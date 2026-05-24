@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="dark">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <meta name="theme-color" content="#060B14"/>
+  <title>TRAIGO — 오프라인</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+    :root{
+      --bg:#060B14;--surf:#0D1626;--card:#0F1924;--border:#1A2D4A;
+      --acl:#3B82F6;--grn:#10B981;--txt:#F0F6FF;--muted:#475569;
+      --sab:env(safe-area-inset-bottom,0px);
+    }
+    html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'Sora',-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;color-scheme:dark}
+    body{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;padding-bottom:calc(24px + var(--sab));min-height:100dvh;text-align:center;background:radial-gradient(ellipse at 50% 0%,#0D1A35 0%,var(--bg) 70%)}
+    .logo{width:80px;height:80px;border-radius:22px;background:linear-gradient(135deg,#2563EB,#7C3AED);display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:900;color:#fff;margin:0 auto 20px;box-shadow:0 0 40px rgba(37,99,235,.3)}
+    h1{font-size:22px;font-weight:900;letter-spacing:-0.5px;margin-bottom:6px}
+    .sub{color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:28px;max-width:280px}
+    .card{background:var(--surf);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:14px;width:100%;max-width:340px}
+    .card-title{font-weight:700;font-size:13px;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+    .item{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:12px}
+    .item:last-child{border-bottom:none}
+    .badge{background:var(--grn);color:#fff;font-size:9px;font-weight:700;padding:2px 8px;border-radius:99px}
+    .badge-warn{background:#F59E0B}
+    .btn{display:block;width:100%;max-width:340px;padding:14px;background:linear-gradient(135deg,#2563EB,#7C3AED);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:10px;letter-spacing:-0.3px;-webkit-tap-highlight-color:transparent}
+    .btn-sec{background:transparent;color:var(--muted);border:1px solid var(--border);margin-bottom:0}
+    .status{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;margin-top:16px}
+    .dot{width:8px;height:8px;border-radius:50%;background:#F59E0B;animation:pulse 1.5s ease infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    .wave{position:fixed;bottom:0;left:0;right:0;height:200px;pointer-events:none;opacity:.04}
+  </style>
+</head>
+<body>
+  <svg class="wave" viewBox="0 0 1440 200" preserveAspectRatio="none">
+    <path d="M0,100 C360,0 720,200 1080,100 C1260,50 1380,150 1440,100 L1440,200 L0,200Z" fill="#3B82F6"/>
+  </svg>
+
+  <div class="logo">T</div>
+  <h1>TRAIGO</h1>
+  <p class="sub">인터넷 연결이 없어도<br/>일부 기능을 사용할 수 있습니다</p>
+
+  <div class="card">
+    <div class="card-title">📦 오프라인 사용 가능</div>
+    <div class="item"><span>홈 대시보드</span><span class="badge">✓ 캐시됨</span></div>
+    <div class="item"><span>포트폴리오 조회</span><span class="badge">✓ 캐시됨</span></div>
+    <div class="item"><span>거래 기록</span><span class="badge">✓ 캐시됨</span></div>
+    <div class="item"><span>설정</span><span class="badge">✓ 캐시됨</span></div>
+    <div class="item"><span>실시간 시세</span><span class="badge badge-warn">인터넷 필요</span></div>
+    <div class="item"><span>TradingView 차트</span><span class="badge badge-warn">인터넷 필요</span></div>
+  </div>
+
+  <button class="btn" onclick="tryReload()">🔄 재연결 시도</button>
+  <button class="btn btn-sec" onclick="goHome()">← 홈으로</button>
+
+  <div class="status">
+    <div class="dot"></div>
+    <span id="status-text">인터넷 연결 확인 중…</span>
+  </div>
+
+  <script>
+    function tryReload() {
+      window.location.reload();
+    }
+    function goHome() {
+      window.location.href = '/';
+    }
+    // Auto-retry every 5 seconds
+    let retries = 0;
+    function checkOnline() {
+      if (navigator.onLine) {
+        document.getElementById('status-text').textContent = '연결됨! 페이지를 불러옵니다…';
+        setTimeout(() => window.location.reload(), 800);
+      } else {
+        retries++;
+        document.getElementById('status-text').textContent = `오프라인 (${retries}회 재시도)`;
+        setTimeout(checkOnline, 5000);
+      }
+    }
+    window.addEventListener('online', () => window.location.reload());
+    setTimeout(checkOnline, 5000);
+  </script>
+</body>
+</html>
