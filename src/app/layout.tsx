@@ -15,6 +15,7 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://auto-platform-zeta.vercel.app'),
   title: 'TRAIGO — 글로벌 투자 시뮬레이션',
   description: '290+ 글로벌 종목 모의투자 · AI 분석 · TradingView 차트 · 완전 무료',
   keywords: ['모의투자','주식','코인','투자','paper trading','트레이딩뷰','자동매매'],

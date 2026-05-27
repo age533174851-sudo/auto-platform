@@ -113,7 +113,7 @@ export async function GET(req: NextRequest) {
   const EODHD_KEY = process.env.EODHD_API_KEY || '';
 
   // 1. FMP public CDN (no key needed for image)
-  const fmpUrl = `https://financialmodelingprep.com/image-stock/${symbolRaw}.png`;
+  const fmpUrl = `https://site.financialmodelingprep.com/image-stock/${symbolRaw}.png`;
   if (await probeUrl(fmpUrl)) {
     const resp: LogoResponse = { symbol: symbolRaw, type: typeRaw, logoUrl: fmpUrl, source: 'fmp', fallback: false };
     cacheSet(cacheKey, resp);
