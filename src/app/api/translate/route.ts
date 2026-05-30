@@ -19,8 +19,9 @@ export async function POST(req: NextRequest) {
   const id = process.env.NAVER_CLIENT_ID || '';
   const secret = process.env.NAVER_CLIENT_SECRET || '';
   if (!id || !secret) {
+    console.log('[Papago] 키 미설정 — NAVER_CLIENT_ID/SECRET 환경변수 확인 필요');
     // 키 없으면 원문 반환 (fallback)
-    return NextResponse.json({ translated: text, source: 'none', fallback: true });
+    return NextResponse.json({ translated: text, source: 'none', fallback: true, reason: 'no_api_key' });
   }
 
   const cacheKey = `${target}:${text}`;
@@ -43,6 +44,7 @@ export async function POST(req: NextRequest) {
     if (source === target) return NextResponse.json({ translated: text, source, skipped: true });
 
     // 번역
+    console.log(`[Papago] 요청: ${source}→${target}, ${text.length}자`);
     const r = await fetch('https://naveropenapi.apigw.ntruss.com/nmt/v1/translation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-NCP-APIGW-API-KEY-ID': id, 'X-NCP-APIGW-API-KEY': secret },
@@ -51,10 +53,12 @@ export async function POST(req: NextRequest) {
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
+      console.log(`[Papago] 에러: HTTP ${r.status}`, e?.errorMessage || '');
       return NextResponse.json({ translated: text, source, fallback: true, error: e?.errorMessage || `HTTP ${r.status}` });
     }
     const d = await r.json();
     const translated = d?.message?.result?.translatedText || text;
+    console.log(`[Papago] 성공: ${translated.slice(0, 40)}...`);
     cache.set(cacheKey, translated);
     if (cache.size > 500) cache.delete(cache.keys().next().value);
     return NextResponse.json({ translated, source });

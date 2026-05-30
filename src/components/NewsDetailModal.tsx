@@ -43,11 +43,11 @@ export default function NewsDetailModal({
 
   const safeTags    = Array.isArray(news.tags)    ? news.tags    : [];
   const safeTickers = Array.isArray(news.tickers) ? news.tickers : [];
-  const safeReasons = Array.isArray(news.reasons) ? news.reasons : [];
   const [newsTab, setNewsTab] = React.useState<'summary' | 'full'>('summary');
-  const [translated, setTranslated] = React.useState<{ title?: string; summary?: string; content?: string } | null>(null);
+  const [translated, setTranslated] = React.useState<{ title?: string; summary?: string; content?: string; reason?: string; reasons?: string[] } | null>(null);
   const [translating, setTranslating] = React.useState(false);
   const [showOriginal, setShowOriginal] = React.useState(false);
+  const safeReasons = (!showOriginal && translated?.reasons) ? translated.reasons : (Array.isArray(news.reasons) ? news.reasons : []);
 
   const translateNews = React.useCallback(async () => {
     if (translated || translating) return;
@@ -60,7 +60,7 @@ export default function NewsDetailModal({
     } catch {}
     setTranslating(true);
     try {
-      const fields = ['title', 'summary', 'content'] as const;
+      const fields = ['title', 'summary', 'content', 'reason'] as const;
       const results: any = {};
       for (const f of fields) {
         const txt = (news as any)[f];
@@ -71,6 +71,18 @@ export default function NewsDetailModal({
         });
         const d = await r.json();
         results[f] = d.translated || txt;
+      }
+      // reasons 배열 번역
+      if (Array.isArray((news as any).reasons) && (news as any).reasons.length > 0) {
+        try {
+          const joined = (news as any).reasons.join('\n');
+          const r = await fetch('/api/translate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: joined, target: 'ko' }),
+          });
+          const d = await r.json();
+          results.reasons = (d.translated || joined).split('\n');
+        } catch {}
       }
       setTranslated(results);
       try { localStorage.setItem(cacheKey, JSON.stringify(results)); } catch {}
@@ -209,7 +221,7 @@ export default function NewsDetailModal({
               ))
             ) : (
               <div style={{ color: T.txt, fontSize: 12, lineHeight: 1.6 }}>
-                {news.reason}
+                {(!showOriginal && translated?.reason) ? translated.reason : news.reason}
               </div>
             )}
           </div>
