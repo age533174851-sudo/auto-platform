@@ -56,7 +56,13 @@ export default function ExchangeConnectPage() {
   const loadConnections = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/exchange?action=list');
+      let auth = '';
+      try {
+        const { getSupabaseClient } = await import('@/lib/supabase/client');
+        const sbc = getSupabaseClient();
+        if (sbc) { const { data } = await sbc.auth.getSession(); if (data?.session?.access_token) auth = `Bearer ${data.session.access_token}`; }
+      } catch {}
+      const r = await fetch('/api/exchange?action=list', { headers: auth ? { Authorization: auth } : {} });
       const d = await r.json();
       setConnections(Array.isArray(d.connections) ? d.connections : []);
     } catch {
@@ -69,6 +75,15 @@ export default function ExchangeConnectPage() {
   useEffect(() => { loadConnections(); }, [loadConnections]);
 
   // ── Connect handler ─────────────────────────────────────────
+  const getAuthHeader = async (): Promise<string> => {
+    try {
+      const { getSupabaseClient } = await import('@/lib/supabase/client');
+      const sbc = getSupabaseClient();
+      if (sbc) { const { data } = await sbc.auth.getSession(); if (data?.session?.access_token) return `Bearer ${data.session.access_token}`; }
+    } catch {}
+    return '';
+  };
+
   const handleConnect = async () => {
     if (!apiKey.trim() || !apiSecret.trim()) {
       setConnectErr('API Key와 Secret Key를 입력해주세요');
@@ -85,9 +100,15 @@ export default function ExchangeConnectPage() {
     setConnectOk(false);
 
     try {
+      const auth = await getAuthHeader();
+      if (!auth) {
+        setConnectErr('먼저 TRAIGO 앱에 로그인해주세요 (더보기 → 로그인). 거래소 연결은 계정에 안전하게 저장됩니다.');
+        setConnecting(false);
+        return;
+      }
       const r = await fetch('/api/exchange', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
           action: 'connect', exchange: selExchange,
           apiKey: apiKey.trim(), apiSecret: apiSecret.trim(),
@@ -116,9 +137,10 @@ export default function ExchangeConnectPage() {
   const handleTest = async (conn: ConnectedExchange) => {
     setTesting(true); setTestMsg('');
     try {
+      const _auth = await getAuthHeader();
       const r = await fetch('/api/exchange', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(_auth?{Authorization:_auth}:{}) },
         body: JSON.stringify({ action: 'test', connectionId: conn.id }),
       });
       const d = await r.json();
@@ -143,9 +165,10 @@ export default function ExchangeConnectPage() {
   const handleDelete = async (id: string) => {
     if (!confirm('이 거래소 연결을 삭제하시겠습니까?\n저장된 API 키는 즉시 삭제됩니다.')) return;
     try {
+      const _a = await getAuthHeader();
       await fetch('/api/exchange', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(_a?{Authorization:_a}:{}) },
         body: JSON.stringify({ action: 'delete', connectionId: id }),
       });
       await loadConnections();
@@ -156,9 +179,10 @@ export default function ExchangeConnectPage() {
   // ── Toggle auto trading ──────────────────────────────────────
   const handleToggleAuto = async (conn: ConnectedExchange) => {
     try {
+      const _a = await getAuthHeader();
       await fetch('/api/exchange', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(_a?{Authorization:_a}:{}) },
         body: JSON.stringify({ action: 'toggle-auto', connectionId: conn.id, enabled: !conn.autoTradingEnabled }),
       });
       await loadConnections();
