@@ -20,7 +20,7 @@ export function getAdminEmails(): Set<string> {
   const now = Date.now();
   if (cachedAdminEmails && now - cachedAt < CACHE_TTL_MS) return cachedAdminEmails;
 
-  const raw = process.env.ADMIN_EMAILS || '';
+  const raw = (process.env.ADMIN_EMAILS || '') + ',' + (process.env.ADMIN_EMAIL || '');
   const set = new Set<string>();
   for (const part of raw.split(/[,;\s]+/)) {
     const e = part.trim().toLowerCase();
