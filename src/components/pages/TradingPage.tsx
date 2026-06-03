@@ -98,6 +98,32 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
   }, []);
   useEffect(() => { refreshPositions(); }, [refreshPositions]);
 
+  // 포지션 종료 — paper 정리 + testnet/live면 거래소 청산
+  const closePosition = async (p: any, cur: number, ratio: number) => {
+    // testnet/live: 거래소에 reduce-only 반대주문
+    if ((tradeMode === 'testnet' || tradeMode === 'live') && connId) {
+      try {
+        const tradeSymbol = p.asset.toUpperCase().replace(/USDT$/,'') + 'USDT';
+        const closeQty = Number((p.qty * ratio).toFixed(3));
+        const r = await fetch('/api/binance/futures/order', {
+          method:'POST',
+          headers:{'Content-Type':'application/json',...(authHeaderRef.current?{Authorization:authHeaderRef.current}:{})},
+          body: JSON.stringify({
+            connectionId: connId, symbol: tradeSymbol,
+            side: p.side==='short'?'BUY':'SELL',   // 청산은 반대방향
+            type:'MARKET', quantity: closeQty, leverage, reduceOnly: true,
+            confirmToken:'LIVE_ORDER_CONFIRMED',
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) { alert(`거래소 청산 실패:\n${d.message||d.error}`); return; }
+        alert(`거래소 청산 주문 전송됨 (${Math.round(ratio*100)}%)\n주문번호: ${d.orderId||'-'}`);
+      } catch (e:any) { alert(`청산 오류: ${e?.message||''}`); return; }
+    }
+    closePaperPosition(p.asset, cur, ratio);
+    refreshPositions();
+  };
+
   const confirmOrder = async (sideArg?: string) => {
     const side = sideArg || sideRef.current || '매수';
     setShowConfirm(false);
@@ -593,11 +619,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                       {p.tpPrice&&<span style={{color:T.grn}}>TP ₩{fmt(Math.round(p.tpPrice))}</span>}
                     </div>
                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
-                      {quickActions.includes('close_all')&&<button onClick={()=>{ closePaperPosition(p.asset, cur, 1); refreshPositions(); }}
+                      {quickActions.includes('close_all')&&<button onClick={()=>closePosition(p,cur,1)}
                         style={{padding:'9px',background:T.red+'18',color:T.red,border:`1px solid ${T.red}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>전량 종료</button>}
-                      {quickActions.includes('close_50')&&<button onClick={()=>{ closePaperPosition(p.asset, cur, 0.5); refreshPositions(); }}
+                      {quickActions.includes('close_50')&&<button onClick={()=>closePosition(p,cur,0.5)}
                         style={{padding:'9px',background:T.ylw+'15',color:T.ylw,border:`1px solid ${T.ylw}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>50% 종료</button>}
-                      {quickActions.includes('close_25')&&<button onClick={()=>{ closePaperPosition(p.asset, cur, 0.25); refreshPositions(); }}
+                      {quickActions.includes('close_25')&&<button onClick={()=>closePosition(p,cur,0.25)}
                         style={{padding:'9px',background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>25% 종료</button>}
                       {quickActions.includes('add')&&<button onClick={()=>{setSel(prices.find(a=>a.id===p.asset)||sel);setTab('trade');setSide('매수');}}
                         style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
