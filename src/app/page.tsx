@@ -56,6 +56,7 @@ const AccountsPage    = dynamic(() => import('@/components/pages/AccountsPage'),
 const HubAccountsPage = dynamic(() => import('@/components/pages/HubAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
 const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
 const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
+const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
 const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
 const AIPortfolioPage = dynamic(() => import('@/components/pages/AIPortfolioPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -126,7 +127,7 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
 
   return (
     <div dir={isRTL ? 'rtl' : 'ltr'} style={{position:'fixed',inset:0,background:T.bg,display:'flex',flexDirection:'column',zIndex:1000}}>
-      <div style={{padding:'32px 24px 16px',textAlign:'center',flexShrink:0}}>
+      <div style={{padding:'32px 24px 16px',textAlign:'center',flexShrink:0,width:'100%',maxWidth:560,margin:'0 auto'}}>
         <div style={{width:64,height:64,borderRadius:18,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:30,fontWeight:900,color:'#fff',margin:'0 auto 10px'}}>T</div>
         <div style={{color:T.txt,fontWeight:900,fontSize:22,letterSpacing:-0.5}}>TRAIGO</div>
         <div style={{color:T.muted,fontSize:11,marginTop:3}}>{t.tagline}</div>
@@ -136,7 +137,7 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
           <span>{step===0 ? t.title : t.currencyTitle}</span>
         </div>
       </div>
-      <div style={{flex:1,overflowY:'auto',padding:'0 20px 8px'}}>
+      <div style={{flex:1,overflowY:'auto',padding:'0 20px 8px',width:'100%',maxWidth:560,margin:'0 auto'}}>
         {step===0&&<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>{LANGS.map(l=>(
           <button key={l.id} onClick={()=>pick(l.id)}
             dir={l.id === 'ar' ? 'rtl' : 'ltr'}
@@ -147,7 +148,7 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
         ))}</div>}
         {step===1&&<div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>{Object.entries(CURRENCIES).map(([code,cur])=><button key={code} onClick={()=>setSc(code)} style={{background:sc===code?T.acc+'25':T.card,border:`2px solid ${sc===code?T.acl:T.border}`,borderRadius:12,padding:'10px 4px',cursor:'pointer',textAlign:'center'}}><div style={{color:sc===code?T.acl:T.txt,fontWeight:800,fontSize:18}}>{cur.symbol}</div><div style={{color:T.muted,fontSize:9,marginTop:1}}>{code}</div></button>)}</div>}
       </div>
-      <div style={{padding:'14px 20px 36px',flexShrink:0,borderTop:`1px solid ${T.border}`,background:T.bg}}>
+      <div style={{padding:'14px 20px 36px',flexShrink:0,borderTop:`1px solid ${T.border}`,background:T.bg,width:'100%',maxWidth:560,margin:'0 auto'}}>
         <button onClick={()=>{if(step===0)setStep(1);else onDone(sl,sc);}} style={{width:'100%',padding:'16px',background:`linear-gradient(135deg,${T.acc},${T.prp})`,color:'#fff',border:'none',borderRadius:16,fontWeight:800,fontSize:16,cursor:'pointer',marginBottom:10}}>{step===0 ? t.next : t.start}</button>
         <button onClick={()=>onDone(sl,sc==='KRW'&&sl!=='ko'?'USD':sc)} style={{width:'100%',padding:'10px',background:'transparent',color:T.muted,border:'none',cursor:'pointer',fontSize:12}}>{t.skip}</button>
       </div>
@@ -390,7 +391,7 @@ export default function App() {
     home:'전체 요약을 한눈에 봐요',
     watchlist:'관심 종목을 모아봐요',
     market:'실시간 코인·주식 시세를 봐요',
-    trade:'직접 사고팔아요 (수동 매매)',
+    trading:'직접 사고팔아요 (수동 매매)',
     auto:'AI가 대신 자동으로 거래해요',
     strategies:'나만의 매매 규칙을 만들어요',
     fear_dca:'공포일 때 분할 매수하는 전략',
@@ -436,6 +437,7 @@ export default function App() {
         case 'accounts':     return <ExchangeConnectPage/>;
         case 'manual_accounts': return <ManualAccountsPage/>;
         case 'fear_dca':     return <FearDcaPage/>;
+        case 'menu_hub':     return <MenuHubPage onNav={nav}/>;
         case 'pine_guide':   return <PineGuidePage/>;
         case 'seasonality':  return <SeasonalityPage/>;
         case 'hub_accounts': return <HubAccountsPage/>;
@@ -518,13 +520,16 @@ export default function App() {
               <div style={{marginLeft:'auto'}}><Dot c={T.grn}/></div>
             </div>
           </div>
+          <button onClick={()=>nav('menu_hub')} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 16px',margin:'2px 0 6px',background:tab==='menu_hub'?T.acg:T.acc+'15',color:tab==='menu_hub'?T.acl:T.acl,border:'none',borderRadius:0,cursor:'pointer',fontSize:13,fontWeight:800,textAlign:'left'}}>
+            <span style={{width:20,display:'inline-flex',alignItems:'center',justifyContent:'center'}}><SearchIc size={16} strokeWidth={2.4}/></span>전체 메뉴 · 검색
+          </button>
           {(()=>{
             const find=(id:string)=>allTabs.find(t=>t.id===id);
             const groups:{title:string;ids:string[]}[]=[
-              {title:'',ids:['home','watch','market']},
-              {title:'거래',ids:['trade','auto','strategies','fear_dca']},
+              {title:'',ids:['home','watchlist','market']},
+              {title:'거래',ids:['trading','auto','strategies','fear_dca','season']},
               {title:'분석',ids:['backtest','pine_guide','seasonality','news','analysis']},
-              {title:'관리',ids:['portfolio','risk_settings','history','accounts','alerts']},
+              {title:'관리',ids:['portfolio','risk_settings','history','accounts','manual_accounts','alerts']},
               {title:'기타',ids:['academy','settings']},
             ];
             return groups.map((g,gi)=>(
@@ -658,23 +663,44 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-                <div style={{display:'flex',flexDirection:'column',gap:6}}>
-                  {MTABS.filter(t2=>!simpleMode||t2.core).map(t2=>{
-                    const Ic = t2.Icon;
-                    const active = tab === t2.id;
-                    return (
-                      <button key={t2.id} onClick={()=>nav(t2.id)} style={{background:active?T.acg:T.alt,border:`1px solid ${active?T.acl:T.border}`,borderRadius:12,padding:'12px 14px',display:'flex',alignItems:'center',gap:12,cursor:'pointer',position:'relative',touchAction:'manipulation',textAlign:'left',width:'100%'}}>
-                        <span style={{flexShrink:0,width:36,height:36,borderRadius:9,background:active?T.acl+'20':T.surf,display:'flex',alignItems:'center',justifyContent:'center'}}>
-                          <Ic size={18} strokeWidth={active?2.4:2.1} color={active?T.acl:T.sub}/>
-                        </span>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{color:active?T.acl:T.txt,fontSize:13,fontWeight:700}}>{t2.label}</div>
-                          <div style={{color:T.muted,fontSize:10,marginTop:1}}>{TAB_DESC[t2.id]||''}</div>
+                <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                  {(()=>{
+                    const mGroups:{title:string;ids:string[]}[]=[
+                      {title:'거래',ids:['strategies','fear_dca','season']},
+                      {title:'분석',ids:['backtest','pine_guide','seasonality','news','analysis']},
+                      {title:'관리',ids:['portfolio','risk_settings','history','accounts','manual_accounts','alerts']},
+                      {title:'기타',ids:['academy','settings']},
+                    ];
+                    return mGroups.map((g,gi)=>{
+                      const items=g.ids.map(id=>MTABS.find(t=>t.id===id)).filter(Boolean).filter((t2:any)=>!simpleMode||t2.core);
+                      if(items.length===0) return null;
+                      return (
+                        <div key={gi}>
+                          <div style={{display:'flex',alignItems:'center',gap:8,margin:'12px 2px 6px'}}>
+                            <span style={{color:T.acl,fontSize:10,fontWeight:800,letterSpacing:1}}>{g.title}</span>
+                            <div style={{flex:1,height:1,background:T.border}}/>
+                          </div>
+                          <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                            {items.map((t2:any)=>{
+                              const Ic=t2.Icon; const active=tab===t2.id;
+                              return (
+                                <button key={t2.id} onClick={()=>nav(t2.id)} style={{background:active?T.acg:T.alt,border:`1px solid ${active?T.acl:T.border}`,borderRadius:12,padding:'12px 14px',display:'flex',alignItems:'center',gap:12,cursor:'pointer',position:'relative',touchAction:'manipulation',textAlign:'left',width:'100%'}}>
+                                  <span style={{flexShrink:0,width:36,height:36,borderRadius:9,background:active?T.acl+'20':T.surf,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                                    <Ic size={18} strokeWidth={active?2.4:2.1} color={active?T.acl:T.sub}/>
+                                  </span>
+                                  <div style={{flex:1,minWidth:0}}>
+                                    <div style={{color:active?T.acl:T.txt,fontSize:13,fontWeight:700}}>{t2.label}</div>
+                                    <div style={{color:T.muted,fontSize:10,marginTop:1}}>{TAB_DESC[t2.id]||''}</div>
+                                  </div>
+                                  {t2.id==='alerts'&&unreadCount>0&&<span style={{flexShrink:0,background:T.red,color:'#fff',borderRadius:'50%',width:18,height:18,fontSize:9,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700}}>{unreadCount}</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
-                        {t2.id==='alerts'&&unreadCount>0&&<span style={{flexShrink:0,background:T.red,color:'#fff',borderRadius:'50%',width:18,height:18,fontSize:9,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700}}>{unreadCount}</span>}
-                      </button>
-                    );
-                  })}
+                      );
+                    });
+                  })()}
                 </div>
                 {simpleMode && (
                   <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:10,lineHeight:1.4}}>

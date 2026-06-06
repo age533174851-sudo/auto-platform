@@ -25,6 +25,7 @@ interface WebhookPayload {
   mode?:      'paper'|'real';
   strategyId?:string;
   connectionId?:string;
+  secret?:    string;
   exchange?:  string;
   // Idempotency
   id?:        string;
@@ -128,24 +129,73 @@ export async function POST(req: NextRequest) {
     }, { status: 200 }); // 200 so TradingView doesn't retry
   }
 
-  // ── Real mode: mark as pending confirmation ───────────────
+  // ── Real mode: 거래소에 실제 주문 전송 (24시간 무인) ───────────
   if (mode === 'real') {
-    entry.status = 'pending_confirmation';
-    signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
-    // In a real system, this would send to a queue for manual confirmation
-    // For now, log and return — NEVER execute real orders from webhook directly
-    console.log('[TRAIGO] Real mode signal received — queued for confirmation:', webhookId);
-    return NextResponse.json({
-      ok:      true,
-      id:      webhookId,
-      mode:    'real',
-      status:  'pending_confirmation',
-      message: '실거래 신호 수신됨. 이중 확인 대기 중.',
-      warnings:safetyResult.warnings,
-      fee:     safetyResult.estimatedFee,
-      slip:    safetyResult.estimatedSlip,
-      liqPx:  safetyResult.liquidationPx,
-    });
+    // 보안: 웹훅 시크릿 검증 (아무나 주문 못 넣게)
+    const expectedSecret = process.env.WEBHOOK_SECRET || '';
+    if (expectedSecret && body.secret !== expectedSecret) {
+      entry.status = 'blocked_auth';
+      signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+      return NextResponse.json({ ok: false, id: webhookId, message: '웹훅 시크릿 불일치 — 인증 실패' }, { status: 401 });
+    }
+    if (!body.connectionId) {
+      entry.status = 'blocked';
+      signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+      return NextResponse.json({ ok: false, id: webhookId, message: 'connectionId 필수 (거래소 연결 ID)' }, { status: 400 });
+    }
+    try {
+      const tradeSymbol = symbol.toUpperCase().replace(/USDT$/, '') + 'USDT';
+      const { placeFuturesOrderSafe } = await import('@/lib/exchanges/binanceFutures');
+      const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
+      const sb = getSupabaseAdmin();
+      // 연결 정보 로드 (서버 권한)
+      const { data: conn } = await (sb.from('exchange_connections') as any)
+        .select('*').eq('id', body.connectionId).single();
+      if (!conn) throw new Error('거래소 연결을 찾을 수 없음');
+      if (conn.has_withdrawal) throw new Error('출금 권한 키는 자동매매 불가');
+      const { decryptSecret } = await import('@/lib/exchanges/crypto');
+      const apiSecret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+      const apiKey = conn.api_key ?? conn.api_key_encrypted ?? '';
+      const isTestnet = conn.is_testnet !== false;
+
+      const px = body.price || 0;
+      const usdtNotional = (body.amount || body.quantity * px || 0) / 1375;
+      const qty = body.quantity || (px > 0 ? usdtNotional / (px / 1375) : 0);
+
+      const result = await placeFuturesOrderSafe(
+        apiKey, apiSecret,
+        {
+          symbol: tradeSymbol,
+          side: (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+          type: 'MARKET',
+          quantity: Number(qty.toFixed(3)),
+        },
+        isTestnet,
+      );
+
+      entry.status = result.success ? 'executed' : 'error';
+      (entry as any).orderResult = result;
+      signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+
+      // 텔레그램 알림
+      try {
+        const { sendTelegram, fmtEntry, fmtError } = await import('@/lib/notify/telegram');
+        if (result.success) await sendTelegram(fmtEntry({ symbol: tradeSymbol, side: body.side === 'sell' ? '매도' : '매수', price: px, amount: body.amount || 0, leverage: body.leverage, mode: '실전(웹훅)' }));
+        else await sendTelegram(fmtError(`웹훅 주문 실패: ${result.message}`));
+      } catch {}
+
+      return NextResponse.json({
+        ok: result.success, id: webhookId, mode: 'real',
+        status: result.success ? 'executed' : 'error',
+        orderId: (result as any).orderId,
+        message: result.success ? '실거래 주문 체결됨' : `주문 실패: ${result.message}`,
+      });
+    } catch (e: any) {
+      entry.status = 'error';
+      signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+      try { const { sendTelegram, fmtError } = await import('@/lib/notify/telegram'); await sendTelegram(fmtError(`웹훅 오류: ${e?.message}`)); } catch {}
+      return NextResponse.json({ ok: false, id: webhookId, message: `주문 오류: ${e?.message || ''}` }, { status: 200 });
+    }
   }
 
   // ── Paper mode: log only ──────────────────────────────────
