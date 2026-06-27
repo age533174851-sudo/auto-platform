@@ -40,6 +40,7 @@ function safeConn(row: any) {
     lastTestResult:     row.test_status ?? null,
     autoTradingEnabled: !!row.auto_trading_enabled,
     isPaper:            row.is_paper !== false,    // 기본 true
+    isTestnet:          !!row.is_testnet,          // 테스트넷 여부
     createdAt:          row.created_at ?? null,
   };
 }
@@ -244,10 +245,28 @@ export async function POST(req: NextRequest) {
     const conn = await getConn(connectionId, uid, sb);
     if (!conn) return NextResponse.json({ error: '연결을 찾을 수 없습니다' }, { status: 404 });
 
-    if (enabled === true && !conn.perm_trading) {
-      return NextResponse.json({
-        error: 'API 키에 거래(trading) 권한이 없습니다.\n거래소에서 권한을 부여하고 재연결하세요.',
-      }, { status: 403 });
+    if (enabled === true) {
+      // 출금 권한 키는 모든 모드에서 거부 (안전)
+      if (conn.has_withdrawal === true) {
+        return NextResponse.json({ error: '출금 권한이 있는 API 키는 자동매매에 사용할 수 없습니다.\n출금 권한 없는 키로 재연결하세요.' }, { status: 403 });
+      }
+      const isTestnet = conn.is_testnet === true;
+      const isMock = !isTestnet && conn.is_paper === true;   // 순수 내부 모의
+      // 디버깅용 — 권한 응답 상태를 로그로 (Vercel Function Logs에서 확인)
+      console.log('[toggle-auto] mode=%s testnet=%s paper=%s perm_trading=%s perm_read=%s has_withdrawal=%s',
+        isMock ? 'MOCK' : isTestnet ? 'TESTNET' : 'LIVE', conn.is_testnet, conn.is_paper, conn.perm_trading, conn.perm_read, conn.has_withdrawal);
+
+      if (isMock) {
+        // MOCK: 실제 거래소 거래 권한 검사하지 않음 (로컬 자동매매만)
+      } else if (isTestnet) {
+        // TESTNET: 선물 테스트넷 연결이 이미 검증됨 → 거래 가능으로 간주
+        // (과거 버전에서 perm_trading이 false로 저장됐어도 테스트넷은 허용 — 가짜 자금)
+      } else {
+        // LIVE: 실거래 권한 필수
+        if (!conn.perm_trading) {
+          return NextResponse.json({ error: '실전(LIVE) 자동매매에는 거래(trading) 권한이 필요합니다.\nBinance에서 Futures 거래 권한을 활성화한 뒤 재연결하세요.' }, { status: 403 });
+        }
+      }
     }
 
     if (sb) {

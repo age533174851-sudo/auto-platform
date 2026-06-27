@@ -19,12 +19,15 @@ export async function testExchange(
 ): Promise<TestResult> {
   switch (exchange) {
     case 'binance':
-      // 테스트넷이면 선물 테스트넷으로 검증 (testnet.binancefuture.com)
+      // 테스트넷이면 선물 테스트넷으로 검증 (demo-fapi.binance.com)
       if (isTestnet) {
         try {
           const r = await testFuturesConnection(key, secret, true);
+          // ★ 권한 객체를 반드시 반환 — 안 그러면 perm_trading=false로 저장돼 자동매매 토글이 막힘
+          // 선물 테스트넷 연결 성공 = 읽기 + 선물 거래 권한 확인됨 (canTrade로 보정, 출금권한은 테스트넷에서 의미없음)
+          console.log('[testExchange:binance:testnet] success=%s canTrade=%s', r.success, (r as any).canTrade);
           return r.success
-            ? { success: true, message: r.message || '테스트넷 연결 성공' }
+            ? { success: true, message: r.message || '테스트넷 연결 성공', permissions: { read: true, trading: (r as any).canTrade !== false, withdrawal: false } }
             : { success: false, message: r.message || '테스트넷 인증 실패' };
         } catch (e) {
           return { success: false, message: e instanceof Error ? e.message : '테스트넷 검증 오류' };

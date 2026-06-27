@@ -308,6 +308,7 @@ export default function ExchangeConnectPage() {
                     <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:2 }}>
                       <div style={{ color:T.txt, fontWeight:800, fontSize:13 }}>{conn.nickname}</div>
                       <div style={{ width:6, height:6, borderRadius:'50%', background: conn.status==='active' ? T.grn : T.red, flexShrink:0 }}/>
+                      {(()=>{ const mode = conn.isTestnet ? 'TESTNET' : (conn.isPaper ? 'MOCK' : 'LIVE'); const c = mode==='LIVE'?T.grn:mode==='TESTNET'?T.ylw:T.prp; return <span style={{ background:c+'20', color:c, fontSize:8, fontWeight:800, padding:'1px 6px', borderRadius:5, letterSpacing:0.3 }}>{mode}</span>; })()}
                     </div>
                     <div style={{ color:T.muted, fontSize:10 }}>{conn.apiKeyMasked} · {ex.name}</div>
                     <div style={{ display:'flex', gap:4, marginTop:4, flexWrap:'wrap' }}>

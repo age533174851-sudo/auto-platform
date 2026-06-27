@@ -73,6 +73,7 @@ export interface ConnectedExchange {
   lastTestResult: string | null;
   autoTradingEnabled: boolean;
   isPaper:        boolean;       // paper trading mode
+  isTestnet?:     boolean;       // 거래소 테스트넷/데모 환경 여부
   createdAt:      string;
   balance?: {
     total: number;
