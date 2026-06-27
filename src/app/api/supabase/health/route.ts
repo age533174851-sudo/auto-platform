@@ -2,7 +2,7 @@
 // Returns env var presence (true/false only — never actual values)
 // and a live DB connectivity check.
 import { NextResponse } from 'next/server';
-import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import { getSupabaseAdmin, serviceRoleKeyRole } from '@/lib/supabase/admin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,10 +14,16 @@ export async function GET() {
   const hasSrvKey  = !!process.env.SUPABASE_SERVICE_ROLE_KEY;
   const allPresent = hasUrl && hasAnon && hasSrvKey;
 
+  // service_role 키가 진짜 service_role인지 진단 (anon/publishable 키 오삽입 탐지)
+  const keyRole = serviceRoleKeyRole();
+  const keyRoleOk = keyRole === 'service_role';
+
   const envStatus = {
     NEXT_PUBLIC_SUPABASE_URL:      hasUrl,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: hasAnon,
     SUPABASE_SERVICE_ROLE_KEY:     hasSrvKey,
+    SERVICE_ROLE_KEY_역할:         keyRole,    // service_role | anon | unknown | missing
+    SERVICE_ROLE_KEY_정상:         keyRoleOk,
   };
 
   if (!allPresent) {

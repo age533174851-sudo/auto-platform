@@ -169,12 +169,12 @@ export async function POST(req: NextRequest) {
       if (/row-level security|row level security/i.test(lastErr)) {
         const role = serviceRoleKeyRole();
         const hint = role === 'anon'
-          ? 'SUPABASE_SERVICE_ROLE_KEY에 anon 키가 들어가 있습니다. Supabase→Settings→API의 service_role secret으로 교체 후 재배포하세요.'
+          ? 'SUPABASE_SERVICE_ROLE_KEY에 anon/publishable 키가 들어가 있습니다. Supabase→Settings→API의 service_role(secret) 키로 교체 후 재배포하세요.'
           : role === 'missing'
           ? 'SUPABASE_SERVICE_ROLE_KEY가 설정되지 않았습니다.'
           : role === 'service_role'
           ? 'service_role 키는 맞지만 RLS에 막혔습니다. exchange_connections_rls.sql 정책을 실행하세요.'
-          : 'SUPABASE_SERVICE_ROLE_KEY 값을 확인하세요 (service_role secret이어야 함).';
+          : 'SUPABASE_SERVICE_ROLE_KEY가 JWT 형식이 아닙니다 — 키가 잘렸거나 공백/줄바꿈이 섞였을 수 있습니다. 신형 키라면 sb_secret_... 인지, 구형이면 service_role JWT 전체를 다시 복사하세요.';
         return NextResponse.json({ error: `RLS 정책에 막힘: ${hint}`, code: 'RLS_DENIED', keyRole: role }, { status: 500 });
       }
       return NextResponse.json({ error: lastErr || '저장 실패' }, { status: 500 });
