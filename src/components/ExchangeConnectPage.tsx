@@ -49,6 +49,16 @@ export default function ExchangeConnectPage() {
   const [diag,         setDiag]         = useState<any>(null);
   const [diagRunning,  setDiagRunning]  = useState(false);
   const [balLoading,   setBalLoading]   = useState(false);
+  const [toggleBusy,   setToggleBusy]   = useState<string|null>(null);   // 토글 중인 connectionId
+  const [toast,        setToast]        = useState<{ msg:string; ok:boolean }|null>(null);
+  const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 4200); }, []);
+  const toastEl = toast ? (
+    <div style={{ position:'fixed', left:'50%', bottom:88, transform:'translateX(-50%)', zIndex:9999, maxWidth:'90vw',
+      background: toast.ok ? '#0F766E' : '#B91C1C', color:'#fff', padding:'11px 16px', borderRadius:10,
+      fontSize:12, fontWeight:600, lineHeight:1.5, boxShadow:'0 8px 24px rgba(0,0,0,.35)', whiteSpace:'pre-line', textAlign:'center' }}>
+      {toast.msg}
+    </div>
+  ) : null;
   const [testing,      setTesting]      = useState(false);
   const [testMsg,      setTestMsg]      = useState('');
 
@@ -178,15 +188,34 @@ export default function ExchangeConnectPage() {
 
   // ── Toggle auto trading ──────────────────────────────────────
   const handleToggleAuto = async (conn: ConnectedExchange) => {
+    if (toggleBusy) return;                       // 중복 클릭 방지
+    const turningOn = !conn.autoTradingEnabled;
+    setToggleBusy(conn.id);
     try {
       const _a = await getAuthHeader();
-      await fetch('/api/exchange', {
+      const r = await fetch('/api/exchange', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(_a?{Authorization:_a}:{}) },
-        body: JSON.stringify({ action: 'toggle-auto', connectionId: conn.id, enabled: !conn.autoTradingEnabled }),
+        body: JSON.stringify({ action: 'toggle-auto', connectionId: conn.id, enabled: turningOn }),
+        signal: AbortSignal.timeout(8000),
       });
+      let d: any = {};
+      try { d = await r.json(); } catch {}
+      if (!r.ok || d.error) {
+        // 서버가 막은 실제 이유를 그대로 노출 (거래권한 없음 / 연결없음 / DB오류 등)
+        const reason = d.error || (r.status === 403 ? 'API 키에 거래 권한이 없습니다' : r.status === 401 ? '로그인이 필요합니다' : r.status >= 500 ? '서버 오류 (Supabase 연결 확인)' : `요청 실패 (HTTP ${r.status})`);
+        showToast(`자동매매 ${turningOn?'ON':'OFF'} 실패: ${reason}`, false);
+        return;
+      }
       await loadConnections();
-    } catch {}
+      setSelConn(prev => prev && prev.id === conn.id ? { ...prev, autoTradingEnabled: turningOn } : prev);
+      showToast(`자동매매 ${turningOn?'ON 활성화됨':'OFF'}`, true);
+    } catch (e: any) {
+      const msg = e?.name === 'TimeoutError' ? '응답 시간 초과 — 서버/Supabase 상태를 확인하세요' : (e?.message || '네트워크 오류');
+      showToast(`자동매매 전환 실패: ${msg}`, false);
+    } finally {
+      setToggleBusy(null);
+    }
   };
 
   const meta = EXCHANGE_META[selExchange];
@@ -197,6 +226,7 @@ export default function ExchangeConnectPage() {
   // ════════════════════════════════════════════════════════════
   if (view === 'list') return (
     <div>
+      {toastEl}
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:16 }}>
         <div style={{ width:32, height:32, borderRadius:10, background:'linear-gradient(135deg,#2563EB,#7C3AED)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16 }}>🔗</div>
@@ -306,7 +336,8 @@ export default function ExchangeConnectPage() {
                     </div>
                     <div onClick={() => handleToggleAuto(conn)}
                       style={{
-                        width:36, height:20, borderRadius:10, cursor:'pointer', position:'relative', flexShrink:0,
+                        width:36, height:20, borderRadius:10, cursor: toggleBusy===conn.id?'wait':'pointer', position:'relative', flexShrink:0,
+                        opacity: toggleBusy===conn.id ? 0.5 : 1,
                         background: conn.autoTradingEnabled ? T.grn : T.alt,
                         border: `1px solid ${conn.autoTradingEnabled ? T.grn : T.border}`,
                         transition:'background .2s',
@@ -485,6 +516,7 @@ export default function ExchangeConnectPage() {
     const ex = EXCHANGE_META[selConn.exchange];
     return (
       <div>
+        {toastEl}
         <button onClick={() => setView('list')}
           style={{ background:'transparent', border:`1px solid ${T.border}`, borderRadius:8, color:T.muted, padding:'5px 12px', fontSize:12, cursor:'pointer', marginBottom:14 }}>
           ← 목록으로
@@ -632,10 +664,9 @@ export default function ExchangeConnectPage() {
               <span style={{ color: selConn.autoTradingEnabled ? T.grn : T.muted, fontSize:11, fontWeight:700 }}>
                 {selConn.autoTradingEnabled ? 'ON' : 'OFF'}
               </span>
-              <div onClick={() => handleToggleAuto(selConn).then(() => {
-                setSelConn(prev => prev ? {...prev, autoTradingEnabled: !prev.autoTradingEnabled} : prev);
-              })} style={{
-                width:40, height:22, borderRadius:11, cursor:'pointer', position:'relative',
+              <div onClick={() => handleToggleAuto(selConn)} style={{
+                width:40, height:22, borderRadius:11, cursor: toggleBusy===selConn.id?'wait':'pointer', position:'relative',
+                opacity: toggleBusy===selConn.id ? 0.5 : 1,
                 background: selConn.autoTradingEnabled ? T.grn : T.alt,
                 border: `1px solid ${selConn.autoTradingEnabled ? T.grn : T.border}`,
                 transition:'background .2s',
