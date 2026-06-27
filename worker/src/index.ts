@@ -19,13 +19,14 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 let errorCount = 0;
 const prevPos: Record<string, Set<string>> = {};
 
-// ── 통합 락: Redis SETNX 우선, 없으면 Supabase worker_lock 폴백 ──
+// ── 액션 락: Redis 있으면 SETNX. 없으면 생략(no-op) — jobs의 atomic claim이 중복 방지 ──
+// (worker_lock 테이블이 없어도 job 처리가 막히지 않게 함)
 async function acquireActionLock(name: string, ttl: number): Promise<boolean> {
   if (redisAvailable()) return lockNxEx(name, WORKER_ID, ttl);
-  return acquireLock(name, WORKER_ID, ttl);
+  return true;
 }
 async function releaseActionLock(name: string): Promise<void> {
-  if (redisAvailable()) await unlock(name); else await releaseLock(name, WORKER_ID);
+  if (redisAvailable()) await unlock(name);
 }
 
 async function getConnection(connId: string): Promise<any | null> {
@@ -103,9 +104,12 @@ async function processPendingJobs() {
       .eq('status', 'PROCESSING').lt('locked_until', new Date().toISOString());
   } catch {}
 
-  const { data: jobs } = await sb().from('jobs').select('*').eq('status', 'PENDING')
+  const { data: jobs, error: qErr } = await sb().from('jobs').select('*').eq('status', 'PENDING')
     .order('priority', { ascending: true }).order('created_at', { ascending: true }).limit(10);
+  if (qErr) { console.error('[jobs] ❌ PENDING 조회 실패:', qErr.message, '— jobs 테이블/RLS/service_role 키 확인'); return; }
+  console.log(`[jobs] pending count=${jobs?.length ?? 0}`);
   if (!jobs || jobs.length === 0) return;
+  console.log(`[jobs] picked ${jobs[0].id.slice(0,8)} ${jobs[0].action} ${jobs[0].symbol || ''} status=${jobs[0].status}`);
 
   for (const job of jobs as any[]) {
     const actionLockKey = `lock:action:${job.exchange}:${job.connection_id}:${job.action}:${job.symbol || 'ALL'}`;
@@ -191,19 +195,21 @@ async function monitorConnections() {
 
 let tickCount = 0;
 async function tick() {
-  const isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4);
-  if (!isMain) { await heartbeat(WORKER_ID, 'standby', '다른 워커 활성 — 대기', errorCount); return; }
-  await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', 'jobs+monitor', errorCount);
   tickCount++;
-  if (tickCount === 1 || tickCount % 20 === 0) console.log(`[worker] Polling jobs... (tick #${tickCount}, errors=${errorCount})`);
+  if (tickCount === 1 || tickCount % 20 === 0) console.log(`[worker] tick #${tickCount} (errors=${errorCount})`);
+  // ★ job 처리는 락과 무관하게 항상 실행 (PENDING→PROCESSING atomic claim이 중복 방지)
   await processPendingJobs();
-  await monitorConnections();
+  // 모니터(Ghost Sync/킬스위치 job 보장)는 main 락으로 중복 방지 — 락 인프라 없으면 단일 워커로 간주해 진행
+  let isMain = true;
+  try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
+  await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount);
+  if (isMain) await monitorConnections();
 }
 
 async function startupChecks() {
   console.log('════════════════════════════════════════');
   console.log('  🚀 TRAIGO Worker started');
-  console.log(`  id=${WORKER_ID}  poll=${POLL_SEC}s  redis=${redisAvailable() ? 'ON' : 'OFF(Supabase 락 폴백)'}`);
+  console.log(`  id=${WORKER_ID}  poll=${POLL_SEC}s  redis=${redisAvailable() ? 'ON(액션락 활성)' : 'OFF(액션락 생략·atomic claim으로 중복방지)'}`);
   console.log('════════════════════════════════════════');
 
   // 필수 env 검증 (값은 노출 안 함)
