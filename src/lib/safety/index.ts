@@ -151,18 +151,52 @@ export function getCooldownRemaining(userId: string): number {
 // ─────────────────────────────────────────────────────────────
 // Liquidation Price Calculator
 // ─────────────────────────────────────────────────────────────
+// Binance USDT-M 유지증거금 계단 (BTCUSDT 대표값, 명목가 USDT 기준)
+// [상한 명목가, MMR, 유지증거금 공제액(누적)] — 심볼/시점따라 다르므로 추정치
+const MMR_BRACKETS: Array<[number, number, number]> = [
+  [50_000,       0.004, 0],
+  [500_000,      0.005, 50],
+  [1_000_000,    0.010, 2_550],
+  [5_000_000,    0.025, 17_550],
+  [20_000_000,   0.050, 142_550],
+  [50_000_000,   0.100, 1_142_550],
+  [100_000_000,  0.125, 2_392_550],
+  [Infinity,     0.150, 4_892_550],
+];
+export type BracketTier = [cap: number, mmr: number, maintAmount: number];
+
+export function getMaintMargin(
+  notional: number,
+  brackets?: BracketTier[] | null,   // 실제 거래소 브래킷 (없으면 하드코딩 fallback)
+): { mmr: number; maintAmount: number } {
+  const table = (brackets && brackets.length) ? brackets : MMR_BRACKETS;
+  for (const [cap, mmr, amt] of table) {
+    if (notional <= cap) return { mmr, maintAmount: amt };
+  }
+  const last = table[table.length - 1];
+  return { mmr: last[1], maintAmount: last[2] };
+}
+
 export function calcLiquidationPrice(
   entryPrice: number,
   leverage:   number,
   side:       'buy' | 'sell',
-  mmr:        number = 0.005,   // maintenance margin rate (0.5%)
+  quantity?:  number,            // 제공 시 계단식 MMR + 유지증거금 공제 반영 (Futures 정밀식)
+  brackets?:  BracketTier[] | null,  // 실제 거래소 leverageBracket (없으면 fallback 테이블)
 ): number {
-  // Simplified formula: liq = entry × (1 ± (1 - mmr) / leverage)
-  if (leverage <= 1) return 0;
-  const factor = (1 - mmr) / leverage;
-  return side === 'buy'
-    ? entryPrice * (1 - factor)
-    : entryPrice * (1 + factor);
+  if (leverage <= 1 || entryPrice <= 0) return 0;
+  // quantity 없으면: 평탄 MMR(0.5%) 근사식 (하위호환)
+  if (!quantity || quantity <= 0) {
+    const factor = (1 - 0.005) / leverage;
+    return side === 'buy' ? entryPrice * (1 - factor) : entryPrice * (1 + factor);
+  }
+  // quantity 있으면: 계단식 유지증거금 기반 정밀식 (실제 브래킷 우선)
+  const notional = entryPrice * quantity;
+  const { mmr, maintAmount } = getMaintMargin(notional, brackets);
+  const lp = side === 'buy'
+    ? (entryPrice * (1 - 1 / leverage) - maintAmount / quantity) / (1 - mmr)
+    : (entryPrice * (1 + 1 / leverage) + maintAmount / quantity) / (1 + mmr);
+  return lp > 0 ? lp : 0;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -189,6 +223,9 @@ export async function validatePreOrder(
   // ── 2. Paper mode guard ──────────────────────────────────
   if (input.mode === 'paper') {
     checks.push({ pass: true, code: 'PAPER_MODE', message: '모의투자 모드 — 실제 주문 없음', severity: 'info' });
+  } else if (input.mode === 'testnet') {
+    checks.push({ pass: true, code: 'TESTNET_MODE', message: '테스트넷 모드 — 거래소 테스트 서버 주문', severity: 'info' });
+    warnings.push('테스트넷 모드: 거래소 테스트 서버로 실제 주문이 전송됩니다 (가짜 자금)');
   } else {
     checks.push({ pass: true, code: 'REAL_MODE', message: '실거래 모드 활성화됨', severity: 'warn' });
     warnings.push('⚠️ 실거래 모드: 실제 자산이 사용됩니다');
@@ -278,7 +315,7 @@ export async function validatePreOrder(
   const funding   = input.leverage > 1 ? getDefaultFundingRate(input.symbol).rate * entryVal * 3 : 0; // 24h
 
   // ── 11. Liquidation price ────────────────────────────────
-  const liquidationPx = calcLiquidationPrice(input.price, input.leverage, input.side);
+  const liquidationPx = calcLiquidationPrice(input.price, input.leverage, input.side, input.quantity);
   const maxPossibleLoss = (entryVal / input.leverage); // max loss = margin
 
   if (input.stopLoss) {

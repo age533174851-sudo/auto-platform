@@ -10,7 +10,7 @@ export type SafetyCheckResult = {
 };
 
 export type OrderSide = 'buy' | 'sell';
-export type OrderMode = 'paper' | 'real';
+export type OrderMode = 'paper' | 'testnet' | 'real';
 
 export interface PreOrderInput {
   userId:         string;

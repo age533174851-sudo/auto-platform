@@ -103,6 +103,299 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
   }, []);
   useEffect(() => { refreshPositions(); }, [refreshPositions]);
 
+  // ── Binance 실제 포지션 동기화 + Ghost Sync (testnet/live) ──────
+  const [realPos, setRealPos] = useState<any[]>([]);       // 거래소 실제 (source of truth)
+  const [ghostPos, setGhostPos] = useState<any[]>([]);     // 직전엔 있었는데 사라진 포지션 (사용자 확인 후 정리)
+  const [realFunding, setRealFunding] = useState<{ total:number; bySymbol:Record<string,number>; items:any[] }|null>(null);
+  const [realTestnet, setRealTestnet] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string|null>(null);
+  const [syncedAt, setSyncedAt] = useState<number|null>(null);
+  const [syncStatus, setSyncStatus] = useState<'idle'|'syncing'|'synced'|'mismatch'|'error'|'disconnected'>('idle');
+  const [mismatchActive, setMismatchActive] = useState(false);   // 불일치 시 신규주문/Reverse/TPSL 차단 (Close는 허용)
+  const [tradingBlocked, setTradingBlocked] = useState(false);   // 5회 연속 실패 → 신규 진입 차단
+  const [syncLog, setSyncLog] = useState<Array<{ t:number; mode:string; ex:string; symbol:string; status:string; detail:string; action:string }>>([]);
+  const [pollSec, setPollSec] = useState<number>(()=>{ try { const v=+(localStorage.getItem('tg_poll_sec')||'15'); return [5,15,30,60].includes(v)?v:15; } catch { return 15; } });
+  useEffect(()=>{ try { localStorage.setItem('tg_poll_sec', String(pollSec)); } catch {} }, [pollSec]);
+  const errCountRef = useRef(0);
+  const prevPosRef = useRef<any[]|null>(null);   // TRAIGO가 알고있던 직전 포지션 (Ghost 비교 기준)
+  const pushLog = useCallback((status:string, symbol:string, detail:string, action:string)=>{
+    setSyncLog(l=>[{ t:Date.now(), mode: tradeMode, ex:'binance', symbol, status, detail, action }, ...l].slice(0,50));
+  }, [tradeMode]);
+  // 텔레그램 알림 (서버에서 throttle/로그) — 실패해도 무시
+  const tgAlert = useCallback(async (payload:any)=>{
+    try {
+      const auth = authHeaderRef.current;
+      await fetch('/api/alert/telegram', { method:'POST', headers:{'Content-Type':'application/json',...(auth?{Authorization:auth}:{})}, body: JSON.stringify(payload), signal: AbortSignal.timeout(4000) });
+    } catch {}
+  }, []);
+
+  const syncBinancePositions = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent;
+    if (!connId) { if(!silent) setSyncMsg('연결된 Binance 거래소가 없습니다. 먼저 API 키를 연결하세요.'); setSyncStatus('disconnected'); return; }
+    if (!silent) setSyncing(true);
+    setSyncStatus('syncing');
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch(`/api/binance/futures/account?connectionId=${encodeURIComponent(connId)}`, {
+        headers: auth ? { Authorization: auth } : {},
+        signal: AbortSignal.timeout(3000),   // 3초 타임아웃
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || d.positionMsg || ('HTTP '+r.status));
+
+      const live = (Array.isArray(d.positions) ? d.positions : []).filter((p:any)=>Math.abs(p.amount||0)>0);
+
+      // ── Ghost Sync diff (직전 스냅샷 vs 신규) ──
+      const prev = prevPosRef.current;
+      let mismatch = false;
+      if (prev) {
+        const nextSyms = new Set(live.map((p:any)=>p.symbol));
+        const prevSyms = new Set(prev.map((p:any)=>p.symbol));
+        // A. 직전엔 있었는데 거래소에 없음 → ghost (자동삭제 금지)
+        const vanished = prev.filter((p:any)=>!nextSyms.has(p.symbol)).map((p:any)=>({ ...p, _ghost:true }));
+        if (vanished.length) { setGhostPos(g=>{ const have=new Set(g.map((x:any)=>x.symbol)); return [...g, ...vanished.filter((v:any)=>!have.has(v.symbol))]; }); vanished.forEach((v:any)=>pushLog('ghost', v.symbol, 'TRAIGO에 있었으나 거래소 미존재', '사용자 확인 대기')); mismatch=true; }
+        // B/C. 신규 발견 또는 수량/방향 불일치
+        for (const p of live) {
+          const old = prev.find((x:any)=>x.symbol===p.symbol);
+          if (!old) { p._discovered=true; pushLog('discovered', p.symbol, '미등록 실포지션 발견', '실포지션 카드 편입'); mismatch=true; }
+          else {
+            const os=(old.amount||0)<0?'S':'L', ns=(p.amount||0)<0?'S':'L';
+            if (os!==ns) { p._mismatch='방향'; pushLog('mismatch', p.symbol, `방향 불일치 (${os}→${ns})`, '거래소 우선'); mismatch=true; }
+            else if (Math.abs((old.amount||0)-(p.amount||0)) > Math.abs(p.amount||0)*0.005+1e-9) { p._mismatch='수량'; pushLog('mismatch', p.symbol, '수량 불일치', '거래소 우선'); mismatch=true; }
+          }
+        }
+        // 거래소에 다시 나타난 심볼은 ghost에서 제거
+        setGhostPos(g=>g.filter((x:any)=>!nextSyms.has(x.symbol)));
+      }
+      prevPosRef.current = live;
+
+      setRealPos(live);
+      setRealFunding(d.funding || null);
+      setRealTestnet(!!d.testnet);
+      setSyncedAt(Date.now());
+      errCountRef.current = 0;
+      setTradingBlocked(false);
+      setMismatchActive(mismatch);
+      setSyncStatus(mismatch ? 'mismatch' : 'synced');
+      if (mismatch) tgAlert({ level:'warning', eventType:'ghost_sync', exchange:'Binance', mode: d.testnet?'TESTNET':'LIVE', title:'Ghost Sync 불일치 감지', message:'화면과 거래소 포지션이 불일치합니다. 거래소 우선 적용됨.' });
+      if (!silent) setSyncMsg(`동기화 완료 · ${d.testnet?'테스트넷':'라이브'} · 포지션 ${live.length}개${mismatch?' · ⚠️ 불일치 감지':''}`);
+    } catch (e:any) {
+      errCountRef.current += 1;
+      const n = errCountRef.current;
+      setSyncStatus('error');
+      pushLog('error', '-', e?.message || '네트워크/타임아웃', `연속 실패 ${n}회`);
+      if (n === 3) tgAlert({ level:'warning', eventType:'api_fail', exchange:'Binance', mode: realTestnet?'TESTNET':'LIVE', title:'API 연결 3회 연속 실패', message:'자동 동기화가 중지되었습니다. 거래소 상태를 확인하세요.' });
+      if (n >= 5) setTradingBlocked(true);
+      if (!silent || n >= 2) setSyncMsg(`동기화 오류 (${n}회 연속): ${e?.message || '타임아웃'}${n>=3?' · 자동 폴링 중지됨':''}${n>=5?' · 신규 진입 차단':''}`);
+    } finally { if (!silent) setSyncing(false); }
+  }, [connId, pushLog, tgAlert, realTestnet]);
+
+  const dismissGhost = useCallback((symbol:string)=>{
+    setGhostPos(g=>g.filter((x:any)=>x.symbol!==symbol));
+    pushLog('resolved', symbol, 'ghost 포지션 정리', '사용자 삭제');
+  }, [pushLog]);
+
+  // ── Daily MDD Kill Switch ──────────────────────────────────────
+  const [ksStatus, setKsStatus] = useState<any|null>(null);
+  const [ksBusy, setKsBusy] = useState(false);
+  const [ksReleaseText, setKsReleaseText] = useState('');
+  const [showKsPanel, setShowKsPanel] = useState(false);
+  const fetchKsStatus = useCallback(async ()=>{
+    if (!connId) return;
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch(`/api/risk/kill-switch/status?connectionId=${encodeURIComponent(connId)}`, { headers: auth?{Authorization:auth}:{}, signal: AbortSignal.timeout(4000) });
+      const d = await r.json();
+      if (r.ok && !d.error) setKsStatus(d);
+      else if (d.noTable || d.error==='table_missing') setKsStatus({ noTable:true });
+    } catch { /* 조용히 */ }
+  }, [connId]);
+  const ksUpdate = useCallback(async (patch:any)=>{
+    if (!connId) return; setKsBusy(true);
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch('/api/risk/kill-switch/update', { method:'POST', headers:{'Content-Type':'application/json',...(auth?{Authorization:auth}:{})}, body: JSON.stringify({ connectionId: connId, ...patch }) });
+      const d = await r.json();
+      if (!r.ok || d.error) showToast(`설정 실패: ${d.message||d.error}`, false);
+      else { showToast('리스크 설정 저장됨', true); fetchKsStatus(); }
+    } catch(e:any){ showToast(`오류: ${e?.message}`, false); } finally { setKsBusy(false); }
+  }, [connId, showToast, fetchKsStatus]);
+  const ksReset = useCallback(async ()=>{
+    if (!connId) return;
+    if (ksStatus?.active && ksReleaseText.trim()!=='해제합니다') { showToast('해제하려면 "해제합니다"를 정확히 입력하세요', false); return; }
+    setKsBusy(true);
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch('/api/risk/kill-switch/reset', { method:'POST', headers:{'Content-Type':'application/json',...(auth?{Authorization:auth}:{})}, body: JSON.stringify({ connectionId: connId }) });
+      const d = await r.json();
+      if (!r.ok || d.error) showToast(`리셋 실패: ${d.message||d.error}`, false);
+      else { showToast('킬스위치 리셋 — 새 기준 설정됨', true); setKsReleaseText(''); fetchKsStatus(); }
+    } catch(e:any){ showToast(`오류: ${e?.message}`, false); } finally { setKsBusy(false); }
+  }, [connId, ksStatus, ksReleaseText, showToast, fetchKsStatus]);
+  const ksTrigger = useCallback(async ()=>{
+    if (!connId) return; setKsBusy(true);
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch('/api/risk/kill-switch/trigger', { method:'POST', headers:{'Content-Type':'application/json',...(auth?{Authorization:auth}:{})}, body: JSON.stringify({ connectionId: connId, reason:'수동 발동' }) });
+      const d = await r.json();
+      if (!r.ok || d.error) showToast(`발동 실패: ${d.message||d.error}`, false);
+      else { showToast('🛑 킬스위치 수동 발동됨', true); fetchKsStatus(); }
+    } catch(e:any){ showToast(`오류: ${e?.message}`, false); } finally { setKsBusy(false); }
+  }, [connId, showToast, fetchKsStatus]);
+  // 폴링과 함께 킬스위치 상태 갱신
+  useEffect(()=>{
+    if ((tradeMode==='testnet'||tradeMode==='live') && connId) fetchKsStatus();
+  }, [tradeMode, connId, syncedAt, fetchKsStatus]);
+  // Railway Worker heartbeat 상태
+  const [workerStatus, setWorkerStatus] = useState<any|null>(null);
+  useEffect(()=>{
+    if (!(tradeMode==='testnet'||tradeMode==='live')) return;
+    let cancelled=false;
+    const fetchWorker=async()=>{
+      try { const auth=authHeaderRef.current; const r=await fetch('/api/worker/status',{headers:auth?{Authorization:auth}:{},signal:AbortSignal.timeout(4000)}); const d=await r.json(); if(!cancelled) setWorkerStatus(d); } catch {}
+    };
+    fetchWorker(); const t=setInterval(fetchWorker, 20000);
+    return ()=>{ cancelled=true; clearInterval(t); };
+  }, [tradeMode]);
+  const [tgBusy, setTgBusy] = useState(false);
+  const [redisOk, setRedisOk] = useState<boolean|null>(null);
+  const ksTestTelegram = useCallback(async (channel:'money'|'system', test:'basic'|'throttle'|'escalation'='basic')=>{
+    setTgBusy(true);
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch('/api/telegram/test', { method:'POST', headers:{'Content-Type':'application/json',...(auth?{Authorization:auth}:{})}, body: JSON.stringify({ channel, severity: channel==='money'?'critical':'warning', test }) });
+      const d = await r.json();
+      if (typeof d.redis==='boolean') setRedisOk(d.redis);
+      if (d.ok) showToast(`${channel==='money'?'Money':'System'} Bot ${test==='basic'?'테스트':test} 발송 — 폰 확인 (Redis ${d.redis?'연결':'미연결'})`, true);
+      else showToast(`발송 실패: ${d.message||d.error||'설정 확인'}`, false);
+    } catch(e:any){ showToast(`오류: ${e?.message}`, false); } finally { setTgBusy(false); }
+  }, [showToast]);
+
+  // ── Auto Position Polling (TESTNET/LIVE 전용) ──────────────────
+  useEffect(()=>{
+    const active = (tradeMode==='testnet'||tradeMode==='live') && !!connId;
+    if (!active) { setSyncStatus(s=>connId?s:'disconnected'); return; }
+    let timer:any = null;
+    const tick = ()=>{
+      if (document.visibilityState !== 'visible') return;       // 백그라운드면 중지
+      if (errCountRef.current >= 3) { if(timer){clearInterval(timer);timer=null;} return; }  // 3회 연속 실패 시 중지
+      syncBinancePositions({ silent:true });
+    };
+    syncBinancePositions({ silent:true });                       // 진입 즉시 1회
+    timer = setInterval(tick, pollSec*1000);
+    const onVis = ()=>{ if (document.visibilityState==='visible') { errCountRef.current=0; syncBinancePositions({ silent:true }); } };  // 복귀 시 즉시
+    document.addEventListener('visibilitychange', onVis);
+    return ()=>{ if(timer)clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
+  }, [tradeMode, connId, pollSec, syncBinancePositions]);
+
+  // ── 실포지션 종료 (reduce-only) ────────────────────────────────
+  const [closeBusy, setCloseBusy] = useState<string|null>(null);      // `${symbol}:${percent}`
+  const [toast, setToast] = useState<{ msg:string; ok:boolean }|null>(null);
+  const [closeConfirm, setCloseConfirm] = useState<{ p:any; percent:number }|null>(null);
+  const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 3800); }, []);
+  // 큐 작업 상태 폴링 (요청접수→처리중→성공/실패)
+  const pollJob = useCallback(async (jobId:string, label:string):Promise<boolean>=>{
+    const auth = authHeaderRef.current;
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline) {
+      await new Promise(r=>setTimeout(r, 1500));
+      try {
+        const r = await fetch(`/api/jobs/${jobId}`, { headers: auth?{Authorization:auth}:{}, signal: AbortSignal.timeout(4000) });
+        const d = await r.json();
+        if (d.status==='COMPLETED') { showToast(`${label} 성공`, true); return true; }
+        if (d.status==='FAILED' || d.status==='CANCELLED') { showToast(`${label} 실패: ${d.error||'-'}`, false); return false; }
+      } catch {}
+    }
+    showToast(`${label} 처리 지연 — 거래소/Worker 상태 확인`, false);
+    return false;
+  }, [showToast]);
+  const execCloseReal = useCallback(async (p:any, percent:number)=>{
+    const positionSide = (p.side==='SHORT' || (p.amount||0)<0) ? 'SHORT' : 'LONG';
+    const key = `${p.symbol}:${percent}`;
+    setCloseBusy(key);
+    try {
+      const auth = authHeaderRef.current;
+      const r = await fetch('/api/binance/futures/close-position', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json', ...(auth?{ Authorization: auth }:{}) },
+        body: JSON.stringify({ connectionId: connId, symbol: p.symbol, positionSide, quantity: Math.abs(p.amount||0), percent }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) { showToast(`종료 요청 실패: ${d.message || d.error || ('HTTP '+r.status)}`, false); }
+      else if (d.queued && d.jobId) {
+        showToast(`${p.symbol} ${percent}% 종료 요청 접수됨 — 처리 중`, true);
+        const okJob = await pollJob(d.jobId, `${p.symbol} ${percent}% 종료`);
+        if (okJob) await syncBinancePositions();
+      }
+    } catch (e:any) { showToast(`종료 오류: ${e?.message || '네트워크'}`, false); }
+    finally { setCloseBusy(null); }
+  }, [connId, syncBinancePositions, showToast, pollJob]);
+  const closeReal = useCallback((p:any, percent:number)=>{
+    if (!realTestnet) setCloseConfirm({ p, percent });   // LIVE → 확인 모달 필수
+    else execCloseReal(p, percent);                       // TESTNET → 즉시 실행
+  }, [realTestnet, execCloseReal]);
+
+  // ── 실포지션 TP/SL 편집 ────────────────────────────────────────
+  const [tpslModal, setTpslModal] = useState<any|null>(null);   // 대상 포지션
+  const [tpslBusy, setTpslBusy] = useState(false);
+  const [tpInput, setTpInput] = useState('');
+  const [slInput, setSlInput] = useState('');
+  const [tpslMode, setTpslMode] = useState<'pct'|'price'>('pct');
+  const [tpslConfirm, setTpslConfirm] = useState<{ p:any; tpPrice:number|null; slPrice:number|null }|null>(null);
+  const openTpsl = useCallback((p:any)=>{
+    setTpslMode('pct'); setTpInput(''); setSlInput(''); setTpslModal(p);
+  }, []);
+  const calcTpSl = useCallback((p:any, tpVal:string, slVal:string, mode:'pct'|'price')=>{
+    const entry = p.entryPrice || 0;
+    const isLong = !(p.side==='SHORT' || (p.amount||0)<0);
+    let tpPrice:number|null = null, slPrice:number|null = null;
+    if (tpVal!=='' && !isNaN(+tpVal)) tpPrice = mode==='price' ? +tpVal : (isLong ? entry*(1+(+tpVal)/100) : entry*(1-(+tpVal)/100));
+    if (slVal!=='' && !isNaN(+slVal)) slPrice = mode==='price' ? +slVal : (isLong ? entry*(1-(+slVal)/100) : entry*(1+(+slVal)/100));
+    return { tpPrice, slPrice };
+  }, []);
+  const submitTpsl = useCallback(async (p:any, tpPrice:number|null, slPrice:number|null)=>{
+    setTpslBusy(true);
+    try {
+      const positionSide = (p.side==='SHORT' || (p.amount||0)<0) ? 'SHORT' : 'LONG';
+      const auth = authHeaderRef.current;
+      const r = await fetch('/api/binance/futures/tpsl', {
+        method:'POST', headers:{ 'Content-Type':'application/json', ...(auth?{ Authorization:auth }:{}) },
+        body: JSON.stringify({ connectionId: connId, symbol: p.symbol, positionSide, tpPrice, slPrice }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) { showToast(`TP/SL 요청 실패: ${d.message || d.error || ('HTTP '+r.status)}`, false); }
+      else if (d.queued && d.jobId) {
+        showToast(`${p.symbol} TP/SL 요청 접수됨 — 처리 중`, true);
+        setTpslModal(null);
+        const okJob = await pollJob(d.jobId, `${p.symbol} TP/SL`);
+        if (okJob) await syncBinancePositions();
+      }
+    } catch (e:any) { showToast(`TP/SL 오류: ${e?.message || '네트워크'}`, false); }
+    finally { setTpslBusy(false); }
+  }, [connId, syncBinancePositions, showToast, pollJob]);
+  const onTpslSubmit = useCallback((p:any)=>{
+    if (mismatchActive) { showToast('⚠️ 포지션 불일치 감지 — 동기화 전까지 TP/SL 수정이 차단됩니다', false); return; }
+    if (tradingBlocked) { showToast('⚠️ 동기화 연속 실패 — 거래가 차단된 상태입니다', false); return; }
+    const { tpPrice, slPrice } = calcTpSl(p, tpInput, slInput, tpslMode);
+    if (tpPrice==null && slPrice==null) { showToast('TP 또는 SL 중 하나는 입력하세요', false); return; }
+    if (!realTestnet) setTpslConfirm({ p, tpPrice, slPrice });   // LIVE → 확인 모달
+    else submitTpsl(p, tpPrice, slPrice);                         // TESTNET → 즉시
+  }, [tpInput, slInput, tpslMode, calcTpSl, realTestnet, submitTpsl, showToast, mismatchActive, tradingBlocked]);
+
+  // ── 펀딩 카운트다운 1초 틱 (실포지션 있을 때만) ───────────────────
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(()=>{
+    if (realPos.length===0) return;
+    const t = setInterval(()=>setNowTick(Date.now()), 1000);
+    return ()=>clearInterval(t);
+  }, [realPos.length]);
+  const fmtCountdown = useCallback((ms:number)=>{
+    if (!(ms>0)) return '00:00:00';
+    const s=Math.floor(ms/1000), h=Math.floor(s/3600), m=Math.floor((s%3600)/60), ss=s%60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+  }, []);
+
   // 포지션 종료 — paper 정리 + testnet/live면 거래소 청산
   const closePosition = async (p: any, cur: number, ratio: number) => {
     // testnet/live: 거래소에 reduce-only 반대주문
@@ -132,6 +425,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
   const confirmOrder = async (sideArg?: string) => {
     const side = sideArg || sideRef.current || '매수';
     setShowConfirm(false);
+    // EMERGENCY_STOP: 킬스위치 발동 중이면 신규 진입 차단 (Close/TP-SL은 별도 허용)
+    if (ksStatus?.active && (tradeMode==='testnet'||tradeMode==='live')) {
+      showToast('🛑 킬스위치 발동 중 — 신규 진입이 차단되었습니다', false);
+      setStatus(null); return;
+    }
     setStatus('loading');
     const orderAmt = amount ? +amount : 100_000;
 
@@ -170,25 +468,30 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
           setOrders(prev=>[{ id:uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
             price:krwPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'failed', pnl:0, pnlPct:0,
             openedAt:new Date().toISOString(), note:errMsg, emotion:'😟' } as Order, ...prev]);
-          alert(`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 실패:\n\n${errMsg}\n\n(잔고 부족, 최소주문금액 미달, 권한 부족 등을 확인하세요)`);
+          alert(`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 요청 실패:\n\n${errMsg}`);
           setStatus('error' as any); setTimeout(()=>setStatus(null),4000); return;
         }
-        // 성공 — 우리 앱에도 포지션 표시 (paper store에 기록)
-        const filledPx = d.price || krwPx;
-        try {
-          paperBuy(sel.id, filledPx, orderAmt, {
-            stopLossPct: sl && filledPx ? Math.abs(((+sl-filledPx)/filledPx)*100) : undefined,
-            takeProfitPct: tp && filledPx ? Math.abs(((+tp-filledPx)/filledPx)*100) : undefined,
-            stratId: tradeMode,
-            side: side === '매수' ? 'long' : 'short',
-          });
-          refreshPositions();
-        } catch {}
-        setOrders(prev=>[{ id:d.orderId||uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
-          price:filledPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'filled', pnl:0, pnlPct:0,
-          openedAt:new Date().toISOString(), note:`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 #${d.orderId||''}`, emotion:'😊' } as Order, ...prev]);
-        alert(`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 성공!\n주문번호: ${d.orderId||'-'}\n체결가: ${filledPx}`);
-        setStatus('done'); setTimeout(()=>setStatus(null),3000); return;
+        // 요청 접수됨 → Worker 처리 대기 (job 폴링)
+        if (d.queued && d.jobId) {
+          showToast(`${tradeSymbol} ${side} 요청 접수됨 — Worker 처리 중`, true);
+          setStatus('done'); setTimeout(()=>setStatus(null),2000);
+          const okJob = await pollJob(d.jobId, `${tradeSymbol} ${side} 주문`);
+          if (okJob) {
+            try {
+              paperBuy(sel.id, krwPx, orderAmt, {
+                stopLossPct: sl && krwPx ? Math.abs(((+sl-krwPx)/krwPx)*100) : undefined,
+                takeProfitPct: tp && krwPx ? Math.abs(((+tp-krwPx)/krwPx)*100) : undefined,
+                stratId: tradeMode, side: side === '매수' ? 'long' : 'short',
+              });
+              refreshPositions();
+            } catch {}
+            setOrders(prev=>[{ id:d.jobId||uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
+              price:krwPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'filled', pnl:0, pnlPct:0,
+              openedAt:new Date().toISOString(), note:`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 (job ${String(d.jobId).slice(0,8)})`, emotion:'😊' } as Order, ...prev]);
+            await syncBinancePositions();
+          }
+        }
+        return;
       } catch (e:any) {
         alert(`주문 오류: ${e?.message||'네트워크 오류'}`);
         setStatus('error' as any); setTimeout(()=>setStatus(null),3000); return;
@@ -601,10 +904,349 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
               </div>
           </Card>
 
-          {/* 현재 포지션 (실제 보유) */}
+          {/* Binance 실제 포지션 (TESTNET/LIVE) — 동기화 */}
+          {hasExchange && (
+            <Card style={{padding:'14px 16px',marginBottom:12,borderLeft:`3px solid ${T.ylw}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,gap:8,flexWrap:'wrap'}}>
+                <div style={{color:T.txt,fontWeight:800,fontSize:13,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                  Binance 실제 포지션
+                  {realPos.length>0&&<span style={{background:(realTestnet?T.ylw:T.red)+'20',color:realTestnet?T.ylw:T.red,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>{realTestnet?'TESTNET':'LIVE'} {realPos.length}</span>}
+                  {(()=>{ const m:Record<string,[string,string]>={ idle:['대기',T.muted], syncing:['동기화 중',T.ylw], synced:['동기화됨',T.grn], mismatch:['불일치 감지',T.red], error:['API 오류',T.red], disconnected:['연결 끊김',T.muted] }; const [lb,c]=m[syncStatus]||m.idle; return <span style={{background:c+'20',color:c,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5,display:'inline-flex',alignItems:'center',gap:3}}>{syncStatus==='synced'?'●':syncStatus==='syncing'?'◐':'○'} {lb}</span>; })()}
+                </div>
+                <button onClick={()=>syncBinancePositions()} disabled={syncing}
+                  style={{padding:'6px 12px',background:syncing?T.alt:T.acg,color:syncing?T.muted:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,fontSize:11,fontWeight:700,cursor:syncing?'default':'pointer'}}>
+                  {syncing?'동기화 중…':'⟳ 수동 동기화'}
+                </button>
+              </div>
+              {/* 자동 폴링 간격 선택 (testnet/live에서 작동) */}
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,fontSize:10,color:T.muted,flexWrap:'wrap'}}>
+                <span>자동 동기화</span>
+                {[5,15,30,60].map(s=>(
+                  <button key={s} onClick={()=>setPollSec(s)}
+                    style={{padding:'3px 9px',background:pollSec===s?T.acg:'transparent',color:pollSec===s?T.acl:T.muted,border:`1px solid ${pollSec===s?T.acl:T.border}`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>{s}초</button>
+                ))}
+                {(tradeMode==='mock')&&<span style={{color:T.muted,fontSize:9}}>· 실거래(테넷/실전) 모드에서 작동</span>}
+              </div>
+
+              {/* Daily MDD Kill Switch — 배지 + 패널 */}
+              {(tradeMode==='testnet'||tradeMode==='live')&&(
+                <div style={{marginBottom:8}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
+                    {(()=>{ const lv=ksStatus?.noTable?'na':(ksStatus?.level||'ok'); const m:Record<string,[string,string]>={ ok:['🛡 Risk OK',T.grn], warning:['⚠️ Warning',T.ylw], active:['🛑 Kill Switch Active',T.red], na:['리스크 미설정',T.muted] }; const [lb,c]=m[lv]||m.ok; return <span style={{background:c+'18',color:c,fontSize:10,fontWeight:800,padding:'3px 9px',borderRadius:6}}>{lb}</span>; })()}
+                    <div style={{display:'flex',alignItems:'center',gap:6}}>
+                      {workerStatus&&(()=>{ const m:Record<string,string>={ running:T.grn, degraded:T.ylw, stopped:T.red, absent:T.muted, error:T.muted }; const c=m[workerStatus.status]||T.muted; return <span style={{background:c+'18',color:c,fontSize:9,fontWeight:700,padding:'2px 7px',borderRadius:5}} title={workerStatus.task||''}>Worker {workerStatus.label||workerStatus.status}</span>; })()}
+                      <button onClick={()=>setShowKsPanel(v=>!v)} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:6,color:T.sub,fontSize:10,fontWeight:700,padding:'3px 9px',cursor:'pointer'}}>{showKsPanel?'리스크 닫기':'리스크 관리'}</button>
+                    </div>
+                  </div>
+
+                  {showKsPanel&&(
+                    <div style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:10,padding:'12px',marginTop:8}}>
+                      {/* 알림 (듀얼봇 + Redis 상태) */}
+                      <div style={{marginBottom:10}}>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                          <span style={{fontSize:10,color:T.muted,fontWeight:700}}>Telegram 알림</span>
+                          {redisOk!=null&&<span style={{fontSize:9,fontWeight:700,color:redisOk?T.grn:T.ylw,background:(redisOk?T.grn:T.ylw)+'18',padding:'1px 7px',borderRadius:5}}>Redis {redisOk?'연결됨':'미연결(fail-open)'}</span>}
+                        </div>
+                        <div style={{display:'flex',gap:6}}>
+                          <button onClick={()=>ksTestTelegram('money')} disabled={tgBusy}
+                            style={{flex:1,padding:'8px',background:T.prp+'18',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:tgBusy?'default':'pointer'}}>📨 Money Bot</button>
+                          <button onClick={()=>ksTestTelegram('system')} disabled={tgBusy}
+                            style={{flex:1,padding:'8px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:tgBusy?'default':'pointer'}}>🛠 System Bot</button>
+                        </div>
+                        <div style={{display:'flex',gap:6,marginTop:6}}>
+                          <button onClick={()=>ksTestTelegram('money','throttle')} disabled={tgBusy}
+                            style={{flex:1,padding:'6px',background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:6,fontSize:9,fontWeight:700,cursor:'pointer'}}>throttle 테스트</button>
+                          <button onClick={()=>ksTestTelegram('system','escalation')} disabled={tgBusy}
+                            style={{flex:1,padding:'6px',background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:6,fontSize:9,fontWeight:700,cursor:'pointer'}}>escalation 테스트</button>
+                        </div>
+                      </div>
+                      {ksStatus?.noTable?(
+                        <div style={{color:T.ylw,fontSize:11,lineHeight:1.6}}>kill_switch_state 테이블이 없어 작동하지 않습니다. 아래 SQL을 Supabase에서 실행한 뒤 새로고침하세요. (상세는 개발자 안내 참고)</div>
+                      ):ksStatus?(
+                        <>
+                          {ksStatus.triggerReason&&<div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:8,padding:'8px',marginBottom:10,color:T.red,fontSize:10,fontWeight:700}}>발동 원인: {ksStatus.triggerReason}</div>}
+                          {/* C/D 자동 실행 결과 */}
+                          {ksStatus.exec&&(ksStatus.exec.cancel||ksStatus.exec.close)&&(
+                            <div style={{background:T.alt,borderRadius:8,padding:'8px',marginBottom:10,fontSize:10}}>
+                              {ksStatus.exec.cancel&&<div style={{color:ksStatus.exec.cancel.success?T.grn:T.red,fontWeight:700}}>주문 취소: {ksStatus.exec.cancel.success?`완료 (${ksStatus.exec.cancel.count||0}심볼)`:'일부 실패 — 거래소 직접 확인'}</div>}
+                              {ksStatus.exec.close&&<div style={{color:ksStatus.exec.close.success?T.grn:T.red,fontWeight:700,marginTop:3}}>포지션 종료: {ksStatus.exec.close.success?`완료 (재시도 ${ksStatus.exec.close.retries}회)`:`${ksStatus.exec.close.remaining}개 잔존 — 거래소 직접 확인 필요`}</div>}
+                            </div>
+                          )}
+                          {/* Reconciliation 잔여 경고 */}
+                          {ksStatus.recon&&!ksStatus.recon.clean&&(
+                            <div style={{background:T.red+'20',border:`1px solid ${T.red}60`,borderRadius:8,padding:'8px',marginBottom:10}}>
+                              <div style={{color:T.red,fontSize:10,fontWeight:800}}>⚠️ 거래소 직접 확인 필요</div>
+                              <div style={{color:T.sub,fontSize:9,marginTop:2}}>재확인 결과 포지션 {ksStatus.recon.positions}개 · 미체결 {ksStatus.recon.orders}개 잔존. 거래소 앱에서 직접 확인하세요.</div>
+                            </div>
+                          )}
+                          <div style={{fontSize:10,color:T.muted,marginBottom:8}}>현재 Equity <b style={{color:T.txt}}>{(ksStatus.equity||0).toFixed(2)} USDT</b></div>
+                          {([['일일',ksStatus.daily,ksStatus.config.dailyLimitPct,'dailyLimitPct'],['주간',ksStatus.weekly,ksStatus.config.weeklyLimitPct,'weeklyLimitPct'],['월간',ksStatus.monthly,ksStatus.config.monthlyLimitPct,'monthlyLimitPct']] as any[]).map(([lab,d,lim]:any,i:number)=>{
+                            const ddv=d.drawdownPct||0; const pctOfLim=Math.min(100,Math.max(0,(-ddv/lim)*100));
+                            return (
+                              <div key={i} style={{marginBottom:8}}>
+                                <div style={{display:'flex',justifyContent:'space-between',fontSize:10,marginBottom:3}}>
+                                  <span style={{color:T.muted}}>{lab} 손실</span>
+                                  <span style={{color:ddv<=-lim?T.red:ddv<=-lim*0.8?T.ylw:T.sub,fontWeight:700,fontFamily:'Inter,monospace'}}>{ddv.toFixed(2)}% / 한도 -{lim}% · 남은 {d.remainingPct.toFixed(1)}%</span>
+                                </div>
+                                <div style={{height:5,background:T.alt,borderRadius:3,overflow:'hidden'}}><div style={{height:'100%',width:`${pctOfLim}%`,background:pctOfLim>=100?T.red:pctOfLim>=80?T.ylw:T.grn}}/></div>
+                              </div>
+                            );
+                          })}
+                          {/* 한도 입력 */}
+                          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginTop:10}}>
+                            {([['일일','dailyLimitPct',ksStatus.config.dailyLimitPct],['주간','weeklyLimitPct',ksStatus.config.weeklyLimitPct],['월간','monthlyLimitPct',ksStatus.config.monthlyLimitPct]] as any[]).map(([lab,key,val]:any)=>(
+                              <div key={key}>
+                                <div style={{fontSize:9,color:T.muted,marginBottom:3}}>{lab} 한도%</div>
+                                <input defaultValue={val} inputMode="decimal" onBlur={e=>{ const v=+e.target.value; if(v>0&&v!==val) ksUpdate({[key]:v}); }}
+                                  style={{width:'100%',background:T.alt,border:`1px solid ${T.border}`,borderRadius:6,padding:'7px',color:T.txt,fontSize:12,outline:'none'}}/>
+                              </div>
+                            ))}
+                          </div>
+                          {/* 조치 모드 */}
+                          <div style={{fontSize:9,color:T.muted,margin:'10px 0 4px'}}>발동 시 조치 (A신규차단 B봇정지 C주문취소 D포지션종료)</div>
+                          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                            {(['A','B','C','D'] as const).map(a=>{ const on=(ksStatus.config.actionMode||'').includes(a); return (
+                              <button key={a} onClick={()=>{ const cur=ksStatus.config.actionMode||''; const next=on?cur.replace(a,''):cur+a; ksUpdate({actionMode: next||'A'}); }}
+                                style={{flex:1,minWidth:36,padding:'7px',background:on?T.acg:'transparent',color:on?T.acl:T.muted,border:`1px solid ${on?T.acl:T.border}`,borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer'}}>{a}{a==='D'?'⚠️':''}</button>
+                            );})}
+                          </div>
+                          {/* 액션 */}
+                          <div style={{display:'flex',gap:6,marginTop:12}}>
+                            <button onClick={()=>ksUpdate({enabled:!ksStatus.config.enabled})} disabled={ksBusy}
+                              style={{flex:1,padding:'9px',background:ksStatus.config.enabled?T.grn+'18':T.alt,color:ksStatus.config.enabled?T.grn:T.muted,border:`1px solid ${ksStatus.config.enabled?T.grn+'40':T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>{ksStatus.config.enabled?'ON':'OFF'}</button>
+                            <button onClick={ksTrigger} disabled={ksBusy||ksStatus.active}
+                              style={{flex:1,padding:'9px',background:T.red+'15',color:T.red,border:`1px solid ${T.red}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:ksStatus.active?'default':'pointer',opacity:ksStatus.active?0.5:1}}>수동 발동</button>
+                            <button onClick={ksReset} disabled={ksBusy}
+                              style={{flex:1,padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>기준 리셋</button>
+                          </div>
+                          {/* 강제 해제 (active 시 "해제합니다" 입력) */}
+                          {ksStatus.active&&(
+                            <div style={{marginTop:10}}>
+                              <div style={{fontSize:9,color:T.red,marginBottom:4}}>발동 상태입니다. 해제하려면 "해제합니다" 입력 후 기준 리셋</div>
+                              <input value={ksReleaseText} onChange={e=>setKsReleaseText(e.target.value)} placeholder='해제합니다'
+                                style={{width:'100%',background:T.alt,border:`1px solid ${T.red}40`,borderRadius:6,padding:'8px',color:T.txt,fontSize:12,outline:'none'}}/>
+                            </div>
+                          )}
+                        </>
+                      ):(
+                        <div style={{color:T.muted,fontSize:11,textAlign:'center',padding:'8px 0'}}>리스크 상태 불러오는 중…</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 불일치 / 거래차단 경고 배너 */}
+              {mismatchActive&&(
+                <div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:8,padding:'8px 11px',marginBottom:8}}>
+                  <div style={{color:T.red,fontSize:11,fontWeight:800}}>⚠️ 포지션 불일치 감지 — 거래소 데이터 우선 적용</div>
+                  <div style={{color:T.sub,fontSize:9,marginTop:2}}>신규 주문·Reverse·TP/SL 수정 차단됨 (Close는 허용). 동기화로 일치되면 자동 해제.</div>
+                </div>
+              )}
+              {tradingBlocked&&(
+                <div style={{background:T.red+'20',border:`1px solid ${T.red}60`,borderRadius:8,padding:'8px 11px',marginBottom:8}}>
+                  <div style={{color:T.red,fontSize:11,fontWeight:800}}>🛑 동기화 5회 연속 실패 — 신규 진입 차단</div>
+                  <div style={{color:T.sub,fontSize:9,marginTop:2}}>수동 동기화 성공 시 해제됩니다.</div>
+                </div>
+              )}
+              {syncMsg&&<div style={{color:(syncMsg.includes('실패')||syncMsg.includes('오류')||syncMsg.includes('불일치'))?T.red:T.muted,fontSize:10,marginBottom:8}}>{syncMsg}</div>}
+              {realFunding&&(
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:T.muted,padding:'6px 0',borderBottom:`1px solid ${T.border}`,marginBottom:8}}>
+                  <span>누적 펀딩비 (최근 200건)</span>
+                  <span style={{color:realFunding.total>=0?T.grn:T.red,fontWeight:700,fontFamily:'Inter,monospace'}}>{realFunding.total>=0?'+':''}{realFunding.total.toFixed(4)} USDT {realFunding.total>=0?'(수령)':'(지불)'}</span>
+                </div>
+              )}
+              {/* Ghost 포지션 — 거래소 미존재 (사용자 확인 후 정리) */}
+              {ghostPos.map((g,i)=>(
+                <div key={'ghost'+i} style={{background:T.red+'10',border:`1px dashed ${T.red}50`,borderRadius:10,padding:'10px 12px',marginBottom:8}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
+                    <div>
+                      <span style={{background:T.red+'20',color:T.red,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>{g.symbol} 거래소 미존재</span>
+                      <div style={{color:T.muted,fontSize:9,marginTop:4}}>TRAIGO에는 있었으나 거래소에서 사라짐 (청산/외부종료 가능). 자동 삭제하지 않음.</div>
+                    </div>
+                    <button onClick={()=>dismissGhost(g.symbol)}
+                      style={{padding:'7px 12px',background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>정리</button>
+                  </div>
+                </div>
+              ))}
+              {realPos.length===0&&ghostPos.length===0?(
+                <div style={{color:T.muted,fontSize:11,textAlign:'center',padding:'12px 0'}}>{syncedAt?'열린 포지션이 없습니다':'동기화 버튼을 눌러 거래소 포지션을 불러오세요'}</div>
+              ):realPos.map((p,i)=>{
+                const isShort=p.side==='SHORT'||(p.amount||0)<0;
+                const fundSym=realFunding?.bySymbol?.[p.symbol];
+                return (
+                  <div key={i} style={{background:T.alt,borderRadius:10,padding:'11px 13px',marginBottom:i<realPos.length-1?8:0}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                      <span style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
+                        <span style={{background:(isShort?T.red:T.grn)+'20',color:isShort?T.red:T.grn,fontSize:10,fontWeight:800,padding:'2px 8px',borderRadius:5}}>{p.symbol} {isShort?'SHORT':'LONG'} {p.leverage}x</span>
+                        {p._discovered&&<span style={{background:T.ylw+'20',color:T.ylw,fontSize:8,fontWeight:800,padding:'1px 6px',borderRadius:4}}>미등록 발견</span>}
+                        {p._mismatch&&<span style={{background:T.red+'20',color:T.red,fontSize:8,fontWeight:800,padding:'1px 6px',borderRadius:4}}>{p._mismatch} 불일치</span>}
+                      </span>
+                      <span style={{color:(p.unrealizedPnl||0)>=0?T.grn:T.red,fontSize:13,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{(p.unrealizedPnl||0)>=0?'+':''}{(p.unrealizedPnl||0).toFixed(2)} USDT</span>
+                    </div>
+                    <div style={{display:'flex',gap:12,flexWrap:'wrap',fontSize:9,color:T.muted,fontFamily:'Inter,monospace',marginBottom:6}}>
+                      <span>진입 {p.entryPrice}</span><span>마크 {p.markPrice}</span><span>수량 {Math.abs(p.amount||0)}</span>
+                    </div>
+                    <div style={{display:'flex',justifyContent:'space-between',fontSize:11,padding:'3px 0'}}>
+                      <span style={{color:T.muted}}>청산가 <span style={{color:p.liqSource==='exchange'?T.grn:T.ylw,fontSize:8,fontWeight:700,marginLeft:4,background:(p.liqSource==='exchange'?T.grn:T.ylw)+'18',padding:'1px 5px',borderRadius:4}}>{p.liqSource==='exchange'?'거래소 실제값':'추정'}</span></span>
+                      <span style={{color:T.ylw,fontWeight:700,fontFamily:'Inter,monospace'}}>{p.liquidationPrice}</span>
+                    </div>
+                    {p.mmr!=null&&(
+                      <div style={{display:'flex',justifyContent:'space-between',fontSize:11,padding:'3px 0'}}>
+                        <span style={{color:T.muted}}>MMR <span style={{color:p.bracketSource==='exchange'?T.grn:T.ylw,fontSize:8,fontWeight:700,marginLeft:4,background:(p.bracketSource==='exchange'?T.grn:T.ylw)+'18',padding:'1px 5px',borderRadius:4}}>{p.bracketSource==='exchange'?'거래소 브래킷':'추정'}</span></span>
+                        <span style={{color:T.txt,fontWeight:700,fontFamily:'Inter,monospace'}}>{(p.mmr*100).toFixed(2)}% · 공제 {p.maintAmount}</span>
+                      </div>
+                    )}
+                    {fundSym!=null&&(
+                      <div style={{display:'flex',justifyContent:'space-between',fontSize:11,padding:'3px 0'}}>
+                        <span style={{color:T.muted}}>펀딩비 ({p.symbol})</span>
+                        <span style={{color:fundSym>=0?T.grn:T.red,fontWeight:700,fontFamily:'Inter,monospace'}}>{fundSym>=0?'+':''}{fundSym.toFixed(4)} USDT</span>
+                      </div>
+                    )}
+                    {/* 펀딩 예측 — 다음 펀딩시간 + 예상 펀딩비 */}
+                    <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${T.border}`}}>
+                      {p.nextFundingTime?(
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:10}}>
+                          <div>
+                            <div style={{color:T.muted,marginBottom:2}}>다음 펀딩</div>
+                            <div style={{color:T.txt,fontWeight:700,fontFamily:'Inter,monospace'}}>{fmtCountdown(p.nextFundingTime-nowTick)} 남음</div>
+                          </div>
+                          <div>
+                            <div style={{color:T.muted,marginBottom:2}}>예상 펀딩비</div>
+                            <div style={{fontWeight:700,fontFamily:'Inter,monospace',color:p.fundingSide==='receive'?T.grn:p.fundingSide==='pay'?T.red:T.muted}}>
+                              {p.estimatedNextFundingFee!=null?`${p.estimatedNextFundingFee>=0?'+':''}${p.estimatedNextFundingFee.toFixed(4)} ${p.fundingSide==='receive'?'수령':p.fundingSide==='pay'?'지불':'중립'}`:'-'}
+                            </div>
+                          </div>
+                          <div style={{gridColumn:'1 / -1',display:'flex',justifyContent:'space-between',color:T.muted,marginTop:2}}>
+                            <span>Funding Rate</span>
+                            <span style={{fontFamily:'Inter,monospace',color:T.txt,fontWeight:700}}>{((p.lastFundingRate||0)*100).toFixed(4)}%</span>
+                          </div>
+                        </div>
+                      ):(
+                        <div style={{color:T.muted,fontSize:10}}>펀딩 데이터 없음</div>
+                      )}
+                    </div>
+                    {/* 현재 TP/SL 상태 */}
+                    {(p.tpPrice||p.slPrice)&&(
+                      <div style={{display:'flex',gap:14,fontSize:10,marginTop:4,paddingTop:6,borderTop:`1px solid ${T.border}`,fontFamily:'Inter,monospace'}}>
+                        <span style={{color:p.tpPrice?T.grn:T.muted}}>TP {p.tpPrice?p.tpPrice:'미설정'}</span>
+                        <span style={{color:p.slPrice?T.red:T.muted}}>SL {p.slPrice?p.slPrice:'미설정'}</span>
+                      </div>
+                    )}
+                    {/* 액션 버튼 — reduce-only 종료 + TP/SL */}
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginTop:8}}>
+                      <button onClick={()=>closeReal(p,100)} disabled={!!closeBusy}
+                        style={{padding:'9px',background:T.red+'18',color:T.red,border:`1px solid ${T.red}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:closeBusy?'default':'pointer',opacity:closeBusy&&closeBusy!==`${p.symbol}:100`?0.5:1}}>
+                        {closeBusy===`${p.symbol}:100`?'종료 중…':'전량 종료'}</button>
+                      <button onClick={()=>closeReal(p,50)} disabled={!!closeBusy}
+                        style={{padding:'9px',background:T.ylw+'15',color:T.ylw,border:`1px solid ${T.ylw}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:closeBusy?'default':'pointer',opacity:closeBusy&&closeBusy!==`${p.symbol}:50`?0.5:1}}>
+                        {closeBusy===`${p.symbol}:50`?'종료 중…':'50% 종료'}</button>
+                      <button onClick={()=>openTpsl(p)} disabled={!!closeBusy}
+                        style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                        TP/SL</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </Card>
+          )}
+
+          {/* 토스트 (성공/실패) */}
+          {toast&&(
+            <div style={{position:'fixed',left:'50%',bottom:24,transform:'translateX(-50%)',zIndex:9999,maxWidth:'90%',
+              background:toast.ok?T.grn:T.red,color:'#fff',padding:'11px 18px',borderRadius:10,fontSize:12,fontWeight:700,
+              boxShadow:'0 6px 24px rgba(0,0,0,0.4)'}}>
+              {toast.ok?'✓ ':'✕ '}{toast.msg}
+            </div>
+          )}
+
+          {/* LIVE 종료 확인 모달 */}
+          {closeConfirm&&(
+            <div onClick={()=>setCloseConfirm(null)} style={{position:'fixed',inset:0,zIndex:9998,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+              <div onClick={e=>e.stopPropagation()} style={{background:T.card,border:`1px solid ${T.red}50`,borderRadius:16,padding:20,maxWidth:340,width:'100%'}}>
+                <div style={{color:T.red,fontSize:15,fontWeight:900,marginBottom:10}}>⚠️ 실계좌 포지션 종료</div>
+                <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:6}}>실계좌 포지션을 시장가로 종료합니다. 계속할까요?</div>
+                <div style={{color:T.muted,fontSize:11,marginBottom:16}}>{closeConfirm.p.symbol} · {(closeConfirm.p.side==='SHORT'||(closeConfirm.p.amount||0)<0)?'SHORT':'LONG'} · {closeConfirm.percent}% (reduce-only 시장가)</div>
+                <button onClick={()=>{ const c=closeConfirm; setCloseConfirm(null); execCloseReal(c.p,c.percent); }}
+                  style={{width:'100%',padding:'12px',background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer',marginBottom:8}}>시장가로 종료</button>
+                <button onClick={()=>setCloseConfirm(null)}
+                  style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
+              </div>
+            </div>
+          )}
+
+          {/* TP/SL 편집 바텀시트 */}
+          {tpslModal&&(()=>{
+            const p=tpslModal;
+            const isLong=!(p.side==='SHORT'||(p.amount||0)<0);
+            const cur=p.markPrice||p.entryPrice;
+            const preview=calcTpSl(p,tpInput,slInput,tpslMode);
+            return (
+              <div onClick={()=>setTpslModal(null)} style={{position:'fixed',inset:0,zIndex:9998,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+                <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderTop:`1px solid ${T.border}`,borderTopLeftRadius:18,borderTopRightRadius:18,padding:'18px 18px 28px',width:'100%',maxWidth:480,maxHeight:'85vh',overflowY:'auto'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+                    <span style={{background:(isLong?T.grn:T.red)+'20',color:isLong?T.grn:T.red,fontSize:11,fontWeight:800,padding:'2px 9px',borderRadius:6}}>{p.symbol} {isLong?'LONG':'SHORT'} {p.leverage}x</span>
+                    <button onClick={()=>setTpslModal(null)} style={{background:'none',border:'none',color:T.muted,fontSize:20,cursor:'pointer',lineHeight:1}}>✕</button>
+                  </div>
+                  <div style={{display:'flex',gap:16,fontSize:11,color:T.muted,marginBottom:6,fontFamily:'Inter,monospace'}}>
+                    <span>진입 {p.entryPrice}</span><span>현재 {cur}</span>
+                  </div>
+                  <div style={{fontSize:10,color:T.muted,marginBottom:14}}>현재 설정 — TP {p.tpPrice||'없음'} · SL {p.slPrice||'없음'}</div>
+                  <div style={{display:'flex',gap:8,marginBottom:12}}>
+                    {(['pct','price'] as const).map(m=>(
+                      <button key={m} onClick={()=>setTpslMode(m)} style={{flex:1,padding:'8px',background:tpslMode===m?T.acg:'transparent',color:tpslMode===m?T.acl:T.muted,border:`1px solid ${tpslMode===m?T.acl:T.border}`,borderRadius:8,fontSize:11,fontWeight:700,cursor:'pointer'}}>{m==='pct'?'퍼센트 (%)':'가격 직접'}</button>
+                    ))}
+                  </div>
+                  <div style={{marginBottom:12}}>
+                    <div style={{color:T.grn,fontSize:11,fontWeight:700,marginBottom:6}}>익절 (TP){tpslMode==='pct'?' +%':' 가격'}</div>
+                    <input value={tpInput} onChange={e=>setTpInput(e.target.value.replace(/[^0-9.]/g,''))} inputMode="decimal" placeholder={tpslMode==='pct'?'예: 5 (+5%)':'예: 95000'}
+                      style={{width:'100%',background:T.alt,border:`1px solid ${T.grn}40`,borderRadius:8,padding:'12px',color:T.txt,fontSize:14,outline:'none'}}/>
+                    {tpslMode==='pct'&&<div style={{display:'flex',gap:6,marginTop:6}}>{['3','5','10'].map(v=>(
+                      <button key={v} onClick={()=>setTpInput(v)} style={{flex:1,padding:'6px',background:T.grn+'15',color:T.grn,border:`1px solid ${T.grn}30`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>+{v}%</button>
+                    ))}</div>}
+                    {preview.tpPrice!=null&&<div style={{fontSize:10,color:T.muted,marginTop:5,fontFamily:'Inter,monospace'}}>→ TP 가격 ≈ {Math.round(preview.tpPrice*100)/100}</div>}
+                  </div>
+                  <div style={{marginBottom:16}}>
+                    <div style={{color:T.red,fontSize:11,fontWeight:700,marginBottom:6}}>손절 (SL){tpslMode==='pct'?' -%':' 가격'}</div>
+                    <input value={slInput} onChange={e=>setSlInput(e.target.value.replace(/[^0-9.]/g,''))} inputMode="decimal" placeholder={tpslMode==='pct'?'예: 2 (-2%)':'예: 88000'}
+                      style={{width:'100%',background:T.alt,border:`1px solid ${T.red}40`,borderRadius:8,padding:'12px',color:T.txt,fontSize:14,outline:'none'}}/>
+                    {tpslMode==='pct'&&<div style={{display:'flex',gap:6,marginTop:6}}>{['1','2','5'].map(v=>(
+                      <button key={v} onClick={()=>setSlInput(v)} style={{flex:1,padding:'6px',background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>-{v}%</button>
+                    ))}</div>}
+                    {preview.slPrice!=null&&<div style={{fontSize:10,color:T.muted,marginTop:5,fontFamily:'Inter,monospace'}}>→ SL 가격 ≈ {Math.round(preview.slPrice*100)/100}</div>}
+                  </div>
+                  <button onClick={()=>onTpslSubmit(p)} disabled={tpslBusy}
+                    style={{width:'100%',padding:'13px',background:tpslBusy?T.alt:T.acl,color:tpslBusy?T.muted:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:tpslBusy?'default':'pointer'}}>
+                    {tpslBusy?'등록 중…':'TP/SL 등록'}</button>
+                  <div style={{fontSize:9,color:T.muted,marginTop:8,textAlign:'center'}}>기존 TP/SL 주문은 취소 후 새로 등록됩니다 (replace · MARK_PRICE 기준)</div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* LIVE TP/SL 확인 모달 */}
+          {tpslConfirm&&(
+            <div onClick={()=>setTpslConfirm(null)} style={{position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+              <div onClick={e=>e.stopPropagation()} style={{background:T.card,border:`1px solid ${T.acl}50`,borderRadius:16,padding:20,maxWidth:340,width:'100%'}}>
+                <div style={{color:T.acl,fontSize:15,fontWeight:900,marginBottom:10}}>실계좌 TP/SL 등록</div>
+                <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:6}}>실계좌 TP/SL 주문을 등록합니다. 계속할까요?</div>
+                <div style={{color:T.muted,fontSize:11,marginBottom:16,fontFamily:'Inter,monospace'}}>
+                  {tpslConfirm.p.symbol}
+                  {tpslConfirm.tpPrice!=null?` · TP ${Math.round(tpslConfirm.tpPrice*100)/100}`:''}
+                  {tpslConfirm.slPrice!=null?` · SL ${Math.round(tpslConfirm.slPrice*100)/100}`:''}
+                </div>
+                <button onClick={()=>{ const c=tpslConfirm; setTpslConfirm(null); submitTpsl(c.p,c.tpPrice,c.slPrice); }}
+                  style={{width:'100%',padding:'12px',background:T.acl,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer',marginBottom:8}}>등록</button>
+                <button onClick={()=>setTpslConfirm(null)}
+                  style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
+              </div>
+            </div>
+          )}
+
+          {/* 모의 포지션 (paper store) */}
           {positions.length>0&&(
-            <Card style={{padding:'14px 16px',marginBottom:12,borderLeft:`3px solid ${T.grn}`}}>
-              <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10}}>현재 포지션 ({positions.length})</div>
+            <Card style={{padding:'14px 16px',marginBottom:12,borderLeft:`3px solid ${T.prp}`}}>
+              <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>모의 포지션 ({positions.length})<span style={{background:T.prp+'20',color:T.prp,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>MOCK</span></div>
               {positions.map((p,i)=>{
                 const cur = prices.find(a=>a.id===p.asset)?.p || p.avgPrice;
                 const isShort = p.side === 'short';
@@ -686,10 +1328,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                         <div style={{marginBottom:12}}>
                           {[['현재가',cur],['진입가',p.avgPrice],['청산가', isShort? p.avgPrice*(1+(0.9/lev)) : p.avgPrice*(1-(0.9/lev)) ]].map(([l,v]:any,i)=>(
                             <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',fontSize:11}}>
-                              <span style={{color:T.muted}}>{l}</span>
+                              <span style={{color:T.muted}}>{l}{l==='청산가'&&<span style={{color:T.ylw,fontSize:8,fontWeight:700,marginLeft:5,background:T.ylw+'18',padding:'1px 5px',borderRadius:4}}>추정</span>}</span>
                               <span style={{color:l==='청산가'?T.ylw:T.txt,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>₩{fmt(Math.round(v))}</span>
                             </div>
                           ))}
+                          <div style={{fontSize:9,color:T.muted,marginTop:4,lineHeight:1.4}}>청산가는 근사식 추정값입니다. 실거래(테스트넷/실전)는 거래소 계단식 유지증거금(MMR)을 적용한 정확값이 사용됩니다.</div>
                         </div>
 
                         {tpslTab==='trailing'?(
@@ -849,7 +1492,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
 type StratType='ema_cross'|'rsi_reversal'|'macd_trend'|'breakout'|'scalping'|'swing'|'dca'|'buy_dip'|'funding_rate'|'ai_strategy';
 type StratStatus='running'|'paused'|'stopped'|'error';
 type SignalState='waiting'|'confirmed'|'rejected'|'executed'|'expired';
-type ExecMode='paper'|'simulated'|'real';
+type ExecMode='paper'|'simulated'|'testnet'|'real';
 type OrderStatus='pending'|'processing'|'completed'|'failed'|'canceled';
 
 interface Strategy {

@@ -54,6 +54,7 @@ export default function PortfolioPage({
   onOpenAsset?: (a: any, dest?: string) => void;
 }) {
   const [positions, setPositions] = useState<Position[]>([]);
+  const [acctTab, setAcctTab] = useState('all');
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [toast, setToast] = useState('');
@@ -231,9 +232,23 @@ export default function PortfolioPage({
         </button>
       </div>
 
+      {/* 계좌 분리 탭 */}
+      <div style={{ display:'flex', gap:6, marginBottom:12, overflowX:'auto' }}>
+        {([['all','전체'],['auto','자동매매'],['swing','단타'],['hold','장투']] as [string,string][]).map(([v,l])=>(
+          <button key={v} onClick={()=>setAcctTab(v)} style={{ flex:'1 0 auto', minWidth:70, padding:'9px 8px', background: acctTab===v?T.acc:T.alt, color: acctTab===v?'#fff':T.muted, border:`1px solid ${acctTab===v?T.acc:T.border}`, borderRadius:10, fontSize:12, fontWeight:700, cursor:'pointer', whiteSpace:'nowrap' }}>{l}</button>
+        ))}
+      </div>
+      {acctTab!=='all' && (
+        <div style={{ background:T.alt, borderRadius:10, padding:'10px 13px', marginBottom:10, fontSize:11, color:T.sub, lineHeight:1.5 }}>
+          {acctTab==='auto' && '자동매매 계좌 — 봇이 자동으로 운용하는 자금이에요.'}
+          {acctTab==='swing' && '단타 계좌 — 짧게 사고파는 단기 매매 자금이에요.'}
+          {acctTab==='hold' && '장투 계좌 — 길게 보유하는 장기 투자 자금이에요.'}
+        </div>
+      )}
+
       {/* Total value card */}
       <Card style={{ marginBottom: 10, padding:'16px 18px' }}>
-        <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>총 평가금액</div>
+        <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>{acctTab==='all'?'총 평가금액':acctTab==='auto'?'자동매매 평가금액':acctTab==='swing'?'단타 평가금액':'장투 평가금액'}</div>
         <div style={{ color: T.txt, fontSize: 26, fontWeight: 900, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums', marginBottom: 6 }}>
           {formatKRW(portfolioStats.totalMarket)}
         </div>

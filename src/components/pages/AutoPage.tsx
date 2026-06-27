@@ -103,11 +103,15 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
       {/* Exec mode + global stop */}
       <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
         <div style={{display:'flex',gap:4,flex:1}}>
-          {(['paper','simulated'] as ExecMode[]).map(m=>(
-            <button key={m} onClick={()=>m==='real'?setShowConfirmReal(true):setExecMode(m)} style={{flex:1,padding:'8px',background:execMode===m?T.acg:'transparent',color:execMode===m?T.acl:T.muted,border:`1px solid ${execMode===m?T.acl:T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>
-              {m==='paper'?'모의':m==='simulated'?'시뮬':'⚠️ 실전'}
+          {(['paper','testnet','real'] as ExecMode[]).map(m=>{
+            const c=m==='paper'?T.acl:m==='testnet'?T.ylw:T.red;
+            const on=execMode===m;
+            return (
+            <button key={m} onClick={()=>m==='real'?setShowConfirmReal(true):setExecMode(m)} style={{flex:1,padding:'8px',background:on?c+'22':'transparent',color:on?c:T.muted,border:`1px solid ${on?c:T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>
+              {m==='paper'?'모의':m==='testnet'?'테스트넷':'⚠️ 실전'}
             </button>
-          ))}
+            );
+          })}
         </div>
         <button onClick={()=>globalStop?setGlobalStop(false):handleGlobalStop()} style={{background:globalStop?T.grn+'20':T.red+'20',color:globalStop?T.grn:T.red,border:`1px solid ${globalStop?T.grn:T.red}40`,borderRadius:10,padding:'8px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>
           {globalStop?'▶ 재시작':'⏹ 전체정지'}
@@ -117,6 +121,10 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
       {globalStop&&<div style={{background:T.red+'15',border:`1px solid ${T.red}`,borderRadius:12,padding:'10px 14px',marginBottom:12,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:18}}>🚨</span><div style={{color:T.red,fontWeight:700,fontSize:12}}>전체 긴급 정지 활성화 — 모든 봇이 중단되었습니다</div></div>}
 
       {execMode==='paper'&&<div style={{background:T.prp+'12',border:`1px solid ${T.prp}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontSize:11,fontWeight:700}}>모의 자동매매 모드 — 실제 자금 이동 없음 · 수익 보장 없음</div></div>}
+
+      {execMode==='testnet'&&<div style={{background:T.ylw+'15',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontSize:11,fontWeight:700}}>테스트넷 자동매매 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
+
+      {execMode==='real'&&<div style={{background:T.red+'15',border:`1px solid ${T.red}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 실전 자동매매 — 연결된 거래소로 실제 주문 실행 · 원금 손실 위험</div></div>}
 
       {/* Dashboard metrics */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
@@ -331,7 +339,7 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
                   <div style={{display:'flex',gap:5,alignItems:'center',marginBottom:2,flexWrap:'wrap'}}>
                     <span style={{background:r.side==='long'?T.grn+'15':T.red+'15',color:r.side==='long'?T.grn:T.red,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.side==='long'?'롱':'숏'}</span>
                     <span style={{color:T.txt,fontWeight:700,fontSize:12}}>{r.asset}</span>
-                    <span style={{background:T.prp+'15',color:T.prp,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.execMode==='paper'?'모의':'실전'}</span>
+                    <span style={{background:T.prp+'15',color:T.prp,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.execMode==='paper'?'모의':r.execMode==='testnet'?'테넷':'실전'}</span>
                   </div>
                   <div style={{color:T.muted,fontSize:10}}>{r.stratName}</div>
                   <div style={{color:T.muted,fontSize:9,marginTop:1}}>진입 {cvt(r.entryPrice,'KRW')}{r.exitPrice?` → ${cvt(r.exitPrice,'KRW')}`:' (오픈)'}</div>
@@ -402,7 +410,8 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
           <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.8)',zIndex:200}} onClick={()=>setShowConfirmReal(false)}/>
           <div style={{position:'fixed',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:201,background:T.surf,borderRadius:20,padding:`24px 20px calc(24px + env(safe-area-inset-bottom, 0px))`,width:320,border:`2px solid ${T.red}`}} onClick={e=>e.stopPropagation()}>
             <div style={{color:T.red,fontWeight:800,fontSize:16,marginBottom:8}}>⚠️ 실전 모드 활성화</div>
-            <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:16}}>실전 모드에서는 연결된 거래소 API를 통해 실제 주문이 실행됩니다. 원금 손실 위험이 있습니다.<br/><br/>현재 TRAIGO는 실전 주문 실행 기능을 지원하지 않습니다 (플레이스홀더).</div>
+            <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:16}}>실전 모드에서는 연결된 거래소 API를 통해 실제 주문이 실행됩니다. 원금 손실 위험이 있습니다.<br/><br/>먼저 테스트넷에서 전략을 충분히 검증한 뒤 활성화하세요.</div>
+            <button onClick={()=>{setExecMode('real');setShowConfirmReal(false);}} style={{width:'100%',padding:'12px',background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer',marginBottom:8}}>실전 모드 활성화</button>
             <button onClick={()=>setShowConfirmReal(false)} style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소 (모의 유지)</button>
           </div>
         </>
@@ -837,7 +846,7 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
                       {log.action==='buy'?'매수':'매도'}
                     </span>
                     <span style={{padding:'1px 5px',background:T.alt,color:T.muted,borderRadius:4,fontSize:9,fontWeight:700}}>
-                      {log.mode==='paper'?'모의':'실전'}
+                      {log.mode==='paper'?'모의':log.mode==='testnet'?'테넷':'실전'}
                     </span>
                   </div>
                   <div style={{color:T.muted,fontSize:10,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{log.strategyName}</div>

@@ -22,7 +22,7 @@ interface WebhookPayload {
   stopLoss?:  number;
   takeProfit?:number;
   // Control
-  mode?:      'paper'|'real';
+  mode?:      'paper'|'testnet'|'real';
   strategyId?:string;
   connectionId?:string;
   secret?:    string;
@@ -51,14 +51,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'Invalid JSON' }, { status: 400 });
   }
 
-  // ── Secret validation ──────────────────────────────────────
+  // ── Secret validation (code) — 불일치 시 200 + Signal Dropped (TradingView 재시도 방지) ──
   if (WEBHOOK_SECRET && body.code !== WEBHOOK_SECRET) {
     logAudit({
       userId: body.userId || 'anon', action: 'WEBHOOK_AUTH_FAIL',
-      resource: body.symbol || '?', detail: { ip: req.ip },
+      resource: body.symbol || '?', detail: { ip: req.ip, reason: 'code mismatch' },
       result: 'blocked',
     });
-    return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+    return NextResponse.json({ ok: false, dropped: true, message: 'Signal dropped — code 불일치' }, { status: 200 });
   }
 
   // ── Idempotency key ─────────────────────────────────────────
@@ -129,14 +129,16 @@ export async function POST(req: NextRequest) {
     }, { status: 200 }); // 200 so TradingView doesn't retry
   }
 
-  // ── Real mode: 거래소에 실제 주문 전송 (24시간 무인) ───────────
-  if (mode === 'real') {
+  // ── Real/Testnet mode: 거래소에 실제 주문 전송 (24시간 무인) ───────────
+  // real  → 연결의 is_testnet 플래그를 따름 (라이브 키면 라이브, 테스트 키면 테스트넷)
+  // testnet → 연결 플래그와 무관하게 항상 거래소 테스트넷으로 강제 라우팅
+  if (mode === 'real' || mode === 'testnet') {
     // 보안: 웹훅 시크릿 검증 (아무나 주문 못 넣게)
     const expectedSecret = process.env.WEBHOOK_SECRET || '';
     if (expectedSecret && body.secret !== expectedSecret) {
       entry.status = 'blocked_auth';
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
-      return NextResponse.json({ ok: false, id: webhookId, message: '웹훅 시크릿 불일치 — 인증 실패' }, { status: 401 });
+      return NextResponse.json({ ok: false, dropped: true, id: webhookId, message: 'Signal dropped — 웹훅 시크릿 불일치' }, { status: 200 });
     }
     if (!body.connectionId) {
       entry.status = 'blocked';
@@ -153,42 +155,49 @@ export async function POST(req: NextRequest) {
         .select('*').eq('id', body.connectionId).single();
       if (!conn) throw new Error('거래소 연결을 찾을 수 없음');
       if (conn.has_withdrawal) throw new Error('출금 권한 키는 자동매매 불가');
-      const { decryptSecret } = await import('@/lib/exchanges/crypto');
-      const apiSecret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
-      const apiKey = conn.api_key ?? conn.api_key_encrypted ?? '';
-      const isTestnet = conn.is_testnet !== false;
+      // 킬스위치 가드: active면 신규 진입 차단 (reduce-only 종료는 허용)
+      const { isKillSwitchActive } = await import('@/lib/risk/killSwitch');
+      const ks = await isKillSwitchActive(sb, body.connectionId);
+      if (ks.active && !body.reduceOnly) {
+        entry.status = 'blocked_killswitch';
+        signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+        try {
+          const { sendTelegramAlert } = await import('@/lib/notify/telegram');
+          await sendTelegramAlert({
+            level: 'warning', eventType: 'signal_dropped', exchange: 'Binance', mode: mode === 'testnet' ? 'TESTNET' : 'LIVE', symbol: body.symbol,
+            title: 'Signal Dropped — 킬스위치 발동 중',
+            message: '킬스위치 active 상태라 신규 진입 신호를 무시했습니다.',
+            fields: { Reason: ks.reason || '계좌 보호' },
+          }, sb);
+        } catch {}
+        return NextResponse.json({ ok: false, id: webhookId, blocked: true, dropped: true, message: `🛑 킬스위치 발동 중 — 신규 진입 차단 (${ks.reason || '계좌 보호'})` }, { status: 200 });
+      }
+      const isTestnet = mode === 'testnet' ? true : (conn.is_testnet !== false);
 
       const px = body.price || 0;
       const usdtNotional = (body.amount || body.quantity * px || 0) / 1375;
       const qty = body.quantity || (px > 0 ? usdtNotional / (px / 1375) : 0);
 
-      const result = await placeFuturesOrderSafe(
-        apiKey, apiSecret,
-        {
-          symbol: tradeSymbol,
-          side: (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
-          type: 'MARKET',
-          quantity: Number(qty.toFixed(3)),
-        },
-        isTestnet,
-      );
+      // 거래소 직접 호출 X → jobs 큐에 PLACE_ORDER 적재 (Worker가 유일 실행자)
+      const { enqueueJob } = await import('@/lib/jobs');
+      const q = await enqueueJob(sb, {
+        userId: conn.user_id, connectionId: body.connectionId, action: 'PLACE_ORDER',
+        mode: isTestnet ? 'TESTNET' : 'LIVE', symbol: tradeSymbol,
+        side: (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+        quantity: Number(qty.toFixed(3)),
+        payload: { type: 'MARKET', leverage: body.leverage ?? null, source: 'webhook' },
+        priority: 4,
+      });
 
-      entry.status = result.success ? 'executed' : 'error';
-      (entry as any).orderResult = result;
+      entry.status = q.ok ? 'queued' : 'error';
+      (entry as any).jobId = q.jobId;
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
 
-      // 텔레그램 알림
-      try {
-        const { sendTelegram, fmtEntry, fmtError } = await import('@/lib/notify/telegram');
-        if (result.success) await sendTelegram(fmtEntry({ symbol: tradeSymbol, side: body.side === 'sell' ? '매도' : '매수', price: px, amount: body.amount || 0, leverage: body.leverage, mode: '실전(웹훅)' }));
-        else await sendTelegram(fmtError(`웹훅 주문 실패: ${result.message}`));
-      } catch {}
-
       return NextResponse.json({
-        ok: result.success, id: webhookId, mode: 'real',
-        status: result.success ? 'executed' : 'error',
-        orderId: (result as any).orderId,
-        message: result.success ? '실거래 주문 체결됨' : `주문 실패: ${result.message}`,
+        ok: q.ok, id: webhookId, mode, queued: q.ok, jobId: q.jobId,
+        status: q.ok ? 'queued' : 'error',
+        testnet: isTestnet,
+        message: q.ok ? '신호 접수됨 — Worker가 주문 실행' : `적재 실패: ${q.error}`,
       });
     } catch (e: any) {
       entry.status = 'error';

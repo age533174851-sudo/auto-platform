@@ -25,3 +25,35 @@ export function fmtExit(p: { symbol: string; reason: string; price: number; pnl:
 }
 export function fmtError(msg: string) { return `⚠️ <b>오류</b>\n${msg}`; }
 export function fmtCircuit(reason: string) { return `🛑 <b>서킷브레이커</b>\n${reason}`; }
+
+// ── 구조화 긴급 알림 (Redis 엔진에 위임 — 호환 래퍼) ──────────────
+export type AlertLevel = 'critical' | 'warning' | 'info';
+export interface TelegramAlert {
+  level?: AlertLevel;
+  severity?: AlertLevel;
+  channel?: 'money' | 'system';
+  title: string;
+  eventType: string;
+  message?: string;
+  fields?: Record<string, string | number>;
+  mode?: string;
+  exchange?: string;
+  symbol?: string;
+  dedupKey?: string;
+}
+
+export async function sendTelegramAlert(a: TelegramAlert, sb?: any): Promise<{ ok: boolean; throttled?: boolean; error?: string }> {
+  const { dispatchAlert } = await import('@/lib/notify/alerts');
+  const res = await dispatchAlert({
+    severity: (a.severity || a.level || 'warning'),
+    channel: a.channel,
+    eventType: a.eventType,
+    title: a.title,
+    message: a.message,
+    fields: a.fields,
+    mode: a.mode,
+    exchange: a.exchange,
+    symbol: a.symbol,
+  }, sb);
+  return { ok: res.ok, throttled: res.throttled, error: res.error };
+}
