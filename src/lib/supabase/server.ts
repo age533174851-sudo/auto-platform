@@ -13,6 +13,19 @@ export function getSupabaseAdmin(): SupabaseClient<Database> | null {
   });
 }
 
+/** SUPABASE_SERVICE_ROLE_KEY가 진짜 service_role 키인지 JWT role로 진단.
+ *  anon 키를 잘못 넣으면 RLS에 막히므로, 이를 빨리 잡기 위함. */
+export function serviceRoleKeyRole(): 'service_role' | 'anon' | 'unknown' | 'missing' {
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) return 'missing';
+  try {
+    const payload = JSON.parse(Buffer.from(key.split('.')[1] || '', 'base64').toString('utf8'));
+    if (payload?.role === 'service_role') return 'service_role';
+    if (payload?.role === 'anon') return 'anon';
+    return 'unknown';
+  } catch { return 'unknown'; }
+}
+
 /** Extract Supabase user ID from Bearer JWT in Authorization header. */
 export async function getUserIdFromRequest(
   authHeader: string | null
