@@ -196,6 +196,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
     pushLog('resolved', symbol, 'ghost 포지션 정리', '사용자 삭제');
   }, [pushLog]);
 
+  // toast: 아래 Kill Switch/큐 핸들러들이 의존성으로 참조 → 먼저 선언 (TDZ 방지)
+  const [toast, setToast] = useState<{ msg:string; ok:boolean }|null>(null);
+  const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 3800); }, []);
+
   // ── Daily MDD Kill Switch ──────────────────────────────────────
   const [ksStatus, setKsStatus] = useState<any|null>(null);
   const [ksBusy, setKsBusy] = useState(false);
@@ -291,9 +295,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
 
   // ── 실포지션 종료 (reduce-only) ────────────────────────────────
   const [closeBusy, setCloseBusy] = useState<string|null>(null);      // `${symbol}:${percent}`
-  const [toast, setToast] = useState<{ msg:string; ok:boolean }|null>(null);
   const [closeConfirm, setCloseConfirm] = useState<{ p:any; percent:number }|null>(null);
-  const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 3800); }, []);
   // 큐 작업 상태 폴링 (요청접수→처리중→성공/실패)
   const pollJob = useCallback(async (jobId:string, label:string):Promise<boolean>=>{
     const auth = authHeaderRef.current;
