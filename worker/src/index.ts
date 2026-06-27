@@ -117,6 +117,7 @@ async function processPendingJobs() {
         .update({ status: 'PROCESSING', locked_by: WORKER_ID, locked_until: new Date(Date.now() + 60000).toISOString(), attempts: (job.attempts || 0) + 1, updated_at: new Date().toISOString() })
         .eq('id', job.id).eq('status', 'PENDING').select();
       if (!claimed || claimed.length === 0) continue;  // 다른 워커가 가져감
+      console.log(`[worker] Processing job ${job.id.slice(0,8)} ${job.action} ${job.symbol || ''} (attempt ${(job.attempts||0)+1}/${job.max_attempts||5})`);
 
       const conn = await getConnection(job.connection_id);
       if (!conn) { await finalize(job, false, null, '연결 없음'); continue; }
@@ -183,19 +184,49 @@ async function monitorConnections() {
   }
 }
 
+let tickCount = 0;
 async function tick() {
   const isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4);
   if (!isMain) { await heartbeat(WORKER_ID, 'standby', '다른 워커 활성 — 대기', errorCount); return; }
   await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', 'jobs+monitor', errorCount);
+  tickCount++;
+  if (tickCount === 1 || tickCount % 20 === 0) console.log(`[worker] Polling jobs... (tick #${tickCount}, errors=${errorCount})`);
   await processPendingJobs();
   await monitorConnections();
 }
 
+async function startupChecks() {
+  console.log('════════════════════════════════════════');
+  console.log('  🚀 TRAIGO Worker started');
+  console.log(`  id=${WORKER_ID}  poll=${POLL_SEC}s  redis=${redisAvailable() ? 'ON' : 'OFF(Supabase 락 폴백)'}`);
+  console.log('════════════════════════════════════════');
+
+  // 필수 env 검증 (값은 노출 안 함)
+  const missing: string[] = [];
+  if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (!process.env.EXCHANGE_ENCRYPTION_KEY && !process.env.ENCRYPTION_KEY) missing.push('ENCRYPTION_KEY (또는 EXCHANGE_ENCRYPTION_KEY)');
+  if (missing.length) {
+    console.error('❌ 필수 환경변수 누락:', missing.join(', '));
+    console.error('   Railway → Variables 에서 설정 후 재배포하세요.');
+  }
+
+  // Supabase 연결 확인 (jobs 테이블 조회)
+  try {
+    const { error } = await sb().from('jobs').select('id').limit(1);
+    if (error) console.error('⚠️  Supabase 연결됨 but jobs 조회 실패:', error.message, '— jobs.sql 실행했는지 확인');
+    else console.log('✅ Connected to Supabase (jobs 테이블 확인됨)');
+  } catch (e: any) {
+    console.error('❌ Supabase 연결 실패:', e?.message || e, '— SUPABASE_URL/SERVICE_ROLE_KEY 확인');
+  }
+}
+
 async function main() {
-  console.log(`[worker] TRAIGO worker 시작 — id=${WORKER_ID} poll=${POLL_SEC}s redis=${redisAvailable()}`);
+  await startupChecks();
   let stopping = false;
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig as any, async () => {
     if (stopping) return; stopping = true;
+    console.log('[worker] 종료 신호 수신 — heartbeat stopped 기록 후 종료');
     try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount); await releaseLock('main', WORKER_ID); } catch {}
     process.exit(0);
   });
