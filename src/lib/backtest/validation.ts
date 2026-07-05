@@ -69,6 +69,21 @@ export function validateBacktest(r: BacktestResult): ValidationResult {
     fatal.push(`⚠️ 모순된 결과: 손익비 ${r.profitFactor.toFixed(2)}(손실형)인데 수익률 +${r.totalReturn.toFixed(0)}% — 포지션 크기 계산 의심`);
   }
 
+  // ── 물리적으로 불가능한 값 = 계산 오류 (하드 자동 실패) ──
+  const loseN = (r as any).loseTrades ?? 0;
+  if (r.profitFactor > 50 && r.profitFactor < 900 && loseN > 0) {
+    fatal.push(`⚠️ 손익비 비정상 (${r.profitFactor.toFixed(1)}) — 실제 전략에서 나올 수 없는 값, 계산 오류 의심`);
+  }
+  if (r.sharpeRatio > 10) {
+    fatal.push(`⚠️ 샤프 지수 비정상 (${r.sharpeRatio.toFixed(1)}) — 10 초과는 계산 오류/과최적화. 실전 샤프는 통상 3 이하`);
+  }
+  if (r.maxDrawdown > 100) {
+    fatal.push(`⚠️ 최대낙폭 ${r.maxDrawdown.toFixed(0)}% — 자산이 마이너스가 됨(불가능). 자산 계산 로직 오류`);
+  }
+  if (!isFinite(r.totalReturn) || !isFinite(r.profitFactor) || !isFinite(r.sharpeRatio)) {
+    fatal.push('⚠️ 지표에 비정상 값(NaN/Infinity) — 계산 오류');
+  }
+
   // ── 종합 등급 ──
   let grade: Grade, gradeLabel: string, gradeColor: string, recommendation: string;
   const canGoLive = fatal.length === 0 && score >= 55;

@@ -99,6 +99,8 @@ export async function POST(req: NextRequest) {
       avgLossPct:     result.avgLossPct,
       profitFactor:   result.profitFactor,
       sharpe:         result.sharpe,
+      avgTradePct:    result.avgTradePct,
+      sanityWarning:  result.sanityWarning,
     },
     equityCurve: sampledEquity,
     trades: result.trades.slice(-50), // last 50

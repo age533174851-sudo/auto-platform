@@ -356,6 +356,12 @@ export default function BacktestPage() {
           {/* Summary card */}
           <Card style={{ marginBottom: 10,
             borderLeft:`3px solid ${result.summary.totalReturnPct >= 0 ? T.grn : T.red}` }}>
+            {(result.summary as any).sanityWarning && (
+              <div style={{ background: T.red+'15', border:`1px solid ${T.red}40`, borderRadius: 8, padding:'8px 10px', marginBottom: 10 }}>
+                <div style={{ color: T.red, fontSize: 11, fontWeight: 800 }}>⚠️ {(result.summary as any).sanityWarning}</div>
+                <div style={{ color: T.muted, fontSize: 9, marginTop: 3 }}>이 결과는 신뢰할 수 없습니다. 레버리지·수량·기간 설정을 확인하세요.</div>
+              </div>
+            )}
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline',
               marginBottom: 12 }}>
               <span style={{ color: T.muted, fontSize: 11 }}>총 수익률</span>

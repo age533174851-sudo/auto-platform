@@ -18,6 +18,7 @@ export interface BacktestConfig {
   initialCash:  number;
   feeRate:      number;     // 0.001 = 0.1%
   leverage?:    number;     // 1 = no leverage
+  positionPct?: number;     // 증거금으로 쓸 balance 비율 (0~1, 기본 1=전액). risk_percent 개념
   startTs?:     number;
   endTs?:       number;
   // Strategy params
@@ -42,6 +43,7 @@ export interface Trade {
   value:   number;
   fee:     number;
   pnl?:    number;
+  netPnL?: number;
   pnlPct?: number;
   reason:  string;
 }
@@ -64,6 +66,8 @@ export interface BacktestResult {
   avgLossPct:    number;
   profitFactor:  number;
   sharpe:        number;
+  avgTradePct?:  number;
+  sanityWarning?: string | null;   // 비현실적 결과 자동 감지
 }
 
 /* ─── Indicators ─────────────────────────────────────────── */
@@ -172,12 +176,15 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   const equityCurve: EquityPoint[] = [];
 
   const fee   = cfg.feeRate ?? 0.001;
-  let cash    = cfg.initialCash;
-  let position = 0;       // # of units held
+  let cash    = cfg.initialCash;      // ★ balance = 현금성 총자산(equity). 진입 시 변경 안 함, 청산 시 netPnL만 반영
+  let position = 0;       // # of units held (레버리지 반영된 수량)
   let entryPrice = 0;
+  let entryFeePaid = 0;   // 진입 시 낸 수수료 (청산 netPnL에서 차감)
+  let investedMargin = 0; // 현재 포지션에 투입된 증거금 누계 (DCA 한도용)
   let peakEquity = cfg.initialCash;
   let maxDrawdown = 0;
   const lev = Math.max(1, cfg.leverage ?? 1);
+  const positionPct = Math.min(1, Math.max(0.01, cfg.positionPct ?? 1));  // 증거금 비율
 
   /* Pre-compute indicators */
   const emaF = ema(closes, cfg.emaFast ?? 12);
@@ -247,49 +254,46 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
       }
     }
 
-    /* Execute */
+    /* Execute — equity 모델: 진입은 balance 불변, 청산 시에만 netPnL 반영 */
     if (signal === 'buy' && position === 0) {
-      const cashToUse = cfg.strategy === 'dca' ? Math.min(dcaAmount, cash) : cash;
-      const qty = (cashToUse * lev) / price;
-      const f = qty * price * fee;
-      if (cashToUse - f > 0) {
-        position = qty;
-        entryPrice = price;
-        cash -= cashToUse;
-        trades.push({
-          side: 'buy', time: candle.t, price, qty, value: cashToUse,
-          fee: f, reason,
-        });
-      }
-    } else if (signal === 'buy' && cfg.strategy === 'dca' && cash >= dcaAmount) {
-      // DCA accumulates
-      const qty = dcaAmount / price;
-      const f = qty * price * fee;
+      const margin   = cash * positionPct;        // 증거금 = balance × 비율
+      const notional = margin * lev;              // 명목 규모 (= 증거금 × 레버리지)
+      const qty      = notional / price;
+      const f        = notional * fee;            // 진입 수수료 (명목 기준)
+      position = qty;
+      entryPrice = price;
+      entryFeePaid = f;
+      investedMargin = margin;
+      // ★ balance(cash) 변경 없음
+      trades.push({ side: 'buy', time: candle.t, price, qty, value: notional, fee: f, reason });
+    } else if (signal === 'buy' && cfg.strategy === 'dca' && investedMargin + dcaAmount <= cash) {
+      // DCA 누적 (증거금 누계가 balance를 넘지 않는 선까지)
+      const notional = dcaAmount * lev;
+      const qty = notional / price;
+      const f = notional * fee;
       const newTotal = position + qty;
-      entryPrice = (entryPrice * position + price * qty) / newTotal;
+      entryPrice = position > 0 ? (entryPrice * position + price * qty) / newTotal : price;
       position = newTotal;
-      cash -= dcaAmount;
-      trades.push({
-        side: 'buy', time: candle.t, price, qty, value: dcaAmount,
-        fee: f, reason,
-      });
+      entryFeePaid += f;
+      investedMargin += dcaAmount;
+      // ★ balance 변경 없음
+      trades.push({ side: 'buy', time: candle.t, price, qty, value: notional, fee: f, reason });
     } else if (signal === 'sell' && position > 0) {
-      const value = position * price;
-      const f = value * fee;
-      const proceeds = value - f;
-      const pnl = proceeds - position * entryPrice;
+      const exitFee = position * price * fee;
+      const grossPnL = (price - entryPrice) * position;            // 수량은 이미 레버리지 반영
+      const netPnL = grossPnL - entryFeePaid - exitFee;            // 수수료 차감
       const pnlPct = entryPrice > 0 ? ((price - entryPrice) / entryPrice) * 100 * lev : 0;
-      cash += proceeds;
+      cash += netPnL;                                              // ★ 청산 시에만 netPnL 반영
       trades.push({
-        side: 'sell', time: candle.t, price, qty: position, value: proceeds,
-        fee: f, pnl, pnlPct, reason,
+        side: 'sell', time: candle.t, price, qty: position, value: position * price,
+        fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason,
       });
-      position = 0;
-      entryPrice = 0;
+      position = 0; entryPrice = 0; entryFeePaid = 0; investedMargin = 0;
     }
 
-    /* Equity tracking */
-    const equity = cash + position * price;
+    /* Equity tracking — balance + 미실현손익 (mark-to-market) */
+    const unrealized = position > 0 ? (price - entryPrice) * position : 0;
+    const equity = cash + unrealized;
     equityCurve.push({ t: candle.t, equity });
     if (equity > peakEquity) peakEquity = equity;
     const dd = peakEquity > 0 ? ((peakEquity - equity) / peakEquity) * 100 : 0;
@@ -299,15 +303,14 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   /* Close open position at last price */
   if (position > 0) {
     const last = safeCandles[safeCandles.length - 1];
-    const value = position * last.c;
-    const f = value * fee;
-    const proceeds = value - f;
-    const pnl = proceeds - position * entryPrice;
+    const exitFee = position * last.c * fee;
+    const grossPnL = (last.c - entryPrice) * position;
+    const netPnL = grossPnL - entryFeePaid - exitFee;
     const pnlPct = entryPrice > 0 ? ((last.c - entryPrice) / entryPrice) * 100 * lev : 0;
-    cash += proceeds;
+    cash += netPnL;
     trades.push({
-      side: 'sell', time: last.t, price: last.c, qty: position, value: proceeds,
-      fee: f, pnl, pnlPct, reason: '백테스트 종료 청산',
+      side: 'sell', time: last.t, price: last.c, qty: position, value: position * last.c,
+      fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason: '백테스트 종료 청산',
     });
     position = 0;
   }
@@ -338,6 +341,16 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   const stdev = Math.sqrt(variance);
   const sharpe = stdev > 0 ? (avgRet / stdev) * Math.sqrt(252) : 0;
 
+  // 평균 거래 수익률 (거래당 pnlPct 평균)
+  const avgTradePct = completed.length > 0
+    ? completed.reduce((s, t) => s + (t.pnlPct ?? 0), 0) / completed.length : 0;
+
+  // 자동 검증 — 비현실적 결과 감지
+  let sanityWarning: string | null = null;
+  if (!isFinite(finalEquity) || finalEquity <= 0) sanityWarning = '자산 계산 오류 (비정상 값)';
+  else if (Math.abs(totalReturnPct) > 1000) sanityWarning = `비현실적 수익률 (${totalReturnPct.toFixed(0)}%) — 계산 오류 또는 과최적화 의심`;
+  else if (finalEquity > cfg.initialCash * 50) sanityWarning = '최종 자산이 초기 대비 50배 초과 — 계산 오류 의심';
+
   return {
     config: cfg,
     candleCount: safeCandles.length,
@@ -354,6 +367,8 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     avgLossPct,
     profitFactor,
     sharpe,
+    avgTradePct,
+    sanityWarning,
   };
 }
 

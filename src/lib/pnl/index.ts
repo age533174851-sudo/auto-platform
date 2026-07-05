@@ -2,7 +2,7 @@
 // TRAIGO P&L Engine — Real Net Profit Calculator
 // Integrates: fees + funding + slippage
 // ─────────────────────────────────────────────────────────────
-import { calcRoundTripFee, UserFeeConfig } from '../fees';
+import { UserFeeConfig } from '../fees';
 import { calcFundingCost, FundingCostParams } from '../funding';
 import { calcSlippage, SlippageParams } from '../slippage';
 
@@ -66,18 +66,18 @@ export function calcTradePnL(p: TradePnLParams): TradePnLResult {
   const grossPnL = rawMove * p.quantity;
   const grossPct = entryValue > 0 ? rawMove / p.entryPrice : 0;
 
-  // 2. Fees
-  const fees = calcRoundTripFee(
-    entryValue, exitValue,
-    { ...p.feeConfig, marketType: p.isFutures ? 'futures' : 'spot' }
-  );
-  const feesPct = entryValue > 0 ? fees.totalFee / entryValue : 0;
+  // 2. Fees (수수료만 — 슬리피지는 3번에서 별도 계산하므로 중복 금지)
+  const takerRate = p.feeConfig.takerRate ?? 0.001;
+  const entryFee  = entryValue * takerRate;
+  const exitFee   = exitValue  * takerRate;
+  const totalFee  = entryFee + exitFee;
+  const feesPct   = entryValue > 0 ? totalFee / entryValue : 0;
 
   // 3. Slippage
   const slipParams: Partial<SlippageParams> = {
     dailyVolume: p.dailyVolume,
     assetType:   p.dailyVolume > 1e9 ? 'major' : p.dailyVolume > 1e8 ? 'mid' : 'small',
-    exchange:    p.feeConfig.exchange,
+    exchange:    (p.feeConfig as any).exchangeId,
   };
   const entrySlip = calcSlippage({ ...slipParams, orderSize: entryValue } as SlippageParams);
   const exitSlip  = calcSlippage({ ...slipParams, orderSize: exitValue  } as SlippageParams);
@@ -101,7 +101,7 @@ export function calcTradePnL(p: TradePnLParams): TradePnLResult {
   }
 
   // 5. Totals
-  const totalCosts = fees.totalFee + totalSlip + fundingCost;
+  const totalCosts = totalFee + totalSlip + fundingCost;
   const netPnL     = grossPnL - totalCosts;
   const netPct     = entryValue > 0 ? netPnL / entryValue : 0;
   const netLevered = marginUsed  > 0 ? netPnL / marginUsed : 0;
@@ -113,14 +113,14 @@ export function calcTradePnL(p: TradePnLParams): TradePnLResult {
   if (netPnL < 0 && grossPnL > 0) {
     warnings.push(`수수료/슬리피지로 인해 수익이 손실로 전환됨`);
   }
-  if (fees.totalFee > Math.abs(grossPnL) * 0.3) {
+  if (totalFee > Math.abs(grossPnL) * 0.3) {
     warnings.push(`수수료가 총 수익의 30% 이상`);
   }
 
   return {
     grossPnL, grossPnLPct: grossPct,
-    entryFee: fees.entryFee, exitFee: fees.exitFee,
-    totalFees: fees.totalFee, feesPct,
+    entryFee, exitFee,
+    totalFees: totalFee, feesPct,
     entrySlippage: entrySlip.amount, exitSlippage: exitSlip.amount, totalSlippage: totalSlip,
     fundingCost, fundingPayments,
     totalCosts,
@@ -147,13 +147,12 @@ export function calcMinViableProfit(
   fundingPct:       number;
   slippagePct:      number;
 } {
-  const fees      = calcRoundTripFee(entryValue, entryValue, feeConfig);
-  const feesPct   = fees.totalFee / entryValue;
+  const feesPct   = (feeConfig.takerRate ?? 0.001) * 2;   // 왕복 수수료 비율 (진입+청산)
 
   const fc        = calcFundingCost({ positionValue: entryValue, fundingRate, intervalHours: 8, holdingHours, isLong: true });
   const fundingPct = fc.totalCost / entryValue;
 
-  const slip      = calcSlippage({ orderSize: entryValue, dailyVolume, assetType: dailyVolume > 1e9 ? 'major' : 'mid', exchange: feeConfig.exchange });
+  const slip      = calcSlippage({ orderSize: entryValue, dailyVolume, assetType: dailyVolume > 1e9 ? 'major' : 'mid', exchange: (feeConfig as any).exchangeId });
   const slipPct   = slip.rate * 2; // entry + exit
 
   const totalCostsPct = feesPct + Math.abs(fundingPct) + slipPct;
@@ -188,14 +187,15 @@ export function applyBacktestCosts(
   const entryValue = trade.entryPrice * trade.quantity;
   const exitValue  = trade.exitPrice  * trade.quantity;
 
-  // Fees
-  const fees = calcRoundTripFee(entryValue, exitValue, cfg.feeConfig);
+  // Fees (진입+청산 수수료)
+  const taker = cfg.feeConfig.takerRate ?? 0.001;
+  const feeTotal = entryValue * taker + exitValue * taker;
 
   // Slippage (if enabled)
   let slipTotal = 0;
   if (cfg.applySlippage) {
-    const es = calcSlippage({ orderSize: entryValue, dailyVolume: cfg.dailyVolume, assetType: 'mid', exchange: cfg.feeConfig.exchange });
-    const xs = calcSlippage({ orderSize: exitValue,  dailyVolume: cfg.dailyVolume, assetType: 'mid', exchange: cfg.feeConfig.exchange });
+    const es = calcSlippage({ orderSize: entryValue, dailyVolume: cfg.dailyVolume, assetType: 'mid', exchange: (cfg.feeConfig as any).exchangeId });
+    const xs = calcSlippage({ orderSize: exitValue,  dailyVolume: cfg.dailyVolume, assetType: 'mid', exchange: (cfg.feeConfig as any).exchangeId });
     slipTotal = es.amount + xs.amount;
   }
 
@@ -210,10 +210,10 @@ export function applyBacktestCosts(
 
   const rawMove  = trade.isLong ? (trade.exitPrice - trade.entryPrice) : (trade.entryPrice - trade.exitPrice);
   const grossPnL = rawMove * trade.quantity;
-  const totalCosts = fees.totalFee + slipTotal + fundingTotal;
+  const totalCosts = feeTotal + slipTotal + fundingTotal;
   const netPnL = grossPnL - totalCosts;
 
-  return { netPnL, grossPnL, totalCosts, feeTotal: fees.totalFee, slipTotal, fundingTotal };
+  return { netPnL, grossPnL, totalCosts, feeTotal, slipTotal, fundingTotal };
 }
 
 // ── Formatters ────────────────────────────────────────────────
