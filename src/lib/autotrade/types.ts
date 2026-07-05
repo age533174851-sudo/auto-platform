@@ -43,4 +43,7 @@ export interface ExecutionLog {
   filledQuantity?: number;
   // 거부 사유
   reason?:      string;
+  // 귀속(attribution) — 성적표/프로필 분리용
+  aiSource?:    string;    // 'claude' | 'gpt' | 'gemini' | 'grok' | 'rule'
+  profileId?:   string;    // 'SCALP_HIGH_LEV' | 'SWING_LOW_LEV'
 }

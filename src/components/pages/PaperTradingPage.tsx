@@ -1,6 +1,8 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { T } from '@/lib/constants';
+import MockAutoTrade from '@/components/MockAutoTrade';
+import StrategyProfilesPanel from '@/components/StrategyProfilesPanel';
 import { Card, Logo } from './SharedUI';
 import { safeNumber, formatKRW, safePercent } from '@/lib/format';
 import { ASSETS } from '@/data/assets';
@@ -108,6 +110,12 @@ export default function PaperTradingPage({
           {toast}
         </div>
       )}
+
+      {/* MOCK 자동매매 패널 — 앱 내부 완결형 (거래소/Worker 무관) */}
+      <MockAutoTrade />
+
+      {/* 전략 프로필 (고위험 단타 / 저위험 스윙 분리 운용) */}
+      <StrategyProfilesPanel />
 
       {/* Header */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 14 }}>
