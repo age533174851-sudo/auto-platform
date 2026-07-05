@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import MockAutoTrade from '@/components/MockAutoTrade';
 import StrategyProfilesPanel from '@/components/StrategyProfilesPanel';
+import { notify } from '@/lib/notify/center';
 import { Card, Logo } from './SharedUI';
 import { safeNumber, formatKRW, safePercent } from '@/lib/format';
 import { ASSETS } from '@/data/assets';
@@ -29,7 +30,10 @@ export default function PaperTradingPage({
   useEffect(() => { setAccount(loadAccount()); }, []);
 
   const showToast = useCallback((msg: string) => {
-    setToast(msg); setTimeout(() => setToast(''), 2500);
+    const clean = msg.replace(/^[✅❌⏳⚠️]\s*/, '');
+    const kind = /실패|오류|부족/.test(clean) ? 'error' : 'info';
+    notify(kind as any, clean);
+    void setToast;
   }, []);
 
   /* Price lookup */
@@ -70,22 +74,41 @@ export default function PaperTradingPage({
   const submitOrder = useCallback(() => {
     if (!account || !selected) return;
     const curPrice = priceLookup(selected.id) || safeNumber(selected.p, 0);
-    if (curPrice <= 0) { showToast('현재가를 알 수 없습니다'); return; }
+    if (curPrice <= 0) { notify('error', '주문 실패', '현재가를 알 수 없습니다'); return; }
     const q = safeNumber(qty, 0);
-    if (q <= 0) { showToast('수량을 입력하세요'); return; }
+    if (q <= 0) { notify('error', '주문 실패', '수량을 입력하세요'); return; }
+
+    // 포지션 인식: 매도 시 보유 포지션이 있으면 '청산', 없으면 일반 매도
+    const posBefore = (account.positions || []).find(p => p.symbol === selected.id);
+    const entryPx = posBefore?.avgPrice;
+    const nameKr = selected.nameKr || selected.id;
 
     const result = placeOrder(account, {
-      symbol: selected.id, name: selected.nameKr || selected.id,
+      symbol: selected.id, name: nameKr,
       side, price: curPrice, qty: q,
     });
     if (result.ok && result.account) {
       setAccount(result.account);
       setQty(''); setSelected(null); setSearch('');
-      showToast(`✅ ${side === 'buy' ? '매수' : '매도'} 체결 (${q.toLocaleString()} @ ${formatKRW(curPrice)})`);
+      if (side === 'buy') {
+        notify('buy', '모의 매수 체결', `${nameKr} · ${q.toLocaleString()} @ ${formatKRW(curPrice)}`);
+      } else {
+        // 매도 = 보유 청산. 실현손익/수익률/진입가/청산가 표시
+        const o: any = result.order || {};
+        const realized = safeNumber(o.realized, 0);
+        const realizedPct = safeNumber(o.realizedPct, 0);
+        const closing = entryPx != null;
+        notify(
+          'sell',
+          closing ? '모의 포지션 청산' : '모의 매도 체결',
+          `${nameKr} · 실현손익 ${realized >= 0 ? '+' : ''}₩${Math.round(realized).toLocaleString('ko-KR')} · 수익률 ${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%` +
+          (closing ? ` · 진입 ${formatKRW(entryPx!)} → 청산 ${formatKRW(curPrice)}` : ''),
+        );
+      }
     } else {
-      showToast(`❌ ${result.error || '주문 실패'}`);
+      notify('error', '주문 실패', result.error || '알 수 없는 오류');
     }
-  }, [account, selected, qty, side, priceLookup, showToast]);
+  }, [account, selected, qty, side, priceLookup]);
 
   const handleReset = useCallback(() => {
     if (!confirm('가상 계좌를 초기화하시겠습니까? (보유 종목·매매 기록 모두 삭제)')) return;
