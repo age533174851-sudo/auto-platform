@@ -70,6 +70,32 @@ export default function PaperTradingPage({
     ).slice(0, 6);
   }, [search, sourceAssets]);
 
+  /* 보유 종목 원탭 청산 — 실현손익/보유시간/이유 담은 풍부한 알림 */
+  const closeHolding = useCallback((p: any) => {
+    if (!account) return;
+    const cur = priceLookup(p.symbol) ?? p.avgPrice;
+    if (cur <= 0) { notify('error', '청산 실패', '현재가를 알 수 없습니다'); return; }
+    const result = placeOrder(account, { symbol: p.symbol, name: p.name, side: 'sell', price: cur, qty: p.qty });
+    if (result.ok && result.account) {
+      setAccount(result.account);
+      const o: any = result.order || {};
+      const realized = safeNumber(o.realized, 0);
+      const realizedPct = safeNumber(o.realizedPct, 0);
+      const win = realized >= 0;
+      // 보유시간
+      const ms = p.openedAt ? Date.now() - p.openedAt : 0;
+      const mins = Math.floor(ms / 60000);
+      const hold = mins >= 60 ? `${Math.floor(mins/60)}시간 ${mins%60}분` : `${mins}분`;
+      notify(
+        win ? 'tp' : 'sl',
+        win ? '모의 익절 청산' : '모의 손절 청산',
+        `${p.name} · 평단 ${formatKRW(p.avgPrice)} → 청산 ${formatKRW(cur)}\n실현손익 ${win ? '+' : ''}₩${Math.round(realized).toLocaleString('ko-KR')} (${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%) · 보유 ${hold}`,
+      );
+    } else {
+      notify('error', '청산 실패', result.error || '알 수 없는 오류');
+    }
+  }, [account, priceLookup]);
+
   /* Order submit */
   const submitOrder = useCallback(() => {
     if (!account || !selected) return;
@@ -302,14 +328,21 @@ export default function PaperTradingPage({
                     {p.qty.toLocaleString('en-US', { maximumFractionDigits: 6 })} @ {formatKRW(p.avgPrice)}
                   </div>
                 </div>
-                <div style={{ textAlign:'right' }}>
-                  <div style={{ color: T.txt, fontSize: 12, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                    {formatKRW(value)}
+                <div style={{ textAlign:'right', display:'flex', alignItems:'center', gap: 10 }}>
+                  <div>
+                    <div style={{ color: T.txt, fontSize: 12, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
+                      {formatKRW(value)}
+                    </div>
+                    <div style={{ color: pnl >= 0 ? T.grn : T.red,
+                      fontSize: 10, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
+                      {pnl >= 0 ? '+' : ''}{formatKRW(pnl)} ({safePercent(pnlPct)})
+                    </div>
                   </div>
-                  <div style={{ color: pnl >= 0 ? T.grn : T.red,
-                    fontSize: 10, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                    {pnl >= 0 ? '+' : ''}{formatKRW(pnl)} ({safePercent(pnlPct)})
-                  </div>
+                  <button type="button" onClick={() => closeHolding(p)}
+                    style={{ padding:'7px 12px', minHeight: 36, background: T.red, color:'#fff',
+                      border:'none', borderRadius: 8, fontSize: 11, fontWeight: 800, cursor:'pointer', flexShrink: 0 }}>
+                    청산
+                  </button>
                 </div>
               </div>
             );
