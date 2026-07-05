@@ -39,6 +39,8 @@ const MOCK_ACCOUNTS:ConnectedAccount[] = [
 
 function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
   const [tab,setTab]=useState<'accounts'|'connect'|'bulk'|'safety'>('accounts');
+  const [toast,setToast]=useState<{msg:string;ok:boolean}|null>(null);
+  const showToast=useCallback((msg:string,ok:boolean)=>{setToast({msg,ok});setTimeout(()=>setToast(null),3500);},[]);
   const [accounts,setAccounts]=useState<ConnectedAccount[]>(MOCK_ACCOUNTS);
   const [selAccs,setSelAccs]=useState<string[]>([]);
   const [connectStep,setConnectStep]=useState(0);
@@ -65,6 +67,13 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
 
   return (
     <div>
+      {toast&&(
+        <div style={{position:'fixed',left:'50%',bottom:24,transform:'translateX(-50%)',zIndex:9999,maxWidth:'90%',
+          background:toast.ok?T.grn:T.red,color:'#fff',padding:'11px 18px',borderRadius:10,fontSize:12,fontWeight:700,
+          boxShadow:'0 6px 24px rgba(0,0,0,0.4)',whiteSpace:'pre-line',textAlign:'center'}}>
+          {toast.ok?'✅ ':'❌ '}{toast.msg}
+        </div>
+      )}
       {/* Global emergency stop banner */}
       {globalStop&&<div style={{background:T.red+'25',border:`1px solid ${T.red}`,borderRadius:12,padding:'12px 14px',marginBottom:14,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:20}}>🚨</span><div><div style={{color:T.red,fontWeight:800}}>전체 긴급 정지 활성화</div><div style={{color:T.sub,fontSize:11}}>모든 자동매매가 중단되었습니다. 수동 매매는 가능합니다.</div></div><button onClick={()=>setGlobalStop(false)} style={{marginLeft:'auto',background:T.red,color:'#fff',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>해제</button></div>}
 
@@ -325,7 +334,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
                 <div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 모의매매 전용 — 실제 자금이 이동하지 않습니다</div>
               </div>
               <button type="button"
-                onClick={() => alert(`${(bulkOrder.selectedAccounts||[]).length}개 계좌에 모의 매수가 실행되었습니다 (실제 자금 이동 없음)`)}
+                onClick={() => showToast(`${(bulkOrder.selectedAccounts||[]).length}개 계좌 모의 매수 체결 · 실제 자금 이동 없음`, true)}
                 style={{width:'100%',padding:'14px',minHeight:50,background:`linear-gradient(135deg,${T.grn},#059669)`,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:'pointer',marginTop:12}}>
                 [{(bulkOrder.selectedAccounts||[]).length}개 계좌] 모의 매수 실행
               </button>

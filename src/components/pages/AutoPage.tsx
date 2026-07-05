@@ -4,20 +4,21 @@ import { T, CURRENCIES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, gS, sS, uid } from '@/lib/utils';
 import type { Asset } from '@/types';
 import { Card } from './SharedUI';
+import AssetLogo from '../AssetLogo';
 import { loadSettings as loadRiskSettings, MODE_LABEL } from '@/lib/risk/store';
 import { Shield, Edit3, ChevronRight } from 'lucide-react';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
-  ema_cross:     {label:'EMA 크로스',      icon:'',color:'#3B82F6',desc:'EMA20/60 골든·데드 크로스 추세 추종'},
-  rsi_reversal:  {label:'RSI 반전',        icon:'',color:'#7C3AED',desc:'RSI 과매수/과매도 반등 전략'},
-  macd_trend:    {label:'MACD 추세',       icon:'',color:'#10B981',desc:'MACD 히스토그램 추세 추종'},
-  breakout:      {label:'브레이크아웃',    icon:'',color:'#F59E0B',desc:'볼린저밴드 / 고저 돌파 전략'},
-  scalping:      {label:'스캘핑',          icon:'',color:'#EF4444',desc:'단기 소폭 수익 반복 전략'},
-  swing:         {label:'스윙',            icon:'',color:'#0891B2',desc:'2~7일 스윙 포지션 전략'},
-  dca:           {label:'DCA 적립',        icon:'',color:'#D97706',desc:'정기 분할 매수 전략'},
-  buy_dip:       {label:'급락 매수',       icon:'',color:'#059669',desc:'급락 시 분할 매수 전략'},
-  funding_rate:  {label:'펀딩비 전략',     icon:'',color:'#F59E0B',desc:'펀딩비 과열 시 롱/숏 비용 구조 활용'},
-  ai_strategy:   {label:'AI 전략',         icon:'',color:'#8B5CF6',desc:'시장 국면 AI 신호 기반 자동매매'},
+  ema_cross:     {label:'EMA 크로스',      icon:'📈',color:'#3B82F6',desc:'EMA20/60 골든·데드 크로스 추세 추종'},
+  rsi_reversal:  {label:'RSI 반전',        icon:'🔄',color:'#7C3AED',desc:'RSI 과매수/과매도 반등 전략'},
+  macd_trend:    {label:'MACD 추세',       icon:'📈',color:'#10B981',desc:'MACD 히스토그램 추세 추종'},
+  breakout:      {label:'브레이크아웃',    icon:'🚀',color:'#F59E0B',desc:'볼린저밴드 / 고저 돌파 전략'},
+  scalping:      {label:'스캘핑',          icon:'⚡',color:'#EF4444',desc:'단기 소폭 수익 반복 전략'},
+  swing:         {label:'스윙',            icon:'🌊',color:'#0891B2',desc:'2~7일 스윙 포지션 전략'},
+  dca:           {label:'DCA 적립',        icon:'💰',color:'#D97706',desc:'정기 분할 매수 전략'},
+  buy_dip:       {label:'급락 매수',       icon:'💧',color:'#059669',desc:'급락 시 분할 매수 전략'},
+  funding_rate:  {label:'펀딩비 전략',     icon:'💸',color:'#F59E0B',desc:'펀딩비 과열 시 롱/숏 비용 구조 활용'},
+  ai_strategy:   {label:'AI 전략',         icon:'🤖',color:'#8B5CF6',desc:'시장 국면 AI 신호 기반 자동매매'},
 };
 
 const INITIAL_STRATS:Strategy[] = [
@@ -149,11 +150,14 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
           {(Array.isArray(strats)?strats:[]).map(s=>{
             const si=STRAT_INFO[s.type];
             return (
-              <Card key={s.id} style={{padding:'14px',marginBottom:10,border:`1px solid ${statusColor[s.status]}20`}} onClick={()=>setSelStrat(selStrat?.id===s.id?null:s)}>
+              <Card key={s.id} style={{padding:'14px',marginBottom:10,border:`1px solid ${statusColor[s.status]}20`,borderLeft:`4px solid ${si.color}`}} onClick={()=>setSelStrat(selStrat?.id===s.id?null:s)}>
                 {/* Header */}
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
                   <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                    <div style={{width:38,height:38,borderRadius:10,background:`${si.color}20`,border:`1px solid ${si.color}40`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,flexShrink:0}}>{si.icon}</div>
+                    <div style={{position:'relative',width:38,height:38,flexShrink:0}}>
+                      <AssetLogo ticker={s.asset} name={s.assetNameKr} size={38} />
+                      <div style={{position:'absolute',right:-4,bottom:-4,width:20,height:20,borderRadius:'50%',background:si.color,border:`2px solid ${T.bg||'#0B1220'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11}}>{si.icon}</div>
+                    </div>
                     <div>
                       <div style={{display:'flex',gap:5,alignItems:'center',flexWrap:'wrap'}}>
                         <span style={{color:T.txt,fontWeight:700,fontSize:13}}>{s.name}</span>

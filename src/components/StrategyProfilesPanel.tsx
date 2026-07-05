@@ -4,6 +4,7 @@
 // (PnL·MDD·일손실·킬스위치)를 독립 추적. 각 프로필 성적표(표본수 n 포함) 표시.
 import React, { useState, useCallback } from 'react';
 import { T } from '@/lib/constants';
+import { notify } from '@/lib/notify/center';
 import { listProfiles, type StrategyProfile, type StrategyType } from '@/lib/strategies/profiles';
 import { buildOrder, type Signal } from '@/lib/strategies/ruleEngine';
 import {
@@ -18,7 +19,12 @@ export default function StrategyProfilesPanel() {
   const [tick, setTick] = useState(0);
   const [toast, setToast] = useState('');
   const refresh = useCallback(() => setTick(t => t + 1), []);
-  const showToast = useCallback((m: string) => { setToast(m); setTimeout(() => setToast(''), 2600); }, []);
+  const showToast = useCallback((m: string) => {
+    const [title, ...rest] = m.split(' · ');
+    const kind: any = /킬스위치|차단/.test(title) ? 'kill' : /익절|성공/.test(title) ? 'success' : /손절|실패|거부/.test(title) ? 'error' : 'info';
+    notify(kind, title, rest.join(' · ') || undefined);
+    setToast(''); void toast;
+  }, [toast]);
   void tick;
 
   // 규칙 엔진으로 1건 시뮬 진입→청산 (프로필 한도 적용 + 격리 기록)

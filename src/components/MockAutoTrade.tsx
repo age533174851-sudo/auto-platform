@@ -7,6 +7,7 @@
 // ─────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { T } from '@/lib/constants';
+import { notify } from '@/lib/notify/center';
 import {
   paperBuy, closePaperPosition, getOpenPositions,
   loadLogs, saveLog, loadPaperBalance,
@@ -47,7 +48,15 @@ export default function MockAutoTrade() {
   const busyRef     = useRef(false);
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const showToast = useCallback((m: string) => { setToast(m); setTimeout(() => setToast(''), 2500); }, []);
+  const showToast = useCallback((m: string) => {
+    const [title, ...rest] = m.split(' · ');
+    let kind: any = 'info';
+    if (/매수|진입|long/i.test(title)) kind = 'buy';
+    else if (/매도|청산|익절|손절|short/i.test(title)) kind = title.includes('익절') ? 'tp' : title.includes('손절') ? 'sl' : 'sell';
+    else if (/실패|오류/i.test(title)) kind = 'error';
+    notify(kind, title, rest.join(' · ') || undefined);
+    setToast(''); void toast;
+  }, [toast]);
   const refresh   = useCallback(() => setTick(t => t + 1), []);
 
   // 현재가 조회 (sim = 랜덤워크, real = /api/prices)
@@ -167,7 +176,7 @@ export default function MockAutoTrade() {
 
         {/* 컨트롤 */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={() => setRunning(r => !r)} style={btn(running ? T.red : T.grn)}>
+          <button onClick={() => setRunning(r => { const nv = !r; notify('bot', nv ? 'MOCK 자동매매 시작' : 'MOCK 자동매매 중지', nv ? `BTC · ${intervalSec}초 주기` : undefined); return nv; })} style={btn(running ? T.red : T.grn)}>
             {running ? '정지' : '자동매매 시작'}
           </button>
           <select value={intervalSec} onChange={e => setIv(Number(e.target.value))}

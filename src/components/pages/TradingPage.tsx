@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
+import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -197,8 +198,17 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
   }, [pushLog]);
 
   // toast: 아래 Kill Switch/큐 핸들러들이 의존성으로 참조 → 먼저 선언 (TDZ 방지)
-  const [toast, setToast] = useState<{ msg:string; ok:boolean }|null>(null);
-  const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 3800); }, []);
+  const [toast, setToast] = useState<{ msg:string; kind:'ok'|'err'|'pending' }|null>(null);
+  const showToast = useCallback((msg:string, ok:boolean|'pending')=>{
+    // 새 통합 알림 시스템으로 흘려보냄 (아이콘 토스트 + 알림센터). title · detail 분리.
+    const [title, ...rest] = msg.split(' · ');
+    const detail = rest.join(' · ') || undefined;
+    let kind: NotifyKind = ok === 'pending' ? 'pending' : ok ? 'success' : 'error';
+    if (ok === true && /매수|롱|buy|진입/i.test(title)) kind = 'buy';
+    else if (ok === true && /매도|숏|sell|청산|리버스/i.test(title)) kind = 'sell';
+    notify(kind, title, detail, { persist: ok !== 'pending' });
+    void setToast;
+  }, []);
 
   // ── Daily MDD Kill Switch ──────────────────────────────────────
   const [ksStatus, setKsStatus] = useState<any|null>(null);
@@ -416,9 +426,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
           }),
         });
         const d = await r.json();
-        if (!r.ok || d.error) { alert(`거래소 청산 실패:\n${d.message||d.error}`); return; }
-        alert(`거래소 청산 주문 전송됨 (${Math.round(ratio*100)}%)\n주문번호: ${d.orderId||'-'}`);
-      } catch (e:any) { alert(`청산 오류: ${e?.message||''}`); return; }
+        if (!r.ok || d.error) { showToast(`청산 실패 · ${d.message||d.error}`, false); return; }
+        showToast(`청산 주문 전송 · ${Math.round(ratio*100)}%`, true);
+      } catch (e:any) { showToast(`청산 오류 · ${e?.message||'네트워크 오류'}`, false); return; }
     }
     closePaperPosition(p.asset, cur, ratio);
     refreshPositions();
@@ -433,6 +443,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
       setStatus(null); return;
     }
     setStatus('loading');
+    showToast(`${tradeMode==='real'?'실전':tradeMode==='testnet'?'테스트넷':'모의'} ${side} 주문 처리 중...`, 'pending');
     const orderAmt = amount ? +amount : 100_000;
 
     // ── 테스트넷/실전: 실제 거래소 선물 주문 ──
@@ -445,7 +456,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
         let usdtNotional = orderAmt / 1375;          // 주문 명목가치 (USDT)
         // 바이낸스 최소 명목가치 20 USDT — 미달 시 안내
         if (usdtNotional < 20) {
-          alert(`주문 금액이 너무 작습니다.\n\n바이낸스 최소 주문: 약 20 USDT (≈ 27,500원)\n현재: ${Math.round(usdtNotional)} USDT (₩${fmt(orderAmt)})\n\n금액을 3만원 이상으로 늘려주세요.`);
+          showToast(`주문 실패 · 최소 주문금액 미달 (약 20 USDT ≈ 27,500원, 현재 ${Math.round(usdtNotional)} USDT)`, false);
           setStatus(null); return;
         }
         const qty = usdtPx > 0 ? usdtNotional / usdtPx : 0;
@@ -470,7 +481,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
           setOrders(prev=>[{ id:uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
             price:krwPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'failed', pnl:0, pnlPct:0,
             openedAt:new Date().toISOString(), note:errMsg, emotion:'😟' } as Order, ...prev]);
-          alert(`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 요청 실패:\n\n${errMsg}`);
+          showToast(`주문 실패 · ${errMsg}`, false);
           setStatus('error' as any); setTimeout(()=>setStatus(null),4000); return;
         }
         // 요청 접수됨 → Worker 처리 대기 (job 폴링)
@@ -495,7 +506,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
         }
         return;
       } catch (e:any) {
-        alert(`주문 오류: ${e?.message||'네트워크 오류'}`);
+        showToast(`주문 오류 · ${e?.message||'네트워크 오류'}`, false);
         setStatus('error' as any); setTimeout(()=>setStatus(null),3000); return;
       }
     }
@@ -534,7 +545,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
           const riskCheck = canOpenNewPosition();
           if (!riskCheck.allowed) {
             setOrders(prev => prev.map((o, i) => i === 0 ? { ...o, note: `진입 차단: ${riskCheck.reason}`, status: 'failed' } : o));
-            alert(`신규 진입 차단\n\n${riskCheck.reason}\n\n(설정 → 리스크 한도에서 조정 가능)`);
+            showToast(`신규 진입 차단 · ${riskCheck.reason}`, false);
             setStatus(null);
             return;
           }
@@ -546,7 +557,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
             side: side === '매수' ? 'long' : 'short',
           });
           refreshPositions();
-          alert(`모의 ${side} 체결!\n${sel.nameKr} ${leverage}x\n금액: ₩${fmt(orderAmt)}\n\n아래 '현재 포지션'에서 확인하세요.`);
+          showToast(`모의 ${side} 체결 · ${sel.nameKr} ${leverage}x · ₩${fmt(orderAmt)} · 아래 현재 포지션에서 확인`, true);
         } catch {}
       }
 
@@ -566,7 +577,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
           const active = tradeMode===m;
           const c = m==='mock'?T.acl:m==='testnet'?T.ylw:T.red;
           return (
-            <button key={m} onClick={()=>{ if(locked){ alert('거래소 연결 후 사용 가능합니다 (더보기 → 거래소연결)'); return; } setTradeMode(m); }}
+            <button key={m} onClick={()=>{ if(locked){ showToast('거래소 연결 후 사용 가능 · 더보기 → 거래소연결', false); return; } setTradeMode(m); }}
               style={{flex:1,padding:'10px 6px',background:active?c+'20':'transparent',color:active?c:locked?T.muted:T.sub,border:`1px solid ${active?c:T.border}`,borderRadius:12,fontWeight:700,fontSize:11,cursor:'pointer',opacity:locked?0.5:1,position:'relative'}}>
               {l}{locked&&' 🔒'}
             </button>
@@ -1153,12 +1164,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
             </Card>
           )}
 
-          {/* 토스트 (성공/실패) */}
+          {/* 토스트 (성공/실패/처리중) — 거래소 앱 스타일 하단 상태 메시지 */}
           {toast&&(
             <div style={{position:'fixed',left:'50%',bottom:24,transform:'translateX(-50%)',zIndex:9999,maxWidth:'90%',
-              background:toast.ok?T.grn:T.red,color:'#fff',padding:'11px 18px',borderRadius:10,fontSize:12,fontWeight:700,
-              boxShadow:'0 6px 24px rgba(0,0,0,0.4)'}}>
-              {toast.ok?'✓ ':'✕ '}{toast.msg}
+              background:toast.kind==='ok'?T.grn:toast.kind==='pending'?(T.acl||'#2563EB'):T.red,color:'#fff',padding:'11px 18px',borderRadius:10,fontSize:12,fontWeight:700,
+              boxShadow:'0 6px 24px rgba(0,0,0,0.4)',whiteSpace:'pre-line',textAlign:'center'}}>
+              {toast.kind==='ok'?'✅ ':toast.kind==='pending'?'⏳ ':'❌ '}{toast.msg}
             </div>
           )}
 
@@ -1277,10 +1288,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                       {quickActions.includes('add')&&<button onClick={()=>{
                         const addAmt = amount ? +amount : 100000;
                         const rc = canOpenNewPosition();
-                        if(!rc.allowed){ alert(`추가 진입 차단: ${rc.reason}`); return; }
+                        if(!rc.allowed){ showToast(`추가 진입 차단 · ${rc.reason}`, false); return; }
                         paperBuy(p.asset, cur, addAmt, { stratId:'manual', side: p.side==='short'?'short':'long' });
                         refreshPositions();
-                        alert(`추가 진입 완료!\n${p.asset} ${p.side==='short'?'숏':'롱'}\n+₩${fmt(addAmt)} (평단가 재계산됨)`);
+                        showToast(`추가 진입 완료 · ${p.asset} ${p.side==='short'?'숏':'롱'} · +₩${fmt(addAmt)}`, true);
                       }} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
                     </div>
                     {(quickActions.includes('reverse')||quickActions.includes('tpsl'))&&<div style={{display:'flex',gap:6,marginTop:6}}>
@@ -1298,14 +1309,14 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                             const r2 = await fetch('/api/binance/futures/order',{method:'POST',headers:{'Content-Type':'application/json',...(authHeaderRef.current?{Authorization:authHeaderRef.current}:{})},
                               body:JSON.stringify({connectionId:connId,symbol:tradeSymbol,side:isShort?'BUY':'SELL',type:'MARKET',quantity:qty,leverage,confirmToken:'LIVE_ORDER_CONFIRMED'})});
                             const d2=await r2.json();
-                            if(!r2.ok||d2.error){ alert(`거래소 리버스 실패:\n${d2.message||d2.error}`); return; }
-                          } catch(e:any){ alert(`거래소 리버스 오류: ${e?.message||''}`); return; }
+                            if(!r2.ok||d2.error){ showToast(`리버스 실패 · ${d2.message||d2.error}`, false); return; }
+                          } catch(e:any){ showToast(`리버스 오류 · ${e?.message||'네트워크 오류'}`, false); return; }
                         }
                         const res = reversePaperPosition(p.asset, cur);
                         refreshPositions();
                         if(res.ok){
-                          alert(`리버스 완료!\n실현손익 ${Math.round(res.pnl).toLocaleString('ko-KR')}원\n→ ${res.newSide==='long'?'롱':'숏'} 포지션으로 전환`);
-                        } else { alert('리버스 실패: 포지션 없음'); }
+                          showToast(`리버스 완료 · 실현손익 ${Math.round(res.pnl).toLocaleString('ko-KR')}원 → ${res.newSide==='long'?'롱':'숏'} 전환`, true);
+                        } else { showToast('리버스 실패 · 포지션 없음', false); }
                       }} style={{flex:1,padding:'9px',background:T.prp+'18',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>리버스</button>}
                       {quickActions.includes('tpsl')&&<button onClick={()=>{ setSlEditAsset(p.asset); setSlEditVal(p.slPrice?String(Math.round(p.slPrice)):''); setTpEditVal(p.tpPrice?String(Math.round(p.tpPrice)):''); }}
                         style={{flex:1,padding:'9px',background:T.alt,color:T.acl,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>TP/SL 편집</button>}
@@ -1403,7 +1414,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                               }
                               try{localStorage.setItem('tg_paper_balance_v1',JSON.stringify(b));}catch{} } refreshPositions(); } catch {}
                             setSlEditAsset('');setTpEditVal('');setSlEditVal('');setTpRoi('');setSlRoi('');setTrailPct('');
-                            alert('TP/SL 설정 완료');
+                            showToast('TP/SL 설정 완료', true);
                           }} style={{flex:1,padding:'12px',background:T.acc,color:'#fff',border:'none',borderRadius:8,fontSize:13,fontWeight:800,cursor:'pointer'}}>확인</button>
                           <button onClick={()=>{setSlEditAsset('');setTpEditVal('');setSlEditVal('');setTpRoi('');setSlRoi('');setTrailPct('');}} style={{flex:1,padding:'12px',background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,fontSize:13,fontWeight:700,cursor:'pointer'}}>취소</button>
                         </div>

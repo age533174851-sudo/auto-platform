@@ -2,6 +2,7 @@ import React from 'react';
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import KeyboardInsetProvider from '@/components/KeyboardInsetProvider';
+import NotifyHost from '@/components/notify/NotifyHost';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -93,6 +94,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body style={{ background: '#060B14', margin: 0, padding: 0 }}>
         <KeyboardInsetProvider />
+        <NotifyHost />
         {children}
       </body>
     </html>
