@@ -419,7 +419,7 @@ export default function App() {
         case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openAsset}/>;
         case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openAsset} onOpenPnL={openPnL}/>;
         case 'trading':      return <TradingPageComp key={activeAsset?.id||'trading'} prices={prices} currency={currency} activeAsset={activeAsset} onOpenPnL={openPnL}/>;
-        case 'auto':         return <AutoPageComp onNav={nav} onOpenAsset={openAsset}/>;
+        case 'auto':         return <AutoPageComp onNav={nav} currency={currency} onOpenAsset={openAsset}/>;
         case 'strategies':   return <StrategyBuilderPage onNav={nav}/>;
         case 'risk_settings':return <RiskSettingsPage/>;
         case 'season':       return <SeasonDashboard/>;

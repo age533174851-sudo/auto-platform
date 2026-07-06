@@ -133,7 +133,7 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>vo
         <div style={{color:T.txt,fontSize:30,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1.5}}>{cvt(TOTAL,currency)}</div>
         <div style={{display:'flex',alignItems:'center',gap:10,marginTop:6}}>
           <span style={{color:T.grn,fontWeight:700,fontSize:13}}>▲ +{cvt(TOTAL_PNL,currency)}</span>
-          <Bdg c={T.grn} ch={"+"+fmtPct(TOTAL_PNL/TOTAL*100)+" 총수익"}/>
+          <Bdg c={T.grn} ch={fmtPct(TOTAL_PNL/TOTAL*100)+" 총수익"}/>
         </div>
         <div style={{display:'flex',gap:8,marginTop:16,flexWrap:'wrap'}}>
           <button onClick={()=>onNav('portfolio')} style={{background:T.acc,color:'#fff',border:'none',borderRadius:12,padding:'11px 18px',fontWeight:800,fontSize:13,cursor:'pointer'}}>포트폴리오</button>

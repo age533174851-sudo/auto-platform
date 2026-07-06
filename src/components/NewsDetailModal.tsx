@@ -153,11 +153,14 @@ export default function NewsDetailModal({
         <div style={{ display:'flex', gap: 8, marginBottom: 14, fontSize: 11, color: T.muted, alignItems:'center' }}>
           {news.source && <span>{news.source}</span>}
           <span>· {dateStr}</span>
-          {translating && <span style={{ color: T.acl, fontSize: 10 }}>· 번역 중…</span>}
+          {translating && <span style={{ color: T.acl, fontSize: 10 }}>· AI 번역 중…</span>}
+          {translated && !showOriginal && (
+            <span style={{ background: T.acl + '20', color: T.acl, fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>AI 번역</span>
+          )}
           {translated && (
             <button onClick={() => setShowOriginal(!showOriginal)}
               style={{ marginLeft:'auto', background: T.alt, border:`1px solid ${T.border}`, borderRadius: 6, padding:'3px 9px', color: T.acl, fontSize: 9, fontWeight: 700, cursor:'pointer' }}>
-              {showOriginal ? '한국어 보기' : '원문 보기'}
+              {showOriginal ? '번역 보기' : '원문 보기'}
             </button>
           )}
         </div>

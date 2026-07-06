@@ -49,7 +49,7 @@ const INITIAL_RISK_EVENTS:RiskEvent[] = [
 
 /* ─── AutoPage Component ─── */
 
-function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpenAsset?: (a: any, dest?: string) => void } = {}) {
+function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void } = {}) {
   const [tab,setTab]=useState<'bots'|'signals'|'risk'|'runs'|'create'>('bots');
   const [strats,setStrats]=useState<Strategy[]>(INITIAL_STRATS);
   const [signals]=useState<Signal[]>(INITIAL_SIGNALS);
@@ -129,7 +129,7 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
 
       {/* Dashboard metrics */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
-        {[{l:'실행중',v:`${running.length}개`,c:T.grn},{l:'총 손익',v:totalPnl>=0?'+'+cvt(totalPnl,'KRW'):cvt(totalPnl,'KRW'),c:totalPnl>=0?T.grn:T.red},{l:'평균 승률',v:`${avgWinRate}%`,c:T.acl},{l:'총 거래',v:`${totalTrades}건`,c:T.muted}].map(s=>(
+        {[{l:'실행중',v:`${running.length}개`,c:T.grn},{l:'총 손익',v:totalPnl>=0?'+'+cvt(totalPnl,currency):cvt(totalPnl,currency),c:totalPnl>=0?T.grn:T.red},{l:'평균 승률',v:`${avgWinRate}%`,c:T.acl},{l:'총 거래',v:`${totalTrades}건`,c:T.muted}].map(s=>(
           <Card key={s.l} style={{padding:'9px 8px',textAlign:'center'}}>
             <div style={{color:s.c,fontSize:13,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',marginBottom:1}}>{s.v}</div>
             <div style={{color:T.muted,fontSize:9}}>{s.l}</div>
@@ -168,7 +168,7 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
                     </div>
                   </div>
                   <div style={{textAlign:'right',flexShrink:0}}>
-                    <div style={{color:s.totalPnl>=0?T.grn:T.red,fontSize:12,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{s.totalPnl>=0?'+':''}{cvt(Math.abs(s.totalPnl),'KRW')}</div>
+                    <div style={{color:s.totalPnl>=0?T.grn:T.red,fontSize:12,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{s.totalPnl>=0?'+':''}{cvt(Math.abs(s.totalPnl),currency)}</div>
                     <div style={{color:T.muted,fontSize:9,marginTop:1}}>승률 {s.winRate}% · {s.trades}건</div>
                   </div>
                 </div>
@@ -202,11 +202,11 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
                       ))}
                       <div style={{background:T.alt,borderRadius:7,padding:'6px 8px'}}>
                         <div style={{color:T.muted,fontSize:9}}>일일 최대 손실</div>
-                        <div style={{color:T.red,fontSize:10,fontWeight:700,marginTop:1}}>{cvt(s.maxDailyLoss,'KRW')}</div>
+                        <div style={{color:T.red,fontSize:10,fontWeight:700,marginTop:1}}>{cvt(s.maxDailyLoss,currency)}</div>
                       </div>
                       <div style={{background:T.alt,borderRadius:7,padding:'6px 8px'}}>
                         <div style={{color:T.muted,fontSize:9}}>최대 포지션</div>
-                        <div style={{color:T.acl,fontSize:10,fontWeight:700,marginTop:1}}>{cvt(s.maxPositionSize,'KRW')}</div>
+                        <div style={{color:T.acl,fontSize:10,fontWeight:700,marginTop:1}}>{cvt(s.maxPositionSize,currency)}</div>
                       </div>
                     </div>
                     {/* AI assistant note */}
@@ -248,7 +248,7 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
                 </div>
               </div>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                <div style={{color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(sig.price,'KRW')}</div>
+                <div style={{color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(sig.price,currency)}</div>
                 <div style={{color:T.muted,fontSize:10}}>{sig.note}</div>
               </div>
               <div style={{marginTop:6,height:4,background:'#1A2D4A',borderRadius:2,overflow:'hidden'}}>
@@ -293,7 +293,7 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
               </button>
             </div>
             {[
-              {l:'일일 최대 손실',v: rs.dailyMaxLossKRW === null ? '제한 없음' : `₩${rs.dailyMaxLossKRW.toLocaleString('ko-KR')}`,sub:'초과 시 전체 자동매매 중단',c:T.red},
+              {l:'일일 최대 손실',v: rs.dailyMaxLossKRW === null ? '제한 없음' : cvt(rs.dailyMaxLossKRW, currency),sub:'초과 시 전체 자동매매 중단',c:T.red},
               {l:'최대 드로다운',v: rs.maxDrawdownPct === null ? '제한 없음' : `${rs.maxDrawdownPct}%`,sub:'연속 손실 한도',c:T.ylw},
               {l:'최대 레버리지',v:`${rs.maxLeverage}x`,sub:'전략별 레버리지 상한',c:T.ylw},
               {l:'최대 동시 거래',v:`${rs.maxOpenPositions}개`,sub:'오픈 포지션 동시 한도',c:T.acl},
@@ -346,10 +346,10 @@ function AutoPage({ onNav, onOpenAsset }: { onNav?: (tab: string) => void; onOpe
                     <span style={{background:T.prp+'15',color:T.prp,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.execMode==='paper'?'모의':r.execMode==='testnet'?'테넷':'실전'}</span>
                   </div>
                   <div style={{color:T.muted,fontSize:10}}>{r.stratName}</div>
-                  <div style={{color:T.muted,fontSize:9,marginTop:1}}>진입 {cvt(r.entryPrice,'KRW')}{r.exitPrice?` → ${cvt(r.exitPrice,'KRW')}`:' (오픈)'}</div>
+                  <div style={{color:T.muted,fontSize:9,marginTop:1}}>진입 {cvt(r.entryPrice,currency)}{r.exitPrice?` → ${cvt(r.exitPrice,currency)}`:' (오픈)'}</div>
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
-                  <div style={{color:r.pnl>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{r.pnl>=0?'+':''}{cvt(Math.abs(r.pnl),'KRW')}</div>
+                  <div style={{color:r.pnl>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{r.pnl>=0?'+':''}{cvt(Math.abs(r.pnl),currency)}</div>
                   <div style={{color:r.pnl>=0?T.grn:T.red,fontSize:10}}>{r.pnl>=0?'+':''}{r.pnlPct.toFixed(2)}%</div>
                 </div>
               </div>
@@ -530,7 +530,7 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
               오늘 PnL ({todayPnL.trades}건)
             </span>
             <span style={{color: todayPnL.pnl >= 0 ? T.grn : T.red, fontWeight:900, fontSize:14, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {todayPnL.pnl >= 0 ? '+' : ''}₩{Math.floor(todayPnL.pnl).toLocaleString('ko-KR')}
+              {todayPnL.pnl >= 0 ? '+' : ''}{cvt(Math.abs(Math.floor(todayPnL.pnl)), currency)}
             </span>
           </div>
 
@@ -551,8 +551,8 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
                 })()}
               </div>
               <div style={{display:'flex',justifyContent:'space-between',marginTop:3,fontSize:9,color:T.muted}}>
-                <span>한도까지 남음: ₩{Math.floor(Math.max(0, guard.todayLimit + Math.min(0, todayPnL.pnl))).toLocaleString('ko-KR')}</span>
-                <span>한도: -₩{guard.todayLimit.toLocaleString('ko-KR')}</span>
+                <span>한도까지 남음: {cvt(Math.floor(Math.max(0, guard.todayLimit + Math.min(0, todayPnL.pnl))), currency)}</span>
+                <span>한도: -{cvt(guard.todayLimit, currency)}</span>
               </div>
             </>
           )}
@@ -721,25 +721,25 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
           <div style={{background:T.alt,padding:'8px 10px',borderRadius:8,border:`1px solid ${T.border}`}}>
             <div style={{color:T.muted,fontSize:9,marginBottom:2}}>현금</div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              ₩{Math.floor(balance.krw).toLocaleString('ko-KR')}
+              {cvt(Math.floor(balance.krw), currency)}
             </div>
           </div>
           <div style={{background:T.alt,padding:'8px 10px',borderRadius:8,border:`1px solid ${T.border}`}}>
             <div style={{color:T.muted,fontSize:9,marginBottom:2}}>보유 {positionCount}개</div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              ₩{Math.floor(totalPositionVal).toLocaleString('ko-KR')}
+              {cvt(Math.floor(totalPositionVal), currency)}
             </div>
           </div>
           <div style={{background:balance.totalPnL>=0?T.grn+'15':T.red+'15',padding:'8px 10px',borderRadius:8,border:`1px solid ${balance.totalPnL>=0?T.grn:T.red}40`}}>
             <div style={{color:balance.totalPnL>=0?T.grn:T.red,fontSize:9,marginBottom:2}}>누적 PnL</div>
             <div style={{color:balance.totalPnL>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {balance.totalPnL>=0?'+':''}₩{Math.floor(balance.totalPnL).toLocaleString('ko-KR')}
+              {balance.totalPnL>=0?'+':''}{cvt(Math.abs(Math.floor(balance.totalPnL)), currency)}
             </div>
           </div>
         </div>
         {positionCount > 0 && (
           <div style={{marginTop:8,fontSize:10,color:T.muted}}>
-            보유: {Object.entries(balance.positions).map(([asset, p]: any) => `${asset} ${p.qty.toFixed(4)}@₩${Math.floor(p.avgPrice).toLocaleString('ko-KR')}`).join(', ')}
+            보유: {Object.entries(balance.positions).map(([asset, p]: any) => `${asset} ${p.qty.toFixed(4)}@${cvt(Math.floor(p.avgPrice), currency)}`).join(', ')}
           </div>
         )}
       </Card>
@@ -859,7 +859,7 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
               </div>
               {log.status === 'triggered' && log.filledPrice && log.filledAmount && (
                 <div style={{color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',background:T.grn+'10',padding:'5px 8px',borderRadius:6,marginTop:4}}>
-                  체결가 ₩{Math.floor(log.filledPrice).toLocaleString('ko-KR')} · ₩{Math.floor(log.filledAmount).toLocaleString('ko-KR')}
+                  체결가 {cvt(Math.floor(log.filledPrice), currency)} · {cvt(Math.floor(log.filledAmount), currency)}
                   {log.filledQuantity && ` (${log.filledQuantity.toFixed(6)})`}
                 </div>
               )}
