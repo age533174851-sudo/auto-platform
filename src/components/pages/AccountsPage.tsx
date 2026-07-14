@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 import { AlertTriangle, PackageOpen, CheckCircle2 } from 'lucide-react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -359,7 +360,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
             <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
               {['자동매매만 정지','수동 매매 유지'].map((opt,i)=>(
                 <button key={i} type="button"
-                  onClick={() => alert(`"${opt}" 옵션은 곧 출시됩니다. 현재는 전체 긴급 정지 토글만 사용 가능합니다.`)}
+                  onClick={() => notifyInfo(`"${opt}" 옵션은 곧 출시됩니다. 현재는 전체 긴급 정지 토글만 사용 가능합니다.`)}
                   style={{background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'10px',minHeight:38,fontSize:11,color:T.txt,cursor:'pointer'}}>{opt}</button>
               ))}
             </div>

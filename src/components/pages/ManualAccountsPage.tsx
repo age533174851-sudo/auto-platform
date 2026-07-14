@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyInfo } from '@/lib/notify/center';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
 import { Wallet, Plus, Trash2, Edit3, TrendingUp, TrendingDown, Info } from 'lucide-react';
@@ -31,14 +33,14 @@ export default function ManualAccountsPage() {
   const totals = useMemo(() => valuateAll(accounts), [accounts]);
 
   const onSave = useCallback((acc: ManualAccount) => {
-    if (!acc.name.trim()) { alert('계좌명을 입력하세요'); return; }
+    if (!acc.name.trim()) { notifyInfo('계좌명을 입력하세요'); return; }
     saveManualAccount(acc);
     refresh();
     setEditing(null);
   }, [refresh]);
 
-  const onDelete = useCallback((id: string) => {
-    if (!confirm('이 계좌를 삭제하시겠습니까?')) return;
+  const onDelete = useCallback(async (id: string) => {
+    if (!(await confirmDialog('이 계좌를 삭제하시겠습니까?', { danger: true }))) return;
     deleteManualAccount(id);
     refresh();
   }, [refresh]);

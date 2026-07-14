@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { notifyError, notifyInfo } from '@/lib/notify/center';
 import type { LucideIcon } from 'lucide-react';
 import {
   Link2, CalendarDays, Mic, Wallet, Receipt, Dice5, Users, Bot,
@@ -227,7 +228,7 @@ function VoiceTab() {
     if (typeof window === 'undefined' || !briefing) return;
     if (typeof window === 'undefined') return;
     const synth = window.speechSynthesis;
-    if (!synth) { alert('이 브라우저는 TTS를 지원하지 않습니다.'); return; }
+    if (!synth) { notifyError('이 브라우저는 TTS를 지원하지 않습니다.'); return; }
     const utter = new SpeechSynthesisUtterance(briefing);
     utter.lang = 'ko-KR';
     utter.rate = 0.9;
@@ -271,7 +272,7 @@ function VoiceTab() {
         <div style={{ color:T.txt, fontWeight:700, fontSize:12, marginBottom:8 }}>빠른 브리핑</div>
         {QUICK.map(q => (
           <button key={q} type="button"
-            onClick={() => alert(`"${q}" — AI 브리핑이 준비중입니다. 곧 출시!`)}
+            onClick={() => notifyInfo(`"${q}" — AI 브리핑이 준비중입니다. 곧 출시!`)}
             style={{ display:'block', width:'100%', textAlign:'left', padding:'10px 12px', minHeight:42, marginBottom:5, background:T.alt, border:`1px solid ${T.border}`, borderRadius:8, color:T.sub, fontSize:11, cursor:'pointer' }}>
             🎙️ {q}
           </button>
@@ -405,12 +406,12 @@ function TaxTab({ currency }: { currency?: string }) {
         {/* Export buttons */}
         <div style={{ display:'flex', gap:6 }}>
           <button type="button"
-            onClick={() => alert('CSV 내보내기 기능은 준비 중입니다')}
+            onClick={() => notifyInfo('CSV 내보내기 기능은 준비 중입니다')}
             style={{ flex:1, padding:'12px', minHeight:44, background:T.alt, border:`1px solid ${T.border}`, borderRadius:10, color:T.muted, fontSize:11, cursor:'pointer' }}>
             📄 CSV 내보내기
           </button>
           <button type="button"
-            onClick={() => alert('PDF 리포트 기능은 준비 중입니다')}
+            onClick={() => notifyInfo('PDF 리포트 기능은 준비 중입니다')}
             style={{ flex:1, padding:'12px', minHeight:44, background:T.alt, border:`1px solid ${T.border}`, borderRadius:10, color:T.muted, fontSize:11, cursor:'pointer' }}>
             📑 PDF 리포트
           </button>
@@ -540,7 +541,7 @@ function CommunityTab() {
               style={{ background:'transparent', border:'none', color:liked.has(p.id)?T.red:T.muted, cursor:'pointer', fontSize:10, padding:0 }}>
               {liked.has(p.id)?'❤️':' 🤍'} {p.likes + (liked.has(p.id)?1:0)}
             </button>
-            <button type="button" onClick={() => alert('댓글 보기 기능은 준비 중입니다')} style={{ background:'transparent', border:'none', color:T.muted, cursor:'pointer', fontSize:10, padding:0 }}>{p.comments}</button>
+            <button type="button" onClick={() => notifyInfo('댓글 보기 기능은 준비 중입니다')} style={{ background:'transparent', border:'none', color:T.muted, cursor:'pointer', fontSize:10, padding:0 }}>{p.comments}</button>
             <button onClick={() => setSaved(s => { const n=new Set(s); n.has(p.id)?n.delete(p.id):n.add(p.id); return n; })}
               style={{ background:'transparent', border:'none', color:saved.has(p.id)?T.ylw:T.muted, cursor:'pointer', fontSize:10, padding:0 }}>
               {saved.has(p.id)?'🔖':''}

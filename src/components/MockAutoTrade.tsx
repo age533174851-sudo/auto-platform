@@ -8,6 +8,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { notify } from '@/lib/notify/center';
+import { writeMockHeartbeat } from '@/lib/engineStatus';
+import { logDecision } from '@/lib/autotrade/auditLog';
 import {
   paperBuy, closePaperPosition, getOpenPositions,
   loadLogs, saveLog, loadPaperBalance,
@@ -113,7 +115,20 @@ export default function MockAutoTrade() {
         tpPct: TP_PCT, slPct: SL_PCT, confThreshold,
       });
       setDecision(d);
+      writeMockHeartbeat({
+        running: true, intervalSec,
+        lastDecision: d.summary, confidence: d.confidence, marketState: d.marketState,
+        openPositions: getOpenPositions().filter(p => p.asset === ASSET).length,
+      });
       setLastCheck(d.summary);
+
+      // ── AI 감사 로그 (모든 판단 기록) ──
+      logDecision({
+        action: d.action, confidence: d.confidence, marketState: d.marketState,
+        summary: d.summary, reasons: d.reasons, price, asset: ASSET,
+        executed: d.action === 'enter_long' || d.action === 'exit_tp' || d.action === 'exit_sl',
+        source: 'mock',
+      });
 
       if (d.action === 'exit_tp' || d.action === 'exit_sl') {
         const isTp = d.action === 'exit_tp';
@@ -202,7 +217,7 @@ export default function MockAutoTrade() {
 
         {/* 컨트롤 */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={() => setRunning(r => { const nv = !r; notify('bot', nv ? 'MOCK 자동매매 시작' : 'MOCK 자동매매 중지', nv ? `BTC · ${intervalSec}초 주기` : undefined); return nv; })} style={btn(running ? T.red : T.grn)}>
+          <button onClick={() => setRunning(r => { const nv = !r; notify('bot', nv ? 'MOCK 자동매매 시작' : 'MOCK 자동매매 중지', nv ? `BTC · ${intervalSec}초 주기` : undefined); writeMockHeartbeat({ running: nv, intervalSec }); return nv; })} style={btn(running ? T.red : T.grn)}>
             {running ? '정지' : '자동매매 시작'}
           </button>
           <select value={intervalSec} onChange={e => setIv(Number(e.target.value))}

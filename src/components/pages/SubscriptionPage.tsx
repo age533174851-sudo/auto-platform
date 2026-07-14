@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -244,7 +245,7 @@ function SubscriptionPage() {
                   : key==='founder'||key==='admin'
                     ? <Bdg c={T.muted} ch="초대 전용"/>
                     : <button type="button"
-                        onClick={() => alert('Pro 구독은 베타 종료 후 출시 예정입니다. 베타 기간 모든 기능 무료!')}
+                        onClick={() => notifyInfo('Pro 구독은 베타 종료 후 출시 예정입니다. 베타 기간 모든 기능 무료!')}
                         style={{background:info.color+'20',color:info.color,border:`1px solid ${info.color}40`,borderRadius:10,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>업그레이드 (준비중)</button>
                 }
               </div>

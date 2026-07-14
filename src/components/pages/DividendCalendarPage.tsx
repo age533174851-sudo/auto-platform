@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { notifyError } from '@/lib/notify/center';
+import DripSimulator from '@/components/DripSimulator';
 import {
   BadgeDollarSign, Briefcase, CalendarDays, ListChecks, Pencil,
 } from 'lucide-react';
@@ -25,7 +27,7 @@ const USD_TO_KRW = 1375;
 const toKRW = (amount: number, currency: 'USD'|'KRW') => currency === 'USD' ? amount * USD_TO_KRW : amount;
 const daysUntil = (d: Date) => Math.ceil((d.getTime() - Date.now()) / 86400000);
 
-function DividendInner() {
+function DividendInner({ currency = 'KRW' }: { currency?: string }) {
   const [tab, setTab] = useState<'upcoming'|'holdings'|'all'>('upcoming');
   const [holdings, setHoldings] = useState<DividendHolding[]>([]);
   const [filterMyOnly, setFilterMyOnly] = useState(true);
@@ -70,10 +72,10 @@ function DividendInner() {
     const s = addSymbol.toUpperCase().trim();
     const n = Number(addShares);
     if (!DIVIDEND_UNIVERSE.find(d => d.symbol === s)) {
-      alert(`${s}는 배당 데이터베이스에 없는 종목입니다.`);
+      notifyError(`${s}는 배당 데이터베이스에 없는 종목입니다.`);
       return;
     }
-    if (!isFinite(n) || n <= 0) { alert('수량을 정확히 입력하세요.'); return; }
+    if (!isFinite(n) || n <= 0) { notifyError('수량을 정확히 입력하세요.'); return; }
     persist([...holdings.filter(h => h.symbol !== s), { symbol: s, shares: n }]);
     setAddSymbol(''); setAddShares('');
   };
@@ -96,6 +98,8 @@ function DividendInner() {
           <div style={F.caption}>다가오는 배당락일 · 예상 수령액 · 연 배당수익 추정</div>
         </div>
       </div>
+
+      <DripSimulator currency={currency} />
 
       {/* 요약 카드 */}
       <div style={cardStyle({ marginBottom: SP.md })}>
@@ -262,6 +266,6 @@ function DividendInner() {
   );
 }
 
-export default function DividendCalendarPage() {
-  return <ErrorBoundary><DividendInner /></ErrorBoundary>;
+export default function DividendCalendarPage(props: { currency?: string }) {
+  return <ErrorBoundary><DividendInner {...props} /></ErrorBoundary>;
 }

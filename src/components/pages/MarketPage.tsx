@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { cvt, fmtPct } from '@/lib/utils';
+import { formatMoney } from '@/lib/currency';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR } from '@/data/assets';
 import type { Asset } from '@/types';
 import {
@@ -243,7 +244,7 @@ function MarketPage({
                       </div>
                       <div style={{ textAlign:'right' }}>
                         <div style={{ color:T.txt, fontSize:11, fontWeight:700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                          {cvt(row.price, currency)}
+                          {formatMoney(row.price, currency, 'USD')}
                         </div>
                         <div style={{ color: up ? T.grn : T.red, fontSize:10, fontWeight:700 }}>
                           {up ? '▲' : '▼'}{Math.abs(row.change).toFixed(2)}%

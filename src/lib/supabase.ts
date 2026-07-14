@@ -117,6 +117,20 @@ export async function sbSignIn(email: string, password: string) {
   return { user: data.user, profile, error: null };
 }
 
+export async function sbSignInWithOAuth(provider: 'google' | 'kakao') {
+  try {
+    const sb = await getClient();
+    if (!sb) return { error: 'Supabase가 설정되지 않았습니다.' };
+    const { error } = await sb.auth.signInWithOAuth({
+      provider,
+      options: { redirectTo: getSiteUrl() + '/auth/callback' },
+    });
+    return { error: error?.message };
+  } catch (e: any) {
+    return { error: e?.message || 'OAuth 로그인 실패' };
+  }
+}
+
 export async function sbSignOut() {
   const sb = await getClient();
   if (!sb) return;

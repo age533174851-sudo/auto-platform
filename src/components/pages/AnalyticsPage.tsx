@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -122,7 +124,7 @@ function AnalyticsPage({prices,currency}:{prices:Asset[];currency:string}) {
               </div>
             ))}
             <button type="button"
-              onClick={() => alert('전체 동기화는 거래소 연결 페이지에서 진행됩니다')}
+              onClick={() => notifyInfo('전체 동기화는 거래소 연결 페이지에서 진행됩니다')}
               style={{width:'100%',marginTop:12,padding:'12px',minHeight:44,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>전체 동기화</button>
           </Card>
           <Card style={{padding:'14px 16px',marginBottom:12}}>
@@ -130,7 +132,7 @@ function AnalyticsPage({prices,currency}:{prices:Asset[];currency:string}) {
             {['iPhone 15 Pro · 현재 기기','MacBook Pro · 2시간 전'].map((d,i)=>(
               <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:i<1?`1px solid ${T.border}`:'none'}}>
                 <span style={{color:T.txt,fontSize:12}}>{d}</span>
-                {i===0?<Bdg c={T.grn} ch="현재" sm/>:<button type="button" onClick={() => { if (confirm(`"${d}" 세션을 해제하시겠습니까?`)) alert('설정 → 보안 → 로그인 기록에서 실제 세션 종료 가능'); }} style={{background:T.red+'15',color:T.red,border:'none',borderRadius:6,padding:'5px 10px',minHeight:30,fontSize:10,cursor:'pointer'}}>해제</button>}
+                {i===0?<Bdg c={T.grn} ch="현재" sm/>:<button type="button" onClick={async () => { if ((await confirmDialog(`"${d}" 세션을 해제하시겠습니까?`, { danger: true }))) notifyInfo('설정 → 보안 → 로그인 기록에서 실제 세션 종료 가능'); }} style={{background:T.red+'15',color:T.red,border:'none',borderRadius:6,padding:'5px 10px',minHeight:30,fontSize:10,cursor:'pointer'}}>해제</button>}
               </div>
             ))}
           </Card>
@@ -151,7 +153,7 @@ function AnalyticsPage({prices,currency}:{prices:Asset[];currency:string}) {
               <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 0',borderBottom:i<4?`1px solid ${T.border}`:'none'}}>
                 <div style={{display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:18}}>{e.icon}</span><div><div style={{color:T.txt,fontSize:12,fontWeight:600}}>{e.l}</div><div style={{color:T.muted,fontSize:10}}>{e.f}</div></div></div>
                 <button type="button"
-                  onClick={() => alert('설정 → 백업 탭에서 전체 데이터를 한 번에 백업할 수 있습니다')}
+                  onClick={() => notifyInfo('설정 → 백업 탭에서 전체 데이터를 한 번에 백업할 수 있습니다')}
                   style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>↓ 다운로드</button>
               </div>
             ))}
@@ -159,8 +161,8 @@ function AnalyticsPage({prices,currency}:{prices:Asset[];currency:string}) {
           <Card style={{padding:'14px 16px'}}>
             <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>📤 백업 복원</div>
             <div role="button" tabIndex={0}
-              onClick={() => alert('설정 → 백업 탭에서 가져오기를 사용해주세요')}
-              onKeyDown={(e) => { if (e.key === 'Enter') alert('설정 → 백업 탭에서 가져오기를 사용해주세요'); }}
+              onClick={() => notifyInfo('설정 → 백업 탭에서 가져오기를 사용해주세요')}
+              onKeyDown={(e) => { if (e.key === 'Enter') notifyInfo('설정 → 백업 탭에서 가져오기를 사용해주세요'); }}
               style={{border:`2px dashed ${T.border}`,borderRadius:10,padding:'24px',textAlign:'center',cursor:'pointer',minHeight:80}}>
               <div style={{fontSize:28,marginBottom:6}}>📁</div>
               <div style={{color:T.muted,fontSize:12}}>백업 파일을 드래그하거나 클릭하여 업로드</div>

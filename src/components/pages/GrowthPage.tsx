@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
+import EtfSwapTool from '@/components/EtfSwapTool';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
 import type { Asset } from '@/types';
 import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
@@ -11,7 +12,7 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          InlineTVChart } from './SharedUI';
 
 
-function GrowthPage() {
+function GrowthPage({ prices = {}, currency = 'KRW' }: { prices?: Record<string, number>; currency?: string }) {
   const [checklist,setChecklist]=useState([
     {id:'c1',done:true, label:'앱 설치 및 첫 로그인',          reward:'🎖 신규 배지',     xp:50},
     {id:'c2',done:true, label:'왓치리스트에 첫 종목 추가',      reward:'+10 XP',        xp:10},
@@ -43,6 +44,7 @@ function GrowthPage() {
 
   return (
     <div>
+      <EtfSwapTool prices={prices} currency={currency} />
       {/* XP Progress */}
       <div style={{background:'linear-gradient(135deg,#0A1628,#0D1F3C)',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>

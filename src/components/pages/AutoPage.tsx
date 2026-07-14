@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, gS, sS, uid } from '@/lib/utils';
 import type { Asset } from '@/types';
@@ -7,6 +9,9 @@ import { Card } from './SharedUI';
 import AssetLogo from '../AssetLogo';
 import { loadSettings as loadRiskSettings, MODE_LABEL } from '@/lib/risk/store';
 import { Shield, Edit3, ChevronRight } from 'lucide-react';
+import AutoStatusBoard from '../AutoStatusBoard';
+import StrategyIntelligence from '../StrategyIntelligence';
+import AuditLogPanel from '../AuditLogPanel';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
   ema_cross:     {label:'EMA 크로스',      icon:'📈',color:'#3B82F6',desc:'EMA20/60 골든·데드 크로스 추세 추종'},
@@ -101,6 +106,13 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: stri
 
   return (
     <div>
+      <AutoStatusBoard />
+      <StrategyIntelligence
+        strategies={strats.map(s => ({ id: s.id, name: s.name, type: (s as any).type, asset: s.asset, winRate: (s as any).winRate ?? 0, totalPnl: (s as any).totalPnl ?? 0, trades: (s as any).trades ?? 0, enabled: (s as any).enabled }))}
+        signals={signals.filter((sg: any) => sg.state !== 'executed').map((sg: any) => ({ stratId: sg.stratId, stratName: sg.stratName, type: (strats.find(st => st.id === sg.stratId) as any)?.type || 'ema_cross', asset: sg.asset, side: sg.type === 'sell' ? 'sell' : 'buy' }))}
+        onDisable={(id) => setStrats(prev => prev.map(s => s.id === id ? { ...s, enabled: false, status: 'stopped' } as any : s))}
+      />
+      <AuditLogPanel currency={currency} />
       {/* Exec mode + global stop */}
       <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
         <div style={{display:'flex',gap:4,flex:1}}>
@@ -263,7 +275,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: stri
             <div style={{display:'flex',gap:8}}>
               <input placeholder="https://your-webhook-url.com/signal" style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:11,outline:'none'}}/>
               <button type="button"
-                onClick={() => alert('TradingView Webhook 연동은 곧 출시됩니다. 현재는 더보기 → 전략빌더의 자체 시그널만 동작합니다.')}
+                onClick={() => notifyInfo('TradingView Webhook 연동은 곧 출시됩니다. 현재는 더보기 → 전략빌더의 자체 시그널만 동작합니다.')}
                 style={{background:T.cyn+'20',color:T.cyn,border:`1px solid ${T.cyn}40`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
             </div>
           </Card>
@@ -602,8 +614,8 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
 
         {/* 빠른 액션 */}
         <div style={{display:'flex',gap:5,marginTop:8}}>
-          <button onClick={() => {
-              if (confirm('오늘의 PnL과 연속 손실 카운터를 초기화하시겠습니까?')) {
+          <button onClick={async () => {
+              if ((await confirmDialog('오늘의 PnL과 연속 손실 카운터를 초기화하시겠습니까?', { danger: true }))) {
                 resetTodayPnL(); refresh();
               }
             }}
@@ -707,8 +719,8 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
         <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
           <Wallet size={14} strokeWidth={2.2} color={T.acl}/>
           <span style={{color:T.txt,fontWeight:800,fontSize:13}}>모의 잔고 (Paper)</span>
-          <button onClick={() => {
-              if (confirm('모의 잔고를 초기화하시겠습니까? (KRW 1,000만원 + 포지션 모두 청산)')) {
+          <button onClick={async () => {
+              if ((await confirmDialog('모의 잔고를 초기화하시겠습니까? (KRW 1,000만원 + 포지션 모두 청산)', { danger: true }))) {
                 resetPaperBalance(); refresh();
               }
             }}
@@ -755,7 +767,7 @@ function AutoTradeLogPanel({ onOpenAsset }: { onOpenAsset?: (a: any, dest?: stri
           새로고침
         </button>
         {logs.length > 0 && (
-          <button onClick={() => { if(confirm('실행 로그를 모두 삭제하시겠습니까?')){clearLogs();refresh();} }}
+          <button onClick={async () => { if((await confirmDialog('실행 로그를 모두 삭제하시겠습니까?', { danger: true }))){clearLogs();refresh();} }}
             aria-label="로그 삭제"
             style={{background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,padding:'4px 8px',fontSize:10,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:3}}>
             <Trash2 size={10} strokeWidth={2.4}/>삭제

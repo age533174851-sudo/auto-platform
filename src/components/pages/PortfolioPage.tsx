@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
 import { T } from '@/lib/constants';
 import { ASSETS } from '@/data/assets';
 import type { Asset } from '@/types';
@@ -197,8 +198,8 @@ export default function PortfolioPage({
     showToast(editingId ? '✅ 수정됨' : '✅ 추가됨');
   }, [selectedAsset, buyPrice, quantity, note, editingId, positions, savePositions, resetForm, showToast]);
 
-  const removePosition = useCallback((id: string) => {
-    if (!confirm('이 종목을 삭제하시겠습니까?')) return;
+  const removePosition = useCallback(async (id: string) => {
+    if (!(await confirmDialog('이 종목을 삭제하시겠습니까?', { danger: true }))) return;
     savePositions(positions.filter(p => p.id !== id));
     showToast('🗑 삭제됨');
   }, [positions, savePositions, showToast]);

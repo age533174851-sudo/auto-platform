@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 import {
   UserProfile, checkPasswordStrength, isValidEmail, getKoreanError,
   getMockSession, setMockSession, clearMockSession,
@@ -7,7 +8,7 @@ import {
   MOCK_USERS, MOCK_INVITE_CODES, ROLE_INFO, canAccessAdmin, canAccessDeveloper,
 } from '@/lib/auth';
 import {
-  SUPABASE_CONFIGURED, sbSignIn, sbSignUp, sbSignOut,
+  SUPABASE_CONFIGURED, sbSignIn, sbSignUp, sbSignOut, sbSignInWithOAuth,
   sbGetSession, sbResetPassword, sbUpdatePassword, getProfile, redeemCode,
   sbHealthCheck, SUPABASE_URL,
 } from '@/lib/supabase';
@@ -397,7 +398,27 @@ export default function AuthPage() {
             <button onClick={handleLogin} disabled={loading || !canLogin} style={{width:'100%',padding:'14px',background:canLogin&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer',marginBottom:12}}>
               {loading ? '로그인 중...' : '로그인'}
             </button>
-            <a href="/" style={{display:'block',textAlign:'center',color:T.muted,fontSize:11,textDecoration:'none'}}>← 로그인 없이 메인으로</a>
+
+            {/* 소셜 로그인 */}
+            <div style={{display:'flex',alignItems:'center',gap:10,margin:'4px 0 12px'}}>
+              <div style={{flex:1,height:1,background:T.border}}/>
+              <span style={{color:T.muted,fontSize:10}}>또는</span>
+              <div style={{flex:1,height:1,background:T.border}}/>
+            </div>
+            <button onClick={async()=>{setLoading(true);const{error}=await sbSignInWithOAuth('google');if(error){showToast(error,'error');setLoading(false);}}} disabled={loading}
+              style={{width:'100%',padding:'13px',background:'#fff',color:'#1F1F1F',border:'none',borderRadius:12,fontWeight:700,fontSize:14,cursor:'pointer',marginBottom:8,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+              <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.8-6.8C35.6 2.4 30.1 0 24 0 14.6 0 6.4 5.4 2.5 13.3l7.9 6.1C12.2 13.7 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9.1h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-16z"/><path fill="#FBBC05" d="M10.4 28.6c-.5-1.4-.8-2.9-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C.9 16.5 0 20.1 0 24s.9 7.5 2.5 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.1 0 11.3-2 15-5.5l-7.1-5.5c-2 1.4-4.6 2.2-7.9 2.2-6.4 0-11.8-4.2-13.6-9.9l-7.9 6.1C6.4 42.6 14.6 48 24 48z"/></svg>
+              Google로 계속하기
+            </button>
+            <button onClick={async()=>{setLoading(true);const{error}=await sbSignInWithOAuth('kakao');if(error){showToast(error,'error');setLoading(false);}}} disabled={loading}
+              style={{width:'100%',padding:'13px',background:'#FEE500',color:'#191600',border:'none',borderRadius:12,fontWeight:700,fontSize:14,cursor:'pointer',marginBottom:14,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+              <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#191600" d="M12 3C6.5 3 2 6.5 2 10.8c0 2.8 1.8 5.2 4.6 6.6-.2.7-.7 2.6-.8 3-.1.5.2.5.4.4.2-.1 2.6-1.8 3.7-2.5.7.1 1.4.2 2.1.2 5.5 0 10-3.5 10-7.8S17.5 3 12 3z"/></svg>
+              카카오로 계속하기
+            </button>
+
+            {/* 로그인 없이 MOCK 체험 */}
+            <a href="/" style={{display:'block',textAlign:'center',color:T.acl,fontSize:13,fontWeight:700,textDecoration:'none',padding:'12px',border:`1px solid ${T.border}`,borderRadius:12}}>로그인 없이 둘러보기 (모의투자 체험)</a>
+            <div style={{color:T.muted,fontSize:10,textAlign:'center',marginTop:8}}>실전 거래·API 연결은 로그인 후 이용할 수 있어요</div>
           </div>
         )}
 
@@ -549,7 +570,7 @@ export default function AuthPage() {
                 <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:i<1?`1px solid ${T.border}`:'none'}}>
                   <div><div style={{color:T.txt,fontSize:12}}>{l.device} {l.cur&&<span style={{background:T.grn+'20',color:T.grn,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:99}}>현재</span>}</div><div style={{color:T.muted,fontSize:10}}>{l.loc} · {l.time}</div></div>
                   {!l.cur && <button type="button"
-                    onClick={() => alert(`"${l.device}" 세션 종료는 설정 → 보안 → 로그인 기록에서 가능합니다 (실제 기기 추적)`)}
+                    onClick={() => notifyInfo(`"${l.device}" 세션 종료는 설정 → 보안 → 로그인 기록에서 가능합니다 (실제 기기 추적)`)}
                     style={{background:T.red+'15',color:T.red,border:'none',borderRadius:6,padding:'6px 12px',minHeight:30,fontSize:10,cursor:'pointer'}}>종료</button>}
                 </div>
               ))}

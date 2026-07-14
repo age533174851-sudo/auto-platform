@@ -373,7 +373,7 @@ export const MOCK_NEWS: NewsItem[] = [
     sentiment:'bullish',
     time:'5분 전',
     publishedAt:'2025-05-16T09:25:00',
-    tickers:['BTC','ETH'],
+    tickers:['BTC','ETH','COIN','MSTR','IBIT'],
     url:'https://coindesk.com',
   },
   {
@@ -425,7 +425,7 @@ export const MOCK_NEWS: NewsItem[] = [
     sentiment:'bullish',
     time:'1시간 전',
     publishedAt:'2025-05-16T08:30:00',
-    tickers:['SOL','BTC','ETH'],
+    tickers:['SOL','BTC','ETH','JTO','BONK'],
     url:'https://cointelegraph.com',
   },
   {

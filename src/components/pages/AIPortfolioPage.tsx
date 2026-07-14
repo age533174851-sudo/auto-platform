@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useMemo } from 'react';
+import RebalanceTool from '@/components/RebalanceTool';
 import {
   Brain, Target, Calendar, BadgeDollarSign, SlidersHorizontal,
   Tag, Rocket, ChartPie, TrendingUp, ChartLine, TriangleAlert,
@@ -78,7 +79,7 @@ const RISKS: RiskProfile[]   = ['conservative','balanced','aggressive','extreme'
 const THEMES: Theme[]        = ['ai_semi','us_tech','dividend','crypto','broad_etf','kr_growth'];
 const HORIZONS: Horizon[]    = ['1y','3y','5y','10y'];
 
-function AIPortfolioInner() {
+function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<string, number>; currency?: string }) {
   const [goal,    setGoal]    = useState(100_000_000);
   const [horizon, setHorizon] = useState<Horizon>('5y');
   const [monthly, setMonthly] = useState(1_000_000);
@@ -110,6 +111,7 @@ function AIPortfolioInner() {
 
   return (
     <div style={PAGE_STYLE}>
+      <RebalanceTool prices={prices} currency={currency} />
       <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: SP.md }}>
         <IconBox tone="purple" size="md"><Brain size={IC_SIZE.md} strokeWidth={IC_STROKE} /></IconBox>
         <div>
@@ -304,6 +306,6 @@ function MiniStat({ label, value, color }: { label: string; value: string; color
   );
 }
 
-export default function AIPortfolioPage() {
-  return <ErrorBoundary><AIPortfolioInner /></ErrorBoundary>;
+export default function AIPortfolioPage(props: { prices?: Record<string, number>; currency?: string }) {
+  return <ErrorBoundary><AIPortfolioInner {...props} /></ErrorBoundary>;
 }

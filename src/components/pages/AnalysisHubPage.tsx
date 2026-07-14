@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyInfo, notifySuccess } from '@/lib/notify/center';
 import { BarChart3, TrendingUp, TrendingDown, Radio, ArrowLeftRight, FlaskConical } from 'lucide-react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -863,7 +864,7 @@ function AnalysisHubPage() {
               </div>
             ))}
             <button type="button"
-              onClick={() => alert('모의 주문은 더보기 → 모의매매 페이지에서 실행할 수 있습니다.')}
+              onClick={() => notifyInfo('모의 주문은 더보기 → 모의매매 페이지에서 실행할 수 있습니다.')}
               style={{width:'100%',padding:'12px',minHeight:46,background:'linear-gradient(135deg,#2563EB,#7C3AED)',color:'#fff',border:'none',borderRadius:11,fontWeight:800,fontSize:13,cursor:'pointer',marginTop:10}}>모의 주문</button>
             <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:5}}>모의매매 전용 · 실제 자금 없음 · 수익 보장 없음</div>
           </Card>
@@ -1104,7 +1105,7 @@ function AnalysisHubPage() {
             <div key={s} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:`1px solid ${T.border}`}}>
               <span style={{color:T.txt,fontSize:12,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{s}</span>
               <button type="button"
-                onClick={() => alert(`${s}는 TradingView 차트의 비교 기능에서 추가할 수 있습니다`)}
+                onClick={() => notifySuccess(`${s}는 TradingView 차트의 비교 기능에서 추가할 수 있습니다`)}
                 style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:10,fontWeight:700,cursor:'pointer'}}>+ 추가</button>
             </div>
           ))}
@@ -1121,7 +1122,7 @@ function AnalysisHubPage() {
             <div key={a.l} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 0',borderBottom:`1px solid ${T.border}`}}>
               <div><div style={{color:T.txt,fontSize:12,fontWeight:600}}>{a.l}</div><div style={{color:T.muted,fontSize:9,marginTop:1}}>{a.d}</div></div>
               <button type="button"
-                onClick={() => alert(`"${a.l}" 알림은 더보기 → 알림 페이지에서 설정할 수 있습니다`)}
+                onClick={() => notifyInfo(`"${a.l}" 알림은 더보기 → 알림 페이지에서 설정할 수 있습니다`)}
                 style={{background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:10,cursor:'pointer'}}>준비중</button>
             </div>
           ))}

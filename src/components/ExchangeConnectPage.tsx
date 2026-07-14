@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
 import { EXCHANGE_META } from '@/lib/exchanges/types';
 import type { ExchangeId, ConnectedExchange } from '@/lib/exchanges/types';
 
@@ -173,7 +174,7 @@ export default function ExchangeConnectPage() {
 
   // ── Delete ──────────────────────────────────────────────────
   const handleDelete = async (id: string) => {
-    if (!confirm('이 거래소 연결을 삭제하시겠습니까?\n저장된 API 키는 즉시 삭제됩니다.')) return;
+    if (!(await confirmDialog('이 거래소 연결을 삭제하시겠습니까?\n저장된 API 키는 즉시 삭제됩니다.', { danger: true }))) return;
     try {
       const _a = await getAuthHeader();
       await fetch('/api/exchange', {

@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifySuccess } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -139,7 +140,7 @@ function FundingPage({currency}:{currency:string}) {
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
                   <div style={{color:T.txt,fontWeight:700}}>연결된 은행 계좌</div>
                   <button type="button"
-                    onClick={() => alert('은행 계좌 추가는 곧 출시됩니다. 현재는 모의 입출금만 지원됩니다.')}
+                    onClick={() => notifySuccess('은행 계좌 추가는 곧 출시됩니다. 현재는 모의 입출금만 지원됩니다.')}
                     style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 계좌 추가</button>
                 </div>
                 {(Array.isArray(linkedBanks)?linkedBanks:[]).map((b,i)=>(
@@ -217,7 +218,7 @@ function FundingPage({currency}:{currency:string}) {
               </div>
             )}
             <button type="button"
-              onClick={() => alert(fxAmount ? `모의 환전이 완료되었습니다 (실제 환전은 거래소 연결 페이지에서 가능)` : '환전 금액을 먼저 입력해주세요')}
+              onClick={() => notifySuccess(fxAmount ? `모의 환전이 완료되었습니다 (실제 환전은 거래소 연결 페이지에서 가능)` : '환전 금액을 먼저 입력해주세요')}
               disabled={!fxAmount}
               style={{width:'100%',padding:'13px',minHeight:48,background:fxAmount?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:fxAmount?'pointer':'not-allowed'}}>
               환전 실행 (모의 — 실제 환전 미실행)

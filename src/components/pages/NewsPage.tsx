@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   Search as SearchIc, X as XIcon, Newspaper, ExternalLink,
   TrendingUp, TrendingDown, Minus, Brain, Sparkles, AlertCircle,
-  ChevronRight, RefreshCw, ArrowLeft,
+  ChevronRight, RefreshCw, ArrowLeft, Star,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
 import { formatNewsDate } from '@/lib/format';
@@ -31,6 +31,32 @@ const CAT_TO_API: Record<string, string> = {
 // 예측별 색상 매핑
 const predColor = (p: NewsPrediction): string =>
   p === 'up' ? T.grn : p === 'down' ? T.red : T.ylw;
+
+// ── 중요도 별점 (AI 분석 없이도 출처·최신성·감성·영향종목수로 산출) ──
+function newsImportance(n: any, impactTotal?: number): number {
+  if (typeof impactTotal === 'number' && impactTotal > 0) {
+    return Math.max(1, Math.min(5, Math.round(impactTotal / 20)));
+  }
+  let score = 0;
+  try { const src = getSourceInfo(n.source); score += (src.reliability / 100) * 2; } catch {}
+  if (n.sentiment === 'bullish' || n.sentiment === 'bearish') score += 1.2; else score += 0.4;
+  const t = typeof n.time === 'number' ? n.time : (n.publishedAt ? new Date(n.publishedAt).getTime() : (n.time ? new Date(n.time).getTime() : 0));
+  if (t) { const h = (Date.now() - t) / 3600000; score += h < 6 ? 1 : h < 24 ? 0.7 : h < 72 ? 0.4 : 0.1; }
+  const tk = Array.isArray(n.tickers) ? n.tickers.length : 0;
+  score += Math.min(0.8, tk * 0.25);
+  return Math.max(1, Math.min(5, Math.round(score)));
+}
+
+function StarRow({ n: count, size = 11 }: { n: number; size?: number }) {
+  const color = count >= 4 ? '#EF4444' : count >= 3 ? '#F59E0B' : '#64748B';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 1 }} title={`중요도 ${count}/5`}>
+      {[1, 2, 3, 4, 5].map(i => (
+        <Star key={i} size={size} color={color} fill={i <= count ? color : 'none'} strokeWidth={2} />
+      ))}
+    </span>
+  );
+}
 
 function PredictionBadge({ prediction, confidence, compact }: { prediction: NewsPrediction; confidence: number; compact?: boolean }) {
   const color = predColor(prediction);
@@ -601,6 +627,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                         );
                       })()}
                       {n.time && <span style={F.muted}>· {formatNewsDate(n.time)}</span>}
+                      <span style={{ marginLeft: 'auto' }}><StarRow n={newsImportance(n, an ? calculateImpact({ sourceName: n.source, prediction: an.prediction, confidence: an.confidence, publishedAt: (typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined)), numAffectedAssets: an.affectedAssets?.length || 0 }).total : undefined)} /></span>
                     </div>
 
                     {/* 영향도 게이지 (AI 분석 완료 시) */}
@@ -663,6 +690,20 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                     ) : (
                       <div style={{ ...F.muted, fontSize: 10 }}>
                         탭하면 AI 분석을 시작합니다
+                      </div>
+                    )}
+
+                    {/* 영향 종목 (항상 표시, AI 분석 없이도 n.tickers) */}
+                    {Array.isArray(n.tickers) && n.tickers.length > 0 && (
+                      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 }}>
+                        <span style={{ color: T.muted, fontSize: 9, fontWeight: 700 }}>영향 종목</span>
+                        {n.tickers.slice(0, 6).map((tk: string) => (
+                          <span key={tk}
+                            onClick={(e) => { e.stopPropagation(); onOpenAsset && onOpenAsset({ id: tk, sym: tk, nameKr: tk, name: tk, p: 0, c: 0, v: '-', t: 'coin', clr: '#3B82F6' }, 'trading'); }}
+                            style={{ padding: '2px 8px', background: T.alt, border: `1px solid ${T.border}`, borderRadius: R.pill, color: T.sub, fontSize: 9.5, fontWeight: 700, cursor: 'pointer' }}>
+                            {tk}
+                          </span>
+                        ))}
                       </div>
                     )}
                   </div>

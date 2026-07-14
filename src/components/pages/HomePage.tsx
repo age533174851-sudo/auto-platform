@@ -10,7 +10,9 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          DonutChart, MiniBar, GlobalSearch, getLeverageRec,
          LiquidationCalc, PositionSizer, RiskDashboard } from './SharedUI';
 import { useLogoMap } from '@/lib/hooks/useLogoMap';
-import { BarChart3, Bot, Wallet, ChevronRight } from 'lucide-react';
+import { getFavorites, subscribeFavorites } from '@/lib/favorites';
+import { menuById } from '@/lib/menuItems';
+import { TrendingUp, Bot, PieChart, GraduationCap, ChevronRight, Wallet } from 'lucide-react';
 
 
 // 첫 진입 1분 시작 가이드 (한 번만 표시)
@@ -57,6 +59,8 @@ function WelcomeGuide({ onNav }: { onNav: (t: string) => void }) {
 
 function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>void;prices:Asset[];currency:string;lang:string;onOpenAsset?:(a:any,dest?:string)=>void}) {
   const [selectedNews, setSelectedNews] = useState<any>(null);
+  const [favs, setFavs] = useState<string[]>([]);
+  useEffect(() => { setFavs(getFavorites()); return subscribeFavorites(() => setFavs(getFavorites())); }, []);
   const top5=useMemo(()=>[...prices].sort((a,b)=>b.c-a.c).slice(0,5),[prices]);
   const [autoAll,setAutoAll]=useState(true);
 
@@ -79,139 +83,84 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>vo
 
   return (
     <div>
-      <WelcomeGuide onNav={onNav} />
-
-      {/* 베타 상태 배지 */}
-      <div style={{background:'linear-gradient(135deg,#0D1A35,#0A1428)',border:`1px solid ${T.border2}`,borderRadius:14,padding:'12px 14px',marginBottom:12}}>
-        <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
-          <span style={{width:7,height:7,borderRadius:'50%',background:T.grn,display:'inline-block'}}/>
-          <span style={{color:T.txt,fontWeight:800,fontSize:13}}>TRAIGO 베타</span>
-          <span style={{marginLeft:'auto',color:T.muted,fontSize:9}}>투자 시뮬레이션 플랫폼</span>
-        </div>
-        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-          <span style={{fontSize:9,color:T.grn,background:T.grn+'15',padding:'2px 8px',borderRadius:5,fontWeight:700}}>✓ 실시간 데이터</span>
-          <span style={{fontSize:9,color:T.acl,background:T.acl+'15',padding:'2px 8px',borderRadius:5,fontWeight:700}}>✓ 모의매매</span>
-          <span style={{fontSize:9,color:T.ylw,background:T.ylw+'15',padding:'2px 8px',borderRadius:5,fontWeight:700}}>△ 실거래 연결 (테스트넷)</span>
-        </div>
-      </div>
-
-      {/* 3개 핵심 액션 — 뭐부터 할지 */}
-      <div style={{marginBottom:14}}>
-        <div style={{color:T.muted,fontSize:11,fontWeight:700,marginBottom:8,paddingLeft:2}}>무엇을 하고 싶으세요?</div>
-        <div style={{display:'flex',flexDirection:'column',gap:8}}>
-          {[
-            { ic: BarChart3, t: '시장 보기', d: '실시간 코인·주식 가격 확인', dest: 'market', c: T.acl },
-            { ic: Bot,       t: '자동매매 시작', d: 'AI·전략으로 자동 투자', dest: 'auto', c: T.prp },
-            { ic: Wallet,    t: '포트폴리오 관리', d: '보유 자산 추적·분석', dest: 'portfolio', c: T.grn },
-          ].map(a => (
-            <button key={a.dest} onClick={() => onNav(a.dest)}
-              style={{display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${T.border}`,borderRadius:14,padding:'14px 16px',cursor:'pointer',textAlign:'left',width:'100%'}}>
-              <div style={{flexShrink:0,width:42,height:42,borderRadius:11,background:a.c+'18',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                <a.ic size={20} strokeWidth={2.2} color={a.c}/>
-              </div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{color:T.txt,fontWeight:800,fontSize:14}}>{a.t}</div>
-                <div style={{color:T.muted,fontSize:11,marginTop:1}}>{a.d}</div>
-              </div>
-              <ChevronRight size={18} color={T.muted}/>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Risk warning */}
-      <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:12,padding:'9px 13px',marginBottom:12,display:'flex',gap:8,alignItems:'flex-start'}}>
-        <span style={{flexShrink:0}}>⚠️</span>
-        <span style={{color:T.ylw,fontSize:11,fontWeight:600,lineHeight:1.5}}>{tr(lang,'warning')}</span>
-      </div>
-
-      {/* Total asset banner */}
+      {/* ── 총자산 히어로 ── */}
       <div style={{background:'linear-gradient(145deg,#0D1A35,#091228)',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>
-        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:4}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>헤지펀드 포트폴리오 · {tr(lang,'mock')}</span></div>
-        <div style={{color:T.muted,fontSize:12,marginBottom:2}}>총 평가 자산</div>
-        <div style={{color:T.txt,fontSize:30,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1.5}}>{cvt(TOTAL,currency)}</div>
-        <div style={{display:'flex',alignItems:'center',gap:10,marginTop:6}}>
-          <span style={{color:T.grn,fontWeight:700,fontSize:13}}>▲ +{cvt(TOTAL_PNL,currency)}</span>
-          <Bdg c={T.grn} ch={fmtPct(TOTAL_PNL/TOTAL*100)+" 총수익"}/>
-        </div>
-        <div style={{display:'flex',gap:8,marginTop:16,flexWrap:'wrap'}}>
-          <button onClick={()=>onNav('portfolio')} style={{background:T.acc,color:'#fff',border:'none',borderRadius:12,padding:'11px 18px',fontWeight:800,fontSize:13,cursor:'pointer'}}>포트폴리오</button>
-          <button onClick={()=>onNav('trading')} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:12,padding:'11px 18px',fontWeight:700,fontSize:13,cursor:'pointer'}}>매매하기</button>
+        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>내 총자산 · {tr(lang,'mock')}</span></div>
+        <div style={{color:T.txt,fontSize:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1.5}}>{cvt(TOTAL,currency)}</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
+          <span style={{color:T.muted,fontSize:12}}>오늘 손익</span>
+          <span style={{color:TOTAL_PNL>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>{TOTAL_PNL>=0?'+':''}{cvt(Math.abs(TOTAL_PNL),currency)}</span>
+          <Bdg c={TOTAL_PNL>=0?T.grn:T.red} ch={fmtPct(TOTAL_PNL/TOTAL*100)}/>
         </div>
       </div>
 
-      {/* Dual portfolio cards */}
-      <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-        <Card style={{padding:'14px 16px',cursor:'pointer'}} glow={false}>
-          <div onClick={()=>onNav('portfolio')} style={{cursor:'pointer'}}>
-            <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}>
-              <span style={{fontSize:14}}>📈</span>
-              <span style={{color:T.muted,fontSize:10,fontWeight:700}}>장투 포트폴리오</span>
-            </div>
-            <div style={{color:T.txt,fontSize:15,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(LONG_VALUE,currency)}</div>
-            <div style={{color:T.grn,fontSize:11,fontWeight:700,marginTop:2}}>+{cvt(1820000,currency)}</div>
-            <div style={{marginTop:8,height:4,background:'#1A2D4A',borderRadius:2}}><div style={{height:'100%',width:'60%',background:T.acl,borderRadius:2}}/></div>
-            <div style={{color:T.muted,fontSize:9,marginTop:3}}>배분 60% · 레버 없음</div>
-          </div>
-        </Card>
-        <Card style={{padding:'14px 16px',cursor:'pointer'}}>
-          <div onClick={()=>onNav('portfolio')} style={{cursor:'pointer'}}>
-            <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}>
-              <span style={{fontSize:14}}>⚡</span>
-              <span style={{color:T.muted,fontSize:10,fontWeight:700}}>단타 포트폴리오</span>
-            </div>
-            <div style={{color:T.txt,fontSize:15,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(SHORT_VALUE,currency)}</div>
-            <div style={{color:T.grn,fontSize:11,fontWeight:700,marginTop:2}}>+{cvt(87000,currency)}</div>
-            <div style={{marginTop:8,height:4,background:'#1A2D4A',borderRadius:2}}><div style={{height:'100%',width:'30%',background:T.ylw,borderRadius:2}}/></div>
-            <div style={{color:T.muted,fontSize:9,marginTop:3}}>배분 30% · 최대 10배</div>
-          </div>
-        </Card>
-      </div>
+      {/* ── 자동매매 상태 ── */}
+      <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${autoAll?T.grn+'40':T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
+        <div style={{flexShrink:0,width:40,height:40,borderRadius:11,background:(autoAll?T.grn:T.muted)+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <Bot size={20} color={autoAll?T.grn:T.muted}/>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:T.txt,fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:6}}>자동매매 <span style={{width:7,height:7,borderRadius:'50%',background:autoAll?T.grn:T.muted,display:'inline-block'}}/><span style={{color:autoAll?T.grn:T.muted,fontSize:11,fontWeight:700}}>{autoAll?'실행중':'정지'}</span></div>
+          <div style={{color:T.muted,fontSize:11,marginTop:1}}>{autoAll?'EMA 추세 + DCA 실행 중':'탭하여 자동매매 시작'}</div>
+        </div>
+        <ChevronRight size={18} color={T.muted}/>
+      </button>
 
-      {/* Status cards */}
-      <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+      {/* ── 핵심 4버튼 (2×2) ── */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:18}}>
         {[
-          {icon:'',l:'DCA 적립',v:'주 3회 실행',sub:'다음 매수 내일',c:T.acl},
-          {icon:'',l:'오늘 단타',v:'+₩87,000',sub:'승률 67% (2/3)',c:T.grn},
-        ].map(x=>(
-          <Card key={x.l} style={{padding:'14px 16px'}}>
-            <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:6}}><span style={{fontSize:14}}>{x.icon}</span><div style={{color:T.muted,fontSize:10,fontWeight:600}}>{x.l}</div></div>
-            <div style={{color:x.c,fontSize:14,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{x.v}</div>
-            <div style={{color:T.muted,fontSize:10,marginTop:3}}>{x.sub}</div>
-          </Card>
+          { t:'매매하기',  d:'직접 사고팔기',   dest:'trading',   Icon:TrendingUp,    c:'#3B82F6' },
+          { t:'자동매매',  d:'AI 자동 투자',    dest:'auto',      Icon:Bot,           c:'#8B5CF6' },
+          { t:'포트폴리오',d:'내 자산 현황',    dest:'portfolio', Icon:PieChart,      c:'#10B981' },
+          { t:'아카데미',  d:'투자 배우기',     dest:'academy',   Icon:GraduationCap, c:'#F59E0B' },
+        ].map(a=>(
+          <button key={a.dest} onClick={()=>onNav(a.dest)}
+            style={{display:'flex',flexDirection:'column',gap:10,background:T.card,border:`1px solid ${T.border}`,borderRadius:18,padding:'18px 16px',cursor:'pointer',textAlign:'left',minHeight:104}}>
+            <div style={{width:46,height:46,borderRadius:13,background:a.c+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <a.Icon size={23} strokeWidth={2.2} color={a.c}/>
+            </div>
+            <div>
+              <div style={{color:T.txt,fontWeight:800,fontSize:15}}>{a.t}</div>
+              <div style={{color:T.muted,fontSize:11,marginTop:2}}>{a.d}</div>
+            </div>
+          </button>
         ))}
       </div>
 
-      {/* Auto trading */}
-      <Card style={{padding:'14px 18px',marginBottom:12}} glow={autoAll}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <div>
-            <div style={{color:T.txt,fontWeight:700,fontSize:13,marginBottom:2}}>자동매매 <Bdg c={autoAll?T.grn:T.muted} ch={autoAll?'실행중':'정지'}/></div>
-            <div style={{color:T.muted,fontSize:11}}>{autoAll?'EMA 추세 + DCA 실행 중':'정지됨'}</div>
+      {/* ── 즐겨찾기 (홈에 고정한 기능) ── */}
+      {favs.length > 0 && (
+        <div style={{marginBottom:18}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <span style={{color:T.txt,fontWeight:700,fontSize:13}}>즐겨찾기</span>
+            <span onClick={()=>onNav('menu_hub')} style={{color:T.acl,fontSize:11,fontWeight:700,cursor:'pointer'}}>편집 ›</span>
           </div>
-          <Toggle on={autoAll} onChange={setAutoAll}/>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10}}>
+            {favs.map(id=>{
+              const m = menuById(id);
+              if (!m) return null;
+              const { Icon } = m;
+              return (
+                <button key={id} onClick={()=>onNav(id)} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:7,background:'transparent',border:'none',cursor:'pointer',padding:'4px 0'}}>
+                  <div style={{width:52,height:52,borderRadius:16,background:m.color+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                    <Icon size={24} color={m.color}/>
+                  </div>
+                  <span style={{color:T.txt,fontSize:10.5,fontWeight:600,textAlign:'center',lineHeight:1.2,wordBreak:'keep-all'}}>{m.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </Card>
+      )}
 
-      {/* Risk status */}
-      <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${T.grn}20`}}>
-        <div style={{color:T.txt,fontWeight:700,fontSize:12,marginBottom:10}}>리스크 현황</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8}}>
-          {[{l:'전체 리스크',v:'낮음',c:T.grn},{l:'장투 건전성',v:'우수',c:T.grn},{l:'단타 손실',v:'0%',c:T.grn}].map(r=>(
-            <div key={r.l} style={{textAlign:'center'}}>
-              <div style={{color:T.muted,fontSize:9,marginBottom:3}}>{r.l}</div>
-              <Bdg c={r.c} ch={r.v}/>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      {/* Top movers */}
+      {/* ── 상위 상승 종목 (가볍게) ── */}
       <Card style={{padding:'14px 16px',marginBottom:12}}>
-        <div style={{color:T.txt,fontWeight:700,fontSize:12,marginBottom:10}}>상위 상승 종목</div>
-        {(Array.isArray(top5)?top5:[]).map((a,i)=>(
-          <div key={a.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderBottom:i<4?`1px solid ${T.border}`:'none'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+          <span style={{color:T.txt,fontWeight:700,fontSize:13}}>상위 상승 종목</span>
+          <span onClick={()=>onNav('market')} style={{color:T.acl,fontSize:11,fontWeight:700,cursor:'pointer'}}>더보기 ›</span>
+        </div>
+        {(Array.isArray(top5)?top5:[]).slice(0,4).map((a,i)=>(
+          <div key={a.id} onClick={()=>onOpenAsset && onOpenAsset(a,'trading')} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 0',borderBottom:i<3?`1px solid ${T.border}`:'none',cursor:'pointer'}}>
             <div style={{display:'flex',alignItems:'center',gap:8}}>
               <Logo id={a.id} size={30} clr={a.clr} name={a.nameKr} logoUrl={logoMap[String(a.sym || a.id).toUpperCase()] || logoMap[String(a.id).toUpperCase()]}/>
               <div><div style={{color:T.txt,fontWeight:600,fontSize:12}}>{a.nameKr}</div><div style={{color:T.muted,fontSize:10}}>{a.sym}</div></div>
@@ -224,22 +173,16 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>vo
         ))}
       </Card>
 
-      {/* News */}
+      {/* ── 최신 뉴스 (가볍게) ── */}
       <Card style={{padding:'14px 16px',marginBottom:12}}>
-        <div style={{color:T.txt,fontWeight:700,fontSize:12,marginBottom:10}}>최신 뉴스</div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+          <span style={{color:T.txt,fontWeight:700,fontSize:13}}>최신 뉴스</span>
+          <span onClick={()=>onNav('news')} style={{color:T.acl,fontSize:11,fontWeight:700,cursor:'pointer'}}>더보기 ›</span>
+        </div>
         {MOCK_NEWS.slice(0,3).map((n,i)=>(
           <div key={n.id} role="button" tabIndex={0}
-            onClick={()=>setSelectedNews({
-            ...n,
-            publishedAt: n.time,
-            summary: (n as any).summary || n.title,
-            content: (n as any).content || (n as any).summary || n.title,
-            tickers: Array.isArray((n as any).tickers) ? (n as any).tickers : [],
-          })}
-            onKeyDown={(e)=>{ if(e.key==='Enter'){ setSelectedNews({...n,publishedAt:n.time,summary:(n as any).summary||n.title,content:(n as any).content||(n as any).summary||n.title,tickers:Array.isArray((n as any).tickers)?(n as any).tickers:[]}); } }}
-            style={{padding:'10px 8px',margin:'0 -8px',borderRadius:8,borderBottom:i<2?`1px solid ${T.border}`:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:8,WebkitTapHighlightColor:'transparent',transition:'background .12s'}}
-            onTouchStart={(e)=>{(e.currentTarget as HTMLElement).style.background=T.alt;}}
-            onTouchEnd={(e)=>{(e.currentTarget as HTMLElement).style.background='transparent';}}>
+            onClick={()=>setSelectedNews({...n,publishedAt:n.time,summary:(n as any).summary||n.title,content:(n as any).content||(n as any).summary||n.title,tickers:Array.isArray((n as any).tickers)?(n as any).tickers:[]})}
+            style={{padding:'10px 8px',margin:'0 -8px',borderRadius:8,borderBottom:i<2?`1px solid ${T.border}`:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:8}}>
             <div style={{flex:1,minWidth:0}}>
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
                 <Bdg c={n.sentiment==='bullish'?T.grn:T.red} ch={n.category}/>
@@ -247,29 +190,10 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>vo
               </div>
               <div style={{color:T.txt,fontSize:12,fontWeight:600,lineHeight:1.4}}>{n.title}</div>
             </div>
-            <span style={{color:T.muted,fontSize:14,flexShrink:0}}>›</span>
+            <ChevronRight size={16} color={T.muted} style={{flexShrink:0}}/>
           </div>
         ))}
-        <div onClick={()=>onNav('news')} style={{textAlign:'center',color:T.acl,fontSize:11,fontWeight:700,padding:'10px 0 0',cursor:'pointer',borderTop:`1px solid ${T.border}`}}>
-          전체 뉴스 보기 →
-        </div>
       </Card>
-
-      {/* Quick access to new features */}
-      <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-        {[
-          {tab:'calendar',icon:'',l:'경제 캘린더',d:'오늘 FOMC·CPI 확인',c:T.red},
-          {tab:'briefing',icon:'',l:'AI 브리핑',d:'오늘의 시장 요약',c:T.prp},
-          {tab:'tax',icon:'',l:'손익 추적',d:'2025년 실현손익',c:T.ylw},
-          {tab:'growth',icon:'',l:'성장 현황',d:'배지·XP·친구초대',c:T.grn},
-        ].map(x=>(
-          <button key={x.tab} onClick={()=>onNav(x.tab)} style={{background:T.card,border:`1px solid ${x.c}20`,borderRadius:14,padding:'12px 12px',textAlign:'left',cursor:'pointer'}}>
-            <div style={{fontSize:18,marginBottom:5}}>{x.icon}</div>
-            <div style={{color:T.txt,fontSize:12,fontWeight:700}}>{x.l}</div>
-            <div style={{color:T.muted,fontSize:10,marginTop:2}}>{x.d}</div>
-          </button>
-        ))}
-      </div>
 
       <NewsDetailModal
         news={selectedNews}

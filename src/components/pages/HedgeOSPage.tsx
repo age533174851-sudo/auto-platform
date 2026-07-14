@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -288,7 +289,7 @@ function HedgeOSPage() {
             <div style={{display:'flex',gap:6,marginBottom:10}}>
               {(['conservative','balanced','aggressive'] as const).map(m=>(
                 <button key={m} type="button"
-                  onClick={() => alert(`${m==='conservative'?'보수형':m==='balanced'?'균형형':'공격형'} 포트폴리오는 곧 출시됩니다. 현재는 더보기 → 리스크관리에서 모드 변경 가능합니다.`)}
+                  onClick={() => notifyInfo(`${m==='conservative'?'보수형':m==='balanced'?'균형형':'공격형'} 포트폴리오는 곧 출시됩니다. 현재는 더보기 → 리스크관리에서 모드 변경 가능합니다.`)}
                   style={{flex:1,padding:'9px',minHeight:36,background:m==='balanced'?T.prp+'20':'transparent',color:m==='balanced'?T.prp:T.muted,border:`1px solid ${m==='balanced'?T.prp:T.border}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
                   {m==='conservative'?'보수형':m==='balanced'?'균형형':'공격형'}
                 </button>
@@ -348,10 +349,10 @@ function HedgeOSPage() {
               </div>
               <div style={{display:'flex',gap:6}}>
                 <button type="button"
-                  onClick={() => alert(`"${s.name}" 상세 정보는 곧 출시됩니다.\n작성자: ${s.author}\n수익률: +${s.pnl}%\n승률: ${s.winRate}%\n점수: ${s.score}`)}
+                  onClick={() => notifyInfo(`"${s.name}" 상세 정보는 곧 출시됩니다.\n작성자: ${s.author}\n수익률: +${s.pnl}%\n승률: ${s.winRate}%\n점수: ${s.score}`)}
                   style={{flex:1,padding:'9px',minHeight:36,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>상세 보기</button>
                 <button type="button"
-                  onClick={() => alert(`"${s.name}" 모의 구독 기능은 곧 출시됩니다. 현재는 더보기 → 전략빌더에서 본인 전략 생성 가능합니다.`)}
+                  onClick={() => notifyInfo(`"${s.name}" 모의 구독 기능은 곧 출시됩니다. 현재는 더보기 → 전략빌더에서 본인 전략 생성 가능합니다.`)}
                   style={{flex:1,padding:'9px',minHeight:36,background:s.color+'15',color:s.color,border:`1px solid ${s.color}30`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>구독 (모의)</button>
               </div>
             </Card>

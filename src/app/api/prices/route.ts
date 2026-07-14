@@ -100,6 +100,40 @@ async function fetchBinance(): Promise<Map<string, PriceResult>> {
   return res;
 }
 
+// ─── CoinGecko 폴백 (Binance 실패/차단 시, 키 불필요) ───────────
+const CG_ID: Record<string,string> = {
+  BTC:'bitcoin', ETH:'ethereum', SOL:'solana', BNB:'binancecoin', XRP:'ripple',
+  DOGE:'dogecoin', ADA:'cardano', AVAX:'avalanche-2', TON:'the-open-network',
+  LINK:'chainlink', DOT:'polkadot', MATIC:'matic-network', ARB:'arbitrum',
+  OP:'optimism', SUI:'sui', PEPE:'pepe', SHIB:'shiba-inu', UNI:'uniswap',
+  APT:'aptos', INJ:'injective-protocol',
+};
+async function fetchCoinGecko(krw: number): Promise<Map<string, PriceResult>> {
+  const res = new Map<string, PriceResult>();
+  const ids = Object.values(CG_ID).join(',');
+  try {
+    const r = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`,
+      { signal: AbortSignal.timeout(4500), headers: { 'Accept': 'application/json' } }
+    );
+    if (!r.ok) throw new Error(`CoinGecko ${r.status}`);
+    const d = await r.json();
+    for (const [sym, id] of Object.entries(CG_ID)) {
+      const row = d[id];
+      if (!row || row.usd == null) continue;
+      res.set(sym, {
+        symbol: sym,
+        price:     row.usd * krw,
+        change24h: row.usd_24h_change ?? 0,
+        volume24h: row.usd_24h_vol ?? 0,
+        marketCap: MCAP[sym],
+        source:    'coingecko' as any,
+      });
+    }
+  } catch {}
+  return res;
+}
+
 // ─── Binance top gainers / losers / trending ───────────────────
 async function fetchBinanceAll(): Promise<any[]> {
   try {
@@ -316,7 +350,12 @@ export async function GET(req: NextRequest) {
 
   // ── Default: batch crypto + stock prices ──
   const mock    = getMock();
-  const cryptoM = await fetchBinance();
+  let cryptoM   = await fetchBinance();
+  let cryptoSrc = 'binance';
+  if (cryptoM.size === 0) {                      // Binance 차단/실패 → CoinGecko 폴백
+    cryptoM = await fetchCoinGecko(KRW);
+    if (cryptoM.size > 0) cryptoSrc = 'coingecko';
+  }
   const stockM  = await fetchPolygon([...US_STOCKS]);
 
   // Merge: live beats mock
@@ -330,14 +369,15 @@ export async function GET(req: NextRequest) {
 
   const allMock = cryptoM.size === 0 && stockM.size === 0;
   return NextResponse.json({
-    source:   cryptoM.size > 0 ? (stockM.size > 0 ? 'binance+polygon' : 'binance') : 'mock',
+    source:   cryptoM.size > 0 ? (stockM.size > 0 ? `${cryptoSrc}+polygon` : cryptoSrc) : 'mock',
     status:   allMock ? 'mock' : 'live',
     latency:  Date.now() - t0,
     count:    data.length,
     prices,
     data,
     providers:[
-      { name:'Binance',    status:cryptoM.size>0?'live':'error' },
+      { name:'Binance',    status:cryptoSrc==='binance'&&cryptoM.size>0?'live':cryptoM.size>0?'fallback':'error' },
+      { name:'CoinGecko',  status:cryptoSrc==='coingecko'?'live':'standby' },
       { name:'Polygon.io', status:process.env.POLYGON_API_KEY || '' ? (stockM.size>0?'live':'error') : 'unconfigured' },
     ],
     timestamp: Date.now(),

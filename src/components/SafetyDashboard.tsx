@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 
 const T = {
   bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
@@ -194,7 +195,7 @@ export default function SafetyDashboard() {
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
   const handleKillSwitch = async (on: boolean) => {
-    if (on && !killReason.trim()) { alert('정지 이유를 입력하세요'); return; }
+    if (on && !killReason.trim()) { notifyInfo('정지 이유를 입력하세요'); return; }
     setActivatingKill(true);
     try {
       await fetch('/api/safety', {

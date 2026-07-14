@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -233,7 +234,7 @@ function TradFiPage({prices,currency}:{prices:Asset[];currency:string}) {
             {lev>sel.maxLev*0.7&&<div style={{background:T.red+'12',border:`1px solid ${T.red}30`,borderRadius:8,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 고레버리지 경고: CFD 상품은 레버리지 손실이 빠릅니다</div></div>}
 
             <button type="button"
-              onClick={() => alert(`모의 진입: ${sel.nameKr} ${side==='long'?'롱':'숏'} ${lev}x\n\n실제 거래는 더보기 → 거래소 연결 후 가능합니다.`)}
+              onClick={() => notifyInfo(`모의 진입: ${sel.nameKr} ${side==='long'?'롱':'숏'} ${lev}x\n\n실제 거래는 더보기 → 거래소 연결 후 가능합니다.`)}
               style={{width:'100%',padding:'15px',minHeight:54,background:`linear-gradient(135deg,${side==='long'?T.grn:'#DC2626'},${side==='long'?'#059669':'#991B1B'})`,color:'#fff',border:'none',borderRadius:12,fontWeight:900,fontSize:14,cursor:'pointer'}}>
               [모의] {sel.nameKr} {side==='long'?'롱':'숏'} {lev}x 주문
             </button>

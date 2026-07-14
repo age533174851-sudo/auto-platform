@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyError } from '@/lib/notify/center';
 import {
   Sparkles, Wand2, Wrench, List, Play, Pause, Copy, Trash2, Plus,
   ChevronLeft, ChevronRight, Send, AlertTriangle, CheckCircle2, Info,
@@ -112,7 +114,7 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
 
   const onDelete = useCallback(async (id: string) => {
     if (typeof window === 'undefined') return;
-    if (!window.confirm('이 전략을 삭제하시겠습니까?')) return;
+    if (!(await confirmDialog('이 전략을 삭제하시겠습니까?', { danger: true }))) return;
     deleteStrategy(id);
     refresh();
     // 클라우드도 삭제
@@ -591,23 +593,21 @@ function ManualBuilder({
     update({ conditions: s.conditions.filter((_, idx) => idx !== i) });
   }, [s.conditions, update]);
 
-  const submit = useCallback(() => {
+  const submit = useCallback(async () => {
     // 안전: 실전 모드면 거래소 선택 확인 + 명시적 확인
     if (s.mode === 'live') {
       if (!s.connectionId) {
         if (typeof window !== 'undefined') {
-          window.alert('실전 매매는 거래소 연결을 선택해야 합니다.\n연결된 거래소가 없으면 먼저 거래소 연결 페이지에서 등록하세요.');
+          notifyError('실전 매매는 거래소 연결을 선택해야 합니다.\n연결된 거래소가 없으면 먼저 거래소 연결 페이지에서 등록하세요.');
         }
         return;
       }
-      const ok = typeof window !== 'undefined' && window.confirm(
-        '⚠️ 실전 매매 모드로 저장합니다.\n\n' +
+      const ok = typeof window !== 'undefined' && (await confirmDialog('⚠️ 실전 매매 모드로 저장합니다.\n\n' +
         '• 조건 충족 시 실제 자금으로 자동 주문이 실행됩니다\n' +
         '• 모든 손실은 전적으로 사용자 책임입니다\n' +
         '• 1회 주문 한도와 출금권한 차단 등 안전장치가 적용됩니다\n' +
         '• 저장 후에도 목록에서 활성화해야 작동합니다\n\n' +
-        '계속하시겠습니까?'
-      );
+        '계속하시겠습니까?'));
       if (!ok) return;
     }
     onSave(s);

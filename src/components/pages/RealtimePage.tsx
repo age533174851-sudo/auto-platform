@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyError } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -157,7 +158,7 @@ function RealtimePage({prices}:{prices:Asset[]}) {
             <div style={{display:'flex',gap:8}}>
               <input placeholder="인증 코드 입력" style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:11,outline:'none'}}/>
               <button type="button"
-                onClick={() => alert('텔레그램 연동은 곧 출시됩니다. @TRAIGO_Bot은 아직 활성화되지 않았습니다.')}
+                onClick={() => notifyError('텔레그램 연동은 곧 출시됩니다. @TRAIGO_Bot은 아직 활성화되지 않았습니다.')}
                 style={{background:T.acl+'20',color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>연동</button>
             </div>
           </Card>

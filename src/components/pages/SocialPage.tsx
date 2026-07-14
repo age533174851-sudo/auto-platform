@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -130,7 +131,7 @@ function SocialPage() {
                 {(Array.isArray(s.tags) ? s.tags : []).map((t:string)=><span key={t} style={{background:T.alt,color:T.muted,fontSize:9,padding:'1px 6px',borderRadius:5}}>#{t}</span>)}
               </div>
               <button type="button"
-                onClick={() => alert('모의 전략 구독은 곧 출시됩니다. 현재는 더보기 → 전략빌더에서 본인 전략 생성 가능합니다.')}
+                onClick={() => notifyInfo('모의 전략 구독은 곧 출시됩니다. 현재는 더보기 → 전략빌더에서 본인 전략 생성 가능합니다.')}
                 style={{width:'100%',padding:'10px',minHeight:38,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>전략 구독 (모의)</button>
             </Card>
           ))}

@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyError } from '@/lib/notify/center';
 import {
   Shield, ShieldAlert, ShieldCheck, ShieldOff,
   Edit3, History, TriangleAlert, Lock, Unlock, RotateCcw, Save, X,
@@ -29,17 +31,15 @@ function RiskSettingsInner() {
   const [showHistory, setShowHistory] = useState(false);
 
   // ── 프리셋 적용 ────────────────────────────────────────────
-  const handlePreset = useCallback((mode: RiskMode) => {
+  const handlePreset = useCallback(async (mode: RiskMode) => {
     if (typeof window === 'undefined') return;
 
     // 제한 없음 모드 — 강력한 동의 요구
     if (mode === 'unlimited') {
-      const confirm1 = window.confirm(
-        '⚠️ 제한 없음 모드 경고\n\n' +
+      const confirm1 = (await confirmDialog('⚠️ 제한 없음 모드 경고\n\n' +
         '리스크 제한을 끄면 큰 손실이 발생할 수 있습니다.\n' +
         '모든 책임은 사용자에게 있습니다.\n\n' +
-        '계속 진행하시겠습니까?'
-      );
+        '계속 진행하시겠습니까?', { danger: true }));
       if (!confirm1) return;
 
       const input = window.prompt(
@@ -47,7 +47,7 @@ function RiskSettingsInner() {
         ''
       );
       if (input?.trim() !== '동의합니다') {
-        window.alert('확인 문구가 일치하지 않아 모드 변경이 취소되었습니다.');
+        notifyError('확인 문구가 일치하지 않아 모드 변경이 취소되었습니다.');
         return;
       }
     }
@@ -71,8 +71,8 @@ function RiskSettingsInner() {
   }, [settings]);
 
   // ── 기본값 복원 ────────────────────────────────────────────
-  const handleResetToStandard = useCallback(() => {
-    if (!window.confirm('"기본 모드" 설정으로 복원하시겠습니까?')) return;
+  const handleResetToStandard = useCallback(async () => {
+    if (!(await confirmDialog('"기본 모드" 설정으로 복원하시겠습니까?'))) return;
     handlePreset('standard');
   }, [handlePreset]);
 
@@ -360,9 +360,9 @@ function EditModal({
                   {draft.safetyEnabled ? '한도 도달 시 자동 정지' : '자동 정지 안함 (사용자 전담)'}
                 </div>
               </div>
-              <button onClick={() => {
+              <button onClick={async () => {
                   if (draft.safetyEnabled) {
-                    if (!window.confirm('안전장치를 끄면 한도 도달 시 자동 정지가 작동하지 않습니다.\n계속하시겠습니까?')) return;
+                    if (!(await confirmDialog('안전장치를 끄면 한도 도달 시 자동 정지가 작동하지 않습니다.\n계속하시겠습니까?', { danger: true }))) return;
                   }
                   update('safetyEnabled', !draft.safetyEnabled);
                 }}

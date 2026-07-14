@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
 
 // ── Theme ─────────────────────────────────────────────────────
 const T = {
@@ -611,7 +612,7 @@ function NoticesPanel({
 
   const remove = async (id: string) => {
     if (!token) return;
-    if (!confirm('이 공지를 삭제하시겠습니까?')) return;
+    if (!(await confirmDialog('이 공지를 삭제하시겠습니까?', { danger: true }))) return;
     try {
       await apiCall('notice_delete', token, 'POST', { action:'notice_delete', id });
       showMsg('삭제 완료', true);

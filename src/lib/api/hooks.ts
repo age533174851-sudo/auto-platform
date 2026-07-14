@@ -64,8 +64,8 @@ export function useLivePrices(intervalMs = 8000) {
       // Skip work if tab hidden
       if (typeof document !== 'undefined' && document.hidden) return;
       fetchCount++;
-      if (fetchCount % Math.round(24000 / intervalMs) === 0) {
-        // Real refresh ~24s
+      if (fetchCount % Math.round(12000 / intervalMs) === 0) {
+        // Real refresh ~12s (실데이터가 시뮬레이션을 자주 덮어씀)
         fetchPrices('coin').then(r => {
           merge(r.data);
           setStatus(r.data.length > 0 ? 'live' : 'mock');

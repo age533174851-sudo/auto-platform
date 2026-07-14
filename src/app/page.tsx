@@ -26,6 +26,8 @@ type IconComp = LucideIcon;
 
 // ── Static imports (small/critical for first paint) ──────────
 import PosterLibrary from '@/components/PosterLibrary';
+import AssetDetailModal from '@/components/AssetDetailModal';
+import ConfirmHost from '@/components/ConfirmHost';
 import SafetyDashboard from '@/components/SafetyDashboard';
 import SeasonDashboard from '@/components/SeasonDashboard';
 import HubDashboard from '@/components/HubDashboard';
@@ -131,10 +133,10 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
         <div style={{width:64,height:64,borderRadius:18,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:30,fontWeight:900,color:'#fff',margin:'0 auto 10px'}}>T</div>
         <div style={{color:T.txt,fontWeight:900,fontSize:22,letterSpacing:-0.5}}>TRAIGO</div>
         <div style={{color:T.muted,fontSize:11,marginTop:3}}>{t.tagline}</div>
-        <div style={{display:'flex',gap:8,marginTop:16,justifyContent:'center'}}>{[0,1].map(i=><div key={i} style={{width:step===i?28:8,height:7,borderRadius:4,background:step===i?T.acl:T.border,transition:'all .3s'}}/>)}</div>
+        <div style={{display:'flex',gap:8,marginTop:16,justifyContent:'center'}}>{[0,1,2].map(i=><div key={i} style={{width:step===i?28:8,height:7,borderRadius:4,background:step===i?T.acl:T.border,transition:'all .3s'}}/>)}</div>
         <div style={{color:T.txt,fontWeight:800,fontSize:17,marginTop:14,display:'flex',alignItems:'center',justifyContent:'center',gap:7}}>
           <Globe2 size={18} strokeWidth={2.2} color={T.acl}/>
-          <span>{step===0 ? t.title : t.currencyTitle}</span>
+          <span>{step===0 ? t.title : step===1 ? t.currencyTitle : '이렇게 시작해요'}</span>
         </div>
       </div>
       <div style={{flex:1,overflowY:'auto',padding:'0 20px 8px',width:'100%',maxWidth:560,margin:'0 auto'}}>
@@ -147,9 +149,28 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
           </button>
         ))}</div>}
         {step===1&&<div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>{Object.entries(CURRENCIES).map(([code,cur])=><button key={code} onClick={()=>setSc(code)} style={{background:sc===code?T.acc+'25':T.card,border:`2px solid ${sc===code?T.acl:T.border}`,borderRadius:12,padding:'10px 4px',cursor:'pointer',textAlign:'center'}}><div style={{color:sc===code?T.acl:T.txt,fontWeight:800,fontSize:18}}>{cur.symbol}</div><div style={{color:T.muted,fontSize:9,marginTop:1}}>{code}</div></button>)}</div>}
+        {step===2&&<div style={{display:'flex',flexDirection:'column',gap:12}}>
+          {[
+            {n:'1',t:'모의투자 (MOCK)',d:'가상 자금으로 안전하게 연습해요. 지금 바로 시작할 수 있어요.',c:T.grn,badge:'지금 시작'},
+            {n:'2',t:'테스트넷 연결',d:'거래소 테스트 환경에 연결해 실전처럼 연습해요. (가짜 돈)',c:T.ylw,badge:'다음 단계'},
+            {n:'3',t:'실전 투자',d:'실제 자금으로 거래해요. 로그인 후 API 연결이 필요해요.',c:T.acl,badge:'로그인 후'},
+          ].map(m=>(
+            <div key={m.n} style={{display:'flex',gap:12,alignItems:'flex-start',background:T.card,border:`1px solid ${m.c}30`,borderRadius:16,padding:'14px 16px'}}>
+              <div style={{flexShrink:0,width:32,height:32,borderRadius:'50%',background:m.c+'20',color:m.c,fontWeight:900,fontSize:15,display:'flex',alignItems:'center',justifyContent:'center'}}>{m.n}</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
+                  <span style={{color:T.txt,fontWeight:800,fontSize:14}}>{m.t}</span>
+                  <span style={{color:m.c,background:m.c+'18',fontSize:9,fontWeight:800,padding:'2px 7px',borderRadius:5}}>{m.badge}</span>
+                </div>
+                <div style={{color:T.muted,fontSize:11,lineHeight:1.5}}>{m.d}</div>
+              </div>
+            </div>
+          ))}
+          <div style={{color:T.muted,fontSize:11,textAlign:'center',marginTop:2}}>먼저 모의투자로 부담 없이 둘러보세요.</div>
+        </div>}
       </div>
       <div style={{padding:'14px 20px 36px',flexShrink:0,borderTop:`1px solid ${T.border}`,background:T.bg,width:'100%',maxWidth:560,margin:'0 auto'}}>
-        <button onClick={()=>{if(step===0)setStep(1);else onDone(sl,sc);}} style={{width:'100%',padding:'16px',background:`linear-gradient(135deg,${T.acc},${T.prp})`,color:'#fff',border:'none',borderRadius:16,fontWeight:800,fontSize:16,cursor:'pointer',marginBottom:10}}>{step===0 ? t.next : t.start}</button>
+        <button onClick={()=>{if(step<2)setStep(step+1);else onDone(sl,sc);}} style={{width:'100%',padding:'16px',background:`linear-gradient(135deg,${T.acc},${T.prp})`,color:'#fff',border:'none',borderRadius:16,fontWeight:800,fontSize:16,cursor:'pointer',marginBottom:10}}>{step<2 ? t.next : '모의투자로 시작하기'}</button>
         <button onClick={()=>onDone(sl,sc==='KRW'&&sl!=='ko'?'USD':sc)} style={{width:'100%',padding:'10px',background:'transparent',color:T.muted,border:'none',cursor:'pointer',fontSize:12}}>{t.skip}</button>
       </div>
     </div>
@@ -314,6 +335,8 @@ export default function App() {
     if(savedLang !== 'ko')   setLang(savedLang);
     if(savedCur  !== 'KRW')  setCurrency(savedCur);
     setOnboarded(savedOb);
+    // 실시간 USD/KRW 환율 갱신 (실패 시 캐시/폴백)
+    import('@/lib/currency').then(m => m.refreshUsdKrw()).catch(()=>{});
   },[]);
 
   useEffect(()=>{
@@ -328,6 +351,8 @@ export default function App() {
 
   // Keyboard shortcuts (desktop/Mac)
   const [activeAsset,setActiveAsset]=useState<any>(null);
+  const [detailAsset,setDetailAsset]=useState<any>(null);
+  const openDetail=useCallback((asset:any)=>{ if(asset) setDetailAsset(asset); },[]);
   const [pnlPrefill,setPnlPrefill]=useState<any>(null);
   const nav=useCallback((id:string)=>{setTab(id);setShowMore(false);},[]);
   const openAsset=useCallback((asset:any,dest='trading')=>{
@@ -415,9 +440,9 @@ export default function App() {
     const p={prices,currency,lang,onNav:nav};
     try {
       switch(tab) {
-        case 'home':         return <HomePageComp {...p} onOpenAsset={openAsset}/>;
-        case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openAsset}/>;
-        case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openAsset} onOpenPnL={openPnL}/>;
+        case 'home':         return <HomePageComp {...p} onOpenAsset={openDetail}/>;
+        case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail}/>;
+        case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openDetail} onOpenPnL={openPnL}/>;
         case 'trading':      return <TradingPageComp key={activeAsset?.id||'trading'} prices={prices} currency={currency} activeAsset={activeAsset} onOpenPnL={openPnL}/>;
         case 'auto':         return <AutoPageComp onNav={nav} currency={currency} onOpenAsset={openAsset}/>;
         case 'strategies':   return <StrategyBuilderPage onNav={nav}/>;
@@ -441,16 +466,16 @@ export default function App() {
         case 'pine_guide':   return <PineGuidePage/>;
         case 'seasonality':  return <SeasonalityPage/>;
         case 'hub_accounts': return <HubAccountsPage/>;
-        case 'ai_portfolio': return <AIPortfolioPage/>;
-        case 'dca':          return <DCAPage/>;
-        case 'dividends':    return <DividendCalendarPage/>;
+        case 'ai_portfolio': return <AIPortfolioPage prices={prices} currency={currency}/>;
+        case 'dca':          return <DCAPage currency={currency}/>;
+        case 'dividends':    return <DividendCalendarPage currency={currency}/>;
         case 'funding':      return <FundingPage currency={currency}/>;
         case 'pnl':         return <PnLCalculatorPage currency={currency} prefill={pnlPrefill}/>;
         case 'heatmap':      return <div><div style={{fontWeight:800,fontSize:15,color:T.txt,marginBottom:12}}>🌈 자산 히트맵</div><Heatmap prices={prices}/></div>;
         case 'scanner':      return <ScannerPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'clock':        return <div style={{padding:'4px 0'}}><React.Suspense fallback={null}><WorldClock/></React.Suspense></div>;
         case 'search':       return <SearchPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
-        case 'review':       return <JournalReviewPage/>;
+        case 'review':       return <JournalReviewPage currency={currency}/>;
         case 'autobot':      return <AutoBotLabPage/>;
         case 'groups':       return <WatchGroupsPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'paper':        return <PaperTradingPage prices={prices} onOpenAsset={openAsset}/>;
@@ -469,7 +494,7 @@ export default function App() {
         case 'calendar':     return <EconCalendarPage lang={lang}/>;
         case 'briefing':     return <BriefingPage prices={prices} onOpenAsset={openAsset}/>;
         case 'tax':          return <TaxPage currency={currency}/>;
-        case 'growth':       return <GrowthPage/>;
+        case 'growth':       return <GrowthPage prices={prices} currency={currency}/>;
         case 'admin':        return isAdminUser ? <AdminPageComp/> : <HomePageComp {...p}/>;
         default:             return <HomePageComp {...p}/>;
       }
@@ -509,6 +534,15 @@ export default function App() {
       <AutoTradeEngine/>
       <ApiHealthMonitor/>
       {!onboarded&&<Onboarding onDone={(l,c)=>{setLang(l);setCurrency(c);setOnboarded(true);sS('tg_ob','1');sS('tg_lang',l);sS('tg_cur',c);}}/>}
+      <ConfirmHost />
+      <AssetDetailModal
+        asset={detailAsset}
+        currency={currency}
+        onClose={()=>setDetailAsset(null)}
+        onTrade={(a)=>openAsset(a,'trading')}
+        onPnL={openPnL}
+        onNav={nav}
+      />
       <div suppressHydrationWarning className="aw" style={{background:T.bg,minHeight:'-webkit-fill-available' as any,color:T.txt}}>
 
         {/* PC Sidebar */}

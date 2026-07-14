@@ -178,6 +178,26 @@ export async function POST(req: NextRequest) {
       const usdtNotional = (body.amount || body.quantity * px || 0) / 1375;
       const qty = body.quantity || (px > 0 ? usdtNotional / (px / 1375) : 0);
 
+      // ── 중복 신호 차단 (멱등성) — TradingView 중복 발사·재시도 방어 ──
+      const { signalKey, claimSignal } = await import('@/lib/risk/idempotency');
+      const dedupKey = signalKey({
+        clientId: body.id || body.alertId || null,
+        connectionId: body.connectionId,
+        symbol: tradeSymbol,
+        action: body.action || (body.side || 'buy'),
+        side: (body.side || 'buy').toUpperCase(),
+        windowSec: 15,
+      });
+      const claim = await claimSignal(sb, dedupKey, 15);
+      if (claim.duplicate) {
+        entry.status = 'duplicate';
+        signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+        return NextResponse.json({
+          ok: true, id: webhookId, duplicate: true, dropped: true,
+          message: '⚠️ 중복 신호 무시됨 — 동일 신호가 이미 처리되었습니다 (이중 주문 방지)',
+        }, { status: 200 });
+      }
+
       // 거래소 직접 호출 X → jobs 큐에 PLACE_ORDER 적재 (Worker가 유일 실행자)
       const { enqueueJob } = await import('@/lib/jobs');
       const q = await enqueueJob(sb, {
@@ -192,6 +212,9 @@ export async function POST(req: NextRequest) {
       entry.status = q.ok ? 'queued' : 'error';
       (entry as any).jobId = q.jobId;
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+      { const { log } = await import('@/lib/log/logger');
+        if (q.ok) log.info('webhook', '실전 주문 큐 적재', { symbol: tradeSymbol, side: body.side, mode, jobId: q.jobId });
+        else log.error('webhook', `주문 적재 실패: ${q.error}`, { symbol: tradeSymbol, mode }); }
 
       return NextResponse.json({
         ok: q.ok, id: webhookId, mode, queued: q.ok, jobId: q.jobId,
@@ -202,6 +225,8 @@ export async function POST(req: NextRequest) {
     } catch (e: any) {
       entry.status = 'error';
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+      const { log } = await import('@/lib/log/logger');
+      log.fatal('webhook', `실전 주문 처리 실패: ${e?.message}`, { symbol: body?.symbol, connectionId: body?.connectionId, mode });
       try { const { sendTelegram, fmtError } = await import('@/lib/notify/telegram'); await sendTelegram(fmtError(`웹훅 오류: ${e?.message}`)); } catch {}
       return NextResponse.json({ ok: false, id: webhookId, message: `주문 오류: ${e?.message || ''}` }, { status: 200 });
     }

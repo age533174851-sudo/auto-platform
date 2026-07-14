@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
 import {
   GripVertical, ArrowUp, ArrowDown, ChevronsUp, ChevronsDown,
   Trash2, Plus, Folder, FolderPlus, Inbox, X, ExternalLink,
@@ -356,8 +357,8 @@ export default function WatchGroupsPage({
     showToast(`✅ "${g.name}" 그룹 생성됨`);
   }, [newName, newIcon, groups, saveGroups, showToast]);
 
-  const deleteGroup = useCallback((id: string) => {
-    if (!confirm('이 그룹을 삭제하시겠습니까?')) return;
+  const deleteGroup = useCallback(async (id: string) => {
+    if (!(await confirmDialog('이 그룹을 삭제하시겠습니까?', { danger: true }))) return;
     const next = groups.filter(g => g.id !== id);
     saveGroups(next);
     if (active === id) setActive(next[0]?.id ?? '');
@@ -490,9 +491,9 @@ export default function WatchGroupsPage({
                   <Plus size={12} strokeWidth={2.4}/>
                   종목 추가
                 </button>
-                <button type="button" onClick={() => {
+                <button type="button" onClick={async () => {
                     if (typeof window === 'undefined') return;
-                    const ok = window.confirm(`정말 "${activeGroup.name}" 그룹을 삭제하시겠습니까?\n(이 그룹에 추가된 종목 자체는 다른 곳에 영향 없음)`);
+                    const ok = (await confirmDialog(`정말 "${activeGroup.name}" 그룹을 삭제하시겠습니까?\n(이 그룹에 추가된 종목 자체는 다른 곳에 영향 없음)`, { danger: true }));
                     if (ok) deleteGroup(activeGroup.id);
                   }}
                   aria-label="그룹 삭제"

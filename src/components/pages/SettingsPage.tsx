@@ -1,5 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyError, notifySuccess } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -89,9 +91,9 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
   },[showToast]);
 
   /* ── 모든 사용자 데이터 삭제 (위험 구역) ── */
-  const clearAllData=useCallback(async()=>{
+  const clearAllData=useCallback(async() =>{
     if(typeof window==='undefined')return;
-    const ok=confirm('정말 모든 로컬 데이터를 삭제하시겠습니까?\n\n삭제 대상:\n• localStorage (포트폴리오, 워치리스트, 알림 등)\n• sessionStorage\n• 브라우저 캐시\n\n이 작업은 되돌릴 수 없습니다.');
+    const ok=(await confirmDialog('정말 모든 로컬 데이터를 삭제하시겠습니까?\n\n삭제 대상:\n• localStorage (포트폴리오, 워치리스트, 알림 등)\n• sessionStorage\n• 브라우저 캐시\n\n이 작업은 되돌릴 수 없습니다.', { danger: true }));
     if(!ok)return;
     try{
       // tg_* 키만 (다른 앱 데이터 보호)
@@ -121,8 +123,8 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
   },[showToast]);
 
   /* ── 로그아웃 ── */
-  const handleSignOut=useCallback(async()=>{
-    if(!confirm('로그아웃 하시겠습니까?'))return;
+  const handleSignOut=useCallback(async() =>{
+    if(!(await confirmDialog('로그아웃 하시겠습니까?', { danger: true })))return;
     try{
       const {getSupabaseClient}=await import('@/lib/supabase/client');
       const sb=getSupabaseClient();
@@ -137,7 +139,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
     }
   },[showToast]);
 
-  const importBackup=useCallback(async(file:File)=>{
+  const importBackup=useCallback(async(file:File) =>{
     setImporting(true);
     try {
       const text=await file.text();
@@ -145,7 +147,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
       if(parsed?.app!=='TRAIGO'||!parsed?.data||typeof parsed.data!=='object'){
         throw new Error('TRAIGO 백업 파일이 아닙니다');
       }
-      if(!confirm('현재 데이터를 백업 파일로 교체하시겠습니까? 이 작업은 되돌릴 수 없습니다.')){
+      if(!(await confirmDialog('현재 데이터를 백업 파일로 교체하시겠습니까? 이 작업은 되돌릴 수 없습니다.', { danger: true }))){
         setImporting(false);
         return;
       }
@@ -469,8 +471,8 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                   <div><div style={{color:T.txt,fontSize:12,fontWeight:600}}>{k.name}</div><div style={{color:T.muted,fontSize:10}}>생성: {k.created} · 최근: {k.lastUsed}</div></div>
                   <div style={{display:'flex',gap:6,alignItems:'center'}}><Bdg c={T.grn} ch="활성"/>
                     <button type="button"
-                      onClick={() => {
-                        if (typeof window !== 'undefined' && window.confirm(`API 키 "${k.name}"을(를) 삭제하시겠습니까?`)) {
+                      onClick={async () => {
+                        if (typeof window !== 'undefined' && (await confirmDialog(`API 키 "${k.name}"을(를) 삭제하시겠습니까?`, { danger: true }))) {
                           showToast('API 키 관리는 거래소 연결 페이지에서 가능합니다');
                         }
                       }}
@@ -720,7 +722,7 @@ function LoginHistoryCard({ isAuthenticated }: { isAuthenticated: boolean }) {
   useEffect(() => { fetchSessions(); }, [fetchSessions]);
 
   const revoke = useCallback(async (id: string) => {
-    if (!confirm('이 세션을 종료하시겠습니까?\n(해당 기기는 다음 새로고침 시 재로그인 필요)')) return;
+    if (!(await confirmDialog('이 세션을 종료하시겠습니까?\n(해당 기기는 다음 새로고침 시 재로그인 필요)', { danger: true }))) return;
     try {
       const { getSupabaseClient } = await import('@/lib/supabase/client');
       const sb = getSupabaseClient();
@@ -736,7 +738,7 @@ function LoginHistoryCard({ isAuthenticated }: { isAuthenticated: boolean }) {
   }, [fetchSessions]);
 
   const revokeAllOthers = useCallback(async () => {
-    if (!confirm('현재 기기를 제외한 모든 세션을 즉시 종료하시겠습니까?\n\n• 다른 기기들은 즉시 또는 곧 로그아웃됩니다\n• 이 작업은 되돌릴 수 없습니다')) return;
+    if (!(await confirmDialog('현재 기기를 제외한 모든 세션을 즉시 종료하시겠습니까?\n\n• 다른 기기들은 즉시 또는 곧 로그아웃됩니다\n• 이 작업은 되돌릴 수 없습니다', { danger: true }))) return;
     try {
       const { getSupabaseClient } = await import('@/lib/supabase/client');
       const sb = getSupabaseClient();
@@ -749,13 +751,13 @@ function LoginHistoryCard({ isAuthenticated }: { isAuthenticated: boolean }) {
       });
       if (r.ok) {
         await fetchSessions();
-        alert('다른 기기에서 모두 로그아웃 처리되었습니다');
+        notifySuccess('다른 기기에서 모두 로그아웃 처리되었습니다');
       } else {
         const d = await r.json().catch(() => ({}));
-        alert(`종료 실패: ${d.error || r.status}`);
+        notifyError(`종료 실패: ${d.error || r.status}`);
       }
     } catch (e) {
-      alert(`오류: ${e instanceof Error ? e.message : 'unknown'}`);
+      notifyError(`오류: ${e instanceof Error ? e.message : 'unknown'}`);
     }
   }, [fetchSessions]);
 

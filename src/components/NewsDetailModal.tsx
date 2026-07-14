@@ -1,4 +1,5 @@
 'use client';
+import { Star } from 'lucide-react';
 import React from 'react';
 import { T } from '@/lib/constants';
 import { formatNewsDate } from '@/lib/format';
@@ -231,6 +232,60 @@ export default function NewsDetailModal({
             )}
           </div>
         )}
+
+        {/* AI 영향 분석 — 영향도 + 매매 영향 (원문→번역→요약→영향도→매매영향) */}
+        {(() => {
+          const senti = (news as any).sentiment as string | undefined;
+          const dirWord = senti === 'bullish' ? '상승' : senti === 'bearish' ? '하락' : '중립';
+          const dirColor = senti === 'bullish' ? T.grn : senti === 'bearish' ? T.red : T.ylw;
+          const conf = Math.round(Number((news as any).confidence) || (senti && senti !== 'neutral' ? 75 : 50));
+          // 영향도 점수: 방향성 + 관련종목 수 + 최신성
+          let score = senti && senti !== 'neutral' ? 45 : 18;
+          score += Math.min(24, safeTickers.length * 8);
+          const pubT = (news as any).publishedAt ? new Date((news as any).publishedAt).getTime() : 0;
+          if (pubT) { const h = (Date.now() - pubT) / 3600000; score += h < 6 ? 24 : h < 24 ? 18 : h < 72 ? 10 : 4; }
+          score = Math.max(5, Math.min(100, score));
+          const stars = Math.max(1, Math.min(5, Math.round(score / 20)));
+          const starColor = stars >= 4 ? T.red : stars >= 3 ? T.ylw : T.muted;
+          const lvlLabel = score >= 75 ? '매우 높음' : score >= 55 ? '높음' : score >= 35 ? '보통' : '낮음';
+          // 단기/중기/장기 관점 (감성 기반 스프레드)
+          const horizons = senti === 'bullish'
+            ? [['단기', '상승', T.grn], ['중기', '상승', T.grn], ['장기', '중립', T.ylw]]
+            : senti === 'bearish'
+            ? [['단기', '하락', T.red], ['중기', '중립', T.ylw], ['장기', '중립', T.ylw]]
+            : [['단기', '중립', T.ylw], ['중기', '중립', T.ylw], ['장기', '중립', T.ylw]];
+          return (
+            <div style={{ background: T.alt, borderRadius: 12, padding: '13px 14px', marginBottom: 12, border: `1px solid ${T.border}` }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <span style={{ color: T.txt, fontSize: 12, fontWeight: 800 }}>AI 영향 분석</span>
+                <span style={{ display: 'inline-flex', gap: 1 }} title={`중요도 ${stars}/5`}>
+                  {[1,2,3,4,5].map(i => <Star key={i} size={12} color={starColor} fill={i <= stars ? starColor : 'none'} strokeWidth={2} />)}
+                </span>
+              </div>
+              {/* 영향도 게이지 */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 3 }}>
+                <span style={{ color: T.muted, fontSize: 10, fontWeight: 700 }}>영향도</span>
+                <span style={{ color: dirColor, fontSize: 11, fontWeight: 900 }}>{score}점 · {lvlLabel}</span>
+              </div>
+              <div style={{ height: 6, background: T.card, borderRadius: 3, overflow: 'hidden', marginBottom: 12 }}>
+                <div style={{ height: '100%', width: `${score}%`, background: dirColor, transition: 'width .3s' }} />
+              </div>
+              {/* 매매 영향 (단기/중기/장기) */}
+              <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 6 }}>매매 영향 · AI 신뢰도 {conf}%</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+                {horizons.map(([term, d, c]) => (
+                  <div key={term as string} style={{ background: T.card, borderRadius: 8, padding: '8px 4px', textAlign: 'center', border: `1px solid ${c as string}30` }}>
+                    <div style={{ color: T.muted, fontSize: 9, marginBottom: 3 }}>{term}</div>
+                    <div style={{ color: c as string, fontSize: 12, fontWeight: 800 }}>{d}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ color: T.muted, fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
+                감성 분석 기반 참고 정보입니다. 투자 판단은 본인 책임입니다.
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Tags */}
         {safeTags.length > 0 && (

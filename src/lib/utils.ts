@@ -1,4 +1,5 @@
 import { CURRENCIES, I18N } from './constants';
+import { getUsdKrw } from './currency';
 
 export function cvt(p: number | null | undefined, cur = 'KRW'): string {
   // 유효하지 않은 값은 '—'로 표시 (0인 척하면 사용자 혼란)
@@ -14,7 +15,10 @@ export function cvt(p: number | null | undefined, cur = 'KRW'): string {
     if (p > 0)     return '₩' + p.toFixed(8);   // SHIB, PEPE 등 극소가격
     return '₩0';
   }
-  const v = p * c.rate;
+  // 비-KRW: 실시간/캐시 환율 사용 (하드코딩 rate 대신). p는 KRW base 가정.
+  let rate = c.rate;
+  if (cur === 'USD') { const live = getUsdKrw(); if (live > 0) rate = 1 / live; }
+  const v = p * rate;
   if (v >= 1e9) return c.symbol + (v/1e9).toFixed(2) + 'B';
   if (v >= 1e6) return c.symbol + (v/1e6).toFixed(2) + 'M';
   if (v >= 1e3) return c.symbol + v.toFixed(2);

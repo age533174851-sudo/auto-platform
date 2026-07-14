@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { T } from '@/lib/constants';
+import TradeRetrospect from '@/components/TradeRetrospect';
 import { Card } from './SharedUI';
 import { formatKRW, safePercent } from '@/lib/format';
 import { formatRelativeTime } from '@/lib/format';
@@ -200,7 +201,7 @@ function generateInsight(trades: TradeEntry[], m: ReviewMetrics): AIInsight {
   return { strengths, mistakes, fixes, timingExit, timingEntry };
 }
 
-export default function JournalReviewPage() {
+export default function JournalReviewPage({ currency = 'KRW' }: { currency?: string }) {
   const [trades, setTrades]   = useState<TradeEntry[]>([]);
   const [selected, setSelected] = useState<TradeEntry | null>(null);
 
@@ -224,6 +225,7 @@ export default function JournalReviewPage() {
 
   return (
     <div style={{ paddingBottom: 100 }}>
+      <TradeRetrospect currency={currency} />
       {/* Header */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 14 }}>
         <div>

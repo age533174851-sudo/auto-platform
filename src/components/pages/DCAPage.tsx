@@ -1,5 +1,8 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
+import AiDcaPanel from '@/components/AiDcaPanel';
+import { confirmDialog } from '@/lib/confirm/dialog';
+import { notifyError } from '@/lib/notify/center';
 import {
   CalendarClock, Plus, Pencil, Trash2, Play, ChartBar,
   TrendingDown, Flame, Coins as CoinsIc, CircleCheck, X as XIcon,
@@ -50,7 +53,7 @@ function priceFor(symbol: string): PriceContext {
   return MOCK_PRICES[symbol] || { currentPrice: 100_000, pct7d: 0, pct30d: 0 };
 }
 
-function DCAInner() {
+function DCAInner({ currency = 'KRW' }: { currency?: string }) {
   const [rules, setRules] = useState<DCARule[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DCARule | null>(null);
@@ -68,8 +71,8 @@ function DCAInner() {
 
   const toggleEnabled = (id: string) => persist(rules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
 
-  const deleteRule = (id: string) => {
-    if (!confirm('이 적립 룰을 삭제할까요?')) return;
+  const deleteRule = async (id: string) => {
+    if (!(await confirmDialog('이 적립 룰을 삭제할까요?', { danger: true }))) return;
     persist(rules.filter(r => r.id !== id));
   };
 
@@ -78,7 +81,7 @@ function DCAInner() {
 
   const saveDraft = () => {
     if (!draft) return;
-    if (!draft.name.trim() || !draft.symbol.trim()) { alert('이름과 종목은 필수입니다.'); return; }
+    if (!draft.name.trim() || !draft.symbol.trim()) { notifyError('이름과 종목은 필수입니다.'); return; }
     const cleaned: DCARule = {
       ...draft,
       baseAmount: Math.max(1000, draft.baseAmount),
@@ -108,6 +111,7 @@ function DCAInner() {
 
   return (
     <div style={PAGE_STYLE}>
+      <AiDcaPanel currency={currency} />
       {/* 헤더 */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: SP.md, gap: SP.sm, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm }}>
@@ -372,6 +376,6 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
   );
 }
 
-export default function DCAPage() {
-  return <ErrorBoundary><DCAInner /></ErrorBoundary>;
+export default function DCAPage(props: { currency?: string }) {
+  return <ErrorBoundary><DCAInner {...props} /></ErrorBoundary>;
 }

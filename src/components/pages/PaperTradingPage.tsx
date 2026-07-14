@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { confirmDialog } from '@/lib/confirm/dialog';
 import { T } from '@/lib/constants';
 import MockAutoTrade from '@/components/MockAutoTrade';
 import StrategyProfilesPanel from '@/components/StrategyProfilesPanel';
@@ -136,8 +137,8 @@ export default function PaperTradingPage({
     }
   }, [account, selected, qty, side, priceLookup]);
 
-  const handleReset = useCallback(() => {
-    if (!confirm('가상 계좌를 초기화하시겠습니까? (보유 종목·매매 기록 모두 삭제)')) return;
+  const handleReset = useCallback(async () => {
+    if (!(await confirmDialog('가상 계좌를 초기화하시겠습니까? (보유 종목·매매 기록 모두 삭제)', { danger: true }))) return;
     setAccount(resetAccount());
     showToast('계좌 초기화 완료');
   }, [showToast]);
