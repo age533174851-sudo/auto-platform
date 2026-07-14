@@ -28,8 +28,15 @@ export const TYPE_COLOR: Record<AssetType, string> = {
   commodity:'#D97706', forex:'#0891B2',
 };
 
+// 외화 표시 자산의 정적 가격을 KRW-base로 정규화 (라이브 API와 동일 기준).
+// 이렇게 하면 모든 자산이 KRW-base가 되어 cvt()가 전 화면에서 올바르게 동작.
+// (coin·krstock·forex·index는 이미 KRW/포인트 기준이라 변환 안 함)
+const _FX_TO_KRW: Partial<Record<AssetType, number>> = {
+  stock: 1375, etf: 1375, commodity: 1375,   // USD
+  jpstock: 9.2, cnstock: 190, eustock: 1490, // JPY/CNY/EUR
+};
 const f = (id:string,nk:string,ne:string,sym:string,p:number,c:number,v:string,t:AssetType,clr:string,ex:Partial<Asset>={}):Asset =>
-  ({id,nameKr:nk,name:ne,sym,p,c,v,t,clr,isFeatured:true,...ex});
+  ({id,nameKr:nk,name:ne,sym,p: _FX_TO_KRW[t] ? p * (_FX_TO_KRW[t] as number) : p,c,v,t,clr,isFeatured:true,...ex});
 
 // ── Featured Crypto (top 15 by market cap) ───────────────────
 const CRYPTO: Asset[] = [

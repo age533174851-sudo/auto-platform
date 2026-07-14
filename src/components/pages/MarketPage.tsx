@@ -244,7 +244,7 @@ function MarketPage({
                       </div>
                       <div style={{ textAlign:'right' }}>
                         <div style={{ color:T.txt, fontSize:11, fontWeight:700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                          {formatMoney(row.price, currency, 'USD')}
+                          {cvt(row.price, currency)}
                         </div>
                         <div style={{ color: up ? T.grn : T.red, fontSize:10, fontWeight:700 }}>
                           {up ? '▲' : '▼'}{Math.abs(row.change).toFixed(2)}%
