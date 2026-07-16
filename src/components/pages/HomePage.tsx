@@ -12,7 +12,7 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
 import { useLogoMap } from '@/lib/hooks/useLogoMap';
 import { getFavorites, subscribeFavorites } from '@/lib/favorites';
 import { menuById } from '@/lib/menuItems';
-import { TrendingUp, Bot, PieChart, GraduationCap, ChevronRight, Wallet } from 'lucide-react';
+import { TrendingUp, Bot, PieChart, GraduationCap, ChevronRight, Wallet, LogIn, Sparkles } from 'lucide-react';
 
 
 // 첫 진입 1분 시작 가이드 (한 번만 표시)
@@ -57,7 +57,7 @@ function WelcomeGuide({ onNav }: { onNav: (t: string) => void }) {
   );
 }
 
-function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>void;prices:Asset[];currency:string;lang:string;onOpenAsset?:(a:any,dest?:string)=>void}) {
+function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onNav:(t:string)=>void;prices:Asset[];currency:string;lang:string;onOpenAsset?:(a:any,dest?:string)=>void;authUser?:any;onLogin?:()=>void}) {
   const [selectedNews, setSelectedNews] = useState<any>(null);
   const [favs, setFavs] = useState<string[]>([]);
   useEffect(() => { setFavs(getFavorites()); return subscribeFavorites(() => setFavs(getFavorites())); }, []);
@@ -83,6 +83,19 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset}:{onNav:(t:string)=>vo
 
   return (
     <div>
+      {/* ── 비로그인 로그인 유도 카드 (설정 안 들어가도 홈에서 바로) ── */}
+      {!authUser && onLogin && (
+        <button onClick={onLogin} aria-label="로그인하기" style={{width:'100%',minHeight:44,textAlign:'left',display:'flex',alignItems:'center',gap:12,background:`linear-gradient(135deg,${T.acc},${T.prp})`,border:'none',borderRadius:18,padding:'16px 18px',marginBottom:14,cursor:'pointer'}}>
+          <div style={{width:40,height:40,borderRadius:12,background:'rgba(255,255,255,0.18)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <LogIn size={20} color="#fff"/>
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{color:'#fff',fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:5}}>TRAIGO 시작하기 <Sparkles size={13} color="#fff"/></div>
+            <div style={{color:'rgba(255,255,255,0.85)',fontSize:11,marginTop:2}}>로그인하면 포트폴리오 저장·자동매매·실전 연결까지</div>
+          </div>
+          <ChevronRight size={20} color="#fff" style={{flexShrink:0}}/>
+        </button>
+      )}
       {/* ── 총자산 히어로 ── */}
       <div style={{background:'linear-gradient(145deg,#0D1A35,#091228)',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>

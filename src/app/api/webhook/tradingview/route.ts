@@ -236,17 +236,20 @@ export async function POST(req: NextRequest) {
   entry.status = 'paper_logged';
   signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
 
-  // 텔레그램 알림 (설정된 경우)
+  // 텔레그램 알림 — 매수완료 카드 + [일시정지][전량청산][웹열기] 버튼
   try {
-    const { sendTelegram, fmtEntry } = await import('@/lib/notify/telegram');
-    await sendTelegram(fmtEntry({
+    const { sendTelegram, entryCard } = await import('@/lib/notify/telegram');
+    const card = entryCard({
       symbol: body.symbol || body.asset || '?',
       side: body.side === 'sell' ? '매도' : '매수',
       price: body.price || 0,
       amount: body.amount || 0,
       leverage: body.leverage,
-      mode: '모의',
-    }));
+      mode: mode === 'real' ? '실전' : '모의',
+      pnlPct: body.pnlPct,
+      connectionId: body.connectionId,
+    });
+    await sendTelegram(card.text, { buttons: card.buttons });
   } catch {}
 
   return NextResponse.json({

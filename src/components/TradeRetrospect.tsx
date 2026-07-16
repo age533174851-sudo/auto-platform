@@ -5,6 +5,8 @@ import { T } from '@/lib/constants';
 import { cvt } from '@/lib/utils';
 import { Brain, AlertTriangle, CheckCircle2, TrendingUp } from 'lucide-react';
 import { analyzeTrades, ordersToClosedTrades } from '@/lib/autotrade/retrospect';
+import TradeReplayModal from '@/components/TradeReplayModal';
+import type { ReplayTrade } from '@/lib/autotrade/replay';
 
 const PAPER_KEY = 'tg_paper_account_v1';
 
@@ -19,6 +21,15 @@ export default function TradeRetrospect({ currency = 'KRW' }: { currency?: strin
   }, []);
 
   const result = useMemo(() => analyzeTrades(ordersToClosedTrades(orders)), [orders]);
+
+  // 복기할 거래 선택 (Trade Replay)
+  const [replayTrade, setReplayTrade] = useState<ReplayTrade | null>(null);
+  const recentTrades: ReplayTrade[] = useMemo(() => (Array.isArray(orders) ? orders : [])
+    .filter((o: any) => o && o.side === 'sell' && o.realized != null)
+    .sort((a: any, b: any) => b.ts - a.ts)
+    .slice(0, 12)
+    .map((o: any) => ({ ts: o.ts, symbol: o.symbol, side: 'sell', exitPrice: o.price, realized: o.realized, realizedPct: o.realizedPct })),
+    [orders]);
 
   const sevColor = (s: string) => s === 'high' ? T.red : s === 'medium' ? T.ylw : T.muted;
 
@@ -95,9 +106,38 @@ export default function TradeRetrospect({ currency = 'KRW' }: { currency?: strin
         </div>
       )}
 
+      {/* 최근 매매 — 클릭해서 복기(Trade Replay) */}
+      {recentTrades.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: T.muted, fontSize: 11, fontWeight: 700, marginBottom: 8 }}>
+            <Search size={13} /> 최근 매매 · 탭하면 왜 이 결과인지 분석
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {recentTrades.map((t, i) => {
+              const loss = t.realized < 0;
+              const c = loss ? T.red : T.grn;
+              return (
+                <button key={i} onClick={() => setReplayTrade(t)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', minHeight: 44, background: T.alt, border: `1px solid ${loss ? T.red + '30' : T.border}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer', textAlign: 'left' }}>
+                  <span style={{ color: T.txt, fontWeight: 800, fontSize: 12, minWidth: 44 }}>{t.symbol}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: c, fontSize: 12.5, fontWeight: 800 }}>{(t.realizedPct ?? 0) >= 0 ? '+' : ''}{(t.realizedPct ?? 0).toFixed(1)}%</div>
+                    <div style={{ color: T.muted, fontSize: 9.5 }}>{new Date(t.ts).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })} {new Date(t.ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</div>
+                  </div>
+                  <span style={{ color: c, fontSize: 12, fontWeight: 700 }}>{t.realized >= 0 ? '+' : ''}{cvt(t.realized, currency)}</span>
+                  <span style={{ color: '#A78BFA', fontSize: 10, fontWeight: 700, flexShrink: 0 }}>복기 ›</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginTop: 12 }}>
         모의매매 체결 기록을 기반으로 분석합니다. 시간대·연속손실·종목·손익비·과매매 패턴을 점검해요.
       </div>
+
+      <TradeReplayModal trade={replayTrade} orders={orders} currency={currency} onClose={() => setReplayTrade(null)} />
     </div>
   );
 }

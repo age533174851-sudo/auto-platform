@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
-import { notifyInfo } from '@/lib/notify/center';
+import { notifyInfo, notifySuccess } from '@/lib/notify/center';
 import { T, CURRENCIES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, gS, sS, uid } from '@/lib/utils';
 import type { Asset } from '@/types';
@@ -11,6 +11,16 @@ import { loadSettings as loadRiskSettings, MODE_LABEL } from '@/lib/risk/store';
 import { Shield, Edit3, ChevronRight } from 'lucide-react';
 import AutoStatusBoard from '../AutoStatusBoard';
 import StrategyIntelligence from '../StrategyIntelligence';
+import RegimeFilterPanel from '../RegimeFilterPanel';
+import CommitteePanel from '../CommitteePanel';
+import AllocationPanel from '../AllocationPanel';
+import TacticalPanel from '../TacticalPanel';
+import LearningPanel from '../LearningPanel';
+import StrategyFactoryPanel from '../StrategyFactoryPanel';
+import DynamicSizingPanel from '../DynamicSizingPanel';
+import ChandelierPanel from '../ChandelierPanel';
+import StrategyScorePanel from '../StrategyScorePanel';
+import MetaStrategyPanel from '../MetaStrategyPanel';
 import AuditLogPanel from '../AuditLogPanel';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
@@ -54,8 +64,9 @@ const INITIAL_RISK_EVENTS:RiskEvent[] = [
 
 /* ─── AutoPage Component ─── */
 
-function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void } = {}) {
-  const [tab,setTab]=useState<'bots'|'signals'|'risk'|'runs'|'create'>('bots');
+function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void; requireAuth?: (reason: string, action: () => void) => void } = {}) {
+  const [tab,setTab]=useState<'bots'|'ai'|'signals'|'risk'|'runs'|'create'>('bots');
+  const [aiSection,setAiSection]=useState<'decision'|'risk'|'analysis'>('decision');
   const [strats,setStrats]=useState<Strategy[]>(INITIAL_STRATS);
   const [signals]=useState<Signal[]>(INITIAL_SIGNALS);
   const [runs]=useState<BotRun[]>(INITIAL_RUNS);
@@ -94,9 +105,15 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: stri
       maxDailyLoss:newStrat.maxDailyLoss,maxPositionSize:newStrat.maxPositionSize,cooldownMin:60,
       params:{},description:STRAT_INFO[newStrat.type].desc,
     };
-    setStrats(p=>[...p,s]);
-    setShowCreate(false);
-    setNewStrat({name:'',type:'ema_cross',asset:'BTC',timeframe:'4h',leverage:1,tp:5,sl:2.5,maxDailyLoss:500000,maxPositionSize:3000000});
+    // 실제 저장 (로그인 후 실행) — MOCK 빌드는 자유, 저장 시점에만 로그인 요구
+    const doSave=()=>{
+      setStrats(p=>[...p,s]);
+      setShowCreate(false);
+      setNewStrat({name:'',type:'ema_cross',asset:'BTC',timeframe:'4h',leverage:1,tp:5,sl:2.5,maxDailyLoss:500000,maxPositionSize:3000000});
+      notifySuccess('전략 저장됨', `${s.name} — 봇 목록에 추가되었어요`);
+    };
+    if(requireAuth) requireAuth('자동매매 전략을 저장하려면 로그인이 필요해요', doSave);
+    else doSave();
   };
 
   const statusColor:Record<StratStatus,string>={running:T.grn,paused:T.ylw,stopped:T.muted,error:T.red};
@@ -107,12 +124,6 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: stri
   return (
     <div>
       <AutoStatusBoard />
-      <StrategyIntelligence
-        strategies={strats.map(s => ({ id: s.id, name: s.name, type: (s as any).type, asset: s.asset, winRate: (s as any).winRate ?? 0, totalPnl: (s as any).totalPnl ?? 0, trades: (s as any).trades ?? 0, enabled: (s as any).enabled }))}
-        signals={signals.filter((sg: any) => sg.state !== 'executed').map((sg: any) => ({ stratId: sg.stratId, stratName: sg.stratName, type: (strats.find(st => st.id === sg.stratId) as any)?.type || 'ema_cross', asset: sg.asset, side: sg.type === 'sell' ? 'sell' : 'buy' }))}
-        onDisable={(id) => setStrats(prev => prev.map(s => s.id === id ? { ...s, enabled: false, status: 'stopped' } as any : s))}
-      />
-      <AuditLogPanel currency={currency} />
       {/* Exec mode + global stop */}
       <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
         <div style={{display:'flex',gap:4,flex:1}}>
@@ -151,7 +162,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: stri
 
       {/* Sub tabs */}
       <div style={{display:'flex',gap:5,marginBottom:14,overflowX:'auto'}}>
-        {([['bots','봇 목록'],['signals','신호'],['risk','리스크'],['runs','실행기록'],['create','➕ 전략 추가']] as const).map(([id,l])=>(
+        {([['bots','봇 목록'],['ai','AI 분석'],['signals','신호'],['risk','리스크'],['runs','실행기록'],['create','전략 추가']] as const).map(([id,l])=>(
           <button key={id} onClick={()=>setTab(id)} style={{flexShrink:0,padding:'7px 11px',background:tab===id?T.acg:'transparent',color:tab===id?T.acl:T.muted,border:`1px solid ${tab===id?T.acl:T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>{l}</button>
         ))}
       </div>
@@ -237,6 +248,47 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset }: { onNav?: (tab: stri
       )}
 
       {/* ── SIGNALS ── */}
+      {tab==='ai'&&(<>
+      {/* AI 서브탭 */}
+      <div style={{display:'flex',gap:6,marginBottom:14}}>
+        {([['decision','의사결정'],['risk','리스크'],['analysis','분석']] as const).map(([id,l])=>(
+          <button key={id} onClick={()=>setAiSection(id)}
+            style={{flex:1,padding:'9px 4px',background:aiSection===id?T.acg:T.card,color:aiSection===id?T.acl:T.muted,border:`1px solid ${aiSection===id?T.acl:T.border}`,borderRadius:11,fontSize:12,fontWeight:800,cursor:'pointer'}}>{l}</button>
+        ))}
+      </div>
+
+      {/* 의사결정: 위원회 → 자산배분 → Tactical → 자기학습 → Meta */}
+      {aiSection==='decision'&&(<>
+      <CommitteePanel symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
+      <AllocationPanel currency={currency} />
+      <TacticalPanel symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
+      <LearningPanel />
+      <StrategyFactoryPanel strategies={strats.map(s => ({ id: s.id, name: s.name, type: (s as any).type, params: (s as any).params }))} />
+      <MetaStrategyPanel
+        strategies={strats.map(s => ({ id: s.id, name: s.name, enabled: !!(s as any).enabled && s.status !== 'stopped', winRate: (s as any).winRate ?? 0, totalPnl: (s as any).totalPnl ?? 0, trades: (s as any).trades ?? 0 }))}
+        onApply={(id, enable) => setStrats(prev => prev.map(s => s.id === id ? { ...s, enabled: enable, status: enable ? 'running' : 'stopped' } as any : s))}
+      />
+      </>)}
+
+      {/* 리스크: 국면 필터 → ATR 포지션 → Chandelier */}
+      {aiSection==='risk'&&(<>
+      <RegimeFilterPanel strategies={strats.map(s => ({ id: s.id, name: s.name, type: (s as any).type, asset: s.asset }))} />
+      <DynamicSizingPanel currency={currency} symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
+      <ChandelierPanel />
+      </>)}
+
+      {/* 분석: 전략 점수 → 전략 지능 → 감사 로그 */}
+      {aiSection==='analysis'&&(<>
+      <StrategyScorePanel strategies={strats.map(s => ({ id: s.id, name: s.name, winRate: (s as any).winRate ?? 0, totalPnl: (s as any).totalPnl ?? 0, trades: (s as any).trades ?? 0 }))} />
+      <StrategyIntelligence
+        strategies={strats.map(s => ({ id: s.id, name: s.name, type: (s as any).type, asset: s.asset, winRate: (s as any).winRate ?? 0, totalPnl: (s as any).totalPnl ?? 0, trades: (s as any).trades ?? 0, enabled: (s as any).enabled }))}
+        signals={signals.filter((sg: any) => sg.state !== 'executed').map((sg: any) => ({ stratId: sg.stratId, stratName: sg.stratName, type: (strats.find(st => st.id === sg.stratId) as any)?.type || 'ema_cross', asset: sg.asset, side: sg.type === 'sell' ? 'sell' : 'buy' }))}
+        onDisable={(id) => setStrats(prev => prev.map(s => s.id === id ? { ...s, enabled: false, status: 'stopped' } as any : s))}
+      />
+      <AuditLogPanel currency={currency} />
+      </>)}
+      </>)}
+
       {tab==='signals'&&(
         <div>
           <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}>

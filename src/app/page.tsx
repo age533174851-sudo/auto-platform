@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { Asset } from '@/types';
 import { T, CURRENCIES, LANGS, I18N, MOCK_NEWS, RTL_LANGS } from '@/lib/constants';
 import { gS, sS, cvt, fmtPct } from '@/lib/utils';
@@ -19,6 +19,7 @@ import {
   Wallet,
   Stethoscope, Settings, CreditCard, Presentation, Shield, LayoutGrid,
   MoreHorizontal, X as XIcon, TriangleAlert,
+  User2, Link2, ShieldCheck, LogOut, Download,
 } from 'lucide-react';
 
 // lucide-react 아이콘 타입
@@ -28,6 +29,7 @@ type IconComp = LucideIcon;
 import PosterLibrary from '@/components/PosterLibrary';
 import AssetDetailModal from '@/components/AssetDetailModal';
 import ConfirmHost from '@/components/ConfirmHost';
+import LoginModal from '@/components/LoginModal';
 import SafetyDashboard from '@/components/SafetyDashboard';
 import SeasonDashboard from '@/components/SeasonDashboard';
 import HubDashboard from '@/components/HubDashboard';
@@ -242,6 +244,32 @@ export default function App() {
   const [tab,setTab]=useState('home');
   // ── Admin role (loaded from Supabase profiles after mount) ──
   const [userRole,setUserRole]=useState<string|null>(null);
+  const [authUser,setAuthUser]=useState<any>(null);
+  const [loginOpen,setLoginOpen]=useState(false);
+  const [loginReason,setLoginReason]=useState<string>('');
+  const [profileOpen,setProfileOpen]=useState(false);
+  const pendingAction=useRef<null|(()=>void)>(null);
+
+  // 로그인 필요 기능 게이팅: 로그인돼 있으면 실행, 아니면 모달 (성공 후 자동 복귀)
+  const requireAuth=useCallback((reason:string,action:()=>void)=>{
+    if(authUser){ action(); return; }
+    setLoginReason(reason); pendingAction.current=action; setLoginOpen(true);
+  },[authUser]);
+
+  // auth 상태 로드 + 구독
+  useEffect(()=>{
+    let unsub:any;
+    (async()=>{
+      try{
+        const { sbGetSession, sbOnAuthStateChange }=await import('@/lib/supabase');
+        const sess=await sbGetSession();
+        if(sess?.user) setAuthUser(sess.user);
+        const r=await sbOnAuthStateChange((profile:any)=>{ setAuthUser(profile); });
+        unsub=r?.unsubscribe || r;
+      }catch{}
+    })();
+    return ()=>{ try{ unsub&&unsub(); }catch{} };
+  },[]);
   const isAdminUser = userRole==='admin'||userRole==='developer'||userRole==='super_admin';
   useEffect(()=>{
     let cancelled=false;
@@ -339,6 +367,18 @@ export default function App() {
     import('@/lib/currency').then(m => m.refreshUsdKrw()).catch(()=>{});
   },[]);
 
+  // 첫 진입 로그인 안내 — 온보딩 완료 + 비로그인 + 미표시 시 1회 (설정 안 들어가도 바로 보이게)
+  useEffect(()=>{
+    if(!onboarded) return;
+    if(authUser) return;
+    let seen=false; try{ seen=!!localStorage.getItem('tg_seen_login_v1'); }catch{}
+    if(seen) return;
+    const t=setTimeout(()=>{
+      if(!authUser){ setLoginReason(''); pendingAction.current=null; setLoginOpen(true); try{localStorage.setItem('tg_seen_login_v1','1');}catch{} }
+    }, 900);
+    return ()=>clearTimeout(t);
+  },[onboarded,authUser]);
+
   useEffect(()=>{
     sS('tg_lang',lang);
     // RTL 언어(아랍어 등) 처리 + lang attr 동기화
@@ -354,7 +394,18 @@ export default function App() {
   const [detailAsset,setDetailAsset]=useState<any>(null);
   const openDetail=useCallback((asset:any)=>{ if(asset) setDetailAsset(asset); },[]);
   const [pnlPrefill,setPnlPrefill]=useState<any>(null);
-  const nav=useCallback((id:string)=>{setTab(id);setShowMore(false);},[]);
+  // 로그인 필요 목적지 (거래소 연결·실전매매 관련). 비로그인 시 즉시 로그인 모달 → 성공 후 자동 이동.
+  const LOGIN_REQUIRED_ROUTES=new Set(['accounts','exchange_connect','hub_accounts','manual_accounts']);
+  const nav=useCallback((id:string)=>{
+    if(LOGIN_REQUIRED_ROUTES.has(id) && !authUser){
+      setLoginReason('거래소 연결과 실전 매매는 로그인이 필요해요');
+      pendingAction.current=()=>{setTab(id);setShowMore(false);};
+      setLoginOpen(true);
+      setShowMore(false);
+      return;
+    }
+    setTab(id);setShowMore(false);
+  },[authUser]);
   const openAsset=useCallback((asset:any,dest='trading')=>{
     if(asset){
       // Force state update even for same asset (triggers re-render)
@@ -437,14 +488,14 @@ export default function App() {
   const unreadCount=0; // TODO: connect to real alert count
 
   const renderPage=useCallback(()=>{
-    const p={prices,currency,lang,onNav:nav};
+    const p={prices,currency,lang,onNav:nav,authUser,onLogin:()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}};
     try {
       switch(tab) {
         case 'home':         return <HomePageComp {...p} onOpenAsset={openDetail}/>;
         case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail}/>;
         case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openDetail} onOpenPnL={openPnL}/>;
         case 'trading':      return <TradingPageComp key={activeAsset?.id||'trading'} prices={prices} currency={currency} activeAsset={activeAsset} onOpenPnL={openPnL}/>;
-        case 'auto':         return <AutoPageComp onNav={nav} currency={currency} onOpenAsset={openAsset}/>;
+        case 'auto':         return <AutoPageComp onNav={nav} currency={currency} onOpenAsset={openAsset} requireAuth={requireAuth}/>;
         case 'strategies':   return <StrategyBuilderPage onNav={nav}/>;
         case 'risk_settings':return <RiskSettingsPage/>;
         case 'season':       return <SeasonDashboard/>;
@@ -535,6 +586,13 @@ export default function App() {
       <ApiHealthMonitor/>
       {!onboarded&&<Onboarding onDone={(l,c)=>{setLang(l);setCurrency(c);setOnboarded(true);sS('tg_ob','1');sS('tg_lang',l);sS('tg_cur',c);}}/>}
       <ConfirmHost />
+      <LoginModal
+        open={loginOpen}
+        reason={loginReason}
+        onClose={()=>{ setLoginOpen(false); pendingAction.current=null; }}
+        onSuccess={()=>{ const a=pendingAction.current; pendingAction.current=null; if(a) setTimeout(a,100); }}
+        onGoEmail={()=>{ if(typeof window!=='undefined') window.location.href='/auth'; }}
+      />
       <AssetDetailModal
         asset={detailAsset}
         currency={currency}
@@ -602,12 +660,12 @@ export default function App() {
               </div>
               {pwaInstallable&&(
                 <button onClick={promptPwaInstall} style={{background:'linear-gradient(135deg,#2563EB,#7C3AED)',border:'none',borderRadius:20,padding:'3px 10px',cursor:'pointer',fontSize:10,color:'#fff',fontWeight:700,display:'flex',alignItems:'center',gap:3}} className="hdr-badge">
-                  📲 설치
+                  <Download size={11} strokeWidth={2.4}/> 설치
                 </button>
               )}
               {isAdminUser&&(
                 <button onClick={()=>nav('admin')} style={{background:'rgba(16,185,129,0.12)',border:'1px solid rgba(16,185,129,0.35)',borderRadius:20,padding:'2px 9px',cursor:'pointer',fontSize:11,color:'#10B981',fontWeight:700,display:'flex',alignItems:'center',gap:3}}>
-                  🛡️ 관리자
+                  <Shield size={11} strokeWidth={2.4}/> 관리자
                 </button>
               )}
               <button onClick={()=>nav('settings')} className="hdr-badge" style={{background:T.acg,border:`1px solid ${T.border}`,borderRadius:20,padding:'2px 8px',cursor:'pointer',fontSize:10,color:T.acl,fontWeight:700,display:'flex',alignItems:'center',gap:3}}>
@@ -616,11 +674,38 @@ export default function App() {
                 <span>{CURRENCIES[currency]?.symbol||'₩'}</span>
               </button>
               <button onClick={()=>nav('alerts')} className="hdr-badge" style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,padding:'2px 7px',cursor:'pointer',fontSize:11,color:T.muted,position:'relative'}}>
-                🔔{unreadCount>0&&<span style={{position:'absolute',top:-3,right:-3,background:T.red,color:'#fff',borderRadius:'50%',width:12,height:12,fontSize:8,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700}}>{unreadCount}</span>}
+                <Bell size={13} strokeWidth={2.2} color={T.muted}/>{unreadCount>0&&<span style={{position:'absolute',top:-3,right:-3,background:T.red,color:'#fff',borderRadius:'50%',width:12,height:12,fontSize:8,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700}}>{unreadCount}</span>}
               </button>
-              <div style={{background:T.prp+'20',border:`1px solid ${T.prp}40`,borderRadius:20,padding:'2px 7px'}}>
-                <span style={{color:T.prp,fontSize:9,fontWeight:700}}>모의</span>
-              </div>
+              {authUser ? (
+                <div style={{position:'relative'}}>
+                  <button onClick={()=>setProfileOpen(o=>!o)} aria-label="프로필 메뉴" style={{minHeight:44,minWidth:44,background:T.prp+'20',border:`1px solid ${T.prp}40`,borderRadius:'50%',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
+                    <span style={{color:T.prp,fontSize:15,fontWeight:800}}>{String(authUser.nickname||authUser.email||'U').charAt(0).toUpperCase()}</span>
+                  </button>
+                  {profileOpen&&(
+                    <>
+                      <div onClick={()=>setProfileOpen(false)} style={{position:'fixed',inset:0,zIndex:60}}/>
+                      <div style={{position:"absolute",right:0,top:50,zIndex:61,background:T.bg,border:`1px solid ${T.border2}`,borderRadius:14,padding:'8px',minWidth:180,boxShadow:'0 8px 30px rgba(0,0,0,.5)'}}>
+                        <div style={{padding:'8px 12px 10px',borderBottom:`1px solid ${T.border}`,marginBottom:4}}>
+                          <div style={{color:T.txt,fontWeight:700,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{authUser.nickname||'내 계정'}</div>
+                          <div style={{color:T.muted,fontSize:10,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{authUser.email||''}</div>
+                        </div>
+                        {[{ic:User2,l:'내 계정',d:'settings'},{ic:Link2,l:'거래소 연결',d:'accounts'},{ic:ShieldCheck,l:'보안',d:'safety'},{ic:Bell,l:'알림 설정',d:'alerts'}].map(m=>(
+                          <button key={m.d} onClick={()=>{setProfileOpen(false);nav(m.d);}} style={{width:'100%',minHeight:44,display:'flex',alignItems:'center',gap:10,background:'transparent',border:'none',borderRadius:9,padding:'0 12px',cursor:'pointer',color:T.txt,fontSize:13,textAlign:'left'}}>
+                            <m.ic size={16} color={T.muted}/> {m.l}
+                          </button>
+                        ))}
+                        <button onClick={async()=>{setProfileOpen(false);try{const{sbSignOut}=await import('@/lib/supabase');await sbSignOut();}catch{};setAuthUser(null);}} style={{width:'100%',minHeight:44,display:'flex',alignItems:'center',gap:10,background:'transparent',border:'none',borderTop:`1px solid ${T.border}`,marginTop:4,paddingTop:4,borderRadius:9,padding:'0 12px',cursor:'pointer',color:T.red,fontSize:13,textAlign:'left'}}>
+                          <LogOut size={16} color={T.red}/> 로그아웃
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <button onClick={()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}} aria-label="로그인" style={{minHeight:44,background:`linear-gradient(135deg,${T.acc},${T.prp})`,border:'none',borderRadius:22,padding:'0 18px',cursor:'pointer',fontSize:13,color:'#fff',fontWeight:800}}>
+                  로그인
+                </button>
+              )}
             </div>
           </div>
 
