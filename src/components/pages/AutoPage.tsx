@@ -12,13 +12,16 @@ import { Shield, Edit3, ChevronRight } from 'lucide-react';
 import AutoStatusBoard from '../AutoStatusBoard';
 import StrategyIntelligence from '../StrategyIntelligence';
 import RegimeFilterPanel from '../RegimeFilterPanel';
+import EnginePanel from '../EnginePanel';
 import CommitteePanel from '../CommitteePanel';
+import StrategyMarketPanel from '../StrategyMarketPanel';
 import AllocationPanel from '../AllocationPanel';
 import TacticalPanel from '../TacticalPanel';
 import LearningPanel from '../LearningPanel';
 import StrategyFactoryPanel from '../StrategyFactoryPanel';
 import DynamicSizingPanel from '../DynamicSizingPanel';
 import ChandelierPanel from '../ChandelierPanel';
+import AdaptiveLeveragePanel from '../AdaptiveLeveragePanel';
 import StrategyScorePanel from '../StrategyScorePanel';
 import MetaStrategyPanel from '../MetaStrategyPanel';
 import AuditLogPanel from '../AuditLogPanel';
@@ -260,6 +263,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       {/* 의사결정: 위원회 → 자산배분 → Tactical → 자기학습 → Meta */}
       {aiSection==='decision'&&(<>
       <CommitteePanel symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
+      <StrategyMarketPanel symbols={Array.from(new Set(['BTC', 'ETH', 'SOL', ...strats.map(s => s.asset)])).slice(0, 6)} />
       <AllocationPanel currency={currency} />
       <TacticalPanel symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
       <LearningPanel />
@@ -272,8 +276,10 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 
       {/* 리스크: 국면 필터 → ATR 포지션 → Chandelier */}
       {aiSection==='risk'&&(<>
+      <EnginePanel />
       <RegimeFilterPanel strategies={strats.map(s => ({ id: s.id, name: s.name, type: (s as any).type, asset: s.asset }))} />
       <DynamicSizingPanel currency={currency} symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
+      <AdaptiveLeveragePanel symbols={Array.from(new Set(['BTC', 'ETH', ...strats.map(s => s.asset)])).slice(0, 5)} />
       <ChandelierPanel />
       </>)}
 

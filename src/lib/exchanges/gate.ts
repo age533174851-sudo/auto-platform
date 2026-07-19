@@ -1,11 +1,12 @@
 // Gate.io API Adapter (server-side only)
-import { createHmac } from 'crypto';
+import { createHmac, createHash } from 'crypto';
 import type { TestResult, ExchangeBalance } from './types';
 
 const BASE = 'https://api.gateio.ws';
 
 function signGate(method: string, path: string, qs: string, body: string, secret: string, ts: string): string {
-  const bodyHash = createHmac('sha512','').update(body).digest('hex'); // gate uses sha512 for body
+  // Gate v4 규격: 본문은 SHA-512 '해시' (HMAC 아님). HMAC를 쓰면 POST 주문 서명이 실패한다.
+  const bodyHash = createHash('sha512').update(body).digest('hex');
   const payload = `${method}\n${path}\n${qs}\n${bodyHash}\n${ts}`;
   return createHmac('sha512', secret).update(payload).digest('hex');
 }

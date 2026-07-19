@@ -1,5 +1,8 @@
 'use client';
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import PortfolioBacktestView from '../PortfolioBacktestView';
+import { StrategyLeg } from '@/lib/backtest/portfolio';
+import CompoundAnalysisView from '../CompoundAnalysisView';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
 import { safeNumber, formatKRW, safePercent } from '@/lib/format';
@@ -86,6 +89,9 @@ export default function BacktestPage() {
 
   const [loading,   setLoading]   = useState(false);
   const [result,    setResult]    = useState<BacktestResponse | null>(null);
+  const [portfolioMode, setPortfolioMode] = useState(false);
+  const [portfolioLegs, setPortfolioLegs] = useState<StrategyLeg[] | null>(null);
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
   const [error,     setError]     = useState('');
   const [toast,     setToast]     = useState('');
   const [loadedFromStrategy, setLoadedFromStrategy] = useState<{ name: string; id: string } | null>(null);
@@ -169,6 +175,39 @@ export default function BacktestPage() {
       setLoading(false);
     }
   }, [symbol, strategy, timeframe, periodDays, initialCash, feeRate, leverage, showToast]);
+
+  // 포트폴리오 백테스트: 여러 전략을 동시 실행 → 합산
+  const runPortfolio = useCallback(async () => {
+    setPortfolioLoading(true);
+    setError('');
+    const combo: { id: Strategy; name: string; weight: number }[] = [
+      { id: 'ema-cross', name: 'EMA 추세', weight: 40 },
+      { id: 'rsi', name: 'RSI 역추세', weight: 35 },
+      { id: 'bollinger', name: '볼린저 돌파', weight: 25 },
+    ];
+    try {
+      const legs: StrategyLeg[] = [];
+      for (const c of combo) {
+        const res = await fetch('/api/backtest', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, strategy: c.id, timeframe, periodDays, initialCash: safeNumber(initialCash, 1_000_000), feeRate: safeNumber(feeRate, 0.1) / 100, leverage: safeNumber(leverage, 1) }),
+          signal: AbortSignal.timeout(25000),
+        });
+        const data = await res.json();
+        if (data?.ok && Array.isArray(data.equityCurve)) {
+          legs.push({ id: c.id, name: c.name, weightPct: c.weight, equityCurve: data.equityCurve });
+        }
+      }
+      if (legs.length < 2) throw new Error('포트폴리오 백테스트에 전략이 부족합니다');
+      setPortfolioLegs(legs);
+      showToast(`✅ ${legs.length}개 전략 포트폴리오 백테스트 완료`);
+    } catch (e: any) {
+      setError(e?.message || '포트폴리오 백테스트 실패');
+      showToast('❌ 포트폴리오 백테스트 실패');
+    } finally {
+      setPortfolioLoading(false);
+    }
+  }, [symbol, timeframe, periodDays, initialCash, feeRate, leverage, showToast]);
 
   /* Equity curve SVG */
   const equitySvg = useMemo(() => {
@@ -330,6 +369,21 @@ export default function BacktestPage() {
         {loading ? '⏳ 백테스트 실행 중…' : '백테스트 실행'}
       </button>
 
+      {/* 포트폴리오 백테스트 */}
+      <button type="button" onClick={runPortfolio} disabled={portfolioLoading}
+        style={{ width:'100%', padding:'12px', minHeight: 46, marginBottom: 12,
+          background: portfolioLoading ? T.alt : T.card, border:`1px solid ${T.acl}`,
+          color: T.acl, borderRadius: 12, fontWeight: 800, fontSize: 13,
+          cursor: portfolioLoading ? 'wait' : 'pointer', opacity: portfolioLoading ? 0.7 : 1,
+          display:'flex', alignItems:'center', justifyContent:'center', gap: 7 }}>
+        {portfolioLoading ? '⏳ 여러 전략 동시 실행 중…' : '📊 다중 전략 포트폴리오 백테스트'}
+      </button>
+
+      {/* 포트폴리오 결과 */}
+      {portfolioLegs && (
+        <PortfolioBacktestView legs={portfolioLegs} initialCapital={safeNumber(initialCash, 1_000_000)} />
+      )}
+
       {/* Error */}
       {error && (
         <Card style={{ background: T.red+'10', border:`1px solid ${T.red}30`, marginBottom: 10 }}>
@@ -395,6 +449,13 @@ export default function BacktestPage() {
               </div>
             )}
           </Card>
+
+          {/* 복리 성장 분석 */}
+          <CompoundAnalysisView
+            totalReturnPct={result.summary.totalReturnPct}
+            periodDays={periodDays}
+            initialCapital={result.summary.finalEquity && result.summary.totalReturnPct ? Math.round(result.summary.finalEquity / (1 + result.summary.totalReturnPct / 100)) : 10000000}
+          />
 
           {/* 실전 적합도 판정 */}
           {(() => {

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { cvt } from '@/lib/utils';
-import { Brain, AlertTriangle, CheckCircle2, TrendingUp } from 'lucide-react';
+import { Brain, AlertTriangle, CheckCircle2, TrendingUp, Search } from 'lucide-react';
 import { analyzeTrades, ordersToClosedTrades } from '@/lib/autotrade/retrospect';
 import TradeReplayModal from '@/components/TradeReplayModal';
 import type { ReplayTrade } from '@/lib/autotrade/replay';
