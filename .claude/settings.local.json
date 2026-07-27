@@ -16,7 +16,9 @@
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; npm test 2>&1 | Select-Object -Last 40; \"exit=$LASTEXITCODE\")",
       "PowerShell(Start-Process notepad.exe -ArgumentList \"D:\\\\�ڵ��Ÿ� ����\\\\.secrets.local.ps1\")",
       "PowerShell(\"�޸��� ����\")",
-      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; git diff -- .claude/settings.local.json)"
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; git diff -- .claude/settings.local.json)",
+      "PowerShell(Get-Content \"$env:TEMP\\\\claude\\\\validate09.txt\" | Select-Object -Last 45)",
+      "PowerShell(Get-Content \"$env:TEMP\\\\claude\\\\btc365.txt\" | Where-Object { $_ -match '════ 관찰|MAE  |방향 적중|^\\\\s+100배|^\\\\s+ 50배|^\\\\s+ 25배|^\\\\s+ 10배' } | Select-Object -First 30)"
     ]
   }
 }
