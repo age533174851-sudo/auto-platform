@@ -325,11 +325,20 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      const { data: conn } = await sb.from('exchange_connections')
-        .select('exchange, api_key_enc, api_secret_enc, has_withdrawal')
-        .eq('id', raw.connectionId).maybeSingle();
+      // 소유권 검사 — connectionId와 userId 모두 페이로드에서 오고, sb는
+      // service-role이라 RLS가 적용되지 않는다. 검사가 없으면 웹훅 시크릿을
+      // 아는 사람이 임의의 connectionId를 지정해 남의 API 키로 주문할 수 있다.
+      if (!raw?.userId) {
+        throw new Error('userId가 없어 연결 소유권을 확인할 수 없습니다');
+      }
 
-      if (!conn) throw new Error('거래소 연결을 찾을 수 없습니다');
+      const { data: conn } = await sb.from('exchange_connections')
+        .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, user_id')
+        .eq('id', raw.connectionId)
+        .eq('user_id', raw.userId)
+        .maybeSingle();
+
+      if (!conn) throw new Error('거래소 연결을 찾을 수 없거나 해당 사용자의 연결이 아닙니다');
       if (conn.has_withdrawal) throw new Error('출금 권한이 있는 키는 자동매매에 사용할 수 없습니다');
 
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
@@ -347,8 +356,8 @@ export async function POST(req: NextRequest) {
         plan,
         stopLoss: v.signal!.stopLoss,
         takeProfit: v.signal!.takeProfit,
-        apiKey: decryptSecret(conn.api_key_enc),
-        apiSecret: decryptSecret(conn.api_secret_enc),
+        apiKey: conn.api_key,
+        apiSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
       });
 
       if (inserted?.id) {

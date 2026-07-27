@@ -53,18 +53,27 @@ async function authorize(req: NextRequest): Promise<{ ok: true } | { ok: false; 
   const provided = req.headers.get('x-calendar-sync-secret') || '';
   if (SYNC_SECRET && safeEqual(provided, SYNC_SECRET)) return { ok: true };
 
-  // ② Supabase JWT — 로그인 사용자
+  // ② Supabase JWT — 단, 관리자 역할만 허용한다.
+  //
+  // 예전에는 로그인 여부(uid 존재)만 확인했다. 그러면 아무 계정이나 가입해
+  // 가짜 FOMC를 등록할 수 있고, Veto가 그 일정으로 거래를 막거나 열어준다.
+  // 위 23행에 적어 둔 위협("외부인이 가짜 FOMC를 넣어…")이 로그인 사용자에게
+  // 그대로 열려 있던 셈이다. 역할은 클라이언트가 아니라 DB에서 읽는다.
   try {
-    const { getUserIdFromRequest } = await import('@/lib/supabase/admin');
-    const uid = await getUserIdFromRequest(req.headers.get('authorization'));
-    if (uid) return { ok: true };
-  } catch { /* JWT 검증 실패 */ }
+    const { checkAdminRole } = await import('@/lib/auth/isAdmin');
+    const check = await checkAdminRole(req.headers.get('authorization'));
+    if (check.isAdmin) return { ok: true };
+    if (check.userId) {
+      return { ok: false, status: 403,
+        error: '경제 캘린더 수정은 관리자만 가능합니다' };
+    }
+  } catch { /* JWT 검증 실패 → 아래 401 */ }
 
   if (!SYNC_SECRET) {
     return { ok: false, status: 503,
       error: 'CALENDAR_SYNC_SECRET이 설정되지 않았습니다. 인증 없이 캘린더를 수정할 수 없습니다.' };
   }
-  return { ok: false, status: 401, error: '인증 필요 — x-calendar-sync-secret 헤더 또는 로그인 토큰' };
+  return { ok: false, status: 401, error: '인증 필요 — x-calendar-sync-secret 헤더 또는 관리자 토큰' };
 }
 
 const VALID_IMPACT = ['low', 'medium', 'high'];

@@ -66,7 +66,7 @@ export async function buildRiskContext(
       const testnet = String(opts.mode || 'TESTNET').toUpperCase() !== 'LIVE';
       const { data: conn } = await sb
         .from('exchange_connections')
-        .select('exchange, api_key_enc, api_secret_enc, has_withdrawal')
+        .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
         .eq('id', opts.connectionId)
         .maybeSingle();
 
@@ -74,8 +74,8 @@ export async function buildRiskContext(
         warnings.push('출금 권한 키는 자동매매에 사용할 수 없습니다');
       } else if (conn) {
         const { decryptSecret } = await import('@/lib/exchanges/crypto');
-        const key = decryptSecret(conn.api_key_enc);
-        const secret = decryptSecret(conn.api_secret_enc);
+        const key = conn.api_key;
+        const secret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
         const ex = String(conn.exchange || '').toLowerCase();
 
         if (ex.includes('binance')) {

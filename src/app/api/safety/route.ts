@@ -1,5 +1,6 @@
 // /api/safety — Safety layer: audit, kill switch, pre-order, health
 import { NextRequest, NextResponse } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import {
   validatePreOrder, logAudit, getAuditLog,
   activateKillSwitch, deactivateKillSwitch, getKillSwitchState,
@@ -10,9 +11,22 @@ import {
 import type { PreOrderInput } from '@/lib/safety/types';
 
 // ── Simple admin check (add proper auth in production) ────────
-const ADMIN_SECRET = process.env.ADMIN_SECRET || '' || 'traigo-admin-dev';
+// 하드코딩 폴백을 두지 않는다. 예전에는 'traigo-admin-dev'가 기본값이었는데,
+// 그 문자열은 소스에 공개돼 있으므로 ADMIN_SECRET을 설정하지 않은 배포에서는
+// 누구나 관리자 동작을 호출할 수 있었다. 미설정이면 관리자 기능을 잠근다.
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
+
 function isAdmin(req: NextRequest): boolean {
-  return req.headers.get('x-admin-secret') === ADMIN_SECRET;
+  // 시크릿 미설정이면 무조건 거부한다. 단순 === 비교로 두면 빈 문자열끼리
+  // 일치해, 헤더를 빈 값으로 보내는 것만으로 관리자가 되는 구멍이 생긴다.
+  if (!ADMIN_SECRET) return false;
+  const provided = req.headers.get('x-admin-secret');
+  if (!provided) return false;
+
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(ADMIN_SECRET, 'utf8');
+  if (a.length !== b.length) return false;
+  try { return timingSafeEqual(a, b); } catch { return false; }
 }
 function userId(req: NextRequest): string {
   return req.headers.get('x-user-id') || 'anon';
