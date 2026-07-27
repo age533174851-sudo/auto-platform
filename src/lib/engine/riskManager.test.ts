@@ -152,6 +152,46 @@ export function runRiskManagerTests() {
     lt(p.leverage, 11, `평가 불가인데 ${p.leverage}배가 승인됨`);
   });
 
+  console.log('[계단식 증거금 상한]');
+
+  test('maxMargin은 고정값이 아니라 상한이다 — 덜 필요하면 덜 쓴다', () => {
+    // 손절 5%, 자본 $10,000, 위험 1% → 필요 증거금은 $100보다 훨씬 작다.
+    // 계단 증거금 $1,000을 줘도 그만큼 쓰지 않아야 한다.
+    const wide = signal({ stopLoss: 95_000 });
+    const p = planPosition(wide, cfg({
+      accountEquity: 10_000, availableMargin: 10_000,
+      maxMargin: 1_000,
+      expansion: expansion({ maxLeverageAllowed: 10 }),
+    }));
+    assert(p.approved, '거부됨: ' + p.rejectReason);
+    assert(p.requiredMargin <= 1_000, `상한 초과: $${p.requiredMargin.toFixed(0)}`);
+    lt(p.requiredMargin, 1_000, `상한을 그대로 다 썼다 ($${p.requiredMargin.toFixed(0)}) — 고정값처럼 동작한다`);
+  });
+
+  test('maxMargin이 가용 증거금보다 작으면 그것이 예산이 된다', () => {
+    // 좁은 손절 → 큰 포지션을 요구하지만 계단 증거금이 $100으로 묶는다
+    const tight = signal({ stopLoss: 99_000 });
+    const p = planPosition(tight, cfg({
+      accountEquity: 100_000, availableMargin: 100_000,
+      maxMargin: 100,
+      expansion: expansion({ maxLeverageAllowed: 100 }),
+    }));
+    if (p.approved) {
+      assert(p.requiredMargin <= 100 + 1e-6,
+        `계단 상한 $100을 넘었다: $${p.requiredMargin.toFixed(2)}`);
+    } else {
+      // 청산이 손절보다 가까우면 거부되는 것도 정상 — 상한이 무시된 게 아니다
+      assert(p.rejectCode === 'LIQUIDATION_BEFORE_STOP' || p.rejectCode === 'POSITION_TOO_SMALL',
+        '예상 밖 거부: ' + p.rejectCode);
+    }
+  });
+
+  test('maxMargin이 0이면 진입하지 않는다', () => {
+    const p = planPosition(signal(), cfg({ maxMargin: 0 }));
+    eq(p.approved, false, 'maxMargin 0인데 승인됨');
+    eq(p.rejectCode, 'INSUFFICIENT_MARGIN');
+  });
+
   console.log('[Risk Manager — 기존 한도]');
 
   test('일일 손실 한도에 도달하면 신규 진입을 막는다', () => {

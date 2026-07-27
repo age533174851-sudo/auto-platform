@@ -18,6 +18,7 @@ import { evaluateBattle, type BattleInput, type BattleResult } from '../strategi
 import { evaluateVeto, type VetoInput, type VetoResult, type VetoRule } from '../strategies/riskVeto';
 import { computeAtrBaseline } from '../strategies/volatilityBaseline';
 import { buildExpansionGate } from '../strategies/expansionMode';
+import { openLadderGate, releaseReservation, type LadderGateResult } from '../strategies/ladderGate';
 import { loadCalendar, upcomingFromCalendar } from '../calendar/econCalendar';
 import { planPosition, type PositionPlan, type RiskConfig } from './riskManager';
 import type { StandardSignal } from './signalGateway';
@@ -47,6 +48,15 @@ export interface PipelineInput {
   riskConfig: RiskConfig;
   strategyId?: string;
   bucket?: string;
+
+  // ── 계단식 전략 게이트 ──
+  // userId가 주어지면 하루 1회 제한과 사이클 상태를 DB에서 강제한다.
+  // 주지 않으면 이 게이트를 건너뛴다 (기존 호출자 호환).
+  userId?: string | null;
+  /** 거래소에서 조회한 확정 잔고. 계단 판정의 기준이 된다. */
+  realizedEquity?: number;
+  /** true면 게이트를 통과해도 예약만 하고 되돌린다 (미리보기·백테스트용) */
+  ladderDryRun?: boolean;
 }
 
 export interface PipelineResult {
@@ -70,6 +80,8 @@ export interface PipelineResult {
   battle: BattleResult | null;
   veto: VetoResult | null;
   plan: PositionPlan | null;
+  /** 계단식 게이트 결과. userId를 주지 않으면 null (게이트를 건너뛴 것). */
+  ladder?: LadderGateResult | null;
 
   reason: string;
   blockedBy?: string;
@@ -225,17 +237,48 @@ export async function runTradingPipeline(sb: any, input: PipelineInput): Promise
     normalMaxLeverage: input.riskConfig.normalMaxLeverage,
   });
 
+  // ── 계단식 게이트 ──
+  // 하루 1회 예약과 사이클 상태를 DB에서 확보한다. 예약은 Risk Manager보다
+  // 먼저 잡는다 — 주문이 나간 뒤에 예약하면 그 사이에 두 번째 신호가 통과할
+  // 수 있다. 대신 이후 단계에서 거부되면 반드시 예약을 되돌린다.
+  let ladder: LadderGateResult | null = null;
+  if (input.userId) {
+    ladder = await openLadderGate(sb, {
+      userId: input.userId,
+      strategyId: input.strategyId,
+      symbol: input.symbol,
+      side: battle.side === 'SHORT' ? 'SHORT' : 'LONG',
+      realizedEquity: input.realizedEquity,
+    });
+
+    if (!ladder.allowed) {
+      const r = base('risk', ladder.reason ?? '계단식 규칙 위반', ladder.rejectCode);
+      r.battle = battle;
+      r.veto = battle.veto ?? null;
+      r.ladder = ladder;
+      return r;
+    }
+  }
+
   const plan = planPosition(signal, {
     ...input.riskConfig,
     expansion: expansionGate.result,
+    // 계단식 1회 증거금을 상한으로 넘긴다 (고정값이 아니라 상한)
+    maxMargin: ladder?.margin ?? input.riskConfig.maxMargin,
   });
 
-  if (!plan.approved) {
-    const r = base('risk', plan.rejectReason ?? '위험 규칙 위반', plan.rejectCode);
-    r.battle = battle;
-    r.veto = battle.veto ?? null;
-    r.plan = plan;
-    return r;
+  if (!plan.approved || input.ladderDryRun) {
+    // 진입하지 않으므로 오늘의 슬롯을 돌려준다. 이걸 빼먹으면 주문이 나가지
+    // 않았는데도 그 날 하루가 소진된다.
+    await releaseReservation(sb, ladder?.reservationId);
+    if (!plan.approved) {
+      const r = base('risk', plan.rejectReason ?? '위험 규칙 위반', plan.rejectCode);
+      r.battle = battle;
+      r.veto = battle.veto ?? null;
+      r.plan = plan;
+      r.ladder = ladder;
+      return r;
+    }
   }
 
   return {

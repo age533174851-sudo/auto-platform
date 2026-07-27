@@ -47,6 +47,15 @@ export interface RiskConfig {
   normalMaxLeverage?: number;
 
   /**
+   * 이번 거래에 쓸 수 있는 증거금 상한 (계단식 전략의 1회 격리 증거금).
+   *
+   * 고정값이 아니라 상한이다. 위험 기반 사이징이 계산한 필요 증거금이
+   * 이보다 작으면 작은 쪽을 쓴다. 손절이 넓은 날 계단 증거금을 그대로
+   * 밀어넣으면 허용 손실을 초과하기 때문이다.
+   */
+  maxMargin?: number;
+
+  /**
    * 거래소에서 조회한 실제 leverageBracket ([상한 명목가, MMR, 공제액]).
    * getLeverageBrackets()로 받아 넘긴다. 없으면 내장 fallback 테이블을 쓴다.
    */
@@ -166,21 +175,36 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
   }
 
   // ── 5) 레버리지 역산 (상한은 0.5단계에서 정한 leverageCap) ──
-  let leverage = Math.max(1, Math.ceil(positionSize / Math.max(availableMargin, 1)));
+  //
+  // 증거금 예산 = min(가용 증거금, 계단식 1회 증거금).
+  // 계단식 전략은 "1회 격리 증거금 $100" 같은 고정 규칙을 갖지만, 그것을
+  // 그대로 밀어넣지 않고 상한으로 쓴다. 위험 기반 사이징이 더 작은 값을
+  // 요구하면 작은 쪽을 따른다 — 손절이 넓은 날 계단 증거금을 다 쓰면
+  // 거래당 허용 손실을 넘긴다.
+  const marginBudget = Math.min(availableMargin, cfg.maxMargin ?? Infinity);
+  if (cfg.maxMargin != null && cfg.maxMargin < availableMargin) {
+    notes.push(`계단식 1회 증거금 상한 $${cfg.maxMargin.toFixed(0)} 적용 (가용 $${availableMargin.toFixed(0)})`);
+  }
+  if (marginBudget <= 0) {
+    return reject('INSUFFICIENT_MARGIN', '이번 거래에 배정할 증거금이 없습니다',
+      signal.symbol, side, notes, { riskAmount, stopDistancePct, effectiveStopPct });
+  }
+
+  let leverage = Math.max(1, Math.ceil(positionSize / Math.max(marginBudget, 1)));
   leverage = clamp(leverage, 1, leverageCap);
   let requiredMargin = positionSize / leverage;
 
-  if (requiredMargin > availableMargin) {
-    positionSize = availableMargin * leverageCap;
+  if (requiredMargin > marginBudget) {
+    positionSize = marginBudget * leverageCap;
     leverage = leverageCap;
     requiredMargin = positionSize / leverage;
-    notes.push(`가용 증거금 한계로 포지션 축소 → $${positionSize.toFixed(0)}`);
+    notes.push(`증거금 예산 한계로 포지션 축소 → $${positionSize.toFixed(0)}`);
   }
   notes.push(`역산 레버리지 ${leverage}배 · 필요 증거금 $${requiredMargin.toFixed(2)}`);
 
-  if (requiredMargin > availableMargin) {
+  if (requiredMargin > marginBudget) {
     return reject('INSUFFICIENT_MARGIN',
-      `증거금 부족 (필요 $${requiredMargin.toFixed(0)} > 가용 $${availableMargin.toFixed(0)})`,
+      `증거금 부족 (필요 $${requiredMargin.toFixed(0)} > 예산 $${marginBudget.toFixed(0)})`,
       signal.symbol, side, notes, { riskAmount, stopDistancePct, effectiveStopPct, positionSize, leverage, requiredMargin });
   }
 
