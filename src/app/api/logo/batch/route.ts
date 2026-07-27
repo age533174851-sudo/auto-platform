@@ -10,8 +10,8 @@
 //   }
 
 import { NextRequest, NextResponse } from 'next/server';
-import { lookupLogo } from '../route';
-import type { AssetType, LogoResponse } from '../route';
+import { lookupLogo } from '@/lib/logoLookup';
+import type { AssetType, LogoResponse } from '@/lib/logoLookup';
 
 export const runtime  = 'nodejs';
 export const dynamic  = 'force-dynamic';

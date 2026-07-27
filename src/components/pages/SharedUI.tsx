@@ -6,9 +6,14 @@ import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR } from '@/data/assets';
 import type { Asset } from '@/types';
 
+// LOGO_DB 항목의 형태. initials/bg는 Logo 컴포넌트가 이미지 로드 실패 시
+// 쓰는 폴백이며 대부분의 항목이 채워 넣는다. url/fallback은 구형 항목용.
+// (src/lib/logoResolver.ts에도 같은 이름의 타입이 있다 — 그쪽은 전 필드 필수)
 export interface LogoDef {
   primary?: string;
   fallbacks?: string[];
+  initials?: string;
+  bg?: string;
   url?: string;
   fallback?: string;
 }
@@ -328,10 +333,10 @@ export function Logo({ id, size=36, clr, name, logoUrl }: {
 }) {
   const t   = (id || '').toUpperCase().trim();
   const def = LOGO_DB[t] || LOGO_DB[id] || null;
-  const bg  = clr || (def as any)?.bg || getBgColor(t) || '#1A2D4A';
+  const bg  = clr || def?.bg || getBgColor(t) || '#1A2D4A';
 
   // Smart initials
-  const inits = (def as any)?.initials
+  const inits = def?.initials
     || (name && /[\uAC00-\uD7AF]/.test(name) ? name.slice(0, 2) : null)
     || t.replace(/[^A-Z0-9가-힣]/gi, '').slice(0, 2).toUpperCase()
     || '??';
