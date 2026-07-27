@@ -10,7 +10,12 @@ const coreSchema = z.object({
 });
 
 // ── 실전 자동매매(주문 실행)에 필요 ──
-const tradingKeys = ['SUPABASE_SERVICE_ROLE_KEY', 'WEBHOOK_SECRET', 'ENCRYPTION_KEY'] as const;
+// 주의: 여기 이름은 코드가 실제로 process.env에서 읽는 이름과 일치해야 한다.
+//   EXCHANGE_ENCRYPTION_KEY    → src/lib/exchanges/crypto.ts
+//   TRADINGVIEW_WEBHOOK_SECRET → src/app/api/webhook/{tradingview,signal}/route.ts
+// 이전에는 WEBHOOK_SECRET / ENCRYPTION_KEY를 검사했는데, 두 이름 모두 실제로는
+// 아무도 읽지 않아 검증이 통과해도 거래소 키 복호화와 웹훅이 실패했다.
+const tradingKeys = ['SUPABASE_SERVICE_ROLE_KEY', 'TRADINGVIEW_WEBHOOK_SECRET', 'EXCHANGE_ENCRYPTION_KEY'] as const;
 
 // ── 기능별 선택 키 (없으면 해당 기능만 비활성/모의) ──
 const featureKeys: { key: string; feature: string }[] = [
