@@ -243,6 +243,42 @@ export async function setFuturesLeverage(key: string, secret: string, symbol: st
   } catch (e: any) { return { success: false, message: e.message || '레버리지 설정 실패' }; }
 }
 
+/**
+ * 마진 타입 설정 (ISOLATED / CROSSED).
+ *
+ * Binance는 심볼별 마진 타입 기본값이 CROSSED다. 주문 전에 이걸 호출하지
+ * 않으면 "격리 증거금" 전략이라도 실제로는 Cross로 체결되고, 손실이 증거금을
+ * 넘어 계좌 전체로 번진다. 계단식 전략처럼 1회 증거금을 고정하는 설계는
+ * 이 호출이 없으면 전제가 무너진다.
+ *
+ * 응답 처리에서 주의할 점:
+ *  -4046 "No need to change margin type" — 이미 원하는 값이라는 뜻이므로
+ *        성공으로 본다. 실패로 처리하면 두 번째 주문부터 전부 막힌다.
+ *  -4047/-4048 — 포지션이나 미체결 주문이 있으면 변경할 수 없다.
+ *        이때는 진짜 실패다 (현재 타입이 무엇인지 알 수 없으므로).
+ */
+export async function setFuturesMarginType(
+  key: string, secret: string, symbol: string,
+  marginType: 'ISOLATED' | 'CROSSED' = 'ISOLATED',
+  testnet = true,
+): Promise<{ success: boolean; alreadySet: boolean; message: string; code?: number }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    await fapiSigned('POST', '/fapi/v1/marginType', key, secret, testnet, { symbol: sym, marginType });
+    return { success: true, alreadySet: false, message: `${sym} 마진 타입 ${marginType}` };
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    const codeMatch = msg.match(/-?\d{4,5}/);
+    const code = codeMatch ? Number(codeMatch[0]) : undefined;
+
+    // 이미 해당 타입 — 성공으로 취급
+    if (code === -4046 || /no need to change margin type/i.test(msg)) {
+      return { success: true, alreadySet: true, message: `${sym}는 이미 ${marginType}입니다`, code };
+    }
+    return { success: false, alreadySet: false, message: msg || '마진 타입 설정 실패', code };
+  }
+}
+
 export async function getFuturesTicker(symbol: string, testnet = true): Promise<number | null> {
   try {
     const sym = symbol.toUpperCase().replace('/', '');

@@ -146,14 +146,31 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         return { ok: false, status: 'FAILED', clientOrderId, message: `중복 확인 실패로 주문 중단: ${e?.message || e}` };
       }
 
-      // ── 3) 레버리지 설정 (주문 전에 반드시) ──
+      // ── 3) 마진 타입 ISOLATED 강제 (레버리지보다 먼저) ──
+      //
+      // Binance는 심볼별 마진 타입 기본값이 CROSSED다. 이 호출이 없으면
+      // "1회 격리 증거금" 전략이라도 실제 체결은 Cross로 나가고, 손실이
+      // 증거금을 넘어 계좌 전체로 번진다. 계단식 증거금 상한과 청산가 계산이
+      // 모두 isolated를 전제하므로, 설정에 실패하면 주문하지 않는다.
+      // (이미 ISOLATED면 -4046이 오는데 그건 성공으로 처리된다)
+      const mt = await bf.setFuturesMarginType(apiKey, apiSecret, plan.symbol, 'ISOLATED', testnet);
+      if (!mt.success) {
+        const reason = `ISOLATED 설정 실패로 주문 중단: ${mt.message}` +
+          (mt.code === -4047 || mt.code === -4048
+            ? ' (해당 심볼에 열린 포지션이나 미체결 주문이 있으면 마진 타입을 바꿀 수 없습니다)'
+            : '');
+        await update({ status: 'FAILED', error_message: reason });
+        return { ok: false, status: 'FAILED', clientOrderId, message: reason };
+      }
+
+      // ── 4) 레버리지 설정 (주문 전에 반드시) ──
       const lev = await bf.setFuturesLeverage(apiKey, apiSecret, plan.symbol, plan.leverage, testnet);
       if (!(lev as any)?.success) {
         await update({ status: 'FAILED', error_message: `레버리지 설정 실패: ${(lev as any)?.message}` });
         return { ok: false, status: 'FAILED', clientOrderId, message: `레버리지 설정 실패: ${(lev as any)?.message}` };
       }
 
-      // ── 4) 주문 전송 ──
+      // ── 5) 주문 전송 ──
       await update({ status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1 });
 
       let res: any;
@@ -174,20 +191,22 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         return { ok: false, status: 'REJECTED', clientOrderId, message: `거래소 거부: ${res?.message}` };
       }
 
-      // ── 5) 접수 확인 ──
+      // ── 6) 접수 확인 ──
       await update({
         status: 'ACKED', exchange_order_id: String(res.orderId),
         filled_qty: res.qty, avg_price: res.price, acked_at: new Date().toISOString(),
       });
 
-      // ── 6) 손절·익절 부착 ──
+      // ── 7) 손절·익절 부착 ──
       let slId: string | undefined, tpId: string | undefined;
       const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
+      let slError = '';
       if (args.stopLoss) {
         const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
           symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
+        else slError = String((sl as any)?.message || '원인 불명');
       }
       if (args.takeProfit) {
         const tp = await bf.placeFuturesTPSL(apiKey, apiSecret, {
@@ -197,14 +216,55 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
       await update({ sl_order_id: slId || null, tp_order_id: tpId || null });
 
-      // 손절이 안 붙었으면 경고 — 위험 계산의 전제가 깨진 상태
-      const slWarning = args.stopLoss && !slId ? ' ⚠️ 손절 주문이 부착되지 않았습니다 — 수동 확인 필요' : '';
+      // ── 8) 손절이 안 붙었으면 포지션을 즉시 닫는다 ──
+      //
+      // 예전에는 경고 문자열만 message에 붙이고 ok:true로 반환했다. 그러면
+      // 호출자는 성공으로 처리하는데 실제로는 손절 없는 포지션이 열려 있다.
+      // 포지션 크기 자체가 "손절 거리"로 역산된 값이므로(허용손실 ÷ 손절거리),
+      // 손절이 없으면 그 크기를 정당화하는 근거가 사라진다. 방치하면 계단식
+      // 1회 증거금을 넘어 손실이 커질 수 있다.
+      // 진입 근거가 사라졌으므로 되돌린다.
+      if (args.stopLoss && !slId) {
+        let closed = false, closeErr = '';
+        try {
+          const close = await bf.placeFuturesOrder(apiKey, apiSecret, {
+            symbol: plan.symbol, side: closeSide, type: 'MARKET',
+            quantity: res.qty || plan.quantity, reduceOnly: true,
+            clientOrderId: `${clientOrderId}X`.slice(0, 36),
+          }, testnet);
+          closed = !!(close as any)?.success;
+          if (!closed) closeErr = String((close as any)?.message || '');
+        } catch (e: any) {
+          closeErr = e?.message || String(e);
+        }
+
+        const detail = `손절 부착 실패(${slError})`;
+        if (closed) {
+          await update({ status: 'FAILED', error_message: `${detail} — 포지션을 즉시 청산했습니다` });
+          return {
+            ok: false, status: 'FAILED', clientOrderId,
+            exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
+            tpOrderId: tpId,
+            message: `${detail}. 손절 없는 포지션을 남기지 않기 위해 진입을 즉시 청산했습니다.`,
+          };
+        }
+
+        // 청산까지 실패 — 사람이 개입해야 한다
+        await update({ status: 'UNKNOWN', error_message: `${detail}, 자동 청산도 실패(${closeErr})` });
+        return {
+          ok: false, status: 'UNKNOWN', clientOrderId,
+          exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
+          tpOrderId: tpId,
+          message: `⚠️ 긴급: ${detail}이고 자동 청산도 실패했습니다(${closeErr}). ` +
+                   `손절 없는 포지션이 열려 있습니다 — 거래소에서 직접 확인하세요.`,
+        };
+      }
 
       return {
         ok: true, status: 'ACKED', clientOrderId,
         exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
         slOrderId: slId, tpOrderId: tpId,
-        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})${slWarning}`,
+        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})`,
       };
     }
 
