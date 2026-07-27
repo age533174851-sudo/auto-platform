@@ -14,26 +14,41 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
 
 
 
-/* ── Mock data for HedgeOS ── */
-interface WalletEntry { id:string; exchange:string; asset:string; balance:number; usdtEq:number; pct:number; clr:string; }
-interface MarketplaceEntry { id:string; name:string; strat:string; score:number; pnl:number; subscribers:number; badge:string; clr:string; }
+/* ── Mock data for HedgeOS ──
+ *
+ * 이 화면의 JSX는 WunderPage에서 옮겨 왔는데 타입 선언과 목업 데이터가
+ * 따라오지 않았다. 그래서 JSX는 w.color / w.name / w.icon / w.type /
+ * s.author / s.winRate / s.verified / dd.mode를 읽는데 타입에는 clr만
+ * 있었고 목업에도 해당 값이 없었다 — 런타임에 전부 undefined였다.
+ * (월렛 색상 막대·계정 이름·마켓플레이스 작성자/승률이 비어 보였다.)
+ *
+ * 아래 정의는 JSX가 실제로 읽는 필드에 맞췄다. 형태는 WunderPage.tsx의
+ * WalletEntry / MarketplaceStrat / DrawdownState와 동일하다.
+ */
+interface WalletEntry { id:string; name:string; icon:string; type:string; balance:number; usdtEq:number; color:string; exchange:string; }
+interface MarketplaceEntry { id:string; name:string; author:string; pnl:number; winRate:number; subscribers:number; score:number; type:string; color:string; badge?:string; verified:boolean; }
 interface LiquidationPos { asset:string; side:string; entryPrice:number; liqPrice:number; distPct:number; leverage:number; clr:string; }
 interface ApiPermission { read:boolean; spot:boolean; futures:boolean; withdrawal:boolean; }
-interface KillSwitchState { active:boolean; target:string; reason:string; activatedAt:string|null; }
-interface DrawdownState { daily:{used:number;limit:number}; weekly:{used:number;limit:number}; monthly:{used:number;limit:number}; }
-type KillSwitchTarget='all'|'futures'|'spot';
-type BotMode='shadow'|'live'|'dca';
+type KillSwitchTarget='all'|'selected_bots'|'selected_exchange'|'auto_only';
+type DrawdownMode='normal'|'cooldown'|'defensive'|'stopped';
+type BotMode='shadow'|'sandbox'|'normal';
+interface KillSwitchState { active:boolean; target:KillSwitchTarget; reason:string; activatedAt:string|null; }
+interface DrawdownState { daily:{used:number;limit:number}; weekly:{used:number;limit:number}; monthly:{used:number;limit:number}; mode:DrawdownMode; cooldownEndsAt:string|null; }
+
+// balance는 KRW 기준으로 통일했다. 이전에는 BTC 0.42와 USDT 18200이 한
+// 배열에 섞여 있어서 totalBalance 합계와 배분 막대 비율이 의미가 없었다.
+// usdtEq 값은 그대로 두고 balance만 환산(약 1,375원/USDT)했다.
 const MOCK_WALLET: WalletEntry[] = [
-  {id:'w1',exchange:'Binance',asset:'BTC',balance:0.42,usdtEq:28350,pct:42,clr:'#F59E0B'},
-  {id:'w2',exchange:'Binance',asset:'ETH',balance:3.8,usdtEq:13680,pct:20,clr:'#6366F1'},
-  {id:'w3',exchange:'Binance',asset:'USDT',balance:18200,usdtEq:18200,pct:27,clr:'#10B981'},
-  {id:'w4',exchange:'Gate.io',asset:'SOL',balance:45,usdtEq:7650,pct:11,clr:'#8B5CF6'},
+  {id:'w1',name:'BTC',icon:'₿',type:'Binance',balance:38_980_000,usdtEq:28350,color:'#F59E0B',exchange:'binance'},
+  {id:'w2',name:'ETH',icon:'Ξ',type:'Binance',balance:18_810_000,usdtEq:13680,color:'#6366F1',exchange:'binance'},
+  {id:'w3',name:'USDT',icon:'$',type:'Binance',balance:25_025_000,usdtEq:18200,color:'#10B981',exchange:'binance'},
+  {id:'w4',name:'SOL',icon:'◎',type:'Gate.io',balance:10_520_000,usdtEq:7650, color:'#8B5CF6',exchange:'gateio'},
 ];
 const MOCK_MARKETPLACE: MarketplaceEntry[] = [
-  {id:'m1',name:'퀀트 알파',strat:'EMA Cross',score:92,pnl:28.4,subscribers:1240,badge:'',clr:'#F59E0B'},
-  {id:'m2',name:'리스크매니저',strat:'RSI Mean Rev',score:87,pnl:19.2,subscribers:876,badge:'',clr:'#6366F1'},
-  {id:'m3',name:'스윙마스터',strat:'Breakout',score:81,pnl:14.7,subscribers:543,badge:'',clr:'#10B981'},
-  {id:'m4',name:'DCA왕',strat:'DCA Bot',score:75,pnl:11.3,subscribers:2100,badge:'',clr:'#3B82F6'},
+  {id:'m1',name:'퀀트 알파',   author:'@quant_alpha', pnl:28.4,winRate:64,subscribers:1240,score:92,type:'EMA Cross',   color:'#F59E0B',badge:'TOP',verified:true},
+  {id:'m2',name:'리스크매니저',author:'@riskmgr',     pnl:19.2,winRate:71,subscribers:876, score:87,type:'RSI Mean Rev',color:'#6366F1',badge:'안정',verified:true},
+  {id:'m3',name:'스윙마스터',  author:'@swingmaster', pnl:14.7,winRate:58,subscribers:543, score:81,type:'Breakout',    color:'#10B981',verified:false},
+  {id:'m4',name:'DCA왕',      author:'@dca_king',    pnl:11.3,winRate:83,subscribers:2100,score:75,type:'DCA Bot',     color:'#3B82F6',badge:'인기',verified:true},
 ];
 const MOCK_LIQ_POSITIONS: LiquidationPos[] = [
   {asset:'BTC',side:'long',entryPrice:88_000_000,liqPrice:70_400_000,distPct:20,leverage:5,clr:'#F59E0B'},
@@ -41,7 +56,7 @@ const MOCK_LIQ_POSITIONS: LiquidationPos[] = [
   {asset:'SOL',side:'short',entryPrice:195_000,  liqPrice:292_500,   distPct:8, leverage:10,clr:'#8B5CF6'},
 ];
 const INIT_KILLSWITCH: KillSwitchState = {active:false,target:'all',reason:'',activatedAt:null};
-const INIT_DRAWDOWN: DrawdownState = {daily:{used:1.2,limit:3},weekly:{used:4.1,limit:10},monthly:{used:7.8,limit:25}};
+const INIT_DRAWDOWN: DrawdownState = {daily:{used:1.2,limit:3},weekly:{used:4.1,limit:10},monthly:{used:7.8,limit:25},mode:'normal',cooldownEndsAt:null};
 
 const MOCK_API_PERMS: Record<string,ApiPermission> = {
   'Binance': {read:true,spot:false,futures:true,withdrawal:false},
