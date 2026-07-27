@@ -190,7 +190,29 @@ export async function POST(req: NextRequest) {
       }, { status: 202 });
     }
 
-    plan = planPosition(v.signal!, ctx.config, ctx.currentOpenRisk);
+    // ── Expansion Mode 게이트 ──
+    // 웹훅은 TradingView가 보낸 페이로드에 일봉이 실려 있을 때만 평가할 수 있다.
+    // 평가하지 못하면 result가 null이고, Risk Manager가 일반 모드 상한으로
+    // 제한한다(fail-closed). 즉 데이터를 안 보내면 고배율이 나갈 수 없다.
+    const { buildExpansionGate } = await import('@/lib/strategies/expansionMode');
+    const expansionGate = buildExpansionGate({
+      dailyHighs: Array.isArray(raw?.dailyHighs) ? raw.dailyHighs : undefined,
+      dailyLows: Array.isArray(raw?.dailyLows) ? raw.dailyLows : undefined,
+      dailyCloses: Array.isArray(raw?.dailyCloses) ? raw.dailyCloses : undefined,
+      currentVolume: typeof raw?.currentVolume === 'number' ? raw.currentVolume : undefined,
+      avgVolume: typeof raw?.avgVolume === 'number' ? raw.avgVolume : undefined,
+      fundingRate: typeof raw?.fundingRate === 'number' ? raw.fundingRate : undefined,
+      oiChangePct: typeof raw?.oiChangePct === 'number' ? raw.oiChangePct : undefined,
+    }, {
+      userMaxLeverage: ctx.config.maxLeverage,
+      normalMaxLeverage: ctx.config.normalMaxLeverage,
+    });
+
+    plan = planPosition(
+      v.signal!,
+      { ...ctx.config, expansion: expansionGate.result },
+      ctx.currentOpenRisk,
+    );
 
     if (sb) {
       try {

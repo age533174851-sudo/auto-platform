@@ -17,6 +17,7 @@
 import { evaluateBattle, type BattleInput, type BattleResult } from '../strategies/dailyBattle';
 import { evaluateVeto, type VetoInput, type VetoResult, type VetoRule } from '../strategies/riskVeto';
 import { computeAtrBaseline } from '../strategies/volatilityBaseline';
+import { buildExpansionGate } from '../strategies/expansionMode';
 import { loadCalendar, upcomingFromCalendar } from '../calendar/econCalendar';
 import { planPosition, type PositionPlan, type RiskConfig } from './riskManager';
 import type { StandardSignal } from './signalGateway';
@@ -206,7 +207,28 @@ export async function runTradingPipeline(sb: any, input: PipelineInput): Promise
     bucket: (input.bucket as any) ?? 'swing',
   };
 
-  const plan = planPosition(signal, input.riskConfig);
+  // ── Expansion Mode 게이트 ──
+  // ②에서 이미 계산한 ATR 기준선을 재사용한다. 평가에 실패하면 result가
+  // null로 오고, Risk Manager가 일반 모드 상한으로 제한한다(fail-closed).
+  const expansionGate = buildExpansionGate({
+    currentAtrPct: vol.method === 'median' ? vol.currentAtrPct : undefined,
+    baselineAtrPct: vol.method === 'median' ? vol.baselineAtrPct : undefined,
+    dailyHighs: input.dailyHighs,
+    dailyLows: input.dailyLows,
+    dailyCloses: input.dailyCloses,
+    currentVolume: input.currentVolume,
+    avgVolume: input.avgVolume,
+    fundingRate: input.fundingRate,
+    oiChangePct: input.oiChangePct,
+  }, {
+    userMaxLeverage: input.riskConfig.maxLeverage,
+    normalMaxLeverage: input.riskConfig.normalMaxLeverage,
+  });
+
+  const plan = planPosition(signal, {
+    ...input.riskConfig,
+    expansion: expansionGate.result,
+  });
 
   if (!plan.approved) {
     const r = base('risk', plan.rejectReason ?? '위험 규칙 위반', plan.rejectCode);

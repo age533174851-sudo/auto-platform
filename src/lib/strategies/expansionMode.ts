@@ -14,6 +14,8 @@
 //   2. Expansion 후보여도 예상 MAE가 청산거리를 넘으면 배율을 낮춘다.
 //   3. 이 모듈은 배율 "상한"만 정한다. 실제 배율은 Risk Manager가 손절 거리로 역산한다.
 
+import { computeAtrBaseline, median } from './volatilityBaseline';
+
 export type TradeMode = 'NO_TRADE' | 'NORMAL' | 'EXPANSION';
 
 export interface ExpansionInput {
@@ -175,4 +177,92 @@ export function bollingerWidthPct(closes: number[], period = 20, stdMult = 2): n
   const variance = w.reduce((a, b) => a + (b - mean) ** 2, 0) / period;
   const sd = Math.sqrt(variance);
   return mean > 0 ? ((sd * stdMult * 2) / mean) * 100 : null;
+}
+
+/** 밴드폭 시계열 — 스퀴즈 판정의 기준선을 만들기 위해 필요하다 */
+export function bollingerWidthSeries(closes: number[], period = 20, stdMult = 2): number[] {
+  const out: number[] = [];
+  for (let i = period; i <= closes.length; i++) {
+    const w = bollingerWidthPct(closes.slice(0, i), period, stdMult);
+    if (w != null) out.push(w);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 주문 경로용 게이트 빌더
+// ─────────────────────────────────────────────────────────────
+// evaluateExpansion()은 순수 계산 함수라 입력을 직접 만들어 줘야 한다.
+// 이 함수가 그 조립을 맡아, 주문 경로 여러 곳이 같은 방식으로 평가하게 한다.
+//
+// 데이터가 모자라면 result를 null로 돌려준다. Risk Manager는 expansion이
+// 없으면 일반 모드 상한을 적용하므로(fail-closed), 판단 근거가 없는 주문에
+// 고배율이 허용되는 일은 생기지 않는다.
+
+export interface ExpansionMarketData {
+  /** ATR을 이미 계산해 뒀다면 그대로 넘긴다 (중복 계산 회피) */
+  currentAtrPct?: number;
+  baselineAtrPct?: number;
+  /** 위 두 값이 없을 때 여기서 계산한다 */
+  dailyHighs?: number[];
+  dailyLows?: number[];
+  dailyCloses?: number[];
+
+  currentVolume?: number;
+  avgVolume?: number;
+  fundingRate?: number;
+  oiChangePct?: number;
+  historicalMaeP90?: number;
+}
+
+export interface ExpansionGateOutcome {
+  /** null이면 평가 불가 — 호출자는 그대로 넘기고 Risk Manager가 fail-closed 처리한다 */
+  result: ExpansionResult | null;
+  /** result가 null인 이유 (로그·응답용) */
+  skipReason?: string;
+}
+
+export function buildExpansionGate(
+  md: ExpansionMarketData,
+  opts: { userMaxLeverage?: number; normalMaxLeverage?: number } = {},
+): ExpansionGateOutcome {
+  // ① ATR — evaluateExpansion의 필수 입력
+  let currentAtrPct = md.currentAtrPct;
+  let baselineAtrPct = md.baselineAtrPct;
+
+  if (!(currentAtrPct && baselineAtrPct && baselineAtrPct > 0)) {
+    const { dailyHighs, dailyLows, dailyCloses } = md;
+    if (!dailyHighs?.length || !dailyLows?.length || !dailyCloses?.length) {
+      return { result: null, skipReason: '일봉 데이터가 없어 변동성 기준선을 만들 수 없습니다' };
+    }
+    // 순환 import를 피하려고 지연 로드하지 않는다 — volatilityBaseline은
+    // expansionMode를 import하지 않으므로 정적 import로 안전하다.
+    const vol = computeAtrBaseline(dailyHighs, dailyLows, dailyCloses, { lookbackDays: 40 });
+    if (vol.method === 'insufficient' || vol.baselineAtrPct <= 0) {
+      return { result: null, skipReason: `변동성 기준선 표본 부족 — ${vol.note}` };
+    }
+    currentAtrPct = vol.currentAtrPct;
+    baselineAtrPct = vol.baselineAtrPct;
+  }
+
+  // ② 선택 입력 — 없으면 해당 신호는 점수에서 빠진다
+  const input: ExpansionInput = { currentAtrPct, baselineAtrPct };
+
+  if (md.dailyCloses && md.dailyCloses.length >= 40) {
+    const series = bollingerWidthSeries(md.dailyCloses);
+    if (series.length >= 20) {
+      input.bbWidthPct = series[series.length - 1];
+      // 현재 값은 기준선에서 제외한다 — 자기 자신이 기준이면 비율이 항상 1이 된다
+      input.bbWidthBaseline = median(series.slice(0, -1));
+    }
+  }
+
+  if (md.currentVolume != null && md.avgVolume != null && md.avgVolume > 0) {
+    input.volumeRatio = md.currentVolume / md.avgVolume;
+  }
+  if (md.fundingRate != null) input.fundingRate = md.fundingRate;
+  if (md.oiChangePct != null) input.oiChangePct = md.oiChangePct;
+  if (md.historicalMaeP90 != null) input.historicalMaeP90 = md.historicalMaeP90;
+
+  return { result: evaluateExpansion(input, opts) };
 }

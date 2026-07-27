@@ -4,7 +4,7 @@
 import { test, assert, eq, lt } from '../../test/harness';
 import { planPosition, type RiskConfig } from './riskManager';
 import type { StandardSignal } from './signalGateway';
-import type { ExpansionResult } from '../strategies/expansionMode';
+import { buildExpansionGate, type ExpansionResult } from '../strategies/expansionMode';
 
 const signal = (over: Partial<StandardSignal> = {}): StandardSignal => ({
   strategyId: 'test',
@@ -109,6 +109,47 @@ export function runRiskManagerTests() {
   test('1배는 청산 사유로 거부되지 않는다', () => {
     const p = planPosition(signal({ stopLoss: 50_000 }), cfg({ maxLeverage: 1, normalMaxLeverage: 1 }));
     assert(p.rejectCode !== 'LIQUIDATION_BEFORE_STOP', '1배인데 청산 사유로 거부됨');
+  });
+
+  console.log('[Expansion 게이트 빌더]');
+
+  // 합성 일봉 — 완만한 우상향에 소폭 노이즈
+  const bars = (n: number, vol = 0.01) => {
+    const closes: number[] = [], highs: number[] = [], lows: number[] = [];
+    let px = 100_000;
+    for (let i = 0; i < n; i++) {
+      px *= 1 + ((i % 7) - 3) * vol * 0.1;
+      closes.push(px);
+      highs.push(px * (1 + vol));
+      lows.push(px * (1 - vol));
+    }
+    return { closes, highs, lows };
+  };
+
+  test('일봉이 없으면 평가하지 않고 이유를 남긴다 (fail-closed)', () => {
+    const g = buildExpansionGate({});
+    eq(g.result, null, '데이터 없이 평가 결과가 나왔다');
+    assert(!!g.skipReason, 'skipReason이 비어 있다');
+  });
+
+  test('표본이 부족하면 평가하지 않는다', () => {
+    const b = bars(20);   // ATR 기준선 최소 표본(20일) 미달
+    const g = buildExpansionGate({ dailyHighs: b.highs, dailyLows: b.lows, dailyCloses: b.closes });
+    eq(g.result, null, '표본 부족인데 평가됨');
+  });
+
+  test('데이터가 충분하면 평가 결과를 만든다', () => {
+    const b = bars(60);
+    const g = buildExpansionGate({ dailyHighs: b.highs, dailyLows: b.lows, dailyCloses: b.closes });
+    assert(g.result !== null, '충분한 데이터인데 평가 실패: ' + g.skipReason);
+    assert(g.result!.maxLeverageAllowed >= 1, '상한이 1배 미만');
+  });
+
+  test('평가 불가 시 주문은 일반 모드 상한으로 제한된다', () => {
+    // buildExpansionGate → planPosition 경로를 그대로 통과시킨다
+    const g = buildExpansionGate({});
+    const p = planPosition(signal(), cfg({ maxLeverage: 100, expansion: g.result }));
+    lt(p.leverage, 11, `평가 불가인데 ${p.leverage}배가 승인됨`);
   });
 
   console.log('[Risk Manager — 기존 한도]');
