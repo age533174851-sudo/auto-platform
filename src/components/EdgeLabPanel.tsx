@@ -71,20 +71,25 @@ export default function EdgeLabPanel() {
           <span style={{ flex: 1 }}>MAE</span>
           <span style={{ flex: 1 }}>MFE</span>
           <span style={{ flex: 1 }}>종가</span>
-          <span style={{ width: 78, textAlign: 'right' }}>100배 결과</span>
+          <span style={{ width: 90, textAlign: 'right' }}>100배 상한</span>
         </div>
         {samples.map((x, i) => (
           <div key={i} style={{ display: 'flex', fontSize: 11, padding: '6px 2px', borderBottom: `1px solid ${T.border}` }}>
             <span style={{ flex: 1, color: x.ex.maePct > 0.5 ? T.red : T.sub }}>-{x.ex.maePct.toFixed(2)}%</span>
             <span style={{ flex: 1, color: T.grn }}>+{x.ex.mfePct.toFixed(2)}%</span>
             <span style={{ flex: 1, color: T.sub }}>+{x.ex.closePct.toFixed(1)}%</span>
-            <span style={{ width: 78, textAlign: 'right', color: x.s.survived ? T.grn : T.red, fontWeight: 700 }}>
-              {x.s.survived ? `+${x.s.achievableReturnPct!.toFixed(0)}%` : '💀 청산'}
+            <span style={{ width: 90, textAlign: 'right', color: x.s.survived ? T.grn : T.red, fontWeight: 700 }}>
+              {x.s.survived ? `≤ +${x.s.mfeUpperBoundPct!.toFixed(0)}%` : '💀 청산'}
             </span>
           </div>
         ))}
         <div style={{ color: T.muted, fontSize: 10, marginTop: 8, lineHeight: 1.4 }}>
           MAE가 0.50%를 넘으면 최종 방향이 맞아도 청산됩니다 (100배 청산거리 = 0.50%)
+        </div>
+        <div style={{ color: T.ylw, fontSize: 10, marginTop: 6, lineHeight: 1.4, background: T.ylw + '12', borderRadius: 8, padding: '7px 9px' }}>
+          ⚠️ 「100배 상한」은 MFE 최고점에서 전량 청산했다고 가정한 <b>천장값</b>입니다.
+          실제 봇은 그 지점을 알 수 없으므로 이만큼 먹지 못합니다.
+          실현 수익은 손절·분할익절·트레일링을 적용해 계산해야 합니다.
         </div>
       </div>
 
