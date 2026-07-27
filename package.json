@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "vercel-build": "next build",
+    "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
