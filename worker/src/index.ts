@@ -19,14 +19,21 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 let errorCount = 0;
 const prevPos: Record<string, Set<string>> = {};
 
-// ── 액션 락: Redis 있으면 SETNX. 없으면 생략(no-op) — jobs의 atomic claim이 중복 방지 ──
-// (worker_lock 테이블이 없어도 job 처리가 막히지 않게 함)
+// ── 액션 락 ──
+// Redis가 있으면 SETNX, 없으면 worker_lock 테이블의 CAS를 쓴다.
+//
+// 예전에는 Redis가 없으면 그냥 true를 돌려줬다(no-op). "jobs의 atomic claim이
+// 중복을 막는다"는 주석이 붙어 있었지만, 그 claim은 같은 잡 행을 두 워커가
+// 동시에 가져가는 것만 막는다. 아래 stale 복구가 아직 실행 중인 잡을 PENDING
+// 으로 되돌리면 다른 워커가 정당하게 claim해서 같은 주문을 또 낸다.
+// Redis는 현재 배포에 설정돼 있지 않으므로, 이 경로가 실제로 쓰인다.
 async function acquireActionLock(name: string, ttl: number): Promise<boolean> {
   if (redisAvailable()) return lockNxEx(name, WORKER_ID, ttl);
-  return true;
+  return acquireLock(name, WORKER_ID, ttl);
 }
 async function releaseActionLock(name: string): Promise<void> {
-  if (redisAvailable()) await unlock(name);
+  if (redisAvailable()) { await unlock(name); return; }
+  await releaseLock(name, WORKER_ID);
 }
 
 async function getConnection(connId: string): Promise<any | null> {
@@ -98,11 +105,46 @@ async function runAction(job: any, conn: any): Promise<{ ok: boolean; result?: a
 
 // ── 잡 처리: stale 복구 → PENDING 조회 → 락 → claim → 실행 → finalize ──
 async function processPendingJobs() {
-  // stale 복구: PROCESSING인데 locked_until 지남 → PENDING
+  // ── stale 복구 ──
+  //
+  // PROCESSING인데 locked_until이 지난 잡을 PENDING으로 되돌린다. 그런데
+  // "만료 = 워커가 죽음"이 아니다. 거래소 호출이 느려서 60초를 넘겼을 뿐인
+  // 살아 있는 워커의 잡을 되돌리면, 다른 워커가 같은 주문을 또 낸다.
+  //
+  // 그래서 두 조건을 모두 요구한다:
+  //   1) 만료 후 유예 시간(GRACE)까지 지났을 것
+  //   2) 해당 잡을 쥔 워커의 heartbeat가 끊겼을 것
+  // 살아 있는 워커의 잡은 아무리 느려도 회수하지 않는다.
+  const STALE_GRACE_MS = 120_000;
   try {
-    await sb().from('jobs').update({ status: 'PENDING', locked_by: null, updated_at: new Date().toISOString() })
-      .eq('status', 'PROCESSING').lt('locked_until', new Date().toISOString());
-  } catch {}
+    const cutoff = new Date(Date.now() - STALE_GRACE_MS).toISOString();
+    const { data: stale } = await sb().from('jobs')
+      .select('id, locked_by, locked_until')
+      .eq('status', 'PROCESSING').lt('locked_until', cutoff).limit(20);
+
+    if (Array.isArray(stale) && stale.length) {
+      // 최근 살아 있는 워커 목록
+      const aliveSince = new Date(Date.now() - 90_000).toISOString();
+      const { data: beats } = await sb().from('worker_heartbeat')
+        .select('worker_id, last_seen, status').gt('last_seen', aliveSince);
+      const alive = new Set(
+        (Array.isArray(beats) ? beats : [])
+          .filter((b: any) => b.status !== 'stopped')
+          .map((b: any) => String(b.worker_id)),
+      );
+
+      for (const j of stale as any[]) {
+        if (j.locked_by && alive.has(String(j.locked_by))) {
+          console.warn(`[jobs] ${String(j.id).slice(0, 8)} 만료됐지만 보유 워커 ${j.locked_by}가 살아 있어 회수하지 않음`);
+          continue;
+        }
+        await sb().from('jobs')
+          .update({ status: 'PENDING', locked_by: null, updated_at: new Date().toISOString() })
+          .eq('id', j.id).eq('status', 'PROCESSING').eq('locked_by', j.locked_by);
+        console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 (보유 워커 ${j.locked_by || '?'} heartbeat 없음)`);
+      }
+    }
+  } catch { /* 회수 실패는 다음 주기에 다시 시도한다 */ }
 
   const { data: jobs, error: qErr } = await sb().from('jobs').select('*').eq('status', 'PENDING')
     .order('priority', { ascending: true }).order('created_at', { ascending: true }).limit(10);
@@ -204,6 +246,58 @@ async function tick() {
   try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
   await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount);
   if (isMain) await monitorConnections();
+  if (isMain) await monitorLadderExits();
+}
+
+// ── 계단식 거래의 트레일링 · 본전 이동 · 시간 청산 ──
+//
+// 손절과 분할 익절은 진입 시 거래소에 걸려 있다. 여기서는 단일 주문으로
+// 표현할 수 없는 나머지를 처리한다. 판단(checkLadderExits)과 실행을 분리해
+// 두었으므로, 여기서는 결정된 조치만 잡으로 넣는다.
+// 직접 주문하지 않고 잡을 만드는 이유: 주문 경로를 한 곳(processPendingJobs)
+// 으로 모아야 멱등 처리와 재시도 규칙이 한 번만 적용된다.
+async function monitorLadderExits() {
+  try {
+    const { checkLadderExits, recordExitCheck } = await import('./exitMonitor');
+    const checks = await checkLadderExits({ testnet: (process.env.WORKER_MODE || 'TESTNET').toUpperCase() !== 'LIVE' });
+
+    for (const c of checks) {
+      if (c.action === 'NONE') continue;
+
+      // 같은 거래에 대한 미처리 잡이 있으면 또 만들지 않는다
+      const { data: dup } = await sb().from('jobs').select('id')
+        .eq('action', c.action === 'CLOSE' ? 'CLOSE_POSITION' : 'SET_TPSL')
+        .eq('symbol', c.symbol).in('status', ['PENDING', 'PROCESSING']).limit(1);
+      if (Array.isArray(dup) && dup.length) continue;
+
+      const { data: trade } = await sb().from('ladder_daily_trades')
+        .select('user_id, symbol, side').eq('id', c.tradeId).maybeSingle();
+      if (!trade) continue;
+
+      const { data: conn } = await sb().from('exchange_connections')
+        .select('id, exchange').eq('user_id', (trade as any).user_id).eq('is_active', true).limit(1).maybeSingle();
+      if (!conn) continue;
+
+      await sb().from('jobs').insert({
+        user_id: (trade as any).user_id,
+        connection_id: (conn as any).id,
+        exchange: 'binance',
+        mode: (process.env.WORKER_MODE || 'TESTNET').toUpperCase(),
+        action: c.action === 'CLOSE' ? 'CLOSE_POSITION' : 'SET_TPSL',
+        symbol: c.symbol,
+        payload: c.action === 'CLOSE'
+          ? { positionSide: String((trade as any).side).toUpperCase(), percent: 100, reason: c.reason }
+          : { positionSide: String((trade as any).side).toUpperCase(), slPrice: c.newStop, reason: c.reason },
+        status: 'PENDING', priority: 1, max_attempts: 3,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      });
+
+      await recordExitCheck(c, true);
+      console.log(`[exit] ${c.symbol} ${c.action} — ${c.reason} (최고 ${c.highWaterR.toFixed(2)}R)`);
+    }
+  } catch (e: any) {
+    console.error('[exit] 청산 감시 실패:', e?.message || e);
+  }
 }
 
 async function startupChecks() {
