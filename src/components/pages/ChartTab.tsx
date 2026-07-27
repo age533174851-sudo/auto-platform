@@ -14,7 +14,10 @@ interface TVAsset {
   cat: string;
   clr: string;
   logo?: string;
-  feat?: boolean;
+  // 데이터 리터럴은 전부 `featured`를 쓴다. 선언이 `feat`으로 되어 있어
+  // TV_ETFS/TV_STOCKS_US 항목마다 TS2353이 났다.
+  // HedgeOSPage.tsx의 동일한 TVAsset도 `featured`로 선언돼 있다.
+  featured?: boolean;
 }
 
 // TV_STOCKS_US alias (shares same structure)
