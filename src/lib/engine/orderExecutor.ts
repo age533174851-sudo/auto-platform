@@ -12,6 +12,7 @@
 //
 // 응답을 못 받으면 절대 그냥 재시도하지 않는다 → UNKNOWN으로 두고 대조 후 판단.
 import type { PositionPlan } from './riskManager';
+import type { ExitPlan } from './exitPlan';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -25,6 +26,11 @@ export interface ExecuteArgs {
   plan: PositionPlan;
   stopLoss?: number;
   takeProfit?: number;
+  /**
+   * 비대칭 청산 계획. 주면 단일 익절 대신 분할 익절 사다리를 건다.
+   * 손절은 이 계획에 포함돼 있어도 stopLoss와 동일하게 전량 STOP_MARKET이다.
+   */
+  exitPlan?: ExitPlan;
   apiKey: string;
   apiSecret: string;
 }
@@ -208,7 +214,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         if ((sl as any)?.success) slId = String((sl as any).orderId);
         else slError = String((sl as any)?.message || '원인 불명');
       }
-      if (args.takeProfit) {
+      // 익절 — exitPlan이 있으면 분할 사다리를, 없으면 기존 단일 익절을 건다.
+      const tpIds: string[] = [];
+      if (args.exitPlan) {
+        for (const o of args.exitPlan.orders) {
+          if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
+          const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
+            symbol: plan.symbol, side: closeSide, stopPrice: o.price,
+            type: 'TAKE_PROFIT_MARKET', quantity: o.quantity,
+          }, testnet);
+          if ((r as any)?.success) tpIds.push(String((r as any).orderId));
+          // 분할 익절 실패는 진입을 되돌릴 사유가 아니다 — 손절은 이미 걸려
+          // 있으므로 손실은 고정된다. 이익 확보만 덜 되는 것이다.
+        }
+        tpId = tpIds[0];
+      } else if (args.takeProfit) {
         const tp = await bf.placeFuturesTPSL(apiKey, apiSecret, {
           symbol: plan.symbol, side: closeSide, stopPrice: args.takeProfit, type: 'TAKE_PROFIT_MARKET',
         }, testnet);
@@ -260,11 +280,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         };
       }
 
+      const exitNote = args.exitPlan
+        ? ` · 분할익절 ${tpIds.length}/${args.exitPlan.orders.filter(o => o.kind === 'PARTIAL_TP').length}건` +
+          (args.exitPlan.trailingQty > 0 ? ` · 잔량 ${args.exitPlan.trailingQty}는 트레일링 대기` : '')
+        : '';
+
       return {
         ok: true, status: 'ACKED', clientOrderId,
         exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
         slOrderId: slId, tpOrderId: tpId,
-        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})`,
+        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})${exitNote}`,
       };
     }
 

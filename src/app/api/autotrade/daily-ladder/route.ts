@@ -215,6 +215,27 @@ export async function POST(req: NextRequest) {
       ? lastClose * (1 - result.plan!.stopDistancePct / 100)
       : lastClose * (1 + result.plan!.stopDistancePct / 100);
 
+    // ── 비대칭 청산 계획 ──
+    // 손절은 전량 고정, 1.5R/3R에서 30%씩 분할 익절, 잔량 40%는 트레일링
+    // 대기. 분할 수량은 거래소 단위에 맞춰야 거부되지 않으므로 필터를 읽는다.
+    const { buildExitPlan } = await import('@/lib/engine/exitPlan');
+    let qtyStep: number | undefined, minQty: number | undefined;
+    try {
+      const bf = await import('@/lib/exchanges/binanceFutures');
+      const f = await bf.getSymbolFilters(symbol, mode !== 'LIVE');
+      if (f) { qtyStep = f.stepSize; minQty = f.minQty; }
+    } catch { /* 필터를 못 읽으면 반올림 없이 진행 — 거래소가 거부하면 분할만 빠진다 */ }
+
+    const exitPlan = buildExitPlan({
+      side: result.plan!.side,
+      entryPrice: lastClose,
+      stopPrice: stopLoss,
+      quantity: result.plan!.quantity,
+      liquidationPrice: result.plan!.liquidationPrice,
+      qtyStep, minQty,
+      maxHoldBars: body.maxHoldDays ?? 5,   // 일봉 기준 — 5일 넘게 들고 있지 않는다
+    });
+
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
@@ -224,6 +245,7 @@ export async function POST(req: NextRequest) {
       mode: mode as 'TESTNET' | 'LIVE',
       plan: result.plan!,
       stopLoss,
+      exitPlan,
       apiKey: conn.api_key,
       apiSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
     });
@@ -247,6 +269,18 @@ export async function POST(req: NextRequest) {
         exchangeOrderId: exec.exchangeOrderId,
         filledQty: exec.filledQty, avgPrice: exec.avgPrice,
         slOrderId: exec.slOrderId, message: exec.message,
+      },
+      exit: {
+        stopPrice: stopLoss,
+        partials: exitPlan.orders
+          .filter(o => o.kind === 'PARTIAL_TP')
+          .map(o => ({ atR: o.atR, price: o.price, quantity: o.quantity })),
+        trailingQty: exitPlan.trailingQty,
+        trailStartR: exitPlan.trailStartR,
+        trailDistanceR: exitPlan.trailDistanceR,
+        breakEvenAtR: exitPlan.breakEvenAtR,
+        maxHoldBars: exitPlan.maxHoldBars,
+        notes: exitPlan.notes,
       },
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
