@@ -13,7 +13,10 @@
       "PowerShell($f = \"$env:TEMP\\\\claude\\\\tsc.txt\"; if\\(Test-Path $f\\){ $lines = Get-Content $f | Where-Object { $_ -match 'error TS' }; \"총 에러: \" + $lines.Count; \"\"; \"── 에러 코드별 집계 ──\"; $lines | ForEach-Object { if\\($_ -match '\\(error TS\\\\d+\\)'\\){ $matches[1] } } | Group-Object | Sort-Object Count -Descending | Select-Object Count,Name | Format-Table -AutoSize | Out-String; \"── 파일별 상위 20 ──\"; $lines | ForEach-Object { \\($_ -split '\\\\\\('\\)[0] } | Group-Object | Sort-Object Count -Descending | Select-Object -First 20 Count,Name | Format-Table -AutoSize | Out-String } else { \"no file\"; Get-Content \"$env:TEMP\\\\claude\\\\D---------\\\\ef67696d-6de8-429b-965d-c7995b66aaed\\\\tasks\\\\bnxgvid34.output\" -TotalCount 40 })",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; npm run build 2>&1 | Out-File \"$env:TEMP\\\\claude\\\\build.txt\" -Encoding utf8; \"exit=$LASTEXITCODE\")",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; npm test 2>&1 | Select-Object -Last 25; \"exit=$LASTEXITCODE\")",
-      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; npm test 2>&1 | Select-Object -Last 40; \"exit=$LASTEXITCODE\")"
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; npm test 2>&1 | Select-Object -Last 40; \"exit=$LASTEXITCODE\")",
+      "PowerShell(Start-Process notepad.exe -ArgumentList \"D:\\\\�ڵ��Ÿ� ����\\\\.secrets.local.ps1\")",
+      "PowerShell(\"�޸��� ����\")",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; git diff -- .claude/settings.local.json)"
     ]
   }
 }
