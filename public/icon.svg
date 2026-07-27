@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E3A5F"/>
+      <stop offset="100%" stop-color="#0A0F1E"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="chart" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+  </defs>
+  <!-- Background rounded rect -->
+  <rect width="512" height="512" rx="110" fill="url(#bg)"/>
+  <!-- Subtle inner glow -->
+  <rect x="2" y="2" width="508" height="508" rx="108" fill="none" stroke="url(#accent)" stroke-width="4" opacity="0.3"/>
+  <!-- Chart bars background -->
+  <rect x="80" y="340" width="50" height="100" rx="8" fill="#1A2D4A" opacity="0.6"/>
+  <rect x="148" y="290" width="50" height="150" rx="8" fill="#1A2D4A" opacity="0.6"/>
+  <rect x="216" y="260" width="50" height="180" rx="8" fill="#1A2D4A" opacity="0.6"/>
+  <rect x="284" y="220" width="50" height="220" rx="8" fill="#1A2D4A" opacity="0.6"/>
+  <rect x="352" y="180" width="50" height="260" rx="8" fill="#1A2D4A" opacity="0.6"/>
+  <!-- Chart bars foreground (gradient) -->
+  <rect x="80" y="360" width="50" height="80" rx="8" fill="url(#chart)" opacity="0.5"/>
+  <rect x="148" y="310" width="50" height="130" rx="8" fill="url(#chart)" opacity="0.65"/>
+  <rect x="216" y="275" width="50" height="165" rx="8" fill="url(#chart)" opacity="0.8"/>
+  <rect x="284" y="235" width="50" height="205" rx="8" fill="url(#chart)" opacity="0.9"/>
+  <rect x="352" y="195" width="50" height="245" rx="8" fill="url(#chart)"/>
+  <!-- T letter -->
+  <rect x="172" y="80" width="168" height="30" rx="15" fill="white"/>
+  <rect x="241" y="80" width="30" height="140" rx="15" fill="white"/>
+  <!-- Subtle line chart overlay -->
+  <polyline points="80,320 148,280 216,240 284,200 352,160 432,130" fill="none" stroke="url(#accent)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+  <circle cx="432" cy="130" r="10" fill="#3B82F6"/>
+</svg>

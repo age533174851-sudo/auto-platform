@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead\\(\"C:\\\\Users\\\\age53\\\\Downloads\\\\TRAIGO-v10.zip\"\\); $z.Entries | ForEach-Object { \"{0,10}  {1}\" -f $_.Length, $_.FullName }; $z.Dispose\\(\\))",
+      "PowerShell($paths = @\\(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\",\"C:\\\\Program Files \\(x86\\)\\\\nodejs\\\\node.exe\",\"$env:LOCALAPPDATA\\\\nvs\",\"$env:APPDATA\\\\nvm\",\"$env:LOCALAPPDATA\\\\fnm_multishells\",\"$env:ProgramFiles\\\\nodejs\"\\); foreach\\($p in $paths\\){ if\\(Test-Path $p\\){ \"FOUND: $p\" } }; Get-Command node,npm,nvm,fnm,volta -ErrorAction SilentlyContinue | Select-Object Name,Source)",
+      "PowerShell(foreach\\($c in @\\('git','curl','gh','psql','docker','winget','pwsh'\\)\\){ $g = Get-Command $c -ErrorAction SilentlyContinue; if\\($g\\){ \"OK   $c -> $\\($g.Source\\)\" } else { \"MISS $c\" } })",
+      "WebFetch(domain:api.supabase.com)",
+      "WebFetch(domain:supabase.com)",
+      "PowerShell(winget install --id OpenJS.NodeJS.LTS -e --silent --accept-source-agreements --accept-package-agreements)",
+      "PowerShell(winget install --id OpenJS.NodeJS.LTS -e --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1)",
+      "PowerShell(winget install --id Git.Git -e --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"D:\\\\자동매매 개발\"; npm install --no-audit --no-fund 2>&1 | Select-Object -Last 30)"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+node_modules/
+.next/
+.env
+.env.local
+.env*.local
+.vercel
+
+# 로컬 자격증명 — Supabase / Vercel 토큰. 절대 커밋 금지
+.secrets.local.ps1
+*.local.ps1
+
+# 로그 / OS
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
