@@ -7,11 +7,6 @@
 //   GET https://api.supabase.com/v1/projects/{ref}/types/typescript
 //       ?included_schemas=public
 //       Authorization: Bearer <personal access token>
-//
-// 이전 버전은 손으로 관리한 10개 테이블만 선언하고 있었다. 실제 DB에는
-// 36개가 있어서, 선언되지 않은 테이블을 supabase.from()으로 부르면
-// 반환 타입이 never가 되고 "Property 'x' does not exist on type 'never'"
-// 형태의 타입 에러가 대량 발생했다.
 // ─────────────────────────────────────────────────────────────
 export type Json =
   | string
@@ -638,6 +633,152 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      exchange_connections_backup_20260727: {
+        Row: {
+          api_key: string | null
+          api_key_encrypted: string | null
+          api_key_masked: string | null
+          api_passphrase_enc: string | null
+          api_secret_enc: string | null
+          auto_trading_enabled: boolean | null
+          created_at: string | null
+          encrypted_passphrase: string | null
+          encrypted_secret: string | null
+          exchange: string | null
+          exchange_id: string | null
+          has_withdrawal: boolean | null
+          id: string | null
+          is_active: boolean | null
+          is_paper: boolean | null
+          is_testnet: boolean | null
+          label: string | null
+          last_error: string | null
+          last_health_check: string | null
+          last_tested_at: string | null
+          nickname: string | null
+          perm_read: boolean | null
+          perm_trading: boolean | null
+          permission_read: boolean | null
+          permission_trade: boolean | null
+          permission_withdraw: boolean | null
+          test_status: string | null
+          updated_at: string | null
+          user_id: string | null
+        }
+        Insert: {
+          api_key?: string | null
+          api_key_encrypted?: string | null
+          api_key_masked?: string | null
+          api_passphrase_enc?: string | null
+          api_secret_enc?: string | null
+          auto_trading_enabled?: boolean | null
+          created_at?: string | null
+          encrypted_passphrase?: string | null
+          encrypted_secret?: string | null
+          exchange?: string | null
+          exchange_id?: string | null
+          has_withdrawal?: boolean | null
+          id?: string | null
+          is_active?: boolean | null
+          is_paper?: boolean | null
+          is_testnet?: boolean | null
+          label?: string | null
+          last_error?: string | null
+          last_health_check?: string | null
+          last_tested_at?: string | null
+          nickname?: string | null
+          perm_read?: boolean | null
+          perm_trading?: boolean | null
+          permission_read?: boolean | null
+          permission_trade?: boolean | null
+          permission_withdraw?: boolean | null
+          test_status?: string | null
+          updated_at?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          api_key?: string | null
+          api_key_encrypted?: string | null
+          api_key_masked?: string | null
+          api_passphrase_enc?: string | null
+          api_secret_enc?: string | null
+          auto_trading_enabled?: boolean | null
+          created_at?: string | null
+          encrypted_passphrase?: string | null
+          encrypted_secret?: string | null
+          exchange?: string | null
+          exchange_id?: string | null
+          has_withdrawal?: boolean | null
+          id?: string | null
+          is_active?: boolean | null
+          is_paper?: boolean | null
+          is_testnet?: boolean | null
+          label?: string | null
+          last_error?: string | null
+          last_health_check?: string | null
+          last_tested_at?: string | null
+          nickname?: string | null
+          perm_read?: boolean | null
+          perm_trading?: boolean | null
+          permission_read?: boolean | null
+          permission_trade?: boolean | null
+          permission_withdraw?: boolean | null
+          test_status?: string | null
+          updated_at?: string | null
+          user_id?: string | null
+        }
+        Relationships: []
+      }
+      invite_codes: {
+        Row: {
+          active: boolean
+          code: string
+          created_at: string
+          created_by: string | null
+          expires_at: string | null
+          id: string
+          note: string | null
+          plan: string
+          role: string
+          uses_count: number
+          uses_max: number | null
+        }
+        Insert: {
+          active?: boolean
+          code: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          note?: string | null
+          plan?: string
+          role?: string
+          uses_count?: number
+          uses_max?: number | null
+        }
+        Update: {
+          active?: boolean
+          code?: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          note?: string | null
+          plan?: string
+          role?: string
+          uses_count?: number
+          uses_max?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invite_codes_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       jobs: {
         Row: {
@@ -1271,38 +1412,67 @@ export type Database = {
       profiles: {
         Row: {
           avatar_url: string | null
+          badges: string[]
           created_at: string | null
           default_currency: string | null
+          display_name: string | null
           email: string | null
+          expires_at: string | null
+          granted_by: string | null
           id: string
+          invite_code: string | null
           name: string | null
+          plan: string
           risk_profile: string | null
           role: string | null
+          status: string
           updated_at: string | null
         }
         Insert: {
           avatar_url?: string | null
+          badges?: string[]
           created_at?: string | null
           default_currency?: string | null
+          display_name?: string | null
           email?: string | null
+          expires_at?: string | null
+          granted_by?: string | null
           id: string
+          invite_code?: string | null
           name?: string | null
+          plan?: string
           risk_profile?: string | null
           role?: string | null
+          status?: string
           updated_at?: string | null
         }
         Update: {
           avatar_url?: string | null
+          badges?: string[]
           created_at?: string | null
           default_currency?: string | null
+          display_name?: string | null
           email?: string | null
+          expires_at?: string | null
+          granted_by?: string | null
           id?: string
+          invite_code?: string | null
           name?: string | null
+          plan?: string
           risk_profile?: string | null
           role?: string | null
+          status?: string
           updated_at?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "profiles_granted_by_fkey"
+            columns: ["granted_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       push_subscriptions: {
         Row: {
