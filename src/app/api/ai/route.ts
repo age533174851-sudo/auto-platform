@@ -1,34 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { callAny } from '@/lib/ai/providers';
 
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-
-// ─── Safe OpenAI call — never exposes key to client ──────────────
-async function callOpenAI(
+// ─── AI 호출 — 키가 설정된 제공자를 순서대로 시도 ────────────────
+// 이전에는 OpenAI만 직접 호출했고, 키가 없거나 실패하면 곧바로 폴백 문구가
+// 나갔다. 이제 OpenAI / Anthropic / Gemini 중 키가 있는 것을 차례로 시도하고,
+// 실제로 응답한 제공자를 source로 돌려준다 (이전에는 항상 'openai'로 표기).
+// 어느 키도 없으면 예전처럼 폴백 문구를 쓴다.
+async function callAI(
   systemPrompt: string,
   userPrompt:   string,
-  maxTokens  = 600
-): Promise<string | null> {
-  const key = process.env.OPENAI_API_KEY || '';
-  if (!key) return null;
-  try {
-    const r = await fetch(OPENAI_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        max_tokens: maxTokens,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt   },
-        ],
-        temperature: 0.7,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d.choices?.[0]?.message?.content?.trim() || null;
-  } catch { return null; }
+  maxTokens  = 600,
+): Promise<{ text: string | null; provider: string | null; model: string }> {
+  const r = await callAny({
+    system: systemPrompt,
+    user: userPrompt,
+    maxTokens,
+    tier: 'L1_CHEAP',   // 이 라우트는 짧은 설명·요약용이다
+  });
+  return {
+    text: r.ok ? r.text : null,
+    provider: r.ok ? r.provider : null,
+    model: r.model,
+  };
 }
 
 // ─── Fallback responses (Korean, education-focused) ──────────────
@@ -78,7 +71,7 @@ const SYSTEM = {
 - 200자 이내`,
 
   news: `당신은 TRAIGO의 시장 뉴스 요약 AI입니다.
-규�글:
+규칙:
 - 한국어, 150자 이내
 - CPI/FOMC/NFP 등 매크로 이벤트 영향 설명
 - 불리시/베어리시 영향 구분
@@ -123,10 +116,10 @@ export async function GET(req: NextRequest) {
     const ethChange   = parseFloat(searchParams.get('ethChange') || '0');
     const vix         = parseFloat(searchParams.get('vix') || '18');
     const userPrompt  = `현재 시장 데이터:\n- BTC 24h 변동: ${btcChange >= 0 ? '+' : ''}${btcChange.toFixed(2)}%\n- ETH 24h 변동: ${ethChange >= 0 ? '+' : ''}${ethChange.toFixed(2)}%\n- VIX 공포지수: ${vix}\n\n현재 시장 심리를 분석해주세요. 공포/탐욕 점수(0-100)와 불리시 확률(%)을 포함하세요.`;
-    const result = await callOpenAI(SYSTEM.sentiment, userPrompt, 200);
+    const r = await callAI(SYSTEM.sentiment, userPrompt, 200);
     return NextResponse.json({
-      result: result || FALLBACKS.sentiment,
-      source: result ? 'openai' : 'fallback',
+      result: r.text || FALLBACKS.sentiment,
+      source: r.provider ?? 'fallback', model: r.model,
       cached: false,
     }, { headers: { 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600' } });
   }
@@ -135,10 +128,10 @@ export async function GET(req: NextRequest) {
   if (action === 'summary') {
     const assets = searchParams.get('assets') || 'BTC,ETH,NVDA,SPY';
     const userPrompt = `현재 주요 자산 현황:\n${assets}\n\n위 자산들의 시장 상황을 간략히 분석해주세요. 전반적인 시장 분위기(불리시/베어리시)와 주목할 포인트를 알려주세요.`;
-    const result = await callOpenAI(SYSTEM.market, userPrompt, 400);
+    const r = await callAI(SYSTEM.market, userPrompt, 400);
     return NextResponse.json({
-      result: result || FALLBACKS.summary,
-      source: result ? 'openai' : 'fallback',
+      result: r.text || FALLBACKS.summary,
+      source: r.provider ?? 'fallback', model: r.model,
     }, { headers: { 'Cache-Control': 'public, s-maxage=180, stale-while-revalidate=360' } });
   }
 
@@ -146,10 +139,10 @@ export async function GET(req: NextRequest) {
   if (action === 'strategy') {
     const strat = searchParams.get('strategy') || 'EMA Cross';
     const userPrompt = `트레이딩 전략 "${strat}"을 초보자도 이해하기 쉽게 한국어로 설명해주세요. 진입/청산 조건, 장단점을 포함하세요.`;
-    const result = await callOpenAI(SYSTEM.strategy, userPrompt, 400);
+    const r = await callAI(SYSTEM.strategy, userPrompt, 400);
     return NextResponse.json({
-      result: result || FALLBACKS.strategy,
-      source: result ? 'openai' : 'fallback',
+      result: r.text || FALLBACKS.strategy,
+      source: r.provider ?? 'fallback', model: r.model,
     }, { headers: { 'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=7200' } });
   }
 
@@ -165,8 +158,8 @@ export async function POST(req: NextRequest) {
   // ── Chat ──
   if (action === 'chat') {
     if (!message.trim()) return NextResponse.json({ error: 'message required' }, { status: 400 });
-    const result = await callOpenAI(SYSTEM.chat, message, 400);
-    return NextResponse.json({ result: result || FALLBACKS.chat, source: result ? 'openai' : 'fallback' });
+    const r = await callAI(SYSTEM.chat, message, 400);
+    return NextResponse.json({ result: r.text || FALLBACKS.chat, source: r.provider ?? 'fallback', model: r.model });
   }
 
   // ── Leverage recommendation ──
@@ -180,8 +173,8 @@ export async function POST(req: NextRequest) {
 - 포트폴리오 규모: ₩${portfolioSize.toLocaleString()}
 
 레버리지 적정성을 평가하고 청산 리스크를 설명해주세요.`;
-    const result = await callOpenAI(SYSTEM.leverage, userPrompt, 400);
-    return NextResponse.json({ result: result || FALLBACKS.leverage, source: result ? 'openai' : 'fallback' });
+    const r = await callAI(SYSTEM.leverage, userPrompt, 400);
+    return NextResponse.json({ result: r.text || FALLBACKS.leverage, source: r.provider ?? 'fallback', model: r.model });
   }
 
   // ── Portfolio review ──
@@ -191,8 +184,8 @@ export async function POST(req: NextRequest) {
       `- ${h.name||h.sym}: ₩${(h.value||0).toLocaleString()} (${(h.pct||0).toFixed(1)}%)`
     ).join('\n');
     const userPrompt = `포트폴리오 구성:\n${holdingsStr || '데이터 없음'}\n\n집중 리스크와 분산 투자 개선점을 분석해주세요.`;
-    const result = await callOpenAI(SYSTEM.portfolio, userPrompt, 400);
-    return NextResponse.json({ result: result || FALLBACKS.portfolio, source: result ? 'openai' : 'fallback' });
+    const r = await callAI(SYSTEM.portfolio, userPrompt, 400);
+    return NextResponse.json({ result: r.text || FALLBACKS.portfolio, source: r.provider ?? 'fallback', model: r.model });
   }
 
   // ── News summary ──
@@ -200,8 +193,8 @@ export async function POST(req: NextRequest) {
     const { headlines = [] } = context;
     const headlineStr = headlines.slice(0, 5).map((h: string, i: number) => `${i+1}. ${h}`).join('\n');
     const userPrompt = `다음 시장 뉴스 헤드라인을 요약해주세요:\n${headlineStr || '헤드라인 없음'}\n\n시장에 미치는 영향과 투자자 관점에서 주목해야 할 포인트를 알려주세요.`;
-    const result = await callOpenAI(SYSTEM.news, userPrompt, 400);
-    return NextResponse.json({ result: result || FALLBACKS.news, source: result ? 'openai' : 'fallback' });
+    const r = await callAI(SYSTEM.news, userPrompt, 400);
+    return NextResponse.json({ result: r.text || FALLBACKS.news, source: r.provider ?? 'fallback', model: r.model });
   }
 
   // ── Journal review ──
@@ -217,8 +210,8 @@ export async function POST(req: NextRequest) {
 - 메모: ${trade.memo||'없음'}
 
 이 거래를 리뷰하고 개선점을 제안해주세요.`;
-    const result = await callOpenAI(SYSTEM.journal, userPrompt, 350);
-    return NextResponse.json({ result: result || FALLBACKS.journal, source: result ? 'openai' : 'fallback' });
+    const r = await callAI(SYSTEM.journal, userPrompt, 350);
+    return NextResponse.json({ result: r.text || FALLBACKS.journal, source: r.provider ?? 'fallback', model: r.model });
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
