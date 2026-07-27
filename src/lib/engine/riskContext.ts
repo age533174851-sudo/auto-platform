@@ -13,8 +13,20 @@ export interface RiskContext {
 }
 
 // 한도 기본값 — 사용자가 risk_limits에 설정하지 않았을 때
+//
+// maxLeverage는 "절대 상한"이지 "적용 배율"이 아니다. 실제 배율은 이 값이
+// 아니라 아래 세 단계가 순서대로 깎아서 정한다:
+//   1) Expansion Mode — 시장 조건 점수와 과거 MAE로 상한을 낮춘다.
+//      평가 근거(일봉·거래량 등)가 없으면 일반 모드 상한(기본 10배)까지만.
+//   2) Risk Manager — 허용 손실액 ÷ 손절 거리로 포지션 크기를 정하고
+//      거기서 배율을 역산한다. 배율은 입력이 아니라 결과다.
+//   3) 청산 거리가 손절 거리의 1.3배 이하면 주문 자체를 거부한다.
+//
+// 이 값이 5였을 때는 Expansion이 43배를 허용해도 min(5, 43)=5가 되어
+// Expansion Mode가 아무 역할도 하지 못했다. 상한을 열어 두고 위 세 단계가
+// 실제 제한을 담당하게 한다.
 const DEFAULTS = {
-  maxLeverage: 5,
+  maxLeverage: 100,
   riskPerTradePct: undefined as number | undefined,  // undefined면 전략군 기본 사용
   maxAccountRiskPct: 5,
   maxDailyLossPct: 3,
