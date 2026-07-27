@@ -2,5 +2,11 @@
   "framework": "nextjs",
   "installCommand": "npm install --legacy-peer-deps",
   "buildCommand": "npm run vercel-build",
-  "regions": ["hnd1"]
+  "regions": ["hnd1"],
+  "crons": [
+    {
+      "path": "/api/autotrade/exit-monitor",
+      "schedule": "0 0 * * *"
+    }
+  ]
 }

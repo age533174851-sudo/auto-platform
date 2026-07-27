@@ -246,58 +246,11 @@ async function tick() {
   try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
   await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount);
   if (isMain) await monitorConnections();
-  if (isMain) await monitorLadderExits();
-}
-
-// ── 계단식 거래의 트레일링 · 본전 이동 · 시간 청산 ──
-//
-// 손절과 분할 익절은 진입 시 거래소에 걸려 있다. 여기서는 단일 주문으로
-// 표현할 수 없는 나머지를 처리한다. 판단(checkLadderExits)과 실행을 분리해
-// 두었으므로, 여기서는 결정된 조치만 잡으로 넣는다.
-// 직접 주문하지 않고 잡을 만드는 이유: 주문 경로를 한 곳(processPendingJobs)
-// 으로 모아야 멱등 처리와 재시도 규칙이 한 번만 적용된다.
-async function monitorLadderExits() {
-  try {
-    const { checkLadderExits, recordExitCheck } = await import('./exitMonitor');
-    const checks = await checkLadderExits({ testnet: (process.env.WORKER_MODE || 'TESTNET').toUpperCase() !== 'LIVE' });
-
-    for (const c of checks) {
-      if (c.action === 'NONE') continue;
-
-      // 같은 거래에 대한 미처리 잡이 있으면 또 만들지 않는다
-      const { data: dup } = await sb().from('jobs').select('id')
-        .eq('action', c.action === 'CLOSE' ? 'CLOSE_POSITION' : 'SET_TPSL')
-        .eq('symbol', c.symbol).in('status', ['PENDING', 'PROCESSING']).limit(1);
-      if (Array.isArray(dup) && dup.length) continue;
-
-      const { data: trade } = await sb().from('ladder_daily_trades')
-        .select('user_id, symbol, side').eq('id', c.tradeId).maybeSingle();
-      if (!trade) continue;
-
-      const { data: conn } = await sb().from('exchange_connections')
-        .select('id, exchange').eq('user_id', (trade as any).user_id).eq('is_active', true).limit(1).maybeSingle();
-      if (!conn) continue;
-
-      await sb().from('jobs').insert({
-        user_id: (trade as any).user_id,
-        connection_id: (conn as any).id,
-        exchange: 'binance',
-        mode: (process.env.WORKER_MODE || 'TESTNET').toUpperCase(),
-        action: c.action === 'CLOSE' ? 'CLOSE_POSITION' : 'SET_TPSL',
-        symbol: c.symbol,
-        payload: c.action === 'CLOSE'
-          ? { positionSide: String((trade as any).side).toUpperCase(), percent: 100, reason: c.reason }
-          : { positionSide: String((trade as any).side).toUpperCase(), slPrice: c.newStop, reason: c.reason },
-        status: 'PENDING', priority: 1, max_attempts: 3,
-        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      });
-
-      await recordExitCheck(c, true);
-      console.log(`[exit] ${c.symbol} ${c.action} — ${c.reason} (최고 ${c.highWaterR.toFixed(2)}R)`);
-    }
-  } catch (e: any) {
-    console.error('[exit] 청산 감시 실패:', e?.message || e);
-  }
+  // 계단식 청산 감시(트레일링·본전이동·시간청산)는 이 워커가 하지 않는다.
+  // Binance가 이 서버의 IP 지역을 차단해 주문이 나가지 않기 때문이다
+  // (jobs 테이블에 "Service unavailable from a restricted location" 기록).
+  // Vercel(regions: hnd1)의 /api/autotrade/exit-monitor가 담당한다.
+  // 여기서 다시 켜면 같은 포지션에 손절 이동이 두 번 나갈 수 있다.
 }
 
 async function startupChecks() {

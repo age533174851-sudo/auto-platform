@@ -1,0 +1,63 @@
+# 계단식 거래의 트레일링 · 본전 이동 · 시간 청산 감시
+#
+# 왜 GitHub Actions인가
+# ─────────────────────
+# Vercel Hobby 플랜의 Cron은 하루 1회만 허용된다. 최대 5일 보유하는 전략에서
+# 트레일링을 하루 한 번 확인하는 것은 사실상 동작하지 않는 것과 같다.
+# vercel.json에도 일 1회 cron을 남겨 두었지만(시간 청산 보장용), 실질적인
+# 감시는 이 워크플로가 담당한다.
+#
+# Railway 워커를 쓰지 않는 이유: Binance가 그쪽 IP 지역을 차단한다.
+# (jobs 테이블에 "Service unavailable from a restricted location" 기록)
+#
+# ── 준비 ──
+# 저장소 Settings → Secrets and variables → Actions 에서 아래를 추가:
+#   EXIT_MONITOR_URL     예: https://auto-platform-zeta.vercel.app
+#   EXIT_MONITOR_SECRET  Vercel에 설정한 ADMIN_SECRET 과 같은 값
+name: exit-monitor
+
+on:
+  schedule:
+    # 15분마다. GitHub는 부하에 따라 몇 분 지연될 수 있다 — 트레일링 용도로는 충분하다.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:   # 수동 실행 (테스트용)
+
+concurrency:
+  # 이전 실행이 끝나지 않았으면 겹쳐 돌리지 않는다.
+  # 같은 포지션에 대해 손절 이동이 두 번 나가는 것을 막는다.
+  group: exit-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 청산 조건 점검 및 실행
+        env:
+          BASE:   ${{ secrets.EXIT_MONITOR_URL }}
+          SECRET: ${{ secrets.EXIT_MONITOR_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE:-}" ] || [ -z "${SECRET:-}" ]; then
+            echo "EXIT_MONITOR_URL 또는 EXIT_MONITOR_SECRET 시크릿이 설정되지 않았습니다."
+            exit 1
+          fi
+
+          # 응답 본문과 상태코드를 분리해서 받는다
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' \
+            --max-time 90 \
+            -H "x-admin-secret: ${SECRET}" \
+            "${BASE}/api/autotrade/exit-monitor")
+
+          echo "HTTP ${code}"
+          cat "$body"
+          echo
+
+          # 인증 실패나 서버 오류는 워크플로 실패로 드러낸다.
+          # 조용히 지나가면 감시가 멈춘 것을 알 수 없다.
+          if [ "$code" != "200" ]; then
+            echo "청산 감시 호출 실패 (HTTP ${code})"
+            exit 1
+          fi

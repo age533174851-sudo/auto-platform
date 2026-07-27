@@ -954,6 +954,137 @@ export type Database = {
         }
         Relationships: []
       }
+      ladder_cycles: {
+        Row: {
+          created_at: string
+          current_tier_index: number
+          cycle_locked: boolean
+          cycle_number: number
+          cycle_start_at: string
+          id: string
+          lock_reason: string | null
+          protected_profit: number
+          realized_equity: number
+          strategy_capital: number
+          strategy_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          current_tier_index?: number
+          cycle_locked?: boolean
+          cycle_number?: number
+          cycle_start_at?: string
+          id?: string
+          lock_reason?: string | null
+          protected_profit?: number
+          realized_equity: number
+          strategy_capital: number
+          strategy_id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          current_tier_index?: number
+          cycle_locked?: boolean
+          cycle_number?: number
+          cycle_start_at?: string
+          id?: string
+          lock_reason?: string | null
+          protected_profit?: number
+          realized_equity?: number
+          strategy_capital?: number
+          strategy_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      ladder_daily_trades: {
+        Row: {
+          allocated_margin: number | null
+          closed_at: string | null
+          created_at: string
+          cycle_id: string | null
+          cycle_number: number | null
+          entry_price: number | null
+          exit_price: number | null
+          exit_reason: string | null
+          id: string
+          leverage: number | null
+          liquidation_price: number | null
+          realized_pnl: number | null
+          side: string | null
+          signal_id: string | null
+          status: string
+          stop_loss: number | null
+          strategy_id: string
+          symbol: string | null
+          take_profit: number | null
+          tier_index: number | null
+          trade_date: string
+          user_id: string
+        }
+        Insert: {
+          allocated_margin?: number | null
+          closed_at?: string | null
+          created_at?: string
+          cycle_id?: string | null
+          cycle_number?: number | null
+          entry_price?: number | null
+          exit_price?: number | null
+          exit_reason?: string | null
+          id?: string
+          leverage?: number | null
+          liquidation_price?: number | null
+          realized_pnl?: number | null
+          side?: string | null
+          signal_id?: string | null
+          status?: string
+          stop_loss?: number | null
+          strategy_id?: string
+          symbol?: string | null
+          take_profit?: number | null
+          tier_index?: number | null
+          trade_date: string
+          user_id: string
+        }
+        Update: {
+          allocated_margin?: number | null
+          closed_at?: string | null
+          created_at?: string
+          cycle_id?: string | null
+          cycle_number?: number | null
+          entry_price?: number | null
+          exit_price?: number | null
+          exit_reason?: string | null
+          id?: string
+          leverage?: number | null
+          liquidation_price?: number | null
+          realized_pnl?: number | null
+          side?: string | null
+          signal_id?: string | null
+          status?: string
+          stop_loss?: number | null
+          strategy_id?: string
+          symbol?: string | null
+          take_profit?: number | null
+          tier_index?: number | null
+          trade_date?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ladder_daily_trades_cycle_id_fkey"
+            columns: ["cycle_id"]
+            isOneToOne: false
+            referencedRelation: "ladder_cycles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       live_orders: {
         Row: {
           acked_at: string | null
