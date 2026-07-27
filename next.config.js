@@ -16,6 +16,8 @@ const nextConfig = {
       { protocol: 'https', hostname: 'upload.wikimedia.org' },
       { protocol: 'https', hostname: 'eodhd.com' },
       { protocol: 'https', hostname: 'assets.coingecko.com' },
+      // 국내 주식 로고 (6자리 종목코드로 조회) — src/lib/logoResolver.ts
+      { protocol: 'https', hostname: 'static.toss.im' },
     ],
     unoptimized: true,
   },

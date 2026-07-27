@@ -105,7 +105,8 @@ export async function lookupLogo(symbolRaw: string, typeRaw: AssetType = 'auto')
 
   // Stock/ETF: FMP → EODHD → fallback
   const EODHD_KEY = process.env.EODHD_API_KEY || '';
-  const fmpUrl = `https://site.financialmodelingprep.com/image-stock/${symbolRaw}.png`;
+  // `site.` 서브도메인은 403을 반환한다 — 루트 호스트를 써야 한다.
+  const fmpUrl = `https://financialmodelingprep.com/image-stock/${symbolRaw}.png`;
   if (await probeUrl(fmpUrl)) {
     const resp: LogoResponse = { symbol: symbolRaw, type: typeRaw, logoUrl: fmpUrl, source: 'fmp', fallback: false };
     cacheSet(cacheKey, resp);

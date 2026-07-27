@@ -166,6 +166,23 @@ export function detectCategory(ticker: string): AssetCategory {
   return 'unknown';
 }
 
+// ── 티커만으로 URL이 만들어지는 로고 소스 ──────────────────────
+// 큐레이션 DB(위 DB 상수)는 수십 개만 담고 있어서, 거기 없는 종목은
+// 전부 이니셜 폴백으로 떨어졌다. 아래 세 소스는 심볼/종목코드를 URL에
+// 그대로 끼워 넣으면 되므로 목록을 손으로 관리하지 않아도 된다.
+// (2026-07 기준 응답 확인: 셋 다 200 + image/png)
+//
+// 주의: FMP는 `financialmodelingprep.com` 호스트만 동작한다.
+//       `site.financialmodelingprep.com`은 403을 반환한다.
+const CDN = {
+  /** 코인 — 심볼 소문자. 예: btc, eth, sol */
+  crypto:  (sym: string) => `https://cdn.jsdelivr.net/npm/cryptocurrency-icons@0.18.1/128/color/${sym.toLowerCase()}.png`,
+  /** 미국 주식·ETF — 티커 대문자 */
+  usStock: (sym: string) => `https://financialmodelingprep.com/image-stock/${sym.toUpperCase()}.png`,
+  /** 국내 주식 — 6자리 종목코드 */
+  krStock: (code: string) => `https://static.toss.im/png-icons/securities/icn-sec-fill-${code}.png`,
+};
+
 /** Build ordered source URL list for a ticker */
 export function buildSourceList(ticker: string, extraLogoUrl?: string): string[] {
   const entry = getLogoEntry(ticker);
@@ -173,15 +190,24 @@ export function buildSourceList(ticker: string, extraLogoUrl?: string): string[]
   if (entry?.primary)        sources.push(entry.primary);
   if (entry?.fallbacks)      sources.push(...entry.fallbacks);
   if (extraLogoUrl)          sources.push(extraLogoUrl);
-  // Auto-generate Clearbit for unknown stocks
-  if (sources.length === 0) {
-    const cat = detectCategory(ticker);
-    if (cat === 'stock') {
-      // Clearbit generic: try lowercase ticker as domain guess
-      sources.push(`https://financialmodelingprep.com/image-stock/${ticker.toUpperCase()}.png`);
-    }
+
+  // 큐레이션 항목이 있어도 카테고리별 CDN을 뒤에 덧붙인다 —
+  // primary가 죽어 있을 때 이니셜로 떨어지지 않고 한 번 더 시도한다.
+  const t   = (ticker || '').toUpperCase().trim();
+  const cat = detectCategory(ticker);
+
+  if (cat === 'crypto') {
+    // BTCUSDT / BTCUSDC 같은 페어 표기에서 기초자산만 떼어낸다
+    const base = t.replace(/(USDT|USDC|KRW)$/, '');
+    if (base) sources.push(CDN.crypto(base));
+  } else if (cat === 'krstock') {
+    sources.push(CDN.krStock(t));
+  } else if (cat === 'stock' || cat === 'etf') {
+    sources.push(CDN.usStock(t));
   }
-  return sources.filter(Boolean);
+
+  // 중복 제거 — 큐레이션 primary가 이미 같은 URL일 수 있다
+  return Array.from(new Set(sources.filter(Boolean)));
 }
 
 /** Get background color for ticker */
