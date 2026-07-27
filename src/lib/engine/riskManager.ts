@@ -6,6 +6,8 @@
 // 이 계층이 주문 권한의 마지막 문이다. AI가 무엇을 추천하든 아래 고정 규칙이 최종 결정한다.
 import type { StandardSignal, StrategyBucket } from './signalGateway';
 import { BUCKET_RISK } from './signalGateway';
+import { calcLiquidationPrice, type BracketTier } from '../safety';
+import type { ExpansionResult } from '../strategies/expansionMode';
 
 export type RejectCode =
   | 'DAILY_LOSS_LIMIT'
@@ -13,12 +15,14 @@ export type RejectCode =
   | 'INVALID_STOP'
   | 'LIQUIDATION_BEFORE_STOP'
   | 'INSUFFICIENT_MARGIN'
-  | 'POSITION_TOO_SMALL';
+  | 'POSITION_TOO_SMALL'
+  | 'EXPANSION_NO_TRADE';
 
 export interface RiskConfig {
   accountEquity: number;
   availableMargin?: number;
   dailyPnl?: number;
+  /** 사용자·거래소가 허용하는 절대 상한. 실제 적용 상한은 아래 expansion과 함께 결정된다. */
   maxLeverage: number;
   riskPerTradePct?: number;
   maxAccountRiskPct?: number;
@@ -27,7 +31,26 @@ export interface RiskConfig {
   feeRatePct?: number;
   slippagePct?: number;
   minNotional?: number;
+  /** @deprecated 청산가는 이제 brackets 기반 정밀식으로 계산한다. tier 조회가 불가능할 때만 쓰인다. */
   maintMarginRate?: number;
+
+  // ── Expansion Mode 게이트 ──────────────────────────────────
+  /**
+   * evaluateExpansion()의 결과. 호출자가 시장 데이터로 평가해 넘긴다.
+   *
+   * 넘기지 않으면 일반 모드 상한(normalMaxLeverage)이 적용된다 — fail-closed.
+   * expansionMode 모듈의 원칙이 "기본은 일반 모드, Expansion은 예외"이므로,
+   * 대변동성 조건을 입증하지 못한 주문에 고배율을 허용하지 않는다.
+   */
+  expansion?: ExpansionResult | null;
+  /** expansion 평가가 없을 때 적용할 상한. 기본 10배. */
+  normalMaxLeverage?: number;
+
+  /**
+   * 거래소에서 조회한 실제 leverageBracket ([상한 명목가, MMR, 공제액]).
+   * getLeverageBrackets()로 받아 넘긴다. 없으면 내장 fallback 테이블을 쓴다.
+   */
+  brackets?: BracketTier[] | null;
 }
 
 export interface PositionPlan {
@@ -83,6 +106,33 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
       signal.symbol, side, notes);
   }
 
+  // ── 0.5) Expansion Mode 게이트 — 이번 주문에 적용할 배율 상한을 정한다 ──
+  //
+  // 이 계산이 여기 있어야 하는 이유: 예전에는 evaluateExpansion()이 Edge Lab
+  // 화면에서만 쓰였고, 주문 경로는 정적 cfg.maxLeverage만 봤다. 그래서 화면이
+  // "최대 43배"라고 계산해도 실제 주문에는 아무 구속력이 없었다.
+  const normalMax = cfg.normalMaxLeverage ?? 10;
+  let leverageCap: number;
+
+  if (cfg.expansion) {
+    if (cfg.expansion.mode === 'NO_TRADE') {
+      return reject('EXPANSION_NO_TRADE',
+        `Expansion 판정이 진입 불가입니다 — ${cfg.expansion.reason}`,
+        signal.symbol, side, notes);
+    }
+    leverageCap = Math.max(1, Math.min(cfg.maxLeverage, cfg.expansion.maxLeverageAllowed));
+    notes.push(
+      `Expansion ${cfg.expansion.mode} (${cfg.expansion.expansionScore}점) — 배율 상한 ${leverageCap}배` +
+      (cfg.expansion.maeConstraint.cappedBy === 'mae' ? ' (과거 MAE 제약)' : '')
+    );
+  } else {
+    // fail-closed: 대변동성 조건을 입증하지 못했으므로 일반 모드 상한을 넘지 않는다.
+    leverageCap = Math.max(1, Math.min(cfg.maxLeverage, normalMax));
+    if (cfg.maxLeverage > normalMax) {
+      notes.push(`Expansion 평가 없음 — 설정 상한 ${cfg.maxLeverage}배 대신 일반 모드 ${leverageCap}배 적용`);
+    }
+  }
+
   // ── 1) 거래당 허용 손실 ──
   const bucketRisk = BUCKET_RISK[bucket];
   const riskPct = cfg.riskPerTradePct ?? (bucketRisk.min + (bucketRisk.max - bucketRisk.min) * signal.confidence);
@@ -115,14 +165,14 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
     notes.push(`명목가치 상한(${cfg.maxNotionalPct ?? 300}%) 적용 → $${positionSize.toFixed(0)}`);
   }
 
-  // ── 5) 레버리지 역산 ──
+  // ── 5) 레버리지 역산 (상한은 0.5단계에서 정한 leverageCap) ──
   let leverage = Math.max(1, Math.ceil(positionSize / Math.max(availableMargin, 1)));
-  leverage = clamp(leverage, 1, cfg.maxLeverage);
+  leverage = clamp(leverage, 1, leverageCap);
   let requiredMargin = positionSize / leverage;
 
   if (requiredMargin > availableMargin) {
-    positionSize = availableMargin * cfg.maxLeverage;
-    leverage = cfg.maxLeverage;
+    positionSize = availableMargin * leverageCap;
+    leverage = leverageCap;
     requiredMargin = positionSize / leverage;
     notes.push(`가용 증거금 한계로 포지션 축소 → $${positionSize.toFixed(0)}`);
   }
@@ -140,16 +190,45 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
       signal.symbol, side, notes, { riskAmount, stopDistancePct, effectiveStopPct, positionSize, leverage, requiredMargin });
   }
 
-  // ── 6) 청산가 ──
-  const liqMove = (1 / leverage) - mmr;
-  const liquidationDistancePct = Math.max(0, liqMove * 100);
-  const liquidationPrice = side === 'LONG'
-    ? signal.entryPrice * (1 - liqMove)
-    : signal.entryPrice * (1 + liqMove);
+  // ── 6) 청산가 — 계단식 유지증거금 정밀식 ──
+  //
+  // 예전에는 (1/leverage - 0.005) 평탄 근사였다. Binance는 유지증거금률이
+  // 포지션 명목가에 따라 계단식으로 오르고 구간마다 공제액이 붙기 때문에,
+  // 명목가가 큰 포지션일수록 근사식이 실제 청산가를 낙관적으로 계산한다.
+  // calcLiquidationPrice는 cfg.brackets(거래소 실조회)를 우선 쓰고, 없으면
+  // 내장 fallback 테이블을 쓴다.
+  const quantity = positionSize / signal.entryPrice;
+  let liquidationPrice = 0;
+  let liquidationDistancePct = 100;   // 1배는 사실상 청산 위험이 없다
+
+  if (leverage > 1) {
+    liquidationPrice = calcLiquidationPrice(
+      signal.entryPrice,
+      leverage,
+      side === 'LONG' ? 'buy' : 'sell',
+      quantity,
+      cfg.brackets,
+    );
+    if (liquidationPrice > 0) {
+      liquidationDistancePct = Math.abs(signal.entryPrice - liquidationPrice) / signal.entryPrice * 100;
+    } else {
+      // 정밀식이 값을 못 내면(비정상 입력) 근사식으로 물러서되 그 사실을 남긴다.
+      const liqMove = Math.max(0, (1 / leverage) - mmr);
+      liquidationDistancePct = liqMove * 100;
+      liquidationPrice = side === 'LONG'
+        ? signal.entryPrice * (1 - liqMove)
+        : signal.entryPrice * (1 + liqMove);
+      notes.push('청산가: 계단식 계산 실패 — 근사식으로 대체');
+    }
+    notes.push(
+      `청산가 $${liquidationPrice.toFixed(2)} (명목가 $${(quantity * signal.entryPrice).toFixed(0)} 기준` +
+      `${cfg.brackets?.length ? ', 거래소 브래킷' : ', 내장 테이블'})`
+    );
+  }
 
   // ── 7) 청산이 손절보다 먼저 오면 거부 (경고 아님) ──
   const SAFETY_BUFFER = 1.3;
-  if (liquidationDistancePct <= effectiveStopPct * SAFETY_BUFFER) {
+  if (leverage > 1 && liquidationDistancePct <= effectiveStopPct * SAFETY_BUFFER) {
     return reject('LIQUIDATION_BEFORE_STOP',
       `청산 거리(${liquidationDistancePct.toFixed(2)}%)가 손절 거리(${effectiveStopPct.toFixed(2)}%)에 너무 가깝습니다 — ${leverage}배는 위험. 배율을 낮추거나 손절을 좁히세요`,
       signal.symbol, side, notes,
@@ -164,7 +243,7 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
     riskAmountWithCosts: positionSize * (effectiveStopPct / 100),
     stopDistancePct, effectiveStopPct,
     positionSize,
-    quantity: positionSize / signal.entryPrice,
+    quantity,
     requiredMargin, leverage,
     liquidationPrice, liquidationDistancePct,
     notes,
