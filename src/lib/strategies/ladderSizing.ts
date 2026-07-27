@@ -27,7 +27,11 @@ export const LADDER_TIERS: LadderTier[] = [
 ];
 
 export const CYCLE_TARGET = 100_000;   // 이 금액 도달 시 사이클 종료
-export const CYCLE_BASE = 100;         // 리셋 후 전략 자본
+export const CYCLE_BASE = 1_000;       // 사이클 시작·리셋 시 전략 자본
+
+// 참고: 1단계($100~$999)는 확정 명세의 운용 구간이 아니다. 사이클은 $1,000
+// (= 2단계)에서 시작한다. 1단계는 손실로 자본이 $1,000 아래로 내려갔을 때
+// 곧바로 거래 불가가 되지 않도록 두는 방어 구간이다.
 
 // 강등은 승급보다 늦게 — 구간 하단의 이 비율 아래로 내려가야 강등
 export const DEMOTE_BUFFER = 0.8;      // 예: 2단계($1,000~) → $800 아래로 가야 1단계
