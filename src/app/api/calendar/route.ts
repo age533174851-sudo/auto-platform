@@ -140,7 +140,10 @@ function addDates(events: typeof EVENTS_KO) {
     ...e,
     date:   DATES[e.id] || nextDate(15),
     time:   e.time,
-    dateTime: `${DATES[e.id] || nextDate(15)}T${e.time}:00+09:00`,
+    // 시간대를 붙이지 않는다. 이건 예시 데이터인데 +09:00을 박으면
+    // 미국 지표가 한국 시각으로 확정된 것처럼 보인다. 예시가 정밀한
+    // 척하면 진짜와 구분이 더 어려워진다.
+    dateTime: null,
   }));
 }
 

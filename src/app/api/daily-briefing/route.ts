@@ -22,6 +22,13 @@ interface StockPick {
 interface DailyReport {
   updatedAt:         string;
   source:            'live' | 'mock' | 'partial';
+  /**
+   * 예시로 채운 섹션 이름. 비어 있으면 전부 실제 응답이다.
+   *
+   * 이게 없으면 'partial'을 봐도 **어느 부분이** 예시인지 알 수 없어서,
+   * 화면이 전체를 의심하거나 전체를 믿거나 둘 중 하나가 된다.
+   */
+  mockSections?: string[];
   financialJuice:    ReportSection;
   seekingAlpha:      ReportSection;
   realEstateFinance: ReportSection & { realEstateOutlook: '상승'|'하락'|'보합' };
@@ -264,9 +271,19 @@ async function callOpenAI(apiKey: string, context: string): Promise<DailyReport 
       console.error('[daily-briefing] Invalid GPT JSON shape');
       return null;
     }
+    // 모델이 일부 섹션을 안 주면 예시로 채워 왔다. 문제는 그 예시에
+    // '엔비디아 EPS $4.93' 같은 **지어낸 구체적 수치**가 들어 있다는 것이다.
+    // 그걸 source:'live'로 내보내면 사용자는 오늘 나온 실적으로 읽는다.
+    // 채우되 어느 섹션이 예시인지 함께 내보낸다.
+    const mockSections: string[] = [];
+    if (!parsed.seekingAlpha) mockSections.push('seekingAlpha');
+    if (!parsed.realEstateFinance) mockSections.push('realEstateFinance');
+
     return {
       updatedAt: new Date().toISOString(),
-      source: 'live',
+      // 일부가 예시면 'live'가 아니다. 전부 진짜일 때만 live다.
+      source: mockSections.length > 0 ? 'partial' : 'live',
+      mockSections,
       financialJuice:    parsed.financialJuice,
       seekingAlpha:      parsed.seekingAlpha    || MOCK_REPORT.seekingAlpha,
       realEstateFinance: parsed.realEstateFinance || MOCK_REPORT.realEstateFinance,
