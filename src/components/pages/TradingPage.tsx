@@ -89,6 +89,32 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
     ? (sel.sym || sel.id).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/USDT$/, '') + 'USDT'
     : '';
   const stream = useBinanceStream(streamSymbol, isCryptoSel && showOrderbook);
+
+  // ── 앱-거래소 상태 대조 ──
+  // 모의매매는 거래소에 포지션이 없으므로 대조할 대상이 없다. 실거래
+  // 연결(TESTNET/LIVE)일 때만 조회한다. 60초 주기면 충분하다 — 주문 직전에는
+  // 서버가 다시 대조하므로 화면 값이 조금 오래돼도 주문이 잘못 나가지 않는다.
+  const [reconcile,setReconcile]=useState<any>(null);
+  useEffect(()=>{
+    if(tradeMode==='mock') { setReconcile(null); return; }
+    let alive=true;
+    const run=async()=>{
+      try{
+        const { getSupabaseClient }=await import('@/lib/supabase/client');
+        const sbc=getSupabaseClient();
+        const token=sbc ? (await sbc.auth.getSession()).data.session?.access_token : null;
+        if(!token) return;
+        const r=await fetch(`/api/reconcile/state?mode=${tradeMode==='live'?'LIVE':'TESTNET'}`,{
+          headers:{ Authorization:`Bearer ${token}` },
+        });
+        const d=await r.json();
+        if(alive) setReconcile(r.ok ? d : null);
+      }catch{ /* 조회 실패 시 경고를 띄우지 않는다 — 없는 불일치를 만들어내면 안 된다 */ }
+    };
+    run();
+    const t=setInterval(run,60000);
+    return ()=>{ alive=false; clearInterval(t); };
+  },[tradeMode]);
   const [orders,setOrders]=useState<Order[]>([]);
   const [showOrders,setShowOrders]=useState(false);
   const [riskProfile,setRiskProfile]=useState<'conservative'|'balanced'|'aggressive'>('balanced');
@@ -680,6 +706,37 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
 
       {tab==='trade'&&(
         <>
+          {/* 앱-거래소 상태 불일치 경고 */}
+          {/*
+            심각한 불일치가 있으면 주문 경로가 409로 막는다. 화면에서도
+            같은 근거를 먼저 보여줘야 사용자가 "왜 주문이 안 나가는지"를
+            누른 뒤에 알게 되지 않는다.
+          */}
+          {reconcile && !reconcile.ok && (
+            <Card style={{
+              padding:'11px 13px', marginBottom:12,
+              background:(reconcile.blockNewOrders?T.red:T.ylw)+'12',
+              border:`1px solid ${(reconcile.blockNewOrders?T.red:T.ylw)}55`,
+            }}>
+              <div style={{color:reconcile.blockNewOrders?T.red:T.ylw,fontWeight:800,fontSize:12,marginBottom:5}}>
+                {reconcile.blockNewOrders ? '⚠️ 앱과 거래소 상태가 어긋납니다 — 신규 주문 차단' : '앱과 거래소에 차이가 있습니다'}
+              </div>
+              {reconcile.mismatches.slice(0,4).map((x:any,i:number)=>(
+                <div key={i} style={{color:T.sub,fontSize:10,lineHeight:1.5,marginTop:2}}>
+                  <span style={{color:x.severity==='critical'?T.red:x.severity==='warn'?T.ylw:T.muted,fontWeight:700}}>
+                    {x.severity==='critical'?'심각':x.severity==='warn'?'경고':'정보'}
+                  </span>{' · '}{x.detail}
+                </div>
+              ))}
+              {reconcile.mismatches.length>4 && (
+                <div style={{color:T.muted,fontSize:9,marginTop:3}}>외 {reconcile.mismatches.length-4}건</div>
+              )}
+              <div style={{color:T.muted,fontSize:9,marginTop:6}}>
+                거래소 앱에서 실제 포지션을 확인하세요. 자동으로 정리하지 않습니다.
+              </div>
+            </Card>
+          )}
+
           {/* Asset selector */}
           <Card style={{padding:12,marginBottom:12}}>
             <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="종목 검색…"

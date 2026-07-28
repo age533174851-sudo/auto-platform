@@ -192,6 +192,22 @@ export async function POST(req: NextRequest) {
   try {
     if (!body.connectionId) throw new Error('connectionId가 없어 주문할 수 없습니다');
 
+    // ── 상태 대조 관문 ──
+    // 계단 게이트가 "오늘 아직 거래 안 함"이라고 판단해도, 그건 앱의 기록
+    // 기준이다. 거래소에 이미 포지션이 열려 있거나 손절이 사라져 있으면
+    // 그 위에 하나를 더 얹게 된다. 주문 직전에 실물과 대조한다.
+    const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
+    const gate = await assertStateConsistent(sb, userId, mode !== 'LIVE');
+    if (!gate.allowed) {
+      await releaseReservation(sb, result.ladder?.reservationId);
+      return NextResponse.json({
+        ...base, executed: false,
+        blocked: 'STATE_MISMATCH',
+        error: gate.reason,
+        mismatches: gate.verdict?.mismatches ?? [],
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
     const { data: conn } = await sb.from('exchange_connections')
       .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, user_id')
       .eq('id', body.connectionId)
