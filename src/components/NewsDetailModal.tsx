@@ -1,4 +1,5 @@
 'use client';
+import { ConsensusPanel } from '@/components/news/ConsensusPanel';
 import { A } from '@/lib/theme/colors';
 import { Star } from 'lucide-react';
 import React from 'react';
@@ -319,6 +320,19 @@ export default function NewsDetailModal({
               ))}
             </div>
           </div>
+        )}
+
+        {/* AI별 의견 비교 — 원문 링크 바로 위.
+            원문을 확인할 수 있는 기사에만 붙인다. 링크 없이 여러 AI에게
+            물어봐야 대조할 방법이 없고 비용만 세 배로 나간다. */}
+        {news.url && news.url !== '#' && news.publishedAt && (
+          <ConsensusPanel article={{
+            title: news.title,
+            body: news.content || news.summary || undefined,
+            url: news.url,
+            publishedAt: news.publishedAt,
+            source: news.source,
+          }}/>
         )}
 
         {/* Original link */}

@@ -1,4 +1,5 @@
 'use client';
+import { ConsensusPanel } from '@/components/news/ConsensusPanel';
 import { AiVerdict, type AiVerdictData } from '@/components/news/AiVerdict';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
@@ -494,6 +495,31 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
             </div>
           </div>
         )}
+
+        {/* AI별 의견 비교 — 원문 링크 바로 위.
+            원문을 확인할 수 있는 기사에만 붙인다. 링크 없이 여러 AI에게
+            물어봐야 대조할 방법이 없고 비용만 세 배로 나간다. */}
+        {(() => {
+          // time은 '5분 전' 같은 표시용 문자열이다. 실제 시각은 publishedAt에
+          // 있다. time을 Date에 넣으면 toISOString()이 던져서 상세 화면이
+          // 통째로 죽는다 — 실제로 그렇게 만들었다가 '페이지 로딩 오류'를 봤다.
+          //
+          // publishedAt은 문자열 그대로 넘긴다. 시간대 표기가 없는 값이
+          // 섞여 있는데, 여기서 UTC라고 단정하면 없는 정보를 만들어내는 것이다.
+          // 이 값은 기록·대조용이라 원문 그대로가 맞다.
+          const pub = (selected as any).publishedAt;
+          const at = typeof pub === 'string' && pub.trim() ? pub.trim() : null;
+          if (!selected.url || !at) return null;
+          return (
+            <ConsensusPanel article={{
+              title: selected.title,
+              body: selected.content || selected.summary || undefined,
+              url: String(selected.url),
+              publishedAt: at,
+              source: selected.source,
+            }}/>
+          );
+        })()}
 
         {/* 원문 열기 */}
         {selected.url && (
