@@ -410,3 +410,64 @@ export function summarizeGuards(orders: { guardedBy: Guard }[]): GuardSummary {
       : null,
   };
 }
+
+// ── 감시 등록 검증 ─────────────────────────────────────
+//
+// 이 검사가 라우트 안에 있으면 테스트할 수 없다. 실제로 그랬고, 연결
+// 소유권 검사에 가려 동작을 확인할 방법이 없었다. 규칙은 순수 함수로 둔다.
+
+export interface WatchSpec {
+  kind: 'TRAILING' | 'RESERVED';
+  side: 'BUY' | 'SELL';
+  qty?: number | null;
+  quoteUsd?: number | null;
+  /** 트레일링 */
+  entryPrice?: number | null;
+  trailPct?: number | null;
+  /** 예약 */
+  triggerPrice?: number | null;
+  direction?: 'above' | 'below' | null;
+}
+
+export interface WatchValidation { ok: boolean; code?: string; reason?: string }
+
+const no = (code: string, reason: string): WatchValidation => ({ ok: false, code, reason });
+
+/**
+ * 감시를 걸어도 되는 값인가.
+ *
+ * 트레일링 매수를 막는 이유: 이 앱의 트레일링은 "고점 대비 하락하면 판다"는
+ * 뜻이다. 매수 쪽에도 같은 이름을 붙이면 "저점 대비 상승하면 산다"인지
+ * "떨어지면 산다"인지 사람마다 다르게 읽는다. 매수는 예약 주문으로 표현한다.
+ */
+export function validateWatchSpec(s: WatchSpec): WatchValidation {
+  const hasQty = s.qty != null && Number.isFinite(s.qty) && s.qty > 0;
+  const hasQuote = s.quoteUsd != null && Number.isFinite(s.quoteUsd) && s.quoteUsd > 0;
+  if (!hasQty && !hasQuote) return no('invalid_amount', '수량 또는 금액이 필요합니다');
+
+  // 매도는 코인 수량으로만 건다. 금액으로 걸면 발동 시점 가격으로 수량을
+  // 되계산해야 하는데, 그 값이 보유를 넘으면 거부된다.
+  if (s.side === 'SELL' && !hasQty) {
+    return no('sell_needs_qty', '매도 감시는 코인 수량으로 지정해야 합니다');
+  }
+
+  if (s.kind === 'TRAILING') {
+    if (s.side !== 'SELL') {
+      return no('sell_only', '트레일링은 매도만 지원합니다. 하락 시 매수는 예약 주문을 쓰세요.');
+    }
+    const e = Number(s.entryPrice);
+    if (!Number.isFinite(e) || e <= 0) return no('invalid_entry', '시작가가 올바르지 않습니다');
+    const p = Number(s.trailPct);
+    if (!Number.isFinite(p) || p <= 0 || p >= 100) {
+      return no('invalid_pct', '트레일링 비율은 0보다 크고 100보다 작아야 합니다');
+    }
+    return { ok: true };
+  }
+
+  const t = Number(s.triggerPrice);
+  if (!Number.isFinite(t) || t <= 0) return no('invalid_trigger', '기준 가격이 올바르지 않습니다');
+  if (s.direction !== 'above' && s.direction !== 'below') {
+    return no('invalid_direction', '발동 방향(이상/이하)이 필요합니다');
+  }
+  return { ok: true };
+}

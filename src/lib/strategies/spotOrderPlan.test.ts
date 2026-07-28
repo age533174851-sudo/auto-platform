@@ -8,7 +8,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   planSplit, planBracket, updateTrailing, startTrailing,
-  checkReserved, checkRepeat, summarizeGuards,
+  checkReserved, checkRepeat, summarizeGuards, validateWatchSpec,
 } from './spotOrderPlan';
 
 const DAY = 86_400_000;
@@ -242,5 +242,41 @@ export function runSpotOrderPlanTests() {
 
   test('주기가 이상하면 실행하지 않는다', () => {
     eq(checkRepeat({ everyDays: 0, maxCount: 10, doneCount: 0, lastAt: NOW }, NOW).due, false);
+  });
+  console.log('[현물 주문 — 감시 등록 검증]');
+
+  test('트레일링 매수는 막는다', () => {
+    const r = validateWatchSpec({ kind: 'TRAILING', side: 'BUY', quoteUsd: 100, entryPrice: 100, trailPct: 5 });
+    eq(r.ok, false, '"떨어지면 산다"인지 "오르면 산다"인지 사람마다 다르게 읽는다');
+    eq(r.code, 'sell_only');
+  });
+
+  test('트레일링 비율은 0~100 사이여야 한다', () => {
+    for (const pct of [0, -5, 100, 150, NaN]) {
+      const r = validateWatchSpec({ kind: 'TRAILING', side: 'SELL', qty: 1, entryPrice: 100, trailPct: pct });
+      eq(r.ok, false, String(pct));
+    }
+    eq(validateWatchSpec({ kind: 'TRAILING', side: 'SELL', qty: 1, entryPrice: 100, trailPct: 5 }).ok, true);
+  });
+
+  test('시작가가 없으면 트레일링을 걸 수 없다', () => {
+    eq(validateWatchSpec({ kind: 'TRAILING', side: 'SELL', qty: 1, trailPct: 5 }).ok, false);
+  });
+
+  test('수량도 금액도 없으면 막는다', () => {
+    eq(validateWatchSpec({ kind: 'TRAILING', side: 'SELL', entryPrice: 100, trailPct: 5 }).ok, false);
+    eq(validateWatchSpec({ kind: 'RESERVED', side: 'BUY', triggerPrice: 100, direction: 'below' }).ok, false);
+  });
+
+  test('매도 감시는 금액이 아니라 수량으로 건다', () => {
+    const r = validateWatchSpec({ kind: 'RESERVED', side: 'SELL', quoteUsd: 100, triggerPrice: 120, direction: 'above' });
+    eq(r.ok, false, '발동 시점에 수량을 되계산하면 보유를 넘길 수 있다');
+    eq(r.code, 'sell_needs_qty');
+  });
+
+  test('예약은 기준가와 방향이 모두 필요하다', () => {
+    eq(validateWatchSpec({ kind: 'RESERVED', side: 'BUY', quoteUsd: 100, triggerPrice: 0, direction: 'below' }).ok, false);
+    eq(validateWatchSpec({ kind: 'RESERVED', side: 'BUY', quoteUsd: 100, triggerPrice: 100 }).ok, false);
+    eq(validateWatchSpec({ kind: 'RESERVED', side: 'BUY', quoteUsd: 100, triggerPrice: 100, direction: 'below' }).ok, true);
   });
 }
