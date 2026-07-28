@@ -1,4 +1,4 @@
-# 뉴스 수집 → AI 분석
+# 뉴스 수집 → 경제 캘린더 → AI 분석
 #
 # 왜 GitHub Actions인가
 # ─────────────────────
@@ -65,6 +65,30 @@ jobs:
           # 503은 키가 없다는 뜻이다. 설정 문제라 실패로 표시해 눈에 띄게 한다.
           if [ "$code" != "200" ]; then
             echo "수집 실패 (HTTP ${code})"
+            exit 1
+          fi
+
+      - name: 경제 캘린더 동기화
+        env:
+          BASE:   ${{ secrets.EXIT_MONITOR_URL }}
+          SECRET: ${{ secrets.NEWS_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' \
+            --max-time 120 \
+            -H "Authorization: Bearer ${SECRET:-}" \
+            "${BASE}/api/cron/calendar-sync")
+
+          echo "HTTP ${code}"
+          cat "$body"
+          echo
+
+          # 503은 키가 없다는 뜻이라 설정 문제다. 그 외에는 일정이 없거나
+          # 일부만 저장된 것이라 워크플로를 실패로 만들지 않는다 —
+          # 그때마다 빨간 표시가 뜨면 진짜 고장을 놓친다.
+          if [ "$code" = "503" ]; then
+            echo "캘린더 공급자 키 또는 테이블 설정 문제 — 위 응답을 확인하세요."
             exit 1
           fi
 
