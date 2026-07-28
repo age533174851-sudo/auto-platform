@@ -64,9 +64,19 @@ export async function POST(req: NextRequest) {
 
   const symbol = String(body.symbol || 'BTCUSDT').toUpperCase().replace('/', '');
   const dryRun = body.dryRun === true;
-  const mode: 'PAPER' | 'TESTNET' | 'LIVE' = ['PAPER', 'TESTNET', 'LIVE'].includes(String(body.mode).toUpperCase())
-    ? String(body.mode).toUpperCase() as any
-    : 'TESTNET';
+  // ── 운영 모드 ──
+  // 사다리(UI_DEMO → PAPER → TESTNET → SHADOW_LIVE → LIVE_SMALL → LIVE_LIMITED)를
+  // 받되, 예전 PAPER/TESTNET/LIVE도 그대로 받아 사다리로 옮긴다.
+  // 모르는 값은 UI_DEMO로 떨어진다 — 오타 하나가 실거래를 켜서는 안 된다.
+  const { fromLegacyMode, gateOrder, capability, toLegacyMode } =
+    await import('@/lib/engine/operatingMode');
+  const opMode = body.mode ? fromLegacyMode(String(body.mode)) : 'TESTNET';
+  const mode = toLegacyMode(opMode);
+  // 시세·계좌 조회를 어느 망에서 할 것인가.
+  // 예전처럼 레거시 mode로 계산하면 Shadow Live가 PAPER로 내려오면서
+  // 테스트넷 시세로 판단하게 된다. 그러면 샤도우의 의미가 없다 —
+  // 실계좌로 판단하되 보내지만 않는 것이 Shadow Live다.
+  const useTestnet = !capability(opMode).needsLiveKey;
 
   // ── 인증 ──
   let userId: string | null = null;
@@ -90,7 +100,7 @@ export async function POST(req: NextRequest) {
     // 본인 것만. body.userId는 신뢰하지 않는다.
   }
 
-  if (mode === 'LIVE' && process.env.ALLOW_LIVE_TRADING !== 'true') {
+  if (capability(opMode).realMoney && process.env.ALLOW_LIVE_TRADING !== 'true') {
     return NextResponse.json(
       { ok: false, error: '실거래가 잠겨 있습니다. ALLOW_LIVE_TRADING=true 설정 후 사용하세요' },
       { status: 403 },
@@ -114,7 +124,7 @@ export async function POST(req: NextRequest) {
   let oiChangePct: number | undefined;
   try {
     const bf = await import('@/lib/exchanges/binanceFutures');
-    const premium = await bf.getPremiumIndex(symbol, mode !== 'LIVE');
+    const premium = await bf.getPremiumIndex(symbol, useTestnet);
     if (premium && typeof (premium as any).lastFundingRate === 'string') {
       fundingRate = parseFloat((premium as any).lastFundingRate) * 100;
     }
@@ -157,7 +167,7 @@ export async function POST(req: NextRequest) {
 
   const base = {
     ok: true,
-    symbol, mode, dryRun,
+    symbol, mode: opMode, dryRun,
     stage: result.stage,
     approved: result.approved,
     reason: result.reason,
@@ -180,9 +190,72 @@ export async function POST(req: NextRequest) {
     } : null,
   };
 
+  // ── 모드 관문 ──
+  // 다른 모든 검사를 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥 관문이다.
+  const notionalUsd = result.plan?.positionSize ?? 0;
+  const modeGate = gateOrder(opMode, notionalUsd);
+
   // 승인 안 됐거나 미리보기면 여기서 끝. 파이프라인이 예약을 이미 되돌렸다.
-  if (!result.approved || dryRun || mode === 'PAPER') {
-    return NextResponse.json({ ...base, executed: false }, { headers: { 'Cache-Control': 'no-store' } });
+  if (!result.approved || dryRun) {
+    return NextResponse.json({ ...base, mode: opMode, executed: false },
+      { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // ── 주문을 보내지 않는 모드 ──
+  // Shadow Live가 여기다. 판단은 전부 마쳤으니 **보냈어야 할 주문을
+  // 기록한다.** 기록하지 않으면 그냥 꺼둔 것과 같아서, 나중에 "그때 진짜
+  // 보냈으면 어떻게 됐나"를 대조할 수가 없다.
+  if (modeGate.disposition !== 'SEND') {
+    let recorded = false;
+    if (modeGate.disposition === 'RECORD' && result.plan) {
+      const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
+      const { error: recErr } = await sb.from('live_orders').insert({
+        // 샤도우 주문임을 id에도 남긴다. 실주문과 사용하는 공간이
+        // 같지만 접두사로 구분되고, UNIQUE 충돌도 나지 않는다.
+        client_order_id: `SH${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36),
+        signal_id: `daily-ladder-${tradeDate}-${symbol}`,
+        user_id: userId, connection_id: body.connectionId || null,
+        exchange: 'binance', mode: opMode,
+        symbol, side: result.plan.side === 'LONG' ? 'BUY' : 'SELL',
+        order_type: 'MARKET',
+        quantity: result.plan.quantity, leverage: result.plan.leverage,
+        // 상태는 INTENT에서 멈춰 둔다. SENT로 가지 않으므로
+        // 복구 대조(SENT/UNKNOWN 조회)가 이 행을 건드리지 않는다.
+        status: 'INTENT',
+        error_message: modeGate.reason,
+      });
+      // 하루 한 번 전략이므로 같은 날 같은 심볼이면 UNIQUE에 걸린다.
+      // 그건 실패가 아니라 "이미 기록됨"이다. 실패로 표시하면 정상 동작을
+      // 오류로 읽게 된다.
+      recorded = !recErr || String((recErr as any).code) === '23505';
+    }
+    // 보내지 않았으므로 오늘 하루를 돌려준다.
+    // 샤도우가 예약을 잡아버리면 진짜 모드로 바꿔도 그날은 거래를 못 한다.
+    const { releaseReservation } = await import('@/lib/strategies/ladderGate');
+    await releaseReservation(sb, result.ladder?.reservationId);
+
+    return NextResponse.json({
+      ...base, mode: opMode, executed: false,
+      disposition: modeGate.disposition,
+      shadowRecorded: recorded,
+      reasonMode: modeGate.reason,
+    }, {
+      status: modeGate.disposition === 'BLOCK' ? 403 : 200,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
+
+  // ── 사람 확인 ──
+  // 소액 실전은 건마다 확인한다. 확인 없이 돌아가면 그건 이미 자동매매다.
+  if (modeGate.needsConfirmation && body.confirm !== true) {
+    const { releaseReservation } = await import('@/lib/strategies/ladderGate');
+    await releaseReservation(sb, result.ladder?.reservationId);
+    return NextResponse.json({
+      ...base, mode: opMode, executed: false,
+      blocked: 'NEEDS_CONFIRMATION',
+      error: `${modeGate.reason} — confirm: true를 함께 보내야 실행됩니다`,
+      notionalUsd,
+    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
   // ── 주문 ──
@@ -197,7 +270,7 @@ export async function POST(req: NextRequest) {
     // 기준이다. 거래소에 이미 포지션이 열려 있거나 손절이 사라져 있으면
     // 그 위에 하나를 더 얹게 된다. 주문 직전에 실물과 대조한다.
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
-    const gate = await assertStateConsistent(sb, userId, mode !== 'LIVE');
+    const gate = await assertStateConsistent(sb, userId, useTestnet);
     if (!gate.allowed) {
       await releaseReservation(sb, result.ladder?.reservationId);
       return NextResponse.json({
@@ -238,7 +311,7 @@ export async function POST(req: NextRequest) {
     let qtyStep: number | undefined, minQty: number | undefined;
     try {
       const bf = await import('@/lib/exchanges/binanceFutures');
-      const f = await bf.getSymbolFilters(symbol, mode !== 'LIVE');
+      const f = await bf.getSymbolFilters(symbol, useTestnet);
       if (f) { qtyStep = f.stepSize; minQty = f.minQty; }
     } catch { /* 필터를 못 읽으면 반올림 없이 진행 — 거래소가 거부하면 분할만 빠진다 */ }
 
