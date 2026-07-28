@@ -19,6 +19,7 @@
 // 그러지 않으면 로그인한 누구나 남의 계정으로 주문을 돌릴 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
+import { tagStrategy } from '@/lib/strategies/ledger';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -269,6 +270,22 @@ export async function POST(req: NextRequest) {
     // 계단 게이트가 "오늘 아직 거래 안 함"이라고 판단해도, 그건 앱의 기록
     // 기준이다. 거래소에 이미 포지션이 열려 있거나 손절이 사라져 있으면
     // 그 위에 하나를 더 얹게 된다. 주문 직전에 실물과 대조한다.
+    // ── 다른 전략 물량 확인 ──
+    // 이 전략의 손절은 closePosition=true인 전량 STOP_MARKET이다
+    // (exitPlan.ts). 같은 심볼을 다른 전략이 들고 있으면 그 손절이
+    // **남의 포지션까지 닫는다.** 그쪽 전략은 자기가 아직 들고 있다고
+    // 믿고 손절도 익절도 걸지 않는다.
+    const foreign = await findForeignHolders(sb, userId, symbol, 'daily-ladder');
+    if (foreign.length > 0) {
+      await releaseReservation(sb, result.ladder?.reservationId);
+      return NextResponse.json({
+        ...base, mode: opMode, executed: false,
+        blocked: 'FOREIGN_STRATEGY_HOLDS',
+        error: `${symbol}을(를) 다른 전략(${foreign.join(', ')})이 보유 중입니다. ` +
+               '이 전략의 손절은 전량 청산이라 그쪽 포지션까지 닫습니다.',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
     const gate = await assertStateConsistent(sb, userId, useTestnet);
     if (!gate.allowed) {
@@ -328,7 +345,9 @@ export async function POST(req: NextRequest) {
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
-      signalId: `daily-ladder-${tradeDate}-${symbol}`,
+      // 소유 전략을 주문에 새긴다. 이게 없으면 나중에 이 포지션이
+      // 누구 것인지 알 수 없고, 장부가 '주인 미상'으로 쌓인다.
+      signalId: tagStrategy(`daily-ladder-${tradeDate}-${symbol}`, 'daily-ladder'),
       clientOrderId,
       exchange: exchange as 'binance' | 'gate',
       mode: mode as 'TESTNET' | 'LIVE',
@@ -390,4 +409,41 @@ export async function GET(req: NextRequest) {
     symbol,
     liveTradingLocked: process.env.ALLOW_LIVE_TRADING !== 'true',
   }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+/**
+ * 같은 심볼을 들고 있는 **다른** 전략을 찾는다.
+ *
+ * 장부는 live_orders의 체결 기록에서 만든다. 소유 전략은 signal_id
+ * 표식으로 붙어 있다 (lib/strategies/ledger.ts).
+ *
+ * 조회에 실패하면 빈 배열을 돌려주지 않고 던진다 — "다른 전략이 없다"와
+ * "확인 못 했다"는 다르고, 후자를 전자로 처리하면 막으려던 사고가 난다.
+ */
+async function findForeignHolders(
+  sb: any, userId: string, symbol: string, selfStrategy: string,
+): Promise<string[]> {
+  const { strategyOf } = await import('@/lib/strategies/ledger');
+  const { data, error } = await sb.from('live_orders')
+    .select('side, filled_qty, quantity, signal_id, strategy_id')
+    .eq('user_id', userId).eq('symbol', symbol)
+    .in('status', ['FILLED', 'RECONCILED'])
+    .order('created_at', { ascending: true })
+    .limit(500);
+  if (error) throw new Error(`전략 장부를 확인하지 못했습니다: ${error.message}`);
+
+  const net = new Map<string, number>();
+  for (const r of (Array.isArray(data) ? data : [])) {
+    const owner = strategyOf(r);
+    // 주인을 모르는 주문은 여기서 판단 근거로 쓰지 않는다. 임의로 남의
+    // 것이라고 보면 정상 진입이 영영 막힌다.
+    if (!owner || owner === selfStrategy) continue;
+    const q = Number(r.filled_qty ?? r.quantity) || 0;
+    if (q <= 0) continue;
+    const signed = String(r.side).toUpperCase() === 'BUY' ? q : -q;
+    net.set(owner, (net.get(owner) ?? 0) + signed);
+  }
+  return Array.from(net.entries())
+    .filter(([, q]) => Math.abs(q) > 1e-12)
+    .map(([k]) => k);
 }
