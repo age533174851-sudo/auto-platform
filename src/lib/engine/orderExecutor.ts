@@ -13,6 +13,7 @@
 // 응답을 못 받으면 절대 그냥 재시도하지 않는다 → UNKNOWN으로 두고 대조 후 판단.
 import type { PositionPlan } from './riskManager';
 import type { ExitPlan } from './exitPlan';
+import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -121,7 +122,37 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   }
 
   const orderRowId = row.id;
+
+  // ── 상태 전이 검증 ──
+  // 예전에는 update()가 어떤 status든 그대로 덮어썼다. 그러면 이미 FAILED로
+  // 확정된 주문이 뒤늦게 도착한 응답 때문에 ACKED로 바뀌는 식의 뒤집힘이
+  // 가능하다. orderLifecycle의 상태 기계를 통과한 전이만 기록한다.
+  //
+  // DB는 예전부터 'INTENT'를 쓰고 상태 기계는 'APPROVED'를 쓴다. 컬럼을
+  // 바꾸려면 마이그레이션과 기존 행 변환이 필요하므로, 여기서 매핑만 한다.
+  const toLifecycle = (s: string): LifecycleState =>
+    (s === 'INTENT' ? 'APPROVED' : s === 'RECONCILED' ? 'ACKED' : s) as LifecycleState;
+
+  let currentStatus: OrderStatus = 'INTENT';
+
   const update = async (patch: Record<string, any>) => {
+    const next = patch.status as OrderStatus | undefined;
+    if (next && next !== currentStatus) {
+      const t = applyTransition(toLifecycle(currentStatus), toLifecycle(next));
+      if (!t.ok) {
+        // 상태만 빼고 나머지는 기록한다. 잘못된 전이는 어딘가의 논리 오류이므로
+        // 조용히 넘기지 않고 사유를 남긴다.
+        try {
+          const { log } = await import('@/lib/log/logger');
+          log.warn('order-executor', `${clientOrderId}: ${t.reason}`);
+        } catch { /* 로거 실패가 주문을 막지 않는다 */ }
+        const { status: _drop, ...rest } = patch;
+        if (Object.keys(rest).length === 0) return;
+        patch = rest;
+      } else {
+        currentStatus = next;
+      }
+    }
     try { await sb.from('live_orders').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', orderRowId); } catch {}
   };
 

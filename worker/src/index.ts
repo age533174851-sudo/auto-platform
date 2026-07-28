@@ -182,6 +182,20 @@ async function processPendingJobs() {
       if (res.ok) {
         await finalize(job, true, res.result, null);
       } else {
+        // ── UNKNOWN은 재시도하지 않는다 ──
+        // "거래소가 받았는지 모르는" 상태다. 다시 보내면 중복 체결이 된다.
+        // 조회로 확정한 뒤에만 다음 판단을 할 수 있으므로 여기서 멈춘다.
+        const unknown = /응답 없음|타임아웃|timeout|ETIMEDOUT|ECONNRESET|socket hang up/i
+          .test(String(res.error || ''));
+        if (unknown) {
+          await finalize(job, false, res.result,
+            `응답을 받지 못해 결과를 확정할 수 없습니다(UNKNOWN). 중복 체결을 막기 위해 재시도하지 않습니다 — ` +
+            `/api/orders/reconcile로 거래소와 대조하세요: ${res.error}`);
+          await alert('system', 'warning', `주문 결과 미확정 (재시도 안 함)`,
+            { Symbol: job.symbol || '-', Action: job.action, Error: res.error || '?' }, `job_unknown:${job.id}`);
+          continue;
+        }
+
         const willRetry = attempts < (job.max_attempts || 5);
         if (willRetry) {
           await sb().from('jobs').update({ status: 'PENDING', error: res.error || '실패', result: res.result || null, locked_by: null, locked_until: new Date(Date.now() + 5000).toISOString(), updated_at: new Date().toISOString() }).eq('id', job.id);
