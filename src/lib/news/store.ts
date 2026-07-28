@@ -77,21 +77,51 @@ export async function knownHashes(sb: any, hashes: string[]): Promise<Set<string
 }
 
 /** 아직 분석 안 된 기사 (크론용) */
-export async function unanalyzed(sb: any, limit = 10): Promise<NormalizedArticle[] | null> {
+export async function unanalyzed(
+  sb: any, limit = 10,
+): Promise<(NormalizedArticle & { attempts: number })[] | null> {
   if (!sb) return null;
+  const map = (data: any[], withAttempts: boolean) => (data || []).map((r: any) => ({
+    hash: r.hash, title: r.title, body: r.body || '', url: r.url,
+    publishedAt: new Date(r.published_at).toISOString(),
+    source: r.source || '', provider: r.provider || '',
+    attempts: withAttempts ? (Number(r.analysis_attempts) || 0) : 0,
+  }));
+  const base = (cols: string) => sb.from(TABLE)
+    .select(cols)
+    .is('analyzed_at', null)
+    .order('published_at', { ascending: false })
+    .limit(Math.max(1, Math.min(50, limit)));
   try {
-    const { data, error } = await sb.from(TABLE)
-      .select('hash, title, body, url, published_at, source, provider')
-      .is('analyzed_at', null)
-      .order('published_at', { ascending: false })
-      .limit(Math.max(1, Math.min(50, limit)));
-    if (error) return null;
-    return (data || []).map((r: any) => ({
-      hash: r.hash, title: r.title, body: r.body || '', url: r.url,
-      publishedAt: new Date(r.published_at).toISOString(),
-      source: r.source || '', provider: r.provider || '',
-    }));
+    const withCol = await base('hash, title, body, url, published_at, source, provider, analysis_attempts');
+    if (!withCol.error) return map(withCol.data, true);
+    // 019를 부분만 돌렸을 수 있다. 시도 횟수 컬럼이 없으면 그것만 빼고
+    // 다시 읽는다 — 재시도 제어는 못 하지만 분석 자체는 돌아야 한다.
+    const legacy = await base('hash, title, body, url, published_at, source, provider');
+    if (legacy.error) return null;
+    return map(legacy.data, false);
   } catch { return null; }
+}
+
+/**
+ * 분석 실패를 기록한다.
+ *
+ * 안 남기면 크론이 돌 때마다 같은 기사를 다시 분석한다. 15분 주기면
+ * 실패 하나가 하루 96번 과금된다.
+ */
+export async function recordFailure(
+  sb: any, hash: string, attempts: number, reason: string,
+): Promise<void> {
+  if (!sb) return;
+  try {
+    const r = await sb.from(TABLE).update({
+      analysis_attempts: attempts,
+      analysis_error: reason.slice(0, 500),
+      last_attempt_at: new Date().toISOString(),
+    }).eq('hash', hash);
+    if (!r?.error) return;
+    // 컬럼이 없으면 기록만 포기한다. 분석 결과까지 버릴 이유는 없다.
+  } catch { /* 기록 실패가 분석 결과를 바꾸지 않는다 */ }
 }
 
 /** 분석 결과를 기사에 붙인다 */

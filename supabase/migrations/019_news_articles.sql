@@ -36,7 +36,15 @@ create table if not exists news_articles (
   risks          jsonb,
   affected_assets jsonb,
   -- 검증이 고친 항목. 모델 품질이 나빠지면 여기가 먼저 늘어난다.
-  repaired       jsonb
+  repaired       jsonb,
+
+  -- ── 재시도 제어 ──
+  -- 이게 없으면 실패한 기사를 크론이 돌 때마다 다시 분석한다. 15분마다
+  -- 돌면 실패 하나가 하루 96번 과금된다. 본문이 깨진 기사 하나가
+  -- 조용히 요금을 태우는 것이라, 실패도 세어야 한다.
+  analysis_attempts int not null default 0,
+  analysis_error    text,
+  last_attempt_at   timestamptz
 );
 
 -- 목록은 최신순으로만 읽는다
