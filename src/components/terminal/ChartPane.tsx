@@ -78,6 +78,10 @@ function ChartInner({ symbol, compact }: { symbol: string; compact?: boolean }) 
           symbol={symbol}
           interval={interval}
           mode={layout}
+          // 거래량을 봉 위에 겹치지 않고 아래 별도 창으로 뗀다.
+          // 09시 전략은 첫 봉의 몸통·꼬리·거래량을 함께 보고 판단하는데,
+          // 겹쳐 있으면 저가 부근에서 꼬리와 거래량 막대가 뒤섞인다.
+          separateVolume
           studies={layout === 'pro' ? ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'] : undefined}
         />
       </div>

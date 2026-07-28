@@ -13,23 +13,25 @@ import { C, FS, NUM, chip, fmtPrice, pnlColor } from './theme';
 import { DataBadge } from '@/components/ui/DataBadge';
 import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
+import { SymbolSearch } from './SymbolSearch';
 
 export const TOPBAR_H = 52;
 
 function SymbolPicker({ compact }: { compact?: boolean }) {
-  const { symbol, symbols, setSymbol } = useTerminal();
+  const { symbol, setSymbol, favorites, toggleFavorite } = useTerminal();
   const [open, setOpen] = useState(false);
 
   return (
     <div style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen(v => !v)}
-        onBlur={() => setTimeout(() => setOpen(false), 120)}
         style={{
           display: 'flex', alignItems: 'center', gap: 7,
-          background: C.raised, border: `1px solid ${C.hair}`, borderRadius: 8,
+          background: open ? C.active : C.raised,
+          border: `1px solid ${open ? C.hair2 : C.hair}`, borderRadius: 8,
           padding: compact ? '6px 9px' : '7px 11px', cursor: 'pointer',
           color: C.text, fontSize: compact ? FS.body : FS.lead, fontWeight: 700,
+          whiteSpace: 'nowrap',
         }}
       >
         {symbol.id.replace(/USDT$/, '')}
@@ -38,26 +40,24 @@ function SymbolPicker({ compact }: { compact?: boolean }) {
       </button>
 
       {open && (
-        <div style={{
-          position: 'absolute', top: '100%', left: 0, marginTop: 5, zIndex: 60,
-          background: C.raised, border: `1px solid ${C.hair2}`, borderRadius: 10,
-          boxShadow: '0 12px 32px rgba(0,0,0,.5)', overflow: 'hidden', minWidth: 190,
-        }}>
-          {symbols.map(s => (
-            <button key={s.id}
-              onMouseDown={() => { setSymbol(s); setOpen(false); }}
-              style={{
-                display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between',
-                gap: 12, background: s.id === symbol.id ? C.active : 'transparent',
-                border: 'none', padding: '9px 12px', cursor: 'pointer', textAlign: 'left',
-              }}>
-              <span style={{ color: C.text, fontSize: FS.body, fontWeight: 600 }}>
-                {s.id.replace(/USDT$/, '')}
-              </span>
-              <span style={{ color: C.faint, fontSize: FS.micro }}>{s.nameKr}</span>
-            </button>
-          ))}
-        </div>
+        <>
+          {/* 바깥을 눌러 닫는다. onBlur로 닫으면 목록 안의 별을 누르는 순간
+              닫혀서 즐겨찾기를 여러 개 못 고른다. */}
+          <div onClick={() => setOpen(false)}
+               style={{ position: 'fixed', inset: 0, zIndex: 59 }}/>
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 60,
+            width: compact ? 'min(92vw, 360px)' : 420,
+          }}>
+            <SymbolSearch
+              current={symbol.id}
+              favorites={favorites}
+              onToggleFav={toggleFavorite}
+              onPick={s => { setSymbol(s); setOpen(false); }}
+              onClose={() => setOpen(false)}
+            />
+          </div>
+        </>
       )}
     </div>
   );

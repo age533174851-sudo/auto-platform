@@ -9,74 +9,25 @@
 // "종목을 골랐다"는 이벤트 하나뿐이다.
 import React, { memo, useEffect, useState } from 'react';
 import { C, FS, NUM, tabStyle, chip, fmtPrice, pnlColor } from './theme';
-import { useTerminal, type TerminalSymbol } from './TerminalContext';
+import { useTerminal } from './TerminalContext';
+import { SymbolSearch } from './SymbolSearch';
 
 type Tab = '시장' | 'AI' | '뉴스' | '일정';
 const TABS: Tab[] = ['시장', 'AI', '뉴스', '일정'];
 
 // ── 시장 ──────────────────────────────────────────────
+// 상단 종목 선택과 **같은 컴포넌트**를 쓴다. 목록이 두 벌이면
+// 한쪽에만 즐겨찾기가 반영되는 식으로 어긋난다.
 function MarketList() {
-  const { symbols, symbol, setSymbol } = useTerminal();
-  const [rows, setRows] = useState<Record<string, { p: number; c: number }>>({});
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch('/api/prices?action=all_crypto&limit=200');
-        const d = await r.json();
-        const list: any[] = Array.isArray(d?.results) ? d.results : [];
-        if (!alive) return;
-        const next: Record<string, { p: number; c: number }> = {};
-        for (const s of symbols) {
-          const base = s.id.replace(/USDT$/, '');
-          const hit = list.find(x =>
-            String(x.symbol).toUpperCase() === base || String(x.symbol).toUpperCase() === s.id);
-          if (hit) next[s.id] = { p: Number(hit.price) || 0, c: Number(hit.change24h) || 0 };
-        }
-        setRows(next);
-      } catch { /* 다음 주기에 다시 */ }
-    };
-    load();
-    const t = setInterval(load, 15_000);
-    return () => { alive = false; clearInterval(t); };
-  }, [symbols]);
-
+  const { symbol, setSymbol, favorites, toggleFavorite } = useTerminal();
   return (
-    <div>
-      {symbols.map((s: TerminalSymbol) => {
-        const r = rows[s.id];
-        const on = s.id === symbol.id;
-        return (
-          <button key={s.id} onClick={() => setSymbol(s)} style={{
-            display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center',
-            padding: '9px 12px', cursor: 'pointer', border: 'none', textAlign: 'left',
-            background: on ? C.active : 'transparent',
-            boxShadow: on ? `inset 2px 0 0 ${C.accent}` : 'none',
-            transition: 'background .12s',
-          }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ color: on ? C.text : C.dim, fontSize: FS.body, fontWeight: 600 }}>
-                {s.id.replace(/USDT$/, '')}
-              </div>
-              <div style={{ color: C.faint, fontSize: FS.micro, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {s.nameKr}
-              </div>
-            </div>
-            <div style={{ textAlign: 'right', ...NUM }}>
-              <div style={{ color: C.text, fontSize: FS.small }}>{r ? fmtPrice(r.p) : '—'}</div>
-              <div style={{ color: pnlColor(r?.c), fontSize: FS.micro, fontWeight: 600 }}>
-                {r ? `${r.c >= 0 ? '+' : ''}${r.c.toFixed(2)}%` : ''}
-              </div>
-            </div>
-          </button>
-        );
-      })}
-      <div style={{
-        padding: '10px 12px', color: C.faint, fontSize: FS.micro,
-        borderTop: `1px solid ${C.hair}`,
-      }}>/api/prices · 15초 주기</div>
-    </div>
+    <SymbolSearch
+      embedded
+      current={symbol.id}
+      favorites={favorites}
+      onToggleFav={toggleFavorite}
+      onPick={setSymbol}
+    />
   );
 }
 

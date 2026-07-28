@@ -15,6 +15,7 @@
 // 모든 소비자가 다시 그려지므로, 뉴스가 30초마다 갱신되면 중앙 차트도
 // 30초마다 흔들린다. 그런 상태는 그것을 쓰는 패널 안에 둔다.
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import { loadFavorites, saveFavorites } from './SymbolSearch';
 
 export interface TerminalSymbol {
   /** 거래소 심볼 — 'BTCUSDT' */
@@ -45,7 +46,11 @@ export interface ModeInfo {
 interface TerminalState {
   symbol: TerminalSymbol;
   setSymbol: (s: TerminalSymbol) => void;
+  /** 즐겨찾기 종목 (좌측 시장 목록·빠른 전환용) */
   symbols: TerminalSymbol[];
+  /** 즐겨찾기 심볼 id 목록 */
+  favorites: string[];
+  toggleFavorite: (id: string) => void;
   /** Bearer 토큰. 없으면 로그인 전이다 */
   auth: string;
   connId: string;
@@ -72,6 +77,7 @@ const UNKNOWN_MODE: ModeInfo = {
 
 export function TerminalProvider({ children }: { children: React.ReactNode }) {
   const [symbol, setSymbolState] = useState<TerminalSymbol>(DEFAULT_SYMBOLS[0]);
+  const [favorites, setFavorites] = useState<string[]>(() => DEFAULT_SYMBOLS.map(s => s.id));
   const [auth, setAuth] = useState('');
   const [connections, setConnections] = useState<any[]>([]);
   const [connId, setConnId] = useState('');
@@ -86,6 +92,16 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
         if (s?.id) setSymbolState(s);
       }
     } catch { /* 저장값이 깨졌으면 기본값 */ }
+    setFavorites(loadFavorites());
+  }, []);
+
+  const toggleFavorite = useCallback((id: string) => {
+    setFavorites(prev => {
+      // 마지막 하나까지 지울 수 있게 둔다. 강제로 남기면 "왜 안 지워지지"가 된다.
+      const next = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id];
+      saveFavorites(next);
+      return next;
+    });
   }, []);
 
   const setSymbol = useCallback((s: TerminalSymbol) => {
@@ -137,10 +153,19 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
     return () => { cancelled = true; };
   }, []);
 
+  // 즐겨찾기를 좌측 목록이 쓰는 형태로. 한국어 이름은 아는 것만 붙인다 —
+  // 모르는 종목에 임의로 이름을 지어 붙이면 그게 더 헷갈린다.
+  const symbols = useMemo<TerminalSymbol[]>(() => favorites.map(id => {
+    const known = DEFAULT_SYMBOLS.find(s => s.id === id);
+    if (known) return known;
+    const base = id.replace(/USDT$/, '');
+    return { id, display: `${base}/USDT`, nameKr: base };
+  }), [favorites]);
+
   const value = useMemo<TerminalState>(() => ({
-    symbol, setSymbol, symbols: DEFAULT_SYMBOLS,
+    symbol, setSymbol, symbols, favorites, toggleFavorite,
     auth, connId, setConnId, connections, mode,
-  }), [symbol, setSymbol, auth, connId, connections, mode]);
+  }), [symbol, setSymbol, symbols, favorites, toggleFavorite, auth, connId, connections, mode]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

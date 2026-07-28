@@ -1,49 +1,40 @@
 'use client';
 // src/components/terminal/MobileShell.tsx
 //
-// 모바일 배치 — PC를 줄인 것이 아니라 같은 조각을 다시 놓은 것.
+// 모바일 배치 — PC를 줄인 것이 아니라 조각을 다시 놓은 것.
 //
-//   세로
-//   ┌──────────────────┐
-//   │ 상단 (종목·가격)   │
-//   │                  │
-//   │      차트         │  ← 화면 대부분. 항상 살아 있다
-//   │                  │
-//   ├──────────────────┤
-//   │ [주문][포지션]     │  ← 하단 고정. 누르면 시트가 위로 덮는다
-//   │ [호가][AI·뉴스]    │
-//   └──────────────────┘
+//   ┌──────────────────────────┐
+//   │ BTCUSDT ▾  -2.48%   STOP │  상단
+//   ├─────────────┬────────────┤
+//   │  주문폼      │  펀딩       │  ← 둘이 항상 같이 보인다
+//   │  방향/배율    │  호가       │
+//   │  가격/수량    │  중앙가     │
+//   │  [롱][숏]    │  잔량 막대   │
+//   ├─────────────┴────────────┤
+//   │ 포지션(1) · 미체결 · 대조   │  ← 탭
+//   ├──────────────────────────┤
+//   │ BTCUSDT 차트           ▲ │  ← 접혀 있다. 누르면 올라온다
+//   └──────────────────────────┘
 //
-//   가로 — 시트를 쓰지 않는다. 가로에서 시트를 올리면 남는 높이가 없다.
-//   ┌─────────────┬──────┐
-//   │    차트      │ 패널  │
-//   └─────────────┴──────┘
+// 왜 차트가 아래에 접혀 있나
+// ──────────────────────────
+// 처음에는 차트를 화면 대부분에 놓고 주문·호가를 시트로 올렸다.
+// 그런데 모바일에서 실제로 하는 일은 **호가를 보며 주문을 넣는 것**이고,
+// 차트는 그 전에 한 번 보는 참고 자료다. 자주 쓰는 둘을 시트 뒤에 숨기고
+// 가끔 보는 하나를 전면에 두면 매번 두 번씩 눌러야 한다.
 //
-// 차트를 시트 **아래에** 두는 이유
-// ────────────────────────────────
-// 패널을 화면 전환으로 만들면 차트가 언마운트되고, PC에서 지켜낸 것
-// (iframe이 살아남아 추세선·확대가 유지되는 것)을 모바일에서 다시 잃는다.
-// 시트는 겹치는 것이라 아래는 그대로 있다.
+// 차트는 한 번 펼치면 접어도 **언마운트하지 않는다**. iframe이 다시 붙으면
+// 그려둔 추세선과 확대 구간이 날아간다 — PC에서 지킨 것과 같은 이유다.
 import React, { useEffect, useState } from 'react';
-import { C, FS, tabStyle } from './theme';
+import { C, FS, NUM, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
-import { TopBar } from './TopBar';
 import { ChartPane } from './ChartPane';
 import { OrderBookPanel, OrderFormPanel } from './OrderPane';
 import { LeftRail } from './LeftRail';
 import { BottomDock } from './BottomDock';
 import { BottomSheet } from './BottomSheet';
-
-type SheetId = '주문' | '포지션' | '호가' | '정보';
-
-const NAV: { id: SheetId; label: string; icon: string }[] = [
-  { id: '주문', label: '주문', icon: '⇄' },
-  { id: '포지션', label: '포지션', icon: '▤' },
-  { id: '호가', label: '호가', icon: '≡' },
-  { id: '정보', label: 'AI·뉴스', icon: '◔' },
-];
-
-const NAV_H = 58;
+import { SymbolSearch } from './SymbolSearch';
+import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
 function useLandscape(): boolean {
   const [land, setLand] = useState(false);
@@ -60,61 +51,132 @@ function useLandscape(): boolean {
   return land;
 }
 
-function PanelBody({ id, onPickPrice, pickedPrice, onBalance }: {
-  id: SheetId;
-  onPickPrice: (p: number) => void;
-  pickedPrice: number | null;
-  onBalance: (v: number | null) => void;
-}) {
-  if (id === '주문') return <OrderFormPanel presetPrice={pickedPrice}/>;
-  if (id === '호가') return <OrderBookPanel rows={11} onPickPrice={onPickPrice}/>;
-  if (id === '포지션') return <div style={{ height: '58vh' }}><BottomDock onBalance={onBalance}/></div>;
-  return <div style={{ height: '58vh' }}><LeftRail/></div>;
+// ── 상단 ────────────────────────────────────────────────
+function MobileHeader({ onOpenSearch, onOpenInfo }: { onOpenSearch: () => void; onOpenInfo: () => void }) {
+  const { symbol, mode } = useTerminal();
+  const stream = useBinanceStream(symbol.id, true);
+  const chg = stream.changePct;
+
+  return (
+    <div style={{
+      flexShrink: 0, padding: '8px 46px 8px 12px',
+      borderBottom: `1px solid ${C.hair}`,
+      background: mode.realMoney
+        ? 'linear-gradient(90deg,rgba(246,70,93,.10),transparent 55%)' : C.panel,
+      borderLeft: mode.realMoney ? `3px solid ${C.down}` : '3px solid transparent',
+      display: 'flex', alignItems: 'center', gap: 8,
+    }}>
+      <button onClick={onOpenSearch} style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        background: 'none', border: 'none', padding: 0, cursor: 'pointer', minWidth: 0,
+      }}>
+        <span style={{
+          color: C.text, fontSize: 15, fontWeight: 800,
+          letterSpacing: '-0.02em', whiteSpace: 'nowrap',
+        }}>{symbol.id}</span>
+        <span style={{
+          color: C.faint, fontSize: 9, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
+          background: C.raised, borderRadius: 4, padding: '2px 5px',
+        }}>무기한</span>
+        <span style={{ color: C.dim, fontSize: 10, flexShrink: 0 }}>▾</span>
+      </button>
+
+      <span style={{ ...NUM, color: pnlColor(chg), fontSize: FS.body, fontWeight: 700 }}>
+        {chg != null ? `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%` : '—'}
+      </span>
+
+      <div style={{ flex: 1 }}/>
+      <button onClick={onOpenInfo} title="AI · 뉴스 · 일정" style={{
+        minHeight: 30, padding: '0 10px', background: C.raised, color: C.dim,
+        border: `1px solid ${C.hair}`, borderRadius: 7,
+        fontSize: FS.micro, fontWeight: 600, cursor: 'pointer', flexShrink: 0,
+      }}>AI·뉴스</button>
+      <KillButton/>
+      {/* 모드는 점 하나로. 자리는 안 먹되 색은 남는다 */}
+      <span
+        title={mode.unknown ? '운영 모드 확인 불가' : mode.label}
+        style={{
+          width: 9, height: 9, borderRadius: '50%', flexShrink: 0,
+          background: mode.unknown ? C.warn : mode.realMoney ? C.down : C.up,
+          boxShadow: mode.realMoney ? `0 0 0 3px ${C.downBg}` : 'none',
+        }}
+      />
+    </div>
+  );
+}
+
+// ── 하단 접이식 차트 ─────────────────────────────────────
+function ChartDrawer() {
+  const { symbol } = useTerminal();
+  const [open, setOpen] = useState(false);
+  // 한 번 열면 계속 붙여 둔다. 접을 때마다 언마운트하면 다시 펼 때
+  // iframe이 처음부터 로드되고 그려둔 것이 날아간다.
+  const [mounted, setMounted] = useState(false);
+
+  const toggle = () => {
+    if (!mounted) setMounted(true);
+    setOpen(v => !v);
+  };
+
+  return (
+    <div style={{
+      flexShrink: 0, borderTop: `1px solid ${C.hair2}`, background: C.panel,
+      display: 'flex', flexDirection: 'column',
+      height: open ? '58vh' : 'auto', minHeight: 0,
+    }}>
+      <button onClick={toggle} style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+        padding: '12px 14px', paddingBottom: open ? 8 : 'max(env(safe-area-inset-bottom), 12px)',
+        color: C.text, fontSize: FS.body, fontWeight: 600, flexShrink: 0,
+      }}>
+        <span>{symbol.id} 차트</span>
+        <span style={{ color: C.dim, fontSize: 11 }}>{open ? '▼' : '▲'}</span>
+      </button>
+
+      {mounted && (
+        // 접혀 있을 때는 높이 0으로 숨긴다. display:none이면 iframe이
+        // 다시 그려질 때 크기를 0으로 인식해 차트가 깨진다.
+        <div style={{
+          flex: open ? 1 : undefined, height: open ? undefined : 0,
+          minHeight: 0, overflow: 'hidden',
+        }}>
+          <ChartPane symbol={symbol.id} compact/>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function MobileShell() {
-  const { mode } = useTerminal();
+  const { symbol, mode, setSymbol, favorites, toggleFavorite } = useTerminal();
   const landscape = useLandscape();
-  const [sheet, setSheet] = useState<SheetId | null>(null);
-  const [panel, setPanel] = useState<SheetId>('주문');   // 가로모드용
   const [picked, setPicked] = useState<number | null>(null);
-  const [balance, setBalance] = useState<number | null>(null);
-  const { symbol } = useTerminal();
+  const [search, setSearch] = useState(false);
+  const [info, setInfo] = useState(false);
 
-  // 호가에서 가격을 고르면 주문으로 넘긴다 — 시트를 갈아 끼운다
-  const pickPrice = (p: number) => {
-    setPicked(p);
-    if (landscape) setPanel('주문'); else setSheet('주문');
-  };
-
-  // ── 가로 ── 2열. 시트를 올릴 높이가 없다.
+  // ── 가로 ── 차트를 옆에 세울 공간이 생긴다
   if (landscape) {
     return (
-      <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: C.bg, color: C.text }}>
-        <TopBar compact balance={balance} right={<KillButton compact/>}/>
+      <div style={{
+        height: '100dvh', display: 'flex', flexDirection: 'column',
+        background: C.bg, color: C.text, overflow: 'hidden',
+      }}>
+        <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)}/>
         <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
           <div style={{ flex: 1, minWidth: 0, borderRight: `1px solid ${C.hair}` }}>
             <ChartPane symbol={symbol.id} compact/>
           </div>
-          <div style={{
-            width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column',
-            background: C.panel, minHeight: 0,
-          }}>
-            <div style={{
-              display: 'flex', gap: 4, padding: 6,
-              borderBottom: `1px solid ${C.hair}`, flexShrink: 0, overflowX: 'auto',
-            }}>
-              {NAV.map(n => (
-                <button key={n.id} onClick={() => setPanel(n.id)} style={tabStyle(panel === n.id)}>
-                  {n.label}
-                </button>
-              ))}
-            </div>
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              <PanelBody id={panel} onPickPrice={pickPrice} pickedPrice={picked} onBalance={setBalance}/>
-            </div>
+          <div style={{ width: 210, flexShrink: 0, overflowY: 'auto', borderRight: `1px solid ${C.hair}` }}>
+            <OrderBookPanel rows={8} dense showFunding onPickPrice={setPicked}/>
+          </div>
+          <div style={{ width: 250, flexShrink: 0, overflowY: 'auto' }}>
+            <OrderFormPanel dense presetPrice={picked}/>
           </div>
         </div>
+        <SearchSheet open={search} onClose={() => setSearch(false)}
+          current={symbol.id} favorites={favorites}
+          onToggleFav={toggleFavorite} onPick={s => { setSymbol(s); setSearch(false); }}/>
       </div>
     );
   }
@@ -125,51 +187,42 @@ export default function MobileShell() {
       height: '100dvh', display: 'flex', flexDirection: 'column',
       background: C.bg, color: C.text, overflow: 'hidden',
     }}>
-      <TopBar compact balance={balance} right={<KillButton compact/>}/>
+      <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)}/>
 
-      {/* 차트는 항상 여기 있다. 시트가 덮어도 언마운트되지 않는다. */}
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <ChartPane symbol={symbol.id} compact/>
+      {/* 주문과 호가는 항상 같이 보인다. 모바일에서 실제로 하는 일이 이것이다. */}
+      <div style={{ display: 'flex', minHeight: 0, flex: 1, overflow: 'hidden' }}>
+        <div style={{
+          width: '56%', flexShrink: 0, overflowY: 'auto',
+          borderRight: `1px solid ${C.hair}`,
+        }}>
+          <OrderFormPanel dense presetPrice={picked}/>
+        </div>
+        <div style={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>
+          <OrderBookPanel rows={7} dense showFunding onPickPrice={setPicked}/>
+        </div>
       </div>
 
-      <nav style={{
-        height: NAV_H, flexShrink: 0, display: 'grid',
-        gridTemplateColumns: `repeat(${NAV.length},1fr)`,
-        borderTop: `1px solid ${C.hair}`, background: C.panel,
-        paddingBottom: 'env(safe-area-inset-bottom)',
+      {/* 포지션 — 접혀 있지 않다. 들고 있는 것을 못 보면 판단을 못 한다.
+          BottomDock이 자기 탭(포지션·미체결·상태대조·전략)을 갖고 있으므로
+          바깥에서 탭을 한 겹 더 씌우지 않는다. */}
+      <div style={{
+        flexShrink: 0, height: '27vh', minHeight: 0,
+        display: 'flex', flexDirection: 'column',
+        borderTop: `1px solid ${C.hair2}`, background: C.panel,
       }}>
-        {NAV.map(n => {
-          const on = sheet === n.id;
-          return (
-            <button key={n.id} onClick={() => setSheet(on ? null : n.id)} style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-              gap: 3, background: 'none', border: 'none', cursor: 'pointer',
-              color: on ? C.accent : C.dim,
-              // 주문 탭만 상단에 얇은 강조선. 가장 많이 누르는 곳이다.
-              boxShadow: on ? `inset 0 2px 0 ${C.accent}` : 'none',
-            }}>
-              <span style={{ fontSize: 15, lineHeight: 1 }}>{n.icon}</span>
-              <span style={{ fontSize: FS.micro, fontWeight: on ? 700 : 500 }}>{n.label}</span>
-            </button>
-          );
-        })}
-      </nav>
+        <BottomDock/>
+      </div>
 
-      <BottomSheet
-        open={sheet !== null}
-        title={sheet === '정보' ? 'AI · 뉴스 · 일정' : sheet ?? ''}
-        onClose={() => setSheet(null)}
-        // 주문 시트는 끌어서 닫히지 않는다. 수량을 입력하다 미끄러지면
-        // 처음부터 다시 해야 한다.
-        lockDrag={sheet === '주문'}
-        maxHeightPct={sheet === '주문' ? 90 : 82}
-      >
-        {sheet && (
-          <PanelBody id={sheet} onPickPrice={pickPrice} pickedPrice={picked} onBalance={setBalance}/>
-        )}
+      <ChartDrawer/>
+
+      <SearchSheet open={search} onClose={() => setSearch(false)}
+        current={symbol.id} favorites={favorites}
+        onToggleFav={toggleFavorite} onPick={s => { setSymbol(s); setSearch(false); }}/>
+
+      <BottomSheet open={info} title="AI · 뉴스 · 일정" onClose={() => setInfo(false)}>
+        <div style={{ height: '62vh' }}><LeftRail/></div>
       </BottomSheet>
 
-      {/* 실자금이면 화면 테두리가 붉다 */}
       {mode.realMoney && (
         <div style={{
           position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 70,
@@ -180,11 +233,26 @@ export default function MobileShell() {
   );
 }
 
+function SearchSheet({ open, onClose, current, favorites, onToggleFav, onPick }: {
+  open: boolean; onClose: () => void; current: string;
+  favorites: string[]; onToggleFav: (id: string) => void;
+  onPick: (s: any) => void;
+}) {
+  return (
+    <BottomSheet open={open} title="종목 검색" onClose={onClose} maxHeightPct={86}>
+      <div style={{ height: '72vh' }}>
+        <SymbolSearch embedded current={current} favorites={favorites}
+          onToggleFav={onToggleFav} onPick={onPick} onClose={onClose}/>
+      </div>
+    </BottomSheet>
+  );
+}
+
 /**
- * Kill Switch는 시트 안에 숨기지 않는다.
+ * Kill Switch는 접거나 시트에 넣지 않는다.
  * 필요한 순간에 두 번 누르게 하면 안 된다.
  */
-function KillButton({ compact }: { compact?: boolean }) {
+function KillButton() {
   const { auth, connId } = useTerminal();
   const [busy, setBusy] = useState(false);
 
@@ -206,11 +274,11 @@ function KillButton({ compact }: { compact?: boolean }) {
 
   return (
     <button onClick={fire} disabled={busy} style={{
-      minHeight: 34, padding: compact ? '0 12px' : '0 16px',
+      minHeight: 30, padding: '0 11px',
       background: C.downBg, color: C.down,
-      border: `1px solid ${C.down}55`, borderRadius: 8,
-      fontSize: FS.small, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
-      whiteSpace: 'nowrap',
+      border: `1px solid ${C.down}55`, borderRadius: 7,
+      fontSize: FS.micro, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
+      whiteSpace: 'nowrap', flexShrink: 0,
     }}>{busy ? '…' : 'STOP'}</button>
   );
 }

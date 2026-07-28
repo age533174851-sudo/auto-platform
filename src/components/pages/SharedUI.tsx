@@ -1854,10 +1854,19 @@ export function RiskDashboard({ positions, prices }: { positions: any[]; prices:
 
 export type ChartLayoutMode = 'default' | 'minimal' | 'pro';
 
-export function InlineTVChart({ symbol, chartType = '1', interval = '60', mode = 'default', studies }: {
+export function InlineTVChart({ symbol, chartType = '1', interval = '60', mode = 'default', studies, separateVolume }: {
   symbol: string; chartType?: string; interval?: string;
   mode?: ChartLayoutMode;
   studies?: string[];   // ['RSI','MACD'] 등 (pro 모드 보조지표)
+  /**
+   * 거래량을 봉 위에 겹치지 않고 아래 별도 창으로 분리한다.
+   *
+   * 위젯 기본값은 가격 축 하단에 거래량 막대를 얹는 것이다. 그러면
+   * 저가 부근의 봉과 거래량 막대가 같은 자리에서 겹쳐, 꼬리가 긴지
+   * 거래량이 많은지 한눈에 구분되지 않는다. 09시 전략은 첫 봉의
+   * 몸통·꼬리·거래량을 함께 보고 판단하므로 이 구분이 중요하다.
+   */
+  separateVolume?: boolean;
 }) {
   // Use central resolver (idempotent — safe to pass already-prefixed symbols)
   const tvSymbol = toTradingViewSymbol(symbol);
@@ -1877,11 +1886,18 @@ export function InlineTVChart({ symbol, chartType = '1', interval = '60', mode =
   // default: 기본 (툴바 + 범례 보임)
   const hideTopToolbar = mode === 'minimal' ? '1' : '0';
   const hideLegend     = mode === 'minimal' ? '1' : '0';
-  const studiesParam = mode === 'pro' && studies && studies.length > 0
-    ? `&studies=${encodeURIComponent(JSON.stringify(studies))}`
-    : '&studies=[]';
 
-  const src = `https://s.tradingview.com/widgetembed/?frameElementId=tv_embed&symbol=${encodeURIComponent(tvSymbol)}&interval=${interval}&theme=dark&style=${chartType}&locale=ko&hide_top_toolbar=${hideTopToolbar}&hide_legend=${hideLegend}&save_image=0&toolbarbg=060B14${studiesParam}&show_popup_button=0`;
+  // 겹친 거래량을 끄고(hidevolume) 같은 지표를 study로 다시 넣으면
+  // 위젯이 그것을 아래 별도 창에 그린다. 둘 중 하나만 하면
+  // 거래량이 사라지거나(끄기만) 두 벌로 보인다(추가만).
+  const extra = mode === 'pro' && studies && studies.length > 0 ? studies : [];
+  const allStudies = separateVolume ? ['Volume@tv-basicstudies', ...extra] : extra;
+  const studiesParam = allStudies.length > 0
+    ? `&studies=${encodeURIComponent(JSON.stringify(allStudies))}`
+    : '&studies=[]';
+  const volumeParam = separateVolume ? '&hidevolume=1' : '';
+
+  const src = `https://s.tradingview.com/widgetembed/?frameElementId=tv_embed&symbol=${encodeURIComponent(tvSymbol)}&interval=${interval}&theme=dark&style=${chartType}&locale=ko&hide_top_toolbar=${hideTopToolbar}&hide_legend=${hideLegend}&save_image=0&toolbarbg=060B14${studiesParam}${volumeParam}&show_popup_button=0`;
 
   return (
     <iframe
