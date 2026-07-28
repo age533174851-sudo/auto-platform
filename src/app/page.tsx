@@ -287,7 +287,13 @@ export default function App() {
       const want=tab==='home'?null:tab;
       if(cur===want) return;              // 이미 맞으면 기록을 남기지 않는다
       if(want) url.searchParams.set('tab',want); else url.searchParams.delete('tab');
-      window.history.pushState({tab},'',url.toString());
+      // 지금 맨 위가 모달 표식이면 쌓지 말고 **덮어쓴다**.
+      // 시트에서 항목을 누르면 화면 전환과 시트 닫힘이 같은 렌더에서 일어난다.
+      // 여기서 쌓고 아래 훅이 back()으로 되감으면 방금 누른 화면이 취소되고
+      // 이전 화면으로 돌아간다 — 메뉴가 아예 안 먹는 것처럼 보인다.
+      const onOverlay=(window.history.state as any)?.overlay===true;
+      if(onOverlay) window.history.replaceState({tab},'',url.toString());
+      else window.history.pushState({tab},'',url.toString());
     }catch{}
   },[tab]);
 
@@ -483,7 +489,13 @@ export default function App() {
       }else if(d.action==='back'){
         // X나 배경을 눌러 닫았다. 만들어 둔 자리를 치우지 않으면
         // 그 다음 뒤로가기가 아무 일도 안 하는 것처럼 보인다.
-        for(let i=0;i<d.count;i++) window.history.back();
+        //
+        // 다만 맨 위가 아직 모달 표식일 때만 되감는다. 화면 전환과 함께
+        // 닫힌 경우에는 위 훅이 표식을 이미 덮어썼으므로, 여기서 back()을
+        // 부르면 방금 이동한 화면이 취소된다.
+        if((window.history.state as any)?.overlay===true){
+          for(let i=0;i<d.count;i++) window.history.back();
+        }
       }
     }catch{}
   },[overlays]);
