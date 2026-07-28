@@ -6,7 +6,7 @@ import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
-import { useBinanceStream, buyPressure } from '@/lib/hooks/useBinanceStream';
+import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
 import type { Asset, Order } from '@/types';
 import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
@@ -919,7 +919,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                   const midFromBook = showBids[0]?.price ?? showAsks[showAsks.length-1]?.price ?? null;
                   const px = stream.lastPrice ?? midFromBook;
                   const chg = stream.changePct;
-                  const pressure = buyPressure(stream.trades);
+                  const pressure = bookImbalance(stream);
 
                   const Row = ({lv,buy}:{lv:{price:number;qty:number};buy:boolean})=>(
                     <div onClick={()=>{ setOrderType('limit'); setLimitPrice(String(lv.price)); }}
@@ -980,7 +980,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                       {pressure != null && (
                         <div style={{padding:'6px 6px 3px',borderTop:`1px solid ${T.border}`,marginTop:2}}>
                           <div style={{display:'flex',justifyContent:'space-between',fontSize:8,color:T.muted,marginBottom:3}}>
-                            <span style={{color:T.grn}}>매수 {pressure.toFixed(1)}%</span>
+                            <span style={{color:T.grn}}>호가 잔량 매수 {pressure.toFixed(1)}%</span>
                             <span style={{color:T.red}}>{(100-pressure).toFixed(1)}% 매도</span>
                           </div>
                           <div style={{display:'flex',height:4,borderRadius:2,overflow:'hidden',background:T.border}}>

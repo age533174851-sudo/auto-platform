@@ -73,10 +73,20 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
     if (typeof window === 'undefined' || !sym) return;
     cleanup();
 
+    // ── 스트림 선택 ──
+    // 이 서비스가 닿는 범위에서 Binance 선물 스트림이 선별적으로 제한된다.
+    // 실측(2026-07): 9초 동안
+    //   depth20     정상        bookTicker  1737건
+    //   aggTrade    0건         ticker      0건
+    //   markPrice   0건         kline_1m    0건
+    // 체결·시세 계열은 오지 않고 호가·북 계열만 온다. 현물 aggTrade는 오지만
+    // 선물 호가에 현물 체결을 섞으면 서로 다른 시장의 값이 한 화면에 놓인다.
+    // 그래서 오는 것만 쓴다: depth(호가) + bookTicker(최우선 호가 → 현재가).
+    // 24시간 변동률은 REST로 따로 받는다 (아래 pollTicker).
     const s = sym.toLowerCase();
     const url =
       `wss://fstream.binance.com/stream?streams=` +
-      `${s}@depth20@100ms/${s}@aggTrade/${s}@ticker`;
+      `${s}@depth20@100ms/${s}@bookTicker`;
 
     setState(prev => ({ ...prev, status: retryRef.current ? 'reconnecting' : 'connecting' }));
 
@@ -113,29 +123,12 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
         return;
       }
 
-      if (stream.includes('@aggTrade')) {
-        const t = {
-          price: parseFloat(d.p), qty: parseFloat(d.q),
-          time: Number(d.T) || Date.now(),
-          buyerMaker: !!d.m,     // true면 매도 체결(매수자가 메이커)
-        };
-        if (!Number.isFinite(t.price)) return;
-        setState(prev => ({
-          ...prev,
-          lastPrice: t.price,
-          trades: [t, ...prev.trades].slice(0, MAX_TRADES),
-        }));
-        return;
-      }
-
-      if (stream.includes('@ticker')) {
-        const last = parseFloat(d.c);
-        const chg = parseFloat(d.P);
-        setState(prev => ({
-          ...prev,
-          lastPrice: Number.isFinite(last) ? last : prev.lastPrice,
-          changePct: Number.isFinite(chg) ? chg : prev.changePct,
-        }));
+      if (stream.includes('@bookTicker')) {
+        // b/a = 최우선 매수/매도 호가. 체결가 스트림이 오지 않으므로
+        // 이 둘의 중간값을 현재가로 쓴다.
+        const bid = parseFloat(d.b), ask = parseFloat(d.a);
+        if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+        setState(prev => ({ ...prev, lastPrice: (bid + ask) / 2 }));
       }
     };
 
@@ -172,6 +165,24 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
     retryRef.current = 0;
     connect(symbol);
 
+    // ── 24시간 변동률 (REST) ──
+    // @ticker 스트림이 오지 않으므로 REST로 받는다. 5초 주기면 충분하다 —
+    // 24시간 변동률은 초 단위로 의미가 바뀌는 값이 아니다.
+    let pollAlive = true;
+    const pollTicker = async () => {
+      try {
+        const r = await fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`);
+        if (!r.ok || !pollAlive) return;
+        const d = await r.json();
+        const chg = parseFloat(d?.priceChangePercent);
+        if (Number.isFinite(chg) && aliveRef.current) {
+          setState(prev => ({ ...prev, changePct: chg }));
+        }
+      } catch { /* 실패하면 다음 주기에 다시 시도 */ }
+    };
+    pollTicker();
+    const pollTimer = setInterval(pollTicker, 5000);
+
     // 탭이 다시 보일 때 연결이 죽어 있으면 살린다
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return;
@@ -185,6 +196,8 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
 
     return () => {
       aliveRef.current = false;
+      pollAlive = false;
+      clearInterval(pollTimer);
       document.removeEventListener('visibilitychange', onVisible);
       cleanup();
     };
@@ -204,14 +217,17 @@ export function depthBars(levels: DepthLevel[]): { level: DepthLevel; cumPct: nu
   });
 }
 
-/** 최근 체결의 매수/매도 강도 (0~100, 매수 비중) */
-export function buyPressure(trades: StreamState['trades']): number | null {
-  if (!trades.length) return null;
-  let buy = 0, sell = 0;
-  for (const t of trades) {
-    const v = t.price * t.qty;
-    if (t.buyerMaker) sell += v; else buy += v;
-  }
-  const total = buy + sell;
-  return total > 0 ? (buy / total) * 100 : null;
+/**
+ * 호가 잔량 기준 매수 비중 (0~100).
+ *
+ * 원래는 체결(aggTrade)로 매수·매도 강도를 재려 했으나 그 스트림이 오지
+ * 않는다. 대신 실제로 오는 호가 잔량으로 계산한다. 체결 강도와 같은 값은
+ * 아니다 — "지금 어느 쪽에 주문이 더 쌓여 있는가"를 뜻한다.
+ * 화면에서도 '호가 잔량'이라고 표기해야 오해가 없다.
+ */
+export function bookImbalance(state: Pick<StreamState, 'asks' | 'bids'>): number | null {
+  const bidQty = state.bids.reduce((a, l) => a + l.qty, 0);
+  const askQty = state.asks.reduce((a, l) => a + l.qty, 0);
+  const total = bidQty + askQty;
+  return total > 0 ? (bidQty / total) * 100 : null;
 }

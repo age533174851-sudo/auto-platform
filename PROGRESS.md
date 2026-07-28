@@ -69,7 +69,28 @@ MAE 분포는 진입 규칙과 무관하므로 그 결론만 유효하다.
 부수 수정: 중앙 현재가가 stream.lastPrice 없을 때 원화(sel.p)로 폴백해 호가(USDT)와
 단위가 섞였다. 최우선 호가로 채우고 'USDT'를 명시하도록 변경.
 
-### ⚠️ 남은 문제: ticker · aggTrade 미수신
+### ticker · aggTrade 미수신 — 원인 규명 완료, 우회 적용
+Node에서 스트림별로 9초간 측정한 결과 (브라우저·앱과 무관하게 재현):
+```
+futures depth20     정상          futures bookTicker  1737건
+futures aggTrade    0건           futures ticker      0건
+futures markPrice   0건           futures kline_1m    0건
+spot    aggTrade    80건
+```
+**호가·북 계열은 오고 체결·시세 계열은 오지 않는다.** 지역 제한으로 보인다
+(Railway가 Binance에 차단됐던 것과 같은 성격). 코드 버그가 아니다.
+
+우회:
+- 현재가: `@ticker` → `@bookTicker`의 최우선 매수/매도 중간값
+- 24h 변동률: REST `/fapi/v1/ticker/24hr` 5초 폴링
+- 매수/매도 강도: 체결 기반 `buyPressure` → 호가 잔량 기반 `bookImbalance`.
+  같은 값이 아니므로 화면에도 '호가 잔량 매수'로 표기한다.
+- 현물 aggTrade는 오지만 선물 호가에 현물 체결을 섞지 않았다.
+
+⚠️ 브라우저에서 최종 렌더 확인은 못 했다 (컨텍스트 소진). 다음 세션에서
+매매 → 상단 서브탭 '매매' → BTC 선택 후 변동률·호가잔량 표시 확인 필요.
+
+### (구) 남은 문제 기록
 같은 결합 스트림인데 `@depth`만 오고 `@ticker`(변동률)와 `@aggTrade`(체결·매수강도)가
 도착하지 않는다. 화면에 "변동률 수신 중"이 계속 남고 매수/매도 강도 막대가 안 나온다.
 확인할 것:
