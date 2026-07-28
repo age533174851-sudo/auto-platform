@@ -30,9 +30,10 @@ import { runLedgerTests } from './src/lib/strategies/ledger.test';
 import { runSpotStrategyTests } from './src/lib/strategies/spotStrategies.test';
 import { runSpotOrderPlanTests } from './src/lib/strategies/spotOrderPlan.test';
 import { runCombinedTests } from './src/lib/strategies/combined.test';
+import { runBinanceHostTests } from './src/lib/exchanges/binanceHosts.test';
 import { summary } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
-runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests();
+runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests();
 const s = summary();
 console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
 if (s.failed > 0) { s.failures.forEach(f => console.log('  FAIL:', f)); (globalThis).process.exitCode = 1; }

@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
   }
 
   const { data: conn } = await (sb.from('exchange_connections') as any)
-    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
 
   if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
     const sym = symbol.toUpperCase().replace('/', '');
     const baseAsset = sym.replace(/USDT$|BUSD$|USDC$/, '');
 
-    const raw = await getSpotTrades(conn.api_key || '', secret, sym, 500);
+    const raw = await getSpotTrades(conn.api_key || '', secret, sym, 500, conn.is_testnet === true);
     const trades = raw
       .map((t: any) => ({
         id: t.id, orderId: t.orderId, time: Number(t.time),

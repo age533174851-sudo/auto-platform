@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
   const [spotRes, futRes] = await Promise.allSettled([
     (async (): Promise<SpotWallet> => {
       const { getBalancesBinance } = await import('@/lib/exchanges/binance');
-      const list = await getBalancesBinance(apiKey, secret);
+      const list = await getBalancesBinance(apiKey, secret, testnet);
       const raw = (Array.isArray(list) ? list : [])
         .map(b => ({
           asset: String(b.currency || ''),

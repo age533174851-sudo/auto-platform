@@ -19,7 +19,7 @@ import {
   Wallet,
   Stethoscope, Settings, CreditCard, Presentation, Shield, LayoutGrid,
   MoreHorizontal, X as XIcon, TriangleAlert,
-  User2, Link2, ShieldCheck, LogOut, Download,
+  User2, Link2, ShieldCheck, LogOut, Download, MonitorSmartphone,
 } from 'lucide-react';
 
 // lucide-react 아이콘 타입
@@ -190,6 +190,7 @@ const BTABS: { id: string; label: string; Icon: IconComp }[] = [
   {id:'season',   label:'시즌전략', Icon: Sprout},
 ];
 const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
+  {id:'terminal',     label:'Pro 터미널', Icon: MonitorSmartphone, core: true},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
   {id:'backtest',     label:'백테스트',   Icon: FlaskConical, core: true},
@@ -408,7 +409,12 @@ export default function App() {
   const [pnlPrefill,setPnlPrefill]=useState<any>(null);
   // 로그인 필요 목적지 (거래소 연결·실전매매 관련). 비로그인 시 즉시 로그인 모달 → 성공 후 자동 이동.
   const LOGIN_REQUIRED_ROUTES=new Set(['accounts','exchange_connect','hub_accounts','manual_accounts']);
+  // 이 앱 밖의 별도 라우트. setTab으로는 갈 수 없다 —
+  // 여기 없으면 메뉴에 항목이 보여도 눌렀을 때 아무 일도 일어나지 않는다.
+  const EXTERNAL_ROUTES:Record<string,string>={ terminal:'/terminal' };
   const nav=useCallback((id:string)=>{
+    const ext=EXTERNAL_ROUTES[id];
+    if(ext){ setShowMore(false); if(typeof window!=='undefined') window.location.href=ext; return; }
     if(LOGIN_REQUIRED_ROUTES.has(id) && !authUser){
       setLoginReason('거래소 연결과 실전 매매는 로그인이 필요해요');
       pendingAction.current=()=>{setTab(id);setShowMore(false);};
@@ -811,7 +817,7 @@ export default function App() {
                 <div style={{display:'flex',flexDirection:'column',gap:4}}>
                   {(()=>{
                     const mGroups:{title:string;ids:string[]}[]=[
-                      {title:'거래',ids:['strategies','autobot','fear_dca','paper','season']},
+                      {title:'거래',ids:['terminal','strategies','autobot','fear_dca','paper','season']},
                       {title:'분석',ids:['backtest','scanner','seasonality','review','briefing','news','calendar','analysis','pine_guide']},
                       {title:'자산',ids:['portfolio','ai_portfolio','growth','dividends','accounts','manual_accounts']},
                       {title:'관리',ids:['risk_settings','history','alerts','safety','diagnostics']},

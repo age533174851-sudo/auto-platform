@@ -79,12 +79,12 @@ export async function GET(req: NextRequest) {
 
       try {
         const bn = await import('@/lib/exchanges/binance');
-        const balances = await bn.getBalancesBinance(apiKey, secret);
+        const balances = await bn.getBalancesBinance(apiKey, secret, testnet);
         const hit = (Array.isArray(balances) ? balances : [])
           .find(b => String(b.currency).toUpperCase() === base);
         spotQty = hit ? (Number(hit.free) || 0) + (Number(hit.locked) || 0) : 0;
 
-        const raw = await bn.getSpotTrades(apiKey, secret, symbol, 500);
+        const raw = await bn.getSpotTrades(apiKey, secret, symbol, 500, testnet);
         spotAvgPrice = computeCostBasis(
           raw.map((t: any) => ({
             time: Number(t.time) || 0,

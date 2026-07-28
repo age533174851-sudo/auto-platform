@@ -105,6 +105,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'decrypt_failed', message: 'API 시크릿 복호화 실패' }, { status: 500 });
   }
   const apiKey = conn.api_key || '';
+  const testnet = conn.is_testnet === true;
   if (!apiKey || !secret) {
     return NextResponse.json({ error: 'missing_credentials' }, { status: 400 });
   }
@@ -119,7 +120,7 @@ export async function POST(req: NextRequest) {
       if (typeof quantity === 'number' && quantity > 0) {
         try {
           const { getSpotSymbolFilters, roundSpotQty } = await import('@/lib/exchanges/binance');
-          const f = await getSpotSymbolFilters(symbol);
+          const f = await getSpotSymbolFilters(symbol, testnet);
           if (f) {
             qty = roundSpotQty(quantity, f.stepSize);
             if (qty < f.minQty) {
@@ -130,7 +131,7 @@ export async function POST(req: NextRequest) {
       }
       result = await placeOrderBinance(apiKey, secret, {
         symbol, side, type,
-        quantity: qty, quoteOrderQty: side === 'BUY' && type === 'MARKET' ? amount : undefined, price,
+        quantity: qty, quoteOrderQty: side === 'BUY' && type === 'MARKET' ? amount : undefined, price, testnet,
       });
     } else if (exchange === 'gate') {
       result = await placeOrderGate(apiKey, secret, {

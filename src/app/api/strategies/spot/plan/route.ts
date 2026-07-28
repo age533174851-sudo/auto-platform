@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
   if (connectionId) {
     try {
       const { data: conn } = await (sb.from('exchange_connections') as any)
-        .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+        .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
         .eq('id', connectionId).eq('user_id', uid).maybeSingle();
       if (conn && !conn.has_withdrawal) {
         const { decryptSecret } = await import('@/lib/exchanges/crypto');
@@ -72,13 +72,13 @@ export async function POST(req: NextRequest) {
         const secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || '');
         const base = symbol.replace(/USDT$|BUSD$|USDC$/, '');
 
-        const balances = await bn.getBalancesBinance(conn.api_key || '', secret);
+        const balances = await bn.getBalancesBinance(conn.api_key || '', secret, conn.is_testnet === true);
         const hit = (Array.isArray(balances) ? balances : [])
           .find(b => String(b.currency).toUpperCase() === base);
         // 미체결에 묶인 물량은 팔 수 없다. free만 센다.
         heldQty = hit ? Number(hit.free) || 0 : 0;
 
-        const raw = await bn.getSpotTrades(conn.api_key || '', secret, symbol, 500);
+        const raw = await bn.getSpotTrades(conn.api_key || '', secret, symbol, 500, conn.is_testnet === true);
         avgPrice = computeCostBasis(
           raw
             .map((t: any) => ({

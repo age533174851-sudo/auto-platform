@@ -82,7 +82,7 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
 
   // ── 연결 소유권 ──
   const { data: conn } = await (sb.from('exchange_connections') as any)
-    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', args.connectionId).eq('user_id', args.userId).maybeSingle();
 
   if (!conn) return bad('connection_not_found', '거래소 연결을 찾을 수 없거나 본인의 연결이 아닙니다');
@@ -96,6 +96,9 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   const { decryptSecret } = await import('./crypto');
   const bn = await import('./binance');
   const apiKey = conn.api_key || '';
+  // 이 한 줄이 모든 호출의 목적지를 정한다. 조회·필터·주문이 같은 값을 써야
+  // 한다 — 잔고는 테스트넷에서 읽고 주문은 실전으로 나가면 최악이다.
+  const testnet = conn.is_testnet === true;
   let secret: string;
   try { secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''); }
   catch { return bad('decrypt_failed', 'API 키를 복호화하지 못했습니다'); }
@@ -107,7 +110,7 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   if (side === 'SELL') {
     const base = symbol.replace(/USDT$|BUSD$|USDC$/, '');
     try {
-      const balances = await bn.getBalancesBinance(apiKey, secret);
+      const balances = await bn.getBalancesBinance(apiKey, secret, testnet);
       const hit = (Array.isArray(balances) ? balances : [])
         .find(b => String(b.currency).toUpperCase() === base);
       // 미체결에 묶인 물량(locked)은 팔 수 없다. free만 센다.
@@ -126,7 +129,7 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   let qty = quantity;
   if (!byQuote && qty != null) {
     try {
-      const f = await bn.getSpotSymbolFilters(symbol);
+      const f = await bn.getSpotSymbolFilters(symbol, testnet);
       if (f) {
         qty = bn.roundSpotQty(qty, f.stepSize);
         if (qty < f.minQty) {
@@ -150,7 +153,8 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
     user_id: args.userId,
     connection_id: args.connectionId,
     exchange: 'binance',
-    mode: 'LIVE',
+    // 테스트넷 주문을 LIVE로 적으면 성과 집계·손실 한도가 가짜 체결을 실전으로 센다.
+    mode: testnet ? 'TESTNET' : 'LIVE',
     symbol, side, order_type: type,
     quantity: byQuote ? 0 : (qty as number),
     price: type === 'LIMIT' ? price : null,
@@ -190,6 +194,10 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
       quantity: byQuote ? undefined : (qty as number),
       quoteOrderQty: byQuote ? (quoteOrderQty as number) : undefined,
       price: type === 'LIMIT' ? (price as number) : undefined,
+      // 이 값을 거래소에 보내지 않으면 UNKNOWN 복구가 주문을 찾을 수 없다.
+      // 지금까지 DB에만 적고 거래소에는 안 보내고 있었다.
+      clientOrderId,
+      testnet,
     });
   } catch (e: any) {
     // 응답을 못 받았다. 나갔는지 안 나갔는지 모른다 — 재시도하지 않는다.

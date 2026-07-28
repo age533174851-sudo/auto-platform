@@ -367,7 +367,7 @@ export async function GET(req: NextRequest) {
 
     let balances;
     try {
-      balances = await getExchangeBalances(conn.exchange_id ?? conn.exchange, apiKey, secret, pass);
+      balances = await getExchangeBalances(conn.exchange_id ?? conn.exchange, apiKey, secret, pass, conn.is_testnet === true);
     } catch (e) {
       return NextResponse.json({
         error: e instanceof Error ? e.message : '잔고 조회 실패',

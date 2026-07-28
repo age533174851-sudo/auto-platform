@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
     const { decryptSecret } = await import('@/lib/exchanges/crypto');
     const { getBalancesBinance } = await import('@/lib/exchanges/binance');
     const secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || '');
-    const balances = await getBalancesBinance(conn.api_key || '', secret);
+    const balances = await getBalancesBinance(conn.api_key || '', secret, conn.is_testnet === true);
 
     // 0인 자산은 빼되, 0이 아닌 것은 전부 돌려준다. 임의로 자르면
     // 사용자가 가진 것이 화면에서 사라진다.

@@ -21,7 +21,7 @@ async function creds(req: NextRequest) {
   if (!connectionId) return { err: NextResponse.json({ error: 'missing_connectionId' }, { status: 400 }) };
 
   const { data: conn } = await (sb.from('exchange_connections') as any)
-    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
 
   if (!conn) return { err: NextResponse.json({ error: 'connection_not_found' }, { status: 404 }) };
@@ -37,7 +37,7 @@ async function creds(req: NextRequest) {
   try { secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''); }
   catch { return { err: NextResponse.json({ error: 'decrypt_failed' }, { status: 500 }) }; }
 
-  return { key: conn.api_key || '', secret };
+  return { key: conn.api_key || '', secret, testnet: conn.is_testnet === true };
 }
 
 export async function GET(req: NextRequest) {
@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
   const symbol = req.nextUrl.searchParams.get('symbol') || undefined;
   try {
     const { getSpotOpenOrders } = await import('@/lib/exchanges/binance');
-    const orders = await getSpotOpenOrders(c.key!, c.secret!, symbol);
+    const orders = await getSpotOpenOrders(c.key!, c.secret!, symbol, c.testnet);
     return NextResponse.json({
       ok: true, marketType: 'SPOT',
       orders: orders.map((o: any) => ({
@@ -78,7 +78,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   const { cancelSpotOrder } = await import('@/lib/exchanges/binance');
-  const r = await cancelSpotOrder(c.key!, c.secret!, symbol, orderId);
+  const r = await cancelSpotOrder(c.key!, c.secret!, symbol, orderId, c.testnet);
   return NextResponse.json(
     { ok: r.success, marketType: 'SPOT', message: r.message },
     { status: r.success ? 200 : 400, headers: { 'Cache-Control': 'no-store' } });

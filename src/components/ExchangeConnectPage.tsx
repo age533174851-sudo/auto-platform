@@ -440,8 +440,8 @@ export default function ExchangeConnectPage() {
               </div>
               <div style={{ color:T.muted, fontSize:9, marginTop:4, lineHeight:1.5 }}>
                 {isTestnet
-                  ? '테스트넷(데모): demo-fapi.binance.com · developers.binance.com 데모 모드에서 발급한 키를 사용하세요. 실제 돈이 들지 않습니다.'
-                  : '⚠️ 실전: fapi.binance.com 실계정 키. 실제 자금이 사용됩니다.'}
+                  ? '테스트넷은 두 개입니다 — 현물: testnet.binance.vision · 선물: demo-fapi.binance.com(developers.binance.com 데모 모드). 키도 각각 따로 발급됩니다. 저장할 때 어느 쪽이 인증됐는지 알려드립니다. 실제 돈이 들지 않습니다.'
+                  : '⚠️ 실전: api.binance.com(현물) · fapi.binance.com(선물) 실계정 키. 실제 자금이 사용됩니다.'}
               </div>
             </div>
           )}
