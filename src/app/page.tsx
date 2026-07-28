@@ -958,7 +958,14 @@ export default function App() {
                       {title:'기타',ids:['academy','posters','social','settings']},
                     ];
                     return mGroups.map((g,gi)=>{
-                      const items=g.ids.map(id=>MTABS.find(t=>t.id===id)).filter(Boolean).filter((t2:any)=>!simpleMode||t2.core);
+                      // 관리자 전용 항목은 목록에서 뺀다. 서버가 막으니
+                      // 보안은 이미 되어 있고, 여기서 빼는 건 눌러도 거부만
+                      // 당하는 항목을 안 보여주기 위해서다.
+                      const ADMIN_ONLY=new Set(['ai_usage']);
+                      const items=g.ids
+                        .filter(id=>!ADMIN_ONLY.has(id)||isAdminUser)
+                        .map(id=>MTABS.find(t=>t.id===id)).filter(Boolean)
+                        .filter((t2:any)=>!simpleMode||t2.core);
                       if(items.length===0) return null;
                       return (
                         <div key={gi}>

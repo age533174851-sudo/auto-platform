@@ -44,6 +44,7 @@ export default function AiUsagePage() {
   const [d, setD] = useState<UsageData | null>(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [denied, setDenied] = useState(false);
   const [days, setDays] = useState(1);
 
   const load = useCallback(async () => {
@@ -62,13 +63,34 @@ export default function AiUsagePage() {
         headers: auth ? { Authorization: auth } : {},
       });
       const j = await r.json();
+      if (r.status === 403) {
+        // 권한 없음을 '조회 실패'로 뭉개지 않는다. 사용자가 뭘 해야
+        // 하는지가 완전히 다르다 — 다시 시도할 일이 아니라 계정 문제다.
+        setDenied(true); setErr(''); setD(null); return;
+      }
       if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `조회 실패 (${r.status})`); setD(null); return; }
+      setDenied(false);
       setErr(''); setD(j);
     } catch (e: any) { setErr(`조회 실패: ${e?.message || e}`); }
     finally { setBusy(false); }
   }, [days]);
 
   useEffect(() => { load(); }, [load]);
+
+  if (denied) {
+    return (
+      <div style={card({ textAlign: 'center', padding: '40px 24px' })}>
+        <Cpu size={26} color={T.muted}/>
+        <div style={{ color: T.txt, fontSize: 15, fontWeight: 700, margin: '12px 0 6px' }}>
+          관리자 전용 화면입니다
+        </div>
+        <div style={{ color: T.muted, fontSize: 12, lineHeight: 1.6 }}>
+          여기에는 전체 사용자의 AI 호출량과 비용이 나옵니다.
+          권한이 필요하면 계정 관리자에게 문의하세요.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

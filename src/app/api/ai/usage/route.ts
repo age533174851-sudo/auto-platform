@@ -8,7 +8,8 @@
 // 나갔나". 세 개 다 숫자 하나로는 답이 안 되고, 특히 세 번째는 틀린
 // 숫자를 보여주는 게 안 보여주는 것보다 나쁘다.
 import { NextRequest, NextResponse } from 'next/server';
-import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+import { getSupabaseAdmin } from '@/lib/supabase/server';
+import { requireAdmin } from '@/lib/auth/isAdmin';
 import { availableProviders, type AiProvider } from '@/lib/ai/providers';
 import { sumCost, estimateCost, PRICING_AS_OF } from '@/lib/ai/pricing';
 
@@ -28,9 +29,11 @@ function median(xs: number[]): number | null {
 }
 
 export async function GET(req: NextRequest) {
-  const uid = await resolveUserId(
-    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
-  if (!uid) return NextResponse.json({ error: 'auth_required' }, { status: 401 });
+  // 관리자만. 이 화면은 **전체 사용자의** 호출량과 비용을 보여준다 —
+  // 다른 사람이 얼마나 썼는지, 어떤 오류가 났는지가 그대로 드러난다.
+  // 화면에서 메뉴를 숨기는 것으로는 못 막는다. API를 직접 부르면 그만이다.
+  const guard = await requireAdmin(req.headers.get('authorization'));
+  if (guard instanceof Response) return guard;
 
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ error: 'supabase_not_configured' }, { status: 503 });
