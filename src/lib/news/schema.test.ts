@@ -12,7 +12,7 @@ import {
   parseDirection, parseHorizon, parseConfidence,
   parseSourceUrl, parsePublishedAt,
   validateAnalysis, extractJson, contentHash, toLegacyAnalysis, newsCacheKey,
-  DIRECTION_KO,
+  isVerifiableNewsItem, DIRECTION_KO,
 } from './schema';
 
 // 검증을 통과하는 최소 입력 — 각 테스트는 여기서 한 군데씩만 망가뜨린다
@@ -366,6 +366,55 @@ export function runNewsSchemaTests() {
     for (const input of [{}, { url: 'https://a.com/x' }, { title: '가나다' }]) {
       const h = contentHash(input);
       assert(/^[0-9a-f]{16}$/.test(h), `형식이 다르다: ${h}`);
+    }
+  });
+
+  console.log('[뉴스 스키마 — 분석 대상 판정]');
+
+  test('주소와 시각이 모두 있어야 분석한다', () => {
+    assert(isVerifiableNewsItem({ url: 'https://reuters.com/a', publishedAt: '2026-07-20T09:00:00Z' }));
+    assert(isVerifiableNewsItem({ url: 'https://reuters.com/a', time: '2026-07-20T09:00:00Z' }));
+  });
+
+  test('주소가 없거나 가짜면 분석하지 않는다', () => {
+    // 지어낸 방향으로 자리를 채우느니 빈 자리로 둔다
+    assert(!isVerifiableNewsItem({ url: '#', publishedAt: '2026-07-20T09:00:00Z' }));
+    assert(!isVerifiableNewsItem({ url: '', publishedAt: '2026-07-20T09:00:00Z' }));
+    assert(!isVerifiableNewsItem({ publishedAt: '2026-07-20T09:00:00Z' }));
+    assert(!isVerifiableNewsItem({ url: 'javascript:alert(1)', publishedAt: '2026-07-20T09:00:00Z' }));
+  });
+
+  test('시각을 읽을 수 없으면 분석하지 않는다', () => {
+    assert(!isVerifiableNewsItem({ url: 'https://reuters.com/a', time: '5분 전' }));
+    assert(!isVerifiableNewsItem({ url: 'https://reuters.com/a' }));
+  });
+
+  test('publishedAt이 time보다 우선 — time만 깨져도 분석한다', () => {
+    // 이 앱의 뉴스 항목은 publishedAt은 ISO, time은 '5분 전'을 담는다
+    assert(isVerifiableNewsItem({
+      url: 'https://reuters.com/a',
+      publishedAt: '2026-07-20T09:00:00Z',
+      time: '5분 전',
+    }));
+  });
+
+  test('통과한 항목은 validateAnalysis도 통과시킨다 — 두 기준이 어긋나면 무한 요청이 된다', () => {
+    // 클라이언트는 isVerifiableNewsItem으로 보낼지 정하고, 서버는
+    // validateAnalysis로 통과 여부를 정한다. 앞은 통과인데 뒤가 떨어뜨리면
+    // 화면은 영영 오지 않는 결과를 계속 다시 요청한다.
+    const items = [
+      { url: 'https://reuters.com/a', publishedAt: '2026-07-20T09:00:00Z' },
+      { url: 'http://coindesk.com/x', time: Date.UTC(2026, 6, 20) },
+      { url: 'https://a.co.kr/b?utm=1', publishedAt: Date.UTC(2026, 6, 19) / 1000 },
+    ];
+    for (const it of items) {
+      assert(isVerifiableNewsItem(it), `보낼 수 있다고 판정: ${it.url}`);
+      const r = validateAnalysis(OK_RAW, {
+        ...OK_CTX,
+        sourceUrl: it.url,
+        publishedAt: (it as any).publishedAt ?? (it as any).time,
+      });
+      assert(r.ok, `그런데 서버가 떨어뜨렸다 (${it.url}): ${r.errors.join(', ')}`);
     }
   });
 

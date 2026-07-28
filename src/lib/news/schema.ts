@@ -164,6 +164,25 @@ export function parsePublishedAt(raw: unknown, nowMs?: number): string | null {
 }
 
 /**
+ * 이 기사를 분석해서 보여줘도 되는가.
+ *
+ * 원문 주소와 발행 시각을 확인할 수 있어야 한다. 확인할 수 없으면 분석하지
+ * 않고, 대신 채워 넣지도 않는다 — 독자가 원문으로 가서 맞는지 볼 수 없는
+ * 방향 표시는 근거가 아니라 그냥 화면에 뜬 글자다.
+ *
+ * 서버와 클라이언트가 같은 답을 내야 한다. 한쪽만 분석을 건너뛰면 다른 쪽은
+ * 영영 오지 않는 결과를 기다리며 계속 다시 요청한다.
+ */
+export function isVerifiableNewsItem(n: {
+  url?: string;
+  publishedAt?: string | number;
+  time?: string | number;
+}): boolean {
+  return parseSourceUrl(n.url) !== null
+      && parsePublishedAt(n.publishedAt ?? n.time) !== null;
+}
+
+/**
  * AI 응답 객체를 검증한다.
  *
  * 통과 조건은 느슨하지 않다. 원문 URL과 발행 시각이 없으면 떨어뜨린다 —

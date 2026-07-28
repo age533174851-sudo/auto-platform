@@ -11,7 +11,7 @@ import { formatNewsDate } from '@/lib/format';
 import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
-import { analyzeNewsBatch, loadCachedAnalysis, newsCacheKey } from '@/lib/news/analyzer';
+import { analyzeNewsBatch, loadCachedAnalysis, newsCacheKey, isVerifiableNewsItem } from '@/lib/news/analyzer';
 import type { AnalyzedNews, NewsAnalysis, NewsPrediction, RawNews } from '@/lib/news/types';
 import { PREDICTION_LABEL } from '@/lib/news/types';
 import { calculateImpact, impactLevel, getSourceInfo, TIER_COLOR, TIER_LABEL } from '@/lib/news/sources';
@@ -34,6 +34,12 @@ const CAT_TO_API: Record<string, string> = {
 // "안 움직인다"가 화면에서 같은 말이 된다 — 구분하려고 만든 값이다.
 const predColor = (p: NewsPrediction): string =>
   p === 'up' ? T.grn : p === 'down' ? T.red : p === 'unknown' ? T.sub : T.ylw;
+
+// 이 기사에 AI 분석을 붙여도 되는가.
+// 원문 주소와 발행 시각을 확인할 수 없으면 분석하지 않고, 지어낸 방향으로
+// 자리를 채우지도 않는다. 서버도 같은 함수로 판단한다.
+const analyzable = (n: { url?: string; publishedAt?: string; time?: string | number }) =>
+  isVerifiableNewsItem(n);
 
 // 기사 발행 시각 → ms. 읽을 수 없으면 undefined.
 // time 필드에는 '5분 전' 같은 표시용 문자열이 들어오기도 해서 publishedAt을 먼저 본다.
@@ -161,8 +167,11 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       setNews(normalized);
 
       // 캐시에서 즉시 채울 수 있는 것
+      // 확인 불가 기사는 캐시에 남아 있어도 꺼내지 않는다. 규칙이 바뀌기 전에
+      // 저장된 분석이 그대로 되살아나면 바꾼 의미가 없다.
       const fromCache: Record<string, NewsAnalysis> = {};
       for (const n of normalized) {
+        if (!analyzable(n)) continue;
         const c = loadCachedAnalysis(newsCacheKey(n));
         if (c) fromCache[n.id || ''] = c;
       }
@@ -233,9 +242,11 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   // 화면에 보이는 상위 5개 자동 분석
   useEffect(() => {
     if (filtered.length === 0) return;
+    // 확인 불가 기사는 후보에서 뺀다. 넣어두면 결과가 영영 안 오는데
+    // analyses[id]가 비어 있으니 매 렌더마다 다시 요청한다.
     const needAnalyze = filtered
       .slice(0, 5)
-      .filter(n => n.id && !analyses[n.id] && !analyzingIds.has(n.id));
+      .filter(n => n.id && !analyses[n.id] && !analyzingIds.has(n.id) && analyzable(n));
     if (needAnalyze.length === 0) return;
 
     const ids = needAnalyze.map(n => n.id!).filter(Boolean);
@@ -252,7 +263,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         summary:  n.summary || n.content || '',
         tickers:  Array.isArray(n.tickers) ? n.tickers : [],
         category: n.category,
-        // 서버가 AI 분석을 통과시킬지 판단하는 근거. 빼먹으면 전부 mock으로 떨어진다
+        // 서버가 분석 여부를 판단하는 근거. 빼먹으면 전부 확인 불가로 떨어진다
         url:         n.url,
         publishedAt: newsTimestamp(n),
       })));
@@ -299,6 +310,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   useEffect(() => {
     if (!selected || !selected.id) return;
     if (analyses[selected.id] || analyzingIds.has(selected.id)) return;
+    if (!analyzable(selected)) return;   // 결과가 오지 않는다 — 요청하면 계속 반복된다
     const id = selected.id;
     setAnalyzingIds(p => { const n = new Set(p); n.add(id); return n; });
     analyzeNewsBatch([{
@@ -332,6 +344,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   if (selected) {
     const an = selected.id ? analyses[selected.id] : undefined;
     const isAnalyzing = selected.id ? analyzingIds.has(selected.id) : false;
+    const canAnalyze = analyzable(selected);
     return (
       <div style={PAGE_STYLE}>
         <button onClick={() => setSelected(null)}
@@ -381,14 +394,25 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
               <div style={F.muted}>
                 {an?.source === 'openai' ? 'OpenAI 분석' :
                  an?.source === 'cache'  ? '캐시된 분석' :
-                 an?.source === 'mock'   ? '키워드 기반 분석' : '분석 중...'}
+                 an?.source === 'mock'   ? '키워드 기반 분석' :
+                 canAnalyze              ? '분석 중...' : '분석 안 함'}
               </div>
             </div>
             {isAnalyzing && <RefreshCw size={14} strokeWidth={IC_STROKE} color={T.acl}
               style={{ animation: 'spin 1s linear infinite' }} />}
           </div>
 
-          {!an && !isAnalyzing && (
+          {/* 왜 분석이 없는지 말한다. 그냥 비워두면 "아직 로딩 중"으로 읽힌다. */}
+          {!an && !isAnalyzing && !canAnalyze && (
+            <div style={{ ...F.body, lineHeight: 1.6, color: T.sub }}>
+              원문 출처를 확인할 수 없어 분석하지 않았습니다.
+              <div style={{ ...F.muted, marginTop: 4 }}>
+                확인할 수 없는 기사에 방향을 붙이면 근거처럼 보이지만 근거가 아닙니다.
+              </div>
+            </div>
+          )}
+
+          {!an && !isAnalyzing && canAnalyze && (
             <div style={F.muted}>분석을 사용할 수 없습니다.</div>
           )}
 
@@ -584,6 +608,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
             const id = n.id || '';
             const an = analyses[id];
             const isAnalyzing = analyzingIds.has(id);
+            const canAnalyze = analyzable(n);
             const _lang = (()=>{ try { return localStorage.getItem('tg_lang')||'ko'; } catch { return 'ko'; } })();
             const _tc = transCache[`${id}_${_lang}`];
             const displayTitle = an?.titleKo || _tc?.title || n.title;
@@ -698,6 +723,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                           }}>
                             {a.direction === 'up' ? <TrendingUp size={9} strokeWidth={IC_STROKE} color={T.grn} />
                               : a.direction === 'down' ? <TrendingDown size={9} strokeWidth={IC_STROKE} color={T.red} />
+                              : a.direction === 'unknown' ? <HelpCircle size={9} strokeWidth={IC_STROKE} color={T.sub} />
                               : <Minus size={9} strokeWidth={IC_STROKE} color={T.ylw} />}
                             {a.symbol}
                           </span>
@@ -708,9 +734,15 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                         <RefreshCw size={11} strokeWidth={IC_STROKE} style={{ animation: 'spin 1s linear infinite' }} />
                         AI 분석 중...
                       </div>
-                    ) : (
+                    ) : canAnalyze ? (
                       <div style={{ ...F.muted, fontSize: 10 }}>
                         탭하면 AI 분석을 시작합니다
+                      </div>
+                    ) : (
+                      // 탭해도 분석되지 않는다. 안내를 그대로 두면 거짓말이 된다.
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: T.muted, fontSize: 10, fontWeight: 700 }}>
+                        <AlertCircle size={11} strokeWidth={IC_STROKE} />
+                        출처 확인 불가 — 분석 안 함
                       </div>
                     )}
 

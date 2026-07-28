@@ -78,8 +78,11 @@ export interface AnalyzeRequest {
 export interface AnalyzeResponse {
   results: Record<string, NewsAnalysis>; // id → analysis
   source: 'openai' | 'mock' | 'mixed';
-  /** 원문 출처를 확인할 수 없어 AI에 보내지 않은 건수. 조용히 줄어들면 알 수 없다 */
-  unverifiable?: number;
+  /**
+   * 원문 출처를 확인할 수 없어 분석하지 않은 항목. results에 자리가 없다.
+   * 빈 자리를 만들어 놓고 말해주지 않으면 호출자는 계속 다시 물어본다.
+   */
+  unverifiableIds?: string[];
 }
 
 // UI에서 쓰는 라벨 / 색상 헬퍼

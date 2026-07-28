@@ -17,7 +17,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { mockAnalyze } from '@/lib/news/mockAnalyzer';
 import {
   ANALYSIS_JSON_INSTRUCTION, extractJson, validateAnalysis, toLegacyAnalysis,
-  parseSourceUrl, parsePublishedAt,
+  isVerifiableNewsItem,
 } from '@/lib/news/schema';
 import type { AnalyzeRequest, AnalyzeResponse, NewsAnalysis } from '@/lib/news/types';
 
@@ -88,16 +88,6 @@ async function analyzeOne(item: Item, apiKey: string): Promise<NewsAnalysis | nu
   return toLegacyAnalysis(v.value!);
 }
 
-/**
- * 출처를 확인할 수 없는 기사는 AI에 보내지 않는다.
- *
- * 보내봐야 검증에서 떨어진다 — 원문 없는 분석은 저장하지 않기로 했으니까.
- * 미리 걸러야 버릴 응답에 돈을 쓰지 않는다.
- */
-function isVerifiable(item: Item): boolean {
-  return parseSourceUrl(item.url) !== null && parsePublishedAt(item.publishedAt) !== null;
-}
-
 export async function POST(req: NextRequest) {
   let body: AnalyzeRequest;
   try {
@@ -119,32 +109,42 @@ export async function POST(req: NextRequest) {
   let anyOpenAI = false;
   let anyMock   = false;
 
-  // 출처를 확인할 수 없는 건 AI에 보내지 않는다 — 어차피 검증에서 떨어진다
-  const askable = useOpenAI ? items.filter(isVerifiable) : [];
-  const unverifiable = useOpenAI ? items.length - askable.length : 0;
+  // 출처를 확인할 수 없는 기사는 아무것도 돌려주지 않는다.
+  //
+  // 예전에는 여기서 mock(키워드 기반)으로 채웠다. 그런데 mock은 방향을
+  // 지어내고 화면에서는 AI 분석과 똑같이 생겼다. 원문으로 가서 맞는지
+  // 확인할 수도 없으니, 그건 분석이 아니라 그냥 화면에 뜬 글자다.
+  // 빈 자리로 두는 게 지어낸 방향보다 낫다.
+  const verifiable   = items.filter(it => isVerifiableNewsItem(it));
+  const unverifiableIds = items.filter(it => !isVerifiableNewsItem(it)).map(it => it.id);
 
-  if (askable.length > 0) {
+  if (useOpenAI && verifiable.length > 0) {
     // 병렬 호출 (timeout 각 20초)
-    const settled = await Promise.allSettled(askable.map(it => analyzeOne(it, apiKey)));
-    for (let i = 0; i < askable.length; i++) {
+    const settled = await Promise.allSettled(verifiable.map(it => analyzeOne(it, apiKey)));
+    for (let i = 0; i < verifiable.length; i++) {
       const s = settled[i];
       if (s.status === 'fulfilled' && s.value) {
-        results[askable[i].id] = s.value;
+        results[verifiable[i].id] = s.value;
         anyOpenAI = true;
       }
     }
   }
 
-  // AI가 못 채운 자리는 mock으로. mock은 source:'mock'으로 표시되어 나가므로
-  // 화면에서 AI 분석과 섞이지 않는다.
-  for (const it of items) {
+  // AI가 못 채운 자리는 mock으로 — 출처가 확인된 기사에 한해서.
+  // 여기의 mock은 "확인은 되는데 분석에 실패했다"는 뜻이고, source:'mock'으로
+  // 표시되어 나간다.
+  for (const it of verifiable) {
     if (results[it.id]) continue;
     results[it.id] = mockAnalyze(it);
     anyMock = true;
   }
 
+  if (unverifiableIds.length > 0) {
+    console.info(`[news/analyze] 출처 확인 불가로 분석하지 않음: ${unverifiableIds.join(', ')}`);
+  }
+
   const source: AnalyzeResponse['source'] = anyOpenAI && anyMock ? 'mixed' : anyOpenAI ? 'openai' : 'mock';
-  return NextResponse.json({ results, source, unverifiable } as AnalyzeResponse, {
+  return NextResponse.json({ results, source, unverifiableIds } as AnalyzeResponse, {
     headers: { 'Cache-Control': 'no-store' },
   });
 }
