@@ -82,8 +82,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
   // 코인일 때만 붙인다. 호가창 탭이 닫혀 있으면 연결하지 않는다 —
   // 보이지도 않는 소켓을 열어두면 데이터와 배터리를 계속 쓴다.
   const isCryptoSel = sel?.t === 'coin';
+  // sel.sym은 'BTC/USDT'처럼 슬래시가 섞여 온다. 영숫자만 남기지 않으면
+  // 'btc/usdt@depth20@100ms'라는 없는 스트림에 붙게 되는데, Binance는 연결을
+  // 받아주고 데이터를 보내지 않아서 "연결됨인데 호가가 비어 있는" 상태가 된다.
   const streamSymbol = isCryptoSel
-    ? (sel.sym || sel.id).toUpperCase().replace(/USDT$/,'') + 'USDT'
+    ? (sel.sym || sel.id).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/USDT$/, '') + 'USDT'
     : '';
   const stream = useBinanceStream(streamSymbol, isCryptoSel && showOrderbook);
   const [orders,setOrders]=useState<Order[]>([]);
@@ -910,8 +913,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                     1e-9,
                     ...showAsks.map(l=>l.qty), ...showBids.map(l=>l.qty),
                   );
-                  const px = stream.lastPrice ?? sel.p ?? 0;
-                  const chg = stream.changePct ?? sel.c ?? 0;
+                  // 호가는 USDT 단위다. lastPrice가 아직 없다고 원화 가격(sel.p)으로
+                  // 폴백하면 호가는 63,654인데 중앙만 94,061,179가 되어 단위가 섞인다.
+                  // 스트림 값이 올 때까지는 최우선 호가로 중앙값을 채운다.
+                  const midFromBook = showBids[0]?.price ?? showAsks[showAsks.length-1]?.price ?? null;
+                  const px = stream.lastPrice ?? midFromBook;
+                  const chg = stream.changePct;
                   const pressure = buyPressure(stream.trades);
 
                   const Row = ({lv,buy}:{lv:{price:number;qty:number};buy:boolean})=>(
@@ -957,8 +964,13 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                         <>
                           {showAsks.map((l,i)=><Row key={'a'+i} lv={l} buy={false}/>)}
                           <div style={{padding:'4px 6px',textAlign:'center',borderTop:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,margin:'1px 0'}}>
-                            <div style={{color:chg>=0?T.grn:T.red,fontWeight:900,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{fmt(px)}</div>
-                            <div style={{color:T.muted,fontSize:8}}>{chg>=0?'▲':'▼'}{Math.abs(chg).toFixed(2)}%</div>
+                            <div style={{color:(chg ?? 0)>=0?T.grn:T.red,fontWeight:900,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+                              {px != null ? fmt(px) : '—'}
+                              <span style={{color:T.muted,fontSize:8,fontWeight:600,marginLeft:3}}>USDT</span>
+                            </div>
+                            <div style={{color:T.muted,fontSize:8}}>
+                              {chg != null ? `${chg>=0?'▲':'▼'}${Math.abs(chg).toFixed(2)}%` : '변동률 수신 중'}
+                            </div>
                           </div>
                           {showBids.map((l,i)=><Row key={'b'+i} lv={l} buy={true}/>)}
                         </>
