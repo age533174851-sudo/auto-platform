@@ -22,7 +22,7 @@ import {
   Wallet,
   Stethoscope, Settings, CreditCard, Presentation, Shield, LayoutGrid,
   MoreHorizontal, X as XIcon, TriangleAlert,
-  User2, Link2, ShieldCheck, LogOut, Download, Sun, Moon, Clock,
+  User2, Link2, ShieldCheck, LogOut, Download, Sun, Moon, Clock, Cpu,
 } from 'lucide-react';
 
 // lucide-react 아이콘 타입
@@ -66,6 +66,7 @@ const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr
 import { nextStack, topmost, historyDelta } from '@/lib/nav/overlayStack';
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
+const AiUsagePage = dynamic(() => import('@/components/pages/AiUsagePage'),{ ssr: false });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const AIPortfolioPage = dynamic(() => import('@/components/pages/AIPortfolioPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -195,6 +196,7 @@ const BTABS: { id: string; label: string; Icon: IconComp }[] = [
   {id:'season',   label:'시즌전략', Icon: Sprout},
 ];
 const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
+  {id:'ai_usage',     label:'AI 관리센터', Icon: Cpu},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
   {id:'backtest',     label:'백테스트',   Icon: FlaskConical, core: true},
@@ -660,6 +662,7 @@ export default function App() {
         case 'accounts':     return <ExchangeConnectPage/>;
         case 'manual_accounts': return <ManualAccountsPage/>;
         case 'fear_dca':     return <FearDcaPage/>;
+        case 'ai_usage':     return <AiUsagePage/>;
         case 'menu_hub':     return <MenuHubPage onNav={nav}/>;
         case 'pine_guide':   return <PineGuidePage/>;
         case 'seasonality':  return <SeasonalityPage/>;
@@ -951,7 +954,7 @@ export default function App() {
                       {title:'거래',ids:['strategies','autobot','fear_dca','paper','season']},
                       {title:'분석',ids:['backtest','scanner','seasonality','review','briefing','news','calendar','analysis','pine_guide']},
                       {title:'자산',ids:['portfolio','ai_portfolio','growth','dividends','accounts','manual_accounts']},
-                      {title:'관리',ids:['risk_settings','history','alerts','safety','diagnostics']},
+                      {title:'관리',ids:['ai_usage','risk_settings','history','alerts','safety','diagnostics']},
                       {title:'기타',ids:['academy','posters','social','settings']},
                     ];
                     return mGroups.map((g,gi)=>{

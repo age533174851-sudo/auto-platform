@@ -39,6 +39,8 @@ export interface AiCallResult {
   text: string | null;
   inputTokens?: number;
   outputTokens?: number;
+  /** 이 호출에 걸린 시간(ms). 측정 못 하면 없다 — 0이 아니다 */
+  latencyMs?: number;
   /** 안전 분류기가 요청을 거절한 경우 (Anthropic) — 오류가 아니라 정상 응답이다. */
   refused?: boolean;
   error?: string;
@@ -199,12 +201,48 @@ async function callGemini(input: AiCallInput): Promise<AiCallResult> {
 }
 
 // ── 단일 호출 ─────────────────────────────────────────────────
+/**
+ * 호출 하나를 기록한다.
+ *
+ * 기록 실패가 호출 결과를 바꾸지 않는다 — 통계를 못 남겼다고 분석까지
+ * 버릴 이유는 없다. 다만 조용히 넘기므로, 화면이 "기록이 0건"과
+ * "호출이 0건"을 구분할 수 있어야 한다.
+ */
+async function logCall(provider: AiProvider, r: AiCallResult, latencyMs: number) {
+  try {
+    const { getSupabaseAdmin } = await import('@/lib/supabase/server');
+    const sb = getSupabaseAdmin();
+    if (!sb) return;
+    await (sb.from('ai_usage') as any).insert({
+      tier: 'L1_CHEAP',
+      kind: 'news',
+      credits: 0,
+      used_own_key: false,
+      cache_hit: false,
+      input_tokens:  r.inputTokens ?? null,
+      output_tokens: r.outputTokens ?? null,
+      provider,
+      model: r.model,
+      latency_ms: latencyMs,
+      ok: r.ok,
+      // 실패 횟수만 세면 '왜'를 모른다. 키 만료와 한도 초과는 대응이 다르다.
+      error_text: r.ok ? null : String(r.error || '').slice(0, 300),
+    });
+  } catch { /* 기록 실패가 호출 결과를 바꾸지 않는다 */ }
+}
+
 export async function callProvider(provider: AiProvider, input: AiCallInput): Promise<AiCallResult> {
+  const t0 = Date.now();
+  let r: AiCallResult;
   switch (provider) {
-    case 'openai':    return callOpenAI(input);
-    case 'anthropic': return callClaude(input);
-    case 'gemini':    return callGemini(input);
+    case 'openai':    r = await callOpenAI(input); break;
+    case 'anthropic': r = await callClaude(input); break;
+    case 'gemini':    r = await callGemini(input); break;
   }
+  const latencyMs = Date.now() - t0;
+  // 기록을 기다리지 않는다. 통계 때문에 사용자 응답이 늦어지면 안 된다.
+  void logCall(provider, r!, latencyMs);
+  return { ...r!, latencyMs };
 }
 
 /**
