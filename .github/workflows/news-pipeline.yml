@@ -114,3 +114,35 @@ jobs:
             echo "AI 키 또는 테이블 설정 문제 — 위 응답을 확인하세요."
             exit 1
           fi
+
+      # 하루 한 번만 돌리면 충분하다. 30분마다 지울 이유가 없고,
+      # 삭제는 자주 할수록 사고 확률만 는다.
+      - name: 오래된 데이터 정리 (하루 한 번)
+        env:
+          BASE:   ${{ secrets.EXIT_MONITOR_URL }}
+          SECRET: ${{ secrets.NEWS_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          hour=$(date -u +%H)
+          if [ "$hour" != "18" ]; then
+            echo "정리는 UTC 18시대(KST 새벽 3시)에만 돕니다. 지금 ${hour}시 — 건너뜁니다."
+            exit 0
+          fi
+
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' \
+            --max-time 120 \
+            -H "Authorization: Bearer ${SECRET:-}" \
+            "${BASE}/api/cron/cleanup?apply=1")
+
+          echo "HTTP ${code}"
+          cat "$body"
+          echo
+
+          # 정리가 실패해도 워크플로를 실패로 만들지 않는다. 지울 게 없거나
+          # 상한에 걸린 것은 정상이고, 그때마다 빨간 표시가 뜨면 진짜 고장을
+          # 놓친다. 응답은 위에 그대로 남는다.
+          if [ "$code" = "401" ] || [ "$code" = "503" ]; then
+            echo "정리 크론 설정 문제 — 위 응답을 확인하세요."
+            exit 1
+          fi
