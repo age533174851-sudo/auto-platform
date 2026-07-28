@@ -36,9 +36,10 @@ import { runThemeTests } from './src/lib/theme/theme.test';
 import { runPositionViewTests } from './src/lib/markets/positionView.test';
 import { runNewsSchemaTests } from './src/lib/news/schema.test';
 import { runAnalyzeOneTests } from './src/lib/news/analyzeOne.test';
+import { runCollectTests } from './src/lib/news/collect.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
-runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runNewsSchemaTests(); runAnalyzeOneTests();
+runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
