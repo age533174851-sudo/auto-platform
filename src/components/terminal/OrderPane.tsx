@@ -221,6 +221,26 @@ export const OrderBookPanel = memo(function OrderBookPanel({
   );
 });
 
+/** 스테퍼 버튼 — 가격을 한 눈금씩 */
+function Step({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+  return (
+    <button onClick={onClick} style={{
+      width: 32, minHeight: 34, background: 'transparent', border: 'none',
+      color: C.dim, fontSize: 16, lineHeight: 1, cursor: 'pointer', flexShrink: 0,
+    }}>{children}</button>
+  );
+}
+
+/** 라벨 + 값 한 줄 */
+function Kv({ k, v, warn }: { k: string; v: string; warn?: boolean }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+      <span style={{ color: C.faint, fontFamily: 'inherit' }}>{k}</span>
+      <span style={{ color: warn ? C.warn : C.dim, fontWeight: 600 }}>{v}</span>
+    </div>
+  );
+}
+
 // ══ 주문판 ══════════════════════════════════════════════
 //
 // 좁은 칸(dense)에서는 구성을 바꾼다. 줄이는 것이 아니라 빼는 것이다.
@@ -247,6 +267,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     catch { return 5; }
   });
   const [levOpen, setLevOpen] = useState(false);
+  // 청산 전용. 켜면 보유분을 줄이는 주문만 나간다 — 반대로 새 포지션이
+  // 열리는 사고를 막는다.
+  const [reduceOnly, setReduceOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
@@ -284,6 +307,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const notional = (Number(qty) || 0) * (Number(price) || mid || 0);
   const margin = leverage > 0 ? notional / leverage : 0;
   const liqPct = roughLiqDistancePct(leverage);
+  // 이 잔고와 배율로 열 수 있는 최대 명목가. 잔고를 모르면 null이다 —
+  // 0으로 적으면 '주문 불가'로 읽히고, 큰 수를 임의로 넣으면 더 나쁘다.
+  const maxOpenUsd = balanceUsd == null ? null : balanceUsd * leverage;
   const liqTone = liqPct < 1 ? C.down : liqPct < 3 ? C.warn : C.dim;
   const base = symbol.id.replace(/USDT$/, '');
 
@@ -291,6 +317,16 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setLeverage(v);
     setLevOpen(false);
     try { localStorage.setItem(LEV_KEY, String(v)); } catch {}
+  };
+
+  // 한 눈금 = 표시 자릿수의 최소 단위. 가격이 없으면 움직이지 않는다 —
+  // 0에서 시작하면 엉뚱한 지정가가 만들어진다.
+  const nudgePrice = (dir: 1 | -1) => {
+    const cur = Number(price) || mid;
+    if (!Number.isFinite(cur as number) || (cur as number) <= 0) return;
+    const step = (cur as number) >= 1000 ? 0.1 : (cur as number) >= 1 ? 0.001 : 0.00001;
+    const next = Math.max(0, (cur as number) + dir * step);
+    setPrice(String(Number(next.toFixed(8))));
   };
 
   const setPct = (pct: number) => {
@@ -301,8 +337,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setQty(q > 0 ? String(Number(q.toFixed(6))) : '');
   };
 
-  const submit = async () => {
+  // 방향을 인자로 받는다. 바이낸스처럼 롱·숏 버튼을 동시에 두면
+  // 누른 버튼이 곧 방향이다 — 토글 상태를 따로 기억하지 않는다.
+  // 토글이 있으면 '숏으로 맞춰놨는데 롱이 나갔다'가 가능해진다.
+  const submit = async (orderSide: 'BUY' | 'SELL') => {
     setMsg(null);
+    setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
     const q = Number(qty);
@@ -315,7 +355,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
           connectionId: connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
-          symbol: symbol.id, side, type: orderType, quantity: q, leverage,
+          symbol: symbol.id, side: orderSide, type: orderType, quantity: q, leverage,
           price: orderType === 'LIMIT' ? Number(price) || undefined : undefined,
         }),
       });
@@ -335,7 +375,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   };
 
   return (
-    <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative' }}>
+    <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', minHeight: '100%' }}>
       {/* 격리·배율 — 자주 안 바꾸는 값이라 칩 하나로 접는다 */}
       <div style={{ display: 'flex', gap: 5 }}>
         <span style={{
@@ -358,46 +398,99 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         청산 약 {liqPct.toFixed(2)}% 이내
       </div>
 
+      {/* 신규/청산 — 바이낸스의 Open/Close 자리 */}
       <div style={{ display: 'flex', gap: 4, background: C.raised, padding: 3, borderRadius: 8 }}>
-        {(['BUY', 'SELL'] as const).map(s => (
-          <button key={s} onClick={() => setSide(s)} style={{
-            flex: 1, minHeight: dense ? 32 : 38, border: 'none', borderRadius: 6, cursor: 'pointer',
-            background: side === s ? (s === 'BUY' ? C.up : C.down) : 'transparent',
-            color: side === s ? '#fff' : (s === 'BUY' ? C.up : C.down),
-            fontSize: dense ? FS.small : FS.body, fontWeight: 700, transition: 'background .12s',
-          }}>{s === 'BUY' ? '롱' : '숏'}</button>
+        {([['OPEN', '신규'], ['CLOSE', '청산']] as const).map(([v, label]) => (
+          <button key={v} onClick={() => setReduceOnly(v === 'CLOSE')} style={{
+            flex: 1, minHeight: dense ? 30 : 34, border: 'none', borderRadius: 6, cursor: 'pointer',
+            background: (v === 'CLOSE') === reduceOnly ? C.panel : 'transparent',
+            color: (v === 'CLOSE') === reduceOnly ? C.text : C.dim,
+            fontSize: dense ? FS.small : FS.body, fontWeight: 700,
+            boxShadow: (v === 'CLOSE') === reduceOnly ? `0 1px 2px ${C.hair2}` : 'none',
+          }}>{label}</button>
         ))}
       </div>
 
+      {/* 주문 유형 */}
       <div style={{ display: 'flex', gap: 4 }}>
         {(['MARKET', 'LIMIT'] as const).map(t => (
           <button key={t} onClick={() => setOrderType(t)} style={{
             ...ghostBtn(orderType === t), flex: 1,
-            padding: dense ? '5px 8px' : '6px 10px', fontSize: FS.micro,
+            padding: dense ? '6px 8px' : '7px 10px', fontSize: FS.small,
           }}>{t === 'MARKET' ? '시장가' : '지정가'}</button>
         ))}
       </div>
 
+      {/* 가격 — 스테퍼 + BBO. 호가를 눌러도 여기로 들어온다 */}
       {orderType === 'LIMIT' && (
-        <input value={price} onChange={e => setPrice(e.target.value)}
-          placeholder={mid ? `가격 ${fmtPrice(mid)}` : '가격'} inputMode="decimal" style={inputStyle}/>
+        <div style={{ display: 'flex', gap: 5 }}>
+          <div style={{
+            flex: 1, display: 'flex', alignItems: 'center', background: C.raised,
+            border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden',
+          }}>
+            <Step onClick={() => nudgePrice(-1)}>−</Step>
+            <input value={price} onChange={e => setPrice(e.target.value)}
+              placeholder={mid ? fmtPrice(mid) : '가격'} inputMode="decimal"
+              style={{
+                flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
+                color: C.text, textAlign: 'center', padding: '9px 2px',
+                fontSize: dense ? FS.small : FS.body, ...NUM,
+              }}/>
+            <Step onClick={() => nudgePrice(1)}>+</Step>
+          </div>
+          {/* 최우선 호가로 바로 채운다. 값을 모르면 누를 수 없다. */}
+          <button onClick={() => { if (mid != null) setPrice(String(mid)); }}
+            disabled={mid == null}
+            title={mid == null ? '시세를 받지 못해 채울 수 없습니다' : '최우선 호가로'}
+            style={{ ...ghostBtn(), minWidth: 46, opacity: mid == null ? 0.5 : 1 }}>BBO</button>
+        </div>
       )}
 
-      <input value={qty} onChange={e => setQty(e.target.value)}
-        placeholder={`수량 (${base})`} inputMode="decimal" style={inputStyle}/>
+      {/* 수량 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', background: C.raised,
+        border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden',
+      }}>
+        <input value={qty} onChange={e => setQty(e.target.value)}
+          placeholder="수량" inputMode="decimal"
+          style={{
+            flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
+            color: C.text, padding: '9px 11px', fontSize: dense ? FS.small : FS.body, ...NUM,
+          }}/>
+        <span style={{
+          padding: '0 10px', color: C.dim, fontSize: FS.micro, fontWeight: 600,
+          borderLeft: `1px solid ${C.hair}`, lineHeight: '34px',
+        }}>{base}</span>
+      </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 4 }}>
-        {[25, 50, 75, 100].map(pct => (
-          <button key={pct} onClick={() => setPct(pct)}
-            disabled={balanceUsd == null}
-            title={balanceUsd == null ? '잔고를 받지 못해 비율 계산을 할 수 없습니다' : undefined}
-            style={{
-              minHeight: 26, borderRadius: 6, cursor: balanceUsd == null ? 'default' : 'pointer',
-              background: C.raised, color: balanceUsd == null ? C.faint : C.dim,
-              border: `1px solid ${C.hair}`, fontSize: FS.micro, fontWeight: 600,
-              opacity: balanceUsd == null ? 0.5 : 1, ...NUM,
-            }}>{pct}%</button>
-        ))}
+      {/* 비율 슬라이더 — 바이낸스의 눈금 슬라이더 자리.
+          잔고를 모르면 비율을 계산할 수 없다. 그때는 눈금만 두고 막는다. */}
+      <div style={{ padding: '2px 2px 0' }}>
+        <div style={{ display: 'flex', gap: 3 }}>
+          {[25, 50, 75, 100].map(pct => (
+            <button key={pct} onClick={() => setPct(pct)}
+              disabled={balanceUsd == null}
+              title={balanceUsd == null ? '잔고를 받지 못해 비율 계산을 할 수 없습니다' : undefined}
+              style={{
+                flex: 1, minHeight: 26, borderRadius: 6,
+                cursor: balanceUsd == null ? 'default' : 'pointer',
+                background: C.raised, color: balanceUsd == null ? C.faint : C.dim,
+                border: `1px solid ${C.hair}`, fontSize: FS.micro, fontWeight: 600,
+                opacity: balanceUsd == null ? 0.5 : 1, ...NUM,
+              }}>{pct}%</button>
+          ))}
+        </div>
+      </div>
+
+      {/* 가용 증거금 — 바이낸스의 Avbl */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+        fontSize: FS.micro, ...NUM,
+      }}>
+        <span style={{ color: C.faint, fontFamily: 'inherit' }}>가용</span>
+        <span style={{ color: balanceUsd == null ? C.warn : C.dim, fontWeight: 600 }}>
+          {balanceUsd == null ? '확인 불가' : `${fmtPrice(balanceUsd)} USDT`}
+        </span>
       </div>
 
       {/* 증거금이 모자라면 주문 전에 말한다. 거래소가 거부한 뒤에
@@ -414,22 +507,46 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         );
       })()}
 
-      {/* 상자 대신 한 줄. 두 값 다 보이되 자리는 한 줄만 먹는다. */}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', gap: 4,
-        fontSize: FS.micro, color: C.faint, whiteSpace: 'nowrap', ...NUM,
-      }}>
-        <span>증거금 <b style={{ color: C.dim, fontWeight: 600 }}>
-          {margin > 0 ? `$${fmtPrice(margin)}` : '—'}</b></span>
-        <span>명목 <b style={{ color: C.dim, fontWeight: 600 }}>
-          {notional > 0 ? `$${fmtPrice(notional)}` : '—'}</b></span>
+      {/* 최대 주문 가능 · 비용 — 바이낸스의 Max Open / Cost.
+          두 버튼 위에 각각 두지 않고 한 번만 둔다. 같은 값이 두 번 나오면
+          서로 다른 값이라고 오해한다. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, ...NUM, fontSize: FS.micro }}>
+        <Kv k="최대 주문" v={maxOpenUsd == null ? '확인 불가' : `${fmtPrice(maxOpenUsd)} USDT`}
+            warn={maxOpenUsd == null}/>
+        <Kv k="비용(증거금)" v={margin > 0 ? `${fmtPrice(margin)} USDT` : '0.00 USDT'}/>
+        <Kv k="명목가" v={notional > 0 ? `${fmtPrice(notional)} USDT` : '—'}/>
       </div>
 
-      {/* 여기서 아낀 자리를 주문 버튼에 쓴다 */}
-      <button onClick={submit} disabled={busy}
-        style={{ ...primaryBtn(side === 'BUY' ? C.up : C.down, busy), minHeight: 44 }}>
-        {busy ? '전송 중…' : `${base} ${side === 'BUY' ? '롱' : '숏'} ${leverage}× 주문`}
+      {/* 롱·숏을 동시에 둔다. 방향 토글을 없앤 이유는 그 토글이 조용히
+          틀릴 수 있기 때문이다 — 숏에 맞춰뒀다고 믿고 눌렀는데 롱이
+          나가는 사고는 화면만 봐서는 예방되지 않는다. 누른 버튼이 방향이다.
+
+          바닥에 고정한다. 위 항목이 늘어나면 버튼이 화면 밖으로 밀리는데,
+          이 화면에서 가장 중요한 버튼이 스크롤해야 보이면 안 된다. */}
+      <div style={{
+        position: 'sticky', bottom: 0, zIndex: 2,
+        display: 'flex', flexDirection: 'column', gap: 6,
+        paddingTop: 6, marginTop: 'auto',
+        background: C.panel, boxShadow: `0 -8px 12px -6px ${C.bg}`,
+      }}>
+      <button onClick={() => submit('BUY')} disabled={busy}
+        style={{ ...primaryBtn(C.up, busy), minHeight: 46, display: 'flex',
+                 alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
+        <span>{busy && side === 'BUY' ? '전송 중…' : reduceOnly ? '롱 청산' : '롱 진입'}</span>
+        <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
+          {reduceOnly ? 'Sell' : `Buy · ${leverage}×`}
+        </span>
       </button>
+
+      <button onClick={() => submit('SELL')} disabled={busy}
+        style={{ ...primaryBtn(C.down, busy), minHeight: 46, display: 'flex',
+                 alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
+        <span>{busy && side === 'SELL' ? '전송 중…' : reduceOnly ? '숏 청산' : '숏 진입'}</span>
+        <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
+          {reduceOnly ? 'Buy' : `Sell · ${leverage}×`}
+        </span>
+      </button>
+      </div>
 
       {/* 실자금 여부는 버튼 바로 아래에. 상단 점만으로는 부족하다. */}
       <div style={{
