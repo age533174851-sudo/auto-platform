@@ -1,4 +1,5 @@
 'use client';
+import { AiVerdict, type AiVerdictData } from '@/components/news/AiVerdict';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
@@ -122,6 +123,41 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   const [analyses,   setAnalyses]   = useState<Record<string, NewsAnalysis>>({});
   const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
   const [transCache, setTransCache] = useState<Record<string, { title?: string; summary?: string }>>({});
+  // 크론이 저장해 둔 AI 분석. 화면에서 다시 부르지 않는다 — 열 때마다
+  // 분석하면 사람 수만큼 요금이 곱해진다.
+  //
+  // URL로 맞춘다. 실시간 피드와 저장본은 id 체계가 달라서 id로는 못 잇는다.
+  const [aiByUrl, setAiByUrl] = useState<Record<string, AiVerdictData>>({});
+  const [aiNote, setAiNote] = useState<string>('');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/news/stored?limit=100', { signal: AbortSignal.timeout(12000) });
+        const j = await r.json();
+        if (!alive) return;
+        if (!r.ok || !j?.ok) {
+          // 왜 분석이 안 붙는지 화면에 남긴다. 조용히 비워 두면
+          // 사용자는 AI가 판단을 안 한 것으로 오해한다.
+          setAiNote(j?.needsMigration
+            ? 'AI 분석 저장소가 아직 설정되지 않았습니다 (마이그레이션 019 필요)'
+            : (j?.message || '저장된 AI 분석을 읽지 못했습니다'));
+          return;
+        }
+        const map: Record<string, AiVerdictData> = {};
+        for (const it of (j.items || [])) {
+          if (it?.url) map[String(it.url)] = it as AiVerdictData;
+        }
+        setAiByUrl(map);
+        setAiNote(j.analyzedCount === 0 && j.total > 0
+          ? '수집은 됐지만 아직 분석 전입니다 — 분석 크론이 돌면 채워집니다' : '');
+      } catch (e: any) {
+        if (alive) setAiNote('저장된 AI 분석을 읽지 못했습니다');
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
   const transReqRef = useRef<Set<string>>(new Set());
   const fetchSeqRef = useRef(0);
 
@@ -560,14 +596,28 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: SP.sm + 2 }}>
+          {/* AI 분석이 왜 안 보이는지 화면에 남긴다. 조용히 비워 두면
+              사용자는 AI가 판단을 안 한 것으로 오해한다 — 실제로는
+              저장소가 없거나 아직 분석 전이다. */}
+          {aiNote && (
+            <div style={{
+              padding: '9px 12px', borderRadius: R.md,
+              background: A(T.ylw, '15'), border: `1px solid ${A(T.ylw, '30')}`,
+              color: T.ylw, fontSize: 11, lineHeight: 1.55,
+            }}>{aiNote}</div>
+          )}
           {filtered.map(n => {
             const id = n.id || '';
             const an = analyses[id];
             const isAnalyzing = analyzingIds.has(id);
             const _lang = (()=>{ try { return localStorage.getItem('tg_lang')||'ko'; } catch { return 'ko'; } })();
             const _tc = transCache[`${id}_${_lang}`];
-            const displayTitle = an?.titleKo || _tc?.title || n.title;
-            const displaySummary = an?.summaryKo || _tc?.summary;
+            // 크론이 저장한 분석을 먼저 쓴다. 화면에서 즉석 분석한 것보다
+            // 검증을 거친 값이다 — 근거 없는 단정이 걸러졌고 원문 URL도
+            // 모델이 지어낸 것이 아니라 수집한 값으로 대조됐다.
+            const stored = n.url ? aiByUrl[String(n.url)] : undefined;
+            const displayTitle = stored?.titleKo || an?.titleKo || _tc?.title || n.title;
+            const displaySummary = stored?.summary || an?.summaryKo || _tc?.summary;
 
             return (
               <div
@@ -578,7 +628,11 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                   cursor: 'pointer',
                   position: 'relative',
                   minHeight: 80,
-                  borderLeft: an ? `3px solid ${predColor(an.prediction)}` : `3px solid ${T.border}`,
+                  borderLeft: `3px solid ${stored?.analyzed
+                    ? (stored.direction === 'bullish' ? T.grn
+                      : stored.direction === 'bearish' ? T.red
+                      : stored.direction === 'uncertain' ? T.ylw : T.sub)
+                    : an ? predColor(an.prediction) : T.border}`,
                   touchAction: 'manipulation',
                 }}
               >
@@ -608,6 +662,15 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                         marginBottom: 8,
                       }}>
                         {displaySummary}
+                      </div>
+                    )}
+
+                    {/* AI 판정 — 저장된 분석이 있을 때만.
+                        없으면 아무것도 안 그린다. '분석 대기'를 모든 카드에
+                        붙이면 그게 배경 소음이 되어 진짜 분석도 안 읽힌다. */}
+                    {stored && (
+                      <div style={{ marginBottom: 8 }}>
+                        <AiVerdict a={stored}/>
                       </div>
                     )}
 
