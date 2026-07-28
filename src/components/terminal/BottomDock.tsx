@@ -14,6 +14,7 @@ import { useTerminal } from './TerminalContext';
 import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
+import { derivePosition } from '@/lib/markets/positionView';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
@@ -128,39 +129,14 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
         {tab === '포지션' && (
           positions.length === 0
             ? <Empty t={acct ? '열린 포지션이 없습니다' : '거래소 연결을 선택하면 표시됩니다'}/>
-            : <Table
-                head={['종목', '방향', '수량', '진입가', 'Mark', '청산가', '미실현', '배율', '마진']}
-                rows={positions.map((p: any) => {
-                  const long = Number(p.amount) > 0;
-                  const pnl = Number(p.unrealizedPnl ?? p.unRealizedProfit);
-                  const iso = p.marginType === 'isolated';
-                  return {
-                    key: p.symbol,
-                    onClick: () => {
-                      const s = symbols.find(x => x.id === p.symbol);
-                      if (s) setSymbol(s);
-                    },
-                    cells: [
-                      <span key="s" style={{ color: C.text, fontWeight: 600 }}>{p.symbol}</span>,
-                      <span key="d" style={chip(long ? C.up : C.down, long ? C.upBg : C.downBg)}>
-                        {long ? 'LONG' : 'SHORT'}
-                      </span>,
-                      fmtPrice(Math.abs(Number(p.amount)), 4),
-                      fmtPrice(p.entryPrice),
-                      fmtPrice(p.markPrice),
-                      <span key="l" style={{ color: C.warn }}>{fmtPrice(p.liquidationPrice)}</span>,
-                      <span key="p" style={{ color: pnlColor(pnl), fontWeight: 700 }}>
-                        {pnl >= 0 ? '+' : ''}{fmtPrice(pnl)}
-                      </span>,
-                      `${fmtPrice(p.leverage, 0)}×`,
-                      // 교차는 격리 전제(청산가·증거금 상한)를 깨므로 눈에 띄어야 한다
-                      <span key="m" style={{ color: iso ? C.dim : C.warn, fontWeight: iso ? 400 : 700 }}>
-                        {iso ? '격리' : '교차'}
-                      </span>,
-                    ],
-                  };
-                })}
-              />
+            : <div>
+                {positions.map((p: any) => (
+                  <PositionCard key={p.symbol} p={p} onPick={() => {
+                    const s = symbols.find(x => x.id === p.symbol);
+                    if (s) setSymbol(s);
+                  }}/>
+                ))}
+              </div>
         )}
 
         {tab === '미체결' && (
@@ -376,6 +352,90 @@ function StrategyTab() {
         실데이터 검증 결과 100배는 이 전략에서 구조적으로 생존이 어렵습니다 —
         MAE 중앙값이 100배 청산거리의 2.6~4배입니다. 배율은 그 사실을 알고 고르세요.
       </div>
+    </div>
+  );
+}
+
+/**
+ * 포지션 카드.
+ *
+ * 표를 쓰지 않는 이유: 열이 아홉 개였다. 375px에서 그 표는 읽는 게 아니라
+ * 훑는 것이 되고, 청산가처럼 놓치면 안 되는 값이 가로 스크롤 밖으로 나간다.
+ *
+ * 값이 없을 때 0을 적지 않는다. 청산가 0은 '0달러에 청산'이 아니라
+ * '청산가를 못 받았다'인데, 화면만 봐서는 둘이 같아 보인다.
+ */
+function PositionCard({ p, onPick }: { p: any; onPick: () => void }) {
+  // 값 해석은 테스트가 있는 순수 함수가 한다. 청산가 0·증거금 추정·
+  // 0으로 나누기 셋 다 화면에서는 그럴듯해 보여서 눈으로 못 잡는다.
+  const v = derivePosition(p);
+  const { side, qty, isolated: iso, leverage: lev, entry, mark, liq,
+          pnl, notional, margin, marginEstimated: marginIsEst, roi } = v;
+  const long = side === 'LONG';
+
+  const Cell = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>{k}</div>
+      <div style={{ ...NUM, color: tone ?? C.text, fontSize: FS.small, fontWeight: 600 }}>{v}</div>
+    </div>
+  );
+  const money = (v: number | null, d = 2) => (v == null ? '확인 불가' : fmtPrice(v, d));
+
+  return (
+    <div style={{
+      padding: '11px 12px', borderBottom: `1px solid ${C.hair}`,
+    }}>
+      {/* 종목 · 방향 · 마진 모드 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 9, flexWrap: 'wrap' }}>
+        <span style={chip(long ? C.up : C.down, long ? C.upBg : C.downBg)}>
+          {long ? 'LONG' : 'SHORT'}
+        </span>
+        <button onClick={onPick} style={{
+          background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+          color: C.text, fontSize: FS.body, fontWeight: 700,
+        }}>{p.symbol}</button>
+        {/* 교차는 격리 전제(청산가·손실 상한)를 깬다. 눈에 띄어야 한다. */}
+        <span style={chip(iso ? C.dim : C.warn)}>
+          {iso ? '격리' : '교차'} {lev == null ? '' : `${fmtPrice(lev, 0)}×`}
+        </span>
+      </div>
+
+      {/* 미실현 손익 · 수익률 — 카드에서 가장 먼저 읽히는 줄 */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div>
+          <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>미실현 손익 (USDT)</div>
+          <div style={{ ...NUM, color: pnlColor(pnl), fontSize: 20, fontWeight: 700 }}>
+            {pnl == null ? '확인 불가' : `${pnl >= 0 ? '+' : ''}${fmtPrice(pnl)}`}
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>수익률</div>
+          <div style={{ ...NUM, color: pnlColor(roi), fontSize: FS.num, fontWeight: 700 }}>
+            {roi == null ? '—' : `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%`}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <Cell k="수량" v={money(qty, 4)}/>
+        <Cell k={marginIsEst ? '증거금 ≈' : '증거금'} v={money(margin)}/>
+        <Cell k="명목가" v={money(notional)}/>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        <Cell k="진입가" v={money(entry)}/>
+        <Cell k="Mark" v={money(mark)}/>
+        {/* 청산가는 이 카드에서 가장 위험한 숫자다 */}
+        <Cell k="청산가" v={liq == null ? '없음' : fmtPrice(liq)} tone={liq == null ? C.dim : C.warn}/>
+      </div>
+
+      {/* 이 종목으로 주문판을 맞춘다. 여기서 바로 주문을 내지 않는 이유는
+          청산이 되돌릴 수 없는 일이기 때문이다 — 수량·유형을 눈으로 확인한
+          뒤에 주문판에서 내야 한다. 카드의 버튼 한 번으로 나가면 잘못 눌렀을
+          때 되돌릴 방법이 없다. */}
+      <button onClick={onPick} style={{ ...ghostBtn(), width: '100%', minHeight: 34 }}>
+        이 종목 주문판으로 →
+      </button>
     </div>
   );
 }
