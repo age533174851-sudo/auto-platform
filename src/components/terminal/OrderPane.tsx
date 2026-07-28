@@ -19,6 +19,7 @@ import { DataBadge } from '@/components/ui/DataBadge';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
 import { useTerminal } from './TerminalContext';
 import { SpotOrderPanel } from './SpotOrderPanel';
+import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
@@ -500,17 +501,8 @@ export const MarketOrderPanel = memo(function MarketOrderPanel(
 ) {
   const { marketType } = useTerminal();
   if (marketType === 'SPOT') return <SpotOrderPanel {...props}/>;
-  // COIN-M은 아직 주문 경로가 없다. 없는 것을 있는 것처럼 보여주지 않는다.
-  if (marketType === 'COIN_FUTURES') {
-    return (
-      <div style={{ padding: 16, color: C.warn, fontSize: FS.small, lineHeight: 1.6 }}>
-        COIN-M 선물은 아직 주문을 지원하지 않습니다.
-        <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 6 }}>
-          USDⓈ-M 선물이나 현물로 전환하세요.
-        </div>
-      </div>
-    );
-  }
+  // COIN-M은 수량 단위가 계약이고 증거금이 코인이라 폼 자체가 다르다.
+  if (marketType === 'COIN_FUTURES') return <CoinMOrderPanel dense={props.dense}/>;
   return <OrderFormPanel {...props}/>;
 });
 
