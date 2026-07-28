@@ -12,16 +12,36 @@
 // ────────────────────────────────
 // lib/menuItems의 MENU를 그대로 쓴다. 목록을 두 벌 두면 앱에 기능이
 // 추가돼도 터미널에서는 안 보이고, 그 차이를 아무도 모른다.
-import React, { memo, useMemo, useState } from 'react';
+import React, { memo, useCallback, useMemo, useState } from 'react';
 import { C, FS, tabStyle } from './theme';
 import { MENU, MENU_CATS } from '@/lib/menuItems';
+import { useTerminal } from './TerminalContext';
 
 export const AppLauncher = memo(function AppLauncher({ onClose }: { onClose?: () => void }) {
   const [q, setQ] = useState('');
+  const { navigateApp } = useTerminal();
 
   // 지금 보고 있는 화면(터미널)은 목록에서 뺀다. 자기 자신으로 가는
   // 링크는 눌러도 아무 일이 없어서 고장난 것처럼 보인다.
-  const items = useMemo(() => MENU.filter(m => m.href !== "/terminal"), []);
+  // 매매 탭이 곧 터미널이므로 trading이 자기 자신이다.
+  const items = useMemo(
+    () => MENU.filter(m => m.href !== '/terminal' && m.id !== 'trading'), []);
+
+  /**
+   * 앱 안에서는 탭만 바꾼다.
+   *
+   * href로 두면 전체 페이지가 다시 로드된다 — 차트 iframe·WebSocket이
+   * 끊기고 다시 붙는다. 같은 앱 안에서 화면을 바꾸는 것뿐인데 그럴 이유가
+   * 없다. 독립 경로(/terminal)로 열었을 때는 navigateApp이 없으므로
+   * preventDefault를 하지 않고 링크가 평소대로 동작한다.
+   */
+  const go = useCallback((e: React.MouseEvent, id: string) => {
+    if (!navigateApp) return;                       // 링크 기본 동작에 맡긴다
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;  // 새 탭으로 열기 존중
+    e.preventDefault();
+    navigateApp(id);
+    onClose?.();
+  }, [navigateApp, onClose]);
 
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -73,7 +93,8 @@ export const AppLauncher = memo(function AppLauncher({ onClose }: { onClose?: ()
                   // 앱은 tab 상태로 화면을 바꾸므로 ?tab=으로 넘긴다.
                   // 새 탭이 아니라 같은 창에서 연다 — 터미널과 앱을 오가는
                   // 것은 화면 전환이지 새 작업이 아니다.
-                  <a key={m.id} href={m.href ?? `/?tab=${encodeURIComponent(m.id)}`} style={{
+                  <a key={m.id} href={m.href ?? `/?tab=${encodeURIComponent(m.id)}`}
+                    onClick={e => go(e, m.id)} style={{
                     display: 'flex', alignItems: 'center', gap: 9,
                     padding: '9px 10px', borderRadius: 9, textDecoration: 'none',
                     background: C.raised, border: `1px solid ${C.hair}`,
@@ -102,7 +123,7 @@ export const AppLauncher = memo(function AppLauncher({ onClose }: { onClose?: ()
           );
         })}
 
-        <a href="/" style={{
+        <a href="/" onClick={e => go(e, 'home')} style={{
           display: 'block', textAlign: 'center', padding: '11px 0', marginTop: 4,
           background: C.raised, border: `1px solid ${C.hair2}`, borderRadius: 9,
           color: C.accent, fontSize: FS.small, fontWeight: 700, textDecoration: 'none',

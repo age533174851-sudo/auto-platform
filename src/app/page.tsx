@@ -775,7 +775,7 @@ export default function App() {
               잘리고 아래로 스크롤이 생기므로, 컨테이너 자체를 바꿔 끼운다. */}
           {tab==='trading' ? (
             <ErrorBoundary onHome={() => nav('home')}>
-              <TerminalTab/>
+              <TerminalTab onNav={nav}/>
             </ErrorBoundary>
           ) : (
             <div className="page-content" style={{padding:'12px 12px calc(var(--nav-h) + 20px)'}}>

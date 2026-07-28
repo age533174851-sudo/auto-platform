@@ -64,6 +64,12 @@ interface TerminalState {
   setConnId: (id: string) => void;
   connections: any[];
   mode: ModeInfo;
+  /**
+   * 앱 안에 들어가 있을 때 탭을 바꾸는 함수. 독립 경로(/terminal)로 열면
+   * 없다 — 그때는 링크가 평소대로 페이지를 이동해야 한다. 그래서 optional이고,
+   * 쓰는 쪽에서 없으면 기본 동작으로 떨어지게 둔다.
+   */
+  navigateApp?: (tabId: string) => void;
 }
 
 const Ctx = createContext<TerminalState | null>(null);
@@ -83,7 +89,9 @@ const UNKNOWN_MODE: ModeInfo = {
   realMoney: false, sendsOrders: false, unknown: true,
 };
 
-export function TerminalProvider({ children }: { children: React.ReactNode }) {
+export function TerminalProvider(
+  { children, navigateApp }: { children: React.ReactNode; navigateApp?: (tabId: string) => void },
+) {
   const [symbol, setSymbolState] = useState<TerminalSymbol>(DEFAULT_SYMBOLS[0]);
   const [favorites, setFavorites] = useState<string[]>(() => DEFAULT_SYMBOLS.map(s => s.id));
   // 기본은 선물이다. 지금까지 이 화면이 하던 일이 선물이었으므로,
@@ -187,9 +195,9 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<TerminalState>(() => ({
     symbol, setSymbol, symbols, favorites, toggleFavorite,
     marketType, setMarketType,
-    auth, connId, setConnId, connections, mode,
+    auth, connId, setConnId, connections, mode, navigateApp,
   }), [symbol, setSymbol, symbols, favorites, toggleFavorite,
-       marketType, setMarketType, auth, connId, connections, mode]);
+       marketType, setMarketType, auth, connId, connections, mode, navigateApp]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

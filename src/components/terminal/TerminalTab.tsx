@@ -27,7 +27,7 @@ const TerminalShell = dynamic(() => import('./TerminalShell'), {
   ),
 });
 
-export default function TerminalTab() {
+export default function TerminalTab({ onNav }: { onNav?: (tabId: string) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [h, setH] = useState<number | null>(null);
 
@@ -68,7 +68,7 @@ export default function TerminalTab() {
       height: h == null ? '70vh' : h,
       width: '100%', overflow: 'hidden', background: '#0A0B0D',
     }}>
-      {h != null && <TerminalShell embedded/>}
+      {h != null && <TerminalShell embedded navigateApp={onNav}/>}
     </div>
   );
 }

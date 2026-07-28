@@ -233,9 +233,11 @@ function ShellInner({ embedded }: { embedded?: boolean }) {
   return <DesktopShell tier={tier} embedded={embedded}/>;
 }
 
-export default function TerminalShell({ embedded }: { embedded?: boolean } = {}) {
+export default function TerminalShell(
+  { embedded, navigateApp }: { embedded?: boolean; navigateApp?: (tabId: string) => void } = {},
+) {
   return (
-    <TerminalProvider>
+    <TerminalProvider navigateApp={navigateApp}>
       <ShellInner embedded={embedded}/>
     </TerminalProvider>
   );
