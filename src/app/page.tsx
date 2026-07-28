@@ -19,7 +19,7 @@ import {
   Wallet,
   Stethoscope, Settings, CreditCard, Presentation, Shield, LayoutGrid,
   MoreHorizontal, X as XIcon, TriangleAlert,
-  User2, Link2, ShieldCheck, LogOut, Download, MonitorSmartphone,
+  User2, Link2, ShieldCheck, LogOut, Download,
 } from 'lucide-react';
 
 // lucide-react 아이콘 타입
@@ -61,6 +61,7 @@ const HubAccountsPage = dynamic(() => import('@/components/pages/HubAccountsPage
 const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
 const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
+const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
 const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
 const AIPortfolioPage = dynamic(() => import('@/components/pages/AIPortfolioPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -190,7 +191,6 @@ const BTABS: { id: string; label: string; Icon: IconComp }[] = [
   {id:'season',   label:'시즌전략', Icon: Sprout},
 ];
 const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
-  {id:'terminal',     label:'Pro 터미널', Icon: MonitorSmartphone, core: true},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
   {id:'backtest',     label:'백테스트',   Icon: FlaskConical, core: true},
@@ -411,7 +411,9 @@ export default function App() {
   const LOGIN_REQUIRED_ROUTES=new Set(['accounts','exchange_connect','hub_accounts','manual_accounts']);
   // 이 앱 밖의 별도 라우트. setTab으로는 갈 수 없다 —
   // 여기 없으면 메뉴에 항목이 보여도 눌렀을 때 아무 일도 일어나지 않는다.
-  const EXTERNAL_ROUTES:Record<string,string>={ terminal:'/terminal' };
+  // 매매 탭이 곧 터미널이므로 terminal은 여기 없다. 넣으면 같은 화면으로
+  // 가는 길이 둘이 되고, 하나는 하단탭이 사라진 채로 열린다.
+  const EXTERNAL_ROUTES:Record<string,string>={};
   const nav=useCallback((id:string)=>{
     const ext=EXTERNAL_ROUTES[id];
     if(ext){ setShowMore(false); if(typeof window!=='undefined') window.location.href=ext; return; }
@@ -769,11 +771,19 @@ export default function App() {
             </div>
           )}
           {/* Page Content */}
-          <div className="page-content" style={{padding:'12px 12px calc(var(--nav-h) + 20px)'}}>
+          {/* 매매 탭은 터미널이다. page-content의 패딩 안에 넣으면 좌우가
+              잘리고 아래로 스크롤이 생기므로, 컨테이너 자체를 바꿔 끼운다. */}
+          {tab==='trading' ? (
             <ErrorBoundary onHome={() => nav('home')}>
-              {renderPage()}
+              <TerminalTab/>
             </ErrorBoundary>
-          </div>
+          ) : (
+            <div className="page-content" style={{padding:'12px 12px calc(var(--nav-h) + 20px)'}}>
+              <ErrorBoundary onHome={() => nav('home')}>
+                {renderPage()}
+              </ErrorBoundary>
+            </div>
+          )}
 
           {/* Bottom Nav */}
           <div className="bottom-nav" style={{display:"flex",alignItems:"stretch"}}>
@@ -817,7 +827,7 @@ export default function App() {
                 <div style={{display:'flex',flexDirection:'column',gap:4}}>
                   {(()=>{
                     const mGroups:{title:string;ids:string[]}[]=[
-                      {title:'거래',ids:['terminal','strategies','autobot','fear_dca','paper','season']},
+                      {title:'거래',ids:['strategies','autobot','fear_dca','paper','season']},
                       {title:'분석',ids:['backtest','scanner','seasonality','review','briefing','news','calendar','analysis','pine_guide']},
                       {title:'자산',ids:['portfolio','ai_portfolio','growth','dividends','accounts','manual_accounts']},
                       {title:'관리',ids:['risk_settings','history','alerts','safety','diagnostics']},

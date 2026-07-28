@@ -106,7 +106,7 @@ function Pane({ children, style }: { children: React.ReactNode; style?: React.CS
   );
 }
 
-function DesktopShell({ tier }: { tier: Exclude<Tier, 'mobile'> }) {
+function DesktopShell({ tier, embedded }: { tier: Exclude<Tier, 'mobile'>; embedded?: boolean }) {
   const { mode, symbol } = useTerminal();
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT);
   const [balance, setBalance] = useState<number | null>(null);
@@ -158,7 +158,10 @@ function DesktopShell({ tier }: { tier: Exclude<Tier, 'mobile'> }) {
 
   return (
     <div ref={rootRef} style={{
-      height: '100dvh', width: '100vw', overflow: 'hidden',
+      // 앱 탭 안에 들어갈 때는 뷰포트가 아니라 부모를 채운다. 100dvh를
+      // 그대로 두면 상단바·하단탭 높이만큼 화면 밖으로 밀려난다.
+      height: embedded ? '100%' : '100dvh',
+      width: embedded ? '100%' : '100vw', overflow: 'hidden',
       background: C.bg, color: C.text,
       display: 'flex', flexDirection: 'column',
       // 실자금이면 화면 테두리가 붉다. 어느 패널을 보고 있어도 주변시에 들어온다.
@@ -209,7 +212,7 @@ function DesktopShell({ tier }: { tier: Exclude<Tier, 'mobile'> }) {
   );
 }
 
-function ShellInner() {
+function ShellInner({ embedded }: { embedded?: boolean }) {
   // 서버·첫 렌더에서는 폭을 모른다. 모르는 채로 PC를 그리면 모바일에서
   // 한 번 깜빡이므로, 정해진 뒤에 그린다.
   const [tier, setTier] = useState<Tier | null>(null);
@@ -225,15 +228,15 @@ function ShellInner() {
     };
   }, []);
 
-  if (tier === null) return <div style={{ background: C.bg, height: '100dvh' }}/>;
-  if (tier === 'mobile') return <MobileShell/>;
-  return <DesktopShell tier={tier}/>;
+  if (tier === null) return <div style={{ background: C.bg, height: embedded ? '100%' : '100dvh' }}/>;
+  if (tier === 'mobile') return <MobileShell embedded={embedded}/>;
+  return <DesktopShell tier={tier} embedded={embedded}/>;
 }
 
-export default function TerminalShell() {
+export default function TerminalShell({ embedded }: { embedded?: boolean } = {}) {
   return (
     <TerminalProvider>
-      <ShellInner/>
+      <ShellInner embedded={embedded}/>
     </TerminalProvider>
   );
 }

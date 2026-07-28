@@ -169,7 +169,7 @@ function ChartDrawer() {
   );
 }
 
-export default function MobileShell() {
+export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   const { symbol, mode, setSymbol, favorites, toggleFavorite } = useTerminal();
   const landscape = useLandscape();
   const [picked, setPicked] = useState<number | null>(null);
@@ -181,7 +181,7 @@ export default function MobileShell() {
   if (landscape) {
     return (
       <div style={{
-        height: '100dvh', display: 'flex', flexDirection: 'column',
+        height: embedded ? '100%' : '100dvh', display: 'flex', flexDirection: 'column',
         background: C.bg, color: C.text, overflow: 'hidden',
       }}>
         <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
@@ -206,7 +206,7 @@ export default function MobileShell() {
   // ── 세로 ──
   return (
     <div style={{
-      height: '100dvh', display: 'flex', flexDirection: 'column',
+      height: embedded ? '100%' : '100dvh', display: 'flex', flexDirection: 'column',
       background: C.bg, color: C.text, overflow: 'hidden',
     }}>
       <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
