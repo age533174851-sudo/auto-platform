@@ -14,11 +14,13 @@ function loadWL(): any[] { if (typeof window === 'undefined') return []; try { r
 function saveWL(arr: any[]) { try { localStorage.setItem(WL_STORE, JSON.stringify(arr)); } catch {} }
 
 export default function AssetDetailModal({
-  asset, currency = 'KRW', logoUrl, onClose, onTrade, onPnL, onNav,
+  asset, currency = 'KRW', logoUrl, prices, onClose, onTrade, onPnL, onNav,
 }: {
   asset: any | null;
   currency?: string;
   logoUrl?: string | null;
+  /** 실시간 시세 목록. 뉴스처럼 심볼만 아는 화면에서 열면 asset에 가격이 없다 */
+  prices?: any[];
   onClose: () => void;
   onTrade?: (a: any) => void;
   onPnL?: (a: any) => void;
@@ -33,7 +35,22 @@ export default function AssetDetailModal({
 
   if (!asset) return null;
 
-  const up = Number(asset.c) >= 0;
+  // 넘어온 asset에 가격이 없을 수 있다. 뉴스 화면은 '관련 종목'으로 심볼만
+  // 넘기기 때문이다. 그때 asset.p는 undefined인데, 그대로 그리면 화면에
+  // ₩0이 뜬다. 0원짜리 비트코인은 시세가 아니라 고장인데 사용자는 둘을
+  // 구분할 수 없다. 실시간 목록에서 다시 찾고, 그래도 없으면 숫자 대신
+  // '확인 불가'라고 말한다.
+  const key = String(asset.id || asset.sym || '').toUpperCase();
+  const live = Array.isArray(prices)
+    ? prices.find((x: any) => String(x?.id || x?.sym || '').toUpperCase() === key)
+    : null;
+  const num = (v: any): number | null => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const pOwn = num(asset.p); const pLive = num(live?.p);
+  const px = pOwn != null && pOwn > 0 ? pOwn : (pLive != null && pLive > 0 ? pLive : null);
+  const chg = num(asset.c) ?? num(live?.c);
+  const vol = asset.v ?? live?.v ?? null;
+
+  const up = Number(chg ?? 0) >= 0;
   const nameKr = asset.nameKr || asset.name || asset.id;
   const sym = asset.sym || asset.id;
 
@@ -78,9 +95,9 @@ export default function AssetDetailModal({
 
           {/* 현재가 + 등락 */}
           <div style={{ marginBottom: 14 }}>
-            <div style={{ color: T.txt, fontSize: 30, fontWeight: 900, fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums', letterSpacing: -1 }}>{cvt(asset.p, currency)}</div>
+            <div style={{ color: T.txt, fontSize: 30, fontWeight: 900, fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums', letterSpacing: -1 }}>{px == null ? '확인 불가' : cvt(px, currency)}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-              <span style={{ color: up ? T.grn : T.red, fontSize: 14, fontWeight: 800 }}>{fmtPct(asset.c)}</span>
+              <span style={{ color: chg == null ? T.muted : up ? T.grn : T.red, fontSize: 14, fontWeight: 800 }}>{chg == null ? '—' : fmtPct(chg)}</span>
               <span style={{ color: T.muted, fontSize: 11 }}>금일 등락</span>
             </div>
           </div>
@@ -92,7 +109,7 @@ export default function AssetDetailModal({
 
           {/* 통계 */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
-            {stat('거래량', asset.v != null ? String(asset.v) : '—')}
+            {stat('거래량', vol != null ? String(vol) : '—')}
             {stat('심볼', String(sym))}
             {stat('유형', asset.t === 'coin' ? '코인' : asset.t === 'stock' ? '해외주식' : asset.t === 'krstock' ? '국내주식' : asset.t === 'etf' ? 'ETF' : '자산')}
           </div>

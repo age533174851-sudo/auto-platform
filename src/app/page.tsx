@@ -731,6 +731,7 @@ export default function App() {
       <AssetDetailModal
         asset={detailAsset}
         currency={currency}
+        prices={prices}
         onClose={()=>setDetailAsset(null)}
         onTrade={(a)=>openAsset(a,'trading')}
         onPnL={openPnL}
