@@ -7,6 +7,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { buildSnapshot, evaluateAll } from '@/lib/autotrade/engine';
+import { fetchCandles, isCandleError } from '@/lib/marketCandles';
 import type { StrategyCondition } from '@/lib/strategies/types';
 
 export const dynamic = 'force-dynamic';
@@ -77,25 +78,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'missing_asset_or_conditions' }, { status: 400 });
   }
 
-  const interval = TF_MAP[timeframe];
-  if (!interval) {
+  if (!TF_MAP[timeframe]) {
     return NextResponse.json({ error: 'unsupported_timeframe' }, { status: 400 });
   }
 
-  const sym = toBinanceSymbol(asset, market);
-  if (!sym) {
-    return NextResponse.json({
-      error: 'market_not_supported',
-      message: `${market} 시장의 ${asset}는 자동매매가 아직 지원되지 않습니다 (현재는 crypto만)`,
-    }, { status: 400 });
-  }
-
-  const klines = await fetchKlines(sym, interval, 150);
-  if (!klines) {
-    return NextResponse.json({
-      error: 'price_fetch_failed',
-      message: `${sym} 가격 데이터를 가져오지 못했습니다`,
-    }, { status: 502 });
+  // 조건 평가도 종가만 있으면 되므로 시장을 가리지 않는다.
+  const klines = await fetchCandles(asset, market, timeframe, 150);
+  if (isCandleError(klines)) {
+    const status = klines.error === 'fetch_failed' ? 502 : 400;
+    return NextResponse.json({ error: klines.error, message: klines.message }, { status });
   }
 
   const snapshot = buildSnapshot(klines.closes, klines.volumes);

@@ -11,6 +11,7 @@
 //       수동 점검용으로 x-admin-secret도 허용한다.
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
+import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -34,6 +35,75 @@ function authorized(req: NextRequest): boolean {
   return false;
 }
 
+/**
+ * 열린 거래마다 거래소 실제 상태를 읽어 기술적 사고를 점검한다.
+ * 조회 자체가 실패하면 exchangeReachable=false로 넘겨 알림만 나가게 한다 —
+ * 연결이 없으면 청산 주문도 못 내므로 임의로 CLOSE 판정하지 않는다.
+ */
+async function runPositionGuards(
+  sb: any,
+  decisions: { tradeId: string; userId: string; symbol: string; side: 'LONG' | 'SHORT' }[],
+  testnet: boolean,
+): Promise<{ tradeId: string; symbol: string; verdict: GuardVerdict }[]> {
+  if (decisions.length === 0) return [];
+
+  const bf = await import('@/lib/exchanges/binanceFutures');
+  const { decryptSecret } = await import('@/lib/exchanges/crypto');
+  const out: { tradeId: string; symbol: string; verdict: GuardVerdict }[] = [];
+
+  // 사용자별로 키를 한 번만 읽는다
+  const credCache = new Map<string, { key: string; secret: string } | null>();
+
+  for (const d of decisions) {
+    try {
+      if (!credCache.has(d.userId)) {
+        const { data: conn } = await sb.from('exchange_connections')
+          .select('api_key, api_secret_enc, encrypted_secret')
+          .eq('user_id', d.userId).eq('is_active', true).limit(1).maybeSingle();
+        credCache.set(d.userId, conn
+          ? { key: (conn as any).api_key, secret: decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? '') }
+          : null);
+      }
+      const cred = credCache.get(d.userId);
+      if (!cred) continue;
+
+      const posRes: any = await bf.getFuturesPositions(cred.key, cred.secret, testnet);
+      const reachable = posRes?.success === true;
+      const pos = reachable
+        ? (posRes.positions as any[]).find(p => String(p.symbol) === d.symbol && Math.abs(Number(p.amount)) > 0)
+        : null;
+
+      // 거래소에 포지션이 없으면 이미 닫힌 것 — 점검 대상이 아니다
+      if (reachable && !pos) continue;
+
+      let hasStop = false;
+      if (reachable) {
+        try {
+          const open = await bf.getFuturesOpenOrders(cred.key, cred.secret, testnet, d.symbol);
+          hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
+            String(o?.type || '').toUpperCase() === 'STOP_MARKET');
+        } catch { hasStop = false; }
+      }
+
+      const verdict = checkPositionGuard({
+        symbol: d.symbol,
+        side: d.side,
+        entryPrice: pos ? Number(pos.entryPrice) : 0,
+        markPrice: pos ? Number(pos.markPrice) : 0,
+        liquidationPrice: pos ? Number(pos.liquidationPrice) : 0,
+        marginType: pos ? pos.marginType : null,
+        hasProtectiveStop: hasStop,
+        exchangeReachable: reachable,
+      });
+
+      if (verdict.action !== 'NONE') out.push({ tradeId: d.tradeId, symbol: d.symbol, verdict });
+    } catch {
+      // 개별 실패가 전체 점검을 막지 않는다
+    }
+  }
+  return out;
+}
+
 export async function GET(req: NextRequest) {
   if (!authorized(req)) {
     return NextResponse.json(
@@ -52,11 +122,31 @@ export async function GET(req: NextRequest) {
 
   const { decideExits } = await import('@/lib/engine/exitMonitor');
   const decisions = await decideExits(sb, { testnet });
+
+  // ── 기술적 사고 점검 ──
+  // 트레일링·시간청산 판단보다 먼저 본다. 청산가에 다다랐거나 손절이
+  // 사라졌거나 마진이 Cross로 바뀐 상태라면, 손절선을 옮길 때가 아니라
+  // 포지션을 닫아야 할 때다.
+  //
+  // 이 점검은 방향으로 판단하지 않는다 (positionGuard.ts 참고).
+  const guardFindings = await runPositionGuards(sb, decisions, testnet);
+  for (const g of guardFindings) {
+    if (g.verdict.action !== 'CLOSE') continue;
+    const d = decisions.find(x => x.tradeId === g.tradeId);
+    if (d) { d.action = 'CLOSE'; d.reason = `[보호] ${g.verdict.reason}`; }
+  }
+
   const actionable = decisions.filter(d => d.action !== 'NONE');
+
+  // 청산까지는 아니지만 알아야 할 이상 (연결 끊김, Mark Price 급변 등)
+  const alerts = guardFindings
+    .filter(g => g.verdict.action === 'ALERT')
+    .map(g => ({ symbol: g.symbol, reason: g.verdict.reason, faults: g.verdict.faults.map(f => f.code) }));
 
   if (dryRun || actionable.length === 0) {
     return NextResponse.json({
       ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
+      alerts,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
         highWaterR: Number(d.highWaterR.toFixed(3)),
@@ -151,6 +241,6 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    ok: true, checked: decisions.length, actionable: actionable.length, results,
+    ok: true, checked: decisions.length, actionable: actionable.length, alerts, results,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

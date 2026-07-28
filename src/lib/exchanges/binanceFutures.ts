@@ -60,6 +60,8 @@ export async function getFuturesBalance(key: string, secret: string, testnet = t
 export interface FuturesPosition {
   symbol: string; side: 'LONG' | 'SHORT' | 'FLAT'; amount: number;
   entryPrice: number; markPrice: number; unrealizedPnl: number; leverage: number; liquidationPrice: number;
+  /** 거래소가 보고한 실제 마진 타입. 'isolated'가 아니면 격리 전제가 깨진 것이다. */
+  marginType: string;
 }
 
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
@@ -74,6 +76,7 @@ export async function getFuturesPositions(key: string, secret: string, testnet =
           amount: Math.abs(amt), entryPrice: parseFloat(p.entryPrice), markPrice: parseFloat(p.markPrice),
           unrealizedPnl: parseFloat(p.unRealizedProfit), leverage: parseInt(p.leverage || '1', 10),
           liquidationPrice: parseFloat(p.liquidationPrice || '0'),
+          marginType: String(p.marginType || '').toLowerCase(),
         } as FuturesPosition;
       });
     return { success: true, message: `${positions.length}개 포지션`, positions };

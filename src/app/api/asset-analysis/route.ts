@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { buildSnapshot, calcRSI, calcEMA } from '@/lib/autotrade/engine';
+import { fetchCandles, isCandleError } from '@/lib/marketCandles';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -193,23 +194,14 @@ export async function POST(req: NextRequest) {
   const timeframe = String(body.timeframe || '1h');
 
   if (!asset) return NextResponse.json({ error: 'missing_asset' }, { status: 400 });
-  const interval = TF_MAP[timeframe];
-  if (!interval) return NextResponse.json({ error: 'unsupported_timeframe' }, { status: 400 });
+  if (!TF_MAP[timeframe]) return NextResponse.json({ error: 'unsupported_timeframe' }, { status: 400 });
 
-  const sym = toBinanceSymbol(asset, market);
-  if (!sym) {
-    return NextResponse.json({
-      error: 'market_not_supported',
-      message: `${market} 시장의 ${asset}는 아직 자동 분석이 지원되지 않습니다. 차트를 직접 확인해주세요.`,
-    }, { status: 400 });
-  }
-
-  const klines = await fetchKlines(sym, interval, 200);
-  if (!klines) {
-    return NextResponse.json({
-      error: 'price_fetch_failed',
-      message: '가격 데이터를 가져오지 못했습니다',
-    }, { status: 502 });
+  // 지표 계산은 시장과 무관하다 — 종가만 있으면 된다. 예전에는 이 라우트가
+  // crypto가 아니면 곧바로 막았는데, 막힌 것은 지표가 아니라 데이터 소스였다.
+  const klines = await fetchCandles(asset, market, timeframe, 200);
+  if (isCandleError(klines)) {
+    const status = klines.error === 'fetch_failed' ? 502 : 400;
+    return NextResponse.json({ error: klines.error, message: klines.message }, { status });
   }
 
   const snapshot = buildSnapshot(klines.closes, klines.volumes);
