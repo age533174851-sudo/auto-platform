@@ -104,6 +104,51 @@ async function runPositionGuards(
   return out;
 }
 
+/**
+ * SENT/UNKNOWN으로 남은 주문을 거래소 조회로 확정한다.
+ *
+ * 연결이 끊겼다 붙은 뒤에 반드시 거쳐야 하는 단계다. 주문을 재전송하지
+ * 않고 조회만 하므로 중복 체결 위험이 없다. 활성 연결마다 한 번씩 돌린다.
+ */
+async function recoverUnresolvedOrders(
+  sb: any, testnet: boolean,
+): Promise<{ checked: number; resolved: number; stillUnknown: number; needsAttention: number; details: string[] }> {
+  const out = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] as string[] };
+  try {
+    // 미확정 주문이 있는 연결만 고른다. 없으면 거래소를 부를 이유가 없다.
+    const { data: pend } = await sb.from('live_orders')
+      .select('connection_id').in('status', ['SENT', 'UNKNOWN']).limit(50);
+    const connIds = Array.from(new Set(
+      (Array.isArray(pend) ? pend : []).map((r: any) => r.connection_id).filter(Boolean)));
+    if (connIds.length === 0) return out;
+
+    const { decryptSecret } = await import('@/lib/exchanges/crypto');
+    const { reconcilePendingOrders } = await import('@/lib/engine/orderExecutor');
+
+    for (const cid of connIds) {
+      const { data: conn } = await sb.from('exchange_connections')
+        .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
+        .eq('id', cid).maybeSingle();
+      if (!conn || (conn as any).has_withdrawal) continue;
+
+      const ex = String((conn as any).exchange || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+      const r = await reconcilePendingOrders(sb, {
+        exchange: ex as 'binance' | 'gate',
+        apiKey: (conn as any).api_key,
+        apiSecret: decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? ''),
+        testnet: (conn as any).is_testnet !== false ? true : testnet,
+      });
+      out.checked += r.checked; out.resolved += r.resolved;
+      out.stillUnknown += r.stillUnknown; out.needsAttention += r.needsAttention;
+      out.details.push(...r.details);
+    }
+  } catch (e: any) {
+    // 복구 실패가 청산 감시를 막으면 안 된다. 사실만 남기고 계속한다.
+    out.details.push(`복구 실패: ${e?.message || e}`);
+  }
+  return out;
+}
+
 export async function GET(req: NextRequest) {
   if (!authorized(req)) {
     return NextResponse.json(
@@ -119,6 +164,16 @@ export async function GET(req: NextRequest) {
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+
+  // ── 미확정 주문 복구 ──
+  //
+  // 청산 판단보다 먼저 한다. UNKNOWN 주문이 실제로는 체결돼 있었다면,
+  // 그것을 모른 채 청산을 계산하면 없는 포지션을 닫으려 하거나 실제
+  // 포지션을 놓친다. 결과가 확정된 뒤에 판단해야 한다.
+  //
+  // 이 복구는 절대 주문을 다시 보내지 않는다 — 거래소에 조회만 한다
+  // (unknownResolver.ts 참고).
+  const recovery = await recoverUnresolvedOrders(sb, testnet);
 
   const { decideExits } = await import('@/lib/engine/exitMonitor');
   const decisions = await decideExits(sb, { testnet });
@@ -146,7 +201,7 @@ export async function GET(req: NextRequest) {
   if (dryRun || actionable.length === 0) {
     return NextResponse.json({
       ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
-      alerts,
+      alerts, recovery,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
         highWaterR: Number(d.highWaterR.toFixed(3)),
@@ -241,6 +296,6 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    ok: true, checked: decisions.length, actionable: actionable.length, alerts, results,
+    ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, results,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

@@ -14,6 +14,15 @@ export interface GatherResult {
   error?: string;
   appPositions: PositionView[];
   exchangePositions: PositionView[];
+  /**
+   * 아직 결과가 확정되지 않은 주문들.
+   *
+   * 상태 대조와는 다른 축이다. 대조는 "지금 무엇이 열려 있는가"를 보고,
+   * 이쪽은 "우리가 보낸 것 중 결과를 모르는 것이 있는가"를 본다.
+   * 미확정 주문이 있으면 거래소 포지션이 앞으로 변할 수 있으므로,
+   * 지금 대조가 일치하더라도 그 위에 새 주문을 얹으면 안 된다.
+   */
+  unresolvedOrders: { clientOrderId: string; symbol: string; reason: string; needsAttention: boolean }[];
 }
 
 export async function gatherAndReconcile(
@@ -21,7 +30,7 @@ export async function gatherAndReconcile(
   userId: string,
   testnet: boolean,
 ): Promise<GatherResult> {
-  const empty = { appPositions: [], exchangePositions: [] };
+  const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
 
   const { data: conn } = await sb.from('exchange_connections')
     .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal')
@@ -89,8 +98,34 @@ export async function gatherAndReconcile(
   const appOpenOrders: OrderView[] = (Array.isArray(appOpenRows) ? appOpenRows : [])
     .map((r: any) => ({ clientOrderId: String(r.client_order_id), symbol: String(r.symbol) }));
 
+  // ── 결과 미확정 주문 ──
+  // UNKNOWN은 "보냈는데 결과를 모르는" 상태다. 이게 남아 있으면 거래소
+  // 포지션이 앞으로 바뀔 수 있으므로, 지금 대조가 맞더라도 그 위에 새
+  // 주문을 얹으면 안 된다.
+  //
+  // needs_attention은 018 마이그레이션에서 생긴다. 아직 적용되지 않은 DB에서
+  // 그 컬럼을 요청하면 조회 전체가 실패하고, 그러면 미확정 주문이 0건으로
+  // 보여 관문이 열려버린다. 실패하면 컬럼을 빼고 다시 조회한다 —
+  // 부가 정보가 없더라도 "미확정 주문이 있다"는 사실은 반드시 알아야 한다.
+  const unresolvedQuery = (cols: string) => sb.from('live_orders')
+    .select(cols)
+    .eq('user_id', userId).eq('status', 'UNKNOWN')
+    .order('created_at', { ascending: false }).limit(20);
+
+  let { data: unresolvedRows, error: unresolvedErr } =
+    await unresolvedQuery('client_order_id, symbol, error_message, needs_attention');
+  if (unresolvedErr) {
+    ({ data: unresolvedRows } = await unresolvedQuery('client_order_id, symbol, error_message'));
+  }
+  const unresolvedOrders = (Array.isArray(unresolvedRows) ? unresolvedRows : []).map((r: any) => ({
+    clientOrderId: String(r.client_order_id || ''),
+    symbol: String(r.symbol || ''),
+    reason: String(r.error_message || '사유 미기록'),
+    needsAttention: r.needs_attention === true,
+  }));
+
   const verdict = reconcileState({ appPositions, exchangePositions, appOpenOrders, exchangeOpenOrders });
-  return { reachable: true, verdict, appPositions, exchangePositions };
+  return { reachable: true, verdict, appPositions, exchangePositions, unresolvedOrders };
 }
 
 /**
@@ -110,6 +145,17 @@ export async function assertStateConsistent(
     return {
       allowed: false, verdict: null,
       reason: `거래소 상태를 확인할 수 없어 신규 주문을 보류합니다: ${r.error || '조회 실패'}`,
+    };
+  }
+  // 미확정 주문이 있으면 막는다. 그 주문이 나중에 체결되면 포지션이
+  // 두 배가 되고, 100배 격리에서 그것은 즉시 청산 거리를 반으로 줄인다.
+  if (r.unresolvedOrders.length > 0) {
+    const first = r.unresolvedOrders[0];
+    return {
+      allowed: false, verdict: r.verdict,
+      reason: `결과가 확정되지 않은 주문이 ${r.unresolvedOrders.length}건 있어 신규 주문을 보류합니다 ` +
+              `(${first.symbol} ${first.clientOrderId}: ${first.reason}). ` +
+              `/api/orders/reconcile로 확정한 뒤 다시 시도하세요.`,
     };
   }
   if (r.verdict?.blockNewOrders) {

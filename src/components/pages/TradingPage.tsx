@@ -994,7 +994,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                     error:        ['연결 실패', T.red],
                     idle:         ['미연결', T.muted],
                   };
-                  const [sLabel, sColor] = statusLabel[stream.status] || statusLabel.idle;
+                  let [sLabel, sColor] = statusLabel[stream.status] || statusLabel.idle;
+                  // 연결은 살아 있는데 데이터가 멈춘 경우. '● 실시간'을 그대로
+                  // 두면 멈춘 호가를 실시간으로 오인해 진입 판단을 하게 된다.
+                  if (stream.stale) {
+                    const ageSec = stream.lastMessageAt
+                      ? Math.round((Date.now() - stream.lastMessageAt) / 1000) : null;
+                    sLabel = ageSec !== null ? `⚠ 멈춤 ${ageSec}초` : '⚠ 데이터 멈춤';
+                    sColor = T.ylw;
+                  }
 
                   if (!isCryptoSel) {
                     return (

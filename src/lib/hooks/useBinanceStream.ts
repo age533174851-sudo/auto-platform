@@ -33,17 +33,35 @@ export interface StreamState {
   markPrice: number | null;
   changePct: number | null;
   status: 'connecting' | 'live' | 'reconnecting' | 'error' | 'idle';
+  /** 마지막으로 데이터가 도착한 시각 (ms). 없으면 한 번도 못 받았다 */
+  lastMessageAt: number | null;
+  /**
+   * 연결은 살아 있는데 데이터가 멈춘 상태.
+   *
+   * status만으로는 부족하다. 실제로 겪은 문제가 정확히 이것이었다 —
+   * Binance가 연결은 받아주고 데이터는 안 보내서 화면에 '● 실시간'이
+   * 떠 있는데 호가는 비어 있었다. onclose가 안 오므로 재연결 로직도
+   * 돌지 않는다. 연결 여부(status)와 신선도(stale)는 다른 축이다.
+   */
+  stale: boolean;
   error?: string;
 }
 
 const EMPTY: StreamState = {
   asks: [], bids: [], trades: [],
   lastPrice: null, markPrice: null, changePct: null,
-  status: 'idle',
+  status: 'idle', lastMessageAt: null, stale: false,
 };
 
 const MAX_TRADES = 30;
 const MAX_BACKOFF_MS = 30_000;
+
+// depth는 100ms마다 온다. 8초면 80회를 놓친 것이므로 정상이 아니다.
+const STALE_MS = 8_000;
+// 여기까지 조용하면 소켓이 살아 있어도 죽은 것으로 보고 다시 붙는다.
+const DEAD_MS = 25_000;
+// 감시 주기. 표시 지연을 1초 이내로 유지한다.
+const WATCHDOG_MS = 1_000;
 
 /**
  * @param symbol   'BTCUSDT' 형식. 빈 값이면 연결하지 않는다.
@@ -57,6 +75,9 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 언마운트·심볼 변경 후 도착한 이벤트가 상태를 덮어쓰지 않게 하는 표식
   const aliveRef = useRef(true);
+  // 마지막 수신 시각. 메시지마다 setState하면 100ms마다 리렌더가 한 번 더
+  // 늘어나므로 ref에 두고, 감시 타이머가 1초에 한 번만 상태로 옮긴다.
+  const lastMsgRef = useRef<number | null>(null);
 
   const cleanup = useCallback(() => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
@@ -102,11 +123,15 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
     ws.onopen = () => {
       if (!aliveRef.current) return;
       retryRef.current = 0;
-      setState(prev => ({ ...prev, status: 'live', error: undefined }));
+      // 연결됐다고 해서 데이터가 오는 것은 아니다. 신선도 시계는 여기서
+      // 시작하되, 실제 수신이 없으면 곧 stale로 넘어간다.
+      lastMsgRef.current = Date.now();
+      setState(prev => ({ ...prev, status: 'live', stale: false, error: undefined }));
     };
 
     ws.onmessage = (ev) => {
       if (!aliveRef.current) return;
+      lastMsgRef.current = Date.now();
       let msg: any;
       try { msg = JSON.parse(ev.data); } catch { return; }
       const stream: string = msg?.stream || '';
@@ -143,7 +168,9 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
       // 지수 백오프. Binance는 24시간마다 정상적으로 끊으므로 재연결은 예외가 아니다.
       const wait = Math.min(1000 * 2 ** retryRef.current, MAX_BACKOFF_MS);
       retryRef.current += 1;
-      setState(prev => ({ ...prev, status: 'reconnecting' }));
+      // stale은 '연결됐는데 조용함'을 뜻한다. 끊긴 상태는 status가 말해주므로
+      // 둘을 동시에 켜두면 같은 사실을 두 번 말하게 된다.
+      setState(prev => ({ ...prev, status: 'reconnecting', stale: false }));
       timerRef.current = setTimeout(() => {
         if (aliveRef.current) connect(sym);
       }, wait);
@@ -163,7 +190,38 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
     // 전까지 이전 종목의 호가가 그대로 보인다.
     setState({ ...EMPTY, status: 'connecting' });
     retryRef.current = 0;
+    lastMsgRef.current = null;
     connect(symbol);
+
+    // ── 무응답 감시 ──
+    // 소켓이 열려 있어도 데이터가 안 오면 화면은 옛 값을 계속 보여준다.
+    // 그 상태에서 '실시간'이라고 표기하는 것이 가장 위험하다 — 멈춘 호가를
+    // 보고 진입 판단을 하게 된다. 그래서 두 단계로 다룬다:
+    //   8초 무응답  → stale 표시 (사용자에게 알린다)
+    //  25초 무응답  → 소켓을 강제로 닫는다 (onclose가 백오프 재연결을 건다)
+    const watchdog = setInterval(() => {
+      if (!aliveRef.current) return;
+      const last = lastMsgRef.current;
+      if (last === null) return;                 // 아직 연결 중
+      const age = Date.now() - last;
+
+      setState(prev => {
+        if (prev.status !== 'live') return prev;  // 끊긴 상태는 status가 이미 말해준다
+        const nextStale = age > STALE_MS;
+        if (nextStale === prev.stale && prev.lastMessageAt === last) return prev;
+        return { ...prev, stale: nextStale, lastMessageAt: last };
+      });
+
+      if (age > DEAD_MS) {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          // 닫으면 onclose가 지수 백오프로 다시 붙인다. 여기서 직접
+          // connect를 부르면 백오프를 건너뛰어 재연결 폭주가 된다.
+          lastMsgRef.current = Date.now();       // 닫는 동안 반복 트리거 방지
+          try { ws.close(); } catch { /* 이미 닫힘 */ }
+        }
+      }
+    }, WATCHDOG_MS);
 
     // ── 24시간 변동률 (REST) ──
     // @ticker 스트림이 오지 않으므로 REST로 받는다. 5초 주기면 충분하다 —
@@ -198,6 +256,7 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
       aliveRef.current = false;
       pollAlive = false;
       clearInterval(pollTimer);
+      clearInterval(watchdog);
       document.removeEventListener('visibilitychange', onVisible);
       cleanup();
     };

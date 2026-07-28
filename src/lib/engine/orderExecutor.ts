@@ -49,6 +49,27 @@ export interface ExecuteResult {
   duplicate?: boolean;
 }
 
+// ── 018 마이그레이션 이전 스키마와의 호환 ──
+//
+// 복구용 컬럼(pos_qty_before 등)은 018에서 추가된다. 아직 적용되지
+// 않은 DB에 그대로 쓰면 update 전체가 실패해 상태 기록까지 날아간다.
+// 주문을 보냈는데 DB가 INTENT로 남는 것이 가장 나쁜 결과이므로,
+// 실패하면 새 컬럼만 빼고 다시 쓴다. 마이그레이션이 적용되면 이 경로는 안 돌아간다.
+const RECOVERY_COLS = ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 'needs_attention'];
+
+async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): Promise<void> {
+  const { error } = await sb.from('live_orders').update(patch).eq('id', id);
+  if (!error) return;
+  const legacy: Record<string, any> = {};
+  let stripped = false;
+  for (const [k, v] of Object.entries(patch)) {
+    if (RECOVERY_COLS.includes(k)) { stripped = true; continue; }
+    legacy[k] = v;
+  }
+  if (!stripped || Object.keys(legacy).length === 0) return;
+  await sb.from('live_orders').update(legacy).eq('id', id);
+}
+
 // 수량 정밀도 보정 — 거래소는 정해진 소수점만 받는다
 export function roundQuantity(qty: number, stepSize: number): number {
   if (!stepSize || stepSize <= 0) return qty;
@@ -153,7 +174,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         currentStatus = next;
       }
     }
-    try { await sb.from('live_orders').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', orderRowId); } catch {}
+    try { await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() }); } catch {}
   };
 
   try {
@@ -207,8 +228,28 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         return { ok: false, status: 'FAILED', clientOrderId, message: `레버리지 설정 실패: ${(lev as any)?.message}` };
       }
 
+      // ── 4.5) 전송 직전 포지션 기록 ──
+      //
+      // 응답을 못 받았을 때(UNKNOWN) "주문이 거래소에 들어갔는가"를 판단할
+      // 유일한 반대 증거다. 나중에 조회했더니 주문은 안 보이는데 포지션이
+      // 변해 있다면, 주문이 들어갔거나 다른 무언가가 계좌를 건드린 것이므로
+      // 자동 확정해서는 안 된다. 기준값이 없으면 그 비교 자체를 못 한다.
+      // 실패해도 주문은 진행한다 — 교차 확인이 없다는 사실만 남긴다.
+      let posQtyBefore: number | null = null;
+      try {
+        const pr: any = await bf.getFuturesPositions(apiKey, apiSecret, testnet);
+        if (pr?.success) {
+          const mine = (pr.positions as any[]).find(
+            (p: any) => String(p.symbol).toUpperCase() === plan.symbol.toUpperCase());
+          posQtyBefore = mine ? Number(mine.amount) || 0 : 0;
+        }
+      } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
+
       // ── 5) 주문 전송 ──
-      await update({ status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1 });
+      await update({
+        status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
+        pos_qty_before: posQtyBefore,
+      });
 
       let res: any;
       try {
@@ -360,13 +401,26 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 }
 
 // ── 재시작 복구: UNKNOWN/SENT 상태 주문을 거래소와 대조 ──
-export interface ReconcileResult { checked: number; resolved: number; stillUnknown: number; details: string[] }
+//
+// 예전 구현은 "거래소에 주문이 안 보이면 전송되지 않은 것"으로 즉시 FAILED를
+// 찍었다. 그런데 거래소가 아직 반영을 못 했거나, 조회가 실패했거나, 우리가
+// 멱등 키를 안 붙여 식별을 못 하는 경우도 전부 "안 보임"으로 들어온다.
+// FAILED로 찍히면 재시도가 열리고, 그 재시도가 그대로 중복 체결이 된다.
+//
+// 판단 규칙은 unknownResolver.ts(순수 함수)로 옮겼다. 여기서는 조회만 해서
+// 넘긴다 — 규칙이 코드 안에 흩어져 있으면 테스트로 확인할 수가 없다.
+export interface ReconcileResult {
+  checked: number; resolved: number; stillUnknown: number;
+  /** 자동 판단이 불가능해 사람이 봐야 하는 건수 */
+  needsAttention: number;
+  details: string[];
+}
 
 export async function reconcilePendingOrders(
   sb: any,
   creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean }
 ): Promise<ReconcileResult> {
-  const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, details: [] };
+  const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] };
 
   const { data: pending } = await sb.from('live_orders')
     .select('*')
@@ -377,43 +431,126 @@ export async function reconcilePendingOrders(
 
   if (!Array.isArray(pending) || !pending.length) return out;
 
+  const { resolveUnknown, shouldEscalate } = await import('./unknownResolver');
+
+  // 포지션은 심볼마다 다시 부르지 않고 한 번만 읽는다. 대조 한 번에 50건이
+  // 들어올 수 있어 건마다 부르면 레이트리밋에 걸린다.
+  let posBySymbol: Map<string, number> | null = null;
+  if (creds.exchange === 'binance') {
+    try {
+      const bf = await import('@/lib/exchanges/binanceFutures');
+      const pr: any = await bf.getFuturesPositions(creds.apiKey, creds.apiSecret, creds.testnet);
+      if (pr?.success) {
+        posBySymbol = new Map(
+          (pr.positions as any[]).map((p: any) => [String(p.symbol).toUpperCase(), Number(p.amount) || 0]),
+        );
+      }
+    } catch { posBySymbol = null; }   // null이면 교차 확인 불가로 취급된다
+  }
+
   for (const o of pending) {
     out.checked++;
+    const attempts = Number(o.resolve_attempts) || 0;
     try {
       if (creds.exchange === 'binance') {
         const bf = await import('@/lib/exchanges/binanceFutures');
-        const r = await bf.findOrderByClientId(creds.apiKey, creds.apiSecret, o.symbol, o.client_order_id, creds.testnet);
-        if (r.found) {
-          const st = r.order?.status;
-          await sb.from('live_orders').update({
-            status: st === 'FILLED' ? 'FILLED' : 'RECONCILED',
-            exchange_order_id: String(r.order?.orderId),
-            filled_qty: parseFloat(r.order?.executedQty || '0'),
-            avg_price: parseFloat(r.order?.avgPrice || '0'),
+
+        // findOrderByClientId는 "없음"(-2013)만 found:false로 돌려주고 그 외
+        // 오류는 던진다. 던진 것은 조회 실패이지 주문 없음이 아니다.
+        let query: { ok: boolean; order: any | null; error?: string };
+        try {
+          const r = await bf.findOrderByClientId(
+            creds.apiKey, creds.apiSecret, o.symbol, o.client_order_id, creds.testnet);
+          query = { ok: true, order: r.found ? r.order : null };
+        } catch (e: any) {
+          query = { ok: false, order: null, error: e?.message || String(e) };
+        }
+
+        const sentAt = o.sent_at || o.created_at;
+        const elapsedMs = sentAt ? Date.now() - new Date(sentAt).getTime() : 0;
+
+        // 기준값이 없으면 비교 자체가 불가능하므로 교차 확인을 생략한다
+        // (018 이전에 만들어진 행). 그 사실은 확정 사유에 남는다.
+        const before = o.pos_qty_before;
+        const position = before === null || before === undefined ? undefined : {
+          qtyBefore: Number(before),
+          qtyNow: posBySymbol ? (posBySymbol.get(String(o.symbol).toUpperCase()) ?? 0) : null,
+        };
+
+        const verdict = resolveUnknown({
+          clientOrderId: o.client_order_id || null, elapsedMs, query, position,
+        });
+
+        if (verdict.resolved) {
+          const st = verdict.state === 'FILLED' ? 'FILLED'
+            : verdict.state === 'FAILED' ? 'FAILED'
+            : verdict.state === 'REJECTED' ? 'REJECTED'
+            : 'RECONCILED';
+          await updateOrderRow(sb, o.id, {
+            status: st,
+            exchange_order_id: query.order?.orderId != null ? String(query.order.orderId) : o.exchange_order_id,
+            filled_qty: query.order ? parseFloat(query.order.executedQty || '0') : o.filled_qty,
+            avg_price: query.order ? parseFloat(query.order.avgPrice || '0') : o.avg_price,
+            error_message: verdict.resolved && st === 'FAILED' ? verdict.reason : o.error_message,
             reconciled_at: new Date().toISOString(),
-          }).eq('id', o.id);
+            resolve_attempts: attempts + 1,
+            last_resolve_at: new Date().toISOString(),
+            needs_attention: false,
+          });
           out.resolved++;
-          out.details.push(`${o.symbol} ${o.client_order_id} → ${st} (체결 ${r.order?.executedQty})`);
+          out.details.push(`${o.symbol} ${o.client_order_id} → ${verdict.state} (${verdict.reason})`);
         } else {
-          // 거래소에 없음 = 주문이 안 나갔음 → 안전하게 실패 처리
-          await sb.from('live_orders').update({
-            status: 'FAILED', error_message: '거래소에 주문 없음 — 전송되지 않은 것으로 확정',
-            reconciled_at: new Date().toISOString(),
-          }).eq('id', o.id);
-          out.resolved++;
-          out.details.push(`${o.symbol} ${o.client_order_id} → 미전송 확정`);
+          // 확정 못 함. 시도 횟수가 넘었거나 모순이면 사람에게 넘긴다.
+          const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
+          await updateOrderRow(sb, o.id, {
+            status: 'UNKNOWN',
+            error_message: verdict.reason,
+            resolve_attempts: attempts + 1,
+            last_resolve_at: new Date().toISOString(),
+            needs_attention: escalate,
+          });
+          out.stillUnknown++;
+          if (escalate) out.needsAttention++;
+          out.details.push(
+            `${o.symbol} ${o.client_order_id} → 미확정${escalate ? ' ⚠ 사람 확인 필요' : ''} (${verdict.reason})`);
         }
       } else {
         const gf = await import('@/lib/exchanges/gateFutures');
         const contract = o.symbol.replace('USDT', '_USDT').toUpperCase();
         const hit = await gf.findOrderByClientIdGateFutures(creds.apiKey, creds.apiSecret, contract, o.client_order_id, creds.testnet);
-        await sb.from('live_orders').update({
-          status: hit ? 'RECONCILED' : 'FAILED',
-          exchange_order_id: hit ? String(hit.id) : null,
-          error_message: hit ? null : '거래소에 주문 없음',
-          reconciled_at: new Date().toISOString(),
-        }).eq('id', o.id);
-        out.resolved++;
+
+        // Gate 경로는 포지션 교차 확인이 아직 없다. 그래서 "안 보임"만으로
+        // FAILED를 찍지 않고, 반영 대기 시간이 지났는지만 본다. 그 시간 안이면
+        // 다음 대조로 미룬다 — Binance와 같은 이유다.
+        const sentAt = o.sent_at || o.created_at;
+        const elapsedMs = sentAt ? Date.now() - new Date(sentAt).getTime() : 0;
+        const verdict = resolveUnknown({
+          clientOrderId: o.client_order_id || null, elapsedMs,
+          query: { ok: true, order: hit ? { status: 'NEW', orderId: hit.id } : null },
+        });
+
+        if (verdict.resolved) {
+          await updateOrderRow(sb, o.id, {
+            status: verdict.state === 'FAILED' ? 'FAILED' : 'RECONCILED',
+            exchange_order_id: hit ? String(hit.id) : null,
+            error_message: verdict.state === 'FAILED' ? verdict.reason : null,
+            reconciled_at: new Date().toISOString(),
+            resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
+            needs_attention: false,
+          });
+          out.resolved++;
+          out.details.push(`${o.symbol} ${o.client_order_id} → ${verdict.state} (Gate)`);
+        } else {
+          const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
+          await updateOrderRow(sb, o.id, {
+            status: 'UNKNOWN', error_message: verdict.reason,
+            resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
+            needs_attention: escalate,
+          });
+          out.stillUnknown++;
+          if (escalate) out.needsAttention++;
+          out.details.push(`${o.symbol} ${o.client_order_id} → 미확정 (Gate: ${verdict.reason})`);
+        }
       }
     } catch (e: any) {
       out.stillUnknown++;
