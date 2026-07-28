@@ -158,6 +158,8 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
   const [selected,     setSelected]     = useState<typeof MOCK_EVENTS[number] | null>(null);
   const [events,       setEvents]       = useState<typeof MOCK_EVENTS>([]);
   const [loading,      setLoading]      = useState(true);
+  // 예시 데이터를 보고 있다는 경고. null이면 실제 일정이다.
+  const [sampleWarning, setSampleWarning] = useState<string | null>(null);
 
   // 첫 마운트에 저장된 필터 복원
   useEffect(() => {
@@ -178,9 +180,20 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
       .then(r => r.json())
       .then(d => {
         const evts = Array.isArray(d.data) ? d.data : (Array.isArray(d.events) ? d.events : []);
-        setEvents(evts.length > 0 ? evts : MOCK_EVENTS);
+        // 샘플인지 실제인지 화면이 말해야 한다. 여기 예상치는 그럴듯하게
+        // 지어낸 숫자라(FOMC 5.25% 같은), 표시가 없으면 사용자는 그걸
+        // 실제 전망으로 읽고 그 시각에 맞춰 포지션을 정리한다.
+        setSampleWarning(d?.sampleWarning ?? null);
+        if (evts.length > 0) setEvents(evts);
+        else {
+          setEvents(MOCK_EVENTS);
+          setSampleWarning('표시된 일정과 예상치는 예시입니다. 실제 발표 일정이 아니므로 매매 판단에 쓰지 마세요.');
+        }
       })
-      .catch(() => setEvents(MOCK_EVENTS))
+      .catch(() => {
+        setEvents(MOCK_EVENTS);
+        setSampleWarning('경제 일정을 불러오지 못해 예시를 표시하고 있습니다. 실제 발표 일정이 아닙니다.');
+      })
       .finally(() => setLoading(false));
   }, [lang]);
 
@@ -418,6 +431,21 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
           })}
         </div>
       </div>
+
+      {/* 예시 데이터 경고 — 목록 바로 위, 놓칠 수 없는 자리에.
+          여기 예상치는 지어낸 숫자다. 표시가 없으면 사용자는 그걸 실제
+          전망으로 읽고, 있지도 않은 FOMC 시각에 맞춰 포지션을 정리한다. */}
+      {sampleWarning && !loading && (
+        <div style={{
+          padding: '11px 13px', borderRadius: R.md, marginBottom: SP.sm,
+          background: A(T.ylw, '15'), border: `1px solid ${A(T.ylw, '40')}`,
+          color: T.ylw, fontSize: 11, lineHeight: 1.6,
+          display: 'flex', gap: 8, alignItems: 'flex-start',
+        }}>
+          <span style={{ flexShrink: 0 }}>⚠️</span>
+          <span>{sampleWarning}</span>
+        </div>
+      )}
 
       {/* 본문 */}
       {loading ? (

@@ -155,10 +155,48 @@ export async function GET(req: NextRequest) {
   };
   let events = addDates(eventMap[lang] ?? EVENTS_KO);
 
+  // ── 1순위: 저장된 일정 ──
+  // 크론이 모아 둔 실제 일정이 있으면 그걸 쓴다. 아래 목데이터는
+  // 그럴듯한 가짜 숫자(FOMC 5.25% 같은)라서, 있는데 안 쓰면 사용자가
+  // 지어낸 예상치를 실제 전망으로 읽는다.
+  let source = 'mock';
+  let status: 'live' | 'sample' = 'sample';
+  try {
+    const { getSupabaseAdmin } = await import('@/lib/supabase/server');
+    const sb = getSupabaseAdmin();
+    if (sb) {
+      const from = new Date(Date.now() - 2 * 86400000).toISOString();
+      const { data, error } = await (sb.from('econ_events') as any)
+        .select('id, timestamp_utc, event, impact, country, actual, forecast, previous')
+        .gte('timestamp_utc', from)
+        .order('timestamp_utc', { ascending: true })
+        .limit(120);
+      if (!error && Array.isArray(data) && data.length > 0) {
+        source = 'db'; status = 'live';
+        events = data.map((r: any) => {
+          const t = new Date(r.timestamp_utc);
+          return {
+            id: String(r.id),
+            title: r.event,
+            country: r.country || '',
+            date: t.toISOString().slice(0, 10),
+            // 저장된 값은 UTC다. 화면이 보는 사람 시간대로 바꾸도록
+            // ISO 전체를 넘긴다 — 여기서 특정 시간대로 굳히면 안 된다.
+            time: t.toISOString().slice(11, 16),
+            dateTime: t.toISOString(),
+            impact: r.impact || 'unknown',
+            forecast: r.forecast ?? null,
+            previous: r.previous ?? null,
+            actual: r.actual ?? null,
+          };
+        });
+      }
+    }
+  } catch { /* 저장분을 못 읽으면 아래로 내려간다 */ }
+
   // Try Finnhub if key is configured
   const finnKey = process.env.FINNHUB_API_KEY || '';
-  let source = 'mock';
-  if (finnKey) {
+  if (finnKey && status !== 'live') {
     try {
       const from = now.toISOString().slice(0, 10);
       const to   = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
@@ -170,14 +208,16 @@ export async function GET(req: NextRequest) {
         const d = await r.json();
         const cal: any[] = d.economicCalendar || [];
         if (cal.length > 0) {
-          source = 'finnhub';
+          source = 'finnhub'; status = 'live';
           events = cal.slice(0, 30).map((ev: any, i: number) => ({
             id:       `fh-${i}`,
             title:    ev.event || ev.eventName || 'Economic Event',
             country:  ev.country || 'US',
             date:     ev.date || nextDate(15),
             time:     ev.time || '08:30',
-            dateTime: `${ev.date || nextDate(15)}T${ev.time || '08:30'}:00+09:00`,
+            // 시간대를 붙이지 않는다. 예전에는 +09:00을 박아서 미국 지표가
+            // 한국 시각으로 해석됐다 — FOMC가 9시간 밀린다.
+            dateTime: ev.time ? `${ev.date}T${ev.time}:00Z` : null,
             impact:   ev.impact === '3' ? 'high' : ev.impact === '2' ? 'medium' : 'low',
             forecast: ev.estimate != null ? String(ev.estimate) : null,
             previous: ev.prev     != null ? String(ev.prev)     : null,
@@ -192,6 +232,14 @@ export async function GET(req: NextRequest) {
   if (country !== 'all') events = events.filter(e => e.country === country);
   if (impact  !== 'all') events = events.filter(e => e.impact  === impact);
 
-  return NextResponse.json({ ok:true, status:'mock', source, lang, data: events },
+  return NextResponse.json({
+    ok: true,
+    // 예전에는 항상 'mock'이었다. 실제 데이터를 받아와도 그렇게 적으면
+    // 화면이 진짜와 가짜를 구분할 수 없다.
+    status, source, lang, data: events,
+    sampleWarning: status === 'sample'
+      ? '표시된 일정과 예상치는 예시입니다. 실제 발표 일정이 아니므로 매매 판단에 쓰지 마세요.'
+      : null,
+  },
     { headers:{ 'Cache-Control':'public, s-maxage=300, stale-while-revalidate=600' } });
 }
