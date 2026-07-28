@@ -97,7 +97,17 @@ async function callOpenAI(input: AiCallInput): Promise<AiCallResult> {
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!r.ok) return { ...base, error: `HTTP ${r.status}` };
+    if (!r.ok) {
+      // 상태 코드만 남기면 '왜'를 모른다. 429는 한도 초과와 잔액 부족이
+      // 같은 코드로 오는데, 전자는 기다리면 풀리고 후자는 결제해야 한다.
+      // 대응이 완전히 다른데 화면에는 둘 다 'HTTP 429'로 보인다.
+      let detail = '';
+      try {
+        const e = await r.json();
+        detail = e?.error?.message || e?.error?.code || '';
+      } catch { /* 본문이 JSON이 아니면 상태 코드만 */ }
+      return { ...base, error: detail ? `HTTP ${r.status} — ${detail}` : `HTTP ${r.status}` };
+    }
     const d = await r.json();
     const text = d?.choices?.[0]?.message?.content?.trim() || null;
     return {
