@@ -35,6 +35,15 @@ export interface StreamState {
   status: 'connecting' | 'live' | 'reconnecting' | 'error' | 'idle';
   /** 마지막으로 데이터가 도착한 시각 (ms). 없으면 한 번도 못 받았다 */
   lastMessageAt: number | null;
+  // ── 값별 수신 시각 ──
+  // 하나로 묶으면 안 된다. 호가는 100ms마다 오고 변동률은 5초마다 오므로,
+  // 같은 나이 표시를 붙이면 둘 중 하나는 반드시 거짓말이 된다.
+  /** 호가(depth) 수신 시각 */
+  depthAt: number | null;
+  /** 현재가(bookTicker) 수신 시각 */
+  priceAt: number | null;
+  /** 24시간 변동률(REST) 수신 시각 */
+  changeAt: number | null;
   /**
    * 연결은 살아 있는데 데이터가 멈춘 상태.
    *
@@ -51,6 +60,7 @@ const EMPTY: StreamState = {
   asks: [], bids: [], trades: [],
   lastPrice: null, markPrice: null, changePct: null,
   status: 'idle', lastMessageAt: null, stale: false,
+  depthAt: null, priceAt: null, changeAt: null,
 };
 
 const MAX_TRADES = 30;
@@ -144,7 +154,7 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
           (Array.isArray(rows) ? rows : [])
             .map((r: any) => ({ price: parseFloat(r[0]), qty: parseFloat(r[1]) }))
             .filter(l => Number.isFinite(l.price) && Number.isFinite(l.qty) && l.qty > 0);
-        setState(prev => ({ ...prev, asks: toLevels(d.a), bids: toLevels(d.b) }));
+        setState(prev => ({ ...prev, asks: toLevels(d.a), bids: toLevels(d.b), depthAt: Date.now() }));
         return;
       }
 
@@ -153,7 +163,7 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
         // 이 둘의 중간값을 현재가로 쓴다.
         const bid = parseFloat(d.b), ask = parseFloat(d.a);
         if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
-        setState(prev => ({ ...prev, lastPrice: (bid + ask) / 2 }));
+        setState(prev => ({ ...prev, lastPrice: (bid + ask) / 2, priceAt: Date.now() }));
       }
     };
 
@@ -234,7 +244,7 @@ export function useBinanceStream(symbol: string, enabled = true): StreamState {
         const d = await r.json();
         const chg = parseFloat(d?.priceChangePercent);
         if (Number.isFinite(chg) && aliveRef.current) {
-          setState(prev => ({ ...prev, changePct: chg }));
+          setState(prev => ({ ...prev, changePct: chg, changeAt: Date.now() }));
         }
       } catch { /* 실패하면 다음 주기에 다시 시도 */ }
     };

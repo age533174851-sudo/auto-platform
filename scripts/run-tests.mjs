@@ -20,9 +20,10 @@ import { runPositionGuardTests } from './src/lib/engine/positionGuard.test';
 import { runStateReconcileTests } from './src/lib/engine/stateReconcile.test';
 import { runOrderLifecycleTests } from './src/lib/engine/orderLifecycle.test';
 import { runUnknownResolverTests } from './src/lib/engine/unknownResolver.test';
+import { runDataQualityTests } from './src/lib/engine/dataQuality.test';
 import { summary } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
-runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests();
+runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests();
 const s = summary();
 console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
 if (s.failed > 0) { s.failures.forEach(f => console.log('  FAIL:', f)); (globalThis).process.exitCode = 1; }

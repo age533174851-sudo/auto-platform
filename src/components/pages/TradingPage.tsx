@@ -7,6 +7,8 @@ import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, closePap
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
+import { DataBadge } from '@/components/ui/DataBadge';
+import type { DataSource } from '@/lib/engine/dataQuality';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
 import type { Asset, Order } from '@/types';
 import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
@@ -15,7 +17,11 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          LiquidationCalc, PositionSizer, RiskDashboard, InlineTVChart, ChartContainer } from './SharedUI';
 
 
-function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];currency:string;activeAsset?:any;onOpenPnL?:(a:any)=>void}) {
+function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSimSteps}:{prices:Asset[];currency:string;activeAsset?:any;onOpenPnL?:(a:any)=>void;
+  /** 마지막 실데이터 수신 시각 (useLivePrices) */
+  priceRealAt?:number|null;
+  /** 그 뒤로 임의로 움직인 횟수. 0보다 크면 현재 값은 모의다 */
+  priceSimSteps?:number}) {
   const [isMock,setIsMock]=useState(true);
   const [tradeMode,setTradeMode]=useState<'mock'|'testnet'|'live'>('mock');
   const [hasExchange,setHasExchange]=useState(false);
@@ -757,6 +763,20 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                 <div style={{color:T.muted,fontSize:10}}>{sel.nameKr}</div>
                 <div style={{color:T.txt,fontSize:22,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1}}>{cvt(sel.p,currency)}</div>
                 <span style={{color:sel.c>=0?T.grn:T.red,fontWeight:800,fontSize:13}}>{sel.c>=0?'▲':'▼'} {Math.abs(sel.c).toFixed(2)}%</span>
+                {/* ── 이 숫자의 정체 ──
+                    이 화면의 대표 가격은 12초마다만 진짜 값이고, 그 사이에는
+                    난수보행으로 움직인다. 지금까지는 그래도 상단에 LIVE가 떴 있었다.
+                    실제 체결은 호가창의 USDT 가격으로 나가므로 둘을 구분해야 한다. */}
+                <div style={{marginTop:3}}>
+                  <DataBadge compact source={{
+                    // 실데이터를 한 번도 못 받았으면 수신 없음이 아니라 **모의**다.
+                    // 숫자는 버젠히 보이고 있으므로 "없다"고 하면 화면과 말이 어긋난다.
+                    kind: (priceRealAt == null || (priceSimSteps ?? 0) > 0) ? 'SIMULATED' : 'POLLED',
+                    origin: priceRealAt == null ? '앱 기본값 · 실데이터 미수신'
+                          : (priceSimSteps ?? 0) > 0 ? '실데이터 사이 보간' : '/api/prices',
+                    label: '표시가', asOf: priceRealAt ?? null, expectedIntervalMs: 12_000,
+                  }}/>
+                </div>
               </div>
               <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:5}}>
                 <Logo id={sel.id} size={38} clr={sel.clr}/>
@@ -987,22 +1007,41 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                     </div>
                   );
 
-                  const statusLabel: Record<string,[string,string]> = {
-                    live:         ['● 실시간', T.grn],
+                  // ── 데이터 출처·나이 ──
+                  // 값마다 따로 만든다. 호가는 100ms마다 오고 변동률은 5초마다
+                  // REST로 온다. 하나로 묶어 표시하면 둘 중 하나는 반드시 거짓말이 된다.
+                  const connected = stream.status === 'live' && !stream.stale;
+                  const depthSrc: DataSource = {
+                    kind: connected ? 'REALTIME' : 'UNAVAILABLE',
+                    origin: 'Binance 선물', label: '호가',
+                    asOf: stream.depthAt, expectedIntervalMs: 100,
+                  };
+                  const priceSrc: DataSource = {
+                    kind: connected ? 'REALTIME' : 'UNAVAILABLE',
+                    origin: 'Binance 선물', label: '최우선 호가 중간값',
+                    asOf: stream.priceAt, expectedIntervalMs: 100,
+                  };
+                  // REST 폴링이다. 실시간과 같은 모양을 주면 안 된다.
+                  const changeSrc: DataSource = {
+                    kind: stream.changeAt ? 'POLLED' : 'UNAVAILABLE',
+                    origin: 'Binance REST', label: '24h 변동률',
+                    asOf: stream.changeAt, expectedIntervalMs: 5_000,
+                  };
+                  // 체결 강도가 아니라 우리가 호가로 계산한 값이다.
+                  const pressureSrc: DataSource = {
+                    kind: connected && stream.depthAt ? 'DERIVED' : 'UNAVAILABLE',
+                    origin: '호가 잔량 계산',
+                    asOf: stream.depthAt, expectedIntervalMs: 100,
+                  };
+
+                  const connLabel: Record<string,[string,string]> = {
+                    live:         ['실시간', T.grn],
                     connecting:   ['연결 중…', T.ylw],
                     reconnecting: ['재연결 중…', T.ylw],
                     error:        ['연결 실패', T.red],
                     idle:         ['미연결', T.muted],
                   };
-                  let [sLabel, sColor] = statusLabel[stream.status] || statusLabel.idle;
-                  // 연결은 살아 있는데 데이터가 멈춘 경우. '● 실시간'을 그대로
-                  // 두면 멈춘 호가를 실시간으로 오인해 진입 판단을 하게 된다.
-                  if (stream.stale) {
-                    const ageSec = stream.lastMessageAt
-                      ? Math.round((Date.now() - stream.lastMessageAt) / 1000) : null;
-                    sLabel = ageSec !== null ? `⚠ 멈춤 ${ageSec}초` : '⚠ 데이터 멈춤';
-                    sColor = T.ylw;
-                  }
+                  const [sLabel, sColor] = connLabel[stream.status] || connLabel.idle;
 
                   if (!isCryptoSel) {
                     return (
@@ -1017,7 +1056,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                     <div style={{background:T.bg,borderRadius:8,padding:'4px 0',border:`1px solid ${T.border}`}}>
                       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'2px 6px 4px',fontSize:8,color:T.muted,borderBottom:`1px solid ${T.border}`}}>
                         <span>가격 (USDT)</span>
-                        <span style={{color:sColor,fontWeight:700}}>{sLabel}</span>
+                        {stream.status === 'live'
+                          ? <DataBadge source={depthSrc} compact/>
+                          : <span style={{color:sColor,fontWeight:700}}>{sLabel}</span>}
                         <span>수량</span>
                       </div>
 
@@ -1036,6 +1077,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                             <div style={{color:T.muted,fontSize:8}}>
                               {chg != null ? `${chg>=0?'▲':'▼'}${Math.abs(chg).toFixed(2)}%` : '변동률 수신 중'}
                             </div>
+                            {/* 현재가와 변동률은 출처도 주기도 다르다. 각각 표기한다. */}
+                            <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1,marginTop:3}}>
+                              <DataBadge source={priceSrc} compact/>
+                              <DataBadge source={changeSrc} compact/>
+                            </div>
                           </div>
                           {showBids.map((l,i)=><Row key={'b'+i} lv={l} buy={true}/>)}
                         </>
@@ -1048,6 +1094,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
                             <span style={{color:T.grn}}>호가 잔량 매수 {pressure.toFixed(1)}%</span>
                             <span style={{color:T.red}}>{(100-pressure).toFixed(1)}% 매도</span>
                           </div>
+                          <div style={{marginBottom:3}}><DataBadge source={pressureSrc} compact/></div>
                           <div style={{display:'flex',height:4,borderRadius:2,overflow:'hidden',background:T.border}}>
                             <div style={{width:`${pressure}%`,background:T.grn}}/>
                             <div style={{width:`${100-pressure}%`,background:T.red}}/>
