@@ -6,6 +6,7 @@ import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
+import { useBinanceStream, buyPressure } from '@/lib/hooks/useBinanceStream';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
 import type { Asset, Order } from '@/types';
 import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
@@ -76,6 +77,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
   const [search,setSearch]=useState('');
   const [showConfirm,setShowConfirm]=useState(false);
   useEffect(()=>{if(activeAsset){const {_ts,...clean}=activeAsset;setSel(clean as Asset);}},[activeAsset]);
+
+  // ── Binance 실시간 스트림 (호가·체결·티커) ──
+  // 코인일 때만 붙인다. 호가창 탭이 닫혀 있으면 연결하지 않는다 —
+  // 보이지도 않는 소켓을 열어두면 데이터와 배터리를 계속 쓴다.
+  const isCryptoSel = sel?.t === 'coin';
+  const streamSymbol = isCryptoSel
+    ? (sel.sym || sel.id).toUpperCase().replace(/USDT$/,'') + 'USDT'
+    : '';
+  const stream = useBinanceStream(streamSymbol, isCryptoSel && showOrderbook);
   const [orders,setOrders]=useState<Order[]>([]);
   const [showOrders,setShowOrders]=useState(false);
   const [riskProfile,setRiskProfile]=useState<'conservative'|'balanced'|'aggressive'>('balanced');
@@ -885,33 +895,88 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL}:{prices:Asset[];cur
             <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:5}}>{tradeMode==='mock'?'모의':tradeMode==='testnet'?'테스트넷':'실전'} · 금액 미입력 시 기본 10만원</div>
               </div>
 
-              {/* 오더북 (호가창) — 주문폼 아래 */}
+              {/* 오더북 (호가창) — Binance 실시간 스트림 */}
+              {/*
+                예전에는 현재가 주변에 Math.random()으로 수량을 만들어 그렸다.
+                모양은 호가창이지만 실제 시장 깊이와 무관해서, 그걸 보고
+                슬리피지나 체결 강도를 판단하면 틀린 판단을 하게 된다.
+                지금은 Binance 선물 depth20 스트림을 그대로 표시한다.
+              */}
               <div style={{marginTop:12}}>
                 {(()=>{
-                  const px = sel.p || 0;
-                  const tick = px > 1000 ? Math.round(px*0.0001) : Math.max(px*0.0001, 0.0001);
-                  const asks = Array.from({length:5},(_,i)=>({ p: px+tick*(5-i), amt: (Math.random()*80+10) }));
-                  const bids = Array.from({length:5},(_,i)=>({ p: px-tick*(i+1), amt: (Math.random()*80+10) }));
-                  const maxAmt = Math.max(...asks.map(a=>a.amt),...bids.map(b=>b.amt));
-                  const Row = ({p,amt,buy}:{p:number;amt:number;buy:boolean})=>(
-                    <div onClick={()=>{ setOrderType('limit'); setLimitPrice(String(Math.round(p))); }}
+                  const showAsks = stream.asks.slice(0, 7).reverse();   // 높은 가격이 위로
+                  const showBids = stream.bids.slice(0, 7);
+                  const maxQty = Math.max(
+                    1e-9,
+                    ...showAsks.map(l=>l.qty), ...showBids.map(l=>l.qty),
+                  );
+                  const px = stream.lastPrice ?? sel.p ?? 0;
+                  const chg = stream.changePct ?? sel.c ?? 0;
+                  const pressure = buyPressure(stream.trades);
+
+                  const Row = ({lv,buy}:{lv:{price:number;qty:number};buy:boolean})=>(
+                    <div onClick={()=>{ setOrderType('limit'); setLimitPrice(String(lv.price)); }}
                       style={{position:'relative',display:'flex',justifyContent:'space-between',padding:'2px 6px',fontSize:10,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',cursor:'pointer',overflow:'hidden',lineHeight:1.5}}>
-                      <div style={{position:'absolute',top:0,bottom:0,right:0,width:`${amt/maxAmt*100}%`,background:buy?T.grn+'18':T.red+'18'}}/>
-                      <span style={{color:buy?T.grn:T.red,zIndex:1}}>{fmt(Math.round(p))}</span>
-                      <span style={{color:T.sub,zIndex:1,fontSize:9}}>{amt.toFixed(1)}</span>
+                      <div style={{position:'absolute',top:0,bottom:0,right:0,width:`${lv.qty/maxQty*100}%`,background:buy?T.grn+'18':T.red+'18'}}/>
+                      <span style={{color:buy?T.grn:T.red,zIndex:1}}>{fmt(lv.price)}</span>
+                      <span style={{color:T.sub,zIndex:1,fontSize:9}}>{lv.qty.toFixed(3)}</span>
                     </div>
                   );
+
+                  const statusLabel: Record<string,[string,string]> = {
+                    live:         ['● 실시간', T.grn],
+                    connecting:   ['연결 중…', T.ylw],
+                    reconnecting: ['재연결 중…', T.ylw],
+                    error:        ['연결 실패', T.red],
+                    idle:         ['미연결', T.muted],
+                  };
+                  const [sLabel, sColor] = statusLabel[stream.status] || statusLabel.idle;
+
+                  if (!isCryptoSel) {
+                    return (
+                      <div style={{background:T.bg,borderRadius:8,padding:'14px 12px',border:`1px solid ${T.border}`,textAlign:'center'}}>
+                        <div style={{color:T.muted,fontSize:11}}>호가창은 암호화폐만 제공합니다</div>
+                        <div style={{color:T.muted,fontSize:9,marginTop:3}}>주식·ETF는 차트 탭에서 확인해주세요</div>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div style={{background:T.bg,borderRadius:8,padding:'4px 0',border:`1px solid ${T.border}`}}>
-                      <div style={{display:'flex',justifyContent:'space-between',padding:'2px 6px 4px',fontSize:8,color:T.muted,borderBottom:`1px solid ${T.border}`}}>
-                        <span>가격</span><span>수량</span>
+                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'2px 6px 4px',fontSize:8,color:T.muted,borderBottom:`1px solid ${T.border}`}}>
+                        <span>가격 (USDT)</span>
+                        <span style={{color:sColor,fontWeight:700}}>{sLabel}</span>
+                        <span>수량</span>
                       </div>
-                      {asks.map((a,i)=><Row key={'a'+i} p={a.p} amt={a.amt} buy={false}/>)}
-                      <div style={{padding:'4px 6px',textAlign:'center',borderTop:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,margin:'1px 0'}}>
-                        <div style={{color:sel.c>=0?T.grn:T.red,fontWeight:900,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{fmt(Math.round(px))}</div>
-                        <div style={{color:T.muted,fontSize:8}}>{sel.c>=0?'▲':'▼'}{Math.abs(sel.c).toFixed(2)}%</div>
-                      </div>
-                      {bids.map((b,i)=><Row key={'b'+i} p={b.p} amt={b.amt} buy={true}/>)}
+
+                      {showAsks.length === 0 && showBids.length === 0 ? (
+                        <div style={{padding:'18px 6px',textAlign:'center',color:T.muted,fontSize:10}}>
+                          {stream.status === 'live' ? '호가 수신 대기 중…' : '호가를 받아오는 중…'}
+                        </div>
+                      ) : (
+                        <>
+                          {showAsks.map((l,i)=><Row key={'a'+i} lv={l} buy={false}/>)}
+                          <div style={{padding:'4px 6px',textAlign:'center',borderTop:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,margin:'1px 0'}}>
+                            <div style={{color:chg>=0?T.grn:T.red,fontWeight:900,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{fmt(px)}</div>
+                            <div style={{color:T.muted,fontSize:8}}>{chg>=0?'▲':'▼'}{Math.abs(chg).toFixed(2)}%</div>
+                          </div>
+                          {showBids.map((l,i)=><Row key={'b'+i} lv={l} buy={true}/>)}
+                        </>
+                      )}
+
+                      {/* 최근 체결 기준 매수/매도 강도 */}
+                      {pressure != null && (
+                        <div style={{padding:'6px 6px 3px',borderTop:`1px solid ${T.border}`,marginTop:2}}>
+                          <div style={{display:'flex',justifyContent:'space-between',fontSize:8,color:T.muted,marginBottom:3}}>
+                            <span style={{color:T.grn}}>매수 {pressure.toFixed(1)}%</span>
+                            <span style={{color:T.red}}>{(100-pressure).toFixed(1)}% 매도</span>
+                          </div>
+                          <div style={{display:'flex',height:4,borderRadius:2,overflow:'hidden',background:T.border}}>
+                            <div style={{width:`${pressure}%`,background:T.grn}}/>
+                            <div style={{width:`${100-pressure}%`,background:T.red}}/>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
