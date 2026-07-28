@@ -60,6 +60,7 @@ const AccountsPage    = dynamic(() => import('@/components/pages/AccountsPage'),
 const HubAccountsPage = dynamic(() => import('@/components/pages/HubAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
 const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
 const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
+import { nextStack, topmost, historyDelta } from '@/lib/nav/overlayStack';
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
@@ -281,19 +282,9 @@ export default function App() {
     }catch{}
   },[tab]);
 
-  // 뒤로/앞으로 — 이때는 주소가 진실이고 화면이 따라간다.
-  // 여기서 setTab을 하면 위 훅이 다시 돌지만, 주소와 이미 같으므로
-  // 아무것도 밀어 넣지 않는다. 그래서 무한히 쌓이지 않는다.
-  useEffect(()=>{
-    const onPop=()=>{
-      try{
-        setTab(new URLSearchParams(window.location.search).get('tab')||'home');
-        setShowMore(false);
-      }catch{}
-    };
-    window.addEventListener('popstate',onPop);
-    return ()=>window.removeEventListener('popstate',onPop);
-  },[]);
+  // 뒤로/앞으로 처리는 오버레이 상태가 다 선언된 뒤에 있다.
+  // 모달이 열려 있으면 화면을 바꾸는 대신 모달부터 닫아야 하는데,
+  // 그 판단을 하려면 모달 상태를 알아야 한다.
   // ── Admin role (loaded from Supabase profiles after mount) ──
   const [userRole,setUserRole]=useState<string|null>(null);
   const [authUser,setAuthUser]=useState<any>(null);
@@ -446,6 +437,68 @@ export default function App() {
   const [detailAsset,setDetailAsset]=useState<any>(null);
   const openDetail=useCallback((asset:any)=>{ if(asset) setDetailAsset(asset); },[]);
   const [pnlPrefill,setPnlPrefill]=useState<any>(null);
+
+  // ── 뒤로가기로 모달 닫기 ──
+  //
+  // 모달이 열린 채 뒤로가기를 누르면 모달만 닫혀야 한다. 화면까지 같이
+  // 바뀌면 뒤로가기 한 번에 두 단계가 사라지고, 사용자는 자기가 어디서
+  // 왔는지 잃는다. 모바일에서는 이게 기본 기대다.
+  //
+  // 방법: 모달이 열릴 때 주소는 그대로 둔 채 히스토리 자리만 하나 만든다.
+  // 뒤로가기가 그 자리를 소비하면 화면은 그대로고 모달만 닫힌다.
+  const overlays=useMemo(()=>[
+    { id:'login',   open:loginOpen,       close:()=>{ setLoginOpen(false); pendingAction.current=null; } },
+    { id:'profile', open:profileOpen,     close:()=>setProfileOpen(false) },
+    { id:'detail',  open:!!detailAsset,   close:()=>setDetailAsset(null) },
+    { id:'more',    open:showMore,        close:()=>setShowMore(false) },
+  ],[loginOpen,profileOpen,detailAsset,showMore]);
+
+  const stackRef=useRef<string[]>([]);
+  const closedByPop=useRef(false);
+  // 핸들러가 항상 최신 상태를 보게 한다. popstate 리스너는 한 번만 붙으므로
+  // 값을 그대로 담으면 첫 렌더의 값에 갇힌다.
+  const overlaysRef=useRef(overlays);
+  overlaysRef.current=overlays;
+
+  useEffect(()=>{
+    const prev=stackRef.current;
+    const next=nextStack(prev,overlays.filter(o=>o.open).map(o=>o.id));
+    stackRef.current=next;
+    const d=historyDelta(prev.length,next.length,closedByPop.current);
+    closedByPop.current=false;
+    try{
+      if(d.action==='push'){
+        // 주소는 바꾸지 않는다. 모달은 화면이 아니라 화면 위의 겹이다 —
+        // 주소까지 바꾸면 그 링크를 공유했을 때 모달이 떠 있는 화면이 된다.
+        for(let i=0;i<d.count;i++) window.history.pushState({ overlay:true },'',window.location.href);
+      }else if(d.action==='back'){
+        // X나 배경을 눌러 닫았다. 만들어 둔 자리를 치우지 않으면
+        // 그 다음 뒤로가기가 아무 일도 안 하는 것처럼 보인다.
+        for(let i=0;i<d.count;i++) window.history.back();
+      }
+    }catch{}
+  },[overlays]);
+
+  // 뒤로/앞으로.
+  //  · 모달이 열려 있으면 맨 위 것만 닫는다. 화면은 건드리지 않는다
+  //  · 아니면 주소가 진실이고 화면이 따라간다. 이때 setTab이 위 주소
+  //    동기화 훅을 다시 돌리지만 주소와 이미 같으므로 아무것도 쌓지 않는다
+  useEffect(()=>{
+    const onPop=()=>{
+      try{
+        const top=topmost(stackRef.current);
+        if(top){
+          closedByPop.current=true;
+          overlaysRef.current.find(o=>o.id===top)?.close();
+          return;
+        }
+        setTab(new URLSearchParams(window.location.search).get('tab')||'home');
+      }catch{}
+    };
+    window.addEventListener('popstate',onPop);
+    return ()=>window.removeEventListener('popstate',onPop);
+  },[]);
+
   // 로그인 필요 목적지 (거래소 연결·실전매매 관련). 비로그인 시 즉시 로그인 모달 → 성공 후 자동 이동.
   const LOGIN_REQUIRED_ROUTES=new Set(['accounts','exchange_connect','hub_accounts','manual_accounts']);
   // 이 앱 밖의 별도 라우트. setTab으로는 갈 수 없다 —
