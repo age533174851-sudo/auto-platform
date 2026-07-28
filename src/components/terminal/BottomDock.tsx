@@ -14,10 +14,11 @@ import { useTerminal } from './TerminalContext';
 import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
+import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
-type Tab = '포지션' | '미체결' | '자산' | '전략장부' | '현물·선물' | '상태대조' | '전략';
-const TABS: Tab[] = ['포지션', '미체결', '자산', '전략장부', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '미체결' | '자산' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const TABS: Tab[] = ['포지션', '미체결', '자산', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void }) {
   const { auth, connId, setSymbol, symbols } = useTerminal();
@@ -218,6 +219,8 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
         {tab === '자산' && <WalletTreePanel/>}
 
         {tab === '전략장부' && <LedgerPanel/>}
+
+        {tab === '현물전략' && <SpotStrategyPanel/>}
 
         {tab === '현물·선물' && <CombinedTab acct={acct}/>}
 

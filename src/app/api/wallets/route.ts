@@ -13,45 +13,14 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import {
   buildWalletTree, spotAllocation,
   SPOT_UNAVAILABLE, FUTURES_UNAVAILABLE,
-  type SpotWallet, type FuturesWallet, type SpotAsset,
+  type SpotWallet, type FuturesWallet,
 } from '@/lib/markets/wallets';
+// 가격 매기기는 통합 자산과 현물 전략이 함께 쓴다. 각자 계산하면
+// 한 화면은 리밸런싱이 돌고 다른 화면은 안 도는 식으로 어긋난다.
+import { priceAssets } from '@/lib/markets/pricing';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-
-/** 스테이블코인은 1달러로 본다. 시세 조회를 아끼고, 어차피 1에 수렴한다 */
-const STABLE = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'DAI']);
-
-/**
- * 현물 자산에 USD 값을 매긴다.
- *
- * 가격을 못 구한 자산은 **0이 아니라 null**이다. 0으로 두면 총자산에서
- * 조용히 사라지고, 사용자는 자산이 줄었다고 오해한다.
- */
-async function priceSpotAssets(
-  raw: { asset: string; free: number; locked: number }[],
-): Promise<SpotAsset[]> {
-  // 시세는 한 번에 받는다. 자산마다 부르면 수십 번이 나간다.
-  let priceMap = new Map<string, number>();
-  try {
-    const r = await fetch('https://api.binance.com/api/v3/ticker/price',
-      { signal: AbortSignal.timeout(8000) });
-    if (r.ok) {
-      const list = await r.json();
-      for (const t of (Array.isArray(list) ? list : [])) {
-        const v = parseFloat(t?.price);
-        if (Number.isFinite(v)) priceMap.set(String(t.symbol), v);
-      }
-    }
-  } catch { /* 시세를 못 받으면 아래에서 전부 null이 된다 */ }
-
-  return raw.map(b => {
-    const total = b.free + b.locked;
-    if (STABLE.has(b.asset)) return { ...b, valueUsd: total };
-    const px = priceMap.get(`${b.asset}USDT`);
-    return { ...b, valueUsd: px != null ? total * px : null };
-  });
-}
 
 export async function GET(req: NextRequest) {
   const uid = await resolveUserId(
@@ -95,7 +64,7 @@ export async function GET(req: NextRequest) {
           locked: Number(b.locked) || 0,
         }))
         .filter(b => b.asset && (b.free > 0 || b.locked > 0));
-      const assets = await priceSpotAssets(raw);
+      const assets = await priceAssets(raw);
       const usdt = assets.find(a => a.asset === 'USDT');
       return {
         ok: true, assets,
