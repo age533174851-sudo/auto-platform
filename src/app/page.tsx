@@ -242,6 +242,18 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
 export default function App() {
   const [mounted, setMounted] = useState(false);
   const [tab,setTab]=useState('home');
+  // ── 딥링크 ──
+  // 이 앱은 한 페이지 안에서 tab 상태로 화면을 바꾸므로 URL이 없다.
+  // 그래서 Pro 터미널 같은 별도 경로에서 특정 화면으로 돌아올 방법이
+  // 없었다. ?tab=xxx 한 번만 읽어 그 화면으로 연다.
+  // (이후 이동은 기존대로 상태로 처리한다 — 히스토리까지 바꾸면
+  //  뒤로가기 동작이 통째로 달라진다.)
+  useEffect(()=>{
+    try{
+      const t=new URLSearchParams(window.location.search).get('tab');
+      if(t) setTab(t);
+    }catch{}
+  },[]);
   // ── Admin role (loaded from Supabase profiles after mount) ──
   const [userRole,setUserRole]=useState<string|null>(null);
   const [authUser,setAuthUser]=useState<any>(null);

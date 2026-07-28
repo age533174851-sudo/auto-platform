@@ -15,6 +15,7 @@ import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { SymbolSearch } from './SymbolSearch';
 import { MarketSwitch } from './MarketSwitch';
+import { AppLauncher } from './AppLauncher';
 
 export const TOPBAR_H = 52;
 
@@ -64,6 +65,43 @@ function SymbolPicker({ compact }: { compact?: boolean }) {
   );
 }
 
+/**
+ * 전체 메뉴. 로고 자리를 이 버튼이 대신한다 —
+ * 로고는 아무 데도 데려다주지 않지만 이건 앱 전체로 데려다준다.
+ */
+function AppMenuButton() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(v => !v)} style={{
+        display: 'flex', alignItems: 'baseline', gap: 6, cursor: 'pointer',
+        background: open ? C.active : 'transparent',
+        border: `1px solid ${open ? C.hair2 : 'transparent'}`,
+        borderRadius: 8, padding: '5px 9px',
+      }}>
+        <span style={{ color: C.text, fontWeight: 800, fontSize: FS.lead, letterSpacing: '-0.02em' }}>
+          TRAIGO
+        </span>
+        <span style={{ color: C.faint, fontSize: FS.micro, fontWeight: 500 }}>Pro</span>
+        <span style={{ color: C.faint, fontSize: 9 }}>▾</span>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 59 }}/>
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 60,
+            width: 520, height: 460,
+            background: C.panel, border: `1px solid ${C.hair2}`, borderRadius: 12,
+            boxShadow: '0 16px 48px rgba(0,0,0,.6)', overflow: 'hidden',
+          }}>
+            <AppLauncher onClose={() => setOpen(false)}/>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TopBarInner({ balance, compact, right }: {
   balance: number | null;
   compact?: boolean;
@@ -86,14 +124,7 @@ function TopBarInner({ balance, compact, right }: {
       // 실자금이면 왼쪽에 붉은 기둥이 선다. 어느 패널을 보든 시야 끝에 걸린다.
       borderLeft: mode.realMoney ? `3px solid ${C.down}` : '3px solid transparent',
     }}>
-      {!compact && (
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-          <span style={{ color: C.text, fontWeight: 800, fontSize: FS.lead, letterSpacing: '-0.02em' }}>
-            TRAIGO
-          </span>
-          <span style={{ color: C.faint, fontSize: FS.micro, fontWeight: 500 }}>Pro</span>
-        </div>
-      )}
+      {!compact && <AppMenuButton/>}
 
       <SymbolPicker compact={compact}/>
 

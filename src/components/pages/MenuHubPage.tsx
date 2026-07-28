@@ -68,7 +68,9 @@ function Row({ m, onNav, fav, onStar }: { m: MenuItem; onNav: (id: string) => vo
   const { Icon } = m;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: T.card, border: `1px solid ${fav ? T.ylw + '50' : T.border}`, borderRadius: 14, padding: '4px 8px 4px 14px' }}>
-      <button onClick={() => onNav(m.id)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 13, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', minHeight: 56, padding: 0 }}>
+      {/* href가 있는 항목은 별도 페이지다. onNav는 이 앱 안의 tab만
+          바꾸므로 그대로 두면 아무 일도 일어나지 않는다. */}
+      <button onClick={() => { if (m.href) window.location.href = m.href; else onNav(m.id); }} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 13, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', minHeight: 56, padding: 0 }}>
         <div style={{ width: 40, height: 40, borderRadius: 11, background: m.color + '1F', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <Icon size={20} color={m.color} />
         </div>

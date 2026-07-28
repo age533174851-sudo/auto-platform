@@ -85,28 +85,35 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
         padding: '7px 10px', borderBottom: `1px solid ${C.hair}`,
       }}>
-        {TABS.map(t => (
-          <button key={t} onClick={() => setTab(t)} style={tabStyle(tab === t)}>
-            {t}
-            {t === '포지션' && positions.length > 0 && (
-              <span style={{ ...NUM, color: C.accent, marginLeft: 5, fontWeight: 700 }}>
-                {positions.length}
-              </span>
-            )}
-          </button>
-        ))}
-        <div style={{ flex: 1 }}/>
+        {/* 탭은 넘치면 가로로 스크롤한다. Kill Switch를 밀어내면 안 된다. */}
+        <div style={{
+          display: 'flex', gap: 4, minWidth: 0, flex: 1,
+          overflowX: 'auto', scrollbarWidth: 'none',
+        }}>
+          {TABS.map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              style={{ ...tabStyle(tab === t), flexShrink: 0 }}>
+              {t}
+              {t === '포지션' && positions.length > 0 && (
+                <span style={{ ...NUM, color: C.accent, marginLeft: 5, fontWeight: 700 }}>
+                  {positions.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
         {killMsg && (
-          <span style={{ fontSize: FS.micro, color: C.warn, marginRight: 8 }}>{killMsg}</span>
+          <span style={{ fontSize: FS.micro, color: C.warn, whiteSpace: 'nowrap' }}>{killMsg}</span>
         )}
         <button onClick={kill} disabled={killing} style={{
-          minHeight: 34, padding: '0 16px', borderRadius: 8, cursor: killing ? 'default' : 'pointer',
+          minHeight: 34, padding: '0 14px', borderRadius: 8, flexShrink: 0,
+          cursor: killing ? 'default' : 'pointer',
           background: C.downBg, color: C.down, border: `1px solid ${C.down}55`,
-          fontSize: FS.small, fontWeight: 700, letterSpacing: '0.02em',
-        }}>{killing ? '발동 중…' : 'KILL SWITCH'}</button>
+          fontSize: FS.small, fontWeight: 700, letterSpacing: '0.02em', whiteSpace: 'nowrap',
+        }}>{killing ? '발동 중…' : 'KILL'}</button>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>

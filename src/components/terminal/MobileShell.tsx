@@ -35,6 +35,7 @@ import { LeftRail } from './LeftRail';
 import { BottomDock } from './BottomDock';
 import { BottomSheet } from './BottomSheet';
 import { SymbolSearch } from './SymbolSearch';
+import { AppLauncher } from './AppLauncher';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
 function useLandscape(): boolean {
@@ -53,7 +54,9 @@ function useLandscape(): boolean {
 }
 
 // ── 상단 ────────────────────────────────────────────────
-function MobileHeader({ onOpenSearch, onOpenInfo }: { onOpenSearch: () => void; onOpenInfo: () => void }) {
+function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu }: {
+  onOpenSearch: () => void; onOpenInfo: () => void; onOpenMenu: () => void;
+}) {
   const { symbol, mode, marketType, setMarketType } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
   const chg = stream.changePct;
@@ -90,6 +93,12 @@ function MobileHeader({ onOpenSearch, onOpenInfo }: { onOpenSearch: () => void; 
       </span>
 
       <div style={{ flex: 1 }}/>
+      {/* 터미널이 섬이 되지 않게. 앱의 나머지 기능으로 가는 유일한 길이다. */}
+      <button onClick={onOpenMenu} title="전체 메뉴" style={{
+        minHeight: 30, width: 32, background: C.raised, color: C.dim,
+        border: `1px solid ${C.hair}`, borderRadius: 7,
+        fontSize: 13, cursor: 'pointer', flexShrink: 0, lineHeight: 1,
+      }}>☰</button>
       <button onClick={onOpenInfo} title="AI · 뉴스 · 일정" style={{
         minHeight: 30, padding: '0 10px', background: C.raised, color: C.dim,
         border: `1px solid ${C.hair}`, borderRadius: 7,
@@ -166,6 +175,7 @@ export default function MobileShell() {
   const [picked, setPicked] = useState<number | null>(null);
   const [search, setSearch] = useState(false);
   const [info, setInfo] = useState(false);
+  const [menu, setMenu] = useState(false);
 
   // ── 가로 ── 차트를 옆에 세울 공간이 생긴다
   if (landscape) {
@@ -174,7 +184,7 @@ export default function MobileShell() {
         height: '100dvh', display: 'flex', flexDirection: 'column',
         background: C.bg, color: C.text, overflow: 'hidden',
       }}>
-        <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)}/>
+        <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
         <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
           <div style={{ flex: 1, minWidth: 0, borderRight: `1px solid ${C.hair}` }}>
             <ChartPane symbol={symbol.id} compact/>
@@ -199,7 +209,7 @@ export default function MobileShell() {
       height: '100dvh', display: 'flex', flexDirection: 'column',
       background: C.bg, color: C.text, overflow: 'hidden',
     }}>
-      <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)}/>
+      <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
 
       {/* 주문과 호가는 항상 같이 보인다. 모바일에서 실제로 하는 일이 이것이다. */}
       <div style={{ display: 'flex', minHeight: 0, flex: 1, overflow: 'hidden' }}>
@@ -230,6 +240,10 @@ export default function MobileShell() {
       <SearchSheet open={search} onClose={() => setSearch(false)}
         current={symbol.id} favorites={favorites}
         onToggleFav={toggleFavorite} onPick={s => { setSymbol(s); setSearch(false); }}/>
+
+      <BottomSheet open={menu} title="전체 메뉴" onClose={() => setMenu(false)} maxHeightPct={88}>
+        <div style={{ height: '74vh' }}><AppLauncher onClose={() => setMenu(false)}/></div>
+      </BottomSheet>
 
       <BottomSheet open={info} title="AI · 뉴스 · 일정" onClose={() => setInfo(false)}>
         <div style={{ height: '62vh' }}><LeftRail/></div>

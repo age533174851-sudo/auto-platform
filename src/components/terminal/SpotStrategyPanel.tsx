@@ -13,6 +13,7 @@
 import React, { memo, useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, chip, ghostBtn, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
+import { SpotOrderTools } from './SpotOrderTools';
 
 interface Row {
   id: string; label: string;
@@ -36,6 +37,27 @@ interface Data {
 }
 
 export const SpotStrategyPanel = memo(function SpotStrategyPanel() {
+  // 전략 판단과 주문 도구는 같은 '현물' 맥락이라 한 탭 안에 둔다.
+  // 하단 탭을 하나 더 늘리면 좁은 화면에서 넘친다.
+  const [view, setView] = useState<'판단' | '주문도구'>('판단');
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 4, padding: '10px 14px 0' }}>
+        {(['판단', '주문도구'] as const).map(v => (
+          <button key={v} onClick={() => setView(v)} style={{
+            background: view === v ? C.active : 'transparent',
+            color: view === v ? C.text : C.dim,
+            border: 'none', borderRadius: 6, padding: '5px 11px',
+            fontSize: FS.small, fontWeight: view === v ? 700 : 500, cursor: 'pointer',
+          }}>{v}</button>
+        ))}
+      </div>
+      {view === '판단' ? <StrategyJudgement/> : <SpotOrderTools/>}
+    </div>
+  );
+});
+
+const StrategyJudgement = memo(function StrategyJudgement() {
   const { symbol, auth, connId, marketType, setMarketType } = useTerminal();
   const [d, setD] = useState<Data | null>(null);
   const [err, setErr] = useState('');

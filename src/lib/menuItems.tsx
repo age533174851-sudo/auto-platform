@@ -6,12 +6,23 @@ import {
   Bot, Cpu, ScrollText, ShieldAlert, LineChart, Newspaper, Sparkles,
   Snowflake, FileText, CalendarDays, Radar, PieChart, Sprout, Coins,
   Scale, GraduationCap, BookOpen, ClipboardCheck, Users, Link2, Settings,
-  Stethoscope, Bell, ShieldCheck,
+  Stethoscope, Bell, ShieldCheck, MonitorSmartphone,
 } from 'lucide-react';
 
-export interface MenuItem { id: string; label: string; desc: string; cat: string; kw?: string; Icon: LucideIcon; color: string }
+export interface MenuItem {
+  id: string; label: string; desc: string; cat: string;
+  kw?: string; Icon: LucideIcon; color: string;
+  /**
+   * 다른 경로로 나가는 항목. 앱은 tab 상태로 화면을 바꾸지만
+   * Pro 터미널은 별도 페이지라 링크로 가야 한다.
+   */
+  href?: string;
+}
 
 export const MENU: MenuItem[] = [
+  // 별도 페이지(/terminal). 앱에서 여기로 가는 유일한 입구다 —
+  // 없으면 사용자가 터미널의 존재를 모른다.
+  { id:'terminal',  label:'Pro 터미널', desc:'차트·호가·주문 통합 화면', cat:'거래', kw:'pro terminal 전문가', Icon:MonitorSmartphone, color:'#5B8DEF', href:'/terminal' },
   { id:'trading',   label:'매매하기',  desc:'직접 사고팔기 (수동 매매)', cat:'거래', kw:'롱숏 매수매도 주문', Icon:TrendingUp,  color:'#3B82F6' },
   { id:'strategies',label:'전략빌더',  desc:'나만의 매매 규칙 만들기',   cat:'거래', kw:'전략',            Icon:Blocks,      color:'#8B5CF6' },
   { id:'fear_dca',  label:'공포 DCA',  desc:'공포일 때 분할 매수',       cat:'거래', kw:'공포탐욕 분할매수', Icon:Activity,    color:'#EF4444' },
