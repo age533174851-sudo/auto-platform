@@ -10,11 +10,12 @@
 // Kill Switch는 탭 안에 숨기지 않는다. 필요한 순간에 두 번 누르게 하면 안 된다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, tabStyle, chip, ghostBtn, fmtPrice, pnlColor } from './theme';
+import { A } from '@/lib/theme/colors';
 import { useTerminal } from './TerminalContext';
 import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
-import { derivePosition } from '@/lib/markets/positionView';
+import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
@@ -131,10 +132,12 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
             ? <Empty t={acct ? '열린 포지션이 없습니다' : '거래소 연결을 선택하면 표시됩니다'}/>
             : <div>
                 {positions.map((p: any) => (
-                  <PositionCard key={p.symbol} p={p} onPick={() => {
-                    const s = symbols.find(x => x.id === p.symbol);
-                    if (s) setSymbol(s);
-                  }}/>
+                  <PositionCard key={p.symbol} p={p}
+                    auth={auth} connId={connId} onClosed={load}
+                    onPick={() => {
+                      const s = symbols.find(x => x.id === p.symbol);
+                      if (s) setSymbol(s);
+                    }}/>
                 ))}
               </div>
         )}
@@ -365,13 +368,81 @@ function StrategyTab() {
  * 값이 없을 때 0을 적지 않는다. 청산가 0은 '0달러에 청산'이 아니라
  * '청산가를 못 받았다'인데, 화면만 봐서는 둘이 같아 보인다.
  */
-function PositionCard({ p, onPick }: { p: any; onPick: () => void }) {
+function PositionCard({ p, onPick, auth, connId, onClosed }: {
+  p: any;
+  onPick: () => void;
+  auth: string;
+  connId: string;
+  /** 청산이 접수되면 목록을 다시 읽는다 */
+  onClosed: () => void;
+}) {
+  const [closing, setClosing] = useState(false);
+  const [closeMsg, setCloseMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // 값 해석은 테스트가 있는 순수 함수가 한다. 청산가 0·증거금 추정·
   // 0으로 나누기 셋 다 화면에서는 그럴듯해 보여서 눈으로 못 잡는다.
   const v = derivePosition(p);
   const { side, qty, isolated: iso, leverage: lev, entry, mark, liq,
           pnl, notional, margin, marginEstimated: marginIsEst, roi } = v;
   const long = side === 'LONG';
+
+  /**
+   * 시장가 전량 청산.
+   *
+   * reduceOnly로 보낸다. 이게 빠지면 청산이 아니라 **반대 방향 신규 진입**이
+   * 된다 — 롱을 닫으려다 숏을 여는 것이고, 화면에는 둘 다 '매도 주문'으로
+   * 보인다. 이 화면에서 가장 조용한 사고다.
+   *
+   * 방향은 포지션의 반대다. 롱이면 팔고, 숏이면 산다.
+   */
+  const closeNow = async () => {
+    if (!auth || !connId) { setCloseMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
+    if (qty <= 0) return;
+
+    const closeSide = closeSideFor(side);
+    // 확인 문구에 숫자를 적는다. '청산하시겠습니까?'만 물으면 사람은
+    // 읽지 않고 예를 누른다. 무엇이 얼마나 나가는지 보여야 한다.
+    const lines = [
+      `${v.symbol} ${side} 포지션을 시장가로 전량 청산합니다.`,
+      '',
+      `수량      ${fmtPrice(qty, 4)}`,
+      `방향      ${closeSide} (reduce-only)`,
+      mark != null ? `현재 Mark ${fmtPrice(mark)}` : '현재 Mark 확인 불가',
+      pnl != null ? `미실현    ${pnl >= 0 ? '+' : ''}${fmtPrice(pnl)} USDT` : '미실현    확인 불가',
+      '',
+      '시장가라 체결가는 위 Mark와 다를 수 있습니다.',
+      '되돌릴 수 없습니다.',
+    ];
+    const { confirmDialog } = await import('@/lib/confirm/dialog');
+    if (!(await confirmDialog(lines.join('\n'), { danger: true }))) return;
+
+    setClosing(true); setCloseMsg(null);
+    try {
+      const r = await fetch('/api/binance/futures/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          connectionId: connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
+          symbol: v.symbol, side: closeSide, type: 'MARKET',
+          quantity: qty, reduceOnly: true,
+        }),
+      });
+      const j = await r.json();
+      if (r.ok && j?.ok) {
+        setCloseMsg({ ok: true, text: `청산 주문 접수됨 · ${String(j.jobId ?? '').slice(0, 8)}` });
+        // 대기열을 거치므로 즉시 반영되지 않는다. 잠시 뒤 다시 읽는다.
+        setTimeout(onClosed, 2500);
+      } else {
+        setCloseMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+      }
+    } catch (e: any) {
+      // 응답을 못 받았다. 나갔는지 안 나갔는지 모른다 — 다시 누르면
+      // 두 번 청산될 수 있다. 재시도하지 말라고 분명히 말한다.
+      setCloseMsg({
+        ok: false,
+        text: `응답 없음 — 다시 누르지 말고 포지션을 먼저 확인하세요 (${e?.message || e})`,
+      });
+    } finally { setClosing(false); }
+  };
 
   const Cell = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
     <div style={{ flex: 1, minWidth: 0 }}>
@@ -429,13 +500,31 @@ function PositionCard({ p, onPick }: { p: any; onPick: () => void }) {
         <Cell k="청산가" v={liq == null ? '없음' : fmtPrice(liq)} tone={liq == null ? C.dim : C.warn}/>
       </div>
 
-      {/* 이 종목으로 주문판을 맞춘다. 여기서 바로 주문을 내지 않는 이유는
-          청산이 되돌릴 수 없는 일이기 때문이다 — 수량·유형을 눈으로 확인한
-          뒤에 주문판에서 내야 한다. 카드의 버튼 한 번으로 나가면 잘못 눌렀을
-          때 되돌릴 방법이 없다. */}
-      <button onClick={onPick} style={{ ...ghostBtn(), width: '100%', minHeight: 34 }}>
-        이 종목 주문판으로 →
-      </button>
+      {closeMsg && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 6,
+          background: closeMsg.ok ? C.upBg : C.downBg,
+          color: closeMsg.ok ? C.up : C.down, fontSize: FS.micro, lineHeight: 1.5,
+        }}>{closeMsg.text}</div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button onClick={onPick} style={{ ...ghostBtn(), flex: 1, minHeight: 36 }}>
+          주문판으로
+        </button>
+        {/* 시장가 청산. 되돌릴 수 없으므로 확인을 받고, 확인 문구에
+            무엇이 얼마나 나가는지 숫자로 적는다. '청산하시겠습니까?'만
+            물으면 사람은 읽지 않고 예를 누른다. */}
+        <button onClick={closeNow} disabled={closing || qty <= 0}
+          style={{
+            flex: 1, minHeight: 36, borderRadius: 7,
+            cursor: closing || qty <= 0 ? 'default' : 'pointer',
+            background: C.downBg, color: C.down,
+            border: `1px solid ${A(C.down, '55')}`,
+            fontSize: FS.small, fontWeight: 700,
+            opacity: closing || qty <= 0 ? 0.5 : 1,
+          }}>{closing ? '청산 중…' : '시장가 청산'}</button>
+      </div>
     </div>
   );
 }

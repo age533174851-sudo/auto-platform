@@ -7,7 +7,7 @@
 //  3. 분모가 0인데 나눠서 수익률이 ∞%로 나가는 것 — 대박으로 읽힌다
 //  4. 값을 못 받았는데 0으로 그려 '손익 0'처럼 보이는 것
 import { test, assert, eq } from '../../test/harness';
-import { derivePosition } from './positionView';
+import { derivePosition, closeSideFor } from './positionView';
 
 const near = (a: number | null, b: number, eps = 1e-6) =>
   a != null && Math.abs(a - b) < eps;
@@ -97,6 +97,21 @@ export function runPositionViewTests() {
 
   test('바이낸스의 unRealizedProfit 철자도 받는다', () => {
     eq(derivePosition({ unRealizedProfit: 7 }).pnl, 7);
+  });
+
+  console.log('[포지션 카드 — 청산 방향]');
+
+  test('롱은 팔아서 닫고 숏은 사서 닫는다', () => {
+    // 반대로 잡으면 청산이 아니라 포지션이 두 배가 된다
+    eq(closeSideFor('LONG'), 'SELL');
+    eq(closeSideFor('SHORT'), 'BUY');
+  });
+
+  test('카드가 읽는 방향과 청산 방향이 어긋나지 않는다', () => {
+    const long = derivePosition({ amount: 1.5 });
+    const short = derivePosition({ amount: -1.5 });
+    eq(closeSideFor(long.side), 'SELL');
+    eq(closeSideFor(short.side), 'BUY');
   });
 
   test('명목가는 진입가 기준', () => {

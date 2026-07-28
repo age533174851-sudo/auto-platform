@@ -80,3 +80,17 @@ export function derivePosition(p: RawPosition): PositionView {
     roi,
   };
 }
+
+/**
+ * 이 포지션을 닫으려면 어느 방향으로 주문해야 하는가.
+ *
+ * 롱은 팔아서 닫고, 숏은 사서 닫는다. 이걸 반대로 잡으면 청산이 아니라
+ * **포지션이 두 배가 된다.** 화면에는 둘 다 '주문 접수됨'으로 보이고,
+ * 다음 조회 때 수량이 늘어난 걸 보고서야 알게 된다.
+ *
+ * reduceOnly와 함께 써야 한다. 방향만 맞고 reduceOnly가 빠지면 기존
+ * 포지션을 닫은 뒤 남은 수량으로 반대 포지션이 열릴 수 있다.
+ */
+export function closeSideFor(side: 'LONG' | 'SHORT'): 'BUY' | 'SELL' {
+  return side === 'LONG' ? 'SELL' : 'BUY';
+}
