@@ -246,14 +246,53 @@ export default function App() {
   // ── 딥링크 ──
   // 이 앱은 한 페이지 안에서 tab 상태로 화면을 바꾸므로 URL이 없다.
   // 그래서 Pro 터미널 같은 별도 경로에서 특정 화면으로 돌아올 방법이
-  // 없었다. ?tab=xxx 한 번만 읽어 그 화면으로 연다.
-  // (이후 이동은 기존대로 상태로 처리한다 — 히스토리까지 바꾸면
-  //  뒤로가기 동작이 통째로 달라진다.)
+  // 없었다. ?tab=xxx를 읽어 그 화면으로 연다.
   useEffect(()=>{
     try{
       const t=new URLSearchParams(window.location.search).get('tab');
       if(t) setTab(t);
     }catch{}
+  },[]);
+
+  // ── 주소창 ↔ 화면 동기화 ──
+  //
+  // 화면을 바꾸면 주소도 바뀐다. 그래야 새로고침해도 보던 화면이 나오고,
+  // 링크를 보내면 상대도 같은 화면을 보고, 뒤로가기가 앱을 나가는 대신
+  // 이전 화면으로 간다.
+  //
+  // setTab이 아니라 tab 값을 보고 있다. nav() 말고도 상태를 바꾸는 길이
+  // 여럿이라(로그인 후 대기 동작, 자산 열기 등) 호출부마다 붙이면 언젠가
+  // 하나가 빠지고, 그 화면만 주소가 안 따라온다.
+  //
+  // 홈은 파라미터 없이 '/'로 둔다 — 첫 화면 주소에 ?tab=home이 붙어 있으면
+  // 공유했을 때 앱 주소가 아니라 무슨 딥링크처럼 보인다.
+  const urlSyncFirst=useRef(true);
+  useEffect(()=>{
+    // 첫 실행은 건너뛴다. 이 시점의 주소가 진실이고 위 딥링크 훅이 화면을
+    // 거기에 맞추는 중이다. 여기서 밀어 넣으면 그 딥링크를 지운다.
+    if(urlSyncFirst.current){ urlSyncFirst.current=false; return; }
+    try{
+      const url=new URL(window.location.href);
+      const cur=url.searchParams.get('tab');
+      const want=tab==='home'?null:tab;
+      if(cur===want) return;              // 이미 맞으면 기록을 남기지 않는다
+      if(want) url.searchParams.set('tab',want); else url.searchParams.delete('tab');
+      window.history.pushState({tab},'',url.toString());
+    }catch{}
+  },[tab]);
+
+  // 뒤로/앞으로 — 이때는 주소가 진실이고 화면이 따라간다.
+  // 여기서 setTab을 하면 위 훅이 다시 돌지만, 주소와 이미 같으므로
+  // 아무것도 밀어 넣지 않는다. 그래서 무한히 쌓이지 않는다.
+  useEffect(()=>{
+    const onPop=()=>{
+      try{
+        setTab(new URLSearchParams(window.location.search).get('tab')||'home');
+        setShowMore(false);
+      }catch{}
+    };
+    window.addEventListener('popstate',onPop);
+    return ()=>window.removeEventListener('popstate',onPop);
   },[]);
   // ── Admin role (loaded from Supabase profiles after mount) ──
   const [userRole,setUserRole]=useState<string|null>(null);
