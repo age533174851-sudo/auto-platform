@@ -19,6 +19,7 @@ import { DataBadge } from '@/components/ui/DataBadge';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
 import { useTerminal } from './TerminalContext';
 import { SpotOrderPanel } from './SpotOrderPanel';
+import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
 
@@ -246,30 +247,36 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [levOpen, setLevOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [balanceUsd, setBalanceUsd] = useState<number | null>(null);
+  const [wallet, setWallet] = useState<WalletTree | null>(null);
 
   // 호가를 눌러 들어온 가격
   useEffect(() => {
     if (presetPrice != null) { setOrderType('LIMIT'); setPrice(String(presetPrice)); }
   }, [presetPrice]);
 
-  // 비율 버튼을 쓰려면 잔고를 알아야 한다. 못 받으면 null로 두고
-  // 비율 버튼이 아무 일도 하지 않게 한다 — 추정치로 주문하면 안 된다.
+  // ── 지갑 ──
+  // 선물 계좌만 따로 부르지 않고 통합 트리를 받는다. 그래야 증거금이
+  // 모자랄 때 "현물에 얼마 있으니 이체하라"까지 말해줄 수 있다.
+  // 물론 현물 잔고가 가용 증거금에 더해지지는 않는다 (lib/markets/wallets.ts).
   useEffect(() => {
-    if (!auth || !connId) { setBalanceUsd(null); return; }
+    if (!auth || !connId) { setWallet(null); return; }
     let alive = true;
-    (async () => {
+    const load = async () => {
       try {
-        const r = await fetch(`/api/binance/futures/account?connectionId=${connId}`,
-          { headers: { Authorization: auth } });
-        if (!r.ok || !alive) return;
+        const r = await fetch(`/api/wallets?connectionId=${connId}`, { headers: { Authorization: auth } });
         const j = await r.json();
-        const b = Number(j?.balance?.available ?? j?.balance?.total ?? j?.availableBalance);
-        if (alive) setBalanceUsd(Number.isFinite(b) ? b : null);
-      } catch { /* 못 받으면 비율 버튼이 비활성 */ }
-    })();
-    return () => { alive = false; };
+        if (!alive) return;
+        setWallet(r.ok && j?.ok ? j.tree : null);
+      } catch { if (alive) setWallet(null); }
+    };
+    load();
+    const t = setInterval(load, 20_000);
+    return () => { alive = false; clearInterval(t); };
   }, [auth, connId]);
+
+  // 비율 버튼은 **선물 가용 증거금**만 쓴다. 현물 USDT를 쓰면 없는 돈으로
+  // 수량을 계산하게 되고, 그 수량이 그대로 주문이 된다.
+  const balanceUsd = wallet?.futuresUsableMargin ?? null;
 
   const mid = stream.lastPrice;
   const notional = (Number(qty) || 0) * (Number(price) || mid || 0);
@@ -390,6 +397,20 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             }}>{pct}%</button>
         ))}
       </div>
+
+      {/* 증거금이 모자라면 주문 전에 말한다. 거래소가 거부한 뒤에
+          알려주면 사용자는 이미 그 크기를 믿고 계획을 세운 뒤다. */}
+      {(() => {
+        if (!wallet || margin <= 0) return null;
+        const chk = canOpenFutures(wallet, margin);
+        if (chk.ok) return null;
+        return (
+          <div style={{
+            padding: '7px 9px', borderRadius: 7, background: C.warnBg,
+            color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
+          }}>{chk.reason}</div>
+        );
+      })()}
 
       {/* 상자 대신 한 줄. 두 값 다 보이되 자리는 한 줄만 먹는다. */}
       <div style={{

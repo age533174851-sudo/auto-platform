@@ -12,10 +12,11 @@ import React, { memo, useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, tabStyle, chip, ghostBtn, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 import { MarketCompare } from './MarketSwitch';
+import { WalletTreePanel } from './WalletTree';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
-type Tab = '포지션' | '미체결' | '현물·선물' | '상태대조' | '전략';
-const TABS: Tab[] = ['포지션', '미체결', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '미체결' | '자산' | '현물·선물' | '상태대조' | '전략';
+const TABS: Tab[] = ['포지션', '미체결', '자산', '현물·선물', '상태대조', '전략'];
 
 function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void }) {
   const { auth, connId, setSymbol, symbols } = useTerminal();
@@ -212,6 +213,8 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
             )}
           </div>
         )}
+
+        {tab === '자산' && <WalletTreePanel/>}
 
         {tab === '현물·선물' && <CombinedTab acct={acct}/>}
 

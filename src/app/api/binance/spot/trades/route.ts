@@ -11,58 +11,12 @@
 // 단가는 유지한다(그때 실현손익이 확정된다). 수수료는 받은 그대로 뺀다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+// 평균 매수가 계산은 순수 함수라 lib에 둔다. 라우트 파일은 정해진 이름만
+// export할 수 있고, 무엇보다 이 계산에는 테스트가 필요하다.
+import { computeCostBasis } from '@/lib/markets/costBasis';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-
-export interface SpotCostBasis {
-  /** 현재 보유 수량 (체결 내역 기준) */
-  qty: number;
-  /** 평균 매수 단가. 보유가 0이면 null */
-  avgPrice: number | null;
-  /** 지금까지 확정된 실현 손익 (수수료 반영) */
-  realizedPnl: number;
-  /** 지불한 수수료 합 (USDT 환산이 아닌 원 통화 그대로일 수 있음) */
-  feePaid: number;
-}
-
-/**
- * 체결 내역에서 평균 매수가와 실현손익을 구한다. 순수 함수 — 시간순 입력을 가정한다.
- */
-export function computeCostBasis(
-  trades: { isBuyer: boolean; qty: number; price: number; commission: number; commissionAsset: string; baseAsset: string }[],
-): SpotCostBasis {
-  let qty = 0, cost = 0, realized = 0, fee = 0;
-
-  for (const t of trades) {
-    if (!Number.isFinite(t.qty) || !Number.isFinite(t.price)) continue;
-    const c = Number.isFinite(t.commission) ? t.commission : 0;
-    fee += c;
-
-    if (t.isBuyer) {
-      // 수수료를 코인으로 냈으면 그만큼 덜 받은 것이다
-      const received = t.commissionAsset === t.baseAsset ? t.qty - c : t.qty;
-      cost += t.qty * t.price;
-      qty += received;
-    } else {
-      const avg = qty > 0 ? cost / qty : 0;
-      const sold = Math.min(t.qty, qty);
-      realized += sold * (t.price - avg);
-      // 매도 수수료는 보통 견적통화(USDT)로 낸다
-      if (t.commissionAsset !== t.baseAsset) realized -= c;
-      cost -= sold * avg;
-      qty -= sold;
-      if (qty < 1e-12) { qty = 0; cost = 0; }
-    }
-  }
-
-  return {
-    qty,
-    avgPrice: qty > 0 ? cost / qty : null,
-    realizedPnl: realized,
-    feePaid: fee,
-  };
-}
 
 export async function GET(req: NextRequest) {
   const uid = await resolveUserId(
