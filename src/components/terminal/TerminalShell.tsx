@@ -1,43 +1,37 @@
 'use client';
 // src/components/terminal/TerminalShell.tsx
 //
-// PC 터미널 레이아웃.
+// 배치를 고르는 곳. PC와 모바일은 **다른 파일**이다.
 //
-//   1920×1080 기준
+//   PC (>=900)
 //   ┌──────────────────────────────────────────────┐
-//   │ 상단 46px — 종목·가격·계좌·연결                 │
+//   │ 상단 52px — 종목·가격·계좌·연결                 │
 //   ├────────┬───────────────────────┬─────────────┤
 //   │ 좌 18% │      중앙 55%          │   우 27%    │
-//   │ 시장   │      차트              │  호가·주문   │
 //   ├────────┴───────────────────────┴─────────────┤
 //   │ 하단 28% — 포지션·미체결·대조·전략·Kill Switch  │
 //   └──────────────────────────────────────────────┘
 //
-// 폭이 줄면 축소하지 않고 **재배치**한다.
-//   ≥1400  3열
-//   1100~  좌측을 접는다 (버튼으로 다시 연다)
-//   900~   좌측 숨김 + 우측 좁게
-//   <900   모바일 화면으로 보낸다 — 이 레이아웃을 줄여 쓰지 않는다
+//   모바일 (<900) → MobileShell. 줄인 것이 아니라 다시 놓은 것이다.
+//   같은 배치를 줄이면 주문 버튼과 Kill Switch까지 작아진다.
 //
-// 크기·비율은 사용자별로 저장한다. 매번 다시 맞추게 하면 안 쓰게 된다.
+// 폭이 줄어드는 중간 단계에서는 좌측을 접는다.
+//   >=1400  3열
+//   1100~   좌측 접기 (버튼으로 다시 연다)
+//   900~    좌측 숨김 + 우측 좁게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { T } from '@/lib/constants';
+import { C, FS } from './theme';
 import { TerminalProvider, useTerminal } from './TerminalContext';
-import { TopBar, TOPBAR_H } from './TopBar';
+import { TopBar } from './TopBar';
 import { LeftRail } from './LeftRail';
 import { ChartPane } from './ChartPane';
 import { OrderPane } from './OrderPane';
 import { BottomDock } from './BottomDock';
+import MobileShell from './MobileShell';
 
 const LAYOUT_KEY = 'tg_terminal_layout_v1';
 
-interface Layout {
-  left: number;    // %
-  right: number;   // %
-  dock: number;    // %
-  leftOpen: boolean;
-}
-
+interface Layout { left: number; right: number; dock: number; leftOpen: boolean }
 const DEFAULT_LAYOUT: Layout = { left: 18, right: 27, dock: 28, leftOpen: true };
 
 /** 어떤 값이 저장돼 있어도 화면이 깨지지 않는 범위로 가둔다 */
@@ -53,7 +47,6 @@ function clampLayout(l: Partial<Layout>): Layout {
 }
 
 type Tier = 'wide' | 'mid' | 'narrow' | 'mobile';
-
 function tierOf(w: number): Tier {
   if (w >= 1400) return 'wide';
   if (w >= 1100) return 'mid';
@@ -63,6 +56,7 @@ function tierOf(w: number): Tier {
 
 function Splitter({ vertical, onDrag }: { vertical?: boolean; onDrag: (deltaPx: number) => void }) {
   const [active, setActive] = useState(false);
+  const [hover, setHover] = useState(false);
   const last = useRef(0);
 
   useEffect(() => {
@@ -88,12 +82,16 @@ function Splitter({ vertical, onDrag }: { vertical?: boolean; onDrag: (deltaPx: 
   return (
     <div
       onMouseDown={e => { last.current = vertical ? e.clientY : e.clientX; setActive(true); }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
-        [vertical ? 'height' : 'width']: 4,
+        [vertical ? 'height' : 'width']: 5,
         [vertical ? 'width' : 'height']: '100%',
-        background: active ? T.acc : T.border,
+        // 평소에는 배경과 구분되지 않는다. 올려야 보인다 —
+        // 항상 보이면 화면이 격자로 조각나 보인다.
+        background: active ? C.accent : hover ? C.hair3 : 'transparent',
         cursor: vertical ? 'row-resize' : 'col-resize',
-        flexShrink: 0,
+        flexShrink: 0, transition: 'background .12s',
       } as React.CSSProperties}
     />
   );
@@ -102,18 +100,16 @@ function Splitter({ vertical, onDrag }: { vertical?: boolean; onDrag: (deltaPx: 
 function Pane({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <div style={{
-      background: T.card, minWidth: 0, minHeight: 0, overflow: 'hidden',
+      background: C.panel, minWidth: 0, minHeight: 0, overflow: 'hidden',
       display: 'flex', flexDirection: 'column', ...style,
     }}>{children}</div>
   );
 }
 
-function ShellInner() {
+function DesktopShell({ tier }: { tier: Exclude<Tier, 'mobile'> }) {
   const { mode, symbol } = useTerminal();
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT);
-  const [tier, setTier] = useState<Tier>('wide');
   const [balance, setBalance] = useState<number | null>(null);
-  const [ready, setReady] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -121,20 +117,15 @@ function ShellInner() {
       const raw = localStorage.getItem(LAYOUT_KEY);
       if (raw) setLayout(clampLayout(JSON.parse(raw)));
     } catch { /* 깨진 저장값은 기본값으로 */ }
-    setReady(true);
   }, []);
+
+  const persist = (c: Layout) => {
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(c)); } catch {}
+  };
 
   const save = useCallback((next: Layout) => {
     const c = clampLayout(next);
-    setLayout(c);
-    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(c)); } catch {}
-  }, []);
-
-  useEffect(() => {
-    const onResize = () => setTier(tierOf(window.innerWidth));
-    onResize();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    setLayout(c); persist(c);
   }, []);
 
   const dragH = useCallback((which: 'left' | 'right') => (dpx: number) => {
@@ -142,11 +133,10 @@ function ShellInner() {
     const dpct = (dpx / w) * 100;
     setLayout(prev => {
       // 우측은 오른쪽 끝에 붙어 있으므로 드래그 방향이 반대다
-      const next = which === 'left'
+      const c = clampLayout(which === 'left'
         ? { ...prev, left: prev.left + dpct }
-        : { ...prev, right: prev.right - dpct };
-      const c = clampLayout(next);
-      try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(c)); } catch {}
+        : { ...prev, right: prev.right - dpct });
+      persist(c);
       return c;
     });
   }, []);
@@ -156,75 +146,49 @@ function ShellInner() {
     const dpct = (dpx / h) * 100;
     setLayout(prev => {
       const c = clampLayout({ ...prev, dock: prev.dock - dpct });
-      try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(c)); } catch {}
+      persist(c);
       return c;
     });
   }, []);
 
-  if (!ready) return <div style={{ background: T.bg, height: '100vh' }}/>;
-
-  // 좁은 화면은 이 레이아웃을 줄여 쓰지 않는다. 모바일은 다른 동선이다.
-  if (tier === 'mobile') {
-    return (
-      <div style={{
-        height: '100vh', background: T.bg, color: T.txt,
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center',
-      }}>
-        <div style={{ fontSize: 15, fontWeight: 900, color: T.acl }}>TRAIGO Pro 터미널</div>
-        <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.7, maxWidth: 320 }}>
-          이 화면은 가로 900px 이상에서 동작합니다.
-          <br/>좁은 화면에서는 축소하지 않고 <b style={{ color: T.txt }}>모바일 전용 화면</b>으로 갑니다 —
-          같은 배치를 줄여 쓰면 주문 버튼까지 작아지기 때문입니다.
-        </div>
-        <a href="/" style={{
-          background: T.acc, color: '#fff', borderRadius: 8,
-          padding: '11px 22px', fontSize: 13, fontWeight: 800, textDecoration: 'none',
-        }}>모바일 화면으로</a>
-      </div>
-    );
-  }
-
-  const showLeft = tier === 'wide' ? layout.leftOpen : tier === 'mid' ? layout.leftOpen : false;
+  const showLeft = tier !== 'narrow' && layout.leftOpen;
   const leftPct = showLeft ? layout.left : 0;
   const rightPct = tier === 'narrow' ? Math.min(layout.right, 32) : layout.right;
   const centerPct = 100 - leftPct - rightPct;
 
   return (
     <div ref={rootRef} style={{
-      height: '100vh', width: '100vw', overflow: 'hidden',
-      background: T.bg, color: T.txt,
+      height: '100dvh', width: '100vw', overflow: 'hidden',
+      background: C.bg, color: C.text,
       display: 'flex', flexDirection: 'column',
       // 실자금이면 화면 테두리가 붉다. 어느 패널을 보고 있어도 주변시에 들어온다.
-      boxShadow: mode.realMoney ? `inset 0 0 0 2px ${T.red}` : 'none',
+      boxShadow: mode.realMoney ? `inset 0 0 0 2px ${C.down}` : 'none',
     }}>
       <TopBar balance={balance}/>
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        {/* ── 상단 3열 ── */}
         <div style={{ height: `${100 - layout.dock}%`, display: 'flex', minHeight: 0 }}>
           {showLeft && (
             <>
-              <Pane style={{ width: `${leftPct}%`, borderRight: `1px solid ${T.border}` }}>
-                <LeftRail/>
-              </Pane>
+              <Pane style={{ width: `${leftPct}%` }}><LeftRail/></Pane>
               <Splitter onDrag={dragH('left')}/>
             </>
           )}
 
-          <Pane style={{ width: `${centerPct}%`, flex: showLeft ? undefined : 1, position: 'relative' }}>
-            {/* 접어둔 좌측을 다시 여는 손잡이. 접어놓고 못 찾으면
-                접힌 것이 아니라 사라진 것이 된다. */}
+          <Pane style={{
+            width: `${centerPct}%`, flex: showLeft ? undefined : 1, position: 'relative',
+          }}>
+            {/* 접어놓고 못 찾으면 접힌 게 아니라 사라진 것이다 */}
             {tier !== 'narrow' && (
               <button
                 onClick={() => save({ ...layout, leftOpen: !showLeft })}
                 title={showLeft ? '시장 패널 접기' : '시장 패널 열기'}
                 style={{
-                  position: 'absolute', top: 5, left: 5, zIndex: 5,
-                  background: T.alt, color: showLeft ? T.muted : T.acl,
-                  border: `1px solid ${showLeft ? T.border : T.border2}`,
-                  borderRadius: 5, padding: '2px 8px', fontSize: 9,
-                  fontWeight: 700, cursor: 'pointer', lineHeight: 1.6,
+                  position: 'absolute', top: 7, left: 8, zIndex: 5,
+                  height: 26, padding: '0 9px', borderRadius: 7, cursor: 'pointer',
+                  background: C.raised, border: `1px solid ${C.hair}`,
+                  color: showLeft ? C.faint : C.accent,
+                  fontSize: FS.micro, fontWeight: 600,
                 }}
               >{showLeft ? '◀' : '▶ 시장'}</button>
             )}
@@ -232,20 +196,38 @@ function ShellInner() {
           </Pane>
 
           <Splitter onDrag={dragH('right')}/>
-          <Pane style={{ width: `${rightPct}%`, borderLeft: `1px solid ${T.border}` }}>
-            <OrderPane/>
-          </Pane>
+          <Pane style={{ width: `${rightPct}%` }}><OrderPane/></Pane>
         </div>
 
         <Splitter vertical onDrag={dragV}/>
 
-        {/* ── 하단 ── */}
-        <Pane style={{ height: `${layout.dock}%`, borderTop: `1px solid ${T.border}` }}>
+        <Pane style={{ height: `${layout.dock}%` }}>
           <BottomDock onBalance={setBalance}/>
         </Pane>
       </div>
     </div>
   );
+}
+
+function ShellInner() {
+  // 서버·첫 렌더에서는 폭을 모른다. 모르는 채로 PC를 그리면 모바일에서
+  // 한 번 깜빡이므로, 정해진 뒤에 그린다.
+  const [tier, setTier] = useState<Tier | null>(null);
+
+  useEffect(() => {
+    const onResize = () => setTier(tierOf(window.innerWidth));
+    onResize();
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+    };
+  }, []);
+
+  if (tier === null) return <div style={{ background: C.bg, height: '100dvh' }}/>;
+  if (tier === 'mobile') return <MobileShell/>;
+  return <DesktopShell tier={tier}/>;
 }
 
 export default function TerminalShell() {

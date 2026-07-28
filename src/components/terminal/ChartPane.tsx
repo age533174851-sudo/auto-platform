@@ -14,7 +14,7 @@
 //   2. memo로 감싸 그 둘이 그대로면 아예 다시 그리지 않고
 //   3. 내부 상태(간격 선택)는 자기 안에만 둔다.
 import React, { memo, useState, useEffect } from 'react';
-import { T } from '@/lib/constants';
+import { C, FS, tabStyle } from './theme';
 import { InlineTVChart } from '@/components/pages/SharedUI';
 
 const INTERVALS: { id: string; label: string }[] = [
@@ -25,9 +25,11 @@ const INTERVALS: { id: string; label: string }[] = [
 const IV_KEY = 'tg_terminal_interval';
 
 /** 심볼만 바뀌면 다시 그린다. 그 외에는 절대 건드리지 않는다. */
-function ChartInner({ symbol }: { symbol: string }) {
+function ChartInner({ symbol, compact }: { symbol: string; compact?: boolean }) {
   const [interval, setInterval] = useState('60');
-  const [layout, setLayout] = useState<'default' | 'minimal' | 'pro'>('default');
+  // 모바일 기본값은 'minimal'이다. TradingView 자체 도구줄까지 나오면
+  // 차트 위에 도구줄이 세 겹으로 쌓여 정작 봉이 안 보인다.
+  const [layout, setLayout] = useState<'default' | 'minimal' | 'pro'>(compact ? 'minimal' : 'default');
 
   useEffect(() => {
     try {
@@ -50,28 +52,26 @@ function ChartInner({ symbol }: { symbol: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 3, padding: '4px 8px',
-        borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 3,
+        padding: compact ? '6px 8px' : '6px 8px 6px 46px',
+        borderBottom: `1px solid ${C.hair}`, flexShrink: 0,
+        overflowX: 'auto', scrollbarWidth: 'none',
       }}>
         {INTERVALS.map(iv => (
-          <button key={iv.id} onClick={() => pick(iv.id)} style={{
-            background: interval === iv.id ? T.acc : 'transparent',
-            color: interval === iv.id ? '#fff' : T.sub,
-            border: `1px solid ${interval === iv.id ? T.acc : T.border}`,
-            borderRadius: 5, padding: '2px 8px', fontSize: 10, fontWeight: 700, cursor: 'pointer',
-          }}>{iv.label}</button>
+          <button key={iv.id} onClick={() => pick(iv.id)} style={tabStyle(interval === iv.id)}>
+            {iv.label}
+          </button>
         ))}
-        <div style={{ flex: 1 }}/>
-        {(['default', 'minimal', 'pro'] as const).map(l => (
+        <div style={{ flex: 1, minWidth: 8 }}/>
+        {/* 레이아웃 전환은 PC에서만. 모바일에서는 이 세 버튼이 간격 버튼을
+            밀어내서 정작 자주 쓰는 것이 화면 밖으로 나간다. */}
+        {!compact && (['default', 'minimal', 'pro'] as const).map(l => (
           <button key={l} onClick={() => pickLayout(l)} style={{
-            background: layout === l ? T.alt : 'transparent',
-            color: layout === l ? T.acl : T.muted,
-            border: `1px solid ${layout === l ? T.border2 : 'transparent'}`,
-            borderRadius: 5, padding: '2px 7px', fontSize: 9, fontWeight: 700, cursor: 'pointer',
+            ...tabStyle(layout === l), fontSize: FS.micro, padding: '4px 9px',
           }}>{l === 'default' ? '기본' : l === 'minimal' ? '간결' : '고급'}</button>
         ))}
       </div>
-      <div style={{ flex: 1, minHeight: 0, padding: 4 }}>
+      <div style={{ flex: 1, minHeight: 0, padding: compact ? 0 : 6, background: C.bg }}>
         {/* key에 심볼과 간격만 넣는다. 다른 무엇이 바뀌어도 iframe은 살아남는다. */}
         <InlineTVChart
           key={`${symbol}-${interval}-${layout}`}
@@ -85,4 +85,4 @@ function ChartInner({ symbol }: { symbol: string }) {
   );
 }
 
-export const ChartPane = memo(ChartInner, (a, b) => a.symbol === b.symbol);
+export const ChartPane = memo(ChartInner, (a, b) => a.symbol === b.symbol && a.compact === b.compact);

@@ -7,19 +7,13 @@
 // 둘이 다를 수 있고, 다르면 그 사실 자체가 가장 중요한 정보다.
 // 그래서 '상태대조' 탭을 따로 뒀다.
 //
-// Kill Switch는 항상 보이는 자리에 크게 둔다. 탭 안에 숨기면 필요한 순간에
-// 두 번 클릭해야 하고, 그 순간에는 한 번도 길다.
+// Kill Switch는 탭 안에 숨기지 않는다. 필요한 순간에 두 번 누르게 하면 안 된다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
-import { T } from '@/lib/constants';
+import { C, FS, NUM, tabStyle, chip, ghostBtn, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 
 type Tab = '포지션' | '미체결' | '상태대조' | '전략';
 const TABS: Tab[] = ['포지션', '미체결', '상태대조', '전략'];
-
-function fmtNum(v: any, d = 2): string {
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: d }) : '—';
-}
 
 function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void }) {
   const { auth, connId, setSymbol, symbols } = useTerminal();
@@ -43,7 +37,7 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
       onBalance?.(Number.isFinite(b) ? b : null);
     } catch (e: any) {
       // 조회 실패를 "포지션 없음"으로 보여주면 안 된다. 있는데 못 본 것일 수 있다.
-      setErr(`거래소 조회 실패 — 포지션 없음이 아니라 확인 불가입니다: ${e?.message || e}`);
+      setErr(`거래소 조회 실패 — 포지션 없음이 아니라 확인 불가입니다 (${e?.message || e})`);
     }
   }, [auth, connId, onBalance]);
 
@@ -74,7 +68,7 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
         body: JSON.stringify({ connectionId: connId, reason: '터미널에서 수동 발동' }),
       });
       const j = await r.json();
-      setKillMsg(r.ok ? '킬스위치 발동됨 — 신규 진입 차단' : (j?.message || j?.error || '발동 실패'));
+      setKillMsg(r.ok ? '발동됨 — 신규 진입 차단' : (j?.message || j?.error || '발동 실패'));
     } catch (e: any) { setKillMsg(`실패: ${e?.message || e}`); }
     finally { setKilling(false); }
   };
@@ -86,46 +80,47 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 2,
-        borderBottom: `1px solid ${T.border}`, padding: '0 6px', flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+        padding: '7px 10px', borderBottom: `1px solid ${C.hair}`,
       }}>
         {TABS.map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            background: 'transparent', border: 'none',
-            borderBottom: `2px solid ${tab === t ? T.acl : 'transparent'}`,
-            color: tab === t ? T.txt : T.muted,
-            padding: '7px 12px', fontSize: 10, fontWeight: 800, cursor: 'pointer',
-          }}>
+          <button key={t} onClick={() => setTab(t)} style={tabStyle(tab === t)}>
             {t}
             {t === '포지션' && positions.length > 0 && (
-              <span style={{ color: T.acl, marginLeft: 4 }}>{positions.length}</span>
+              <span style={{ ...NUM, color: C.accent, marginLeft: 5, fontWeight: 700 }}>
+                {positions.length}
+              </span>
             )}
           </button>
         ))}
         <div style={{ flex: 1 }}/>
-        {killMsg && <span style={{ fontSize: 9, color: T.ylw, marginRight: 8 }}>{killMsg}</span>}
+        {killMsg && (
+          <span style={{ fontSize: FS.micro, color: C.warn, marginRight: 8 }}>{killMsg}</span>
+        )}
         <button onClick={kill} disabled={killing} style={{
-          background: T.red, color: '#fff', border: 'none', borderRadius: 6,
-          padding: '6px 16px', fontSize: 11, fontWeight: 900,
-          cursor: killing ? 'default' : 'pointer', opacity: killing ? 0.6 : 1,
-        }}>
-          {killing ? '발동 중…' : '🛑 Kill Switch'}
-        </button>
+          minHeight: 34, padding: '0 16px', borderRadius: 8, cursor: killing ? 'default' : 'pointer',
+          background: C.downBg, color: C.down, border: `1px solid ${C.down}55`,
+          fontSize: FS.small, fontWeight: 700, letterSpacing: '0.02em',
+        }}>{killing ? '발동 중…' : 'KILL SWITCH'}</button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', fontSize: 10 }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {err && (
-          <div style={{ padding: '8px 10px', color: T.ylw, fontSize: 10, lineHeight: 1.5 }}>{err}</div>
+          <div style={{
+            margin: 10, padding: '10px 12px', borderRadius: 8,
+            background: C.warnBg, color: C.warn, fontSize: FS.small, lineHeight: 1.55,
+          }}>{err}</div>
         )}
 
         {tab === '포지션' && (
           positions.length === 0
-            ? <Empty t={acct ? '열린 포지션이 없습니다' : '연결을 선택하면 표시됩니다'}/>
+            ? <Empty t={acct ? '열린 포지션이 없습니다' : '거래소 연결을 선택하면 표시됩니다'}/>
             : <Table
                 head={['종목', '방향', '수량', '진입가', 'Mark', '청산가', '미실현', '배율', '마진']}
                 rows={positions.map((p: any) => {
                   const long = Number(p.amount) > 0;
                   const pnl = Number(p.unrealizedPnl ?? p.unRealizedProfit);
+                  const iso = p.marginType === 'isolated';
                   return {
                     key: p.symbol,
                     onClick: () => {
@@ -133,20 +128,21 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
                       if (s) setSymbol(s);
                     },
                     cells: [
-                      <b key="s" style={{ color: T.txt }}>{p.symbol}</b>,
-                      <span key="d" style={{ color: long ? T.grn : T.red, fontWeight: 800 }}>
+                      <span key="s" style={{ color: C.text, fontWeight: 600 }}>{p.symbol}</span>,
+                      <span key="d" style={chip(long ? C.up : C.down, long ? C.upBg : C.downBg)}>
                         {long ? 'LONG' : 'SHORT'}
                       </span>,
-                      fmtNum(Math.abs(Number(p.amount)), 4),
-                      fmtNum(p.entryPrice),
-                      fmtNum(p.markPrice),
-                      <span key="l" style={{ color: T.ylw }}>{fmtNum(p.liquidationPrice)}</span>,
-                      <span key="p" style={{ color: pnl >= 0 ? T.grn : T.red, fontWeight: 800 }}>
-                        {fmtNum(pnl)}
+                      fmtPrice(Math.abs(Number(p.amount)), 4),
+                      fmtPrice(p.entryPrice),
+                      fmtPrice(p.markPrice),
+                      <span key="l" style={{ color: C.warn }}>{fmtPrice(p.liquidationPrice)}</span>,
+                      <span key="p" style={{ color: pnlColor(pnl), fontWeight: 700 }}>
+                        {pnl >= 0 ? '+' : ''}{fmtPrice(pnl)}
                       </span>,
-                      `${fmtNum(p.leverage, 0)}x`,
-                      <span key="m" style={{ color: p.marginType === 'isolated' ? T.sub : T.ylw }}>
-                        {p.marginType === 'isolated' ? '격리' : '교차'}
+                      `${fmtPrice(p.leverage, 0)}×`,
+                      // 교차는 격리 전제(청산가·증거금 상한)를 깨므로 눈에 띄어야 한다
+                      <span key="m" style={{ color: iso ? C.dim : C.warn, fontWeight: iso ? 400 : 700 }}>
+                        {iso ? '격리' : '교차'}
                       </span>,
                     ],
                   };
@@ -162,52 +158,54 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
                 rows={open.map((o: any, i: number) => ({
                   key: String(o.orderId ?? i),
                   cells: [
-                    <b key="s" style={{ color: T.txt }}>{o.symbol}</b>,
-                    o.type,
-                    <span key="d" style={{ color: o.side === 'BUY' ? T.grn : T.red }}>{o.side}</span>,
-                    fmtNum(o.origQty, 4),
-                    fmtNum(o.price),
-                    fmtNum(o.stopPrice),
+                    <span key="s" style={{ color: C.text, fontWeight: 600 }}>{o.symbol}</span>,
+                    <span key="t" style={{ color: C.dim }}>{o.type}</span>,
+                    <span key="d" style={{ color: o.side === 'BUY' ? C.up : C.down }}>{o.side}</span>,
+                    fmtPrice(o.origQty, 4),
+                    fmtPrice(o.price),
+                    fmtPrice(o.stopPrice),
                   ],
                 }))}
               />
         )}
 
         {tab === '상태대조' && (
-          <div style={{ padding: 10, lineHeight: 1.6 }}>
-            {!recon ? <Empty t="대조 중…"/> : !recon.ok ? (
-              <div style={{ color: T.ylw }}>
-                대조할 수 없습니다: {recon.error || '사유 미상'}
-                <div style={{ color: T.muted, fontSize: 9, marginTop: 4 }}>
-                  확인 불가는 &quot;문제 없음&quot;이 아닙니다. 이 상태에서는 신규 주문이 막힙니다.
+          <div style={{ padding: 14, lineHeight: 1.6, fontSize: FS.small }}>
+            {!recon ? <Empty t="대조 중"/> : !recon.ok ? (
+              <div style={{ padding: '12px 14px', borderRadius: 8, background: C.warnBg }}>
+                <div style={{ color: C.warn, fontWeight: 700, marginBottom: 4 }}>
+                  대조할 수 없습니다 — {recon.error || '사유 미상'}
+                </div>
+                <div style={{ color: C.dim, fontSize: FS.micro }}>
+                  확인 불가는 &lsquo;문제 없음&rsquo;이 아닙니다. 이 상태에서는 신규 주문이 막힙니다.
                 </div>
               </div>
             ) : (
               <>
-                <div style={{
-                  color: recon.verdict?.blockNewOrders ? T.red : T.grn,
-                  fontWeight: 800, marginBottom: 6,
-                }}>
-                  {recon.verdict?.blockNewOrders ? '⚠ 신규 주문 차단 중' : '앱과 거래소 상태 일치'}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                  <span style={recon.verdict?.blockNewOrders
+                    ? chip(C.down, C.downBg) : chip(C.up, C.upBg)}>
+                    {recon.verdict?.blockNewOrders ? '신규 주문 차단 중' : '앱 · 거래소 일치'}
+                  </span>
+                  <span style={{ color: C.dim }}>{recon.verdict?.summary}</span>
+                  <div style={{ flex: 1 }}/>
+                  <button onClick={loadRecon} style={ghostBtn()}>다시 대조</button>
                 </div>
-                <div style={{ color: T.sub, marginBottom: 8 }}>{recon.verdict?.summary}</div>
-                {(recon.verdict?.mismatches ?? []).map((m: any, i: number) => (
-                  <div key={i} style={{
-                    padding: '4px 7px', marginBottom: 3, borderRadius: 4,
-                    borderLeft: `2px solid ${m.severity === 'critical' ? T.red : m.severity === 'warn' ? T.ylw : T.muted}`,
-                    background: T.alt, fontSize: 9,
-                  }}>
-                    <b style={{
-                      color: m.severity === 'critical' ? T.red : m.severity === 'warn' ? T.ylw : T.sub,
-                    }}>{m.code}</b>
-                    <span style={{ color: T.sub }}> {m.symbol ? `· ${m.symbol}` : ''} — {m.detail}</span>
-                  </div>
-                ))}
-                <button onClick={loadRecon} style={{
-                  marginTop: 6, background: T.alt, color: T.acl,
-                  border: `1px solid ${T.border2}`, borderRadius: 5,
-                  padding: '4px 12px', fontSize: 10, fontWeight: 700, cursor: 'pointer',
-                }}>다시 대조</button>
+                {(recon.verdict?.mismatches ?? []).map((m: any, i: number) => {
+                  const tone = m.severity === 'critical' ? C.down : m.severity === 'warn' ? C.warn : C.faint;
+                  return (
+                    <div key={i} style={{
+                      display: 'flex', gap: 10, alignItems: 'baseline',
+                      padding: '8px 12px', marginBottom: 5, borderRadius: 8,
+                      background: C.raised, borderLeft: `2px solid ${tone}`,
+                    }}>
+                      <span style={{ color: tone, fontWeight: 700, fontSize: FS.micro }}>{m.code}</span>
+                      <span style={{ color: C.dim }}>
+                        {m.symbol ? `${m.symbol} · ` : ''}{m.detail}
+                      </span>
+                    </div>
+                  );
+                })}
               </>
             )}
           </div>
@@ -222,34 +220,45 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
 function StrategyTab() {
   const { mode } = useTerminal();
   return (
-    <div style={{ padding: 10, color: T.sub, lineHeight: 1.7 }}>
-      <div style={{ color: T.txt, fontWeight: 800, marginBottom: 6 }}>
+    <div style={{ padding: 14, color: C.dim, fontSize: FS.small, lineHeight: 1.7, maxWidth: 640 }}>
+      <div style={{ color: C.text, fontSize: FS.lead, fontWeight: 700, marginBottom: 4 }}>
         BTC 09:00 KST 일봉 전략
       </div>
-      <div style={{ color: T.muted, fontSize: 9, marginBottom: 10 }}>
+      <div style={{ color: C.faint, marginBottom: 14 }}>
         09:00 전환 → 10~30분 관찰 → 한 방향 1회 진입 → 다음 09:00 청산
       </div>
+
       <div style={{
-        padding: '7px 9px', borderRadius: 5, background: T.alt,
-        border: `1px solid ${T.border}`, fontSize: 9, lineHeight: 1.6,
+        background: C.raised, borderRadius: 10, padding: '12px 14px',
+        display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14,
       }}>
-        <div style={{ color: T.txt, fontWeight: 700, marginBottom: 3 }}>운영 단계</div>
-        <div>{mode.unknown ? '확인 불가' : mode.label}</div>
-        <div style={{ color: T.muted, marginTop: 4 }}>
-          주문 전송 {mode.unknown ? '?' : mode.sendsOrders ? '함' : '안 함'} ·
-          실제 자금 {mode.unknown ? '?' : mode.realMoney ? '사용' : '미사용'}
+        <div style={{ color: C.text, fontWeight: 600 }}>
+          {mode.unknown ? '운영 단계 확인 불가' : mode.label}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <span style={chip(mode.unknown ? C.warn : mode.sendsOrders ? C.accent : C.dim)}>
+            주문 전송 {mode.unknown ? '?' : mode.sendsOrders ? '함' : '안 함'}
+          </span>
+          <span style={mode.realMoney ? chip(C.down, C.downBg) : chip(C.dim)}>
+            실제 자금 {mode.unknown ? '?' : mode.realMoney ? '사용' : '미사용'}
+          </span>
         </div>
       </div>
-      <div style={{ color: T.muted, fontSize: 9, marginTop: 10, lineHeight: 1.6 }}>
-        실데이터 검증 결과 100배는 이 전략에서 구조적으로 생존이 어렵습니다
-        (MAE 중앙값이 100배 청산거리의 2.6~4배). 배율은 그 사실을 알고 고르세요.
+
+      <div style={{ color: C.faint, lineHeight: 1.65 }}>
+        실데이터 검증 결과 100배는 이 전략에서 구조적으로 생존이 어렵습니다 —
+        MAE 중앙값이 100배 청산거리의 2.6~4배입니다. 배율은 그 사실을 알고 고르세요.
       </div>
     </div>
   );
 }
 
 function Empty({ t }: { t: string }) {
-  return <div style={{ padding: 20, textAlign: 'center', color: T.muted, fontSize: 10 }}>{t}</div>;
+  return (
+    <div style={{ padding: '32px 16px', textAlign: 'center', color: C.faint, fontSize: FS.small }}>
+      {t}
+    </div>
+  );
 }
 
 function Table({ head, rows }: {
@@ -257,13 +266,14 @@ function Table({ head, rows }: {
   rows: { key: string; cells: React.ReactNode[]; onClick?: () => void }[];
 }) {
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: FS.small }}>
       <thead>
         <tr>
           {head.map(h => (
             <th key={h} style={{
-              textAlign: 'left', padding: '5px 10px', color: T.muted, fontSize: 9,
-              fontWeight: 600, borderBottom: `1px solid ${T.border}`, whiteSpace: 'nowrap',
+              textAlign: 'left', padding: '8px 14px', color: C.faint,
+              fontSize: FS.micro, fontWeight: 500, whiteSpace: 'nowrap',
+              borderBottom: `1px solid ${C.hair}`, letterSpacing: '0.03em',
             }}>{h}</th>
           ))}
         </tr>
@@ -273,8 +283,8 @@ function Table({ head, rows }: {
           <tr key={r.key} onClick={r.onClick} style={{ cursor: r.onClick ? 'pointer' : 'default' }}>
             {r.cells.map((c, i) => (
               <td key={i} style={{
-                padding: '5px 10px', color: T.sub, borderBottom: `1px solid ${T.border}`,
-                fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+                padding: '9px 14px', color: C.dim, whiteSpace: 'nowrap',
+                borderBottom: `1px solid ${C.hair}`, ...NUM,
               }}>{c}</td>
             ))}
           </tr>

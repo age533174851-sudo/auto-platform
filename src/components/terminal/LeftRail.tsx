@@ -8,7 +8,7 @@
 // 그래서 fetch도 상태도 여기서 끝낸다 — 밖으로 새어 나가는 것은
 // "종목을 골랐다"는 이벤트 하나뿐이다.
 import React, { memo, useEffect, useState } from 'react';
-import { T } from '@/lib/constants';
+import { C, FS, NUM, tabStyle, chip, fmtPrice, pnlColor } from './theme';
 import { useTerminal, type TerminalSymbol } from './TerminalContext';
 
 type Tab = '시장' | 'AI' | '뉴스' | '일정';
@@ -48,34 +48,34 @@ function MarketList() {
         const r = rows[s.id];
         const on = s.id === symbol.id;
         return (
-          <div key={s.id} onClick={() => setSymbol(s)} style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            padding: '5px 8px', cursor: 'pointer',
-            background: on ? T.acg : 'transparent',
-            borderLeft: `2px solid ${on ? T.acl : 'transparent'}`,
+          <button key={s.id} onClick={() => setSymbol(s)} style={{
+            display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center',
+            padding: '9px 12px', cursor: 'pointer', border: 'none', textAlign: 'left',
+            background: on ? C.active : 'transparent',
+            boxShadow: on ? `inset 2px 0 0 ${C.accent}` : 'none',
+            transition: 'background .12s',
           }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ color: on ? T.txt : T.sub, fontSize: 11, fontWeight: 700 }}>
+              <div style={{ color: on ? C.text : C.dim, fontSize: FS.body, fontWeight: 600 }}>
                 {s.id.replace(/USDT$/, '')}
               </div>
-              <div style={{ color: T.muted, fontSize: 8, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <div style={{ color: C.faint, fontSize: FS.micro, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {s.nameKr}
               </div>
             </div>
-            <div style={{ textAlign: 'right', fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums' }}>
-              <div style={{ color: T.txt, fontSize: 10 }}>
-                {r ? r.p.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}
-              </div>
-              <div style={{ color: !r ? T.muted : r.c >= 0 ? T.grn : T.red, fontSize: 9 }}>
+            <div style={{ textAlign: 'right', ...NUM }}>
+              <div style={{ color: C.text, fontSize: FS.small }}>{r ? fmtPrice(r.p) : '—'}</div>
+              <div style={{ color: pnlColor(r?.c), fontSize: FS.micro, fontWeight: 600 }}>
                 {r ? `${r.c >= 0 ? '+' : ''}${r.c.toFixed(2)}%` : ''}
               </div>
             </div>
-          </div>
+          </button>
         );
       })}
-      <div style={{ padding: '6px 8px', color: T.muted, fontSize: 8, borderTop: `1px solid ${T.border}` }}>
-        /api/prices · 15초 주기
-      </div>
+      <div style={{
+        padding: '10px 12px', color: C.faint, fontSize: FS.micro,
+        borderTop: `1px solid ${C.hair}`,
+      }}>/api/prices · 15초 주기</div>
     </div>
   );
 }
@@ -109,36 +109,37 @@ function StrategyView() {
 
   const side = d?.battle?.side;
   return (
-    <div style={{ padding: 8, fontSize: 10, color: T.sub, lineHeight: 1.55 }}>
+    <div style={{ padding: 12, fontSize: FS.small, color: C.dim, lineHeight: 1.6 }}>
       <button onClick={run} disabled={loading} style={{
-        width: '100%', background: T.acc, color: '#fff', border: 'none', borderRadius: 6,
-        padding: '7px 0', fontSize: 11, fontWeight: 800,
-        cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1, marginBottom: 8,
+        width: '100%', minHeight: 38, background: C.accentBg, color: C.accent,
+        border: `1px solid ${C.accent}44`, borderRadius: 8,
+        fontSize: FS.small, fontWeight: 700, marginBottom: 10,
+        cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1,
       }}>
-        {loading ? '판단 중…' : `${symbol.id.replace(/USDT$/, '')} 오늘 판단 (미리보기)`}
+        {loading ? '판단 중…' : `${symbol.id.replace(/USDT$/, '')} 오늘 판단 미리보기`}
       </button>
 
-      {err && <div style={{ color: T.ylw, marginBottom: 6 }}>{err}</div>}
+      {err && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 8, background: C.warnBg,
+          color: C.warn, marginBottom: 8,
+        }}>{err}</div>
+      )}
 
       {d && (
         <>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-            <span style={{
-              padding: '2px 7px', borderRadius: 5, fontWeight: 800, fontSize: 10,
-              color: d.approved ? T.grn : T.muted,
-              border: `1px solid ${d.approved ? T.grn : T.border2}`,
-            }}>{d.approved ? '진입 조건 충족' : '오늘 진입 없음'}</span>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <span style={d.approved ? chip(C.up, C.upBg) : chip(C.dim)}>
+              {d.approved ? '진입 조건 충족' : '오늘 진입 없음'}
+            </span>
             {side && (
-              <span style={{
-                padding: '2px 7px', borderRadius: 5, fontWeight: 800, fontSize: 10,
-                color: side === 'LONG' ? T.grn : T.red,
-                border: `1px solid ${side === 'LONG' ? T.grn : T.red}`,
-              }}>{side}</span>
+              <span style={chip(side === 'LONG' ? C.up : C.down,
+                                side === 'LONG' ? C.upBg : C.downBg)}>{side}</span>
             )}
           </div>
-          <div style={{ color: T.txt }}>{d.reason}</div>
+          <div style={{ color: C.text }}>{d.reason}</div>
           {d.plan && (
-            <div style={{ marginTop: 8, borderTop: `1px solid ${T.border}`, paddingTop: 6 }}>
+            <div style={{ marginTop: 10, background: C.raised, borderRadius: 8, padding: '10px 12px' }}>
               <Row k="방향" v={d.plan.side}/>
               <Row k="배율" v={`${d.plan.leverage}x`}/>
               <Row k="증거금" v={`$${Number(d.plan.requiredMargin).toFixed(2)}`}/>
@@ -148,7 +149,7 @@ function StrategyView() {
                    warn={Number(d.plan.liquidationDistancePct) < 1}/>
             </div>
           )}
-          <div style={{ marginTop: 6, color: T.muted, fontSize: 8 }}>
+          <div style={{ marginTop: 8, color: C.faint, fontSize: FS.micro }}>
             미리보기입니다 — 주문은 나가지 않습니다 (dryRun)
           </div>
         </>
@@ -159,12 +160,9 @@ function StrategyView() {
 
 function Row({ k, v, warn }: { k: string; v: any; warn?: boolean }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
-      <span style={{ color: T.muted }}>{k}</span>
-      <span style={{
-        color: warn ? T.red : T.txt, fontWeight: warn ? 800 : 600,
-        fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums',
-      }}>{v}</span>
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+      <span style={{ color: C.faint }}>{k}</span>
+      <span style={{ ...NUM, color: warn ? C.down : C.text, fontWeight: warn ? 700 : 600 }}>{v}</span>
     </div>
   );
 }
@@ -195,11 +193,11 @@ function NewsList() {
     <div>
       {items.slice(0, 15).map((n, i) => (
         <a key={i} href={n.url || n.link || '#'} target="_blank" rel="noreferrer" style={{
-          display: 'block', padding: '6px 8px', borderBottom: `1px solid ${T.border}`,
-          color: T.sub, fontSize: 10, lineHeight: 1.45, textDecoration: 'none',
+          display: 'block', padding: '10px 12px', borderBottom: `1px solid ${C.hair}`,
+          color: C.dim, fontSize: FS.small, lineHeight: 1.5, textDecoration: 'none',
         }}>
-          <div style={{ color: T.txt }}>{n.title || n.headline || '(제목 없음)'}</div>
-          <div style={{ color: T.muted, fontSize: 8, marginTop: 2 }}>
+          <div style={{ color: C.text }}>{n.title || n.headline || '(제목 없음)'}</div>
+          <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 3 }}>
             {n.source?.name || n.source || n.publisher || ''}
           </div>
         </a>
@@ -232,21 +230,20 @@ function ScheduleList() {
   }, []);
 
   return (
-    <div style={{ padding: 8, fontSize: 10, color: T.sub, lineHeight: 1.6 }}>
-      <div style={{ color: T.muted, fontSize: 8 }}>다음 09:00 KST 일봉 전환까지</div>
-      <div style={{
-        color: T.acl, fontSize: 16, fontWeight: 900,
-        fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums', margin: '2px 0 10px',
-      }}>{left}</div>
+    <div style={{ padding: 12, fontSize: FS.small, color: C.dim, lineHeight: 1.6 }}>
+      <div style={{ color: C.faint, fontSize: FS.micro }}>다음 09:00 KST 일봉 전환까지</div>
+      <div style={{ ...NUM, color: C.accent, fontSize: 22, fontWeight: 700, margin: '4px 0 14px' }}>
+        {left}
+      </div>
 
-      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 7 }}>
+      <div style={{ background: C.raised, borderRadius: 8, padding: '10px 12px' }}>
         <Row k="운영 모드" v={mode.unknown ? '확인 불가' : mode.label.split(' —')[0]}/>
         <Row k="주문 전송" v={mode.unknown ? '?' : mode.sendsOrders ? '보냄' : '안 보냄'}/>
         <Row k="실제 자금" v={mode.unknown ? '?' : mode.realMoney ? '사용' : '미사용'}
              warn={mode.realMoney}/>
       </div>
 
-      <div style={{ marginTop: 10, color: T.muted, fontSize: 8, lineHeight: 1.5 }}>
+      <div style={{ marginTop: 12, color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
         09:00 전환 → 10~30분 관찰 → 1회 진입 → 다음 09:00 청산.
         이 화면의 모든 판단은 이 순서를 전제로 합니다.
       </div>
@@ -255,7 +252,9 @@ function ScheduleList() {
 }
 
 function Empty({ t }: { t: string }) {
-  return <div style={{ padding: 16, textAlign: 'center', color: T.muted, fontSize: 10 }}>{t}</div>;
+  return (
+    <div style={{ padding: '28px 16px', textAlign: 'center', color: C.faint, fontSize: FS.small }}>{t}</div>
+  );
 }
 
 // ── 껍데기 ────────────────────────────────────────────
@@ -263,14 +262,12 @@ function LeftRailInner() {
   const [tab, setTab] = useState<Tab>('시장');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
-      <div style={{ display: 'flex', borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+      <div style={{
+        display: 'flex', gap: 4, padding: '7px 8px',
+        borderBottom: `1px solid ${C.hair}`, flexShrink: 0,
+      }}>
         {TABS.map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            flex: 1, background: 'transparent', border: 'none',
-            borderBottom: `2px solid ${tab === t ? T.acl : 'transparent'}`,
-            color: tab === t ? T.txt : T.muted,
-            padding: '7px 0', fontSize: 10, fontWeight: 800, cursor: 'pointer',
-          }}>{t}</button>
+          <button key={t} onClick={() => setTab(t)} style={{ ...tabStyle(tab === t), flex: 1 }}>{t}</button>
         ))}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
