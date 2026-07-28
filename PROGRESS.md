@@ -295,3 +295,28 @@ npm test          # 유닛 테스트 55개
 npm run typecheck # 타입 에러 (현재 80)
 npm run build     # 프로덕션 빌드 (104 라우트)
 ```
+
+## 시장 분리 · 전략 계층 (완료)
+
+`/terminal` 안에서 현물 / USDⓈ-M / COIN-M을 전환한다. 주문 경로·지갑·전략이 전부 분리돼 있다.
+
+| 계층 | 파일 | 핵심 규칙 |
+|---|---|---|
+| 시장 유형 | `lib/markets/marketType.ts` | 없는 것은 0이 아니라 **없다**. 모르는 값은 `null` |
+| 통합 자산 | `lib/markets/wallets.ts` | 현물 잔고를 선물 증거금에 **더하지 않는다** |
+| 원가 | `lib/markets/costBasis.ts` | 코인으로 낸 수수료만큼 보유가 준다 |
+| COIN-M | `lib/markets/coinM.ts` | 수량 단위가 **계약**. 계약 크기를 추측하지 않는다 |
+| 전략 장부 | `lib/strategies/ledger.ts` | 자기 귀속분까지만 청산. 차이는 **미귀속**으로 |
+| 현물 전략 10종 | `lib/strategies/spotStrategies.ts` | 의도 타입에 레버리지 필드가 **없다** |
+| 현물 주문 도구 | `lib/strategies/spotOrderPlan.ts` | `guardedBy`로 거래소/앱 보호를 가른다 |
+| 감시 루프 | `api/watch/tick` + GitHub Actions 15분 | **확인 주기를 화면에 그대로 적는다** |
+| 결합 전략 6종 | `lib/strategies/combined.ts` | 반쪽 실행 시 **지금 상태**를 말한다 |
+
+주문 경로는 시장마다 하나다 — `spot/order` · `futures/order` · `coinm/order`.
+확인 토큰도 각각 다르다(`SPOT_` / `LIVE_` / `COINM_`). 같으면 엔드포인트만 바꿔도 통과한다.
+
+**결합 전략 실데이터 확인** (BTCUSDT 63,523 · 펀딩 0.0001% · RSI 42.2):
+- 증거금 1,000인데 헤지에 31,761 필요 → **차단** ("일부만 걸리면 헤지된 줄 알고 더 위험해집니다")
+- 이미 숏 0.6 → 추가 0.4만 (기존 반영)
+- 선물 다리 소실 → `BROKEN` "전액 노출 상태입니다"
+- 한쪽 조회 실패 → `UNKNOWN` "정상이라는 뜻이 아닙니다"

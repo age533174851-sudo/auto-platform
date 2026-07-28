@@ -15,6 +15,7 @@ import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
+import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
 type Tab = '포지션' | '미체결' | '자산' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
@@ -229,7 +230,7 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
 
         {tab === '현물전략' && <SpotStrategyPanel/>}
 
-        {tab === '현물·선물' && <CombinedTab acct={acct}/>}
+        {tab === '현물·선물' && <SpotFuturesTab acct={acct}/>}
 
         {tab === '전략' && <StrategyTab/>}
       </div>
@@ -243,6 +244,26 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
  * 따로 보면 현물 0.15 BTC와 선물 SHORT 0.10 BTC가 둘 다 크게 느껴진다.
  * 실제 방향 노출은 +0.05다. 그 숫자를 직접 보여준다.
  */
+/**
+ * 현물·선물 탭 — 비교판과 결합 전략.
+ *
+ * 탭을 하나 더 늘리지 않는다. 하단 탭이 이미 8개라 좁은 화면에서
+ * Kill Switch를 밀어낸다. 둘은 같은 맥락이므로 서브탭이 맞다.
+ */
+function SpotFuturesTab({ acct }: { acct: any }) {
+  const [view, setView] = useState<'비교' | '결합전략'>('비교');
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 4, padding: '10px 14px 0' }}>
+        {(['비교', '결합전략'] as const).map(v => (
+          <button key={v} onClick={() => setView(v)} style={tabStyle(view === v)}>{v}</button>
+        ))}
+      </div>
+      {view === '비교' ? <CombinedTab acct={acct}/> : <CombinedPanel/>}
+    </div>
+  );
+}
+
 function CombinedTab({ acct }: { acct: any }) {
   const { symbol, auth, connId } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
