@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // src/components/terminal/WalletTree.tsx
 //
 // 통합 자산 트리.
@@ -151,7 +152,7 @@ function BigStat({ label, value, hint, accent }: {
     <div style={{
       flex: 1, minWidth: 0, padding: '10px 12px', borderRadius: 10,
       background: C.raised,
-      border: `1px solid ${accent ? C.accent + '44' : C.hair}`,
+      border: `1px solid ${accent ? A(C.accent,'44') : C.hair}`,
     }}>
       <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 3 }}>{label}</div>
       <div style={{

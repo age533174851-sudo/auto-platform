@@ -14,19 +14,19 @@ export default function GlobalError({
 
   return (
     <html lang="ko">
-      <body style={{ background: '#060B14', margin: 0, fontFamily: 'monospace', color: '#E2E8F0' }}>
+      <body style={{ background: 'var(--t-bg)', margin: 0, fontFamily: 'monospace', color: 'var(--t-txt)' }}>
         <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column',
           alignItems:'center', justifyContent:'center', padding:24 }}>
           <div style={{ fontSize:40, marginBottom:12 }}>⚠️</div>
           <div style={{ color:'#EF4444', fontWeight:900, fontSize:18, marginBottom:8 }}>
             Root Error
           </div>
-          <div style={{ background:'#0F1924', border:'1px solid #EF4444', borderRadius:10,
+          <div style={{ background:'var(--t-card)', border:'1px solid #EF4444', borderRadius:10,
             padding:16, maxWidth:380, width:'100%', marginBottom:16 }}>
-            <div style={{ color:'#E2E8F0', fontSize:12, wordBreak:'break-word', lineHeight:1.6 }}>
+            <div style={{ color:'var(--t-txt)', fontSize:12, wordBreak:'break-word', lineHeight:1.6 }}>
               {error.message}
             </div>
-            <div style={{ color:'#94A3B8', fontSize:10, marginTop:8, whiteSpace:'pre-wrap' }}>
+            <div style={{ color:'var(--t-sub)', fontSize:10, marginTop:8, whiteSpace:'pre-wrap' }}>
               {error.stack?.split('\n').slice(0,5).join('\n')}
             </div>
           </div>

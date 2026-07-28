@@ -54,7 +54,7 @@ function seed(): HubState {
       kind: 'cash',
       name: '현금 대기금',
       icon: '💵',
-      color: '#94A3B8',
+      color: 'var(--t-sub)',
       balance: 1000000,
       cash: 1000000,
       realizedPnl: 0,

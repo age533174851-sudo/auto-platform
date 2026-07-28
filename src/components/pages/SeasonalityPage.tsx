@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
@@ -51,7 +52,7 @@ export default function SeasonalityPage() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <span style={{ color: T.muted, fontSize: 10, fontWeight: 700, letterSpacing: 0.5 }}>섹터 (AI·반도체·성장주)</span>
           <button onClick={() => setOverheated(!overheated)}
-            style={{ display: 'flex', alignItems: 'center', gap: 4, background: overheated ? T.ylw + '20' : T.alt, border: `1px solid ${overheated ? T.ylw : T.border}`, borderRadius: 7, padding: '4px 10px', color: overheated ? T.ylw : T.muted, fontSize: 9, fontWeight: 700, cursor: 'pointer' }}>
+            style={{ display: 'flex', alignItems: 'center', gap: 4, background: overheated ? A(T.ylw,'20') : T.alt, border: `1px solid ${overheated ? T.ylw : T.border}`, borderRadius: 7, padding: '4px 10px', color: overheated ? T.ylw : T.muted, fontSize: 9, fontWeight: 700, cursor: 'pointer' }}>
             <AlertTriangle size={11} /> 과열 {overheated ? 'ON' : 'OFF'}
           </button>
         </div>
@@ -68,7 +69,7 @@ export default function SeasonalityPage() {
       </Card>
 
       {/* 자동매매 주의 */}
-      <div style={{ background: T.ylw + '12', border: `1px solid ${T.ylw}30`, borderRadius: 10, padding: '11px 13px' }}>
+      <div style={{ background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: 10, padding: '11px 13px' }}>
         <div style={{ color: T.ylw, fontSize: 11, fontWeight: 700, marginBottom: 4 }}>계절성 단독 사용 금지</div>
         <div style={{ color: T.sub, fontSize: 10, lineHeight: 1.6 }}>
           계절성은 참고 지표입니다. 추세·과열도·거래량·VIX·금리·실적 일정·뉴스 감성을 함께 보고 판단하세요.

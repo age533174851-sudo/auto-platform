@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -43,7 +44,7 @@ function BriefingPage({prices, onOpenAsset}:{prices:Asset[]; onOpenAsset?: (a: a
   return (
     <div>
       {/* Header */}
-      <div style={{background:'linear-gradient(135deg,#0A1628,#0D1F3C)',border:`1px solid ${T.border2}`,borderRadius:18,padding:'16px 18px',marginBottom:14}}>
+      <div style={{background:'linear-gradient(135deg,var(--t-card),var(--t-surf))',border:`1px solid ${T.border2}`,borderRadius:18,padding:'16px 18px',marginBottom:14}}>
         <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
           <span style={{fontSize:20}}>🤖</span>
           <div>
@@ -51,7 +52,7 @@ function BriefingPage({prices, onOpenAsset}:{prices:Asset[]; onOpenAsset?: (a: a
             <div style={{color:T.muted,fontSize:10}}>{now.toLocaleDateString('ko-KR',{month:'long',day:'numeric',weekday:'long'})} · 교육 목적 · 수익 보장 없음</div>
           </div>
         </div>
-        <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:8,padding:'6px 10px',marginTop:8}}>
+        <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:8,padding:'6px 10px',marginTop:8}}>
           <div style={{color:T.ylw,fontSize:10,fontWeight:600}}>⚠️ AI 브리핑은 교육·참고 목적이며 투자 조언이 아닙니다. 수익을 보장하지 않습니다.</div>
         </div>
       </div>
@@ -265,7 +266,7 @@ function MarketSnapshotCard() {
         <Activity size={14} strokeWidth={2.2} color={T.acl}/>
         <span style={{color:T.txt,fontWeight:800,fontSize:13}}>실시간 시장 스냅샷</span>
         {data.partial && (
-          <span style={{padding:'1px 6px',background:T.ylw+'20',color:T.ylw,fontSize:9,fontWeight:700,borderRadius:4}}>부분</span>
+          <span style={{padding:'1px 6px',background:A(T.ylw,'20'),color:T.ylw,fontSize:9,fontWeight:700,borderRadius:4}}>부분</span>
         )}
         <span style={{marginLeft:'auto',color:T.muted,fontSize:9}}>
           {new Date(data.updatedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}
@@ -459,7 +460,7 @@ function NewsImpactAnalyzer() {
       </button>
 
       {error && (
-        <div style={{marginTop:8,padding:'6px 10px',background:T.red+'10',border:`1px solid ${T.red}30`,borderRadius:6,color:T.red,fontSize:10}}>
+        <div style={{marginTop:8,padding:'6px 10px',background:A(T.red,'10'),border:`1px solid ${A(T.red,'30')}`,borderRadius:6,color:T.red,fontSize:10}}>
           오류: {error}
         </div>
       )}
@@ -469,7 +470,7 @@ function NewsImpactAnalyzer() {
           <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap'}}>
             <span style={{
               padding:'2px 7px',
-              background: result.sentiment==='bullish' ? T.grn+'22' : result.sentiment==='bearish' ? T.red+'22' : T.ylw+'22',
+              background: result.sentiment==='bullish' ? A(T.grn,'22') : result.sentiment==='bearish' ? A(T.red,'22') : A(T.ylw,'22'),
               color: result.sentiment==='bullish' ? T.grn : result.sentiment==='bearish' ? T.red : T.ylw,
               fontSize:9,fontWeight:800,borderRadius:4,
             }}>
@@ -512,7 +513,7 @@ function NewsImpactAnalyzer() {
 
           {/* 경고 */}
           {result.warnings && result.warnings.length > 0 && (
-            <div style={{marginTop:6,padding:'5px 8px',background:T.ylw+'10',border:`1px solid ${T.ylw}30`,borderRadius:6,display:'flex',gap:5,alignItems:'flex-start'}}>
+            <div style={{marginTop:6,padding:'5px 8px',background:A(T.ylw,'10'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:6,display:'flex',gap:5,alignItems:'flex-start'}}>
               <AlertTriangleIc size={11} strokeWidth={2.4} color={T.ylw} style={{flexShrink:0,marginTop:1}}/>
               <div style={{color:T.ylw,fontSize:9,lineHeight:1.4}}>{result.warnings.join(' · ')}</div>
             </div>

@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useMemo } from 'react';
 import RebalanceTool from '@/components/RebalanceTool';
 import {
@@ -19,7 +20,7 @@ import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/to
 
 const CAT_COLOR: Record<string, string> = {
   us_stock: '#60A5FA', us_etf: '#3B82F6', kr_stock: '#F59E0B', kr_etf: '#FB923C',
-  crypto: '#F0B90B', cash: '#94A3B8', bond: '#10B981',
+  crypto: '#F0B90B', cash: 'var(--t-sub)', bond: '#10B981',
 };
 
 const inp: React.CSSProperties = {
@@ -248,7 +249,7 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
 
           {/* 경고 */}
           {Array.isArray(result.warnings) && result.warnings.length > 0 && (
-            <div style={{ ...cardStyle(), background: T.ylw + '12', border: `1px solid ${T.ylw}55` }}>
+            <div style={{ ...cardStyle(), background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'55')}` }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: 6 }}>
                 <TriangleAlert size={IC_SIZE.sm} strokeWidth={IC_STROKE} color={T.ylw} />
                 <div style={{ ...F.section, color: T.ylw }}>알아두기</div>

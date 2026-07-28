@@ -21,7 +21,7 @@ export function statusLabel(s: DataStatus) {
   return s === 'live'  ? { text:'LIVE',  color:'#10B981' }
        : s === 'mock'  ? { text:'MOCK',  color:'#F59E0B' }
        : s === 'error' ? { text:'ERR',   color:'#EF4444' }
-       :                 { text:'…',     color:'#475569' };
+       :                 { text:'…',     color:'var(--t-muted)' };
 }
 
 /* ══════════════════════════════════════════════════════════════

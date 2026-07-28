@@ -60,7 +60,7 @@ export const TIER_COLOR: Record<SourceTier, string> = {
   tier1:   '#10B981',
   tier2:   '#60A5FA',
   tier3:   '#F59E0B',
-  unknown: '#94A3B8',
+  unknown: 'var(--t-sub)',
 };
 
 export const TIER_LABEL: Record<SourceTier, string> = {
@@ -146,5 +146,5 @@ export function impactLevel(score: number): { level: ImpactLevel; label: string;
   if (score >= 70) return { level: 'high',    label: '강함',  color: '#EF4444' };
   if (score >= 50) return { level: 'medium',  label: '보통',  color: '#F59E0B' };
   if (score >= 30) return { level: 'low',     label: '약함',  color: '#60A5FA' };
-  return            { level: 'minimal', label: '미미',  color: '#94A3B8' };
+  return            { level: 'minimal', label: '미미',  color: 'var(--t-sub)' };
 }

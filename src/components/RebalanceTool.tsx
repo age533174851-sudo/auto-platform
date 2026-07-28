@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // RebalanceTool — 자동 리밸런싱. 현재 비중 vs 목표 비중 → 드리프트 → 매수/매도 제안.
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -122,7 +123,7 @@ export default function RebalanceTool({ prices = {}, currency = 'KRW' }: { price
       </div>
 
       {/* 현재 vs 목표 + 제안 */}
-      <div style={{ background: T.card, border: `1px solid ${needsRebalance ? T.ylw + '40' : T.grn + '40'}`, borderRadius: 14, padding: '14px 16px' }}>
+      <div style={{ background: T.card, border: `1px solid ${needsRebalance ? A(T.ylw,'40') : A(T.grn,'40')}`, borderRadius: 14, padding: '14px 16px' }}>
         <div style={{ color: T.txt, fontWeight: 700, fontSize: 13, marginBottom: 12 }}>
           {needsRebalance ? '리밸런싱 제안' : '균형 잡힘 ✓'}
         </div>

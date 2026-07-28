@@ -136,7 +136,7 @@ export const ROLE_RANK: Record<UserRole, number> = {
 };
 
 export const ROLE_INFO: Record<UserRole, { label: string; icon: string; color: string; desc: string }> = {
-  user:        { label: '일반회원',  icon: '👤', color: '#94A3B8', desc: '기본 모의투자 이용' },
+  user:        { label: '일반회원',  icon: '👤', color: 'var(--t-sub)', desc: '기본 모의투자 이용' },
   vip:         { label: 'VIP',       icon: '⭐', color: '#F59E0B', desc: 'VIP 우선 지원' },
   lifetime:    { label: '평생회원',  icon: '♾️', color: '#F59E0B', desc: '평생 Pro 이용' },
   founder:     { label: '창업멤버',  icon: '🚀', color: '#EF4444', desc: '창업팀 특별 멤버' },

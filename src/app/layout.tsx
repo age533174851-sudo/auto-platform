@@ -11,8 +11,8 @@ export const viewport: Viewport = {
   userScalable: true,
   viewportFit: 'cover',
   themeColor: [
-    { media: '(prefers-color-scheme: dark)',  color: '#060B14' },
-    { media: '(prefers-color-scheme: light)', color: '#060B14' },
+    { media: '(prefers-color-scheme: dark)',  color: 'var(--t-bg)' },
+    { media: '(prefers-color-scheme: light)', color: 'var(--t-bg)' },
   ],
 };
 
@@ -63,8 +63,25 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="ko" style={{ colorScheme: 'dark' }}>
+    <html lang="ko" suppressHydrationWarning>
       <head>
+        {/*
+          테마를 그리기 전에 정한다.
+
+          리액트가 붙은 뒤에 바꾸면 첫 프레임이 항상 어두운 화면으로
+          나왔다가 밝은 테마로 튄다. 밝은 테마를 쓰는 사람은 앱을 열
+          때마다 검은 화면이 한 번 번쩍인다. 그래서 파싱을 막는 인라인
+          스크립트로 <html>에 먼저 표시해 둔다. 여기서 하는 일은
+          속성 하나 붙이는 것뿐이라 렌더를 지연시키지 않는다.
+        */}
+        <script dangerouslySetInnerHTML={{ __html: `(function(){try{
+var m=localStorage.getItem(tg_theme_mode);
+if(m!==dark&&m!==light&&m!==auto)m=auto;
+var t=m;
+if(m===auto){var h=new Date().getHours();t=(h>=7&&h<19)?light:dark;}
+document.documentElement.setAttribute(data-theme,t);
+}catch(e){document.documentElement.setAttribute(data-theme,dark);}})();` }}/>
+        <meta name="theme-color" content="#0A0B0D"/>
         {/* Fonts */}
         <link rel="preconnect" href="https://fonts.googleapis.com"/>
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous"/>
@@ -81,7 +98,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Prevent iOS text size adjustment */}
         <meta name="HandheldFriendly" content="true"/>
         {/* Windows tile */}
-        <meta name="msapplication-TileColor" content="#060B14"/>
+        <meta name="msapplication-TileColor" content="#0A0B0D"/>
         <meta name="msapplication-TileImage" content="/icon-192.png"/>
         {/* Preload critical font */}
         <link
@@ -92,7 +109,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           crossOrigin="anonymous"
         />
       </head>
-      <body style={{ background: '#060B14', margin: 0, padding: 0 }}>
+      <body style={{ background: 'var(--t-bg)', margin: 0, padding: 0 }}>
         <KeyboardInsetProvider />
         <NotifyHost />
         {children}

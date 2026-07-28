@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import { Star } from 'lucide-react';
 import React from 'react';
 import { T } from '@/lib/constants';
@@ -156,7 +157,7 @@ export default function NewsDetailModal({
           <span>· {dateStr}</span>
           {translating && <span style={{ color: T.acl, fontSize: 10 }}>· AI 번역 중…</span>}
           {translated && !showOriginal && (
-            <span style={{ background: T.acl + '20', color: T.acl, fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>AI 번역</span>
+            <span style={{ background: A(T.acl,'20'), color: T.acl, fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>AI 번역</span>
           )}
           {translated && (
             <button onClick={() => setShowOriginal(!showOriginal)}
@@ -309,7 +310,7 @@ export default function NewsDetailModal({
                   onClick={() => onTickerClick?.(t)}
                   disabled={!onTickerClick}
                   style={{ background: T.acg, color: T.acl,
-                    border:`1px solid ${T.acl}40`, borderRadius: 8,
+                    border:`1px solid ${A(T.acl,'40')}`, borderRadius: 8,
                     padding:'6px 12px', fontSize: 11, fontWeight: 700,
                     cursor: onTickerClick ? 'pointer' : 'default',
                     minHeight: 36 }}>
@@ -325,7 +326,7 @@ export default function NewsDetailModal({
           <a href={news.url} target="_blank" rel="noopener noreferrer"
             style={{ display:'flex', alignItems:'center', justifyContent:'center', gap: 8, padding:'13px',
               background: T.acg, color: T.acl,
-              border:`1px solid ${T.acl}40`, borderRadius: 12,
+              border:`1px solid ${A(T.acl,'40')}`, borderRadius: 12,
               textDecoration:'none', fontWeight: 700, fontSize: 13, marginTop: 4 }}>
             <span>{news.source ? `${news.source} 원문 보기` : '원문 사이트 방문'}</span>
             <span style={{ fontSize: 14 }}>↗</span>

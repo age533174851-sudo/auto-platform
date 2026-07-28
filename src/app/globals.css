@@ -28,19 +28,124 @@
   --header-h: 48px;
   --sheet-radius: 20px;
   --card-radius:  12px;
-  --bg:    #060B14;
-  --surf:  #0D1626;
-  --card:  #0F1924;
-  --border:#1A2D4A;
-  --acc:   #2563EB;
-  --acl:   #3B82F6;
-  --grn:   #10B981;
-  --red:   #EF4444;
-  --ylw:   #F59E0B;
-  --txt:   #F0F6FF;
-  --muted: #475569;
-  --prp:   #7C3AED;
-  --sub:   #94A3B8;
+  /* 아래 별칭들은 CSS에서만 쓰던 옛 이름이다. 값을 두 벌 유지하면
+     테마를 바꿨을 때 CSS로 칠한 곳만 옛 색으로 남는다. */
+  --bg:    var(--t-bg);
+  --surf:  var(--t-surf);
+  --card:  var(--t-card);
+  --border:var(--t-border);
+  --acc:   var(--t-acc);
+  --acl:   var(--t-acl);
+  --grn:   var(--t-grn);
+  --red:   var(--t-red);
+  --ylw:   var(--t-ylw);
+  --txt:   var(--t-txt);
+  --muted: var(--t-muted);
+  --prp:   var(--t-prp);
+  --sub:   var(--t-sub);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   테마 — 어두움 / 밝음
+   ══════════════════════════════════════════════════════════════════
+
+   왜 여기에 있나
+   ──────────────
+   색을 컴포넌트가 아니라 CSS 변수에 둔다. 그러면 <html data-theme>
+   한 글자만 바꿔도 화면 전체가 따라온다. 리액트가 다시 그리지 않으니
+   차트 iframe도, 스크롤 위치도, 입력 중이던 값도 그대로다.
+
+   어두움 팔레트를 왜 바꿨나
+   ─────────────────────────
+   예전 배경은 파란 네이비(var(--t-bg)/var(--t-card))였다. 파란 배경 위에서는
+   초록·빨강 손익 색이 배경과 싸운다. 거래 화면에서 색은 손익을 뜻해야지
+   장식이면 안 된다. 그래서 배경을 거의 무채색 먹색으로 낮췄다 —
+   터미널이 쓰던 값과 같다. 이제 두 화면이 한 팔레트를 쓴다.
+
+   밝은 테마에서 초록·빨강을 왜 어둡게 잡았나
+   ──────────────────────────────────────────
+   어두운 배경에서 잘 보이는 밝은 초록(#0ECB81)은 흰 배경에서 대비가
+   3:1도 안 나온다. 손익 숫자는 이 앱에서 가장 중요한 글자다. 밝은
+   테마에서는 같은 계열의 더 어두운 값을 쓴다. */
+:root, :root[data-theme='dark'] {
+  --t-bg:      #0A0B0D;
+  --t-card:    #101216;
+  --t-surf:    #16191E;
+  --t-alt:     #1C2026;
+  --t-border:  #23272E;
+  --t-border2: #31363F;
+  --t-txt:     #ECEFF3;
+  --t-sub:     #8A919C;
+  --t-muted:   #5A616B;
+  --t-grn:     #0ECB81;
+  --t-red:     #F6465D;
+  --t-ylw:     #F0B90B;
+  --t-gld:     #D9A441;
+  --t-acl:     #5B8DEF;
+  --t-acc:     #3B6FD4;
+  --t-acg:     #1B2436;
+  --t-prp:     #9B7BF0;
+  --t-cyn:     #35B6D1;
+
+  /* 터미널 표면 — 앱보다 한 단계씩 떠 있다 */
+  --c-bg:     var(--t-bg);
+  --c-panel:  var(--t-card);
+  --c-raised: var(--t-surf);
+  --c-hover:  var(--t-alt);
+  --c-active: #232830;
+  --c-hair:   rgba(255,255,255,.07);
+  --c-hair2:  rgba(255,255,255,.12);
+  --c-hair3:  rgba(255,255,255,.20);
+  --c-up-bg:      rgba(14,203,129,.12);
+  --c-down-bg:    rgba(246,70,93,.12);
+  --c-warn-bg:    rgba(240,185,11,.12);
+  --c-accent-bg:  rgba(91,141,239,.14);
+}
+
+:root[data-theme='light'] {
+  --t-bg:      #FFFFFF;
+  --t-card:    #F7F8FA;
+  --t-surf:    #FFFFFF;
+  --t-alt:     #EEF0F4;
+  --t-border:  #E1E4EA;
+  --t-border2: #C9CED8;
+  --t-txt:     #14171C;
+  --t-sub:     #5A616B;
+  --t-muted:   #8A919C;
+  --t-grn:     #04955F;   /* 흰 배경에서 대비를 확보한 값 */
+  --t-red:     #D6293E;
+  --t-ylw:     #9A7500;
+  --t-gld:     #8A6A20;
+  --t-acl:     #2563EB;
+  --t-acc:     #1D4ED8;
+  --t-acg:     #E6EDFC;
+  --t-prp:     #6D3FD4;
+  --t-cyn:     #0E7490;
+
+  /* 밝은 테마의 경계선은 검정 알파다. 흰색 알파를 그대로 두면
+     흰 배경 위에서 선이 아예 보이지 않아 화면이 한 덩어리가 된다. */
+  --c-bg:     var(--t-bg);
+  --c-panel:  var(--t-card);
+  --c-raised: var(--t-alt);
+  --c-hover:  #E4E7EC;
+  --c-active: #D8DCE3;
+  --c-hair:   rgba(0,0,0,.09);
+  --c-hair2:  rgba(0,0,0,.15);
+  --c-hair3:  rgba(0,0,0,.26);
+  --c-up-bg:      rgba(4,149,95,.10);
+  --c-down-bg:    rgba(214,41,62,.10);
+  --c-warn-bg:    rgba(154,117,0,.12);
+  --c-accent-bg:  rgba(37,99,235,.10);
+  color-scheme: light;
+}
+
+/* 테마가 바뀔 때 화면 전체가 한 번에 넘어가게. 개별 요소마다 넣으면
+   어떤 건 먼저 바뀌고 어떤 건 늦어서 화면이 찢어져 보인다. */
+html { transition: background-color .18s ease; }
+body { transition: background-color .18s ease, color .18s ease; }
+/* 움직임을 줄여달라고 설정한 사람에게는 전환도 움직임이다 */
+@media (prefers-reduced-motion: reduce) {
+  html, body { transition: none; }
 }
 
 /* ── HTML & Body ── */
@@ -61,7 +166,6 @@ body {
   max-width: 100vw;
   min-height: 100vh;
   min-height: -webkit-fill-available;
-  color-scheme: dark;
 }
 
 /* ── Inputs — prevent iOS auto-zoom ── */
@@ -89,28 +193,28 @@ button { font-family: inherit; }
 /* ── Scrollbar ── */
 ::-webkit-scrollbar        { width: 3px; height: 3px; }
 ::-webkit-scrollbar-track  { background: transparent; }
-::-webkit-scrollbar-thumb  { background: #243A5E; border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: #3B82F6; }
+::-webkit-scrollbar-thumb  { background: var(--t-border2); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--t-acl); }
 
 /* ── Range Slider ── */
 input[type=range] {
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 5px; border-radius: 3px;
-  background: #1A2D4A; outline: none; cursor: pointer;
+  background: var(--t-border); outline: none; cursor: pointer;
   touch-action: pan-x;
 }
 input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 22px; height: 22px; border-radius: 50%;
   background: var(--acl); cursor: pointer;
-  border: 2px solid #060B14;
+  border: 2px solid var(--t-bg);
   box-shadow: 0 2px 6px rgba(59,130,246,.4);
   transition: transform .1s;
 }
 input[type=range]::-webkit-slider-thumb:active { transform: scale(1.2); }
 input[type=range]::-moz-range-thumb {
   width: 20px; height: 20px; border-radius: 50%;
-  background: var(--acl); cursor: pointer; border: 2px solid #060B14;
+  background: var(--acl); cursor: pointer; border: 2px solid var(--t-bg);
 }
 
 /* ── Touch targets ── */
@@ -156,7 +260,7 @@ button.xs { min-height: 28px; }
   transform: translateX(-50%);
   width: 100%;
   max-width: 480px;
-  background: rgba(13,22,38,.97);
+  background: color-mix(in srgb, var(--t-card) 97%, transparent);
   border-top: 1px solid var(--border);
   padding-bottom: max(env(safe-area-inset-bottom), 4px);
   z-index: 100;
@@ -332,7 +436,7 @@ button.xs { min-height: 28px; }
 
 /* Skeleton shimmer */
 .skeleton {
-  background: linear-gradient(90deg, #1A2D4A 25%, #243A5E 50%, #1A2D4A 75%);
+  background: linear-gradient(90deg, var(--t-border) 25%, var(--t-border2) 50%, var(--t-border) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: 6px;
@@ -418,14 +522,13 @@ input[type=password], input[type=number] { font-size: 16px !important; }
   body { -webkit-font-smoothing: antialiased; }
 }
 
-/* Dark mode forced */
-@media (prefers-color-scheme: light) {
-  :root { color-scheme: dark; }
-  html  { background: #060B14; }
-}
+/* 예전에는 여기서 다크를 강제했다. 이제 테마는 data-theme이 정하므로
+   이 블록이 남아 있으면 밝은 테마를 켜도 OS가 밝을 때만 다시 어두워진다 —
+   재현이 사람마다 달라서 원인을 찾기 어려운 종류의 버그다. */
+html { background: var(--t-bg); }
 
 kbd {
-  background: #1A2D4A; border: 1px solid #243A5E;
+  background: var(--t-border); border: 1px solid var(--t-border2);
   border-radius: 4px; padding: 2px 5px;
   font-size: 10px; color: var(--txt); font-family: 'Inter', monospace; font-variant-numeric: tabular-nums;
 }

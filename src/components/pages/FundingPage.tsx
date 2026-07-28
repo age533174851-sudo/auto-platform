@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { ProductType, TradFiProvider, TradFiAsset, FundingTab, LinkedBank, ExchangeFunding } from '@/types/domain';
 import { notifySuccess } from '@/lib/notify/center';
@@ -70,7 +71,7 @@ function FundingPage({currency}:{currency:string}) {
       {/* ── HUB TAB ── */}
       {tab==='hub'&&(
         <div>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:12,padding:'10px 14px',marginBottom:14}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:12,padding:'10px 14px',marginBottom:14}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:11}}>⚠️ 안내</div>
             <div style={{color:T.sub,fontSize:10,marginTop:2,lineHeight:1.6}}>실제 계좌이체는 오픈뱅킹 계약/승인 후 가능합니다. 현재는 모의/가이드 기능입니다. TRAIGO는 사용자 자금을 직접 보관하지 않습니다.</div>
           </div>
@@ -107,7 +108,7 @@ function FundingPage({currency}:{currency:string}) {
                 ))}
               </div>
             )}
-            <button onClick={()=>amount&&setShowConfirm(true)} style={{width:'100%',padding:'12px',background:amount?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:'pointer'}}>
+            <button onClick={()=>amount&&setShowConfirm(true)} style={{width:'100%',padding:'12px',background:amount?`linear-gradient(135deg,${T.acc},${T.prp})`:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:'pointer'}}>
               이체 확인 (모의)
             </button>
           </Card>
@@ -128,7 +129,7 @@ function FundingPage({currency}:{currency:string}) {
       {/* ── OPEN BANKING TAB ── */}
       {tab==='openbanking'&&(
         <div>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:12,padding:'12px 14px',marginBottom:14}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:12,padding:'12px 14px',marginBottom:14}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:11,marginBottom:4}}>⚠️ 오픈뱅킹 안내</div>
             <div style={{color:T.sub,fontSize:10,lineHeight:1.6}}>실제 오픈뱅킹 서비스는 금융당국 등록 및 API 계약 후 이용 가능합니다. 현재는 UI 플레이스홀더입니다.</div>
           </div>
@@ -142,7 +143,7 @@ function FundingPage({currency}:{currency:string}) {
                   <div style={{color:T.txt,fontWeight:700}}>연결된 은행 계좌</div>
                   <button type="button"
                     onClick={() => notifySuccess('은행 계좌 추가는 곧 출시됩니다. 현재는 모의 입출금만 지원됩니다.')}
-                    style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 계좌 추가</button>
+                    style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 계좌 추가</button>
                 </div>
                 {(Array.isArray(linkedBanks)?linkedBanks:[]).map((b,i)=>(
                   <div key={b.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 0',borderBottom:i<linkedBanks.length-1?`1px solid ${T.border}`:'none'}}>
@@ -157,7 +158,7 @@ function FundingPage({currency}:{currency:string}) {
                   </div>
                 ))}
               </Card>
-              <Card style={{padding:'14px 16px',border:`1px solid ${T.cyn}30`}}>
+              <Card style={{padding:'14px 16px',border:`1px solid ${A(T.cyn,'30')}`}}>
                 <div style={{color:T.cyn,fontWeight:700,fontSize:12,marginBottom:8}}>오픈뱅킹 등록 절차</div>
                 {['금융결제원 오픈뱅킹 이용 동의','계좌 인증 (1원 인증)','출금 동의 (선택)','파이낸테크 이용번호 발급'].map((s,i)=>(
                   <div key={i} style={{display:'flex',gap:6,padding:'4px 0'}}><span style={{color:T.cyn,fontSize:11}}>{i+1}.</span><span style={{color:T.sub,fontSize:11}}>{s}</span></div>
@@ -179,7 +180,7 @@ function FundingPage({currency}:{currency:string}) {
           {obTab==='withdraw'&&(
             <Card style={{padding:'14px 16px'}}>
               <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>📤 출금 신청 (모의)</div>
-              <div style={{background:T.red+'12',border:`1px solid ${T.red}30`,borderRadius:8,padding:'10px 12px',marginBottom:12}}>
+              <div style={{background:A(T.red,'12'),border:`1px solid ${A(T.red,'30')}`,borderRadius:8,padding:'10px 12px',marginBottom:12}}>
                 <div style={{color:T.red,fontWeight:700,fontSize:11}}>⚠️ 출금 보안 안내</div>
                 <div style={{color:T.sub,fontSize:10,marginTop:2}}>실제 출금은 본인 인증 및 24시간 지연 정책이 적용됩니다.</div>
               </div>
@@ -212,7 +213,7 @@ function FundingPage({currency}:{currency:string}) {
               <input type="number" value={fxAmount} onChange={e=>setFxAmount(e.target.value)} placeholder={`금액 입력 (${fxPair.from})`} style={{width:'100%',background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'10px 12px',color:T.txt,fontSize:14,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontWeight:700,outline:'none'}}/>
             </div>
             {fxAmount&&(
-              <div style={{background:T.acg,border:`1px solid ${T.acl}30`,borderRadius:10,padding:'12px 14px',marginBottom:12}}>
+              <div style={{background:T.acg,border:`1px solid ${A(T.acl,'30')}`,borderRadius:10,padding:'12px 14px',marginBottom:12}}>
                 <div style={{color:T.muted,fontSize:10,marginBottom:4}}>환전 후 ({fxPair.to})</div>
                 <div style={{color:T.acl,fontSize:22,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{Number(fxConverted).toLocaleString()} {fxPair.to}</div>
                 <div style={{color:T.muted,fontSize:10,marginTop:4}}>수수료: {fxFee} {fxPair.from} ({fxPair.fee}%)</div>
@@ -221,7 +222,7 @@ function FundingPage({currency}:{currency:string}) {
             <button type="button"
               onClick={() => notifySuccess(fxAmount ? `모의 환전이 완료되었습니다 (실제 환전은 거래소 연결 페이지에서 가능)` : '환전 금액을 먼저 입력해주세요')}
               disabled={!fxAmount}
-              style={{width:'100%',padding:'13px',minHeight:48,background:fxAmount?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:fxAmount?'pointer':'not-allowed'}}>
+              style={{width:'100%',padding:'13px',minHeight:48,background:fxAmount?`linear-gradient(135deg,${T.acc},${T.prp})`:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:fxAmount?'pointer':'not-allowed'}}>
               환전 실행 (모의 — 실제 환전 미실행)
             </button>
           </Card>
@@ -261,7 +262,7 @@ function FundingPage({currency}:{currency:string}) {
               </div>
             </Card>
           ))}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.ylw}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.ylw,'30')}`}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:12,marginBottom:8}}>⚠️ 책임 안내</div>
             {['TRAIGO는 사용자 자금을 직접 보관하지 않습니다','사용자가 직접 거래소/증권사 계정에 입출금합니다','API 키를 통한 거래는 사용자 본인의 책임입니다','플랫폼 운영자는 API 파트너 계약을 통해 기능을 제공합니다','API Secret은 절대 프론트엔드에 노출되지 않습니다'].map((t,i)=>(
               <div key={i} style={{display:'flex',gap:6,padding:'4px 0'}}><span style={{color:T.ylw,flexShrink:0}}>•</span><span style={{color:T.sub,fontSize:11,lineHeight:1.5}}>{t}</span></div>
@@ -276,7 +277,7 @@ function FundingPage({currency}:{currency:string}) {
           <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.75)',zIndex:200,touchAction:'none'}} onClick={()=>setShowConfirm(false)}/>
           <div style={{position:'fixed',inset:'auto 0 0',zIndex:201,background:T.surf,borderRadius:'20px 20px 0 0',padding:'24px 20px calc(40px + env(safe-area-inset-bottom, 0px))',maxWidth:480,margin:'0 auto',border:`1px solid ${T.border}`}} onClick={e=>e.stopPropagation()}>
             <div style={{color:T.txt,fontWeight:800,fontSize:16,marginBottom:14}}>이체 확인 (모의)</div>
-            <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'10px 12px',marginBottom:14}}>
+            <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'10px 12px',marginBottom:14}}>
               <div style={{color:T.ylw,fontWeight:700,fontSize:11}}>⚠️ 현재는 모의 이체입니다</div>
               <div style={{color:T.sub,fontSize:10,marginTop:2}}>실제 자금이 이동하지 않습니다. 오픈뱅킹 연동 후 실제 이체가 가능합니다.</div>
             </div>
@@ -305,7 +306,7 @@ const PRODUCT_LABEL:Record<ProductType,string> = {
 };
 const PRODUCT_COLOR:Record<ProductType,string> = {
   spot:'#10B981', futures:'#F59E0B', cfd:'#7C3AED', tokenized:'#3B82F6',
-  index:'#8B5CF6', commodity:'#D97706', forex:'#0891B2', watchonly:'#475569',
+  index:'#8B5CF6', commodity:'#D97706', forex:'#0891B2', watchonly:'var(--t-muted)',
 };
 
 const TRADFI_PROVIDERS:Record<TradFiProvider,{name:string;icon:string;color:string;url:string}> = {
@@ -314,7 +315,7 @@ const TRADFI_PROVIDERS:Record<TradFiProvider,{name:string;icon:string;color:stri
   binance:  {name:'Binance Futures',icon:'',color:'#F0B90B',url:'https://www.binance.com/'},
   bitget:   {name:'Bitget TradFi',icon:'🔵',color:'#00D4FF',url:'https://www.bitget.com/'},
   etoro:    {name:'eToro-style',icon:'',color:'#10B981',url:'#'},
-  watchonly:{name:'조회만',icon:'👁',color:'#475569',url:'#'},
+  watchonly:{name:'조회만',icon:'👁',color:'var(--t-muted)',url:'#'},
 };
 
 const TRADFI_ASSETS:TradFiAsset[] = [
@@ -332,7 +333,7 @@ const TRADFI_ASSETS:TradFiAsset[] = [
   {id:'US30',nameKr:'다우존스',name:'US30 Dow Jones',sym:'US30',category:'index',productType:'index',providers:['gate','bybit','bitget'],p:42840,c:0.31,clr:'#8B5CF6',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
   // ── 원자재 CFD ──
   {id:'XAUUSD',nameKr:'금 XAUUSD',name:'Gold XAUUSD',sym:'XAUUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','binance','bitget'],p:3420,c:0.56,clr:'#D97706',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
-  {id:'XAGUSD',nameKr:'은 XAGUSD',name:'Silver XAGUSD',sym:'XAGUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','bitget'],p:38.50,c:-1.58,clr:'#94A3B8',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
+  {id:'XAGUSD',nameKr:'은 XAGUSD',name:'Silver XAGUSD',sym:'XAGUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','bitget'],p:38.50,c:-1.58,clr:'var(--t-sub)',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
   {id:'XTIUSD',nameKr:'WTI 원유',name:'WTI XTIUSD',sym:'XTIUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','binance','bitget'],p:78.40,c:-0.90,clr:'#78350F',overnight:'-0.02%',maxLev:20,isWatchOnly:false},
   {id:'XBRUSD',nameKr:'브렌트유',name:'Brent XBRUSD',sym:'XBRUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','bitget'],p:82.40,c:-0.72,clr:'#92400E',overnight:'-0.02%',maxLev:20,isWatchOnly:false},
   // ── 환율 CFD ──

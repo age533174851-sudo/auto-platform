@@ -2,26 +2,39 @@
 // TRAIGO Constants — Theme, Currency, Localization, Market Data
 // ─────────────────────────────────────────────────────────────
 
-// ── Dark Theme ──────────────────────────────────────────────
+// ── Theme ───────────────────────────────────────────────────
+//
+// 값을 직접 쓰지 않고 CSS 변수를 가리킨다.
+//
+// 이유: 밝은 테마로 바꿀 때 리액트가 다시 그리지 않아도 되게 하려고.
+// 여기에 hex를 넣으면 색이 컴포넌트 안에 박히므로, 테마를 바꾸려면
+// 104개 파일이 전부 다시 렌더돼야 한다. 차트 iframe도 새로 뜬다.
+// 변수로 두면 <html>의 data-theme 한 글자만 바꿔도 화면 전체가 따라온다.
+//
+// 실제 색은 globals.css에 있다 — 어두움/밝음 두 벌.
+//
+// 주의: 여기 값들은 이제 'var(...)' 문자열이다. 뒤에 hex 알파를 이어
+// 붙이면(`T.acl + '20'`) CSS가 조용히 무효가 된다. 투명도는 반드시
+// lib/theme/colors의 A()를 쓴다.
 export const T = {
-  bg:      '#060B14',   // page background
-  card:    '#0A1628',   // card background
-  surf:    '#0D1F3C',   // surface / modal
-  alt:     '#0F2040',   // alternative bg
-  border:  '#1A2D4A',   // border
-  border2: '#243A5E',   // border emphasis
-  txt:     '#E2E8F0',   // primary text
-  sub:     '#94A3B8',   // secondary text
-  muted:   '#475569',   // muted text
-  grn:     '#10B981',   // green / profit
-  red:     '#EF4444',   // red / loss
-  ylw:     '#F59E0B',   // yellow / warning
-  gld:     '#D97706',   // gold
-  acl:     '#60A5FA',   // accent light (blue)
-  acc:     '#2563EB',   // accent (blue)
-  acg:     '#1E3A5F',   // accent ghost
-  prp:     '#7C3AED',   // purple
-  cyn:     '#06B6D4',   // cyan
+  bg:      'var(--t-bg)',       // page background
+  card:    'var(--t-card)',     // card background
+  surf:    'var(--t-surf)',     // surface / modal
+  alt:     'var(--t-alt)',      // alternative bg
+  border:  'var(--t-border)',   // border
+  border2: 'var(--t-border2)',  // border emphasis
+  txt:     'var(--t-txt)',      // primary text
+  sub:     'var(--t-sub)',      // secondary text
+  muted:   'var(--t-muted)',    // muted text
+  grn:     'var(--t-grn)',      // green / profit
+  red:     'var(--t-red)',      // red / loss
+  ylw:     'var(--t-ylw)',      // yellow / warning
+  gld:     'var(--t-gld)',      // gold
+  acl:     'var(--t-acl)',      // accent light
+  acc:     'var(--t-acc)',      // accent
+  acg:     'var(--t-acg)',      // accent ghost
+  prp:     'var(--t-prp)',      // purple
+  cyn:     'var(--t-cyn)',      // cyan
 } as const;
 
 // ── Currencies ───────────────────────────────────────────────

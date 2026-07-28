@@ -24,8 +24,8 @@ export default function Error({
       flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
-      background: '#060B14',
-      color: '#E2E8F0',
+      background: 'var(--t-bg)',
+      color: 'var(--t-txt)',
       padding: '24px',
       fontFamily: 'system-ui, -apple-system, sans-serif',
     }}>
@@ -34,7 +34,7 @@ export default function Error({
         오류가 발생했습니다
       </div>
       <div style={{
-        background: '#0A1628',
+        background: 'var(--t-card)',
         border: '2px solid #EF4444',
         borderRadius: 12,
         padding: 20,
@@ -54,13 +54,13 @@ export default function Error({
             <div style={{ color: '#F59E0B', fontSize: 10, fontWeight: 700, marginBottom: 4 }}>
               STACK TRACE:
             </div>
-            <div style={{ color: '#94A3B8', fontSize: 9, whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 150, overflow: 'auto' }}>
+            <div style={{ color: 'var(--t-sub)', fontSize: 9, whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 150, overflow: 'auto' }}>
               {stack}
             </div>
           </>
         )}
         {digest && (
-          <div style={{ color: '#475569', fontSize: 9, marginTop: 8 }}>Digest: {digest}</div>
+          <div style={{ color: 'var(--t-muted)', fontSize: 9, marginTop: 8 }}>Digest: {digest}</div>
         )}
       </div>
       <div style={{ display: 'flex', gap: 10 }}>
@@ -84,8 +84,8 @@ export default function Error({
           style={{
             padding: '12px 28px',
             background: 'transparent',
-            color: '#94A3B8',
-            border: '1px solid #1A2D4A',
+            color: 'var(--t-sub)',
+            border: '1px solid var(--t-border)',
             borderRadius: 12,
             fontWeight: 700,
             fontSize: 14,
@@ -95,7 +95,7 @@ export default function Error({
           🏠 홈으로
         </button>
       </div>
-      <div style={{ marginTop: 16, color: '#475569', fontSize: 10, textAlign: 'center', maxWidth: 300 }}>
+      <div style={{ marginTop: 16, color: 'var(--t-muted)', fontSize: 10, textAlign: 'center', maxWidth: 300 }}>
         이 화면이 반복된다면 위 오류 메시지를 캡처하여 개발팀에 전달해 주세요.
       </div>
     </div>

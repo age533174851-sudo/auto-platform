@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // RegimeFilterPanel — 종목별 시장 국면 + 전략 적합도 표시.
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -50,7 +51,7 @@ export default function RegimeFilterPanel({ strategies = [] }: { strategies?: { 
   const stratsForAsset = strategies.filter(s => s.asset === sel);
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#0EA5E91F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Compass size={18} color="#0EA5E9" />
@@ -102,7 +103,7 @@ export default function RegimeFilterPanel({ strategies = [] }: { strategies?: { 
         <div style={{ color: T.muted, fontSize: 11, fontWeight: 700, marginBottom: 8 }}>이 국면에 적합한 전략</div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {regime.suitableStrategies.map(t => (
-            <span key={t} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: T.grn + '18', color: T.grn, fontSize: 11, fontWeight: 700, padding: '5px 10px', borderRadius: 7 }}>
+            <span key={t} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: A(T.grn,'18'), color: T.grn, fontSize: 11, fontWeight: 700, padding: '5px 10px', borderRadius: 7 }}>
               <Check size={12} /> {STRAT_LABEL[t] || t}
             </span>
           ))}
@@ -116,7 +117,7 @@ export default function RegimeFilterPanel({ strategies = [] }: { strategies?: { 
           {stratsForAsset.map(s => {
             const fit = strategyFitsRegime(s.type, regime.regime);
             return (
-              <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, background: T.card, borderRadius: 10, padding: '10px 12px', marginBottom: 6, border: `1px solid ${fit.fits ? T.grn + '30' : T.red + '30'}` }}>
+              <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, background: T.card, borderRadius: 10, padding: '10px 12px', marginBottom: 6, border: `1px solid ${fit.fits ? A(T.grn,'30') : A(T.red,'30')}` }}>
                 {fit.fits ? <Check size={15} color={T.grn} /> : <AlertTriangle size={15} color={T.red} />}
                 <div style={{ flex: 1 }}>
                   <div style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>{s.name}</div>

@@ -95,7 +95,7 @@ export interface HubState {
 export const ACCOUNT_KIND_META: Record<AccountKind, { name: string; icon: string; color: string; desc: string }> = {
   shortterm: { name: '단타 계좌',   icon: '⚡', color: '#F59E0B', desc: '돈 벌기용 — 짧게 치고 빠지기' },
   longterm:  { name: '장투 계좌',   icon: '📈', color: '#3B82F6', desc: '돈 키우기용 — 모아가기' },
-  cash:      { name: '현금 대기금', icon: '💵', color: '#94A3B8', desc: '폭락장 추가매수 / 리스크 방어' },
+  cash:      { name: '현금 대기금', icon: '💵', color: 'var(--t-sub)', desc: '폭락장 추가매수 / 리스크 방어' },
   crypto:    { name: '코인 계좌',   icon: '🪙', color: '#F0B90B', desc: '현물 + 선물 통합' },
   stock:     { name: '주식 계좌',   icon: '🏛️', color: '#10B981', desc: 'ETF / 개별주' },
   autobot:   { name: '자동매매',    icon: '🤖', color: '#7C3AED', desc: '봇이 운용 중' },

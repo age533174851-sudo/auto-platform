@@ -31,7 +31,7 @@ export default function ChallengePanel() {
     : result.successPct >= 50 ? T.grn : result.successPct >= 10 ? T.ylw : T.red;
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#EAB3081F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Trophy size={18} color="#FBBF24" />

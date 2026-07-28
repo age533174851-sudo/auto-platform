@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import {
@@ -206,7 +207,7 @@ function HubAccountsPageInner() {
 
       {/* ─── 긴급 모드 배너 ─── */}
       {state.emergencyMode && (
-        <div style={{ background: T.red + '15', border: `1px solid ${T.red}55`, borderRadius: R.md, padding: SP.md, marginBottom: SP.md, display: 'flex', gap: SP.sm, alignItems: 'center' }}>
+        <div style={{ background: A(T.red,'15'), border: `1px solid ${A(T.red,'55')}`, borderRadius: R.md, padding: SP.md, marginBottom: SP.md, display: 'flex', gap: SP.sm, alignItems: 'center' }}>
           <IconBox tone="red" size="md"><Siren size={IC_SIZE.md} strokeWidth={IC_STROKE} /></IconBox>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ ...F.section, color: T.red }}>긴급 탈출 모드 활성화 중</div>
@@ -285,7 +286,7 @@ function HubAccountsPageInner() {
               gap: 8,
               opacity: state.emergencyMode ? 0.5 : 1,
               cursor: state.emergencyMode ? 'not-allowed' : 'pointer',
-              boxShadow: state.emergencyMode ? 'none' : `0 0 0 1px ${T.red}55, 0 6px 20px ${T.red}33`,
+              boxShadow: state.emergencyMode ? 'none' : `0 0 0 1px ${A(T.red,'55')}, 0 6px 20px ${A(T.red,'33')}`,
               width: '100%',
             }}
           >
@@ -475,7 +476,7 @@ function HubAccountsPageInner() {
           <div style={{ ...F.body, marginTop: SP.md, lineHeight: 1.6 }}>
             정말 실행하시겠습니까? 시장가 청산이므로 슬리피지가 발생할 수 있습니다.
           </div>
-          <div style={{ marginTop: SP.sm, padding: SP.sm + 2, background: T.red + '15', border: `1px solid ${T.red}55`, borderRadius: R.md, color: T.red, fontSize: 11, fontWeight: 700 }}>
+          <div style={{ marginTop: SP.sm, padding: SP.sm + 2, background: A(T.red,'15'), border: `1px solid ${A(T.red,'55')}`, borderRadius: R.md, color: T.red, fontSize: 11, fontWeight: 700 }}>
             현물 매도: {emergencyOpts.closeSpot ? 'ON' : 'OFF'} · 장투 매도: {emergencyOpts.closeLongterm ? 'ON' : 'OFF'}
           </div>
           <div style={{ display: 'flex', gap: SP.sm, marginTop: SP.md }}>
@@ -501,7 +502,7 @@ function HubAccountsPageInner() {
             <ResultStat label="유지된 포지션" value={`${emergencyResult.data.notClosed}건`} />
             <ResultStat label="실현손익"      value={formatKRW(emergencyResult.data.realizedPnl)} color={emergencyResult.data.realizedPnl >= 0 ? T.grn : T.red} />
           </div>
-          <div style={{ marginTop: SP.sm, padding: SP.sm + 2, background: T.grn + '15', borderRadius: R.md, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ marginTop: SP.sm, padding: SP.sm + 2, background: A(T.grn,'15'), borderRadius: R.md, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <span style={{ color: T.sub, fontSize: 11 }}>현금 회수</span>
             <span style={{ color: T.grn, fontWeight: 800, fontSize: 16 }}>{formatKRW(emergencyResult.data.cashRecovered)}</span>
           </div>
@@ -546,7 +547,7 @@ function AccountCard({ acc }: { acc: HubAccount }) {
       </div>
 
       {acc.botActive && (
-        <div style={{ marginTop: SP.sm, padding: '8px 12px', background: T.prp + '15', border: `1px solid ${T.prp}55`, borderRadius: R.md, color: T.prp, fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ marginTop: SP.sm, padding: '8px 12px', background: A(T.prp,'15'), border: `1px solid ${A(T.prp,'55')}`, borderRadius: R.md, color: T.prp, fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
           <Bot size={14} strokeWidth={IC_STROKE} /> 자동매매 봇 가동 중
         </div>
       )}
@@ -571,7 +572,7 @@ function AccountCard({ acc }: { acc: HubAccount }) {
                     <span style={{ color: T.txt, fontWeight: 700, fontSize: 12 }}>{p.symbol}</span>
                     <span style={{
                       fontSize: 10, padding: '2px 6px', borderRadius: 4, fontWeight: 800,
-                      background: p.side === 'long' ? T.grn + '33' : p.side === 'short' ? T.red + '33' : T.acg,
+                      background: p.side === 'long' ? A(T.grn,'33') : p.side === 'short' ? A(T.red,'33') : T.acg,
                       color:      p.side === 'long' ? T.grn         : p.side === 'short' ? T.red         : T.acl,
                     }}>
                       {p.side === 'spot' ? 'SPOT' : p.side.toUpperCase()}{p.leverage && p.leverage > 1 ? ` ${p.leverage}x` : ''}

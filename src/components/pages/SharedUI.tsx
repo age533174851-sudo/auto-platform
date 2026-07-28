@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, LOGO_SOURCES } from '@/lib/constants';
 import { toTradingViewSymbol } from '@/lib/tvSymbol';
@@ -171,7 +172,7 @@ export function Pill({ch,active,color,onClick}:{ch:string;active:boolean;color?:
   return <button onClick={onClick} style={{background:active?col+'20':'transparent',color:active?col:T.muted,border:`1px solid ${active?col:T.border}`,borderRadius:20,padding:'5px 13px',fontSize:12,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>{ch}</button>;
 }
 export function Toggle({on,onChange}:{on:boolean;onChange:(v:boolean)=>void}) {
-  return <div onClick={()=>onChange(!on)} style={{width:44,height:24,borderRadius:12,background:on?T.acl:'#243A5E',cursor:'pointer',position:'relative',flexShrink:0,transition:'background .2s'}}><div style={{position:'absolute',top:3,left:on?23:3,width:18,height:18,borderRadius:9,background:'#fff',transition:'left .2s',boxShadow:'0 1px 4px rgba(0,0,0,.4)'}}/></div>;
+  return <div onClick={()=>onChange(!on)} style={{width:44,height:24,borderRadius:12,background:on?T.acl:'var(--t-border2)',cursor:'pointer',position:'relative',flexShrink:0,transition:'background .2s'}}><div style={{position:'absolute',top:3,left:on?23:3,width:18,height:18,borderRadius:9,background:'#fff',transition:'left .2s',boxShadow:'0 1px 4px rgba(0,0,0,.4)'}}/></div>;
 }
 export function Card({children,style,glow}:{children?:React.ReactNode;style?:React.CSSProperties;glow?:boolean;[key:string]:any}) {
   return <div style={{background:T.card,border:`1px solid ${glow?T.acl:T.border}`,borderRadius:18,boxShadow:glow?`0 0 20px ${T.acg}`:'none',...style}}>{children}</div>;
@@ -333,7 +334,7 @@ export function Logo({ id, size=36, clr, name, logoUrl }: {
 }) {
   const t   = (id || '').toUpperCase().trim();
   const def = LOGO_DB[t] || LOGO_DB[id] || null;
-  const bg  = clr || def?.bg || getBgColor(t) || '#1A2D4A';
+  const bg  = clr || def?.bg || getBgColor(t) || 'var(--t-border)';
 
   // Smart initials
   const inits = def?.initials
@@ -545,7 +546,7 @@ const STATUS_META: Record<string, { dot: string; label: string; color: string }>
   ok:           { dot: '', label: '정상',   color: '#10B981' },
   limited:      { dot: '', label: '제한',   color: '#F59E0B' },
   error:        { dot: '', label: '오류',   color: '#EF4444' },
-  unconfigured: { dot: '', label: '미설정', color: '#94A3B8' },
+  unconfigured: { dot: '', label: '미설정', color: 'var(--t-sub)' },
 };
 
 function ProviderStatusPanel() {
@@ -660,7 +661,7 @@ function BinanceReachPanel() {
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
       <button onClick={run} disabled={loading}
-        style={{ width: '100%', padding: '9px', background: T.acg, border: `1px solid ${T.acl}40`, borderRadius: 8, color: T.acl, fontWeight: 700, fontSize: 11, cursor: loading ? 'wait' : 'pointer' }}>
+        style={{ width: '100%', padding: '9px', background: T.acg, border: `1px solid ${A(T.acl,'40')}`, borderRadius: 8, color: T.acl, fontWeight: 700, fontSize: 11, cursor: loading ? 'wait' : 'pointer' }}>
         {loading ? '진단 중…' : '바이낸스 서버 도달성 진단'}
       </button>
       {data && !data.error && (
@@ -676,7 +677,7 @@ function BinanceReachPanel() {
             );
           })}
           <div style={{ marginTop: 8, padding: '7px 10px', borderRadius: 6, fontSize: 10, lineHeight: 1.4,
-            background: data.testnetOk ? T.grn + '12' : T.red + '12',
+            background: data.testnetOk ? A(T.grn,'12') : A(T.red,'12'),
             color: data.testnetOk ? T.grn : T.red }}>
             {data.verdict}
           </div>
@@ -997,13 +998,13 @@ export function GlobalSearch({onSelect,currency}:{onSelect:(id:string,nameKr:str
     <button onClick={()=>setOpen(true)} style={{width:'100%',display:'flex',alignItems:'center',gap:10,background:T.card,border:`1px solid ${T.border}`,borderRadius:14,padding:'12px 16px',cursor:'pointer',marginBottom:12}}>
       <span style={{fontSize:16}}>🔍</span>
       <span style={{color:T.muted,fontSize:13,flex:1,textAlign:'left'}}>전체 시장 검색 (미국·한국·코인·ETF…)</span>
-      <span style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}30`,borderRadius:8,padding:'2px 8px',fontSize:10,fontWeight:700}}>전체</span>
+      <span style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:8,padding:'2px 8px',fontSize:10,fontWeight:700}}>전체</span>
     </button>
   );
 
   return (
     <div style={{marginBottom:12}}>
-      <div style={{background:T.card,border:`1px solid ${T.acl}40`,borderRadius:14,overflow:'hidden'}}>
+      <div style={{background:T.card,border:`1px solid ${A(T.acl,'40')}`,borderRadius:14,overflow:'hidden'}}>
         {/* Search input */}
         <div style={{display:'flex',alignItems:'center',gap:10,padding:'12px 14px',borderBottom:`1px solid ${T.border}`}}>
           <span style={{fontSize:16}}>{loading?'⏳':''}</span>
@@ -1030,7 +1031,7 @@ export function GlobalSearch({onSelect,currency}:{onSelect:(id:string,nameKr:str
           <div style={{maxHeight:340,overflowY:'auto'}}>
             {results.map((r,i)=>{
               const logoUrl=getLogoUrl(r);
-              const typeClr=TYPE_CLR[r.asset_type]||'#94A3B8';
+              const typeClr=TYPE_CLR[r.asset_type]||'var(--t-sub)';
               return (
                 <div key={r.symbol+i} onClick={()=>{
                   // Cache the selected asset
@@ -1124,7 +1125,7 @@ export const TOOL_GROUPS=[
   {name:'도형',icon:'□',tools:[{id:'rect',label:'사각형',icon:'□'},{id:'circle',label:'원',icon:'○'}]},
   {name:'주석',icon:'✏',tools:[{id:'text',label:'텍스트',icon:'T'},{id:'brush',label:'브러시',icon:'✏'},{id:'eraser',label:'지우개',icon:'⬜'}]},
 ];
-export const PALETTE=['#3B82F6','#10B981','#EF4444','#F59E0B','#7C3AED','#EC4899','#FFFFFF','#94A3B8'];
+export const PALETTE=['#3B82F6','#10B981','#EF4444','#F59E0B','#7C3AED','#EC4899','#FFFFFF','var(--t-sub)'];
 
 
 export function TradingChart({ asset }: { asset?: Asset }) {
@@ -1396,7 +1397,7 @@ export function TradingChart({ asset }: { asset?: Asset }) {
             <div style={{ display: 'flex', gap: 2, overflowX: 'auto' }}>
               {Object.entries(indicators).map(([k, on]) => (
                 <button key={k} onClick={() => toggleIndicator(k)} style={{
-                  background: on ? T.ylw + '20' : 'transparent',
+                  background: on ? A(T.ylw,'20') : 'transparent',
                   color:      on ? T.ylw : T.muted,
                   border:     '1px solid ' + (on ? T.ylw : T.border),
                   borderRadius: 5, padding: '1px 5px', fontSize: 9,
@@ -1427,7 +1428,7 @@ export function TradingChart({ asset }: { asset?: Asset }) {
             target="_blank" rel="noopener noreferrer"
             style={{
               background: T.acg, color: T.acl,
-              border: '1px solid ' + T.acl + '40',
+              border: '1px solid ' + A(T.acl,'40'),
               borderRadius: 10, padding: '8px 16px',
               fontSize: 12, fontWeight: 700, textDecoration: 'none', marginTop: 8,
             }}
@@ -1569,8 +1570,8 @@ export function TradingChart({ asset }: { asset?: Asset }) {
                   onClick={() => { setShapes([]); pushH([]); }}
                   style={{
                     padding: '0 8px', height: 26,
-                    background: T.red + '15', color: T.red,
-                    border: '1px solid ' + T.red + '30',
+                    background: A(T.red,'15'), color: T.red,
+                    border: '1px solid ' + A(T.red,'30'),
                     borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: 'pointer',
                   }}
                 >
@@ -1698,7 +1699,7 @@ export function DonutChart({ slices, size = 110 }: {
 /* ── MiniBar ── */
 export function MiniBar({ pct, color }: { pct: number; color: string }) {
   return (
-    <div style={{ height: 6, background: '#1A2D4A', borderRadius: 3, overflow: 'hidden' }}>
+    <div style={{ height: 6, background: 'var(--t-border)', borderRadius: 3, overflow: 'hidden' }}>
       <div style={{ height: '100%', width: Math.min(100, Math.max(0, pct)) + '%', background: color, borderRadius: 3, transition: 'width .4s' }} />
     </div>
   );
@@ -1737,7 +1738,7 @@ export function LiquidationCalc({ entryPrice, leverage, side, currency }: {
           {dist.toFixed(1)}%
         </span>
       </div>
-      <div style={{ height: 6, background: '#1A2D4A', borderRadius: 3, overflow: 'hidden' }}>
+      <div style={{ height: 6, background: 'var(--t-border)', borderRadius: 3, overflow: 'hidden' }}>
         <div style={{ height: '100%', width: Math.min(100, dist * 3) + '%', background: danger ? T.red : T.ylw, borderRadius: 3 }} />
       </div>
     </div>
@@ -1822,7 +1823,7 @@ export function RiskDashboard({ positions, prices }: { positions: any[]; prices:
         {Object.keys(stressPcts).map(k => (
           <button key={k} onClick={() => setStressMode(k)} style={{
             flex: 1, padding: '4px 2px', fontSize: 9, fontWeight: 700, borderRadius: 6, cursor: 'pointer',
-            background: stressMode === k ? T.red + '20' : 'transparent',
+            background: stressMode === k ? A(T.red,'20') : 'transparent',
             color:      stressMode === k ? T.red : T.muted,
             border:     '1px solid ' + (stressMode === k ? T.red : T.border),
           }}>
@@ -2078,8 +2079,8 @@ export function ChartContainer({
                 style={{
                   minWidth: 32, minHeight: 32, padding: '4px 8px',
                   background: active ? '#1E3A5F' : 'transparent',
-                  color: active ? '#60A5FA' : '#94A3B8',
-                  border: `1px solid ${active ? '#60A5FA' : '#1A2D4A'}`,
+                  color: active ? '#60A5FA' : 'var(--t-sub)',
+                  border: `1px solid ${active ? '#60A5FA' : 'var(--t-border)'}`,
                   borderRadius: 6, fontSize: 11, fontWeight: 800, cursor: 'pointer',
                   touchAction: 'manipulation',
                 }}>
@@ -2105,8 +2106,8 @@ export function ChartContainer({
                   style={{
                     minWidth: 38, minHeight: 32, padding: '4px 8px',
                     background: active ? '#7C3AED22' : 'transparent',
-                    color: active ? '#A78BFA' : '#94A3B8',
-                    border: `1px solid ${active ? '#7C3AED' : '#1A2D4A'}`,
+                    color: active ? '#A78BFA' : 'var(--t-sub)',
+                    border: `1px solid ${active ? '#7C3AED' : 'var(--t-border)'}`,
                     borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: 'pointer',
                     touchAction: 'manipulation',
                   }}>
@@ -2179,7 +2180,7 @@ export function ChartContainer({
           }}>
           <div style={{
             width: 40, height: 4,
-            background: isResizing ? '#A78BFA' : '#1A2D4A',
+            background: isResizing ? '#A78BFA' : 'var(--t-border)',
             borderRadius: 2,
           }}/>
         </div>
@@ -2189,7 +2190,7 @@ export function ChartContainer({
       {fullscreen && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 10000,
-          background: '#060B14',
+          background: 'var(--t-bg)',
           display: 'flex', flexDirection: 'column',
         }}>
           <div style={{
@@ -2209,7 +2210,7 @@ export function ChartContainer({
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
               {!isLandscape && (
-                <span style={{ color: '#94A3B8', fontSize: 9 }}>가로로 돌리면 더 넓게</span>
+                <span style={{ color: 'var(--t-sub)', fontSize: 9 }}>가로로 돌리면 더 넓게</span>
               )}
               {/* 풀스크린 안에서도 레이아웃 모드 토글 */}
               {showLayoutModes && (
@@ -2220,9 +2221,9 @@ export function ChartContainer({
                       <button key={m} type="button" onClick={() => changeMode(m)}
                         style={{
                           minWidth: 34, minHeight: 30, padding: '3px 7px',
-                          background: active ? '#7C3AED22' : '#0F2040',
-                          color: active ? '#A78BFA' : '#94A3B8',
-                          border: `1px solid ${active ? '#7C3AED' : '#1A2D4A'}`,
+                          background: active ? '#7C3AED22' : 'var(--t-alt)',
+                          color: active ? '#A78BFA' : 'var(--t-sub)',
+                          border: `1px solid ${active ? '#7C3AED' : 'var(--t-border)'}`,
                           borderRadius: 5, fontSize: 9, fontWeight: 700, cursor: 'pointer',
                         }}>
                         {m === 'default' ? '기본' : m === 'minimal' ? '미니' : '프로'}
@@ -2235,7 +2236,7 @@ export function ChartContainer({
                 aria-label="닫기"
                 style={{
                   minWidth: 38, minHeight: 38,
-                  background: '#0F2040', color: T.txt,
+                  background: 'var(--t-alt)', color: T.txt,
                   border: `1px solid ${T.border}`, borderRadius: 8,
                   cursor: 'pointer',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -2271,7 +2272,7 @@ export function FinancialJuiceWidget({ height = 360 }: { height?: number }) {
   const src = 'https://www.financialjuice.com/widgets/news-feed?theme=dark&height=400';
   return (
     <div style={{ width: '100%', height, borderRadius: 12, overflow: 'hidden',
-      background: '#0A1628', border: '1px solid #1A2D4A' }}>
+      background: 'var(--t-card)', border: '1px solid var(--t-border)' }}>
       <iframe
         src={src}
         title="FinancialJuice News"

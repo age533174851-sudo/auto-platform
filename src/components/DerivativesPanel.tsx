@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // DerivativesPanel — 파생시장 실데이터 (펀딩비 + 미결제약정).
 // 5v5의 파생 축이 쓰는 데이터를 그대로 보여준다.
 import React, { useState, useEffect } from 'react';
@@ -85,7 +86,7 @@ export default function DerivativesPanel({ symbols = ['BTCUSDT', 'ETHUSDT', 'SOL
       </div>
 
       {error && (
-        <div style={{ display: 'flex', gap: 7, alignItems: 'flex-start', background: T.ylw + '12', borderRadius: 9, padding: '9px 11px', marginBottom: 10 }}>
+        <div style={{ display: 'flex', gap: 7, alignItems: 'flex-start', background: A(T.ylw,'12'), borderRadius: 9, padding: '9px 11px', marginBottom: 10 }}>
           <AlertCircle size={13} color={T.ylw} style={{ flexShrink: 0, marginTop: 1 }} />
           <span style={{ color: T.sub, fontSize: 10.5, lineHeight: 1.4 }}>{error}</span>
         </div>

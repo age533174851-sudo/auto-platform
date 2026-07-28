@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -118,7 +119,7 @@ function HistoryPage() {
     <div>
       {/* Toast */}
       {toast && (
-        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:999,background:T.surf,border:`1px solid ${T.grn}40`,borderRadius:12,padding:'10px 16px',fontSize:12,color:T.txt,fontWeight:700,boxShadow:'0 4px 20px rgba(0,0,0,.4)',whiteSpace:'nowrap',zIndex:999}}>
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:999,background:T.surf,border:`1px solid ${A(T.grn,'40')}`,borderRadius:12,padding:'10px 16px',fontSize:12,color:T.txt,fontWeight:700,boxShadow:'0 4px 20px rgba(0,0,0,.4)',whiteSpace:'nowrap',zIndex:999}}>
           {toast}
         </div>
       )}
@@ -127,7 +128,7 @@ function HistoryPage() {
       {deleteId && (
         <>
           <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.75)',zIndex:200}} onClick={()=>setDeleteId(null)}/>
-          <div style={{position:'fixed',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:201,background:T.surf,borderRadius:18,padding:'22px 20px',width:300,border:`1px solid ${T.red}40`}}>
+          <div style={{position:'fixed',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:201,background:T.surf,borderRadius:18,padding:'22px 20px',width:300,border:`1px solid ${A(T.red,'40')}`}}>
             <div style={{color:T.red,fontWeight:700,fontSize:15,marginBottom:8}}>🗑 삭제 확인</div>
             <div style={{color:T.muted,fontSize:12,marginBottom:16}}>이 일지를 삭제하시겠습니까?</div>
             <div style={{display:'flex',gap:8}}>
@@ -177,7 +178,7 @@ function HistoryPage() {
               {form.entryPrice && form.exitPrice && form.size && (()=>{
                 const {pnl, pnlPct} = computePnl(form);
                 return (
-                  <div style={{background:pnl>=0?T.grn+'12':T.red+'12',border:`1px solid ${pnl>=0?T.grn:T.red}30`,borderRadius:8,padding:'7px 10px',marginBottom:10,display:'flex',gap:10}}>
+                  <div style={{background:pnl>=0?A(T.grn,'12'):A(T.red,'12'),border:`1px solid ${pnl>=0?T.grn:T.red}30`,borderRadius:8,padding:'7px 10px',marginBottom:10,display:'flex',gap:10}}>
                     <div><div style={{color:T.muted,fontSize:9}}>예상 PnL</div><div style={{color:pnl>=0?T.grn:T.red,fontWeight:700,fontSize:12,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{pnl>=0?'+':''}₩{Math.abs(pnl).toLocaleString()}</div></div>
                     <div><div style={{color:T.muted,fontSize:9}}>수익률</div><div style={{color:pnl>=0?T.grn:T.red,fontWeight:700,fontSize:12}}>{pnlPct>=0?'+':''}{pnlPct}%</div></div>
                   </div>
@@ -223,7 +224,7 @@ function HistoryPage() {
               </div>
 
               {/* Save */}
-              <button onClick={handleSave} disabled={saving} style={{width:'100%',padding:'13px',background:saving?'#243A5E':'linear-gradient(135deg,#2563EB,#7C3AED)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:saving?'not-allowed':'pointer',marginBottom:6}}>
+              <button onClick={handleSave} disabled={saving} style={{width:'100%',padding:'13px',background:saving?'var(--t-border2)':'linear-gradient(135deg,#2563EB,#7C3AED)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:saving?'not-allowed':'pointer',marginBottom:6}}>
                 {saving?'저장 중…':(editId?'수정 저장':'저장 ✅')}
               </button>
               <div style={{color:T.muted,fontSize:9,textAlign:'center'}}>⚠️ 모의투자 전용 · AI 리뷰 자동 생성</div>
@@ -235,7 +236,7 @@ function HistoryPage() {
       {/* Header */}
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
         <div style={{fontWeight:800,fontSize:15,color:T.txt}}>📝 매매일지</div>
-        <button onClick={openAdd} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,padding:'6px 14px',fontSize:12,fontWeight:700,cursor:'pointer',minHeight:36}}>+ 추가</button>
+        <button onClick={openAdd} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,padding:'6px 14px',fontSize:12,fontWeight:700,cursor:'pointer',minHeight:36}}>+ 추가</button>
       </div>
 
       {/* Stats */}
@@ -276,7 +277,7 @@ function HistoryPage() {
                   </div>
                   <div style={{display:'flex',flexDirection:'column',gap:3}}>
                     <button onClick={()=>openEdit(e)} style={{background:T.alt,border:`1px solid ${T.border}`,borderRadius:6,padding:'3px 7px',fontSize:10,cursor:'pointer',color:T.muted}}>편집</button>
-                    <button onClick={()=>setDeleteId(e.id)} style={{background:T.red+'15',border:'none',borderRadius:6,padding:'3px 7px',fontSize:10,cursor:'pointer',color:T.red}}>삭제</button>
+                    <button onClick={()=>setDeleteId(e.id)} style={{background:A(T.red,'15'),border:'none',borderRadius:6,padding:'3px 7px',fontSize:10,cursor:'pointer',color:T.red}}>삭제</button>
                   </div>
                 </div>
               </div>
@@ -289,7 +290,7 @@ function HistoryPage() {
               </div>
               {e.memo && <div style={{color:T.muted,fontSize:11,marginBottom:6,lineHeight:1.5}}>{e.memo}</div>}
               {e.aiReview && (
-                <div style={{background:T.acl+'12',border:`1px solid ${T.acl}25`,borderRadius:8,padding:'7px 10px'}}>
+                <div style={{background:A(T.acl,'12'),border:`1px solid ${A(T.acl,'25')}`,borderRadius:8,padding:'7px 10px'}}>
                   <div style={{color:T.acl,fontSize:9,fontWeight:700,marginBottom:2}}>AI 리뷰</div>
                   <div style={{color:T.sub,fontSize:11,lineHeight:1.5}}>{e.aiReview}</div>
                 </div>

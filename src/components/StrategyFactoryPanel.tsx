@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // StrategyFactoryPanel — AI 전략 생성기. 개선안 제안 → Shadow Trading 검증 → 승격.
 import React, { useState, useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -62,7 +63,7 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
   };
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#06B6D41F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <FlaskConical size={18} color="#22D3EE" />
@@ -115,7 +116,7 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
                   <div style={{ color: T.muted, fontSize: 9 }}>승률 {p.baseMetrics.winRate.toFixed(0)}% · PF {p.baseMetrics.profitFactor.toFixed(2)}</div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center' }}><ArrowRight size={14} color={T.muted} /></div>
-                <div style={{ flex: 1, background: '#22C55E14', border: `1px solid ${T.grn}30`, borderRadius: 9, padding: '9px 11px' }}>
+                <div style={{ flex: 1, background: '#22C55E14', border: `1px solid ${A(T.grn,'30')}`, borderRadius: 9, padding: '9px 11px' }}>
                   <div style={{ color: T.muted, fontSize: 9.5 }}>개선안 (Shadow)</div>
                   <div style={{ color: T.grn, fontSize: 14, fontWeight: 800 }}>{p.shadowMetrics.score}점</div>
                   <div style={{ color: T.muted, fontSize: 9 }}>승률 {p.shadowMetrics.winRate.toFixed(0)}% · PF {p.shadowMetrics.profitFactor.toFixed(2)}</div>
@@ -155,7 +156,7 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
                 </div>
               )}
               {(p.status === 'promoted' || (p.shadowMetrics && p.verdict?.includes('승격'))) && p.status !== 'rejected' && (
-                <button onClick={() => promote(p.id)} disabled={p.status === 'promoted'} style={{ flex: 1, minHeight: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, background: p.status === 'promoted' ? T.grn + '30' : T.grn, color: p.status === 'promoted' ? T.grn : '#fff', border: 'none', borderRadius: 9, fontWeight: 800, fontSize: 11.5, cursor: p.status === 'promoted' ? 'default' : 'pointer' }}>
+                <button onClick={() => promote(p.id)} disabled={p.status === 'promoted'} style={{ flex: 1, minHeight: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, background: p.status === 'promoted' ? A(T.grn,'30') : T.grn, color: p.status === 'promoted' ? T.grn : '#fff', border: 'none', borderRadius: 9, fontWeight: 800, fontSize: 11.5, cursor: p.status === 'promoted' ? 'default' : 'pointer' }}>
                   {p.status === 'promoted' ? <><Check size={13} /> 승격됨</> : <><TrendingUp size={13} /> 실전 승격</>}
                 </button>
               )}

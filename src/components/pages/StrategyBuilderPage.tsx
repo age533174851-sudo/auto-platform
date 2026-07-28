@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { notifyError } from '@/lib/notify/center';
@@ -151,9 +152,9 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
           <div style={{
             flexShrink: 0, padding: '4px 8px', borderRadius: 8, fontSize: 9, fontWeight: 700,
             background:
-              syncStatus === 'synced'  ? T.grn + '20' :
-              syncStatus === 'syncing' ? T.acl + '20' :
-                                          T.muted + '20',
+              syncStatus === 'synced'  ? A(T.grn,'20') :
+              syncStatus === 'syncing' ? A(T.acl,'20') :
+                                          A(T.muted,'20'),
             color:
               syncStatus === 'synced'  ? T.grn :
               syncStatus === 'syncing' ? T.acl :
@@ -295,14 +296,14 @@ function StrategyList({
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
                 <span style={{ ...F.body, fontWeight: 800, color: T.txt }}>{s.name}</span>
                 {s.source === 'ai' && (
-                  <span style={{ display:'inline-flex', alignItems:'center', gap:3, padding:'2px 6px', background: T.prp+'22', color: T.prp, borderRadius: R.sm, fontSize: 9, fontWeight: 800 }}>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:3, padding:'2px 6px', background: A(T.prp,'22'), color: T.prp, borderRadius: R.sm, fontSize: 9, fontWeight: 800 }}>
                     <Sparkles size={9} strokeWidth={IC_STROKE}/>AI
                   </span>
                 )}
                 <span style={{ padding:'2px 6px', background: T.alt, color: T.muted, borderRadius: R.sm, fontSize: 9, fontWeight: 700 }}>
                   {s.mode === 'paper' ? '모의' : '실전'}
                 </span>
-                <span style={{ padding:'2px 6px', background: s.action === 'buy' ? T.grn+'22' : T.red+'22', color: s.action === 'buy' ? T.grn : T.red, borderRadius: R.sm, fontSize: 9, fontWeight: 800 }}>
+                <span style={{ padding:'2px 6px', background: s.action === 'buy' ? A(T.grn,'22') : A(T.red,'22'), color: s.action === 'buy' ? T.grn : T.red, borderRadius: R.sm, fontSize: 9, fontWeight: 800 }}>
                   {s.action === 'buy' ? '매수' : '매도'}
                 </span>
               </div>
@@ -338,7 +339,7 @@ function StrategyList({
             <button onClick={() => onBacktest(s)}
               style={{
                 ...buttonStyle('ghost','sm'), flex: 1, minWidth: 70,
-                color: T.acl, borderColor: T.acl+'40',
+                color: T.acl, borderColor: A(T.acl,'40'),
               }}>
               백테스트
             </button>
@@ -349,7 +350,7 @@ function StrategyList({
             </button>
             <button onClick={() => onDelete(s.id)}
               aria-label="삭제"
-              style={{ ...buttonStyle('ghost','sm'), minWidth: 36, padding: '6px 10px', color: T.red, borderColor: T.red+'40' }}>
+              style={{ ...buttonStyle('ghost','sm'), minWidth: 36, padding: '6px 10px', color: T.red, borderColor: A(T.red,'40') }}>
               <Trash2 size={12} strokeWidth={IC_STROKE}/>
             </button>
           </div>
@@ -447,7 +448,7 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
         </button>
 
         {error && (
-          <div style={{ marginTop: SP.sm, padding: '8px 12px', background: T.red+'10', border: `1px solid ${T.red}30`, borderRadius: R.sm, color: T.red, fontSize: 11 }}>
+          <div style={{ marginTop: SP.sm, padding: '8px 12px', background: A(T.red,'10'), border: `1px solid ${A(T.red,'30')}`, borderRadius: R.sm, color: T.red, fontSize: 11 }}>
             오류: {error}
           </div>
         )}
@@ -455,7 +456,7 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
 
       {/* 결과 미리보기 */}
       {result && (
-        <div style={cardStyle({ background: T.acl + '08', borderColor: T.acl + '40' })}>
+        <div style={cardStyle({ background: A(T.acl,'08'), borderColor: A(T.acl,'40') })}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: SP.sm }}>
             <CheckCircle2 size={16} strokeWidth={IC_STROKE} color={T.acl}/>
             <span style={{ ...F.section, color: T.acl }}>AI 분석 결과</span>
@@ -467,7 +468,7 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
           {result.warnings && result.warnings.length > 0 && (
             <div style={{ marginBottom: SP.sm }}>
               {result.warnings.map((w, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 5, padding: '6px 10px', background: T.ylw+'10', border: `1px solid ${T.ylw}30`, borderRadius: R.sm, marginBottom: 4 }}>
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 5, padding: '6px 10px', background: A(T.ylw,'10'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: R.sm, marginBottom: 4 }}>
                   <AlertTriangle size={11} strokeWidth={IC_STROKE} color={T.ylw} style={{ marginTop: 2, flexShrink: 0 }}/>
                   <span style={{ color: T.ylw, fontSize: 10, lineHeight: 1.5 }}>{w}</span>
                 </div>
@@ -500,7 +501,7 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
 
           <div style={{
             marginTop: SP.sm, padding: '8px 10px',
-            background: T.ylw+'08', border: `1px solid ${T.ylw}30`,
+            background: A(T.ylw,'08'), border: `1px solid ${A(T.ylw,'30')}`,
             borderRadius: R.sm,
             display: 'flex', alignItems: 'flex-start', gap: 5,
           }}>
@@ -761,7 +762,7 @@ function ManualBuilder({
                 {s.conditions.length > 1 && (
                   <button onClick={() => removeCondition(i)}
                     aria-label="조건 제거"
-                    style={{ background: T.red+'15', color: T.red, border: 'none', borderRadius: R.sm, padding: '6px 10px', cursor: 'pointer', minHeight: 32 }}>
+                    style={{ background: A(T.red,'15'), color: T.red, border: 'none', borderRadius: R.sm, padding: '6px 10px', cursor: 'pointer', minHeight: 32 }}>
                     <Trash2 size={11} strokeWidth={IC_STROKE}/>
                   </button>
                 )}
@@ -906,7 +907,7 @@ function ManualBuilder({
                   return (
                     <button key={opt.v} onClick={() => update({ marketFilter: opt.v })}
                       style={{ padding: '9px 8px', minHeight: 48, borderRadius: R.sm, cursor: 'pointer',
-                        background: active ? T.acc + '22' : T.alt,
+                        background: active ? A(T.acc,'22') : T.alt,
                         border: `1px solid ${active ? T.acl : T.border}`,
                         display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
                       <span style={{ color: active ? T.acl : T.txt, fontWeight: 700, fontSize: 11 }}>{opt.l}</span>
@@ -981,7 +982,7 @@ function ManualBuilder({
               {exLoading ? (
                 <div style={{ ...F.body, color: T.muted, padding: SP.sm }}>거래소 목록 불러오는 중…</div>
               ) : exchanges.length === 0 ? (
-                <div style={{ background: T.red+'10', border: `1px solid ${T.red}30`, borderRadius: R.md, padding: SP.sm }}>
+                <div style={{ background: A(T.red,'10'), border: `1px solid ${A(T.red,'30')}`, borderRadius: R.md, padding: SP.sm }}>
                   <div style={{ color: T.red, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>연결된 거래소가 없습니다</div>
                   <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5 }}>
                     더보기 → 거래소 연결에서 먼저 API 키를 등록하세요. 실전 매매는 거래소 연결이 필수입니다.
@@ -998,7 +999,7 @@ function ManualBuilder({
                         disabled={!usable}
                         style={{
                           textAlign: 'left', padding: '11px 13px', minHeight: 56,
-                          background: active ? T.acc+'20' : T.alt,
+                          background: active ? A(T.acc,'20') : T.alt,
                           border: `1px solid ${active ? T.acl : T.border}`,
                           borderRadius: R.md, cursor: usable ? 'pointer' : 'not-allowed',
                           opacity: usable ? 1 : 0.55,
@@ -1044,7 +1045,7 @@ function ManualBuilder({
           </div>
 
           {/* 경고 */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, padding: SP.sm, background: T.ylw+'10', border: `1px solid ${T.ylw}30`, borderRadius: R.sm, marginBottom: SP.sm }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, padding: SP.sm, background: A(T.ylw,'10'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: R.sm, marginBottom: SP.sm }}>
             <AlertTriangle size={13} strokeWidth={IC_STROKE} color={T.ylw} style={{ marginTop: 2, flexShrink: 0 }}/>
             <span style={{ color: T.ylw, fontSize: 11, lineHeight: 1.5 }}>
               저장 후 비활성 상태로 등록됩니다. 목록에서 토글로 활성화하세요.

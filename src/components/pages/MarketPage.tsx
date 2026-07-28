@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { cvt, fmtPct } from '@/lib/utils';
@@ -317,7 +318,7 @@ function MarketPage({
               <>
                 <span style={{
                   padding:'2px 8px', borderRadius:5, fontSize:9, fontWeight:800,
-                  background: coinMeta.status === 'live' ? T.grn+'20' : T.muted+'20',
+                  background: coinMeta.status === 'live' ? A(T.grn,'20') : A(T.muted,'20'),
                   color:      coinMeta.status === 'live' ? T.grn : T.muted,
                   display:'inline-flex', alignItems:'center', gap:3,
                 }}>
@@ -334,7 +335,7 @@ function MarketPage({
             {filter !== '코인' && filter !== '전체' && (
               <span style={{
                 padding:'2px 8px', borderRadius:5, fontSize:9, fontWeight:800,
-                background: T.ylw+'20', color: T.ylw,
+                background: A(T.ylw,'20'), color: T.ylw,
               }}>
                 대표 종목 · API 키 필요
               </span>
@@ -489,7 +490,7 @@ function MarketPage({
                 onOpenPnL(selAsset);
               }}
               style={{ width:'100%', padding:'12px', background:T.acg, color:T.acl,
-                border:`1px solid ${T.acl}40`, borderRadius:12, fontWeight:700,
+                border:`1px solid ${A(T.acl,'40')}`, borderRadius:12, fontWeight:700,
                 fontSize:13, cursor:onOpenPnL?'pointer':'not-allowed', minHeight:46,
                 opacity:onOpenPnL?1:0.5 }}
             >

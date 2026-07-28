@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
@@ -28,8 +29,8 @@ const LESSONS = [
 const ILL = {
   up:   '#10B981',  // 상승·매수·이익
   down: '#EF4444',  // 하락·매도·손실·위험
-  neut: '#94A3B8',  // 축·보조선
-  ink:  '#E2E8F0',  // 본문 텍스트
+  neut: 'var(--t-sub)',  // 축·보조선
+  ink:  'var(--t-txt)',  // 본문 텍스트
   a:    '#3B82F6',  // 분류 A (주식)
   b:    '#F59E0B',  // 분류 B (코인)
   c:    '#8B5CF6',  // 분류 C (현금)
@@ -68,10 +69,10 @@ function LessonBanner({ kind, color, h = 120 }: { kind: string; color: string; h
           <rect x="46" y="46" width="14" height="40" fill={ILL.a} opacity="0.55" />
           <rect x="64" y="34" width="18" height="52" fill={ILL.a} />
           <rect x="86" y="52" width="14" height="34" fill={ILL.a} opacity="0.55" />
-          <rect x="68" y="42" width="4" height="4" fill="#0B1220" />
-          <rect x="76" y="42" width="4" height="4" fill="#0B1220" />
-          <rect x="68" y="52" width="4" height="4" fill="#0B1220" />
-          <rect x="76" y="52" width="4" height="4" fill="#0B1220" />
+          <rect x="68" y="42" width="4" height="4" fill="var(--t-card)" />
+          <rect x="76" y="42" width="4" height="4" fill="var(--t-card)" />
+          <rect x="68" y="52" width="4" height="4" fill="var(--t-card)" />
+          <rect x="76" y="52" width="4" height="4" fill="var(--t-card)" />
           <line x1="38" y1="86" x2="108" y2="86" stroke={ILL.neut} strokeWidth="1.5" />
           <text x="73" y="26" textAnchor="middle" fill={ILL.a} fontSize="11" fontWeight="800">주식</text>
           <text x="73" y="100" textAnchor="middle" fill={ILL.ink} fontSize="8.5">기업 소유권</text>
@@ -84,7 +85,7 @@ function LessonBanner({ kind, color, h = 120 }: { kind: string; color: string; h
             <line x1="212" y1="76" x2="247" y2="60" /><line x1="247" y1="60" x2="282" y2="76" />
           </g>
           <circle cx="247" cy="60" r="12" fill={ILL.b} />
-          <text x="247" y="65" textAnchor="middle" fill="#0B1220" fontSize="13" fontWeight="900">₿</text>
+          <text x="247" y="65" textAnchor="middle" fill="var(--t-card)" fontSize="13" fontWeight="900">₿</text>
           {[[212,44],[282,44],[212,76],[282,76]].map(([cx, cy], i) => (
             <circle key={i} cx={cx} cy={cy} r="5.5" fill={ILL.b} opacity="0.8" />
           ))}
@@ -300,7 +301,7 @@ export default function AcademyPage({ onHome }: { onHome?: () => void }) {
           {idx < LESSONS.length - 1 && (
             <button type="button" onClick={() => setOpen(LESSONS[idx+1].id)}
               style={{ flex:1, padding:'12px', borderRadius:12, background:T.acg,
-                color:T.acl, border:`1px solid ${T.acl}40`, fontWeight:700, fontSize:13, cursor:'pointer', minHeight:44 }}>
+                color:T.acl, border:`1px solid ${A(T.acl,'40')}`, fontWeight:700, fontSize:13, cursor:'pointer', minHeight:44 }}>
               다음 →
             </button>
           )}

@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { AccountGroup, BulkOrder, ConnectedAccount, ExchangeFunding, ExchangeType, FundingTab, LinkedBank } from '@/types/domain';
 import { notifyInfo } from '@/lib/notify/center';
@@ -27,7 +28,7 @@ const GROUP_INFO:Record<AccountGroup,{name:string;color:string;icon:string}> = {
   longterm: {name:'장투 계좌',color:'#3B82F6',icon:''},
   shortterm:{name:'단타 계좌',color:'#F59E0B',icon:''},
   auto:     {name:'자동매매 계좌',color:'#10B981',icon:''},
-  cash:     {name:'현금 대기 계좌',color:'#94A3B8',icon:'💵'},
+  cash:     {name:'현금 대기 계좌',color:'var(--t-sub)',icon:'💵'},
   custom:   {name:'커스텀 그룹',color:'#7C3AED',icon:''},
 };
 
@@ -77,7 +78,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
         </div>
       )}
       {/* Global emergency stop banner */}
-      {globalStop&&<div style={{background:T.red+'25',border:`1px solid ${T.red}`,borderRadius:12,padding:'12px 14px',marginBottom:14,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:20}}>🚨</span><div><div style={{color:T.red,fontWeight:800}}>전체 긴급 정지 활성화</div><div style={{color:T.sub,fontSize:11}}>모든 자동매매가 중단되었습니다. 수동 매매는 가능합니다.</div></div><button onClick={()=>setGlobalStop(false)} style={{marginLeft:'auto',background:T.red,color:'#fff',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>해제</button></div>}
+      {globalStop&&<div style={{background:A(T.red,'25'),border:`1px solid ${T.red}`,borderRadius:12,padding:'12px 14px',marginBottom:14,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:20}}>🚨</span><div><div style={{color:T.red,fontWeight:800}}>전체 긴급 정지 활성화</div><div style={{color:T.sub,fontSize:11}}>모든 자동매매가 중단되었습니다. 수동 매매는 가능합니다.</div></div><button onClick={()=>setGlobalStop(false)} style={{marginLeft:'auto',background:T.red,color:'#fff',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>해제</button></div>}
 
       {/* Tabs */}
       <div style={{display:'flex',gap:5,marginBottom:14,overflowX:'auto'}}>
@@ -90,12 +91,12 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
       {tab==='accounts'&&(
         <div>
           {/* Paper mode notice */}
-          <div style={{background:T.prp+'15',border:`1px solid ${T.prp}30`,borderRadius:12,padding:'10px 14px',marginBottom:14}}>
+          <div style={{background:A(T.prp,'15'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:12,padding:'10px 14px',marginBottom:14}}>
             <div style={{color:T.prp,fontWeight:700,fontSize:11}}>모의 API 연결 모드</div>
             <div style={{color:T.sub,fontSize:10,marginTop:2}}>실제 거래소 API가 연결된 것처럼 보이지만 모든 거래는 모의입니다. 실제 자금이 이동하지 않습니다.</div>
           </div>
           {/* Summary */}
-          <div style={{background:'linear-gradient(135deg,#0D1A35,#091228)',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
+          <div style={{background:'linear-gradient(135deg,var(--t-card),var(--t-bg))',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
             <div style={{color:T.muted,fontSize:11,marginBottom:2}}>연결된 계좌 총 자산 (모의)</div>
             <div style={{color:T.txt,fontSize:26,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(totalBalance,currency)}</div>
             <div style={{display:'flex',gap:16,marginTop:8}}>
@@ -104,10 +105,10 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
               <div><div style={{color:T.muted,fontSize:10}}>자동매매</div><div style={{color:T.grn,fontWeight:800}}>{accounts.filter(a=>a.autoTrading).length}개 실행</div></div>
             </div>
             <div style={{display:'flex',gap:8,marginTop:12}}>
-              <button onClick={()=>setShowEmergency(true)} style={{background:T.red+'20',color:T.red,border:`1px solid ${T.red}40`,borderRadius:10,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:5}}>
+              <button onClick={()=>setShowEmergency(true)} style={{background:A(T.red,'20'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:5}}>
                 <AlertTriangle size={12} strokeWidth={2.4}/>전체 긴급 정지
               </button>
-              <button onClick={()=>setTab('connect')} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 계좌 연결</button>
+              <button onClick={()=>setTab('connect')} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 계좌 연결</button>
             </div>
           </div>
 
@@ -149,7 +150,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
                         </div>
                       )}
                       {acc.autoTrading&&(
-                        <div style={{marginTop:8,background:T.grn+'12',border:`1px solid ${T.grn}30`,borderRadius:8,padding:'5px 10px',display:'flex',alignItems:'center',gap:6}}>
+                        <div style={{marginTop:8,background:A(T.grn,'12'),border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,padding:'5px 10px',display:'flex',alignItems:'center',gap:6}}>
                           <Dot c={T.grn}/><span style={{color:T.grn,fontSize:10,fontWeight:700}}>자동매매 실행 중</span>
                           <span style={{color:T.muted,fontSize:10}}>일일 최대 손실: {cvt(acc.maxDailyLoss,currency)}</span>
                         </div>
@@ -163,7 +164,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
 
           {/* Bulk trade CTA */}
           {selAccs.length>0&&(
-            <div style={{position:'sticky',bottom:80,background:T.surf,border:`1px solid ${T.acl}40`,borderRadius:16,padding:'12px 14px',boxShadow:'0 -4px 20px rgba(0,0,0,.4)',zIndex:20}}>
+            <div style={{position:'sticky',bottom:80,background:T.surf,border:`1px solid ${A(T.acl,'40')}`,borderRadius:16,padding:'12px 14px',boxShadow:'0 -4px 20px rgba(0,0,0,.4)',zIndex:20}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                 <div><div style={{color:T.txt,fontWeight:700,fontSize:13}}>{selAccs.length}개 계좌 선택됨</div><div style={{color:T.muted,fontSize:10}}>일괄 매매를 실행할 수 있습니다</div></div>
                 <div style={{display:'flex',gap:8}}>
@@ -182,7 +183,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
       {tab==='connect'&&(
         <div>
           {/* Security warning */}
-          <div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:12,padding:'12px 14px',marginBottom:14}}>
+          <div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:12,padding:'12px 14px',marginBottom:14}}>
             <div style={{color:T.red,fontWeight:800,fontSize:13,marginBottom:6}}>🔐 API 연결 보안 수칙</div>
             {['출금 권한은 절대 켜지 마세요','거래 권한만 허용하세요','API 키는 본인 계정에만 사용됩니다','API Secret은 서버에만 저장됩니다 (프론트엔드 미노출)','언제든지 거래소에서 API 키를 삭제할 수 있습니다'].map((w,i)=>(
               <div key={i} style={{display:'flex',gap:6,padding:'3px 0'}}><span style={{color:T.red,fontSize:11,flexShrink:0}}>⚠️</span><span style={{color:T.sub,fontSize:11}}>{w}</span></div>
@@ -221,7 +222,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
                     <div style={{color:T.muted,fontSize:11,marginTop:2,lineHeight:1.5}}>{g.desc}</div>
                     {g.url&&g.step===connectStep&&<a href={g.url} target="_blank" rel="noopener noreferrer" style={{color:T.acl,fontSize:11,fontWeight:700,display:'inline-block',marginTop:4}}>→ {g.action}</a>}
                   </div>
-                  {connectStep===g.step&&g.step<4&&<button onClick={()=>setConnectStep(s=>s+1)} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer',flexShrink:0}}>다음</button>}
+                  {connectStep===g.step&&g.step<4&&<button onClick={()=>setConnectStep(s=>s+1)} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer',flexShrink:0}}>다음</button>}
                 </div>
               ))}
             </Card>
@@ -243,7 +244,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
                 <input type="password" value={apiSecret} onChange={e=>setApiSecret(e.target.value)} placeholder="API Secret 입력 (서버에만 저장됨)" style={{width:'100%',background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'10px 12px',color:T.txt,fontSize:12,outline:'none',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}/>
                 <div style={{color:T.muted,fontSize:10,marginTop:4}}>🔒 API Secret은 암호화되어 서버에만 저장됩니다. 프론트엔드에 노출되지 않습니다.</div>
               </div>
-              <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:8,padding:'10px 12px',marginBottom:14}}>
+              <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:8,padding:'10px 12px',marginBottom:14}}>
                 <div style={{color:T.ylw,fontWeight:700,fontSize:11,marginBottom:3}}>⚠️ 출금 권한 확인</div>
                 <div style={{color:T.sub,fontSize:10}}>API 키 생성 시 출금 권한이 비활성화되어 있는지 반드시 확인하세요. TRAIGO는 출금 기능을 사용하지 않습니다.</div>
               </div>
@@ -259,7 +260,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
       {/* ── BULK ORDER TAB ── */}
       {tab==='bulk'&&(
         <div>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'10px 14px',marginBottom:14}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'10px 14px',marginBottom:14}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:11}}>⚠️ 일괄 매매 모드 · 모의 — 실제 자금 이동 없음</div>
           </div>
 
@@ -277,7 +278,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
           <Card style={{padding:'14px 16px',marginBottom:12}}>
             <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>2️⃣ 실행 계좌 선택</div>
             <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
-              <button onClick={()=>setBulkOrder(p=>({...p,selectedAccounts:accounts.filter(a=>a.status==='connected').map(a=>a.id)}))} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>전체 선택</button>
+              <button onClick={()=>setBulkOrder(p=>({...p,selectedAccounts:accounts.filter(a=>a.status==='connected').map(a=>a.id)}))} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>전체 선택</button>
               {(['longterm','shortterm','auto'] as AccountGroup[]).map(grp=>(
                 <button key={grp} onClick={()=>setBulkOrder(p=>({...p,selectedAccounts:accounts.filter(a=>a.group===grp&&a.status==='connected').map(a=>a.id)}))} style={{background:GROUP_INFO[grp].color+'20',color:GROUP_INFO[grp].color,border:`1px solid ${GROUP_INFO[grp].color}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{GROUP_INFO[grp].name}</button>
               ))}
@@ -311,7 +312,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
 
           {/* Preview */}
           {(bulkOrder.selectedAccounts||[]).length>0&&(bulkOrder.totalAmount||0)>0&&(
-            <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${T.ylw}30`}}>
+            <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${A(T.ylw,'30')}`}}>
               <div style={{color:T.txt,fontWeight:700,fontSize:13,marginBottom:10}}>주문 미리보기</div>
               {(()=>{
                 const selAccObjs=accounts.filter(a=>(bulkOrder.selectedAccounts||[]).includes(a.id));
@@ -332,7 +333,7 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
                 <span style={{color:T.muted,fontSize:12}}>총 주문 금액</span>
                 <span style={{color:T.txt,fontWeight:800,fontSize:14,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(bulkOrder.totalAmount||0,currency)}</span>
               </div>
-              <div style={{background:T.red+'12',border:`1px solid ${T.red}30`,borderRadius:8,padding:'8px 12px',marginTop:10}}>
+              <div style={{background:A(T.red,'12'),border:`1px solid ${A(T.red,'30')}`,borderRadius:8,padding:'8px 12px',marginTop:10}}>
                 <div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 모의매매 전용 — 실제 자금이 이동하지 않습니다</div>
               </div>
               <button type="button"
@@ -349,10 +350,10 @@ function AccountsPage({prices,currency}:{prices:Asset[];currency:string}) {
       {tab==='safety'&&(
         <div>
           {/* Global emergency stop */}
-          <Card style={{padding:'16px',marginBottom:12,border:`1px solid ${T.red}30`}}>
+          <Card style={{padding:'16px',marginBottom:12,border:`1px solid ${A(T.red,'30')}`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div><div style={{color:T.red,fontWeight:800,fontSize:13}}>🚨 전체 긴급 정지</div><div style={{color:T.muted,fontSize:11}}>모든 계좌 자동매매 즉시 중단</div></div>
-              <button onClick={()=>setGlobalStop(true)} style={{background:globalStop?T.grn+'20':T.red+'20',color:globalStop?T.grn:T.red,border:`1px solid ${globalStop?T.grn:T.red}40`,borderRadius:10,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:5}}>
+              <button onClick={()=>setGlobalStop(true)} style={{background:globalStop?A(T.grn,'20'):A(T.red,'20'),color:globalStop?T.grn:T.red,border:`1px solid ${globalStop?T.grn:T.red}40`,borderRadius:10,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:5}}>
                 {globalStop
                   ? <><CheckCircle2 size={12} strokeWidth={2.4}/>정지됨</>
                   : <><AlertTriangle size={12} strokeWidth={2.4}/>전체 정지</>}

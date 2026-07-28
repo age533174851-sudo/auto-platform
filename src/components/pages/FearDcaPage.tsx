@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
@@ -50,7 +51,7 @@ export default function FearDcaPage() {
             </div>
             <div style={{ height: 8, background: T.alt, borderRadius: 4, overflow: 'hidden', position: 'relative' }}>
               <div style={{ position: 'absolute', left: `${fngVal}%`, top: -2, width: 3, height: 12, background: '#fff', borderRadius: 2 }} />
-              <div style={{ height: '100%', width: '100%', background: 'linear-gradient(90deg,#EF4444,#F59E0B,#94A3B8,#60A5FA,#10B981)' }} />
+              <div style={{ height: '100%', width: '100%', background: 'linear-gradient(90deg,#EF4444,#F59E0B,var(--t-sub),#60A5FA,#10B981)' }} />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
               <span style={{ color: T.red, fontSize: 8 }}>공포</span>
@@ -61,7 +62,7 @@ export default function FearDcaPage() {
       </Card>
 
       {/* 현재 판단 */}
-      <Card style={{ padding: 16, marginBottom: 12, background: decision.action === 'buy' ? T.grn + '12' : decision.action === 'exit' ? T.acl + '12' : T.card }}>
+      <Card style={{ padding: 16, marginBottom: 12, background: decision.action === 'buy' ? A(T.grn,'12') : decision.action === 'exit' ? A(T.acl,'12') : T.card }}>
         <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>봇 현재 판단</div>
         <div style={{ color: decision.action === 'buy' ? T.grn : decision.action === 'exit' ? T.acl : decision.action === 'blocked' ? T.ylw : T.muted, fontWeight: 800, fontSize: 14, marginBottom: 2 }}>
           {decision.action === 'buy' ? '분할매수 신호' : decision.action === 'exit' ? '🔵 청산 신호' : decision.action === 'blocked' ? '매수 제한' : '대기'}
@@ -119,7 +120,7 @@ export default function FearDcaPage() {
       </Card>
 
       {/* 안내 */}
-      <div style={{ display: 'flex', gap: 8, padding: '12px 14px', background: T.acl + '10', border: `1px solid ${T.acl}25`, borderRadius: 12 }}>
+      <div style={{ display: 'flex', gap: 8, padding: '12px 14px', background: A(T.acl,'10'), border: `1px solid ${A(T.acl,'25')}`, borderRadius: 12 }}>
         <Info size={16} color={T.acl} style={{ flexShrink: 0, marginTop: 1 }} />
         <div style={{ color: T.sub, fontSize: 11, lineHeight: 1.6 }}>
           <b style={{ color: T.acl }}>공포 DCA란?</b> 시장이 극단적 공포일 때(F&G ≤ {cfg.fearThreshold}) 남들이 팔 때 분할매수하는 전략입니다.

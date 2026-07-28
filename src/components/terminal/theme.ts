@@ -15,35 +15,39 @@
 // 아주 옅은 흰색 알파로 바꾸고, 최소 글자 크기를 10px로 올렸다.
 // 색은 손익·경고·강조 세 가지에만 쓴다.
 
+// 값은 globals.css의 CSS 변수에서 온다. 여기 hex를 박아 두면 밝은
+// 테마로 바꿨을 때 터미널만 어두운 채로 남는다. 앱과 터미널이 한
+// 팔레트를 쓰는 것이 이 파일의 목적이므로, 색의 출처도 하나여야 한다.
 export const C = {
   // ── 표면 ── 아래로 갈수록 위로 떠 있다
-  bg:      '#0A0B0D',   // 가장 아래 (화면 배경)
-  panel:   '#101216',   // 패널
-  raised:  '#16191E',   // 패널 위 요소 (입력창·칩)
-  hover:   '#1C2026',   // 마우스 올림
-  active:  '#232830',   // 눌림·선택
+  bg:      'var(--c-bg)',       // 가장 아래 (화면 배경)
+  panel:   'var(--c-panel)',    // 패널
+  raised:  'var(--c-raised)',   // 패널 위 요소 (입력창·칩)
+  hover:   'var(--c-hover)',    // 마우스 올림
+  active:  'var(--c-active)',   // 눌림·선택
 
   // ── 경계 ── 실선 대신 알파. 선이 보이면 화면이 조각나 보인다
-  hair:    'rgba(255,255,255,.07)',
-  hair2:   'rgba(255,255,255,.12)',
-  hair3:   'rgba(255,255,255,.20)',
+  // 밝은 테마에서는 흰색 알파가 보이지 않으므로 변수로 뒤집는다
+  hair:    'var(--c-hair)',
+  hair2:   'var(--c-hair2)',
+  hair3:   'var(--c-hair3)',
 
   // ── 글자 ──
-  text:    '#ECEFF3',
-  dim:     '#8A919C',
-  faint:   '#5A616B',
+  text:    'var(--t-txt)',
+  dim:     'var(--t-sub)',
+  faint:   'var(--t-muted)',
 
   // ── 의미색 ── 여기 셋 말고는 색을 쓰지 않는다
-  up:      '#0ECB81',
-  upBg:    'rgba(14,203,129,.12)',
-  down:    '#F6465D',
-  downBg:  'rgba(246,70,93,.12)',
-  warn:    '#F0B90B',
-  warnBg:  'rgba(240,185,11,.12)',
+  up:      'var(--t-grn)',
+  upBg:    'var(--c-up-bg)',
+  down:    'var(--t-red)',
+  downBg:  'var(--c-down-bg)',
+  warn:    'var(--t-ylw)',
+  warnBg:  'var(--c-warn-bg)',
 
   // ── 강조 ── 상호작용 가능함을 뜻한다
-  accent:  '#5B8DEF',
-  accentBg:'rgba(91,141,239,.14)',
+  accent:  'var(--t-acl)',
+  accentBg:'var(--c-accent-bg)',
 } as const;
 
 /** 숫자는 항상 이 조합. 자릿수가 흔들리면 값이 바뀐 것처럼 보인다 */

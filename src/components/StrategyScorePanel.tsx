@@ -36,7 +36,7 @@ export default function StrategyScorePanel({ strategies = [] }: { strategies?: {
   const reco = useMemo(() => recommendStrategy(scored), [scored]);
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#F59E0B20', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Award size={18} color="#F59E0B" />

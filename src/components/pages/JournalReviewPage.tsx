@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import TradeRetrospect from '@/components/TradeRetrospect';
@@ -234,7 +235,7 @@ export default function JournalReviewPage({ currency = 'KRW' }: { currency?: str
         </div>
         <button type="button" onClick={refresh}
           style={{ padding:'8px 14px', minHeight: 36, background: T.acg,
-            border:`1px solid ${T.acl}40`, borderRadius: 10, color: T.acl,
+            border:`1px solid ${A(T.acl,'40')}`, borderRadius: 10, color: T.acl,
             fontWeight: 700, fontSize: 11, cursor:'pointer' }}>
           다시 분석
         </button>
@@ -254,7 +255,7 @@ export default function JournalReviewPage({ currency = 'KRW' }: { currency?: str
       ) : (
         <>
           {/* Disclaimer */}
-          <div style={{ background: T.ylw + '10', border:`1px solid ${T.ylw}30`,
+          <div style={{ background: A(T.ylw,'10'), border:`1px solid ${A(T.ylw,'30')}`,
             borderRadius: 10, padding:'8px 12px', marginBottom: 10,
             color: T.ylw, fontSize: 10, lineHeight: 1.5 }}>
             ⚠️ 본 분석은 <strong>학습용</strong>이며 투자 조언이 아닙니다.
@@ -342,7 +343,7 @@ export default function JournalReviewPage({ currency = 'KRW' }: { currency?: str
           {/* Best & worst */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8, marginBottom: 10 }}>
             {metrics.bestTrade && (
-              <Card style={{ background: T.grn+'10', border:`1px solid ${T.grn}30` }}>
+              <Card style={{ background: A(T.grn,'10'), border:`1px solid ${A(T.grn,'30')}` }}>
                 <div style={{ color: T.grn, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>최고 수익</div>
                 <div style={{ color: T.txt, fontSize: 13, fontWeight: 800 }}>{metrics.bestTrade.symbol}</div>
                 <div style={{ color: T.grn, fontSize: 12, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
@@ -354,7 +355,7 @@ export default function JournalReviewPage({ currency = 'KRW' }: { currency?: str
               </Card>
             )}
             {metrics.worstTrade && (
-              <Card style={{ background: T.red+'10', border:`1px solid ${T.red}30` }}>
+              <Card style={{ background: A(T.red,'10'), border:`1px solid ${A(T.red,'30')}` }}>
                 <div style={{ color: T.red, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>최대 손실</div>
                 <div style={{ color: T.txt, fontSize: 13, fontWeight: 800 }}>{metrics.worstTrade.symbol}</div>
                 <div style={{ color: T.red, fontSize: 12, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
@@ -440,8 +441,8 @@ export default function JournalReviewPage({ currency = 'KRW' }: { currency?: str
               </div>
             )}
             {selected.mistake && (
-              <div style={{ marginTop: 8, padding:'10px 12px', background: T.red+'10',
-                border:`1px solid ${T.red}30`, borderRadius: 8 }}>
+              <div style={{ marginTop: 8, padding:'10px 12px', background: A(T.red,'10'),
+                border:`1px solid ${A(T.red,'30')}`, borderRadius: 8 }}>
                 <div style={{ color: T.red, fontSize: 9, marginBottom: 4 }}>실수 메모</div>
                 <div style={{ color: T.txt, fontSize: 12, lineHeight: 1.6 }}>{selected.mistake}</div>
               </div>

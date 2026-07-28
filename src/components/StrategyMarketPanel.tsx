@@ -43,7 +43,7 @@ export default function StrategyMarketPanel({ symbols = ['BTC', 'ETH', 'SOL', 'D
   const activeAlloc = portfolio.allocation.filter(a => enabled[a.symbol]);
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#22C55E1F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Store size={18} color="#4ADE80" />

@@ -29,7 +29,7 @@ function IchimokuChart({ x = 0, y = 0, width = 400, height = 220, primaryColor =
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
       {/* 격자 */}
       {[40,80,120,160,200].map(yy => (
-        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="#243A5E" strokeOpacity="0.3" strokeDasharray="2 4"/>
+        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="var(--t-border2)" strokeOpacity="0.3" strokeDasharray="2 4"/>
       ))}
       {/* 구름대 fill — 상승 (Span A > Span B) → 초록 반투명 */}
       <path d={`${spanAPath} L390,95 L370,100 L340,105 L310,112 L280,118 L250,125 L220,132 L190,140 L160,148 L130,155 L100,162 L70,168 L40,172 L10,175 Z`}
@@ -39,7 +39,7 @@ function IchimokuChart({ x = 0, y = 0, width = 400, height = 220, primaryColor =
       {/* Span B — 빨강 */}
       <path d={spanBPath} stroke="#EF4444" strokeWidth="1.4" fill="none" strokeOpacity="0.85"/>
       {/* 가격선 */}
-      <path d={pricePath} stroke="#E2E8F0" strokeWidth="2.2" fill="none"/>
+      <path d={pricePath} stroke="var(--t-txt)" strokeWidth="2.2" fill="none"/>
       {/* 전환선 — 파랑 */}
       <path d={tenkanPath} stroke="#60A5FA" strokeWidth="1.6" fill="none" strokeOpacity="0.95"/>
       {/* 기준선 — 빨강 */}
@@ -73,11 +73,11 @@ function RsiChart({ x = 0, y = 0, width = 400, height = 220, primaryColor = '#A7
   return (
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
       {/* 가격 영역 (상단 0~110) */}
-      <rect x="0" y="0" width="400" height="110" fill="#060B14"/>
-      <path d={pricePath} stroke="#E2E8F0" strokeWidth="2.2" fill="none"/>
-      <text x="10" y="14" fill="#94A3B8" fontSize="9" fontFamily="sans-serif" fontWeight="700">PRICE</text>
+      <rect x="0" y="0" width="400" height="110" fill="var(--t-bg)"/>
+      <path d={pricePath} stroke="var(--t-txt)" strokeWidth="2.2" fill="none"/>
+      <text x="10" y="14" fill="var(--t-sub)" fontSize="9" fontFamily="sans-serif" fontWeight="700">PRICE</text>
       {/* 구분선 */}
-      <line x1="0" y1="115" x2="400" y2="115" stroke="#1A2D4A" strokeWidth="1"/>
+      <line x1="0" y1="115" x2="400" y2="115" stroke="var(--t-border)" strokeWidth="1"/>
       {/* RSI 영역 (115~210) */}
       {/* 70선 (과매수, 빨강 영역) */}
       <rect x="0" y="120" width="400" height="20" fill="#EF4444" fillOpacity="0.1"/>
@@ -114,10 +114,10 @@ function MacdChart({ x = 0, y = 0, width = 400, height = 220, primaryColor = '#6
   const histBase = 175;
   return (
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
-      <text x="10" y="14" fill="#94A3B8" fontSize="9" fontFamily="sans-serif" fontWeight="700">MACD</text>
+      <text x="10" y="14" fill="var(--t-sub)" fontSize="9" fontFamily="sans-serif" fontWeight="700">MACD</text>
       {/* 0선 */}
-      <line x1="0" y1={histBase} x2="400" y2={histBase} stroke="#475569" strokeWidth="0.7" strokeDasharray="2 4"/>
-      <text x="6" y={histBase-3} fill="#475569" fontSize="8" fontFamily="sans-serif">0</text>
+      <line x1="0" y1={histBase} x2="400" y2={histBase} stroke="var(--t-muted)" strokeWidth="0.7" strokeDasharray="2 4"/>
+      <text x="6" y={histBase-3} fill="var(--t-muted)" fontSize="8" fontFamily="sans-serif">0</text>
       {/* Histogram */}
       {hist.map((h, i) => (
         <rect key={i} x={h.x} y={h.h >= 0 ? histBase - h.h : histBase}
@@ -157,9 +157,9 @@ function EmaChart({ x = 0, y = 0, width = 400, height = 220, primaryColor = '#60
   return (
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
       {[60,120,180].map(yy => (
-        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="#243A5E" strokeOpacity="0.3" strokeDasharray="2 4"/>
+        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="var(--t-border2)" strokeOpacity="0.3" strokeDasharray="2 4"/>
       ))}
-      <path d={pricePath}  stroke="#E2E8F0" strokeWidth="2.4" fill="none"/>
+      <path d={pricePath}  stroke="var(--t-txt)" strokeWidth="2.4" fill="none"/>
       <path d={ema20}      stroke="#60A5FA" strokeWidth="1.8" fill="none"/>
       <path d={ema60}      stroke="#F59E0B" strokeWidth="1.8" fill="none"/>
       <path d={ema120}     stroke="#A78BFA" strokeWidth="1.8" fill="none"/>
@@ -195,7 +195,7 @@ function BollingerChart({ x = 0, y = 0, width = 400, height = 220 }: ChartProps)
       {/* 하단 밴드 */}
       <path d={lower}  stroke="#60A5FA" strokeWidth="1.4" fill="none" strokeOpacity="0.85"/>
       {/* 가격 */}
-      <path d={price}  stroke="#E2E8F0" strokeWidth="2.2" fill="none"/>
+      <path d={price}  stroke="var(--t-txt)" strokeWidth="2.2" fill="none"/>
       {/* 터치 포인트 */}
       <circle cx="90" cy="158" r="5" fill="#10B981" stroke="#fff" strokeWidth="1.5"/>
       <text x="100" y="170" fill="#10B981" fontSize="9" fontFamily="sans-serif" fontWeight="800">하단 터치 → 매수</text>
@@ -231,7 +231,7 @@ function CandleChart({ x = 0, y = 0, width = 400, height = 220 }: ChartProps) {
   return (
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
       {[40,80,120,160,200].map(yy => (
-        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="#243A5E" strokeOpacity="0.25" strokeDasharray="2 4"/>
+        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="var(--t-border2)" strokeOpacity="0.25" strokeDasharray="2 4"/>
       ))}
       {candles.map((c, i) => {
         const up = c.close < c.open;
@@ -255,7 +255,7 @@ function CandleChart({ x = 0, y = 0, width = 400, height = 220 }: ChartProps) {
           </g>
         );
       })}
-      <text x="10" y="14" fill="#94A3B8" fontSize="9" fontFamily="sans-serif" fontWeight="700">캔들 패턴</text>
+      <text x="10" y="14" fill="var(--t-sub)" fontSize="9" fontFamily="sans-serif" fontWeight="700">캔들 패턴</text>
     </svg>
   );
 }
@@ -267,16 +267,16 @@ function VolumeChart({ x = 0, y = 0, width = 400, height = 220 }: ChartProps) {
   const cw = 26;
   return (
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
-      <path d={price} stroke="#E2E8F0" strokeWidth="2.2" fill="none"/>
-      <text x="10" y="14" fill="#94A3B8" fontSize="9" fontFamily="sans-serif" fontWeight="700">PRICE</text>
+      <path d={price} stroke="var(--t-txt)" strokeWidth="2.2" fill="none"/>
+      <text x="10" y="14" fill="var(--t-sub)" fontSize="9" fontFamily="sans-serif" fontWeight="700">PRICE</text>
       {/* 구분선 */}
-      <line x1="0" y1="120" x2="400" y2="120" stroke="#1A2D4A"/>
+      <line x1="0" y1="120" x2="400" y2="120" stroke="var(--t-border)"/>
       {/* 거래량 막대 */}
       {vols.map((v, i) => (
         <rect key={i} x={10 + i*28} y={210 - v} width={cw} height={v}
           fill={v > 50 ? '#60A5FA' : '#1E3A5F'} fillOpacity="0.85"/>
       ))}
-      <text x="10" y="134" fill="#94A3B8" fontSize="9" fontFamily="sans-serif" fontWeight="700">VOLUME</text>
+      <text x="10" y="134" fill="var(--t-sub)" fontSize="9" fontFamily="sans-serif" fontWeight="700">VOLUME</text>
       {/* 거래량 폭발 강조 */}
       <text x="260" y="155" fill="#60A5FA" fontSize="9" fontFamily="sans-serif" fontWeight="800">거래량 폭발</text>
       <line x1="252" y1="158" x2="276" y2="170" stroke="#60A5FA" strokeWidth="1"/>
@@ -301,7 +301,7 @@ function FibonacciChart({ x = 0, y = 0, width = 400, height = 220 }: ChartProps)
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
       {levels.map((l, i) => {
         const isKey = l.pct === 61.8 || l.pct === 50;
-        const color = isKey ? '#F59E0B' : '#475569';
+        const color = isKey ? '#F59E0B' : 'var(--t-muted)';
         return (
           <g key={i}>
             <line x1="0" y1={l.y} x2="400" y2={l.y}
@@ -315,8 +315,8 @@ function FibonacciChart({ x = 0, y = 0, width = 400, height = 220 }: ChartProps)
           </g>
         );
       })}
-      <path d={price} stroke="#E2E8F0" strokeWidth="2.2" fill="none"/>
-      <text x="10" y="14" fill="#94A3B8" fontSize="9" fontFamily="sans-serif" fontWeight="700">FIBONACCI</text>
+      <path d={price} stroke="var(--t-txt)" strokeWidth="2.2" fill="none"/>
+      <text x="10" y="14" fill="var(--t-sub)" fontSize="9" fontFamily="sans-serif" fontWeight="700">FIBONACCI</text>
     </svg>
   );
 }
@@ -326,7 +326,7 @@ function GenericChart({ x = 0, y = 0, width = 400, height = 220, primaryColor = 
   return (
     <svg x={x} y={y} width={width} height={height} viewBox="0 0 400 220">
       {[40,80,120,160,200].map(yy => (
-        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="#243A5E" strokeOpacity="0.3"/>
+        <line key={yy} x1="0" y1={yy} x2="400" y2={yy} stroke="var(--t-border2)" strokeOpacity="0.3"/>
       ))}
       {/* 트레이드 바 */}
       {[0,1,2,3,4,5,6,7,8,9,10,11].map(i=>{
@@ -368,7 +368,7 @@ function ConceptChart({ x = 0, y = 0, width = 400, height = 220, type }: ChartPr
               fontFamily="sans-serif" fontWeight="900" textAnchor="middle">{i + 1}</text>
             <rect x="64" y={yy} width="320" height="30" rx="6"
               fill={cfg.bg} fillOpacity="0.1" stroke={cfg.color} strokeWidth="0.5" strokeOpacity="0.4"/>
-            <text x="80" y={yy + 20} fill="#E2E8F0"
+            <text x="80" y={yy + 20} fill="var(--t-txt)"
               fontSize="14" fontFamily="sans-serif" fontWeight="700">
               {item}
             </text>

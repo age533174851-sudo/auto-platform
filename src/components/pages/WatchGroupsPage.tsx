@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import {
@@ -192,7 +193,7 @@ function DraggableAssetRow({
         aria-label="그룹에서 제거"
         style={{
           padding: 6, background: T.alt, color: T.red,
-          border: `1px solid ${T.red}30`, borderRadius: 6,
+          border: `1px solid ${A(T.red,'30')}`, borderRadius: 6,
           cursor: 'pointer', minWidth: 30, minHeight: 30,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
@@ -485,7 +486,7 @@ export default function WatchGroupsPage({
               <div style={{ display:'flex', gap: 6, flexShrink: 0 }}>
                 <button type="button" onClick={() => setShowEdit(activeGroup.id)}
                   style={{ padding:'7px 12px', background: T.acg, color: T.acl,
-                    border:`1px solid ${T.acl}40`, borderRadius: 8,
+                    border:`1px solid ${A(T.acl,'40')}`, borderRadius: 8,
                     fontSize: 10, fontWeight: 700, cursor:'pointer', minHeight: 34,
                     display: 'flex', alignItems: 'center', gap: 4 }}>
                   <Plus size={12} strokeWidth={2.4}/>
@@ -498,7 +499,7 @@ export default function WatchGroupsPage({
                   }}
                   aria-label="그룹 삭제"
                   style={{ padding: 7, background: T.alt, color: T.red,
-                    border:`1px solid ${T.red}30`, borderRadius: 8,
+                    border:`1px solid ${A(T.red,'30')}`, borderRadius: 8,
                     cursor:'pointer', minWidth: 34, minHeight: 34,
                     display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                   <Trash2 size={14} strokeWidth={2.2}/>
@@ -517,7 +518,7 @@ export default function WatchGroupsPage({
               </div>
               <button type="button" onClick={() => setShowEdit(activeGroup.id)}
                 style={{ background: T.acg, color: T.acl,
-                  border:`1px solid ${T.acl}40`, borderRadius: 10,
+                  border:`1px solid ${A(T.acl,'40')}`, borderRadius: 10,
                   padding:'9px 18px', fontSize: 12, fontWeight: 700,
                   cursor:'pointer', minHeight: 38,
                   display: 'inline-flex', alignItems: 'center', gap: 5 }}>
@@ -646,8 +647,8 @@ export default function WatchGroupsPage({
                 <div key={a.id} onClick={() => toggleAsset(a.id)}
                   style={{ display:'flex', alignItems:'center', gap: 10,
                     padding:'9px 10px', cursor:'pointer',
-                    background: isIn ? T.grn + '15' : 'transparent',
-                    border:`1px solid ${isIn ? T.grn + '40' : T.border}`,
+                    background: isIn ? A(T.grn,'15') : 'transparent',
+                    border:`1px solid ${isIn ? A(T.grn,'40') : T.border}`,
                     borderRadius: 10, marginBottom: 5 }}>
                   <Logo id={a.id} size={28} clr={a.clr} name={a.nameKr}/>
                   <div style={{ flex: 1, minWidth: 0 }}>

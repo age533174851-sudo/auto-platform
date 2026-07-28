@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // TradeRetrospect — 실제 매매 기록 AI 복기. 조건별 손실 패턴 경고 + 강점.
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -81,7 +82,7 @@ export default function TradeRetrospect({ currency = 'KRW' }: { currency?: strin
           ))}
         </div>
       ) : result.totalTrades >= 5 ? (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: T.grn + '12', borderRadius: 10, padding: '11px 14px', marginBottom: result.strengths.length ? 14 : 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: A(T.grn,'12'), borderRadius: 10, padding: '11px 14px', marginBottom: result.strengths.length ? 14 : 0 }}>
           <CheckCircle2 size={16} color={T.grn} />
           <span style={{ color: T.txt, fontSize: 12 }}>뚜렷한 약점 패턴이 감지되지 않았어요. 좋습니다.</span>
         </div>
@@ -118,7 +119,7 @@ export default function TradeRetrospect({ currency = 'KRW' }: { currency?: strin
               const c = loss ? T.red : T.grn;
               return (
                 <button key={i} onClick={() => setReplayTrade(t)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', minHeight: 44, background: T.alt, border: `1px solid ${loss ? T.red + '30' : T.border}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer', textAlign: 'left' }}>
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', minHeight: 44, background: T.alt, border: `1px solid ${loss ? A(T.red,'30') : T.border}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer', textAlign: 'left' }}>
                   <span style={{ color: T.txt, fontWeight: 800, fontSize: 12, minWidth: 44 }}>{t.symbol}</span>
                   <div style={{ flex: 1 }}>
                     <div style={{ color: c, fontSize: 12.5, fontWeight: 800 }}>{(t.realizedPct ?? 0) >= 0 ? '+' : ''}{(t.realizedPct ?? 0).toFixed(1)}%</div>

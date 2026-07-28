@@ -36,7 +36,7 @@ export const ACCOUNT_TYPE_LABEL: Record<ManualAccountType, string> = {
 
 export const ACCOUNT_TYPE_COLOR: Record<ManualAccountType, string> = {
   bank: '#3B82F6', toss: '#0064FF', stock: '#10B981',
-  coin_spot: '#F7931A', coin_futures: '#7C3AED', etc: '#94A3B8',
+  coin_spot: '#F7931A', coin_futures: '#7C3AED', etc: 'var(--t-sub)',
 };
 
 export function loadManualAccounts(): ManualAccount[] {

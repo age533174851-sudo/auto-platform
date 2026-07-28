@@ -1,6 +1,6 @@
 'use client';
 export default function UnauthorizedPage() {
-  const T = { bg:'#060B14', card:'#0F1924', border:'#1A2D4A', acc:'#2563EB', acl:'#3B82F6', acg:'rgba(37,99,235,.15)', txt:'#F0F6FF', muted:'#475569' };
+  const T = { bg:'var(--t-bg)', card:'var(--t-card)', border:'var(--t-border)', acc:'#2563EB', acl:'#3B82F6', acg:'rgba(37,99,235,.15)', txt:'var(--t-txt)', muted:'var(--t-muted)' };
   return (
     <div style={{ minHeight:'100vh', background:T.bg, display:'flex', alignItems:'center', justifyContent:'center', padding:20, fontFamily:"'Sora',sans-serif" }}>
       <div style={{ textAlign:'center', maxWidth:380 }}>

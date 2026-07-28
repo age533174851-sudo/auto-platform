@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { DrawingAction, DrawingObject, DrawingTool, LayoutData } from '@/types/domain';
 import { Keyboard, Maximize, LayoutGrid } from 'lucide-react';
@@ -37,7 +38,7 @@ const TV_ETFS: TVAsset[] = [
   {sym:'VTI',  label:'미국전체시장',  tv:'AMEX:VTI',    cat:'etf', clr:'#1D4ED8'},
   {sym:'VOO',  label:'뱅가드S&P500',  tv:'AMEX:VOO',    cat:'etf', clr:'#1D4ED8'},
   {sym:'GLD',  label:'금 ETF',        tv:'AMEX:GLD',    cat:'etf', clr:'#D97706'},
-  {sym:'SLV',  label:'은 ETF',        tv:'AMEX:SLV',    cat:'etf', clr:'#94A3B8'},
+  {sym:'SLV',  label:'은 ETF',        tv:'AMEX:SLV',    cat:'etf', clr:'var(--t-sub)'},
   {sym:'USO',  label:'WTI원유 ETF',   tv:'AMEX:USO',    cat:'etf', clr:'#78350F'},
   {sym:'TLT',  label:'20년 국채 ETF', tv:'NASDAQ:TLT',  cat:'etf', clr:'#1D4ED8'},
   {sym:'HYG',  label:'하이일드채권',  tv:'AMEX:HYG',    cat:'etf', clr:'#059669'},
@@ -118,7 +119,7 @@ const TV_KRSTOCKS: TVAsset[] = [
 // Commodities & Forex
 const TV_MACRO: TVAsset[] = [
   {sym:'XAUUSD',label:'금(Gold)',    tv:'OANDA:XAUUSD',cat:'commodity',clr:'#FFD700',featured:true},
-  {sym:'XAGUSD',label:'은(Silver)',  tv:'OANDA:XAGUSD',cat:'commodity',clr:'#94A3B8'},
+  {sym:'XAGUSD',label:'은(Silver)',  tv:'OANDA:XAGUSD',cat:'commodity',clr:'var(--t-sub)'},
   {sym:'USOIL', label:'WTI 원유',    tv:'TVC:USOIL',   cat:'commodity',clr:'#78350F',featured:true},
   {sym:'UKOIL', label:'브렌트유',    tv:'TVC:UKOIL',   cat:'commodity',clr:'#78350F'},
   {sym:'NATGAS',label:'천연가스',    tv:'NYMEX:NG1!',  cat:'commodity',clr:'#2563EB'},
@@ -194,7 +195,7 @@ function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string
           timezone: 'Asia/Seoul',
           theme: 'dark',
           locale: 'kr',
-          toolbar_bg: '#060B14',
+          toolbar_bg: 'var(--t-bg)',
           enable_publishing: false,
           allow_symbol_change: true,
           save_image: false,
@@ -204,10 +205,10 @@ function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string
           studies: ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'],
           width: '100%',
           height: '100%',
-          backgroundColor: '#060B14',
-          gridColor: '#1A2D4A',
+          backgroundColor: 'var(--t-bg)',
+          gridColor: 'var(--t-border)',
           overrides: {
-            'paneProperties.background': '#060B14',
+            'paneProperties.background': 'var(--t-bg)',
             'paneProperties.backgroundType': 'solid',
           },
         });
@@ -226,7 +227,7 @@ function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string
         script.async = true;
         script.onload = initWidget;
         script.onerror = () => {
-          el.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;gap:8px;background:#0F1924;color:#475569;font-size:11px;">
+          el.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;gap:8px;background:var(--t-card);color:var(--t-muted);font-size:11px;">
             <span style="font-size:24px">📊</span>
             <div>${symbol}</div>
             <div>TradingView 차트 로딩 실패</div>
@@ -250,7 +251,7 @@ function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string
   }, [symbol, chartType, interval]);
 
   return (
-    <div ref={ref} style={{ width:'100%', height:'100%', borderRadius:'inherit', overflow:'hidden', background:'#060B14' }}/>
+    <div ref={ref} style={{ width:'100%', height:'100%', borderRadius:'inherit', overflow:'hidden', background:'var(--t-bg)' }}/>
   );
 }
 
@@ -403,13 +404,13 @@ function saveLayouts(layouts: LayoutData[]): void {
 
 /* ── Default fib levels ── */
 const DEFAULT_FIB_LEVELS = [
-  { level: 0,     label: '0',     color: '#94A3B8' },
+  { level: 0,     label: '0',     color: 'var(--t-sub)' },
   { level: 0.236, label: '0.236', color: '#3B82F6' },
   { level: 0.382, label: '0.382', color: '#10B981' },
   { level: 0.5,   label: '0.5',   color: '#F59E0B' },
   { level: 0.618, label: '0.618', color: '#EF4444' },
   { level: 0.786, label: '0.786', color: '#7C3AED' },
-  { level: 1,     label: '1',     color: '#94A3B8' },
+  { level: 1,     label: '1',     color: 'var(--t-sub)' },
   { level: 1.272, label: '1.272', color: '#0891B2' },
   { level: 1.618, label: '1.618', color: '#EF4444' },
 ];
@@ -548,7 +549,7 @@ function ChartTab() {
   return (
     <div>
       {/* Header */}
-      <div style={{background:'linear-gradient(135deg,#060B14,#0A0F1E)',border:`1px solid ${sel.clr}40`,borderRadius:18,padding:'14px 16px',marginBottom:12}}>
+      <div style={{background:'linear-gradient(135deg,var(--t-bg),#0A0F1E)',border:`1px solid ${sel.clr}40`,borderRadius:18,padding:'14px 16px',marginBottom:12}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
           <div style={{display:'flex',gap:8,alignItems:'center',flex:1}}>
             <Logo asset={sel} size={32}/>
@@ -556,7 +557,7 @@ function ChartTab() {
               <div style={{display:'flex',gap:5,alignItems:'center',flexWrap:'wrap'}}>
                 <span style={{color:T.txt,fontWeight:800,fontSize:14}}>{sel.label}</span>
                 <span style={{background:`${sel.clr}20`,color:sel.clr,fontSize:9,fontWeight:700,padding:'2px 6px',borderRadius:99}}>{sel.sym}</span>
-                {provStatus&&<span style={{background:provStatus.status==='live'?T.grn+'20':T.ylw+'20',color:provStatus.status==='live'?T.grn:T.ylw,fontSize:8,fontWeight:700,padding:'1px 6px',borderRadius:99}}>{provStatus.status==='live'?'● LIVE':'● MOCK'} {provStatus.source}</span>}
+                {provStatus&&<span style={{background:provStatus.status==='live'?A(T.grn,'20'):A(T.ylw,'20'),color:provStatus.status==='live'?T.grn:T.ylw,fontSize:8,fontWeight:700,padding:'1px 6px',borderRadius:99}}>{provStatus.status==='live'?'● LIVE':'● MOCK'} {provStatus.source}</span>}
               </div>
               <div style={{color:T.muted,fontSize:10,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',marginTop:1}}>{sel.tv}</div>
             </div>
@@ -580,10 +581,10 @@ function ChartTab() {
               {l==='1'?'▣ 1':'⬒ 2분할'}
             </button>
           ))}
-          <button onClick={()=>addWatchlist(sel)} style={{padding:'4px 9px',background:watchlist.some(w=>w.tv===sel.tv)?T.ylw+'20':'transparent',color:watchlist.some(w=>w.tv===sel.tv)?T.ylw:T.muted,border:`1px solid ${watchlist.some(w=>w.tv===sel.tv)?T.ylw:T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+          <button onClick={()=>addWatchlist(sel)} style={{padding:'4px 9px',background:watchlist.some(w=>w.tv===sel.tv)?A(T.ylw,'20'):'transparent',color:watchlist.some(w=>w.tv===sel.tv)?T.ylw:T.muted,border:`1px solid ${watchlist.some(w=>w.tv===sel.tv)?T.ylw:T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>
             {watchlist.some(w=>w.tv===sel.tv)?'★ 저장됨':'☆ 관심'}
           </button>
-          <a href="/chart" target="_blank" style={{marginLeft:'auto',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:30,fontSize:10,fontWeight:700,textDecoration:'none',display:'inline-flex',alignItems:'center',gap:4}}>
+          <a href="/chart" target="_blank" style={{marginLeft:'auto',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'6px 12px',minHeight:30,fontSize:10,fontWeight:700,textDecoration:'none',display:'inline-flex',alignItems:'center',gap:4}}>
             <Maximize size={11} strokeWidth={2.4}/>전체 ↗
           </a>
         </div>
@@ -651,7 +652,7 @@ function ChartTab() {
         {CAT_TABS.map(c=>(
           <button key={c.id} onClick={()=>{setCatFilt(c.id);setSubCat('all');setQuery('');}} style={{flexShrink:0,padding:'5px 9px',background:catFilt===c.id?T.acg:'transparent',color:catFilt===c.id?T.acl:T.muted,border:`1px solid ${catFilt===c.id?T.acl:T.border}`,borderRadius:20,fontSize:10,fontWeight:700,cursor:'pointer'}}>
             {c.icon} {c.l}
-            {c.id==='watchlist'&&watchlist.length>0&&<span style={{marginLeft:3,background:T.ylw+'20',color:T.ylw,borderRadius:99,padding:'0 4px',fontSize:8}}>{watchlist.length}</span>}
+            {c.id==='watchlist'&&watchlist.length>0&&<span style={{marginLeft:3,background:A(T.ylw,'20'),color:T.ylw,borderRadius:99,padding:'0 4px',fontSize:8}}>{watchlist.length}</span>}
           </button>
         ))}
       </div>
@@ -660,7 +661,7 @@ function ChartTab() {
       {catFilt==='stock'&&!query&&(
         <div style={{display:'flex',gap:3,overflowX:'auto',paddingBottom:3,marginBottom:6}}>
           {STOCK_SUB.map(s=>(
-            <button key={s.id} onClick={()=>setSubCat(s.id)} style={{flexShrink:0,padding:'3px 8px',background:subCat===s.id?T.prp+'20':'transparent',color:subCat===s.id?T.prp:T.muted,border:`1px solid ${subCat===s.id?T.prp:T.border}`,borderRadius:20,fontSize:9,fontWeight:700,cursor:'pointer'}}>
+            <button key={s.id} onClick={()=>setSubCat(s.id)} style={{flexShrink:0,padding:'3px 8px',background:subCat===s.id?A(T.prp,'20'):'transparent',color:subCat===s.id?T.prp:T.muted,border:`1px solid ${subCat===s.id?T.prp:T.border}`,borderRadius:20,fontSize:9,fontWeight:700,cursor:'pointer'}}>
               {s.l}
             </button>
           ))}

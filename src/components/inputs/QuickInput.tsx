@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React from 'react';
 import { T } from '@/lib/constants';
 
@@ -32,7 +33,7 @@ export function QuickSelectInput({
           return (
             <button key={p} onClick={() => onChange(p)}
               style={{ flex: '1 0 auto', minWidth: 48, padding: '8px 6px', borderRadius: 8, cursor: 'pointer',
-                background: active ? T.acc + '25' : T.alt,
+                background: active ? A(T.acc,'25') : T.alt,
                 color: active ? T.acl : T.sub,
                 border: `1px solid ${active ? T.acl : T.border}`,
                 fontSize: 11, fontWeight: active ? 800 : 600 }}>
@@ -80,7 +81,7 @@ export function DurationPicker({
           return (
             <button key={p} onClick={() => onChange(p)}
               style={{ flex: '1 0 auto', minWidth: 44, padding: '8px 6px', borderRadius: 8, cursor: 'pointer',
-                background: active ? T.acc + '25' : T.alt, color: active ? T.acl : T.sub,
+                background: active ? A(T.acc,'25') : T.alt, color: active ? T.acl : T.sub,
                 border: `1px solid ${active ? T.acl : T.border}`, fontSize: 11, fontWeight: active ? 800 : 600 }}>
               {fmt(p)}
             </button>

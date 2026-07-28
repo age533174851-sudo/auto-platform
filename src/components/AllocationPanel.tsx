@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // AllocationPanel — AI 자산배분. 투자위원회 bias로 장기/단기/현금 자동 조정.
 import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -111,7 +112,7 @@ export default function AllocationPanel({ currency = 'KRW', strategyScore }: { c
       </div>
 
       <button onClick={() => setCrashRisk(v => !v)}
-        style={{ width: '100%', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, background: crashRisk ? T.red + '20' : T.alt, color: crashRisk ? T.red : T.muted, border: `1px solid ${crashRisk ? T.red + '40' : T.border}`, borderRadius: 10, fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+        style={{ width: '100%', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, background: crashRisk ? A(T.red,'20') : T.alt, color: crashRisk ? T.red : T.muted, border: `1px solid ${crashRisk ? A(T.red,'40') : T.border}`, borderRadius: 10, fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
         <AlertTriangle size={14} /> 폭락 위험 모드 {crashRisk ? 'ON' : 'OFF'}
       </button>
 

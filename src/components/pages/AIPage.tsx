@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import type { Asset } from '@/types';
@@ -91,18 +92,18 @@ function AIPage({prices,currency,onOpenAsset}:{prices:Asset[];currency:string;on
       {tab==='insights'&&(
         <div>
           {/* AI Market Summary */}
-          <Card style={{padding:'14px 16px',marginBottom:12,background:'linear-gradient(135deg,#0D1A35,#091228)',border:`1px solid ${T.acl}30`}}>
+          <Card style={{padding:'14px 16px',marginBottom:12,background:'linear-gradient(135deg,var(--t-card),var(--t-bg))',border:`1px solid ${A(T.acl,'30')}`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
               <div style={{color:T.acl,fontSize:12,fontWeight:700}}>AI 시장 요약</div>
               {insightLoading&&<div style={{color:T.muted,fontSize:10}}>분석 중…</div>}
               {insight&&!insightLoading&&<div style={{color:T.muted,fontSize:9}}>{insight.source==='openai'?'✅ GPT-4o':'📚 기본'}</div>}
             </div>
             {insightLoading?(
-              <div style={{height:60,background:'linear-gradient(90deg,#1A2D4A 25%,#243A5E 50%,#1A2D4A 75%)',backgroundSize:'200% 100%',animation:'shimmer 1.2s infinite',borderRadius:8}}/>
+              <div style={{height:60,background:'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)',backgroundSize:'200% 100%',animation:'shimmer 1.2s infinite',borderRadius:8}}/>
             ):(
               <div style={{color:T.sub,fontSize:12,lineHeight:1.7,whiteSpace:'pre-wrap'}}>{insight?.text||'AI 분석을 불러오는 중…'}</div>
             )}
-            <button onClick={()=>{setInsight(null);}} style={{marginTop:8,background:'none',border:`1px solid ${T.acl}40`,borderRadius:7,padding:'3px 10px',color:T.acl,fontSize:10,cursor:'pointer'}}>새로 분석</button>
+            <button onClick={()=>{setInsight(null);}} style={{marginTop:8,background:'none',border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,padding:'3px 10px',color:T.acl,fontSize:10,cursor:'pointer'}}>새로 분석</button>
           </Card>
 
           {/* Strategy explanations */}
@@ -127,7 +128,7 @@ function AIPage({prices,currency,onOpenAsset}:{prices:Asset[];currency:string;on
             </Card>
           ))}
 
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginTop:4}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginTop:4}}>
             <div style={{color:T.ylw,fontSize:10}}>⚠️ AI 분석은 교육 목적입니다. 실제 투자 결정은 공인 투자 전문가와 상담하세요.</div>
           </div>
         </div>
@@ -165,7 +166,7 @@ function AIPage({prices,currency,onOpenAsset}:{prices:Asset[];currency:string;on
               placeholder="시장 분석, 전략 설명, 레버리지 위험 등 질문하세요…"
               style={{flex:1,background:T.bg,border:`1px solid ${loading?T.border:T.acl}`,borderRadius:12,padding:'10px 14px',color:T.txt,fontSize:14,outline:'none'}}
             />
-            <button onClick={sendMsg} disabled={loading||!input.trim()} style={{padding:'10px 14px',background:loading||!input.trim()?'#243A5E':'linear-gradient(135deg,#2563EB,#7C3AED)',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:loading||!input.trim()?'not-allowed':'pointer',flexShrink:0}}>
+            <button onClick={sendMsg} disabled={loading||!input.trim()} style={{padding:'10px 14px',background:loading||!input.trim()?'var(--t-border2)':'linear-gradient(135deg,#2563EB,#7C3AED)',color:'#fff',border:'none',borderRadius:12,fontWeight:700,fontSize:13,cursor:loading||!input.trim()?'not-allowed':'pointer',flexShrink:0}}>
               {loading?'…':'전송'}
             </button>
           </div>

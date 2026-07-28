@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
@@ -107,8 +108,8 @@ function HedgeOSPage() {
             <div>
               <div style={{display:'flex',gap:4,alignItems:'center'}}>
                 <span style={{color:T.txt,fontWeight:700,fontSize:12}}>{pos.asset}</span>
-                <span style={{background:pos.side==='long'?T.grn+'20':T.red+'20',color:pos.side==='long'?T.grn:T.red,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:4}}>{pos.side.toUpperCase()}</span>
-                <span style={{background:T.ylw+'15',color:T.ylw,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:4}}>{pos.leverage}x</span>
+                <span style={{background:pos.side==='long'?A(T.grn,'20'):A(T.red,'20'),color:pos.side==='long'?T.grn:T.red,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:4}}>{pos.side.toUpperCase()}</span>
+                <span style={{background:A(T.ylw,'15'),color:T.ylw,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:4}}>{pos.leverage}x</span>
               </div>
               <div style={{color:T.muted,fontSize:9,marginTop:1}}>진입 {cvt(pos.entryPrice,'KRW')} → 청산 {cvt(pos.liqPrice,'KRW')}</div>
             </div>
@@ -118,7 +119,7 @@ function HedgeOSPage() {
             <div style={{color:T.muted,fontSize:9}}>청산까지</div>
           </div>
         </div>
-        <div style={{height:5,background:'#1A2D4A',borderRadius:3,overflow:'hidden'}}>
+        <div style={{height:5,background:'var(--t-border)',borderRadius:3,overflow:'hidden'}}>
           <div style={{height:'100%',width:`${Math.min(100,100-pos.distPct*5)}%`,background:c,borderRadius:3,transition:'width .5s'}}/>
         </div>
         {danger&&<div style={{marginTop:5,color:T.red,fontSize:9,fontWeight:700}}>⚠️ 청산 위험 — 즉시 확인 필요</div>}
@@ -140,7 +141,7 @@ function HedgeOSPage() {
             <div style={{color:T.muted,fontSize:10}}>Kill Switch · 드로다운 보호 · 유니파이드 월렛 · AI 포트폴리오 · 거래소 모니터</div>
           </div>
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
-            <button onClick={()=>setProMode(v=>!v)} style={{background:proMode?T.prp+'20':'transparent',color:proMode?T.prp:T.muted,border:`1px solid ${proMode?T.prp:T.border}`,borderRadius:8,padding:'4px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{proMode?'PRO':'👤 일반'}</button>
+            <button onClick={()=>setProMode(v=>!v)} style={{background:proMode?A(T.prp,'20'):'transparent',color:proMode?T.prp:T.muted,border:`1px solid ${proMode?T.prp:T.border}`,borderRadius:8,padding:'4px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{proMode?'PRO':'👤 일반'}</button>
           </div>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6}}>
@@ -167,7 +168,7 @@ function HedgeOSPage() {
           </button>
         ))}
       </div>
-      {botMode==='normal'&&<div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:10,padding:'9px 13px',marginBottom:12}}><div style={{color:T.red,fontWeight:700,fontSize:11}}>⚠️ 실전 모드 — 현재 비활성화. 거래소 API 연결 + 출금 권한 차단 확인 필요</div></div>}
+      {botMode==='normal'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'9px 13px',marginBottom:12}}><div style={{color:T.red,fontWeight:700,fontSize:11}}>⚠️ 실전 모드 — 현재 비활성화. 거래소 API 연결 + 출금 권한 차단 확인 필요</div></div>}
 
       {/* Sub tabs */}
       <div style={{display:'flex',gap:5,marginBottom:14,overflowX:'auto'}}>
@@ -188,14 +189,14 @@ function HedgeOSPage() {
                 {ks.active&&<div style={{color:T.red,fontSize:10,marginTop:3}}>{ks.activatedAt} 활성화됨 · {ks.reason}</div>}
               </div>
               {ks.active
-                ? <button onClick={deactivateKill} style={{background:T.grn+'20',color:T.grn,border:`1px solid ${T.grn}40`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>✅ 해제</button>
-                : <button onClick={()=>setShowConfirmKill(true)} style={{background:T.red+'20',color:T.red,border:`1px solid ${T.red}40`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>🚨 실행</button>
+                ? <button onClick={deactivateKill} style={{background:A(T.grn,'20'),color:T.grn,border:`1px solid ${A(T.grn,'40')}`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>✅ 해제</button>
+                : <button onClick={()=>setShowConfirmKill(true)} style={{background:A(T.red,'20'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>🚨 실행</button>
               }
             </div>
             {!ks.active&&(
               <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:6}}>
                 {([['all','전체 봇 정지'],['selected_bots','선택된 봇만'],['selected_exchange','거래소 선택'],['auto_only','자동매매만']] as const).map(([t,l])=>(
-                  <button key={t} onClick={()=>activateKill(t)} style={{background:T.red+'10',color:T.red,border:`1px solid ${T.red}20`,borderRadius:8,padding:'8px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{l}</button>
+                  <button key={t} onClick={()=>activateKill(t)} style={{background:A(T.red,'10'),color:T.red,border:`1px solid ${A(T.red,'20')}`,borderRadius:8,padding:'8px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{l}</button>
                 ))}
               </div>
             )}
@@ -219,7 +220,7 @@ function HedgeOSPage() {
                     <span style={{color:T.muted,fontSize:11}}>{r.l}</span>
                     <span style={{color:c,fontSize:11,fontWeight:700}}>{cvt(r.used,'KRW')} / {cvt(r.limit,'KRW')} ({r.pct.toFixed(0)}%)</span>
                   </div>
-                  <div style={{height:6,background:'#1A2D4A',borderRadius:3,overflow:'hidden'}}>
+                  <div style={{height:6,background:'var(--t-border)',borderRadius:3,overflow:'hidden'}}>
                     <div style={{height:'100%',width:`${Math.min(100,r.pct)}%`,background:c,borderRadius:3,transition:'width .5s'}}/>
                   </div>
                 </div>
@@ -231,7 +232,7 @@ function HedgeOSPage() {
           <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${liqAlert?T.red:T.border}30`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{color:T.txt,fontWeight:700}}>청산 위험 모니터</div>
-              <button onClick={()=>setLiqAlert(v=>!v)} style={{background:liqAlert?T.red+'20':T.acg,color:liqAlert?T.red:T.acl,border:`1px solid ${liqAlert?T.red:T.acl}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{liqAlert?'알림 ON':'🔕 알림 OFF'}</button>
+              <button onClick={()=>setLiqAlert(v=>!v)} style={{background:liqAlert?A(T.red,'20'):T.acg,color:liqAlert?T.red:T.acl,border:`1px solid ${liqAlert?T.red:T.acl}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{liqAlert?'알림 ON':'🔕 알림 OFF'}</button>
             </div>
             {(MOCK_LIQ_POSITIONS||[]).map(p=><LiqGauge key={p.asset} pos={p}/>)}
           </Card>
@@ -263,7 +264,7 @@ function HedgeOSPage() {
             <div style={{color:T.txt,fontSize:28,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(totalBalance,'KRW')}</div>
             <div style={{color:T.acl,fontSize:13,fontWeight:700,marginTop:2}}>${totalUSDT.toLocaleString()} USDT</div>
             {/* Allocation bar */}
-            <div style={{marginTop:12,height:8,background:'#1A2D4A',borderRadius:4,overflow:'hidden',display:'flex'}}>
+            <div style={{marginTop:12,height:8,background:'var(--t-border)',borderRadius:4,overflow:'hidden',display:'flex'}}>
               {(MOCK_WALLET||[]).map(w=><div key={w.id} style={{height:'100%',width:`${w.balance/totalBalance*100}%`,background:w.color,opacity:0.85}}/>)}
             </div>
             <div style={{display:'flex',gap:8,marginTop:6,flexWrap:'wrap'}}>
@@ -299,13 +300,13 @@ function HedgeOSPage() {
           ))}
 
           {/* AI portfolio advice */}
-          <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${T.prp}30`}}>
+          <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${A(T.prp,'30')}`}}>
             <div style={{color:T.prp,fontWeight:700,marginBottom:8}}>AI 포트폴리오 관리자</div>
             <div style={{display:'flex',gap:6,marginBottom:10}}>
               {(['conservative','balanced','aggressive'] as const).map(m=>(
                 <button key={m} type="button"
                   onClick={() => notifyInfo(`${m==='conservative'?'보수형':m==='balanced'?'균형형':'공격형'} 포트폴리오는 곧 출시됩니다. 현재는 더보기 → 리스크관리에서 모드 변경 가능합니다.`)}
-                  style={{flex:1,padding:'9px',minHeight:36,background:m==='balanced'?T.prp+'20':'transparent',color:m==='balanced'?T.prp:T.muted,border:`1px solid ${m==='balanced'?T.prp:T.border}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                  style={{flex:1,padding:'9px',minHeight:36,background:m==='balanced'?A(T.prp,'20'):'transparent',color:m==='balanced'?T.prp:T.muted,border:`1px solid ${m==='balanced'?T.prp:T.border}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
                   {m==='conservative'?'보수형':m==='balanced'?'균형형':'공격형'}
                 </button>
               ))}
@@ -357,7 +358,7 @@ function HedgeOSPage() {
                 </div>
               </div>
               <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
-                <div style={{flex:1,height:4,background:'#1A2D4A',borderRadius:2,overflow:'hidden'}}>
+                <div style={{flex:1,height:4,background:'var(--t-border)',borderRadius:2,overflow:'hidden'}}>
                   <div style={{height:'100%',width:`${s.score}%`,background:s.score>=70?T.grn:s.score>=40?T.ylw:T.red,borderRadius:2}}/>
                 </div>
                 <span style={{color:T.muted,fontSize:10,flexShrink:0}}>점수 {s.score}</span>
@@ -365,7 +366,7 @@ function HedgeOSPage() {
               <div style={{display:'flex',gap:6}}>
                 <button type="button"
                   onClick={() => notifyInfo(`"${s.name}" 상세 정보는 곧 출시됩니다.\n작성자: ${s.author}\n수익률: +${s.pnl}%\n승률: ${s.winRate}%\n점수: ${s.score}`)}
-                  style={{flex:1,padding:'9px',minHeight:36,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>상세 보기</button>
+                  style={{flex:1,padding:'9px',minHeight:36,background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>상세 보기</button>
                 <button type="button"
                   onClick={() => notifyInfo(`"${s.name}" 모의 구독 기능은 곧 출시됩니다. 현재는 더보기 → 전략빌더에서 본인 전략 생성 가능합니다.`)}
                   style={{flex:1,padding:'9px',minHeight:36,background:s.color+'15',color:s.color,border:`1px solid ${s.color}30`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>구독 (모의)</button>
@@ -425,7 +426,7 @@ function HedgeOSPage() {
           </Card>
 
           {/* AI Risk Manager */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.prp}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.prp,'30')}`}}>
             <div style={{color:T.prp,fontWeight:700,marginBottom:8}}>AI 위험 관리자</div>
             {[
               {msg:'현재 시장 변동성이 보통 수준 — 정상 레버리지 유지',level:'ok'},
@@ -475,7 +476,7 @@ function HedgeOSPage() {
           </Card>
 
           {/* Shadow mode explanation */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.prp}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.prp,'30')}`}}>
             <div style={{color:T.prp,fontWeight:700,marginBottom:8}}>👁 섀도우 모드란?</div>
             <div style={{color:T.sub,fontSize:11,lineHeight:1.7}}>
               섀도우 모드에서는 전략 로직이 완전히 실행되지만 실제 주문은 전송되지 않습니다.
@@ -774,7 +775,7 @@ const TV_ETFS: TVAsset[] = [
   {sym:'VTI',  label:'미국전체시장',  tv:'AMEX:VTI',    cat:'etf', clr:'#1D4ED8'},
   {sym:'VOO',  label:'뱅가드S&P500',  tv:'AMEX:VOO',    cat:'etf', clr:'#1D4ED8'},
   {sym:'GLD',  label:'금 ETF',        tv:'AMEX:GLD',    cat:'etf', clr:'#D97706'},
-  {sym:'SLV',  label:'은 ETF',        tv:'AMEX:SLV',    cat:'etf', clr:'#94A3B8'},
+  {sym:'SLV',  label:'은 ETF',        tv:'AMEX:SLV',    cat:'etf', clr:'var(--t-sub)'},
   {sym:'USO',  label:'WTI원유 ETF',   tv:'AMEX:USO',    cat:'etf', clr:'#78350F'},
   {sym:'TLT',  label:'20년 국채 ETF', tv:'NASDAQ:TLT',  cat:'etf', clr:'#1D4ED8'},
   {sym:'HYG',  label:'하이일드채권',  tv:'AMEX:HYG',    cat:'etf', clr:'#059669'},
@@ -855,7 +856,7 @@ const TV_KRSTOCKS: TVAsset[] = [
 // Commodities & Forex
 const TV_MACRO: TVAsset[] = [
   {sym:'XAUUSD',label:'금(Gold)',    tv:'OANDA:XAUUSD',cat:'commodity',clr:'#FFD700',featured:true},
-  {sym:'XAGUSD',label:'은(Silver)',  tv:'OANDA:XAGUSD',cat:'commodity',clr:'#94A3B8'},
+  {sym:'XAGUSD',label:'은(Silver)',  tv:'OANDA:XAGUSD',cat:'commodity',clr:'var(--t-sub)'},
   {sym:'USOIL', label:'WTI 원유',    tv:'TVC:USOIL',   cat:'commodity',clr:'#78350F',featured:true},
   {sym:'UKOIL', label:'브렌트유',    tv:'TVC:UKOIL',   cat:'commodity',clr:'#78350F'},
   {sym:'NATGAS',label:'천연가스',    tv:'NYMEX:NG1!',  cat:'commodity',clr:'#2563EB'},

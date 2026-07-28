@@ -1,17 +1,14 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
   Trophy, Crown, Sparkles, Radio, Thermometer, Scale,
 } from 'lucide-react';
 
-const T = {
-  bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
-  border:'#1A2D4A', border2:'#243A5E',
-  txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B', gld:'#D97706',
-  acl:'#60A5FA', acc:'#2563EB', acg:'#1E3A5F', prp:'#7C3AED',
-} as const;
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return <div style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:14, padding:'14px 16px', ...style }}>{children}</div>;
@@ -70,7 +67,7 @@ function MarketCapWidget({ currency, onOpenAsset }: { currency: string; onOpenAs
       {loading ? (
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
           {[0,1,2,3,4].map(i => (
-            <div key={i} style={{ height:60, background:T.card, borderRadius:12, animation:'shimmer 1.2s infinite', backgroundImage:'linear-gradient(90deg,#1A2D4A 25%,#243A5E 50%,#1A2D4A 75%)', backgroundSize:'200% 100%' }}/>
+            <div key={i} style={{ height:60, background:T.card, borderRadius:12, animation:'shimmer 1.2s infinite', backgroundImage:'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)', backgroundSize:'200% 100%' }}/>
           ))}
         </div>
       ) : data.length === 0 ? (
@@ -109,7 +106,7 @@ function MarketCapWidget({ currency, onOpenAsset }: { currency: string; onOpenAs
                   }}>
                   {/* Rank */}
                   <div style={{ width:28, height:28, borderRadius:8, flexShrink:0,
-                    background: i===0?T.gld+'30':i===1?'#C0C0C020':i===2?'#CD7F3220':'transparent',
+                    background: i===0?A(T.gld,'30'):i===1?'#C0C0C020':i===2?'#CD7F3220':'transparent',
                     border:`1px solid ${i===0?T.gld:i===1?'#C0C0C0':i===2?'#CD7F32':T.border}`,
                     display:'flex', alignItems:'center', justifyContent:'center',
                     color:i===0?T.gld:i===1?'#C0C0C0':i===2?'#CD7F32':T.muted,
@@ -188,7 +185,7 @@ function CopyTradingWidget() {
           </button>
         ))}
       </div>
-      <div style={{ background:'#F59E0B0A', border:`1px solid ${T.ylw}25`, borderRadius:10, padding:'8px 12px', marginBottom:10, color:T.ylw, fontSize:10 }}>
+      <div style={{ background:'#F59E0B0A', border:`1px solid ${A(T.ylw,'25')}`, borderRadius:10, padding:'8px 12px', marginBottom:10, color:T.ylw, fontSize:10 }}>
         ⚠️ 복사 거래는 교육 목적입니다. 과거 수익이 미래를 보장하지 않습니다.
       </div>
       {loading ? (
@@ -196,7 +193,7 @@ function CopyTradingWidget() {
       ) : traders.map(t => (
         <Card key={t.id} style={{ marginBottom:8, padding:'12px 14px' }}>
           <div style={{ display:'flex', alignItems:'flex-start', gap:10 }}>
-            <div style={{ width:38, height:38, borderRadius:12, background:`linear-gradient(135deg,${T.acg},${T.prp+'40'})`,
+            <div style={{ width:38, height:38, borderRadius:12, background:`linear-gradient(135deg,${T.acg},${A(T.prp,'40')})`,
               border:`1px solid ${T.border}`, display:'flex', alignItems:'center', justifyContent:'center',
               fontSize:14, fontWeight:900, color:T.acl, flexShrink:0 }}>
               {t.name.slice(0,1)}
@@ -220,7 +217,7 @@ function CopyTradingWidget() {
             </div>
             <div style={{ flexShrink:0, display:'flex', flexDirection:'column', gap:4 }}>
               <button onClick={() => setFollowing(f => { const s=new Set(f); s.has(t.id)?s.delete(t.id):s.add(t.id); return s; })}
-                style={{ padding:'6px 12px', background:following.has(t.id)?T.grn+'20':T.acg,
+                style={{ padding:'6px 12px', background:following.has(t.id)?A(T.grn,'20'):T.acg,
                   border:`1px solid ${following.has(t.id)?T.grn:T.acl}40`, borderRadius:8,
                   color:following.has(t.id)?T.grn:T.acl, fontSize:10, fontWeight:700, cursor:'pointer', whiteSpace:'nowrap' }}>
                 {following.has(t.id) ? '✓ 팔로잉' : '+ 팔로우'}
@@ -288,7 +285,7 @@ function AIStrategyBuilder() {
         <Card>
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:10 }}>
             <div style={{ color:T.txt, fontWeight:800, fontSize:13 }}>{result.strategy.name}</div>
-            <span style={{ background:result.source==='openai'?T.grn+'20':T.ylw+'20',
+            <span style={{ background:result.source==='openai'?A(T.grn,'20'):A(T.ylw,'20'),
               color:result.source==='openai'?T.grn:T.ylw, fontSize:9, padding:'2px 7px', borderRadius:6 }}>
               {result.source==='openai'?'✅ GPT-4o':'📚 기본'}
             </span>
@@ -324,7 +321,7 @@ function AIStrategyBuilder() {
               </div>
             </div>
           )}
-          <div style={{ marginTop:8, background:'#EF444408', border:`1px solid ${T.red}20`, borderRadius:8, padding:'7px 10px', color:T.muted, fontSize:9 }}>
+          <div style={{ marginTop:8, background:'#EF444408', border:`1px solid ${A(T.red,'20')}`, borderRadius:8, padding:'7px 10px', color:T.muted, fontSize:9 }}>
             ⚠️ AI 생성 전략은 교육 목적입니다. 실제 투자 전 충분한 검토가 필요합니다.
           </div>
         </Card>
@@ -370,10 +367,10 @@ function MarketBriefing() {
       {loading ? (
         <div style={{ height:80, background:T.card, borderRadius:12, marginBottom:10 }}/>
       ) : data && (
-        <Card style={{ marginBottom:10, background:'linear-gradient(135deg,#0D1A35,#091228)', border:`1px solid ${T.acl}30` }}>
+        <Card style={{ marginBottom:10, background:'linear-gradient(135deg,var(--t-card),var(--t-bg))', border:`1px solid ${A(T.acl,'30')}` }}>
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
             <div style={{ color:T.acl, fontWeight:700, fontSize:11 }}>오늘의 시장</div>
-            <span style={{ background:data.source==='openai'?T.grn+'20':T.ylw+'20', color:data.source==='openai'?T.grn:T.ylw, fontSize:8, padding:'1px 6px', borderRadius:5 }}>
+            <span style={{ background:data.source==='openai'?A(T.grn,'20'):A(T.ylw,'20'), color:data.source==='openai'?T.grn:T.ylw, fontSize:8, padding:'1px 6px', borderRadius:5 }}>
               {data.source==='openai'?'GPT-4o':'기본'}
             </span>
           </div>
@@ -407,7 +404,7 @@ function MarketBriefing() {
             placeholder="뉴스 헤드라인 입력 (FOMC, CPI, ETF…)"
             style={{ flex:1, background:T.bg, border:`1px solid ${T.border}`, borderRadius:8, padding:'8px 12px', color:T.txt, fontSize:12, outline:'none' }}/>
           <button onClick={analyzeNews} disabled={analyzing||!headline.trim()}
-            style={{ padding:'8px 14px', background:T.acg, border:`1px solid ${T.acl}40`, borderRadius:8, color:T.acl, fontWeight:700, fontSize:11, cursor:'pointer', flexShrink:0 }}>
+            style={{ padding:'8px 14px', background:T.acg, border:`1px solid ${A(T.acl,'40')}`, borderRadius:8, color:T.acl, fontWeight:700, fontSize:11, cursor:'pointer', flexShrink:0 }}>
             {analyzing?'분석 중':'분석'}
           </button>
         </div>
@@ -480,13 +477,13 @@ function LiquidationMap() {
                   })()}
                 </div>
               </div>
-              <div style={{ background:T.grn+'15', borderRadius:8, padding:'8px', textAlign:'center' }}>
+              <div style={{ background:A(T.grn,'15'), borderRadius:8, padding:'8px', textAlign:'center' }}>
                 <div style={{ color:T.muted, fontSize:8 }}>롱 비중</div>
                 <div style={{ color:T.grn, fontWeight:800, fontSize:14 }}>
                   {Number.isFinite(Number(data.longRatio)) ? `${data.longRatio}%` : '—'}
                 </div>
               </div>
-              <div style={{ background:T.red+'15', borderRadius:8, padding:'8px', textAlign:'center' }}>
+              <div style={{ background:A(T.red,'15'), borderRadius:8, padding:'8px', textAlign:'center' }}>
                 <div style={{ color:T.muted, fontSize:8 }}>숏 비중</div>
                 <div style={{ color:T.red, fontWeight:800, fontSize:14 }}>
                   {Number.isFinite(Number(data.shortRatio)) ? `${data.shortRatio}%` : '—'}

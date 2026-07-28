@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { notifyInfo } from '@/lib/notify/center';
 import {
@@ -13,12 +14,9 @@ import {
   sbHealthCheck, SUPABASE_URL,
 } from '@/lib/supabase';
 
-const T = {
-  bg:'#060B14', card:'#0F1924', border:'#1A2D4A', border2:'#243A5E',
-  acc:'#2563EB', acl:'#3B82F6', acg:'rgba(37,99,235,.15)',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B', prp:'#7C3AED',
-  txt:'#F0F6FF', sub:'#94A3B8', muted:'#475569', surf:'#0D1626',
-};
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 type AuthMode = 'login' | 'signup' | 'reset' | 'profile' | 'redeem' | 'security';
 
@@ -73,7 +71,7 @@ function StrengthMeter({ password }: { password: string }) {
     <div style={{marginTop:6}}>
       <div style={{display:'flex',gap:3,marginBottom:4}}>
         {[1,2,3,4].map(i => (
-          <div key={i} style={{flex:1,height:3,borderRadius:2,background:score>=i?color:'#1A2D4A',transition:'background .2s'}}/>
+          <div key={i} style={{flex:1,height:3,borderRadius:2,background:score>=i?color:'var(--t-border)',transition:'background .2s'}}/>
         ))}
       </div>
       {label && (
@@ -299,7 +297,7 @@ export default function AuthPage() {
           {(()=>{
             // env 없음 → Mock, env 있지만 핑 실패 → 실제 원인 표시, 성공 → 연결됨
             if (!SUPABASE_CONFIGURED) return (
-              <div style={{marginTop:8,display:'inline-block',padding:'3px 10px',borderRadius:99,background:T.ylw+'12',border:`1px solid ${T.ylw}30`}}>
+              <div style={{marginTop:8,display:'inline-block',padding:'3px 10px',borderRadius:99,background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`}}>
                 <span style={{fontSize:10,fontWeight:700,color:T.ylw}}>🔧 Mock 모드 (env 미설정)</span>
               </div>
             );
@@ -338,10 +336,10 @@ export default function AuthPage() {
                   <div style={{display:'flex',gap:4,marginTop:4,flexWrap:'wrap'}}>
                     <span style={{background:`${ri.color}20`,color:ri.color,fontSize:9,fontWeight:700,padding:'2px 7px',borderRadius:99,border:`1px solid ${ri.color}40`}}>{ri.label}</span>
                     {session.badges.map(b => (
-                      <span key={b} style={{background:`${T.ylw}15`,color:T.ylw,fontSize:9,fontWeight:700,padding:'2px 6px',borderRadius:99}}>{b}</span>
+                      <span key={b} style={{background:`${A(T.ylw,'15')}`,color:T.ylw,fontSize:9,fontWeight:700,padding:'2px 6px',borderRadius:99}}>{b}</span>
                     ))}
                     {(session.expiresAt === null && ['lifetime','founder'].includes(session.role)) && (
-                      <span style={{background:`${T.ylw}15`,color:T.ylw,fontSize:9,fontWeight:700,padding:'2px 6px',borderRadius:99}}>♾️ 평생</span>
+                      <span style={{background:`${A(T.ylw,'15')}`,color:T.ylw,fontSize:9,fontWeight:700,padding:'2px 6px',borderRadius:99}}>♾️ 평생</span>
                     )}
                   </div>
                 </div>
@@ -351,11 +349,11 @@ export default function AuthPage() {
                   <a href="/admin" style={{display:'block',padding:'11px',background:`${ri.color}15`,color:ri.color,border:`1px solid ${ri.color}40`,borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none',textAlign:'center'}}>{ri.icon} 관리자 대시보드 →</a>
                 )}
                 {canAccessDeveloper(session.role) && (
-                  <a href="/developer" style={{display:'block',padding:'11px',background:`${T.prp}15`,color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none',textAlign:'center'}}>⚙️ 개발자 대시보드 →</a>
+                  <a href="/developer" style={{display:'block',padding:'11px',background:`${A(T.prp,'15')}`,color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none',textAlign:'center'}}>⚙️ 개발자 대시보드 →</a>
                 )}
-                <a href="/" style={{display:'block',padding:'11px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none',textAlign:'center'}}>🏠 메인으로</a>
+                <a href="/" style={{display:'block',padding:'11px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none',textAlign:'center'}}>🏠 메인으로</a>
                 <div style={{display:'flex',gap:8}}>
-                  <button onClick={() => setMode('redeem')} style={{flex:1,padding:'9px',background:'transparent',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>🎟️ 초대 코드</button>
+                  <button onClick={() => setMode('redeem')} style={{flex:1,padding:'9px',background:'transparent',color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>🎟️ 초대 코드</button>
                   <button onClick={() => setMode('security')} style={{flex:1,padding:'9px',background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>🔒 보안 설정</button>
                 </div>
                 <button onClick={doLogout} style={{padding:'10px',background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,fontSize:11,cursor:'pointer'}}>로그아웃</button>
@@ -375,7 +373,7 @@ export default function AuthPage() {
               ))}
             </div>
             {!SUPABASE_CONFIGURED && (
-              <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:14}}>
+              <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:14}}>
                 <div style={{color:T.ylw,fontWeight:700,fontSize:10}}>🔧 Mock 모드 — .env.local에 Supabase 키 추가 시 실제 인증 활성화</div>
               </div>
             )}
@@ -395,7 +393,7 @@ export default function AuthPage() {
               </button>
               <span style={{color:T.muted,fontSize:12}}>로그인 유지</span>
             </div>
-            <button onClick={handleLogin} disabled={loading || !canLogin} style={{width:'100%',padding:'14px',background:canLogin&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer',marginBottom:12}}>
+            <button onClick={handleLogin} disabled={loading || !canLogin} style={{width:'100%',padding:'14px',background:canLogin&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer',marginBottom:12}}>
               {loading ? '로그인 중...' : '로그인'}
             </button>
 
@@ -467,7 +465,7 @@ export default function AuthPage() {
                 style={{width:'100%',background:T.bg,border:`1px solid ${T.border}`,borderRadius:10,padding:'10px 14px',color:T.txt,fontSize:16,fontFamily:'monospace',fontWeight:700,outline:'none',letterSpacing:1}}/>
               <div style={{color:T.muted,fontSize:10,marginTop:3}}>코드 입력 시 VIP/창업멤버/평생회원 플랜이 자동 적용됩니다.</div>
             </div>
-            <button onClick={handleSignup} disabled={loading || !canSignup} style={{width:'100%',padding:'14px',background:canSignup&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:canSignup?'pointer':'not-allowed',marginBottom:8}}>
+            <button onClick={handleSignup} disabled={loading || !canSignup} style={{width:'100%',padding:'14px',background:canSignup&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:canSignup?'pointer':'not-allowed',marginBottom:8}}>
               {loading ? '가입 중...' : '회원가입'}
             </button>
             {!canSignup && (email || password || confirmPw) && (
@@ -497,7 +495,7 @@ export default function AuthPage() {
               <input type="email" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key==='Enter'&&handleReset()} placeholder="가입한 이메일"
                 style={{width:'100%',background:T.bg,border:`1px solid ${T.border}`,borderRadius:10,padding:'12px 14px',color:T.txt,fontSize:16,outline:'none'}}/>
             </div>
-            <button onClick={handleReset} disabled={loading || !isValidEmail(email)} style={{width:'100%',padding:'14px',background:isValidEmail(email)&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer'}}>
+            <button onClick={handleReset} disabled={loading || !isValidEmail(email)} style={{width:'100%',padding:'14px',background:isValidEmail(email)&&!loading?`linear-gradient(135deg,${T.acc},${T.prp})`:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer'}}>
               {loading ? '발송 중...' : '재설정 메일 발송'}
             </button>
           </div>
@@ -523,7 +521,7 @@ export default function AuthPage() {
                 ))}
               </div>
             )}
-            <button onClick={handleRedeem} disabled={loading || !redeemVal.trim()} style={{width:'100%',padding:'13px',background:redeemVal&&!loading?`linear-gradient(135deg,${T.prp},#5B21B6)`:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer'}}>
+            <button onClick={handleRedeem} disabled={loading || !redeemVal.trim()} style={{width:'100%',padding:'13px',background:redeemVal&&!loading?`linear-gradient(135deg,${T.prp},#5B21B6)`:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:14,cursor:'pointer'}}>
               {loading ? '확인 중...' : '코드 적용'}
             </button>
           </div>
@@ -540,7 +538,7 @@ export default function AuthPage() {
             <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,padding:16,marginBottom:12}}>
               <div style={{color:T.txt,fontWeight:700,marginBottom:12}}>🔑 비밀번호 변경</div>
               {session && canAccessAdmin(session.role) && (
-                <div style={{background:T.red+'12',border:`1px solid ${T.red}30`,borderRadius:8,padding:'8px 12px',marginBottom:10}}>
+                <div style={{background:A(T.red,'12'),border:`1px solid ${A(T.red,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:10}}>
                   <div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 관리자 계정은 강력한 비밀번호를 사용하세요.</div>
                 </div>
               )}
@@ -549,7 +547,7 @@ export default function AuthPage() {
                 <PasswordInput value={confirmNewPw} onChange={setConfirmNewPw} label="새 비밀번호 확인" onEnter={handleChangePw}/>
                 {confirmNewPw && newPw !== confirmNewPw && <div style={{color:T.red,fontSize:10,marginTop:3}}>⚠️ 비밀번호가 일치하지 않습니다.</div>}
               </div>
-              <button onClick={handleChangePw} disabled={loading||!newPw||newPw!==confirmNewPw||!checkPasswordStrength(newPw).isValid} style={{width:'100%',padding:'11px',background:(newPw&&newPw===confirmNewPw&&checkPasswordStrength(newPw).isValid&&!loading)?T.acc:'#243A5E',color:'#fff',border:'none',borderRadius:10,fontWeight:700,cursor:'pointer'}}>
+              <button onClick={handleChangePw} disabled={loading||!newPw||newPw!==confirmNewPw||!checkPasswordStrength(newPw).isValid} style={{width:'100%',padding:'11px',background:(newPw&&newPw===confirmNewPw&&checkPasswordStrength(newPw).isValid&&!loading)?T.acc:'var(--t-border2)',color:'#fff',border:'none',borderRadius:10,fontWeight:700,cursor:'pointer'}}>
                 {loading ? '변경 중...' : '비밀번호 변경'}
               </button>
             </div>
@@ -568,14 +566,14 @@ export default function AuthPage() {
               <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>📋 최근 로그인 기록</div>
               {[{device:'iPhone 15 Pro',loc:'서울, 대한민국',time:'방금',cur:true},{device:'MacBook Pro',loc:'서울',time:'어제 18:30',cur:false}].map((l,i) => (
                 <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:i<1?`1px solid ${T.border}`:'none'}}>
-                  <div><div style={{color:T.txt,fontSize:12}}>{l.device} {l.cur&&<span style={{background:T.grn+'20',color:T.grn,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:99}}>현재</span>}</div><div style={{color:T.muted,fontSize:10}}>{l.loc} · {l.time}</div></div>
+                  <div><div style={{color:T.txt,fontSize:12}}>{l.device} {l.cur&&<span style={{background:A(T.grn,'20'),color:T.grn,fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:99}}>현재</span>}</div><div style={{color:T.muted,fontSize:10}}>{l.loc} · {l.time}</div></div>
                   {!l.cur && <button type="button"
                     onClick={() => notifyInfo(`"${l.device}" 세션 종료는 설정 → 보안 → 로그인 기록에서 가능합니다 (실제 기기 추적)`)}
-                    style={{background:T.red+'15',color:T.red,border:'none',borderRadius:6,padding:'6px 12px',minHeight:30,fontSize:10,cursor:'pointer'}}>종료</button>}
+                    style={{background:A(T.red,'15'),color:T.red,border:'none',borderRadius:6,padding:'6px 12px',minHeight:30,fontSize:10,cursor:'pointer'}}>종료</button>}
                 </div>
               ))}
             </div>
-            <button onClick={doLogout} style={{width:'100%',padding:'11px',background:'transparent',color:T.red,border:`1px solid ${T.red}40`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>
+            <button onClick={doLogout} style={{width:'100%',padding:'11px',background:'transparent',color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>
               모든 기기에서 로그아웃
             </button>
           </div>

@@ -267,7 +267,7 @@ function PosterZoomViewer({
         transform:'translateX(-50%)',
         background:'rgba(0,0,0,.5)', backdropFilter:'blur(8px)',
         borderRadius:8, padding:'5px 12px',
-        color:'#94A3B8', fontSize:10, fontWeight:600,
+        color:'var(--t-sub)', fontSize:10, fontWeight:600,
         whiteSpace:'nowrap',
       }}>
         핀치 / 휠 = 확대 · 드래그 = 이동 · 더블클릭 = 리셋
@@ -288,8 +288,8 @@ function PosterPlaceholder({ poster }: { poster: Poster }) {
       style={{ position:'absolute', inset:0, borderRadius:12 }}>
       <defs>
         <linearGradient id={`g${poster.id}`} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#060B14"/>
-          <stop offset="100%" stopColor="#0D1F3C"/>
+          <stop offset="0%" stopColor="var(--t-bg)"/>
+          <stop offset="100%" stopColor="var(--t-surf)"/>
         </linearGradient>
       </defs>
       <rect width="400" height="560" rx="12" fill={`url(#g${poster.id})`}/>
@@ -312,7 +312,7 @@ function PosterPlaceholder({ poster }: { poster: Poster }) {
         {DIFFICULTY_LABEL[meta.difficulty]}
       </text>
       {/* Title */}
-      <text x="24" y="115" fill="#E2E8F0"
+      <text x="24" y="115" fill="var(--t-txt)"
         style={{ fontSize:14, fontWeight:900, fontFamily:'sans-serif' }}>
         {poster.title.slice(0, 18)}
       </text>
@@ -323,7 +323,7 @@ function PosterPlaceholder({ poster }: { poster: Poster }) {
         </text>
       )}
       {poster.title.length > 36 && (
-        <text x="24" y="153" fill="#94A3B8"
+        <text x="24" y="153" fill="var(--t-sub)"
           style={{ fontSize:11, fontFamily:'sans-serif' }}>
           {poster.title.slice(36, 52)}…
         </text>
@@ -343,7 +343,7 @@ function PosterPlaceholder({ poster }: { poster: Poster }) {
       {!poster.available && (
         <>
           <rect x="20" y="490" width="360" height="40" rx="8"
-            fill="#1A2D4A" stroke="#EF4444" strokeWidth="1" strokeOpacity="0.4"/>
+            fill="var(--t-border)" stroke="#EF4444" strokeWidth="1" strokeOpacity="0.4"/>
           <text x="200" y="515" textAnchor="middle" fill="#EF4444" fillOpacity="0.8"
             style={{ fontSize:12, fontFamily:'sans-serif' }}>업로드 예정</text>
         </>
@@ -357,7 +357,7 @@ function PosterPlaceholder({ poster }: { poster: Poster }) {
         </>
       )}
       {/* Bottom motto */}
-      <text x="200" y="552" textAnchor="middle" fill="#475569"
+      <text x="200" y="552" textAnchor="middle" fill="var(--t-muted)"
         style={{ fontSize:9, fontFamily:'sans-serif' }}>TRAIGO 투자 강의 시리즈</text>
     </svg>
   );
@@ -453,7 +453,7 @@ export default function PosterLibrary() {
   const imgSrc = (p: Poster) => `/posters/poster-${p.id.toString().padStart(2,'0')}.png`;
 
   return (
-    <div style={{ color:'#E2E8F0', userSelect:'none' }}>
+    <div style={{ color:'var(--t-txt)', userSelect:'none' }}>
 
       {/* ── Header ── */}
       <div style={{ marginBottom:16 }}>
@@ -466,18 +466,18 @@ export default function PosterLibrary() {
           }}>📚</div>
           <div>
             <div style={{ fontWeight:900, fontSize:16, letterSpacing:-0.5 }}>TRAIGO 투자 강의</div>
-            <div style={{ color:'#475569', fontSize:10 }}>1~40번 실전 투자 포스터 라이브러리</div>
+            <div style={{ color:'var(--t-muted)', fontSize:10 }}>1~40번 실전 투자 포스터 라이브러리</div>
           </div>
           <div style={{ marginLeft:'auto', textAlign:'right' }}>
             <div style={{
-              background:'#1A2D4A',
-              border:'1px solid #243A5E', borderRadius:8,
+              background:'var(--t-border)',
+              border:'1px solid var(--t-border2)', borderRadius:8,
               padding:'3px 10px', fontSize:10, color:'#60A5FA',
               marginBottom:4,
             }}>
               총 {POSTER_DATA.length}강
             </div>
-            <div style={{ fontSize:9, color:'#94A3B8' }}>
+            <div style={{ fontSize:9, color:'var(--t-sub)' }}>
               {completed.size} / {POSTER_DATA.length} 완료 ({Math.round((completed.size / POSTER_DATA.length) * 100)}%)
             </div>
           </div>
@@ -485,7 +485,7 @@ export default function PosterLibrary() {
 
         {/* Progress bar */}
         <div style={{
-          height:5, background:'#1A2D4A', borderRadius:3, overflow:'hidden',
+          height:5, background:'var(--t-border)', borderRadius:3, overflow:'hidden',
           marginBottom:10,
         }}>
           <div style={{
@@ -499,22 +499,22 @@ export default function PosterLibrary() {
         {/* Search */}
         <div style={{
           display:'flex', gap:8, alignItems:'center',
-          background:'#0A1628', border:'1px solid #1A2D4A',
+          background:'var(--t-card)', border:'1px solid var(--t-border)',
           borderRadius:12, padding:'8px 14px', marginBottom:10,
         }}>
-          <span style={{ color:'#475569' }}>🔍</span>
+          <span style={{ color:'var(--t-muted)' }}>🔍</span>
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="강의 제목, 번호, 카테고리 검색…"
             style={{
               background:'transparent', border:'none', outline:'none',
-              color:'#E2E8F0', fontSize:13, flex:1,
+              color:'var(--t-txt)', fontSize:13, flex:1,
             }}
           />
           {search && (
             <button onClick={() => setSearch('')}
-              style={{ background:'none', border:'none', color:'#475569', cursor:'pointer', fontSize:16 }}>✕</button>
+              style={{ background:'none', border:'none', color:'var(--t-muted)', cursor:'pointer', fontSize:16 }}>✕</button>
           )}
         </div>
 
@@ -529,8 +529,8 @@ export default function PosterLibrary() {
                 style={{
                   flexShrink:0, padding:'5px 12px',
                   background: active ? col+'22' : 'transparent',
-                  color: active ? col : '#475569',
-                  border: `1px solid ${active ? col : '#1A2D4A'}`,
+                  color: active ? col : 'var(--t-muted)',
+                  border: `1px solid ${active ? col : 'var(--t-border)'}`,
                   borderRadius:20, fontSize:11, fontWeight:700, cursor:'pointer',
                   whiteSpace:'nowrap',
                 }}>
@@ -548,7 +548,7 @@ export default function PosterLibrary() {
 
       {/* ── Grid ── */}
       {filtered.length === 0 ? (
-        <div style={{ textAlign:'center', padding:'40px 0', color:'#475569' }}>
+        <div style={{ textAlign:'center', padding:'40px 0', color:'var(--t-muted)' }}>
           <div style={{ fontSize:32, marginBottom:8 }}>🔍</div>
           <div>"{search}" 검색 결과 없음</div>
         </div>
@@ -569,8 +569,8 @@ export default function PosterLibrary() {
                 onClick={() => setSel(p)}
                 style={{
                   position:'relative',
-                  background:'#0A1628',
-                  border:`1px solid ${p.available ? col+'40' : '#1A2D4A'}`,
+                  background:'var(--t-card)',
+                  border:`1px solid ${p.available ? col+'40' : 'var(--t-border)'}`,
                   borderRadius:12, overflow:'hidden', cursor:'pointer',
                   aspectRatio:'5/7',
                   transition:'transform .15s, border-color .15s, box-shadow .15s',
@@ -583,7 +583,7 @@ export default function PosterLibrary() {
                 onMouseLeave={e => {
                   (e.currentTarget as HTMLElement).style.transform = '';
                   (e.currentTarget as HTMLElement).style.boxShadow = '';
-                  (e.currentTarget as HTMLElement).style.borderColor = p.available ? col+'40' : '#1A2D4A';
+                  (e.currentTarget as HTMLElement).style.borderColor = p.available ? col+'40' : 'var(--t-border)';
                 }}
               >
                 {/* Real image (hidden until loaded) */}
@@ -657,7 +657,7 @@ export default function PosterLibrary() {
                   position:'absolute', bottom:0, left:0, right:0,
                   background:'linear-gradient(transparent, rgba(0,0,0,.9))',
                   padding:'24px 8px 8px',
-                  fontSize:10, fontWeight:700, color:'#E2E8F0',
+                  fontSize:10, fontWeight:700, color:'var(--t-txt)',
                   lineHeight:1.3,
                 }}>
                   {p.title}
@@ -694,8 +694,8 @@ export default function PosterLibrary() {
               marginBottom:12,
             }}>
               <div>
-                <div style={{ fontWeight:900, fontSize:14, color:'#E2E8F0' }}>{sel.title}</div>
-                <div style={{ color:'#475569', fontSize:10 }}>
+                <div style={{ fontWeight:900, fontSize:14, color:'var(--t-txt)' }}>{sel.title}</div>
+                <div style={{ color:'var(--t-muted)', fontSize:10 }}>
                   #{sel.id.toString().padStart(2,'0')} · {sel.category}
                 </div>
               </div>
@@ -715,8 +715,8 @@ export default function PosterLibrary() {
                   onClick={() => setSel(null)}
                   style={{
                     width:34, height:34, display:'flex', alignItems:'center', justifyContent:'center',
-                    background:'#1A2D4A', border:'1px solid #243A5E',
-                    borderRadius:10, color:'#94A3B8', cursor:'pointer', fontSize:18,
+                    background:'var(--t-border)', border:'1px solid var(--t-border2)',
+                    borderRadius:10, color:'var(--t-sub)', cursor:'pointer', fontSize:18,
                   }}>
                   ✕
                 </button>
@@ -734,7 +734,7 @@ export default function PosterLibrary() {
                 borderRadius:16, overflow:'hidden',
                 border:`1px solid ${CAT_COLORS[sel.category]||'#60A5FA'}40`,
                 boxShadow:`0 20px 60px ${CAT_COLORS[sel.category]||'#60A5FA'}20`,
-                aspectRatio:'5/7', position:'relative', background:'#0A1628',
+                aspectRatio:'5/7', position:'relative', background:'var(--t-card)',
                 cursor: 'zoom-in',
               }}>
               {!imgErr.has(sel.id) ? (
@@ -752,7 +752,7 @@ export default function PosterLibrary() {
                 position:'absolute', top:8, right:8,
                 background:'rgba(0,0,0,.7)', backdropFilter:'blur(4px)',
                 borderRadius:8, padding:'4px 10px',
-                color:'#E2E8F0', fontSize:9, fontWeight:700,
+                color:'var(--t-txt)', fontSize:9, fontWeight:700,
                 display:'inline-flex', alignItems:'center', gap:4,
               }}>
                 <Maximize size={10} strokeWidth={2.4}/>크게 보기
@@ -765,10 +765,10 @@ export default function PosterLibrary() {
                   borderRadius:16,
                 }}>
                   <div style={{ fontSize:40, marginBottom:12 }}>⏳</div>
-                  <div style={{ color:'#E2E8F0', fontWeight:800, fontSize:16, marginBottom:6 }}>
+                  <div style={{ color:'var(--t-txt)', fontWeight:800, fontSize:16, marginBottom:6 }}>
                     업로드 예정
                   </div>
-                  <div style={{ color:'#475569', fontSize:12 }}>
+                  <div style={{ color:'var(--t-muted)', fontSize:12 }}>
                     /public/posters/poster-{sel.id.toString().padStart(2,'0')}.png
                   </div>
                 </div>
@@ -782,9 +782,9 @@ export default function PosterLibrary() {
                 disabled={sel.id <= 1}
                 style={{
                   padding:'9px 14px', minHeight:38,
-                  background: sel.id > 1 ? '#1A2D4A' : '#0A1628',
-                  border: `1px solid ${sel.id > 1 ? '#243A5E' : '#1A2D4A'}`, borderRadius:10,
-                  color: sel.id > 1 ? '#94A3B8' : '#475569',
+                  background: sel.id > 1 ? 'var(--t-border)' : 'var(--t-card)',
+                  border: `1px solid ${sel.id > 1 ? 'var(--t-border2)' : 'var(--t-border)'}`, borderRadius:10,
+                  color: sel.id > 1 ? 'var(--t-sub)' : 'var(--t-muted)',
                   cursor: sel.id > 1 ? 'pointer' : 'not-allowed',
                   fontSize:12, fontWeight:700,
                   display:'inline-flex', alignItems:'center', gap:4,
@@ -794,13 +794,13 @@ export default function PosterLibrary() {
               </button>
               <div style={{
                 flex:1, padding:'9px 12px', minHeight:38,
-                background:'#0A1628', border:'1px solid #1A2D4A', borderRadius:10,
-                color:'#94A3B8', fontSize:11, textAlign:'center',
+                background:'var(--t-card)', border:'1px solid var(--t-border)', borderRadius:10,
+                color:'var(--t-sub)', fontSize:11, textAlign:'center',
                 display:'flex', alignItems:'center', justifyContent:'center', gap:6,
               }}>
                 <span>{sel.id} / {POSTER_DATA.length}</span>
-                <span style={{ color:'#475569' }}>·</span>
-                <span style={{ color: completed.has(sel.id) ? '#10B981' : '#475569' }}>
+                <span style={{ color:'var(--t-muted)' }}>·</span>
+                <span style={{ color: completed.has(sel.id) ? '#10B981' : 'var(--t-muted)' }}>
                   {completed.has(sel.id) ? '완료' : '미완료'}
                 </span>
               </div>
@@ -809,9 +809,9 @@ export default function PosterLibrary() {
                 disabled={sel.id >= POSTER_DATA.length}
                 style={{
                   padding:'9px 14px', minHeight:38,
-                  background: sel.id < POSTER_DATA.length ? '#1A2D4A' : '#0A1628',
-                  border: `1px solid ${sel.id < POSTER_DATA.length ? '#243A5E' : '#1A2D4A'}`, borderRadius:10,
-                  color: sel.id < POSTER_DATA.length ? '#94A3B8' : '#475569',
+                  background: sel.id < POSTER_DATA.length ? 'var(--t-border)' : 'var(--t-card)',
+                  border: `1px solid ${sel.id < POSTER_DATA.length ? 'var(--t-border2)' : 'var(--t-border)'}`, borderRadius:10,
+                  color: sel.id < POSTER_DATA.length ? 'var(--t-sub)' : 'var(--t-muted)',
                   cursor: sel.id < POSTER_DATA.length ? 'pointer' : 'not-allowed',
                   fontSize:12, fontWeight:700,
                   display:'inline-flex', alignItems:'center', gap:4,
@@ -826,9 +826,9 @@ export default function PosterLibrary() {
               <button onClick={() => toggleCompleted(sel.id)}
                 style={{
                   flex:1, padding:'10px', minHeight:42,
-                  background: completed.has(sel.id) ? '#10B98122' : '#1A2D4A',
-                  color:      completed.has(sel.id) ? '#10B981' : '#94A3B8',
-                  border: `1px solid ${completed.has(sel.id) ? '#10B981' : '#243A5E'}`,
+                  background: completed.has(sel.id) ? '#10B98122' : 'var(--t-border)',
+                  color:      completed.has(sel.id) ? '#10B981' : 'var(--t-sub)',
+                  border: `1px solid ${completed.has(sel.id) ? '#10B981' : 'var(--t-border2)'}`,
                   borderRadius:10, fontSize:12, fontWeight:700, cursor:'pointer',
                   display:'inline-flex', alignItems:'center', justifyContent:'center', gap:5,
                 }}>
@@ -840,9 +840,9 @@ export default function PosterLibrary() {
                 aria-label={bookmarked.has(sel.id) ? '북마크 해제' : '북마크'}
                 style={{
                   padding:'10px 14px', minHeight:42,
-                  background: bookmarked.has(sel.id) ? '#F59E0B22' : '#1A2D4A',
-                  color:      bookmarked.has(sel.id) ? '#F59E0B' : '#94A3B8',
-                  border: `1px solid ${bookmarked.has(sel.id) ? '#F59E0B' : '#243A5E'}`,
+                  background: bookmarked.has(sel.id) ? '#F59E0B22' : 'var(--t-border)',
+                  color:      bookmarked.has(sel.id) ? '#F59E0B' : 'var(--t-sub)',
+                  border: `1px solid ${bookmarked.has(sel.id) ? '#F59E0B' : 'var(--t-border2)'}`,
                   borderRadius:10, cursor:'pointer',
                   display:'flex', alignItems:'center', justifyContent:'center',
                 }}>
@@ -879,13 +879,13 @@ export default function PosterLibrary() {
                   {meta.summary && (
                     <div style={{
                       padding:'12px 14px',
-                      background:'#0A1628', border:'1px solid #1A2D4A',
+                      background:'var(--t-card)', border:'1px solid var(--t-border)',
                       borderRadius:12,
                     }}>
-                      <div style={{ color:'#94A3B8', fontSize:10, fontWeight:700, marginBottom:4 }}>
+                      <div style={{ color:'var(--t-sub)', fontSize:10, fontWeight:700, marginBottom:4 }}>
                         한 줄 요약
                       </div>
-                      <div style={{ color:'#E2E8F0', fontSize:13, lineHeight:1.6 }}>
+                      <div style={{ color:'var(--t-txt)', fontSize:13, lineHeight:1.6 }}>
                         {meta.summary}
                       </div>
                     </div>
@@ -895,7 +895,7 @@ export default function PosterLibrary() {
                   {meta.keypoints && meta.keypoints.length > 0 && (
                     <div style={{
                       padding:'12px 14px',
-                      background:'#0A1628', border:'1px solid #1A2D4A',
+                      background:'var(--t-card)', border:'1px solid var(--t-border)',
                       borderRadius:12,
                     }}>
                       <div style={{ color:'#60A5FA', fontSize:10, fontWeight:700, marginBottom:8,

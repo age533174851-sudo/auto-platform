@@ -90,7 +90,7 @@ export default function NotifyHost() {
         background: 'rgba(17,24,39,0.7)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.12)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
       }}>
-        <Bell size={18} color="#e2e8f0" />
+        <Bell size={18} color="var(--t-txt)" />
         {unread > 0 && <span style={{ position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 99, background: '#EF4444', color: '#fff', fontSize: 9, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{unread > 9 ? '9+' : unread}</span>}
       </button>
 
@@ -100,18 +100,18 @@ export default function NotifyHost() {
           <div onClick={() => setOpenCenter(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 10001 }} />
           <div style={{
             position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(86vw, 360px)', zIndex: 10002,
-            background: '#0B1220', borderLeft: '1px solid rgba(255,255,255,0.1)', boxShadow: '-8px 0 32px rgba(0,0,0,0.5)',
+            background: 'var(--t-card)', borderLeft: '1px solid rgba(255,255,255,0.1)', boxShadow: '-8px 0 32px rgba(0,0,0,0.5)',
             display: 'flex', flexDirection: 'column', animation: 'tg-slide-in .22s ease-out',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Bell size={16} color="#e2e8f0" />
+                <Bell size={16} color="var(--t-txt)" />
                 <span style={{ color: '#fff', fontSize: 14, fontWeight: 800 }}>알림</span>
                 <span style={{ color: '#64748b', fontSize: 11 }}>최근 {items.length}</span>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={() => { clearNotifications(); setItems([]); }} title="전체 삭제" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 4 }}><Trash2 size={16} color="#64748b" /></button>
-                <button onClick={() => setOpenCenter(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 4 }}><X size={18} color="#94a3b8" /></button>
+                <button onClick={() => setOpenCenter(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 4 }}><X size={18} color="var(--t-sub)" /></button>
               </div>
             </div>
             <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
@@ -123,9 +123,9 @@ export default function NotifyHost() {
                   <div key={it.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 8px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                     <k.Icon size={17} color={k.color} style={{ flexShrink: 0, marginTop: 1 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ color: '#e2e8f0', fontSize: 12.5, fontWeight: 700 }}>{it.title}</div>
-                      {it.detail && <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 2, whiteSpace: 'pre-line' }}>{it.detail}</div>}
-                      <div style={{ color: '#475569', fontSize: 9, marginTop: 3, fontVariantNumeric: 'tabular-nums' }}>{timeStr(it.at)}</div>
+                      <div style={{ color: 'var(--t-txt)', fontSize: 12.5, fontWeight: 700 }}>{it.title}</div>
+                      {it.detail && <div style={{ color: 'var(--t-sub)', fontSize: 11, marginTop: 2, whiteSpace: 'pre-line' }}>{it.detail}</div>}
+                      <div style={{ color: 'var(--t-muted)', fontSize: 9, marginTop: 3, fontVariantNumeric: 'tabular-nums' }}>{timeStr(it.at)}</div>
                     </div>
                   </div>
                 );

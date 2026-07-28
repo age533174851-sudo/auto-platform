@@ -33,7 +33,7 @@ export class ErrorBoundary extends React.Component<
         <div style={{
           minHeight: '100vh', display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center',
-          background: '#060B14', color: '#E2E8F0',
+          background: 'var(--t-bg)', color: 'var(--t-txt)',
           padding: 24, textAlign: 'center', fontFamily: 'monospace',
         }}>
           <div style={{fontSize: 40, marginBottom: 12}}>⚠️</div>
@@ -41,14 +41,14 @@ export class ErrorBoundary extends React.Component<
             Client-side Exception
           </div>
           <div style={{
-            background: '#0F1924', border: '1px solid #EF4444',
+            background: 'var(--t-card)', border: '1px solid #EF4444',
             borderRadius: 10, padding: 16, maxWidth: 360, width: '100%',
             textAlign: 'left', marginBottom: 16,
           }}>
             <div style={{color: '#F59E0B', fontSize: 13, fontWeight: 700, marginBottom: 6}}>
               Error:
             </div>
-            <div style={{color: '#E2E8F0', fontSize: 12, wordBreak: 'break-word', lineHeight: 1.5}}>
+            <div style={{color: 'var(--t-txt)', fontSize: 12, wordBreak: 'break-word', lineHeight: 1.5}}>
               {msg}
             </div>
             {stack && (
@@ -56,7 +56,7 @@ export class ErrorBoundary extends React.Component<
                 <div style={{color: '#F59E0B', fontSize: 11, fontWeight: 700, marginTop: 10, marginBottom: 4}}>
                   Stack:
                 </div>
-                <div style={{color: '#94A3B8', fontSize: 10, whiteSpace: 'pre-wrap', lineHeight: 1.4}}>
+                <div style={{color: 'var(--t-sub)', fontSize: 10, whiteSpace: 'pre-wrap', lineHeight: 1.4}}>
                   {stack}
                 </div>
               </>

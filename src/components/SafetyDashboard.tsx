@@ -1,14 +1,11 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { notifyInfo } from '@/lib/notify/center';
 
-const T = {
-  bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
-  border:'#1A2D4A', border2:'#243A5E',
-  txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B',
-  acl:'#60A5FA', acc:'#2563EB', acg:'#1E3A5F',
-} as const;
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 // ── Risk Disclosure Modal ─────────────────────────────────────
 export function RiskDisclosureModal({
@@ -38,11 +35,11 @@ export function RiskDisclosureModal({
 
   return (
     <div style={{ position:'fixed', inset:0, zIndex:600, background:'rgba(0,0,0,.88)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
-      <div style={{ background:T.card, border:`1px solid ${T.red}40`, borderRadius:18, padding:20, maxWidth:440, width:'100%', maxHeight:'80vh', overflowY:'auto' }}>
+      <div style={{ background:T.card, border:`1px solid ${A(T.red,'40')}`, borderRadius:18, padding:20, maxWidth:440, width:'100%', maxHeight:'80vh', overflowY:'auto' }}>
         <div style={{ color:T.red, fontWeight:900, fontSize:16, marginBottom:4 }}>⚠️ 실거래 전환 위험고지</div>
         <div style={{ color:T.muted, fontSize:11, marginBottom:14 }}>아래 모든 항목에 동의해야 실거래가 활성화됩니다</div>
 
-        <div style={{ background:'#EF444408', border:`1px solid ${T.red}25`, borderRadius:10, padding:'10px 14px', marginBottom:14 }}>
+        <div style={{ background:'#EF444408', border:`1px solid ${A(T.red,'25')}`, borderRadius:10, padding:'10px 14px', marginBottom:14 }}>
           <div style={{ color:T.red, fontSize:10, fontWeight:700, marginBottom:6 }}>🚨 이것은 실제 자산 거래입니다</div>
           <div style={{ color:'#FCA5A5', fontSize:10, lineHeight:1.7 }}>
             모의투자와 달리 실거래는 실제 금전 손실이 발생할 수 있습니다.<br/>
@@ -135,10 +132,10 @@ export function PreOrderEstimate({
   const fmt = (v: number) => v >= 10000 ? '₩'+Math.round(v).toLocaleString() : '₩'+v.toFixed(0);
 
   return (
-    <div style={{ background:T.card, border:`1px solid ${result.allowed ? T.acl+'40' : T.red+'40'}`, borderRadius:12, padding:'12px 14px' }}>
+    <div style={{ background:T.card, border:`1px solid ${result.allowed ? A(T.acl,'40') : A(T.red,'40')}`, borderRadius:12, padding:'12px 14px' }}>
       <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
         <div style={{ color:T.txt, fontWeight:700, fontSize:12 }}>예상 비용 분석</div>
-        <div style={{ background: result.allowed ? T.grn+'20' : T.red+'20', border:`1px solid ${result.allowed?T.grn:T.red}40`, borderRadius:6, padding:'2px 8px', color: result.allowed?T.grn:T.red, fontSize:10, fontWeight:700 }}>
+        <div style={{ background: result.allowed ? A(T.grn,'20') : A(T.red,'20'), border:`1px solid ${result.allowed?T.grn:T.red}40`, borderRadius:6, padding:'2px 8px', color: result.allowed?T.grn:T.red, fontSize:10, fontWeight:700 }}>
           {result.allowed ? '✅ 진입 가능' : '❌ 차단됨'}
         </div>
       </div>
@@ -157,16 +154,16 @@ export function PreOrderEstimate({
       </div>
 
       {result.liquidationPx && (
-        <div style={{ background:'#EF444410', border:`1px solid ${T.red}30`, borderRadius:8, padding:'6px 10px', marginBottom:6 }}>
+        <div style={{ background:'#EF444410', border:`1px solid ${A(T.red,'30')}`, borderRadius:8, padding:'6px 10px', marginBottom:6 }}>
           <div style={{ color:T.red, fontSize:10 }}>청산가: <strong>{fmt(result.liquidationPx)}</strong></div>
         </div>
       )}
 
       {result.blockers?.map((b: string, i: number) => (
-        <div key={i} style={{ background:'#EF444408', border:`1px solid ${T.red}30`, borderRadius:7, padding:'5px 9px', marginBottom:4, color:T.red, fontSize:10 }}>🚫 {b}</div>
+        <div key={i} style={{ background:'#EF444408', border:`1px solid ${A(T.red,'30')}`, borderRadius:7, padding:'5px 9px', marginBottom:4, color:T.red, fontSize:10 }}>🚫 {b}</div>
       ))}
       {result.warnings?.map((w: string, i: number) => (
-        <div key={i} style={{ background:'#F59E0B08', border:`1px solid ${T.ylw}30`, borderRadius:7, padding:'5px 9px', marginBottom:4, color:T.ylw, fontSize:10 }}>{w}</div>
+        <div key={i} style={{ background:'#F59E0B08', border:`1px solid ${A(T.ylw,'30')}`, borderRadius:7, padding:'5px 9px', marginBottom:4, color:T.ylw, fontSize:10 }}>{w}</div>
       ))}
     </div>
   );
@@ -249,13 +246,13 @@ export default function SafetyDashboard() {
               placeholder="정지 이유 입력…"
               style={{ flex:1, background:T.bg, border:`1px solid ${T.border}`, borderRadius:8, padding:'8px 12px', color:T.txt, fontSize:12, outline:'none' }}/>
             <button onClick={() => handleKillSwitch(true)} disabled={activatingKill || !killReason.trim()}
-              style={{ padding:'8px 16px', background:T.red+'20', border:`1px solid ${T.red}60`, borderRadius:8, color:T.red, fontWeight:700, fontSize:11, cursor:'pointer' }}>
+              style={{ padding:'8px 16px', background:A(T.red,'20'), border:`1px solid ${A(T.red,'60')}`, borderRadius:8, color:T.red, fontWeight:700, fontSize:11, cursor:'pointer' }}>
               🛑 전체 정지
             </button>
           </div>
         ) : (
           <button onClick={() => handleKillSwitch(false)} disabled={activatingKill}
-            style={{ width:'100%', padding:'10px', background:T.grn+'20', border:`1px solid ${T.grn}60`, borderRadius:10, color:T.grn, fontWeight:700, fontSize:12, cursor:'pointer' }}>
+            style={{ width:'100%', padding:'10px', background:A(T.grn,'20'), border:`1px solid ${A(T.grn,'60')}`, borderRadius:10, color:T.grn, fontWeight:700, fontSize:12, cursor:'pointer' }}>
             ✅ 긴급 정지 해제
           </button>
         )}
@@ -263,7 +260,7 @@ export default function SafetyDashboard() {
 
       {/* Risk metrics */}
       <div className="mobile-1col" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:10 }}>
-        <div style={{ background:T.card, border:`1px solid ${dl > 300000 ? T.red+'60' : T.border}`, borderRadius:12, padding:'12px' }}>
+        <div style={{ background:T.card, border:`1px solid ${dl > 300000 ? A(T.red,'60') : T.border}`, borderRadius:12, padding:'12px' }}>
           <div style={{ color:T.muted, fontSize:9, marginBottom:4 }}>오늘 누적 손실</div>
           <div style={{ color: dl > 300000 ? T.red : dl > 100000 ? T.ylw : T.grn, fontWeight:800, fontSize:16 }}>
             ₩{dl.toLocaleString()}
@@ -273,7 +270,7 @@ export default function SafetyDashboard() {
           </div>
           <div style={{ color:T.muted, fontSize:8, marginTop:2 }}>한도 ₩500,000</div>
         </div>
-        <div style={{ background:T.card, border:`1px solid ${cl >= 2 ? T.ylw+'60' : T.border}`, borderRadius:12, padding:'12px' }}>
+        <div style={{ background:T.card, border:`1px solid ${cl >= 2 ? A(T.ylw,'60') : T.border}`, borderRadius:12, padding:'12px' }}>
           <div style={{ color:T.muted, fontSize:9, marginBottom:4 }}>연속 손실 횟수</div>
           <div style={{ color: cl >= 3 ? T.red : cl >= 2 ? T.ylw : T.grn, fontWeight:800, fontSize:28 }}>
             {cl} <span style={{ fontSize:12, color:T.muted }}>/ 3</span>
@@ -315,7 +312,7 @@ export default function SafetyDashboard() {
       </div>
 
       {/* Security info */}
-      <div style={{ background:'#2563EB08', border:`1px solid ${T.acl}20`, borderRadius:12, padding:'12px 14px' }}>
+      <div style={{ background:'#2563EB08', border:`1px solid ${A(T.acl,'20')}`, borderRadius:12, padding:'12px 14px' }}>
         <div style={{ color:T.acl, fontWeight:700, fontSize:11, marginBottom:6 }}>🔐 보안 아키텍처</div>
         <div style={{ color:'#93C5FD', fontSize:10, lineHeight:1.7 }}>
           ✅ 웹훅 중복 방지 (24h 아이덴티컨시 키)<br/>

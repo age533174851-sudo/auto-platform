@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -46,7 +47,7 @@ function WelcomeGuide({ onNav }: { onNav: (t: string) => void }) {
             </button>
           ))}
         </div>
-        <div style={{ background: T.ylw + '12', border: `1px solid ${T.ylw}30`, borderRadius: 10, padding: '9px 12px', marginBottom: 14 }}>
+        <div style={{ background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: 10, padding: '9px 12px', marginBottom: 14 }}>
           <span style={{ color: T.ylw, fontSize: 10, lineHeight: 1.5 }}>기본은 모의매매예요. 실제 거래는 직접 켜야 작동하니 안심하고 둘러보세요.</span>
         </div>
         <button onClick={dismiss} style={{ width: '100%', padding: '13px', background: T.acc, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>
@@ -97,7 +98,7 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
         </button>
       )}
       {/* ── 총자산 히어로 ── */}
-      <div style={{background:'linear-gradient(145deg,#0D1A35,#091228)',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
+      <div style={{background:'linear-gradient(145deg,var(--t-card),var(--t-bg))',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>
         <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>내 총자산 · {tr(lang,'mock')}</span></div>
         <div style={{color:T.txt,fontSize:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1.5}}>{cvt(TOTAL,currency)}</div>
@@ -109,7 +110,7 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
       </div>
 
       {/* ── 자동매매 상태 ── */}
-      <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${autoAll?T.grn+'40':T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
+      <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${autoAll?A(T.grn,'40'):T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
         <div style={{flexShrink:0,width:40,height:40,borderRadius:11,background:(autoAll?T.grn:T.muted)+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
           <Bot size={20} color={autoAll?T.grn:T.muted}/>
         </div>

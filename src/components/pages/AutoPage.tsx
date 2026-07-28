@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { BotRun, ExecMode, RiskEvent, Signal, SignalState, StratStatus, StratType, Strategy } from '@/types/domain';
 import { confirmDialog } from '@/lib/confirm/dialog';
@@ -148,18 +149,18 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             );
           })}
         </div>
-        <button onClick={()=>globalStop?setGlobalStop(false):handleGlobalStop()} style={{background:globalStop?T.grn+'20':T.red+'20',color:globalStop?T.grn:T.red,border:`1px solid ${globalStop?T.grn:T.red}40`,borderRadius:10,padding:'8px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>
+        <button onClick={()=>globalStop?setGlobalStop(false):handleGlobalStop()} style={{background:globalStop?A(T.grn,'20'):A(T.red,'20'),color:globalStop?T.grn:T.red,border:`1px solid ${globalStop?T.grn:T.red}40`,borderRadius:10,padding:'8px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>
           {globalStop?'▶ 재시작':'⏹ 전체정지'}
         </button>
       </div>
 
-      {globalStop&&<div style={{background:T.red+'15',border:`1px solid ${T.red}`,borderRadius:12,padding:'10px 14px',marginBottom:12,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:18}}>🚨</span><div style={{color:T.red,fontWeight:700,fontSize:12}}>전체 긴급 정지 활성화 — 모든 봇이 중단되었습니다</div></div>}
+      {globalStop&&<div style={{background:A(T.red,'15'),border:`1px solid ${T.red}`,borderRadius:12,padding:'10px 14px',marginBottom:12,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:18}}>🚨</span><div style={{color:T.red,fontWeight:700,fontSize:12}}>전체 긴급 정지 활성화 — 모든 봇이 중단되었습니다</div></div>}
 
-      {execMode==='paper'&&<div style={{background:T.prp+'12',border:`1px solid ${T.prp}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontSize:11,fontWeight:700}}>모의 자동매매 모드 — 실제 자금 이동 없음 · 수익 보장 없음</div></div>}
+      {execMode==='paper'&&<div style={{background:A(T.prp,'12'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontSize:11,fontWeight:700}}>모의 자동매매 모드 — 실제 자금 이동 없음 · 수익 보장 없음</div></div>}
 
-      {execMode==='testnet'&&<div style={{background:T.ylw+'15',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontSize:11,fontWeight:700}}>테스트넷 자동매매 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
+      {execMode==='testnet'&&<div style={{background:A(T.ylw,'15'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontSize:11,fontWeight:700}}>테스트넷 자동매매 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
 
-      {execMode==='real'&&<div style={{background:T.red+'15',border:`1px solid ${T.red}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 실전 자동매매 — 연결된 거래소로 실제 주문 실행 · 원금 손실 위험</div></div>}
+      {execMode==='real'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 실전 자동매매 — 연결된 거래소로 실제 주문 실행 · 원금 손실 위험</div></div>}
 
       {/* Dashboard metrics */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
@@ -190,7 +191,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                   <div style={{display:'flex',gap:8,alignItems:'center'}}>
                     <div style={{position:'relative',width:38,height:38,flexShrink:0}}>
                       <AssetLogo ticker={s.asset} name={s.assetNameKr} size={38} />
-                      <div style={{position:'absolute',right:-4,bottom:-4,width:20,height:20,borderRadius:'50%',background:si.color,border:`2px solid ${T.bg||'#0B1220'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11}}>{si.icon}</div>
+                      <div style={{position:'absolute',right:-4,bottom:-4,width:20,height:20,borderRadius:'50%',background:si.color,border:`2px solid ${T.bg||'var(--t-card)'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11}}>{si.icon}</div>
                     </div>
                     <div>
                       <div style={{display:'flex',gap:5,alignItems:'center',flexWrap:'wrap'}}>
@@ -217,11 +218,11 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                 </div>
                 {/* Controls */}
                 <div style={{display:'flex',gap:6}}>
-                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,padding:'7px',background:s.status==='running'?T.ylw+'15':T.grn+'15',color:s.status==='running'?T.ylw:T.grn,border:`1px solid ${s.status==='running'?T.ylw:T.grn}30`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,padding:'7px',background:s.status==='running'?A(T.ylw,'15'):A(T.grn,'15'),color:s.status==='running'?T.ylw:T.grn,border:`1px solid ${s.status==='running'?T.ylw:T.grn}30`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
                     {s.status==='running'?'⏸ 일시중지':'▶ 시작'}
                   </button>
-                  <button onClick={e=>{e.stopPropagation();stopStrat(s.id);}} style={{flex:1,padding:'7px',background:T.red+'12',color:T.red,border:`1px solid ${T.red}25`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>⏹ 중지</button>
-                  <button onClick={e=>{e.stopPropagation();setEditStrat(s);}} style={{padding:'7px 10px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>설정</button>
+                  <button onClick={e=>{e.stopPropagation();stopStrat(s.id);}} style={{flex:1,padding:'7px',background:A(T.red,'12'),color:T.red,border:`1px solid ${A(T.red,'25')}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>⏹ 중지</button>
+                  <button onClick={e=>{e.stopPropagation();setEditStrat(s);}} style={{padding:'7px 10px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>설정</button>
                 </div>
                 {/* Expanded detail */}
                 {selStrat?.id===s.id&&(
@@ -244,7 +245,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                       </div>
                     </div>
                     {/* AI assistant note */}
-                    <div style={{marginTop:8,background:T.prp+'10',border:`1px solid ${T.prp}25`,borderRadius:8,padding:'8px 10px'}}>
+                    <div style={{marginTop:8,background:A(T.prp,'10'),border:`1px solid ${A(T.prp,'25')}`,borderRadius:8,padding:'8px 10px'}}>
                       <div style={{color:T.prp,fontSize:10,fontWeight:700,marginBottom:2}}>AI 어시스턴트</div>
                       <div style={{color:T.sub,fontSize:10,lineHeight:1.5}}>
                         {s.status==='running'?'전략이 정상 실행 중입니다. 현재 시장 변동성이 보통 수준으로 설정된 레버리지가 적절합니다.':s.status==='paused'?'일시 중지 상태입니다. 시장 상황 확인 후 재개를 권장합니다.':'전략이 중지되었습니다. 파라미터를 검토한 후 다시 시작하세요.'}
@@ -312,7 +313,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 
       {tab==='signals'&&(
         <div>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}>
             <div style={{color:T.ylw,fontSize:11,fontWeight:700}}>신호 처리 엔진 — 내부 지표 · TradingView · AI (준비중)</div>
           </div>
           {(Array.isArray(signals)?signals:[]).map(sig=>(
@@ -320,7 +321,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
                 <div>
                   <div style={{display:'flex',gap:5,alignItems:'center',marginBottom:3,flexWrap:'wrap'}}>
-                    <span style={{background:sig.type==='buy'?T.grn+'20':T.red+'20',color:sig.type==='buy'?T.grn:T.red,fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:6}}>{sig.type==='buy'?'매수':'매도'}</span>
+                    <span style={{background:sig.type==='buy'?A(T.grn,'20'):A(T.red,'20'),color:sig.type==='buy'?T.grn:T.red,fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:6}}>{sig.type==='buy'?'매수':'매도'}</span>
                     <span style={{color:T.txt,fontWeight:700,fontSize:12}}>{sig.asset}</span>
                     <span style={{background:signalColor[sig.state]+'20',color:signalColor[sig.state],fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:99}}>{signalLabel[sig.state]}</span>
                     <span style={{background:T.alt,color:T.muted,fontSize:9,padding:'1px 5px',borderRadius:5}}>{sig.source}</span>
@@ -336,20 +337,20 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                 <div style={{color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(sig.price,currency)}</div>
                 <div style={{color:T.muted,fontSize:10}}>{sig.note}</div>
               </div>
-              <div style={{marginTop:6,height:4,background:'#1A2D4A',borderRadius:2,overflow:'hidden'}}>
+              <div style={{marginTop:6,height:4,background:'var(--t-border)',borderRadius:2,overflow:'hidden'}}>
                 <div style={{height:'100%',width:sig.confidence+'%',background:signalColor[sig.state],borderRadius:2}}/>
               </div>
             </Card>
           ))}
           {/* Webhook placeholder */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.cyn}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.cyn,'30')}`}}>
             <div style={{color:T.cyn,fontWeight:700,fontSize:12,marginBottom:8}}>📺 TradingView Webhook 연동</div>
             <div style={{color:T.muted,fontSize:11,lineHeight:1.6,marginBottom:10}}>TradingView 알림 → TRAIGO 자동 신호 수신. 실행 시 자동으로 봇이 처리합니다.</div>
             <div style={{display:'flex',gap:8}}>
               <input placeholder="https://your-webhook-url.com/signal" style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:11,outline:'none'}}/>
               <button type="button"
                 onClick={() => notifyInfo('TradingView Webhook 연동은 곧 출시됩니다. 현재는 더보기 → 전략빌더의 자체 시그널만 동작합니다.')}
-                style={{background:T.cyn+'20',color:T.cyn,border:`1px solid ${T.cyn}40`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
+                style={{background:A(T.cyn,'20'),color:T.cyn,border:`1px solid ${A(T.cyn,'40')}`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
             </div>
           </Card>
         </div>
@@ -371,7 +372,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
               <button onClick={() => onNav?.('risk_settings')}
                 aria-label="리스크 편집"
                 style={{display:'inline-flex',alignItems:'center',gap:4, background:T.acg, color:T.acl,
-                  border:`1px solid ${T.acl}40`, borderRadius:8, padding:'6px 10px',
+                  border:`1px solid ${A(T.acl,'40')}`, borderRadius:8, padding:'6px 10px',
                   fontSize:11, fontWeight:700, cursor:'pointer', minHeight:32}}>
                 <Edit3 size={11} strokeWidth={2.4}/>편집
                 <ChevronRight size={12} strokeWidth={2.4}/>
@@ -405,7 +406,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             ))}
           </Card>
           {/* Emergency stop */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.red}40`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.red,'40')}`}}>
             <div style={{color:T.red,fontWeight:700,marginBottom:6}}>🚨 긴급 정지</div>
             <div style={{color:T.muted,fontSize:11,marginBottom:10}}>모든 자동매매를 즉시 중단합니다. 수동 거래는 계속 가능합니다.</div>
             <button onClick={handleGlobalStop} style={{width:'100%',padding:'12px',background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:'pointer'}}>🚨 전체 자동매매 긴급 정지</button>
@@ -426,9 +427,9 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
                 <div>
                   <div style={{display:'flex',gap:5,alignItems:'center',marginBottom:2,flexWrap:'wrap'}}>
-                    <span style={{background:r.side==='long'?T.grn+'15':T.red+'15',color:r.side==='long'?T.grn:T.red,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.side==='long'?'롱':'숏'}</span>
+                    <span style={{background:r.side==='long'?A(T.grn,'15'):A(T.red,'15'),color:r.side==='long'?T.grn:T.red,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.side==='long'?'롱':'숏'}</span>
                     <span style={{color:T.txt,fontWeight:700,fontSize:12}}>{r.asset}</span>
-                    <span style={{background:T.prp+'15',color:T.prp,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.execMode==='paper'?'모의':r.execMode==='testnet'?'테넷':'실전'}</span>
+                    <span style={{background:A(T.prp,'15'),color:T.prp,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:6}}>{r.execMode==='paper'?'모의':r.execMode==='testnet'?'테넷':'실전'}</span>
                   </div>
                   <div style={{color:T.muted,fontSize:10}}>{r.stratName}</div>
                   <div style={{color:T.muted,fontSize:9,marginTop:1}}>진입 {cvt(r.entryPrice,currency)}{r.exitPrice?` → ${cvt(r.exitPrice,currency)}`:' (오픈)'}</div>
@@ -483,10 +484,10 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                 </div>
               ))}
             </div>
-            <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:8,padding:'8px 12px',marginBottom:12}}>
+            <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:12}}>
               <div style={{color:T.ylw,fontSize:10,fontWeight:700}}>⚠️ 새 전략은 항상 모의매매 모드로 시작됩니다. 실제 거래 비활성화.</div>
             </div>
-            <button onClick={handleCreateStrat} disabled={!newStrat.asset} style={{width:'100%',padding:'12px',background:newStrat.asset?T.acc:'#243A5E',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:'pointer'}}>
+            <button onClick={handleCreateStrat} disabled={!newStrat.asset} style={{width:'100%',padding:'12px',background:newStrat.asset?T.acc:'var(--t-border2)',color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:'pointer'}}>
               전략 생성 (모의)
             </button>
           </Card>
@@ -501,7 +502,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             <div style={{color:T.red,fontWeight:800,fontSize:16,marginBottom:8}}>⚠️ 실전 모드 활성화</div>
             <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:16}}>실전 모드에서는 연결된 거래소 API를 통해 실제 주문이 실행됩니다. 원금 손실 위험이 있습니다.<br/><br/>먼저 테스트넷에서 전략을 충분히 검증한 뒤 활성화하세요.</div>
             <button onClick={()=>{setExecMode('real');setShowConfirmReal(false);}} style={{width:'100%',padding:'12px',background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer',marginBottom:8}}>실전 모드 활성화</button>
-            <button onClick={()=>setShowConfirmReal(false)} style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소 (모의 유지)</button>
+            <button onClick={()=>setShowConfirmReal(false)} style={{width:'100%',padding:'12px',background:A(T.muted,'20'),color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소 (모의 유지)</button>
           </div>
         </>
       )}
@@ -520,7 +521,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                 </div>
               ))}
             </div>
-            <div style={{background:T.grn+'12',border:`1px solid ${T.grn}30`,borderRadius:8,padding:'8px 12px',marginBottom:12}}>
+            <div style={{background:A(T.grn,'12'),border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:12}}>
               <div style={{color:T.grn,fontSize:10,fontWeight:700}}>설정 변경은 백테스트 후 적용을 권장합니다.</div>
             </div>
             <button onClick={()=>setEditStrat(null)} style={{width:'100%',padding:'12px',background:T.acc,color:'#fff',border:'none',borderRadius:12,fontWeight:700,cursor:'pointer'}}>확인</button>
@@ -598,7 +599,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
           }}>{MODE_LABEL[riskMode].label}</span>
           <span style={{
             marginLeft:'auto', padding:'2px 7px',borderRadius:4,fontSize:9,fontWeight:800,
-            background: guard.pass ? T.grn + '22' : T.red + '22',
+            background: guard.pass ? A(T.grn,'22') : A(T.red,'22'),
             color:      guard.pass ? T.grn       : T.red,
           }}>
             {guard.pass ? '정상 작동' : '정지됨'}
@@ -649,7 +650,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
             {guard.consecutive > 0 && (
               <div style={{
                 padding:'4px 9px', borderRadius:6, fontSize:10, fontWeight:700,
-                background: guard.consecutive >= guard.consecutiveLimit ? T.red+'20' : T.ylw+'20',
+                background: guard.consecutive >= guard.consecutiveLimit ? A(T.red,'20') : A(T.ylw,'20'),
                 color:      guard.consecutive >= guard.consecutiveLimit ? T.red      : T.ylw,
                 border: `1px solid ${guard.consecutive >= guard.consecutiveLimit ? T.red : T.ylw}30`,
               }}>
@@ -659,15 +660,15 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
             {guard.cooldownUntil > Date.now() && (
               <div style={{
                 padding:'4px 9px', borderRadius:6, fontSize:10, fontWeight:700,
-                background: T.ylw+'20', color: T.ylw,
-                border: `1px solid ${T.ylw}30`,
+                background: A(T.ylw,'20'), color: T.ylw,
+                border: `1px solid ${A(T.ylw,'30')}`,
                 display:'inline-flex', alignItems:'center', gap:4,
               }}>
                 <Clock size={10} strokeWidth={2.4}/>
                 쿨다운 {Math.ceil((guard.cooldownUntil - Date.now()) / 60_000)}분 남음
                 <button onClick={() => { clearCooldown(); refresh(); }}
                   aria-label="쿨다운 해제"
-                  style={{marginLeft:4,background:'transparent',color:T.ylw,border:`1px solid ${T.ylw}50`,borderRadius:4,padding:'1px 6px',fontSize:9,cursor:'pointer'}}>
+                  style={{marginLeft:4,background:'transparent',color:T.ylw,border:`1px solid ${A(T.ylw,'50')}`,borderRadius:4,padding:'1px 6px',fontSize:9,cursor:'pointer'}}>
                   해제
                 </button>
               </div>
@@ -678,7 +679,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
         {!guard.pass && guard.reason && (
           <div style={{
             marginTop:8, padding:'7px 10px',
-            background: T.red+'10', border: `1px solid ${T.red}30`,
+            background: A(T.red,'10'), border: `1px solid ${A(T.red,'30')}`,
             borderRadius:6, color: T.red, fontSize: 11, lineHeight: 1.4,
           }}>
             {guard.reason}
@@ -736,7 +737,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
           </div>
 
           {perf.curConsecLoss >= 3 && (
-            <div style={{marginTop:8,padding:'7px 10px',background:T.red+'10',border:`1px solid ${T.red}30`,borderRadius:6,color:T.red,fontSize:10,lineHeight:1.4}}>
+            <div style={{marginTop:8,padding:'7px 10px',background:A(T.red,'10'),border:`1px solid ${A(T.red,'30')}`,borderRadius:6,color:T.red,fontSize:10,lineHeight:1.4}}>
               ⚠️ 연속 {perf.curConsecLoss}회 손실 중 — 전략 점검을 권장합니다
             </div>
           )}
@@ -769,7 +770,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                     <span>{sp.metrics.totalTrades}건</span>
                   </div>
                   {sp.shouldDisable && sp.enabled && (
-                    <div style={{display:'flex',alignItems:'center',gap:6,marginTop:6,padding:'5px 8px',background:T.red+'12',borderRadius:6}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,marginTop:6,padding:'5px 8px',background:A(T.red,'12'),borderRadius:6}}>
                       <span style={{flex:1,color:T.red,fontSize:9,lineHeight:1.3}}>⚠️ {sp.healthReason} — 비활성화 권장</span>
                       <button onClick={() => autoDisable(sp.strategyId)}
                         style={{flexShrink:0,background:T.red,color:'#fff',border:'none',borderRadius:5,padding:'3px 9px',fontSize:9,fontWeight:700,cursor:'pointer'}}>
@@ -815,7 +816,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
               {cvt(Math.floor(totalPositionVal), currency)}
             </div>
           </div>
-          <div style={{background:balance.totalPnL>=0?T.grn+'15':T.red+'15',padding:'8px 10px',borderRadius:8,border:`1px solid ${balance.totalPnL>=0?T.grn:T.red}40`}}>
+          <div style={{background:balance.totalPnL>=0?A(T.grn,'15'):A(T.red,'15'),padding:'8px 10px',borderRadius:8,border:`1px solid ${balance.totalPnL>=0?T.grn:T.red}40`}}>
             <div style={{color:balance.totalPnL>=0?T.grn:T.red,fontSize:9,marginBottom:2}}>누적 PnL</div>
             <div style={{color:balance.totalPnL>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
               {balance.totalPnL>=0?'+':''}{cvt(Math.abs(Math.floor(balance.totalPnL)), currency)}
@@ -842,7 +843,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
         {logs.length > 0 && (
           <button onClick={async () => { if((await confirmDialog('실행 로그를 모두 삭제하시겠습니까?', { danger: true }))){clearLogs();refresh();} }}
             aria-label="로그 삭제"
-            style={{background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,padding:'4px 8px',fontSize:10,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:3}}>
+            style={{background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:6,padding:'4px 8px',fontSize:10,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:3}}>
             <Trash2 size={10} strokeWidth={2.4}/>삭제
           </button>
         )}
@@ -931,7 +932,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                         textDecorationColor: T.muted,
                         textUnderlineOffset: 2,
                       }}>{log.asset}</span>
-                    <span style={{padding:'1px 5px',background:log.action==='buy'?T.grn+'22':T.red+'22',color:log.action==='buy'?T.grn:T.red,borderRadius:4,fontSize:9,fontWeight:800}}>
+                    <span style={{padding:'1px 5px',background:log.action==='buy'?A(T.grn,'22'):A(T.red,'22'),color:log.action==='buy'?T.grn:T.red,borderRadius:4,fontSize:9,fontWeight:800}}>
                       {log.action==='buy'?'매수':'매도'}
                     </span>
                     <span style={{padding:'1px 5px',background:T.alt,color:T.muted,borderRadius:4,fontSize:9,fontWeight:700}}>
@@ -943,7 +944,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                 <div style={{color:T.muted,fontSize:9,flexShrink:0}}>{timeLabel}</div>
               </div>
               {log.status === 'triggered' && log.filledPrice && log.filledAmount && (
-                <div style={{color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',background:T.grn+'10',padding:'5px 8px',borderRadius:6,marginTop:4}}>
+                <div style={{color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',background:A(T.grn,'10'),padding:'5px 8px',borderRadius:6,marginTop:4}}>
                   체결가 {cvt(Math.floor(log.filledPrice), currency)} · {cvt(Math.floor(log.filledAmount), currency)}
                   {log.filledQuantity && ` (${log.filledQuantity.toFixed(6)})`}
                 </div>

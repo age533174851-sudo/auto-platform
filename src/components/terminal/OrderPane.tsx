@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // src/components/terminal/OrderPane.tsx
 //
 // 호가판과 주문판. **따로 export한다.**
@@ -346,7 +347,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <button onClick={() => setLevOpen(v => !v)} style={{
           flex: 1, minHeight: 30, borderRadius: 7, cursor: 'pointer',
           background: leverage >= 50 ? C.downBg : C.raised,
-          border: `1px solid ${leverage >= 50 ? C.down + '55' : C.hair}`,
+          border: `1px solid ${leverage >= 50 ? A(C.down,'55') : C.hair}`,
           color: leverage >= 50 ? C.down : C.text,
           fontSize: FS.small, fontWeight: 700, ...NUM,
         }}>{leverage}×</button>

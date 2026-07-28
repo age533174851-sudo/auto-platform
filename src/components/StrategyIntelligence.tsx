@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // StrategyIntelligence — 전략 건강도 + 우선순위 충돌 해결 시각화.
 import React, { useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -27,7 +28,7 @@ export default function StrategyIntelligence({
           <div style={{ color: T.muted, fontSize: 11 }}>건강도 모니터링 · 신호 충돌 자동 해결</div>
         </div>
         {dangerCount > 0 && (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: T.red + '20', color: T.red, fontSize: 10, fontWeight: 800, padding: '4px 8px', borderRadius: 6 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: A(T.red,'20'), color: T.red, fontSize: 10, fontWeight: 800, padding: '4px 8px', borderRadius: 6 }}>
             <AlertTriangle size={12} /> {dangerCount}
           </span>
         )}
@@ -71,7 +72,7 @@ export default function StrategyIntelligence({
       </div>
       {healthList.length === 0 && <div style={{ color: T.muted, fontSize: 12, padding: '8px 0' }}>등록된 전략이 없습니다.</div>}
       {healthList.map(({ s, h }) => (
-        <div key={s.id} style={{ background: T.alt, borderRadius: 12, padding: '11px 13px', marginBottom: 8, border: h.shouldDisable ? `1px solid ${T.red}40` : `1px solid transparent` }}>
+        <div key={s.id} style={{ background: T.alt, borderRadius: 12, padding: '11px 13px', marginBottom: 8, border: h.shouldDisable ? `1px solid ${A(T.red,'40')}` : `1px solid transparent` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}>
             <span style={{ color: T.txt, fontSize: 12, fontWeight: 700, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
             <span style={{ background: h.color + '20', color: h.color, fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 5 }}>{h.label} {h.tier !== 'unknown' ? h.score : ''}</span>
@@ -84,7 +85,7 @@ export default function StrategyIntelligence({
             <span style={{ color: T.muted, fontSize: 9.5, flex: 1 }}>{h.reasons[0]}{h.reasons.length > 1 ? ` · ${h.reasons[1]}` : ''}</span>
             {h.shouldDisable && onDisable && (
               <button onClick={() => onDisable(s.id)}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, background: T.red + '18', color: T.red, border: `1px solid ${T.red}40`, borderRadius: 7, padding: '5px 10px', fontSize: 10, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}>
+                style={{ display: 'flex', alignItems: 'center', gap: 4, background: A(T.red,'18'), color: T.red, border: `1px solid ${A(T.red,'40')}`, borderRadius: 7, padding: '5px 10px', fontSize: 10, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}>
                 <Power size={11} /> 자동 정지
               </button>
             )}

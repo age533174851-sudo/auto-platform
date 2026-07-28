@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -173,7 +174,7 @@ function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];curre
     <div>
       {/* ── Toast ── */}
       {toast&&(
-        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:999,background:T.surf,border:`1px solid ${T.acl}40`,borderRadius:12,padding:'10px 16px',fontSize:12,fontWeight:700,color:T.txt,whiteSpace:'nowrap',boxShadow:'0 4px 20px rgba(0,0,0,.5)'}}>
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:999,background:T.surf,border:`1px solid ${A(T.acl,'40')}`,borderRadius:12,padding:'10px 16px',fontSize:12,fontWeight:700,color:T.txt,whiteSpace:'nowrap',boxShadow:'0 4px 20px rgba(0,0,0,.5)'}}>
           {toast}
         </div>
       )}
@@ -228,7 +229,7 @@ function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];curre
                       </div>
                       <button
                         onClick={()=>{ already ? remove(a.id) : add(a); }}
-                        style={{flexShrink:0,marginLeft:10,background:already?T.red+'15':T.acg,color:already?T.red:T.acl,border:`1px solid ${already?T.red:T.acl}40`,borderRadius:9,padding:'6px 12px',fontSize:11,fontWeight:700,cursor:'pointer',minHeight:34}}
+                        style={{flexShrink:0,marginLeft:10,background:already?A(T.red,'15'):T.acg,color:already?T.red:T.acl,border:`1px solid ${already?T.red:T.acl}40`,borderRadius:9,padding:'6px 12px',fontSize:11,fontWeight:700,cursor:'pointer',minHeight:34}}
                       >
                         {already?'제거':'+ 추가'}
                       </button>
@@ -249,7 +250,7 @@ function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];curre
         <div style={{fontWeight:900,fontSize:16,color:T.txt}}>왓치리스트</div>
         <button
           onClick={openModal}
-          style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,padding:'7px 14px',fontSize:12,fontWeight:700,cursor:'pointer',minHeight:38}}
+          style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,padding:'7px 14px',fontSize:12,fontWeight:700,cursor:'pointer',minHeight:38}}
         >
           + 추가
         </button>

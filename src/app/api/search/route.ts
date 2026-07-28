@@ -277,7 +277,7 @@ export async function GET(req: NextRequest) {
       labelEn: q.toUpperCase(),
       cat:     manualTV.startsWith('BINANCE') ? 'crypto' : manualTV.startsWith('KRX') ? 'krstock' : 'stock',
       tv:      manualTV,
-      clr:     '#94A3B8',
+      clr:     'var(--t-sub)',
       source:  'manual',
     } as any);
   }

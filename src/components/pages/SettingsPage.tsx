@@ -1,4 +1,6 @@
 'use client';
+import ThemeToggle from '@/components/ThemeToggle';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { notifyError, notifySuccess } from '@/lib/notify/center';
@@ -14,8 +16,7 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
 import { useProfile } from '@/lib/auth/useProfile';
 import {
   Globe2, DollarSign, Bell, Target, Shield, Database, Settings as SettingsIcon,
-  Lock, Save, Scale, Flame, Download, Upload, Hourglass,
-} from 'lucide-react';
+  Lock, Save, Scale, Flame, Download, Upload, Hourglass, Sun } from 'lucide-react';
 
 
 function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(l:string)=>void;currency:string;setCurrency:(c:string)=>void}) {
@@ -236,18 +237,27 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
             <div style={{display:'flex',gap:8}}>
               {isAuthenticated ? (
                 <>
-                  <button type="button" onClick={handleSignOut} style={{flex:1,padding:'10px',minHeight:44,background:'transparent',color:T.red,border:`1px solid ${T.red}55`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>
+                  <button type="button" onClick={handleSignOut} style={{flex:1,padding:'10px',minHeight:44,background:'transparent',color:T.red,border:`1px solid ${A(T.red,'55')}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>
                     로그아웃
                   </button>
                   {isAdminUser && <a href="/admin" style={{padding:'10px 14px',minHeight:44,background:'rgba(16,185,129,0.1)',color:'#10B981',border:'1px solid rgba(16,185,129,0.3)',borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer',textDecoration:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>관리자</a>}
                 </>
               ) : (
                 <>
-                  <a href="/auth" style={{flex:1,padding:'10px',minHeight:44,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer',textDecoration:'none',textAlign:'center',display:'flex',alignItems:'center',justifyContent:'center'}}>로그인 / 회원가입</a>
+                  <a href="/auth" style={{flex:1,padding:'10px',minHeight:44,background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer',textDecoration:'none',textAlign:'center',display:'flex',alignItems:'center',justifyContent:'center'}}>로그인 / 회원가입</a>
                   {isAdminUser && <a href="/admin" style={{padding:'10px 14px',minHeight:44,background:'rgba(16,185,129,0.1)',color:'#10B981',border:'1px solid rgba(16,185,129,0.3)',borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer',textDecoration:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>관리자</a>}
                 </>
               )}
             </div>
+          </Card>
+
+          {/* 화면 테마 */}
+          <Card style={{padding:16,marginBottom:12}}>
+            <div style={{color:T.txt,fontWeight:700,marginBottom:12,display:'flex',alignItems:'center',gap:6}}>
+              <Sun size={14} strokeWidth={2.2} color={T.acl}/>
+              <span>화면 테마</span>
+            </div>
+            <ThemeToggle/>
           </Card>
 
           {/* Language */}
@@ -278,7 +288,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                     <span style={{
                       fontSize:9, fontWeight:800,
                       padding:'2px 6px',
-                      background: active ? T.acl + '25' : T.alt,
+                      background: active ? A(T.acl,'25') : T.alt,
                       color: active ? T.acl : T.muted,
                       borderRadius:6,
                       flexShrink:0,
@@ -350,7 +360,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                       const { notify } = await import('@/lib/notifications');
                       notify('priceAlerts', 'TRAIGO 테스트 알림', { body: '알림이 정상 작동합니다!' });
                     }}
-                    style={{flexShrink:0,background:T.alt,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>
+                    style={{flexShrink:0,background:T.alt,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>
                     테스트
                   </button>
                 )}
@@ -463,7 +473,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
               <div style={{color:T.txt,fontWeight:700}}>API 키 관리</div>
               <button type="button"
                 onClick={() => showToast('API 키 생성 기능은 곧 출시됩니다 (거래소 연결 페이지에서 등록)')}
-                style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 생성</button>
+                style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 생성</button>
             </div>
             {(Array.isArray(apiKeys)?apiKeys:[]).map(k=>(
               <div key={k.id} style={{background:T.alt,borderRadius:10,padding:'10px 12px',marginBottom:8}}>
@@ -476,7 +486,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                           showToast('API 키 관리는 거래소 연결 페이지에서 가능합니다');
                         }
                       }}
-                      style={{background:T.red+'15',color:T.red,border:'none',borderRadius:6,padding:'5px 10px',minHeight:30,fontSize:10,cursor:'pointer'}}>삭제</button>
+                      style={{background:A(T.red,'15'),color:T.red,border:'none',borderRadius:6,padding:'5px 10px',minHeight:30,fontSize:10,cursor:'pointer'}}>삭제</button>
                   </div>
                 </div>
               </div>
@@ -530,15 +540,15 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                 : <><Download size={15} strokeWidth={2.4}/><span>백업 파일 가져오기</span></>}
             </button>
 
-            <div style={{padding:'10px 12px',background:T.ylw+'10',
-              border:`1px solid ${T.ylw}30`,borderRadius:10,
+            <div style={{padding:'10px 12px',background:A(T.ylw,'10'),
+              border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,
               color:T.ylw,fontSize:10,lineHeight:1.5,marginTop:6}}>
               ⚠️ 백업 파일에는 보유 종목·매매 내역 등 개인 정보가 포함됩니다. 안전한 곳에 보관하세요.
             </div>
           </Card>
 
           <Card style={{padding:16,marginBottom:12,
-            background:T.red+'08',border:`1px solid ${T.red}30`}}>
+            background:A(T.red,'08'),border:`1px solid ${A(T.red,'30')}`}}>
             <div style={{color:T.red,fontWeight:700,fontSize:13,marginBottom:6}}>⚠️ 위험 구역</div>
             <div style={{color:T.muted,fontSize:11,lineHeight:1.6,marginBottom:12}}>
               아래 작업은 되돌릴 수 없습니다. 진행 전 반드시 백업해주세요.
@@ -571,7 +581,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
       {tab==='pro'&&(
         <div>
           {/* Pro plans */}
-          <Card style={{padding:16,marginBottom:12,border:`1px solid ${T.gld}40`}}>
+          <Card style={{padding:16,marginBottom:12,border:`1px solid ${A(T.gld,'40')}`}}>
             <div style={{textAlign:'center',marginBottom:16}}>
               <div style={{fontSize:32,marginBottom:6}}>💎</div>
               <div style={{color:T.txt,fontWeight:900,fontSize:18}}>TRAIGO Pro</div>
@@ -614,7 +624,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                 </div>
                 <button type="button"
                   onClick={() => showToast(s.price === '무료' ? `"${s.name}" 적용은 곧 출시됩니다` : `${s.name} 구독은 Pro 출시 후 가능`)}
-                  style={{background:s.price==='무료'?T.grn+'15':T.ylw+'15',color:s.price==='무료'?T.grn:T.ylw,border:`1px solid ${s.price==='무료'?T.grn:T.ylw}30`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:10,fontWeight:700,cursor:'pointer'}}>{s.price}</button>
+                  style={{background:s.price==='무료'?A(T.grn,'15'):A(T.ylw,'15'),color:s.price==='무료'?T.grn:T.ylw,border:`1px solid ${s.price==='무료'?T.grn:T.ylw}30`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:10,fontWeight:700,cursor:'pointer'}}>{s.price}</button>
               </div>
             ))}
           </Card>
@@ -639,7 +649,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                     showToast('복사 실패 - 직접 선택해주세요');
                   }
                 }}
-                style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>복사</button>
+                style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'8px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>복사</button>
             </div>
           </Card>
         </div>
@@ -647,7 +657,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
 
       {tab==='legal'&&(
         <div>
-          <Card style={{padding:16,marginBottom:12,border:`1px solid ${T.ylw}30`}}>
+          <Card style={{padding:16,marginBottom:12,border:`1px solid ${A(T.ylw,'30')}`}}>
             <div style={{color:T.ylw,fontWeight:800,fontSize:13,marginBottom:10}}>⚠️ 중요 법적 고지</div>
             {['TRAIGO는 교육·시뮬레이션 목적의 모의투자 플랫폼입니다','실제 금융 거래를 실행하지 않습니다','수익을 보장하지 않으며 모든 투자 손실은 투자자 본인의 책임입니다','레버리지 거래는 원금 초과 손실이 발생할 수 있습니다','표시되는 시세는 참고용이며 지연될 수 있습니다'].map((t,i,arr)=>(
               <div key={i} style={{display:'flex',gap:6,padding:'5px 0',borderBottom:i<arr.length-1?`1px solid ${T.border}`:'none'}}>
@@ -787,7 +797,7 @@ function LoginHistoryCard({ isAuthenticated }: { isAuthenticated: boolean }) {
         </button>
         {sessions.filter(s => !s.is_current).length > 0 && (
           <button onClick={revokeAllOthers}
-            style={{background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,padding:'4px 10px',minHeight:28,fontSize:9,fontWeight:700,cursor:'pointer'}}>
+            style={{background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:6,padding:'4px 10px',minHeight:28,fontSize:9,fontWeight:700,cursor:'pointer'}}>
             다른 기기 모두 로그아웃
           </button>
         )}
@@ -798,7 +808,7 @@ function LoginHistoryCard({ isAuthenticated }: { isAuthenticated: boolean }) {
           기록을 불러오는 중...
         </div>
       ) : error ? (
-        <div style={{padding:'10px',background:T.red+'10',border:`1px solid ${T.red}30`,borderRadius:6,color:T.red,fontSize:10}}>
+        <div style={{padding:'10px',background:A(T.red,'10'),border:`1px solid ${A(T.red,'30')}`,borderRadius:6,color:T.red,fontSize:10}}>
           오류: {error}
         </div>
       ) : sessions.length === 0 ? (
@@ -840,7 +850,7 @@ function LoginHistoryCard({ isAuthenticated }: { isAuthenticated: boolean }) {
               </div>
               {!isCurrent && (
                 <button onClick={() => revoke(s.id)}
-                  style={{background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer',minHeight:30,flexShrink:0}}>
+                  style={{background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:6,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer',minHeight:30,flexShrink:0}}>
                   종료
                 </button>
               )}

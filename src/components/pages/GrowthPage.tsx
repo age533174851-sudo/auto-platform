@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { PINE_SCRIPT } from '@/lib/strategies/pineScript';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
@@ -47,18 +48,18 @@ function GrowthPage({ prices = {}, currency = 'KRW' }: { prices?: Record<string,
     <div>
       <EtfSwapTool prices={prices} currency={currency} />
       {/* XP Progress */}
-      <div style={{background:'linear-gradient(135deg,#0A1628,#0D1F3C)',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
+      <div style={{background:'linear-gradient(135deg,var(--t-card),var(--t-surf))',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
           <div>
             <div style={{color:T.muted,fontSize:11,marginBottom:2}}>총 경험치</div>
             <div style={{color:T.ylw,fontSize:28,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{totalXP} XP</div>
           </div>
-          <div style={{background:T.ylw+'20',borderRadius:12,padding:'8px 14px',textAlign:'center'}}>
+          <div style={{background:A(T.ylw,'20'),borderRadius:12,padding:'8px 14px',textAlign:'center'}}>
             <div style={{color:T.ylw,fontSize:18,fontWeight:900}}>Lv.{Math.floor(totalXP/50)+1}</div>
             <div style={{color:T.muted,fontSize:9}}>초보 투자자</div>
           </div>
         </div>
-        <div style={{height:6,background:'#1A2D4A',borderRadius:3,overflow:'hidden',marginBottom:4}}>
+        <div style={{height:6,background:'var(--t-border)',borderRadius:3,overflow:'hidden',marginBottom:4}}>
           <div style={{height:'100%',width:`${totalXP/maxXP*100}%`,background:`linear-gradient(90deg,${T.ylw},${T.grn})`,borderRadius:3,transition:'width .6s'}}/>
         </div>
         <div style={{color:T.muted,fontSize:10}}>{totalXP}/{maxXP} XP · 체크리스트 {doneCount}/{checklist.length} 완료</div>
@@ -98,11 +99,11 @@ function GrowthPage({ prices = {}, currency = 'KRW' }: { prices?: Record<string,
       </Card>
 
       {/* Referral */}
-      <Card style={{padding:'16px',border:`1px solid ${T.prp}30`}}>
+      <Card style={{padding:'16px',border:`1px solid ${A(T.prp,'30')}`}}>
         <div style={{color:T.prp,fontWeight:700,marginBottom:8}}>🎁 친구 초대 리워드</div>
         <div style={{display:'flex',gap:8,marginBottom:10}}>
           <div style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'9px 12px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:12,fontWeight:700,color:T.txt,letterSpacing:1}}>{REFERRAL_CODE}</div>
-          <button onClick={()=>typeof navigator!=='undefined'&&navigator.clipboard?.writeText(REFERRAL_CODE)} style={{background:T.prp+'20',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:8,padding:'0 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>복사</button>
+          <button onClick={()=>typeof navigator!=='undefined'&&navigator.clipboard?.writeText(REFERRAL_CODE)} style={{background:A(T.prp,'20'),color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:8,padding:'0 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>복사</button>
         </div>
         <div style={{display:'flex',gap:8,marginBottom:8}}>
           <div style={{flex:1,background:T.alt,borderRadius:10,padding:'10px 12px',textAlign:'center'}}>

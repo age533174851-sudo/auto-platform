@@ -1,16 +1,13 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect } from 'react';
 import {
   UserProfile, getMockSession, canAccessDeveloper, ROLE_INFO,
 } from '@/lib/auth';
 
-const T = {
-  bg:'#060B14', card:'#0F1924', border:'#1A2D4A', border2:'#243A5E',
-  acc:'#2563EB', acl:'#3B82F6', acg:'rgba(37,99,235,.15)',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B', prp:'#7C3AED',
-  cyn:'#0891B2', gld:'#D97706',
-  txt:'#F0F6FF', sub:'#94A3B8', muted:'#475569', surf:'#0D1626',
-};
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 function Card({children,style}:{children?:React.ReactNode;style?:React.CSSProperties;[key:string]:any}) {
   return <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,...style}}>{children}</div>;
@@ -23,7 +20,7 @@ function Dot({c}:{c:string}) {
 }
 function Toggle({on,onChange}:{on:boolean;onChange:(v:boolean)=>void}) {
   return (
-    <button onClick={()=>onChange(!on)} style={{width:40,height:22,borderRadius:11,background:on?T.grn:'#1A2D4A',border:'none',cursor:'pointer',position:'relative',transition:'background .2s',flexShrink:0}}>
+    <button onClick={()=>onChange(!on)} style={{width:40,height:22,borderRadius:11,background:on?T.grn:'var(--t-border)',border:'none',cursor:'pointer',position:'relative',transition:'background .2s',flexShrink:0}}>
       <div style={{position:'absolute',top:3,left:on?20:3,width:16,height:16,borderRadius:8,background:'#fff',transition:'left .2s'}}/>
     </button>
   );
@@ -92,8 +89,8 @@ export default function DeveloperPage() {
         </div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           {testMode&&<Bdg c={T.ylw} ch="🧪 테스트 모드"/>}
-          <a href="/admin" style={{background:T.grn+'20',color:T.grn,border:`1px solid ${T.grn}40`,borderRadius:8,padding:'5px 10px',fontSize:11,fontWeight:700,textDecoration:'none'}}>🛡️ 관리자</a>
-          <a href="/" style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'5px 10px',fontSize:11,fontWeight:700,textDecoration:'none'}}>🏠</a>
+          <a href="/admin" style={{background:A(T.grn,'20'),color:T.grn,border:`1px solid ${A(T.grn,'40')}`,borderRadius:8,padding:'5px 10px',fontSize:11,fontWeight:700,textDecoration:'none'}}>🛡️ 관리자</a>
+          <a href="/" style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'5px 10px',fontSize:11,fontWeight:700,textDecoration:'none'}}>🏠</a>
         </div>
       </div>
 
@@ -117,7 +114,7 @@ export default function DeveloperPage() {
         {/* Tabs */}
         <div style={{display:'flex',gap:6,marginBottom:16,overflowX:'auto'}}>
           {([['status','📡 시스템 상태'],['logs','📋 에러 로그'],['flags','🚩 개발 플래그'],['deploy','🚀 배포']] as const).map(([id,label])=>(
-            <button key={id} onClick={()=>setTab(id)} style={{flexShrink:0,padding:'8px 14px',background:tab===id?T.prp+'25':'transparent',color:tab===id?T.prp:T.muted,border:`1px solid ${tab===id?T.prp:T.border}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>{label}</button>
+            <button key={id} onClick={()=>setTab(id)} style={{flexShrink:0,padding:'8px 14px',background:tab===id?A(T.prp,'25'):'transparent',color:tab===id?T.prp:T.muted,border:`1px solid ${tab===id?T.prp:T.border}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>{label}</button>
           ))}
         </div>
 
@@ -158,7 +155,7 @@ export default function DeveloperPage() {
               ))}
             </Card>
 
-            <Card style={{padding:'16px',border:`1px solid ${T.ylw}30`}}>
+            <Card style={{padding:'16px',border:`1px solid ${A(T.ylw,'30')}`}}>
               <div style={{color:T.ylw,fontWeight:700,marginBottom:10}}>⚠️ 설정 필요 항목</div>
               {[
                 {l:'NEXT_PUBLIC_SUPABASE_URL',desc:'Supabase 프로젝트 URL'},
@@ -202,7 +199,7 @@ export default function DeveloperPage() {
         {/* FLAGS */}
         {tab==='flags'&&(
           <div>
-            <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'10px 14px',marginBottom:12}}>
+            <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'10px 14px',marginBottom:12}}>
               <div style={{color:T.ylw,fontWeight:700,fontSize:11}}>🧪 개발 플래그 — 프로덕션에서 비활성화</div>
             </div>
             <Card style={{padding:'16px',marginBottom:12}}>
@@ -246,7 +243,7 @@ export default function DeveloperPage() {
         {/* DEPLOY */}
         {tab==='deploy'&&(
           <div>
-            <Card style={{padding:'16px',marginBottom:12,border:`1px solid ${T.grn}30`}}>
+            <Card style={{padding:'16px',marginBottom:12,border:`1px solid ${A(T.grn,'30')}`}}>
               <div style={{color:T.txt,fontWeight:700,marginBottom:12}}>🚀 배포 현황</div>
               {[
                 {env:'Production',branch:'main',commit:'a1b2c3d',time:'2025-05-13 09:00',status:'deployed'},
@@ -280,7 +277,7 @@ export default function DeveloperPage() {
               ))}
             </Card>
 
-            <Card style={{padding:'16px',border:`1px solid ${T.prp}30`}}>
+            <Card style={{padding:'16px',border:`1px solid ${A(T.prp,'30')}`}}>
               <div style={{color:T.prp,fontWeight:700,marginBottom:10}}>📦 tech stack</div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:6}}>
                 {[['Next.js','14.2.5'],['React','18.3.1'],['TypeScript','5.5.3'],['Tailwind CSS','3.4.4'],['Supabase','(미설치)'],['next.config.js','ignoreBuildErrors: true']].map(([k,v])=>(

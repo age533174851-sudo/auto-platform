@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // EdgeLabPanel — MAE/MFE 경로 분석 + Expansion Mode.
 // "최종 방향을 맞혀도 경로에서 청산된다"를 숫자로 보여준다.
 import React, { useState, useMemo } from 'react';
@@ -47,7 +48,7 @@ export default function EdgeLabPanel() {
   const samples = cases.slice(0, 6).map(ex => ({ ex, s: survivalAt(ex, 100) }));
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#06B6D41F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Microscope size={18} color="#22D3EE" />
@@ -86,7 +87,7 @@ export default function EdgeLabPanel() {
         <div style={{ color: T.muted, fontSize: 10, marginTop: 8, lineHeight: 1.4 }}>
           MAE가 0.50%를 넘으면 최종 방향이 맞아도 청산됩니다 (100배 청산거리 = 0.50%)
         </div>
-        <div style={{ color: T.ylw, fontSize: 10, marginTop: 6, lineHeight: 1.4, background: T.ylw + '12', borderRadius: 8, padding: '7px 9px' }}>
+        <div style={{ color: T.ylw, fontSize: 10, marginTop: 6, lineHeight: 1.4, background: A(T.ylw,'12'), borderRadius: 8, padding: '7px 9px' }}>
           ⚠️ 「100배 상한」은 MFE 최고점에서 전량 청산했다고 가정한 <b>천장값</b>입니다.
           실제 봇은 그 지점을 알 수 없으므로 이만큼 먹지 못합니다.
           실현 수익은 손절·분할익절·트레일링을 적용해 계산해야 합니다.
@@ -141,7 +142,7 @@ export default function EdgeLabPanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
           <Zap size={13} color="#FBBF24" />
           <span style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>Expansion Mode</span>
-          <span style={{ marginLeft: 'auto', background: expansionDemo.mode === 'EXPANSION' ? T.grn + '20' : T.border2,
+          <span style={{ marginLeft: 'auto', background: expansionDemo.mode === 'EXPANSION' ? A(T.grn,'20') : T.border2,
             color: expansionDemo.mode === 'EXPANSION' ? T.grn : T.muted, fontSize: 10, fontWeight: 800, padding: '3px 8px', borderRadius: 5 }}>
             {expansionDemo.mode}
           </span>

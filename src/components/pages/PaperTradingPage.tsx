@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { T } from '@/lib/constants';
@@ -175,7 +176,7 @@ export default function PaperTradingPage({
         </div>
         <button type="button" onClick={handleReset}
           style={{ padding:'8px 12px', minHeight: 36, background: T.alt, color: T.red,
-            border:`1px solid ${T.red}30`, borderRadius: 8,
+            border:`1px solid ${A(T.red,'30')}`, borderRadius: 8,
             fontSize: 10, fontWeight: 700, cursor:'pointer' }}>
           초기화
         </button>
@@ -365,7 +366,7 @@ export default function PaperTradingPage({
               <div>
                 <div style={{ display:'flex', alignItems:'center', gap: 5 }}>
                   <span style={{
-                    background: o.side === 'buy' ? T.grn+'20' : T.red+'20',
+                    background: o.side === 'buy' ? A(T.grn,'20') : A(T.red,'20'),
                     color: o.side === 'buy' ? T.grn : T.red,
                     fontSize: 9, fontWeight: 700, padding:'1px 6px', borderRadius: 4,
                   }}>{o.side === 'buy' ? '매수' : '매도'}</span>

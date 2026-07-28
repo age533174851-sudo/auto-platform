@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Search as SearchIc, X as XIcon, Newspaper, ExternalLink,
@@ -448,7 +449,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                   onClick={() => openAssetTag(t)}
                   style={{
                     ...buttonStyle('ghost', 'sm'),
-                    background: T.acg, color: T.acl, border: `1px solid ${T.acl}44`,
+                    background: T.acg, color: T.acl, border: `1px solid ${A(T.acl,'44')}`,
                     gap: 4,
                   }}>
                   {t} <ChevronRight size={11} strokeWidth={IC_STROKE} />

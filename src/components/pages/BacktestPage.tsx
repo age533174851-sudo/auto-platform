@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import PortfolioBacktestView from '../PortfolioBacktestView';
 import { StrategyLeg } from '@/lib/backtest/portfolio';
@@ -253,7 +254,7 @@ export default function BacktestPage() {
 
       {/* 자동 로드된 전략 배지 */}
       {loadedFromStrategy && (
-        <Card style={{ marginBottom: 10, background: T.prp + '10', border: `1px solid ${T.prp}30` }}>
+        <Card style={{ marginBottom: 10, background: A(T.prp,'10'), border: `1px solid ${A(T.prp,'30')}` }}>
           <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
             <span style={{ fontSize: 16 }}>🤖</span>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -386,7 +387,7 @@ export default function BacktestPage() {
 
       {/* Error */}
       {error && (
-        <Card style={{ background: T.red+'10', border:`1px solid ${T.red}30`, marginBottom: 10 }}>
+        <Card style={{ background: A(T.red,'10'), border:`1px solid ${A(T.red,'30')}`, marginBottom: 10 }}>
           <div style={{ color: T.red, fontSize: 12, fontWeight: 700 }}>⚠️ {error}</div>
         </Card>
       )}
@@ -411,7 +412,7 @@ export default function BacktestPage() {
           <Card style={{ marginBottom: 10,
             borderLeft:`3px solid ${result.summary.totalReturnPct >= 0 ? T.grn : T.red}` }}>
             {(result.summary as any).sanityWarning && (
-              <div style={{ background: T.red+'15', border:`1px solid ${T.red}40`, borderRadius: 8, padding:'8px 10px', marginBottom: 10 }}>
+              <div style={{ background: A(T.red,'15'), border:`1px solid ${A(T.red,'40')}`, borderRadius: 8, padding:'8px 10px', marginBottom: 10 }}>
                 <div style={{ color: T.red, fontSize: 11, fontWeight: 800 }}>⚠️ {(result.summary as any).sanityWarning}</div>
                 <div style={{ color: T.muted, fontSize: 9, marginTop: 3 }}>이 결과는 신뢰할 수 없습니다. 레버리지·수량·기간 설정을 확인하세요.</div>
               </div>
@@ -498,7 +499,7 @@ export default function BacktestPage() {
                 {v.passed.length > 0 && (
                   <div style={{ marginBottom: 8, display:'flex', flexWrap:'wrap', gap: 4 }}>
                     {v.passed.map((p, i) => (
-                      <span key={i} style={{ color: T.grn, fontSize: 9, background: T.grn+'15', padding:'2px 7px', borderRadius: 4 }}>✓ {p}</span>
+                      <span key={i} style={{ color: T.grn, fontSize: 9, background: A(T.grn,'15'), padding:'2px 7px', borderRadius: 4 }}>✓ {p}</span>
                     ))}
                   </div>
                 )}
@@ -510,14 +511,14 @@ export default function BacktestPage() {
             );
           })()}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8, marginBottom: 10 }}>
-            <Card style={{ background: T.grn + '10', border:`1px solid ${T.grn}30` }}>
+            <Card style={{ background: A(T.grn,'10'), border:`1px solid ${A(T.grn,'30')}` }}>
               <div style={{ color: T.grn, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>승리</div>
               <div style={{ color: T.txt, fontSize: 18, fontWeight: 900 }}>{result.summary.winTrades}건</div>
               <div style={{ color: T.grn, fontSize: 11, marginTop: 2 }}>
                 평균 +{Math.abs(result.summary.avgWinPct).toFixed(2)}%
               </div>
             </Card>
-            <Card style={{ background: T.red + '10', border:`1px solid ${T.red}30` }}>
+            <Card style={{ background: A(T.red,'10'), border:`1px solid ${A(T.red,'30')}` }}>
               <div style={{ color: T.red, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>패배</div>
               <div style={{ color: T.txt, fontSize: 18, fontWeight: 900 }}>{result.summary.loseTrades}건</div>
               <div style={{ color: T.red, fontSize: 11, marginTop: 2 }}>
@@ -544,7 +545,7 @@ export default function BacktestPage() {
                     <div key={i} style={{ padding:'9px 14px', borderBottom:`1px solid ${T.border}` }}>
                       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 3 }}>
                         <div style={{ display:'flex', alignItems:'center', gap: 6 }}>
-                          <span style={{ background: isLong ? T.grn+'20' : T.red+'20', color: isLong ? T.grn : T.red,
+                          <span style={{ background: isLong ? A(T.grn,'20') : A(T.red,'20'), color: isLong ? T.grn : T.red,
                             fontSize: 9, fontWeight: 800, padding:'2px 7px', borderRadius: 4 }}>
                             {isLong ? 'LONG' : 'SHORT'}{t.leverage ? ` ${t.leverage}x` : ''}
                           </span>

@@ -1,17 +1,14 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { getCurrentSeasonMode, getAdjustedParams, SEASON_CONFIGS, formatSeasonMode } from '@/lib/season';
 import { getMockMarketScore } from '@/lib/market';
 import type { MarketScore } from '@/lib/market';
 import type { SeasonMode } from '@/lib/season';
 
-const T = {
-  bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
-  border:'#1A2D4A', border2:'#243A5E',
-  txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B',
-  acl:'#60A5FA', acc:'#2563EB', acg:'#1E3A5F', prp:'#7C3AED',
-} as const;
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return <div style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:14, padding:'14px 16px', ...style }}>{children}</div>;
@@ -218,7 +215,7 @@ export default function SeasonDashboard() {
         </div>
 
         {/* Strategy */}
-        <div style={{ background: T.acl+'0D', border:`1px solid ${T.acl}25`, borderRadius:10, padding:'8px 12px', marginBottom:8 }}>
+        <div style={{ background: A(T.acl,'0D'), border:`1px solid ${A(T.acl,'25')}`, borderRadius:10, padding:'8px 12px', marginBottom:8 }}>
           <div style={{ color:T.acl, fontSize:10, fontWeight:700, marginBottom:2 }}>추천 전략</div>
           <div style={{ color:T.txt, fontSize:12, fontWeight:700 }}>{params.strategy}</div>
         </div>

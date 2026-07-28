@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
@@ -129,7 +130,7 @@ export default function PineGuidePage() {
           <button onClick={() => setCodeOpen(!codeOpen)} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: T.txt, fontWeight: 800, fontSize: 13, cursor: 'pointer', padding: 0 }}>
             {codeOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}② 예제 전략 코드
           </button>
-          <button onClick={copyCode} style={{ display: 'flex', alignItems: 'center', gap: 4, background: copied ? T.grn + '20' : T.alt, border: `1px solid ${copied ? T.grn : T.border}`, borderRadius: 7, padding: '5px 11px', color: copied ? T.grn : T.acl, fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
+          <button onClick={copyCode} style={{ display: 'flex', alignItems: 'center', gap: 4, background: copied ? A(T.grn,'20') : T.alt, border: `1px solid ${copied ? T.grn : T.border}`, borderRadius: 7, padding: '5px 11px', color: copied ? T.grn : T.acl, fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
             {copied ? <><Check size={12} /> 복사됨</> : <><Copy size={12} /> 코드 복사</>}
           </button>
         </div>

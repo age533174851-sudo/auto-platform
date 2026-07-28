@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // AssetDetailModal — 종목 카드 탭 시 뜨는 상세 팝업.
 // 현재가·금일등락·미니차트·거래량 + [매매하기]/[관심등록]/[AI 분석] 액션.
 import React, { useState, useEffect } from 'react';
@@ -103,7 +104,7 @@ export default function AssetDetailModal({
               <TrendingUp size={18} /> 매매하기
             </button>
             <button onClick={toggleWatch}
-              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, background: watched ? T.ylw + '20' : T.card, color: watched ? T.ylw : T.txt, border: `1px solid ${watched ? T.ylw + '50' : T.border}`, borderRadius: 13, padding: '15px', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, background: watched ? A(T.ylw,'20') : T.card, color: watched ? T.ylw : T.txt, border: `1px solid ${watched ? A(T.ylw,'50') : T.border}`, borderRadius: 13, padding: '15px', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
               <Star size={16} fill={watched ? T.ylw : 'none'} color={watched ? T.ylw : T.txt} /> {watched ? '관심됨' : '관심'}
             </button>
           </div>

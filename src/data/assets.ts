@@ -117,7 +117,7 @@ const INDICES: Asset[] = [
 // ── Featured Commodities ──────────────────────────────────────
 const COMMODITIES: Asset[] = [
   f('GLD','금','Gold Spot','GOLD',3420,0.56,'45B','commodity','#D97706'),
-  f('SLV','은','Silver Spot','SILVER',38.50,-1.58,'12B','commodity','#94A3B8'),
+  f('SLV','은','Silver Spot','SILVER',38.50,-1.58,'12B','commodity','var(--t-sub)'),
   f('WTI','원유 WTI','WTI Crude Oil','WTI',78.40,-0.90,'22B','commodity','#78350F'),
   f('BRENT','브렌트유','Brent Crude Oil','BRENT',82.40,-0.72,'18B','commodity','#92400E'),
   f('NG','천연가스','Natural Gas','NATGAS',2.84,1.24,'8.2B','commodity','#0891B2'),

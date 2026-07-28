@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // ─────────────────────────────────────────────────────────────
 // MockAutoTrade — 앱 내부 완결형 모의(MOCK) 자동매매
 // 거래소 API / Worker / jobs queue를 전혀 쓰지 않고, 브라우저 안에서
@@ -208,7 +209,7 @@ export default function MockAutoTrade() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 14, fontWeight: 800, color: T.txt }}>🧪 MOCK 자동매매</span>
-            <span style={{ background: T.prp + '20', color: T.prp, fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 5 }}>MOCK</span>
+            <span style={{ background: A(T.prp,'20'), color: T.prp, fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 5 }}>MOCK</span>
           </div>
           <span style={{ fontSize: 11, fontWeight: 800, color: running ? T.grn : T.muted }}>
             {running ? '● 실행중' : '○ 정지'}
@@ -309,7 +310,7 @@ export default function MockAutoTrade() {
           <input type="range" min={40} max={95} step={5} value={confThreshold} onChange={e => setConfThreshold(Number(e.target.value))} style={{ flex: 1 }} />
         </div>
         {stoppedReason && (
-          <div style={{ background: T.ylw + '12', border: `1px solid ${T.ylw}30`, borderRadius: 8, padding: '8px 10px', marginTop: 8 }}>
+          <div style={{ background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: 8, padding: '8px 10px', marginTop: 8 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: T.ylw }}>정지 사유: {stoppedReason}</div>
             <div style={{ fontSize: 9, color: T.muted, marginTop: 3 }}>참고: 브라우저 탭이 백그라운드로 가면 타이머가 느려질 수 있습니다 (상시 실행은 Worker 필요).</div>
           </div>

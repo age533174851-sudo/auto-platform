@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { Strategy } from '@/types/domain';
 import { PINE_SCRIPT } from '@/lib/strategies/pineScript';
@@ -106,7 +107,7 @@ function WunderPage() {
   return (
     <div>
       {/* Header */}
-      <div style={{background:'linear-gradient(135deg,#0A0F1E,#0D1628)',border:`1px solid ${T.acl}40`,borderRadius:18,padding:'16px 18px',marginBottom:14}}>
+      <div style={{background:'linear-gradient(135deg,#0A0F1E,#0D1628)',border:`1px solid ${A(T.acl,'40')}`,borderRadius:18,padding:'16px 18px',marginBottom:14}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
           <div>
             <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:4}}>
@@ -118,7 +119,7 @@ function WunderPage() {
           </div>
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
             <Bdg c={T.prp} ch="모의"/>
-            <button onClick={()=>setRunning(r=>!r)} style={{background:running?T.grn+'20':T.acg,color:running?T.grn:T.acl,border:`1px solid ${running?T.grn:T.acl}40`,borderRadius:10,padding:'7px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>
+            <button onClick={()=>setRunning(r=>!r)} style={{background:running?A(T.grn,'20'):T.acg,color:running?T.grn:T.acl,border:`1px solid ${running?T.grn:T.acl}40`,borderRadius:10,padding:'7px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>
               {running?'⏸ 일시중지':'▶ 시작 (모의)'}
             </button>
           </div>
@@ -150,7 +151,7 @@ function WunderPage() {
       {tab==='dashboard'&&(
         <div>
           {/* Paper warning */}
-          <div style={{background:T.prp+'12',border:`1px solid ${T.prp}30`,borderRadius:10,padding:'9px 13px',marginBottom:12}}>
+          <div style={{background:A(T.prp,'12'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'9px 13px',marginBottom:12}}>
             <div style={{color:T.prp,fontWeight:700,fontSize:11}}>모의매매 전용 · 실제 거래 미실행 · 수익 보장 없음</div>
           </div>
 
@@ -194,7 +195,7 @@ function WunderPage() {
                       <div style={{display:'flex',gap:5,alignItems:'center',marginBottom:3}}>
                         <span style={{background:clr+'20',color:clr,fontSize:9,fontWeight:700,padding:'2px 7px',borderRadius:6}}>{label}</span>
                         <span style={{color:T.muted,fontSize:10}}>{sig.time}</span>
-                        {sig.stage>0&&<span style={{background:T.ylw+'15',color:T.ylw,fontSize:9,padding:'1px 5px',borderRadius:5}}>{sig.stage}차</span>}
+                        {sig.stage>0&&<span style={{background:A(T.ylw,'15'),color:T.ylw,fontSize:9,padding:'1px 5px',borderRadius:5}}>{sig.stage}차</span>}
                       </div>
                       <div style={{color:T.muted,fontSize:10}}>{sig.comment}</div>
                     </div>
@@ -209,10 +210,10 @@ function WunderPage() {
           </Card>
 
           {/* Emergency stop */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.red}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.red,'30')}`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
               <div><div style={{color:T.red,fontWeight:700}}>🚨 긴급 정지</div><div style={{color:T.muted,fontSize:10}}>모든 신호 처리 즉시 중단</div></div>
-              <button onClick={()=>setRunning(false)} style={{background:T.red+'20',color:T.red,border:`1px solid ${T.red}40`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>정지</button>
+              <button onClick={()=>setRunning(false)} style={{background:A(T.red,'20'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>정지</button>
             </div>
           </Card>
         </div>
@@ -221,7 +222,7 @@ function WunderPage() {
       {/* ────── SETTINGS ────── */}
       {tab==='settings'&&(
         <div>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'9px 13px',marginBottom:14}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'9px 13px',marginBottom:14}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:11}}>⚠️ 설정 변경은 다음 신호부터 적용됩니다. 모의매매 전용.</div>
           </div>
 
@@ -282,7 +283,7 @@ function WunderPage() {
 
           {/* High leverage warning */}
           {settings.leverage>5&&(
-            <div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:10,padding:'10px 14px'}}>
+            <div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'10px 14px'}}>
               <div style={{color:T.red,fontWeight:700,fontSize:12,marginBottom:3}}>⚠️ 고레버리지 경고</div>
               <div style={{color:T.sub,fontSize:11,lineHeight:1.5}}>{settings.leverage}배 레버리지는 매우 위험합니다. 작은 가격 변동에도 원금 손실 위험이 큽니다. 경험이 없다면 1~3배를 권장합니다.</div>
             </div>
@@ -323,7 +324,7 @@ function WunderPage() {
       {/* ────── WEBHOOK ────── */}
       {tab==='webhook'&&(
         <div>
-          <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${T.acl}30`}}>
+          <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${A(T.acl,'30')}`}}>
             <div style={{color:T.acl,fontWeight:700,marginBottom:10}}>TradingView → TRAIGO 웹훅 설정</div>
             <div style={{display:'flex',flexDirection:'column',gap:10}}>
               {[
@@ -347,7 +348,7 @@ function WunderPage() {
               <div style={{flex:1,background:T.bg,border:`1px solid ${T.border}`,borderRadius:8,padding:'10px 12px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:10,color:T.acl,wordBreak:'break-all'}}>
                 https://your-domain.vercel.app/api/webhook/tradingview
               </div>
-              <button onClick={()=>copyText('https://your-domain.vercel.app/api/webhook/tradingview','url')} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'0 12px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{copied==='url'?'✅':'복사'}</button>
+              <button onClick={()=>copyText('https://your-domain.vercel.app/api/webhook/tradingview','url')} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'0 12px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{copied==='url'?'✅':'복사'}</button>
             </div>
             <div style={{color:T.muted,fontSize:9}}>* Vercel 배포 후 실제 도메인으로 교체하세요</div>
           </Card>
@@ -368,7 +369,7 @@ function WunderPage() {
                 <div key={key} style={{marginBottom:10}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
                     <span style={{background:`${clr}20`,color:clr,fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:6}}>{label}</span>
-                    <button onClick={()=>copyText(json.replace('BTCWUNDER',wunderCode),key)} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:6,padding:'3px 8px',fontSize:10,cursor:'pointer'}}>{copied===key?'✅':'복사'}</button>
+                    <button onClick={()=>copyText(json.replace('BTCWUNDER',wunderCode),key)} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:6,padding:'3px 8px',fontSize:10,cursor:'pointer'}}>{copied===key?'✅':'복사'}</button>
                   </div>
                   <div style={{background:'#030610',borderRadius:8,padding:'10px 12px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:10,color:T.grn,lineHeight:1.7,overflowX:'auto',whiteSpace:'pre'}}>{json.replace('BTCWUNDER',wunderCode)}</div>
                 </div>
@@ -377,7 +378,7 @@ function WunderPage() {
           </Card>
 
           {/* Exchange connection */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.ylw}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.ylw,'30')}`}}>
             <div style={{color:T.ylw,fontWeight:700,marginBottom:10}}>⚠️ 실제 거래소 연결 (플레이스홀더)</div>
             <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
               {['Gate.io','Binance','Bybit','WunderTrading'].map(ex=>(
@@ -396,18 +397,18 @@ function WunderPage() {
       {/* ────── PINE SCRIPT ────── */}
       {tab==='pine'&&(
         <div>
-          <div style={{background:T.grn+'12',border:`1px solid ${T.grn}30`,borderRadius:10,padding:'9px 13px',marginBottom:12}}>
+          <div style={{background:A(T.grn,'12'),border:`1px solid ${A(T.grn,'30')}`,borderRadius:10,padding:'9px 13px',marginBottom:12}}>
             <div style={{color:T.grn,fontWeight:700,fontSize:11}}>📜 BTC WUNDER AUTO COMPLETE FINAL — Pine Script v5</div>
             <div style={{color:T.muted,fontSize:10,marginTop:2}}>TradingView에서 새 전략 스크립트를 만들고 아래 코드를 붙여넣으세요.</div>
           </div>
 
           <div style={{display:'flex',gap:8,marginBottom:12}}>
-            <button onClick={()=>copyText(PINE_SCRIPT,'pine')} style={{flex:1,padding:'11px',background:T.grn+'20',color:T.grn,border:`1px solid ${T.grn}40`,borderRadius:12,fontWeight:700,fontSize:13,cursor:'pointer'}}>{copied==='pine'?'✅ 복사됨!':'Pine Script 전체 복사'}</button>
-            <button onClick={()=>setShowPine(v=>!v)} style={{padding:'11px 14px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:12,fontWeight:700,fontSize:11,cursor:'pointer'}}>{showPine?'접기':'펼치기'}</button>
+            <button onClick={()=>copyText(PINE_SCRIPT,'pine')} style={{flex:1,padding:'11px',background:A(T.grn,'20'),color:T.grn,border:`1px solid ${A(T.grn,'40')}`,borderRadius:12,fontWeight:700,fontSize:13,cursor:'pointer'}}>{copied==='pine'?'✅ 복사됨!':'Pine Script 전체 복사'}</button>
+            <button onClick={()=>setShowPine(v=>!v)} style={{padding:'11px 14px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:12,fontWeight:700,fontSize:11,cursor:'pointer'}}>{showPine?'접기':'펼치기'}</button>
           </div>
 
           {showPine&&(
-            <div style={{background:'#030610',borderRadius:12,padding:'14px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:10,color:'#50FA7B',lineHeight:1.7,overflowX:'auto',maxHeight:500,overflowY:'auto',border:`1px solid ${T.grn}30`,whiteSpace:'pre'}}>
+            <div style={{background:'#030610',borderRadius:12,padding:'14px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:10,color:'#50FA7B',lineHeight:1.7,overflowX:'auto',maxHeight:500,overflowY:'auto',border:`1px solid ${A(T.grn,'30')}`,whiteSpace:'pre'}}>
               {PINE_SCRIPT}
             </div>
           )}
@@ -442,7 +443,7 @@ function WunderPage() {
           <div style={{position:'fixed',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:201,background:T.surf,borderRadius:20,padding:'24px 20px',width:320,border:`2px solid ${T.red}`}} onClick={e=>e.stopPropagation()}>
             <div style={{color:T.red,fontWeight:800,fontSize:16,marginBottom:8}}>⚠️ 실전 모드 비활성화</div>
             <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:16}}>TRAIGO는 현재 실제 거래 실행을 지원하지 않습니다. 모든 신호는 모의매매로만 처리됩니다.</div>
-            <button onClick={()=>setShowRealWarning(false)} style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>확인</button>
+            <button onClick={()=>setShowRealWarning(false)} style={{width:'100%',padding:'12px',background:A(T.muted,'20'),color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>확인</button>
           </div>
         </>
       )}
@@ -565,7 +566,7 @@ const INITIAL_SESSIONS: SessionFilter[] = [
   {id:'london', label:'런던',      hours:'17:00–02:00 KST',active:true, enabled:true, volatility:'높음', color:'#3B82F6'},
   {id:'newyork',label:'뉴욕',      hours:'22:00–06:00 KST',active:true, enabled:true, volatility:'매우 높음',color:'#EF4444'},
   {id:'overlap_ln',label:'런던×NY',hours:'22:00–02:00 KST',active:true, enabled:true, volatility:'최고', color:'#7C3AED'},
-  {id:'weekend',label:'주말',      hours:'토·일',            active:false,enabled:false,volatility:'낮음', color:'#475569'},
+  {id:'weekend',label:'주말',      hours:'토·일',            active:false,enabled:false,volatility:'낮음', color:'var(--t-muted)'},
 ];
 
 const MOCK_ECON_EVENTS = [

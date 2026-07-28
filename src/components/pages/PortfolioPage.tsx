@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { T } from '@/lib/constants';
@@ -318,7 +319,7 @@ export default function PortfolioPage({
             <div style={{ fontSize: 13, marginBottom: 14 }}>아직 보유 종목이 없습니다</div>
             <button type="button" onClick={openAdd}
               style={{ background: T.acg, color: T.acl,
-                border:`1px solid ${T.acl}40`, borderRadius: 10,
+                border:`1px solid ${A(T.acl,'40')}`, borderRadius: 10,
                 padding:'10px 20px', fontSize: 12, fontWeight: 700,
                 cursor:'pointer', minHeight: 40 }}>
               첫 종목 추가하기
@@ -379,7 +380,7 @@ export default function PortfolioPage({
                   }
                 }}
                 style={{ flex: 1, padding:'7px', background: T.acg, color: T.acl,
-                  border:`1px solid ${T.acl}40`, borderRadius: 8,
+                  border:`1px solid ${A(T.acl,'40')}`, borderRadius: 8,
                   fontSize: 10, fontWeight: 700, cursor:'pointer', minHeight: 34 }}>
                 상세
               </button>
@@ -391,7 +392,7 @@ export default function PortfolioPage({
               </button>
               <button type="button" onClick={() => removePosition(p.id)}
                 style={{ padding:'7px 12px', background: T.alt, color: T.red,
-                  border:`1px solid ${T.red}30`, borderRadius: 8,
+                  border:`1px solid ${A(T.red,'30')}`, borderRadius: 8,
                   fontSize: 10, fontWeight: 700, cursor:'pointer', minHeight: 34 }}>
                 🗑
               </button>
@@ -521,7 +522,7 @@ export default function PortfolioPage({
 
                 {/* Live preview */}
                 {toNum(buyPrice) > 0 && toNum(quantity) > 0 && (
-                  <div style={{ background: T.acg, border:`1px solid ${T.acl}40`,
+                  <div style={{ background: T.acg, border:`1px solid ${A(T.acl,'40')}`,
                     borderRadius: 10, padding:'10px 14px', marginBottom: 14 }}>
                     <div style={{ color: T.acl, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>
                       미리보기

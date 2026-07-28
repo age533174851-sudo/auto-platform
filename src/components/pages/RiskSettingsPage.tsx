@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { notifyError } from '@/lib/notify/center';
@@ -110,7 +111,7 @@ function RiskSettingsInner() {
         {/* unlimited 경고 배너 */}
         {settings.mode === 'unlimited' && (
           <div style={{
-            background: T.red + '20', border: `1px solid ${T.red}50`,
+            background: A(T.red,'20'), border: `1px solid ${A(T.red,'50')}`,
             borderRadius: R.sm, padding: '8px 10px', marginBottom: SP.sm,
             display: 'flex', alignItems: 'flex-start', gap: 6,
           }}>

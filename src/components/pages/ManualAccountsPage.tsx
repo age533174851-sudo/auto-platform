@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { notifyInfo } from '@/lib/notify/center';
@@ -64,7 +65,7 @@ export default function ManualAccountsPage() {
       </div>
 
       {/* 안내 */}
-      <Card style={{ padding: '10px 14px', marginBottom: 12, background: T.ylw + '10', border: `1px solid ${T.ylw}30` }}>
+      <Card style={{ padding: '10px 14px', marginBottom: 12, background: A(T.ylw,'10'), border: `1px solid ${A(T.ylw,'30')}` }}>
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           <Info size={13} strokeWidth={2.2} color={T.ylw} style={{ marginTop: 1, flexShrink: 0 }} />
           <span style={{ color: T.ylw, fontSize: 10, lineHeight: 1.5 }}>
@@ -113,7 +114,7 @@ export default function ManualAccountsPage() {
                   <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 8, fontWeight: 800, background: color + '22', color }}>
                     {ACCOUNT_TYPE_LABEL[acc.type]}
                   </span>
-                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 8, fontWeight: 700, background: T.muted + '22', color: T.muted }}>
+                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 8, fontWeight: 700, background: A(T.muted,'22'), color: T.muted }}>
                     수동등록
                   </span>
                 </div>
@@ -132,7 +133,7 @@ export default function ManualAccountsPage() {
                   <Edit3 size={12} strokeWidth={2.2} />
                 </button>
                 <button onClick={() => onDelete(acc.id)} aria-label="삭제"
-                  style={{ background: T.red + '15', color: T.red, border: `1px solid ${T.red}30`, borderRadius: 6, padding: '6px 8px', minHeight: 30, cursor: 'pointer' }}>
+                  style={{ background: A(T.red,'15'), color: T.red, border: `1px solid ${A(T.red,'30')}`, borderRadius: 6, padding: '6px 8px', minHeight: 30, cursor: 'pointer' }}>
                   <Trash2 size={12} strokeWidth={2.2} />
                 </button>
               </div>
@@ -153,7 +154,7 @@ export default function ManualAccountsPage() {
 
       {/* 추가 버튼 */}
       <button onClick={() => setEditing(emptyAccount())}
-        style={{ width: '100%', padding: '14px', minHeight: 50, marginTop: 4, background: T.acg, color: T.acl, border: `1px dashed ${T.acl}60`, borderRadius: 12, fontWeight: 800, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+        style={{ width: '100%', padding: '14px', minHeight: 50, marginTop: 4, background: T.acg, color: T.acl, border: `1px dashed ${A(T.acl,'60')}`, borderRadius: 12, fontWeight: 800, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
         <Plus size={16} strokeWidth={2.4} /> 계좌 추가
       </button>
 
@@ -241,7 +242,7 @@ function AccountEditor({ account, onSave, onCancel }: {
             <div key={h.id} style={{ background: T.alt, borderRadius: 8, padding: 10, marginBottom: 6 }}>
               <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
                 <input value={h.symbol} onChange={e => updHolding(i, { symbol: e.target.value.toUpperCase() })} placeholder="심볼 (BTC)" style={{ ...inputStyle, flex: 1 }} />
-                <button onClick={() => rmHolding(i)} style={{ background: T.red + '15', color: T.red, border: 'none', borderRadius: 6, padding: '0 10px', cursor: 'pointer' }}>
+                <button onClick={() => rmHolding(i)} style={{ background: A(T.red,'15'), color: T.red, border: 'none', borderRadius: 6, padding: '0 10px', cursor: 'pointer' }}>
                   <Trash2 size={12} strokeWidth={2.2} />
                 </button>
               </div>

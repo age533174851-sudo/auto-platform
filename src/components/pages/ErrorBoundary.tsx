@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React from 'react';
 
 interface Props {
@@ -112,8 +113,8 @@ export function PageErrorFallback({
   onHome?: () => void;
 }) {
   const T = {
-    bg:'#060B14', card:'#0F1924', border:'#1A2D4A', txt:'#F0F6FF',
-    muted:'#475569', red:'#EF4444', ylw:'#F59E0B',
+    bg:'var(--t-bg)', card:'var(--t-card)', border:'var(--t-border)', txt:'var(--t-txt)',
+    muted:'var(--t-muted)', red:'#EF4444', ylw:'#F59E0B',
     acl:'#3B82F6', acg:'rgba(37,99,235,.15)',
   };
   return (
@@ -135,7 +136,7 @@ export function PageErrorFallback({
         {isChunk && onReload && (
           <button type="button" onClick={onReload}
             style={{ padding:'10px 20px', borderRadius:10, cursor:'pointer',
-              background:T.acg, color:T.acl, border:`1px solid ${T.acl}40`,
+              background:T.acg, color:T.acl, border:`1px solid ${A(T.acl,'40')}`,
               fontWeight:700, fontSize:13, minHeight:44 }}>
             새로고침
           </button>
@@ -143,7 +144,7 @@ export function PageErrorFallback({
         {!isChunk && onRetry && (
           <button type="button" onClick={onRetry}
             style={{ padding:'10px 20px', borderRadius:10, cursor:'pointer',
-              background:T.acg, color:T.acl, border:`1px solid ${T.acl}40`,
+              background:T.acg, color:T.acl, border:`1px solid ${A(T.acl,'40')}`,
               fontWeight:700, fontSize:13, minHeight:44 }}>
             다시 시도
           </button>

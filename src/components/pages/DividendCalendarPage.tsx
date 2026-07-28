@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { notifyError } from '@/lib/notify/center';
 import DripSimulator from '@/components/DripSimulator';
@@ -173,7 +174,7 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                         <span style={{ ...F.muted, marginLeft: 8 }}>· {FREQ_LABEL[d.frequency]} · {d.yieldPct.toFixed(1)}%</span>
                       </div>
                       {withPayment && withPayment.shares > 0 && (
-                        <div style={{ marginTop: SP.sm, padding: '10px 12px', background: T.grn + '15', borderRadius: R.md, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ marginTop: SP.sm, padding: '10px 12px', background: A(T.grn,'15'), borderRadius: R.md, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={F.muted}>예상 수령액 ({withPayment.shares}주)</span>
                           <span style={{ ...F.numM, color: T.grn }}>{formatKRW(withPayment.paymentKRW)}</span>
                         </div>
@@ -222,7 +223,7 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                     <Pencil size={13} strokeWidth={IC_STROKE} /> 수정
                   </button>
                 </div>
-                <div style={{ marginTop: SP.sm, padding: '10px 12px', background: T.grn + '15', borderRadius: R.md, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ marginTop: SP.sm, padding: '10px 12px', background: A(T.grn,'15'), borderRadius: R.md, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={F.caption}>연 예상 배당</span>
                   <span style={{ ...F.numM, color: T.grn }}>{formatKRW(toKRW(est.annualDividend, est.currency))}</span>
                 </div>

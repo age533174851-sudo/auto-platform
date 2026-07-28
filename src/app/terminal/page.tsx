@@ -12,7 +12,7 @@ const TerminalShell = dynamic(() => import('@/components/terminal/TerminalShell'
   ssr: false,
   loading: () => (
     <div style={{
-      height: '100vh', background: '#060B14', color: '#60A5FA',
+      height: '100vh', background: 'var(--t-bg)', color: '#60A5FA',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: 13, fontWeight: 800, letterSpacing: 1,
     }}>TRAIGO Pro 터미널 로딩 중…</div>

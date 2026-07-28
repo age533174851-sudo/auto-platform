@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { safeNumber, formatKRW, safePercent } from '@/lib/format';
 
@@ -36,12 +37,9 @@ interface CalcRecord {
 /* ─── Constants ───────────────────────────────────────────── */
 const STORE_KEY = 'tg_pnl_history_v1';
 
-const T = {
-  bg:'#060B14', card:'#0A1628', alt:'#0F2040',
-  border:'#1A2D4A', txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B',
-  acl:'#60A5FA', acg:'rgba(37,99,235,.15)', prp:'#7C3AED',
-};
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 const ASSET_OPTIONS: { id: AssetCategory; label: string; icon: string; fee: number; tax: number }[] = [
   { id:'crypto',   label:'코인',     icon:'', fee: 0.1,   tax: 0    },
@@ -523,7 +521,7 @@ export default function PnLCalculatorPage({
       {/* Prefill banner */}
       {prefill && (prefill.assetName || prefill.symbol) && (
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
-          background: T.acg, border:`1px solid ${T.acl}40`, borderRadius: 12,
+          background: T.acg, border:`1px solid ${A(T.acl,'40')}`, borderRadius: 12,
           padding:'10px 14px', marginBottom: 10 }}>
           <div>
             <div style={{ color: T.acl, fontSize: 11, fontWeight: 700 }}>
@@ -592,7 +590,7 @@ export default function PnLCalculatorPage({
           <div style={{ display:'flex', gap: 6 }}>
             <button type="button" onClick={() => setSide('long')}
               style={{ flex: 1, padding:'11px', minHeight: 42,
-                background: side === 'long' ? T.grn + '20' : T.alt,
+                background: side === 'long' ? A(T.grn,'20') : T.alt,
                 border:`1px solid ${side === 'long' ? T.grn : T.border}`,
                 borderRadius: 10, color: side === 'long' ? T.grn : T.muted,
                 fontWeight: 700, fontSize: 13, cursor:'pointer' }}>
@@ -600,7 +598,7 @@ export default function PnLCalculatorPage({
             </button>
             <button type="button" onClick={() => setSide('short')}
               style={{ flex: 1, padding:'11px', minHeight: 42,
-                background: side === 'short' ? T.red + '20' : T.alt,
+                background: side === 'short' ? A(T.red,'20') : T.alt,
                 border:`1px solid ${side === 'short' ? T.red : T.border}`,
                 borderRadius: 10, color: side === 'short' ? T.red : T.muted,
                 fontWeight: 700, fontSize: 13, cursor:'pointer' }}>
@@ -632,7 +630,7 @@ export default function PnLCalculatorPage({
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 10 }}>
           <div style={{ color: T.txt, fontWeight: 700, fontSize: 13 }}>가격 · 수량</div>
           <button type="button" onClick={() => loadExample()}
-            style={{ background: T.acg, border:`1px solid ${T.acl}40`, borderRadius: 8,
+            style={{ background: T.acg, border:`1px solid ${A(T.acl,'40')}`, borderRadius: 8,
               color: T.acl, padding:'5px 10px', fontSize: 10, fontWeight: 700, cursor:'pointer' }}>
             예시 불러오기
           </button>
@@ -720,7 +718,7 @@ export default function PnLCalculatorPage({
 
       {/* ── Validation messages ── */}
       {validation.length > 0 && computed && (
-        <Card style={{ background: T.ylw + '10', border:`1px solid ${T.ylw}40` }}>
+        <Card style={{ background: A(T.ylw,'10'), border:`1px solid ${A(T.ylw,'40')}` }}>
           <div style={{ color: T.ylw, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
             ⚠️ 입력값을 확인하세요
           </div>
@@ -783,14 +781,14 @@ export default function PnLCalculatorPage({
             {/* Action row */}
             <div style={{ display:'flex', gap: 6, marginTop: 12 }}>
               <button type="button" onClick={saveResult}
-                style={{ flex: 1, padding:'10px', background: T.grn + '20',
-                  border:`1px solid ${T.grn}60`, borderRadius: 10, color: T.grn,
+                style={{ flex: 1, padding:'10px', background: A(T.grn,'20'),
+                  border:`1px solid ${A(T.grn,'60')}`, borderRadius: 10, color: T.grn,
                   fontWeight: 700, fontSize: 11, cursor:'pointer', minHeight: 38 }}>
                 매매일지에 저장
               </button>
               <button type="button" onClick={copyResult}
                 style={{ flex: 1, padding:'10px', background: T.acg,
-                  border:`1px solid ${T.acl}40`, borderRadius: 10, color: T.acl,
+                  border:`1px solid ${A(T.acl,'40')}`, borderRadius: 10, color: T.acl,
                   fontWeight: 700, fontSize: 11, cursor:'pointer', minHeight: 38 }}>
                 결과 복사
               </button>

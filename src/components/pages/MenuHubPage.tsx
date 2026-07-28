@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // MenuHubPage — 토스식 전체 메뉴. 카테고리 + 검색 + lucide 아이콘 + 즐겨찾기(별표).
 import React, { useState, useMemo, useEffect } from 'react';
 import { T } from '@/lib/constants';
@@ -67,7 +68,7 @@ export default function MenuHubPage({ onNav }: { onNav: (id: string) => void }) 
 function Row({ m, onNav, fav, onStar }: { m: MenuItem; onNav: (id: string) => void; fav: boolean; onStar: (id: string) => void }) {
   const { Icon } = m;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: T.card, border: `1px solid ${fav ? T.ylw + '50' : T.border}`, borderRadius: 14, padding: '4px 8px 4px 14px' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: T.card, border: `1px solid ${fav ? A(T.ylw,'50') : T.border}`, borderRadius: 14, padding: '4px 8px 4px 14px' }}>
       {/* href가 있는 항목은 별도 페이지다. onNav는 이 앱 안의 tab만
           바꾸므로 그대로 두면 아무 일도 일어나지 않는다. */}
       <button onClick={() => { if (m.href) window.location.href = m.href; else onNav(m.id); }} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 13, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', minHeight: 56, padding: 0 }}>

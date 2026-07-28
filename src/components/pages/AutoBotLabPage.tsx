@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useMemo, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
@@ -126,7 +127,7 @@ export default function AutoBotLabPage() {
         <div style={{ color: T.muted, fontSize: 10 }}>매매 로직 시뮬레이터 · 학습용</div>
       </div>
 
-      <div style={{ background: T.ylw + '10', border:`1px solid ${T.ylw}30`,
+      <div style={{ background: A(T.ylw,'10'), border:`1px solid ${A(T.ylw,'30')}`,
         borderRadius: 10, padding:'8px 12px', marginBottom: 10,
         color: T.ylw, fontSize: 10, lineHeight: 1.5 }}>
         ⚠️ 모든 로직은 <strong>학습/시뮬레이션 용도</strong>입니다. 실제 자동매매는 별도 인프라(증권사 API, 키 관리, 컴플라이언스)가 필요합니다.
@@ -276,8 +277,8 @@ export default function AutoBotLabPage() {
               resize:'vertical' }}/>
 
           <div style={{ marginTop: 14, padding:'12px 14px',
-            background: pullbackResult.hit ? T.grn + '10' : T.alt,
-            border: pullbackResult.hit ? `1px solid ${T.grn}40` : `1px solid ${T.border}`,
+            background: pullbackResult.hit ? A(T.grn,'10') : T.alt,
+            border: pullbackResult.hit ? `1px solid ${A(T.grn,'40')}` : `1px solid ${T.border}`,
             borderRadius: 10 }}>
             <div style={{ color: pullbackResult.hit ? T.grn : T.muted,
               fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
@@ -350,7 +351,7 @@ export default function AutoBotLabPage() {
             ))}
             {(atrResult.shouldTakeProfit || atrResult.shouldStopLoss) && (
               <div style={{ marginTop: 8, padding:'8px 10px',
-                background: atrResult.shouldTakeProfit ? T.grn + '20' : T.red + '20',
+                background: atrResult.shouldTakeProfit ? A(T.grn,'20') : A(T.red,'20'),
                 borderRadius: 8, color: atrResult.shouldTakeProfit ? T.grn : T.red,
                 fontSize: 11, fontWeight: 700, textAlign:'center' }}>
                 {atrResult.shouldTakeProfit ? '익절 시그널 발동' : '🛑 손절 시그널 발동'}
@@ -416,8 +417,8 @@ export default function AutoBotLabPage() {
         <>
           <Card style={{ marginBottom: 10 }}>
             <div style={{ color: T.txt, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>운용 시간대</div>
-            <div style={{ padding:'14px', background: inWindow ? T.grn + '15' : T.alt,
-              border:`1px solid ${inWindow ? T.grn + '40' : T.border}`,
+            <div style={{ padding:'14px', background: inWindow ? A(T.grn,'15') : T.alt,
+              border:`1px solid ${inWindow ? A(T.grn,'40') : T.border}`,
               borderRadius: 10, textAlign:'center', marginBottom: 10 }}>
               <div style={{ color: inWindow ? T.grn : T.muted, fontSize: 14, fontWeight: 800 }}>
                 {inWindow ? '✅ 봇 운용 중' : '⏸ 운용 시간대 외'}

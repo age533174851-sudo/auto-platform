@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
@@ -96,7 +97,7 @@ export default function DiagnosticsPage() {
         </div>
         <button type="button" onClick={refresh} disabled={loading}
           style={{ padding:'8px 14px', minHeight: 36, background: T.acg,
-            border:`1px solid ${T.acl}40`, borderRadius: 10, color: T.acl,
+            border:`1px solid ${A(T.acl,'40')}`, borderRadius: 10, color: T.acl,
             fontWeight: 700, fontSize: 12, cursor: loading ? 'wait' : 'pointer',
             opacity: loading ? 0.6 : 1 }}>
           {loading ? '⏳' : ''} 재실행
@@ -169,7 +170,7 @@ export default function DiagnosticsPage() {
                 )}
                 {p.error && (
                   <div style={{ color: T.red, fontSize: 10, marginTop: 4,
-                    background: T.red+'10', padding:'4px 8px', borderRadius: 6 }}>
+                    background: A(T.red,'10'), padding:'4px 8px', borderRadius: 6 }}>
                     ⚠️ {p.error}
                   </div>
                 )}

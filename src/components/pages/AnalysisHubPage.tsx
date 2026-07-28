@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { DrawingAction, DrawingObject, DrawingTool, LayoutData } from '@/types/domain';
 import { notifyInfo, notifySuccess } from '@/lib/notify/center';
@@ -161,13 +162,13 @@ function saveLayouts(layouts: LayoutData[]): void {
 
 /* ── Default fib levels ── */
 const DEFAULT_FIB_LEVELS = [
-  { level: 0,     label: '0',     color: '#94A3B8' },
+  { level: 0,     label: '0',     color: 'var(--t-sub)' },
   { level: 0.236, label: '0.236', color: '#3B82F6' },
   { level: 0.382, label: '0.382', color: '#10B981' },
   { level: 0.5,   label: '0.5',   color: '#F59E0B' },
   { level: 0.618, label: '0.618', color: '#EF4444' },
   { level: 0.786, label: '0.786', color: '#7C3AED' },
-  { level: 1,     label: '1',     color: '#94A3B8' },
+  { level: 1,     label: '1',     color: 'var(--t-sub)' },
   { level: 1.272, label: '1.272', color: '#0891B2' },
   { level: 1.618, label: '1.618', color: '#EF4444' },
 ];
@@ -420,22 +421,22 @@ function AnalysisHubPage() {
   return (
     <div>
       {/* ── Top toolbar ── */}
-      <div style={{background:'linear-gradient(135deg,#04060F,#080D1A)',border:`1px solid ${T.acl}30`,borderRadius:18,padding:'12px 14px',marginBottom:12}}>
+      <div style={{background:'linear-gradient(135deg,#04060F,#080D1A)',border:`1px solid ${A(T.acl,'30')}`,borderRadius:18,padding:'12px 14px',marginBottom:12}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
           <div style={{display:'flex',gap:5,alignItems:'center'}}>
             <span style={{fontSize:16}}>🔬</span>
             <span style={{color:T.txt,fontWeight:800,fontSize:14}}>Analysis Hub</span>
-            {undoStack.length>0&&<span style={{background:T.prp+'20',color:T.prp,fontSize:9,padding:'1px 6px',borderRadius:99,fontWeight:700}}>{undoStack.length} 기록</span>}
+            {undoStack.length>0&&<span style={{background:A(T.prp,'20'),color:T.prp,fontSize:9,padding:'1px 6px',borderRadius:99,fontWeight:700}}>{undoStack.length} 기록</span>}
           </div>
           <div style={{display:'flex',gap:5}}>
             <button onClick={undo} disabled={!undoStack.length} style={{background:undoStack.length?T.alt:'transparent',color:undoStack.length?T.txt:T.muted,border:`1px solid ${T.border}`,borderRadius:7,padding:'4px 8px',fontSize:11,cursor:undoStack.length?'pointer':'default'}}>↩ 실행취소</button>
             <button onClick={redo} disabled={!redoStack.length} style={{background:redoStack.length?T.alt:'transparent',color:redoStack.length?T.txt:T.muted,border:`1px solid ${T.border}`,borderRadius:7,padding:'4px 8px',fontSize:11,cursor:redoStack.length?'pointer':'default'}}>↪ 다시실행</button>
-            <a href="/chart" target="_blank" style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,textDecoration:'none'}}>⛶</a>
+            <a href="/chart" target="_blank" style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,textDecoration:'none'}}>⛶</a>
           </div>
         </div>
         {/* Quick tool bar */}
         <div style={{display:'flex',gap:4,overflowX:'auto'}}>
-          <button onClick={()=>openSheet('interval')} style={{flexShrink:0,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,padding:'5px 10px',fontSize:11,fontWeight:800,cursor:'pointer',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+          <button onClick={()=>openSheet('interval')} style={{flexShrink:0,background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,padding:'5px 10px',fontSize:11,fontWeight:800,cursor:'pointer',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
             {INTERVALS.find(i=>i.id===activeInterval)?.label||activeInterval}
           </button>
           <button onClick={()=>openSheet('charttype')} style={{flexShrink:0,background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,padding:'5px 10px',fontSize:13,cursor:'pointer'}}>
@@ -444,12 +445,12 @@ function AnalysisHubPage() {
           <button onClick={()=>setTab('indicators')} style={{flexShrink:0,background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
             🔬{activeIndicators.length>0&&<span style={{background:T.acl,color:'#fff',borderRadius:99,padding:'0 3px',fontSize:8,marginLeft:2}}>{activeIndicators.length}</span>}
           </button>
-          <button onClick={()=>openSheet('drawing')} style={{flexShrink:0,background:activeTool!=='cursor'?T.prp+'15':T.alt,color:activeTool!=='cursor'?T.prp:T.sub,border:`1px solid ${activeTool!=='cursor'?T.prp:T.border}`,borderRadius:7,padding:'5px 9px',fontSize:13,cursor:'pointer'}}>
+          <button onClick={()=>openSheet('drawing')} style={{flexShrink:0,background:activeTool!=='cursor'?A(T.prp,'15'):T.alt,color:activeTool!=='cursor'?T.prp:T.sub,border:`1px solid ${activeTool!=='cursor'?T.prp:T.border}`,borderRadius:7,padding:'5px 9px',fontSize:13,cursor:'pointer'}}>
             {DRAWING_TOOLS.find(d=>d.id===activeTool)?.icon||'↗'}
           </button>
-          <button onClick={()=>setMagnetMode(v=>!v)} style={{flexShrink:0,background:magnetMode?T.ylw+'20':T.alt,color:magnetMode?T.ylw:T.muted,border:`1px solid ${magnetMode?T.ylw:T.border}`,borderRadius:7,padding:'5px 9px',fontSize:12,cursor:'pointer'}} title="자석 스냅 모드">🧲</button>
+          <button onClick={()=>setMagnetMode(v=>!v)} style={{flexShrink:0,background:magnetMode?A(T.ylw,'20'):T.alt,color:magnetMode?T.ylw:T.muted,border:`1px solid ${magnetMode?T.ylw:T.border}`,borderRadius:7,padding:'5px 9px',fontSize:12,cursor:'pointer'}} title="자석 스냅 모드">🧲</button>
           <button onClick={()=>openSheet('objecttree')} style={{flexShrink:0,background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
-           {drawings.length>0&&<span style={{background:T.muted+'80',color:T.txt,borderRadius:99,padding:'0 3px',fontSize:8,marginLeft:2}}>{drawings.length}</span>}
+           {drawings.length>0&&<span style={{background:A(T.muted,'80'),color:T.txt,borderRadius:99,padding:'0 3px',fontSize:8,marginLeft:2}}>{drawings.length}</span>}
           </button>
           {selectedDrawing&&(
             <>
@@ -457,10 +458,10 @@ function AnalysisHubPage() {
                 <div style={{width:12,height:12,borderRadius:'50%',background:selectedDrawing.style.color,display:'inline-block'}}/>
               </button>
               {(selectedDrawing.toolId==='long_pos'||selectedDrawing.toolId==='short_pos')&&(
-                <button onClick={()=>openSheet('risk')} style={{flexShrink:0,background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:7,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>위험</button>
+                <button onClick={()=>openSheet('risk')} style={{flexShrink:0,background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:7,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>위험</button>
               )}
               {selectedDrawing.toolId.includes('fib')&&(
-                <button onClick={()=>openSheet('fib')} style={{flexShrink:0,background:T.ylw+'15',color:T.ylw,border:`1px solid ${T.ylw}30`,borderRadius:7,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>피보</button>
+                <button onClick={()=>openSheet('fib')} style={{flexShrink:0,background:A(T.ylw,'15'),color:T.ylw,border:`1px solid ${A(T.ylw,'30')}`,borderRadius:7,padding:'5px 9px',fontSize:10,fontWeight:700,cursor:'pointer'}}>피보</button>
               )}
             </>
           )}
@@ -469,14 +470,14 @@ function AnalysisHubPage() {
 
       {/* Active tool indicator */}
       {activeTool!=='cursor'&&(
-        <div style={{background:T.prp+'12',border:`1px solid ${T.prp}30`,borderRadius:10,padding:'8px 12px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div style={{background:A(T.prp,'12'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <div style={{color:T.prp,fontWeight:700,fontSize:12}}>
             {DRAWING_TOOLS.find(d=>d.id===activeTool)?.icon} {DRAWING_TOOLS.find(d=>d.id===activeTool)?.label} 도구 활성
             {magnetMode&&' · 🧲 스냅'}
           </div>
           <div style={{display:'flex',gap:5}}>
             <button onClick={()=>addDrawing(activeTool,riskEntry,riskTP)} style={{background:T.prp,color:'#fff',border:'none',borderRadius:7,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>추가</button>
-            <button onClick={()=>setActiveTool('cursor')} style={{background:T.prp+'20',color:T.prp,border:'none',borderRadius:7,padding:'4px 8px',fontSize:10,cursor:'pointer'}}>해제</button>
+            <button onClick={()=>setActiveTool('cursor')} style={{background:A(T.prp,'20'),color:T.prp,border:'none',borderRadius:7,padding:'4px 8px',fontSize:10,cursor:'pointer'}}>해제</button>
           </div>
         </div>
       )}
@@ -496,7 +497,7 @@ function AnalysisHubPage() {
             <InlineTVChart key={`${symbol}-${chartType}-${activeInterval}`} symbol={symbol} chartType={chartType} interval={activeInterval}/>
             <div style={{position:'absolute',top:8,right:8,display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
               {DRAWING_TOOLS.filter(d=>['cursor','trendline','hline','fib_ret','long_pos','short_pos','rect','text'].includes(d.id)).map(d=>(
-                <button key={d.id} onClick={()=>setActiveTool(d.id)} style={{width:30,height:30,background:activeTool===d.id?T.prp+'CC':T.card+'CC',color:activeTool===d.id?'#fff':T.sub,border:`1px solid ${activeTool===d.id?T.prp:T.border}`,borderRadius:7,cursor:'pointer',fontSize:12,display:'flex',alignItems:'center',justifyContent:'center',backdropFilter:'blur(4px)',WebkitBackdropFilter:'blur(4px)'}}>
+                <button key={d.id} onClick={()=>setActiveTool(d.id)} style={{width:30,height:30,background:activeTool===d.id?A(T.prp,'CC'):A(T.card,'CC'),color:activeTool===d.id?'#fff':T.sub,border:`1px solid ${activeTool===d.id?T.prp:T.border}`,borderRadius:7,cursor:'pointer',fontSize:12,display:'flex',alignItems:'center',justifyContent:'center',backdropFilter:'blur(4px)',WebkitBackdropFilter:'blur(4px)'}}>
                   {d.icon}
                 </button>
               ))}
@@ -569,12 +570,12 @@ function AnalysisHubPage() {
           </Card>
 
           {/* ── PAPER TRADING PREVIEW ── */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.prp}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.prp,'30')}`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{color:T.prp,fontWeight:700}}>모의매매</div>
-              <button onClick={()=>setTab('paper')} style={{background:T.prp+'20',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>열기</button>
+              <button onClick={()=>setTab('paper')} style={{background:A(T.prp,'20'),color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>열기</button>
             </div>
-            <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}25`,borderRadius:8,padding:'8px 10px',marginBottom:8}}>
+            <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'25')}`,borderRadius:8,padding:'8px 10px',marginBottom:8}}>
               <div style={{color:T.ylw,fontSize:10,fontWeight:700}}>⚠️ 모의투자입니다. 실제 주문이 아닙니다.</div>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
@@ -600,7 +601,7 @@ function AnalysisHubPage() {
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{color:T.txt,fontWeight:700}}>📐 레이아웃 저장</div>
               <div style={{display:'flex',gap:5}}>
-                <button onClick={()=>setShowSaveLayout(v=>!v)} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'4px 10px',fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 저장</button>
+                <button onClick={()=>setShowSaveLayout(v=>!v)} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'4px 10px',fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 저장</button>
                 <button onClick={exportLayout} style={{background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>↓ 내보내기</button>
                 <label style={{background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>
                   ↑ 가져오기<input type="file" accept=".json" style={{display:'none'}} onChange={importLayout}/>
@@ -610,7 +611,7 @@ function AnalysisHubPage() {
             {showSaveLayout&&(
               <div style={{display:'flex',gap:6,marginBottom:10}}>
                 <input value={newLayoutName} onChange={e=>setNewLayoutName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&saveCurrentLayout()} placeholder="레이아웃 이름" style={{flex:1,background:T.bg,border:`1px solid ${T.acl}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:16,outline:'none'}}/>
-                <button onClick={saveCurrentLayout} disabled={!newLayoutName.trim()} style={{background:newLayoutName.trim()?T.acc:'#243A5E',color:'#fff',border:'none',borderRadius:8,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
+                <button onClick={saveCurrentLayout} disabled={!newLayoutName.trim()} style={{background:newLayoutName.trim()?T.acc:'var(--t-border2)',color:'#fff',border:'none',borderRadius:8,padding:'8px 14px',fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
               </div>
             )}
             {layouts.length===0?(
@@ -625,7 +626,7 @@ function AnalysisHubPage() {
                     </div>
                     <div style={{display:'flex',gap:4}}>
                       {activeLayout===l.id&&<Bdg c={T.grn} ch="활성"/>}
-                      <button onClick={e=>{e.stopPropagation();deleteLayout(l.id);}} style={{background:T.red+'15',color:T.red,border:'none',borderRadius:6,padding:'2px 7px',fontSize:9,cursor:'pointer'}}>삭제</button>
+                      <button onClick={e=>{e.stopPropagation();deleteLayout(l.id);}} style={{background:A(T.red,'15'),color:T.red,border:'none',borderRadius:6,padding:'2px 7px',fontSize:9,cursor:'pointer'}}>삭제</button>
                     </div>
                   </div>
                 ))}
@@ -709,13 +710,13 @@ function AnalysisHubPage() {
           {/* Group tabs */}
           <div style={{display:'flex',gap:4,marginBottom:10,overflowX:'auto'}}>
             {DRAWING_GROUPS.map(g=>(
-              <button key={g.id} onClick={()=>setDrawingGroup(g.id)} style={{flexShrink:0,padding:'5px 10px',background:drawingGroup===g.id?T.prp+'20':'transparent',color:drawingGroup===g.id?T.prp:T.muted,border:`1px solid ${drawingGroup===g.id?T.prp:T.border}`,borderRadius:20,fontSize:10,fontWeight:700,cursor:'pointer'}}>{g.l}</button>
+              <button key={g.id} onClick={()=>setDrawingGroup(g.id)} style={{flexShrink:0,padding:'5px 10px',background:drawingGroup===g.id?A(T.prp,'20'):'transparent',color:drawingGroup===g.id?T.prp:T.muted,border:`1px solid ${drawingGroup===g.id?T.prp:T.border}`,borderRadius:20,fontSize:10,fontWeight:700,cursor:'pointer'}}>{g.l}</button>
             ))}
           </div>
 
           <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,marginBottom:12}}>
             {DRAWING_TOOLS.filter(d=>d.group===drawingGroup).map(d=>(
-              <button key={d.id} onClick={()=>{ if(activeTool===d.id){ addDrawing(d.id); } else { setActiveTool(d.id); }}} style={{background:activeTool===d.id?T.prp+'20':T.card,border:`2px solid ${activeTool===d.id?T.prp:T.border}`,borderRadius:12,padding:'12px 6px',cursor:'pointer',textAlign:'center',position:'relative'}}>
+              <button key={d.id} onClick={()=>{ if(activeTool===d.id){ addDrawing(d.id); } else { setActiveTool(d.id); }}} style={{background:activeTool===d.id?A(T.prp,'20'):T.card,border:`2px solid ${activeTool===d.id?T.prp:T.border}`,borderRadius:12,padding:'12px 6px',cursor:'pointer',textAlign:'center',position:'relative'}}>
                 {activeTool===d.id&&<div style={{position:'absolute',top:3,right:3,width:6,height:6,borderRadius:'50%',background:T.prp}}/>}
                 <div style={{fontSize:20,marginBottom:4}}>{d.icon}</div>
                 <div style={{color:activeTool===d.id?T.prp:T.txt,fontSize:9,fontWeight:700,lineHeight:1.3}}>{d.label}</div>
@@ -731,7 +732,7 @@ function AnalysisHubPage() {
           <Card style={{padding:'14px 16px'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{color:T.txt,fontWeight:700}}>오브젝트 트리 ({drawings.length}개)</div>
-              {drawings.length>0&&<button onClick={clearAllDrawings} style={{background:T.red+'15',color:T.red,border:'none',borderRadius:7,padding:'3px 8px',fontSize:9,cursor:'pointer'}}>전체삭제</button>}
+              {drawings.length>0&&<button onClick={clearAllDrawings} style={{background:A(T.red,'15'),color:T.red,border:'none',borderRadius:7,padding:'3px 8px',fontSize:9,cursor:'pointer'}}>전체삭제</button>}
             </div>
             {drawings.length===0?(
               <div style={{color:T.muted,fontSize:11,textAlign:'center',padding:'16px 0'}}>드로잉이 없습니다<br/><span style={{fontSize:10}}>위 도구로 추가하세요</span></div>
@@ -759,7 +760,7 @@ function AnalysisHubPage() {
       {/* ── INTERVAL ── */}
       {tab==='interval'&&(
         <div>
-          <div style={{background:T.acg,border:`1px solid ${T.acl}30`,borderRadius:10,padding:'9px 13px',marginBottom:12}}>
+          <div style={{background:T.acg,border:`1px solid ${A(T.acl,'30')}`,borderRadius:10,padding:'9px 13px',marginBottom:12}}>
             <div style={{color:T.acl,fontWeight:700,fontSize:12}}>현재: <span style={{fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{INTERVALS.find(i=>i.id===activeInterval)?.label||activeInterval}</span></div>
           </div>
           {INTERVAL_GROUPS.map(grp=>(
@@ -803,7 +804,7 @@ function AnalysisHubPage() {
                     <div style={{color:T.muted,fontSize:9}}>{ind.category==='trend'?'추세':ind.category==='momentum'?'모멘텀':ind.category==='volatility'?'변동성':'거래량'}</div>
                   </div>
                 </div>
-                <button onClick={()=>toggleIndicator(ind.id)} style={{background:active?T.red+'15':T.acg,color:active?T.red:T.acl,border:`1px solid ${active?T.red:T.acl}40`,borderRadius:9,padding:'5px 12px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                <button onClick={()=>toggleIndicator(ind.id)} style={{background:active?A(T.red,'15'):T.acg,color:active?T.red:T.acl,border:`1px solid ${active?T.red:T.acl}40`,borderRadius:9,padding:'5px 12px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
                   {active?'제거':'추가'}
                 </button>
               </div>
@@ -842,7 +843,7 @@ function AnalysisHubPage() {
       {/* ── PAPER ── */}
       {tab==='paper'&&(
         <div>
-          <div style={{background:'linear-gradient(135deg,#060B14,#0A0F1E)',border:`1px solid ${T.prp}40`,borderRadius:18,padding:'16px',marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,var(--t-bg),#0A0F1E)',border:`1px solid ${A(T.prp,'40')}`,borderRadius:18,padding:'16px',marginBottom:12}}>
             <div style={{color:T.muted,fontSize:11,marginBottom:2}}>모의매매 계좌</div>
             <div style={{color:T.txt,fontSize:26,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(paperSize,'KRW')}</div>
             <div style={{display:'flex',gap:12,marginTop:6}}>
@@ -855,7 +856,7 @@ function AnalysisHubPage() {
             <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>모의 주문</div>
             <div style={{display:'flex',gap:6,marginBottom:10}}>
               {['매수','매도'].map(s=>(
-                <button key={s} style={{flex:1,padding:'10px',background:s==='매수'?T.grn+'15':T.red+'15',color:s==='매수'?T.grn:T.red,border:`1px solid ${s==='매수'?T.grn:T.red}40`,borderRadius:10,fontWeight:700,fontSize:13,cursor:'pointer'}}>{s}</button>
+                <button key={s} style={{flex:1,padding:'10px',background:s==='매수'?A(T.grn,'15'):A(T.red,'15'),color:s==='매수'?T.grn:T.red,border:`1px solid ${s==='매수'?T.grn:T.red}40`,borderRadius:10,fontWeight:700,fontSize:13,cursor:'pointer'}}>{s}</button>
               ))}
             </div>
             {[{l:'심볼',v:symbol.split(':')[1]||symbol},{l:'차트 유형',v:CHART_TYPES.find(c=>c.id===chartType)?.label||chartType},{l:'인터벌',v:INTERVALS.find(i=>i.id===activeInterval)?.label||activeInterval},{l:'드로잉',v:`${drawings.length}개`}].map((r,i)=>(
@@ -877,12 +878,12 @@ function AnalysisHubPage() {
         <BottomSheet title="✏️ 드로잉 도구 선택">
           <div style={{display:'flex',gap:4,marginBottom:10,overflowX:'auto'}}>
             {DRAWING_GROUPS.map(g=>(
-              <button key={g.id} onClick={()=>setDrawingGroup(g.id)} style={{flexShrink:0,padding:'4px 9px',background:drawingGroup===g.id?T.prp+'20':'transparent',color:drawingGroup===g.id?T.prp:T.muted,border:`1px solid ${drawingGroup===g.id?T.prp:T.border}`,borderRadius:20,fontSize:10,fontWeight:700,cursor:'pointer'}}>{g.l}</button>
+              <button key={g.id} onClick={()=>setDrawingGroup(g.id)} style={{flexShrink:0,padding:'4px 9px',background:drawingGroup===g.id?A(T.prp,'20'):'transparent',color:drawingGroup===g.id?T.prp:T.muted,border:`1px solid ${drawingGroup===g.id?T.prp:T.border}`,borderRadius:20,fontSize:10,fontWeight:700,cursor:'pointer'}}>{g.l}</button>
             ))}
           </div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:6}}>
             {DRAWING_TOOLS.filter(d=>d.group===drawingGroup).map(d=>(
-              <button key={d.id} onClick={()=>{setActiveTool(d.id);setShowSheet(false);setTab('drawing');}} style={{background:activeTool===d.id?T.prp+'20':T.card,border:`2px solid ${activeTool===d.id?T.prp:T.border}`,borderRadius:10,padding:'10px 4px',cursor:'pointer',textAlign:'center'}}>
+              <button key={d.id} onClick={()=>{setActiveTool(d.id);setShowSheet(false);setTab('drawing');}} style={{background:activeTool===d.id?A(T.prp,'20'):T.card,border:`2px solid ${activeTool===d.id?T.prp:T.border}`,borderRadius:10,padding:'10px 4px',cursor:'pointer',textAlign:'center'}}>
                 <div style={{fontSize:20,marginBottom:3}}>{d.icon}</div>
                 <div style={{color:activeTool===d.id?T.prp:T.muted,fontSize:8,fontWeight:700,lineHeight:1.2}}>{d.label.slice(0,6)}</div>
               </button>
@@ -929,8 +930,8 @@ function AnalysisHubPage() {
           ):(
             <>
               <div style={{display:'flex',gap:6,marginBottom:10}}>
-                <button onClick={clearAllDrawings} style={{flex:1,padding:'8px',background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>전체 삭제</button>
-                <button onClick={()=>setDrawings(d=>d.map(x=>({...x,visible:true,hidden:false})))} style={{flex:1,padding:'8px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}30`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>모두 표시</button>
+                <button onClick={clearAllDrawings} style={{flex:1,padding:'8px',background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>전체 삭제</button>
+                <button onClick={()=>setDrawings(d=>d.map(x=>({...x,visible:true,hidden:false})))} style={{flex:1,padding:'8px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>모두 표시</button>
               </div>
               {drawings.map(d=>(
                 <div key={d.id} style={{display:'flex',alignItems:'center',gap:8,padding:'10px 0',borderBottom:`1px solid ${T.border}`,opacity:d.hidden?0.4:1}}>
@@ -962,7 +963,7 @@ function AnalysisHubPage() {
           <div style={{marginBottom:12}}>
             <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:6}}>색상</div>
             <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-              {['#3B82F6','#10B981','#EF4444','#F59E0B','#7C3AED','#0891B2','#EC4899','#F97316','#14B8A6','#94A3B8','#FFFFFF','#000000'].map(clr=>(
+              {['#3B82F6','#10B981','#EF4444','#F59E0B','#7C3AED','#0891B2','#EC4899','#F97316','#14B8A6','var(--t-sub)','#FFFFFF','#000000'].map(clr=>(
                 <button key={clr} onClick={()=>updateDrawingStyle(selectedDrawing.id,{color:clr})} style={{width:28,height:28,borderRadius:6,background:clr,border:`3px solid ${selectedDrawing.style.color===clr?'#fff':'transparent'}`,cursor:'pointer'}}/>
               ))}
             </div>
@@ -995,10 +996,10 @@ function AnalysisHubPage() {
             </div>
           </div>
           <div style={{display:'flex',gap:8}}>
-            <button onClick={()=>toggleLock(selectedDrawing.id)} style={{flex:1,padding:'10px',background:selectedDrawing.locked?T.ylw+'15':T.alt,color:selectedDrawing.locked?T.ylw:T.muted,border:`1px solid ${T.border}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>
+            <button onClick={()=>toggleLock(selectedDrawing.id)} style={{flex:1,padding:'10px',background:selectedDrawing.locked?A(T.ylw,'15'):T.alt,color:selectedDrawing.locked?T.ylw:T.muted,border:`1px solid ${T.border}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>
               {selectedDrawing.locked?'🔒 잠금됨':'🔓 잠금'}
             </button>
-            <button onClick={()=>deleteDrawing(selectedDrawing.id)} style={{flex:1,padding:'10px',background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>🗑 삭제</button>
+            <button onClick={()=>deleteDrawing(selectedDrawing.id)} style={{flex:1,padding:'10px',background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:'pointer'}}>🗑 삭제</button>
           </div>
         </BottomSheet>
       )}
@@ -1017,7 +1018,7 @@ function AnalysisHubPage() {
             <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:4}}>레버리지: {riskLeverage}x</div>
             <input type="range" min={1} max={20} step={1} value={riskLeverage} onChange={e=>setRiskLeverage(+e.target.value)} style={{width:'100%',accentColor:T.acl}}/>
           </div>
-          <Card style={{padding:'12px 14px',marginBottom:10,border:`1px solid ${T.grn}30`}}>
+          <Card style={{padding:'12px 14px',marginBottom:10,border:`1px solid ${A(T.grn,'30')}`}}>
             <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
               {[
                 {l:'리스크/리워드',v:`1 : ${riskReward.toFixed(2)}`,c:riskReward>=2?T.grn:riskReward>=1?T.ylw:T.red},
@@ -1032,7 +1033,7 @@ function AnalysisHubPage() {
               ))}
             </div>
           </Card>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:8,padding:'8px 12px',marginBottom:10}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:10}}>
             <div style={{color:T.ylw,fontSize:10,fontWeight:700}}>⚠️ 교육 목적 계산 · 실제 거래에 사용하지 마세요</div>
           </div>
           <button onClick={()=>addDrawing(activeTool,riskEntry,riskTP)} style={{width:'100%',padding:'12px',background:`linear-gradient(135deg,${activeTool==='long_pos'?T.grn:T.red},${activeTool==='long_pos'?T.acl:T.prp})`,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:'pointer'}}>
@@ -1049,7 +1050,7 @@ function AnalysisHubPage() {
             <button onClick={()=>setFibShowLabels(v=>!v)} style={{flex:1,padding:'9px',background:fibShowLabels?T.acg:T.alt,color:fibShowLabels?T.acl:T.muted,border:`1px solid ${fibShowLabels?T.acl:T.border}`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>
               {fibShowLabels?'레이블 ON':'레이블 OFF'}
             </button>
-            <button onClick={()=>setFibReverse(v=>!v)} style={{flex:1,padding:'9px',background:fibReverse?T.prp+'20':T.alt,color:fibReverse?T.prp:T.muted,border:`1px solid ${fibReverse?T.prp:T.border}`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>
+            <button onClick={()=>setFibReverse(v=>!v)} style={{flex:1,padding:'9px',background:fibReverse?A(T.prp,'20'):T.alt,color:fibReverse?T.prp:T.muted,border:`1px solid ${fibReverse?T.prp:T.border}`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>
               {fibReverse?'역방향 ON':'역방향 OFF'}
             </button>
           </div>
@@ -1090,7 +1091,7 @@ function AnalysisHubPage() {
                     <div style={{color:T.muted,fontSize:9}}>{ind.category}</div>
                   </div>
                 </div>
-                <button onClick={()=>{activeIndicators.includes(ind.id)?setActiveIndicators(p=>p.filter(x=>x!==ind.id)):setActiveIndicators(p=>[...p,ind.id]);}} style={{background:active?T.red+'15':T.acg,color:active?T.red:T.acl,border:`1px solid ${active?T.red:T.acl}40`,borderRadius:9,padding:'5px 12px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                <button onClick={()=>{activeIndicators.includes(ind.id)?setActiveIndicators(p=>p.filter(x=>x!==ind.id)):setActiveIndicators(p=>[...p,ind.id]);}} style={{background:active?A(T.red,'15'):T.acg,color:active?T.red:T.acl,border:`1px solid ${active?T.red:T.acl}40`,borderRadius:9,padding:'5px 12px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
                   {active?'제거':'추가'}
                 </button>
               </div>
@@ -1107,7 +1108,7 @@ function AnalysisHubPage() {
               <span style={{color:T.txt,fontSize:12,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{s}</span>
               <button type="button"
                 onClick={() => notifySuccess(`${s}는 TradingView 차트의 비교 기능에서 추가할 수 있습니다`)}
-                style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:10,fontWeight:700,cursor:'pointer'}}>+ 추가</button>
+                style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:10,fontWeight:700,cursor:'pointer'}}>+ 추가</button>
             </div>
           ))}
           <div style={{marginTop:10,color:T.muted,fontSize:9}}>* TradingView 차트에서 비교 기능이 활성화됩니다</div>
@@ -1116,7 +1117,7 @@ function AnalysisHubPage() {
 
       {showSheet&&sheetContent==='alerts'&&(
         <BottomSheet title="알림 설정">
-          <div style={{background:T.acg,border:`1px solid ${T.acl}30`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+          <div style={{background:T.acg,border:`1px solid ${A(T.acl,'30')}`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
             <div style={{color:T.acl,fontWeight:700,fontSize:11}}>현재 심볼: {symbol}</div>
           </div>
           {[{l:'가격 도달',d:'특정 가격 도달 시 알림'},{l:'% 변동',d:'일정 % 이상 변동 시 알림'},{l:'거래량 급증',d:'평균 대비 거래량 급증 시'},{l:'지표 조건',d:'RSI 과매수/과매도 등'}].map((a,i)=>(
@@ -1136,7 +1137,7 @@ function AnalysisHubPage() {
             <div style={{fontSize:40,marginBottom:10}}>⏮</div>
             <div style={{color:T.txt,fontWeight:700,fontSize:14,marginBottom:6}}>바 리플레이</div>
             <div style={{color:T.muted,fontSize:11,lineHeight:1.6,marginBottom:14}}>과거 특정 시점부터 차트를 재생합니다. TradingView 위젯에서 직접 실행하세요.</div>
-            <a href="/chart" target="_blank" style={{display:'inline-block',padding:'10px 20px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,fontSize:12,fontWeight:700,textDecoration:'none'}}>전용 차트에서 열기 ↗</a>
+            <a href="/chart" target="_blank" style={{display:'inline-block',padding:'10px 20px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,fontSize:12,fontWeight:700,textDecoration:'none'}}>전용 차트에서 열기 ↗</a>
           </div>
         </BottomSheet>
       )}
@@ -1154,7 +1155,7 @@ function AnalysisHubPage() {
                   <div style={{color:T.txt,fontSize:12,fontWeight:700}}>{t.n}</div>
                   <div style={{color:T.muted,fontSize:9,marginTop:1}}>{t.inds.join(' · ')} · {t.desc}</div>
                 </div>
-                <button onClick={()=>setActiveIndicators(t.inds)} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>적용</button>
+                <button onClick={()=>setActiveIndicators(t.inds)} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>적용</button>
               </div>
             ))}
           </div>
@@ -1189,7 +1190,7 @@ function AnalysisHubPage() {
 
       {showSheet&&sheetContent==='financials'&&(
         <BottomSheet title="재무제표">
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}25`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'25')}`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:11,display:'inline-flex',alignItems:'center',gap:5}}>
               <Radio size={11} strokeWidth={2.4}/>재무 데이터 준비중
             </div>
@@ -1206,7 +1207,7 @@ function AnalysisHubPage() {
 
       {showSheet&&sheetContent==='forecasts'&&(
         <BottomSheet title="🔮 애널리스트 예측">
-          <div style={{background:T.acl+'12',border:`1px solid ${T.acl}25`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+          <div style={{background:A(T.acl,'12'),border:`1px solid ${A(T.acl,'25')}`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
             <div style={{color:T.acl,fontWeight:700,fontSize:11,display:'inline-flex',alignItems:'center',gap:5}}>
               <Radio size={11} strokeWidth={2.4}/>예측 데이터 준비중
             </div>
@@ -1289,8 +1290,8 @@ function AnalysisHubPage() {
             WUNDER 자동매매 전략도 Pine Script로 작성됩니다.
           </div>
           <div style={{display:'flex',gap:6}}>
-            <a href="/chart" target="_blank" style={{flex:1,display:'block',padding:'10px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,fontSize:11,fontWeight:700,textDecoration:'none',textAlign:'center'}}>TradingView에서 열기 ↗</a>
-            <button onClick={()=>setTab('wunder' as any)} style={{flex:1,padding:'10px',background:T.prp+'15',color:T.prp,border:`1px solid ${T.prp}30`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>WUNDER 봇 Pine Script</button>
+            <a href="/chart" target="_blank" style={{flex:1,display:'block',padding:'10px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,fontSize:11,fontWeight:700,textDecoration:'none',textAlign:'center'}}>TradingView에서 열기 ↗</a>
+            <button onClick={()=>setTab('wunder' as any)} style={{flex:1,padding:'10px',background:A(T.prp,'15'),color:T.prp,border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>WUNDER 봇 Pine Script</button>
           </div>
         </BottomSheet>
       )}

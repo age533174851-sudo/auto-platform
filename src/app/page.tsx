@@ -1,4 +1,7 @@
 'use client';
+import { useTheme } from '@/lib/theme/useTheme';
+import { MODE_LABEL, type ThemeMode } from '@/lib/theme/themeMode';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { Asset } from '@/types';
 import { T, CURRENCIES, LANGS, I18N, MOCK_NEWS, RTL_LANGS } from '@/lib/constants';
@@ -19,7 +22,7 @@ import {
   Wallet,
   Stethoscope, Settings, CreditCard, Presentation, Shield, LayoutGrid,
   MoreHorizontal, X as XIcon, TriangleAlert,
-  User2, Link2, ShieldCheck, LogOut, Download,
+  User2, Link2, ShieldCheck, LogOut, Download, Sun, Moon, Clock,
 } from 'lucide-react';
 
 // lucide-react 아이콘 타입
@@ -37,62 +40,62 @@ import HubDashboard from '@/components/HubDashboard';
 // ── Dynamic imports (lazy-loaded, eliminates TDZ in bundle) ──
 import dynamic from 'next/dynamic';
 
-const HomePageComp    = dynamic(() => import('@/components/pages/HomePage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const MarketPageComp  = dynamic(() => import('@/components/pages/MarketPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const WatchlistPage   = dynamic(() => import('@/components/pages/WatchlistPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const PortfolioPageComp = dynamic(() => import('@/components/pages/PortfolioPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const TradingPageComp = dynamic(() => import('@/components/pages/TradingPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AutoPageComp    = dynamic(() => import('@/components/pages/AutoPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const StrategyBuilderPage = dynamic(() => import('@/components/pages/StrategyBuilderPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const RiskSettingsPage = dynamic(() => import('@/components/pages/RiskSettingsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
+const HomePageComp    = dynamic(() => import('@/components/pages/HomePage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const MarketPageComp  = dynamic(() => import('@/components/pages/MarketPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const WatchlistPage   = dynamic(() => import('@/components/pages/WatchlistPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const PortfolioPageComp = dynamic(() => import('@/components/pages/PortfolioPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const TradingPageComp = dynamic(() => import('@/components/pages/TradingPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AutoPageComp    = dynamic(() => import('@/components/pages/AutoPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const StrategyBuilderPage = dynamic(() => import('@/components/pages/StrategyBuilderPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const RiskSettingsPage = dynamic(() => import('@/components/pages/RiskSettingsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const AutoTradeEngine = dynamic(() => import('@/components/AutoTradeEngine'), { ssr: false });
 const ApiHealthMonitor = dynamic(() => import('@/components/ApiHealthMonitor'), { ssr: false });
-const AIPageComp      = dynamic(() => import('@/components/pages/AIPage'),      { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const NewsPage        = dynamic(() => import('@/components/pages/NewsPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AlertsPage      = dynamic(() => import('@/components/pages/AlertsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const HistoryPage     = dynamic(() => import('@/components/pages/HistoryPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const BacktestPage    = dynamic(() => import('@/components/pages/BacktestPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AcademyPage     = dynamic(() => import('@/components/pages/AcademyPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const ScannerPage     = dynamic(() => import('@/components/pages/ScannerPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const SettingsPage    = dynamic(() => import('@/components/pages/SettingsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const SocialPage      = dynamic(() => import('@/components/pages/SocialPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AccountsPage    = dynamic(() => import('@/components/pages/AccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const HubAccountsPage = dynamic(() => import('@/components/pages/HubAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
+const AIPageComp      = dynamic(() => import('@/components/pages/AIPage'),      { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const NewsPage        = dynamic(() => import('@/components/pages/NewsPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AlertsPage      = dynamic(() => import('@/components/pages/AlertsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const HistoryPage     = dynamic(() => import('@/components/pages/HistoryPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const BacktestPage    = dynamic(() => import('@/components/pages/BacktestPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AcademyPage     = dynamic(() => import('@/components/pages/AcademyPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const ScannerPage     = dynamic(() => import('@/components/pages/ScannerPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const SettingsPage    = dynamic(() => import('@/components/pages/SettingsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const SocialPage      = dynamic(() => import('@/components/pages/SocialPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AccountsPage    = dynamic(() => import('@/components/pages/AccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const HubAccountsPage = dynamic(() => import('@/components/pages/HubAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 import { nextStack, topmost, historyDelta } from '@/lib/nav/overlayStack';
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
-const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
-const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>로딩 중...</div> });
-const AIPortfolioPage = dynamic(() => import('@/components/pages/AIPortfolioPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const DCAPage         = dynamic(() => import('@/components/pages/DCAPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const DividendCalendarPage = dynamic(() => import('@/components/pages/DividendCalendarPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const FundingPage     = dynamic(() => import('@/components/pages/FundingPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const TradFiPage      = dynamic(() => import('@/components/pages/TradFiPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const RealtimePage    = dynamic(() => import('@/components/pages/RealtimePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AnalyticsPage   = dynamic(() => import('@/components/pages/AnalyticsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const SubscriptionPage = dynamic(() => import('@/components/pages/SubscriptionPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const EconCalendarPage = dynamic(() => import('@/components/pages/EconCalendarPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const BriefingPage    = dynamic(() => import('@/components/pages/BriefingPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const TaxPage         = dynamic(() => import('@/components/pages/TaxPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const GrowthPage      = dynamic(() => import('@/components/pages/GrowthPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const WunderPage      = dynamic(() => import('@/components/pages/WunderPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const HedgeOSPage     = dynamic(() => import('@/components/pages/HedgeOSPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const ChartTab        = dynamic(() => import('@/components/pages/ChartTab'),   { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AnalysisHubPage = dynamic(() => import('@/components/pages/AnalysisHubPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const IntelligencePage = dynamic(() => import('@/components/IntelligencePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const PnLCalculatorPage = dynamic(() => import('@/components/PnLCalculator'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const DiagnosticsPage    = dynamic(() => import('@/components/pages/DiagnosticsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const SearchPage         = dynamic(() => import('@/components/pages/SearchPage'),       { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const JournalReviewPage  = dynamic(() => import('@/components/pages/JournalReviewPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AutoBotLabPage     = dynamic(() => import('@/components/pages/AutoBotLabPage'),   { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const WatchGroupsPage    = dynamic(() => import('@/components/pages/WatchGroupsPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const PaperTradingPage   = dynamic(() => import('@/components/pages/PaperTradingPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const ExchangeConnectPage = dynamic(() => import('@/components/ExchangeConnectPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const AdminPageComp   = dynamic(() => import('@/components/pages/AdminPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const WorldClock = dynamic(() => import('@/components/pages/SharedUI').then(m => ({ default: m.WorldClock })), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
-const Heatmap = dynamic(() => import('@/components/pages/SharedUI').then(m => ({ default: m.Heatmap })), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'#475569',fontSize:13}}>⏳ 로딩 중...</div> });
+const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
+const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
+const AIPortfolioPage = dynamic(() => import('@/components/pages/AIPortfolioPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const DCAPage         = dynamic(() => import('@/components/pages/DCAPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const DividendCalendarPage = dynamic(() => import('@/components/pages/DividendCalendarPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const FundingPage     = dynamic(() => import('@/components/pages/FundingPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const TradFiPage      = dynamic(() => import('@/components/pages/TradFiPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const RealtimePage    = dynamic(() => import('@/components/pages/RealtimePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AnalyticsPage   = dynamic(() => import('@/components/pages/AnalyticsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const SubscriptionPage = dynamic(() => import('@/components/pages/SubscriptionPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const EconCalendarPage = dynamic(() => import('@/components/pages/EconCalendarPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const BriefingPage    = dynamic(() => import('@/components/pages/BriefingPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const TaxPage         = dynamic(() => import('@/components/pages/TaxPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const GrowthPage      = dynamic(() => import('@/components/pages/GrowthPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const WunderPage      = dynamic(() => import('@/components/pages/WunderPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const HedgeOSPage     = dynamic(() => import('@/components/pages/HedgeOSPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const ChartTab        = dynamic(() => import('@/components/pages/ChartTab'),   { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AnalysisHubPage = dynamic(() => import('@/components/pages/AnalysisHubPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const IntelligencePage = dynamic(() => import('@/components/IntelligencePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const PnLCalculatorPage = dynamic(() => import('@/components/PnLCalculator'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const DiagnosticsPage    = dynamic(() => import('@/components/pages/DiagnosticsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const SearchPage         = dynamic(() => import('@/components/pages/SearchPage'),       { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const JournalReviewPage  = dynamic(() => import('@/components/pages/JournalReviewPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AutoBotLabPage     = dynamic(() => import('@/components/pages/AutoBotLabPage'),   { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const WatchGroupsPage    = dynamic(() => import('@/components/pages/WatchGroupsPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const PaperTradingPage   = dynamic(() => import('@/components/pages/PaperTradingPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const ExchangeConnectPage = dynamic(() => import('@/components/ExchangeConnectPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const AdminPageComp   = dynamic(() => import('@/components/pages/AdminPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const WorldClock = dynamic(() => import('@/components/pages/SharedUI').then(m => ({ default: m.WorldClock })), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const Heatmap = dynamic(() => import('@/components/pages/SharedUI').then(m => ({ default: m.Heatmap })), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 
 
 // 온보딩 번역 — 선택 언어 기준으로 제목/버튼 표시
@@ -147,12 +150,12 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
         {step===0&&<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>{LANGS.map(l=>(
           <button key={l.id} onClick={()=>pick(l.id)}
             dir={l.id === 'ar' ? 'rtl' : 'ltr'}
-            style={{background:sl===l.id?T.acc+'25':T.card,border:`2px solid ${sl===l.id?T.acl:T.border}`,borderRadius:16,padding:'16px 12px',cursor:'pointer',textAlign:'center',minHeight:64,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:4}}>
+            style={{background:sl===l.id?A(T.acc,'25'):T.card,border:`2px solid ${sl===l.id?T.acl:T.border}`,borderRadius:16,padding:'16px 12px',cursor:'pointer',textAlign:'center',minHeight:64,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:4}}>
             <div style={{color:sl===l.id?T.acl:T.txt,fontWeight:700,fontSize:15,lineHeight:1.2,wordBreak:'keep-all'}}>{l.native}</div>
             {l.native !== l.label && <div style={{color:T.muted,fontSize:9}}>{l.label}</div>}
           </button>
         ))}</div>}
-        {step===1&&<div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>{Object.entries(CURRENCIES).map(([code,cur])=><button key={code} onClick={()=>setSc(code)} style={{background:sc===code?T.acc+'25':T.card,border:`2px solid ${sc===code?T.acl:T.border}`,borderRadius:12,padding:'10px 4px',cursor:'pointer',textAlign:'center'}}><div style={{color:sc===code?T.acl:T.txt,fontWeight:800,fontSize:18}}>{cur.symbol}</div><div style={{color:T.muted,fontSize:9,marginTop:1}}>{code}</div></button>)}</div>}
+        {step===1&&<div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>{Object.entries(CURRENCIES).map(([code,cur])=><button key={code} onClick={()=>setSc(code)} style={{background:sc===code?A(T.acc,'25'):T.card,border:`2px solid ${sc===code?T.acl:T.border}`,borderRadius:12,padding:'10px 4px',cursor:'pointer',textAlign:'center'}}><div style={{color:sc===code?T.acl:T.txt,fontWeight:800,fontSize:18}}>{cur.symbol}</div><div style={{color:T.muted,fontSize:9,marginTop:1}}>{code}</div></button>)}</div>}
         {step===2&&<div style={{display:'flex',flexDirection:'column',gap:12}}>
           {[
             {n:'1',t:'모의투자 (MOCK)',d:'가상 자금으로 안전하게 연습해요. 지금 바로 시작할 수 있어요.',c:T.grn,badge:'지금 시작'},
@@ -243,6 +246,12 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
 
 export default function App() {
   const [mounted, setMounted] = useState(false);
+  const { mode: themeMode, setMode: setThemeMode } = useTheme();
+  // 밝음 → 어두움 → 시간에 맞춰 → 밝음. 셋뿐이라 목록을 따로 두지 않는다.
+  const cycleTheme=useCallback(()=>{
+    const order:ThemeMode[]=['light','dark','auto'];
+    setThemeMode(order[(order.indexOf(themeMode)+1)%order.length]);
+  },[themeMode,setThemeMode]);
   const [tab,setTab]=useState('home');
   // ── 딥링크 ──
   // 이 앱은 한 페이지 안에서 tab 상태로 화면을 바꾸므로 URL이 없다.
@@ -680,7 +689,7 @@ export default function App() {
       return <div style={{padding:'24px 16px',textAlign:'center',color:'#EF4444'}}>
         <div style={{marginBottom:8,display:'flex',justifyContent:'center'}}><TriangleAlert size={28} strokeWidth={2.2}/></div>
         <div style={{fontWeight:700,marginBottom:4}}>페이지 오류</div>
-        <div style={{fontSize:11,color:'#94A3B8',marginBottom:12}}>{String(e)}</div>
+        <div style={{fontSize:11,color:'var(--t-sub)',marginBottom:12}}>{String(e)}</div>
         <button onClick={()=>nav('home')} style={{background:'#2563EB',color:'#fff',border:'none',borderRadius:10,padding:'10px 20px',fontWeight:700,cursor:'pointer'}}>홈으로</button>
       </div>;
     }
@@ -692,10 +701,10 @@ export default function App() {
   if (!mounted) {
     return (
       <div style={{
-        minHeight:'100vh', background:'#060B14',
+        minHeight:'100vh', background:'var(--t-bg)',
         display:'flex', alignItems:'center', justifyContent:'center',
       }}>
-        <div style={{ textAlign:'center', color:'#475569' }}>
+        <div style={{ textAlign:'center', color:'var(--t-muted)' }}>
           <div style={{ fontSize:32, marginBottom:8 }}>
             <span style={{ display:'inline-block', animation:'spin 1s linear infinite' }}>⟳</span>
           </div>
@@ -738,7 +747,7 @@ export default function App() {
               <div style={{marginLeft:'auto'}}><Dot c={T.grn}/></div>
             </div>
           </div>
-          <button onClick={()=>nav('menu_hub')} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 16px',margin:'2px 0 6px',background:tab==='menu_hub'?T.acg:T.acc+'15',color:tab==='menu_hub'?T.acl:T.acl,border:'none',borderRadius:0,cursor:'pointer',fontSize:13,fontWeight:800,textAlign:'left'}}>
+          <button onClick={()=>nav('menu_hub')} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 16px',margin:'2px 0 6px',background:tab==='menu_hub'?T.acg:A(T.acc,'15'),color:tab==='menu_hub'?T.acl:T.acl,border:'none',borderRadius:0,cursor:'pointer',fontSize:13,fontWeight:800,textAlign:'left'}}>
             <span style={{width:20,display:'inline-flex',alignItems:'center',justifyContent:'center'}}><SearchIc size={16} strokeWidth={2.4}/></span>전체 메뉴 · 검색
           </button>
           {(()=>{
@@ -765,7 +774,7 @@ export default function App() {
             ));
           })()}
           <div style={{marginTop:'auto',padding:'12px 14px',borderTop:`1px solid ${T.border}`}}>
-            <div style={{background:T.prp+'20',border:`1px solid ${T.prp}40`,borderRadius:10,padding:'8px 12px'}}>
+            <div style={{background:A(T.prp,'20'),border:`1px solid ${A(T.prp,'40')}`,borderRadius:10,padding:'8px 12px'}}>
               <div style={{color:T.prp,fontWeight:700,fontSize:11,display:'flex',alignItems:'center',gap:6}}><Bot size={12} strokeWidth={2.2}/> 모의투자 모드</div>
               <div style={{color:T.muted,fontSize:10,marginTop:2}}>실제 돈 사용 안됨 · 수익 보장 없음</div>
             </div>
@@ -775,7 +784,7 @@ export default function App() {
         {/* Main Content */}
         <div className="mc" style={{flex:1}}>
           {/* Header */}
-          <div style={{position:'sticky',top:0,zIndex:50,background:'rgba(6,11,20,.92)',backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)',borderBottom:`1px solid ${T.border}`,padding:'11px 16px 9px',display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:`max(env(safe-area-inset-top),11px)`}}>
+          <div style={{position:'sticky',top:0,zIndex:50,background:'color-mix(in srgb, var(--t-bg) 92%, transparent)',backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)',borderBottom:`1px solid ${T.border}`,padding:'11px 16px 9px',display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:`max(env(safe-area-inset-top),11px)`}}>
             <div style={{display:'flex',alignItems:'center',gap:8}}>
               <div style={{width:26,height:26,borderRadius:8,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:13,color:'#fff'}}>T</div>
               <div style={{fontWeight:900,fontSize:14,letterSpacing:-0.5}}>{allTabs.find(t2=>t2.id===tab)?.label||'TRAIGO'}</div>
@@ -784,6 +793,13 @@ export default function App() {
               <div style={{display:'flex',alignItems:'center',gap:3,background:priceStatus==='live'?'rgba(16,185,129,.12)':priceStatus==='mock'?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)',border:`1px solid ${priceStatus==='live'?'rgba(16,185,129,.3)':priceStatus==='mock'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}`,borderRadius:20,padding:'2px 7px'}}>
                 <Dot c={priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red}/><span style={{color:priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red,fontSize:9,fontWeight:700}}>{priceStatus==='live'?'LIVE':priceStatus==='mock'?'MOCK':'ERR'}</span>
               </div>
+              {/* 테마는 설정에도 있지만 여기에도 둔다. 밝기는 자주 바꾸는
+                  것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.
+                  누르면 밝음 → 어두움 → 시간에 맞춰 순으로 돈다. */}
+              <button onClick={cycleTheme} title={`테마: ${MODE_LABEL[themeMode]}`} aria-label={`테마 ${MODE_LABEL[themeMode]}`}
+                style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,width:26,height:26,cursor:'pointer',color:T.sub,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                {themeMode==='light'?<Sun size={13} strokeWidth={2.2}/>:themeMode==='dark'?<Moon size={13} strokeWidth={2.2}/>:<Clock size={13} strokeWidth={2.2}/>}
+              </button>
               {pwaInstallable&&(
                 <button onClick={promptPwaInstall} style={{background:'linear-gradient(135deg,#2563EB,#7C3AED)',border:'none',borderRadius:20,padding:'3px 10px',cursor:'pointer',fontSize:10,color:'#fff',fontWeight:700,display:'flex',alignItems:'center',gap:3}} className="hdr-badge">
                   <Download size={11} strokeWidth={2.4}/> 설치
@@ -804,7 +820,7 @@ export default function App() {
               </button>
               {authUser ? (
                 <div style={{position:'relative'}}>
-                  <button onClick={()=>setProfileOpen(o=>!o)} aria-label="프로필 메뉴" style={{minHeight:44,minWidth:44,background:T.prp+'20',border:`1px solid ${T.prp}40`,borderRadius:'50%',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
+                  <button onClick={()=>setProfileOpen(o=>!o)} aria-label="프로필 메뉴" style={{minHeight:44,minWidth:44,background:A(T.prp,'20'),border:`1px solid ${A(T.prp,'40')}`,borderRadius:'50%',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
                     <span style={{color:T.prp,fontSize:15,fontWeight:800}}>{String(authUser.nickname||authUser.email||'U').charAt(0).toUpperCase()}</span>
                   </button>
                   {profileOpen&&(
@@ -855,7 +871,7 @@ export default function App() {
           )}
           {/* PWA: Update banner */}
           {pwaUpdate&&(
-            <div style={{background:'#1E3A5F',borderBottom:`1px solid ${T.acl}40`,padding:'8px 16px',display:'flex',alignItems:'center',gap:8,zIndex:49}}>
+            <div style={{background:'#1E3A5F',borderBottom:`1px solid ${A(T.acl,'40')}`,padding:'8px 16px',display:'flex',alignItems:'center',gap:8,zIndex:49}}>
               <span style={{fontSize:14}}>🔄</span>
               <span style={{color:T.acl,fontSize:11,fontWeight:700,flex:1}}>새 버전이 있습니다</span>
               <button onClick={applyPwaUpdate} style={{background:T.acl,color:'#fff',border:'none',borderRadius:8,padding:'4px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>업데이트</button>
@@ -939,7 +955,7 @@ export default function App() {
                               const Ic=t2.Icon; const active=tab===t2.id;
                               return (
                                 <button key={t2.id} onClick={()=>nav(t2.id)} style={{background:active?T.acg:T.alt,border:`1px solid ${active?T.acl:T.border}`,borderRadius:12,padding:'12px 14px',display:'flex',alignItems:'center',gap:12,cursor:'pointer',position:'relative',touchAction:'manipulation',textAlign:'left',width:'100%'}}>
-                                  <span style={{flexShrink:0,width:36,height:36,borderRadius:9,background:active?T.acl+'20':T.surf,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                                  <span style={{flexShrink:0,width:36,height:36,borderRadius:9,background:active?A(T.acl,'20'):T.surf,display:'flex',alignItems:'center',justifyContent:'center'}}>
                                     <Ic size={18} strokeWidth={active?2.4:2.1} color={active?T.acl:T.sub}/>
                                   </span>
                                   <div style={{flex:1,minWidth:0}}>

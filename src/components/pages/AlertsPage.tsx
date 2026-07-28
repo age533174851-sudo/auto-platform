@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { ASSETS } from '@/data/assets';
@@ -249,7 +250,7 @@ export default function AlertsPage({
 
       {/* Permission banner */}
       {permStatus === 'default' && (
-        <Card style={{ marginBottom: 10, background: T.acl+'10', border:`1px solid ${T.acl}40` }}>
+        <Card style={{ marginBottom: 10, background: A(T.acl,'10'), border:`1px solid ${A(T.acl,'40')}` }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap: 10 }}>
             <div>
               <div style={{ color: T.txt, fontSize: 12, fontWeight: 700, marginBottom: 2 }}>
@@ -269,7 +270,7 @@ export default function AlertsPage({
         </Card>
       )}
       {permStatus === 'denied' && (
-        <Card style={{ marginBottom: 10, background: T.red+'10', border:`1px solid ${T.red}30` }}>
+        <Card style={{ marginBottom: 10, background: A(T.red,'10'), border:`1px solid ${A(T.red,'30')}` }}>
           <div style={{ color: T.red, fontSize: 11, fontWeight: 700 }}>
             ⚠️ 알림이 차단되어 있습니다. 브라우저 설정에서 알림을 허용해주세요.
           </div>
@@ -343,7 +344,7 @@ export default function AlertsPage({
             <div key={a.id} style={{ padding:'12px 14px',
               borderBottom: i < alerts.length - 1 ? `1px solid ${T.border}` : 'none',
               opacity: a.active ? 1 : 0.5,
-              background: a.triggered ? T.grn + '08' : 'transparent' }}>
+              background: a.triggered ? A(T.grn,'08') : 'transparent' }}>
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom: 6 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display:'flex', alignItems:'center', gap: 5, marginBottom: 3 }}>
@@ -352,7 +353,7 @@ export default function AlertsPage({
                       {TYPE_LABEL[a.type]}
                     </span>
                     {a.triggered && (
-                      <span style={{ background: T.grn + '20', color: T.grn,
+                      <span style={{ background: A(T.grn,'20'), color: T.grn,
                         fontSize: 9, fontWeight: 700, padding:'2px 6px', borderRadius: 4 }}>
                         ✓ 발동됨
                       </span>
@@ -377,7 +378,7 @@ export default function AlertsPage({
                   {a.triggered && (
                     <button type="button" onClick={() => resetAlert(a.id)}
                       style={{ padding:'6px 10px', minHeight: 32, background: T.acg,
-                        border:`1px solid ${T.acl}40`, borderRadius: 6, color: T.acl,
+                        border:`1px solid ${A(T.acl,'40')}`, borderRadius: 6, color: T.acl,
                         fontSize: 10, fontWeight: 700, cursor:'pointer' }}>
                       재활성
                     </button>
@@ -392,7 +393,7 @@ export default function AlertsPage({
                   </button>
                   <button type="button" onClick={() => removeAlert(a.id)}
                     style={{ padding:'6px 8px', minHeight: 32, background:'transparent',
-                      border:`1px solid ${T.red}30`, borderRadius: 6, color: T.red,
+                      border:`1px solid ${A(T.red,'30')}`, borderRadius: 6, color: T.red,
                       fontSize: 10, fontWeight: 700, cursor:'pointer' }}>
                     🗑
                   </button>

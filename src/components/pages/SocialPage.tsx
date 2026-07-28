@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { AccountGroup, BulkOrder, ConnectedAccount, ExchangeType, Strategy } from '@/types/domain';
 import { notifyInfo } from '@/lib/notify/center';
@@ -91,7 +92,7 @@ function SocialPage() {
 
   return (
     <div>
-      <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:10}}>
+      <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:10}}>
         <div style={{color:T.ylw,fontWeight:700,fontSize:10}}>⚠️ 모든 성과는 모의투자 기준 · 실제 수익 보장 없음</div>
       </div>
 
@@ -133,7 +134,7 @@ function SocialPage() {
               </div>
               <button type="button"
                 onClick={() => notifyInfo('모의 전략 구독은 곧 출시됩니다. 현재는 더보기 → 전략빌더에서 본인 전략 생성 가능합니다.')}
-                style={{width:'100%',padding:'10px',minHeight:38,background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>전략 구독 (모의)</button>
+                style={{width:'100%',padding:'10px',minHeight:38,background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:9,fontSize:11,fontWeight:700,cursor:'pointer'}}>전략 구독 (모의)</button>
             </Card>
           ))}
         </div>
@@ -144,7 +145,7 @@ function SocialPage() {
           {BOARD_POSTS.map(p=>(
             <Card key={p.id} style={{padding:'12px 14px',marginBottom:6,cursor:'pointer'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:4}}>
-                <span style={{background:T.acl+'20',color:T.acl,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:5}}>{p.category}</span>
+                <span style={{background:A(T.acl,'20'),color:T.acl,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:5}}>{p.category}</span>
                 <div style={{display:'flex',gap:8,color:T.muted,fontSize:9}}>
                   <span>👁 {p.views}</span><span>❤️ {p.likes}</span><span>{p.comments}</span>
                 </div>
@@ -161,7 +162,7 @@ function SocialPage() {
           {QA_POSTS.map(p=>(
             <Card key={p.id} style={{padding:'12px 14px',marginBottom:6,cursor:'pointer'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:4}}>
-                <span style={{background:p.solved?T.grn+'20':T.ylw+'20',color:p.solved?T.grn:T.ylw,fontSize:9,fontWeight:700,padding:'1px 7px',borderRadius:5}}>{p.solved?'✅ 해결됨':'미해결'}</span>
+                <span style={{background:p.solved?A(T.grn,'20'):A(T.ylw,'20'),color:p.solved?T.grn:T.ylw,fontSize:9,fontWeight:700,padding:'1px 7px',borderRadius:5}}>{p.solved?'✅ 해결됨':'미해결'}</span>
                 <div style={{display:'flex',gap:8,color:T.muted,fontSize:9}}><span>{p.answers}</span><span>❤️ {p.likes}</span></div>
               </div>
               <div style={{color:T.txt,fontSize:12,fontWeight:600,marginBottom:3}}>{p.title}</div>
@@ -182,10 +183,10 @@ function SocialPage() {
       {tab==='profit'&&(
         <div>
           {PROFIT_POSTS.map(p=>(
-            <Card key={p.id} style={{padding:'14px 16px',marginBottom:8,border:`1px solid ${T.grn}20`}}>
+            <Card key={p.id} style={{padding:'14px 16px',marginBottom:8,border:`1px solid ${A(T.grn,'20')}`}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                 <div style={{display:'flex',gap:6,alignItems:'center'}}>
-                  <div style={{width:28,height:28,borderRadius:8,background:T.grn+'20',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:900,color:T.grn}}>{(p.user||'?')[1]?.toUpperCase()||'?'}</div>
+                  <div style={{width:28,height:28,borderRadius:8,background:A(T.grn,'20'),display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:900,color:T.grn}}>{(p.user||'?')[1]?.toUpperCase()||'?'}</div>
                   <div><div style={{color:T.txt,fontSize:12,fontWeight:700}}>{p.user} {p.badge}</div><div style={{color:T.muted,fontSize:9}}>{p.time} · {p.asset} {p.side}</div></div>
                 </div>
                 <div style={{textAlign:'right'}}>
@@ -205,7 +206,7 @@ function SocialPage() {
           {NOTICES.map(n=>(
             <Card key={n.id} style={{padding:'12px 14px',marginBottom:6,border:`1px solid ${n.important?T.acl:T.border}20`}}>
               <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:3}}>
-                {n.important&&<span style={{background:T.red+'20',color:T.red,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:5}}>중요</span>}
+                {n.important&&<span style={{background:A(T.red,'20'),color:T.red,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:5}}>중요</span>}
                 <span style={{color:T.muted,fontSize:9}}>{n.time}</span>
               </div>
               <div style={{color:T.txt,fontSize:12,fontWeight:600}}>{n.title}</div>
@@ -231,7 +232,7 @@ const GROUP_INFO:Record<AccountGroup,{name:string;color:string;icon:string}> = {
   longterm: {name:'장투 계좌',color:'#3B82F6',icon:''},
   shortterm:{name:'단타 계좌',color:'#F59E0B',icon:''},
   auto:     {name:'자동매매 계좌',color:'#10B981',icon:''},
-  cash:     {name:'현금 대기 계좌',color:'#94A3B8',icon:'💵'},
+  cash:     {name:'현금 대기 계좌',color:'var(--t-sub)',icon:'💵'},
   custom:   {name:'커스텀 그룹',color:'#7C3AED',icon:''},
 };
 

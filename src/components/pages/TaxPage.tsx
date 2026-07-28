@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -146,7 +147,7 @@ function TaxPage({currency}:{currency:string}) {
 
       {tab==='summary'&&(
         <div>
-          <div style={{background:'linear-gradient(135deg,#0A1628,#0D1F3C)',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
+          <div style={{background:'linear-gradient(135deg,var(--t-card),var(--t-surf))',border:`1px solid ${T.border2}`,borderRadius:18,padding:'18px 16px',marginBottom:14}}>
             <div style={{color:T.muted,fontSize:11,marginBottom:2}}>{year}년 순 실현손익 (모의)</div>
             <div style={{color:YEARLY.net>=0?T.grn:T.red,fontSize:28,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{YEARLY.net>=0?'+':''}{cvt(YEARLY.net,currency)}</div>
             <div style={{display:'flex',gap:16,marginTop:8,flexWrap:'wrap'}}>
@@ -211,7 +212,7 @@ function TaxPage({currency}:{currency:string}) {
 
           {tab === 'calculator' && (
             <div>
-              <div style={{ background:T.ylw+'10', border:`1px solid ${T.ylw}30`, borderRadius:10, padding:'10px 14px', marginBottom:14, color:T.ylw, fontSize:10, lineHeight:1.6 }}>
+              <div style={{ background:A(T.ylw,'10'), border:`1px solid ${A(T.ylw,'30')}`, borderRadius:10, padding:'10px 14px', marginBottom:14, color:T.ylw, fontSize:10, lineHeight:1.6 }}>
                 ⚠️ 이 계산기는 앱 내 <b>참고용 계산기</b>입니다. 실제 세무신고용으로 사용하지 마세요. 정확한 세무 상담은 공인세무사에게 문의하세요.
               </div>
               {/* 자산 유형 선택 */}
@@ -270,12 +271,12 @@ function TaxPage({currency}:{currency:string}) {
         <div>
           <Card style={{padding:'14px 16px',marginBottom:10}}>
             <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>📥 내보내기</div>
-            <button onClick={csvExport} style={{width:'100%',padding:'12px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:11,fontWeight:700,fontSize:13,cursor:'pointer',marginBottom:8}}>
+            <button onClick={csvExport} style={{width:'100%',padding:'12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:11,fontWeight:700,fontSize:13,cursor:'pointer',marginBottom:8}}>
               {year}년 CSV 다운로드
             </button>
             <div style={{color:T.muted,fontSize:10,textAlign:'center'}}>엑셀에서 열 수 있는 CSV 형식으로 내보냅니다.</div>
           </Card>
-          <div style={{background:T.ylw+'12',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'10px 14px'}}>
+          <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'10px 14px'}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:11,marginBottom:4}}>⚠️ 세금 안내</div>
             <div style={{color:T.muted,fontSize:10,lineHeight:1.6}}>이 데이터는 모의투자 기록입니다. 실제 세금 신고는 공인 세무사와 상담하세요. 예상 세금 계산은 교육 목적입니다.</div>
           </div>

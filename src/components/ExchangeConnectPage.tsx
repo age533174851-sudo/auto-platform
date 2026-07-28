@@ -1,24 +1,21 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { EXCHANGE_META } from '@/lib/exchanges/types';
 import type { ExchangeId, ConnectedExchange } from '@/lib/exchanges/types';
 
 // ── Theme ─────────────────────────────────────────────────────
-const T = {
-  bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
-  border:'#1A2D4A', border2:'#243A5E',
-  txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B',
-  acl:'#60A5FA', acc:'#2563EB', acg:'#1E3A5F', prp:'#7C3AED',
-} as const;
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 // ── Exchange order & display ──────────────────────────────────
 const EXCHANGES: ExchangeId[] = ['binance','bybit','okx','gate','upbit','bithumb'];
 
 // ── Loading skeleton ──────────────────────────────────────────
 function Skeleton({ w='100%', h=14 }: { w?: string|number; h?: number }) {
-  return <div style={{ width:w, height:h, borderRadius:6, background:'linear-gradient(90deg,#1A2D4A 25%,#243A5E 50%,#1A2D4A 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.2s infinite' }}/>;
+  return <div style={{ width:w, height:h, borderRadius:6, background:'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.2s infinite' }}/>;
 }
 
 // ── Card ──────────────────────────────────────────────────────
@@ -242,7 +239,7 @@ export default function ExchangeConnectPage() {
       </div>
 
       {/* Security banner */}
-      <div style={{ background:'#F59E0B0F', border:`1px solid ${T.ylw}30`, borderRadius:12, padding:'10px 14px', marginBottom:14 }}>
+      <div style={{ background:'#F59E0B0F', border:`1px solid ${A(T.ylw,'30')}`, borderRadius:12, padding:'10px 14px', marginBottom:14 }}>
         <div style={{ color:T.ylw, fontWeight:700, fontSize:11, marginBottom:4 }}>🔐 보안 안내</div>
         <div style={{ color:'#B45309', fontSize:10, lineHeight:1.6 }}>
           • API Secret은 <strong>AES-256-GCM 암호화</strong> 후 서버에만 저장 · 절대 클라이언트로 반환하지 않습니다<br/>
@@ -313,9 +310,9 @@ export default function ExchangeConnectPage() {
                     </div>
                     <div style={{ color:T.muted, fontSize:10 }}>{conn.apiKeyMasked} · {ex.name}</div>
                     <div style={{ display:'flex', gap:4, marginTop:4, flexWrap:'wrap' }}>
-                      {conn.permissions.read     && <span style={{ background:T.grn+'20', color:T.grn,   fontSize:8, padding:'1px 5px', borderRadius:4 }}>조회</span>}
-                      {conn.permissions.trading  && <span style={{ background:T.ylw+'20', color:T.ylw,   fontSize:8, padding:'1px 5px', borderRadius:4 }}>거래</span>}
-                      {conn.permissions.withdrawal && <span style={{ background:T.red+'20', color:T.red, fontSize:8, padding:'1px 5px', borderRadius:4 }}>⚠️ 출금</span>}
+                      {conn.permissions.read     && <span style={{ background:A(T.grn,'20'), color:T.grn,   fontSize:8, padding:'1px 5px', borderRadius:4 }}>조회</span>}
+                      {conn.permissions.trading  && <span style={{ background:A(T.ylw,'20'), color:T.ylw,   fontSize:8, padding:'1px 5px', borderRadius:4 }}>거래</span>}
+                      {conn.permissions.withdrawal && <span style={{ background:A(T.red,'20'), color:T.red, fontSize:8, padding:'1px 5px', borderRadius:4 }}>⚠️ 출금</span>}
                     </div>
                   </div>
                   <div style={{ display:'flex', flexDirection:'column', gap:5, alignItems:'flex-end' }}>
@@ -324,7 +321,7 @@ export default function ExchangeConnectPage() {
                       상세
                     </button>
                     <button onClick={() => handleDelete(conn.id)}
-                      style={{ padding:'4px 10px', background:'transparent', border:`1px solid ${T.red}30`, borderRadius:8, color:T.red, fontSize:10, cursor:'pointer' }}>
+                      style={{ padding:'4px 10px', background:'transparent', border:`1px solid ${A(T.red,'30')}`, borderRadius:8, color:T.red, fontSize:10, cursor:'pointer' }}>
                       삭제
                     </button>
                   </div>
@@ -402,7 +399,7 @@ export default function ExchangeConnectPage() {
         </div>
 
         {/* Security reminder */}
-        <div style={{ background:'#EF444410', border:`1px solid ${T.red}30`, borderRadius:10, padding:'10px 14px', marginBottom:14 }}>
+        <div style={{ background:'#EF444410', border:`1px solid ${A(T.red,'30')}`, borderRadius:10, padding:'10px 14px', marginBottom:14 }}>
           <div style={{ color:T.red, fontSize:10, fontWeight:700, marginBottom:3 }}>⚠️ 반드시 확인하세요</div>
           <div style={{ color:'#FCA5A5', fontSize:10, lineHeight:1.6 }}>
             ✗ <strong>출금(Withdrawal) 권한은 절대 부여하지 마세요</strong><br/>
@@ -484,10 +481,10 @@ export default function ExchangeConnectPage() {
 
         {/* Error / success */}
         {connectErr && (
-          <div style={{ marginTop:12, background:'#EF444415', border:`1px solid ${T.red}40`, borderRadius:10, padding:'10px 14px', color:T.red, fontSize:11, lineHeight:1.5, whiteSpace:'pre-wrap' }}>{connectErr}</div>
+          <div style={{ marginTop:12, background:'#EF444415', border:`1px solid ${A(T.red,'40')}`, borderRadius:10, padding:'10px 14px', color:T.red, fontSize:11, lineHeight:1.5, whiteSpace:'pre-wrap' }}>{connectErr}</div>
         )}
         {connectOk && (
-          <div style={{ marginTop:12, background:'#10B98115', border:`1px solid ${T.grn}40`, borderRadius:10, padding:'10px 14px', color:T.grn, fontSize:12, fontWeight:700 }}>
+          <div style={{ marginTop:12, background:'#10B98115', border:`1px solid ${A(T.grn,'40')}`, borderRadius:10, padding:'10px 14px', color:T.grn, fontSize:12, fontWeight:700 }}>
             ✅ 연결 성공! 목록으로 이동합니다…
           </div>
         )}
@@ -558,11 +555,11 @@ export default function ExchangeConnectPage() {
 
           {/* Test connection */}
           <button onClick={() => handleTest(selConn)} disabled={testing}
-            style={{ width:'100%', padding:'10px', background:T.alt, border:`1px solid ${T.acl}40`, borderRadius:10, color:T.acl, fontWeight:700, fontSize:12, cursor: testing ? 'not-allowed' : 'pointer' }}>
+            style={{ width:'100%', padding:'10px', background:T.alt, border:`1px solid ${A(T.acl,'40')}`, borderRadius:10, color:T.acl, fontWeight:700, fontSize:12, cursor: testing ? 'not-allowed' : 'pointer' }}>
             {testing ? '테스트 중…' : '연결 테스트'}
           </button>
           {testMsg && (
-            <div style={{ marginTop:8, padding:'8px 12px', background: testMsg.startsWith('✅') ? T.grn+'10' : T.red+'10', borderRadius:8, color: testMsg.startsWith('✅') ? T.grn : T.red, fontSize:11 }}>
+            <div style={{ marginTop:8, padding:'8px 12px', background: testMsg.startsWith('✅') ? A(T.grn,'10') : A(T.red,'10'), borderRadius:8, color: testMsg.startsWith('✅') ? T.grn : T.red, fontSize:11 }}>
               {testMsg}
             </div>
           )}
@@ -586,7 +583,7 @@ export default function ExchangeConnectPage() {
             } catch (e:any) { setDiag({ error: e?.message || '진단 실패' }); }
             finally { setDiagRunning(false); }
           }} disabled={diagRunning}
-            style={{ width:'100%', marginTop:8, padding:'10px', background:T.prp+'15', border:`1px solid ${T.prp}40`, borderRadius:10, color:T.prp, fontWeight:700, fontSize:12, cursor: diagRunning?'not-allowed':'pointer' }}>
+            style={{ width:'100%', marginTop:8, padding:'10px', background:A(T.prp,'15'), border:`1px solid ${A(T.prp,'40')}`, borderRadius:10, color:T.prp, fontWeight:700, fontSize:12, cursor: diagRunning?'not-allowed':'pointer' }}>
             {diagRunning ? '진단 중…' : '테스트넷 진단 (시스템 검증)'}
           </button>
           {diag && !diag.error && (
@@ -606,7 +603,7 @@ export default function ExchangeConnectPage() {
                 </div>
               ))}
               <div style={{ marginTop:8, padding:'7px 10px', borderRadius:7, fontSize:10, lineHeight:1.4,
-                background: diag.verdict==='ready'?T.grn+'12':diag.verdict==='partial'?T.ylw+'12':T.red+'12',
+                background: diag.verdict==='ready'?A(T.grn,'12'):diag.verdict==='partial'?A(T.ylw,'12'):A(T.red,'12'),
                 color: diag.verdict==='ready'?T.grn:diag.verdict==='partial'?T.ylw:T.red }}>
                 {diag.verdict==='ready' ? '✅ 모든 항목 통과 — 시스템 정상. 소액 실전 테스트 가능' :
                  diag.verdict==='partial' ? '⚠️ 일부 실패 — 실패 항목 확인 후 재시도' :
@@ -615,7 +612,7 @@ export default function ExchangeConnectPage() {
             </div>
           )}
           {diag?.error && (
-            <div style={{ marginTop:8, padding:'8px 12px', background:T.red+'10', borderRadius:8, color:T.red, fontSize:11 }}>진단 실패: {diag.error}</div>
+            <div style={{ marginTop:8, padding:'8px 12px', background:A(T.red,'10'), borderRadius:8, color:T.red, fontSize:11 }}>진단 실패: {diag.error}</div>
           )}
         </Card>
 
@@ -678,18 +675,18 @@ export default function ExchangeConnectPage() {
             </div>
           </div>
           {selConn.autoTradingEnabled && (
-            <div style={{ marginTop:8, background:'#F59E0B10', border:`1px solid ${T.ylw}30`, borderRadius:8, padding:'7px 10px', color:T.ylw, fontSize:10 }}>
+            <div style={{ marginTop:8, background:'#F59E0B10', border:`1px solid ${A(T.ylw,'30')}`, borderRadius:8, padding:'7px 10px', color:T.ylw, fontSize:10 }}>
               ⚠️ 자동매매 활성화됨 · 실주문 기능은 별도 안전장치 승인 후 활성화됩니다
             </div>
           )}
         </Card>
 
         {/* Delete */}
-        <div style={{ background:'#EF444408', border:`1px solid ${T.red}20`, borderRadius:12, padding:'12px 14px' }}>
+        <div style={{ background:'#EF444408', border:`1px solid ${A(T.red,'20')}`, borderRadius:12, padding:'12px 14px' }}>
           <div style={{ color:T.red, fontWeight:700, fontSize:11, marginBottom:6 }}>⛔ 위험 구역</div>
           <div style={{ color:'#FCA5A5', fontSize:10, marginBottom:10 }}>연결을 삭제하면 저장된 API 키가 즉시 삭제됩니다</div>
           <button onClick={() => handleDelete(selConn.id)}
-            style={{ width:'100%', padding:'10px', background:'transparent', border:`1px solid ${T.red}50`, borderRadius:10, color:T.red, fontWeight:700, fontSize:12, cursor:'pointer' }}>
+            style={{ width:'100%', padding:'10px', background:'transparent', border:`1px solid ${A(T.red,'50')}`, borderRadius:10, color:T.red, fontWeight:700, fontSize:12, cursor:'pointer' }}>
             🗑️ 이 거래소 연결 삭제
           </button>
         </div>

@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { DataFreq, RealtimeConfig } from '@/types/domain';
 import { notifyError } from '@/lib/notify/center';
@@ -153,14 +154,14 @@ function RealtimePage({prices}:{prices:Asset[]}) {
           </Card>
 
           {/* Telegram setup */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.acl}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.acl,'30')}`}}>
             <div style={{color:T.acl,fontWeight:700,fontSize:12,marginBottom:8}}>📱 텔레그램 연동 (준비중)</div>
             <div style={{color:T.muted,fontSize:11,lineHeight:1.7,marginBottom:10}}>1. @TRAIGO_Bot 검색<br/>2. /start 입력<br/>3. 인증 코드 입력</div>
             <div style={{display:'flex',gap:8}}>
               <input placeholder="인증 코드 입력" style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:11,outline:'none'}}/>
               <button type="button"
                 onClick={() => notifyError('텔레그램 연동은 곧 출시됩니다. @TRAIGO_Bot은 아직 활성화되지 않았습니다.')}
-                style={{background:T.acl+'20',color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>연동</button>
+                style={{background:A(T.acl,'20'),color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>연동</button>
             </div>
           </Card>
         </div>

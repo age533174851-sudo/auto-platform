@@ -41,7 +41,7 @@ export default function AiDcaPanel({ currency = 'KRW' }: { currency?: string }) 
   const save = () => { saveAiDcaCfg(cfg); setSaved(true); notifySuccess('AI DCA 설정 저장됨', `${FREQ_LABEL[cfg.frequency]} 기본 ${cvt(cfg.baseAmount, currency)} · 공포지수 연동`); setTimeout(() => setSaved(false), 1800); };
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px 16px 18px', marginBottom: 16 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px 16px 18px', marginBottom: 16 }}>
       {/* 헤더 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
         <div style={{ width: 36, height: 36, borderRadius: 10, background: '#8B5CF625', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>

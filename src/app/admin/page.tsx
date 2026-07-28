@@ -1,16 +1,12 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 
 // ── Theme ─────────────────────────────────────────────────────
-const T = {
-  bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
-  border:'#1A2D4A', border2:'#243A5E',
-  txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B', gld:'#D97706',
-  acc:'#2563EB', acl:'#60A5FA', acg:'rgba(37,99,235,.12)',
-  prp:'#7C3AED',
-};
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 function Card({children,style}:{children?:React.ReactNode;style?:React.CSSProperties}) {
   return <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,...style}}>{children}</div>;
@@ -193,7 +189,7 @@ export default function AdminPage() {
           <div style={{fontSize:40,marginBottom:12}}>🔐</div>
           <div style={{color:T.txt,fontWeight:800,fontSize:16,marginBottom:8}}>로그인이 필요합니다</div>
           <div style={{color:T.muted,fontSize:12,marginBottom:20}}>관리자 페이지에 접근하려면 먼저 로그인하세요.</div>
-          <a href="/auth" style={{display:'block',padding:'12px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}30`,borderRadius:10,fontWeight:700,fontSize:13,textDecoration:'none'}}>로그인하러 가기</a>
+          <a href="/auth" style={{display:'block',padding:'12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:10,fontWeight:700,fontSize:13,textDecoration:'none'}}>로그인하러 가기</a>
         </Card>
       </div>
     );
@@ -250,7 +246,7 @@ export default function AdminPage() {
           <Bdg c={T.grn} ch="admin"/>
         </div>
         {actionMsg && (
-          <div style={{background:actionMsg.ok?T.grn+'20':T.red+'20',color:actionMsg.ok?T.grn:T.red,
+          <div style={{background:actionMsg.ok?A(T.grn,'20'):A(T.red,'20'),color:actionMsg.ok?T.grn:T.red,
                        border:`1px solid ${actionMsg.ok?T.grn:T.red}30`,borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:700}}>
             {actionMsg.text}
           </div>
@@ -298,7 +294,7 @@ export default function AdminPage() {
                   </div>
                 </Card>
                 <button onClick={()=>loadTab('health')}
-                  style={{padding:'8px 16px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}30`,borderRadius:8,fontWeight:700,fontSize:12,cursor:'pointer'}}>
+                  style={{padding:'8px 16px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:8,fontWeight:700,fontSize:12,cursor:'pointer'}}>
                   🔄 새로고침
                 </button>
               </>
@@ -315,14 +311,14 @@ export default function AdminPage() {
                 placeholder="이메일 또는 이름 검색..."
                 style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 12px',color:T.txt,fontSize:12,outline:'none'}}/>
               <button onClick={()=>loadTab('users')}
-                style={{padding:'8px 14px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}30`,borderRadius:8,fontWeight:700,fontSize:12,cursor:'pointer'}}>
+                style={{padding:'8px 14px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:8,fontWeight:700,fontSize:12,cursor:'pointer'}}>
                 검색
               </button>
             </div>
             <div style={{color:T.muted,fontSize:11,marginBottom:10}}>총 {users.length}명</div>
             {users.map(u=>(
               <Card key={u.id} style={{padding:'12px 16px',marginBottom:8,display:'flex',alignItems:'center',gap:12}}>
-                <div style={{width:36,height:36,borderRadius:10,background:`${T.acc}30`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>
+                <div style={{width:36,height:36,borderRadius:10,background:`${A(T.acc,'30')}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>
                   {u.role==='admin'?'🛡️':'👤'}
                 </div>
                 <div style={{flex:1,minWidth:0}}>
@@ -336,7 +332,7 @@ export default function AdminPage() {
                 </div>
                 {u.id !== userId && (
                   <button onClick={()=>toggleBan(u.id, u.status)}
-                    style={{padding:'6px 12px',background:u.status==='banned'?T.grn+'20':T.red+'20',
+                    style={{padding:'6px 12px',background:u.status==='banned'?A(T.grn,'20'):A(T.red,'20'),
                             color:u.status==='banned'?T.grn:T.red,border:`1px solid ${u.status==='banned'?T.grn:T.red}30`,
                             borderRadius:8,fontWeight:700,fontSize:11,cursor:'pointer',flexShrink:0}}>
                     {u.status==='banned'?'차단 해제':'차단'}
@@ -524,14 +520,14 @@ export default function AdminPage() {
             </Card>
 
             {/* Emergency bot stop */}
-            <Card style={{padding:20,border:`1px solid ${T.red}30`,background:T.red+'05'}}>
+            <Card style={{padding:20,border:`1px solid ${A(T.red,'30')}`,background:A(T.red,'05')}}>
               <div style={{color:T.red,fontWeight:800,fontSize:13,marginBottom:6}}>🚨 긴급 전략 전체 정지</div>
               <div style={{color:T.muted,fontSize:11,marginBottom:14}}>
                 실행 중인 모든 자동매매 전략을 즉시 중지합니다. 이 작업은 되돌릴 수 없습니다.
               </div>
               {!killConfirm ? (
                 <button onClick={()=>setKillCon(true)}
-                  style={{padding:'10px 20px',background:T.red+'20',color:T.red,border:`1px solid ${T.red}40`,borderRadius:10,fontWeight:800,fontSize:13,cursor:'pointer'}}>
+                  style={{padding:'10px 20px',background:A(T.red,'20'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:10,fontWeight:800,fontSize:13,cursor:'pointer'}}>
                   🛑 긴급 정지 실행
                 </button>
               ) : (
@@ -627,14 +623,14 @@ function NoticesPanel({
       <div style={{color:T.txt,fontWeight:800,fontSize:15,marginBottom:12,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <span>공지 관리 ({notices.length})</span>
         <button onClick={() => setShowCreate(v => !v)}
-          style={{background:showCreate?T.muted+'20':T.acg,color:showCreate?T.muted:T.acl,border:`1px solid ${showCreate?T.muted:T.acl}40`,borderRadius:7,padding:'7px 14px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>
+          style={{background:showCreate?A(T.muted,'20'):T.acg,color:showCreate?T.muted:T.acl,border:`1px solid ${showCreate?T.muted:T.acl}40`,borderRadius:7,padding:'7px 14px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>
           {showCreate ? '취소' : '+ 새 공지'}
         </button>
       </div>
 
       {/* 생성 폼 */}
       {showCreate && (
-        <Card style={{padding:18,marginBottom:14,border:`1px solid ${T.acl}30`}}>
+        <Card style={{padding:18,marginBottom:14,border:`1px solid ${A(T.acl,'30')}`}}>
           <div style={{marginBottom:8}}>
             <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:4}}>제목</div>
             <input value={title} onChange={e => setTitle(e.target.value)} maxLength={120}
@@ -691,7 +687,7 @@ function NoticesPanel({
                   <span style={{padding:'2px 7px',borderRadius:4,fontSize:9,fontWeight:700,background:T.alt,color:T.muted}}>
                     {n.show_to==='all'?'전체':n.show_to==='pro'?'Pro':'관리자'}
                   </span>
-                  {!n.active && <span style={{padding:'2px 7px',borderRadius:4,fontSize:9,fontWeight:700,background:T.muted+'22',color:T.muted}}>비활성</span>}
+                  {!n.active && <span style={{padding:'2px 7px',borderRadius:4,fontSize:9,fontWeight:700,background:A(T.muted,'22'),color:T.muted}}>비활성</span>}
                 </div>
                 <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:3}}>{n.title}</div>
                 <div style={{color:T.sub,fontSize:11,lineHeight:1.5,whiteSpace:'pre-wrap'}}>{n.body}</div>
@@ -702,7 +698,7 @@ function NoticesPanel({
                   {n.active?'비활성':'활성'}
                 </button>
                 <button onClick={() => remove(n.id)} type="button"
-                  style={{background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,padding:'5px 10px',minHeight:28,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                  style={{background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:6,padding:'5px 10px',minHeight:28,fontSize:10,fontWeight:700,cursor:'pointer'}}>
                   삭제
                 </button>
               </div>

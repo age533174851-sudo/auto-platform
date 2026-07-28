@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // ConfirmHost — 전역 확인 모달. 앱 루트에 마운트. confirmDialog() 요청을 렌더.
 import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
@@ -39,7 +40,7 @@ export default function ConfirmHost() {
         <style>{`@keyframes tg-confirm-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:scale(1)}}`}</style>
 
         {danger && (
-          <div style={{ width: 44, height: 44, borderRadius: '50%', background: T.red + '1A', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
+          <div style={{ width: 44, height: 44, borderRadius: '50%', background: A(T.red,'1A'), display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
             <AlertTriangle size={22} color={T.red} />
           </div>
         )}

@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // DailyStrategyPanel — 1D 5v5 통합 백테스트 결과.
 // 실전 규칙(하루 1회·계단식·비대칭 청산·사이클)을 그대로 반영한 결과를 보여준다.
 import React, { useState, useMemo } from 'react';
@@ -63,7 +64,7 @@ export default function DailyStrategyPanel() {
   const evColor = result.expectancyR >= 0 ? T.grn : T.red;
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#8B5CF61F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Swords size={18} color="#A78BFA" />
@@ -105,7 +106,7 @@ export default function DailyStrategyPanel() {
             <div style={{ color: T.muted, fontSize: 9 }}>허용 상한</div>
             <div style={{ color: T.sub, fontSize: 14, fontWeight: 800 }}>{maxLev}배</div>
           </div>
-          <div style={{ flex: 1, background: T.grn + '14', borderRadius: 8, padding: '8px 10px' }}>
+          <div style={{ flex: 1, background: A(T.grn,'14'), borderRadius: 8, padding: '8px 10px' }}>
             <div style={{ color: T.muted, fontSize: 9 }}>실제 최대</div>
             <div style={{ color: T.grn, fontSize: 14, fontWeight: 800 }}>{actualMaxLev}배</div>
           </div>

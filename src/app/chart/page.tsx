@@ -1,12 +1,10 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useRef } from 'react';
 
-const T = {
-  bg:'#060B14', card:'#0F1924', border:'#1A2D4A', border2:'#243A5E',
-  acc:'#2563EB', acl:'#3B82F6', acg:'rgba(37,99,235,.15)',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B', prp:'#7C3AED',
-  txt:'#F0F6FF', sub:'#94A3B8', muted:'#475569', surf:'#0D1626',
-};
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 type Layout = '1'|'2h'|'2v'|'4';
 
@@ -203,11 +201,11 @@ export default function ChartPage() {
         </div>
         <div style={{ display:'flex', gap:6, alignItems:'center' }}>
           {provStatus && (
-            <span style={{ background:provStatus==='live'?T.grn+'20':T.ylw+'20', color:provStatus==='live'?T.grn:T.ylw, fontSize:9, fontWeight:700, padding:'2px 7px', borderRadius:99 }}>
+            <span style={{ background:provStatus==='live'?A(T.grn,'20'):A(T.ylw,'20'), color:provStatus==='live'?T.grn:T.ylw, fontSize:9, fontWeight:700, padding:'2px 7px', borderRadius:99 }}>
               {provStatus==='live'?'● LIVE':'● MOCK'}
             </span>
           )}
-          <button onClick={() => document.documentElement.requestFullscreen?.()} style={{ background:T.acg, color:T.acl, border:`1px solid ${T.acl}40`, borderRadius:8, padding:'4px 10px', fontSize:10, fontWeight:700, cursor:'pointer' }}>⛶ 전체화면</button>
+          <button onClick={() => document.documentElement.requestFullscreen?.()} style={{ background:T.acg, color:T.acl, border:`1px solid ${A(T.acl,'40')}`, borderRadius:8, padding:'4px 10px', fontSize:10, fontWeight:700, cursor:'pointer' }}>⛶ 전체화면</button>
         </div>
       </div>
 

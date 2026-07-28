@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // PortfolioBacktestView — 다중 전략 포트폴리오 백테스트. 합산 성과 + 분산 효과 + 상관관계.
 import React, { useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -51,7 +52,7 @@ export default function PortfolioBacktestView({ legs, initialCapital = 10000000 
       </svg>
 
       {/* 분산 효과 (핵심) */}
-      <div style={{ background: result.diversificationBenefit > 0 ? T.grn + '12' : T.alt, border: `1px solid ${result.diversificationBenefit > 0 ? T.grn + '30' : T.border}`, borderRadius: 12, padding: '13px', marginBottom: 14 }}>
+      <div style={{ background: result.diversificationBenefit > 0 ? A(T.grn,'12') : T.alt, border: `1px solid ${result.diversificationBenefit > 0 ? A(T.grn,'30') : T.border}`, borderRadius: 12, padding: '13px', marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 10 }}>
           <Shield size={15} color={result.diversificationBenefit > 0 ? T.grn : T.muted} />
           <span style={{ color: T.txt, fontSize: 12.5, fontWeight: 800 }}>분산 효과</span>

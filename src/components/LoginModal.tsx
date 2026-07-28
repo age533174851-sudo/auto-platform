@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // LoginModal — 어디서든 뜨는 로그인 바텀시트. Google/이메일/MOCK 체험.
 import React, { useState } from 'react';
 import { T } from '@/lib/constants';
@@ -59,7 +60,7 @@ export default function LoginModal({
           </div>
         </div>
 
-        {err && <div style={{ background: T.red + '15', border: `1px solid ${T.red}30`, borderRadius: 10, padding: '10px 12px', color: T.red, fontSize: 12, margin: '14px 0 4px', textAlign: 'center' }}>{err}</div>}
+        {err && <div style={{ background: A(T.red,'15'), border: `1px solid ${A(T.red,'30')}`, borderRadius: 10, padding: '10px 12px', color: T.red, fontSize: 12, margin: '14px 0 4px', textAlign: 'center' }}>{err}</div>}
 
         <div style={{ marginTop: 18 }}>
           {/* Google */}

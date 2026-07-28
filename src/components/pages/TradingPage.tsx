@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { BotRun, ExecMode, RiskEvent, Signal, SignalState, StratStatus, StratType, Strategy } from '@/types/domain';
 import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
@@ -630,9 +631,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           );
         })}
       </div>
-      {tradeMode==='mock'&&<div style={{background:T.prp+'15',border:`1px solid ${T.prp}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontWeight:700,fontSize:11}}>모의매매 — 앱 내부 가상 포지션 · 실제 돈 사용 안됨</div></div>}
-      {tradeMode==='testnet'&&<div style={{background:T.ylw+'15',border:`1px solid ${T.ylw}30`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontWeight:700,fontSize:11}}>테스트넷 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
-      {tradeMode==='live'&&<div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontWeight:800,fontSize:11}}>⚠️ 실전 — 실제 자금으로 주문이 실행됩니다</div></div>}
+      {tradeMode==='mock'&&<div style={{background:A(T.prp,'15'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontWeight:700,fontSize:11}}>모의매매 — 앱 내부 가상 포지션 · 실제 돈 사용 안됨</div></div>}
+      {tradeMode==='testnet'&&<div style={{background:A(T.ylw,'15'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontWeight:700,fontSize:11}}>테스트넷 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
+      {tradeMode==='live'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontWeight:800,fontSize:11}}>⚠️ 실전 — 실제 자금으로 주문이 실행됩니다</div></div>}
 
       {(tradeMode==='testnet'||tradeMode==='live')&&connections.length>0&&(
         <div style={{marginBottom:12}}>
@@ -687,7 +688,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                 매도
               </button>
             </div>
-            <button type="button" onClick={()=>onOpenPnL?.(sel)} disabled={!onOpenPnL} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:10,fontWeight:700,fontSize:12,cursor:onOpenPnL?'pointer':'not-allowed',minHeight:38,opacity:onOpenPnL?1:0.5}}>
+            <button type="button" onClick={()=>onOpenPnL?.(sel)} disabled={!onOpenPnL} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:10,fontWeight:700,fontSize:12,cursor:onOpenPnL?'pointer':'not-allowed',minHeight:38,opacity:onOpenPnL?1:0.5}}>
               수익 계산기로 이동
             </button>
           </div>
@@ -913,7 +914,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               <div style={{display:'flex',gap:6,marginBottom:8}}>
                 <input type="number" inputMode="decimal" value={limitPrice} onChange={e=>setLimitPrice(e.target.value)} placeholder={`${orderType==='conditional'?'트리거가':'지정가'}`}
                   style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:7,padding:'9px 11px',color:T.txt,fontSize:13,fontWeight:700,outline:'none'}}/>
-                <button onClick={()=>setLimitPrice(String(Math.round(sel.p)))} style={{padding:'0 14px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:11,fontWeight:800,cursor:'pointer'}}>BBO</button>
+                <button onClick={()=>setLimitPrice(String(Math.round(sel.p)))} style={{padding:'0 14px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:11,fontWeight:800,cursor:'pointer'}}>BBO</button>
               </div>
             )}
 
@@ -945,9 +946,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             {/* TP/SL 한 줄 */}
             <div style={{display:'flex',gap:6,marginBottom:8}}>
               <input type="number" value={tp} onChange={e=>setTp(e.target.value)} placeholder="익절가(TP)"
-                style={{flex:1,background:T.alt,border:`1px solid ${T.grn}30`,borderRadius:7,padding:'9px',color:T.txt,fontSize:12,outline:'none'}}/>
+                style={{flex:1,background:T.alt,border:`1px solid ${A(T.grn,'30')}`,borderRadius:7,padding:'9px',color:T.txt,fontSize:12,outline:'none'}}/>
               <input type="number" value={sl} onChange={e=>setSl(e.target.value)} placeholder="손절가(SL)"
-                style={{flex:1,background:T.alt,border:`1px solid ${T.red}30`,borderRadius:7,padding:'9px',color:T.txt,fontSize:12,outline:'none'}}/>
+                style={{flex:1,background:T.alt,border:`1px solid ${A(T.red,'30')}`,borderRadius:7,padding:'9px',color:T.txt,fontSize:12,outline:'none'}}/>
             </div>
 
             {/* 요약 한 줄 (금액 있을때만, 컴팩트) */}
@@ -1001,7 +1002,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                   const Row = ({lv,buy}:{lv:{price:number;qty:number};buy:boolean})=>(
                     <div onClick={()=>{ setOrderType('limit'); setLimitPrice(String(lv.price)); }}
                       style={{position:'relative',display:'flex',justifyContent:'space-between',padding:'2px 6px',fontSize:10,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',cursor:'pointer',overflow:'hidden',lineHeight:1.5}}>
-                      <div style={{position:'absolute',top:0,bottom:0,right:0,width:`${lv.qty/maxQty*100}%`,background:buy?T.grn+'18':T.red+'18'}}/>
+                      <div style={{position:'absolute',top:0,bottom:0,right:0,width:`${lv.qty/maxQty*100}%`,background:buy?A(T.grn,'18'):A(T.red,'18')}}/>
                       <span style={{color:buy?T.grn:T.red,zIndex:1}}>{fmt(lv.price)}</span>
                       <span style={{color:T.sub,zIndex:1,fontSize:9}}>{lv.qty.toFixed(3)}</span>
                     </div>
@@ -1117,7 +1118,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                   {(()=>{ const m:Record<string,[string,string]>={ idle:['대기',T.muted], syncing:['동기화 중',T.ylw], synced:['동기화됨',T.grn], mismatch:['불일치 감지',T.red], error:['API 오류',T.red], disconnected:['연결 끊김',T.muted] }; const [lb,c]=m[syncStatus]||m.idle; return <span style={{background:c+'20',color:c,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5,display:'inline-flex',alignItems:'center',gap:3}}>{syncStatus==='synced'?'●':syncStatus==='syncing'?'◐':'○'} {lb}</span>; })()}
                 </div>
                 <button onClick={()=>syncBinancePositions()} disabled={syncing}
-                  style={{padding:'6px 12px',background:syncing?T.alt:T.acg,color:syncing?T.muted:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,fontSize:11,fontWeight:700,cursor:syncing?'default':'pointer'}}>
+                  style={{padding:'6px 12px',background:syncing?T.alt:T.acg,color:syncing?T.muted:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:11,fontWeight:700,cursor:syncing?'default':'pointer'}}>
                   {syncing?'동기화 중…':'⟳ 수동 동기화'}
                 </button>
               </div>
@@ -1152,9 +1153,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         </div>
                         <div style={{display:'flex',gap:6}}>
                           <button onClick={()=>ksTestTelegram('money')} disabled={tgBusy}
-                            style={{flex:1,padding:'8px',background:T.prp+'18',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:tgBusy?'default':'pointer'}}>📨 Money Bot</button>
+                            style={{flex:1,padding:'8px',background:A(T.prp,'18'),color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:tgBusy?'default':'pointer'}}>📨 Money Bot</button>
                           <button onClick={()=>ksTestTelegram('system')} disabled={tgBusy}
-                            style={{flex:1,padding:'8px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:tgBusy?'default':'pointer'}}>🛠 System Bot</button>
+                            style={{flex:1,padding:'8px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:tgBusy?'default':'pointer'}}>🛠 System Bot</button>
                         </div>
                         <div style={{display:'flex',gap:6,marginTop:6}}>
                           <button onClick={()=>ksTestTelegram('money','throttle')} disabled={tgBusy}
@@ -1167,7 +1168,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         <div style={{color:T.ylw,fontSize:11,lineHeight:1.6}}>kill_switch_state 테이블이 없어 작동하지 않습니다. 아래 SQL을 Supabase에서 실행한 뒤 새로고침하세요. (상세는 개발자 안내 참고)</div>
                       ):ksStatus?(
                         <>
-                          {ksStatus.triggerReason&&<div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:8,padding:'8px',marginBottom:10,color:T.red,fontSize:10,fontWeight:700}}>발동 원인: {ksStatus.triggerReason}</div>}
+                          {ksStatus.triggerReason&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:8,padding:'8px',marginBottom:10,color:T.red,fontSize:10,fontWeight:700}}>발동 원인: {ksStatus.triggerReason}</div>}
                           {/* C/D 자동 실행 결과 */}
                           {ksStatus.exec&&(ksStatus.exec.cancel||ksStatus.exec.close)&&(
                             <div style={{background:T.alt,borderRadius:8,padding:'8px',marginBottom:10,fontSize:10}}>
@@ -1177,7 +1178,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                           )}
                           {/* Reconciliation 잔여 경고 */}
                           {ksStatus.recon&&!ksStatus.recon.clean&&(
-                            <div style={{background:T.red+'20',border:`1px solid ${T.red}60`,borderRadius:8,padding:'8px',marginBottom:10}}>
+                            <div style={{background:A(T.red,'20'),border:`1px solid ${A(T.red,'60')}`,borderRadius:8,padding:'8px',marginBottom:10}}>
                               <div style={{color:T.red,fontSize:10,fontWeight:800}}>⚠️ 거래소 직접 확인 필요</div>
                               <div style={{color:T.sub,fontSize:9,marginTop:2}}>재확인 결과 포지션 {ksStatus.recon.positions}개 · 미체결 {ksStatus.recon.orders}개 잔존. 거래소 앱에서 직접 확인하세요.</div>
                             </div>
@@ -1216,18 +1217,18 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                           {/* 액션 */}
                           <div style={{display:'flex',gap:6,marginTop:12}}>
                             <button onClick={()=>ksUpdate({enabled:!ksStatus.config.enabled})} disabled={ksBusy}
-                              style={{flex:1,padding:'9px',background:ksStatus.config.enabled?T.grn+'18':T.alt,color:ksStatus.config.enabled?T.grn:T.muted,border:`1px solid ${ksStatus.config.enabled?T.grn+'40':T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>{ksStatus.config.enabled?'ON':'OFF'}</button>
+                              style={{flex:1,padding:'9px',background:ksStatus.config.enabled?A(T.grn,'18'):T.alt,color:ksStatus.config.enabled?T.grn:T.muted,border:`1px solid ${ksStatus.config.enabled?A(T.grn,'40'):T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>{ksStatus.config.enabled?'ON':'OFF'}</button>
                             <button onClick={ksTrigger} disabled={ksBusy||ksStatus.active}
-                              style={{flex:1,padding:'9px',background:T.red+'15',color:T.red,border:`1px solid ${T.red}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:ksStatus.active?'default':'pointer',opacity:ksStatus.active?0.5:1}}>수동 발동</button>
+                              style={{flex:1,padding:'9px',background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:ksStatus.active?'default':'pointer',opacity:ksStatus.active?0.5:1}}>수동 발동</button>
                             <button onClick={ksReset} disabled={ksBusy}
-                              style={{flex:1,padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>기준 리셋</button>
+                              style={{flex:1,padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>기준 리셋</button>
                           </div>
                           {/* 강제 해제 (active 시 "해제합니다" 입력) */}
                           {ksStatus.active&&(
                             <div style={{marginTop:10}}>
                               <div style={{fontSize:9,color:T.red,marginBottom:4}}>발동 상태입니다. 해제하려면 "해제합니다" 입력 후 기준 리셋</div>
                               <input value={ksReleaseText} onChange={e=>setKsReleaseText(e.target.value)} placeholder='해제합니다'
-                                style={{width:'100%',background:T.alt,border:`1px solid ${T.red}40`,borderRadius:6,padding:'8px',color:T.txt,fontSize:12,outline:'none'}}/>
+                                style={{width:'100%',background:T.alt,border:`1px solid ${A(T.red,'40')}`,borderRadius:6,padding:'8px',color:T.txt,fontSize:12,outline:'none'}}/>
                             </div>
                           )}
                         </>
@@ -1241,13 +1242,13 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
 
               {/* 불일치 / 거래차단 경고 배너 */}
               {mismatchActive&&(
-                <div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:8,padding:'8px 11px',marginBottom:8}}>
+                <div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:8,padding:'8px 11px',marginBottom:8}}>
                   <div style={{color:T.red,fontSize:11,fontWeight:800}}>⚠️ 포지션 불일치 감지 — 거래소 데이터 우선 적용</div>
                   <div style={{color:T.sub,fontSize:9,marginTop:2}}>신규 주문·Reverse·TP/SL 수정 차단됨 (Close는 허용). 동기화로 일치되면 자동 해제.</div>
                 </div>
               )}
               {tradingBlocked&&(
-                <div style={{background:T.red+'20',border:`1px solid ${T.red}60`,borderRadius:8,padding:'8px 11px',marginBottom:8}}>
+                <div style={{background:A(T.red,'20'),border:`1px solid ${A(T.red,'60')}`,borderRadius:8,padding:'8px 11px',marginBottom:8}}>
                   <div style={{color:T.red,fontSize:11,fontWeight:800}}>🛑 동기화 5회 연속 실패 — 신규 진입 차단</div>
                   <div style={{color:T.sub,fontSize:9,marginTop:2}}>수동 동기화 성공 시 해제됩니다.</div>
                 </div>
@@ -1261,10 +1262,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               )}
               {/* Ghost 포지션 — 거래소 미존재 (사용자 확인 후 정리) */}
               {ghostPos.map((g,i)=>(
-                <div key={'ghost'+i} style={{background:T.red+'10',border:`1px dashed ${T.red}50`,borderRadius:10,padding:'10px 12px',marginBottom:8}}>
+                <div key={'ghost'+i} style={{background:A(T.red,'10'),border:`1px dashed ${A(T.red,'50')}`,borderRadius:10,padding:'10px 12px',marginBottom:8}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
                     <div>
-                      <span style={{background:T.red+'20',color:T.red,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>{g.symbol} 거래소 미존재</span>
+                      <span style={{background:A(T.red,'20'),color:T.red,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>{g.symbol} 거래소 미존재</span>
                       <div style={{color:T.muted,fontSize:9,marginTop:4}}>TRAIGO에는 있었으나 거래소에서 사라짐 (청산/외부종료 가능). 자동 삭제하지 않음.</div>
                     </div>
                     <button onClick={()=>dismissGhost(g.symbol)}
@@ -1282,8 +1283,8 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
                       <span style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
                         <span style={{background:(isShort?T.red:T.grn)+'20',color:isShort?T.red:T.grn,fontSize:10,fontWeight:800,padding:'2px 8px',borderRadius:5}}>{p.symbol} {isShort?'SHORT':'LONG'} {p.leverage}x</span>
-                        {p._discovered&&<span style={{background:T.ylw+'20',color:T.ylw,fontSize:8,fontWeight:800,padding:'1px 6px',borderRadius:4}}>미등록 발견</span>}
-                        {p._mismatch&&<span style={{background:T.red+'20',color:T.red,fontSize:8,fontWeight:800,padding:'1px 6px',borderRadius:4}}>{p._mismatch} 불일치</span>}
+                        {p._discovered&&<span style={{background:A(T.ylw,'20'),color:T.ylw,fontSize:8,fontWeight:800,padding:'1px 6px',borderRadius:4}}>미등록 발견</span>}
+                        {p._mismatch&&<span style={{background:A(T.red,'20'),color:T.red,fontSize:8,fontWeight:800,padding:'1px 6px',borderRadius:4}}>{p._mismatch} 불일치</span>}
                       </span>
                       <span style={{color:(p.unrealizedPnl||0)>=0?T.grn:T.red,fontSize:13,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{(p.unrealizedPnl||0)>=0?'+':''}{(p.unrealizedPnl||0).toFixed(2)} USDT</span>
                     </div>
@@ -1339,13 +1340,13 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                     {/* 액션 버튼 — reduce-only 종료 + TP/SL */}
                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginTop:8}}>
                       <button onClick={()=>closeReal(p,100)} disabled={!!closeBusy}
-                        style={{padding:'9px',background:T.red+'18',color:T.red,border:`1px solid ${T.red}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:closeBusy?'default':'pointer',opacity:closeBusy&&closeBusy!==`${p.symbol}:100`?0.5:1}}>
+                        style={{padding:'9px',background:A(T.red,'18'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:closeBusy?'default':'pointer',opacity:closeBusy&&closeBusy!==`${p.symbol}:100`?0.5:1}}>
                         {closeBusy===`${p.symbol}:100`?'종료 중…':'전량 종료'}</button>
                       <button onClick={()=>closeReal(p,50)} disabled={!!closeBusy}
-                        style={{padding:'9px',background:T.ylw+'15',color:T.ylw,border:`1px solid ${T.ylw}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:closeBusy?'default':'pointer',opacity:closeBusy&&closeBusy!==`${p.symbol}:50`?0.5:1}}>
+                        style={{padding:'9px',background:A(T.ylw,'15'),color:T.ylw,border:`1px solid ${A(T.ylw,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:closeBusy?'default':'pointer',opacity:closeBusy&&closeBusy!==`${p.symbol}:50`?0.5:1}}>
                         {closeBusy===`${p.symbol}:50`?'종료 중…':'50% 종료'}</button>
                       <button onClick={()=>openTpsl(p)} disabled={!!closeBusy}
-                        style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                        style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>
                         TP/SL</button>
                     </div>
                   </div>
@@ -1366,14 +1367,14 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           {/* LIVE 종료 확인 모달 */}
           {closeConfirm&&(
             <div onClick={()=>setCloseConfirm(null)} style={{position:'fixed',inset:0,zIndex:9998,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
-              <div onClick={e=>e.stopPropagation()} style={{background:T.card,border:`1px solid ${T.red}50`,borderRadius:16,padding:20,maxWidth:340,width:'100%'}}>
+              <div onClick={e=>e.stopPropagation()} style={{background:T.card,border:`1px solid ${A(T.red,'50')}`,borderRadius:16,padding:20,maxWidth:340,width:'100%'}}>
                 <div style={{color:T.red,fontSize:15,fontWeight:900,marginBottom:10}}>⚠️ 실계좌 포지션 종료</div>
                 <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:6}}>실계좌 포지션을 시장가로 종료합니다. 계속할까요?</div>
                 <div style={{color:T.muted,fontSize:11,marginBottom:16}}>{closeConfirm.p.symbol} · {(closeConfirm.p.side==='SHORT'||(closeConfirm.p.amount||0)<0)?'SHORT':'LONG'} · {closeConfirm.percent}% (reduce-only 시장가)</div>
                 <button onClick={()=>{ const c=closeConfirm; setCloseConfirm(null); execCloseReal(c.p,c.percent); }}
                   style={{width:'100%',padding:'12px',background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer',marginBottom:8}}>시장가로 종료</button>
                 <button onClick={()=>setCloseConfirm(null)}
-                  style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
+                  style={{width:'100%',padding:'12px',background:A(T.muted,'20'),color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
               </div>
             </div>
           )}
@@ -1403,18 +1404,18 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                   <div style={{marginBottom:12}}>
                     <div style={{color:T.grn,fontSize:11,fontWeight:700,marginBottom:6}}>익절 (TP){tpslMode==='pct'?' +%':' 가격'}</div>
                     <input value={tpInput} onChange={e=>setTpInput(e.target.value.replace(/[^0-9.]/g,''))} inputMode="decimal" placeholder={tpslMode==='pct'?'예: 5 (+5%)':'예: 95000'}
-                      style={{width:'100%',background:T.alt,border:`1px solid ${T.grn}40`,borderRadius:8,padding:'12px',color:T.txt,fontSize:14,outline:'none'}}/>
+                      style={{width:'100%',background:T.alt,border:`1px solid ${A(T.grn,'40')}`,borderRadius:8,padding:'12px',color:T.txt,fontSize:14,outline:'none'}}/>
                     {tpslMode==='pct'&&<div style={{display:'flex',gap:6,marginTop:6}}>{['3','5','10'].map(v=>(
-                      <button key={v} onClick={()=>setTpInput(v)} style={{flex:1,padding:'6px',background:T.grn+'15',color:T.grn,border:`1px solid ${T.grn}30`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>+{v}%</button>
+                      <button key={v} onClick={()=>setTpInput(v)} style={{flex:1,padding:'6px',background:A(T.grn,'15'),color:T.grn,border:`1px solid ${A(T.grn,'30')}`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>+{v}%</button>
                     ))}</div>}
                     {preview.tpPrice!=null&&<div style={{fontSize:10,color:T.muted,marginTop:5,fontFamily:'Inter,monospace'}}>→ TP 가격 ≈ {Math.round(preview.tpPrice*100)/100}</div>}
                   </div>
                   <div style={{marginBottom:16}}>
                     <div style={{color:T.red,fontSize:11,fontWeight:700,marginBottom:6}}>손절 (SL){tpslMode==='pct'?' -%':' 가격'}</div>
                     <input value={slInput} onChange={e=>setSlInput(e.target.value.replace(/[^0-9.]/g,''))} inputMode="decimal" placeholder={tpslMode==='pct'?'예: 2 (-2%)':'예: 88000'}
-                      style={{width:'100%',background:T.alt,border:`1px solid ${T.red}40`,borderRadius:8,padding:'12px',color:T.txt,fontSize:14,outline:'none'}}/>
+                      style={{width:'100%',background:T.alt,border:`1px solid ${A(T.red,'40')}`,borderRadius:8,padding:'12px',color:T.txt,fontSize:14,outline:'none'}}/>
                     {tpslMode==='pct'&&<div style={{display:'flex',gap:6,marginTop:6}}>{['1','2','5'].map(v=>(
-                      <button key={v} onClick={()=>setSlInput(v)} style={{flex:1,padding:'6px',background:T.red+'15',color:T.red,border:`1px solid ${T.red}30`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>-{v}%</button>
+                      <button key={v} onClick={()=>setSlInput(v)} style={{flex:1,padding:'6px',background:A(T.red,'15'),color:T.red,border:`1px solid ${A(T.red,'30')}`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>-{v}%</button>
                     ))}</div>}
                     {preview.slPrice!=null&&<div style={{fontSize:10,color:T.muted,marginTop:5,fontFamily:'Inter,monospace'}}>→ SL 가격 ≈ {Math.round(preview.slPrice*100)/100}</div>}
                   </div>
@@ -1430,7 +1431,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           {/* LIVE TP/SL 확인 모달 */}
           {tpslConfirm&&(
             <div onClick={()=>setTpslConfirm(null)} style={{position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
-              <div onClick={e=>e.stopPropagation()} style={{background:T.card,border:`1px solid ${T.acl}50`,borderRadius:16,padding:20,maxWidth:340,width:'100%'}}>
+              <div onClick={e=>e.stopPropagation()} style={{background:T.card,border:`1px solid ${A(T.acl,'50')}`,borderRadius:16,padding:20,maxWidth:340,width:'100%'}}>
                 <div style={{color:T.acl,fontSize:15,fontWeight:900,marginBottom:10}}>실계좌 TP/SL 등록</div>
                 <div style={{color:T.sub,fontSize:12,lineHeight:1.6,marginBottom:6}}>실계좌 TP/SL 주문을 등록합니다. 계속할까요?</div>
                 <div style={{color:T.muted,fontSize:11,marginBottom:16,fontFamily:'Inter,monospace'}}>
@@ -1441,7 +1442,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                 <button onClick={()=>{ const c=tpslConfirm; setTpslConfirm(null); submitTpsl(c.p,c.tpPrice,c.slPrice); }}
                   style={{width:'100%',padding:'12px',background:T.acl,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer',marginBottom:8}}>등록</button>
                 <button onClick={()=>setTpslConfirm(null)}
-                  style={{width:'100%',padding:'12px',background:T.muted+'20',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
+                  style={{width:'100%',padding:'12px',background:A(T.muted,'20'),color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
               </div>
             </div>
           )}
@@ -1449,7 +1450,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           {/* 모의 포지션 (paper store) */}
           {positions.length>0&&(
             <Card style={{padding:'14px 16px',marginBottom:12,borderLeft:`3px solid ${T.prp}`}}>
-              <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>모의 포지션 ({positions.length})<span style={{background:T.prp+'20',color:T.prp,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>MOCK</span></div>
+              <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>모의 포지션 ({positions.length})<span style={{background:A(T.prp,'20'),color:T.prp,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>MOCK</span></div>
               {positions.map((p,i)=>{
                 const cur = prices.find(a=>a.id===p.asset)?.p || p.avgPrice;
                 const isShort = p.side === 'short';
@@ -1470,9 +1471,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                     </div>
                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
                       {quickActions.includes('close_all')&&<button onClick={()=>closePosition(p,cur,1)}
-                        style={{padding:'9px',background:T.red+'18',color:T.red,border:`1px solid ${T.red}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>전량 종료</button>}
+                        style={{padding:'9px',background:A(T.red,'18'),color:T.red,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>전량 종료</button>}
                       {quickActions.includes('close_50')&&<button onClick={()=>closePosition(p,cur,0.5)}
-                        style={{padding:'9px',background:T.ylw+'15',color:T.ylw,border:`1px solid ${T.ylw}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>50% 종료</button>}
+                        style={{padding:'9px',background:A(T.ylw,'15'),color:T.ylw,border:`1px solid ${A(T.ylw,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>50% 종료</button>}
                       {quickActions.includes('close_25')&&<button onClick={()=>closePosition(p,cur,0.25)}
                         style={{padding:'9px',background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>25% 종료</button>}
                       {quickActions.includes('add')&&<button onClick={()=>{
@@ -1482,7 +1483,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         paperBuy(p.asset, cur, addAmt, { stratId:'manual', side: p.side==='short'?'short':'long' });
                         refreshPositions();
                         showToast(`추가 진입 완료 · ${p.asset} ${p.side==='short'?'숏':'롱'} · +₩${fmt(addAmt)}`, true);
-                      }} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
+                      }} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
                     </div>
                     {(quickActions.includes('reverse')||quickActions.includes('tpsl'))&&<div style={{display:'flex',gap:6,marginTop:6}}>
                       {quickActions.includes('reverse')&&<button onClick={async()=>{
@@ -1507,7 +1508,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         if(res.ok){
                           showToast(`리버스 완료 · 실현손익 ${Math.round(res.pnl).toLocaleString('ko-KR')}원 → ${res.newSide==='long'?'롱':'숏'} 전환`, true);
                         } else { showToast('리버스 실패 · 포지션 없음', false); }
-                      }} style={{flex:1,padding:'9px',background:T.prp+'18',color:T.prp,border:`1px solid ${T.prp}40`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>리버스</button>}
+                      }} style={{flex:1,padding:'9px',background:A(T.prp,'18'),color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>리버스</button>}
                       {quickActions.includes('tpsl')&&<button onClick={()=>{ setSlEditAsset(p.asset); setSlEditVal(p.slPrice?String(Math.round(p.slPrice)):''); setTpEditVal(p.tpPrice?String(Math.round(p.tpPrice)):''); }}
                         style={{flex:1,padding:'9px',background:T.alt,color:T.acl,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>TP/SL 편집</button>}
                     </div>}
@@ -1531,7 +1532,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         <div style={{marginBottom:12}}>
                           {[['현재가',cur],['진입가',p.avgPrice],['청산가', isShort? p.avgPrice*(1+(0.9/lev)) : p.avgPrice*(1-(0.9/lev)) ]].map(([l,v]:any,i)=>(
                             <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',fontSize:11}}>
-                              <span style={{color:T.muted}}>{l}{l==='청산가'&&<span style={{color:T.ylw,fontSize:8,fontWeight:700,marginLeft:5,background:T.ylw+'18',padding:'1px 5px',borderRadius:4}}>추정</span>}</span>
+                              <span style={{color:T.muted}}>{l}{l==='청산가'&&<span style={{color:T.ylw,fontSize:8,fontWeight:700,marginLeft:5,background:A(T.ylw,'18'),padding:'1px 5px',borderRadius:4}}>추정</span>}</span>
                               <span style={{color:l==='청산가'?T.ylw:T.txt,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>₩{fmt(Math.round(v))}</span>
                             </div>
                           ))}
@@ -1542,7 +1543,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                           <div style={{marginBottom:12}}>
                             <div style={{color:T.acl,fontSize:10,fontWeight:700,marginBottom:4}}>트레일링 스탑 (고점 대비 하락 %)</div>
                             <input value={trailPct} onChange={e=>setTrailPct(e.target.value.replace(/[^0-9.]/g,''))} placeholder="예: 5 (고점 -5% 도달 시 청산)" inputMode="decimal"
-                              style={{width:'100%',background:T.alt,border:`1px solid ${T.prp}40`,borderRadius:8,padding:'11px',color:T.txt,fontSize:13,outline:'none'}}/>
+                              style={{width:'100%',background:T.alt,border:`1px solid ${A(T.prp,'40')}`,borderRadius:8,padding:'11px',color:T.txt,fontSize:13,outline:'none'}}/>
                             <div style={{color:T.muted,fontSize:9,marginTop:6,lineHeight:1.4}}>가격이 오를수록 청산선도 따라 올라갑니다. 고점에서 설정%만큼 떨어지면 자동 청산.</div>
                           </div>
                         ):(
@@ -1551,12 +1552,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                             <div style={{marginBottom:10}}>
                               <div style={{color:T.grn,fontSize:10,fontWeight:700,marginBottom:4}}>익절 (TP)</div>
                               <div style={{display:'flex',gap:6}}>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${T.grn}40`,borderRadius:7,padding:'0 10px'}}>
+                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.grn,'40')}`,borderRadius:7,padding:'0 10px'}}>
                                   <input value={tpEditVal} onChange={e=>{setTpEditVal(e.target.value.replace(/[^0-9.]/g,''));setTpRoi('');}} placeholder="목표 가격" inputMode="decimal"
                                     style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
                                   <span style={{color:T.muted,fontSize:10}}>₩</span>
                                 </div>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${T.grn}40`,borderRadius:7,padding:'0 10px'}}>
+                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.grn,'40')}`,borderRadius:7,padding:'0 10px'}}>
                                   <input value={tpRoi} onChange={e=>{setTpRoi(e.target.value.replace(/[^0-9.]/g,''));setTpEditVal('');}} placeholder="수익률 ROI" inputMode="decimal"
                                     style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
                                   <span style={{color:T.muted,fontSize:10}}>%</span>
@@ -1568,12 +1569,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                             <div style={{marginBottom:12}}>
                               <div style={{color:T.red,fontSize:10,fontWeight:700,marginBottom:4}}>손절 (SL)</div>
                               <div style={{display:'flex',gap:6}}>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${T.red}40`,borderRadius:7,padding:'0 10px'}}>
+                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,padding:'0 10px'}}>
                                   <input value={slEditVal} onChange={e=>{setSlEditVal(e.target.value.replace(/[^0-9.]/g,''));setSlRoi('');}} placeholder="손절 가격" inputMode="decimal"
                                     style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
                                   <span style={{color:T.muted,fontSize:10}}>₩</span>
                                 </div>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${T.red}40`,borderRadius:7,padding:'0 10px'}}>
+                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,padding:'0 10px'}}>
                                   <input value={slRoi} onChange={e=>{setSlRoi(e.target.value.replace(/[^0-9.]/g,''));setSlEditVal('');}} placeholder="손실률" inputMode="decimal"
                                     style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
                                   <span style={{color:T.muted,fontSize:10}}>%</span>
@@ -1676,7 +1677,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             <div style={{marginTop:12,color:T.muted,fontSize:11,lineHeight:1.5}}>
               {tradeMode==='mock'?'모의매매 — 실제 자금이 사용되지 않습니다.':tradeMode==='testnet'?'테스트넷 — 거래소 테스트 서버에 실제 주문이 전송됩니다.':'⚠️ 실전 — 실제 자금으로 주문이 실행됩니다.'}
             </div>
-            {leverage>10&&<div style={{marginTop:8,background:T.red+'15',border:`1px solid ${T.red}30`,borderRadius:8,padding:'8px 12px',color:T.red,fontSize:11}}>⚠️ {leverage}배는 원금 손실 위험이 매우 높습니다</div>}
+            {leverage>10&&<div style={{marginTop:8,background:A(T.red,'15'),border:`1px solid ${A(T.red,'30')}`,borderRadius:8,padding:'8px 12px',color:T.red,fontSize:11}}>⚠️ {leverage}배는 원금 손실 위험이 매우 높습니다</div>}
             <div style={{display:'flex',gap:10,marginTop:16}}>
               <button onClick={()=>setShowConfirm(false)} style={{flex:1,padding:'14px',background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
               <button onClick={()=>confirmOrder(sideRef.current)} style={{flex:2,padding:'15px',minHeight:48,background:side==='매수'?T.grn:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:15,cursor:'pointer'}}>
@@ -1994,8 +1995,8 @@ function TechAnalysisTab({ asset }: { asset: any }) {
           </span>
         </div>
         <div style={{height:6,background:T.alt,borderRadius:3,overflow:'hidden',position:'relative'}}>
-          <div style={{position:'absolute',top:0,bottom:0,left:'30%',width:1,background:T.grn+'80',zIndex:1}}/>
-          <div style={{position:'absolute',top:0,bottom:0,left:'70%',width:1,background:T.red+'80',zIndex:1}}/>
+          <div style={{position:'absolute',top:0,bottom:0,left:'30%',width:1,background:A(T.grn,'80'),zIndex:1}}/>
+          <div style={{position:'absolute',top:0,bottom:0,left:'70%',width:1,background:A(T.red,'80'),zIndex:1}}/>
           {snap.rsi != null && (
             <div style={{height:'100%',width:`${snap.rsi}%`,background:
               snap.rsi > 70 ? T.red :
@@ -2109,9 +2110,9 @@ function NewsTab({ asset }: { asset: any }) {
             <div style={{color:T.txt,fontWeight:700,fontSize:12,lineHeight:1.4,flex:1}}>{n.title}</div>
             {(n as any).sentiment && (
               <span style={{flexShrink:0,padding:'1px 6px',
-                background: (n as any).sentiment === 'bullish' ? T.grn+'22' :
-                            (n as any).sentiment === 'bearish' ? T.red+'22' :
-                            T.ylw+'22',
+                background: (n as any).sentiment === 'bullish' ? A(T.grn,'22') :
+                            (n as any).sentiment === 'bearish' ? A(T.red,'22') :
+                            A(T.ylw,'22'),
                 color: (n as any).sentiment === 'bullish' ? T.grn :
                        (n as any).sentiment === 'bearish' ? T.red :
                        T.ylw,

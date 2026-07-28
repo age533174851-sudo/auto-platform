@@ -63,7 +63,7 @@ export default function EtfSwapTool({ prices = {}, currency = 'KRW' }: { prices?
   );
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 16 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#10B98120', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <ArrowRightLeft size={18} color="#10B981" />

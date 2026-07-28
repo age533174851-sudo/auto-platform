@@ -102,7 +102,7 @@ export default function AssetLogo({
       {!loaded && (
         <div style={{
           position: 'absolute', inset: 0, borderRadius: r,
-          background: 'linear-gradient(90deg,#1A2D4A 25%,#243A5E 50%,#1A2D4A 75%)',
+          background: 'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)',
           backgroundSize: '200% 100%',
           animation: 'shimmer 1.2s infinite',
         }}/>

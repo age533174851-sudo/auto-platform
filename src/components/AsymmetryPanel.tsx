@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // AsymmetryPanel — "손실은 고정, 이익은 열어둔다".
 // 배율로 비대칭을 만들려는 시도가 왜 실패하는지, 진짜 비대칭이 어디서 나오는지 보여준다.
 import React, { useState, useMemo } from 'react';
@@ -47,7 +48,7 @@ export default function AsymmetryPanel() {
   const evColor = levAnalysis.ev >= 0 ? T.grn : T.red;
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#22C55E1F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Scale size={18} color="#4ADE80" />
@@ -133,7 +134,7 @@ export default function AsymmetryPanel() {
             <div style={{ color: T.muted, fontSize: 9.5 }}>고정 익절 2R</div>
             <div style={{ color: T.sub, fontSize: 15, fontWeight: 900 }}>+2.00R</div>
           </div>
-          <div style={{ flex: 1, background: T.grn + '14', border: `1px solid ${T.grn}30`, borderRadius: 9, padding: '9px 11px' }}>
+          <div style={{ flex: 1, background: A(T.grn,'14'), border: `1px solid ${A(T.grn,'30')}`, borderRadius: 9, padding: '9px 11px' }}>
             <div style={{ color: T.muted, fontSize: 9.5 }}>비대칭 (트레일링)</div>
             <div style={{ color: T.grn, fontSize: 15, fontWeight: 900 }}>+{sim.realizedR.toFixed(2)}R</div>
           </div>

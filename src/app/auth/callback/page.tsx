@@ -9,11 +9,9 @@
 // ─────────────────────────────────────────────────────────────
 import React, { useEffect, useState } from 'react';
 
-const T = {
-  bg: '#060B14', card: '#0A1628', border: '#1A2D4A',
-  txt: '#E2E8F0', muted: '#94A3B8', acl: '#60A5FA', acc: '#2563EB',
-  grn: '#10B981', red: '#EF4444',
-};
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 type Phase = 'verifying' | 'success' | 'no_session' | 'error';
 

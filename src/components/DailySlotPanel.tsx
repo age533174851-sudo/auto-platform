@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // DailySlotPanel — DAILY_HIGH_LEV 10슬롯 격리 전략.
 // 슬롯 현황 + 배율 역산 + 100배 스트레스 테스트를 한 화면에서 보여준다.
 import React, { useState, useMemo } from 'react';
@@ -43,7 +44,7 @@ export default function DailySlotPanel() {
   const liqColor = stress.liquidationRate >= 50 ? T.red : stress.liquidationRate >= 20 ? T.ylw : T.grn;
 
   return (
-    <div style={{ background: 'linear-gradient(145deg,#0D1A35,#091228)', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
+    <div style={{ background: 'linear-gradient(145deg,var(--t-card),var(--t-bg))', border: `1px solid ${T.border2}`, borderRadius: 18, padding: '16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: '#F59E0B1F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Layers size={18} color="#FBBF24" />
@@ -52,13 +53,13 @@ export default function DailySlotPanel() {
           <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>10슬롯 격리 전략</div>
           <div style={{ color: T.muted, fontSize: 11 }}>자산 ÷ 10 = 슬롯 1개 · 슬롯당 하루 1회</div>
         </div>
-        <span style={{ background: enabled ? T.grn + '20' : T.red + '20', color: enabled ? T.grn : T.red, fontSize: 10, fontWeight: 800, padding: '4px 9px', borderRadius: 6 }}>
+        <span style={{ background: enabled ? A(T.grn,'20') : A(T.red,'20'), color: enabled ? T.grn : T.red, fontSize: 10, fontWeight: 800, padding: '4px 9px', borderRadius: 6 }}>
           {enabled ? '활성' : '비활성'}
         </span>
       </div>
 
       {!enabled && (
-        <div style={{ background: T.red + '12', border: `1px solid ${T.red}30`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
+        <div style={{ background: A(T.red,'12'), border: `1px solid ${A(T.red,'30')}`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
           <span style={{ color: T.sub, fontSize: 11.5 }}>
             자산이 ${ACCOUNT_CEILING.toLocaleString()}을 넘어 이 전략은 비활성화됩니다. 단타/스윙/장투 배분을 사용하세요.
           </span>
@@ -115,7 +116,7 @@ export default function DailySlotPanel() {
             <div style={{ color: T.muted, fontSize: 9.5 }}>안전 최대 배율</div>
             <div style={{ color: T.acl, fontSize: 15, fontWeight: 900 }}>{safeLev}배</div>
           </div>
-          <div style={{ flex: 1, background: clamped ? T.ylw + '15' : T.alt, borderRadius: 9, padding: '9px 11px' }}>
+          <div style={{ flex: 1, background: clamped ? A(T.ylw,'15') : T.alt, borderRadius: 9, padding: '9px 11px' }}>
             <div style={{ color: T.muted, fontSize: 9.5 }}>실제 적용</div>
             <div style={{ color: clamped ? T.ylw : T.grn, fontSize: 15, fontWeight: 900 }}>{actualLev}배</div>
           </div>

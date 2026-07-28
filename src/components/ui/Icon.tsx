@@ -1,3 +1,4 @@
+import { A } from '@/lib/theme/colors';
 // ─────────────────────────────────────────────────────────────
 // TRAIGO Design System — Icon wrapper + tokens
 // 이모지 대신 lucide-react 아이콘을 일관된 크기/색상으로 표시
@@ -16,13 +17,13 @@ export type IconTone =
   | 'gray';   // 중립 / 설정
 
 const TONE_BG: Record<IconTone, string> = {
-  blue:   T.acl + '22',
-  green:  T.grn + '22',
-  red:    T.red + '22',
-  yellow: T.ylw + '22',
-  purple: T.prp + '22',
-  cyan:   T.cyn + '22',
-  gray:   T.sub + '22',
+  blue:   A(T.acl,'22'),
+  green:  A(T.grn,'22'),
+  red:    A(T.red,'22'),
+  yellow: A(T.ylw,'22'),
+  purple: A(T.prp,'22'),
+  cyan:   A(T.cyn,'22'),
+  gray:   A(T.sub,'22'),
 };
 
 const TONE_FG: Record<IconTone, string> = {

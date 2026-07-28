@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
@@ -19,7 +20,7 @@ const PRODUCT_LABEL:Record<ProductType,string> = {
 };
 const PRODUCT_COLOR:Record<ProductType,string> = {
   spot:'#10B981', futures:'#F59E0B', cfd:'#7C3AED', tokenized:'#3B82F6',
-  index:'#8B5CF6', commodity:'#D97706', forex:'#0891B2', watchonly:'#475569',
+  index:'#8B5CF6', commodity:'#D97706', forex:'#0891B2', watchonly:'var(--t-muted)',
 };
 
 const TRADFI_PROVIDERS:Record<TradFiProvider,{name:string;icon:string;color:string;url:string}> = {
@@ -28,7 +29,7 @@ const TRADFI_PROVIDERS:Record<TradFiProvider,{name:string;icon:string;color:stri
   binance:  {name:'Binance Futures',icon:'',color:'#F0B90B',url:'https://www.binance.com/'},
   bitget:   {name:'Bitget TradFi',icon:'🔵',color:'#00D4FF',url:'https://www.bitget.com/'},
   etoro:    {name:'eToro-style',icon:'',color:'#10B981',url:'#'},
-  watchonly:{name:'조회만',icon:'👁',color:'#475569',url:'#'},
+  watchonly:{name:'조회만',icon:'👁',color:'var(--t-muted)',url:'#'},
 };
 
 const TRADFI_ASSETS:TradFiAsset[] = [
@@ -46,7 +47,7 @@ const TRADFI_ASSETS:TradFiAsset[] = [
   {id:'US30',nameKr:'다우존스',name:'US30 Dow Jones',sym:'US30',category:'index',productType:'index',providers:['gate','bybit','bitget'],p:42840,c:0.31,clr:'#8B5CF6',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
   // ── 원자재 CFD ──
   {id:'XAUUSD',nameKr:'금 XAUUSD',name:'Gold XAUUSD',sym:'XAUUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','binance','bitget'],p:3420,c:0.56,clr:'#D97706',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
-  {id:'XAGUSD',nameKr:'은 XAGUSD',name:'Silver XAGUSD',sym:'XAGUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','bitget'],p:38.50,c:-1.58,clr:'#94A3B8',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
+  {id:'XAGUSD',nameKr:'은 XAGUSD',name:'Silver XAGUSD',sym:'XAGUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','bitget'],p:38.50,c:-1.58,clr:'var(--t-sub)',overnight:'-0.01%',maxLev:20,isWatchOnly:false},
   {id:'XTIUSD',nameKr:'WTI 원유',name:'WTI XTIUSD',sym:'XTIUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','binance','bitget'],p:78.40,c:-0.90,clr:'#78350F',overnight:'-0.02%',maxLev:20,isWatchOnly:false},
   {id:'XBRUSD',nameKr:'브렌트유',name:'Brent XBRUSD',sym:'XBRUSD',category:'commodity',productType:'cfd',providers:['gate','bybit','bitget'],p:82.40,c:-0.72,clr:'#92400E',overnight:'-0.02%',maxLev:20,isWatchOnly:false},
   // ── 환율 CFD ──
@@ -148,7 +149,7 @@ function TradFiPage({prices,currency}:{prices:Asset[];currency:string}) {
           </div>
 
           {/* CFD Warning */}
-          <div style={{background:T.prp+'15',border:`1px solid ${T.prp}30`,borderRadius:10,padding:'10px 14px',marginBottom:12}}>
+          <div style={{background:A(T.prp,'15'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'10px 14px',marginBottom:12}}>
             <div style={{color:T.prp,fontWeight:700,fontSize:11}}>⚠️ 이 상품은 CFD입니다. 실제 자산 보유 아님 · 레버리지·스왑비·청산 위험 있음 · 모의매매 전용</div>
           </div>
 
@@ -205,14 +206,14 @@ function TradFiPage({prices,currency}:{prices:Asset[];currency:string}) {
               <input type="range" min={1} max={sel.maxLev} value={lev} onChange={e=>setLev(+e.target.value)} style={{width:'100%',accentColor:lev>10?T.red:lev>5?T.ylw:T.grn,marginBottom:6}}/>
               <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
                 {[1,2,3,5,10,sel.maxLev].filter((v,i,a)=>a.indexOf(v)===i).map(v=>(
-                  <button key={v} onClick={()=>setLev(v)} style={{background:lev===v?T.acl+'25':'transparent',color:lev===v?T.acl:T.muted,border:`1px solid ${lev===v?T.acl:T.border}`,borderRadius:6,padding:'3px 8px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{v}x</button>
+                  <button key={v} onClick={()=>setLev(v)} style={{background:lev===v?A(T.acl,'25'):'transparent',color:lev===v?T.acl:T.muted,border:`1px solid ${lev===v?T.acl:T.border}`,borderRadius:6,padding:'3px 8px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{v}x</button>
                 ))}
               </div>
             </div>
 
             {/* Liquidation preview */}
             {amount&&(
-              <div style={{background:lev>10?T.red+'12':T.alt,border:`1px solid ${lev>10?T.red:T.border}30`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+              <div style={{background:lev>10?A(T.red,'12'):T.alt,border:`1px solid ${lev>10?T.red:T.border}30`,borderRadius:10,padding:'10px 12px',marginBottom:12}}>
                 <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
                   <span style={{color:T.muted,fontSize:11}}>예상 청산가</span>
                   <span style={{color:lev>5?T.red:T.ylw,fontWeight:700,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{liqPrice.toFixed(sel.category==='forex'?4:2)}</span>
@@ -232,7 +233,7 @@ function TradFiPage({prices,currency}:{prices:Asset[];currency:string}) {
               </div>
             )}
 
-            {lev>sel.maxLev*0.7&&<div style={{background:T.red+'12',border:`1px solid ${T.red}30`,borderRadius:8,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 고레버리지 경고: CFD 상품은 레버리지 손실이 빠릅니다</div></div>}
+            {lev>sel.maxLev*0.7&&<div style={{background:A(T.red,'12'),border:`1px solid ${A(T.red,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 고레버리지 경고: CFD 상품은 레버리지 손실이 빠릅니다</div></div>}
 
             <button type="button"
               onClick={() => notifyInfo(`모의 진입: ${sel.nameKr} ${side==='long'?'롱':'숏'} ${lev}x\n\n실제 거래는 더보기 → 거래소 연결 후 가능합니다.`)}
@@ -266,7 +267,7 @@ function TradFiPage({prices,currency}:{prices:Asset[];currency:string}) {
               </div>
             </Card>
           ))}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.ylw}30`,marginTop:4}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.ylw,'30')}`,marginTop:4}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:12,marginBottom:8}}>⚠️ 계정 적격성 안내</div>
             {['거래소 계정 KYC 완료 필요','일부 상품은 특정 국가에서 제한될 수 있음','개인 투자자 등급에 따라 레버리지 한도 다름','CFD는 거래소 정책에 따라 변동 가능','TRAIGO는 CFD 직접 제공자가 아닌 연결 플레이스홀더'].map((w,i)=>(
               <div key={i} style={{display:'flex',gap:6,padding:'3px 0'}}><span style={{color:T.ylw,fontSize:11}}>•</span><span style={{color:T.sub,fontSize:11}}>{w}</span></div>

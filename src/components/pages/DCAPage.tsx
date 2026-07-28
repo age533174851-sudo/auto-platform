@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import AiDcaPanel from '@/components/AiDcaPanel';
 import { confirmDialog } from '@/lib/confirm/dialog';
@@ -206,7 +207,7 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
                     <Pencil size={14} strokeWidth={IC_STROKE} />
                   </button>
                   <button onClick={() => deleteRule(r.id)}
-                    style={{ ...buttonStyle('ghost'), padding: '10px 12px', color: T.red, border: `1px solid ${T.red}55` }}>
+                    style={{ ...buttonStyle('ghost'), padding: '10px 12px', color: T.red, border: `1px solid ${A(T.red,'55')}` }}>
                     <Trash2 size={14} strokeWidth={IC_STROKE} />
                   </button>
                 </div>

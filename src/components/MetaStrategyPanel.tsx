@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 // MetaStrategyPanel — AI가 전략을 자동 교체(OFF/ON)하고 자금을 배분.
 import React, { useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -60,7 +61,7 @@ export default function MetaStrategyPanel({
           })}
         </div>
       ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: T.grn + '12', borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: A(T.grn,'12'), borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
           <Check size={15} color={T.grn} />
           <span style={{ color: T.txt, fontSize: 12 }}>{meta.summary}</span>
         </div>

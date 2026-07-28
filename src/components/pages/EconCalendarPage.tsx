@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   CalendarDays, Star, Globe2, Info, TriangleAlert, ArrowLeft,
@@ -290,7 +291,7 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
 
         {/* 이벤트 설명 */}
         {desc && (
-          <div style={cardStyle({ marginBottom: SP.md, background: T.acl + '08', border: `1px solid ${T.acl}30` })}>
+          <div style={cardStyle({ marginBottom: SP.md, background: A(T.acl,'08'), border: `1px solid ${A(T.acl,'30')}` })}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
               <Info size={IC_SIZE.sm} strokeWidth={IC_STROKE} color={T.acl} />
               <span style={{ ...F.section, color: T.acl }}>{lang === 'ko' ? '이벤트 설명' : lang === 'ja' ? 'イベント説明' : 'Event Info'}</span>
@@ -301,7 +302,7 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
 
         {/* 트레이딩 주의 */}
         {selected.impact === 'high' && (
-          <div style={cardStyle({ background: T.red + '08', border: `1px solid ${T.red}40` })}>
+          <div style={cardStyle({ background: A(T.red,'08'), border: `1px solid ${A(T.red,'40')}` })}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
               <TriangleAlert size={IC_SIZE.sm} strokeWidth={IC_STROKE} color={T.red} />
               <span style={{ ...F.section, color: T.red }}>
@@ -409,7 +410,7 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
                   fontSize: 11, fontWeight: 700,
                   cursor: 'pointer', touchAction: 'manipulation',
                   display: 'inline-flex', alignItems: 'center', gap: 4,
-                  boxShadow: active ? `0 0 0 1px ${T.acl}55` : 'none',
+                  boxShadow: active ? `0 0 0 1px ${A(T.acl,'55')}` : 'none',
                 }}>
                 {c.code} <span style={{ opacity: 0.7, fontWeight: 500 }}>{lang === 'ko' ? c.ko : c.en}</span>
               </button>

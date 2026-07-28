@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React from 'react';
 import { T } from '@/lib/constants';
 
@@ -46,7 +47,7 @@ export default function ComingSoonPage({
             style={{
               padding: '11px 22px', borderRadius: 12, cursor: 'pointer',
               background: T.acg, color: T.acl,
-              border: `1px solid ${T.acl}40`, fontWeight: 700, fontSize: 13,
+              border: `1px solid ${A(T.acl,'40')}`, fontWeight: 700, fontSize: 13,
             }}
           >
             🏠 홈으로

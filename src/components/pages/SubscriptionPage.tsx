@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { notifyInfo } from '@/lib/notify/center';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
@@ -14,7 +15,7 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
 
 
 const PLAN_INFO: Record<PlanType,{label:string;color:string;icon:string;price:string;features:string[]}> = {
-  free:     {label:'무료',     color:'#94A3B8',icon:'🆓',price:'₩0',         features:['모의매매','기본 차트','15개 종목 왓치']},
+  free:     {label:'무료',     color:'var(--t-sub)',icon:'🆓',price:'₩0',         features:['모의매매','기본 차트','15개 종목 왓치']},
   pro:      {label:'Pro',     color:'#3B82F6',icon:'',price:'₩9,900/월',   features:['모든 무료 기능','무제한 왓치리스트','AI 분석 50회/월','실시간 알림']},
   premium:  {label:'Premium', color:'#7C3AED',icon:'',price:'₩29,900/월',  features:['모든 Pro 기능','AI 무제한','TradFi CFD','고급 백테스트']},
   lifetime: {label:'평생회원', color:'#F59E0B',icon:'♾️',price:'₩299,000 1회',features:['모든 Premium 기능','평생 이용','업그레이드 무료','우선 지원']},
@@ -188,8 +189,8 @@ function SubscriptionPage() {
 
           {/* Quick actions */}
           <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
-            <button onClick={()=>setTab('plans')} style={{background:T.acg,border:`1px solid ${T.acl}40`,borderRadius:12,padding:'12px',color:T.acl,fontWeight:700,fontSize:12,cursor:'pointer'}}>요금제 비교</button>
-            <button onClick={()=>setTab('redeem')} style={{background:T.prp+'15',border:`1px solid ${T.prp}40`,borderRadius:12,padding:'12px',color:T.prp,fontWeight:700,fontSize:12,cursor:'pointer'}}>🎟️ 초대 코드 입력</button>
+            <button onClick={()=>setTab('plans')} style={{background:T.acg,border:`1px solid ${A(T.acl,'40')}`,borderRadius:12,padding:'12px',color:T.acl,fontWeight:700,fontSize:12,cursor:'pointer'}}>요금제 비교</button>
+            <button onClick={()=>setTab('redeem')} style={{background:A(T.prp,'15'),border:`1px solid ${A(T.prp,'40')}`,borderRadius:12,padding:'12px',color:T.prp,fontWeight:700,fontSize:12,cursor:'pointer'}}>🎟️ 초대 코드 입력</button>
           </div>
 
           {/* Subscription info */}
@@ -211,7 +212,7 @@ function SubscriptionPage() {
           </Card>
 
           {/* Payment placeholder */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.ylw}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.ylw,'30')}`}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:12,marginBottom:8}}>💳 결제 수단</div>
             <div style={{color:T.muted,fontSize:11,lineHeight:1.6,marginBottom:10}}>실제 결제 기능은 준비 중입니다. 현재는 초대 코드 또는 관리자 부여로만 유료 플랜을 이용할 수 있습니다.</div>
             <div style={{display:'flex',gap:6}}>
@@ -283,7 +284,7 @@ function SubscriptionPage() {
               </button>
             </div>
             {redeemStatus?.startsWith('success:')&&(
-              <div style={{background:T.grn+'15',border:`1px solid ${T.grn}40`,borderRadius:10,padding:'12px 14px'}}>
+              <div style={{background:A(T.grn,'15'),border:`1px solid ${A(T.grn,'40')}`,borderRadius:10,padding:'12px 14px'}}>
                 <div style={{color:T.grn,fontWeight:700,fontSize:13,marginBottom:4}}>✅ 코드 적용 완료!</div>
                 <div style={{color:T.sub,fontSize:11}}>
                   {PLAN_INFO[redeemStatus.split(':')[1] as PlanType]?.label} 플랜이 활성화되었습니다.
@@ -292,14 +293,14 @@ function SubscriptionPage() {
               </div>
             )}
             {redeemStatus==='error'&&(
-              <div style={{background:T.red+'15',border:`1px solid ${T.red}40`,borderRadius:10,padding:'12px 14px'}}>
+              <div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'12px 14px'}}>
                 <div style={{color:T.red,fontWeight:700,fontSize:12}}>❌ 유효하지 않은 코드입니다</div>
                 <div style={{color:T.muted,fontSize:10,marginTop:3}}>코드를 다시 확인하거나 관리자에게 문의하세요.</div>
               </div>
             )}
           </Card>
           {/* Test codes hint */}
-          <Card style={{padding:'14px 16px',border:`1px solid ${T.ylw}30`}}>
+          <Card style={{padding:'14px 16px',border:`1px solid ${A(T.ylw,'30')}`}}>
             <div style={{color:T.ylw,fontWeight:700,fontSize:12,marginBottom:8}}>테스트 코드 (개발 환경)</div>
             <div style={{display:'flex',flexDirection:'column',gap:6}}>
               {MOCK_INVITE_CODES.filter(c=>c.active).map(c=>(
@@ -349,7 +350,7 @@ function SubscriptionPage() {
                       <div style={{color:T.muted,fontSize:9,marginBottom:4}}>
                         {u.expiresAt===null?'♾️ 평생':u.expiresAt||'-'}
                       </div>
-                      <button onClick={()=>setGrantModal({userId:u.userId,name:u.name})} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>플랜 변경</button>
+                      <button onClick={()=>setGrantModal({userId:u.userId,name:u.name})} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'4px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>플랜 변경</button>
                     </div>
                   </div>
                   {/* Quick grant buttons */}
@@ -370,11 +371,11 @@ function SubscriptionPage() {
             <div>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
                 <div style={{color:T.txt,fontWeight:700}}>🎟️ 초대 코드 목록</div>
-                <button onClick={()=>setShowCreateCode(v=>!v)} style={{background:T.acg,color:T.acl,border:`1px solid ${T.acl}40`,borderRadius:8,padding:'5px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 새 코드</button>
+                <button onClick={()=>setShowCreateCode(v=>!v)} style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'5px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 새 코드</button>
               </div>
 
               {showCreateCode&&(
-                <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${T.acl}30`}}>
+                <Card style={{padding:'14px 16px',marginBottom:12,border:`1px solid ${A(T.acl,'30')}`}}>
                   <div style={{color:T.txt,fontWeight:700,marginBottom:10}}>새 초대 코드 생성</div>
                   {[
                     {l:'코드',k:'code',ph:'예: TRAIGO-VIP-2025',type:'text'},
@@ -406,7 +407,7 @@ function SubscriptionPage() {
               )}
 
               {inviteCodes.map((c,i)=>(
-                <div key={c.id} style={{background:T.card,border:`1px solid ${c.active?T.border:T.muted+'30'}`,borderRadius:12,padding:'12px 14px',marginBottom:8,opacity:c.active?1:0.55}}>
+                <div key={c.id} style={{background:T.card,border:`1px solid ${c.active?T.border:A(T.muted,'30')}`,borderRadius:12,padding:'12px 14px',marginBottom:8,opacity:c.active?1:0.55}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
                     <div>
                       <div style={{color:T.txt,fontWeight:700,fontSize:12,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:.5,marginBottom:4}}>{c.code}</div>
@@ -416,7 +417,7 @@ function SubscriptionPage() {
                         <Bdg c={T.muted} ch={`${c.usesCount}/${c.usesMax===null?'∞':c.usesMax} 사용`}/>
                       </div>
                     </div>
-                    <button onClick={()=>setInviteCodes(prev=>prev.map(x=>x.id===c.id?{...x,active:!x.active}:x))} style={{background:c.active?T.red+'15':T.grn+'15',color:c.active?T.red:T.grn,border:`1px solid ${c.active?T.red:T.grn}30`,borderRadius:8,padding:'4px 8px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                    <button onClick={()=>setInviteCodes(prev=>prev.map(x=>x.id===c.id?{...x,active:!x.active}:x))} style={{background:c.active?A(T.red,'15'):A(T.grn,'15'),color:c.active?T.red:T.grn,border:`1px solid ${c.active?T.red:T.grn}30`,borderRadius:8,padding:'4px 8px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
                       {c.active?'비활성화':'활성화'}
                     </button>
                   </div>
@@ -456,7 +457,7 @@ function SubscriptionPage() {
                         <div style={{display:'flex',gap:5,alignItems:'center'}}><span style={{fontSize:12}}>{info.icon}</span><span style={{color:T.txt,fontSize:11}}>{info.label}</span></div>
                         <span style={{color:info.color,fontSize:11,fontWeight:700}}>{count}명 ({pct}%)</span>
                       </div>
-                      <div style={{height:5,background:'#1A2D4A',borderRadius:3,overflow:'hidden'}}>
+                      <div style={{height:5,background:'var(--t-border)',borderRadius:3,overflow:'hidden'}}>
                         <div style={{height:'100%',width:pct+'%',background:info.color,borderRadius:3,transition:'width .5s'}}/>
                       </div>
                     </div>
@@ -464,9 +465,9 @@ function SubscriptionPage() {
                 })}
               </Card>
               {/* DB Schema reference */}
-              <Card style={{padding:'14px 16px',border:`1px solid ${T.acl}30`}}>
+              <Card style={{padding:'14px 16px',border:`1px solid ${A(T.acl,'30')}`}}>
                 <div style={{color:T.acl,fontWeight:700,fontSize:12,marginBottom:8}}>🗄️ DB 스키마 (참고)</div>
-                <div style={{background:'#060B14',borderRadius:8,padding:'10px 12px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:10,color:T.grn,lineHeight:1.8}}>
+                <div style={{background:'var(--t-bg)',borderRadius:8,padding:'10px 12px',fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontSize:10,color:T.grn,lineHeight:1.8}}>
                   {`-- subscriptions table\ncreate table subscriptions (\n  user_id uuid references auth.users,\n  plan_type text,\n  status text,\n  expires_at timestamptz,\n  granted_by uuid,\n  created_at timestamptz default now()\n);\n\n-- invite_codes table\ncreate table invite_codes (\n  code text primary key,\n  plan_type text,\n  uses_max int,\n  uses_count int default 0,\n  active boolean default true\n);`}
                 </div>
               </Card>

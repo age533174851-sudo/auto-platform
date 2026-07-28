@@ -1,4 +1,5 @@
 'use client';
+import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { notifyError, notifyInfo } from '@/lib/notify/center';
 import type { LucideIcon } from 'lucide-react';
@@ -6,13 +7,9 @@ import {
   Link2, CalendarDays, Mic, Wallet, Receipt, Dice5, Users, Bot,
 } from 'lucide-react';
 
-const T = {
-  bg:'#060B14', card:'#0A1628', surf:'#0D1F3C', alt:'#0F2040',
-  border:'#1A2D4A', border2:'#243A5E',
-  txt:'#E2E8F0', sub:'#94A3B8', muted:'#475569',
-  grn:'#10B981', red:'#EF4444', ylw:'#F59E0B',
-  acl:'#60A5FA', acc:'#2563EB', acg:'#1E3A5F', prp:'#7C3AED',
-} as const;
+// 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
+// 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
+import { T } from '@/lib/constants';
 
 type TabId = 'onchain'|'calendar'|'voice'|'accounts'|'tax'|'simulator'|'community'|'assistant';
 
@@ -42,7 +39,7 @@ function SHead({ emoji, title, sub }: { emoji:string; title:string; sub?:string 
   );
 }
 function Skeleton({ h=14 }: { h?: number }) {
-  return <div style={{ height:h, borderRadius:6, background:'linear-gradient(90deg,#1A2D4A 25%,#243A5E 50%,#1A2D4A 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.2s infinite' }}/>;
+  return <div style={{ height:h, borderRadius:6, background:'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.2s infinite' }}/>;
 }
 function Badge({ label, color }: { label:string; color:string }) {
   return <span style={{ background:color+'20', color, fontSize:9, padding:'1px 5px', borderRadius:4, fontWeight:700, flexShrink:0 }}>{label}</span>;
@@ -248,8 +245,8 @@ function VoiceTab() {
         <div style={{ textAlign:'center', padding:'16px 0' }}>
           <button onClick={speak} disabled={loading||!briefing}
             style={{ width:80, height:80, borderRadius:'50%', cursor:'pointer', border:'none',
-              background: playing ? `radial-gradient(circle,${T.red}40,${T.red}20)` : `radial-gradient(circle,${T.acl}40,${T.acc}20)`,
-              boxShadow: playing ? `0 0 20px ${T.red}60` : `0 0 20px ${T.acl}40`,
+              background: playing ? `radial-gradient(circle,${A(T.red,'40')},${A(T.red,'20')})` : `radial-gradient(circle,${A(T.acl,'40')},${A(T.acc,'20')})`,
+              boxShadow: playing ? `0 0 20px ${A(T.red,'60')}` : `0 0 20px ${A(T.acl,'40')}`,
               fontSize:32, transition:'all .3s' }}>
             {playing ? '⏸️' : '▶️'}
           </button>
@@ -313,7 +310,7 @@ function AccountsTab({ prices }: { prices?: any[] }) {
       {MOCK_ACCOUNTS.map(acc => (
         <Card key={acc.id} c={<>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
-            <div style={{ width:28, height:28, borderRadius:8, background:T.acg, border:`1px solid ${T.acl}40`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>
+            <div style={{ width:28, height:28, borderRadius:8, background:T.acg, border:`1px solid ${A(T.acl,'40')}`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>
               {acc.exchange === 'binance' ? '' : acc.exchange === 'bybit' ? '🟠' : '🔵'}
             </div>
             <div style={{ flex:1 }}>
@@ -330,7 +327,7 @@ function AccountsTab({ prices }: { prices?: any[] }) {
           </div>
         </>} style={{ marginBottom:6 }}/>
       ))}
-      <div style={{ background:'#60A5FA0A', border:`1px solid ${T.acl}25`, borderRadius:10, padding:'10px 12px', marginTop:6, color:T.acl, fontSize:10 }}>
+      <div style={{ background:'#60A5FA0A', border:`1px solid ${A(T.acl,'25')}`, borderRadius:10, padding:'10px 12px', marginTop:6, color:T.acl, fontSize:10 }}>
         실제 거래소 연결은 "거래소연결" 탭에서 API 키를 등록하세요.
       </div>
     </div>
@@ -382,7 +379,7 @@ function TaxTab({ currency }: { currency?: string }) {
               </div>
             ))}
           </div>
-          <div style={{ background:'#F59E0B0A', border:`1px solid ${T.ylw}25`, borderRadius:8, padding:'8px 10px', color:T.ylw, fontSize:9 }}>
+          <div style={{ background:'#F59E0B0A', border:`1px solid ${A(T.ylw,'25')}`, borderRadius:8, padding:'8px 10px', color:T.ylw, fontSize:9 }}>
             {data.note}
           </div>
         </>} style={{ marginBottom:8 }}/>
@@ -491,7 +488,7 @@ function SimulatorTab() {
               return <polyline key={i} points={pts} fill="none" stroke={isPositive?'#10B98120':'#EF444420'} strokeWidth="1"/>;
             })}
           </svg>
-          <div style={{ marginTop:8, background:'#F59E0B0A', border:`1px solid ${T.ylw}25`, borderRadius:8, padding:'8px', color:T.ylw, fontSize:9 }}>
+          <div style={{ marginTop:8, background:'#F59E0B0A', border:`1px solid ${A(T.ylw,'25')}`, borderRadius:8, padding:'8px', color:T.ylw, fontSize:9 }}>
             ⚠️ 시뮬레이션은 과거 통계 기반입니다. 실제 시장은 다를 수 있습니다.
           </div>
         </>}/>
@@ -517,7 +514,7 @@ function CommunityTab() {
   return (
     <div>
       <SHead title="커뮤니티" sub="전략 공유 · 수익 인증 · 매매일지"/>
-      <div style={{ background:'#EF444408', border:`1px solid ${T.red}20`, borderRadius:10, padding:'8px 12px', marginBottom:10, color:'#FCA5A5', fontSize:10 }}>
+      <div style={{ background:'#EF444408', border:`1px solid ${A(T.red,'20')}`, borderRadius:10, padding:'8px 12px', marginBottom:10, color:'#FCA5A5', fontSize:10 }}>
         🚫 투자 판단은 본인 책임. 타인 전략의 맹목적 추종은 큰 손실로 이어질 수 있습니다.
       </div>
       {loading ? <Skeleton h={200}/> : posts.map(p => (
@@ -592,7 +589,7 @@ function AssistantTab() {
             placeholder="무엇이든 물어보세요… (예: 왜 손실났는지 분석해줘)"
             style={{ flex:1, background:T.bg, border:`1px solid ${T.border}`, borderRadius:10, padding:'10px 14px', color:T.txt, fontSize:12, outline:'none' }}/>
           <button onClick={() => ask(input)} disabled={loading||!input.trim()}
-            style={{ padding:'10px 16px', background:T.acg, border:`1px solid ${T.acl}40`, borderRadius:10, color:T.acl, fontWeight:700, fontSize:12, cursor:'pointer', flexShrink:0 }}>
+            style={{ padding:'10px 16px', background:T.acg, border:`1px solid ${A(T.acl,'40')}`, borderRadius:10, color:T.acl, fontWeight:700, fontSize:12, cursor:'pointer', flexShrink:0 }}>
             {loading ? '…' : '전송'}
           </button>
         </div>
