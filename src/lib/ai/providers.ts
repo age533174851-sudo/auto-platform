@@ -22,6 +22,14 @@ export interface AiCallInput {
   tier?: AiTier;
   /** 개인 키(BYOK). 주어지면 서버 환경변수 대신 이 키로 호출한다. */
   apiKey?: string;
+  /**
+   * JSON만 받겠다는 표시.
+   *
+   * 프롬프트로 "JSON만 출력해라"라고 부탁하는 것과 다르다. 부탁은 모델이
+   * 자주 어긴다 — 코드펜스를 씌우거나 앞에 설명을 붙인다. 공급자가
+   * 제공하는 강제 모드를 쓰면 파싱 실패 자체가 줄어든다.
+   */
+  jsonOnly?: boolean;
 }
 
 export interface AiCallResult {
@@ -78,6 +86,8 @@ async function callOpenAI(input: AiCallInput): Promise<AiCallResult> {
       body: JSON.stringify({
         model,
         max_tokens: input.maxTokens ?? 800,
+        // JSON 모드. 프롬프트에 "JSON만"이라고 적는 것보다 확실하다.
+        ...(input.jsonOnly ? { response_format: { type: 'json_object' } } : {}),
         messages: [
           { role: 'system', content: input.system },
           { role: 'user',   content: input.user   },
@@ -163,7 +173,11 @@ async function callGemini(input: AiCallInput): Promise<AiCallResult> {
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: input.system }] },
           contents: [{ role: 'user', parts: [{ text: input.user }] }],
-          generationConfig: { maxOutputTokens: input.maxTokens ?? 800 },
+          generationConfig: {
+            maxOutputTokens: input.maxTokens ?? 800,
+            // Gemini도 JSON 강제 모드가 있다
+            ...(input.jsonOnly ? { responseMimeType: 'application/json' } : {}),
+          },
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       },

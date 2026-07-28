@@ -202,7 +202,13 @@ export function extractJson(text: string | null | undefined): any | null {
   if (first >= 0 && last > first) candidates.push(t.slice(first, last + 1));
 
   for (const c of candidates) {
-    try { const v = JSON.parse(c); if (v && typeof v === 'object') return v; } catch { /* 다음 후보 */ }
+    try {
+      const v = JSON.parse(c);
+      // 배열을 받지 않는다. typeof []는 'object'라 그냥 두면 통과하는데,
+      // 그러면 뒤에서 titleKo·direction 같은 필드 접근이 전부 undefined가
+      // 되고 '모델이 빈 응답을 줬다'로 잘못 읽힌다.
+      if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+    } catch { /* 다음 후보 */ }
   }
   return null;
 }

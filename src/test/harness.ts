@@ -6,15 +6,38 @@ let passed = 0;
 let failed = 0;
 const failures: string[] = [];
 
-export function test(name: string, fn: () => void) {
-  try {
-    fn();
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } catch (e: any) {
+/**
+ * 아직 끝나지 않은 비동기 테스트.
+ *
+ * 이게 없으면 async 테스트가 **실패해도 통과로 집계된다.** fn()이
+ * 프라미스를 돌려주는데 try/catch는 이미 빠져나간 뒤라 예외를 못 잡고,
+ * 카운터는 그 자리에서 passed++를 한다. 테스트가 거짓말을 하는 것이라
+ * 없느니만 못하다.
+ */
+const pending: Promise<void>[] = [];
+
+export function test(name: string, fn: () => void | Promise<void>) {
+  const ok = () => { passed++; console.log(`  ✓ ${name}`); };
+  const no = (e: any) => {
     failed++;
     failures.push(`${name}: ${e?.message || e}`);
     console.log(`  ✗ ${name} — ${e?.message || e}`);
+  };
+  try {
+    const r = fn() as any;
+    if (r && typeof r.then === 'function') {
+      pending.push(r.then(ok, no));
+      return;
+    }
+    ok();
+  } catch (e: any) { no(e); }
+}
+
+/** 비동기 테스트가 다 끝날 때까지 기다린다. 집계 전에 반드시 부른다 */
+export async function flushAsync(): Promise<void> {
+  while (pending.length) {
+    const batch = pending.splice(0, pending.length);
+    await Promise.all(batch);
   }
 }
 
