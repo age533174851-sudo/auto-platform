@@ -29,7 +29,8 @@ import React, { useEffect, useState } from 'react';
 import { C, FS, NUM, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 import { ChartPane } from './ChartPane';
-import { OrderBookPanel, OrderFormPanel } from './OrderPane';
+import { OrderBookPanel, MarketOrderPanel } from './OrderPane';
+import { MarketSwitch } from './MarketSwitch';
 import { LeftRail } from './LeftRail';
 import { BottomDock } from './BottomDock';
 import { BottomSheet } from './BottomSheet';
@@ -53,17 +54,20 @@ function useLandscape(): boolean {
 
 // ── 상단 ────────────────────────────────────────────────
 function MobileHeader({ onOpenSearch, onOpenInfo }: { onOpenSearch: () => void; onOpenInfo: () => void }) {
-  const { symbol, mode } = useTerminal();
+  const { symbol, mode, marketType, setMarketType } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
   const chg = stream.changePct;
 
   return (
     <div style={{
-      flexShrink: 0, padding: '8px 46px 8px 12px',
+      flexShrink: 0,
       borderBottom: `1px solid ${C.hair}`,
       background: mode.realMoney
         ? 'linear-gradient(90deg,rgba(246,70,93,.10),transparent 55%)' : C.panel,
       borderLeft: mode.realMoney ? `3px solid ${C.down}` : '3px solid transparent',
+    }}>
+    <div style={{
+      padding: '8px 46px 6px 12px',
       display: 'flex', alignItems: 'center', gap: 8,
     }}>
       <button onClick={onOpenSearch} style={{
@@ -101,6 +105,14 @@ function MobileHeader({ onOpenSearch, onOpenInfo }: { onOpenSearch: () => void; 
           boxShadow: mode.realMoney ? `0 0 0 3px ${C.downBg}` : 'none',
         }}
       />
+    </div>
+
+    {/* 시장 전환은 자기 줄을 갖는다. 종목·가격과 같은 줄에 두면
+        좁은 화면에서 서로를 밀어내고, 밀려난 쪽이 잘린다.
+        어느 시장에 있는지는 잘려도 되는 정보가 아니다. */}
+    <div style={{ padding: '0 12px 8px' }}>
+      <MarketSwitch compact value={marketType} onChange={setMarketType}/>
+    </div>
     </div>
   );
 }
@@ -171,7 +183,7 @@ export default function MobileShell() {
             <OrderBookPanel rows={8} dense showFunding onPickPrice={setPicked}/>
           </div>
           <div style={{ width: 250, flexShrink: 0, overflowY: 'auto' }}>
-            <OrderFormPanel dense presetPrice={picked}/>
+            <MarketOrderPanel dense presetPrice={picked}/>
           </div>
         </div>
         <SearchSheet open={search} onClose={() => setSearch(false)}
@@ -195,7 +207,7 @@ export default function MobileShell() {
           width: '56%', flexShrink: 0, overflowY: 'auto',
           borderRight: `1px solid ${C.hair}`,
         }}>
-          <OrderFormPanel dense presetPrice={picked}/>
+          <MarketOrderPanel dense presetPrice={picked}/>
         </div>
         <div style={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>
           <OrderBookPanel rows={7} dense showFunding onPickPrice={setPicked}/>

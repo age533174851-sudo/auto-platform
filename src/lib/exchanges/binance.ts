@@ -169,6 +169,51 @@ export async function placeOrderBinance(
   }
 }
 
+// ─── 현물 조회 ───────────────────────────────────────────────
+// 선물 쪽 함수와 이름을 겹치지 않게 둔다. import 한 줄을 잘못 쓰면
+// 현물 화면이 선물 데이터를 보여주게 되고, 그 화면을 보고 주문한다.
+
+/** 현물 미체결 주문. symbol을 주면 그 종목만. */
+export async function getSpotOpenOrders(
+  key: string, secret: string, symbol?: string,
+): Promise<any[]> {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
+  const d = await bnFetch('/api/v3/openOrders', key, secret, params);
+  return Array.isArray(d) ? d : [];
+}
+
+/**
+ * 현물 체결 내역.
+ *
+ * Binance는 심볼 없이 전체 체결을 주지 않는다. 그래서 symbol이 필수다 —
+ * 없는데 빈 배열을 돌려주면 "거래 내역이 없다"로 읽힌다.
+ */
+export async function getSpotTrades(
+  key: string, secret: string, symbol: string, limit = 100,
+): Promise<any[]> {
+  const d = await bnFetch('/api/v3/myTrades', key, secret, {
+    symbol: symbol.toUpperCase().replace('/', ''),
+    limit: String(Math.min(1000, Math.max(1, limit))),
+  });
+  return Array.isArray(d) ? d : [];
+}
+
+/** 현물 주문 취소 */
+export async function cancelSpotOrder(
+  key: string, secret: string, symbol: string, orderId: string | number,
+): Promise<{ success: boolean; message?: string }> {
+  try {
+    await bnFetch('/api/v3/order', key, secret, {
+      symbol: symbol.toUpperCase().replace('/', ''),
+      orderId: String(orderId),
+    });
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, message: e?.message || '취소 실패' };
+  }
+}
+
 // ─── 현물 LOT_SIZE 처리 ──────────────────────────────────────
 const _spotLotCache: Record<string, { stepSize: number; minQty: number; at: number }> = {};
 

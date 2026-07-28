@@ -18,6 +18,7 @@ import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn, chip } fro
 import { DataBadge } from '@/components/ui/DataBadge';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
 import { useTerminal } from './TerminalContext';
+import { SpotOrderPanel } from './SpotOrderPanel';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
 
@@ -466,6 +467,32 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   );
 });
 
+/**
+ * 시장 유형에 맞는 주문판을 고른다.
+ *
+ * 조건부 렌더가 아니라 **컴포넌트 교체**다. 현물이 선택되면 선물 폼은
+ * 아예 마운트되지 않으므로, 레버리지 입력이 화면 어딘가에 남아 있을
+ * 가능성 자체가 없다.
+ */
+export const MarketOrderPanel = memo(function MarketOrderPanel(
+  props: { presetPrice?: number | null; dense?: boolean },
+) {
+  const { marketType } = useTerminal();
+  if (marketType === 'SPOT') return <SpotOrderPanel {...props}/>;
+  // COIN-M은 아직 주문 경로가 없다. 없는 것을 있는 것처럼 보여주지 않는다.
+  if (marketType === 'COIN_FUTURES') {
+    return (
+      <div style={{ padding: 16, color: C.warn, fontSize: FS.small, lineHeight: 1.6 }}>
+        COIN-M 선물은 아직 주문을 지원하지 않습니다.
+        <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 6 }}>
+          USDⓈ-M 선물이나 현물로 전환하세요.
+        </div>
+      </div>
+    );
+  }
+  return <OrderFormPanel {...props}/>;
+});
+
 // ══ PC 우측 열 — 둘을 쌓는다 ═══════════════════════════
 export const OrderPane = memo(function OrderPane() {
   const [picked, setPicked] = useState<number | null>(null);
@@ -473,7 +500,7 @@ export const OrderPane = memo(function OrderPane() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto' }}>
       <OrderBookPanel onPickPrice={setPicked}/>
       <div style={{ borderTop: `1px solid ${C.hair}` }}/>
-      <OrderFormPanel presetPrice={picked}/>
+      <MarketOrderPanel presetPrice={picked}/>
     </div>
   );
 });

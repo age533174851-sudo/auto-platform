@@ -14,6 +14,7 @@ import { DataBadge } from '@/components/ui/DataBadge';
 import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { SymbolSearch } from './SymbolSearch';
+import { MarketSwitch } from './MarketSwitch';
 
 export const TOPBAR_H = 52;
 
@@ -69,7 +70,7 @@ function TopBarInner({ balance, compact, right }: {
   /** 모바일에서 Kill Switch 등을 오른쪽에 끼워 넣는다 */
   right?: React.ReactNode;
 }) {
-  const { symbol, mode, connections } = useTerminal();
+  const { symbol, mode, connections, marketType, setMarketType } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
 
   const px = stream.lastPrice;
@@ -95,6 +96,10 @@ function TopBarInner({ balance, compact, right }: {
       )}
 
       <SymbolPicker compact={compact}/>
+
+      {/* 지금 어느 시장에 있는지 모르면 '매도'를 누르며 파는 줄 알고
+          숏을 연다. 종목 바로 옆에 둔다. */}
+      {!compact && <MarketSwitch value={marketType} onChange={setMarketType}/>}
 
       <div style={{
         display: 'flex', flexDirection: 'column', gap: 1,

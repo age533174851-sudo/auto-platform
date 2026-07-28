@@ -16,6 +16,7 @@
 // 30초마다 흔들린다. 그런 상태는 그것을 쓰는 패널 안에 둔다.
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { loadFavorites, saveFavorites } from './SymbolSearch';
+import { parseMarketType, type MarketType } from '@/lib/markets/marketType';
 
 export interface TerminalSymbol {
   /** 거래소 심볼 — 'BTCUSDT' */
@@ -51,6 +52,12 @@ interface TerminalState {
   /** 즐겨찾기 심볼 id 목록 */
   favorites: string[];
   toggleFavorite: (id: string) => void;
+  /**
+   * 시장 유형. 이게 바뀌면 주문창·잔고·위험 계산이 통째로 바뀐다.
+   * 화면 어디서도 이 값을 무시하고 주문을 만들면 안 된다.
+   */
+  marketType: MarketType;
+  setMarketType: (m: MarketType) => void;
   /** Bearer 토큰. 없으면 로그인 전이다 */
   auth: string;
   connId: string;
@@ -68,6 +75,7 @@ export function useTerminal(): TerminalState {
 }
 
 const SYMBOL_KEY = 'tg_terminal_symbol';
+const MARKET_KEY = 'tg_terminal_market';
 
 /** 모드를 모를 때의 값. 실계좌가 아니라고 단정하지 않는다 */
 const UNKNOWN_MODE: ModeInfo = {
@@ -78,6 +86,9 @@ const UNKNOWN_MODE: ModeInfo = {
 export function TerminalProvider({ children }: { children: React.ReactNode }) {
   const [symbol, setSymbolState] = useState<TerminalSymbol>(DEFAULT_SYMBOLS[0]);
   const [favorites, setFavorites] = useState<string[]>(() => DEFAULT_SYMBOLS.map(s => s.id));
+  // 기본은 선물이다. 지금까지 이 화면이 하던 일이 선물이었으므로,
+  // 새로고침 한 번에 사용자의 주문 대상이 바뀌면 안 된다.
+  const [marketType, setMarketTypeState] = useState<MarketType>('USDT_FUTURES');
   const [auth, setAuth] = useState('');
   const [connections, setConnections] = useState<any[]>([]);
   const [connId, setConnId] = useState('');
@@ -93,6 +104,17 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
       }
     } catch { /* 저장값이 깨졌으면 기본값 */ }
     setFavorites(loadFavorites());
+    // 저장값이 이상하면 무시하고 기본값을 쓴다. parseMarketType은
+    // 모르는 값에 null을 주므로 오타가 다른 시장으로 새지 않는다.
+    try {
+      const m = parseMarketType(localStorage.getItem(MARKET_KEY));
+      if (m) setMarketTypeState(m);
+    } catch { /* 기본값 유지 */ }
+  }, []);
+
+  const setMarketType = useCallback((m: MarketType) => {
+    setMarketTypeState(m);
+    try { localStorage.setItem(MARKET_KEY, m); } catch {}
   }, []);
 
   const toggleFavorite = useCallback((id: string) => {
@@ -164,8 +186,10 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<TerminalState>(() => ({
     symbol, setSymbol, symbols, favorites, toggleFavorite,
+    marketType, setMarketType,
     auth, connId, setConnId, connections, mode,
-  }), [symbol, setSymbol, symbols, favorites, toggleFavorite, auth, connId, connections, mode]);
+  }), [symbol, setSymbol, symbols, favorites, toggleFavorite,
+       marketType, setMarketType, auth, connId, connections, mode]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

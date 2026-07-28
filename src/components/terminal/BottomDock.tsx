@@ -11,9 +11,11 @@
 import React, { memo, useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, tabStyle, chip, ghostBtn, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
+import { MarketCompare } from './MarketSwitch';
+import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
-type Tab = '포지션' | '미체결' | '상태대조' | '전략';
-const TABS: Tab[] = ['포지션', '미체결', '상태대조', '전략'];
+type Tab = '포지션' | '미체결' | '현물·선물' | '상태대조' | '전략';
+const TABS: Tab[] = ['포지션', '미체결', '현물·선물', '상태대조', '전략'];
 
 function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void }) {
   const { auth, connId, setSymbol, symbols } = useTerminal();
@@ -211,7 +213,95 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
           </div>
         )}
 
+        {tab === '현물·선물' && <CombinedTab acct={acct}/>}
+
         {tab === '전략' && <StrategyTab/>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 현물과 선물을 나란히 본다.
+ *
+ * 따로 보면 현물 0.15 BTC와 선물 SHORT 0.10 BTC가 둘 다 크게 느껴진다.
+ * 실제 방향 노출은 +0.05다. 그 숫자를 직접 보여준다.
+ */
+function CombinedTab({ acct }: { acct: any }) {
+  const { symbol, auth, connId } = useTerminal();
+  const stream = useBinanceStream(symbol.id, true);
+  const [spotQty, setSpotQty] = useState<number | null>(null);
+  const [spotPrice, setSpotPrice] = useState<number | null>(null);
+  const [funding, setFunding] = useState<number | null>(null);
+  const base = symbol.id.replace(/USDT$/, '');
+
+  // 현물 가격은 현물 시장에서 받아야 한다. 선물 호가를 현물 가격으로
+  // 쓰면 Basis가 항상 0이 되어 두 시장이 같다는 거짓말이 된다.
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol.id}`);
+        if (r.ok && alive) {
+          const j = await r.json();
+          const v = parseFloat(j?.price);
+          setSpotPrice(Number.isFinite(v) ? v : null);
+        }
+      } catch { if (alive) setSpotPrice(null); }
+      try {
+        const r = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol.id}`);
+        if (r.ok && alive) {
+          const j = await r.json();
+          const v = parseFloat(j?.lastFundingRate);
+          setFunding(Number.isFinite(v) ? v * 100 : null);
+        }
+      } catch { if (alive) setFunding(null); }
+    };
+    load();
+    const t = setInterval(load, 15_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [symbol.id]);
+
+  // 현물 보유는 현물 지갑에서만 읽는다. 선물 계좌와 섞지 않는다.
+  useEffect(() => {
+    if (!auth || !connId) { setSpotQty(null); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(`/api/binance/spot/balance?connectionId=${connId}`,
+          { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (!alive) return;
+        if (!r.ok || !j?.ok) { setSpotQty(null); return; }
+        const hit = (j.balances || []).find((b: any) => b.asset === base);
+        setSpotQty(hit ? Number(hit.free) + Number(hit.locked) : 0);
+      } catch { if (alive) setSpotQty(null); }
+    })();
+    return () => { alive = false; };
+  }, [auth, connId, base]);
+
+  // 선물 순수량 — 조회를 못 했으면 0이 아니라 null이다
+  const positions: any[] = Array.isArray(acct?.positions) ? acct.positions : [];
+  const futuresQty = acct == null ? null
+    : positions
+        .filter((p: any) => String(p.symbol) === symbol.id)
+        .reduce((sum: number, p: any) => sum + (Number(p.amount) || 0), 0);
+
+  return (
+    <div style={{ padding: 14, maxWidth: 420 }}>
+      <div style={{ color: C.text, fontSize: FS.body, fontWeight: 700, marginBottom: 8 }}>
+        {symbol.id} · 현물 vs 선물
+      </div>
+      <MarketCompare
+        spotPrice={spotPrice}
+        markPrice={stream.lastPrice}
+        fundingPct={funding}
+        spotQty={spotQty}
+        futuresQty={futuresQty}
+      />
+      <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 10, lineHeight: 1.6 }}>
+        현물 보유와 선물 포지션을 따로 보면 둘 다 크게 느껴집니다.
+        총 순노출이 실제 방향입니다 — 현물 0.15 + 선물 SHORT 0.10이면 실질 +0.05입니다.
       </div>
     </div>
   );
