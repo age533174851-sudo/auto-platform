@@ -82,7 +82,7 @@ export interface ImpactScore {
 
 interface CalcInput {
   sourceName?:  string;
-  prediction?:  'up' | 'down' | 'flat';
+  prediction?:  'up' | 'down' | 'flat' | 'unknown';
   confidence?:  number;         // 0~100
   publishedAt?: number;         // ms timestamp
   numAffectedAssets?: number;
@@ -97,6 +97,11 @@ export function calculateImpact(input: CalcInput): ImpactScore {
   if (input.prediction === 'up' || input.prediction === 'down') {
     sentimentScore = (conf / 100) * 50;
     reasons.push(`예측 ${input.prediction === 'up' ? '상승' : '하락'} (신뢰도 ${conf}%)`);
+  } else if (input.prediction === 'unknown') {
+    // 판단을 보류한 뉴스는 영향도를 거의 주지 않는다. 보합(10점)보다도 낮다 —
+    // "안 움직인다"는 판단이지만 "모르겠다"는 판단이 아니다.
+    sentimentScore = 5;
+    reasons.push('AI가 방향 판단을 보류함');
   } else {
     sentimentScore = 10;
     reasons.push('방향성 약함 (보합)');

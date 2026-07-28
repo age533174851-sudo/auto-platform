@@ -4,7 +4,12 @@
 // ─────────────────────────────────────────────────────────────
 
 export type NewsSentiment = 'bullish' | 'bearish' | 'neutral';
-export type NewsPrediction = 'up' | 'down' | 'flat';
+
+// 'unknown'은 'flat'과 다르다.
+// flat = "안 움직일 것 같다"(예측), unknown = "모르겠다"(판단 보류).
+// 이 자리를 없애면 모델은 언제나 셋 중 하나를 고르고, 근거 없는 추측이
+// 예측과 똑같은 모양으로 화면에 남는다. schema.ts의 uncertain이 여기로 온다.
+export type NewsPrediction = 'up' | 'down' | 'flat' | 'unknown';
 
 // 원본 뉴스 (외부 API에서 들어오는 형태)
 export interface RawNews {
@@ -15,7 +20,10 @@ export interface RawNews {
   source?: string;
   url?: string;
   image?: string;
+  /** 표시용. '5분 전' 같은 사람이 읽는 문자열이 들어오기도 한다 — 시각 계산에 쓰지 말 것 */
   time?: string | number;
+  /** 실제 발행 시각 (ISO). 시각이 필요하면 이쪽을 먼저 본다 */
+  publishedAt?: string;
   category?: string;
   tickers?: string[];
   sentiment?: NewsSentiment;
@@ -59,6 +67,10 @@ export interface AnalyzeRequest {
     summary?: string;
     tickers?: string[];
     category?: string;
+    // 원문 출처. 서버가 AI 분석을 통과시킬지 판단하는 근거다 —
+    // 확인할 수 없는 분석은 화면에 "AI가 그렇다고 했다"만 남긴다.
+    url?:         string;
+    publishedAt?: string | number;
   }[];
 }
 
@@ -66,17 +78,21 @@ export interface AnalyzeRequest {
 export interface AnalyzeResponse {
   results: Record<string, NewsAnalysis>; // id → analysis
   source: 'openai' | 'mock' | 'mixed';
+  /** 원문 출처를 확인할 수 없어 AI에 보내지 않은 건수. 조용히 줄어들면 알 수 없다 */
+  unverifiable?: number;
 }
 
 // UI에서 쓰는 라벨 / 색상 헬퍼
 export const PREDICTION_LABEL: Record<NewsPrediction, string> = {
-  up:   '상승 예상',
-  down: '하락 예상',
-  flat: '보합 예상',
+  up:      '상승 예상',
+  down:    '하락 예상',
+  flat:    '보합 예상',
+  unknown: '판단 보류',
 };
 
-export const PREDICTION_TONE: Record<NewsPrediction, 'green' | 'red' | 'yellow'> = {
-  up:   'green',
-  down: 'red',
-  flat: 'yellow',
+export const PREDICTION_TONE: Record<NewsPrediction, 'green' | 'red' | 'yellow' | 'gray'> = {
+  up:      'green',
+  down:    'red',
+  flat:    'yellow',
+  unknown: 'gray',
 };

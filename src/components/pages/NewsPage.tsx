@@ -3,7 +3,7 @@ import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Search as SearchIc, X as XIcon, Newspaper, ExternalLink,
-  TrendingUp, TrendingDown, Minus, Brain, Sparkles, AlertCircle,
+  TrendingUp, TrendingDown, Minus, HelpCircle, Brain, Sparkles, AlertCircle,
   ChevronRight, RefreshCw, ArrowLeft, Star,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
@@ -11,7 +11,7 @@ import { formatNewsDate } from '@/lib/format';
 import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
-import { analyzeNewsBatch, loadCachedAnalysis } from '@/lib/news/analyzer';
+import { analyzeNewsBatch, loadCachedAnalysis, newsCacheKey } from '@/lib/news/analyzer';
 import type { AnalyzedNews, NewsAnalysis, NewsPrediction, RawNews } from '@/lib/news/types';
 import { PREDICTION_LABEL } from '@/lib/news/types';
 import { calculateImpact, impactLevel, getSourceInfo, TIER_COLOR, TIER_LABEL } from '@/lib/news/sources';
@@ -30,8 +30,20 @@ const CAT_TO_API: Record<string, string> = {
 };
 
 // 예측별 색상 매핑
+// unknown(판단 보류)은 보합의 노랑을 쓰지 않는다. 색이 같으면 "모르겠다"와
+// "안 움직인다"가 화면에서 같은 말이 된다 — 구분하려고 만든 값이다.
 const predColor = (p: NewsPrediction): string =>
-  p === 'up' ? T.grn : p === 'down' ? T.red : T.ylw;
+  p === 'up' ? T.grn : p === 'down' ? T.red : p === 'unknown' ? T.sub : T.ylw;
+
+// 기사 발행 시각 → ms. 읽을 수 없으면 undefined.
+// time 필드에는 '5분 전' 같은 표시용 문자열이 들어오기도 해서 publishedAt을 먼저 본다.
+function newsTimestamp(n: { time?: string | number; publishedAt?: string }): number | undefined {
+  const raw = n.publishedAt ?? n.time;
+  if (raw == null || raw === '') return undefined;
+  if (typeof raw === 'number') return raw;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : undefined;
+}
 
 // ── 중요도 별점 (AI 분석 없이도 출처·최신성·감성·영향종목수로 산출) ──
 function newsImportance(n: any, impactTotal?: number): number {
@@ -41,7 +53,7 @@ function newsImportance(n: any, impactTotal?: number): number {
   let score = 0;
   try { const src = getSourceInfo(n.source); score += (src.reliability / 100) * 2; } catch {}
   if (n.sentiment === 'bullish' || n.sentiment === 'bearish') score += 1.2; else score += 0.4;
-  const t = typeof n.time === 'number' ? n.time : (n.publishedAt ? new Date(n.publishedAt).getTime() : (n.time ? new Date(n.time).getTime() : 0));
+  const t = newsTimestamp(n);
   if (t) { const h = (Date.now() - t) / 3600000; score += h < 6 ? 1 : h < 24 ? 0.7 : h < 72 ? 0.4 : 0.1; }
   const tk = Array.isArray(n.tickers) ? n.tickers.length : 0;
   score += Math.min(0.8, tk * 0.25);
@@ -61,7 +73,9 @@ function StarRow({ n: count, size = 11 }: { n: number; size?: number }) {
 
 function PredictionBadge({ prediction, confidence, compact }: { prediction: NewsPrediction; confidence: number; compact?: boolean }) {
   const color = predColor(prediction);
-  const Icon = prediction === 'up' ? TrendingUp : prediction === 'down' ? TrendingDown : Minus;
+  // 보류는 물음표. 보합의 '—'와 같은 모양을 쓰면 구분한 의미가 없다
+  const Icon = prediction === 'up' ? TrendingUp : prediction === 'down' ? TrendingDown
+             : prediction === 'unknown' ? HelpCircle : Minus;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -89,7 +103,8 @@ function ConfidenceBar({ value, color }: { value: number; color: string }) {
 
 function AssetTag({ symbol, direction, onClick }: { symbol: string; direction: NewsPrediction; onClick?: () => void }) {
   const color = predColor(direction);
-  const Icon = direction === 'up' ? TrendingUp : direction === 'down' ? TrendingDown : Minus;
+  const Icon = direction === 'up' ? TrendingUp : direction === 'down' ? TrendingDown
+             : direction === 'unknown' ? HelpCircle : Minus;
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick?.(); }}
@@ -148,7 +163,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       // 캐시에서 즉시 채울 수 있는 것
       const fromCache: Record<string, NewsAnalysis> = {};
       for (const n of normalized) {
-        const c = loadCachedAnalysis(n.id || '');
+        const c = loadCachedAnalysis(newsCacheKey(n));
         if (c) fromCache[n.id || ''] = c;
       }
       if (Object.keys(fromCache).length > 0) setAnalyses(p => ({ ...p, ...fromCache }));
@@ -237,6 +252,9 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         summary:  n.summary || n.content || '',
         tickers:  Array.isArray(n.tickers) ? n.tickers : [],
         category: n.category,
+        // 서버가 AI 분석을 통과시킬지 판단하는 근거. 빼먹으면 전부 mock으로 떨어진다
+        url:         n.url,
+        publishedAt: newsTimestamp(n),
       })));
       setAnalyses(prev => ({ ...prev, ...results }));
       setAnalyzingIds(prev => {
@@ -265,7 +283,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       .map(n => ({
         id: n.id!,
         sourceName: n.source,
-        publishedAt: typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined),
+        publishedAt: newsTimestamp(n),
         analysis: analyses[n.id!],
       }));
 
@@ -288,6 +306,8 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       summary: selected.summary || selected.content || '',
       tickers: Array.isArray(selected.tickers) ? selected.tickers : [],
       category: selected.category,
+      url:         selected.url,
+      publishedAt: newsTimestamp(selected),
     }]).then(results => {
       setAnalyses(prev => ({ ...prev, ...results }));
     }).finally(() => {
@@ -628,12 +648,12 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                         );
                       })()}
                       {n.time && <span style={F.muted}>· {formatNewsDate(n.time)}</span>}
-                      <span style={{ marginLeft: 'auto' }}><StarRow n={newsImportance(n, an ? calculateImpact({ sourceName: n.source, prediction: an.prediction, confidence: an.confidence, publishedAt: (typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined)), numAffectedAssets: an.affectedAssets?.length || 0 }).total : undefined)} /></span>
+                      <span style={{ marginLeft: 'auto' }}><StarRow n={newsImportance(n, an ? calculateImpact({ sourceName: n.source, prediction: an.prediction, confidence: an.confidence, publishedAt: newsTimestamp(n), numAffectedAssets: an.affectedAssets?.length || 0 }).total : undefined)} /></span>
                     </div>
 
                     {/* 영향도 게이지 (AI 분석 완료 시) */}
                     {an && (() => {
-                      const t = typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined);
+                      const t = newsTimestamp(n);
                       const imp = calculateImpact({
                         sourceName: n.source,
                         prediction: an.prediction,

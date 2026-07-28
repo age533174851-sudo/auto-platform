@@ -98,8 +98,15 @@ export function matchNews(
   });
   const level = impactLevel(impact.total);
 
-  // 알림 트리거: high 이상 + 새 뉴스
-  const shouldNotify = impact.total >= 60 && !hasSeen(newsId);
+  // 알림 트리거: high 이상 + 새 뉴스.
+  // 방향을 보류한 분석으로는 알리지 않는다 — 휴대폰을 울려놓고 "모르겠다"고
+  // 할 거면 울리지 않는 게 낫다.
+  const shouldNotify = impact.total >= 60 && analysis.prediction !== 'unknown' && !hasSeen(newsId);
+
+  const dirWord = analysis.prediction === 'up' ? '상승 가능'
+                : analysis.prediction === 'down' ? '하락 가능'
+                : analysis.prediction === 'unknown' ? '언급됨 (방향 판단 보류)'
+                : '영향 가능';
 
   return {
     newsId,
@@ -107,7 +114,7 @@ export function matchNews(
     impactScore:   impact.total,
     impactLevel:   level,
     shouldNotify,
-    reason:        `${matched.join(', ')} ${analysis.prediction === 'up' ? '상승' : analysis.prediction === 'down' ? '하락' : '영향'} 가능 (영향도 ${impact.total}점)`,
+    reason:        `${matched.join(', ')} ${dirWord} (영향도 ${impact.total}점)`,
   };
 }
 

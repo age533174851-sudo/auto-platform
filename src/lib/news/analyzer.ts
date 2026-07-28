@@ -5,8 +5,12 @@
 
 import type { AnalyzeRequest, AnalyzeResponse, NewsAnalysis } from './types';
 import { mockAnalyze } from './mockAnalyzer';
+import { newsCacheKey } from './schema';
 
-const CACHE_KEY_PREFIX = 'tg_news_analysis_v1_';
+export { newsCacheKey };
+
+// v2 — 키를 id에서 내용 지문으로 바꿨다. 옛 키는 자연히 버려진다.
+const CACHE_KEY_PREFIX = 'tg_news_analysis_v2_';
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24h
 
 interface CacheEntry {
@@ -45,11 +49,13 @@ export function saveCachedAnalysis(id: string, analysis: NewsAnalysis): void {
 export async function analyzeNewsBatch(items: AnalyzeRequest['items']): Promise<Record<string, NewsAnalysis>> {
   if (!Array.isArray(items) || items.length === 0) return {};
 
-  // 캐시된 것은 즉시 반환, 나머지만 API
+  // 캐시된 것은 즉시 반환, 나머지만 API.
+  // 캐시는 내용 지문으로 찾고, 결과는 호출자가 준 id로 돌려준다 —
+  // 같은 기사가 다른 id로 들어와도 두 번 분석하지 않는다.
   const cached: Record<string, NewsAnalysis> = {};
   const needFetch: AnalyzeRequest['items'] = [];
   for (const it of items) {
-    const c = loadCachedAnalysis(it.id);
+    const c = loadCachedAnalysis(newsCacheKey(it));
     if (c) cached[it.id] = c;
     else needFetch.push(it);
   }
@@ -67,11 +73,11 @@ export async function analyzeNewsBatch(items: AnalyzeRequest['items']): Promise<
     if (r.ok) {
       const d = (await r.json()) as AnalyzeResponse;
       if (d && d.results) {
-        for (const id of Object.keys(d.results)) {
-          const a = d.results[id];
+        for (const it of needFetch) {
+          const a = d.results[it.id];
           if (a) {
-            cached[id] = a;
-            saveCachedAnalysis(id, a);
+            cached[it.id] = a;
+            saveCachedAnalysis(newsCacheKey(it), a);
           }
         }
         // API에서 누락된 건 mock으로
@@ -79,7 +85,7 @@ export async function analyzeNewsBatch(items: AnalyzeRequest['items']): Promise<
           if (!cached[it.id]) {
             const m = mockAnalyze(it);
             cached[it.id] = m;
-            saveCachedAnalysis(it.id, m);
+            saveCachedAnalysis(newsCacheKey(it), m);
           }
         }
         return cached;
@@ -89,7 +95,7 @@ export async function analyzeNewsBatch(items: AnalyzeRequest['items']): Promise<
     for (const it of needFetch) {
       const m = mockAnalyze(it);
       cached[it.id] = m;
-      saveCachedAnalysis(it.id, m);
+      saveCachedAnalysis(newsCacheKey(it), m);
     }
     return cached;
   } catch (e) {
@@ -97,7 +103,7 @@ export async function analyzeNewsBatch(items: AnalyzeRequest['items']): Promise<
     for (const it of needFetch) {
       const m = mockAnalyze(it);
       cached[it.id] = m;
-      saveCachedAnalysis(it.id, m);
+      saveCachedAnalysis(newsCacheKey(it), m);
     }
     return cached;
   }
