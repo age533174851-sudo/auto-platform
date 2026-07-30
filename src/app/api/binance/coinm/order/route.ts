@@ -141,6 +141,89 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
 
+  // ── 거래 전 점검 ──
+  //
+  // 여기 끼우는 이유: 바로 위에서 ISOLATED와 배율 설정이 **성공을 확인하고**
+  // 통과했다. 그 앞에서 점검하면 마진 모드를 아직 모르는 상태가 되고,
+  // 그러면 필수 항목 unknown으로 모든 COIN-M 주문이 막힌다.
+  //
+  // COIN-M 목록에는 손절·청산거리 항목이 없다 — 이 경로가 손절을 붙이지
+  // 않기 때문이다. 면제가 아니라 아직 못 고친 위험의 표시다
+  // (preTradeChecklist의 STOP_ATTACHED 주석 참조).
+  {
+    const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+    const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+
+    const isExit = body.reduceOnly === true;
+    const markPrice = await dapi.getCoinMMarkPrice(symbol, testnet);
+    // 명목가는 계약 수 × 계약 크기(USD)다. 코인 수량이 아니다 —
+    // COIN-M에서 그 둘을 섞으면 자릿수가 통째로 틀린다.
+    const notionalUsd = contracts * spec.contractUsd;
+
+    // 필요 증거금은 코인 단위다. 마크가를 못 읽으면 계산하지 않는다 —
+    // 추측한 가격으로 증거금을 적으면 그 판정이 거짓말이 된다.
+    let marginInput: { required: number | null; available: number | null } | null = null;
+    if (!isExit && markPrice != null) {
+      // requiredMarginCoin은 결과 객체를 준다. ok:false면 계산이 안 된 것이라
+      // marginCoin(0)을 쓰면 안 된다 — 0은 '증거금이 필요 없다'가 아니다.
+      const req = requiredMarginCoin(contracts, spec.contractUsd, markPrice, leverage);
+      if (req.ok) {
+        const bal = await dapi.getCoinMBalances(apiKey, secret, testnet);
+        // 심볼에서 담보 코인을 뽑는다: BTCUSD_PERP → BTC
+        const coin = symbol.split('USD')[0];
+        const hit = bal.success
+          ? bal.balances.find(b => b.asset.toUpperCase() === coin.toUpperCase())
+          : null;
+        marginInput = {
+          required: req.marginCoin,
+          available: hit ? (hit.availableBalance ?? hit.balance) : null,
+        };
+      }
+    }
+
+    const localMs = Date.now();
+    // COIN-M은 dapi 호스트다. 선물(fapi) 시각을 쓰면 다른 호스트에 물어보는
+    // 것이 된다 — premiumIndex 호출로 도달성은 이미 확인됐으므로, 시각만
+    // 따로 읽는다.
+    const serverMs = await dapi.getCoinMServerTime(testnet);
+
+    const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+    const g = gateOrder(mode, notionalUsd);
+
+    const checklist = runChecklist({
+      mode: { disposition: g.disposition, reason: g.reason },
+      clock: serverMs != null ? { localMs, serverMs } : null,
+      // 위에서 성공을 확인한 값들이다
+      marginType: 'isolated',
+      leverage: { actual: leverage, intended: leverage },
+      // 실제로 센다. 0을 그냥 적으면 "확인했고 없다"가 되는데, 그건
+      // 확인하지 않은 것을 통과로 적는 것이다 — 이 체크리스트가 막으려는
+      // 바로 그 실패다. 조회가 실패하면 null이 되어 unknown으로 막힌다.
+      unresolvedOrderCount: await (async () => {
+        const q = await sb.from('live_orders')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', uid).eq('status', 'UNKNOWN');
+        return q.error ? null : (q.count ?? 0);
+      })(),
+      existingPositionQty: null,
+      margin: marginInput,
+      side: side === 'SELL' ? 'SHORT' : 'LONG',
+    }, { market: 'COINM', intent: isExit ? 'EXIT' : 'ENTRY' });
+
+    if (!checklist.allowed) {
+      return NextResponse.json({
+        error: 'checklist_blocked',
+        message: checklist.summary,
+        checklist: {
+          allowed: false, market: checklist.market, intent: checklist.intent,
+          passed: checklist.passed, total: checklist.total,
+          unknownCount: checklist.unknownCount,
+          results: checklist.results, blockers: checklist.blockers,
+        },
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // ── 의도 기록 ──
   const clientOrderId = `CM${Date.now().toString(36).toUpperCase()}${symbol}`.slice(0, 36);
   let signalId = tagSignalId(String(body.signalId || 'manual-coinm'), 'COIN_FUTURES');

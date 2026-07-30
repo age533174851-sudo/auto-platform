@@ -140,8 +140,18 @@ export function runPreTradeChecklistTests() {
     assert(v.blockers.length > 0, '막는 항목이 있어야 한다');
   });
 
-  test('검사 항목 수가 목록과 같다 — 하나 빠뜨리면 조용히 안 돌아간다', () => {
-    eq(runChecklist(goodInput()).total, CHECK_SPECS.length);
+  test('USDⓈ-M 진입 + 하루제한이면 전체 목록이 돈다', () => {
+    eq(runChecklist(goodInput(), { market: 'USDM', intent: 'ENTRY', dailyLimit: true }).total,
+       CHECK_SPECS.length);
+  });
+
+  test('기본값은 USDⓈ-M 진입 · 하루제한 없음 — 오늘 진입 항목이 빠진다', () => {
+    const v = runChecklist(goodInput());
+    eq(v.market, 'USDM');
+    eq(v.intent, 'ENTRY');
+    eq(v.total, CHECK_SPECS.length - 1);
+    assert(!v.results.some(r => r.id === 'TODAY_ENTRY'),
+      '수동 주문에는 하루 제한이 없는데 "확인 못 함"으로 남으면 확인할 것이 있다고 읽힌다');
   });
 
   test('모드가 BLOCK이면 막는다', () => {
@@ -211,13 +221,14 @@ export function runPreTradeChecklistTests() {
   });
 
   test('오늘 이미 진입했으면 막는다', () => {
-    const v = runChecklist({ ...goodInput(), todayEntry: { alreadyTraded: true } });
+    const v = runChecklist({ ...goodInput(), todayEntry: { alreadyTraded: true } },
+      { dailyLimit: true });
     eq(v.allowed, false);
     eq(statusOf(v, 'TODAY_ENTRY').status, 'fail');
   });
 
   test('오늘 진입 이력을 모르는 것은 막지 않는다 — 마진 모드를 모르는 것과 무게가 다르다', () => {
-    const v = runChecklist({ ...goodInput(), todayEntry: null });
+    const v = runChecklist({ ...goodInput(), todayEntry: null }, { dailyLimit: true });
     eq(statusOf(v, 'TODAY_ENTRY').status, 'unknown');
     eq(statusOf(v, 'TODAY_ENTRY').blocks, false);
     eq(v.allowed, true);
@@ -278,6 +289,153 @@ export function runPreTradeChecklistTests() {
     // 둘 다 없으면 unknown이고 막힌다.
     eq(runChecklist({ ...goodInput(), liquidationPrice: null }).allowed, false);
     eq(runChecklist({ ...goodInput(), liquidationPrice: 58000 }).allowed, true);
+  });
+
+  console.log('[거래 전 점검 — 현물 (해당 없는 검사를 빼는가)]');
+
+  /** 현물 주문에는 마진·청산·배율·손절이 아예 없다 */
+  function spotInput(): ChecklistInput {
+    return {
+      mode: { disposition: 'SEND', reason: '현물' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      margin: { required: 100, available: 500 },
+      // 아래는 현물에 존재하지 않아 넘기지 않는다
+      // marginType, liquidationPrice, stopPrice, leverage, reconcile …
+    };
+  }
+
+  test('현물 주문이 통과한다 — 선물 검사를 그대로 물리면 전부 막힌다', () => {
+    const v = runChecklist(spotInput(), { market: 'SPOT' });
+    eq(v.allowed, true, `현물이 막혔다: ${v.summary}`);
+    eq(v.market, 'SPOT');
+  });
+
+  test('현물에는 마진 모드·청산·배율·손절 항목이 아예 없다', () => {
+    const ids = runChecklist(spotInput(), { market: 'SPOT' }).results.map(r => r.id);
+    for (const gone of ['MARGIN_ISOLATED', 'LIQUIDATION_DISTANCE', 'LEVERAGE',
+                        'STOP_ATTACHED', 'EXISTING_POSITION', 'STATE_RECONCILE'] as CheckId[]) {
+      assert(!ids.includes(gone), `${gone}이 현물 목록에 있다 — 현물에는 존재하지 않는 개념이다`);
+    }
+  });
+
+  test('현물은 모드·시계만 본다', () => {
+    const v = runChecklist(spotInput(), { market: 'SPOT' });
+    eq(v.results.map(r => r.id).sort().join(','), 'CLOCK_SKEW,MODE');
+  });
+
+  test('현물에는 자금 항목도 없다 — 시장가는 체결가를 몰라 껍데기 통과가 된다', () => {
+    // 시장가+수량 주문은 필요 금액을 계산할 수 없다. 추측해 채우면
+    // required:0으로 무조건 통과하는 초록 체크가 생긴다. 현물 자금 부족은
+    // 거래소가 주문을 통째로 거부하므로(일부 체결이 없다) 빼는 것이 맞다.
+    const ids = runChecklist(spotInput(), { market: 'SPOT' }).results.map(r => r.id);
+    assert(!ids.includes('MARGIN_SUFFICIENT'), '현물에 증거금 항목이 있다');
+  });
+
+  test('파생에서는 증거금을 본다', () => {
+    for (const m of ['USDM', 'COINM'] as const) {
+      const ids = runChecklist(goodInput(), { market: m }).results.map(r => r.id);
+      assert(ids.includes('MARGIN_SUFFICIENT'), `${m}에 증거금 항목이 없다`);
+    }
+  });
+
+  test('현물에서 시계가 틀리면 막는다 — 서명 요청은 시장과 무관하다', () => {
+    const v = runChecklist({ ...spotInput(), clock: { localMs: 1_010_000, serverMs: 1_000_000 } },
+      { market: 'SPOT' });
+    eq(v.allowed, false);
+  });
+
+  test('해당 없는 검사를 pass로 적지 않는다 — 확인한 것도 사실도 아니다', () => {
+    const v = runChecklist(spotInput(), { market: 'SPOT' });
+    eq(v.passed, v.total, '현물 목록은 전부 통과여야 한다');
+    // 목록 자체가 짧아야 한다. 길이가 USDM과 같으면 뭔가 pass로 채운 것이다
+    assert(v.total < runChecklist(goodInput()).total,
+      '현물 목록이 선물과 같은 길이다 — 없는 검사를 채웠다는 뜻이다');
+  });
+
+  console.log('[거래 전 점검 — COIN-M]');
+
+  test('COIN-M은 마진·배율·증거금을 본다 (현물과 다르다)', () => {
+    const ids = runChecklist(goodInput(), { market: 'COINM' }).results.map(r => r.id);
+    for (const kept of ['MARGIN_ISOLATED', 'LEVERAGE', 'MARGIN_SUFFICIENT',
+                        'EXISTING_POSITION', 'UNRESOLVED_ORDERS'] as CheckId[]) {
+      assert(ids.includes(kept), `${kept}이 빠졌다`);
+    }
+  });
+
+  test('COIN-M에는 손절·청산거리 항목이 없다 — 그 경로가 손절을 붙이지 않는다', () => {
+    // 면제가 아니라 아직 못 고친 위험의 표시다. COIN-M에 손절 부착을 넣으면
+    // markets에 'COINM'을 더해야 하고, 그때 이 테스트를 뒤집어야 한다.
+    // 물려 놓고 보니 COIN-M 주문이 통째로 막혀서 알게 된 것이다.
+    const ids = runChecklist(goodInput(), { market: 'COINM' }).results.map(r => r.id);
+    assert(!ids.includes('STOP_ATTACHED'), 'COIN-M 주문이 전부 막힌다');
+    assert(!ids.includes('LIQUIDATION_DISTANCE'), 'COIN-M 주문이 전부 막힌다');
+  });
+
+  test('손절 없는 COIN-M 주문이 통과한다 — 기능이 죽지 않아야 한다', () => {
+    const v = runChecklist({
+      mode: { disposition: 'SEND', reason: 'COIN-M' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      unresolvedOrderCount: 0,
+      marginType: 'isolated',
+      leverage: { actual: 10, intended: 10 },
+      existingPositionQty: 0,
+      margin: { required: 0.01, available: 0.5 },
+      // stopPrice·liquidationPrice 없음 — COIN-M 경로는 손절을 만들지 않는다
+    }, { market: 'COINM' });
+    eq(v.allowed, true, `COIN-M이 막혔다: ${v.summary}`);
+  });
+
+  test('COIN-M에는 상태 대조가 없다 — 대조는 USDⓈ-M 포지션만 읽는다', () => {
+    const ids = runChecklist(goodInput(), { market: 'COINM' }).results.map(r => r.id);
+    assert(!ids.includes('STATE_RECONCILE'),
+      '다른 시장의 상태로 이 시장의 주문을 막으면 안 된다');
+  });
+
+  test('COIN-M도 CROSS면 막는다', () => {
+    eq(runChecklist({ ...goodInput(), marginType: 'cross' }, { market: 'COINM' }).allowed, false);
+  });
+
+  console.log('[거래 전 점검 — 청산 주문 (나갈 수 있는가)]');
+
+  test('청산은 CROSS여도 나갈 수 있어야 한다 — 막으면 나갈 방법이 없어진다', () => {
+    const v = runChecklist({ ...goodInput(), marginType: 'cross' }, { intent: 'EXIT' });
+    eq(v.allowed, true, `청산이 막혔다: ${v.summary}`);
+    eq(v.intent, 'EXIT');
+  });
+
+  test('청산에는 손절·청산거리·증거금 검사가 없다 — 청산은 증거금을 돌려준다', () => {
+    const ids = runChecklist(goodInput(), { intent: 'EXIT' }).results.map(r => r.id);
+    for (const gone of ['STOP_ATTACHED', 'LIQUIDATION_DISTANCE', 'MARGIN_SUFFICIENT',
+                        'UNRESOLVED_ORDERS', 'LEVERAGE', 'TODAY_ENTRY'] as CheckId[]) {
+      assert(!ids.includes(gone), `${gone}이 청산을 막을 수 있다`);
+    }
+  });
+
+  test('청산에도 모드·시계·상태대조는 본다', () => {
+    const ids = runChecklist(goodInput(), { intent: 'EXIT' }).results.map(r => r.id);
+    for (const kept of ['MODE', 'CLOCK_SKEW', 'STATE_RECONCILE'] as CheckId[]) {
+      assert(ids.includes(kept), `${kept}이 빠졌다`);
+    }
+  });
+
+  test('손절 없이도 청산은 나간다 — 나오는 주문에 손절을 요구하면 안 된다', () => {
+    eq(runChecklist({ ...goodInput(), stopPrice: null }, { intent: 'EXIT' }).allowed, true);
+  });
+
+  test('증거금이 없어도 청산은 나간다', () => {
+    eq(runChecklist({ ...goodInput(), margin: { required: 9999, available: 1 } },
+      { intent: 'EXIT' }).allowed, true);
+  });
+
+  test('청산이어도 모드가 막으면 못 나간다 — 모드는 가장 바깥 관문이다', () => {
+    eq(runChecklist({ ...goodInput(), mode: { disposition: 'BLOCK', reason: 'UI 데모' } },
+      { intent: 'EXIT' }).allowed, false);
+  });
+
+  test('현물 매도(EXIT)도 모드·시계만 본다', () => {
+    const v = runChecklist(spotInput(), { market: 'SPOT', intent: 'EXIT' });
+    eq(v.allowed, true);
+    eq(v.results.map(r => r.id).sort().join(','), 'CLOCK_SKEW,MODE');
   });
 
   console.log('[거래 전 점검 — 요약 문구]');

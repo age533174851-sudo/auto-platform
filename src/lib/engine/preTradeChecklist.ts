@@ -58,9 +58,38 @@ export type CheckId =
   /** 증거금이 충분한가 */
   | 'MARGIN_SUFFICIENT';
 
+/**
+ * 어느 시장의 주문인가.
+ *
+ * 이 구분이 없으면 현물 주문이 전부 막힌다. 현물에는 마진 모드도 청산가도
+ * 레버리지도 **존재하지 않는데**, 선물 체크리스트를 그대로 물리면 그 항목들이
+ * `unknown`으로 잡혀 필수 항목 차단에 걸린다.
+ *
+ * 없는 것을 `pass`로 적는 것도 답이 아니다 — 현물 주문에 "마진 모드
+ * ISOLATED ✓"가 뜨면 그건 확인한 것도 아니고 사실도 아니다. 해당 없는 검사는
+ * **목록에서 빼는 것**이 맞다.
+ */
+export type MarketKind = 'SPOT' | 'USDM' | 'COINM';
+
+/**
+ * 들어가는 주문인가 나오는 주문인가.
+ *
+ * 청산(reduceOnly)에 진입 검사를 물리면 **나갈 수 없게 된다.** CROSS 포지션을
+ * 정리하려는데 "마진 모드가 ISOLATED가 아닙니다"로 막히고, 손절을 안 붙였다고
+ * 막히고, 증거금이 부족하다고 막힌다 — 청산은 증거금을 **돌려주는** 동작이다.
+ *
+ * 커맨드 레지스트리의 `reducing`과 같은 생각이다: 위험을 줄이는 방향은
+ * 늘리는 방향과 다르게 다뤄야 한다.
+ */
+export type OrderIntent = 'ENTRY' | 'EXIT';
+
 export interface CheckSpec {
   id: CheckId;
   label: string;
+  /** 이 시장에서 의미가 있는 검사인가 */
+  markets: MarketKind[];
+  /** 진입·청산 중 어디서 의미가 있는가 */
+  intents: OrderIntent[];
   /**
    * `fail`이면 주문을 막는가.
    *
@@ -85,18 +114,72 @@ export interface CheckSpec {
  * 순서는 **바깥 관문부터**다. 모드가 막으면 나머지는 볼 필요가 없고,
  * 시계가 틀리면 거래소 응답 자체를 신뢰할 수 없다.
  */
+const ALL_MARKETS: MarketKind[] = ['SPOT', 'USDM', 'COINM'];
+/** 파생 시장. 마진·청산·배율이 존재하는 곳 */
+const DERIV: MarketKind[] = ['USDM', 'COINM'];
+const BOTH: OrderIntent[] = ['ENTRY', 'EXIT'];
+const ENTRY_ONLY: OrderIntent[] = ['ENTRY'];
+
 export const CHECK_SPECS: CheckSpec[] = [
-  { id: 'MODE',                 label: '운영 모드가 주문을 허용',      blocking: true,  requiredToKnow: true },
-  { id: 'CLOCK_SKEW',           label: '시계가 거래소와 일치',         blocking: true,  requiredToKnow: true },
-  { id: 'STATE_RECONCILE',      label: '거래소와 앱 상태 일치',        blocking: true,  requiredToKnow: true },
-  { id: 'UNRESOLVED_ORDERS',    label: '결과 미확정 주문 없음',        blocking: true,  requiredToKnow: true },
-  { id: 'MARGIN_ISOLATED',      label: '마진 모드 ISOLATED',           blocking: true,  requiredToKnow: true },
-  { id: 'STOP_ATTACHED',        label: '손절이 붙어 있음',             blocking: true,  requiredToKnow: true },
-  { id: 'LIQUIDATION_DISTANCE', label: '손절이 청산보다 먼저',         blocking: true,  requiredToKnow: true },
-  { id: 'MARGIN_SUFFICIENT',    label: '증거금 충분',                  blocking: true,  requiredToKnow: true },
-  { id: 'TODAY_ENTRY',          label: '오늘 진입 이력',               blocking: true,  requiredToKnow: false },
-  { id: 'LEVERAGE',             label: '배율이 의도와 같음',           blocking: false, requiredToKnow: false },
-  { id: 'EXISTING_POSITION',    label: '기존 포지션',                  blocking: false, requiredToKnow: false },
+  // 어느 시장·어느 방향이든 본다. 모드는 가장 바깥 관문이고, 시계는 서명
+  // 요청 자체의 전제다 — 청산도 서명 요청이라 시계가 틀리면 못 나간다.
+  { id: 'MODE',       label: '운영 모드가 주문을 허용', markets: ALL_MARKETS, intents: BOTH,
+    blocking: true, requiredToKnow: true },
+  { id: 'CLOCK_SKEW', label: '시계가 거래소와 일치',    markets: ALL_MARKETS, intents: BOTH,
+    blocking: true, requiredToKnow: true },
+
+  // 상태 대조는 USDⓈ-M만이다. gatherAndReconcile이 읽는 것은 선물 포지션
+  // (getFuturesPositions)이라, 현물이나 COIN-M 주문에 그 판정을 물리면
+  // **다른 시장의 상태로 이 시장의 주문을 막는다.** 없는 검사를 있는 것처럼
+  // 두는 것보다, 해당 시장에서 빼는 것이 정직하다.
+  { id: 'STATE_RECONCILE',   label: '거래소와 앱 상태 일치', markets: ['USDM'], intents: BOTH,
+    blocking: true, requiredToKnow: true },
+
+  // 미확정 주문은 live_orders 기준이라 파생 경로에만 있다.
+  // 청산에는 물리지 않는다 — 나가려는데 막히면 그게 더 위험하고, reduceOnly는
+  // 최악의 경우 아무 일도 안 하는 주문이 된다(포지션을 뒤집지 못한다).
+  { id: 'UNRESOLVED_ORDERS', label: '결과 미확정 주문 없음', markets: DERIV, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 파생 + 진입에서만. CROSS 포지션을 정리하려는데 "ISOLATED가 아닙니다"로
+  // 막으면 나갈 방법이 없어진다.
+  { id: 'MARGIN_ISOLATED',      label: '마진 모드 ISOLATED', markets: DERIV, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+  // 이 둘은 USDⓈ-M만이다 — **손절이 존재하는 것을 전제**하기 때문이다.
+  //
+  // COIN-M 주문 경로(`api/binance/coinm/order`)는 손절을 붙이지 않는다.
+  // 그래서 이 검사를 COIN-M에 물리면 모든 COIN-M 주문이 차단된다. 실제로
+  // 그렇게 만들어 놓고 보니 기능 하나가 통째로 죽었다.
+  //
+  // ⚠ 이것은 검사를 면제해 준 것이 아니라 **아직 못 고친 위험을 표시한 것**이다.
+  //   COIN-M에 손절이 없다는 사실은 그대로 남아 있다 (PROGRESS 미처리 과제).
+  //   그 경로에 손절 부착을 넣으면 여기 markets에 'COINM'을 더해야 한다.
+  { id: 'STOP_ATTACHED',        label: '손절이 붙어 있음',   markets: ['USDM'], intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+  { id: 'LIQUIDATION_DISTANCE', label: '손절이 청산보다 먼저', markets: ['USDM'], intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 증거금은 파생에만 둔다. 청산은 증거금을 돌려주는 동작이라 보지 않는다.
+  //
+  // 현물에서 뺀 이유가 두 개다:
+  //  1. 시장가+수량 주문은 체결가를 모르므로 필요 금액을 계산할 수 없다.
+  //     시세를 추측해 채우면 `required: 0`이나 추측값으로 판정하게 되고,
+  //     그건 **껍데기 통과**다 — 이 파일이 막으려는 바로 그 실패다
+  //  2. 현물 자금 부족은 거래소가 주문을 통째로 거부한다. 선물처럼 일부만
+  //     체결되어 어중간한 포지션이 남는 실패가 없다
+  { id: 'MARGIN_SUFFICIENT', label: '증거금 충분', markets: DERIV, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 하루 1회 제한이 있는 전략에서만 (옵션 dailyLimit). 수동 주문에는
+  // 그런 제한이 없어서, 켜지 않으면 목록에 나오지 않는다.
+  { id: 'TODAY_ENTRY', label: '오늘 진입 이력', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: false },
+
+  // 막지 않는 항목
+  { id: 'LEVERAGE',          label: '배율이 의도와 같음', markets: DERIV, intents: ENTRY_ONLY,
+    blocking: false, requiredToKnow: false },
+  { id: 'EXISTING_POSITION', label: '기존 포지션',        markets: DERIV, intents: BOTH,
+    blocking: false, requiredToKnow: false },
 ];
 
 const SPEC_BY_ID: Record<CheckId, CheckSpec> =
@@ -243,9 +326,27 @@ export interface ChecklistInput {
   margin?: { required: number | null; available: number | null } | null;
 }
 
+export interface ChecklistOptions {
+  /** 기본 'USDM' — 기존 호출자(daily-ladder)의 동작을 바꾸지 않는다 */
+  market?: MarketKind;
+  /** 기본 'ENTRY' */
+  intent?: OrderIntent;
+  /**
+   * 하루 1회 제한이 있는 전략인가. 기본 false.
+   *
+   * 켜지 않으면 '오늘 진입 이력'이 목록에 아예 안 나온다. 수동 주문에는
+   * 그런 제한이 없는데 "확인 못 함"으로 남겨 두면, 사용자는 확인해야 할
+   * 것이 있다고 읽는다.
+   */
+  dailyLimit?: boolean;
+}
+
 export interface ChecklistVerdict {
   /** 주문을 보내도 되는가 */
   allowed: boolean;
+  /** 어떤 조건으로 판정했는가 — 응답만 보고도 알 수 있어야 한다 */
+  market: MarketKind;
+  intent: OrderIntent;
   results: CheckResult[];
   /** 막고 있는 항목들 */
   blockers: CheckResult[];
@@ -269,9 +370,32 @@ function resultFor(
   return { id, label: spec.label, status, detail, blocks };
 }
 
-/** 전체 체크리스트를 돌린다. 순수 함수 — 네트워크를 타지 않는다 */
-export function runChecklist(input: ChecklistInput): ChecklistVerdict {
-  const results: CheckResult[] = [];
+/** 이 시장·이 방향에서 의미가 있는 검사인가 */
+export function appliesTo(
+  id: CheckId, market: MarketKind, intent: OrderIntent, dailyLimit: boolean,
+): boolean {
+  const spec = SPEC_BY_ID[id];
+  if (!spec) return false;
+  if (id === 'TODAY_ENTRY' && !dailyLimit) return false;
+  return spec.markets.includes(market) && spec.intents.includes(intent);
+}
+
+/**
+ * 전체 체크리스트를 돌린다. 순수 함수 — 네트워크를 타지 않는다.
+ *
+ * 해당 없는 검사는 **목록에서 빠진다.** pass로 적지 않는다 — 현물 주문에
+ * "마진 모드 ISOLATED ✓"가 뜨면 확인한 것도 아니고 사실도 아니다.
+ */
+export function runChecklist(
+  input: ChecklistInput,
+  opts: ChecklistOptions = {},
+): ChecklistVerdict {
+  const market = opts.market ?? 'USDM';
+  const intent = opts.intent ?? 'ENTRY';
+  const dailyLimit = opts.dailyLimit ?? false;
+
+  const all: CheckResult[] = [];
+  const results = all;   // 아래 push는 그대로 두고, 마지막에 걸러낸다
 
   // 1. 운영 모드 — 가장 바깥 관문
   if (!input.mode) {
@@ -375,23 +499,29 @@ export function runChecklist(input: ChecklistInput): ChecklistVerdict {
     results.push(resultFor('EXISTING_POSITION', 'pass', '없음'));
   }
 
-  const blockers = results.filter(r => r.blocks);
-  const passed = results.filter(r => r.status === 'pass').length;
-  const unknownCount = results.filter(r => r.status === 'unknown').length;
+  // 여기서 걸러낸다. 위에서 조건마다 분기하면 검사 하나 추가할 때 적용
+  // 규칙을 두 곳에 적게 되고, 언젠가 한 곳만 고친다.
+  const scoped = all.filter(r => appliesTo(r.id, market, intent, dailyLimit));
+
+  const blockers = scoped.filter(r => r.blocks);
+  const passed = scoped.filter(r => r.status === 'pass').length;
+  const unknownCount = scoped.filter(r => r.status === 'unknown').length;
 
   return {
     allowed: blockers.length === 0,
-    results,
+    market,
+    intent,
+    results: scoped,
     blockers,
     passed,
-    total: results.length,
+    total: scoped.length,
     unknownCount,
     // 확인하지 못한 항목 수를 요약에 넣는다. "9/11 통과"만 적으면 나머지 2개가
     // 실패인지 확인 불가인지 알 수 없고, 둘은 대응이 완전히 다르다.
     summary: blockers.length === 0
       ? (unknownCount > 0
-          ? `${passed}/${results.length} 통과 · 확인 못 한 항목 ${unknownCount}개 (막지 않는 항목)`
-          : `${passed}/${results.length} 통과`)
+          ? `${passed}/${scoped.length} 통과 · 확인 못 한 항목 ${unknownCount}개 (막지 않는 항목)`
+          : `${passed}/${scoped.length} 통과`)
       : `${blockers.length}개 항목이 주문을 막습니다: ${blockers.map(b => b.label).join(', ')}`,
   };
 }

@@ -95,6 +95,23 @@ export interface CoinMBalance {
  * COIN-M 지갑. 코인별로 따로 있다 — BTC 잔고와 ETH 잔고는 서로 못 쓴다.
  * USDT-M 지갑과도 완전히 별개다.
  */
+/**
+ * COIN-M 서버 시각 (epoch ms). 못 읽으면 null.
+ *
+ * fapi(USDⓈ-M)나 api(현물)의 시각을 쓰지 않는 이유: 호스트가 다르다.
+ * 이 파일이 base()를 따로 두는 것과 같은 이유다 — 다른 호스트에 물어본
+ * 시각으로 이 호스트의 recvWindow를 판정하면 그건 다른 값을 재는 것이다.
+ */
+export async function getCoinMServerTime(testnet = false): Promise<number | null> {
+  try {
+    const r = await fetch(`${base(testnet)}/dapi/v1/time`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const t = Number(d?.serverTime);
+    return Number.isFinite(t) && t > 0 ? t : null;
+  } catch { return null; }
+}
+
 export async function getCoinMBalances(
   key: string, secret: string, testnet = false,
 ): Promise<{ success: boolean; balances: CoinMBalance[]; message?: string }> {

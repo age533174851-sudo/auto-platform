@@ -390,6 +390,10 @@ export async function POST(req: NextRequest) {
         required: result.plan!.requiredMargin,
         available: ctx.config.availableMargin ?? ctx.config.accountEquity,
       },
+    }, {
+      // USDⓈ-M 진입이고, 이 전략은 하루 1회 제한이 있다.
+      // dailyLimit를 켜야 '오늘 진입 이력'이 목록에 들어온다.
+      market: 'USDM', intent: 'ENTRY', dailyLimit: true,
     });
 
     if (!checklist.allowed) {

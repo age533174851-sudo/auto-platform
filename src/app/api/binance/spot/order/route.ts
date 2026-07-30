@@ -52,6 +52,65 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 거래 전 점검 ──
+  //
+  // 현물 목록은 짧다 — 운영 모드 · 시계 오차, 그리고 매수면 자금.
+  // 마진 모드·청산가·배율·손절은 **현물에 존재하지 않으므로 목록에서 빠진다**
+  // (preTradeChecklist의 market 구분). 없는 것을 pass로 적으면 확인한 것도
+  // 사실도 아닌 초록 체크가 생긴다.
+  //
+  // 짧아도 물리는 이유: 이 경로는 지금까지 **운영 모드 관문을 지나지 않았다.**
+  // spotOrderExecutor는 공매도·보유·정밀도를 보지만 모드는 보지 않는다.
+  // 그래서 UI_DEMO나 PAPER 모드에서도 실제 거래소로 주문이 나갔다.
+  //
+  // 매도는 EXIT로 본다. 보유한 것을 파는 것은 위험을 줄이는 방향이고, 자금
+  // 검사를 물리면 정작 팔아서 현금을 만들려는 주문이 막힌다.
+  const spotSide = String(body.side || '').toUpperCase();
+  const isSell = spotSide === 'SELL';
+  {
+    const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+    const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+    const { getSpotServerTime } = await import('@/lib/exchanges/binance');
+
+    const { data: sconn } = await (sb.from('exchange_connections') as any)
+      .select('is_testnet').eq('id', body.connectionId).eq('user_id', uid).maybeSingle();
+    const spotTestnet = sconn?.is_testnet !== false;
+
+    // 명목가는 아는 만큼만 넘긴다. quoteOrderQty가 있으면 그것이 곧 금액이고,
+    // 지정가면 수량×가격이다. 시장가+수량만 온 경우는 체결가를 모르므로
+    // 0으로 둔다 — 여기서 시세를 추측해 채우면 모드 상한($100)이 추측값으로
+    // 판정된다.
+    const notional = Number(body.quoteOrderQty)
+      || (Number(body.quantity) * Number(body.price)) || 0;
+
+    const localMs = Date.now();
+    const serverMs = await getSpotServerTime(spotTestnet);
+    const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+    const g = gateOrder(mode, notional);
+
+    const checklist = runChecklist({
+      mode: { disposition: g.disposition, reason: g.reason },
+      clock: serverMs != null ? { localMs, serverMs } : null,
+      // 현물에는 증거금 항목이 없다 (preTradeChecklist의 markets 참조).
+      // 매도 전 보유 확인은 spotOrderExecutor가 하고, 매수 자금 부족은
+      // 거래소가 주문을 통째로 거부한다.
+    }, { market: 'SPOT', intent: isSell ? 'EXIT' : 'ENTRY' });
+
+    if (!checklist.allowed) {
+      return NextResponse.json({
+        ok: false, marketType: 'SPOT',
+        error: 'checklist_blocked',
+        message: checklist.summary,
+        checklist: {
+          allowed: false, market: checklist.market, intent: checklist.intent,
+          passed: checklist.passed, total: checklist.total,
+          unknownCount: checklist.unknownCount,
+          results: checklist.results, blockers: checklist.blockers,
+        },
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   const r = await placeSpotOrder(sb, {
     userId: uid,
     connectionId: String(body.connectionId),
