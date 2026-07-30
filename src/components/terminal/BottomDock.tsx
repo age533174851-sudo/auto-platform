@@ -23,7 +23,26 @@ import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 type Tab = '포지션' | '미체결' | '자산' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
 const TABS: Tab[] = ['포지션', '미체결', '자산', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
-function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void }) {
+/**
+ * `flow` — 스크롤을 자기가 갖지 않는다.
+ *
+ * 기본(false)은 고정 높이 칸 안에서 **자기 안에서** 스크롤한다. PC 하단 독은
+ * 그게 맞다 — 칸 크기가 정해져 있다.
+ *
+ * 모바일에서는 그게 문제였다. 포지션 칸이 27vh로 잠겨 있어서 카드 하나가
+ * 다 안 보이고, 화면 스크롤과 칸 안 스크롤이 겹쳐 손가락이 어디에 닿았는지에
+ * 따라 다르게 움직인다. `flow`면 높이를 내용에 맡기고 스크롤은 페이지가
+ * 가져간다 — 끌어내리면 포지션이 화면을 채운다.
+ *
+ * 탭 줄은 그때 `sticky`가 된다. 카드 사이를 지나가는 동안 어느 탭인지
+ * 사라지면 안 되기 때문이다. 붙는 위치(`stickyTop`)는 헤더 높이라서
+ * 바깥에서 받는다 — 여기서 추측하면 헤더가 두 줄일 때 겹친다.
+ */
+function BottomDockInner({ onBalance, flow, stickyTop }: {
+  onBalance?: (v: number | null) => void;
+  flow?: boolean;
+  stickyTop?: number | string;
+}) {
   const { auth, connId, setSymbol, symbols } = useTerminal();
   const [tab, setTab] = useState<Tab>('포지션');
   const [acct, setAcct] = useState<any>(null);
@@ -86,10 +105,18 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
     : Array.isArray(acct?.orders) ? acct.orders : [];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div style={{
+      display: 'flex', flexDirection: 'column',
+      height: flow ? 'auto' : '100%', minHeight: 0,
+    }}>
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
         padding: '7px 10px', borderBottom: `1px solid ${C.hair}`,
+        // 페이지 스크롤에 얹혀 있을 때는 탭 줄이 헤더 밑에 붙어 있어야 한다.
+        // 배경을 깔지 않으면 카드가 탭 줄 뒤로 지나가며 글자가 겹친다.
+        ...(flow ? {
+          position: 'sticky' as const, top: stickyTop ?? 0, zIndex: 5, background: C.panel,
+        } : null),
       }}>
         {/* 탭은 넘치면 가로로 스크롤한다. Kill Switch를 밀어내면 안 된다. */}
         <div style={{
@@ -119,7 +146,9 @@ function BottomDockInner({ onBalance }: { onBalance?: (v: number | null) => void
         }}>{killing ? '발동 중…' : 'KILL'}</button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      <div style={flow
+        ? { flex: 'none', minHeight: 0 }
+        : { flex: 1, minHeight: 0, overflow: 'auto' }}>
         {err && (
           <div style={{
             margin: 10, padding: '10px 12px', borderRadius: 8,

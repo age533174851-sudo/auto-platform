@@ -31,8 +31,8 @@ interface SpotHolding {
 }
 
 export const SpotOrderPanel = memo(function SpotOrderPanel({
-  presetPrice, dense,
-}: { presetPrice?: number | null; dense?: boolean }) {
+  presetPrice, presetSeq, dense,
+}: { presetPrice?: number | null; presetSeq?: number; dense?: boolean }) {
   const { symbol, auth, connId, connections, mode } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
   const cap = capability('SPOT');
@@ -53,7 +53,8 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
 
   useEffect(() => {
     if (presetPrice != null) { setOrderType('LIMIT'); setPrice(String(presetPrice)); }
-  }, [presetPrice]);
+    // presetSeq — 같은 가격을 다시 눌렀을 때도 반영한다 (usePickedPrice 주석)
+  }, [presetPrice, presetSeq]);
 
   // 매도로 바꾸면 단위도 코인으로. 매도를 USDT로 받으면 "얼마어치 팔지"를
   // 계산해야 하는데, 그 계산 결과가 보유량을 넘으면 거부된다.

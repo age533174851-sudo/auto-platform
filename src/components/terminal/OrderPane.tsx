@@ -14,7 +14,7 @@ import { A } from '@/lib/theme/colors';
 //  - 뉴스·표는 촘촘하게. 주문 버튼과 입력창은 **크게**.
 //  - 배율은 숫자만 쓰지 않고 그 배율의 청산 거리를 함께 보여준다.
 //    100배가 위험한 이유는 숫자가 커서가 아니라 청산 거리가 0.5%라서다.
-import React, { memo, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn, chip } from './theme';
 import { DataBadge } from '@/components/ui/DataBadge';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
@@ -112,15 +112,28 @@ export const OrderBookPanel = memo(function OrderBookPanel({
   const mid = stream.lastPrice ?? bids[0]?.price ?? null;
   const imbalance = bookImbalance(stream);
 
+  // 호가 한 줄.
+  //
+  // 높이를 **명시한다.** globals.css에 `button { min-height: 44px }`가 있어서
+  // (터치 목표 최소 크기) 호가 줄도 44px이 됐다. 위아래 7줄이면 616px —
+  // 세로 화면 하나가 호가판 하나로 다 찬다. 그러면 호가·주문폼·포지션을 한
+  // 화면에서 같이 보는 것이 불가능해지고, 깊이를 보려고 또 스크롤해야 한다.
+  //
+  // 44px 규칙을 여기서 깨는 이유: 이건 낱개 버튼이 아니라 **사다리**다.
+  // 줄 하나를 크게 만드는 대신 줄이 여러 개 보이는 것이 이 판의 목적이고,
+  // 실제 거래소 앱들도 20px 안팎을 쓴다. 숫자 크기는 그대로 둔다.
+  const rowH = dense ? 21 : 24;
   const Row = ({ p, q, buy }: { p: number; q: number; buy: boolean }) => (
     <button
       onClick={() => onPickPrice?.(p)}
       style={{
         position: 'relative', display: 'flex', justifyContent: 'space-between',
+        alignItems: 'center',
         width: '100%', background: 'none', border: 'none',
-        padding: dense ? '1px 8px' : '1px 12px', cursor: onPickPrice ? 'pointer' : 'default',
+        minHeight: 0, height: rowH, flexShrink: 0,
+        padding: dense ? '0 8px' : '0 12px', cursor: onPickPrice ? 'pointer' : 'default',
         overflow: 'hidden', ...NUM, fontSize: dense ? FS.micro : FS.small,
-        lineHeight: dense ? 1.85 : 1.75,
+        lineHeight: 1,
       }}
     >
       {/* 깊이 막대는 배경으로만. 숫자를 가리면 읽는 속도가 떨어진다 */}
@@ -174,21 +187,36 @@ export const OrderBookPanel = memo(function OrderBookPanel({
         <>
           {asks.map((l, i) => <Row key={'a' + i} p={l.price} q={l.qty} buy={false}/>)}
 
-          <div style={{
-            display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 8,
-            padding: dense ? '6px 8px' : '7px 12px', margin: '2px 0',
-            borderTop: `1px solid ${C.hair}`, borderBottom: `1px solid ${C.hair}`,
-          }}>
+          {/* 가운데 현재가도 누르면 그 가격이 주문폼에 들어간다.
+              호가 줄만 눌리던 때는 **가장 크게 떠 있는 숫자가 유일하게 안
+              눌리는 것**이었다. 지정가를 넣을 때 제일 자주 쓰는 값이 현재가라
+              그게 제일 이상했다. 버튼으로 바꾸고, 눌린다는 것을 밑줄로 알린다. */}
+          <button
+            onClick={() => { if (mid != null) onPickPrice?.(mid); }}
+            disabled={mid == null || !onPickPrice}
+            title={onPickPrice ? '이 가격으로 지정가 주문' : undefined}
+            style={{
+              display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 8,
+              width: '100%', background: 'none',
+              padding: dense ? '6px 8px' : '7px 12px', margin: '2px 0',
+              border: 'none', minHeight: 0,
+              borderTop: `1px solid ${C.hair}`, borderBottom: `1px solid ${C.hair}`,
+              cursor: mid != null && onPickPrice ? 'pointer' : 'default',
+            }}>
             <span style={{
               ...NUM, color: pnlColor(stream.changePct),
               fontSize: dense ? 15 : 19, fontWeight: 700,
+              textDecoration: mid != null && onPickPrice ? 'underline' : 'none',
+              textDecorationColor: C.hair3,
+              textDecorationThickness: 1,
+              textUnderlineOffset: 3,
             }}>{fmtPrice(mid)}</span>
             {stream.changePct != null && (
               <span style={{ ...NUM, color: pnlColor(stream.changePct), fontSize: FS.small, fontWeight: 600 }}>
                 {stream.changePct >= 0 ? '+' : ''}{stream.changePct.toFixed(2)}%
               </span>
             )}
-          </div>
+          </button>
 
           {bids.map((l, i) => <Row key={'b' + i} p={l.price} q={l.qty} buy={true}/>)}
         </>
@@ -221,6 +249,30 @@ export const OrderBookPanel = memo(function OrderBookPanel({
   );
 });
 
+/**
+ * 눌러서 고른 가격.
+ *
+ * 왜 `number` 하나로 두지 않는가: 주문폼은 `useEffect([presetPrice])`로 값을
+ * 받는다. 같은 가격을 두 번 누르면 값이 안 바뀌므로 effect가 다시 돌지 않고,
+ * **아무 일도 일어나지 않는다.** 그 사이에 가격을 직접 고쳐 놨다면 되돌릴
+ * 방법이 그 줄을 누르는 것뿐인데 그게 안 듣는다.
+ *
+ * 그래서 누른 **횟수**를 같이 들고 다닌다. 같은 값이어도 seq가 바뀌므로
+ * 매번 반영된다.
+ */
+export function usePickedPrice() {
+  const [picked, setPicked] = useState<{ price: number; seq: number } | null>(null);
+  const pick = useCallback((p: number) => {
+    if (!Number.isFinite(p) || p <= 0) return;   // 0을 지정가로 넣지 않는다
+    setPicked(prev => ({ price: p, seq: (prev?.seq ?? 0) + 1 }));
+  }, []);
+  return {
+    pick,
+    presetPrice: picked?.price ?? null,
+    presetSeq: picked?.seq ?? 0,
+  };
+}
+
 /** 스테퍼 버튼 — 가격을 한 눈금씩 */
 function Step({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
   return (
@@ -249,9 +301,11 @@ function Kv({ k, v, warn }: { k: string; v: string; warn?: boolean }) {
 //  - 주문 버튼은 그대로 크게. 여기서 아낀 자리를 그쪽에 쓴다.
 // 목표는 375×812에서 **스크롤 없이** 주문까지 닿는 것이다.
 export const OrderFormPanel = memo(function OrderFormPanel({
-  presetPrice, dense,
+  presetPrice, presetSeq, dense,
 }: {
   presetPrice?: number | null;
+  /** 누른 횟수. 같은 가격을 다시 눌렀을 때도 반영되게 (usePickedPrice 주석) */
+  presetSeq?: number;
   /** 모바일 2열의 좁은 칸에 들어갈 때 */
   dense?: boolean;
 }) {
@@ -274,10 +328,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
 
-  // 호가를 눌러 들어온 가격
+  // 호가·현재가를 눌러 들어온 가격.
+  //
+  // presetSeq가 의존성에 있는 이유: 같은 가격을 두 번 누르면 presetPrice가
+  // 안 바뀌어 effect가 돌지 않는다. 그 사이 가격을 직접 고쳐 놨다면 되돌릴
+  // 방법이 그 줄을 누르는 것뿐인데 그게 안 듣는다.
   useEffect(() => {
     if (presetPrice != null) { setOrderType('LIMIT'); setPrice(String(presetPrice)); }
-  }, [presetPrice]);
+  }, [presetPrice, presetSeq]);
 
   // ── 지갑 ──
   // 선물 계좌만 따로 부르지 않고 통합 트리를 받는다. 그래야 증거금이
@@ -615,7 +673,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
  * 가능성 자체가 없다.
  */
 export const MarketOrderPanel = memo(function MarketOrderPanel(
-  props: { presetPrice?: number | null; dense?: boolean },
+  props: { presetPrice?: number | null; presetSeq?: number; dense?: boolean },
 ) {
   const { marketType } = useTerminal();
   if (marketType === 'SPOT') return <SpotOrderPanel {...props}/>;
@@ -626,12 +684,12 @@ export const MarketOrderPanel = memo(function MarketOrderPanel(
 
 // ══ PC 우측 열 — 둘을 쌓는다 ═══════════════════════════
 export const OrderPane = memo(function OrderPane() {
-  const [picked, setPicked] = useState<number | null>(null);
+  const { pick, presetPrice, presetSeq } = usePickedPrice();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto' }}>
-      <OrderBookPanel onPickPrice={setPicked}/>
+      <OrderBookPanel onPickPrice={pick}/>
       <div style={{ borderTop: `1px solid ${C.hair}` }}/>
-      <MarketOrderPanel presetPrice={picked}/>
+      <MarketOrderPanel presetPrice={presetPrice} presetSeq={presetSeq}/>
     </div>
   );
 });
