@@ -23,6 +23,13 @@ export interface AiCallInput {
   /** 개인 키(BYOK). 주어지면 서버 환경변수 대신 이 키로 호출한다. */
   apiKey?: string;
   /**
+   * 무슨 용도의 호출인가 (news | signal | explain | decision).
+   *
+   * 기록에만 쓴다. 예전에는 logCall이 'news'를 하드코딩해서, 합의 분석이든
+   * 챗이든 전부 뉴스로 집계됐다 — 어디서 돈이 나가는지 화면이 알 수 없었다.
+   */
+  kind?: string;
+  /**
    * JSON만 받겠다는 표시.
    *
    * 프롬프트로 "JSON만 출력해라"라고 부탁하는 것과 다르다. 부탁은 모델이
@@ -218,14 +225,26 @@ async function callGemini(input: AiCallInput): Promise<AiCallResult> {
  * 버릴 이유는 없다. 다만 조용히 넘기므로, 화면이 "기록이 0건"과
  * "호출이 0건"을 구분할 수 있어야 한다.
  */
-async function logCall(provider: AiProvider, r: AiCallResult, latencyMs: number) {
+async function logCall(
+  provider: AiProvider,
+  r: AiCallResult,
+  latencyMs: number,
+  input: AiCallInput,
+) {
   try {
     const { getSupabaseAdmin } = await import('@/lib/supabase/server');
     const sb = getSupabaseAdmin();
     if (!sb) return;
     await (sb.from('ai_usage') as any).insert({
-      tier: 'L1_CHEAP',
-      kind: 'news',
+      // tier와 kind를 하드코딩하고 있었다 — 'L1_CHEAP' / 'news'. 그래서
+      // premium 모델을 부르면서 표에는 '기본 AI'로, 합의 분석도 '뉴스'로
+      // 찍혔다. 비용 화면이 어디서 돈이 나가는지 못 짚는 상태였다.
+      //
+      // tier는 DB에서 NOT NULL이라 값이 있어야 한다. tier가 안 넘어온
+      // 호출은 실제로 **premium 모델**을 쓴다(isCheap가 false) — 그래서
+      // 기본값도 그 사실에 맞춘다. 여기서 'L1_CHEAP'로 두면 다시 거짓말이다.
+      tier: input.tier ?? 'L2_PREMIUM',
+      kind: input.kind ?? null,
       credits: 0,
       used_own_key: false,
       cache_hit: false,
@@ -251,7 +270,7 @@ export async function callProvider(provider: AiProvider, input: AiCallInput): Pr
   }
   const latencyMs = Date.now() - t0;
   // 기록을 기다리지 않는다. 통계 때문에 사용자 응답이 늦어지면 안 된다.
-  void logCall(provider, r!, latencyMs);
+  void logCall(provider, r!, latencyMs, input);
   return { ...r!, latencyMs };
 }
 

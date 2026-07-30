@@ -63,8 +63,18 @@ export async function POST(req: NextRequest) {
 
   // 각 공급자에게 **같은 질문**을 던진다. 프롬프트가 다르면 의견 차이가
   // 모델 차이인지 질문 차이인지 알 수 없다.
+  //
+  // 계층은 저가로 둔다. 합의의 값어치는 한 모델을 깊게 굴리는 데 있지 않고
+  // **서로 다른 회사의 모델이 갈리는지**에 있다. 공급자 수만큼 요금이
+  // 곱해지는 자리라 여기서 premium을 쓰면 비용이 가장 빨리 튄다.
+  // 더 깊은 판단이 필요하다고 판단되면 tier를 'L3_COMMITTEE'로 바꾸면 된다
+  // (그러면 각 공급자의 premium 모델이 불린다).
   const settled = await Promise.all(providers.map(async p => {
-    const r = await analyzeArticle(article, (input) => callProvider(p, input));
+    const r = await analyzeArticle(
+      article,
+      (input) => callProvider(p, input),
+      { tier: 'L1_CHEAP', kind: 'consensus' },
+    );
     return { provider: p, r };
   }));
 
