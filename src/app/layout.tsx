@@ -75,13 +75,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           스크립트로 <html>에 먼저 표시해 둔다. 여기서 하는 일은
           속성 하나 붙이는 것뿐이라 렌더를 지연시키지 않는다.
         */}
+        {/*
+          따옴표가 전부 빠져 있었다 — `localStorage.getItem(tg_theme_mode)`.
+          첫 줄에서 ReferenceError로 던지고, catch 안의 `data-theme`도 같은
+          이유로 던져서 결국 data-theme이 **아예 안 붙었다.** 위 주석이
+          막겠다고 적어 둔 그 검은 화면 번쩍임이 그대로 나고 있었다.
+          문법 오류라 타입체크·빌드·테스트 어디에도 걸리지 않는다 —
+          문자열 안이니까.
+        */}
         <script dangerouslySetInnerHTML={{ __html: `(function(){try{
-var m=localStorage.getItem(tg_theme_mode);
-if(m!==dark&&m!==light&&m!==auto)m=auto;
+var m=localStorage.getItem('tg_theme_mode');
+if(m!=='dark'&&m!=='light'&&m!=='auto')m='auto';
 var t=m;
-if(m===auto){var h=new Date().getHours();t=(h>=7&&h<19)?light:dark;}
-document.documentElement.setAttribute(data-theme,t);
-}catch(e){document.documentElement.setAttribute(data-theme,dark);}})();` }}/>
+if(m==='auto'){var h=new Date().getHours();t=(h>=7&&h<19)?'light':'dark';}
+document.documentElement.setAttribute('data-theme',t);
+}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();` }}/>
         <meta name="theme-color" content="#0A0B0D"/>
         {/* Fonts */}
         <link rel="preconnect" href="https://fonts.googleapis.com"/>
