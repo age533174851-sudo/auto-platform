@@ -88,24 +88,39 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
     // "없음"이 되고, 그게 중복 체결로 이어진다.
     if (g.reachable) input.unresolvedOrderCount = g.unresolvedOrders.length;
 
-    if (g.reachable) {
-      const want = symbol.toUpperCase().replace('/', '');
-      const pos = g.exchangePositions.find(p => p.symbol.toUpperCase() === want);
+  } catch {
+    /* unknown */
+  }
 
-      // 포지션이 없는 것과 조회를 못 한 것은 다르다. reachable이면
-      // "없음"이 사실이므로 0을 적는다.
-      input.existingPositionQty = pos ? pos.qty : 0;
-
-      if (pos) {
-        input.marginType = pos.marginType ?? null;
-        input.liquidationPrice = pos.liquidationPrice ?? null;
-        if (pos.leverage != null && intendedLeverage != null) {
-          input.leverage = { actual: pos.leverage, intended: intendedLeverage };
+  // 3-b. 이 심볼의 위험 정보 — 마진 모드·배율·청산가·현재 수량
+  //
+  // gatherAndReconcile의 목록을 쓰지 않는다. 그쪽은 수량 0을 걸러내므로
+  // **신규 진입 심볼이 목록에 없다.** 그러면 마진 모드가 unknown이 되어
+  // 모든 첫 주문이 막힌다. 마진 모드는 포지션이 아니라 심볼별 계좌 설정이라
+  // 수량이 0이어도 존재하고, getSymbolPositionRisk가 그걸 읽는다.
+  //
+  // 주문 경로(daily-ladder)도 같은 함수를 쓴다. 여기서 다른 방법으로 읽으면
+  // 미리 본 결과와 실제로 막히는 근거가 갈린다 — 이 프로젝트가 상태 대조를
+  // 공용화한 것과 같은 이유다.
+  try {
+    const { data: conn } = await sb.from('exchange_connections')
+      .select('api_key, api_secret_enc, encrypted_secret')
+      .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
+    if (conn) {
+      const bf = await import('@/lib/exchanges/binanceFutures');
+      const { decryptSecret } = await import('@/lib/exchanges/crypto');
+      const secret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+      const risk = await bf.getSymbolPositionRisk(conn.api_key, secret, symbol, testnet);
+      if (risk) {
+        input.marginType = risk.marginType || null;
+        input.existingPositionQty = Math.abs(risk.positionAmt);
+        if (risk.liquidationPrice != null) input.liquidationPrice = risk.liquidationPrice;
+        if (risk.leverage != null && intendedLeverage != null) {
+          input.leverage = { actual: risk.leverage, intended: intendedLeverage };
         }
       }
-      // 포지션이 없으면 마진 모드·청산가를 알 수 없다. 신규 진입이라 아직
-      // 존재하지 않는 값이므로 unknown이 맞다 — 여기서 'isolated'로
-      // 가정하면 CROSS 계좌에서 첫 주문이 그대로 나간다.
+      // 못 읽었으면 넣지 않는다 → unknown → 필수 항목이라 막는다.
+      // 여기서 'isolated'로 가정하면 CROSS 계좌의 첫 주문이 그대로 나간다.
     }
   } catch {
     /* unknown */

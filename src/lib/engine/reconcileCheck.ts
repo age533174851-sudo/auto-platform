@@ -141,12 +141,24 @@ export async function assertStateConsistent(
   sb: any,
   userId: string,
   testnet: boolean,
-): Promise<{ allowed: boolean; reason?: string; verdict: ReconcileVerdict | null }> {
+): Promise<{
+  allowed: boolean;
+  reason?: string;
+  verdict: ReconcileVerdict | null;
+  /**
+   * 방금 읽은 원본. 호출자가 같은 조회를 다시 하지 않도록 실어 보낸다.
+   *
+   * 거래 전 점검(preTradeChecklist)이 이 값들을 필요로 하는데, 없으면
+   * 주문 경로가 거래소를 두 번 읽는다 — 레이트리밋을 두 배로 쓰고,
+   * 두 조회 사이에 상태가 바뀌면 점검과 차단이 서로 다른 사실을 본다.
+   */
+  gather: GatherResult;
+}> {
   const r = await gatherAndReconcile(sb, userId, testnet);
 
   if (!r.reachable) {
     return {
-      allowed: false, verdict: null,
+      allowed: false, verdict: null, gather: r,
       reason: `거래소 상태를 확인할 수 없어 신규 주문을 보류합니다: ${r.error || '조회 실패'}`,
     };
   }
@@ -155,7 +167,7 @@ export async function assertStateConsistent(
   if (r.unresolvedOrders.length > 0) {
     const first = r.unresolvedOrders[0];
     return {
-      allowed: false, verdict: r.verdict,
+      allowed: false, verdict: r.verdict, gather: r,
       reason: `결과가 확정되지 않은 주문이 ${r.unresolvedOrders.length}건 있어 신규 주문을 보류합니다 ` +
               `(${first.symbol} ${first.clientOrderId}: ${first.reason}). ` +
               `/api/orders/reconcile로 확정한 뒤 다시 시도하세요.`,
@@ -163,9 +175,9 @@ export async function assertStateConsistent(
   }
   if (r.verdict?.blockNewOrders) {
     return {
-      allowed: false, verdict: r.verdict,
+      allowed: false, verdict: r.verdict, gather: r,
       reason: `앱과 거래소 상태가 어긋나 신규 주문을 보류합니다 — ${r.verdict.summary}`,
     };
   }
-  return { allowed: true, verdict: r.verdict };
+  return { allowed: true, verdict: r.verdict, gather: r };
 }

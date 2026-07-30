@@ -292,6 +292,61 @@ export async function getFuturesTicker(symbol: string, testnet = true): Promise<
   } catch { return null; }
 }
 
+export interface SymbolPositionRisk {
+  symbol: string;
+  /** 부호 있는 수량. 0이면 포지션 없음 */
+  positionAmt: number;
+  /** 'isolated' | 'cross' */
+  marginType: string;
+  leverage: number | null;
+  /** 0이면 거래소가 안 준 것이라 null */
+  liquidationPrice: number | null;
+  entryPrice: number | null;
+  markPrice: number | null;
+}
+
+/**
+ * 심볼 하나의 포지션 위험 정보. **포지션이 없어도 돌려준다.**
+ *
+ * getFuturesPositions와 왜 따로 두는가
+ * ────────────────────────────────────
+ * 그 함수는 `positionAmt !== 0`으로 걸러낸다. 목록 화면에는 그게 맞다 —
+ * 없는 포지션을 줄로 그릴 이유가 없다. 그런데 **주문 전 점검**에는 그 필터가
+ * 치명적이다. 신규 진입은 정의상 포지션이 0이므로, 걸러진 목록에서는 그
+ * 심볼의 마진 모드를 알 수 없다. 그러면 점검이 "마진 모드를 모른다"로
+ * 모든 신규 진입을 막는다.
+ *
+ * 마진 모드는 포지션이 아니라 **심볼별 계좌 설정**이라 포지션이 0이어도
+ * 존재한다. 그 값을 읽으려고 이 함수를 둔다. symbol을 지정하므로 응답도
+ * 작다 — 전체를 받아 거르는 것보다 싸다.
+ */
+export async function getSymbolPositionRisk(
+  key: string, secret: string, symbol: string, testnet = true,
+): Promise<SymbolPositionRisk | null> {
+  try {
+    const sym = symbol.toUpperCase().replace('/', '');
+    const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet, { symbol: sym });
+    const rows = Array.isArray(data) ? data : [data];
+    // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을
+    // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
+    const row = rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
+    if (!row) return null;
+
+    const liq = parseFloat(row.liquidationPrice ?? '0');
+    const lev = parseInt(row.leverage ?? '0', 10);
+    return {
+      symbol: String(row.symbol ?? sym),
+      positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
+      marginType: String(row.marginType ?? '').toLowerCase(),
+      // 0은 값이 아니라 '못 받았음'이다
+      leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
+      liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
+      entryPrice: parseFloat(row.entryPrice ?? '0') || null,
+      markPrice: parseFloat(row.markPrice ?? '0') || null,
+    };
+  } catch { return null; }
+}
+
 /**
  * 거래소 서버 시각 (epoch ms). 못 읽으면 null — 0이 아니다.
  *

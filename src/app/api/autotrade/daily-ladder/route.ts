@@ -342,6 +342,75 @@ export async function POST(req: NextRequest) {
       maxHoldBars: body.maxHoldDays ?? 5,   // 일봉 기준 — 5일 넘게 들고 있지 않는다
     });
 
+    // ── 거래 전 점검 (마지막 관문) ──
+    //
+    // 위의 검사들을 하나의 목록으로 모아 다시 판정한다. 왜 또 보는가:
+    //  1. 흩어진 검사가 전부 돌았는지 **한 곳에서** 확인할 수 있어야 한다.
+    //     지금까지는 검사를 하나 빼먹어도 아무도 몰랐다
+    //  2. 여기서만 보는 것이 둘 있다 — 시계 오차, 그리고 신규 진입 심볼의
+    //     마진 모드. 둘 다 이 지점까지 확인된 적이 없다
+    //  3. 실패 이유를 목록 모양으로 돌려주면 화면이 그대로 그릴 수 있다.
+    //     `/api/orders/preflight`와 **같은 판정 함수**를 쓰므로 미리 본 결과와
+    //     실제로 막히는 근거가 갈리지 않는다
+    //
+    // 거래소를 다시 읽지 않는다. 상태 대조가 방금 읽은 것을 gather로 받아
+    // 쓰고, 추가 호출은 두 개뿐이다 — 서버 시각(공개)과 이 심볼의 위험 정보.
+    // 심볼별 조회가 필요한 이유: getFuturesPositions는 수량 0을 걸러내므로
+    // 신규 진입 심볼의 마진 모드가 그 목록에 없다.
+    const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+    const bfPre = await import('@/lib/exchanges/binanceFutures');
+    const apiSecretPre = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+
+    // 로컬 시각을 호출 직후에 찍는다. 응답을 기다린 뒤 찍으면 왕복 지연이
+    // 그대로 오차로 계산돼, 시계가 정확해도 실패로 뜬다.
+    const localMs = Date.now();
+    const serverMs = await bfPre.getFuturesServerTime(useTestnet);
+    const risk = await bfPre.getSymbolPositionRisk(conn.api_key, apiSecretPre, symbol, useTestnet);
+
+    const checklist = runChecklist({
+      mode: { disposition: modeGate.disposition, reason: modeGate.reason },
+      clock: serverMs != null ? { localMs, serverMs } : null,
+      // 여기까지 왔다는 것은 assertStateConsistent를 통과했다는 뜻이다
+      reconcile: { reachable: true, blockNewOrders: false, summary: gate.verdict?.summary || '일치' },
+      unresolvedOrderCount: gate.gather.unresolvedOrders.length,
+      marginType: risk?.marginType ?? null,
+      leverage: risk?.leverage != null
+        ? { actual: risk.leverage, intended: result.plan!.leverage }
+        : null,
+      existingPositionQty: risk ? Math.abs(risk.positionAmt) : null,
+      // 계단 게이트가 예약을 내줬다 = 오늘 아직 거래하지 않았다.
+      // 여기서 ladderGate를 다시 부르면 슬롯이 또 예약된다.
+      todayEntry: { alreadyTraded: false },
+      stopPrice: stopLoss,
+      // 거래소가 준 청산가를 우선한다. 포지션이 없으면 계획의 계산값을 쓴다 —
+      // 그때는 아직 거래소에 청산가가 존재하지 않는다.
+      liquidationPrice: risk?.liquidationPrice ?? result.plan!.liquidationPrice ?? null,
+      side: result.plan!.side,
+      margin: {
+        required: result.plan!.requiredMargin,
+        available: ctx.config.availableMargin ?? ctx.config.accountEquity,
+      },
+    });
+
+    if (!checklist.allowed) {
+      // 오늘 하루를 돌려준다. 주문이 나가지 않았으므로 슬롯을 소모하면
+      // 사용자는 원인을 고친 뒤에도 내일까지 기다려야 한다.
+      await releaseReservation(sb, reservationId);
+      return NextResponse.json({
+        ...base, executed: false,
+        blocked: 'CHECKLIST_BLOCKED',
+        error: checklist.summary,
+        checklist: {
+          allowed: false,
+          passed: checklist.passed,
+          total: checklist.total,
+          unknownCount: checklist.unknownCount,
+          results: checklist.results,
+          blockers: checklist.blockers,
+        },
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
@@ -372,6 +441,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ...base,
       executed: exec.ok,
+      // 통과한 점검도 실어 보낸다. 막힐 때만 보여주면 사용자는 "점검이
+      // 돌았는지" 알 수 없고, 확인 못 한 항목(unknown)이 있었다는 사실도
+      // 사라진다 — 통과했지만 두 개는 확인 못 했다는 것은 알아야 한다.
+      checklist: {
+        allowed: true,
+        passed: checklist.passed,
+        total: checklist.total,
+        unknownCount: checklist.unknownCount,
+        results: checklist.results,
+      },
       order: {
         status: exec.status, clientOrderId: exec.clientOrderId,
         exchangeOrderId: exec.exchangeOrderId,

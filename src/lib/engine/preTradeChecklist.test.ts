@@ -251,6 +251,35 @@ export function runPreTradeChecklistTests() {
     }
   });
 
+  console.log('[거래 전 점검 — 신규 진입 (주문 경로 배선에서 실제로 걸린 것)]');
+
+  test('포지션 없는 신규 진입도 통과할 수 있어야 한다 — 못 하면 전략이 아예 못 돈다', () => {
+    // 배선하면서 처음 만든 실패가 이것이었다. getFuturesPositions는 수량 0을
+    // 걸러내므로 신규 진입 심볼이 목록에 없고, 그러면 marginType이 unknown이
+    // 되어 **모든 첫 주문이 막힌다.** 마진 모드는 포지션이 아니라 심볼별 계좌
+    // 설정이라 수량 0에도 존재한다 — getSymbolPositionRisk로 읽는다.
+    const v = runChecklist({
+      ...goodInput(),
+      existingPositionQty: 0,        // 포지션 없음 (사실)
+      marginType: 'isolated',        // 심볼 설정은 읽힌다
+      liquidationPrice: 58000,       // 거래소에 없으면 계획의 계산값
+    });
+    eq(v.allowed, true, `신규 진입이 막혔다: ${v.summary}`);
+  });
+
+  test('신규 진입인데 마진 모드를 못 읽으면 막는다 — CROSS 계좌의 첫 주문이 그대로 나간다', () => {
+    const v = runChecklist({ ...goodInput(), existingPositionQty: 0, marginType: null });
+    eq(v.allowed, false);
+    eq(statusOf(v, 'MARGIN_ISOLATED').status, 'unknown');
+  });
+
+  test('포지션이 없으면 거래소 청산가가 없다 — 계획의 계산값으로 판정한다', () => {
+    // 주문 경로는 `risk?.liquidationPrice ?? plan.liquidationPrice`를 넘긴다.
+    // 둘 다 없으면 unknown이고 막힌다.
+    eq(runChecklist({ ...goodInput(), liquidationPrice: null }).allowed, false);
+    eq(runChecklist({ ...goodInput(), liquidationPrice: 58000 }).allowed, true);
+  });
+
   console.log('[거래 전 점검 — 요약 문구]');
 
   test('막는 항목이 있으면 이름을 나열한다', () => {
