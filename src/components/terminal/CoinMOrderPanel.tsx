@@ -26,6 +26,13 @@ import {
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
 
+// 손절 폭 후보. 역방향 계약이라 **가격 기준 퍼센트**다 (코인 수량이 아니다).
+//
+// 기본값을 두는 이유: 예전 이 화면은 손절을 아예 보내지 않았고, 서버도 붙이지
+// 않았다. 이제 서버가 손절 없는 진입을 거부하므로, 값이 없으면 버튼이 죽는다.
+// 기본값을 두더라도 **결과 가격을 화면에 적기** 때문에 숨겨지지 않는다.
+const SL_PCTS = [1, 2, 3, 5, 10];
+
 /** USDⓈ-M 심볼을 COIN-M 무기한으로 바꾼다. BTCUSDT → BTCUSD_PERP */
 function toCoinMSymbol(usdtSymbol: string): string {
   const base = usdtSymbol.replace(/USDT$/, '');
@@ -45,6 +52,7 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  const [slPct, setSlPct] = useState(2);
   const [contractUsd, setContractUsd] = useState<number | null>(null);
   const [contractSource, setContractSource] = useState<'exchange' | 'known' | null>(null);
   const [markPrice, setMarkPrice] = useState<number | null>(null);
@@ -89,11 +97,32 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
   const liq = markPrice != null
     ? inverseLiquidationPrice(markPrice, leverage, side === 'BUY' ? 'LONG' : 'SHORT') : null;
 
+  // 손절가. 마크가를 모르면 만들지 않는다 — 그러면 주문할 수 없고, 그게 맞다.
+  const stopPrice = markPrice != null
+    ? (side === 'BUY' ? markPrice * (1 - slPct / 100) : markPrice * (1 + slPct / 100))
+    : null;
+
+  // 손절이 청산 너머면 그 손절은 작동할 기회가 없다. 배율이 높을수록 청산이
+  // 가까워지므로(100배면 1% 남짓) 이 조합이 실제로 자주 나온다.
+  // 서버도 같은 것을 막지만, 보내기 전에 여기서 알려주는 편이 낫다.
+  const stopBeyondLiq = stopPrice != null && liq != null
+    && (side === 'BUY' ? stopPrice <= liq : stopPrice >= liq);
+
+  const blocked = contracts <= 0 || stopPrice == null || stopBeyondLiq;
+
   const submit = async () => {
     setMsg(null);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
     if (contracts <= 0) { setMsg({ ok: false, text: '계약 수가 0입니다' }); return; }
+    if (stopPrice == null) {
+      setMsg({ ok: false, text: '마크가를 읽지 못해 손절가를 만들 수 없습니다 — 손절 없이 진입하지 않습니다' });
+      return;
+    }
+    if (stopBeyondLiq) {
+      setMsg({ ok: false, text: '손절이 청산가 너머입니다. 배율을 낮추거나 손절 폭을 줄이세요' });
+      return;
+    }
 
     setBusy(true);
     try {
@@ -106,6 +135,9 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
           confirmToken: 'COINM_ORDER_CONFIRMED',
           symbol: cmSymbol, side, type: 'MARKET',
           contracts, leverage,
+          // 퍼센트가 아니라 **가격**을 보낸다. 서버가 자기 마크가로 다시
+          // 계산하면 화면에 보여준 값과 다른 손절이 걸린다.
+          stopPrice,
         }),
       });
       const j = await r.json();
@@ -196,6 +228,17 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
         placeholder={unit === 'USD' ? '금액 (USD)' : '계약 수 (정수)'}
         inputMode={unit === 'USD' ? 'decimal' : 'numeric'} style={inp}/>
 
+      {/* 손절. 이 화면에서 뺄 수 없는 항목이다 — 서버가 손절 없는 진입을 거부한다 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 26 }}>손절</span>
+        {SL_PCTS.map(p => (
+          <button key={p} onClick={() => setSlPct(p)}
+            style={{ ...ghostBtn(slPct === p), flex: 1, fontSize: FS.micro, ...NUM }}>
+            {p}%
+          </button>
+        ))}
+      </div>
+
       {/* 세 단위를 동시에 보여준다. 하나만 보이면 착각이 안 잡힌다. */}
       <div style={{
         background: C.raised, borderRadius: 8, padding: dense ? '8px 10px' : '10px 12px',
@@ -209,9 +252,37 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
         {/* 증거금은 코인 단위다. COIN-M 지갑에는 USDT가 없다. */}
         <KV k="필요 증거금"
             v={margin?.ok ? `${fmtPrice(margin.marginCoin, 6)} ${base}` : '—'}/>
+        <KV k={`손절가 (−${slPct}%)`}
+            v={stopPrice != null ? fmtPrice(stopPrice) : '읽지 못했습니다'}
+            color={stopBeyondLiq ? C.down : undefined}/>
         <KV k="청산가(근사)" v={liq != null ? fmtPrice(liq) : '—'}
             color={C.warn}/>
       </div>
+
+      {stopBeyondLiq && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7, background: C.downBg,
+          color: C.down, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          손절({stopPrice != null ? fmtPrice(stopPrice) : '—'})이 청산가
+          ({liq != null ? fmtPrice(liq) : '—'}) 너머입니다. 청산이 먼저 닿으므로
+          손절은 작동할 기회가 없습니다 — 배율을 낮추거나 손절 폭을 줄이세요.
+          <div style={{ color: C.dim, marginTop: 4 }}>
+            {leverage}배에서는 청산가가 약 {liq != null && markPrice != null
+              ? `${Math.abs((liq - markPrice) / markPrice * 100).toFixed(2)}%`
+              : '—'} 거리입니다. 실제 청산은 이보다 더 가깝습니다.
+          </div>
+        </div>
+      )}
+
+      {stopPrice == null && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7, background: C.warnBg,
+          color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          마크가를 읽지 못해 손절가를 계산할 수 없습니다. 손절 없이 진입하지 않습니다.
+        </div>
+      )}
 
       {unit === 'CONTRACTS' && amt > 0 && !Number.isInteger(amt) && (
         <div style={{
@@ -229,9 +300,11 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
         </div>
       )}
 
-      <button onClick={submit} disabled={busy || contracts <= 0}
-        style={{ ...primaryBtn(side === 'BUY' ? C.up : C.down, busy || contracts <= 0), minHeight: 44 }}>
-        {busy ? '전송 중…' : `${base} ${side === 'BUY' ? 'LONG' : 'SHORT'} ${contracts}계약 ${leverage}×`}
+      <button onClick={submit} disabled={busy || blocked}
+        style={{ ...primaryBtn(side === 'BUY' ? C.up : C.down, busy || blocked), minHeight: 44 }}>
+        {busy ? '전송 중…'
+          : `${base} ${side === 'BUY' ? 'LONG' : 'SHORT'} ${contracts}계약 ${leverage}×`
+            + (stopPrice != null && !stopBeyondLiq ? ` · 손절 ${fmtPrice(stopPrice)}` : '')}
       </button>
 
       <div style={{

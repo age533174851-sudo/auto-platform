@@ -9,7 +9,7 @@ import { test, assert, eq } from '../../test/harness';
 import {
   isCoinMSymbol, baseAssetOf, isPerpetual, resolveContractSize,
   notionalToContracts, contractsToCoin, requiredMarginCoin,
-  inversePnlCoin, inverseLiquidationPrice, checkCoinMIntent,
+  inversePnlCoin, inverseLiquidationPrice, checkCoinMIntent, coinMStopPlan,
 } from './coinM';
 
 const near = (a: number, b: number, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -174,5 +174,50 @@ export function runCoinMTests() {
   test('값이 이상하면 청산가를 내지 않는다', () => {
     eq(inverseLiquidationPrice(0, 10, 'LONG'), null);
     eq(inverseLiquidationPrice(50_000, 0, 'LONG'), null);
+  });
+  console.log('[COIN-M — 손절 방향]');
+
+  test('LONG(BUY 진입)은 SELL 손절이고 기준가보다 아래다', () => {
+    const p = coinMStopPlan('BUY', 58_000, 60_000);
+    eq(p.ok, true, p.reason);
+    eq(p.stopSide, 'SELL');
+  });
+
+  test('SHORT(SELL 진입)은 BUY 손절이고 기준가보다 위다', () => {
+    const p = coinMStopPlan('SELL', 62_000, 60_000);
+    eq(p.ok, true, p.reason);
+    eq(p.stopSide, 'BUY');
+  });
+
+  test('방향이 뒤집히면 즉시 발동한다 — 그걸 막는다', () => {
+    const badLong = coinMStopPlan('BUY', 61_000, 60_000);
+    eq(badLong.ok, false);
+    assert(badLong.reason.includes('즉시 발동'), `이유를 적어야 한다: ${badLong.reason}`);
+    eq(coinMStopPlan('SELL', 59_000, 60_000).ok, false);
+  });
+
+  test('손절가가 없으면 거부한다 — 손절 없는 진입은 크기를 정당화할 수 없다', () => {
+    for (const sp of [null, undefined, 0, -1, NaN]) {
+      eq(coinMStopPlan('BUY', sp as number, 60_000).ok, false, `${String(sp)}가 통과했다`);
+    }
+  });
+
+  test('마크가를 모르면 방향 검사를 건너뛴다 — 추측한 가격으로 거부하지 않는다', () => {
+    eq(coinMStopPlan('BUY', 58_000, null).ok, true);
+    eq(coinMStopPlan('BUY', null, null).ok, false, '손절가 자체는 여전히 필요하다');
+  });
+
+  test('거부해도 손절 방향은 채워 돌려준다 — 호출자가 분기를 두 번 하지 않게', () => {
+    const p = coinMStopPlan('BUY', null);
+    eq(p.stopSide, 'SELL');
+    eq(p.ok, false);
+  });
+
+  test('손절은 청산보다 진입가에 가까워야 한다 — 추정 청산가로 확인할 수 있다', () => {
+    // 이 조합이 실제로 위험한 것이다: 10배 롱의 추정 청산가 아래에 손절을 두면
+    // 손절은 작동할 기회가 없다. 판정은 체크리스트가 하지만, 값이 그렇게
+    // 나오는지는 여기서 못 박는다.
+    const liq = inverseLiquidationPrice(60_000, 10, 'LONG')!;
+    assert(liq < 58_000, `추정 청산가가 손절보다 가깝다: ${liq}`);
   });
 }

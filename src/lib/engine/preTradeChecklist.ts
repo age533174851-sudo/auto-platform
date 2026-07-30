@@ -145,18 +145,18 @@ export const CHECK_SPECS: CheckSpec[] = [
   // 막으면 나갈 방법이 없어진다.
   { id: 'MARGIN_ISOLATED',      label: '마진 모드 ISOLATED', markets: DERIV, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
-  // 이 둘은 USDⓈ-M만이다 — **손절이 존재하는 것을 전제**하기 때문이다.
+  // 이 둘은 **손절이 존재하는 것을 전제**한다.
   //
-  // COIN-M 주문 경로(`api/binance/coinm/order`)는 손절을 붙이지 않는다.
-  // 그래서 이 검사를 COIN-M에 물리면 모든 COIN-M 주문이 차단된다. 실제로
-  // 그렇게 만들어 놓고 보니 기능 하나가 통째로 죽었다.
+  // 한동안 `markets: ['USDM']`이었다. COIN-M 주문 경로가 손절을 붙이지 않아서,
+  // 물리면 모든 COIN-M 주문이 차단됐기 때문이다 — 면제가 아니라 못 고친 위험의
+  // 표시였다. 이제 `api/binance/coinm/order`가 손절을 붙이고 실패하면 포지션을
+  // 되돌리므로, 두 검사를 COIN-M에도 물린다.
   //
-  // ⚠ 이것은 검사를 면제해 준 것이 아니라 **아직 못 고친 위험을 표시한 것**이다.
-  //   COIN-M에 손절이 없다는 사실은 그대로 남아 있다 (PROGRESS 미처리 과제).
-  //   그 경로에 손절 부착을 넣으면 여기 markets에 'COINM'을 더해야 한다.
-  { id: 'STOP_ATTACHED',        label: '손절이 붙어 있음',   markets: ['USDM'], intents: ENTRY_ONLY,
+  // 현물에는 여전히 없다. 현물에는 청산이 없고 손절도 별도 주문이라, 없는 것을
+  // 검사 목록에 두면 그 항목은 영원히 unknown이 된다.
+  { id: 'STOP_ATTACHED',        label: '손절이 붙어 있음',   markets: DERIV, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
-  { id: 'LIQUIDATION_DISTANCE', label: '손절이 청산보다 먼저', markets: ['USDM'], intents: ENTRY_ONLY,
+  { id: 'LIQUIDATION_DISTANCE', label: '손절이 청산보다 먼저', markets: DERIV, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 증거금은 파생에만 둔다. 청산은 증거금을 돌려주는 동작이라 보지 않는다.

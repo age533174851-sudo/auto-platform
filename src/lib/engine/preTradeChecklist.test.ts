@@ -362,16 +362,17 @@ export function runPreTradeChecklistTests() {
     }
   });
 
-  test('COIN-M에는 손절·청산거리 항목이 없다 — 그 경로가 손절을 붙이지 않는다', () => {
-    // 면제가 아니라 아직 못 고친 위험의 표시다. COIN-M에 손절 부착을 넣으면
-    // markets에 'COINM'을 더해야 하고, 그때 이 테스트를 뒤집어야 한다.
-    // 물려 놓고 보니 COIN-M 주문이 통째로 막혀서 알게 된 것이다.
+  test('COIN-M도 손절·청산거리를 본다 — 그 경로가 손절을 붙인다', () => {
+    // 이 테스트는 뒤집힌 것이다. 예전에는 두 항목이 **없어야** 통과했다:
+    // COIN-M 경로가 손절을 붙이지 않아서 물리면 주문이 통째로 막혔기 때문이다.
+    // 그건 면제가 아니라 못 고친 위험의 표시였고, 이제 그 경로가 손절을 붙이고
+    // 실패하면 포지션을 되돌린다.
     const ids = runChecklist(goodInput(), { market: 'COINM' }).results.map(r => r.id);
-    assert(!ids.includes('STOP_ATTACHED'), 'COIN-M 주문이 전부 막힌다');
-    assert(!ids.includes('LIQUIDATION_DISTANCE'), 'COIN-M 주문이 전부 막힌다');
+    assert(ids.includes('STOP_ATTACHED'), '손절 검사가 빠졌다');
+    assert(ids.includes('LIQUIDATION_DISTANCE'), '청산거리 검사가 빠졌다');
   });
 
-  test('손절 없는 COIN-M 주문이 통과한다 — 기능이 죽지 않아야 한다', () => {
+  test('손절 없는 COIN-M 진입은 막는다', () => {
     const v = runChecklist({
       mode: { disposition: 'SEND', reason: 'COIN-M' },
       clock: { localMs: 1_000_000, serverMs: 1_000_050 },
@@ -380,9 +381,39 @@ export function runPreTradeChecklistTests() {
       leverage: { actual: 10, intended: 10 },
       existingPositionQty: 0,
       margin: { required: 0.01, available: 0.5 },
-      // stopPrice·liquidationPrice 없음 — COIN-M 경로는 손절을 만들지 않는다
+      side: 'LONG',
+      // stopPrice 없음
+    }, { market: 'COINM' });
+    eq(v.allowed, false, '손절 없는 역방향 계약 진입이 통과했다');
+    eq(statusOf(v, 'STOP_ATTACHED').status, 'fail');
+  });
+
+  test('손절이 있는 COIN-M 진입은 통과한다 — 기능이 죽지 않아야 한다', () => {
+    const v = runChecklist({
+      mode: { disposition: 'SEND', reason: 'COIN-M' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      unresolvedOrderCount: 0,
+      marginType: 'isolated',
+      leverage: { actual: 10, intended: 10 },
+      existingPositionQty: 0,
+      margin: { required: 0.01, available: 0.5 },
+      side: 'LONG',
+      stopPrice: 59000,
+      // 포지션이 없으면 거래소 청산가가 없다 — 경로가 보수적 추정값을 넘긴다
+      liquidationPrice: 55000,
     }, { market: 'COINM' });
     eq(v.allowed, true, `COIN-M이 막혔다: ${v.summary}`);
+  });
+
+  test('COIN-M 청산(EXIT)에는 손절을 요구하지 않는다 — 나갈 수 없게 된다', () => {
+    const v = runChecklist({
+      mode: { disposition: 'SEND', reason: 'COIN-M' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      marginType: 'cross', existingPositionQty: 3,
+    }, { market: 'COINM', intent: 'EXIT' });
+    const ids = v.results.map(r => r.id);
+    assert(!ids.includes('STOP_ATTACHED'), '청산에 손절을 요구하면 나갈 수 없다');
+    eq(v.allowed, true, `청산이 막혔다: ${v.summary}`);
   });
 
   test('COIN-M에는 상태 대조가 없다 — 대조는 USDⓈ-M 포지션만 읽는다', () => {
