@@ -1,10 +1,21 @@
-// /api/binance/futures/order — jobs 큐에 PLACE_ORDER 적재 (Worker가 유일 실행자)
+// /api/binance/futures/order — USDⓈ-M 수동 주문. **Vercel에서 직접 실행한다.**
 // POST { connectionId, symbol, side, type, quantity, price?, leverage?, reduceOnly?, confirmToken, stopLossPct?, takeProfitPct? }
+//
+// 예전에는 jobs 큐에 적재하고 Worker가 유일한 실행자였다. 그런데 그 워커는
+// Binance IP 지역 차단으로 쓰지 않고 있어서(PROGRESS 인프라 표), 이 경로로
+// 넣은 주문은 큐에 쌓이기만 하고 실행되지 않았다 — 응답은 ok:true였고 화면은
+// "주문됨"으로 그렸다.
+//
+// Vercel(hnd1)에서는 Binance가 정상이고 daily-ladder가 이미 직접 실행한다.
+// 같은 executeOrder를 쓰면 생명주기 기록·멱등 키·ISOLATED 강제·손절 부착·
+// UNKNOWN 처리가 전부 따라온다. 워커 경로에는 절반만 있었다.
+//
+// 관문 순서: 확인 토큰 → 파라미터 검증 → 연결·출금권한 → 킬스위치
+//            → 거래 전 점검 → 수동 계획 검사 → executeOrder
 
 import { NextRequest, NextResponse } from 'next/server';
 import { validateOrder } from '@/lib/engine/orderValidation';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { enqueueJob } from '@/lib/jobs';
 import { isKillSwitchActive } from '@/lib/risk/killSwitch';
 
 export const dynamic = 'force-dynamic';
@@ -47,6 +58,15 @@ export async function POST(req: NextRequest) {
   //
   // reduceOnly면 EXIT다. 나오는 주문에 진입 검사(손절·증거금·미확정 주문)를
   // 물리면 나갈 수 없게 된다.
+  //
+  // 아래 실행부가 같은 값을 다시 읽지 않도록 블록 밖에 둔다. 두 번 읽으면
+  // 레이트리밋을 두 배로 쓰고, 두 조회 사이에 상태가 바뀌면 점검과 실제
+  // 주문이 서로 다른 사실을 본다.
+  let preflightRisk: any = null;
+  let preflightStop: number | null = null;
+  let preflightRef: number | null = null;
+  let preflightPassed = 0;
+  let preflightTotal = 0;
   {
     const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
@@ -75,11 +95,13 @@ export async function POST(req: NextRequest) {
           symbol, useTestnet);
       }
     } catch { /* null → unknown → 막힌다 */ }
+    preflightRisk = risk;
 
     // 기준가: 지정가면 그 가격, 아니면 마크가. 둘 다 없으면 명목가를 계산할
     // 수 없고, 그러면 증거금도 모드 상한도 판정할 수 없다.
     const refPriceRaw = Number(price ?? risk?.markPrice ?? 0);
     const refPrice = Number.isFinite(refPriceRaw) && refPriceRaw > 0 ? refPriceRaw : null;
+    preflightRef = refPrice;
     const notionalUsd = refPrice ? Number(quantity) * refPrice : 0;
 
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
@@ -117,6 +139,7 @@ export async function POST(req: NextRequest) {
           ? refPrice * (1 - slPct / 100)
           : refPrice * (1 + slPct / 100))
       : null;
+    preflightStop = stopPrice;
 
     const checklist = runChecklist({
       mode: { disposition: g.disposition, reason: g.reason },
@@ -137,6 +160,9 @@ export async function POST(req: NextRequest) {
       margin: marginInput,
     }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY' });
 
+    preflightPassed = checklist.passed;
+    preflightTotal = checklist.total;
+
     if (!checklist.allowed) {
       return NextResponse.json({
         error: 'checklist_blocked',
@@ -151,31 +177,97 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── 실행자 확인 ──
+  // ── 직접 실행 ──
   //
-  // 이 라우트는 거래소를 직접 부르지 않고 jobs 큐에 적재한다. 실행자는
-  // Railway Worker 하나뿐인데, 그 워커는 Binance IP 지역 차단으로 쓰지 않고
-  // 있다(PROGRESS.md 인프라 표). 즉 지금까지 이 경로로 넣은 주문은 **큐에
-  // 쌓이기만 하고 실행되지 않았다.** 그런데 응답은 `ok: true, queued: true`라
-  // 화면은 "주문됨"으로 그렸다.
+  // 예전에는 jobs 큐에 적재하고 `{ ok: true, queued: true }`를 돌려줬다.
+  // 실행자는 Railway Worker 하나뿐인데 그 워커는 Binance IP 지역 차단으로
+  // 쓰지 않고 있다(PROGRESS 인프라 표). 즉 이 경로로 넣은 주문은 **큐에
+  // 쌓이기만 하고 실행되지 않았고**, 화면은 ok:true를 받아 "주문됨"으로
+  // 그렸다. 성공처럼 보이는 실패다.
   //
-  // 성공처럼 보이는 실패다. 확인해서 없으면 적재하지 않고 503으로 거절한다 —
-  // 넣어두면 워커가 몇 시간 뒤 살아났을 때 그때 시세로 주문이 나간다.
-  const { checkExecutorBeforeQueue, executorUnavailableBody, withExpiry } =
-    await import('@/lib/jobs/queueGuard');
-  const executor = await checkExecutorBeforeQueue(sb);
-  if (!executor.canQueue) {
-    return NextResponse.json(executorUnavailableBody(executor),
-      { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  // Vercel(hnd1)에서는 Binance가 정상이고, `daily-ladder`가 이미 여기서
+  // 직접 실행한다. 같은 `executeOrder`를 쓰면 생명주기 기록·멱등 키·
+  // ISOLATED 강제·손절 부착·UNKNOWN 처리가 전부 따라온다. 워커 경로에는
+  // 그게 절반만 있었다.
+  //
+  // 큐는 남겨 둔다 — 웹훅(signal·tradingview)이 아직 쓴다. 다만 그쪽도
+  // 실행자가 없으면 적재하지 않는다(queueGuard).
+  const { buildManualPlan } = await import('@/lib/engine/manualPlan');
+  const { executeOrder } = await import('@/lib/engine/orderExecutor');
+  const { decryptSecret } = await import('@/lib/exchanges/crypto');
+
+  // 키는 위에서 조회한 연결 행에 없다(id·exchange_id·is_testnet만 골랐다).
+  const { data: keyRow } = await (sb.from('exchange_connections') as any)
+    .select('api_key, api_secret_enc, encrypted_secret')
+    .eq('id', connectionId).eq('user_id', uid).maybeSingle();
+  if (!keyRow?.api_key) {
+    return NextResponse.json({ error: 'connection_key_missing' }, { status: 400 });
   }
 
-  const r = await enqueueJob(sb, {
-    userId: uid, connectionId, action: 'PLACE_ORDER',
-    mode: conn.is_testnet ? 'TESTNET' : 'LIVE', symbol, side, quantity: Number(quantity),
-    // 만료 시각을 새긴다. 워커가 늦게 집어도 오래된 주문은 실행하지 않는다.
-    payload: withExpiry({ type, price: price ?? null, leverage: leverage ?? null, reduceOnly: !!reduceOnly, stopLossPct: body.stopLossPct ?? null, takeProfitPct: body.takeProfitPct ?? null }),
-    priority: reduceOnly ? 2 : 5,
+  const built = buildManualPlan({
+    symbol, side: String(side).toUpperCase() as 'BUY' | 'SELL',
+    quantity: Number(quantity),
+    // 배율을 안 보내면 거래소에 설정된 값을 쓴다. 1로 가정하면 실제로는
+    // 20배인 계좌에서 필요 증거금이 20분의 1로 계산된다.
+    leverage: Number(leverage ?? preflightRisk?.leverage ?? 0),
+    reduceOnly: !!reduceOnly,
+    liquidationPrice: preflightRisk?.liquidationPrice ?? null,
+    stopPrice: preflightStop,
+    refPrice: preflightRef,
   });
-  if (!r.ok) return NextResponse.json({ error: 'enqueue_failed', message: r.error }, { status: 500 });
-  return NextResponse.json({ ok: true, queued: true, jobId: r.jobId });
+
+  if (!built.plan.approved) {
+    // executeOrder도 approved:false를 거부하지만, 여기서 먼저 돌려주면
+    // 사유를 그대로 전할 수 있다 (executeOrder는 '승인되지 않은 계획'만 말한다).
+    return NextResponse.json({
+      ok: false, error: 'plan_rejected', message: built.reason,
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // 멱등 키. 같은 사용자·심볼·방향·수량을 같은 분(minute)에 두 번 누르면
+  // 같은 키가 되어 거래소가 두 번째를 거부한다 — 손이 떨려 두 번 누른 것과
+  // 정말 두 번 주문하려는 것을 구분할 수 없으므로, 실수 쪽을 막는다.
+  // 1분 뒤에는 다른 키가 되므로 의도적인 반복은 가능하다.
+  const minute = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  const clientOrderId =
+    `MF${minute}${symbol}${String(side)[0]}${String(quantity).replace('.', '')}`
+      .slice(0, 36);
+
+  const exec = await executeOrder(sb, {
+    userId: uid,
+    connectionId,
+    signalId: `manual-${minute}-${symbol}`,
+    clientOrderId,
+    exchange: 'binance',
+    mode: conn.is_testnet ? 'TESTNET' : 'LIVE',
+    plan: built.plan,
+    orderType: type === 'LIMIT' ? 'LIMIT' : 'MARKET',
+    limitPrice: price != null ? Number(price) : undefined,
+    reduceOnly: !!reduceOnly,
+    // 청산에는 손절을 붙이지 않는다 (executeOrder가 reduceOnly로 건너뛴다)
+    stopLoss: reduceOnly ? undefined : (preflightStop ?? undefined),
+    apiKey: keyRow.api_key,
+    apiSecret: decryptSecret(keyRow.api_secret_enc ?? keyRow.encrypted_secret ?? ''),
+  });
+
+  // UNKNOWN은 502다 — 보냈는데 결과를 모르는 상태다. 200으로 돌려주면
+  // 화면이 성공으로 그리고, 그게 중복 주문을 부른다.
+  const status = exec.ok ? 200 : exec.status === 'UNKNOWN' ? 502 : 400;
+
+  return NextResponse.json({
+    ok: exec.ok,
+    // queued를 false로 명시한다. 이 경로는 더 이상 큐를 쓰지 않는다 —
+    // 화면이 예전 응답 모양을 보고 "적재됨"으로 그리지 않게.
+    queued: false,
+    executed: exec.ok,
+    status: exec.status,
+    clientOrderId: exec.clientOrderId,
+    exchangeOrderId: exec.exchangeOrderId,
+    filledQty: exec.filledQty,
+    avgPrice: exec.avgPrice,
+    slOrderId: exec.slOrderId,
+    duplicate: exec.duplicate,
+    message: exec.message,
+    checklist: { allowed: true, passed: preflightPassed, total: preflightTotal },
+  }, { status, headers: { 'Cache-Control': 'no-store' } });
 }

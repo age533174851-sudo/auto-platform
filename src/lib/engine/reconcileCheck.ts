@@ -82,13 +82,28 @@ export async function gatherAndReconcile(
     }));
   } catch { exchangeOpenOrders = undefined; }
 
-  const { data: appRows } = await sb.from('live_orders')
-    .select('client_order_id, symbol, side, filled_qty, status')
+  // ── 청산 주문은 포지션이 아니다 ──
+  //
+  // reduce_only 행을 그대로 포지션으로 읽으면 방향이 뒤집혀 잡힌다. 롱을 닫은
+  // SELL 기록이 숏 포지션이 되고, 거래소에는 그런 포지션이 없으니 심각 불일치가
+  // 되어 이후 주문이 전부 막힌다.
+  //
+  // 컬럼이 없는 스키마에서 select가 실패하면 조회 전체가 비고, 그러면 앱
+  // 포지션이 통째로 사라져 이번에는 반대 방향 불일치가 난다. 그래서 실패하면
+  // 컬럼을 빼고 다시 읽는다 — 아래 미확정 주문 조회와 같은 방식이다.
+  const appQuery = (cols: string) => sb.from('live_orders')
+    .select(cols)
     .eq('user_id', userId).in('status', ['ACKED', 'FILLED'])
     .order('created_at', { ascending: false }).limit(50);
 
+  let { data: appRows, error: appErr } =
+    await appQuery('client_order_id, symbol, side, filled_qty, status, reduce_only');
+  if (appErr) {
+    ({ data: appRows } = await appQuery('client_order_id, symbol, side, filled_qty, status'));
+  }
+
   const appPositions: PositionView[] = (Array.isArray(appRows) ? appRows : [])
-    .filter((r: any) => Number(r.filled_qty) > 0)
+    .filter((r: any) => Number(r.filled_qty) > 0 && r.reduce_only !== true)
     .map((r: any) => ({
       symbol: String(r.symbol),
       side: String(r.side).toUpperCase() === 'SHORT' ? 'SHORT' as const : 'LONG' as const,

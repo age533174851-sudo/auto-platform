@@ -32,6 +32,24 @@ export interface ExecuteArgs {
    * 손절은 이 계획에 포함돼 있어도 stopLoss와 동일하게 전량 STOP_MARKET이다.
    */
   exitPlan?: ExitPlan;
+  /**
+   * 주문 유형. **기본 MARKET** — 기존 호출자(daily-ladder)의 동작을 바꾸지 않는다.
+   *
+   * 예전에는 여기서 'MARKET'을 하드코딩했다. 수동 주문을 이 경로로 옮기면서
+   * 그대로 두면 사용자가 지정가로 넣은 주문이 **조용히 시장가로 나간다.**
+   * 지정가를 쓰는 이유가 '그 가격에만 사겠다'는 것이므로, 그건 주문을
+   * 무시하는 것과 같다.
+   */
+  orderType?: 'MARKET' | 'LIMIT';
+  /** LIMIT일 때 필수. 없으면 전송 전에 거부한다 */
+  limitPrice?: number;
+  /**
+   * 청산 주문인가.
+   *
+   * true면 손절·익절을 **붙이지 않는다.** 나가는 주문에 보호주문을 걸면
+   * 포지션이 없어진 뒤에 남아서, 다음 진입을 예상치 못하게 닫는다.
+   */
+  reduceOnly?: boolean;
   apiKey: string;
   apiSecret: string;
 }
@@ -80,7 +98,14 @@ export function roundQuantity(qty: number, stepSize: number): number {
 export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteResult> {
   const { clientOrderId, plan, exchange, mode, apiKey, apiSecret } = args;
   const testnet = mode !== 'LIVE';
-  const side: 'BUY' | 'SELL' = plan.side === 'LONG' ? 'BUY' : 'SELL';
+  const orderType = args.orderType ?? 'MARKET';
+  // 청산이면 방향이 뒤집힌다. plan.side는 '무슨 포지션을 다루는가'이고
+  // reduceOnly는 그것을 줄이는 주문이므로 반대 방향으로 보내야 한다.
+  // 이걸 틀리면 청산 대신 **두 배로 늘린다.**
+  const posSide: 'BUY' | 'SELL' = plan.side === 'LONG' ? 'BUY' : 'SELL';
+  const side: 'BUY' | 'SELL' = args.reduceOnly
+    ? (posSide === 'BUY' ? 'SELL' : 'BUY')
+    : posSide;
 
   // ── 0) 사전 안전 검사 — 잘못된 값이 거래소로 나가지 않게 ──
   if (!plan.approved) {
@@ -94,6 +119,12 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   }
   if (!clientOrderId || clientOrderId.length < 4) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: 'clientOrderId가 없으면 중복 주문을 막을 수 없어 중단합니다' };
+  }
+  // 지정가인데 가격이 없으면 보내지 않는다. 여기서 시장가로 바꿔 보내면
+  // 사용자가 지정한 가격이 무시된 채 체결된다 — 지정가를 쓴 이유가 사라진다.
+  if (orderType === 'LIMIT' && (args.limitPrice == null || !isFinite(args.limitPrice) || args.limitPrice <= 0)) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: `지정가 주문에 가격이 없습니다 (${args.limitPrice}). 시장가로 바꿔 보내지 않습니다` };
   }
   // 손절 방향 재확인 (Risk Manager를 통과했더라도 마지막으로 한 번 더)
   if (args.stopLoss != null && plan.liquidationPrice > 0) {
@@ -115,7 +146,18 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     exchange, mode,
     symbol: plan.symbol,
     side,
-    order_type: 'MARKET',
+    // 하드코딩이었다. 지정가 주문을 'MARKET'으로 적으면 나중에 내역을 볼 때
+    // 왜 그 가격에 체결됐는지 설명이 안 된다.
+    order_type: orderType,
+    // 청산 주문임을 반드시 기록한다.
+    //
+    // 안 적으면 상태 대조(reconcileCheck)가 이 행을 **반대 방향 진입**으로
+    // 읽는다. 롱을 닫은 SELL 기록이 숏 포지션으로 잡히고, 거래소에는 그런
+    // 포지션이 없으니 심각 불일치가 되어 이후 주문이 전부 막힌다.
+    //
+    // daily-ladder는 진입만 하므로 이 필드가 없어도 드러나지 않았다.
+    // 수동 청산이 이 경로를 타면서 실제 문제가 된다.
+    reduce_only: !!args.reduceOnly,
     quantity: plan.quantity,
     leverage: plan.leverage,
     stop_loss: args.stopLoss ?? null,
@@ -254,8 +296,10 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       let res: any;
       try {
         res = await bf.placeFuturesOrder(apiKey, apiSecret, {
-          symbol: plan.symbol, side, type: 'MARKET',
+          symbol: plan.symbol, side, type: orderType,
           quantity: plan.quantity, clientOrderId,
+          ...(orderType === 'LIMIT' ? { price: args.limitPrice } : {}),
+          ...(args.reduceOnly ? { reduceOnly: true } : {}),
         }, testnet);
       } catch (e: any) {
         // 응답을 못 받음 → 체결됐을 수도 있다. 절대 재시도하지 않고 UNKNOWN.
@@ -279,7 +323,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       let slId: string | undefined, tpId: string | undefined;
       const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
       let slError = '';
-      if (args.stopLoss) {
+      // 청산 주문에는 보호주문을 붙이지 않는다. 붙이면 포지션이 없어진 뒤에도
+      // 남아서 다음 진입을 예상치 못하게 닫는다.
+      if (!args.reduceOnly && args.stopLoss) {
         const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
           symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
         }, testnet);
@@ -288,7 +334,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
       // 익절 — exitPlan이 있으면 분할 사다리를, 없으면 기존 단일 익절을 건다.
       const tpIds: string[] = [];
-      if (args.exitPlan) {
+      if (args.reduceOnly) {
+        // 위와 같은 이유 — 나가는 주문에 익절 사다리를 걸지 않는다
+      } else if (args.exitPlan) {
         for (const o of args.exitPlan.orders) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
           const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
