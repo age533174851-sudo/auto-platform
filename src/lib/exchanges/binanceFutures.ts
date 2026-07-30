@@ -292,6 +292,26 @@ export async function getFuturesTicker(symbol: string, testnet = true): Promise<
   } catch { return null; }
 }
 
+/**
+ * 거래소 서버 시각 (epoch ms). 못 읽으면 null — 0이 아니다.
+ *
+ * 왜 필요한가: 서명 요청은 timestamp를 싣고, 바이낸스는 recvWindow(이
+ * 프로젝트는 5000ms) 밖의 요청을 -1021로 거절한다. 그 실패는 주문을 보낸
+ * **뒤에** 오고 화면에는 그냥 '주문 실패'로 보인다. 원인이 로컬 시계라는
+ * 것을 알 방법이 없어서, 주문 전에 미리 비교하려고 둔다.
+ *
+ * 공개 엔드포인트라 키가 필요 없다 — 연결을 등록하기 전에도 확인할 수 있다.
+ */
+export async function getFuturesServerTime(testnet = true): Promise<number | null> {
+  try {
+    const r = await fetch(`${base(testnet)}/fapi/v1/time`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const t = Number(d?.serverTime);
+    return Number.isFinite(t) && t > 0 ? t : null;
+  } catch { return null; }
+}
+
 export interface FuturesOrderResult {
   success: boolean; message: string; orderId?: number | string;
   symbol?: string; side?: string; qty?: number; price?: number; raw?: any;

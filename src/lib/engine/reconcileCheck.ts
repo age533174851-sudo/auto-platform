@@ -68,6 +68,9 @@ export async function gatherAndReconcile(
       leverage: Number(p.leverage) || null,
       marginType: p.marginType || null,
       hasProtectiveStop: hasStop,
+      // 대조에는 쓰지 않지만 거래 전 점검이 쓴다 (PositionView 주석 참조).
+      // 0이면 거래소가 안 준 것이라 null로 둔다 — 0은 청산가가 아니다.
+      liquidationPrice: Number(p.liquidationPrice) || null,
     });
   }
 

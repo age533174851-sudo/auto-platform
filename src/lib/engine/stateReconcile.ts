@@ -55,6 +55,15 @@ export interface PositionView {
   leverage?: number | null;
   marginType?: string | null;
   hasProtectiveStop?: boolean;
+  /**
+   * 거래소가 보고한 청산가. **이 파일의 대조에는 쓰지 않는다.**
+   *
+   * 앱이 청산가를 따로 들고 있지 않으므로 비교할 대상이 없다. 그런데도
+   * 여기 싣는 이유는 거래소 포지션을 읽는 곳이 한 곳(reconcileCheck)이고,
+   * 거래 전 점검(preTradeChecklist)이 같은 값을 필요로 하기 때문이다.
+   * 빼면 같은 조회를 두 번 하게 되고, 그만큼 레이트리밋을 더 쓴다.
+   */
+  liquidationPrice?: number | null;
 }
 
 export interface OrderView {
