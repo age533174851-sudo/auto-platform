@@ -716,11 +716,64 @@ select가 실패하면 앱 포지션이 통째로 사라지므로 컬럼을 빼�
 `UNKNOWN`은 **502**로 돌려준다. 200이면 화면이 성공으로 그리고, 그게 중복 주문을 부른다.
 `queued: false`를 명시해 화면이 예전 응답 모양을 보고 "적재됨"으로 그리지 않게 했다.
 
-### 남은 것
+### 웹훅 둘도 직접 실행 (완료)
 
-- COIN-M·현물 경로는 이미 직접 실행이었다 (큐를 쓰지 않는다)
-- 웹훅 둘은 여전히 큐 → 워커다. 실행자가 없으면 적재하지 않지만, **실행은 안 된다.**
-  같은 방식으로 직접 실행으로 옮길 수 있다
+**`webhook/signal`** — 이미 직접 실행 경로가 있었다. 큐는 폴백이었는데, 그 폴백이
+걸리는 조건이 문제였다: **위험 계산이 실행 자체에 실패했을 때**(`plan`이 undefined).
+
+이 파일은 바로 위에 "Risk Manager가 거부하면 큐에 넣지 않는다 — 주문 권한의 마지막 문"
+이라고 적어 두고, **거부보다 정보가 더 없는 상태**(실행조차 못 함)만 큐로 빠져나가
+워커가 대신 크기를 정하게 되어 있었다. 폴백을 없애고 202 + `risk_plan_unavailable`로
+돌려준다.
+
+**`webhook/tradingview`** — 직접 실행으로 옮겼다. 수동 주문과 같은 경로다
+(거래 전 점검 → `buildManualPlan` → `executeOrder`).
+
+#### tradingview에서 드러난 것 셋
+
+1. **`reduceOnly`가 주문에 넘어가지 않았다.** 킬스위치 판단에는 `body.reduceOnly`를
+   쓰면서(신규 진입만 차단) 큐 payload에는 넣지 않았다. `closeLong` 신호가
+   **신규 진입으로** 나갈 수 있었다. 이제 `orderType`(closeLong 등)·`action`·
+   `reduceOnly` 셋 중 하나라도 청산이면 EXIT로 본다
+2. **손절 없이 주문했다.** 알림 하나로 보호 없는 포지션이 열렸다. 이제 진입에
+   `stopLossPct` 또는 `stopPrice`가 없으면 400으로 거부하고, 응답에 무엇을 넣어야
+   하는지 적어 준다. **기존 TradingView 알림을 고쳐야 한다**
+3. **죽은 환율 계산.** `(amount/1375) / (px/1375)`로 원-달러 추정치가 두 번 들어가
+   서로 상쇄되고 있었다. 결과는 `amount/px`와 같지만, 읽는 사람은 통화 변환이
+   일어난다고 믿는다. 실제 가정은 'amount와 price가 같은 통화'뿐이라 그대로 적었다
+
+#### 응답
+
+둘 다 `queued: false`를 명시한다. 예전에는 `status: 'queued'` / `queued: true`를
+돌려줬고 화면·알림이 "처리 예정"으로 읽었다 — 실제로는 아무도 처리하지 않았다.
+`UNKNOWN`은 502다. TradingView는 실패를 재발사할 수 있고, 200을 주면 그 재발사가
+중복 체결이 된다. 15초 중복 창(`claimSignal`)과 `clientOrderId` 멱등이 그걸 막는다.
+
+### 이제 `PLACE_ORDER`는 어디서도 큐를 쓰지 않는다
+
+`grep PLACE_ORDER src/app` → 0건. 네 주문 경로 전부 Vercel에서 직접 실행한다.
+
+### ⚠ 그런데 큐를 쓰는 것이 7개 남았다 — 전부 위험을 줄이는 동작이다
+
+| 라우트 | 동작 |
+|---|---|
+| `risk/kill-switch/trigger` | `KILL_SWITCH_EXECUTE` |
+| `risk/kill-switch/status` | `KILL_SWITCH_EXECUTE` |
+| `binance/futures/close-position` | `CLOSE_POSITION` |
+| `binance/futures/close-all` | `CLOSE_ALL_POSITIONS` |
+| `binance/futures/cancel-all` | `CANCEL_ALL_ORDERS` |
+| `binance/futures/tpsl` | `SET_TPSL` |
+| `telegram/callback` | `CLOSE_ALL_POSITIONS` |
+
+**킬스위치를 누르면 DB의 `active=true`는 켜져서 신규 주문은 막힌다. 그런데 미체결
+취소와 포지션 종료는 큐에 적재되고, 그 큐를 비우는 워커가 없다.**
+
+즉 지금 킬스위치는 **문을 잠그지만 안에 있는 것을 꺼내지 않는다.** 실제로 꺼내는
+`executeKillActions`는 `lib/risk/killSwitch.ts`에 있고 그 라우트가 이미 import까지
+해 두었는데, 부르지 않고 큐에 넣는다.
+
+이게 이 저장소에서 지금 가장 위험한 미처리 항목이다. 다음에 이걸 해야 한다.
+
 - Gate 거래소 경로 (미처리 과제 1번)
 
 ## 거래 전 점검 (완료)

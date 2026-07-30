@@ -197,8 +197,11 @@ export async function POST(req: NextRequest) {
       const isTestnet = mode === 'testnet' ? true : (conn.is_testnet !== false);
 
       const px = body.price || 0;
-      const usdtNotional = (body.amount || body.quantity * px || 0) / 1375;
-      const qty = body.quantity || (px > 0 ? usdtNotional / (px / 1375) : 0);
+      // 예전 식에는 `/1375`(원-달러 추정치)가 두 번 들어가 서로 상쇄되고 있었다.
+      //   (amount/1375) / (px/1375) === amount/px
+      // 결과는 같지만, 읽는 사람은 통화 변환이 일어난다고 믿는다. 실제로는
+      // amount와 price가 **같은 통화**라는 가정만 있다. 그 가정을 그대로 적는다.
+      const qty = body.quantity || (px > 0 ? (body.amount || 0) / px : 0);
 
       // ── 중복 신호 차단 (멱등성) — TradingView 중복 발사·재시도 방어 ──
       const { signalKey, claimSignal } = await import('@/lib/risk/idempotency');
@@ -220,46 +223,171 @@ export async function POST(req: NextRequest) {
         }, { status: 200 });
       }
 
-      // 거래소 직접 호출 X → jobs 큐에 PLACE_ORDER 적재 (Worker가 유일 실행자)
+      // ── 직접 실행 ──
       //
-      // 실행자가 없으면 적재하지 않는다. 넣어두면 워커가 나중에 살아났을 때
-      // 그때 시세로 주문이 나가고, 웹훅은 그걸 보낸 사람이 이미 잊은 신호다.
-      const { checkExecutorBeforeQueue, withExpiry } = await import('@/lib/jobs/queueGuard');
-      const executor = await checkExecutorBeforeQueue(sb);
-      if (!executor.canQueue) {
-        entry.status = 'error';
-        (entry as any).error = `주문 실행기 ${executor.label} — 적재하지 않았습니다. ${executor.reason}`;
-        signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
-        return NextResponse.json({
-          ok: false, error: 'executor_unavailable', queued: false,
-          executor: { status: executor.status, label: executor.label, ageSec: executor.ageSec },
-          message: executor.reason,
-        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      // 예전에는 jobs 큐에 적재했고 Worker가 유일한 실행자였다. 그 워커는
+      // Binance IP 지역 차단으로 쓰지 않고 있어(PROGRESS 인프라 표) 적재된
+      // 신호는 실행되지 않았는데, 응답은 `status: 'queued'`였다.
+      //
+      // 게다가 그 payload에는 **reduceOnly가 빠져 있었다.** 위에서 킬스위치
+      // 판단에는 body.reduceOnly를 쓰면서 주문에는 넘기지 않았으므로,
+      // closeLong 신호가 신규 진입으로 나갈 수 있었다.
+      //
+      // 이제 수동 주문과 같은 경로를 쓴다 — 거래 전 점검 → 수동 계획 검사 →
+      // executeOrder. 생명주기 기록·멱등 키·ISOLATED 강제가 따라온다.
+      const isExit = body.reduceOnly === true
+        || /^close/i.test(String(body.orderType || ''))
+        || /^(close|exit)/i.test(String(body.action || ''));
+
+      const sideUp = (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+      const levNum = Number(body.leverage ?? 0);
+
+      // 손절가. 퍼센트로 오면 가격으로 바꾼다.
+      //
+      // 진입에 손절이 없으면 아래 buildManualPlan이 거부한다. 예전 큐 경로는
+      // 손절 없이 그냥 보냈다 — 알림 하나로 보호 없는 포지션이 열렸다.
+      const slPct = Number((body as any).stopLossPct);
+      const stopPrice = (body as any).stopPrice != null
+        ? Number((body as any).stopPrice)
+        : (px > 0 && Number.isFinite(slPct) && slPct > 0
+            ? (sideUp === 'BUY' ? px * (1 - slPct / 100) : px * (1 + slPct / 100))
+            : null);
+
+      const { getSymbolPositionRisk, getFuturesServerTime, getFuturesBalance } =
+        await import('@/lib/exchanges/binanceFutures');
+      const { decryptSecret } = await import('@/lib/exchanges/crypto');
+      const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+      const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+      const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
+      const { buildManualPlan } = await import('@/lib/engine/manualPlan');
+      const { executeOrder } = await import('@/lib/engine/orderExecutor');
+
+      const apiSecret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+      const localMs = Date.now();
+      const serverMs = await getFuturesServerTime(isTestnet);
+      const risk = await getSymbolPositionRisk(conn.api_key, apiSecret, tradeSymbol, isTestnet);
+      const gate = await assertStateConsistent(sb, conn.user_id, isTestnet);
+
+      const refPrice = px > 0 ? px : (risk?.markPrice ?? null);
+      const notionalUsd = refPrice ? qty * refPrice : 0;
+      const opMode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+      const g = gateOrder(opMode, notionalUsd);
+
+      let marginInput: { required: number | null; available: number | null } | null = null;
+      if (!isExit && refPrice && levNum > 0) {
+        let available: number | null = null;
+        try {
+          const bal: any = await getFuturesBalance(conn.api_key, apiSecret, isTestnet);
+          if (bal?.success) {
+            const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
+            if (usdt) available = usdt.availableBalance;
+          }
+        } catch { /* null → unknown → 막힌다 */ }
+        marginInput = { required: notionalUsd / levNum, available };
       }
 
-      const { enqueueJob } = await import('@/lib/jobs');
-      const q = await enqueueJob(sb, {
-        userId: conn.user_id, connectionId: body.connectionId, action: 'PLACE_ORDER',
-        mode: isTestnet ? 'TESTNET' : 'LIVE', symbol: tradeSymbol,
-        side: (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+      const checklist = runChecklist({
+        mode: { disposition: g.disposition, reason: g.reason },
+        clock: serverMs != null ? { localMs, serverMs } : null,
+        reconcile: {
+          reachable: gate.gather.reachable,
+          blockNewOrders: !!gate.verdict?.blockNewOrders,
+          summary: gate.reason || gate.verdict?.summary,
+        },
+        unresolvedOrderCount: gate.gather.reachable ? gate.gather.unresolvedOrders.length : null,
+        marginType: risk?.marginType ?? null,
+        leverage: (risk?.leverage != null && levNum > 0)
+          ? { actual: risk.leverage, intended: levNum } : null,
+        existingPositionQty: risk ? Math.abs(risk.positionAmt) : null,
+        stopPrice,
+        liquidationPrice: risk?.liquidationPrice ?? null,
+        side: sideUp === 'BUY' ? 'LONG' : 'SHORT',
+        margin: marginInput,
+      }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY' });
+
+      if (!checklist.allowed) {
+        entry.status = 'error';
+        (entry as any).error = checklist.summary;
+        signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+        return NextResponse.json({
+          ok: false, id: webhookId, executed: false, queued: false,
+          error: 'checklist_blocked', message: checklist.summary,
+          checklist: { allowed: false, passed: checklist.passed, total: checklist.total,
+            blockers: checklist.blockers },
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+
+      const built = buildManualPlan({
+        symbol: tradeSymbol,
+        side: sideUp,
         quantity: Number(qty.toFixed(3)),
-        payload: withExpiry({ type: 'MARKET', leverage: body.leverage ?? null, source: 'webhook' }),
-        priority: 4,
+        leverage: levNum > 0 ? levNum : Number(risk?.leverage ?? 0),
+        reduceOnly: isExit,
+        liquidationPrice: risk?.liquidationPrice ?? null,
+        stopPrice,
+        refPrice,
       });
 
-      entry.status = q.ok ? 'queued' : 'error';
-      (entry as any).jobId = q.jobId;
+      if (!built.plan.approved) {
+        entry.status = 'error';
+        (entry as any).error = built.reason;
+        signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+        return NextResponse.json({
+          ok: false, id: webhookId, executed: false, queued: false,
+          error: 'plan_rejected', message: built.reason,
+          hint: stopPrice == null && !isExit
+            ? '알림 본문에 stopLossPct 또는 stopPrice를 넣으세요. 손절 없는 진입은 실행하지 않습니다.'
+            : undefined,
+        }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+      }
+
+      // 멱등 키는 위 claimSignal의 중복 창(15초)과 별개다. 그쪽은 같은 신호의
+      // 재발사를, 이쪽은 같은 주문의 재전송을 막는다.
+      const clientOrderId = `TV${String(body.id || body.alertId || webhookId)
+        .replace(/[^a-zA-Z0-9]/g, '').slice(0, 30)}`.slice(0, 36);
+
+      const q = await executeOrder(sb, {
+        userId: conn.user_id,
+        connectionId: body.connectionId,
+        signalId: `tradingview-${webhookId}`,
+        clientOrderId,
+        exchange: 'binance',
+        mode: isTestnet ? 'TESTNET' : 'LIVE',
+        plan: built.plan,
+        orderType: 'MARKET',
+        reduceOnly: isExit,
+        stopLoss: isExit ? undefined : (stopPrice ?? undefined),
+        apiKey: conn.api_key,
+        apiSecret,
+      });
+
+      entry.status = q.ok ? 'executed' : 'error';
+      (entry as any).clientOrderId = q.clientOrderId;
+      if (!q.ok) (entry as any).error = q.message;
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
       { const { log } = await import('@/lib/log/logger');
-        if (q.ok) log.info('webhook', '실전 주문 큐 적재', { symbol: tradeSymbol, side: body.side, mode, jobId: q.jobId });
-        else log.error('webhook', `주문 적재 실패: ${q.error}`, { symbol: tradeSymbol, mode }); }
+        if (q.ok) log.info('webhook', '주문 실행', { symbol: tradeSymbol, side: body.side, mode, clientOrderId: q.clientOrderId, status: q.status });
+        else log.error('webhook', `주문 실패: ${q.message}`, { symbol: tradeSymbol, mode, status: q.status }); }
 
+      // UNKNOWN은 200으로 돌려주지 않는다. TradingView는 실패를 재발사할 수
+      // 있고, '보냈는데 결과를 모르는' 상태에서 재발사가 오면 중복 체결이 된다.
+      // 5xx를 주면 TradingView가 재시도할 수 있지만, 15초 중복 창(claimSignal)과
+      // clientOrderId 멱등이 그걸 막는다.
       return NextResponse.json({
-        ok: q.ok, id: webhookId, mode, queued: q.ok, jobId: q.jobId,
-        status: q.ok ? 'queued' : 'error',
+        ok: q.ok, id: webhookId, mode,
+        // 더 이상 큐를 쓰지 않는다. 화면·알림이 "처리 예정"으로 읽지 않게 명시한다.
+        queued: false,
+        executed: q.ok,
+        status: q.status,
+        clientOrderId: q.clientOrderId,
+        exchangeOrderId: q.exchangeOrderId,
+        filledQty: q.filledQty,
+        avgPrice: q.avgPrice,
+        slOrderId: q.slOrderId,
+        duplicate: q.duplicate || undefined,
         testnet: isTestnet,
-        message: q.ok ? '신호 접수됨 — Worker가 주문 실행' : `적재 실패: ${q.error}`,
-      });
+        message: q.message,
+      }, { status: q.ok ? 200 : q.status === 'UNKNOWN' ? 502 : 400 });
     } catch (e: any) {
       entry.status = 'error';
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();

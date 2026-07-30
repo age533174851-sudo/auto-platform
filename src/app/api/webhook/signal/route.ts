@@ -383,55 +383,48 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 그 외: 큐에 적재 (워커가 처리)
-  let jobId: string | undefined;
-  if (sb && raw?.connectionId) {
-    try {
-      // 실행자가 없으면 적재하지 않는다 (queueGuard 주석 참조).
-      const { checkExecutorBeforeQueue, executorUnavailableBody } =
-        await import('@/lib/jobs/queueGuard');
-      const executor = await checkExecutorBeforeQueue(sb);
-      if (!executor.canQueue) {
-        return NextResponse.json(executorUnavailableBody(executor),
-          { status: 503, headers: { 'Cache-Control': 'no-store' } });
-      }
-
-      const { enqueueJob } = await import('@/lib/jobs');
-      const q = await enqueueJob(sb, {
-        userId: raw.userId || 'system',
-        connectionId: raw.connectionId,
-        action: 'PLACE_ORDER',
-        exchange: raw.exchange || undefined,
-        mode: raw.mode || 'TESTNET',
-        symbol: v.signal!.symbol,
-        side: v.signal!.signal === 'SHORT' ? 'sell' : 'buy',
-        payload: {
-          kind: 'standard_signal',
-          signalId,
-          signal: v.signal,          // 표준 신호 원본 (금액·레버리지 없음)
-          clientOrderId: `TRAIGO-${signalId}`.slice(0, 36),
-          // 워커가 늦게 집어도 오래된 신호는 실행하지 않는다
-          expiresAt: new Date(Date.now() + 120_000).toISOString(),
-        },
-      });
-      if (q.ok) jobId = q.jobId;
-      if (jobId && inserted?.id) {
-        try { await sb.from('signals').update({ status: 'queued', job_id: jobId }).eq('id', inserted.id); } catch {}
-      }
-    } catch (e: any) {
-      try { const { log } = await import('@/lib/log/logger'); log.error('signal-webhook', `큐 적재 실패: ${e?.message || e}`); } catch {}
-    }
+  // ── 여기까지 왔다는 것 ──
+  //
+  // 위 분기를 하나도 타지 못했다는 뜻이다. 가능한 경우는 셋이다:
+  //   · 위험 계산이 **실행 자체에 실패**했다 (plan이 undefined)
+  //   · mode가 PAPER·TESTNET·LIVE 중 어느 것도 아니다
+  //   · TESTNET/LIVE인데 connectionId가 없다
+  //
+  // 예전에는 이 자리에서 jobs 큐에 적재하고 워커가 크기를 정하게 했다.
+  // 그런데 그 경로는 이 파일이 스스로 적어 둔 원칙을 어긴다 —
+  // "Risk Manager가 거부하면 큐에 넣지 않는다 (주문 권한의 마지막 문)".
+  // 거부된 것보다 **실행조차 못 한 것**이 정보가 더 없는 상태인데, 그때만
+  // 큐로 빠져나가 워커가 대신 정하게 되어 있었다.
+  //
+  // 게다가 그 워커는 Binance IP 지역 차단으로 쓰지 않고 있어(PROGRESS 인프라 표)
+  // 적재된 신호는 실행되지 않았다. 응답에는 queued: true가 실려 있었다.
+  //
+  // 그래서 큐를 쓰지 않는다. 주문하지 않았다는 사실을 그대로 돌려준다.
+  if (!plan) {
+    return NextResponse.json({
+      accepted: true, signalId, approved: false,
+      executed: false, queued: false,
+      error: 'risk_plan_unavailable',
+      message: '위험 계산을 실행하지 못해 주문하지 않았습니다. '
+             + '신호는 기록했습니다 — 계좌 정보나 봉 데이터를 확인하세요.',
+    }, { status: 202 });
   }
 
   // ── 6) 즉시 202 ──
+  //
+  // 여기는 '주문할 조건이 아니었다'는 응답이다. queued를 항상 false로 명시한다 —
+  // 예전에는 이 자리에서 큐 적재 여부를 실었고, 화면과 알림이 그것을
+  // "처리 예정"으로 읽었다. 실제로는 아무도 처리하지 않았다.
   return NextResponse.json({
     accepted: true,
     signalId,
     bucket: v.signal!.bucket,
-    queued: !!jobId,
-    jobId,
+    executed: false,
+    queued: false,
     warnings: v.warnings?.length ? v.warnings : undefined,
-    note: raw?.connectionId ? undefined : 'connectionId가 없어 기록만 하고 큐에 넣지 않았습니다',
+    message: !raw?.connectionId
+      ? 'connectionId가 없어 기록만 했습니다 — 주문하지 않았습니다'
+      : `mode='${mode}'로는 주문하지 않습니다 (PAPER·TESTNET·LIVE만 실행합니다)`,
   }, { status: 202 });
 }
 
