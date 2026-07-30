@@ -9,7 +9,7 @@
 //
 // Kill Switch는 탭 안에 숨기지 않는다. 필요한 순간에 두 번 누르게 하면 안 된다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
-import { C, FS, NUM, tabStyle, chip, ghostBtn, fmtPrice, pnlColor } from './theme';
+import { C, FS, NUM, tabStyle, chip, ghostBtn, input, fmtPrice, pnlColor } from './theme';
 import { A } from '@/lib/theme/colors';
 import { useTerminal } from './TerminalContext';
 import { MarketCompare } from './MarketSwitch';
@@ -407,6 +407,9 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
 }) {
   const [closing, setClosing] = useState(false);
   const [closeMsg, setCloseMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // 카드 안에서 펼치는 판. 한 번에 하나만 — 둘을 같이 열면 카드가 화면보다 길어지고,
+  // 뒤집기와 TP/SL을 동시에 만지는 것은 서로 다른 결과를 기대하는 조작이다.
+  const [panel, setPanel] = useState<'reverse' | 'tpsl' | null>(null);
   // 값 해석은 테스트가 있는 순수 함수가 한다. 청산가 0·증거금 추정·
   // 0으로 나누기 셋 다 화면에서는 그럴듯해 보여서 눈으로 못 잡는다.
   const v = derivePosition(p);
@@ -538,8 +541,19 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
       )}
 
       <div style={{ display: 'flex', gap: 6 }}>
-        <button onClick={onPick} style={{ ...ghostBtn(), flex: 1, minHeight: 36 }}>
-          주문판으로
+        {/* 뒤집기 — 청산 + 반대 진입. 진입이 섞여 있으므로 손절을 받아야
+            하고, 그래서 바로 실행하지 않고 판을 편다. */}
+        <button onClick={() => { setPanel(p => p === 'reverse' ? null : 'reverse'); }}
+          disabled={qty <= 0}
+          style={{ ...ghostBtn(panel === 'reverse'), flex: 1, minHeight: 36,
+                   opacity: qty <= 0 ? 0.5 : 1 }}>
+          뒤집기
+        </button>
+        <button onClick={() => { setPanel(p => p === 'tpsl' ? null : 'tpsl'); }}
+          disabled={qty <= 0}
+          style={{ ...ghostBtn(panel === 'tpsl'), flex: 1, minHeight: 36,
+                   opacity: qty <= 0 ? 0.5 : 1 }}>
+          TP/SL
         </button>
         {/* 시장가 청산. 되돌릴 수 없으므로 확인을 받고, 확인 문구에
             무엇이 얼마나 나가는지 숫자로 적는다. '청산하시겠습니까?'만
@@ -552,8 +566,278 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
             border: `1px solid ${A(C.down, '55')}`,
             fontSize: FS.small, fontWeight: 700,
             opacity: closing || qty <= 0 ? 0.5 : 1,
-          }}>{closing ? '청산 중…' : '시장가 청산'}</button>
+          }}>{closing ? '청산 중…' : '청산'}</button>
       </div>
+
+      {panel === 'reverse' && (
+        <ReversePanel v={v} auth={auth} connId={connId}
+          onDone={(text, delay) => {
+            // 결과 문구를 **카드로 올린다.** 판 안에 두면 판이 닫히는 순간
+            // 같이 사라져서, 방금 무슨 일이 일어났는지 화면에 아무것도
+            // 남지 않는다 — 뒤집기는 그걸 모르면 안 되는 동작이다.
+            setCloseMsg({ ok: true, text });
+            setPanel(null);
+            setTimeout(onClosed, delay);
+          }}/>
+      )}
+      {panel === 'tpsl' && (
+        <TpSlPanel v={v} auth={auth} connId={connId}
+          onDone={(text, delay) => {
+            setCloseMsg({ ok: true, text });
+            setPanel(null);
+            setTimeout(onClosed, delay);
+          }}/>
+      )}
+
+      <button onClick={onPick} style={{
+        width: '100%', marginTop: 6, minHeight: 30, background: 'none',
+        border: 'none', color: C.faint, fontSize: FS.micro, cursor: 'pointer',
+      }}>주문판에서 이 종목 보기</button>
+    </div>
+  );
+}
+
+/**
+ * 뒤집기 판.
+ *
+ * 손절 폭을 먼저 받는다. 없으면 서버가 청산 전에 거부하는데(그쪽에서도 막는다),
+ * **청산이 끝난 뒤에 진입이 거부되면 포지션이 사라진 채로 끝난다.** 그러니
+ * 화면에서도 값 없이는 누를 수 없어야 한다.
+ *
+ * 결과 손절가를 숫자로 보여준다. %만 보여주면 그게 청산가 안쪽인지 밖인지
+ * 알 수 없고, 배율이 높을수록 그 둘이 가까워진다.
+ */
+function ReversePanel({ v, auth, connId, onDone }: {
+  v: ReturnType<typeof derivePosition>; auth: string; connId: string;
+  /** 성공했을 때만 부른다. 문구는 카드가 들고 있어야 판이 닫혀도 남는다 */
+  onDone: (text: string, refreshDelayMs: number) => void;
+}) {
+  const [pct, setPct] = useState(2);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const newSide: 'LONG' | 'SHORT' = v.side === 'LONG' ? 'SHORT' : 'LONG';
+  const ref = v.mark ?? v.entry;
+  // 새 포지션 기준의 손절이다. 뒤집힌 방향으로 계산해야 한다 —
+  // 지금 방향으로 계산하면 걸자마자 발동하는 값이 나온다.
+  const stopPrice = ref != null
+    ? (newSide === 'LONG' ? ref * (1 - pct / 100) : ref * (1 + pct / 100))
+    : null;
+
+  const go = async () => {
+    if (!auth || !connId) { setMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
+    const lines = [
+      `${v.symbol} ${v.side} ${fmtPrice(v.qty, 4)} 를 청산하고`,
+      `반대로 ${newSide} ${fmtPrice(v.qty, 4)} 진입합니다.`,
+      '',
+      `손절      ${stopPrice == null ? '기준가를 몰라 계산 불가' : `${fmtPrice(stopPrice)} (${pct}%)`}`,
+      `배율      ${v.leverage == null ? '거래소 설정값' : `${fmtPrice(v.leverage, 0)}×`}`,
+      '',
+      '청산이 끝난 것을 확인한 뒤에만 반대 진입을 보냅니다.',
+      '확인하지 못하면 진입하지 않고 멈춥니다 — 그때는 포지션이 없는 상태입니다.',
+      '되돌릴 수 없습니다.',
+    ];
+    const { confirmDialog } = await import('@/lib/confirm/dialog');
+    if (!(await confirmDialog(lines.join('\n'), { danger: true }))) return;
+
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/binance/futures/reverse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          connectionId: connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
+          symbol: v.symbol, expectedSide: v.side, expectedQty: v.qty,
+          leverage: v.leverage ?? undefined, stopLossPct: pct,
+        }),
+      });
+      const j = await r.json();
+      const text = j?.message || j?.error || `실패 (${r.status})`;
+      if (j?.ok) onDone(text, 2500);
+      else setMsg({ ok: false, text });
+    } catch (e: any) {
+      // 어느 단계에서 끊겼는지 모른다. 다시 누르면 이미 뒤집힌 것을 또 뒤집는다.
+      setMsg({ ok: false,
+        text: `응답 없음 — 다시 누르지 말고 포지션을 먼저 확인하세요 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 8, padding: '10px 11px', borderRadius: 8, background: C.raised }}>
+      <div style={{ color: C.dim, fontSize: FS.micro, marginBottom: 8 }}>
+        {v.side} {fmtPrice(v.qty, 4)} → <b style={{ color: newSide === 'LONG' ? C.up : C.down }}>
+          {newSide} {fmtPrice(v.qty, 4)}
+        </b>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 8 }}>
+        <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 26 }}>손절</span>
+        {[1, 2, 3, 5, 10].map(p => (
+          <button key={p} onClick={() => setPct(p)}
+            style={{ ...ghostBtn(pct === p), flex: 1, fontSize: FS.micro, ...NUM }}>{p}%</button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: FS.micro, marginBottom: 9 }}>
+        <span style={{ color: C.faint }}>새 손절가</span>
+        <span style={{ ...NUM, color: stopPrice == null ? C.warn : C.text, fontWeight: 600 }}>
+          {stopPrice == null ? '기준가 확인 불가' : fmtPrice(stopPrice)}
+        </span>
+      </div>
+
+      {msg && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+          background: msg.ok ? C.upBg : C.downBg, color: msg.ok ? C.up : C.down,
+          fontSize: FS.micro, lineHeight: 1.5,
+        }}>{msg.text}</div>
+      )}
+
+      <button onClick={go} disabled={busy || v.qty <= 0}
+        style={{
+          width: '100%', minHeight: 38, borderRadius: 7,
+          cursor: busy ? 'default' : 'pointer',
+          background: newSide === 'LONG' ? C.upBg : C.downBg,
+          color: newSide === 'LONG' ? C.up : C.down,
+          border: `1px solid ${A(newSide === 'LONG' ? C.up : C.down, '55')}`,
+          fontSize: FS.small, fontWeight: 700, opacity: busy ? 0.6 : 1,
+        }}>
+        {busy ? '뒤집는 중…' : `${newSide}으로 뒤집기`}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 가격 한 칸 + % 단추들.
+ *
+ * **컴포넌트 밖에 둔다.** 안에 두면 부모가 다시 그려질 때마다 이것도
+ * 새로운 타입이 되어 React가 input을 통째로 갈아 끼운다 — 한 글자 칠 때마다
+ * 포커스가 빠져서 사실상 입력을 못 한다. (자동 조작으로는 값을 한 번에
+ * 넣으니 안 보이고, 손으로 칠 때만 드러난다.)
+ */
+function PriceField({ label, value, onChange, presets, onPreset, refPrice, wrong }: {
+  label: string; value: string; onChange: (s: string) => void;
+  presets: number[]; onPreset: (p: number) => void;
+  refPrice: number | null; wrong: boolean;
+}) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+        <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 30 }}>{label}</span>
+        <input value={value} onChange={e => onChange(e.target.value)}
+          inputMode="decimal" placeholder={refPrice != null ? fmtPrice(refPrice) : '가격'}
+          style={{ ...input, flex: 1, minHeight: 32, fontSize: FS.small,
+                   borderColor: wrong ? C.down : undefined }}/>
+      </div>
+      <div style={{ display: 'flex', gap: 4, paddingLeft: 36 }}>
+        {presets.map(p => (
+          <button key={p} onClick={() => onPreset(p)} disabled={refPrice == null}
+            style={{ ...ghostBtn(), flex: 1, fontSize: FS.micro, minHeight: 26, ...NUM }}>
+            {p}%
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * TP/SL 판.
+ *
+ * 값을 **가격으로** 보낸다. %로 보내고 서버가 다시 계산하면 화면에 보여준
+ * 값과 다른 주문이 걸린다. %는 입력을 돕는 수단일 뿐이다.
+ *
+ * 방향 검사를 여기서 한 번 한다. LONG의 익절이 현재가 아래면 걸자마자
+ * 체결되고, 손절이 위면 걸자마자 발동한다 — 둘 다 화면에서는 '설정됨'이다.
+ */
+function TpSlPanel({ v, auth, connId, onDone }: {
+  v: ReturnType<typeof derivePosition>; auth: string; connId: string;
+  onDone: (text: string, refreshDelayMs: number) => void;
+}) {
+  const ref = v.mark ?? v.entry;
+  const [tp, setTp] = useState('');
+  const [sl, setSl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const long = v.side === 'LONG';
+  const fromPct = (pct: number, profit: boolean) => {
+    if (ref == null) return '';
+    const up = profit ? long : !long;          // 이익 방향인가
+    return String(Number((ref * (1 + (up ? pct : -pct) / 100)).toFixed(6)));
+  };
+
+  const tpNum = Number(tp), slNum = Number(sl);
+  const tpOk = !tp || (Number.isFinite(tpNum) && tpNum > 0);
+  const slOk = !sl || (Number.isFinite(slNum) && slNum > 0);
+  // 방향이 틀리면 거는 즉시 터진다
+  const tpWrong = !!tp && tpOk && ref != null && (long ? tpNum <= ref : tpNum >= ref);
+  const slWrong = !!sl && slOk && ref != null && (long ? slNum >= ref : slNum <= ref);
+  const blocked = (!tp && !sl) || !tpOk || !slOk || tpWrong || slWrong;
+
+  const go = async () => {
+    if (!auth || !connId) { setMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/binance/futures/tpsl', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          connectionId: connId, symbol: v.symbol, positionSide: v.side,
+          tpPrice: tp ? tpNum : undefined,
+          slPrice: sl ? slNum : undefined,
+        }),
+      });
+      const j = await r.json();
+      const text = j?.message || j?.error || `실패 (${r.status})`;
+      if (j?.ok) onDone(`${text} — 익절/손절은 '미체결' 탭에서 확인하세요`, 2000);
+      else setMsg({ ok: false, text });
+    } catch (e: any) {
+      setMsg({ ok: false, text: `응답 없음 — 거래소에서 직접 확인하세요 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 8, padding: '10px 11px', borderRadius: 8, background: C.raised }}>
+      <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 8, lineHeight: 1.5 }}>
+        전량 청산용 TP/SL을 새로 겁니다. 기존 <b>전량 청산용</b> 주문만 지우고
+        분할 익절 사다리는 남깁니다.
+      </div>
+
+      <PriceField label="익절" value={tp} onChange={setTp} presets={[1, 2, 5, 10]}
+        refPrice={ref} onPreset={p => setTp(fromPct(p, true))} wrong={tpWrong}/>
+      <PriceField label="손절" value={sl} onChange={setSl} presets={[1, 2, 3, 5]}
+        refPrice={ref} onPreset={p => setSl(fromPct(p, false))} wrong={slWrong}/>
+
+      {(tpWrong || slWrong) && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+          background: C.downBg, color: C.down, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          {tpWrong && `${v.side} 익절이 현재가(${ref != null ? fmtPrice(ref) : '?'}) ${long ? '아래' : '위'}입니다 — 걸자마자 체결됩니다. `}
+          {slWrong && `${v.side} 손절이 현재가 ${long ? '위' : '아래'}입니다 — 걸자마자 발동합니다.`}
+        </div>
+      )}
+
+      {msg && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+          background: msg.ok ? C.upBg : C.downBg, color: msg.ok ? C.up : C.down,
+          fontSize: FS.micro, lineHeight: 1.5,
+        }}>{msg.text}</div>
+      )}
+
+      <button onClick={go} disabled={busy || blocked}
+        style={{
+          width: '100%', minHeight: 38, borderRadius: 7,
+          cursor: busy || blocked ? 'default' : 'pointer',
+          background: C.accentBg, color: C.accent,
+          border: `1px solid ${A(C.accent, '55')}`,
+          fontSize: FS.small, fontWeight: 700, opacity: busy || blocked ? 0.5 : 1,
+        }}>
+        {busy ? '거는 중…' : !tp && !sl ? '익절 또는 손절을 입력하세요' : 'TP/SL 걸기'}
+      </button>
     </div>
   );
 }
