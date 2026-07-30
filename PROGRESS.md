@@ -17,13 +17,14 @@
 019가 없으면 뉴스가 저장되지 않고, `ADMIN_SECRET`이 없으면 청산 감시가 401이다.
 **테스트넷 가동(다음 단계 A)이 여기서 멈춰 있다.**
 
-**제일 위험한 것**: `middleware.ts`가 `/admin`·`/developer` 화면을 실질적으로 막지 않는다.
-API는 보호되지만 화면은 열린다.
+**제일 위험한 것**: Gate 거래소 경로에 마진타입 설정과 손절 부착이 없다.
+바이낸스 경로에서 막아둔 것들이 거기는 뚫려 있고, 이건 실제 돈이 걸린 경로다.
 
 | 검증 | 값 (2026-07-30 실행) |
 |---|---|
-| 유닛 테스트 | 528 통과 / 0 실패 |
+| 유닛 테스트 | 567 통과 / 0 실패 |
 | 타입 에러 | 80건 (`ignoreBuildErrors`로 덮여 있음) |
+| 프로덕션 빌드 | 통과 · 미들웨어 27.6 kB |
 
 ## 인프라
 
@@ -183,15 +184,14 @@ Binance Futures 스타일 — PC 3열(차트 | 호가+체결 | 주문폼), 모�
 
 위험한 순서로 적는다.
 
-1. **`middleware.ts`가 `/admin`·`/developer`를 실질적으로 막지 않는다**
-   세션이 localStorage에 있어 미들웨어가 볼 수 없다. API는 `requireAdmin`으로
-   보호되지만, **화면은 열린다** — "잠긴 줄 알았는데 안 잠긴" 상태라 제일 위험하다.
-2. **Gate 거래소 경로**: 마진타입 설정 없음, 손절 부착 없음,
+1. **Gate 거래소 경로**: 마진타입 설정 없음, 손절 부착 없음,
    `setLeverageGateFutures` 결과 미확인. 바이낸스 경로에서 막아둔 것들이 여기는 뚫려 있다.
-3. **타입 에러 80건** — `next.config.js`가 `ignoreBuildErrors: true`로 덮고 있다
-4. `slotManager.ts` 정리 (감사 10번). 폐기 표시만 되어 있고 파일은 남아 있다:
+2. **타입 에러 80건** — `next.config.js`가 `ignoreBuildErrors: true`로 덮고 있다
+3. `slotManager.ts` 정리 (감사 10번). 폐기 표시만 되어 있고 파일은 남아 있다:
    `src/lib/strategies/slotManager.ts`
-5. 신뢰성 2번 잔여: 주문 생명주기를 **화면에 표시**, UNKNOWN 주문의 자동 조회 확정
+4. 신뢰성 2번 잔여: 주문 생명주기를 **화면에 표시**, UNKNOWN 주문의 자동 조회 확정
+
+~~`middleware.ts`가 `/admin`·`/developer`를 막지 않는다~~ ✅ 해결 (아래 절 참조)
 
 ## 추가 요청 기능 (사용자 제시, 미착수)
 
@@ -353,7 +353,7 @@ PC를 먼저 만들고, 모바일은 같은 컴포넌트를 다른 동선으로 
 ## 검증 명령
 
 ```bash
-npm test          # 유닛 테스트 528개 통과 / 0 실패 (테스트 파일 31개)
+npm test          # 유닛 테스트 567개 통과 / 0 실패 (테스트 파일 32개)
 npm run typecheck # 타입 에러 80건
 npm run build     # 프로덕션 빌드
 ```
@@ -479,3 +479,80 @@ Vercel Hobby는 Cron이 하루 1회뿐이고 그 자리는 `exit-monitor`가 쓴
 - `d6052a9` 가격 없는 종목이 **₩0으로** 뜨던 것 — 0원은 시세가 아니라 고장이다
 - `1edf566` **'live'라고 적으면서 지어낸 수치를 섞던 것** — 시간대·출처 점검
 - `5b28524` 더보기 메뉴 회귀 (위 '미처리 UI' 참조)
+
+## 관리자 화면 차단 (완료)
+
+미들웨어가 `/admin`·`/developer`를 **서버에서** 막는다. 테스트 39개.
+
+### 무엇이 문제였나
+
+`middleware.ts`는 아무것도 막지 않았고, 파일에 그 이유가 주석으로 적혀 있었다 —
+세션이 localStorage에 있어 미들웨어가 볼 수 없다는 것. 사실이었지만 두 가지가 남았다.
+
+1. **`/developer`의 문지기가 위조 가능했다.** `getMockSession()`으로 localStorage의
+   `tg_mock_session_v2`를 읽어 role을 봤다. 콘솔에서 그 JSON의 role만 바꾸면 화면이
+   열렸다 — 문지기가 방문자 주머니에 들어 있던 셈이다
+2. 화면은 열리고 데이터만 403이라 **"잠긴 줄 알았는데 안 잠긴"** 상태였다
+
+### 어떻게 고쳤나
+
+세션 전체를 쿠키로 옮기지 않았다. 그러면 저장소 어댑터·refresh token·4KB 조각내기까지
+로그인 흐름 전체를 건드린다. 대신 **access token만 쿠키(`tg_at`)로 복사**했다.
+원본은 그대로 localStorage에 있고 로그인·로그아웃 코드는 손대지 않았다.
+
+| 파일 | 역할 |
+|---|---|
+| `lib/auth/adminGate.ts` | 통과 판정 (순수 함수 + 조회). 테스트가 붙는 자리 |
+| `middleware.ts` | 쿠키를 꺼내 판정에 넘기고 리다이렉트만 한다 |
+| `components/auth/SessionCookieSync.tsx` | 세션 토큰 → 쿠키 복사. 레이아웃에 상주 |
+| `lib/auth/clientRole.ts` | 화면이 '내 role'을 묻는 하나의 경로 |
+
+핵심 규칙:
+- **role을 토큰에서 읽지 않는다.** JWT payload는 서명 없이 누구나 만든다 —
+  `{"role":"super_admin"}`은 base64 한 번이다. 디코드해 쓰는 값은 `sub`·`exp` 둘뿐이고
+  권한은 Supabase가 서명을 검증한 뒤 돌려준 role로만 정한다
+- **PostgREST 한 번으로 서명 검증과 권한 확인을 같이 한다.** 서명이 틀리면 401이고,
+  RLS(`profiles_self_read`)가 걸려 있어 남의 행은 애초에 안 읽힌다. service role 키를
+  미들웨어에 들고 다니지 않는다
+- **조회에 실패하면 통과시키지 않는다.** 정전에 풀리는 잠금장치는 잠금장치가 아니다.
+  대신 관리자가 잠깐 못 들어오는 쪽을 택했다 (화면 2개고 API는 따로 막혀 있다)
+- **모르는 role 문자열은 막는다.** '일단 통과'를 택하면 역할 하나 추가할 때 문이 열린다
+- `/developer`는 `/admin`보다 등급이 높다 — admin 계정은 /developer에 못 들어간다.
+  기존 `canAccessDeveloper()`와 같은 기준이다. 두 곳이 다르면 화면과 미들웨어가
+  서로 다른 말을 한다
+
+같이 고친 것:
+- `/admin`이 `role !== 'admin'`으로 판정해 **developer·super_admin을 막고 있었다.**
+  등급이 더 높은데 그 화면만 다른 말을 했다 → `canAccessAdmin()` 하나로 통일
+- `/admin`과 `/developer`가 같은 질문에 각자 다른 방법으로 답하고 있었다 →
+  `clientRole.ts` 하나로 모음
+- `/unauthorized`가 거절 사유를 표시한다. `lookup_failed`는 권한 문제가 아니라
+  서버가 확인을 못 한 것이라 '다시 시도'가 답인데, "권한 없음"만 보이면 계정을 의심한다
+
+### 실제로 확인한 것
+
+프로덕션 빌드를 띄우고 curl로 (전부 307 리다이렉트):
+
+| 요청 | 결과 |
+|---|---|
+| 쿠키 없이 `/admin` | `/auth?next=%2Fadmin&reason=no_token` |
+| 쿠키 없이 `/developer` | `/auth?next=%2Fdeveloper&reason=no_token` |
+| `/admin/anything` (하위 경로) | `/auth?next=%2Fadmin%2Fanything&reason=no_token` |
+| 쓰레기 쿠키 | `reason=bad_token` |
+| 만료 토큰 | `reason=expired` (네트워크 안 부름) |
+| **payload에 `role:super_admin`을 심은 위조 토큰** | `reason=unverified` — 거부됨 |
+| `/terminal` (보호 대상 아님) | 200, 그대로 통과 |
+
+**아직 확인 못 한 것**: 실제 관리자 계정으로 통과하는 경로. 이 컨테이너에 진짜 anon
+키가 없어 유닛 테스트(가짜 PostgREST)로만 검증했다. 배포 후 관리자로 `/admin`에
+들어가 보는 것이 남았다 — 만약 막히면 `/unauthorized`의 **사유 코드**를 보면 된다
+(`lookup_failed`면 조회 문제, `insufficient_role`이면 DB의 role 문제다).
+
+**한 번 튕길 수 있다**: 배포 직후 첫 방문은 쿠키가 아직 없어 `/auth`로 갔다가
+되돌아온다. `/auth`가 `next` 파라미터로 원래 목적지에 다시 보내고, 그때는 쿠키가
+생겨 있어 통과한다. `next`는 같은 사이트 경로만 따라간다 — 로그인 화면이
+오픈 리다이렉트가 되면 피싱에 그대로 쓰인다.
+
+**이 장치의 한계**: 미들웨어는 페이지 요청만 막는다. JS 번들 파일 자체는 여전히
+공개 URL이다. 코드를 숨기는 장치가 아니라 화면에 들어가지 못하게 하는 장치이고,
+데이터의 방어선은 계속 API의 `requireAdmin()`이다.

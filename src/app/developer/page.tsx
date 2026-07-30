@@ -1,9 +1,8 @@
 'use client';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect } from 'react';
-import {
-  UserProfile, getMockSession, canAccessDeveloper, ROLE_INFO,
-} from '@/lib/auth';
+import { type UserRole, canAccessDeveloper, ROLE_INFO } from '@/lib/auth';
+import { getSessionAndRole } from '@/lib/auth/clientRole';
 
 // 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
 // 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
@@ -43,7 +42,14 @@ const API_STATUS = [
 ];
 
 export default function DeveloperPage() {
-  const [session,setSession]=useState<UserProfile|null>(null);
+  // role은 서버가 확인해 준 값만 쓴다.
+  //
+  // 예전에는 getMockSession()으로 localStorage의 JSON을 읽어 role을 봤다.
+  // 콘솔에서 그 값을 바꾸면 이 화면이 그대로 열렸다 — 문지기가 방문자의
+  // 주머니에 들어 있던 셈이다. 이제 lib/auth/clientRole.ts가 /api/auth/me에
+  // 물어보고, 그 앞에서 미들웨어가 페이지 진입 자체를 막는다.
+  const [role,setRole]=useState<string|null>(null);
+  const [who,setWho]=useState<string|null>(null);
   const [loading,setLoading]=useState(true);
   const [tab,setTab]=useState<'status'|'logs'|'flags'|'deploy'>('status');
   const [testMode,setTestMode]=useState(true);
@@ -55,17 +61,30 @@ export default function DeveloperPage() {
   });
   const [uptime]=useState({start:'2025-05-13 09:00:00',hours:4,builds:127,deploys:14});
 
-  useEffect(()=>{const s=getMockSession();setSession(s);setLoading(false);},[]);
+  useEffect(()=>{
+    let alive=true;
+    getSessionAndRole().then(r=>{
+      if(!alive) return;
+      setRole(r.role);
+      setWho(r.displayName ?? r.email);
+      setLoading(false);
+    });
+    return ()=>{alive=false;};
+  },[]);
 
   if(loading) return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:T.muted,fontSize:13}}>로딩 중…</div></div>;
 
-  if(!session||!canAccessDeveloper(session.role)) {
+  if(!canAccessDeveloper(role as UserRole|undefined)) {
     return (
       <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center',padding:20,fontFamily:"'Sora',sans-serif"}}>
         <div style={{textAlign:'center',maxWidth:360}}>
           <div style={{fontSize:48,marginBottom:16}}>🔒</div>
           <div style={{color:T.txt,fontWeight:800,fontSize:20,marginBottom:8}}>개발자 전용 페이지</div>
-          <div style={{color:T.muted,fontSize:13,lineHeight:1.6,marginBottom:20}}>developer 또는 super_admin 계정이 필요합니다.</div>
+          <div style={{color:T.muted,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+            developer 또는 super_admin 계정이 필요합니다.
+            {/* 현재 역할을 보여준다. 안 보여주면 '로그인은 했는데 왜 막히지'가 된다 */}
+            {role && <><br/><span style={{fontSize:11}}>현재 역할: <span style={{color:T.ylw}}>{role}</span></span></>}
+          </div>
           <a href="/auth" style={{display:'inline-block',padding:'12px 24px',background:T.acc,color:'#fff',borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none',marginRight:8}}>로그인</a>
           <a href="/" style={{display:'inline-block',padding:'12px 24px',background:T.card,color:T.muted,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,fontSize:13,textDecoration:'none'}}>홈으로</a>
         </div>
@@ -73,7 +92,7 @@ export default function DeveloperPage() {
     );
   }
 
-  const ri=ROLE_INFO[session.role];
+  const ri=ROLE_INFO[role as UserRole];
   const filteredLogs=logFilter==='all'?MOCK_ERRORS:MOCK_ERRORS.filter(e=>e.level===logFilter);
 
   return (
@@ -84,7 +103,7 @@ export default function DeveloperPage() {
           <div style={{width:32,height:32,borderRadius:8,background:`linear-gradient(135deg,${T.prp},#5B21B6)`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>⚙️</div>
           <div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13}}>TRAIGO 개발자 대시보드</div>
-            <div style={{color:T.muted,fontSize:10}}>{session.displayName} · {ri.label}</div>
+            <div style={{color:T.muted,fontSize:10}}>{who ?? '개발자'} · {ri.label}</div>
           </div>
         </div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>

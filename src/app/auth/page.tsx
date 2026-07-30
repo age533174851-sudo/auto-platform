@@ -3,7 +3,7 @@ import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { notifyInfo } from '@/lib/notify/center';
 import {
-  UserProfile, checkPasswordStrength, isValidEmail, getKoreanError,
+  UserProfile, type UserRole, checkPasswordStrength, isValidEmail, getKoreanError,
   getMockSession, setMockSession, clearMockSession,
   mockSignIn, mockSignUp, mockRedeemCode,
   MOCK_USERS, MOCK_INVITE_CODES, ROLE_INFO, canAccessAdmin, canAccessDeveloper,
@@ -106,6 +106,31 @@ function Toast({ msg, type, onClose }: { msg:string; type:'success'|'error'|'inf
   );
 }
 
+/**
+ * 미들웨어가 `?next=`로 알려준 원래 목적지로 되돌려 보낸다.
+ *
+ * 두 가지를 확인하고서만 보낸다:
+ *   1. **같은 사이트의 경로인가** — `//evil.com`이나 `https://evil.com`을
+ *      그대로 따라가면 이 화면이 오픈 리다이렉트가 된다. 로그인 페이지는
+ *      피싱에 가장 많이 쓰이는 자리라 여기서 막아야 한다
+ *   2. **그 role로 갈 수 있는 곳인가** — 못 가는 곳으로 보내면 미들웨어가
+ *      다시 여기로 돌려보내고, 그게 무한 왕복이 된다
+ */
+function redirectToNext(role?: UserRole) {
+  if (typeof window === 'undefined') return;
+  const next = new URLSearchParams(window.location.search).get('next');
+  // '/'로 시작하고 '//'로 시작하지 않는 것만 — 후자는 프로토콜 상대 URL이다
+  if (!next || !next.startsWith('/') || next.startsWith('//')) return;
+
+  const allowed =
+    next.startsWith('/developer') ? canAccessDeveloper(role) :
+    next.startsWith('/admin')     ? canAccessAdmin(role) :
+    true;
+  if (!allowed) return;
+
+  window.location.replace(next);
+}
+
 /* ── Main Auth Page ── */
 export default function AuthPage() {
   const [mode, setMode]               = useState<AuthMode>('login');
@@ -143,7 +168,17 @@ export default function AuthPage() {
           const s = await sbGetSession();
           if (s?.user) {
             const p = await getProfile(s.user.id);
-            if (p) { setSession(p); setMode('profile'); }
+            if (p) {
+              setSession(p); setMode('profile');
+              // 미들웨어가 보낸 경우 원래 가려던 곳으로 되돌려 보낸다.
+              //
+              // 이 화면에 왔다는 것만으로 이미 목적이 절반 달성됐다 —
+              // 레이아웃의 SessionCookieSync가 돌아 세션 쿠키가 생겼다.
+              // 로그인은 되어 있는데 쿠키만 없던 경우(배포 직후 첫 방문)라면
+              // 지금 다시 가면 통과한다. 안 보내주면 사용자는 '로그인돼
+              // 있는데 관리자 페이지가 안 열린다'로만 겪는다.
+              redirectToNext(p.role);
+            }
           }
         } catch {}
       } else {

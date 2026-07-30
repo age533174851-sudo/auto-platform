@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import KeyboardInsetProvider from '@/components/KeyboardInsetProvider';
 import NotifyHost from '@/components/notify/NotifyHost';
+import SessionCookieSync from '@/components/auth/SessionCookieSync';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -112,6 +113,12 @@ document.documentElement.setAttribute(data-theme,t);
       <body style={{ background: 'var(--t-bg)', margin: 0, padding: 0 }}>
         <KeyboardInsetProvider />
         <NotifyHost />
+        {/*
+          미들웨어가 /admin·/developer를 막을 수 있도록 세션 토큰을 쿠키로
+          복사한다. 앱 전체에 있어야 한다 — 관리자 화면에만 두면 그 화면에
+          들어가야 쿠키가 생기고, 들어가려면 쿠키가 있어야 한다.
+        */}
+        <SessionCookieSync />
         {children}
       </body>
     </html>
