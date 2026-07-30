@@ -253,8 +253,6 @@ export async function POST(req: NextRequest) {
             ? (sideUp === 'BUY' ? px * (1 - slPct / 100) : px * (1 + slPct / 100))
             : null);
 
-      const { getSymbolPositionRisk, getFuturesServerTime, getFuturesBalance } =
-        await import('@/lib/exchanges/binanceFutures');
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
       const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
       const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
@@ -262,10 +260,52 @@ export async function POST(req: NextRequest) {
       const { buildManualPlan } = await import('@/lib/engine/manualPlan');
       const { executeOrder } = await import('@/lib/engine/orderExecutor');
 
+      // 이 연결이 어느 거래소인가.
+      //
+      // 예전에는 `exchange: 'binance'`가 **하드코딩**돼 있었다. 연결은 id로만
+      // 찾으므로 Gate 연결이 그대로 들어오는데, 그러면 Gate 키로 바이낸스에
+      // 서명해 보내는 셈이다 — 점검용 조회는 전부 실패하고(전 항목 unknown →
+      // 차단), 통과했다면 엉뚱한 거래소로 주문이 나갔다.
+      const exchange: 'binance' | 'gate' =
+        String(conn.exchange_id ?? conn.exchange ?? '').toLowerCase().includes('gate')
+          ? 'gate' : 'binance';
+
       const apiSecret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+
+      // 로컬 시각은 호출 직후에 찍는다 — 응답을 기다린 뒤 찍으면 왕복 지연이
+      // 그대로 시계 오차가 된다.
       const localMs = Date.now();
-      const serverMs = await getFuturesServerTime(isTestnet);
-      const risk = await getSymbolPositionRisk(conn.api_key, apiSecret, tradeSymbol, isTestnet);
+      let serverMs: number | null = null;
+      let risk: {
+        marginType: string; leverage: number | null;
+        liquidationPrice: number | null; positionAmt: number; markPrice?: number | null;
+      } | null = null;
+      let readBalance: () => Promise<number | null>;
+
+      if (exchange === 'gate') {
+        const gf = await import('@/lib/exchanges/gateFutures');
+        const gp = await import('@/lib/exchanges/gatePlan');
+        serverMs = await gf.getGateServerTime(isTestnet);
+        const contract = gp.toGateContract(tradeSymbol);
+        risk = gp.gatePositionToRisk(
+          await gf.getPositionGateFutures(conn.api_key, apiSecret, contract, isTestnet));
+        readBalance = async () => {
+          const acc: any = await gf.getAccountGateFutures(conn.api_key, apiSecret, isTestnet);
+          const avail = Number(acc?.available);
+          return Number.isFinite(avail) ? avail : null;
+        };
+      } else {
+        const bf = await import('@/lib/exchanges/binanceFutures');
+        serverMs = await bf.getFuturesServerTime(isTestnet);
+        risk = await bf.getSymbolPositionRisk(conn.api_key, apiSecret, tradeSymbol, isTestnet);
+        readBalance = async () => {
+          const bal: any = await bf.getFuturesBalance(conn.api_key, apiSecret, isTestnet);
+          if (!bal?.success) return null;
+          const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
+          return usdt ? usdt.availableBalance : null;
+        };
+      }
+
       const gate = await assertStateConsistent(sb, conn.user_id, isTestnet);
 
       const refPrice = px > 0 ? px : (risk?.markPrice ?? null);
@@ -277,11 +317,7 @@ export async function POST(req: NextRequest) {
       if (!isExit && refPrice && levNum > 0) {
         let available: number | null = null;
         try {
-          const bal: any = await getFuturesBalance(conn.api_key, apiSecret, isTestnet);
-          if (bal?.success) {
-            const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
-            if (usdt) available = usdt.availableBalance;
-          }
+          available = await readBalance();
         } catch { /* null → unknown → 막힌다 */ }
         marginInput = { required: notionalUsd / levNum, available };
       }
@@ -351,7 +387,7 @@ export async function POST(req: NextRequest) {
         connectionId: body.connectionId,
         signalId: `tradingview-${webhookId}`,
         clientOrderId,
-        exchange: 'binance',
+        exchange,
         mode: isTestnet ? 'TESTNET' : 'LIVE',
         plan: built.plan,
         orderType: 'MARKET',

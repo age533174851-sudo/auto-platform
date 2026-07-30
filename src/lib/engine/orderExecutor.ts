@@ -413,34 +413,157 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       };
     }
 
-    // Gate
+    // ── Gate ──
+    //
+    // 이 분기는 바이낸스 경로가 가진 보호를 하나도 갖고 있지 않았다:
+    // 마진 모드 미확인 · 레버리지 설정 결과 무시 · 손절 미부착 ·
+    // 수량을 Math.round(0.4 → 0, 1.6 → 2). 하나씩 채운다.
     const gf = await import('@/lib/exchanges/gateFutures');
-    const contract = plan.symbol.replace('USDT', '_USDT').toUpperCase();
+    const gp = await import('@/lib/exchanges/gatePlan');
+    const contract = gp.toGateContract(plan.symbol);
+    if (!contract) {
+      await update({ status: 'REJECTED', error_message: `Gate 계약 이름을 만들 수 없습니다 (${plan.symbol})` });
+      return { ok: false, status: 'REJECTED', clientOrderId,
+        message: `Gate 계약 이름을 만들 수 없습니다 (${plan.symbol})` };
+    }
 
-    const existing = await gf.findOrderByClientIdGateFutures(apiKey, apiSecret, contract, clientOrderId, testnet);
-    if (existing) {
+    // 수량을 먼저 확정한다. 1계약 미만이면 아무것도 하기 전에 멈춘다 —
+    // 예전에는 Math.round로 0을 만들어 보냈다.
+    const sized = gp.toGateSize(plan.quantity, plan.side);
+    if (!sized.ok) {
+      await update({ status: 'REJECTED', error_message: sized.reason });
+      return { ok: false, status: 'REJECTED', clientOrderId, message: sized.reason };
+    }
+
+    // 손절 방향을 미리 검사한다. 주문을 낸 뒤에 알면 이미 늦다.
+    const stopSpec = gp.gateStopSpec(plan.side, args.stopLoss ?? null);
+    if (!args.reduceOnly && !stopSpec.ok) {
+      await update({ status: 'REJECTED', error_message: stopSpec.reason });
+      return { ok: false, status: 'REJECTED', clientOrderId,
+        message: `손절을 걸 수 없어 진입하지 않습니다 — ${stopSpec.reason}` };
+    }
+
+    // 중복 확인. **조회에 실패하면 보내지 않는다.**
+    // "없음"과 "확인 못 함"을 같이 취급하면, 레이트리밋 한 번이 중복 체결이
+    // 된다 (바이낸스 경로와 같은 규칙).
+    const lookup = await gf.findOrderByClientIdGateFutures(apiKey, apiSecret, contract, clientOrderId, testnet);
+    if (!lookup.ok) {
+      const msg = `중복 확인 실패로 주문 중단: ${lookup.error || '조회 실패'}`;
+      await update({ status: 'FAILED', error_message: msg });
+      return { ok: false, status: 'FAILED', clientOrderId, message: msg };
+    }
+    if (lookup.order) {
+      const existing = lookup.order;
       await update({ status: 'RECONCILED', exchange_order_id: String(existing.id), reconciled_at: new Date().toISOString() });
       return { ok: true, status: 'RECONCILED', clientOrderId, exchangeOrderId: String(existing.id),
         duplicate: true, message: '거래소에 이미 존재하는 주문' };
     }
 
-    await gf.setLeverageGateFutures(apiKey, apiSecret, contract, plan.leverage, testnet);
-    await update({ status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1 });
+    // ── 레버리지 + 격리 확인 ──
+    // 결과를 버리지 않는다. Gate에서 leverage=0은 교차 마진이고, 교차면 한
+    // 종목의 손실이 지갑 전체로 번진다 (바이낸스 경로의 ISOLATED 강제와 같은 이유).
+    // 청산 주문은 건너뛴다 — 나가는 주문에 배율을 다시 설정할 이유가 없다.
+    if (!args.reduceOnly) {
+      const lev = await gf.setLeverageGateFutures(apiKey, apiSecret, contract, plan.leverage, testnet);
+      if (!lev.success) {
+        await update({ status: 'REJECTED', error_message: lev.message });
+        return { ok: false, status: 'REJECTED', clientOrderId,
+          message: `Gate 배율·마진 모드를 확정하지 못해 주문을 중단합니다 — ${lev.message}` };
+      }
+    }
+
+    // 진입 직전 포지션 수량을 남긴다. UNKNOWN이 됐을 때 교차 확인의 기준값이다.
+    let gatePosBefore: number | null = null;
+    try {
+      const before = await gf.getPositionGateFutures(apiKey, apiSecret, contract, testnet);
+      gatePosBefore = before ? Number(before.size) || 0 : 0;
+    } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
+
+    await update({
+      status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
+      pos_qty_before: gatePosBefore,
+    });
 
     let gres: any;
     try {
       gres = await gf.placeOrderGateFutures(apiKey, apiSecret, {
         contract,
-        size: plan.side === 'LONG' ? Math.round(plan.quantity) : -Math.round(plan.quantity),
-        price: '0', tif: 'ioc', clientOrderId,
+        size: sized.size,
+        price: orderType === 'LIMIT' ? String(args.limitPrice) : '0',
+        tif: orderType === 'LIMIT' ? 'gtc' : 'ioc',
+        reduceOnly: !!args.reduceOnly,
+        clientOrderId,
       }, testnet);
     } catch (e: any) {
       await update({ status: 'UNKNOWN', error_message: `응답 없음: ${e?.message || e}` });
       return { ok: false, status: 'UNKNOWN', clientOrderId, message: '응답 없음 — 대조 필요' };
     }
 
-    await update({ status: 'ACKED', exchange_order_id: String(gres?.id), acked_at: new Date().toISOString() });
-    return { ok: true, status: 'ACKED', clientOrderId, exchangeOrderId: String(gres?.id), message: '주문 접수 (Gate)' };
+    // ── 체결됐는가 ──
+    //
+    // 시장가는 `tif: 'ioc'`로 나간다. 유동성이 없으면 Gate는 200 + `finished`에
+    // `left`(미체결 수량)를 그대로 담아 돌려준다 — "정상 처리됐고 하나도 안
+    // 붙었다"는 뜻이다. 이걸 ACKED로 기록하면 없는 포지션에 손절을 걸려 하고,
+    // 화면에는 손절 실패라는 엉뚱한 이유가 뜬다.
+    const fill = gp.gateFillOf(gres);
+    if (fill.unfilled) {
+      await update({ status: 'REJECTED', exchange_order_id: String(gres?.id ?? ''),
+        filled_qty: 0, error_message: fill.reason });
+      return { ok: false, status: 'REJECTED', clientOrderId,
+        exchangeOrderId: gres?.id != null ? String(gres.id) : undefined, filledQty: 0,
+        message: `체결되지 않았습니다 — ${fill.reason}` };
+    }
+
+    await update({
+      status: 'ACKED', exchange_order_id: String(gres?.id ?? ''),
+      acked_at: new Date().toISOString(),
+      // 못 읽었으면 적지 않는다 — 0으로 적으면 '체결 없음'이 사실이 된다
+      ...(fill.filledQty != null ? { filled_qty: fill.filledQty } : {}),
+      ...(fill.avgPrice != null ? { avg_price: fill.avgPrice } : {}),
+    });
+
+    // ── 손절 부착 ──
+    //
+    // 청산 주문에는 붙이지 않는다. 진입에는 반드시 붙이고, **실패하면 방금 연
+    // 포지션을 즉시 닫는다** — 감사 지적 3번과 같은 규칙이다. 포지션 크기는
+    // 손절이 있다는 전제로 계산됐으므로, 그 전제가 없으면 크기를 정당화할
+    // 근거가 사라진다.
+    //
+    // Gate의 price_orders 호출은 실계좌로 검증되지 않았다. 그래서 이 되돌리기가
+    // 특히 중요하다 — API 모양이 틀렸더라도 결과는 '보호 없는 포지션'이 아니라
+    // '포지션 없음 + 실패 보고'가 된다.
+    let gateSlId: string | undefined;
+    if (!args.reduceOnly && args.stopLoss) {
+      const sl = await gf.placeStopGateFutures(apiKey, apiSecret, {
+        contract, rule: stopSpec.rule, triggerPrice: args.stopLoss,
+        autoSize: stopSpec.autoSize, clientOrderId: `${clientOrderId}SL`,
+      }, testnet);
+
+      if (sl.success) {
+        gateSlId = sl.orderId;
+        await update({ sl_order_id: sl.orderId ?? null });
+      } else {
+        const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
+        const msg = `손절을 걸지 못해 포지션을 되돌렸습니다 — ${sl.message}`
+          + (undo.success ? '' : ` / ⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+        await update({ status: 'FAILED', error_message: msg });
+        return { ok: false, status: 'FAILED', clientOrderId,
+          exchangeOrderId: String(gres?.id), message: msg };
+      }
+    }
+
+    return {
+      ok: true, status: 'ACKED', clientOrderId,
+      exchangeOrderId: gres?.id != null ? String(gres.id) : undefined,
+      filledQty: fill.filledQty ?? undefined,
+      avgPrice: fill.avgPrice ?? undefined,
+      slOrderId: gateSlId,
+      message: `주문 접수 (Gate · ${sized.size}계약)`
+        + (sized.reason ? ` · ${sized.reason}` : '')
+        + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
+            ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')
+        + (gateSlId ? ' · 손절 부착' : ''),
+    };
 
   } catch (e: any) {
     await update({ status: 'FAILED', error_message: e?.message || String(e) });
@@ -494,6 +617,16 @@ export async function reconcilePendingOrders(
         );
       }
     } catch { posBySymbol = null; }   // null이면 교차 확인 불가로 취급된다
+  } else {
+    // Gate도 교차 확인을 한다. 예전에는 이 분기가 없어서 '주문이 안 보임'만으로
+    // 판단했다 — 조회가 늦게 반영되는 거래소에서 그건 중복 주문의 근거가 된다.
+    try {
+      const gf = await import('@/lib/exchanges/gateFutures');
+      const rows = await gf.getPositionsGateFutures(creds.apiKey, creds.apiSecret, creds.testnet);
+      posBySymbol = new Map(
+        rows.map((p: any) => [String(p.contract || '').replace('_', '').toUpperCase(), Number(p.size) || 0]),
+      );
+    } catch { posBySymbol = null; }
   }
 
   for (const o of pending) {
@@ -564,23 +697,38 @@ export async function reconcilePendingOrders(
         }
       } else {
         const gf = await import('@/lib/exchanges/gateFutures');
-        const contract = o.symbol.replace('USDT', '_USDT').toUpperCase();
-        const hit = await gf.findOrderByClientIdGateFutures(creds.apiKey, creds.apiSecret, contract, o.client_order_id, creds.testnet);
+        const gp = await import('@/lib/exchanges/gatePlan');
+        // 계약 이름 변환은 toGateContract 한 곳에만 둔다. 예전에는 여기서
+        // `replace('USDT','_USDT')`를 직접 했다 — 소문자 심볼이나 USDT가 앞에
+        // 오는 이름에서 다른 결과가 나온다.
+        const contract = gp.toGateContract(o.symbol);
+        const hit = await gf.findOrderByClientIdGateFutures(
+          creds.apiKey, creds.apiSecret, contract, o.client_order_id, creds.testnet);
 
-        // Gate 경로는 포지션 교차 확인이 아직 없다. 그래서 "안 보임"만으로
-        // FAILED를 찍지 않고, 반영 대기 시간이 지났는지만 본다. 그 시간 안이면
-        // 다음 대조로 미룬다 — Binance와 같은 이유다.
         const sentAt = o.sent_at || o.created_at;
         const elapsedMs = sentAt ? Date.now() - new Date(sentAt).getTime() : 0;
+
+        // 기준값이 없으면 비교가 불가능하므로 교차 확인을 생략한다 (바이낸스와 동일).
+        const gBefore = o.pos_qty_before;
+        const position = gBefore === null || gBefore === undefined ? undefined : {
+          qtyBefore: Number(gBefore),
+          qtyNow: posBySymbol ? (posBySymbol.get(String(o.symbol).toUpperCase()) ?? 0) : null,
+        };
+
         const verdict = resolveUnknown({
           clientOrderId: o.client_order_id || null, elapsedMs,
-          query: { ok: true, order: hit ? { status: 'NEW', orderId: hit.id } : null },
+          // 조회 실패를 '주문 없음'으로 넘기지 않는다 — resolveUnknown이
+          // ok:false를 '확인 못 함'으로 다룬다.
+          query: hit.ok
+            ? { ok: true, order: hit.order ? { status: 'NEW', orderId: hit.order.id } : null }
+            : { ok: false, order: null, error: hit.error },
+          position,
         });
 
         if (verdict.resolved) {
           await updateOrderRow(sb, o.id, {
             status: verdict.state === 'FAILED' ? 'FAILED' : 'RECONCILED',
-            exchange_order_id: hit ? String(hit.id) : null,
+            exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
             error_message: verdict.state === 'FAILED' ? verdict.reason : null,
             reconciled_at: new Date().toISOString(),
             resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),

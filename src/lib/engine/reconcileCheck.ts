@@ -33,7 +33,7 @@ export async function gatherAndReconcile(
   const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
 
   const { data: conn } = await sb.from('exchange_connections')
-    .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+    .select('exchange_id, exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
     .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
 
   if (!conn) return { reachable: false, verdict: null, error: '활성 거래소 연결이 없습니다', ...empty };
@@ -41,46 +41,100 @@ export async function gatherAndReconcile(
     return { reachable: false, verdict: null, error: '출금 권한 키는 사용할 수 없습니다', ...empty };
   }
 
-  const bf = await import('@/lib/exchanges/binanceFutures');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const key = (conn as any).api_key as string;
   const secret = decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? '');
 
-  const posRes: any = await bf.getFuturesPositions(key, secret, testnet);
-  if (!posRes?.success) {
-    // 조회 실패를 "포지션 없음"으로 처리하면 앱의 모든 포지션이 불일치로 잡힌다.
-    return { reachable: false, verdict: null, error: posRes?.message || '거래소 조회 실패', ...empty };
-  }
+  // ── 어느 거래소인가 ──
+  //
+  // 예전에는 바이낸스만 읽었다. Gate 연결에서 이 함수를 부르면 Gate 키로
+  // 바이낸스에 물어보게 되고, 실패 → `reachable: false` → 거래 전 점검이
+  // '확인 못 함'으로 **모든 Gate 주문을 막았다.**
+  //
+  // 판정(reconcileState)은 거래소를 모른다 — PositionView만 받는다. 그래서
+  // 읽는 쪽만 갈라 준다.
+  const isGate = String((conn as any).exchange_id ?? (conn as any).exchange ?? '')
+    .toLowerCase().includes('gate');
 
   const exchangePositions: PositionView[] = [];
-  for (const p of (posRes.positions as any[])) {
-    let hasStop = false;
-    try {
-      const open = await bf.getFuturesOpenOrders(key, secret, testnet, p.symbol);
-      hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
-        String(o?.type || '').toUpperCase() === 'STOP_MARKET');
-    } catch { hasStop = false; }
-
-    exchangePositions.push({
-      symbol: p.symbol,
-      side: p.side === 'SHORT' ? 'SHORT' : 'LONG',
-      qty: Math.abs(Number(p.amount)),
-      leverage: Number(p.leverage) || null,
-      marginType: p.marginType || null,
-      hasProtectiveStop: hasStop,
-      // 대조에는 쓰지 않지만 거래 전 점검이 쓴다 (PositionView 주석 참조).
-      // 0이면 거래소가 안 준 것이라 null로 둔다 — 0은 청산가가 아니다.
-      liquidationPrice: Number(p.liquidationPrice) || null,
-    });
-  }
-
   let exchangeOpenOrders: OrderView[] | undefined;
-  try {
-    const open = await bf.getFuturesOpenOrders(key, secret, testnet);
-    exchangeOpenOrders = (Array.isArray(open) ? open : []).map((o: any) => ({
-      clientOrderId: String(o.clientOrderId || ''), symbol: String(o.symbol || ''),
-    }));
-  } catch { exchangeOpenOrders = undefined; }
+
+  if (isGate) {
+    const gf = await import('@/lib/exchanges/gateFutures');
+    const gp = await import('@/lib/exchanges/gatePlan');
+
+    let gatePositions: any[];
+    try {
+      gatePositions = await gf.getPositionsGateFutures(key, secret, testnet);
+    } catch (e: any) {
+      return { reachable: false, verdict: null,
+        error: `Gate 포지션 조회 실패: ${e?.message || e}`, ...empty };
+    }
+
+    for (const p of gatePositions) {
+      // 변환은 gatePositionToRisk 한 곳에만 둔다 (leverage 0 = 교차 등).
+      const r = gp.gatePositionToRisk(p)!;
+      // 조건부 주문 목록으로 보호주문 유무를 판정한다. 못 읽으면 **있다고
+      // 가정하지 않는다** — 없는 것으로 보면 대조가 '손절 소실'을 띄우고
+      // 주문이 막히는데, 그게 있다고 보는 것보다 안전하다.
+      const priceOrders = await gf.getPriceOrdersGateFutures(key, secret, p.contract, testnet);
+      exchangePositions.push({
+        // Gate 계약명을 앱 심볼 모양으로 되돌린다 — 대조는 심볼로 짝을 맞춘다
+        symbol: String(p.contract || '').replace('_', ''),
+        side: r.positionAmt < 0 ? 'SHORT' : 'LONG',
+        qty: Math.abs(r.positionAmt),
+        leverage: r.leverage,
+        marginType: r.marginType,
+        hasProtectiveStop: priceOrders == null ? false : priceOrders.length > 0,
+        liquidationPrice: r.liquidationPrice,
+      });
+    }
+
+    // Gate 미체결 주문. clientOrderId는 't-' 접두사가 붙어 저장되므로 떼어낸다.
+    try {
+      const rows = await gf.getOpenOrdersGateFutures(key, secret, testnet);
+      exchangeOpenOrders = rows.map(o => ({
+        clientOrderId: String(o.text || '').replace(/^t-/, ''),
+        symbol: String(o.contract || '').replace('_', ''),
+      }));
+    } catch { exchangeOpenOrders = undefined; }
+
+  } else {
+    const bf = await import('@/lib/exchanges/binanceFutures');
+    const posRes: any = await bf.getFuturesPositions(key, secret, testnet);
+    if (!posRes?.success) {
+      // 조회 실패를 "포지션 없음"으로 처리하면 앱의 모든 포지션이 불일치로 잡힌다.
+      return { reachable: false, verdict: null, error: posRes?.message || '거래소 조회 실패', ...empty };
+    }
+
+    for (const p of (posRes.positions as any[])) {
+      let hasStop = false;
+      try {
+        const open = await bf.getFuturesOpenOrders(key, secret, testnet, p.symbol);
+        hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
+          String(o?.type || '').toUpperCase() === 'STOP_MARKET');
+      } catch { hasStop = false; }
+
+      exchangePositions.push({
+        symbol: p.symbol,
+        side: p.side === 'SHORT' ? 'SHORT' : 'LONG',
+        qty: Math.abs(Number(p.amount)),
+        leverage: Number(p.leverage) || null,
+        marginType: p.marginType || null,
+        hasProtectiveStop: hasStop,
+        // 대조에는 쓰지 않지만 거래 전 점검이 쓴다 (PositionView 주석 참조).
+        // 0이면 거래소가 안 준 것이라 null로 둔다 — 0은 청산가가 아니다.
+        liquidationPrice: Number(p.liquidationPrice) || null,
+      });
+    }
+
+    try {
+      const open = await bf.getFuturesOpenOrders(key, secret, testnet);
+      exchangeOpenOrders = (Array.isArray(open) ? open : []).map((o: any) => ({
+        clientOrderId: String(o.clientOrderId || ''), symbol: String(o.symbol || ''),
+      }));
+    } catch { exchangeOpenOrders = undefined; }
+  }
 
   // ── 청산 주문은 포지션이 아니다 ──
   //

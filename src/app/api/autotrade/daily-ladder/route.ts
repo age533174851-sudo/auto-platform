@@ -358,14 +358,41 @@ export async function POST(req: NextRequest) {
     // 심볼별 조회가 필요한 이유: getFuturesPositions는 수량 0을 걸러내므로
     // 신규 진입 심볼의 마진 모드가 그 목록에 없다.
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
-    const bfPre = await import('@/lib/exchanges/binanceFutures');
     const apiSecretPre = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
 
-    // 로컬 시각을 호출 직후에 찍는다. 응답을 기다린 뒤 찍으면 왕복 지연이
-    // 그대로 오차로 계산돼, 시계가 정확해도 실패로 뜬다.
+    // ── 거래소별로 읽는다 ──
+    //
+    // 예전에는 바이낸스 API만 불렀다. Gate 연결이면 Gate 키로 바이낸스에
+    // 물어보게 되고, 실패 → 마진 모드 unknown → 필수 항목 차단으로
+    // **모든 Gate 주문이 막혔다.** 시계도 다른 회사 서버에 물어보는 셈이었다.
+    //
+    // 로컬 시각은 호출 직후에 찍는다. 응답을 기다린 뒤 찍으면 왕복 지연이
+    // 그대로 오차로 계산돼 시계가 정확해도 실패로 뜬다.
+    let serverMs: number | null = null;
+    let risk: { marginType: string; leverage: number | null;
+                liquidationPrice: number | null; positionAmt: number } | null = null;
     const localMs = Date.now();
-    const serverMs = await bfPre.getFuturesServerTime(useTestnet);
-    const risk = await bfPre.getSymbolPositionRisk(conn.api_key, apiSecretPre, symbol, useTestnet);
+
+    if (exchange === 'gate') {
+      const gfPre = await import('@/lib/exchanges/gateFutures');
+      const gpPre = await import('@/lib/exchanges/gatePlan');
+      serverMs = await gfPre.getGateServerTime(useTestnet);
+      const contractPre = gpPre.toGateContract(symbol);
+      const gpos = await gfPre.getPositionGateFutures(conn.api_key, apiSecretPre, contractPre, useTestnet);
+      // 변환은 gatePositionToRisk 한 곳에만 둔다 — 'leverage 0은 교차'를
+      // 호출자마다 다시 적으면 한 곳을 고쳐도 나머지가 조용히 틀린 채 남는다.
+      risk = gpPre.gatePositionToRisk(gpos);
+    } else {
+      const bfPre = await import('@/lib/exchanges/binanceFutures');
+      serverMs = await bfPre.getFuturesServerTime(useTestnet);
+      const r = await bfPre.getSymbolPositionRisk(conn.api_key, apiSecretPre, symbol, useTestnet);
+      if (r) {
+        risk = {
+          marginType: r.marginType, leverage: r.leverage,
+          liquidationPrice: r.liquidationPrice, positionAmt: r.positionAmt,
+        };
+      }
+    }
 
     const checklist = runChecklist({
       mode: { disposition: modeGate.disposition, reason: modeGate.reason },

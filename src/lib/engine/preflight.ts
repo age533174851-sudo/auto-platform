@@ -61,14 +61,50 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
     /* 넣지 않는다 → unknown */
   }
 
+  // 1-b. 어느 거래소인가.
+  //
+  // 아래의 시계·포지션·잔고는 **거래소마다 다른 호스트와 다른 서명**이다.
+  // 예전에는 전부 바이낸스로 갔다. Gate 계정에서는 Gate 키로 바이낸스를
+  // 부르는 셈이라 모든 조회가 실패했고, 점검은 전 항목 unknown이 되어
+  // 주문을 막았다 — 안전하게 틀리기는 했지만, 화면에는 "확인 불가"만 남고
+  // Gate 사용자는 아무것도 미리 볼 수 없었다.
+  //
+  // 연결을 한 번만 읽어 아래 두 곳에서 같이 쓴다.
+  let conn: any = null;
+  let secret = '';
+  let isGate = false;
+  try {
+    const { data } = await sb.from('exchange_connections')
+      .select('api_key, api_secret_enc, encrypted_secret, exchange_id, exchange')
+      .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
+    if (data) {
+      conn = data;
+      const { decryptSecret } = await import('@/lib/exchanges/crypto');
+      secret = decryptSecret(data.api_secret_enc ?? data.encrypted_secret ?? '');
+      const tag = String(data.exchange_id ?? data.exchange ?? '').toLowerCase();
+      isGate = tag.includes('gate');
+    }
+  } catch {
+    /* conn이 null로 남는다 → 아래 항목들은 unknown */
+  }
+
   // 2. 시계. 공개 엔드포인트라 키 없이도 읽는다.
   //
   // 로컬 시각을 **호출 직후**에 찍는다. 응답을 기다린 뒤에 찍으면 왕복
   // 지연이 그대로 오차로 계산돼, 시계가 정확해도 실패로 뜬다.
+  //
+  // 주문을 보낼 거래소의 시각을 읽는다. 다른 회사 서버와 맞는지를 재면
+  // 그건 다른 것을 재는 것이다.
   try {
-    const { getFuturesServerTime } = await import('@/lib/exchanges/binanceFutures');
     const localMs = Date.now();
-    const serverMs = await getFuturesServerTime(testnet);
+    let serverMs: number | null = null;
+    if (isGate) {
+      const gf = await import('@/lib/exchanges/gateFutures');
+      serverMs = await gf.getGateServerTime(testnet);
+    } else {
+      const { getFuturesServerTime } = await import('@/lib/exchanges/binanceFutures');
+      serverMs = await getFuturesServerTime(testnet);
+    }
     if (serverMs != null) input.clock = { localMs, serverMs };
   } catch {
     /* unknown */
@@ -102,14 +138,24 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
   // 주문 경로(daily-ladder)도 같은 함수를 쓴다. 여기서 다른 방법으로 읽으면
   // 미리 본 결과와 실제로 막히는 근거가 갈린다 — 이 프로젝트가 상태 대조를
   // 공용화한 것과 같은 이유다.
+  // Gate에서는 포지션 레버리지 0이 교차 마진이다 — isGateIsolated가 그 판정을
+  // 갖고 있다. 여기서 문자열을 직접 비교하면 판정이 두 곳으로 갈린다.
   try {
-    const { data: conn } = await sb.from('exchange_connections')
-      .select('api_key, api_secret_enc, encrypted_secret')
-      .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
-    if (conn) {
+    if (conn && isGate) {
+      const gf = await import('@/lib/exchanges/gateFutures');
+      const gp = await import('@/lib/exchanges/gatePlan');
+      const pos = await gf.getPositionGateFutures(conn.api_key, secret, gp.toGateContract(symbol), testnet);
+      const risk = gp.gatePositionToRisk(pos);
+      if (risk) {
+        input.marginType = risk.marginType;
+        input.existingPositionQty = Math.abs(risk.positionAmt);
+        if (risk.liquidationPrice != null) input.liquidationPrice = risk.liquidationPrice;
+        if (risk.leverage != null && intendedLeverage != null) {
+          input.leverage = { actual: risk.leverage, intended: intendedLeverage };
+        }
+      }
+    } else if (conn) {
       const bf = await import('@/lib/exchanges/binanceFutures');
-      const { decryptSecret } = await import('@/lib/exchanges/crypto');
-      const secret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
       const risk = await bf.getSymbolPositionRisk(conn.api_key, secret, symbol, testnet);
       if (risk) {
         input.marginType = risk.marginType || null;
@@ -119,27 +165,32 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
           input.leverage = { actual: risk.leverage, intended: intendedLeverage };
         }
       }
-      // 못 읽었으면 넣지 않는다 → unknown → 필수 항목이라 막는다.
-      // 여기서 'isolated'로 가정하면 CROSS 계좌의 첫 주문이 그대로 나간다.
     }
+    // 못 읽었으면 넣지 않는다 → unknown → 필수 항목이라 막는다.
+    // 여기서 'isolated'로 가정하면 CROSS 계좌의 첫 주문이 그대로 나간다.
   } catch {
     /* unknown */
   }
 
   // 4. 증거금
   try {
-    const { data: conn } = await sb.from('exchange_connections')
-      .select('api_key, api_secret_enc, encrypted_secret')
-      .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
     if (conn && requiredMargin != null) {
-      const bf = await import('@/lib/exchanges/binanceFutures');
-      const { decryptSecret } = await import('@/lib/exchanges/crypto');
-      const secret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
-      const bal: any = await bf.getFuturesBalance(conn.api_key, secret, testnet);
-      if (bal?.success) {
-        const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
-        if (usdt) {
-          input.margin = { required: requiredMargin, available: usdt.availableBalance };
+      if (isGate) {
+        // Gate 선물 계좌는 USDT 단일 통화다 — available이 곧 가용 증거금이다.
+        const gf = await import('@/lib/exchanges/gateFutures');
+        const acc: any = await gf.getAccountGateFutures(conn.api_key, secret, testnet);
+        const avail = Number(acc?.available);
+        if (Number.isFinite(avail)) {
+          input.margin = { required: requiredMargin, available: avail };
+        }
+      } else {
+        const bf = await import('@/lib/exchanges/binanceFutures');
+        const bal: any = await bf.getFuturesBalance(conn.api_key, secret, testnet);
+        if (bal?.success) {
+          const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
+          if (usdt) {
+            input.margin = { required: requiredMargin, available: usdt.availableBalance };
+          }
         }
       }
     }
