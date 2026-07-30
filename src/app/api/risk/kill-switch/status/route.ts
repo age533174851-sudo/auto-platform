@@ -47,13 +47,28 @@ export async function GET(req: NextRequest) {
           reason: state.triggerReason || '한도 초과', equity, drawdownPct: status.daily.drawdownPct,
           action: state.actionMode, mode: testnet ? 'TESTNET' : 'LIVE',
         });
+        // 자동 발동도 여기서 실제로 실행한다. 예전에는 job을 적재하고 Worker가
+        // 실행했는데, 그 워커를 쓰지 않게 된 뒤로 한도를 넘겨 자동 발동해도
+        // 포지션이 그대로 남았다. 수동 발동(trigger)과 같은 문제였다.
         try {
-          const { enqueueJob } = await import('@/lib/jobs');
-          const q = await enqueueJob(sb, { userId: uid, connectionId, action: 'KILL_SWITCH_EXECUTE', mode: testnet ? 'TESTNET' : 'LIVE', payload: { actionMode: state.actionMode, reason: state.triggerReason }, priority: 0, maxAttempts: 10 });
-          exec = { queued: true, jobId: q.jobId };
-        } catch { exec = { error: true }; }
+          const { loadBinanceCreds } = await import('@/lib/exchanges/loadCreds');
+          const { executeKillActions } = await import('@/lib/risk/killSwitch');
+          const creds = await loadBinanceCreds(sb, uid, connectionId);
+          if (!creds.ok) {
+            exec = { ran: false, error: creds.error,
+              message: creds.message || 'API 키를 읽지 못해 취소·종료를 실행하지 못했습니다' };
+          } else {
+            const r = await executeKillActions(sb, uid, connectionId, {
+              key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+              actionMode: state.actionMode,
+            });
+            exec = { ran: true, ...r };
+          }
+        } catch (e: any) {
+          exec = { ran: false, error: 'execute_failed', message: e?.message || '취소·종료 실행 실패' };
+        }
 
-        // 🚨 즉시 텔레그램 알림 (Worker 실행 결과는 Worker가 추가 발송)
+        // 🚨 즉시 텔레그램 알림 (실행 결과는 위 exec에 담겨 응답으로 나간다)
         try {
           const { sendTelegramAlert } = await import('@/lib/notify/telegram');
           await sendTelegramAlert({

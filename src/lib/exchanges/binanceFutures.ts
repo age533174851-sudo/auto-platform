@@ -227,6 +227,119 @@ export async function closeAllPositions(key: string, secret: string, testnet = t
 }
 
 // 현재 잔여 포지션/주문 수 (reconciliation용)
+/**
+ * 포지션을 비율로 줄인다 (부분 청산).
+ *
+ * worker/src/binance.ts의 closePositionPct를 앱으로 옮긴 것이다. 그 워커는
+ * Binance IP 지역 차단으로 쓰지 않고 있어서, 그쪽에만 있던 이 기능은 호출해도
+ * 아무 일이 일어나지 않았다.
+ *
+ * 지키는 것 넷:
+ *  - 포지션이 없으면 **성공**이다. 이미 원하는 상태이므로 오류로 만들면
+ *    화면이 "청산 실패"를 띄우고 사용자가 다시 누른다
+ *  - 방향이 다르면 **거부**한다. 롱을 닫으라는 요청에 숏이 열려 있으면
+ *    그건 상태가 어긋난 것이고, 그때 시장가를 보내면 새 포지션이 생긴다
+ *  - 수량은 **내림**한다. 올리면 보유량을 넘겨 거래소가 거부하거나,
+ *    reduceOnly가 아니었다면 반대 포지션이 열린다
+ *  - 계산된 수량이 최소 단위에 못 미치면 **전량**으로 올린다. 1%를 닫으려다
+ *    아무것도 못 닫는 것보다, 남길 수 없는 양이면 전부 닫는 편이 낫다
+ *    (그 사실을 closedQty로 돌려주므로 화면이 숨기지 않을 수 있다)
+ */
+/**
+ * 부분 청산 수량 계산. 순수 함수 — 테스트가 붙는 자리다.
+ *
+ * 여기서 틀리면 조용하다. 조금 더 닫히거나 덜 닫히는 것은 화면에서 알 수 없고,
+ * 그 차이가 남은 포지션의 청산가를 바꾼다.
+ */
+export function closeQuantityFor(
+  totalQty: number, percent: number, stepSize: number, minQty: number,
+): { qty: number; fullClose: boolean; reason: string } {
+  const total = Math.abs(Number(totalQty) || 0);
+  if (total <= 0) return { qty: 0, fullClose: false, reason: '포지션이 없습니다' };
+
+  // 말이 안 되는 비율이면 **거래하지 않는다.**
+  //
+  // 처음에는 `Number(percent) || 100`으로 두고 "0이나 음수는 전량"이라고 적었다.
+  // 그런데 실제 동작은 음수를 1%로 조이고 있었고(주석과 코드가 달랐다), 어느
+  // 쪽이든 **잘못된 입력으로 실제 주문을 낸다.** 0%는 '아무것도 하지 않음'이고
+  // 음수는 뜻이 없다 — 그때 100%로 해석해 전량을 닫으면 최악이고, 1%로 조여
+  // 조금 닫는 것도 요청하지 않은 거래다.
+  const raw = Number(percent);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return { qty: 0, fullClose: false,
+      reason: `비율이 유효하지 않습니다 (${percent}). 추측해서 청산하지 않습니다` };
+  }
+  // 여기부터는 의도가 읽히는 값이다. 0.5%처럼 너무 작으면 1%로, 100 초과는
+  // 보유량보다 많이 닫으라는 뜻이라 전량으로 조인다.
+  const pct = Math.max(1, Math.min(100, raw));
+
+  // 내림한다. 올리면 보유량을 넘겨 거래소가 거부하거나, reduceOnly가 아니었다면
+  // 반대 포지션이 열린다.
+  let qty = stepSize > 0 ? roundToStep(total * (pct / 100), stepSize) : total * (pct / 100);
+  let fullClose = pct >= 100;
+  let reason = `${pct}%`;
+
+  if (qty < minQty) {
+    // 남길 수 없는 양이면 전부 닫는다. 1%를 닫으려다 아무것도 못 닫는 것보다 낫다.
+    // 다만 그 사실을 숨기지 않는다 — 호출자가 화면에 적을 수 있게 이유를 돌려준다.
+    qty = stepSize > 0 ? roundToStep(total, stepSize) : total;
+    fullClose = true;
+    reason = `${pct}%가 최소 단위(${minQty}) 미만이라 전량`;
+  }
+  if (qty <= 0 || qty < minQty) {
+    return { qty: 0, fullClose: false, reason: `종료 수량이 최소 단위(${minQty}) 미만입니다` };
+  }
+  return { qty, fullClose, reason };
+}
+
+export async function closePositionPercent(
+  key: string, secret: string, symbol: string,
+  positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
+): Promise<{ success: boolean; closedQty: number; fullClose: boolean; message: string }> {
+  try {
+    const sym = symbol.toUpperCase().replace('/', '');
+    const posRes: any = await getFuturesPositions(key, secret, testnet);
+    if (!posRes?.success) {
+      return { success: false, closedQty: 0, fullClose: false,
+        message: `포지션 조회 실패: ${posRes?.message || '사유 미상'}` };
+    }
+    const pos = (posRes.positions as FuturesPosition[])
+      .find(p => p.symbol.toUpperCase() === sym);
+    if (!pos || Math.abs(pos.amount) === 0) {
+      return { success: true, closedQty: 0, fullClose: false, message: '이미 포지션이 없습니다' };
+    }
+    if (pos.side !== positionSide) {
+      return { success: false, closedQty: 0, fullClose: false,
+        message: `방향 불일치 — 요청 ${positionSide}, 실제 ${pos.side}. 상태를 먼저 대조하세요` };
+    }
+
+    const filters = await getSymbolFilters(sym, testnet);
+    const calc = closeQuantityFor(
+      pos.amount, percent, filters?.stepSize ?? 0, filters?.minQty ?? 0);
+    if (calc.qty <= 0) {
+      return { success: false, closedQty: 0, fullClose: false, message: calc.reason };
+    }
+    const { qty, fullClose } = calc;
+
+    const side: 'BUY' | 'SELL' = pos.side === 'LONG' ? 'SELL' : 'BUY';
+    const r = await placeFuturesOrder(key, secret, {
+      symbol: sym, side, type: 'MARKET', quantity: qty, reduceOnly: true,
+    }, testnet);
+
+    if (!r.success) {
+      return { success: false, closedQty: 0, fullClose: false, message: r.message };
+    }
+    return {
+      success: true, closedQty: qty, fullClose,
+      message: `${qty} 종료 (${calc.reason})`,
+    };
+  } catch (e: any) {
+    // 여기까지 오면 주문을 보냈는지 알 수 없다. 성공으로 만들지 않는다.
+    return { success: false, closedQty: 0, fullClose: false,
+      message: e?.message || '부분 청산 실패 — 결과를 확인할 수 없습니다' };
+  }
+}
+
 export async function countOpen(key: string, secret: string, testnet = true) {
   const [{ positions }, { orders }] = await Promise.all([
     getFuturesPositions(key, secret, testnet),
@@ -436,11 +549,25 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
   } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[] }; }
 }
 
-// 심볼의 기존 TP/SL(STOP_MARKET·TAKE_PROFIT_MARKET) 주문만 취소 (replace용)
+/**
+ * 심볼의 기존 TP/SL만 취소 (replace용).
+ *
+ * **전량 청산용(closePosition=true)만 지운다.**
+ *
+ * 예전에는 STOP_MARKET·TAKE_PROFIT_MARKET을 전부 지웠다. 그러면 분할 익절
+ * 사다리(수량 지정 + reduceOnly)와 다른 전략이 걸어 둔 보호주문까지 같이
+ * 날아간다. 그쪽 전략은 자기 손절이 살아 있다고 믿고 아무것도 다시 걸지 않는다.
+ *
+ * 이것은 감사 지적 6번("TP/SL 수정이 타 주문 취소")과 같은 문제다. 그 수정은
+ * worker/src/binance.ts에만 들어가 있었고 이 함수에는 오지 않았다 — 지금까지
+ * 호출자가 없어서 드러나지 않았다. TP/SL 라우트를 직접 실행으로 옮기며 함께 고쳤다.
+ */
 export async function cancelOpenTPSL(key: string, secret: string, symbol: string, testnet = true, only?: 'TP' | 'SL') {
   try {
     const { orders } = await getFuturesOpenOrders(key, secret, testnet, symbol);
     const targets = orders.filter(o => {
+      // 분할 익절·남의 주문은 건드리지 않는다
+      if (o.closePosition !== true) return false;
       const isTP = o.type === 'TAKE_PROFIT_MARKET';
       const isSL = o.type === 'STOP_MARKET';
       if (only === 'TP') return isTP;

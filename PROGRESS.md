@@ -23,7 +23,7 @@
 
 | 검증 | 값 (2026-07-30 실행) |
 |---|---|
-| 유닛 테스트 | 766 통과 / 0 실패 |
+| 유닛 테스트 | 780 통과 / 0 실패 |
 | 타입 에러 | 80건 (`ignoreBuildErrors`로 덮여 있음) |
 | 프로덕션 빌드 | 통과 · 미들웨어 27.6 kB |
 
@@ -354,7 +354,7 @@ PC를 먼저 만들고, 모바일은 같은 컴포넌트를 다른 동선으로 
 ## 검증 명령
 
 ```bash
-npm test          # 유닛 테스트 766개 통과 / 0 실패 (테스트 파일 37개)
+npm test          # 유닛 테스트 780개 통과 / 0 실패 (테스트 파일 38개)
 npm run typecheck # 타입 에러 80건
 npm run build     # 프로덕션 빌드
 ```
@@ -753,27 +753,66 @@ select가 실패하면 앱 포지션이 통째로 사라지므로 컬럼을 빼�
 
 `grep PLACE_ORDER src/app` → 0건. 네 주문 경로 전부 Vercel에서 직접 실행한다.
 
-### ⚠ 그런데 큐를 쓰는 것이 7개 남았다 — 전부 위험을 줄이는 동작이다
+### 킬스위치와 청산 경로 7개도 직접 실행 (완료)
 
-| 라우트 | 동작 |
+**킬스위치가 문을 잠그지만 안에 있는 것을 꺼내지 않고 있었다.** 누르면 DB의
+`active=true`가 켜져 신규 주문은 막혔지만, 미체결 취소와 포지션 종료는 큐에
+적재되고 그 큐를 비우는 워커가 없었다. 급할 때 누른 사람은 정리됐다고 믿고 손을
+뗀다 — 이 저장소에서 가장 위험한 실패였다.
+
+실제로 꺼내는 `executeKillActions`는 `lib/risk/killSwitch.ts`에 있었고 그 라우트가
+**이미 import까지 해 두었는데 부르지 않았다.**
+
+| 라우트 | 이제 |
 |---|---|
-| `risk/kill-switch/trigger` | `KILL_SWITCH_EXECUTE` |
-| `risk/kill-switch/status` | `KILL_SWITCH_EXECUTE` |
-| `binance/futures/close-position` | `CLOSE_POSITION` |
-| `binance/futures/close-all` | `CLOSE_ALL_POSITIONS` |
-| `binance/futures/cancel-all` | `CANCEL_ALL_ORDERS` |
-| `binance/futures/tpsl` | `SET_TPSL` |
-| `telegram/callback` | `CLOSE_ALL_POSITIONS` |
+| `risk/kill-switch/trigger` | `executeKillActions` 직접 호출 |
+| `risk/kill-switch/status` (자동 발동) | 같음 |
+| `binance/futures/close-all` | 취소 → 종료 순서로 직접 |
+| `binance/futures/cancel-all` | 직접 (최대 3회 재시도) |
+| `binance/futures/close-position` | `closePositionPercent` 신규 |
+| `binance/futures/tpsl` | 직접 (포지션·방향 확인 후) |
+| `telegram/callback` | 취소 → 종료 직접 |
 
-**킬스위치를 누르면 DB의 `active=true`는 켜져서 신규 주문은 막힌다. 그런데 미체결
-취소와 포지션 종료는 큐에 적재되고, 그 큐를 비우는 워커가 없다.**
+**`grep enqueueJob src/app` → 0건.** 앱은 더 이상 jobs 큐를 쓰지 않는다.
 
-즉 지금 킬스위치는 **문을 잠그지만 안에 있는 것을 꺼내지 않는다.** 실제로 꺼내는
-`executeKillActions`는 `lib/risk/killSwitch.ts`에 있고 그 라우트가 이미 import까지
-해 두었는데, 부르지 않고 큐에 넣는다.
+#### 실패를 성공에 섞지 않는다
 
-이게 이 저장소에서 지금 가장 위험한 미처리 항목이다. 다음에 이걸 해야 한다.
+- 킬스위치: 취소·종료가 실패하면 `ok: false` + 502. "킬스위치는 켜졌지만(신규 주문
+  차단) 취소·종료가 완료되지 않았습니다"라고 적는다. `ok: true`로 돌려주면 화면이
+  "정리됨"으로 그리고 사용자는 거래소를 확인하지 않는다
+- `close-all`: 취소 실패는 종료를 막지 않되 응답에 그대로 실어 보낸다
+- `tpsl`: 손절 실패를 성공에 섞지 않는다. 익절만 걸리고 손절이 실패했는데
+  `ok: true`를 주면 사용자는 보호가 걸렸다고 믿는다
+- 전부 `queued: false`를 명시한다
 
+#### 이 작업에서 드러난 것 셋
+
+**1. `cancelOpenTPSL`이 분할 익절까지 취소했다.** 감사 지적 6번("TP/SL 수정이 타 주문
+취소")의 수정이 `worker/src/binance.ts`에만 들어가 있었고 앱의 이 함수에는 오지
+않았다. 지금까지 **호출자가 없어서** 드러나지 않았다. TP/SL 라우트를 직접 실행으로
+옮기며 함께 고쳤다 — `closePosition=true`만 취소한다.
+
+**2. `close-position`이 쓰지 않는 파라미터를 필수로 요구했다.** `quantity`를 필수로
+받으면서 워커에는 `percent`만 넘겼다. 화면이 보낸 수량은 어디에도 쓰이지 않았다.
+
+**3. 부분 청산 비율 검사에서 주석과 코드가 달랐다.** `Number(percent) || 100`으로
+두고 "0이나 음수는 전량"이라 적었는데, 실제로는 음수가 1%로 조여졌다. 어느 쪽이든
+**잘못된 입력으로 실제 주문을 낸다** — 100%면 전량이 날아가고 1%면 요청하지 않은
+거래가 나간다. 이제 0·음수·NaN은 **거래하지 않는다**(테스트로 고정).
+
+#### 공용 자격증명 로더
+
+`lib/exchanges/loadCreds.ts` — 소유권·거래소·출금권한·복호화 검사를 한 곳에 모았다.
+다섯 라우트가 같은 다섯 줄을 복사해 갖고 있었고, 하나만 빠뜨리면 그 경로에서 남의
+연결로 주문하거나 출금 권한 키를 쓴다. 이 함수를 통과하지 못하면 키를 얻지 못하므로
+검사를 건너뛰는 길이 없다.
+
+`is_testnet`은 **명시적으로 false일 때만 실전**으로 본다. 모르는 값이 실전이 되면 안 된다.
+
+### 남은 것
+
+- `src/lib/jobs.ts`와 `worker/`는 남아 있다. 앱은 쓰지 않지만, 워커를 다시 쓸
+  선택지를 없애지 않았다. 워커에는 만료 검사가 들어가 있다
 - Gate 거래소 경로 (미처리 과제 1번)
 
 ## 거래 전 점검 (완료)

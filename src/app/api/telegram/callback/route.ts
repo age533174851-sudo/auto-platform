@@ -79,14 +79,46 @@ export async function POST(req: NextRequest) {
         ]] },
       });
     } else if (action === 'closeconfirm') {
-      // 2단계: 실제 전량청산 job 적재 (Worker가 실행)
+      // ── 2단계: 실제로 전량청산한다 ──
+      //
+      // 예전에는 job을 적재하고 Worker가 실행했다. 그 워커는 Binance IP 지역
+      // 차단으로 쓰지 않고 있어서(PROGRESS 인프라 표) 청산이 일어나지 않았는데,
+      // 텔레그램에는 "요청이 접수되었습니다. 잠시 후 체결됩니다"가 갔다.
+      //
+      // 텔레그램에서 청산을 누르는 상황은 대개 급한 상황이다. 그때 오는 이
+      // 문구를 믿고 손을 떼면 포지션이 그대로 남는다.
       if (!connectionId) { await answer(cbId, '연결 정보 없음'); return NextResponse.json({ ok: true }); }
       const { data: conn } = await sb.from('exchange_connections').select('user_id').eq('id', connectionId).maybeSingle();
-      const { enqueueJob } = await import('@/lib/jobs');
-      const q = await enqueueJob(sb, { action: 'CLOSE_ALL_POSITIONS', connectionId, userId: conn?.user_id, payload: { source: 'telegram' } } as any);
-      log.fatal('telegram', '전량청산 요청', { connectionId, jobId: q.jobId });
-      await answer(cbId, q.ok ? '🔴 전량청산 요청됨' : '청산 실패');
-      await tgApi('sendMessage', { chat_id: cb.message?.chat?.id, text: q.ok ? '🔴 <b>전량청산</b> 요청이 접수되었습니다. 잠시 후 체결됩니다.' : '⚠️ 전량청산 실패 — 다시 시도하세요.', parse_mode: 'HTML' });
+      if (!conn?.user_id) { await answer(cbId, '연결 소유자를 확인할 수 없음'); return NextResponse.json({ ok: true }); }
+
+      const { loadBinanceCreds } = await import('@/lib/exchanges/loadCreds');
+      const creds = await loadBinanceCreds(sb, conn.user_id, connectionId);
+
+      let ok = false;
+      let detail = '';
+      if (!creds.ok) {
+        detail = creds.message || creds.error || 'API 키를 읽지 못했습니다';
+      } else {
+        const bf = await import('@/lib/exchanges/binanceFutures');
+        // 취소를 먼저 한다. 미체결 지정가가 남아 있으면 종료 직후 그 주문이
+        // 체결되어 포지션이 다시 열린다.
+        const cancel = await bf.cancelAllOpenOrders(creds.key!, creds.secret!, creds.testnet!);
+        const close = await bf.closeAllPositions(creds.key!, creds.secret!, creds.testnet!, 5);
+        ok = !!close?.success;
+        detail = ok
+          ? `미체결 ${cancel?.count ?? 0}건 취소 · 포지션 전체 종료`
+          : `포지션 ${close?.remaining ?? '?'}개 잔존 — 거래소에서 직접 확인하세요`;
+      }
+
+      log.fatal('telegram', `전량청산 ${ok ? '완료' : '실패'}`, { connectionId, detail });
+      await answer(cbId, ok ? '🔴 전량청산 완료' : '⚠️ 청산 실패');
+      await tgApi('sendMessage', {
+        chat_id: cb.message?.chat?.id,
+        text: ok
+          ? `🔴 <b>전량청산 완료</b>\n${detail}`
+          : `⚠️ <b>전량청산 실패</b>\n${detail}`,
+        parse_mode: 'HTML',
+      });
     } else if (action === 'cancel') {
       await answer(cbId, '취소되었습니다');
     } else {
