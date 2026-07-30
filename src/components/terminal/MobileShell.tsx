@@ -42,6 +42,7 @@ import { useTerminal } from './TerminalContext';
 import { ChartPane } from './ChartPane';
 import { OrderBookPanel, MarketOrderPanel, usePickedPrice } from './OrderPane';
 import { MarketSwitch } from './MarketSwitch';
+import { TradeModeSwitch } from './TradeModeSwitch';
 import { LeftRail } from './LeftRail';
 import { BottomDock } from './BottomDock';
 import { BottomSheet } from './BottomSheet';
@@ -173,8 +174,11 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
     {/* 시장 전환은 자기 줄을 갖는다. 종목·가격과 같은 줄에 두면
         좁은 화면에서 서로를 밀어내고, 밀려난 쪽이 잘린다.
         어느 시장에 있는지는 잘려도 되는 정보가 아니다. */}
-    <div style={{ padding: '0 12px 8px' }}>
+    <div style={{ padding: '0 12px 8px', display: 'flex', flexDirection: 'column', gap: 7 }}>
       <MarketSwitch compact value={marketType} onChange={setMarketType}/>
+      {/* 이 화면에서 가장 중요한 한 줄 — 진짜 돈인가.
+          접거나 메뉴에 넣지 않는다. */}
+      <TradeModeSwitch compact/>
     </div>
     </div>
   );

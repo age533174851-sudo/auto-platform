@@ -130,6 +130,15 @@ export interface MarginCheck {
 }
 
 export function canOpenFutures(tree: WalletTree, requiredMarginUsd: number): MarginCheck {
+  // 모양이 다른 응답이 와도 **화면이 죽지 않게** 한다.
+  //
+  // 예전에는 `tree.futures.ok`를 바로 읽었다. `/api/wallets`가 예전 모양을
+  // 돌려주거나(배포 중 버전이 섞일 때) 오류 객체를 주면 여기서 TypeError가
+  // 나고, 이 함수는 주문판 렌더 중에 불리므로 **터미널 전체가 흰 화면**이
+  // 된다. 증거금을 모르는 것과 화면이 사라지는 것은 전혀 다른 문제다.
+  if (!tree || typeof tree !== 'object' || !(tree as any).futures) {
+    return { ok: false, reason: '지갑 정보를 읽지 못해 주문 가능 여부를 알 수 없습니다' };
+  }
   if (tree.futures.ok !== true) {
     return { ok: false, reason: '선물 지갑을 확인하지 못해 주문 가능 여부를 알 수 없습니다' };
   }
@@ -141,7 +150,7 @@ export function canOpenFutures(tree: WalletTree, requiredMarginUsd: number): Mar
   if (requiredMarginUsd <= avail) return { ok: true };
 
   const shortfall = requiredMarginUsd - avail;
-  const inSpot = tree.spot.ok ? tree.spot.usdt : 0;
+  const inSpot = tree.spot?.ok ? tree.spot.usdt : 0;
 
   // 현물에 돈이 있다는 사실은 알려주되, 그것이 증거금이 아니라는 것도 같이 말한다.
   const hint = inSpot >= shortfall

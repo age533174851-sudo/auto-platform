@@ -19,6 +19,7 @@ import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
+import { usePaperAccount } from './PaperWallet';
 
 type Tab = '포지션' | '미체결' | '자산' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
 const TABS: Tab[] = ['포지션', '미체결', '자산', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
@@ -43,7 +44,9 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
   flow?: boolean;
   stickyTop?: number | string;
 }) {
-  const { auth, connId, setSymbol, symbols } = useTerminal();
+  const { auth, connId, setSymbol, symbols, tradeMode } = useTerminal();
+  const isPaper = tradeMode === 'PAPER';
+  const paper = usePaperAccount(isPaper);
   const [tab, setTab] = useState<Tab>('포지션');
   const [acct, setAcct] = useState<any>(null);
   const [err, setErr] = useState('');
@@ -52,6 +55,9 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
   const [killMsg, setKillMsg] = useState('');
 
   const load = useCallback(async () => {
+    // 모의에서는 거래소를 부르지 않는다. 부르면 '연결 없음' 오류가 뜨는데
+    // 모의는 연결이 없는 것이 정상이다 — 정상 상태를 오류로 그리면 안 된다.
+    if (isPaper) return;
     if (!auth || !connId) return;
     try {
       const r = await fetch(`/api/binance/futures/account?connectionId=${connId}`,
@@ -66,7 +72,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
       // 조회 실패를 "포지션 없음"으로 보여주면 안 된다. 있는데 못 본 것일 수 있다.
       setErr(`거래소 조회 실패 — 포지션 없음이 아니라 확인 불가입니다 (${e?.message || e})`);
     }
-  }, [auth, connId, onBalance]);
+  }, [auth, connId, onBalance, isPaper]);
 
   useEffect(() => {
     load();
@@ -156,7 +162,19 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
           }}>{err}</div>
         )}
 
-        {tab === '포지션' && (
+        {tab === '포지션' && (isPaper ? (
+          paper.positions.length === 0
+            ? <Empty t={paper.err || '열린 모의 포지션이 없습니다'}/>
+            : <div>
+                {paper.positions.map((p: any) => (
+                  <PaperPositionCard key={p.id} p={p} auth={auth} onClosed={paper.reload}
+                    onPick={() => {
+                      const s = symbols.find(x => x.id === p.symbol);
+                      if (s) setSymbol(s);
+                    }}/>
+                ))}
+              </div>
+        ) : (
           positions.length === 0
             ? <Empty t={acct ? '열린 포지션이 없습니다' : '거래소 연결을 선택하면 표시됩니다'}/>
             : <div>
@@ -169,9 +187,13 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
                     }}/>
                 ))}
               </div>
+        ))}
+
+        {tab === '미체결' && isPaper && (
+          <Empty t="모의에는 미체결 주문이 없습니다 — 시장가로만 체결됩니다"/>
         )}
 
-        {tab === '미체결' && (
+        {tab === '미체결' && !isPaper && (
           open.length === 0
             ? <Empty t="미체결 주문이 없습니다"/>
             : <Table
@@ -838,6 +860,123 @@ function TpSlPanel({ v, auth, connId, onDone }: {
         }}>
         {busy ? '거는 중…' : !tp && !sl ? '익절 또는 손절을 입력하세요' : 'TP/SL 걸기'}
       </button>
+    </div>
+  );
+}
+
+/**
+ * 모의 포지션 카드.
+ *
+ * 실계좌 카드와 **따로 둔다.** 같은 컴포넌트에 조건을 붙이면 언젠가
+ * 모의 카드의 청산 버튼이 실계좌 라우트를 부른다 — 그게 이 화면에서
+ * 가장 조용한 사고다. 생긴 것은 비슷해도 부르는 곳이 다르다.
+ *
+ * 가상이라는 사실을 카드에 적는다. 화면만 보고 실계좌와 구분할 수 없으면
+ * 모의로 연습하는 의미가 반쯤 사라진다.
+ */
+function PaperPositionCard({ p, auth, onClosed, onPick }: {
+  p: any; auth: string; onClosed: () => void; onPick: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const long = p.side === 'LONG';
+
+  const close = async () => {
+    const { confirmDialog } = await import('@/lib/confirm/dialog');
+    const okToGo = await confirmDialog([
+      `모의 ${p.symbol} ${p.side} ${fmtPrice(p.quantity, 6)}를 청산합니다.`,
+      '',
+      p.markPrice != null ? `현재가   ${fmtPrice(p.markPrice)}` : '현재가   확인 불가',
+      p.unrealizedPnl != null
+        ? `평가손익 ${p.unrealizedPnl >= 0 ? '+' : ''}${fmtPrice(p.unrealizedPnl)} USDT`
+        : '평가손익 확인 불가',
+      '',
+      '가상 자금입니다.',
+    ].join('\n'));
+    if (!okToGo) return;
+
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/paper/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ positionId: p.id }),
+      });
+      const j = await r.json();
+      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      if (j?.ok) setTimeout(onClosed, 600);
+    } catch (e: any) {
+      setMsg({ ok: false, text: `실패 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  const Cell = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>{k}</div>
+      <div style={{ ...NUM, color: tone ?? C.text, fontSize: FS.small, fontWeight: 600 }}>{v}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ padding: '11px 12px', borderBottom: `1px solid ${C.hair}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 9, flexWrap: 'wrap' }}>
+        <span style={chip(long ? C.up : C.down, long ? C.upBg : C.downBg)}>
+          {long ? 'LONG' : 'SHORT'}
+        </span>
+        <button onClick={onPick} style={{
+          background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+          color: C.text, fontSize: FS.body, fontWeight: 700,
+        }}>{p.symbol}</button>
+        <span style={chip(C.dim)}>격리 {fmtPrice(p.leverage, 0)}×</span>
+        {/* 이 칩이 실계좌 카드와의 유일한 구분이다 */}
+        <span style={chip(C.accent, C.accentBg)}>모의</span>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div>
+          <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>평가손익 (가상 USDT)</div>
+          <div style={{ ...NUM, color: pnlColor(p.unrealizedPnl), fontSize: 20, fontWeight: 700 }}>
+            {p.unrealizedPnl == null ? '확인 불가'
+              : `${p.unrealizedPnl >= 0 ? '+' : ''}${fmtPrice(p.unrealizedPnl)}`}
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>수익률</div>
+          <div style={{ ...NUM, color: pnlColor(p.roiPct), fontSize: FS.num, fontWeight: 700 }}>
+            {p.roiPct == null ? '—' : `${p.roiPct >= 0 ? '+' : ''}${p.roiPct.toFixed(2)}%`}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <Cell k="수량" v={fmtPrice(p.quantity, 6)}/>
+        <Cell k="증거금" v={fmtPrice(p.margin)}/>
+        <Cell k="명목가" v={fmtPrice(p.notional)}/>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        <Cell k="체결가" v={fmtPrice(p.fillPrice)}/>
+        <Cell k="현재가" v={p.markPrice == null ? '확인 불가' : fmtPrice(p.markPrice)}/>
+        <Cell k="손절" v={p.stopLoss == null ? '없음' : fmtPrice(p.stopLoss)}
+          tone={p.stopLoss == null ? C.down : C.dim}/>
+      </div>
+
+      {msg && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 6,
+          background: msg.ok ? C.upBg : C.downBg, color: msg.ok ? C.up : C.down,
+          fontSize: FS.micro, lineHeight: 1.5,
+        }}>{msg.text}</div>
+      )}
+
+      <button onClick={close} disabled={busy}
+        style={{
+          width: '100%', minHeight: 36, borderRadius: 7,
+          cursor: busy ? 'default' : 'pointer',
+          background: C.downBg, color: C.down,
+          border: `1px solid ${A(C.down, '55')}`,
+          fontSize: FS.small, fontWeight: 700, opacity: busy ? 0.6 : 1,
+        }}>{busy ? '청산 중…' : '모의 청산'}</button>
     </div>
   );
 }

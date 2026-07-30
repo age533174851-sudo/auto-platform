@@ -134,4 +134,13 @@ export function runWalletTests() {
     eq(t.futuresEquity, 170, '미실현손익이 순자산에 반영되지 않았다');
     eq(t.spotValueUsd, 4000, '현물이 선물 손익의 영향을 받았다');
   });
+  test('지갑 모양이 다르면 화면을 죽이지 않고 "모른다"로 돌려준다', () => {
+    // 주문판 렌더 중에 불리는 함수다. 여기서 throw하면 터미널이 흰 화면이
+    // 된다 — 증거금을 모르는 것과 화면이 사라지는 것은 다른 문제다.
+    for (const bad of [null, undefined, {}, { spot: {} }, 'x', 3]) {
+      const r = canOpenFutures(bad as any, 100);
+      eq(r.ok, false, `${JSON.stringify(bad)}가 통과했다`);
+      assert(!!r.reason, '이유가 없다');
+    }
+  });
 }

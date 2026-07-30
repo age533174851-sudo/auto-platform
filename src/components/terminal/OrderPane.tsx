@@ -22,6 +22,8 @@ import { useTerminal } from './TerminalContext';
 import { SpotOrderPanel } from './SpotOrderPanel';
 import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
+import { MODE_INFO, orderEndpointFor } from '@/lib/markets/tradeMode';
+import { PaperWallet, usePaperAccount } from './PaperWallet';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
 
@@ -309,8 +311,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   /** 모바일 2열의 좁은 칸에 들어갈 때 */
   dense?: boolean;
 }) {
-  const { symbol, auth, connId, connections, mode } = useTerminal();
+  const { symbol, auth, connId, connections, mode, tradeMode, modeResolution } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
+  const isPaper = tradeMode === 'PAPER';
+  const paper = usePaperAccount(isPaper);
 
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
@@ -321,6 +325,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     catch { return 5; }
   });
   const [levOpen, setLevOpen] = useState(false);
+  // 손절 폭(%). **이 칸이 없어서 신규 진입이 전부 거부되고 있었다** —
+  // 서버(manualPlan)가 손절 없는 진입을 막는데 화면이 값을 보내지 않았다.
+  // 화면에서 못 넣는 값을 서버가 요구하면 그 기능은 죽은 것이다.
+  const [slPct, setSlPct] = useState(2);
   // 청산 전용. 켜면 보유분을 줄이는 주문만 나간다 — 반대로 새 포지션이
   // 열리는 사고를 막는다.
   const [reduceOnly, setReduceOnly] = useState(false);
@@ -359,7 +367,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
   // 비율 버튼은 **선물 가용 증거금**만 쓴다. 현물 USDT를 쓰면 없는 돈으로
   // 수량을 계산하게 되고, 그 수량이 그대로 주문이 된다.
-  const balanceUsd = wallet?.futuresUsableMargin ?? null;
+  //
+  // 모의에서는 가상 계좌의 가용이 그 자리다. 거래소 잔고를 쓰면 모의인데
+  // 실계좌 잔고로 수량이 계산된다 — 연습이 되지 않는다.
+  const balanceUsd = isPaper
+    ? (paper.acct ? paper.acct.available : null)
+    : (wallet?.futuresUsableMargin ?? null);
 
   const mid = stream.lastPrice;
   const notional = (Number(qty) || 0) * (Number(price) || mid || 0);
@@ -402,24 +415,62 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setMsg(null);
     setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
-    if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
+    // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
+    if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason }); return; }
     const q = Number(qty);
     if (!Number.isFinite(q) || q <= 0) { setMsg({ ok: false, text: '수량을 입력하세요' }); return; }
+    if (!reduceOnly && !(slPct > 0)) {
+      setMsg({ ok: false, text: '손절 폭을 고르세요 — 손절 없는 진입은 받지 않습니다' });
+      return;
+    }
+
+    // 실전은 누를 때마다 확인한다. 모드 전환에서 한 번 확인했지만, 그건
+    // 몇 분 전 일이고 그 사이 화면을 여러 번 만졌다.
+    if (modeResolution.realMoney) {
+      const { confirmDialog } = await import('@/lib/confirm/dialog');
+      const okToGo = await confirmDialog([
+        `실전 ${orderSide === 'BUY' ? 'LONG' : 'SHORT'} ${q} ${base} · ${leverage}배`,
+        '',
+        `기준가   ${orderType === 'LIMIT' ? fmtPrice(Number(price)) : (mid != null ? fmtPrice(mid) : '시장가')}`,
+        `손절     ${slPct}%`,
+        `증거금   약 ${fmtPrice(margin)} USDT`,
+        '',
+        '실제 자금이 사용됩니다. 되돌릴 수 없습니다.',
+      ].join('\n'), { danger: true });
+      if (!okToGo) return;
+    }
 
     setBusy(true);
     try {
-      const r = await fetch('/api/binance/futures/order', {
+      const endpoint = orderEndpointFor(tradeMode, 'USDM');
+      const body = isPaper
+        ? {
+            // 가상 장부는 방향을 LONG/SHORT로 적는다 (거래소의 BUY/SELL과 다르다)
+            symbol: symbol.id, side: orderSide === 'BUY' ? 'LONG' : 'SHORT',
+            quantity: q, leverage, stopLossPct: slPct,
+          }
+        : {
+            connectionId: modeResolution.connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
+            symbol: symbol.id, side: orderSide, type: orderType, quantity: q, leverage,
+            price: orderType === 'LIMIT' ? Number(price) || undefined : undefined,
+            reduceOnly: reduceOnly || undefined,
+            // 이 값이 빠져서 신규 진입이 전부 거부되고 있었다
+            stopLossPct: reduceOnly ? undefined : slPct,
+          };
+
+      const r = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({
-          connectionId: connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
-          symbol: symbol.id, side: orderSide, type: orderType, quantity: q, leverage,
-          price: orderType === 'LIMIT' ? Number(price) || undefined : undefined,
-        }),
+        body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (r.ok && j?.ok) setMsg({ ok: true, text: `주문 접수됨 · ${String(j.jobId).slice(0, 8)}` });
-      else setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+      if (r.ok && j?.ok) {
+        setMsg({ ok: true, text: j?.message || '주문 접수됨' });
+        setQty('');
+        if (isPaper) paper.reload();
+      } else {
+        setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+      }
     } catch (e: any) {
       // 응답을 못 받았다. 나갔는지 안 나갔는지 모르는 상태다.
       setMsg({ ok: false, text: `응답 없음 — 재시도 말고 포지션 먼저 확인 (${e?.message || e})` });
@@ -455,6 +506,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       <div style={{ ...NUM, color: liqTone, fontSize: FS.micro, fontWeight: 600, marginTop: -2 }}>
         청산 약 {liqPct.toFixed(2)}% 이내
       </div>
+
+      {/* 모의면 가상 지갑을 여기 둔다. 잔고와 충전이 주문 바로 위에 있어야
+          "돈이 없어서 못 넣는다"와 "충전하면 된다"가 한눈에 이어진다. */}
+      {isPaper && (
+        <PaperWallet dense={dense} acct={paper.acct} err={paper.err} onChanged={paper.reload}/>
+      )}
 
       {/* 신규/청산 — 바이낸스의 Open/Close 자리 */}
       <div style={{ display: 'flex', gap: 4, background: C.raised, padding: 3, borderRadius: 8 }}>
@@ -521,6 +578,50 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         }}>{base}</span>
       </div>
 
+      {/* 손절 — **이 줄이 없어서 신규 진입이 전부 거부되고 있었다.**
+          서버(manualPlan)는 손절 없는 진입을 막는데 화면에 넣을 칸이
+          없었다. 화면에서 못 넣는 값을 서버가 요구하면 그 기능은 죽은 것이다.
+
+          청산(reduceOnly)에는 붙이지 않는다 — 나가는 주문에 손절을 요구하면
+          나갈 수 없게 된다. */}
+      {!reduceOnly && (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 26 }}>손절</span>
+            {[1, 2, 3, 5, 10].map(p => (
+              <button key={p} onClick={() => setSlPct(p)}
+                style={{
+                  flex: 1, minHeight: 26, borderRadius: 6, cursor: 'pointer',
+                  background: slPct === p ? C.accentBg : C.raised,
+                  color: slPct === p ? C.accent : C.dim,
+                  border: `1px solid ${slPct === p ? A(C.accent, '55') : C.hair}`,
+                  fontSize: FS.micro, fontWeight: 700, ...NUM,
+                }}>{p}%</button>
+            ))}
+          </div>
+          {(() => {
+            // 결과 손절가와, 그게 청산 안쪽인지. %만 보면 배율이 높을 때
+            // 손절이 청산 너머라는 것을 알 수 없다.
+            const ref = orderType === 'LIMIT' ? (Number(price) || mid) : mid;
+            if (ref == null || !(ref > 0)) return null;
+            const buyStop = ref * (1 - slPct / 100);
+            const sellStop = ref * (1 + slPct / 100);
+            const beyond = slPct >= liqPct;
+            return (
+              <div style={{
+                marginTop: 4, fontSize: FS.micro, lineHeight: 1.5,
+                color: beyond ? C.down : C.faint,
+              }}>
+                {beyond
+                  ? `손절 ${slPct}%가 청산 거리(약 ${liqPct.toFixed(2)}%)보다 멉니다 — `
+                    + '청산이 먼저 닿아 손절이 작동하지 못합니다'
+                  : `롱 ${fmtPrice(buyStop)} · 숏 ${fmtPrice(sellStop)}`}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* 비율 슬라이더 — 바이낸스의 눈금 슬라이더 자리.
           잔고를 모르면 비율을 계산할 수 없다. 그때는 눈금만 두고 막는다. */}
       <div style={{ padding: '2px 2px 0' }}>
@@ -545,7 +646,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
         fontSize: FS.micro, ...NUM,
       }}>
-        <span style={{ color: C.faint, fontFamily: 'inherit' }}>가용</span>
+        <span style={{ color: C.faint, fontFamily: 'inherit' }}>
+          {isPaper ? '가용 (모의)' : '가용'}
+        </span>
         <span style={{ color: balanceUsd == null ? C.warn : C.dim, fontWeight: 600 }}>
           {balanceUsd == null ? '확인 불가' : `${fmtPrice(balanceUsd)} USDT`}
         </span>
@@ -554,7 +657,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* 증거금이 모자라면 주문 전에 말한다. 거래소가 거부한 뒤에
           알려주면 사용자는 이미 그 크기를 믿고 계획을 세운 뒤다. */}
       {(() => {
-        if (!wallet || margin <= 0) return null;
+        if (isPaper || !wallet || margin <= 0) return null;
         const chk = canOpenFutures(wallet, margin);
         if (chk.ok) return null;
         return (
