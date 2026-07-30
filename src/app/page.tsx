@@ -65,11 +65,15 @@ const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccoun
 const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 import { nextStack, topmost, historyDelta } from '@/lib/nav/overlayStack';
 import type { Command } from '@/lib/commands/types';
-import { useCommandHotkey } from '@/lib/commands/useCommandHotkey';
-import { notifyError } from '@/lib/notify/center';
+import { useHotkeys } from '@/lib/commands/useHotkeys';
+import { DEFAULT_PROFILE } from '@/lib/commands/keymap';
+import { buildCommands } from '@/lib/commands/registry';
+import { MENU } from '@/lib/menuItems';
+import { notifyError, notifyInfo } from '@/lib/notify/center';
 // 팔레트는 열릴 때까지 필요 없다. 앱 첫 로드에 끼우면 Ctrl+K를 한 번도
 // 누르지 않는 사용자도 그 무게를 같이 받는다.
 const CommandPalette = dynamic(() => import('@/components/CommandPalette'),{ ssr: false });
+const ShortcutHelp = dynamic(() => import('@/components/ShortcutHelp'),{ ssr: false });
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
 const AiUsagePage = dynamic(() => import('@/components/pages/AiUsagePage'),{ ssr: false });
@@ -262,6 +266,7 @@ export default function App() {
   },[themeMode,setThemeMode]);
   const [tab,setTab]=useState('home');
   const [paletteOpen,setPaletteOpen]=useState(false);
+  const [helpOpen,setHelpOpen]=useState(false);
   // ── 딥링크 ──
   // 이 앱은 한 페이지 안에서 tab 상태로 화면을 바꾸므로 URL이 없다.
   // 그래서 Pro 터미널 같은 별도 경로에서 특정 화면으로 돌아올 방법이
@@ -477,7 +482,8 @@ export default function App() {
     { id:'more',    open:showMore,        close:()=>setShowMore(false) },
     // 팔레트도 겹이다 — 뒤로가기가 팔레트만 닫고 화면은 그대로 둔다.
     { id:'palette', open:paletteOpen,     close:()=>setPaletteOpen(false) },
-  ],[loginOpen,profileOpen,detailAsset,showMore,paletteOpen]);
+    { id:'help',    open:helpOpen,        close:()=>setHelpOpen(false) },
+  ],[loginOpen,profileOpen,detailAsset,showMore,paletteOpen,helpOpen]);
 
   const stackRef=useRef<string[]>([]);
   const closedByPop=useRef(false);
@@ -589,6 +595,8 @@ export default function App() {
         return;
       }
       case 'invoke':
+        if(cmd.action.value==='palette.open'){ setShowMore(false); setPaletteOpen(true); return; }
+        if(cmd.action.value==='help.keys'){ setShowMore(false); setHelpOpen(true); return; }
         if(cmd.action.value==='theme.toggle'){ cycleTheme(); return; }
         if(cmd.action.value==='theme.auto'){ setThemeMode('auto'); return; }
         notifyError('아직 연결되지 않은 커맨드입니다', cmd.label);
@@ -605,15 +613,32 @@ export default function App() {
     ()=>(prices as any[])?.map(a=>({ id:a.id, sym:a.sym, nameKr:a.nameKr, name:a.name }))??[],
     [prices]);
 
-  // Ctrl/Cmd+K. 리스너는 처음부터 붙어 있어야 한다 — 팔레트 컴포넌트는
-  // 늦게 불러오지만 첫 단축키부터 먹어야 하므로 훅만 따로 가져왔다.
+  // 팔레트를 여는 창구가 단축키만이 아니다 — 더보기 시트의 검색 줄도 같은
+  // 상태를 켠다. 겹을 둘 다 쌓으면 뒤로가기를 두 번 눌러야 하므로 시트는 닫는다.
   const openPalette=useCallback(()=>{
-    // 팔레트를 열면 더보기 시트는 닫는다. 겹을 둘 다 쌓으면 뒤로가기를
-    // 두 번 눌러야 화면으로 돌아온다.
     setShowMore(false);
     setPaletteOpen(true);
   },[]);
-  useCommandHotkey(openPalette);
+
+  // ── 전역 단축키 ──
+  //
+  // 커맨드 레지스트리 위의 키맵이다. 키를 핸들러에 박지 않는 이유는
+  // registry.ts에 적어 뒀다 — 창구마다 판단하면 위험 등급을 빼먹는다.
+  const allCommands=useMemo(()=>buildCommands(MENU),[]);
+  const lookupCommand=useCallback(
+    (id:string)=>allCommands.find(c=>c.id===id)??null,[allCommands]);
+  useHotkeys({
+    profile: DEFAULT_PROFILE,
+    lookup: lookupCommand,
+    onRun: runCommand,
+    // 확인이 필요한 커맨드는 첫 입력에 실행되지 않는다. 화면에 아무 표시가
+    // 없으면 사용자는 단축키가 씹혔다고 생각하고 다시 누른다 — 그 두 번째가
+    // 실행이 되므로, 무엇을 기다리는지 반드시 알려야 한다.
+    onAsk: (cmd)=>notifyInfo('한 번 더 누르면 실행됩니다', cmd.label),
+    // 팔레트가 열려 있으면 전역 단축키를 끈다. 팔레트는 자기 키(↑↓·Enter·Esc)를
+    // 쓰는데 그 위에서 g·? 같은 것이 같이 터지면 두 곳이 동시에 반응한다.
+    disabled: paletteOpen || helpOpen,
+  });
 
   // Open the PnL calculator with asset prefilled
   const openPnL = useCallback((asset:any) => {
@@ -1006,6 +1031,10 @@ export default function App() {
               isAdmin={isAdminUser}
               symbols={paletteSymbols}
             />
+          )}
+
+          {helpOpen&&(
+            <ShortcutHelp open={helpOpen} onClose={()=>setHelpOpen(false)} profile={DEFAULT_PROFILE}/>
           )}
 
           {showMore&&(

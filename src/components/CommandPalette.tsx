@@ -261,6 +261,6 @@ export default function CommandPalette({
   );
 }
 
-// Ctrl/Cmd+K 리스너는 lib/commands/useCommandHotkey.ts에 있다.
-// 이 파일은 dynamic import로 늦게 불러오는데, 리스너는 첫 Ctrl+K부터
-// 들어야 하므로 같은 파일에 둘 수 없다.
+// 단축키 리스너는 lib/commands/useHotkeys.ts에 있다. 이 파일은 dynamic
+// import로 늦게 불러오는데 리스너는 첫 입력부터 들어야 하므로, 같은 파일에
+// 둘 수 없다. 키맵은 lib/commands/keymap.ts.

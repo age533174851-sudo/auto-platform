@@ -54,6 +54,22 @@ export function menuToCommands(menu: MenuLike[]): Command[] {
  * 여기 있는 것들이 팔레트의 실제 값어치다 — 메뉴를 열어 찾을 수 없는 동작.
  */
 export const EXTRA_COMMANDS: Command[] = [
+  // ── 팔레트·도움말 ──
+  //
+  // 팔레트 자체도 커맨드다. 그래야 `mod+k` 바인딩이 다른 단축키와 똑같은
+  // 경로를 타고, 위험 등급 검사도 같은 곳에서 받는다. 특별 취급하는 키를
+  // 하나 만들면 그 하나만 다른 규칙으로 자란다.
+  {
+    id: 'palette.open', label: '빠른 명령', desc: '이동·실행·검색 (초성 지원)',
+    cat: '표시', kw: 'palette command 명령 검색 팔레트',
+    danger: 'safe', action: { kind: 'invoke', value: 'palette.open' },
+  },
+  {
+    id: 'help.keys', label: '단축키 도움말', desc: '지금 쓸 수 있는 단축키 목록',
+    cat: '표시', kw: 'help shortcut 단축키 도움말 키보드',
+    danger: 'safe', action: { kind: 'invoke', value: 'help.keys' },
+  },
+
   // ── 화면·표시 ──
   {
     id: 'theme.toggle', label: '테마 전환', desc: '밝음 ↔ 어두움',
