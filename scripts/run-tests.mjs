@@ -43,9 +43,10 @@ import { runPricingTests } from './src/lib/ai/pricing.test';
 import { runCalendarTests } from './src/lib/calendar/normalize.test';
 import { runRetentionTests } from './src/lib/maintenance/retention.test';
 import { runAdminGateTests } from './src/lib/auth/adminGate.test';
+import { runCommandTests } from './src/lib/commands/commands.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
-runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests();
+runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
