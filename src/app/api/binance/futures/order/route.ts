@@ -151,10 +151,29 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 실행자 확인 ──
+  //
+  // 이 라우트는 거래소를 직접 부르지 않고 jobs 큐에 적재한다. 실행자는
+  // Railway Worker 하나뿐인데, 그 워커는 Binance IP 지역 차단으로 쓰지 않고
+  // 있다(PROGRESS.md 인프라 표). 즉 지금까지 이 경로로 넣은 주문은 **큐에
+  // 쌓이기만 하고 실행되지 않았다.** 그런데 응답은 `ok: true, queued: true`라
+  // 화면은 "주문됨"으로 그렸다.
+  //
+  // 성공처럼 보이는 실패다. 확인해서 없으면 적재하지 않고 503으로 거절한다 —
+  // 넣어두면 워커가 몇 시간 뒤 살아났을 때 그때 시세로 주문이 나간다.
+  const { checkExecutorBeforeQueue, executorUnavailableBody, withExpiry } =
+    await import('@/lib/jobs/queueGuard');
+  const executor = await checkExecutorBeforeQueue(sb);
+  if (!executor.canQueue) {
+    return NextResponse.json(executorUnavailableBody(executor),
+      { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const r = await enqueueJob(sb, {
     userId: uid, connectionId, action: 'PLACE_ORDER',
     mode: conn.is_testnet ? 'TESTNET' : 'LIVE', symbol, side, quantity: Number(quantity),
-    payload: { type, price: price ?? null, leverage: leverage ?? null, reduceOnly: !!reduceOnly, stopLossPct: body.stopLossPct ?? null, takeProfitPct: body.takeProfitPct ?? null },
+    // 만료 시각을 새긴다. 워커가 늦게 집어도 오래된 주문은 실행하지 않는다.
+    payload: withExpiry({ type, price: price ?? null, leverage: leverage ?? null, reduceOnly: !!reduceOnly, stopLossPct: body.stopLossPct ?? null, takeProfitPct: body.takeProfitPct ?? null }),
     priority: reduceOnly ? 2 : 5,
   });
   if (!r.ok) return NextResponse.json({ error: 'enqueue_failed', message: r.error }, { status: 500 });

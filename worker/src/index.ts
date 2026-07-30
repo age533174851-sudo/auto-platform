@@ -170,6 +170,33 @@ async function processPendingJobs() {
       if (!claimed || claimed.length === 0) continue;  // 다른 워커가 가져감
       console.log(`[worker] Processing job ${job.id.slice(0,8)} ${job.action} ${job.symbol || ''} (attempt ${(job.attempts||0)+1}/${job.max_attempts||5})`);
 
+      // ── 만료된 주문은 실행하지 않는다 ──
+      //
+      // 이 워커는 멈춰 있던 적이 있다(Binance IP 지역 차단). 그동안 큐에 쌓인
+      // 주문을 다시 켤 때 그대로 내보내면, 사용자가 몇 시간 전에 누르고 이미
+      // 잊은 주문이 완전히 다른 시세에서 체결된다.
+      //
+      // 만료 시각은 적재하는 쪽이 payload.expiresAt에 새긴다
+      // (src/lib/jobs/queueGuard.ts). 시각이 없는 주문 — 이 보호가 들어가기
+      // 전에 쌓인 것 — 도 실행하지 않는다. 언제 만든 것인지 알 수 없는 주문을
+      // 내보내는 쪽이 더 위험하다.
+      //
+      // 주문 계열에만 적용한다. 킬스위치·전량청산은 늦게라도 실행되는 것이
+      // 맞다 — 위험을 줄이는 방향이다.
+      if (job.action === 'PLACE_ORDER' || job.action === 'SET_TPSL') {
+        const exp = (job.payload as any)?.expiresAt as string | undefined;
+        const t = exp ? Date.parse(exp) : NaN;
+        if (!Number.isFinite(t) || Date.now() > t) {
+          const why = !exp
+            ? '만료 시각이 없는 주문입니다. 언제 만들어진 것인지 알 수 없어 실행하지 않습니다.'
+            : `${Math.round((Date.now() - t) / 1000)}초 지난 주문입니다. 그때 시세가 아니므로 실행하지 않습니다.`;
+          await finalize(job, false, null, why);
+          await alert('system', 'warning', '만료된 주문을 건너뜀',
+            { Symbol: job.symbol || '-', Action: job.action, 사유: why }, `job_expired:${job.id}`);
+          continue;
+        }
+      }
+
       const conn = await getConnection(job.connection_id);
       if (!conn) { await finalize(job, false, null, '연결 없음'); continue; }
       if (conn.has_withdrawal === true) { await finalize(job, false, null, '출금권한 키 거부'); continue; }

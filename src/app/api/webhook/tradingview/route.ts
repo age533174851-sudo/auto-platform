@@ -221,13 +221,29 @@ export async function POST(req: NextRequest) {
       }
 
       // 거래소 직접 호출 X → jobs 큐에 PLACE_ORDER 적재 (Worker가 유일 실행자)
+      //
+      // 실행자가 없으면 적재하지 않는다. 넣어두면 워커가 나중에 살아났을 때
+      // 그때 시세로 주문이 나가고, 웹훅은 그걸 보낸 사람이 이미 잊은 신호다.
+      const { checkExecutorBeforeQueue, withExpiry } = await import('@/lib/jobs/queueGuard');
+      const executor = await checkExecutorBeforeQueue(sb);
+      if (!executor.canQueue) {
+        entry.status = 'error';
+        (entry as any).error = `주문 실행기 ${executor.label} — 적재하지 않았습니다. ${executor.reason}`;
+        signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+        return NextResponse.json({
+          ok: false, error: 'executor_unavailable', queued: false,
+          executor: { status: executor.status, label: executor.label, ageSec: executor.ageSec },
+          message: executor.reason,
+        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
+
       const { enqueueJob } = await import('@/lib/jobs');
       const q = await enqueueJob(sb, {
         userId: conn.user_id, connectionId: body.connectionId, action: 'PLACE_ORDER',
         mode: isTestnet ? 'TESTNET' : 'LIVE', symbol: tradeSymbol,
         side: (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
         quantity: Number(qty.toFixed(3)),
-        payload: { type: 'MARKET', leverage: body.leverage ?? null, source: 'webhook' },
+        payload: withExpiry({ type: 'MARKET', leverage: body.leverage ?? null, source: 'webhook' }),
         priority: 4,
       });
 

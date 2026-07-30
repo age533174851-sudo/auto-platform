@@ -387,6 +387,15 @@ export async function POST(req: NextRequest) {
   let jobId: string | undefined;
   if (sb && raw?.connectionId) {
     try {
+      // 실행자가 없으면 적재하지 않는다 (queueGuard 주석 참조).
+      const { checkExecutorBeforeQueue, executorUnavailableBody } =
+        await import('@/lib/jobs/queueGuard');
+      const executor = await checkExecutorBeforeQueue(sb);
+      if (!executor.canQueue) {
+        return NextResponse.json(executorUnavailableBody(executor),
+          { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
+
       const { enqueueJob } = await import('@/lib/jobs');
       const q = await enqueueJob(sb, {
         userId: raw.userId || 'system',
@@ -401,6 +410,8 @@ export async function POST(req: NextRequest) {
           signalId,
           signal: v.signal,          // 표준 신호 원본 (금액·레버리지 없음)
           clientOrderId: `TRAIGO-${signalId}`.slice(0, 36),
+          // 워커가 늦게 집어도 오래된 신호는 실행하지 않는다
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
         },
       });
       if (q.ok) jobId = q.jobId;
