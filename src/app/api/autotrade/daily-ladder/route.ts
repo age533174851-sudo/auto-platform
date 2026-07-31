@@ -396,7 +396,10 @@ export async function POST(req: NextRequest) {
 
     // 오늘 손실 한도 — 자동매매에서 가장 중요한 관문이다. 사람이 안 보고
     // 있는 동안 도는 경로이므로, 여기가 막히지 않으면 하루 한도가 없는 것과 같다.
-    let dailyLossFact: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null = null;
+    type LimitV = { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+    let dailyLossFact: LimitV = null;
+    let weeklyFact: LimitV = null;
+    let streakFact: LimitV = null;
     try {
       const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
       const f = await collectDailyLoss({
@@ -407,6 +410,17 @@ export async function POST(req: NextRequest) {
         currentEquityUsd: ctx.config.accountEquity ?? null,
       });
       dailyLossFact = { status: f.verdict.status, reason: f.verdict.reason };
+
+      // 주간 한도 · 연패. 크론이 도는 경로라 여기가 막히지 않으면
+      // 그 잠금은 없는 것과 같다.
+      const { collectStreakLimits } = await import('@/lib/risk/lossStreakCheck');
+      const sf = await collectStreakLimits({
+        apiKey: conn.api_key, apiSecret: apiSecretPre, testnet: useTestnet,
+        exchange: exchange === 'gate' ? 'gate' : 'binance',
+        currentEquityUsd: ctx.config.accountEquity ?? null,
+      });
+      weeklyFact = { status: sf.weekly.status, reason: sf.weekly.reason };
+      streakFact = { status: sf.streak.status, reason: sf.streak.reason };
     } catch { /* null → unknown → 막힌다 */ }
 
     // 시장 국면. 일봉은 위에서 이미 받아 뒀다(bars.closes) — 다시 받으면
@@ -419,6 +433,7 @@ export async function POST(req: NextRequest) {
     const checklist = runChecklist({
       mode: { disposition: modeGate.disposition, reason: modeGate.reason },
       dailyLoss: dailyLossFact,
+      weeklyLoss: weeklyFact, lossStreak: streakFact,
       regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
       // 여기까지 왔다는 것은 assertStateConsistent를 통과했다는 뜻이다

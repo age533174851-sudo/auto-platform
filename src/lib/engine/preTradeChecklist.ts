@@ -59,6 +59,10 @@ export type CheckId =
   | 'MARGIN_SUFFICIENT'
   /** 오늘 잃은 금액이 한도 안인가 */
   | 'DAILY_LOSS_LIMIT'
+  /** 이번 주 잃은 금액이 한도 안인가 */
+  | 'WEEKLY_LOSS_LIMIT'
+  /** 연속 손절로 잠겨 있지 않은가 */
+  | 'LOSS_STREAK'
   /** 지금 시장 국면이 이 방향의 진입에 맞는가 */
   | 'REGIME_FILTER';
 
@@ -180,6 +184,16 @@ export const CHECK_SPECS: CheckSpec[] = [
   // 모든 시장에 건다. 한도는 계좌 단위이지 시장 단위가 아니다 — 선물에서
   // 한도를 채운 뒤 현물로 옮겨 계속하면 잠근 의미가 없다.
   { id: 'DAILY_LOSS_LIMIT', label: '오늘 손실 한도', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 주간 한도. **하루 한도가 못 보는 자리다** — 매일 −2.9%씩 닷새면 하루
+  // 잠금은 한 번도 안 걸리는데 한 주에 −14%다.
+  { id: 'WEEKLY_LOSS_LIMIT', label: '이번 주 손실 한도', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 연패 잠금. 다섯 번 연속 손절은 '운이 나빴다'일 수도 있지만, 전략이
+  // 지금 시장과 안 맞는다는 신호일 때가 더 많다.
+  { id: 'LOSS_STREAK', label: '연속 손절', markets: ALL_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 시장 국면. **필터를 켠 경우에만** 목록에 나온다 (옵션 regimeFilter).
@@ -349,6 +363,13 @@ export interface ChecklistInput {
    * 지우면 안 된다.
    */
   dailyLoss?: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+  /**
+   * 이번 주 손실 한도 판정 (risk/lossStreak의 judgeWeeklyLoss 결과).
+   * 하루 한도와 같은 규칙: null이면 '확인 못 함'이고 진입이 막힌다.
+   */
+  weeklyLoss?: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+  /** 연패 잠금 판정 (risk/lossStreak의 judgeLossStreak 결과) */
+  lossStreak?: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
   /**
    * 시장 국면 판정 (risk/regimeGate의 judgeRegime 결과).
    *
@@ -539,6 +560,23 @@ export function runChecklist(
     results.push(resultFor('DAILY_LOSS_LIMIT', 'unknown', input.dailyLoss.reason));
   } else {
     results.push(resultFor('DAILY_LOSS_LIMIT', 'pass', input.dailyLoss.reason));
+  }
+
+  // 주간 한도 · 연패 — 하루 한도와 **같은 규칙**으로 판정한다.
+  // 셋이 서로 다른 규칙을 쓰면 어떤 잠금이 왜 걸렸는지 화면에서 못 읽는다.
+  for (const [id, v] of [
+    ['WEEKLY_LOSS_LIMIT', input.weeklyLoss],
+    ['LOSS_STREAK', input.lossStreak],
+  ] as const) {
+    if (!v) {
+      results.push(resultFor(id, 'unknown', '판정 결과를 받지 못했습니다'));
+    } else if (v.status === 'locked') {
+      results.push(resultFor(id, 'fail', v.reason));
+    } else if (v.status === 'unknown') {
+      results.push(resultFor(id, 'unknown', v.reason));
+    } else {
+      results.push(resultFor(id, 'pass', v.reason));
+    }
   }
 
   if (!input.todayEntry) {

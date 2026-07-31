@@ -218,9 +218,19 @@ export async function POST(req: NextRequest) {
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
     const g = gateOrder(mode, notionalUsd);
 
+    // 손실 잠금 셋. **이 라우트도 넣은 적이 없어서 진입이 전부 막혀 있었다**
+    // (현물 라우트와 같은 자리, 같은 이유).
+    const limits = isExit
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null }
+      : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
+          sb, userId: uid, connectionId: body.connectionId, testnet,
+          equityUsd: marginInput?.available ?? null,
+        });
+
     const checklist = runChecklist({
       mode: { disposition: g.disposition, reason: g.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
+      ...limits,
       // 위에서 성공을 확인한 값들이다
       marginType: 'isolated',
       leverage: { actual: leverage, intended: leverage },

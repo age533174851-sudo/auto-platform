@@ -23,6 +23,8 @@ function goodInput(): ChecklistInput {
     existingPositionQty: 0,
     todayEntry: { alreadyTraded: false },
     dailyLoss: { status: 'ok', reason: '오늘 −10.00 / 한도 50.00 USDT' },
+    weeklyLoss: { status: 'ok', reason: '주간 여유 400.00 USDT' },
+    lossStreak: { status: 'ok', reason: '연패 없음' },
     stopPrice: 60000,
     liquidationPrice: 58000,
     side: 'LONG',
@@ -338,6 +340,8 @@ export function runPreTradeChecklistTests() {
       clock: { localMs: 1_000_000, serverMs: 1_000_050 },
       margin: { required: 100, available: 500 },
       dailyLoss: { status: 'ok', reason: '한도 안' },
+      weeklyLoss: { status: 'ok', reason: '한도 안' },
+      lossStreak: { status: 'ok', reason: '연패 없음' },
       // 아래는 현물에 존재하지 않아 넘기지 않는다
       // marginType, liquidationPrice, stopPrice, leverage, reconcile …
     };
@@ -357,11 +361,47 @@ export function runPreTradeChecklistTests() {
     }
   });
 
-  test('현물은 모드·시계·일일 한도만 본다', () => {
+  test('주간 한도에 걸리면 신규 진입이 막힌다 — 하루 한도가 통과여도', () => {
+    const v = runChecklist({
+      ...goodInput(),
+      dailyLoss: { status: 'ok', reason: '오늘은 여유 있음' },
+      weeklyLoss: { status: 'locked', reason: '이번 주 손실이 한도에 닿았습니다' },
+    }, { market: 'USDM', intent: 'ENTRY' });
+    eq(v.allowed, false, '매일 −2.9%씩 닷새면 하루 잠금은 한 번도 안 걸린다');
+    assert(JSON.stringify(v.blockers).includes('주'), JSON.stringify(v.blockers));
+  });
+
+  test('연패로 잠기면 막힌다', () => {
+    const v = runChecklist({
+      ...goodInput(),
+      lossStreak: { status: 'locked', reason: '연속 5회 손절' },
+    }, { market: 'USDM', intent: 'ENTRY' });
+    eq(v.allowed, false);
+  });
+
+  test('주간·연패 판정을 못 받으면 막는다 — 모르는 것은 통과가 아니다', () => {
+    const { weeklyLoss: _w, lossStreak: _s, ...rest } = goodInput();
+    const v = runChecklist(rest as any, { market: 'USDM', intent: 'ENTRY' });
+    eq(v.allowed, false);
+    assert(v.unknownCount >= 2, `확인 못 한 항목 ${v.unknownCount}개`);
+  });
+
+  test('**청산은 주간·연패 잠금과 무관하다** — 못 나가게 막으면 손실을 키운다', () => {
+    const v = runChecklist({
+      ...goodInput(),
+      dailyLoss: { status: 'locked', reason: '한도 도달' },
+      weeklyLoss: { status: 'locked', reason: '주간 한도 도달' },
+      lossStreak: { status: 'locked', reason: '연속 5회 손절' },
+    }, { market: 'USDM', intent: 'EXIT' });
+    eq(v.allowed, true, '나가는 주문까지 막으면 잠금의 목적과 정반대가 된다');
+  });
+
+  test('현물은 모드·시계·손실 한도(일·주·연패)만 본다', () => {
     // 일일 한도는 **계좌 단위**라 현물에도 걸린다. 선물에서 한도를 채운 뒤
     // 현물로 옮겨 계속하면 잠근 의미가 없다.
     const v = runChecklist(spotInput(), { market: 'SPOT' });
-    eq(v.results.map(r => r.id).sort().join(','), 'CLOCK_SKEW,DAILY_LOSS_LIMIT,MODE');
+    eq(v.results.map(r => r.id).sort().join(','),
+       'CLOCK_SKEW,DAILY_LOSS_LIMIT,LOSS_STREAK,MODE,WEEKLY_LOSS_LIMIT');
   });
 
   test('현물에는 자금 항목도 없다 — 시장가는 체결가를 몰라 껍데기 통과가 된다', () => {
@@ -443,6 +483,8 @@ export function runPreTradeChecklistTests() {
       // 포지션이 없으면 거래소 청산가가 없다 — 경로가 보수적 추정값을 넘긴다
       liquidationPrice: 55000,
       dailyLoss: { status: 'ok', reason: '한도 안' },
+      weeklyLoss: { status: 'ok', reason: '한도 안' },
+      lossStreak: { status: 'ok', reason: '연패 없음' },
     }, { market: 'COINM' });
     eq(v.allowed, true, `COIN-M이 막혔다: ${v.summary}`);
   });
@@ -474,6 +516,8 @@ export function runPreTradeChecklistTests() {
     const v = runChecklist({
       ...goodInput(),
       dailyLoss: { status: 'locked', reason: '오늘 손실이 한도에 닿았습니다' },
+      weeklyLoss: { status: 'ok', reason: '한도 안' },
+      lossStreak: { status: 'ok', reason: '연패 없음' },
     });
     eq(v.allowed, false);
     eq(statusOf(v, 'DAILY_LOSS_LIMIT').status, 'fail');
@@ -493,6 +537,8 @@ export function runPreTradeChecklistTests() {
       reconcile: { reachable: true, blockNewOrders: false, summary: '일치' },
       marginType: 'cross', existingPositionQty: 3,
       dailyLoss: { status: 'locked', reason: '한도 도달' },
+      weeklyLoss: { status: 'ok', reason: '한도 안' },
+      lossStreak: { status: 'ok', reason: '연패 없음' },
     }, { intent: 'EXIT' });
     const ids = v.results.map(r => r.id);
     assert(!ids.includes('DAILY_LOSS_LIMIT'), '청산에 일일 한도를 물리면 나갈 수 없다');

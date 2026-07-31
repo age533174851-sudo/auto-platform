@@ -94,9 +94,27 @@ export async function POST(req: NextRequest) {
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
     const g = gateOrder(mode, notional);
 
+    // 손실 잠금 셋(오늘·이번 주·연패).
+    //
+    // **이 줄이 없어서 현물 매수가 전부 막혀 있었다.** 체크리스트의
+    // 오늘 손실 한도는 '모르면 막는' 필수 항목인데 이 라우트는 그 값을
+    // 한 번도 넣은 적이 없다 — 화면에는 "오늘 손실 한도: 확인 못 함"으로
+    // 떴고, 사용자가 할 수 있는 일은 없었다.
+    //
+    // 매도(EXIT)에는 어차피 안 물린다. 나가는 길을 막으면 잠금의 목적과
+    // 정반대가 되기 때문이다.
+    const limits = isSell
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null }
+      : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
+          sb, userId: uid, connectionId: body.connectionId,
+          exchange: spotExchange === 'gate' ? 'gate' : 'binance',
+          testnet: spotTestnet,
+        });
+
     const checklist = runChecklist({
       mode: { disposition: g.disposition, reason: g.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
+      ...limits,
       // 현물에는 증거금 항목이 없다 (preTradeChecklist의 markets 참조).
       // 매도 전 보유 확인은 spotOrderExecutor가 하고, 매수 자금 부족은
       // 거래소가 주문을 통째로 거부한다.

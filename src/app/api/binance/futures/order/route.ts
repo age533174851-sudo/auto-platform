@@ -143,7 +143,10 @@ export async function POST(req: NextRequest) {
 
     // 오늘 손실 한도. 거래소 원장에서 읽는다 — 브라우저에 들고 있던
     // 예전 방식은 저장소를 지우면 리셋됐고 이 경로에는 걸리지 않았다.
-    let dailyLoss: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null = null;
+    type LimitVerdict = { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+    let dailyLoss: LimitVerdict = null;
+    let weeklyLoss: LimitVerdict = null;
+    let lossStreak: LimitVerdict = null;
     if (!isExit) {
       try {
         const { data: c4 } = await (sb.from('exchange_connections') as any)
@@ -158,6 +161,18 @@ export async function POST(req: NextRequest) {
             currentEquityUsd: marginInput?.available ?? null,
           });
           dailyLoss = { status: f.verdict.status, reason: f.verdict.reason };
+
+          // 주간 한도 · 연패. 하루 한도가 못 보는 자리다 — 매일 −2.9%씩
+          // 닷새면 하루 잠금은 한 번도 안 걸리는데 한 주에 −14%다.
+          const { collectStreakLimits } = await import('@/lib/risk/lossStreakCheck');
+          const sf = await collectStreakLimits({
+            apiKey: c4.api_key,
+            apiSecret: decryptSecret(c4.api_secret_enc ?? c4.encrypted_secret ?? ''),
+            testnet: useTestnet,
+            currentEquityUsd: marginInput?.available ?? null,
+          });
+          weeklyLoss = { status: sf.weekly.status, reason: sf.weekly.reason };
+          lossStreak = { status: sf.streak.status, reason: sf.streak.reason };
         }
       } catch { /* null → unknown → 막힌다 */ }
     }
@@ -165,7 +180,7 @@ export async function POST(req: NextRequest) {
     const checklist = runChecklist({
       mode: { disposition: g.disposition, reason: g.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
-      dailyLoss,
+      dailyLoss, weeklyLoss, lossStreak,
       reconcile: {
         reachable: gate.gather.reachable,
         blockNewOrders: !!gate.verdict?.blockNewOrders,

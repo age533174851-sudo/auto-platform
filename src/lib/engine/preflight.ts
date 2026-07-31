@@ -221,6 +221,26 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
     /* 넣지 않는다 → unknown → 막힌다 */
   }
 
+  // 4-c. 주간 한도 · 연패 잠금.
+  //
+  // 하루 한도는 하루 안의 피해만 자른다. 매일 −2.9%씩 닷새면 하루 잠금은
+  // **한 번도 안 걸리는데** 한 주에 −14%다. 그 자리를 여기서 본다.
+  try {
+    if (conn) {
+      const { collectStreakLimits } = await import('@/lib/risk/lossStreakCheck');
+      const eq = input.margin?.available ?? null;
+      const f = await collectStreakLimits({
+        apiKey: conn.api_key, apiSecret: secret, testnet,
+        exchange: isGate ? 'gate' : 'binance',
+        currentEquityUsd: eq != null ? Number(eq) : null,
+      });
+      input.weeklyLoss = { status: f.weekly.status, reason: f.weekly.reason };
+      input.lossStreak = { status: f.streak.status, reason: f.streak.reason };
+    }
+  } catch {
+    /* 넣지 않는다 → unknown → 막힌다 */
+  }
+
   // 5. 오늘 진입 — 호출자가 알 때만 (위 주석 참조)
   if (alreadyTradedToday != null) {
     input.todayEntry = { alreadyTraded: alreadyTradedToday };

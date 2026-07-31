@@ -324,7 +324,10 @@ export async function POST(req: NextRequest) {
 
       // 오늘 손실 한도. 웹훅은 사람이 안 보는 사이에 도는 경로라
       // 여기가 막히지 않으면 하루 한도가 없는 것과 같다.
-      let dailyLossFact: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null = null;
+      type LimitV = { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+      let dailyLossFact: LimitV = null;
+      let weeklyFact: LimitV = null;
+      let streakFact: LimitV = null;
       if (!isExit) {
         try {
           const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
@@ -333,6 +336,16 @@ export async function POST(req: NextRequest) {
             exchange, currentEquityUsd: marginInput?.available ?? null,
           });
           dailyLossFact = { status: f.verdict.status, reason: f.verdict.reason };
+
+          // 주간 한도 · 연패. 사람이 안 보는 사이에 도는 경로라 여기가
+          // 막히지 않으면 그 잠금은 없는 것과 같다.
+          const { collectStreakLimits } = await import('@/lib/risk/lossStreakCheck');
+          const sf = await collectStreakLimits({
+            apiKey: conn.api_key, apiSecret, testnet: isTestnet,
+            exchange, currentEquityUsd: marginInput?.available ?? null,
+          });
+          weeklyFact = { status: sf.weekly.status, reason: sf.weekly.reason };
+          streakFact = { status: sf.streak.status, reason: sf.streak.reason };
         } catch { /* null → unknown → 막힌다 */ }
       }
 
@@ -345,6 +358,7 @@ export async function POST(req: NextRequest) {
       const checklist = runChecklist({
         mode: { disposition: g.disposition, reason: g.reason },
         dailyLoss: dailyLossFact,
+        weeklyLoss: weeklyFact, lossStreak: streakFact,
         regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },
         clock: serverMs != null ? { localMs, serverMs } : null,
         reconcile: {
