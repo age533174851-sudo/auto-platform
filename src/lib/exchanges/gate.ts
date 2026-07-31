@@ -2,7 +2,16 @@
 import { createHmac, createHash } from 'crypto';
 import type { TestResult, ExchangeBalance } from './types';
 
-const BASE = 'https://api.gateio.ws';
+// 호스트를 **연결의 testnet 여부로** 고른다.
+//
+// 예전에는 `const BASE = 'https://api.gateio.ws'` 하나로 박혀 있었다.
+// 그래서 테스트넷으로 등록한 Gate 연결이어도
+//   · 연결 테스트와 잔고 조회가 실계좌를 봤고
+//   · `/api/exchange/order`가 **실계좌로 주문을 보냈다** (그 라우트는
+//     testnet 값을 계산해 두고 Gate 갈래에서만 안 넘기고 있었다)
+// 화면에는 '테스트넷'이라고 적혀 있는 채로.
+import { gateBase } from './gateFutures';
+import { toGatePair } from './gateSpotPlan';
 
 function signGate(method: string, path: string, qs: string, body: string, secret: string, ts: string): string {
   // Gate v4 규격: 본문은 SHA-512 '해시' (HMAC 아님). HMAC를 쓰면 POST 주문 서명이 실패한다.
@@ -11,11 +20,11 @@ function signGate(method: string, path: string, qs: string, body: string, secret
   return createHmac('sha512', secret).update(payload).digest('hex');
 }
 
-async function gateFetch(path: string, key: string, secret: string) {
+async function gateFetch(path: string, key: string, secret: string, testnet = false) {
   const ts  = Math.floor(Date.now()/1000).toString();
   const sig = signGate('GET', path, '', '', secret, ts);
 
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetch(`${gateBase(testnet)}${path}`, {
     headers: {
       'KEY': key, 'SIGN': sig, 'Timestamp': ts,
       'Content-Type': 'application/json',
@@ -26,10 +35,10 @@ async function gateFetch(path: string, key: string, secret: string) {
   return r.json();
 }
 
-export async function testGate(key: string, secret: string): Promise<TestResult> {
+export async function testGate(key: string, secret: string, testnet = false): Promise<TestResult> {
   const t0 = Date.now();
   try {
-    const data = await gateFetch('/api/v4/spot/accounts', key, secret);
+    const data = await gateFetch('/api/v4/spot/accounts', key, secret, testnet);
     const balances: ExchangeBalance[] = (Array.isArray(data) ? data : [])
       .filter((b: any) => parseFloat(b.available) + parseFloat(b.locked) > 0)
       .slice(0, 20)
@@ -41,20 +50,20 @@ export async function testGate(key: string, secret: string): Promise<TestResult>
   }
 }
 
-export async function getBalancesGate(key: string, secret: string): Promise<ExchangeBalance[]> {
-  const data = await gateFetch('/api/v4/spot/accounts', key, secret);
+export async function getBalancesGate(key: string, secret: string, testnet = false): Promise<ExchangeBalance[]> {
+  const data = await gateFetch('/api/v4/spot/accounts', key, secret, testnet);
   return (Array.isArray(data) ? data : [])
     .filter((b: any) => parseFloat(b.available)+parseFloat(b.locked)>0)
     .map((b: any) => ({ currency: b.currency, free: parseFloat(b.available), locked: parseFloat(b.locked), total: parseFloat(b.available)+parseFloat(b.locked) }));
 }
 
 // ─── POST helper (signed) ──────────────────────────────────────
-async function gatePost(path: string, key: string, secret: string, bodyObj: any) {
+async function gatePost(path: string, key: string, secret: string, bodyObj: any, testnet = false) {
   const ts   = Math.floor(Date.now()/1000).toString();
   const body = JSON.stringify(bodyObj);
   const sig  = signGate('POST', path, '', body, secret, ts);
 
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetch(`${gateBase(testnet)}${path}`, {
     method:  'POST',
     headers: {
       'KEY': key, 'SIGN': sig, 'Timestamp': ts,
@@ -94,11 +103,19 @@ export async function placeOrderGate(
     amount?:    number;        // USDT 금액 (MARKET BUY)
     price?:     number;        // LIMIT 전용
   },
+  testnet = false,
 ): Promise<GateOrderResult> {
   try {
-    // 심볼 정규화 → BTC_USDT
-    let pair = opts.symbol.toUpperCase().replace('/', '').replace('_', '');
-    if (pair.endsWith('USDT')) pair = `${pair.slice(0, -4)}_USDT`;
+    // 종목 이름은 **한 곳**에서 만든다.
+    //
+    // 여기 있던 `endsWith('USDT')`만 보는 코드는 ETHBTC·SOLUSDC에 밑줄을
+    // 안 붙였다. 거절되면 그나마 낫고, 하필 그 이름의 종목이 있으면
+    // 다른 것을 산다. 판정이 두 곳에 있으면 한쪽만 고쳐진다.
+    const p = toGatePair(opts.symbol);
+    if (!p) {
+      return { success: false, message: `종목 '${opts.symbol}'의 결제 통화를 알 수 없습니다 (예: BTC_USDT)` };
+    }
+    const pair = p.pair;
 
     const body: any = {
       currency_pair: pair,
@@ -123,7 +140,7 @@ export async function placeOrderGate(
       body.price  = String(opts.price);
     }
 
-    const d = await gatePost('/api/v4/spot/orders', key, secret, body);
+    const d = await gatePost('/api/v4/spot/orders', key, secret, body, testnet);
     return {
       success: true,
       message: '주문 체결',
@@ -152,7 +169,8 @@ export async function placeConditionalGate(
     amount: number;        // 수량
     side: 'buy' | 'sell';
     rule: '>=' | '<=';     // 트리거 방향 (손절=<=, 익절=>=)
-  }
+  },
+  testnet = false,
 ): Promise<GateOrderResult> {
   try {
     const body = {
@@ -170,7 +188,7 @@ export async function placeConditionalGate(
         time_in_force: 'gtc',
       },
     };
-    const d = await gatePost('/api/v4/spot/price_orders', key, secret, body);
+    const d = await gatePost('/api/v4/spot/price_orders', key, secret, body, testnet);
     return { success: true, message: '조건부 주문 등록 (거래소가 24시간 감시)', orderId: d.id, symbol: opts.pair, side: opts.side, qty: opts.amount, price: opts.orderPrice, raw: d };
   } catch (e: any) {
     return { success: false, message: e.message || '조건부 주문 실패' };
