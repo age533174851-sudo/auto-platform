@@ -70,11 +70,17 @@ export async function POST(req: NextRequest) {
   {
     const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
-    const { getSpotServerTime } = await import('@/lib/exchanges/binance');
-
     const { data: sconn } = await (sb.from('exchange_connections') as any)
-      .select('is_testnet').eq('id', body.connectionId).eq('user_id', uid).maybeSingle();
+      .select('exchange_id, is_testnet').eq('id', body.connectionId).eq('user_id', uid).maybeSingle();
     const spotTestnet = sconn?.is_testnet !== false;
+    const spotExchange = String(sconn?.exchange_id || 'binance').toLowerCase();
+
+    // 시각은 **주문이 나갈 거래소**에서 읽는다. Gate 주문을 넣으면서
+    // 바이낸스 시각으로 시계 오차를 재면, 그 초록 체크는 다른 거래소에
+    // 대한 것이다 — 확인한 적 없는 것을 확인했다고 적는 셈이다.
+    const readServerTime = spotExchange === 'gate'
+      ? (await import('@/lib/exchanges/gateFutures')).getGateServerTime
+      : (await import('@/lib/exchanges/binance')).getSpotServerTime;
 
     // 명목가는 아는 만큼만 넘긴다. quoteOrderQty가 있으면 그것이 곧 금액이고,
     // 지정가면 수량×가격이다. 시장가+수량만 온 경우는 체결가를 모르므로
@@ -84,7 +90,7 @@ export async function POST(req: NextRequest) {
       || (Number(body.quantity) * Number(body.price)) || 0;
 
     const localMs = Date.now();
-    const serverMs = await getSpotServerTime(spotTestnet);
+    const serverMs = await readServerTime(spotTestnet);
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
     const g = gateOrder(mode, notional);
 

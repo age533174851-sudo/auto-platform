@@ -29,7 +29,7 @@ function authHeaders(method: string, path: string, qs: string, body: string, key
   };
 }
 
-async function gateReq<T>(
+export async function gateReq<T>(
   method: 'GET' | 'POST' | 'DELETE',
   path: string,
   opts: { key?: string; secret?: string; qs?: string; body?: any; testnet?: boolean; timeoutMs?: number } = {}
