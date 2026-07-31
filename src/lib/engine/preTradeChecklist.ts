@@ -58,7 +58,9 @@ export type CheckId =
   /** 증거금이 충분한가 */
   | 'MARGIN_SUFFICIENT'
   /** 오늘 잃은 금액이 한도 안인가 */
-  | 'DAILY_LOSS_LIMIT';
+  | 'DAILY_LOSS_LIMIT'
+  /** 지금 시장 국면이 이 방향의 진입에 맞는가 */
+  | 'REGIME_FILTER';
 
 /**
  * 어느 시장의 주문인가.
@@ -178,6 +180,15 @@ export const CHECK_SPECS: CheckSpec[] = [
   // 모든 시장에 건다. 한도는 계좌 단위이지 시장 단위가 아니다 — 선물에서
   // 한도를 채운 뒤 현물로 옮겨 계속하면 잠근 의미가 없다.
   { id: 'DAILY_LOSS_LIMIT', label: '오늘 손실 한도', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 시장 국면. **필터를 켠 경우에만** 목록에 나온다 (옵션 regimeFilter).
+  //
+  // 왜 옵션인가: 이 검사는 피해 크기를 제한하는 것이 아니라 **어떤 거래를
+  // 할지 자체를 바꾼다.** 사용자가 만들어 둔 전략의 신호를 조용히 거부하기
+  // 시작하면 그건 다른 전략이 된다. 켜는 것은 명시적 선택이어야 하고,
+  // 켜지 않았으면 '확인 못 함'으로 남겨서도 안 된다.
+  { id: 'REGIME_FILTER', label: '시장 국면 적합', markets: ALL_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 하루 1회 제한이 있는 전략에서만 (옵션 dailyLimit). 수동 주문에는
@@ -338,6 +349,13 @@ export interface ChecklistInput {
    * 지우면 안 된다.
    */
   dailyLoss?: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+  /**
+   * 시장 국면 판정 (risk/regimeGate의 judgeRegime 결과).
+   *
+   * `opts.regimeFilter`를 켰는데 이 값이 없으면 `unknown`이고 막힌다 —
+   * 필터를 켠 채로 국면을 못 본 것은 필터가 없는 것과 같다.
+   */
+  regime?: { status: 'ok' | 'blocked' | 'unknown'; reason: string } | null;
   /** 계획된 손절가. 없으면 손절이 안 붙은 것 */
   stopPrice?: number | null;
   liquidationPrice?: number | null;
@@ -358,6 +376,13 @@ export interface ChecklistOptions {
    * 것이 있다고 읽는다.
    */
   dailyLimit?: boolean;
+  /**
+   * 시장 국면 필터를 목록에 넣을 것인가.
+   *
+   * 켜지 않으면 REGIME_FILTER가 아예 빠진다 — 보지 않기로 한 검사를
+   * '확인 못 함'으로 남기면 확인할 것이 있다고 읽힌다.
+   */
+  regimeFilter?: boolean;
 }
 
 export interface ChecklistVerdict {
@@ -392,10 +417,12 @@ function resultFor(
 /** 이 시장·이 방향에서 의미가 있는 검사인가 */
 export function appliesTo(
   id: CheckId, market: MarketKind, intent: OrderIntent, dailyLimit: boolean,
+  regimeFilter = false,
 ): boolean {
   const spec = SPEC_BY_ID[id];
   if (!spec) return false;
   if (id === 'TODAY_ENTRY' && !dailyLimit) return false;
+  if (id === 'REGIME_FILTER' && !regimeFilter) return false;
   return spec.markets.includes(market) && spec.intents.includes(intent);
 }
 
@@ -412,6 +439,7 @@ export function runChecklist(
   const market = opts.market ?? 'USDM';
   const intent = opts.intent ?? 'ENTRY';
   const dailyLimit = opts.dailyLimit ?? false;
+  const regimeFilter = opts.regimeFilter ?? false;
 
   const all: CheckResult[] = [];
   const results = all;   // 아래 push는 그대로 두고, 마지막에 걸러낸다
@@ -489,6 +517,18 @@ export function runChecklist(
   }
 
   // 9. 오늘 진입
+  // ── 시장 국면 ──
+  if (!input.regime) {
+    results.push(resultFor('REGIME_FILTER', 'unknown',
+      '시장 국면을 확인하지 못했습니다 — 필터를 켠 채로 못 보면 필터가 없는 것과 같습니다'));
+  } else if (input.regime.status === 'blocked') {
+    results.push(resultFor('REGIME_FILTER', 'fail', input.regime.reason));
+  } else if (input.regime.status === 'unknown') {
+    results.push(resultFor('REGIME_FILTER', 'unknown', input.regime.reason));
+  } else {
+    results.push(resultFor('REGIME_FILTER', 'pass', input.regime.reason));
+  }
+
   // ── 오늘 손실 한도 ──
   if (!input.dailyLoss) {
     results.push(resultFor('DAILY_LOSS_LIMIT', 'unknown',
@@ -532,7 +572,7 @@ export function runChecklist(
 
   // 여기서 걸러낸다. 위에서 조건마다 분기하면 검사 하나 추가할 때 적용
   // 규칙을 두 곳에 적게 되고, 언젠가 한 곳만 고친다.
-  const scoped = all.filter(r => appliesTo(r.id, market, intent, dailyLimit));
+  const scoped = all.filter(r => appliesTo(r.id, market, intent, dailyLimit, regimeFilter));
 
   const blockers = scoped.filter(r => r.blocks);
   const passed = scoped.filter(r => r.status === 'pass').length;

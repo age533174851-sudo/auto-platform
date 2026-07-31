@@ -332,6 +332,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 오늘 손실 한도. **보이지 않으면 없는 것과 같다** — 주문 버튼을 눌렀을
   // 때 처음 알게 되면 그 시점까지 한도를 모른 채로 계획을 세운 것이다.
   const [dailyLimit, setDailyLimit] = useState<any>(null);
+  // 지금 시장 국면. **필터를 켜지 않아도 보여준다** — 필터가 꺼져 있어도
+  // "지금 고변동장"이라는 사실은 알아야 한다.
+  const [regime, setRegime] = useState<any>(null);
   // 청산 전용. 켜면 보유분을 줄이는 주문만 나간다 — 반대로 새 포지션이
   // 열리는 사고를 막는다.
   const [reduceOnly, setReduceOnly] = useState(false);
@@ -386,6 +389,22 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     const t = setInterval(load, 30_000);
     return () => { alive = false; clearInterval(t); };
   }, [auth, isPaper, modeResolution.connId]);
+
+  // 국면은 주문 방향에 따라 판정이 달라진다(상승장 숏 등). 롱 기준으로
+  // 받아 두고, 막히는 경우에만 방향을 따로 표시한다.
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(`/api/regime?symbol=${symbol.id}&side=LONG`);
+        const j = await r.json();
+        if (alive) setRegime(j?.regime ? j : null);
+      } catch { if (alive) setRegime(null); }
+    };
+    load();
+    const t = setInterval(load, 120_000);   // 일봉이라 자주 볼 이유가 없다
+    return () => { alive = false; clearInterval(t); };
+  }, [symbol.id]);
 
   // 비율 버튼은 **선물 가용 증거금**만 쓴다. 현물 USDT를 쓰면 없는 돈으로
   // 수량을 계산하게 되고, 그 수량이 그대로 주문이 된다.
@@ -675,6 +694,27 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           {balanceUsd == null ? '확인 불가' : `${fmtPrice(balanceUsd)} USDT`}
         </span>
       </div>
+
+      {/* 지금 국면. 필터를 켜지 않아도 보여준다 — 고변동장인지 아닌지는
+          필터와 무관하게 알아야 하는 사실이다. */}
+      {regime?.regime && (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+          fontSize: FS.micro,
+        }}>
+          <span style={{ color: C.faint }}>시장 국면</span>
+          <span style={{
+            color: !regime.regime.dataOk ? C.warn
+              : regime.gate?.blockEntries ? C.down
+              : regime.regime.volatility === 'high_vol' ? C.warn : C.dim,
+            fontWeight: 600, textAlign: 'right', maxWidth: '72%',
+          }}>
+            {regime.regime.label}
+            {regime.gate?.enabled && regime.gate?.blockEntries ? ' · 진입 차단' : ''}
+            {regime.gate?.enabled === false ? ' (필터 꺼짐)' : ''}
+          </span>
+        </div>
+      )}
 
       {/* 오늘 손실 한도. 남은 여유를 미리 보여주면 마지막 한 번을 넣기 전에
           스스로 멈출 수 있다. 막힌 상태는 붉게, 확인 불가는 노랗게 —

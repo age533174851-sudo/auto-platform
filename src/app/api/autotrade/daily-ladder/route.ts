@@ -409,9 +409,17 @@ export async function POST(req: NextRequest) {
       dailyLossFact = { status: f.verdict.status, reason: f.verdict.reason };
     } catch { /* null → unknown → 막힌다 */ }
 
+    // 시장 국면. 일봉은 위에서 이미 받아 뒀다(bars.closes) — 다시 받으면
+    // 두 조회 사이에 값이 달라져 점검과 실제 판단이 다른 봉을 본다.
+    const { collectRegime } = await import('@/lib/risk/regimeCheck');
+    const regimeFacts = await collectRegime({
+      symbol, side: result.plan!.side, closes: bars.closes,
+    });
+
     const checklist = runChecklist({
       mode: { disposition: modeGate.disposition, reason: modeGate.reason },
       dailyLoss: dailyLossFact,
+      regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
       // 여기까지 왔다는 것은 assertStateConsistent를 통과했다는 뜻이다
       reconcile: { reachable: true, blockNewOrders: false, summary: gate.verdict?.summary || '일치' },
@@ -437,6 +445,8 @@ export async function POST(req: NextRequest) {
       // USDⓈ-M 진입이고, 이 전략은 하루 1회 제한이 있다.
       // dailyLimit를 켜야 '오늘 진입 이력'이 목록에 들어온다.
       market: 'USDM', intent: 'ENTRY', dailyLimit: true,
+      // 국면 필터는 켠 경우에만 목록에 들어온다 (REGIME_FILTER 환경변수).
+      regimeFilter: regimeFacts.enabled,
     });
 
     if (!checklist.allowed) {

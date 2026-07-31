@@ -141,18 +141,55 @@ export function runPreTradeChecklistTests() {
     assert(v.blockers.length > 0, '막는 항목이 있어야 한다');
   });
 
-  test('USDⓈ-M 진입 + 하루제한이면 전체 목록이 돈다', () => {
-    eq(runChecklist(goodInput(), { market: 'USDM', intent: 'ENTRY', dailyLimit: true }).total,
-       CHECK_SPECS.length);
+  test('USDⓈ-M 진입 + 하루제한 + 국면필터면 전체 목록이 돈다', () => {
+    eq(runChecklist(goodInput(), {
+      market: 'USDM', intent: 'ENTRY', dailyLimit: true, regimeFilter: true,
+    }).total, CHECK_SPECS.length);
   });
 
-  test('기본값은 USDⓈ-M 진입 · 하루제한 없음 — 오늘 진입 항목이 빠진다', () => {
+  test('기본값은 하루제한·국면필터 없음 — 두 항목이 빠진다', () => {
     const v = runChecklist(goodInput());
     eq(v.market, 'USDM');
     eq(v.intent, 'ENTRY');
-    eq(v.total, CHECK_SPECS.length - 1);
+    eq(v.total, CHECK_SPECS.length - 2);
     assert(!v.results.some(r => r.id === 'TODAY_ENTRY'),
       '수동 주문에는 하루 제한이 없는데 "확인 못 함"으로 남으면 확인할 것이 있다고 읽힌다');
+    assert(!v.results.some(r => r.id === 'REGIME_FILTER'),
+      '보지 않기로 한 검사를 "확인 못 함"으로 남기면 확인할 것이 있다고 읽힌다');
+  });
+
+  console.log('[거래 전 점검 — 시장 국면 필터]');
+
+  test('필터를 켰는데 국면을 못 보면 막는다 — 필터가 없는 것과 같다', () => {
+    const v = runChecklist(goodInput(), { regimeFilter: true });
+    eq(v.allowed, false);
+    eq(statusOf(v, 'REGIME_FILTER').status, 'unknown');
+  });
+
+  test('국면이 안 맞으면 막는다', () => {
+    const v = runChecklist(
+      { ...goodInput(), regime: { status: 'blocked', reason: '하락 추세에서 롱 진입 차단' } },
+      { regimeFilter: true });
+    eq(v.allowed, false);
+    eq(statusOf(v, 'REGIME_FILTER').status, 'fail');
+  });
+
+  test('국면이 맞으면 통과한다', () => {
+    const v = runChecklist(
+      { ...goodInput(), regime: { status: 'ok', reason: '상승 추세 · 보통변동 — 진입 허용' } },
+      { regimeFilter: true });
+    eq(v.allowed, true, `막혔다: ${v.summary}`);
+  });
+
+  test('청산에는 국면을 묻지 않는다 — 국면이 나쁘다고 못 나가면 안 된다', () => {
+    const v = runChecklist({
+      mode: { disposition: 'SEND', reason: '청산' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      reconcile: { reachable: true, blockNewOrders: false, summary: '일치' },
+      marginType: 'cross', existingPositionQty: 3,
+    }, { intent: 'EXIT', regimeFilter: true });
+    assert(!v.results.some(r => r.id === 'REGIME_FILTER'), '청산에 국면 필터가 붙었다');
+    eq(v.allowed, true, `청산이 막혔다: ${v.summary}`);
   });
 
   test('모드가 BLOCK이면 막는다', () => {

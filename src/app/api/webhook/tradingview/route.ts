@@ -336,9 +336,16 @@ export async function POST(req: NextRequest) {
         } catch { /* null → unknown → 막힌다 */ }
       }
 
+      // 시장 국면. 웹훅 신호가 국면과 맞는지 본다 — 필터를 켠 경우에만.
+      const { collectRegime } = await import('@/lib/risk/regimeCheck');
+      const regimeFacts = await collectRegime({
+        symbol: tradeSymbol, side: sideUp === 'BUY' ? 'LONG' : 'SHORT',
+      });
+
       const checklist = runChecklist({
         mode: { disposition: g.disposition, reason: g.reason },
         dailyLoss: dailyLossFact,
+        regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },
         clock: serverMs != null ? { localMs, serverMs } : null,
         reconcile: {
           reachable: gate.gather.reachable,
@@ -354,7 +361,8 @@ export async function POST(req: NextRequest) {
         liquidationPrice: risk?.liquidationPrice ?? null,
         side: sideUp === 'BUY' ? 'LONG' : 'SHORT',
         margin: marginInput,
-      }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY' });
+      }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY',
+           regimeFilter: regimeFacts.enabled });
 
       if (!checklist.allowed) {
         entry.status = 'error';

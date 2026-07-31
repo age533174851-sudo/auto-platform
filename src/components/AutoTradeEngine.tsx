@@ -219,7 +219,13 @@ export default function AutoTradeEngine() {
             if (strat.marketFilter && strat.marketFilter !== 'any' && snapshot.ema20 && snapshot.ema60 && price) {
               try {
                 const { regimeAllowsEntry } = await import('@/lib/risk/regime');
-                // snapshot 기반 간이 레짐 구성
+                // 국면을 **손으로 만들지 않는다.**
+                //
+                // 예전에는 여기서 detectRegime의 계산식을 복사해 객체를 조립했다.
+                // 그러면 판정이 두 벌이 되고, 한쪽만 고쳐진다 — 실제로
+                // detectRegime에 '봉이 모자라면 판정하지 않는다'를 넣었을 때
+                // 이 조립본은 그 검사를 통째로 비껴갔다. `allowEntry: true`가
+                // 상수로 박혀 있었으므로 계산이 무엇이든 허용이었다.
                 const ema20 = snapshot.ema20, ema60 = snapshot.ema60;
                 const volPct = snapshot.atr && price ? (snapshot.atr / price) * 100 : 0;
                 const gap = ((ema20 - ema60) / ema60) * 100;
@@ -227,9 +233,17 @@ export default function AutoTradeEngine() {
                 const trendScore = Math.max(-100, Math.min(100, gap * 8 + pricePos * 2));
                 const trend = trendScore > 12 ? 'uptrend' : trendScore < -12 ? 'downtrend' : 'sideways';
                 const volatility = volPct >= 4 ? 'high_vol' : volPct < 1.2 ? 'low_vol' : 'normal_vol';
+                // 이 화면은 봉 배열이 아니라 스냅샷(ema20/ema60/atr)을 갖고 있어
+                // detectRegime을 그대로 부를 수 없다. 대신 그 값들이 **실제로
+                // 계산된 것**임을 확인했을 때만 dataOk를 켠다 — 위 if 조건이
+                // ema20·ema60·price가 모두 있음을 이미 보장한다.
                 const regime = {
                   trend: trend as any, volatility: volatility as any,
                   label: '', trendScore, volPct, recommendation: '', allowEntry: true,
+                  dataOk: Number.isFinite(ema20) && Number.isFinite(ema60) && Number.isFinite(price)
+                          && ema60 !== 0,
+                  bars: 0,
+                  dataReason: '스냅샷 기반 판정 (봉 배열 없음)',
                 };
                 const gate = regimeAllowsEntry(regime, strat.action, strat.marketFilter);
                 if (!gate.allowed) {
