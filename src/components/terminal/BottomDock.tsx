@@ -20,9 +20,10 @@ import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { usePaperAccount } from './PaperWallet';
+import { AllocationPanel } from './AllocationPanel';
 
-type Tab = '포지션' | '미체결' | '자산' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const TABS: Tab[] = ['포지션', '미체결', '자산', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '미체결' | '자산' | '자금배분' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const TABS: Tab[] = ['포지션', '미체결', '자산', '자금배분', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -255,6 +256,9 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         )}
 
         {tab === '자산' && <WalletTreePanel/>}
+
+        {tab === '자금배분' && <AllocationPanel/>}
+
 
         {tab === '전략장부' && <LedgerPanel/>}
 
