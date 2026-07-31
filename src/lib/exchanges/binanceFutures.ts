@@ -105,6 +105,31 @@ export async function getFuturesFunding(
   }
 }
 
+/**
+ * 오늘의 손익 원장. **종류를 가리지 않고 받아온다.**
+ *
+ * `getFuturesFunding`은 펀딩만 본다. 일일 손실 한도는 실현손익·수수료·
+ * 펀딩을 **모두** 세야 한다 — 100배로 자주 들어가면 수수료가 손익보다 커지는
+ * 구간이 있고, 무기한은 8시간마다 펀딩을 낸다. 수수료를 빼놓고 "오늘 얼마
+ * 잃었나"에 답하면 그건 다른 질문의 답이다.
+ *
+ * 합산은 `lib/risk/dailyLoss.ts`의 순수 함수가 한다. 여기서는 받아만 온다.
+ *
+ * **못 받으면 null이다.** 빈 배열로 돌려주면 호출자가 '오늘 거래 없음'으로
+ * 읽고, 그러면 한도가 통째로 사라진다.
+ */
+export async function getFuturesIncome(
+  key: string, secret: string, testnet = true,
+  opts: { startTime?: number; limit?: number } = {},
+): Promise<any[] | null> {
+  try {
+    const params: Record<string, string | number> = { limit: opts.limit ?? 1000 };
+    if (opts.startTime) params.startTime = opts.startTime;
+    const data = await fapiSigned('GET', '/fapi/v1/income', key, secret, testnet, params);
+    return Array.isArray(data) ? data : null;
+  } catch { return null; }
+}
+
 // ── 레버리지 브래킷 (심볼별 실제 유지증거금률/공제액) ──────────────
 // Binance /fapi/v1/leverageBracket (서명 필요). 응답을 [상한, MMR, 공제액] 형태로 변환
 export type BracketTier = [cap: number, mmr: number, maintAmount: number];

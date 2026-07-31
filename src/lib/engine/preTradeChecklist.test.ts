@@ -22,6 +22,7 @@ function goodInput(): ChecklistInput {
     leverage: { actual: 10, intended: 10 },
     existingPositionQty: 0,
     todayEntry: { alreadyTraded: false },
+    dailyLoss: { status: 'ok', reason: '오늘 −10.00 / 한도 50.00 USDT' },
     stopPrice: 60000,
     liquidationPrice: 58000,
     side: 'LONG',
@@ -299,6 +300,7 @@ export function runPreTradeChecklistTests() {
       mode: { disposition: 'SEND', reason: '현물' },
       clock: { localMs: 1_000_000, serverMs: 1_000_050 },
       margin: { required: 100, available: 500 },
+      dailyLoss: { status: 'ok', reason: '한도 안' },
       // 아래는 현물에 존재하지 않아 넘기지 않는다
       // marginType, liquidationPrice, stopPrice, leverage, reconcile …
     };
@@ -318,9 +320,11 @@ export function runPreTradeChecklistTests() {
     }
   });
 
-  test('현물은 모드·시계만 본다', () => {
+  test('현물은 모드·시계·일일 한도만 본다', () => {
+    // 일일 한도는 **계좌 단위**라 현물에도 걸린다. 선물에서 한도를 채운 뒤
+    // 현물로 옮겨 계속하면 잠근 의미가 없다.
     const v = runChecklist(spotInput(), { market: 'SPOT' });
-    eq(v.results.map(r => r.id).sort().join(','), 'CLOCK_SKEW,MODE');
+    eq(v.results.map(r => r.id).sort().join(','), 'CLOCK_SKEW,DAILY_LOSS_LIMIT,MODE');
   });
 
   test('현물에는 자금 항목도 없다 — 시장가는 체결가를 몰라 껍데기 통과가 된다', () => {
@@ -401,6 +405,7 @@ export function runPreTradeChecklistTests() {
       stopPrice: 59000,
       // 포지션이 없으면 거래소 청산가가 없다 — 경로가 보수적 추정값을 넘긴다
       liquidationPrice: 55000,
+      dailyLoss: { status: 'ok', reason: '한도 안' },
     }, { market: 'COINM' });
     eq(v.allowed, true, `COIN-M이 막혔다: ${v.summary}`);
   });
@@ -424,6 +429,44 @@ export function runPreTradeChecklistTests() {
 
   test('COIN-M도 CROSS면 막는다', () => {
     eq(runChecklist({ ...goodInput(), marginType: 'cross' }, { market: 'COINM' }).allowed, false);
+  });
+
+  console.log('[거래 전 점검 — 오늘 손실 한도]');
+
+  test('한도에 걸리면 진입이 막힌다', () => {
+    const v = runChecklist({
+      ...goodInput(),
+      dailyLoss: { status: 'locked', reason: '오늘 손실이 한도에 닿았습니다' },
+    });
+    eq(v.allowed, false);
+    eq(statusOf(v, 'DAILY_LOSS_LIMIT').status, 'fail');
+  });
+
+  test('오늘 손실을 모르면 막는다 — 모른 채 보내면 한도를 안 건 것과 같다', () => {
+    const { dailyLoss: _drop, ...rest } = goodInput();
+    const v = runChecklist(rest as any);
+    eq(v.allowed, false);
+    eq(statusOf(v, 'DAILY_LOSS_LIMIT').status, 'unknown');
+  });
+
+  test('한도에 걸려도 **청산은 나갈 수 있다** — 못 나가면 손실을 키우는 잠금이다', () => {
+    const v = runChecklist({
+      mode: { disposition: 'SEND', reason: '청산' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      reconcile: { reachable: true, blockNewOrders: false, summary: '일치' },
+      marginType: 'cross', existingPositionQty: 3,
+      dailyLoss: { status: 'locked', reason: '한도 도달' },
+    }, { intent: 'EXIT' });
+    const ids = v.results.map(r => r.id);
+    assert(!ids.includes('DAILY_LOSS_LIMIT'), '청산에 일일 한도를 물리면 나갈 수 없다');
+    eq(v.allowed, true, `청산이 막혔다: ${v.summary}`);
+  });
+
+  test('COIN-M·현물에도 걸린다 — 한도는 계좌 단위다', () => {
+    for (const m of ['USDM', 'COINM', 'SPOT'] as const) {
+      const ids = runChecklist(goodInput(), { market: m }).results.map(r => r.id);
+      assert(ids.includes('DAILY_LOSS_LIMIT'), `${m}에 일일 한도가 없다`);
+    }
   });
 
   console.log('[거래 전 점검 — 청산 주문 (나갈 수 있는가)]');

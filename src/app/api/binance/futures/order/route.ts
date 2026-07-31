@@ -141,9 +141,31 @@ export async function POST(req: NextRequest) {
       : null;
     preflightStop = stopPrice;
 
+    // 오늘 손실 한도. 거래소 원장에서 읽는다 — 브라우저에 들고 있던
+    // 예전 방식은 저장소를 지우면 리셋됐고 이 경로에는 걸리지 않았다.
+    let dailyLoss: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null = null;
+    if (!isExit) {
+      try {
+        const { data: c4 } = await (sb.from('exchange_connections') as any)
+          .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
+        if (c4) {
+          const { decryptSecret } = await import('@/lib/exchanges/crypto');
+          const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
+          const f = await collectDailyLoss({
+            apiKey: c4.api_key,
+            apiSecret: decryptSecret(c4.api_secret_enc ?? c4.encrypted_secret ?? ''),
+            testnet: useTestnet,
+            currentEquityUsd: marginInput?.available ?? null,
+          });
+          dailyLoss = { status: f.verdict.status, reason: f.verdict.reason };
+        }
+      } catch { /* null → unknown → 막힌다 */ }
+    }
+
     const checklist = runChecklist({
       mode: { disposition: g.disposition, reason: g.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
+      dailyLoss,
       reconcile: {
         reachable: gate.gather.reachable,
         blockNewOrders: !!gate.verdict?.blockNewOrders,

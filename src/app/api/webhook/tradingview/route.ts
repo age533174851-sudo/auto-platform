@@ -322,8 +322,23 @@ export async function POST(req: NextRequest) {
         marginInput = { required: notionalUsd / levNum, available };
       }
 
+      // 오늘 손실 한도. 웹훅은 사람이 안 보는 사이에 도는 경로라
+      // 여기가 막히지 않으면 하루 한도가 없는 것과 같다.
+      let dailyLossFact: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null = null;
+      if (!isExit) {
+        try {
+          const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
+          const f = await collectDailyLoss({
+            apiKey: conn.api_key, apiSecret, testnet: isTestnet,
+            exchange, currentEquityUsd: marginInput?.available ?? null,
+          });
+          dailyLossFact = { status: f.verdict.status, reason: f.verdict.reason };
+        } catch { /* null → unknown → 막힌다 */ }
+      }
+
       const checklist = runChecklist({
         mode: { disposition: g.disposition, reason: g.reason },
+        dailyLoss: dailyLossFact,
         clock: serverMs != null ? { localMs, serverMs } : null,
         reconcile: {
           reachable: gate.gather.reachable,

@@ -198,6 +198,29 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
     /* unknown */
   }
 
+  // 4-b. 오늘 손실 한도.
+  //
+  // 거래소가 알려준 실현손익·수수료·펀딩으로 판단한다. 브라우저에 들고
+  // 있던 예전 방식(risk/guard.ts)은 저장소를 지우면 리셋됐고 서버 경로에는
+  // 아예 걸리지 않았다.
+  try {
+    if (conn) {
+      const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
+      // 현재 자산은 위 4번에서 읽은 가용 증거금이 아니라 **지갑 잔고**여야
+      // 하지만, 여기서 한 번 더 부르지 않고 있는 값을 쓴다. 비율 한도가
+      // 조금 보수적으로 잡히는 쪽이라 안전한 방향의 오차다.
+      const eq = input.margin?.available ?? null;
+      const f = await collectDailyLoss({
+        apiKey: conn.api_key, apiSecret: secret, testnet,
+        exchange: isGate ? 'gate' : 'binance',
+        currentEquityUsd: eq != null ? Number(eq) : null,
+      });
+      input.dailyLoss = { status: f.verdict.status, reason: f.verdict.reason };
+    }
+  } catch {
+    /* 넣지 않는다 → unknown → 막힌다 */
+  }
+
   // 5. 오늘 진입 — 호출자가 알 때만 (위 주석 참조)
   if (alreadyTradedToday != null) {
     input.todayEntry = { alreadyTraded: alreadyTradedToday };

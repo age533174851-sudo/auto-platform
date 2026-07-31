@@ -56,7 +56,9 @@ export type CheckId =
   /** 손절이 청산보다 먼저 닿는가 */
   | 'LIQUIDATION_DISTANCE'
   /** 증거금이 충분한가 */
-  | 'MARGIN_SUFFICIENT';
+  | 'MARGIN_SUFFICIENT'
+  /** 오늘 잃은 금액이 한도 안인가 */
+  | 'DAILY_LOSS_LIMIT';
 
 /**
  * 어느 시장의 주문인가.
@@ -168,6 +170,14 @@ export const CHECK_SPECS: CheckSpec[] = [
   //  2. 현물 자금 부족은 거래소가 주문을 통째로 거부한다. 선물처럼 일부만
   //     체결되어 어중간한 포지션이 남는 실패가 없다
   { id: 'MARGIN_SUFFICIENT', label: '증거금 충분', markets: DERIV, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 오늘 얼마를 잃었는가. **진입에만** 건다 —
+  // 한도에 걸렸다고 나갈 수 없게 만들면 그건 손실을 키우는 잠금이다.
+  //
+  // 모든 시장에 건다. 한도는 계좌 단위이지 시장 단위가 아니다 — 선물에서
+  // 한도를 채운 뒤 현물로 옮겨 계속하면 잠근 의미가 없다.
+  { id: 'DAILY_LOSS_LIMIT', label: '오늘 손실 한도', markets: ALL_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 하루 1회 제한이 있는 전략에서만 (옵션 dailyLimit). 수동 주문에는
@@ -319,6 +329,15 @@ export interface ChecklistInput {
   existingPositionQty?: number | null;
   /** ladderGate 결과 */
   todayEntry?: { alreadyTraded: boolean; detail?: string } | null;
+  /**
+   * 오늘 손실 한도 판정 (risk/dailyLoss의 judgeDailyLoss 결과).
+   *
+   * 넘기지 않으면 `unknown`이고, 필수 항목이라 진입이 막힌다. 한도를 안
+   * 걸어 둔 계정도 judgeDailyLoss가 'ok'를 돌려주므로 그대로 넘기면 된다 —
+   * '검사를 안 건 것'과 '확인에 실패한 것'은 다르고, 그 구분을 여기서
+   * 지우면 안 된다.
+   */
+  dailyLoss?: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
   /** 계획된 손절가. 없으면 손절이 안 붙은 것 */
   stopPrice?: number | null;
   liquidationPrice?: number | null;
@@ -470,6 +489,18 @@ export function runChecklist(
   }
 
   // 9. 오늘 진입
+  // ── 오늘 손실 한도 ──
+  if (!input.dailyLoss) {
+    results.push(resultFor('DAILY_LOSS_LIMIT', 'unknown',
+      '오늘 손실을 확인하지 못했습니다 — 한도를 넘었는지 알 수 없습니다'));
+  } else if (input.dailyLoss.status === 'locked') {
+    results.push(resultFor('DAILY_LOSS_LIMIT', 'fail', input.dailyLoss.reason));
+  } else if (input.dailyLoss.status === 'unknown') {
+    results.push(resultFor('DAILY_LOSS_LIMIT', 'unknown', input.dailyLoss.reason));
+  } else {
+    results.push(resultFor('DAILY_LOSS_LIMIT', 'pass', input.dailyLoss.reason));
+  }
+
   if (!input.todayEntry) {
     results.push(resultFor('TODAY_ENTRY', 'unknown', '오늘 진입 이력을 확인하지 못했습니다'));
   } else if (input.todayEntry.alreadyTraded) {

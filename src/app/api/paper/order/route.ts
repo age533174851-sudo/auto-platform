@@ -68,6 +68,31 @@ export async function POST(req: NextRequest) {
     available = null;   // 모르면 buildPaperPlan이 막는다
   }
 
+  // 오늘 손실 한도 — 모의에도 건다. 규칙이 실전과 다르면 그 연습은 쓸모가
+  // 없다 (하루 한도를 무시하고 계속 넣어도 되는 화면에서 익힌 습관이
+  // 실계좌에서 그대로 나온다).
+  try {
+    const { collectPaperDailyLoss } = await import('@/lib/risk/dailyLossCheck');
+    const dl = await collectPaperDailyLoss({ sb, userId: uid });
+    if (dl.verdict.blockEntries) {
+      return NextResponse.json({
+        ok: false, error: 'daily_limit', paper: true,
+        status: dl.verdict.status,
+        message: dl.verdict.status === 'locked'
+          ? `[모의] ${dl.verdict.reason}`
+          : `[모의] ${dl.verdict.reason} — 확인하지 못해 진입하지 않습니다`,
+        todayNetUsd: dl.todayNetUsd,
+      }, { status: 429, headers: { 'Cache-Control': 'no-store' } });
+    }
+  } catch {
+    // 판정 자체가 터지면 막는다. 한도를 확인하지 못한 채 넣는 것은
+    // 한도를 안 건 것과 같다.
+    return NextResponse.json({
+      ok: false, error: 'daily_limit_unknown', paper: true,
+      message: '[모의] 오늘 손실 한도를 확인하지 못해 진입하지 않았습니다',
+    }, { status: 429, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const built = buildPaperPlan({
     symbol, side: side as 'LONG' | 'SHORT',
     quantity: Number(body?.quantity),

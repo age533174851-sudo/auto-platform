@@ -394,8 +394,24 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // 오늘 손실 한도 — 자동매매에서 가장 중요한 관문이다. 사람이 안 보고
+    // 있는 동안 도는 경로이므로, 여기가 막히지 않으면 하루 한도가 없는 것과 같다.
+    let dailyLossFact: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null = null;
+    try {
+      const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
+      const f = await collectDailyLoss({
+        apiKey: conn.api_key, apiSecret: apiSecretPre, testnet: useTestnet,
+        exchange: exchange === 'gate' ? 'gate' : 'binance',
+        // 계좌 자산은 riskContext가 이미 읽어 뒀다. 여기서 또 부르면
+        // 레이트리밋을 두 배로 쓰고, 두 조회 사이에 값이 달라진다.
+        currentEquityUsd: ctx.config.accountEquity ?? null,
+      });
+      dailyLossFact = { status: f.verdict.status, reason: f.verdict.reason };
+    } catch { /* null → unknown → 막힌다 */ }
+
     const checklist = runChecklist({
       mode: { disposition: modeGate.disposition, reason: modeGate.reason },
+      dailyLoss: dailyLossFact,
       clock: serverMs != null ? { localMs, serverMs } : null,
       // 여기까지 왔다는 것은 assertStateConsistent를 통과했다는 뜻이다
       reconcile: { reachable: true, blockNewOrders: false, summary: gate.verdict?.summary || '일치' },

@@ -146,6 +146,49 @@ export async function getPositionGateFutures(
   } catch { return null; }
 }
 
+/**
+ * 손익 원장 (account_book). 일일 손실 한도가 읽는 것.
+ *
+ * Gate의 모양은 바이낸스와 다르다:
+ *   · 시각이 **초 단위**다 (`time`) — ms로 비교하면 1970년으로 읽힌다
+ *   · 종류가 `pnl` / `fee` / `fund` 소문자다
+ *   · 금액 필드 이름이 `change`다
+ *
+ * 그래서 여기서 바이낸스 모양(IncomeItem)으로 맞춰 돌려준다. 합산은
+ * `lib/risk/dailyLoss.ts`의 순수 함수 하나가 두 거래소를 같이 처리한다 —
+ * 한도 판정이 거래소마다 갈리면 한쪽만 고쳐진다.
+ *
+ * **못 받으면 null이다.** 빈 배열이면 '오늘 거래 없음'으로 읽혀 한도가 사라진다.
+ *
+ * ⚠ 이 호출은 실계좌로 검증되지 않았다 (Gate 경로 전반과 같다).
+ */
+export async function getGateAccountBook(
+  key: string, secret: string, testnet = true,
+  opts: { fromSec?: number; limit?: number } = {},
+): Promise<{ incomeType: string; income: number; time: number }[] | null> {
+  try {
+    const qs = [`limit=${opts.limit ?? 300}`, opts.fromSec ? `from=${opts.fromSec}` : '']
+      .filter(Boolean).join('&');
+    const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/account_book', {
+      key, secret, qs, testnet,
+    });
+    if (!Array.isArray(rows)) return null;
+    return rows.map(r => {
+      const t = String(r?.type || '').toLowerCase();
+      return {
+        // 바이낸스 이름으로 맞춘다. 합산 함수가 이 이름을 본다.
+        incomeType: t === 'pnl' ? 'REALIZED_PNL'
+          : t === 'fee' ? 'COMMISSION'
+          : t === 'fund' ? 'FUNDING_FEE'
+          : t.toUpperCase(),
+        income: Number(r?.change),
+        // 초 → ms. 이걸 빼먹으면 오늘 기록이 전부 '어제 이전'으로 걸러진다.
+        time: Number(r?.time) * 1000,
+      };
+    });
+  } catch { return null; }
+}
+
 // ── 레버리지 설정 ────────────────────────────────────
 /**
  * 레버리지를 설정하고 **결과를 확인한다.**

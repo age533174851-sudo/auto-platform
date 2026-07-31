@@ -329,6 +329,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 서버(manualPlan)가 손절 없는 진입을 막는데 화면이 값을 보내지 않았다.
   // 화면에서 못 넣는 값을 서버가 요구하면 그 기능은 죽은 것이다.
   const [slPct, setSlPct] = useState(2);
+  // 오늘 손실 한도. **보이지 않으면 없는 것과 같다** — 주문 버튼을 눌렀을
+  // 때 처음 알게 되면 그 시점까지 한도를 모른 채로 계획을 세운 것이다.
+  const [dailyLimit, setDailyLimit] = useState<any>(null);
   // 청산 전용. 켜면 보유분을 줄이는 주문만 나간다 — 반대로 새 포지션이
   // 열리는 사고를 막는다.
   const [reduceOnly, setReduceOnly] = useState(false);
@@ -364,6 +367,25 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     const t = setInterval(load, 20_000);
     return () => { alive = false; clearInterval(t); };
   }, [auth, connId]);
+
+  // 한도 현황은 주기적으로 다시 읽는다. 판정은 서버가 하고 화면은 같은
+  // 답을 보여줄 뿐이다 — 각자 계산하면 서로 다른 숫자를 말하게 된다.
+  useEffect(() => {
+    if (!auth) { setDailyLimit(null); return; }
+    if (!isPaper && !modeResolution.connId) { setDailyLimit(null); return; }
+    let alive = true;
+    const load = async () => {
+      try {
+        const q = isPaper ? 'paper=1' : `connectionId=${modeResolution.connId}`;
+        const r = await fetch(`/api/risk/daily-limit?${q}`, { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (alive) setDailyLimit(j?.ok ? j : { status: 'unknown', reason: j?.message || '확인 불가' });
+      } catch { if (alive) setDailyLimit({ status: 'unknown', reason: '확인 불가' }); }
+    };
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [auth, isPaper, modeResolution.connId]);
 
   // 비율 버튼은 **선물 가용 증거금**만 쓴다. 현물 USDT를 쓰면 없는 돈으로
   // 수량을 계산하게 되고, 그 수량이 그대로 주문이 된다.
@@ -653,6 +675,42 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           {balanceUsd == null ? '확인 불가' : `${fmtPrice(balanceUsd)} USDT`}
         </span>
       </div>
+
+      {/* 오늘 손실 한도. 남은 여유를 미리 보여주면 마지막 한 번을 넣기 전에
+          스스로 멈출 수 있다. 막힌 상태는 붉게, 확인 불가는 노랗게 —
+          '여유 있음'과 '모름'이 같아 보이면 안 된다. */}
+      {dailyLimit && (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+          fontSize: FS.micro, ...NUM,
+        }}>
+          <span style={{ color: C.faint, fontFamily: 'inherit' }}>오늘 한도</span>
+          <span style={{
+            color: dailyLimit.status === 'locked' ? C.down
+              : dailyLimit.status === 'unknown' ? C.warn : C.dim,
+            fontWeight: 600, textAlign: 'right', maxWidth: '72%',
+            fontFamily: dailyLimit.status === 'ok' && dailyLimit.remainingUsd != null
+              ? undefined : 'inherit',
+          }}>
+            {dailyLimit.status === 'locked' ? '잠김 — 신규 진입 불가'
+              : dailyLimit.status === 'unknown' ? '확인 불가'
+              : dailyLimit.remainingUsd != null
+                ? `여유 ${fmtPrice(dailyLimit.remainingUsd)} USDT`
+                : '한도 없음'}
+          </span>
+        </div>
+      )}
+
+      {dailyLimit?.blockEntries && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7,
+          background: dailyLimit.status === 'locked' ? C.downBg : C.warnBg,
+          color: dailyLimit.status === 'locked' ? C.down : C.warn,
+          fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          {dailyLimit.reason}
+        </div>
+      )}
 
       {/* 증거금이 모자라면 주문 전에 말한다. 거래소가 거부한 뒤에
           알려주면 사용자는 이미 그 크기를 믿고 계획을 세운 뒤다. */}
