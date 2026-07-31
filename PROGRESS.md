@@ -52,6 +52,12 @@ COIN-M 손절(`STOP_MARKET` + `closePosition`)도 같은 상태다 — 요청 �
 Supabase SQL 편집기에 파일 내용을 붙여넣고 실행. (관리 API 토큰이 환경에 없어
 자동 적용을 못 했다.)
 
+- [ ] `010_paper_trading.sql` — **없으면 데모 자동매매가 아예 안 돈다** (paper_positions·paper_accounts)
+- [ ] `022_rls_worker_tables.sql` — **보안.** worker_lock·worker_heartbeat·
+      telegram_alert_log·kill_switch_log에 RLS가 꺼져 있다. Supabase Advisors가
+      CRITICAL로 잡았고, 실제로 공개 anon 키만으로 읽고 쓸 수 있는 상태다.
+      `worker_lock`이 가장 위험하다 — 남이 쓰면 분산 잠금을 뺏거나 풀 수 있어
+      청산 감시가 두 번 돌거나 아예 안 돈다
 - [ ] `018_live_orders_recovery.sql` — 적용 전에도 앱은 돌지만 UNKNOWN 주문의
       포지션 교차 확인이 생략된다. 새 컬럼을 빼고 다시 쓰는 폴백이 돈다
 - [ ] `019_news_articles.sql` — **없으면 뉴스 파이프라인이 아무것도 저장하지 못한다**
