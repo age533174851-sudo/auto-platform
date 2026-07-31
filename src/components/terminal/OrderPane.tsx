@@ -24,6 +24,7 @@ import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor } from '@/lib/markets/tradeMode';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
+import { DemoRunner } from './DemoRunner';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
 
@@ -552,6 +553,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           "돈이 없어서 못 넣는다"와 "충전하면 된다"가 한눈에 이어진다. */}
       {isPaper && (
         <PaperWallet dense={dense} acct={paper.acct} err={paper.err} onChanged={paper.reload}/>
+      )}
+
+      {/* 규칙을 정해 두고 그대로 지키는 기계를 돌려 본다. 손으로 넣는
+          연습과 자동이 도는 연습은 다른 연습이다. */}
+      {isPaper && (
+        <DemoRunner dense={dense} symbol={symbol.id} onChanged={paper.reload}/>
       )}
 
       {/* 신규/청산 — 바이낸스의 Open/Close 자리 */}

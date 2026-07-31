@@ -176,7 +176,48 @@ export async function GET(req: NextRequest) {
   const recovery = await recoverUnresolvedOrders(sb, testnet);
 
   const { decideExits } = await import('@/lib/engine/exitMonitor');
-  const decisions = await decideExits(sb, { testnet });
+
+  // 지금 거래소에 실제로 걸려 있는 손절가를 읽어 주는 함수.
+  //
+  // DB의 stop_loss는 **진입 시점 값**이고 1R을 정의한다. 그 둘을 한 칸에
+  // 두면(예전처럼 옮길 때마다 덮어쓰면) 1R이 매번 커져서 트레일링이 한 번
+  // 움직인 뒤 멈춘다 — 첫 이동은 일어나므로 동작하는 것처럼 보인다.
+  //
+  // 사용자마다 키가 다르므로 사용자 단위로 한 번만 읽어 캐시한다.
+  const stopCache = new Map<string, Map<string, number> | null>();
+  const liveStopFor = async (uid: string, symbol: string): Promise<number | null> => {
+    if (!stopCache.has(uid)) {
+      let m: Map<string, number> | null = null;
+      try {
+        const { data: c } = await sb.from('exchange_connections')
+          .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+          .eq('user_id', uid).eq('is_active', true).limit(1).maybeSingle();
+        if (c && !(c as any).has_withdrawal) {
+          const { decryptSecret } = await import('@/lib/exchanges/crypto');
+          const bfx = await import('@/lib/exchanges/binanceFutures');
+          const sec = decryptSecret((c as any).api_secret_enc ?? (c as any).encrypted_secret ?? '');
+          // getFuturesOpenOrders는 {success, orders} 모양을 돌려준다.
+          // 배열로 착각하면 조용히 0건이 되고, 그러면 진입 손절을 계속 쓴다.
+          const res: any = await bfx.getFuturesOpenOrders((c as any).api_key, sec, testnet);
+          const open: any[] = Array.isArray(res) ? res : (res?.orders ?? []);
+          m = new Map<string, number>();
+          for (const o of open) {
+            if (String(o?.type).toUpperCase() !== 'STOP_MARKET') continue;
+            if (o?.closePosition !== true) continue;   // 분할 익절 사다리는 제외
+            const p = Number(o?.stopPrice);
+            if (Number.isFinite(p) && p > 0) m.set(String(o.symbol).toUpperCase(), p);
+          }
+        }
+      } catch { m = null; }   // 못 읽으면 진입 손절을 그대로 쓴다
+      stopCache.set(uid, m);
+    }
+    return stopCache.get(uid)?.get(String(symbol).toUpperCase()) ?? null;
+  };
+
+  const { readTrailConfig } = await import('@/lib/engine/trailPlan');
+  const { cfg: trailCfg } = readTrailConfig(k => process.env[k]);
+
+  const decisions = await decideExits(sb, { testnet, liveStopFor, cfg: trailCfg });
 
   // ── 기술적 사고 점검 ──
   // 트레일링·시간청산 판단보다 먼저 본다. 청산가에 다다랐거나 손절이
@@ -284,8 +325,10 @@ export async function GET(req: NextRequest) {
       } catch { /* 취소 실패 시 손절이 둘 남는다 — 위험하지 않다 */ }
 
       if (!dryRun) {
+        // **stop_loss를 덮어쓰지 않는다.** 그 칸은 진입 시점 값이고 1R을
+        // 정의한다. 덮어쓰면 다음 주기에 1R이 커져서 트레일링이 멈춘다.
+        // 지금 걸린 손절은 거래소가 갖고 있고, 위에서 그것을 읽어 쓴다.
         await sb.from('ladder_daily_trades').update({
-          stop_loss: d.newStop,
           exit_reason: d.reason,
         }).eq('id', d.tradeId);
       }

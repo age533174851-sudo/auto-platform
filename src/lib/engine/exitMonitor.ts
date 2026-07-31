@@ -76,7 +76,23 @@ export async function highWaterSince(
  */
 export async function decideExits(
   sb: any,
-  opts: { testnet: boolean; maxHoldMs?: number; limit?: number } ,
+  opts: {
+    testnet: boolean; maxHoldMs?: number; limit?: number;
+    /**
+     * 심볼별로 **거래소에 지금 걸려 있는** 손절가.
+     *
+     * DB의 stop_loss는 **진입 시점 값**이고 1R을 정의한다. 예전에는 손절을
+     * 옮길 때마다 그 값을 덮어썼는데, 그러면 다음 주기에 1R이 커지고
+     * highWaterR이 작아져서 **트레일링이 한 번 움직인 뒤 멈춘다.**
+     * 첫 이동은 일어나므로 화면에서는 동작하는 것처럼 보였다.
+     *
+     * 그래서 진입 손절은 DB가, 지금 걸린 손절은 거래소가 갖는다.
+     * 못 읽은 심볼은 진입 손절을 그대로 쓴다.
+     */
+    liveStopFor?: (userId: string, symbol: string) => Promise<number | null>;
+    /** 트레일링 설정. 없으면 기본값 */
+    cfg?: Partial<import('./trailPlan').TrailConfig>;
+  },
 ): Promise<ExitDecision[]> {
   const maxHoldMs = opts.maxHoldMs ?? 5 * 24 * 60 * 60 * 1000;
   const out: ExitDecision[] = [];
@@ -117,44 +133,30 @@ export async function decideExits(
       continue;
     }
 
-    const riskDist = Math.abs(entry - stop);
-    let desiredStop = stop;
-    let reason = '';
-
-    // ── 본전 이동 ──
-    if (hw.highWaterR >= R_BREAK_EVEN) {
-      if (isLong ? entry > desiredStop : entry < desiredStop) {
-        desiredStop = entry;
-        reason = `${R_BREAK_EVEN}R 도달 — 손절을 본전으로`;
-      }
-    }
-
-    // ── 트레일링 ──
-    if (hw.highWaterR >= R_TRAIL_START) {
-      const trailR = hw.highWaterR - R_TRAIL_DIST;
-      const trailPrice = isLong ? entry + riskDist * trailR : entry - riskDist * trailR;
-      if (isLong ? trailPrice > desiredStop : trailPrice < desiredStop) {
-        desiredStop = trailPrice;
-        reason = `최고 ${hw.highWaterR.toFixed(2)}R — 트레일링 손절을 ${trailR.toFixed(2)}R로 이동`;
-      }
-    }
-
-    // 손절은 좁히기만 한다
-    const improves = isLong ? desiredStop > stop : desiredStop < stop;
-    if (!improves) {
-      out.push({ ...common, action: 'NONE', highWaterR: hw.highWaterR, lastPrice: hw.lastPrice, reason: '이동 조건 미충족' });
-      continue;
-    }
-
-    // 현재가가 이미 새 손절선을 지났으면 이동이 아니라 청산이다
-    const passed = isLong ? hw.lastPrice <= desiredStop : hw.lastPrice >= desiredStop;
-    out.push({
-      ...common,
-      action: passed ? 'CLOSE' : 'MOVE_STOP',
-      newStop: passed ? undefined : desiredStop,
+    // 판정은 순수 함수가 한다 (trailPlan.ts — 테스트가 붙어 있다).
+    // 여기서 계산을 다시 적으면 두 벌이 되고, 그중 한쪽만 고쳐진다.
+    const { planTrail } = await import('./trailPlan');
+    let liveStop: number | null = null;
+    try { liveStop = (await opts.liveStopFor?.(t.user_id, String(t.symbol))) ?? null; }
+    catch { liveStop = null; }   // 못 읽으면 진입 손절을 그대로 쓴다
+    const v = planTrail({
+      side,
+      entryPrice: entry,
+      initialStop: stop,                        // 1R의 기준. 절대 안 바뀐다
+      currentStop: liveStop ?? stop,             // 거래소에 지금 걸린 것
       highWaterR: hw.highWaterR,
       lastPrice: hw.lastPrice,
-      reason: passed ? `${reason} — 현재가가 이미 그 선을 지나 즉시 청산` : reason,
+      cfg: opts.cfg,
+    });
+
+    out.push({
+      ...common,
+      currentStop: liveStop ?? stop,
+      action: v.action,
+      newStop: v.newStop,
+      highWaterR: hw.highWaterR,
+      lastPrice: hw.lastPrice,
+      reason: v.reason,
     });
   }
 
