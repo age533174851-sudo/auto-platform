@@ -64,13 +64,19 @@ export function TradeModeSwitch({ compact }: { compact?: boolean }) {
         })}
       </div>
 
-      {/* 설명 한 줄. 색이 아니라 글자로 말한다. */}
+      {/* 설명 한 줄. 색이 아니라 글자로 말한다.
+          좁은 화면에서는 짧은 쪽을 쓴다 — 두 줄로 접히면 그 36px이 그대로
+          포지션 칸에서 빠진다. 지우지는 않는다: 색만 보고 판단하게 두면
+          안 되는 정보다. */}
       <div style={{
-        marginTop: 5, fontSize: FS.micro, lineHeight: 1.5,
+        marginTop: 4, fontSize: FS.micro, lineHeight: 1.45,
         color: live ? C.down : C.faint,
         fontWeight: live ? 700 : 400,
+        whiteSpace: compact ? 'nowrap' : undefined,
+        overflow: compact ? 'hidden' : undefined,
+        textOverflow: compact ? 'ellipsis' : undefined,
       }}>
-        {info.desc}
+        {compact ? info.descShort : info.desc}
       </div>
 
       {/* 쓸 연결이 없으면 그 사실과 이유. 주문 버튼까지 가서 실패하게 두지 않는다 */}

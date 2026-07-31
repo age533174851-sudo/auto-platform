@@ -109,14 +109,28 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
       background: C.raised, borderRadius: 8,
       padding: dense ? '8px 10px' : '10px 12px',
     }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+      {/* 한 줄 요약 + [＋].
+          좁은 화면(dense)에서는 이 한 줄과 오차 표시만 남긴다. 잔고·증거금·
+          수익률·충전·초기화를 늘 펼쳐 두면 150px을 먹는데, 그만큼이 아래
+          포지션 칸에서 빠진다. 정작 주문 직전에 필요한 값은 '가용' 하나다. */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <span style={{ color: C.faint, fontSize: FS.micro }}>모의 가용</span>
-        <span style={{ ...NUM, color: acct ? C.text : C.warn, fontSize: FS.body, fontWeight: 700 }}>
-          {acct ? `${fmtPrice(acct.available)} USDT` : '확인 불가'}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ ...NUM, color: acct ? C.text : C.warn, fontSize: FS.body, fontWeight: 700 }}>
+            {acct ? `${fmtPrice(acct.available)} USDT` : '확인 불가'}
+          </span>
+          <button onClick={() => setOpen(v => !v)} title="충전 · 초기화"
+            style={{
+              width: 26, height: 26, borderRadius: 7, flexShrink: 0, lineHeight: 1,
+              background: open ? C.accentBg : C.panel,
+              color: open ? C.accent : C.dim,
+              border: `1px solid ${open ? `${C.accent}55` : C.hair}`,
+              fontSize: 14, fontWeight: 700, cursor: 'pointer',
+            }}>{open ? '×' : '＋'}</button>
+        </div>
       </div>
 
-      {acct && (
+      {acct && !dense && (
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: FS.micro }}>
           <span style={{ color: C.faint }}>
             잔고 {fmtPrice(acct.balance)} · 증거금 {fmtPrice(acct.usedMargin)}
@@ -128,23 +142,32 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
         </div>
       )}
 
+      {/* 오류는 접지 않는다. '확인 불가'만 보이고 이유가 안 보이면
+          사용자가 할 수 있는 일이 없어진다. */}
       {err && (
         <div style={{ marginTop: 5, color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>{err}</div>
       )}
 
-      <div style={{ display: 'flex', gap: 5, marginTop: 8 }}>
-        <button onClick={() => setOpen(v => !v)}
-          style={{ ...ghostBtn(open), flex: 1, minHeight: 30, fontSize: FS.micro }}>
-          충전
-        </button>
-        <button onClick={reset} disabled={busy}
-          style={{ ...ghostBtn(), flex: 1, minHeight: 30, fontSize: FS.micro }}>
-          초기화
-        </button>
-      </div>
+      {open && (
+        <div style={{ display: 'flex', gap: 5, marginTop: 8 }}>
+          <button onClick={reset} disabled={busy}
+            style={{ ...ghostBtn(), flex: 1, minHeight: 28, fontSize: FS.micro }}>
+            초기화
+          </button>
+          {dense && acct && (
+            <span style={{
+              flex: 1.4, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+              ...NUM, fontSize: FS.micro, color: pnlColor(acct.returnPct),
+            }}>
+              누적 {acct.returnPct == null ? '—'
+                : `${acct.returnPct >= 0 ? '+' : ''}${acct.returnPct.toFixed(2)}%`}
+            </span>
+          )}
+        </div>
+      )}
 
       {open && (
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: 7 }}>
           <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
             {PRESETS.map(v => (
               <button key={v} onClick={() => setAmount(String(v))}

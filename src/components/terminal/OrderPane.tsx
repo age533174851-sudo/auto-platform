@@ -527,8 +527,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
   return (
     <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', minHeight: '100%' }}>
-      {/* 격리·배율 — 자주 안 바꾸는 값이라 칩 하나로 접는다 */}
-      <div style={{ display: 'flex', gap: 5 }}>
+      {/* 격리 · 배율 · 청산거리 — **한 줄**.
+          예전에는 세 줄이었다(격리/배율 한 줄 + 청산거리 한 줄 + 사이 여백).
+          셋 다 '자주 안 바꾸지만 늘 보여야 하는' 값이라 한 줄에 나란히 둔다.
+          여기서 아낀 자리는 아래 포지션 칸으로 간다.
+
+          청산거리를 지우지 않는 이유: 배율 숫자만으로는 위험이 안 읽힌다.
+          5×와 50×의 차이는 '10배'가 아니라 '20% 여유'와 '2% 여유'다. */}
+      <div style={{ display: 'flex', gap: 5, alignItems: 'stretch' }}>
         <span style={{
           flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
           minHeight: 30, borderRadius: 7, background: C.raised,
@@ -542,11 +548,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           color: leverage >= 50 ? C.down : C.text,
           fontSize: FS.small, fontWeight: 700, ...NUM,
         }}>{leverage}×</button>
-      </div>
-
-      {/* 이 배율에서 청산까지 얼마나 가까운지. 배율 숫자만으로는 위험이 안 읽힌다. */}
-      <div style={{ ...NUM, color: liqTone, fontSize: FS.micro, fontWeight: 600, marginTop: -2 }}>
-        청산 약 {liqPct.toFixed(2)}% 이내
+        <span title="이 배율에서 청산까지의 대략적인 거리" style={{
+          flex: 1.15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          minHeight: 30, borderRadius: 7, background: C.raised,
+          border: `1px solid ${liqPct < 3 ? A(liqTone, '55') : C.hair}`,
+          color: liqTone, fontSize: FS.micro, fontWeight: 700, ...NUM,
+          whiteSpace: 'nowrap',
+        }}>청산 {liqPct.toFixed(1)}%</span>
       </div>
 
       {/* 모의면 가상 지갑을 여기 둔다. 잔고와 충전이 주문 바로 위에 있어야
@@ -561,27 +569,41 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <DemoRunner dense={dense} symbol={symbol.id} onChanged={paper.reload}/>
       )}
 
-      {/* 신규/청산 — 바이낸스의 Open/Close 자리 */}
-      <div style={{ display: 'flex', gap: 4, background: C.raised, padding: 3, borderRadius: 8 }}>
-        {([['OPEN', '신규'], ['CLOSE', '청산']] as const).map(([v, label]) => (
-          <button key={v} onClick={() => setReduceOnly(v === 'CLOSE')} style={{
-            flex: 1, minHeight: dense ? 30 : 34, border: 'none', borderRadius: 6, cursor: 'pointer',
-            background: (v === 'CLOSE') === reduceOnly ? C.panel : 'transparent',
-            color: (v === 'CLOSE') === reduceOnly ? C.text : C.dim,
-            fontSize: dense ? FS.small : FS.body, fontWeight: 700,
-            boxShadow: (v === 'CLOSE') === reduceOnly ? `0 1px 2px ${C.hair2}` : 'none',
-          }}>{label}</button>
-        ))}
-      </div>
-
-      {/* 주문 유형 */}
-      <div style={{ display: 'flex', gap: 4 }}>
-        {(['MARKET', 'LIMIT'] as const).map(t => (
-          <button key={t} onClick={() => setOrderType(t)} style={{
-            ...ghostBtn(orderType === t), flex: 1,
-            padding: dense ? '6px 8px' : '7px 10px', fontSize: FS.small,
-          }}>{t === 'MARKET' ? '시장가' : '지정가'}</button>
-        ))}
+      {/* 신규/청산 (바이낸스의 Open/Close) + 주문 유형.
+          좁은 화면에서는 **한 줄**에 넣는다. 두 줄로 두면 68px인데, 그만큼이
+          아래 포지션 칸에서 빠진다. 둘은 다른 축이므로 사이에 칸막이를 둔다 —
+          붙여 놓으면 네 칸짜리 하나로 보인다. */}
+      <div style={{ display: 'flex', gap: dense ? 6 : 4, flexDirection: dense ? 'row' : 'column' }}>
+        <div style={{
+          display: 'flex', gap: 3, background: C.raised, padding: 3, borderRadius: 8,
+          flex: 1, minWidth: 0,
+        }}>
+          {([['OPEN', '신규'], ['CLOSE', '청산']] as const).map(([v, label]) => (
+            <button key={v} onClick={() => setReduceOnly(v === 'CLOSE')} style={{
+              flex: 1, minWidth: 0,
+              minHeight: dense ? 28 : 34, border: 'none', borderRadius: 6, cursor: 'pointer',
+              background: (v === 'CLOSE') === reduceOnly ? C.panel : 'transparent',
+              color: (v === 'CLOSE') === reduceOnly ? C.text : C.dim,
+              fontSize: dense ? FS.micro : FS.body, fontWeight: 700,
+              boxShadow: (v === 'CLOSE') === reduceOnly ? `0 1px 2px ${C.hair2}` : 'none',
+            }}>{label}</button>
+          ))}
+        </div>
+        <div style={{
+          display: 'flex', gap: 3, background: C.raised, padding: 3, borderRadius: 8,
+          flex: 1, minWidth: 0,
+        }}>
+          {(['MARKET', 'LIMIT'] as const).map(t => (
+            <button key={t} onClick={() => setOrderType(t)} style={{
+              flex: 1, minWidth: 0,
+              minHeight: dense ? 28 : 34, border: 'none', borderRadius: 6, cursor: 'pointer',
+              background: orderType === t ? C.panel : 'transparent',
+              color: orderType === t ? C.text : C.dim,
+              fontSize: dense ? FS.micro : FS.body, fontWeight: 700,
+              boxShadow: orderType === t ? `0 1px 2px ${C.hair2}` : 'none',
+            }}>{t === 'MARKET' ? '시장가' : '지정가'}</button>
+          ))}
+        </div>
       </div>
 
       {/* 가격 — 스테퍼 + BBO. 호가를 눌러도 여기로 들어온다 */}
@@ -780,7 +802,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <Kv k="최대 주문" v={maxOpenUsd == null ? '확인 불가' : `${fmtPrice(maxOpenUsd)} USDT`}
             warn={maxOpenUsd == null}/>
         <Kv k="비용(증거금)" v={margin > 0 ? `${fmtPrice(margin)} USDT` : '0.00 USDT'}/>
-        <Kv k="명목가" v={notional > 0 ? `${fmtPrice(notional)} USDT` : '—'}/>
+        {/* 명목가는 좁은 화면에서 뺀다. 비용 × 배율이라 계산이 되는 값이고,
+            나머지 둘과 달리 이걸 몰라서 잘못 누르는 일은 없다. */}
+        {!dense && <Kv k="명목가" v={notional > 0 ? `${fmtPrice(notional)} USDT` : '—'}/>}
       </div>
 
       {/* 롱·숏을 동시에 둔다. 방향 토글을 없앤 이유는 그 토글이 조용히

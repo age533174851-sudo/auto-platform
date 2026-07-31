@@ -32,6 +32,8 @@ export interface TradeModeInfo {
   needsConnection: boolean;
   /** 한 줄 설명 — 화면에 그대로 쓴다 */
   desc: string;
+  /** 좁은 화면용 한 줄. 색만으로 구분하게 두지 않으려면 짧아도 글자는 남아야 한다 */
+  descShort: string;
 }
 
 export const MODE_INFO: Record<TradeMode, TradeModeInfo> = {
@@ -39,16 +41,19 @@ export const MODE_INFO: Record<TradeMode, TradeModeInfo> = {
     mode: 'PAPER', short: '모의', label: '모의투자',
     realMoney: false, needsConnection: false,
     desc: '앱 안의 가상 잔고로만 체결됩니다. 거래소로 주문이 나가지 않습니다.',
+    descShort: '가상 잔고 · 거래소로 안 나감',
   },
   TESTNET: {
     mode: 'TESTNET', short: '테스트넷', label: '테스트넷 매매',
     realMoney: false, needsConnection: true,
     desc: '거래소 테스트넷에 실제 주문이 나갑니다. 돈은 걸리지 않습니다.',
+    descShort: '테스트넷 주문 · 돈 안 걸림',
   },
   LIVE: {
     mode: 'LIVE', short: '실전', label: '실전매매',
     realMoney: true, needsConnection: true,
     desc: '실제 자금으로 주문이 나갑니다. 되돌릴 수 없습니다.',
+    descShort: '실제 자금 · 되돌릴 수 없음',
   },
 };
 

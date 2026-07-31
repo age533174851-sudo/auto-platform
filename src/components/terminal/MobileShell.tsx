@@ -3,29 +3,44 @@
 //
 // 모바일 배치 — PC를 줄인 것이 아니라 조각을 다시 놓은 것.
 //
-// 세로는 **한 줄 스크롤**이다. 칸을 잘라 각 칸이 자기 안에서 스크롤하게
-// 두지 않는다 (아래 '세로' 주석 참조).
+// 세로는 세 칸이다: 헤더 · 주문+호가 · 포지션. **포지션은 끌어내리지 않아도
+// 보인다** (아래 '왜 페이지 스크롤을 버렸나' 참조).
 //
 //   ┌──────────────────────────┐ ← 고정
 //   │ BTCUSDT ▾  +0.99%   STOP │
+//   │ 현물 · USDT-M · COIN-M    │
+//   │ 모의 · 테스트넷 · 실전     │
 //   ├─────────────┬────────────┤ ─┐
-//   │  주문폼      │  펀딩       │  │ 첫 화면
-//   │  방향/배율    │  호가       │  │ (통 − 헤더 − 44)
-//   │  가격/수량    │  현재가 ⟵눌림│  │
-//   │  [롱][숏]    │  잔량 막대   │  │
+//   │  주문폼      │  펀딩       │  │ 남는 자리 전부
+//   │  방향/배율    │  호가       │  │ (길면 이 칸 안에서
+//   │  가격/수량    │  현재가 ⟵눌림│  │  스크롤. 롱/숏
+//   │  [롱][숏]    │  잔량 막대   │  │  버튼은 바닥 고정)
 //   ├─────────────┴────────────┤ ─┘
-//   │ 포지션(2)·미체결·자산 …    │ ← 44px만 보인다 (엿보기)
-//   ╌╌╌╌╌╌╌ 끌어내리면 ╌╌╌╌╌╌╌╌
-//   │ 포지션(2)·미체결·자산 …    │ ← 헤더 밑에 고정
+//   │ ══ (손잡이 — 끌어 키운다)  │ ← 여기부터가 **첫 화면 안에 있다**
+//   │ 포지션(2)·미체결·자산 …    │
 //   │ ┌──────────────────────┐ │
-//   │ │ BTCUSDT  LONG 격리 5× │ │  포지션 카드가
-//   │ │ 미실현 −15.72  −43.6% │ │  화면을 채운다
-//   │ │ 진입 · Mark · 청산가   │ │
-//   │ │ [주문판으로][시장가청산]│ │
+//   │ │ BTCUSDT LONG 격리 5× │ │
+//   │ │ 미실현 −15.72 −43.6% │ │
 //   │ └──────────────────────┘ │
 //   ├──────────────────────────┤
 //   │ BTCUSDT 차트           ▲ │  ← 접혀 있다. 누르면 올라온다
 //   └──────────────────────────┘
+//
+// 왜 페이지 스크롤을 버렸나
+// ─────────────────────────
+// 한동안 세로를 '한 줄 스크롤'로 뒀다. 포지션 칸의 최소 높이를 '화면 − 헤더'로
+// 잡아서, 끌어내리면 포지션이 화면을 꽉 채우게. 그런데 그러면 **포지션을
+// 보려면 반드시 한 화면을 통째로 끌어내려야 한다.** 들고 있는 것이 있는지
+// 없는지가 스크롤해야만 보이는 정보가 된다 — 그건 없는 것과 비슷하다.
+//
+// 지금은 화면을 세 칸으로 나눠 고정한다: 헤더 · 주문+호가 · 포지션.
+// 포지션 칸은 **처음부터 보인다.** 탭 줄과 첫 카드가 첫 화면 안에 있고,
+// 더 보고 싶으면 손잡이를 끌어 키운다. 끄는 것 자체는 좋다고 하셨고,
+// 끌어야만 보이는 것이 문제였다.
+//
+// 스크롤이 두 겹이 되는 문제는 남는다. 그래서 겹치는 자리를 하나로 줄였다:
+// 주문 칸과 포지션 칸은 경계가 눈에 보이고(손잡이·테두리), 각자 자기
+// 안에서만 움직인다.
 //
 // 왜 차트가 아래에 접혀 있나
 // ──────────────────────────
@@ -184,6 +199,56 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
   );
 }
 
+/**
+ * 포지션 칸 손잡이.
+ *
+ * 끌면 칸이 커지고, 누르면 최대/최소를 오간다. 둘 다 두는 이유는 **끌기가
+ * 보이지 않는 기능**이기 때문이다 — 손잡이가 있어도 끌 수 있는 줄 모르는
+ * 사람이 있고, 그 사람에게는 없는 기능이다.
+ *
+ * 포인터 이벤트를 쓰고 캡처한다. touchmove만 쓰면 손가락이 칸 밖으로 나가는
+ * 순간 이벤트가 끊겨 칸이 끌리다 만 자리에 멈춘다.
+ */
+function DockHandle({ onDrag, onToggle }: {
+  onDrag: (dy: number) => void;
+  onToggle: () => void;
+}) {
+  const last = React.useRef<number | null>(null);
+  const moved = React.useRef(0);
+
+  return (
+    <div
+      onPointerDown={e => {
+        last.current = e.clientY;
+        moved.current = 0;
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={e => {
+        if (last.current == null) return;
+        const dy = e.clientY - last.current;
+        if (dy === 0) return;
+        last.current = e.clientY;
+        moved.current += Math.abs(dy);
+        onDrag(dy);
+      }}
+      onPointerUp={e => {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+        // 끌지 않고 뗐으면 누른 것으로 본다. 8px는 손 떨림 여유다.
+        if (moved.current < 8) onToggle();
+        last.current = null;
+      }}
+      onPointerCancel={() => { last.current = null; }}
+      style={{
+        flexShrink: 0, height: 18, cursor: 'ns-resize',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        touchAction: 'none',
+      }}
+    >
+      <div style={{ width: 34, height: 4, borderRadius: 2, background: C.hair2 }}/>
+    </div>
+  );
+}
+
 // ── 하단 접이식 차트 ─────────────────────────────────────
 function ChartDrawer() {
   const { symbol } = useTerminal();
@@ -239,6 +304,8 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   // 호가 줄·현재가를 누르면 그 가격이 주문폼에 들어간다. 같은 가격을 두 번
   // 눌러도 반영되도록 누른 횟수를 같이 들고 다닌다 (usePickedPrice 주석).
   const { pick, presetPrice, presetSeq } = usePickedPrice();
+  // 사용자가 손잡이로 정한 포지션 칸 높이. null이면 기본값(통의 32%)을 쓴다.
+  const [dockUser, setDockUser] = useState<number | null>(null);
   const [search, setSearch] = useState(false);
   const [info, setInfo] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -271,77 +338,67 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
 
   // ── 세로 ──
   //
-  // 한 줄 스크롤이다. 예전에는 화면을 세 칸(주문·호가 / 포지션 27vh / 차트)으로
-  // 잘라 각 칸이 자기 안에서 스크롤했다. 그게 두 가지를 망쳤다:
+  // 세 칸으로 나눠 고정한다. 페이지 스크롤은 없다.
   //
-  //  1. 포지션 카드 하나가 27vh에 안 들어간다. 청산가와 청산 버튼이 항상
-  //     칸 밖에 있어서, 들고 있는 것을 보려면 좁은 칸을 또 스크롤해야 했다
-  //  2. 스크롤이 두 겹이라 손가락이 어디에 닿았는지에 따라 화면이 다르게
-  //     움직인다 — 어느 칸을 만지고 있는지 보이지 않으므로 예측이 안 된다
+  //   헤더        잰 높이 그대로 (종목이 길면 한 줄 늘어난다)
+  //   주문+호가   남는 자리 전부. 폼이 길면 이 칸 안에서 스크롤한다
+  //   포지션      dockH. **첫 화면 안에 있다.** 손잡이로 키운다
+  //   차트        접혀 있으면 한 줄
   //
-  // 그래서 페이지가 스크롤을 갖는다. 첫 화면은 주문+호가(모바일에서 실제로
-  // 하는 일), 끌어내리면 포지션이 화면을 채운다. 헤더와 탭 줄은 고정이라
-  // 어디까지 내려가도 종목·가격·STOP과 지금 보는 탭이 보인다.
-  // 포지션 칸의 최소 높이 = '통 − 헤더'.
-  //
-  // 끌어내려 스냅이 걸리면 탭 줄이 헤더 바로 밑에 오고 나머지 전부가
-  // 카드가 된다. 카드가 그보다 많으면 계속 스크롤되고, 적으면 빈 곳이
-  // 남는다 — 빈 곳이 남는 편이 카드가 잘리는 것보다 낫다.
-  //
-  // 재기 전(첫 그림)에는 dvh로 근사한다. 재고 나면 픽셀 값으로 바뀐다.
-  const dockMinH = boxH
-    ? `${Math.max(320, boxH - hdrH)}px`
-    : `calc(100dvh - ${hdrH || 96}px)`;
+  // dockH의 기본값은 통 높이의 32%다. 카드 하나(약 150px)와 탭 줄이 들어가는
+  // 최소치를 밑으로 두고, 위로는 주문 버튼이 남을 만큼만 올라간다 —
+  // 포지션을 키우다가 주문을 못 넣게 되면 그건 다른 화면이 된 것이다.
+  const avail = Math.max(0, boxH - hdrH);
+  const dockMin = 132;
+  const dockMax = Math.max(dockMin, avail - 260);
+  const dockDefault = Math.min(dockMax, Math.max(dockMin, Math.round(avail * 0.32)));
+  const dockH = avail === 0 ? 200
+    : Math.min(dockMax, Math.max(dockMin, dockUser ?? dockDefault));
 
   return (
     <div ref={boxRef} style={{
       height: embedded ? '100%' : '100dvh',
       background: C.bg, color: C.text,
-      overflowY: 'auto', overflowX: 'hidden',
-      // 근접 스냅. mandatory로 하면 포지션 카드를 읽는 중에도 화면이
-      // 끌려가서 읽을 수가 없다. proximity는 손을 뗀 위치가 경계 근처일
-      // 때만 맞춰 준다 — 끌어내림이 '반쯤 걸린' 상태로 끝나지 않게.
-      scrollSnapType: 'y proximity',
-      // iOS에서 고정 헤더 위로 화면이 튕겨 올라가는 것을 막는다
-      overscrollBehaviorY: 'contain',
-      WebkitOverflowScrolling: 'touch' as any,
+      display: 'flex', flexDirection: 'column',
+      overflow: 'hidden',
     }}>
-      <MobileHeader innerRef={hdrRef} sticky
+      <MobileHeader innerRef={hdrRef}
         onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
 
-      {/* 주문 + 호가.
-          높이를 화면에 맞춰 늘리지 않는다. 늘리면 주문폼 가운데에 죽은
-          여백이 200px 넘게 생긴다 — 폼 내용이 그만큼 길지 않기 때문이다.
-          자연 높이로 두면 그 밑에서 탭 줄과 첫 카드가 저절로 걸치고,
-          그게 '아래에 더 있다'는 신호가 된다.
-          두 열의 자연 높이는 다르다(주문폼이 더 길다). 짧은 쪽 아래가
-          비는 것은 의도한 것이다 — 호가를 억지로 늘리면 빈 줄이 생긴다. */}
-      <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+      {/* 주문 + 호가 — 남는 자리 전부.
+          두 열이 각자 스크롤한다. 주문폼이 호가보다 길어서 한 통에 넣으면
+          호가가 폼 길이에 끌려 올라간다 — 호가는 늘 같은 자리에 있어야
+          눈이 찾는다. 롱/숏 버튼은 폼 안에서 바닥에 고정돼 있다. */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
         <div style={{
-          width: '56%', flexShrink: 0,
+          width: '56%', flexShrink: 0, minHeight: 0,
           borderRight: `1px solid ${C.hair}`,
+          overflowY: 'auto', overscrollBehavior: 'contain',
+          WebkitOverflowScrolling: 'touch' as any,
         }}>
           <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          flex: 1, minWidth: 0, minHeight: 0,
+          overflowY: 'auto', overscrollBehavior: 'contain',
+        }}>
           <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
         </div>
       </div>
 
-      {/* 포지션 — 끌어내리면 화면을 채운다.
-          최소 높이를 '화면 − 헤더'로 두는 이유: 스냅이 여기에 맞았을 때
-          탭 줄이 헤더 바로 밑에 오고 나머지 전부가 카드가 된다. 카드가
-          그보다 많으면 계속 스크롤되고, 적으면 빈 곳이 남는다 —
-          빈 곳이 남는 편이 카드가 잘리는 것보다 낫다.
-          BottomDock이 자기 탭을 갖고 있으므로 바깥에서 한 겹 더 씌우지 않는다. */}
+      {/* 포지션 — 첫 화면 안에 있다. 손잡이를 끌면 커진다. */}
       <div style={{
-        minHeight: dockMinH,
+        height: dockH, flexShrink: 0, minHeight: 0,
         borderTop: `1px solid ${C.hair2}`, background: C.panel,
-        // 스냅은 고정 헤더를 모른다. scroll-margin-top을 주지 않으면 탭 줄이
-        // 헤더 뒤로 들어간 자리에서 멈춘다.
-        scrollSnapAlign: 'start', scrollMarginTop: hdrH || 96,
+        display: 'flex', flexDirection: 'column',
       }}>
-        <BottomDock flow stickyTop={hdrH || 96}/>
+        <DockHandle
+          onDrag={dy => setDockUser(h => Math.min(dockMax, Math.max(dockMin, (h ?? dockDefault) - dy)))}
+          onToggle={() => setDockUser(h => ((h ?? dockDefault) > dockDefault + 20 ? dockMin : dockMax))}
+        />
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <BottomDock/>
+        </div>
       </div>
 
       <ChartDrawer/>
