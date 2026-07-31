@@ -1,0 +1,93 @@
+# PR에서 테스트·빌드를 돌린다.
+#
+# 왜 필요한가
+# ───────────
+# 유닛 테스트가 1100개 넘게 있는데 **PR에서 한 번도 안 돌고 있었다.**
+# 저장소의 워크플로 셋(exit-monitor·news-pipeline·watch-tick)은 전부
+# cron이고, 코드 변경을 검사하는 것은 하나도 없었다.
+#
+# 그동안 "테스트 통과"는 누군가 자기 컴퓨터에서 돌린 결과였고, GitHub에는
+# 그 근거가 남지 않았다. 즉 무언가 깨져도 PR은 초록으로 보였다.
+#
+# 타입 에러를 왜 '개수'로 재는가
+# ──────────────────────────────
+# 이 저장소는 타입 에러 80건을 안고 있고 `ignoreBuildErrors`로 덮여 있다.
+# 지금 0으로 만드는 것은 별개의 큰 작업이라 여기서 할 수 없다.
+#
+# 그렇다고 검사를 빼면 **81번째 에러가 조용히 들어온다.** 그래서 개수를
+# 세서 기준보다 늘면 실패시킨다. 줄이는 것은 언제나 환영이고, 그때는
+# BASELINE을 같이 내리면 된다.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# 같은 브랜치에 새로 푸시하면 이전 실행을 취소한다. 이미 지나간 커밋을
+# 검사하느라 지금 커밋의 결과가 늦어지면 안 된다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # 빌드에 실제 키가 필요하지는 않다(없으면 각 기능이 503으로 그 사실을
+      # 알린다). 다만 Next가 빌드 중에 이 값을 읽으므로 자리만 채운다.
+      NEXT_TELEMETRY_DISABLED: '1'
+      # 타입 에러 기준선. 줄였으면 이 숫자도 같이 내린다.
+      TS_ERROR_BASELINE: '80'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # package-lock.json 그대로 설치한다. `npm install`은 잠금 파일을
+      # 고쳐서, CI가 개발자 컴퓨터와 다른 의존성으로 통과할 수 있다.
+      - name: 의존성 설치
+        run: npm ci
+
+      # 이 저장소의 하네스는 src를 node_modules 없이 컴파일해 돌린다.
+      # 그래서 테스트 대상 모듈은 상대 경로 import만 쓴다 (scripts/run-tests.mjs 참조).
+      - name: 유닛 테스트
+        run: npm test
+
+      - name: 타입 에러 개수 확인
+        run: |
+          set -o pipefail
+          # tsc가 에러를 내면 non-zero로 끝난다. 개수를 세는 것이 목적이므로
+          # 여기서 죽지 않게 받아 두고, 아래에서 기준과 비교해 판정한다.
+          npx tsc --noEmit -p tsconfig.json > ts.log 2>&1 || true
+          COUNT=$(grep -cE "error TS" ts.log || true)
+          echo "타입 에러 ${COUNT}건 (기준 ${TS_ERROR_BASELINE}건)"
+          if [ "$COUNT" -gt "$TS_ERROR_BASELINE" ]; then
+            echo "::error::타입 에러가 ${TS_ERROR_BASELINE}건에서 ${COUNT}건으로 늘었습니다"
+            # 늘어난 줄만 보여준다. 전체 로그는 80줄이라 새 에러가 묻힌다.
+            grep -E "error TS" ts.log | tail -n $((COUNT - TS_ERROR_BASELINE))
+            exit 1
+          fi
+          if [ "$COUNT" -lt "$TS_ERROR_BASELINE" ]; then
+            echo "::notice::타입 에러가 ${COUNT}건으로 줄었습니다 — TS_ERROR_BASELINE을 같이 내려 주세요"
+          fi
+
+      - name: 프로덕션 빌드
+        run: npm run build
+
+      # 실패했을 때 무엇이 틀렸는지 로그가 남아야 한다.
+      - name: 타입 로그 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsc-log
+          path: ts.log
+          if-no-files-found: ignore
+          retention-days: 7
