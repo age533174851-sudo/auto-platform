@@ -13,7 +13,20 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AiTier } from './gateway';
 
-export type AiProvider = 'openai' | 'anthropic' | 'gemini';
+import {
+  ALL_PROVIDERS, PROVIDER_LABEL, MODELS, isCheap,
+  resolveRoute, availableProviders, providerRoutes,
+  OPENAI_COMPATIBLE,
+  type AiProvider, type AiVia, type ProviderRoute,
+} from './routing';
+
+// 부르는 쪽이 두 파일을 알 필요는 없다 — 지금까지 쓰던 이름 그대로 내보낸다.
+export {
+  ALL_PROVIDERS, PROVIDER_LABEL,
+  resolveRoute, availableProviders, providerRoutes,
+};
+export type { AiProvider, AiVia, ProviderRoute };
+
 
 export interface AiCallInput {
   system: string;
@@ -50,48 +63,45 @@ export interface AiCallResult {
   latencyMs?: number;
   /** 안전 분류기가 요청을 거절한 경우 (Anthropic) — 오류가 아니라 정상 응답이다. */
   refused?: boolean;
+  /** 직접 갔는가, OpenRouter를 거쳤는가. 비용·장애 원인을 가르는 값이다 */
+  via?: AiVia;
   error?: string;
 }
 
 const TIMEOUT_MS = 30_000;
 
-// ── 모델 선택 ─────────────────────────────────────────────────
-// 모델 ID는 제공자 쪽에서 계속 바뀌므로 환경변수로 덮어쓸 수 있게 둔다.
-const MODELS = {
-  openai: {
-    cheap:   process.env.OPENAI_MODEL_CHEAP   || 'gpt-4o-mini',
-    premium: process.env.OPENAI_MODEL_PREMIUM || 'gpt-4o',
-  },
-  gemini: {
-    cheap:   process.env.GEMINI_MODEL_CHEAP   || 'gemini-2.0-flash',
-    premium: process.env.GEMINI_MODEL_PREMIUM || 'gemini-2.5-pro',
-  },
-  // Anthropic은 모델을 나누지 않는다. 깊이/비용은 effort로 조절한다.
-  anthropic: process.env.ANTHROPIC_MODEL || 'claude-opus-5',
-};
 
-const isCheap = (tier?: AiTier) => tier === 'L1_CHEAP';
 
-/** 어떤 제공자의 키가 준비돼 있는지 (값은 노출하지 않는다) */
-export function availableProviders(): AiProvider[] {
-  const out: AiProvider[] = [];
-  if (process.env.OPENAI_API_KEY)    out.push('openai');
-  if (process.env.ANTHROPIC_API_KEY) out.push('anthropic');
-  if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) out.push('gemini');
-  return out;
-}
+// ── OpenAI 호환 경로 ──────────────────────────────────────────
+//
+// OpenAI · Grok · Perplexity · OpenRouter가 전부 같은 형식이다
+// (`POST /chat/completions`). 하나로 만든다 — 네 벌을 두면 JSON 강제 모드나
+// 오류 처리를 한 곳만 고치는 일이 반드시 생긴다.
+async function callOpenAICompatible(
+  route: ProviderRoute, input: AiCallInput,
+): Promise<AiCallResult> {
+  const provider = route.provider;
+  const model = route.model;
+  const base: AiCallResult = { ok: false, provider, model, text: null };
 
-// ── OpenAI ────────────────────────────────────────────────────
-async function callOpenAI(input: AiCallInput): Promise<AiCallResult> {
-  const key = input.apiKey || process.env.OPENAI_API_KEY || '';
-  const model = isCheap(input.tier) ? MODELS.openai.cheap : MODELS.openai.premium;
-  const base: AiCallResult = { ok: false, provider: 'openai', model, text: null };
-  if (!key) return { ...base, error: 'OPENAI_API_KEY 미설정' };
+  const key = input.apiKey || (route.keyEnv ? process.env[route.keyEnv] : '') || '';
+  if (!key) return { ...base, error: route.reason };
+  if (!route.baseUrl) return { ...base, error: `${provider} 호출 경로가 없습니다` };
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${key}`,
+  };
+  if (route.via === 'openrouter') {
+    // OpenRouter가 요청 출처를 표시하는 데 쓰는 헤더. 없어도 동작하지만
+    // 대시보드에서 어느 앱이 썼는지 구분이 안 된다.
+    headers['HTTP-Referer'] = process.env.NEXT_PUBLIC_APP_URL || 'https://traigo.app';
+    headers['X-Title'] = 'TRAIGO';
+  }
 
   try {
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    const r = await fetch(`${route.baseUrl}/chat/completions`, {
+      method: 'POST', headers,
       body: JSON.stringify({
         model,
         max_tokens: input.maxTokens ?? 800,
@@ -108,22 +118,33 @@ async function callOpenAI(input: AiCallInput): Promise<AiCallResult> {
       // 상태 코드만 남기면 '왜'를 모른다. 429는 한도 초과와 잔액 부족이
       // 같은 코드로 오는데, 전자는 기다리면 풀리고 후자는 결제해야 한다.
       // 대응이 완전히 다른데 화면에는 둘 다 'HTTP 429'로 보인다.
+      //
+      // 그리고 OpenRouter는 없는 모델 ID에 404를 준다. 모델 ID를 오류에
+      // 같이 담아야 "무엇을 고쳐야 하는지"가 보인다.
       let detail = '';
       try {
         const e = await r.json();
         detail = e?.error?.message || e?.error?.code || '';
       } catch { /* 본문이 JSON이 아니면 상태 코드만 */ }
-      return { ...base, error: detail ? `HTTP ${r.status} — ${detail}` : `HTTP ${r.status}` };
+      const via = route.via === 'openrouter' ? ' via OpenRouter' : '';
+      return {
+        ...base,
+        error: `HTTP ${r.status}${via} [${model}]${detail ? ` — ${detail}` : ''}`
+          + (r.status === 404 ? ` · OPENROUTER_MODEL_${provider.toUpperCase()}로 모델 ID를 맞추세요` : ''),
+      };
     }
     const d = await r.json();
     const text = d?.choices?.[0]?.message?.content?.trim() || null;
     return {
       ...base, ok: !!text, text,
+      // OpenRouter는 실제로 응답한 모델을 돌려준다. 그걸 그대로 기록해야
+      // 비용 화면이 무엇에 돈을 썼는지 말할 수 있다.
+      model: typeof d?.model === 'string' && d.model ? d.model : model,
       inputTokens:  d?.usage?.prompt_tokens,
       outputTokens: d?.usage?.completion_tokens,
     };
   } catch (e: any) {
-    return { ...base, error: e?.message || 'openai 호출 실패' };
+    return { ...base, error: e?.message || `${provider} 호출 실패` };
   }
 }
 
@@ -262,16 +283,27 @@ async function logCall(
 
 export async function callProvider(provider: AiProvider, input: AiCallInput): Promise<AiCallResult> {
   const t0 = Date.now();
+  const route = resolveRoute(provider, k => process.env[k], input.tier);
+
+  // 어느 길로 가는지는 resolveRoute 한 곳이 정한다. 여기서 다시 판단하면
+  // 화면이 말하는 경로와 실제로 부른 경로가 갈라진다.
   let r: AiCallResult;
-  switch (provider) {
-    case 'openai':    r = await callOpenAI(input); break;
-    case 'anthropic': r = await callClaude(input); break;
-    case 'gemini':    r = await callGemini(input); break;
+  if (route.via === 'none') {
+    r = { ok: false, provider, model: route.model, text: null, error: route.reason };
+  } else if (route.via === 'openrouter' || OPENAI_COMPATIBLE[provider]) {
+    r = await callOpenAICompatible(route, input);
+  } else if (provider === 'anthropic') {
+    r = await callClaude(input);
+  } else if (provider === 'gemini') {
+    r = await callGemini(input);
+  } else {
+    r = { ok: false, provider, model: route.model, text: null, error: `${provider} 경로 없음` };
   }
+
   const latencyMs = Date.now() - t0;
   // 기록을 기다리지 않는다. 통계 때문에 사용자 응답이 늦어지면 안 된다.
   void logCall(provider, r!, latencyMs, input);
-  return { ...r!, latencyMs };
+  return { ...r!, latencyMs, via: route.via };
 }
 
 /**
@@ -324,8 +356,10 @@ export async function callCommittee(input: AiCallInput): Promise<CommitteeResult
     .filter(r => !r.ok)
     .map(r => ({ provider: r.provider, reason: r.refused ? '안전 정책 거절' : (r.error || '실패') }));
 
-  const LABEL: Record<AiProvider, string> = { openai: 'GPT', anthropic: 'Claude', gemini: 'Gemini' };
-  const combined = opinions.map(o => `[${LABEL[o.provider]}]\n${o.text}`).join('\n\n');
+  // 이름표는 PROVIDER_LABEL 한 곳에서. 여기 따로 두면 제공자를 추가할 때마다
+  // 두 곳을 고쳐야 하고, 한 곳만 고치면 새 AI가 'undefined'로 표시된다.
+  const combined = opinions
+    .map(o => `[${PROVIDER_LABEL[o.provider]}]\n${o.text}`).join('\n\n');
 
   return { opinions, skipped, combined, count: opinions.length };
 }

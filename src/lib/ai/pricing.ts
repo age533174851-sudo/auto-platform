@@ -43,12 +43,30 @@ const TABLE: { prefix: string; price: Price }[] = [
   { prefix: 'gemini-2.0-flash', price: { inPerM: 0.10, outPerM: 0.40 } },
   { prefix: 'gemini-2.5-flash', price: { inPerM: 0.30, outPerM: 2.50 } },
   { prefix: 'gemini-2.5-pro',   price: { inPerM: 1.25, outPerM: 10.00 } },
+  // xAI
+  { prefix: 'grok-3-mini', price: { inPerM: 0.30, outPerM: 0.50 } },
+  { prefix: 'grok-3',      price: { inPerM: 3.00, outPerM: 15.00 } },
+  { prefix: 'grok-4',      price: { inPerM: 3.00, outPerM: 15.00 } },
+  // Perplexity
+  { prefix: 'sonar-pro',   price: { inPerM: 3.00, outPerM: 15.00 } },
+  { prefix: 'sonar',       price: { inPerM: 1.00, outPerM: 1.00 } },
 ];
 
 /** 모델 ID로 단가를 찾는다. 없으면 null — 0이 아니다 */
 export function priceOf(model: string | null | undefined): Price | null {
-  const m = String(model ?? '').trim().toLowerCase();
+  let m = String(model ?? '').trim().toLowerCase();
   if (!m) return null;
+  // OpenRouter는 모델 ID에 회사 이름을 붙여 준다 (`openai/gpt-4o`).
+  // 떼지 않으면 접두사가 하나도 안 맞아 전부 '단가 모름'이 되고, 비용
+  // 화면이 OpenRouter를 쓰는 순간 통째로 비어 버린다.
+  //
+  // 다만 **OpenRouter는 원가에 수수료를 붙인다.** 그래서 여기서 나오는
+  // 값은 실제 청구액의 하한이다 — 화면이 '추정'이라고 적는 이유가 하나 더 있다.
+  const slash = m.indexOf('/');
+  if (slash > 0) m = m.slice(slash + 1);
+  // `:free`, `:nitro` 같은 변형 꼬리표도 뗀다
+  const colon = m.indexOf(':');
+  if (colon > 0) m = m.slice(0, colon);
   // 가장 긴 접두사가 이긴다. 'gpt-4o'가 'gpt-4o-mini'를 먼저 잡으면
   // 미니 요금이 16배로 계산된다.
   let best: { len: number; price: Price } | null = null;
