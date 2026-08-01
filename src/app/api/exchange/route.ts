@@ -357,15 +357,27 @@ export async function POST(req: NextRequest) {
     if (!connectionId) return NextResponse.json({ error: 'missing_params' }, { status: 400 });
     const next = isTestnet === true;
     if (sb) {
+      // 컬럼 이름은 `auto_trading_enabled`다. 한동안 `auto_trading`으로
+      // 잘못 적어서 이 요청이 통째로 실패했다 — 덕분에 환경도 안 바뀌었다.
+      // 그게 오히려 맞는 결과였다: 자동매매를 못 끄는데 환경만 바뀌면,
+      // 다음 신호가 사용자가 확인하지 않은 계좌로 나간다. 그래서 지금도
+      // **한 번의 update로 묶어 둔다** — 둘 중 하나만 되는 상태를 만들지 않는다.
       const { error } = await (sb.from('exchange_connections') as any)
-        .update({ is_testnet: next, auto_trading: false })
+        .update({ is_testnet: next, auto_trading_enabled: false })
         .eq('id', connectionId).eq('user_id', uid);
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (error) {
+        return NextResponse.json({
+          error: `환경을 바꾸지 못했습니다: ${error.message}`,
+          // 무엇이 안 바뀌었는지 분명히 한다. '실패했다'만 적으면 사용자는
+          // 반쯤 바뀌었을까 봐 확인할 방법을 찾게 된다.
+          message: '아무것도 바뀌지 않았습니다 — 연결은 그대로입니다.',
+        }, { status: 500 });
+      }
     } else {
       const r = MEM_STORE.find(x => x.id === connectionId);
       if (!r) return NextResponse.json({ error: '연결을 찾을 수 없습니다' }, { status: 404 });
       r.is_testnet = next;
-      (r as any).auto_trading = false;
+      (r as any).auto_trading_enabled = false;
     }
     return NextResponse.json({
       success: true, isTestnet: next,

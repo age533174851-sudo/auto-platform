@@ -208,10 +208,15 @@ export default function ExchangeConnectPage() {
         body: JSON.stringify({ action: 'set-testnet', connectionId: conn.id, isTestnet: next }),
       });
       const d = await r.json();
-      showToast(d?.message || (r.ok ? '바꿨습니다' : (d?.error || '변경 실패')), !!d?.success);
+      // 실패 사유를 그대로 보여준다. '변경 실패'만 적으면 무엇이 문제인지
+      // 알 수 없고, 반쯤 바뀌었는지도 알 수 없다.
+      showToast(
+        d?.success ? (d.message || '바꿨습니다')
+                   : [d?.error, d?.message].filter(Boolean).join('\n') || `변경 실패 (${r.status})`,
+        !!d?.success);
       if (d?.success) {
         await loadConnections();
-        setSelConn(prev => prev ? ({ ...prev, isTestnet: next, autoTrading: false } as any) : prev);
+        setSelConn(prev => prev ? ({ ...prev, isTestnet: next, autoTradingEnabled: false } as any) : prev);
         setTestMsg(''); setBalances([]); setBalErr('');
       }
     } catch (e: any) {
