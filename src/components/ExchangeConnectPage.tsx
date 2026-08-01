@@ -146,9 +146,15 @@ export default function ExchangeConnectPage() {
         setConnectErr(d.error || '연결 실패');
       } else {
         setConnectOk(true);
+        // 고른 환경과 실제 키가 달랐으면 **그 사실을 말한다.** 조용히 바꾸면
+        // 사용자가 '실전'이라고 믿는 연결이 테스트넷이 되고, 그 반대도 된다.
+        if (d?.detected?.switched && d.detected.message) {
+          showToast(d.detected.message, true);
+          setIsTestnet(!!d.detected.isTestnet);
+        }
         setApiKey(''); setApiSecret(''); setPassphrase(''); setNickname('');
         await loadConnections();
-        setTimeout(() => setView('list'), 1500);
+        setTimeout(() => setView('list'), d?.detected?.switched ? 3200 : 1500);
       }
     } catch (e: any) {
       setConnectErr(e.message || '네트워크 오류');
@@ -483,7 +489,11 @@ export default function ExchangeConnectPage() {
               실계좌에 물어보고 401이 뜨는데, 화면에는 그 이유가 안 적혔다. */}
           {HAS_TESTNET.includes(selExchange) && (
             <div>
-              <div style={{ color:T.sub, fontSize:11, marginBottom:4 }}>연결 환경</div>
+              <div style={{ color:T.sub, fontSize:11, marginBottom:4 }}>
+                연결 환경 <span style={{ color:T.muted, fontSize:9, fontWeight:600 }}>
+                  — 틀려도 됩니다. 키가 반대쪽이면 알아서 찾아 그대로 알려드립니다
+                </span>
+              </div>
               <div style={{ display:'flex', gap:6 }}>
                 {([
                   { id: true,  label: '테스트넷', desc: '가짜 돈 · 안전', color: T.grn },

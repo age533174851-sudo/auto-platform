@@ -79,9 +79,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '지원하지 않는 거래소' }, { status: 400 });
     }
 
+    // ── 어느 환경의 키인가를 **판별한다** ─────────────────────
+    //
+    // 테스트넷 키와 실전 키는 물리적으로 다른 키다. 같은 키로 양쪽을 쓸 수
+    // 없다. 즉 이건 사용자가 고르는 '모드'가 아니라 **그 키의 성질**이다.
+    //
+    // 그런데 지금까지는 사람에게 물었고, 사람은 틀렸다:
+    //   · Gate에는 선택지조차 없어서 전부 실전으로 저장 → 테스트넷 키가 401
+    //   · 바이낸스는 실전으로 등록했는데 키는 테스트넷 → 연결 테스트는 실패,
+    //     테스트넷 진단은 5/5 통과라는 이상한 상태
+    // 둘 다 원인이 같다. **묻지 않으면 틀릴 수 없다.**
+    //
+    // 그래서 고른 쪽을 먼저 시도하고, 실패하면 반대쪽도 시도한다. 반대쪽이
+    // 통하면 그쪽이 정답이고 그 사실을 응답에 적는다 — 조용히 바꾸지 않는다.
+    // 사용자가 '실전'이라고 믿는 연결이 테스트넷이 되는 것은 그 반대만큼
+    // 나쁘다.
+    const canDetect = ['binance', 'gate'].includes(String(exchange));
+    const first = isTestnet !== false;
+    let usedTestnet = first;
     let testResult;
+    let switched = false;
     try {
-      testResult = await testExchange(exchange as ExchangeId, apiKey, apiSecret, passphrase, isTestnet);
+      testResult = await testExchange(exchange as ExchangeId, apiKey, apiSecret, passphrase, first);
+      if (!testResult.success && canDetect) {
+        const alt = await testExchange(exchange as ExchangeId, apiKey, apiSecret, passphrase, !first);
+        if (alt.success) { testResult = alt; usedTestnet = !first; switched = true; }
+      }
     } catch (e) {
       return NextResponse.json({
         error: e instanceof Error ? e.message : '검증 실패',
@@ -89,7 +112,10 @@ export async function POST(req: NextRequest) {
     }
 
     if (!testResult.success) {
-      return NextResponse.json({ error: `연결 테스트 실패: ${testResult.message}` }, { status: 400 });
+      return NextResponse.json({
+        error: `연결 테스트 실패: ${testResult.message}`
+          + (canDetect ? ' (테스트넷·실전 양쪽 모두 시도했습니다)' : ''),
+      }, { status: 400 });
     }
 
     // 출금 권한 거부 (안전)
@@ -131,7 +157,8 @@ export async function POST(req: NextRequest) {
       is_active:           true,
       auto_trading_enabled: false,
       is_paper:            true,                           // 기본 모의
-      is_testnet:          !!isTestnet,                    // 테스트넷 여부
+      // 사용자가 고른 값이 아니라 **실제로 통한 쪽**을 저장한다.
+      is_testnet:          usedTestnet,
       last_tested_at:      new Date().toISOString(),
       test_status:         testResult.message,
     };
@@ -160,7 +187,16 @@ export async function POST(req: NextRequest) {
         // ON CONFLICT 제약 없음 → onConflict 없이 일반 insert로
         if (/ON CONFLICT/i.test(lastErr)) {
           const { data: d2, error: e2 } = await (sb.from('exchange_connections') as any).insert(rec).select().single();
-          if (!e2) return NextResponse.json({ success: true, connection: safeConn(d2), testResult: { success: true, message: testResult.message } });
+          if (!e2) return NextResponse.json({
+            success: true, connection: safeConn(d2),
+            testResult: { success: true, message: testResult.message },
+            // 고른 것과 실제가 달랐으면 **그 사실을 말한다.** 조용히 바꾸면
+            // 사용자가 '실전'이라고 믿는 연결이 테스트넷이 되고, 그 반대도 된다.
+            detected: { isTestnet: usedTestnet, switched,
+              message: switched
+                ? `입력한 키는 ${usedTestnet ? '테스트넷' : '실전'} 키였습니다 — ${usedTestnet ? '테스트넷' : '실전'}으로 등록했습니다.`
+                : null },
+          });
           lastErr = e2.message || lastErr;
           break;
         }

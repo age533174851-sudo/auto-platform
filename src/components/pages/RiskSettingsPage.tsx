@@ -392,24 +392,23 @@ function EditModal({
             const displayValue = isNull ? '' : String(value ?? '');
             return (
               <div key={String(f.key)} style={{ marginBottom: SP.md }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                  <span style={{ ...F.caption, color: T.sub }}>{f.label}</span>
+                {/* 지금 고른 모드의 권장값을 **라벨 줄 안에** 적는다.
+                    줄을 따로 쓰면 항목마다 한 줄씩 늘어나고, 스크롤이
+                    길어질수록 "내가 뭘 바꿨더라"가 더 안 보인다. */}
+                <div style={{ display: 'flex', justifyContent: 'space-between',
+                              alignItems: 'baseline', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                  <span style={{ ...F.caption, color: T.sub, display: 'inline-flex',
+                                 alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
+                    {f.label}
+                    <DefaultHint
+                      now={value}
+                      base={(RISK_PRESETS as any)[draft.mode]?.[f.key as any]}
+                      unit={f.suffix || ''}
+                      onReset={() => update(f.key, (RISK_PRESETS as any)[draft.mode]?.[f.key as any])}/>
+                  </span>
                   <span style={{ color: isNull ? T.red : T.acl, fontWeight: 800, fontSize: 13 }}>
                     {isNull ? '제한 없음' : `${displayValue}${f.suffix || ''}`}
                   </span>
-                </div>
-                {/* 지금 고른 모드의 권장값을 항상 적는다.
-                    이 화면의 숫자는 **얼마나 잃을 수 있는지**를 정한다.
-                    표준 모드가 최대 레버리지 10배인데 내가 언제 50으로
-                    올려놓고 잊었다면, 그건 알고 한 결정이 아니다.
-                    기준은 지금 모드의 프리셋이다 — 안전/표준/공격은 서로
-                    다른 권장값을 갖고, 하나로 비교하면 뜻이 없다. */}
-                <div style={{ marginBottom: 4 }}>
-                  <DefaultHint
-                    now={value}
-                    base={(RISK_PRESETS as any)[draft.mode]?.[f.key as any]}
-                    unit={f.suffix || ''}
-                    onReset={() => update(f.key, (RISK_PRESETS as any)[draft.mode]?.[f.key as any])}/>
                 </div>
                 <input
                   type="number"
@@ -421,11 +420,14 @@ function EditModal({
                     if (Number.isFinite(n)) update(f.key, n as any);
                   }}
                   style={{
-                    width: '100%', boxSizing: 'border-box',
+                    // 여섯 자리 숫자에 화면 전체 너비를 주지 않는다. 칸이
+                    // 크다고 더 정확해지지 않고, 한 화면에 보이는 항목만 줄어든다.
+                    width: `${String(f.max).length + 4}ch`, minWidth: 96, maxWidth: '100%',
+                    boxSizing: 'border-box',
                     background: T.bg, color: isNull ? T.muted : T.txt,
                     border: `1px solid ${T.border}`, borderRadius: R.sm,
-                    padding: '8px 12px', fontSize: 13, fontFamily: 'monospace',
-                    outline: 'none', marginBottom: 6,
+                    padding: '7px 10px', fontSize: 13, fontFamily: 'monospace',
+                    outline: 'none', marginBottom: 6, display: 'block',
                   }}/>
                 {f.quick && (
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>

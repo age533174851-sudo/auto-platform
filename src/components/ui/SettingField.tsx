@@ -40,6 +40,11 @@ function show(v: any, unit?: string): string {
   if (v === true) return '켜짐';
   if (v === false) return '꺼짐';
   if (v == null || v === '') return '—';
+  // 1000000은 읽는 데 시간이 걸린다. 자릿수를 세다 틀리면 100만과 1000만을
+  // 헷갈리는데, 이 화면에서 그건 10배 차이다.
+  if (typeof v === 'number' && Number.isFinite(v) && Math.abs(v) >= 10000) {
+    return `${v.toLocaleString('ko-KR')}${unit ?? ''}`;
+  }
   return `${v}${unit ?? ''}`;
 }
 
