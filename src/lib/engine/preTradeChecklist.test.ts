@@ -147,17 +147,23 @@ export function runPreTradeChecklistTests() {
     assert(v.blockers.length > 0, '막는 항목이 있어야 한다');
   });
 
-  test('USDⓈ-M 진입 + 하루제한 + 국면필터 + AI거부권이면 전체 목록이 돈다', () => {
+  test('USDⓈ-M 진입 + 하루제한 + 국면필터 + AI거부권이면 파생 전체 목록이 돈다', () => {
+    // 장 시간(MARKET_HOURS)은 주식에만 있다. 코인은 24시간이라 그 질문
+    // 자체가 없다 — 목록에 두면 영원히 unknown이 된다.
+    const stockOnly = CHECK_SPECS.filter(sp => !sp.markets.includes('USDM')).length;
     eq(runChecklist(goodInput(), {
       market: 'USDM', intent: 'ENTRY', dailyLimit: true, regimeFilter: true, aiVeto: true,
-    }).total, CHECK_SPECS.length);
+    }).total, CHECK_SPECS.length - stockOnly);
   });
 
-  test('기본값은 하루제한·국면필터·AI거부권 없음 — 세 항목이 빠진다', () => {
+  test('기본값은 하루제한·국면필터·AI거부권 없음 — 세 항목이 빠진다 (+ 주식 전용 항목)', () => {
     const v = runChecklist(goodInput());
     eq(v.market, 'USDM');
     eq(v.intent, 'ENTRY');
-    eq(v.total, CHECK_SPECS.length - 3);
+    const stockOnly = CHECK_SPECS.filter(sp => !sp.markets.includes('USDM')).length;
+    eq(v.total, CHECK_SPECS.length - 3 - stockOnly);
+    assert(!v.results.some(r => r.id === 'MARKET_HOURS'),
+      '코인은 24시간이라 장 시간 항목이 목록에 있으면 영원히 unknown이 된다');
     assert(!v.results.some(r => r.id === 'TODAY_ENTRY'),
       '수동 주문에는 하루 제한이 없는데 "확인 못 함"으로 남으면 확인할 것이 있다고 읽힌다');
     assert(!v.results.some(r => r.id === 'REGIME_FILTER'),
@@ -700,5 +706,112 @@ export function runPreTradeChecklistTests() {
   test('항목 id가 중복되지 않는다', () => {
     const ids = CHECK_SPECS.map(s => s.id);
     eq(new Set(ids).size, ids.length);
+  });
+
+  // ── 주식 (24시간이 아닌 시장) ───────────────────────────
+  console.log('[거래 전 점검 — 주식]');
+
+  test('주식에는 청산·마진모드·미확정주문 검사가 없다', () => {
+    // 주식 현물에는 청산도 마진 모드도 존재하지 않는다. pass로 적으면
+    // "청산가 확인 ✓"가 뜨는데 그건 확인한 것도 아니고 사실도 아니다.
+    const v = runChecklist({ marketHours: { canOrder: true, reason: '정규장', holidaysKnown: true } },
+      { market: 'STOCK', intent: 'ENTRY' });
+    for (const id of ['LIQUIDATION_DISTANCE', 'MARGIN_ISOLATED', 'STATE_RECONCILE', 'UNRESOLVED_ORDERS']) {
+      assert(!v.results.some(r => r.id === id), `주식에 ${id}가 있으면 안 된다`);
+    }
+  });
+
+  test('주식에는 장 시간 검사가 있다', () => {
+    const v = runChecklist({ marketHours: { canOrder: true, reason: '정규장', holidaysKnown: true } },
+      { market: 'STOCK', intent: 'ENTRY' });
+    assert(v.results.some(r => r.id === 'MARKET_HOURS'), '장 시간 검사가 없다');
+  });
+
+  test('장이 닫혀 있으면 막는다', () => {
+    const v = runChecklist({ marketHours: { canOrder: false, reason: '한국거래소 마감 후', holidaysKnown: true } },
+      { market: 'STOCK', intent: 'ENTRY' });
+    const h = v.results.find(r => r.id === 'MARKET_HOURS')!;
+    eq(h.status, 'fail');
+    eq(h.blocks, true);
+    assert(h.detail.includes('마감'), h.detail);
+  });
+
+  test('장 시간을 안 넘기면 막는다 — 조용히 통과시키지 않는다', () => {
+    // 주식 주문 경로가 이 값을 안 넘기는 상태로 배포되면 그 순간 모든
+    // 주식 주문이 막혀야 한다. 통과시키면 새벽에 주문이 나가기 시작하고,
+    // 그건 아무도 안 본다.
+    const v = runChecklist({}, { market: 'STOCK', intent: 'ENTRY' });
+    const h = v.results.find(r => r.id === 'MARKET_HOURS')!;
+    eq(h.status, 'unknown');
+    eq(h.blocks, true);
+  });
+
+  test('휴장일 목록이 없으면 통과가 아니라 경고다', () => {
+    // '열림'이라고만 적으면 설날에도 초록 체크가 뜬다.
+    const v = runChecklist({ marketHours: { canOrder: true, reason: '정규장', holidaysKnown: false } },
+      { market: 'STOCK', intent: 'ENTRY' });
+    const h = v.results.find(r => r.id === 'MARKET_HOURS')!;
+    eq(h.status, 'warn');
+    // 경고는 막지 않는다 — 증권사가 최종 방어선이다
+    eq(h.blocks, false);
+  });
+
+  test('청산에도 장 시간을 건다 — 장외에는 팔 수도 없다', () => {
+    const v = runChecklist({ marketHours: { canOrder: false, reason: '마감 후', holidaysKnown: true } },
+      { market: 'STOCK', intent: 'EXIT' });
+    assert(v.results.some(r => r.id === 'MARKET_HOURS'), '청산에도 있어야 한다');
+    eq(v.allowed, false);
+  });
+
+  test('주식에도 손실 한도가 걸린다', () => {
+    // 한도는 계좌 단위이지 시장 단위가 아니다. 선물에서 한도를 채운 뒤
+    // 주식으로 옮겨 계속하면 잠근 의미가 없다.
+    const v = runChecklist({ marketHours: { canOrder: true, reason: '정규장', holidaysKnown: true } },
+      { market: 'STOCK', intent: 'ENTRY' });
+    assert(v.results.some(r => r.id === 'DAILY_LOSS_LIMIT'), '오늘 손실 한도가 없다');
+    assert(v.results.some(r => r.id === 'WEEKLY_LOSS_LIMIT'), '주간 손실 한도가 없다');
+  });
+
+  test('주식에도 현금 충분 검사가 있다', () => {
+    const v = runChecklist({ marketHours: { canOrder: true, reason: '정규장', holidaysKnown: true } },
+      { market: 'STOCK', intent: 'ENTRY' });
+    assert(v.results.some(r => r.id === 'MARGIN_SUFFICIENT'), '증거금(현금) 검사가 없다');
+  });
+
+  test('토큰화 주식에는 장 시간이 없고 거래 비용이 있다', () => {
+    // 24시간 거래되지만 거래대금이 실제 종목의 수만 분의 1이다.
+    // 장 시간 대신 호가 차이가 관문이 된다.
+    const v = runChecklist({ spread: { canOrder: true, reason: '왕복 0.2%' } },
+      { market: 'TOKENIZED', intent: 'ENTRY' });
+    assert(!v.results.some(r => r.id === 'MARKET_HOURS'), '토큰화는 24시간이다');
+    assert(v.results.some(r => r.id === 'SPREAD_COST'), '거래 비용 검사가 없다');
+  });
+
+  test('거래 비용이 목표를 넘으면 막는다', () => {
+    const v = runChecklist({ spread: { canOrder: false, reason: '목표 1%인데 왕복 2.2% — 이겨도 못 법니다' } },
+      { market: 'TOKENIZED', intent: 'ENTRY' });
+    const c = v.results.find(r => r.id === 'SPREAD_COST')!;
+    eq(c.status, 'fail');
+    eq(c.blocks, true);
+  });
+
+  test('호가를 안 넘기면 막는다 — 얇은 시장에 모르고 시장가를 내지 않는다', () => {
+    const v = runChecklist({}, { market: 'TOKENIZED', intent: 'ENTRY' });
+    const c = v.results.find(r => r.id === 'SPREAD_COST')!;
+    eq(c.status, 'unknown');
+    eq(c.blocks, true);
+  });
+
+  test('나가는 길은 비용으로 막지 않는다 — 얇은 시장에 갇힌다', () => {
+    const v = runChecklist({}, { market: 'TOKENIZED', intent: 'EXIT' });
+    assert(!v.results.some(r => r.id === 'SPREAD_COST'), '청산에는 없어야 한다');
+  });
+
+  test('코인 주요 시장에는 거래 비용 검사가 없다', () => {
+    // 배선하지 않은 검사를 목록에 두면 모든 주문이 '확인 불가'로 막힌다.
+    for (const m of ['USDM', 'COINM', 'SPOT'] as const) {
+      assert(!runChecklist(goodInput(), { market: m, intent: 'ENTRY' })
+        .results.some(r => r.id === 'SPREAD_COST'), `${m}에 있으면 안 된다`);
+    }
   });
 }
