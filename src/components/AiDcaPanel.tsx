@@ -7,8 +7,9 @@ import { Brain, TrendingDown, Check } from 'lucide-react';
 import { notifySuccess } from '@/lib/notify/center';
 import {
   loadAiDcaCfg, saveAiDcaCfg, tierForFng, computeBuyAmount, FREQ_LABEL,
-  DEFAULT_TIERS, type AiDcaConfig,
+  DEFAULT_TIERS, DEFAULT_CFG, type AiDcaConfig,
 } from '@/lib/dca/aiDca';
+import { DefaultHint } from '@/components/ui/SettingField';
 
 export default function AiDcaPanel({ currency = 'KRW' }: { currency?: string }) {
   const [cfg, setCfg] = useState<AiDcaConfig>(loadAiDcaCfg());
@@ -73,13 +74,23 @@ export default function AiDcaPanel({ currency = 'KRW' }: { currency?: string }) 
 
       {/* 기본 적립액 */}
       <div style={{ background: T.card, borderRadius: 12, padding: '12px 14px', marginBottom: 12 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <span style={{ color: T.muted, fontSize: 12 }}>기본 적립액 (중립 기준)</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+          <span style={{ color: T.muted, fontSize: 12, display: 'inline-flex', alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
+            기본 적립액 (중립 기준)
+            {/* 회당 얼마가 나가는지는 이 화면에서 가장 중요한 숫자다.
+                지금 값만 보이면 내가 바꾼 것인지 원래 그랬던 것인지 모른다. */}
+            <DefaultHint now={cfg.baseAmount} base={DEFAULT_CFG.baseAmount}
+              onReset={() => setBase(DEFAULT_CFG.baseAmount)}/>
+          </span>
           <span style={{ color: T.txt, fontWeight: 800, fontSize: 14 }}>{cvt(cfg.baseAmount, currency)}</span>
         </div>
         <input type="range" min={10000} max={1000000} step={10000} value={cfg.baseAmount}
           onChange={e => setBase(Number(e.target.value))} style={{ width: '100%', accentColor: '#A78BFA' }} />
-        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <div style={{ marginTop: 8, marginBottom: 4 }}>
+          <DefaultHint now={cfg.frequency} base={DEFAULT_CFG.frequency}
+            onReset={() => { setCfg(c => ({ ...c, frequency: DEFAULT_CFG.frequency })); setSaved(false); }}/>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
           {(['daily', 'weekly', 'monthly'] as const).map(fq => (
             <button key={fq} onClick={() => { setCfg(c => ({ ...c, frequency: fq })); setSaved(false); }}
               style={{ flex: 1, background: cfg.frequency === fq ? '#8B5CF6' : T.alt, color: cfg.frequency === fq ? '#fff' : T.muted, border: 'none', borderRadius: 8, padding: '8px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>

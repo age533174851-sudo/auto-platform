@@ -52,6 +52,107 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 거래 전 점검 ──
+  //
+  // 현물 목록은 짧다 — 운영 모드 · 시계 오차, 그리고 매수면 자금.
+  // 마진 모드·청산가·배율·손절은 **현물에 존재하지 않으므로 목록에서 빠진다**
+  // (preTradeChecklist의 market 구분). 없는 것을 pass로 적으면 확인한 것도
+  // 사실도 아닌 초록 체크가 생긴다.
+  //
+  // 짧아도 물리는 이유: 이 경로는 지금까지 **운영 모드 관문을 지나지 않았다.**
+  // spotOrderExecutor는 공매도·보유·정밀도를 보지만 모드는 보지 않는다.
+  // 그래서 UI_DEMO나 PAPER 모드에서도 실제 거래소로 주문이 나갔다.
+  //
+  // 매도는 EXIT로 본다. 보유한 것을 파는 것은 위험을 줄이는 방향이고, 자금
+  // 검사를 물리면 정작 팔아서 현금을 만들려는 주문이 막힌다.
+  const spotSide = String(body.side || '').toUpperCase();
+  const isSell = spotSide === 'SELL';
+  {
+    const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+    const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+    const { data: sconn } = await (sb.from('exchange_connections') as any)
+      .select('exchange_id, is_testnet').eq('id', body.connectionId).eq('user_id', uid).maybeSingle();
+    const spotTestnet = sconn?.is_testnet !== false;
+    const spotExchange = String(sconn?.exchange_id || 'binance').toLowerCase();
+
+    // 시각은 **주문이 나갈 거래소**에서 읽는다. Gate 주문을 넣으면서
+    // 바이낸스 시각으로 시계 오차를 재면, 그 초록 체크는 다른 거래소에
+    // 대한 것이다 — 확인한 적 없는 것을 확인했다고 적는 셈이다.
+    const readServerTime = spotExchange === 'gate'
+      ? (await import('@/lib/exchanges/gateFutures')).getGateServerTime
+      : (await import('@/lib/exchanges/binance')).getSpotServerTime;
+
+    // 명목가는 아는 만큼만 넘긴다. quoteOrderQty가 있으면 그것이 곧 금액이고,
+    // 지정가면 수량×가격이다. 시장가+수량만 온 경우는 체결가를 모르므로
+    // 0으로 둔다 — 여기서 시세를 추측해 채우면 모드 상한($100)이 추측값으로
+    // 판정된다.
+    const notional = Number(body.quoteOrderQty)
+      || (Number(body.quantity) * Number(body.price)) || 0;
+
+    const localMs = Date.now();
+    const serverMs = await readServerTime(spotTestnet);
+    const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+    const g = gateOrder(mode, notional);
+
+    // 손실 잠금 셋(오늘·이번 주·연패).
+    //
+    // **이 줄이 없어서 현물 매수가 전부 막혀 있었다.** 체크리스트의
+    // 오늘 손실 한도는 '모르면 막는' 필수 항목인데 이 라우트는 그 값을
+    // 한 번도 넣은 적이 없다 — 화면에는 "오늘 손실 한도: 확인 못 함"으로
+    // 떴고, 사용자가 할 수 있는 일은 없었다.
+    //
+    // 매도(EXIT)에는 어차피 안 물린다. 나가는 길을 막으면 잠금의 목적과
+    // 정반대가 되기 때문이다.
+    const limits = isSell
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null, aiVeto: null, aiPredictionId: null }
+      : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
+          sb, userId: uid, connectionId: body.connectionId,
+          exchange: spotExchange === 'gate' ? 'gate' : 'binance',
+          testnet: spotTestnet,
+          // AI 거부권이 볼 종목·방향. 현물 매수는 LONG으로 본다 —
+          // 매도(EXIT)에는 어차피 이 검사가 붙지 않는다.
+          symbol: String(body.symbol || ''), side: isSell ? 'SHORT' : 'LONG',
+          market: 'SPOT',
+          addMarginUsd: null,
+          openUse: null,
+        });
+
+    const checklist = runChecklist({
+      mode: { disposition: g.disposition, reason: g.reason },
+      clock: serverMs != null ? { localMs, serverMs } : null,
+      ...limits,
+      // 현물에는 증거금 항목이 없다 (preTradeChecklist의 markets 참조).
+      // 매도 전 보유 확인은 spotOrderExecutor가 하고, 매수 자금 부족은
+      // 거래소가 주문을 통째로 거부한다.
+      // 판정이 있으면 목록에 넣는다. 켜져 있으면 collectAllLimits가
+      // **실패해도** 판정을 남기므로, 여기서 항목이 조용히 사라지지 않는다.
+    }, { market: 'SPOT', intent: isSell ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto });
+
+    // 이 AI 판단이 실제로 어떻게 쓰였는지 원장에 되짚는다.
+    // 막은 것만 채점하면 "AI가 막았을 때는 늘 맞더라"는 착시가 생긴다 —
+    // 통과시킨 것도 같이 채점해야 그 확신도가 신호인지 알 수 있다.
+    if (limits.aiPredictionId) {
+      const { markApplied } = await import('@/lib/ai/vetoCheck');
+      await markApplied(sb, limits.aiPredictionId,
+        limits.aiVeto?.status === 'blocked' ? 'VETO' : 'PASS',
+        isSell ? 'SHORT' : 'LONG', null);
+    }
+
+    if (!checklist.allowed) {
+      return NextResponse.json({
+        ok: false, marketType: 'SPOT',
+        error: 'checklist_blocked',
+        message: checklist.summary,
+        checklist: {
+          allowed: false, market: checklist.market, intent: checklist.intent,
+          passed: checklist.passed, total: checklist.total,
+          unknownCount: checklist.unknownCount,
+          results: checklist.results, blockers: checklist.blockers,
+        },
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   const r = await placeSpotOrder(sb, {
     userId: uid,
     connectionId: String(body.connectionId),

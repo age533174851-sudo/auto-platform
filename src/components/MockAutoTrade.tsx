@@ -8,6 +8,7 @@ import { A } from '@/lib/theme/colors';
 // ─────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { T } from '@/lib/constants';
+import { SliderField } from '@/components/ui/SettingField';
 import { notify } from '@/lib/notify/center';
 import { writeMockHeartbeat } from '@/lib/engineStatus';
 import { logDecision } from '@/lib/autotrade/auditLog';
@@ -304,10 +305,13 @@ export default function MockAutoTrade() {
             </>
           )}
         </div>
-        {/* 신뢰도 임계값 조절 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-          <span style={{ fontSize: 10, color: T.muted }}>진입 임계값 {confThreshold}% 이상</span>
-          <input type="range" min={40} max={95} step={5} value={confThreshold} onChange={e => setConfThreshold(Number(e.target.value))} style={{ flex: 1 }} />
+        {/* 신뢰도 임계값. 슬라이더만 두면 정확한 값을 못 넣는다 —
+            폰에서 72를 맞추려면 손가락을 1px 단위로 움직여야 한다. */}
+        <div style={{ marginTop: 8 }}>
+          <SliderField label="진입 임계값 (이 신뢰도 이상만 진입)"
+            value={confThreshold} base={70} unit="%"
+            min={40} max={95} step={5}
+            onChange={setConfThreshold}/>
         </div>
         {stoppedReason && (
           <div style={{ background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: 8, padding: '8px 10px', marginTop: 8 }}>

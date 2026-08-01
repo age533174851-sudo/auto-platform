@@ -1,8 +1,15 @@
-// /api/binance/futures/cancel-all — jobs 큐에 CANCEL_ALL_ORDERS 적재 (Worker 실행)
+// /api/binance/futures/cancel-all — 미체결 주문 전체 취소. **Vercel에서 직접 실행한다.**
 // POST { connectionId }
+//
+// 예전에는 jobs 큐에 CANCEL_ALL_ORDERS를 적재하고 Worker가 실행했다. 그 워커는
+// Binance IP 지역 차단으로 쓰지 않고 있어서(PROGRESS 인프라 표) 취소는 일어나지
+// 않았고, 응답은 `ok: true, queued: true`였다.
+//
+// 미체결 취소는 **위험을 줄이는 동작**이다. 그런 동작이 조용히 실패하는 것은
+// 주문이 실패하는 것보다 나쁘다 — 사용자는 정리됐다고 믿고 손을 뗀다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { enqueueJob } from '@/lib/jobs';
+import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -15,16 +22,29 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ error: 'supabase_not_configured' }, { status: 503 });
 
-  const { connectionId } = body;
-  if (!connectionId) return NextResponse.json({ error: 'missing_connectionId' }, { status: 400 });
+  const creds = await loadBinanceCreds(sb, uid, body.connectionId);
+  if (!creds.ok) return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status });
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
-    .select('id, exchange_id, is_testnet, has_withdrawal').eq('id', connectionId).eq('user_id', uid).single();
-  if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
-  if (String(conn.exchange_id).toLowerCase() !== 'binance') return NextResponse.json({ error: 'not_binance' }, { status: 400 });
-  if (conn.has_withdrawal === true) return NextResponse.json({ error: 'withdrawal_key_blocked' }, { status: 403 });
+  const { cancelAllOpenOrders } = await import('@/lib/exchanges/binanceFutures');
 
-  const r = await enqueueJob(sb, { userId: uid, connectionId, action: 'CANCEL_ALL_ORDERS', mode: conn.is_testnet ? 'TESTNET' : 'LIVE', priority: 1, maxAttempts: 5 });
-  if (!r.ok) return NextResponse.json({ error: 'enqueue_failed', message: r.error }, { status: 500 });
-  return NextResponse.json({ ok: true, queued: true, jobId: r.jobId });
+  // 최대 3회. 취소는 되돌릴 필요가 없는 동작이라 재시도가 안전하다 —
+  // 이미 취소된 주문을 다시 취소해도 결과가 같다.
+  let last: any = null;
+  for (let i = 1; i <= 3; i++) {
+    last = await cancelAllOpenOrders(creds.key, creds.secret, creds.testnet);
+    if (last?.success) break;
+    if (i < 3) await new Promise(r => setTimeout(r, 1500));
+  }
+
+  return NextResponse.json({
+    ok: !!last?.success,
+    queued: false,
+    executed: !!last?.success,
+    cancelled: last?.count ?? null,
+    results: last?.results,
+    testnet: creds.testnet,
+    message: last?.success
+      ? `미체결 주문 취소 완료 (${last?.count ?? 0}건)`
+      : '취소 실패 — 거래소에서 직접 확인하세요. 개별 결과는 results를 보세요',
+  }, { status: last?.success ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
 }

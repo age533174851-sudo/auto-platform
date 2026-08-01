@@ -358,28 +358,13 @@ export async function validatePreOrder(
   };
 }
 
-// ─────────────────────────────────────────────────────────────
-// API Key Health Check
-// ─────────────────────────────────────────────────────────────
-export async function checkApiKeyHealth(
-  exchange: string,
-  apiKey: string,
-  secret: string,
-  passphrase?: string,
-): Promise<{ healthy: boolean; latencyMs: number; error?: string }> {
-  const t0 = Date.now();
-  try {
-    const { testExchange } = await import('../exchanges/router');
-    const result = await testExchange(exchange as any, apiKey, secret, passphrase);
-    return {
-      healthy:   result.success,
-      latencyMs: result.latencyMs ?? 0,
-      error:     result.success ? undefined : result.message,
-    };
-  } catch (e: any) {
-    return { healthy: false, latencyMs: Date.now() - t0, error: e.message };
-  }
-}
+// API 키 헬스체크(checkApiKeyHealth)는 지웠다.
+//
+// 유일한 호출자가 `/api/safety?action=health`였고, 그 라우트는 API 시크릿을
+// URL 쿼리로 받고 있었다(로그에 평문으로 남는다). 라우트를 지우면서 이
+// 함수도 같이 지운다 — 남겨 두면 다음 사람이 같은 모양으로 다시 붙인다.
+// 연결 확인은 `/api/exchange` action=test가 한다.
+
 
 // ─────────────────────────────────────────────────────────────
 // Notification Fallback (stub — real impl in API route)

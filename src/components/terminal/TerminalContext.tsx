@@ -17,6 +17,7 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { loadFavorites, saveFavorites } from './SymbolSearch';
 import { parseMarketType, type MarketType } from '@/lib/markets/marketType';
+import { resolveTradeMode, TRADE_MODES, type TradeMode, type ModeResolution } from '@/lib/markets/tradeMode';
 
 export interface TerminalSymbol {
   /** 거래소 심볼 — 'BTCUSDT' */
@@ -65,6 +66,20 @@ interface TerminalState {
   connections: any[];
   mode: ModeInfo;
   /**
+   * 어디에 주문을 보내는가 — 모의 / 테스트넷 / 실전.
+   *
+   * `mode`(운영 단계)와 다른 값이다. 그쪽은 서버가 정하는 **사다리 단계**이고
+   * 이쪽은 사용자가 지금 고른 **주문 대상**이다. 둘을 섞으면 화면이 말하는
+   * 것과 실제로 주문이 가는 곳이 갈린다.
+   *
+   * 서버가 다시 검사한다. 이 값은 화면이 어느 라우트로 보낼지와 어떤 경고를
+   * 띄울지를 정할 뿐, 권한을 주지 않는다.
+   */
+  tradeMode: TradeMode;
+  setTradeMode: (m: TradeMode) => void;
+  /** 이 모드에서 실제로 쓰이는 연결과 그 이유 */
+  modeResolution: ModeResolution;
+  /**
    * 앱 안에 들어가 있을 때 탭을 바꾸는 함수. 독립 경로(/terminal)로 열면
    * 없다 — 그때는 링크가 평소대로 페이지를 이동해야 한다. 그래서 optional이고,
    * 쓰는 쪽에서 없으면 기본 동작으로 떨어지게 둔다.
@@ -81,7 +96,20 @@ export function useTerminal(): TerminalState {
 }
 
 const SYMBOL_KEY = 'tg_terminal_symbol';
+const TRADE_MODE_KEY = 'tg_terminal_trade_mode';
 const MARKET_KEY = 'tg_terminal_market';
+/**
+ * 고른 계좌. **실전 선택도 기억한다** — 모드(TRADE_MODE_KEY)와 반대다.
+ *
+ * 모드를 안 기억하는 이유는 "어제 실전이었다"가 오늘 첫 주문을 실전으로
+ * 만들면 안 되기 때문이다. 계좌는 다르다: 안 기억해도 실전 탭을 누르는
+ * 순간 목록의 첫 번째가 **말없이** 선택된다. 그러면 위험이 사라지는 게
+ * 아니라 '어느 계좌인지 모르는 상태'로 바뀔 뿐이다.
+ *
+ * 안전장치는 기억하지 않는 것이 아니라 **화면에 계좌를 계속 적어 두는 것**
+ * (OrderPane의 AccountLine)이다.
+ */
+const CONN_KEY = 'tg_terminal_conn';
 
 /** 모드를 모를 때의 값. 실계좌가 아니라고 단정하지 않는다 */
 const UNKNOWN_MODE: ModeInfo = {
@@ -101,6 +129,30 @@ export function TerminalProvider(
   const [connections, setConnections] = useState<any[]>([]);
   const [connId, setConnId] = useState('');
   const [mode, setMode] = useState<ModeInfo>(UNKNOWN_MODE);
+  // **기본은 모의다.** 새로 열었을 때 실전에 서 있으면 안 된다 —
+  // 모르고 누르는 첫 주문이 실제 돈이 되는 것이 이 화면의 최악이다.
+  const [tradeMode, setTradeModeState] = useState<TradeMode>('PAPER');
+
+  // 고른 매매 모드를 기억한다. **실전은 기억하지 않는다** —
+  // 어제 실전으로 켜뒀다는 이유로 오늘 첫 화면이 실전이면 안 된다.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(TRADE_MODE_KEY);
+      if (raw && (TRADE_MODES as string[]).includes(raw) && raw !== 'LIVE') {
+        setTradeModeState(raw as TradeMode);
+      }
+    } catch { /* 기본값(모의)으로 둔다 */ }
+  }, []);
+
+  const setTradeMode = useCallback((m: TradeMode) => {
+    setTradeModeState(m);
+    try {
+      // 실전은 저장하지 않는다 (위 주석). 저장된 값을 지워 다음 방문이
+      // 모의로 시작하게 한다.
+      if (m === 'LIVE') localStorage.removeItem(TRADE_MODE_KEY);
+      else localStorage.setItem(TRADE_MODE_KEY, m);
+    } catch { /* 저장 실패는 이번 세션에만 영향 */ }
+  }, []);
 
   // 새로고침 후 보던 종목으로 돌아온다
   useEffect(() => {
@@ -118,6 +170,15 @@ export function TerminalProvider(
       const m = parseMarketType(localStorage.getItem(MARKET_KEY));
       if (m) setMarketTypeState(m);
     } catch { /* 기본값 유지 */ }
+  }, []);
+
+  /** 계좌를 바꾼다. 다음 방문에도 같은 계좌에 서 있게 저장한다 */
+  const chooseConn = useCallback((id: string) => {
+    setConnId(id);
+    try {
+      if (id) localStorage.setItem(CONN_KEY, id);
+      else localStorage.removeItem(CONN_KEY);
+    } catch { /* 저장 실패는 이번 세션에만 영향 */ }
   }, []);
 
   const setMarketType = useCallback((m: MarketType) => {
@@ -164,7 +225,14 @@ export function TerminalProvider(
           .filter((c: any) => !c.has_withdrawal);
         if (cancelled) return;
         setConnections(usable);
-        if (usable[0]) setConnId(usable[0].id);
+        // 지난번에 고른 계좌가 아직 있으면 그것을 쓴다. 없으면 첫 번째.
+        // **저장값을 그대로 믿지 않는다** — 지운 연결의 id가 남아 있으면
+        // 아무 계좌도 못 고른 상태가 되고, 화면은 그것을 '계좌 없음'으로
+        // 그린다.
+        let saved = '';
+        try { saved = localStorage.getItem(CONN_KEY) || ''; } catch { /* 못 읽으면 첫 번째 */ }
+        const keep = saved && usable.some((c: any) => c.id === saved) ? saved : (usable[0]?.id || '');
+        if (keep) setConnId(keep);
       } catch { /* 연결 목록 실패 — 주문 패널이 안내한다 */ }
 
       try {
@@ -192,12 +260,20 @@ export function TerminalProvider(
     return { id, display: `${base}/USDT`, nameKr: base };
   }), [favorites]);
 
+  // 이 모드에서 실제로 쓸 연결. 판정은 순수 함수가 한다 —
+  // '모르는 is_testnet은 실전이 아니다' 같은 규칙이 화면마다 갈리면 안 된다.
+  const modeResolution = useMemo(
+    () => resolveTradeMode(tradeMode, connections, connId || null),
+    [tradeMode, connections, connId]);
+
   const value = useMemo<TerminalState>(() => ({
     symbol, setSymbol, symbols, favorites, toggleFavorite,
     marketType, setMarketType,
-    auth, connId, setConnId, connections, mode, navigateApp,
+    auth, connId, setConnId: chooseConn, connections, mode, navigateApp,
+    tradeMode, setTradeMode, modeResolution,
   }), [symbol, setSymbol, symbols, favorites, toggleFavorite,
-       marketType, setMarketType, auth, connId, connections, mode, navigateApp]);
+       marketType, setMarketType, auth, connId, chooseConn, connections, mode, navigateApp,
+       tradeMode, setTradeMode, modeResolution]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

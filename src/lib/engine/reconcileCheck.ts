@@ -33,7 +33,7 @@ export async function gatherAndReconcile(
   const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
 
   const { data: conn } = await sb.from('exchange_connections')
-    .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+    .select('exchange_id, exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
     .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
 
   if (!conn) return { reachable: false, verdict: null, error: '활성 거래소 연결이 없습니다', ...empty };
@@ -41,51 +41,123 @@ export async function gatherAndReconcile(
     return { reachable: false, verdict: null, error: '출금 권한 키는 사용할 수 없습니다', ...empty };
   }
 
-  const bf = await import('@/lib/exchanges/binanceFutures');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const key = (conn as any).api_key as string;
   const secret = decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? '');
 
-  const posRes: any = await bf.getFuturesPositions(key, secret, testnet);
-  if (!posRes?.success) {
-    // 조회 실패를 "포지션 없음"으로 처리하면 앱의 모든 포지션이 불일치로 잡힌다.
-    return { reachable: false, verdict: null, error: posRes?.message || '거래소 조회 실패', ...empty };
-  }
+  // ── 어느 거래소인가 ──
+  //
+  // 예전에는 바이낸스만 읽었다. Gate 연결에서 이 함수를 부르면 Gate 키로
+  // 바이낸스에 물어보게 되고, 실패 → `reachable: false` → 거래 전 점검이
+  // '확인 못 함'으로 **모든 Gate 주문을 막았다.**
+  //
+  // 판정(reconcileState)은 거래소를 모른다 — PositionView만 받는다. 그래서
+  // 읽는 쪽만 갈라 준다.
+  const isGate = String((conn as any).exchange_id ?? (conn as any).exchange ?? '')
+    .toLowerCase().includes('gate');
 
   const exchangePositions: PositionView[] = [];
-  for (const p of (posRes.positions as any[])) {
-    let hasStop = false;
-    try {
-      const open = await bf.getFuturesOpenOrders(key, secret, testnet, p.symbol);
-      hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
-        String(o?.type || '').toUpperCase() === 'STOP_MARKET');
-    } catch { hasStop = false; }
+  let exchangeOpenOrders: OrderView[] | undefined;
 
-    exchangePositions.push({
-      symbol: p.symbol,
-      side: p.side === 'SHORT' ? 'SHORT' : 'LONG',
-      qty: Math.abs(Number(p.amount)),
-      leverage: Number(p.leverage) || null,
-      marginType: p.marginType || null,
-      hasProtectiveStop: hasStop,
-    });
+  if (isGate) {
+    const gf = await import('@/lib/exchanges/gateFutures');
+    const gp = await import('@/lib/exchanges/gatePlan');
+
+    let gatePositions: any[];
+    try {
+      gatePositions = await gf.getPositionsGateFutures(key, secret, testnet);
+    } catch (e: any) {
+      return { reachable: false, verdict: null,
+        error: `Gate 포지션 조회 실패: ${e?.message || e}`, ...empty };
+    }
+
+    for (const p of gatePositions) {
+      // 변환은 gatePositionToRisk 한 곳에만 둔다 (leverage 0 = 교차 등).
+      const r = gp.gatePositionToRisk(p)!;
+      // 조건부 주문 목록으로 보호주문 유무를 판정한다. 못 읽으면 **있다고
+      // 가정하지 않는다** — 없는 것으로 보면 대조가 '손절 소실'을 띄우고
+      // 주문이 막히는데, 그게 있다고 보는 것보다 안전하다.
+      const priceOrders = await gf.getPriceOrdersGateFutures(key, secret, p.contract, testnet);
+      exchangePositions.push({
+        // Gate 계약명을 앱 심볼 모양으로 되돌린다 — 대조는 심볼로 짝을 맞춘다
+        symbol: String(p.contract || '').replace('_', ''),
+        side: r.positionAmt < 0 ? 'SHORT' : 'LONG',
+        qty: Math.abs(r.positionAmt),
+        leverage: r.leverage,
+        marginType: r.marginType,
+        hasProtectiveStop: priceOrders == null ? false : priceOrders.length > 0,
+        liquidationPrice: r.liquidationPrice,
+      });
+    }
+
+    // Gate 미체결 주문. clientOrderId는 't-' 접두사가 붙어 저장되므로 떼어낸다.
+    try {
+      const rows = await gf.getOpenOrdersGateFutures(key, secret, testnet);
+      exchangeOpenOrders = rows.map(o => ({
+        clientOrderId: String(o.text || '').replace(/^t-/, ''),
+        symbol: String(o.contract || '').replace('_', ''),
+      }));
+    } catch { exchangeOpenOrders = undefined; }
+
+  } else {
+    const bf = await import('@/lib/exchanges/binanceFutures');
+    const posRes: any = await bf.getFuturesPositions(key, secret, testnet);
+    if (!posRes?.success) {
+      // 조회 실패를 "포지션 없음"으로 처리하면 앱의 모든 포지션이 불일치로 잡힌다.
+      return { reachable: false, verdict: null, error: posRes?.message || '거래소 조회 실패', ...empty };
+    }
+
+    for (const p of (posRes.positions as any[])) {
+      let hasStop = false;
+      try {
+        const open = await bf.getFuturesOpenOrders(key, secret, testnet, p.symbol);
+        hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
+          String(o?.type || '').toUpperCase() === 'STOP_MARKET');
+      } catch { hasStop = false; }
+
+      exchangePositions.push({
+        symbol: p.symbol,
+        side: p.side === 'SHORT' ? 'SHORT' : 'LONG',
+        qty: Math.abs(Number(p.amount)),
+        leverage: Number(p.leverage) || null,
+        marginType: p.marginType || null,
+        hasProtectiveStop: hasStop,
+        // 대조에는 쓰지 않지만 거래 전 점검이 쓴다 (PositionView 주석 참조).
+        // 0이면 거래소가 안 준 것이라 null로 둔다 — 0은 청산가가 아니다.
+        liquidationPrice: Number(p.liquidationPrice) || null,
+      });
+    }
+
+    try {
+      const open = await bf.getFuturesOpenOrders(key, secret, testnet);
+      exchangeOpenOrders = (Array.isArray(open) ? open : []).map((o: any) => ({
+        clientOrderId: String(o.clientOrderId || ''), symbol: String(o.symbol || ''),
+      }));
+    } catch { exchangeOpenOrders = undefined; }
   }
 
-  let exchangeOpenOrders: OrderView[] | undefined;
-  try {
-    const open = await bf.getFuturesOpenOrders(key, secret, testnet);
-    exchangeOpenOrders = (Array.isArray(open) ? open : []).map((o: any) => ({
-      clientOrderId: String(o.clientOrderId || ''), symbol: String(o.symbol || ''),
-    }));
-  } catch { exchangeOpenOrders = undefined; }
-
-  const { data: appRows } = await sb.from('live_orders')
-    .select('client_order_id, symbol, side, filled_qty, status')
+  // ── 청산 주문은 포지션이 아니다 ──
+  //
+  // reduce_only 행을 그대로 포지션으로 읽으면 방향이 뒤집혀 잡힌다. 롱을 닫은
+  // SELL 기록이 숏 포지션이 되고, 거래소에는 그런 포지션이 없으니 심각 불일치가
+  // 되어 이후 주문이 전부 막힌다.
+  //
+  // 컬럼이 없는 스키마에서 select가 실패하면 조회 전체가 비고, 그러면 앱
+  // 포지션이 통째로 사라져 이번에는 반대 방향 불일치가 난다. 그래서 실패하면
+  // 컬럼을 빼고 다시 읽는다 — 아래 미확정 주문 조회와 같은 방식이다.
+  const appQuery = (cols: string) => sb.from('live_orders')
+    .select(cols)
     .eq('user_id', userId).in('status', ['ACKED', 'FILLED'])
     .order('created_at', { ascending: false }).limit(50);
 
+  let { data: appRows, error: appErr } =
+    await appQuery('client_order_id, symbol, side, filled_qty, status, reduce_only');
+  if (appErr) {
+    ({ data: appRows } = await appQuery('client_order_id, symbol, side, filled_qty, status'));
+  }
+
   const appPositions: PositionView[] = (Array.isArray(appRows) ? appRows : [])
-    .filter((r: any) => Number(r.filled_qty) > 0)
+    .filter((r: any) => Number(r.filled_qty) > 0 && r.reduce_only !== true)
     .map((r: any) => ({
       symbol: String(r.symbol),
       side: String(r.side).toUpperCase() === 'SHORT' ? 'SHORT' as const : 'LONG' as const,
@@ -138,12 +210,24 @@ export async function assertStateConsistent(
   sb: any,
   userId: string,
   testnet: boolean,
-): Promise<{ allowed: boolean; reason?: string; verdict: ReconcileVerdict | null }> {
+): Promise<{
+  allowed: boolean;
+  reason?: string;
+  verdict: ReconcileVerdict | null;
+  /**
+   * 방금 읽은 원본. 호출자가 같은 조회를 다시 하지 않도록 실어 보낸다.
+   *
+   * 거래 전 점검(preTradeChecklist)이 이 값들을 필요로 하는데, 없으면
+   * 주문 경로가 거래소를 두 번 읽는다 — 레이트리밋을 두 배로 쓰고,
+   * 두 조회 사이에 상태가 바뀌면 점검과 차단이 서로 다른 사실을 본다.
+   */
+  gather: GatherResult;
+}> {
   const r = await gatherAndReconcile(sb, userId, testnet);
 
   if (!r.reachable) {
     return {
-      allowed: false, verdict: null,
+      allowed: false, verdict: null, gather: r,
       reason: `거래소 상태를 확인할 수 없어 신규 주문을 보류합니다: ${r.error || '조회 실패'}`,
     };
   }
@@ -152,7 +236,7 @@ export async function assertStateConsistent(
   if (r.unresolvedOrders.length > 0) {
     const first = r.unresolvedOrders[0];
     return {
-      allowed: false, verdict: r.verdict,
+      allowed: false, verdict: r.verdict, gather: r,
       reason: `결과가 확정되지 않은 주문이 ${r.unresolvedOrders.length}건 있어 신규 주문을 보류합니다 ` +
               `(${first.symbol} ${first.clientOrderId}: ${first.reason}). ` +
               `/api/orders/reconcile로 확정한 뒤 다시 시도하세요.`,
@@ -160,9 +244,9 @@ export async function assertStateConsistent(
   }
   if (r.verdict?.blockNewOrders) {
     return {
-      allowed: false, verdict: r.verdict,
+      allowed: false, verdict: r.verdict, gather: r,
       reason: `앱과 거래소 상태가 어긋나 신규 주문을 보류합니다 — ${r.verdict.summary}`,
     };
   }
-  return { allowed: true, verdict: r.verdict };
+  return { allowed: true, verdict: r.verdict, gather: r };
 }

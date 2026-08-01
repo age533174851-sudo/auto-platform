@@ -134,9 +134,13 @@ export async function POST(req: NextRequest) {
         quantity: qty, quoteOrderQty: side === 'BUY' && type === 'MARKET' ? amount : undefined, price, testnet,
       });
     } else if (exchange === 'gate') {
+      // **testnet을 반드시 넘긴다.** 여기서 빠져 있었다 — 위에서 값을
+      // 계산해 두고 바이낸스 갈래에만 넘겼다. 그래서 테스트넷으로 등록한
+      // Gate 연결의 주문이 실계좌로 나갔다. 화면에는 '테스트넷'이라고
+      // 적힌 채로.
       result = await placeOrderGate(apiKey, secret, {
         symbol, side, type, quantity, amount, price,
-      });
+      }, testnet);
     } else {
       return NextResponse.json({ error: 'unsupported_exchange', message: `${exchange} 주문은 아직 미지원 (binance/gate만)` }, { status: 400 });
     }

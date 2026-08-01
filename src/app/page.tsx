@@ -64,6 +64,16 @@ const HubAccountsPage = dynamic(() => import('@/components/pages/HubAccountsPage
 const ManualAccountsPage = dynamic(() => import('@/components/pages/ManualAccountsPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const FearDcaPage = dynamic(() => import('@/components/pages/FearDcaPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 import { nextStack, topmost, historyDelta } from '@/lib/nav/overlayStack';
+import type { Command } from '@/lib/commands/types';
+import { useHotkeys } from '@/lib/commands/useHotkeys';
+import { DEFAULT_PROFILE } from '@/lib/commands/keymap';
+import { buildCommands } from '@/lib/commands/registry';
+import { MENU } from '@/lib/menuItems';
+import { notifyError, notifyInfo } from '@/lib/notify/center';
+// 팔레트는 열릴 때까지 필요 없다. 앱 첫 로드에 끼우면 Ctrl+K를 한 번도
+// 누르지 않는 사용자도 그 무게를 같이 받는다.
+const CommandPalette = dynamic(() => import('@/components/CommandPalette'),{ ssr: false });
+const ShortcutHelp = dynamic(() => import('@/components/ShortcutHelp'),{ ssr: false });
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
 const AiUsagePage = dynamic(() => import('@/components/pages/AiUsagePage'),{ ssr: false });
@@ -255,6 +265,8 @@ export default function App() {
     setThemeMode(order[(order.indexOf(themeMode)+1)%order.length]);
   },[themeMode,setThemeMode]);
   const [tab,setTab]=useState('home');
+  const [paletteOpen,setPaletteOpen]=useState(false);
+  const [helpOpen,setHelpOpen]=useState(false);
   // ── 딥링크 ──
   // 이 앱은 한 페이지 안에서 tab 상태로 화면을 바꾸므로 URL이 없다.
   // 그래서 Pro 터미널 같은 별도 경로에서 특정 화면으로 돌아올 방법이
@@ -468,7 +480,10 @@ export default function App() {
     { id:'profile', open:profileOpen,     close:()=>setProfileOpen(false) },
     { id:'detail',  open:!!detailAsset,   close:()=>setDetailAsset(null) },
     { id:'more',    open:showMore,        close:()=>setShowMore(false) },
-  ],[loginOpen,profileOpen,detailAsset,showMore]);
+    // 팔레트도 겹이다 — 뒤로가기가 팔레트만 닫고 화면은 그대로 둔다.
+    { id:'palette', open:paletteOpen,     close:()=>setPaletteOpen(false) },
+    { id:'help',    open:helpOpen,        close:()=>setHelpOpen(false) },
+  ],[loginOpen,profileOpen,detailAsset,showMore,paletteOpen,helpOpen]);
 
   const stackRef=useRef<string[]>([]);
   const closedByPop=useRef(false);
@@ -541,6 +556,7 @@ export default function App() {
     }
     setTab(id);setShowMore(false);
   },[authUser]);
+
   const openAsset=useCallback((asset:any,dest='trading')=>{
     if(asset){
       // Force state update even for same asset (triggers re-render)
@@ -552,6 +568,77 @@ export default function App() {
     }
     nav(dest);
   },[nav]);
+  // ── 커맨드 실행 ──
+  //
+  // 레지스트리는 "무엇을 할지"만 선언하고(action.kind), 실제 동작은 여기서
+  // 연결한다. 그래야 레지스트리와 매칭 규칙이 setTab이나 router를 모르는
+  // 순수 코드로 남고, 테스트가 붙는다.
+  //
+  // 모르는 kind를 조용히 넘기지 않는 이유: 커맨드를 추가하고 배선을 잊으면
+  // 팔레트에서 눌러도 아무 일이 없다. 그건 "고장"인데 화면에서는 "닫힘"으로
+  // 보여서 원인을 못 찾는다.
+  const runCommand=useCallback((cmd:Command)=>{
+    switch(cmd.action.kind){
+      case 'tab':
+        nav(cmd.action.value);
+        return;
+      case 'href':
+        if(typeof window!=='undefined') window.location.href=cmd.action.value;
+        return;
+      case 'symbol': {
+        // id로 원본 자산을 찾아 넘긴다. {sym}만 만들어 보내면 가격·이름이
+        // 없는 반쪽 객체가 되고, 상세 화면이 ₩0을 그린다 — 0원은 시세가
+        // 아니라 고장이라는 것을 이 프로젝트에서 이미 겪었다.
+        const found=(prices as any[])?.find(a=>a?.id===cmd.action.value);
+        if(found) openAsset(found,'trading');
+        else notifyError('종목을 찾지 못했습니다', cmd.label);
+        return;
+      }
+      case 'invoke':
+        if(cmd.action.value==='palette.open'){ setShowMore(false); setPaletteOpen(true); return; }
+        if(cmd.action.value==='help.keys'){ setShowMore(false); setHelpOpen(true); return; }
+        if(cmd.action.value==='theme.toggle'){ cycleTheme(); return; }
+        if(cmd.action.value==='theme.auto'){ setThemeMode('auto'); return; }
+        notifyError('아직 연결되지 않은 커맨드입니다', cmd.label);
+        return;
+      default:
+        notifyError('알 수 없는 커맨드입니다', cmd.label);
+    }
+  },[nav,openAsset,cycleTheme,setThemeMode,prices]);
+
+  // 팔레트에 넘길 종목. 한글 이름을 같이 실어야 'ㅅㅅㅈㅈ' → 삼성전자가
+  // 된다 — 기호만 넘기면 초성 검색이 코인에만 통하고 국내 주식에는 통하지
+  // 않는다. 정작 초성이 가장 필요한 쪽이 빠진다.
+  const paletteSymbols=useMemo(
+    ()=>(prices as any[])?.map(a=>({ id:a.id, sym:a.sym, nameKr:a.nameKr, name:a.name }))??[],
+    [prices]);
+
+  // 팔레트를 여는 창구가 단축키만이 아니다 — 더보기 시트의 검색 줄도 같은
+  // 상태를 켠다. 겹을 둘 다 쌓으면 뒤로가기를 두 번 눌러야 하므로 시트는 닫는다.
+  const openPalette=useCallback(()=>{
+    setShowMore(false);
+    setPaletteOpen(true);
+  },[]);
+
+  // ── 전역 단축키 ──
+  //
+  // 커맨드 레지스트리 위의 키맵이다. 키를 핸들러에 박지 않는 이유는
+  // registry.ts에 적어 뒀다 — 창구마다 판단하면 위험 등급을 빼먹는다.
+  const allCommands=useMemo(()=>buildCommands(MENU),[]);
+  const lookupCommand=useCallback(
+    (id:string)=>allCommands.find(c=>c.id===id)??null,[allCommands]);
+  useHotkeys({
+    profile: DEFAULT_PROFILE,
+    lookup: lookupCommand,
+    onRun: runCommand,
+    // 확인이 필요한 커맨드는 첫 입력에 실행되지 않는다. 화면에 아무 표시가
+    // 없으면 사용자는 단축키가 씹혔다고 생각하고 다시 누른다 — 그 두 번째가
+    // 실행이 되므로, 무엇을 기다리는지 반드시 알려야 한다.
+    onAsk: (cmd)=>notifyInfo('한 번 더 누르면 실행됩니다', cmd.label),
+    // 팔레트가 열려 있으면 전역 단축키를 끈다. 팔레트는 자기 키(↑↓·Enter·Esc)를
+    // 쓰는데 그 위에서 g·? 같은 것이 같이 터지면 두 곳이 동시에 반응한다.
+    disabled: paletteOpen || helpOpen,
+  });
 
   // Open the PnL calculator with asset prefilled
   const openPnL = useCallback((asset:any) => {
@@ -799,7 +886,14 @@ export default function App() {
 
         {/* Main Content */}
         <div className="mc" style={{flex:1}}>
-          {/* Header */}
+          {/* Header
+              매매 탭에서는 감춘다. 이 줄과 아래 시세띠가 합쳐서 80px쯤
+              먹는데, 터미널은 그 80px이 있고 없고에 따라 주문폼이 한
+              화면에 들어가느냐 마느냐가 갈린다. 탭 이름('매매')은 하단
+              탭에 이미 켜져 있고, 종목·가격·모드는 터미널 헤더가 더
+              정확하게 보여준다 — 같은 것을 두 번 그리느라 주문을 밀어낼
+              이유가 없다. */}
+          {tab!=='trading'&&(
           <div style={{position:'sticky',top:0,zIndex:50,background:'color-mix(in srgb, var(--t-bg) 92%, transparent)',backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)',borderBottom:`1px solid ${T.border}`,padding:'11px 16px 9px',display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:`max(env(safe-area-inset-top),11px)`}}>
             <div style={{display:'flex',alignItems:'center',gap:8}}>
               <div style={{width:26,height:26,borderRadius:8,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:13,color:'#fff'}}>T</div>
@@ -866,8 +960,12 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
-          {/* Ticker */}
+          {/* Ticker — 매매 탭에서는 감춘다 (위 Header 주석 참조).
+              터미널에는 자기 종목의 실시간 호가가 있고, 다른 코인 시세를
+              흘려보내는 띠는 주문 화면에서 자리를 먹는 것 이상을 하지 않는다. */}
+          {tab!=='trading'&&(
           <div style={{background:T.surf,borderBottom:`1px solid ${T.border}`,overflow:'hidden',height:26,display:'flex',alignItems:'center'}}>
             <div className="ticker">
               {[...tickerAssets,...tickerAssets].map((a,i)=>(
@@ -877,6 +975,7 @@ export default function App() {
               ))}
             </div>
           </div>
+          )}
 
           {/* PWA: Offline banner */}
           {pwaOffline&&(
@@ -932,10 +1031,41 @@ export default function App() {
           </div>
 
           {/* More Menu */}
+          {/*
+            빠른 명령 팔레트. Ctrl/Cmd+K 또는 아래 '더보기'의 검색으로 열린다.
+            열려 있을 때만 렌더한다 — 컴포넌트가 dynamic이라 그때 불러온다.
+          */}
+          {paletteOpen&&(
+            <CommandPalette
+              open={paletteOpen}
+              onClose={()=>setPaletteOpen(false)}
+              onRun={runCommand}
+              isAdmin={isAdminUser}
+              symbols={paletteSymbols}
+            />
+          )}
+
+          {helpOpen&&(
+            <ShortcutHelp open={helpOpen} onClose={()=>setHelpOpen(false)} profile={DEFAULT_PROFILE}/>
+          )}
+
           {showMore&&(
             <>
               <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.5)',zIndex:90}} onClick={()=>setShowMore(false)}/>
               <div className="kb-shrink" style={{position:'fixed',bottom:'calc(var(--nav-h) + 8px)',left:'50%',transform:'translateX(-50%)',width:'calc(100% - 24px)',maxWidth:456,background:T.surf,border:`1px solid ${T.border}`,borderRadius:20,padding:'12px 12px calc(12px + env(safe-area-inset-bottom,0px))',zIndex:150,boxShadow:'0 -8px 40px rgba(0,0,0,.6)',maxHeight:'70vh',overflowY:'auto'}}>
+                {/*
+                  모바일에는 Ctrl+K가 없다. 단축키만 만들어 두면 이 기능은
+                  PC 사용자만의 것이 된다 — 그래서 눈에 보이는 입구를 둔다.
+                */}
+                <button onClick={openPalette}
+                  style={{display:'flex',alignItems:'center',gap:8,width:'100%',marginBottom:10,
+                    background:T.alt,border:`1px solid ${T.border}`,borderRadius:12,
+                    padding:'11px 12px',cursor:'pointer',textAlign:'left'}}>
+                  <span style={{fontSize:14}}>🔍</span>
+                  <span style={{flex:1,color:T.muted,fontSize:12,fontWeight:600}}>이동·실행·검색 — 초성도 됩니다</span>
+                  <span style={{color:T.muted,fontSize:9,fontWeight:700,border:`1px solid ${T.border}`,borderRadius:5,padding:'2px 5px'}}>⌘K</span>
+                </button>
+
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,paddingLeft:4}}>
                   <span style={{color:T.muted,fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:.8}}>더보기</span>
                   <div style={{display:'flex',gap:4,background:T.alt,borderRadius:8,padding:3}}>

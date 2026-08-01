@@ -15,6 +15,7 @@ import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { SymbolSearch } from './SymbolSearch';
 import { MarketSwitch } from './MarketSwitch';
+import { TradeModeSwitch } from './TradeModeSwitch';
 import { AppLauncher } from './AppLauncher';
 
 export const TOPBAR_H = 52;
@@ -131,6 +132,8 @@ function TopBarInner({ balance, compact, right }: {
       {/* 지금 어느 시장에 있는지 모르면 '매도'를 누르며 파는 줄 알고
           숏을 연다. 종목 바로 옆에 둔다. */}
       {!compact && <MarketSwitch value={marketType} onChange={setMarketType}/>}
+      {/* 모의/테스트넷/실전. 좁을 때도 뺄 수 없다 — 이 값만 '진짜 돈인가'를 정한다 */}
+      <div style={{ minWidth: 190 }}><TradeModeSwitch compact/></div>
 
       <div style={{
         display: 'flex', flexDirection: 'column', gap: 1,

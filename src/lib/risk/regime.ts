@@ -12,7 +12,28 @@ export interface MarketRegime {
   volPct: number;
   recommendation: string;
   allowEntry: boolean;
+  /**
+   * 판정할 만큼 봉이 있었는가.
+   *
+   * **false면 위의 trend·volatility는 의미가 없다.** 예전에는 이 값이
+   * 없어서, 봉이 0개여도 '횡보 · 저변동 · 진입 허용'이 나왔다 — 시세
+   * 조회가 실패하면 필터가 통째로 통과로 샜다는 뜻이다.
+   */
+  dataOk: boolean;
+  /** 받은 봉 수 */
+  bars: number;
+  /** dataOk가 false인 이유 */
+  dataReason: string;
 }
+
+/**
+ * 판정에 필요한 최소 봉 수.
+ *
+ * ema(60)이 60개를 요구한다. 그보다 적으면 ema60이 null이 되고 추세
+ * 점수가 0으로 남아 **무조건 '횡보'**가 된다. 그 횡보는 관측이 아니라
+ * 계산을 못 한 것이다.
+ */
+export const REGIME_MIN_BARS = 60;
 
 function ema(values: number[], period: number): number | null {
   if (values.length < period) return null;
@@ -29,6 +50,21 @@ function atr(closes: number[], period = 14): number {
 }
 
 export function detectRegime(closes: number[]): MarketRegime {
+  const list = Array.isArray(closes) ? closes.filter(c => Number.isFinite(c) && c > 0) : [];
+  const bars = list.length;
+  if (bars < REGIME_MIN_BARS) {
+    // 계산하지 않는다. 여기서 '횡보'를 돌려주면 그 값이 그대로 진입 허용이
+    // 되고, 시세를 못 받은 것과 실제 횡보장이 구분되지 않는다.
+    return {
+      trend: 'sideways', volatility: 'normal_vol',
+      label: '판정 불가', trendScore: 0, volPct: 0,
+      recommendation: `봉이 ${bars}개뿐입니다 (최소 ${REGIME_MIN_BARS}개 필요) — 국면을 판정할 수 없습니다`,
+      allowEntry: false,
+      dataOk: false, bars,
+      dataReason: `봉 ${bars}/${REGIME_MIN_BARS}개`,
+    };
+  }
+  closes = list;
   const price = closes[closes.length - 1] || 0;
   const ema20 = ema(closes, 20);
   const ema60 = ema(closes, 60);
@@ -59,13 +95,22 @@ export function detectRegime(closes: number[]): MarketRegime {
   else if (trend === 'uptrend') { recommendation = '상승 추세 — 추세추종 유리'; allowEntry = true; }
   else { recommendation = '횡보 — 반전매매(RSI/볼밴) 유리'; allowEntry = true; }
 
-  return { trend, volatility, label, trendScore: +trendScore.toFixed(1), volPct: +volPct.toFixed(2), recommendation, allowEntry };
+  return {
+    trend, volatility, label,
+    trendScore: +trendScore.toFixed(1), volPct: +volPct.toFixed(2),
+    recommendation, allowEntry,
+    dataOk: true, bars, dataReason: '',
+  };
 }
 
 export function regimeAllowsEntry(
   regime: MarketRegime, action: 'buy' | 'sell',
   marketFilter?: 'any' | 'trend_only' | 'range_only' | 'avoid_highvol',
 ): { allowed: boolean; reason: string } {
+  // 판정하지 못한 것을 허용으로 읽지 않는다.
+  if (!regime.dataOk) {
+    return { allowed: false, reason: `국면을 판정하지 못했습니다 (${regime.dataReason})` };
+  }
   if (regime.volatility === 'high_vol') return { allowed: false, reason: `고변동장 진입 차단 (변동성 ${regime.volPct}%)` };
   if (regime.trend === 'downtrend' && action === 'buy') return { allowed: false, reason: '하락 추세에서 롱 진입 차단' };
   if (regime.trend === 'uptrend' && action === 'sell') return { allowed: false, reason: '상승 추세에서 숏 진입 차단' };

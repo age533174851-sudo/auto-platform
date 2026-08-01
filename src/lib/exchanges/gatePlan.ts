@@ -1,0 +1,207 @@
+// src/lib/exchanges/gatePlan.ts
+//
+// Gate 선물 주문에서 **틀리면 조용한** 계산들.
+//
+// 왜 따로 빼는가
+// ──────────────
+// orderExecutor의 Gate 분기에는 네 가지 문제가 있었다:
+//
+//  1. 수량을 `Math.round`했다. Gate 선물의 size는 **정수 계약 수**인데,
+//     반올림이라 0.4가 0이 되고(주문이 안 나가거나 거부) 1.6이 2가 된다
+//     (의도보다 25% 큰 포지션). COIN-M에서 겪은 '수량 단위가 계약'과 같은
+//     함정이다 — 이번에는 반올림 방향까지 틀렸다
+//  2. 마진 모드를 확인하지 않았다. 바이낸스 경로는 ISOLATED를 강제하고
+//     실패하면 주문을 중단한다(감사 지적 2번). Gate는 아무것도 안 했다
+//  3. `setLeverageGateFutures` 결과를 **버렸다**. 실패해도 주문이 나간다 —
+//     계좌에 설정된 배율이 무엇이든 그대로
+//  4. 손절을 붙이지 않았다. 포지션 크기는 손절이 있다는 전제로 계산됐는데
+//     그 전제가 Gate에서는 존재하지 않았다
+//
+// 1·4의 방향 계산과 검증 규칙을 여기 모아 테스트를 붙인다. 네트워크는 타지 않는다.
+
+/** 심볼 → Gate 계약 이름. 'BTCUSDT' → 'BTC_USDT' */
+export function toGateContract(symbol: string): string {
+  const s = String(symbol || '').toUpperCase().replace('/', '').replace('_', '');
+  if (!s) return '';
+  // USDT로 끝나면 그 앞을 base로 자른다. 'USDT' 자체는 계약이 아니다.
+  if (s.endsWith('USDT') && s.length > 4) return `${s.slice(0, -4)}_USDT`;
+  return s;
+}
+
+export interface GateSizeResult {
+  /** 부호 있는 계약 수. 롱 양수, 숏 음수. 0이면 주문하지 않는다 */
+  size: number;
+  ok: boolean;
+  reason: string;
+}
+
+/**
+ * 주문 수량을 Gate의 정수 계약 수로.
+ *
+ * **내림한다.** 올리면 의도보다 큰 포지션이 열리고, 그만큼 청산가가 가까워진다.
+ * 내려서 0이 되면 주문하지 않는다 — 0을 보내면 거래소가 거부하거나(운이 좋으면)
+ * 의미 없는 주문이 기록에 남는다.
+ */
+export function toGateSize(quantity: number, side: 'LONG' | 'SHORT'): GateSizeResult {
+  const q = Number(quantity);
+  if (!Number.isFinite(q) || q <= 0) {
+    return { size: 0, ok: false, reason: `수량이 유효하지 않습니다 (${quantity})` };
+  }
+  const contracts = Math.floor(q);
+  if (contracts < 1) {
+    return {
+      size: 0, ok: false,
+      reason: `수량 ${q}은 1계약 미만입니다. Gate 선물은 정수 계약 단위라 `
+            + '주문할 수 없습니다 — 수량을 늘리세요',
+    };
+  }
+  return {
+    size: side === 'LONG' ? contracts : -contracts,
+    ok: true,
+    reason: contracts === q ? '' : `${q} → ${contracts}계약 (내림)`,
+  };
+}
+
+/**
+ * Gate 레버리지 응답이 격리(isolated)를 뜻하는가.
+ *
+ * Gate v4에서 포지션 레버리지 `0`은 **교차 마진**이다. 0이 아닌 값이 격리다.
+ * 그래서 설정 후 실제 값을 되읽어 확인한다 — 설정 호출이 200을 줬다는 것과
+ * 계좌가 격리라는 것은 다른 얘기다.
+ *
+ * 값을 읽지 못하면 `false`다. 모르는 것을 격리로 보면, 교차 계좌에서 첫 주문이
+ * 그대로 나가고 한 종목의 손실이 지갑 전체로 번진다.
+ */
+export function isGateIsolated(leverageRaw: string | number | null | undefined): boolean {
+  if (leverageRaw == null || leverageRaw === '') return false;
+  const n = Number(leverageRaw);
+  return Number.isFinite(n) && n > 0;
+}
+
+export interface GateFillView {
+  /** 체결된 계약 수(절대값). 알 수 없으면 null */
+  filledQty: number | null;
+  avgPrice: number | null;
+  /** 주문이 끝났는데 한 계약도 안 붙었다 — 포지션이 없다 */
+  unfilled: boolean;
+  reason: string;
+}
+
+/**
+ * Gate 주문 응답에서 체결량을 읽는다.
+ *
+ * 왜 필요한가: 시장가 주문은 `tif: 'ioc'`로 나간다. 유동성이 없으면 Gate는
+ * **200과 `status: 'finished'`를 주면서 `left`에 남은 수량을 그대로 담아
+ * 돌려준다.** 즉 "정상 처리됐고, 하나도 안 붙었다"는 응답이다.
+ *
+ * 예전에는 이 응답을 그대로 ACKED로 기록하고 '주문 접수'라고 보고했다.
+ * 그 다음에 손절을 붙이려 하면(없는 포지션에) 거래소가 거부하고, 화면에는
+ * 엉뚱한 이유가 뜬다. 체결이 0이면 그 사실을 그 자리에서 말해야 한다.
+ *
+ * `left`가 없으면 **모르는 것**이다 — 미체결로 단정하지 않는다.
+ */
+export function gateFillOf(res: any | null | undefined): GateFillView {
+  const size = Math.abs(Number(res?.size));
+  const left = Math.abs(Number(res?.left));
+  const px = Number(res?.fill_price);
+  const status = String(res?.status ?? '').toLowerCase();
+
+  const avgPrice = Number.isFinite(px) && px > 0 ? px : null;
+
+  if (!Number.isFinite(size) || !Number.isFinite(left)) {
+    return { filledQty: null, avgPrice, unfilled: false,
+      reason: '체결량을 응답에서 읽지 못했습니다' };
+  }
+  const filled = Math.max(0, size - left);
+  if (filled === 0 && (status === 'finished' || status === 'cancelled')) {
+    return { filledQty: 0, avgPrice, unfilled: true,
+      reason: `주문이 ${status}로 끝났는데 체결이 0계약입니다 (요청 ${size}, 미체결 ${left})` };
+  }
+  return { filledQty: filled, avgPrice, unfilled: false, reason: '' };
+}
+
+export interface GateRiskView {
+  /** Gate는 격리/교차를 레버리지 값으로 표현한다 — isGateIsolated가 판정한다 */
+  marginType: 'isolated' | 'cross';
+  leverage: number | null;
+  liquidationPrice: number | null;
+  /** 부호 있는 계약 수. 롱 양수, 숏 음수 */
+  positionAmt: number;
+  entryPrice: number | null;
+}
+
+/**
+ * Gate 포지션 응답 → 거래 전 점검이 읽는 모양.
+ *
+ * 왜 함수로 빼는가: 이 변환을 호출하는 곳이 네 군데다(거래 전 점검 수집,
+ * 일일 사다리, 상태 대조, TradingView 웹훅). 각자 인라인으로 적으면
+ * "레버리지 0은 교차"라는 판정이 네 벌이 되고, 한 곳만 고치면 나머지
+ * 세 곳은 조용히 틀린 채로 남는다.
+ *
+ * **못 읽었으면 null이다.** 여기서 빈 값을 만들어 돌려주면 호출자가
+ * `positionAmt: 0`(포지션 없음)과 `marginType: 'cross'`(교차 계좌)를
+ * 사실로 받아들인다. 둘 다 확인한 적이 없는 값이다.
+ */
+export function gatePositionToRisk(pos: any | null | undefined): GateRiskView | null {
+  if (!pos) return null;
+
+  const lev = Number(pos.leverage);
+  const liq = Number(pos.liq_price);
+  const entry = Number(pos.entry_price);
+
+  return {
+    marginType: isGateIsolated(pos.leverage) ? 'isolated' : 'cross',
+    // 0은 교차를 뜻하는 표식이라 '배율 0'으로 적지 않는다 — 배율은 모르는 것이다.
+    leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
+    liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
+    positionAmt: Number.isFinite(Number(pos.size)) ? Number(pos.size) : 0,
+    entryPrice: Number.isFinite(entry) && entry > 0 ? entry : null,
+  };
+}
+
+export interface GateStopSpec {
+  /** 1 = 가격이 트리거 이상, 2 = 이하 */
+  rule: 1 | 2;
+  /** 포지션을 닫는 방향 */
+  autoSize: 'close_long' | 'close_short';
+  ok: boolean;
+  reason: string;
+}
+
+/**
+ * 손절 주문의 트리거 방향.
+ *
+ * 여기서 부호를 틀리면 **손절이 즉시 발동하거나 영원히 발동하지 않는다.**
+ * 둘 다 화면에서는 '손절 걸림'으로 보인다.
+ *
+ *  - LONG  은 가격이 **내려갈 때** 닫는다 → rule 2 (이하) · close_long
+ *  - SHORT 은 가격이 **올라갈 때** 닫는다 → rule 1 (이상) · close_short
+ */
+export function gateStopSpec(
+  side: 'LONG' | 'SHORT',
+  stopPrice: number | null | undefined,
+  refPrice?: number | null,
+): GateStopSpec {
+  const base: GateStopSpec = side === 'LONG'
+    ? { rule: 2, autoSize: 'close_long', ok: true, reason: '' }
+    : { rule: 1, autoSize: 'close_short', ok: true, reason: '' };
+
+  const sp = Number(stopPrice);
+  if (!Number.isFinite(sp) || sp <= 0) {
+    return { ...base, ok: false, reason: `손절가가 유효하지 않습니다 (${stopPrice})` };
+  }
+  // 기준가를 알면 방향까지 본다. LONG 손절이 진입가 위면 걸자마자 발동한다.
+  if (refPrice != null && Number.isFinite(Number(refPrice)) && Number(refPrice) > 0) {
+    const ref = Number(refPrice);
+    const badLong = side === 'LONG' && sp >= ref;
+    const badShort = side === 'SHORT' && sp <= ref;
+    if (badLong || badShort) {
+      return {
+        ...base, ok: false,
+        reason: `${side} 기준가 ${ref} / 손절 ${sp} — 손절이 `
+              + `${side === 'LONG' ? '위' : '아래'}에 있어 즉시 발동합니다`,
+      };
+    }
+  }
+  return base;
+}

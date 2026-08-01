@@ -9,12 +9,13 @@ import {
   TrendingDown, Flame, Coins as CoinsIc, CircleCheck, X as XIcon,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
+import { DefaultHint } from '@/components/ui/SettingField';
 import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
 import { formatKRW } from '@/lib/format';
 import {
   loadDCARules, saveDCARules, createBlankRule,
   computeNextRun, previewExecution, projectAccumulation,
-  FREQUENCY_LABEL,
+  FREQUENCY_LABEL, DCA_DEFAULTS,
 } from '@/lib/accounts/dca';
 import type { DCARule, DCAFrequency, PriceContext } from '@/lib/accounts/dca';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
@@ -280,7 +281,14 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
             </div>
           </Field>
 
+          {/* 기본값을 같이 적는다. 회당 얼마가 나가는지는 이 화면에서
+              가장 중요한 숫자인데, 지금 값만 보이면 내가 바꾼 것인지
+              원래 그랬던 것인지 알 수 없다. */}
           <Field label={`1회 매수금액: ${formatKRW(draft.baseAmount)}`}>
+            <div style={{ marginBottom: 4 }}>
+              <DefaultHint now={draft.baseAmount} base={DCA_DEFAULTS.baseAmount}
+                onReset={() => setDraft({ ...draft, baseAmount: DCA_DEFAULTS.baseAmount })}/>
+            </div>
             <input type="number" value={draft.baseAmount} onChange={e => setDraft({ ...draft, baseAmount: Number(e.target.value)||0 })} style={inp} />
           </Field>
 
@@ -295,12 +303,20 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
             {draft.dipBoost.enabled && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
                 <div>
-                  <div style={F.muted}>하락폭 (%)</div>
+                  <div style={{ display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap' }}>
+                    <span style={F.muted}>하락폭 (%)</span>
+                    <DefaultHint now={draft.dipBoost.threshold} base={DCA_DEFAULTS.dipBoost.threshold}
+                      onReset={() => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, threshold: DCA_DEFAULTS.dipBoost.threshold } })}/>
+                  </div>
                   <input type="number" value={draft.dipBoost.threshold}
                     onChange={e => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, threshold: Number(e.target.value) } })} style={inp} />
                 </div>
                 <div>
-                  <div style={F.muted}>매수 배수</div>
+                  <div style={{ display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap' }}>
+                    <span style={F.muted}>매수 배수</span>
+                    <DefaultHint now={draft.dipBoost.multiplier} base={DCA_DEFAULTS.dipBoost.multiplier}
+                      onReset={() => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, multiplier: DCA_DEFAULTS.dipBoost.multiplier } })}/>
+                  </div>
                   <input type="number" step={0.1} value={draft.dipBoost.multiplier}
                     onChange={e => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, multiplier: Number(e.target.value)||1 } })} style={inp} />
                 </div>
@@ -319,7 +335,11 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
             {draft.overheatCut.enabled && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
                 <div>
-                  <div style={F.muted}>상승폭 (%)</div>
+                  <div style={{ display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap' }}>
+                    <span style={F.muted}>상승폭 (%)</span>
+                    <DefaultHint now={draft.overheatCut.threshold} base={DCA_DEFAULTS.overheatCut.threshold}
+                      onReset={() => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, threshold: DCA_DEFAULTS.overheatCut.threshold } })}/>
+                  </div>
                   <input type="number" value={draft.overheatCut.threshold}
                     onChange={e => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, threshold: Number(e.target.value) } })} style={inp} />
                 </div>

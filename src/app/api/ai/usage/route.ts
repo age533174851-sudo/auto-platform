@@ -10,7 +10,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase/server';
 import { requireAdmin } from '@/lib/auth/isAdmin';
-import { availableProviders, type AiProvider } from '@/lib/ai/providers';
+import { availableProviders, ALL_PROVIDERS, type AiProvider } from '@/lib/ai/providers';
 import { sumCost, estimateCost, PRICING_AS_OF } from '@/lib/ai/pricing';
 
 export const dynamic = 'force-dynamic';
@@ -42,7 +42,7 @@ export async function GET(req: NextRequest) {
   const since = new Date(Date.now() - days * 86_400_000).toISOString();
 
   const configured = availableProviders();
-  const all: AiProvider[] = ['openai', 'anthropic', 'gemini'];
+  const all: AiProvider[] = ALL_PROVIDERS;
 
   let rows: any[] = [];
   let logWarning: string | null = null;

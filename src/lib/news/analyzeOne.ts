@@ -18,6 +18,9 @@ import {
   validateAnalysis, extractJson, contentHash,
   ANALYSIS_JSON_INSTRUCTION, type NewsAnalysisV2,
 } from './schema';
+// 타입만 가져온다 — 컴파일 시 지워지므로 이 파일이 여전히 fetch도
+// 공급자 코드도 끌어오지 않는다 (키 없이 테스트되는 성질을 유지한다).
+import type { AiTier } from '../ai/gateway';
 
 export interface ArticleInput {
   title: string;
@@ -30,6 +33,7 @@ export interface ArticleInput {
 /** providers.callAny와 같은 모양. 테스트에서는 가짜를 넣는다 */
 export type AiCaller = (input: {
   system: string; user: string; maxTokens?: number; jsonOnly?: boolean;
+  tier?: AiTier; kind?: string;
 }) => Promise<{ ok: boolean; provider: string; model: string; text: string | null; error?: string }>;
 
 export interface AnalyzeResult {
@@ -64,7 +68,23 @@ export function buildPrompt(a: ArticleInput): string {
   ].filter(Boolean).join('\n');
 }
 
-export async function analyzeArticle(a: ArticleInput, call: AiCaller): Promise<AnalyzeResult> {
+/**
+ * 어떤 계층·용도로 부를지. 기본은 저가 계층이다.
+ *
+ * 기본값을 저가로 두는 이유: 이 함수는 크론이 하루 최대 240번 부른다.
+ * 기본값이 비싼 쪽이면, 새 호출자를 추가할 때마다 조용히 요금이 는다.
+ * 비싸게 쓰려면 그 자리에서 명시적으로 적어야 한다.
+ */
+export interface AnalyzeOptions {
+  tier?: AiTier;
+  kind?: string;
+}
+
+export async function analyzeArticle(
+  a: ArticleInput,
+  call: AiCaller,
+  opts: AnalyzeOptions = {},
+): Promise<AnalyzeResult> {
   const hash = contentHash({ url: a.url, title: a.title, publishedAt: a.publishedAt });
 
   // 원문이 없으면 부르지 않는다. 링크 없는 분석은 저장해도 확인할 수 없고,
@@ -75,7 +95,21 @@ export async function analyzeArticle(a: ArticleInput, call: AiCaller): Promise<A
 
   let r;
   try {
-    r = await call({ system: SYSTEM, user: buildPrompt(a), maxTokens: 700, jsonOnly: true });
+    // tier를 반드시 넘긴다.
+    //
+    // 안 넘기면 providers.ts의 isCheap()이 false가 되어 **premium 모델**이
+    // 불린다 — gpt-4o / gemini-2.5-pro / claude-opus-5. 이 크론은 30분마다
+    // 최대 5건, 하루 240건까지 돈다. 기사 하나하나를 프런티어 모델로 분류하면
+    // 저가 모델 대비 대략 17배를 쓴다. 그러고도 화면에는 아무 차이가 없다 —
+    // 응답은 어느 쪽이든 나오니까.
+    //
+    // 뉴스 방향 분류는 저가 모델로 충분한 일이다. 더 깊은 판단이 필요하면
+    // 합의 분석(L3_COMMITTEE)이 따로 있다.
+    r = await call({
+      system: SYSTEM, user: buildPrompt(a), maxTokens: 700, jsonOnly: true,
+      tier: opts.tier ?? 'L1_CHEAP',
+      kind: opts.kind ?? 'news',
+    });
   } catch (e: any) {
     return { ok: false, hash, value: null, reason: `AI 호출 실패: ${e?.message || e}`, repaired: [] };
   }

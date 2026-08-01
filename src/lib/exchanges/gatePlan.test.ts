@@ -1,0 +1,259 @@
+// src/lib/exchanges/gatePlan.test.ts
+//
+// Gate 경로에서 **조용히 틀리는** 것들을 못 박는다.
+//
+// 수량 반올림 방향, 격리 판정, 손절 트리거 방향. 셋 다 화면에서는 정상으로
+// 보인다 — 주문이 나가고, '손절 걸림'이 뜨고, 숫자가 그럴듯하다.
+
+import { test, eq, assert } from '../../test/harness';
+import {
+  toGateContract, toGateSize, isGateIsolated, gateStopSpec, gatePositionToRisk, gateFillOf,
+} from './gatePlan';
+import { toGateText } from './gateFutures';
+
+export function runGatePlanTests() {
+  console.log('[Gate — 계약 이름]');
+
+  test('BTCUSDT → BTC_USDT', () => {
+    eq(toGateContract('BTCUSDT'), 'BTC_USDT');
+    eq(toGateContract('ETHUSDT'), 'ETH_USDT');
+  });
+
+  test('슬래시·언더바·소문자를 정리한다', () => {
+    eq(toGateContract('btc/usdt'), 'BTC_USDT');
+    eq(toGateContract('BTC_USDT'), 'BTC_USDT');
+  });
+
+  test('USDT가 아니면 그대로 둔다 — 추측해서 바꾸지 않는다', () => {
+    eq(toGateContract('BTCUSD'), 'BTCUSD');
+  });
+
+  test('빈 값은 빈 문자열', () => {
+    eq(toGateContract(''), '');
+    eq(toGateContract(null as any), '');
+  });
+
+  test("'USDT'만 오면 계약으로 만들지 않는다", () => {
+    eq(toGateContract('USDT'), 'USDT');
+  });
+
+  console.log('[Gate — 계약 수 (반올림 방향)]');
+
+  test('정수는 그대로, 롱은 양수 숏은 음수', () => {
+    eq(toGateSize(3, 'LONG').size, 3);
+    eq(toGateSize(3, 'SHORT').size, -3);
+  });
+
+  test('내림한다 — 올리면 의도보다 큰 포지션이 열린다', () => {
+    // 예전 코드는 Math.round였다. 1.6 → 2는 25% 큰 주문이다.
+    eq(toGateSize(1.6, 'LONG').size, 1);
+    eq(toGateSize(1.9, 'SHORT').size, -1);
+    eq(toGateSize(9.99, 'LONG').size, 9);
+  });
+
+  test('1계약 미만은 주문하지 않는다 — Math.round는 0을 만들어 보냈다', () => {
+    for (const q of [0.4, 0.9, 0.001]) {
+      const r = toGateSize(q, 'LONG');
+      eq(r.ok, false, `${q}가 통과했다`);
+      eq(r.size, 0);
+      assert(r.reason.includes('1계약'), `이유를 적어야 한다: ${r.reason}`);
+    }
+  });
+
+  test('0·음수·NaN은 주문하지 않는다', () => {
+    for (const q of [0, -3, NaN, Infinity]) {
+      eq(toGateSize(q as number, 'LONG').ok, false, `${String(q)}가 통과했다`);
+    }
+  });
+
+  test('내림이 일어나면 그 사실을 이유에 남긴다', () => {
+    assert(toGateSize(1.6, 'LONG').reason.includes('내림'), '내림을 알려야 한다');
+    eq(toGateSize(2, 'LONG').reason, '', '정수는 군더더기를 붙이지 않는다');
+  });
+
+  console.log('[Gate — 격리 판정]');
+
+  test('0이 아닌 레버리지는 격리다', () => {
+    eq(isGateIsolated('10'), true);
+    eq(isGateIsolated(10), true);
+    eq(isGateIsolated('1'), true);
+  });
+
+  test('레버리지 0은 교차다 — Gate에서 0은 cross margin이다', () => {
+    eq(isGateIsolated('0'), false);
+    eq(isGateIsolated(0), false);
+  });
+
+  test('읽지 못하면 격리가 아니다 — 모르는 것을 격리로 보면 교차 계좌에서 주문이 나간다', () => {
+    eq(isGateIsolated(null), false);
+    eq(isGateIsolated(undefined), false);
+    eq(isGateIsolated(''), false);
+    eq(isGateIsolated('알 수 없음'), false);
+  });
+
+  console.log('[Gate — 체결량 읽기]');
+
+  test('전량 체결', () => {
+    const f = gateFillOf({ size: 3, left: 0, status: 'finished', fill_price: '60000' });
+    eq(f.filledQty, 3);
+    eq(f.avgPrice, 60000);
+    eq(f.unfilled, false);
+  });
+
+  test('IOC가 하나도 못 붙고 끝나면 미체결이다 — 200 응답에 finished가 실려 온다', () => {
+    const f = gateFillOf({ size: 3, left: 3, status: 'finished', fill_price: '0' });
+    eq(f.unfilled, true, '체결 0인데 접수로 보고하면 없는 포지션에 손절을 건다');
+    eq(f.filledQty, 0);
+    eq(f.avgPrice, null, '0은 체결가가 아니다');
+    assert(f.reason.includes('0계약'), `이유를 적어야 한다: ${f.reason}`);
+  });
+
+  test('부분 체결은 미체결이 아니다', () => {
+    const f = gateFillOf({ size: 5, left: 2, status: 'finished', fill_price: '60000' });
+    eq(f.filledQty, 3);
+    eq(f.unfilled, false);
+  });
+
+  test('숏(음수 수량)도 절대값으로 센다', () => {
+    eq(gateFillOf({ size: -4, left: -1, status: 'finished' }).filledQty, 3);
+  });
+
+  test('열려 있는 주문은 미체결로 단정하지 않는다 — 아직 끝나지 않았다', () => {
+    const f = gateFillOf({ size: 3, left: 3, status: 'open' });
+    eq(f.unfilled, false);
+    eq(f.filledQty, 0);
+  });
+
+  test('left를 못 읽으면 모르는 것이다 — 미체결로도, 체결로도 단정하지 않는다', () => {
+    for (const r of [null, undefined, {}, { size: 3, status: 'finished' }]) {
+      const f = gateFillOf(r);
+      eq(f.filledQty, null, `${JSON.stringify(r)}에서 수량을 만들어냈다`);
+      eq(f.unfilled, false);
+    }
+  });
+
+  console.log('[Gate — 주문 이름(text)]');
+
+  test("규격에 맞는 이름은 't-'만 붙인다 — 지금 쓰는 키가 바뀌지 않게", () => {
+    eq(toGateText('LD20260730BTCUSDT'), 't-LD20260730BTCUSDT');
+    eq(toGateText('MF1735689600000'), 't-MF1735689600000');
+  });
+
+  test('빈 값·영숫자가 하나도 없는 값은 이름을 만들지 않는다', () => {
+    eq(toGateText(undefined), undefined);
+    eq(toGateText(''), undefined);
+    eq(toGateText('///'), undefined);
+  });
+
+  test('특수문자를 지운 뒤에도 서로 다른 주문은 다른 이름이어야 한다', () => {
+    // 예전 구현은 둘 다 't-MF12'였다 → 중복 확인이 남의 주문을 내 것으로 읽는다
+    const a = toGateText('MF/1:2');
+    const b = toGateText('MF12');
+    assert(a !== b, `충돌: ${a} === ${b}`);
+  });
+
+  test('30자를 넘겨도 접미사(SL)가 살아 남아야 한다 — 진입과 손절이 같은 이름이 되면 안 된다', () => {
+    const longId = 'MF' + '9'.repeat(30);
+    const entry = toGateText(longId);
+    const stop = toGateText(`${longId}SL`);
+    assert(entry !== stop, `진입과 손절이 같은 이름이다: ${entry}`);
+  });
+
+  test('Gate 규격을 지킨다 — 30자 이내, 영숫자·밑줄·하이픈만', () => {
+    for (const id of ['MF/1:2', 'MF' + '9'.repeat(40), 'LD20260730BTCUSDT', 'a-b_c']) {
+      const t = toGateText(id)!;
+      assert(t.startsWith('t-'), `접두사가 없다: ${t}`);
+      assert(t.length <= 30, `${t} 가 ${t.length}자다`);
+      assert(/^t-[A-Za-z0-9_-]+$/.test(t), `허용되지 않는 문자: ${t}`);
+    }
+  });
+
+  test('같은 입력은 항상 같은 이름 — 멱등 키가 재시도마다 바뀌면 중복 주문이 난다', () => {
+    eq(toGateText('MF/1:2'), toGateText('MF/1:2'));
+  });
+
+  console.log('[Gate — 포지션 → 점검 입력]');
+
+  test('못 읽으면 null이다 — 빈 값을 만들어 주면 "포지션 없음·교차"가 사실이 된다', () => {
+    eq(gatePositionToRisk(null), null);
+    eq(gatePositionToRisk(undefined), null);
+  });
+
+  test('격리 포지션을 그대로 옮긴다', () => {
+    const r = gatePositionToRisk({
+      contract: 'BTC_USDT', size: 3, leverage: '10',
+      liq_price: '54000', entry_price: '60000',
+    })!;
+    eq(r.marginType, 'isolated');
+    eq(r.leverage, 10);
+    eq(r.liquidationPrice, 54000);
+    eq(r.positionAmt, 3);
+    eq(r.entryPrice, 60000);
+  });
+
+  test('레버리지 0은 교차이고, 배율은 0이 아니라 unknown이다', () => {
+    const r = gatePositionToRisk({ contract: 'BTC_USDT', size: 0, leverage: '0' })!;
+    eq(r.marginType, 'cross');
+    eq(r.leverage, null, '0을 배율로 적으면 의도 배율과의 비교가 거짓말을 한다');
+  });
+
+  test('숏은 음수 수량으로 온다 — 부호를 지운다', () => {
+    eq(gatePositionToRisk({ contract: 'BTC_USDT', size: -5, leverage: '20' })!.positionAmt, -5);
+  });
+
+  test('청산가 0·없음은 null이다 — 0을 적으면 청산거리가 100%로 계산된다', () => {
+    for (const liq of [undefined, null, '0', '', 'x']) {
+      eq(gatePositionToRisk({ contract: 'BTC_USDT', size: 1, leverage: '5', liq_price: liq })!.liquidationPrice,
+        null, `${String(liq)}가 값으로 남았다`);
+    }
+  });
+
+  test('수량이 없는 신규 계약도 마진 모드를 돌려준다 — 첫 주문이 막히지 않게', () => {
+    const r = gatePositionToRisk({ contract: 'ETH_USDT', size: 0, leverage: '15' })!;
+    eq(r.marginType, 'isolated');
+    eq(r.positionAmt, 0);
+  });
+
+  console.log('[Gate — 손절 트리거 방향]');
+
+  test('LONG은 가격이 내려갈 때 닫는다', () => {
+    const s = gateStopSpec('LONG', 58000, 60000);
+    eq(s.ok, true, s.reason);
+    eq(s.rule, 2, '이하일 때 발동해야 한다');
+    eq(s.autoSize, 'close_long');
+  });
+
+  test('SHORT은 가격이 올라갈 때 닫는다', () => {
+    const s = gateStopSpec('SHORT', 62000, 60000);
+    eq(s.ok, true, s.reason);
+    eq(s.rule, 1, '이상일 때 발동해야 한다');
+    eq(s.autoSize, 'close_short');
+  });
+
+  test('방향이 뒤집히면 즉시 발동한다 — 그걸 막는다', () => {
+    const badLong = gateStopSpec('LONG', 61000, 60000);
+    eq(badLong.ok, false);
+    assert(badLong.reason.includes('즉시 발동'), `이유를 적어야 한다: ${badLong.reason}`);
+
+    const badShort = gateStopSpec('SHORT', 59000, 60000);
+    eq(badShort.ok, false);
+  });
+
+  test('손절가가 없으면 거부한다', () => {
+    for (const sp of [null, undefined, 0, -1, NaN]) {
+      eq(gateStopSpec('LONG', sp as number, 60000).ok, false, `${String(sp)}가 통과했다`);
+    }
+  });
+
+  test('기준가를 모르면 방향 검사를 건너뛴다 — 손절가 자체는 여전히 필요하다', () => {
+    eq(gateStopSpec('LONG', 58000, null).ok, true);
+    eq(gateStopSpec('LONG', null, null).ok, false);
+  });
+
+  test('거부해도 rule·autoSize는 채워 돌려준다 — 호출자가 분기를 두 번 하지 않게', () => {
+    const s = gateStopSpec('LONG', null);
+    eq(s.rule, 2);
+    eq(s.autoSize, 'close_long');
+    eq(s.ok, false);
+  });
+}

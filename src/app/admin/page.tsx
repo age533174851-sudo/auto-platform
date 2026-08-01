@@ -2,6 +2,8 @@
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
+import { canAccessAdmin, type UserRole } from '@/lib/auth';
+import { getSessionAndRole } from '@/lib/auth/clientRole';
 
 // ── Theme ─────────────────────────────────────────────────────
 // 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
@@ -23,33 +25,9 @@ function Toggle({on,onChange}:{on:boolean;onChange:(v:boolean)=>void}) {
 }
 
 // ── Role guard helper (client-side) ──────────────────────────
-async function getSessionAndRole(): Promise<{userId:string|null;role:string|null;token:string|null}> {
-  try {
-    const {getSupabaseClient} = await import('@/lib/supabase/client');
-    const sb = getSupabaseClient();
-    if (!sb) return {userId:null,role:null,token:null};
-    const {data:{session}} = await sb.auth.getSession();
-    if (!session?.user) return {userId:null,role:null,token:null};
-    // /api/auth/me 호출 → ADMIN_EMAILS 자동 승급 트리거 + 최신 role 반환
-    try {
-      const r = await fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (r.ok) {
-        const d = await r.json();
-        return {
-          userId: d?.user?.id ?? session.user.id,
-          role:   d?.profile?.role ?? 'user',
-          token:  session.access_token,
-        };
-      }
-    } catch { /* fall through */ }
-    // /api/auth/me 실패 시 fallback — DB 직접 조회
-    const {data:profile} = await sb.from('profiles').select('role').eq('id',session.user.id).single();
-    const r = (profile as { role?: string } | null)?.role ?? 'user';
-    return {userId:session.user.id, role:r, token:session.access_token};
-  } catch { return {userId:null,role:null,token:null}; }
-}
+// 구현은 lib/auth/clientRole.ts에 있다 (import는 파일 맨 위). 이 화면과
+// /developer가 같은 질문에 서로 다른 방법으로 답하고 있었고, 그래서
+// /developer 쪽이 localStorage를 믿는 상태로 남아 있었다. 하나로 모았다.
 
 async function apiCall(action:string, token:string|null, method='GET', body?:unknown) {
   const url = method==='GET' ? `/api/admin?action=${action}` : '/api/admin';
@@ -196,8 +174,12 @@ export default function AdminPage() {
   }
 
   // ── Not admin (403 display + unauthorized 자동 리다이렉트) ──
-  // role이 admin이 아닌 경우 4초 후 /unauthorized 페이지로 이동
-  if (role !== 'admin') {
+  // 4초 후 /unauthorized 페이지로 이동
+  //
+  // `role !== 'admin'`이었다. developer·super_admin은 admin보다 등급이 높은데
+  // 이 화면에서만 막혔다 — 미들웨어와 API는 통과시키므로 화면 하나가 다른
+  // 말을 하고 있었다. canAccessAdmin() 하나를 기준으로 쓴다.
+  if (!canAccessAdmin(role as UserRole|undefined)) {
     if (typeof window !== 'undefined') {
       setTimeout(() => {
         try { window.location.href = '/unauthorized'; } catch { /* ignore */ }

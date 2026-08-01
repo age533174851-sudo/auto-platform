@@ -160,6 +160,20 @@ function seedRules(): DCARule[] {
   ];
 }
 
+/**
+ * 새 룰을 만들 때 쓰는 값 = **기본값**.
+ *
+ * 상수로 빼는 이유: 화면이 "이 값이 기본과 다릅니다"를 말하려면 기본이
+ * 무엇인지 알아야 한다. createBlankRule 안에만 있으면 화면에서 볼 수 없고,
+ * 화면이 자기 사본을 들면 언젠가 둘이 어긋나 **틀린 기본값을 알려준다.**
+ */
+export const DCA_DEFAULTS = {
+  baseAmount: 100000,
+  dipBoost:    { enabled: true,  threshold: -5, multiplier: 2 },
+  overheatCut: { enabled: false, threshold: 20, multiplier: 0.5 },
+  reinvestDividend: true,
+} as const;
+
 export function createBlankRule(): DCARule {
   return {
     id: `dca_${Date.now().toString(36)}`,
@@ -168,10 +182,10 @@ export function createBlankRule(): DCARule {
     symbol: 'QQQ',
     symbolName: 'Invesco QQQ',
     frequency: 'monthly',
-    baseAmount: 100000,
-    dipBoost: { enabled: true, threshold: -5, multiplier: 2 },
-    overheatCut: { enabled: false, threshold: 20, multiplier: 0.5 },
-    reinvestDividend: true,
+    baseAmount: DCA_DEFAULTS.baseAmount,
+    dipBoost: { ...DCA_DEFAULTS.dipBoost },
+    overheatCut: { ...DCA_DEFAULTS.overheatCut },
+    reinvestDividend: DCA_DEFAULTS.reinvestDividend,
     startedAt: Date.now(),
     totalInvested: 0,
     totalShares: 0,

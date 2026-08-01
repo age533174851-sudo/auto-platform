@@ -18,7 +18,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import {
   checkCoinMIntent, resolveContractSize, notionalToContracts,
-  requiredMarginCoin, isCoinMSymbol,
+  requiredMarginCoin, isCoinMSymbol, coinMStopPlan, inverseLiquidationPrice,
 } from '@/lib/markets/coinM';
 import { tagSignalId } from '@/lib/markets/marketType';
 import { tagStrategy } from '@/lib/strategies/ledger';
@@ -123,6 +123,36 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: intent.code, message: intent.reason }, { status: 400 });
   }
 
+  const isExit = body.reduceOnly === true;
+
+  // ── 손절가 ──
+  //
+  // 진입에는 반드시 있어야 한다. 없으면 아래 체크리스트의 STOP_ATTACHED가
+  // 막는다 — 예전에는 그 검사가 COIN-M을 비껴갔고, 이 경로는 손절을 아예
+  // 붙이지 않았다. 포지션 크기는 손절이 있다는 전제로 계산되는데 그 전제가
+  // 없었던 것이다.
+  //
+  // stopLossPct(%)로 와도 받는다. 역방향 계약이라 퍼센트는 **가격 기준**이다
+  // (코인 수량이 아니다) — 마크가에서 계산한다. 마크가를 모르면 손절가를
+  // 만들지 않는다. 추측한 기준가로 손절을 적으면 실제와 다른 값이 걸린다.
+  const markPrice = await dapi.getCoinMMarkPrice(symbol, testnet);
+  const slPct = Number(body.stopLossPct);
+  const stopPrice = body.stopPrice != null
+    ? Number(body.stopPrice)
+    : (markPrice != null && Number.isFinite(slPct) && slPct > 0
+        ? (side === 'BUY' ? markPrice * (1 - slPct / 100) : markPrice * (1 + slPct / 100))
+        : null);
+
+  // 방향을 보내기 전에 검사한다. 주문을 낸 뒤에 알면 이미 늦다.
+  const stopPlan = coinMStopPlan(side, stopPrice, markPrice);
+  if (!isExit && !stopPlan.ok) {
+    return NextResponse.json({
+      error: 'stop_required',
+      message: `손절을 걸 수 없어 진입하지 않습니다 — ${stopPlan.reason}`,
+      hint: 'stopPrice(가격) 또는 stopLossPct(%)를 보내세요.',
+    }, { status: 400 });
+  }
+
   // ── ISOLATED 강제 ──
   // USDⓈ-M과 같은 이유다. CROSSED면 손실이 그 코인 지갑 전체로 번진다.
   const mt = await dapi.setCoinMMarginType(apiKey, secret, symbol, 'ISOLATED', testnet);
@@ -139,6 +169,131 @@ export async function POST(req: NextRequest) {
       error: 'leverage_failed',
       message: `레버리지 설정 실패로 주문을 중단했습니다: ${lev.message}`,
     }, { status: 400 });
+  }
+
+  // 이 심볼의 실제 위험 정보. 포지션이 없어도 돌려주는 함수를 쓴다 —
+  // getCoinMPositions는 수량 0을 걸러내므로 신규 진입 심볼이 목록에 없다.
+  const risk = await dapi.getCoinMSymbolRisk(apiKey, secret, symbol, testnet);
+
+  // ── 거래 전 점검 ──
+  //
+  // 여기 끼우는 이유: 바로 위에서 ISOLATED와 배율 설정이 **성공을 확인하고**
+  // 통과했다. 그 앞에서 점검하면 마진 모드를 아직 모르는 상태가 되고,
+  // 그러면 필수 항목 unknown으로 모든 COIN-M 주문이 막힌다.
+  {
+    const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+    const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+
+    // 명목가는 계약 수 × 계약 크기(USD)다. 코인 수량이 아니다 —
+    // COIN-M에서 그 둘을 섞으면 자릿수가 통째로 틀린다.
+    const notionalUsd = contracts * spec.contractUsd;
+
+    // 필요 증거금은 코인 단위다. 마크가를 못 읽으면 계산하지 않는다 —
+    // 추측한 가격으로 증거금을 적으면 그 판정이 거짓말이 된다.
+    let marginInput: { required: number | null; available: number | null } | null = null;
+    if (!isExit && markPrice != null) {
+      // requiredMarginCoin은 결과 객체를 준다. ok:false면 계산이 안 된 것이라
+      // marginCoin(0)을 쓰면 안 된다 — 0은 '증거금이 필요 없다'가 아니다.
+      const req = requiredMarginCoin(contracts, spec.contractUsd, markPrice, leverage);
+      if (req.ok) {
+        const bal = await dapi.getCoinMBalances(apiKey, secret, testnet);
+        // 심볼에서 담보 코인을 뽑는다: BTCUSD_PERP → BTC
+        const coin = symbol.split('USD')[0];
+        const hit = bal.success
+          ? bal.balances.find(b => b.asset.toUpperCase() === coin.toUpperCase())
+          : null;
+        marginInput = {
+          required: req.marginCoin,
+          available: hit ? (hit.availableBalance ?? hit.balance) : null,
+        };
+      }
+    }
+
+    const localMs = Date.now();
+    // COIN-M은 dapi 호스트다. 선물(fapi) 시각을 쓰면 다른 호스트에 물어보는
+    // 것이 된다 — premiumIndex 호출로 도달성은 이미 확인됐으므로, 시각만
+    // 따로 읽는다.
+    const serverMs = await dapi.getCoinMServerTime(testnet);
+
+    const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+    const g = gateOrder(mode, notionalUsd);
+
+    // 손실 잠금 셋. **이 라우트도 넣은 적이 없어서 진입이 전부 막혀 있었다**
+    // (현물 라우트와 같은 자리, 같은 이유).
+    const limits = isExit
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null, aiVeto: null, aiPredictionId: null }
+      : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
+          sb, userId: uid, connectionId: body.connectionId, testnet,
+          equityUsd: marginInput?.available ?? null,
+          symbol, side: side === 'BUY' ? 'LONG' : 'SHORT',
+          // COIN-M은 여기서 열린 포지션 목록을 들고 있지 않다. **빈 배열로
+          // 치지 않는다** — 못 읽은 것을 0으로 세면 한도가 넉넉해진다.
+          // openUse를 안 넘기면 판정이 unknown이 되어 막힌다. 서브계좌를
+          // 안 쓰는 사람에게는 영향이 없어야 하므로, 그 경우만 통과시킨다.
+          market: 'COINM',
+          addMarginUsd: marginInput?.required ?? null,
+          openUse: null,
+        });
+
+    const checklist = runChecklist({
+      mode: { disposition: g.disposition, reason: g.reason },
+      clock: serverMs != null ? { localMs, serverMs } : null,
+      ...limits,
+      // 위에서 성공을 확인한 값들이다
+      marginType: 'isolated',
+      leverage: { actual: leverage, intended: leverage },
+      // 실제로 센다. 0을 그냥 적으면 "확인했고 없다"가 되는데, 그건
+      // 확인하지 않은 것을 통과로 적는 것이다 — 이 체크리스트가 막으려는
+      // 바로 그 실패다. 조회가 실패하면 null이 되어 unknown으로 막힌다.
+      unresolvedOrderCount: await (async () => {
+        const q = await sb.from('live_orders')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', uid).eq('status', 'UNKNOWN');
+        return q.error ? null : (q.count ?? 0);
+      })(),
+      // 조회가 실패하면 null이다 — 0으로 적으면 '확인했고 없다'가 된다
+      existingPositionQty: risk ? Math.abs(risk.contracts) : null,
+      margin: marginInput,
+      side: side === 'SELL' ? 'SHORT' : 'LONG',
+      stopPrice,
+      // 청산가: 거래소 값이 있으면 그것, 없으면 **보수적 추정값**.
+      //
+      // 신규 진입에는 거래소 청산가가 없다(포지션이 없으니까). 그렇다고 비워
+      // 두면 청산거리 검사가 unknown으로 모든 첫 주문을 막는다 — 일일 사다리가
+      // 계획의 계산값을 넘기는 것과 같은 이유로 추정값을 쓴다.
+      //
+      // 추정은 실제보다 **멀게** 나온다(inverseLiquidationPrice 주석). 그대로
+      // 쓰면 검사가 느슨해져 실제 청산 너머의 손절이 통과할 수 있다. 그래서
+      // 유지증거금률을 넉넉히(1%) 잡아 청산가를 진입가 쪽으로 당긴다 —
+      // 틀리더라도 **더 엄격한 쪽으로** 틀리게.
+      liquidationPrice: risk?.liquidationPrice
+        || (markPrice != null
+            ? inverseLiquidationPrice(markPrice, leverage, side === 'SELL' ? 'SHORT' : 'LONG', 1.0)
+            : null),
+    }, { market: 'COINM', intent: isExit ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto });
+
+    // 이 AI 판단이 실제로 어떻게 쓰였는지 원장에 되짚는다.
+    // 막은 것만 채점하면 "AI가 막았을 때는 늘 맞더라"는 착시가 생긴다 —
+    // 통과시킨 것도 같이 채점해야 그 확신도가 신호인지 알 수 있다.
+    if (limits.aiPredictionId) {
+      const { markApplied } = await import('@/lib/ai/vetoCheck');
+      await markApplied(sb, limits.aiPredictionId,
+        limits.aiVeto?.status === 'blocked' ? 'VETO' : 'PASS',
+        side === 'BUY' ? 'LONG' : 'SHORT', markPrice ?? null);
+    }
+
+    if (!checklist.allowed) {
+      return NextResponse.json({
+        error: 'checklist_blocked',
+        message: checklist.summary,
+        checklist: {
+          allowed: false, market: checklist.market, intent: checklist.intent,
+          passed: checklist.passed, total: checklist.total,
+          unknownCount: checklist.unknownCount,
+          results: checklist.results, blockers: checklist.blockers,
+        },
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
   }
 
   // ── 의도 기록 ──
@@ -217,6 +372,70 @@ export async function POST(req: NextRequest) {
     acked_at: new Date().toISOString(),
   });
 
+  // ── 손절 부착 ──
+  //
+  // 청산 주문에는 붙이지 않는다(나가는 주문이다). 진입에는 반드시 붙이고,
+  // **실패하면 방금 연 포지션을 즉시 닫는다** — USDⓈ-M·Gate 경로와 같은
+  // 규칙이다(감사 지적 3번). 포지션 크기는 손절이 있다는 전제로 계산됐으므로,
+  // 그 전제가 없으면 그 크기를 정당화할 근거가 사라진다.
+  //
+  // 되돌리기까지 실패하면 그 사실을 그대로 돌려준다. 여기서 ok:true를 주면
+  // 화면에는 '진입 성공'이 뜨고, 보호 없는 역방향 포지션이 남는다.
+  let slOrderId: number | undefined;
+  let stopNote: string | null = null;
+
+  if (!isExit) {
+    // 체결 후의 **실제** 청산가로 손절 위치를 다시 본다. 주문 전 판정은 추정값을
+    // 썼고, 실제 청산가는 그보다 가깝다. 손절이 청산 너머면 그 손절은 작동할
+    // 기회가 없다 — 그런 포지션은 열어 둘 이유가 없다.
+    const after = await dapi.getCoinMSymbolRisk(apiKey, secret, symbol, testnet);
+    const realLiq = after?.liquidationPrice || null;
+    const stopBeyondLiq = realLiq != null && stopPrice != null
+      && (side === 'BUY' ? stopPrice <= realLiq : stopPrice >= realLiq);
+
+    if (stopBeyondLiq) {
+      const undo = await dapi.closeCoinMPosition(apiKey, secret, symbol, testnet);
+      const msg = `손절 ${stopPrice} / 실제 청산 ${realLiq} — 청산이 먼저 닿아 `
+        + `포지션을 되돌렸습니다 (배율을 낮추거나 손절을 진입가에 붙이세요)`
+        + (undo.success ? '' : ` / ⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+      await patch({ status: 'FAILED', error_message: msg });
+      return NextResponse.json({
+        ok: false, marketType: 'COIN_FUTURES', status: 'FAILED',
+        error: 'liquidation_before_stop', clientOrderId, orderId: r.orderId,
+        rolledBack: undo.success, message: msg,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // 손절 주문 이름은 진입 주문 이름과 **달라야 한다.** `${id}SL`을 그냥 36자로
+    // 자르면 원본이 이미 길 때 'SL'이 잘려 나가고 두 이름이 같아진다 —
+    // 거래소는 그걸 중복 주문으로 거부하고, 화면에는 '손절 실패'만 남는다.
+    // (Gate 경로에서 같은 함정을 겪었다.) 접미사를 지키려면 앞을 잘라야 한다.
+    const slClientId = `${clientOrderId.slice(0, 34)}SL`;
+
+    const sl = await dapi.placeCoinMStop(apiKey, secret, {
+      symbol, stopSide: stopPlan.stopSide, stopPrice: stopPrice as number,
+      clientOrderId: slClientId,
+    }, testnet);
+
+    if (sl.success) {
+      slOrderId = sl.orderId;
+      await patch({ sl_order_id: sl.orderId != null ? String(sl.orderId) : null });
+      if (realLiq == null) {
+        stopNote = '실제 청산가를 읽지 못해 추정값으로 판정했습니다 — 청산거리를 직접 확인하세요';
+      }
+    } else {
+      const undo = await dapi.closeCoinMPosition(apiKey, secret, symbol, testnet);
+      const msg = `손절을 걸지 못해 포지션을 되돌렸습니다 — ${sl.message}`
+        + (undo.success ? '' : ` / ⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+      await patch({ status: 'FAILED', error_message: msg });
+      return NextResponse.json({
+        ok: false, marketType: 'COIN_FUTURES', status: 'FAILED',
+        error: 'stop_attach_failed', clientOrderId, orderId: r.orderId,
+        rolledBack: undo.success, message: msg,
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // 참고용 증거금 — **코인 단위**다
   const margin = r.avgPrice
     ? requiredMarginCoin(contracts, spec.contractUsd, r.avgPrice, leverage)
@@ -232,6 +451,12 @@ export async function POST(req: NextRequest) {
     marginCoin: margin?.ok ? margin.marginCoin : null,
     baseAsset: symbol.replace(/USD_(PERP|\d{6})$/, ''),
     conversionNote,
-    message: `COIN-M ${side === 'BUY' ? 'LONG 진입' : 'SHORT 진입'} — ${contracts}계약`,
+    stopPrice: isExit ? null : stopPrice,
+    slOrderId: slOrderId ?? null,
+    stopNote,
+    message: isExit
+      ? `COIN-M 청산 — ${contracts}계약`
+      : `COIN-M ${side === 'BUY' ? 'LONG 진입' : 'SHORT 진입'} — ${contracts}계약`
+        + (slOrderId ? ` · 손절 ${stopPrice} 부착` : ''),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

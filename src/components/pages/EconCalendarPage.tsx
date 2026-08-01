@@ -160,6 +160,10 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
   const [loading,      setLoading]      = useState(true);
   // 예시 데이터를 보고 있다는 경고. null이면 실제 일정이다.
   const [sampleWarning, setSampleWarning] = useState<string | null>(null);
+  // 실제 일정을 지금 받아오기. 크론은 하루 한 번만 돌아서(Vercel Hobby는
+  // 일 단위 크론만 허용) 처음 켠 사람은 최대 하루를 빈 달력으로 기다린다.
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
   // 첫 마운트에 저장된 필터 복원
   useEffect(() => {
@@ -174,9 +178,9 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
   }, [filter, countries]);
 
   // 이벤트 fetch
-  useEffect(() => {
+  const loadEvents = useCallback(() => {
     setLoading(true);
-    fetch(`/api/calendar?lang=${lang}&country=all`, { signal: AbortSignal.timeout(8000) })
+    return fetch(`/api/calendar?lang=${lang}&country=all`, { signal: AbortSignal.timeout(8000) })
       .then(r => r.json())
       .then(d => {
         const evts = Array.isArray(d.data) ? d.data : (Array.isArray(d.events) ? d.events : []);
@@ -196,6 +200,46 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
       })
       .finally(() => setLoading(false));
   }, [lang]);
+
+  useEffect(() => { loadEvents(); }, [loadEvents]);
+
+  /**
+   * 공급자에서 실제 일정을 지금 받아온다.
+   *
+   * 결과를 **그대로 보여준다.** "동기화 완료"만 뜨고 달력이 그대로면
+   * 사용자는 무엇이 잘못됐는지 알 수 없다 — 키가 없는 것인지, 시간대를
+   * 못 읽어 버린 것인지, 원래 일정이 없는 것인지가 전부 다른 문제다.
+   */
+  const syncNow = async () => {
+    setSyncing(true); setSyncMsg(null);
+    try {
+      let auth = '';
+      try {
+        const { getSupabaseClient } = await import('@/lib/supabase/client');
+        const sbc = getSupabaseClient();
+        if (sbc) {
+          const { data } = await sbc.auth.getSession();
+          if (data?.session?.access_token) auth = `Bearer ${data.session.access_token}`;
+        }
+      } catch { /* 로그인 전이면 아래에서 401이 온다 */ }
+
+      const r = await fetch('/api/cron/calendar-sync', {
+        method: 'POST', headers: auth ? { Authorization: auth } : {},
+      });
+      const d = await r.json();
+      if (!r.ok || !d?.ok) {
+        setSyncMsg(d?.message || d?.storageWarning || d?.error || `동기화 실패 (${r.status})`);
+        return;
+      }
+      const bits = [`${d.saved}건 저장`];
+      if (d.skippedNoTimezone > 0) bits.push(`시간대 불명 ${d.skippedNoTimezone}건 제외`);
+      if (d.unknownImpact > 0) bits.push(`중요도 미상 ${d.unknownImpact}건(지표 회피 대상에서 빠짐)`);
+      setSyncMsg(bits.join(' · '));
+      await loadEvents();
+    } catch (e: any) {
+      setSyncMsg(`동기화하지 못했습니다 (${e?.message || e})`);
+    } finally { setSyncing(false); }
+  };
 
   const filtered = useMemo(() => {
     if (!Array.isArray(events)) return [];
@@ -443,8 +487,23 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
           display: 'flex', gap: 8, alignItems: 'flex-start',
         }}>
           <span style={{ flexShrink: 0 }}>⚠️</span>
-          <span>{sampleWarning}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>{sampleWarning}</span>
+          <button onClick={syncNow} disabled={syncing} style={{
+            ...buttonStyle('ghost', 'sm'), flexShrink: 0,
+            color: T.ylw, borderColor: A(T.ylw, '40'),
+            opacity: syncing ? 0.5 : 1,
+          }}>{syncing ? '받는 중…' : '실제 일정 받기'}</button>
         </div>
+      )}
+
+      {/* 동기화 결과. 성공도 **숫자로** 적는다 — "완료"만 뜨고 달력이
+          그대로면 무엇이 잘못됐는지 알 수 없다. */}
+      {syncMsg && (
+        <div style={{
+          padding: '9px 12px', borderRadius: R.md, marginBottom: SP.sm,
+          background: T.alt, border: `1px solid ${T.border}`,
+          color: T.sub, fontSize: 11, lineHeight: 1.6,
+        }}>{syncMsg}</div>
       )}
 
       {/* 본문 */}

@@ -1,7 +1,7 @@
 // src/lib/backtest/engine.test.ts
 // 백테스트 엔진 유닛 테스트 — 자산 계산 정확성 + 폭증 방지 + sanity 검증.
 import { runBacktest, type Candle } from './engine';
-import { test, close, lt, gt, assert } from '../../test/harness';
+import { test, close, lt, gt, eq, assert } from '../../test/harness';
 
 function candles(spec: Array<[number, number]>): Candle[] {
   // spec: [가격, 반복수][] → 캔들 배열
@@ -43,11 +43,140 @@ export function runBacktestTests() {
 
   test('진입은 balance 불변, 청산 시에만 반영 (보유 중 equity = 미실현 반영)', () => {
     // 매수 후 가격 상승 중(미청산) — equityCurve가 balance+미실현을 반영하되 폭증 없음
+    //
+    // **손절·익절을 0으로 끈다.** 이 테스트가 보는 것은 자산 모델이지
+    // 청산 규칙이 아니다. 규칙을 켜 두면 +4%에서 익절돼 105까지 못 간다.
     const C = candles([[98, 20], [100, 1], [105, 10]]);   // 매수 후 105로 상승, 청산 신호 없이 종료청산
-    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10, stopPct: 0, takeProfitPct: 0, maxHoldHours: 0 } as any);
     // 진입가 100, 종료 105, 3배, 증거금 1M → netPnL = (105-100)*30000 = 150000
     close(r.finalEquity, 10_150_000, 5000, '최종 ≈10.15M');
     lt(r.finalEquity, 11_000_000, '폭증 없음');
+  });
+
+  // ── 데모와 같은 규칙으로 도는가 ─────────────────────────
+  //
+  // 예전 백테스트에는 손절·익절·청산·보유시간이 **하나도 없었다.** 전략
+  // 신호로만 사고팔았다. 그 차이는 한 방향으로만 작동한다 — 손절로 끝나는
+  // 거래가 없으니 언제나 더 좋게 나온다. 그리고 그 성적이 자금 배분으로
+  // 흘러 실제 돈의 크기를 정한다.
+
+  test('기본값으로 돌리면 익절이 걸린다 — 신호가 없어도 나간다', () => {
+    const C = candles([[98, 20], [100, 1], [105, 10]]);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    // 익절 4% → 104에 나간다. 105가 아니다.
+    const sell = r.trades.find(t => t.side === 'sell');
+    close(sell!.price, 104, 0.01, '익절가 104에 청산');
+    close(r.finalEquity, 10_120_000, 5000, '(104-100)×30000 = 120,000');
+  });
+
+  test('손절이 걸리고, 그 횟수가 성적표에 남는다', () => {
+    // 진입 후 -5%까지 떨어진다 → 2% 손절
+    const C = candles([[98, 20], [100, 1], [95, 10]]);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    gt(r.stopExits ?? 0, 0, '손절로 끝난 거래가 있어야');
+    lt(r.finalEquity, 10_000_000, '손절이면 손실');
+  });
+
+  test('갭으로 손절을 뛰어넘으면 손절가가 아니라 그 가격에 체결된다', () => {
+    // 100에 진입 → 다음 봉이 95로 열린다. 손절 98에 받았다고 치면
+    // 실제로는 못 받는 3원을 매번 벌어들이는 장부가 된다.
+    const C = candles([[98, 20], [100, 1], [95, 10]]);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    const sell = r.trades.find(t => t.side === 'sell');
+    close(sell!.price, 95, 0.01, '갭 난 시가 95에 체결');
+    gt(r.gapExits ?? 0, 0, '갭으로 밀린 청산이 세어져야');
+  });
+
+  test('손절 없이 돌리면 성적표가 그 사실을 적는다', () => {
+    // 손절 없는 백테스트를 손절 있는 실전과 비교하면 안 된다.
+    // 숫자만 남으면 그 차이가 안 보이므로 결과에 같이 싣는다.
+    const C = candles([[98, 20], [100, 1], [102, 10]]);
+    const off = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10, stopPct: 0 } as any);
+    assert(/손절 없이/.test(off.rulesNote || ''), '손절 없이 돌린 사실이 적혀야');
+    const on = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    assert(/손절 2%/.test(on.rulesNote || ''), '켜져 있으면 어떤 규칙인지 적혀야');
+  });
+
+  test('진입한 봉의 저가로는 손절당하지 않는다', () => {
+    // 그 저가는 진입 *전에* 찍힌 것일 수 있다. 들어가자마자 손절당한
+    // 것으로 계산하면 모든 전략이 실제보다 훨씬 나쁘게 나온다.
+    const C = candles([[98, 20], [100, 1], [100, 10]]);
+    // 진입 봉(가격 100)의 저가를 90으로 낮춘다
+    C[20] = { ...C[20], l: 90 };
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    const sell = r.trades.find(t => t.side === 'sell');
+    assert(!sell || !/손절/.test(sell.reason), '진입 봉의 저가로 손절되면 안 된다');
+  });
+
+  // ── 숏 ─────────────────────────────────────────────────
+  //
+  // 데모 자동매매는 하락 추세에 숏을 잡는다. 백테스트가 롱만 돌면 하락장
+  // 성적이 통째로 빠지고, 그러면 "이 전략은 하락장에 거래를 안 한다"는
+  // 잘못된 결론이 나온다.
+
+  const DOWN = (): Candle[] => candles([[102, 20], [100, 1], [95, 10]]);
+  const futures = (extra: any = {}) => ({
+    symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0,
+    leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10, ...extra,
+  } as any);
+
+  test('하락장에서 숏으로 들어가고, 내려가면 이익이다', () => {
+    const r = runBacktest(DOWN(), futures());
+    gt(r.shortTrades ?? 0, 0, '숏 진입이 있어야');
+    gt(r.finalEquity, 10_000_000, '가격이 내렸으니 숏은 이익');
+  });
+
+  test('숏 익절은 아래쪽이다 — 100에 들어가 96에 닫는다', () => {
+    const r = runBacktest(DOWN(), futures());
+    // 익절 4% → 숏은 96. 저가가 95까지 갔어도 걸어 둔 96까지만 친다.
+    const exit = r.trades.filter(t => t.pnl !== undefined)[0];
+    close(exit.price, 96, 0.01, '숏 익절가 96');
+    close((exit as any).netPnL, (100 - 96) * (1_000_000 * 3 / 100), 1, '(100-96)×수량');
+  });
+
+  test('현물(1배)에서는 숏을 안 잡는다 — 낼 수 없는 주문이다', () => {
+    const r = runBacktest(DOWN(), futures({ leverage: 1 }));
+    eq(r.shortTrades ?? 0, 0);
+    assert(/롱만/.test(r.rulesNote || ''), '롱만 돌았다고 적혀야');
+  });
+
+  test('배율을 줬어도 명시적으로 끄면 롱만 돈다', () => {
+    const r = runBacktest(DOWN(), futures({ allowShort: false }));
+    eq(r.shortTrades ?? 0, 0);
+  });
+
+  test('DCA는 배율이 있어도 숏을 안 한다', () => {
+    const r = runBacktest(DOWN(), futures({ strategy: 'dca', dcaIntervalDays: 1 }));
+    eq(r.shortTrades ?? 0, 0);
+  });
+
+  test('숏이 불리하게 가면 위쪽에서 손절된다', () => {
+    // 100에 숏 → 105로 오른다. 손절 2% → 102.
+    const C = candles([[102, 20], [100, 1], [105, 10]]);
+    const r = runBacktest(C, futures());
+    gt(r.shortTrades ?? 0, 0, '숏 진입이 있어야');
+    gt(r.stopExits ?? 0, 0, '손절로 끝나야');
+    lt(r.finalEquity, 10_000_000, '숏인데 올랐으니 손실');
+  });
+
+  test('반대 신호가 오면 먼저 닫는다 — 한 계좌에 반대 포지션 둘이 생기지 않는다', () => {
+    // 내렸다가(숏) 다시 오른다(골든크로스) — 그 시점에 숏이 닫혀야 한다.
+    const C = candles([[102, 20], [100, 1], [99, 6], [130, 12]]);
+    const r = runBacktest(C, futures({ stopPct: 0, takeProfitPct: 0, maxHoldHours: 0 }));
+    // 체결 목록에서 어느 시점에도 미청산 수량이 양쪽으로 쌓이면 안 된다
+    let net = 0;
+    for (const t of r.trades) net += (t.side === 'buy' ? 1 : -1) * t.qty;
+    close(net, 0, 1e-6, '끝나면 포지션이 0이어야');
+  });
+
+  test('숏 보유 중 가격이 오르면 자산 곡선이 내려간다', () => {
+    // 부호를 안 뒤집으면 숏이 손실일 때 자산이 늘어나는 곡선이 그려지고,
+    // 최대 낙폭이 통째로 틀어진다.
+    const C = candles([[102, 20], [100, 1], [101, 10]]);
+    const r = runBacktest(C, futures({ stopPct: 0, takeProfitPct: 0, maxHoldHours: 0 }));
+    gt(r.shortTrades ?? 0, 0, '숏 진입이 있어야');
+    const last = r.equityCurve[r.equityCurve.length - 2];  // 종료청산 직전
+    lt(last.equity, 10_000_000, '숏인데 올랐으면 평가자산이 줄어야');
   });
 
   test('수수료가 손익을 줄인다 (feeRate>0이면 순수익 < 무수수료)', () => {

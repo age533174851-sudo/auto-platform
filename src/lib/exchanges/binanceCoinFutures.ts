@@ -95,6 +95,23 @@ export interface CoinMBalance {
  * COIN-M 지갑. 코인별로 따로 있다 — BTC 잔고와 ETH 잔고는 서로 못 쓴다.
  * USDT-M 지갑과도 완전히 별개다.
  */
+/**
+ * COIN-M 서버 시각 (epoch ms). 못 읽으면 null.
+ *
+ * fapi(USDⓈ-M)나 api(현물)의 시각을 쓰지 않는 이유: 호스트가 다르다.
+ * 이 파일이 base()를 따로 두는 것과 같은 이유다 — 다른 호스트에 물어본
+ * 시각으로 이 호스트의 recvWindow를 판정하면 그건 다른 값을 재는 것이다.
+ */
+export async function getCoinMServerTime(testnet = false): Promise<number | null> {
+  try {
+    const r = await fetch(`${base(testnet)}/dapi/v1/time`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const t = Number(d?.serverTime);
+    return Number.isFinite(t) && t > 0 ? t : null;
+  } catch { return null; }
+}
+
 export async function getCoinMBalances(
   key: string, secret: string, testnet = false,
 ): Promise<{ success: boolean; balances: CoinMBalance[]; message?: string }> {
@@ -147,6 +164,114 @@ export async function getCoinMPositions(
     return { success: true, positions };
   } catch (e: any) {
     return { success: false, positions: [], message: e?.message || 'COIN-M 포지션 조회 실패' };
+  }
+}
+
+/**
+ * 계약 하나의 위험 정보. **수량이 0이어도 돌려준다.**
+ *
+ * `getCoinMPositions`는 `contracts !== 0`으로 걸러낸다. 목록에는 맞지만
+ * **신규 진입 심볼이 목록에 없어서** 마진 모드·배율·청산가를 확인할 수 없다.
+ * USDⓈ-M에서 겪은 것과 같은 함정이다(`getSymbolPositionRisk`를 따로 만든 이유):
+ * 그때는 마진 모드가 unknown이 되어 모든 첫 주문이 막혔다.
+ *
+ * 못 읽으면 null이다 — 호출자는 추측하지 않고 멈춰야 한다.
+ */
+export async function getCoinMSymbolRisk(
+  key: string, secret: string, symbol: string, testnet = false,
+): Promise<CoinMPosition | null> {
+  try {
+    const d = await dapiSigned('GET', '/dapi/v1/positionRisk', key, secret, testnet, { symbol });
+    const rows = Array.isArray(d) ? d : [d];
+    // 헤지 모드에서는 같은 심볼이 LONG/SHORT 두 행으로 온다. 수량이 있는 행을
+    // 먼저 고르고, 없으면 첫 행(설정값만 있는 행)을 쓴다.
+    const row = rows.find((p: any) => Math.abs(Number(p?.positionAmt) || 0) > 0)
+      ?? rows.find((p: any) => String(p?.symbol || '').toUpperCase() === symbol.toUpperCase());
+    if (!row) return null;
+    return {
+      symbol: String(row.symbol),
+      contracts: Number(row.positionAmt) || 0,
+      entryPrice: Number(row.entryPrice) || 0,
+      markPrice: Number(row.markPrice) || 0,
+      // 0은 거래소가 주지 않은 것이다. 0을 청산가로 쓰면 청산거리가 100%로 계산된다.
+      liquidationPrice: Number(row.liquidationPrice) || 0,
+      leverage: Number(row.leverage) || 0,
+      marginType: String(row.marginType || ''),
+      unrealizedPnlCoin: Number(row.unRealizedProfit) || 0,
+    };
+  } catch { return null; }
+}
+
+/**
+ * 손절 주문(STOP_MARKET · 전량 청산).
+ *
+ * `workingType: 'MARK_PRICE'` — 마지막 체결가로 트리거하면 얇은 호가에서
+ * 잘못 터진다. USDⓈ-M 경로가 같은 값을 쓰는 것과 같은 이유다.
+ *
+ * `closePosition: 'true'`라 수량을 보내지 않는다. 부분 청산이 아니라 '이
+ * 포지션을 닫는다'는 주문이므로, 이후 포지션이 늘거나 줄어도 따라간다 —
+ * 계약 수를 적어 두면 그 수량만 닫히고 나머지는 보호 없이 남는다.
+ */
+export async function placeCoinMStop(
+  key: string, secret: string,
+  opts: { symbol: string; stopSide: 'BUY' | 'SELL'; stopPrice: number; clientOrderId?: string },
+  testnet = false,
+): Promise<{ success: boolean; orderId?: number; message: string }> {
+  if (!Number.isFinite(opts.stopPrice) || opts.stopPrice <= 0) {
+    return { success: false, message: `손절가가 유효하지 않습니다 (${opts.stopPrice})` };
+  }
+  try {
+    const params: Record<string, string | number> = {
+      symbol: opts.symbol.toUpperCase(),
+      side: opts.stopSide,
+      type: 'STOP_MARKET',
+      stopPrice: opts.stopPrice,
+      closePosition: 'true',
+      workingType: 'MARK_PRICE',
+    };
+    if (opts.clientOrderId) params.newClientOrderId = opts.clientOrderId;
+    const d = await dapiSigned('POST', '/dapi/v1/order', key, secret, testnet, params);
+    return { success: true, orderId: d?.orderId, message: '손절 설정' };
+  } catch (e: any) {
+    return { success: false, message: `손절 설정 실패: ${e?.message || e}` };
+  }
+}
+
+/**
+ * 계약 하나의 포지션을 전량 닫는다 (비상 회수용).
+ *
+ * 손절을 붙이지 못했을 때 방금 연 포지션을 되돌리는 데 쓴다 —
+ * USDⓈ-M·Gate 경로가 같은 상황에서 하는 것과 같다(감사 지적 3번).
+ *
+ * MARKET에는 `closePosition`을 쓸 수 없어 수량을 보내야 한다. 그 수량은
+ * **거래소에서 읽은 현재 계약 수**다. 우리가 방금 보낸 수량을 쓰면 부분
+ * 체결이었을 때 남지 않은 수량까지 닫으려 해 거부된다.
+ */
+export async function closeCoinMPosition(
+  key: string, secret: string, symbol: string, testnet = false,
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const pos = await getCoinMSymbolRisk(key, secret, symbol, testnet);
+    if (!pos) {
+      return { success: false,
+        message: '포지션을 읽지 못해 되돌리지 못했습니다 — 거래소에서 직접 확인하세요' };
+    }
+    const contracts = Math.abs(pos.contracts);
+    if (!contracts) return { success: true, message: '이미 포지션이 없습니다' };
+
+    const r = await placeCoinMOrder(key, secret, {
+      symbol,
+      // 롱(+)이면 SELL로, 숏(−)이면 BUY로 닫는다
+      side: pos.contracts > 0 ? 'SELL' : 'BUY',
+      type: 'MARKET',
+      contracts,
+      reduceOnly: true,
+    }, testnet);
+    return r.success
+      ? { success: true, message: `포지션 전량 종료 (${contracts}계약)` }
+      : { success: false, message: `종료 실패: ${r.message}` };
+  } catch (e: any) {
+    return { success: false, message: `종료 실패: ${e?.message || e}` };
   }
 }
 

@@ -11,7 +11,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parseImpact, toUtc, toDate, cleanValue, eventKey,
-  normalizeEvent, collectEvents,
+  normalizeEvent, collectEvents, withEventName, syncCooldown, SYNC_COOLDOWN_MS,
 } from './normalize';
 
 const PAST = '2020-01-15';
@@ -175,5 +175,67 @@ export function runCalendarTests() {
   test('지문이 국가를 구분한다', () => {
     // 같은 이름의 지표가 나라마다 있다
     assert(eventKey('US', 'CPI', PAST) !== eventKey('KR', 'CPI', PAST));
+  });
+
+  // ── 이름 두 벌 ──────────────────────────────────────────
+  //
+  // 라우트는 `title`로 내보내는데 캘린더 화면은 `event`를 읽는다. 그래서
+  // **카드에 지표 이름이 통째로 비어 있었다** — 날짜·예측·이전은 다 뜨는데
+  // 무슨 발표인지만 없다. 빈 문자열은 렌더링에서 그냥 안 보이고 타입도
+  // 안 잡아 준다.
+  console.log('[캘린더 — 이름이 이름 자리에 오는가]');
+
+  test('title만 있으면 event도 채운다', () => {
+    const r = withEventName({ id: 'x', title: 'FOMC 금리 결정' } as any);
+    eq(r.event, 'FOMC 금리 결정');
+    eq(r.title, 'FOMC 금리 결정');
+  });
+
+  test('event만 있으면 title도 채운다', () => {
+    const r = withEventName({ id: 'x', event: '미국 CPI' } as any);
+    eq(r.title, '미국 CPI');
+  });
+
+  test('둘 다 있으면 event를 따른다 — DB 칸 이름이 event다', () => {
+    const r = withEventName({ event: 'A', title: 'B' } as any);
+    eq(r.event, 'A');
+    eq(r.title, 'A');
+  });
+
+  test('이름이 없으면 빈 문자열이지 undefined가 아니다', () => {
+    // undefined면 `e.event || ''` 같은 방어가 없는 곳에서 'undefined'가
+    // 글자로 찍힌다.
+    const r = withEventName({ id: 'x' } as any);
+    eq(r.event, '');
+    eq(r.title, '');
+  });
+
+  test('나머지 칸은 건드리지 않는다', () => {
+    const r = withEventName({ id: 'x', title: 'CPI', forecast: '3.2%', impact: 'high' } as any);
+    eq(r.forecast, '3.2%');
+    eq(r.impact, 'high');
+  });
+
+  // ── 수동 동기화 쿨다운 ──────────────────────────────────
+  console.log('[캘린더 동기화 — 연타 막기]');
+
+  test('처음에는 바로 된다', () => {
+    eq(syncCooldown(0, 1_000_000).allowed, true);
+  });
+
+  test('방금 했으면 막고, 몇 초 남았는지 말한다', () => {
+    const r = syncCooldown(1_000_000, 1_000_000 + 60_000);
+    eq(r.allowed, false);
+    eq(r.waitSec, (SYNC_COOLDOWN_MS - 60_000) / 1000);
+  });
+
+  test('간격이 지나면 다시 된다', () => {
+    eq(syncCooldown(1_000_000, 1_000_000 + SYNC_COOLDOWN_MS).allowed, true);
+  });
+
+  test('시계가 뒤로 가도 영원히 잠기지 않는다', () => {
+    // lastAt이 미래면 남은 시간이 무한정 커진다. 서버리스에서 인스턴스마다
+    // 시계가 조금씩 다른 것은 흔한 일이다.
+    eq(syncCooldown(2_000_000, 1_000_000).allowed, true);
   });
 }

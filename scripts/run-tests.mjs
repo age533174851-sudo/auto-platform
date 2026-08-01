@@ -42,9 +42,34 @@ import { runConsensusTests } from './src/lib/news/consensus.test';
 import { runPricingTests } from './src/lib/ai/pricing.test';
 import { runCalendarTests } from './src/lib/calendar/normalize.test';
 import { runRetentionTests } from './src/lib/maintenance/retention.test';
+import { runAdminGateTests } from './src/lib/auth/adminGate.test';
+import { runCommandTests } from './src/lib/commands/commands.test';
+import { runKeymapTests } from './src/lib/commands/keymap.test';
+import { runPreTradeChecklistTests } from './src/lib/engine/preTradeChecklist.test';
+import { runExecutorHealthTests } from './src/lib/jobs/executorHealth.test';
+import { runManualPlanTests } from './src/lib/engine/manualPlan.test';
+import { runCloseQtyTests } from './src/lib/exchanges/closeQty.test';
+import { runGatePlanTests } from './src/lib/exchanges/gatePlan.test';
+import { runPromotionMapTests } from './src/lib/auth/promotionMap.test';
+import { runTradeModeTests } from './src/lib/markets/tradeMode.test';
+import { runPaperPlanTests } from './src/lib/engine/paperPlan.test';
+import { runDailyLossTests } from './src/lib/risk/dailyLoss.test';
+import { runRegimeGateTests } from './src/lib/risk/regimeGate.test';
+import { runTrailPlanTests } from './src/lib/engine/trailPlan.test';
+import { runPaperRunnerTests } from './src/lib/engine/paperRunner.test';
+import { runExitRulesTests } from './src/lib/engine/exitRules.test';
+import { runAllocationTests } from './src/lib/portfolio/allocation.test';
+import { runStatsTests } from './src/lib/portfolio/stats.test';
+import { runRoutingTests } from './src/lib/ai/routing.test';
+import { runGateSpotPlanTests } from './src/lib/exchanges/gateSpotPlan.test';
+import { runLossStreakTests } from './src/lib/risk/lossStreak.test';
+import { runTradeVetoTests } from './src/lib/ai/tradeVeto.test';
+import { runCalibrationTests } from './src/lib/ai/calibration.test';
+import { runRecordPredictionTests } from './src/lib/ai/recordPrediction.test';
+import { runSubAccountTests } from './src/lib/portfolio/subAccount.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
-runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests();
+runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runGatePlanTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {

@@ -6,16 +6,21 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const userId = url.searchParams.get('userId') || 'paper-default';
-
+  // 사용자는 **인증 헤더에서만** 얻는다.
+  //
+  // 예전에는 `?userId=`를 그대로 믿었다. 남의 가상 계좌를 URL만 바꿔
+  // 들여다볼 수 있었다는 뜻이다. 가상 돈이라도 그 사람의 매매 기록이다.
   let sb: any = null;
+  let userId: string | null = null;
   try {
-    const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
+    const { getSupabaseAdmin, resolveUserId } = await import('@/lib/supabase/admin');
     sb = getSupabaseAdmin();
+    userId = await resolveUserId(
+      req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
   } catch {
     return NextResponse.json({ ok: false, error: 'DB 연결 없음' }, { status: 500 });
   }
+  if (!userId) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
 
   try {
     const { getPaperAccount } = await import('@/lib/engine/paperStore');

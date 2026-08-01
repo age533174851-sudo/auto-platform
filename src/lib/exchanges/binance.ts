@@ -30,6 +30,26 @@ function sign(query: string, secret: string): string {
   return createHmac('sha256', secret).update(query).digest('hex');
 }
 
+/**
+ * 현물 거래소 서버 시각 (epoch ms). 못 읽으면 null — 0이 아니다.
+ *
+ * 선물의 getFuturesServerTime과 왜 따로 두는가: 호스트가 다르다
+ * (api.binance.com vs fapi.binance.com, 테스트넷은 완전히 다른 거래소다).
+ * 하나로 쓰면 현물 주문의 시계를 선물 호스트에 물어보는 것이 되고, 그건
+ * 이 파일이 spotBase()를 따로 둔 이유와 같은 종류의 혼입이다.
+ *
+ * 서명이 필요 없는 공개 엔드포인트다.
+ */
+export async function getSpotServerTime(testnet?: boolean): Promise<number | null> {
+  try {
+    const r = await fetch(`${spotBase(testnet)}/api/v3/time`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const t = Number(d?.serverTime);
+    return Number.isFinite(t) && t > 0 ? t : null;
+  } catch { return null; }
+}
+
 async function bnFetch(
   path: string, key: string, secret: string,
   params: Record<string,string> = {}, testnet?: boolean,

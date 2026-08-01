@@ -63,8 +63,18 @@ export async function POST(req: NextRequest) {
 
   // 각 공급자에게 **같은 질문**을 던진다. 프롬프트가 다르면 의견 차이가
   // 모델 차이인지 질문 차이인지 알 수 없다.
+  //
+  // 계층은 저가로 둔다. 합의의 값어치는 한 모델을 깊게 굴리는 데 있지 않고
+  // **서로 다른 회사의 모델이 갈리는지**에 있다. 공급자 수만큼 요금이
+  // 곱해지는 자리라 여기서 premium을 쓰면 비용이 가장 빨리 튄다.
+  // 더 깊은 판단이 필요하다고 판단되면 tier를 'L3_COMMITTEE'로 바꾸면 된다
+  // (그러면 각 공급자의 premium 모델이 불린다).
   const settled = await Promise.all(providers.map(async p => {
-    const r = await analyzeArticle(article, (input) => callProvider(p, input));
+    const r = await analyzeArticle(
+      article,
+      (input) => callProvider(p, input),
+      { tier: 'L1_CHEAP', kind: 'consensus' },
+    );
     return { provider: p, r };
   }));
 
@@ -89,6 +99,38 @@ export async function POST(req: NextRequest) {
 
   const result = aggregate(opinions);
 
+  // 원장에 남긴다. 남기지 않으면 나중에 채점할 것이 없고, "AI 96점"은
+  // 영원히 확인할 수 없는 숫자로 남는다.
+  //
+  // **물어본 수(providers.length)를 같이 남긴다.** 다섯에 물어 둘이 답한
+  // 만장일치와 다섯이 답한 만장일치는 완전히 다른 판단인데, responded만
+  // 남기면 그 구분이 사라진다.
+  let recorded: { inserted: number; error: string | null } = { inserted: 0, error: 'not_attempted' };
+  try {
+    const assets = settled
+      .map(s => (s.r as any)?.value?.affectedAssets)
+      .find(a => Array.isArray(a) && a.length) ?? [];
+    const { getSupabaseAdmin } = await import('@/lib/supabase/server');
+    const sb = getSupabaseAdmin();
+    if (sb) {
+      const { recordPrediction } = await import('@/lib/ai/recordPrediction');
+      recorded = await recordPrediction({
+        sb, userId: uid, source: 'consensus',
+        assets,
+        direction: result.direction,
+        confidence: result.confidence,
+        level: result.level,
+        responded: result.responded,
+        asked: providers.length,
+        reasons: result.sharedReasons,
+      });
+    } else {
+      recorded = { inserted: 0, error: 'db_unavailable' };
+    }
+  } catch (e: any) {
+    recorded = { inserted: 0, error: e?.message || 'record_failed' };
+  }
+
   return NextResponse.json({
     ok: true,
     consensus: {
@@ -99,7 +141,12 @@ export async function POST(req: NextRequest) {
       summary: result.summary,
       votes: result.votes,
       responded: result.responded,
+      // 물어본 수를 응답에도 넣는다. 화면이 '2/5'를 그릴 수 있어야 한다.
+      asked: providers.length,
     },
+    // 몇 건을 원장에 남겼는지 그대로 돌려준다. 조용히 0건이 되면 몇 주 뒤에
+    // "채점할 것이 없다"로만 드러나고, 그때는 원인을 찾을 수 없다.
+    recorded,
     // AI별 의견을 그대로 노출한다. 합의만 보여주면 왜 그 결론인지
     // 되짚을 수 없고, 갈린 지점이야말로 이 기능의 값어치다.
     opinions: opinions.map(o => ({

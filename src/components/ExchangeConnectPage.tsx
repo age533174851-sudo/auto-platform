@@ -13,6 +13,18 @@ import { T } from '@/lib/constants';
 // ── Exchange order & display ──────────────────────────────────
 const EXCHANGES: ExchangeId[] = ['binance','bybit','okx','gate','upbit','bithumb'];
 
+/**
+ * 테스트넷 호스트가 **서버 쪽에 실제로 구현된** 거래소.
+ *
+ * 목록에 없는 거래소는 토글을 아예 보여주지 않는다 — 고를 수 있는데 서버가
+ * 실계좌로 물어보면, 화면에는 '테스트넷'이라고 적힌 채 실계좌가 조회된다.
+ * 그건 이 저장소에서 이미 한 번 낸 사고다(Gate `BASE` 하드코딩).
+ *
+ * 여기 추가하기 전에 `lib/exchanges/<거래소>`가 testnet 인자를 받아 호스트를
+ * 바꾸는지 먼저 확인할 것. Bybit·OKX는 아직 아니다.
+ */
+const HAS_TESTNET: ExchangeId[] = ['binance', 'gate'];
+
 // ── Loading skeleton ──────────────────────────────────────────
 function Skeleton({ w='100%', h=14 }: { w?: string|number; h?: number }) {
   return <div style={{ width:w, height:h, borderRadius:6, background:'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.2s infinite' }}/>;
@@ -47,6 +59,7 @@ export default function ExchangeConnectPage() {
   const [diag,         setDiag]         = useState<any>(null);
   const [diagRunning,  setDiagRunning]  = useState(false);
   const [balLoading,   setBalLoading]   = useState(false);
+  const [balErr,       setBalErr]       = useState('');
   const [toggleBusy,   setToggleBusy]   = useState<string|null>(null);   // 토글 중인 connectionId
   const [toast,        setToast]        = useState<{ msg:string; ok:boolean }|null>(null);
   const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 4200); }, []);
@@ -59,6 +72,11 @@ export default function ExchangeConnectPage() {
   ) : null;
   const [testing,      setTesting]      = useState(false);
   const [testMsg,      setTestMsg]      = useState('');
+  // 거래소 키에 IP 제한을 걸었을 때 허용 목록에 넣어야 하는 것은
+  // **이 서버**의 IP다. 지금까지 "이 서버 IP를 확인하세요"라고만 적고
+  // 그 값을 알려주지 않았다 — 확인할 방법이 없는 안내였다.
+  const [srvIp,        setSrvIp]        = useState<any>(null);
+  const [ipBusy,       setIpBusy]       = useState(false);
 
   // ── Load connections ────────────────────────────────────────
   const loadConnections = useCallback(async () => {
@@ -92,6 +110,19 @@ export default function ExchangeConnectPage() {
     return '';
   };
 
+  const loadServerIp = async () => {
+    setIpBusy(true);
+    try {
+      const auth = await getAuthHeader();
+      const r = await fetch('/api/diagnostics/ip', { headers: auth ? { Authorization: auth } : {} });
+      const d = await r.json();
+      // 실패를 빈 값으로 두지 않는다 — 빈 칸은 '아직 안 눌렀다'로 읽힌다
+      setSrvIp(r.ok && d?.ok ? d : { error: d?.message || d?.error || `확인 실패 (${r.status})` });
+    } catch (e: any) {
+      setSrvIp({ error: `확인 실패 (${e?.message || e})` });
+    } finally { setIpBusy(false); }
+  };
+
   const handleConnect = async () => {
     if (!apiKey.trim() || !apiSecret.trim()) {
       setConnectErr('API Key와 Secret Key를 입력해주세요');
@@ -122,7 +153,10 @@ export default function ExchangeConnectPage() {
           apiKey: apiKey.trim(), apiSecret: apiSecret.trim(),
           passphrase: passphrase.trim() || undefined,
           nickname: nickname.trim() || meta.nameKr,
-          isTestnet: selExchange === 'binance' ? isTestnet : false,
+          // 테스트넷을 고를 수 있는 거래소면 고른 값을 그대로 보낸다.
+          // 예전에는 `binance ? isTestnet : false`였다 — Gate 테스트넷 키를
+          // 등록할 방법이 아예 없었고, 화면은 그 사실을 말하지도 않았다.
+          isTestnet: HAS_TESTNET.includes(selExchange) ? isTestnet : false,
         }),
       });
       const d = await r.json();
@@ -130,9 +164,15 @@ export default function ExchangeConnectPage() {
         setConnectErr(d.error || '연결 실패');
       } else {
         setConnectOk(true);
+        // 고른 환경과 실제 키가 달랐으면 **그 사실을 말한다.** 조용히 바꾸면
+        // 사용자가 '실전'이라고 믿는 연결이 테스트넷이 되고, 그 반대도 된다.
+        if (d?.detected?.switched && d.detected.message) {
+          showToast(d.detected.message, true);
+          setIsTestnet(!!d.detected.isTestnet);
+        }
         setApiKey(''); setApiSecret(''); setPassphrase(''); setNickname('');
         await loadConnections();
-        setTimeout(() => setView('list'), 1500);
+        setTimeout(() => setView('list'), d?.detected?.switched ? 3200 : 1500);
       }
     } catch (e: any) {
       setConnectErr(e.message || '네트워크 오류');
@@ -152,20 +192,82 @@ export default function ExchangeConnectPage() {
         body: JSON.stringify({ action: 'test', connectionId: conn.id }),
       });
       const d = await r.json();
-      setTestMsg(d.success ? `✅ ${d.message} (${d.latencyMs}ms)` : `❌ ${d.message}`);
+      const text = String(d.message ?? '');
+      setTestMsg(d.success ? `✅ ${text} (${d.latencyMs}ms)` : `❌ ${text}`);
+      // 실패 이유에 IP가 걸려 있으면 **묻기 전에** 서버 IP를 띄운다.
+      //
+      // 아래 '확인' 버튼을 눌러야만 보이는 값은, 그걸 눌러야 한다는 걸
+      // 아는 사람에게만 보이는 값이다. 정작 이 오류를 처음 보는 사람은
+      // 무엇을 허용 목록에 넣어야 하는지 모른 채로 화면을 닫는다.
+      if (!d.success && /\bip\b|아이피/i.test(text)) loadServerIp();
       await loadConnections();
     } catch { setTestMsg('❌ 테스트 실패'); }
     finally { setTesting(false); }
   };
 
+  // ── 테스트넷 여부 바꾸기 ─────────────────────────────────────
+  //
+  // 실전으로 등록해 놓고 실제로는 테스트넷 키인 경우가 흔하다. 지금까지는
+  // 지우고 다시 만드는 수밖에 없었는데, 그러면 키를 다시 붙여넣어야 하고
+  // 그 과정에서 실전 키를 잘못 넣을 위험이 새로 생긴다.
+  const [envBusy, setEnvBusy] = useState(false);
+  const switchEnv = async (conn: ConnectedExchange, next: boolean) => {
+    const going = next ? '테스트넷' : '실전';
+    const lines = [
+      `이 연결을 ${going}으로 바꿉니다.`,
+      '',
+      next
+        ? '가짜 돈으로 도는 계좌를 보게 됩니다.'
+        : '⚠️ 이제부터 이 연결의 주문은 실제 자금을 씁니다.',
+      '',
+      '자동매매는 꺼집니다 — 어느 계좌를 향하는지가 바뀌었으므로,',
+      '연결 테스트로 확인한 뒤 직접 다시 켜세요.',
+    ];
+    if (!(await confirmDialog(lines.join('\n'), { danger: !next }))) return;
+    setEnvBusy(true);
+    try {
+      const _a = await getAuthHeader();
+      const r = await fetch('/api/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(_a?{Authorization:_a}:{}) },
+        body: JSON.stringify({ action: 'set-testnet', connectionId: conn.id, isTestnet: next }),
+      });
+      const d = await r.json();
+      // 실패 사유를 그대로 보여준다. '변경 실패'만 적으면 무엇이 문제인지
+      // 알 수 없고, 반쯤 바뀌었는지도 알 수 없다.
+      showToast(
+        d?.success ? (d.message || '바꿨습니다')
+                   : [d?.error, d?.message].filter(Boolean).join('\n') || `변경 실패 (${r.status})`,
+        !!d?.success);
+      if (d?.success) {
+        await loadConnections();
+        setSelConn(prev => prev ? ({ ...prev, isTestnet: next, autoTradingEnabled: false } as any) : prev);
+        setTestMsg(''); setBalances([]); setBalErr('');
+      }
+    } catch (e: any) {
+      showToast(`변경 실패 (${e?.message || e})`, false);
+    } finally { setEnvBusy(false); }
+  };
+
   // ── Load balances ───────────────────────────────────────────
   const loadBalances = async (conn: ConnectedExchange) => {
-    setBalLoading(true); setBalances([]);
+    setBalLoading(true); setBalances([]); setBalErr('');
     try {
-      const r = await fetch(`/api/exchange?action=balances&id=${conn.id}`);
+      // **인증 헤더가 빠져 있었다.** 이 화면의 다른 요청은 전부 붙이는데
+      // 이것만 없어서 서버가 사용자를 못 알아보고 404를 돌려줬다 —
+      // 그래서 잔고 조회는 **한 번도 성공한 적이 없다.** 화면에는
+      // "잔고 없음 또는 조회 실패"만 떴다.
+      const _a = await getAuthHeader();
+      const r = await fetch(`/api/exchange?action=balances&id=${conn.id}`,
+        { headers: _a ? { Authorization: _a } : undefined });
       const d = await r.json();
+      // 실패 사유를 버리지 않는다. '잔고가 0'과 '못 읽었다'는 완전히 다른
+      // 상태인데 화면에서는 둘 다 비어 보인다.
+      if (!r.ok || d?.error) { setBalances([]); setBalErr(d?.error || `조회 실패 (${r.status})`); return; }
       setBalances(d.balances || []);
-    } catch { setBalances([]); }
+    } catch (e: any) {
+      setBalances([]); setBalErr(`잔고를 읽지 못했습니다 (${e?.message || e})`);
+    }
     finally { setBalLoading(false); }
   };
 
@@ -410,10 +512,18 @@ export default function ExchangeConnectPage() {
 
         {/* Inputs */}
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-          {/* 테스트넷/실전 토글 (binance만) */}
-          {selExchange === 'binance' && (
+          {/* 테스트넷/실전 토글.
+              **바이낸스 전용이 아니다.** Gate도 테스트넷 호스트가 따로 있고
+              (api-testnet.gateapi.io) 서버는 그것을 지원하는데, 여기서 고를 수
+              없어서 Gate 테스트넷 키를 등록할 방법이 없었다. 등록해 봐야
+              실계좌에 물어보고 401이 뜨는데, 화면에는 그 이유가 안 적혔다. */}
+          {HAS_TESTNET.includes(selExchange) && (
             <div>
-              <div style={{ color:T.sub, fontSize:11, marginBottom:4 }}>연결 환경</div>
+              <div style={{ color:T.sub, fontSize:11, marginBottom:4 }}>
+                연결 환경 <span style={{ color:T.muted, fontSize:9, fontWeight:600 }}>
+                  — 틀려도 됩니다. 키가 반대쪽이면 알아서 찾아 그대로 알려드립니다
+                </span>
+              </div>
               <div style={{ display:'flex', gap:6 }}>
                 {([
                   { id: true,  label: '테스트넷', desc: '가짜 돈 · 안전', color: T.grn },
@@ -436,9 +546,15 @@ export default function ExchangeConnectPage() {
                 })}
               </div>
               <div style={{ color:T.muted, fontSize:9, marginTop:4, lineHeight:1.5 }}>
-                {isTestnet
-                  ? '테스트넷은 두 개입니다 — 현물: testnet.binance.vision · 선물: demo-fapi.binance.com(developers.binance.com 데모 모드). 키도 각각 따로 발급됩니다. 저장할 때 어느 쪽이 인증됐는지 알려드립니다. 실제 돈이 들지 않습니다.'
-                  : '⚠️ 실전: api.binance.com(현물) · fapi.binance.com(선물) 실계정 키. 실제 자금이 사용됩니다.'}
+                {/* 어느 호스트에 물어볼지를 적는다. 실패했을 때 오류 메시지가
+                    같은 호스트를 말하므로, 둘을 맞춰 보면 원인이 바로 보인다. */}
+                {selExchange === 'gate'
+                  ? (isTestnet
+                      ? '테스트넷: api-testnet.gateapi.io. Gate 테스트넷 키는 실전 키와 별도로 발급받아야 합니다. 실제 돈이 들지 않습니다.'
+                      : '⚠️ 실전: api.gateio.ws 실계정 키. 실제 자금이 사용됩니다.')
+                  : (isTestnet
+                      ? '테스트넷은 두 개입니다 — 현물: testnet.binance.vision · 선물: demo-fapi.binance.com(developers.binance.com 데모 모드). 키도 각각 따로 발급됩니다. 저장할 때 어느 쪽이 인증됐는지 알려드립니다. 실제 돈이 들지 않습니다.'
+                      : '⚠️ 실전: api.binance.com(현물) · fapi.binance.com(선물) 실계정 키. 실제 자금이 사용됩니다.')}
               </div>
             </div>
           )}
@@ -553,6 +669,31 @@ export default function ExchangeConnectPage() {
             ))}
           </div>
 
+          {/* 연결 환경 바꾸기.
+              연결 테스트가 어느 호스트에 물어보는지를 정하는 값이라,
+              테스트 버튼 바로 위에 둔다 — 실패했을 때 다음에 눌러야 할 것이
+              바로 위에 있어야 한다. */}
+          {HAS_TESTNET.includes(selConn.exchange as ExchangeId) && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ color:T.muted, fontSize:10, fontWeight:700, marginBottom:4 }}>
+                연결 환경 — 지금 <b style={{ color: selConn.isTestnet ? T.grn : T.red }}>
+                  {selConn.isTestnet ? '테스트넷' : '실전'}
+                </b>
+              </div>
+              <button onClick={() => switchEnv(selConn, !selConn.isTestnet)} disabled={envBusy}
+                style={{ width:'100%', padding:'9px', background:T.alt,
+                  border:`1px solid ${A(selConn.isTestnet ? T.red : T.grn,'40')}`, borderRadius:10,
+                  color: selConn.isTestnet ? T.red : T.grn, fontWeight:700, fontSize:11,
+                  cursor: envBusy ? 'not-allowed' : 'pointer' }}>
+                {envBusy ? '바꾸는 중…' : selConn.isTestnet ? '실전으로 바꾸기' : '테스트넷으로 바꾸기'}
+              </button>
+              <div style={{ color:T.muted, fontSize:9, marginTop:4, lineHeight:1.5 }}>
+                연결 테스트는 실패하는데 테스트넷 진단은 통과한다면, 이 연결이
+                실전으로 등록됐지만 키는 테스트넷 키라는 뜻입니다.
+              </div>
+            </div>
+          )}
+
           {/* Test connection */}
           <button onClick={() => handleTest(selConn)} disabled={testing}
             style={{ width:'100%', padding:'10px', background:T.alt, border:`1px solid ${A(T.acl,'40')}`, borderRadius:10, color:T.acl, fontWeight:700, fontSize:12, cursor: testing ? 'not-allowed' : 'pointer' }}>
@@ -563,6 +704,42 @@ export default function ExchangeConnectPage() {
               {testMsg}
             </div>
           )}
+
+          {/* 이 서버의 IP.
+              401·IP 제한 오류의 원인 중 하나가 이것인데, 지금까지 화면이
+              "이 서버 IP를 허용 목록에 넣으세요"라고만 하고 그 값은 안
+              알려줬다. 여기서 직접 보여준다. */}
+          <div style={{ marginTop:10, padding:'10px 12px', background:T.alt, border:`1px solid ${T.border}`, borderRadius:10 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+              <span style={{ color:T.sub, fontSize:11, fontWeight:700 }}>거래소에 보이는 서버 IP</span>
+              <button onClick={loadServerIp} disabled={ipBusy} style={{
+                padding:'5px 10px', minHeight:0, background:'transparent',
+                border:`1px solid ${T.border}`, borderRadius:8,
+                color:T.acl, fontSize:10, fontWeight:700, cursor: ipBusy ? 'default' : 'pointer',
+              }} className="switch">{ipBusy ? '확인 중…' : '확인'}</button>
+            </div>
+            {srvIp?.ip && (
+              <>
+                <div style={{ marginTop:6, color:T.txt, fontSize:14, fontWeight:800, fontVariantNumeric:'tabular-nums', wordBreak:'break-all' }}>
+                  {srvIp.ip}
+                </div>
+                {/* 고정이라고 말하지 않는다. 이 값 하나만 허용 목록에 넣으면
+                    지금은 되고 나중에 조용히 막힌다. */}
+                <div style={{ marginTop:5, color:T.ylw, fontSize:10, lineHeight:1.55 }}>
+                  {srvIp.note}
+                </div>
+              </>
+            )}
+            {srvIp?.error && (
+              <div style={{ marginTop:6, color:T.red, fontSize:10, lineHeight:1.55 }}>{srvIp.error}</div>
+            )}
+            {!srvIp && (
+              <div style={{ marginTop:5, color:T.muted, fontSize:10, lineHeight:1.55 }}>
+                키에 IP 제한을 걸었다면 이 IP를 거래소 허용 목록에 넣어야 합니다.
+                내 폰·PC의 IP가 아니라 <b>주문을 보내는 서버</b>의 IP입니다.
+              </div>
+            )}
+          </div>
 
           {/* 테스트넷 진단 (선물 시스템 검증) */}
           <button onClick={async () => {
@@ -630,9 +807,14 @@ export default function ExchangeConnectPage() {
             <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
               {[0,1,2].map(i=><Skeleton key={i} h={32}/>)}
             </div>
+          ) : balErr ? (
+            <div style={{ padding:'10px 12px', borderRadius:9, background:A(T.ylw,'12'),
+                          color:T.ylw, fontSize:11, lineHeight:1.6 }}>
+              {balErr}
+            </div>
           ) : balances.length === 0 ? (
             <div style={{ textAlign:'center', padding:'20px 0', color:T.muted, fontSize:12 }}>
-              잔고 없음 또는 조회 실패
+              잔고가 없습니다 (0개 자산)
             </div>
           ) : (
             <div>

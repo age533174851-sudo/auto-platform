@@ -40,7 +40,26 @@ function safeConn(row: any) {
     lastTestResult:     row.test_status ?? null,
     autoTradingEnabled: !!row.auto_trading_enabled,
     isPaper:            row.is_paper !== false,    // 기본 true
-    isTestnet:          !!row.is_testnet,          // 테스트넷 여부
+
+    // **이 프로젝트 전체의 규칙: `is_testnet === false`일 때만 실전이다.**
+    // 모르는 값을 실전으로 읽으면 설정이 덜 된 계정이 곧바로 실계좌가 된다.
+    isTestnet:          row.is_testnet !== false,
+
+    // 스네이크 케이스 그대로도 내보낸다.
+    //
+    // 이게 빠져 있어서 화면의 모드 분류가 통째로 죽어 있었다:
+    // `lib/markets/tradeMode.ts`의 isLiveConnection·connectionsFor는
+    // `is_testnet`·`has_withdrawal`을 보는데 응답에 그 이름이 없었다.
+    // 결과가 조용해서 더 나빴다 —
+    //   · 모든 연결이 '테스트넷'으로 분류돼 **실전 탭에는 언제나
+    //     "실전 연결이 없습니다"**가 떴다 (실전 매매가 아예 막혀 있었다)
+    //   · 반대로 **실전 키가 테스트넷 탭에서 선택 가능**했다. 화면에는
+    //     '테스트넷 계좌'라고 적힌 채로 주문은 실계좌로 나간다
+    //   · 출금 권한 키를 목록에서 빼는 필터(`!c.has_withdrawal`)도
+    //     아무것도 거르지 않고 있었다
+    is_testnet:         row.is_testnet !== false,
+    has_withdrawal:     !!row.has_withdrawal,
+
     createdAt:          row.created_at ?? null,
   };
 }
@@ -79,9 +98,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '지원하지 않는 거래소' }, { status: 400 });
     }
 
+    // ── 어느 환경의 키인가를 **판별한다** ─────────────────────
+    //
+    // 테스트넷 키와 실전 키는 물리적으로 다른 키다. 같은 키로 양쪽을 쓸 수
+    // 없다. 즉 이건 사용자가 고르는 '모드'가 아니라 **그 키의 성질**이다.
+    //
+    // 그런데 지금까지는 사람에게 물었고, 사람은 틀렸다:
+    //   · Gate에는 선택지조차 없어서 전부 실전으로 저장 → 테스트넷 키가 401
+    //   · 바이낸스는 실전으로 등록했는데 키는 테스트넷 → 연결 테스트는 실패,
+    //     테스트넷 진단은 5/5 통과라는 이상한 상태
+    // 둘 다 원인이 같다. **묻지 않으면 틀릴 수 없다.**
+    //
+    // 그래서 고른 쪽을 먼저 시도하고, 실패하면 반대쪽도 시도한다. 반대쪽이
+    // 통하면 그쪽이 정답이고 그 사실을 응답에 적는다 — 조용히 바꾸지 않는다.
+    // 사용자가 '실전'이라고 믿는 연결이 테스트넷이 되는 것은 그 반대만큼
+    // 나쁘다.
+    const canDetect = ['binance', 'gate'].includes(String(exchange));
+    const first = isTestnet !== false;
+    let usedTestnet = first;
     let testResult;
+    let switched = false;
     try {
-      testResult = await testExchange(exchange as ExchangeId, apiKey, apiSecret, passphrase, isTestnet);
+      testResult = await testExchange(exchange as ExchangeId, apiKey, apiSecret, passphrase, first);
+      if (!testResult.success && canDetect) {
+        const alt = await testExchange(exchange as ExchangeId, apiKey, apiSecret, passphrase, !first);
+        if (alt.success) { testResult = alt; usedTestnet = !first; switched = true; }
+      }
     } catch (e) {
       return NextResponse.json({
         error: e instanceof Error ? e.message : '검증 실패',
@@ -89,7 +131,10 @@ export async function POST(req: NextRequest) {
     }
 
     if (!testResult.success) {
-      return NextResponse.json({ error: `연결 테스트 실패: ${testResult.message}` }, { status: 400 });
+      return NextResponse.json({
+        error: `연결 테스트 실패: ${testResult.message}`
+          + (canDetect ? ' (테스트넷·실전 양쪽 모두 시도했습니다)' : ''),
+      }, { status: 400 });
     }
 
     // 출금 권한 거부 (안전)
@@ -131,7 +176,8 @@ export async function POST(req: NextRequest) {
       is_active:           true,
       auto_trading_enabled: false,
       is_paper:            true,                           // 기본 모의
-      is_testnet:          !!isTestnet,                    // 테스트넷 여부
+      // 사용자가 고른 값이 아니라 **실제로 통한 쪽**을 저장한다.
+      is_testnet:          usedTestnet,
       last_tested_at:      new Date().toISOString(),
       test_status:         testResult.message,
     };
@@ -160,7 +206,16 @@ export async function POST(req: NextRequest) {
         // ON CONFLICT 제약 없음 → onConflict 없이 일반 insert로
         if (/ON CONFLICT/i.test(lastErr)) {
           const { data: d2, error: e2 } = await (sb.from('exchange_connections') as any).insert(rec).select().single();
-          if (!e2) return NextResponse.json({ success: true, connection: safeConn(d2), testResult: { success: true, message: testResult.message } });
+          if (!e2) return NextResponse.json({
+            success: true, connection: safeConn(d2),
+            testResult: { success: true, message: testResult.message },
+            // 고른 것과 실제가 달랐으면 **그 사실을 말한다.** 조용히 바꾸면
+            // 사용자가 '실전'이라고 믿는 연결이 테스트넷이 되고, 그 반대도 된다.
+            detected: { isTestnet: usedTestnet, switched,
+              message: switched
+                ? `입력한 키는 ${usedTestnet ? '테스트넷' : '실전'} 키였습니다 — ${usedTestnet ? '테스트넷' : '실전'}으로 등록했습니다.`
+                : null },
+          });
           lastErr = e2.message || lastErr;
           break;
         }
@@ -217,7 +272,23 @@ export async function POST(req: NextRequest) {
 
     let result;
     try {
-      result = await testExchange(conn.exchange_id ?? conn.exchange, apiKey, secret, pass);
+      // **이 연결의 환경으로 물어본다.**
+      //
+      // 마지막 인자를 안 넘기고 있었다. isTestnet은 optional이라 undefined면
+      // falsy — 즉 '연결 테스트' 버튼은 연결이 테스트넷이든 아니든 **언제나
+      // 실전 호스트**에 물어봤다. 테스트넷 키로 실전에 물으면 서명이 안
+      // 맞아 401이 오고, 화면에는 "키가 틀렸거나 / 반대쪽 키이거나 / IP
+      // 제한"이라고 뜬다. 셋 다 아닌데도.
+      //
+      // 등록(connect)은 이 값을 제대로 넘기고 있었다. 그래서 **등록은
+      // 되는데 연결 테스트만 실패하는** 상태가 만들어졌다 — 사용자가
+      // 원인을 찾을 수 없는 조합이다.
+      //
+      // `!== false`는 이 프로젝트 공통 규칙이다(모르는 값은 테스트넷).
+      result = await testExchange(
+        conn.exchange_id ?? conn.exchange, apiKey, secret, pass,
+        conn.is_testnet !== false,
+      );
     } catch (e) {
       result = { success: false, message: e instanceof Error ? e.message : '테스트 실패' };
     }
@@ -307,6 +378,50 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, isPaper: !!isPaper });
   }
 
+  // 이미 등록한 연결의 테스트넷 여부를 바꾼다.
+  //
+  // 왜 필요한가: 실전으로 등록해 놓고 실제로는 테스트넷 키인 경우가 흔하다
+  // (연결 테스트는 실패하는데 테스트넷 진단은 통과하는 상태). 지금까지는
+  // **지우고 다시 만드는 수밖에 없었다** — 키를 다시 붙여넣어야 하고, 그
+  // 과정에서 실전 키를 잘못 넣을 위험이 새로 생긴다.
+  //
+  // 자동매매는 **끈다.** 어느 계좌를 향하는지가 바뀌었는데 켜진 채로 두면,
+  // 다음 신호가 사용자가 확인하지 않은 계좌로 나간다.
+  if (action === 'set-testnet') {
+    const { connectionId, isTestnet } = body;
+    if (!connectionId) return NextResponse.json({ error: 'missing_params' }, { status: 400 });
+    const next = isTestnet === true;
+    if (sb) {
+      // 컬럼 이름은 `auto_trading_enabled`다. 한동안 `auto_trading`으로
+      // 잘못 적어서 이 요청이 통째로 실패했다 — 덕분에 환경도 안 바뀌었다.
+      // 그게 오히려 맞는 결과였다: 자동매매를 못 끄는데 환경만 바뀌면,
+      // 다음 신호가 사용자가 확인하지 않은 계좌로 나간다. 그래서 지금도
+      // **한 번의 update로 묶어 둔다** — 둘 중 하나만 되는 상태를 만들지 않는다.
+      const { error } = await (sb.from('exchange_connections') as any)
+        .update({ is_testnet: next, auto_trading_enabled: false })
+        .eq('id', connectionId).eq('user_id', uid);
+      if (error) {
+        return NextResponse.json({
+          error: `환경을 바꾸지 못했습니다: ${error.message}`,
+          // 무엇이 안 바뀌었는지 분명히 한다. '실패했다'만 적으면 사용자는
+          // 반쯤 바뀌었을까 봐 확인할 방법을 찾게 된다.
+          message: '아무것도 바뀌지 않았습니다 — 연결은 그대로입니다.',
+        }, { status: 500 });
+      }
+    } else {
+      const r = MEM_STORE.find(x => x.id === connectionId);
+      if (!r) return NextResponse.json({ error: '연결을 찾을 수 없습니다' }, { status: 404 });
+      r.is_testnet = next;
+      (r as any).auto_trading_enabled = false;
+    }
+    return NextResponse.json({
+      success: true, isTestnet: next,
+      message: next
+        ? '테스트넷으로 바꿨습니다. 자동매매는 꺼졌습니다 — 연결 테스트로 확인한 뒤 다시 켜세요.'
+        : '⚠️ 실전으로 바꿨습니다. 이제 실제 자금이 사용됩니다. 자동매매는 꺼졌습니다 — 연결 테스트로 확인한 뒤 다시 켜세요.',
+    });
+  }
+
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
 }
 
@@ -328,7 +443,10 @@ export async function GET(req: NextRequest) {
     if (sb) {
       const { data, error } = await sb
         .from('exchange_connections')
-        .select('id, exchange_id, label, api_key_masked, has_withdrawal, perm_read, perm_trading, is_active, auto_trading_enabled, is_paper, last_tested_at, test_status, api_passphrase_enc, created_at')
+        // is_testnet이 빠져 있었다 — 그래서 위 safeConn이 무엇을 어떻게
+        // 매핑하든 결과가 늘 '테스트넷'이었다. 없는 칸은 조회하지 않으면
+        // 기본값이 아니라 **모른다**가 되고, 여기서는 그게 사고였다.
+        .select('id, exchange_id, label, api_key_masked, has_withdrawal, perm_read, perm_trading, is_active, auto_trading_enabled, is_paper, is_testnet, last_tested_at, test_status, api_passphrase_enc, created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false });
       if (error) return NextResponse.json({ error: error.message, connections: [] }, { status: 500 });

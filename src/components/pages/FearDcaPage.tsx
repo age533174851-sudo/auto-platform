@@ -3,6 +3,7 @@ import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
+import { SettingField, DefaultHint, settingInput, ResetAll, countChanged } from '@/components/ui/SettingField';
 import { TrendingDown, Info } from 'lucide-react';
 import { DEFAULT_FEAR_DCA, evaluateFearDca, getDcaState, type FearDcaConfig } from '@/lib/strategies/fearDca';
 
@@ -78,45 +79,63 @@ export default function FearDcaPage() {
       <Card style={{ padding: 16, marginBottom: 12 }}>
         <div style={{ color: T.txt, fontWeight: 700, fontSize: 13, marginBottom: 12 }}>전략 설정</div>
 
-        <Field label="대상 자산">
+        {/* 기본값을 항상 적는다. "최대 투입비율 85"만 보이면 이게 권장값인지
+            내가 올려놓고 잊은 값인지 알 수 없는데, 이 화면의 숫자는 **돈이
+            얼마나 들어가는지**를 정한다. 모르고 돌리면 알고 한 결정이 아니다. */}
+        <SettingField label="대상 자산" value={cfg.asset} base={DEFAULT_FEAR_DCA.asset}
+          onReset={() => update({ asset: DEFAULT_FEAR_DCA.asset })}>
           <input value={cfg.asset} onChange={e => update({ asset: e.target.value.toUpperCase() })}
-            style={inp} placeholder="BTC" />
-        </Field>
+            style={settingInput(8)} placeholder="BTC" />
+        </SettingField>
 
-        {[
-          { k: 'buyPerTime', l: '1회 매수금액 (원)', step: 5000 },
-          { k: 'totalSeed', l: '전체 시드 (원)', step: 100000 },
-        ].map(f => (
-          <Field key={f.k} label={f.l}>
-            <input type="number" value={(cfg as any)[f.k]} step={f.step}
-              onChange={e => update({ [f.k]: parseFloat(e.target.value) || 0 } as any)} style={inp} />
-          </Field>
+        {([
+          { k: 'buyPerTime', l: '1회 매수금액', unit: '원', step: 5000, ch: 12 },
+          { k: 'totalSeed', l: '전체 시드', unit: '원', step: 100000, ch: 14 },
+        ] as const).map(f => (
+          <SettingField key={f.k} label={f.l} value={(cfg as any)[f.k]}
+            base={(DEFAULT_FEAR_DCA as any)[f.k]} unit={f.unit}
+            onReset={() => update({ [f.k]: (DEFAULT_FEAR_DCA as any)[f.k] } as any)}>
+            <input type="number" value={(cfg as any)[f.k]} step={f.step} inputMode="numeric"
+              onChange={e => update({ [f.k]: parseFloat(e.target.value) || 0 } as any)}
+              style={settingInput(f.ch)} />
+          </SettingField>
         ))}
 
-        {[
-          { k: 'maxInvestPct', l: '최대 투입비율 (%)', min: 10, max: 100, step: 5 },
-          { k: 'cooldownDays', l: '쿨타임 (일)', min: 1, max: 30, step: 1 },
-          { k: 'fearThreshold', l: '공포 매수 기준 (F&G ≤)', min: 5, max: 40, step: 5 },
-          { k: 'greedExit', l: '탐욕 청산 기준 (F&G ≥)', min: 50, max: 90, step: 5 },
-        ].map(f => (
-          <Field key={f.k} label={`${f.l}: ${(cfg as any)[f.k]}`}>
+        {([
+          { k: 'maxInvestPct', l: '최대 투입비율', unit: '%', min: 10, max: 100, step: 5 },
+          { k: 'cooldownDays', l: '쿨타임', unit: '일', min: 1, max: 30, step: 1 },
+          { k: 'fearThreshold', l: '공포 매수 기준 (F&G ≤)', unit: '', min: 5, max: 40, step: 5 },
+          { k: 'greedExit', l: '탐욕 청산 기준 (F&G ≥)', unit: '', min: 50, max: 90, step: 5 },
+        ] as const).map(f => (
+          <SettingField key={f.k} grow label={f.l} value={(cfg as any)[f.k]}
+            base={(DEFAULT_FEAR_DCA as any)[f.k]} unit={f.unit}
+            onReset={() => update({ [f.k]: (DEFAULT_FEAR_DCA as any)[f.k] } as any)}>
             <input type="range" min={f.min} max={f.max} step={f.step} value={(cfg as any)[f.k]}
               onChange={e => update({ [f.k]: parseFloat(e.target.value) } as any)}
               style={{ width: '100%', accentColor: T.acl }} />
-          </Field>
+          </SettingField>
         ))}
 
         {/* 선물 토글 */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, padding: '10px 12px', background: T.alt, borderRadius: 10 }}>
           <div>
-            <div style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>선물 사용</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
+              <span style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>선물 사용</span>
+              <DefaultHint now={cfg.useFutures} base={DEFAULT_FEAR_DCA.useFutures}
+                onReset={() => update({ useFutures: DEFAULT_FEAR_DCA.useFutures })}/>
+            </div>
             <div style={{ color: T.muted, fontSize: 9 }}>DCA는 현물 권장 — 선물은 물타다 청산 위험</div>
           </div>
           <button onClick={() => update({ useFutures: !cfg.useFutures })}
-            style={{ width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer', background: cfg.useFutures ? T.red : T.muted, position: 'relative' }}>
+            className="switch" style={{ width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer', background: cfg.useFutures ? T.red : T.muted, position: 'relative' }}>
             <span style={{ position: 'absolute', top: 3, left: cfg.useFutures ? 21 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left .2s' }} />
           </button>
         </div>
+
+        <ResetAll
+          changed={countChanged(cfg as any, DEFAULT_FEAR_DCA as any,
+            ['asset','buyPerTime','totalSeed','maxInvestPct','cooldownDays','fearThreshold','greedExit','useFutures'])}
+          onReset={() => update({ ...DEFAULT_FEAR_DCA, enabled: cfg.enabled })}/>
       </Card>
 
       {/* 안내 */}

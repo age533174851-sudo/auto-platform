@@ -245,3 +245,53 @@ export function checkCoinMIntent(i: CoinMIntent): CoinMCheck {
   }
   return { ok: true };
 }
+
+// ── 손절 ───────────────────────────────────────────────
+
+export interface CoinMStopPlan {
+  /** 손절 주문의 방향. 진입의 반대다 */
+  stopSide: 'BUY' | 'SELL';
+  ok: boolean;
+  reason: string;
+}
+
+/**
+ * COIN-M 손절 주문 계획.
+ *
+ * 왜 순수 함수인가: 여기서 방향을 틀리면 **손절이 즉시 발동하거나 영원히
+ * 발동하지 않는다.** 둘 다 화면에서는 '손절 걸림'으로 보인다. 그리고 역방향
+ * 계약은 이미 한 번 헷갈리는 시장이다(수량이 계약, 손익이 코인) — 방향까지
+ * 코드 안에 흩어 두면 확인할 방법이 없다.
+ *
+ *  - LONG(BUY 진입)은 가격이 **내려갈 때** 닫는다 → SELL 손절, 손절가 < 기준가
+ *  - SHORT(SELL 진입)은 가격이 **올라갈 때** 닫는다 → BUY 손절, 손절가 > 기준가
+ *
+ * 기준가(마크가)를 모르면 방향 검사를 건너뛴다 — 추측한 가격으로 거부하면
+ * 정상 주문이 막힌다. 손절가 자체가 없으면 그것은 거부한다.
+ */
+export function coinMStopPlan(
+  entrySide: 'BUY' | 'SELL',
+  stopPrice: number | null | undefined,
+  markPrice?: number | null,
+): CoinMStopPlan {
+  const stopSide: 'BUY' | 'SELL' = entrySide === 'BUY' ? 'SELL' : 'BUY';
+  const sp = Number(stopPrice);
+
+  if (!Number.isFinite(sp) || sp <= 0) {
+    return { stopSide, ok: false,
+      reason: `손절가가 유효하지 않습니다 (${stopPrice}). `
+            + '손절 없는 진입은 포지션 크기를 정당화할 근거가 없습니다' };
+  }
+
+  const ref = Number(markPrice);
+  if (Number.isFinite(ref) && ref > 0) {
+    const badLong = entrySide === 'BUY' && sp >= ref;
+    const badShort = entrySide === 'SELL' && sp <= ref;
+    if (badLong || badShort) {
+      return { stopSide, ok: false,
+        reason: `${entrySide === 'BUY' ? 'LONG' : 'SHORT'} 마크가 ${ref} / 손절 ${sp} — `
+              + `손절이 ${entrySide === 'BUY' ? '위' : '아래'}에 있어 즉시 발동합니다` };
+    }
+  }
+  return { stopSide, ok: true, reason: '' };
+}

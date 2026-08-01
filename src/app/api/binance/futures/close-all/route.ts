@@ -1,8 +1,14 @@
-// /api/binance/futures/close-all — jobs 큐에 CLOSE_ALL_POSITIONS 적재 (Worker 실행)
+// /api/binance/futures/close-all — 포지션 전체 종료. **Vercel에서 직접 실행한다.**
 // POST { connectionId }
+//
+// 예전에는 jobs 큐에 적재하고 Worker가 실행했다. 그 워커는 쓰지 않고 있어서
+// (PROGRESS 인프라 표) 종료는 일어나지 않았고 응답은 ok:true였다.
+//
+// 취소를 먼저 한다. 미체결 지정가가 남아 있으면 종료 직후 그 주문이 체결되어
+// 포지션이 다시 열린다 — 닫았다고 믿은 뒤에 열리는 것이 가장 위험하다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { enqueueJob } from '@/lib/jobs';
+import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -15,16 +21,26 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ error: 'supabase_not_configured' }, { status: 503 });
 
-  const { connectionId } = body;
-  if (!connectionId) return NextResponse.json({ error: 'missing_connectionId' }, { status: 400 });
+  const creds = await loadBinanceCreds(sb, uid, body.connectionId);
+  if (!creds.ok) return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status });
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
-    .select('id, exchange_id, is_testnet, has_withdrawal').eq('id', connectionId).eq('user_id', uid).single();
-  if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
-  if (String(conn.exchange_id).toLowerCase() !== 'binance') return NextResponse.json({ error: 'not_binance' }, { status: 400 });
-  if (conn.has_withdrawal === true) return NextResponse.json({ error: 'withdrawal_key_blocked' }, { status: 403 });
+  const { cancelAllOpenOrders, closeAllPositions } = await import('@/lib/exchanges/binanceFutures');
 
-  const r = await enqueueJob(sb, { userId: uid, connectionId, action: 'CLOSE_ALL_POSITIONS', mode: conn.is_testnet ? 'TESTNET' : 'LIVE', priority: 1, maxAttempts: 8 });
-  if (!r.ok) return NextResponse.json({ error: 'enqueue_failed', message: r.error }, { status: 500 });
-  return NextResponse.json({ ok: true, queued: true, jobId: r.jobId });
+  const cancel = await cancelAllOpenOrders(creds.key, creds.secret, creds.testnet);
+  const close = await closeAllPositions(creds.key, creds.secret, creds.testnet, 5);
+
+  return NextResponse.json({
+    ok: !!close?.success,
+    queued: false,
+    executed: !!close?.success,
+    // 취소 실패는 막지 않되 숨기지도 않는다. 종료가 됐는데 취소가 안 됐으면
+    // 사용자가 그 사실을 알아야 한다.
+    cancel: { success: !!cancel?.success, count: cancel?.count ?? null, results: cancel?.results },
+    remaining: close?.remaining ?? null,
+    retries: close?.retries ?? null,
+    testnet: creds.testnet,
+    message: close?.success
+      ? '포지션 전체 종료 완료'
+      : `포지션 ${close?.remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
+  }, { status: close?.success ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
 }

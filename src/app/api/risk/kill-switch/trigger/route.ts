@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions } from '@/lib/risk/killSwitch';
+import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -38,15 +39,53 @@ export async function POST(req: NextRequest) {
   const testnet = conn.is_testnet === true;
   await logKillEvent(sb, uid, connectionId, { reason: s.triggerReason, equity: 0, drawdownPct: 0, action: 'MANUAL_TRIGGER', mode: testnet ? 'TESTNET' : 'LIVE' });
 
-  // 발동 순간 KILL_SWITCH_EXECUTE job 적재 (Worker가 실행)
+  // ── 발동 순간 실제로 실행한다 ──
+  //
+  // 예전에는 KILL_SWITCH_EXECUTE job을 적재하고 Worker가 실행하게 했다. 그
+  // 워커는 Binance IP 지역 차단으로 쓰지 않고 있어서(PROGRESS 인프라 표)
+  // **미체결 취소와 포지션 종료가 일어나지 않았다.**
+  //
+  // 즉 킬스위치를 누르면 DB의 active=true는 켜져서 신규 주문은 막혔지만,
+  // 이미 열린 포지션은 그대로 남았다. 문을 잠그고 안에 있는 것을 꺼내지 않은
+  // 것이다. 급할 때 누른 사람은 정리됐다고 믿고 손을 뗀다 — 이 앱에서 가장
+  // 위험한 실패였다.
+  //
+  // executeKillActions는 이 파일이 이미 import하고 있었다. 부르지 않았을 뿐이다.
   let exec: any = null;
   if (!wasActive) {
     try {
-      const { enqueueJob } = await import('@/lib/jobs');
-      const q = await enqueueJob(sb, { userId: uid, connectionId, action: 'KILL_SWITCH_EXECUTE', mode: testnet ? 'TESTNET' : 'LIVE', payload: { actionMode: s.actionMode, reason: s.triggerReason }, priority: 0, maxAttempts: 10 });
-      exec = { queued: true, jobId: q.jobId };
-    } catch { exec = { error: true }; }
+      const creds = await loadBinanceCreds(sb, uid, connectionId);
+      if (!creds.ok) {
+        // 실행하지 못했다는 사실을 숨기지 않는다. active=true는 이미 저장됐으므로
+        // 신규 주문은 막힌 상태다 — 그 절반만 됐다는 것을 응답에 적는다.
+        exec = { ran: false, error: creds.error, message: creds.message
+          || 'API 키를 읽지 못해 취소·종료를 실행하지 못했습니다' };
+      } else {
+        const r = await executeKillActions(sb, uid, connectionId, {
+          key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+          actionMode: s.actionMode,
+        });
+        exec = { ran: true, ...r };
+      }
+    } catch (e: any) {
+      exec = { ran: false, error: 'execute_failed', message: e?.message || '취소·종료 실행 실패' };
+    }
   }
 
-  return NextResponse.json({ ok: true, active: true, triggerReason: s.triggerReason, exec });
+  // 취소·종료가 실패하면 ok:true로 돌려주지 않는다. 화면이 "정리됨"으로 그리면
+  // 사용자는 거래소를 확인하지 않는다.
+  const execOk = !wasActive
+    ? !!(exec?.ran && (exec.cancel?.success !== false) && (exec.close?.success !== false))
+    : true;
+
+  return NextResponse.json({
+    ok: execOk,
+    active: true,
+    queued: false,
+    triggerReason: s.triggerReason,
+    exec,
+    message: execOk
+      ? '킬스위치 발동 — 신규 주문 차단, 미체결 취소·포지션 종료 완료'
+      : '킬스위치는 켜졌지만(신규 주문 차단) 취소·종료가 완료되지 않았습니다 — 거래소에서 직접 확인하세요',
+  }, { status: execOk ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
 }

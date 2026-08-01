@@ -77,7 +77,7 @@ export default function StrategyMarketPanel({ symbols = ['BTC', 'ETH', 'SOL', 'D
               {/* 토글 */}
               {!isNone ? (
                 <button onClick={() => toggle(a.symbol)}
-                  style={{ width: 46, height: 26, borderRadius: 13, border: 'none', background: on ? a.tfColor : T.border2, position: 'relative', cursor: 'pointer', flexShrink: 0, transition: 'background .2s' }}>
+                  className="switch" style={{ width: 46, height: 26, borderRadius: 13, border: 'none', background: on ? a.tfColor : T.border2, position: 'relative', cursor: 'pointer', flexShrink: 0, transition: 'background .2s' }}>
                   <span style={{ position: 'absolute', top: 3, left: on ? 23 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left .2s' }} />
                 </button>
               ) : (

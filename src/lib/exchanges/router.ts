@@ -61,7 +61,9 @@ export async function testExchange(
       return testBinance(key, secret);
     case 'bybit':    return testBybit(key, secret);
     case 'okx':      return testOKX(key, secret, passphrase || '');
-    case 'gate':     return testGate(key, secret);
+    // Gate도 testnet을 받는다. 안 넘기면 테스트넷 연결의 '연결 성공'이
+    // 실계좌를 본 결과가 된다 — 확인한 적 없는 것을 확인했다고 적는 셈이다.
+    case 'gate':     return testGate(key, secret, isTestnet === true);
     case 'upbit':    return testUpbit(key, secret);
     case 'bithumb':  return testBithumb(key, secret);
     default:         return { success: false, message: `Unknown exchange: ${exchange}` };
@@ -80,7 +82,7 @@ export async function getExchangeBalances(
       case 'binance':  return getBalancesBinance(key, secret, isTestnet);
       case 'bybit':    return getBalancesBybit(key, secret);
       case 'okx':      return getBalancesOKX(key, secret, passphrase || '');
-      case 'gate':     return getBalancesGate(key, secret);
+      case 'gate':     return getBalancesGate(key, secret, isTestnet === true);
       case 'upbit':    return getBalancesUpbit(key, secret);
       case 'bithumb':  return getBalancesBithumb(key, secret);
       default:         return [];

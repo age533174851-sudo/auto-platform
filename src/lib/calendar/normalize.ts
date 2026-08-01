@@ -197,3 +197,46 @@ export function collectEvents(
 
   return { events, removed, skipped };
 }
+
+/**
+ * 응답 한 줄에 **이름을 두 이름으로** 싣는다.
+ *
+ * 왜 이런 일을 하는가
+ * ───────────────────
+ * `/api/calendar`는 지표 이름을 `title`로 내보내는데, 경제 캘린더 화면은
+ * `event`를 읽는다. 둘이 안 맞아서 **카드에 이름이 통째로 비어 있었다** —
+ * 날짜·예측·이전·중요도는 다 뜨는데 "무슨 발표인지"만 없다.
+ *
+ * 그리고 이런 어긋남은 조용하다. 빈 문자열은 렌더링에서 그냥 안 보이고,
+ * 타입도 안 잡아 준다(응답이 any로 흐른다). 자동매매의 경제지표 회피
+ * 게이트는 같은 이유로 `cd.events`를 읽고 있었는데 라우트는 `data`를 준다 —
+ * 그쪽은 **항상 빈 배열**이라 지표 회피가 한 번도 걸린 적이 없다.
+ *
+ * 한쪽 이름만 남기고 소비자를 고치는 게 정석이지만, 이 응답을 읽는 곳을
+ * 전부 찾았다고 확신할 수 없다. 못 찾은 곳은 다시 조용히 비어 있게 된다.
+ * 그래서 **둘 다 싣고 항상 같은 값이게** 만든다.
+ */
+export function withEventName<T extends Record<string, any>>(row: T): T & { event: string; title: string } {
+  const name = String(row?.event ?? row?.title ?? '');
+  return { ...row, event: name, title: name };
+}
+
+/** 수동 동기화 최소 간격(ms). 같은 데이터를 1분에 열 번 받아도 달라지는 게 없다 */
+export const SYNC_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * 지금 다시 받아와도 되는가.
+ *
+ * 순수 함수로 두는 이유: "몇 초 남았다"를 화면이 그대로 쓰기 때문이다.
+ * 라우트가 직접 계산하면 남은 시간이 음수로 나오거나(시계가 뒤로 간 경우)
+ * 0초인데 못 누르는 상태가 조용히 생긴다.
+ */
+export function syncCooldown(lastAt: number, nowMs: number): { allowed: boolean; waitSec: number } {
+  const last = Number(lastAt);
+  // 한 번도 안 했으면 바로 된다. 시계가 뒤로 갔을 때(미래의 lastAt)도
+  // 영원히 잠기지 않게 막는다.
+  if (!Number.isFinite(last) || last <= 0 || last > nowMs) return { allowed: true, waitSec: 0 };
+  const left = SYNC_COOLDOWN_MS - (nowMs - last);
+  if (left <= 0) return { allowed: true, waitSec: 0 };
+  return { allowed: false, waitSec: Math.ceil(left / 1000) };
+}
