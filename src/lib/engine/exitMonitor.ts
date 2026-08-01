@@ -92,16 +92,25 @@ export async function decideExits(
     liveStopFor?: (userId: string, symbol: string) => Promise<number | null>;
     /** 트레일링 설정. 없으면 기본값 */
     cfg?: Partial<import('./trailPlan').TrailConfig>;
+    /**
+     * 이 사용자 것만 본다. 화면이 "내 포지션이 지금 어떤 상태인가"를
+     * 물을 때 쓴다 — 크론은 안 넘기고 전부 본다.
+     *
+     * 판정을 화면 쪽에 다시 적지 않으려고 여기에 거르개를 둔다. 규칙이
+     * 두 벌이 되면 화면이 말하는 것과 실제로 손절을 옮기는 것이 갈린다.
+     */
+    userId?: string | null;
   },
 ): Promise<ExitDecision[]> {
   const maxHoldMs = opts.maxHoldMs ?? 5 * 24 * 60 * 60 * 1000;
   const out: ExitDecision[] = [];
 
-  const { data: open } = await sb
+  let q = sb
     .from('ladder_daily_trades')
     .select('id, user_id, symbol, side, entry_price, stop_loss, created_at')
-    .eq('status', 'OPEN')
-    .limit(opts.limit ?? 25);
+    .eq('status', 'OPEN');
+  if (opts.userId) q = q.eq('user_id', opts.userId);
+  const { data: open } = await q.limit(opts.limit ?? 25);
 
   if (!Array.isArray(open) || open.length === 0) return out;
 
