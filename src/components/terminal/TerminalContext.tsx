@@ -18,6 +18,7 @@ import React, { createContext, useContext, useState, useEffect, useMemo, useCall
 import { loadFavorites, saveFavorites } from './SymbolSearch';
 import { parseMarketType, type MarketType } from '@/lib/markets/marketType';
 import { resolveTradeMode, TRADE_MODES, type TradeMode, type ModeResolution } from '@/lib/markets/tradeMode';
+import { watchAuthToken } from '@/lib/auth/authToken';
 
 export interface TerminalSymbol {
   /** 거래소 심볼 — 'BTCUSDT' */
@@ -200,21 +201,21 @@ export function TerminalProvider(
     try { localStorage.setItem(SYMBOL_KEY, JSON.stringify(s)); } catch {}
   }, []);
 
-  // 인증 → 연결 목록 → 운영 모드. 순서대로 한 번만.
+  // 로그인 토큰을 **계속** 따라간다.
+  //
+  // 예전에는 화면이 뜰 때 한 번 읽고 끝이었다. access token은 1시간짜리라,
+  // 한 시간이 지나면 화면이 들고 있는 값만 죽고 모든 요청이 401이 됐다.
+  // 사용자에게는 "가만히 있었는데 로그아웃됐다"로 보인다 — 실제로는
+  // 로그아웃된 적이 없고 세션은 살아 있다. 다시 로그인하면 낫는 이유도
+  // 그래서다(새 토큰을 다시 복사할 뿐이다).
+  useEffect(() => watchAuthToken(setAuth), []);
+
+  // 연결 목록 → 운영 모드. **토큰이 바뀌면 다시 읽는다** —
+  // 처음 로드 때 아직 로그인 전이었으면 연결 목록이 영영 비어 있었다.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let token = '';
-      try {
-        const { getSupabaseClient } = await import('@/lib/supabase/client');
-        const sbc = getSupabaseClient();
-        if (sbc) {
-          const { data } = await sbc.auth.getSession();
-          if (data?.session?.access_token) token = `Bearer ${data.session.access_token}`;
-        }
-      } catch { /* 로그인 전 */ }
-      if (cancelled) return;
-      setAuth(token);
+      const token = auth;
       if (!token) return;
 
       const h = { Authorization: token };
@@ -249,7 +250,7 @@ export function TerminalProvider(
       } catch { /* 모르는 채로 둔다 — UNKNOWN_MODE가 그 사실을 보여준다 */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [auth]);
 
   // 즐겨찾기를 좌측 목록이 쓰는 형태로. 한국어 이름은 아는 것만 붙인다 —
   // 모르는 종목에 임의로 이름을 지어 붙이면 그게 더 헷갈린다.
