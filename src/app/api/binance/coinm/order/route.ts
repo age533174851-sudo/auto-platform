@@ -283,7 +283,19 @@ export async function POST(req: NextRequest) {
     }
 
     if (!checklist.allowed) {
+      // **막았다는 사실을 남긴다.** 예전에는 409만 돌려주고 끝이라
+      // 어디에도 안 남았다 — 그래서 화면은 설정값만 보여줄 수 있었고,
+      // 설정값만 보이면 사람은 그것이 돌고 있다고 믿는다.
+      // 기록 실패가 주문을 되살리지는 않는다(이미 막혔다). 다만
+      // 조용히 넘기지 않고 응답에 적는다.
+      let logNote: string | null = null;
+      try {
+        const { recordSafetyBlocks } = await import('@/lib/safety/safetyLog');
+        const lg = await recordSafetyBlocks(sb, uid, checklist.results as any, { market: 'COINM', symbol: String(symbol || '') });
+        logNote = lg.error;
+      } catch (e: any) { logNote = String(e?.message || e); }
       return NextResponse.json({
+        safetyLogError: logNote,
         error: 'checklist_blocked',
         message: checklist.summary,
         checklist: {
