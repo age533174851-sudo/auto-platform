@@ -81,6 +81,50 @@ export interface WalletTree {
 /**
  * 두 지갑을 하나의 트리로. 합치되 섞지 않는다.
  */
+/**
+ * 선물 잔고 응답에서 **USDT 지갑**을 꺼낸다.
+ *
+ * 왜 함수로 빼는가
+ * ────────────────
+ * `/api/wallets`가 이 응답을 이렇게 읽고 있었다:
+ *
+ *   const walletBalance = Number(b.balance ?? b.total ?? b.walletBalance) || 0;
+ *   const availableMargin = Number(b.available ?? b.availableBalance) || 0;
+ *
+ * 그런데 `getFuturesBalance`가 돌려주는 것은 `{ success, message, balances }`다.
+ * `balance`도 `available`도 **없는 이름**이다 — 둘 다 NaN이 되고, `|| 0`이
+ * 그것을 0으로 만들었다. 즉 **바이낸스 선물 가용 증거금은 언제나 0.00**이었다.
+ * 화면에는 "가용 0.00 USDT · 최대 0.00"으로 떴고, 그건 '돈이 없다'로 읽힌다.
+ *
+ * 이름이 안 맞는 것은 타입이 잡아 주지 않는다(응답이 any로 흘렀다). 그래서
+ * 여기로 빼고 테스트를 붙인다.
+ *
+ * **없는 자산은 0이다, 모르는 게 아니다.** getFuturesBalance는 잔고가 0인
+ * 자산을 아예 빼고 준다. 목록에 USDT가 없으면 그건 조회 실패가 아니라
+ * 진짜 0이다 — 여기서 null을 주면 잔고 0인 계좌가 '확인 불가'가 된다.
+ */
+export function usdtFromFuturesBalances(
+  res: any,
+): { ok: boolean; walletBalance: number; availableMargin: number; error?: string } {
+  if (!res || res.success !== true) {
+    return { ok: false, walletBalance: 0, availableMargin: 0, error: String(res?.message || '선물 잔고 조회 실패') };
+  }
+  const list = Array.isArray(res.balances) ? res.balances : null;
+  if (!list) {
+    // success인데 목록이 없다 — 응답 모양이 바뀐 것이다. 0으로 넘기지 않는다.
+    return { ok: false, walletBalance: 0, availableMargin: 0, error: '선물 잔고 응답에 balances 목록이 없습니다' };
+  }
+  const row = list.find((b: any) => String(b?.asset).toUpperCase() === 'USDT');
+  if (!row) return { ok: true, walletBalance: 0, availableMargin: 0 };
+
+  const w = Number(row.balance);
+  const a = Number(row.availableBalance);
+  if (!Number.isFinite(w) || !Number.isFinite(a)) {
+    return { ok: false, walletBalance: 0, availableMargin: 0, error: 'USDT 잔고가 숫자가 아닙니다' };
+  }
+  return { ok: true, walletBalance: w, availableMargin: a };
+}
+
 export function buildWalletTree(spot: SpotWallet, futures: FuturesWallet): WalletTree {
   // ── 현물 평가액 ──
   // 가격을 못 매긴 자산은 합계에서 빼되, 이름을 남긴다. 조용히 빼면

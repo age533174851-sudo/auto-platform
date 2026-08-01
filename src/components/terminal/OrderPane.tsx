@@ -371,7 +371,19 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         const r = await fetch(`/api/wallets?connectionId=${wid}`, { headers: { Authorization: auth } });
         const j = await r.json();
         if (!alive) return;
-        if (r.ok && j?.ok) { setWallet(j.tree); setWalletErr(''); return; }
+        if (r.ok && j?.ok) {
+          setWallet(j.tree);
+          // **라우트가 ok여도 지갑 한쪽은 실패했을 수 있다.**
+          //
+          // 현물과 선물을 따로 부르고 하나가 죽어도 나머지를 돌려주기
+          // 때문이다(그래야 실패한 쪽을 0으로 채워 총자산이 줄어 보이는
+          // 일이 없다). 그래서 이유는 `tree.futures.error`에 들어 있는데,
+          // 화면은 그걸 안 읽고 '확인 불가'만 그리고 있었다 — 사용자는
+          // 키가 문제인지 자금이 없는 건지 알 방법이 없다.
+          const fe = j.tree?.futures;
+          setWalletErr(fe && fe.ok === false ? String(fe.error || '선물 지갑을 읽지 못했습니다') : '');
+          return;
+        }
         // **왜 못 읽었는지를 버리지 않는다.** 지금까지 이유를 통째로
         // 지우고 '확인 불가'만 남겼는데, 그러면 테스트 자금을 받으러 갈지
         // 키를 고칠지 사용자가 알 수 없다.

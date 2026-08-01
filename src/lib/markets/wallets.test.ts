@@ -5,7 +5,7 @@
 // 그 사실이 계산 어디에서도 흐려지면 안 된다.
 import { test, assert, eq } from '../../test/harness';
 import {
-  buildWalletTree, canOpenFutures, spotAllocation,
+  buildWalletTree, canOpenFutures, spotAllocation, usdtFromFuturesBalances,
   SPOT_UNAVAILABLE, FUTURES_UNAVAILABLE,
   type SpotWallet, type FuturesWallet,
 } from './wallets';
@@ -142,5 +142,51 @@ export function runWalletTests() {
       eq(r.ok, false, `${JSON.stringify(bad)}가 통과했다`);
       assert(!!r.reason, '이유가 없다');
     }
+  });
+
+  // ── 선물 잔고 응답 읽기 ─────────────────────────────────
+  //
+  // `/api/wallets`가 이 응답을 `b.balance ?? b.total ?? b.walletBalance`로
+  // 읽고 있었다. 실제 이름은 `balances`(배열)다 — 셋 다 없어서 NaN이 되고,
+  // `|| 0`이 그것을 0으로 만들었다. **바이낸스 선물 가용 증거금이 언제나
+  // 0.00**이었고, 화면에는 '돈이 없다'로 보였다.
+  console.log('[선물 잔고 응답 — 이름이 안 맞으면 0이 된다]');
+
+  const okRes = (rows: any[]) => ({ success: true, message: '', balances: rows });
+
+  test('USDT 행에서 잔고와 가용을 꺼낸다', () => {
+    const r = usdtFromFuturesBalances(okRes([
+      { asset: 'BNB', balance: 1, availableBalance: 1 },
+      { asset: 'USDT', balance: 1234.5, availableBalance: 1000.25 },
+    ]));
+    eq(r.ok, true);
+    eq(r.walletBalance, 1234.5);
+    eq(r.availableMargin, 1000.25);
+  });
+
+  test('목록에 USDT가 없으면 0이다 — 조회 실패가 아니다', () => {
+    // getFuturesBalance는 잔고 0인 자산을 아예 빼고 준다. 여기서 null을
+    // 주면 잔고 0인 계좌가 '확인 불가'가 되어, 자금을 받으러 갈지 키를
+    // 고칠지 알 수 없게 된다.
+    const r = usdtFromFuturesBalances(okRes([{ asset: 'BNB', balance: 1, availableBalance: 1 }]));
+    eq(r.ok, true);
+    eq(r.availableMargin, 0);
+  });
+
+  test('조회가 실패했으면 0으로 넘기지 않는다', () => {
+    const r = usdtFromFuturesBalances({ success: false, message: '[-2015] Invalid API-key' });
+    eq(r.ok, false);
+    assert((r.error || '').includes('-2015'), r.error || '');
+  });
+
+  test('success인데 목록이 없으면 응답 모양이 바뀐 것이다 — 0으로 치지 않는다', () => {
+    // 예전 코드가 정확히 이 경우를 0으로 만들었다.
+    eq(usdtFromFuturesBalances({ success: true }).ok, false);
+    eq(usdtFromFuturesBalances({ success: true, balance: 500, available: 400 }).ok, false);
+  });
+
+  test('숫자가 아닌 잔고는 0이 아니라 실패다', () => {
+    const r = usdtFromFuturesBalances(okRes([{ asset: 'USDT', balance: 'x', availableBalance: null }]));
+    eq(r.ok, false);
   });
 }

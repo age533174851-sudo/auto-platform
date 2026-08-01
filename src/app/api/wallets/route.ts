@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import {
-  buildWalletTree, spotAllocation,
+  buildWalletTree, spotAllocation, usdtFromFuturesBalances,
   SPOT_UNAVAILABLE, FUTURES_UNAVAILABLE,
   type SpotWallet, type FuturesWallet,
 } from '@/lib/markets/wallets';
@@ -126,26 +126,23 @@ export async function GET(req: NextRequest) {
         getFuturesBalance(apiKey, secret, testnet),
         getFuturesPositions(apiKey, secret, testnet),
       ]);
-      if (!(bal as any)?.success) throw new Error((bal as any)?.message || '선물 잔고 조회 실패');
-
-      const b: any = bal;
       const positions: any[] = (pos as any)?.success ? (pos as any).positions : [];
       const unrealized = positions.reduce(
         (s, p) => s + (Number(p.unrealizedPnl ?? p.unRealizedProfit) || 0), 0);
       const positionMargin = positions.reduce(
         (s, p) => s + (Number(p.isolatedMargin ?? p.initialMargin) || 0), 0);
 
-      const walletBalance = Number(b.balance ?? b.total ?? b.walletBalance);
-      const availableMargin = Number(b.available ?? b.availableBalance);
-      // **`|| 0`을 쓰지 않는다.** 응답에 그 칸이 없거나 숫자가 아니면
-      // 0이 되어 화면에 "0.00 USDT"로 뜬다. 0은 '돈이 없다'이고 이건
-      // '못 읽었다'인데, 사용자는 그 차이를 알 방법이 없다 — 테스트 자금을
-      // 받으러 갈지 키를 고칠지가 갈리는 자리다.
-      if (!Number.isFinite(walletBalance) || !Number.isFinite(availableMargin)) {
-        throw new Error('선물 잔고 응답에 잔고 칸이 없습니다');
-      }
+      // 응답 모양을 여기서 추측하지 않는다 — 정확히 그래서 틀렸었다.
+      // (lib/markets/wallets의 usdtFromFuturesBalances 주석 참조)
+      const w = usdtFromFuturesBalances(bal);
+      if (!w.ok) throw new Error(w.error || '선물 잔고를 읽지 못했습니다');
 
-      return { ok: true, walletBalance, availableMargin, positionMargin, unrealizedPnl: unrealized };
+      return {
+        ok: true,
+        walletBalance: w.walletBalance,
+        availableMargin: w.availableMargin,
+        positionMargin, unrealizedPnl: unrealized,
+      };
     })(),
   ]);
 
