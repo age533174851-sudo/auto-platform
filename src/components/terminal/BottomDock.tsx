@@ -778,6 +778,56 @@ function PriceField({ label, value, onChange, presets, onPreset, refPrice, wrong
 }
 
 /**
+ * 이 가격에 닿으면 손익이 얼마인가.
+ *
+ * 두 가지를 같이 적는다:
+ *   · **금액**(USDT) — 실제로 계좌에서 늘거나 줄어드는 값
+ *   · **수익률**(ROI) — 증거금 대비. 가격이 1% 움직여도 10배면 10%다
+ *
+ * 수량이나 진입가를 모르면 **계산하지 않는다.** 0으로 적으면 '손익 없음'이
+ * 되는데, 그건 이 화면에서 가장 위험한 거짓말이다.
+ */
+function PnlPreview({ label, price, v, ok }: {
+  label: string;
+  price: number;
+  v: ReturnType<typeof derivePosition>;
+  /** 입력이 유효한가. 아니면 아무것도 안 그린다 */
+  ok: boolean;
+}) {
+  if (!ok || !Number.isFinite(price) || price <= 0) return null;
+  const entry = v.entry;
+  const qty = v.qty;
+  if (entry == null || !(entry > 0) || !(qty > 0)) {
+    return (
+      <div style={{ color: C.warn, fontSize: FS.micro, margin: '-4px 0 8px 36px', lineHeight: 1.5 }}>
+        {label} 손익을 계산할 수 없습니다 — 진입가·수량을 확인하지 못했습니다
+      </div>
+    );
+  }
+  const dir = v.side === 'LONG' ? 1 : -1;
+  const pnl = (price - entry) * qty * dir;
+  // 증거금을 모르면 수익률은 내지 않는다. 명목가로 대신 계산하면 레버리지가
+  // 빠져서 실제보다 훨씬 작은 숫자가 나온다.
+  const roi = v.margin != null && v.margin > 0 ? (pnl / v.margin) * 100 : null;
+  const tone = pnl >= 0 ? C.up : C.down;
+  return (
+    <div style={{
+      display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap',
+      margin: '-4px 0 8px 36px', fontSize: FS.micro, ...NUM,
+    }}>
+      <span style={{ color: C.faint, fontFamily: 'inherit' }}>이 가격이면</span>
+      <span style={{ color: tone, fontWeight: 700 }}>
+        {pnl >= 0 ? '+' : ''}{fmtPrice(pnl)} USDT
+      </span>
+      <span style={{ color: roi == null ? C.warn : tone }}>
+        {roi == null ? '수익률 계산 불가(증거금 모름)'
+          : `(${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%)`}
+      </span>
+    </div>
+  );
+}
+
+/**
  * TP/SL 판.
  *
  * 값을 **가격으로** 보낸다. %로 보내고 서버가 다시 계산하면 화면에 보여준
@@ -842,8 +892,17 @@ function TpSlPanel({ v, auth, connId, onDone }: {
 
       <PriceField label="익절" value={tp} onChange={setTp} presets={[1, 2, 5, 10]}
         refPrice={ref} onPreset={p => setTp(fromPct(p, true))} wrong={tpWrong}/>
+      {/* **이 가격이면 얼마인가.**
+          지금까지 가격만 받고 결과를 안 보여줬다. 그런데 사람이 정하고 싶은
+          것은 보통 가격이 아니라 금액이다 — "6만3천에 익절"이 아니라
+          "20달러 벌면 나간다". 가격만 보이면 그 둘을 머리로 환산해야 하고,
+          레버리지가 끼면 그 계산이 틀린다(수익률은 증거금 대비다).
+          바이낸스가 ROI·PnL 칸을 따로 두는 이유가 이것이다. */}
+      <PnlPreview label="익절" price={tpNum} v={v} ok={!!tp && tpOk && !tpWrong}/>
+
       <PriceField label="손절" value={sl} onChange={setSl} presets={[1, 2, 3, 5]}
         refPrice={ref} onPreset={p => setSl(fromPct(p, false))} wrong={slWrong}/>
+      <PnlPreview label="손절" price={slNum} v={v} ok={!!sl && slOk && !slWrong}/>
 
       {(tpWrong || slWrong) && (
         <div style={{
