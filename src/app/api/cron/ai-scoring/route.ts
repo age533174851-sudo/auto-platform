@@ -26,9 +26,31 @@ import { outcomeFromPrices } from '@/lib/ai/calibration';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+// 하루 치를 한 번에 처리하므로 기본 10초로는 부족하다. Hobby 상한이 60초다.
+export const maxDuration = 60;
 
-/** 한 번에 이만큼만. 크론이 타임아웃으로 통째로 실패하는 것보다 낫다 */
-const MAX_PER_RUN = 200;
+/**
+ * 크론은 **하루 한 번**이다 (vercel.json: `30 3 * * *` = 12:30 KST).
+ *
+ * 시간별로 두었다가 배포가 통째로 실패했다:
+ *   "Hobby accounts are limited to daily cron jobs."
+ * 더 자주 돌리고 싶으면 요금제를 올리거나, 이 주소를 외부 스케줄러에서
+ * `?secret=` 붙여 부르면 된다. **시간별로 되돌리면 배포가 다시 깨진다.**
+ *
+ * 채점은 급한 일이 아니다 — 지연되어도 성적표가 늦게 나올 뿐 매매에
+ * 영향이 없다. 그래서 하루 한 번으로 충분하다.
+ */
+const MAX_PER_RUN = 400;
+
+/**
+ * 가격 조회 동시 실행 수.
+ *
+ * 행마다 두 번(예측 시점 · 기한 시점) 부르므로 순차로 돌리면 400행에
+ * 800번이고, 한 번에 200ms만 잡아도 160초다 — 함수가 죽는다.
+ * 8이면 800/8 × 200ms ≈ 20초. Binance 공개 klines의 가중치도 이 정도는
+ * 여유가 있다.
+ */
+const CONCURRENCY = 8;
 
 /**
  * 그 시각의 1분봉 종가.
@@ -92,28 +114,31 @@ export async function GET(req: NextRequest) {
   let unpriced = 0;
   let failed = 0;
 
-  for (const r of due) {
+  const scoreOne = async (r: any) => {
     const at = Date.parse(String(r.decided_at));
     const h = Number(r.horizon_min);
     const symbol = String(r.symbol || '');
-    if (!symbol) { unpriced++; continue; }
+    if (!symbol) { unpriced++; return; }
 
-    const entry = Number.isFinite(Number(r.entry_price)) && Number(r.entry_price) > 0
-      ? Number(r.entry_price)
-      : await closeAt(symbol, at);
-    const later = await closeAt(symbol, at + h * 60_000);
+    // 두 시점을 **동시에** 읽는다. 순차로 읽으면 행마다 왕복이 두 번이다.
+    const [entryRead, later] = await Promise.all([
+      Number.isFinite(Number(r.entry_price)) && Number(r.entry_price) > 0
+        ? Promise.resolve(Number(r.entry_price))
+        : closeAt(symbol, at),
+      closeAt(symbol, at + h * 60_000),
+    ]);
 
-    const outcome = outcomeFromPrices(entry, later);
+    const outcome = outcomeFromPrices(entryRead, later);
     // 둘 중 하나라도 못 읽었으면 **건드리지 않는다.** 다음 실행에서 다시
     // 시도한다 — 여기서 'neutral'로 적으면 못 읽은 것이 결과가 된다.
-    if (outcome == null) { unpriced++; continue; }
+    if (outcome == null) { unpriced++; return; }
 
     try {
       const { error } = await (sb as any).from('ai_predictions')
         .update({
           outcome,
           outcome_price: later,
-          entry_price: entry,
+          entry_price: entryRead,
           scored_at: new Date(now).toISOString(),
         })
         .eq('id', r.id)
@@ -122,6 +147,13 @@ export async function GET(req: NextRequest) {
       if (error) throw new Error(error.message);
       scored++;
     } catch { failed++; }
+  };
+
+  // 동시에 CONCURRENCY개씩. 한 건이 던져도 나머지는 계속 간다 —
+  // 한 종목의 조회 실패로 그날 채점이 통째로 멈추면 안 된다.
+  for (let i = 0; i < due.length; i += CONCURRENCY) {
+    await Promise.all(due.slice(i, i + CONCURRENCY).map(r =>
+      scoreOne(r).catch(() => { failed++; })));
   }
 
   return NextResponse.json({
