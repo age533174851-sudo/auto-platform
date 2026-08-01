@@ -16,6 +16,7 @@ import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
 import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
+import { linearLiquidationPrice } from '@/lib/engine/paperPlan';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
@@ -444,7 +445,7 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
   const [closeMsg, setCloseMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // 카드 안에서 펼치는 판. 한 번에 하나만 — 둘을 같이 열면 카드가 화면보다 길어지고,
   // 뒤집기와 TP/SL을 동시에 만지는 것은 서로 다른 결과를 기대하는 조작이다.
-  const [panel, setPanel] = useState<'reverse' | 'tpsl' | null>(null);
+  const [panel, setPanel] = useState<'reverse' | 'tpsl' | 'lev' | null>(null);
   // 값 해석은 테스트가 있는 순수 함수가 한다. 청산가 0·증거금 추정·
   // 0으로 나누기 셋 다 화면에서는 그럴듯해 보여서 눈으로 못 잡는다.
   const v = derivePosition(p);
@@ -590,6 +591,14 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
                    opacity: qty <= 0 ? 0.5 : 1 }}>
           TP/SL
         </button>
+        {/* 배율은 '얼마나 벌 수 있나'의 손잡이처럼 보이지만 실제로 바뀌는
+            것은 **청산가**다. 그래서 포지션 카드에 둔다 — 청산가 바로 옆. */}
+        <button onClick={() => { setPanel(p => p === 'lev' ? null : 'lev'); }}
+          disabled={qty <= 0}
+          style={{ ...ghostBtn(panel === 'lev'), flex: 1, minHeight: 36,
+                   opacity: qty <= 0 ? 0.5 : 1 }}>
+          배율
+        </button>
         {/* 시장가 청산. 되돌릴 수 없으므로 확인을 받고, 확인 문구에
             무엇이 얼마나 나가는지 숫자로 적는다. '청산하시겠습니까?'만
             물으면 사람은 읽지 않고 예를 누른다. */}
@@ -610,6 +619,14 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
             // 결과 문구를 **카드로 올린다.** 판 안에 두면 판이 닫히는 순간
             // 같이 사라져서, 방금 무슨 일이 일어났는지 화면에 아무것도
             // 남지 않는다 — 뒤집기는 그걸 모르면 안 되는 동작이다.
+            setCloseMsg({ ok: true, text });
+            setPanel(null);
+            setTimeout(onClosed, delay);
+          }}/>
+      )}
+      {panel === 'lev' && (
+        <LeveragePanel v={v} auth={auth} connId={connId}
+          onDone={(text, delay) => {
             setCloseMsg({ ok: true, text });
             setPanel(null);
             setTimeout(onClosed, delay);
@@ -772,6 +789,148 @@ function PriceField({ label, value, onChange, presets, onPreset, refPrice, wrong
             {p}%
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 배율 변경 판.
+ *
+ * 이 화면에서 가장 오해하기 쉬운 조작이다. 배율은 "얼마나 벌 수 있나"의
+ * 손잡이처럼 보이지만, 들고 있는 포지션에서 실제로 바뀌는 것은 **청산가**다.
+ * 100 → 50으로 내리면 청산가가 멀어지고, 올리면 **현재가 쪽으로 다가온다.**
+ *
+ * 그래서 고르는 즉시 바뀔 청산가를 계산해 보여주고, 현재가를 이미 넘는
+ * 값은 누르지 못하게 한다. 서버도 같은 검사를 한 번 더 한다 — 화면 계산은
+ * 추정이고, 되돌릴 수 없는 판단을 화면 계산 하나에 맡기지 않는다.
+ */
+function LeveragePanel({ v, auth, connId, onDone }: {
+  v: ReturnType<typeof derivePosition>; auth: string; connId: string;
+  onDone: (text: string, refreshDelayMs: number) => void;
+}) {
+  const cur = v.leverage == null ? null : Math.round(v.leverage);
+  const [next, setNext] = useState<number>(cur ?? 5);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const entry = v.entry;
+  const mark = v.mark;
+  // 화면 추정도 서버와 **같은 규칙**으로 계산한다(유지증거금 1%). 둘이 다르면
+  // 화면에서 통과한 값이 서버에서 막히고, 사용자는 이유를 알 수 없다.
+  const projected = (entry != null && entry > 0)
+    ? linearLiquidationPrice(entry, next, v.side === 'LONG' ? 'LONG' : 'SHORT', 1.0)
+    : null;
+  const wouldLiq = projected != null && mark != null && mark > 0
+    && (v.side === 'LONG' ? mark <= projected : mark >= projected);
+  const distPct = projected != null && mark != null && mark > 0
+    ? Math.abs((mark - projected) / mark) * 100 : null;
+
+  const go = async () => {
+    if (!auth || !connId) { setMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
+    const { confirmDialog } = await import('@/lib/confirm/dialog');
+    const okToGo = await confirmDialog([
+      `${v.symbol} 배율을 ${cur ?? '?'}배 → ${next}배로 바꿉니다.`,
+      '',
+      '들고 있는 포지션의 **청산가가 함께 움직입니다.**',
+      projected != null ? `바뀐 뒤 청산가  약 ${fmtPrice(projected)}` : '바뀐 뒤 청산가  계산 불가',
+      mark != null ? `현재 Mark      ${fmtPrice(mark)}` : '현재 Mark      확인 불가',
+      distPct != null ? `청산까지        약 ${distPct.toFixed(2)}%` : '',
+      '',
+      '청산가는 추정치입니다. 실제 값은 바꾼 뒤 포지션에서 확인하세요.',
+    ].filter(Boolean).join('\n'), { danger: (distPct ?? 99) < 3 });
+    if (!okToGo) return;
+
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/binance/futures/leverage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ connectionId: connId, symbol: v.symbol, leverage: next }),
+      });
+      const j = await r.json();
+      const text = j?.message || j?.error || `실패 (${r.status})`;
+      if (r.ok && j?.ok) onDone(j.warning ? `${text} — ${j.warning}` : text, 2000);
+      else setMsg({ ok: false, text });
+    } catch (e: any) {
+      // 응답을 못 받았다. 바뀌었는지 아닌지 모른다.
+      setMsg({ ok: false, text: `응답 없음 — 다시 누르지 말고 포지션의 배율을 먼저 확인하세요 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  const LEVS = [1, 2, 3, 5, 10, 20, 50, 75, 100, 125];
+  return (
+    <div style={{ marginTop: 8, padding: '10px 11px', borderRadius: 8, background: C.raised }}>
+      <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 8, lineHeight: 1.5 }}>
+        지금 <b style={{ color: C.text }}>{cur == null ? '확인 불가' : `${cur}배`}</b>.
+        배율을 바꾸면 <b style={{ color: C.warn }}>이 포지션의 청산가도 함께 움직입니다.</b>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 4, marginBottom: 9 }}>
+        {LEVS.map(L => {
+          const on = next === L;
+          const risky = L >= 50;
+          return (
+            <button key={L} onClick={() => setNext(L)} style={{
+              minHeight: 30, borderRadius: 7, cursor: 'pointer',
+              background: on ? (risky ? C.down : C.accent) : C.panel,
+              color: on ? '#fff' : risky ? C.warn : C.dim,
+              border: `1px solid ${on ? 'transparent' : C.hair}`,
+              fontSize: FS.micro, fontWeight: 700, ...NUM,
+            }}>{L}×</button>
+          );
+        })}
+      </div>
+
+      {/* 바뀐 뒤 청산가. 이 판의 핵심 숫자다 */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: FS.micro, marginBottom: 4 }}>
+        <span style={{ color: C.faint }}>바뀐 뒤 청산가 (추정)</span>
+        <span style={{ ...NUM, color: projected == null ? C.warn : wouldLiq ? C.down : C.text, fontWeight: 700 }}>
+          {projected == null ? '계산 불가' : fmtPrice(projected)}
+        </span>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: FS.micro, marginBottom: 9 }}>
+        <span style={{ color: C.faint }}>청산까지</span>
+        <span style={{ ...NUM, color: distPct == null ? C.warn : distPct < 3 ? C.down : C.dim, fontWeight: 700 }}>
+          {distPct == null ? '확인 불가' : `${distPct.toFixed(2)}%`}
+        </span>
+      </div>
+
+      {wouldLiq && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+          background: C.downBg, color: C.down, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          이 배율이면 청산가가 현재가를 이미 넘습니다 — <b>바꾸는 즉시 청산됩니다.</b>
+        </div>
+      )}
+
+      {msg && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+          background: msg.ok ? C.upBg : C.downBg, color: msg.ok ? C.up : C.down,
+          fontSize: FS.micro, lineHeight: 1.5,
+        }}>{msg.text}</div>
+      )}
+
+      <button onClick={go} disabled={busy || wouldLiq || next === cur || v.qty <= 0}
+        style={{
+          width: '100%', minHeight: 38, borderRadius: 7,
+          cursor: busy || wouldLiq || next === cur ? 'default' : 'pointer',
+          background: C.accentBg, color: C.accent,
+          border: `1px solid ${A(C.accent, '55')}`,
+          fontSize: FS.small, fontWeight: 700,
+          opacity: busy || wouldLiq || next === cur ? 0.5 : 1,
+        }}>
+        {busy ? '바꾸는 중…'
+          : next === cur ? '지금과 같은 배율입니다'
+          : wouldLiq ? '이 배율로는 바꿀 수 없습니다'
+          : `${next}배로 바꾸기`}
+      </button>
+
+      <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 7, lineHeight: 1.5 }}>
+        청산가는 유지증거금 구간을 넉넉히 잡은 <b>추정치</b>입니다 — 실제 청산은
+        이보다 가까울 수 있습니다. 바꾼 뒤 포지션에서 거래소 값을 확인하세요.
       </div>
     </div>
   );
