@@ -41,7 +41,13 @@ async function apiFetch<T>(
 export interface PriceItem {
   id: string; symbol: string; nameKr: string;
   price: number; change24h: number; volume: string;
-  source: 'binance' | 'mock';
+  /**
+   * 이 **한 줄**의 출처. 'mock'은 지어낸 값이다.
+   *
+   * 응답 전체가 아니라 줄마다 다르다 — /api/prices는 실데이터에 mock
+   * 시드를 섞어서 준다. 거래소가 막혀도 응답에는 숫자가 가득하다.
+   */
+  source: string;
 }
 
 export async function fetchPrices(action = 'coin', extra = ''): Promise<ApiResult<PriceItem[]>> {
@@ -60,7 +66,10 @@ export async function fetchPrices(action = 'coin', extra = ''): Promise<ApiResul
     price:     t.price    ?? t.p      ?? 0,
     change24h: t.change24h ?? t.c     ?? 0,
     volume:    t.volume24h ?? t.v     ?? '-',
-    source:    r.data.source === 'binance' ? 'binance' : 'mock',
+    // **줄마다 출처를 따로 본다.** 예전에는 응답 전체의 source를 모든
+    // 줄에 붙였다. /api/prices는 실데이터에 mock 시드를 **섞어서** 주므로,
+    // 그 안의 지어낸 값들이 전부 'binance'로 표시됐다.
+    source:    (t.source === 'mock' || !t.source) ? 'mock' : String(t.source),
   }));
   return { data: items, status: items.length > 0 ? 'live' : 'mock', source: r.data.source || 'api' };
 }
