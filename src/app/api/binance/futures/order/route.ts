@@ -141,46 +141,24 @@ export async function POST(req: NextRequest) {
       : null;
     preflightStop = stopPrice;
 
-    // 오늘 손실 한도. 거래소 원장에서 읽는다 — 브라우저에 들고 있던
-    // 예전 방식은 저장소를 지우면 리셋됐고 이 경로에는 걸리지 않았다.
-    type LimitVerdict = { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
-    let dailyLoss: LimitVerdict = null;
-    let weeklyLoss: LimitVerdict = null;
-    let lossStreak: LimitVerdict = null;
-    if (!isExit) {
-      try {
-        const { data: c4 } = await (sb.from('exchange_connections') as any)
-          .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
-        if (c4) {
-          const { decryptSecret } = await import('@/lib/exchanges/crypto');
-          const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
-          const f = await collectDailyLoss({
-            apiKey: c4.api_key,
-            apiSecret: decryptSecret(c4.api_secret_enc ?? c4.encrypted_secret ?? ''),
-            testnet: useTestnet,
-            currentEquityUsd: marginInput?.available ?? null,
-          });
-          dailyLoss = { status: f.verdict.status, reason: f.verdict.reason };
-
-          // 주간 한도 · 연패. 하루 한도가 못 보는 자리다 — 매일 −2.9%씩
-          // 닷새면 하루 잠금은 한 번도 안 걸리는데 한 주에 −14%다.
-          const { collectStreakLimits } = await import('@/lib/risk/lossStreakCheck');
-          const sf = await collectStreakLimits({
-            apiKey: c4.api_key,
-            apiSecret: decryptSecret(c4.api_secret_enc ?? c4.encrypted_secret ?? ''),
-            testnet: useTestnet,
-            currentEquityUsd: marginInput?.available ?? null,
-          });
-          weeklyLoss = { status: sf.weekly.status, reason: sf.weekly.reason };
-          lossStreak = { status: sf.streak.status, reason: sf.streak.reason };
-        }
-      } catch { /* null → unknown → 막힌다 */ }
-    }
+    // 잠금 셋(오늘·이번 주·연패) + 켜져 있으면 AI 거부권을 **한 입구에서** 모은다.
+    //
+    // 이 라우트만 직접 채우고 있었다. 그러면 검사를 하나 추가할 때마다 여기와
+    // collectLimits 두 곳을 고쳐야 하고, 언젠가 한쪽만 고친다 — 현물·COIN-M이
+    // 오늘 손실 한도를 통째로 빠뜨리고 있던 것이 정확히 그 결과였다.
+    // 판정을 두 곳에 두지 않는다.
+    const limits = isExit
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null, aiVeto: null, aiPredictionId: null }
+      : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
+          sb, userId: uid, connectionId, testnet: useTestnet,
+          equityUsd: marginInput?.available ?? null,
+          symbol, side: String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
+        });
 
     const checklist = runChecklist({
       mode: { disposition: g.disposition, reason: g.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
-      dailyLoss, weeklyLoss, lossStreak,
+      ...limits,
       reconcile: {
         reachable: gate.gather.reachable,
         blockNewOrders: !!gate.verdict?.blockNewOrders,
@@ -195,10 +173,20 @@ export async function POST(req: NextRequest) {
       liquidationPrice: risk?.liquidationPrice ?? null,
       side: String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
       margin: marginInput,
-    }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY' });
+    }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto });
 
     preflightPassed = checklist.passed;
     preflightTotal = checklist.total;
+
+    // 이 AI 판단이 실제로 어떻게 쓰였는지 원장에 되짚는다.
+    // 막은 것만 채점하면 "AI가 막았을 때는 늘 맞더라"는 착시가 생긴다 —
+    // 통과시킨 것도 같이 채점해야 그 확신도가 신호인지 알 수 있다.
+    if (limits.aiPredictionId) {
+      const { markApplied } = await import('@/lib/ai/vetoCheck');
+      await markApplied(sb, limits.aiPredictionId,
+        limits.aiVeto?.status === 'blocked' ? 'VETO' : 'PASS',
+        String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT', risk?.markPrice ?? null);
+    }
 
     if (!checklist.allowed) {
       return NextResponse.json({

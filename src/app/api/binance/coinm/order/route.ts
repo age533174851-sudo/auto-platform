@@ -221,10 +221,11 @@ export async function POST(req: NextRequest) {
     // 손실 잠금 셋. **이 라우트도 넣은 적이 없어서 진입이 전부 막혀 있었다**
     // (현물 라우트와 같은 자리, 같은 이유).
     const limits = isExit
-      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null }
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null, aiVeto: null, aiPredictionId: null }
       : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
           sb, userId: uid, connectionId: body.connectionId, testnet,
           equityUsd: marginInput?.available ?? null,
+          symbol, side: side === 'BUY' ? 'LONG' : 'SHORT',
         });
 
     const checklist = runChecklist({
@@ -262,7 +263,17 @@ export async function POST(req: NextRequest) {
         || (markPrice != null
             ? inverseLiquidationPrice(markPrice, leverage, side === 'SELL' ? 'SHORT' : 'LONG', 1.0)
             : null),
-    }, { market: 'COINM', intent: isExit ? 'EXIT' : 'ENTRY' });
+    }, { market: 'COINM', intent: isExit ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto });
+
+    // 이 AI 판단이 실제로 어떻게 쓰였는지 원장에 되짚는다.
+    // 막은 것만 채점하면 "AI가 막았을 때는 늘 맞더라"는 착시가 생긴다 —
+    // 통과시킨 것도 같이 채점해야 그 확신도가 신호인지 알 수 있다.
+    if (limits.aiPredictionId) {
+      const { markApplied } = await import('@/lib/ai/vetoCheck');
+      await markApplied(sb, limits.aiPredictionId,
+        limits.aiVeto?.status === 'blocked' ? 'VETO' : 'PASS',
+        side === 'BUY' ? 'LONG' : 'SHORT', markPrice ?? null);
+    }
 
     if (!checklist.allowed) {
       return NextResponse.json({

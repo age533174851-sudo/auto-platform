@@ -66,12 +66,33 @@ export interface CollectLimitsArgs {
  * 못 읽으면 그건 AI가 안전장치가 된 것이다.
  */
 async function fillAiVeto(out: LimitVerdicts, args: CollectLimitsArgs, now: number): Promise<void> {
-  if (!args.symbol || (args.side !== 'LONG' && args.side !== 'SHORT')) return;
+  let cfg: any = null;
   try {
     const { readVetoConfig } = await import('@/lib/ai/tradeVeto');
-    const cfg = readVetoConfig(process.env as any);
-    // 꺼져 있으면 체크리스트가 이 항목을 아예 안 보여준다. 판정도 하지 않는다.
-    if (!cfg.enabled) return;
+    cfg = readVetoConfig(process.env as any);
+  } catch { return; }
+
+  // 꺼져 있으면 체크리스트가 이 항목을 아예 안 보여준다. 판정도 하지 않는다.
+  if (!cfg?.enabled) return;
+
+  // **켜져 있으면 어떤 경우에도 판정을 남긴다.**
+  //
+  // 예전에는 실패하면 null로 두었다. 그런데 호출자는 `!!limits.aiVeto`로
+  // 이 검사를 목록에 넣을지 정한다 — null이면 항목이 **통째로 사라진다.**
+  // 즉 켜 놓고 조회가 한 번 실패하면, 그 뒤로는 AI 검사가 있었다는 사실
+  // 자체가 화면에서 없어진다. 켜졌다고 믿는 검사가 안 도는 것이 이 파일이
+  // 막으려는 바로 그 실패다.
+  const fallback = (reason: string) => {
+    out.aiVeto = { status: cfg.strict ? 'unknown' : 'abstain', reason };
+    out.aiPredictionId = null;
+  };
+
+  if (!args.symbol || (args.side !== 'LONG' && args.side !== 'SHORT')) {
+    fallback('종목·방향을 몰라 AI 판단을 적용하지 않았습니다');
+    return;
+  }
+
+  try {
     const { collectAiVeto } = await import('@/lib/ai/vetoCheck');
     const r = await collectAiVeto({
       sb: args.sb, userId: args.userId, symbol: args.symbol,
@@ -79,9 +100,8 @@ async function fillAiVeto(out: LimitVerdicts, args: CollectLimitsArgs, now: numb
     });
     out.aiVeto = r.verdict;
     out.aiPredictionId = r.predictionId;
-  } catch {
-    // 판정 자체를 못 만들었다. null로 두면 체크리스트가 warn으로 남긴다 —
-    // 통과로 적지도, 막지도 않는다.
+  } catch (e: any) {
+    fallback(`AI 합의를 읽지 못했습니다 (${e?.message || e})`);
   }
 }
 

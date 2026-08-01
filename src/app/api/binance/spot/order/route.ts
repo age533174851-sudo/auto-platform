@@ -104,11 +104,14 @@ export async function POST(req: NextRequest) {
     // 매도(EXIT)에는 어차피 안 물린다. 나가는 길을 막으면 잠금의 목적과
     // 정반대가 되기 때문이다.
     const limits = isSell
-      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null }
+      ? { dailyLoss: null, weeklyLoss: null, lossStreak: null, aiVeto: null, aiPredictionId: null }
       : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
           sb, userId: uid, connectionId: body.connectionId,
           exchange: spotExchange === 'gate' ? 'gate' : 'binance',
           testnet: spotTestnet,
+          // AI 거부권이 볼 종목·방향. 현물 매수는 LONG으로 본다 —
+          // 매도(EXIT)에는 어차피 이 검사가 붙지 않는다.
+          symbol: String(body.symbol || ''), side: isSell ? 'SHORT' : 'LONG',
         });
 
     const checklist = runChecklist({
@@ -118,7 +121,19 @@ export async function POST(req: NextRequest) {
       // 현물에는 증거금 항목이 없다 (preTradeChecklist의 markets 참조).
       // 매도 전 보유 확인은 spotOrderExecutor가 하고, 매수 자금 부족은
       // 거래소가 주문을 통째로 거부한다.
-    }, { market: 'SPOT', intent: isSell ? 'EXIT' : 'ENTRY' });
+      // 판정이 있으면 목록에 넣는다. 켜져 있으면 collectAllLimits가
+      // **실패해도** 판정을 남기므로, 여기서 항목이 조용히 사라지지 않는다.
+    }, { market: 'SPOT', intent: isSell ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto });
+
+    // 이 AI 판단이 실제로 어떻게 쓰였는지 원장에 되짚는다.
+    // 막은 것만 채점하면 "AI가 막았을 때는 늘 맞더라"는 착시가 생긴다 —
+    // 통과시킨 것도 같이 채점해야 그 확신도가 신호인지 알 수 있다.
+    if (limits.aiPredictionId) {
+      const { markApplied } = await import('@/lib/ai/vetoCheck');
+      await markApplied(sb, limits.aiPredictionId,
+        limits.aiVeto?.status === 'blocked' ? 'VETO' : 'PASS',
+        isSell ? 'SHORT' : 'LONG', null);
+    }
 
     if (!checklist.allowed) {
       return NextResponse.json({
