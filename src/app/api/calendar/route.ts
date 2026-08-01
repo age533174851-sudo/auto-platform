@@ -171,7 +171,7 @@ export async function GET(req: NextRequest) {
     if (sb) {
       const from = new Date(Date.now() - 2 * 86400000).toISOString();
       const { data, error } = await (sb.from('econ_events') as any)
-        .select('id, timestamp_utc, event, impact, country, actual, forecast, previous')
+        .select('id, timestamp_utc, event, impact, country, actual, forecast, previous, time_known')
         .gte('timestamp_utc', from)
         .order('timestamp_utc', { ascending: true })
         .limit(120);
@@ -189,6 +189,9 @@ export async function GET(req: NextRequest) {
             time: t.toISOString().slice(11, 16),
             dateTime: t.toISOString(),
             impact: r.impact || 'unknown',
+            // 시각을 아는가. FRED에서 온 행은 false다 — 회피 판정이
+            // 이 값을 보고 그날 하루 전체를 막는다(lib/risk/eventGuard).
+            time_known: r.time_known !== false,
             forecast: r.forecast ?? null,
             previous: r.previous ?? null,
             actual: r.actual ?? null,

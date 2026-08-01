@@ -105,6 +105,26 @@ async function runSync() {
     sourceStatus.tradingeconomics = Array.isArray(d) ? `${d.length}건` : '응답 없음';
   } else sourceStatus.tradingeconomics = 'TRADING_ECONOMICS_API_KEY 없음';
 
+  // FRED — 무료 키. **날짜만 주고 시각은 안 준다.**
+  //
+  // 그래서 아래 collectEvents(시간대를 확정 못 하면 버리는 경로)로 보내지
+  // 않는다. 거기 넣으면 전부 버려진다 — 시각이 없으니까. 대신 시각을
+  // '모른다'로 표시해 따로 저장한다. 회피 판정이 그 표시를 보고 그날
+  // 하루 전체를 막는다(lib/risk/eventGuard).
+  //
+  // 시각을 지어내지 않는 이유는 fred.ts 맨 위에 적어 뒀다.
+  let fredRows: Array<Record<string, any>> = [];
+  const fredKey = process.env.FRED_API_KEY;
+  if (fredKey) {
+    const { pickFredEvents, fredEventsToRows, fredReleaseDatesUrl } = await import('@/lib/calendar/fred');
+    const d = await fetchJson(fredReleaseDatesUrl(fredKey, from, to));
+    const picked = pickFredEvents(d?.release_dates);
+    fredRows = fredEventsToRows(picked);
+    sourceStatus.fred = d
+      ? `${picked.length}건 (시각 없음 — 하루 단위 회피)`
+      : '응답 없음';
+  } else sourceStatus.fred = 'FRED_API_KEY 없음';
+
   const fmpKey = process.env.FMP_API_KEY;
   if (fmpKey) {
     const d = await fetchJson(
@@ -113,11 +133,11 @@ async function runSync() {
     sourceStatus.fmp = Array.isArray(d) ? `${d.length}건` : '응답 없음';
   } else sourceStatus.fmp = 'FMP_API_KEY 없음';
 
-  if (batches.length === 0) {
+  if (batches.length === 0 && fredRows.length === 0) {
     // 키가 없는 것과 일정이 없는 것은 다르다. 화면에서는 둘 다 빈 달력이다.
     return NextResponse.json({
       ok: false,
-      message: '경제 캘린더 공급자 키가 없습니다. TRADING_ECONOMICS_API_KEY 또는 FMP_API_KEY를 넣으세요.',
+      message: '경제 캘린더 공급자 키가 없습니다. FRED_API_KEY(무료) 또는 TRADING_ECONOMICS_API_KEY / FMP_API_KEY를 넣으세요.',
       sources: sourceStatus,
     }, { status: 503 });
   }
@@ -143,6 +163,22 @@ async function runSync() {
 
   let saved = 0;
   let storageWarning: string | null = null;
+
+  // FRED는 시각을 모르는 채로 따로 저장한다. 다른 공급자와 같은 표에
+  // 들어가되 time_known=false가 그 차이를 들고 간다.
+  if (fredRows.length > 0) {
+    try {
+      const { error } = await (sb.from('econ_events') as any)
+        .upsert(fredRows, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+      saved += fredRows.length;
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      storageWarning = /time_known/i.test(msg)
+        ? 'time_known 칸이 없습니다 — 마이그레이션 027을 적용하세요.'
+        : `FRED 저장 실패: ${msg}`;
+    }
+  }
 
   if (placeable.length > 0) {
     const rows = placeable.map(e => ({
@@ -170,7 +206,7 @@ async function runSync() {
         storageWarning = missing
           ? 'econ_events 테이블이 없습니다 — supabase/migrations/015_econ_events.sql을 실행하세요.'
           : `저장 실패: ${error.message}`;
-      } else saved = rows.length;
+      } else saved += rows.length;
     } catch (e: any) {
       storageWarning = `저장 중 오류: ${e?.message || e}`;
     }
