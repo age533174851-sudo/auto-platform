@@ -18,6 +18,8 @@
 // 안 된다. 이 파일이 하는 일은 "규칙을 정해 두고 그대로 지키는 기계"를
 // 돌려 보는 것이다 — 그 규칙에 우위가 있는지는 백테스트가 답할 질문이다.
 
+import { exitOnMark, DEFAULT_EXIT } from './exitRules';
+
 export interface PaperBar {
   close: number;
 }
@@ -50,11 +52,13 @@ export interface RunnerConfig {
 
 export const DEFAULT_RUNNER: RunnerConfig = {
   riskPctPerTrade: 1,
-  stopPct: 2,
-  takeProfitPct: 4,
+  // 손절·익절·보유시간은 **백테스트와 같은 값**을 쓴다. 여기에 숫자를
+  // 다시 적으면 한쪽만 바뀐 채로 두 성적표를 비교하게 된다.
+  stopPct: DEFAULT_EXIT.stopPct,
+  takeProfitPct: DEFAULT_EXIT.takeProfitPct,
+  maxHoldHours: DEFAULT_EXIT.maxHoldHours,
   leverage: 5,
   maxOpenPositions: 1,
-  maxHoldHours: 72,
 };
 
 export type RunnerActionKind = 'OPEN' | 'CLOSE' | 'NONE';
@@ -89,46 +93,27 @@ export function planExits(
   cfg: RunnerConfig = DEFAULT_RUNNER,
 ): RunnerAction[] {
   if (!Array.isArray(positions) || positions.length === 0) return [];
-  if (markPrice == null || !Number.isFinite(markPrice) || markPrice <= 0) {
-    // 가격을 모르면 아무것도 닫지 않는다. 추측한 가격으로 닫으면 그 손익이
-    // 장부에 남고, 그 뒤의 모든 수치가 그 위에 쌓인다.
-    return [];
-  }
 
   const out: RunnerAction[] = [];
   for (const p of positions) {
-    const long = p.side === 'LONG';
-
-    // 1) 청산 — 가장 나쁜 것부터
-    if (p.liquidationPrice != null && p.liquidationPrice > 0
-        && (long ? markPrice <= p.liquidationPrice : markPrice >= p.liquidationPrice)) {
-      out.push({ kind: 'CLOSE', positionId: p.id, exitReason: 'LIQUIDATION',
-        reason: `청산가 ${p.liquidationPrice} 도달 (현재 ${markPrice})` });
-      continue;
-    }
-
-    // 2) 손절
-    if (p.stopLoss != null && p.stopLoss > 0
-        && (long ? markPrice <= p.stopLoss : markPrice >= p.stopLoss)) {
-      out.push({ kind: 'CLOSE', positionId: p.id, exitReason: 'SL',
-        reason: `손절 ${p.stopLoss} 도달 (현재 ${markPrice})` });
-      continue;
-    }
-
-    // 3) 익절
-    if (p.takeProfit != null && p.takeProfit > 0
-        && (long ? markPrice >= p.takeProfit : markPrice <= p.takeProfit)) {
-      out.push({ kind: 'CLOSE', positionId: p.id, exitReason: 'TP',
-        reason: `익절 ${p.takeProfit} 도달 (현재 ${markPrice})` });
-      continue;
-    }
-
-    // 4) 시간 청산
-    const heldMs = nowMs - p.openedAt;
-    if (Number.isFinite(heldMs) && heldMs >= cfg.maxHoldHours * 3_600_000) {
-      out.push({ kind: 'CLOSE', positionId: p.id, exitReason: 'MAX_HOLD',
-        reason: `최대 보유 ${cfg.maxHoldHours}시간 초과` });
-    }
+    // **규칙을 여기서 다시 쓰지 않는다.** 백테스트와 같은 함수를 부른다.
+    //
+    // 예전에는 이 자리에 청산→손절→익절→시간 판정이 그대로 적혀 있었고,
+    // 백테스트에는 그 넷이 아예 없었다. 두 벌로 두면 한쪽만 고쳐지고,
+    // 그때 성적표는 실전과 다른 기계의 성적이 된다.
+    const hit = exitOnMark(
+      {
+        side: p.side, entry: p.fillPrice,
+        stop: p.stopLoss, takeProfit: p.takeProfit,
+        liquidation: p.liquidationPrice, openedAt: p.openedAt,
+      },
+      markPrice, nowMs, { maxHoldHours: cfg.maxHoldHours },
+    );
+    if (!hit) continue;
+    out.push({
+      kind: 'CLOSE', positionId: p.id, exitReason: hit.reason,
+      reason: `${hit.note} (현재 ${markPrice})`,
+    });
   }
   return out;
 }

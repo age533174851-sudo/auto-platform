@@ -70,8 +70,23 @@ export async function POST(req: NextRequest) {
     dataSource = 'synthetic';
   }
 
+  // 청산 규칙 — 안 넘기면 엔진이 데모와 같은 기본값(손절 2% · 익절 4% ·
+  // 최대보유 72시간)을 쓴다. **명시적으로 0을 넘겼을 때만** 그 규칙을 끈다.
+  //
+  // `Number(x) || 기본값`으로 쓰면 안 된다. 0이 falsy라 "손절 없이 돌려
+  // 보겠다"는 요청이 조용히 기본값으로 바뀐다 — 사용자가 고른 것과 다른
+  // 조건의 성적표가 나오고, 화면에는 아무 차이도 안 보인다.
+  const numOrUndef = (v: any): number | undefined => {
+    if (v == null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
   const result = runBacktest(candles, {
     symbol, strategy, initialCash, feeRate, leverage,
+    stopPct: numOrUndef(body?.stopPct),
+    takeProfitPct: numOrUndef(body?.takeProfitPct),
+    maxHoldHours: numOrUndef(body?.maxHoldHours),
     emaFast: body?.emaFast, emaSlow: body?.emaSlow,
     rsiPeriod: body?.rsiPeriod, rsiOversold: body?.rsiOversold, rsiOverbought: body?.rsiOverbought,
     bbPeriod: body?.bbPeriod, bbStd: body?.bbStd,
@@ -101,6 +116,12 @@ export async function POST(req: NextRequest) {
       sharpe:         result.sharpe,
       avgTradePct:    result.avgTradePct,
       sanityWarning:  result.sanityWarning,
+      // 어떤 규칙으로 돈 성적인지 같이 보낸다. 숫자만 보내면 손절 없이
+      // 돌린 결과와 손절 있는 결과가 화면에서 똑같아 보인다.
+      rulesNote:      result.rulesNote,
+      stopExits:      result.stopExits,
+      liqExits:       result.liqExits,
+      gapExits:       result.gapExits,
     },
     equityCurve: sampledEquity,
     trades: result.trades.slice(-50), // last 50

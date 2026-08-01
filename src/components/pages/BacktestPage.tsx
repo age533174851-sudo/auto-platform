@@ -442,6 +442,32 @@ export default function BacktestPage() {
               ))}
             </div>
 
+            {/* **어떤 규칙으로 돈 성적인가.**
+                수익률만 크게 보여주면, 손절 없이 돌린 결과와 손절을 걸고
+                돌린 결과가 화면에서 똑같아 보인다. 그런데 그 둘은 다른
+                기계의 성적이라 비교하면 안 된다. */}
+            {(result.summary as any).rulesNote && (
+              <div style={{
+                marginTop: 10, padding:'8px 10px', borderRadius: 8,
+                background: /손절 없이/.test((result.summary as any).rulesNote) ? A(T.ylw,'15') : T.alt,
+                border: `1px solid ${/손절 없이/.test((result.summary as any).rulesNote) ? A(T.ylw,'40') : T.border}`,
+              }}>
+                <div style={{ color: /손절 없이/.test((result.summary as any).rulesNote) ? T.ylw : T.sub, fontSize: 10, fontWeight: 700, lineHeight: 1.55 }}>
+                  청산 규칙 · {(result.summary as any).rulesNote}
+                </div>
+                {((result.summary as any).stopExits > 0 || (result.summary as any).liqExits > 0) && (
+                  <div style={{ color: T.muted, fontSize: 9, marginTop: 4, lineHeight: 1.5 }}>
+                    손절로 끝남 {(result.summary as any).stopExits}건
+                    {(result.summary as any).liqExits > 0 && ` · 청산 ${(result.summary as any).liqExits}건`}
+                    {(result.summary as any).gapExits > 0 && ` · 그중 ${(result.summary as any).gapExits}건은 갭으로 손절가에 못 받음`}
+                  </div>
+                )}
+                <div style={{ color: T.muted, fontSize: 9, marginTop: 4, lineHeight: 1.5 }}>
+                  데모 자동매매와 같은 규칙으로 계산합니다. 한 봉에서 손절과 익절이 둘 다 닿으면 <b>손절이 먼저</b>였다고 봅니다.
+                </div>
+              </div>
+            )}
+
             {/* Equity curve */}
             {equitySvg && (
               <div style={{ marginTop: 12, paddingTop: 12, borderTop:`1px solid ${T.border}` }}>

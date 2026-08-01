@@ -1,5 +1,10 @@
 // src/lib/backtest/engine.ts
-// Self-contained backtest engine. No external dependencies.
+// Self-contained backtest engine.
+//
+// 청산 규칙만 밖에서 가져온다(lib/engine/exitRules) — 데모 자동매매와
+// **같은 함수**를 써야 두 성적표를 비교할 수 있기 때문이다. 규칙을 두 벌
+// 두면 한쪽만 고쳐지고, 그때 백테스트는 실전과 다른 기계의 성적이 된다.
+import { exitOnBar, DEFAULT_EXIT } from '../engine/exitRules';
 
 export type Strategy = 'ema-cross' | 'rsi' | 'macd' | 'bollinger' | 'dca';
 
@@ -33,6 +38,22 @@ export interface BacktestConfig {
   bbPeriod?:    number;     // default 20
   bbStd?:       number;     // default 2
   dcaIntervalDays?: number; // default 7 (for DCA)
+
+  // ── 청산 규칙 ───────────────────────────────────────────
+  //
+  // 데모(paperRunner)는 손절·익절·청산가·보유시간을 다 보는데 백테스트에는
+  // **넷 다 없었다.** 전략 신호로만 사고팔았다. 그 차이는 한 방향으로만
+  // 작동한다 — 백테스트에는 손절로 끝나는 거래도, 청산으로 날아가는 거래도
+  // 없으니 **언제나 더 좋게 나온다.** 그리고 그 성적이 전략 점수와 자금
+  // 배분으로 흘러 실제 돈의 크기를 정한다.
+  //
+  // 판정은 `lib/engine/exitRules`가 한다 — 데모와 **같은 함수**다.
+  /** 손절 폭(%). 0이나 미지정이면 손절 없이 돈다(권장하지 않음) */
+  stopPct?: number;
+  /** 익절 폭(%). 0이면 익절을 걸지 않는다 */
+  takeProfitPct?: number;
+  /** 최대 보유 시간(시간). 0이면 시간 청산 없음 */
+  maxHoldHours?: number;
 }
 
 export interface Trade {
@@ -68,6 +89,20 @@ export interface BacktestResult {
   sharpe:        number;
   avgTradePct?:  number;
   sanityWarning?: string | null;   // 비현실적 결과 자동 감지
+
+  /** 손절로 끝난 거래 수 */
+  stopExits?: number;
+  /** 청산으로 끝난 거래 수 */
+  liqExits?: number;
+  /** 걸어 둔 가격에 못 받고 갭으로 밀린 청산 수 */
+  gapExits?: number;
+  /**
+   * **이 백테스트가 데모와 같은 규칙으로 돌았는가.**
+   *
+   * 손절 없이 돌린 결과를 손절 있는 실전과 비교하면 안 된다. 숫자만
+   * 남으면 그 차이가 안 보이므로 결과에 같이 싣는다.
+   */
+  rulesNote?: string | null;
 }
 
 /* ─── Indicators ─────────────────────────────────────────── */
@@ -201,9 +236,57 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   let lastDcaTs = 0;
   const dcaAmount = cfg.initialCash / 20; // 20 buys spread
 
+  // 진입한 봉·손절·익절·청산가. 청산 규칙이 쓴다.
+  let entryBarIdx = -1;
+  let entryTs = 0;
+  let stopPrice: number | null = null;
+  let tpPrice: number | null = null;
+  let liqPrice: number | null = null;
+  // **기본값은 데모와 같다.** 0은 여전히 '손절 없음'이지만, 그건 명시적으로
+  // 0을 넘겼을 때만이다. 안 넘기면 손절 없이 도는 것을 기본으로 두면,
+  // 아무도 안 넘기고 그러면 아무것도 안 바뀐다.
+  const stopPct = Math.max(0, cfg.stopPct ?? DEFAULT_EXIT.stopPct);
+  const tpPct = Math.max(0, cfg.takeProfitPct ?? DEFAULT_EXIT.takeProfitPct);
+  const maxHoldHours = Math.max(0, cfg.maxHoldHours ?? DEFAULT_EXIT.maxHoldHours);
+  /** 손절·청산으로 닫힌 횟수. 성적표에 같이 적는다 */
+  let stopExits = 0, liqExits = 0, gapExits = 0;
+
   for (let i = 0; i < safeCandles.length; i++) {
     const candle = safeCandles[i];
     const price  = candle.c;
+
+    // ── 청산 규칙이 신호보다 먼저다 ────────────────────────
+    //
+    // 손절은 미룰 수 없다. 신호를 먼저 보면 "손절을 지나쳤지만 그 봉에
+    // 매도 신호가 없어서 계속 들고 있었다"가 되어, 실제로는 이미 끊긴
+    // 거래가 장부에서 살아남는다.
+    //
+    // **진입한 봉은 건너뛴다.** 그 봉의 저가는 진입 *전에* 찍힌 것일 수
+    // 있어서, 들어가자마자 손절당한 것으로 계산된다.
+    if (position > 0 && i > entryBarIdx && (stopPrice != null || tpPrice != null || maxHoldHours > 0)) {
+      const hit = exitOnBar(
+        { side: 'LONG', entry: entryPrice, stop: stopPrice, takeProfit: tpPrice,
+          liquidation: liqPrice, openedAt: entryTs },
+        candle, { maxHoldHours },
+      );
+      if (hit) {
+        const px = hit.price;
+        const exitFee = position * px * fee;
+        const grossPnL = (px - entryPrice) * position;
+        const netPnL = grossPnL - entryFeePaid - exitFee;
+        const pnlPct = entryPrice > 0 ? ((px - entryPrice) / entryPrice) * 100 * lev : 0;
+        cash += netPnL;
+        trades.push({
+          side: 'sell', time: candle.t, price: px, qty: position, value: position * px,
+          fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason: hit.note,
+        });
+        if (hit.reason === 'SL') stopExits++;
+        if (hit.reason === 'LIQUIDATION') liqExits++;
+        if (hit.gapped) gapExits++;
+        position = 0; entryPrice = 0; entryFeePaid = 0; investedMargin = 0;
+        stopPrice = tpPrice = liqPrice = null; entryBarIdx = -1;
+      }
+    }
 
     let signal: 'buy' | 'sell' | null = null;
     let reason = '';
@@ -264,6 +347,13 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
       entryPrice = price;
       entryFeePaid = f;
       investedMargin = margin;
+      entryBarIdx = i;
+      entryTs = candle.t;
+      stopPrice = stopPct > 0 ? price * (1 - stopPct / 100) : null;
+      tpPrice = tpPct > 0 ? price * (1 + tpPct / 100) : null;
+      // 격리 증거금 기준 청산가. 유지증거금률을 모르므로 1.0%로 본다 —
+      // 실제보다 **먼저** 청산되는 쪽이라 낙관으로 기울지 않는다.
+      liqPrice = lev > 1 ? price * (1 - (1 / lev) + 0.01) : null;
       // ★ balance(cash) 변경 없음
       trades.push({ side: 'buy', time: candle.t, price, qty, value: notional, fee: f, reason });
     } else if (signal === 'buy' && cfg.strategy === 'dca' && investedMargin + dcaAmount <= cash) {
@@ -289,6 +379,7 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
         fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason,
       });
       position = 0; entryPrice = 0; entryFeePaid = 0; investedMargin = 0;
+      stopPrice = tpPrice = liqPrice = null; entryBarIdx = -1;
     }
 
     /* Equity tracking — balance + 미실현손익 (mark-to-market) */
@@ -351,6 +442,15 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   else if (Math.abs(totalReturnPct) > 1000) sanityWarning = `비현실적 수익률 (${totalReturnPct.toFixed(0)}%) — 계산 오류 또는 과최적화 의심`;
   else if (finalEquity > cfg.initialCash * 50) sanityWarning = '최종 자산이 초기 대비 50배 초과 — 계산 오류 의심';
 
+  // 손절을 안 걸고 돌렸으면 그 사실이 성적표에 붙어 있어야 한다.
+  // 데모는 손절을 걸고 도는데 백테스트만 안 걸면, 두 성적은 **다른 기계의
+  // 성적**이고 비교하면 안 된다. 그런데 숫자만 보면 그 차이가 안 보인다.
+  const rulesNote = stopPct > 0
+    ? `손절 ${stopPct}%${tpPct > 0 ? ` · 익절 ${tpPct}%` : ' · 익절 없음'}`
+      + `${maxHoldHours > 0 ? ` · 최대보유 ${maxHoldHours}시간` : ''}`
+      + `${lev > 1 ? ` · ${lev}배 청산 반영` : ''}`
+    : '⚠️ 손절 없이 돌렸습니다 — 데모·실전은 손절을 걸고 돕니다. 이 결과는 그쪽과 비교할 수 없습니다.';
+
   return {
     config: cfg,
     candleCount: safeCandles.length,
@@ -369,6 +469,7 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     sharpe,
     avgTradePct,
     sanityWarning,
+    stopExits, liqExits, gapExits, rulesNote,
   };
 }
 

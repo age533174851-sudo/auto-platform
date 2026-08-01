@@ -43,11 +43,69 @@ export function runBacktestTests() {
 
   test('진입은 balance 불변, 청산 시에만 반영 (보유 중 equity = 미실현 반영)', () => {
     // 매수 후 가격 상승 중(미청산) — equityCurve가 balance+미실현을 반영하되 폭증 없음
+    //
+    // **손절·익절을 0으로 끈다.** 이 테스트가 보는 것은 자산 모델이지
+    // 청산 규칙이 아니다. 규칙을 켜 두면 +4%에서 익절돼 105까지 못 간다.
     const C = candles([[98, 20], [100, 1], [105, 10]]);   // 매수 후 105로 상승, 청산 신호 없이 종료청산
-    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10, stopPct: 0, takeProfitPct: 0, maxHoldHours: 0 } as any);
     // 진입가 100, 종료 105, 3배, 증거금 1M → netPnL = (105-100)*30000 = 150000
     close(r.finalEquity, 10_150_000, 5000, '최종 ≈10.15M');
     lt(r.finalEquity, 11_000_000, '폭증 없음');
+  });
+
+  // ── 데모와 같은 규칙으로 도는가 ─────────────────────────
+  //
+  // 예전 백테스트에는 손절·익절·청산·보유시간이 **하나도 없었다.** 전략
+  // 신호로만 사고팔았다. 그 차이는 한 방향으로만 작동한다 — 손절로 끝나는
+  // 거래가 없으니 언제나 더 좋게 나온다. 그리고 그 성적이 자금 배분으로
+  // 흘러 실제 돈의 크기를 정한다.
+
+  test('기본값으로 돌리면 익절이 걸린다 — 신호가 없어도 나간다', () => {
+    const C = candles([[98, 20], [100, 1], [105, 10]]);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    // 익절 4% → 104에 나간다. 105가 아니다.
+    const sell = r.trades.find(t => t.side === 'sell');
+    close(sell!.price, 104, 0.01, '익절가 104에 청산');
+    close(r.finalEquity, 10_120_000, 5000, '(104-100)×30000 = 120,000');
+  });
+
+  test('손절이 걸리고, 그 횟수가 성적표에 남는다', () => {
+    // 진입 후 -5%까지 떨어진다 → 2% 손절
+    const C = candles([[98, 20], [100, 1], [95, 10]]);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    gt(r.stopExits ?? 0, 0, '손절로 끝난 거래가 있어야');
+    lt(r.finalEquity, 10_000_000, '손절이면 손실');
+  });
+
+  test('갭으로 손절을 뛰어넘으면 손절가가 아니라 그 가격에 체결된다', () => {
+    // 100에 진입 → 다음 봉이 95로 열린다. 손절 98에 받았다고 치면
+    // 실제로는 못 받는 3원을 매번 벌어들이는 장부가 된다.
+    const C = candles([[98, 20], [100, 1], [95, 10]]);
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    const sell = r.trades.find(t => t.side === 'sell');
+    close(sell!.price, 95, 0.01, '갭 난 시가 95에 체결');
+    gt(r.gapExits ?? 0, 0, '갭으로 밀린 청산이 세어져야');
+  });
+
+  test('손절 없이 돌리면 성적표가 그 사실을 적는다', () => {
+    // 손절 없는 백테스트를 손절 있는 실전과 비교하면 안 된다.
+    // 숫자만 남으면 그 차이가 안 보이므로 결과에 같이 싣는다.
+    const C = candles([[98, 20], [100, 1], [102, 10]]);
+    const off = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10, stopPct: 0 } as any);
+    assert(/손절 없이/.test(off.rulesNote || ''), '손절 없이 돌린 사실이 적혀야');
+    const on = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    assert(/손절 2%/.test(on.rulesNote || ''), '켜져 있으면 어떤 규칙인지 적혀야');
+  });
+
+  test('진입한 봉의 저가로는 손절당하지 않는다', () => {
+    // 그 저가는 진입 *전에* 찍힌 것일 수 있다. 들어가자마자 손절당한
+    // 것으로 계산하면 모든 전략이 실제보다 훨씬 나쁘게 나온다.
+    const C = candles([[98, 20], [100, 1], [100, 10]]);
+    // 진입 봉(가격 100)의 저가를 90으로 낮춘다
+    C[20] = { ...C[20], l: 90 };
+    const r = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0, leverage: 3, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
+    const sell = r.trades.find(t => t.side === 'sell');
+    assert(!sell || !/손절/.test(sell.reason), '진입 봉의 저가로 손절되면 안 된다');
   });
 
   test('수수료가 손익을 줄인다 (feeRate>0이면 순수익 < 무수수료)', () => {
