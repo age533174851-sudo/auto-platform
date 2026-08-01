@@ -50,6 +50,40 @@ export async function POST(req: NextRequest) {
     try { const ks = await isKillSwitchActive(sb, connectionId); if (ks.active) return NextResponse.json({ error: 'kill_switch_active', message: `🛑 킬스위치 발동 중 (${ks.reason || '계좌 보호'})` }, { status: 423 }); } catch {}
   }
 
+  // ── 거래소 수량·가격 단위 ──
+  //
+  // **이 단계가 없어서 수동 주문이 거부되고 있었다.**
+  //   [-1111] Precision is over the maximum defined for this asset.
+  //
+  // 비율 버튼(25%·50%·100%)이 `잔고 × 비율 × 배율 ÷ 가격`을 소수점
+  // 여섯 자리로 잘라 보냈는데, BTCUSDT 선물의 수량 단위는 0.001이라
+  // 0.09906은 존재할 수 없는 수량이다.
+  //
+  // roundToStep도 roundQuantity도 저장소에 이미 있었다. 그런데 자동매매
+  // 경로에서만 불렸다 — 자동은 되는데 손으로 누르면 안 되는 상태였다.
+  //
+  // 점검보다 **앞에** 둔다. 뒤에 두면 점검은 0.09906으로 명목가·증거금을
+  // 계산하고 실제 주문은 0.099로 나가서, 검사한 값과 나간 값이 다르다.
+  let orderQty = Number(quantity);
+  let orderPrice = price != null ? Number(price) : null;
+  let quantizeNote: string | null = null;
+  {
+    const bf = await import('@/lib/exchanges/binanceFutures');
+    const { quantizeOrder } = await import('@/lib/exchanges/quantize');
+    // 못 읽으면 null이다. 기본값을 지어내면 맞는 수량을 틀린 수량으로 바꾼다.
+    const filters = await bf.getSymbolFilters(symbol, conn.is_testnet !== false);
+    const q = quantizeOrder(orderQty, orderPrice, filters);
+    if (!q.ok) {
+      return NextResponse.json({
+        ok: false, error: 'invalid_quantity', message: q.reason,
+      }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+    }
+    orderQty = q.quantity!;
+    if (q.price != null) orderPrice = q.price;
+    // 바뀌었거나, 규격을 못 읽어서 그대로 보내는 경우 둘 다 남긴다.
+    if (q.changed || !q.applied) quantizeNote = q.reason;
+  }
+
   // ── 거래 전 점검 ──
   //
   // 이 라우트는 주문을 보내지 않고 jobs 큐에 적재한다. 그래도 여기서 막는
@@ -106,7 +140,7 @@ export async function POST(req: NextRequest) {
     const refPriceRaw = Number(price ?? risk?.markPrice ?? 0);
     const refPrice = Number.isFinite(refPriceRaw) && refPriceRaw > 0 ? refPriceRaw : null;
     preflightRef = refPrice;
-    const notionalUsd = refPrice ? Number(quantity) * refPrice : 0;
+    const notionalUsd = refPrice ? orderQty * refPrice : 0;
 
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
     const g = gateOrder(mode, notionalUsd);
@@ -267,7 +301,7 @@ export async function POST(req: NextRequest) {
 
   const built = buildManualPlan({
     symbol, side: String(side).toUpperCase() as 'BUY' | 'SELL',
-    quantity: Number(quantity),
+    quantity: orderQty,
     // 배율을 안 보내면 거래소에 설정된 값을 쓴다. 1로 가정하면 실제로는
     // 20배인 계좌에서 필요 증거금이 20분의 1로 계산된다.
     leverage: Number(leverage ?? preflightRisk?.leverage ?? 0),
@@ -291,7 +325,7 @@ export async function POST(req: NextRequest) {
   // 1분 뒤에는 다른 키가 되므로 의도적인 반복은 가능하다.
   const minute = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const clientOrderId =
-    `MF${minute}${symbol}${String(side)[0]}${String(quantity).replace('.', '')}`
+    `MF${minute}${symbol}${String(side)[0]}${String(orderQty).replace('.', '')}`
       .slice(0, 36);
 
   const exec = await executeOrder(sb, {
@@ -329,6 +363,9 @@ export async function POST(req: NextRequest) {
     slOrderId: exec.slOrderId,
     duplicate: exec.duplicate,
     message: exec.message,
+    // 수량을 조용히 바꾸지 않는다 — 바뀌었으면 화면이 그대로 보여준다.
+    quantizeNote,
+    quantity: orderQty,
     checklist: {
       allowed: true, passed: preflightPassed, total: preflightTotal,
       // 넘겨서 나갔으면 그렇게 적는다. '통과'로 적으면 기록이 거짓이 된다.

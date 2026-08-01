@@ -33,94 +33,102 @@ export function statusLabel(s: DataStatus) {
    값이었다. 상단 MOCK 배지만이 유일한 단서였다.
    all_crypto는 {results:[...]} 형태라 fetchPrices가 그대로 읽는다.
    (데이터 출처 표시를 붙이다가 드러난 문제다.) */
-export function useLivePrices(intervalMs = 8000) {
+export function useLivePrices(intervalMs = 5000) {
   const [prices,    setPrices]    = useState<Asset[]>(ASSETS);
   const [status,    setStatus]    = useState<DataStatus>('loading');
   const [source,    setSource]    = useState('initialising');
-  // ── 값의 출처를 구분하기 위한 시간 ──
-  //
-  // 이 훅은 실데이터를 12초마다 받고, 그 사이에는 simulatePriceUpdate로
-  // 값을 임의로 움직인다. 즉 화면에 보이는 가격은 네 번 중 세 번이
-  // 난수보행이다. 그런데 상단 표시는 계속 LIVE였다.
-  // 언제 진짜 값을 받았는지, 그 뒤로 몇 번 움직였는지를 남긴다.
   const [lastRealAt, setLastRealAt] = useState<number | null>(null);
-  const [simSteps,   setSimSteps]   = useState(0);
+  /**
+   * **실제 시세를 받은 종목의 id.**
+   *
+   * ASSETS에는 하드코딩된 기본 가격이 들어 있다(BTC 60,212 같은 것).
+   * 그 값을 그대로 그리면 시세를 못 받았을 때도 그럴듯한 숫자가 뜬다 —
+   * 실제로 매매 화면은 63,093인데 왓치리스트는 60,212를 보여주고 있었다.
+   *
+   * 여기 없는 종목의 가격은 **화면이 '—'로 그려야 한다.** 모르는 것을
+   * 숫자로 그리면 그게 시세인 줄 안다.
+   */
+  const [liveIds, setLiveIds] = useState<Set<string>>(() => new Set());
 
-  // Merge Binance live data into ASSETS array (keep full Asset shape)
-  const merge = useCallback((live: PriceItem[]) => {
+  const merge = useCallback((all: PriceItem[]) => {
+    // **지어낸 값은 받지 않는다.** /api/prices는 실데이터에 mock 시드를
+    // 섞어서 준다 — 거래소가 막혔을 때도 응답에 숫자가 가득하다.
+    // 그 숫자를 그리면 화면은 멀쩡한데 값이 전부 가짜다.
+    const live = all.filter(l => l.source !== 'mock');
     if (!live.length) return;
+    const got = new Set<string>();
     setPrices(prev => prev.map(a => {
       const match = live.find(l =>
         l.id === a.id || l.symbol === a.id ||
         l.symbol.toUpperCase() === a.sym?.replace('USDT','').toUpperCase()
       );
       if (!match) return a;
+      got.add(a.id);
       return { ...a, p: match.price, c: match.change24h, v: String(match.volume) };
     }));
+    setLiveIds(prev => {
+      // 이번에 못 받은 종목을 지우지 않는다. 한 번 실패했다고 값이
+      // 사라지면 화면이 깜빡인다 — 오래된 값이라는 것은 lastRealAt이 말한다.
+      const next = new Set(prev);
+      got.forEach(id => next.add(id));
+      return next;
+    });
   }, []);
 
-  // Initial fetch
-  useEffect(() => {
-    fetchPrices('all_crypto', 'limit=200').then(r => {
+  const load = useCallback(() => {
+    return fetchPrices('all_crypto', 'limit=200').then(r => {
+      const real = (r.data || []).filter(l => l.source !== 'mock');
       merge(r.data);
-      setStatus(r.data.length > 0 ? 'live' : 'mock');
-      setSource(r.source);
-      if (r.data.length > 0) { setLastRealAt(Date.now()); setSimSteps(0); }
-    });
+      // 줄이 있다고 live가 아니다 — 전부 mock 시드일 수 있다.
+      setStatus(real.length > 0 ? 'live' : 'mock');
+      setSource(real.length > 0 ? r.source : 'mock');
+      if (real.length > 0) setLastRealAt(Date.now());
+    }).catch(() => { setStatus('mock'); });
   }, [merge]);
 
-  // Interval: real refresh every ~24s, local sim every 8s (mobile-friendly)
-  // PAUSES when tab is hidden to save CPU/battery.
+  useEffect(() => { load(); }, [load]);
+
+  // **난수보행을 걷어냈다.**
+  //
+  // 예전에는 12초마다 실데이터를 받고 **그 사이 세 번은 Math.random()으로
+  // 값을 흔들었다.** 화면이 살아 있어 보이게 하려던 것인데, 결과는 네 번 중
+  // 세 번이 지어낸 가격이었다. 상단 배지는 계속 LIVE였다.
+  //
+  // 거래 앱에서 지어낸 가격을 그리는 것은 그 자체로 사고다. 사용자가 그 값을
+  // 보고 주문을 낸다. 화면이 덜 부드러운 것이 훨씬 낫다 — 대신 자주 받는다.
   useEffect(() => {
-    let fetchCount = 0;
     let stopped = false;
     const tick = () => {
       if (stopped) return;
-      // Skip work if tab hidden
+      // 탭이 숨겨져 있으면 받지 않는다. 배터리와 레이트리밋 둘 다.
       if (typeof document !== 'undefined' && document.hidden) return;
-      fetchCount++;
-      if (fetchCount % Math.round(12000 / intervalMs) === 0) {
-        // Real refresh ~12s (실데이터가 시뮬레이션을 자주 덮어씀)
-        fetchPrices('all_crypto', 'limit=200').then(r => {
-          merge(r.data);
-          setStatus(r.data.length > 0 ? 'live' : 'mock');
-          setSource(r.source);
-          if (r.data.length > 0) { setLastRealAt(Date.now()); setSimSteps(0); }
-        }).catch(() => {});
-      } else {
-        // Local simulation between refreshes
-        setPrices(prev => simulatePriceUpdate(prev));
-        setSimSteps(n => n + 1);   // 진짜 값이 아니라는 표시
-      }
+      load();
     };
-    const t = setInterval(tick, intervalMs);
-    // Refetch immediately when tab becomes visible again
+    const t = setInterval(tick, Math.max(2000, intervalMs));
+    // 돌아왔을 때 즉시 한 번. 오래된 값을 그대로 두면 몇 초 동안
+    // 지난 가격을 보고 주문할 수 있다.
     const onVis = () => {
-      if (typeof document !== 'undefined' && !document.hidden) {
-        fetchPrices('all_crypto', 'limit=200').then(r => {
-          merge(r.data);
-          setStatus(r.data.length > 0 ? 'live' : 'mock');
-          setSource(r.source);
-          if (r.data.length > 0) { setLastRealAt(Date.now()); setSimSteps(0); }
-        }).catch(() => {});
-      }
+      if (typeof document !== 'undefined' && !document.hidden) load();
     };
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', onVis);
-    }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVis);
     return () => {
       stopped = true;
       clearInterval(t);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVis);
     };
-  }, [intervalMs, merge]);
+  }, [intervalMs, load]);
 
   return {
     prices, status, source,
-    /** 마지막으로 실데이터를 받은 시각. 없으면 아직 한 번도 못 받았다 */
+    /** 마지막으로 실데이터를 받은 시각. null이면 아직 한 번도 못 받았다 */
     lastRealAt,
-    /** 그 뒤로 임의로 움직인 횟수. 0보다 크면 현재 값은 모의다 */
-    simSteps,
+    /** 실제 시세를 받은 종목. 여기 없으면 화면이 '—'로 그려야 한다 */
+    liveIds,
+    /**
+     * 더 이상 값을 지어내지 않으므로 항상 0이다.
+     * 이 값을 읽는 화면들이 있어 모양만 남긴다.
+     */
+    simSteps: 0,
   };
 }
 
