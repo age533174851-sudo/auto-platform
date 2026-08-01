@@ -72,6 +72,11 @@ export default function ExchangeConnectPage() {
   ) : null;
   const [testing,      setTesting]      = useState(false);
   const [testMsg,      setTestMsg]      = useState('');
+  // 거래소 키에 IP 제한을 걸었을 때 허용 목록에 넣어야 하는 것은
+  // **이 서버**의 IP다. 지금까지 "이 서버 IP를 확인하세요"라고만 적고
+  // 그 값을 알려주지 않았다 — 확인할 방법이 없는 안내였다.
+  const [srvIp,        setSrvIp]        = useState<any>(null);
+  const [ipBusy,       setIpBusy]       = useState(false);
 
   // ── Load connections ────────────────────────────────────────
   const loadConnections = useCallback(async () => {
@@ -103,6 +108,19 @@ export default function ExchangeConnectPage() {
       if (sbc) { const { data } = await sbc.auth.getSession(); if (data?.session?.access_token) return `Bearer ${data.session.access_token}`; }
     } catch {}
     return '';
+  };
+
+  const loadServerIp = async () => {
+    setIpBusy(true);
+    try {
+      const auth = await getAuthHeader();
+      const r = await fetch('/api/diagnostics/ip', { headers: auth ? { Authorization: auth } : {} });
+      const d = await r.json();
+      // 실패를 빈 값으로 두지 않는다 — 빈 칸은 '아직 안 눌렀다'로 읽힌다
+      setSrvIp(r.ok && d?.ok ? d : { error: d?.message || d?.error || `확인 실패 (${r.status})` });
+    } catch (e: any) {
+      setSrvIp({ error: `확인 실패 (${e?.message || e})` });
+    } finally { setIpBusy(false); }
   };
 
   const handleConnect = async () => {
@@ -679,6 +697,42 @@ export default function ExchangeConnectPage() {
               {testMsg}
             </div>
           )}
+
+          {/* 이 서버의 IP.
+              401·IP 제한 오류의 원인 중 하나가 이것인데, 지금까지 화면이
+              "이 서버 IP를 허용 목록에 넣으세요"라고만 하고 그 값은 안
+              알려줬다. 여기서 직접 보여준다. */}
+          <div style={{ marginTop:10, padding:'10px 12px', background:T.alt, border:`1px solid ${T.border}`, borderRadius:10 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+              <span style={{ color:T.sub, fontSize:11, fontWeight:700 }}>거래소에 보이는 서버 IP</span>
+              <button onClick={loadServerIp} disabled={ipBusy} style={{
+                padding:'5px 10px', minHeight:0, background:'transparent',
+                border:`1px solid ${T.border}`, borderRadius:8,
+                color:T.acl, fontSize:10, fontWeight:700, cursor: ipBusy ? 'default' : 'pointer',
+              }} className="switch">{ipBusy ? '확인 중…' : '확인'}</button>
+            </div>
+            {srvIp?.ip && (
+              <>
+                <div style={{ marginTop:6, color:T.txt, fontSize:14, fontWeight:800, fontVariantNumeric:'tabular-nums', wordBreak:'break-all' }}>
+                  {srvIp.ip}
+                </div>
+                {/* 고정이라고 말하지 않는다. 이 값 하나만 허용 목록에 넣으면
+                    지금은 되고 나중에 조용히 막힌다. */}
+                <div style={{ marginTop:5, color:T.ylw, fontSize:10, lineHeight:1.55 }}>
+                  {srvIp.note}
+                </div>
+              </>
+            )}
+            {srvIp?.error && (
+              <div style={{ marginTop:6, color:T.red, fontSize:10, lineHeight:1.55 }}>{srvIp.error}</div>
+            )}
+            {!srvIp && (
+              <div style={{ marginTop:5, color:T.muted, fontSize:10, lineHeight:1.55 }}>
+                키에 IP 제한을 걸었다면 이 IP를 거래소 허용 목록에 넣어야 합니다.
+                내 폰·PC의 IP가 아니라 <b>주문을 보내는 서버</b>의 IP입니다.
+              </div>
+            )}
+          </div>
 
           {/* 테스트넷 진단 (선물 시스템 검증) */}
           <button onClick={async () => {
