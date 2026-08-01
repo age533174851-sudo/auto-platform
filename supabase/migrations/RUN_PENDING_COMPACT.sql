@@ -217,3 +217,26 @@ BEGIN
 END $$;
 CREATE INDEX IF NOT EXISTS paper_pos_market_idx
   ON paper_positions (user_id, market, status);
+
+CREATE TABLE IF NOT EXISTS safety_events (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID,
+  kind         TEXT NOT NULL,
+  label        TEXT,
+  status       TEXT NOT NULL,
+  market       TEXT,
+  symbol       TEXT,
+  reason       TEXT,
+  occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS safety_events_user_kind_idx
+  ON safety_events (user_id, kind, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS safety_events_recent_idx
+  ON safety_events (occurred_at DESC);
+ALTER TABLE safety_events ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS safety_events_service ON safety_events;
+CREATE POLICY safety_events_service ON safety_events
+  FOR ALL TO service_role USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS safety_events_owner ON safety_events;
+CREATE POLICY safety_events_owner ON safety_events
+  FOR SELECT TO authenticated USING (user_id = auth.uid());

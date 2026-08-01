@@ -240,3 +240,53 @@ export function syncCooldown(lastAt: number, nowMs: number): { allowed: boolean;
   if (left <= 0) return { allowed: true, waitSec: 0 };
   return { allowed: false, waitSec: Math.ceil(left / 1000) };
 }
+
+/**
+ * 지표 이름을 화면 언어로 옮긴다.
+ *
+ * 왜 이게 틀렸었나
+ * ────────────────
+ * 원래 화면 함수는 사전 키가 이름 **안에 들어 있기만 하면** 무조건 바꿨다:
+ *
+ *   '미국 소비자물가지수 (CPI)'
+ *     → 'CPI'를 찾음 → '소비자물가지수' + 나머지('미국 소비자물가지수 ()')
+ *     → '소비자물가지수 미국 소비자물가지수 ()'
+ *
+ * 영어 이름('US CPI')을 옮기려고 만든 규칙인데, 목데이터와 한국어 공급자는
+ * 이미 한국어 이름을 준다. **이미 그 언어인 것을 또 옮기면 겹친다.**
+ * 그리고 키만 빼내니 괄호가 `()`로 남았다.
+ *
+ * 둘 다 조용한 종류다 — 글자가 이상해도 화면은 멀쩡히 그려지고, 에러도
+ * 안 난다. 그래서 순수 함수로 빼고 테스트를 붙인다.
+ */
+export function localizeEventTitle(
+  title: string,
+  langKey: 'ko' | 'en' | 'ja' | 'zh',
+  dict: Record<string, Record<string, string>>,
+): string {
+  const raw = String(title || '');
+  if (!raw) return '';
+
+  // 이미 한국어면 그대로 둔다. 한글이 들어 있는 이름을 한국어로 '번역'할
+  // 일은 없다 — 그 경우가 정확히 위의 겹침이다.
+  if (langKey === 'ko' && /[가-힣]/.test(raw)) return tidy(raw);
+
+  // 긴 키를 먼저 본다 ('Core CPI'가 'CPI'보다 앞서야 한다)
+  const keys = Object.keys(dict || {}).sort((a, b) => b.length - a.length);
+  for (const key of keys) {
+    if (!raw.includes(key)) continue;
+    const trans = dict[key][langKey] || dict[key]['en'] || key;
+    const rest = tidy(raw.replace(key, ''));
+    return rest ? `${trans} ${rest}` : trans;
+  }
+  return tidy(raw);
+}
+
+/** 키를 빼낸 자리에 남는 빈 괄호·겹친 공백을 정리한다 */
+function tidy(s: string): string {
+  return String(s || '')
+    .replace(/\(\s*\)/g, '')      // '(CPI)'에서 키가 빠져 '()'만 남은 것
+    .replace(/\[\s*\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}

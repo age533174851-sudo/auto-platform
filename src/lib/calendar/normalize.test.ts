@@ -12,6 +12,7 @@ import { test, assert, eq } from '../../test/harness';
 import {
   parseImpact, toUtc, toDate, cleanValue, eventKey,
   normalizeEvent, collectEvents, withEventName, syncCooldown, SYNC_COOLDOWN_MS,
+  localizeEventTitle,
 } from './normalize';
 
 const PAST = '2020-01-15';
@@ -237,5 +238,49 @@ export function runCalendarTests() {
     // lastAt이 미래면 남은 시간이 무한정 커진다. 서버리스에서 인스턴스마다
     // 시계가 조금씩 다른 것은 흔한 일이다.
     eq(syncCooldown(2_000_000, 1_000_000).allowed, true);
+  });
+
+  // ── 지표 이름 옮기기 ────────────────────────────────────
+  console.log('[캘린더 — 이름을 두 번 옮기지 않는다]');
+
+  const DICT: Record<string, Record<string, string>> = {
+    'CPI':      { ko: '소비자물가지수', en: 'CPI' },
+    'Core CPI': { ko: '근원 소비자물가', en: 'Core CPI' },
+    'FOMC':     { ko: 'FOMC 금리 결정', en: 'FOMC' },
+  };
+
+  test('이미 한국어인 이름은 다시 옮기지 않는다', () => {
+    // 이게 화면에 '소비자물가지수 미국 소비자물가지수 ()'를 만들던 버그다.
+    eq(localizeEventTitle('미국 소비자물가지수 (CPI)', 'ko', DICT), '미국 소비자물가지수 (CPI)');
+    eq(localizeEventTitle('FOMC 금리 결정', 'ko', DICT), 'FOMC 금리 결정');
+  });
+
+  test('영어 이름은 옮긴다', () => {
+    eq(localizeEventTitle('US CPI', 'ko', DICT), '소비자물가지수 US');
+  });
+
+  test('긴 키가 먼저다 — Core CPI가 CPI보다 앞선다', () => {
+    eq(localizeEventTitle('US Core CPI', 'ko', DICT), '근원 소비자물가 US');
+  });
+
+  test('키를 빼낸 자리에 빈 괄호를 남기지 않는다', () => {
+    // '(CPI)'에서 키만 지우면 '()'가 남아 화면에 그대로 찍힌다.
+    eq(localizeEventTitle('US Inflation (CPI)', 'ko', DICT), '소비자물가지수 US Inflation');
+  });
+
+  test('사전에 없으면 원문 그대로 (다만 찌꺼기는 정리)', () => {
+    eq(localizeEventTitle('Retail Sales', 'ko', DICT), 'Retail Sales');
+    eq(localizeEventTitle('Retail   Sales  ( )', 'ko', DICT), 'Retail Sales');
+  });
+
+  test('빈 이름은 빈 문자열', () => {
+    eq(localizeEventTitle('', 'ko', DICT), '');
+    eq(localizeEventTitle(null as any, 'ko', DICT), '');
+  });
+
+  test('영어 화면에서는 한글 이름도 사전을 탄다', () => {
+    // 한글 예외는 ko일 때만이다. 영어 화면에서 한국어 이름이 오면
+    // 사전으로 옮길 수 있어야 한다.
+    eq(localizeEventTitle('FOMC 금리 결정', 'en', DICT), 'FOMC 금리 결정');
   });
 }

@@ -370,7 +370,10 @@ export default function App() {
   useEffect(()=>{
     if(typeof window==='undefined') return;
     if('serviceWorker' in navigator){
-      navigator.serviceWorker.register('/sw.js',{scope:'/'})
+      // 빌드 id를 붙여 부른다. 파일 내용이 같아도 URL이 달라지면 브라우저가
+      // 새 서비스워커로 보고 설치하고, sw.js는 이 값으로 캐시 이름을 짓는다.
+      // (public/sw.js 맨 위 주석 참조 — 손으로 버전을 올리던 것을 없앴다)
+      navigator.serviceWorker.register(`/sw.js?v=${process.env.NEXT_PUBLIC_BUILD_ID || 'dev'}`,{scope:'/'})
         .then(reg=>{
           setPwaSwReg(reg);
           reg.addEventListener('updatefound',()=>{
