@@ -66,18 +66,24 @@ export function TradeModeSwitch({ compact }: { compact?: boolean }) {
 
       {/* 설명 한 줄. 색이 아니라 글자로 말한다.
           좁은 화면에서는 짧은 쪽을 쓴다 — 두 줄로 접히면 그 36px이 그대로
-          포지션 칸에서 빠진다. 지우지는 않는다: 색만 보고 판단하게 두면
-          안 되는 정보다. */}
-      <div style={{
-        marginTop: 4, fontSize: FS.micro, lineHeight: 1.45,
-        color: live ? C.down : C.faint,
-        fontWeight: live ? 700 : 400,
-        whiteSpace: compact ? 'nowrap' : undefined,
-        overflow: compact ? 'hidden' : undefined,
-        textOverflow: compact ? 'ellipsis' : undefined,
-      }}>
-        {compact ? info.descShort : info.desc}
-      </div>
+          포지션 칸에서 빠진다.
+
+          **실전에서는 좁아도 남긴다.** 모의·테스트넷에서만 뺀다:
+          그때는 눌린 칩에 '모의'·'테스트넷'이라고 **글자로** 적혀 있어서
+          색에만 기대는 것이 아니다. 반면 실전은 한 번 더 말해야 하고,
+          그 한 줄을 아끼려다 잘못 누르게 두는 것은 자리 절약이 아니다. */}
+      {(!compact || live) && (
+        <div style={{
+          marginTop: 4, fontSize: FS.micro, lineHeight: 1.45,
+          color: live ? C.down : C.faint,
+          fontWeight: live ? 700 : 400,
+          whiteSpace: compact ? 'nowrap' : undefined,
+          overflow: compact ? 'hidden' : undefined,
+          textOverflow: compact ? 'ellipsis' : undefined,
+        }}>
+          {compact ? info.descShort : info.desc}
+        </div>
+      )}
 
       {/* 쓸 연결이 없으면 그 사실과 이유. 주문 버튼까지 가서 실패하게 두지 않는다 */}
       {!modeResolution.ok && (

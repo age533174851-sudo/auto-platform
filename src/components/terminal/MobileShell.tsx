@@ -186,14 +186,22 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
       />
     </div>
 
-    {/* 시장 전환은 자기 줄을 갖는다. 종목·가격과 같은 줄에 두면
-        좁은 화면에서 서로를 밀어내고, 밀려난 쪽이 잘린다.
-        어느 시장에 있는지는 잘려도 되는 정보가 아니다. */}
-    <div style={{ padding: '0 12px 6px', display: 'flex', flexDirection: 'column', gap: 5 }}>
-      <MarketSwitch compact value={marketType} onChange={setMarketType}/>
-      {/* 이 화면에서 가장 중요한 한 줄 — 진짜 돈인가.
-          접거나 메뉴에 넣지 않는다. */}
-      <TradeModeSwitch compact/>
+    {/* 시장 전환과 모드 전환을 **한 줄에** 놓는다.
+        둘 다 종목·가격 줄에는 못 넣는다(서로를 밀어내고 밀려난 쪽이 잘린다).
+        그렇다고 각자 한 줄씩 쓰면 헤더만 130px이고, 그 차이가 그대로
+        주문폼에서 빠져 25%·50% 줄이 진입 버튼 뒤로 밀렸다.
+
+        둘 다 칩 세 개짜리라 360px에 나란히 들어간다. 어느 쪽도 접거나
+        메뉴로 숨기지 않는다 — '현물인가 선물인가'와 '진짜 돈인가'는
+        잘려도 되는 정보가 아니다. */}
+    <div style={{ padding: '0 12px 6px', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+      <div style={{ flexShrink: 0 }}>
+        <MarketSwitch compact value={marketType} onChange={setMarketType}/>
+      </div>
+      {/* 이 화면에서 가장 중요한 한 줄 — 진짜 돈인가. */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <TradeModeSwitch compact/>
+      </div>
     </div>
     </div>
   );
@@ -271,7 +279,7 @@ function ChartDrawer({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
       <button onClick={toggle} style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         width: '100%', background: 'none', border: 'none', cursor: 'pointer',
-        padding: '12px 14px', paddingBottom: open ? 8 : 'max(env(safe-area-inset-bottom), 12px)',
+        padding: '9px 14px', paddingBottom: open ? 8 : 'max(env(safe-area-inset-bottom), 9px)',
         color: C.text, fontSize: FS.body, fontWeight: 600, flexShrink: 0,
       }}>
         <span>{symbol.id} 차트</span>
@@ -366,7 +374,9 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   // 준다. 폼이 다 들어가면 스크롤이 아예 없다. 폼이 너무 길어 안 들어가면
   // 그때만 폼이 스크롤하고, 포지션은 탭 줄만 남는다 — **탭 줄은 항상 보인다.**
   const avail = Math.max(0, boxH - hdrH);
-  const dockMin = 84;                       // 손잡이 + 탭 줄
+  // 손잡이(18) + 탭 줄(34 + 위아래 7). 여유를 더 두면 그만큼이 **주문폼에서**
+  // 빠진다 — dockH가 leftover보다 이 값을 먼저 지키기 때문이다.
+  const dockMin = 66;
   const dockMax = Math.max(dockMin, avail - 160);
   const leftover = formH > 0
     ? avail - formH - chartH

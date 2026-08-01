@@ -519,7 +519,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   };
 
   const pad = dense ? 7 : 12;
-  const gap = dense ? 5 : 12;
+  // 줄 사이 간격. dense에서 1px을 줄이면 줄이 여덟이라 8px이 생기고,
+  // 그 8px이 25%·50% 줄이 진입 버튼 뒤로 밀리느냐 마느냐를 가른다.
+  const gap = dense ? 4 : 12;
   const inputStyle: React.CSSProperties = {
     ...input, padding: dense ? '7px 9px' : '10px 12px', fontSize: dense ? FS.small : FS.body,
   };
@@ -536,12 +538,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       <div style={{ display: 'flex', gap: 5, alignItems: 'stretch' }}>
         <span style={{
           flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          minHeight: 30, borderRadius: 7, background: C.raised,
+          minHeight: dense ? 28 : 30, borderRadius: 7, background: C.raised,
           border: `1px solid ${C.hair}`, color: C.dim,
           fontSize: FS.micro, fontWeight: 600,
         }}>격리</span>
         <button onClick={() => setLevOpen(v => !v)} style={{
-          flex: 1, minHeight: 30, borderRadius: 7, cursor: 'pointer',
+          flex: 1, minHeight: dense ? 28 : 30, borderRadius: 7, cursor: 'pointer',
           background: leverage >= 50 ? C.downBg : C.raised,
           border: `1px solid ${leverage >= 50 ? A(C.down,'55') : C.hair}`,
           color: leverage >= 50 ? C.down : C.text,
@@ -549,7 +551,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         }}>{leverage}×</button>
         <span title="이 배율에서 청산까지의 대략적인 거리" style={{
           flex: 1.15, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          minHeight: 30, borderRadius: 7, background: C.raised,
+          minHeight: dense ? 28 : 30, borderRadius: 7, background: C.raised,
           border: `1px solid ${liqPct < 3 ? A(liqTone, '55') : C.hair}`,
           color: liqTone, fontSize: FS.micro, fontWeight: 700, ...NUM,
           whiteSpace: 'nowrap',
@@ -677,6 +679,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             const buyStop = ref * (1 - slPct / 100);
             const sellStop = ref * (1 + slPct / 100);
             const beyond = slPct >= liqPct;
+            // 좁은 화면에서는 **위험할 때만** 적는다.
+            // '롱 61,676 · 숏 64,193'은 알면 좋은 값이지만 손절 %와 현재가에서
+            // 바로 나오는 값이다. 반면 '손절이 청산 너머'는 그 줄이 없으면
+            // 알 방법이 없다 — 둘을 같은 규칙으로 두면 자리를 아끼려다
+            // 중요한 쪽까지 같이 사라진다.
+            if (dense && !beyond) return null;
             return (
               <div style={{
                 marginTop: 4, fontSize: FS.micro, lineHeight: 1.5,
@@ -694,7 +702,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
       {/* 비율 슬라이더 — 바이낸스의 눈금 슬라이더 자리.
           잔고를 모르면 비율을 계산할 수 없다. 그때는 눈금만 두고 막는다. */}
-      <div style={{ padding: '2px 2px 0' }}>
+      <div style={{ padding: dense ? 0 : '2px 2px 0' }}>
         <div style={{ display: 'flex', gap: 3 }}>
           {[25, 50, 75, 100].map(pct => (
             <button key={pct} onClick={() => setPct(pct)}
@@ -838,10 +846,25 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           틀릴 수 있기 때문이다 — 숏에 맞춰뒀다고 믿고 눌렀는데 롱이
           나가는 사고는 화면만 봐서는 예방되지 않는다. 누른 버튼이 방향이다.
 
-          바닥에 고정한다. 위 항목이 늘어나면 버튼이 화면 밖으로 밀리는데,
-          이 화면에서 가장 중요한 버튼이 스크롤해야 보이면 안 된다. */}
+          한동안 `position: sticky; bottom: 0`으로 바닥에 붙여 뒀다. 폼이
+          길어져도 버튼은 늘 보이게 하려던 것이다. 그런데 좁은 화면에서
+          폼이 칸보다 길어지면 이 블록(약 96px)이 **위 내용을 덮는다.**
+          덮인 것이 25%·50%·75%·100% 줄이었고, 그 자리를 누르면 탭이
+          진입 버튼으로 들어갔다 — 사용자에게는 "비율 버튼이 안 눌린다"로
+          보인다. elementFromPoint로 재 보면 네 개 전부 '롱 진입'이 받는다.
+          모의라 '수량을 입력하세요'로 끝났을 뿐, 실전이라면 의도하지 않은
+          방향의 주문 확인창이 뜬다.
+
+          그래서 dense에서는 고정을 뺀다. 두 실패를 비교하면:
+            · 고정: 버튼은 늘 보이지만 **다른 조작을 조용히 삼킨다**
+            · 흐름: 폼이 길면 버튼까지 스크롤해야 한다 — 눈에 보이는 불편
+          이 저장소에서 조용히 틀리는 쪽은 언제나 더 나쁘다.
+
+          `marginTop: 'auto'`는 남긴다. 폼이 다 들어가는 보통의 경우에는
+          지금까지처럼 버튼이 칸 바닥에 붙는다. 넓은 화면(dense 아님)은
+          그대로 고정을 쓴다 — 거기서는 덮일 만큼 좁아지지 않는다. */}
       <div style={{
-        position: 'sticky', bottom: 0, zIndex: 2,
+        ...(dense ? null : { position: 'sticky' as const, bottom: 0, zIndex: 2 }),
         display: 'flex', flexDirection: 'column', gap: 6,
         paddingTop: 6, marginTop: 'auto',
         background: C.panel, boxShadow: `0 -8px 12px -6px ${C.bg}`,

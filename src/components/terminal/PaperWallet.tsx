@@ -107,7 +107,7 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
   return (
     <div style={{
       background: C.raised, borderRadius: 8,
-      padding: dense ? '8px 10px' : '10px 12px',
+      padding: dense ? '5px 9px' : '10px 12px',
     }}>
       {/* 한 줄 요약 + [＋].
           좁은 화면(dense)에서는 이 한 줄과 오차 표시만 남긴다. 잔고·증거금·
@@ -116,12 +116,15 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <span style={{ color: C.faint, fontSize: FS.micro }}>모의 가용</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <span style={{ ...NUM, color: acct ? C.text : C.warn, fontSize: FS.body, fontWeight: 700 }}>
+          <span style={{
+            ...NUM, color: acct ? C.text : C.warn,
+            fontSize: dense ? FS.small : FS.body, fontWeight: 700,
+          }}>
             {acct ? `${fmtPrice(acct.available)} USDT` : '확인 불가'}
           </span>
           <button onClick={() => setOpen(v => !v)} title="충전 · 초기화"
             style={{
-              width: 26, height: 26, borderRadius: 7, flexShrink: 0, lineHeight: 1,
+              width: 26, height: dense ? 24 : 26, borderRadius: 7, flexShrink: 0, lineHeight: 1,
               background: open ? C.accentBg : C.panel,
               color: open ? C.accent : C.dim,
               border: `1px solid ${open ? `${C.accent}55` : C.hair}`,
