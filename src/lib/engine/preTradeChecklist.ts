@@ -68,7 +68,9 @@ export type CheckId =
   /** AI 합의가 이 방향을 강하게 반대하는가 (거부권만, 진입은 못 만든다) */
   | 'AI_VETO'
   /** 이 주문이 배정한 가상 서브계좌 한도 안인가 */
-  | 'SUBACCOUNT_LIMIT';
+  | 'SUBACCOUNT_LIMIT'
+  /** 지금 이 시장이 열려 있는가 (주식 전용 — 코인은 24시간이다) */
+  | 'MARKET_HOURS';
 
 /**
  * 어느 시장의 주문인가.
@@ -81,7 +83,7 @@ export type CheckId =
  * ISOLATED ✓"가 뜨면 그건 확인한 것도 아니고 사실도 아니다. 해당 없는 검사는
  * **목록에서 빼는 것**이 맞다.
  */
-export type MarketKind = 'SPOT' | 'USDM' | 'COINM';
+export type MarketKind = 'SPOT' | 'USDM' | 'COINM' | 'STOCK';
 
 /**
  * 들어가는 주문인가 나오는 주문인가.
@@ -126,7 +128,18 @@ export interface CheckSpec {
  * 순서는 **바깥 관문부터**다. 모드가 막으면 나머지는 볼 필요가 없고,
  * 시계가 틀리면 거래소 응답 자체를 신뢰할 수 없다.
  */
-const ALL_MARKETS: MarketKind[] = ['SPOT', 'USDM', 'COINM'];
+const ALL_MARKETS: MarketKind[] = ['SPOT', 'USDM', 'COINM', 'STOCK'];
+/**
+ * 주식만.
+ *
+ * 주식 현물에는 청산도 마진 모드도 레버리지도 **존재하지 않는다.**
+ * 없는 것을 pass로 적으면 "청산가 확인 ✓"가 뜨는데 그건 확인한 것도
+ * 아니고 사실도 아니다. 해당 없는 검사는 목록에서 뺀다 — 현물에서
+ * 이미 쓰고 있는 규칙과 같다.
+ *
+ * 대신 주식에는 코인에 없는 관문이 하나 있다: **장이 열려 있는가.**
+ */
+const STOCK_ONLY: MarketKind[] = ['STOCK'];
 /** 파생 시장. 마진·청산·배율이 존재하는 곳 */
 const DERIV: MarketKind[] = ['USDM', 'COINM'];
 const BOTH: OrderIntent[] = ['ENTRY', 'EXIT'];
@@ -179,7 +192,20 @@ export const CHECK_SPECS: CheckSpec[] = [
   //     그건 **껍데기 통과**다 — 이 파일이 막으려는 바로 그 실패다
   //  2. 현물 자금 부족은 거래소가 주문을 통째로 거부한다. 선물처럼 일부만
   //     체결되어 어중간한 포지션이 남는 실패가 없다
-  { id: 'MARGIN_SUFFICIENT', label: '증거금 충분', markets: DERIV, intents: ENTRY_ONLY,
+  { id: 'MARGIN_SUFFICIENT', label: '증거금 충분', markets: [...DERIV, 'STOCK'], intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // **장이 열려 있는가.** 주식에만 있는 관문이다.
+  //
+  // 코인은 24시간이라 지금까지 이 질문을 한 코드가 없었다. 주식에서
+  // 그대로 두면 크론이 새벽 3시에 주문을 내고, 증권사는 그걸 거부하거나
+  // 다음 영업일 예약주문으로 받는다. **둘 다 화면에는 에러로 안 뜬다** —
+  // 전략은 진입했다고 믿고 손절 감시를 시작하는데 포지션은 없다.
+  //
+  // 청산(EXIT)에도 건다. 장외에 파는 것도 안 되기 때문이다. 다른 검사들과
+  // 달리 여기서는 '나가는 길을 막는다'가 문제가 아니다 — 애초에 시장이
+  // 닫혀 있어서 나갈 수가 없고, 그 사실을 알려 주는 쪽이 낫다.
+  { id: 'MARKET_HOURS', label: '장이 열려 있음', markets: STOCK_ONLY, intents: BOTH,
     blocking: true, requiredToKnow: true },
 
   // 오늘 얼마를 잃었는가. **진입에만** 건다 —
@@ -429,6 +455,22 @@ export interface ChecklistInput {
   liquidationPrice?: number | null;
   side?: 'LONG' | 'SHORT' | null;
   margin?: { required: number | null; available: number | null } | null;
+  /**
+   * 장 시간 판정 (주식 전용).
+   *
+   * `marketPhase()`의 결과를 그대로 넣는다. 여기서 다시 판정하지 않는
+   * 이유는 늘 같다 — 규칙이 두 벌이 되면 화면이 말하는 것과 실제로
+   * 주문을 막는 것이 갈린다.
+   *
+   * **넣지 않으면 'unknown'이고, 그건 막는다.** 주식 주문 경로가 이
+   * 값을 안 넘기는 상태로 배포되면 그 사실이 바로 드러나야 한다.
+   */
+  marketHours?: {
+    canOrder: boolean;
+    reason: string;
+    /** 휴장일 목록을 들고 있었는가 */
+    holidaysKnown?: boolean;
+  } | null;
 }
 
 export interface ChecklistOptions {
@@ -672,6 +714,23 @@ export function runChecklist(
       input.todayEntry.detail || '오늘 이미 진입했습니다 — 이 전략은 하루 최대 1회입니다'));
   } else {
     results.push(resultFor('TODAY_ENTRY', 'pass', '오늘 진입 없음'));
+  }
+
+  // 장 시간 (주식 전용).
+  //
+  // **못 받았으면 통과가 아니다.** 주식 주문 경로가 이 값을 안 넘기면
+  // 그 순간 모든 주식 주문이 막힌다 — 그게 맞다. 조용히 통과시키면
+  // 새벽에 주문이 나가기 시작하고, 그건 아무도 안 본다.
+  if (!input.marketHours) {
+    results.push(resultFor('MARKET_HOURS', 'unknown', '장이 열려 있는지 확인하지 못했습니다'));
+  } else if (!input.marketHours.canOrder) {
+    results.push(resultFor('MARKET_HOURS', 'fail', input.marketHours.reason));
+  } else {
+    // 열려 있다. 다만 휴장일 목록이 없으면 그 사실을 같이 적는다 —
+    // '열림'이라고만 적으면 설날에도 초록 체크가 뜬다.
+    results.push(resultFor('MARKET_HOURS',
+      input.marketHours.holidaysKnown === false ? 'warn' : 'pass',
+      input.marketHours.reason));
   }
 
   // 10. 배율 (막지 않는다)
