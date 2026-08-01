@@ -356,6 +356,42 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
       await update({ sl_order_id: slId || null, tp_order_id: tpId || null });
 
+      // ── 7-b) 손절이 **정말** 걸려 있는지 되읽는다 ──
+      //
+      // 위의 `slId`는 거래소가 200을 줬다는 뜻이지, 그 주문이 지금 주문장에
+      // 남아 있다는 뜻이 아니다. 리스크 엔진이 접수 직후 취소하거나,
+      // reduceOnly 조건이 안 맞아 즉시 취소되거나, 다른 심볼로 들어가도
+      // 응답은 성공이다. 셋 다 결과는 같다 — **손절 없는 포지션이 열려 있다.**
+      //
+      // 못 읽었을 때는 '없음'으로 치지 않는다. 조회 한 번 실패로 멀쩡한
+      // 포지션을 시장가로 닫으면 수수료와 슬리피지를 확정 손실로 물면서
+      // 아무것도 얻지 못한다. 그래서 결과가 셋이다 — 있음/없음/확인 불가.
+      let stopCheckNote = '';
+      if (!args.reduceOnly && args.stopLoss && slId) {
+        const { verifyStopAttached, shouldUnwind } = await import('./stopVerify');
+        let openOrders: any[] | null = null;
+        try {
+          const oo: any = await bf.getFuturesOpenOrders(apiKey, apiSecret, testnet, plan.symbol);
+          // success가 false여도 orders: []를 돌려준다. 그 빈 배열을 그대로
+          // 넘기면 **조회 실패가 '손절 없음'이 되어 포지션이 청산된다.**
+          openOrders = oo?.success && Array.isArray(oo.orders) ? oo.orders : null;
+        } catch { openOrders = null; }
+
+        const check = verifyStopAttached(openOrders, {
+          symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss,
+        });
+        if (shouldUnwind(check)) {
+          // 아래 8)의 되돌리기 경로를 그대로 탄다. 판정을 두 곳에 적지 않는다.
+          slId = undefined;
+          slError = check.reason;
+          // 방금 적은 sl_order_id를 지운다. 남겨 두면 나중에 대조할 때
+          // 있지도 않은 주문을 "손절 걸림"으로 읽는다.
+          await update({ sl_order_id: null });
+        } else if (check.status === 'unknown') {
+          stopCheckNote = ` · ${check.reason}`;
+        }
+      }
+
       // ── 8) 손절이 안 붙었으면 포지션을 즉시 닫는다 ──
       //
       // 예전에는 경고 문자열만 message에 붙이고 ok:true로 반환했다. 그러면
@@ -409,7 +445,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         ok: true, status: 'ACKED', clientOrderId,
         exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
         slOrderId: slId, tpOrderId: tpId,
-        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})${exitNote}`,
+        // 손절이 걸렸는지 **확인하지 못했으면** 그 사실을 메시지에 남긴다.
+        // 조용히 지나가면 "접수됨"만 보이고, 사용자는 손절이 확인된 줄 안다.
+        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})${exitNote}${stopCheckNote}`,
       };
     }
 

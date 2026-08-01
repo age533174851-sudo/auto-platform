@@ -527,33 +527,70 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setBusy(true);
     try {
       const endpoint = orderEndpointFor(tradeMode, 'USDM');
-      const body = isPaper
-        ? {
-            // 가상 장부는 방향을 LONG/SHORT로 적는다 (거래소의 BUY/SELL과 다르다)
-            symbol: symbol.id, side: orderSide === 'BUY' ? 'LONG' : 'SHORT',
-            quantity: q, leverage, stopLossPct: slPct,
-          }
-        : {
-            connectionId: modeResolution.connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
-            symbol: symbol.id, side: orderSide, type: orderType, quantity: q, leverage,
-            price: orderType === 'LIMIT' ? Number(price) || undefined : undefined,
-            reduceOnly: reduceOnly || undefined,
-            // 이 값이 빠져서 신규 진입이 전부 거부되고 있었다
-            stopLossPct: reduceOnly ? undefined : slPct,
-          };
+      // 점검이 막았을 때 사용자가 "네"를 누른 항목을 실어서 **한 번만** 다시
+      // 보낸다. overrideChecks는 항목 id 목록이다 — 통짜 우회를 두지 않는
+      // 이유는 물어본 사이에 새로 막힌 항목이 그대로 막혀야 하기 때문이다.
+      const send = (overrideChecks?: string[]) => {
+        const body = isPaper
+          ? {
+              // 가상 장부는 방향을 LONG/SHORT로 적는다 (거래소의 BUY/SELL과 다르다)
+              symbol: symbol.id, side: orderSide === 'BUY' ? 'LONG' : 'SHORT',
+              quantity: q, leverage, stopLossPct: slPct,
+            }
+          : {
+              connectionId: modeResolution.connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
+              symbol: symbol.id, side: orderSide, type: orderType, quantity: q, leverage,
+              price: orderType === 'LIMIT' ? Number(price) || undefined : undefined,
+              reduceOnly: reduceOnly || undefined,
+              // 이 값이 빠져서 신규 진입이 전부 거부되고 있었다
+              stopLossPct: reduceOnly ? undefined : slPct,
+              overrideChecks,
+            };
+        return fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: auth },
+          body: JSON.stringify(body),
+        });
+      };
 
-      const r = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify(body),
-      });
-      const j = await r.json();
+      let r = await send();
+      let j = await r.json();
+
+      // 점검이 막았다 — 무엇이 막았는지 보여주고 "네/아니요"를 묻는다.
+      // 예전에는 여기서 빨간 글씨만 뜨고 끝이라 사용자가 할 수 있는 일이
+      // 없었다. 막아서 앱을 떠나게 만드는 것은 안전이 아니다.
+      if (r.status === 409 && j?.error === 'checklist_blocked') {
+        const { overridePrompt } = await import('@/lib/engine/checkOverride');
+        const p = overridePrompt(j?.checklist?.blockers, { realMoney: modeResolution.realMoney });
+        if (p.canAsk) {
+          const { confirmDialog } = await import('@/lib/confirm/dialog');
+          const yes = await confirmDialog(p.text, {
+            title: '이대로 주문할까요?',
+            confirmText: '네', cancelText: '아니요',
+            danger: modeResolution.realMoney,
+          });
+          if (yes) {
+            r = await send(p.askable.map((b: any) => String(b.id)));
+            j = await r.json();
+          }
+        }
+      }
+
       if (r.ok && j?.ok) {
-        setMsg({ ok: true, text: j?.message || '주문 접수됨' });
+        // 넘겨서 나간 것을 '통과'로 적지 않는다.
+        setMsg({
+          ok: true,
+          text: (j?.message || '주문 접수됨')
+            + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : ''),
+        });
         setQty('');
         if (isPaper) paper.reload();
       } else {
-        setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+        setMsg({
+          ok: false,
+          text: (j?.message || j?.error || `실패 (${r.status})`)
+            + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : ''),
+        });
       }
     } catch (e: any) {
       // 응답을 못 받았다. 나갔는지 안 나갔는지 모르는 상태다.
