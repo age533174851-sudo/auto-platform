@@ -168,7 +168,17 @@ function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];curre
     }
     return Array.from(set);
   }, [displayRows]);
-  const logoMap = useLogoMap(symbolsForLogo);
+  // **탭이 곧 자산 종류다.** 안 넘기면 서버가 'auto'로 추측하고,
+  // 추측은 주식을 먼저 본다 — 그래서 코인 탭에 SOL→ReneSola,
+  // XRP→Bitwise 로고가 떴다. 티커는 시장을 가로질러 겹친다.
+  const logoType: 'crypto' | 'stock' | 'etf' | 'auto' =
+    cat === '코인' ? 'crypto'
+    : cat === 'ETF' ? 'etf'
+    : (cat === '미국주식' || cat === '국내주식') ? 'stock'
+    // 원자재·관심종목은 섞여 있어 추측할 수밖에 없다. 섞인 목록에
+    // 한 종류를 강제하면 나머지가 전부 틀린다.
+    : 'auto';
+  const logoMap = useLogoMap(symbolsForLogo, logoType);
 
   return (
     <div>
