@@ -140,7 +140,7 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
       ...(sticky ? { position: 'sticky' as const, top: 0, zIndex: 20 } : null),
     }}>
     <div style={{
-      padding: '8px 46px 6px 12px',
+      padding: '6px 46px 4px 12px',
       display: 'flex', alignItems: 'center', gap: 8,
     }}>
       <button onClick={onOpenSearch} style={{
@@ -189,7 +189,7 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
     {/* 시장 전환은 자기 줄을 갖는다. 종목·가격과 같은 줄에 두면
         좁은 화면에서 서로를 밀어내고, 밀려난 쪽이 잘린다.
         어느 시장에 있는지는 잘려도 되는 정보가 아니다. */}
-    <div style={{ padding: '0 12px 8px', display: 'flex', flexDirection: 'column', gap: 7 }}>
+    <div style={{ padding: '0 12px 6px', display: 'flex', flexDirection: 'column', gap: 5 }}>
       <MarketSwitch compact value={marketType} onChange={setMarketType}/>
       {/* 이 화면에서 가장 중요한 한 줄 — 진짜 돈인가.
           접거나 메뉴에 넣지 않는다. */}
@@ -250,7 +250,7 @@ function DockHandle({ onDrag, onToggle }: {
 }
 
 // ── 하단 접이식 차트 ─────────────────────────────────────
-function ChartDrawer() {
+function ChartDrawer({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
   const { symbol } = useTerminal();
   const [open, setOpen] = useState(false);
   // 한 번 열면 계속 붙여 둔다. 접을 때마다 언마운트하면 다시 펼 때
@@ -263,7 +263,7 @@ function ChartDrawer() {
   };
 
   return (
-    <div style={{
+    <div ref={innerRef} style={{
       flexShrink: 0, borderTop: `1px solid ${C.hair2}`, background: C.panel,
       display: 'flex', flexDirection: 'column',
       height: open ? '58vh' : 'auto', minHeight: 0,
@@ -306,6 +306,13 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   const { pick, presetPrice, presetSeq } = usePickedPrice();
   // 사용자가 손잡이로 정한 포지션 칸 높이. null이면 기본값(통의 32%)을 쓴다.
   const [dockUser, setDockUser] = useState<number | null>(null);
+  // 주문폼의 **자연 높이**. 스크롤 통 안쪽을 재야 내용 전체 높이가 나온다 —
+  // 바깥(통)을 재면 통에 맞춰 잘린 높이가 나와서 아무 정보가 없다.
+  const [formRef, formH] = useMeasuredHeight<HTMLDivElement>();
+  // 접힌 차트 줄도 자리를 차지한다. 이걸 빼먹으면 폼을 아무리 줄여도
+  // **딱 차트 줄 높이만큼** 계속 모자란다 — 남는 자리를 포지션에 다 줘
+  // 버리고, 밀려나는 것은 flex:1인 주문 칸이기 때문이다.
+  const [chartRef, chartH] = useMeasuredHeight<HTMLDivElement>();
   const [search, setSearch] = useState(false);
   const [info, setInfo] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -348,12 +355,24 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   // dockH의 기본값은 통 높이의 32%다. 카드 하나(약 150px)와 탭 줄이 들어가는
   // 최소치를 밑으로 두고, 위로는 주문 버튼이 남을 만큼만 올라간다 —
   // 포지션을 키우다가 주문을 못 넣게 되면 그건 다른 화면이 된 것이다.
+  // 포지션 칸의 기본 높이는 **주문폼이 다 들어가고 남는 만큼**이다.
+  //
+  // 처음에는 '통의 32%'로 고정했다. 그런데 앱 안에서는 남는 높이가 상황마다
+  // 다르고(배너·시세띠·하단탭), 32%를 떼고 나면 주문폼이 자기 칸에 안 들어가
+  // **폼 안에서 또 스크롤**이 생겼다. 롱/숏 버튼이 바닥에 고정돼 있으니 그
+  // 버튼이 손절·수량 줄을 덮었고, 화면은 "주문할 것이 두 줄뿐인" 모양이 됐다.
+  //
+  // 그래서 반대로 잡는다: 폼의 자연 높이(formH)를 재고, 남는 것을 포지션에
+  // 준다. 폼이 다 들어가면 스크롤이 아예 없다. 폼이 너무 길어 안 들어가면
+  // 그때만 폼이 스크롤하고, 포지션은 탭 줄만 남는다 — **탭 줄은 항상 보인다.**
   const avail = Math.max(0, boxH - hdrH);
-  const dockMin = 132;
-  const dockMax = Math.max(dockMin, avail - 260);
-  const dockDefault = Math.min(dockMax, Math.max(dockMin, Math.round(avail * 0.32)));
-  const dockH = avail === 0 ? 200
-    : Math.min(dockMax, Math.max(dockMin, dockUser ?? dockDefault));
+  const dockMin = 84;                       // 손잡이 + 탭 줄
+  const dockMax = Math.max(dockMin, avail - 160);
+  const leftover = formH > 0
+    ? avail - formH - chartH
+    : Math.round(avail * 0.32);
+  const dockH = avail === 0 ? 160
+    : Math.min(dockMax, Math.max(dockMin, dockUser ?? leftover));
 
   return (
     <div ref={boxRef} style={{
@@ -376,7 +395,9 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
           overflowY: 'auto', overscrollBehavior: 'contain',
           WebkitOverflowScrolling: 'touch' as any,
         }}>
-          <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
+          <div ref={formRef}>
+            <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
+          </div>
         </div>
         <div style={{
           flex: 1, minWidth: 0, minHeight: 0,
@@ -393,15 +414,15 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
         display: 'flex', flexDirection: 'column',
       }}>
         <DockHandle
-          onDrag={dy => setDockUser(h => Math.min(dockMax, Math.max(dockMin, (h ?? dockDefault) - dy)))}
-          onToggle={() => setDockUser(h => ((h ?? dockDefault) > dockDefault + 20 ? dockMin : dockMax))}
+          onDrag={dy => setDockUser(h => Math.min(dockMax, Math.max(dockMin, (h ?? dockH) - dy)))}
+          onToggle={() => setDockUser(h => ((h ?? dockH) > dockMin + 20 ? dockMin : dockMax))}
         />
         <div style={{ flex: 1, minHeight: 0 }}>
           <BottomDock/>
         </div>
       </div>
 
-      <ChartDrawer/>
+      <ChartDrawer innerRef={chartRef}/>
 
       <SearchSheet open={search} onClose={() => setSearch(false)}
         current={symbol.id} favorites={favorites}

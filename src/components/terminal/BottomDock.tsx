@@ -21,9 +21,10 @@ import { CombinedPanel } from './CombinedPanel';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { usePaperAccount } from './PaperWallet';
 import { AllocationPanel } from './AllocationPanel';
+import { DemoRunner } from './DemoRunner';
 
-type Tab = '포지션' | '미체결' | '자산' | '자금배분' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const TABS: Tab[] = ['포지션', '미체결', '자산', '자금배분', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -45,10 +46,13 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
   flow?: boolean;
   stickyTop?: number | string;
 }) {
-  const { auth, connId, setSymbol, symbols, tradeMode } = useTerminal();
+  const { auth, connId, setSymbol, symbols, tradeMode, symbol } = useTerminal();
   const isPaper = tradeMode === 'PAPER';
   const paper = usePaperAccount(isPaper);
   const [tab, setTab] = useState<Tab>('포지션');
+  // '데모'는 모의일 때만 나온다. 실전 화면에 '데모 자동매매' 탭이 떠 있으면
+  // 그게 지금 도는 것인지 헷갈린다 — 모드가 다르면 아예 안 보이는 편이 낫다.
+  const TABS = isPaper ? ALL_TABS : ALL_TABS.filter(t => t !== '데모');
   const [acct, setAcct] = useState<any>(null);
   const [err, setErr] = useState('');
   const [recon, setRecon] = useState<any>(null);
@@ -258,6 +262,11 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {tab === '자산' && <WalletTreePanel/>}
 
         {tab === '자금배분' && <AllocationPanel/>}
+        {tab === '데모' && (
+          <div style={{ padding: 12 }}>
+            <DemoRunner symbol={symbol.id} onChanged={paper.reload}/>
+          </div>
+        )}
 
 
         {tab === '전략장부' && <LedgerPanel/>}

@@ -24,7 +24,6 @@ import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor } from '@/lib/markets/tradeMode';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
-import { DemoRunner } from './DemoRunner';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
 
@@ -519,8 +518,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     } finally { setBusy(false); }
   };
 
-  const pad = dense ? 8 : 12;
-  const gap = dense ? 6 : 12;
+  const pad = dense ? 7 : 12;
+  const gap = dense ? 5 : 12;
   const inputStyle: React.CSSProperties = {
     ...input, padding: dense ? '7px 9px' : '10px 12px', fontSize: dense ? FS.small : FS.body,
   };
@@ -563,11 +562,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <PaperWallet dense={dense} acct={paper.acct} err={paper.err} onChanged={paper.reload}/>
       )}
 
-      {/* 규칙을 정해 두고 그대로 지키는 기계를 돌려 본다. 손으로 넣는
-          연습과 자동이 도는 연습은 다른 연습이다. */}
-      {isPaper && (
-        <DemoRunner dense={dense} symbol={symbol.id} onChanged={paper.reload}/>
-      )}
+      {/* 데모 자동매매 카드는 여기 있었는데 하단 독의 '데모' 탭으로 옮겼다.
+          두 가지 이유다:
+           · 이건 주문 입력란이 아니라 **조종 장치**다. 수량·손절과 같은
+             줄에 두면 주문 한 건을 넣는 흐름에 끼어든다
+           · 좁은 화면에서 이 카드 40px 때문에 주문폼이 한 화면에 안
+             들어갔다. 롱/숏 버튼이 손절·수량 줄을 덮는 상태가 됐다 */}
 
       {/* 신규/청산 (바이낸스의 Open/Close) + 주문 유형.
           좁은 화면에서는 **한 줄**에 넣는다. 두 줄로 두면 68px인데, 그만큼이
@@ -711,7 +711,11 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </div>
       </div>
 
-      {/* 가용 증거금 — 바이낸스의 Avbl */}
+      {/* 가용 증거금 — 바이낸스의 Avbl.
+          모의에서는 바로 위 PaperWallet이 **같은 값**을 이미 보여준다.
+          좁은 화면에서 같은 숫자를 두 줄에 적는 것은 자리를 두 배로 쓰면서
+          정보를 하나도 더 주지 않는다. */}
+      {!(dense && isPaper) && (
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
         fontSize: FS.micro, ...NUM,
@@ -723,10 +727,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           {balanceUsd == null ? '확인 불가' : `${fmtPrice(balanceUsd)} USDT`}
         </span>
       </div>
+      )}
 
       {/* 지금 국면. 필터를 켜지 않아도 보여준다 — 고변동장인지 아닌지는
           필터와 무관하게 알아야 하는 사실이다. */}
-      {regime?.regime && (
+      {regime?.regime && (!dense
+        || !regime.regime.dataOk
+        || regime.gate?.blockEntries
+        || regime.regime.volatility === 'high_vol') && (
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           fontSize: FS.micro,
@@ -748,7 +756,11 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* 오늘 손실 한도. 남은 여유를 미리 보여주면 마지막 한 번을 넣기 전에
           스스로 멈출 수 있다. 막힌 상태는 붉게, 확인 불가는 노랗게 —
           '여유 있음'과 '모름'이 같아 보이면 안 된다. */}
-      {dailyLimit && (
+      {/* 좁은 화면에서는 **막혔거나 모를 때만** 보여준다.
+          '여유 400 USDT'는 알면 좋은 값이지만, 잠겼거나 확인 못 한 것은
+          **반드시** 보여야 하는 값이다. 둘을 같은 규칙으로 두면 자리를
+          아끼려다 중요한 쪽까지 같이 사라진다. */}
+      {dailyLimit && (!dense || dailyLimit.status !== 'ok') && (
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           fontSize: FS.micro, ...NUM,
@@ -798,14 +810,29 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* 최대 주문 가능 · 비용 — 바이낸스의 Max Open / Cost.
           두 버튼 위에 각각 두지 않고 한 번만 둔다. 같은 값이 두 번 나오면
           서로 다른 값이라고 오해한다. */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, ...NUM, fontSize: FS.micro }}>
-        <Kv k="최대 주문" v={maxOpenUsd == null ? '확인 불가' : `${fmtPrice(maxOpenUsd)} USDT`}
-            warn={maxOpenUsd == null}/>
-        <Kv k="비용(증거금)" v={margin > 0 ? `${fmtPrice(margin)} USDT` : '0.00 USDT'}/>
-        {/* 명목가는 좁은 화면에서 뺀다. 비용 × 배율이라 계산이 되는 값이고,
-            나머지 둘과 달리 이걸 몰라서 잘못 누르는 일은 없다. */}
-        {!dense && <Kv k="명목가" v={notional > 0 ? `${fmtPrice(notional)} USDT` : '—'}/>}
-      </div>
+      {/* 최대 주문 · 비용. 좁은 화면에서는 **한 줄**에 붙인다.
+          명목가는 뺀다 — 비용 × 배율이라 계산되는 값이고, 이걸 몰라서
+          잘못 누르는 일은 없다. */}
+      {dense ? (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', gap: 8,
+          ...NUM, fontSize: FS.micro,
+        }}>
+          <span style={{ color: maxOpenUsd == null ? C.warn : C.faint }}>
+            최대 {maxOpenUsd == null ? '확인 불가' : fmtPrice(maxOpenUsd)}
+          </span>
+          <span style={{ color: C.dim }}>
+            비용 {margin > 0 ? fmtPrice(margin) : '0.00'}
+          </span>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, ...NUM, fontSize: FS.micro }}>
+          <Kv k="최대 주문" v={maxOpenUsd == null ? '확인 불가' : `${fmtPrice(maxOpenUsd)} USDT`}
+              warn={maxOpenUsd == null}/>
+          <Kv k="비용(증거금)" v={margin > 0 ? `${fmtPrice(margin)} USDT` : '0.00 USDT'}/>
+          <Kv k="명목가" v={notional > 0 ? `${fmtPrice(notional)} USDT` : '—'}/>
+        </div>
+      )}
 
       {/* 롱·숏을 동시에 둔다. 방향 토글을 없앤 이유는 그 토글이 조용히
           틀릴 수 있기 때문이다 — 숏에 맞춰뒀다고 믿고 눌렀는데 롱이
@@ -820,7 +847,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         background: C.panel, boxShadow: `0 -8px 12px -6px ${C.bg}`,
       }}>
       <button onClick={() => submit('BUY')} disabled={busy}
-        style={{ ...primaryBtn(C.up, busy), minHeight: 46, display: 'flex',
+        style={{ ...primaryBtn(C.up, busy), minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'BUY' ? '전송 중…' : reduceOnly ? '롱 청산' : '롱 진입'}</span>
         <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
@@ -829,7 +856,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       </button>
 
       <button onClick={() => submit('SELL')} disabled={busy}
-        style={{ ...primaryBtn(C.down, busy), minHeight: 46, display: 'flex',
+        style={{ ...primaryBtn(C.down, busy), minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'SELL' ? '전송 중…' : reduceOnly ? '숏 청산' : '숏 진입'}</span>
         <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
@@ -838,15 +865,21 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       </button>
       </div>
 
-      {/* 실자금 여부는 버튼 바로 아래에. 상단 점만으로는 부족하다. */}
-      <div style={{
-        textAlign: 'center', fontSize: FS.micro, lineHeight: 1.45,
-        color: mode.unknown ? C.warn : mode.realMoney ? C.down : C.faint,
-      }}>
-        {mode.unknown ? '운영 모드 확인 불가'
-          : mode.realMoney ? '실제 자금이 사용됩니다'
-          : '모의 · 실제 자금 아님'}
-      </div>
+      {/* 실자금 여부는 버튼 바로 아래에. 상단 점만으로는 부족하다.
+          다만 좁은 화면에서 **모의일 때는 뺀다** — 헤더의 모드 전환줄이
+          '모의'라고 글자로 적고 바로 밑에 설명까지 붙어 있다. 같은 말을
+          세 번 하느라 주문 버튼을 화면 밖으로 밀어내는 것은 안전이 아니다.
+          **실자금과 확인 불가는 좁아도 남긴다.** 그쪽은 한 번 더 말해야 한다. */}
+      {(!dense || mode.unknown || mode.realMoney) && (
+        <div style={{
+          textAlign: 'center', fontSize: FS.micro, lineHeight: 1.45,
+          color: mode.unknown ? C.warn : mode.realMoney ? C.down : C.faint,
+        }}>
+          {mode.unknown ? '운영 모드 확인 불가'
+            : mode.realMoney ? '실제 자금이 사용됩니다'
+            : '모의 · 실제 자금 아님'}
+        </div>
+      )}
 
       {msg && (
         <div style={{
@@ -855,7 +888,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         }}>{msg.text}</div>
       )}
 
-      {!connections.length && (
+      {/* 모의에는 거래소 연결이 필요 없다. 여기서 이 문구를 띄우면
+          **사실이 아닌 것을 경고로 적는 것**이고, 사용자는 있지도 않은
+          문제를 고치려 한다. */}
+      {!connections.length && !isPaper && (
         <div style={{ textAlign: 'center', fontSize: FS.micro, color: C.faint }}>
           거래소 연결이 없어 주문할 수 없습니다
         </div>

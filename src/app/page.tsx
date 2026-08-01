@@ -886,7 +886,14 @@ export default function App() {
 
         {/* Main Content */}
         <div className="mc" style={{flex:1}}>
-          {/* Header */}
+          {/* Header
+              매매 탭에서는 감춘다. 이 줄과 아래 시세띠가 합쳐서 80px쯤
+              먹는데, 터미널은 그 80px이 있고 없고에 따라 주문폼이 한
+              화면에 들어가느냐 마느냐가 갈린다. 탭 이름('매매')은 하단
+              탭에 이미 켜져 있고, 종목·가격·모드는 터미널 헤더가 더
+              정확하게 보여준다 — 같은 것을 두 번 그리느라 주문을 밀어낼
+              이유가 없다. */}
+          {tab!=='trading'&&(
           <div style={{position:'sticky',top:0,zIndex:50,background:'color-mix(in srgb, var(--t-bg) 92%, transparent)',backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)',borderBottom:`1px solid ${T.border}`,padding:'11px 16px 9px',display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:`max(env(safe-area-inset-top),11px)`}}>
             <div style={{display:'flex',alignItems:'center',gap:8}}>
               <div style={{width:26,height:26,borderRadius:8,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:13,color:'#fff'}}>T</div>
@@ -953,8 +960,12 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
-          {/* Ticker */}
+          {/* Ticker — 매매 탭에서는 감춘다 (위 Header 주석 참조).
+              터미널에는 자기 종목의 실시간 호가가 있고, 다른 코인 시세를
+              흘려보내는 띠는 주문 화면에서 자리를 먹는 것 이상을 하지 않는다. */}
+          {tab!=='trading'&&(
           <div style={{background:T.surf,borderBottom:`1px solid ${T.border}`,overflow:'hidden',height:26,display:'flex',alignItems:'center'}}>
             <div className="ticker">
               {[...tickerAssets,...tickerAssets].map((a,i)=>(
@@ -964,6 +975,7 @@ export default function App() {
               ))}
             </div>
           </div>
+          )}
 
           {/* PWA: Offline banner */}
           {pwaOffline&&(
