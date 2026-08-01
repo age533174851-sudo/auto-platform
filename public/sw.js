@@ -1,9 +1,23 @@
 // ═══════════════════════════════════════════════════════════
 // TRAIGO Service Worker — PWA offline support + smart caching
-// IMPORTANT: bump CACHE_VERSION on each deploy to invalidate old chunks
-// ═══════════════════════════════════════════════════════════
-
-const CACHE_VERSION   = 'traigo-v10-2026-05-28';  // bump per deploy
+//
+// 캐시 버전은 **자동이다.** 손으로 올리지 않는다.
+// ─────────────────────────────────────────────
+// 예전에는 여기 `const CACHE_VERSION = 'traigo-v10-2026-05-28'`가 박혀 있고
+// 바로 위에 "bump per deploy"라고 적혀 있었다. 그런데 두 달 넘게 아무도
+// 안 올렸다. 배포할 때마다 사람이 기억해야 하는 안전 절차는 결국 잊힌다.
+//
+// 안 올리면 무슨 일이 생기나:
+//   · activate에서 옛 캐시를 지우는 조건이 "CACHE_VERSION으로 시작하지
+//     않는 것"인데, 버전이 안 바뀌니 **아무것도 지워지지 않는다.**
+//     캐시가 계속 쌓이고 오프라인 폴백은 두 달 전 화면 그대로다.
+//   · 미리 캐시한 app shell(manifest·아이콘·offline.html)도 그때 것이다.
+//
+// 그래서 등록할 때 `/sw.js?v=<빌드 id>`로 부르고, 여기서 그 값을 읽는다.
+// 배포마다 빌드 id가 달라지므로 캐시 이름이 자동으로 갈리고, 옛 캐시는
+// activate가 지운다. 사람이 기억할 것이 없다.
+const SW_VERSION = new URL(self.location.href).searchParams.get('v') || 'dev';
+const CACHE_VERSION   = `traigo-${SW_VERSION}`;
 const STATIC_CACHE    = `${CACHE_VERSION}-static`;
 const DYNAMIC_CACHE   = `${CACHE_VERSION}-dynamic`;
 const API_CACHE       = `${CACHE_VERSION}-api`;

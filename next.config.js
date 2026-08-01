@@ -1,5 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // 서비스워커 캐시 버전의 근거. Vercel은 커밋 SHA를 주고, 로컬에서는
+  // 빌드 시각을 쓴다. 이 값이 바뀌어야 옛 캐시가 지워진다.
+  env: {
+    NEXT_PUBLIC_BUILD_ID:
+      (process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 8) || String(Date.now()),
+  },
   reactStrictMode: false,
   productionBrowserSourceMaps: false, // disabled for security
   typescript: { ignoreBuildErrors: true },
