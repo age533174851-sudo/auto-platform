@@ -64,7 +64,9 @@ export type CheckId =
   /** 연속 손절로 잠겨 있지 않은가 */
   | 'LOSS_STREAK'
   /** 지금 시장 국면이 이 방향의 진입에 맞는가 */
-  | 'REGIME_FILTER';
+  | 'REGIME_FILTER'
+  /** AI 합의가 이 방향을 강하게 반대하는가 (거부권만, 진입은 못 만든다) */
+  | 'AI_VETO';
 
 /**
  * 어느 시장의 주문인가.
@@ -203,6 +205,17 @@ export const CHECK_SPECS: CheckSpec[] = [
   // 시작하면 그건 다른 전략이 된다. 켜는 것은 명시적 선택이어야 하고,
   // 켜지 않았으면 '확인 못 함'으로 남겨서도 안 된다.
   { id: 'REGIME_FILTER', label: '시장 국면 적합', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // AI 거부권. **켠 경우에만** 목록에 나온다 (옵션 aiVeto).
+  //
+  // 국면 필터와 같은 이유로 옵션이다 — 어떤 거래를 할지 자체를 바꾼다.
+  //
+  // requiredToKnow가 true인 이유: judgeAiVeto가 판단하지 못한 경우를
+  // 'abstain'(warn)으로 돌려주므로 평소에는 여기 걸리지 않는다. strict를
+  // 켠 사람만 'unknown'을 받고 막힌다. 즉 "AI를 못 불렀으면 멈춘다"를
+  // 고른 사람에게만 적용된다 — 기본값으로 AI 장애가 매매 장애가 되지 않는다.
+  { id: 'AI_VETO', label: 'AI 합의 거부권', markets: ALL_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 하루 1회 제한이 있는 전략에서만 (옵션 dailyLimit). 수동 주문에는
@@ -377,6 +390,16 @@ export interface ChecklistInput {
    * 필터를 켠 채로 국면을 못 본 것은 필터가 없는 것과 같다.
    */
   regime?: { status: 'ok' | 'blocked' | 'unknown'; reason: string } | null;
+  /**
+   * AI 합의 거부권 판정 (ai/tradeVeto의 judgeAiVeto 결과).
+   *
+   * 'abstain'은 **막지 않는다.** AI를 못 부른 것은 손실 한도를 못 읽은 것과
+   * 다르다 — 한쪽은 안전장치이고 한쪽은 덧댄 의견이다. AI 장애가 매매
+   * 장애가 되면 그 순간 AI를 안전장치로 쓴 것이 된다.
+   *
+   * 그렇다고 통과로도 적지 않는다. 'abstain'은 warn으로 화면에 남는다.
+   */
+  aiVeto?: { status: 'ok' | 'blocked' | 'abstain' | 'unknown'; reason: string } | null;
   /** 계획된 손절가. 없으면 손절이 안 붙은 것 */
   stopPrice?: number | null;
   liquidationPrice?: number | null;
@@ -404,6 +427,13 @@ export interface ChecklistOptions {
    * '확인 못 함'으로 남기면 확인할 것이 있다고 읽힌다.
    */
   regimeFilter?: boolean;
+  /**
+   * AI 거부권을 목록에 넣을 것인가. 기본 false.
+   *
+   * 켜지 않으면 AI_VETO가 아예 빠진다. AI를 안 쓰기로 한 사람에게
+   * '확인 못 함'으로 남기면 확인할 것이 있다고 읽힌다.
+   */
+  aiVeto?: boolean;
 }
 
 export interface ChecklistVerdict {
@@ -438,12 +468,13 @@ function resultFor(
 /** 이 시장·이 방향에서 의미가 있는 검사인가 */
 export function appliesTo(
   id: CheckId, market: MarketKind, intent: OrderIntent, dailyLimit: boolean,
-  regimeFilter = false,
+  regimeFilter = false, aiVeto = false,
 ): boolean {
   const spec = SPEC_BY_ID[id];
   if (!spec) return false;
   if (id === 'TODAY_ENTRY' && !dailyLimit) return false;
   if (id === 'REGIME_FILTER' && !regimeFilter) return false;
+  if (id === 'AI_VETO' && !aiVeto) return false;
   return spec.markets.includes(market) && spec.intents.includes(intent);
 }
 
@@ -461,6 +492,7 @@ export function runChecklist(
   const intent = opts.intent ?? 'ENTRY';
   const dailyLimit = opts.dailyLimit ?? false;
   const regimeFilter = opts.regimeFilter ?? false;
+  const aiVeto = opts.aiVeto ?? false;
 
   const all: CheckResult[] = [];
   const results = all;   // 아래 push는 그대로 두고, 마지막에 걸러낸다
@@ -550,6 +582,24 @@ export function runChecklist(
     results.push(resultFor('REGIME_FILTER', 'pass', input.regime.reason));
   }
 
+  // ── AI 거부권 ──
+  //
+  // 'abstain'을 pass로 적지 않는 이유: AI에게 못 물어봤는데 초록으로 그리면
+  // 사용자는 AI가 확인해 줬다고 읽는다. 그렇다고 막지도 않는다 — 이건
+  // 안전장치가 아니라 덧댄 의견이다. 그래서 warn이다.
+  if (!input.aiVeto) {
+    results.push(resultFor('AI_VETO', 'warn',
+      'AI 합의를 받지 못했습니다 — AI 판단 없이 진행합니다'));
+  } else if (input.aiVeto.status === 'blocked') {
+    results.push(resultFor('AI_VETO', 'fail', input.aiVeto.reason));
+  } else if (input.aiVeto.status === 'unknown') {
+    results.push(resultFor('AI_VETO', 'unknown', input.aiVeto.reason));
+  } else if (input.aiVeto.status === 'abstain') {
+    results.push(resultFor('AI_VETO', 'warn', input.aiVeto.reason));
+  } else {
+    results.push(resultFor('AI_VETO', 'pass', input.aiVeto.reason));
+  }
+
   // ── 오늘 손실 한도 ──
   if (!input.dailyLoss) {
     results.push(resultFor('DAILY_LOSS_LIMIT', 'unknown',
@@ -610,7 +660,7 @@ export function runChecklist(
 
   // 여기서 걸러낸다. 위에서 조건마다 분기하면 검사 하나 추가할 때 적용
   // 규칙을 두 곳에 적게 되고, 언젠가 한 곳만 고친다.
-  const scoped = all.filter(r => appliesTo(r.id, market, intent, dailyLimit, regimeFilter));
+  const scoped = all.filter(r => appliesTo(r.id, market, intent, dailyLimit, regimeFilter, aiVeto));
 
   const blockers = scoped.filter(r => r.blocks);
   const passed = scoped.filter(r => r.status === 'pass').length;

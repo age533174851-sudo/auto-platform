@@ -24,9 +24,23 @@ export interface LimitVerdicts {
   dailyLoss: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
   weeklyLoss: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
   lossStreak: { status: 'ok' | 'locked' | 'unknown'; reason: string } | null;
+  /**
+   * AI 거부권. **켜져 있고 symbol·side를 받았을 때만** 채운다.
+   *
+   * 여기 넣는 이유는 위와 같다 — 다섯 라우트가 각자 채우게 두면 반드시
+   * 한둘이 빠지고, 그때 그 라우트는 AI 없이 도는데 화면에는 켜져 있다고
+   * 뜬다. 켜졌다고 믿는 검사가 실제로는 안 도는 것이 이 파일이 막으려는
+   * 바로 그 실패다.
+   */
+  aiVeto: { status: 'ok' | 'blocked' | 'abstain' | 'unknown'; reason: string } | null;
+  /** 채점 원장에서 이 판정에 쓴 행. 주문이 나가면 markApplied로 되짚는다 */
+  aiPredictionId: string | null;
 }
 
-const EMPTY: LimitVerdicts = { dailyLoss: null, weeklyLoss: null, lossStreak: null };
+const EMPTY: LimitVerdicts = {
+  dailyLoss: null, weeklyLoss: null, lossStreak: null,
+  aiVeto: null, aiPredictionId: null,
+};
 
 export interface CollectLimitsArgs {
   sb: any;
@@ -40,12 +54,41 @@ export interface CollectLimitsArgs {
   /** 현재 자산(USDT). 비율 한도를 계산하는 데 쓴다 */
   equityUsd?: number | null;
   nowMs?: number;
+  /** AI 거부권을 볼 종목·방향. 둘 다 있어야 판정한다 */
+  symbol?: string | null;
+  side?: 'LONG' | 'SHORT' | null;
 }
 
 /**
- * 오늘·이번 주·연패 잠금을 한 번에.
+ * AI 거부권을 채운다. 켜져 있지 않으면 아무것도 하지 않는다.
  *
- * 셋 중 하나가 실패해도 나머지는 채운다. 하나 때문에 셋 다 unknown이 되면
+ * 여기서 실패해도 나머지 판정은 그대로 둔다 — AI 조회 실패로 손실 한도까지
+ * 못 읽으면 그건 AI가 안전장치가 된 것이다.
+ */
+async function fillAiVeto(out: LimitVerdicts, args: CollectLimitsArgs, now: number): Promise<void> {
+  if (!args.symbol || (args.side !== 'LONG' && args.side !== 'SHORT')) return;
+  try {
+    const { readVetoConfig } = await import('@/lib/ai/tradeVeto');
+    const cfg = readVetoConfig(process.env as any);
+    // 꺼져 있으면 체크리스트가 이 항목을 아예 안 보여준다. 판정도 하지 않는다.
+    if (!cfg.enabled) return;
+    const { collectAiVeto } = await import('@/lib/ai/vetoCheck');
+    const r = await collectAiVeto({
+      sb: args.sb, userId: args.userId, symbol: args.symbol,
+      side: args.side, nowMs: now, cfg,
+    });
+    out.aiVeto = r.verdict;
+    out.aiPredictionId = r.predictionId;
+  } catch {
+    // 판정 자체를 못 만들었다. null로 두면 체크리스트가 warn으로 남긴다 —
+    // 통과로 적지도, 막지도 않는다.
+  }
+}
+
+/**
+ * 오늘·이번 주·연패 잠금(+켜져 있으면 AI 거부권)을 한 번에.
+ *
+ * 하나가 실패해도 나머지는 채운다. 하나 때문에 전부 unknown이 되면
  * 사용자는 무엇을 고쳐야 하는지 알 수 없다.
  */
 export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVerdicts> {
@@ -64,6 +107,7 @@ export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVe
       out.weeklyLoss = { status: f.weekly.status, reason: f.weekly.reason };
       out.lossStreak = { status: f.streak.status, reason: f.streak.reason };
     } catch { /* null → unknown → 막힌다 */ }
+    await fillAiVeto(out, args, now);
     return out;
   }
 
@@ -109,5 +153,6 @@ export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVe
     out.lossStreak = { status: f.streak.status, reason: f.streak.reason };
   } catch { /* null → unknown → 막힌다 */ }
 
+  await fillAiVeto(out, args, now);
   return out;
 }

@@ -143,21 +143,23 @@ export function runPreTradeChecklistTests() {
     assert(v.blockers.length > 0, '막는 항목이 있어야 한다');
   });
 
-  test('USDⓈ-M 진입 + 하루제한 + 국면필터면 전체 목록이 돈다', () => {
+  test('USDⓈ-M 진입 + 하루제한 + 국면필터 + AI거부권이면 전체 목록이 돈다', () => {
     eq(runChecklist(goodInput(), {
-      market: 'USDM', intent: 'ENTRY', dailyLimit: true, regimeFilter: true,
+      market: 'USDM', intent: 'ENTRY', dailyLimit: true, regimeFilter: true, aiVeto: true,
     }).total, CHECK_SPECS.length);
   });
 
-  test('기본값은 하루제한·국면필터 없음 — 두 항목이 빠진다', () => {
+  test('기본값은 하루제한·국면필터·AI거부권 없음 — 세 항목이 빠진다', () => {
     const v = runChecklist(goodInput());
     eq(v.market, 'USDM');
     eq(v.intent, 'ENTRY');
-    eq(v.total, CHECK_SPECS.length - 2);
+    eq(v.total, CHECK_SPECS.length - 3);
     assert(!v.results.some(r => r.id === 'TODAY_ENTRY'),
       '수동 주문에는 하루 제한이 없는데 "확인 못 함"으로 남으면 확인할 것이 있다고 읽힌다');
     assert(!v.results.some(r => r.id === 'REGIME_FILTER'),
       '보지 않기로 한 검사를 "확인 못 함"으로 남기면 확인할 것이 있다고 읽힌다');
+    assert(!v.results.some(r => r.id === 'AI_VETO'),
+      'AI를 안 쓰기로 했는데 목록에 남으면 확인할 것이 있다고 읽힌다');
   });
 
   console.log('[거래 전 점검 — 시장 국면 필터]');
@@ -191,6 +193,59 @@ export function runPreTradeChecklistTests() {
       marginType: 'cross', existingPositionQty: 3,
     }, { intent: 'EXIT', regimeFilter: true });
     assert(!v.results.some(r => r.id === 'REGIME_FILTER'), '청산에 국면 필터가 붙었다');
+    eq(v.allowed, true, `청산이 막혔다: ${v.summary}`);
+  });
+
+  console.log('[거래 전 점검 — AI 거부권]');
+
+  test('AI가 강하게 반대하면 막는다', () => {
+    const v = runChecklist(
+      { ...goodInput(), aiVeto: { status: 'blocked', reason: 'AI 3/3이 하락으로 봤습니다 (확신도 90%)' } },
+      { aiVeto: true });
+    eq(v.allowed, false);
+    eq(statusOf(v, 'AI_VETO').status, 'fail');
+  });
+
+  test('AI를 못 불렀어도 막지 않는다 — AI 장애가 매매 장애가 되면 안 된다', () => {
+    const v = runChecklist(goodInput(), { aiVeto: true });
+    eq(v.allowed, true, `막혔다: ${v.summary}`);
+    // 그렇다고 통과로 적지도 않는다. warn이어야 화면에 남는다.
+    eq(statusOf(v, 'AI_VETO').status, 'warn');
+  });
+
+  test('abstain은 통과가 아니라 warn이다 — 초록으로 그리면 AI가 봐준 줄 안다', () => {
+    const v = runChecklist(
+      { ...goodInput(), aiVeto: { status: 'abstain', reason: 'AI 1개만 답했습니다' } },
+      { aiVeto: true });
+    eq(v.allowed, true);
+    eq(statusOf(v, 'AI_VETO').status, 'warn');
+  });
+
+  test('strict가 낸 unknown은 막는다 — 그걸 고른 사람에게만 적용된다', () => {
+    const v = runChecklist(
+      { ...goodInput(), aiVeto: { status: 'unknown', reason: 'AI 합의를 받지 못했습니다' } },
+      { aiVeto: true });
+    eq(v.allowed, false);
+    eq(statusOf(v, 'AI_VETO').status, 'unknown');
+  });
+
+  test('AI가 반대하지 않으면 통과한다', () => {
+    const v = runChecklist(
+      { ...goodInput(), aiVeto: { status: 'ok', reason: 'AI 3/3이 상승으로 봤습니다 — 반대하지 않습니다' } },
+      { aiVeto: true });
+    eq(v.allowed, true, `막혔다: ${v.summary}`);
+    eq(statusOf(v, 'AI_VETO').status, 'pass');
+  });
+
+  test('청산에는 AI를 묻지 않는다 — AI가 반대한다고 못 나가면 안 된다', () => {
+    const v = runChecklist({
+      mode: { disposition: 'SEND', reason: '청산' },
+      clock: { localMs: 1_000_000, serverMs: 1_000_050 },
+      reconcile: { reachable: true, blockNewOrders: false, summary: '일치' },
+      marginType: 'cross', existingPositionQty: 3,
+      aiVeto: { status: 'blocked', reason: 'AI가 반대' },
+    }, { intent: 'EXIT', aiVeto: true });
+    assert(!v.results.some(r => r.id === 'AI_VETO'), '청산에 AI 거부권이 붙었다');
     eq(v.allowed, true, `청산이 막혔다: ${v.summary}`);
   });
 
