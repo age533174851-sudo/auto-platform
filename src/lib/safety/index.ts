@@ -365,12 +365,19 @@ export async function checkApiKeyHealth(
   exchange: string,
   apiKey: string,
   secret: string,
+  /**
+   * 이 키가 테스트넷 키인가. **필수다** — optional로 두면 안 넘기게 되고,
+   * 그러면 테스트넷 키를 실전 호스트에 물어보게 된다. 서명이 안 맞아
+   * 401이 오고 화면에는 "키가 틀렸거나 IP 제한"이라고 뜬다. 셋 다 아닌데도.
+   * `/api/exchange`의 test 액션이 정확히 그 상태였다.
+   */
+  isTestnet: boolean,
   passphrase?: string,
 ): Promise<{ healthy: boolean; latencyMs: number; error?: string }> {
   const t0 = Date.now();
   try {
     const { testExchange } = await import('../exchanges/router');
-    const result = await testExchange(exchange as any, apiKey, secret, passphrase);
+    const result = await testExchange(exchange as any, apiKey, secret, passphrase, isTestnet);
     return {
       healthy:   result.success,
       latencyMs: result.latencyMs ?? 0,

@@ -68,7 +68,10 @@ export async function GET(req: NextRequest) {
     if (!exchange || !apiKey || !secret) {
       return NextResponse.json({ error: 'exchange, apiKey, secret required' }, { status: 400 });
     }
-    const result = await checkApiKeyHealth(exchange, apiKey, secret, passphrase);
+    // 어느 환경의 키인지 받는다. 안 주면 테스트넷으로 본다 —
+    // 이 프로젝트 공통 규칙이고, 모르는 채로 실전 호스트를 두드리지 않는다.
+    const testnet = (searchParams.get('testnet') || '') !== 'false';
+    const result = await checkApiKeyHealth(exchange, apiKey, secret, testnet, passphrase);
     logAudit({ userId: uid, action: 'API_KEY_HEALTH_CHECK', resource: exchange, detail: { healthy: result.healthy, latencyMs: result.latencyMs }, result: result.healthy ? 'success' : 'error' });
     return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } });
   }

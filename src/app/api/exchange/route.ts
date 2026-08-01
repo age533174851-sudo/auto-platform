@@ -272,7 +272,23 @@ export async function POST(req: NextRequest) {
 
     let result;
     try {
-      result = await testExchange(conn.exchange_id ?? conn.exchange, apiKey, secret, pass);
+      // **이 연결의 환경으로 물어본다.**
+      //
+      // 마지막 인자를 안 넘기고 있었다. isTestnet은 optional이라 undefined면
+      // falsy — 즉 '연결 테스트' 버튼은 연결이 테스트넷이든 아니든 **언제나
+      // 실전 호스트**에 물어봤다. 테스트넷 키로 실전에 물으면 서명이 안
+      // 맞아 401이 오고, 화면에는 "키가 틀렸거나 / 반대쪽 키이거나 / IP
+      // 제한"이라고 뜬다. 셋 다 아닌데도.
+      //
+      // 등록(connect)은 이 값을 제대로 넘기고 있었다. 그래서 **등록은
+      // 되는데 연결 테스트만 실패하는** 상태가 만들어졌다 — 사용자가
+      // 원인을 찾을 수 없는 조합이다.
+      //
+      // `!== false`는 이 프로젝트 공통 규칙이다(모르는 값은 테스트넷).
+      result = await testExchange(
+        conn.exchange_id ?? conn.exchange, apiKey, secret, pass,
+        conn.is_testnet !== false,
+      );
     } catch (e) {
       result = { success: false, message: e instanceof Error ? e.message : '테스트 실패' };
     }

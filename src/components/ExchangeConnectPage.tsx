@@ -192,7 +192,14 @@ export default function ExchangeConnectPage() {
         body: JSON.stringify({ action: 'test', connectionId: conn.id }),
       });
       const d = await r.json();
-      setTestMsg(d.success ? `✅ ${d.message} (${d.latencyMs}ms)` : `❌ ${d.message}`);
+      const text = String(d.message ?? '');
+      setTestMsg(d.success ? `✅ ${text} (${d.latencyMs}ms)` : `❌ ${text}`);
+      // 실패 이유에 IP가 걸려 있으면 **묻기 전에** 서버 IP를 띄운다.
+      //
+      // 아래 '확인' 버튼을 눌러야만 보이는 값은, 그걸 눌러야 한다는 걸
+      // 아는 사람에게만 보이는 값이다. 정작 이 오류를 처음 보는 사람은
+      // 무엇을 허용 목록에 넣어야 하는지 모른 채로 화면을 닫는다.
+      if (!d.success && /\bip\b|아이피/i.test(text)) loadServerIp();
       await loadConnections();
     } catch { setTestMsg('❌ 테스트 실패'); }
     finally { setTesting(false); }
