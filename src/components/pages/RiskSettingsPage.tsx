@@ -8,6 +8,7 @@ import {
   Edit3, History, TriangleAlert, Lock, Unlock, RotateCcw, Save, X,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
+import { DefaultHint } from '@/components/ui/SettingField';
 import { ErrorBoundary } from './ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
@@ -396,6 +397,19 @@ function EditModal({
                   <span style={{ color: isNull ? T.red : T.acl, fontWeight: 800, fontSize: 13 }}>
                     {isNull ? '제한 없음' : `${displayValue}${f.suffix || ''}`}
                   </span>
+                </div>
+                {/* 지금 고른 모드의 권장값을 항상 적는다.
+                    이 화면의 숫자는 **얼마나 잃을 수 있는지**를 정한다.
+                    표준 모드가 최대 레버리지 10배인데 내가 언제 50으로
+                    올려놓고 잊었다면, 그건 알고 한 결정이 아니다.
+                    기준은 지금 모드의 프리셋이다 — 안전/표준/공격은 서로
+                    다른 권장값을 갖고, 하나로 비교하면 뜻이 없다. */}
+                <div style={{ marginBottom: 4 }}>
+                  <DefaultHint
+                    now={value}
+                    base={(RISK_PRESETS as any)[draft.mode]?.[f.key as any]}
+                    unit={f.suffix || ''}
+                    onReset={() => update(f.key, (RISK_PRESETS as any)[draft.mode]?.[f.key as any])}/>
                 </div>
                 <input
                   type="number"
