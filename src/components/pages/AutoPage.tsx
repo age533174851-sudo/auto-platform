@@ -8,6 +8,7 @@ import { T, CURRENCIES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, gS, sS, uid } from '@/lib/utils';
 import type { Asset } from '@/types';
 import { Card } from './SharedUI';
+import { SettingField, settingInput } from '@/components/ui/SettingField';
 import AssetLogo from '../AssetLogo';
 import { loadSettings as loadRiskSettings, MODE_LABEL } from '@/lib/risk/store';
 import { Shield, Edit3, ChevronRight } from 'lucide-react';
@@ -75,6 +76,23 @@ const INITIAL_RISK_EVENTS:RiskEvent[] = [
 ];
 
 /* ─── AutoPage Component ─── */
+
+/**
+ * 전략을 만들 때 쓰는 기본값.
+ *
+ * 예전에는 입력칸의 placeholder로만 있었다. placeholder는 **값이 아니다** —
+ * 비워 두면 0이 들어가고, 화면에는 회색으로 '5'가 떠 있으니 5인 줄 안다.
+ * 익절 5%로 보이는데 실제로는 0%인 전략이 만들어진다.
+ *
+ * 설정을 고칠 때도 이 값을 '기본'으로 보여준다. 지금 값이 내가 바꾼 것인지
+ * 원래 그랬던 것인지 구분할 수 있어야 한다.
+ */
+export const STRAT_DEFAULTS = {
+  timeframe: '4h',
+  leverage: 1,
+  tp: 5,
+  sl: 2.5,
+} as const;
 
 function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void; requireAuth?: (reason: string, action: () => void) => void } = {}) {
   const [tab,setTab]=useState<'bots'|'ai'|'signals'|'risk'|'runs'|'create'>('bots');
@@ -470,18 +488,22 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           <Card style={{padding:'14px 16px',marginBottom:12}}>
             <div style={{color:T.muted,fontSize:11,fontWeight:700,marginBottom:10}}>기본 설정</div>
             <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
-              {[
-                {l:'전략 이름',k:'name',type:'text',ph:'내 EMA 전략'},
-                {l:'대상 자산',k:'asset',type:'text',ph:'BTC'},
-                {l:'타임프레임',k:'timeframe',type:'text',ph:'4h'},
-                {l:'레버리지',k:'leverage',type:'number',ph:'1'},
-                {l:'익절 %',k:'tp',type:'number',ph:'5'},
-                {l:'손절 %',k:'sl',type:'number',ph:'2.5'},
-              ].map(f=>(
-                <div key={f.k}>
-                  <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:4}}>{f.l}</div>
-                  <input type={f.type} value={(newStrat as any)[f.k]||''} onChange={e=>setNewStrat(p=>({...p,[f.k]:f.type==='number'?+e.target.value:e.target.value}))} placeholder={f.ph} style={{width:'100%',background:T.bg,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:12,outline:'none'}}/>
-                </div>
+              {([
+                {l:'전략 이름',k:'name',type:'text',ph:'내 EMA 전략',base:undefined,unit:'',ch:14},
+                {l:'대상 자산',k:'asset',type:'text',ph:'BTC',base:'BTC',unit:'',ch:8},
+                {l:'타임프레임',k:'timeframe',type:'text',ph:'4h',base:STRAT_DEFAULTS.timeframe,unit:'',ch:6},
+                {l:'레버리지',k:'leverage',type:'number',ph:'1',base:STRAT_DEFAULTS.leverage,unit:'x',ch:6},
+                {l:'익절',k:'tp',type:'number',ph:'5',base:STRAT_DEFAULTS.tp,unit:'%',ch:6},
+                {l:'손절',k:'sl',type:'number',ph:'2.5',base:STRAT_DEFAULTS.sl,unit:'%',ch:6},
+              ] as const).map(f=>(
+                <SettingField key={f.k} label={f.l} value={(newStrat as any)[f.k]} unit={f.unit}
+                  base={f.base}
+                  onReset={f.base===undefined?undefined:()=>setNewStrat(p=>({...p,[f.k]:f.base as any}))}>
+                  <input type={f.type} value={(newStrat as any)[f.k] ?? ''}
+                    inputMode={f.type==='number'?'decimal':undefined}
+                    onChange={e=>setNewStrat(p=>({...p,[f.k]:f.type==='number'?(parseFloat(e.target.value)||0):e.target.value}))}
+                    placeholder={f.ph} style={settingInput(f.ch)}/>
+                </SettingField>
               ))}
             </div>
             <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:12}}>
@@ -513,18 +535,36 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.8)',zIndex:200}} onClick={()=>setEditStrat(null)}/>
           <div style={{position:'fixed',inset:'auto 0 0',zIndex:201,background:T.surf,borderRadius:'20px 20px 0 0',padding:'20px 16px 40px',maxWidth:480,margin:'0 auto',border:`1px solid ${T.border}`}} onClick={e=>e.stopPropagation()}>
             <div style={{color:T.txt,fontWeight:800,fontSize:15,marginBottom:12}}>{editStrat.name} 설정</div>
-            <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
-              {[{l:'레버리지',v:`${editStrat.leverage}x`},{l:'익절',v:`${editStrat.tp}%`},{l:'손절',v:`${editStrat.sl}%`},{l:'타임프레임',v:editStrat.timeframe}].map(r=>(
-                <div key={r.l} style={{background:T.alt,borderRadius:10,padding:'10px 12px'}}>
-                  <div style={{color:T.muted,fontSize:10}}>{r.l}</div>
-                  <div style={{color:T.txt,fontSize:14,fontWeight:700,marginTop:2}}>{r.v}</div>
-                </div>
+            {/* 읽기 전용 상자였다. '설정'을 눌러 열었는데 아무것도 못 바꾸는
+                화면이면 그건 설정이 아니라 요약이다. 이제 실제로 고쳐진다. */}
+            <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 12px',marginBottom:4}}>
+              {([
+                {k:'leverage',l:'레버리지',unit:'x',type:'number',step:1,ch:6},
+                {k:'tp',l:'익절',unit:'%',type:'number',step:0.5,ch:6},
+                {k:'sl',l:'손절',unit:'%',type:'number',step:0.5,ch:6},
+                {k:'timeframe',l:'타임프레임',unit:'',type:'text',step:undefined,ch:6},
+              ] as const).map(f=>(
+                <SettingField key={f.k} label={f.l} value={(editStrat as any)[f.k]} unit={f.unit}
+                  base={(STRAT_DEFAULTS as any)[f.k]}
+                  onReset={()=>setEditStrat(p=>p?{...p,[f.k]:(STRAT_DEFAULTS as any)[f.k]} as any:p)}>
+                  <input type={f.type} step={f.step as any}
+                    inputMode={f.type==='number'?'decimal':undefined}
+                    value={(editStrat as any)[f.k] ?? ''}
+                    onChange={e=>setEditStrat(p=>p?{...p,[f.k]:f.type==='number'?(parseFloat(e.target.value)||0):e.target.value} as any:p)}
+                    style={settingInput(f.ch)}/>
+                </SettingField>
               ))}
             </div>
             <div style={{background:A(T.grn,'12'),border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,padding:'8px 12px',marginBottom:12}}>
               <div style={{color:T.grn,fontSize:10,fontWeight:700}}>설정 변경은 백테스트 후 적용을 권장합니다.</div>
             </div>
-            <button onClick={()=>setEditStrat(null)} style={{width:'100%',padding:'12px',background:T.acc,color:'#fff',border:'none',borderRadius:12,fontWeight:700,cursor:'pointer'}}>확인</button>
+            <div style={{display:'flex',gap:8}}>
+              {/* 예전에는 '확인'이 그냥 창을 닫기만 했다 — 고친 값이 조용히
+                  사라졌다. 저장과 취소를 분리한다. */}
+              <button onClick={()=>setEditStrat(null)} style={{flex:1,padding:'12px',background:A(T.muted,'18'),color:T.sub,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:700,cursor:'pointer'}}>취소</button>
+              <button onClick={()=>{const e=editStrat; setStrats(p=>p.map(x=>x.id===e.id?{...x,leverage:e.leverage,tp:e.tp,sl:e.sl,timeframe:e.timeframe,riskLevel:e.leverage>5?'high':e.leverage>2?'medium':'low'} as any:x)); setEditStrat(null);}}
+                style={{flex:2,padding:'12px',background:T.acc,color:'#fff',border:'none',borderRadius:12,fontWeight:800,cursor:'pointer'}}>저장</button>
+            </div>
           </div>
         </>
       )}
