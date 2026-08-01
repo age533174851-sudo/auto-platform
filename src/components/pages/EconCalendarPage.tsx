@@ -231,6 +231,27 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
       const bits = [`${d.saved}건 저장`];
       if (d.skippedNoTimezone > 0) bits.push(`시간대 불명 ${d.skippedNoTimezone}건 제외`);
       if (d.unknownImpact > 0) bits.push(`중요도 미상 ${d.unknownImpact}건(지표 회피 대상에서 빠짐)`);
+
+      // **0건이면 성공이 아니다.**
+      //
+      // 라우트는 저장에 실패하지 않았으니 ok:true를 준다. 그런데 받은 게
+      // 없으면 달력은 그대로 예시다 — 화면에 '0건 저장'만 뜨면 사용자는
+      // 무엇을 고쳐야 하는지 알 수 없다. 이유는 응답의 sources에 이미
+      // 들어 있는데(어느 공급자가 몇 건을 줬는지, 키가 없는지) 그걸
+      // 안 보여주고 있었다.
+      if (!(d.saved > 0)) {
+        const src = d.sources && typeof d.sources === 'object'
+          ? Object.entries(d.sources).map(([k, v]) => `${k}: ${v}`).join(' · ')
+          : '';
+        setSyncMsg(
+          `받아온 일정이 없습니다 (수집 ${d.collected ?? 0}건). `
+          + (src ? `공급자 응답 — ${src}. ` : '')
+          + '무료 플랜이 경제 캘린더를 막는 경우가 많습니다. '
+          + 'TRADING_ECONOMICS_API_KEY를 추가하면 그쪽으로도 받습니다.'
+        );
+        return;
+      }
+
       setSyncMsg(bits.join(' · '));
       await loadEvents();
     } catch (e: any) {
