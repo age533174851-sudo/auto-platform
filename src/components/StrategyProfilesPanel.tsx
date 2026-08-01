@@ -12,6 +12,38 @@ import {
   resetProfileKill, resetProfileRisk, winRate, type ProfileRiskState,
 } from '@/lib/strategies/profileRisk';
 
+/**
+ * 초를 사람이 읽는 기간으로.
+ *
+ * 시뮬은 1000회를 1초에 돌린다. 그러면 "이 전략 1000번"이 쉬운 일처럼
+ * 보이는데 실제로는 몇 달치다. 그 감각이 없으면 시뮬 결과를 과신한다.
+ */
+function fmtDur(sec: number): string {
+  if (!Number.isFinite(sec) || sec <= 0) return '—';
+  const m = sec / 60, h = m / 60, d = h / 24;
+  if (d >= 365) return `${(d / 365).toFixed(1)}년`;
+  if (d >= 30)  return `${(d / 30).toFixed(1)}개월`;
+  if (d >= 1)   return `${d.toFixed(d < 10 ? 1 : 0)}일`;
+  if (h >= 1)   return `${h.toFixed(h < 10 ? 1 : 0)}시간`;
+  if (m >= 1)   return `${Math.round(m)}분`;
+  return `${Math.round(sec)}초`;
+}
+
+/** 시뮬 한 건의 결과. 이름을 붙여 두면 화살표 함수의 반환 타입 자리에서
+ *  `=>`가 타입의 일부로 읽히는 파싱 문제를 피할 수 있다. */
+/** 시뮬 한 건의 결과.
+ *  이 저장소는 `strict: false`라 `{ok:true}|{ok:false}` 판별 유니온이
+ *  좁혀지지 않는다(boolean 리터럴이 넓어진다). 그래서 한 모양으로 둔다. */
+type SimResult = {
+  ok: boolean;
+  /** ok=false일 때의 사유 */
+  reason?: string;
+  win?: boolean;
+  pnl?: number;
+  killed?: boolean;
+  killReason?: string;
+};
+
 const AI_SOURCES = ['claude', 'gpt', 'gemini', 'grok'];
 const SIM_PRICE = 140_000_000;
 
@@ -27,10 +59,17 @@ export default function StrategyProfilesPanel() {
   }, [toast]);
   void tick;
 
-  // 규칙 엔진으로 1건 시뮬 진입→청산 (프로필 한도 적용 + 격리 기록)
-  const simTrade = (p: StrategyProfile) => {
+  const [busy, setBusy] = useState<StrategyType | null>(null);
+
+  /**
+   * 한 건 시뮬. 결과를 **돌려준다** — 여러 번 돌릴 때 집계해야 하기 때문이다.
+   *
+   * 화면에 띄우지 않는 이유: 1000번 돌리면서 매번 토스트를 띄우면 아무것도
+   * 읽을 수 없다. 요약은 부르는 쪽이 한 번만 한다.
+   */
+  const simOnce = (p: StrategyProfile): SimResult => {
     const can = canProfileEnter(p.id);
-    if (!can.allowed) { showToast(`${p.label} 진입 차단: ${can.reason}`); return; }
+    if (!can.allowed) return { ok: false, reason: can.reason || '진입 차단' };
     const eq = loadProfileRisk(p.id).equity;
     const sig: Signal = {
       bias: Math.random() > 0.5 ? 'long' : 'short',
@@ -38,15 +77,47 @@ export default function StrategyProfilesPanel() {
       aiSource: AI_SOURCES[Math.floor(Math.random() * AI_SOURCES.length)],
     };
     const built = buildOrder({ signal: sig, profile: p, equityKRW: eq, price: SIM_PRICE });
-    if (!built.ok) { showToast(`주문 거부: ${built.reason}`); return; }
+    if (!built.ok) return { ok: false, reason: (built as any).reason || '주문 거부' };
     // 무작위 승패: 익절(+TP%) 또는 손절(-SL%) — notional 기준(레버리지 반영)
     const win = Math.random() < 0.5;
     const pnlPct = win ? p.takeProfitPct : -p.stopLossPct;
     const pnl = Math.round(built.order.notionalKRW * (pnlPct / 100));
-    const s = recordProfileTrade(p.id, pnl);
-    showToast(`${p.label}: ${sig.bias} ${built.order.leverage}x → ${win ? '익절' : '손절'} ${pnl >= 0 ? '+' : ''}${pnl.toLocaleString('ko-KR')}원`);
-    if (s.killed) showToast(`⛔ ${p.label} 킬스위치: ${s.killedReason}`);
+    const st = recordProfileTrade(p.id, pnl);
+    return { ok: true, win, pnl, killed: !!st.killed, killReason: st.killedReason };
+  };
+
+  /**
+   * N번 돌린다.
+   *
+   * **중간에 멈추면 그 사실을 말한다.** 1000번을 눌렀는데 킬스위치가 12번째에
+   * 걸려 멈췄다면, "1000번 돌렸다"고 적는 것은 거짓말이다. 실제 실행 횟수와
+   * 멈춘 이유를 같이 적는다 — 오히려 그게 이 시뮬의 가장 쓸모 있는 결과다
+   * (이 설정으로는 12번이면 하루 한도가 찬다는 뜻이니까).
+   */
+  const simTrades = (p: StrategyProfile, n: number) => {
+    setBusy(p.id);
+    let ran = 0, wins = 0, pnlSum = 0;
+    let stopped = '';
+    for (let i = 0; i < n; i++) {
+      const r = simOnce(p);
+      if (!r.ok) { stopped = r.reason; break; }
+      ran++; pnlSum += r.pnl ?? 0; if (r.win) wins++;
+      if (r.killed) { stopped = `킬스위치 — ${r.killReason || '사유 미상'}`; break; }
+    }
+    setBusy(null);
     refresh();
+
+    if (ran === 0) { showToast(`${p.label} 실행 못 함 · ${stopped || '사유 미상'}`); return; }
+    const rate = Math.round((wins / ran) * 100);
+    const head = ran < n
+      ? `${p.label} ${ran}/${n}회에서 멈춤`
+      : `${p.label} ${ran}회 완료`;
+    showToast([
+      head,
+      `승 ${wins} · 패 ${ran - wins} (${rate}%)`,
+      `합계 ${pnlSum >= 0 ? '+' : ''}${pnlSum.toLocaleString('ko-KR')}원`,
+      stopped ? `멈춘 이유: ${stopped}` : '',
+    ].filter(Boolean).join(' · '));
   };
 
   const box: React.CSSProperties = { background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 14, marginBottom: 12 };
@@ -106,11 +177,32 @@ export default function StrategyProfilesPanel() {
               {s.killed && <div style={{ fontSize: 9, color: T.red, marginTop: 5 }}>⛔ {s.killedReason}</div>}
             </div>
 
-            {/* 액션 */}
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              <button onClick={() => simTrade(p)} style={btn(accent)} disabled={s.killed} >모의 진입 시뮬 (규칙엔진)</button>
+            {/* 액션 — 몇 번 돌릴지 고른다.
+                한 번씩만 눌러서는 표본이 안 모인다. 위 성적표가 "표본 20건
+                미만은 우연"이라고 적어 두고 정작 20건을 모으려면 스무 번을
+                눌러야 했다. */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {[1, 10, 100, 1000].map(n => (
+                <button key={n} onClick={() => simTrades(p, n)}
+                  style={{ ...btn(n === 1 ? accent : T.alt2 || '#334155'),
+                           opacity: (s.killed || busy === p.id) ? 0.5 : 1 }}
+                  disabled={s.killed || busy === p.id}>
+                  {busy === p.id ? '…' : n === 1 ? '모의 진입 시뮬 (규칙엔진)' : `${n}회`}
+                </button>
+              ))}
               {s.killed && <button onClick={() => { resetProfileKill(p.id); refresh(); showToast('킬스위치 해제'); }} style={btn(T.muted)}>킬스위치 해제</button>}
               <button onClick={() => { resetProfileRisk(p.id); refresh(); showToast(`${p.label} 계좌 리셋`); }} style={btn(T.alt2 || '#334155')}>계좌 리셋</button>
+            </div>
+
+            {/* 실제로는 얼마나 걸리는 양인가.
+                1000회를 1초에 돌리면 "이 전략 1000번"이 쉬운 일처럼 보인다.
+                실제로는 몇 달치다. 그 감각이 없으면 시뮬 결과를 과신한다. */}
+            <div style={{ fontSize: 9, color: T.muted, marginTop: 6, lineHeight: 1.5 }}>
+              {p.maxHoldSec > 0
+                ? `실제 소요 시간(최대 보유시간 ${fmtDur(p.maxHoldSec)} 기준 상한): `
+                  + [10, 100, 1000].map(n => `${n}회 ≈ ${fmtDur(p.maxHoldSec * n)}`).join(' · ')
+                  + '. 실제로는 대부분 익절·손절이 먼저 닿아 이보다 짧습니다.'
+                : '이 프로필은 최대 보유시간이 무제한이라 실제 소요 시간을 예측할 수 없습니다.'}
             </div>
 
             <div style={{ fontSize: 9, color: T.muted, marginTop: 8, lineHeight: 1.5 }}>{p.description}</div>

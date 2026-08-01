@@ -171,3 +171,83 @@ export function countChanged<T extends Record<string, any>>(
 ): number {
   return keys.reduce((n, k) => n + (sameValue(now[k], base[k]) ? 0 : 1), 0);
 }
+
+/**
+ * 슬라이더 + **숫자 입력** + 기본값.
+ *
+ * 왜 숫자 입력을 같이 두는가
+ * ──────────────────────────
+ * 슬라이더만 있으면 정확한 값을 넣을 수 없다. "진입 임계값 70%"를 72로
+ * 맞추려면 손가락을 1px 단위로 움직여야 하고, 폰에서는 사실상 불가능하다.
+ * 그래서 실제로는 **아무 값이나 대충 맞춰 놓고 쓰게 된다** — 그런데 이
+ * 화면의 값들은 돈이 얼마나 들어가는지를 정한다.
+ *
+ * 슬라이더는 대략 감을 잡는 데, 숫자칸은 정확히 넣는 데 쓴다. 둘은 같은
+ * 값을 보므로 어느 쪽을 만져도 다른 쪽이 따라 움직인다.
+ *
+ * 범위를 벗어난 입력은 **잘라서 넣는다**. 막아 버리면 사용자는 자기가 뭘
+ * 잘못했는지 모른 채 입력이 안 먹는다고 느끼고, 그대로 두면 슬라이더가
+ * 표현할 수 없는 값이 저장된다.
+ */
+export function SliderField({
+  label, value, base, unit, min, max, step = 1, onChange, hint, color,
+}: {
+  label: string;
+  value: number;
+  /** 기본값. 주지 않으면 꼬리표를 안 붙인다 */
+  base?: number;
+  unit?: string;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (v: number) => void;
+  hint?: string;
+  color?: string;
+}) {
+  const clamp = (n: number) => Math.min(max, Math.max(min, n));
+  // 소수 step에서 부동소수점 찌꺼기가 남지 않게 자릿수를 맞춘다
+  const decimals = (String(step).split('.')[1] || '').length;
+  const round = (n: number) => Number(n.toFixed(decimals));
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 8, marginBottom: 5, flexWrap: 'wrap',
+      }}>
+        <span style={{ color: T.sub, fontSize: 11, fontWeight: 700,
+                       display: 'inline-flex', alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
+          {label}
+          {base !== undefined && (
+            <DefaultHint now={value} base={base} unit={unit} onReset={() => onChange(base)}/>
+          )}
+        </span>
+        {/* 숫자칸. 슬라이더로는 못 넣는 값을 여기서 넣는다 */}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <input
+            type="number" inputMode="decimal"
+            value={Number.isFinite(value) ? value : ''}
+            min={min} max={max} step={step}
+            onChange={e => {
+              const n = parseFloat(e.target.value);
+              if (Number.isFinite(n)) onChange(round(clamp(n)));
+            }}
+            style={{
+              width: `${String(max).length + 4}ch`, minWidth: 62,
+              background: T.alt, border: `1px solid ${T.border}`, borderRadius: 7,
+              padding: '5px 8px', color: T.txt, fontSize: 12, fontWeight: 700,
+              textAlign: 'right', outline: 'none', fontVariantNumeric: 'tabular-nums',
+            }}/>
+          {unit && <span style={{ color: T.muted, fontSize: 11, fontWeight: 700 }}>{unit}</span>}
+        </span>
+      </div>
+      <input type="range" min={min} max={max} step={step}
+        value={Number.isFinite(value) ? value : min}
+        onChange={e => onChange(round(clamp(parseFloat(e.target.value))))}
+        style={{ width: '100%', accentColor: color ?? T.acl, display: 'block' }}/>
+      {hint && (
+        <div style={{ color: T.muted, fontSize: 9, marginTop: 4, lineHeight: 1.5 }}>{hint}</div>
+      )}
+    </div>
+  );
+}
