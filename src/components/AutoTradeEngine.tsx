@@ -194,8 +194,11 @@ export default function AutoTradeEngine() {
                 const { checkEventWindow, parseCalendarEvents } = await import('@/lib/risk/eventGuard');
                 const cr = await fetch('/api/calendar');
                 const cd = await cr.json();
-                const rawEvents = (cd.events || []).map((e: any) => ({
-                  id: e.id, title: e.title, impact: e.impact,
+                // `data`와 `events` 둘 다 본다. 예전에는 `cd.events`만 봤는데
+                // 라우트는 `data`만 줬다 — **항상 빈 배열**이었고, 그래서
+                // 지표 회피가 켜져 있는데 한 번도 안 걸렸다.
+                const rawEvents = (cd.data || cd.events || []).map((e: any) => ({
+                  id: e.id, title: e.event || e.title, impact: e.impact,
                   date: e.date, time: e.time, at: e.dateTime ? new Date(e.dateTime).getTime() : undefined,
                 }));
                 const events = parseCalendarEvents(rawEvents);

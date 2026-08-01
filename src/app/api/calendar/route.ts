@@ -1,5 +1,6 @@
 // src/app/api/calendar/route.ts — Economic calendar (Finnhub + mock fallback)
 import { NextRequest, NextResponse } from 'next/server';
+import { withEventName } from '@/lib/calendar/normalize';
 export const dynamic = 'force-dynamic';
 
 // Multilingual event titles
@@ -136,7 +137,7 @@ const DATES: Record<string, string> = {
 };
 
 function addDates(events: typeof EVENTS_KO) {
-  return events.map(e => ({
+  return events.map(e => withEventName({
     ...e,
     date:   DATES[e.id] || nextDate(15),
     time:   e.time,
@@ -178,7 +179,7 @@ export async function GET(req: NextRequest) {
         source = 'db'; status = 'live';
         events = data.map((r: any) => {
           const t = new Date(r.timestamp_utc);
-          return {
+          return withEventName({
             id: String(r.id),
             title: r.event,
             country: r.country || '',
@@ -191,7 +192,7 @@ export async function GET(req: NextRequest) {
             forecast: r.forecast ?? null,
             previous: r.previous ?? null,
             actual: r.actual ?? null,
-          };
+          });
         });
       }
     }
@@ -212,7 +213,7 @@ export async function GET(req: NextRequest) {
         const cal: any[] = d.economicCalendar || [];
         if (cal.length > 0) {
           source = 'finnhub'; status = 'live';
-          events = cal.slice(0, 30).map((ev: any, i: number) => ({
+          events = cal.slice(0, 30).map((ev: any, i: number) => withEventName({
             id:       `fh-${i}`,
             title:    ev.event || ev.eventName || 'Economic Event',
             country:  ev.country || 'US',
@@ -239,7 +240,12 @@ export async function GET(req: NextRequest) {
     ok: true,
     // 예전에는 항상 'mock'이었다. 실제 데이터를 받아와도 그렇게 적으면
     // 화면이 진짜와 가짜를 구분할 수 없다.
-    status, source, lang, data: events,
+    status, source, lang,
+    data: events,
+    // `events`라는 이름으로도 싣는다. 자동매매의 지표 회피 게이트가
+    // `cd.events`를 읽고 있었는데 여기서는 `data`만 줘서 **항상 빈 배열**을
+    // 받고 있었다 — 회피가 켜져 있는데 한 번도 안 걸렸다.
+    events,
     sampleWarning: status === 'sample'
       ? '표시된 일정과 예상치는 예시입니다. 실제 발표 일정이 아니므로 매매 판단에 쓰지 마세요.'
       : null,
