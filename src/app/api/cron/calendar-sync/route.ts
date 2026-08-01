@@ -21,11 +21,21 @@
 // 그쪽은 사람이 직접 넣거나 외부 결과를 주입하는 통로다. 여기는 예약
 // 수집이다. 둘 다 같은 테이블에 같은 규칙으로 쓴다.
 import { NextRequest, NextResponse } from 'next/server';
-import { getSupabaseAdmin } from '@/lib/supabase/server';
-import { collectEvents } from '@/lib/calendar/normalize';
+import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+import { collectEvents, syncCooldown } from '@/lib/calendar/normalize';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+/**
+ * 마지막 수동 동기화 시각.
+ *
+ * 인스턴스 안에서만 산다(서버리스라 재시작되면 잊는다). 그래도 두는 이유는
+ * 화면에서 버튼을 연타할 때를 막기 위해서다 — 공급자 호출은 유료 쿼터이고,
+ * 같은 데이터를 1분에 열 번 받아도 달라지는 게 없다. 완벽한 잠금이 필요한
+ * 자리가 아니다(잘못 돌아도 upsert라 데이터가 상하지 않는다).
+ */
+let lastManualAt = 0;
 
 async function fetchJson(url: string): Promise<any | null> {
   try {
@@ -36,6 +46,36 @@ async function fetchJson(url: string): Promise<any | null> {
 
 const ymd = (d: Date) => d.toISOString().slice(0, 10);
 
+/**
+ * 지금 바로 한 번 받아온다 — 화면의 '일정 동기화' 버튼용.
+ *
+ * 왜 POST를 따로 여는가
+ * ─────────────────────
+ * 크론은 **하루에 한 번**만 돈다(Vercel Hobby는 일 단위 크론만 허용한다).
+ * 그러면 처음 켠 사람은 최대 하루를 빈 달력으로 기다려야 하고, 키를 잘못
+ * 넣었는지 데이터가 원래 없는 건지도 그때까지 알 수 없다.
+ *
+ * GET(크론)은 CRON_SECRET으로 잠겨 있는데, 그 비밀을 화면에 둘 수는 없다 —
+ * 브라우저로 보내는 순간 비밀이 아니다. 그래서 로그인한 사용자면 되게 하고,
+ * 대신 연타를 쿨다운으로 막는다. 이 표는 사용자별 데이터가 아니라 공용
+ * 일정이라 누가 갱신하든 결과가 같다.
+ */
+export async function POST(req: NextRequest) {
+  const uid = await resolveUserId(
+    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+  if (!uid) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+
+  const cool = syncCooldown(lastManualAt, Date.now());
+  if (!cool.allowed) {
+    return NextResponse.json({
+      ok: false, error: 'cooldown',
+      message: `방금 받아왔습니다. ${cool.waitSec}초 뒤에 다시 시도하세요.`,
+    }, { status: 429 });
+  }
+  lastManualAt = Date.now();
+  return runSync();
+}
+
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET || '';
   if (secret) {
@@ -43,6 +83,11 @@ export async function GET(req: NextRequest) {
       || req.nextUrl.searchParams.get('secret') || '';
     if (given !== secret) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
+  return runSync();
+}
+
+/** 크론과 수동 버튼이 **같은 코드**를 쓴다. 두 벌이면 한쪽만 고쳐진다 */
+async function runSync() {
 
   // 지난 7일 ~ 앞으로 30일. 지난 것도 받는 이유는 발표된 실제치를
   // 채우기 위해서다 — 앞만 보면 예상치만 있는 달력이 된다.

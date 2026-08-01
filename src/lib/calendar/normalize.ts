@@ -220,3 +220,23 @@ export function withEventName<T extends Record<string, any>>(row: T): T & { even
   const name = String(row?.event ?? row?.title ?? '');
   return { ...row, event: name, title: name };
 }
+
+/** 수동 동기화 최소 간격(ms). 같은 데이터를 1분에 열 번 받아도 달라지는 게 없다 */
+export const SYNC_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * 지금 다시 받아와도 되는가.
+ *
+ * 순수 함수로 두는 이유: "몇 초 남았다"를 화면이 그대로 쓰기 때문이다.
+ * 라우트가 직접 계산하면 남은 시간이 음수로 나오거나(시계가 뒤로 간 경우)
+ * 0초인데 못 누르는 상태가 조용히 생긴다.
+ */
+export function syncCooldown(lastAt: number, nowMs: number): { allowed: boolean; waitSec: number } {
+  const last = Number(lastAt);
+  // 한 번도 안 했으면 바로 된다. 시계가 뒤로 갔을 때(미래의 lastAt)도
+  // 영원히 잠기지 않게 막는다.
+  if (!Number.isFinite(last) || last <= 0 || last > nowMs) return { allowed: true, waitSec: 0 };
+  const left = SYNC_COOLDOWN_MS - (nowMs - last);
+  if (left <= 0) return { allowed: true, waitSec: 0 };
+  return { allowed: false, waitSec: Math.ceil(left / 1000) };
+}
