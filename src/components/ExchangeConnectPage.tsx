@@ -59,6 +59,7 @@ export default function ExchangeConnectPage() {
   const [diag,         setDiag]         = useState<any>(null);
   const [diagRunning,  setDiagRunning]  = useState(false);
   const [balLoading,   setBalLoading]   = useState(false);
+  const [balErr,       setBalErr]       = useState('');
   const [toggleBusy,   setToggleBusy]   = useState<string|null>(null);   // 토글 중인 connectionId
   const [toast,        setToast]        = useState<{ msg:string; ok:boolean }|null>(null);
   const showToast = useCallback((msg:string, ok:boolean)=>{ setToast({ msg, ok }); setTimeout(()=>setToast(null), 4200); }, []);
@@ -173,14 +174,64 @@ export default function ExchangeConnectPage() {
     finally { setTesting(false); }
   };
 
+  // ── 테스트넷 여부 바꾸기 ─────────────────────────────────────
+  //
+  // 실전으로 등록해 놓고 실제로는 테스트넷 키인 경우가 흔하다. 지금까지는
+  // 지우고 다시 만드는 수밖에 없었는데, 그러면 키를 다시 붙여넣어야 하고
+  // 그 과정에서 실전 키를 잘못 넣을 위험이 새로 생긴다.
+  const [envBusy, setEnvBusy] = useState(false);
+  const switchEnv = async (conn: ConnectedExchange, next: boolean) => {
+    const going = next ? '테스트넷' : '실전';
+    const lines = [
+      `이 연결을 ${going}으로 바꿉니다.`,
+      '',
+      next
+        ? '가짜 돈으로 도는 계좌를 보게 됩니다.'
+        : '⚠️ 이제부터 이 연결의 주문은 실제 자금을 씁니다.',
+      '',
+      '자동매매는 꺼집니다 — 어느 계좌를 향하는지가 바뀌었으므로,',
+      '연결 테스트로 확인한 뒤 직접 다시 켜세요.',
+    ];
+    if (!(await confirmDialog(lines.join('\n'), { danger: !next }))) return;
+    setEnvBusy(true);
+    try {
+      const _a = await getAuthHeader();
+      const r = await fetch('/api/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(_a?{Authorization:_a}:{}) },
+        body: JSON.stringify({ action: 'set-testnet', connectionId: conn.id, isTestnet: next }),
+      });
+      const d = await r.json();
+      showToast(d?.message || (r.ok ? '바꿨습니다' : (d?.error || '변경 실패')), !!d?.success);
+      if (d?.success) {
+        await loadConnections();
+        setSelConn(prev => prev ? ({ ...prev, isTestnet: next, autoTrading: false } as any) : prev);
+        setTestMsg(''); setBalances([]); setBalErr('');
+      }
+    } catch (e: any) {
+      showToast(`변경 실패 (${e?.message || e})`, false);
+    } finally { setEnvBusy(false); }
+  };
+
   // ── Load balances ───────────────────────────────────────────
   const loadBalances = async (conn: ConnectedExchange) => {
-    setBalLoading(true); setBalances([]);
+    setBalLoading(true); setBalances([]); setBalErr('');
     try {
-      const r = await fetch(`/api/exchange?action=balances&id=${conn.id}`);
+      // **인증 헤더가 빠져 있었다.** 이 화면의 다른 요청은 전부 붙이는데
+      // 이것만 없어서 서버가 사용자를 못 알아보고 404를 돌려줬다 —
+      // 그래서 잔고 조회는 **한 번도 성공한 적이 없다.** 화면에는
+      // "잔고 없음 또는 조회 실패"만 떴다.
+      const _a = await getAuthHeader();
+      const r = await fetch(`/api/exchange?action=balances&id=${conn.id}`,
+        { headers: _a ? { Authorization: _a } : undefined });
       const d = await r.json();
+      // 실패 사유를 버리지 않는다. '잔고가 0'과 '못 읽었다'는 완전히 다른
+      // 상태인데 화면에서는 둘 다 비어 보인다.
+      if (!r.ok || d?.error) { setBalances([]); setBalErr(d?.error || `조회 실패 (${r.status})`); return; }
       setBalances(d.balances || []);
-    } catch { setBalances([]); }
+    } catch (e: any) {
+      setBalances([]); setBalErr(`잔고를 읽지 못했습니다 (${e?.message || e})`);
+    }
     finally { setBalLoading(false); }
   };
 
@@ -578,6 +629,31 @@ export default function ExchangeConnectPage() {
             ))}
           </div>
 
+          {/* 연결 환경 바꾸기.
+              연결 테스트가 어느 호스트에 물어보는지를 정하는 값이라,
+              테스트 버튼 바로 위에 둔다 — 실패했을 때 다음에 눌러야 할 것이
+              바로 위에 있어야 한다. */}
+          {HAS_TESTNET.includes(selConn.exchange as ExchangeId) && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ color:T.muted, fontSize:10, fontWeight:700, marginBottom:4 }}>
+                연결 환경 — 지금 <b style={{ color: selConn.isTestnet ? T.grn : T.red }}>
+                  {selConn.isTestnet ? '테스트넷' : '실전'}
+                </b>
+              </div>
+              <button onClick={() => switchEnv(selConn, !selConn.isTestnet)} disabled={envBusy}
+                style={{ width:'100%', padding:'9px', background:T.alt,
+                  border:`1px solid ${A(selConn.isTestnet ? T.red : T.grn,'40')}`, borderRadius:10,
+                  color: selConn.isTestnet ? T.red : T.grn, fontWeight:700, fontSize:11,
+                  cursor: envBusy ? 'not-allowed' : 'pointer' }}>
+                {envBusy ? '바꾸는 중…' : selConn.isTestnet ? '실전으로 바꾸기' : '테스트넷으로 바꾸기'}
+              </button>
+              <div style={{ color:T.muted, fontSize:9, marginTop:4, lineHeight:1.5 }}>
+                연결 테스트는 실패하는데 테스트넷 진단은 통과한다면, 이 연결이
+                실전으로 등록됐지만 키는 테스트넷 키라는 뜻입니다.
+              </div>
+            </div>
+          )}
+
           {/* Test connection */}
           <button onClick={() => handleTest(selConn)} disabled={testing}
             style={{ width:'100%', padding:'10px', background:T.alt, border:`1px solid ${A(T.acl,'40')}`, borderRadius:10, color:T.acl, fontWeight:700, fontSize:12, cursor: testing ? 'not-allowed' : 'pointer' }}>
@@ -655,9 +731,14 @@ export default function ExchangeConnectPage() {
             <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
               {[0,1,2].map(i=><Skeleton key={i} h={32}/>)}
             </div>
+          ) : balErr ? (
+            <div style={{ padding:'10px 12px', borderRadius:9, background:A(T.ylw,'12'),
+                          color:T.ylw, fontSize:11, lineHeight:1.6 }}>
+              {balErr}
+            </div>
           ) : balances.length === 0 ? (
             <div style={{ textAlign:'center', padding:'20px 0', color:T.muted, fontSize:12 }}>
-              잔고 없음 또는 조회 실패
+              잔고가 없습니다 (0개 자산)
             </div>
           ) : (
             <div>

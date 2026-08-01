@@ -307,6 +307,38 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, isPaper: !!isPaper });
   }
 
+  // 이미 등록한 연결의 테스트넷 여부를 바꾼다.
+  //
+  // 왜 필요한가: 실전으로 등록해 놓고 실제로는 테스트넷 키인 경우가 흔하다
+  // (연결 테스트는 실패하는데 테스트넷 진단은 통과하는 상태). 지금까지는
+  // **지우고 다시 만드는 수밖에 없었다** — 키를 다시 붙여넣어야 하고, 그
+  // 과정에서 실전 키를 잘못 넣을 위험이 새로 생긴다.
+  //
+  // 자동매매는 **끈다.** 어느 계좌를 향하는지가 바뀌었는데 켜진 채로 두면,
+  // 다음 신호가 사용자가 확인하지 않은 계좌로 나간다.
+  if (action === 'set-testnet') {
+    const { connectionId, isTestnet } = body;
+    if (!connectionId) return NextResponse.json({ error: 'missing_params' }, { status: 400 });
+    const next = isTestnet === true;
+    if (sb) {
+      const { error } = await (sb.from('exchange_connections') as any)
+        .update({ is_testnet: next, auto_trading: false })
+        .eq('id', connectionId).eq('user_id', uid);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    } else {
+      const r = MEM_STORE.find(x => x.id === connectionId);
+      if (!r) return NextResponse.json({ error: '연결을 찾을 수 없습니다' }, { status: 404 });
+      r.is_testnet = next;
+      (r as any).auto_trading = false;
+    }
+    return NextResponse.json({
+      success: true, isTestnet: next,
+      message: next
+        ? '테스트넷으로 바꿨습니다. 자동매매는 꺼졌습니다 — 연결 테스트로 확인한 뒤 다시 켜세요.'
+        : '⚠️ 실전으로 바꿨습니다. 이제 실제 자금이 사용됩니다. 자동매매는 꺼졌습니다 — 연결 테스트로 확인한 뒤 다시 켜세요.',
+    });
+  }
+
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
 }
 
