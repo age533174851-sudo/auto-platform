@@ -3,44 +3,44 @@
 //
 // 모바일 배치 — PC를 줄인 것이 아니라 조각을 다시 놓은 것.
 //
-// 세로는 세 칸이다: 헤더 · 주문+호가 · 포지션. **포지션은 끌어내리지 않아도
-// 보인다** (아래 '왜 페이지 스크롤을 버렸나' 참조).
+// 첫 화면은 스크롤 없이 다 보이고, **더 보려면 그냥 내린다.**
 //
-//   ┌──────────────────────────┐ ← 고정
-//   │ BTCUSDT ▾  +0.99%   STOP │
-//   │ 현물 · USDT-M · COIN-M    │
-//   │ 모의 · 테스트넷 · 실전     │
+//   ┌──────────────────────────┐ ← 붙어 있다(sticky)
+//   │ BTCUSDT ▾  −1.91%   STOP │
+//   │ 현물·USDT-M·COIN-M │ 모의·테스트넷·실전 │
 //   ├─────────────┬────────────┤ ─┐
-//   │  주문폼      │  펀딩       │  │ 남는 자리 전부
-//   │  방향/배율    │  호가       │  │ (길면 이 칸 안에서
-//   │  가격/수량    │  현재가 ⟵눌림│  │  스크롤. 롱/숏
-//   │  [롱][숏]    │  잔량 막대   │  │  버튼은 바닥 고정)
+//   │  주문폼      │  펀딩       │  │ 첫 화면의 나머지를
+//   │  방향/배율    │  호가       │  │ 정확히 채운다.
+//   │  가격/수량    │  현재가 ⟵눌림│  │ 스크롤 없이 다 보인다
+//   │  [롱][숏]    │  잔량 막대   │  │
 //   ├─────────────┴────────────┤ ─┘
-//   │ ══ (손잡이 — 끌어 키운다)  │ ← 여기부터가 **첫 화면 안에 있다**
-//   │ 포지션(2)·미체결·자산 …    │
-//   │ ┌──────────────────────┐ │
+//   │ 포지션 · 데모 · 미체결 …   │ ← 탭 줄까지가 첫 화면 (sticky)
+//   ├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┤
+//   │ ┌──────────────────────┐ │ ← 여기부터는 화면을 내리면 나온다
 //   │ │ BTCUSDT LONG 격리 5× │ │
 //   │ │ 미실현 −15.72 −43.6% │ │
 //   │ └──────────────────────┘ │
 //   ├──────────────────────────┤
-//   │ BTCUSDT 차트           ▲ │  ← 접혀 있다. 누르면 올라온다
+//   │ BTCUSDT 차트           ▲ │  ← 맨 아래. 누르면 올라온다
 //   └──────────────────────────┘
 //
-// 왜 페이지 스크롤을 버렸나
-// ─────────────────────────
-// 한동안 세로를 '한 줄 스크롤'로 뒀다. 포지션 칸의 최소 높이를 '화면 − 헤더'로
-// 잡아서, 끌어내리면 포지션이 화면을 꽉 채우게. 그런데 그러면 **포지션을
-// 보려면 반드시 한 화면을 통째로 끌어내려야 한다.** 들고 있는 것이 있는지
-// 없는지가 스크롤해야만 보이는 정보가 된다 — 그건 없는 것과 비슷하다.
+// 배치가 세 번 바뀐 이유 — 두 요구가 서로 반대처럼 보였다
+// ───────────────────────────────────────────────────────
+//  1. 처음: 포지션 칸의 최소 높이를 '화면 − 헤더'로 뒀다. 그러면 **포지션을
+//     보려면 반드시 한 화면을 통째로 끌어내려야 한다.** 들고 있는 것이 있는지
+//     없는지가 스크롤해야만 보이는 정보가 된다 — 없는 것과 비슷하다.
+//  2. 그래서 칸을 고정하고 손잡이로 끌게 했다. 그런데 **끌기는 보이지 않는
+//     기능**이다. 손잡이가 있어도 끌 수 있는 줄 모르는 사람에게는 없는
+//     기능이고, 그 사람의 포지션 칸은 영원히 탭 줄뿐이다.
+//  3. 지금: 첫 화면을 고정하고 **그 아래는 그냥 페이지 스크롤**이다.
 //
-// 지금은 화면을 세 칸으로 나눠 고정한다: 헤더 · 주문+호가 · 포지션.
-// 포지션 칸은 **처음부터 보인다.** 탭 줄과 첫 카드가 첫 화면 안에 있고,
-// 더 보고 싶으면 손잡이를 끌어 키운다. 끄는 것 자체는 좋다고 하셨고,
-// 끌어야만 보이는 것이 문제였다.
+// 1번이 문제였던 것은 스크롤 자체가 아니라 **스크롤이 필수**였다는 점이다.
+// 지금은 주문폼이 첫 화면에 다 들어가므로 내리는 것은 '더 보려고' 하는 일이지
+// 주문하려고 하는 일이 아니다. 화면을 내리는 것은 아무도 배울 필요가 없다.
 //
-// 스크롤이 두 겹이 되는 문제는 남는다. 그래서 겹치는 자리를 하나로 줄였다:
-// 주문 칸과 포지션 칸은 경계가 눈에 보이고(손잡이·테두리), 각자 자기
-// 안에서만 움직인다.
+// 스크롤이 두 겹이 되는 문제는 통을 **하나로** 두어 없앴다. 주문 칸과 호가
+// 칸은 각자 스크롤하지 않는다(overflow: hidden) — 손가락이 어디에 닿았는지에
+// 따라 다르게 움직이는 화면이 되지 않게.
 //
 // 왜 차트가 아래에 접혀 있나
 // ──────────────────────────
@@ -207,56 +207,6 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
   );
 }
 
-/**
- * 포지션 칸 손잡이.
- *
- * 끌면 칸이 커지고, 누르면 최대/최소를 오간다. 둘 다 두는 이유는 **끌기가
- * 보이지 않는 기능**이기 때문이다 — 손잡이가 있어도 끌 수 있는 줄 모르는
- * 사람이 있고, 그 사람에게는 없는 기능이다.
- *
- * 포인터 이벤트를 쓰고 캡처한다. touchmove만 쓰면 손가락이 칸 밖으로 나가는
- * 순간 이벤트가 끊겨 칸이 끌리다 만 자리에 멈춘다.
- */
-function DockHandle({ onDrag, onToggle }: {
-  onDrag: (dy: number) => void;
-  onToggle: () => void;
-}) {
-  const last = React.useRef<number | null>(null);
-  const moved = React.useRef(0);
-
-  return (
-    <div
-      onPointerDown={e => {
-        last.current = e.clientY;
-        moved.current = 0;
-        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={e => {
-        if (last.current == null) return;
-        const dy = e.clientY - last.current;
-        if (dy === 0) return;
-        last.current = e.clientY;
-        moved.current += Math.abs(dy);
-        onDrag(dy);
-      }}
-      onPointerUp={e => {
-        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-        // 끌지 않고 뗐으면 누른 것으로 본다. 8px는 손 떨림 여유다.
-        if (moved.current < 8) onToggle();
-        last.current = null;
-      }}
-      onPointerCancel={() => { last.current = null; }}
-      style={{
-        flexShrink: 0, height: 18, cursor: 'ns-resize',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        touchAction: 'none',
-      }}
-    >
-      <div style={{ width: 34, height: 4, borderRadius: 2, background: C.hair2 }}/>
-    </div>
-  );
-}
-
 // ── 하단 접이식 차트 ─────────────────────────────────────
 function ChartDrawer({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
   const { symbol } = useTerminal();
@@ -312,15 +262,6 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   // 호가 줄·현재가를 누르면 그 가격이 주문폼에 들어간다. 같은 가격을 두 번
   // 눌러도 반영되도록 누른 횟수를 같이 들고 다닌다 (usePickedPrice 주석).
   const { pick, presetPrice, presetSeq } = usePickedPrice();
-  // 사용자가 손잡이로 정한 포지션 칸 높이. null이면 기본값(통의 32%)을 쓴다.
-  const [dockUser, setDockUser] = useState<number | null>(null);
-  // 주문폼의 **자연 높이**. 스크롤 통 안쪽을 재야 내용 전체 높이가 나온다 —
-  // 바깥(통)을 재면 통에 맞춰 잘린 높이가 나와서 아무 정보가 없다.
-  const [formRef, formH] = useMeasuredHeight<HTMLDivElement>();
-  // 접힌 차트 줄도 자리를 차지한다. 이걸 빼먹으면 폼을 아무리 줄여도
-  // **딱 차트 줄 높이만큼** 계속 모자란다 — 남는 자리를 포지션에 다 줘
-  // 버리고, 밀려나는 것은 flex:1인 주문 칸이기 때문이다.
-  const [chartRef, chartH] = useMeasuredHeight<HTMLDivElement>();
   const [search, setSearch] = useState(false);
   const [info, setInfo] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -353,86 +294,74 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
 
   // ── 세로 ──
   //
-  // 세 칸으로 나눠 고정한다. 페이지 스크롤은 없다.
+  // 첫 화면은 고정, 그 아래는 **그냥 내리면 이어진다.**
   //
-  //   헤더        잰 높이 그대로 (종목이 길면 한 줄 늘어난다)
-  //   주문+호가   남는 자리 전부. 폼이 길면 이 칸 안에서 스크롤한다
-  //   포지션      dockH. **첫 화면 안에 있다.** 손잡이로 키운다
-  //   차트        접혀 있으면 한 줄
+  //   ┌ 헤더        화면에 붙어 있다(sticky)          ┐
+  //   │ 주문+호가   첫 화면의 나머지를 정확히 채운다  │ ← 스크롤 없이 다 보인다
+  //   │ 탭 줄       포지션·데모·미체결…  (sticky)     ┘
+  //   ├ 포지션 카드  ← 여기부터는 화면을 내리면 나온다
+  //   └ 차트        맨 아래
   //
-  // dockH의 기본값은 통 높이의 32%다. 카드 하나(약 150px)와 탭 줄이 들어가는
-  // 최소치를 밑으로 두고, 위로는 주문 버튼이 남을 만큼만 올라간다 —
-  // 포지션을 키우다가 주문을 못 넣게 되면 그건 다른 화면이 된 것이다.
-  // 포지션 칸의 기본 높이는 **주문폼이 다 들어가고 남는 만큼**이다.
+  // 손잡이(드래그)를 없앤 이유
+  // ──────────────────────────
+  // 한동안 포지션 칸을 고정 높이로 두고 손잡이로 끌어 키웠다. 그런데
+  // **끌기는 보이지 않는 기능**이다 — 손잡이가 있어도 끌 수 있는 줄 모르는
+  // 사람에게는 없는 기능이고, 그 사람에게 포지션 칸은 영원히 탭 줄뿐이다.
   //
-  // 처음에는 '통의 32%'로 고정했다. 그런데 앱 안에서는 남는 높이가 상황마다
-  // 다르고(배너·시세띠·하단탭), 32%를 떼고 나면 주문폼이 자기 칸에 안 들어가
-  // **폼 안에서 또 스크롤**이 생겼다. 롱/숏 버튼이 바닥에 고정돼 있으니 그
-  // 버튼이 손절·수량 줄을 덮었고, 화면은 "주문할 것이 두 줄뿐인" 모양이 됐다.
+  // 화면을 내리는 것은 아무도 배울 필요가 없다. 그래서 끌기를 없애고
+  // 페이지 스크롤로 바꿨다.
   //
-  // 그래서 반대로 잡는다: 폼의 자연 높이(formH)를 재고, 남는 것을 포지션에
-  // 준다. 폼이 다 들어가면 스크롤이 아예 없다. 폼이 너무 길어 안 들어가면
-  // 그때만 폼이 스크롤하고, 포지션은 탭 줄만 남는다 — **탭 줄은 항상 보인다.**
-  const avail = Math.max(0, boxH - hdrH);
-  // 손잡이(18) + 탭 줄(34 + 위아래 7). 여유를 더 두면 그만큼이 **주문폼에서**
-  // 빠진다 — dockH가 leftover보다 이 값을 먼저 지키기 때문이다.
-  const dockMin = 66;
-  const dockMax = Math.max(dockMin, avail - 160);
-  const leftover = formH > 0
-    ? avail - formH - chartH
-    : Math.round(avail * 0.32);
-  const dockH = avail === 0 ? 160
-    : Math.min(dockMax, Math.max(dockMin, dockUser ?? leftover));
+  // 예전에 페이지 스크롤을 버렸던 이유는 지금 없다
+  // ──────────────────────────────────────────────
+  // 그때는 포지션 칸의 최소 높이가 '화면 − 헤더'라, 포지션을 보려면 **반드시**
+  // 한 화면을 통째로 끌어내려야 했다. 지금은 주문폼이 첫 화면에 다 들어가므로
+  // 내리는 것은 **더 보려고** 하는 일이지 필수가 아니다. 안 내리면 주문만
+  // 하면 되고, 내리면 포지션이 나온다.
+  //
+  // 첫 화면의 주문 칸 높이 = 통 − 헤더 − TAB_ROW.
+  // 탭 줄만큼 남기는 이유: 그 줄이 안 보이면 아래에 무언가 있다는 사실 자체가
+  // 안 보인다. 스크롤은 배울 필요 없는 동작이지만, **내릴 것이 있다는 신호**는
+  // 화면에 있어야 한다.
+  const TAB_ROW = 76;          // 탭 줄(48) + 그 아래 내용이 살짝 비치는 만큼
+  const firstScreen = Math.max(220, boxH - hdrH - TAB_ROW);
 
   return (
     <div ref={boxRef} style={{
       height: embedded ? '100%' : '100dvh',
       background: C.bg, color: C.text,
-      display: 'flex', flexDirection: 'column',
-      overflow: 'hidden',
+      // 이 통이 스크롤을 갖는다. 안쪽 칸들은 각자 스크롤하지 않는다 —
+      // 두 겹이 되면 손가락이 어디에 닿았는지에 따라 다르게 움직인다.
+      overflowY: 'auto', overscrollBehavior: 'contain',
+      WebkitOverflowScrolling: 'touch' as any,
     }}>
-      <MobileHeader innerRef={hdrRef}
+      {/* 헤더는 붙어 있는다. 내려도 종목·가격·STOP은 보여야 한다. */}
+      <MobileHeader innerRef={hdrRef} sticky
         onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
 
-      {/* 주문 + 호가 — 남는 자리 전부.
-          두 열이 각자 스크롤한다. 주문폼이 호가보다 길어서 한 통에 넣으면
+      {/* 주문 + 호가 — 첫 화면의 나머지를 정확히 채운다.
+          두 열을 한 통에 넣지 않는 이유: 주문폼이 호가보다 길어서 한 통이면
           호가가 폼 길이에 끌려 올라간다 — 호가는 늘 같은 자리에 있어야
-          눈이 찾는다. 롱/숏 버튼은 폼 안에서 바닥에 고정돼 있다. */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+          눈이 찾는다. */}
+      <div style={{ height: firstScreen, display: 'flex', overflow: 'hidden' }}>
         <div style={{
-          width: '56%', flexShrink: 0, minHeight: 0,
+          width: '56%', flexShrink: 0, minHeight: 0, overflow: 'hidden',
           borderRight: `1px solid ${C.hair}`,
-          overflowY: 'auto', overscrollBehavior: 'contain',
-          WebkitOverflowScrolling: 'touch' as any,
         }}>
-          <div ref={formRef}>
-            <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
-          </div>
+          <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
         </div>
-        <div style={{
-          flex: 1, minWidth: 0, minHeight: 0,
-          overflowY: 'auto', overscrollBehavior: 'contain',
-        }}>
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
           <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
         </div>
       </div>
 
-      {/* 포지션 — 첫 화면 안에 있다. 손잡이를 끌면 커진다. */}
-      <div style={{
-        height: dockH, flexShrink: 0, minHeight: 0,
-        borderTop: `1px solid ${C.hair2}`, background: C.panel,
-        display: 'flex', flexDirection: 'column',
-      }}>
-        <DockHandle
-          onDrag={dy => setDockUser(h => Math.min(dockMax, Math.max(dockMin, (h ?? dockH) - dy)))}
-          onToggle={() => setDockUser(h => ((h ?? dockH) > dockMin + 20 ? dockMin : dockMax))}
-        />
-        <div style={{ flex: 1, minHeight: 0 }}>
-          <BottomDock/>
-        </div>
+      {/* 포지션 — 탭 줄은 첫 화면 안에 있고, 카드는 내리면 나온다.
+          `flow`는 이 독이 **자기 스크롤을 갖지 않는다**는 뜻이다. 탭 줄은
+          헤더 밑에 붙어(stickyTop) 카드 사이를 지나가는 동안에도 남는다. */}
+      <div style={{ borderTop: `1px solid ${C.hair2}`, background: C.panel }}>
+        <BottomDock flow stickyTop={hdrH}/>
       </div>
 
-      <ChartDrawer innerRef={chartRef}/>
+      <ChartDrawer/>
 
       <SearchSheet open={search} onClose={() => setSearch(false)}
         current={symbol.id} favorites={favorites}
