@@ -67,6 +67,9 @@ export async function POST(req: NextRequest) {
   // 검사를 물리면 정작 팔아서 현금을 만들려는 주문이 막힌다.
   const spotSide = String(body.side || '').toUpperCase();
   const isSell = spotSide === 'SELL';
+  // 점검을 통과해서 나간 것과 **사용자가 넘겨서 나간 것**은 다르다.
+  let overrideNote: string | null = null;
+  let safetyLogError: string | null = null;
   {
     const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
@@ -139,29 +142,30 @@ export async function POST(req: NextRequest) {
     }
 
     if (!checklist.allowed) {
-      // **막았다는 사실을 남긴다.** 예전에는 409만 돌려주고 끝이라
-      // 어디에도 안 남았다 — 그래서 화면은 설정값만 보여줄 수 있었고,
-      // 설정값만 보이면 사람은 그것이 돌고 있다고 믿는다.
-      // 기록 실패가 주문을 되살리지는 않는다(이미 막혔다). 다만
-      // 조용히 넘기지 않고 응답에 적는다.
-      let logNote: string | null = null;
-      try {
-        const { recordSafetyBlocks } = await import('@/lib/safety/safetyLog');
-        const lg = await recordSafetyBlocks(sb, uid, checklist.results as any, { market: 'SPOT', symbol: String(body.symbol || '') });
-        logNote = lg.error;
-      } catch (e: any) { logNote = String(e?.message || e); }
-      return NextResponse.json({
-        safetyLogError: logNote,
-        ok: false, marketType: 'SPOT',
-        error: 'checklist_blocked',
-        message: checklist.summary,
-        checklist: {
-          allowed: false, market: checklist.market, intent: checklist.intent,
-          passed: checklist.passed, total: checklist.total,
-          unknownCount: checklist.unknownCount,
-          results: checklist.results, blockers: checklist.blockers,
-        },
-      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      // 확인창에서 "네"를 누른 항목을 적용한다. 자세한 규칙은
+      // checkOverride.ts — 손실 한도·연패 잠금은 지목해도 안 넘어간다.
+      const { gateWithOverrides, readOverrides } = await import('@/lib/engine/overrideGate');
+      const gateRes = await gateWithOverrides(
+        sb, uid, checklist as any, readOverrides(body),
+        { market: 'SPOT', symbol: String(body.symbol || '') });
+      if (gateRes.blocked) {
+        return NextResponse.json({
+          safetyLogError: gateRes.logError,
+          ok: false, marketType: 'SPOT',
+          error: 'checklist_blocked',
+          message: checklist.summary,
+          refusedOverrides: gateRes.refused.map(b => b.id),
+          checklist: {
+            allowed: false, market: checklist.market, intent: checklist.intent,
+            passed: checklist.passed, total: checklist.total,
+            unknownCount: checklist.unknownCount,
+            results: checklist.results, blockers: gateRes.remaining,
+          },
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+      overrideNote = `사용자가 점검 ${gateRes.waived.length}개를 확인하고 진행: `
+        + gateRes.waived.map(b => b.label || b.id).join(', ');
+      safetyLogError = gateRes.logError;
     }
   }
 
@@ -192,5 +196,7 @@ export async function POST(req: NextRequest) {
     avgPrice: r.avgPrice,
     error: r.ok ? undefined : (r.code || 'order_failed'),
     message: r.message,
+    checklist: { allowed: true, overridden: overrideNote != null, overrideNote },
+    safetyLogError,
   }, { status, headers: { 'Cache-Control': 'no-store' } });
 }

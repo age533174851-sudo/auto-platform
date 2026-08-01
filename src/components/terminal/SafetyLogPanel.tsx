@@ -28,6 +28,15 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
 
+// 발동 기록의 세 가지 뜻. 'waived'를 '한도 걸림'으로 뭉뚱그리면 **막힌 것과
+// 사용자가 넘긴 것이 같아 보인다** — 뒤쪽은 주문이 실제로 나갔다.
+function statusMark(s: string | null | undefined): { text: string; tone: string } {
+  const v = String(s || '');
+  if (v === 'unknown') return { text: '확인 못 함', tone: C.warn };
+  if (v === 'waived')  return { text: '사용자가 넘김', tone: C.accent };
+  return { text: '한도 걸림', tone: C.down };
+}
+
 function ago(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms)) return '';
   const d = Date.now() - ms;
@@ -121,10 +130,10 @@ export function SafetyLogPanel() {
               </div>
               {i.lastReason && (
                 <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 4, lineHeight: 1.5 }}>
-                  {/* 'fail'과 'unknown'을 다른 색으로. 앞은 한도에 걸린 것이고
-                      뒤는 확인을 못 한 것이라 고치는 방법이 다르다. */}
-                  <span style={{ color: i.lastStatus === 'unknown' ? C.warn : C.down, fontWeight: 700 }}>
-                    {i.lastStatus === 'unknown' ? '확인 못 함' : '한도 걸림'}
+                  {/* 'fail'·'unknown'·'waived'를 다른 색으로. 한도에 걸린 것,
+                      확인을 못 한 것, 사용자가 넘긴 것 — 대응이 전부 다르다. */}
+                  <span style={{ color: statusMark(i.lastStatus).tone, fontWeight: 700 }}>
+                    {statusMark(i.lastStatus).text}
                   </span>
                   {' · '}{i.lastReason}
                 </div>
@@ -157,8 +166,11 @@ export function SafetyLogPanel() {
           {recent.map((r, i) => (
             <div key={i} style={{ padding: '7px 0', borderBottom: `1px solid ${C.hair}` }}>
               <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                <span style={{ color: r.status === 'unknown' ? C.warn : C.down, fontSize: FS.micro, fontWeight: 700 }}>
+                <span style={{ color: statusMark(r.status).tone, fontSize: FS.micro, fontWeight: 700 }}>
                   {r.label || r.kind}
+                </span>
+                <span style={{ color: statusMark(r.status).tone, fontSize: FS.micro, fontWeight: 700 }}>
+                  {statusMark(r.status).text}
                 </span>
                 <span style={{ ...NUM, color: C.faint, fontSize: FS.micro }}>
                   {r.market || ''} {r.symbol || ''}

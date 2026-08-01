@@ -67,6 +67,10 @@ export async function POST(req: NextRequest) {
   let preflightRef: number | null = null;
   let preflightPassed = 0;
   let preflightTotal = 0;
+  // 점검을 통과해서 나간 것과 **사용자가 넘겨서 나간 것**은 다르다.
+  // 응답에 적어야 화면이 "점검 통과"라고 쓰지 않는다.
+  let overrideNote: string | null = null;
+  let safetyLogError: string | null = null;
   {
     const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
@@ -199,28 +203,38 @@ export async function POST(req: NextRequest) {
     }
 
     if (!checklist.allowed) {
+      // 사용자가 확인창에서 "네"를 누른 항목을 여기서 적용한다.
+      // 통짜 우회가 아니라 **항목을 하나하나 지목**한 목록이라, 물어본
+      // 사이에 새로 막힌 항목은 그대로 막힌다. 손실 한도·연패 잠금은
+      // 지목해도 안 넘어간다(checkOverride의 NEVER 목록).
+      //
       // **막았다는 사실을 남긴다.** 예전에는 409만 돌려주고 끝이라
       // 어디에도 안 남았다 — 그래서 화면은 설정값만 보여줄 수 있었고,
-      // 설정값만 보이면 사람은 그것이 돌고 있다고 믿는다.
-      // 기록 실패가 주문을 되살리지는 않는다(이미 막혔다). 다만
-      // 조용히 넘기지 않고 응답에 적는다.
-      let logNote: string | null = null;
-      try {
-        const { recordSafetyBlocks } = await import('@/lib/safety/safetyLog');
-        const lg = await recordSafetyBlocks(sb, uid, checklist.results as any, { market: 'USDM', symbol: String(symbol || '') });
-        logNote = lg.error;
-      } catch (e: any) { logNote = String(e?.message || e); }
-      return NextResponse.json({
-        safetyLogError: logNote,
-        error: 'checklist_blocked',
-        message: checklist.summary,
-        checklist: {
-          allowed: false, market: checklist.market, intent: checklist.intent,
-          passed: checklist.passed, total: checklist.total,
-          unknownCount: checklist.unknownCount,
-          results: checklist.results, blockers: checklist.blockers,
-        },
-      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      // 설정값만 보이면 사람은 그것이 돌고 있다고 믿는다. 넘긴 것도
+      // 같은 표에 'waived'로 남는다.
+      const { gateWithOverrides, readOverrides } = await import('@/lib/engine/overrideGate');
+      const gateRes = await gateWithOverrides(
+        sb, uid, checklist as any, readOverrides(body),
+        { market: 'USDM', symbol: String(symbol || '') });
+      if (gateRes.blocked) {
+        return NextResponse.json({
+          safetyLogError: gateRes.logError,
+          error: 'checklist_blocked',
+          message: checklist.summary,
+          // 지목했는데 못 넘긴 항목. 화면이 "네를 눌렀는데 왜 안 되지"를
+          // 겪지 않게 이유를 같이 돌려준다.
+          refusedOverrides: gateRes.refused.map(b => b.id),
+          checklist: {
+            allowed: false, market: checklist.market, intent: checklist.intent,
+            passed: checklist.passed, total: checklist.total,
+            unknownCount: checklist.unknownCount,
+            results: checklist.results, blockers: gateRes.remaining,
+          },
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+      overrideNote = `사용자가 점검 ${gateRes.waived.length}개를 확인하고 진행: `
+        + gateRes.waived.map(b => b.label || b.id).join(', ');
+      safetyLogError = gateRes.logError;
     }
   }
 
@@ -315,6 +329,11 @@ export async function POST(req: NextRequest) {
     slOrderId: exec.slOrderId,
     duplicate: exec.duplicate,
     message: exec.message,
-    checklist: { allowed: true, passed: preflightPassed, total: preflightTotal },
+    checklist: {
+      allowed: true, passed: preflightPassed, total: preflightTotal,
+      // 넘겨서 나갔으면 그렇게 적는다. '통과'로 적으면 기록이 거짓이 된다.
+      overridden: overrideNote != null, overrideNote,
+    },
+    safetyLogError,
   }, { status, headers: { 'Cache-Control': 'no-store' } });
 }

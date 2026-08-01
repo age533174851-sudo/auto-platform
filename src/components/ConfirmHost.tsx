@@ -15,12 +15,14 @@ export default function ConfirmHost() {
     setReq((cur: any) => { if (cur) cur.resolve(ok); return null; });
   }, []);
 
-  // ESC = 취소, Enter = 확인
+  // ESC = 취소. Enter = 확인 — **단 위험한 것은 빼고.**
+  // 실전 주문과 안전 점검 무시는 Enter로 넘어가면 안 된다. 창이 뜬 줄
+  // 모르고 Enter를 눌러 실제 자금이 나가는 것이 실제로 가능했다.
   useEffect(() => {
     if (!req) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close(false);
-      else if (e.key === 'Enter') close(true);
+      else if (e.key === 'Enter' && !req.danger) close(true);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -47,7 +49,15 @@ export default function ConfirmHost() {
 
         {req.title && <div style={{ color: T.txt, fontWeight: 800, fontSize: 16, textAlign: 'center', marginBottom: 8 }}>{req.title}</div>}
 
-        <div style={{ color: req.title ? T.muted : T.txt, fontSize: 13.5, lineHeight: 1.6, textAlign: 'center', marginBottom: 18, whiteSpace: 'pre-wrap' }}>
+        {/* \uBAA9\uB85D\uC774 \uAE38\uBA74 \uAC00\uC6B4\uB370 \uC815\uB82C\uC740 \uC77D\uAE30 \uC5B4\uB835\uB2E4 \u2014 \uD56D\uBAA9\uC774 \uC5EC\uB7FF\uC774\uBA74 \uC67C\uCABD\uC73C\uB85C.
+            \uADF8\uB9AC\uACE0 \uBC18\uB4DC\uC2DC \uC2A4\uD06C\uB864\uC774 \uB418\uC5B4\uC57C \uD55C\uB2E4. \uC608\uC804\uC5D0\uB294 maxHeight\uAC00 \uC5C6\uC5B4
+            \uD56D\uBAA9\uC774 \uB9CE\uC73C\uBA74 **\uBC84\uD2BC\uC774 \uD654\uBA74 \uBC16\uC73C\uB85C \uBC00\uB824** \uC544\uBB34\uAC83\uB3C4 \uBABB \uB20C\uB800\uB2E4. */}
+        <div style={{
+          color: req.title ? T.muted : T.txt, fontSize: 13.5, lineHeight: 1.6,
+          textAlign: lines.length > 4 ? 'left' : 'center',
+          marginBottom: 18, whiteSpace: 'pre-wrap',
+          maxHeight: '52vh', overflowY: 'auto',
+        }}>
           {lines.map((ln: string, i: number) => <div key={i}>{ln || '\u00A0'}</div>)}
         </div>
 
