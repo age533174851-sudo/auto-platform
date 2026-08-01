@@ -127,7 +127,7 @@ export default function FearDcaPage() {
             <div style={{ color: T.muted, fontSize: 9 }}>DCA는 현물 권장 — 선물은 물타다 청산 위험</div>
           </div>
           <button onClick={() => update({ useFutures: !cfg.useFutures })}
-            style={{ width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer', background: cfg.useFutures ? T.red : T.muted, position: 'relative' }}>
+            className="switch" style={{ width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer', background: cfg.useFutures ? T.red : T.muted, position: 'relative' }}>
             <span style={{ position: 'absolute', top: 3, left: cfg.useFutures ? 21 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left .2s' }} />
           </button>
         </div>

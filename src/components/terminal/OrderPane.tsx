@@ -295,6 +295,61 @@ function Kv({ k, v, warn }: { k: string; v: string; warn?: boolean }) {
   );
 }
 
+/**
+ * 지금 주문이 나갈 계좌 한 줄.
+ *
+ * 왜 필요한가
+ * ───────────
+ * 이 화면에서 되돌릴 수 없는 질문은 둘이다: **진짜 돈인가**, 그리고
+ * **어느 계좌인가.** 앞은 모드 전환줄이 답하는데 뒤는 아무도 답하지 않았다.
+ *
+ * 테스트넷 연결과 실전 연결을 같이 등록해 두는 것이 정상이고(키가 아예
+ * 다르다), 같은 환경에 연결이 둘 이상일 수도 있다. 그때 '테스트넷'이라는
+ * 글자만으로는 **어느 키**로 나가는지 알 수 없다.
+ *
+ * 모의는 거래소를 안 부르므로 계좌가 없다. 그 사실을 그대로 적는다 —
+ * 빈 줄로 두면 '못 읽었다'로 읽힌다.
+ */
+const AccountLine = memo(function AccountLine() {
+  const { connections, tradeMode, modeResolution } = useTerminal();
+
+  const box = (color: string, bg: string, text: string, sub?: string) => (
+    <div style={{
+      display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap',
+      padding: '5px 8px', borderRadius: 7, background: bg,
+      border: `1px solid ${A(color, '40')}`, fontSize: FS.micro, lineHeight: 1.4,
+    }}>
+      <span style={{ color, fontWeight: 800, whiteSpace: 'nowrap' }}>{text}</span>
+      {sub && <span style={{ color: C.dim, minWidth: 0, wordBreak: 'break-all' }}>{sub}</span>}
+    </div>
+  );
+
+  if (tradeMode === 'PAPER') {
+    return box(C.accent, C.accentBg, '모의 계좌', '거래소로 나가지 않습니다');
+  }
+  if (!modeResolution.ok) {
+    // 쓸 연결이 없다. 주문 버튼까지 가서 실패하게 두지 않는다.
+    return box(C.warn, C.warnBg, '계좌 없음', modeResolution.reason);
+  }
+
+  const conn: any = connections.find((c: any) => c.id === modeResolution.connId);
+  if (!conn) {
+    // 판정은 됐는데 목록에서 못 찾았다. **조용히 넘기지 않는다** —
+    // 어느 계좌인지 모르는 채로 주문이 나가는 상태다.
+    return box(C.warn, C.warnBg, '계좌 확인 불가', '연결 정보를 읽지 못했습니다');
+  }
+
+  const live = modeResolution.realMoney;
+  const name = conn.nickname || conn.label || conn.exchange || '연결';
+  const key = conn.apiKeyMasked || conn.api_key_masked || '';
+  return box(
+    live ? C.down : C.up,
+    live ? C.downBg : C.upBg,
+    live ? '실전 계좌' : '테스트넷 계좌',
+    `${name}${key ? ` · ${key}` : ''}`,
+  );
+});
+
 // ══ 주문판 ══════════════════════════════════════════════
 //
 // 좁은 칸(dense)에서는 구성을 바꾼다. 줄이는 것이 아니라 빼는 것이다.
@@ -528,6 +583,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
   return (
     <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', minHeight: '100%' }}>
+      {/* 이 주문이 **어느 계좌로 나가는가.**
+          지금까지 화면에 없던 값이다. 연결을 여러 개 등록해 두면(테스트넷
+          하나 + 실전 하나가 정상이다) 모드만 보고는 어느 키로 나가는지 알
+          방법이 없었다 — 그런데 그게 이 화면에서 되돌릴 수 없는 유일한
+          질문의 절반이다(나머지 절반은 '진짜 돈인가'). 좁아도 지우지 않는다. */}
+      <AccountLine/>
+
       {/* 격리 · 배율 · 청산거리 — **한 줄**.
           예전에는 세 줄이었다(격리/배율 한 줄 + 청산거리 한 줄 + 사이 여백).
           셋 다 '자주 안 바꾸지만 늘 보여야 하는' 값이라 한 줄에 나란히 둔다.

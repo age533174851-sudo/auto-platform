@@ -122,9 +122,13 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
           }}>
             {acct ? `${fmtPrice(acct.available)} USDT` : '확인 불가'}
           </span>
-          <button onClick={() => setOpen(v => !v)} title="충전 · 초기화"
+          {/* `className="switch"`로 전역 `button { min-height: 44px }`에서 뺀다.
+              안 빼면 26×26 버튼이 **26×44 세로 막대**가 된다 — 정사각형으로
+              그려 놓고 화면에서는 길쭉한 네모로 보이는 상태였다. */}
+          <button onClick={() => setOpen(v => !v)} title="충전 · 초기화" className="switch"
             style={{
-              width: 26, height: dense ? 24 : 26, borderRadius: 7, flexShrink: 0, lineHeight: 1,
+              width: dense ? 26 : 28, height: dense ? 26 : 28, borderRadius: 7,
+              flexShrink: 0, lineHeight: 1,
               background: open ? C.accentBg : C.panel,
               color: open ? C.accent : C.dim,
               border: `1px solid ${open ? `${C.accent}55` : C.hair}`,

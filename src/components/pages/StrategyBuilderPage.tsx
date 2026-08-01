@@ -846,7 +846,7 @@ function ManualBuilder({
                   <div style={{ color: T.muted, fontSize: 9, marginTop: 2 }}>시드의 N%만 잃도록 수량·레버리지 자동 역산</div>
                 </div>
                 <button onClick={() => update({ risk: { ...s.risk, useFixedRisk: !s.risk.useFixedRisk } })}
-                  style={{ flexShrink: 0, width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
+                  className="switch" style={{ flexShrink: 0, width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
                     background: s.risk.useFixedRisk ? T.grn : T.muted, position: 'relative', transition: 'background .2s' }}>
                   <span style={{ position: 'absolute', top: 3, left: s.risk.useFixedRisk ? 21 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left .2s' }}/>
                 </button>
@@ -929,7 +929,7 @@ function ManualBuilder({
                   <div style={{ color: T.muted, fontSize: 9, marginTop: 2 }}>CPI·FOMC·NFP 발표 전 30분~후 60분 거래중지</div>
                 </div>
                 <button onClick={() => update({ avoidEconEvents: !s.avoidEconEvents })}
-                  style={{ flexShrink: 0, width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
+                  className="switch" style={{ flexShrink: 0, width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
                     background: s.avoidEconEvents ? T.grn : T.muted, position: 'relative', transition: 'background .2s' }}>
                   <span style={{ position: 'absolute', top: 3, left: s.avoidEconEvents ? 21 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left .2s' }}/>
                 </button>
