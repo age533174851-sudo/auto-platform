@@ -1,6 +1,7 @@
 'use client';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { localizeEventTitle } from '@/lib/calendar/normalize';
 import {
   CalendarDays, Star, Globe2, Info, TriangleAlert, ArrowLeft,
   CheckCheck, XCircle, Filter,
@@ -36,20 +37,16 @@ const ECO_TRANS: Record<string, Record<string, string>> = {
   'Industrial Prod':{ ko:'산업생산',       en:'Industrial Production',      ja:'鉱工業生産',         zh:'工业产出' },
 };
 
+/**
+ * 판정은 lib/calendar/normalize의 순수 함수가 한다.
+ *
+ * 여기 직접 적혀 있던 규칙이 **이미 한국어인 이름을 또 옮겨서**
+ * '소비자물가지수 미국 소비자물가지수 ()'를 만들고 있었다. 화면 파일 안에
+ * 있으면 테스트가 안 붙고, 글자가 이상해도 에러가 안 나서 안 들킨다.
+ */
 function tEco(lang: string, title: string): string {
-  const safeTitle = String(title || '');
   const langKey = lang === 'ko' ? 'ko' : lang === 'ja' ? 'ja' : lang === 'zh' ? 'zh' : 'en';
-  if (!safeTitle) return '';
-  // 더 긴 키를 먼저 매칭 (Core CPI > CPI 등)
-  const keys = Object.keys(ECO_TRANS).sort((a, b) => b.length - a.length);
-  for (const key of keys) {
-    if (safeTitle.includes(key)) {
-      const trans = ECO_TRANS[key][langKey] || ECO_TRANS[key]['en'];
-      const rest = safeTitle.replace(key, '').trim();
-      return rest ? `${trans} ${rest}` : trans;
-    }
-  }
-  return safeTitle;
+  return localizeEventTitle(title, langKey, ECO_TRANS);
 }
 
 // ── 이벤트 short code 추출 (FOMC, CPI 등) ────────────────────
