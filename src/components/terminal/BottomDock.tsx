@@ -24,10 +24,11 @@ import { usePaperAccount } from './PaperWallet';
 import { AllocationPanel } from './AllocationPanel';
 import { SafetyLogPanel } from './SafetyLogPanel';
 import { TrailPanel } from './TrailPanel';
+import { KisConnectPanel } from './KisConnectPanel';
 import { DemoRunner } from './DemoRunner';
 
-type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '증권사' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '증권사', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -272,6 +273,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {/* 트레일링은 **이미 돌고 있는데** 화면이 없었다. 손절이 자기도
             모르게 움직이면, 그 손절에 걸려 나갔을 때 이유를 알 수 없다. */}
         {tab === '손절이동' && <TrailPanel/>}
+        {tab === '증권사' && <KisConnectPanel/>}
         {tab === '데모' && (
           <div style={{ padding: 12 }}>
             <DemoRunner symbol={symbol.id} onChanged={paper.reload}/>
