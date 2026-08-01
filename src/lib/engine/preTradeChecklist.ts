@@ -70,7 +70,9 @@ export type CheckId =
   /** 이 주문이 배정한 가상 서브계좌 한도 안인가 */
   | 'SUBACCOUNT_LIMIT'
   /** 지금 이 시장이 열려 있는가 (주식 전용 — 코인은 24시간이다) */
-  | 'MARKET_HOURS';
+  | 'MARKET_HOURS'
+  /** 거래 비용(호가 차이 + 수수료)이 목표 수익을 잡아먹지 않는가 */
+  | 'SPREAD_COST';
 
 /**
  * 어느 시장의 주문인가.
@@ -83,7 +85,7 @@ export type CheckId =
  * ISOLATED ✓"가 뜨면 그건 확인한 것도 아니고 사실도 아니다. 해당 없는 검사는
  * **목록에서 빼는 것**이 맞다.
  */
-export type MarketKind = 'SPOT' | 'USDM' | 'COINM' | 'STOCK';
+export type MarketKind = 'SPOT' | 'USDM' | 'COINM' | 'STOCK' | 'TOKENIZED';
 
 /**
  * 들어가는 주문인가 나오는 주문인가.
@@ -128,7 +130,7 @@ export interface CheckSpec {
  * 순서는 **바깥 관문부터**다. 모드가 막으면 나머지는 볼 필요가 없고,
  * 시계가 틀리면 거래소 응답 자체를 신뢰할 수 없다.
  */
-const ALL_MARKETS: MarketKind[] = ['SPOT', 'USDM', 'COINM', 'STOCK'];
+const ALL_MARKETS: MarketKind[] = ['SPOT', 'USDM', 'COINM', 'STOCK', 'TOKENIZED'];
 /**
  * 주식만.
  *
@@ -140,6 +142,19 @@ const ALL_MARKETS: MarketKind[] = ['SPOT', 'USDM', 'COINM', 'STOCK'];
  * 대신 주식에는 코인에 없는 관문이 하나 있다: **장이 열려 있는가.**
  */
 const STOCK_ONLY: MarketKind[] = ['STOCK'];
+/**
+ * 얇을 수 있는 시장.
+ *
+ * 토큰화 주식은 **24시간 거래되지만 거래대금이 실제 종목의 수만 분의
+ * 1**이라, 장 시간 대신 호가 차이가 관문이 된다. 실제 주식도 소형주나
+ * 거래 적은 ETF는 벌어지므로 같이 넣는다 — 대형주에서는 늘 통과하니
+ * 해롭지 않다.
+ *
+ * 코인 주요 종목(BTC·ETH)은 스프레드가 0.01% 수준이라 뺐다. 넣으려면
+ * 그 라우트들이 호가를 읽어 넘겨야 하는데, **배선하지 않은 검사를
+ * 목록에 두면 모든 주문이 '확인 불가'로 막힌다.** 배선한 곳에만 건다.
+ */
+const THIN_MARKETS: MarketKind[] = ['STOCK', 'TOKENIZED'];
 /** 파생 시장. 마진·청산·배율이 존재하는 곳 */
 const DERIV: MarketKind[] = ['USDM', 'COINM'];
 const BOTH: OrderIntent[] = ['ENTRY', 'EXIT'];
@@ -206,6 +221,23 @@ export const CHECK_SPECS: CheckSpec[] = [
   // 달리 여기서는 '나가는 길을 막는다'가 문제가 아니다 — 애초에 시장이
   // 닫혀 있어서 나갈 수가 없고, 그 사실을 알려 주는 쪽이 낫다.
   { id: 'MARKET_HOURS', label: '장이 열려 있음', markets: STOCK_ONLY, intents: BOTH,
+    blocking: true, requiredToKnow: true },
+
+  // **거래 비용이 목표를 잡아먹지 않는가.**
+  //
+  // 지금까지 이 앱이 다룬 것은 BTC·ETH 같은 두꺼운 시장이었다. 거기서는
+  // 스프레드가 0.01%라 없는 셈 쳐도 됐고, 그래서 이 검사가 없었다.
+  //
+  // 토큰화 주식(xStocks 같은 것)은 거래대금이 실제 종목의 수만 분의
+  // 1이라 호가가 0.5~2%씩 벌어진다. 단타 목표가 1%인데 왕복 비용이 2%면
+  // **이기는 매매를 해도 손실이다.** 그리고 그 비용은 체결가에 녹아 있어서
+  // 어느 화면에도 안 나타난다 — 수익률이 이상하게 낮은데 이유를 못 찾는다.
+  //
+  // 진입에만 건다. 나가는 길에 "비용이 크다"고 막으면 얇은 시장에 갇힌다.
+  //
+  // requiredToKnow가 true인 이유: 얇은 시장에서 스프레드를 **모르는 채로**
+  // 시장가를 내는 것이 정확히 막으려는 상황이다.
+  { id: 'SPREAD_COST', label: '거래 비용이 목표보다 작음', markets: THIN_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 오늘 얼마를 잃었는가. **진입에만** 건다 —
@@ -471,6 +503,23 @@ export interface ChecklistInput {
     /** 휴장일 목록을 들고 있었는가 */
     holidaysKnown?: boolean;
   } | null;
+  /**
+   * 거래 비용 판정.
+   *
+   * `checkSpread()`의 결과를 그대로 넣는다. 여기서 다시 계산하지 않는
+   * 이유는 늘 같다 — 규칙이 두 벌이 되면 화면이 말하는 것과 실제로
+   * 막는 것이 갈린다.
+   *
+   * 얇을 수 있는 시장(주식·토큰화 주식)에만 건다. 코인 주요 종목은
+   * 스프레드가 0.01% 수준이고, 무엇보다 그 라우트들이 아직 호가를
+   * 넘기지 않는다 — 배선하지 않은 검사를 목록에 두면 모든 주문이
+   * '확인 불가'로 막힌다.
+   */
+  spread?: {
+    canOrder: boolean;
+    reason: string;
+    status?: string;
+  } | null;
 }
 
 export interface ChecklistOptions {
@@ -714,6 +763,18 @@ export function runChecklist(
       input.todayEntry.detail || '오늘 이미 진입했습니다 — 이 전략은 하루 최대 1회입니다'));
   } else {
     results.push(resultFor('TODAY_ENTRY', 'pass', '오늘 진입 없음'));
+  }
+
+  // 거래 비용.
+  //
+  // **못 받았으면 통과가 아니다.** 호가를 못 읽은 채로 얇은 시장에
+  // 시장가를 내는 것이 이 검사가 막으려는 바로 그 상황이다.
+  if (!input.spread) {
+    results.push(resultFor('SPREAD_COST', 'unknown', '호가를 읽지 못해 거래 비용을 계산하지 못했습니다'));
+  } else if (!input.spread.canOrder) {
+    results.push(resultFor('SPREAD_COST', 'fail', input.spread.reason));
+  } else {
+    results.push(resultFor('SPREAD_COST', 'pass', input.spread.reason));
   }
 
   // 장 시간 (주식 전용).

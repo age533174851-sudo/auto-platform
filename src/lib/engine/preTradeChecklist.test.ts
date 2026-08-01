@@ -777,4 +777,41 @@ export function runPreTradeChecklistTests() {
       { market: 'STOCK', intent: 'ENTRY' });
     assert(v.results.some(r => r.id === 'MARGIN_SUFFICIENT'), '증거금(현금) 검사가 없다');
   });
+
+  test('토큰화 주식에는 장 시간이 없고 거래 비용이 있다', () => {
+    // 24시간 거래되지만 거래대금이 실제 종목의 수만 분의 1이다.
+    // 장 시간 대신 호가 차이가 관문이 된다.
+    const v = runChecklist({ spread: { canOrder: true, reason: '왕복 0.2%' } },
+      { market: 'TOKENIZED', intent: 'ENTRY' });
+    assert(!v.results.some(r => r.id === 'MARKET_HOURS'), '토큰화는 24시간이다');
+    assert(v.results.some(r => r.id === 'SPREAD_COST'), '거래 비용 검사가 없다');
+  });
+
+  test('거래 비용이 목표를 넘으면 막는다', () => {
+    const v = runChecklist({ spread: { canOrder: false, reason: '목표 1%인데 왕복 2.2% — 이겨도 못 법니다' } },
+      { market: 'TOKENIZED', intent: 'ENTRY' });
+    const c = v.results.find(r => r.id === 'SPREAD_COST')!;
+    eq(c.status, 'fail');
+    eq(c.blocks, true);
+  });
+
+  test('호가를 안 넘기면 막는다 — 얇은 시장에 모르고 시장가를 내지 않는다', () => {
+    const v = runChecklist({}, { market: 'TOKENIZED', intent: 'ENTRY' });
+    const c = v.results.find(r => r.id === 'SPREAD_COST')!;
+    eq(c.status, 'unknown');
+    eq(c.blocks, true);
+  });
+
+  test('나가는 길은 비용으로 막지 않는다 — 얇은 시장에 갇힌다', () => {
+    const v = runChecklist({}, { market: 'TOKENIZED', intent: 'EXIT' });
+    assert(!v.results.some(r => r.id === 'SPREAD_COST'), '청산에는 없어야 한다');
+  });
+
+  test('코인 주요 시장에는 거래 비용 검사가 없다', () => {
+    // 배선하지 않은 검사를 목록에 두면 모든 주문이 '확인 불가'로 막힌다.
+    for (const m of ['USDM', 'COINM', 'SPOT'] as const) {
+      assert(!runChecklist(goodInput(), { market: m, intent: 'ENTRY' })
+        .results.some(r => r.id === 'SPREAD_COST'), `${m}에 있으면 안 된다`);
+    }
+  });
 }
