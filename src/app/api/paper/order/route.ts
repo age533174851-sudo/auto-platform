@@ -35,23 +35,47 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'missing_params' }, { status: 400 });
   }
 
+  // 어느 시장인가. 모르는 값은 **거부한다** — USDM으로 흘려보내면 현물
+  // 주문이 선물 규칙(배율·청산·손절 필수)으로 계산된다.
+  const market = String(body?.market || 'USDM').toUpperCase();
+  if (market !== 'SPOT' && market !== 'USDM') {
+    return NextResponse.json({
+      ok: false, error: 'unsupported_market',
+      message: market === 'COINM'
+        ? '모의 COIN-M은 아직 지원하지 않습니다'
+        : `모르는 시장입니다 (${market})`,
+    }, { status: 400 });
+  }
+  const spot = market === 'SPOT';
+
   // 체결 기준가는 **서버가 받는다.** 화면이 보낸 가격을 그대로 쓰면
   // 유리한 값을 넣어 장부를 만들 수 있고, 그러면 성적표가 의미를 잃는다.
+  //
+  // 현물은 **현물 시세**를 쓴다. 선물 마크가로 현물을 채우면 펀딩·베이시스
+  // 만큼 다른 가격에 산 장부가 되고, 그 차이가 성적표에 그대로 남는다.
   let markPrice: number | null = null;
   try {
-    const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
-    const px = await getPremiumIndex(symbol, false);
-    const v = Number(px?.markPrice);
-    markPrice = Number.isFinite(v) && v > 0 ? v : null;
+    if (spot) {
+      const { fetchSpotPriceMap } = await import('@/lib/markets/pricing');
+      const map = await fetchSpotPriceMap();
+      const v = Number(map.get(symbol));
+      markPrice = Number.isFinite(v) && v > 0 ? v : null;
+    } else {
+      const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
+      const px = await getPremiumIndex(symbol, false);
+      const v = Number(px?.markPrice);
+      markPrice = Number.isFinite(v) && v > 0 ? v : null;
+    }
   } catch { markPrice = null; }
 
-  // 손절: 가격으로 왔으면 그대로, %면 마크가에서 만든다
+  // 손절: 가격으로 왔으면 그대로, %면 마크가에서 만든다.
+  // 현물에는 손절이 없다 — 실전 현물 라우트도 stopLossPct를 거부한다.
   const slPct = Number(body?.stopLossPct);
-  const stopPrice = body?.stopPrice != null
+  const stopPrice = spot ? null : (body?.stopPrice != null
     ? Number(body.stopPrice)
     : (markPrice != null && Number.isFinite(slPct) && slPct > 0
         ? (side === 'LONG' ? markPrice * (1 - slPct / 100) : markPrice * (1 + slPct / 100))
-        : null);
+        : null));
 
   // 가용 잔고 = 잔고 − 열린 포지션이 물고 있는 증거금.
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있다.
@@ -95,8 +119,9 @@ export async function POST(req: NextRequest) {
 
   const built = buildPaperPlan({
     symbol, side: side as 'LONG' | 'SHORT',
+    market: market as 'SPOT' | 'USDM',
     quantity: Number(body?.quantity),
-    leverage: Number(body?.leverage ?? 1),
+    leverage: spot ? 1 : Number(body?.leverage ?? 1),
     markPrice, stopPrice,
     takeProfit: body?.takeProfit != null ? Number(body.takeProfit) : null,
     availableBalance: available,
@@ -115,7 +140,7 @@ export async function POST(req: NextRequest) {
   // 같은 신호를 두 번 넣지 않게 한다. paper_positions에 signal_id UNIQUE가
   // 걸려 있어(010 마이그레이션) 같은 분(minute)의 같은 주문은 한 번만 들어간다.
   const minute = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
-  const signalId = `paper-${uid.slice(0, 8)}-${minute}-${symbol}-${side}-${built.plan.quantity}`;
+  const signalId = `paper-${uid.slice(0, 8)}-${minute}-${market}-${symbol}-${side}-${built.plan.quantity}`;
 
   const { openPaperPosition } = await import('@/lib/engine/paperStore');
   const r = await openPaperPosition(sb, {
@@ -123,6 +148,7 @@ export async function POST(req: NextRequest) {
     signalId,
     strategyId: String(body?.strategyId || 'manual'),
     plan: built.plan,
+    market,
     entryPrice: markPrice as number,
     stopLoss: stopPrice ?? undefined,
     takeProfit: body?.takeProfit != null ? Number(body.takeProfit) : undefined,

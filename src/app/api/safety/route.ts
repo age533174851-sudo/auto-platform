@@ -4,7 +4,7 @@ import { timingSafeEqual } from 'crypto';
 import {
   validatePreOrder, logAudit, getAuditLog,
   activateKillSwitch, deactivateKillSwitch, getKillSwitchState,
-  checkApiKeyHealth, recordLoss, recordTradeResult,
+  recordLoss, recordTradeResult,
   getDailyLoss, getConsecutiveLoss, setCooldown,
   sendNotificationWithFallback,
 } from '@/lib/safety';
@@ -59,22 +59,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ events, count: events.length });
   }
 
-  // ── API key health ────────────────────────────────────────
-  if (action === 'health') {
-    const exchange   = searchParams.get('exchange') || '';
-    const apiKey     = searchParams.get('apiKey')   || '';
-    const secret     = searchParams.get('secret')   || '';
-    const passphrase = searchParams.get('pass')     || undefined;
-    if (!exchange || !apiKey || !secret) {
-      return NextResponse.json({ error: 'exchange, apiKey, secret required' }, { status: 400 });
-    }
-    // 어느 환경의 키인지 받는다. 안 주면 테스트넷으로 본다 —
-    // 이 프로젝트 공통 규칙이고, 모르는 채로 실전 호스트를 두드리지 않는다.
-    const testnet = (searchParams.get('testnet') || '') !== 'false';
-    const result = await checkApiKeyHealth(exchange, apiKey, secret, testnet, passphrase);
-    logAudit({ userId: uid, action: 'API_KEY_HEALTH_CHECK', resource: exchange, detail: { healthy: result.healthy, latencyMs: result.latencyMs }, result: result.healthy ? 'success' : 'error' });
-    return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } });
-  }
+  // ── API key health — **지웠다** ─────────────────────────
+  //
+  // `?action=health&apiKey=...&secret=...` 이었다. API 시크릿을 URL 쿼리로
+  // 받는다는 뜻이고, 쿼리 문자열은 액세스 로그·프록시 로그·브라우저 기록에
+  // 평문으로 남는다. 키가 새는 경로 중 가장 조용한 종류다.
+  //
+  // POST로 고치는 대신 지운다: 부르는 화면이 하나도 없었다. 안 쓰는 기능을
+  // 안전하게 만드는 것보다 없애는 쪽이 확실하다. 연결 상태는
+  // `/api/exchange` action=test가 이미 한다 — 거기서는 시크릿이 서버에
+  // 저장돼 있어 네트워크로 오가지 않는다.
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
 }

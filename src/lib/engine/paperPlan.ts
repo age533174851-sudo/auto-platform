@@ -46,6 +46,16 @@ export function linearLiquidationPrice(
 export interface PaperOrderInput {
   symbol: string;
   side: 'LONG' | 'SHORT';
+  /**
+   * 어느 시장인가. 안 주면 'USDM'(지금까지의 동작).
+   *
+   * 현물은 **선물의 특수한 경우가 아니다.** 배율이 없고, 청산이 없고,
+   * 손절이 없다. 실전 현물 라우트도 `stopLossPct`·`leverage`를 아예
+   * 거부한다(`/api/binance/spot/order`). 모의만 손절을 요구하면 규칙이
+   * 실전과 달라지고, 그러면 그 연습은 연습이 아니다 — 이 파일이 지키려는
+   * 것이 정확히 그 대칭이다.
+   */
+  market?: 'SPOT' | 'USDM' | 'COINM';
   quantity: number;
   leverage: number;
   /** 체결 기준가. 모르면 주문하지 않는다 */
@@ -90,8 +100,21 @@ export function buildPaperPlan(i: PaperOrderInput): PaperPlanResult {
     return no(`수량이 유효하지 않습니다 (${i.quantity})`);
   }
 
-  const lev = Number(i.leverage);
-  if (!Number.isFinite(lev) || lev < 1 || lev > PAPER_MAX_LEVERAGE) {
+  const spot = i.market === 'SPOT';
+
+  // 현물은 배율이 없다. 1이 아닌 값이 오면 **조용히 1로 바꾸지 않는다** —
+  // 화면이 3배를 보여주고 있는데 장부에 1배로 적히면 둘이 갈린다.
+  const lev = spot ? 1 : Number(i.leverage);
+  if (spot) {
+    if (i.leverage != null && Number(i.leverage) !== 1) {
+      return no(`현물에는 배율이 없습니다 (받은 값 ${i.leverage})`);
+    }
+    // 현물 매도는 **가진 것을 파는 것**이라 새 포지션이 아니다.
+    // 여기서 열 수 있는 것은 매수뿐이고, 매도는 청산 경로로 간다.
+    if (i.side !== 'LONG') {
+      return no('현물은 숏으로 열 수 없습니다. 매도는 보유분 청산으로 처리하세요.');
+    }
+  } else if (!Number.isFinite(lev) || lev < 1 || lev > PAPER_MAX_LEVERAGE) {
     return no(`배율은 1~${PAPER_MAX_LEVERAGE} 사이여야 합니다 (받은 값 ${i.leverage})`);
   }
 
@@ -99,29 +122,37 @@ export function buildPaperPlan(i: PaperOrderInput): PaperPlanResult {
     return no(`방향이 유효하지 않습니다 (${i.side})`);
   }
 
-  // 손절은 모의에서도 필수다. 위 주석 참조 — 규칙이 다르면 연습이 아니다.
+  // 손절: 선물은 필수, **현물은 없는 개념이다.**
+  //
+  // 실전 현물 라우트가 stopLossPct를 거부한다. 모의만 요구하면 규칙이
+  // 실전과 달라진다 — 그러면 연습이 아니다.
   const sp = Number(i.stopPrice);
-  if (!Number.isFinite(sp) || sp <= 0) {
+  const hasStop = Number.isFinite(sp) && sp > 0;
+  if (!spot && !hasStop) {
     return no('손절가가 없습니다. 모의에서도 손절 없는 진입은 받지 않습니다 — '
             + '규칙이 실전과 다르면 연습이 되지 않습니다.');
   }
-  const wrongLong = i.side === 'LONG' && sp >= price;
-  const wrongShort = i.side === 'SHORT' && sp <= price;
-  if (wrongLong || wrongShort) {
-    return no(`${i.side} 기준가 ${price} / 손절 ${sp} — 손절이 `
-            + `${i.side === 'LONG' ? '위' : '아래'}에 있어 즉시 발동합니다`);
+  if (hasStop) {
+    const wrongLong = i.side === 'LONG' && sp >= price;
+    const wrongShort = i.side === 'SHORT' && sp <= price;
+    if (wrongLong || wrongShort) {
+      return no(`${i.side} 기준가 ${price} / 손절 ${sp} — 손절이 `
+              + `${i.side === 'LONG' ? '위' : '아래'}에 있어 즉시 발동합니다`);
+    }
   }
 
   const notional = qty * price;
   const requiredMargin = notional / lev;
   const feeRate = (Number.isFinite(Number(i.feeRatePct)) ? Number(i.feeRatePct) : 0.05) / 100;
   const entryFee = notional * feeRate;
-  const liq = linearLiquidationPrice(price, lev, i.side);
+  // 현물에는 청산이 없다. 0이 아니라 **null**이다 — 0으로 두면 화면이
+  // "청산가 0"을 그리고, 그건 "곧 청산된다"로 읽힌다.
+  const liq = spot ? null : linearLiquidationPrice(price, lev, i.side);
 
   const shaped = { notional, requiredMargin, entryFee, liquidationPrice: liq };
 
   // 손절이 청산 너머면 손절은 작동할 기회가 없다. 배율이 높을수록 자주 나온다.
-  if (liq != null) {
+  if (liq != null && hasStop) {
     const beyond = i.side === 'LONG' ? sp <= liq : sp >= liq;
     if (beyond) {
       return no(
@@ -147,17 +178,22 @@ export function buildPaperPlan(i: PaperOrderInput): PaperPlanResult {
     approved: true,
     symbol: i.symbol,
     side: i.side,
-    riskAmount: Math.abs(price - sp) * qty,
-    riskAmountWithCosts: Math.abs(price - sp) * qty + entryFee,
-    stopDistancePct: Math.abs(price - sp) / price * 100,
-    effectiveStopPct: Math.abs(price - sp) / price * 100,
+    // 손절이 없으면 '한 거래에 거는 위험'을 낼 수 없다. 0으로 적으면
+    // "위험 0"이 되어 위험 없는 거래처럼 보인다 — 현물은 산 금액 전부가
+    // 위험이므로 명목가를 그대로 쓴다.
+    riskAmount: hasStop ? Math.abs(price - sp) * qty : notional,
+    riskAmountWithCosts: (hasStop ? Math.abs(price - sp) * qty : notional) + entryFee,
+    stopDistancePct: hasStop ? Math.abs(price - sp) / price * 100 : 100,
+    effectiveStopPct: hasStop ? Math.abs(price - sp) / price * 100 : 100,
     positionSize: notional,
     quantity: qty,
     requiredMargin,
     leverage: lev,
     liquidationPrice: liq ?? 0,
     liquidationDistancePct: liq != null ? Math.abs(price - liq) / price * 100 : 0,
-    notes: ['모의투자 — 거래소로 주문이 나가지 않습니다'],
+    notes: spot
+      ? ['모의투자 — 거래소로 주문이 나가지 않습니다', '현물 — 배율·청산 없음']
+      : ['모의투자 — 거래소로 주문이 나가지 않습니다'],
   };
 
   return { ok: true, reason: '', ...shaped, plan };

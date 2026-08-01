@@ -104,4 +104,70 @@ export function runPaperPlanTests() {
     eq(r.notional, 600);
     assert(r.liquidationPrice != null, '청산가가 비어 있다');
   });
+
+  // ── 현물 ────────────────────────────────────────────────
+  //
+  // 현물은 선물의 특수한 경우가 아니다. 배율이 없고, 청산이 없고, 손절이
+  // 없다. 실전 현물 라우트가 stopLossPct·leverage를 아예 거부하므로
+  // 모의만 손절을 요구하면 규칙이 실전과 달라진다.
+  console.log('[모의 현물 — 규칙이 실전과 같아야 한다]');
+
+  const spotBase = {
+    symbol: 'BTCUSDT', side: 'LONG' as const, quantity: 0.01, leverage: 1,
+    markPrice: 60000, availableBalance: 1000, market: 'SPOT' as const,
+  };
+
+  test('현물은 손절 없이도 통과한다 — 실전 현물이 손절을 안 받기 때문이다', () => {
+    const r = buildPaperPlan(spotBase);
+    eq(r.ok, true, r.reason);
+  });
+
+  test('선물은 손절이 없으면 여전히 거부한다', () => {
+    const r = buildPaperPlan({ ...base, stopPrice: null });
+    eq(r.ok, false);
+    assert(r.reason.includes('손절'), r.reason);
+  });
+
+  test('현물에는 청산가가 없다 — 0이 아니라 null이다', () => {
+    // 0으로 두면 화면이 "청산가 0"을 그리고, 그건 "곧 청산된다"로 읽힌다.
+    const r = buildPaperPlan(spotBase);
+    eq(r.liquidationPrice, null);
+    eq(r.plan?.liquidationPrice, 0);   // PositionPlan은 number라 0으로 내려간다
+  });
+
+  test('현물 증거금은 산 금액 전부다 — 배율로 나누지 않는다', () => {
+    const r = buildPaperPlan(spotBase);
+    eq(r.notional, 600);
+    eq(r.requiredMargin, 600);
+  });
+
+  test('현물에 배율을 주면 조용히 1로 바꾸지 않고 거부한다', () => {
+    // 화면이 3배를 보여주는데 장부에 1배로 적히면 둘이 갈린다.
+    const r = buildPaperPlan({ ...spotBase, leverage: 3 });
+    eq(r.ok, false);
+    assert(r.reason.includes('배율'), r.reason);
+  });
+
+  test('현물은 숏으로 못 연다 — 매도는 보유분 청산이다', () => {
+    const r = buildPaperPlan({ ...spotBase, side: 'SHORT' as any });
+    eq(r.ok, false);
+    assert(r.reason.includes('숏'), r.reason);
+  });
+
+  test('현물도 잔고를 넘으면 거부한다', () => {
+    const r = buildPaperPlan({ ...spotBase, availableBalance: 100 });
+    eq(r.ok, false);
+    assert(r.reason.includes('잔고'), r.reason);
+  });
+
+  test('손절 없는 현물의 위험은 0이 아니라 산 금액 전부다', () => {
+    // 0으로 적으면 "위험 0"이 되어 위험 없는 거래처럼 보인다.
+    const r = buildPaperPlan(spotBase);
+    eq(r.plan?.riskAmount, 600);
+  });
+
+  test('현물에 손절을 붙이면 방향은 여전히 검사한다', () => {
+    const r = buildPaperPlan({ ...spotBase, stopPrice: 61000 });
+    eq(r.ok, false, '롱인데 손절이 위에 있으면 즉시 발동한다');
+  });
 }

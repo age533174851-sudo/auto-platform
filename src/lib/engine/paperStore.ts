@@ -21,6 +21,8 @@ export async function openPaperPosition(
     userId: string; signalId: string; strategyId: string; bucket?: string;
     plan: PositionPlan; entryPrice: number; stopLoss?: number; takeProfit?: number;
     feeRatePct?: number; slippagePct?: number;
+    /** 'SPOT' | 'USDM' | 'COINM'. 안 주면 지금까지의 동작대로 USDM */
+    market?: string;
   }
 ): Promise<{ ok: boolean; positionId?: string; fill?: PaperFill; error?: string; duplicate?: boolean }> {
   const fill = simulateFill(args.plan, args.entryPrice, {
@@ -34,6 +36,9 @@ export async function openPaperPosition(
     strategy_id: args.strategyId,
     bucket: args.bucket || null,
     symbol: args.plan.symbol,
+    // 현물과 선물은 화면에 보여야 하는 것이 다르다(배율·청산가). 섞어 두면
+    // 현물에도 '1배 · 청산가 —'가 뜨고, 사용자는 그걸 '못 읽었다'로 읽는다.
+    market: args.market || 'USDM',
     side: fill.side,
     status: 'open',
     entry_price: fill.entryPrice,

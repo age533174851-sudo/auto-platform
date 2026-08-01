@@ -21,6 +21,7 @@ import React, { memo, useEffect, useState } from 'react';
 import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
 import { AccountLine } from './AccountLine';
+import { usePaperAccount } from './PaperWallet';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { capability, checkIntent } from '@/lib/markets/marketType';
 
@@ -46,8 +47,7 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
   // 선물 폼은 이미 modeResolution.connId를 쓰고 있었다. 같은 화면에서 두
   // 규칙이 도는 것이 문제였다.
   const connId = tradeMode === 'PAPER' ? '' : (modeResolution.connId || '');
-  // 모의는 이 폼이 아직 못 한다. 조용히 실계좌로 보내지 않는다.
-  const paperUnsupported = tradeMode === 'PAPER';
+  const paper = tradeMode === 'PAPER';
 
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
@@ -72,8 +72,20 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
   // 계산해야 하는데, 그 계산 결과가 보유량을 넘으면 거부된다.
   useEffect(() => { if (side === 'SELL') setUnit('BASE'); }, [side]);
 
+  // 모의 잔고. 모의일 때는 거래소 지갑이 아니라 가상 계좌를 본다 —
+  // 안 그러면 % 버튼이 '잔고를 받지 못해'로 계속 비활성이다.
+  const paperAcct = usePaperAccount(paper);
+
   // 현물 지갑 — 선물 계좌와 다른 엔드포인트다
   useEffect(() => {
+    if (paper) {
+      // 조회 실패를 0으로 그리지 않는다. 0은 '돈이 없다'이고 실패는
+      // '모른다'인데, 화면에서는 둘이 똑같이 보인다.
+      const b = Number(paperAcct.acct?.available ?? paperAcct.acct?.balance);
+      setUsdt(Number.isFinite(b) ? b : null);
+      setHeld(null);
+      return;
+    }
     if (!auth || !connId) { setUsdt(null); setHeld(null); return; }
     let alive = true;
     const load = async () => {
@@ -97,7 +109,7 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
     load();
     const t = setInterval(load, 20_000);
     return () => { alive = false; clearInterval(t); };
-  }, [auth, connId, symbol.id]);
+  }, [auth, connId, symbol.id, paper, paperAcct.acct]);
 
   const px = Number(price) || mid || 0;
   const amt = Number(amount) || 0;
@@ -128,12 +140,17 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
   const submit = async () => {
     setMsg(null);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
-    if (paperUnsupported) {
-      setMsg({ ok: false, text: '모의 모드에서는 현물 주문을 아직 지원하지 않습니다 — 테스트넷/실전으로 바꾸거나 USDT-M을 쓰세요' });
+    // 모의는 거래소를 안 부른다. 연결도 필요 없다.
+    if (!paper) {
+      if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason || '이 모드에서 쓸 계좌가 없습니다' }); return; }
+      if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
+    }
+    if (paper && side === 'SELL') {
+      // 모의 현물 매도는 **보유분 청산**이다. 새 포지션이 아니다.
+      // 여기서 매도를 '숏 열기'로 만들면 실전 현물에 없는 동작을 연습하게 된다.
+      setMsg({ ok: false, text: '모의 현물 매도는 포지션 탭에서 청산으로 처리하세요 — 현물은 가진 것만 팝니다' });
       return;
     }
-    if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason || '이 모드에서 쓸 계좌가 없습니다' }); return; }
-    if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
     if (amt <= 0) { setMsg({ ok: false, text: side === 'BUY' && unit === 'QUOTE' ? '금액을 입력하세요' : '수량을 입력하세요' }); return; }
 
     // 보내기 전에 같은 규칙으로 한 번 더 본다. 서버도 검사하지만,
@@ -147,7 +164,21 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
     setBusy(true);
     try {
       const byQuote = side === 'BUY' && orderType === 'MARKET' && unit === 'QUOTE';
-      const r = await fetch(cap.orderEndpoint, {
+      // 모의는 다른 주소로 간다. 같은 주소에 플래그만 얹으면 언젠가 그
+      // 플래그가 빠진 채 실계좌로 나간다.
+      const r = paper
+        ? await fetch('/api/paper/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: auth },
+            body: JSON.stringify({
+              // 모의 장부는 수량으로만 센다. 금액으로 입력했으면 여기서
+              // 수량으로 바꾼다 — 서버가 자기 시세로 다시 나누면 화면에
+              // 보여준 수량과 다른 수량이 장부에 남는다.
+              market: 'SPOT', symbol: symbol.id, side: 'LONG',
+              quantity: qtyToSend, leverage: 1,
+            }),
+          })
+        : await fetch(cap.orderEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
@@ -182,12 +213,12 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
       {/* 어느 계좌로 나가는가. 선물 폼과 **같은 줄**을 쓴다 —
           여기만 없으면 현물 탭에서는 계좌를 확인할 수도 바꿀 수도 없다. */}
       <AccountLine/>
-      {paperUnsupported && (
+      {paper && (
         <div style={{
-          padding: '6px 8px', borderRadius: 7, background: C.warnBg,
-          color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
+          padding: '6px 8px', borderRadius: 7, background: C.accentBg,
+          color: C.accent, fontSize: FS.micro, lineHeight: 1.5,
         }}>
-          모의 모드에서는 현물 주문을 아직 지원하지 않습니다. 이 상태로는 주문이 나가지 않습니다.
+          모의 현물 — 가상 잔고로 삽니다. 매도는 포지션 탭에서 청산으로 처리합니다.
         </div>
       )}
 
