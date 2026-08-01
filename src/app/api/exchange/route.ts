@@ -40,7 +40,26 @@ function safeConn(row: any) {
     lastTestResult:     row.test_status ?? null,
     autoTradingEnabled: !!row.auto_trading_enabled,
     isPaper:            row.is_paper !== false,    // 기본 true
-    isTestnet:          !!row.is_testnet,          // 테스트넷 여부
+
+    // **이 프로젝트 전체의 규칙: `is_testnet === false`일 때만 실전이다.**
+    // 모르는 값을 실전으로 읽으면 설정이 덜 된 계정이 곧바로 실계좌가 된다.
+    isTestnet:          row.is_testnet !== false,
+
+    // 스네이크 케이스 그대로도 내보낸다.
+    //
+    // 이게 빠져 있어서 화면의 모드 분류가 통째로 죽어 있었다:
+    // `lib/markets/tradeMode.ts`의 isLiveConnection·connectionsFor는
+    // `is_testnet`·`has_withdrawal`을 보는데 응답에 그 이름이 없었다.
+    // 결과가 조용해서 더 나빴다 —
+    //   · 모든 연결이 '테스트넷'으로 분류돼 **실전 탭에는 언제나
+    //     "실전 연결이 없습니다"**가 떴다 (실전 매매가 아예 막혀 있었다)
+    //   · 반대로 **실전 키가 테스트넷 탭에서 선택 가능**했다. 화면에는
+    //     '테스트넷 계좌'라고 적힌 채로 주문은 실계좌로 나간다
+    //   · 출금 권한 키를 목록에서 빼는 필터(`!c.has_withdrawal`)도
+    //     아무것도 거르지 않고 있었다
+    is_testnet:         row.is_testnet !== false,
+    has_withdrawal:     !!row.has_withdrawal,
+
     createdAt:          row.created_at ?? null,
   };
 }
@@ -408,7 +427,10 @@ export async function GET(req: NextRequest) {
     if (sb) {
       const { data, error } = await sb
         .from('exchange_connections')
-        .select('id, exchange_id, label, api_key_masked, has_withdrawal, perm_read, perm_trading, is_active, auto_trading_enabled, is_paper, last_tested_at, test_status, api_passphrase_enc, created_at')
+        // is_testnet이 빠져 있었다 — 그래서 위 safeConn이 무엇을 어떻게
+        // 매핑하든 결과가 늘 '테스트넷'이었다. 없는 칸은 조회하지 않으면
+        // 기본값이 아니라 **모른다**가 되고, 여기서는 그게 사고였다.
+        .select('id, exchange_id, label, api_key_masked, has_withdrawal, perm_read, perm_trading, is_active, auto_trading_enabled, is_paper, is_testnet, last_tested_at, test_status, api_passphrase_enc, created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false });
       if (error) return NextResponse.json({ error: error.message, connections: [] }, { status: 500 });

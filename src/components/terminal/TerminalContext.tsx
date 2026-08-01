@@ -98,6 +98,18 @@ export function useTerminal(): TerminalState {
 const SYMBOL_KEY = 'tg_terminal_symbol';
 const TRADE_MODE_KEY = 'tg_terminal_trade_mode';
 const MARKET_KEY = 'tg_terminal_market';
+/**
+ * 고른 계좌. **실전 선택도 기억한다** — 모드(TRADE_MODE_KEY)와 반대다.
+ *
+ * 모드를 안 기억하는 이유는 "어제 실전이었다"가 오늘 첫 주문을 실전으로
+ * 만들면 안 되기 때문이다. 계좌는 다르다: 안 기억해도 실전 탭을 누르는
+ * 순간 목록의 첫 번째가 **말없이** 선택된다. 그러면 위험이 사라지는 게
+ * 아니라 '어느 계좌인지 모르는 상태'로 바뀔 뿐이다.
+ *
+ * 안전장치는 기억하지 않는 것이 아니라 **화면에 계좌를 계속 적어 두는 것**
+ * (OrderPane의 AccountLine)이다.
+ */
+const CONN_KEY = 'tg_terminal_conn';
 
 /** 모드를 모를 때의 값. 실계좌가 아니라고 단정하지 않는다 */
 const UNKNOWN_MODE: ModeInfo = {
@@ -160,6 +172,15 @@ export function TerminalProvider(
     } catch { /* 기본값 유지 */ }
   }, []);
 
+  /** 계좌를 바꾼다. 다음 방문에도 같은 계좌에 서 있게 저장한다 */
+  const chooseConn = useCallback((id: string) => {
+    setConnId(id);
+    try {
+      if (id) localStorage.setItem(CONN_KEY, id);
+      else localStorage.removeItem(CONN_KEY);
+    } catch { /* 저장 실패는 이번 세션에만 영향 */ }
+  }, []);
+
   const setMarketType = useCallback((m: MarketType) => {
     setMarketTypeState(m);
     try { localStorage.setItem(MARKET_KEY, m); } catch {}
@@ -204,7 +225,14 @@ export function TerminalProvider(
           .filter((c: any) => !c.has_withdrawal);
         if (cancelled) return;
         setConnections(usable);
-        if (usable[0]) setConnId(usable[0].id);
+        // 지난번에 고른 계좌가 아직 있으면 그것을 쓴다. 없으면 첫 번째.
+        // **저장값을 그대로 믿지 않는다** — 지운 연결의 id가 남아 있으면
+        // 아무 계좌도 못 고른 상태가 되고, 화면은 그것을 '계좌 없음'으로
+        // 그린다.
+        let saved = '';
+        try { saved = localStorage.getItem(CONN_KEY) || ''; } catch { /* 못 읽으면 첫 번째 */ }
+        const keep = saved && usable.some((c: any) => c.id === saved) ? saved : (usable[0]?.id || '');
+        if (keep) setConnId(keep);
       } catch { /* 연결 목록 실패 — 주문 패널이 안내한다 */ }
 
       try {
@@ -241,10 +269,10 @@ export function TerminalProvider(
   const value = useMemo<TerminalState>(() => ({
     symbol, setSymbol, symbols, favorites, toggleFavorite,
     marketType, setMarketType,
-    auth, connId, setConnId, connections, mode, navigateApp,
+    auth, connId, setConnId: chooseConn, connections, mode, navigateApp,
     tradeMode, setTradeMode, modeResolution,
   }), [symbol, setSymbol, symbols, favorites, toggleFavorite,
-       marketType, setMarketType, auth, connId, connections, mode, navigateApp,
+       marketType, setMarketType, auth, connId, chooseConn, connections, mode, navigateApp,
        tradeMode, setTradeMode, modeResolution]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

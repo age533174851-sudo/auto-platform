@@ -20,6 +20,7 @@
 import React, { memo, useEffect, useState } from 'react';
 import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
+import { AccountLine } from './AccountLine';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { capability, checkIntent } from '@/lib/markets/marketType';
 
@@ -33,9 +34,20 @@ interface SpotHolding {
 export const SpotOrderPanel = memo(function SpotOrderPanel({
   presetPrice, presetSeq, dense,
 }: { presetPrice?: number | null; presetSeq?: number; dense?: boolean }) {
-  const { symbol, auth, connId, connections, mode } = useTerminal();
+  const { symbol, auth, connections, mode, tradeMode, modeResolution } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
   const cap = capability('SPOT');
+
+  // **모드가 정한 계좌를 쓴다.** 예전에는 컨텍스트의 connId를 그대로 썼는데,
+  // 그 값은 모드(모의/테스트넷/실전)를 거치지 않은 '마지막에 고른 연결'이다.
+  // 그래서 모의나 테스트넷 탭에 서 있어도 실전 키가 골라져 있으면 현물
+  // 주문이 그 실계좌로 나갔다 — 화면에는 '모의'라고 적힌 채로.
+  //
+  // 선물 폼은 이미 modeResolution.connId를 쓰고 있었다. 같은 화면에서 두
+  // 규칙이 도는 것이 문제였다.
+  const connId = tradeMode === 'PAPER' ? '' : (modeResolution.connId || '');
+  // 모의는 이 폼이 아직 못 한다. 조용히 실계좌로 보내지 않는다.
+  const paperUnsupported = tradeMode === 'PAPER';
 
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
@@ -116,6 +128,11 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
   const submit = async () => {
     setMsg(null);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
+    if (paperUnsupported) {
+      setMsg({ ok: false, text: '모의 모드에서는 현물 주문을 아직 지원하지 않습니다 — 테스트넷/실전으로 바꾸거나 USDT-M을 쓰세요' });
+      return;
+    }
+    if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason || '이 모드에서 쓸 계좌가 없습니다' }); return; }
     if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
     if (amt <= 0) { setMsg({ ok: false, text: side === 'BUY' && unit === 'QUOTE' ? '금액을 입력하세요' : '수량을 입력하세요' }); return; }
 
@@ -162,6 +179,18 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
 
   return (
     <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap }}>
+      {/* 어느 계좌로 나가는가. 선물 폼과 **같은 줄**을 쓴다 —
+          여기만 없으면 현물 탭에서는 계좌를 확인할 수도 바꿀 수도 없다. */}
+      <AccountLine/>
+      {paperUnsupported && (
+        <div style={{
+          padding: '6px 8px', borderRadius: 7, background: C.warnBg,
+          color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          모의 모드에서는 현물 주문을 아직 지원하지 않습니다. 이 상태로는 주문이 나가지 않습니다.
+        </div>
+      )}
+
       {/* 현물임을 화면에서 먼저 말한다. 선물 폼과 착각하면 안 된다. */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,

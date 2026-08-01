@@ -18,6 +18,7 @@ import { A } from '@/lib/theme/colors';
 import React, { memo, useEffect, useState } from 'react';
 import { C, FS, NUM, chip, ghostBtn, primaryBtn, input, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
+import { AccountLine } from './AccountLine';
 import {
   isCoinMSymbol, baseAssetOf, resolveContractSize, notionalToContracts,
   contractsToCoin, requiredMarginCoin, inverseLiquidationPrice,
@@ -40,7 +41,14 @@ function toCoinMSymbol(usdtSymbol: string): string {
 }
 
 export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?: boolean }) {
-  const { symbol, auth, connId, connections, mode } = useTerminal();
+  const { symbol, auth, connections, mode, tradeMode, modeResolution } = useTerminal();
+
+  // 선물 폼과 **같은 규칙**으로 계좌를 정한다. 예전에는 컨텍스트의 connId를
+  // 그대로 썼는데 그 값은 모드를 거치지 않은 '마지막에 고른 연결'이라,
+  // 모의·테스트넷 탭에 서 있어도 실전 키가 골라져 있으면 COIN-M 주문이
+  // 그 실계좌로 나갔다.
+  const connId = tradeMode === 'PAPER' ? '' : (modeResolution.connId || '');
+  const paperUnsupported = tradeMode === 'PAPER';
   const cmSymbol = toCoinMSymbol(symbol.id);
   const base = baseAssetOf(cmSymbol) ?? symbol.id.replace(/USDT$/, '');
 
@@ -113,6 +121,11 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
   const submit = async () => {
     setMsg(null);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
+    if (paperUnsupported) {
+      setMsg({ ok: false, text: '모의 모드에서는 COIN-M 주문을 아직 지원하지 않습니다 — 테스트넷/실전으로 바꾸거나 USDT-M을 쓰세요' });
+      return;
+    }
+    if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason || '이 모드에서 쓸 계좌가 없습니다' }); return; }
     if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
     if (contracts <= 0) { setMsg({ ok: false, text: '계약 수가 0입니다' }); return; }
     if (stopPrice == null) {
@@ -178,6 +191,17 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
 
   return (
     <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap: dense ? 6 : 10, position: 'relative' }}>
+      {/* 어느 계좌로 나가는가 — 세 주문판이 같은 줄을 쓴다 */}
+      <AccountLine/>
+      {paperUnsupported && (
+        <div style={{
+          padding: '6px 8px', borderRadius: 7, background: C.warnBg,
+          color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          모의 모드에서는 COIN-M 주문을 아직 지원하지 않습니다. 이 상태로는 주문이 나가지 않습니다.
+        </div>
+      )}
+
       {/* 이 시장이 무엇인지, 단위가 무엇인지 먼저 말한다 */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,

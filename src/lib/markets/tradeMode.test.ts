@@ -50,6 +50,24 @@ export function runTradeModeTests() {
     eq(connectionsFor('TESTNET', [withdrawConn]).length, 0);
   });
 
+  test('이 함수들은 스네이크 케이스만 읽는다 — 카멜 케이스만 준 객체는 전부 테스트넷이 된다', () => {
+    // 실제로 났던 사고를 그대로 적어 둔다.
+    //
+    // `/api/exchange?action=list`가 `isTestnet`·`permissions.withdrawal`만
+    // 내보내고 `is_testnet`·`has_withdrawal`은 안 내보냈다. 그래서 화면에서:
+    //   · 실전 연결이 **하나도** 안 잡혀 실전 탭이 언제나 "연결 없음"
+    //   · 실전 키가 **테스트넷 목록에 들어가** '테스트넷 계좌'라고 적힌 채
+    //     실계좌로 주문
+    //   · 출금 권한 키가 안 걸러짐
+    //
+    // 함수는 멀쩡했고 입력이 틀렸다. 그래서 아무 테스트도 안 깨졌다.
+    const camelOnly: any = { id: 'c1', isTestnet: false, permissions: { withdrawal: true } };
+    eq(isLiveConnection(camelOnly), false);
+    eq(connectionsFor('LIVE', [camelOnly]).length, 0);
+    eq(connectionsFor('TESTNET', [camelOnly]).length, 1);
+    // 서버 응답에 이 두 이름이 반드시 있어야 한다는 뜻이다 (route.ts safeConn).
+  });
+
   test('모의는 연결을 쓰지 않는다', () => {
     eq(connectionsFor('PAPER', [testnetConn, liveConn]).length, 0);
   });
