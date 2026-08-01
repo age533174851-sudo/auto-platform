@@ -342,6 +342,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
+  const [walletErr, setWalletErr] = useState('');
 
   // 호가·현재가를 눌러 들어온 가격.
   //
@@ -357,20 +358,33 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 모자랄 때 "현물에 얼마 있으니 이체하라"까지 말해줄 수 있다.
   // 물론 현물 잔고가 가용 증거금에 더해지지는 않는다 (lib/markets/wallets.ts).
   useEffect(() => {
-    if (!auth || !connId) { setWallet(null); return; }
+    // **주문이 나가는 계좌와 같은 계좌를 본다.**
+    //
+    // 예전에는 컨텍스트의 connId(모드를 안 거친 '마지막에 고른 연결')를
+    // 썼다. 주문은 modeResolution.connId로 나가므로, 둘이 다르면 화면에
+    // 뜬 잔고와 실제로 주문이 깎는 잔고가 다른 계좌의 것이 된다.
+    const wid = isPaper ? '' : (modeResolution.connId || '');
+    if (!auth || !wid) { setWallet(null); setWalletErr(''); return; }
     let alive = true;
     const load = async () => {
       try {
-        const r = await fetch(`/api/wallets?connectionId=${connId}`, { headers: { Authorization: auth } });
+        const r = await fetch(`/api/wallets?connectionId=${wid}`, { headers: { Authorization: auth } });
         const j = await r.json();
         if (!alive) return;
-        setWallet(r.ok && j?.ok ? j.tree : null);
-      } catch { if (alive) setWallet(null); }
+        if (r.ok && j?.ok) { setWallet(j.tree); setWalletErr(''); return; }
+        // **왜 못 읽었는지를 버리지 않는다.** 지금까지 이유를 통째로
+        // 지우고 '확인 불가'만 남겼는데, 그러면 테스트 자금을 받으러 갈지
+        // 키를 고칠지 사용자가 알 수 없다.
+        setWallet(null);
+        setWalletErr(String(j?.message || j?.error || `조회 실패 (${r.status})`));
+      } catch (e: any) {
+        if (alive) { setWallet(null); setWalletErr(`지갑을 읽지 못했습니다 (${e?.message || e})`); }
+      }
     };
     load();
     const t = setInterval(load, 20_000);
     return () => { alive = false; clearInterval(t); };
-  }, [auth, connId]);
+  }, [auth, isPaper, modeResolution.connId]);
 
   // 한도 현황은 주기적으로 다시 읽는다. 판정은 서버가 하고 화면은 같은
   // 답을 보여줄 뿐이다 — 각자 계산하면 서로 다른 숫자를 말하게 된다.
@@ -743,6 +757,19 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           {balanceUsd == null ? '확인 불가' : `${fmtPrice(balanceUsd)} USDT`}
         </span>
       </div>
+      )}
+
+      {/* 못 읽었으면 **왜**. '확인 불가'만으로는 무엇을 고쳐야 할지 알 수 없다 */}
+      {!isPaper && balanceUsd == null && walletErr && (
+        <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>{walletErr}</div>
+      )}
+
+      {/* 읽었는데 0이면 그것도 말해 준다. 0과 '못 읽음'은 다른 문제이고,
+          고칠 방법도 다르다 — 하나는 자금을 받아야 하고 하나는 키를 고쳐야 한다. */}
+      {!isPaper && balanceUsd === 0 && (
+        <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>
+          잔고가 0입니다 — 조회는 됐습니다. 테스트넷이면 거래소에서 테스트 자금을 받으세요.
+        </div>
       )}
 
       {/* 지금 국면. 필터를 켜지 않아도 보여준다 — 고변동장인지 아닌지는
