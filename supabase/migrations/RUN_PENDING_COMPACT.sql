@@ -240,3 +240,8 @@ CREATE POLICY safety_events_service ON safety_events
 DROP POLICY IF EXISTS safety_events_owner ON safety_events;
 CREATE POLICY safety_events_owner ON safety_events
   FOR SELECT TO authenticated USING (user_id = auth.uid());
+
+ALTER TABLE econ_events
+  ADD COLUMN IF NOT EXISTS time_known BOOLEAN NOT NULL DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS econ_events_dayonly_idx
+  ON econ_events (timestamp_utc) WHERE time_known = FALSE;
