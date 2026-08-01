@@ -153,6 +153,16 @@ export async function POST(req: NextRequest) {
           sb, userId: uid, connectionId, testnet: useTestnet,
           equityUsd: marginInput?.available ?? null,
           symbol, side: String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
+          // 서브계좌 한도. 열린 포지션 목록을 **못 읽었으면 넘기지 않는다** —
+          // 빈 배열로 치면 "아무것도 안 쓰고 있다"가 되어 한도가 통째로
+          // 넉넉해지고, 그건 검사를 켜 놓고 안 거는 것과 같다.
+          market: 'USDM',
+          addMarginUsd: marginInput?.required ?? null,
+          openUse: gate.gather.reachable
+            ? gate.gather.exchangePositions.map((p: any) => ({
+                symbol: String(p.symbol), market: 'USDM', marginUsd: p.margin ?? null,
+              }))
+            : null,
         });
 
     const checklist = runChecklist({

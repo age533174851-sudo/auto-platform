@@ -25,6 +25,10 @@ function goodInput(): ChecklistInput {
     dailyLoss: { status: 'ok', reason: '오늘 −10.00 / 한도 50.00 USDT' },
     weeklyLoss: { status: 'ok', reason: '주간 여유 400.00 USDT' },
     lossStreak: { status: 'ok', reason: '연패 없음' },
+    // 서브계좌를 안 만든 사용자는 judgeSubAccount가 'ok'를 돌려준다.
+    // 여기서 빼면 '확인 못 함'이 되어 모든 진입이 막힌다 — 실제로 그렇게
+    // 동작하는 것이 맞고, 그래서 픽스처가 이 값을 넘긴다.
+    subAccount: { status: 'ok', reason: '가상 서브계좌를 쓰지 않습니다' },
     stopPrice: 60000,
     liquidationPrice: 58000,
     side: 'LONG',
@@ -397,6 +401,10 @@ export function runPreTradeChecklistTests() {
       dailyLoss: { status: 'ok', reason: '한도 안' },
       weeklyLoss: { status: 'ok', reason: '한도 안' },
       lossStreak: { status: 'ok', reason: '연패 없음' },
+    // 서브계좌를 안 만든 사용자는 judgeSubAccount가 'ok'를 돌려준다.
+    // 여기서 빼면 '확인 못 함'이 되어 모든 진입이 막힌다 — 실제로 그렇게
+    // 동작하는 것이 맞고, 그래서 픽스처가 이 값을 넘긴다.
+    subAccount: { status: 'ok', reason: '가상 서브계좌를 쓰지 않습니다' },
       // 아래는 현물에 존재하지 않아 넘기지 않는다
       // marginType, liquidationPrice, stopPrice, leverage, reconcile …
     };
@@ -456,7 +464,7 @@ export function runPreTradeChecklistTests() {
     // 현물로 옮겨 계속하면 잠근 의미가 없다.
     const v = runChecklist(spotInput(), { market: 'SPOT' });
     eq(v.results.map(r => r.id).sort().join(','),
-       'CLOCK_SKEW,DAILY_LOSS_LIMIT,LOSS_STREAK,MODE,WEEKLY_LOSS_LIMIT');
+       'CLOCK_SKEW,DAILY_LOSS_LIMIT,LOSS_STREAK,MODE,SUBACCOUNT_LIMIT,WEEKLY_LOSS_LIMIT');
   });
 
   test('현물에는 자금 항목도 없다 — 시장가는 체결가를 몰라 껍데기 통과가 된다', () => {
@@ -540,6 +548,10 @@ export function runPreTradeChecklistTests() {
       dailyLoss: { status: 'ok', reason: '한도 안' },
       weeklyLoss: { status: 'ok', reason: '한도 안' },
       lossStreak: { status: 'ok', reason: '연패 없음' },
+    // 서브계좌를 안 만든 사용자는 judgeSubAccount가 'ok'를 돌려준다.
+    // 여기서 빼면 '확인 못 함'이 되어 모든 진입이 막힌다 — 실제로 그렇게
+    // 동작하는 것이 맞고, 그래서 픽스처가 이 값을 넘긴다.
+    subAccount: { status: 'ok', reason: '가상 서브계좌를 쓰지 않습니다' },
     }, { market: 'COINM' });
     eq(v.allowed, true, `COIN-M이 막혔다: ${v.summary}`);
   });
@@ -573,6 +585,10 @@ export function runPreTradeChecklistTests() {
       dailyLoss: { status: 'locked', reason: '오늘 손실이 한도에 닿았습니다' },
       weeklyLoss: { status: 'ok', reason: '한도 안' },
       lossStreak: { status: 'ok', reason: '연패 없음' },
+    // 서브계좌를 안 만든 사용자는 judgeSubAccount가 'ok'를 돌려준다.
+    // 여기서 빼면 '확인 못 함'이 되어 모든 진입이 막힌다 — 실제로 그렇게
+    // 동작하는 것이 맞고, 그래서 픽스처가 이 값을 넘긴다.
+    subAccount: { status: 'ok', reason: '가상 서브계좌를 쓰지 않습니다' },
     });
     eq(v.allowed, false);
     eq(statusOf(v, 'DAILY_LOSS_LIMIT').status, 'fail');
@@ -594,6 +610,10 @@ export function runPreTradeChecklistTests() {
       dailyLoss: { status: 'locked', reason: '한도 도달' },
       weeklyLoss: { status: 'ok', reason: '한도 안' },
       lossStreak: { status: 'ok', reason: '연패 없음' },
+    // 서브계좌를 안 만든 사용자는 judgeSubAccount가 'ok'를 돌려준다.
+    // 여기서 빼면 '확인 못 함'이 되어 모든 진입이 막힌다 — 실제로 그렇게
+    // 동작하는 것이 맞고, 그래서 픽스처가 이 값을 넘긴다.
+    subAccount: { status: 'ok', reason: '가상 서브계좌를 쓰지 않습니다' },
     }, { intent: 'EXIT' });
     const ids = v.results.map(r => r.id);
     assert(!ids.includes('DAILY_LOSS_LIMIT'), '청산에 일일 한도를 물리면 나갈 수 없다');

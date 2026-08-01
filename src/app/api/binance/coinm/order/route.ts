@@ -226,6 +226,13 @@ export async function POST(req: NextRequest) {
           sb, userId: uid, connectionId: body.connectionId, testnet,
           equityUsd: marginInput?.available ?? null,
           symbol, side: side === 'BUY' ? 'LONG' : 'SHORT',
+          // COIN-M은 여기서 열린 포지션 목록을 들고 있지 않다. **빈 배열로
+          // 치지 않는다** — 못 읽은 것을 0으로 세면 한도가 넉넉해진다.
+          // openUse를 안 넘기면 판정이 unknown이 되어 막힌다. 서브계좌를
+          // 안 쓰는 사람에게는 영향이 없어야 하므로, 그 경우만 통과시킨다.
+          market: 'COINM',
+          addMarginUsd: marginInput?.required ?? null,
+          openUse: null,
         });
 
     const checklist = runChecklist({

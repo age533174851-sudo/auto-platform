@@ -18,6 +18,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, ghostBtn, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
+import { SubAccountPanel } from './SubAccountPanel';
 
 const STATUS_TONE: Record<string, string> = {
   ok: C.up, insufficient: C.dim, disabled: C.down, unknown: C.warn,
@@ -55,24 +56,31 @@ export function AllocationPanel() {
 
   useEffect(() => { load(); }, [load]);
 
-  if (err) {
+  // 배분표를 못 읽어도 **서브계좌 편집은 살려 둔다.**
+  //
+  // 저건 성적 계산이고 이건 한도 설정이다. 계산이 실패했다고 한도를 못 고치게
+  // 하면, 정작 주문이 막혔을 때 원인을 풀 수 있는 화면에 들어갈 수가 없다.
+  if (err || !data) {
     return (
-      <div style={{ padding: 14 }}>
-        <div style={{
-          padding: '10px 12px', borderRadius: 8,
-          background: C.warnBg, color: C.warn, fontSize: FS.small, lineHeight: 1.55,
-        }}>{err}</div>
-        <button onClick={load} style={{ ...ghostBtn(), marginTop: 10, minHeight: 30 }}>
-          다시 시도
-        </button>
+      <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {err ? (
+          <>
+            <div style={{
+              padding: '10px 12px', borderRadius: 8,
+              background: C.warnBg, color: C.warn, fontSize: FS.small, lineHeight: 1.55,
+            }}>{err}</div>
+            <button onClick={load} style={{ ...ghostBtn(), minHeight: 30 }}>다시 시도</button>
+          </>
+        ) : (
+          <div style={{ padding: '6px 0', textAlign: 'center', color: C.faint, fontSize: FS.small }}>
+            {busy ? '계산 중…' : '—'}
+          </div>
+        )}
+        <Section title="가상 서브계좌 — 이 한도가 주문을 막습니다">
+          <SubAccountPanel/>
+        </Section>
       </div>
     );
-  }
-
-  if (!data) {
-    return <div style={{ padding: 20, textAlign: 'center', color: C.faint, fontSize: FS.small }}>
-      {busy ? '계산 중…' : '—'}
-    </div>;
   }
 
   const plan = data.plan ?? {};
@@ -227,8 +235,16 @@ export function AllocationPanel() {
       <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
         {data.sourceNote}<br/>
         최근 {data.lookbackDays}일 · 청산된 거래 {data.tradeCount}건 기준.
-        <b> 이 표는 계산만 합니다 — 실제 주문 크기에 아직 물려 있지 않습니다.</b>
+        <b> 위 표는 계산만 합니다 — 실제로 주문을 막는 것은 아래 가상 서브계좌입니다.</b>
       </div>
+
+      {/* 계산과 한도를 한 화면에 둔다.
+          배분표는 "이렇게 나누면 좋겠다"를 그리고, 아래 바구니는 그것을
+          실제로 강제한다. 두 화면으로 갈라 놓으면 계산만 보고 한도는 안
+          걸어 둔 상태가 오래 간다 — 지금까지가 정확히 그 상태였다. */}
+      <Section title="가상 서브계좌 — 이 한도가 주문을 막습니다">
+        <SubAccountPanel/>
+      </Section>
 
       <button onClick={load} disabled={busy}
         style={{ ...ghostBtn(), minHeight: 32, opacity: busy ? 0.5 : 1 }}>

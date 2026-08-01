@@ -66,7 +66,9 @@ export type CheckId =
   /** 지금 시장 국면이 이 방향의 진입에 맞는가 */
   | 'REGIME_FILTER'
   /** AI 합의가 이 방향을 강하게 반대하는가 (거부권만, 진입은 못 만든다) */
-  | 'AI_VETO';
+  | 'AI_VETO'
+  /** 이 주문이 배정한 가상 서브계좌 한도 안인가 */
+  | 'SUBACCOUNT_LIMIT';
 
 /**
  * 어느 시장의 주문인가.
@@ -216,6 +218,19 @@ export const CHECK_SPECS: CheckSpec[] = [
   // 켠 사람만 'unknown'을 받고 막힌다. 즉 "AI를 못 불렀으면 멈춘다"를
   // 고른 사람에게만 적용된다 — 기본값으로 AI 장애가 매매 장애가 되지 않는다.
   { id: 'AI_VETO', label: 'AI 합의 거부권', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
+  // 가상 서브계좌 한도.
+  //
+  // 배분표(portfolio/allocation)가 "성장 600만 · 안정 250만"을 그려주는데
+  // 지금까지 **주문이 그 숫자를 보지 않았다.** 계산만 하고 안 막는 안전장치는
+  // 없는 것보다 나쁘다 — 있다고 믿으면 사람이 직접 안 센다.
+  //
+  // 바구니를 안 만들었으면 판정이 'ok'로 나오므로(subAccount.ts) 쓰지 않는
+  // 사람에게는 아무 일도 일어나지 않는다. 그래서 옵션이 아니라 항상 건다.
+  //
+  // 진입에만 건다. 한도를 넘었다고 못 나가게 하면 그건 손실을 키우는 잠금이다.
+  { id: 'SUBACCOUNT_LIMIT', label: '서브계좌 한도', markets: ALL_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 하루 1회 제한이 있는 전략에서만 (옵션 dailyLimit). 수동 주문에는
@@ -400,6 +415,15 @@ export interface ChecklistInput {
    * 그렇다고 통과로도 적지 않는다. 'abstain'은 warn으로 화면에 남는다.
    */
   aiVeto?: { status: 'ok' | 'blocked' | 'abstain' | 'unknown'; reason: string } | null;
+  /**
+   * 가상 서브계좌 한도 판정 (portfolio/subAccount의 judgeSubAccount 결과).
+   *
+   * 넘기지 않으면 `unknown`이고 진입이 막힌다. 손실 한도와 같은 규칙이다 —
+   * 사용자가 "600만 원까지"라고 정해 둔 것이 조회 실패 한 번으로 무제한이
+   * 되면 안 된다. 바구니를 안 만든 사람은 judgeSubAccount가 'ok'를
+   * 돌려주므로 그대로 넘기면 된다.
+   */
+  subAccount?: { status: 'ok' | 'over' | 'unassigned' | 'unknown'; reason: string } | null;
   /** 계획된 손절가. 없으면 손절이 안 붙은 것 */
   stopPrice?: number | null;
   liquidationPrice?: number | null;
@@ -580,6 +604,18 @@ export function runChecklist(
     results.push(resultFor('REGIME_FILTER', 'unknown', input.regime.reason));
   } else {
     results.push(resultFor('REGIME_FILTER', 'pass', input.regime.reason));
+  }
+
+  // ── 서브계좌 한도 ──
+  if (!input.subAccount) {
+    results.push(resultFor('SUBACCOUNT_LIMIT', 'unknown',
+      '서브계좌 한도를 확인하지 못했습니다 — 정해 둔 한도가 있는지 알 수 없습니다'));
+  } else if (input.subAccount.status === 'over' || input.subAccount.status === 'unassigned') {
+    results.push(resultFor('SUBACCOUNT_LIMIT', 'fail', input.subAccount.reason));
+  } else if (input.subAccount.status === 'unknown') {
+    results.push(resultFor('SUBACCOUNT_LIMIT', 'unknown', input.subAccount.reason));
+  } else {
+    results.push(resultFor('SUBACCOUNT_LIMIT', 'pass', input.subAccount.reason));
   }
 
   // ── AI 거부권 ──

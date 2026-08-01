@@ -112,6 +112,9 @@ export async function POST(req: NextRequest) {
           // AI 거부권이 볼 종목·방향. 현물 매수는 LONG으로 본다 —
           // 매도(EXIT)에는 어차피 이 검사가 붙지 않는다.
           symbol: String(body.symbol || ''), side: isSell ? 'SHORT' : 'LONG',
+          market: 'SPOT',
+          addMarginUsd: null,
+          openUse: null,
         });
 
     const checklist = runChecklist({

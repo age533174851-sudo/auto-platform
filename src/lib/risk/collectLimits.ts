@@ -35,11 +35,19 @@ export interface LimitVerdicts {
   aiVeto: { status: 'ok' | 'blocked' | 'abstain' | 'unknown'; reason: string } | null;
   /** 채점 원장에서 이 판정에 쓴 행. 주문이 나가면 markApplied로 되짚는다 */
   aiPredictionId: string | null;
+  /**
+   * 가상 서브계좌 한도.
+   *
+   * 손실 한도와 같은 규칙으로 **못 읽으면 막는다**. 사용자가 "성장 600만"이라고
+   * 정해 둔 것이 조회 실패 한 번으로 무제한이 되면 안 된다. 바구니를 안
+   * 만든 사람은 판정이 'ok'로 나오므로 아무 일도 일어나지 않는다.
+   */
+  subAccount: { status: 'ok' | 'over' | 'unassigned' | 'unknown'; reason: string } | null;
 }
 
 const EMPTY: LimitVerdicts = {
   dailyLoss: null, weeklyLoss: null, lossStreak: null,
-  aiVeto: null, aiPredictionId: null,
+  aiVeto: null, aiPredictionId: null, subAccount: null,
 };
 
 export interface CollectLimitsArgs {
@@ -57,6 +65,12 @@ export interface CollectLimitsArgs {
   /** AI 거부권을 볼 종목·방향. 둘 다 있어야 판정한다 */
   symbol?: string | null;
   side?: 'LONG' | 'SHORT' | null;
+  /** 서브계좌 한도용. 'SPOT' | 'USDM' | 'COINM' */
+  market?: string | null;
+  /** 이 주문이 새로 묶는 증거금(USDT) */
+  addMarginUsd?: number | null;
+  /** 지금 열려 있는 것들 (증거금 기준). 못 읽었으면 넘기지 않는다 */
+  openUse?: Array<{ symbol: string; market: string; marginUsd: number | null }> | null;
 }
 
 /**
@@ -106,7 +120,33 @@ async function fillAiVeto(out: LimitVerdicts, args: CollectLimitsArgs, now: numb
 }
 
 /**
- * 오늘·이번 주·연패 잠금(+켜져 있으면 AI 거부권)을 한 번에.
+ * 서브계좌 한도를 채운다.
+ *
+ * 여기서 실패해도 나머지 판정은 그대로 둔다 — 한 조회 실패로 손실 한도까지
+ * 못 읽으면 사용자는 무엇을 고쳐야 하는지 알 수 없다.
+ */
+async function fillSubAccount(out: LimitVerdicts, args: CollectLimitsArgs): Promise<void> {
+  if (!args.market || !args.symbol) {
+    // 시장·종목을 모르면 어느 바구니인지 정할 수 없다. **통과시키지 않는다.**
+    out.subAccount = { status: 'unknown', reason: '시장·종목을 몰라 서브계좌 한도를 확인하지 못했습니다' };
+    return;
+  }
+  try {
+    const { collectSubAccount } = await import('@/lib/portfolio/subAccountCheck');
+    const r = await collectSubAccount({
+      sb: args.sb, userId: args.userId,
+      market: String(args.market), symbol: String(args.symbol),
+      addMarginUsd: args.addMarginUsd ?? null,
+      open: Array.isArray(args.openUse) ? args.openUse : null,
+    });
+    out.subAccount = { status: r.verdict.status, reason: r.verdict.reason };
+  } catch (e: any) {
+    out.subAccount = { status: 'unknown', reason: `서브계좌 한도를 확인하지 못했습니다 (${e?.message || e})` };
+  }
+}
+
+/**
+ * 오늘·이번 주·연패 잠금 + (켜져 있으면) AI 거부권 + 서브계좌 한도를 한 번에.
  *
  * 하나가 실패해도 나머지는 채운다. 하나 때문에 전부 unknown이 되면
  * 사용자는 무엇을 고쳐야 하는지 알 수 없다.
@@ -128,6 +168,7 @@ export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVe
       out.lossStreak = { status: f.streak.status, reason: f.streak.reason };
     } catch { /* null → unknown → 막힌다 */ }
     await fillAiVeto(out, args, now);
+    await fillSubAccount(out, args);
     return out;
   }
 
@@ -174,5 +215,6 @@ export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVe
   } catch { /* null → unknown → 막힌다 */ }
 
   await fillAiVeto(out, args, now);
+  await fillSubAccount(out, args);
   return out;
 }
