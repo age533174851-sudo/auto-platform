@@ -455,6 +455,11 @@ export default function BacktestPage() {
                 <div style={{ color: /손절 없이/.test((result.summary as any).rulesNote) ? T.ylw : T.sub, fontSize: 10, fontWeight: 700, lineHeight: 1.55 }}>
                   청산 규칙 · {(result.summary as any).rulesNote}
                 </div>
+                {(result.summary as any).shortTrades > 0 && (
+                  <div style={{ color: T.muted, fontSize: 9, marginTop: 4, lineHeight: 1.5 }}>
+                    숏 진입 {(result.summary as any).shortTrades}건 — 하락장 성적이 포함돼 있습니다.
+                  </div>
+                )}
                 {((result.summary as any).stopExits > 0 || (result.summary as any).liqExits > 0) && (
                   <div style={{ color: T.muted, fontSize: 9, marginTop: 4, lineHeight: 1.5 }}>
                     손절로 끝남 {(result.summary as any).stopExits}건

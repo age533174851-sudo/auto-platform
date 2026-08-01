@@ -54,6 +54,21 @@ export interface BacktestConfig {
   takeProfitPct?: number;
   /** 최대 보유 시간(시간). 0이면 시간 청산 없음 */
   maxHoldHours?: number;
+
+  /**
+   * 하락 신호에 **숏으로 들어가는가.**
+   *
+   * 안 주면 `leverage > 1`일 때만 켠다 — 숏은 선물·마진 계좌에서만 되고,
+   * 배율을 준 백테스트가 곧 그 계좌를 가정한 것이기 때문이다. 현물
+   * 백테스트(1배)에 숏을 켜면 실제로는 낼 수 없는 주문의 성적이 나온다.
+   *
+   * 왜 필요한가: 데모 자동매매는 하락 추세에 **숏을 잡는다.** 백테스트가
+   * 롱만 돌면 하락장 성적이 통째로 빠지고, 그 상태로 두 성적을 비교하면
+   * "이 전략은 하락장에 거래를 안 한다"는 잘못된 결론이 나온다.
+   *
+   * DCA는 어떤 경우에도 숏을 안 한다 — 정기 적립 전략에 숏은 뜻이 없다.
+   */
+  allowShort?: boolean;
 }
 
 export interface Trade {
@@ -94,6 +109,8 @@ export interface BacktestResult {
   stopExits?: number;
   /** 청산으로 끝난 거래 수 */
   liqExits?: number;
+  /** 숏으로 들어간 거래 수. 0이면 하락장 성적이 안 들어간 것이다 */
+  shortTrades?: number;
   /** 걸어 둔 가격에 못 받고 갭으로 밀린 청산 수 */
   gapExits?: number;
   /**
@@ -212,7 +229,15 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
 
   const fee   = cfg.feeRate ?? 0.001;
   let cash    = cfg.initialCash;      // ★ balance = 현금성 총자산(equity). 진입 시 변경 안 함, 청산 시 netPnL만 반영
-  let position = 0;       // # of units held (레버리지 반영된 수량)
+  let position = 0;       // 보유 수량(절대값, 레버리지 반영). 방향은 side가 갖는다
+  /**
+   * 지금 방향. null이면 포지션이 없다.
+   *
+   * 부호 있는 수량(음수=숏)으로 두지 않는 이유: 기존 코드가 `position > 0`을
+   * '포지션 있음'으로 쓰고 있어서, 부호를 넣으면 숏이 '포지션 없음'으로
+   * 읽히는 자리가 조용히 생긴다.
+   */
+  let side: 'LONG' | 'SHORT' | null = null;
   let entryPrice = 0;
   let entryFeePaid = 0;   // 진입 시 낸 수수료 (청산 netPnL에서 차감)
   let investedMargin = 0; // 현재 포지션에 투입된 증거금 누계 (DCA 한도용)
@@ -249,7 +274,53 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   const tpPct = Math.max(0, cfg.takeProfitPct ?? DEFAULT_EXIT.takeProfitPct);
   const maxHoldHours = Math.max(0, cfg.maxHoldHours ?? DEFAULT_EXIT.maxHoldHours);
   /** 손절·청산으로 닫힌 횟수. 성적표에 같이 적는다 */
-  let stopExits = 0, liqExits = 0, gapExits = 0;
+  let stopExits = 0, liqExits = 0, gapExits = 0, shortTrades = 0;
+
+  // 숏은 선물·마진에서만 된다. 명시하지 않으면 배율로 판단한다.
+  const allowShort = cfg.strategy === 'dca'
+    ? false
+    : (cfg.allowShort ?? lev > 1);
+
+  /** 청산 손익 한 곳. 롱은 (나간값-들어간값), 숏은 그 반대다 */
+  const closeAt = (px: number, t: number, why: string) => {
+    const exitFee = position * px * fee;
+    const dir = side === 'SHORT' ? -1 : 1;
+    const grossPnL = (px - entryPrice) * position * dir;
+    const netPnL = grossPnL - entryFeePaid - exitFee;
+    const pnlPct = entryPrice > 0 ? ((px - entryPrice) / entryPrice) * 100 * lev * dir : 0;
+    cash += netPnL;
+    trades.push({
+      // 숏 청산은 '되사기'라 buy다. side 칸이 방향이 아니라 **주문**을
+      // 뜻하도록 유지한다 — 체결 목록은 실제로 낸 주문을 보여줘야 한다.
+      side: side === 'SHORT' ? 'buy' : 'sell',
+      time: t, price: px, qty: position, value: position * px,
+      fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason: why,
+    });
+    position = 0; side = null; entryPrice = 0; entryFeePaid = 0; investedMargin = 0;
+    stopPrice = tpPrice = liqPrice = null; entryBarIdx = -1;
+  };
+
+  /** 진입 한 곳. 손절·익절·청산가를 방향에 맞춰 건다 */
+  const openAt = (dir: 'LONG' | 'SHORT', px: number, i: number, t: number, why: string) => {
+    const margin   = cash * positionPct;
+    const notional = margin * lev;
+    const qty      = notional / px;
+    const f        = notional * fee;
+    position = qty; side = dir;
+    entryPrice = px; entryFeePaid = f; investedMargin = margin;
+    entryBarIdx = i; entryTs = t;
+    const sgn = dir === 'LONG' ? 1 : -1;
+    stopPrice = stopPct > 0 ? px * (1 - sgn * stopPct / 100) : null;
+    tpPrice = tpPct > 0 ? px * (1 + sgn * tpPct / 100) : null;
+    // 격리 증거금 기준 청산가. 유지증거금률을 모르므로 1.0%로 본다 —
+    // 실제보다 **먼저** 청산되는 쪽이라 낙관으로 기울지 않는다.
+    liqPrice = lev > 1 ? px * (1 - sgn * ((1 / lev) - 0.01)) : null;
+    if (dir === 'SHORT') shortTrades++;
+    trades.push({
+      side: dir === 'SHORT' ? 'sell' : 'buy',
+      time: t, price: px, qty, value: notional, fee: f, reason: why,
+    });
+  };
 
   for (let i = 0; i < safeCandles.length; i++) {
     const candle = safeCandles[i];
@@ -263,28 +334,17 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     //
     // **진입한 봉은 건너뛴다.** 그 봉의 저가는 진입 *전에* 찍힌 것일 수
     // 있어서, 들어가자마자 손절당한 것으로 계산된다.
-    if (position > 0 && i > entryBarIdx && (stopPrice != null || tpPrice != null || maxHoldHours > 0)) {
+    if (position > 0 && side && i > entryBarIdx && (stopPrice != null || tpPrice != null || maxHoldHours > 0)) {
       const hit = exitOnBar(
-        { side: 'LONG', entry: entryPrice, stop: stopPrice, takeProfit: tpPrice,
+        { side, entry: entryPrice, stop: stopPrice, takeProfit: tpPrice,
           liquidation: liqPrice, openedAt: entryTs },
         candle, { maxHoldHours },
       );
       if (hit) {
-        const px = hit.price;
-        const exitFee = position * px * fee;
-        const grossPnL = (px - entryPrice) * position;
-        const netPnL = grossPnL - entryFeePaid - exitFee;
-        const pnlPct = entryPrice > 0 ? ((px - entryPrice) / entryPrice) * 100 * lev : 0;
-        cash += netPnL;
-        trades.push({
-          side: 'sell', time: candle.t, price: px, qty: position, value: position * px,
-          fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason: hit.note,
-        });
         if (hit.reason === 'SL') stopExits++;
         if (hit.reason === 'LIQUIDATION') liqExits++;
         if (hit.gapped) gapExits++;
-        position = 0; entryPrice = 0; entryFeePaid = 0; investedMargin = 0;
-        stopPrice = tpPrice = liqPrice = null; entryBarIdx = -1;
+        closeAt(hit.price, candle.t, hit.note);
       }
     }
 
@@ -338,24 +398,20 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     }
 
     /* Execute — equity 모델: 진입은 balance 불변, 청산 시에만 netPnL 반영 */
+
+    // **반대 신호는 먼저 닫는다.** 숏을 들고 있는데 매수 신호가 오면
+    // 그건 새 롱이 아니라 지금 숏을 끝내라는 뜻이다. 안 닫고 새로 열면
+    // 한 계좌에 반대 포지션 둘이 생겨 손익이 서로를 지운다.
+    if (position > 0 && side && ((signal === 'buy' && side === 'SHORT') || (signal === 'sell' && side === 'LONG'))) {
+      closeAt(price, candle.t, reason);
+    }
+
     if (signal === 'buy' && position === 0) {
-      const margin   = cash * positionPct;        // 증거금 = balance × 비율
-      const notional = margin * lev;              // 명목 규모 (= 증거금 × 레버리지)
-      const qty      = notional / price;
-      const f        = notional * fee;            // 진입 수수료 (명목 기준)
-      position = qty;
-      entryPrice = price;
-      entryFeePaid = f;
-      investedMargin = margin;
-      entryBarIdx = i;
-      entryTs = candle.t;
-      stopPrice = stopPct > 0 ? price * (1 - stopPct / 100) : null;
-      tpPrice = tpPct > 0 ? price * (1 + tpPct / 100) : null;
-      // 격리 증거금 기준 청산가. 유지증거금률을 모르므로 1.0%로 본다 —
-      // 실제보다 **먼저** 청산되는 쪽이라 낙관으로 기울지 않는다.
-      liqPrice = lev > 1 ? price * (1 - (1 / lev) + 0.01) : null;
-      // ★ balance(cash) 변경 없음
-      trades.push({ side: 'buy', time: candle.t, price, qty, value: notional, fee: f, reason });
+      openAt('LONG', price, i, candle.t, reason);
+    } else if (signal === 'sell' && position === 0 && allowShort) {
+      // 하락 신호에 숏. 데모 자동매매가 하는 일과 같다 — 이게 없으면
+      // 백테스트에서 하락장 성적이 통째로 빠진다.
+      openAt('SHORT', price, i, candle.t, reason);
     } else if (signal === 'buy' && cfg.strategy === 'dca' && investedMargin + dcaAmount <= cash) {
       // DCA 누적 (증거금 누계가 balance를 넘지 않는 선까지)
       const notional = dcaAmount * lev;
@@ -368,22 +424,17 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
       investedMargin += dcaAmount;
       // ★ balance 변경 없음
       trades.push({ side: 'buy', time: candle.t, price, qty, value: notional, fee: f, reason });
-    } else if (signal === 'sell' && position > 0) {
-      const exitFee = position * price * fee;
-      const grossPnL = (price - entryPrice) * position;            // 수량은 이미 레버리지 반영
-      const netPnL = grossPnL - entryFeePaid - exitFee;            // 수수료 차감
-      const pnlPct = entryPrice > 0 ? ((price - entryPrice) / entryPrice) * 100 * lev : 0;
-      cash += netPnL;                                              // ★ 청산 시에만 netPnL 반영
-      trades.push({
-        side: 'sell', time: candle.t, price, qty: position, value: position * price,
-        fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason,
-      });
-      position = 0; entryPrice = 0; entryFeePaid = 0; investedMargin = 0;
-      stopPrice = tpPrice = liqPrice = null; entryBarIdx = -1;
     }
+    // 롱을 매도 신호로 닫는 갈래는 위 '반대 신호는 먼저 닫는다'가 이미
+    // 처리한다. 여기 한 번 더 두면 두 곳이 같은 일을 하게 되고, 언젠가
+    // 한쪽만 고쳐진다.
 
     /* Equity tracking — balance + 미실현손익 (mark-to-market) */
-    const unrealized = position > 0 ? (price - entryPrice) * position : 0;
+    // 숏은 가격이 내려야 이익이다. 부호를 안 뒤집으면 숏이 손실일 때
+    // 자산이 늘어나는 곡선이 그려진다 — 최대 낙폭이 통째로 틀어진다.
+    const unrealized = position > 0
+      ? (price - entryPrice) * position * (side === 'SHORT' ? -1 : 1)
+      : 0;
     const equity = cash + unrealized;
     equityCurve.push({ t: candle.t, equity });
     if (equity > peakEquity) peakEquity = equity;
@@ -392,18 +443,9 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   }
 
   /* Close open position at last price */
-  if (position > 0) {
+  if (position > 0 && side) {
     const last = safeCandles[safeCandles.length - 1];
-    const exitFee = position * last.c * fee;
-    const grossPnL = (last.c - entryPrice) * position;
-    const netPnL = grossPnL - entryFeePaid - exitFee;
-    const pnlPct = entryPrice > 0 ? ((last.c - entryPrice) / entryPrice) * 100 * lev : 0;
-    cash += netPnL;
-    trades.push({
-      side: 'sell', time: last.t, price: last.c, qty: position, value: position * last.c,
-      fee: exitFee, pnl: netPnL, netPnL, pnlPct, reason: '백테스트 종료 청산',
-    });
-    position = 0;
+    closeAt(last.c, last.t, '백테스트 종료 청산');
   }
 
   /* Stats */
@@ -449,6 +491,7 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     ? `손절 ${stopPct}%${tpPct > 0 ? ` · 익절 ${tpPct}%` : ' · 익절 없음'}`
       + `${maxHoldHours > 0 ? ` · 최대보유 ${maxHoldHours}시간` : ''}`
       + `${lev > 1 ? ` · ${lev}배 청산 반영` : ''}`
+      + `${allowShort ? ' · 숏 포함' : ' · 롱만'}`
     : '⚠️ 손절 없이 돌렸습니다 — 데모·실전은 손절을 걸고 돕니다. 이 결과는 그쪽과 비교할 수 없습니다.';
 
   return {
@@ -469,7 +512,7 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     sharpe,
     avgTradePct,
     sanityWarning,
-    stopExits, liqExits, gapExits, rulesNote,
+    stopExits, liqExits, gapExits, shortTrades, rulesNote,
   };
 }
 

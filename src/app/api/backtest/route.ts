@@ -87,6 +87,8 @@ export async function POST(req: NextRequest) {
     stopPct: numOrUndef(body?.stopPct),
     takeProfitPct: numOrUndef(body?.takeProfitPct),
     maxHoldHours: numOrUndef(body?.maxHoldHours),
+    // 숏. 안 주면 엔진이 배율로 판단한다(1배=현물이면 숏 없음).
+    allowShort: typeof body?.allowShort === 'boolean' ? body.allowShort : undefined,
     emaFast: body?.emaFast, emaSlow: body?.emaSlow,
     rsiPeriod: body?.rsiPeriod, rsiOversold: body?.rsiOversold, rsiOverbought: body?.rsiOverbought,
     bbPeriod: body?.bbPeriod, bbStd: body?.bbStd,
@@ -119,6 +121,7 @@ export async function POST(req: NextRequest) {
       // 어떤 규칙으로 돈 성적인지 같이 보낸다. 숫자만 보내면 손절 없이
       // 돌린 결과와 손절 있는 결과가 화면에서 똑같아 보인다.
       rulesNote:      result.rulesNote,
+      shortTrades:    result.shortTrades,
       stopExits:      result.stopExits,
       liqExits:       result.liqExits,
       gapExits:       result.gapExits,
