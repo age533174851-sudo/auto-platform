@@ -20,6 +20,33 @@ function signGate(method: string, path: string, qs: string, body: string, secret
   return createHmac('sha512', secret).update(payload).digest('hex');
 }
 
+/**
+ * 실패를 사람이 고칠 수 있는 문장으로.
+ *
+ * `HTTP 401`만 적으면 화면에는 "연결 테스트 실패: HTTP 401"이 뜬다. 그걸 보고
+ * 할 수 있는 일이 없다 — 키가 틀린 건지, 서명이 틀린 건지, **테스트넷 키를
+ * 실계좌에 물어본 건지** 구분이 안 된다. 마지막 경우가 제일 흔하고 제일
+ * 알아채기 어렵다.
+ *
+ * 그래서 세 가지를 항상 적는다: Gate가 실제로 한 말 · 어느 호스트에 물었나 ·
+ * 지금 뭘 확인해야 하나.
+ */
+function gateError(status: number, body: any, testnet: boolean): Error {
+  const said = body?.message || body?.label || '';
+  const host = testnet ? '테스트넷(api-testnet.gateapi.io)' : '실전(api.gateio.ws)';
+  const hint =
+    status === 401
+      // 401은 Gate가 서명을 못 받아들인 것이다. 원인이 셋인데 화면에서는
+      // 구별이 안 되므로 셋을 다 적는다.
+      ? ` — ${host}에 물어본 결과입니다. ①키/시크릿이 맞는지 ②이 키가 ${testnet ? '테스트넷' : '실전'} 키가 맞는지(반대쪽 키라면 연결의 테스트넷 설정을 바꾸세요) ③IP 제한을 걸었다면 이 서버 IP가 허용 목록에 있는지 확인하세요`
+      : status === 403
+        ? ` — ${host}. 키에 이 동작의 권한이 없습니다(읽기 권한을 켜세요)`
+        : status === 429
+          ? ` — ${host}. 요청이 너무 잦습니다. 잠시 뒤 다시 시도하세요`
+          : ` — ${host}에 물어본 결과입니다`;
+  return new Error(`${said || `HTTP ${status}`}${hint}`);
+}
+
 async function gateFetch(path: string, key: string, secret: string, testnet = false) {
   const ts  = Math.floor(Date.now()/1000).toString();
   const sig = signGate('GET', path, '', '', secret, ts);
@@ -31,7 +58,13 @@ async function gateFetch(path: string, key: string, secret: string, testnet = fa
     },
     signal: AbortSignal.timeout(8000),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    // 본문을 버리지 않는다. Gate는 여기에 실제 사유를 담아 보낸다
+    // (`INVALID_KEY`, `INVALID_SIGNATURE`, `IP_FORBIDDEN` 등).
+    // 바로 아래 gatePost는 원래 이렇게 하고 있었는데 GET 경로만 빠져 있었다.
+    const err = await r.json().catch(() => ({}));
+    throw gateError(r.status, err, testnet);
+  }
   return r.json();
 }
 
@@ -74,7 +107,7 @@ async function gatePost(path: string, key: string, secret: string, bodyObj: any,
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    throw new Error(err.message || err.label || `HTTP ${r.status}`);
+    throw gateError(r.status, err, testnet);
   }
   return r.json();
 }

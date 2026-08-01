@@ -13,6 +13,18 @@ import { T } from '@/lib/constants';
 // ── Exchange order & display ──────────────────────────────────
 const EXCHANGES: ExchangeId[] = ['binance','bybit','okx','gate','upbit','bithumb'];
 
+/**
+ * 테스트넷 호스트가 **서버 쪽에 실제로 구현된** 거래소.
+ *
+ * 목록에 없는 거래소는 토글을 아예 보여주지 않는다 — 고를 수 있는데 서버가
+ * 실계좌로 물어보면, 화면에는 '테스트넷'이라고 적힌 채 실계좌가 조회된다.
+ * 그건 이 저장소에서 이미 한 번 낸 사고다(Gate `BASE` 하드코딩).
+ *
+ * 여기 추가하기 전에 `lib/exchanges/<거래소>`가 testnet 인자를 받아 호스트를
+ * 바꾸는지 먼저 확인할 것. Bybit·OKX는 아직 아니다.
+ */
+const HAS_TESTNET: ExchangeId[] = ['binance', 'gate'];
+
 // ── Loading skeleton ──────────────────────────────────────────
 function Skeleton({ w='100%', h=14 }: { w?: string|number; h?: number }) {
   return <div style={{ width:w, height:h, borderRadius:6, background:'linear-gradient(90deg,var(--t-border) 25%,var(--t-border2) 50%,var(--t-border) 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.2s infinite' }}/>;
@@ -122,7 +134,10 @@ export default function ExchangeConnectPage() {
           apiKey: apiKey.trim(), apiSecret: apiSecret.trim(),
           passphrase: passphrase.trim() || undefined,
           nickname: nickname.trim() || meta.nameKr,
-          isTestnet: selExchange === 'binance' ? isTestnet : false,
+          // 테스트넷을 고를 수 있는 거래소면 고른 값을 그대로 보낸다.
+          // 예전에는 `binance ? isTestnet : false`였다 — Gate 테스트넷 키를
+          // 등록할 방법이 아예 없었고, 화면은 그 사실을 말하지도 않았다.
+          isTestnet: HAS_TESTNET.includes(selExchange) ? isTestnet : false,
         }),
       });
       const d = await r.json();
@@ -410,8 +425,12 @@ export default function ExchangeConnectPage() {
 
         {/* Inputs */}
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-          {/* 테스트넷/실전 토글 (binance만) */}
-          {selExchange === 'binance' && (
+          {/* 테스트넷/실전 토글.
+              **바이낸스 전용이 아니다.** Gate도 테스트넷 호스트가 따로 있고
+              (api-testnet.gateapi.io) 서버는 그것을 지원하는데, 여기서 고를 수
+              없어서 Gate 테스트넷 키를 등록할 방법이 없었다. 등록해 봐야
+              실계좌에 물어보고 401이 뜨는데, 화면에는 그 이유가 안 적혔다. */}
+          {HAS_TESTNET.includes(selExchange) && (
             <div>
               <div style={{ color:T.sub, fontSize:11, marginBottom:4 }}>연결 환경</div>
               <div style={{ display:'flex', gap:6 }}>
@@ -436,9 +455,15 @@ export default function ExchangeConnectPage() {
                 })}
               </div>
               <div style={{ color:T.muted, fontSize:9, marginTop:4, lineHeight:1.5 }}>
-                {isTestnet
-                  ? '테스트넷은 두 개입니다 — 현물: testnet.binance.vision · 선물: demo-fapi.binance.com(developers.binance.com 데모 모드). 키도 각각 따로 발급됩니다. 저장할 때 어느 쪽이 인증됐는지 알려드립니다. 실제 돈이 들지 않습니다.'
-                  : '⚠️ 실전: api.binance.com(현물) · fapi.binance.com(선물) 실계정 키. 실제 자금이 사용됩니다.'}
+                {/* 어느 호스트에 물어볼지를 적는다. 실패했을 때 오류 메시지가
+                    같은 호스트를 말하므로, 둘을 맞춰 보면 원인이 바로 보인다. */}
+                {selExchange === 'gate'
+                  ? (isTestnet
+                      ? '테스트넷: api-testnet.gateapi.io. Gate 테스트넷 키는 실전 키와 별도로 발급받아야 합니다. 실제 돈이 들지 않습니다.'
+                      : '⚠️ 실전: api.gateio.ws 실계정 키. 실제 자금이 사용됩니다.')
+                  : (isTestnet
+                      ? '테스트넷은 두 개입니다 — 현물: testnet.binance.vision · 선물: demo-fapi.binance.com(developers.binance.com 데모 모드). 키도 각각 따로 발급됩니다. 저장할 때 어느 쪽이 인증됐는지 알려드립니다. 실제 돈이 들지 않습니다.'
+                      : '⚠️ 실전: api.binance.com(현물) · fapi.binance.com(선물) 실계정 키. 실제 자금이 사용됩니다.')}
               </div>
             </div>
           )}
