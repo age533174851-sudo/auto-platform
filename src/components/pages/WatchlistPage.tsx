@@ -13,7 +13,7 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
 import { useLogoMap } from '@/lib/hooks/useLogoMap';
 
 
-function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];currency:string;onNav:(tab:string)=>void;onOpenAsset?:(a:Asset,dest?:string)=>void}) {
+function WatchlistPage({prices,currency,onNav,onOpenAsset,liveIds}:{prices:Asset[];currency:string;onNav:(tab:string)=>void;onOpenAsset?:(a:Asset,dest?:string)=>void;liveIds?:Set<string>}) {
   const STORE = 'tg_watchlist_v2';
 
   /* ─── Full search DB (Korean names, clean) ─── */
@@ -156,7 +156,17 @@ function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];curre
   const displayRows = displayIds.map(id=>{
     const db   = WL_DB.find(a=>a.id===id) || wl.find(w=>w.id===id);
     const live = (prices||[]).find(p=>p.id===id);
-    return db ? {...db,...(live||{})} : null;
+    if (!db) return null;
+    // **실제 시세를 받은 종목만 숫자를 그린다.**
+    //
+    // ASSETS에는 하드코딩된 기본 가격이 들어 있다(BTC 60,212 같은 것).
+    // 시세를 못 받았을 때 그 값을 그대로 그리면 그럴듯한 숫자가 뜨고,
+    // 실제로 매매 화면은 63,093인데 여기는 60,212를 보여주고 있었다.
+    //
+    // liveIds를 아예 못 받았으면(옛 호출부) 판단하지 않는다 — 전부
+    // '—'로 만들면 그것대로 화면이 죽는다.
+    const noData = liveIds ? !liveIds.has(id) : false;
+    return {...db,...(live||{}), noData};
   }).filter(Boolean) as any[];
 
   // 모든 표시 심볼 + 관심종목 심볼 → batch logo
@@ -305,7 +315,11 @@ function WatchlistPage({prices,currency,onNav,onOpenAsset}:{prices:Asset[];curre
                 {a.p?(
                   <>
                     <div style={{color:a.noData?T.muted:T.txt,fontWeight:700,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}}>{a.noData?'—':a.p?cvt(a.p,currency):'연결 필요'}</div>
-                    <div style={{color:(a.c||0)>=0?T.grn:T.red,fontSize:10,fontWeight:700,marginTop:1,whiteSpace:'nowrap'}}>{(a.c||0)>=0?'▲':'▼'}{Math.abs(a.c||0).toFixed(2)}%</div>
+                    {/* 시세를 못 받았으면 등락률도 안 그린다. '—' 옆에
+                        '▲0.00%'가 붙으면 값이 있는 것처럼 읽힌다. */}
+                    {a.noData
+                      ? <div style={{color:T.muted,fontSize:9,marginTop:1,whiteSpace:'nowrap'}}>시세 없음</div>
+                      : <div style={{color:(a.c||0)>=0?T.grn:T.red,fontSize:10,fontWeight:700,marginTop:1,whiteSpace:'nowrap'}}>{(a.c||0)>=0?'▲':'▼'}{Math.abs(a.c||0).toFixed(2)}%</div>}
                   </>
                 ):(
                   <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:3}}>

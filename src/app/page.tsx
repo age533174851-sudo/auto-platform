@@ -422,7 +422,7 @@ export default function App() {
   };
 
   // Live prices via API hook (auto-fetches /api/prices, simulates locally)
-  const { prices, status: priceStatus, source: priceSource, lastRealAt: priceRealAt, simSteps: priceSimSteps } = useLivePrices(3000);
+  const { prices, status: priceStatus, source: priceSource, lastRealAt: priceRealAt, simSteps: priceSimSteps, liveIds: priceLiveIds } = useLivePrices(3000);
   const [showMore,setShowMore]=useState(false);
   const [simpleMode,setSimpleMode]=useState(()=>{ try { return localStorage.getItem('tg_simple_mode')==='true'; } catch { return false; } });
   // SSR-safe: start with defaults, load from localStorage after mount
@@ -731,7 +731,7 @@ export default function App() {
     try {
       switch(tab) {
         case 'home':         return <HomePageComp {...p} onOpenAsset={openDetail}/>;
-        case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail}/>;
+        case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail} liveIds={priceLiveIds}/>;
         case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openDetail} onOpenPnL={openPnL}/>;
         case 'trading':      return <TradingPageComp key={activeAsset?.id||'trading'} prices={prices} currency={currency} activeAsset={activeAsset} onOpenPnL={openPnL} priceRealAt={priceRealAt} priceSimSteps={priceSimSteps}/>;
         case 'auto':         return <AutoPageComp onNav={nav} currency={currency} onOpenAsset={openAsset} requireAuth={requireAuth}/>;
