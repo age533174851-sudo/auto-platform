@@ -27,6 +27,8 @@ import { PaperWallet, usePaperAccount } from './PaperWallet';
 import { AccountLine } from './AccountLine';
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 75, 100];
+/** 슬라이더·숫자 입력의 상한. 칩 목록의 마지막 값과 같아야 한다 */
+const MAX_LEVERAGE = 100;
 
 /**
  * 펀딩비와 다음 정산까지 남은 시간.
@@ -452,10 +454,24 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const liqTone = liqPct < 1 ? C.down : liqPct < 3 ? C.warn : C.dim;
   const base = symbol.id.replace(/USDT$/, '');
 
+  /** 배율을 1~MAX_LEVERAGE로 자른다. 범위 밖을 조용히 통과시키지 않는다 */
+  const clampLev = (v: any): number => {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return leverage;
+    return Math.min(MAX_LEVERAGE, Math.max(1, n));
+  };
+
+  /** 값만 바꾼다 — 슬라이더·숫자 입력처럼 **연속으로** 움직이는 조작용 */
+  const setLev = (v: any) => {
+    const n = clampLev(v);
+    setLeverage(n);
+    try { localStorage.setItem(LEV_KEY, String(n)); } catch {}
+  };
+
+  /** 고르고 닫는다 — 빠른 선택 칩용 */
   const pickLev = (v: number) => {
-    setLeverage(v);
+    setLev(v);
     setLevOpen(false);
-    try { localStorage.setItem(LEV_KEY, String(v)); } catch {}
   };
 
   // 한 눈금 = 표시 자릿수의 최소 단위. 가격이 없으면 움직이지 않는다 —
@@ -978,6 +994,65 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             boxShadow: '0 12px 32px rgba(0,0,0,.6)', padding: 10,
           }}>
             <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 7 }}>레버리지</div>
+
+            {/* − / 숫자 / + 한 줄.
+                칩만 있으면 **칩에 없는 배율은 아예 고를 수가 없다**(7배·33배).
+                거래소는 다 되는데 이 화면만 못 하는 것이라, 사용자는 앱을
+                나가서 거래소 앱으로 바꾸고 돌아온다. */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              background: C.panel, border: `1px solid ${C.hair}`, borderRadius: 8,
+              padding: 4, marginBottom: 8,
+            }}>
+              <button type="button" onClick={() => setLev(leverage - 1)}
+                disabled={leverage <= 1}
+                style={{
+                  width: 38, minHeight: 34, borderRadius: 6, border: 'none', cursor: 'pointer',
+                  background: C.raised, color: leverage <= 1 ? C.faint : C.text,
+                  fontSize: FS.lead, fontWeight: 800,
+                }}>−</button>
+              <input
+                value={leverage}
+                inputMode="numeric"
+                onChange={e => {
+                  // 지우는 중일 수 있다. 빈 칸을 1로 바꾸면 숫자를 못 지운다.
+                  const raw = e.target.value.replace(/[^0-9]/g, '');
+                  if (raw === '') return;
+                  setLev(raw);
+                }}
+                style={{
+                  flex: 1, minWidth: 0, textAlign: 'center',
+                  background: 'transparent', border: 'none', outline: 'none',
+                  color: leverage >= 50 ? C.warn : C.text,
+                  fontSize: FS.num, fontWeight: 800, ...NUM,
+                }}/>
+              <span style={{ color: C.dim, fontSize: FS.small, fontWeight: 700 }}>×</span>
+              <button type="button" onClick={() => setLev(leverage + 1)}
+                disabled={leverage >= MAX_LEVERAGE}
+                style={{
+                  width: 38, minHeight: 34, borderRadius: 6, border: 'none', cursor: 'pointer',
+                  background: C.raised, color: leverage >= MAX_LEVERAGE ? C.faint : C.text,
+                  fontSize: FS.lead, fontWeight: 800,
+                }}>+</button>
+            </div>
+
+            {/* 끌어서 고르기 */}
+            <input
+              type="range" min={1} max={MAX_LEVERAGE} step={1} value={leverage}
+              onChange={e => setLev(e.target.value)}
+              className="switch"
+              style={{
+                width: '100%', minHeight: 0, height: 26, margin: 0,
+                accentColor: leverage >= 50 ? C.down : C.accent, cursor: 'pointer',
+              }}/>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between',
+              color: C.faint, fontSize: FS.micro, ...NUM, marginBottom: 8,
+            }}>
+              {[1, 25, 50, 75, 100].map(v => <span key={v}>{v}×</span>)}
+            </div>
+
+            {/* 빠른 선택. 슬라이더가 있어도 자주 쓰는 값은 한 번에 가야 한다 */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 5 }}>
               {LEVERAGES.map(v => {
                 const on = leverage === v;
@@ -993,9 +1068,28 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                 );
               })}
             </div>
-            <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 8, lineHeight: 1.5 }}>
+
+            {/* **이 배율이 무엇을 뜻하는지**를 숫자 옆에 붙인다.
+                100×가 위험한 이유는 숫자가 커서가 아니라 청산까지 1%라서다.
+                슬라이더를 끄는 동안 이 값이 같이 움직여야 의미가 있다. */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              marginTop: 8, fontSize: FS.micro, ...NUM,
+            }}>
+              <span style={{ color: C.faint }}>청산까지</span>
+              <span style={{ color: leverage >= 50 ? C.down : leverage >= 20 ? C.warn : C.dim, fontWeight: 700 }}>
+                약 {roughLiqDistancePct(leverage).toFixed(leverage >= 20 ? 2 : 1)}%
+              </span>
+            </div>
+            <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 4, lineHeight: 1.5 }}>
               청산 거리는 유지증거금을 뺀 근사치입니다. 실제 청산은 이보다 가깝습니다.
             </div>
+
+            <button type="button" onClick={() => setLevOpen(false)} style={{
+              width: '100%', minHeight: 36, marginTop: 9, borderRadius: 8,
+              background: C.accent, color: '#fff', border: 'none',
+              fontSize: FS.small, fontWeight: 700, cursor: 'pointer',
+            }}>{leverage}× 적용</button>
           </div>
         </>
       )}

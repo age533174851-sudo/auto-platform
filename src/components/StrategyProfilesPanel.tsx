@@ -185,9 +185,21 @@ export default function StrategyProfilesPanel() {
               {[1, 10, 100, 1000].map(n => (
                 <button key={n} onClick={() => simTrades(p, n)}
                   style={{ ...btn(n === 1 ? accent : T.alt2 || '#334155'),
-                           opacity: (s.killed || busy === p.id) ? 0.5 : 1 }}
+                           opacity: (s.killed || busy === p.id) ? 0.5 : 1,
+                           display: 'inline-flex', flexDirection: 'column',
+                           alignItems: 'center', gap: 1, lineHeight: 1.25 }}
                   disabled={s.killed || busy === p.id}>
                   {busy === p.id ? '…' : n === 1 ? '모의 진입 시뮬 (규칙엔진)' : `${n}회`}
+                  {/* **누르기 전에** 그게 며칠치인지 보인다.
+                      아래 문단에도 같은 값이 있지만, 거기까지 읽고 다시
+                      버튼으로 눈을 올리는 사람은 많지 않다. 1000회를 1초에
+                      돌리면 쉬운 일처럼 보이는데 실제로는 열흘치다 —
+                      그 감각은 누르는 순간에 있어야 한다. */}
+                  {busy !== p.id && n > 1 && p.maxHoldSec > 0 && (
+                    <span style={{ fontSize: 8, opacity: 0.75, fontWeight: 500 }}>
+                      ≈ {fmtDur(p.maxHoldSec * n)}
+                    </span>
+                  )}
                 </button>
               ))}
               {s.killed && <button onClick={() => { resetProfileKill(p.id); refresh(); showToast('킬스위치 해제'); }} style={btn(T.muted)}>킬스위치 해제</button>}
@@ -201,7 +213,7 @@ export default function StrategyProfilesPanel() {
               {p.maxHoldSec > 0
                 ? `실제 소요 시간(최대 보유시간 ${fmtDur(p.maxHoldSec)} 기준 상한): `
                   + [10, 100, 1000].map(n => `${n}회 ≈ ${fmtDur(p.maxHoldSec * n)}`).join(' · ')
-                  + '. 실제로는 대부분 익절·손절이 먼저 닿아 이보다 짧습니다.'
+                  + '. 버튼에 적힌 기간이 이 값입니다. 실제로는 대부분 익절·손절이 먼저 닿아 이보다 짧습니다.'
                 : '이 프로필은 최대 보유시간이 무제한이라 실제 소요 시간을 예측할 수 없습니다.'}
             </div>
 
