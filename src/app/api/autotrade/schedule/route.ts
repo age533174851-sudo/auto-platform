@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
 
   const { data: rows, error } = await (sb as any)
     .from('autotrade_schedules')
-    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result')
+    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct')
     .eq('user_id', uid).order('symbol');
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
@@ -98,6 +98,36 @@ export async function POST(req: NextRequest) {
   const enabled = body?.enabled !== false;
   const modeRaw = String(body?.mode || 'TESTNET').toUpperCase();
 
+  // 배율 **상한**과 1회 위험 비율. 둘 다 선택이다 — 안 주면 코드 기본값.
+  //
+  // '상한'이지 '배율'이 아니다. 여기에 100을 저장하고 그대로 쓰면 손절이
+  // 2%인 자리에도 100배가 나가는데, 그건 진입 직후 청산이다. 상한이면
+  // 역산 결과가 더 작을 때 작은 쪽이 나간다 — 안전한 쪽으로 틀린다.
+  const levRaw = body?.leverageCap;
+  const riskRaw = body?.riskPct;
+  let leverageCap: number | null = null;
+  let riskPct: number | null = null;
+  if (levRaw != null && levRaw !== '') {
+    const n = Math.round(Number(levRaw));
+    if (!Number.isFinite(n) || n < 1 || n > 125) {
+      return NextResponse.json({
+        ok: false, error: 'invalid_leverage',
+        message: `배율 상한은 1~125 사이여야 합니다 (입력 ${levRaw})`,
+      }, { status: 400 });
+    }
+    leverageCap = n;
+  }
+  if (riskRaw != null && riskRaw !== '') {
+    const n = Number(riskRaw);
+    if (!Number.isFinite(n) || n <= 0 || n > 100) {
+      return NextResponse.json({
+        ok: false, error: 'invalid_risk',
+        message: `1회 위험 비율은 0보다 크고 100 이하여야 합니다 (입력 ${riskRaw})`,
+      }, { status: 400 });
+    }
+    riskPct = n;
+  }
+
   if (!symbol) return NextResponse.json({ ok: false, error: 'missing_symbol' }, { status: 400 });
 
   // **연결이 없으면 만들지 않는다.** 연결 없는 줄은 크론이 읽어도 주문을
@@ -155,8 +185,9 @@ export async function POST(req: NextRequest) {
     .upsert({
       user_id: uid, symbol, connection_id: connectionId,
       mode: modeRaw, enabled,
+      leverage_cap: leverageCap, risk_pct: riskPct,
     }, { onConflict: 'user_id,symbol' })
-    .select('id, symbol, mode, enabled, connection_id').single();
+    .select('id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct').single();
 
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
@@ -167,8 +198,17 @@ export async function POST(req: NextRequest) {
     ok: true, schedule: data,
     // 켠 직후에 안 도는 것을 고장으로 읽지 않게, 언제 도는지 같이 말한다.
     message: enabled
-      ? `${symbol} 자동매매를 켰습니다 — 다음 실행은 매일 23:00 UTC(한국 08:00)입니다`
+      ? `${symbol} 자동매매를 켰습니다`
+        + (leverageCap ? ` · 배율 상한 ${leverageCap}배` : '')
+        + (riskPct ? ` · 1회 위험 ${riskPct}%` : '')
+        + ' — 다음 실행은 매일 23:00 UTC(한국 08:00)입니다'
       : `${symbol} 자동매매를 껐습니다`,
+    // **상한이지 목표가 아니다.** 손절이 넓으면 역산 결과가 더 작게 나오고,
+    // 그때는 작은 쪽이 나간다. 화면이 이걸 '100배로 나간다'로 읽으면 안 된다.
+    leverageNote: leverageCap
+      ? `배율은 손절 거리에서 역산되고 ${leverageCap}배에서 잘립니다. `
+        + `${leverageCap}배가 실제로 나오려면 손절이 약 ${(100 / leverageCap * 0.26).toFixed(2)}% 안쪽이어야 합니다.`
+      : null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 

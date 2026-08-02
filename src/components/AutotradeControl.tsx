@@ -44,6 +44,9 @@ export default function AutotradeControl() {
 
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [connId, setConnId] = useState('');
+  // 10슬롯 방식: 1회 위험 10% · 배율 상한 100. 이게 기본값이다.
+  const [levCap, setLevCap] = useState('100');
+  const [riskPct, setRiskPct] = useState('10');
 
   const load = useCallback(async () => {
     if (!auth) { setErr('로그인이 필요합니다'); setData(null); return; }
@@ -71,7 +74,11 @@ export default function AutotradeControl() {
       const r = await fetch('/api/autotrade/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({ symbol, connectionId: connId, mode: 'TESTNET', enabled }),
+        body: JSON.stringify({
+          symbol, connectionId: connId, mode: 'TESTNET', enabled,
+          leverageCap: levCap === '' ? undefined : Number(levCap),
+          riskPct: riskPct === '' ? undefined : Number(riskPct),
+        }),
       });
       const j = await r.json();
       setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
@@ -89,6 +96,10 @@ export default function AutotradeControl() {
         body: JSON.stringify({
           symbol: row.symbol, connectionId: row.connection_id,
           mode: row.mode, enabled: !row.enabled,
+          // 켜고 끌 때 크기 설정을 **지우지 않는다.** 안 실어 보내면
+          // null로 덮여서, 껐다 켠 것만으로 배율 상한이 사라진다.
+          leverageCap: row.leverage_cap ?? undefined,
+          riskPct: row.risk_pct ?? undefined,
         }),
       });
       const j = await r.json();
@@ -173,6 +184,8 @@ export default function AutotradeControl() {
                 </div>
                 <div style={{ color: T.muted, fontSize: 10, marginTop: 2 }}>
                   {s.connection_id ? '연결 있음' : <span style={{ color: T.red }}>연결 없음 — 주문을 낼 수 없습니다</span>}
+                  {s.risk_pct != null ? ` · 위험 ${s.risk_pct}%` : ''}
+                  {s.leverage_cap != null ? ` · 상한 ${s.leverage_cap}배` : ''}
                   {s.last_run_at ? ` · 마지막 ${fmt(s.last_run_at)}` : ' · 실행된 적 없음'}
                 </div>
               </div>
@@ -209,6 +222,40 @@ export default function AutotradeControl() {
               </option>
             ))}
           </select>
+        </div>
+
+        {/* 크기와 배율 — 10슬롯 방식이면 위험 10% · 상한 100배 */}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>1회 위험 (%)</div>
+            <input value={riskPct} inputMode="decimal"
+              onChange={e => setRiskPct(e.target.value.replace(/[^0-9.]/g, ''))}
+              style={{
+                width: '100%', background: T.alt, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
+              }}/>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>배율 상한 (배)</div>
+            <input value={levCap} inputMode="numeric"
+              onChange={e => setLevCap(e.target.value.replace(/[^0-9]/g, ''))}
+              style={{
+                width: '100%', background: T.alt, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: '9px 10px',
+                color: Number(levCap) >= 50 ? T.ylw : T.txt, fontSize: 12, outline: 'none',
+              }}/>
+          </div>
+        </div>
+
+        {/* **상한이지 목표가 아니다.** 이걸 안 적으면 '100배로 나간다'로 읽는다. */}
+        <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.6 }}>
+          배율은 <b style={{ color: T.txt }}>손절 거리에서 역산</b>되고 이 상한에서 잘립니다 —
+          여기에 100을 넣어도 손절이 넓으면 더 작은 배율로 나갑니다.
+          {Number(levCap) > 0 && (
+            <> {levCap}배가 실제로 나오려면 손절이 약{' '}
+              <b style={{ color: T.ylw }}>{(100 / Number(levCap) * 0.26).toFixed(2)}%</b> 안쪽이어야 하고,
+              그건 BTC 노이즈 수준이라 진입 직후 손절될 수 있습니다.</>
+          )}
         </div>
 
         {/* **테스트넷 고정이다.** 실전은 화면에서 한 번에 켤 수 있으면 안 된다 —
