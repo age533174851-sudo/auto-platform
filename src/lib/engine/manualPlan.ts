@@ -105,16 +105,35 @@ export function buildManualPlan(input: ManualOrderInput): ManualPlanResult {
   if (!Number.isFinite(base.quantity) || base.quantity <= 0) {
     return deny(`수량이 유효하지 않습니다 (${quantity})`);
   }
+  // ── 청산은 배율 검사보다 먼저 통과시킨다 ──
+  //
+  // 배율은 '얼마나 크게 들어가는가'의 값이다. **나가는 주문에는 그 질문이
+  // 없다.** 그런데 예전에는 배율 검사가 위에 있어서, 거래소에서 배율을 못
+  // 읽으면(0으로 내려오면) 청산 주문까지 `배율이 유효하지 않습니다 (0)`로
+  // 막혔다. 청산 화면은 배율을 아예 보내지도 않으므로 이건 상시 위험이다.
+  //
+  // 못 여는 것은 불편이고, **못 닫는 것은 사고다.** 순서를 바꾼다.
+  if (reduceOnly) {
+    // 청산은 손절도 요구하지 않는다. 나가는 주문이다.
+    const notes = lev >= 1
+      ? base.notes
+      : [...base.notes, '배율을 확인하지 못해 필요 증거금은 계산하지 않았습니다 (청산에는 쓰이지 않습니다)'];
+    return { plan: { ...base, approved: true, notes }, reason: '' };
+  }
+
   if (!Number.isFinite(lev) || lev < 1) {
-    return deny(`배율이 유효하지 않습니다 (${leverage})`);
+    // 0·NaN·null이 오는 경우는 대개 '사용자가 0배를 골랐다'가 아니라
+    // **거래소에서 배율을 못 읽어서 빈칸이 0으로 내려온 것**이다. 그런데
+    // 예전 문구는 `(0)`만 적었고, 그러면 화면에는 "배율이 유효하지 않습니다
+    // (0)"만 뜬다 — 무엇을 고쳐야 하는지가 빠져 있다.
+    const missing = leverage == null || !Number.isFinite(lev) || lev === 0;
+    return deny(missing
+      ? '배율을 확인하지 못했습니다 — 화면에서 배율을 직접 고르거나, '
+        + '거래소에서 이 심볼의 배율 설정을 확인하세요'
+      : `배율 ${leverage}배는 최소값(1배)보다 낮습니다`);
   }
   if (lev > MANUAL_MAX_LEVERAGE) {
     return deny(`배율 ${lev}배는 이 경로의 상한(${MANUAL_MAX_LEVERAGE}배)을 넘습니다`);
-  }
-
-  if (reduceOnly) {
-    // 청산은 손절을 요구하지 않는다. 나가는 주문이다.
-    return { plan: { ...base, approved: true }, reason: '' };
   }
 
   // ── 진입에는 손절이 있어야 한다 ──
