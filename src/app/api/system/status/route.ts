@@ -9,8 +9,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import {
-  cronStatus, tableStatus, connectionStatus, overallSummary,
-  type CronExpectation, type TableProbe, type StatusItem,
+  cronStatus, tableStatus, connectionStatus, overallSummary, autotradeStatus,
+  type CronExpectation, type TableProbe, type StatusItem, type AutotradeProbe,
 } from '@/lib/system/statusReport';
 
 export const dynamic = 'force-dynamic';
@@ -26,8 +26,12 @@ const HOUR = 3_600_000;
  * 빨간불이 켜지고, 그러면 사람은 곧 이 화면을 안 본다.
  */
 const CRONS: CronExpectation[] = [
-  { job: 'exit-monitor',  label: '청산 감시',    maxGapMs: 30 * HOUR },
-  { job: 'calendar-sync', label: '일정 동기화',  maxGapMs: 30 * HOUR },
+  // **자동매매 진입이 여기 없어서**, 이 화면은 '자동매매가 도는가'에
+  // 답하지 못했다. 정작 그게 가장 자주 묻는 질문이다.
+  { job: 'daily-ladder',   label: '자동매매 진입', maxGapMs: 30 * HOUR },
+  { job: 'exit-monitor',   label: '청산 감시',     maxGapMs: 30 * HOUR },
+  { job: 'scheduled-exit', label: '시간 예약 청산', maxGapMs: 30 * HOUR },
+  { job: 'calendar-sync',  label: '일정 동기화',   maxGapMs: 30 * HOUR },
 ];
 
 /** 있어야 하는 표 */
@@ -35,6 +39,9 @@ const TABLES: Array<{ name: string; label: string; migration: string }> = [
   { name: 'sub_accounts',  label: '가상 서브계좌', migration: '024' },
   { name: 'safety_events', label: '안전장치 기록', migration: '026' },
   { name: 'cron_runs',     label: '크론 실행 기록', migration: '029' },
+  { name: 'trader_signals', label: '방송자 신호',   migration: '030' },
+  { name: 'autotrade_schedules', label: '자동매매 예약', migration: '031' },
+  { name: 'scheduled_exits', label: '시간 예약 청산', migration: '032' },
 ];
 
 export async function GET(req: NextRequest) {
@@ -68,6 +75,45 @@ export async function GET(req: NextRequest) {
     probes.push({ ...t, exists });
   }
   items.push(...tableStatus(probes));
+
+  // ── 자동매매가 지금 돌 수 있는가 ──
+  //
+  // 위 항목들이 각각 초록불이어도 "그래서 도는 거야?"에는 답이 안 된다.
+  // 넷 중 하나만 빠져도 아무 일도 안 일어나는데, 화면에는 초록 셋과
+  // 회색 하나가 보일 뿐이다. 한 줄로 합쳐서 답한다.
+  {
+    const tableExists = probes.find(x => x.name === 'autotrade_schedules')?.exists ?? null;
+    let enabledRows: number | null = null;
+    let rowsMissingConnection: number | null = null;
+    if (tableExists) {
+      try {
+        const { data, error } = await (sb as any)
+          .from('autotrade_schedules')
+          .select('connection_id')
+          .eq('user_id', uid).eq('enabled', true);
+        if (!error && Array.isArray(data)) {
+          enabledRows = data.length;
+          rowsMissingConnection = data.filter((r: any) => !r?.connection_id).length;
+        }
+        // 오류면 null로 남는다 — 0으로 채우면 '켜진 줄 없음'이 되고,
+        // 그건 조회 실패와 완전히 다른 사실이다.
+      } catch { /* null */ }
+    }
+
+    const ladder = (runs as any[])
+      .filter(r => r?.job === 'daily-ladder')
+      .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())[0];
+
+    const probe: AutotradeProbe = {
+      tableExists, enabledRows, rowsMissingConnection,
+      // **서버에 값이 있는지만 본다.** 값 자체는 응답에 절대 싣지 않는다.
+      adminSecretSet: !!process.env.ADMIN_SECRET,
+      cronSecretSet: !!process.env.CRON_SECRET,
+      lastRunMs: ladder?.started_at ? new Date(ladder.started_at).getTime() : null,
+      lastResult: ladder?.status ?? null,
+    };
+    items.push(autotradeStatus(probe, now));
+  }
 
   // ── 연결 ──
   let count: number | null = null;
