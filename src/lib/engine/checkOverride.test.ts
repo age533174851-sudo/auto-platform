@@ -17,18 +17,61 @@ export function runCheckOverrideTests() {
     eq(canOverride('STATE_RECONCILE'), true);
   });
 
-  test('손실 한도와 연패 잠금은 못 넘긴다', () => {
+  test('한도에 실제로 걸렸으면(fail) 못 넘긴다', () => {
     // 이 셋의 존재 이유가 "계속하고 싶은 바로 그 순간에 멈추는 것"이다.
     // 한 번 눌러 넘길 수 있으면 넘길 사람은 정확히 그 순간에 넘긴다.
-    eq(canOverride('DAILY_LOSS_LIMIT'), false);
-    eq(canOverride('WEEKLY_LOSS_LIMIT'), false);
-    eq(canOverride('LOSS_STREAK'), false);
+    eq(canOverride('DAILY_LOSS_LIMIT', 'fail'), false);
+    eq(canOverride('WEEKLY_LOSS_LIMIT', 'fail'), false);
+    eq(canOverride('LOSS_STREAK', 'fail'), false);
+  });
+
+  // 한도를 '못 읽은 것'은 '걸린 것'이 아니다. 예전에는 id만 보고 잘라서
+  // 둘이 같았고, 그 결과 손실 한도 표 하나를 못 읽으면 **다른 항목까지**
+  // 확인창이 통째로 안 떴다(canAsk는 못 넘기는 항목이 있으면 false다).
+  // 사용자에게는 "네/아니요가 안 나온다"로만 보였다.
+  test('한도를 못 읽었으면(unknown) 물어볼 수 있다', () => {
+    eq(canOverride('DAILY_LOSS_LIMIT', 'unknown'), true);
+    eq(canOverride('WEEKLY_LOSS_LIMIT', 'unknown'), true);
+    eq(canOverride('LOSS_STREAK', 'unknown'), true);
+  });
+
+  test('상태를 아예 모르면 못 넘긴다 — 모르는 것을 유리하게 읽지 않는다', () => {
+    for (const id of NEVER_OVERRIDABLE) {
+      eq(canOverride(id), false, `${id}가 상태 없이 통과했다`);
+      eq(canOverride(id, null), false, `${id}가 status:null로 통과했다`);
+      eq(canOverride(id, 'pass'), false, `${id}가 status:pass로 통과했다`);
+    }
+  });
+
+  test('한도가 아닌 항목은 상태와 무관하게 넘길 수 있다', () => {
+    eq(canOverride('MODE', 'fail'), true);
+    eq(canOverride('MODE'), true);
   });
 
   test('빈 id는 못 넘긴다', () => {
     eq(canOverride(''), false);
     eq(canOverride(null), false);
     eq(canOverride(undefined), false);
+  });
+
+  // ── 확인창을 못 띄우면 이유가 있어야 한다 ────────────────
+  test('canAsk가 false면 whyNoAsk가 반드시 있다', () => {
+    const cases = [
+      overridePrompt([]),
+      overridePrompt(null),
+      overridePrompt([b('DAILY_LOSS_LIMIT', { status: 'fail' })]),
+      overridePrompt([b('MODE'), b('LOSS_STREAK', { status: 'fail' })]),
+    ];
+    for (const p of cases) {
+      eq(p.canAsk, false);
+      assert(p.whyNoAsk.length > 0, '왜 안 물어보는지가 비어 있다');
+    }
+  });
+
+  test('못 읽은 손실 한도는 문구에 경고를 남긴다', () => {
+    const p = overridePrompt([b('DAILY_LOSS_LIMIT', { status: 'unknown', label: '오늘 손실 한도' })]);
+    eq(p.canAsk, true, p.whyNoAsk);
+    assert(p.text.includes('모르는 상태'), `경고가 없다: ${p.text}`);
   });
 
   // ── 적용 ────────────────────────────────────────────────

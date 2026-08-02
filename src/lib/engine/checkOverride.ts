@@ -57,10 +57,32 @@ export const NEVER_REASON: Record<string, string> = {
   LOSS_STREAK: '연패 잠금은 눌러서 넘길 수 없습니다. 연달아 잃은 뒤가 정확히 넘기고 싶어지는 순간이라, 그때 풀리면 잠금이 아닙니다.',
 };
 
-export function canOverride(id: string | null | undefined): boolean {
+/**
+ * 넘길 수 있는가.
+ *
+ * **상태를 같이 본다.** 위 NEVER 목록의 근거는 "확인한 결과 멈춰야 한다"는
+ * 것이다 — 한도에 **걸렸을 때** 멈추는 게 목적이다. 그런데 예전에는 id만
+ * 보고 잘랐다. 그래서 손실 한도를 **읽지 못한 경우**(status:'unknown')도
+ * '한도에 걸렸다'와 똑같이 다뤄졌다.
+ *
+ * 그게 왜 나쁜가: `canAsk`는 못 넘기는 항목이 하나라도 있으면 false다.
+ * 즉 손실 한도 표 하나를 못 읽으면 **다른 다섯 항목까지 통째로** 확인창이
+ * 안 뜬다. 사용자에게는 "네/아니요가 안 나온다"로만 보이고, 이유는
+ * 어디에도 안 적힌다. 실제로 그 상태가 났다.
+ *
+ * 그래서 NEVER 항목은 **'fail'일 때만** 못 넘기는 것으로 한다.
+ * 'unknown'이면 물어볼 수 있게 하되, 문구에서 모른다는 사실을 크게 적는다.
+ * 상태가 아예 없으면(값을 못 받았으면) 보수적으로 못 넘긴다 —
+ * 모르는 것을 유리하게 읽지 않는다.
+ */
+export function canOverride(
+  id: string | null | undefined,
+  status?: string | null,
+): boolean {
   const s = String(id || '');
   if (!s) return false;
-  return !NEVER_OVERRIDABLE.includes(s);
+  if (!NEVER_OVERRIDABLE.includes(s)) return true;
+  return String(status || '') === 'unknown';
 }
 
 export interface OverrideOutcome {
@@ -97,7 +119,10 @@ export function applyOverrides(
   for (const b of list) {
     const id = String(b?.id || '');
     if (!id || !asked.has(id)) { remaining.push(b); continue; }
-    if (!canOverride(id)) {
+    // **상태까지 같은 규칙으로 본다.** 화면(overridePrompt)이 물어본 것을
+    // 서버(여기)가 거부하면 "네를 눌렀는데 왜 안 되지"가 된다. 두 곳이
+    // 같은 함수를 같은 인자로 부르게 둔다.
+    if (!canOverride(id, b?.status)) {
       // 넘겨달라고 했지만 안 된다. **막는 쪽에도 넣는다** — refused에만
       // 넣고 remaining에서 빼면 주문이 나간다.
       refused.push(b);
@@ -144,10 +169,14 @@ export function waiveEventsFrom(
 export function overridePrompt(
   blockers: BlockerLike[] | null | undefined,
   opts: { realMoney?: boolean } = {},
-): { askable: BlockerLike[]; blocked: BlockerLike[]; text: string; canAsk: boolean } {
+): {
+  askable: BlockerLike[]; blocked: BlockerLike[]; text: string; canAsk: boolean;
+  /** 확인창을 못 띄우는 이유. **canAsk가 false인데 이 값이 비면 안 된다** */
+  whyNoAsk: string;
+} {
   const list = Array.isArray(blockers) ? blockers.filter(Boolean) : [];
-  const askable = list.filter(b => canOverride(b?.id));
-  const blocked = list.filter(b => !canOverride(b?.id));
+  const askable = list.filter(b => canOverride(b?.id, b?.status));
+  const blocked = list.filter(b => !canOverride(b?.id, b?.status));
 
   const lines: string[] = [];
 
@@ -168,6 +197,15 @@ export function overridePrompt(
     if (askable.some(b => String(b?.status) === 'fail')) {
       lines.push('✕ 는 확인해 보니 조건에 맞지 않는 항목입니다.');
     }
+    // 손실 한도를 '못 읽어서' 물어보는 경우는 따로 크게 적는다. 다른
+    // 항목과 같은 무게로 지나가면, 한도를 넘긴 채로 넘기는 일이 생긴다.
+    const unknownLimits = askable.filter(
+      b => NEVER_OVERRIDABLE.includes(String(b?.id)) && String(b?.status) === 'unknown');
+    if (unknownLimits.length > 0) {
+      lines.push('');
+      lines.push(`⚠ ${unknownLimits.map(b => b?.label || b?.id).join(' · ')}를 읽지 못했습니다.`);
+      lines.push('   한도를 넘겼는지 아닌지 **모르는 상태**입니다 — 넘겼을 수도 있습니다.');
+    }
     lines.push('');
     lines.push(opts.realMoney
       ? '실제 자금이 사용됩니다. 이 주문 한 건만 통과시킵니다.'
@@ -184,11 +222,24 @@ export function overridePrompt(
     }
   }
 
-  return {
-    askable, blocked,
-    text: lines.join('\n'),
-    // 넘길 수 없는 항목이 하나라도 있으면 물어볼 이유가 없다 — "네"를
-    // 눌러도 어차피 막힌다. 물어놓고 안 되는 것이 제일 나쁘다.
-    canAsk: askable.length > 0 && blocked.length === 0,
-  };
+  // 넘길 수 없는 항목이 하나라도 있으면 물어볼 이유가 없다 — "네"를
+  // 눌러도 어차피 막힌다. 물어놓고 안 되는 것이 제일 나쁘다.
+  const canAsk = askable.length > 0 && blocked.length === 0;
+
+  // **왜 안 물어보는지를 반드시 만든다.**
+  //
+  // 예전에는 canAsk가 false면 화면이 그냥 아무것도 안 했다. 사용자에게는
+  // "네/아니요가 안 나온다"로만 보이고, 이유는 어디에도 없었다. 실제로
+  // 손실 한도 두 개를 못 읽어서 나머지 네 항목까지 확인창이 통째로 안 뜬
+  // 일이 있었고, 그게 화면만 봐서는 고장과 구분되지 않았다.
+  let whyNoAsk = '';
+  if (!canAsk) {
+    if (list.length === 0) whyNoAsk = '막은 항목을 받지 못했습니다.';
+    else if (blocked.length > 0) {
+      whyNoAsk = `${blocked.map(b => b?.label || b?.id).join(' · ')}는 눌러서 넘길 수 없어, `
+        + '나머지 항목도 확인창으로 통과시킬 수 없습니다.';
+    } else whyNoAsk = '넘길 수 있는 항목이 없습니다.';
+  }
+
+  return { askable, blocked, text: lines.join('\n'), canAsk, whyNoAsk };
 }
