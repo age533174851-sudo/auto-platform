@@ -594,19 +594,83 @@ export async function placeFuturesOrder(
 
 export async function placeFuturesTPSL(
   key: string, secret: string,
-  opts: { symbol: string; side: 'BUY' | 'SELL'; stopPrice: number; type: 'TAKE_PROFIT_MARKET' | 'STOP_MARKET'; quantity?: number },
+  opts: {
+    symbol: string; side: 'BUY' | 'SELL'; stopPrice: number;
+    type: 'TAKE_PROFIT_MARKET' | 'STOP_MARKET'; quantity?: number;
+    /**
+     * 트리거 기준가. 기본은 MARK_PRICE — 얇은 호가의 한 틱 꼬리에 손절이
+     * 털리는 것을 줄인다. 예전에는 코드에 박혀 있어서 사용자가 Last를
+     * 원해도 방법이 없었다.
+     */
+    workingType?: 'MARK_PRICE' | 'CONTRACT_PRICE';
+  },
   testnet = true,
 ): Promise<FuturesOrderResult> {
   try {
     const params: Record<string, string | number> = {
       symbol: opts.symbol.toUpperCase().replace('/', ''), side: opts.side, type: opts.type, stopPrice: opts.stopPrice,
-      workingType: 'MARK_PRICE',
+      workingType: opts.workingType || 'MARK_PRICE',
     };
     if (opts.quantity != null) { params.quantity = opts.quantity; params.reduceOnly = 'true'; }
     else { params.closePosition = 'true'; }
     const d = await fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
     return { success: true, message: opts.type === 'TAKE_PROFIT_MARKET' ? '익절 설정' : '손절 설정', orderId: d.orderId, symbol: d.symbol, raw: d };
   } catch (e: any) { return { success: false, message: e.message || 'TP/SL 실패' }; }
+}
+
+/**
+ * 트레일링 스톱 (TRAILING_STOP_MARKET).
+ *
+ * 가격이 유리한 쪽으로 갈 때 손절이 따라 올라가고, `callbackRate`만큼
+ * 되돌리면 시장가로 닫는다.
+ *
+ * 주의할 점 둘
+ * ────────────
+ *  · `callbackRate`는 거래소가 0.1~10%만 받는다. 범위 밖이면 거절되는데
+ *    그 메시지로는 무엇이 잘못됐는지 알기 어렵다 — 부르기 전에
+ *    `tpslPlan.checkTrailing`으로 거른다.
+ *  · `activationPrice`는 **선택**이다. 안 주면 지금 마크가에서 바로
+ *    추적을 시작한다. 주면 그 가격에 닿아야 시작된다 — 방향이 틀리면
+ *    영원히 시작되지 않고, 화면에서는 걸린 것처럼 보인다.
+ *
+ * `closePosition`은 쓰지 않는다. 트레일링은 부분 수량이 흔하고,
+ * closePosition과 quantity를 같이 보내면 거래소가 거부한다.
+ */
+export async function placeFuturesTrailingStop(
+  key: string, secret: string,
+  opts: {
+    symbol: string; side: 'BUY' | 'SELL';
+    /** 0.1 ~ 10 (%) */
+    callbackRate: number;
+    /** 없으면 전량 */
+    quantity?: number | null;
+    activationPrice?: number | null;
+    workingType?: 'MARK_PRICE' | 'CONTRACT_PRICE';
+  },
+  testnet = true,
+): Promise<FuturesOrderResult> {
+  try {
+    const params: Record<string, string | number> = {
+      symbol: opts.symbol.toUpperCase().replace('/', ''),
+      side: opts.side,
+      type: 'TRAILING_STOP_MARKET',
+      callbackRate: opts.callbackRate,
+      workingType: opts.workingType || 'MARK_PRICE',
+      reduceOnly: 'true',
+    };
+    if (opts.quantity != null && opts.quantity > 0) params.quantity = opts.quantity;
+    if (opts.activationPrice != null && opts.activationPrice > 0) {
+      params.activationPrice = opts.activationPrice;
+    }
+    const d = await fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
+    return {
+      success: true,
+      message: `트레일링 스톱 설정 (${opts.callbackRate}%)`,
+      orderId: d.orderId, symbol: d.symbol, raw: d,
+    };
+  } catch (e: any) {
+    return { success: false, message: e.message || '트레일링 스톱 실패' };
+  }
 }
 
 export async function cancelFuturesOrder(key: string, secret: string, symbol: string, orderId: number | string, testnet = true) {
