@@ -550,16 +550,134 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/** GET — 오늘 실행 가능한지 미리보기 (주문·예약 없음) */
+/**
+ * GET — **크론 진입점.**
+ *
+ * 왜 이게 없어서 자동매매가 한 번도 안 돌았나
+ * ──────────────────────────────────────────
+ * 진입 엔진은 POST에 있고, 실행하려면 누가·어느 종목·어느 연결로 할지를
+ * 본문에 받아야 한다. 그런데 **Vercel 크론은 GET만 보내고 본문을 못
+ * 싣는다.** 그래서 vercel.json에 등록할 수가 없었고, 실제로 등록되어
+ * 있지도 않았다.
+ *
+ * 결과: 화면에는 자동매매 설정이 다 있는데 **한 번도 실행된 적이 없다.**
+ * 테스트넷에서도 안 돌았다. 에러도 안 났다 — 아무 일도 안 일어났으니까.
+ * 이 저장소에서 하루에 아홉 번째로 나온 같은 모양이고, 그중 제일 크다.
+ *
+ * 이제 GET이 autotrade_schedules를 읽어 켜져 있는 줄마다 POST를 부른다.
+ * 같은 실행 경로를 쓰므로 점검·손절 부착·기록이 전부 그대로 따라온다.
+ *
+ * 인증 없이 열어 두지 않는다
+ * ──────────────────────────
+ * 이 주소는 실제 주문을 낸다. Vercel 크론(Bearer CRON_SECRET)이나
+ * x-admin-secret이 없으면 거부한다. 미리보기가 필요하면 POST에
+ * dryRun: true를 쓴다.
+ */
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const symbol = (url.searchParams.get('symbol') || 'BTCUSDT').toUpperCase();
+  const cronSecret = process.env.CRON_SECRET || '';
+  const adminSecret = process.env.ADMIN_SECRET || '';
+  const auth = req.headers.get('authorization') || '';
+  const byCron = !!cronSecret && safeEqual(auth, `Bearer ${cronSecret}`);
+  const byAdmin = !!adminSecret && safeEqual(req.headers.get('x-admin-secret'), adminSecret);
+
+  if (!byCron && !byAdmin) {
+    return NextResponse.json({
+      ok: false,
+      error: '인증 필요 — Vercel Cron(Bearer CRON_SECRET) 또는 x-admin-secret',
+      // 무엇이 없어서 막혔는지 적는다. '인증 필요'만 적으면 CRON_SECRET을
+      // 안 넣은 것인지 값이 틀린 것인지 알 수 없다.
+      cronSecretConfigured: !!cronSecret,
+    }, { status: 401 });
+  }
+
+  const startedAt = Date.now();
+  const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
+  const sb = getSupabaseAdmin();
+  if (!sb) {
+    return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+  }
+
+  let rows: any[] = [];
+  let readError: string | null = null;
+  try {
+    const { data, error } = await (sb as any)
+      .from('autotrade_schedules').select('*').eq('enabled', true);
+    if (error) throw new Error(error.message);
+    rows = Array.isArray(data) ? data : [];
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    readError = /autotrade_schedules/i.test(msg) && /(does not exist|schema cache|relation)/i.test(msg)
+      ? 'autotrade_schedules 표가 없습니다 — 마이그레이션 031을 적용하세요'
+      : msg;
+  }
+
+  const results: any[] = [];
+  if (!readError) {
+    const origin = new URL(req.url).origin;
+    for (const r of rows) {
+      // 연결이 없으면 부르지 않는다. 진입 엔진이 어차피 거부하지만,
+      // 여기서 걸러야 왜 안 됐는지가 이 표에 남는다.
+      if (!r.connection_id) {
+        results.push({ symbol: r.symbol, ok: false, error: '연결(connectionId)이 지정되지 않았습니다' });
+        await noteRun(sb, r.id, '연결 없음');
+        continue;
+      }
+      try {
+        // **같은 POST 경로를 그대로 부른다.** 여기서 로직을 다시 쓰면
+        // 수동 주문과 자동 주문이 서로 다른 검사를 받게 된다.
+        const res = await fetch(`${origin}/api/autotrade/daily-ladder`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-secret': adminSecret },
+          body: JSON.stringify({
+            userId: r.user_id, symbol: r.symbol,
+            mode: r.mode, connectionId: r.connection_id,
+          }),
+        });
+        const j = await res.json().catch(() => null);
+        const ok = res.ok && j?.ok !== false;
+        results.push({ symbol: r.symbol, mode: r.mode, ok, detail: j?.message || j?.error || null });
+        await noteRun(sb, r.id, ok ? (j?.message || '실행됨') : (j?.error || `실패 (${res.status})`));
+      } catch (e: any) {
+        results.push({ symbol: r.symbol, ok: false, error: String(e?.message || e) });
+        await noteRun(sb, r.id, `호출 실패: ${e?.message || e}`);
+      }
+    }
+  }
+
+  // 돌았다는 사실을 남긴다. 이게 없으면 또 "돌고 있는 줄 알았는데"가 된다.
+  let cronLogError: string | null = null;
+  try {
+    const { recordCronRun } = await import('@/lib/system/cronLog');
+    const lg = await recordCronRun(sb, 'daily-ladder',
+      readError ? 'failed' : rows.length === 0 ? 'skipped' : 'ok',
+      readError || `${rows.length}건 실행 · 성공 ${results.filter(x => x.ok).length}건`,
+      startedAt);
+    cronLogError = lg.error;
+  } catch (e: any) { cronLogError = String(e?.message || e); }
+
   return NextResponse.json({
-    ok: true,
-    hint: 'POST로 실행합니다. { symbol, mode: "TESTNET", connectionId, dryRun: true }로 미리보기하세요.',
-    symbol,
+    ok: !readError,
+    error: readError,
+    // **0건도 결과다.** 켜 놓은 것이 없으면 그렇게 말한다 — 조용히
+    // 아무것도 안 하면 지금까지와 똑같아진다.
+    scheduled: rows.length,
+    note: readError ? readError
+      : rows.length === 0
+        ? '켜져 있는 자동매매 설정이 없습니다 — autotrade_schedules에 enabled=true 줄이 필요합니다'
+        : `${rows.length}건 실행했습니다`,
+    results,
+    cronLogError,
     liveTradingLocked: process.env.ALLOW_LIVE_TRADING !== 'true',
   }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+/** 이 설정이 언제 마지막으로 돌았는지 남긴다 */
+async function noteRun(sb: any, id: string, result: string): Promise<void> {
+  try {
+    await (sb as any).from('autotrade_schedules')
+      .update({ last_run_at: new Date().toISOString(), last_result: String(result).slice(0, 300) })
+      .eq('id', id);
+  } catch { /* 기록 실패가 실행을 되돌리지는 않는다 */ }
 }
 
 /**
