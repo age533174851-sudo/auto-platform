@@ -458,31 +458,89 @@ export interface SymbolPositionRisk {
  * 존재한다. 그 값을 읽으려고 이 함수를 둔다. symbol을 지정하므로 응답도
  * 작다 — 전체를 받아 거르는 것보다 싸다.
  */
-export async function getSymbolPositionRisk(
+/**
+ * 이 심볼의 마진 모드·배율·청산가.
+ *
+ * **왜 두 번 시도하는가**
+ * 바이낸스가 `/fapi/v2/positionRisk`를 없애고 v3로 옮겼다. 그런데 v3
+ * 응답에는 **marginType과 leverage가 없다** — 그 둘은 계정 조회로 옮겨
+ * 갔다. 그래서 v2가 살아 있는 서버에서는 v2를 쓰고(한 번에 다 온다),
+ * 없는 서버에서는 v3 + 계정 조회로 채운다.
+ *
+ * **실패 이유를 삼키지 않는다**
+ * 예전에는 `catch { return null }`이었다. 그래서 마진 모드를 못 읽어도
+ * "확인 못 함"까지만 뜨고 **왜 못 읽었는지는 아무도 몰랐다.** 오늘
+ * 하루를 그것 때문에 썼다. 이제 이유를 함께 돌려준다.
+ */
+export async function getSymbolPositionRiskEx(
   key: string, secret: string, symbol: string, testnet = true,
-): Promise<SymbolPositionRisk | null> {
-  try {
-    const sym = symbol.toUpperCase().replace('/', '');
-    const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet, { symbol: sym });
-    const rows = Array.isArray(data) ? data : [data];
-    // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을
-    // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
-    const row = rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
-    if (!row) return null;
+): Promise<{ risk: SymbolPositionRisk | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
 
+  const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
     const liq = parseFloat(row.liquidationPrice ?? '0');
-    const lev = parseInt(row.leverage ?? '0', 10);
+    const lev = extra?.leverage != null ? extra.leverage : parseInt(row.leverage ?? '0', 10);
     return {
       symbol: String(row.symbol ?? sym),
       positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
-      marginType: String(row.marginType ?? '').toLowerCase(),
+      marginType: String(extra?.marginType ?? row.marginType ?? '').toLowerCase(),
       // 0은 값이 아니라 '못 받았음'이다
-      leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
+      leverage: Number.isFinite(lev as any) && Number(lev) > 0 ? Number(lev) : null,
       liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
       entryPrice: parseFloat(row.entryPrice ?? '0') || null,
       markPrice: parseFloat(row.markPrice ?? '0') || null,
+    } as SymbolPositionRisk;
+  };
+  // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을
+  // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
+  const pick = (data: any) => {
+    const rows = Array.isArray(data) ? data : [data];
+    return rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
+  };
+
+  let v2Err = '';
+  try {
+    const row = pick(await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet, { symbol: sym }));
+    if (row && row.marginType != null) return { risk: shape(row), error: null };
+  } catch (e: any) { v2Err = String(e?.message || e); }
+
+  // v3 + 계정 조회. v3에는 marginType·leverage가 없다.
+  try {
+    const row = pick(await fapiSigned('GET', '/fapi/v3/positionRisk', key, secret, testnet, { symbol: sym }));
+    if (!row) return { risk: null, error: `포지션 정보가 비어 있습니다 (v2: ${v2Err || '없음'})` };
+
+    let marginType: string | undefined;
+    let leverage: number | null | undefined;
+    try {
+      const acct: any = await fapiSigned('GET', '/fapi/v3/account', key, secret, testnet);
+      const p = (acct?.positions || []).find((x: any) => String(x?.symbol) === sym);
+      if (p) {
+        // v3 계정은 isolated 여부를 boolean으로 준다
+        marginType = p.isolated === true ? 'isolated' : p.isolated === false ? 'cross' : undefined;
+        const l = parseInt(p.leverage ?? '0', 10);
+        leverage = Number.isFinite(l) && l > 0 ? l : null;
+      }
+    } catch { /* marginType은 빈 값 → 검사가 '확인 못 함'으로 잡는다 */ }
+
+    return {
+      risk: shape(row, { marginType, leverage }),
+      // 마진 모드를 못 채웠으면 그 사실을 남긴다. 값만 비워 두면 또
+      // "왜 확인 못 했지"가 된다.
+      error: marginType ? null : `마진 모드를 계정 조회에서 못 찾았습니다 (v2: ${v2Err || '없음'})`,
     };
-  } catch { return null; }
+  } catch (e: any) {
+    return {
+      risk: null,
+      error: `포지션 조회 실패 — v2: ${v2Err || '시도 안 함'} / v3: ${String(e?.message || e)}`,
+    };
+  }
+}
+
+/** 이유가 필요 없을 때 쓰는 얇은 래퍼 */
+export async function getSymbolPositionRisk(
+  key: string, secret: string, symbol: string, testnet = true,
+): Promise<SymbolPositionRisk | null> {
+  return (await getSymbolPositionRiskEx(key, secret, symbol, testnet)).risk;
 }
 
 /**

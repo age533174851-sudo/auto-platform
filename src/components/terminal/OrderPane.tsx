@@ -352,6 +352,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 것이 "ISOLATED가 아니다"인지 "확인을 못 했다"인지 구분이 안 된다.
   // 둘은 고치는 방법이 완전히 다르다.
   const [blockers, setBlockers] = useState<any[]>([]);
+  const [riskError, setRiskError] = useState<string | null>(null);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
 
@@ -507,6 +508,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const submit = async (orderSide: 'BUY' | 'SELL') => {
     setMsg(null);
     setBlockers([]);
+    setRiskError(null);
     setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
@@ -571,6 +573,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       // 없었다. 막아서 앱을 떠나게 만드는 것은 안전이 아니다.
       if (r.status === 409 && j?.error === 'checklist_blocked') {
         setBlockers(Array.isArray(j?.checklist?.blockers) ? j.checklist.blockers : []);
+        setRiskError(j?.riskError ?? null);
         const { overridePrompt } = await import('@/lib/engine/checkOverride');
         const p = overridePrompt(j?.checklist?.blockers, { realMoney: modeResolution.realMoney });
         if (p.canAsk) {
@@ -999,6 +1002,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               </div>
             </div>
           ))}
+          {/* 조회가 왜 실패했는지. 점검 항목은 '확인 못 함'까지만 말할 수
+              있으므로 그 뒤의 이유를 여기 붙인다 — 이게 없으면 무엇을
+              고쳐야 하는지 알 수 없다. */}
+          {riskError && (
+            <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
+              거래소 조회 오류: {riskError}
+            </div>
+          )}
           <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
             <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
           </div>

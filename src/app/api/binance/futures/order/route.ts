@@ -97,6 +97,7 @@ export async function POST(req: NextRequest) {
   // 레이트리밋을 두 배로 쓰고, 두 조회 사이에 상태가 바뀌면 점검과 실제
   // 주문이 서로 다른 사실을 본다.
   let preflightRisk: any = null;
+  let riskError: string | null = null;
   let preflightStop: number | null = null;
   let preflightRef: number | null = null;
   let preflightPassed = 0;
@@ -128,9 +129,14 @@ export async function POST(req: NextRequest) {
         .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
       if (c2) {
         const { decryptSecret } = await import('@/lib/exchanges/crypto');
-        risk = await bf.getSymbolPositionRisk(
+        const rr = await bf.getSymbolPositionRiskEx(
           c2.api_key, decryptSecret(c2.api_secret_enc ?? c2.encrypted_secret ?? ''),
           symbol, useTestnet);
+        risk = rr.risk;
+        // **왜 못 읽었는지를 들고 간다.** 값만 비우면 화면에는
+        // '확인 못 함'까지만 뜨고 원인은 아무도 모른다 — 오늘 하루를
+        // 그것 때문에 썼다.
+        riskError = rr.error;
       }
     } catch { /* null → unknown → 막힌다 */ }
     preflightRisk = risk;
@@ -258,6 +264,9 @@ export async function POST(req: NextRequest) {
           // 지목했는데 못 넘긴 항목. 화면이 "네를 눌렀는데 왜 안 되지"를
           // 겪지 않게 이유를 같이 돌려준다.
           refusedOverrides: gateRes.refused.map(b => b.id),
+          // 조회가 왜 실패했는지. 점검 항목은 '확인 못 함'까지만 말할 수
+          // 있으므로, 그 뒤의 이유를 여기 붙인다.
+          riskError,
           checklist: {
             allowed: false, market: checklist.market, intent: checklist.intent,
             passed: checklist.passed, total: checklist.total,
