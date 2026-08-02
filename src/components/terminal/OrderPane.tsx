@@ -19,6 +19,7 @@ import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn, chip } fro
 import { DataBadge } from '@/components/ui/DataBadge';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
 import { useTerminal } from './TerminalContext';
+import { notifyError, notifySuccess } from '@/lib/notify/center';
 import { SpotOrderPanel } from './SpotOrderPanel';
 import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
@@ -588,23 +589,30 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
       if (r.ok && j?.ok) {
         // 넘겨서 나간 것을 '통과'로 적지 않는다.
-        setMsg({
-          ok: true,
-          text: (j?.message || '주문 접수됨')
-            + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : ''),
-        });
+        const okText = (j?.message || '주문 접수됨')
+          + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : '');
+        setMsg({ ok: true, text: okText });
+        // 토스트로도 띄운다 — 4초 뒤 저절로 사라지고, 탭하면 바로 닫히고,
+        // 알림 센터에 남아서 나중에 다시 볼 수 있다.
+        notifySuccess('주문 접수됨', okText);
         setQty('');
         if (isPaper) paper.reload();
       } else {
-        setMsg({
-          ok: false,
-          text: (j?.message || j?.error || `실패 (${r.status})`)
-            + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : ''),
-        });
+        const failText = (j?.message || j?.error || `실패 (${r.status})`)
+          + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : '');
+        setMsg({ ok: false, text: failText });
+        // **막힌 이유의 첫 줄까지 토스트에 싣는다.** 항목 이름만 있으면
+        // 무엇을 고쳐야 하는지 알 수 없다.
+        const first = Array.isArray(j?.checklist?.blockers) ? j.checklist.blockers[0] : null;
+        notifyError(
+          r.status === 409 ? '점검이 주문을 막았습니다' : '주문 실패',
+          first?.detail ? `${first.label}: ${first.detail}` : failText);
       }
     } catch (e: any) {
       // 응답을 못 받았다. 나갔는지 안 나갔는지 모르는 상태다.
-      setMsg({ ok: false, text: `응답 없음 — 재시도 말고 포지션 먼저 확인 (${e?.message || e})` });
+      const noRes = `응답 없음 — 재시도 말고 포지션 먼저 확인 (${e?.message || e})`;
+      setMsg({ ok: false, text: noRes });
+      notifyError('응답을 못 받았습니다', noRes);
     } finally { setBusy(false); }
   };
 
@@ -967,6 +975,11 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           padding: '9px 10px', borderRadius: 8, background: C.downBg,
           display: 'flex', flexDirection: 'column', gap: 7,
         }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -3, marginBottom: -3 }}>
+            <button onClick={() => setBlockers([])} aria-label="닫기"
+              style={{ background: 'none', border: 'none', color: C.faint,
+                       cursor: 'pointer', padding: '0 2px', fontSize: FS.body, lineHeight: 1 }}>×</button>
+          </div>
           {blockers.map((b: any, i: number) => (
             <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
               <span style={{
@@ -1058,7 +1071,15 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <div style={{
           padding: '8px 10px', borderRadius: 8, fontSize: FS.micro, lineHeight: 1.5,
           color: msg.ok ? C.up : C.down, background: msg.ok ? C.upBg : C.downBg,
-        }}>{msg.text}</div>
+          display: 'flex', gap: 8, alignItems: 'flex-start',
+        }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{msg.text}</span>
+          {/* 끌 수 있게. 고칠 때까지 계속 남아 있어야 하는 안내와,
+              읽고 나면 치우고 싶은 안내는 다르다 — 치우는 쪽은 사용자가 정한다 */}
+          <button onClick={() => setMsg(null)} aria-label="닫기"
+            style={{ background: 'none', border: 'none', color: 'inherit',
+                     cursor: 'pointer', padding: '0 2px', fontSize: FS.body, lineHeight: 1, opacity: .7 }}>×</button>
+        </div>
       )}
 
 
