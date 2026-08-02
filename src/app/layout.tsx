@@ -4,6 +4,7 @@ import './globals.css';
 import KeyboardInsetProvider from '@/components/KeyboardInsetProvider';
 import NotifyHost from '@/components/notify/NotifyHost';
 import SessionCookieSync from '@/components/auth/SessionCookieSync';
+import DisplayScaleApplier from '@/components/settings/DisplayScaleApplier';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -127,6 +128,10 @@ document.documentElement.setAttribute('data-theme',t);
           들어가야 쿠키가 생기고, 들어가려면 쿠키가 있어야 한다.
         */}
         <SessionCookieSync />
+        {/* 저장해 둔 화면 배율을 앱이 뜰 때 바로 적용한다.
+            설정 화면에서만 적용하면, 크게 해 둔 사람은 거기 들어가기
+            전까지 못 읽는 화면을 본다. */}
+        <DisplayScaleApplier />
         {children}
       </body>
     </html>
