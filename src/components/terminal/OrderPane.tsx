@@ -84,6 +84,8 @@ export function useCountdown(nextAt: number | null): string {
   return txt;
 }
 const LEV_KEY = 'tg_terminal_leverage';
+/** 수량 단위(코인 개수 / USDT 금액) 기억용 */
+const UNIT_KEY = 'tg_terminal_unit';
 
 /**
  * 이 배율에서 청산까지의 대략 거리(%).
@@ -355,6 +357,29 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [riskError, setRiskError] = useState<string | null>(null);
   // 접힌 채로 시작한다 — 펼쳐 두면 진입 버튼이 화면 밖으로 밀린다
   const [blockOpen, setBlockOpen] = useState(false);
+  // 확인창("네/아니요")을 못 띄운 이유. 비어 있지 않으면 화면에 적는다.
+  const [noAskWhy, setNoAskWhy] = useState('');
+
+  // 이 심볼의 마진 모드. **null은 '격리'가 아니라 '모른다'다.**
+  //
+  // 예전에는 화면에 '격리'라는 글자만 박혀 있었다 — 거래소에서 읽지도 않고,
+  // 누를 수도 없었다. 그래서 같은 화면 아래쪽에서 점검이 "마진 모드를 읽지
+  // 못했습니다 — CROSS인지 확인할 수 없습니다"라고 말하는 동안, 위쪽은
+  // '격리'라고 단정하고 있었다. 둘 중 하나는 거짓이고 사용자는 큰 글씨를 믿는다.
+  const [marginType, setMarginType] = useState<'ISOLATED' | 'CROSSED' | null>(null);
+  const [marginErr, setMarginErr] = useState('');
+  const [marginBusy, setMarginBusy] = useState(false);
+  const [marginOpen, setMarginOpen] = useState(false);
+
+  // 주문 수량을 무엇으로 세는가 — 코인 개수(BTC)인가 금액(USDT)인가.
+  //
+  // 거래소는 늘 코인 개수로 받는다. USDT로 적으면 화면이 나눠서 개수를
+  // 만든다. **환산은 화면에서 하고, 서버로는 개수만 보낸다** — 두 곳에서
+  // 나누기 시작하면 어느 쪽이 실제로 나간 수량인지 알 수 없다.
+  const [unit, setUnit] = useState<'BASE' | 'QUOTE'>(() => {
+    try { return localStorage.getItem(UNIT_KEY) === 'QUOTE' ? 'QUOTE' : 'BASE'; }
+    catch { return 'BASE'; }
+  });
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
 
@@ -447,6 +472,72 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     return () => { alive = false; clearInterval(t); };
   }, [symbol.id]);
 
+  // ── 마진 모드를 실제로 읽어 온다 ──
+  //
+  // 모의는 거래소에 나가지 않으므로 물어볼 곳이 없다. 그때는 '격리'로
+  // **고정**이고, 그건 앱이 정한 규칙이라 단정해도 된다 — 거래소 상태를
+  // 모르면서 단정하는 것과 다르다.
+  useEffect(() => {
+    if (isPaper) { setMarginType('ISOLATED'); setMarginErr(''); return; }
+    const connId = modeResolution.connId;
+    if (!auth || !connId) { setMarginType(null); setMarginErr('연결이 없어 확인하지 못했습니다'); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/binance/futures/margin-type?connectionId=${encodeURIComponent(connId)}&symbol=${symbol.id}`,
+          { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (!alive) return;
+        setMarginType(j?.marginType ?? null);
+        setMarginErr(j?.marginType ? '' : (j?.message || j?.error || '마진 모드를 읽지 못했습니다'));
+      } catch (e: any) {
+        // **격리로 가정하지 않는다.** 여기서 기본값을 넣으면 화면이 다시
+        // 거짓말을 시작한다.
+        if (alive) { setMarginType(null); setMarginErr(`조회 실패 (${e?.message || e})`); }
+      }
+    })();
+    return () => { alive = false; };
+  }, [auth, modeResolution.connId, symbol.id, isPaper]);
+
+  /** 마진 모드를 바꾼다. 교차는 되돌릴 수 없는 성격이라 한 번 묻는다. */
+  const switchMargin = async (want: 'ISOLATED' | 'CROSSED') => {
+    const connId = modeResolution.connId;
+    if (isPaper) { setMarginErr('모의는 격리로 고정입니다'); return; }
+    if (!auth || !connId) { setMarginErr('로그인·연결이 필요합니다'); return; }
+    if (want === marginType) { setMarginOpen(false); return; }
+
+    if (want === 'CROSSED') {
+      const { confirmDialog } = await import('@/lib/confirm/dialog');
+      const ok = await confirmDialog([
+        `${symbol.id}를 교차(CROSS)로 바꿉니다.`,
+        '',
+        '교차에서는 손실이 이 포지션의 증거금을 넘어 **계좌 전체로 번집니다.**',
+        '이 앱의 청산가 계산과 증거금 상한은 모두 격리를 전제로 합니다.',
+      ].join('\n'), { title: '교차로 바꿀까요?', confirmText: '네', cancelText: '아니요', danger: true });
+      if (!ok) return;
+    }
+
+    setMarginBusy(true); setMarginErr('');
+    try {
+      const r = await fetch('/api/binance/futures/margin-type', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ connectionId: connId, symbol: symbol.id, marginType: want }),
+      });
+      const j = await r.json();
+      if (r.ok && j?.ok) {
+        setMarginType(want); setMarginOpen(false);
+        notifySuccess('마진 모드 변경', j.message || `${want}로 바꿨습니다`);
+      } else {
+        // 실패했으면 **화면 값을 바꾸지 않는다.** 거래소는 그대로다.
+        setMarginErr(j?.message || j?.error || `실패 (${r.status})`);
+      }
+    } catch (e: any) {
+      setMarginErr(`응답 없음 — 거래소에서 직접 확인하세요 (${e?.message || e})`);
+    } finally { setMarginBusy(false); }
+  };
+
   // 비율 버튼은 **선물 가용 증거금**만 쓴다. 현물 USDT를 쓰면 없는 돈으로
   // 수량을 계산하게 되고, 그 수량이 그대로 주문이 된다.
   //
@@ -457,7 +548,25 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     : (wallet?.futuresUsableMargin ?? null);
 
   const mid = stream.lastPrice;
-  const notional = (Number(qty) || 0) * (Number(price) || mid || 0);
+
+  // ── 단위 환산은 **여기 한 곳에서만** 한다 ──
+  //
+  // 거래소는 언제나 코인 개수로 받는다. 사용자가 USDT로 적었으면 화면이
+  // 나눠서 개수를 만든다. 그 환산을 서버에도 두면 두 곳이 나누게 되고,
+  // 그러면 실제로 나간 수량이 어느 쪽 계산인지 알 수 없다.
+  const unitPx = Number(price) || mid || 0;
+  /** 사용자가 입력란에 적은 숫자 (단위는 unit) */
+  const typedQty = Number(qty);
+  /**
+   * 실제로 주문에 나갈 코인 개수.
+   *
+   * USDT로 적었는데 **가격을 모르면 NaN이다.** 0으로 두면 아래 검사에서
+   * '수량을 입력하세요'로 끝나 버리는데, 실제 문제는 가격을 못 읽은 것이다.
+   */
+  const baseQty = unit === 'BASE'
+    ? typedQty
+    : (unitPx > 0 ? typedQty / unitPx : NaN);
+  const notional = (Number.isFinite(baseQty) ? baseQty : 0) * unitPx;
   const margin = leverage > 0 ? notional / leverage : 0;
   const liqPct = roughLiqDistancePct(leverage);
   // 이 잔고와 배율로 열 수 있는 최대 명목가. 잔고를 모르면 null이다 —
@@ -500,8 +609,26 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     const px = Number(price) || mid || 0;
     // 잔고를 모르면 비율 계산이 불가능하다. 임의 값으로 채우지 않는다.
     if (px <= 0 || balanceUsd == null) return;
-    const q = (balanceUsd * (pct / 100) * leverage) / px;
-    setQty(q > 0 ? String(Number(q.toFixed(6))) : '');
+    // 이 비율로 열 명목가(USDT). 코인 개수는 여기서 나눠 만든다.
+    const notionalUsd = balanceUsd * (pct / 100) * leverage;
+    // **고른 단위로 적는다.** 개수 칸에 USDT를, USDT 칸에 개수를 넣으면
+    // 사용자가 보는 숫자와 나가는 주문이 어긋난다.
+    const v = unit === 'BASE' ? notionalUsd / px : notionalUsd;
+    setQty(v > 0 ? String(Number(v.toFixed(unit === 'BASE' ? 6 : 2))) : '');
+  };
+
+  /** 단위를 바꾼다. **적어 둔 값을 그대로 두지 않고 환산한다** */
+  const switchUnit = (next: 'BASE' | 'QUOTE') => {
+    if (next === unit) return;
+    setUnit(next);
+    try { localStorage.setItem(UNIT_KEY, next); } catch {}
+    // 값이 없거나 가격을 모르면 환산할 수 없다. 그때는 **비운다** —
+    // 숫자를 그대로 두면 0.09 BTC가 0.09 USDT로 읽히고, 그 상태로 눌리면
+    // 의도한 것의 70만분의 1이 나간다.
+    const cur = Number(qty);
+    if (!Number.isFinite(cur) || cur <= 0 || unitPx <= 0) { setQty(''); return; }
+    const v = next === 'BASE' ? cur / unitPx : cur * unitPx;
+    setQty(String(Number(v.toFixed(next === 'BASE' ? 6 : 2))));
   };
 
   // 방향을 인자로 받는다. 바이낸스처럼 롱·숏 버튼을 동시에 두면
@@ -512,11 +639,18 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setBlockers([]);
     setRiskError(null);
     setBlockOpen(false);
+    setNoAskWhy('');
     setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
     if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason }); return; }
-    const q = Number(qty);
+    // USDT로 적었으면 여기서 코인 개수가 된다. **가격을 모르면 환산이
+    // 불가능하고, 그건 '수량을 안 적었다'와 다른 문제다** — 다르게 말한다.
+    if (unit === 'QUOTE' && unitPx <= 0) {
+      setMsg({ ok: false, text: '가격을 확인하지 못해 USDT를 수량으로 바꿀 수 없습니다 — 지정가를 입력하거나 단위를 ' + base + '로 바꾸세요' });
+      return;
+    }
+    const q = Number(baseQty);
     if (!Number.isFinite(q) || q <= 0) { setMsg({ ok: false, text: '수량을 입력하세요' }); return; }
     if (!reduceOnly && !(slPct > 0)) {
       setMsg({ ok: false, text: '손절 폭을 고르세요 — 손절 없는 진입은 받지 않습니다' });
@@ -590,6 +724,11 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             r = await send(p.askable.map((b: any) => String(b.id)));
             j = await r.json();
           }
+        } else {
+          // **왜 안 물어보는지 적는다.** 예전에는 여기서 아무 일도 안
+          // 일어났고, 사용자에게는 '네/아니요가 안 나온다'로만 보였다.
+          // 안 뜨는 것과 고장 난 것이 화면에서 똑같았다.
+          setNoAskWhy(p.whyNoAsk || '');
         }
       }
 
@@ -647,12 +786,24 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           청산거리를 지우지 않는 이유: 배율 숫자만으로는 위험이 안 읽힌다.
           5×와 50×의 차이는 '10배'가 아니라 '20% 여유'와 '2% 여유'다. */}
       <div style={{ display: 'flex', gap: 5, alignItems: 'stretch' }}>
-        <span style={{
-          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          minHeight: dense ? 28 : 30, borderRadius: 7, background: C.raised,
-          border: `1px solid ${C.hair}`, color: C.dim,
-          fontSize: FS.micro, fontWeight: 600,
-        }}>격리</span>
+        {/* **읽어 온 값만 적는다.** 못 읽었으면 '확인 못 함'이다 —
+            여기에 '격리'를 박아 두면, 아래 점검이 "CROSS인지 알 수 없다"고
+            말하는 동안 위에서는 격리라고 단정하게 된다. 실제로 그랬다. */}
+        <button onClick={() => { if (!isPaper) setMarginOpen(v => !v); }}
+          title={marginErr || undefined}
+          style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3,
+            minHeight: dense ? 28 : 30, borderRadius: 7,
+            background: marginType === 'CROSSED' ? C.downBg : C.raised,
+            border: `1px solid ${marginType == null ? A(C.warn, '55')
+              : marginType === 'CROSSED' ? A(C.down, '55') : C.hair}`,
+            color: marginType == null ? C.warn : marginType === 'CROSSED' ? C.down : C.dim,
+            fontSize: FS.micro, fontWeight: marginType === 'CROSSED' ? 800 : 600,
+            cursor: isPaper ? 'default' : 'pointer',
+          }}>
+          {marginType == null ? '모드 ?' : marginType === 'CROSSED' ? '교차' : '격리'}
+          {!isPaper && <span style={{ opacity: .5, fontSize: FS.micro }}>▾</span>}
+        </button>
         <button onClick={() => setLevOpen(v => !v)} style={{
           flex: 1, minHeight: dense ? 28 : 30, borderRadius: 7, cursor: 'pointer',
           background: leverage >= 50 ? C.downBg : C.raised,
@@ -668,6 +819,34 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           whiteSpace: 'nowrap',
         }}>청산 {liqPct.toFixed(1)}%</span>
       </div>
+
+      {/* 마진 모드 고르기 */}
+      {marginOpen && !isPaper && (
+        <div style={{ padding: '9px 10px', borderRadius: 8, background: C.raised, display: 'grid', gap: 7 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {(['ISOLATED', 'CROSSED'] as const).map(m => {
+              const on = marginType === m;
+              return (
+                <button key={m} onClick={() => switchMargin(m)} disabled={marginBusy} style={{
+                  minHeight: 34, borderRadius: 7, cursor: marginBusy ? 'default' : 'pointer',
+                  background: on ? (m === 'CROSSED' ? C.down : C.accent) : C.panel,
+                  color: on ? '#fff' : m === 'CROSSED' ? C.down : C.dim,
+                  border: `1px solid ${on ? 'transparent' : C.hair}`,
+                  fontSize: FS.micro, fontWeight: 700, opacity: marginBusy ? .5 : 1,
+                }}>{m === 'CROSSED' ? '교차 CROSS' : '격리 ISOLATED'}</button>
+              );
+            })}
+          </div>
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5 }}>
+            <b style={{ color: C.dim }}>격리</b>는 손실이 이 포지션의 증거금까지만 갑니다.{' '}
+            <b style={{ color: C.down }}>교차</b>는 <b style={{ color: C.down }}>계좌 전체</b>로 번집니다.
+            열린 포지션이나 미체결 주문이 있으면 거래소가 변경을 거부합니다.
+          </div>
+          {marginErr && (
+            <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>{marginErr}</div>
+          )}
+        </div>
+      )}
 
       {/* 모의면 가상 지갑을 여기 둔다. 잔고와 충전이 주문 바로 위에 있어야
           "돈이 없어서 못 넣는다"와 "충전하면 된다"가 한눈에 이어진다. */}
@@ -744,22 +923,46 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </div>
       )}
 
-      {/* 수량 */}
+      {/* 수량 — 코인 개수(BTC)로도, 금액(USDT)으로도 적을 수 있다.
+          단위 칸을 누르면 바뀌고, 적어 둔 값은 그때 환산된다. */}
       <div style={{
         display: 'flex', alignItems: 'center', background: C.raised,
         border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden',
       }}>
         <input value={qty} onChange={e => setQty(e.target.value)}
-          placeholder="수량" inputMode="decimal"
+          placeholder={unit === 'BASE' ? '수량' : '주문금액'} inputMode="decimal"
           style={{
             flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
             color: C.text, padding: '9px 11px', fontSize: dense ? FS.small : FS.body, ...NUM,
           }}/>
-        <span style={{
-          padding: '0 10px', color: C.dim, fontSize: FS.micro, fontWeight: 600,
-          borderLeft: `1px solid ${C.hair}`, lineHeight: '34px',
-        }}>{base}</span>
+        <button onClick={() => switchUnit(unit === 'BASE' ? 'QUOTE' : 'BASE')}
+          title="단위 바꾸기"
+          style={{
+            padding: '0 10px', minHeight: 34, background: 'transparent', cursor: 'pointer',
+            color: C.dim, fontSize: FS.micro, fontWeight: 700,
+            border: 'none', borderLeft: `1px solid ${C.hair}`,
+            display: 'flex', alignItems: 'center', gap: 3,
+          }}>
+          {unit === 'BASE' ? base : 'USDT'}
+          <span style={{ opacity: .5 }}>⇄</span>
+        </button>
       </div>
+
+      {/* **실제로 나갈 개수를 적는다.**
+          USDT로 적으면 거래소에 나가는 것은 그 숫자가 아니라 나눈 결과다.
+          그 값을 안 보여주면 사용자가 확인할 방법이 없고, 그러면 이 칸은
+          '얼마인지 모르는 주문'을 만드는 칸이 된다.
+          가격을 못 읽었으면 환산도 못 한다 — 그 사실을 그대로 적는다. */}
+      {unit === 'QUOTE' && Number(qty) > 0 && (
+        <div style={{
+          margin: '-4px 0 0', fontSize: FS.micro, lineHeight: 1.5,
+          color: unitPx > 0 ? C.faint : C.warn, ...NUM,
+        }}>
+          {unitPx > 0
+            ? `→ 약 ${Number(baseQty.toFixed(6))} ${base} (${fmtPrice(unitPx)} 기준)`
+            : `가격을 확인하지 못해 ${base} 수량으로 바꿀 수 없습니다`}
+        </div>
+      )}
 
       {/* 손절 — **이 줄이 없어서 신규 진입이 전부 거부되고 있었다.**
           서버(manualPlan)는 손절 없는 진입을 막는데 화면에 넣을 칸이
@@ -999,10 +1202,22 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             <span style={{ color: C.faint, fontSize: FS.micro, flexShrink: 0 }}>
               {blockOpen ? '접기 ▲' : '자세히 ▼'}
             </span>
-            <span onClick={(e) => { e.stopPropagation(); setBlockers([]); setRiskError(null); }}
+            <span onClick={(e) => { e.stopPropagation(); setBlockers([]); setRiskError(null); setNoAskWhy(''); }}
               role="button" aria-label="닫기"
               style={{ color: C.faint, fontSize: FS.body, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>×</span>
           </button>
+
+          {/* **왜 "네/아니요"가 안 떴는가.** 접혀 있어도 보인다 — 이걸
+              펼쳐야만 보이게 하면 사용자는 확인창이 고장 났다고 생각한다. */}
+          {noAskWhy && (
+            <div style={{
+              margin: '0 10px 9px', padding: '7px 9px', borderRadius: 7,
+              background: A(C.warn, '18'), color: C.warn,
+              fontSize: FS.micro, lineHeight: 1.5,
+            }}>
+              확인창을 띄우지 않았습니다 — {noAskWhy}
+            </div>
+          )}
 
           {blockOpen && (
             <div style={{
