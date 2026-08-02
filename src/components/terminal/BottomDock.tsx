@@ -26,14 +26,16 @@ import { AllocationPanel } from './AllocationPanel';
 import { SafetyLogPanel } from './SafetyLogPanel';
 import { TrailPanel } from './TrailPanel';
 import { ScheduledExitPanel } from './ScheduledExitPanel';
+import { PreferencesPanel } from './PreferencesPanel';
+import { loadPrefs } from '@/lib/ui/preferences';
 import { KisConnectPanel } from './KisConnectPanel';
 import { SystemStatusPanel } from './SystemStatusPanel';
 import { TraderSignalPanel } from './TraderSignalPanel';
 import { LoginDiagnosticPanel } from './LoginDiagnosticPanel';
 import { DemoRunner } from './DemoRunner';
 
-type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '설정' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '설정', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -286,6 +288,10 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {/* 시간 예약 청산. 이 판은 예약과 함께 **실행기 상태**를 늘 띄운다 —
             크론이 하루 1회뿐이라 '예약됨'만 적으면 거짓말이 된다. */}
         {tab === '시간예약' && <ScheduledExitPanel/>}
+
+        {/* 화면 기본값. 여기 있는 스위치는 전부 실제로 무언가를 바꾼다 —
+            눌러도 아무 일 안 하는 스위치를 두면 화면 전체를 못 믿게 된다. */}
+        {tab === '설정' && <PreferencesPanel/>}
         {tab === '증권사' && <KisConnectPanel/>}
         {tab === '상태' && <SystemStatusPanel/>}
         {tab === '방송자' && <TraderSignalPanel/>}
@@ -472,6 +478,9 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
 }) {
   const [closing, setClosing] = useState(false);
   const [closeMsg, setCloseMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // 버튼 구성·표시 밀도는 설정이 정한다. 한 번 읽는다 — 설정을 바꾸면
+  // 그 탭에서 저장되고, 포지션 탭으로 돌아오면 새로 마운트된다.
+  const [prefs] = useState(() => loadPrefs());
   // 카드 안에서 펼치는 판. 한 번에 하나만 — 둘을 같이 열면 카드가 화면보다 길어지고,
   // 뒤집기와 TP/SL을 동시에 만지는 것은 서로 다른 결과를 기대하는 조작이다.
   const [panel, setPanel] = useState<'reverse' | 'tpsl' | 'lev' | null>(null);
@@ -658,41 +667,53 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
         }}>{closeMsg.text}</div>
       )}
 
+      {/* 어떤 버튼을 어느 순서로 놓을지는 **설정**이 정한다(화면 탭).
+          예전에는 넷이 고정이라 좁은 화면에서 글자가 잘렸고, 안 쓰는
+          버튼이 자리를 차지했다. 설정에서 최소 하나는 남게 막아 뒀다 —
+          다 끄면 여기서 청산조차 못 한다. */}
       <div style={{ display: 'flex', gap: 6 }}>
-        {/* 뒤집기 — 청산 + 반대 진입. 진입이 섞여 있으므로 손절을 받아야
-            하고, 그래서 바로 실행하지 않고 판을 편다. */}
-        <button onClick={() => { setPanel(p => p === 'reverse' ? null : 'reverse'); }}
-          disabled={qty <= 0}
-          style={{ ...ghostBtn(panel === 'reverse'), flex: 1, minHeight: 36,
-                   opacity: qty <= 0 ? 0.5 : 1 }}>
-          뒤집기
-        </button>
-        <button onClick={() => { setPanel(p => p === 'tpsl' ? null : 'tpsl'); }}
-          disabled={qty <= 0}
-          style={{ ...ghostBtn(panel === 'tpsl'), flex: 1, minHeight: 36,
-                   opacity: qty <= 0 ? 0.5 : 1 }}>
-          TP/SL
-        </button>
-        {/* 배율은 '얼마나 벌 수 있나'의 손잡이처럼 보이지만 실제로 바뀌는
-            것은 **청산가**다. 그래서 포지션 카드에 둔다 — 청산가 바로 옆. */}
-        <button onClick={() => { setPanel(p => p === 'lev' ? null : 'lev'); }}
-          disabled={qty <= 0}
-          style={{ ...ghostBtn(panel === 'lev'), flex: 1, minHeight: 36,
-                   opacity: qty <= 0 ? 0.5 : 1 }}>
-          배율
-        </button>
-        {/* 시장가 청산. 되돌릴 수 없으므로 확인을 받고, 확인 문구에
-            무엇이 얼마나 나가는지 숫자로 적는다. '청산하시겠습니까?'만
-            물으면 사람은 읽지 않고 예를 누른다. */}
-        <button onClick={closeNow} disabled={closing || qty <= 0}
-          style={{
-            flex: 1, minHeight: 36, borderRadius: 7,
-            cursor: closing || qty <= 0 ? 'default' : 'pointer',
-            background: C.downBg, color: C.down,
-            border: `1px solid ${A(C.down, '55')}`,
-            fontSize: FS.small, fontWeight: 700,
-            opacity: closing || qty <= 0 ? 0.5 : 1,
-          }}>{closing ? '청산 중…' : '청산'}</button>
+        {prefs.positionButtons.map(b => {
+          const off = qty <= 0;
+          if (b === 'REVERSE') return (
+            // 뒤집기 — 청산 + 반대 진입. 진입이 섞여 있으므로 손절을 받아야
+            // 하고, 그래서 바로 실행하지 않고 판을 편다.
+            <button key={b} onClick={() => { setPanel(x => x === 'reverse' ? null : 'reverse'); }}
+              disabled={off}
+              style={{ ...ghostBtn(panel === 'reverse'), flex: 1, minHeight: 36, opacity: off ? 0.5 : 1 }}>
+              뒤집기
+            </button>
+          );
+          if (b === 'TPSL') return (
+            <button key={b} onClick={() => { setPanel(x => x === 'tpsl' ? null : 'tpsl'); }}
+              disabled={off}
+              style={{ ...ghostBtn(panel === 'tpsl'), flex: 1, minHeight: 36, opacity: off ? 0.5 : 1 }}>
+              TP/SL
+            </button>
+          );
+          if (b === 'LEVERAGE') return (
+            // 배율은 '얼마나 벌 수 있나'의 손잡이처럼 보이지만 실제로 바뀌는
+            // 것은 **청산가**다. 그래서 포지션 카드에 둔다 — 청산가 바로 옆.
+            <button key={b} onClick={() => { setPanel(x => x === 'lev' ? null : 'lev'); }}
+              disabled={off}
+              style={{ ...ghostBtn(panel === 'lev'), flex: 1, minHeight: 36, opacity: off ? 0.5 : 1 }}>
+              배율
+            </button>
+          );
+          // 시장가 청산. 되돌릴 수 없으므로 확인을 받고, 확인 문구에
+          // 무엇이 얼마나 나가는지 숫자로 적는다. '청산하시겠습니까?'만
+          // 물으면 사람은 읽지 않고 예를 누른다.
+          return (
+            <button key={b} onClick={closeNow} disabled={closing || off}
+              style={{
+                flex: 1, minHeight: 36, borderRadius: 7,
+                cursor: closing || off ? 'default' : 'pointer',
+                background: C.downBg, color: C.down,
+                border: `1px solid ${A(C.down, '55')}`,
+                fontSize: FS.small, fontWeight: 700,
+                opacity: closing || off ? 0.5 : 1,
+              }}>{closing ? '청산 중…' : '청산'}</button>
+          );
+        })}
       </div>
 
       {panel === 'reverse' && (
@@ -1143,7 +1164,8 @@ function TpSlPanel({ v, auth, connId, onDone }: {
 
   // 트리거 기준. 기본은 Mark — 얇은 호가의 한 틱 꼬리에 손절이 털리는 것을
   // 줄인다. 거래소도 Last/Mark를 고르게 해 둔다.
-  const [trigger, setTrigger] = useState<'MARK' | 'LAST'>('MARK');
+  // 설정에서 고른 기본값으로 시작한다. 매번 같은 값을 다시 고르지 않게.
+  const [trigger, setTrigger] = useState<'MARK' | 'LAST'>(() => loadPrefs().trigger);
 
   // 몇 %를 닫을 것인가. **POSITION 탭에서는 쓰지 않는다**(항상 전량).
   const [portion, setPortion] = useState(100);
