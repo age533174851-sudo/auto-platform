@@ -43,6 +43,94 @@ export function linearLiquidationPrice(
   return liq > 0 ? liq : null;
 }
 
+/** 마진 모드. 모의도 실전과 같은 이름을 쓴다 */
+export type MarginMode = 'ISOLATED' | 'CROSSED';
+
+/**
+ * **교차(CROSS) 청산가.**
+ *
+ * 격리와 무엇이 다른가
+ * ────────────────────
+ * 격리는 이 포지션에 떼어 둔 증거금만 걸린다. 그래서 청산가는 진입가와
+ * 배율만으로 정해진다 — 잔고가 얼마든 상관없다.
+ *
+ * 교차는 **계좌 전체가 이 포지션을 받친다.** 남은 잔고가 많으면 청산가가
+ * 멀어지고, 적으면 가까워진다. 같은 10배 포지션이라도 잔고에 따라 청산가가
+ * 완전히 달라진다는 뜻이고, 그래서 잔고를 안 넣고는 계산 자체가 안 된다.
+ *
+ * 유도
+ * ────
+ * 청산은 계좌 순자산이 유지증거금에 닿는 순간이다.
+ *   순자산 = 지갑잔고 + 미실현손익
+ *   유지증거금 = 수량 × 가격 × mmr
+ *
+ * LONG:  잔고 + 수량(P − 진입가) = 수량·P·mmr
+ *        → P = (수량·진입가 − 잔고) / (수량·(1 − mmr))
+ * SHORT: 잔고 + 수량(진입가 − P) = 수량·P·mmr
+ *        → P = (잔고 + 수량·진입가) / (수량·(1 + mmr))
+ *
+ * @param walletBalance 이 포지션을 받치는 지갑 잔고. **미실현손익은 빼고**
+ *                      넣는다(공식이 그것을 다시 더한다). 다른 교차
+ *                      포지션이 쓰고 있는 몫은 미리 빼서 넘긴다.
+ * @returns 청산가. **잔고가 충분해 가격 0까지 안 터지면 null이다** —
+ *          0을 돌려주면 '0달러에 청산'이 되어 청산거리가 100%로 계산되고,
+ *          그건 가장 위험한 상태가 가장 안전해 보이는 결과다.
+ */
+export function crossLiquidationPrice(
+  entryPrice: number, quantity: number, side: 'LONG' | 'SHORT',
+  walletBalance: number, mmrPct = 0.5,
+): number | null {
+  const p = Number(entryPrice), q = Number(quantity), bal = Number(walletBalance);
+  if (!Number.isFinite(p) || p <= 0) return null;
+  if (!Number.isFinite(q) || q <= 0) return null;
+  // 잔고를 모르면 **계산하지 않는다.** 0으로 가정하면 격리보다도 가까운
+  // 청산가가 나오고, 화면은 그것을 사실처럼 그린다.
+  if (!Number.isFinite(bal)) return null;
+
+  const mm = mmrPct / 100;
+  if (!(mm >= 0 && mm < 1)) return null;
+
+  if (side === 'LONG') {
+    const denom = q * (1 - mm);
+    if (denom <= 0) return null;
+    const liq = (q * p - bal) / denom;
+    // 잔고가 명목가보다 크면 가격이 0이 돼도 순자산이 남는다 — 청산가가
+    // 없다. null이 그 뜻이다.
+    return liq > 0 ? liq : null;
+  }
+  const denom = q * (1 + mm);
+  if (denom <= 0) return null;
+  const liq = (bal + q * p) / denom;
+  // 숏은 가격이 오를수록 손해라 청산가는 언제나 진입가 위에 있다.
+  return liq > 0 ? liq : null;
+}
+
+/**
+ * 모드에 맞는 청산가를 낸다. 화면·장부가 **한 곳에서만** 고르게 한다.
+ *
+ * 두 공식을 부르는 쪽마다 조건문으로 갈라 두면, 그중 한 자리에서 모드를
+ * 안 보고 격리 공식을 쓰게 된다. 그러면 교차 포지션에 격리 청산가가
+ * 찍히고, 그건 화면에서 구분이 안 된다.
+ */
+export function liquidationFor(args: {
+  mode: MarginMode;
+  entryPrice: number;
+  side: 'LONG' | 'SHORT';
+  leverage: number;
+  quantity?: number | null;
+  /** 교차일 때만 쓴다. 없으면 교차 청산가는 계산하지 못한다 */
+  walletBalance?: number | null;
+  mmrPct?: number;
+}): number | null {
+  const mmr = args.mmrPct ?? 0.5;
+  if (args.mode === 'CROSSED') {
+    if (args.quantity == null || args.walletBalance == null) return null;
+    return crossLiquidationPrice(
+      args.entryPrice, args.quantity, args.side, args.walletBalance, mmr);
+  }
+  return linearLiquidationPrice(args.entryPrice, args.leverage, args.side, mmr);
+}
+
 export interface PaperOrderInput {
   symbol: string;
   side: 'LONG' | 'SHORT';
@@ -64,6 +152,14 @@ export interface PaperOrderInput {
   takeProfit?: number | null;
   /** 가상 잔고. **모르면 거부한다** — 0으로 두면 전부 막히고, 무시하면 개념이 사라진다 */
   availableBalance: number | null;
+  /**
+   * 격리인가 교차인가. 안 주면 **격리**다.
+   *
+   * 기본을 교차로 두지 않는 이유: 교차는 손실이 계좌 전체로 번진다.
+   * 값을 안 보낸 옛 호출부가 조용히 교차가 되면, 아무도 고르지 않은
+   * 위험이 켜진다.
+   */
+  marginMode?: MarginMode;
   /** 편도 수수료율(%) — 증거금 확인에 함께 센다 */
   feeRatePct?: number;
 }
@@ -147,7 +243,18 @@ export function buildPaperPlan(i: PaperOrderInput): PaperPlanResult {
   const entryFee = notional * feeRate;
   // 현물에는 청산이 없다. 0이 아니라 **null**이다 — 0으로 두면 화면이
   // "청산가 0"을 그리고, 그건 "곧 청산된다"로 읽힌다.
-  const liq = spot ? null : linearLiquidationPrice(price, lev, i.side);
+  //
+  // 교차면 **계좌 전체가 받친다.** 잔고를 넣어야 계산이 된다 — 격리
+  // 공식으로 대신 그리면 실제 청산은 다른 데서 온다.
+  //
+  // 교차 잔고는 '이 주문의 증거금까지 포함한 지갑 잔고'다. availableBalance는
+  // 아직 이 주문을 빼기 전 값이므로 그대로 쓴다.
+  const mode: MarginMode = i.marginMode === 'CROSSED' ? 'CROSSED' : 'ISOLATED';
+  const liq = spot ? null : liquidationFor({
+    mode, entryPrice: price, side: i.side, leverage: lev,
+    quantity: qty,
+    walletBalance: i.availableBalance == null ? null : Number(i.availableBalance),
+  });
 
   const shaped = { notional, requiredMargin, entryFee, liquidationPrice: liq };
 

@@ -4,7 +4,10 @@
 // 여기서 확인하는 것은 "실전과 같은 규칙인가"다.
 
 import { test, eq, assert } from '../../test/harness';
-import { buildPaperPlan, linearLiquidationPrice, PAPER_MAX_LEVERAGE } from './paperPlan';
+import {
+  buildPaperPlan, linearLiquidationPrice, crossLiquidationPrice, liquidationFor,
+  PAPER_MAX_LEVERAGE,
+} from './paperPlan';
 
 const base = {
   symbol: 'BTCUSDT', side: 'LONG' as const, quantity: 0.01, leverage: 5,
@@ -169,5 +172,83 @@ export function runPaperPlanTests() {
   test('현물에 손절을 붙이면 방향은 여전히 검사한다', () => {
     const r = buildPaperPlan({ ...spotBase, stopPrice: 61000 });
     eq(r.ok, false, '롱인데 손절이 위에 있으면 즉시 발동한다');
+  });
+
+  // ── 교차(CROSS) 청산가 ───────────────────────────────────
+  //
+  // 격리와 근본이 다르다: 계좌 전체가 포지션을 받치므로 **잔고가 청산가를
+  // 움직인다.** 같은 10배 포지션이라도 잔고에 따라 청산가가 완전히 다르다.
+  //
+  // 이걸 격리 공식으로 그리면 화면에는 그럴듯한 숫자가 뜨는데 실제 청산은
+  // 다른 데서 온다 — 그게 이 화면에서 가장 위험한 거짓말이다.
+
+  // 잔고 0이면 교차도 사실상 격리와 같은 자리다(받쳐 줄 여유가 없다).
+  test('잔고가 0이면 롱 청산가는 진입가 근처다', () => {
+    const liq = crossLiquidationPrice(100, 1, 'LONG', 0, 0);
+    eq(liq, 100);
+  });
+
+  // **잔고가 많을수록 청산가가 멀어진다.** 이게 교차의 핵심이고,
+  // 격리 공식으로는 절대 나오지 않는 성질이다.
+  test('잔고가 늘면 롱 청산가가 내려간다(멀어진다)', () => {
+    const a = crossLiquidationPrice(100, 1, 'LONG', 10, 0)!;
+    const b = crossLiquidationPrice(100, 1, 'LONG', 30, 0)!;
+    eq(a, 90);
+    eq(b, 70);
+    assert(b < a, '잔고가 많은데 청산가가 더 가깝다');
+  });
+
+  test('숏은 청산가가 진입가 위에 있고, 잔고가 늘면 올라간다', () => {
+    const a = crossLiquidationPrice(100, 1, 'SHORT', 10, 0)!;
+    const b = crossLiquidationPrice(100, 1, 'SHORT', 30, 0)!;
+    eq(a, 110);
+    eq(b, 130);
+    assert(a > 100 && b > a, '숏 청산가가 진입가 아래이거나 안 움직인다');
+  });
+
+  // 잔고가 명목가보다 크면 가격이 0이 돼도 순자산이 남는다.
+  // **0을 돌려주면 '0달러에 청산'이 되어 청산거리가 100%로 계산되고,
+  // 가장 위험한 상태가 가장 안전해 보인다.**
+  test('잔고가 충분하면 롱 청산가는 없다(null)', () => {
+    eq(crossLiquidationPrice(100, 1, 'LONG', 100, 0), null);
+    eq(crossLiquidationPrice(100, 1, 'LONG', 500, 0), null);
+  });
+
+  test('유지증거금률이 클수록 롱 청산가가 올라간다(가까워진다)', () => {
+    const lo = crossLiquidationPrice(100, 1, 'LONG', 20, 0)!;
+    const hi = crossLiquidationPrice(100, 1, 'LONG', 20, 5)!;
+    assert(hi > lo, `mmr이 큰데 청산가가 안 가까워졌다: ${lo} vs ${hi}`);
+  });
+
+  // 잔고를 모르면 계산하지 않는다. 0으로 가정하면 격리보다도 가까운
+  // 청산가가 나오고, 화면은 그것을 사실처럼 그린다.
+  test('값이 모자라면 null — 0으로 가정하지 않는다', () => {
+    eq(crossLiquidationPrice(100, 1, 'LONG', NaN as any, 0.5), null);
+    eq(crossLiquidationPrice(0, 1, 'LONG', 10, 0.5), null);
+    eq(crossLiquidationPrice(100, 0, 'LONG', 10, 0.5), null);
+    eq(crossLiquidationPrice(100, -1, 'LONG', 10, 0.5), null);
+  });
+
+  // ── 모드에 맞는 공식을 고른다 ────────────────────────────
+  //
+  // 부르는 쪽마다 조건문으로 갈라 두면 그중 한 자리에서 모드를 안 보고
+  // 격리 공식을 쓰게 된다. 그러면 교차 포지션에 격리 청산가가 찍히는데
+  // 화면에서는 구분이 안 된다.
+  test('격리는 잔고를 안 본다', () => {
+    const a = liquidationFor({ mode: 'ISOLATED', entryPrice: 100, side: 'LONG', leverage: 10, quantity: 1, walletBalance: 5 });
+    const b = liquidationFor({ mode: 'ISOLATED', entryPrice: 100, side: 'LONG', leverage: 10, quantity: 1, walletBalance: 9999 });
+    eq(a, b, '격리인데 잔고에 따라 청산가가 달라졌다');
+    eq(a, linearLiquidationPrice(100, 10, 'LONG'));
+  });
+
+  test('교차는 잔고를 본다', () => {
+    const a = liquidationFor({ mode: 'CROSSED', entryPrice: 100, side: 'LONG', leverage: 10, quantity: 1, walletBalance: 10, mmrPct: 0 });
+    const b = liquidationFor({ mode: 'CROSSED', entryPrice: 100, side: 'LONG', leverage: 10, quantity: 1, walletBalance: 30, mmrPct: 0 });
+    assert(a !== b, '교차인데 잔고가 청산가를 안 움직였다');
+  });
+
+  test('교차인데 잔고나 수량을 모르면 null', () => {
+    eq(liquidationFor({ mode: 'CROSSED', entryPrice: 100, side: 'LONG', leverage: 10, quantity: 1, walletBalance: null }), null);
+    eq(liquidationFor({ mode: 'CROSSED', entryPrice: 100, side: 'LONG', leverage: 10, quantity: null, walletBalance: 10 }), null);
   });
 }
