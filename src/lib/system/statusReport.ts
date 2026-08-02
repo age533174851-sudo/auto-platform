@@ -182,6 +182,97 @@ export function tableStatus(probes: TableProbe[]): StatusItem[] {
   });
 }
 
+/**
+ * **자동매매가 지금 돌 수 있는 상태인가.**
+ *
+ * 왜 따로 두는가
+ * ──────────────
+ * 표가 있는지, 크론이 도는지, 예약 줄이 있는지를 각각 초록불로 보여줘도
+ * "그래서 자동매매가 도는 거야?"에는 답이 안 된다. 넷 중 하나만 빠져도
+ * 아무 일도 안 일어나는데, 화면에는 초록 셋과 회색 하나가 보일 뿐이다.
+ *
+ * 실제로 이 저장소가 몇 달 동안 그 상태였다 — 설정은 다 있고, 에러도 안
+ * 나고, **한 번도 안 돌았다.** 그래서 조건을 하나로 합쳐서 한 줄로 답한다.
+ *
+ * 순서가 있다. 앞이 안 되면 뒤는 볼 필요도 없다.
+ */
+export interface AutotradeProbe {
+  /** autotrade_schedules 표가 있는가. null=확인 못 함 */
+  tableExists: boolean | null;
+  /** 켜져 있고 연결이 붙은 줄의 수. null=확인 못 함 */
+  enabledRows: number | null;
+  /** 그중 connection_id가 비어 있는 줄. 있으면 그 줄은 주문을 못 낸다 */
+  rowsMissingConnection: number | null;
+  /** ADMIN_SECRET이 서버에 있는가 (크론이 진입 엔진을 부를 때 쓴다) */
+  adminSecretSet: boolean;
+  /** CRON_SECRET이 서버에 있는가 */
+  cronSecretSet: boolean;
+  /** daily-ladder가 마지막으로 돈 시각. null=한 번도 안 돎(또는 기록 없음) */
+  lastRunMs: number | null;
+  lastResult: string | null;
+}
+
+export function autotradeStatus(p: AutotradeProbe, nowMs: number): StatusItem {
+  const id = 'autotrade';
+  const label = '자동매매';
+  const bad = (detail: string, action: string): StatusItem =>
+    ({ id, label, health: 'bad', detail, action });
+
+  if (p.tableExists === null) {
+    return { id, label, health: 'unknown',
+      detail: '예약 표를 읽지 못해 판단할 수 없습니다', action: null };
+  }
+  if (!p.tableExists) {
+    return bad('autotrade_schedules 표가 없습니다 — 크론이 읽을 것이 없습니다',
+      '마이그레이션 031을 적용하세요');
+  }
+  if (p.enabledRows === null) {
+    return { id, label, health: 'unknown',
+      detail: '켜진 예약이 있는지 확인하지 못했습니다', action: null };
+  }
+  if (p.enabledRows === 0) {
+    // 표는 있는데 줄이 없다. 크론은 돌지만 **할 일이 없다.**
+    return bad('켜진 자동매매 예약이 없습니다 — 크론이 돌아도 아무 일도 하지 않습니다',
+      'autotrade_schedules에 enabled=true인 줄을 하나 만드세요');
+  }
+  if ((p.rowsMissingConnection ?? 0) > 0) {
+    return bad(`예약 ${p.rowsMissingConnection}건에 거래소 연결이 없습니다 — 실행돼도 주문을 낼 수 없습니다`,
+      '그 줄의 connection_id를 채우세요');
+  }
+  if (!p.adminSecretSet) {
+    // 크론(GET)이 진입 엔진(POST)을 자기 자신에게 부를 때 쓴다.
+    // 없으면 401로 조용히 죽고, 아무 데도 안 남는다.
+    return bad('ADMIN_SECRET이 없습니다 — 크론이 진입 엔진을 부르지 못하고 401로 끝납니다',
+      'Vercel 환경변수에 ADMIN_SECRET을 넣고 **재배포**하세요 (저장만 하면 적용되지 않습니다)');
+  }
+  if (!p.cronSecretSet) {
+    return bad('CRON_SECRET이 없습니다 — Vercel 크론이 인증되지 않습니다',
+      'Vercel 환경변수에 CRON_SECRET을 넣고 **재배포**하세요');
+  }
+
+  // 여기까지 왔으면 설정은 다 됐다. 이제 **실제로 돌았는가**만 남는다.
+  if (p.lastRunMs == null) {
+    return { id, label, health: 'warn',
+      detail: '설정은 끝났는데 아직 한 번도 실행된 기록이 없습니다',
+      action: '크론은 하루 1회(23:00 UTC · 한국 08:00)입니다. 그 시각이 지난 뒤에도 비어 있으면 재배포를 확인하세요' };
+  }
+  const gap = nowMs - p.lastRunMs;
+  // 하루 1회 + Vercel의 한 시간 오차 + 여유
+  const stale = gap > 30 * 3_600_000;
+  if (p.lastResult === 'failed') {
+    return bad(`마지막 실행이 실패했습니다 (${ago(p.lastRunMs, nowMs)})`,
+      '실행기록에서 실패 사유를 확인하세요');
+  }
+  if (stale) {
+    return { id, label, health: 'warn',
+      detail: `마지막 실행이 ${ago(p.lastRunMs, nowMs)}입니다 — 하루 넘게 안 돌았습니다`,
+      action: 'Vercel 크론 등록과 최근 배포를 확인하세요' };
+  }
+  return { id, label, health: 'ok',
+    detail: `마지막 실행 ${ago(p.lastRunMs, nowMs)} · ${p.lastResult || '결과 없음'}`,
+    action: null };
+}
+
 export interface ConnProbe {
   /** 연결 개수. **null이면 못 읽은 것** */
   count: number | null;

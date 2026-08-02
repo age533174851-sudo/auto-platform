@@ -120,6 +120,13 @@ export default function StrategyProfilesPanel() {
     ].filter(Boolean).join(' · '));
   };
 
+  /** 표본 기간 표시. 시간대는 기기 설정을 따른다 (Intl에 맡긴다) */
+  const fmtStamp = (ms: number) => {
+    try {
+      return new Intl.DateTimeFormat('ko-KR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(ms));
+    } catch { return '알 수 없음'; }
+  };
+
   const box: React.CSSProperties = { background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 14, marginBottom: 12 };
   const chip = (label: string, val: string, c = T.txt) => (
     <div style={{ background: T.alt, borderRadius: 8, padding: '6px 8px' }}>
@@ -164,7 +171,24 @@ export default function StrategyProfilesPanel() {
 
             {/* 프로필별 격리 성적표 */}
             <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginBottom: 8 }}>
-              <div style={{ fontSize: 9, color: T.muted, marginBottom: 6 }}>성적표 (이 프로필 전용 계좌 · 표본 n={s.tradeCount})</div>
+              {/* **이건 시뮬레이션 결과다.** 실제 계좌 성적과 같은 모양으로
+                  그려 두면 그렇게 읽힌다 — 이 저장소에서 이미 한 번
+                  일어난 일이다(안 도는 봇이 +₩847,000을 표시했다). */}
+              <div style={{ fontSize: 9, color: T.muted, marginBottom: 6 }}>
+                성적표 · <b style={{ color: T.ylw }}>모의 시뮬</b> (거래소에 나가지 않음) · 표본 n={s.tradeCount}
+              </div>
+
+              {/* **언제 쌓인 표본인가.** 기간 없는 성적표는 해석할 수 없다 —
+                  같은 1002건이 10일치인지 반년치인지에 따라 완전히 다른
+                  이야기다. 예전 기록에는 이 값이 없으므로 그때는 그렇게 적는다
+                  (0으로 채우면 화면이 '1970년부터'라고 쓴다). */}
+              {s.tradeCount > 0 && (
+                <div style={{ fontSize: 8.5, color: T.muted, marginBottom: 6, lineHeight: 1.5 }}>
+                  {s.firstTradeAt == null || s.lastTradeAt == null
+                    ? '표본 기간: 기록되지 않음 (이 기능이 생기기 전에 쌓인 표본입니다 — 계좌 리셋 후 다시 모으면 기간이 남습니다)'
+                    : `표본 기간: ${fmtStamp(s.firstTradeAt)} ~ ${fmtStamp(s.lastTradeAt)}`}
+                </div>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 6 }}>
                 {chip('누적손익', `${s.realizedPnL >= 0 ? '+' : ''}${Math.round(s.realizedPnL).toLocaleString('ko-KR')}`, s.realizedPnL >= 0 ? T.grn : T.red)}
                 {chip('승률', s.tradeCount > 0 ? `${winRate(s).toFixed(0)}% (${s.winCount}/${s.tradeCount})` : '-')}

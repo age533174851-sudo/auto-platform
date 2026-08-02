@@ -10,7 +10,8 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  readProviderState, decideOAuthGo, disabledMessage, label,
+  readProviderState, decideOAuthGo, disabledMessage, adminFixHint, label,
+  objectParticle,
 } from './oauthProviders';
 
 export function runOAuthProvidersTests() {
@@ -57,12 +58,33 @@ export function runOAuthProvidersTests() {
   });
 
   // "provider is not enabled"를 그대로 띄우면 사용자는 자기가 뭘 잘못한
-  // 줄 안다. 이건 앱 주인이 대시보드에서 켜야 하는 것이다.
-  test('안내에 지금 할 수 있는 일과 관리자가 할 일이 둘 다 있다', () => {
+  // 줄 안다. 사용자에게는 **지금 할 수 있는 일**만 말한다.
+  test('사용자 안내에는 지금 할 수 있는 일이 있다', () => {
     const m = disabledMessage('google');
     assert(m.includes('이메일'), `지금 로그인할 방법이 없다: ${m}`);
-    assert(m.includes('Supabase'), `관리자가 뭘 해야 하는지가 없다: ${m}`);
     assert(!m.includes('Unsupported provider'), '영어 원문을 그대로 띄운다');
+  });
+
+  // 일반 사용자에게 'Supabase 대시보드'는 할 수 있는 일이 아니다.
+  // 자기가 뭘 잘못 눌렀나 싶게 만들고, 남의 앱 내부 구성을 보여주는 것이다.
+  test('관리자 조치는 사용자 안내에 섞지 않는다', () => {
+    assert(!disabledMessage('google').includes('Supabase'),
+      '사용자 화면에 대시보드 경로가 노출된다');
+    assert(adminFixHint('google').includes('Supabase'), '관리자 안내가 비어 있다');
+  });
+
+  // 화면에 실제로 "구글를 켜고"가 떴다. 이름을 문자열로 조합하면서
+  // 조사를 하나로 박으면 반드시 한쪽이 틀린다.
+  test('조사는 받침으로 정한다 — 구글을 / 카카오를', () => {
+    eq(objectParticle('구글'), '을');
+    eq(objectParticle('카카오'), '를');
+    assert(adminFixHint('google').includes('구글을'), adminFixHint('google'));
+    assert(adminFixHint('kakao').includes('카카오를'), adminFixHint('kakao'));
+  });
+
+  test('한글이 아니면 조사를 단정하지 않는다', () => {
+    eq(objectParticle('Google'), '을(를)');
+    eq(objectParticle(''), '을(를)');
   });
 
   test('제공자 이름은 한국어로 적는다', () => {

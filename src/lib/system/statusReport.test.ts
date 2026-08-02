@@ -1,7 +1,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
-  cronStatus, tableStatus, connectionStatus, overallSummary, ago,
-  type CronExpectation,
+  cronStatus, tableStatus, connectionStatus, overallSummary, ago, autotradeStatus,
+  type CronExpectation, type AutotradeProbe,
 } from './statusReport';
 
 export function runStatusReportTests() {
@@ -170,5 +170,61 @@ export function runStatusReportTests() {
   test('없는 시각은 빈 문자열', () => {
     eq(ago(null, now), '');
     eq(ago(NaN, now), '');
+  });
+
+  // ── 자동매매가 지금 돌 수 있는가 ─────────────────────────
+  //
+  // 표·크론·예약을 각각 초록불로 보여줘도 "그래서 도는 거야?"에는 답이
+  // 안 된다. 넷 중 하나만 빠져도 아무 일도 안 일어나는데, 화면에는 초록
+  // 셋과 회색 하나가 보일 뿐이다. 실제로 이 저장소가 몇 달 동안 그
+  // 상태였다 — 설정은 다 있고, 에러도 안 나고, 한 번도 안 돌았다.
+  const okProbe = (o: Partial<AutotradeProbe> = {}): AutotradeProbe => ({
+    tableExists: true, enabledRows: 1, rowsMissingConnection: 0,
+    adminSecretSet: true, cronSecretSet: true,
+    lastRunMs: now - 3_600_000, lastResult: 'ok', ...o,
+  });
+
+  test('다 갖춰지고 최근에 돌았으면 ok', () => {
+    eq(autotradeStatus(okProbe(), now).health, 'ok');
+  });
+
+  // 순서대로 하나씩 빼 본다. **어느 하나만 빠져도 안 돈다** —
+  // 그리고 그때마다 무엇을 해야 하는지가 적혀 있어야 한다.
+  test('하나라도 빠지면 bad이고, 할 일이 적혀 있다', () => {
+    const cases: Array<[string, Partial<AutotradeProbe>]> = [
+      ['표 없음', { tableExists: false }],
+      ['켜진 줄 없음', { enabledRows: 0 }],
+      ['연결 없는 줄', { rowsMissingConnection: 1 }],
+      ['ADMIN_SECRET 없음', { adminSecretSet: false }],
+      ['CRON_SECRET 없음', { cronSecretSet: false }],
+    ];
+    for (const [name, over] of cases) {
+      const r = autotradeStatus(okProbe(over), now);
+      eq(r.health, 'bad', `${name}인데 bad가 아니다`);
+      assert(!!r.action && r.action.length > 0, `${name}에 할 일이 없다`);
+    }
+  });
+
+  // 설정이 다 됐는데 한 번도 안 돈 것 — 이게 이 저장소의 실제 상태였다.
+  // ok로 그리면 안 되고, bad로 그려도 안 된다(설정은 맞으니까).
+  test('설정은 끝났는데 실행 기록이 없으면 warn', () => {
+    const r = autotradeStatus(okProbe({ lastRunMs: null, lastResult: null }), now);
+    eq(r.health, 'warn');
+    assert(r.detail.includes('한 번도'), r.detail);
+  });
+
+  test('마지막 실행이 실패면 bad', () => {
+    eq(autotradeStatus(okProbe({ lastResult: 'failed' }), now).health, 'bad');
+  });
+
+  test('하루 넘게 안 돌았으면 warn', () => {
+    eq(autotradeStatus(okProbe({ lastRunMs: now - 40 * 3_600_000 }), now).health, 'warn');
+  });
+
+  // 못 읽은 것을 '없음'으로 그리면, 조회가 한 번 실패할 때마다
+  // 멀쩡한 자동매매가 꺼진 것처럼 보인다.
+  test('확인 못 한 것은 unknown — 없음으로 단정하지 않는다', () => {
+    eq(autotradeStatus(okProbe({ tableExists: null }), now).health, 'unknown');
+    eq(autotradeStatus(okProbe({ enabledRows: null }), now).health, 'unknown');
   });
 }

@@ -84,6 +84,41 @@ export function annotateAuthError(msg: string, testnet?: boolean): string {
     : `${msg} · 실전 현물(api.binance.com)에 물어본 결과입니다. 테스트넷 키라면 연결의 테스트넷 설정을 확인하세요.`;
 }
 
+/**
+ * 선물(USDⓈ-M) 인증 실패를 **고칠 수 있는 말로** 바꾼다.
+ *
+ * `[-2015] Invalid API-key, IP, or permissions for action`은 바이낸스가
+ * 원인 셋을 한 문장으로 뭉뚱그린 것이다. 이 메시지만 보면 무엇을
+ * 확인해야 하는지 알 수 없다 — 실제로 이 화면에서 그대로 멈췄다.
+ *
+ * 셋을 나눠 적는다. 그리고 **어느 호스트에 물어봤는지**를 같이 적는다.
+ * 이 저장소에서 가장 흔한 원인이 그것이기 때문이다: 실전 키를 등록한
+ * 연결에 테스트넷 표시가 붙어 있으면 데모 호스트로 나가고, 데모는 그
+ * 키를 모른다.
+ */
+export function explainFuturesAuthError(msg: string, testnet: boolean): string {
+  const m = String(msg || '');
+  if (!/-2015|-2014|-1022|API-key|Invalid API|signature/i.test(m)) return m;
+
+  const host = testnet ? 'demo-fapi.binance.com (테스트넷)' : 'fapi.binance.com (실전)';
+  const wrongEnv = testnet
+    ? '이 연결은 **테스트넷**으로 표시돼 있어 데모 서버에 요청했습니다. '
+      + '등록한 키가 실전 키라면 데모는 그 키를 모릅니다 — 연결의 테스트넷 설정이나 키 중 하나가 틀렸습니다.'
+    : '이 연결은 **실전**으로 표시돼 있어 실전 서버에 요청했습니다. '
+      + '등록한 키가 테스트넷 키라면 실전은 그 키를 모릅니다.';
+
+  return [
+    m,
+    '',
+    `요청한 곳: ${host}`,
+    '',
+    '원인은 셋 중 하나입니다:',
+    `1. **환경이 안 맞습니다.** ${wrongEnv}`,
+    '2. **선물 권한이 꺼져 있습니다.** 키 설정에서 Futures(선물) 거래를 켜야 합니다 — 읽기만 켜져 있으면 조회는 되고 주문만 막힙니다.',
+    '3. **IP 제한에 걸렸습니다.** 키에 IP 화이트리스트를 걸었다면, 이 앱이 나가는 IP가 그 목록에 있어야 합니다.',
+  ].join('\n');
+}
+
 export async function testBinance(key: string, secret: string, testnet?: boolean): Promise<TestResult> {
   const t0 = Date.now();
   try {

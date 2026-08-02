@@ -790,7 +790,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         {/* **읽어 온 값만 적는다.** 못 읽었으면 '확인 못 함'이다 —
             여기에 '격리'를 박아 두면, 아래 점검이 "CROSS인지 알 수 없다"고
             말하는 동안 위에서는 격리라고 단정하게 된다. 실제로 그랬다. */}
-        <button onClick={() => { if (!isPaper) setMarginOpen(v => !v); }}
+        {/* 모의에서도 **누르면 반응한다.** 예전에는 모의일 때 아무 일도
+            안 일어나서, 사용자에게는 '고장난 버튼'으로 보였다.
+            모의는 정말로 격리 고정이다 — 모의 엔진에 마진 모드 개념이
+            없고(margin_mode 컬럼도 없다), 청산가는 진입가·배율만으로
+            내는 순수 격리 공식이다. 그러니 교차를 고르게 하면 눌러도
+            계산이 안 바뀌는 가짜 선택지가 된다. 대신 **왜 못 바꾸는지**를
+            말한다. */}
+        <button onClick={() => setMarginOpen(v => !v)}
           title={marginErr || undefined}
           style={{
             flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3,
@@ -800,10 +807,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               : marginType === 'CROSSED' ? A(C.down, '55') : C.hair}`,
             color: marginType == null ? C.warn : marginType === 'CROSSED' ? C.down : C.dim,
             fontSize: FS.micro, fontWeight: marginType === 'CROSSED' ? 800 : 600,
-            cursor: isPaper ? 'default' : 'pointer',
+            cursor: 'pointer',
           }}>
           {marginType == null ? '모드 ?' : marginType === 'CROSSED' ? '교차' : '격리'}
-          {!isPaper && <span style={{ opacity: .5, fontSize: FS.micro }}>▾</span>}
+          <span style={{ opacity: .5, fontSize: FS.micro }}>▾</span>
         </button>
         <button onClick={() => setLevOpen(v => !v)} style={{
           flex: 1, minHeight: dense ? 28 : 30, borderRadius: 7, cursor: 'pointer',
@@ -820,6 +827,24 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           whiteSpace: 'nowrap',
         }}>청산 {liqPct.toFixed(1)}%</span>
       </div>
+
+      {/* 모의는 왜 못 바꾸는가.
+          "안 됩니다"만 적으면 고장으로 읽힌다 — 되는 곳을 같이 알려준다. */}
+      {marginOpen && isPaper && (
+        <div style={{ padding: '9px 10px', borderRadius: 8, background: C.raised, display: 'grid', gap: 6 }}>
+          <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+            모의는 격리로 고정입니다
+          </div>
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
+            모의 계좌는 교차 증거금을 계산하지 않습니다 — 청산가를 진입가와
+            배율만으로 냅니다. 여기서 <b>교차</b>를 고를 수 있게 해 두면
+            <b> 눌러도 아무것도 안 바뀌는 선택지</b>가 됩니다.
+            <br/>
+            교차를 연습하시려면 위에서 <b style={{ color: C.text }}>테스트넷</b>으로
+            바꾸세요. 거기서는 실제로 거래소 설정이 바뀝니다.
+          </div>
+        </div>
+      )}
 
       {/* 마진 모드 고르기 */}
       {marginOpen && !isPaper && (

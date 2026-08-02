@@ -70,6 +70,22 @@ export function label(p: OAuthProvider): string {
 }
 
 /**
+ * 목적격 조사. '구글'은 받침이 있어 **을**, '카카오'는 없어 **를**이다.
+ *
+ * 이름을 문자열 조합으로 만들면서 조사를 하나로 박으면 반드시 한쪽이
+ * 틀린다. 실제로 화면에 "구글를 켜고"가 떴다.
+ */
+export function objectParticle(word: string): string {
+  const last = String(word || '').trim().slice(-1);
+  const code = last.charCodeAt(0);
+  // 한글 음절이 아니면 판단하지 않는다 — 영문·숫자에 조사를 붙이는 규칙은
+  // 발음에 달려 있어서 글자만으로는 못 정한다.
+  if (!(code >= 0xac00 && code <= 0xd7a3)) return '을(를)';
+  // (코드 - 0xAC00) % 28 === 0 이면 받침이 없다
+  return (code - 0xac00) % 28 === 0 ? '를' : '을';
+}
+
+/**
  * 꺼져 있을 때 사용자에게 보여줄 문구.
  *
  * "provider is not enabled"를 그대로 띄우면 사용자는 자기가 뭘 잘못한
@@ -77,10 +93,20 @@ export function label(p: OAuthProvider): string {
  * 적어야 한다. 그리고 지금 당장 로그인할 다른 길도 같이 알려준다.
  */
 export function disabledMessage(p: OAuthProvider): string {
-  return `${label(p)} 로그인이 아직 켜져 있지 않습니다.\n`
-    + '지금은 이메일·비밀번호로 로그인하세요.\n\n'
-    + `(관리자: Supabase 대시보드 → Authentication → Providers → ${label(p)}를 켜고 `
-    + 'OAuth 클라이언트 ID·시크릿을 넣어야 합니다)';
+  return `${label(p)} 로그인이 아직 켜져 있지 않습니다. 지금은 이메일로 로그인하세요.`;
+}
+
+/**
+ * 관리자에게만 보여줄 조치 안내.
+ *
+ * `disabledMessage`와 나눠 둔 이유: 일반 사용자에게 'Supabase 대시보드'는
+ * 할 수 있는 일이 아니다. 자기가 뭘 잘못 눌렀나 싶게 만들 뿐이고,
+ * 남의 앱 내부 구성을 그대로 보여주는 것이기도 하다.
+ */
+export function adminFixHint(p: OAuthProvider): string {
+  const name = label(p);
+  return `Supabase 대시보드 → Authentication → Providers → ${name}${objectParticle(name)} 켜고 `
+    + 'OAuth 클라이언트 ID·시크릿을 넣으세요.';
 }
 
 /**
@@ -93,4 +119,34 @@ export function decideOAuthGo(state: ProviderState, p: OAuthProvider): { go: boo
   if (state.enabled === null) return { go: true, message: '' };
   if (state.enabled) return { go: true, message: '' };
   return { go: false, message: disabledMessage(p) };
+}
+
+/**
+ * 로그인 화면이 뜰 때 미리 물어본다 — 꺼진 버튼을 **누르게 두지 않기 위해서**.
+ *
+ * 누른 뒤에 안내하는 것보다 낫다. 누를 수 있는 버튼은 '된다'는 약속이고,
+ * 눌러 봐야 아는 것은 그 약속을 매번 깨는 것이다.
+ *
+ * 못 물어봤으면 **아무것도 끄지 않는다.** 설정 조회가 한 번 실패했다고
+ * 멀쩡한 구글 로그인이 회색이 되면, 그게 더 자주 일어나는 사고다.
+ */
+export async function fetchProviderStates(
+  supabaseUrl: string,
+  anonKey: string,
+  providers: OAuthProvider[] = ['google', 'kakao'],
+): Promise<Record<string, ProviderState>> {
+  const unknown: Record<string, ProviderState> = {};
+  for (const p of providers) unknown[p] = { enabled: null, reason: '확인하지 못했습니다' };
+  if (!supabaseUrl) return unknown;
+  try {
+    const r = await fetch(`${supabaseUrl}/auth/v1/settings`, {
+      headers: anonKey ? { apikey: anonKey } : undefined,
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!r.ok) return unknown;
+    const settings = await r.json();
+    const out: Record<string, ProviderState> = {};
+    for (const p of providers) out[p] = readProviderState(settings, p);
+    return out;
+  } catch { return unknown; }
 }

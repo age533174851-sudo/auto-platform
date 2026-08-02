@@ -246,8 +246,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
       } catch (e: any) {
         // 조회 자체가 실패하면 판단 불가 → 주문하지 않는다
-        await update({ status: 'FAILED', error_message: `중복 확인 실패: ${e?.message || e}` });
-        return { ok: false, status: 'FAILED', clientOrderId, message: `중복 확인 실패로 주문 중단: ${e?.message || e}` };
+        //
+        // 인증 오류(-2015 등)면 원인 셋을 나눠 적는다. 바이낸스 원문은
+        // "Invalid API-key, IP, or permissions"로 셋을 한 문장에 뭉쳐
+        // 놓아서, 그대로 띄우면 무엇을 확인해야 하는지 알 수 없다.
+        const { explainFuturesAuthError } = await import('@/lib/exchanges/binance');
+        const why = explainFuturesAuthError(String(e?.message || e), testnet);
+        await update({ status: 'FAILED', error_message: `중복 확인 실패: ${why}` });
+        return { ok: false, status: 'FAILED', clientOrderId, message: `중복 확인 실패로 주문 중단: ${why}` };
       }
 
       // ── 3~4) 마진 타입·레버리지는 **진입에만** 설정한다 ──
