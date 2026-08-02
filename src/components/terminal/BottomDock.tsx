@@ -1134,6 +1134,24 @@ function TpSlPanel({ v, auth, connId, onDone }: {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // ── 세 갈래 ──
+  //
+  // 거래소 시트도 이렇게 나눠 둔다(TP/SL · Position TP/SL · Trailing Stop).
+  // 한 폼에 다 넣으면 '전량인 줄 알고 걸었는데 30%만 걸린' 같은 일이 난다 —
+  // 걸린 뒤에는 미체결 탭을 봐야 알 수 있고, 그때는 이미 늦다.
+  const [mode, setMode] = useState<'PARTIAL' | 'POSITION' | 'TRAIL'>('POSITION');
+
+  // 트리거 기준. 기본은 Mark — 얇은 호가의 한 틱 꼬리에 손절이 털리는 것을
+  // 줄인다. 거래소도 Last/Mark를 고르게 해 둔다.
+  const [trigger, setTrigger] = useState<'MARK' | 'LAST'>('MARK');
+
+  // 몇 %를 닫을 것인가. **POSITION 탭에서는 쓰지 않는다**(항상 전량).
+  const [portion, setPortion] = useState(100);
+
+  // 트레일링
+  const [callback, setCallback] = useState('1');
+  const [activation, setActivation] = useState('');
+
   const long = v.side === 'LONG';
   const fromPct = (pct: number, profit: boolean) => {
     if (ref == null) return '';
@@ -1147,7 +1165,21 @@ function TpSlPanel({ v, auth, connId, onDone }: {
   // 방향이 틀리면 거는 즉시 터진다
   const tpWrong = !!tp && tpOk && ref != null && (long ? tpNum <= ref : tpNum >= ref);
   const slWrong = !!sl && slOk && ref != null && (long ? slNum >= ref : slNum <= ref);
-  const blocked = (!tp && !sl) || !tpOk || !slOk || tpWrong || slWrong;
+
+  // **손절이 청산가 너머면 손절은 작동할 기회가 없다.**
+  // 거래소도 경고만 하고 받는다 — 그러면 청산이 먼저 닿는다.
+  const slBeyondLiq = !!sl && slOk && !slWrong && v.liq != null && v.liq > 0
+    && (long ? slNum <= v.liq : slNum >= v.liq);
+
+  const cbNum = Number(callback);
+  const cbOk = Number.isFinite(cbNum) && cbNum >= 0.1 && cbNum <= 10;
+  const actNum = activation ? Number(activation) : null;
+  const actWrong = actNum != null && ref != null
+    && (long ? actNum <= ref : actNum >= ref);
+
+  const blocked = mode === 'TRAIL'
+    ? (!cbOk || actWrong)
+    : ((!tp && !sl) || !tpOk || !slOk || tpWrong || slWrong || slBeyondLiq);
 
   const go = async () => {
     if (!auth || !connId) { setMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
@@ -1158,8 +1190,13 @@ function TpSlPanel({ v, auth, connId, onDone }: {
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
           connectionId: connId, symbol: v.symbol, positionSide: v.side,
-          tpPrice: tp ? tpNum : undefined,
-          slPrice: sl ? slNum : undefined,
+          trigger,
+          // POSITION 탭은 **항상 전량**이다. 여기서 portion을 같이 보내면
+          // 탭을 바꾸고 남은 값이 조용히 따라간다.
+          portionPct: mode === 'POSITION' ? undefined : portion,
+          ...(mode === 'TRAIL'
+            ? { trailing: { callbackRate: cbNum, activationPrice: actNum ?? undefined } }
+            : { tpPrice: tp ? tpNum : undefined, slPrice: sl ? slNum : undefined }),
         }),
       });
       const j = await r.json();
@@ -1173,9 +1210,118 @@ function TpSlPanel({ v, auth, connId, onDone }: {
 
   return (
     <div style={{ marginTop: 8, padding: '10px 11px', borderRadius: 8, background: C.raised }}>
+
+      {/* 세 갈래. 거래소 시트와 같은 순서로 둔다 — 두 화면을 오가는 사람이
+          같은 자리에서 같은 것을 찾을 수 있어야 한다. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 4, marginBottom: 9 }}>
+        {([['POSITION', '전량'], ['PARTIAL', '부분'], ['TRAIL', '트레일링']] as const).map(([m, label]) => (
+          <button key={m} onClick={() => setMode(m)} style={{
+            minHeight: 30, borderRadius: 7, cursor: 'pointer',
+            background: mode === m ? C.accent : C.panel,
+            color: mode === m ? '#fff' : C.dim,
+            border: `1px solid ${mode === m ? 'transparent' : C.hair}`,
+            fontSize: FS.micro, fontWeight: 700,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* 트리거 기준. 예전에는 코드에 Mark로 박혀 있어서 고를 수 없었다. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+        <span style={{ color: C.faint, fontSize: FS.micro, flexShrink: 0 }}>트리거</span>
+        {([['MARK', 'Mark'], ['LAST', 'Last']] as const).map(([t, label]) => (
+          <button key={t} onClick={() => setTrigger(t)} style={{
+            flex: 1, minHeight: 26, borderRadius: 6, cursor: 'pointer',
+            background: trigger === t ? C.raised : 'transparent',
+            color: trigger === t ? C.text : C.dim,
+            border: `1px solid ${trigger === t ? C.hair2 : C.hair}`,
+            fontSize: FS.micro, fontWeight: 700,
+          }}>{label}</button>
+        ))}
+      </div>
       <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 8, lineHeight: 1.5 }}>
-        전량 청산용 TP/SL을 새로 겁니다. 기존 <b>전량 청산용</b> 주문만 지우고
-        분할 익절 사다리는 남깁니다.
+        {trigger === 'MARK'
+          ? 'Mark(지수 기반) — 순간적인 꼬리에 덜 걸립니다.'
+          : 'Last(최종 체결가) — 얇은 호가에서는 한 틱 꼬리에도 발동할 수 있습니다.'}
+      </div>
+
+      {/* 몇 %를 닫는가. 전량 탭에서는 묻지 않는다 */}
+      {mode !== 'POSITION' && (
+        <div style={{ marginBottom: 9 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ color: C.faint, fontSize: FS.micro }}>청산 비율</span>
+            <span style={{ ...NUM, color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+              {portion}%{v.qty > 0 ? ` · ${fmtPrice(v.qty * portion / 100, 6)}` : ''}
+            </span>
+          </div>
+          <input type="range" min={1} max={100} step={1} value={portion}
+            onChange={e => setPortion(Number(e.target.value))}
+            style={{ width: '100%', minHeight: 0, height: 24, margin: 0, accentColor: C.accent }}/>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[25, 50, 75, 100].map(p => (
+              <button key={p} onClick={() => setPortion(p)} style={{
+                flex: 1, minHeight: 24, borderRadius: 6, cursor: 'pointer',
+                background: portion === p ? C.accentBg : C.panel,
+                color: portion === p ? C.accent : C.dim,
+                border: `1px solid ${portion === p ? C.accent : C.hair}`,
+                fontSize: FS.micro, fontWeight: 700, ...NUM,
+              }}>{p}%</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mode === 'TRAIL' ? (
+        <>
+          {/* 콜백 비율 — 거래소가 0.1~10%만 받는다 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span style={{ color: C.faint, fontSize: FS.micro, width: 46, flexShrink: 0 }}>콜백</span>
+            <input value={callback} inputMode="decimal"
+              onChange={e => setCallback(e.target.value.replace(/[^0-9.]/g, ''))}
+              style={{ ...input, flex: 1, padding: '8px 10px', ...NUM }}/>
+            <span style={{ color: C.dim, fontSize: FS.micro, fontWeight: 700 }}>%</span>
+            {[1, 5, 10].map(p => (
+              <button key={p} onClick={() => setCallback(String(p))} style={{
+                minHeight: 26, padding: '0 9px', borderRadius: 6, cursor: 'pointer',
+                background: callback === String(p) ? C.accentBg : C.panel,
+                color: callback === String(p) ? C.accent : C.dim,
+                border: `1px solid ${callback === String(p) ? C.accent : C.hair}`,
+                fontSize: FS.micro, fontWeight: 700, ...NUM,
+              }}>{p}%</button>
+            ))}
+          </div>
+          {!cbOk && (
+            <div style={{ color: C.down, fontSize: FS.micro, marginBottom: 6, lineHeight: 1.5 }}>
+              콜백 비율은 0.1~10% 사이여야 합니다 (거래소 제한).
+            </div>
+          )}
+
+          {/* 발동가는 선택. 비우면 지금 마크가에서 바로 추적을 시작한다 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span style={{ color: C.faint, fontSize: FS.micro, width: 46, flexShrink: 0 }}>발동가</span>
+            <input value={activation} inputMode="decimal" placeholder="비우면 즉시 추적 시작"
+              onChange={e => setActivation(e.target.value.replace(/[^0-9.]/g, ''))}
+              style={{ ...input, flex: 1, padding: '8px 10px', ...NUM }}/>
+          </div>
+          {actWrong && (
+            <div style={{
+              padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+              background: C.downBg, color: C.down, fontSize: FS.micro, lineHeight: 1.5,
+            }}>
+              {v.side} 발동가가 현재가({ref != null ? fmtPrice(ref) : '?'}) {long ? '아래' : '위'}입니다 —
+              즉시 발동해서 추적을 쓰는 의미가 없습니다.
+            </div>
+          )}
+          <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 8, lineHeight: 1.6 }}>
+            가격이 유리한 쪽으로 갈 때 손절이 따라가고, <b>{cbOk ? cbNum : '?'}%</b> 되돌리면
+            시장가로 닫습니다. 발동가를 넣으면 그 가격에 닿아야 추적이 시작됩니다.
+          </div>
+        </>
+      ) : (
+      <>
+      <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 8, lineHeight: 1.5 }}>
+        {mode === 'POSITION'
+          ? '포지션 전량을 닫는 TP/SL을 새로 겁니다. 기존 전량 청산용 주문만 지우고 분할 익절 사다리는 남깁니다.'
+          : '고른 비율만큼만 닫습니다. 나머지는 그대로 남습니다.'}
       </div>
 
       <PriceField label="익절" value={tp} onChange={setTp} presets={[1, 2, 5, 10]}
@@ -1202,6 +1348,22 @@ function TpSlPanel({ v, auth, connId, onDone }: {
         </div>
       )}
 
+      {/* **손절이 청산가 너머면 손절은 작동할 기회가 없다.**
+          거래소도 이걸 경고만 하고 받아 준다. 그러면 청산이 먼저 닿고,
+          화면에는 그때까지 '설정됨'으로 떠 있다. */}
+      {slBeyondLiq && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 7,
+          background: C.downBg, color: C.down, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          손절 {fmtPrice(slNum)}이 청산가 {v.liq != null ? fmtPrice(v.liq) : '?'} 너머입니다 —
+          <b> 청산이 먼저 닿아 손절은 작동하지 못합니다.</b> 손절을 진입가 쪽으로 당기거나
+          배율을 낮추세요.
+        </div>
+      )}
+      </>
+      )}
+
       {msg && (
         <div style={{
           padding: '7px 9px', borderRadius: 7, marginBottom: 7,
@@ -1218,7 +1380,12 @@ function TpSlPanel({ v, auth, connId, onDone }: {
           border: `1px solid ${A(C.accent, '55')}`,
           fontSize: FS.small, fontWeight: 700, opacity: busy || blocked ? 0.5 : 1,
         }}>
-        {busy ? '거는 중…' : !tp && !sl ? '익절 또는 손절을 입력하세요' : 'TP/SL 걸기'}
+        {busy ? '거는 중…'
+          : mode === 'TRAIL'
+            ? (!cbOk ? '콜백 비율을 0.1~10%로 입력하세요' : `트레일링 걸기 (${cbNum}%${portion < 100 ? ` · ${portion}%` : ''})`)
+          : !tp && !sl ? '익절 또는 손절을 입력하세요'
+          : slBeyondLiq ? '손절이 청산가 너머입니다'
+          : `${mode === 'POSITION' ? '전량' : `${portion}%`} TP/SL 걸기`}
       </button>
     </div>
   );
