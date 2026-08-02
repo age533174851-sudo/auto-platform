@@ -40,7 +40,19 @@ const FALLBACK_EQUITY = 10000;
 
 export async function buildRiskContext(
   sb: any,
-  opts: { userId?: string | null; connectionId?: string | null; mode?: string }
+  opts: {
+    userId?: string | null; connectionId?: string | null; mode?: string;
+    /**
+     * 이 실행에만 적용하는 상한. 자동매매 예약 줄(`autotrade_schedules`)의
+     * `leverage_cap`이 여기로 들어온다.
+     *
+     * **없으면(null/undefined) 안 건드린다** — 0으로 읽으면 배율 상한이 0이
+     * 되어 주문이 통째로 막힌다. '정하지 않음'과 '0으로 정함'은 다르다.
+     */
+    leverageCap?: number | null;
+    /** 1회 위험 비율(%). 예약 줄의 `risk_pct`. */
+    riskPct?: number | null;
+  }
 ): Promise<RiskContext> {
   const warnings: string[] = [];
   let accountEquity = FALLBACK_EQUITY;
@@ -70,6 +82,38 @@ export async function buildRiskContext(
     }
   } else {
     warnings.push('사용자 미지정 — 기본 한도 사용');
+  }
+
+  // ── 1.5) 이 실행에만 적용하는 값 ──
+  //
+  // 화면(자동매매 카드)에서 '배율 상한'·'1회 위험'을 입력받아 예약 줄에
+  // 저장한다. **그 값을 여기서 읽지 않으면 화면이 거짓말을 한다** — 100을
+  // 넣고 저장까지 됐는데 엔진은 기본값으로 돈다. 실제로 그 상태였다.
+  //
+  // 못 읽는 값은 무시한다. NaN·0·음수를 그대로 넣으면 상한 0(주문 전면
+  // 차단) 또는 위험 0%(수량 0)가 된다. 모르는 것을 유리하게도, 불리하게도
+  // 읽지 않는다 — 안 건드리는 것이 맞다.
+  const capIn = opts.leverageCap;
+  if (capIn != null) {
+    const cap = Number(capIn);
+    if (Number.isFinite(cap) && cap >= 1 && cap <= 125) {
+      limits.maxLeverage = cap;
+      // 상한이지 적용 배율이 아니다. 실제 배율은 손절 거리에서 역산되고
+      // 이 값에서 잘린다 — 화면에도 같은 말이 적혀 있다.
+      warnings.push(`예약 설정의 배율 상한 ${cap}배 적용 (실제 배율은 손절 거리에서 역산)`);
+    } else {
+      warnings.push(`예약 설정의 배율 상한(${capIn})을 쓰지 못했습니다 — 1~125 범위가 아닙니다. 기본 상한 ${limits.maxLeverage}배로 돕니다`);
+    }
+  }
+  const riskIn = opts.riskPct;
+  if (riskIn != null) {
+    const rp = Number(riskIn);
+    if (Number.isFinite(rp) && rp > 0 && rp <= 100) {
+      limits.riskPerTradePct = rp;
+      warnings.push(`예약 설정의 1회 위험 ${rp}% 적용`);
+    } else {
+      warnings.push(`예약 설정의 1회 위험(${riskIn})을 쓰지 못했습니다 — 0 초과 100 이하가 아닙니다`);
+    }
   }
 
   // ── 2) 실계좌 잔고 (연결이 있을 때만) ──

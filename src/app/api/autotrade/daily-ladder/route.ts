@@ -143,6 +143,10 @@ export async function POST(req: NextRequest) {
     userId,
     connectionId: body.connectionId || null,
     mode,
+    // 예약 줄에 저장된 값. GET(크론)이 실어 보낸다.
+    // **이 두 줄이 없어서 화면에 100·10을 넣어도 엔진은 기본값으로 돌았다.**
+    leverageCap: body.leverageCap ?? null,
+    riskPct: body.riskPct ?? null,
   });
 
   // ── 파이프라인 ──
@@ -673,6 +677,11 @@ export async function GET(req: NextRequest) {
           body: JSON.stringify({
             userId: r.user_id, symbol: r.symbol,
             mode: r.mode, connectionId: r.connection_id,
+            // 마이그레이션 034 전이면 undefined다. ?? null로 눕혀서 보내면
+            // 받는 쪽이 '정하지 않음'으로 읽고 기본값을 쓴다 — 0으로 읽히면
+            // 배율 상한 0이 되어 주문이 통째로 막힌다.
+            leverageCap: r.leverage_cap ?? null,
+            riskPct: r.risk_pct ?? null,
           }),
         });
         const j = await res.json().catch(() => null);
