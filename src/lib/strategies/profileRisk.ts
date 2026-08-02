@@ -19,6 +19,17 @@ export interface ProfileRiskState {
   killedReason?: string;
   tradeCount:   number;
   winCount:     number;
+
+  // ── 언제 쌓인 표본인가 ──
+  //
+  // 이게 없어서 화면에 `누적손익 +21,764,179,181 · 표본 1002건`만 떴다.
+  // 그 숫자가 **10일치 시뮬인지 반년치인지 알 수 없고**, 그러면 승률도
+  // MDD도 해석할 수가 없다. 기간 없는 성적표는 성적표가 아니다.
+  //
+  // 예전에 저장된 상태에는 이 칸이 없다. **0이 아니라 undefined다** —
+  // 0으로 채우면 1970년이 되고 화면이 '1970년부터'라고 적는다.
+  firstTradeAt?: number;
+  lastTradeAt?:  number;
 }
 
 const SEED = 10_000_000;   // 프로필당 모의 시드 (분리 계좌 가정)
@@ -62,6 +73,11 @@ export function recordProfileTrade(id: StrategyType, pnl: number): ProfileRiskSt
   s.dayPnL = s.equity - s.dayStartEquity;
   s.tradeCount += 1;
   if (pnl > 0) s.winCount += 1;
+
+  // 표본 기간. 첫 건은 한 번만 찍고, 마지막 건은 매번 갱신한다.
+  const nowMs = Date.now();
+  if (s.firstTradeAt == null) s.firstTradeAt = nowMs;
+  s.lastTradeAt = nowMs;
 
   if (s.equity > s.peakEquity) s.peakEquity = s.equity;
   const dd = s.peakEquity > 0 ? (s.peakEquity - s.equity) / s.peakEquity * 100 : 0;

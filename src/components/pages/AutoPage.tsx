@@ -127,7 +127,21 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
   const avgWinRate = strats.length ? Math.round(strats.reduce((s,x)=>s+x.winRate,0)/strats.length) : 0;
   const totalTrades = strats.reduce((s,x)=>s+x.trades,0);
 
-  const toggleStrat=(id:string)=>setStrats(p=>p.map(s=>s.id===id?{...s,status:s.status==='running'?'paused':'running',enabled:s.status!=='running'}:s));
+  // ── 이 목록은 실행기에 연결돼 있지 않다 ──
+  //
+  // '시작'을 누르면 이 화면의 React 상태만 바뀐다. 실제로 도는 것은
+  // AutoTradeEngine이고, 그건 `listStrategies()`(전략빌더 저장소)를 읽는다 —
+  // 이 여섯 장의 카드는 거기에 없다.
+  //
+  // 그래서 **켜짐 상태를 저장하지 않는다.** 저장하면 화면을 나갔다 와도
+  // '실행중'이 남고, 그러면 돌지 않는 봇이 영구히 도는 것처럼 보인다.
+  // 지금 '나갔다 오면 꺼져 있는' 것은 버그가 아니라, 저장할 진실이 없는
+  // 상태다. 진실을 만들기 전에 표시부터 만들면 그게 거짓말이 된다.
+  const toggleStrat=(id:string)=>{
+    setStrats(p=>p.map(s=>s.id===id?{...s,status:s.status==='running'?'paused':'running',enabled:s.status!=='running'}:s));
+    setNotWiredWarn(true);
+  };
+  const [notWiredWarn, setNotWiredWarn] = useState(false);
   const stopStrat=(id:string)=>setStrats(p=>p.map(s=>s.id===id?{...s,status:'stopped',enabled:false}:s));
 
   const handleGlobalStop=()=>{
@@ -213,6 +227,32 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       {/* ── BOTS ── */}
       {tab==='bots'&&(
         <div>
+          {/* **이 목록은 실행기에 연결돼 있지 않다.**
+              '시작'을 눌러도 이 화면의 상태만 바뀌고, 어떤 주문도 나가지
+              않는다. 실제로 도는 것은 전략빌더에 저장된 전략이다
+              (AutoTradeEngine이 60초마다 그것을 평가한다).
+              이 줄이 없으면 '실행중'이라고 적힌 카드를 보고 돌고 있다고
+              믿게 된다 — 이 저장소에서 이미 한 번 일어난 일이다. */}
+          <div style={{
+            background:A(T.ylw,'12'), border:`1px solid ${A(T.ylw,'30')}`,
+            borderRadius:10, padding:'10px 12px', marginBottom:10,
+            color:T.ylw, fontSize:11, lineHeight:1.6,
+          }}>
+            <b>이 여섯 개는 예시 카드입니다 — 실행기에 연결돼 있지 않습니다.</b><br/>
+            [시작]을 눌러도 <b>주문이 나가지 않고</b>, 화면을 나가면 상태가 사라집니다
+            (저장하면 돌지 않는 봇이 계속 '실행중'으로 보이기 때문입니다).<br/>
+            실제로 도는 것은 <b>더보기 → 전략빌더</b>에서 만든 전략입니다.
+            거기서 만들어 활성화하면 60초마다 평가합니다 (기본 모의).
+          </div>
+          {notWiredWarn && (
+            <div style={{
+              background:A(T.red,'12'), border:`1px solid ${A(T.red,'30')}`,
+              borderRadius:10, padding:'10px 12px', marginBottom:10,
+              color:T.red, fontSize:11, lineHeight:1.6,
+            }}>
+              방금 누른 [시작]은 <b>아무 주문도 내지 않았습니다.</b> 위 안내를 보세요.
+            </div>
+          )}
           {(Array.isArray(strats)?strats:[]).map(s=>{
             const si=STRAT_INFO[s.type];
             return (
