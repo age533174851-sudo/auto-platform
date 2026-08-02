@@ -1,5 +1,5 @@
 import { test, eq, assert } from '../../test/harness';
-import { verifyStopAttached, shouldUnwind, type OpenOrderLike } from './stopVerify';
+import { verifyStopAttached, shouldUnwind, findAnyStop, type OpenOrderLike } from './stopVerify';
 
 export function runStopVerifyTests() {
   console.log('[손절 되읽기 — 200을 받았다고 걸린 것은 아니다]');
@@ -139,5 +139,50 @@ export function runStopVerifyTests() {
     eq(verifyStopAttached([stop({ stopPrice: 102 })], WANT, 1).status, 'missing');
     // 음수를 그대로 쓰면 허용 범위가 뒤집혀 아무것도 안 맞는다
     eq(verifyStopAttached([stop({ stopPrice: 100 })], WANT, -5).status, 'attached');
+  });
+
+  // ── 화면이 묻는 질문: 이 포지션, 손절 있나 ──────────────
+  //
+  // 실제로 테스트넷에 5배 포지션이 열렸는데 거래소에는 Open Orders(0)이었다.
+  // 포지션 카드에 그 사실이 어디에도 안 적혀서, 손절이 붙었는지를 사람이
+  // 거래소에 직접 들어가서 확인해야 했다.
+  const LONG = { symbol: 'BTCUSDT', positionSide: 'LONG' as const };
+  const SHORT = { symbol: 'BTCUSDT', positionSide: 'SHORT' as const };
+
+  test('발동가를 몰라도 손절이 있는지는 알 수 있다', () => {
+    const r = findAnyStop([stop()], LONG);
+    eq(r.status, 'attached');
+    eq(r.foundStopPrice, 100);
+  });
+
+  test('목록은 읽었는데 없으면 missing — 이게 위험한 상태다', () => {
+    eq(findAnyStop([], LONG).status, 'missing');
+  });
+
+  test('못 읽었으면 unknown — 없음으로 단정하지 않는다', () => {
+    eq(findAnyStop(null, LONG).status, 'unknown');
+    eq(findAnyStop(undefined, LONG).status, 'unknown');
+  });
+
+  // 롱을 닫는 손절은 SELL이다. 방향을 안 보면 반대 방향 진입 예약이
+  // 손절로 잡혀서 '손절 있음'이 된다.
+  test('포지션을 닫는 방향만 손절로 본다', () => {
+    eq(findAnyStop([stop({ side: 'SELL' })], LONG).status, 'attached');
+    eq(findAnyStop([stop({ side: 'BUY' })], LONG).status, 'missing');
+    eq(findAnyStop([stop({ side: 'BUY' })], SHORT).status, 'attached');
+  });
+
+  test('익절은 손절이 아니다', () => {
+    eq(findAnyStop([stop({ type: 'TAKE_PROFIT_MARKET' })], LONG).status, 'missing');
+  });
+
+  test('다른 종목의 손절은 세지 않는다', () => {
+    eq(findAnyStop([stop({ symbol: 'ETHUSDT' })], LONG).status, 'missing');
+  });
+
+  test('발동가를 못 읽어도 걸려 있으면 attached다', () => {
+    const r = findAnyStop([stop({ stopPrice: null, price: null })], LONG);
+    eq(r.status, 'attached');
+    eq(r.foundStopPrice, null);
   });
 }

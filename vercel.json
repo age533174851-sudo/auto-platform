@@ -15,6 +15,10 @@
       "schedule": "0 0 * * *"
     },
     {
+      "path": "/api/autotrade/scheduled-exit",
+      "schedule": "0 1 * * *"
+    },
+    {
       "path": "/api/cron/ai-scoring",
       "schedule": "30 3 * * *"
     },

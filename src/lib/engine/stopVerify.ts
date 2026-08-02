@@ -125,6 +125,56 @@ export function verifyStopAttached(
 }
 
 /**
+ * 이 포지션에 **손절이 하나라도** 걸려 있는가.
+ *
+ * `verifyStopAttached`와 묻는 것이 다르다. 저쪽은 "내가 방금 건 그 손절이
+ * 실제로 붙었나"라서 목표 발동가가 필요하다. 이쪽은 화면이 묻는 질문 —
+ * "지금 이 포지션, 손절 있나?" — 이고 값은 모른다.
+ *
+ * 이게 없어서 실제로 이런 일이 났다: 테스트넷에 5배 포지션이 열렸는데
+ * 거래소 화면에는 `Open Orders (0)`이었다. 앱의 포지션 카드에는 그 사실이
+ * 어디에도 안 적혀 있어서, 손절이 붙었는지를 **사람이 거래소에 직접
+ * 들어가서** 확인해야 했다.
+ *
+ * @param orders 못 읽었으면 **null**. 빈 배열(진짜로 없음)과 다르다.
+ * @param positionSide 들고 있는 방향. 롱을 닫는 손절은 SELL이다.
+ */
+export function findAnyStop(
+  orders: OpenOrderLike[] | null | undefined,
+  want: { symbol: string; positionSide: 'LONG' | 'SHORT' },
+): StopCheck {
+  const none = (status: StopVerdict, reason: string): StopCheck =>
+    ({ status, reason, orderId: null, foundStopPrice: null });
+
+  if (!Array.isArray(orders)) {
+    return none('unknown', '미체결 주문을 읽지 못해 손절이 걸렸는지 확인하지 못했습니다');
+  }
+
+  const sym = String(want?.symbol || '').toUpperCase();
+  // 포지션을 닫는 방향. 이걸 안 보면 반대 방향 진입 예약이 손절로 잡힌다.
+  const closeSide = want?.positionSide === 'LONG' ? 'SELL' : 'BUY';
+
+  for (const o of orders) {
+    if (!o) continue;
+    if (sym && String(o.symbol || '').toUpperCase() !== sym) continue;
+    if (String(o.side || '').toUpperCase() !== closeSide) continue;
+    if (!isStopType(o.type)) continue;
+
+    const px = num(o.stopPrice) ?? num(o.triggerPrice) ?? num(o.price);
+    return {
+      status: 'attached',
+      reason: px == null
+        ? '손절 주문이 걸려 있습니다 (발동가를 읽지 못했습니다)'
+        : `손절 ${px}에 걸려 있습니다`,
+      orderId: o.orderId == null ? null : String(o.orderId),
+      foundStopPrice: px,
+    };
+  }
+
+  return none('missing', '이 포지션에 걸린 손절 주문이 없습니다');
+}
+
+/**
  * 이 결과로 포지션을 되돌려야 하는가.
  *
  * **'확인 불가'로는 청산하지 않는다.** 조회 실패 한 번으로 멀쩡한 포지션을

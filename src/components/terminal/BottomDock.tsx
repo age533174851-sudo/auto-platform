@@ -8,7 +8,7 @@
 // 그래서 '상태대조' 탭을 따로 뒀다.
 //
 // Kill Switch는 탭 안에 숨기지 않는다. 필요한 순간에 두 번 누르게 하면 안 된다.
-import React, { memo, useCallback, useEffect, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { C, FS, NUM, tabStyle, chip, ghostBtn, input, fmtPrice, pnlColor } from './theme';
 import { A } from '@/lib/theme/colors';
 import { useTerminal } from './TerminalContext';
@@ -16,6 +16,7 @@ import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
 import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
+import { findAnyStop } from '@/lib/engine/stopVerify';
 import { linearLiquidationPrice } from '@/lib/engine/paperPlan';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
@@ -24,14 +25,15 @@ import { usePaperAccount } from './PaperWallet';
 import { AllocationPanel } from './AllocationPanel';
 import { SafetyLogPanel } from './SafetyLogPanel';
 import { TrailPanel } from './TrailPanel';
+import { ScheduledExitPanel } from './ScheduledExitPanel';
 import { KisConnectPanel } from './KisConnectPanel';
 import { SystemStatusPanel } from './SystemStatusPanel';
 import { TraderSignalPanel } from './TraderSignalPanel';
 import { LoginDiagnosticPanel } from './LoginDiagnosticPanel';
 import { DemoRunner } from './DemoRunner';
 
-type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -193,6 +195,10 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
                 {positions.map((p: any) => (
                   <PositionCard key={p.symbol} p={p}
                     auth={auth} connId={connId} onClosed={load}
+                    // 미체결 주문을 그대로 넘긴다. **못 읽었으면 null이다** —
+                    // 빈 배열로 바꾸면 조회 실패가 '손절 없음'으로 읽힌다.
+                    openOrders={Array.isArray(acct?.openOrders) ? acct.openOrders
+                      : Array.isArray(acct?.orders) ? acct.orders : null}
                     onPick={() => {
                       const s = symbols.find(x => x.id === p.symbol);
                       if (s) setSymbol(s);
@@ -276,6 +282,10 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {/* 트레일링은 **이미 돌고 있는데** 화면이 없었다. 손절이 자기도
             모르게 움직이면, 그 손절에 걸려 나갔을 때 이유를 알 수 없다. */}
         {tab === '손절이동' && <TrailPanel/>}
+
+        {/* 시간 예약 청산. 이 판은 예약과 함께 **실행기 상태**를 늘 띄운다 —
+            크론이 하루 1회뿐이라 '예약됨'만 적으면 거짓말이 된다. */}
+        {tab === '시간예약' && <ScheduledExitPanel/>}
         {tab === '증권사' && <KisConnectPanel/>}
         {tab === '상태' && <SystemStatusPanel/>}
         {tab === '방송자' && <TraderSignalPanel/>}
@@ -450,13 +460,15 @@ function StrategyTab() {
  * 값이 없을 때 0을 적지 않는다. 청산가 0은 '0달러에 청산'이 아니라
  * '청산가를 못 받았다'인데, 화면만 봐서는 둘이 같아 보인다.
  */
-function PositionCard({ p, onPick, auth, connId, onClosed }: {
+function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
   p: any;
   onPick: () => void;
   auth: string;
   connId: string;
   /** 청산이 접수되면 목록을 다시 읽는다 */
   onClosed: () => void;
+  /** 거래소 미체결 주문. **못 읽었으면 null** — 빈 배열과 다르다 */
+  openOrders?: any[] | null;
 }) {
   const [closing, setClosing] = useState(false);
   const [closeMsg, setCloseMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -469,6 +481,19 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
   const { side, qty, isolated: iso, leverage: lev, entry, mark, liq,
           pnl, notional, margin, marginEstimated: marginIsEst, roi } = v;
   const long = side === 'LONG';
+
+  // ── 이 포지션에 손절이 걸려 있는가 ──
+  //
+  // 이 줄이 없어서, 테스트넷에 5배 포지션이 열렸는데 거래소에는
+  // Open Orders(0)인 상태를 **사람이 거래소에 직접 들어가서** 확인해야 했다.
+  // 손절 없는 레버리지 포지션은 이 화면에서 가장 급한 사실인데 어디에도
+  // 안 적혀 있었다.
+  const stopCheck = useMemo(
+    () => findAnyStop(openOrders, {
+      symbol: String(p?.symbol || ''),
+      positionSide: side === 'LONG' ? 'LONG' : 'SHORT',
+    }),
+    [openOrders, p?.symbol, side]);
 
   /**
    * 시장가 전량 청산.
@@ -558,7 +583,43 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
         <span style={chip(iso ? C.dim : C.warn)}>
           {iso ? '격리' : '교차'} {lev == null ? '' : `${fmtPrice(lev, 0)}×`}
         </span>
+        {/* 손절이 걸려 있는가. **세 상태를 구분한다** — 있음 / 없음 /
+            확인 못 함. 못 읽은 것을 '없음'으로 그리면 조회가 한 번 실패할
+            때마다 멀쩡한 포지션이 위험해 보이고, 곧 아무도 안 믿는다. */}
+        <span style={chip(
+          stopCheck.status === 'attached' ? C.up
+            : stopCheck.status === 'missing' ? C.down : C.warn,
+          stopCheck.status === 'attached' ? C.upBg
+            : stopCheck.status === 'missing' ? C.downBg : undefined,
+        )} title={stopCheck.reason}>
+          {stopCheck.status === 'attached' ? '손절 있음'
+            : stopCheck.status === 'missing' ? '손절 없음' : '손절 ?'}
+        </span>
       </div>
+
+      {/* 손절 없는 레버리지 포지션은 이 화면에서 가장 급한 사실이다.
+          칩 하나로는 지나친다 — 무엇을 하라는 말까지 적는다. */}
+      {stopCheck.status === 'missing' && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7, marginBottom: 9,
+          background: C.downBg, color: C.down, fontSize: FS.micro, lineHeight: 1.6,
+        }}>
+          <b>손절이 걸려 있지 않습니다.</b>{' '}
+          {lev != null && lev > 1
+            ? `${fmtPrice(lev, 0)}배에서는 가격이 약 ${(100 / lev).toFixed(1)}%만 반대로 가도 청산됩니다. `
+            : ''}
+          아래 <b>TP/SL</b>에서 손절을 걸거나 포지션을 닫으세요.
+        </div>
+      )}
+      {stopCheck.status === 'unknown' && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 9,
+          background: C.raised, color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          손절이 걸렸는지 확인하지 못했습니다 — 미체결 주문을 읽지 못했습니다.
+          <b> 없다는 뜻이 아닙니다.</b>
+        </div>
+      )}
 
       {/* 미실현 손익 · 수익률 — 카드에서 가장 먼저 읽히는 줄 */}
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -1227,6 +1288,15 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
           color: C.text, fontSize: FS.body, fontWeight: 700,
         }}>{p.symbol}</button>
         <span style={chip(C.dim)}>격리 {fmtPrice(p.leverage, 0)}×</span>
+        {/* 손절 칩을 실계좌 카드와 **같은 자리·같은 문구**로 둔다.
+            모의에서는 손절이 장부에 있고(거래소 주문이 아니다) 값이
+            없으면 없는 것이라 '확인 못 함'이 나올 수 없다. 그래도 칩을
+            생략하면, 두 화면을 오가는 사람이 '모의에는 원래 이 칩이
+            없나' 아니면 '내 화면이 옛날 것인가'를 구분할 수 없다. */}
+        <span style={chip(
+          p.stopLoss == null ? C.down : C.up,
+          p.stopLoss == null ? C.downBg : C.upBg,
+        )}>{p.stopLoss == null ? '손절 없음' : '손절 있음'}</span>
         {/* 이 칩이 실계좌 카드와의 유일한 구분이다 */}
         <span style={chip(C.accent, C.accentBg)}>모의</span>
       </div>
