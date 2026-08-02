@@ -353,6 +353,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 둘은 고치는 방법이 완전히 다르다.
   const [blockers, setBlockers] = useState<any[]>([]);
   const [riskError, setRiskError] = useState<string | null>(null);
+  // 접힌 채로 시작한다 — 펼쳐 두면 진입 버튼이 화면 밖으로 밀린다
+  const [blockOpen, setBlockOpen] = useState(false);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
 
@@ -509,6 +511,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setMsg(null);
     setBlockers([]);
     setRiskError(null);
+    setBlockOpen(false);
     setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
@@ -968,51 +971,74 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           화면 바닥에 붙고, 그 아래 내용은 **화면 밖으로 밀린다.**
           사용자는 "6개가 막습니다"만 보고 이유는 영영 못 본다 —
           스크롤해야 보이는 안내는 없는 것과 같다. */}
-      {/* **막은 이유를 항목마다 적는다.**
-          이름만 보여주면 무엇을 고쳐야 하는지 알 수 없다. 그리고
-          '확인 못 함'과 '조건에 안 맞음'을 구분해서 그린다 — 앞은
-          조회가 실패한 것이고 뒤는 실제로 걸린 것이라, 고치는 방법이
-          완전히 다르다. */}
+      {/* **막는 이유 — 접힌 채로 시작한다.**
+          펼쳐 두면 항목이 여섯일 때 세로로 길어져서 진입 버튼을 화면
+          밖으로 밀어낸다. 그러면 이유는 보이는데 주문을 못 누른다.
+
+          한 줄 요약(개수 + 첫 항목)만 먼저 보이고, 눌러야 펼쳐진다.
+          펼쳐도 높이를 40vh로 묶고 안에서 스크롤한다 — 화면을 밀어내지
+          않는다. */}
       {blockers.length > 0 && (
-        <div style={{
-          padding: '9px 10px', borderRadius: 8, background: C.downBg,
-          display: 'flex', flexDirection: 'column', gap: 7,
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -3, marginBottom: -3 }}>
-            <button onClick={() => setBlockers([])} aria-label="닫기"
-              style={{ background: 'none', border: 'none', color: C.faint,
-                       cursor: 'pointer', padding: '0 2px', fontSize: FS.body, lineHeight: 1 }}>×</button>
-          </div>
-          {blockers.map((b: any, i: number) => (
-            <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+        <div style={{ borderRadius: 8, background: C.downBg, overflow: 'hidden' }}>
+          <button onClick={() => setBlockOpen(v => !v)}
+            style={{
+              width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+              padding: '9px 10px', display: 'flex', gap: 8, alignItems: 'center',
+              textAlign: 'left', color: 'inherit',
+            }}>
+            <span style={{ color: C.down, fontWeight: 900, fontSize: FS.micro, flexShrink: 0 }}>✕</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: FS.micro, lineHeight: 1.45 }}>
+              <b style={{ color: C.down }}>{blockers.length}개가 막고 있습니다</b>
               <span style={{
-                color: b?.status === 'unknown' ? C.faint : C.down,
-                fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
-              }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
-                  {b?.label}
-                  <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
-                    {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
-                  </span>
+                display: 'block', color: C.faint, marginTop: 2,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {blockers[0]?.label} — {blockers[0]?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
+              </span>
+            </span>
+            <span style={{ color: C.faint, fontSize: FS.micro, flexShrink: 0 }}>
+              {blockOpen ? '접기 ▲' : '자세히 ▼'}
+            </span>
+            <span onClick={(e) => { e.stopPropagation(); setBlockers([]); setRiskError(null); }}
+              role="button" aria-label="닫기"
+              style={{ color: C.faint, fontSize: FS.body, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>×</span>
+          </button>
+
+          {blockOpen && (
+            <div style={{
+              padding: '0 10px 10px', display: 'flex', flexDirection: 'column', gap: 7,
+              // 화면을 밀어내지 않는다 — 길면 이 안에서 스크롤한다
+              maxHeight: '40vh', overflowY: 'auto',
+            }}>
+              {blockers.map((b: any, i: number) => (
+                <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+                  <span style={{
+                    color: b?.status === 'unknown' ? C.faint : C.down,
+                    fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
+                  }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+                      {b?.label}
+                      <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
+                        {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
+                      </span>
+                    </div>
+                    <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
+                      {b?.detail}
+                    </div>
+                  </div>
                 </div>
-                <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
-                  {b?.detail}
+              ))}
+              {riskError && (
+                <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>
+                  거래소 조회 오류: {riskError}
                 </div>
+              )}
+              <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5 }}>
+                <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
               </div>
             </div>
-          ))}
-          {/* 조회가 왜 실패했는지. 점검 항목은 '확인 못 함'까지만 말할 수
-              있으므로 그 뒤의 이유를 여기 붙인다 — 이게 없으면 무엇을
-              고쳐야 하는지 알 수 없다. */}
-          {riskError && (
-            <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
-              거래소 조회 오류: {riskError}
-            </div>
           )}
-          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
-            <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
-          </div>
         </div>
       )}
 
