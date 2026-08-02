@@ -11,6 +11,7 @@ import type { ExpansionResult } from '../strategies/expansionMode';
 
 export type RejectCode =
   | 'DAILY_LOSS_LIMIT'
+  | 'DAILY_PNL_UNKNOWN'
   | 'TOTAL_RISK_LIMIT'
   | 'INVALID_STOP'
   | 'LIQUIDATION_BEFORE_STOP'
@@ -22,6 +23,18 @@ export interface RiskConfig {
   accountEquity: number;
   availableMargin?: number;
   dailyPnl?: number;
+  /**
+   * dailyPnl을 **실제로 확인했는가.**
+   *
+   * false면 위 숫자는 의미가 없다. 0은 '오늘 안 잃었다'로 읽히는데, 못
+   * 읽은 것과 안 잃은 것은 다르다. 이 둘을 구분하지 않으면 일일 손실
+   * 한도는 있는 척만 하는 장치가 된다 — 실제로 그랬다.
+   *
+   * 안 넘기면(undefined) 예전처럼 동작한다. 이 값을 채우는 것은
+   * buildRiskContext의 책임이고, 직접 cfg를 만드는 호출자(백테스트 등)는
+   * 자기 dailyPnl을 자기가 알고 넘기므로 검사 대상이 아니다.
+   */
+  dailyPnlKnown?: boolean;
   /** 사용자·거래소가 허용하는 절대 상한. 실제 적용 상한은 아래 expansion과 함께 결정된다. */
   maxLeverage: number;
   riskPerTradePct?: number;
@@ -109,6 +122,23 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
   const maxDailyLossPct = cfg.maxDailyLossPct ?? 3;
   const dailyLossLimit = cfg.accountEquity * (maxDailyLossPct / 100);
   const dailyPnl = cfg.dailyPnl ?? 0;
+
+  // **확인하지 못한 것은 통과가 아니다.**
+  //
+  // dailyPnl 0은 '오늘 안 잃었다'로 읽히고 그대로 통과한다. 그런데 못
+  // 읽어도 0이다. 둘을 구분하지 않는 동안 이 한도는 있는 척만 했다 —
+  // 실제로 조회 대상 표 이름이 틀려서 언제나 0이었고, -3% 중단이 한 번도
+  // 걸리지 않았다.
+  //
+  // 여기서 막으면 시끄럽다. 하지만 조용히 통과하면 손실 한도 없이 도는
+  // 것이고, 그 사실을 아무도 모른다. 시끄러운 쪽이 낫다.
+  if (cfg.dailyPnlKnown === false) {
+    return reject('DAILY_PNL_UNKNOWN',
+      '오늘 실현손익을 확인하지 못해 일일 손실 한도를 평가할 수 없습니다 — '
+      + '한도를 모르는 채로는 신규 진입하지 않습니다',
+      signal.symbol, side, notes);
+  }
+
   if (dailyPnl <= -dailyLossLimit) {
     return reject('DAILY_LOSS_LIMIT',
       `일일 손실 한도 도달 (오늘 $${dailyPnl.toFixed(0)} / 한도 -$${dailyLossLimit.toFixed(0)}) — 오늘은 신규 진입하지 않습니다`,

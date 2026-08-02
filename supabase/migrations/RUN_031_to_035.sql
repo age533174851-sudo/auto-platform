@@ -154,4 +154,11 @@ UNION ALL SELECT '칸 paper_positions.margin_mode',
 UNION ALL SELECT '표 cron_runs (029)',
        CASE WHEN to_regclass('public.cron_runs') IS NULL THEN '없음' ELSE '있음' END
 UNION ALL SELECT '표 trader_signals (030)',
-       CASE WHEN to_regclass('public.trader_signals') IS NULL THEN '없음' ELSE '있음' END;
+       CASE WHEN to_regclass('public.trader_signals') IS NULL THEN '없음' ELSE '있음' END
+-- 아래 둘은 **일일 손실 한도의 재료**다. 하나라도 없으면 오늘 얼마
+-- 잃었는지를 계산할 수 없고, 엔진은 한도를 모르는 채로 진입하지 않는다
+-- (DAILY_PNL_UNKNOWN). 없으면 013·010을 적용해야 한다.
+UNION ALL SELECT '표 daily_slot_uses (013 · 손실한도 재료)',
+       CASE WHEN to_regclass('public.daily_slot_uses') IS NULL THEN '없음' ELSE '있음' END
+UNION ALL SELECT '표 paper_positions (010 · 손실한도 재료)',
+       CASE WHEN to_regclass('public.paper_positions') IS NULL THEN '없음' ELSE '있음' END;

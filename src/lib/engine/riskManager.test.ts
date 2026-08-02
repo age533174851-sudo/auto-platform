@@ -200,6 +200,34 @@ export function runRiskManagerTests() {
     eq(p.rejectCode, 'DAILY_LOSS_LIMIT');
   });
 
+  // ── **못 읽은 손익을 '안 잃었다'로 세지 않는다** ──
+  //
+  // dailyPnl 0은 통과한다. 못 읽어도 0이다. 둘을 구분하지 않는 동안 이
+  // 한도는 있는 척만 했다 — 조회 대상 표 이름이 틀려서 언제나 0이었고,
+  // -3% 중단이 한 번도 걸리지 않았다.
+  test('오늘 손익을 확인하지 못했으면 진입하지 않는다', () => {
+    const p = planPosition(signal(), cfg({ dailyPnl: 0, dailyPnlKnown: false }));
+    eq(p.approved, false, '한도를 모르는 채로 통과했다');
+    eq(p.rejectCode, 'DAILY_PNL_UNKNOWN');
+  });
+
+  test('확인했고 0이면 통과한다 — 0 자체는 문제가 아니다', () => {
+    const p = planPosition(signal(), cfg({ dailyPnl: 0, dailyPnlKnown: true }));
+    assert(p.rejectCode !== 'DAILY_PNL_UNKNOWN', '확인한 0을 막았다');
+  });
+
+  test('안 넘기면 예전대로 — 백테스트 호출자를 막지 않는다', () => {
+    const p = planPosition(signal(), cfg({ dailyPnl: 0 }));
+    assert(p.rejectCode !== 'DAILY_PNL_UNKNOWN', 'undefined를 false로 읽었다');
+  });
+
+  // 모르는 것이 한도 도달보다 먼저다. 못 읽은 상태에서 dailyPnl 숫자를
+  // 근거로 어떤 판정도 내리지 않는다.
+  test('모를 때는 손익 숫자로 판정하지 않는다', () => {
+    const p = planPosition(signal(), cfg({ dailyPnl: -5_000, dailyPnlKnown: false }));
+    eq(p.rejectCode, 'DAILY_PNL_UNKNOWN', '못 읽은 숫자를 근거로 판정했다');
+  });
+
   test('손절 거리가 0이면 위험 계산이 불가하므로 거부한다', () => {
     const p = planPosition(signal({ stopLoss: 100_000 }), cfg());
     eq(p.approved, false);

@@ -97,6 +97,32 @@ export function runRiskContextTests() {
     eq((await buildRiskContext(null, { riskPct: 100 })).config.riskPerTradePct, 100);
   });
 
+  // ── **오늘 실현손익 — 0과 '모름'을 구분한다** ──
+  //
+  // 여기는 원래 `orders` 표를 읽고 있었다. 그런 표는 없다. supabase-js는
+  // 없는 표에 던지지 않고 { data: null, error }를 돌려주는데 error를 안
+  // 봤다. 그래서 dailyPnl이 언제나 0이었고, "오늘 -3% 넘으면 중단"이 한
+  // 번도 걸린 적이 없다. 0은 '안 잃었다'로 읽히니까.
+  test('읽지 못하면 dailyPnlKnown이 false다 — 0이 아니다', async () => {
+    const ctx = await buildRiskContext(null, {});
+    eq(ctx.config.dailyPnlKnown, false, '못 읽었는데 확인했다고 했다');
+  });
+
+  test('못 읽었으면 이유를 남긴다', async () => {
+    const ctx = await buildRiskContext(null, {});
+    assert(ctx.warnings.some(w => w.includes('실현손익')),
+      '조용히 넘어갔다: ' + ctx.warnings.join(' / '));
+  });
+
+  test('읽은 값과 읽지 못한 상태가 같은 숫자(0)로 보이지 않는다', async () => {
+    // 못 읽었을 때의 dailyPnl은 0이지만, 그 0을 믿으면 안 된다는 표시가
+    // 반드시 함께 온다. 이 두 값이 한 몸으로 움직여야 riskManager가
+    // 구분할 수 있다.
+    const ctx = await buildRiskContext(null, {});
+    eq(ctx.config.dailyPnl, 0);
+    eq(ctx.config.dailyPnlKnown, false);
+  });
+
   // 배율 상한은 상한이지 적용 배율이 아니다. 화면에도 그렇게 적혀 있고,
   // 설명이 어긋나면 사용자가 100배가 나가는 줄 안다.
   test('상한이라고 말한다 — 적용 배율이라고 말하지 않는다', async () => {

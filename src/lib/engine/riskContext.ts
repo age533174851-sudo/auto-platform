@@ -157,19 +157,65 @@ export async function buildRiskContext(
   }
 
   // ── 3) 오늘 실현손익 (일일 손실 한도 판정용) ──
+  //
+  // **이 값이 틀리면 일일 손실 한도가 통째로 없는 것과 같다.**
+  //
+  // 여기는 원래 `orders` 표를 읽고 있었다. 그런 표는 없다 — 실주문은
+  // `live_orders`, 청산 손익은 `daily_slot_uses`와 `paper_positions`에
+  // 있다. supabase-js는 없는 표에 대해 던지지 않고 { data:null, error }를
+  // 돌려주는데, 이 코드는 error를 안 봤다. 그래서 dailyPnl이 **언제나
+  // 0**이었고, "오늘 -3% 넘으면 신규 진입 중단"이 한 번도 걸린 적이 없다.
+  //
+  // 0은 '오늘 안 잃었다'로 읽힌다. 못 읽은 것을 안 잃은 것으로 세면
+  // 한도는 있는 척만 하는 장치가 된다.
   let dailyPnl = 0;
+  // **못 읽었으면 0이 아니라 '모른다'다.** riskManager가 이 값을 보고
+  // 한도를 평가할 수 있는지 없는지를 가른다.
+  let dailyPnlKnown = false;
   if (sb && opts.userId) {
-    try {
-      const since = new Date(); since.setUTCHours(0, 0, 0, 0);
-      const { data } = await sb
-        .from('orders')
-        .select('realized_pnl')
-        .eq('user_id', opts.userId)
-        .gte('created_at', since.toISOString());
-      if (Array.isArray(data)) {
-        dailyPnl = data.reduce((a: number, r: any) => a + (Number(r.realized_pnl) || 0), 0);
+    const since = new Date(); since.setUTCHours(0, 0, 0, 0);
+    const sinceIso = since.toISOString();
+    const failed: string[] = [];
+    let sum = 0;
+
+    // 두 경로에서 온다. 실전·사다리는 슬롯 표, 모의는 모의 포지션 표.
+    // 어느 한쪽이라도 못 읽으면 합계를 모르는 것이다 — 읽힌 쪽만 더해서
+    // 아는 척하면 실제보다 손실이 작게 잡히고, 그건 한도를 느슨하게
+    // 만드는 방향으로 틀린다.
+    const sources: Array<{ table: string; column: string; timeCol: string }> = [
+      { table: 'daily_slot_uses', column: 'realized_pnl', timeCol: 'closed_at' },
+      { table: 'paper_positions', column: 'realized_pnl', timeCol: 'closed_at' },
+    ];
+    for (const s of sources) {
+      try {
+        const { data, error } = await sb
+          .from(s.table)
+          .select(s.column)
+          .eq('user_id', opts.userId)
+          .eq('status', 'closed')
+          .gte(s.timeCol, sinceIso);
+        if (error) { failed.push(`${s.table}: ${error.message}`); continue; }
+        if (!Array.isArray(data)) { failed.push(`${s.table}: 응답이 배열이 아닙니다`); continue; }
+        for (const r of data) {
+          const v = Number((r as any)[s.column]);
+          // 청산됐는데 손익이 비어 있으면 그 줄은 못 읽은 것이다.
+          // 0으로 세면 손실 하나가 통째로 사라진다.
+          if (!Number.isFinite(v)) { failed.push(`${s.table}: 손익이 비어 있는 줄이 있습니다`); break; }
+          sum += v;
+        }
+      } catch (e: any) {
+        failed.push(`${s.table}: ${e?.message || e}`);
       }
-    } catch { /* orders 테이블 없으면 0 유지 */ }
+    }
+
+    if (failed.length === 0) {
+      dailyPnl = sum;
+      dailyPnlKnown = true;
+    } else {
+      warnings.push(`오늘 실현손익을 확인하지 못했습니다 — 일일 손실 한도를 평가할 수 없습니다 (${failed.join(' / ')})`);
+    }
+  } else {
+    warnings.push('사용자 미지정 — 오늘 실현손익을 확인할 수 없습니다');
   }
 
   // ── 4) 현재 열린 위험 (승인된 계획 중 아직 청산 안 된 것) ──
@@ -210,6 +256,7 @@ export async function buildRiskContext(
       accountEquity,
       availableMargin,
       dailyPnl,
+      dailyPnlKnown,
       maxLeverage: limits.maxLeverage,
       riskPerTradePct: limits.riskPerTradePct,
       maxAccountRiskPct: limits.maxAccountRiskPct,
