@@ -25,14 +25,15 @@ import { usePaperAccount } from './PaperWallet';
 import { AllocationPanel } from './AllocationPanel';
 import { SafetyLogPanel } from './SafetyLogPanel';
 import { TrailPanel } from './TrailPanel';
+import { ScheduledExitPanel } from './ScheduledExitPanel';
 import { KisConnectPanel } from './KisConnectPanel';
 import { SystemStatusPanel } from './SystemStatusPanel';
 import { TraderSignalPanel } from './TraderSignalPanel';
 import { LoginDiagnosticPanel } from './LoginDiagnosticPanel';
 import { DemoRunner } from './DemoRunner';
 
-type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -281,6 +282,10 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {/* 트레일링은 **이미 돌고 있는데** 화면이 없었다. 손절이 자기도
             모르게 움직이면, 그 손절에 걸려 나갔을 때 이유를 알 수 없다. */}
         {tab === '손절이동' && <TrailPanel/>}
+
+        {/* 시간 예약 청산. 이 판은 예약과 함께 **실행기 상태**를 늘 띄운다 —
+            크론이 하루 1회뿐이라 '예약됨'만 적으면 거짓말이 된다. */}
+        {tab === '시간예약' && <ScheduledExitPanel/>}
         {tab === '증권사' && <KisConnectPanel/>}
         {tab === '상태' && <SystemStatusPanel/>}
         {tab === '방송자' && <TraderSignalPanel/>}
