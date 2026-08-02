@@ -23,6 +23,14 @@ export async function openPaperPosition(
     feeRatePct?: number; slippagePct?: number;
     /** 'SPOT' | 'USDM' | 'COINM'. 안 주면 지금까지의 동작대로 USDM */
     market?: string;
+    /**
+     * 격리인가 교차인가. 안 주면 **격리**다.
+     *
+     * 기본을 교차로 두지 않는 이유: 교차는 손실이 계좌 전체로 번진다.
+     * 값을 안 보낸 옛 호출부가 조용히 교차가 되면 아무도 고르지 않은
+     * 위험이 켜진다.
+     */
+    marginMode?: 'ISOLATED' | 'CROSSED';
   }
 ): Promise<{ ok: boolean; positionId?: string; fill?: PaperFill; error?: string; duplicate?: boolean }> {
   const fill = simulateFill(args.plan, args.entryPrice, {
@@ -51,6 +59,10 @@ export async function openPaperPosition(
     take_profit: fill.takeProfit ?? null,
     liquidation_price: fill.liquidationPrice,
     entry_fee: fill.entryFee,
+    // 격리인가 교차인가. **청산가가 이미 이 모드로 계산돼 들어온다** —
+    // 여기서 모드를 안 적으면 나중에 그 숫자가 어느 공식으로 나온 값인지
+    // 알 수 없다.
+    margin_mode: args.marginMode === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
   };
 
   const { data, error } = await sb.from('paper_positions').insert(row).select('id').single();

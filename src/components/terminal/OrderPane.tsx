@@ -87,6 +87,8 @@ export function useCountdown(nextAt: number | null): string {
 const LEV_KEY = 'tg_terminal_leverage';
 /** 수량 단위(코인 개수 / USDT 금액) 기억용 */
 const UNIT_KEY = 'tg_terminal_unit';
+/** 모의에서 마지막으로 고른 마진 모드 */
+const PAPER_MARGIN_KEY = 'tg_paper_margin_mode';
 
 /**
  * 이 배율에서 청산까지의 대략 거리(%).
@@ -479,7 +481,17 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // **고정**이고, 그건 앱이 정한 규칙이라 단정해도 된다 — 거래소 상태를
   // 모르면서 단정하는 것과 다르다.
   useEffect(() => {
-    if (isPaper) { setMarginType('ISOLATED'); setMarginErr(''); return; }
+    if (isPaper) {
+      // 모의는 거래소에 물어볼 곳이 없다. 대신 **이 화면이 고른 값이
+      // 그대로 주문에 실려 나가고**, 모의 엔진이 그 모드로 청산가를
+      // 계산한다(paperPlan.liquidationFor). 마지막에 고른 값을 기억한다.
+      try {
+        const saved = localStorage.getItem(PAPER_MARGIN_KEY);
+        setMarginType(saved === 'CROSSED' ? 'CROSSED' : 'ISOLATED');
+      } catch { setMarginType('ISOLATED'); }
+      setMarginErr('');
+      return;
+    }
     const connId = modeResolution.connId;
     if (!auth || !connId) { setMarginType(null); setMarginErr('연결이 없어 확인하지 못했습니다'); return; }
     let alive = true;
@@ -504,7 +516,30 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   /** 마진 모드를 바꾼다. 교차는 되돌릴 수 없는 성격이라 한 번 묻는다. */
   const switchMargin = async (want: 'ISOLATED' | 'CROSSED') => {
     const connId = modeResolution.connId;
-    if (isPaper) { setMarginErr('모의는 격리로 고정입니다'); return; }
+
+    // 모의는 거래소를 안 탄다. **다음 주문에 실려 나가는 값**이라
+    // 여기서 바로 정하면 된다. 이미 열린 포지션의 청산가는 바뀌지 않는다 —
+    // 그건 진입할 때의 모드로 계산돼 장부에 박혀 있다.
+    if (isPaper) {
+      if (want === 'CROSSED') {
+        const { confirmDialog } = await import('@/lib/confirm/dialog');
+        const ok = await confirmDialog([
+          '다음 모의 주문을 교차(CROSS)로 넣습니다.',
+          '',
+          '교차는 **가상 계좌 잔고 전체가** 포지션을 받칩니다.',
+          '잔고가 많을수록 청산가가 멀어지고, 적을수록 가까워집니다.',
+          '',
+          '이미 열려 있는 포지션에는 적용되지 않습니다 — 그건 진입할 때의',
+          '모드로 계산된 청산가를 그대로 씁니다.',
+        ].join('\n'), { title: '교차로 넣을까요?', confirmText: '네', cancelText: '아니요' });
+        if (!ok) return;
+      }
+      setMarginType(want);
+      setMarginOpen(false);
+      setMarginErr('');
+      try { localStorage.setItem(PAPER_MARGIN_KEY, want); } catch {}
+      return;
+    }
     if (!auth || !connId) { setMarginErr('로그인·연결이 필요합니다'); return; }
     if (want === marginType) { setMarginOpen(false); return; }
 
@@ -686,6 +721,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               // 가상 장부는 방향을 LONG/SHORT로 적는다 (거래소의 BUY/SELL과 다르다)
               symbol: symbol.id, side: orderSide === 'BUY' ? 'LONG' : 'SHORT',
               quantity: q, leverage, stopLossPct: slPct,
+              // 모의 엔진이 이 모드로 청산가를 계산한다. 안 보내면 격리다.
+              marginMode: marginType === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
             }
           : {
               connectionId: modeResolution.connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
@@ -828,26 +865,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         }}>청산 {liqPct.toFixed(1)}%</span>
       </div>
 
-      {/* 모의는 왜 못 바꾸는가.
-          "안 됩니다"만 적으면 고장으로 읽힌다 — 되는 곳을 같이 알려준다. */}
-      {marginOpen && isPaper && (
-        <div style={{ padding: '9px 10px', borderRadius: 8, background: C.raised, display: 'grid', gap: 6 }}>
-          <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
-            모의는 격리로 고정입니다
-          </div>
-          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
-            모의 계좌는 교차 증거금을 계산하지 않습니다 — 청산가를 진입가와
-            배율만으로 냅니다. 여기서 <b>교차</b>를 고를 수 있게 해 두면
-            <b> 눌러도 아무것도 안 바뀌는 선택지</b>가 됩니다.
-            <br/>
-            교차를 연습하시려면 위에서 <b style={{ color: C.text }}>테스트넷</b>으로
-            바꾸세요. 거기서는 실제로 거래소 설정이 바뀝니다.
-          </div>
-        </div>
-      )}
-
       {/* 마진 모드 고르기 */}
-      {marginOpen && !isPaper && (
+      {marginOpen && (
         <div style={{ padding: '9px 10px', borderRadius: 8, background: C.raised, display: 'grid', gap: 7 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
             {(['ISOLATED', 'CROSSED'] as const).map(m => {
@@ -863,10 +882,16 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               );
             })}
           </div>
+          {/* 모의와 실계좌는 **적용 시점이 다르다.** 모의는 거래소를 안
+              타므로 다음 주문에만 실리고, 실계좌는 심볼 설정을 바로 바꾼다.
+              같은 문구를 쓰면 모의에서 '이미 열린 포지션도 바뀐 줄' 안다. */}
           <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5 }}>
             <b style={{ color: C.dim }}>격리</b>는 손실이 이 포지션의 증거금까지만 갑니다.{' '}
-            <b style={{ color: C.down }}>교차</b>는 <b style={{ color: C.down }}>계좌 전체</b>로 번집니다.
-            열린 포지션이나 미체결 주문이 있으면 거래소가 변경을 거부합니다.
+            <b style={{ color: C.down }}>교차</b>는 <b style={{ color: C.down }}>계좌 전체</b>로 번지고,
+            잔고가 많을수록 청산가가 멀어집니다.
+            {isPaper
+              ? ' 모의에서는 **다음 주문부터** 적용됩니다 — 이미 열린 포지션의 청산가는 진입할 때의 모드 그대로입니다.'
+              : ' 열린 포지션이나 미체결 주문이 있으면 거래소가 변경을 거부합니다.'}
           </div>
           {marginErr && (
             <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>{marginErr}</div>

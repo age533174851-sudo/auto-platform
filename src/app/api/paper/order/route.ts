@@ -125,6 +125,10 @@ export async function POST(req: NextRequest) {
     markPrice, stopPrice,
     takeProfit: body?.takeProfit != null ? Number(body.takeProfit) : null,
     availableBalance: available,
+    // 현물에는 마진 모드가 없다. 선물만 받는다.
+    // **아는 값만 받는다** — 오타 하나가 '교차인데 격리로 계산'을 만든다.
+    marginMode: spot ? 'ISOLATED'
+      : String(body?.marginMode || '').toUpperCase() === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
   });
 
   if (!built.ok || !built.plan) {
@@ -148,6 +152,8 @@ export async function POST(req: NextRequest) {
     signalId,
     strategyId: String(body?.strategyId || 'manual'),
     plan: built.plan,
+    marginMode: spot ? 'ISOLATED'
+      : String(body?.marginMode || '').toUpperCase() === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
     market,
     entryPrice: markPrice as number,
     stopLoss: stopPrice ?? undefined,
