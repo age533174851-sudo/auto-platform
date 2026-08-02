@@ -1283,6 +1283,15 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
           color: C.text, fontSize: FS.body, fontWeight: 700,
         }}>{p.symbol}</button>
         <span style={chip(C.dim)}>격리 {fmtPrice(p.leverage, 0)}×</span>
+        {/* 손절 칩을 실계좌 카드와 **같은 자리·같은 문구**로 둔다.
+            모의에서는 손절이 장부에 있고(거래소 주문이 아니다) 값이
+            없으면 없는 것이라 '확인 못 함'이 나올 수 없다. 그래도 칩을
+            생략하면, 두 화면을 오가는 사람이 '모의에는 원래 이 칩이
+            없나' 아니면 '내 화면이 옛날 것인가'를 구분할 수 없다. */}
+        <span style={chip(
+          p.stopLoss == null ? C.down : C.up,
+          p.stopLoss == null ? C.downBg : C.upBg,
+        )}>{p.stopLoss == null ? '손절 없음' : '손절 있음'}</span>
         {/* 이 칩이 실계좌 카드와의 유일한 구분이다 */}
         <span style={chip(C.accent, C.accentBg)}>모의</span>
       </div>
