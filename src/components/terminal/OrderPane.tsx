@@ -22,6 +22,7 @@ import { useTerminal } from './TerminalContext';
 import { notifyError, notifySuccess } from '@/lib/notify/center';
 import { SpotOrderPanel } from './SpotOrderPanel';
 import { CoinMOrderPanel } from './CoinMOrderPanel';
+import { StockOrderPanel } from './StockOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor } from '@/lib/markets/tradeMode';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
@@ -1472,6 +1473,8 @@ export const MarketOrderPanel = memo(function MarketOrderPanel(
   if (marketType === 'SPOT') return <SpotOrderPanel {...props}/>;
   // COIN-M은 수량 단위가 계약이고 증거금이 코인이라 폼 자체가 다르다.
   if (marketType === 'COIN_FUTURES') return <CoinMOrderPanel dense={props.dense}/>;
+  // 주식은 거래소가 아니라 증권사를 타고, 장이 열려 있는지를 먼저 본다.
+  if (marketType === 'STOCK') return <StockOrderPanel dense={props.dense}/>;
   return <OrderFormPanel {...props}/>;
 });
 

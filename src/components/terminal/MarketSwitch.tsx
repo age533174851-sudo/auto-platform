@@ -16,9 +16,14 @@ export const MarketSwitch = memo(function MarketSwitch({
   value, onChange, compact,
 }: { value: MarketType; onChange: (m: MarketType) => void; compact?: boolean }) {
   return (
+    // 칩이 넷이 되면서 360px 화면에서 모드 전환과 나란히 두면 넘친다.
+    // 넘친 쪽을 자르면 '주식'이 통째로 사라지는데, 화면에는 그냥 없는
+    // 것처럼 보인다. 자르는 대신 **가로로 스크롤**한다.
     <div style={{
       display: 'flex', gap: 3, background: C.raised,
-      padding: 3, borderRadius: 8, flexShrink: 0,
+      padding: 3, borderRadius: 8, flexShrink: 1,
+      overflowX: 'auto', maxWidth: '100%',
+      scrollbarWidth: 'none',
     }}>
       {MARKET_TYPES.map(m => {
         const on = m === value;
