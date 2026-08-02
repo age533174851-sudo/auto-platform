@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
 
   const { data: rows, error } = await (sb as any)
     .from('autotrade_schedules')
-    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct')
+    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct, interval_min')
     .eq('user_id', uid).order('symbol');
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
@@ -128,6 +128,19 @@ export async function POST(req: NextRequest) {
     riskPct = n;
   }
 
+  // 얼마나 자주 진입을 볼 것인가(분). 안 주면 표 기본값(하루).
+  let intervalMin: number | null = null;
+  if (body?.intervalMin != null && body.intervalMin !== '') {
+    const n = Math.round(Number(body.intervalMin));
+    if (!Number.isFinite(n) || n < 1 || n > 10080) {
+      return NextResponse.json({
+        ok: false, error: 'invalid_interval',
+        message: `실행 간격은 1분~7일(10080분) 사이여야 합니다 (입력 ${body.intervalMin})`,
+      }, { status: 400 });
+    }
+    intervalMin = n;
+  }
+
   if (!symbol) return NextResponse.json({ ok: false, error: 'missing_symbol' }, { status: 400 });
 
   // **연결이 없으면 만들지 않는다.** 연결 없는 줄은 크론이 읽어도 주문을
@@ -186,8 +199,9 @@ export async function POST(req: NextRequest) {
       user_id: uid, symbol, connection_id: connectionId,
       mode: modeRaw, enabled,
       leverage_cap: leverageCap, risk_pct: riskPct,
+      ...(intervalMin != null ? { interval_min: intervalMin } : {}),
     }, { onConflict: 'user_id,symbol' })
-    .select('id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct').single();
+    .select('id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct, interval_min').single();
 
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');

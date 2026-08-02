@@ -19,7 +19,7 @@
 //  · 지금 **실제로** 켜져 있는가 (설정값이 아니라 표에 든 줄)
 //  · 마지막으로 **실제로** 돌았는가 (cron_runs)
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 
@@ -47,6 +47,12 @@ export default function AutotradeControl() {
   // 10슬롯 방식: 1회 위험 10% · 배율 상한 100. 이게 기본값이다.
   const [levCap, setLevCap] = useState('100');
   const [riskPct, setRiskPct] = useState('10');
+  // 얼마나 자주 진입을 볼 것인가(분). 크론은 하루 1회지만, 앱이 열려
+  // 있는 동안은 이 간격으로 본다.
+  const [intervalMin, setIntervalMin] = useState('60');
+  // 앱이 열려 있는 동안 진입 엔진을 부를 것인가.
+  // **기본은 꺼짐** — 화면을 열었다는 이유만으로 주문이 나가면 안 된다.
+  const [ticking, setTicking] = useState(false);
 
   const load = useCallback(async () => {
     if (!auth) { setErr('로그인이 필요합니다'); setData(null); return; }
@@ -68,6 +74,36 @@ export default function AutotradeControl() {
 
   useEffect(() => { load(); }, [load]);
 
+  // ── 앱 타이머 ──
+  //
+  // 크론이 하루 1회뿐이라 단타가 안 된다. 이 화면이 열려 있는 동안
+  // 30초마다 진입 엔진을 부른다 — **실제 진입 간격은 서버가 지킨다**
+  // (autotrade_schedules.interval_min). 여기서 자주 부른다고 자주
+  // 들어가는 것이 아니다.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    if (!ticking || !auth) return;
+    let alive = true;
+    const tick = async () => {
+      if (busyRef.current || !alive) return;
+      busyRef.current = true;
+      try {
+        const r = await fetch('/api/autotrade/daily-ladder', { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (!alive) return;
+        // 실제로 무언가 실행됐을 때만 목록을 다시 읽는다. 건너뛴 것까지
+        // 새로 고치면 화면이 30초마다 깜빡인다.
+        const did = Array.isArray(j?.results) && j.results.some((x: any) => !x?.skipped);
+        if (did) load();
+        if (j?.ok === false && j?.message) setMsg({ ok: false, text: j.message });
+      } catch { /* 다음 주기에 다시 본다 */ }
+      finally { busyRef.current = false; }
+    };
+    const t = setInterval(tick, 30_000);
+    tick();
+    return () => { alive = false; clearInterval(t); };
+  }, [ticking, auth, load]);
+
   const save = async (enabled: boolean) => {
     setBusy(true); setMsg(null);
     try {
@@ -78,6 +114,7 @@ export default function AutotradeControl() {
           symbol, connectionId: connId, mode: 'TESTNET', enabled,
           leverageCap: levCap === '' ? undefined : Number(levCap),
           riskPct: riskPct === '' ? undefined : Number(riskPct),
+          intervalMin: intervalMin === '' ? undefined : Number(intervalMin),
         }),
       });
       const j = await r.json();
@@ -100,6 +137,7 @@ export default function AutotradeControl() {
           // null로 덮여서, 껐다 켠 것만으로 배율 상한이 사라진다.
           leverageCap: row.leverage_cap ?? undefined,
           riskPct: row.risk_pct ?? undefined,
+          intervalMin: row.interval_min ?? undefined,
         }),
       });
       const j = await r.json();
@@ -186,6 +224,7 @@ export default function AutotradeControl() {
                   {s.connection_id ? '연결 있음' : <span style={{ color: T.red }}>연결 없음 — 주문을 낼 수 없습니다</span>}
                   {s.risk_pct != null ? ` · 위험 ${s.risk_pct}%` : ''}
                   {s.leverage_cap != null ? ` · 상한 ${s.leverage_cap}배` : ''}
+                  {s.interval_min != null ? ` · ${s.interval_min}분마다` : ''}
                   {s.last_run_at ? ` · 마지막 ${fmt(s.last_run_at)}` : ' · 실행된 적 없음'}
                 </div>
               </div>
@@ -245,7 +284,39 @@ export default function AutotradeControl() {
                 color: Number(levCap) >= 50 ? T.ylw : T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>간격 (분)</div>
+            <input value={intervalMin} inputMode="numeric"
+              onChange={e => setIntervalMin(e.target.value.replace(/[^0-9]/g, ''))}
+              style={{
+                width: '100%', background: T.alt, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
+              }}/>
+          </div>
         </div>
+
+        {/* **간격을 짧게 잡아도 실행기가 없으면 그 간격으로 안 돈다.**
+            이걸 안 적으면 '5분으로 해놨는데 왜 안 돌지'가 된다. */}
+        <div style={{
+          background: A(ticking ? T.grn : T.ylw, '10'),
+          border: `1px solid ${A(ticking ? T.grn : T.ylw, '30')}`,
+          borderRadius: 8, padding: '9px 10px',
+          color: ticking ? T.grn : T.ylw, fontSize: 10.5, lineHeight: 1.6,
+        }}>
+          {ticking
+            ? <>이 화면이 열려 있는 동안 <b>{intervalMin || '?'}분</b> 간격으로 진입을 봅니다.
+                <b> 화면을 닫으면 멈추고</b>, 그때부터는 하루 1회 크론만 남습니다.</>
+            : <>지금은 <b>하루 1회 크론</b>만 있습니다 (한국 아침 8시).
+                아래 스위치를 켜면 이 화면이 열려 있는 동안 자주 봅니다.</>}
+        </div>
+
+        <button onClick={() => setTicking(v => !v)} style={{
+          minHeight: 34, borderRadius: 8, cursor: 'pointer',
+          background: ticking ? A(T.grn, '18') : 'transparent',
+          color: ticking ? T.grn : T.muted,
+          border: `1px solid ${ticking ? A(T.grn, '40') : T.border}`,
+          fontSize: 11.5, fontWeight: 800,
+        }}>{ticking ? '자주 보기 켜짐 — 끄기' : '이 화면이 열려 있는 동안 자주 보기'}</button>
 
         {/* **상한이지 목표가 아니다.** 이걸 안 적으면 '100배로 나간다'로 읽는다. */}
         <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.6 }}>
