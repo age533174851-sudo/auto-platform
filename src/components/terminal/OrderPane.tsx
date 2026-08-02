@@ -330,8 +330,15 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [price, setPrice] = useState('');
   const [qty, setQty] = useState('');
   const [leverage, setLeverage] = useState(() => {
-    try { const v = +(localStorage.getItem(LEV_KEY) || '5'); return v >= 1 && v <= 125 ? v : 5; }
-    catch { return 5; }
+    try {
+      const raw = localStorage.getItem(LEV_KEY);
+      if (raw) { const v = +raw; if (v >= 1 && v <= 125) return v; }
+    } catch { /* 설정으로 */ }
+    // 저장된 값이 없으면 설정의 기본 배율을 쓴다
+    try {
+      const { loadPrefs } = require('@/lib/ui/preferences');
+      return loadPrefs().leverage;
+    } catch { return 5; }
   });
   const [levOpen, setLevOpen] = useState(false);
   // 손절 폭(%). **이 칸이 없어서 신규 진입이 전부 거부되고 있었다** —
@@ -380,8 +387,16 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 만든다. **환산은 화면에서 하고, 서버로는 개수만 보낸다** — 두 곳에서
   // 나누기 시작하면 어느 쪽이 실제로 나간 수량인지 알 수 없다.
   const [unit, setUnit] = useState<'BASE' | 'QUOTE'>(() => {
-    try { return localStorage.getItem(UNIT_KEY) === 'QUOTE' ? 'QUOTE' : 'BASE'; }
-    catch { return 'BASE'; }
+    // 마지막에 쓰던 값이 먼저다. 없으면 **설정의 기본값**을 쓴다 —
+    // 설정을 바꿔 놓고 매번 다시 고르게 하면 그 설정은 없는 것과 같다.
+    try {
+      const last = localStorage.getItem(UNIT_KEY);
+      if (last === 'QUOTE' || last === 'BASE') return last;
+    } catch { /* 설정으로 */ }
+    try {
+      const { loadPrefs } = require('@/lib/ui/preferences');
+      return loadPrefs().unit;
+    } catch { return 'BASE'; }
   });
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
@@ -487,7 +502,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       // 계산한다(paperPlan.liquidationFor). 마지막에 고른 값을 기억한다.
       try {
         const saved = localStorage.getItem(PAPER_MARGIN_KEY);
-        setMarginType(saved === 'CROSSED' ? 'CROSSED' : 'ISOLATED');
+        // 저장값이 먼저다 — 이 화면에서 마지막에 고른 것.
+        // 없으면 설정 화면의 기본값을 쓴다. 예전처럼 무조건 ISOLATED로
+        // 떨어뜨리면, 설정에서 교차를 골라 둔 사람이 매번 격리로 시작한다.
+        if (saved === 'CROSSED' || saved === 'ISOLATED') setMarginType(saved);
+        else {
+          const { loadPrefs } = require('@/lib/ui/preferences');
+          setMarginType(loadPrefs().paperMargin);
+        }
       } catch { setMarginType('ISOLATED'); }
       setMarginErr('');
       return;
@@ -693,20 +715,33 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       return;
     }
 
+    // 확인창을 띄우는가.
+    //
+    // 설정(화면 → 확인창)에서 유형별로 끌 수 있다. 다만 **실전은 설정과
+    // 무관하게 항상 묻는다** — 진짜 돈이 나가는 것을 설정 하나로 끌 수
+    // 있으면 그건 설정이 아니라 안전장치 제거다. 그 규칙은
+    // preferences.shouldConfirm 한 곳에 있고 테스트가 붙어 있다.
+    //
     // 실전은 누를 때마다 확인한다. 모드 전환에서 한 번 확인했지만, 그건
     // 몇 분 전 일이고 그 사이 화면을 여러 번 만졌다.
-    if (modeResolution.realMoney) {
-      const { confirmDialog } = await import('@/lib/confirm/dialog');
-      const okToGo = await confirmDialog([
-        `실전 ${orderSide === 'BUY' ? 'LONG' : 'SHORT'} ${q} ${base} · ${leverage}배`,
-        '',
-        `기준가   ${orderType === 'LIMIT' ? fmtPrice(Number(price)) : (mid != null ? fmtPrice(mid) : '시장가')}`,
-        `손절     ${slPct}%`,
-        `증거금   약 ${fmtPrice(margin)} USDT`,
-        '',
-        '실제 자금이 사용됩니다. 되돌릴 수 없습니다.',
-      ].join('\n'), { danger: true });
-      if (!okToGo) return;
+    {
+      const { loadPrefs, shouldConfirm } = await import('@/lib/ui/preferences');
+      const kind = orderType === 'LIMIT' ? 'LIMIT' : 'MARKET';
+      if (shouldConfirm(loadPrefs(), kind, !!modeResolution.realMoney)) {
+        const { confirmDialog } = await import('@/lib/confirm/dialog');
+        const real = !!modeResolution.realMoney;
+        const okToGo = await confirmDialog([
+          `${real ? '실전' : tradeMode === 'PAPER' ? '모의' : '테스트넷'} `
+            + `${orderSide === 'BUY' ? 'LONG' : 'SHORT'} ${q} ${base} · ${leverage}배`,
+          '',
+          `기준가   ${orderType === 'LIMIT' ? fmtPrice(Number(price)) : (mid != null ? fmtPrice(mid) : '시장가')}`,
+          `손절     ${slPct}%`,
+          `증거금   약 ${fmtPrice(margin)} USDT`,
+          '',
+          real ? '실제 자금이 사용됩니다. 되돌릴 수 없습니다.' : '가상 자금입니다.',
+        ].join('\n'), { danger: real });
+        if (!okToGo) return;
+      }
     }
 
     setBusy(true);

@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
   // ── 1) 연결 ──
   const { data: conn, error: connErr } = await (sb as any)
     .from('exchange_connections')
-    .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, account_no, is_testnet')
+    .select('id, exchange_id, api_key, api_secret_enc, account_no, is_testnet')
     .eq('id', String(body.connectionId || ''))
     .eq('user_id', uid)
     .maybeSingle();
@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
 
   const creds = {
     appKey: String(conn.api_key || ''),
-    appSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
+    appSecret: decryptSecret(conn.api_secret_enc ?? ''),
     accountNo: String(conn.account_no || ''),
     // is_testnet === false 만 실전이다. 이 저장소 전체가 쓰는 규칙이고,
     // 모르는 값이 실전으로 읽히지 않게 하려는 것이다.

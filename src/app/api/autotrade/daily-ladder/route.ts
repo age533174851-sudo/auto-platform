@@ -143,6 +143,10 @@ export async function POST(req: NextRequest) {
     userId,
     connectionId: body.connectionId || null,
     mode,
+    // 예약 줄에 저장된 값. GET(크론)이 실어 보낸다.
+    // **이 두 줄이 없어서 화면에 100·10을 넣어도 엔진은 기본값으로 돌았다.**
+    leverageCap: body.leverageCap ?? null,
+    riskPct: body.riskPct ?? null,
   });
 
   // ── 파이프라인 ──
@@ -299,7 +303,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { data: conn } = await sb.from('exchange_connections')
-      .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, user_id')
+      .select('exchange_id, api_key, api_secret_enc, has_withdrawal, user_id')
       .eq('id', body.connectionId)
       .eq('user_id', userId)         // 소유권 — 남의 연결로 주문할 수 없다
       .maybeSingle();
@@ -310,7 +314,7 @@ export async function POST(req: NextRequest) {
     const { decryptSecret } = await import('@/lib/exchanges/crypto');
     const { executeOrder } = await import('@/lib/engine/orderExecutor');
 
-    const exchange = String(conn.exchange || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+    const exchange = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
     const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
     const clientOrderId = `LD${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36);
 
@@ -358,7 +362,7 @@ export async function POST(req: NextRequest) {
     // 심볼별 조회가 필요한 이유: getFuturesPositions는 수량 0을 걸러내므로
     // 신규 진입 심볼의 마진 모드가 그 목록에 없다.
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
-    const apiSecretPre = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+    const apiSecretPre = decryptSecret(conn.api_secret_enc ?? '');
 
     // ── 거래소별로 읽는다 ──
     //
@@ -496,7 +500,7 @@ export async function POST(req: NextRequest) {
       stopLoss,
       exitPlan,
       apiKey: conn.api_key,
-      apiSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
+      apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
     });
 
     if (exec.ok) {
@@ -580,14 +584,34 @@ export async function GET(req: NextRequest) {
   const byCron = !!cronSecret && safeEqual(auth, `Bearer ${cronSecret}`);
   const byAdmin = !!adminSecret && safeEqual(req.headers.get('x-admin-secret'), adminSecret);
 
+  // 로그인한 사용자도 부를 수 있다 — **자기 예약만.**
+  //
+  // 크론이 하루 1회뿐이라 단타가 안 된다. 앱이 열려 있는 동안 화면이
+  // 주기적으로 이 주소를 부르면 그 사이는 자주 볼 수 있다.
+  // 남의 예약까지 돌리면 안 되므로 uid로 자른다.
+  let uid: string | null = null;
   if (!byCron && !byAdmin) {
+    const { resolveUserId } = await import('@/lib/supabase/admin');
+    uid = await resolveUserId(auth, req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+    if (!uid) {
+      return NextResponse.json({
+        ok: false,
+        error: '인증 필요 — Vercel Cron(Bearer CRON_SECRET) · x-admin-secret · 로그인 토큰',
+        // 무엇이 없어서 막혔는지 적는다. '인증 필요'만 적으면 CRON_SECRET을
+        // 안 넣은 것인지 값이 틀린 것인지 알 수 없다.
+        cronSecretConfigured: !!cronSecret,
+      }, { status: 401 });
+    }
+  }
+
+  // 사용자가 부르는 경로는 ADMIN_SECRET이 있어야 진입 엔진(POST)을 부를
+  // 수 있다. 없으면 여기서 말한다 — 아래에서 401을 받고 '실패'로만 남으면
+  // 원인을 알 수 없다.
+  if (uid && !adminSecret) {
     return NextResponse.json({
-      ok: false,
-      error: '인증 필요 — Vercel Cron(Bearer CRON_SECRET) 또는 x-admin-secret',
-      // 무엇이 없어서 막혔는지 적는다. '인증 필요'만 적으면 CRON_SECRET을
-      // 안 넣은 것인지 값이 틀린 것인지 알 수 없다.
-      cronSecretConfigured: !!cronSecret,
-    }, { status: 401 });
+      ok: false, error: 'admin_secret_missing',
+      message: 'ADMIN_SECRET이 없어 진입 엔진을 부를 수 없습니다 — Vercel에 넣고 재배포하세요',
+    }, { status: 503 });
   }
 
   const startedAt = Date.now();
@@ -600,8 +624,10 @@ export async function GET(req: NextRequest) {
   let rows: any[] = [];
   let readError: string | null = null;
   try {
-    const { data, error } = await (sb as any)
-      .from('autotrade_schedules').select('*').eq('enabled', true);
+    let q = (sb as any).from('autotrade_schedules').select('*').eq('enabled', true);
+    // 사용자가 불렀으면 자기 것만
+    if (uid) q = q.eq('user_id', uid);
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
     rows = Array.isArray(data) ? data : [];
   } catch (e: any) {
@@ -622,6 +648,26 @@ export async function GET(req: NextRequest) {
         await noteRun(sb, r.id, '연결 없음');
         continue;
       }
+
+      // ── 너무 자주 부르면 건너뛴다 ──
+      //
+      // 이 주소를 분 단위로 부를 수 있게 열어 뒀다(앱 타이머·외부 스케줄러).
+      // 간격을 안 보면 조건이 맞는 동안 **매 분 진입**한다 — 그건 자동매매가
+      // 아니라 사고다.
+      //
+      // interval_min이 없으면(마이그레이션 035 전) 하루로 본다. 0으로 읽으면
+      // 간격이 통째로 사라진다.
+      const intervalMin = Number(r.interval_min);
+      const gapMs = (Number.isFinite(intervalMin) && intervalMin >= 1 ? intervalMin : 1440) * 60_000;
+      const lastMs = r.last_run_at ? new Date(r.last_run_at).getTime() : null;
+      if (lastMs != null && Number.isFinite(lastMs) && Date.now() - lastMs < gapMs) {
+        const leftMin = Math.ceil((gapMs - (Date.now() - lastMs)) / 60_000);
+        results.push({ symbol: r.symbol, ok: true, skipped: true,
+          detail: `아직 간격 안 됨 — ${leftMin}분 남음` });
+        // **여기서는 last_run_at을 건드리지 않는다.** 건너뛴 것을 실행으로
+        // 적으면 간격이 매번 갱신돼서 영원히 안 돈다.
+        continue;
+      }
       try {
         // **같은 POST 경로를 그대로 부른다.** 여기서 로직을 다시 쓰면
         // 수동 주문과 자동 주문이 서로 다른 검사를 받게 된다.
@@ -631,6 +677,11 @@ export async function GET(req: NextRequest) {
           body: JSON.stringify({
             userId: r.user_id, symbol: r.symbol,
             mode: r.mode, connectionId: r.connection_id,
+            // 마이그레이션 034 전이면 undefined다. ?? null로 눕혀서 보내면
+            // 받는 쪽이 '정하지 않음'으로 읽고 기본값을 쓴다 — 0으로 읽히면
+            // 배율 상한 0이 되어 주문이 통째로 막힌다.
+            leverageCap: r.leverage_cap ?? null,
+            riskPct: r.risk_pct ?? null,
           }),
         });
         const j = await res.json().catch(() => null);
@@ -693,8 +744,12 @@ async function findForeignHolders(
   sb: any, userId: string, symbol: string, selfStrategy: string,
 ): Promise<string[]> {
   const { strategyOf } = await import('@/lib/strategies/ledger');
+  // **strategy_id는 live_orders에 없는 칸이다.** 그걸 고르는 동안 이 질의는
+  // 언제나 실패했고, 위 주석대로 실패는 던지므로 **진입이 매번 여기서
+  // 막혔다.** 소유 전략은 원래 signal_id의 [s:...] 표식으로 붙어 있고
+  // (tagStrategy), strategyOf가 그 표식을 읽는다 — 칸은 필요 없었다.
   const { data, error } = await sb.from('live_orders')
-    .select('side, filled_qty, quantity, signal_id, strategy_id')
+    .select('side, filled_qty, quantity, signal_id')
     .eq('user_id', userId).eq('symbol', symbol)
     .in('status', ['FILLED', 'RECONCILED'])
     .order('created_at', { ascending: true })

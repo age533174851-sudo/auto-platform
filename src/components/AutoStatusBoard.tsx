@@ -88,7 +88,9 @@ export default function AutoStatusBoard({ authHeader }: { authHeader?: string })
       {/* Worker (Railway) */}
       <Row icon={Server} iconColor="#0EA5E9" title="Worker (Railway)" health={workerHealth}
         detail={worker.present ? `${worker.task || '-'} · 최근 ${worker.ageSec != null ? worker.ageSec + '초 전' : '-'}` : (worker.label || '연결 없음')}
-        sub={worker.present && worker.errorCount != null ? `오류 ${worker.errorCount}건 · ${worker.workerId || ''}` : '실전/테스트넷 상시 실행은 Worker 필요'} />
+        sub={worker.present && worker.errorCount != null
+          ? `오류 ${worker.errorCount}건 · ${worker.workerId || ''}`
+          : '지금은 쓰지 않습니다 — 자동매매는 Vercel 크론이 돌립니다'} />
 
       {/* AI 판단 */}
       <Row icon={Sparkles} iconColor="#F59E0B" title="AI 판단 엔진"
@@ -97,7 +99,14 @@ export default function AutoStatusBoard({ authHeader }: { authHeader?: string })
         sub={mock.openPositions != null ? `활성 포지션 ${mock.openPositions}개` : undefined} />
 
       <div style={{ color: T.muted, fontSize: 10, marginTop: 10, lineHeight: 1.5 }}>
-        MOCK은 브라우저에서 즉시 동작하고, 실전/테스트넷 상시 자동매매는 Railway Worker가 담당합니다.
+        {/* **이 줄이 거짓말이었다.** Railway 워커는 Binance IP 지역 차단으로
+            쓰지 않고 있고, 실제로 자동매매를 돌리는 것은 Vercel 크론
+            (daily-ladder)이다. 워커가 '없음'인 것을 보고 "그래서 자동매매가
+            안 되는구나"로 읽으면, 정작 봐야 할 곳을 안 보게 된다. */}
+        이 판은 <b style={{ color: T.txt }}>브라우저 엔진</b> 상태입니다.
+        실제 자동매매는 <b style={{ color: T.txt }}>Vercel 크론</b>이 매일 한 번 돌립니다 —
+        그건 위의 <b style={{ color: T.txt }}>자동매매 (실제 실행)</b> 판에서 보세요.
+        Railway 워커는 Binance 지역 차단으로 쓰지 않습니다.
       </div>
     </div>
   );
