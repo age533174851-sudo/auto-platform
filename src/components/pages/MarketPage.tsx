@@ -12,6 +12,14 @@ import {
 } from './SharedUI';
 import { useLogoMap } from '@/lib/hooks/useLogoMap';
 
+/**
+ * 고를 수 있는 견적통화.
+ *
+ * 서버(`/api/prices` QUOTES)와 **같은 목록이어야 한다.** 화면에만 있는
+ * 통화를 누르면 서버가 400을 돌려주고, 사용자는 목록이 빈 이유를 모른다.
+ */
+const QUOTE_CHIPS = ['USDT', 'USDC', 'FDUSD', 'BTC', 'BNB', 'ETH'] as const;
+
 /* ─────────────────────────────────────────────────────────────
    MarketPage
 ───────────────────────────────────────────────────────────── */
@@ -42,6 +50,12 @@ function MarketPage({
   const [allCoins,   setAllCoins]   = useState<Asset[]>([]);
   const [coinMeta,   setCoinMeta]   = useState<{ count: number; total: number; status: string } | null>(null);
   const [coinsLoading, setCoinsLoading] = useState(false);
+  const [coinsErr,   setCoinsErr]   = useState('');
+  // 무엇으로 사는가. BTC/USDT와 BTC/BTC는 다른 시장이고 가격 단위도 다르다.
+  const [quote,      setQuote]      = useState('USDT');
+  // 통화별로 따로 담는다. 하나로 두면 통화를 바꿀 때마다 다시 받아야 하고,
+  // 받는 동안 **이전 통화의 목록이 새 통화 이름표를 달고 떠 있게 된다.**
+  const [coinCache,  setCoinCache]  = useState<Record<string, Asset[]>>({});
 
   /* ── gainers / losers / trending fetch with fallback ── */
   useEffect(() => {
@@ -77,31 +91,57 @@ function MarketPage({
       .finally(() => setMktLoading(false));
   }, [mktTab, prices]);
 
-  // 코인 필터 선택 시 Binance 전체 USDT 페어 로드 (한 번만)
+  // 코인 필터 선택 시 그 견적통화의 페어를 로드 (통화별로 한 번씩)
   useEffect(() => {
-    if (filter !== '코인' || allCoins.length > 0 || coinsLoading) return;
+    if (filter !== '코인') return;
+    const cached = coinCache[quote];
+    if (cached) { setAllCoins(cached); setCoinsErr(''); return; }
+
+    let alive = true;
     setCoinsLoading(true);
-    fetch('/api/prices?action=all_crypto&limit=300')
+    setCoinsErr('');
+    // **먼저 비운다.** 안 비우면 받아오는 동안 이전 통화의 목록이 새 통화
+    // 이름표를 달고 떠 있고, 그 사이 누르면 다른 시장의 종목이 열린다.
+    setAllCoins([]);
+    fetch(`/api/prices?action=all_crypto&limit=300&quote=${encodeURIComponent(quote)}`)
       .then(r => r.json())
       .then(d => {
+        if (!alive) return;
+        if (d?.error) {
+          setCoinMeta({ count: 0, total: 0, status: 'error' });
+          setCoinsErr(d.message || d.error);
+          return;
+        }
         const results = Array.isArray(d.results) ? d.results : [];
         const mapped: Asset[] = results.map((c: any) => ({
-          id:     c.symbol,
-          sym:    `${c.symbol}/USDT`,
+          id:     `${c.symbol}${quote}`,
+          sym:    `${c.symbol}/${quote}`,
           nameKr: c.symbol,
           name:   c.symbol,
+          // 달러 계열이 아니면 원화 환산을 안 한 값이 온다(krw:false).
+          // 그대로 쓰되 아래에서 단위를 통화로 적는다 — 0.00003을 '원'으로
+          // 적으면 완전히 다른 숫자가 된다.
           p:      c.price || 0,
           c:      c.change24h || 0,
           v:      c.volume24h ? `${(c.volume24h / 1e8).toFixed(1)}억` : '-',
           t:      'coin' as const,
           clr:    '#F7931A',
-        }));
+          quote,
+          krw:    c.krw !== false,
+        } as any));
         setAllCoins(mapped);
+        setCoinCache(m => ({ ...m, [quote]: mapped }));
         setCoinMeta({ count: d.count || mapped.length, total: d.total || 0, status: d.status || 'live' });
+        if (mapped.length === 0) setCoinsErr(`${quote} 페어를 받지 못했습니다`);
       })
-      .catch(() => setCoinMeta({ count: 0, total: 0, status: 'error' }))
-      .finally(() => setCoinsLoading(false));
-  }, [filter, allCoins.length, coinsLoading]);
+      .catch(e => {
+        if (!alive) return;
+        setCoinMeta({ count: 0, total: 0, status: 'error' });
+        setCoinsErr(`목록을 받지 못했습니다 (${e?.message || e})`);
+      })
+      .finally(() => { if (alive) setCoinsLoading(false); });
+    return () => { alive = false; };
+  }, [filter, quote, coinCache]);
 
   /* ── list filter / sort ── */
   const TYPE_MAP: Record<string, string> = {
@@ -303,6 +343,27 @@ function MarketPage({
               ))}
           </div>
 
+          {/* 견적통화 — '무엇으로 사는가'.
+              BTC/USDT와 BTC/BTC는 다른 시장이고 가격 단위도 다르다.
+              코인일 때만 뜬다 — 주식·ETF에는 이 축이 없다. */}
+          {filter === '코인' && (
+            <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:8, marginBottom:8 }}>
+              {QUOTE_CHIPS.map(q => (
+                <button
+                  key={q}
+                  onClick={() => setQuote(q)}
+                  style={{
+                    flexShrink:0, padding:'5px 12px', borderRadius:999, cursor:'pointer',
+                    background: quote === q ? A(T.acl,'22') : 'transparent',
+                    color:      quote === q ? T.acl : T.muted,
+                    border:    `1px solid ${quote === q ? T.acl : T.border}`,
+                    fontSize:11, fontWeight:800,
+                  }}
+                >{q}</button>
+              ))}
+            </div>
+          )}
+
           {/* Sort pills */}
           <div style={{ display:'flex', gap:6, marginBottom:8 }}>
             <Pill ch="등락률순" active={sort === 'change'} onClick={() => setSort('change')} color={T.grn} />
@@ -355,9 +416,32 @@ function MarketPage({
             </div>
 
             {list.length === 0 ? (
-              <div style={{ padding:'36px 0', textAlign:'center', color:T.muted }}>
-                <div style={{ fontSize:28, marginBottom:6 }}>🔍</div>
-                <div>검색 결과 없음</div>
+              // **비어 있는 이유를 갈라 적는다.** 셋 다 '아무것도 없다'로
+              // 보이지만 할 일이 다르다 — 기다리기 / 검색어 지우기 / 다시 받기.
+              <div style={{ padding:'36px 14px', textAlign:'center', color:T.muted }}>
+                {coinsLoading ? (
+                  <>
+                    <div style={{ fontSize:28, marginBottom:6 }}>⏳</div>
+                    <div>{quote} 페어를 받는 중…</div>
+                  </>
+                ) : coinsErr ? (
+                  <>
+                    <div style={{ fontSize:28, marginBottom:6 }}>⚠️</div>
+                    <div style={{ color:T.ylw, fontSize:12, lineHeight:1.6 }}>{coinsErr}</div>
+                    <button
+                      onClick={() => setCoinCache(m => { const n = { ...m }; delete n[quote]; return n; })}
+                      style={{
+                        marginTop:10, padding:'6px 14px', borderRadius:8, cursor:'pointer',
+                        background:'transparent', border:`1px solid ${T.border}`,
+                        color:T.txt, fontSize:11, fontWeight:700,
+                      }}>다시 받기</button>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize:28, marginBottom:6 }}>🔍</div>
+                    <div>검색 결과 없음</div>
+                  </>
+                )}
               </div>
             ) : (Array.isArray(list)?list:[]).map((a, i) => (
               <div
@@ -387,8 +471,13 @@ function MarketPage({
                   <Spark pos={a.c >= 0} w={52} h={24} />
                 </div>
                 <div style={{ textAlign:'right' }}>
+                  {/* BTC·BNB·ETH 페어는 원화로 환산하지 않는다. 0.00003을
+                      '원'으로 적으면 완전히 다른 숫자가 된다 — 통화 단위를
+                      그대로 붙여서 무엇으로 센 값인지 남긴다. */}
                   <div style={{ color:T.txt, fontWeight:700, fontSize:11, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                    {cvt(a.p, currency)}
+                    {(a as any).krw === false
+                      ? `${Number(a.p).toPrecision(6).replace(/\.?0+$/, '')} ${(a as any).quote}`
+                      : cvt(a.p, currency)}
                   </div>
                   <div style={{ color: a.c >= 0 ? T.grn : T.red, fontSize:11, fontWeight:700 }}>
                     {fmtPct(a.c)}

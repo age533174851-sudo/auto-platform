@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { QUOTES, isSupportedQuote, isDollarQuote, acceptPair, baseOf } from '@/lib/markets/pair';
 
 // ─── Types ───────────────────────────────────────────────────────
 interface PriceResult {
@@ -135,7 +136,8 @@ async function fetchCoinGecko(krw: number): Promise<Map<string, PriceResult>> {
 }
 
 // ─── Binance top gainers / losers / trending ───────────────────
-async function fetchBinanceAll(): Promise<any[]> {
+async function fetchBinanceAll(quote: string = 'USDT'): Promise<any[]> {
+  const q = String(quote || 'USDT').toUpperCase();
   try {
     const r = await fetch(
       'https://api.binance.com/api/v3/ticker/24hr?type=MINI',
@@ -143,15 +145,37 @@ async function fetchBinanceAll(): Promise<any[]> {
     );
     if (!r.ok) return [];
     const all: any[] = await r.json();
-    return all
-      .filter((t:any) => t.symbol.endsWith('USDT') && !t.symbol.includes('UP') && !t.symbol.includes('DOWN') && !t.symbol.includes('BEAR') && !t.symbol.includes('BULL'))
-      .map((t:any) => ({
-        symbol:    t.symbol.replace('USDT',''),
-        price:     parseFloat(t.lastPrice) * KRW,
+
+    // 이 통화로 상장된 베이스 전부. 레버리지 토큰(`<상장코인>UP`)을
+    // **어림잡지 않고 정확히** 가르는 데 쓴다 — JUP처럼 그냥 UP으로
+    // 끝나는 실제 코인을 지우지 않기 위해서다.
+    const knownBases = new Set<string>();
+    for (const t of all) {
+      const b = baseOf(t?.symbol, q);
+      if (b) knownBases.add(b);
+    }
+
+    const out: any[] = [];
+    for (const t of all) {
+      // acceptPair가 끝에서만 자르고 레버리지 토큰을 뺀다. 여기서 직접
+      // 하지 않는 이유는 그 두 줄이 목록에서 종목을 지우기 때문이다 —
+      // 지워진 종목은 '없는 종목'과 똑같이 보여서 틀려도 안 드러난다.
+      const base = acceptPair(t?.symbol, q, knownBases);
+      if (base == null) continue;
+      out.push({
+        symbol:    base,
+        quote:     q,
+        // 가격은 견적통화 단위다. 달러 계열만 원화로 바꾼다 —
+        // BTC 페어의 0.00003에 환율을 곱하면 완전히 다른 숫자가 된다.
+        price:     parseFloat(t.lastPrice) * (isDollarQuote(q) ? KRW : 1),
+        priceInQuote: parseFloat(t.lastPrice),
+        krw:       isDollarQuote(q),
         change24h: parseFloat(t.priceChangePercent),
         volume24h: parseFloat(t.quoteVolume),
         source:    'binance',
-      }));
+      });
+    }
+    return out;
   } catch { return []; }
 }
 
@@ -315,12 +339,24 @@ export async function GET(req: NextRequest) {
   // ── All crypto (Binance 전체 USDT 페어, 거래량순) ──
   if (action === 'all_crypto') {
     const limit = Math.min(500, parseInt(searchParams.get('limit') || '200'));
-    const all = await fetchBinanceAll();
+    // 목록에 없는 값이 오면 **조용히 USDT로 바꾸지 않는다.** 화면은
+    // 자기가 고른 통화의 목록을 본다고 믿는데 다른 통화가 오면 알 수 없다.
+    const askedQuote = String(searchParams.get('quote') || 'USDT').toUpperCase();
+    if (!isSupportedQuote(askedQuote)) {
+      return NextResponse.json({
+        results: [], count: 0, total: 0, status: 'error',
+        error: 'unsupported_quote',
+        message: `지원하지 않는 견적통화입니다: ${askedQuote}`,
+        supported: QUOTES,
+      }, { status: 400 });
+    }
+    const all = await fetchBinanceAll(askedQuote);
     const sorted = all
       .sort((a, b) => (b.volume24h || 0) - (a.volume24h || 0))
       .slice(0, limit);
     return NextResponse.json({
       results: sorted,
+      quote:   askedQuote,
       source:  'binance',
       count:   sorted.length,
       total:   all.length,
