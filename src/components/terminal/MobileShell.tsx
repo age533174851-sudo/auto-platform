@@ -195,7 +195,11 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
         메뉴로 숨기지 않는다 — '현물인가 선물인가'와 '진짜 돈인가'는
         잘려도 되는 정보가 아니다. */}
     <div style={{ padding: '0 12px 6px', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-      <div style={{ flexShrink: 0 }}>
+      {/* 칩이 넷(현물·USDT-M·COIN-M·주식)이라 더는 flexShrink:0으로
+          붙잡을 수 없다. 붙잡으면 옆의 모드 전환('진짜 돈인가')이 밀려
+          잘린다 — 둘 중 잘려도 되는 것은 없다. 시장 줄이 좁아지면 그
+          안에서 가로 스크롤한다. */}
+      <div style={{ minWidth: 0, flexShrink: 1 }}>
         <MarketSwitch compact value={marketType} onChange={setMarketType}/>
       </div>
       {/* 이 화면에서 가장 중요한 한 줄 — 진짜 돈인가. */}

@@ -19,9 +19,9 @@
 // 위험 계산을 돌리면 답이 나온다 — 틀린 답이.
 // 그래서 능력표는 boolean이고, 없는 항목은 화면에 아예 렌더되지 않는다.
 
-export type MarketType = 'SPOT' | 'USDT_FUTURES' | 'COIN_FUTURES';
+export type MarketType = 'SPOT' | 'USDT_FUTURES' | 'COIN_FUTURES' | 'STOCK';
 
-export const MARKET_TYPES: MarketType[] = ['SPOT', 'USDT_FUTURES', 'COIN_FUTURES'];
+export const MARKET_TYPES: MarketType[] = ['SPOT', 'USDT_FUTURES', 'COIN_FUTURES', 'STOCK'];
 
 export interface MarketCapability {
   label: string;
@@ -77,6 +77,21 @@ const CAP: Record<MarketType, MarketCapability> = {
     sellLabel: () => 'SHORT 진입',
     orderEndpoint: '/api/binance/coinm/order',
   },
+  // 주식은 거래소가 아니라 **증권사(한국투자증권)**를 탄다. 연결도 따로다 —
+  // 바이낸스 연결로는 주문이 안 나가고, 그 사실을 주문판이 먼저 말한다.
+  //
+  // canShort가 false인 이유: 이 경로는 현금 매수·매도만 낸다. 공매도는
+  // 대주/신용이 따로 필요하고 규칙도 다르다. **없는 것을 있는 척하지 않는다.**
+  STOCK: {
+    label: '주식', shortLabel: '주식',
+    leverage: false, liquidation: false, marginMode: false,
+    funding: false, canShort: false, reduceOnly: false,
+    // 증권 계좌는 현금 계좌다. 선물 지갑과 섞으면 안 된다.
+    wallet: 'SPOT_WALLET',
+    buyLabel: base => `${base} 매수`,
+    sellLabel: base => `${base} 매도`,
+    orderEndpoint: '/api/stock/order',
+  },
 };
 
 export function capability(m: MarketType): MarketCapability {
@@ -113,7 +128,7 @@ export function isFutures(m: MarketType): boolean {
 // 그래서 컬럼이 있으면 컬럼에, 없으면 signal_id 앞에 표식을 붙여 남긴다.
 // 표식은 사람이 읽을 수 있고, 마이그레이션 후에도 그대로 해석된다.
 
-const TAG = /^\[(SPOT|USDT_FUTURES|COIN_FUTURES)\]/;
+const TAG = /^\[(SPOT|USDT_FUTURES|COIN_FUTURES|STOCK)\]/;
 
 /** signal_id 앞에 유형 표식을 붙인다 */
 export function tagSignalId(signalId: string, m: MarketType): string {

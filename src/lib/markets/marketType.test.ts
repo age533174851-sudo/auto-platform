@@ -40,6 +40,33 @@ export function runMarketTypeTests() {
     assert(capability('SPOT').orderEndpoint.includes('/spot/'), capability('SPOT').orderEndpoint);
   });
 
+  // 주식은 거래소가 아니라 증권사를 탄다. 여기서 능력을 잘못 적으면
+  // 주식 화면에 레버리지 칸이 생기고, 사용자는 그것을 보고 배율을
+  // 걸었다고 믿는다 — 이 경로에는 배율이 **없다.**
+  test('주식에는 레버리지·청산·공매도가 없다', () => {
+    const s = capability('STOCK');
+    eq(s.leverage, false);
+    eq(s.liquidation, false);
+    eq(s.marginMode, false);
+    eq(s.funding, false);
+    // 이 경로는 현금 매수·매도만 낸다. 공매도는 대주/신용이 따로 필요하다.
+    eq(s.canShort, false);
+    // 증권 계좌는 현금 계좌다. 선물 증거금과 섞으면 안 된다.
+    eq(s.wallet, 'SPOT_WALLET');
+  });
+
+  test('주식은 증권사 엔드포인트로 간다 — 바이낸스로 가면 안 된다', () => {
+    const ep = capability('STOCK').orderEndpoint;
+    assert(!ep.includes('binance'), `주식 주문이 바이낸스로 간다: ${ep}`);
+    assert(ep.includes('/stock/'), ep);
+  });
+
+  test('주식 버튼에는 LONG/SHORT가 없다', () => {
+    for (const l of [capability('STOCK').buyLabel('삼성전자'), capability('STOCK').sellLabel('삼성전자')]) {
+      assert(!/LONG|SHORT/.test(l), `주식 버튼에 방향 용어가 있다: ${l}`);
+    }
+  });
+
   console.log('[시장 유형 — 버튼 문구]');
 
   test('현물과 선물의 버튼 문구가 겹치지 않는다', () => {
