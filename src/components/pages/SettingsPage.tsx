@@ -1,5 +1,6 @@
 'use client';
 import ThemeToggle from '@/components/ThemeToggle';
+import DisplayScaleControl from '@/components/settings/DisplayScaleControl';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
@@ -258,6 +259,18 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
               <span>화면 테마</span>
             </div>
             <ThemeToggle/>
+          </Card>
+
+          {/* 화면 크기 — 테마 바로 아래. 안 보이면 아무것도 못 한다 */}
+          <Card style={{padding:16,marginBottom:12}}>
+            <div style={{color:T.txt,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:6}}>
+              <Sun size={14} strokeWidth={2.2} color={T.acl}/>
+              <span>화면 크기</span>
+            </div>
+            <div style={{color:T.muted,fontSize:10,marginBottom:12,lineHeight:1.6}}>
+              글씨가 작아 숫자를 잘못 읽는 것은 거래에서 그대로 손실이 됩니다.
+            </div>
+            <DisplayScaleControl/>
           </Card>
 
           {/* Language */}

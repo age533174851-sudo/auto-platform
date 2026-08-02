@@ -164,6 +164,7 @@ export async function GET(req: NextRequest) {
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+  const cronStartedAt = Date.now();
 
   // ── 미확정 주문 복구 ──
   //
@@ -338,7 +339,16 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // 돌았다는 사실을 남긴다. 이게 없으면 크론이 조용히 죽어도 아무도
+  // 모른다 — 캘린더 동기화가 vercel.json에 등록조차 안 된 채로 몇 달을
+  // 보낸 것이 정확히 그 결과였다.
+  const { recordCronRun } = await import('@/lib/system/cronLog');
+  const cronLog = await recordCronRun(sb, 'exit-monitor',
+    actionable.length > 0 ? 'ok' : 'skipped',
+    `${decisions.length}건 확인 · ${actionable.length}건 처리`, cronStartedAt);
+
   return NextResponse.json({
     ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, results,
+    cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

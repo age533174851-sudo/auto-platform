@@ -152,6 +152,7 @@ async function runSync() {
   // 'unknown'으로 들어간 일정은 회피 대상에서 빠진다. 그 사실을 응답에
   // 적어야 사람이 수동으로 채워 넣을지 판단할 수 있다.
   const unknownImpact = placeable.filter(e => e.impact === 'unknown').length;
+  const cronStartedAt = Date.now();
 
   const sb = getSupabaseAdmin();
   if (!sb) {
@@ -212,8 +213,14 @@ async function runSync() {
     }
   }
 
+  const { recordCronRun } = await import('@/lib/system/cronLog');
+  const cronLog = await recordCronRun(sb, 'calendar-sync',
+    storageWarning ? 'failed' : (saved > 0 ? 'ok' : 'skipped'),
+    storageWarning || `${saved}건 저장 · ${collected.events.length}건 수집`, cronStartedAt);
+
   return NextResponse.json({
     ok: !storageWarning,
+    cronLogError: cronLog.error,
     range: { from, to },
     sources: sourceStatus,
     collected: collected.events.length,
