@@ -502,6 +502,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       // 계산한다(paperPlan.liquidationFor). 마지막에 고른 값을 기억한다.
       try {
         const saved = localStorage.getItem(PAPER_MARGIN_KEY);
+        // 저장값이 먼저다 — 이 화면에서 마지막에 고른 것.
+        // 없으면 설정 화면의 기본값을 쓴다. 예전처럼 무조건 ISOLATED로
+        // 떨어뜨리면, 설정에서 교차를 골라 둔 사람이 매번 격리로 시작한다.
         if (saved === 'CROSSED' || saved === 'ISOLATED') setMarginType(saved);
         else {
           const { loadPrefs } = require('@/lib/ui/preferences');
@@ -896,6 +899,24 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           whiteSpace: 'nowrap',
         }}>청산 {liqPct.toFixed(1)}%</span>
       </div>
+
+      {/* 모의는 왜 못 바꾸는가.
+          "안 됩니다"만 적으면 고장으로 읽힌다 — 되는 곳을 같이 알려준다. */}
+      {marginOpen && isPaper && (
+        <div style={{ padding: '9px 10px', borderRadius: 8, background: C.raised, display: 'grid', gap: 6 }}>
+          <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+            모의는 격리로 고정입니다
+          </div>
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
+            모의 계좌는 교차 증거금을 계산하지 않습니다 — 청산가를 진입가와
+            배율만으로 냅니다. 여기서 <b>교차</b>를 고를 수 있게 해 두면
+            <b> 눌러도 아무것도 안 바뀌는 선택지</b>가 됩니다.
+            <br/>
+            교차를 연습하시려면 위에서 <b style={{ color: C.text }}>테스트넷</b>으로
+            바꾸세요. 거기서는 실제로 거래소 설정이 바뀝니다.
+          </div>
+        </div>
+      )}
 
       {/* 마진 모드 고르기 */}
       {marginOpen && (
