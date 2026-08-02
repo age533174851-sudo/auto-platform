@@ -120,21 +120,21 @@ export async function buildRiskContext(
   if (sb && opts.connectionId) {
     try {
       const testnet = String(opts.mode || 'TESTNET').toUpperCase() !== 'LIVE';
-      const { data: conn } = await sb
-        .from('exchange_connections')
-        .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
-        .eq('id', opts.connectionId)
-        .maybeSingle();
+      // 예전에는 여기서 `exchange`·`encrypted_secret` 칸을 골랐다. 둘 다
+      // 존재하지 않는 칸이라 질의가 통째로 실패했고, error를 안 봤기 때문에
+      // conn이 조용히 null이 됐다. 그래서 **연결이 멀쩡해도 잔고를 한 번도
+      // 못 읽었고, 계좌 자산이 언제나 폴백 $10,000이었다** — 포지션 크기가
+      // 전부 가짜 자산 기준으로 계산됐다는 뜻이다. 경고조차 없었다.
+      const { loadConnection } = await import('../exchanges/connection');
+      const { conn, error: connErr } = await loadConnection(sb, opts.connectionId, opts.userId);
 
-      if (conn?.has_withdrawal) {
-        warnings.push('출금 권한 키는 자동매매에 사용할 수 없습니다');
-      } else if (conn) {
-        const { decryptSecret } = await import('@/lib/exchanges/crypto');
-        const key = conn.api_key;
-        const secret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
-        const ex = String(conn.exchange || '').toLowerCase();
+      if (!conn) {
+        warnings.push(`계좌 조회 불가 — ${connErr} (기본 자산 $${FALLBACK_EQUITY} 가정)`);
+      } else {
+        const key = conn.apiKey;
+        const secret = conn.apiSecret;
 
-        if (ex.includes('binance')) {
+        if (conn.exchange === 'binance') {
           const { getFuturesBalance } = await import('@/lib/exchanges/binanceFutures');
           const r: any = await getFuturesBalance(key, secret, testnet);
           const usdt = r?.balances?.find((b: any) => b.asset === 'USDT');
@@ -142,13 +142,19 @@ export async function buildRiskContext(
             accountEquity = Number(usdt.balance) || FALLBACK_EQUITY;
             availableMargin = Number(usdt.availableBalance);
             source = 'exchange';
+          } else {
+            // 응답은 왔는데 USDT가 없다 — 잔고 0일 수도, 응답 모양이 다를
+            // 수도 있다. 어느 쪽이든 $10,000으로 계산하면 안 된다.
+            warnings.push(`잔고 응답에 USDT가 없습니다 — 기본 자산 $${FALLBACK_EQUITY} 가정 (${r?.error || '이유 미상'})`);
           }
-        } else if (ex.includes('gate')) {
+        } else if (conn.exchange === 'gate') {
           const { getAccountGateFutures } = await import('@/lib/exchanges/gateFutures');
           const a: any = await getAccountGateFutures(key, secret, testnet);
           accountEquity = Number(a?.total) || FALLBACK_EQUITY;
           availableMargin = Number(a?.available);
           source = 'exchange';
+        } else {
+          warnings.push(`${conn.exchange} 연결로는 선물 잔고를 읽지 않습니다 — 기본 자산 $${FALLBACK_EQUITY} 가정`);
         }
       }
     } catch (e: any) {

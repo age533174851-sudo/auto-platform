@@ -75,13 +75,13 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
   let isGate = false;
   try {
     const { data } = await sb.from('exchange_connections')
-      .select('api_key, api_secret_enc, encrypted_secret, exchange_id, exchange')
+      .select('api_key, api_secret_enc, exchange_id')
       .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
     if (data) {
       conn = data;
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
-      secret = decryptSecret(data.api_secret_enc ?? data.encrypted_secret ?? '');
-      const tag = String(data.exchange_id ?? data.exchange ?? '').toLowerCase();
+      secret = decryptSecret(data.api_secret_enc ?? '');
+      const tag = String(data.exchange_id ?? '').toLowerCase();
       isGate = tag.includes('gate');
     }
   } catch {

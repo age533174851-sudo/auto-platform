@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
   if (action === 'test') {
     const { data: conn } = await (sb as any)
       .from('exchange_connections')
-      .select('id, api_key, api_secret_enc, encrypted_secret, account_no, is_testnet')
+      .select('id, api_key, api_secret_enc, account_no, is_testnet')
       .eq('id', String(body.connectionId || '')).eq('user_id', uid).eq('exchange_id', 'kis')
       .maybeSingle();
     if (!conn) {
@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
     }
     const r = await testKisConnection({
       appKey: String(conn.api_key || ''),
-      appSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
+      appSecret: decryptSecret(conn.api_secret_enc ?? ''),
       accountNo: String(conn.account_no || ''),
       env: conn.is_testnet === false ? 'LIVE' : 'PAPER',
     }, supabaseTokenCache(sb, conn.id));

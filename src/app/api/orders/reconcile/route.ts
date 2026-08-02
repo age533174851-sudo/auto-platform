@@ -76,7 +76,7 @@ export async function GET(req: NextRequest) {
 
     // 연결 정보로 실제 대조
     const { data: conn } = await sb.from('exchange_connections')
-      .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
+      .select('exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
       .eq('id', connectionId).maybeSingle();
 
     if (!conn) return NextResponse.json({ ok: false, error: '연결을 찾을 수 없습니다' }, { status: 404 });
@@ -87,11 +87,11 @@ export async function GET(req: NextRequest) {
     const { decryptSecret } = await import('@/lib/exchanges/crypto');
     const { reconcilePendingOrders } = await import('@/lib/engine/orderExecutor');
 
-    const ex = String(conn.exchange || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+    const ex = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
     const result = await reconcilePendingOrders(sb, {
       exchange: ex as 'binance' | 'gate',
       apiKey: conn.api_key,
-      apiSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
+      apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
       // exchange_connections에는 mode 컬럼이 없다. 테스트넷 여부는 is_testnet이며,
       // 값이 없으면 안전한 쪽(테스트넷)으로 본다.
       testnet: conn.is_testnet !== false,

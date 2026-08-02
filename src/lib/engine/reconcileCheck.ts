@@ -33,7 +33,7 @@ export async function gatherAndReconcile(
   const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
 
   const { data: conn } = await sb.from('exchange_connections')
-    .select('exchange_id, exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+    .select('exchange_id, api_key, api_secret_enc, has_withdrawal')
     .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
 
   if (!conn) return { reachable: false, verdict: null, error: '활성 거래소 연결이 없습니다', ...empty };
@@ -43,7 +43,7 @@ export async function gatherAndReconcile(
 
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const key = (conn as any).api_key as string;
-  const secret = decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? '');
+  const secret = decryptSecret((conn as any).api_secret_enc ?? '');
 
   // ── 어느 거래소인가 ──
   //
@@ -53,7 +53,7 @@ export async function gatherAndReconcile(
   //
   // 판정(reconcileState)은 거래소를 모른다 — PositionView만 받는다. 그래서
   // 읽는 쪽만 갈라 준다.
-  const isGate = String((conn as any).exchange_id ?? (conn as any).exchange ?? '')
+  const isGate = String((conn as any).exchange_id ?? '')
     .toLowerCase().includes('gate');
 
   const exchangePositions: PositionView[] = [];

@@ -333,7 +333,7 @@ export async function POST(req: NextRequest) {
       }
 
       const { data: conn } = await sb.from('exchange_connections')
-        .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, user_id')
+        .select('exchange_id, api_key, api_secret_enc, has_withdrawal, user_id')
         .eq('id', raw.connectionId)
         .eq('user_id', raw.userId)
         .maybeSingle();
@@ -344,7 +344,7 @@ export async function POST(req: NextRequest) {
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
       const { executeOrder } = await import('@/lib/engine/orderExecutor');
 
-      const exchange = String(conn.exchange || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+      const exchange = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
       const clientOrderId = `TG${signalId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 30)}`;
 
       const r = await executeOrder(sb, {
@@ -357,7 +357,7 @@ export async function POST(req: NextRequest) {
         stopLoss: v.signal!.stopLoss,
         takeProfit: v.signal!.takeProfit,
         apiKey: conn.api_key,
-        apiSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
+        apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
       });
 
       if (inserted?.id) {

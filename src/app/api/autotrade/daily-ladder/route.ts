@@ -303,7 +303,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { data: conn } = await sb.from('exchange_connections')
-      .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, user_id')
+      .select('exchange_id, api_key, api_secret_enc, has_withdrawal, user_id')
       .eq('id', body.connectionId)
       .eq('user_id', userId)         // 소유권 — 남의 연결로 주문할 수 없다
       .maybeSingle();
@@ -314,7 +314,7 @@ export async function POST(req: NextRequest) {
     const { decryptSecret } = await import('@/lib/exchanges/crypto');
     const { executeOrder } = await import('@/lib/engine/orderExecutor');
 
-    const exchange = String(conn.exchange || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+    const exchange = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
     const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
     const clientOrderId = `LD${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36);
 
@@ -362,7 +362,7 @@ export async function POST(req: NextRequest) {
     // 심볼별 조회가 필요한 이유: getFuturesPositions는 수량 0을 걸러내므로
     // 신규 진입 심볼의 마진 모드가 그 목록에 없다.
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
-    const apiSecretPre = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+    const apiSecretPre = decryptSecret(conn.api_secret_enc ?? '');
 
     // ── 거래소별로 읽는다 ──
     //
@@ -500,7 +500,7 @@ export async function POST(req: NextRequest) {
       stopLoss,
       exitPlan,
       apiKey: conn.api_key,
-      apiSecret: decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? ''),
+      apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
     });
 
     if (exec.ok) {
@@ -744,8 +744,12 @@ async function findForeignHolders(
   sb: any, userId: string, symbol: string, selfStrategy: string,
 ): Promise<string[]> {
   const { strategyOf } = await import('@/lib/strategies/ledger');
+  // **strategy_id는 live_orders에 없는 칸이다.** 그걸 고르는 동안 이 질의는
+  // 언제나 실패했고, 위 주석대로 실패는 던지므로 **진입이 매번 여기서
+  // 막혔다.** 소유 전략은 원래 signal_id의 [s:...] 표식으로 붙어 있고
+  // (tagStrategy), strategyOf가 그 표식을 읽는다 — 칸은 필요 없었다.
   const { data, error } = await sb.from('live_orders')
-    .select('side, filled_qty, quantity, signal_id, strategy_id')
+    .select('side, filled_qty, quantity, signal_id')
     .eq('user_id', userId).eq('symbol', symbol)
     .in('status', ['FILLED', 'RECONCILED'])
     .order('created_at', { ascending: true })

@@ -58,10 +58,10 @@ async function runPositionGuards(
     try {
       if (!credCache.has(d.userId)) {
         const { data: conn } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, encrypted_secret')
+          .select('api_key, api_secret_enc')
           .eq('user_id', d.userId).eq('is_active', true).limit(1).maybeSingle();
         credCache.set(d.userId, conn
-          ? { key: (conn as any).api_key, secret: decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? '') }
+          ? { key: (conn as any).api_key, secret: decryptSecret((conn as any).api_secret_enc ?? '') }
           : null);
       }
       const cred = credCache.get(d.userId);
@@ -127,15 +127,15 @@ async function recoverUnresolvedOrders(
 
     for (const cid of connIds) {
       const { data: conn } = await sb.from('exchange_connections')
-        .select('exchange, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
+        .select('exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
         .eq('id', cid).maybeSingle();
       if (!conn || (conn as any).has_withdrawal) continue;
 
-      const ex = String((conn as any).exchange || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+      const ex = String((conn as any).exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
       const r = await reconcilePendingOrders(sb, {
         exchange: ex as 'binance' | 'gate',
         apiKey: (conn as any).api_key,
-        apiSecret: decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? ''),
+        apiSecret: decryptSecret((conn as any).api_secret_enc ?? ''),
         testnet: (conn as any).is_testnet !== false ? true : testnet,
       });
       out.checked += r.checked; out.resolved += r.resolved;
@@ -191,12 +191,12 @@ export async function GET(req: NextRequest) {
       let m: Map<string, number> | null = null;
       try {
         const { data: c } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+          .select('api_key, api_secret_enc, has_withdrawal')
           .eq('user_id', uid).eq('is_active', true).limit(1).maybeSingle();
         if (c && !(c as any).has_withdrawal) {
           const { decryptSecret } = await import('@/lib/exchanges/crypto');
           const bfx = await import('@/lib/exchanges/binanceFutures');
-          const sec = decryptSecret((c as any).api_secret_enc ?? (c as any).encrypted_secret ?? '');
+          const sec = decryptSecret((c as any).api_secret_enc ?? '');
           // getFuturesOpenOrders는 {success, orders} 모양을 돌려준다.
           // 배열로 착각하면 조용히 0건이 되고, 그러면 진입 손절을 계속 쓴다.
           const res: any = await bfx.getFuturesOpenOrders((c as any).api_key, sec, testnet);
@@ -259,7 +259,7 @@ export async function GET(req: NextRequest) {
   for (const d of actionable) {
     try {
       const { data: conn } = await sb.from('exchange_connections')
-        .select('id, api_key, api_secret_enc, encrypted_secret, has_withdrawal')
+        .select('id, api_key, api_secret_enc, has_withdrawal')
         .eq('user_id', d.userId).eq('is_active', true)
         .limit(1).maybeSingle();
 
@@ -267,7 +267,7 @@ export async function GET(req: NextRequest) {
       if ((conn as any).has_withdrawal) { results.push({ symbol: d.symbol, ok: false, error: '출금 권한 키 — 사용 불가' }); continue; }
 
       const key = (conn as any).api_key as string;
-      const secret = decryptSecret((conn as any).api_secret_enc ?? (conn as any).encrypted_secret ?? '');
+      const secret = decryptSecret((conn as any).api_secret_enc ?? '');
       const exitSide: 'BUY' | 'SELL' = d.side === 'LONG' ? 'SELL' : 'BUY';
 
       if (d.action === 'CLOSE') {
