@@ -952,6 +952,46 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </div>
       )}
 
+      {/* **막는 이유는 버튼 위에 둔다.**
+          예전에는 버튼 아래에 있었다. 그런데 이 폼은 길어서 버튼이
+          화면 바닥에 붙고, 그 아래 내용은 **화면 밖으로 밀린다.**
+          사용자는 "6개가 막습니다"만 보고 이유는 영영 못 본다 —
+          스크롤해야 보이는 안내는 없는 것과 같다. */}
+      {/* **막은 이유를 항목마다 적는다.**
+          이름만 보여주면 무엇을 고쳐야 하는지 알 수 없다. 그리고
+          '확인 못 함'과 '조건에 안 맞음'을 구분해서 그린다 — 앞은
+          조회가 실패한 것이고 뒤는 실제로 걸린 것이라, 고치는 방법이
+          완전히 다르다. */}
+      {blockers.length > 0 && (
+        <div style={{
+          padding: '9px 10px', borderRadius: 8, background: C.downBg,
+          display: 'flex', flexDirection: 'column', gap: 7,
+        }}>
+          {blockers.map((b: any, i: number) => (
+            <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+              <span style={{
+                color: b?.status === 'unknown' ? C.faint : C.down,
+                fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
+              }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+                  {b?.label}
+                  <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
+                    {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
+                  </span>
+                </div>
+                <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
+                  {b?.detail}
+                </div>
+              </div>
+            </div>
+          ))}
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
+            <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
+          </div>
+        </div>
+      )}
+
       {/* 롱·숏을 동시에 둔다. 방향 토글을 없앤 이유는 그 토글이 조용히
           틀릴 수 있기 때문이다 — 숏에 맞춰뒀다고 믿고 눌렀는데 롱이
           나가는 사고는 화면만 봐서는 예방되지 않는다. 누른 버튼이 방향이다.
@@ -1021,40 +1061,6 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         }}>{msg.text}</div>
       )}
 
-      {/* **막은 이유를 항목마다 적는다.**
-          이름만 보여주면 무엇을 고쳐야 하는지 알 수 없다. 그리고
-          '확인 못 함'과 '조건에 안 맞음'을 구분해서 그린다 — 앞은
-          조회가 실패한 것이고 뒤는 실제로 걸린 것이라, 고치는 방법이
-          완전히 다르다. */}
-      {blockers.length > 0 && (
-        <div style={{
-          padding: '9px 10px', borderRadius: 8, background: C.downBg,
-          display: 'flex', flexDirection: 'column', gap: 7,
-        }}>
-          {blockers.map((b: any, i: number) => (
-            <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
-              <span style={{
-                color: b?.status === 'unknown' ? C.faint : C.down,
-                fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
-              }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
-                  {b?.label}
-                  <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
-                    {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
-                  </span>
-                </div>
-                <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
-                  {b?.detail}
-                </div>
-              </div>
-            </div>
-          ))}
-          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
-            <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
-          </div>
-        </div>
-      )}
 
       {/* 모의에는 거래소 연결이 필요 없다. 여기서 이 문구를 띄우면
           **사실이 아닌 것을 경고로 적는 것**이고, 사용자는 있지도 않은
