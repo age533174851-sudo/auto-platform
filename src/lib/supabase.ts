@@ -121,6 +121,33 @@ export async function sbSignInWithOAuth(provider: 'google' | 'kakao') {
   try {
     const sb = await getClient();
     if (!sb) return { error: 'Supabase가 설정되지 않았습니다.' };
+
+    // ── 보내기 전에 켜져 있는지 묻는다 ──
+    //
+    // `signInWithOAuth`는 브라우저를 **즉시** 그 주소로 보낸다. 제공자가
+    // 꺼져 있으면 400이 다음 페이지에서 일어나고, 앱에는 돌려줄 오류가
+    // 없다 — 함수는 성공한 것처럼 반환하고 끝난다. 실제로 사용자가
+    // Supabase가 그린 날것의 JSON을 보고 앱을 벗어났다:
+    //   {"code":400,...,"msg":"Unsupported provider: provider is not enabled"}
+    //
+    // 조회에 실패하면 **막지 않는다.** 확인 못 한 것은 꺼진 것이 아니다.
+    const { readProviderState, decideOAuthGo } = await import('./auth/oauthProviders');
+    let settings: any = null;
+    try {
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+      const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+      if (url) {
+        const r = await fetch(`${url}/auth/v1/settings`, {
+          headers: key ? { apikey: key } : undefined,
+          signal: AbortSignal.timeout(4000),
+        });
+        if (r.ok) settings = await r.json();
+      }
+    } catch { /* 못 물어봤다 → 아래에서 그냥 보낸다 */ }
+
+    const decision = decideOAuthGo(readProviderState(settings, provider), provider);
+    if (!decision.go) return { error: decision.message };
+
     const { error } = await sb.auth.signInWithOAuth({
       provider,
       options: { redirectTo: getSiteUrl() + '/auth/callback' },
