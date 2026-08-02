@@ -137,22 +137,37 @@ export async function buildRiskContext(
         if (conn.exchange === 'binance') {
           const { getFuturesBalance } = await import('@/lib/exchanges/binanceFutures');
           const r: any = await getFuturesBalance(key, secret, testnet);
-          const usdt = r?.balances?.find((b: any) => b.asset === 'USDT');
-          if (usdt) {
-            accountEquity = Number(usdt.balance) || FALLBACK_EQUITY;
-            availableMargin = Number(usdt.availableBalance);
-            source = 'exchange';
+          // 이 함수는 실패를 던지지 않고 { success:false, message }로 돌려준다.
+          // 성공 여부를 안 보면 '키가 틀렸다'와 '잔고가 0이다'가 똑같이
+          // 폴백 $10,000으로 흘러간다.
+          if (!r?.success) {
+            warnings.push(`잔고 조회 실패 — ${r?.message || '이유 미상'} (기본 자산 $${FALLBACK_EQUITY} 가정)`);
           } else {
-            // 응답은 왔는데 USDT가 없다 — 잔고 0일 수도, 응답 모양이 다를
-            // 수도 있다. 어느 쪽이든 $10,000으로 계산하면 안 된다.
-            warnings.push(`잔고 응답에 USDT가 없습니다 — 기본 자산 $${FALLBACK_EQUITY} 가정 (${r?.error || '이유 미상'})`);
+            const usdt = r.balances?.find((b: any) => b.asset === 'USDT');
+            if (usdt) {
+              accountEquity = Number(usdt.balance) || FALLBACK_EQUITY;
+              availableMargin = Number(usdt.availableBalance);
+              source = 'exchange';
+            } else {
+              // getFuturesBalance는 잔고 0인 자산을 목록에서 뺀다. 즉 여기는
+              // **USDT 잔고가 0이라는 뜻**이다. 그걸 $10,000으로 읽으면 돈이
+              // 없는 계좌로 포지션 크기를 계산하게 된다.
+              warnings.push(`USDT 잔고가 0입니다 — 입금 전에는 진입할 수 없습니다 (기본 자산 $${FALLBACK_EQUITY} 가정)`);
+            }
           }
         } else if (conn.exchange === 'gate') {
           const { getAccountGateFutures } = await import('@/lib/exchanges/gateFutures');
           const a: any = await getAccountGateFutures(key, secret, testnet);
-          accountEquity = Number(a?.total) || FALLBACK_EQUITY;
-          availableMargin = Number(a?.available);
-          source = 'exchange';
+          const total = Number(a?.total);
+          // total을 못 읽었는데 source를 'exchange'로 적으면, 폴백
+          // $10,000을 **거래소가 알려준 잔고**라고 말하는 것이 된다.
+          if (Number.isFinite(total) && total > 0) {
+            accountEquity = total;
+            availableMargin = Number(a?.available);
+            source = 'exchange';
+          } else {
+            warnings.push(`Gate 잔고를 읽지 못했습니다 — 기본 자산 $${FALLBACK_EQUITY} 가정`);
+          }
         } else {
           warnings.push(`${conn.exchange} 연결로는 선물 잔고를 읽지 않습니다 — 기본 자산 $${FALLBACK_EQUITY} 가정`);
         }
