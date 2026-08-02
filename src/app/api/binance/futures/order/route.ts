@@ -97,6 +97,7 @@ export async function POST(req: NextRequest) {
   // 레이트리밋을 두 배로 쓰고, 두 조회 사이에 상태가 바뀌면 점검과 실제
   // 주문이 서로 다른 사실을 본다.
   let preflightRisk: any = null;
+  let riskError: string | null = null;
   let preflightStop: number | null = null;
   let preflightRef: number | null = null;
   let preflightPassed = 0;
@@ -128,9 +129,14 @@ export async function POST(req: NextRequest) {
         .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
       if (c2) {
         const { decryptSecret } = await import('@/lib/exchanges/crypto');
-        risk = await bf.getSymbolPositionRisk(
+        const rr = await bf.getSymbolPositionRiskEx(
           c2.api_key, decryptSecret(c2.api_secret_enc ?? c2.encrypted_secret ?? ''),
           symbol, useTestnet);
+        risk = rr.risk;
+        // **왜 못 읽었는지를 들고 간다.** 값만 비우면 화면에는
+        // '확인 못 함'까지만 뜨고 원인은 아무도 모른다 — 오늘 하루를
+        // 그것 때문에 썼다.
+        riskError = rr.error;
       }
     } catch { /* null → unknown → 막힌다 */ }
     preflightRisk = risk;
@@ -258,6 +264,9 @@ export async function POST(req: NextRequest) {
           // 지목했는데 못 넘긴 항목. 화면이 "네를 눌렀는데 왜 안 되지"를
           // 겪지 않게 이유를 같이 돌려준다.
           refusedOverrides: gateRes.refused.map(b => b.id),
+          // 조회가 왜 실패했는지. 점검 항목은 '확인 못 함'까지만 말할 수
+          // 있으므로, 그 뒤의 이유를 여기 붙인다.
+          riskError,
           checklist: {
             allowed: false, market: checklist.market, intent: checklist.intent,
             passed: checklist.passed, total: checklist.total,
@@ -299,12 +308,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'connection_key_missing' }, { status: 400 });
   }
 
+  // 배율을 안 보내면 거래소에 설정된 값을 쓴다. 1로 가정하면 실제로는
+  // 20배인 계좌에서 필요 증거금이 20분의 1로 계산된다.
+  const levNum = Number(leverage ?? preflightRisk?.leverage ?? 0);
+
+  // 여기서 먼저 막는다. 예전에는 0을 그대로 넘겨서 화면에
+  // "배율이 유효하지 않습니다 (0)"만 떴는데, 그 0은 사용자가 고른 값이
+  // 아니라 **포지션 조회가 실패했다는 뜻**이었다. 조회 실패 사유를
+  // 여기서 같이 돌려줘야 화면이 무엇을 고쳐야 하는지 말할 수 있다.
+  // 청산(reduceOnly)은 배율을 몰라도 나갈 수 있어야 한다. 못 여는 것은
+  // 불편이지만 못 닫는 것은 사고다 — manualPlan도 같은 순서로 판단한다.
+  if (!reduceOnly && (!Number.isFinite(levNum) || levNum < 1)) {
+    return NextResponse.json({
+      ok: false, error: leverage == null ? 'leverage_unknown' : 'leverage_invalid',
+      message: leverage == null
+        ? '배율을 정하지 못했습니다 — 거래소에서 이 심볼의 배율을 읽지 못했습니다'
+          + (riskError ? ` (${riskError})` : '')
+          + '. 주문 화면에서 배율을 직접 골라 주세요.'
+        : `배율 ${leverage}은(는) 쓸 수 없습니다 — 1배 이상이어야 합니다`,
+      riskError,
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const built = buildManualPlan({
     symbol, side: String(side).toUpperCase() as 'BUY' | 'SELL',
     quantity: orderQty,
-    // 배율을 안 보내면 거래소에 설정된 값을 쓴다. 1로 가정하면 실제로는
-    // 20배인 계좌에서 필요 증거금이 20분의 1로 계산된다.
-    leverage: Number(leverage ?? preflightRisk?.leverage ?? 0),
+    leverage: levNum,
     reduceOnly: !!reduceOnly,
     liquidationPrice: preflightRisk?.liquidationPrice ?? null,
     stopPrice: preflightStop,

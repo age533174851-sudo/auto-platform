@@ -509,6 +509,10 @@ function PositionCard({ p, onPick, auth, connId, onClosed }: {
           connectionId: connId, confirmToken: 'LIVE_ORDER_CONFIRMED',
           symbol: v.symbol, side: closeSide, type: 'MARKET',
           quantity: qty, reduceOnly: true,
+          // 아는 값이면 실어 보낸다. 서버가 못 읽었을 때 0으로 떨어지는
+          // 것을 막는다 — 청산은 이제 배율 없이도 통과하지만, 기록에는
+          // 실제 배율이 남는 편이 낫다.
+          leverage: v.leverage != null && v.leverage >= 1 ? Math.round(v.leverage) : undefined,
         }),
       });
       const j = await r.json();
@@ -875,7 +879,23 @@ function LeveragePanel({ v, auth, connId, onDone }: {
     } finally { setBusy(false); }
   };
 
-  const LEVS = [1, 2, 3, 5, 10, 20, 50, 75, 100, 125];
+  // 눌러서 고르는 값과 끌어서 고르는 값을 같은 범위 안에 둔다. 눈금은
+  // 거래소(Adjust Leverage)와 같은 자리에 찍는다 — 다른 자리에 찍으면
+  // 같은 화면을 보고 다른 배율을 기억하게 된다.
+  const MAX_LEV = 125;
+  const clampLev = (n: number) => Math.min(MAX_LEV, Math.max(1, Math.round(n)));
+  const TICKS = [1, 25, 50, 75, 100, 125];
+  const risky = next >= 50;
+  const stepBtn = (label: string, to: number, off: boolean) => (
+    <button type="button" onClick={() => setNext(clampLev(to))} disabled={off}
+      style={{
+        width: 38, minHeight: 34, borderRadius: 6, border: 'none',
+        cursor: off ? 'default' : 'pointer',
+        background: C.panel, color: off ? C.faint : C.text,
+        fontSize: FS.lead, fontWeight: 800,
+      }}>{label}</button>
+  );
+
   return (
     <div style={{ marginTop: 8, padding: '10px 11px', borderRadius: 8, background: C.raised }}>
       <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 8, lineHeight: 1.5 }}>
@@ -883,20 +903,51 @@ function LeveragePanel({ v, auth, connId, onDone }: {
         배율을 바꾸면 <b style={{ color: C.warn }}>이 포지션의 청산가도 함께 움직입니다.</b>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 4, marginBottom: 9 }}>
-        {LEVS.map(L => {
-          const on = next === L;
-          const risky = L >= 50;
-          return (
-            <button key={L} onClick={() => setNext(L)} style={{
-              minHeight: 30, borderRadius: 7, cursor: 'pointer',
-              background: on ? (risky ? C.down : C.accent) : C.panel,
-              color: on ? '#fff' : risky ? C.warn : C.dim,
-              border: `1px solid ${on ? 'transparent' : C.hair}`,
-              fontSize: FS.micro, fontWeight: 700, ...NUM,
-            }}>{L}×</button>
-          );
-        })}
+      {/* − 5× + . 한 배씩 고르는 길이 없으면 눈금 사이 값은 못 고른다 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
+        padding: '4px 5px', borderRadius: 8, background: C.panel,
+        border: `1px solid ${C.hair}`,
+      }}>
+        {stepBtn('−', next - 1, next <= 1)}
+        <input
+          value={String(next)}
+          inputMode="numeric"
+          onChange={e => {
+            // 지우는 중일 수 있다. 빈 칸을 1로 바꾸면 숫자를 못 지운다.
+            const raw = e.target.value.replace(/[^0-9]/g, '');
+            if (raw === '') return;
+            setNext(clampLev(Number(raw)));
+          }}
+          style={{
+            flex: 1, minWidth: 0, textAlign: 'center',
+            background: 'transparent', border: 'none', outline: 'none',
+            color: risky ? C.warn : C.text,
+            fontSize: FS.lead, fontWeight: 800, ...NUM,
+          }}/>
+        <span style={{ color: C.dim, fontSize: FS.small, fontWeight: 700 }}>×</span>
+        {stepBtn('+', next + 1, next >= MAX_LEV)}
+      </div>
+
+      {/* 끌어서 고르기. 50배부터는 손잡이 색이 바뀐다 */}
+      <input
+        type="range" min={1} max={MAX_LEV} step={1} value={next}
+        onChange={e => setNext(clampLev(Number(e.target.value)))}
+        style={{
+          width: '100%', minHeight: 0, height: 26, margin: 0,
+          accentColor: risky ? C.down : C.accent, cursor: 'pointer',
+        }}/>
+      {/* 눈금은 누를 수 있다 — 끌기가 어려운 화면에서도 한 번에 간다 */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', marginBottom: 9,
+      }}>
+        {TICKS.map(L => (
+          <button key={L} type="button" onClick={() => setNext(L)} style={{
+            minHeight: 22, padding: '0 2px', border: 'none', background: 'transparent',
+            cursor: 'pointer', ...NUM, fontSize: FS.micro, fontWeight: 700,
+            color: next === L ? (L >= 50 ? C.down : C.accent) : C.faint,
+          }}>{L}×</button>
+        ))}
       </div>
 
       {/* 바뀐 뒤 청산가. 이 판의 핵심 숫자다 */}

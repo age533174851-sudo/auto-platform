@@ -114,8 +114,12 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   if (!isFinite(plan.quantity) || plan.quantity <= 0) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: `주문 수량이 유효하지 않습니다 (${plan.quantity})` };
   }
-  if (!isFinite(plan.leverage) || plan.leverage < 1) {
-    return { ok: false, status: 'REJECTED', clientOrderId, message: `레버리지가 유효하지 않습니다 (${plan.leverage})` };
+  // 배율은 진입에만 필요하다. 청산에서 이 검사를 걸면, 거래소에서 배율을
+  // 못 읽었다는 이유로 **포지션을 못 닫게 된다.** (아래 3~4단계도 같은 이유로
+  // 진입에만 실행한다)
+  if (!args.reduceOnly && (!isFinite(plan.leverage) || plan.leverage < 1)) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: `레버리지를 확인하지 못했습니다 (${plan.leverage}) — 주문 화면에서 배율을 직접 골라 주세요` };
   }
   if (!clientOrderId || clientOrderId.length < 4) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: 'clientOrderId가 없으면 중복 주문을 막을 수 없어 중단합니다' };
@@ -246,28 +250,37 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         return { ok: false, status: 'FAILED', clientOrderId, message: `중복 확인 실패로 주문 중단: ${e?.message || e}` };
       }
 
-      // ── 3) 마진 타입 ISOLATED 강제 (레버리지보다 먼저) ──
+      // ── 3~4) 마진 타입·레버리지는 **진입에만** 설정한다 ──
       //
-      // Binance는 심볼별 마진 타입 기본값이 CROSSED다. 이 호출이 없으면
-      // "1회 격리 증거금" 전략이라도 실제 체결은 Cross로 나가고, 손실이
-      // 증거금을 넘어 계좌 전체로 번진다. 계단식 증거금 상한과 청산가 계산이
-      // 모두 isolated를 전제하므로, 설정에 실패하면 주문하지 않는다.
-      // (이미 ISOLATED면 -4046이 오는데 그건 성공으로 처리된다)
-      const mt = await bf.setFuturesMarginType(apiKey, apiSecret, plan.symbol, 'ISOLATED', testnet);
-      if (!mt.success) {
-        const reason = `ISOLATED 설정 실패로 주문 중단: ${mt.message}` +
-          (mt.code === -4047 || mt.code === -4048
-            ? ' (해당 심볼에 열린 포지션이나 미체결 주문이 있으면 마진 타입을 바꿀 수 없습니다)'
-            : '');
-        await update({ status: 'FAILED', error_message: reason });
-        return { ok: false, status: 'FAILED', clientOrderId, message: reason };
-      }
+      // 둘 다 '어떻게 들어갈 것인가'의 설정이다. 나가는 주문에는 해당이
+      // 없는데, 예전에는 청산에도 그대로 걸어 두고 실패하면 주문을 중단했다.
+      // 그래서 청산이 막히는 길이 두 개 있었다:
+      //   · 마진 타입: 열린 포지션이 있으면 못 바꾼다(-4047). 청산에는 항상
+      //     포지션이 있으므로, CROSSED로 열린 포지션은 **닫을 수가 없었다.**
+      //   · 레버리지: 거래소에서 배율을 못 읽으면 0이 내려오고 그대로 거부.
+      //
+      // 못 여는 것은 불편이고, **못 닫는 것은 사고다.**
+      if (!args.reduceOnly) {
+        // Binance는 심볼별 마진 타입 기본값이 CROSSED다. 이 호출이 없으면
+        // "1회 격리 증거금" 전략이라도 실제 체결은 Cross로 나가고, 손실이
+        // 증거금을 넘어 계좌 전체로 번진다. 계단식 증거금 상한과 청산가 계산이
+        // 모두 isolated를 전제하므로, 설정에 실패하면 주문하지 않는다.
+        // (이미 ISOLATED면 -4046이 오는데 그건 성공으로 처리된다)
+        const mt = await bf.setFuturesMarginType(apiKey, apiSecret, plan.symbol, 'ISOLATED', testnet);
+        if (!mt.success) {
+          const reason = `ISOLATED 설정 실패로 주문 중단: ${mt.message}` +
+            (mt.code === -4047 || mt.code === -4048
+              ? ' (해당 심볼에 열린 포지션이나 미체결 주문이 있으면 마진 타입을 바꿀 수 없습니다)'
+              : '');
+          await update({ status: 'FAILED', error_message: reason });
+          return { ok: false, status: 'FAILED', clientOrderId, message: reason };
+        }
 
-      // ── 4) 레버리지 설정 (주문 전에 반드시) ──
-      const lev = await bf.setFuturesLeverage(apiKey, apiSecret, plan.symbol, plan.leverage, testnet);
-      if (!(lev as any)?.success) {
-        await update({ status: 'FAILED', error_message: `레버리지 설정 실패: ${(lev as any)?.message}` });
-        return { ok: false, status: 'FAILED', clientOrderId, message: `레버리지 설정 실패: ${(lev as any)?.message}` };
+        const lev = await bf.setFuturesLeverage(apiKey, apiSecret, plan.symbol, plan.leverage, testnet);
+        if (!(lev as any)?.success) {
+          await update({ status: 'FAILED', error_message: `레버리지 설정 실패: ${(lev as any)?.message}` });
+          return { ok: false, status: 'FAILED', clientOrderId, message: `레버리지 설정 실패: ${(lev as any)?.message}` };
+        }
       }
 
       // ── 4.5) 전송 직전 포지션 기록 ──

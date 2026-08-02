@@ -19,6 +19,7 @@ import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn, chip } fro
 import { DataBadge } from '@/components/ui/DataBadge';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
 import { useTerminal } from './TerminalContext';
+import { notifyError, notifySuccess } from '@/lib/notify/center';
 import { SpotOrderPanel } from './SpotOrderPanel';
 import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
@@ -351,6 +352,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 것이 "ISOLATED가 아니다"인지 "확인을 못 했다"인지 구분이 안 된다.
   // 둘은 고치는 방법이 완전히 다르다.
   const [blockers, setBlockers] = useState<any[]>([]);
+  const [riskError, setRiskError] = useState<string | null>(null);
+  // 접힌 채로 시작한다 — 펼쳐 두면 진입 버튼이 화면 밖으로 밀린다
+  const [blockOpen, setBlockOpen] = useState(false);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
 
@@ -506,6 +510,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const submit = async (orderSide: 'BUY' | 'SELL') => {
     setMsg(null);
     setBlockers([]);
+    setRiskError(null);
+    setBlockOpen(false);
     setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
@@ -570,6 +576,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       // 없었다. 막아서 앱을 떠나게 만드는 것은 안전이 아니다.
       if (r.status === 409 && j?.error === 'checklist_blocked') {
         setBlockers(Array.isArray(j?.checklist?.blockers) ? j.checklist.blockers : []);
+        setRiskError(j?.riskError ?? null);
         const { overridePrompt } = await import('@/lib/engine/checkOverride');
         const p = overridePrompt(j?.checklist?.blockers, { realMoney: modeResolution.realMoney });
         if (p.canAsk) {
@@ -588,23 +595,30 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
       if (r.ok && j?.ok) {
         // 넘겨서 나간 것을 '통과'로 적지 않는다.
-        setMsg({
-          ok: true,
-          text: (j?.message || '주문 접수됨')
-            + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : ''),
-        });
+        const okText = (j?.message || '주문 접수됨')
+          + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : '');
+        setMsg({ ok: true, text: okText });
+        // 토스트로도 띄운다 — 4초 뒤 저절로 사라지고, 탭하면 바로 닫히고,
+        // 알림 센터에 남아서 나중에 다시 볼 수 있다.
+        notifySuccess('주문 접수됨', okText);
         setQty('');
         if (isPaper) paper.reload();
       } else {
-        setMsg({
-          ok: false,
-          text: (j?.message || j?.error || `실패 (${r.status})`)
-            + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : ''),
-        });
+        const failText = (j?.message || j?.error || `실패 (${r.status})`)
+          + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : '');
+        setMsg({ ok: false, text: failText });
+        // **막힌 이유의 첫 줄까지 토스트에 싣는다.** 항목 이름만 있으면
+        // 무엇을 고쳐야 하는지 알 수 없다.
+        const first = Array.isArray(j?.checklist?.blockers) ? j.checklist.blockers[0] : null;
+        notifyError(
+          r.status === 409 ? '점검이 주문을 막았습니다' : '주문 실패',
+          first?.detail ? `${first.label}: ${first.detail}` : failText);
       }
     } catch (e: any) {
       // 응답을 못 받았다. 나갔는지 안 나갔는지 모르는 상태다.
-      setMsg({ ok: false, text: `응답 없음 — 재시도 말고 포지션 먼저 확인 (${e?.message || e})` });
+      const noRes = `응답 없음 — 재시도 말고 포지션 먼저 확인 (${e?.message || e})`;
+      setMsg({ ok: false, text: noRes });
+      notifyError('응답을 못 받았습니다', noRes);
     } finally { setBusy(false); }
   };
 
@@ -952,6 +966,82 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </div>
       )}
 
+      {/* **막는 이유는 버튼 위에 둔다.**
+          예전에는 버튼 아래에 있었다. 그런데 이 폼은 길어서 버튼이
+          화면 바닥에 붙고, 그 아래 내용은 **화면 밖으로 밀린다.**
+          사용자는 "6개가 막습니다"만 보고 이유는 영영 못 본다 —
+          스크롤해야 보이는 안내는 없는 것과 같다. */}
+      {/* **막는 이유 — 접힌 채로 시작한다.**
+          펼쳐 두면 항목이 여섯일 때 세로로 길어져서 진입 버튼을 화면
+          밖으로 밀어낸다. 그러면 이유는 보이는데 주문을 못 누른다.
+
+          한 줄 요약(개수 + 첫 항목)만 먼저 보이고, 눌러야 펼쳐진다.
+          펼쳐도 높이를 40vh로 묶고 안에서 스크롤한다 — 화면을 밀어내지
+          않는다. */}
+      {blockers.length > 0 && (
+        <div style={{ borderRadius: 8, background: C.downBg, overflow: 'hidden' }}>
+          <button onClick={() => setBlockOpen(v => !v)}
+            style={{
+              width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+              padding: '9px 10px', display: 'flex', gap: 8, alignItems: 'center',
+              textAlign: 'left', color: 'inherit',
+            }}>
+            <span style={{ color: C.down, fontWeight: 900, fontSize: FS.micro, flexShrink: 0 }}>✕</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: FS.micro, lineHeight: 1.45 }}>
+              <b style={{ color: C.down }}>{blockers.length}개가 막고 있습니다</b>
+              <span style={{
+                display: 'block', color: C.faint, marginTop: 2,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {blockers[0]?.label} — {blockers[0]?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
+              </span>
+            </span>
+            <span style={{ color: C.faint, fontSize: FS.micro, flexShrink: 0 }}>
+              {blockOpen ? '접기 ▲' : '자세히 ▼'}
+            </span>
+            <span onClick={(e) => { e.stopPropagation(); setBlockers([]); setRiskError(null); }}
+              role="button" aria-label="닫기"
+              style={{ color: C.faint, fontSize: FS.body, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>×</span>
+          </button>
+
+          {blockOpen && (
+            <div style={{
+              padding: '0 10px 10px', display: 'flex', flexDirection: 'column', gap: 7,
+              // 화면을 밀어내지 않는다 — 길면 이 안에서 스크롤한다
+              maxHeight: '40vh', overflowY: 'auto',
+            }}>
+              {blockers.map((b: any, i: number) => (
+                <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+                  <span style={{
+                    color: b?.status === 'unknown' ? C.faint : C.down,
+                    fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
+                  }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+                      {b?.label}
+                      <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
+                        {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
+                      </span>
+                    </div>
+                    <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
+                      {b?.detail}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {riskError && (
+                <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>
+                  거래소 조회 오류: {riskError}
+                </div>
+              )}
+              <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5 }}>
+                <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 롱·숏을 동시에 둔다. 방향 토글을 없앤 이유는 그 토글이 조용히
           틀릴 수 있기 때문이다 — 숏에 맞춰뒀다고 믿고 눌렀는데 롱이
           나가는 사고는 화면만 봐서는 예방되지 않는다. 누른 버튼이 방향이다.
@@ -1018,43 +1108,17 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <div style={{
           padding: '8px 10px', borderRadius: 8, fontSize: FS.micro, lineHeight: 1.5,
           color: msg.ok ? C.up : C.down, background: msg.ok ? C.upBg : C.downBg,
-        }}>{msg.text}</div>
-      )}
-
-      {/* **막은 이유를 항목마다 적는다.**
-          이름만 보여주면 무엇을 고쳐야 하는지 알 수 없다. 그리고
-          '확인 못 함'과 '조건에 안 맞음'을 구분해서 그린다 — 앞은
-          조회가 실패한 것이고 뒤는 실제로 걸린 것이라, 고치는 방법이
-          완전히 다르다. */}
-      {blockers.length > 0 && (
-        <div style={{
-          padding: '9px 10px', borderRadius: 8, background: C.downBg,
-          display: 'flex', flexDirection: 'column', gap: 7,
+          display: 'flex', gap: 8, alignItems: 'flex-start',
         }}>
-          {blockers.map((b: any, i: number) => (
-            <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
-              <span style={{
-                color: b?.status === 'unknown' ? C.faint : C.down,
-                fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
-              }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
-                  {b?.label}
-                  <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
-                    {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
-                  </span>
-                </div>
-                <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
-                  {b?.detail}
-                </div>
-              </div>
-            </div>
-          ))}
-          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
-            <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
-          </div>
+          <span style={{ flex: 1, minWidth: 0 }}>{msg.text}</span>
+          {/* 끌 수 있게. 고칠 때까지 계속 남아 있어야 하는 안내와,
+              읽고 나면 치우고 싶은 안내는 다르다 — 치우는 쪽은 사용자가 정한다 */}
+          <button onClick={() => setMsg(null)} aria-label="닫기"
+            style={{ background: 'none', border: 'none', color: 'inherit',
+                     cursor: 'pointer', padding: '0 2px', fontSize: FS.body, lineHeight: 1, opacity: .7 }}>×</button>
         </div>
       )}
+
 
       {/* 모의에는 거래소 연결이 필요 없다. 여기서 이 문구를 띄우면
           **사실이 아닌 것을 경고로 적는 것**이고, 사용자는 있지도 않은

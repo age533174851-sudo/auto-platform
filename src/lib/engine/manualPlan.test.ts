@@ -47,6 +47,29 @@ export function runManualPlanTests() {
     }
   });
 
+  // 배율은 '얼마나 크게 들어가는가'다. 나가는 주문에는 그 질문이 없다.
+  // 예전에는 배율 검사가 청산보다 먼저 있어서, 거래소에서 배율을 못 읽으면
+  // (0으로 내려오면) 청산까지 `배율이 유효하지 않습니다 (0)`로 막혔다.
+  // 청산 화면은 배율을 아예 보내지도 않으므로 이건 상시 위험이었다.
+  test('배율을 몰라도 청산은 막지 않는다 — 못 닫는 것이 못 여는 것보다 위험하다', () => {
+    for (const l of [0, NaN, undefined as any, null as any]) {
+      const r = buildManualPlan(entry({ leverage: l, reduceOnly: true, stopPrice: null }));
+      eq(r.plan.approved, true, `배율 ${l}에서 청산이 막혔다: ${r.reason}`);
+    }
+  });
+
+  test('배율을 못 읽었으면 청산 notes에 그 사실을 남긴다', () => {
+    const notes = buildManualPlan(entry({ leverage: 0, reduceOnly: true, stopPrice: null })).plan.notes;
+    assert(notes.some(n => n.includes('배율을 확인하지 못')), `표시가 없다: ${notes.join(' / ')}`);
+  });
+
+  test('배율이 1 미만이면 진입은 이유를 적고 거부한다', () => {
+    const r = buildManualPlan(entry({ leverage: 0 }));
+    eq(r.plan.approved, false);
+    // "(0)"만 적으면 무엇을 고쳐야 하는지 알 수 없다
+    assert(r.reason.includes('확인하지 못'), `무엇을 하라는지가 없다: ${r.reason}`);
+  });
+
   test('배율 상한을 넘으면 승인하지 않는다', () => {
     eq(buildManualPlan(entry({ leverage: MANUAL_MAX_LEVERAGE })).plan.approved, true);
     const over = buildManualPlan(entry({ leverage: MANUAL_MAX_LEVERAGE + 1 }));
@@ -112,9 +135,11 @@ export function runManualPlanTests() {
     eq(buildManualPlan(entry({ side: 'SELL', stopPrice: 62000 })).plan.side, 'SHORT');
   });
 
-  test('청산도 수량·배율 검사는 받는다', () => {
+  // 수량은 청산에도 필요하다 — 얼마를 닫을지 모르면 주문 자체가 성립하지
+  // 않는다. 배율은 아니다(위 '배율을 몰라도 청산은 막지 않는다' 참고).
+  test('청산도 수량 검사는 받는다', () => {
     eq(buildManualPlan(entry({ reduceOnly: true, quantity: 0 })).plan.approved, false);
-    eq(buildManualPlan(entry({ reduceOnly: true, leverage: 0 })).plan.approved, false);
+    eq(buildManualPlan(entry({ reduceOnly: true, quantity: NaN as any })).plan.approved, false);
   });
 
   console.log('[수동 주문 계획 — 방향 왕복 (틀리면 청산이 아니라 두 배가 된다)]');
