@@ -1,11 +1,12 @@
 'use client';
 import { A } from '@/lib/theme/colors';
 // LoginModal — 어디서든 뜨는 로그인 바텀시트. Google/이메일/MOCK 체험.
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { T } from '@/lib/constants';
 import { X, Mail, ArrowRight, Loader2 } from 'lucide-react';
 import { sbSignInWithOAuth, sbSignIn } from '@/lib/supabase';
 import { notifyError } from '@/lib/notify/center';
+import { fetchProviderStates, disabledMessage } from '@/lib/auth/oauthProviders';
 
 export default function LoginModal({
   open, reason, onClose, onSuccess, onGoEmail,
@@ -21,6 +22,24 @@ export default function LoginModal({
   const [pw, setPw] = useState('');
   const [showEmail, setShowEmail] = useState(false);
   const [err, setErr] = useState('');
+
+  // 구글이 켜져 있는가. **null은 '꺼짐'이 아니라 '확인 못 함'이다** —
+  // 확인 못 한 것을 회색으로 만들면, 설정 조회가 한 번 실패할 때마다
+  // 멀쩡한 구글 로그인이 사라진다. 그게 더 자주 나는 사고다.
+  const [googleOn, setGoogleOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    // 열릴 때 미리 물어본다 — 꺼진 버튼을 **누르게 두지 않기 위해서**.
+    // 누를 수 있는 버튼은 '된다'는 약속이고, 눌러 봐야 아는 것은 그
+    // 약속을 매번 깨는 것이다.
+    fetchProviderStates(
+      process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
+      ['google'],
+    ).then(m => { if (alive) setGoogleOn(m.google?.enabled ?? null); });
+    return () => { alive = false; };
+  }, [open]);
 
   if (!open) return null;
 
@@ -63,14 +82,26 @@ export default function LoginModal({
         {err && <div style={{ background: A(T.red,'15'), border: `1px solid ${A(T.red,'30')}`, borderRadius: 10, padding: '10px 12px', color: T.red, fontSize: 12, margin: '14px 0 4px', textAlign: 'center' }}>{err}</div>}
 
         <div style={{ marginTop: 18 }}>
-          {/* Google */}
-          <button onClick={google} disabled={!!loading}
-            style={{ width: '100%', minHeight: 52, background: '#fff', color: '#1F1F1F', border: 'none', borderRadius: 13, fontWeight: 700, fontSize: 15, cursor: loading ? 'default' : 'pointer', marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
+          {/* Google — 꺼져 있는 것을 아는 경우에만 잠근다.
+              googleOn === null(확인 못 함)이면 그대로 열어 둔다. */}
+          <button onClick={google} disabled={!!loading || googleOn === false}
+            title={googleOn === false ? disabledMessage('google') : undefined}
+            style={{ width: '100%', minHeight: 52, background: '#fff', color: '#1F1F1F', border: 'none', borderRadius: 13, fontWeight: 700, fontSize: 15, cursor: loading || googleOn === false ? 'default' : 'pointer', marginBottom: googleOn === false ? 4 : 10, opacity: googleOn === false ? 0.45 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
             {loading === 'google' ? <Loader2 size={18} style={{ animation: 'tg-spin .8s linear infinite' }} /> : (
               <svg width="19" height="19" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.8-6.8C35.6 2.4 30.1 0 24 0 14.6 0 6.4 5.4 2.5 13.3l7.9 6.1C12.2 13.7 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9.1h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-16z"/><path fill="#FBBC05" d="M10.4 28.6c-.5-1.4-.8-2.9-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C.9 16.5 0 20.1 0 24s.9 7.5 2.5 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.1 0 11.3-2 15-5.5l-7.1-5.5c-2 1.4-4.6 2.2-7.9 2.2-6.4 0-11.8-4.2-13.6-9.9l-7.9 6.1C6.4 42.6 14.6 48 24 48z"/></svg>
             )}
             Google로 계속하기
           </button>
+
+          {/* 왜 잠겼는지. 회색 버튼만 두면 화면이 고장 난 것으로 보인다.
+              **관리자 조치는 여기 적지 않는다** — 일반 사용자에게
+              'Supabase 대시보드'는 할 수 있는 일이 아니고, 자기가 뭘
+              잘못 눌렀나 싶게 만들 뿐이다. */}
+          {googleOn === false && (
+            <div style={{ color: T.muted, fontSize: 11.5, lineHeight: 1.5, margin: '0 0 10px', textAlign: 'center' }}>
+              {disabledMessage('google')}
+            </div>
+          )}
 
           {/* 이메일 토글 */}
           {!showEmail ? (
