@@ -1239,6 +1239,9 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
 }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [tpslOpen, setTpslOpen] = useState(false);
+  const [slIn, setSlIn] = useState('');
+  const [tpIn, setTpIn] = useState('');
   const long = p.side === 'LONG';
 
   const close = async () => {
@@ -1265,6 +1268,31 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
       const j = await r.json();
       setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
       if (j?.ok) setTimeout(onClosed, 600);
+    } catch (e: any) {
+      setMsg({ ok: false, text: `실패 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  /** 손절·익절을 고친다. 빈 칸은 **'그대로'가 아니라 '지우기'**다 — 둘을
+      섞으면 지우려던 손절이 남거나, 남기려던 값이 사라진다. */
+  const saveTpsl = async () => {
+    if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
+    const body: any = { positionId: p.id };
+    if (slIn.trim() !== '') body.stopLoss = Number(slIn);
+    if (tpIn.trim() !== '') body.takeProfit = Number(tpIn);
+    if (body.stopLoss === undefined && body.takeProfit === undefined) {
+      setMsg({ ok: false, text: '손절 또는 익절 값을 입력하세요' }); return;
+    }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/paper/modify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      if (j?.ok) { setSlIn(''); setTpIn(''); setTpslOpen(false); setTimeout(onClosed, 400); }
     } catch (e: any) {
       setMsg({ ok: false, text: `실패 (${e?.message || e})` });
     } finally { setBusy(false); }
@@ -1338,14 +1366,48 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
         }}>{msg.text}</div>
       )}
 
-      <button onClick={close} disabled={busy}
-        style={{
-          width: '100%', minHeight: 36, borderRadius: 7,
-          cursor: busy ? 'default' : 'pointer',
-          background: C.downBg, color: C.down,
-          border: `1px solid ${A(C.down, '55')}`,
-          fontSize: FS.small, fontWeight: 700, opacity: busy ? 0.6 : 1,
-        }}>{busy ? '청산 중…' : '모의 청산'}</button>
+      {/* 포지션 아래 조작 줄 — 실계좌 카드·거래소 앱과 **같은 자리**에 둔다.
+          예전에는 여기에 '모의 청산' 하나뿐이었다. 연습으로 쓰라고 만든
+          화면에서 정작 손절을 옮기는 연습을 할 수 없었다. */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button onClick={() => setTpslOpen(v => !v)} disabled={busy}
+          style={{
+            flex: 1, minHeight: 36, borderRadius: 7, cursor: busy ? 'default' : 'pointer',
+            background: C.raised, color: C.text, border: `1px solid ${C.hair}`,
+            fontSize: FS.small, fontWeight: 700, opacity: busy ? 0.6 : 1,
+          }}>{tpslOpen ? 'TP/SL 접기' : 'TP/SL'}</button>
+        <button onClick={close} disabled={busy}
+          style={{
+            flex: 1, minHeight: 36, borderRadius: 7,
+            cursor: busy ? 'default' : 'pointer',
+            background: C.downBg, color: C.down,
+            border: `1px solid ${A(C.down, '55')}`,
+            fontSize: FS.small, fontWeight: 700, opacity: busy ? 0.6 : 1,
+          }}>{busy ? '청산 중…' : '모의 청산'}</button>
+      </div>
+
+      {tpslOpen && (
+        <div style={{ marginTop: 8, padding: '10px 11px', borderRadius: 8, background: C.raised, display: 'grid', gap: 7 }}>
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5 }}>
+            비우면 그 값을 지웁니다. 방향이 틀리면(롱 손절이 현재가 위 등)
+            서버가 거부합니다 — 걸자마자 발동하는 값이기 때문입니다.
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input value={slIn} onChange={e => setSlIn(e.target.value)} inputMode="decimal"
+              placeholder={`손절 ${p.stopLoss == null ? '(없음)' : fmtPrice(p.stopLoss)}`}
+              style={{ ...input, flex: 1, padding: '8px 10px', ...NUM }}/>
+            <input value={tpIn} onChange={e => setTpIn(e.target.value)} inputMode="decimal"
+              placeholder={`익절 ${p.takeProfit == null ? '(없음)' : fmtPrice(p.takeProfit)}`}
+              style={{ ...input, flex: 1, padding: '8px 10px', ...NUM }}/>
+          </div>
+          <button onClick={saveTpsl} disabled={busy}
+            style={{
+              minHeight: 34, borderRadius: 7, cursor: busy ? 'default' : 'pointer',
+              background: C.accentBg, color: C.accent, border: `1px solid ${C.accent}`,
+              fontSize: FS.micro, fontWeight: 700, opacity: busy ? 0.6 : 1,
+            }}>{busy ? '저장 중…' : '저장'}</button>
+        </div>
+      )}
     </div>
   );
 }
