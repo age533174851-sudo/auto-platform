@@ -50,11 +50,23 @@ const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:st
 };
 
 const INITIAL_STRATS:Strategy[] = [
-  {id:'s1',name:'BTC EMA 추세 추종',type:'ema_cross',status:'running',asset:'BTC',assetNameKr:'비트코인',timeframe:'4h',leverage:2,maxLeverage:5,riskLevel:'medium',tp:5,sl:2.5,enabled:true,winRate:67,totalPnl:847000,trades:18,maxDailyLoss:500000,maxPositionSize:3000000,cooldownMin:60,params:{ema_fast:20,ema_slow:60,rsi_filter:true,rsi_min:40,rsi_max:70},description:'EMA20/60 크로스 + RSI 40~70 필터'},
-  {id:'s2',name:'ETH RSI 반전',type:'rsi_reversal',status:'paused',asset:'ETH',assetNameKr:'이더리움',timeframe:'1h',leverage:1,maxLeverage:3,riskLevel:'low',tp:4,sl:2,enabled:true,winRate:58,totalPnl:312000,trades:12,maxDailyLoss:200000,maxPositionSize:2000000,cooldownMin:120,params:{rsi_ob:70,rsi_os:30,rsi_period:14},description:'RSI 30↓ 매수 · RSI 70↑ 매도'},
-  {id:'s3',name:'SOL 브레이크아웃',type:'breakout',status:'stopped',asset:'SOL',assetNameKr:'솔라나',timeframe:'15m',leverage:3,maxLeverage:10,riskLevel:'high',tp:8,sl:3,enabled:false,winRate:71,totalPnl:224400,trades:7,maxDailyLoss:300000,maxPositionSize:1500000,cooldownMin:30,params:{bb_period:20,bb_std:2,vol_mult:1.5},description:'볼린저밴드 상단/하단 돌파'},
-  {id:'s4',name:'BTC DCA 적립',type:'dca',status:'running',asset:'BTC',assetNameKr:'비트코인',timeframe:'1d',leverage:1,maxLeverage:1,riskLevel:'low',tp:50,sl:20,enabled:true,winRate:83,totalPnl:1240000,trades:24,maxDailyLoss:1000000,maxPositionSize:5000000,cooldownMin:1440,params:{interval_days:7,amount_krw:300000,max_entries:10},description:'주 1회 BTC 정기 매수 DCA'},
-  {id:'s5',name:'BTC 펀딩비 전략',type:'funding_rate',status:'stopped',asset:'BTC',assetNameKr:'비트코인',timeframe:'4h',leverage:2,maxLeverage:5,riskLevel:'medium',tp:3,sl:1.5,enabled:false,winRate:62,totalPnl:0,trades:0,maxDailyLoss:300000,maxPositionSize:2000000,cooldownMin:240,params:{funding_threshold:0.01,direction_mode:'auto',min_funding_rate:0.005},description:'펀딩비가 과열된 시장에서 롱/숏 비용 구조를 이용하는 전략'},
+// **이것들은 돌고 있는 봇이 아니라 전략 '틀'이다.**
+//
+// 예전에는 여기에 status:'running'과 승률 67%·누적 +₩847,000 같은
+// 숫자가 박혀 있었다. 화면은 "실행중"이라고 말했고 수익까지 보여줬지만
+// **아무것도 돌지 않았다.** 이 화면은 서버를 부르지 않는다 — 코드에 적힌
+// 숫자를 그대로 그렸을 뿐이다.
+//
+// 안 도는 것을 조용히 두는 것보다 이쪽이 훨씬 나쁘다. 사용자는 자동매매가
+// 돈을 벌고 있다고 믿고 실제 자금을 넣는다.
+//
+// 그래서 성과는 전부 0, 상태는 전부 '정지'다. 실제 실행은
+// autotrade_schedules(마이그레이션 031)에 등록하고 크론이 돌린다.
+  {id:'s1',name:'BTC EMA 추세 추종',type:'ema_cross',status:'stopped',asset:'BTC',assetNameKr:'비트코인',timeframe:'4h',leverage:2,maxLeverage:5,riskLevel:'medium',tp:5,sl:2.5,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:500000,maxPositionSize:3000000,cooldownMin:60,params:{ema_fast:20,ema_slow:60,rsi_filter:true,rsi_min:40,rsi_max:70},description:'EMA20/60 크로스 + RSI 40~70 필터'},
+  {id:'s2',name:'ETH RSI 반전',type:'rsi_reversal',status:'stopped',asset:'ETH',assetNameKr:'이더리움',timeframe:'1h',leverage:1,maxLeverage:3,riskLevel:'low',tp:4,sl:2,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:200000,maxPositionSize:2000000,cooldownMin:120,params:{rsi_ob:70,rsi_os:30,rsi_period:14},description:'RSI 30↓ 매수 · RSI 70↑ 매도'},
+  {id:'s3',name:'SOL 브레이크아웃',type:'breakout',status:'stopped',asset:'SOL',assetNameKr:'솔라나',timeframe:'15m',leverage:3,maxLeverage:10,riskLevel:'high',tp:8,sl:3,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:300000,maxPositionSize:1500000,cooldownMin:30,params:{bb_period:20,bb_std:2,vol_mult:1.5},description:'볼린저밴드 상단/하단 돌파'},
+  {id:'s4',name:'BTC DCA 적립',type:'dca',status:'stopped',asset:'BTC',assetNameKr:'비트코인',timeframe:'1d',leverage:1,maxLeverage:1,riskLevel:'low',tp:50,sl:20,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:1000000,maxPositionSize:5000000,cooldownMin:1440,params:{interval_days:7,amount_krw:300000,max_entries:10},description:'주 1회 BTC 정기 매수 DCA'},
+  {id:'s5',name:'BTC 펀딩비 전략',type:'funding_rate',status:'stopped',asset:'BTC',assetNameKr:'비트코인',timeframe:'4h',leverage:2,maxLeverage:5,riskLevel:'medium',tp:3,sl:1.5,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:300000,maxPositionSize:2000000,cooldownMin:240,params:{funding_threshold:0.01,direction_mode:'auto',min_funding_rate:0.005},description:'펀딩비가 과열된 시장에서 롱/숏 비용 구조를 이용하는 전략'},
   {id:'s6',name:'BTC AI 전략',type:'ai_strategy',status:'stopped',asset:'BTC',assetNameKr:'비트코인',timeframe:'1h',leverage:2,maxLeverage:3,riskLevel:'medium',tp:4,sl:2,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:300000,maxPositionSize:2000000,cooldownMin:120,params:{ai_mode:'balanced',confidence_threshold:70,regime_filter:true},description:'시장 국면 AI 신호를 기반으로 자동 진입/청산'},
 ];
 
@@ -64,15 +76,16 @@ const INITIAL_SIGNALS:Signal[] = [
   {id:'sig3',stratId:'s1',stratName:'BTC EMA 추세 추종',asset:'BTC',type:'sell',price:91200000,state:'executed',confidence:82,source:'indicator',createdAt:'2025-05-12T22:00:00',note:'EMA 데드크로스 + RSI 71'},
 ];
 
+// 비어 있다. 예전에는 여기에 2025년 5월 날짜의 '완료된 거래'가 세 건
+// 박혀 있었다 — 일어난 적 없는 거래다.
 const INITIAL_RUNS:BotRun[] = [
-  {id:'r1',stratId:'s1',stratName:'BTC EMA',asset:'BTC',side:'long',entryPrice:92400000,exitPrice:94230000,qty:0.02,pnl:36600,pnlPct:1.98,status:'completed',execMode:'paper',openedAt:'2025-05-11T10:00:00',closedAt:'2025-05-13T09:32:00'},
-  {id:'r2',stratId:'s4',stratName:'BTC DCA',asset:'BTC',side:'long',entryPrice:90100000,qty:0.0033,pnl:13729,pnlPct:4.6,status:'completed',execMode:'paper',openedAt:'2025-05-05T00:00:00'},
-  {id:'r3',stratId:'s2',stratName:'ETH RSI',asset:'ETH',side:'long',entryPrice:5640000,exitPrice:5490000,qty:0.5,pnl:-75000,pnlPct:-2.66,status:'completed',execMode:'paper',openedAt:'2025-05-10T14:00:00',closedAt:'2025-05-11T08:00:00'},
 ];
 
+// 비어 있다. '일일 손실 한도 80% 도달', '3회 연속 손실 쿨다운' 같은
+// 줄이 박혀 있었는데, 그 안전장치들은 한 번도 발동한 적이 없다.
+// 발동한 척하는 것이 발동 안 한 것보다 나쁘다 — 사용자는 안전장치가
+// 일하고 있다고 믿는다.
 const INITIAL_RISK_EVENTS:RiskEvent[] = [
-  {id:'re1',type:'daily_loss',message:'일일 손실이 한도의 80%에 도달했습니다. ETH RSI 전략 일시 중지.',severity:'warning',timestamp:'2025-05-11T15:30:00'},
-  {id:'re2',type:'consecutive_loss',message:'3회 연속 손실 감지 — BTC EMA 전략 1시간 쿨다운 진입.',severity:'info',timestamp:'2025-05-10T18:00:00'},
 ];
 
 /* ─── AutoPage Component ─── */

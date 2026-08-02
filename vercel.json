@@ -7,6 +7,10 @@
   ],
   "crons": [
     {
+      "path": "/api/autotrade/daily-ladder",
+      "schedule": "0 23 * * *"
+    },
+    {
       "path": "/api/autotrade/exit-monitor",
       "schedule": "0 0 * * *"
     },

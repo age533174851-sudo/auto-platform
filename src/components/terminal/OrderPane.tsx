@@ -343,6 +343,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [reduceOnly, setReduceOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // **왜 막혔는지**를 따로 들고 있는다.
+  //
+  // 예전에는 "7개 항목이 주문을 막습니다: 운영 모드가 주문을 허용,
+  // 마진 모드 ISOLATED, …" 처럼 **항목 이름만** 보여줬다. 이름만 보면
+  // 무엇을 고쳐야 하는지 알 수 없다 — '마진 모드 ISOLATED'가 막는다는
+  // 것이 "ISOLATED가 아니다"인지 "확인을 못 했다"인지 구분이 안 된다.
+  // 둘은 고치는 방법이 완전히 다르다.
+  const [blockers, setBlockers] = useState<any[]>([]);
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
 
@@ -497,6 +505,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 토글이 있으면 '숏으로 맞춰놨는데 롱이 나갔다'가 가능해진다.
   const submit = async (orderSide: 'BUY' | 'SELL') => {
     setMsg(null);
+    setBlockers([]);
     setSide(orderSide);
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
@@ -560,6 +569,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       // 예전에는 여기서 빨간 글씨만 뜨고 끝이라 사용자가 할 수 있는 일이
       // 없었다. 막아서 앱을 떠나게 만드는 것은 안전이 아니다.
       if (r.status === 409 && j?.error === 'checklist_blocked') {
+        setBlockers(Array.isArray(j?.checklist?.blockers) ? j.checklist.blockers : []);
         const { overridePrompt } = await import('@/lib/engine/checkOverride');
         const p = overridePrompt(j?.checklist?.blockers, { realMoney: modeResolution.realMoney });
         if (p.canAsk) {
@@ -1009,6 +1019,41 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           padding: '8px 10px', borderRadius: 8, fontSize: FS.micro, lineHeight: 1.5,
           color: msg.ok ? C.up : C.down, background: msg.ok ? C.upBg : C.downBg,
         }}>{msg.text}</div>
+      )}
+
+      {/* **막은 이유를 항목마다 적는다.**
+          이름만 보여주면 무엇을 고쳐야 하는지 알 수 없다. 그리고
+          '확인 못 함'과 '조건에 안 맞음'을 구분해서 그린다 — 앞은
+          조회가 실패한 것이고 뒤는 실제로 걸린 것이라, 고치는 방법이
+          완전히 다르다. */}
+      {blockers.length > 0 && (
+        <div style={{
+          padding: '9px 10px', borderRadius: 8, background: C.downBg,
+          display: 'flex', flexDirection: 'column', gap: 7,
+        }}>
+          {blockers.map((b: any, i: number) => (
+            <div key={b?.id ?? i} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+              <span style={{
+                color: b?.status === 'unknown' ? C.faint : C.down,
+                fontWeight: 900, fontSize: FS.micro, width: 10, flexShrink: 0, lineHeight: 1.5,
+              }}>{b?.status === 'unknown' ? '?' : '✕'}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: C.text, fontSize: FS.micro, fontWeight: 700 }}>
+                  {b?.label}
+                  <span style={{ marginLeft: 5, color: b?.status === 'unknown' ? C.faint : C.down, fontWeight: 600 }}>
+                    {b?.status === 'unknown' ? '확인 못 함' : '조건 불일치'}
+                  </span>
+                </div>
+                <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, lineHeight: 1.5 }}>
+                  {b?.detail}
+                </div>
+              </div>
+            </div>
+          ))}
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.5, marginTop: 2 }}>
+            <b style={{ color: C.dim }}>?</b> 는 조회가 실패한 것이고, <b style={{ color: C.down }}>✕</b> 는 실제로 조건에 걸린 것입니다.
+          </div>
+        </div>
       )}
 
       {/* 모의에는 거래소 연결이 필요 없다. 여기서 이 문구를 띄우면
