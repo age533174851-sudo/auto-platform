@@ -71,6 +71,11 @@ jobs:
           # 401은 시크릿이 서로 다르다는 뜻이다. 상태코드만 남기면
           # "넣었는데 왜 안 되지"가 반복된다 — 무엇을 확인할지 적는다.
           if [ "$code" = "401" ]; then
+            # 이쪽이 보낸 값의 지문. 서버 응답의 serverFingerprint와 비교한다.
+            # 같으면 값은 맞는데 다른 이유이고, 다르면 서로 다른 값이다.
+            # SHA-256 앞 6자리라 값을 되찾을 수 없다.
+            mine=$(printf '%s' "${SECRET}" | sha256sum | cut -c1-6)
+            echo "이 워크플로가 보낸 값의 지문: ${mine}"
             echo "──────────────────────────────────────────────"
             echo "인증 실패: GitHub의 EXIT_MONITOR_SECRET과"
             echo "Vercel의 ADMIN_SECRET이 글자 하나까지 같아야 합니다."
