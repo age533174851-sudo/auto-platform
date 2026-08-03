@@ -269,4 +269,54 @@ export function runAutotradeHealthTests() {
     eq(r.running, true, '실행 기록은 있는데 안 돌았다고 했다');
     assert(r.verdict.includes('돌지 않습니다'), '막힌 게 있는데 정상이라고 했다: ' + r.verdict);
   });
+
+  // ══ 여는 크론과 닫는 크론은 다르다 ══
+  //
+  // 지금까지 진입만 보고 있었다. 청산 감시(exit-monitor)가 멈춰 있으면
+  // 트레일링 손절도 시간 청산도 안 된다 — 진입이 안 되는 것보다 나쁘다.
+  test('열린 거래가 있는데 청산 감시가 안 돌았으면 막힌 것으로 적는다', () => {
+    const r = autotradeHealth(good({ openTradeCount: 2, exitRuns: [] }));
+    eq(find(r, 'exitmon').state, 'bad');
+    assert(find(r, 'exitmon').detail.includes('2건'), find(r, 'exitmon').detail);
+  });
+
+  test('청산 감시가 최근에 돌았으면 통과다', () => {
+    const r = autotradeHealth(good({
+      openTradeCount: 1,
+      exitRuns: [{ status: 'ok', detail: '1건 점검', started_at: iso(NOW - 3600_000) }],
+    }));
+    eq(find(r, 'exitmon').state, 'ok');
+  });
+
+  test('청산 감시가 실패했으면 이유를 적는다', () => {
+    const r = autotradeHealth(good({
+      openTradeCount: 1,
+      exitRuns: [{ status: 'failed', detail: '401', started_at: iso(NOW - 3600_000) }],
+    }));
+    eq(find(r, 'exitmon').state, 'bad');
+    assert(find(r, 'exitmon').detail.includes('401'), find(r, 'exitmon').detail);
+  });
+
+  test('이틀 넘게 안 돌았으면 방치로 적는다', () => {
+    const r = autotradeHealth(good({
+      openTradeCount: 3,
+      exitRuns: [{ status: 'ok', detail: 'ok', started_at: iso(NOW - 5 * 86400_000) }],
+    }));
+    eq(find(r, 'exitmon').state, 'bad');
+    assert(find(r, 'exitmon').detail.includes('방치'), find(r, 'exitmon').detail);
+  });
+
+  // 포지션이 없는데 빨간 줄을 띄우면 목록을 안 믿게 된다.
+  test('열린 거래가 없으면 청산 감시를 따지지 않는다', () => {
+    eq(find(autotradeHealth(good({ openTradeCount: 0, exitRuns: [] })), 'exitmon'), undefined);
+  });
+
+  // **0건과 '못 읽음'은 다르다.**
+  test('열린 거래 수를 못 읽었으면 판정하지 않는다', () => {
+    eq(find(autotradeHealth(good({ openTradeCount: null, exitRuns: [] })), 'exitmon'), undefined);
+  });
+
+  test('열린 거래는 있는데 감시 기록을 못 읽었으면 확인 못 함이다', () => {
+    eq(find(autotradeHealth(good({ openTradeCount: 2, exitRuns: null })), 'exitmon').state, 'unknown');
+  });
 }

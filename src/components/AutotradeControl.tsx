@@ -223,6 +223,8 @@ export default function AutotradeControl() {
     cronSecretSet: data?.cronSecretSet,
     liveUnlocked: data?.liveUnlocked,
     marginColumnPresent: data?.marginColumnPresent ?? null,
+    exitRuns: (data?.exitRuns ?? null) as any,
+    openTradeCount: data?.openTradeCount ?? null,
     connections: (data?.connections || []) as any,
     cronUtcHour: data?.cronUtcHour ?? null,
   });
