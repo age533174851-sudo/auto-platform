@@ -363,10 +363,22 @@ export async function POST(req: NextRequest) {
     signalId: `manual-${minute}-${symbol}`,
     clientOrderId,
     exchange: 'binance',
-    mode: conn.is_testnet ? 'TESTNET' : 'LIVE',
+    // **프로젝트 공통 규칙: is_testnet === false일 때만 실전이다.**
+    // 여기는 truthy 검사라 이 칸이 비면 실전으로 떨어진다 — 모르는 값이
+    // 실제 돈 쪽으로 기울면 안 된다. 위 quantize도 이미 `!== false`를 쓴다.
+    mode: conn.is_testnet !== false ? 'TESTNET' : 'LIVE',
     plan: built.plan,
     orderType: type === 'LIMIT' ? 'LIMIT' : 'MARKET',
-    limitPrice: price != null ? Number(price) : undefined,
+    // **정규화한 가격을 보낸다.**
+    //
+    // 위에서 호가 단위에 맞춰 orderPrice를 만들어 놓고, 여기서는 원본
+    // price를 넘기고 있었다. 그래서 62661.95가 그대로 나가 거래소가
+    // -4014(Price not increased by tick size)로 거부했다 — BTCUSDT의
+    // 호가 단위는 0.10이라 .95로 끝나는 가격은 존재하지 않는다.
+    //
+    // 수량은 orderQty를 제대로 쓰고 있었다. 가격만 빠져 있었고, 그래서
+    // "수량은 되는데 지정가만 거부"라는 모양이 됐다.
+    limitPrice: orderPrice != null ? orderPrice : undefined,
     reduceOnly: !!reduceOnly,
     // 청산에는 손절을 붙이지 않는다 (executeOrder가 reduceOnly로 건너뛴다)
     stopLoss: reduceOnly ? undefined : (preflightStop ?? undefined),
