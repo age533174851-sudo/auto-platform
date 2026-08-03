@@ -48,6 +48,9 @@ export default function AutotradeControl() {
   const [connId, setConnId] = useState('');
   // 10슬롯 방식: 1회 위험 10% · 배율 상한 100. 이게 기본값이다.
   const [levCap, setLevCap] = useState('100');
+  // 실전으로 켤 것인가. **기본은 테스트넷이다** — 화면을 열자마자 실전이
+  // 선택돼 있으면, 켜기만 누르면 진짜 돈이 나간다.
+  const [live, setLive] = useState(false);
   const [riskPct, setRiskPct] = useState('10');
   // 얼마나 자주 진입을 볼 것인가(분). 크론은 하루 1회지만, 앱이 열려
   // 있는 동안은 이 간격으로 본다.
@@ -113,7 +116,7 @@ export default function AutotradeControl() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
-          symbol, connectionId: connId, mode: 'TESTNET', enabled,
+          symbol, connectionId: connId, mode: live ? 'LIVE_SMALL' : 'TESTNET', enabled,
           leverageCap: levCap === '' ? undefined : Number(levCap),
           riskPct: riskPct === '' ? undefined : Number(riskPct),
           intervalMin: intervalMin === '' ? undefined : Number(intervalMin),
@@ -377,13 +380,44 @@ export default function AutotradeControl() {
           )}
         </div>
 
-        {/* **테스트넷 고정이다.** 실전은 화면에서 한 번에 켤 수 있으면 안 된다 —
-            며칠 돌려 보고 올리는 것이 이 사다리의 존재 이유다. */}
+        {/* ── 테스트넷 / 실전 ──
+            예전에는 mode가 'TESTNET'으로 코드에 박혀 있어서 **실전 자동매매를
+            켤 방법이 아예 없었다.** 사다리를 지키려던 것인데, 결과는 기능이
+            없는 것이었다.
+
+            그래서 고르게 하되 **기본은 테스트넷**이고, 실전은 고른 연결이
+            실계좌일 때만 켤 수 있다. 서버도 같은 검사를 한다(모드와 연결이
+            어긋나면 거부) — 화면만 막으면 화면을 우회하는 순간 뚫린다. */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          {([[false, '테스트넷'], [true, '실전']] as const).map(([v, label]) => {
+            const on = live === v;
+            const tone = v ? T.red : T.acl;
+            return (
+              <button key={String(v)} onClick={() => setLive(v)} style={{
+                minHeight: 34, borderRadius: 8, cursor: 'pointer',
+                background: on ? A(tone, '20') : 'transparent',
+                color: on ? tone : T.muted,
+                border: `1px solid ${on ? A(tone, '55') : T.border}`,
+                fontSize: 11.5, fontWeight: 800,
+              }}>{label}</button>
+            );
+          })}
+        </div>
+
         <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.6 }}>
-          이 버튼은 <b style={{ color: T.txt }}>테스트넷</b>으로만 켭니다. 실전으로 올리는 것은
-          테스트넷에서 며칠 돌려 본 뒤에 하세요 — 그러라고 단계를 나눠 뒀습니다.
-          {conns.some(c => c.is_testnet === false) && (
-            <><br/><b style={{ color: T.ylw }}>실전 연결을 고르면 거부됩니다</b> (모드와 연결이 어긋나면 막습니다).</>
+          {live ? (
+            <>
+              <b style={{ color: T.red }}>실전은 사람이 안 보는 동안 진짜 돈이 나갑니다.</b>{' '}
+              고른 연결이 <b style={{ color: T.txt }}>실계좌</b>여야 켜집니다 — 테스트넷 연결을
+              고르면 서버가 거부합니다.
+              <br/>건당 명목가 <b style={{ color: T.txt }}>$100</b> 상한이 걸립니다(LIVE_SMALL).
+              그 이상은 승급이 필요합니다.
+            </>
+          ) : (
+            <>
+              <b style={{ color: T.txt }}>테스트넷</b>으로 켭니다. 실전으로 올리기 전에 며칠
+              돌려 보시는 것이 안전합니다 — 그러라고 단계를 나눠 뒀습니다.
+            </>
           )}
         </div>
 
@@ -394,11 +428,31 @@ export default function AutotradeControl() {
           }}>{msg.text}</div>
         )}
 
-        <button onClick={() => save(true)} disabled={busy || !connId} style={{
+        <button
+          onClick={async () => {
+            // 실전은 한 번 더 묻는다. 켜는 순간부터 사람이 안 보는 동안
+            // 주문이 나가므로, **켜는 그 순간을 사람이 지나가게** 한다.
+            if (live) {
+              const { confirmDialog } = await import('@/lib/confirm/dialog');
+              const ok = await confirmDialog([
+                `${symbol} 자동매매를 **실전**으로 켭니다.`,
+                '',
+                '이제부터 사람이 안 보는 동안 진짜 돈으로 주문이 나갑니다.',
+                `배율 상한 ${levCap || '기본'}배 · 1회 위험 ${riskPct || '기본'}%`,
+                '건당 명목가 $100 상한이 걸립니다.',
+                '',
+                '되돌리려면 이 화면에서 스위치를 끄면 됩니다.',
+              ].join('\n'), { danger: true });
+              if (!ok) return;
+            }
+            save(true);
+          }}
+          disabled={busy || !connId} style={{
           minHeight: 40, borderRadius: 10, cursor: busy || !connId ? 'default' : 'pointer',
-          background: A(T.acl, '18'), color: T.acl, border: `1px solid ${A(T.acl, '45')}`,
+          background: A(live ? T.red : T.acl, '18'), color: live ? T.red : T.acl,
+          border: `1px solid ${A(live ? T.red : T.acl, '45')}`,
           fontSize: 12.5, fontWeight: 800, opacity: busy || !connId ? .5 : 1,
-        }}>{busy ? '저장 중…' : '자동매매 켜기 (테스트넷)'}</button>
+        }}>{busy ? '저장 중…' : `자동매매 켜기 (${live ? '실전 · 진짜 돈' : '테스트넷'})`}</button>
       </div>
 
       {/* 실제 실행 기록 — **설정이 아니라 일어난 일**이다 */}
