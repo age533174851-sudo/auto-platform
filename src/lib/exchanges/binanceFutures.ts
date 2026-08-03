@@ -566,6 +566,13 @@ export async function getFuturesServerTime(testnet = true): Promise<number | nul
 export interface FuturesOrderResult {
   success: boolean; message: string; orderId?: number | string;
   symbol?: string; side?: string; qty?: number; price?: number; raw?: any;
+  /**
+   * 이 **거래 환경**이 그 주문 유형을 아예 안 받는가(-4120).
+   *
+   * 파라미터를 고쳐서 될 일이 아니라는 뜻이다. 이게 없으면 화면이
+   * 키·권한·수량을 의심하게 만든다 — 거기엔 고칠 것이 없다.
+   */
+  envUnsupported?: boolean;
 }
 
 export async function placeFuturesOrder(
@@ -665,11 +672,19 @@ export async function placeFuturesTPSL(
         const d2 = await attempt(other);
         return { success: true, message: `${label} 설정 (대체 방식)`, orderId: d2.orderId, symbol: d2.symbol, raw: d2 };
       } catch (e2: any) {
+        // 두 모양 다 -4120이면 파라미터 문제가 아니라 **환경 문제**다.
+        // 그렇게 말해야 사용자가 키·권한·수량을 뒤지지 않는다.
+        const bothBlocked = /-4120|not supported for this endpoint|Algo Order/i
+          .test(String(e2?.message || e2));
         return {
           success: false,
-          message: `${label} 부착 실패 — 이 거래 환경이 ${opts.type} 주문을 받지 않습니다. `
-            + `두 가지 방식(전량 청산·수량 지정)을 다 시도했습니다. `
-            + `원문: ${msg} / ${String(e2?.message || e2)}`,
+          envUnsupported: bothBlocked,
+          message: bothBlocked
+            ? `${label}을(를) 거래소에 걸 수 없습니다 — ${testnet ? '바이낸스 데모(demo-fapi)' : '이 환경'}가 `
+              + `${opts.type} 주문을 받지 않습니다(-4120). 전량 청산·수량 지정 두 방식을 다 시도했습니다. `
+              + `키·권한·수량 문제가 아닙니다.`
+            : `${label} 부착 실패 — 두 가지 방식을 다 시도했습니다. `
+              + `원문: ${msg} / ${String(e2?.message || e2)}`,
         };
       }
     }

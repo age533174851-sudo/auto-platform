@@ -358,7 +358,20 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           fallbackQuantity: res.qty || plan.quantity,
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
-        else slError = String((sl as any)?.message || '원인 불명');
+        else {
+          slError = String((sl as any)?.message || '원인 불명');
+          // 이 환경이 조건부 주문을 아예 안 받는 경우다. 사용자가
+          // 고칠 것이 **여기에는 없다** — 무엇을 해야 하는지까지 적는다.
+          // 이 말이 없으면 같은 시도를 반복하게 되고, 시도마다 진입·청산
+          // 수수료가 나간다(실제로 잔고가 그렇게 줄었다).
+          if ((sl as any)?.envUnsupported) {
+            slError += testnet
+              ? ' — 이 환경에서는 거래소 손절을 걸 수 없으므로, 여기서 손절 있는 진입은 불가능합니다.'
+                + ' 실전(fapi)은 STOP_MARKET을 받으므로 이 제약은 데모에만 해당합니다.'
+                + ' 모의(PAPER) 모드는 앱이 직접 손절을 계산하므로 연습에 쓸 수 있습니다.'
+              : ' — 거래소가 조건부 주문을 받지 않습니다. 손절 없이 진입하지 않습니다.';
+          }
+        }
       }
       // 익절 — exitPlan이 있으면 분할 사다리를, 없으면 기존 단일 익절을 건다.
       const tpIds: string[] = [];
