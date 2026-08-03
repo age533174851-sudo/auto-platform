@@ -151,10 +151,35 @@ async function recoverUnresolvedOrders(
 
 export async function GET(req: NextRequest) {
   if (!authorized(req)) {
-    return NextResponse.json(
-      { ok: false, error: '인증 필요 — Vercel Cron(Bearer CRON_SECRET) 또는 x-admin-secret' },
-      { status: 401 },
-    );
+    // ── 401은 두 가지가 전혀 다른 문제인데 문구가 같았다 ──
+    //
+    //  (가) 서버에 ADMIN_SECRET이 아예 없다 → Vercel에 넣고 **재배포**해야 한다
+    //  (나) 있는데 보낸 값과 다르다        → GitHub 시크릿을 맞춰야 한다
+    //
+    // "인증 필요"만 적으면 둘을 구분할 수 없어서, 이미 넣어 둔 사람이
+    // 같은 값을 계속 다시 넣게 된다. 실제로 그 상태였다.
+    //
+    // **값은 절대 싣지 않는다.** 있다/없다와 길이만 본다 — 길이는 앞뒤
+    // 공백이 딸려 들어간 경우를 잡는 데 쓰인다(복사할 때 가장 흔한 실수).
+    const adminSet = !!process.env.ADMIN_SECRET;
+    const cronSet = !!process.env.CRON_SECRET;
+    const sent = req.headers.get('x-admin-secret') || '';
+    const hint = !adminSet
+      ? '서버에 ADMIN_SECRET이 없습니다 — Vercel → Settings → Environment Variables에 넣고 **재배포**하세요. 저장만 하면 기존 배포에는 적용되지 않습니다.'
+      : !sent
+        ? 'x-admin-secret 헤더가 오지 않았습니다.'
+        : sent.length !== String(process.env.ADMIN_SECRET).length
+          ? `보낸 값의 길이가 서버 값과 다릅니다 (보낸 ${sent.length}자 / 서버 ${String(process.env.ADMIN_SECRET).length}자) — 복사할 때 앞뒤 공백이나 줄바꿈이 딸려 들어갔는지 확인하세요.`
+          : '길이는 같은데 값이 다릅니다 — GitHub의 EXIT_MONITOR_SECRET을 Vercel의 ADMIN_SECRET과 똑같이 맞추세요.';
+
+    return NextResponse.json({
+      ok: false,
+      error: '인증 필요 — Vercel Cron(Bearer) 또는 x-admin-secret 헤더가 맞아야 합니다',
+      message: hint,
+      // 값이 아니라 **설정 여부**다. 이게 있어야 어느 쪽을 고칠지 안다.
+      adminSecretSet: adminSet,
+      cronSecretSet: cronSet,
+    }, { status: 401 });
   }
 
   const url = new URL(req.url);
