@@ -773,12 +773,31 @@ export default function ExchangeConnectPage() {
                   {diag.passed}/{diag.total} · {diag.successRate}%
                 </span>
               </div>
+              {/* 어디에 무슨 키로 물어봤는가. 이게 없으면 "테스트넷이 안 된다"와
+                  "실전 호스트에 테스트넷 키를 보냈다"를 구분할 수 없다.
+                  키는 앞 8자만 — 전체 값은 화면에도 응답에도 싣지 않는다. */}
+              {(diag.host || diag.keyPrefix) && (
+                <div style={{ color:T.muted, fontSize:9, marginBottom:6, wordBreak:'break-all' }}>
+                  {diag.host}{diag.keyPrefix ? ` · 키 ${diag.keyPrefix}…` : ''}
+                </div>
+              )}
               {(diag.checks||[]).map((c:any,i:number)=>(
-                <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'5px 0', borderBottom:i<diag.checks.length-1?`1px solid ${T.border}`:'none' }}>
-                  <span style={{ color: c.ok?T.txt:T.red, fontSize:11 }}>{c.ok?'✅':'❌'} {c.name}</span>
-                  <span style={{ color:T.muted, fontSize:9, textAlign:'right', maxWidth:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.detail} · {c.ms}ms</span>
+                <div key={i} style={{ padding:'5px 0', borderBottom:i<diag.checks.length-1?`1px solid ${T.border}`:'none' }}>
+                  <div style={{ color: c.ok?T.txt:T.red, fontSize:11 }}>{c.ok?'✅':'❌'} {c.name}</div>
+                  {/* **오류 원문을 자르지 않는다.** 예전에는 한 줄로 잘라서
+                      정작 필요한 거래소 메시지가 '…'로 사라졌다 — 진단을
+                      돌려도 원인을 알 수 없었다. */}
+                  <div style={{ color:T.muted, fontSize:9, lineHeight:1.5, marginTop:2, whiteSpace:'pre-wrap', wordBreak:'break-word' }}>
+                    {c.detail}{c.ms ? ` · ${c.ms}ms` : ''}
+                  </div>
                 </div>
               ))}
+              {diag.cause && (
+                <div style={{ marginTop:8, padding:'7px 10px', borderRadius:7, fontSize:10, lineHeight:1.5,
+                  background:A(T.prp,'12'), color:T.prp, whiteSpace:'pre-wrap' }}>
+                  {diag.cause}
+                </div>
+              )}
               <div style={{ marginTop:8, padding:'7px 10px', borderRadius:7, fontSize:10, lineHeight:1.4,
                 background: diag.verdict==='ready'?A(T.grn,'12'):diag.verdict==='partial'?A(T.ylw,'12'):A(T.red,'12'),
                 color: diag.verdict==='ready'?T.grn:diag.verdict==='partial'?T.ylw:T.red }}>
