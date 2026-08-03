@@ -18,6 +18,7 @@
 // "횡보장이라 안 들어감"은 완전히 다른 상태인데, 로그가 없으면 똑같이
 // 보인다.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
 
@@ -67,7 +68,7 @@ export function DemoRunner({ dense, symbol, onChanged }: {
       const ok = r.ok && !!j?.ok;
       push({
         at: Date.now(), ok, dryRun,
-        text: j?.message || j?.error || `응답 없음 (${r.status})`,
+        text: errorTextOf(j, `응답 없음 (${r.status})`),
       });
       if (ok && !dryRun && (j?.closed?.length || j?.entered)) onChanged?.();
     } catch (e: any) {

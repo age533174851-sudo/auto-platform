@@ -12,6 +12,7 @@
 // 그다음이 순노출과 펀딩 비용이다. 헤지는 공짜가 아니다 — 몇 달 유지하면
 // 펀딩이 피하려던 하락폭보다 클 수 있다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, chip, ghostBtn, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 
@@ -59,7 +60,7 @@ export const CombinedPanel = memo(function CombinedPanel() {
       if (connId) q.set('connectionId', connId);
       const r = await fetch(`/api/strategies/combined?${q}`, { headers: { Authorization: auth } });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `평가 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `평가 실패 (${r.status})`)); return; }
       setErr(''); setD(j);
     } catch (e: any) { setErr(`평가 실패 (${e?.message || e})`); }
     finally { setBusy(false); }

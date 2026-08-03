@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 // src/components/terminal/CoinMOrderPanel.tsx
 //
 // COIN-M 주문판. 현물·USDⓈ-M과 별개 파일이다.
@@ -158,7 +159,7 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
         setMsg({ ok: true, text: `${j.message}${j.conversionNote ? ` · ${j.conversionNote}` : ''}` });
         setAmount('');
       } else {
-        setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+        setMsg({ ok: false, text: errorTextOf(j, `실패 (${r.status})`) });
       }
     } catch (e: any) {
       setMsg({ ok: false, text: `응답 없음 — 재시도 말고 COIN-M 내역을 먼저 확인하세요 (${e?.message || e})` });

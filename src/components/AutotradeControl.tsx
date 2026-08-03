@@ -20,6 +20,7 @@
 //  · 마지막으로 **실제로** 돌았는가 (cron_runs)
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 
@@ -68,7 +69,7 @@ export default function AutotradeControl() {
           const testnet = list.find((c: any) => c.is_testnet !== false);
           setConnId((testnet || list[0])?.id || '');
         }
-      } else setErr(j?.message || j?.error || '읽지 못했습니다');
+      } else setErr(errorTextOf(j, '읽지 못했습니다'));
     } catch (e: any) { setErr(`읽지 못했습니다 (${e?.message || e})`); }
   }, [auth, connId]);
 
@@ -118,7 +119,7 @@ export default function AutotradeControl() {
         }),
       });
       const j = await r.json();
-      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
       if (j?.ok) load();
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
     finally { setBusy(false); }
@@ -141,7 +142,7 @@ export default function AutotradeControl() {
         }),
       });
       const j = await r.json();
-      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
       if (j?.ok) load();
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
     finally { setBusy(false); }

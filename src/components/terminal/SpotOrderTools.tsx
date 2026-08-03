@@ -16,6 +16,7 @@
 // 멈추고 어디까지 나갔는지 보여준다 — 계속 보내면 의도하지 않은
 // 반쪽 사다리가 남는다.
 import React, { memo, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, chip, ghostBtn, primaryBtn, input, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
@@ -93,7 +94,7 @@ export const SpotOrderTools = memo(function SpotOrderTools() {
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (!r.ok) { setErr(j?.message || j?.error || `계획 실패 (${r.status})`); return; }
+      if (!r.ok) { setErr(errorTextOf(j, `계획 실패 (${r.status})`)); return; }
       setPlan(j);
       if (!j.ok) setErr(j.warnings?.[0] || '계획을 만들 수 없습니다');
     } catch (e: any) {
@@ -123,7 +124,7 @@ export const SpotOrderTools = memo(function SpotOrderTools() {
         const j = await r.json();
         if (!r.ok || !j?.ok) {
           // 여기서 멈춘다. 계속 보내면 의도하지 않은 반쪽 사다리가 남는다.
-          setErr(`${o.label}에서 실패해 중단했습니다: ${j?.message || j?.error}`);
+          setErr(`${o.label}에서 실패해 중단했습니다: ${errorTextOf(j)}`);
           break;
         }
         done.push(o.label);

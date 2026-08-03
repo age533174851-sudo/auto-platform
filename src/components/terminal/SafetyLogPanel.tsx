@@ -25,6 +25,7 @@
 // 마지막 것이 핵심이다. 못 읽은 것을 0으로 그리면 "안전장치가 조용히
 // 죽었다"와 "아직 걸릴 일이 없었다"가 화면에서 같아진다.
 import React, { useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
 
@@ -62,7 +63,7 @@ export function SafetyLogPanel() {
       const j = await r.json();
       if (!r.ok || !j?.ok) {
         setData(null);
-        setErr(j?.message || j?.error || `조회 실패 (${r.status})`);
+        setErr(errorTextOf(j, `조회 실패 (${r.status})`));
         return;
       }
       setErr('');

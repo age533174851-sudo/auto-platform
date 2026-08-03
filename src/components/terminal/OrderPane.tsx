@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 // src/components/terminal/OrderPane.tsx
 //
 // 호가판과 주문판. **따로 export한다.**
@@ -438,14 +439,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           // 화면은 그걸 안 읽고 '확인 불가'만 그리고 있었다 — 사용자는
           // 키가 문제인지 자금이 없는 건지 알 방법이 없다.
           const fe = j.tree?.futures;
-          setWalletErr(fe && fe.ok === false ? String(fe.error || '선물 지갑을 읽지 못했습니다') : '');
+          setWalletErr(fe && fe.ok === false ? String(errorTextOf(fe, '선물 지갑을 읽지 못했습니다')) : '');
           return;
         }
         // **왜 못 읽었는지를 버리지 않는다.** 지금까지 이유를 통째로
         // 지우고 '확인 불가'만 남겼는데, 그러면 테스트 자금을 받으러 갈지
         // 키를 고칠지 사용자가 알 수 없다.
         setWallet(null);
-        setWalletErr(String(j?.message || j?.error || `조회 실패 (${r.status})`));
+        setWalletErr(String(errorTextOf(j, `조회 실패 (${r.status})`)));
       } catch (e: any) {
         if (alive) { setWallet(null); setWalletErr(`지갑을 읽지 못했습니다 (${e?.message || e})`); }
       }
@@ -525,7 +526,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         const j = await r.json();
         if (!alive) return;
         setMarginType(j?.marginType ?? null);
-        setMarginErr(j?.marginType ? '' : (j?.message || j?.error || '마진 모드를 읽지 못했습니다'));
+        setMarginErr(j?.marginType ? '' : (errorTextOf(j, '마진 모드를 읽지 못했습니다')));
       } catch (e: any) {
         // **격리로 가정하지 않는다.** 여기서 기본값을 넣으면 화면이 다시
         // 거짓말을 시작한다.
@@ -589,7 +590,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         notifySuccess('마진 모드 변경', j.message || `${want}로 바꿨습니다`);
       } else {
         // 실패했으면 **화면 값을 바꾸지 않는다.** 거래소는 그대로다.
-        setMarginErr(j?.message || j?.error || `실패 (${r.status})`);
+        setMarginErr(errorTextOf(j, `실패 (${r.status})`));
       }
     } catch (e: any) {
       setMarginErr(`응답 없음 — 거래소에서 직접 확인하세요 (${e?.message || e})`);
@@ -846,7 +847,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         //
         // 그때 사용자가 보는 것은 "API 키가 무효" 한 줄이다. 키는 멀쩡한데
         // **다른 연결을 골랐어야 했다**는 사실이 어디에도 없다.
-        const raw = String(j?.message || j?.error || `실패 (${r.status})`);
+        const raw = String(errorTextOf(j, `실패 (${r.status})`));
         const authish = /-2015|-2014|-1022|Invalid API|API-key|permissions/i.test(raw);
         const many = (modeResolution.choices ?? 0) > 1;
         const failText = raw

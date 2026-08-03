@@ -15,6 +15,7 @@
 // 이 예약을 실행할 수 있는지, 제 시각에 나갈 수 있는지를 같이 적는다.
 // 그 줄이 없으면 이 기능은 '되는 것처럼 보이는 기능'이 된다.
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, input } from './theme';
 import { useTerminal } from './TerminalContext';
 import { toUtcMs, validateSchedule, accuracyNote, fmtGap } from '@/lib/engine/scheduleExit';
@@ -55,7 +56,7 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
       });
       const j = await r.json();
       if (j?.ok) { setRows(Array.isArray(j.pending) ? j.pending : []); setLoadErr(''); }
-      else setLoadErr(j?.message || j?.error || '예약을 읽지 못했습니다');
+      else setLoadErr(errorTextOf(j, '예약을 읽지 못했습니다'));
     } catch (e: any) { setLoadErr(`예약을 읽지 못했습니다 (${e?.message || e})`); }
   }, [auth]);
 
@@ -116,7 +117,7 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
       if (r.ok && j?.ok) {
         setMsg({ ok: true, text: `${date} ${time}에 ${portion === '' ? '전량' : `${portion}%`} 청산 예약됨` });
         load();
-      } else setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+      } else setMsg({ ok: false, text: errorTextOf(j, `실패 (${r.status})`) });
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
     finally { setBusy(false); }
   };

@@ -10,6 +10,7 @@
 // 총액에 '이상'을 붙이고 무엇이 빠졌는지 같이 적는다. 정확한 척하는
 // 숫자 하나가 안 보여주는 것보다 나쁘다.
 import React, { useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { Cpu, RefreshCw, AlertTriangle, Clock, DollarSign } from 'lucide-react';
@@ -68,7 +69,7 @@ export default function AiUsagePage() {
         // 하는지가 완전히 다르다 — 다시 시도할 일이 아니라 계정 문제다.
         setDenied(true); setErr(''); setD(null); return;
       }
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `조회 실패 (${r.status})`); setD(null); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `조회 실패 (${r.status})`)); setD(null); return; }
       setDenied(false);
       setErr(''); setD(j);
     } catch (e: any) { setErr(`조회 실패: ${e?.message || e}`); }

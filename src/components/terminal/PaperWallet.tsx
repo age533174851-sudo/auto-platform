@@ -10,6 +10,7 @@
 // 수익으로 잡혀 수익률이 부풀려지고, 그 성적표는 아무것도 말해주지 않는다.
 // 화면에도 그렇게 적는다.
 import React, { useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn, input, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 
@@ -41,7 +42,7 @@ export function usePaperAccount(enabled: boolean) {
         // 조회 실패를 잔고 0으로 그리지 않는다. 0은 '돈이 없다'이고
         // 실패는 '모른다'인데, 화면에서는 둘이 똑같이 보인다.
         setAcct(null);
-        setErr(j?.message || j?.error || `조회 실패 (${r.status})`);
+        setErr(errorTextOf(j, `조회 실패 (${r.status})`));
         return;
       }
       setErr('');
@@ -85,7 +86,7 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
         body: JSON.stringify(payload),
       });
       const j = await r.json();
-      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
       if (j?.ok) { setAmount(''); onChanged(); }
     } catch (e: any) {
       setMsg({ ok: false, text: `실패 (${e?.message || e})` });

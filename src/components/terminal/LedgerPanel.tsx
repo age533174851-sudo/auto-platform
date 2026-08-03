@@ -11,6 +11,7 @@
 //
 // 그래서 미귀속을 작게 각주로 두지 않고 종목 줄에 바로 붙인다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, tabStyle, chip, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 import type { StrategyHolding, AttributionResult, Conflict } from '@/lib/strategies/ledger';
@@ -37,7 +38,7 @@ export const LedgerPanel = memo(function LedgerPanel() {
       const q = connId ? `?connectionId=${connId}` : '';
       const r = await fetch(`/api/strategies/ledger${q}`, { headers: { Authorization: auth } });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `조회 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `조회 실패 (${r.status})`)); return; }
       setErr(''); setD(j);
     } catch (e: any) {
       setErr(`장부 조회 실패 — 포지션 없음이 아니라 확인 불가입니다 (${e?.message || e})`);

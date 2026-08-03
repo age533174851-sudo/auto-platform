@@ -12,6 +12,7 @@
 // 그리고 모의가 기본이다. 실전은 명시적으로 켜야 하고, 켤 때 무슨
 // 뜻인지 화면이 말한다.
 import React, { useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn, primaryBtn, input } from './theme';
 import { useTerminal } from './TerminalContext';
 
@@ -54,7 +55,7 @@ export function KisConnectPanel() {
         setAppKey(''); setAppSecret(''); setAccountNo('');
         load();
       } else {
-        setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})`, hint: j?.hint });
+        setMsg({ ok: false, text: errorTextOf(j, `실패 (${r.status})`), hint: j?.hint });
       }
     } catch (e: any) {
       setMsg({ ok: false, text: `요청이 실패했습니다 (${e?.message || e})` });

@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { listStrategies } from '@/lib/strategies/store';
 import {
   loadLogs, saveLog, getLastEvaluatedAt, setLastEvaluatedAt,
@@ -381,7 +382,7 @@ export default function AutoTradeEngine() {
                   filledQuantity: od.qty,
                   reason: orderRes.ok && od.ok
                     ? `실전 체결 (주문ID ${od.orderId})`
-                    : `실전 주문 실패: ${od.message || od.error || '알 수 없음'}`,
+                    : `실전 주문 실패: ${od.message || errorTextOf(od, '알 수 없음')}`,
                 });
 
                 if (typeof window !== 'undefined' && 'Notification' in window &&

@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 // src/components/terminal/WalletTree.tsx
 //
 // 통합 자산 트리.
@@ -32,7 +33,7 @@ export const WalletTreePanel = memo(function WalletTreePanel({ dense }: { dense?
     try {
       const r = await fetch(`/api/wallets?connectionId=${connId}`, { headers: { Authorization: auth } });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `조회 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `조회 실패 (${r.status})`)); return; }
       setErr(''); setTree(j.tree); setAlloc(j.allocation || []);
     } catch (e: any) {
       setErr(`자산 조회 실패 — 잔고 0이 아니라 확인 불가입니다 (${e?.message || e})`);
