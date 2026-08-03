@@ -239,7 +239,10 @@ export async function assertStateConsistent(
       allowed: false, verdict: r.verdict, gather: r,
       reason: `결과가 확정되지 않은 주문이 ${r.unresolvedOrders.length}건 있어 신규 주문을 보류합니다 ` +
               `(${first.symbol} ${first.clientOrderId}: ${first.reason}). ` +
-              `/api/orders/reconcile로 확정한 뒤 다시 시도하세요.`,
+              // **사용자에게 API 주소를 알려주지 않는다.** 휴대폰으로 보는
+              // 사람에게 "/api/…를 호출하세요"는 막다른 길이다. 화면에
+              // 버튼이 있고, 그 버튼을 누르라고 말해야 한다.
+              `아래 '미확정 주문 확정' 버튼을 눌러 거래소와 대조한 뒤 다시 시도하세요.`,
     };
   }
   if (r.verdict?.blockNewOrders) {

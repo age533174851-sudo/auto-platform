@@ -369,6 +369,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 접힌 채로 시작한다 — 펼쳐 두면 진입 버튼이 화면 밖으로 밀린다
   const [blockOpen, setBlockOpen] = useState(false);
   // 확인창("네/아니요")을 못 띄운 이유. 비어 있지 않으면 화면에 적는다.
+  const [reconciling, setReconciling] = useState(false);
   const [noAskWhy, setNoAskWhy] = useState('');
 
   // 이 심볼의 마진 모드. **null은 '격리'가 아니라 '모른다'다.**
@@ -1358,6 +1359,47 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               role="button" aria-label="닫기"
               style={{ color: C.faint, fontSize: FS.body, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>×</span>
           </button>
+
+          {/* ── 미확정 주문 확정 버튼 ──
+              결과를 모르는 주문이 남아 있으면 신규 진입이 막힌다. 그건
+              맞는 동작이다 — 나갔는지 모르는 주문 위에 또 얹으면 두 배로
+              들어간다.
+              문제는 **푸는 방법이 화면에 없었다**는 것이다. 안내가
+              "/api/orders/reconcile로 확정하세요"였는데, 휴대폰으로 보는
+              사람에게 API 주소는 막다른 길이다. */}
+          {blockers.some(b => /미확정|확정되지 않은/.test(`${b.label} ${b.detail || ''}`)) && !isPaper && (
+            <div style={{ padding: '0 10px 9px' }}>
+              <button
+                onClick={async () => {
+                  if (!auth || !modeResolution.connId) return;
+                  setReconciling(true);
+                  try {
+                    const r = await fetch(
+                      `/api/orders/reconcile?connectionId=${encodeURIComponent(modeResolution.connId)}`,
+                      { headers: { Authorization: auth } });
+                    const j = await r.json();
+                    // 결과를 그대로 보여준다. 몇 건을 어떻게 확정했는지
+                    // 모르면 다시 눌러야 하는지 알 수 없다.
+                    setMsg({ ok: !!j?.ok, text: j?.ok
+                      ? `대조 완료 — ${j?.resolved ?? 0}건 확정${j?.stillUnknown ? ` · ${j.stillUnknown}건은 아직 모름` : ''}`
+                      : errorTextOf(j, `대조 실패 (${r.status})`) });
+                    if (j?.ok) { setBlockers([]); setRiskError(null); }
+                  } catch (e: any) {
+                    setMsg({ ok: false, text: `대조 요청이 응답하지 않았습니다 (${e?.message || e})` });
+                  } finally { setReconciling(false); }
+                }}
+                disabled={reconciling}
+                style={{
+                  width: '100%', minHeight: 34, borderRadius: 8,
+                  background: C.raised, color: C.text,
+                  border: `1px solid ${A(C.down, '55')}`,
+                  fontSize: FS.micro, fontWeight: 700,
+                  cursor: reconciling ? 'default' : 'pointer', opacity: reconciling ? 0.6 : 1,
+                }}>
+                {reconciling ? '거래소와 대조 중…' : '미확정 주문 확정 (거래소와 대조)'}
+              </button>
+            </div>
+          )}
 
           {/* **왜 "네/아니요"가 안 떴는가.** 접혀 있어도 보인다 — 이걸
               펼쳐야만 보이게 하면 사용자는 확인창이 고장 났다고 생각한다. */}
