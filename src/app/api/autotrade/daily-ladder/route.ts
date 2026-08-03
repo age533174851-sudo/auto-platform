@@ -65,6 +65,19 @@ export async function POST(req: NextRequest) {
 
   const symbol = String(body.symbol || 'BTCUSDT').toUpperCase().replace('/', '');
   const dryRun = body.dryRun === true;
+  /**
+   * **주문 직전까지 진짜로 가 본다. 주문만 안 낸다.**
+   *
+   * dryRun은 파이프라인이 진입을 승인하지 않으면 거기서 끝나서, 그 뒤의
+   * 관문들(마진 모드·서브계좌 한도·손실 한도·시계·상태 대조)을 한 번도
+   * 통과시켜 본 적이 없다. 그래서 "미리보기는 되는데 내일 아침에 안 되는"
+   * 일이 생긴다 — 실제로 이번에 서브계좌 한도와 마진 모드가 그렇게
+   * 숨어 있었다.
+   *
+   * checkOnly는 조건이 안 맞아도 관문 목록을 끝까지 돌려 결과를 준다.
+   * 예약 슬롯은 반드시 돌려준다 — 점검이 하루를 잡아먹으면 안 된다.
+   */
+  const checkOnly = body.checkOnly === true;
   // ── 운영 모드 ──
   // 사다리(UI_DEMO → PAPER → TESTNET → SHADOW_LIVE → LIVE_SMALL → LIVE_LIMITED)를
   // 받되, 예전 PAPER/TESTNET/LIVE도 그대로 받아 사다리로 옮긴다.
@@ -112,6 +125,49 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) {
     return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+  }
+
+  // ── 목적지 확인 (다른 무엇보다 먼저) ──
+  //
+  // **주문이 어느 망으로 나가는지는 연결이 정한다. 모드가 아니다.**
+  //
+  // 예전에는 `useTestnet`을 모드에서만 뽑았다. 그러면 예약 줄이
+  // TESTNET인데 연결이 실계좌이면, 시세·필터·서버시각을 데모 서버에서
+  // 읽고 주문은 실계좌 키로 나간다. 그게 이번 주에 본 -2015와 -1111의
+  // 뿌리다 — 두 망의 심볼 필터가 다르고 키도 호환되지 않는다.
+  //
+  // 예약 저장(POST /api/autotrade/schedule)에서 이미 막지만, **저장 뒤에
+  // 연결의 is_testnet이 바뀌었거나 예전에 저장된 줄이면 그 검사를
+  // 통과한 적이 없다.** 주문 직전에 실물로 다시 본다.
+  let connIsLive: boolean | null = null;
+  if (body.connectionId) {
+    const { data: c, error: cErr } = await sb.from('exchange_connections')
+      .select('is_testnet').eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
+    if (cErr) {
+      return NextResponse.json({
+        ok: false, error: 'connection_lookup_failed',
+        message: `거래소 연결을 확인하지 못했습니다: ${cErr.message}`,
+      }, { status: 503 });
+    }
+    if (!c) {
+      return NextResponse.json({
+        ok: false, error: 'connection_not_found',
+        message: '거래소 연결을 찾을 수 없거나 본인의 연결이 아닙니다',
+      }, { status: 404 });
+    }
+    connIsLive = (c as any).is_testnet === false;
+
+    const modeIsLive = capability(opMode).needsLiveKey;
+    if (connIsLive !== modeIsLive) {
+      return NextResponse.json({
+        ok: false, error: 'mode_conn_mismatch',
+        message: connIsLive
+          ? `${opMode} 모드인데 **실전 연결**입니다 — 이대로 두면 실계좌 키로 테스트넷에 주문하게 되어 전부 실패합니다. `
+            + '자동 화면에서 실전으로 올리거나 테스트넷 연결을 고르세요.'
+          : `${opMode} 모드인데 **테스트넷 연결**입니다 — 실전으로 나가야 할 주문이 테스트넷으로 갑니다. `
+            + '자동 화면에서 실전 연결을 고르세요.',
+      }, { status: 400 });
+    }
   }
 
   // ── 시장 데이터 ──
@@ -201,10 +257,21 @@ export async function POST(req: NextRequest) {
   // ── 모드 관문 ──
   // 다른 모든 검사를 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥 관문이다.
   const notionalUsd = result.plan?.positionSize ?? 0;
-  const modeGate = gateOrder(opMode, notionalUsd);
+  // **상한을 자산에 붙인다.** 고정 $1,000짜리 상한은 100배 전략의
+  // 명목가(자산의 10배)를 언제나 막는다 — 계좌가 아무리 커져도.
+  // 자산을 못 읽었으면 넘기지 않는다: 그때는 고정 금액만 남는다.
+  const equityForCap = Number.isFinite(Number(ctx.config.accountEquity))
+    ? Number(ctx.config.accountEquity) : null;
+  const envCap = Number(process.env.LIVE_MAX_NOTIONAL_USD);
+  const modeGate = gateOrder(opMode, notionalUsd, {
+    equityUsd: equityForCap,
+    overrideMaxNotionalUsd: Number.isFinite(envCap) && envCap > 0 ? envCap : null,
+  });
 
   // 승인 안 됐거나 미리보기면 여기서 끝. 파이프라인이 예약을 이미 되돌렸다.
-  if (!result.approved || dryRun) {
+  // checkOnly는 여기서 멈추지 않는다. 진입 조건이 안 맞는 것과 **관문이
+  // 막혀 있는 것**은 다른 문제이고, 알고 싶은 것은 후자다.
+  if ((!result.approved && !checkOnly) || dryRun) {
     return NextResponse.json({ ...base, mode: opMode, executed: false },
       { headers: { 'Cache-Control': 'no-store' } });
   }
@@ -255,13 +322,21 @@ export async function POST(req: NextRequest) {
 
   // ── 사람 확인 ──
   // 소액 실전은 건마다 확인한다. 확인 없이 돌아가면 그건 이미 자동매매다.
-  if (modeGate.needsConfirmation && body.confirm !== true) {
+  //
+  // **크론에게는 확인을 받을 사람이 없다.** LIVE_SMALL은 정의상 건마다
+  // 사람이 눌러야 하는 모드라, 예약에 걸어 두면 매일 여기서 409로 끝난다.
+  // 화면에는 '켜짐'으로 보이고 실행 기록에는 '실패'만 쌓인다 — 이 저장소에서
+  // 가장 자주 나온 모양이다. 그래서 이유를 그렇게 적고 무엇을 해야 하는지
+  // 함께 준다. 조용히 통과시키지는 않는다: 확인이 필요한 모드는 필요한 것이다.
+  if (modeGate.needsConfirmation && body.confirm !== true && !checkOnly) {
     const { releaseReservation } = await import('@/lib/strategies/ladderGate');
     await releaseReservation(sb, result.ladder?.reservationId);
     return NextResponse.json({
       ...base, mode: opMode, executed: false,
       blocked: 'NEEDS_CONFIRMATION',
-      error: `${modeGate.reason} — confirm: true를 함께 보내야 실행됩니다`,
+      error: `${modeGate.reason} — ${opMode}는 건마다 사람이 확인하는 모드라 `
+        + '예약(크론)으로는 주문이 나가지 않습니다. 자동 화면에서 모드를 '
+        + 'LIVE_LIMITED(제한 자동매매)로 올리거나, 매매 화면에서 직접 주문하세요.',
       notionalUsd,
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
@@ -272,6 +347,37 @@ export async function POST(req: NextRequest) {
 
   try {
     if (!body.connectionId) throw new Error('connectionId가 없어 주문할 수 없습니다');
+
+    // ── 점검용 가상 계획 ──
+    //
+    // 진입 신호가 없으면 파이프라인은 계획을 만들지 않는다. 그러면 손절가·
+    // 필요 증거금 같은 계획 기반 항목이 전부 '모름'이 되고, 점검 결과가
+    // **막힌 것처럼 보인다** — 실제로는 아무 문제가 없는데도.
+    //
+    // 그래서 점검일 때만, 지금 설정으로 진입한다면 어떤 계획이 나올지를
+    // 같은 규칙(증거금 예산 × 역산 배율)으로 만들어 그것으로 관문을 본다.
+    // 응답에 가상이라고 적는다 — 이 숫자가 실제 주문이라고 읽히면 안 된다.
+    const usedSyntheticPlan = checkOnly && !result.plan;
+    if (usedSyntheticPlan) {
+      const px = bars.closes[bars.closes.length - 1];
+      const eqNow = Number(ctx.config.accountEquity);
+      const stopPct = 2;                                   // 기본 손절 거리
+      const marginBudget = Number.isFinite(eqNow) && eqNow > 0
+        ? eqNow * ((Number(body.marginPct) > 0 ? Number(body.marginPct) : 10) / 100)
+        : null;
+      const capLev = Number(body.leverageCap) > 0 ? Number(body.leverageCap) : 100;
+      const riskLev = (Number(body.riskPct) > 0 ? Number(body.riskPct) : 10) / stopPct;
+      const lev = Math.max(1, Math.floor(Math.min(capLev, riskLev * (marginBudget && eqNow ? eqNow / marginBudget : 1))));
+      const notional = marginBudget != null ? marginBudget * lev : 0;
+      (result as any).plan = {
+        side: 'LONG', leverage: lev,
+        requiredMargin: marginBudget, positionSize: notional,
+        quantity: px > 0 ? notional / px : 0,
+        stopDistancePct: stopPct,
+        liquidationPrice: null,
+        notes: ['점검용 가상 계획 — 실제 진입 신호가 아닙니다'],
+      };
+    }
 
     // ── 상태 대조 관문 ──
     // 계단 게이트가 "오늘 아직 거래 안 함"이라고 판단해도, 그건 앱의 기록
@@ -392,13 +498,59 @@ export async function POST(req: NextRequest) {
     } else {
       const bfPre = await import('@/lib/exchanges/binanceFutures');
       serverMs = await bfPre.getFuturesServerTime(useTestnet);
-      const r = await bfPre.getSymbolPositionRisk(conn.api_key, apiSecretPre, symbol, useTestnet);
+      let r = await bfPre.getSymbolPositionRisk(conn.api_key, apiSecretPre, symbol, useTestnet);
+
+      // ── 마진 모드를 **점검 전에** ISOLATED로 맞춘다 ──
+      //
+      // 바이낸스 선물 계좌의 기본값은 CROSS다. 그래서 새 계좌·새 심볼은
+      // 언제나 cross로 시작하는데, 점검 목록의 'MARGIN_ISOLATED'는
+      // 차단 항목이다. 결과: **첫 실전 진입이 매일 여기서 막힌다.**
+      // 예약은 켜져 있고 크론도 돌고 기록에는 '실패'만 남는다.
+      //
+      // executeOrder가 주문 직전에 바꾸긴 하지만 그건 점검을 통과한 뒤라
+      // 도달하지 못한다. 포지션이 없을 때만 바꾼다 — 열린 포지션의 마진
+      // 모드를 건드리면 거래소가 거부하고, 성공해도 그건 다른 이야기다.
+      if (r && String(r.marginType).toUpperCase() !== 'ISOLATED' && Math.abs(r.positionAmt) === 0) {
+        try {
+          await bfPre.setFuturesMarginType(conn.api_key, apiSecretPre, symbol, 'ISOLATED', useTestnet);
+          // 바꿨다고 믿지 않는다. 다시 읽어서 실제 값을 점검에 넘긴다.
+          const again = await bfPre.getSymbolPositionRisk(conn.api_key, apiSecretPre, symbol, useTestnet);
+          if (again) r = again;
+        } catch { /* 못 바꿨으면 아래 점검이 cross 그대로 보고 막는다 */ }
+      }
+
       if (r) {
         risk = {
           marginType: r.marginType, leverage: r.leverage,
           liquidationPrice: r.liquidationPrice, positionAmt: r.positionAmt,
         };
       }
+    }
+
+    // ── 서브계좌 한도 ──
+    //
+    // **이 항목을 안 넘기고 있었다.** 점검 목록에서 SUBACCOUNT_LIMIT은
+    // '모르면 막는' 항목이라(requiredToKnow), 안 넘기면 unknown이 되어
+    // **모든 진입이 매번 차단됐다.** 수동 주문 경로는 collectAllLimits로
+    // 이 값을 채우고 있었고, 자동 경로만 빠져 있었다 — 그래서 손으로는
+    // 되는데 자동으로는 안 되는 상태였다.
+    let subAccountFact: { status: 'ok' | 'over' | 'unassigned' | 'unknown'; reason: string } | null = null;
+    try {
+      const { collectSubAccount } = await import('@/lib/portfolio/subAccountCheck');
+      const sa = await collectSubAccount({
+        sb, userId, market: 'USDM', symbol,
+        addMarginUsd: result.plan!.requiredMargin ?? null,
+        // 열린 포지션을 **못 읽었으면 빈 배열로 치지 않는다** — 빈 배열은
+        // "아무것도 안 쓰고 있다"가 되어 한도가 통째로 넉넉해진다.
+        open: gate.gather.reachable
+          ? gate.gather.exchangePositions.map((p: any) => ({
+              symbol: String(p.symbol), market: 'USDM', marginUsd: p.margin ?? null,
+            }))
+          : null,
+      });
+      subAccountFact = { status: sa.verdict.status, reason: sa.verdict.reason };
+    } catch (e: any) {
+      subAccountFact = { status: 'unknown', reason: `서브계좌 한도를 확인하지 못했습니다 (${e?.message || e})` };
     }
 
     // 오늘 손실 한도 — 자동매매에서 가장 중요한 관문이다. 사람이 안 보고
@@ -442,6 +594,7 @@ export async function POST(req: NextRequest) {
       dailyLoss: dailyLossFact,
       weeklyLoss: weeklyFact, lossStreak: streakFact,
       regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },
+      subAccount: subAccountFact,
       clock: serverMs != null ? { localMs, serverMs } : null,
       // 여기까지 왔다는 것은 assertStateConsistent를 통과했다는 뜻이다
       reconcile: { reachable: true, blockNewOrders: false, summary: gate.verdict?.summary || '일치' },
@@ -470,6 +623,31 @@ export async function POST(req: NextRequest) {
       // 국면 필터는 켠 경우에만 목록에 들어온다 (REGIME_FILTER 환경변수).
       regimeFilter: regimeFacts.enabled,
     });
+
+    // ── 점검만 하고 끝낸다 ──
+    // 통과했든 막혔든 **주문은 내지 않고 슬롯도 돌려준다.**
+    if (checkOnly) {
+      await releaseReservation(sb, reservationId);
+      return NextResponse.json({
+        ...base, executed: false, checkOnly: true,
+        approvedByPipeline: result.approved,
+        syntheticPlan: usedSyntheticPlan,
+        error: checklist.allowed ? null : checklist.summary,
+        checklist: {
+          allowed: checklist.allowed,
+          passed: checklist.passed, total: checklist.total,
+          unknownCount: checklist.unknownCount,
+          results: checklist.results,
+          blockers: checklist.blockers,
+        },
+        note: checklist.allowed
+          ? (result.approved
+              ? '지금 이 순간이면 주문이 나갑니다 — 모든 관문을 통과했습니다'
+              : '관문은 전부 통과했습니다. 진입 조건(신호)만 아직 안 맞습니다 — 조건이 맞는 순간 주문이 나갑니다'
+                + (usedSyntheticPlan ? ' (계획 기반 항목은 지금 설정으로 만든 가상 계획으로 확인했습니다)' : ''))
+          : '이대로면 주문이 나가지 않습니다 — 아래 막힌 항목을 보세요',
+      }, { headers: { 'Cache-Control': 'no-store' } });
+    }
 
     if (!checklist.allowed) {
       // 오늘 하루를 돌려준다. 주문이 나가지 않았으므로 슬롯을 소모하면
@@ -607,10 +785,13 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 사용자가 부르는 경로는 ADMIN_SECRET이 있어야 진입 엔진(POST)을 부를
-  // 수 있다. 없으면 여기서 말한다 — 아래에서 401을 받고 '실패'로만 남으면
-  // 원인을 알 수 없다.
-  if (uid && !adminSecret) {
+  // ADMIN_SECRET이 없으면 진입 엔진(POST)을 부를 수 없다. **크론도 마찬가지다.**
+  //
+  // 예전에는 이 검사가 `uid &&`로 묶여 있어서 사용자 호출에서만 걸렸다.
+  // 크론(Bearer CRON_SECRET)으로 들어오면 그대로 통과해서, 빈 시크릿으로
+  // POST를 부르고 줄마다 401을 받았다. 화면에는 "실패"만 남고 왜 실패했는지는
+  // 어디에도 없었다 — 여기서 한 번 말하는 것이 열 줄의 401보다 낫다.
+  if (!adminSecret) {
     return NextResponse.json({
       ok: false, error: 'admin_secret_missing',
       message: 'ADMIN_SECRET이 없어 진입 엔진을 부를 수 없습니다 — Vercel에 넣고 재배포하세요',

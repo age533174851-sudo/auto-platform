@@ -49,6 +49,23 @@ export interface ModeCapability {
   autoTrade: boolean;
   /** 1회 주문 명목가 상한(USD). null이면 제한 없음 */
   maxNotionalUsd: number | null;
+  /**
+   * 자산 대비 명목가 상한(%). 실제 상한은 **둘 중 큰 쪽**이다.
+   *
+   * 왜 고정 금액만으로는 안 되나
+   * ──────────────────────────
+   * $100 고정 상한은 계좌가 $360일 때는 빡빡하고 $100,000일 때는
+   * 의미가 없다. 시드가 커지면 사용자가 상한을 손으로 올려야 하는데,
+   * 그러면 상한은 "안전장치"가 아니라 "귀찮은 것"이 되고 결국 꺼진다.
+   *
+   * 비율로 두면 자산과 함께 자란다. 그리고 이 비율이 곧 "한 번에
+   * 자산의 몇 배까지 걸 수 있나"다 — 2000%는 자산의 20배 명목가,
+   * 100배 배율이면 증거금 20%까지다.
+   *
+   * null이면 비율 상한 없음. 자산을 모르면 이 항목은 무시되고 고정
+   * 금액만 남는다 — **모르는 것을 유리하게 읽지 않는다.**
+   */
+  maxNotionalPctOfEquity: number | null;
   /** 사용자에게 보여줄 이름 */
   label: string;
 }
@@ -56,35 +73,46 @@ export interface ModeCapability {
 const CAP: Record<OperatingMode, ModeCapability> = {
   UI_DEMO: {
     sendsOrders: false, realMoney: false, needsLiveKey: false,
-    recordsIntent: false, autoTrade: false, maxNotionalUsd: 0,
+    recordsIntent: false, autoTrade: false,
+    maxNotionalUsd: 0, maxNotionalPctOfEquity: null,
     label: 'UI 데모 — 화면만',
   },
   PAPER: {
     sendsOrders: false, realMoney: false, needsLiveKey: false,
-    recordsIntent: true, autoTrade: false, maxNotionalUsd: null,
+    recordsIntent: true, autoTrade: false,
+    maxNotionalUsd: null, maxNotionalPctOfEquity: null,
     label: '모의매매 — 앱 내부 장부',
   },
   TESTNET: {
     sendsOrders: true, realMoney: false, needsLiveKey: false,
-    recordsIntent: true, autoTrade: true, maxNotionalUsd: null,
+    recordsIntent: true, autoTrade: true,
+    maxNotionalUsd: null, maxNotionalPctOfEquity: null,
     label: 'Testnet — 거래소 테스트넷 실주문',
   },
   SHADOW_LIVE: {
     // 핵심: 판단은 전부 하되 보내지 않는다.
     sendsOrders: false, realMoney: false, needsLiveKey: true,
-    recordsIntent: true, autoTrade: true, maxNotionalUsd: null,
+    recordsIntent: true, autoTrade: true,
+    maxNotionalUsd: null, maxNotionalPctOfEquity: null,
     label: 'Shadow Live — 실계좌 판단, 주문은 기록만',
   },
   LIVE_SMALL: {
     // 사람이 매번 확인한다. 자동으로 넘어가지 않는다.
     sendsOrders: true, realMoney: true, needsLiveKey: true,
-    recordsIntent: true, autoTrade: false, maxNotionalUsd: 100,
+    recordsIntent: true, autoTrade: false,
+    // 자산의 2배까지. $360이면 $720 — '소액'의 뜻이 계좌 크기에 따라
+    // 달라져야 한다. 고정 $100은 작은 계좌에는 과하고 큰 계좌에는 무의미했다.
+    maxNotionalUsd: 100, maxNotionalPctOfEquity: 200,
     label: '소액 실전 — 건마다 사람 확인',
   },
   LIVE_LIMITED: {
     sendsOrders: true, realMoney: true, needsLiveKey: true,
-    recordsIntent: true, autoTrade: true, maxNotionalUsd: 1000,
-    label: '제한 자동매매',
+    recordsIntent: true, autoTrade: true,
+    // 자산의 20배까지 = 100배 배율에서 증거금 20%까지. "100배로 10%씩
+    // 열 번"은 자산의 10배 명목가라 여기 들어온다. 20%를 넘으면
+    // '열 번 나눠 쓴다'가 아니게 되므로 거기서 자른다.
+    maxNotionalUsd: 1000, maxNotionalPctOfEquity: 2000,
+    label: '제한 자동매매 — 건별 확인 없이 나갑니다',
   },
 };
 
@@ -210,9 +238,46 @@ export interface OrderGate {
  * 다른 모든 검사를 통과했어도 여기서 막히면 나가지 않는다.
  * 모드는 가장 바깥 관문이다.
  */
+export interface GateOptions {
+  /**
+   * 계좌 자산(USD). 비율 상한을 계산할 때만 쓴다.
+   * **모르면 주지 말 것** — 0을 주면 비율 상한이 0이 되어 전부 막힌다.
+   */
+  equityUsd?: number | null;
+  /** 환경변수 등으로 명시적으로 올린 절대 상한(USD) */
+  overrideMaxNotionalUsd?: number | null;
+}
+
+/**
+ * 이 모드에서 이 주문의 명목가 상한은 얼마인가. null이면 상한 없음.
+ *
+ * 고정 금액과 자산 비율 중 **큰 쪽**을 쓴다. 작은 계좌는 고정 금액이
+ * 지켜 주고, 계좌가 커지면 비율이 따라 올라간다. 사용자가 상한을 손으로
+ * 올리게 만들면 그 상한은 결국 꺼진다.
+ */
+export function notionalCapOf(mode: OperatingMode, opts?: GateOptions): number | null {
+  const cap = CAP[mode];
+  if (cap.maxNotionalUsd === null) return null;
+
+  const candidates: number[] = [cap.maxNotionalUsd];
+
+  const eq = Number(opts?.equityUsd);
+  if (cap.maxNotionalPctOfEquity != null && Number.isFinite(eq) && eq > 0) {
+    candidates.push(eq * (cap.maxNotionalPctOfEquity / 100));
+  }
+
+  const ov = Number(opts?.overrideMaxNotionalUsd);
+  if (Number.isFinite(ov) && ov > 0) candidates.push(ov);
+
+  // UI_DEMO의 0은 '상한 0'이 맞다. 0을 max로 밀어 올리면 안 되므로
+  // 후보가 하나뿐일 때는 그대로 둔다.
+  return Math.max(...candidates);
+}
+
 export function gateOrder(
   mode: OperatingMode,
   notionalUsd: number,
+  opts?: GateOptions,
 ): OrderGate {
   const cap = CAP[mode];
 
@@ -232,11 +297,16 @@ export function gateOrder(
   }
 
   // 상한은 권고가 아니라 강제다. 넘으면 보내지 않는다.
-  if (cap.maxNotionalUsd !== null && notionalUsd > cap.maxNotionalUsd) {
+  const limit = notionalCapOf(mode, opts);
+  if (limit !== null && notionalUsd > limit) {
+    const eq = Number(opts?.equityUsd);
+    const byPct = cap.maxNotionalPctOfEquity != null && Number.isFinite(eq) && eq > 0
+      && eq * (cap.maxNotionalPctOfEquity / 100) >= limit;
     return {
       disposition: 'BLOCK', live: cap.realMoney, needsConfirmation: false,
-      reason: `${cap.label}의 1회 상한 $${cap.maxNotionalUsd}를 넘습니다 ` +
-              `(요청 $${notionalUsd.toFixed(2)})`,
+      reason: `${cap.label}의 1회 상한 $${limit.toFixed(2)}를 넘습니다 `
+        + `(요청 $${notionalUsd.toFixed(2)})`
+        + (byPct ? ` — 자산 $${eq.toFixed(2)}의 ${cap.maxNotionalPctOfEquity}%` : ''),
     };
   }
 

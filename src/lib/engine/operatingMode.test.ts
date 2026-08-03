@@ -5,7 +5,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parseMode, capability, canChangeMode, gateOrder, toLegacyMode, fromLegacyMode,
-  modeForDestination,
+  modeForDestination, notionalCapOf,
   LADDER, type OperatingMode, type ModeEvidence,
 } from './operatingMode';
 
@@ -186,5 +186,75 @@ export function runOperatingModeTests() {
     const g = gateOrder(m, 50);
     eq(g.needsConfirmation, true, '실제 돈인데 확인 없이 나간다');
     eq(g.live, true);
+  });
+
+  console.log('[운영 모드 — 상한이 자산과 함께 자라는가]');
+
+  // ── 왜 비율이어야 하나 ──
+  //
+  // 고정 $1,000 상한은 100배 전략의 명목가(자산의 10배)를 **계좌가
+  // 아무리 커져도** 막는다. $10,000 계좌의 10배는 $100,000이니까.
+  // 그러면 사용자가 상한을 손으로 올리게 되고, 손으로 올리는 상한은
+  // 결국 꺼진다. 자산에 붙여 두면 그럴 이유가 없어진다.
+  test('자산을 모르면 고정 상한만 남는다 — 유리하게 읽지 않는다', () => {
+    eq(notionalCapOf('LIVE_SMALL'), 100);
+    eq(notionalCapOf('LIVE_SMALL', { equityUsd: null }), 100);
+    eq(notionalCapOf('LIVE_LIMITED', { equityUsd: 0 }), 1000, '자산 0을 비율에 넣었다');
+  });
+
+  test('자산이 크면 상한도 크다', () => {
+    eq(notionalCapOf('LIVE_SMALL', { equityUsd: 1000 }), 2000);      // 자산의 200%
+    eq(notionalCapOf('LIVE_LIMITED', { equityUsd: 10_000 }), 200_000); // 자산의 2000%
+  });
+
+  test('자산이 작으면 고정 금액이 지켜 준다 — 둘 중 큰 쪽', () => {
+    eq(notionalCapOf('LIVE_SMALL', { equityUsd: 10 }), 100, '$10 계좌라고 상한이 $20이 되면 안 된다');
+    eq(notionalCapOf('LIVE_LIMITED', { equityUsd: 10 }), 1000);
+  });
+
+  test('상한 없는 모드는 그대로 없다', () => {
+    eq(notionalCapOf('TESTNET', { equityUsd: 1000 }), null);
+  });
+
+  test('UI 데모의 상한 0은 0으로 남는다 — 비율이 올려 주면 안 된다', () => {
+    eq(notionalCapOf('UI_DEMO', { equityUsd: 1_000_000 }), 0);
+    eq(gateOrder('UI_DEMO', 1, { equityUsd: 1_000_000 }).disposition, 'BLOCK');
+  });
+
+  // **이것이 내일 아침을 막을 뻔한 것이다.**
+  // $360 계좌, 증거금 10%, 100배 → 명목가 $3,600.
+  // 예전 고정 상한($1,000)에서는 실전 자동매매가 매일 BLOCK이었다.
+  test('$360 계좌의 100배 전략(명목가 $3,600)이 제한 자동매매를 통과한다', () => {
+    const g = gateOrder('LIVE_LIMITED', 3600, { equityUsd: 360 });
+    eq(g.disposition, 'SEND', g.reason);
+    eq(g.needsConfirmation, false, '예약으로 도는 모드가 사람 확인을 요구하면 크론이 못 낸다');
+  });
+
+  test('그래도 무한은 아니다 — 자산의 20배를 넘으면 막는다', () => {
+    const g = gateOrder('LIVE_LIMITED', 8000, { equityUsd: 360 });
+    eq(g.disposition, 'BLOCK', '증거금 20%를 넘는 명목가가 그대로 나갔다');
+    assert(g.reason.includes('360'), '왜 막혔는지 자산이 안 적혀 있다: ' + g.reason);
+  });
+
+  test('환경변수로 올린 상한도 반영된다', () => {
+    eq(notionalCapOf('LIVE_SMALL', { overrideMaxNotionalUsd: 5000 }), 5000);
+    eq(gateOrder('LIVE_SMALL', 3000, { overrideMaxNotionalUsd: 5000 }).disposition, 'SEND');
+  });
+
+  test('음수·NaN 덮어쓰기는 무시한다 — 상한이 사라지면 안 된다', () => {
+    eq(notionalCapOf('LIVE_SMALL', { overrideMaxNotionalUsd: -1 }), 100);
+    eq(notionalCapOf('LIVE_SMALL', { overrideMaxNotionalUsd: NaN }), 100);
+    eq(notionalCapOf('LIVE_SMALL', { equityUsd: NaN }), 100);
+  });
+
+  // ── 예약이 실제로 실행될 수 있는 모드인가 ──
+  //
+  // LIVE_SMALL은 정의상 건마다 사람이 확인한다. 크론에게는 확인해 줄
+  // 사람이 없으므로, 예약에 걸어 두면 매일 409로 끝난다. 화면은 '켜짐'인데
+  // 주문은 한 건도 안 나간다 — 이 저장소에서 제일 자주 나온 모양이다.
+  test('제한 자동매매만 사람 없이 돌 수 있다', () => {
+    eq(capability('LIVE_SMALL').autoTrade, false, 'LIVE_SMALL이 자동으로 돌면 확인의 의미가 없다');
+    eq(capability('LIVE_LIMITED').autoTrade, true, '예약으로 돌 수 있는 실전 모드가 하나도 없다');
+    eq(gateOrder('LIVE_LIMITED', 10, { equityUsd: 1000 }).needsConfirmation, false);
   });
 }

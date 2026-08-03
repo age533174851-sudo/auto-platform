@@ -42,6 +42,9 @@ export default function AutotradeControl() {
   const [data, setData] = useState<any>(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  // 점검 결과. **주문을 내지 않고** 진짜 관문을 끝까지 돌린 결과다.
+  const [check, setCheck] = useState<any>(null);
+  const [checking, setChecking] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [symbol, setSymbol] = useState('BTCUSDT');
@@ -112,6 +115,35 @@ export default function AutotradeControl() {
     return () => { alive = false; clearInterval(t); };
   }, [ticking, auth, load]);
 
+  /**
+   * **지금 눌러서 내일을 확인한다.**
+   *
+   * 예약을 켜 놓고 다음 날 아침을 기다렸다가 "안 됐네"를 아는 것은 너무
+   * 늦다. 이 버튼은 크론이 부르는 것과 **같은 경로**를 그대로 돌린다 —
+   * 모드 관문, 시계, 상태 대조, 마진 모드, 손실 한도, 서브계좌 한도까지.
+   * 마지막 주문만 안 낸다.
+   */
+  const runCheck = async () => {
+    setChecking(true); setCheck(null); setMsg(null);
+    try {
+      const r = await fetch('/api/autotrade/daily-ladder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          checkOnly: true, symbol, connectionId: connId,
+          mode: live ? 'LIVE_LIMITED' : 'TESTNET',
+          leverageCap: levCap === '' ? undefined : Number(levCap),
+          riskPct: riskPct === '' ? undefined : Number(riskPct),
+          marginPct: marginPct === '' ? undefined : Number(marginPct),
+        }),
+      });
+      const j = await r.json();
+      setCheck(j);
+      if (!j?.checklist) setMsg({ ok: false, text: errorTextOf(j, `점검 실패 (${r.status})`) });
+    } catch (e: any) { setMsg({ ok: false, text: `점검 실패 (${e?.message || e})` }); }
+    finally { setChecking(false); }
+  };
+
   const save = async (enabled: boolean) => {
     setBusy(true); setMsg(null);
     try {
@@ -119,7 +151,13 @@ export default function AutotradeControl() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
-          symbol, connectionId: connId, mode: live ? 'LIVE_SMALL' : 'TESTNET', enabled,
+          symbol, connectionId: connId,
+          // **LIVE_SMALL이 아니라 LIVE_LIMITED다.**
+          // LIVE_SMALL은 정의상 건마다 사람이 확인하는 모드라, 예약(크론)에
+          // 걸어 두면 매일 409로 끝난다 — 화면은 '켜짐'인데 주문은 한 건도
+          // 안 나간다. 예약은 사람이 없을 때 도는 것이므로, 켜는 순간에
+          // 한 번 확인받고(아래 확인창) 그 뒤로는 확인 없이 나가는 모드를 쓴다.
+          mode: live ? 'LIVE_LIMITED' : 'TESTNET', enabled,
           leverageCap: levCap === '' ? undefined : Number(levCap),
           riskPct: riskPct === '' ? undefined : Number(riskPct),
           marginPct: marginPct === '' ? undefined : Number(marginPct),
@@ -168,35 +206,13 @@ export default function AutotradeControl() {
   const lastRun = runs[0] || null;
   const conns: any[] = Array.isArray(data?.connections) ? data.connections : [];
 
-  // **한 줄로 답한다.** 조건을 따로 보여주면 넷 중 하나만 빠져도 아무 일이
-  // 안 일어나는데 화면에는 초록 셋과 회색 하나가 보인다.
-  let verdict: { tone: string; text: string; action: string };
-  if (err) verdict = { tone: T.ylw, text: '상태를 읽지 못했습니다', action: err };
-  else if (!data) verdict = { tone: T.muted, text: '읽는 중…', action: '' };
-  else if (on.length === 0) {
-    verdict = { tone: T.red, text: '자동매매가 꺼져 있습니다',
-      action: '아래에서 종목과 연결을 고르고 [자동매매 켜기]를 누르세요' };
-  } else if (on.some(s => !s.connection_id)) {
-    verdict = { tone: T.red, text: '연결이 없는 예약이 있습니다',
-      action: '실행돼도 주문을 낼 수 없습니다 — 다시 켜서 연결을 지정하세요' };
-  } else if (!data.adminSecretSet) {
-    verdict = { tone: T.red, text: 'ADMIN_SECRET이 없습니다',
-      action: '크론이 진입 엔진을 못 부르고 401로 끝납니다. Vercel에 넣고 **재배포**하세요' };
-  } else if (!data.cronSecretSet) {
-    verdict = { tone: T.red, text: 'CRON_SECRET이 없습니다',
-      action: 'Vercel 크론이 인증되지 않습니다. 넣고 **재배포**하세요' };
-  } else if (!lastRun) {
-    verdict = { tone: T.ylw, text: `켜져 있습니다 — 아직 한 번도 실행되지 않았습니다`,
-      action: '크론은 매일 23:00 UTC(한국 아침 8시)에 한 번 돕니다. 그 시각이 지난 뒤에도 비어 있으면 재배포를 확인하세요' };
-  } else if (lastRun.status === 'failed') {
-    verdict = { tone: T.red, text: '마지막 실행이 실패했습니다', action: lastRun.detail || '' };
-  } else {
-    verdict = { tone: T.grn, text: `켜져 있고 실제로 돌고 있습니다`,
-      action: `마지막 실행 ${fmt(lastRun.started_at)} · ${lastRun.status}${lastRun.detail ? ` — ${lastRun.detail}` : ''}` };
-  }
-
-  // 항목별 점검. 판정 로직은 순수 함수가 한다 — 화면마다 다르게 읽으면
-  // 같은 상태가 화면에 따라 다르게 보인다.
+  // 항목별 점검. **판정은 순수 함수 한 곳에서만 한다.**
+  //
+  // 예전에는 이 파일이 한 줄 판정을 따로 계산했다. 그 계산은 마지막 실행이
+  // ok이기만 하면 초록으로 "켜져 있고 실제로 돌고 있습니다"라고 적었는데,
+  // 아래 점검 목록은 같은 순간에 "실거래가 잠겨 있습니다"를 빨갛게 띄우고
+  // 있었다. **같은 상태를 두 곳에서 다르게 읽은 것이다.** 사람은 큰 글씨를
+  // 믿는다. 그래서 판정은 하나만 남긴다.
   const health = autotradeHealth({
     nowMs: Date.now(),
     schedules: schedules as any,
@@ -204,8 +220,28 @@ export default function AutotradeControl() {
     runsError: data?.runsError || null,
     tableMissing: data?.error === 'table_missing',
     adminSecretSet: data?.adminSecretSet,
+    cronSecretSet: data?.cronSecretSet,
+    liveUnlocked: data?.liveUnlocked,
+    marginColumnPresent: data?.marginColumnPresent ?? null,
+    connections: (data?.connections || []) as any,
     cronUtcHour: data?.cronUtcHour ?? null,
   });
+
+
+  // 화면 상태(읽는 중·읽기 실패)만 여기서 더한다 — 그건 점검 함수가 모르는
+  // 것이고, 서버 상태에 대한 판단이 아니다.
+  let verdict: { tone: string; text: string; action: string };
+  if (err) verdict = { tone: T.ylw, text: '상태를 읽지 못했습니다', action: err };
+  else if (!data) verdict = { tone: T.muted, text: '읽는 중…', action: '' };
+  else {
+    const anyBad = health.items.some(i => i.state === 'bad');
+    verdict = {
+      tone: anyBad ? T.red : health.running === true ? T.grn : T.ylw,
+      text: health.verdict,
+      action: health.nextAction
+        || (lastRun ? `마지막 실행 ${fmt(lastRun.started_at)} · ${lastRun.status}${lastRun.detail ? ` — ${lastRun.detail}` : ''}` : ''),
+    };
+  }
 
   return (
     <div style={box}>
@@ -388,6 +424,46 @@ export default function AutotradeControl() {
           fontSize: 11.5, fontWeight: 800,
         }}>{ticking ? '자주 보기 켜짐 — 끄기' : '이 화면이 열려 있는 동안 자주 보기'}</button>
 
+        {/* ── 지금 눌러서 내일을 확인한다 ──
+            켜 놓고 다음 날 아침에 "안 됐네"를 아는 것은 너무 늦다. */}
+        <button onClick={runCheck} disabled={checking || !connId} style={{
+          minHeight: 36, borderRadius: 8, cursor: checking || !connId ? 'default' : 'pointer',
+          background: A(T.ylw, '14'), color: T.ylw, border: `1px solid ${A(T.ylw, '40')}`,
+          fontSize: 11.5, fontWeight: 800,
+        }}>{checking ? '점검 중…' : '지금 점검하기 (주문은 안 냅니다)'}</button>
+
+        {check?.checklist && (
+          <div style={{
+            background: A(check.checklist.allowed ? T.grn : T.red, '10'),
+            border: `1px solid ${A(check.checklist.allowed ? T.grn : T.red, '35')}`,
+            borderRadius: 10, padding: '10px 11px',
+          }}>
+            <div style={{ color: check.checklist.allowed ? T.grn : T.red, fontWeight: 800, fontSize: 12 }}>
+              {check.checklist.allowed ? '통과' : '막힘'} · {check.checklist.passed}/{check.checklist.total}
+              {check.checklist.unknownCount > 0 && ` · 확인 못 함 ${check.checklist.unknownCount}`}
+            </div>
+            {check.note && (
+              <div style={{ color: T.muted, fontSize: 10.5, marginTop: 4, lineHeight: 1.6 }}>{check.note}</div>
+            )}
+            <div style={{ marginTop: 7 }}>
+              {(check.checklist.results || []).map((r: any) => (
+                <div key={r.id} style={{ display: 'flex', gap: 6, alignItems: 'baseline', padding: '3px 0' }}>
+                  <span style={{ fontSize: 10 }}>
+                    {r.status === 'pass' ? '✅' : r.status === 'fail' ? '❌' : r.status === 'warn' ? '⚠️' : '❔'}
+                  </span>
+                  <span style={{ color: T.txt, fontSize: 10.5, fontWeight: 700, minWidth: 108 }}>{r.label}</span>
+                  <span style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.5, flex: 1 }}>{r.detail}</span>
+                </div>
+              ))}
+            </div>
+            {check.syntheticPlan && (
+              <div style={{ color: T.muted, fontSize: 10, marginTop: 6, lineHeight: 1.55 }}>
+                지금은 진입 신호가 없어서, 계획이 필요한 항목은 <b style={{ color: T.txt }}>지금 설정으로 만든 가상 계획</b>으로 확인했습니다.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* **상한이지 목표가 아니다.** 이걸 안 적으면 '100배로 나간다'로 읽는다. */}
         <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.6 }}>
           배율은 <b style={{ color: T.txt }}>손절 거리에서 역산</b>되고 이 상한에서 잘립니다 —
@@ -429,8 +505,10 @@ export default function AutotradeControl() {
               <b style={{ color: T.red }}>실전은 사람이 안 보는 동안 진짜 돈이 나갑니다.</b>{' '}
               고른 연결이 <b style={{ color: T.txt }}>실계좌</b>여야 켜집니다 — 테스트넷 연결을
               고르면 서버가 거부합니다.
-              <br/>건당 명목가 <b style={{ color: T.txt }}>$100</b> 상한이 걸립니다(LIVE_SMALL).
-              그 이상은 승급이 필요합니다.
+              <br/>건당 명목가 상한은 <b style={{ color: T.txt }}>자산의 20배</b>(최소 $1,000)입니다.
+              100배 배율이면 증거금 20%까지가 그 안입니다 — "10%씩 열 번"은 여기 들어옵니다.
+              <br/>서버에 <b style={{ color: T.txt }}>ALLOW_LIVE_TRADING=true</b>가 없으면 실전 예약은
+              매번 거부됩니다. 아래 점검 목록이 그걸 확인해 줍니다.
             </>
           ) : (
             <>
@@ -456,9 +534,10 @@ export default function AutotradeControl() {
               const ok = await confirmDialog([
                 `${symbol} 자동매매를 **실전**으로 켭니다.`,
                 '',
-                '이제부터 사람이 안 보는 동안 진짜 돈으로 주문이 나갑니다.',
-                `배율 상한 ${levCap || '기본'}배 · 1회 위험 ${riskPct || '기본'}%`,
-                '건당 명목가 $100 상한이 걸립니다.',
+                '이제부터 사람이 안 보는 동안 **건별 확인 없이** 진짜 돈으로 주문이 나갑니다.',
+                `배율 상한 ${levCap || '기본'}배 · 1회 위험 ${riskPct || '기본'}% · 1회 증거금 ${marginPct || '기본'}%`,
+                '건당 명목가 상한은 자산의 20배(최소 $1,000)입니다.',
+                '지금 누르는 이 확인이, 앞으로 나갈 모든 주문에 대한 확인입니다.',
                 '',
                 '되돌리려면 이 화면에서 스위치를 끄면 됩니다.',
               ].join('\n'), { danger: true });

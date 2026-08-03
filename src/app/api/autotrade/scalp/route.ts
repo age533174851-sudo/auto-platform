@@ -217,7 +217,7 @@ export async function POST(req: NextRequest) {
   //
   // 다른 검사를 다 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥
   // 관문이고, SEND가 아니면 **주문을 만들지 않는다.**
-  const modeGate = gateOrder(opMode, plan.positionSize ?? 0);
+  const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
   if (modeGate.disposition !== 'SEND') {
     return NextResponse.json({
       ...base, executed: false, blocked: 'MODE_GATE',

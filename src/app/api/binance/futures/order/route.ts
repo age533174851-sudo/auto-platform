@@ -178,7 +178,35 @@ export async function POST(req: NextRequest) {
     // 순간 그렇게 되고, 그 실수는 실제 돈으로만 드러난다.
     const envMode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
     const mode = modeForDestination(envMode, conn.is_testnet === false);
-    const g = gateOrder(mode, notionalUsd);
+
+    // ── 자산을 관문보다 **먼저** 읽는다 ──
+    //
+    // 1회 명목가 상한이 자산에 붙어 있다(고정 금액과 비율 중 큰 쪽).
+    // 자산을 모른 채 관문을 지나면 고정 금액만 남고, 100배 주문은
+    // 계좌가 아무리 커도 매번 막힌다. 못 읽으면 null로 둔다 —
+    // **0으로 두면 비율 상한이 0이 되어 전부 막힌다.**
+    let availableUsd: number | null = null;
+    try {
+      const { data: cBal } = await (sb.from('exchange_connections') as any)
+        .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
+      if (cBal) {
+        const { decryptSecret } = await import('@/lib/exchanges/crypto');
+        const bal: any = await bf.getFuturesBalance(
+          cBal.api_key, decryptSecret(cBal.api_secret_enc ?? cBal.encrypted_secret ?? ''), useTestnet);
+        if (bal?.success) {
+          const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
+          if (usdt && Number.isFinite(Number(usdt.availableBalance))) {
+            availableUsd = Number(usdt.availableBalance);
+          }
+        }
+      }
+    } catch { /* null로 남는다 — 고정 상한만 적용된다 */ }
+
+    const envNotionalCap = Number(process.env.LIVE_MAX_NOTIONAL_USD);
+    const g = gateOrder(mode, notionalUsd, {
+      equityUsd: availableUsd,
+      overrideMaxNotionalUsd: Number.isFinite(envNotionalCap) && envNotionalCap > 0 ? envNotionalCap : null,
+    });
 
     // 필요 증거금 = 명목가 / 배율. 기준가나 배율을 모르면 **계산하지 않는다** —
     // 0으로 두면 "필요 0 / 가용 N"이 되어 무조건 통과하는 껍데기 체크가 된다.
@@ -186,21 +214,10 @@ export async function POST(req: NextRequest) {
     if (!isExit) {
       const lev = Number(leverage ?? risk?.leverage ?? 0);
       if (refPrice && Number.isFinite(lev) && lev > 0) {
-        let available: number | null = null;
-        try {
-          const { data: c3 } = await (sb.from('exchange_connections') as any)
-            .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
-          if (c3) {
-            const { decryptSecret } = await import('@/lib/exchanges/crypto');
-            const bal: any = await bf.getFuturesBalance(
-              c3.api_key, decryptSecret(c3.api_secret_enc ?? c3.encrypted_secret ?? ''), useTestnet);
-            if (bal?.success) {
-              const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
-              if (usdt) available = usdt.availableBalance;
-            }
-          }
-        } catch { /* available은 null로 남는다 → unknown → 막힌다 */ }
-        marginInput = { required: notionalUsd / lev, available };
+        // 관문 앞에서 이미 읽었다. 여기서 또 부르면 레이트리밋을 두 배로
+        // 쓰고, 두 조회 사이에 값이 달라져 관문과 증거금 검사가 서로 다른
+        // 잔고를 보게 된다. 못 읽었으면 null 그대로 → unknown → 막힌다.
+        marginInput = { required: notionalUsd / lev, available: availableUsd };
       }
     }
 

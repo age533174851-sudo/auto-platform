@@ -220,7 +220,7 @@ export async function POST(req: NextRequest) {
     const serverMs = await dapi.getCoinMServerTime(testnet);
 
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
-    const g = gateOrder(mode, notionalUsd);
+    const g = gateOrder(mode, notionalUsd, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
 
     // 손실 잠금 셋. **이 라우트도 넣은 적이 없어서 진입이 전부 막혀 있었다**
     // (현물 라우트와 같은 자리, 같은 이유).

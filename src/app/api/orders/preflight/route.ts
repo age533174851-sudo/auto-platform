@@ -69,6 +69,13 @@ export async function POST(req: NextRequest) {
     // 하루치 슬롯이 예약된다 (preflight.ts 주석 참조).
     alreadyTradedToday: typeof body?.alreadyTradedToday === 'boolean'
       ? body.alreadyTradedToday : null,
+    // 1회 명목가 상한이 자산에 붙어 있다. 안 넘기면 **미리보기와 실제
+    // 주문이 다른 상한을 쓴다** — 미리보기 통과가 통과를 뜻하지 않게 된다.
+    equityUsd: num(body?.equityUsd),
+    overrideMaxNotionalUsd: (() => {
+      const n = Number(process.env.LIVE_MAX_NOTIONAL_USD);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })(),
   });
 
   const verdict = runChecklist(input);
