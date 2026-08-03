@@ -40,7 +40,17 @@ export async function GET(req: NextRequest) {
     // 요청이 나간다. 진입 손절을 기준으로 본 판정이라는 사실은 아래
     // `liveStopKnown: false`로 그대로 적는다. **모르는 것을 아는 척하지
     // 않으면 화면이 덜 유용해도 틀리지는 않는다.**
-    decisions = await decideExits(sb, { testnet, cfg, userId: uid });
+    // 망은 **이 사용자의 연결**이 정한다. 환경변수로 정하면 실계좌
+    // 포지션을 테스트넷 시세로 판정해서, 화면이 실제와 다른 상태를
+    // 보여준다 — 청산 감시 크론에서 같은 결함을 방금 고쳤다.
+    const testnetFor = async (u: string): Promise<boolean | null> => {
+      try {
+        const { data: c } = await (sb as any).from('exchange_connections')
+          .select('is_testnet').eq('user_id', u).eq('is_active', true).limit(1).maybeSingle();
+        return c ? (c as any).is_testnet !== false : null;
+      } catch { return null; }
+    };
+    decisions = await decideExits(sb, { testnet, testnetFor, cfg, userId: uid });
   } catch (e: any) {
     error = String(e?.message || e);
   }

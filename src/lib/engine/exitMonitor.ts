@@ -77,7 +77,23 @@ export async function highWaterSince(
 export async function decideExits(
   sb: any,
   opts: {
-    testnet: boolean; maxHoldMs?: number; limit?: number;
+    /**
+     * 어느 망의 시세로 판단할 것인가 — **기본값일 뿐이다.**
+     *
+     * 실제로는 그 포지션을 들고 있는 연결이 정한다. 아래 testnetFor를
+     * 넘기면 거래마다 그 연결의 is_testnet을 따른다.
+     */
+    testnet: boolean;
+    /**
+     * 이 사용자의 포지션이 어느 망에 있는가.
+     *
+     * **이게 없어서 사고가 날 뻔했다.** 예전에는 환경변수 하나(LADDER_MODE)로
+     * 전부 정했다. 진입은 연결을 따라 실계좌로 나가는데 청산 감시는
+     * 테스트넷 시세로 판단하게 되고, 그러면 트레일링도 시간 청산도
+     * 실제 포지션에 닿지 않는다. **못 여는 것은 불편이고 못 닫는 것은 사고다.**
+     */
+    testnetFor?: (userId: string) => Promise<boolean | null>;
+    maxHoldMs?: number; limit?: number;
     /**
      * 심볼별로 **거래소에 지금 걸려 있는** 손절가.
      *
@@ -136,9 +152,20 @@ export async function decideExits(
       continue;
     }
 
-    const hw = await highWaterSince(t.symbol, openedAt, entry, stop, isLong, opts.testnet);
+    // 이 거래가 실제로 어느 망에 있는가. 못 알아내면 기본값을 쓰되,
+    // 그건 '모르는 것'이므로 아래 사유에 적힌다.
+    let tnet = opts.testnet;
+    let tnetKnown = true;
+    if (opts.testnetFor) {
+      const r = await opts.testnetFor(String(t.user_id));
+      if (r == null) tnetKnown = false; else tnet = r;
+    }
+
+    const hw = await highWaterSince(t.symbol, openedAt, entry, stop, isLong, tnet);
     if (!hw) {
-      out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry, reason: '캔들 조회 실패 — 이번 주기 건너뜀' });
+      out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,
+        reason: '캔들 조회 실패 — 이번 주기 건너뜀'
+          + (tnetKnown ? '' : ' (이 거래의 연결을 못 읽어 기본 망으로 조회했습니다)') });
       continue;
     }
 
