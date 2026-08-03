@@ -42,6 +42,14 @@ export interface PreflightOptions {
    * 이 항목은 막지 않는다.
    */
   alreadyTradedToday?: boolean | null;
+  /**
+   * 계좌 자산(USD). 1회 명목가 상한이 자산에 붙어 있으므로, 이걸 안 넘기면
+   * **미리보기와 실제 관문이 다른 상한을 쓴다** — 미리보기는 통과인데
+   * 주문은 막히거나, 그 반대가 된다. 모르면 넘기지 말 것(0은 금물).
+   */
+  equityUsd?: number | null;
+  /** 환경변수로 올린 절대 상한(USD) */
+  overrideMaxNotionalUsd?: number | null;
 }
 
 export async function collectChecklistInput(opts: PreflightOptions): Promise<ChecklistInput> {
@@ -55,7 +63,10 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
   // 1. 운영 모드 — 순수 함수라 실패할 수 없다
   try {
     const { gateOrder } = await import('./operatingMode');
-    const g = gateOrder(mode, notionalUsd);
+    const g = gateOrder(mode, notionalUsd, {
+      equityUsd: opts.equityUsd ?? null,
+      overrideMaxNotionalUsd: opts.overrideMaxNotionalUsd ?? null,
+    });
     input.mode = { disposition: g.disposition, reason: g.reason };
   } catch {
     /* 넣지 않는다 → unknown */

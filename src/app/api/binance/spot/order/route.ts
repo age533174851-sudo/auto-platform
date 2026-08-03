@@ -95,7 +95,7 @@ export async function POST(req: NextRequest) {
     const localMs = Date.now();
     const serverMs = await readServerTime(spotTestnet);
     const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
-    const g = gateOrder(mode, notional);
+    const g = gateOrder(mode, notional, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
 
     // 손실 잠금 셋(오늘·이번 주·연패).
     //

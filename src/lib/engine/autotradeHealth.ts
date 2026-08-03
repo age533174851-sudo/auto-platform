@@ -52,6 +52,14 @@ export interface HealthInput {
   tableMissing?: boolean;
   /** 서버에 ADMIN_SECRET이 있는가. **값은 절대 받지 않는다** */
   adminSecretSet?: boolean;
+  /** 서버에 CRON_SECRET이 있는가. 없으면 Vercel 크론이 401을 받는다 */
+  cronSecretSet?: boolean;
+  /** ALLOW_LIVE_TRADING이 켜져 있는가. 실전 예약이 있을 때만 의미가 있다 */
+  liveUnlocked?: boolean;
+  /** margin_pct 칸이 있는가 (마이그레이션 036). null이면 확인 못 함 */
+  marginColumnPresent?: boolean | null;
+  /** 켜진 예약의 연결 정보 — 모드와 목적지가 맞는지 본다 */
+  connections?: Array<{ id?: string | null; is_testnet?: boolean | null }> | null;
   /** 크론이 도는 UTC 시각 */
   cronUtcHour?: number | null;
   /** 지금 시각 (ms). 테스트가 시계를 고정할 수 있어야 한다 */
@@ -170,6 +178,86 @@ export function autotradeHealth(input: HealthInput): HealthReport {
       'Vercel → Settings → Environment Variables에 ADMIN_SECRET을 넣고 재배포하세요'));
   } else {
     items.push(item('secret', '자동 실행 열쇠', 'unknown', '확인하지 못했습니다', ''));
+  }
+
+  // ── 4-b) 크론 열쇠 ──
+  //
+  // Vercel 크론은 Bearer CRON_SECRET으로 들어온다. 없으면 매일 401을
+  // 받고 아무 일도 안 일어난다. ADMIN_SECRET과 **다른 값이고 둘 다 필요하다.**
+  if (input.cronSecretSet === false) {
+    items.push(item('cronsecret', '크론 열쇠', 'bad',
+      'CRON_SECRET이 없어 Vercel 크론이 인증되지 않습니다',
+      'Vercel → Settings → Environment Variables에 CRON_SECRET을 넣고 재배포하세요'));
+  } else if (input.cronSecretSet === true) {
+    items.push(item('cronsecret', '크론 열쇠', 'ok', '설정돼 있습니다'));
+  }
+
+  // ── 4-c) 실전 예약이라면 ──
+  //
+  // 여기가 이번에 가장 조용했던 구멍이다. 아래 셋 중 하나라도 어긋나면
+  // **설정은 전부 초록인데 실전 주문이 한 건도 안 나간다.**
+  const liveRows = on.filter(r => {
+    const m = String(r?.mode || '').toUpperCase();
+    return m.startsWith('LIVE') || m === 'SHADOW_LIVE';
+  });
+
+  if (liveRows.length > 0) {
+    // (1) 실거래 잠금. 이게 안 풀려 있으면 진입 엔진이 403으로 끝난다.
+    if (input.liveUnlocked === true) {
+      items.push(item('livelock', '실거래 잠금', 'ok', '풀려 있습니다 (ALLOW_LIVE_TRADING)'));
+    } else if (input.liveUnlocked === false) {
+      items.push(item('livelock', '실거래 잠금', 'bad',
+        '실거래가 잠겨 있어 실전 예약이 매번 403으로 끝납니다',
+        'Vercel에 ALLOW_LIVE_TRADING=true를 넣고 재배포하세요'));
+    } else {
+      items.push(item('livelock', '실거래 잠금', 'unknown', '확인하지 못했습니다', ''));
+    }
+
+    // (2) 크론이 실제로 주문을 낼 수 있는 모드인가.
+    //     LIVE_SMALL은 정의상 건마다 사람이 눌러야 한다. 예약에 걸어 두면
+    //     매일 409로 끝나고, 화면에는 '켜짐'만 보인다.
+    const needConfirm = liveRows.filter(r => String(r?.mode || '').toUpperCase() === 'LIVE_SMALL');
+    if (needConfirm.length > 0) {
+      items.push(item('automode', '자동 실행 가능 모드', 'bad',
+        `${needConfirm.length}건이 LIVE_SMALL입니다 — 건마다 사람 확인이 필요한 모드라 예약으로는 주문이 나가지 않습니다`,
+        '자동 화면에서 실전 스위치를 다시 저장하세요 (제한 자동매매로 바뀝니다) — 또는 매매 화면에서 직접 주문하세요'));
+    } else {
+      items.push(item('automode', '자동 실행 가능 모드', 'ok',
+        `${liveRows.length}건이 확인 없이 실행 가능한 모드입니다`));
+    }
+
+    // (3) 모드와 연결의 목적지가 맞는가.
+    //     실전 모드 + 테스트넷 연결이면 주문이 테스트넷으로 새고,
+    //     반대면 실계좌 키로 데모 서버를 두드려 전부 실패한다(-2015).
+    const connMap = new Map<string, boolean | null>();
+    for (const c of (input.connections || [])) {
+      if (c?.id) connMap.set(String(c.id), c.is_testnet === false);
+    }
+    if (connMap.size === 0) {
+      items.push(item('dest', '연결 목적지', 'unknown', '연결 정보를 확인하지 못했습니다', ''));
+    } else {
+      const bad2 = liveRows.filter(r => {
+        const isLive = r?.connection_id ? connMap.get(String(r.connection_id)) : undefined;
+        return isLive === false;   // 실전 모드인데 테스트넷 연결
+      });
+      items.push(bad2.length === 0
+        ? item('dest', '연결 목적지', 'ok', '실전 모드에 실전 연결이 걸려 있습니다')
+        : item('dest', '연결 목적지', 'bad',
+            `${bad2.length}건이 실전 모드인데 테스트넷 연결입니다 (${bad2.map(r => r?.symbol || '?').join(', ')})`,
+            '자동 화면에서 실전 연결을 고르세요 — 지금은 주문이 테스트넷으로 나갑니다'));
+    }
+  }
+
+  // ── 4-d) 증거금 칸 ──
+  //
+  // margin_pct가 없으면 증거금 예산이 가용 전액이 되고, 배율은 낮게
+  // 역산된다. 화면에 100을 넣어도 5배가 나간다 — 에러 없이.
+  if (input.marginColumnPresent === false) {
+    items.push(item('margincol', '1회 증거금 칸', 'bad',
+      'margin_pct 칸이 없어 배율이 낮게 역산됩니다 (화면에 100을 넣어도 그대로 안 나갑니다)',
+      'Supabase SQL Editor에서 마이그레이션 036을 적용하세요'));
+  } else if (input.marginColumnPresent === true) {
+    items.push(item('margincol', '1회 증거금 칸', 'ok', '있습니다 (마이그레이션 036 적용됨)'));
   }
 
   // ── 5) **실제로 돌았는가** ──

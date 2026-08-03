@@ -167,4 +167,106 @@ export function runAutotradeHealthTests() {
     // 여러 줄을 한꺼번에 던지면 사람은 아무것도 안 한다.
     assert(!r.nextAction.includes('\n'), '한 번에 여러 개를 시켰다');
   });
+
+  // ══ 실전 예약 — 설정이 전부 초록인데 한 건도 안 나가던 것들 ══
+  //
+  // 아래 셋은 전부 같은 모양이다. 화면은 "켜짐"이고 점검은 전부 ✅인데,
+  // 진입 엔진이 매일 403/409/-2015로 끝난다. 그 사실이 화면 어디에도
+  // 없으면 사용자는 내일 아침에야 안 됐다는 것을 안다.
+  const liveGood = (over: any = {}) => good({
+    schedules: [{ symbol: 'BTCUSDT', enabled: true, connection_id: 'c1', mode: 'LIVE_LIMITED',
+                  last_run_at: iso(NOW - 3600_000), last_result: '진입 안 함' }],
+    connections: [{ id: 'c1', is_testnet: false }],
+    liveUnlocked: true, cronSecretSet: true, marginColumnPresent: true,
+    ...over,
+  });
+
+  const find = (r: any, id: string) => r.items.find((i: any) => i.id === id);
+
+  test('실전 예약이 다 맞으면 새 항목들이 전부 통과한다', () => {
+    const r = autotradeHealth(liveGood());
+    for (const id of ['livelock', 'automode', 'dest', 'margincol', 'cronsecret']) {
+      eq(find(r, id)?.state, 'ok', `${id}가 통과가 아니다: ${JSON.stringify(find(r, id))}`);
+    }
+    eq(r.running, true);
+  });
+
+  // ① ALLOW_LIVE_TRADING — 진입 엔진이 403으로 끝난다
+  test('실거래가 잠겨 있으면 막힌 것으로 적는다', () => {
+    const r = autotradeHealth(liveGood({ liveUnlocked: false }));
+    eq(find(r, 'livelock').state, 'bad');
+    assert(find(r, 'livelock').action.includes('ALLOW_LIVE_TRADING'),
+      '무엇을 넣어야 하는지 안 적었다');
+    assert(r.verdict.includes('돌지 않습니다'), r.verdict);
+  });
+
+  test('실거래 잠금을 확인 못 했으면 통과로도 고장으로도 적지 않는다', () => {
+    eq(find(autotradeHealth(liveGood({ liveUnlocked: undefined })), 'livelock').state, 'unknown');
+  });
+
+  // 테스트넷 예약에는 이 항목이 아예 없어야 한다 — 상관없는 빨간 줄을
+  // 띄우면 사용자가 점검 목록을 안 믿게 된다.
+  test('테스트넷 예약에는 실전 항목이 안 뜬다', () => {
+    const r = autotradeHealth(good({
+      schedules: [{ symbol: 'BTCUSDT', enabled: true, connection_id: 'c1', mode: 'TESTNET' }],
+      liveUnlocked: false,
+    }));
+    eq(find(r, 'livelock'), undefined, '테스트넷인데 실거래 잠금을 따졌다');
+    eq(find(r, 'automode'), undefined);
+  });
+
+  // ② LIVE_SMALL — 크론에게는 확인해 줄 사람이 없다
+  test('LIVE_SMALL 예약은 크론으로 못 돈다고 말한다', () => {
+    const r = autotradeHealth(liveGood({
+      schedules: [{ symbol: 'BTCUSDT', enabled: true, connection_id: 'c1', mode: 'LIVE_SMALL',
+                    last_run_at: iso(NOW - 3600_000) }],
+    }));
+    eq(find(r, 'automode').state, 'bad');
+    assert(find(r, 'automode').detail.includes('사람 확인'), find(r, 'automode').detail);
+  });
+
+  // ③ 모드와 연결의 목적지 — -2015의 뿌리
+  test('실전 모드에 테스트넷 연결이면 막힌 것으로 적는다', () => {
+    const r = autotradeHealth(liveGood({ connections: [{ id: 'c1', is_testnet: true }] }));
+    eq(find(r, 'dest').state, 'bad');
+    assert(find(r, 'dest').detail.includes('BTCUSDT'), '어느 예약인지 안 적었다');
+  });
+
+  test('연결 정보를 못 읽었으면 목적지를 판정하지 않는다', () => {
+    eq(find(autotradeHealth(liveGood({ connections: [] })), 'dest').state, 'unknown');
+  });
+
+  // ④ 마이그레이션 036 — 배율이 조용히 낮아지던 것
+  test('margin_pct 칸이 없으면 그 사실과 마이그레이션 번호를 적는다', () => {
+    const r = autotradeHealth(liveGood({ marginColumnPresent: false }));
+    eq(find(r, 'margincol').state, 'bad');
+    assert(find(r, 'margincol').action.includes('036'), find(r, 'margincol').action);
+  });
+
+  test('칸이 있는지 확인 못 했으면 아예 안 적는다 — 있다고도 없다고도 안 한다', () => {
+    eq(find(autotradeHealth(liveGood({ marginColumnPresent: null })), 'margincol'), undefined);
+  });
+
+  // ⑤ CRON_SECRET — 없으면 Vercel 크론이 매일 401
+  test('CRON_SECRET이 없으면 막힌 것으로 적는다', () => {
+    const r = autotradeHealth(good({ cronSecretSet: false }));
+    eq(find(r, 'cronsecret').state, 'bad');
+    assert(find(r, 'cronsecret').action.includes('CRON_SECRET'), find(r, 'cronsecret').action);
+  });
+
+  test('CRON_SECRET을 안 물어봤으면 줄을 만들지 않는다', () => {
+    eq(find(autotradeHealth(good()), 'cronsecret'), undefined);
+  });
+
+  // 여러 개가 동시에 막혀도 할 일은 하나다.
+  test('실전 항목이 여럿 막혀도 다음 할 일은 하나다', () => {
+    const r = autotradeHealth(liveGood({
+      liveUnlocked: false, marginColumnPresent: false,
+      connections: [{ id: 'c1', is_testnet: true }],
+    }));
+    assert(r.nextAction.length > 0);
+    assert(!r.nextAction.includes('\n'), '한 번에 여러 개를 시켰다');
+    eq(r.running, true, '실행 기록은 있는데 안 돌았다고 했다');
+    assert(r.verdict.includes('돌지 않습니다'), '막힌 게 있는데 정상이라고 했다: ' + r.verdict);
+  });
 }

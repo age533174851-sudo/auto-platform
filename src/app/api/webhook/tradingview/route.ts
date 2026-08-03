@@ -311,7 +311,7 @@ export async function POST(req: NextRequest) {
       const refPrice = px > 0 ? px : (risk?.markPrice ?? null);
       const notionalUsd = refPrice ? qty * refPrice : 0;
       const opMode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
-      const g = gateOrder(opMode, notionalUsd);
+      const g = gateOrder(opMode, notionalUsd, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
 
       let marginInput: { required: number | null; available: number | null } | null = null;
       if (!isExit && refPrice && levNum > 0) {

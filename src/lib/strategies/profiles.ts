@@ -28,6 +28,50 @@ export interface StrategyProfile {
   dailyLossLimitPct: number; // 이 전략 계좌의 하루 손실 한도 (%) → 초과 시 프로필 킬스위치
   maxHoldSec:      number;   // 최대 보유시간 (초) — 초과 시 청산 고려 (0 = 무제한)
   maxOpenPositions: number;
+
+  // ── 모의 시뮬 전용 칸 ────────────────────────────────────
+  // 아래 값은 **거래소에 나가지 않는다.** 성적표 화면(StrategyProfilesPanel)이
+  // 모의 계좌를 돌릴 때만 쓴다. 실주문 경로는 이 칸을 읽지 않는다.
+
+  /** 모의 계좌 통화. 없으면 KRW. */
+  simCurrency?:    'KRW' | 'USD';
+  /** 모의 시드. 없으면 기본값(1천만원). */
+  simSeed?:        number;
+  /** **이 금액에 닿으면 한 회차가 끝난다.** 없으면 목표 없음(횟수로만 돈다). */
+  simTargetEquity?: number;
+  /** 모의 체결가. 통화에 맞는 값이어야 수량이 말이 된다. */
+  simPrice?:       number;
+  /**
+   * 한 건이 잡아먹는 **모의 시간**(초).
+   *
+   * 이게 왜 필요한가: 하루 손실 한도는 '하루'가 있어야 리셋된다. 그런데
+   * 시뮬 1000건은 실제로는 1초 만에 끝나서 벽시계로는 전부 같은 날이다.
+   * 그러면 12건쯤에서 한도가 차고 영영 안 풀린다 — 실제로는 며칠에 걸쳐
+   * 나눠 일어날 일인데도. 그래서 모의 시계를 따로 돌린다.
+   *
+   * 없으면 maxHoldSec을 쓰고, 그것도 0(무제한)이면 하루로 친다.
+   */
+  simHoldSec?:     number;
+  /** 테이커 수수료(한쪽, 명목가 대비 %). 없으면 바이낸스 선물 기본 0.045. */
+  takerFeePct?:    number;
+}
+
+/** 모의 한 건이 잡아먹는 시간. 무제한 보유 프로필은 '한 건 = 하루'로 가정한다. */
+export function simHoldSecOf(p: StrategyProfile): number {
+  if (p.simHoldSec > 0) return p.simHoldSec;
+  if (p.maxHoldSec > 0) return p.maxHoldSec;
+  return 86400;
+}
+
+/** 모의 시드. 통화는 simCurrency가 정한다. */
+export function simSeedOf(p: StrategyProfile): number {
+  return p.simSeed > 0 ? p.simSeed : 10_000_000;
+}
+
+/** 모의 체결가. */
+export function simPriceOf(p: StrategyProfile): number {
+  if (p.simPrice > 0) return p.simPrice;
+  return p.simCurrency === 'USD' ? 100_000 : 140_000_000;
 }
 
 // ── 프리셋 A: 고위험 단타 ──────────────────────────────────
@@ -48,6 +92,7 @@ export const SCALP_HIGH_LEV: StrategyProfile = {
   dailyLossLimitPct: 2,               // 하루 -2%면 이 전략 정지
   maxHoldSec: 900,                    // 15분 이상 보유 금지
   maxOpenPositions: 2,
+  simCurrency: 'KRW',
 };
 
 // ── 프리셋 B: 저위험 스윙 ──────────────────────────────────
@@ -68,6 +113,11 @@ export const SWING_LOW_LEV: StrategyProfile = {
   dailyLossLimitPct: 8,              // 하루 -8%면 정지
   maxHoldSec: 0,                      // 무제한 보유
   maxOpenPositions: 4,
+  simCurrency: 'KRW',
+  // 무제한 보유라 실제 소요 시간을 알 수 없다. 시뮬에서는 **가정**을 하나
+  // 세워야 모의 시계가 돈다 — 설명대로 '며칠~몇 주' 중 짧은 쪽인 3일.
+  // 화면에는 이게 가정이라고 적는다.
+  simHoldSec: 259_200,                // 3일 (가정)
 };
 
 // ── 프리셋 C: 10슬롯 격리 고배율 ──────────────────────────
@@ -85,7 +135,10 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   leverage: 10,                       // 기본값 — 실제로는 손절 거리에서 역산
   maxLeverage: 100,                   // 절대 상한 (도달 조건이 매우 까다로움)
   marginModes: ['isolated'],          // Cross 금지 — 다른 슬롯 자금이 끌려가면 안 됨
-  maxPortfolioPct: 100,               // 슬롯 시스템이 별도로 통제
+  // **슬롯 1개 = 자산의 10%.** 여기가 100이면 증거금 상한이 계좌 전액이 되고,
+  // 그러면 한 번에 계좌 전부를 걸 수 있다 — '10등분'이 아니게 된다.
+  // 10으로 묶어야 규칙 엔진이 산출한 증거금이 슬롯 한 칸을 넘지 못한다.
+  maxPortfolioPct: 10,
   riskPercentPerTrade: 10,            // 슬롯 1개 = 자산의 10%
   takeProfitPct: 1.5,
   stopLossPct: 0.5,                   // 기본 손절 (신호가 주면 그것 사용)
@@ -94,6 +147,13 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   dailyLossLimitPct: 30,              // 하루 -30%면 전략 정지 (슬롯 3개 소진 수준)
   maxHoldSec: 14400,                  // 4시간
   maxOpenPositions: 1,                // 동시 1개만 (슬롯 순차 사용)
+
+  // ── 모의: $1,000으로 시작해서 $100,000에 닿으면 한 회차 끝 ──
+  // 실제 계획과 같은 숫자를 쓴다. 시드 1000불, 목표 10만불.
+  simCurrency: 'USD',
+  simSeed: 1_000,
+  simTargetEquity: 100_000,
+  simPrice: 100_000,
 };
 
 export const PROFILES: Record<StrategyType, StrategyProfile> = {

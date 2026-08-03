@@ -36,10 +36,24 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
-  const { data: rows, error } = await (sb as any)
-    .from('autotrade_schedules')
-    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct, interval_min, margin_pct')
-    .eq('user_id', uid).order('symbol');
+  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct, interval_min, margin_pct';
+  const WITHOUT_MARGIN = FULL.replace(', margin_pct', '');
+
+  let { data: rows, error } = await (sb as any)
+    .from('autotrade_schedules').select(FULL).eq('user_id', uid).order('symbol');
+
+  // **margin_pct 칸이 없으면 이 조회가 통째로 실패한다.** 그러면 화면은
+  // "예약을 읽지 못했습니다"만 띄우고, 진짜 원인(마이그레이션 036 미적용)은
+  // 어디에도 안 나온다. 칸을 빼고 다시 읽어서 화면은 살리고, 무엇이
+  // 빠졌는지는 점검 목록이 말하게 한다.
+  let marginColumnPresent: boolean | null = error ? null : true;
+  if (error && /margin_pct/i.test(String(error.message))) {
+    marginColumnPresent = false;
+    const retry = await (sb as any)
+      .from('autotrade_schedules').select(WITHOUT_MARGIN).eq('user_id', uid).order('symbol');
+    rows = retry.data; error = retry.error;
+  }
+
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
     return NextResponse.json({ ok: false, error: 'query_failed', message: error.message }, { status: 500 });
@@ -77,6 +91,11 @@ export async function GET(req: NextRequest) {
     // 크론이 실제로 인증될 수 있는가. **값은 싣지 않는다**
     adminSecretSet: !!process.env.ADMIN_SECRET,
     cronSecretSet: !!process.env.CRON_SECRET,
+    // 실거래 잠금. 이게 안 풀려 있으면 실전 예약은 매일 403으로 끝난다 —
+    // 그런데 화면 어디에도 그 사실이 없었다. **값이 아니라 상태만 나간다.**
+    liveUnlocked: process.env.ALLOW_LIVE_TRADING === 'true',
+    // 마이그레이션 036이 적용됐는가. 없으면 배율이 낮게 역산된다.
+    marginColumnPresent,
     // 크론이 도는 시각. 화면이 '언제 도는지'를 적을 수 있어야 한다 —
     // 안 적으면 켠 직후에 안 도는 것을 고장으로 읽는다.
     cronUtcHour: 23,
