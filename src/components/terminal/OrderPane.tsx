@@ -816,8 +816,26 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         setQty('');
         if (isPaper) paper.reload();
       } else {
-        const failText = (j?.message || j?.error || `실패 (${r.status})`)
-          + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : '');
+        // ── 인증 오류인데 쓸 수 있는 연결이 여럿이면 그 사실을 함께 적는다 ──
+        //
+        // 바이낸스 테스트넷은 **두 개**다. 현물은 testnet.binance.vision,
+        // 선물은 demo-fapi — 키가 따로 발급된다. 둘 다 앱에서는 그냥
+        // '테스트넷 연결'이라 목록에 나란히 서고, 앱이 그중 하나를 골라
+        // 주문한다. 현물 테스트넷 키가 뽑히면 선물 주문은 -2015로 막힌다.
+        //
+        // 그때 사용자가 보는 것은 "API 키가 무효" 한 줄이다. 키는 멀쩡한데
+        // **다른 연결을 골랐어야 했다**는 사실이 어디에도 없다.
+        const raw = String(j?.message || j?.error || `실패 (${r.status})`);
+        const authish = /-2015|-2014|-1022|Invalid API|API-key|permissions/i.test(raw);
+        const many = (modeResolution.choices ?? 0) > 1;
+        const failText = raw
+          + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : '')
+          + (authish && many
+            ? `\n\n지금 이 모드에 쓸 수 있는 연결이 ${modeResolution.choices}개이고, `
+              + `그중 **${modeResolution.chosenLabel || '첫 번째'}**로 보냈습니다. `
+              + '바이낸스는 현물 테스트넷과 선물 데모의 키가 다릅니다 — '
+              + '키를 고치기 전에 **다른 연결로 바꿔서** 먼저 시도해 보세요.'
+            : '');
         setMsg({ ok: false, text: failText });
         // **막힌 이유의 첫 줄까지 토스트에 싣는다.** 항목 이름만 있으면
         // 무엇을 고쳐야 하는지 알 수 없다.
