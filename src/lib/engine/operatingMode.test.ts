@@ -5,6 +5,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parseMode, capability, canChangeMode, gateOrder, toLegacyMode, fromLegacyMode,
+  modeForDestination,
   LADDER, type OperatingMode, type ModeEvidence,
 } from './operatingMode';
 
@@ -133,5 +134,57 @@ export function runOperatingModeTests() {
     const real = LADDER.filter(m => capability(m).realMoney);
     eq(real.length, 2, `실자금 모드가 늘었다: ${real.join(', ')}`);
     assert(!real.includes('SHADOW_LIVE' as OperatingMode), 'Shadow Live에 돈이 걸렸다');
+  });
+
+  // ── **관문은 목적지를 기준으로 정한다** ────────────────
+  //
+  // 수동 선물 주문 경로는 목적지(실제 돈인가)를 연결의 is_testnet으로,
+  // 상한·사람 확인을 NEXT_PUBLIC_APP_MODE로 정했다. 둘이 서로 모른다.
+  //
+  // 테스트넷으로 며칠 돌리다 실전 연결을 고르면, 주문은 fapi(실제 돈)로
+  // 나가는데 관문은 여전히 TESTNET이라 $100 상한도 사람 확인도 안 걸린다.
+  // 환경변수 바꾸는 걸 잊는 순간 그렇게 되고, 그 실수는 실제 돈으로만
+  // 드러난다.
+  console.log('[운영 모드 — 목적지가 기준이다]');
+
+  test('실계좌로 나가는데 모드가 테스트넷이면 실자금 단계로 올린다', () => {
+    eq(modeForDestination('TESTNET', true), 'LIVE_SMALL');
+    eq(modeForDestination('PAPER', true), 'LIVE_SMALL');
+    eq(modeForDestination('UI_DEMO', true), 'LIVE_SMALL');
+    eq(modeForDestination('SHADOW_LIVE', true), 'LIVE_SMALL');
+  });
+
+  test('올린 모드에는 상한과 사람 확인이 붙는다', () => {
+    const m = modeForDestination('TESTNET', true);
+    eq(capability(m).realMoney, true);
+    eq(capability(m).maxNotionalUsd, 100, '상한이 안 붙었다');
+    eq(capability(m).autoTrade, false, '사람 확인 없이 자동으로 나간다');
+  });
+
+  // 이미 실자금 단계면 그대로 둔다 — 사용자가 올려 둔 것을 되돌리지 않는다.
+  test('이미 실자금 단계면 낮추지 않는다', () => {
+    eq(modeForDestination('LIVE_LIMITED', true), 'LIVE_LIMITED');
+    eq(modeForDestination('LIVE_SMALL', true), 'LIVE_SMALL');
+  });
+
+  // **오직 조이는 방향으로만 움직인다.** 테스트넷 목적지에 대해 모드를
+  // 낮추면, UI_DEMO로 잠가 둔 것을 이 함수가 풀어 주는 셈이 된다.
+  test('테스트넷 목적지면 아무것도 바꾸지 않는다', () => {
+    for (const m of ['UI_DEMO', 'PAPER', 'TESTNET', 'SHADOW_LIVE', 'LIVE_SMALL', 'LIVE_LIMITED'] as const) {
+      eq(modeForDestination(m, false), m, `${m}이 바뀌었다`);
+    }
+  });
+
+  test('실계좌 + 상한 넘는 주문은 막힌다', () => {
+    const m = modeForDestination('TESTNET', true);
+    const g = gateOrder(m, 500);
+    assert(g.disposition !== 'SEND', `$500이 상한 $100을 넘겼는데 나간다: ${g.disposition}`);
+  });
+
+  test('실계좌 + 상한 안이면 사람 확인을 요구한다', () => {
+    const m = modeForDestination('TESTNET', true);
+    const g = gateOrder(m, 50);
+    eq(g.needsConfirmation, true, '실제 돈인데 확인 없이 나간다');
+    eq(g.live, true);
   });
 }

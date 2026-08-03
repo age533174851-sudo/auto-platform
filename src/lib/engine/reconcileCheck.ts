@@ -29,12 +29,26 @@ export async function gatherAndReconcile(
   sb: any,
   userId: string,
   testnet: boolean,
+  /**
+   * **이 주문이 쓰는 연결.** 주면 그 연결만 본다.
+   *
+   * 안 주면 예전처럼 활성 연결 중 아무거나 하나를 집는데, 연결이 여럿이면
+   * 그건 **주문과 상관없는 거래소**일 수 있다. 실제로 그랬다 — 바이낸스
+   * 실전 진입이 "Gate 401: Invalid key provided"로 막혔다. Gate 키가 죽은
+   * 것과 바이낸스 주문은 아무 관계가 없다.
+   *
+   * 남의 거래소 상태로 이 거래소의 주문을 막으면, 고칠 수 없는 이유로
+   * 영영 막힌다.
+   */
+  connectionId?: string | null,
 ): Promise<GatherResult> {
   const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
 
-  const { data: conn } = await sb.from('exchange_connections')
+  let q = sb.from('exchange_connections')
     .select('exchange_id, api_key, api_secret_enc, has_withdrawal')
-    .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
+    .eq('user_id', userId).eq('is_active', true);
+  if (connectionId) q = q.eq('id', connectionId);
+  const { data: conn } = await q.limit(1).maybeSingle();
 
   if (!conn) return { reachable: false, verdict: null, error: '활성 거래소 연결이 없습니다', ...empty };
   if ((conn as any).has_withdrawal) {
@@ -210,6 +224,8 @@ export async function assertStateConsistent(
   sb: any,
   userId: string,
   testnet: boolean,
+  /** 이 주문이 쓰는 연결. 주면 그 연결만 대조한다 */
+  connectionId?: string | null,
 ): Promise<{
   allowed: boolean;
   reason?: string;
@@ -223,7 +239,7 @@ export async function assertStateConsistent(
    */
   gather: GatherResult;
 }> {
-  const r = await gatherAndReconcile(sb, userId, testnet);
+  const r = await gatherAndReconcile(sb, userId, testnet, connectionId);
 
   if (!r.reachable) {
     return {

@@ -147,6 +147,9 @@ export async function POST(req: NextRequest) {
     // **이 두 줄이 없어서 화면에 100·10을 넣어도 엔진은 기본값으로 돌았다.**
     leverageCap: body.leverageCap ?? null,
     riskPct: body.riskPct ?? null,
+    // 배율을 실제로 결정하는 값. 없으면 증거금 예산이 가용 전액이 되어
+    // 배율이 낮게 역산된다 — 화면에 100을 적어도 5배가 나간다.
+    marginPct: body.marginPct ?? null,
   });
 
   // ── 파이프라인 ──
@@ -291,7 +294,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
-    const gate = await assertStateConsistent(sb, userId, useTestnet);
+    const gate = await assertStateConsistent(sb, userId, useTestnet, body.connectionId || null);
     if (!gate.allowed) {
       await releaseReservation(sb, result.ladder?.reservationId);
       return NextResponse.json({
@@ -682,6 +685,7 @@ export async function GET(req: NextRequest) {
             // 배율 상한 0이 되어 주문이 통째로 막힌다.
             leverageCap: r.leverage_cap ?? null,
             riskPct: r.risk_pct ?? null,
+            marginPct: r.margin_pct ?? null,
           }),
         });
         const j = await res.json().catch(() => null);

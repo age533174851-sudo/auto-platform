@@ -306,7 +306,7 @@ export async function POST(req: NextRequest) {
         };
       }
 
-      const gate = await assertStateConsistent(sb, conn.user_id, isTestnet);
+      const gate = await assertStateConsistent(sb, conn.user_id, isTestnet, conn.id || null);
 
       const refPrice = px > 0 ? px : (risk?.markPrice ?? null);
       const notionalUsd = refPrice ? qty * refPrice : 0;

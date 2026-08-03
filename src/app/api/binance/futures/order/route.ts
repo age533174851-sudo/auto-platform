@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
   let overrideNote: string | null = null;
   let safetyLogError: string | null = null;
   {
-    const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+    const { fromLegacyMode, gateOrder, modeForDestination } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
     const bf = await import('@/lib/exchanges/binanceFutures');
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
     const serverMs = await bf.getFuturesServerTime(useTestnet);
 
     // 상태 대조는 USDⓈ-M 경로의 검사다. 여기가 그 시장이다.
-    const gate = await assertStateConsistent(sb, uid, useTestnet);
+    const gate = await assertStateConsistent(sb, uid, useTestnet, connectionId);
 
     // 마진 모드·배율·청산가는 이 심볼에서 직접 읽는다. 목록 조회는 수량 0을
     // 걸러내므로 신규 진입 심볼이 빠진다 (daily-ladder에서 겪은 것과 같다).
@@ -169,7 +169,15 @@ export async function POST(req: NextRequest) {
     preflightRef = refPrice;
     const notionalUsd = refPrice ? orderQty * refPrice : 0;
 
-    const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+    // **관문은 목적지를 기준으로 정한다.**
+    //
+    // 예전에는 NEXT_PUBLIC_APP_MODE만 봤다. 그런데 주문이 실제로 어디로
+    // 나가는지는 연결의 is_testnet이 정한다. 둘이 서로 모르는 상태라,
+    // 환경변수가 TESTNET인 채 실전 연결을 고르면 **실제 돈이 나가는데
+    // $100 상한도 사람 확인도 안 걸린다.** 환경변수 바꾸는 것을 잊는
+    // 순간 그렇게 되고, 그 실수는 실제 돈으로만 드러난다.
+    const envMode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
+    const mode = modeForDestination(envMode, conn.is_testnet === false);
     const g = gateOrder(mode, notionalUsd);
 
     // 필요 증거금 = 명목가 / 배율. 기준가나 배율을 모르면 **계산하지 않는다** —
