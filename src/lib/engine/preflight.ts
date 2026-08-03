@@ -50,6 +50,8 @@ export interface PreflightOptions {
   equityUsd?: number | null;
   /** 환경변수로 올린 절대 상한(USD) */
   overrideMaxNotionalUsd?: number | null;
+  /** 어느 시장인가. 서브계좌 한도를 어느 바구니에서 셀지 정한다. 없으면 USDM */
+  market?: 'USDM' | 'COINM' | 'SPOT' | 'STOCK' | 'TOKENIZED';
 }
 
 export async function collectChecklistInput(opts: PreflightOptions): Promise<ChecklistInput> {
@@ -134,6 +136,35 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
     // 조회가 안 됐으면 미확정 주문 수도 신뢰할 수 없다 — 0으로 적으면
     // "없음"이 되고, 그게 중복 체결로 이어진다.
     if (g.reachable) input.unresolvedOrderCount = g.unresolvedOrders.length;
+
+    // ── 서브계좌 한도 ──
+    //
+    // **여기 없어서 두 번 사고가 났다.** daily-ladder와 tradingview 웹훅이
+    // 점검 입력을 손으로 나열하다가 이 항목을 빠뜨렸고, 그건 '모르면 막는'
+    // 항목이라 그 두 경로의 진입이 매번 조용히 차단됐다.
+    //
+    // 한 곳에서 채우면 다음에 이 수집기를 쓰는 경로는 빠뜨릴 수가 없다.
+    // 열린 포지션은 방금 읽은 것을 그대로 쓴다 — 다시 부르면 레이트리밋을
+    // 두 배로 쓰고 두 조회 사이에 값이 달라진다.
+    try {
+      const { collectSubAccount } = await import('../portfolio/subAccountCheck');
+      const sa = await collectSubAccount({
+        sb, userId,
+        market: opts.market || 'USDM',
+        symbol,
+        addMarginUsd: requiredMargin ?? null,
+        // **못 읽었으면 빈 배열로 치지 않는다.** 빈 배열은 "아무것도 안
+        // 쓰고 있다"가 되어 한도가 통째로 넉넉해진다.
+        open: g.reachable
+          ? (g.exchangePositions || []).map((p: any) => ({
+              symbol: String(p.symbol), market: opts.market || 'USDM', marginUsd: p.margin ?? null,
+            }))
+          : null,
+      });
+      input.subAccount = { status: sa.verdict.status, reason: sa.verdict.reason };
+    } catch (e: any) {
+      input.subAccount = { status: 'unknown', reason: `서브계좌 한도를 확인하지 못했습니다 (${e?.message || e})` };
+    }
 
   } catch {
     /* unknown */

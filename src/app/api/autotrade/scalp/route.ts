@@ -250,6 +250,68 @@ export async function POST(req: NextRequest) {
     }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 목적지 확인 ──
+  //
+  // 주문이 어느 망으로 나가는지는 **연결**이 정한다. 모드가 아니다.
+  // 어긋나면 실계좌 키로 데모 서버를 두드리거나(-2015), 실전인 줄 알고
+  // 켠 것이 테스트넷으로 새어 나간다.
+  const connIsLive = conn.isTestnet === false;
+  if (connIsLive !== capability(opMode).needsLiveKey) {
+    return NextResponse.json({
+      ...base, executed: false, blocked: 'MODE_CONN_MISMATCH',
+      error: connIsLive
+        ? `${opMode} 모드인데 실전 연결입니다 — 실계좌 키로 테스트넷에 주문하게 되어 전부 실패합니다`
+        : `${opMode} 모드인데 테스트넷 연결입니다 — 실전으로 나가야 할 주문이 테스트넷으로 갑니다`,
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // ── 거래 전 점검 ──
+  //
+  // **이 경로에는 점검이 통째로 없었다.** riskManager는 돌지만 그건
+  // 크기·배율을 정하는 곳이고, 아래 것들은 아무도 안 보고 있었다:
+  //
+  //   · 거래소와 앱 상태 일치 (미확정 주문이 남아 있는가)
+  //   · 마진 모드 ISOLATED
+  //   · 시계 오차
+  //   · 거래소 장부 기준 오늘·주간 손실 한도, 연패
+  //   · 서브계좌 한도
+  //   · 손절이 청산가보다 먼저인가
+  //
+  // 실주문을 내는 경로가 점검 없이 도는 것은, 안전장치를 만들어 두고
+  // 한쪽 문만 잠그지 않은 것과 같다. 수동 주문과 같은 수집기를 쓴다 —
+  // 여기서 따로 모으면 언젠가 한쪽만 고치게 된다.
+  const { collectChecklistInput } = await import('@/lib/engine/preflight');
+  const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
+  const checkInput = await collectChecklistInput({
+    sb, userId,
+    testnet: !connIsLive,
+    symbol,
+    side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
+    mode: opMode,
+    notionalUsd: plan.positionSize ?? 0,
+    stopPrice: scalp.signal.stop ?? null,
+    intendedLeverage: plan.leverage ?? null,
+    requiredMargin: plan.requiredMargin ?? null,
+    equityUsd: ctx.config.accountEquity ?? null,
+    market: 'USDM',
+    overrideMaxNotionalUsd: (() => {
+      const n = Number(process.env.LIVE_MAX_NOTIONAL_USD);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })(),
+  });
+  const checklist = runChecklist(checkInput, { market: 'USDM', intent: 'ENTRY' });
+  if (!checklist.allowed) {
+    return NextResponse.json({
+      ...base, executed: false, blocked: 'CHECKLIST_BLOCKED',
+      error: checklist.summary,
+      checklist: {
+        allowed: false, passed: checklist.passed, total: checklist.total,
+        unknownCount: checklist.unknownCount,
+        results: checklist.results, blockers: checklist.blockers,
+      },
+    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   // ── 주문 ──
   //
   // clientOrderId에 봉 시각을 넣는다. 같은 봉에서 두 번 불려도 거래소가
@@ -277,6 +339,12 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ...base,
     executed: exec.ok,
+    // 통과한 점검도 실어 보낸다. 막힐 때만 보여주면 점검이 돌았는지
+    // 알 수 없고, 확인 못 한 항목이 있었다는 사실도 사라진다.
+    checklist: {
+      allowed: true, passed: checklist.passed, total: checklist.total,
+      unknownCount: checklist.unknownCount, results: checklist.results,
+    },
     order: {
       status: exec.status, clientOrderId: exec.clientOrderId,
       exchangeOrderId: exec.exchangeOrderId,
