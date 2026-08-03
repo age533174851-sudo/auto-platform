@@ -990,3 +990,47 @@ export async function diagnoseFutures(
 
   return { host: base(testnet), keyPrefix: String(key || '').slice(0, 8), checks };
 }
+
+/**
+ * 이 호스트가 **어떤 주문 유형을 받는다고 스스로 말하는가.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 데모(demo-fapi)에서 STOP_MARKET이 -4120으로 거절됐다. 그런데 그건
+ * 주문을 실제로 내 봐야 알 수 있었고, 매번 진입·청산 수수료가 나갔다.
+ *
+ * `exchangeInfo`는 **키도 서명도 필요 없는 공개 조회**이고, 심볼마다
+ * `orderTypes`를 알려준다. 미리 물어보면 주문을 내기 전에 알 수 있다.
+ *
+ * 이 값을 판단에 그대로 쓰지는 않는다 — 거래소가 목록에 적어 두고도
+ * 거절하는 경우가 있다(실제로 그랬을 수 있다). 화면에 **사실을 보여주는**
+ * 용도다. 목록에 없으면 확실히 안 되는 것이고, 있는데 안 되면 그건
+ * 거래소가 목록과 다르게 동작하는 것이라 그렇게 적어야 한다.
+ */
+export async function futuresOrderTypes(
+  hostUrl: string, symbol = 'BTCUSDT',
+): Promise<{ ok: boolean; orderTypes: string[]; detail: string }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const r = await fetch(`${hostUrl}/fapi/v1/exchangeInfo?symbol=${sym}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) return { ok: false, orderTypes: [], detail: `HTTP ${r.status}` };
+    const d = await r.json();
+    const row = (Array.isArray(d?.symbols) ? d.symbols : []).find(
+      (s: any) => String(s?.symbol).toUpperCase() === sym);
+    if (!row) return { ok: false, orderTypes: [], detail: `${sym}을(를) 찾지 못했습니다` };
+    const types = Array.isArray(row.orderTypes) ? row.orderTypes.map(String) : [];
+    return { ok: true, orderTypes: types, detail: types.length ? types.join(', ') : '목록이 비어 있습니다' };
+  } catch (e: any) {
+    return { ok: false, orderTypes: [], detail: String(e?.message || e) };
+  }
+}
+
+/** 진단이 물어볼 선물 호스트들. 옛 테스트넷이 살아 있는지도 함께 본다 */
+export const FUTURES_HOSTS = {
+  live: FUTURES_BASE,
+  demo: TESTNET_FUTURES_BASE,
+  /** 바이낸스가 데모로 옮기기 전의 선물 테스트넷. 아직 사는지 확인용 */
+  oldTestnet: 'https://testnet.binancefuture.com',
+} as const;

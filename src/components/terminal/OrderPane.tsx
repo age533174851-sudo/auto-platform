@@ -702,6 +702,27 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
     if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason }); return; }
+
+    // ── 이 연결로 이 시장에 주문할 수 있는가 ──
+    //
+    // 주문 라우트는 **시장**으로 정해진다(orderEndpointFor). 그런데 연결은
+    // 거래소별이다. 게이트아이오 연결을 고른 채 USDⓈ-M을 누르면 바이낸스
+    // 라우트로 가고, 서버가 거부한다 — 예전에는 그 응답이 `not_binance`
+    // 한 단어로 화면에 떴다.
+    //
+    // 보내 놓고 거부당하는 것보다 **누르기 전에 말하는 것**이 낫다.
+    if (!isPaper) {
+      const chosen = connections.find((c: any) => c.id === modeResolution.connId);
+      const ex = String((chosen as any)?.exchange_id || '').toLowerCase();
+      // 모르면 막지 않는다 — 목록을 못 읽었다는 이유로 주문을 막으면
+      // 확인하지 못한 것이 거부가 된다.
+      if (ex && ex !== 'binance') {
+        setMsg({ ok: false, text:
+          `이 연결은 ${ex}입니다 — 이 화면의 주문은 바이낸스 연결로만 나갑니다. `
+          + '위쪽에서 바이낸스 연결로 바꾸세요.' });
+        return;
+      }
+    }
     // USDT로 적었으면 여기서 코인 개수가 된다. **가격을 모르면 환산이
     // 불가능하고, 그건 '수량을 안 적었다'와 다른 문제다** — 다르게 말한다.
     if (unit === 'QUOTE' && unitPx <= 0) {

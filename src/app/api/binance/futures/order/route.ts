@@ -41,9 +41,30 @@ export async function POST(req: NextRequest) {
 
   const { data: conn } = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, is_testnet, has_withdrawal').eq('id', connectionId).eq('user_id', uid).single();
-  if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
-  if (String(conn.exchange_id).toLowerCase() !== 'binance') return NextResponse.json({ error: 'not_binance' }, { status: 400 });
-  if (conn.has_withdrawal === true) return NextResponse.json({ error: 'withdrawal_key_blocked' }, { status: 403 });
+  if (!conn) {
+    return NextResponse.json({
+      error: 'connection_not_found',
+      message: '연결을 찾지 못했습니다 — 지워졌거나 내 연결이 아닙니다',
+    }, { status: 404 });
+  }
+  // **코드 문자열을 그대로 화면에 보내지 않는다.**
+  //
+  // 예전에는 `not_binance` 한 단어가 그대로 토스트에 떴다. 그건 사람에게
+  // 하는 말이 아니다 — 무엇이 잘못됐는지도, 무엇을 해야 하는지도 없다.
+  // 실제로 게이트아이오 연결을 고른 채 USDⓈ-M 주문을 누른 상황이었다.
+  if (String(conn.exchange_id).toLowerCase() !== 'binance') {
+    return NextResponse.json({
+      error: 'not_binance',
+      message: `이 연결은 ${conn.exchange_id}입니다 — USDⓈ-M 선물 주문은 바이낸스 연결로만 나갑니다. `
+        + '위쪽 연결 선택에서 바이낸스 연결로 바꾸세요.',
+    }, { status: 400 });
+  }
+  if (conn.has_withdrawal === true) {
+    return NextResponse.json({
+      error: 'withdrawal_key_blocked',
+      message: '출금 권한이 있는 키입니다 — 주문에 쓸 수 없습니다. 출금 권한을 뺀 키로 다시 등록하세요.',
+    }, { status: 403 });
+  }
 
   // 킬스위치 가드: 신규 진입 차단 (reduce-only 종료는 허용)
   if (!reduceOnly) {
