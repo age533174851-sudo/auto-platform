@@ -827,7 +827,14 @@ const _lotCache: Record<string, { stepSize: number; minQty: number; tickSize: nu
 
 export async function getSymbolFilters(symbol: string, testnet = true): Promise<{ stepSize: number; minQty: number; tickSize: number } | null> {
   const sym = symbol.toUpperCase().replace('/', '');
-  const cached = _lotCache[sym];
+  // ── 캐시 열쇠에 **호스트**를 넣는다 ──
+  //
+  // 예전에는 심볼만으로 캐시했다. 그런데 규격은 환경마다 다르다 —
+  // 데모의 BTCUSDT는 step 0.0001인데 실전은 0.001이다. 한쪽에서 먼저
+  // 읽힌 값이 다른 쪽에 그대로 쓰이면, **맞는 수량을 틀린 격자로
+  // 반올림한다.** 그리고 그 주문은 -1111로 거부된다.
+  const cacheKey = `${testnet ? 'demo' : 'live'}:${sym}`;
+  const cached = _lotCache[cacheKey];
   if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached;
   try {
     const r = await fetch(`${base(testnet)}/fapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(8000) });
@@ -837,13 +844,32 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     if (!s) return null;
     const lot = (s.filters || []).find((f: any) => f.filterType === 'LOT_SIZE');
     const priceF = (s.filters || []).find((f: any) => f.filterType === 'PRICE_FILTER');
+
+    // ── **못 읽으면 만들어내지 않는다** ──
+    //
+    // 예전에는 `parseFloat(lot?.stepSize || '0.001')`처럼 기본값을
+    // 지어냈다. 종목마다·환경마다 다른 값을 코드에 박아 두면, 규격을
+    // 못 읽은 순간 **틀린 격자로 반올림한 주문**이 나간다. 그건 규격을
+    // 안 맞춘 것보다 나쁘다 — 맞춘 줄 알고 보내니까.
+    //
+    // quantize.ts의 원칙이 이미 그렇게 적혀 있다("못 읽으면 그대로
+    // 보내고 거래소가 판단하게 둔다"). 여기서 기본값을 채우는 바람에
+    // 그 경로가 한 번도 안 돌았다.
+    const step = parseFloat(lot?.stepSize ?? '');
+    const min = parseFloat(lot?.minQty ?? '');
+    const tick = parseFloat(priceF?.tickSize ?? '');
+    if (!Number.isFinite(step) || step <= 0) return null;
+    if (!Number.isFinite(tick) || tick <= 0) return null;
+
     const result = {
-      stepSize: parseFloat(lot?.stepSize || '0.001'),
-      minQty:   parseFloat(lot?.minQty || '0.001'),
-      tickSize: parseFloat(priceF?.tickSize || '0.01'),
+      stepSize: step,
+      // minQty만 없으면 stepSize로 대신한다 — 한 칸이 최소라는 뜻이고,
+      // 이건 지어낸 값이 아니라 같은 응답에서 나온 값이다.
+      minQty: Number.isFinite(min) && min > 0 ? min : step,
+      tickSize: tick,
       at: Date.now(),
     };
-    _lotCache[sym] = result;
+    _lotCache[cacheKey] = result;
     return result;
   } catch { return null; }
 }

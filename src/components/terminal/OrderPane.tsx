@@ -830,7 +830,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       if (r.ok && j?.ok) {
         // 넘겨서 나간 것을 '통과'로 적지 않는다.
         const okText = (j?.message || '주문 접수됨')
-          + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : '');
+          + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : '')
+          // 수량·가격이 거래소 규격에 맞춰 바뀌었거나, 규격을 못 읽어
+          // 그대로 보냈다는 사실. 서버는 계속 돌려주고 있었는데 화면이
+          // 한 번도 쓰지 않았다 — 100%를 눌렀는데 잔고가 남는 이유가
+          // 어디에도 없었다.
+          + (j?.quantizeNote ? ` · ${j.quantizeNote}` : '');
         setMsg({ ok: true, text: okText });
         // 토스트로도 띄운다 — 4초 뒤 저절로 사라지고, 탭하면 바로 닫히고,
         // 알림 센터에 남아서 나중에 다시 볼 수 있다.
@@ -847,7 +852,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         //
         // 그때 사용자가 보는 것은 "API 키가 무효" 한 줄이다. 키는 멀쩡한데
         // **다른 연결을 골랐어야 했다**는 사실이 어디에도 없다.
-        const raw = String(errorTextOf(j, `실패 (${r.status})`));
+        const raw = errorTextOf(j, `실패 (${r.status})`)
+          // 실패한 이유가 규격 때문일 수 있다. 거래소 오류(-1111 등)만
+          // 보여주면 무엇을 고쳐야 하는지 알 수 없다.
+          + (j?.quantizeNote ? `\n\n${j.quantizeNote}` : '');
         const authish = /-2015|-2014|-1022|Invalid API|API-key|permissions/i.test(raw);
         const many = (modeResolution.choices ?? 0) > 1;
         const failText = raw
