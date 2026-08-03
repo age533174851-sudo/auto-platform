@@ -20,6 +20,7 @@
 //  · 마지막으로 **실제로** 돌았는가 (cron_runs)
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { autotradeHealth } from '@/lib/engine/autotradeHealth';
 import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -186,6 +187,18 @@ export default function AutotradeControl() {
       action: `마지막 실행 ${fmt(lastRun.started_at)} · ${lastRun.status}${lastRun.detail ? ` — ${lastRun.detail}` : ''}` };
   }
 
+  // 항목별 점검. 판정 로직은 순수 함수가 한다 — 화면마다 다르게 읽으면
+  // 같은 상태가 화면에 따라 다르게 보인다.
+  const health = autotradeHealth({
+    nowMs: Date.now(),
+    schedules: schedules as any,
+    runs: (data?.runs || []) as any,
+    runsError: data?.runsError || null,
+    tableMissing: data?.error === 'table_missing',
+    adminSecretSet: data?.adminSecretSet,
+    cronUtcHour: data?.cronUtcHour ?? null,
+  });
+
   return (
     <div style={box}>
       <div style={{ color: T.txt, fontWeight: 900, fontSize: 14, marginBottom: 10 }}>
@@ -202,6 +215,40 @@ export default function AutotradeControl() {
           <div style={{ color: T.muted, fontSize: 11, marginTop: 5, lineHeight: 1.6 }}>{verdict.action}</div>
         )}
       </div>
+
+      {/* ── 항목별 점검 ──
+          판정 한 줄만 있으면 "왜 안 도는지"를 알 수 없다. 무엇을 확인했고
+          무엇이 막혔는지를 줄마다 보여준다. **확인 못 한 것은 물음표다** —
+          통과로도 실패로도 세지 않는다. */}
+      {health.items.length > 0 && (
+        <div style={{ marginBottom: 12, background: T.alt, borderRadius: 10, padding: '9px 11px' }}>
+          <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 7 }}>점검</div>
+          {health.items.map((it, i) => (
+            <div key={it.id} style={{
+              padding: '6px 0',
+              borderBottom: i < health.items.length - 1 ? `1px solid ${T.border}` : 'none',
+            }}>
+              <div style={{ display: 'flex', gap: 7, alignItems: 'baseline' }}>
+                <span style={{ fontSize: 11 }}>
+                  {it.state === 'ok' ? '✅' : it.state === 'bad' ? '❌' : '❔'}
+                </span>
+                <span style={{
+                  color: it.state === 'bad' ? T.red : it.state === 'unknown' ? T.ylw : T.txt,
+                  fontSize: 11.5, fontWeight: 700,
+                }}>{it.label}</span>
+              </div>
+              <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.55, marginTop: 2, paddingLeft: 18 }}>
+                {it.detail}
+              </div>
+              {it.action && (
+                <div style={{ color: T.ylw, fontSize: 10.5, lineHeight: 1.55, marginTop: 3, paddingLeft: 18 }}>
+                  → {it.action}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* 지금 켜져 있는 예약 */}
       {schedules.length > 0 && (

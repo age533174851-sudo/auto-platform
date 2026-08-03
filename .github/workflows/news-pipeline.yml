@@ -47,18 +47,29 @@ jobs:
           SECRET: ${{ secrets.NEWS_CRON_SECRET }}
         run: |
           set -euo pipefail
+          # 끝 슬래시를 떼어 낸다. 시크릿에 "https://x.app/"처럼 넣으면
+          # "…app//api/…"가 되고 Vercel이 308로 되돌린다. 사람이 주소를
+          # 붙여넣을 때 가장 흔한 실수인데, 그때 나오는 것은 308 한 줄뿐이라
+          # 원인을 알기 어렵다.
+          BASE="${BASE%/}"
           if [ -z "${BASE:-}" ]; then
             echo "EXIT_MONITOR_URL 시크릿이 설정되지 않았습니다."
             exit 1
           fi
 
           body=$(mktemp)
-          code=$(curl -sS -o "$body" -w '%{http_code}' \
+          # -L: 리다이렉트를 따라간다. 308은 메서드와 바디를 유지하므로
+          #     헤더(x-admin-secret)도 그대로 간다.
+          # url_effective: 실제로 어디에 닿았는지. 리다이렉트가 났으면
+          #     그 사실이 로그에 남아야 다음에 주소를 고칠 수 있다.
+          out=$(curl -sSL -o "$body" -w '%{http_code} %{url_effective}' \
             --max-time 120 \
             -H "Authorization: Bearer ${SECRET:-}" \
             "${BASE}/api/cron/news-sync")
 
-          echo "HTTP ${code}"
+          code="${out%% *}"
+          final="${out#* }"
+          echo "HTTP ${code} · ${final}"
           cat "$body"
           echo
 
@@ -75,12 +86,18 @@ jobs:
         run: |
           set -euo pipefail
           body=$(mktemp)
-          code=$(curl -sS -o "$body" -w '%{http_code}' \
+          # -L: 리다이렉트를 따라간다. 308은 메서드와 바디를 유지하므로
+          #     헤더(x-admin-secret)도 그대로 간다.
+          # url_effective: 실제로 어디에 닿았는지. 리다이렉트가 났으면
+          #     그 사실이 로그에 남아야 다음에 주소를 고칠 수 있다.
+          out=$(curl -sSL -o "$body" -w '%{http_code} %{url_effective}' \
             --max-time 120 \
             -H "Authorization: Bearer ${SECRET:-}" \
             "${BASE}/api/cron/calendar-sync")
 
-          echo "HTTP ${code}"
+          code="${out%% *}"
+          final="${out#* }"
+          echo "HTTP ${code} · ${final}"
           cat "$body"
           echo
 
@@ -99,12 +116,18 @@ jobs:
         run: |
           set -euo pipefail
           body=$(mktemp)
-          code=$(curl -sS -o "$body" -w '%{http_code}' \
+          # -L: 리다이렉트를 따라간다. 308은 메서드와 바디를 유지하므로
+          #     헤더(x-admin-secret)도 그대로 간다.
+          # url_effective: 실제로 어디에 닿았는지. 리다이렉트가 났으면
+          #     그 사실이 로그에 남아야 다음에 주소를 고칠 수 있다.
+          out=$(curl -sSL -o "$body" -w '%{http_code} %{url_effective}' \
             --max-time 300 \
             -H "Authorization: Bearer ${SECRET:-}" \
             "${BASE}/api/cron/ai-enrichment?limit=5")
 
-          echo "HTTP ${code}"
+          code="${out%% *}"
+          final="${out#* }"
+          echo "HTTP ${code} · ${final}"
           cat "$body"
           echo
 
@@ -130,12 +153,18 @@ jobs:
           fi
 
           body=$(mktemp)
-          code=$(curl -sS -o "$body" -w '%{http_code}' \
+          # -L: 리다이렉트를 따라간다. 308은 메서드와 바디를 유지하므로
+          #     헤더(x-admin-secret)도 그대로 간다.
+          # url_effective: 실제로 어디에 닿았는지. 리다이렉트가 났으면
+          #     그 사실이 로그에 남아야 다음에 주소를 고칠 수 있다.
+          out=$(curl -sSL -o "$body" -w '%{http_code} %{url_effective}' \
             --max-time 120 \
             -H "Authorization: Bearer ${SECRET:-}" \
             "${BASE}/api/cron/cleanup?apply=1")
 
-          echo "HTTP ${code}"
+          code="${out%% *}"
+          final="${out#* }"
+          echo "HTTP ${code} · ${final}"
           cat "$body"
           echo
 

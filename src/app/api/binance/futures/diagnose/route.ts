@@ -82,8 +82,37 @@ export async function POST(req: NextRequest) {
   // 주문을 실제로 내 보지는 않는다 — 진단이 부작용을 만들면 진단을 못
   // 돌린다. 대신 **주문 계열 조회**를 찔러 본다. 인증 계층은 같으므로,
   // 여기가 막히면 주문도 막힌다.
-  const { diagnoseFutures } = await import('@/lib/exchanges/binanceFutures');
+  const { diagnoseFutures, futuresOrderTypes, FUTURES_HOSTS } =
+    await import('@/lib/exchanges/binanceFutures');
   const deep = await diagnoseFutures(apiKey, secret, testnet, 'BTCUSDT');
+
+  // ── **이 환경이 어떤 주문 유형을 받는다고 스스로 말하는가** ──
+  //
+  // 데모가 STOP_MARKET을 거절하는 것을 지금까지는 주문을 실제로 내 봐야
+  // 알 수 있었고, 시도마다 진입·청산 수수료가 나갔다(잔고가 4,997 →
+  // 4,960으로 줄었다).
+  //
+  // exchangeInfo는 키도 서명도 필요 없는 공개 조회이고 심볼별 orderTypes를
+  // 알려준다. 미리 물어보면 주문 전에 알 수 있다.
+  //
+  // 이 값을 판단에 그대로 쓰지는 않는다 — 목록에 적어 두고도 거절하는
+  // 경우가 있다. **사실을 보여주는** 용도다.
+  let stopSupport: any = null;
+  try {
+    const here = await futuresOrderTypes(testnet ? FUTURES_HOSTS.demo : FUTURES_HOSTS.live, 'BTCUSDT');
+    const hasStop = here.ok && here.orderTypes.includes('STOP_MARKET');
+    checks.push({
+      name: '조건부 주문 지원 (STOP_MARKET)',
+      ok: hasStop,
+      detail: here.ok
+        ? (hasStop
+            ? `받습니다 · ${here.orderTypes.length}종`
+            : `목록에 없습니다 — 손절을 거래소에 걸 수 없습니다. 지원: ${here.detail}`)
+        : `확인하지 못했습니다 (${here.detail})`,
+      ms: 0,
+    });
+    stopSupport = { host: testnet ? FUTURES_HOSTS.demo : FUTURES_HOSTS.live, ...here, hasStop };
+  } catch { /* 못 물어봤으면 항목만 빠진다 */ }
   for (const c of deep.checks) {
     // 위에서 이미 본 항목은 건너뛴다
     if (c.path === '/fapi/v1/time' || c.path === '/fapi/v2/balance') continue;
@@ -127,6 +156,7 @@ export async function POST(req: NextRequest) {
     // 어디에 무슨 키로 물어봤는지. **키 값은 싣지 않는다** — 앞 8자만.
     host: deep.host,
     keyPrefix: deep.keyPrefix,
+    stopSupport,
     cause,
     at: Date.now(),
   }, { headers: { 'Cache-Control': 'no-store' } });

@@ -1,0 +1,252 @@
+// src/lib/engine/autotradeHealth.ts
+//
+// **자동매매가 지금 도는가.** 한 화면에서 답한다.
+//
+// 왜 필요한가
+// ───────────
+// 이 프로젝트에서 가장 비싼 결함은 전부 같은 모양이었다 —
+// **켜져 있다고 믿는데 실제로는 안 도는 것.**
+//
+//  · 크론이 vercel.json에 아예 없어서 한 번도 안 돌았다
+//  · 화면은 `+₩847,000`을 띄우는데 엔진은 잠들어 있었다
+//  · 예약 표가 없어서 실행기가 매번 조용히 끝났다
+//  · 손절 감시 워크플로가 30회 연속 실패 중이었다(시크릿 미설정)
+//
+// 각각은 다른 원인이지만 사용자가 겪는 것은 하나다: **알 수가 없다.**
+// 화면 여기저기에 조각조각 떠 있고, 그걸 다 모아야 판단이 된다.
+//
+// 이 파일이 지키는 것
+// ───────────────────
+// 1. **증거 없이 '돌고 있다'고 말하지 않는다.** 설정이 다 맞아도 실제로
+//    돈 기록이 없으면 '아직 안 돌았다'이다. 설정과 실행은 다른 것이다.
+// 2. **'확인 못 함'과 '안 됨'을 구분한다.** 조회에 실패한 것을 고장으로
+//    적으면 사용자가 멀쩡한 것을 고치러 간다. 반대로 통과로 적으면
+//    고장을 놓친다.
+// 3. **막힌 항목마다 무엇을 해야 하는지 적는다.** "연결 없음"만 적으면
+//    어디서 무엇을 눌러야 하는지 알 수 없다.
+
+export type HealthState = 'ok' | 'bad' | 'unknown';
+
+export interface HealthItem {
+  id: string;
+  label: string;
+  state: HealthState;
+  /** 지금 상태를 사실대로 */
+  detail: string;
+  /** 막혔을 때 무엇을 해야 하는가. ok면 빈 문자열 */
+  action: string;
+}
+
+export interface HealthInput {
+  /** autotrade_schedules 행들 (사용자 것) */
+  schedules?: Array<{
+    symbol?: string | null; enabled?: boolean | null; connection_id?: string | null;
+    mode?: string | null; last_run_at?: string | null; last_result?: string | null;
+    interval_min?: number | null;
+  }> | null;
+  /** cron_runs에서 읽은 daily-ladder 실행 기록 (최신순) */
+  runs?: Array<{ status?: string | null; detail?: string | null; started_at?: string | null }> | null;
+  /** 실행 기록을 못 읽었으면 그 이유. 빈 배열과 '못 읽음'은 다르다 */
+  runsError?: string | null;
+  /** 표가 아예 없을 때 */
+  tableMissing?: boolean;
+  /** 서버에 ADMIN_SECRET이 있는가. **값은 절대 받지 않는다** */
+  adminSecretSet?: boolean;
+  /** 크론이 도는 UTC 시각 */
+  cronUtcHour?: number | null;
+  /** 지금 시각 (ms). 테스트가 시계를 고정할 수 있어야 한다 */
+  nowMs: number;
+}
+
+export interface HealthReport {
+  items: HealthItem[];
+  /** 한 줄 결론 */
+  verdict: string;
+  /**
+   * 실제로 돌고 있는가.
+   * **true는 실행 기록이 있을 때만.** null은 '확인하지 못했다'이고,
+   * 그것을 false(고장)로도 true(정상)로도 읽지 않는다.
+   */
+  running: boolean | null;
+  /** 가장 먼저 해야 할 일. 없으면 빈 문자열 */
+  nextAction: string;
+}
+
+const DAY_MS = 24 * 3600_000;
+
+const item = (id: string, label: string, state: HealthState, detail: string, action = ''): HealthItem =>
+  ({ id, label, state, detail, action });
+
+/** '3시간 전' 같은 말. 미래면 그렇게 적는다 — 시계 어긋남이 숨으면 안 된다 */
+export function agoText(fromMs: number, nowMs: number): string {
+  const d = nowMs - fromMs;
+  if (!Number.isFinite(d)) return '시각 불명';
+  if (d < 0) return `${Math.round(-d / 60000)}분 후 (시각이 미래입니다)`;
+  const m = Math.floor(d / 60000);
+  if (m < 1) return '방금';
+  if (m < 60) return `${m}분 전`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}시간 전`;
+  return `${Math.floor(h / 24)}일 전`;
+}
+
+/** 다음 크론까지 몇 시간인가 */
+export function nextCronText(cronUtcHour: number | null | undefined, nowMs: number): string {
+  // **Number(null)은 0이다.** 그대로 두면 '모른다'가 '자정에 돈다'가 되고,
+  // 화면은 있지도 않은 다음 실행 시각을 자신 있게 적는다. 0시는 실제로
+  // 쓸 수 있는 값이라 뒤의 범위 검사로도 안 걸린다.
+  if (cronUtcHour == null) return '크론 시각을 알 수 없습니다';
+  const h = Number(cronUtcHour);
+  if (!Number.isFinite(h) || h < 0 || h > 23) return '크론 시각을 알 수 없습니다';
+  const now = new Date(nowMs);
+  const next = new Date(nowMs);
+  next.setUTCHours(h, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1);
+  const mins = Math.round((next.getTime() - nowMs) / 60000);
+  const kstHour = (h + 9) % 24;
+  return `다음 실행 약 ${Math.floor(mins / 60)}시간 ${mins % 60}분 뒤 (한국 ${String(kstHour).padStart(2, '0')}:00)`;
+}
+
+export function autotradeHealth(input: HealthInput): HealthReport {
+  const items: HealthItem[] = [];
+  const now = input.nowMs;
+
+  // ── 1) 예약 표 ──
+  if (input.tableMissing) {
+    items.push(item('table', '예약 표', 'bad',
+      'autotrade_schedules 표가 없습니다',
+      'Supabase SQL Editor에서 마이그레이션 031~035를 적용하세요'));
+    return {
+      items, running: false,
+      verdict: '자동매매가 돌 수 없습니다 — 예약을 저장할 표가 없습니다',
+      nextAction: items[0].action,
+    };
+  }
+
+  const rows = Array.isArray(input.schedules) ? input.schedules : null;
+  if (!rows) {
+    items.push(item('table', '예약 표', 'unknown',
+      '예약을 읽지 못했습니다',
+      '잠시 뒤 새로고침해 보세요'));
+  } else if (rows.length === 0) {
+    items.push(item('table', '등록된 예약', 'bad',
+      '등록된 예약이 없습니다',
+      '아래에서 종목·연결을 고르고 자동매매를 켜세요'));
+  } else {
+    items.push(item('table', '등록된 예약', 'ok', `${rows.length}건`));
+  }
+
+  const on = (rows || []).filter(r => r?.enabled === true);
+
+  // ── 2) 켜져 있는가 ──
+  if (rows && rows.length > 0) {
+    items.push(on.length > 0
+      ? item('enabled', '스위치', 'ok', `${on.length}건 켜짐`)
+      : item('enabled', '스위치', 'bad', '전부 꺼져 있습니다', '예약 카드의 스위치를 켜세요'));
+  }
+
+  // ── 3) 연결 ──
+  //
+  // 연결이 없으면 실행기가 불려도 주문을 낼 수 없다. 그런데 그건
+  // '안 도는 것'처럼 보이지 않는다 — 매번 조용히 건너뛴다.
+  if (on.length > 0) {
+    const noConn = on.filter(r => !r?.connection_id);
+    items.push(noConn.length === 0
+      ? item('conn', '거래소 연결', 'ok', '켜진 예약에 연결이 지정돼 있습니다')
+      : item('conn', '거래소 연결', 'bad',
+          `${noConn.length}건에 연결이 없습니다 (${noConn.map(r => r?.symbol || '?').join(', ')})`,
+          '예약 카드에서 거래소 연결을 고르세요 — 연결 없이는 주문이 나가지 않습니다'));
+  }
+
+  // ── 4) 자동 실행 열쇠 ──
+  //
+  // 크론이 진입 엔진을 부르려면 서버에 ADMIN_SECRET이 있어야 한다.
+  // **값은 여기로 오지 않는다** — 있다/없다만 본다.
+  if (input.adminSecretSet === true) {
+    items.push(item('secret', '자동 실행 열쇠', 'ok', '설정돼 있습니다'));
+  } else if (input.adminSecretSet === false) {
+    items.push(item('secret', '자동 실행 열쇠', 'bad',
+      'ADMIN_SECRET이 없어 크론이 진입 엔진을 부를 수 없습니다',
+      'Vercel → Settings → Environment Variables에 ADMIN_SECRET을 넣고 재배포하세요'));
+  } else {
+    items.push(item('secret', '자동 실행 열쇠', 'unknown', '확인하지 못했습니다', ''));
+  }
+
+  // ── 5) **실제로 돌았는가** ──
+  //
+  // 여기가 이 파일의 핵심이다. 위 항목이 전부 초록이어도 실행 기록이
+  // 없으면 **한 번도 안 돈 것**이다. 설정과 실행은 다른 것이고, 지금까지
+  // 이 둘을 구분하지 않아서 "켜 놨는데 왜 아무 일도 없지"가 반복됐다.
+  let running: boolean | null = null;
+  const runs = Array.isArray(input.runs) ? input.runs : null;
+
+  if (input.runsError) {
+    items.push(item('ran', '실제 실행', 'unknown',
+      `실행 기록을 읽지 못했습니다 (${input.runsError})`,
+      '기록을 못 읽었을 뿐, 안 돌았다는 뜻은 아닙니다'));
+  } else if (!runs || runs.length === 0) {
+    items.push(item('ran', '실제 실행', 'bad',
+      '실행 기록이 없습니다 — 아직 한 번도 안 돌았습니다',
+      input.cronUtcHour != null ? nextCronText(input.cronUtcHour, now) : '크론 등록을 확인하세요'));
+    running = false;
+  } else {
+    const last = runs[0];
+    const t = last?.started_at ? new Date(last.started_at).getTime() : NaN;
+    const okStatus = String(last?.status || '').toLowerCase();
+    const when = Number.isFinite(t) ? agoText(t, now) : '시각 불명';
+
+    if (!Number.isFinite(t)) {
+      items.push(item('ran', '실제 실행', 'unknown',
+        `마지막 실행 시각을 읽지 못했습니다 (${last?.detail || ''})`, ''));
+    } else if (okStatus === 'failed') {
+      items.push(item('ran', '실제 실행', 'bad',
+        `마지막 실행이 실패했습니다 — ${when} · ${last?.detail || '이유 미상'}`,
+        '아래 실행 기록의 이유를 보세요'));
+      running = false;
+    } else if (now - t > 2 * DAY_MS) {
+      // 하루 1회 크론인데 이틀 넘게 기록이 없으면 멈춘 것이다.
+      items.push(item('ran', '실제 실행', 'bad',
+        `마지막 실행이 ${when}입니다 — 그 뒤로 돈 기록이 없습니다`,
+        '크론이 멈췄을 수 있습니다. 배포 상태와 ADMIN_SECRET을 확인하세요'));
+      running = false;
+    } else {
+      items.push(item('ran', '실제 실행', 'ok',
+        `${when} · ${last?.detail || okStatus || '기록됨'}`));
+      running = true;
+    }
+  }
+
+  // ── 6) 마지막에 무엇을 했는가 ──
+  //
+  // '돌았다'와 '진입했다'는 다르다. 대부분의 날은 조건이 안 맞아 진입하지
+  // 않고, 그건 정상이다. 그 사실을 적어야 사용자가 기다릴 수 있다.
+  const withRun = (rows || []).filter(r => r?.last_run_at);
+  if (withRun.length > 0) {
+    const latest = withRun
+      .map(r => ({ r, t: new Date(String(r.last_run_at)).getTime() }))
+      .filter(x => Number.isFinite(x.t))
+      .sort((a, b) => b.t - a.t)[0];
+    if (latest) {
+      items.push(item('result', '마지막 판단', 'ok',
+        `${latest.r.symbol || '?'} · ${agoText(latest.t, now)} · ${latest.r.last_result || '기록 없음'}`));
+    }
+  }
+
+  // ── 결론 ──
+  const bad = items.find(i => i.state === 'bad');
+  const unknown = items.filter(i => i.state === 'unknown');
+
+  let verdict: string;
+  if (bad) {
+    verdict = `자동매매가 돌지 않습니다 — ${bad.detail}`;
+  } else if (running === true) {
+    verdict = unknown.length > 0
+      ? `돌고 있습니다 (확인 못 한 항목 ${unknown.length}개)`
+      : '켜져 있고 실제로 돌고 있습니다';
+  } else {
+    // 나쁜 항목은 없는데 돌았다는 증거도 없다. **정상이라고 말하지 않는다.**
+    verdict = '설정은 맞지만 실제로 돈 기록을 확인하지 못했습니다';
+  }
+
+  return { items, verdict, running, nextAction: bad?.action || '' };
+}

@@ -455,6 +455,36 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           closeErr = e?.message || String(e);
         }
 
+        // ── **접수됐다와 없어졌다는 다르다** ──
+        //
+        // 거래소가 200을 줬다는 것은 주문을 받았다는 뜻이지, 포지션이
+        // 사라졌다는 뜻이 아니다. 부분 체결로 끝나거나, 리스크 엔진이
+        // 접수 직후 취소하거나, reduceOnly가 조용히 무시될 수 있다.
+        //
+        // 손절 부착 쪽은 이미 되읽어 확인한다(7-b). 되돌리기 쪽만
+        // 안 하고 있었고, 그래서 화면에 "진입을 즉시 청산했습니다"가
+        // 뜬 채로 포지션이 그대로 열려 있는 일이 생겼다. 그 문장은
+        // 사용자가 더 확인하지 않게 만들기 때문에 특히 나쁘다.
+        if (closed) {
+          try {
+            const after = await bf.getSymbolPositionRiskEx(apiKey, apiSecret, plan.symbol, testnet);
+            const left = after.risk ? Math.abs(Number(after.risk.positionAmt) || 0) : null;
+            if (left != null && left > 0) {
+              closed = false;
+              closeErr = `청산 주문은 접수됐는데 포지션이 ${left} 남아 있습니다`;
+            }
+            // 조회 자체가 실패하면 **확인하지 못한 것**이다. 접수만 보고
+            // '닫았다'고 단정하지 않는다.
+            else if (after.error) {
+              closed = false;
+              closeErr = `청산 주문은 접수됐지만 실제로 닫혔는지 확인하지 못했습니다 (${after.error})`;
+            }
+          } catch (e: any) {
+            closed = false;
+            closeErr = `청산 주문은 접수됐지만 확인에 실패했습니다 (${e?.message || e})`;
+          }
+        }
+
         // ── 닫기가 실패했다면 **정말 열려 있는지 확인한다** ──
         //
         // -2022(ReduceOnly Order is rejected)는 대부분 "줄일 포지션이
