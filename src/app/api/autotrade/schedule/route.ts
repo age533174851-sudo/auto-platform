@@ -16,6 +16,7 @@
 // 않았고, 화면 어디에도 그 사실이 없었다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
+import { leverageNote } from '@/lib/engine/leverageMath';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -279,10 +280,9 @@ export async function POST(req: NextRequest) {
       : `${symbol} 자동매매를 껐습니다`,
     // **상한이지 목표가 아니다.** 손절이 넓으면 역산 결과가 더 작게 나오고,
     // 그때는 작은 쪽이 나간다. 화면이 이걸 '100배로 나간다'로 읽으면 안 된다.
-    leverageNote: leverageCap
-      ? `배율은 손절 거리에서 역산되고 ${leverageCap}배에서 잘립니다. `
-        + `${leverageCap}배가 실제로 나오려면 손절이 약 ${(100 / leverageCap * 0.26).toFixed(2)}% 안쪽이어야 합니다.`
-      : null,
+    // 식은 leverageMath 한 곳에만 둔다. 여기 있던 숫자는 1회 증거금
+    // 칸이 생기기 전의 식이라, 증거금 10%에서는 네 배 틀렸다.
+    leverageNote: leverageCap ? leverageNote(leverageCap, riskPct, marginPct) : null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 

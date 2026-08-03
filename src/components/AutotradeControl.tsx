@@ -21,6 +21,7 @@
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autotradeHealth } from '@/lib/engine/autotradeHealth';
+import { stopPctForLeverage } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -470,11 +471,19 @@ export default function AutotradeControl() {
         <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.6 }}>
           배율은 <b style={{ color: T.txt }}>손절 거리에서 역산</b>되고 이 상한에서 잘립니다 —
           여기에 100을 넣어도 손절이 넓으면 더 작은 배율로 나갑니다.
-          {Number(levCap) > 0 && (
-            <> {levCap}배가 실제로 나오려면 손절이 약{' '}
-              <b style={{ color: T.ylw }}>{(100 / Number(levCap) * 0.26).toFixed(2)}%</b> 안쪽이어야 하고,
-              그건 BTC 노이즈 수준이라 진입 직후 손절될 수 있습니다.</>
-          )}
+          {/* **식은 한 곳에만 둔다.** 여기 있던 `100/levCap*0.26`은 1회 증거금
+              칸이 생기기 전의 식이었다. 증거금 10%를 넣은 지금 같은 조건의
+              답은 0.26%가 아니라 1%다 — 네 배 차이인데 화면은 계속 옛날
+              숫자를 적고 있었다. */}
+          {(() => {
+            const st = stopPctForLeverage(Number(levCap), Number(riskPct), Number(marginPct));
+            if (st == null) return null;
+            return (
+              <> {levCap}배가 실제로 나오려면 (1회 위험 {riskPct}% · 1회 증거금 {marginPct}%에서)
+                손절이 약 <b style={{ color: T.ylw }}>{st.toFixed(2)}%</b> 안쪽이어야 합니다.
+                {st < 0.5 && ' 그건 BTC 노이즈 수준이라 진입 직후 손절될 수 있습니다.'}</>
+            );
+          })()}
         </div>
 
         {/* ── 테스트넷 / 실전 ──
