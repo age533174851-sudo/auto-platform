@@ -267,6 +267,38 @@ export function fromLegacyMode(raw: string | null | undefined): OperatingMode {
   return parseMode(raw);
 }
 
+/**
+ * **이 주문이 실제로 어디로 나가는가**를 기준으로 모드를 정한다.
+ *
+ * 왜 필요한가
+ * ───────────
+ * 수동 선물 주문 경로는 이랬다:
+ *
+ *   목적지(실제 돈인가) ← 연결의 is_testnet
+ *   상한·사람 확인      ← NEXT_PUBLIC_APP_MODE 환경변수
+ *
+ * **둘이 서로 모른다.** 테스트넷으로 며칠 돌리다가 실전 연결을 고르면,
+ * 주문은 fapi(실제 돈)로 나가는데 관문은 여전히 TESTNET이라 $100 상한도
+ * 사람 확인도 안 걸린다. 환경변수를 바꾸는 것을 잊는 순간 그렇게 된다 —
+ * 그리고 그 실수는 실제 돈으로만 드러난다.
+ *
+ * 그래서 **목적지가 실계좌면 모드를 최소 LIVE_SMALL로 올린다.**
+ *
+ * 내리지는 않는다
+ * ───────────────
+ * 이미 실자금 단계(LIVE_LIMITED 등)면 그대로 둔다. 테스트넷 목적지에
+ * 대해서도 낮추지 않는다 — UI_DEMO로 잠가 둔 것을 이 함수가 풀어 주면
+ * 잠근 이유가 사라진다. **오직 조이는 방향으로만 움직인다.**
+ */
+export function modeForDestination(
+  envMode: OperatingMode,
+  isLiveDestination: boolean,
+): OperatingMode {
+  if (!isLiveDestination) return envMode;
+  // 실계좌인데 실자금 단계가 아니면 가장 좁은 실자금 단계로 올린다.
+  return CAP[envMode].realMoney ? envMode : 'LIVE_SMALL';
+}
+
 export function toLegacyMode(mode: OperatingMode): 'PAPER' | 'TESTNET' | 'LIVE' {
   if (mode === 'TESTNET') return 'TESTNET';
   if (mode === 'LIVE_SMALL' || mode === 'LIVE_LIMITED') return 'LIVE';
