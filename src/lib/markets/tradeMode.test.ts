@@ -147,4 +147,62 @@ export function runTradeModeTests() {
     eq(MODE_INFO.LIVE.realMoney, true);
     assert(MODE_INFO.PAPER.desc.includes('나가지 않습니다'), '모의 설명이 약하다');
   });
+
+  // ── **연결이 둘 이상일 때 조용히 고르지 않는다** ──
+  //
+  // 실제로 있었던 일: 바이낸스 연결이 둘(실전·데모)인데 하나가
+  // is_testnet=true로 잘못 저장돼 있었다. 테스트넷 탭에서는 둘 다
+  // '쓸 수 있는 연결'이라 첫 번째가 뽑혔고, 그게 데모 서버가 모르는
+  // 키였다. 화면에는 다른 연결의 잔고가 떠 있었고 주문만 -2015로 막혔다.
+  //
+  // is_testnet은 사용자가 적은 값이지 거래소가 확인해 준 값이 아니다.
+  console.log('[매매 모드 — 어느 연결로 나가는지 말한다]');
+
+  const C = (id: string, label: string, testnet: boolean | null) =>
+    ({ id, label, exchange_id: 'binance', is_testnet: testnet } as any);
+
+  test('쓸 수 있는 연결이 하나면 조용히 쓴다', () => {
+    const r = resolveTradeMode('TESTNET', [C('a', '데모', true)], null);
+    eq(r.connId, 'a');
+    eq(r.reason, '', '하나뿐인데 설명을 붙였다');
+    eq(r.choices, 1);
+  });
+
+  test('둘 이상이면 어느 것을 골랐는지 말한다', () => {
+    const r = resolveTradeMode('TESTNET', [C('a', '데모', true), C('b', '실전키오등록', true)], null);
+    eq(r.connId, 'a');
+    eq(r.choices, 2);
+    assert(r.reason.includes('2개'), '몇 개인지 안 적었다: ' + r.reason);
+    assert(r.reason.includes('데모'), '고른 연결 이름이 없다: ' + r.reason);
+  });
+
+  test('사용자가 고른 연결이 있으면 그것을 쓰고 조용하다', () => {
+    const r = resolveTradeMode('TESTNET', [C('a', '데모', true), C('b', '둘째', true)], 'b');
+    eq(r.connId, 'b');
+    eq(r.reason, '');
+    eq(r.chosenLabel, '둘째');
+  });
+
+  test('고른 연결이 이 모드에 안 맞으면 바꾼 사실과 대상 이름을 적는다', () => {
+    const r = resolveTradeMode('TESTNET', [C('a', '데모', true)], 'live-1');
+    eq(r.connId, 'a');
+    assert(r.reason.includes('데모'), '어디로 나가는지 안 적었다: ' + r.reason);
+  });
+
+  // 이름이 없어도 문장이 깨지면 안 된다 — "(으)로 주문합니다"만 남으면
+  // 사용자는 무엇으로 나가는지 알 수 없다.
+  test('이름이 없으면 거래소와 id 앞자리로 부른다', () => {
+    const r = resolveTradeMode('TESTNET', [
+      { id: 'abcdef1234', exchange_id: 'binance', is_testnet: true } as any,
+      { id: 'zzz', exchange_id: 'binance', is_testnet: true } as any,
+    ], null);
+    assert((r.chosenLabel || '').length > 0, '이름이 비었다');
+    assert(r.reason.includes('abcdef12'), r.reason);
+  });
+
+  test('실전 모드에서도 여러 개면 말한다', () => {
+    const r = resolveTradeMode('LIVE', [C('a', '실전1', false), C('b', '실전2', false)], null);
+    eq(r.choices, 2);
+    assert(r.reason.includes('2개'), r.reason);
+  });
 }
