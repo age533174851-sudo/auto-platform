@@ -172,6 +172,18 @@ export async function GET(req: NextRequest) {
           ? `보낸 값의 길이가 서버 값과 다릅니다 (보낸 ${sent.length}자 / 서버 ${String(process.env.ADMIN_SECRET).length}자) — 복사할 때 앞뒤 공백이나 줄바꿈이 딸려 들어갔는지 확인하세요.`
           : '길이는 같은데 값이 다릅니다 — GitHub의 EXIT_MONITOR_SECRET을 Vercel의 ADMIN_SECRET과 똑같이 맞추세요.';
 
+    // ── 지문 ──
+    //
+    // "값이 다르다"까지는 알았는데, 그게 **다른 값을 넣어서**인지
+    // **재배포가 아직 반영이 안 돼서**인지를 구분할 수 없다. 후자면
+    // 아무리 다시 넣어도 안 되고, 그 상태가 오래 간다.
+    //
+    // SHA-256 앞 6자리만 돌려준다. 24비트라 값을 되찾을 수 없고(UUID는
+    // 2^122 공간이다), 양쪽이 같은 값을 들고 있는지는 한눈에 보인다.
+    // 재배포가 먹었는지도 이 값이 바뀌는 것으로 알 수 있다.
+    const { createHash } = await import('crypto');
+    const fp = (v: string) => v ? createHash('sha256').update(v).digest('hex').slice(0, 6) : null;
+
     return NextResponse.json({
       ok: false,
       error: '인증 필요 — Vercel Cron(Bearer) 또는 x-admin-secret 헤더가 맞아야 합니다',
@@ -179,6 +191,10 @@ export async function GET(req: NextRequest) {
       // 값이 아니라 **설정 여부**다. 이게 있어야 어느 쪽을 고칠지 안다.
       adminSecretSet: adminSet,
       cronSecretSet: cronSet,
+      // 서버가 지금 들고 있는 값의 지문. 재배포 전후로 이 값이 바뀌면
+      // 배포가 반영된 것이고, 안 바뀌면 아직이다.
+      serverFingerprint: fp(String(process.env.ADMIN_SECRET || '')),
+      sentFingerprint: fp(sent),
     }, { status: 401 });
   }
 
