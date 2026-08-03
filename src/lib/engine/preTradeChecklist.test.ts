@@ -873,4 +873,22 @@ export function runPreTradeChecklistTests() {
     const v = runChecklist(goodInput(), { market: 'USDM', intent: 'ENTRY' });
     eq(statusOf(v, 'SUBACCOUNT_LIMIT').status, 'pass');
   });
+
+  // 수집기가 서브계좌를 채우는 것이 **한 곳**에 있어야 한다.
+  // 손으로 나열하는 경로는 언젠가 빠뜨린다 — 두 번 그랬다.
+  test('점검 입력 타입에 서브계좌 칸이 있다', () => {
+    const input = goodInput();
+    assert('subAccount' in input, '입력 타입에서 서브계좌가 사라졌다');
+  });
+
+  // 실주문을 내는 경로가 점검을 건너뛰면, 안전장치를 만들어 두고 문
+  // 하나를 안 잠근 것과 같다. 단타 경로에는 이게 통째로 없었다.
+  test('진입에서 차단 항목이 하나라도 unknown이면 안 나간다', () => {
+    for (const k of ['dailyLoss', 'weeklyLoss', 'lossStreak', 'reconcile', 'clock'] as const) {
+      const input: any = goodInput();
+      delete input[k];
+      const v = runChecklist(input, { market: 'USDM', intent: 'ENTRY' });
+      eq(v.allowed, false, `${k}를 안 넘겼는데 통과했다`);
+    }
+  });
 }
