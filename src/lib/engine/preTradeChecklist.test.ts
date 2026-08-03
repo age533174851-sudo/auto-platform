@@ -833,4 +833,44 @@ export function runPreTradeChecklistTests() {
         .results.some(r => r.id === 'SPREAD_COST'), `${m}에 있으면 안 된다`);
     }
   });
+
+  // ══ 입력을 빠뜨리면 조용히 막힌다 — 두 번 사고를 낸 자리 ══
+  //
+  // daily-ladder와 tradingview 웹훅은 점검 입력을 손으로 나열하다가
+  // subAccount를 빠뜨렸다. 그러면 unknown → 차단이라 **모든 자동 진입이
+  // 매일 막혔다.** 손으로 내는 주문은 collectAllLimits가 이 값을 채워
+  // 줘서 멀쩡했고, 그래서 "손으로는 되는데 자동으로는 안 되는" 상태가
+  // 오래 갔다.
+  test('서브계좌 입력을 안 넘기면 막힌다 — 통과가 아니다', () => {
+    const input = goodInput();
+    delete (input as any).subAccount;
+    const v = runChecklist(input, { market: 'USDM', intent: 'ENTRY' });
+    eq(v.allowed, false, '안 넘긴 항목을 통과로 셌다');
+    eq(statusOf(v, 'SUBACCOUNT_LIMIT').status, 'unknown');
+  });
+
+  // 막는 것만으로는 부족하다. **왜 막혔는지가 원인을 가리켜야 한다.**
+  // 예전 문구는 "정해 둔 한도가 있는지 알 수 없습니다"였는데, 그걸 읽은
+  // 사람은 자기가 서브계좌를 안 만들어서 그런 줄 알았다. 실제 원인은
+  // 주문 경로가 값을 안 넘긴 것이었다.
+  test('막힌 이유가 원인을 가리킨다 — 입력 누락도 후보로 적는다', () => {
+    const input = goodInput();
+    delete (input as any).subAccount;
+    const d = statusOf(runChecklist(input, { market: 'USDM', intent: 'ENTRY' }), 'SUBACCOUNT_LIMIT').detail;
+    assert(d.includes('subAccount'), '어느 입력이 빠졌는지 안 적었다: ' + d);
+  });
+
+  test('청산은 서브계좌 한도를 안 본다 — 못 닫는 것이 더 위험하다', () => {
+    const input = goodInput();
+    delete (input as any).subAccount;
+    const v = runChecklist(input, { market: 'USDM', intent: 'EXIT' });
+    assert(!v.results.some(r => r.id === 'SUBACCOUNT_LIMIT'), '청산을 한도로 막았다');
+  });
+
+  // 서브계좌를 안 만든 사람은 통과해야 한다. 안 그러면 이 기능을 쓰지도
+  // 않는 사람의 주문이 전부 막힌다.
+  test('서브계좌를 안 쓰면 통과다', () => {
+    const v = runChecklist(goodInput(), { market: 'USDM', intent: 'ENTRY' });
+    eq(statusOf(v, 'SUBACCOUNT_LIMIT').status, 'pass');
+  });
 }

@@ -710,7 +710,17 @@ export function runChecklist(
   // ── 서브계좌 한도 ──
   if (!input.subAccount) {
     results.push(resultFor('SUBACCOUNT_LIMIT', 'unknown',
-      '서브계좌 한도를 확인하지 못했습니다 — 정해 둔 한도가 있는지 알 수 없습니다'));
+      // **이 문구가 두 번 사고를 냈다.**
+      //
+      // daily-ladder와 tradingview 웹훅은 점검 입력을 손으로 나열하다가
+      // 이 항목을 빠뜨렸다. 그러면 여기서 unknown이 되고, unknown은
+      // 차단이라 **모든 자동 진입이 매일 조용히 막혔다.** 그런데 화면에
+      // 뜬 문구는 "한도가 있는지 알 수 없습니다"라서, 읽는 사람은
+      // 자기가 서브계좌를 안 만들어서 그런 줄 알았다.
+      //
+      // 원인이 둘(안 넘김 / 못 읽음)이면 문구도 둘을 말해야 한다.
+      '서브계좌 한도를 확인하지 못했습니다 — 한도를 읽지 못했거나, 이 주문 경로가 '
+      + '점검에 서브계좌 정보를 넘기지 않았습니다 (subAccount 입력 누락)'));
   } else if (input.subAccount.status === 'over' || input.subAccount.status === 'unassigned') {
     results.push(resultFor('SUBACCOUNT_LIMIT', 'fail', input.subAccount.reason));
   } else if (input.subAccount.status === 'unknown') {
