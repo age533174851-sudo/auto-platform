@@ -649,11 +649,30 @@ export function runPreTradeChecklistTests() {
     }
   });
 
-  test('청산에도 모드·시계·상태대조는 본다', () => {
+  test('청산에도 모드·시계는 본다', () => {
+    // 모드는 가장 바깥 관문이고, 시계는 서명 요청 자체의 전제다 —
+    // 청산도 서명 요청이라 시계가 틀리면 아예 못 나간다.
     const ids = runChecklist(goodInput(), { intent: 'EXIT' }).results.map(r => r.id);
-    for (const kept of ['MODE', 'CLOCK_SKEW', 'STATE_RECONCILE'] as CheckId[]) {
+    for (const kept of ['MODE', 'CLOCK_SKEW'] as CheckId[]) {
       assert(ids.includes(kept), `${kept}이 빠졌다`);
     }
+  });
+
+  // ── **상태가 어긋났을 때야말로 닫을 수 있어야 한다** ──
+  //
+  // 실제로 있었던 일: 화면에 포지션이 보이는데 청산 버튼이 "거래소와 앱
+  // 상태 일치"로 거부당했다. 불일치가 생기면 나가는 문이 잠긴 것이다.
+  // 못 여는 것은 불편이고 못 닫는 것은 사고다.
+  test('상태 불일치가 청산을 막지 않는다', () => {
+    const broken = { ...goodInput(), reconcile: { reachable: true, blockNewOrders: true, summary: '심각 불일치' } };
+    eq(runChecklist(broken, { intent: 'EXIT' }).allowed, true, '불일치 때문에 못 닫는다');
+    // 진입은 여전히 막아야 한다 — 그쪽은 안 여는 것이 안전한 방향이다.
+    eq(runChecklist(broken, { intent: 'ENTRY' }).allowed, false, '진입까지 열렸다');
+  });
+
+  test('상태 대조를 못 했을 때도 청산은 나간다', () => {
+    const unknown = { ...goodInput(), reconcile: null };
+    eq(runChecklist(unknown, { intent: 'EXIT' }).allowed, true, '확인 못 했다고 못 닫는다');
   });
 
   test('손절 없이도 청산은 나간다 — 나오는 주문에 손절을 요구하면 안 된다', () => {

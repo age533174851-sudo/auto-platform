@@ -515,7 +515,14 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
    */
   const closeNow = async () => {
     if (!auth || !connId) { setCloseMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
-    if (qty <= 0) return;
+    // **조용히 돌아가지 않는다.** 예전에는 그냥 return이라, 청산을 눌러도
+    // 아무 일도 안 일어나고 이유도 없었다. 닫으려는 사람에게 침묵은
+    // 최악의 응답이다 — 버튼이 고장 났는지 조건이 안 맞는지 알 수 없다.
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setCloseMsg({ ok: false, text:
+        `청산할 수량을 읽지 못했습니다 (${qty}) — 거래소에서 직접 닫으세요` });
+      return;
+    }
 
     const closeSide = closeSideFor(side);
     // 확인 문구에 숫자를 적는다. '청산하시겠습니까?'만 물으면 사람은
