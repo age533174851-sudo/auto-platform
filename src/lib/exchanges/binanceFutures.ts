@@ -598,6 +598,18 @@ export async function placeFuturesTPSL(
     symbol: string; side: 'BUY' | 'SELL'; stopPrice: number;
     type: 'TAKE_PROFIT_MARKET' | 'STOP_MARKET'; quantity?: number;
     /**
+     * 대체 시도에만 쓰는 수량.
+     *
+     * 손절은 `closePosition: true`로 거는 것이 맞다 — 부분 체결이든
+     * 나중에 수량이 바뀌든 '그때 있는 전량'을 닫는다. 그래서 quantity를
+     * 안 넘긴다.
+     *
+     * 그런데 그 모양이 -4120으로 거절되면 대체할 수단이 없어진다.
+     * 이 칸은 **1차 시도의 모양을 바꾸지 않으면서** 대체 시도에 쓸 수량을
+     * 준다. 없으면 대체 시도를 건너뛴다.
+     */
+    fallbackQuantity?: number | null;
+    /**
      * 트리거 기준가. 기본은 MARK_PRICE — 얇은 호가의 한 틱 꼬리에 손절이
      * 털리는 것을 줄인다. 예전에는 코드에 박혀 있어서 사용자가 Last를
      * 원해도 방법이 없었다.
@@ -606,16 +618,63 @@ export async function placeFuturesTPSL(
   },
   testnet = true,
 ): Promise<FuturesOrderResult> {
-  try {
+  const sym = opts.symbol.toUpperCase().replace('/', '');
+  const label = opts.type === 'TAKE_PROFIT_MARKET' ? '익절' : '손절';
+
+  const attempt = async (shape: 'closePosition' | 'quantity') => {
     const params: Record<string, string | number> = {
-      symbol: opts.symbol.toUpperCase().replace('/', ''), side: opts.side, type: opts.type, stopPrice: opts.stopPrice,
+      symbol: sym, side: opts.side, type: opts.type, stopPrice: opts.stopPrice,
       workingType: opts.workingType || 'MARK_PRICE',
     };
-    if (opts.quantity != null) { params.quantity = opts.quantity; params.reduceOnly = 'true'; }
-    else { params.closePosition = 'true'; }
-    const d = await fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
-    return { success: true, message: opts.type === 'TAKE_PROFIT_MARKET' ? '익절 설정' : '손절 설정', orderId: d.orderId, symbol: d.symbol, raw: d };
-  } catch (e: any) { return { success: false, message: e.message || 'TP/SL 실패' }; }
+    if (shape === 'quantity') {
+      const q = opts.quantity ?? opts.fallbackQuantity;
+      if (q == null || !Number.isFinite(Number(q)) || Number(q) <= 0) {
+        throw new Error('수량을 모르면 이 방식으로 걸 수 없습니다');
+      }
+      params.quantity = Number(q);
+      params.reduceOnly = 'true';
+    } else {
+      params.closePosition = 'true';
+    }
+    return fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
+  };
+
+  // 원래 쓰던 모양. 수량을 알면 reduceOnly, 모르면 closePosition.
+  const first: 'closePosition' | 'quantity' = opts.quantity != null ? 'quantity' : 'closePosition';
+
+  try {
+    const d = await attempt(first);
+    return { success: true, message: `${label} 설정`, orderId: d.orderId, symbol: d.symbol, raw: d };
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+
+    // ── -4120: 이 엔드포인트가 이 주문 유형을 안 받는다 ──
+    //
+    // 바이낸스 데모(demo-fapi)에서 STOP_MARKET이 이 오류로 거절되는 것을
+    // 봤다. 환경마다 조건부 주문의 파라미터 조합을 받는 범위가 다르므로,
+    // **반대 모양으로 한 번 더 시도한다** — closePosition으로 막혔으면
+    // 수량+reduceOnly로, 그 반대도 마찬가지.
+    //
+    // 엔드포인트 주소를 추측해서 바꾸지는 않는다. 어디로 나갈지 확실하지
+    // 않은 주문을 실계좌에 보내는 것이 이 오류보다 훨씬 나쁘다.
+    const other: 'closePosition' | 'quantity' = first === 'quantity' ? 'closePosition' : 'quantity';
+    const retriable = /-4120|not supported for this endpoint|Algo Order/i.test(msg);
+    const canRetryWithQty = (opts.quantity ?? opts.fallbackQuantity) != null;
+    if (retriable && !(other === 'quantity' && !canRetryWithQty)) {
+      try {
+        const d2 = await attempt(other);
+        return { success: true, message: `${label} 설정 (대체 방식)`, orderId: d2.orderId, symbol: d2.symbol, raw: d2 };
+      } catch (e2: any) {
+        return {
+          success: false,
+          message: `${label} 부착 실패 — 이 거래 환경이 ${opts.type} 주문을 받지 않습니다. `
+            + `두 가지 방식(전량 청산·수량 지정)을 다 시도했습니다. `
+            + `원문: ${msg} / ${String(e2?.message || e2)}`,
+        };
+      }
+    }
+    return { success: false, message: msg || 'TP/SL 실패' };
+  }
 }
 
 /**
