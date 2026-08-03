@@ -816,15 +816,103 @@ export async function placeFuturesOrderSafe(
 export async function findOrderByClientId(
   key: string, secret: string, symbol: string, clientOrderId: string, testnet = true
 ): Promise<{ found: boolean; order?: any }> {
+  const sym = symbol.toUpperCase().replace('/', '');
   try {
     const d = await fapiSigned('GET', '/fapi/v1/order', key, secret, testnet, {
-      symbol: symbol.toUpperCase().replace('/', ''),
+      symbol: sym,
       origClientOrderId: clientOrderId,
     });
     return { found: !!d?.orderId, order: d };
   } catch (e: any) {
+    const msg = String(e?.message || e);
     // -2013 = Order does not exist → 아직 안 나감
-    if (/-2013|does not exist|Unknown order/i.test(e?.message || '')) return { found: false };
-    throw e;   // 그 외 오류는 상위로 (판단 불가 상태에서 재시도하면 위험)
+    if (/-2013|does not exist|Unknown order/i.test(msg)) return { found: false };
+
+    // ── 이 엔드포인트만 막혔을 수 있다 ──
+    //
+    // 바이낸스 데모(demo-fapi)에서 `/fapi/v1/order` 단건 조회가 키는
+    // 멀쩡한데 -2015를 주는 경우가 있다. 그때 그대로 던지면 **중복 확인을
+    // 못 했다는 이유로 주문 전체가 막힌다** — 실제로 그 상태였다.
+    //
+    // 그렇다고 중복 확인을 건너뛰면 안 된다. 그건 같은 주문이 두 번
+    // 나가도 모른다는 뜻이고, 이 검사가 존재하는 이유가 사라진다.
+    //
+    // 대신 **다른 문으로 같은 것을 확인한다.** 미체결 목록과 최근 주문
+    // 목록에서 같은 clientOrderId를 찾는다. 그쪽까지 막히면 그때는
+    // 정말 확인 불가이므로 던진다.
+    if (!/-2015|-2014|-1022|API-key|Invalid API|permissions/i.test(msg)) throw e;
+
+    try {
+      const open = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, { symbol: sym });
+      const hitOpen = (Array.isArray(open) ? open : [])
+        .find((o: any) => String(o?.clientOrderId) === clientOrderId);
+      if (hitOpen) return { found: true, order: hitOpen };
+
+      // 미체결에 없다고 '없음'이 아니다 — 이미 체결됐을 수 있다.
+      // 최근 주문까지 봐야 '안 나갔다'고 말할 수 있다.
+      const recent = await fapiSigned('GET', '/fapi/v1/allOrders', key, secret, testnet, {
+        symbol: sym, limit: 100,
+      });
+      const hit = (Array.isArray(recent) ? recent : [])
+        .find((o: any) => String(o?.clientOrderId) === clientOrderId);
+      return hit ? { found: true, order: hit } : { found: false };
+    } catch (e2: any) {
+      // 두 문 다 막혔다 — 이제는 정말 판단 불가다. 원래 오류를 그대로
+      // 올린다(그쪽이 원인에 더 가깝다).
+      throw e;
+    }
   }
+}
+
+/**
+ * 이 키로 무엇이 되고 무엇이 안 되는가.
+ *
+ * 왜 필요한가
+ * ───────────
+ * `-2015 Invalid API-key, IP, or permissions`는 세 가지를 한 문장에 뭉쳐
+ * 놓았다. 화면에는 잔고가 멀쩡히 떠 있는데 주문만 막히는 상황에서, 그
+ * 문장만 보고는 무엇을 고쳐야 하는지 알 수 없다.
+ *
+ * 그래서 **엔드포인트별로 하나씩 찔러 보고 결과를 그대로 적는다.**
+ * 어떤 것이 되고 어떤 것이 안 되는지가 곧 원인이다:
+ *   · 전부 실패      → 키·환경·IP 문제
+ *   · 읽기만 성공    → 선물 거래 권한
+ *   · 단건 조회만 실패 → 그 엔드포인트가 이 환경에서 안 되는 것
+ *
+ * **주문은 내지 않는다.** 진단이 부작용을 만들면 진단을 못 돌린다.
+ */
+export async function diagnoseFutures(
+  key: string, secret: string, testnet = true, symbol = 'BTCUSDT',
+): Promise<{ host: string; keyPrefix: string; checks: Array<{ name: string; path: string; ok: boolean; detail: string }> }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  const probes: Array<{ name: string; path: string; params?: Record<string, string | number> }> = [
+    { name: '서버 시각 (서명 없음)', path: '/fapi/v1/time' },
+    { name: '잔고 (읽기)', path: '/fapi/v2/balance' },
+    { name: '포지션 (읽기)', path: '/fapi/v2/positionRisk', params: { symbol: sym } },
+    { name: '미체결 주문 (읽기)', path: '/fapi/v1/openOrders', params: { symbol: sym } },
+    { name: '최근 주문 (읽기)', path: '/fapi/v1/allOrders', params: { symbol: sym, limit: 1 } },
+    // 없는 clientOrderId를 물어본다. 정상이면 -2013(없음)이 온다 —
+    // 그것도 '성공'이다. 여기서 -2015가 오면 이 엔드포인트만 막힌 것이다.
+    { name: '단건 주문 조회', path: '/fapi/v1/order', params: { symbol: sym, origClientOrderId: 'diagnose-none' } },
+  ];
+
+  const checks: Array<{ name: string; path: string; ok: boolean; detail: string }> = [];
+  for (const p of probes) {
+    try {
+      if (p.path === '/fapi/v1/time') {
+        const t = await getFuturesServerTime(testnet);
+        checks.push({ name: p.name, path: p.path, ok: t != null, detail: t != null ? '정상' : '응답 없음' });
+        continue;
+      }
+      await fapiSigned('GET', p.path, key, secret, testnet, p.params || {});
+      checks.push({ name: p.name, path: p.path, ok: true, detail: '정상' });
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      // 주문이 없다는 응답은 **인증이 통과했다는 뜻**이다. 실패가 아니다.
+      const notFound = /-2013|does not exist|Unknown order/i.test(msg);
+      checks.push({ name: p.name, path: p.path, ok: notFound, detail: notFound ? '정상 (해당 주문 없음)' : msg });
+    }
+  }
+
+  return { host: base(testnet), keyPrefix: String(key || '').slice(0, 8), checks };
 }
