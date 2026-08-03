@@ -60,6 +60,10 @@ export interface HealthInput {
   marginColumnPresent?: boolean | null;
   /** 켜진 예약의 연결 정보 — 모드와 목적지가 맞는지 본다 */
   connections?: Array<{ id?: string | null; is_testnet?: boolean | null }> | null;
+  /** exit-monitor 실행 기록 (최신순). 포지션을 닫아 주는 크론이다 */
+  exitRuns?: Array<{ status?: string | null; detail?: string | null; started_at?: string | null }> | null;
+  /** 지금 열려 있는 계단식 거래 수. **null은 '못 읽음'이고 0이 아니다** */
+  openTradeCount?: number | null;
   /** 크론이 도는 UTC 시각 */
   cronUtcHour?: number | null;
   /** 지금 시각 (ms). 테스트가 시계를 고정할 수 있어야 한다 */
@@ -301,6 +305,40 @@ export function autotradeHealth(input: HealthInput): HealthReport {
       items.push(item('ran', '실제 실행', 'ok',
         `${when} · ${last?.detail || okStatus || '기록됨'}`));
       running = true;
+    }
+  }
+
+  // ── 5-b) **포지션을 닫아 줄 크론은 도는가** ──
+  //
+  // 지금까지 진입만 보고 있었다. 그런데 여는 것과 닫는 것은 다른
+  // 크론이다(exit-monitor). 그게 멈춰 있으면 트레일링 손절도 시간
+  // 청산도 안 된다 — 진입이 안 되는 것보다 나쁘다.
+  //
+  // **열린 거래가 있을 때만 묻는다.** 포지션이 없는데 빨간 줄을 띄우면
+  // 목록을 안 믿게 된다. 그리고 '열린 거래 0건'과 '못 읽음'은 다르다.
+  if (input.openTradeCount != null && input.openTradeCount > 0) {
+    const er = Array.isArray(input.exitRuns) ? input.exitRuns : null;
+    const last = er && er.length > 0 ? er[0] : null;
+    const t = last?.started_at ? new Date(last.started_at).getTime() : NaN;
+
+    if (!er) {
+      items.push(item('exitmon', '청산 감시', 'unknown',
+        `열린 거래 ${input.openTradeCount}건 · 청산 감시 기록을 읽지 못했습니다`, ''));
+    } else if (!last || !Number.isFinite(t)) {
+      items.push(item('exitmon', '청산 감시', 'bad',
+        `열린 거래 ${input.openTradeCount}건인데 청산 감시가 돈 기록이 없습니다 — 손절 이동·시간 청산이 일어나지 않습니다`,
+        'Vercel 크론(exit-monitor)과 CRON_SECRET을 확인하세요'));
+    } else if (String(last.status || '').toLowerCase() === 'failed') {
+      items.push(item('exitmon', '청산 감시', 'bad',
+        `청산 감시가 실패했습니다 — ${agoText(t, now)} · ${last.detail || '이유 미상'}`,
+        '실패가 이어지면 열린 포지션이 손절 이동 없이 방치됩니다'));
+    } else if (now - t > 2 * DAY_MS) {
+      items.push(item('exitmon', '청산 감시', 'bad',
+        `청산 감시가 ${agoText(t, now)} 이후로 안 돌았습니다 — 열린 거래 ${input.openTradeCount}건이 방치돼 있습니다`,
+        '배포 상태와 크론 등록을 확인하세요'));
+    } else {
+      items.push(item('exitmon', '청산 감시', 'ok',
+        `${agoText(t, now)} · 열린 거래 ${input.openTradeCount}건 감시 중`));
     }
   }
 

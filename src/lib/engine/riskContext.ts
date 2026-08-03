@@ -70,6 +70,14 @@ export async function buildRiskContext(
 
   // ── 1) 사용자 한도 ──
   let limits = { ...DEFAULTS };
+  /**
+   * 명목가 상한을 **사용자가 직접 정했는가.**
+   *
+   * 기본값 300%와 사용자가 고른 300%는 다르다. 전자는 아무도 안 정한
+   * 값이라 예약 설정과 어긋나면 예약 쪽을 따라야 하고, 후자는 사용자가
+   * 그어 둔 선이라 함부로 올리면 안 된다.
+   */
+  let notionalPctFromUser = false;
   if (sb && opts.userId) {
     try {
       const { data } = await sb.from('risk_limits').select('*').eq('user_id', opts.userId).maybeSingle();
@@ -83,6 +91,7 @@ export async function buildRiskContext(
           feeRatePct: data.fee_rate_pct != null ? Number(data.fee_rate_pct) : DEFAULTS.feeRatePct,
           slippagePct: data.slippage_pct != null ? Number(data.slippage_pct) : DEFAULTS.slippagePct,
         };
+        notionalPctFromUser = Number(data.max_notional_pct) > 0;
       } else {
         warnings.push('사용자 위험 한도 미설정 — 기본값 사용 (최대 5배, 일일 -3%)');
       }
@@ -318,6 +327,44 @@ export async function buildRiskContext(
       }
     } else {
       warnings.push(`예약 설정의 1회 증거금(${mIn})을 쓰지 못했습니다 — 0 초과 100 이하가 아닙니다`);
+    }
+  }
+
+  // ── 명목가 상한과 배율 상한을 맞춘다 ──
+  //
+  // **여기서 100배가 30배로 잘리고 있었다.**
+  //
+  // 배율은 명목가 ÷ 증거금 예산으로 역산된다. 그런데 명목가에는 따로
+  // 상한이 있고(기본 자산의 300%), 그게 증거금 상한보다 먼저 걸린다.
+  //
+  //   증거금 10% · 배율 상한 100배 → 필요한 명목가 = 자산의 1000%
+  //   그런데 명목가 상한이 300% → 명목가가 잘림 → 역산 배율 30배
+  //
+  // 화면에는 100이 적혀 있고, 저장도 됐고, 에러도 안 난다. 그냥 30배가
+  // 나간다. 이 저장소에서 제일 자주 나온 모양이다 — 된 줄 아는 것.
+  //
+  // 두 상한은 같은 것을 서로 다른 단위로 말한다. 어긋나면 맞춰야 한다.
+  const capForNotional = Number(limits.maxLeverage);
+  const mpOk = Number(opts.marginPct);
+  if (Number.isFinite(mpOk) && mpOk > 0 && mpOk <= 100
+      && Number.isFinite(capForNotional) && capForNotional > 0) {
+    const needed = mpOk * capForNotional;          // 증거금 % × 배율 = 명목가 %
+    if (needed > limits.maxNotionalPct) {
+      if (notionalPctFromUser) {
+        // **사용자가 그어 둔 선은 올리지 않는다.** 대신 그 선 때문에
+        // 배율이 얼마까지만 나오는지 정확히 말한다.
+        const effective = Math.floor(limits.maxNotionalPct / mpOk);
+        warnings.push(
+          `명목가 상한 ${limits.maxNotionalPct}%(직접 설정)이 배율보다 먼저 걸립니다 — `
+          + `증거금 ${mpOk}%에서는 최대 ${effective}배까지만 나갑니다. `
+          + `${capForNotional}배를 쓰려면 명목가 상한이 ${needed}% 이상이어야 합니다.`);
+      } else {
+        warnings.push(
+          `명목가 상한을 ${limits.maxNotionalPct}% → ${needed}%로 올렸습니다 `
+          + `(증거금 ${mpOk}% × 배율 상한 ${capForNotional}배). `
+          + '기본값이 배율보다 먼저 걸려 있었습니다.');
+        limits.maxNotionalPct = needed;
+      }
     }
   }
 

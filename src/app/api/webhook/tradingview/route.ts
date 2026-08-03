@@ -355,8 +355,39 @@ export async function POST(req: NextRequest) {
         symbol: tradeSymbol, side: sideUp === 'BUY' ? 'LONG' : 'SHORT',
       });
 
+      // ── 서브계좌 한도 ──
+      //
+      // **이 항목을 안 넘기고 있었다.** 점검 목록에서 '모르면 막는'
+      // 항목이라(requiredToKnow), 안 넘기면 unknown이 되어 **모든 웹훅
+      // 진입이 매번 차단됐다.** 수동 주문 경로는 collectAllLimits가
+      // 이 값을 채워 주는데, 여기는 항목을 손으로 나열하다가 빠뜨렸다 —
+      // 같은 실수가 daily-ladder에도 있었다.
+      let subAccountFact: { status: 'ok' | 'over' | 'unassigned' | 'unknown'; reason: string } | null = null;
+      if (!isExit) {
+        try {
+          const { collectSubAccount } = await import('@/lib/portfolio/subAccountCheck');
+          const sa = await collectSubAccount({
+            // 한도는 **연결의 주인** 기준이다. body.userId는 웹훅 발신자가
+            // 보내는 값이라 믿지 않는다 — 남의 한도로 판정하면 안 된다.
+            sb, userId: conn.user_id, market: 'USDM', symbol: tradeSymbol,
+            addMarginUsd: marginInput?.required ?? null,
+            // 못 읽었으면 빈 배열로 치지 않는다 — 빈 배열은 "아무것도
+            // 안 쓰고 있다"가 되어 한도가 통째로 넉넉해진다.
+            open: gate.gather.reachable
+              ? gate.gather.exchangePositions.map((p: any) => ({
+                  symbol: String(p.symbol), market: 'USDM', marginUsd: p.margin ?? null,
+                }))
+              : null,
+          });
+          subAccountFact = { status: sa.verdict.status, reason: sa.verdict.reason };
+        } catch (e: any) {
+          subAccountFact = { status: 'unknown', reason: `서브계좌 한도를 확인하지 못했습니다 (${e?.message || e})` };
+        }
+      }
+
       const checklist = runChecklist({
         mode: { disposition: g.disposition, reason: g.reason },
+        subAccount: subAccountFact,
         dailyLoss: dailyLossFact,
         weeklyLoss: weeklyFact, lossStreak: streakFact,
         regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },

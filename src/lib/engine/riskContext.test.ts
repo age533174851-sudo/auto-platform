@@ -161,4 +161,62 @@ export function runRiskContextTests() {
     // paper_positions는 연속 손실 계산에도 쓰이므로 등장 자체는 막지 않는다.
     // 중요한 것은 **손익 합계**에 안 섞이는 것이고, 그건 위 소스 선택으로 정해진다.
   });
+
+  // ══ 100배가 30배로 잘리던 자리 ══
+  //
+  // 배율은 명목가 ÷ 증거금 예산으로 역산된다. 그런데 명목가에는 따로
+  // 상한이 있고(기본 자산의 300%), 그게 증거금 상한보다 **먼저** 걸린다.
+  //
+  //   증거금 10% · 배율 상한 100배 → 필요한 명목가 = 자산의 1000%
+  //   명목가 상한 300% → 명목가가 잘림 → 역산 배율 30배
+  //
+  // 화면에는 100이 적혀 있고, 저장도 됐고, 에러도 안 났다. 30배가 나갔다.
+  test('증거금 10% · 배율 100배면 명목가 상한이 1000%까지 열린다', async () => {
+    const ctx = await buildRiskContext(null, { marginPct: 10, leverageCap: 100 });
+    eq(ctx.config.maxNotionalPct, 1000, '명목가 상한이 배율보다 먼저 걸린다 — 100배가 안 나온다');
+  });
+
+  test('올렸으면 올렸다고 말한다 — 조용히 바꾸지 않는다', async () => {
+    const ctx = await buildRiskContext(null, { marginPct: 10, leverageCap: 100 });
+    assert(ctx.warnings.some(w => w.includes('명목가 상한을') && w.includes('1000%')),
+      '상한을 바꿨는데 말이 없다: ' + ctx.warnings.join(' / '));
+  });
+
+  test('필요한 만큼만 올린다 — 기본값보다 작으면 그대로 둔다', async () => {
+    // 증거금 10% × 배율 20배 = 200% < 기본 300%
+    const ctx = await buildRiskContext(null, { marginPct: 10, leverageCap: 20 });
+    eq(ctx.config.maxNotionalPct, 300, '필요 없는데 상한을 내렸다');
+  });
+
+  test('증거금을 안 정하면 안 건드린다', async () => {
+    eq((await buildRiskContext(null, { leverageCap: 100 })).config.maxNotionalPct, 300);
+  });
+
+  test('증거금이 범위 밖이면 안 건드린다', async () => {
+    eq((await buildRiskContext(null, { marginPct: 0, leverageCap: 100 })).config.maxNotionalPct, 300);
+    eq((await buildRiskContext(null, { marginPct: 150, leverageCap: 100 })).config.maxNotionalPct, 300);
+  });
+
+  // **사용자가 그어 둔 선은 올리지 않는다.**
+  // 대신 그 선 때문에 배율이 얼마까지만 나오는지 정확히 말한다.
+  test('직접 설정한 명목가 상한은 안 올리고, 실제 배율을 알려준다', async () => {
+    const sb: any = {
+      from: () => {
+        const chain: any = {
+          select: () => chain, eq: () => chain, gte: () => chain,
+          order: () => chain, limit: () => chain,
+          maybeSingle: async () => ({
+            data: { max_leverage: 100, max_notional_pct: 400, max_account_risk_pct: 5,
+                    max_daily_loss_pct: 3, risk_per_trade_pct: null }, error: null }),
+          then: (res: any) => res({ data: [], error: null }),
+        };
+        return chain;
+      },
+    };
+    const ctx = await buildRiskContext(sb, { userId: 'u1', marginPct: 10, leverageCap: 100 });
+    eq(ctx.config.maxNotionalPct, 400, '사용자가 그어 둔 선을 올려 버렸다');
+    // 400% ÷ 증거금 10% = 40배
+    assert(ctx.warnings.some(w => w.includes('40배')),
+      '실제로 몇 배까지 나가는지 안 알려줬다: ' + ctx.warnings.join(' / '));
+  });
 }

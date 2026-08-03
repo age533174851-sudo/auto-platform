@@ -16,6 +16,7 @@
 // 않았고, 화면 어디에도 그 사실이 없었다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
+import { leverageNote } from '@/lib/engine/leverageMath';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -72,6 +73,30 @@ export async function GET(req: NextRequest) {
     else runs = data || [];
   } catch (e: any) { runsError = String(e?.message || e); }
 
+  // ── 청산 감시도 돌고 있는가 ──
+  //
+  // 진입만 보고 있었다. 그런데 **포지션을 여는 것과 닫는 것은 다른
+  // 크론이다.** 진입이 잘 돌아도 청산 감시가 멈춰 있으면 트레일링 손절도
+  // 시간 청산도 안 되고, 그건 진입이 안 되는 것보다 나쁘다.
+  // 열린 거래가 있을 때만 의미가 있으므로 그 수도 같이 센다.
+  let exitRuns: any[] = [];
+  let openTradeCount: number | null = null;
+  try {
+    const { data } = await (sb as any)
+      .from('cron_runs')
+      .select('job, status, detail, started_at')
+      .eq('job', 'exit-monitor')
+      .order('started_at', { ascending: false }).limit(5);
+    exitRuns = data || [];
+  } catch { /* 못 읽으면 점검이 '확인 못 함'으로 적는다 */ }
+  try {
+    const { data } = await (sb as any)
+      .from('ladder_daily_trades')
+      .select('id').eq('user_id', uid).eq('status', 'OPEN').limit(50);
+    // **0건과 '못 읽음'은 다르다.** 못 읽으면 null로 남긴다.
+    openTradeCount = Array.isArray(data) ? data.length : null;
+  } catch { openTradeCount = null; }
+
   // 고를 수 있는 연결. 화면이 이 목록에서만 고르게 해야 '없는 연결 id'가
   // 저장되는 일이 없다.
   let connections: any[] = [];
@@ -96,6 +121,8 @@ export async function GET(req: NextRequest) {
     liveUnlocked: process.env.ALLOW_LIVE_TRADING === 'true',
     // 마이그레이션 036이 적용됐는가. 없으면 배율이 낮게 역산된다.
     marginColumnPresent,
+    // 포지션을 닫아 줄 크론이 돌고 있는가 + 지금 열려 있는 거래 수
+    exitRuns, openTradeCount,
     // 크론이 도는 시각. 화면이 '언제 도는지'를 적을 수 있어야 한다 —
     // 안 적으면 켠 직후에 안 도는 것을 고장으로 읽는다.
     cronUtcHour: 23,
@@ -253,10 +280,9 @@ export async function POST(req: NextRequest) {
       : `${symbol} 자동매매를 껐습니다`,
     // **상한이지 목표가 아니다.** 손절이 넓으면 역산 결과가 더 작게 나오고,
     // 그때는 작은 쪽이 나간다. 화면이 이걸 '100배로 나간다'로 읽으면 안 된다.
-    leverageNote: leverageCap
-      ? `배율은 손절 거리에서 역산되고 ${leverageCap}배에서 잘립니다. `
-        + `${leverageCap}배가 실제로 나오려면 손절이 약 ${(100 / leverageCap * 0.26).toFixed(2)}% 안쪽이어야 합니다.`
-      : null,
+    // 식은 leverageMath 한 곳에만 둔다. 여기 있던 숫자는 1회 증거금
+    // 칸이 생기기 전의 식이라, 증거금 10%에서는 네 배 틀렸다.
+    leverageNote: leverageCap ? leverageNote(leverageCap, riskPct, marginPct) : null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
