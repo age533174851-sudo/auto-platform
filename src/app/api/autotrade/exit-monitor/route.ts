@@ -148,7 +148,14 @@ async function recoverUnresolvedOrders(
         exchange: ex as 'binance' | 'gate',
         apiKey: (conn as any).api_key,
         apiSecret: decryptSecret((conn as any).api_secret_enc ?? ''),
-        testnet: (conn as any).is_testnet !== false ? true : testnet,
+        // **연결이 정한다. 전역 기본값을 섞지 않는다.**
+        //
+        // 예전에는 `is_testnet !== false ? true : testnet`이었다. 실전
+        // 연결이면 삼항의 else로 빠져 전역 testnet을 쓰는데, 그 기본값이
+        // true(테스트넷)다. 결과: **실전 연결의 미확정 주문을 테스트넷에
+        // 물어보고, 없으니 영영 확정되지 않는다.** 미확정 주문이 남아
+        // 있으면 다음 진입이 상태 대조에서 막힌다 — 하나가 다음을 막는다.
+        testnet: (conn as any).is_testnet !== false,
       });
       out.checked += r.checked; out.resolved += r.resolved;
       out.stillUnknown += r.stillUnknown; out.needsAttention += r.needsAttention;
