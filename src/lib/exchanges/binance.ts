@@ -119,6 +119,73 @@ export function explainFuturesAuthError(msg: string, testnet: boolean): string {
   ].join('\n');
 }
 
+/**
+ * -2015가 났을 때 **셋 중 무엇인지 실제로 알아낸다.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 위 함수는 원인 셋을 나열한다. 나열은 원문보다 낫지만, 사용자는 여전히
+ * 셋을 다 뒤져야 한다. 그런데 대부분의 경우 **우리가 이미 답을 알 수 있다.**
+ *
+ * 바이낸스 선물 키의 권한은 계층이다:
+ *   · `/fapi/v2/balance` — **읽기** 권한이면 된다
+ *   · `/fapi/v1/order`   — **거래(TRADE)** 권한이 필요하다
+ *
+ * 그래서 읽기가 되는데 주문이 -2015면, 환경도 IP도 아니다. 둘 다 틀렸다면
+ * 읽기부터 막힌다(IP 화이트리스트는 엔드포인트를 가리지 않고, 데모 서버는
+ * 실전 키를 아예 모른다). 남는 것은 하나뿐이다 — **선물 거래 권한이 꺼져 있다.**
+ *
+ * 반대로 읽기도 -2015면 환경이나 IP다. 그때는 좁히지 않고 그대로 둔다 —
+ * **모르는 것을 아는 척하지 않는다.**
+ */
+export async function narrowFuturesAuthError(
+  msg: string, testnet: boolean,
+  probeRead: () => Promise<{ success: boolean; message?: string }>,
+): Promise<string> {
+  const base = explainFuturesAuthError(msg, testnet);
+  // 인증 오류가 아니면 좁힐 것이 없다
+  if (base === String(msg || '')) return base;
+
+  let readOk = false;
+  let probeErr = '';
+  try {
+    const r = await probeRead();
+    readOk = !!r?.success;
+    if (!readOk) probeErr = String(r?.message || '');
+  } catch (e: any) {
+    probeErr = String(e?.message || e);
+  }
+
+  if (readOk) {
+    const host = testnet ? 'demo-fapi.binance.com (테스트넷)' : 'fapi.binance.com (실전)';
+    return [
+      String(msg || ''),
+      '',
+      `요청한 곳: ${host}`,
+      '',
+      '**선물 거래 권한이 꺼져 있습니다.**',
+      '',
+      '같은 키·같은 서버로 잔고 조회는 성공했습니다. 즉 키도 맞고 환경도 맞고',
+      'IP도 막히지 않았습니다 — 그 셋 중 하나라도 틀렸다면 잔고부터 막힙니다.',
+      '주문 계열 요청만 거부됐으므로 남는 원인은 하나입니다.',
+      '',
+      '고치는 법: 바이낸스 → API 관리 → 이 키 편집 → **Futures(선물) 사용**을 켜고',
+      '저장하세요. 읽기만 켜져 있으면 잔고·시세는 보이고 주문만 막힙니다.',
+      // 빈 문자열은 문단을 나누는 빈 줄이다. filter(Boolean)으로 지우면
+      // 전체가 한 덩어리가 되어 화면에서 읽기 어려워진다.
+      ...(testnet ? ['', '(테스트넷 키는 testnet.binancefuture.com에서 관리합니다)'] : []),
+    ].join('\n');
+  }
+
+  // 읽기도 막혔다 — 환경이나 IP다. 권한은 아니다(권한 문제면 읽기는 됐다).
+  return [
+    base,
+    '',
+    `— 확인: 잔고 조회도 같은 오류로 막혔습니다${probeErr ? ` (${probeErr})` : ''}.`,
+    '  읽기부터 막히면 **2번(선물 권한)은 아닙니다.** 1번(환경)과 3번(IP)을 보세요.',
+  ].join('\n');
+}
+
 export async function testBinance(key: string, secret: string, testnet?: boolean): Promise<TestResult> {
   const t0 = Date.now();
   try {

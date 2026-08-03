@@ -250,8 +250,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         // 인증 오류(-2015 등)면 원인 셋을 나눠 적는다. 바이낸스 원문은
         // "Invalid API-key, IP, or permissions"로 셋을 한 문장에 뭉쳐
         // 놓아서, 그대로 띄우면 무엇을 확인해야 하는지 알 수 없다.
-        const { explainFuturesAuthError } = await import('@/lib/exchanges/binance');
-        const why = explainFuturesAuthError(String(e?.message || e), testnet);
+        // 셋을 나열하는 대신 **어느 것인지 알아낸다.** 같은 키·같은 서버로
+        // 잔고(읽기 권한)를 한 번 찔러 본다. 그게 되면 환경도 IP도 아니므로
+        // 남는 것은 '선물 거래 권한이 꺼짐' 하나뿐이다.
+        const { narrowFuturesAuthError } = await import('@/lib/exchanges/binance');
+        const why = await narrowFuturesAuthError(
+          String(e?.message || e), testnet,
+          () => bf.getFuturesBalance(apiKey, apiSecret, testnet) as any,
+        );
         await update({ status: 'FAILED', error_message: `중복 확인 실패: ${why}` });
         return { ok: false, status: 'FAILED', clientOrderId, message: `중복 확인 실패로 주문 중단: ${why}` };
       }
