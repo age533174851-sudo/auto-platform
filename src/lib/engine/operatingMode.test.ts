@@ -5,7 +5,9 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parseMode, capability, canChangeMode, gateOrder, toLegacyMode, fromLegacyMode,
-  LADDER, type OperatingMode, type ModeEvidence,, modeForDestination } from './operatingMode';
+  modeForDestination,
+  LADDER, type OperatingMode, type ModeEvidence,
+} from './operatingMode';
 
 const CLEAN: ModeEvidence = {
   completedTrades: 999, daysInMode: 999,
