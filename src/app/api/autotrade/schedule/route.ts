@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
 
   const { data: rows, error } = await (sb as any)
     .from('autotrade_schedules')
-    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct, interval_min')
+    .select('id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct, interval_min, margin_pct')
     .eq('user_id', uid).order('symbol');
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
@@ -128,6 +128,21 @@ export async function POST(req: NextRequest) {
     riskPct = n;
   }
 
+  // 1회 증거금 비율(%). **이 값이 배율을 실제로 결정한다** —
+  // 배율은 명목가 ÷ 증거금 예산으로 역산되므로, 예산을 작게 묶어야
+  // 높은 배율이 나온다. "100배로 10%씩 10번"의 그 10%다.
+  let marginPct: number | null = null;
+  if (body?.marginPct != null && body.marginPct !== '') {
+    const n = Number(body.marginPct);
+    if (!Number.isFinite(n) || n <= 0 || n > 100) {
+      return NextResponse.json({
+        ok: false, error: 'invalid_margin',
+        message: `1회 증거금 비율은 0보다 크고 100 이하여야 합니다 (입력 ${body.marginPct})`,
+      }, { status: 400 });
+    }
+    marginPct = n;
+  }
+
   // 얼마나 자주 진입을 볼 것인가(분). 안 주면 표 기본값(하루).
   let intervalMin: number | null = null;
   if (body?.intervalMin != null && body.intervalMin !== '') {
@@ -197,7 +212,7 @@ export async function POST(req: NextRequest) {
     .from('autotrade_schedules')
     .upsert({
       user_id: uid, symbol, connection_id: connectionId,
-      mode: modeRaw, enabled,
+      mode: modeRaw, enabled, margin_pct: marginPct,
       leverage_cap: leverageCap, risk_pct: riskPct,
       ...(intervalMin != null ? { interval_min: intervalMin } : {}),
     }, { onConflict: 'user_id,symbol' })

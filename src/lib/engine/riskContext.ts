@@ -52,6 +52,15 @@ export async function buildRiskContext(
     leverageCap?: number | null;
     /** 1회 위험 비율(%). 예약 줄의 `risk_pct`. */
     riskPct?: number | null;
+    /**
+     * 1회 증거금 비율(%). 예약 줄의 `margin_pct`.
+     *
+     * **이 값이 없어서 100배가 안 나왔다.** 배율은 명목가 ÷ 증거금 예산으로
+     * 역산되는데, 예산이 '가용 전액'이면 배율이 낮게 떨어진다. 계좌의 10%만
+     * 증거금으로 묶으면 같은 명목가에서 배율이 열 배가 된다 —
+     * 그게 "100배로 10%씩 10번"의 뜻이다.
+     */
+    marginPct?: number | null;
   }
 ): Promise<RiskContext> {
   const warnings: string[] = [];
@@ -93,11 +102,21 @@ export async function buildRiskContext(
   // 못 읽는 값은 무시한다. NaN·0·음수를 그대로 넣으면 상한 0(주문 전면
   // 차단) 또는 위험 0%(수량 0)가 된다. 모르는 것을 유리하게도, 불리하게도
   // 읽지 않는다 — 안 건드리는 것이 맞다.
+  // 사용자가 배율 상한을 명시했으면 **그것이 상한이다.**
+  //
+  // riskManager는 Expansion 평가가 없으면 일반 모드 상한(기본 10배)으로
+  // 한 번 더 자른다. 안전한 기본값이지만, 화면에 100을 적었는데 10배가
+  // 나가면 화면이 거짓말을 하는 것이다. 명시한 값을 그대로 상한으로 쓴다 —
+  // 실제 배율은 여전히 손절 거리에서 역산되므로, 이건 '100배로 나간다'가
+  // 아니라 '100배까지 허용한다'이다.
+  let normalMaxLeverage: number | undefined;
+
   const capIn = opts.leverageCap;
   if (capIn != null) {
     const cap = Number(capIn);
     if (Number.isFinite(cap) && cap >= 1 && cap <= 125) {
       limits.maxLeverage = cap;
+      normalMaxLeverage = cap;
       // 상한이지 적용 배율이 아니다. 실제 배율은 손절 거리에서 역산되고
       // 이 값에서 잘린다 — 화면에도 같은 말이 적혀 있다.
       warnings.push(`예약 설정의 배율 상한 ${cap}배 적용 (실제 배율은 손절 거리에서 역산)`);
@@ -281,10 +300,33 @@ export async function buildRiskContext(
     } catch { /* 없으면 0 */ }
   }
 
+  // ── 1회 증거금 상한 ──
+  //
+  // 비율을 금액으로 바꾼다. **자산을 읽은 뒤에** 해야 한다 — 폴백
+  // $10,000으로 계산하면 실제 계좌와 다른 금액이 상한이 된다.
+  let maxMargin: number | undefined;
+  const mIn = opts.marginPct;
+  if (mIn != null) {
+    const mp = Number(mIn);
+    if (Number.isFinite(mp) && mp > 0 && mp <= 100) {
+      maxMargin = accountEquity * (mp / 100);
+      warnings.push(`1회 증거금 ${mp}% ($${maxMargin.toFixed(2)}) 적용 — 배율은 이 예산에서 역산됩니다`);
+      if (source !== 'exchange') {
+        // 자산을 못 읽었으면 이 금액도 가짜다. 조용히 쓰면 실제 계좌와
+        // 다른 크기로 주문이 나간다.
+        warnings.push('계좌 자산을 거래소에서 읽지 못해 위 증거금 금액은 가정값입니다');
+      }
+    } else {
+      warnings.push(`예약 설정의 1회 증거금(${mIn})을 쓰지 못했습니다 — 0 초과 100 이하가 아닙니다`);
+    }
+  }
+
   return {
     config: {
       accountEquity,
       availableMargin,
+      maxMargin,
+      normalMaxLeverage,
       dailyPnl,
       dailyPnlKnown,
       maxLeverage: limits.maxLeverage,

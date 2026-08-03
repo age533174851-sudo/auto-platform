@@ -52,6 +52,9 @@ export default function AutotradeControl() {
   // 선택돼 있으면, 켜기만 누르면 진짜 돈이 나간다.
   const [live, setLive] = useState(false);
   const [riskPct, setRiskPct] = useState('10');
+  // 1회 증거금 비율. **배율을 실제로 결정하는 값이다** — 이게 없으면
+  // 증거금 예산이 가용 전액이 되어 배율이 낮게 역산된다.
+  const [marginPct, setMarginPct] = useState('10');
   // 얼마나 자주 진입을 볼 것인가(분). 크론은 하루 1회지만, 앱이 열려
   // 있는 동안은 이 간격으로 본다.
   const [intervalMin, setIntervalMin] = useState('60');
@@ -119,6 +122,7 @@ export default function AutotradeControl() {
           symbol, connectionId: connId, mode: live ? 'LIVE_SMALL' : 'TESTNET', enabled,
           leverageCap: levCap === '' ? undefined : Number(levCap),
           riskPct: riskPct === '' ? undefined : Number(riskPct),
+          marginPct: marginPct === '' ? undefined : Number(marginPct),
           intervalMin: intervalMin === '' ? undefined : Number(intervalMin),
         }),
       });
@@ -142,6 +146,7 @@ export default function AutotradeControl() {
           // null로 덮여서, 껐다 켠 것만으로 배율 상한이 사라진다.
           leverageCap: row.leverage_cap ?? undefined,
           riskPct: row.risk_pct ?? undefined,
+          marginPct: row.margin_pct ?? undefined,
           intervalMin: row.interval_min ?? undefined,
         }),
       });
@@ -320,6 +325,20 @@ export default function AutotradeControl() {
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>1회 위험 (%)</div>
             <input value={riskPct} inputMode="decimal"
               onChange={e => setRiskPct(e.target.value.replace(/[^0-9.]/g, ''))}
+              style={{
+                width: '100%', background: T.alt, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
+              }}/>
+          </div>
+          <div style={{ flex: 1 }}>
+            {/* **배율을 실제로 결정하는 값.**
+                배율 = 명목가 ÷ 증거금 예산이다. 이 칸이 없던 동안 예산이
+                '가용 전액'이라 배율이 낮게 역산됐다 — 상한에 100을 적어도
+                5배쯤이 나갔다. 계좌의 10%만 묶으면 같은 명목가에서 배율이
+                열 배가 된다. "100배로 10%씩 10번"의 그 10%다. */}
+            <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>1회 증거금 (%)</div>
+            <input value={marginPct} inputMode="decimal"
+              onChange={e => setMarginPct(e.target.value.replace(/[^0-9.]/g, ''))}
               style={{
                 width: '100%', background: T.alt, border: `1px solid ${T.border}`,
                 borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
