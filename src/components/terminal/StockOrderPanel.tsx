@@ -19,6 +19,7 @@
 //    없으면 **주문 버튼을 만들지 않는다** — 눌리는 버튼을 두고 실패
 //    메시지를 띄우는 것보다, 왜 못 누르는지를 먼저 말하는 편이 낫다.
 import React, { memo, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, input } from './theme';
 import { useTerminal } from './TerminalContext';
 import { notifyError, notifySuccess } from '@/lib/notify/center';
@@ -128,7 +129,7 @@ export const StockOrderPanel = memo(function StockOrderPanel({ dense }: { dense?
         notifySuccess('주식 주문 접수됨', `${code} ${q}주 · ${t}`);
         setQty('');
       } else {
-        const t = j?.message || j?.error || `실패 (${r.status})`;
+        const t = errorTextOf(j, `실패 (${r.status})`);
         setMsg({ ok: false, text: t });
         const first = Array.isArray(j?.checklist?.blockers) ? j.checklist.blockers[0] : null;
         notifyError(r.status === 409 ? '점검이 주문을 막았습니다' : '주식 주문 실패',

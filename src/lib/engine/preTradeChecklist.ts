@@ -172,7 +172,17 @@ export const CHECK_SPECS: CheckSpec[] = [
   // (getFuturesPositions)이라, 현물이나 COIN-M 주문에 그 판정을 물리면
   // **다른 시장의 상태로 이 시장의 주문을 막는다.** 없는 검사를 있는 것처럼
   // 두는 것보다, 해당 시장에서 빼는 것이 정직하다.
-  { id: 'STATE_RECONCILE',   label: '거래소와 앱 상태 일치', markets: ['USDM'], intents: BOTH,
+  //
+  // **청산에는 물리지 않는다.** 상태가 어긋났을 때야말로 포지션을 닫을 수
+  // 있어야 한다. 그런데 이 검사가 EXIT까지 막고 있어서, 불일치가 생기면
+  // 나가는 문이 잠겼다 — 화면에 포지션이 보이는데 청산 버튼이 "거래소와
+  // 앱 상태 일치"로 거부당했다.
+  //
+  // 못 여는 것은 불편이고 **못 닫는 것은 사고다.** 바로 아래 UNRESOLVED_
+  // ORDERS와 MARGIN_ISOLATED가 같은 이유로 이미 진입 전용이었는데, 이
+  // 항목만 남아 있었다. reduceOnly는 최악의 경우 아무 일도 안 하는 주문이
+  // 된다(포지션을 뒤집지 못한다) — 막아서 얻는 것보다 잃는 것이 크다.
+  { id: 'STATE_RECONCILE',   label: '거래소와 앱 상태 일치', markets: ['USDM'], intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: true },
 
   // 미확정 주문은 live_orders 기준이라 파생 경로에만 있다.

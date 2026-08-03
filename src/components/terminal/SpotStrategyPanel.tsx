@@ -11,6 +11,7 @@
 //
 // 그래서 각 줄에 '주문창에 채우기'만 둔다 — 값을 옮겨줄 뿐 나가지 않는다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, chip, ghostBtn, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
 import { SpotOrderTools } from './SpotOrderTools';
@@ -75,7 +76,7 @@ const StrategyJudgement = memo(function StrategyJudgement() {
       if (connId) q.set('connectionId', connId);
       const r = await fetch(`/api/strategies/spot?${q}`, { headers: { Authorization: auth } });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `평가 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `평가 실패 (${r.status})`)); return; }
       setErr(''); setD(j);
     } catch (e: any) {
       setErr(`전략 평가 실패 (${e?.message || e})`);

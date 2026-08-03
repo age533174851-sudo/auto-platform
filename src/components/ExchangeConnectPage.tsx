@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { EXCHANGE_META } from '@/lib/exchanges/types';
@@ -117,7 +118,7 @@ export default function ExchangeConnectPage() {
       const r = await fetch('/api/diagnostics/ip', { headers: auth ? { Authorization: auth } : {} });
       const d = await r.json();
       // 실패를 빈 값으로 두지 않는다 — 빈 칸은 '아직 안 눌렀다'로 읽힌다
-      setSrvIp(r.ok && d?.ok ? d : { error: d?.message || d?.error || `확인 실패 (${r.status})` });
+      setSrvIp(r.ok && d?.ok ? d : { error: errorTextOf(d, `확인 실패 (${r.status})`) });
     } catch (e: any) {
       setSrvIp({ error: `확인 실패 (${e?.message || e})` });
     } finally { setIpBusy(false); }
@@ -161,7 +162,7 @@ export default function ExchangeConnectPage() {
       });
       const d = await r.json();
       if (!r.ok || d.error) {
-        setConnectErr(d.error || '연결 실패');
+        setConnectErr(errorTextOf(d, '연결 실패'));
       } else {
         setConnectOk(true);
         // 고른 환경과 실제 키가 달랐으면 **그 사실을 말한다.** 조용히 바꾸면

@@ -14,6 +14,7 @@
 // 3개 공급자를 부르면 비용이 세 배다. 화면을 열 때 자동으로 돌리면
 // 스크롤만 해도 요금이 나간다. 사용자가 누를 때만 부른다.
 import React, { useCallback, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { Users, AlertTriangle } from 'lucide-react';
@@ -76,7 +77,7 @@ export function ConsensusPanel({ article }: {
         body: JSON.stringify({ article }),
       });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `실패 (${r.status})`)); return; }
       setD(j);
     } catch (e: any) { setErr(`요청 실패: ${e?.message || e}`); }
     finally { setBusy(false); }

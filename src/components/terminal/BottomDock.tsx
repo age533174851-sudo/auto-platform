@@ -9,6 +9,7 @@
 //
 // Kill Switch는 탭 안에 숨기지 않는다. 필요한 순간에 두 번 누르게 하면 안 된다.
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, tabStyle, chip, ghostBtn, input, fmtPrice, pnlColor } from './theme';
 import { A } from '@/lib/theme/colors';
 import { useTerminal } from './TerminalContext';
@@ -79,7 +80,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
       const r = await fetch(`/api/binance/futures/account?connectionId=${connId}`,
         { headers: { Authorization: auth } });
       const j = await r.json();
-      if (!r.ok) { setErr(j?.message || j?.error || `조회 실패 (${r.status})`); return; }
+      if (!r.ok) { setErr(errorTextOf(j, `조회 실패 (${r.status})`)); return; }
       setErr('');
       setAcct(j);
       const b = Number(j?.balance?.available ?? j?.balance?.total ?? j?.availableBalance);
@@ -117,7 +118,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         body: JSON.stringify({ connectionId: connId, reason: '터미널에서 수동 발동' }),
       });
       const j = await r.json();
-      setKillMsg(r.ok ? '발동됨 — 신규 진입 차단' : (j?.message || j?.error || '발동 실패'));
+      setKillMsg(r.ok ? '발동됨 — 신규 진입 차단' : (errorTextOf(j, '발동 실패')));
     } catch (e: any) { setKillMsg(`실패: ${e?.message || e}`); }
     finally { setKilling(false); }
   };
@@ -237,7 +238,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
             {!recon ? <Empty t="대조 중"/> : !recon.ok ? (
               <div style={{ padding: '12px 14px', borderRadius: 8, background: C.warnBg }}>
                 <div style={{ color: C.warn, fontWeight: 700, marginBottom: 4 }}>
-                  대조할 수 없습니다 — {recon.error || '사유 미상'}
+                  대조할 수 없습니다 — {errorTextOf(recon, '사유 미상')}
                 </div>
                 <div style={{ color: C.dim, fontSize: FS.micro }}>
                   확인 불가는 &lsquo;문제 없음&rsquo;이 아닙니다. 이 상태에서는 신규 주문이 막힙니다.
@@ -515,7 +516,14 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
    */
   const closeNow = async () => {
     if (!auth || !connId) { setCloseMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
-    if (qty <= 0) return;
+    // **조용히 돌아가지 않는다.** 예전에는 그냥 return이라, 청산을 눌러도
+    // 아무 일도 안 일어나고 이유도 없었다. 닫으려는 사람에게 침묵은
+    // 최악의 응답이다 — 버튼이 고장 났는지 조건이 안 맞는지 알 수 없다.
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setCloseMsg({ ok: false, text:
+        `청산할 수량을 읽지 못했습니다 (${qty}) — 거래소에서 직접 닫으세요` });
+      return;
+    }
 
     const closeSide = closeSideFor(side);
     // 확인 문구에 숫자를 적는다. '청산하시겠습니까?'만 물으면 사람은
@@ -555,7 +563,7 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
         // 대기열을 거치므로 즉시 반영되지 않는다. 잠시 뒤 다시 읽는다.
         setTimeout(onClosed, 2500);
       } else {
-        setCloseMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+        setCloseMsg({ ok: false, text: errorTextOf(j, `실패 (${r.status})`) });
       }
     } catch (e: any) {
       // 응답을 못 받았다. 나갔는지 안 나갔는지 모른다 — 다시 누르면
@@ -807,7 +815,7 @@ function ReversePanel({ v, auth, connId, onDone }: {
         }),
       });
       const j = await r.json();
-      const text = j?.message || j?.error || `실패 (${r.status})`;
+      const text = errorTextOf(j, `실패 (${r.status})`);
       if (j?.ok) onDone(text, 2500);
       else setMsg({ ok: false, text });
     } catch (e: any) {
@@ -952,7 +960,7 @@ function LeveragePanel({ v, auth, connId, onDone }: {
         body: JSON.stringify({ connectionId: connId, symbol: v.symbol, leverage: next }),
       });
       const j = await r.json();
-      const text = j?.message || j?.error || `실패 (${r.status})`;
+      const text = errorTextOf(j, `실패 (${r.status})`);
       if (r.ok && j?.ok) onDone(j.warning ? `${text} — ${j.warning}` : text, 2000);
       else setMsg({ ok: false, text });
     } catch (e: any) {
@@ -1222,7 +1230,7 @@ function TpSlPanel({ v, auth, connId, onDone }: {
         }),
       });
       const j = await r.json();
-      const text = j?.message || j?.error || `실패 (${r.status})`;
+      const text = errorTextOf(j, `실패 (${r.status})`);
       if (j?.ok) onDone(`${text} — 익절/손절은 '미체결' 탭에서 확인하세요`, 2000);
       else setMsg({ ok: false, text });
     } catch (e: any) {
@@ -1455,7 +1463,7 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
         body: JSON.stringify({ positionId: p.id }),
       });
       const j = await r.json();
-      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
       if (j?.ok) setTimeout(onClosed, 600);
     } catch (e: any) {
       setMsg({ ok: false, text: `실패 (${e?.message || e})` });
@@ -1480,7 +1488,7 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      setMsg({ ok: !!j?.ok, text: j?.message || j?.error || `실패 (${r.status})` });
+      setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
       if (j?.ok) { setSlIn(''); setTpIn(''); setTpslOpen(false); setTimeout(onClosed, 400); }
     } catch (e: any) {
       setMsg({ ok: false, text: `실패 (${e?.message || e})` });

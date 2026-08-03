@@ -686,8 +686,20 @@ export async function GET(req: NextRequest) {
         });
         const j = await res.json().catch(() => null);
         const ok = res.ok && j?.ok !== false;
-        results.push({ symbol: r.symbol, mode: r.mode, ok, detail: j?.message || j?.error || null });
-        await noteRun(sb, r.id, ok ? (j?.message || '실행됨') : (j?.error || `실패 (${res.status})`));
+        // **'엔진이 답했다'와 '진입했다'는 다르다.**
+        //
+        // 대부분의 날은 조건이 안 맞아 진입하지 않는다. 그건 정상이고
+        // 실패도 아니다. 그런데 둘을 같은 '성공'으로 세면 화면에
+        // "성공 1건"이 뜨고, 사람은 포지션이 생긴 줄 안다.
+        const executed = j?.executed === true;
+        results.push({
+          symbol: r.symbol, mode: r.mode, ok, executed,
+          detail: j?.message || j?.error || j?.reason || null,
+        });
+        await noteRun(sb, r.id,
+          ok ? (executed ? `진입: ${j?.message || '체결'}`
+                         : `진입 안 함: ${j?.reason || j?.message || '조건 불충족'}`)
+             : (j?.error || `실패 (${res.status})`));
       } catch (e: any) {
         results.push({ symbol: r.symbol, ok: false, error: String(e?.message || e) });
         await noteRun(sb, r.id, `호출 실패: ${e?.message || e}`);
@@ -701,7 +713,10 @@ export async function GET(req: NextRequest) {
     const { recordCronRun } = await import('@/lib/system/cronLog');
     const lg = await recordCronRun(sb, 'daily-ladder',
       readError ? 'failed' : rows.length === 0 ? 'skipped' : 'ok',
-      readError || `${rows.length}건 실행 · 성공 ${results.filter(x => x.ok).length}건`,
+      // 확인한 줄 수 · 실제 진입 · 실패를 나눠 적는다. '성공 N건'만 적으면
+      // 진입하지 않은 날도 매매가 일어난 것처럼 읽힌다.
+      readError || `${rows.length}건 확인 · 진입 ${results.filter(x => x.executed).length}건`
+        + ` · 실패 ${results.filter(x => !x.ok).length}건`,
       startedAt);
     cronLogError = lg.error;
   } catch (e: any) { cronLogError = String(e?.message || e); }

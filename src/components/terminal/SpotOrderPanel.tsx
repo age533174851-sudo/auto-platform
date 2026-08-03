@@ -18,6 +18,7 @@
 // 선물은 초록/빨강 'LONG 진입 / SHORT 진입', 현물은 'BTC 매수 / BTC 매도'.
 // 두 화면이 같아 보이면 언젠가 현물인 줄 알고 선물 숏을 누른다.
 import React, { memo, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
 import { AccountLine } from './AccountLine';
@@ -195,7 +196,7 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
         setMsg({ ok: true, text: `${j.message} · ${fmtPrice(j.filledQty ?? 0, 6)} ${base}` });
         setAmount('');
       } else {
-        setMsg({ ok: false, text: j?.message || j?.error || `실패 (${r.status})` });
+        setMsg({ ok: false, text: errorTextOf(j, `실패 (${r.status})`) });
       }
     } catch (e: any) {
       setMsg({ ok: false, text: `응답 없음 — 재시도 말고 현물 내역을 먼저 확인하세요 (${e?.message || e})` });

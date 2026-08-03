@@ -17,6 +17,7 @@
 // 2번이 이 화면의 목적이다. 방송을 보는 사람은 기억으로 판단하는데,
 // 기억은 크게 맞힌 것만 남기고 조용히 틀린 것은 지운다.
 import React, { useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn, primaryBtn, input } from './theme';
 import { useTerminal } from './TerminalContext';
 import { CONFIDENCE_LABEL, ACTION_LABEL } from '@/lib/signals/positionParse';
@@ -51,7 +52,7 @@ export function TraderSignalPanel() {
       const j = await r.json();
       if (!r.ok || !j?.ok) {
         setData(null);
-        setErr([j?.message || j?.error || `조회 실패 (${r.status})`, j?.hint].filter(Boolean).join(' — '));
+        setErr([errorTextOf(j, `조회 실패 (${r.status})`), j?.hint].filter(Boolean).join(' — '));
         return;
       }
       setErr(''); setData(j);
@@ -89,7 +90,7 @@ export function TraderSignalPanel() {
     const { r, j } = await post({ action: 'add_channel', name: newName.trim() });
     setBusy(false);
     if (r.ok && j?.ok) { setNewName(''); load(); }
-    else setMsg({ ok: false, text: [j?.message || j?.error, j?.hint].filter(Boolean).join(' — ') });
+    else setMsg({ ok: false, text: [errorTextOf(j), j?.hint].filter(Boolean).join(' — ') });
   };
 
   const addSignal = async () => {
@@ -103,7 +104,7 @@ export function TraderSignalPanel() {
     });
     setBusy(false);
     if (r.ok && j?.ok) { setText(''); setPreview(null); setSawScreen(false); load(); setMsg({ ok: true, text: '기록했습니다' }); }
-    else setMsg({ ok: false, text: [j?.message || j?.error, j?.hint].filter(Boolean).join(' — ') });
+    else setMsg({ ok: false, text: [errorTextOf(j), j?.hint].filter(Boolean).join(' — ') });
   };
 
   if (err) {

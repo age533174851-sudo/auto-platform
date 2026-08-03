@@ -15,6 +15,7 @@
 // 실제로는 **현물 매수를 꺼 버린 것**이다. 그 사실을 저장 전에 화면이
 // 말해 주지 않으면, 사용자는 다음 주문이 막힌 다음에야 알게 된다.
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn, input as inputStyle, chip } from './theme';
 import { useTerminal } from './TerminalContext';
 import { pickAccount, type SubAccount } from '@/lib/portfolio/subAccount';
@@ -76,7 +77,7 @@ export function SubAccountPanel() {
         // 조회 실패를 '바구니 없음'으로 그리지 않는다. 빈 목록은 "이 기능을
         // 안 쓴다"는 뜻인데, 못 읽은 것도 화면에서는 똑같이 비어 보인다.
         setRows(null);
-        setErr(j?.message || j?.error || `조회 실패 (${r.status})`);
+        setErr(errorTextOf(j, `조회 실패 (${r.status})`));
         return;
       }
       setErr('');
@@ -108,7 +109,7 @@ export function SubAccountPanel() {
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setSaveErr(j?.message || j?.error || `저장 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setSaveErr(errorTextOf(j, `저장 실패 (${r.status})`)); return; }
       setDraft(null);
       await load();
     } catch (e: any) {
@@ -124,7 +125,7 @@ export function SubAccountPanel() {
         method: 'DELETE', headers: { Authorization: auth },
       });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `삭제 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `삭제 실패 (${r.status})`)); return; }
       setConfirmDel(null);
       await load();
     } catch (e: any) {

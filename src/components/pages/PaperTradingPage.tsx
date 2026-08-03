@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { T } from '@/lib/constants';
@@ -94,7 +95,7 @@ export default function PaperTradingPage({
         `${p.name} · 평단 ${formatKRW(p.avgPrice)} → 청산 ${formatKRW(cur)}\n실현손익 ${win ? '+' : ''}₩${Math.round(realized).toLocaleString('ko-KR')} (${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%) · 보유 ${hold}`,
       );
     } else {
-      notify('error', '청산 실패', result.error || '알 수 없는 오류');
+      notify('error', '청산 실패', errorTextOf(result, '알 수 없는 오류'));
     }
   }, [account, priceLookup]);
 
@@ -134,7 +135,7 @@ export default function PaperTradingPage({
         );
       }
     } else {
-      notify('error', '주문 실패', result.error || '알 수 없는 오류');
+      notify('error', '주문 실패', errorTextOf(result, '알 수 없는 오류'));
     }
   }, [account, selected, qty, side, priceLookup]);
 

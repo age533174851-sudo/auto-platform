@@ -12,6 +12,7 @@
 // 기억하지 않는다. 그래서 목록 맨 위에 주기를 크게 적고, 각 항목에
 // 마지막으로 확인한 시각을 붙인다. 그 시각이 오래됐으면 감시가 멈춘 것이다.
 import React, { memo, useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, chip, ghostBtn, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
@@ -51,7 +52,7 @@ export const WatchPanel = memo(function WatchPanel() {
     try {
       const r = await fetch('/api/watch', { headers: { Authorization: auth } });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `조회 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `조회 실패 (${r.status})`)); return; }
       setErr(''); setRows(j.watches); setIntervalMin(j.checkIntervalMin); setNote(j.note);
     } catch (e: any) { setErr(`감시 조회 실패 (${e?.message || e})`); }
   }, [auth]);
@@ -82,7 +83,7 @@ export const WatchPanel = memo(function WatchPanel() {
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (!r.ok || !j?.ok) { setErr(j?.message || j?.error || `등록 실패 (${r.status})`); return; }
+      if (!r.ok || !j?.ok) { setErr(errorTextOf(j, `등록 실패 (${r.status})`)); return; }
       setQty(''); setQuoteUsd(''); setTriggerPrice('');
       await load();
     } catch (e: any) { setErr(`등록 실패 (${e?.message || e})`); }

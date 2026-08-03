@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 // src/components/terminal/OrderPane.tsx
 //
 // 호가판과 주문판. **따로 export한다.**
@@ -438,14 +439,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           // 화면은 그걸 안 읽고 '확인 불가'만 그리고 있었다 — 사용자는
           // 키가 문제인지 자금이 없는 건지 알 방법이 없다.
           const fe = j.tree?.futures;
-          setWalletErr(fe && fe.ok === false ? String(fe.error || '선물 지갑을 읽지 못했습니다') : '');
+          setWalletErr(fe && fe.ok === false ? String(errorTextOf(fe, '선물 지갑을 읽지 못했습니다')) : '');
           return;
         }
         // **왜 못 읽었는지를 버리지 않는다.** 지금까지 이유를 통째로
         // 지우고 '확인 불가'만 남겼는데, 그러면 테스트 자금을 받으러 갈지
         // 키를 고칠지 사용자가 알 수 없다.
         setWallet(null);
-        setWalletErr(String(j?.message || j?.error || `조회 실패 (${r.status})`));
+        setWalletErr(String(errorTextOf(j, `조회 실패 (${r.status})`)));
       } catch (e: any) {
         if (alive) { setWallet(null); setWalletErr(`지갑을 읽지 못했습니다 (${e?.message || e})`); }
       }
@@ -525,7 +526,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         const j = await r.json();
         if (!alive) return;
         setMarginType(j?.marginType ?? null);
-        setMarginErr(j?.marginType ? '' : (j?.message || j?.error || '마진 모드를 읽지 못했습니다'));
+        setMarginErr(j?.marginType ? '' : (errorTextOf(j, '마진 모드를 읽지 못했습니다')));
       } catch (e: any) {
         // **격리로 가정하지 않는다.** 여기서 기본값을 넣으면 화면이 다시
         // 거짓말을 시작한다.
@@ -589,7 +590,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         notifySuccess('마진 모드 변경', j.message || `${want}로 바꿨습니다`);
       } else {
         // 실패했으면 **화면 값을 바꾸지 않는다.** 거래소는 그대로다.
-        setMarginErr(j?.message || j?.error || `실패 (${r.status})`);
+        setMarginErr(errorTextOf(j, `실패 (${r.status})`));
       }
     } catch (e: any) {
       setMarginErr(`응답 없음 — 거래소에서 직접 확인하세요 (${e?.message || e})`);
@@ -702,6 +703,27 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
     // 모의는 연결이 필요 없다. 나머지는 이 모드에서 쓸 연결이 있어야 한다.
     if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason }); return; }
+
+    // ── 이 연결로 이 시장에 주문할 수 있는가 ──
+    //
+    // 주문 라우트는 **시장**으로 정해진다(orderEndpointFor). 그런데 연결은
+    // 거래소별이다. 게이트아이오 연결을 고른 채 USDⓈ-M을 누르면 바이낸스
+    // 라우트로 가고, 서버가 거부한다 — 예전에는 그 응답이 `not_binance`
+    // 한 단어로 화면에 떴다.
+    //
+    // 보내 놓고 거부당하는 것보다 **누르기 전에 말하는 것**이 낫다.
+    if (!isPaper) {
+      const chosen = connections.find((c: any) => c.id === modeResolution.connId);
+      const ex = String((chosen as any)?.exchange_id || '').toLowerCase();
+      // 모르면 막지 않는다 — 목록을 못 읽었다는 이유로 주문을 막으면
+      // 확인하지 못한 것이 거부가 된다.
+      if (ex && ex !== 'binance') {
+        setMsg({ ok: false, text:
+          `이 연결은 ${ex}입니다 — 이 화면의 주문은 바이낸스 연결로만 나갑니다. `
+          + '위쪽에서 바이낸스 연결로 바꾸세요.' });
+        return;
+      }
+    }
     // USDT로 적었으면 여기서 코인 개수가 된다. **가격을 모르면 환산이
     // 불가능하고, 그건 '수량을 안 적었다'와 다른 문제다** — 다르게 말한다.
     if (unit === 'QUOTE' && unitPx <= 0) {
@@ -808,7 +830,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       if (r.ok && j?.ok) {
         // 넘겨서 나간 것을 '통과'로 적지 않는다.
         const okText = (j?.message || '주문 접수됨')
-          + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : '');
+          + (j?.checklist?.overridden ? ` · ${j.checklist.overrideNote}` : '')
+          // 수량·가격이 거래소 규격에 맞춰 바뀌었거나, 규격을 못 읽어
+          // 그대로 보냈다는 사실. 서버는 계속 돌려주고 있었는데 화면이
+          // 한 번도 쓰지 않았다 — 100%를 눌렀는데 잔고가 남는 이유가
+          // 어디에도 없었다.
+          + (j?.quantizeNote ? ` · ${j.quantizeNote}` : '');
         setMsg({ ok: true, text: okText });
         // 토스트로도 띄운다 — 4초 뒤 저절로 사라지고, 탭하면 바로 닫히고,
         // 알림 센터에 남아서 나중에 다시 볼 수 있다.
@@ -816,8 +843,29 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         setQty('');
         if (isPaper) paper.reload();
       } else {
-        const failText = (j?.message || j?.error || `실패 (${r.status})`)
-          + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : '');
+        // ── 인증 오류인데 쓸 수 있는 연결이 여럿이면 그 사실을 함께 적는다 ──
+        //
+        // 바이낸스 테스트넷은 **두 개**다. 현물은 testnet.binance.vision,
+        // 선물은 demo-fapi — 키가 따로 발급된다. 둘 다 앱에서는 그냥
+        // '테스트넷 연결'이라 목록에 나란히 서고, 앱이 그중 하나를 골라
+        // 주문한다. 현물 테스트넷 키가 뽑히면 선물 주문은 -2015로 막힌다.
+        //
+        // 그때 사용자가 보는 것은 "API 키가 무효" 한 줄이다. 키는 멀쩡한데
+        // **다른 연결을 골랐어야 했다**는 사실이 어디에도 없다.
+        const raw = errorTextOf(j, `실패 (${r.status})`)
+          // 실패한 이유가 규격 때문일 수 있다. 거래소 오류(-1111 등)만
+          // 보여주면 무엇을 고쳐야 하는지 알 수 없다.
+          + (j?.quantizeNote ? `\n\n${j.quantizeNote}` : '');
+        const authish = /-2015|-2014|-1022|Invalid API|API-key|permissions/i.test(raw);
+        const many = (modeResolution.choices ?? 0) > 1;
+        const failText = raw
+          + (j?.refusedOverrides?.length ? ' — 이 항목은 눌러서 넘길 수 없습니다' : '')
+          + (authish && many
+            ? `\n\n지금 이 모드에 쓸 수 있는 연결이 ${modeResolution.choices}개이고, `
+              + `그중 **${modeResolution.chosenLabel || '첫 번째'}**로 보냈습니다. `
+              + '바이낸스는 현물 테스트넷과 선물 데모의 키가 다릅니다 — '
+              + '키를 고치기 전에 **다른 연결로 바꿔서** 먼저 시도해 보세요.'
+            : '');
         setMsg({ ok: false, text: failText });
         // **막힌 이유의 첫 줄까지 토스트에 싣는다.** 항목 이름만 있으면
         // 무엇을 고쳐야 하는지 알 수 없다.

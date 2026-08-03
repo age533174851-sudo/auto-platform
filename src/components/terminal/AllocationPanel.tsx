@@ -16,6 +16,7 @@
 //
 // 잘된 것만 크게 보여주면 "왜 아무것도 안 도는지" 알 수 없는 화면이 된다.
 import React, { useCallback, useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
 import { SubAccountPanel } from './SubAccountPanel';
@@ -43,7 +44,7 @@ export function AllocationPanel() {
         // 조회 실패를 '배분 없음'으로 그리지 않는다. 빈 표와 못 읽은 표는
         // 완전히 다른 상태인데 화면에서는 둘 다 비어 보인다.
         setData(null);
-        setErr(j?.message || j?.error || `조회 실패 (${r.status})`);
+        setErr(errorTextOf(j, `조회 실패 (${r.status})`));
         return;
       }
       setErr('');

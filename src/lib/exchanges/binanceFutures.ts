@@ -566,6 +566,13 @@ export async function getFuturesServerTime(testnet = true): Promise<number | nul
 export interface FuturesOrderResult {
   success: boolean; message: string; orderId?: number | string;
   symbol?: string; side?: string; qty?: number; price?: number; raw?: any;
+  /**
+   * 이 **거래 환경**이 그 주문 유형을 아예 안 받는가(-4120).
+   *
+   * 파라미터를 고쳐서 될 일이 아니라는 뜻이다. 이게 없으면 화면이
+   * 키·권한·수량을 의심하게 만든다 — 거기엔 고칠 것이 없다.
+   */
+  envUnsupported?: boolean;
 }
 
 export async function placeFuturesOrder(
@@ -598,6 +605,18 @@ export async function placeFuturesTPSL(
     symbol: string; side: 'BUY' | 'SELL'; stopPrice: number;
     type: 'TAKE_PROFIT_MARKET' | 'STOP_MARKET'; quantity?: number;
     /**
+     * 대체 시도에만 쓰는 수량.
+     *
+     * 손절은 `closePosition: true`로 거는 것이 맞다 — 부분 체결이든
+     * 나중에 수량이 바뀌든 '그때 있는 전량'을 닫는다. 그래서 quantity를
+     * 안 넘긴다.
+     *
+     * 그런데 그 모양이 -4120으로 거절되면 대체할 수단이 없어진다.
+     * 이 칸은 **1차 시도의 모양을 바꾸지 않으면서** 대체 시도에 쓸 수량을
+     * 준다. 없으면 대체 시도를 건너뛴다.
+     */
+    fallbackQuantity?: number | null;
+    /**
      * 트리거 기준가. 기본은 MARK_PRICE — 얇은 호가의 한 틱 꼬리에 손절이
      * 털리는 것을 줄인다. 예전에는 코드에 박혀 있어서 사용자가 Last를
      * 원해도 방법이 없었다.
@@ -606,16 +625,71 @@ export async function placeFuturesTPSL(
   },
   testnet = true,
 ): Promise<FuturesOrderResult> {
-  try {
+  const sym = opts.symbol.toUpperCase().replace('/', '');
+  const label = opts.type === 'TAKE_PROFIT_MARKET' ? '익절' : '손절';
+
+  const attempt = async (shape: 'closePosition' | 'quantity') => {
     const params: Record<string, string | number> = {
-      symbol: opts.symbol.toUpperCase().replace('/', ''), side: opts.side, type: opts.type, stopPrice: opts.stopPrice,
+      symbol: sym, side: opts.side, type: opts.type, stopPrice: opts.stopPrice,
       workingType: opts.workingType || 'MARK_PRICE',
     };
-    if (opts.quantity != null) { params.quantity = opts.quantity; params.reduceOnly = 'true'; }
-    else { params.closePosition = 'true'; }
-    const d = await fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
-    return { success: true, message: opts.type === 'TAKE_PROFIT_MARKET' ? '익절 설정' : '손절 설정', orderId: d.orderId, symbol: d.symbol, raw: d };
-  } catch (e: any) { return { success: false, message: e.message || 'TP/SL 실패' }; }
+    if (shape === 'quantity') {
+      const q = opts.quantity ?? opts.fallbackQuantity;
+      if (q == null || !Number.isFinite(Number(q)) || Number(q) <= 0) {
+        throw new Error('수량을 모르면 이 방식으로 걸 수 없습니다');
+      }
+      params.quantity = Number(q);
+      params.reduceOnly = 'true';
+    } else {
+      params.closePosition = 'true';
+    }
+    return fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
+  };
+
+  // 원래 쓰던 모양. 수량을 알면 reduceOnly, 모르면 closePosition.
+  const first: 'closePosition' | 'quantity' = opts.quantity != null ? 'quantity' : 'closePosition';
+
+  try {
+    const d = await attempt(first);
+    return { success: true, message: `${label} 설정`, orderId: d.orderId, symbol: d.symbol, raw: d };
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+
+    // ── -4120: 이 엔드포인트가 이 주문 유형을 안 받는다 ──
+    //
+    // 바이낸스 데모(demo-fapi)에서 STOP_MARKET이 이 오류로 거절되는 것을
+    // 봤다. 환경마다 조건부 주문의 파라미터 조합을 받는 범위가 다르므로,
+    // **반대 모양으로 한 번 더 시도한다** — closePosition으로 막혔으면
+    // 수량+reduceOnly로, 그 반대도 마찬가지.
+    //
+    // 엔드포인트 주소를 추측해서 바꾸지는 않는다. 어디로 나갈지 확실하지
+    // 않은 주문을 실계좌에 보내는 것이 이 오류보다 훨씬 나쁘다.
+    const other: 'closePosition' | 'quantity' = first === 'quantity' ? 'closePosition' : 'quantity';
+    const retriable = /-4120|not supported for this endpoint|Algo Order/i.test(msg);
+    const canRetryWithQty = (opts.quantity ?? opts.fallbackQuantity) != null;
+    if (retriable && !(other === 'quantity' && !canRetryWithQty)) {
+      try {
+        const d2 = await attempt(other);
+        return { success: true, message: `${label} 설정 (대체 방식)`, orderId: d2.orderId, symbol: d2.symbol, raw: d2 };
+      } catch (e2: any) {
+        // 두 모양 다 -4120이면 파라미터 문제가 아니라 **환경 문제**다.
+        // 그렇게 말해야 사용자가 키·권한·수량을 뒤지지 않는다.
+        const bothBlocked = /-4120|not supported for this endpoint|Algo Order/i
+          .test(String(e2?.message || e2));
+        return {
+          success: false,
+          envUnsupported: bothBlocked,
+          message: bothBlocked
+            ? `${label}을(를) 거래소에 걸 수 없습니다 — ${testnet ? '바이낸스 데모(demo-fapi)' : '이 환경'}가 `
+              + `${opts.type} 주문을 받지 않습니다(-4120). 전량 청산·수량 지정 두 방식을 다 시도했습니다. `
+              + `키·권한·수량 문제가 아닙니다.`
+            : `${label} 부착 실패 — 두 가지 방식을 다 시도했습니다. `
+              + `원문: ${msg} / ${String(e2?.message || e2)}`,
+        };
+      }
+    }
+    return { success: false, message: msg || 'TP/SL 실패' };
+  }
 }
 
 /**
@@ -753,7 +827,14 @@ const _lotCache: Record<string, { stepSize: number; minQty: number; tickSize: nu
 
 export async function getSymbolFilters(symbol: string, testnet = true): Promise<{ stepSize: number; minQty: number; tickSize: number } | null> {
   const sym = symbol.toUpperCase().replace('/', '');
-  const cached = _lotCache[sym];
+  // ── 캐시 열쇠에 **호스트**를 넣는다 ──
+  //
+  // 예전에는 심볼만으로 캐시했다. 그런데 규격은 환경마다 다르다 —
+  // 데모의 BTCUSDT는 step 0.0001인데 실전은 0.001이다. 한쪽에서 먼저
+  // 읽힌 값이 다른 쪽에 그대로 쓰이면, **맞는 수량을 틀린 격자로
+  // 반올림한다.** 그리고 그 주문은 -1111로 거부된다.
+  const cacheKey = `${testnet ? 'demo' : 'live'}:${sym}`;
+  const cached = _lotCache[cacheKey];
   if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached;
   try {
     const r = await fetch(`${base(testnet)}/fapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(8000) });
@@ -763,13 +844,32 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     if (!s) return null;
     const lot = (s.filters || []).find((f: any) => f.filterType === 'LOT_SIZE');
     const priceF = (s.filters || []).find((f: any) => f.filterType === 'PRICE_FILTER');
+
+    // ── **못 읽으면 만들어내지 않는다** ──
+    //
+    // 예전에는 `parseFloat(lot?.stepSize || '0.001')`처럼 기본값을
+    // 지어냈다. 종목마다·환경마다 다른 값을 코드에 박아 두면, 규격을
+    // 못 읽은 순간 **틀린 격자로 반올림한 주문**이 나간다. 그건 규격을
+    // 안 맞춘 것보다 나쁘다 — 맞춘 줄 알고 보내니까.
+    //
+    // quantize.ts의 원칙이 이미 그렇게 적혀 있다("못 읽으면 그대로
+    // 보내고 거래소가 판단하게 둔다"). 여기서 기본값을 채우는 바람에
+    // 그 경로가 한 번도 안 돌았다.
+    const step = parseFloat(lot?.stepSize ?? '');
+    const min = parseFloat(lot?.minQty ?? '');
+    const tick = parseFloat(priceF?.tickSize ?? '');
+    if (!Number.isFinite(step) || step <= 0) return null;
+    if (!Number.isFinite(tick) || tick <= 0) return null;
+
     const result = {
-      stepSize: parseFloat(lot?.stepSize || '0.001'),
-      minQty:   parseFloat(lot?.minQty || '0.001'),
-      tickSize: parseFloat(priceF?.tickSize || '0.01'),
+      stepSize: step,
+      // minQty만 없으면 stepSize로 대신한다 — 한 칸이 최소라는 뜻이고,
+      // 이건 지어낸 값이 아니라 같은 응답에서 나온 값이다.
+      minQty: Number.isFinite(min) && min > 0 ? min : step,
+      tickSize: tick,
       at: Date.now(),
     };
-    _lotCache[sym] = result;
+    _lotCache[cacheKey] = result;
     return result;
   } catch { return null; }
 }
@@ -916,3 +1016,47 @@ export async function diagnoseFutures(
 
   return { host: base(testnet), keyPrefix: String(key || '').slice(0, 8), checks };
 }
+
+/**
+ * 이 호스트가 **어떤 주문 유형을 받는다고 스스로 말하는가.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 데모(demo-fapi)에서 STOP_MARKET이 -4120으로 거절됐다. 그런데 그건
+ * 주문을 실제로 내 봐야 알 수 있었고, 매번 진입·청산 수수료가 나갔다.
+ *
+ * `exchangeInfo`는 **키도 서명도 필요 없는 공개 조회**이고, 심볼마다
+ * `orderTypes`를 알려준다. 미리 물어보면 주문을 내기 전에 알 수 있다.
+ *
+ * 이 값을 판단에 그대로 쓰지는 않는다 — 거래소가 목록에 적어 두고도
+ * 거절하는 경우가 있다(실제로 그랬을 수 있다). 화면에 **사실을 보여주는**
+ * 용도다. 목록에 없으면 확실히 안 되는 것이고, 있는데 안 되면 그건
+ * 거래소가 목록과 다르게 동작하는 것이라 그렇게 적어야 한다.
+ */
+export async function futuresOrderTypes(
+  hostUrl: string, symbol = 'BTCUSDT',
+): Promise<{ ok: boolean; orderTypes: string[]; detail: string }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const r = await fetch(`${hostUrl}/fapi/v1/exchangeInfo?symbol=${sym}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) return { ok: false, orderTypes: [], detail: `HTTP ${r.status}` };
+    const d = await r.json();
+    const row = (Array.isArray(d?.symbols) ? d.symbols : []).find(
+      (s: any) => String(s?.symbol).toUpperCase() === sym);
+    if (!row) return { ok: false, orderTypes: [], detail: `${sym}을(를) 찾지 못했습니다` };
+    const types = Array.isArray(row.orderTypes) ? row.orderTypes.map(String) : [];
+    return { ok: true, orderTypes: types, detail: types.length ? types.join(', ') : '목록이 비어 있습니다' };
+  } catch (e: any) {
+    return { ok: false, orderTypes: [], detail: String(e?.message || e) };
+  }
+}
+
+/** 진단이 물어볼 선물 호스트들. 옛 테스트넷이 살아 있는지도 함께 본다 */
+export const FUTURES_HOSTS = {
+  live: FUTURES_BASE,
+  demo: TESTNET_FUTURES_BASE,
+  /** 바이낸스가 데모로 옮기기 전의 선물 테스트넷. 아직 사는지 확인용 */
+  oldTestnet: 'https://testnet.binancefuture.com',
+} as const;

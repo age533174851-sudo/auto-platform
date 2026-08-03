@@ -353,9 +353,25 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       if (!args.reduceOnly && args.stopLoss) {
         const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
           symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
+          // 1차는 closePosition(그때 있는 전량)이 맞다. 그게 이 환경에서
+          // 거절되면(-4120) 체결 수량으로 한 번 더 시도한다.
+          fallbackQuantity: res.qty || plan.quantity,
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
-        else slError = String((sl as any)?.message || '원인 불명');
+        else {
+          slError = String((sl as any)?.message || '원인 불명');
+          // 이 환경이 조건부 주문을 아예 안 받는 경우다. 사용자가
+          // 고칠 것이 **여기에는 없다** — 무엇을 해야 하는지까지 적는다.
+          // 이 말이 없으면 같은 시도를 반복하게 되고, 시도마다 진입·청산
+          // 수수료가 나간다(실제로 잔고가 그렇게 줄었다).
+          if ((sl as any)?.envUnsupported) {
+            slError += testnet
+              ? ' — 이 환경에서는 거래소 손절을 걸 수 없으므로, 여기서 손절 있는 진입은 불가능합니다.'
+                + ' 실전(fapi)은 STOP_MARKET을 받으므로 이 제약은 데모에만 해당합니다.'
+                + ' 모의(PAPER) 모드는 앱이 직접 손절을 계산하므로 연습에 쓸 수 있습니다.'
+              : ' — 거래소가 조건부 주문을 받지 않습니다. 손절 없이 진입하지 않습니다.';
+          }
+        }
       }
       // 익절 — exitPlan이 있으면 분할 사다리를, 없으면 기존 단일 익절을 건다.
       const tpIds: string[] = [];
@@ -439,6 +455,46 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           closeErr = e?.message || String(e);
         }
 
+        // ── 닫기가 실패했다면 **정말 열려 있는지 확인한다** ──
+        //
+        // -2022(ReduceOnly Order is rejected)는 대부분 "줄일 포지션이
+        // 없다"는 뜻이다. 진입이 체결되지 않았거나 이미 닫힌 경우다.
+        // 그런데 예전에는 닫기 실패를 곧바로 "손절 없는 포지션이 열려
+        // 있습니다"로 적었다. 없는 포지션을 찾으라고 보내는 것이고,
+        // 사용자는 거래소를 뒤지다가 아무것도 못 찾는다.
+        //
+        // 반대로 정말 열려 있으면 수량을 거래소에서 읽어 **그 수량으로**
+        // 한 번 더 닫는다. 우리가 들고 있던 res.qty가 부분 체결이나
+        // 반올림으로 실제와 다르면 reduceOnly가 거절된다.
+        let posAmt: number | null = null;
+        let posErr = '';
+        if (!closed) {
+          try {
+            const { risk, error } = await bf.getSymbolPositionRiskEx(apiKey, apiSecret, plan.symbol, testnet);
+            if (error) posErr = error;
+            else posAmt = risk ? Math.abs(Number(risk.positionAmt) || 0) : 0;
+          } catch (e: any) { posErr = String(e?.message || e); }
+
+          if (posAmt != null && posAmt > 0) {
+            try {
+              const retry = await bf.placeFuturesOrder(apiKey, apiSecret, {
+                symbol: plan.symbol, side: closeSide, type: 'MARKET',
+                quantity: posAmt, reduceOnly: true,
+                clientOrderId: `${clientOrderId}Y`.slice(0, 36),
+              }, testnet);
+              if ((retry as any)?.success) { closed = true; closeErr = ''; }
+              else closeErr = `${closeErr} · 실제 수량(${posAmt})으로 재시도도 실패: ${(retry as any)?.message || ''}`;
+            } catch (e: any) {
+              closeErr = `${closeErr} · 재시도 실패: ${e?.message || e}`;
+            }
+          } else if (posAmt === 0) {
+            // 열린 포지션이 없다. 되돌릴 것이 없으므로 '닫았다'와 같다 —
+            // 다만 문구는 사실대로 적는다(아래 detail에서 구분한다).
+            closed = true;
+            closeErr = '';
+          }
+        }
+
         const detail = `손절 부착 실패(${slError})`;
         if (closed) {
           await update({ status: 'FAILED', error_message: `${detail} — 포지션을 즉시 청산했습니다` });
@@ -446,18 +502,30 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
             ok: false, status: 'FAILED', clientOrderId,
             exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
             tpOrderId: tpId,
-            message: `${detail}. 손절 없는 포지션을 남기지 않기 위해 진입을 즉시 청산했습니다.`,
+            message: posAmt === 0
+              // 되돌릴 것이 없었다. '청산했다'고 적으면 하지도 않은 일을
+              // 했다고 말하는 것이고, 사용자는 체결된 줄 안다.
+              ? `${detail}. 거래소에 열린 포지션이 없어 되돌릴 것이 없었습니다 — 진입은 체결되지 않았습니다.`
+              : `${detail}. 손절 없는 포지션을 남기지 않기 위해 진입을 즉시 청산했습니다.`,
           };
         }
 
         // 청산까지 실패 — 사람이 개입해야 한다
+        //
+        // **포지션이 열려 있다고 단정하려면 확인했어야 한다.** 확인하지
+        // 못했으면 그렇게 적는다 — 없는 포지션을 찾으라고 보내면 사용자는
+        // 거래소를 뒤지다가 아무것도 못 찾고, 다음부터 이 경고를 안 믿는다.
+        const posLine = posAmt != null && posAmt > 0
+          ? `손절 없는 포지션 ${posAmt}이(가) 열려 있습니다 — 거래소에서 직접 닫으세요.`
+          : posErr
+            ? `포지션이 열렸는지 확인하지 못했습니다(${posErr}) — 거래소에서 직접 확인하세요.`
+            : '거래소에서 직접 확인하세요.';
         await update({ status: 'UNKNOWN', error_message: `${detail}, 자동 청산도 실패(${closeErr})` });
         return {
           ok: false, status: 'UNKNOWN', clientOrderId,
           exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
           tpOrderId: tpId,
-          message: `⚠️ 긴급: ${detail}이고 자동 청산도 실패했습니다(${closeErr}). ` +
-                   `손절 없는 포지션이 열려 있습니다 — 거래소에서 직접 확인하세요.`,
+          message: `⚠️ 긴급: ${detail}이고 자동 청산도 실패했습니다(${closeErr}). ${posLine}`,
         };
       }
 

@@ -100,6 +100,16 @@ export interface ModeResolution {
   reason: string;
   /** 실제 자금이 걸리는가 — 화면 경고의 근거 */
   realMoney: boolean;
+  /**
+   * 이 모드에서 쓸 수 있었던 연결의 수.
+   *
+   * 2 이상이면 앱이 하나를 골랐다는 뜻이다. `is_testnet`은 사용자가 적은
+   * 값이지 거래소가 확인해 준 값이 아니라서, 잘못 표시된 연결이 섞여
+   * 있으면 엉뚱한 계좌로 주문이 나간다. 그 가능성을 화면이 알아야 한다.
+   */
+  choices?: number;
+  /** 실제로 고른 연결의 이름. 화면이 "어디로 나가는지"를 적을 수 있어야 한다 */
+  chosenLabel?: string;
 }
 
 /**
@@ -138,14 +148,45 @@ export function resolveTradeMode(
   }
 
   const preferred = preferId ? usable.find(c => c.id === preferId) : null;
-  if (preferred) return { ...base, ok: true, connId: preferred.id, reason: '' };
+  if (preferred) {
+    return {
+      ...base, ok: true, connId: preferred.id, reason: '',
+      choices: usable.length, chosenLabel: labelOf(preferred),
+    };
+  }
 
+  // ── 같은 모드에 쓸 수 있는 연결이 둘 이상이면 **조용히 고르지 않는다** ──
+  //
+  // 실제로 이런 일이 있었다. 바이낸스 연결이 둘(실전·데모)인데 하나가
+  // is_testnet=true로 잘못 저장돼 있었다. 테스트넷 탭에서는 둘 다
+  // '쓸 수 있는 연결'이라 첫 번째가 뽑혔고, 그게 데모 서버가 모르는
+  // 키였다. 화면에는 다른 연결의 잔고가 떠 있었고 주문만 -2015로 막혔다.
+  //
+  // is_testnet 칸은 **사용자가 적은 값**이지 거래소가 확인해 준 값이
+  // 아니다. 그래서 이 값이 틀릴 수 있다는 전제로, 여러 개일 때는 어느
+  // 것을 골랐는지 반드시 말한다. 잘못 골랐다는 뜻이 아니라 —
+  // **골랐다는 사실 자체를 사용자가 알아야 한다.**
+  const picked = usable[0];
+  const others = usable.length - 1;
   return {
-    ...base, ok: true, connId: usable[0].id,
+    ...base, ok: true, connId: picked.id,
+    choices: usable.length, chosenLabel: labelOf(picked),
     reason: preferId
-      ? '고른 연결이 이 모드에 맞지 않아 다른 연결을 씁니다 — 아래에서 확인하세요'
-      : '',
+      ? `고른 연결이 이 모드에 맞지 않아 ${labelOf(picked)}(으)로 주문합니다 — 아래에서 확인하세요`
+      : others > 0
+        ? `이 모드에 쓸 수 있는 연결이 ${usable.length}개입니다 — ${labelOf(picked)}(으)로 주문합니다. `
+          + '다른 연결을 쓰려면 직접 고르세요.'
+        : '',
   };
+}
+
+/** 사람이 알아볼 이름. 없으면 id 앞자리 — 빈 문자열로 두면 문장이 깨진다 */
+function labelOf(c: ConnLike): string {
+  const l = String(c?.label || '').trim();
+  if (l) return l;
+  const ex = String(c?.exchange_id || '').trim();
+  const short = String(c?.id || '').slice(0, 8);
+  return ex ? `${ex} ${short}` : short || '알 수 없는 연결';
 }
 
 /**

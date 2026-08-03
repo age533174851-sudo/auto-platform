@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { errorTextOf } from '@/lib/http/errorText';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { BotRun, ExecMode, RiskEvent, Signal, SignalState, StratStatus, StratType, Strategy } from '@/types/domain';
 import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
@@ -329,7 +330,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       const d = await r.json();
       if (typeof d.redis==='boolean') setRedisOk(d.redis);
       if (d.ok) showToast(`${channel==='money'?'Money':'System'} Bot ${test==='basic'?'테스트':test} 발송 — 폰 확인 (Redis ${d.redis?'연결':'미연결'})`, true);
-      else showToast(`발송 실패: ${d.message||d.error||'설정 확인'}`, false);
+      else showToast(`발송 실패: ${d.message||errorTextOf(d, '설정 확인')}`, false);
     } catch(e:any){ showToast(`오류: ${e?.message}`, false); } finally { setTgBusy(false); }
   }, [showToast]);
 
@@ -363,7 +364,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         const r = await fetch(`/api/jobs/${jobId}`, { headers: auth?{Authorization:auth}:{}, signal: AbortSignal.timeout(4000) });
         const d = await r.json();
         if (d.status==='COMPLETED') { showToast(`${label} 성공`, true); return true; }
-        if (d.status==='FAILED' || d.status==='CANCELLED') { showToast(`${label} 실패: ${d.error||'-'}`, false); return false; }
+        if (d.status==='FAILED' || d.status==='CANCELLED') { showToast(`${label} 실패: ${errorTextOf(d, '-')}`, false); return false; }
       } catch {}
     }
     showToast(`${label} 처리 지연 — 거래소/Worker 상태 확인`, false);
@@ -524,7 +525,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         });
         const d = await r.json();
         if (!r.ok || d.error) {
-          const errMsg = d.message || d.error || '주문 실패';
+          const errMsg = d.message || errorTextOf(d, '주문 실패');
           setOrders(prev=>[{ id:uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
             price:krwPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'failed', pnl:0, pnlPct:0,
             openedAt:new Date().toISOString(), note:errMsg, emotion:'😟' } as Order, ...prev]);

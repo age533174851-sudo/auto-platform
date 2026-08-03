@@ -52,6 +52,7 @@
 // 차트는 한 번 펼치면 접어도 **언마운트하지 않는다**. iframe이 다시 붙으면
 // 그려둔 추세선과 확대 구간이 날아간다 — PC에서 지킨 것과 같은 이유다.
 import React, { useEffect, useState } from 'react';
+import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 import { ChartPane } from './ChartPane';
@@ -423,7 +424,7 @@ function KillButton() {
         body: JSON.stringify({ connectionId: connId, reason: '모바일 터미널에서 수동 발동' }),
       });
       const j = await r.json();
-      alert(r.ok ? '킬스위치 발동됨 — 신규 진입 차단' : (j?.message || j?.error || '발동 실패'));
+      alert(r.ok ? '킬스위치 발동됨 — 신규 진입 차단' : (errorTextOf(j, '발동 실패')));
     } catch (e: any) { alert(`실패: ${e?.message || e}`); }
     finally { setBusy(false); }
   };
