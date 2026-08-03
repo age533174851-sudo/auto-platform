@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
     const serverMs = await bf.getFuturesServerTime(useTestnet);
 
     // 상태 대조는 USDⓈ-M 경로의 검사다. 여기가 그 시장이다.
-    const gate = await assertStateConsistent(sb, uid, useTestnet);
+    const gate = await assertStateConsistent(sb, uid, useTestnet, connectionId);
 
     // 마진 모드·배율·청산가는 이 심볼에서 직접 읽는다. 목록 조회는 수량 0을
     // 걸러내므로 신규 진입 심볼이 빠진다 (daily-ladder에서 겪은 것과 같다).

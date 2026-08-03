@@ -291,7 +291,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
-    const gate = await assertStateConsistent(sb, userId, useTestnet);
+    const gate = await assertStateConsistent(sb, userId, useTestnet, body.connectionId || null);
     if (!gate.allowed) {
       await releaseReservation(sb, result.ladder?.reservationId);
       return NextResponse.json({
