@@ -130,4 +130,35 @@ export function runRiskContextTests() {
     assert(ctx.warnings.some(w => w.includes('상한') && w.includes('역산')),
       '상한/역산 설명이 없다: ' + ctx.warnings.join(' / '));
   });
+
+  // ── **모의 손익을 실전 한도에 섞지 않는다** ──
+  //
+  // 모의는 연습이다. 연습에서 잃었다고 실전 진입이 막히면, 연습을 할수록
+  // 실전을 못 하게 된다. 반대로 실전 손실이 모의 한도에 잡히면 연습조차
+  // 막힌다. 한도는 그 돈이 실제로 오간 장부에서만 계산한다.
+  test('모드에 따라 다른 장부를 본다', async () => {
+    const seen: string[] = [];
+    const sb: any = {
+      from(t: string) {
+        seen.push(t);
+        const chain: any = {
+          select: () => chain, eq: () => chain, gte: () => chain,
+          order: () => chain, limit: () => chain,
+          maybeSingle: async () => ({ data: null, error: null }),
+          then: (res: any) => res({ data: [], error: null }),
+        };
+        return chain;
+      },
+    };
+    seen.length = 0;
+    await buildRiskContext(sb, { userId: 'u1', mode: 'PAPER' });
+    assert(seen.includes('paper_positions'), '모의인데 모의 장부를 안 봤다');
+    assert(!seen.includes('daily_slot_uses'), '모의인데 실전 장부를 봤다');
+
+    seen.length = 0;
+    await buildRiskContext(sb, { userId: 'u1', mode: 'LIVE' });
+    assert(seen.includes('daily_slot_uses'), '실전인데 실전 장부를 안 봤다');
+    // paper_positions는 연속 손실 계산에도 쓰이므로 등장 자체는 막지 않는다.
+    // 중요한 것은 **손익 합계**에 안 섞이는 것이고, 그건 위 소스 선택으로 정해진다.
+  });
 }

@@ -203,10 +203,19 @@ export async function buildRiskContext(
     // 어느 한쪽이라도 못 읽으면 합계를 모르는 것이다 — 읽힌 쪽만 더해서
     // 아는 척하면 실제보다 손실이 작게 잡히고, 그건 한도를 느슨하게
     // 만드는 방향으로 틀린다.
-    const sources: Array<{ table: string; column: string; timeCol: string }> = [
-      { table: 'daily_slot_uses', column: 'realized_pnl', timeCol: 'closed_at' },
-      { table: 'paper_positions', column: 'realized_pnl', timeCol: 'closed_at' },
-    ];
+    // ── **모의 손익을 실전 한도에 섞지 않는다** ──
+    //
+    // 처음엔 두 표를 항상 합쳤다. 그런데 모의는 연습이다 — 연습에서
+    // 잃었다고 실전 진입이 막히면, 연습을 할수록 실전을 못 하게 된다.
+    // 반대로 실전 손실이 모의 한도에 잡히면 연습조차 막힌다.
+    //
+    // 한도는 **그 돈이 실제로 오간 장부**에서만 계산한다.
+    //   · 모의(PAPER)  → paper_positions
+    //   · 그 외(실전·테스트넷) → daily_slot_uses
+    const isPaperMode = String(opts.mode || '').toUpperCase() === 'PAPER';
+    const sources: Array<{ table: string; column: string; timeCol: string }> = isPaperMode
+      ? [{ table: 'paper_positions', column: 'realized_pnl', timeCol: 'closed_at' }]
+      : [{ table: 'daily_slot_uses', column: 'realized_pnl', timeCol: 'closed_at' }];
     for (const s of sources) {
       try {
         const { data, error } = await sb
