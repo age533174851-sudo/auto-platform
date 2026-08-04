@@ -171,6 +171,42 @@ body {
 /* ── Inputs — prevent iOS auto-zoom ── */
 input, select, textarea { font-family: inherit; font-size: 16px; }
 button { font-family: inherit; }
+
+/* ── 가로로 새는 것 막기 ─────────────────────────────────────────
+   왜 필요한가
+   ───────────
+   자동매매 카드에서 네 칸짜리 입력 줄 하나가 화면 밖으로 나갔고, 그
+   한 줄이 카드 전체를 밀어내서 **위아래 모든 글자가 오른쪽에서 잘렸다.**
+
+   원인은 CSS 기본값이다. flex/grid 아이템의 자동 최소 크기(min-width:auto)는
+   '내용보다 작아지지 않는다'는 뜻이고, `<input>`은 브라우저가 정한 기본
+   폭(대략 170px)을 내용으로 친다. 네 칸이면 최소 680px이라 폰에서는
+   무조건 넘친다. `flex:1`도 `1fr`도 이 최소값 아래로는 못 줄인다.
+
+   그래서 입력 요소는 언제나 줄어들 수 있게 한다. 이건 흔한 리셋이고
+   부작용이 없다 — 원래 폭이 필요한 곳은 width로 직접 정한다. */
+input, select, textarea, button { min-width: 0; }
+
+/* 화면에 안 들어가는 것보다 줄바꿈이 낫다. 긴 주소·해시·숫자가 칸을
+   뚫고 나가는 것을 막는다. */
+img, svg, video, canvas { max-width: 100%; height: auto; }
+
+/* 폰에서는 레이아웃 요소도 줄어들 수 있어야 한다.
+   `repeat(4, 1fr)` 같은 고정 칸도 여기서 비로소 접힌다 — 1fr은
+   minmax(auto, 1fr)이라 아이템의 min-width가 0이어야 실제로 줄어든다.
+   넓은 화면은 자리가 있으므로 건드리지 않는다. */
+@media (max-width: 640px) {
+  /* 이 앱에는 <main>이 없다(page.tsx가 div로 짠다). body 기준으로 건다 —
+     선택자가 아무것도 안 잡으면 규칙은 있는데 효과가 없고, 그건 고친
+     줄 아는 것이라 제일 나쁘다. */
+  body :where(div, section, article, header, footer, nav, form, label, span, p, a) {
+    min-width: 0;
+  }
+  /* 가로 스크롤을 **일부러** 만든 곳은 예외다. 여기서 아이템이 줄어들면
+     스크롤이 사라지고 내용이 뭉개진다 — 넘침을 고치려다 멀쩡한 것을
+     망가뜨리는 셈이다. */
+  .scroll-x > *, .wl-tabs > *, table :where(td, th) { min-width: auto; }
+}
 .no-select { -webkit-user-select: none; user-select: none; }
 
 /* ── Animations ── */

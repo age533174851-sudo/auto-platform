@@ -19,6 +19,8 @@ import { test, eq, assert, close } from '../../test/harness';
 import {
   impliedLeverage, stopPctForLeverage, notionalPctFor,
   leverageCapFromNotional, leverageNote,
+  liquidationDistancePct, maxLeverageBeforeLiquidation,
+  stopFiresBeforeLiquidation, liquidationWarning,
 } from './leverageMath';
 
 export function runLeverageMathTests() {
@@ -102,5 +104,62 @@ export function runLeverageMathTests() {
 
   test('배율 상한이 없으면 문장도 없다', () => {
     eq(leverageNote(0, 10, 10), null);
+  });
+
+  // ══ 청산이 손절보다 먼저 오는 구간 ══
+  //
+  // 이 계좌에서 실제로 두 번 일어났다:
+  //   진입 62,906 → 청산 62,573 (0.53%). 손절은 구경도 못 했다.
+  //
+  // 100배에서 청산은 약 0.6%에 온다. 손절을 1%에 걸면 그 손절은 청산
+  // **뒤에** 있어서 작동할 기회가 없고 증거금 전액이 사라진다.
+  test('100배의 청산 거리는 약 0.6%다', () => {
+    close(liquidationDistancePct(100), 0.6, 1e-9);
+    close(liquidationDistancePct(50), 1.6, 1e-9);
+    close(liquidationDistancePct(10), 9.6, 1e-9);
+  });
+
+  test('유지증거금보다 청산 거리가 짧아지는 배율은 진입 즉시 청산이다', () => {
+    // 100/250 = 0.4 → 0.4 - 0.4 = 0 → 양수가 아니다
+    eq(liquidationDistancePct(250), null);
+    eq(liquidationDistancePct(300), null);
+  });
+
+  // **어제 제가 드린 말이 여기서 틀렸다.**
+  // "손절 1%면 100배가 나옵니다"는 배율 역산으로는 맞지만, 그 조합은
+  // 청산이 먼저 와서 실제로는 쓸 수 없다.
+  test('손절 1%에서는 71배가 천장이다 — 100배는 못 쓴다', () => {
+    const m = maxLeverageBeforeLiquidation(1.0);
+    close(m, 100 / 1.4, 1e-9);
+    assert(Math.floor(m) === 71, '천장이 71배가 아니다: ' + m);
+    assert(m < 100, '손절 1%에 100배가 안전하다고 했다');
+  });
+
+  test('손절 0.5%면 100배가 안전 구간 안이다', () => {
+    const m = maxLeverageBeforeLiquidation(0.5);
+    assert(m > 100, `손절 0.5%인데 천장이 ${m}배다`);
+  });
+
+  test('손절과 청산의 선후를 판정한다', () => {
+    // 위험 10% · 증거금 10% · 손절 1% → 100배 → 청산 0.6% < 손절 1% → 위험
+    eq(stopFiresBeforeLiquidation({ riskPct: 10, marginPct: 10, stopPct: 1 }), false);
+    // 손절 0.5% → 배율 200 → 청산 0.1% < 0.5% → 여전히 위험
+    eq(stopFiresBeforeLiquidation({ riskPct: 10, marginPct: 10, stopPct: 0.5 }), false);
+    // 위험 5% · 증거금 10% · 손절 2% → 25배 → 청산 3.6% > 손절 2% → 안전
+    eq(stopFiresBeforeLiquidation({ riskPct: 5, marginPct: 10, stopPct: 2 }), true);
+  });
+
+  test('모르면 null이다 — false(안전)로 답하지 않는다', () => {
+    eq(stopFiresBeforeLiquidation({ riskPct: 0, marginPct: 10, stopPct: 1 }), null);
+    eq(liquidationDistancePct(0), null);
+    eq(maxLeverageBeforeLiquidation(0), null);
+  });
+
+  test('위험할 때만 경고한다 — 안전하면 조용하다', () => {
+    const bad = liquidationWarning({ riskPct: 10, marginPct: 10, stopPct: 1 });
+    assert(bad != null && bad.includes('청산'), '위험한데 경고가 없다: ' + bad);
+    assert(bad.includes('71배'), '안전한 배율을 안 알려줬다: ' + bad);
+    // 문제없을 때 문장을 띄우면 경고가 배경이 되고, 진짜 경고도 안 읽힌다.
+    eq(liquidationWarning({ riskPct: 5, marginPct: 10, stopPct: 2 }), null);
   });
 }

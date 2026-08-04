@@ -110,3 +110,89 @@ export function leverageNote(
     + `지금 설정(1회 위험 ${risk}% · 1회 증거금 ${margin}%)에서 ${targetLeverage}배가 나오려면 `
     + `손절이 약 ${stop.toFixed(2)}% 안쪽이어야 합니다. 손절이 더 넓으면 그만큼 낮은 배율로 나갑니다.`;
 }
+
+// ── 청산이 손절보다 먼저 오는 구간 ────────────────────────────
+//
+// **이걸 몰라서 청산당한다.**
+//
+// 격리 마진에서 청산은 (1/배율 − 유지증거금률)만큼 불리하게 움직이면
+// 온다. 100배면 1% − 0.4% ≈ 0.6%다. 그런데 손절을 1%에 걸면 그 손절은
+// **청산 뒤에 있다.** 가격이 0.6%에서 청산을 치고 지나가므로 손절은
+// 작동할 기회가 없고, 증거금 전액이 사라진다.
+//
+// 실제로 이 계좌에서 일어난 일이다:
+//   진입 62,906 → 청산 62,573 (0.53%). 손절은 구경도 못 했다.
+//
+// "배율이 높을수록 손절이 타이트해야 한다"가 아니라, **배율이 손절
+// 거리를 정한다.** 손절을 정하고 배율을 올리는 것이 아니라, 배율을
+// 정하면 손절이 그 안쪽이어야만 의미가 있다.
+
+/** BTC USDⓈ-M 유지증거금률(%). 명목가 구간에 따라 다르지만 소액 구간 기준. */
+export const DEFAULT_MMR_PCT = 0.4;
+
+/**
+ * 이 배율에서 청산까지 몇 % 인가. 손절은 **이 안쪽**이어야 한다.
+ *
+ * 청산거리% = 100 ÷ 배율 − 유지증거금률%
+ *
+ * 결과가 0 이하면 그 배율은 진입 즉시 청산 구간이다 — null을 준다.
+ */
+export function liquidationDistancePct(leverage: number, mmrPct = DEFAULT_MMR_PCT): number | null {
+  const L = Number(leverage), m = Number(mmrPct);
+  if (!Number.isFinite(L) || L <= 0 || !Number.isFinite(m) || m < 0) return null;
+  const d = 100 / L - m;
+  return d > 0 ? d : null;
+}
+
+/**
+ * 이 손절 거리에서 **청산당하지 않는** 최대 배율.
+ *
+ * 손절% < 100÷배율 − MMR%  →  배율 < 100 ÷ (손절% + MMR%)
+ *
+ * 손절 1%면 100/(1+0.4) = 71배가 천장이다. 100배는 못 쓴다.
+ * 손절 0.5%면 100/0.9 = 111배 → 거래소 상한 125배 안이라 100배가 가능하다.
+ */
+export function maxLeverageBeforeLiquidation(stopPct: number, mmrPct = DEFAULT_MMR_PCT): number | null {
+  const s = Number(stopPct), m = Number(mmrPct);
+  if (!Number.isFinite(s) || s <= 0 || !Number.isFinite(m) || m < 0) return null;
+  const L = 100 / (s + m);
+  return L > 0 ? L : null;
+}
+
+/**
+ * 이 설정으로 진입하면 손절이 청산보다 먼저 오는가.
+ *
+ * **모르면 null이다.** false로 답하면 "안전하다"로 읽힌다.
+ */
+export function stopFiresBeforeLiquidation(
+  inp: LeverageInputs, mmrPct = DEFAULT_MMR_PCT,
+): boolean | null {
+  const lev = impliedLeverage(inp);
+  if (lev == null) return null;
+  const liq = liquidationDistancePct(lev, mmrPct);
+  if (liq == null) return false;          // 진입 즉시 청산 구간
+  return Number(inp.stopPct) < liq;
+}
+
+/**
+ * 화면에 적을 경고. 안전하면 null — 문제없을 때 문장을 띄우면
+ * 경고가 배경이 되고, 그러면 진짜 경고도 안 읽힌다.
+ */
+export function liquidationWarning(
+  inp: LeverageInputs, mmrPct = DEFAULT_MMR_PCT,
+): string | null {
+  const lev = impliedLeverage(inp);
+  if (lev == null) return null;
+  const liq = liquidationDistancePct(lev, mmrPct);
+  if (liq == null) {
+    return `배율 ${Math.round(lev)}배는 진입 즉시 청산 구간입니다 (유지증거금 ${mmrPct}%).`;
+  }
+  if (Number(inp.stopPct) < liq) return null;
+  const safe = maxLeverageBeforeLiquidation(Number(inp.stopPct), mmrPct);
+  return `손절 ${inp.stopPct}%가 청산 거리 ${liq.toFixed(2)}%보다 멉니다 — `
+    + '손절이 작동하기 전에 청산됩니다(증거금 전액 소멸). '
+    + (safe != null
+        ? `이 손절에서는 ${Math.floor(safe)}배까지가 안전합니다. `
+          + `${Math.round(lev)}배를 쓰려면 손절이 ${liq.toFixed(2)}% 안쪽이어야 합니다.`
+        : '');
+}

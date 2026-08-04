@@ -21,7 +21,7 @@
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autotradeHealth } from '@/lib/engine/autotradeHealth';
-import { stopPctForLeverage } from '@/lib/engine/leverageMath';
+import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -199,6 +199,9 @@ export default function AutotradeControl() {
   const box: React.CSSProperties = {
     background: T.card, border: `1px solid ${T.border}`,
     borderRadius: 12, padding: 14, marginBottom: 12,
+    // 안쪽에서 무엇이 넘치든 카드가 화면을 밀어내지는 않게 한다.
+    // 넘치는 것을 고치는 것이 먼저고, 이건 마지막 방어선이다.
+    minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere',
   };
 
   const schedules: any[] = Array.isArray(data?.schedules) ? data.schedules : [];
@@ -359,8 +362,21 @@ export default function AutotradeControl() {
         </div>
 
         {/* 크기와 배율 — 10슬롯 방식이면 위험 10% · 상한 100배 */}
-        <div style={{ display: 'flex', gap: 6 }}>
-          <div style={{ flex: 1 }}>
+        {/* ── 왜 grid이고 왜 auto-fit인가 ──
+            여기가 `display:flex` + `flex:1`이었다. flex 아이템의 기본
+            min-width는 auto라서 **input의 기본 폭 아래로는 안 줄어든다.**
+            네 칸이면 최소 폭이 600px쯤 되고, 폰(360px)에서는 이 줄 하나가
+            카드 전체를 화면 밖으로 밀어낸다 — 그래서 위아래 모든 글자가
+            오른쪽에서 잘렸다. 한 줄이 넘치면 카드가 통째로 넘친다.
+
+            minmax(112px, 1fr)이면 좁은 화면에서 두 칸씩 두 줄로 접히고
+            넓은 화면에서는 네 칸으로 편다. 미디어 쿼리 없이 된다. */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(112px, 1fr))',
+          gap: 6,
+        }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>1회 위험 (%)</div>
             <input value={riskPct} inputMode="decimal"
               onChange={e => setRiskPct(e.target.value.replace(/[^0-9.]/g, ''))}
@@ -369,7 +385,7 @@ export default function AutotradeControl() {
                 borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ minWidth: 0 }}>
             {/* **배율을 실제로 결정하는 값.**
                 배율 = 명목가 ÷ 증거금 예산이다. 이 칸이 없던 동안 예산이
                 '가용 전액'이라 배율이 낮게 역산됐다 — 상한에 100을 적어도
@@ -383,7 +399,7 @@ export default function AutotradeControl() {
                 borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>배율 상한 (배)</div>
             <input value={levCap} inputMode="numeric"
               onChange={e => setLevCap(e.target.value.replace(/[^0-9]/g, ''))}
@@ -393,7 +409,7 @@ export default function AutotradeControl() {
                 color: Number(levCap) >= 50 ? T.ylw : T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>간격 (분)</div>
             <input value={intervalMin} inputMode="numeric"
               onChange={e => setIntervalMin(e.target.value.replace(/[^0-9]/g, ''))}
@@ -412,11 +428,17 @@ export default function AutotradeControl() {
           borderRadius: 8, padding: '9px 10px',
           color: ticking ? T.grn : T.ylw, fontSize: 10.5, lineHeight: 1.6,
         }}>
+          {/* **폰을 닫아도 돈다.** 예약은 DB에 있고, 서버 쪽 실행기가
+              15분마다 물어본다(GitHub Actions: autotrade-tick). 실제 진입
+              간격은 아래 '간격(분)'이 정한다 — 15분마다 물어봐도 간격이
+              안 됐으면 건너뛴다. 배포해도, 화면을 닫아도 안 꺼진다.
+              끄는 방법은 이 화면의 스위치뿐이다. */}
           {ticking
-            ? <>이 화면이 열려 있는 동안 <b>{intervalMin || '?'}분</b> 간격으로 진입을 봅니다.
-                <b> 화면을 닫으면 멈추고</b>, 그때부터는 하루 1회 크론만 남습니다.</>
-            : <>지금은 <b>하루 1회 크론</b>만 있습니다 (한국 아침 8시).
-                아래 스위치를 켜면 이 화면이 열려 있는 동안 자주 봅니다.</>}
+            ? <>서버가 <b>15분마다</b> 확인하고, 실제 진입은 <b>{intervalMin || '?'}분</b> 간격으로 봅니다.
+                이 화면은 추가로 더 자주 볼 뿐이라 <b>닫아도 자동매매는 계속 돕니다.</b></>
+            : <>서버가 <b>15분마다</b> 확인합니다 (실제 진입 간격은 <b>{intervalMin || '?'}분</b>).
+                <b> 폰을 닫아도, 배포를 해도 계속 돕니다</b> — 예약은 서버에 저장돼 있습니다.
+                아래 스위치는 이 화면이 열려 있는 동안만 더 자주 보는 용도입니다.</>}
         </div>
 
         <button onClick={() => setTicking(v => !v)} style={{
@@ -478,10 +500,22 @@ export default function AutotradeControl() {
           {(() => {
             const st = stopPctForLeverage(Number(levCap), Number(riskPct), Number(marginPct));
             if (st == null) return null;
+            // **청산이 손절보다 먼저 오는가.** 이걸 안 보면 손절을 걸어
+            // 두고도 청산당한다 — 이 계좌에서 실제로 두 번 일어났다.
+            const liq = liquidationDistancePct(Number(levCap));
+            const safeLev = maxLeverageBeforeLiquidation(st);
             return (
               <> {levCap}배가 실제로 나오려면 (1회 위험 {riskPct}% · 1회 증거금 {marginPct}%에서)
                 손절이 약 <b style={{ color: T.ylw }}>{st.toFixed(2)}%</b> 안쪽이어야 합니다.
-                {st < 0.5 && ' 그건 BTC 노이즈 수준이라 진입 직후 손절될 수 있습니다.'}</>
+                {liq != null && (
+                  <><br/>그런데 {levCap}배의 <b>청산은 약 {liq.toFixed(2)}%</b>에 옵니다
+                    (유지증거금 0.4% 기준).{' '}
+                    {st >= liq
+                      ? <b style={{ color: T.red }}>손절 {st.toFixed(2)}%는 청산 뒤에 있어 작동하지 못합니다 —
+                          증거금 전액이 사라집니다. 이 손절이면 {safeLev != null ? Math.floor(safeLev) : '?'}배까지가 안전합니다.</b>
+                      : <span style={{ color: T.grn }}>손절이 청산보다 먼저 닿습니다 — 이 조합은 안전합니다.</span>}
+                  </>
+                )}</>
             );
           })()}
         </div>
@@ -494,7 +528,7 @@ export default function AutotradeControl() {
             그래서 고르게 하되 **기본은 테스트넷**이고, 실전은 고른 연결이
             실계좌일 때만 켤 수 있다. 서버도 같은 검사를 한다(모드와 연결이
             어긋나면 거부) — 화면만 막으면 화면을 우회하는 순간 뚫린다. */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
           {([[false, '테스트넷'], [true, '실전']] as const).map(([v, label]) => {
             const on = live === v;
             const tone = v ? T.red : T.acl;
