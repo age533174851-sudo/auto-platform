@@ -196,3 +196,70 @@ export function liquidationWarning(
           + `${Math.round(lev)}배를 쓰려면 손절이 ${liq.toFixed(2)}% 안쪽이어야 합니다.`
         : '');
 }
+
+// ── 위험%와 증거금%의 관계 ────────────────────────────────────
+//
+// **이것 하나가 100배 전략의 성패를 가른다.**
+//
+// 손절에 닿았을 때 잃는 돈은 자산 × 위험%다. 이번 자리에 묶은 돈은
+// 자산 × 증거금%다. 두 값이 **같으면** 손절 자리가 곧 증거금이 0이
+// 되는 자리다. 유지증거금이 있으므로 청산은 그보다 **앞**에 있다.
+//
+//   위험 10% · 증거금 10% → 손절이 0.5%든 5%든 **언제나 청산이 먼저**
+//
+// 손절 거리를 아무리 조절해도 안 된다. 배율이 같이 움직이기 때문이다.
+// 고칠 곳은 손절이 아니라 **위험% 대 증거금% 비율**이다.
+//
+//   위험 5% · 증거금 10% → 손절 0.5%에서 100배, 그리고 안전
+//
+// 손절이 증거금의 절반만 먹으면 청산까지 두 배의 여유가 생긴다.
+
+/**
+ * 이 위험/증거금 비율에서 **안전하려면 손절이 최소 몇 %여야 하는가.**
+ *
+ * 조건: 손절% > 유지증거금% ÷ (증거금% ÷ 위험% − 1)
+ *
+ * 증거금% ≤ 위험%이면 어떤 손절에서도 안전할 수 없다 → null.
+ * (null이 '제한 없음'이 아니라 '불가능'이라는 뜻이므로 호출부는
+ *  반드시 아래 verdict를 함께 쓴다.)
+ */
+export function minSafeStopPct(
+  riskPct: number, marginPct: number, mmrPct = DEFAULT_MMR_PCT,
+): number | null {
+  const r = Number(riskPct), m = Number(marginPct), mmr = Number(mmrPct);
+  if (![r, m, mmr].every(Number.isFinite) || r <= 0 || m <= 0 || mmr < 0) return null;
+  const ratio = m / r;
+  if (ratio <= 1) return null;              // 어떤 손절로도 안 된다
+  return mmr / (ratio - 1);
+}
+
+/**
+ * 위험%와 증거금%의 조합 자체가 성립하는가.
+ *
+ * 성립하지 않으면 **무엇을 얼마로 바꿔야 하는지**까지 적는다.
+ * "안 됩니다"만 적으면 사용자는 손절을 계속 조절하다가 포기한다 —
+ * 그런데 고칠 곳은 손절이 아니다.
+ */
+export function riskMarginVerdict(
+  riskPct: number, marginPct: number, mmrPct = DEFAULT_MMR_PCT,
+): { ok: boolean; message: string } | null {
+  const r = Number(riskPct), m = Number(marginPct);
+  if (!Number.isFinite(r) || !Number.isFinite(m) || r <= 0 || m <= 0) return null;
+
+  if (m <= r) {
+    const suggest = Math.max(0.1, Math.round((m / 2) * 10) / 10);
+    return {
+      ok: false,
+      message: `1회 위험 ${r}%가 1회 증거금 ${m}% 이상입니다 — 손절에 닿으면 증거금이 다 없어지는 자리라 `
+        + `**손절을 몇 %로 하든 청산이 먼저 옵니다.** 손절 거리로는 못 고칩니다. `
+        + `1회 위험을 ${suggest}% 이하로 내리세요(증거금의 절반 이하). `
+        + `그러면 손절 0.5%에서 ${Math.round((100 * suggest) / (0.5 * m))}배까지 안전하게 나옵니다.`,
+    };
+  }
+  const s = minSafeStopPct(r, m, mmrPct);
+  if (s == null) return null;
+  return {
+    ok: true,
+    message: `1회 위험 ${r}% · 1회 증거금 ${m}% — 손절이 ${s.toFixed(2)}%보다 넓으면 손절이 먼저 닿습니다(안전).`,
+  };
+}

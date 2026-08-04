@@ -21,6 +21,7 @@ import {
   leverageCapFromNotional, leverageNote,
   liquidationDistancePct, maxLeverageBeforeLiquidation,
   stopFiresBeforeLiquidation, liquidationWarning,
+  minSafeStopPct, riskMarginVerdict,
 } from './leverageMath';
 
 export function runLeverageMathTests() {
@@ -161,5 +162,60 @@ export function runLeverageMathTests() {
     assert(bad.includes('71배'), '안전한 배율을 안 알려줬다: ' + bad);
     // 문제없을 때 문장을 띄우면 경고가 배경이 되고, 진짜 경고도 안 읽힌다.
     eq(liquidationWarning({ riskPct: 5, marginPct: 10, stopPct: 2 }), null);
+  });
+
+  // ══ 손절로는 못 고치는 조합 ══
+  //
+  // 손절에 닿았을 때 잃는 돈(자산×위험%)이 이번 자리에 묶은 돈
+  // (자산×증거금%)과 같으면, 손절 자리가 곧 증거금이 0이 되는 자리다.
+  // 유지증거금이 있으므로 청산은 그보다 앞이다 — **손절을 몇 %로 하든.**
+  //
+  // 사용자의 설정이 정확히 이것이었다: 위험 10% · 증거금 10%.
+  test('위험 = 증거금이면 어떤 손절에서도 청산이 먼저다', () => {
+    for (const stop of [0.3, 0.5, 1, 2, 3, 5, 10]) {
+      eq(stopFiresBeforeLiquidation({ riskPct: 10, marginPct: 10, stopPct: stop }), false,
+        `손절 ${stop}%에서 안전하다고 했다`);
+    }
+    eq(minSafeStopPct(10, 10), null, '불가능한데 가능한 손절이 있다고 했다');
+  });
+
+  test('위험이 증거금보다 크면 더 나쁘다 — 역시 불가능', () => {
+    eq(minSafeStopPct(20, 10), null);
+    eq(riskMarginVerdict(20, 10).ok, false);
+  });
+
+  // 고칠 곳은 손절이 아니라 비율이다. 그 말을 해 줘야 한다 —
+  // "안 됩니다"만 적으면 손절만 계속 만지다가 포기한다.
+  test('안 되는 조합이면 무엇을 얼마로 바꿀지 적는다', () => {
+    const v = riskMarginVerdict(10, 10);
+    eq(v.ok, false);
+    assert(v.message.includes('손절 거리로는 못 고칩니다'), v.message);
+    assert(v.message.includes('5%'), '내려야 할 값을 안 적었다: ' + v.message);
+  });
+
+  test('위험이 증거금의 절반이면 거의 모든 손절에서 안전하다', () => {
+    close(minSafeStopPct(5, 10), 0.4, 1e-9);
+    for (const stop of [0.5, 1, 2, 5]) {
+      eq(stopFiresBeforeLiquidation({ riskPct: 5, marginPct: 10, stopPct: stop }), true,
+        `손절 ${stop}%가 위험하다고 나왔다`);
+    }
+  });
+
+  // 그리고 그 조합에서도 100배는 나온다 — 안전을 위해 배율을 포기할
+  // 필요가 없다는 것이 핵심이다.
+  test('위험 5% · 증거금 10% · 손절 0.5%면 100배가 나오고 안전하다', () => {
+    close(impliedLeverage({ riskPct: 5, marginPct: 10, stopPct: 0.5 }), 100, 1e-9);
+    eq(stopFiresBeforeLiquidation({ riskPct: 5, marginPct: 10, stopPct: 0.5 }), true);
+  });
+
+  test('되는 조합이면 최소 손절을 알려준다', () => {
+    const v = riskMarginVerdict(5, 10);
+    eq(v.ok, true);
+    assert(v.message.includes('0.40%'), v.message);
+  });
+
+  test('값이 없으면 아무 말도 안 한다', () => {
+    eq(riskMarginVerdict(0, 10), null);
+    eq(riskMarginVerdict(NaN, 10), null);
   });
 }

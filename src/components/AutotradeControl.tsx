@@ -21,7 +21,7 @@
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autotradeHealth } from '@/lib/engine/autotradeHealth';
-import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation } from '@/lib/engine/leverageMath';
+import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation, riskMarginVerdict } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -451,6 +451,26 @@ export default function AutotradeControl() {
               }}/>
           </div>
         </div>
+
+        {/* ── 위험% 대 증거금% ──
+            손절 거리를 아무리 조절해도 안 되는 조합이 있다. 손절 손실이
+            증거금 전액이면 손절 자리가 곧 청산 자리이고, 유지증거금만큼
+            청산이 항상 먼저다. 고칠 곳은 손절이 아니라 이 비율이다. */}
+        {(() => {
+          const v = riskMarginVerdict(Number(riskPct), Number(marginPct));
+          if (!v) return null;
+          return (
+            <div style={{
+              background: A(v.ok ? T.grn : T.red, '12'),
+              border: `1px solid ${A(v.ok ? T.grn : T.red, '40')}`,
+              borderRadius: 8, padding: '9px 10px',
+              color: v.ok ? T.grn : T.red, fontSize: 10.5, lineHeight: 1.65,
+            }}>
+              {v.message.split('**').map((part, i) =>
+                i % 2 === 1 ? <b key={i}>{part}</b> : <span key={i}>{part}</span>)}
+            </div>
+          );
+        })()}
 
         {/* **간격을 짧게 잡아도 실행기가 없으면 그 간격으로 안 돈다.**
             이걸 안 적으면 '5분으로 해놨는데 왜 안 돌지'가 된다. */}
