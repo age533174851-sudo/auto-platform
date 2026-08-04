@@ -712,9 +712,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // '포지션 없음 + 실패 보고'가 된다.
     let gateSlId: string | undefined;
     if (!args.reduceOnly && args.stopLoss) {
+      // spec을 통째로 넘긴다. 예전에는 rule·autoSize만 spec에서 꺼내고
+      // triggerPrice는 원본 손절가를 넘겨서, 호가 단위에 맞춰 둔 값이
+      // 아무 데도 안 쓰였다 — 계산해 놓고 배선을 안 한 것이다.
       const sl = await gf.placeStopGateFutures(apiKey, apiSecret, {
-        contract, rule: stopSpec.rule, triggerPrice: args.stopLoss,
-        autoSize: stopSpec.autoSize, clientOrderId: `${clientOrderId}SL`,
+        contract, spec: stopSpec, clientOrderId: `${clientOrderId}SL`,
       }, testnet);
 
       if (sl.success) {
@@ -738,6 +740,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       slOrderId: gateSlId,
       message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
         + (sized.reason ? ` · ${sized.reason}` : '')
+        + (stopSpec.note ? ` · ${stopSpec.note}` : '')
         + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
             ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')
         + (gateSlId ? ' · 손절 부착' : ''),

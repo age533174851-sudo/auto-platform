@@ -12,7 +12,7 @@ import {
 } from './gatePlan';
 import { quantizeOrder } from './quantize';
 import { futuresExchangeOf } from './futuresAdapter';
-import { toGateText } from './gateFutures';
+import { toGateText, placeStopGateFutures } from './gateFutures';
 
 export function runGatePlanTests() {
   console.log('[Gate — 계약 이름]');
@@ -444,5 +444,29 @@ export function runGatePlanTests() {
 
   test('손절가가 없으면 트리거 가격도 없다', () => {
     eq(gateStopSpec('LONG', null, 63912.1, TICK).triggerPrice, null);
+  });
+
+  // ── 계산해 놓고 배선을 안 하면 아무 소용이 없다 ──
+  //
+  // 실제로 그랬다. gateStopSpec이 호가 단위에 맞춘 triggerPrice를 만들어
+  // 뒀는데, 호출부는 rule·autoSize만 spec에서 꺼내고 **triggerPrice는
+  // 원본 손절가를 그대로** 넘겼다. 맞춰 둔 값은 아무 데도 안 쓰였고
+  // 거래소는 똑같이 거부했다.
+  //
+  // 그래서 세 값을 한 덩어리로만 받게 바꿨다 — 하나만 옛날 값일 수 없다.
+  // 여기서는 그 덩어리가 비어 있을 때 **보내지 않는다**는 것만 확인한다
+  // (네트워크를 타기 전에 돌아온다).
+  console.log('[Gate — 손절 트리거는 spec 덩어리로만 나간다]');
+
+  test('트리거 가격이 없으면 거래소로 보내지 않는다', async () => {
+    for (const tp of [null, 0, NaN]) {
+      const r = await placeStopGateFutures('k', 's', {
+        contract: 'BTC_USDT',
+        spec: { rule: 2, autoSize: 'close_long', triggerPrice: tp as any },
+        clientOrderId: 'X1',
+      }, true);
+      eq(r.success, false, `${String(tp)}가 전송됐다`);
+      assert(r.message.includes('트리거 가격'), r.message);
+    }
   });
 }
