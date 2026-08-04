@@ -505,6 +505,28 @@ export async function POST(req: NextRequest) {
       // 변환은 gatePositionToRisk 한 곳에만 둔다 — 'leverage 0은 교차'를
       // 호출자마다 다시 적으면 한 곳을 고쳐도 나머지가 조용히 틀린 채 남는다.
       risk = gpPre.gatePositionToRisk(gpos);
+
+      // ── Gate도 마진 모드를 **점검 전에** 맞춘다 ──
+      //
+      // 바이낸스에서 고친 것과 같은 자리다. 차이가 하나 있다:
+      // 바이낸스는 포지션이 없어도 marginType을 알려주는데, **Gate는
+      // 포지션이 없으면 아무것도 안 준다**(gatePositionToRisk가 null).
+      // 그러면 점검의 'MARGIN_ISOLATED'가 unknown이 되고, 그건 차단
+      // 항목이라 **첫 진입이 매일 여기서 막힌다.**
+      //
+      // Gate에서는 배율을 정하는 것이 곧 격리를 정하는 것이다(0이 교차).
+      // 계획한 배율로 설정하면 격리가 되고, 그 값을 다시 읽어 점검에 준다.
+      // **바꿨다고 믿지 않고 되읽는다** — 설정이 실패해도 응답은 성공처럼
+      // 보일 수 있다.
+      if (!risk || String(risk.marginType).toLowerCase() !== 'isolated') {
+        const wantLev = Math.max(1, Math.round(Number(result.plan?.leverage) || 1));
+        try {
+          await gfPre.setLeverageGateFutures(conn.api_key, apiSecretPre, contractPre, wantLev, useTestnet);
+          const again = await gfPre.getPositionGateFutures(conn.api_key, apiSecretPre, contractPre, useTestnet);
+          const r2 = gpPre.gatePositionToRisk(again);
+          if (r2) risk = r2;
+        } catch { /* 못 바꿨으면 아래 점검이 unknown 그대로 보고 막는다 */ }
+      }
     } else {
       const bfPre = await import('@/lib/exchanges/binanceFutures');
       serverMs = await bfPre.getFuturesServerTime(useTestnet);
