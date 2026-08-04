@@ -750,14 +750,42 @@ export interface ReconcileResult {
 
 export async function reconcilePendingOrders(
   sb: any,
-  creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean }
+  creds: {
+    exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean;
+    /**
+     * **누구의 주문을 대조하는가.**
+     *
+     * 이게 없어서 이 함수는 `status IN (SENT, UNKNOWN) AND exchange = 'binance'`로
+     * **모든 사용자의 주문**을 긁어 왔다. 그리고 그것을 **한 사람의 API 키**로
+     * 거래소에 물어봤다. 남의 주문은 이 계좌에 있을 리 없으니 "거래소에
+     * 없음"으로 판정되고, 그 판정이 남의 행에 쓰인다.
+     *
+     * 서버 전용 경로라 외부에서 부를 수는 없지만, 한 사용자의 대조가 다른
+     * 사용자의 장부를 바꾸는 것은 그 자체로 사고다.
+     */
+    userId?: string | null;
+    /**
+     * 어느 연결의 주문인가. 연결이 곧 거래소이자 망(실전/테스트넷)이다.
+     *
+     * 없으면 테스트넷에서 만든 주문을 실전 거래소에 물어보게 되고,
+     * 거래소는 모른다고 답한다 — 그 기록은 영영 확정되지 않고 상태
+     * 대조를 영구히 막는다. 실제로 이 계좌가 그 상태였다.
+     */
+    connectionId?: string | null;
+  }
 ): Promise<ReconcileResult> {
   const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] };
 
-  const { data: pending } = await sb.from('live_orders')
+  let q = sb.from('live_orders')
     .select('*')
     .in('status', ['SENT', 'UNKNOWN'])
-    .eq('exchange', creds.exchange)
+    .eq('exchange', creds.exchange);
+  // **모르면 좁히지 않는다.** 좁히지 않으면 과하게 대조할 뿐이지만,
+  // 잘못 좁히면 진짜 미확정 주문을 놓친다.
+  if (creds.userId) q = q.eq('user_id', creds.userId);
+  if (creds.connectionId) q = q.eq('connection_id', creds.connectionId);
+
+  const { data: pending } = await q
     .order('created_at', { ascending: true })
     .limit(50);
 

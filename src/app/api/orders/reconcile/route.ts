@@ -27,23 +27,49 @@ function safeEqual(provided: string | null, expected: string): boolean {
   try { return timingSafeEqual(a, b); } catch { return false; }
 }
 
-/** 관리자 JWT 또는 워커 시크릿. 둘 다 아니면 거부한다. */
-async function authorize(req: NextRequest): Promise<Response | null> {
-  if (safeEqual(req.headers.get('x-admin-secret'), WORKER_SECRET)) return null;
-
-  const guard = await requireAdmin(req.headers.get('authorization'));
-  if (guard instanceof Response) {
-    return NextResponse.json(
-      { ok: false, error: '관리자 권한이 필요합니다 (Bearer 토큰 또는 x-admin-secret 헤더)' },
-      { status: 401, headers: { 'Cache-Control': 'no-store' } },
-    );
+/**
+ * 누가 부를 수 있고, 무엇까지 볼 수 있는가.
+ *
+ * **관리자 전용은 너무 좁았다.**
+ * 미확정 주문이 남으면 그 사용자의 신규 진입이 막힌다. 푸는 버튼이
+ * 화면에 있는데 관리자만 누를 수 있으면, 일반 사용자는 막힌 채로
+ * 아무것도 못 한다 — 관리자에게 부탁하는 것은 방법이 아니다.
+ *
+ * 그래서 세 갈래로 나눈다:
+ *   · 워커 시크릿  → 전체 대조 (크론·배포 직후)
+ *   · 관리자 JWT   → 전체 대조
+ *   · 사용자 JWT   → **자기 것만.** 자기 연결만, 자기 주문만.
+ *
+ * scopeUserId가 있으면 그 사용자로 좁힌다. null이면 전체다.
+ */
+async function authorize(req: NextRequest): Promise<
+  { denied: Response } | { denied: null; scopeUserId: string | null }
+> {
+  if (safeEqual(req.headers.get('x-admin-secret'), WORKER_SECRET)) {
+    return { denied: null, scopeUserId: null };
   }
-  return null;
+
+  const auth = req.headers.get('authorization');
+  const guard = await requireAdmin(auth);
+  if (!(guard instanceof Response)) return { denied: null, scopeUserId: null };
+
+  // 관리자가 아니면 본인 것만. 로그인조차 아니면 거부.
+  const { resolveUserId } = await import('@/lib/supabase/admin');
+  const uid = await resolveUserId(auth, req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+  if (uid) return { denied: null, scopeUserId: uid };
+
+  return {
+    denied: NextResponse.json(
+      { ok: false, error: '로그인이 필요합니다 (Bearer 토큰 또는 x-admin-secret 헤더)' },
+      { status: 401, headers: { 'Cache-Control': 'no-store' } },
+    ),
+  };
 }
 
 export async function GET(req: NextRequest) {
-  const denied = await authorize(req);
-  if (denied) return denied;
+  const az = await authorize(req);
+  if (az.denied) return az.denied;
+  const scopeUserId = (az as any).scopeUserId as string | null;
 
   const url = new URL(req.url);
   const connectionId = url.searchParams.get('connectionId');
@@ -56,10 +82,13 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
     }
 
-    // 미확정 주문 목록
-    const { data: pending } = await sb.from('live_orders')
+    // 미확정 주문 목록. **관리자가 아니면 자기 것만 본다** —
+    // 예전에는 전 사용자의 심볼·방향·상태·오류메시지가 한 번에 나왔다.
+    let listQ = sb.from('live_orders')
       .select('id, client_order_id, symbol, side, status, mode, exchange, created_at, error_message')
-      .in('status', ['SENT', 'UNKNOWN', 'INTENT'])
+      .in('status', ['SENT', 'UNKNOWN', 'INTENT']);
+    if (scopeUserId) listQ = listQ.eq('user_id', scopeUserId);
+    const { data: pending } = await listQ
       .order('created_at', { ascending: true })
       .limit(50);
 
@@ -74,12 +103,16 @@ export async function GET(req: NextRequest) {
       }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
-    // 연결 정보로 실제 대조
-    const { data: conn } = await sb.from('exchange_connections')
-      .select('exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
-      .eq('id', connectionId).maybeSingle();
+    // 연결 정보로 실제 대조.
+    // **소유권을 확인한다.** 이게 없으면 남의 connectionId를 넣어 그
+    // 사람의 API 키를 복호화하고 거래소 요청까지 나가게 할 수 있다.
+    let connQ = sb.from('exchange_connections')
+      .select('user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
+      .eq('id', connectionId);
+    if (scopeUserId) connQ = connQ.eq('user_id', scopeUserId);
+    const { data: conn } = await connQ.maybeSingle();
 
-    if (!conn) return NextResponse.json({ ok: false, error: '연결을 찾을 수 없습니다' }, { status: 404 });
+    if (!conn) return NextResponse.json({ ok: false, error: '연결을 찾을 수 없거나 본인의 연결이 아닙니다' }, { status: 404 });
     if (conn.has_withdrawal) {
       return NextResponse.json({ ok: false, error: '출금 권한 키는 사용할 수 없습니다' }, { status: 403 });
     }
@@ -95,6 +128,13 @@ export async function GET(req: NextRequest) {
       // exchange_connections에는 mode 컬럼이 없다. 테스트넷 여부는 is_testnet이며,
       // 값이 없으면 안전한 쪽(테스트넷)으로 본다.
       testnet: conn.is_testnet !== false,
+      // **누구의, 어느 연결의 주문인가.** 없으면 이 사람의 키로 모든
+      // 사용자의 주문을 대조하고, 테스트넷 기록을 실전 거래소에 물어본다.
+      // 관리자/워커는 전체(null), 사용자는 본인 것만.
+      // 연결은 언제나 좁힌다 — 테스트넷 기록을 실전 거래소에 물어보면
+      // 영영 확정되지 않고 상태 대조를 영구히 막는다.
+      userId: scopeUserId ?? (conn as any).user_id ?? null,
+      connectionId,
     });
 
     return NextResponse.json({ ok: true, ...result }, { headers: { 'Cache-Control': 'no-store' } });

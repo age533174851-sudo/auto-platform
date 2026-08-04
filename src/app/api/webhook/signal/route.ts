@@ -317,10 +317,12 @@ export async function POST(req: NextRequest) {
   // TESTNET/LIVE: 실제 거래소 주문
   if ((mode === 'TESTNET' || mode === 'LIVE') && plan?.approved && sb && raw?.connectionId) {
     // 실거래는 명시적 환경변수로 잠금 해제해야 함 (실수 방지)
-    if (mode === 'LIVE' && process.env.ALLOW_LIVE_TRADING !== 'true') {
+    const { liveTradingGate: _lg } = await import('@/lib/engine/liveTradingGate');
+    const _lgv = _lg();
+    if (mode === 'LIVE' && !_lgv.allowed) {
       return NextResponse.json({
         accepted: true, signalId, approved: true, mode, executed: false,
-        error: '실거래가 잠겨 있습니다. ALLOW_LIVE_TRADING=true 설정 후 사용하세요',
+        error: _lgv.reason, env: _lgv.env,
       }, { status: 202 });
     }
 

@@ -159,9 +159,23 @@ export async function gatherAndReconcile(
   // 컬럼이 없는 스키마에서 select가 실패하면 조회 전체가 비고, 그러면 앱
   // 포지션이 통째로 사라져 이번에는 반대 방향 불일치가 난다. 그래서 실패하면
   // 컬럼을 빼고 다시 읽는다 — 아래 미확정 주문 조회와 같은 방식이다.
-  const appQuery = (cols: string) => sb.from('live_orders')
+  // ── **어느 연결의 기록인가** ──
+  //
+  // 이 조회들이 `user_id`로만 걸러지고 있었다. 그러면 **테스트넷에서
+  // 만든 기록을 실전 거래소에 물어본다.** 거래소는 당연히 모른다고
+  // 답하고, 대조는 "앱에는 있는데 거래소에 없다"로 끝난다 —
+  // 영원히. 실제로 이 계좌가 그 상태였다: 08-03 테스트넷 주문 9건이
+  // 실전 연결 대조를 막고 있었고, [미확정 주문 확정]을 눌러도 안 풀렸다.
+  // 없는 것을 찾고 있었으니까.
+  //
+  // 연결이 곧 거래소이자 망이다. 연결을 알면 그 연결 것만 본다.
+  // **모르면 좁히지 않는다** — 안 거르는 쪽이 과하게 막는 쪽이고,
+  // 과하게 막는 것은 놓치는 것보다 낫다.
+  const scope = (q: any) => (connectionId ? q.eq('connection_id', connectionId) : q);
+
+  const appQuery = (cols: string) => scope(sb.from('live_orders')
     .select(cols)
-    .eq('user_id', userId).in('status', ['ACKED', 'FILLED'])
+    .eq('user_id', userId).in('status', ['ACKED', 'FILLED']))
     .order('created_at', { ascending: false }).limit(50);
 
   let { data: appRows, error: appErr } =
@@ -178,9 +192,9 @@ export async function gatherAndReconcile(
       qty: Number(r.filled_qty),
     }));
 
-  const { data: appOpenRows } = await sb.from('live_orders')
+  const { data: appOpenRows } = await scope(sb.from('live_orders')
     .select('client_order_id, symbol')
-    .eq('user_id', userId).in('status', ['SENT', 'ACKED']).limit(50);
+    .eq('user_id', userId).in('status', ['SENT', 'ACKED'])).limit(50);
   const appOpenOrders: OrderView[] = (Array.isArray(appOpenRows) ? appOpenRows : [])
     .map((r: any) => ({ clientOrderId: String(r.client_order_id), symbol: String(r.symbol) }));
 
@@ -193,9 +207,9 @@ export async function gatherAndReconcile(
   // 그 컬럼을 요청하면 조회 전체가 실패하고, 그러면 미확정 주문이 0건으로
   // 보여 관문이 열려버린다. 실패하면 컬럼을 빼고 다시 조회한다 —
   // 부가 정보가 없더라도 "미확정 주문이 있다"는 사실은 반드시 알아야 한다.
-  const unresolvedQuery = (cols: string) => sb.from('live_orders')
+  const unresolvedQuery = (cols: string) => scope(sb.from('live_orders')
     .select(cols)
-    .eq('user_id', userId).eq('status', 'UNKNOWN')
+    .eq('user_id', userId).eq('status', 'UNKNOWN'))
     .order('created_at', { ascending: false }).limit(20);
 
   let { data: unresolvedRows, error: unresolvedErr } =

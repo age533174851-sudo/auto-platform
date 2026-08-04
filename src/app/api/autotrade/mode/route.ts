@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
   const ev: ModeEvidence = {
     completedTrades: 0, daysInMode: 0,
     unresolvedOrders: 0, criticalMismatches: 0,
-    hasLiveKey: false, liveUnlocked: process.env.ALLOW_LIVE_TRADING === 'true',
+    hasLiveKey: false, liveUnlocked: (require('@/lib/engine/liveTradingGate') as any).liveTradingGate().allowed,
   };
 
   try {

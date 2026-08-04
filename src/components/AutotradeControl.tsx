@@ -258,6 +258,7 @@ export default function AutotradeControl() {
     adminSecretSet: data?.adminSecretSet,
     cronSecretSet: data?.cronSecretSet,
     liveUnlocked: data?.liveUnlocked,
+    liveGate: data?.liveGate ?? null,
     marginColumnPresent: data?.marginColumnPresent ?? null,
     exitRuns: (data?.exitRuns ?? null) as any,
     openTradeCount: data?.openTradeCount ?? null,

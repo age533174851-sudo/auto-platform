@@ -54,8 +54,13 @@ export interface HealthInput {
   adminSecretSet?: boolean;
   /** 서버에 CRON_SECRET이 있는가. 없으면 Vercel 크론이 401을 받는다 */
   cronSecretSet?: boolean;
-  /** ALLOW_LIVE_TRADING이 켜져 있는가. 실전 예약이 있을 때만 의미가 있다 */
+  /**
+   * 실주문이 **실제로 열려 있는가.** 스위치가 켜졌는지가 아니라
+   * 이 환경에서 나갈 수 있는지다 — 미리보기는 스위치가 켜져 있어도 막힌다.
+   */
   liveUnlocked?: boolean;
+  /** 왜 열렸는지/막혔는지. 서버(liveTradingGate)가 준 그대로 */
+  liveGate?: { env?: string; reason?: string; previewOverride?: boolean } | null;
   /** margin_pct 칸이 있는가 (마이그레이션 036). null이면 확인 못 함 */
   marginColumnPresent?: boolean | null;
   /** 켜진 예약의 연결 정보 — 모드와 목적지가 맞는지 본다 */
@@ -208,11 +213,23 @@ export function autotradeHealth(input: HealthInput): HealthReport {
   if (liveRows.length > 0) {
     // (1) 실거래 잠금. 이게 안 풀려 있으면 진입 엔진이 403으로 끝난다.
     if (input.liveUnlocked === true) {
-      items.push(item('livelock', '실거래 잠금', 'ok', '풀려 있습니다 (ALLOW_LIVE_TRADING)'));
+      // 미리보기 예외로 열린 것이면 초록으로 넘기지 않는다. 그건 정상
+      // 상태가 아니라 **일부러 켜 둔 예외**이고, 예외는 보여야 한다.
+      items.push(input.liveGate?.previewOverride
+        ? item('livelock', '실거래 잠금', 'unknown',
+            '미리보기(Preview) 배포인데 실주문이 열려 있습니다 — 일부러 켠 예외 상태입니다',
+            '확인이 끝나면 ALLOW_LIVE_TRADING_ON_PREVIEW를 끄세요')
+        : item('livelock', '실거래 잠금', 'ok',
+            `풀려 있습니다${input.liveGate?.env ? ` (${input.liveGate.env})` : ''}`));
     } else if (input.liveUnlocked === false) {
+      // **'스위치가 꺼짐'과 '미리보기라 막힘'은 다른 문제다.**
+      // 둘 다 "잠겨 있습니다"로 적으면 사용자는 이미 켠 스위치를
+      // 또 켜러 간다. 서버가 준 이유를 그대로 쓴다.
       items.push(item('livelock', '실거래 잠금', 'bad',
-        '실거래가 잠겨 있어 실전 예약이 매번 403으로 끝납니다',
-        'Vercel에 ALLOW_LIVE_TRADING=true를 넣고 재배포하세요'));
+        input.liveGate?.reason || '실거래가 잠겨 있어 실전 예약이 매번 403으로 끝납니다',
+        input.liveGate?.env === 'preview'
+          ? 'Vercel 환경변수에서 ALLOW_LIVE_TRADING의 Preview 체크를 해제하세요 (Production만 켜면 됩니다)'
+          : 'Vercel에 ALLOW_LIVE_TRADING=true를 넣고 재배포하세요'));
     } else {
       items.push(item('livelock', '실거래 잠금', 'unknown', '확인하지 못했습니다', ''));
     }

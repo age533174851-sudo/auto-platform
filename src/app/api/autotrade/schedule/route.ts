@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { leverageNote } from '@/lib/engine/leverageMath';
+import { liveTradingGate } from '@/lib/engine/liveTradingGate';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -118,7 +119,10 @@ export async function GET(req: NextRequest) {
     cronSecretSet: !!process.env.CRON_SECRET,
     // 실거래 잠금. 이게 안 풀려 있으면 실전 예약은 매일 403으로 끝난다 —
     // 그런데 화면 어디에도 그 사실이 없었다. **값이 아니라 상태만 나간다.**
-    liveUnlocked: process.env.ALLOW_LIVE_TRADING === 'true',
+    // **스위치가 켜졌다'와 '실제로 열린다'는 다르다.** Preview 배포는
+    // 스위치가 켜져 있어도 막힌다. 화면이 후자를 보여야 한다.
+    liveUnlocked: liveTradingGate().allowed,
+    liveGate: (() => { const g = liveTradingGate(); return { env: g.env, reason: g.reason, previewOverride: g.previewOverride }; })(),
     // 마이그레이션 036이 적용됐는가. 없으면 배율이 낮게 역산된다.
     marginColumnPresent,
     // 포지션을 닫아 줄 크론이 돌고 있는가 + 지금 열려 있는 거래 수

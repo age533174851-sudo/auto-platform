@@ -319,4 +319,33 @@ export function runAutotradeHealthTests() {
   test('열린 거래는 있는데 감시 기록을 못 읽었으면 확인 못 함이다', () => {
     eq(find(autotradeHealth(good({ openTradeCount: 2, exitRuns: null })), 'exitmon').state, 'unknown');
   });
+
+  // 미리보기에서 막힌 것과 스위치가 꺼진 것은 다른 문제다.
+  // 둘 다 "잠겨 있습니다"로 적으면 이미 켠 스위치를 또 켜러 간다.
+  test('미리보기라 막힌 것이면 그렇게 적고, 할 일도 다르다', () => {
+    const r = autotradeHealth(liveGood({
+      liveUnlocked: false,
+      liveGate: { env: 'preview', reason: '미리보기(Preview) 배포에서는 실주문을 내지 않습니다' },
+    }));
+    const it = find(r, 'livelock');
+    eq(it.state, 'bad');
+    assert(it.detail.includes('Preview'), it.detail);
+    assert(it.action.includes('Preview 체크를 해제'), it.action);
+  });
+
+  test('미리보기 예외로 열린 것은 초록이 아니다', () => {
+    const it = find(autotradeHealth(liveGood({
+      liveUnlocked: true, liveGate: { env: 'preview', previewOverride: true },
+    })), 'livelock');
+    eq(it.state, 'unknown', '예외 상태를 정상으로 적었다');
+    assert(it.action.includes('끄세요'), it.action);
+  });
+
+  test('Production에서 열린 것은 환경까지 적는다', () => {
+    const it = find(autotradeHealth(liveGood({
+      liveUnlocked: true, liveGate: { env: 'production' },
+    })), 'livelock');
+    eq(it.state, 'ok');
+    assert(it.detail.includes('production'), it.detail);
+  });
 }

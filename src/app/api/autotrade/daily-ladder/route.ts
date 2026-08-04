@@ -114,11 +114,18 @@ export async function POST(req: NextRequest) {
     // 본인 것만. body.userId는 신뢰하지 않는다.
   }
 
-  if (capability(opMode).realMoney && process.env.ALLOW_LIVE_TRADING !== 'true') {
-    return NextResponse.json(
-      { ok: false, error: '실거래가 잠겨 있습니다. ALLOW_LIVE_TRADING=true 설정 후 사용하세요' },
-      { status: 403 },
-    );
+  // 판정은 한 곳에서만 한다. 여섯 곳이 각자 process.env를 읽고 있었고,
+  // 그중 하나만 느슨해도 실주문은 그리로 나간다.
+  // **Preview 배포는 여기서 막힌다** — 이 구분이 지금까지 없었다.
+  if (capability(opMode).realMoney) {
+    const { liveTradingGate } = await import('@/lib/engine/liveTradingGate');
+    const lg = liveTradingGate();
+    if (!lg.allowed) {
+      return NextResponse.json(
+        { ok: false, error: lg.reason, env: lg.env, liveUnlocked: lg.unlocked },
+        { status: 403 },
+      );
+    }
   }
 
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
@@ -929,7 +936,7 @@ export async function GET(req: NextRequest) {
         : `${rows.length}건 실행했습니다`,
     results,
     cronLogError,
-    liveTradingLocked: process.env.ALLOW_LIVE_TRADING !== 'true',
+    liveTradingLocked: !(await import('@/lib/engine/liveTradingGate')).liveTradingGate().allowed,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
