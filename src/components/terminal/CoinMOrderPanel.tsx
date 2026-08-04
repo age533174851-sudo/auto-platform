@@ -20,6 +20,7 @@ import React, { memo, useEffect, useState } from 'react';
 import { C, FS, NUM, chip, ghostBtn, primaryBtn, input, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 import { AccountLine } from './AccountLine';
+import { marketSupportsExchange } from '@/lib/markets/tradeMode';
 import {
   isCoinMSymbol, baseAssetOf, resolveContractSize, notionalToContracts,
   contractsToCoin, requiredMarginCoin, inverseLiquidationPrice,
@@ -128,6 +129,14 @@ export const CoinMOrderPanel = memo(function CoinMOrderPanel({ dense }: { dense?
     }
     if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason || '이 모드에서 쓸 계좌가 없습니다' }); return; }
     if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
+    {
+      // 보내 놓고 거부당하는 것보다 누르기 전에 말한다. 지원 여부는
+      // marketSupportsExchange 한 곳에 있다 — 시장을 열 때 고칠 자리가
+      // 여러 곳이면 한 곳만 고쳐지고 나머지는 조용히 막힌 채 남는다.
+      const chosen = (connections || []).find((c: any) => c.id === connId);
+      const sup = marketSupportsExchange((chosen as any)?.exchange_id, 'COINM');
+      if (!sup.ok) { setMsg({ ok: false, text: sup.reason }); return; }
+    }
     if (contracts <= 0) { setMsg({ ok: false, text: '계약 수가 0입니다' }); return; }
     if (stopPrice == null) {
       setMsg({ ok: false, text: '마크가를 읽지 못해 손절가를 만들 수 없습니다 — 손절 없이 진입하지 않습니다' });

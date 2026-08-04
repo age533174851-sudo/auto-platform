@@ -242,6 +242,67 @@ function labelOf(c: ConnLike): string {
  * 모드마다 라우트가 다르다. 화면이 이걸 직접 조립하면 한 곳을 고쳐도
  * 나머지가 남는다 — 모의 주문이 실계좌 라우트로 가는 것이 그런 실수다.
  */
+/** 사람이 읽는 거래소 이름. 모르는 값은 그대로 돌려준다 — 지어내지 않는다 */
+export function exchangeLabel(exchangeId: any): string {
+  const raw = String(exchangeId ?? '').trim().toLowerCase();
+  if (!raw) return '알 수 없는 거래소';
+  return EX_NAME[raw] || raw;
+}
+
+/**
+ * 이 연결로 이 시장에 주문할 수 있는가.
+ *
+ * 왜 필요한가
+ * ───────────
+ * 주문 라우트는 **시장**으로 정해지는데(orderEndpointFor) 연결은
+ * **거래소**별이다. 둘이 안 맞으면 보내 놓고 거부당한다.
+ *
+ * 그래서 주문판이 누르기 전에 막는 검사를 갖고 있었는데, 그 검사가
+ * `exchange_id !== 'binance'`로 박혀 있었다. **서버에서 Gate를 열어 준
+ * 뒤에도 화면이 계속 막았다** — 고쳤는데 다른 곳이 남은 것이다.
+ * 이 저장소에서 가장 자주 반복된 실패다.
+ *
+ * 그래서 지원 여부를 **여기 한 곳에** 둔다. 시장을 하나 더 열 때
+ * 고칠 자리가 하나여야 한다.
+ *
+ * **모르는 조합은 막지 않는다.** 목록을 못 읽어 exchange_id가 비어 있는
+ * 것을 거부로 바꾸면, 확인하지 못한 것이 차단이 된다 — 서버가 진짜
+ * 판정자이고 여기는 미리 알려 주는 자리일 뿐이다.
+ */
+export function marketSupportsExchange(
+  exchangeId: any, market: 'SPOT' | 'USDM' | 'COINM' | 'STOCK',
+): { ok: boolean; reason: string } {
+  const ex = String(exchangeId ?? '').trim().toLowerCase();
+  if (!ex) return { ok: true, reason: '' };           // 모르면 막지 않는다
+
+  const gate = ex === 'gate' || ex === 'gateio' || ex === 'gate.io';
+  const binance = ex === 'binance';
+  const kis = ex === 'kis';
+
+  const allowed =
+    market === 'USDM'  ? (binance || gate) :
+    market === 'SPOT'  ? (binance || gate) :
+    market === 'COINM' ? binance :
+    market === 'STOCK' ? kis :
+    false;
+
+  if (allowed) return { ok: true, reason: '' };
+
+  const where =
+    market === 'USDM'  ? 'USDⓈ-M 선물' :
+    market === 'SPOT'  ? '현물' :
+    market === 'COINM' ? 'COIN-M 선물' : '주식';
+  const who =
+    market === 'COINM' ? '바이낸스' :
+    market === 'STOCK' ? '한국투자증권' : '바이낸스·게이트아이오';
+
+  return {
+    ok: false,
+    reason: `${exchangeLabel(ex)} 연결로는 ${where} 주문을 낼 수 없습니다 — `
+          + `${who} 연결로 바꾸세요.`,
+  };
+}
+
 export function orderEndpointFor(mode: TradeMode, market: 'SPOT' | 'USDM' | 'COINM'): string {
   if (mode === 'PAPER') return '/api/paper/order';
   if (market === 'SPOT') return '/api/binance/spot/order';

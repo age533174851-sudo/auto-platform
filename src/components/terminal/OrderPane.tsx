@@ -25,7 +25,7 @@ import { SpotOrderPanel } from './SpotOrderPanel';
 import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { StockOrderPanel } from './StockOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
-import { MODE_INFO, orderEndpointFor } from '@/lib/markets/tradeMode';
+import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
 import { AccountLine } from './AccountLine';
 
@@ -713,17 +713,18 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     // 한 단어로 화면에 떴다.
     //
     // 보내 놓고 거부당하는 것보다 **누르기 전에 말하는 것**이 낫다.
+    //
+    // 다만 이 검사가 `exchange_id !== 'binance'`로 박혀 있었다. 그래서
+    // 서버에서 Gate를 열어 준 뒤에도 **화면이 계속 막았다** — 주문은
+    // 나갈 수 있는데 버튼을 누르면 "바이낸스 연결로만 나갑니다"가 떴다.
+    // 고쳤는데 다른 곳이 남은 것이고, 이 저장소에서 가장 자주 반복된
+    // 실패다. 지원 여부는 이제 marketSupportsExchange 한 곳에 있다.
     if (!isPaper) {
       const chosen = connections.find((c: any) => c.id === modeResolution.connId);
-      const ex = String((chosen as any)?.exchange_id || '').toLowerCase();
       // 모르면 막지 않는다 — 목록을 못 읽었다는 이유로 주문을 막으면
-      // 확인하지 못한 것이 거부가 된다.
-      if (ex && ex !== 'binance') {
-        setMsg({ ok: false, text:
-          `이 연결은 ${ex}입니다 — 이 화면의 주문은 바이낸스 연결로만 나갑니다. `
-          + '위쪽에서 바이낸스 연결로 바꾸세요.' });
-        return;
-      }
+      // 확인하지 못한 것이 거부가 된다. 서버가 진짜 판정자다.
+      const sup = marketSupportsExchange((chosen as any)?.exchange_id, 'USDM');
+      if (!sup.ok) { setMsg({ ok: false, text: sup.reason }); return; }
     }
     // USDT로 적었으면 여기서 코인 개수가 된다. **가격을 모르면 환산이
     // 불가능하고, 그건 '수량을 안 적었다'와 다른 문제다** — 다르게 말한다.

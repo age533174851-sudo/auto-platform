@@ -8,7 +8,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   isLiveConnection, connectionsFor, resolveTradeMode, orderEndpointFor,
-  switchWarning, MODE_INFO, type ConnLike,
+  switchWarning, MODE_INFO, marketSupportsExchange, exchangeLabel, type ConnLike,
 } from './tradeMode';
 
 const testnetConn: ConnLike = { id: 't1', is_testnet: true };
@@ -258,5 +258,62 @@ export function runTradeModeTests() {
     const r = resolveTradeMode('LIVE', [C('a', '실전1', false), C('b', '실전2', false)], null);
     eq(r.choices, 2);
     assert(r.reason.includes('2개'), r.reason);
+  });
+
+  // ── 시장 × 거래소 ────────────────────────────────────
+  //
+  // **이 검사가 화면에 `exchange_id !== 'binance'`로 박혀 있었다.**
+  //
+  // 서버에서 Gate를 열어 준 뒤에도 주문판이 계속 막았다 — 버튼을 누르면
+  // "이 화면의 주문은 바이낸스 연결로만 나갑니다"가 떴다. 주문은 나갈 수
+  // 있는데 화면이 보내지 않은 것이다. 고쳤는데 다른 곳이 남는 실패는 이
+  // 저장소에서 가장 자주 반복됐고, 그래서 판정을 여기 한 곳에 모았다.
+  console.log('[시장 × 거래소 — 어디로 주문할 수 있는가]');
+
+  test('USDⓈ-M은 바이낸스와 게이트아이오 둘 다 된다', () => {
+    for (const ex of ['binance', 'gate', 'gateio', 'GATE', 'Gate.io']) {
+      eq(marketSupportsExchange(ex, 'USDM').ok, true, `${ex}가 막혔다`);
+    }
+  });
+
+  test('현물도 둘 다 된다 — 현물 주문 라우트에 Gate 분기가 있다', () => {
+    eq(marketSupportsExchange('gate', 'SPOT').ok, true);
+    eq(marketSupportsExchange('binance', 'SPOT').ok, true);
+  });
+
+  test('COIN-M은 바이낸스만 — 수량 단위가 계약이고 Gate 경로가 없다', () => {
+    eq(marketSupportsExchange('binance', 'COINM').ok, true);
+    eq(marketSupportsExchange('gate', 'COINM').ok, false);
+  });
+
+  test('주식은 증권사 연결로만 나간다', () => {
+    eq(marketSupportsExchange('kis', 'STOCK').ok, true);
+    eq(marketSupportsExchange('binance', 'STOCK').ok, false);
+    eq(marketSupportsExchange('kis', 'USDM').ok, false);
+  });
+
+  // **모르는 것을 거부로 바꾸지 않는다.** 연결 목록을 못 읽어 exchange_id가
+  // 비어 있는 것을 막으면, 확인하지 못한 것이 차단이 된다. 서버가 진짜
+  // 판정자이고 이건 미리 알려 주는 자리일 뿐이다.
+  test('거래소를 모르면 막지 않는다', () => {
+    for (const v of ['', null, undefined, '  ']) {
+      eq(marketSupportsExchange(v, 'USDM').ok, true, `${String(v)}에서 막혔다`);
+    }
+  });
+
+  test('막을 때는 무엇으로 바꿔야 하는지 말한다', () => {
+    const r = marketSupportsExchange('gate', 'COINM');
+    eq(r.ok, false);
+    assert(r.reason.includes('게이트아이오'), '어느 연결인지 안 적었다: ' + r.reason);
+    assert(r.reason.includes('COIN-M'), '어느 시장인지 안 적었다: ' + r.reason);
+    assert(r.reason.includes('바이낸스'), '무엇으로 바꿔야 하는지 안 적었다: ' + r.reason);
+  });
+
+  // 코드 문자열이 그대로 화면에 뜨면 안 된다.
+  test('거래소 이름은 사람이 읽는 말로, 모르는 값은 지어내지 않는다', () => {
+    eq(exchangeLabel('gate'), '게이트아이오');
+    eq(exchangeLabel('BINANCE'), '바이낸스');
+    eq(exchangeLabel('kraken'), 'kraken');
+    eq(exchangeLabel(''), '알 수 없는 거래소');
   });
 }
