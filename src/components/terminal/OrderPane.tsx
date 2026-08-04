@@ -346,6 +346,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 서버(manualPlan)가 손절 없는 진입을 막는데 화면이 값을 보내지 않았다.
   // 화면에서 못 넣는 값을 서버가 요구하면 그 기능은 죽은 것이다.
   const [slPct, setSlPct] = useState(2);
+  // 직접 입력 중인 문자열. 숫자 상태와 따로 두는 이유: '1.'이나 '0.'처럼
+  // **아직 숫자가 아닌 중간 상태**를 그대로 보여줘야 지우고 다시 쓸 수 있다.
+  // 숫자만 들고 있으면 '10'에서 한 글자 지운 '1'이 곧바로 확정돼 버린다.
+  const [slText, setSlText] = useState('');
+  /** 손절을 가격으로 적을 때의 입력 문자열. 값은 %로 환산해 slPct에 저장한다 */
+  const [slPriceText, setSlPriceText] = useState('');
   // 오늘 손실 한도. **보이지 않으면 없는 것과 같다** — 주문 버튼을 눌렀을
   // 때 처음 알게 되면 그 시점까지 한도를 모른 채로 계획을 세운 것이다.
   const [dailyLimit, setDailyLimit] = useState<any>(null);
@@ -1129,7 +1135,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 26 }}>손절</span>
             {[1, 2, 3, 5, 10].map(p => (
-              <button key={p} onClick={() => setSlPct(p)}
+              <button key={p} onClick={() => { setSlPct(p); setSlText(''); }}
                 style={{
                   flex: 1, minHeight: 26, borderRadius: 6, cursor: 'pointer',
                   background: slPct === p ? C.accentBg : C.raised,
@@ -1138,7 +1144,75 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                   fontSize: FS.micro, fontWeight: 700, ...NUM,
                 }}>{p}%</button>
             ))}
+            {/* ── 직접 입력 ──
+                버튼 다섯 개는 자주 쓰는 값일 뿐이고, 그 다섯 개만 쓸 수
+                있다는 뜻이 아니다. 20%처럼 사이에 없는 값을 쓰려면 넣을
+                자리가 있어야 한다 — 화면에서 못 넣는 값을 서버가 받는다면
+                그 기능은 반쯤 죽은 것이다(손절 칸 자체가 없어서 신규 진입이
+                전부 거부되던 것과 같은 모양이다).
+
+                고른 값이 목록에 없으면 이 칸이 그 값을 들고 있으므로,
+                무엇이 걸려 있는지 화면만 보고 알 수 있다. */}
+            <input
+              inputMode="decimal" placeholder="직접"
+              value={slText !== '' ? slText : ([1, 2, 3, 5, 10].includes(slPct) ? '' : String(slPct))}
+              onChange={e => {
+                const t = e.target.value.replace(/[^0-9.]/g, '');
+                setSlText(t);
+                const n = Number(t);
+                // 빈 칸이나 0은 **적용하지 않는다.** 지우는 도중에 손절이
+                // 0으로 바뀌면, 그 순간 진입 버튼을 누른 주문이 손절 없이
+                // 나가려 한다(서버가 막지만 이유가 엉뚱해진다).
+                if (Number.isFinite(n) && n > 0 && n < 100) setSlPct(n);
+              }}
+              onBlur={() => setSlText('')}
+              style={{
+                width: 48, minHeight: 26, borderRadius: 6, textAlign: 'center',
+                background: [1, 2, 3, 5, 10].includes(slPct) ? C.raised : C.accentBg,
+                color: [1, 2, 3, 5, 10].includes(slPct) ? C.dim : C.accent,
+                border: `1px solid ${[1, 2, 3, 5, 10].includes(slPct) ? C.hair : A(C.accent, '55')}`,
+                fontSize: FS.micro, fontWeight: 700, outline: 'none', ...NUM,
+              }}/>
           </div>
+          {/* ── 손절을 **가격으로** 정하고 싶을 때 ──
+
+              %는 계산의 단위이지 사람이 보는 단위가 아니다. 차트에서
+              "62,400 밑으로 깨지면 나간다"를 정해 놓고 온 사람에게
+              "그게 몇 %인지 계산해서 넣으세요"라고 하면, 반올림 한 번에
+              의도한 자리가 아닌 곳에 손절이 걸린다.
+
+              값은 %로 되돌려 저장한다. 서버·점검·주문이 전부 %를 쓰므로
+              여기서만 환산하면 나머지는 손댈 필요가 없다 — 단위를 두 벌로
+              들고 다니면 한쪽만 갱신되는 순간 손절가가 조용히 달라진다. */}
+          {(() => {
+            const ref0 = orderType === 'LIMIT' ? (Number(price) || mid) : mid;
+            if (ref0 == null || !(ref0 > 0)) return null;
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 26 }}>가격</span>
+                <input
+                  inputMode="decimal"
+                  placeholder={`롱 ${fmtPrice(ref0 * (1 - slPct / 100))}`}
+                  value={slPriceText}
+                  onChange={e => {
+                    const t = e.target.value.replace(/[^0-9.]/g, '');
+                    setSlPriceText(t);
+                    const v = Number(t);
+                    // 기준가와 같거나 반대편이면 **적용하지 않는다.** 거리가
+                    // 0이면 손절이 즉시 발동하고, 그건 사용자가 원한 것이 아니다.
+                    if (!Number.isFinite(v) || v <= 0) return;
+                    const pct = (Math.abs(ref0 - v) / ref0) * 100;
+                    if (pct > 0 && pct < 100) { setSlPct(Number(pct.toFixed(4))); setSlText(''); }
+                  }}
+                  onBlur={() => setSlPriceText('')}
+                  style={{
+                    flex: 1, minWidth: 0, minHeight: 26, borderRadius: 6, padding: '0 8px',
+                    background: C.raised, color: C.text, border: `1px solid ${C.hair}`,
+                    fontSize: FS.micro, fontWeight: 700, outline: 'none', ...NUM,
+                  }}/>
+              </div>
+            );
+          })()}
           {(() => {
             // 결과 손절가와, 그게 청산 안쪽인지. %만 보면 배율이 높을 때
             // 손절이 청산 너머라는 것을 알 수 없다.
