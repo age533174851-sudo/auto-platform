@@ -100,8 +100,20 @@ export function TradeModeSwitch({ compact }: { compact?: boolean }) {
         </div>
       )}
 
-      {/* 연결이 바뀌었다면 그 사실 */}
-      {modeResolution.ok && modeResolution.reason && (
+      {/* 연결이 바뀌었다면 그 사실.
+
+          **compact에서는 적지 않는다 — 바로 밑 주문판의 AccountLine이
+          같은 문장을 이미 적는다.** 두 번 적으면 세 줄이 두 번이라
+          여섯 줄이고, 좁은 화면에서 그만큼 주문 버튼이 아래로 밀린다.
+          실제로 [숏 진입]이 칸 밖으로 밀려 나갔다.
+
+          같은 말을 반복해서 안전해지지 않는다. AccountLine 쪽에 두는
+          이유는 거기가 **어느 계좌인지 바로 위에 적혀 있는 자리**라
+          "이 계좌로 나갑니다"가 무엇을 가리키는지 알 수 있어서다.
+
+          `!ok`(쓸 연결 없음)는 위에 그대로 남는다. 그건 주문판이 아예
+          안 뜰 수도 있는 상황이라 여기서 말해야 한다. */}
+      {!compact && modeResolution.ok && modeResolution.reason && (
         <div style={{ marginTop: 5, color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>
           {modeResolution.reason}
         </div>
