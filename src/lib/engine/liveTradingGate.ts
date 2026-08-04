@@ -81,9 +81,9 @@ export function judgeLiveGate(e: LiveGateEnv): LiveGateVerdict {
   if (env === 'preview' && !previewOverride) {
     return {
       allowed: false, env, unlocked, previewOverride: false,
-      reason: '미리보기(Preview) 배포라 실주문을 내지 않습니다 — **이건 정상입니다.** '
+      reason: '미리보기(Preview) 배포라 실주문을 내지 않습니다 — 이건 정상입니다. '
         + 'PR마다 새 미리보기가 생기고 누구나 열어 볼 수 있어서, 여기서 실계좌로 '
-        + '주문이 나가면 막을 방법이 없습니다. 실전 동작은 **본 주소(Production)**에서 확인하세요.'
+        + '주문이 나가면 막을 방법이 없습니다. 실전 동작은 본 주소(Production)에서 확인하세요.'
         + (unlocked
             ? ' (지금 이 배포에는 ALLOW_LIVE_TRADING이 켜져 있습니다 — Preview 체크를 해제하세요.)'
             : ''),

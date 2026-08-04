@@ -53,6 +53,22 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  // ── 인증 ──
+  //
+  // 이 경로는 거래소에서 최대 2000일치를 받아 와 DB에 upsert한다.
+  // 인증이 없으면 아무나 반복 호출해서 외부 API 레이트리밋과 요금,
+  // DB 쓰기를 소모시킬 수 있다. 값 자체는 거래소에서 오므로 위조는
+  // 안 되지만, **비용은 위조 없이도 나간다.**
+  const { resolveUserId } = await import('@/lib/supabase/admin');
+  const uid = await resolveUserId(
+    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+  const byAdmin = !!process.env.ADMIN_SECRET
+    && req.headers.get('x-admin-secret') === process.env.ADMIN_SECRET;
+  if (!uid && !byAdmin) {
+    return NextResponse.json(
+      { ok: false, error: 'auth_required', message: '로그인이 필요합니다' }, { status: 401 });
+  }
+
   let body: any;
   try { body = await req.json(); } catch { return NextResponse.json({ ok: false, error: 'JSON 파싱 실패' }, { status: 400 }); }
 
