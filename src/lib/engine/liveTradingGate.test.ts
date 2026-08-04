@@ -35,6 +35,38 @@ export function runLiveTradingGateTests() {
     assert(g.reason.includes('체크를 해제'), '무엇을 해야 하는지 안 적었다: ' + g.reason);
   });
 
+  // ── 순서가 뒤바뀌면 정반대를 시킨다 ──
+  //
+  // Preview 배포에는 보통 ALLOW_LIVE_TRADING이 아예 없다(Production
+  // 범위로만 켜 두니까). 그때 '스위치 꺼짐' 가지로 빠지면
+  // **"넣고 재배포하세요"**라고 안내하게 되고, 그건 방금 닫은 구멍을
+  // 다시 열라는 말이다. 실제로 화면이 그렇게 떴다.
+  test('Preview에 변수가 아예 없어도 "넣으라"고 하지 않는다', () => {
+    const g = judgeLiveGate({ VERCEL_ENV: V });   // 스위치 없음 = 올바른 설정
+    eq(g.allowed, false);
+    assert(!/넣고 재배포/.test(g.reason),
+      '올바르게 설정해 둔 것을 되돌리라고 시킨다: ' + g.reason);
+    assert(g.reason.includes('정상'), '막힌 것이 정상이라고 안 알려줬다: ' + g.reason);
+    assert(g.reason.includes('Production'), '어디서 확인해야 하는지 안 적었다: ' + g.reason);
+  });
+
+  test('Production에 변수가 없으면 그때는 넣으라고 한다', () => {
+    const g = judgeLiveGate({ VERCEL_ENV: P });
+    eq(g.allowed, false);
+    assert(/넣고 재배포/.test(g.reason), '진짜로 넣어야 할 때 안 알려줬다: ' + g.reason);
+  });
+
+  // 두 문장이 서로 반대를 말하면 안 된다.
+  test('한 응답 안에서 넣으라는 말과 빼라는 말이 같이 나오지 않는다', () => {
+    for (const e of [{ VERCEL_ENV: V }, { ALLOW_LIVE_TRADING: 'true', VERCEL_ENV: V },
+                     { VERCEL_ENV: P }, { ALLOW_LIVE_TRADING: 'true', VERCEL_ENV: P }]) {
+      const r = judgeLiveGate(e as any).reason;
+      const add = /넣고 재배포/.test(r);
+      const remove = /체크를 해제/.test(r);
+      assert(!(add && remove), '모순된 안내: ' + r);
+    }
+  });
+
   // 미리보기에서 정말로 실주문을 내야 할 때가 있다(테스트넷 키로는
   // 재현이 안 되는 문제). 그때는 스위치를 하나 더 켜야 하고, 켜져
   // 있으면 그 사실이 응답에 그대로 실린다.

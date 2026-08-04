@@ -225,10 +225,15 @@ export function autotradeHealth(input: HealthInput): HealthReport {
       // **'스위치가 꺼짐'과 '미리보기라 막힘'은 다른 문제다.**
       // 둘 다 "잠겨 있습니다"로 적으면 사용자는 이미 켠 스위치를
       // 또 켜러 간다. 서버가 준 이유를 그대로 쓴다.
-      items.push(item('livelock', '실거래 잠금', 'bad',
+      items.push(item('livelock', '실거래 잠금',
+        // 미리보기에서 막힌 것은 고장이 아니다. ❌로 두면 사용자가
+        // 고치러 가고, 고치면 구멍이 열린다.
+        input.liveGate?.env === 'preview' ? 'unknown' : 'bad',
         input.liveGate?.reason || '실거래가 잠겨 있어 실전 예약이 매번 403으로 끝납니다',
+        // **미리보기에서는 할 일이 없다.** 막힌 것이 정상이므로 고치라고
+        // 하면 안 된다 — 시키는 대로 하면 방금 닫은 구멍이 다시 열린다.
         input.liveGate?.env === 'preview'
-          ? 'Vercel 환경변수에서 ALLOW_LIVE_TRADING의 Preview 체크를 해제하세요 (Production만 켜면 됩니다)'
+          ? '실전 동작은 본 주소(Production)에서 확인하세요 — 여기서 고칠 것은 없습니다'
           : 'Vercel에 ALLOW_LIVE_TRADING=true를 넣고 재배포하세요'));
     } else {
       items.push(item('livelock', '실거래 잠금', 'unknown', '확인하지 못했습니다', ''));

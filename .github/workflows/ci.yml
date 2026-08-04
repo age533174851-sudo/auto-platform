@@ -44,7 +44,7 @@ jobs:
       # **기준선은 실제 개수와 같아야 한다.**
       # 80으로 두면 지금(74)에서 새 오류 6개가 들어와도 통과한다.
       # 줄어들 때마다 같이 내린다 — 아래 단계가 그걸 알려 준다.
-      TS_ERROR_BASELINE: '74'
+      TS_ERROR_BASELINE: '73'
 
     steps:
       - uses: actions/checkout@v4

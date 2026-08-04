@@ -69,6 +69,27 @@ export function judgeLiveGate(e: LiveGateEnv): LiveGateVerdict {
   const env = readEnv(e);
   const previewOverride = String(e.ALLOW_LIVE_TRADING_ON_PREVIEW) === 'true';
 
+  // ── 미리보기는 스위치보다 **먼저** 본다 ──
+  //
+  // 순서가 뒤바뀌면 이런 모순이 나온다. Preview 배포에는 보통
+  // ALLOW_LIVE_TRADING이 없다(Production 범위로만 켜 두니까). 그러면
+  // '스위치 꺼짐' 가지로 빠져서 **"넣고 재배포하세요"**라고 안내한다.
+  // 그건 방금 닫은 구멍을 다시 열라는 말이다.
+  //
+  // 미리보기에서 실주문이 안 나가는 것은 **고장이 아니라 정상**이다.
+  // 그렇게 말해야 사용자가 되돌리지 않는다.
+  if (env === 'preview' && !previewOverride) {
+    return {
+      allowed: false, env, unlocked, previewOverride: false,
+      reason: '미리보기(Preview) 배포라 실주문을 내지 않습니다 — **이건 정상입니다.** '
+        + 'PR마다 새 미리보기가 생기고 누구나 열어 볼 수 있어서, 여기서 실계좌로 '
+        + '주문이 나가면 막을 방법이 없습니다. 실전 동작은 **본 주소(Production)**에서 확인하세요.'
+        + (unlocked
+            ? ' (지금 이 배포에는 ALLOW_LIVE_TRADING이 켜져 있습니다 — Preview 체크를 해제하세요.)'
+            : ''),
+    };
+  }
+
   if (!unlocked) {
     return {
       allowed: false, env, unlocked: false, previewOverride,
@@ -82,6 +103,8 @@ export function judgeLiveGate(e: LiveGateEnv): LiveGateVerdict {
   }
 
   if (env === 'preview') {
+    // 위에서 !previewOverride는 이미 걸렀다. 여기 오는 것은 예외를
+    // 명시적으로 켠 경우뿐이다.
     if (previewOverride) {
       // 열어 주되 **조용히 열지는 않는다.** 미리보기에서 실주문이
       // 나가는 것은 언제나 예외 상황이고, 예외는 보여야 한다.
