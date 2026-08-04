@@ -46,6 +46,7 @@ export default function AutotradeControl() {
   // 점검 결과. **주문을 내지 않고** 진짜 관문을 끝까지 돌린 결과다.
   const [check, setCheck] = useState<any>(null);
   const [checking, setChecking] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [symbol, setSymbol] = useState('BTCUSDT');
@@ -115,6 +116,37 @@ export default function AutotradeControl() {
     tick();
     return () => { alive = false; clearInterval(t); };
   }, [ticking, auth, load]);
+
+  /**
+   * 미확정 주문을 거래소와 대조해 확정한다.
+   *
+   * **왜 이 화면에 있어야 하나**
+   * 결과를 모르는 주문이 남아 있으면 신규 진입이 막힌다. 그건 맞는
+   * 동작이다 — 나갔는지 모르는 주문 위에 또 얹으면 두 배로 들어간다.
+   *
+   * 문제는 이 화면이 "아래 '미확정 주문 확정' 버튼을 눌러..."라고
+   * 안내하면서 **그 버튼을 여기 두지 않았다**는 것이다. 버튼은 매매
+   * 화면에만 있었다. 막힌 자리에서 푸는 방법이 없으면, 안내는 안내가
+   * 아니라 막다른 길이다.
+   */
+  const reconcile = async () => {
+    if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 고르세요' }); return; }
+    setReconciling(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/orders/reconcile?connectionId=${encodeURIComponent(connId)}`,
+        { headers: { Authorization: auth } });
+      const j = await r.json();
+      // 몇 건을 어떻게 했는지 그대로 보여준다. 모르면 다시 눌러야 하는지
+      // 알 수 없고, "확정했다"만 뜨면 아직 남은 것을 놓친다.
+      setMsg({ ok: !!j?.ok, text: j?.ok
+        ? `대조 완료 — ${j?.resolved ?? 0}건 확정`
+          + (j?.stillUnknown ? ` · ${j.stillUnknown}건은 거래소에도 없어 아직 모름` : '')
+        : errorTextOf(j, `대조 실패 (${r.status})`) });
+      if (j?.ok) { load(); setCheck(null); }
+    } catch (e: any) {
+      setMsg({ ok: false, text: `대조 요청이 응답하지 않았습니다 (${e?.message || e})` });
+    } finally { setReconciling(false); }
+  };
 
   /**
    * **지금 눌러서 내일을 확인한다.**
@@ -456,6 +488,17 @@ export default function AutotradeControl() {
           background: A(T.ylw, '14'), color: T.ylw, border: `1px solid ${A(T.ylw, '40')}`,
           fontSize: 11.5, fontWeight: 800,
         }}>{checking ? '점검 중…' : '지금 점검하기 (주문은 안 냅니다)'}</button>
+
+        {/* ── 미확정 주문 확정 ──
+            막힌 자리에서 푸는 방법이 있어야 한다. 예전에는 이 화면이
+            "아래 버튼을 눌러"라고 안내하면서 그 버튼을 안 뒀다. */}
+        <button onClick={reconcile} disabled={reconciling || !connId} style={{
+          minHeight: 34, borderRadius: 8,
+          cursor: reconciling || !connId ? 'default' : 'pointer',
+          background: 'transparent', color: T.muted,
+          border: `1px solid ${T.border}`, fontSize: 11, fontWeight: 700,
+          opacity: reconciling ? 0.6 : 1,
+        }}>{reconciling ? '거래소와 대조 중…' : '미확정 주문 확정 (거래소와 대조)'}</button>
 
         {check?.checklist && (
           <div style={{
