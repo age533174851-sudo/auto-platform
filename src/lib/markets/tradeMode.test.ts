@@ -225,6 +225,27 @@ export function runTradeModeTests() {
     assert((r.chosenLabel || '').includes('실전'), r.chosenLabel);
   });
 
+  // ── 응답의 이름이 바뀌어도 버틴다 ──
+  //
+  // **이게 실제로 화면을 망가뜨렸다.** `/api/exchange?action=list`가
+  // exchange_id를 `exchange`로, label을 `nickname`으로 바꿔 내보내고 있었다.
+  // 그래서 여기 있는 위 테스트들은 전부 통과하는데 화면에는
+  //   "테스트넷 연결 cd7fd4be(으)로 주문합니다"
+  // 가 떴다. 응답 쪽을 고쳤지만, 이름이 어긋나면 **조용히** 틀리는 종류라
+  // 여기서도 받아 준다.
+  test('exchange·nickname으로 와도 알아본다 — 응답 필드 이름이 갈린 적이 있다', () => {
+    const r = resolveTradeMode('LIVE', [
+      { id: 'cd7fd4be-1111', exchange: 'gate', is_testnet: false } as any,
+    ], null);
+    assert((r.chosenLabel || '').includes('게이트아이오'),
+      '거래소를 못 알아봤다: ' + r.chosenLabel);
+
+    const r2 = resolveTradeMode('LIVE', [
+      { id: 'cd7fd4be-1111', nickname: '내 게이트', is_testnet: false } as any,
+    ], null);
+    eq(r2.chosenLabel, '내 게이트');
+  });
+
   // 사용자가 붙인 이름이 있으면 그게 최우선이다.
   test('사용자 이름이 있으면 그대로 쓴다', () => {
     const r = resolveTradeMode('LIVE', [

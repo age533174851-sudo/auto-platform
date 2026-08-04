@@ -21,6 +21,14 @@
 
 import type { SymbolFilters } from './quantize';
 
+/** getGateContractSpec가 돌려주는 모양 중 계산에 필요한 부분만 */
+export interface GateSpecLike {
+  quantoMultiplier: number;
+  orderSizeMin?: number | null;
+  orderSizeMax?: number | null;
+  orderPriceRound?: number | null;
+}
+
 /** 심볼 → Gate 계약 이름. 'BTCUSDT' → 'BTC_USDT' */
 export function toGateContract(symbol: string): string {
   const s = String(symbol || '').toUpperCase().replace('/', '').replace('_', '');
@@ -168,6 +176,20 @@ export interface GateStopSpec {
   autoSize: 'close_long' | 'close_short';
   ok: boolean;
   reason: string;
+  /**
+   * 실제로 거래소에 보낼 트리거 가격. 호가 단위에 맞춰져 있다.
+   *
+   * **이걸 안 쓰면 손절이 안 걸린다.** Gate는 호가 단위의 정수배가 아닌
+   * 트리거 가격을 거부한다:
+   *   Gate 400: invalid argument: trigger.price price is not an integer
+   *   multiple of a price unit
+   * 진입 가격은 quantizeOrder가 맞춰 주는데 손절가는 아무도 안 맞추고
+   * 있었다. 그래서 진입은 성공하고 손절만 실패했고, 규칙대로 방금 연
+   * 포지션을 되돌렸다 — 안전하긴 하지만 **주문을 아예 낼 수 없다.**
+   */
+  triggerPrice: number | null;
+  /** 호가 단위에 맞추느라 값이 바뀌었으면 그 사실. 조용히 바꾸지 않는다 */
+  note: string;
 }
 
 /**
@@ -183,14 +205,42 @@ export function gateStopSpec(
   side: 'LONG' | 'SHORT',
   stopPrice: number | null | undefined,
   refPrice?: number | null,
+  /** 계약 규격. 주면 트리거 가격을 호가 단위에 맞춘다 */
+  spec?: GateSpecLike | null,
 ): GateStopSpec {
   const base: GateStopSpec = side === 'LONG'
-    ? { rule: 2, autoSize: 'close_long', ok: true, reason: '' }
-    : { rule: 1, autoSize: 'close_short', ok: true, reason: '' };
+    ? { rule: 2, autoSize: 'close_long', ok: true, reason: '', triggerPrice: null, note: '' }
+    : { rule: 1, autoSize: 'close_short', ok: true, reason: '', triggerPrice: null, note: '' };
 
-  const sp = Number(stopPrice);
-  if (!Number.isFinite(sp) || sp <= 0) {
+  const sp0 = Number(stopPrice);
+  if (!Number.isFinite(sp0) || sp0 <= 0) {
     return { ...base, ok: false, reason: `손절가가 유효하지 않습니다 (${stopPrice})` };
+  }
+
+  // ── 호가 단위에 맞춘다 ──
+  //
+  // **반올림하지 않고 진입에서 멀어지는 쪽으로 민다.**
+  // LONG 손절은 아래에 있으므로 내림, SHORT 손절은 위에 있으므로 올림.
+  // 가까워지는 쪽으로 밀면 손절이 한 틱 일찍 터질 수 있고, 그건 사용자가
+  // 정하지 않은 손절이다. 한 틱만큼 손실이 커지는 쪽이 낫다 —
+  // 63912에서 0.1틱은 0.00016%다.
+  const tick = Number(spec?.orderPriceRound);
+  let sp = sp0;
+  let note = '';
+  if (Number.isFinite(tick) && tick > 0) {
+    const n = sp0 / tick;
+    // 부동소수 오차 보정. 이미 격자에 맞는 값이 한 틱 밀리면 안 된다.
+    const eps = 1e-9;
+    const k = side === 'LONG' ? Math.floor(n + eps) : Math.ceil(n - eps);
+    // 소수 자릿수를 tick에서 뽑아 잘라 낸다. k*tick이 62653.90000000001이
+    // 되면 거래소가 또 거부한다.
+    const dec = Math.max(0, Math.min(12, Math.round(-Math.log10(tick))));
+    sp = Number((k * tick).toFixed(dec));
+    if (!(sp > 0)) {
+      return { ...base, ok: false,
+        reason: `손절가 ${sp0}을 호가 단위(${tick})에 맞추면 0이 됩니다` };
+    }
+    if (sp !== sp0) note = `손절가 ${sp0} → ${sp} (호가 단위 ${tick})`;
   }
   // 기준가를 알면 방향까지 본다. LONG 손절이 진입가 위면 걸자마자 발동한다.
   if (refPrice != null && Number.isFinite(Number(refPrice)) && Number(refPrice) > 0) {
@@ -199,13 +249,13 @@ export function gateStopSpec(
     const badShort = side === 'SHORT' && sp <= ref;
     if (badLong || badShort) {
       return {
-        ...base, ok: false,
+        ...base, ok: false, triggerPrice: sp, note,
         reason: `${side} 기준가 ${ref} / 손절 ${sp} — 손절이 `
               + `${side === 'LONG' ? '위' : '아래'}에 있어 즉시 발동합니다`,
       };
     }
   }
-  return base;
+  return { ...base, triggerPrice: sp, note };
 }
 
 // ── 기초자산 수량 ↔ 계약 수 ──────────────────────────
@@ -215,13 +265,6 @@ export function gateStopSpec(
 // 두 곳에 두면 한쪽만 고쳐지고, 그 실수는 '의도의 10000배 주문'으로 나온다.
 
 
-/** getGateContractSpec가 돌려주는 모양 중 계산에 필요한 부분만 */
-export interface GateSpecLike {
-  quantoMultiplier: number;
-  orderSizeMin?: number | null;
-  orderSizeMax?: number | null;
-  orderPriceRound?: number | null;
-}
 
 /**
  * Gate 계약 규격 → 공용 `quantizeOrder`가 읽는 모양.

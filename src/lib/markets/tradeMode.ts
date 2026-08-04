@@ -62,6 +62,15 @@ export interface ConnLike {
   id: string;
   label?: string | null;
   exchange_id?: string | null;
+  /**
+   * 같은 값의 다른 이름들.
+   *
+   * `/api/exchange?action=list`는 한동안 exchange_id를 `exchange`로, label을
+   * `nickname`으로 바꿔 내보냈다. 그래서 화면에 원시 UUID가 떴다. 응답 쪽을
+   * 고쳤지만, 이름이 어긋나면 **조용히** 틀리는 종류라 여기서도 받아 준다.
+   */
+  exchange?: string | null;
+  nickname?: string | null;
   /** **false일 때만** 실전이다. null·undefined는 테스트넷으로 본다 */
   is_testnet?: boolean | null;
   has_withdrawal?: boolean | null;
@@ -205,10 +214,10 @@ const EX_NAME: Record<string, string> = {
  * 알 수 있게 한다.
  */
 function labelOf(c: ConnLike): string {
-  const l = String(c?.label || '').trim();
+  const l = String(c?.label || c?.nickname || '').trim();
   if (l) return l;
 
-  const exRaw = String(c?.exchange_id || '').trim().toLowerCase();
+  const exRaw = String(c?.exchange_id || c?.exchange || '').trim().toLowerCase();
   const ex = EX_NAME[exRaw] || (exRaw ? exRaw : '');
   // 저장소 전체 규칙: is_testnet === false 만 실전이다.
   const net = c?.is_testnet === false ? '실전' : '테스트넷';

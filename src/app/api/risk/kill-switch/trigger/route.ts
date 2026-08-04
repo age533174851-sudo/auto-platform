@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions } from '@/lib/risk/killSwitch';
-import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
   let exec: any = null;
   if (!wasActive) {
     try {
-      const creds = await loadBinanceCreds(sb, uid, connectionId);
+      const creds = await loadFuturesCreds(sb, uid, connectionId);
       if (!creds.ok) {
         // 실행하지 못했다는 사실을 숨기지 않는다. active=true는 이미 저장됐으므로
         // 신규 주문은 막힌 상태다 — 그 절반만 됐다는 것을 응답에 적는다.
@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
       } else {
         const r = await executeKillActions(sb, uid, connectionId, {
           key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
-          actionMode: s.actionMode,
+          exchange: creds.exchange, actionMode: s.actionMode,
         });
         exec = { ran: true, ...r };
       }

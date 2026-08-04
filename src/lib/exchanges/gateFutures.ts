@@ -543,3 +543,129 @@ export async function getGateContractSpec(
 export function __clearGateSpecCache() {
   for (const k of Object.keys(_gateSpecCache)) delete _gateSpecCache[k];
 }
+
+// ── 비상 정리 (전량 취소 · 전량 종료) ────────────────
+//
+// **못 여는 것은 불편이고 못 닫는 것은 사고다.**
+//
+// 바이낸스에는 `cancelAllOpenOrders`·`closeAllPositions`가 있어서 화면의
+// [미체결 취소]·[전량 청산]·[KILL] 버튼이 그걸 부른다. Gate에는 없었다.
+// 그래서 Gate 연결로 포지션이 열리면 **그 버튼들이 전부 죽어 있었다** —
+// 열 수는 있는데 닫을 수 없는 상태다. 그건 열지 못하는 것보다 나쁘다.
+
+/**
+ * 미체결 주문 전체 취소 (일반 주문 + 조건부 주문).
+ *
+ * Gate의 DELETE는 계약을 요구한다. 그래서 열린 주문을 먼저 읽어 계약을
+ * 모으고 계약별로 지운다. 손절·익절은 `price_orders`라는 다른 통에 있어서
+ * **따로 지워야 한다** — 이걸 빼면 포지션을 닫은 뒤에도 손절 주문이 남아,
+ * 반대 방향으로 새 포지션을 여는 사고가 난다.
+ *
+ * 조회에 실패하면 성공이라고 말하지 않는다. 여기서 "0건 취소 완료"를
+ * 돌려주면 사용자는 정리됐다고 믿고 손을 뗀다.
+ */
+export async function cancelAllOpenOrdersGateFutures(
+  key: string, secret: string, testnet = true,
+): Promise<{ success: boolean; count: number | null; results: any[]; message: string }> {
+  const results: any[] = [];
+
+  let open: GateOrderResult[];
+  try {
+    open = await getOpenOrdersGateFutures(key, secret, testnet);
+  } catch (e: any) {
+    return { success: false, count: null, results,
+      message: `미체결 주문을 읽지 못해 취소하지 못했습니다: ${e?.message || e}` };
+  }
+
+  // 조건부 주문(손절·익절)은 계약 없이 전체 조회가 안 된다. 포지션이 있는
+  // 계약도 함께 모아야 손절만 남는 일이 없다.
+  const contracts = new Set<string>();
+  for (const o of open) if (o?.contract) contracts.add(String(o.contract));
+  try {
+    for (const p of await getPositionsGateFutures(key, secret, testnet)) {
+      if (p?.contract) contracts.add(String(p.contract));
+    }
+  } catch { /* 포지션을 못 읽어도 열린 주문 쪽은 지운다 */ }
+
+  if (contracts.size === 0) {
+    return { success: true, count: 0, results, message: '미체결 주문이 없습니다' };
+  }
+
+  let ok = true;
+  let count = 0;
+  for (const contract of contracts) {
+    try {
+      const r = await gateReq<any[]>('DELETE', '/api/v4/futures/usdt/orders', {
+        key, secret, qs: `contract=${contract}`, testnet,
+      });
+      const n = Array.isArray(r) ? r.length : 0;
+      count += n;
+      results.push({ contract, kind: 'orders', success: true, count: n });
+    } catch (e: any) {
+      ok = false;
+      results.push({ contract, kind: 'orders', success: false, error: String(e?.message || e) });
+    }
+    try {
+      const r = await gateReq<any[]>('DELETE', '/api/v4/futures/usdt/price_orders', {
+        key, secret, qs: `contract=${contract}`, testnet,
+      });
+      const n = Array.isArray(r) ? r.length : 0;
+      count += n;
+      results.push({ contract, kind: 'price_orders', success: true, count: n });
+    } catch (e: any) {
+      ok = false;
+      results.push({ contract, kind: 'price_orders', success: false, error: String(e?.message || e) });
+    }
+  }
+
+  return {
+    success: ok, count, results,
+    message: ok ? `미체결 주문 취소 완료 (${count}건)`
+                : '일부 계약에서 취소가 실패했습니다 — 거래소에서 직접 확인하세요',
+  };
+}
+
+/**
+ * 포지션 전체 종료.
+ *
+ * **닫은 뒤에 다시 읽어 확인한다.** 주문이 200을 받았다는 것과 포지션이
+ * 없다는 것은 다른 얘기다 — 유동성이 없으면 `ioc`는 그대로 취소되고,
+ * 그때 "종료 완료"라고 적으면 사용자는 없는 안전을 믿는다.
+ */
+export async function closeAllPositionsGateFutures(
+  key: string, secret: string, testnet = true, retries = 3,
+): Promise<{ success: boolean; remaining: number | null; retries: number; results: any[]; message: string }> {
+  const results: any[] = [];
+  let attempt = 0;
+
+  for (attempt = 1; attempt <= Math.max(1, retries); attempt++) {
+    let positions: GatePosition[];
+    try {
+      positions = await getPositionsGateFutures(key, secret, testnet);
+    } catch (e: any) {
+      return { success: false, remaining: null, retries: attempt, results,
+        message: `포지션을 읽지 못해 종료를 확인할 수 없습니다: ${e?.message || e}` };
+    }
+    if (positions.length === 0) {
+      return { success: true, remaining: 0, retries: attempt, results, message: '포지션 전체 종료 완료' };
+    }
+    for (const p of positions) {
+      const r = await closePositionGateFutures(key, secret, String(p.contract), testnet);
+      results.push({ contract: p.contract, size: p.size, ...r });
+    }
+    if (attempt < retries) await new Promise(r => setTimeout(r, 1200));
+  }
+
+  // 마지막으로 한 번 더 확인한다. 못 읽으면 remaining은 null이다 —
+  // 0으로 적으면 '전부 닫혔다'가 사실이 된다.
+  let remaining: number | null = null;
+  try { remaining = (await getPositionsGateFutures(key, secret, testnet)).length; } catch { /* null */ }
+
+  return {
+    success: remaining === 0,
+    remaining, retries: attempt - 1, results,
+    message: remaining === 0
+      ? '포지션 전체 종료 완료'
+      : `포지션 ${remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
+  };
+}
