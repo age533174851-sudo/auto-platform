@@ -137,6 +137,38 @@ export async function openLadderGate(
   }
 
   try {
+    // ── 버려진 예약 치우기 (사이클 판정보다 **먼저**) ──
+    //
+    // 예약은 주문보다 먼저 꽂힌다. 그래야 동시 요청 둘 중 하나만
+    // 통과한다(unique 제약). 그런데 예약한 뒤 주문까지 가는 동안 함수가
+    // 죽으면 — Vercel 실행 상한(60초)에 걸리거나 배포로 인스턴스가
+    // 교체되면 — releaseReservation이 돌지 못한다.
+    //
+    // 그러면 RESERVED 행이 남고, unique 제약 때문에 **그날은 다시 시도할
+    // 수 없다.** 주문은 한 건도 안 나갔는데 하루를 잃는다. 화면에는
+    // "오늘 이미 거래했습니다"로만 보이고 푸는 방법이 없다.
+    //
+    // 하루 1회 크론일 때는 드물었다. 실행기를 15분마다로 바꾸면서 같은
+    // 창에 들어갈 확률이 96배가 됐다.
+    //
+    // **사이클 판정보다 먼저 한다.** 오늘 사이클이 잠겨 있어도 버려진
+    // 예약은 치워야 한다 — 잠금이 풀린 뒤에 그 행이 또 하루를 먹는다.
+    //
+    // **진입 흔적이 없는 RESERVED만 치운다.** entry_price가 있으면 주문이
+    // 나간 것이므로 절대 건드리지 않는다. 그걸 지우면 하루 1회 제약이
+    // 풀려 같은 날 두 번 들어간다 — 막으려던 사고보다 크다.
+    const STALE_MS = 10 * 60 * 1000;   // 실행 상한(60초)의 열 배
+    try {
+      await sb.from('ladder_daily_trades')
+        .delete()
+        .eq('user_id', opts.userId)
+        .eq('strategy_id', strategyId)
+        .eq('trade_date', todayUtc())
+        .eq('status', 'RESERVED')
+        .is('entry_price', null)
+        .lt('created_at', new Date(Date.now() - STALE_MS).toISOString());
+    } catch { /* 못 치워도 아래 insert가 ALREADY_TRADED로 알려 준다 */ }
+
     const cycle = await getOrCreateCycle(sb, opts.userId, strategyId);
     if (!cycle) {
       return { allowed: false, rejectCode: 'DB_ERROR', reason: '사이클 상태를 읽지 못했습니다' };
@@ -182,6 +214,7 @@ export async function openLadderGate(
 
     // ── 하루 1회 예약 (unique 제약이 경쟁을 처리한다) ──
     const tradeDate = todayUtc();
+
     const { data: reservation, error: resErr } = await sb
       .from('ladder_daily_trades')
       .insert({
