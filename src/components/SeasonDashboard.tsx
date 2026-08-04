@@ -172,7 +172,10 @@ export default function SeasonDashboard() {
         </div>
 
         {/* Component scores */}
-        <div className="mobile-1col" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6 }} className="season-grid">
+        {/* className이 두 번 있었다. 뒤엣것이 이기므로 **mobile-1col이
+            조용히 버려져** 모바일 1단 레이아웃이 안 먹고 있었다.
+            오류도 경고도 없이 스타일 하나가 사라지는 모양이다. */}
+        <div className="mobile-1col season-grid" style={{ display:'grid', gridTemplateColumns:'repeat(2, minmax(0, 1fr))', gap:6 }}>
           {score && [
             { label:'EMA 추세', v: score.components.ema, color:T.acl },
             { label:'일목구름', v: score.components.ichimoku, color:T.prp },

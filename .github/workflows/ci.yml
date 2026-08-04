@@ -41,7 +41,10 @@ jobs:
       # 알린다). 다만 Next가 빌드 중에 이 값을 읽으므로 자리만 채운다.
       NEXT_TELEMETRY_DISABLED: '1'
       # 타입 에러 기준선. 줄였으면 이 숫자도 같이 내린다.
-      TS_ERROR_BASELINE: '80'
+      # **기준선은 실제 개수와 같아야 한다.**
+      # 80으로 두면 지금(74)에서 새 오류 6개가 들어와도 통과한다.
+      # 줄어들 때마다 같이 내린다 — 아래 단계가 그걸 알려 준다.
+      TS_ERROR_BASELINE: '74'
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +64,39 @@ jobs:
       - name: 유닛 테스트
         run: npm test
 
+      # ── ESLint ──
+      #
+      # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그
+      # 53건의 성격이 전혀 다르다:
+      #
+      #   42건 react/no-unescaped-entities  — JSX 안의 따옴표. 순전히 표기
+      #   10건 @next/next/no-img-element    — 성능 권고
+      #    1건 기타
+      #
+      # 표기 규칙 때문에 CI를 빨갛게 두면, 사람들은 곧 CI를 안 본다.
+      # 그래서 **틀리면 실제로 깨지는 규칙만** 막는다.
+      #
+      # react-hooks/rules-of-hooks가 그것이다. 훅을 조건부로 부르면 React가
+      # 훅을 호출 순서로 식별하기 때문에 이전 훅의 상태를 다음 훅이 집어
+      # 간다. 화면이 조용히 뒤섞이거나 "Rendered fewer hooks than expected"로
+      # 죽는다. 이 규칙 위반은 스타일이 아니라 버그다.
+      #
+      # 나머지는 아래 '전체 lint'에서 세기만 하고 실패시키지 않는다.
+      # 줄어들면 그때 기준을 조인다.
+      - name: ESLint — 깨지는 규칙만 차단
+        run: |
+          set -o pipefail
+          npm run lint 2>&1 | tee lint.log || true
+          FATAL=$(grep -cE "rules-of-hooks|jsx-no-duplicate-props|react-hooks/exhaustive-deps.*Error" lint.log || true)
+          echo "치명 규칙 위반 ${FATAL}건"
+          if [ "$FATAL" -gt 0 ]; then
+            echo "::error::훅 규칙 위반은 상태가 뒤섞이는 버그입니다"
+            grep -E "rules-of-hooks|jsx-no-duplicate-props" -B 20 lint.log | grep -E "^\./|rules-of-hooks|jsx-no-duplicate-props"
+            exit 1
+          fi
+          TOTAL=$(grep -cE "Error:" lint.log || true)
+          echo "::notice::표기·권고 수준 lint 오류 ${TOTAL}건 (차단하지 않음)"
+
       - name: 타입 에러 개수 확인
         run: |
           set -o pipefail
@@ -69,6 +105,22 @@ jobs:
           npx tsc --noEmit -p tsconfig.json > ts.log 2>&1 || true
           COUNT=$(grep -cE "error TS" ts.log || true)
           echo "타입 에러 ${COUNT}건 (기준 ${TS_ERROR_BASELINE}건)"
+
+          # ── 개수로 재는 것의 구멍 ──
+          #
+          # 파싱 오류가 나면 tsc가 그 파일에서 멈춰 **에러가 줄어든다.**
+          # 실제로 80건이 1건이 된 적이 있고, 그때 이 검사는 통과했다.
+          # 문법이 깨진 것은 개수와 무관하게 언제나 실패여야 한다.
+          # 파싱이 **중단되는** 코드만 고른다. TS1117(중복 프로퍼티) 같은
+          # 문법 오류는 파싱을 멈추지 않으므로 개수 검사에 맡긴다 —
+          # 여기 넣으면 기준선에 이미 있는 것 때문에 매번 빨개진다.
+          PARSE_CODES='TS1002|TS1003|TS1005|TS1011|TS1109|TS1128|TS1131|TS1160|TS1161'
+          SYNTAX=$(grep -cE "error (${PARSE_CODES}):" ts.log || true)
+          if [ "$SYNTAX" -gt 0 ]; then
+            echo "::error::파싱이 중단된 파일이 있습니다 (${SYNTAX}건) — 개수 검사보다 우선합니다"
+            grep -E "error (${PARSE_CODES}):" ts.log | head -20
+            exit 1
+          fi
           if [ "$COUNT" -gt "$TS_ERROR_BASELINE" ]; then
             echo "::error::타입 에러가 ${TS_ERROR_BASELINE}건에서 ${COUNT}건으로 늘었습니다"
             # 늘어난 줄만 보여준다. 전체 로그는 80줄이라 새 에러가 묻힌다.

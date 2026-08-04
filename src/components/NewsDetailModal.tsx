@@ -42,17 +42,28 @@ export default function NewsDetailModal({
   onClose: () => void;
   onTickerClick?: (ticker: string) => void;
 }) {
-  if (!news) return null;
-
-  const safeTags    = Array.isArray(news.tags)    ? news.tags    : [];
-  const safeTickers = Array.isArray(news.tickers) ? news.tickers : [];
+  // **훅보다 먼저 return하면 안 된다.**
+  //
+  // 예전에는 `if (!news) return null;`이 여기 맨 위에 있었다. 그러면
+  // news가 없을 때 훅을 0개 부르고, 있을 때 6개 부른다. React는 훅을
+  // **호출 순서로** 식별하므로 같은 자리에서 개수가 달라지면 이전 훅의
+  // 상태를 다음 훅이 집어 간다. 모달이 계속 붙어 있는 채로 news만
+  // 바뀌면(부모가 항상 렌더하고 null만 넘기는 구조) 번역 상태와 탭
+  // 상태가 서로 뒤바뀌거나 "Rendered fewer hooks than expected"로 죽는다.
+  //
+  // 훅을 전부 부른 뒤에 그린다.
   const [newsTab, setNewsTab] = React.useState<'summary' | 'full'>('summary');
   const [translated, setTranslated] = React.useState<{ title?: string; summary?: string; content?: string; reason?: string; reasons?: string[] } | null>(null);
   const [translating, setTranslating] = React.useState(false);
   const [showOriginal, setShowOriginal] = React.useState(false);
-  const safeReasons = (!showOriginal && translated?.reasons) ? translated.reasons : (Array.isArray(news.reasons) ? news.reasons : []);
+  // news가 없을 수 있다 — 아래 조건부 반환 전까지는 옵셔널로 읽는다.
+  const safeTags    = Array.isArray(news?.tags)    ? news.tags    : [];
+  const safeTickers = Array.isArray(news?.tickers) ? news.tickers : [];
+  const safeReasons = (!showOriginal && translated?.reasons) ? translated.reasons : (Array.isArray(news?.reasons) ? news.reasons : []);
 
   const translateNews = React.useCallback(async () => {
+    // news가 없으면 번역할 것도 없다. 훅은 항상 돌지만 몸통은 비운다.
+    if (!news) return;
     if (translated || translating) return;
     let appLang = 'ko'; try { appLang = localStorage.getItem('tg_lang') || 'ko'; } catch {}
     if (appLang === 'en') return;  // 영어면 원문
@@ -100,6 +111,10 @@ export default function NewsDetailModal({
     try { lang = localStorage.getItem('tg_lang') || 'ko'; } catch {}
     if (lang !== 'en') translateNews();
   }, [translateNews]);
+
+  // ── 훅은 여기까지. 이 아래는 그리기다 ──
+  // 조건부 반환은 반드시 마지막 훅 뒤에 온다.
+  if (!news) return null;
 
   // 표시할 텍스트 (번역 우선, showOriginal이면 원문)
   const disp = (field: 'title' | 'summary' | 'content') => {
