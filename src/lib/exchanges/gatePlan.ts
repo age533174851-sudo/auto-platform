@@ -19,6 +19,8 @@
 //
 // 1·4의 방향 계산과 검증 규칙을 여기 모아 테스트를 붙인다. 네트워크는 타지 않는다.
 
+import type { SymbolFilters } from './quantize';
+
 /** 심볼 → Gate 계약 이름. 'BTCUSDT' → 'BTC_USDT' */
 export function toGateContract(symbol: string): string {
   const s = String(symbol || '').toUpperCase().replace('/', '').replace('_', '');
@@ -204,4 +206,112 @@ export function gateStopSpec(
     }
   }
   return base;
+}
+
+// ── 기초자산 수량 ↔ 계약 수 ──────────────────────────
+//
+// 이 저장소 전체에서 `plan.quantity`는 **기초자산 수량**이다 (0.05 BTC).
+// Gate만 주문 단위가 정수 계약이다. 그 변환을 여기 한 곳에 둔다 —
+// 두 곳에 두면 한쪽만 고쳐지고, 그 실수는 '의도의 10000배 주문'으로 나온다.
+
+
+/** getGateContractSpec가 돌려주는 모양 중 계산에 필요한 부분만 */
+export interface GateSpecLike {
+  quantoMultiplier: number;
+  orderSizeMin?: number | null;
+  orderSizeMax?: number | null;
+  orderPriceRound?: number | null;
+}
+
+/**
+ * Gate 계약 규격 → 공용 `quantizeOrder`가 읽는 모양.
+ *
+ * 수량 단위를 `quantoMultiplier`로 놓으면, 기초자산 수량을 그 배수로 내림하는
+ * 일이 그대로 "정수 계약으로 내림"이 된다. 바이낸스와 같은 함수를 쓰게 되어
+ * 판정이 한 벌로 유지된다.
+ *
+ * **못 읽었으면 null을 그대로 넘긴다.** quantizeOrder는 null을 받으면
+ * 규격을 적용하지 않았다고 표시한다.
+ */
+export function gateFiltersOf(spec: GateSpecLike | null | undefined): SymbolFilters | null {
+  const m = Number(spec?.quantoMultiplier);
+  if (!Number.isFinite(m) || m <= 0) return null;
+  const minC = Number(spec?.orderSizeMin);
+  const round = Number(spec?.orderPriceRound);
+  return {
+    stepSize: m,
+    // 최소 계약 수를 기초자산으로 환산한다. 계약 수로 두면 단위가 섞인다.
+    minQty: (Number.isFinite(minC) && minC > 0 ? minC : 1) * m,
+    tickSize: Number.isFinite(round) && round > 0 ? round : null,
+  };
+}
+
+/**
+ * 기초자산 수량 → 부호 있는 계약 수.
+ *
+ * **배수를 모르면 주문하지 않는다.** 1로 가정하면 BTC_USDT에서 0.05 BTC 주문이
+ * 0계약(거부)이나, 반대로 500 BTC(계좌 전체의 몇 백 배)로 나갈 수 있다.
+ * 어느 쪽도 조용히 넘길 수 없다.
+ *
+ * 내림한다 — 올리면 의도보다 큰 포지션이 열리고 그만큼 청산가가 가까워진다.
+ */
+export function gateSizeFromBase(
+  baseQty: number, side: 'LONG' | 'SHORT', spec: GateSpecLike | null | undefined,
+): GateSizeResult {
+  const q = Number(baseQty);
+  if (!Number.isFinite(q) || q <= 0) {
+    return { size: 0, ok: false, reason: `수량이 유효하지 않습니다 (${baseQty})` };
+  }
+  const m = Number(spec?.quantoMultiplier);
+  if (!Number.isFinite(m) || m <= 0) {
+    return {
+      size: 0, ok: false,
+      reason: 'Gate 계약 규격(1계약당 수량)을 읽지 못해 주문하지 않습니다 — '
+            + '수량 단위를 모르는 채로 보내면 의도와 전혀 다른 크기가 나갑니다',
+    };
+  }
+
+  // 부동소수 오차 보정. 0.05 / 0.0001이 499.99999…로 나오면 499계약이 된다.
+  const contracts = Math.floor(q / m + 1e-9);
+  if (contracts < 1) {
+    return {
+      size: 0, ok: false,
+      reason: `수량 ${q}은 1계약(${m})보다 작습니다 — Gate 선물은 정수 계약 단위라 `
+            + '주문할 수 없습니다. 수량을 늘리세요',
+    };
+  }
+  const minC = Number(spec?.orderSizeMin);
+  if (Number.isFinite(minC) && minC > 0 && contracts < minC) {
+    return {
+      size: 0, ok: false,
+      reason: `${contracts}계약은 최소 주문 ${minC}계약보다 적습니다 (수량 ${q})`,
+    };
+  }
+  const maxC = Number(spec?.orderSizeMax);
+  if (Number.isFinite(maxC) && maxC > 0 && contracts > maxC) {
+    return {
+      size: 0, ok: false,
+      reason: `${contracts}계약은 최대 주문 ${maxC}계약을 넘습니다 (수량 ${q})`,
+    };
+  }
+
+  // 실제로 나가는 기초자산 수량. 요청과 다르면 그렇게 말한다.
+  const actualBase = contracts * m;
+  const changed = Math.abs(actualBase - q) > m * 1e-6;
+  return {
+    size: side === 'LONG' ? contracts : -contracts,
+    ok: true,
+    reason: changed ? `${q} → ${contracts}계약 (${actualBase}, 내림)` : `${contracts}계약`,
+  };
+}
+
+/** 계약 수 → 기초자산 수량. 배수를 모르면 null — 계약 수를 수량으로 적지 않는다 */
+export function gateBaseFromContracts(
+  contracts: number, spec: GateSpecLike | null | undefined,
+): number | null {
+  const c = Number(contracts);
+  const m = Number(spec?.quantoMultiplier);
+  if (!Number.isFinite(c)) return null;
+  if (!Number.isFinite(m) || m <= 0) return null;
+  return c * m;
 }

@@ -180,13 +180,51 @@ export function resolveTradeMode(
   };
 }
 
-/** 사람이 알아볼 이름. 없으면 id 앞자리 — 빈 문자열로 두면 문장이 깨진다 */
+/** 거래소 id를 사람이 읽는 이름으로. 모르는 값은 그대로 둔다 — 지어내지 않는다. */
+const EX_NAME: Record<string, string> = {
+  binance: '바이낸스', gate: '게이트아이오', gateio: '게이트아이오',
+  bybit: '바이빗', upbit: '업비트', bithumb: '빗썸', okx: 'OKX', kis: '한국투자증권',
+};
+
+/**
+ * 화면에 적을 연결 이름.
+ *
+ * **원시 UUID를 사람에게 보여주지 않는다.**
+ *
+ * 예전에는 label도 exchange_id도 없으면 `id.slice(0,8)`을 그대로 적었다.
+ * 그래서 매매 화면에 이런 문장이 떴다:
+ *
+ *   "고른 연결이 이 모드에 맞지 않아 cd7fd4be(으)로 주문합니다"
+ *
+ * 사용자 입장에서 cd7fd4be는 아무 의미가 없다. 그런데 이 문장은
+ * **앱이 다른 계좌로 바꿔서 주문한다**는 뜻이라, 어느 계좌인지 모르면
+ * 확인할 방법이 없다. 돈이 나가는 화면에서 식별자가 식별을 못 한다.
+ *
+ * 그래서 사람이 알아볼 수 있는 것부터 쓴다 — 거래소 이름과 실전/테스트넷.
+ * 그것도 없으면 id를 쓰되 **'연결'이라고 이름표를 붙여** 그게 무엇인지
+ * 알 수 있게 한다.
+ */
 function labelOf(c: ConnLike): string {
   const l = String(c?.label || '').trim();
   if (l) return l;
-  const ex = String(c?.exchange_id || '').trim();
+
+  const exRaw = String(c?.exchange_id || '').trim().toLowerCase();
+  const ex = EX_NAME[exRaw] || (exRaw ? exRaw : '');
+  // 저장소 전체 규칙: is_testnet === false 만 실전이다.
+  const net = c?.is_testnet === false ? '실전' : '테스트넷';
   const short = String(c?.id || '').slice(0, 8);
-  return ex ? `${ex} ${short}` : short || '알 수 없는 연결';
+
+  // **id 앞자리를 괄호에 넣어 함께 적는다.**
+  //
+  // 거래소 이름만 쓰면 읽기는 좋은데, 같은 거래소·같은 망 연결이 둘이면
+  // 이름이 똑같아진다. "2개입니다 — 바이낸스 테스트넷으로 주문합니다"는
+  // 어느 쪽인지 알려주지 못한다. 고르지 않고 골라 준 사실을 알리려던
+  // 문장이 정작 무엇을 골랐는지는 못 말하게 된다.
+  //
+  // 벌거벗은 UUID는 안 되지만, 이름 뒤에 붙는 식별자는 필요하다.
+  if (ex) return short ? `${ex} ${net} (${short})` : `${ex} ${net}`;
+  // 거래소조차 모를 때. 그때도 '연결'이라는 이름표를 붙인다.
+  return short ? `${net} 연결 ${short}` : '알 수 없는 연결';
 }
 
 /**

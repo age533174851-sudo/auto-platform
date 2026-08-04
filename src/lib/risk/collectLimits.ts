@@ -188,7 +188,10 @@ export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVe
     apiKey = c.api_key || '';
     apiSecret = decryptSecret(c.api_secret_enc ?? c.encrypted_secret ?? '');
     if (exchange == null) {
-      exchange = String(c.exchange_id || '').toLowerCase() === 'gate' ? 'gate' : 'binance';
+      // `gate`와 `gateio` 두 이름이 저장소 안에 같이 돌아다닌다. 정확히
+      // 'gate'만 보면 `gateio` 연결이 **바이낸스로 읽혀** Gate 키로 바이낸스
+      // 원장을 조회하고, 실패 → 오늘 손실이 null → 한도가 통째로 사라진다.
+      exchange = String(c.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
     }
     if (testnet == null) testnet = c.is_testnet !== false;
   } catch { return out; }

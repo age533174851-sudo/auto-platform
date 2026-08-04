@@ -319,4 +319,44 @@ export function runAutotradeHealthTests() {
   test('열린 거래는 있는데 감시 기록을 못 읽었으면 확인 못 함이다', () => {
     eq(find(autotradeHealth(good({ openTradeCount: 2, exitRuns: null })), 'exitmon').state, 'unknown');
   });
+
+  // 미리보기에서 막힌 것과 스위치가 꺼진 것은 다른 문제다.
+  // 둘 다 "잠겨 있습니다"로 적으면 이미 켠 스위치를 또 켜러 간다.
+  // 미리보기에서 막힌 것은 **고장이 아니다.** ❌로 두면 사용자가 고치러
+  // 가고, 고치면 방금 닫은 구멍이 다시 열린다. 실제로 그렇게 안내했었다.
+  test('미리보기라 막힌 것은 고장이 아니다 — 고치라고 하지 않는다', () => {
+    const r = autotradeHealth(liveGood({
+      liveUnlocked: false,
+      liveGate: { env: 'preview', reason: '미리보기(Preview) 배포라 실주문을 내지 않습니다 — 이건 정상입니다.' },
+    }));
+    const it = find(r, 'livelock');
+    eq(it.state, 'unknown', '정상 동작을 고장으로 적었다');
+    assert(it.detail.includes('Preview'), it.detail);
+    assert(!/넣고 재배포/.test(it.action), '되돌리라고 시킨다: ' + it.action);
+    assert(it.action.includes('Production'), '어디서 확인할지 안 적었다: ' + it.action);
+  });
+
+  test('Production에서 잠겨 있으면 그때는 고장이고, 넣으라고 한다', () => {
+    const it = find(autotradeHealth(liveGood({
+      liveUnlocked: false, liveGate: { env: 'production' },
+    })), 'livelock');
+    eq(it.state, 'bad');
+    assert(it.action.includes('ALLOW_LIVE_TRADING'), it.action);
+  });
+
+  test('미리보기 예외로 열린 것은 초록이 아니다', () => {
+    const it = find(autotradeHealth(liveGood({
+      liveUnlocked: true, liveGate: { env: 'preview', previewOverride: true },
+    })), 'livelock');
+    eq(it.state, 'unknown', '예외 상태를 정상으로 적었다');
+    assert(it.action.includes('끄세요'), it.action);
+  });
+
+  test('Production에서 열린 것은 환경까지 적는다', () => {
+    const it = find(autotradeHealth(liveGood({
+      liveUnlocked: true, liveGate: { env: 'production' },
+    })), 'livelock');
+    eq(it.state, 'ok');
+    assert(it.detail.includes('production'), it.detail);
+  });
 }

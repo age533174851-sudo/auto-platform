@@ -258,6 +258,7 @@ export default function AutotradeControl() {
     adminSecretSet: data?.adminSecretSet,
     cronSecretSet: data?.cronSecretSet,
     liveUnlocked: data?.liveUnlocked,
+    liveGate: data?.liveGate ?? null,
     marginColumnPresent: data?.marginColumnPresent ?? null,
     exitRuns: (data?.exitRuns ?? null) as any,
     openTradeCount: data?.openTradeCount ?? null,
@@ -485,10 +486,17 @@ export default function AutotradeControl() {
               간격은 아래 '간격(분)'이 정한다 — 15분마다 물어봐도 간격이
               안 됐으면 건너뛴다. 배포해도, 화면을 닫아도 안 꺼진다.
               끄는 방법은 이 화면의 스위치뿐이다. */}
+          {/* **간격은 '얼마나 자주 보는가'이지 '얼마나 자주 들어가는가'가 아니다.**
+              계단식 전략은 DB에 unique(user, strategy, trade_date) 제약이
+              걸려 있어 **성공한 진입은 하루 최대 1회**다. 앞 문구는
+              "실제 진입 간격 60분"이라고 적었는데, 그건 60분마다 포지션이
+              생긴다는 뜻으로 읽힌다. 실제로는 하루 한 번이다. */}
           {ticking
-            ? <>서버가 <b>15분마다</b> 확인하고, 실제 진입은 <b>{intervalMin || '?'}분</b> 간격으로 봅니다.
-                이 화면은 추가로 더 자주 볼 뿐이라 <b>닫아도 자동매매는 계속 돕니다.</b></>
-            : <>서버가 <b>15분마다</b> 확인합니다 (실제 진입 간격은 <b>{intervalMin || '?'}분</b>).
+            ? <>서버가 <b>15분마다</b>, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다.
+                진입은 <b>하루 최대 1회</b>입니다(계단식 전략의 하루 1회 제약).
+                이 화면은 더 자주 볼 뿐이라 <b>닫아도 자동매매는 계속 돕니다.</b></>
+            : <>서버가 <b>15분마다</b> 확인하고, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다 —
+                조건이 맞으면 그때 들어가고, <b>진입은 하루 최대 1회</b>입니다.
                 <b> 폰을 닫아도, 배포를 해도 계속 돕니다</b> — 예약은 서버에 저장돼 있습니다.
                 아래 스위치는 이 화면이 열려 있는 동안만 더 자주 보는 용도입니다.</>}
         </div>

@@ -150,13 +150,15 @@ const TV_CAT_COLOR: Record<string,string> = {
 
 /* ── Inline TradingView Widget ── */
 function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string; chartType?:string; interval?:string }) {
-  if (!symbol) return (
-    <div style={{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:T.card,flexDirection:'column',gap:6}}>
-      <span style={{fontSize:24}}>📊</span>
-      <span style={{color:T.muted,fontSize:12}}>심볼을 선택하세요</span>
-    </div>
-  );
-
+  // **훅보다 먼저 return하면 안 된다.**
+  //
+  // 예전에는 `if (!symbol) return ...`이 여기 맨 위에 있었다. 그러면
+  // 심볼이 없을 때 이 컴포넌트는 훅을 0개 부르고, 있을 때는 3개 부른다.
+  // React는 훅을 **호출 순서로** 식별하므로, 같은 자리에서 개수가 달라지면
+  // 이전 훅의 상태를 다음 훅이 집어 간다. 심볼이 비었다가 채워지는 순간
+  // ref가 엉뚱한 값을 가리키거나 "Rendered fewer hooks than expected"로 죽는다.
+  //
+  // 훅을 전부 부른 **뒤에** 그린다. 훅은 조건 없이 항상 같은 순서로 돈다.
   const ref = useRef<HTMLDivElement>(null);
   const wid = useRef<any>(null);
 
@@ -168,6 +170,8 @@ function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string
   };
 
   useEffect(() => {
+    // 심볼이 없으면 위젯을 만들지 않는다. 훅 자체는 항상 돈다.
+    if (!symbol) return;
     if (!ref.current || typeof window === 'undefined') return;
     const el = ref.current;
 
@@ -249,6 +253,14 @@ function InlineTVChart({ symbol, chartType='1', interval='60' }: { symbol:string
       wid.current = null;
     };
   }, [symbol, chartType, interval]);
+
+  // 훅을 전부 부른 뒤에 조건부로 그린다.
+  if (!symbol) return (
+    <div style={{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:T.card,flexDirection:'column',gap:6}}>
+      <span style={{fontSize:24}}>📊</span>
+      <span style={{color:T.muted,fontSize:12}}>심볼을 선택하세요</span>
+    </div>
+  );
 
   return (
     <div ref={ref} style={{ width:'100%', height:'100%', borderRadius:'inherit', overflow:'hidden', background:'var(--t-bg)' }}/>

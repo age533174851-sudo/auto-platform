@@ -98,9 +98,13 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  if (capability(opMode).realMoney && process.env.ALLOW_LIVE_TRADING !== 'true') {
-    return NextResponse.json(
-      { ok: false, error: '실거래가 잠겨 있습니다. ALLOW_LIVE_TRADING=true 설정 후 사용하세요' }, { status: 403 });
+  if (capability(opMode).realMoney) {
+    const { liveTradingGate } = await import('@/lib/engine/liveTradingGate');
+    const lg = liveTradingGate();
+    if (!lg.allowed) {
+      return NextResponse.json(
+        { ok: false, error: lg.reason, env: lg.env, liveUnlocked: lg.unlocked }, { status: 403 });
+    }
   }
 
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');

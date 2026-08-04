@@ -139,7 +139,7 @@ async function recoverUnresolvedOrders(
 
     for (const cid of connIds) {
       const { data: conn } = await sb.from('exchange_connections')
-        .select('exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
+        .select('user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
         .eq('id', cid).maybeSingle();
       if (!conn || (conn as any).has_withdrawal) continue;
 
@@ -156,6 +156,10 @@ async function recoverUnresolvedOrders(
         // 물어보고, 없으니 영영 확정되지 않는다.** 미확정 주문이 남아
         // 있으면 다음 진입이 상태 대조에서 막힌다 — 하나가 다음을 막는다.
         testnet: (conn as any).is_testnet !== false,
+        // 이 연결의 주인 것만, 이 연결 것만. 없으면 한 사람의 키로
+        // 모든 사용자의 주문을 대조하게 된다.
+        userId: (conn as any).user_id ?? null,
+        connectionId: cid,
       });
       out.checked += r.checked; out.resolved += r.resolved;
       out.stillUnknown += r.stillUnknown; out.needsAttention += r.needsAttention;

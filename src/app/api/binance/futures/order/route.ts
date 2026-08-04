@@ -1,6 +1,20 @@
 // /api/binance/futures/order — USDⓈ-M 수동 주문. **Vercel에서 직접 실행한다.**
 // POST { connectionId, symbol, side, type, quantity, price?, leverage?, reduceOnly?, confirmToken, stopLossPct?, takeProfitPct? }
 //
+// ⚠ 경로 이름은 `binance`지만 **바이낸스 전용이 아니다.** Gate 연결도 여기로
+//   나간다. 이름을 바꾸면 화면·북마크·기존 호출이 전부 깨져서 그대로 뒀다 —
+//   거래소는 `connectionId`가 정한다.
+//
+// 왜 Gate 전용 라우트를 따로 만들지 않았나
+// ─────────────────────────────────────────
+// 이 저장소에서 반복된 사고가 정확히 그 모양이다: 주문 경로가 여러 개인데
+// 안전 검사는 일부에만 있는 것. 현물·COIN-M이 오늘 손실 한도를 통째로
+// 빠뜨리고 있던 것, 워커 경로에 생명주기 기록이 절반만 있던 것.
+//
+// 그래서 라우트는 하나로 두고 **읽는 쪽만** 거래소별로 갈랐다
+// (`lib/exchanges/futuresAdapter.ts`). 점검·한도·멱등 키·손절 부착은
+// 두 거래소가 같은 코드를 지난다.
+//
 // 예전에는 jobs 큐에 적재하고 Worker가 유일한 실행자였다. 그런데 그 워커는
 // Binance IP 지역 차단으로 쓰지 않고 있어서(PROGRESS 인프라 표), 이 경로로
 // 넣은 주문은 큐에 쌓이기만 하고 실행되지 않았다 — 응답은 ok:true였고 화면은
@@ -47,18 +61,25 @@ export async function POST(req: NextRequest) {
       message: '연결을 찾지 못했습니다 — 지워졌거나 내 연결이 아닙니다',
     }, { status: 404 });
   }
-  // **코드 문자열을 그대로 화면에 보내지 않는다.**
+  // ── 어느 거래소로 나가는가 ──
   //
-  // 예전에는 `not_binance` 한 단어가 그대로 토스트에 떴다. 그건 사람에게
-  // 하는 말이 아니다 — 무엇이 잘못됐는지도, 무엇을 해야 하는지도 없다.
-  // 실제로 게이트아이오 연결을 고른 채 USDⓈ-M 주문을 누른 상황이었다.
-  if (String(conn.exchange_id).toLowerCase() !== 'binance') {
+  // 예전에는 여기서 `!== 'binance'`면 거절했다. Gate 연결을 고른 사용자는
+  // **수동 주문을 낼 방법이 아예 없었다** — 자동매매(executeOrder)에는
+  // Gate 분기가 있는데 손으로 누르는 경로만 없었다.
+  //
+  // 모르는 거래소는 여전히 막는다. 바이낸스로 치면 Gate 키로 바이낸스에
+  // 서명 요청을 보내게 되고, 그 실패는 '주문 실패'로만 보인다.
+  const { futuresExchangeOf, futuresExchangeName } = await import('@/lib/exchanges/futuresAdapter');
+  const ex = futuresExchangeOf(conn.exchange_id);
+  if (!ex) {
     return NextResponse.json({
-      error: 'not_binance',
-      message: `이 연결은 ${conn.exchange_id}입니다 — USDⓈ-M 선물 주문은 바이낸스 연결로만 나갑니다. `
-        + '위쪽 연결 선택에서 바이낸스 연결로 바꾸세요.',
+      error: 'unsupported_exchange',
+      message: `이 연결(${conn.exchange_id || '알 수 없음'})로는 USDⓈ-M 선물 주문을 낼 수 없습니다 — `
+        + '지금 지원하는 곳은 바이낸스와 게이트아이오입니다. '
+        + '위쪽 연결 선택에서 바꾸세요.',
     }, { status: 400 });
   }
+  const exName = futuresExchangeName(ex);
   if (conn.has_withdrawal === true) {
     return NextResponse.json({
       error: 'withdrawal_key_blocked',
@@ -88,11 +109,16 @@ export async function POST(req: NextRequest) {
   let orderQty = Number(quantity);
   let orderPrice = price != null ? Number(price) : null;
   let quantizeNote: string | null = null;
+  //
+  // Gate도 같은 함수를 지난다. Gate의 수량 단위는 **정수 계약**이고 1계약이
+  // 몇 개인지는 계약마다 다른데(`quanto_multiplier`, BTC_USDT는 0.0001),
+  // 그 배수를 stepSize로 놓으면 "기초자산 수량을 배수로 내림"이 곧 "정수
+  // 계약으로 내림"이 된다. 판정을 두 벌로 만들지 않는다.
   {
-    const bf = await import('@/lib/exchanges/binanceFutures');
+    const { futuresSymbolFilters } = await import('@/lib/exchanges/futuresAdapter');
     const { quantizeOrder } = await import('@/lib/exchanges/quantize');
     // 못 읽으면 null이다. 기본값을 지어내면 맞는 수량을 틀린 수량으로 바꾼다.
-    const filters = await bf.getSymbolFilters(symbol, conn.is_testnet !== false);
+    const filters = await futuresSymbolFilters(ex, symbol, conn.is_testnet !== false);
     const q = quantizeOrder(orderQty, orderPrice, filters);
     if (!q.ok) {
       return NextResponse.json({
@@ -130,36 +156,84 @@ export async function POST(req: NextRequest) {
   {
     const { fromLegacyMode, gateOrder, modeForDestination } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
-    const bf = await import('@/lib/exchanges/binanceFutures');
+    const { futuresServerTime, futuresPositionRisk, futuresAvailableUsd } =
+      await import('@/lib/exchanges/futuresAdapter');
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
 
     const isExit = !!reduceOnly;
     const useTestnet = conn.is_testnet !== false;
 
     const localMs = Date.now();
-    const serverMs = await bf.getFuturesServerTime(useTestnet);
+    // **이 거래소의** 시각을 읽는다. 시계 오차 검사는 "내 시계가 이 거래소와
+    // 맞는가"이므로, 다른 회사 서버에 물어본 값으로 판정하면 다른 것을 잰다.
+    const serverMs = await futuresServerTime(ex, useTestnet);
 
     // 상태 대조는 USDⓈ-M 경로의 검사다. 여기가 그 시장이다.
+    // (`gatherAndReconcile`은 연결의 exchange_id를 보고 Gate/바이낸스를 가른다)
     const gate = await assertStateConsistent(sb, uid, useTestnet, connectionId);
+
+    // ── 키를 **한 번만** 읽는다 ──
+    //
+    // 예전에는 포지션용·잔고용으로 같은 행을 두 번 조회했다. 두 번 읽으면
+    // 그 사이에 연결이 지워지거나 키가 바뀌었을 때 포지션과 잔고가 서로
+    // 다른 키로 읽힌다.
+    let connKey = '';
+    let connSecret = '';
+    try {
+      const { data: c2 } = await (sb.from('exchange_connections') as any)
+        .select('api_key, api_secret_enc, encrypted_secret')
+        .eq('id', connectionId).eq('user_id', uid).maybeSingle();
+      if (c2?.api_key) {
+        const { decryptSecret } = await import('@/lib/exchanges/crypto');
+        connKey = String(c2.api_key);
+        connSecret = decryptSecret(c2.api_secret_enc ?? c2.encrypted_secret ?? '');
+      }
+    } catch { /* 빈 키 → 아래 조회가 전부 실패 → unknown → 막힌다 */ }
 
     // 마진 모드·배율·청산가는 이 심볼에서 직접 읽는다. 목록 조회는 수량 0을
     // 걸러내므로 신규 진입 심볼이 빠진다 (daily-ladder에서 겪은 것과 같다).
-    let risk: Awaited<ReturnType<typeof bf.getSymbolPositionRisk>> = null;
-    try {
-      const { data: c2 } = await (sb.from('exchange_connections') as any)
-        .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
-      if (c2) {
-        const { decryptSecret } = await import('@/lib/exchanges/crypto');
-        const rr = await bf.getSymbolPositionRiskEx(
-          c2.api_key, decryptSecret(c2.api_secret_enc ?? c2.encrypted_secret ?? ''),
-          symbol, useTestnet);
+    let risk: import('@/lib/exchanges/futuresAdapter').FuturesRiskView | null = null;
+    if (connKey) {
+      try {
+        const rr = await futuresPositionRisk(ex, connKey, connSecret, symbol, useTestnet);
         risk = rr.risk;
         // **왜 못 읽었는지를 들고 간다.** 값만 비우면 화면에는
         // '확인 못 함'까지만 뜨고 원인은 아무도 모른다 — 오늘 하루를
         // 그것 때문에 썼다.
         riskError = rr.error;
-      }
-    } catch { /* null → unknown → 막힌다 */ }
+      } catch (e: any) { riskError = String(e?.message || e); }
+    } else {
+      riskError = '연결의 API 키를 읽지 못했습니다';
+    }
+
+    // ── 점검 **전에** 격리로 맞춰 둔다 (Gate) ──
+    //
+    // 안 그러면 아무것도 할 수 없는 상태가 된다:
+    //   점검이 '교차 마진'을 보고 막는다 → 주문이 안 나간다 →
+    //   격리로 바꾸는 `setLeverageGateFutures`는 주문 실행부에 있다 →
+    //   실행부에 못 간다 → 영원히 교차.
+    // 사용자가 화면에서 고칠 방법도 없다. daily-ladder에서 같은 교착을
+    // 이미 한 번 풀었고, 여기도 같은 자리다.
+    //
+    // 청산(reduceOnly)에는 하지 않는다 — 나가는 주문에 배율을 다시 설정할
+    // 이유가 없고, **못 닫게 만드는 것이 가장 나쁜 결과다.**
+    if (ex === 'gate' && !reduceOnly && connKey
+        && String(risk?.marginType || '').toLowerCase() !== 'isolated') {
+      try {
+        const gf = await import('@/lib/exchanges/gateFutures');
+        const gp = await import('@/lib/exchanges/gatePlan');
+        const contract = gp.toGateContract(symbol);
+        const wantLev = Math.max(1, Math.round(Number(leverage ?? risk?.leverage) || 1));
+        if (contract) {
+          await gf.setLeverageGateFutures(connKey, connSecret, contract, wantLev, useTestnet);
+          // **되읽어서 확인한다.** 설정 호출이 200을 줬다는 것과 계좌가
+          // 격리라는 것은 다른 얘기다.
+          const again = await futuresPositionRisk(ex, connKey, connSecret, symbol, useTestnet);
+          if (again.risk) { risk = again.risk; riskError = again.error; }
+        }
+      } catch { /* 실패하면 risk는 그대로 → 점검이 교차로 막는다 */ }
+    }
+
     preflightRisk = risk;
 
     // 기준가: 지정가면 그 가격, 아니면 마크가. 둘 다 없으면 명목가를 계산할
@@ -185,22 +259,9 @@ export async function POST(req: NextRequest) {
     // 자산을 모른 채 관문을 지나면 고정 금액만 남고, 100배 주문은
     // 계좌가 아무리 커도 매번 막힌다. 못 읽으면 null로 둔다 —
     // **0으로 두면 비율 상한이 0이 되어 전부 막힌다.**
-    let availableUsd: number | null = null;
-    try {
-      const { data: cBal } = await (sb.from('exchange_connections') as any)
-        .select('api_key, api_secret_enc, encrypted_secret').eq('id', connectionId).maybeSingle();
-      if (cBal) {
-        const { decryptSecret } = await import('@/lib/exchanges/crypto');
-        const bal: any = await bf.getFuturesBalance(
-          cBal.api_key, decryptSecret(cBal.api_secret_enc ?? cBal.encrypted_secret ?? ''), useTestnet);
-        if (bal?.success) {
-          const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
-          if (usdt && Number.isFinite(Number(usdt.availableBalance))) {
-            availableUsd = Number(usdt.availableBalance);
-          }
-        }
-      }
-    } catch { /* null로 남는다 — 고정 상한만 적용된다 */ }
+    const availableUsd: number | null = connKey
+      ? await futuresAvailableUsd(ex, connKey, connSecret, useTestnet)
+      : null;
 
     const envNotionalCap = Number(process.env.LIVE_MAX_NOTIONAL_USD);
     const g = gateOrder(mode, notionalUsd, {
@@ -268,7 +329,10 @@ export async function POST(req: NextRequest) {
       marginType: risk?.marginType ?? null,
       leverage: (risk?.leverage != null && leverage != null)
         ? { actual: risk.leverage, intended: Number(leverage) } : null,
-      existingPositionQty: risk ? Math.abs(risk.positionAmt) : null,
+      // Gate는 계약 수로 주는 것을 어댑터가 기초자산으로 환산해 준다. 배수를
+      // 못 읽으면 null이다 — 계약 수를 수량 칸에 적으면 "기존 포지션 500 BTC"가
+      // 사실인 것처럼 화면에 뜬다.
+      existingPositionQty: risk?.positionAmt != null ? Math.abs(risk.positionAmt) : null,
       stopPrice,
       liquidationPrice: risk?.liquidationPrice ?? null,
       side: String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
@@ -368,7 +432,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: false, error: leverage == null ? 'leverage_unknown' : 'leverage_invalid',
       message: leverage == null
-        ? '배율을 정하지 못했습니다 — 거래소에서 이 심볼의 배율을 읽지 못했습니다'
+        ? `배율을 정하지 못했습니다 — ${exName}에서 이 심볼의 배율을 읽지 못했습니다`
           + (riskError ? ` (${riskError})` : '')
           + '. 주문 화면에서 배율을 직접 골라 주세요.'
         : `배율 ${leverage}은(는) 쓸 수 없습니다 — 1배 이상이어야 합니다`,
@@ -408,7 +472,10 @@ export async function POST(req: NextRequest) {
     connectionId,
     signalId: `manual-${minute}-${symbol}`,
     clientOrderId,
-    exchange: 'binance',
+    // **연결이 정한다.** 예전에는 'binance'로 박혀 있었다 — 이 라우트가
+    // 바이낸스 연결만 받았으니 그때는 맞았지만, 지금 그대로 두면 Gate
+    // 주문이 바이낸스 분기로 들어가 Gate 키로 바이낸스에 서명을 보낸다.
+    exchange: ex,
     // **프로젝트 공통 규칙: is_testnet === false일 때만 실전이다.**
     // 여기는 truthy 검사라 이 칸이 비면 실전으로 떨어진다 — 모르는 값이
     // 실제 돈 쪽으로 기울면 안 된다. 위 quantize도 이미 `!== false`를 쓴다.
@@ -438,6 +505,10 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     ok: exec.ok,
+    // **어디로 나갔는지 적는다.** 라우트 이름이 `binance`라 응답만 보고는
+    // 알 수 없다. 연결을 잘못 고른 것을 여기서 알아챌 수 있어야 한다.
+    exchange: ex,
+    exchangeName: exName,
     // queued를 false로 명시한다. 이 경로는 더 이상 큐를 쓰지 않는다 —
     // 화면이 예전 응답 모양을 보고 "적재됨"으로 그리지 않게.
     queued: false,

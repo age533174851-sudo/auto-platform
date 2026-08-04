@@ -191,13 +191,46 @@ export function runTradeModeTests() {
 
   // 이름이 없어도 문장이 깨지면 안 된다 — "(으)로 주문합니다"만 남으면
   // 사용자는 무엇으로 나가는지 알 수 없다.
-  test('이름이 없으면 거래소와 id 앞자리로 부른다', () => {
+  // 이름이 없어도 **사람이 읽을 수 있어야** 하고, 동시에 **어느 것인지
+  // 구분되어야** 한다. 둘 중 하나만 만족하면 안 된다:
+  //  · id만 쓰면 "cd7fd4be(으)로 주문합니다" — 무슨 계좌인지 모른다
+  //  · 거래소 이름만 쓰면 같은 거래소 둘일 때 구분이 안 된다
+  test('이름이 없으면 거래소·망과 id 앞자리를 함께 적는다', () => {
     const r = resolveTradeMode('TESTNET', [
       { id: 'abcdef1234', exchange_id: 'binance', is_testnet: true } as any,
       { id: 'zzz', exchange_id: 'binance', is_testnet: true } as any,
     ], null);
     assert((r.chosenLabel || '').length > 0, '이름이 비었다');
-    assert(r.reason.includes('abcdef12'), r.reason);
+    assert(r.reason.includes('바이낸스'), '거래소 이름이 없다: ' + r.reason);
+    assert(r.reason.includes('테스트넷'), '실전/테스트넷 구분이 없다: ' + r.reason);
+    assert(r.reason.includes('abcdef12'), '어느 연결인지 구분할 수 없다: ' + r.reason);
+  });
+
+  // **원시 UUID가 통째로 이름이 되면 안 된다.**
+  // 매매 화면에 "cd7fd4be(으)로 주문합니다"가 실제로 떴다.
+  test('벌거벗은 UUID를 이름으로 쓰지 않는다', () => {
+    const r = resolveTradeMode('TESTNET', [
+      { id: 'cd7fd4be-1111-2222-3333-444444444444', is_testnet: true } as any,
+    ], 'other-id');
+    const label = r.chosenLabel || '';
+    assert(label !== 'cd7fd4be', 'UUID 앞자리만 이름으로 썼다: ' + label);
+    assert(/연결|테스트넷/.test(label), '무엇인지 알 수 없는 이름이다: ' + label);
+  });
+
+  test('거래소를 알면 한글 이름으로 부른다', () => {
+    const r = resolveTradeMode('LIVE', [
+      { id: 'aaaaaaaa11', exchange_id: 'gate', is_testnet: false } as any,
+    ], null);
+    assert((r.chosenLabel || '').includes('게이트아이오'), r.chosenLabel);
+    assert((r.chosenLabel || '').includes('실전'), r.chosenLabel);
+  });
+
+  // 사용자가 붙인 이름이 있으면 그게 최우선이다.
+  test('사용자 이름이 있으면 그대로 쓴다', () => {
+    const r = resolveTradeMode('LIVE', [
+      { id: 'x1', label: '내 실계좌', exchange_id: 'binance', is_testnet: false } as any,
+    ], null);
+    eq(r.chosenLabel, '내 실계좌');
   });
 
   test('실전 모드에서도 여러 개면 말한다', () => {

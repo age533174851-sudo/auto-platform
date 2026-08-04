@@ -588,9 +588,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         message: `Gate 계약 이름을 만들 수 없습니다 (${plan.symbol})` };
     }
 
-    // 수량을 먼저 확정한다. 1계약 미만이면 아무것도 하기 전에 멈춘다 —
-    // 예전에는 Math.round로 0을 만들어 보냈다.
-    const sized = gp.toGateSize(plan.quantity, plan.side);
+    // ── 수량: 기초자산 → 정수 계약 ──
+    //
+    // **여기가 Gate 주문이 BTC에서 한 번도 나가지 못한 이유였다.**
+    //
+    // `plan.quantity`는 저장소 전체에서 기초자산 수량이다(0.05 BTC). 그런데
+    // Gate의 `size`는 정수 계약 수이고, 1계약이 몇 개인지는 계약마다 다르다 —
+    // BTC_USDT는 0.0001이다. 예전 코드는 그 배수를 읽지 않고 0.05를 그대로
+    // 계약 수로 보고 내림했다. floor(0.05) = 0 → "1계약 미만입니다"로 거부.
+    // 실제로는 500계약이었어야 했다.
+    //
+    // SOL_USDT처럼 배수가 1인 계약에서는 우연히 맞았다. 그래서 "어떤 종목은
+    // 되고 BTC만 안 되는" 모양이었고 원인을 짚을 단서가 없었다.
+    //
+    // **규격을 못 읽으면 주문하지 않는다.** 배수를 1로 가정하면 이번엔 반대로
+    // 10000배가 나간다.
+    const gspec = await gf.getGateContractSpec(contract, testnet);
+    const sized = gp.gateSizeFromBase(plan.quantity, plan.side, gspec);
     if (!sized.ok) {
       await update({ status: 'REJECTED', error_message: sized.reason });
       return { ok: false, status: 'REJECTED', clientOrderId, message: sized.reason };
@@ -719,7 +733,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       filledQty: fill.filledQty ?? undefined,
       avgPrice: fill.avgPrice ?? undefined,
       slOrderId: gateSlId,
-      message: `주문 접수 (Gate · ${sized.size}계약)`
+      message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
         + (sized.reason ? ` · ${sized.reason}` : '')
         + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
             ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')
@@ -750,20 +764,58 @@ export interface ReconcileResult {
 
 export async function reconcilePendingOrders(
   sb: any,
-  creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean }
+  creds: {
+    exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean;
+    /**
+     * **누구의 주문을 대조하는가.**
+     *
+     * 이게 없어서 이 함수는 `status IN (SENT, UNKNOWN) AND exchange = 'binance'`로
+     * **모든 사용자의 주문**을 긁어 왔다. 그리고 그것을 **한 사람의 API 키**로
+     * 거래소에 물어봤다. 남의 주문은 이 계좌에 있을 리 없으니 "거래소에
+     * 없음"으로 판정되고, 그 판정이 남의 행에 쓰인다.
+     *
+     * 서버 전용 경로라 외부에서 부를 수는 없지만, 한 사용자의 대조가 다른
+     * 사용자의 장부를 바꾸는 것은 그 자체로 사고다.
+     */
+    userId?: string | null;
+    /**
+     * 어느 연결의 주문인가. 연결이 곧 거래소이자 망(실전/테스트넷)이다.
+     *
+     * 없으면 테스트넷에서 만든 주문을 실전 거래소에 물어보게 되고,
+     * 거래소는 모른다고 답한다 — 그 기록은 영영 확정되지 않고 상태
+     * 대조를 영구히 막는다. 실제로 이 계좌가 그 상태였다.
+     */
+    connectionId?: string | null;
+  }
 ): Promise<ReconcileResult> {
   const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] };
 
-  const { data: pending } = await sb.from('live_orders')
+  // **ACKED가 빠져 있었다.**
+  //
+  // ACKED는 "거래소가 접수했다"는 상태다. 그 뒤 체결·취소로 넘어가는
+  // 경로가 아무 데도 없어서, 한번 ACKED가 된 주문은 영원히 ACKED로
+  // 남았다. 그런데 상태 대조는 ACKED를 "열려 있는 주문"이자 (수량이
+  // 있으면) "보유 중인 포지션"으로 읽는다.
+  //
+  // 결과: 거래소에는 아무것도 없는데 앱은 계속 있다고 믿고, **신규
+  // 진입이 영구히 막힌다.** [미확정 주문 확정]을 눌러도 안 풀렸다 —
+  // 그 버튼이 여기를 부르는데 ACKED를 조회하지 않았으니까.
+  let q = sb.from('live_orders')
     .select('*')
-    .in('status', ['SENT', 'UNKNOWN'])
-    .eq('exchange', creds.exchange)
+    .in('status', ['SENT', 'UNKNOWN', 'ACKED'])
+    .eq('exchange', creds.exchange);
+  // **모르면 좁히지 않는다.** 좁히지 않으면 과하게 대조할 뿐이지만,
+  // 잘못 좁히면 진짜 미확정 주문을 놓친다.
+  if (creds.userId) q = q.eq('user_id', creds.userId);
+  if (creds.connectionId) q = q.eq('connection_id', creds.connectionId);
+
+  const { data: pending } = await q
     .order('created_at', { ascending: true })
     .limit(50);
 
   if (!Array.isArray(pending) || !pending.length) return out;
 
-  const { resolveUnknown, shouldEscalate } = await import('./unknownResolver');
+  const { resolveUnknown, resolveAcked, shouldEscalate } = await import('./unknownResolver');
 
   // 포지션은 심볼마다 다시 부르지 않고 한 번만 읽는다. 대조 한 번에 50건이
   // 들어올 수 있어 건마다 부르면 레이트리밋에 걸린다.
@@ -819,9 +871,17 @@ export async function reconcilePendingOrders(
           qtyNow: posBySymbol ? (posBySymbol.get(String(o.symbol).toUpperCase()) ?? 0) : null,
         };
 
-        const verdict = resolveUnknown({
-          clientOrderId: o.client_order_id || null, elapsedMs, query, position,
-        });
+        // **상태마다 규칙이 다르다.**
+        // SENT/UNKNOWN은 "보냈는지도 모르는" 상태라, 주문이 안 보이면
+        // 전송 안 됨(FAILED)으로 확정할 수 있다.
+        // ACKED는 거래소가 이미 받았다고 확인해 준 상태다. 지금 안 보이는
+        // 것은 "안 들어갔다"가 아니라 "이미 끝났다"이므로 FAILED로 찍으면
+        // 장부가 거짓말을 하고, FAILED는 재시도가 열리는 상태라 중복
+        // 체결의 문이 된다.
+        const args = { clientOrderId: o.client_order_id || null, elapsedMs, query, position };
+        const verdict = String(o.status) === 'ACKED'
+          ? resolveAcked(args)
+          : resolveUnknown(args);
 
         if (verdict.resolved) {
           const st = verdict.state === 'FILLED' ? 'FILLED'

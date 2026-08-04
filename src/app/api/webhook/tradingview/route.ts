@@ -173,9 +173,25 @@ export async function POST(req: NextRequest) {
       const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
       const sb = getSupabaseAdmin();
       // 연결 정보 로드 (서버 권한)
+      // ── 이 연결이 정말 그 사람 것인가 ──
+      //
+      // **소유권 검사가 없었다.** 웹훅은 시크릿 하나로 인증되는데
+      // (body.code), 어느 계좌로 나갈지는 body.connectionId가 정했다.
+      // 그래서 시크릿을 아는 사람은 **아무 연결 id나 넣어 남의 계좌로**
+      // 주문을 낼 수 있었다.
+      //
+      // 시크릿이 사용자마다 다르지 않다는 점은 그대로 남는다(구조 변경이
+      // 필요하다). 그래도 지금은 최소한 **연결과 사용자가 맞는지**는
+      // 봐야 한다 — id 하나만 알면 되는 것과 둘 다 알아야 하는 것은 다르다.
+      //
+      // 실주문 경로에서 'anon'은 받지 않는다. 주인을 모르는 채로 실계좌에
+      // 주문을 내면 나중에 그 포지션이 누구 것인지도 알 수 없다.
+      if (!body.userId) {
+        throw new Error('userId가 없어 연결 소유자를 확인할 수 없습니다');
+      }
       const { data: conn } = await (sb.from('exchange_connections') as any)
-        .select('*').eq('id', body.connectionId).single();
-      if (!conn) throw new Error('거래소 연결을 찾을 수 없음');
+        .select('*').eq('id', body.connectionId).eq('user_id', body.userId).single();
+      if (!conn) throw new Error('거래소 연결을 찾을 수 없거나 그 사용자의 연결이 아닙니다');
       if (conn.has_withdrawal) throw new Error('출금 권한 키는 자동매매 불가');
       // 킬스위치 가드: active면 신규 진입 차단 (reduce-only 종료는 허용)
       const { isKillSwitchActive } = await import('@/lib/risk/killSwitch');

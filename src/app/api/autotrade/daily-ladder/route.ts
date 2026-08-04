@@ -114,11 +114,18 @@ export async function POST(req: NextRequest) {
     // 본인 것만. body.userId는 신뢰하지 않는다.
   }
 
-  if (capability(opMode).realMoney && process.env.ALLOW_LIVE_TRADING !== 'true') {
-    return NextResponse.json(
-      { ok: false, error: '실거래가 잠겨 있습니다. ALLOW_LIVE_TRADING=true 설정 후 사용하세요' },
-      { status: 403 },
-    );
+  // 판정은 한 곳에서만 한다. 여섯 곳이 각자 process.env를 읽고 있었고,
+  // 그중 하나만 느슨해도 실주문은 그리로 나간다.
+  // **Preview 배포는 여기서 막힌다** — 이 구분이 지금까지 없었다.
+  if (capability(opMode).realMoney) {
+    const { liveTradingGate } = await import('@/lib/engine/liveTradingGate');
+    const lg = liveTradingGate();
+    if (!lg.allowed) {
+      return NextResponse.json(
+        { ok: false, error: lg.reason, env: lg.env, liveUnlocked: lg.unlocked },
+        { status: 403 },
+      );
+    }
   }
 
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
@@ -443,9 +450,12 @@ export async function POST(req: NextRequest) {
     const { buildExitPlan } = await import('@/lib/engine/exitPlan');
     let qtyStep: number | undefined, minQty: number | undefined;
     try {
-      const bf = await import('@/lib/exchanges/binanceFutures');
-      const f = await bf.getSymbolFilters(symbol, useTestnet);
-      if (f) { qtyStep = f.stepSize; minQty = f.minQty; }
+      // **이 거래소의** 규격을 읽는다. 예전에는 Gate 연결에서도 바이낸스
+      // 규격을 읽었다. Gate의 수량 단위는 정수 계약(BTC_USDT는 0.0001)이라
+      // 남의 격자로 자른 분할 수량은 계약 경계에 안 맞을 수 있다.
+      const { futuresSymbolFilters } = await import('@/lib/exchanges/futuresAdapter');
+      const f = await futuresSymbolFilters(exchange as any, symbol, useTestnet);
+      if (f?.stepSize) { qtyStep = f.stepSize; minQty = f.minQty ?? undefined; }
     } catch { /* 필터를 못 읽으면 반올림 없이 진행 — 거래소가 거부하면 분할만 빠진다 */ }
 
     const exitPlan = buildExitPlan({
@@ -498,6 +508,28 @@ export async function POST(req: NextRequest) {
       // 변환은 gatePositionToRisk 한 곳에만 둔다 — 'leverage 0은 교차'를
       // 호출자마다 다시 적으면 한 곳을 고쳐도 나머지가 조용히 틀린 채 남는다.
       risk = gpPre.gatePositionToRisk(gpos);
+
+      // ── Gate도 마진 모드를 **점검 전에** 맞춘다 ──
+      //
+      // 바이낸스에서 고친 것과 같은 자리다. 차이가 하나 있다:
+      // 바이낸스는 포지션이 없어도 marginType을 알려주는데, **Gate는
+      // 포지션이 없으면 아무것도 안 준다**(gatePositionToRisk가 null).
+      // 그러면 점검의 'MARGIN_ISOLATED'가 unknown이 되고, 그건 차단
+      // 항목이라 **첫 진입이 매일 여기서 막힌다.**
+      //
+      // Gate에서는 배율을 정하는 것이 곧 격리를 정하는 것이다(0이 교차).
+      // 계획한 배율로 설정하면 격리가 되고, 그 값을 다시 읽어 점검에 준다.
+      // **바꿨다고 믿지 않고 되읽는다** — 설정이 실패해도 응답은 성공처럼
+      // 보일 수 있다.
+      if (!risk || String(risk.marginType).toLowerCase() !== 'isolated') {
+        const wantLev = Math.max(1, Math.round(Number(result.plan?.leverage) || 1));
+        try {
+          await gfPre.setLeverageGateFutures(conn.api_key, apiSecretPre, contractPre, wantLev, useTestnet);
+          const again = await gfPre.getPositionGateFutures(conn.api_key, apiSecretPre, contractPre, useTestnet);
+          const r2 = gpPre.gatePositionToRisk(again);
+          if (r2) risk = r2;
+        } catch { /* 못 바꿨으면 아래 점검이 unknown 그대로 보고 막는다 */ }
+      }
     } else {
       const bfPre = await import('@/lib/exchanges/binanceFutures');
       serverMs = await bfPre.getFuturesServerTime(useTestnet);
@@ -929,7 +961,7 @@ export async function GET(req: NextRequest) {
         : `${rows.length}건 실행했습니다`,
     results,
     cronLogError,
-    liveTradingLocked: process.env.ALLOW_LIVE_TRADING !== 'true',
+    liveTradingLocked: !(await import('@/lib/engine/liveTradingGate')).liveTradingGate().allowed,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 

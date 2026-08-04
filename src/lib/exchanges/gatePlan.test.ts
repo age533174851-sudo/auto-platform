@@ -8,7 +8,10 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   toGateContract, toGateSize, isGateIsolated, gateStopSpec, gatePositionToRisk, gateFillOf,
+  gateSizeFromBase, gateFiltersOf, gateBaseFromContracts,
 } from './gatePlan';
+import { quantizeOrder } from './quantize';
+import { futuresExchangeOf } from './futuresAdapter';
 import { toGateText } from './gateFutures';
 
 export function runGatePlanTests() {
@@ -255,5 +258,133 @@ export function runGatePlanTests() {
     eq(s.rule, 2);
     eq(s.autoSize, 'close_long');
     eq(s.ok, false);
+  });
+
+  // ── 기초자산 수량 ↔ 계약 수 ─────────────────────────
+  //
+  // **이게 없어서 Gate 주문은 BTC에서 한 번도 나가지 못했다.**
+  //
+  // Gate의 size는 정수 계약 수이고, 1계약이 몇 개인지는 계약마다 다르다.
+  // BTC_USDT는 0.0001이다. 예전 코드는 배수를 읽지 않고 기초자산 수량을
+  // 그대로 계약 수로 보고 내림했다 — 0.05 BTC는 floor(0.05)=0계약이 되어
+  // "1계약 미만"으로 거부됐다. 실제로는 500계약이었다.
+  console.log('[Gate — 수량 단위(계약 배수)]');
+
+  const BTC = { quantoMultiplier: 0.0001, orderSizeMin: 1, orderSizeMax: 1000000, orderPriceRound: 0.1 };
+  const SOL = { quantoMultiplier: 1, orderSizeMin: 1, orderSizeMax: 1000000, orderPriceRound: 0.01 };
+
+  test('0.05 BTC는 0계약이 아니라 500계약이다', () => {
+    const r = gateSizeFromBase(0.05, 'LONG', BTC);
+    eq(r.ok, true, r.reason);
+    eq(r.size, 500);
+  });
+
+  test('숏은 음수 계약이다', () => {
+    eq(gateSizeFromBase(0.05, 'SHORT', BTC).size, -500);
+  });
+
+  test('배수가 1인 계약은 수량이 그대로 계약 수다', () => {
+    eq(gateSizeFromBase(3, 'LONG', SOL).size, 3);
+  });
+
+  // **여기가 핵심이다.** 배수를 1로 가정하면 0.05 BTC 주문이 500 BTC로
+  // 나간다 — 계좌 전체의 몇 백 배다. 그건 거부당하는 것과 비교할 수 없다.
+  test('배수를 모르면 주문하지 않는다 — 1로 가정하지 않는다', () => {
+    for (const spec of [null, undefined, {} as any, { quantoMultiplier: 0 },
+                        { quantoMultiplier: NaN }, { quantoMultiplier: -1 }]) {
+      const r = gateSizeFromBase(0.05, 'LONG', spec as any);
+      eq(r.ok, false, `규격 ${JSON.stringify(spec)}로 주문이 나갔다`);
+      eq(r.size, 0);
+    }
+    assert(gateSizeFromBase(0.05, 'LONG', null).reason.includes('규격'),
+      '왜 못 나가는지 안 적었다');
+  });
+
+  test('내림한다 — 올리면 의도보다 큰 포지션이 열린다', () => {
+    // 0.05009 / 0.0001 = 500.9 → 500계약
+    eq(gateSizeFromBase(0.05009, 'LONG', BTC).size, 500);
+  });
+
+  // 부동소수 오차. 0.05 / 0.0001이 499.99999…로 나오면 한 계약을 잃는다.
+  test('부동소수 오차로 한 계약을 잃지 않는다', () => {
+    for (const q of [0.05, 0.07, 0.29, 0.0003, 1.1]) {
+      const r = gateSizeFromBase(q, 'LONG', BTC);
+      eq(r.size, Math.round(q / 0.0001), `수량 ${q}에서 계약 수가 어긋났다`);
+    }
+  });
+
+  test('1계약보다 작으면 거부하고, 1계약이 얼마인지 알려준다', () => {
+    const r = gateSizeFromBase(0.00005, 'LONG', BTC);
+    eq(r.ok, false);
+    assert(r.reason.includes('0.0001'), '1계약이 얼마인지 안 알려줬다: ' + r.reason);
+  });
+
+  test('최소·최대 계약 수를 지킨다', () => {
+    eq(gateSizeFromBase(0.0005, 'LONG', { ...BTC, orderSizeMin: 10 }).ok, false);
+    eq(gateSizeFromBase(0.05, 'LONG', { ...BTC, orderSizeMax: 100 }).ok, false);
+  });
+
+  test('수량이 유효하지 않으면 거부한다', () => {
+    for (const q of [0, -1, NaN, null, undefined, 'x']) {
+      eq(gateSizeFromBase(q as number, 'LONG', BTC).ok, false, `${String(q)}가 통과했다`);
+    }
+  });
+
+  test('바뀌었으면 바뀌었다고 말한다', () => {
+    assert(gateSizeFromBase(0.05009, 'LONG', BTC).reason.includes('내림'), '조용히 줄였다');
+    assert(!gateSizeFromBase(0.05, 'LONG', BTC).reason.includes('내림'), '안 바뀐 걸 바뀌었다고 한다');
+  });
+
+  test('계약 수 → 기초자산. 배수를 모르면 null이다', () => {
+    eq(gateBaseFromContracts(500, BTC), 0.05);
+    eq(gateBaseFromContracts(-500, BTC), -0.05);
+    eq(gateBaseFromContracts(500, null), null, '계약 수를 수량으로 적으면 안 된다');
+    eq(gateBaseFromContracts(500, { quantoMultiplier: 0 }), null);
+  });
+
+  // 규격을 공용 quantizeOrder가 읽는 모양으로 바꿔, 두 거래소가 같은
+  // 판정 코드를 지나게 한다. 배수를 stepSize로 놓으면 "기초자산을 배수로
+  // 내림"이 곧 "정수 계약으로 내림"이다.
+  console.log('[Gate — 규격을 공용 수량 보정에 연결한다]');
+
+  test('배수가 수량 단위가 되고, 최소 계약 수는 기초자산으로 환산된다', () => {
+    const f = gateFiltersOf(BTC);
+    eq(f!.stepSize, 0.0001);
+    eq(f!.minQty, 0.0001);
+    eq(f!.tickSize, 0.1);
+    eq(gateFiltersOf({ ...BTC, orderSizeMin: 10 })!.minQty, 0.001);
+  });
+
+  test('배수를 모르면 규격도 null이다 — 지어내지 않는다', () => {
+    eq(gateFiltersOf(null), null);
+    eq(gateFiltersOf({ quantoMultiplier: 0 } as any), null);
+  });
+
+  test('공용 보정을 지나면 항상 계약의 정수배가 나온다', () => {
+    const f = gateFiltersOf(BTC);
+    const q = quantizeOrder(0.05009, 62661.95, f);
+    eq(q.ok, true, q.reason);
+    eq(q.quantity, 0.05);
+    // 가격도 Gate 호가 단위(0.1)에 맞는다 — .95는 존재할 수 없는 가격이다
+    eq(q.price, 62661.9);
+    // 그 수량은 계약으로 정확히 떨어진다
+    eq(gateSizeFromBase(q.quantity!, 'LONG', BTC).size, 500);
+  });
+
+  console.log('[선물 어댑터 — 거래소 이름]');
+
+  test('gate와 gateio를 한 이름으로 모은다', () => {
+    for (const v of ['gate', 'gateio', 'GATE', 'Gate.io', ' gate ']) {
+      eq(futuresExchangeOf(v), 'gate', `${v}가 gate로 안 읽혔다`);
+    }
+    eq(futuresExchangeOf('BINANCE'), 'binance');
+  });
+
+  // **모르는 거래소를 바이낸스로 치지 않는다.** 그러면 Gate가 아닌 키로
+  // 바이낸스에 서명 요청을 보내고, 그 실패는 '주문 실패'로만 보인다.
+  test('모르는 거래소는 null이다', () => {
+    for (const v of ['upbit', 'bybit', 'okx', '', null, undefined, 'binance-futures']) {
+      eq(futuresExchangeOf(v), null, `${String(v)}가 통과했다`);
+    }
   });
 }
