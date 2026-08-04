@@ -348,8 +348,25 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
           호가가 폼 길이에 끌려 올라간다 — 호가는 늘 같은 자리에 있어야
           눈이 찾는다. */}
       <div style={{ height: firstScreen, display: 'flex', overflow: 'hidden' }}>
+        {/* ── 주문 칸은 **자기 스크롤을 갖는다** ──
+
+            예전에는 `overflow: hidden`이었다. 폼이 이 칸보다 길어지면
+            넘치는 부분이 **그냥 사라졌다** — 스크롤도 안 되고 표시도 없다.
+
+            실제로 그렇게 됐다. 연결 경고 한 줄이 늘자 [숏 진입] 버튼이
+            잘려 나가고 [롱 진입]만 남았다. 이게 왜 나쁘냐면, 화면은
+            아무 문제도 없어 보인다는 것이다 — 오류도 빈 칸도 없이 그냥
+            버튼 하나짜리 주문판으로 보인다. **숏을 치려던 사람이 눈앞에
+            있는 유일한 버튼을 누르면 롱이 나간다.**
+
+            바깥 통이 스크롤을 갖고 안쪽은 안 갖는다는 원칙이 있었지만
+            (스크롤이 두 겹이면 손가락이 어디 닿았냐에 따라 다르게 움직인다),
+            그건 **내용이 다 들어간다는 전제**에서만 맞다. 스크롤이 겹치는
+            불편과 주문 버튼이 사라지는 사고를 비교하면 답은 하나다. */}
         <div style={{
-          width: '56%', flexShrink: 0, minHeight: 0, overflow: 'hidden',
+          width: '56%', flexShrink: 0, minHeight: 0,
+          overflowY: 'auto', overscrollBehavior: 'contain',
+          WebkitOverflowScrolling: 'touch' as any,
           borderRight: `1px solid ${C.hair}`,
         }}>
           <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
