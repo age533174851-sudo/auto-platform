@@ -4,7 +4,7 @@
 // FAILED로 잘못 확정하면 재시도가 열리고, 그 재시도가 중복 체결이 된다.
 import { test, assert, eq } from '../../test/harness';
 import {
-  resolveUnknown, nextQueryDelayMs, shouldEscalate,
+  resolveUnknown, resolveAcked, nextQueryDelayMs, shouldEscalate,
   REFLECT_GRACE_MS, MAX_RESOLVE_ATTEMPTS,
 } from './unknownResolver';
 
@@ -118,5 +118,58 @@ export function runUnknownResolverTests() {
   test('일정 횟수 넘으면 자동 조회를 멈추고 사람에게 넘긴다', () => {
     eq(shouldEscalate(MAX_RESOLVE_ATTEMPTS - 1), false);
     eq(shouldEscalate(MAX_RESOLVE_ATTEMPTS), true);
+  });
+
+  // ══ ACKED는 UNKNOWN과 규칙이 다르다 ══
+  //
+  // resolveUnknown의 마지막 규칙은 "주문이 안 보이고 포지션도 그대로면
+  // 전송 안 됨(FAILED)"이다. **ACKED에 그 규칙을 쓰면 안 된다.**
+  // 거래소가 이미 받았다고 확인해 준 주문이기 때문이다.
+  const okQuery = { ok: true, order: null as any };
+
+  test('ACKED인데 조회에 없으면 FAILED가 아니라 RECONCILED다', () => {
+    const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 60_000, query: okQuery });
+    eq(r.resolved, true);
+    eq(r.state, 'RECONCILED', 'ACKED 주문을 전송 실패로 찍었다 — 장부가 거짓말을 하고 재시도가 열린다');
+    assert(!/전송되지 않/.test(r.reason), r.reason);
+  });
+
+  test('같은 상황에서 UNKNOWN은 여전히 FAILED다 — 규칙을 섞지 않는다', () => {
+    const r = resolveUnknown({ clientOrderId: 'c1', elapsedMs: 60_000, query: okQuery });
+    eq(r.state, 'FAILED');
+  });
+
+  test('거래소에 못 닿으면 ACKED를 그대로 둔다', () => {
+    const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 60_000,
+      query: { ok: false, order: null, error: 'timeout' } });
+    eq(r.resolved, false);
+    eq(r.state, 'ACKED', '조회 실패를 확정으로 바꿨다');
+    eq(r.action, 'RETRY_QUERY');
+  });
+
+  test('주문이 조회되면 거래소 상태를 그대로 따른다', () => {
+    const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 60_000,
+      query: { ok: true, order: { status: 'FILLED', executedQty: '1' } as any } });
+    eq(r.resolved, true);
+    eq(r.state, 'FILLED');
+  });
+
+  test('반영 대기 시간 안이면 확정하지 않는다', () => {
+    const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 100, query: okQuery });
+    eq(r.resolved, false);
+    eq(r.action, 'RETRY_QUERY');
+  });
+
+  test('멱등 키가 없으면 사람에게 넘긴다 — 식별할 방법이 없다', () => {
+    const r = resolveAcked({ clientOrderId: null, elapsedMs: 60_000, query: okQuery });
+    eq(r.resolved, false);
+    eq(r.action, 'ESCALATE');
+  });
+
+  // 체결인지 취소인지는 이 조회로 알 수 없다. 아는 척하면 손익이 틀어진다.
+  test('체결·취소 어느 쪽이라고도 단정하지 않는다', () => {
+    const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 60_000, query: okQuery });
+    assert(r.reason.includes('거래 내역'), '확인할 곳을 안 알려줬다: ' + r.reason);
+    assert(r.state !== 'FILLED' && r.state !== 'CANCELED', '단정했다: ' + r.state);
   });
 }

@@ -171,3 +171,102 @@ export const MAX_RESOLVE_ATTEMPTS = 8;
 export function shouldEscalate(attempt: number): boolean {
   return attempt >= MAX_RESOLVE_ATTEMPTS;
 }
+
+// ── ACKED는 UNKNOWN과 규칙이 다르다 ──────────────────────────
+//
+// **위 resolveUnknown을 ACKED에 그대로 쓰면 안 된다.**
+//
+// resolveUnknown의 마지막 규칙(3-d)은 "멱등 키로 물었는데 주문이 없고
+// 포지션도 그대로면 → 전송되지 않은 것(FAILED)"이다. SENT/UNKNOWN에는
+// 맞다. 그 상태는 "보냈는지도 모르는" 상태니까.
+//
+// **ACKED는 다르다.** 거래소가 주문을 받았다고 이미 확인해 줬고, 우리는
+// exchange_order_id까지 갖고 있다. 그런데 지금 조회에 안 나온다면 그건
+// "안 들어갔다"가 아니라 **이미 끝났다**는 뜻이다 — 체결됐거나 취소됐고,
+// 거래소의 조회 창(대개 며칠)에서 밀려났다.
+//
+// 그걸 FAILED로 찍으면 두 가지가 망가진다:
+//   · 장부가 거짓말을 한다 (나간 주문을 안 나갔다고 기록)
+//   · FAILED는 재시도가 열리는 상태다 → 중복 체결의 문
+//
+// 그리고 이 구멍 때문에 실제로 무슨 일이 있었나
+// ─────────────────────────────────────────
+// reconcilePendingOrders는 `status IN ('SENT','UNKNOWN')`만 조회했다.
+// **ACKED가 빠져 있었다.** 그래서 ACKED로 들어간 주문은 그 뒤로 아무도
+// 건드리지 않고 영원히 ACKED에 남았다.
+//
+// 그런데 상태 대조(gatherAndReconcile)는 ACKED를 "열려 있는 주문"이자
+// (수량이 있으면) "보유 중인 포지션"으로 읽는다. 결과: 거래소에는
+// 아무것도 없는데 앱은 계속 있다고 믿고, **신규 진입이 영구히 막힌다.**
+// [미확정 주문 확정]을 눌러도 안 풀린다 — 그 버튼이 ACKED를 안 보니까.
+
+/**
+ * 거래소가 받았다고 확인해 준(ACKED) 주문의 지금 상태를 판정한다.
+ *
+ * 확정할 수 없으면 **확정하지 않는다.** 여기서 잘못 확정하면 장부가
+ * 조용히 틀리고, 그 틀린 장부가 다음 주문을 막거나 열어 준다.
+ */
+/**
+ * ACKED 판정 결과.
+ *
+ * 'RECONCILED'는 생명주기 상태가 아니라 **장부 상태**다 — "거래소에서
+ * 더 이상 살아 있지 않다. 최종 결과는 거래 내역에서 확인해야 한다."
+ * OrderState에 억지로 밀어 넣지 않고 여기서만 넓힌다. 억지로 넣으면
+ * 상태 기계의 전이 표가 거짓말을 하게 된다.
+ */
+export interface AckedResolveResult extends Omit<ResolveResult, 'state'> {
+  state: OrderState | 'RECONCILED';
+}
+
+export function resolveAcked(input: ResolveInput): AckedResolveResult {
+  const { clientOrderId, elapsedMs, query, position } = input;
+
+  // 1. 거래소에 못 닿았으면 아무것도 바꾸지 않는다.
+  if (!query.ok) {
+    return {
+      state: 'ACKED', resolved: false, action: 'RETRY_QUERY',
+      reason: `거래소 조회 실패 — 상태를 확인할 수 없습니다: ${query.error || '사유 미상'}`,
+    };
+  }
+
+  // 2. 주문이 조회됐으면 거래소 상태를 그대로 따른다.
+  if (query.order) {
+    const mapped = fromExchangeStatus(query.order.status);
+    if (!mapped) {
+      return {
+        state: 'ACKED', resolved: false, action: 'ESCALATE',
+        reason: `거래소가 해석할 수 없는 상태를 돌려줬습니다: ${query.order.status ?? '(없음)'}`,
+      };
+    }
+    return { state: mapped, resolved: true, action: 'NONE',
+      reason: `거래소 조회로 확정: ${query.order.status}` };
+  }
+
+  // 3. 조회는 됐는데 주문이 없다.
+  if (!clientOrderId) {
+    return {
+      state: 'ACKED', resolved: false, action: 'ESCALATE',
+      reason: '멱등 키가 없어 거래소에서 이 주문을 식별할 수 없습니다',
+    };
+  }
+  if (elapsedMs < REFLECT_GRACE_MS) {
+    return {
+      state: 'ACKED', resolved: false, action: 'RETRY_QUERY',
+      reason: `전송 후 ${Math.round(elapsedMs)}ms — 거래소 반영 대기 시간 내입니다`,
+    };
+  }
+
+  // **여기가 UNKNOWN과 갈리는 지점이다.**
+  // 거래소가 받았다고 했던 주문이 이제 안 보인다 = 더 이상 살아 있지
+  // 않다. 체결인지 취소인지는 이 조회로 알 수 없으므로 **그렇게 말한다.**
+  // RECONCILED는 "이 주문은 끝났고, 최종 결과는 거래 내역에서 확인해야
+  // 한다"는 뜻이다 — FILLED로도 FAILED로도 단정하지 않는다.
+  return {
+    state: 'RECONCILED', resolved: true, action: 'NONE',
+    reason: position && position.qtyNow !== null && !qtyChanged(position)
+      ? '거래소가 받았던 주문이 더 이상 조회되지 않고 포지션도 그대로입니다 — '
+        + '이미 종료된 주문으로 정리합니다 (체결·취소 여부는 거래 내역에서 확인하세요)'
+      : '거래소가 받았던 주문이 더 이상 조회되지 않습니다 — '
+        + '이미 종료된 주문으로 정리합니다 (체결·취소 여부는 거래 내역에서 확인하세요)',
+  };
+}

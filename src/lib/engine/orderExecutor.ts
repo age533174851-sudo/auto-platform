@@ -776,9 +776,19 @@ export async function reconcilePendingOrders(
 ): Promise<ReconcileResult> {
   const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] };
 
+  // **ACKED가 빠져 있었다.**
+  //
+  // ACKED는 "거래소가 접수했다"는 상태다. 그 뒤 체결·취소로 넘어가는
+  // 경로가 아무 데도 없어서, 한번 ACKED가 된 주문은 영원히 ACKED로
+  // 남았다. 그런데 상태 대조는 ACKED를 "열려 있는 주문"이자 (수량이
+  // 있으면) "보유 중인 포지션"으로 읽는다.
+  //
+  // 결과: 거래소에는 아무것도 없는데 앱은 계속 있다고 믿고, **신규
+  // 진입이 영구히 막힌다.** [미확정 주문 확정]을 눌러도 안 풀렸다 —
+  // 그 버튼이 여기를 부르는데 ACKED를 조회하지 않았으니까.
   let q = sb.from('live_orders')
     .select('*')
-    .in('status', ['SENT', 'UNKNOWN'])
+    .in('status', ['SENT', 'UNKNOWN', 'ACKED'])
     .eq('exchange', creds.exchange);
   // **모르면 좁히지 않는다.** 좁히지 않으면 과하게 대조할 뿐이지만,
   // 잘못 좁히면 진짜 미확정 주문을 놓친다.
@@ -791,7 +801,7 @@ export async function reconcilePendingOrders(
 
   if (!Array.isArray(pending) || !pending.length) return out;
 
-  const { resolveUnknown, shouldEscalate } = await import('./unknownResolver');
+  const { resolveUnknown, resolveAcked, shouldEscalate } = await import('./unknownResolver');
 
   // 포지션은 심볼마다 다시 부르지 않고 한 번만 읽는다. 대조 한 번에 50건이
   // 들어올 수 있어 건마다 부르면 레이트리밋에 걸린다.
@@ -847,9 +857,17 @@ export async function reconcilePendingOrders(
           qtyNow: posBySymbol ? (posBySymbol.get(String(o.symbol).toUpperCase()) ?? 0) : null,
         };
 
-        const verdict = resolveUnknown({
-          clientOrderId: o.client_order_id || null, elapsedMs, query, position,
-        });
+        // **상태마다 규칙이 다르다.**
+        // SENT/UNKNOWN은 "보냈는지도 모르는" 상태라, 주문이 안 보이면
+        // 전송 안 됨(FAILED)으로 확정할 수 있다.
+        // ACKED는 거래소가 이미 받았다고 확인해 준 상태다. 지금 안 보이는
+        // 것은 "안 들어갔다"가 아니라 "이미 끝났다"이므로 FAILED로 찍으면
+        // 장부가 거짓말을 하고, FAILED는 재시도가 열리는 상태라 중복
+        // 체결의 문이 된다.
+        const args = { clientOrderId: o.client_order_id || null, elapsedMs, query, position };
+        const verdict = String(o.status) === 'ACKED'
+          ? resolveAcked(args)
+          : resolveUnknown(args);
 
         if (verdict.resolved) {
           const st = verdict.state === 'FILLED' ? 'FILLED'
