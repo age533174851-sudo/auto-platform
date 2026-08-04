@@ -60,7 +60,7 @@ export async function gateReq<T>(
 }
 
 // ── 공개 시세 (서명 불필요) ──────────────────────────
-export interface GateTicker { contract: string; last: string; index_price?: string; funding_rate?: string; volume_24h?: string }
+export interface GateTicker { contract: string; last: string; mark_price?: string; index_price?: string; funding_rate?: string; volume_24h?: string }
 
 export async function getTickerGateFutures(contract: string, testnet = true): Promise<GateTicker | null> {
   const list = await gateReq<GateTicker[]>('GET', '/api/v4/futures/usdt/tickers', { qs: `contract=${contract}`, testnet });
@@ -466,4 +466,80 @@ export async function checkGateFuturesConnection(
   out.latencyMs = Date.now() - t0;
   out.ok = out.publicOk && out.privateOk;
   return out;
+}
+
+// ── 계약 규격 ────────────────────────────────────────
+//
+// **이게 없어서 Gate 선물 주문은 BTC에서 절대 나갈 수 없었다.**
+//
+// Gate의 주문 수량(`size`)은 **정수 계약 수**다. 한 계약이 몇 개의 기초자산인지는
+// 계약마다 다르다 — BTC_USDT는 `quanto_multiplier`가 0.0001이라 1계약 = 0.0001 BTC다.
+//
+// 저장소는 이 값을 **한 번도 읽은 적이 없다.** `toGateSize`가 기초자산 수량을
+// 그대로 계약 수로 보고 내림했다. 그래서 0.05 BTC 주문은 floor(0.05) = 0계약이
+// 되어 "1계약 미만입니다"로 거부됐다. 실제로는 500계약이었어야 했다.
+//
+// 반대로 SOL_USDT처럼 배수가 1인 계약에서는 우연히 맞았다. 그래서 "어떤 종목은
+// 되고 BTC만 안 되는" 모양이었고, 원인이 수량 단위라는 걸 알 방법이 없었다.
+//
+// **못 읽으면 null이다.** 배수를 1로 가정하면 BTC 주문이 10000배로 나간다.
+// 그건 거부당하는 것보다 비교할 수 없이 나쁘다.
+export interface GateContractSpec {
+  contract: string;
+  /** 1계약 = 몇 개의 기초자산인가. BTC_USDT는 0.0001 */
+  quantoMultiplier: number;
+  /** 최소 주문 계약 수 */
+  orderSizeMin: number;
+  /** 최대 주문 계약 수. 못 읽으면 null */
+  orderSizeMax: number | null;
+  /** 가격 호가 단위. 못 읽으면 null */
+  orderPriceRound: number | null;
+}
+
+const _gateSpecCache: Record<string, GateContractSpec & { at: number }> = {};
+
+/**
+ * 계약 하나의 규격. 못 읽으면 null.
+ *
+ * 캐시 열쇠에 호스트를 넣는다 — 테스트넷과 실전의 규격이 같다는 보장이 없고,
+ * 한쪽에서 읽은 값으로 다른 쪽 수량을 만들면 조용히 틀린 크기가 나간다
+ * (바이낸스 `getSymbolFilters`에서 같은 실수를 이미 한 번 했다).
+ */
+export async function getGateContractSpec(
+  contract: string, testnet = true,
+): Promise<GateContractSpec | null> {
+  const name = String(contract || '').toUpperCase();
+  if (!name) return null;
+  const cacheKey = `${testnet ? 'demo' : 'live'}:${name}`;
+  const cached = _gateSpecCache[cacheKey];
+  if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached;
+
+  try {
+    const c = await gateReq<any>('GET', `/api/v4/futures/usdt/contracts/${name}`, { testnet });
+    const mult = Number(c?.quanto_multiplier);
+    // 배수가 없거나 0이면 규격을 못 읽은 것이다. 여기서 1을 채우지 않는다.
+    if (!Number.isFinite(mult) || mult <= 0) return null;
+
+    const minRaw = Number(c?.order_size_min);
+    const maxRaw = Number(c?.order_size_max);
+    const roundRaw = Number(c?.order_price_round);
+
+    const spec: GateContractSpec & { at: number } = {
+      contract: String(c?.name || name),
+      quantoMultiplier: mult,
+      // 최소 계약 수를 못 읽으면 1이다. 이건 지어낸 값이 아니라 "정수 계약"이라는
+      // 규격 자체가 주는 하한이다.
+      orderSizeMin: Number.isFinite(minRaw) && minRaw > 0 ? minRaw : 1,
+      orderSizeMax: Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null,
+      orderPriceRound: Number.isFinite(roundRaw) && roundRaw > 0 ? roundRaw : null,
+      at: Date.now(),
+    };
+    _gateSpecCache[cacheKey] = spec;
+    return spec;
+  } catch { return null; }
+}
+
+/** 테스트가 캐시를 비우기 위해 쓴다 */
+export function __clearGateSpecCache() {
+  for (const k of Object.keys(_gateSpecCache)) delete _gateSpecCache[k];
 }

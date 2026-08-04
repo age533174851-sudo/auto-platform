@@ -450,9 +450,12 @@ export async function POST(req: NextRequest) {
     const { buildExitPlan } = await import('@/lib/engine/exitPlan');
     let qtyStep: number | undefined, minQty: number | undefined;
     try {
-      const bf = await import('@/lib/exchanges/binanceFutures');
-      const f = await bf.getSymbolFilters(symbol, useTestnet);
-      if (f) { qtyStep = f.stepSize; minQty = f.minQty; }
+      // **이 거래소의** 규격을 읽는다. 예전에는 Gate 연결에서도 바이낸스
+      // 규격을 읽었다. Gate의 수량 단위는 정수 계약(BTC_USDT는 0.0001)이라
+      // 남의 격자로 자른 분할 수량은 계약 경계에 안 맞을 수 있다.
+      const { futuresSymbolFilters } = await import('@/lib/exchanges/futuresAdapter');
+      const f = await futuresSymbolFilters(exchange as any, symbol, useTestnet);
+      if (f?.stepSize) { qtyStep = f.stepSize; minQty = f.minQty ?? undefined; }
     } catch { /* 필터를 못 읽으면 반올림 없이 진행 — 거래소가 거부하면 분할만 빠진다 */ }
 
     const exitPlan = buildExitPlan({

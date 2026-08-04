@@ -588,9 +588,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         message: `Gate 계약 이름을 만들 수 없습니다 (${plan.symbol})` };
     }
 
-    // 수량을 먼저 확정한다. 1계약 미만이면 아무것도 하기 전에 멈춘다 —
-    // 예전에는 Math.round로 0을 만들어 보냈다.
-    const sized = gp.toGateSize(plan.quantity, plan.side);
+    // ── 수량: 기초자산 → 정수 계약 ──
+    //
+    // **여기가 Gate 주문이 BTC에서 한 번도 나가지 못한 이유였다.**
+    //
+    // `plan.quantity`는 저장소 전체에서 기초자산 수량이다(0.05 BTC). 그런데
+    // Gate의 `size`는 정수 계약 수이고, 1계약이 몇 개인지는 계약마다 다르다 —
+    // BTC_USDT는 0.0001이다. 예전 코드는 그 배수를 읽지 않고 0.05를 그대로
+    // 계약 수로 보고 내림했다. floor(0.05) = 0 → "1계약 미만입니다"로 거부.
+    // 실제로는 500계약이었어야 했다.
+    //
+    // SOL_USDT처럼 배수가 1인 계약에서는 우연히 맞았다. 그래서 "어떤 종목은
+    // 되고 BTC만 안 되는" 모양이었고 원인을 짚을 단서가 없었다.
+    //
+    // **규격을 못 읽으면 주문하지 않는다.** 배수를 1로 가정하면 이번엔 반대로
+    // 10000배가 나간다.
+    const gspec = await gf.getGateContractSpec(contract, testnet);
+    const sized = gp.gateSizeFromBase(plan.quantity, plan.side, gspec);
     if (!sized.ok) {
       await update({ status: 'REJECTED', error_message: sized.reason });
       return { ok: false, status: 'REJECTED', clientOrderId, message: sized.reason };
@@ -719,7 +733,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       filledQty: fill.filledQty ?? undefined,
       avgPrice: fill.avgPrice ?? undefined,
       slOrderId: gateSlId,
-      message: `주문 접수 (Gate · ${sized.size}계약)`
+      message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
         + (sized.reason ? ` · ${sized.reason}` : '')
         + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
             ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')

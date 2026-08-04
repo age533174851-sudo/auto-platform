@@ -1,0 +1,205 @@
+// src/lib/exchanges/futuresAdapter.ts
+//
+// **USDⓈ-M 선물 주문 앞에서 읽어야 하는 것들을, 거래소와 무관하게.**
+//
+// 왜 이 파일이 생겼나
+// ───────────────────
+// 수동 주문 라우트(`/api/binance/futures/order`)는 이름 그대로 바이낸스
+// 전용이었다. 첫 줄에서 `exchange_id !== 'binance'`면 거절했고, 안쪽에는
+// `getFuturesServerTime` · `getSymbolPositionRiskEx` · `getFuturesBalance` ·
+// `getSymbolFilters` 네 개의 바이낸스 전용 호출이 박혀 있었다.
+//
+// Gate 연결을 고른 사용자는 주문을 낼 방법이 아예 없었다. 자동매매
+// (`executeOrder`)는 Gate 분기가 있는데, 손으로 누르는 경로만 없었다.
+//
+// **두 번째 라우트를 만들지 않는다.**
+// 이 저장소에서 반복된 사고가 정확히 그 모양이었다 — 주문 경로가 여러 개인데
+// 안전 검사는 일부에만 있는 것(현물·COIN-M이 오늘 손실 한도를 통째로
+// 빠뜨리고 있던 것, 워커 경로에 생명주기 기록이 절반만 있던 것). 라우트를
+// 하나로 두고 **읽는 쪽만** 거래소별로 갈라 놓으면, 점검·한도·멱등 키는
+// 언제나 한 벌이다.
+//
+// 못 읽으면 null이다
+// ──────────────────
+// 여기 있는 함수는 전부 실패를 null로 돌려준다. 0이나 기본값으로 채우면
+// 점검이 '확인함'으로 통과한다. 이 저장소의 규칙은 하나다 —
+// **확인하지 못한 것은 통과가 아니다.**
+
+import type { SymbolFilters } from './quantize';
+
+export type FuturesExchange = 'binance' | 'gate';
+
+/**
+ * 연결의 `exchange_id`를 이 경로가 다루는 거래소로 좁힌다.
+ *
+ * Gate는 저장소 안에서 `gate`와 `gateio` 두 이름으로 돌아다닌다
+ * (`tradeMode.ts`의 이름표도 둘 다 받는다). 여기서 한 이름으로 모은다.
+ * 모르는 거래소는 **null**이다 — 바이낸스로 치면 Gate 키로 바이낸스에
+ * 서명 요청을 보내게 된다.
+ */
+export function futuresExchangeOf(raw: any): FuturesExchange | null {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (s === 'binance') return 'binance';
+  if (s === 'gate' || s === 'gateio' || s === 'gate.io') return 'gate';
+  return null;
+}
+
+/** 사람이 읽는 거래소 이름 */
+export function futuresExchangeName(ex: FuturesExchange): string {
+  return ex === 'gate' ? '게이트아이오' : '바이낸스';
+}
+
+/**
+ * 거래 전 점검이 읽는 포지션 상태. 두 거래소를 같은 모양으로 맞춘다.
+ *
+ * `positionAmt`는 **기초자산 수량**이다. Gate는 계약 수로 주는데, 그대로
+ * 두면 주문 수량과 단위가 달라서 "기존 포지션 500, 주문 0.05"처럼 비교할
+ * 수 없는 두 숫자가 한 화면에 뜬다. 배수를 못 읽으면 null로 둔다.
+ */
+export interface FuturesRiskView {
+  symbol: string;
+  /** 기초자산 수량. 부호 있음(롱 양수). 못 읽으면 null */
+  positionAmt: number | null;
+  /** 'isolated' | 'cross' | '' (모름) */
+  marginType: string;
+  leverage: number | null;
+  liquidationPrice: number | null;
+  entryPrice: number | null;
+  markPrice: number | null;
+}
+
+/** 거래소 서버 시각(epoch ms). 못 읽으면 null — 0이 아니다 */
+export async function futuresServerTime(
+  ex: FuturesExchange, testnet: boolean,
+): Promise<number | null> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    return gf.getGateServerTime(testnet);
+  }
+  const bf = await import('./binanceFutures');
+  return bf.getFuturesServerTime(testnet);
+}
+
+/**
+ * 수량·가격 규격. 못 읽으면 null — `quantizeOrder`가 "적용 안 함"으로 표시한다.
+ *
+ * Gate는 계약 배수(`quanto_multiplier`)를 수량 단위로 놓는다. 그래서 같은
+ * `quantizeOrder`가 두 거래소를 처리한다 — 기초자산 수량을 배수로 내림하는
+ * 일이 곧 "정수 계약으로 내림"이다.
+ */
+export async function futuresSymbolFilters(
+  ex: FuturesExchange, symbol: string, testnet: boolean,
+): Promise<SymbolFilters | null> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    const gp = await import('./gatePlan');
+    const spec = await gf.getGateContractSpec(gp.toGateContract(symbol), testnet);
+    return gp.gateFiltersOf(spec);
+  }
+  const bf = await import('./binanceFutures');
+  return bf.getSymbolFilters(symbol, testnet);
+}
+
+/**
+ * 이 심볼의 마진 모드·배율·청산가·마크가.
+ *
+ * 실패 이유를 삼키지 않는다. 값만 비우면 화면에는 '확인 못 함'까지만 뜨고
+ * 왜 못 읽었는지는 아무도 모른다 — 그것 때문에 하루를 쓴 적이 있다.
+ */
+export async function futuresPositionRisk(
+  ex: FuturesExchange, key: string, secret: string, symbol: string, testnet: boolean,
+): Promise<{ risk: FuturesRiskView | null; error: string | null }> {
+  if (ex === 'binance') {
+    const bf = await import('./binanceFutures');
+    const rr = await bf.getSymbolPositionRiskEx(key, secret, symbol, testnet);
+    if (!rr.risk) return { risk: null, error: rr.error };
+    return {
+      risk: {
+        symbol: rr.risk.symbol,
+        positionAmt: Number.isFinite(rr.risk.positionAmt) ? rr.risk.positionAmt : null,
+        marginType: rr.risk.marginType || '',
+        leverage: rr.risk.leverage ?? null,
+        liquidationPrice: rr.risk.liquidationPrice ?? null,
+        entryPrice: rr.risk.entryPrice ?? null,
+        markPrice: rr.risk.markPrice ?? null,
+      },
+      error: rr.error,
+    };
+  }
+
+  const gf = await import('./gateFutures');
+  const gp = await import('./gatePlan');
+  const contract = gp.toGateContract(symbol);
+  if (!contract) {
+    return { risk: null, error: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
+  }
+
+  let pos: any = null;
+  let posErr: string | null = null;
+  try {
+    pos = await gf.getPositionGateFutures(key, secret, contract, testnet);
+    if (!pos) posErr = `Gate 포지션 조회가 비어 있습니다 (${contract})`;
+  } catch (e: any) {
+    posErr = `Gate 포지션 조회 실패: ${e?.message || e}`;
+  }
+
+  const view = gp.gatePositionToRisk(pos);
+  if (!view) return { risk: null, error: posErr || 'Gate 포지션을 읽지 못했습니다' };
+
+  // 계약 수 → 기초자산 수량. 배수를 못 읽으면 null로 둔다. 계약 수를 그대로
+  // 수량 칸에 적으면 "기존 포지션 500 BTC"라는 거짓이 화면에 뜬다.
+  const spec = await gf.getGateContractSpec(contract, testnet);
+  const baseAmt = gp.gateBaseFromContracts(view.positionAmt, spec);
+
+  // 마크가는 포지션 응답에 없다. 티커에서 읽는다 — 신규 진입이면 포지션이
+  // 없어서 진입가도 없고, 기준가가 없으면 명목가·증거금·손절가를 전부
+  // 계산할 수 없다.
+  let mark: number | null = null;
+  try {
+    const t = await gf.getTickerGateFutures(contract, testnet);
+    const m = Number(t?.mark_price ?? t?.last);
+    mark = Number.isFinite(m) && m > 0 ? m : null;
+  } catch { /* null — 기준가 없음으로 점검이 막는다 */ }
+
+  return {
+    risk: {
+      symbol: contract,
+      positionAmt: baseAmt,
+      marginType: view.marginType,
+      leverage: view.leverage,
+      liquidationPrice: view.liquidationPrice,
+      entryPrice: view.entryPrice,
+      markPrice: mark,
+    },
+    // 배수를 못 읽었으면 그 사실을 들고 간다. 이게 없으면 주문 수량도
+    // 만들 수 없어서 어차피 아래에서 막힌다 — 이유를 여기서 준다.
+    error: spec ? posErr : (posErr ? `${posErr} / Gate 계약 규격을 읽지 못했습니다`
+                                   : 'Gate 계약 규격(1계약당 수량)을 읽지 못했습니다'),
+  };
+}
+
+/**
+ * 주문에 쓸 수 있는 USDT. 못 읽으면 **null**이다.
+ *
+ * 0으로 두면 안 된다 — 1회 명목가 상한이 자산의 비율로도 걸려 있어서,
+ * 0이면 비율 상한이 0이 되고 계좌가 아무리 커도 전부 막힌다. 0과 '모름'은
+ * 다른 값이다.
+ */
+export async function futuresAvailableUsd(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+): Promise<number | null> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const acct = await gf.getAccountGateFutures(key, secret, testnet);
+      const v = Number(acct?.available);
+      return Number.isFinite(v) ? v : null;
+    }
+    const bf = await import('./binanceFutures');
+    const bal: any = await bf.getFuturesBalance(key, secret, testnet);
+    if (!bal?.success) return null;
+    const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
+    const v = Number(usdt?.availableBalance);
+    return Number.isFinite(v) ? v : null;
+  } catch { return null; }
+}
