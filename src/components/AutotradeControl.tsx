@@ -544,6 +544,45 @@ export default function AutotradeControl() {
                 </div>
               ))}
             </div>
+            {/* ── 무엇이 어긋났는가 ──
+                "불일치 10건 (심각 1 · 경고 9)"만 적으면 고칠 수가 없다.
+                개수는 상태가 아니라 개수일 뿐이다. 심각한 것부터 적는다. */}
+            {Array.isArray(check.mismatches) && check.mismatches.length > 0 && (
+              <div style={{ marginTop: 8, borderTop: `1px solid ${T.border}`, paddingTop: 7 }}>
+                <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 5 }}>
+                  앱과 거래소가 어긋난 곳 ({check.mismatches.length}건)
+                </div>
+                {[...check.mismatches]
+                  .sort((a: any, b: any) => (b.severity === 'critical' ? 1 : 0) - (a.severity === 'critical' ? 1 : 0))
+                  .slice(0, 12)
+                  .map((m: any, i: number) => (
+                    <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'baseline', padding: '3px 0' }}>
+                      <span style={{ fontSize: 10 }}>
+                        {m.severity === 'critical' ? '🛑' : m.severity === 'warn' ? '⚠️' : 'ℹ️'}
+                      </span>
+                      <span style={{ color: T.txt, fontSize: 10.5, fontWeight: 700, minWidth: 66 }}>
+                        {m.symbol || '—'}
+                      </span>
+                      <span style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.5, flex: 1 }}>
+                        {m.detail}
+                        {(m.app != null || m.exchange != null) && (
+                          <> <span style={{ opacity: 0.8 }}>(앱 {String(m.app ?? '—')} · 거래소 {String(m.exchange ?? '—')})</span></>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                {check.mismatches.length > 12 && (
+                  <div style={{ color: T.muted, fontSize: 10, marginTop: 3 }}>
+                    …외 {check.mismatches.length - 12}건
+                  </div>
+                )}
+                <div style={{ color: T.ylw, fontSize: 10, marginTop: 5, lineHeight: 1.55 }}>
+                  → 대부분 위 [미확정 주문 확정]으로 풀립니다. 그래도 남으면 거래소에
+                  실제로 열려 있는 포지션·주문을 정리하거나, 매매 화면에서 직접 닫으세요.
+                </div>
+              </div>
+            )}
+
             {check.syntheticPlan && (
               <div style={{ color: T.muted, fontSize: 10, marginTop: 6, lineHeight: 1.55 }}>
                 지금은 진입 신호가 없어서, 계획이 필요한 항목은 <b style={{ color: T.txt }}>지금 설정으로 만든 가상 계획</b>으로 확인했습니다.
