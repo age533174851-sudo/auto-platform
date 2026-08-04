@@ -8,7 +8,7 @@
 // 포지션이 다시 열린다 — 닫았다고 믿은 뒤에 열리는 것이 가장 위험하다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -21,13 +21,15 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ error: 'supabase_not_configured' }, { status: 503 });
 
-  const creds = await loadBinanceCreds(sb, uid, body.connectionId);
+  // 거래소를 가리지 않는다 — Gate 연결에서 이 버튼이 죽어 있으면
+  // 열 수는 있는데 닫을 수 없는 상태가 된다.
+  const creds = await loadFuturesCreds(sb, uid, body.connectionId);
   if (!creds.ok) return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status });
 
-  const { cancelAllOpenOrders, closeAllPositions } = await import('@/lib/exchanges/binanceFutures');
+  const { futuresCancelAll, futuresCloseAll } = await import('@/lib/exchanges/futuresAdapter');
 
-  const cancel = await cancelAllOpenOrders(creds.key, creds.secret, creds.testnet);
-  const close = await closeAllPositions(creds.key, creds.secret, creds.testnet, 5);
+  const cancel = await futuresCancelAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!);
+  const close = await futuresCloseAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!, 5);
 
   return NextResponse.json({
     ok: !!close?.success,
@@ -39,8 +41,9 @@ export async function POST(req: NextRequest) {
     remaining: close?.remaining ?? null,
     retries: close?.retries ?? null,
     testnet: creds.testnet,
+    exchange: creds.exchange,
     message: close?.success
       ? '포지션 전체 종료 완료'
-      : `포지션 ${close?.remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
+      : close?.message || `포지션 ${close?.remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
   }, { status: close?.success ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
 }

@@ -39,30 +39,30 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'missing_connectionId' }, { status: 400 });
     }
 
-    const { loadBinanceCreds } = await import('@/lib/exchanges/loadCreds');
-    const creds = await loadBinanceCreds(sb, uid, connectionId);
+    // **거래소를 가리지 않는다.** 예전에는 loadBinanceCreds라 Gate 연결이면
+    // not_binance로 끝났고, 화면에는 "오늘 한도 — 확인 불가"만 떴다.
+    // 사용자는 한도를 못 읽은 것인지 이 기능이 Gate를 모르는 것인지 알 수 없다.
+    const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
+    const creds = await loadFuturesCreds(sb, uid, connectionId);
     if (!creds.ok) {
       return NextResponse.json({ ok: false, error: creds.error, message: creds.message },
         { status: creds.status });
     }
 
     // 지갑 잔고. 못 읽으면 null이고, 비율 한도는 그때 unknown이 된다.
-    let equity: number | null = null;
-    try {
-      const bf = await import('@/lib/exchanges/binanceFutures');
-      const bal: any = await bf.getFuturesBalance(creds.key!, creds.secret!, creds.testnet!);
-      if (bal?.success) {
-        const usdt = (bal.balances ?? []).find((b: any) => b.asset === 'USDT');
-        if (usdt) equity = Number(usdt.balance ?? usdt.availableBalance);
-      }
-    } catch { /* null */ }
+    const { futuresAvailableUsd } = await import('@/lib/exchanges/futuresAdapter');
+    const equity = await futuresAvailableUsd(
+      creds.exchange!, creds.key!, creds.secret!, creds.testnet!);
 
+    // 원장 엔드포인트는 거래소마다 다르다. 합산·판정은 같은 순수 함수가 한다 —
+    // 한도 판정이 거래소마다 갈리면 한쪽만 고쳐진다.
     const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
     const f = await collectDailyLoss({
       apiKey: creds.key!, apiSecret: creds.secret!, testnet: creds.testnet!,
+      exchange: creds.exchange!,
       currentEquityUsd: equity,
     });
-    return NextResponse.json({ ok: true, paper: false, ...shape(f) },
+    return NextResponse.json({ ok: true, paper: false, exchange: creds.exchange, ...shape(f) },
       { headers: { 'Cache-Control': 'no-store' } });
 
   } catch (e: any) {

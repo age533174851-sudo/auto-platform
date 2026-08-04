@@ -60,6 +60,23 @@ function safeConn(row: any) {
     is_testnet:         row.is_testnet !== false,
     has_withdrawal:     !!row.has_withdrawal,
 
+    // ── exchange_id·label도 스네이크 케이스로 내보낸다 ──
+    //
+    // **이게 빠져서 매매 화면에 원시 UUID가 떴다:**
+    //
+    //   "고른 연결이 이 모드에 맞지 않아 테스트넷 연결 cd7fd4be(으)로 주문합니다"
+    //
+    // 이 문장은 **앱이 다른 계좌로 바꿔서 주문한다**는 뜻이다. 어느 계좌인지
+    // 모르면 확인할 방법이 없는데, 정작 식별자가 식별을 못 했다.
+    //
+    // 원인은 위쪽 매핑이다 — exchange_id를 `exchange`로, label을 `nickname`으로
+    // 이름을 바꿔 내보내고 있었다. tradeMode의 labelOf는 `exchange_id`·`label`을
+    // 보므로 둘 다 undefined였고, 그래서 마지막 가지(id 앞자리)로 떨어졌다.
+    // is_testnet·has_withdrawal이 같은 이유로 빠져 있던 것을 이미 한 번 고쳤는데,
+    // 그때 이 둘은 같이 넣지 않았다.
+    exchange_id:        row.exchange_id ?? row.exchange ?? null,
+    label:              row.label ?? row.nickname ?? null,
+
     createdAt:          row.created_at ?? null,
   };
 }

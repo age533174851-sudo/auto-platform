@@ -203,3 +203,64 @@ export async function futuresAvailableUsd(
     return Number.isFinite(v) ? v : null;
   } catch { return null; }
 }
+
+// ── 비상 정리 ────────────────────────────────────────
+//
+// **못 여는 것은 불편이고 못 닫는 것은 사고다.**
+//
+// [미체결 취소]·[전량 청산]·[KILL] 버튼이 부르는 자리다. 이 세 개가
+// Gate에서 안 되면 열 수는 있는데 닫을 수 없는 상태가 된다.
+
+export interface CancelAllResult {
+  success: boolean;
+  /** 취소한 건수. 못 세면 null — 0으로 적으면 '없었다'가 사실이 된다 */
+  count: number | null;
+  results: any[];
+  message: string;
+}
+
+export async function futuresCancelAll(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+): Promise<CancelAllResult> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    return gf.cancelAllOpenOrdersGateFutures(key, secret, testnet);
+  }
+  const bf = await import('./binanceFutures');
+  const r: any = await bf.cancelAllOpenOrders(key, secret, testnet);
+  return {
+    success: !!r?.success,
+    count: r?.count ?? null,
+    results: r?.results ?? [],
+    message: r?.success ? `미체결 주문 취소 완료 (${r?.count ?? 0}건)`
+                        : '취소 실패 — 거래소에서 직접 확인하세요',
+  };
+}
+
+export interface CloseAllResult {
+  success: boolean;
+  /** 남은 포지션 수. **못 읽으면 null이다** — 0으로 적으면 '전부 닫혔다'가 된다 */
+  remaining: number | null;
+  retries: number | null;
+  results: any[];
+  message: string;
+}
+
+export async function futuresCloseAll(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean, retries = 5,
+): Promise<CloseAllResult> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    return gf.closeAllPositionsGateFutures(key, secret, testnet, retries);
+  }
+  const bf = await import('./binanceFutures');
+  const r: any = await bf.closeAllPositions(key, secret, testnet, retries);
+  return {
+    success: !!r?.success,
+    remaining: r?.remaining ?? null,
+    retries: r?.retries ?? null,
+    results: r?.results ?? [],
+    message: r?.success ? '포지션 전체 종료 완료'
+                        : `포지션 ${r?.remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
+  };
+}

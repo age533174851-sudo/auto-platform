@@ -25,8 +25,8 @@
 // 정리해야 하는지**를 그대로 적어 돌려준다.
 import { NextRequest, NextResponse } from 'next/server';
 import { resolveUserId, getSupabaseAdmin } from '@/lib/supabase/server';
-import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
-import { setFuturesMarginType, getSymbolPositionRiskEx } from '@/lib/exchanges/binanceFutures';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
+import { setFuturesMarginType } from '@/lib/exchanges/binanceFutures';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -42,15 +42,22 @@ export async function GET(req: NextRequest) {
   if (!symbol) return NextResponse.json({ error: 'missing_symbol' }, { status: 400 });
 
   const sb = getSupabaseAdmin();
-  const creds = await loadBinanceCreds(sb, uid, url.searchParams.get('connectionId'));
+  // **거래소를 가리지 않는다.** 예전에는 바이낸스 전용이라 Gate 연결이면
+  // not_binance로 끝났고, 주문 화면의 마진 모드 칸에 "모드 ?"가 떴다.
+  // 그건 "모른다"가 아니라 "이 라우트가 Gate를 모른다"였는데, 화면은 그
+  // 둘을 구분해 말할 수 없었다.
+  const creds = await loadFuturesCreds(sb, uid, url.searchParams.get('connectionId'));
   if (!creds.ok) {
     return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status || 400 });
   }
 
-  const rr = await getSymbolPositionRiskEx(creds.key!, creds.secret!, symbol, creds.testnet === true);
+  const { futuresPositionRisk } = await import('@/lib/exchanges/futuresAdapter');
+  const rr = await futuresPositionRisk(
+    creds.exchange!, creds.key!, creds.secret!, symbol, creds.testnet === true);
 
   // positionRisk v3에는 marginType이 없다. 값이 안 오면 **null이다.**
   // 'ISOLATED'로 채우면 화면이 확인된 사실처럼 그린다.
+  // (Gate는 leverage=0이 교차라 gatePositionToRisk가 이미 둘로 갈라 준다)
   const raw = rr.risk?.marginType ?? null;
   const marginType = raw == null ? null
     : /isolat/i.test(String(raw)) ? 'ISOLATED'
@@ -63,7 +70,8 @@ export async function GET(req: NextRequest) {
     marginType,
     // 왜 못 읽었는지. 이게 없으면 화면은 '확인 못 함'까지만 말할 수 있다.
     error: marginType == null ? (rr.error || '거래소가 마진 모드를 돌려주지 않았습니다') : null,
-    hasPosition: rr.risk ? Math.abs(Number(rr.risk.positionAmt) || 0) > 0 : null,
+    exchange: creds.exchange,
+    hasPosition: rr.risk?.positionAmt != null ? Math.abs(Number(rr.risk.positionAmt)) > 0 : null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -92,9 +100,55 @@ export async function POST(req: NextRequest) {
   }
 
   const sb = getSupabaseAdmin();
-  const creds = await loadBinanceCreds(sb, uid, body?.connectionId);
+  const creds = await loadFuturesCreds(sb, uid, body?.connectionId);
   if (!creds.ok) {
     return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status || 400 });
+  }
+
+  // ── Gate는 마진 모드를 배율로 표현한다 ──
+  //
+  // leverage = 0 이 교차, 0이 아니면 격리다. 그래서 '격리로 바꾼다'는
+  // 배율을 1 이상으로 설정하는 일이고, '교차로 바꾼다'는 0으로 두는 일이다.
+  //
+  // **교차로 바꾸는 길은 열지 않는다.** 이 앱의 청산가 계산·증거금 상한이
+  // 전부 격리를 전제한다. 교차는 한 종목의 손실이 지갑 전체로 번지는데,
+  // 그걸 켜 주고도 화면의 청산가는 격리 기준으로 남는다 — 화면이 거짓을
+  // 말하게 하는 것보다 이 버튼을 막는 쪽이 낫다.
+  if (creds.exchange === 'gate') {
+    const gf = await import('@/lib/exchanges/gateFutures');
+    const gp = await import('@/lib/exchanges/gatePlan');
+    const contract = gp.toGateContract(symbol);
+    if (!contract) {
+      return NextResponse.json({ error: 'bad_symbol',
+        message: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` }, { status: 400 });
+    }
+    if (want === 'CROSSED') {
+      return NextResponse.json({
+        error: 'cross_not_supported',
+        message: '게이트아이오 연결은 교차 마진으로 바꿀 수 없습니다 — 이 앱의 청산가·증거금 '
+               + '계산이 전부 격리를 전제합니다. 교차로 열면 화면의 청산가가 틀린 값이 됩니다.',
+      }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // 지금 배율을 유지한 채 격리로만 돌린다. 못 읽으면 1배다 — 배율을
+    // 지어내 올리면 사용자가 정하지 않은 위험이 된다.
+    let lev = 1;
+    try {
+      const pos = await gf.getPositionGateFutures(creds.key!, creds.secret!, contract, creds.testnet === true);
+      const n = Number(pos?.leverage);
+      if (Number.isFinite(n) && n >= 1) lev = Math.round(n);
+    } catch { /* 1배 */ }
+
+    const g = await gf.setLeverageGateFutures(
+      creds.key!, creds.secret!, contract, lev, creds.testnet === true);
+    if (!g.success) {
+      return NextResponse.json({ error: 'margin_type_failed', message: g.message },
+        { status: 400, headers: { 'Cache-Control': 'no-store' } });
+    }
+    return NextResponse.json({
+      ok: true, symbol, exchange: 'gate', marginType: 'ISOLATED', alreadySet: false,
+      message: `${contract}를 격리로 맞췄습니다 (${g.leverage ?? lev}배)`,
+    }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   const r = await setFuturesMarginType(creds.key!, creds.secret!, symbol, want, creds.testnet === true);

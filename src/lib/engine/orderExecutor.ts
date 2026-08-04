@@ -611,7 +611,10 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     }
 
     // 손절 방향을 미리 검사한다. 주문을 낸 뒤에 알면 이미 늦다.
-    const stopSpec = gp.gateStopSpec(plan.side, args.stopLoss ?? null);
+    // 규격을 함께 넘겨 트리거 가격을 호가 단위에 맞춘다 — 안 맞추면
+    // "trigger.price is not an integer multiple of a price unit"로 거부되고,
+    // 그러면 진입은 성공한 뒤 손절만 실패해 포지션을 되돌리게 된다.
+    const stopSpec = gp.gateStopSpec(plan.side, args.stopLoss ?? null, null, gspec);
     if (!args.reduceOnly && !stopSpec.ok) {
       await update({ status: 'REJECTED', error_message: stopSpec.reason });
       return { ok: false, status: 'REJECTED', clientOrderId,

@@ -9,7 +9,7 @@
 // 주문이 실패하는 것보다 나쁘다 — 사용자는 정리됐다고 믿고 손을 뗀다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -22,16 +22,18 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ error: 'supabase_not_configured' }, { status: 503 });
 
-  const creds = await loadBinanceCreds(sb, uid, body.connectionId);
+  // 거래소를 가리지 않는다. 위험을 줄이는 동작이 거래소를 이유로
+  // 조용히 안 도는 것은 주문이 실패하는 것보다 나쁘다.
+  const creds = await loadFuturesCreds(sb, uid, body.connectionId);
   if (!creds.ok) return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status });
 
-  const { cancelAllOpenOrders } = await import('@/lib/exchanges/binanceFutures');
+  const { futuresCancelAll } = await import('@/lib/exchanges/futuresAdapter');
 
   // 최대 3회. 취소는 되돌릴 필요가 없는 동작이라 재시도가 안전하다 —
   // 이미 취소된 주문을 다시 취소해도 결과가 같다.
   let last: any = null;
   for (let i = 1; i <= 3; i++) {
-    last = await cancelAllOpenOrders(creds.key, creds.secret, creds.testnet);
+    last = await futuresCancelAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!);
     if (last?.success) break;
     if (i < 3) await new Promise(r => setTimeout(r, 1500));
   }
@@ -43,6 +45,7 @@ export async function POST(req: NextRequest) {
     cancelled: last?.count ?? null,
     results: last?.results,
     testnet: creds.testnet,
+    exchange: creds.exchange,
     message: last?.success
       ? `미체결 주문 취소 완료 (${last?.count ?? 0}건)`
       : '취소 실패 — 거래소에서 직접 확인하세요. 개별 결과는 results를 보세요',

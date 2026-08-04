@@ -21,6 +21,8 @@ export interface CredsResult {
   secret?: string;
   testnet?: boolean;
   connectionId?: string;
+  /** 어느 거래소인가. `loadFuturesCreds`만 채운다 */
+  exchange?: 'binance' | 'gate';
   /** ok=false일 때. 그대로 HTTP 상태로 쓴다 */
   status?: number;
   error?: string;
@@ -36,6 +38,37 @@ export interface CredsResult {
 export async function loadBinanceCreds(
   sb: any, userId: string, connectionId: string,
 ): Promise<CredsResult> {
+  const r = await loadFuturesCreds(sb, userId, connectionId);
+  if (r.ok && r.exchange !== 'binance') {
+    return { ok: false, status: 400, error: 'not_binance',
+      message: `이 연결은 ${r.exchange}입니다 — 이 기능은 아직 바이낸스 연결만 지원합니다` };
+  }
+  return r;
+}
+
+/**
+ * 선물 주문 경로가 다루는 거래소(바이낸스·Gate)의 키를 꺼낸다.
+ *
+ * 왜 `loadBinanceCreds`와 나누는가
+ * ─────────────────────────────────
+ * 예전에는 이 함수 하나가 `exchange_id !== 'binance'`면 `not_binance`로
+ * 거절했다. 그런데 이걸 쓰는 라우트가 12개다 — 한도 조회·마진 모드·
+ * 킬스위치·전량청산·미체결취소까지. **Gate 연결을 고른 사용자는 그 화면들이
+ * 전부 죽어 있었다.**
+ *
+ * 실제로 화면에는 이렇게 떴다:
+ *   · 마진 모드 칸: "모드 ?"
+ *   · 오늘 한도:    "확인 불가"
+ * 둘 다 "고장"이 아니라 "이 라우트는 Gate를 모른다"였는데, 화면은 그걸
+ * 구분해 말할 수 없었다.
+ *
+ * **못 닫는 것이 가장 나쁘다.** 전량청산·미체결취소가 Gate에서 안 되면
+ * 열린 포지션을 화면에서 닫을 방법이 없다. 그래서 거래소를 함께 돌려주는
+ * 이 함수를 만들고, 진짜로 바이낸스 전용인 것만 위의 얇은 래퍼를 쓴다.
+ */
+export async function loadFuturesCreds(
+  sb: any, userId: string, connectionId: string,
+): Promise<CredsResult> {
   if (!connectionId) {
     return { ok: false, status: 400, error: 'missing_connectionId' };
   }
@@ -45,8 +78,15 @@ export async function loadBinanceCreds(
     .eq('id', connectionId).eq('user_id', userId).maybeSingle();
 
   if (!conn) return { ok: false, status: 404, error: 'connection_not_found' };
-  if (String(conn.exchange_id).toLowerCase() !== 'binance') {
-    return { ok: false, status: 400, error: 'not_binance' };
+
+  // 이름 정규화는 futuresAdapter 한 곳에 있다 — `gate`와 `gateio`가 저장소
+  // 안에 같이 돌아다니고, 정확히 'gate'만 보면 `gateio` 연결이 조용히 빠진다.
+  const { futuresExchangeOf } = await import('./futuresAdapter');
+  const exchange = futuresExchangeOf(conn.exchange_id);
+  if (!exchange) {
+    return { ok: false, status: 400, error: 'unsupported_exchange',
+      message: `이 연결(${conn.exchange_id || '알 수 없음'})은 선물 경로가 다루지 않습니다 `
+             + '— 지금 지원하는 곳은 바이낸스와 게이트아이오입니다' };
   }
   if (conn.has_withdrawal === true) {
     return { ok: false, status: 403, error: 'withdrawal_key_blocked',
@@ -73,7 +113,7 @@ export async function loadBinanceCreds(
   }
 
   return {
-    ok: true, key: conn.api_key, secret,
+    ok: true, key: conn.api_key, secret, exchange,
     // 명시적으로 false일 때만 실전이다. null·undefined는 테스트넷으로 본다 —
     // 모르는 값이 실전이 되면 안 된다.
     testnet: conn.is_testnet !== false,

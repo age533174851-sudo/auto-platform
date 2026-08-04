@@ -224,9 +224,17 @@ export interface KillExecResult {
 }
 export async function executeKillActions(
   sb: any, userId: string, connectionId: string,
-  opts: { key: string; secret: string; testnet: boolean; actionMode: string },
+  opts: { key: string; secret: string; testnet: boolean; actionMode: string;
+          /** 어느 거래소인가. 안 주면 바이낸스 — 예전 호출부와 동작이 같다 */
+          exchange?: 'binance' | 'gate' },
 ): Promise<KillExecResult> {
-  const { cancelAllOpenOrders, closeAllPositions } = await import('@/lib/exchanges/binanceFutures');
+  // **거래소를 가리지 않는다.** 킬스위치는 "문을 잠그고 안에 있는 것을 꺼내는"
+  // 동작이다. Gate에서 꺼내는 쪽이 안 돌면 잠그기만 하고 끝나는데, 급할 때
+  // 누른 사람은 정리됐다고 믿고 손을 뗀다 — 이 앱에서 가장 위험한 실패다.
+  const { futuresCancelAll, futuresCloseAll } = await import('@/lib/exchanges/futuresAdapter');
+  const ex = opts.exchange ?? 'binance';
+  const cancelAllOpenOrders = (k: string, sec: string, t: boolean) => futuresCancelAll(ex, k, sec, t);
+  const closeAllPositions = (k: string, sec: string, t: boolean, n: number) => futuresCloseAll(ex, k, sec, t, n);
   const mode = (opts.actionMode || '').toUpperCase();
   const doClose = mode.includes('D');
   const doCancel = mode.includes('C') || doClose;   // 종료하려면 반드시 취소가 선행

@@ -387,4 +387,62 @@ export function runGatePlanTests() {
       eq(futuresExchangeOf(v), null, `${String(v)}가 통과했다`);
     }
   });
+
+  // ── 손절 트리거 가격도 호가 단위에 맞아야 한다 ──────
+  //
+  // **이것 때문에 Gate 주문이 실제로 실패했다.**
+  //   Gate 400: invalid argument: trigger.price price is not an integer
+  //   multiple of a price unit
+  // 진입 가격은 quantizeOrder가 맞춰 주는데 손절가는 아무도 안 맞추고
+  // 있었다. 그래서 진입은 체결되고 손절만 실패했고, 규칙대로 방금 연
+  // 포지션을 되돌렸다 — 안전하긴 하지만 주문을 아예 낼 수 없다.
+  console.log('[Gate — 손절 트리거 가격 단위]');
+
+  const TICK = { quantoMultiplier: 0.0001, orderPriceRound: 0.1 };
+
+  test('호가 단위의 배수로 맞춘다', () => {
+    const s = gateStopSpec('LONG', 62653.906, 63912.1, TICK);
+    eq(s.ok, true, s.reason);
+    eq(s.triggerPrice, 62653.9);
+    // 소수 꼬리가 남으면 거래소가 또 거부한다
+    eq(String(s.triggerPrice).length <= 9, true, `꼬리가 남았다: ${s.triggerPrice}`);
+  });
+
+  // **반올림하지 않는다.** 진입 쪽으로 당기면 손절이 한 틱 일찍 터진다 —
+  // 그건 사용자가 정하지 않은 손절이다. 멀어지는 쪽이 낫다.
+  test('LONG은 내리고 SHORT은 올린다 — 진입에서 멀어지는 쪽', () => {
+    eq(gateStopSpec('LONG', 62653.98, 63912.1, TICK).triggerPrice, 62653.9);
+    eq(gateStopSpec('SHORT', 65170.02, 63912.1, TICK).triggerPrice, 65170.1);
+  });
+
+  test('이미 격자에 맞는 값은 한 틱도 안 움직인다', () => {
+    eq(gateStopSpec('LONG', 62653.9, 63912.1, TICK).triggerPrice, 62653.9);
+    eq(gateStopSpec('SHORT', 65170.1, 63912.1, TICK).triggerPrice, 65170.1);
+  });
+
+  test('바뀌었으면 바뀌었다고 적는다', () => {
+    assert(gateStopSpec('LONG', 62653.906, 63912.1, TICK).note.includes('62653.9'),
+      '조용히 바꿨다');
+    eq(gateStopSpec('LONG', 62653.9, 63912.1, TICK).note, '', '안 바뀐 걸 바뀌었다고 한다');
+  });
+
+  test('규격을 모르면 원래 값을 그대로 쓴다 — 지어낸 격자로 옮기지 않는다', () => {
+    eq(gateStopSpec('LONG', 62653.906, 63912.1, null).triggerPrice, 62653.906);
+    eq(gateStopSpec('LONG', 62653.906, 63912.1).triggerPrice, 62653.906);
+  });
+
+  test('맞추고 나서도 방향 검사는 그대로 한다', () => {
+    // LONG 손절이 진입가 위 → 즉시 발동
+    eq(gateStopSpec('LONG', 64000.06, 63912.1, TICK).ok, false);
+  });
+
+  test('거부해도 맞춘 값을 함께 돌려준다 — 호출자가 두 번 계산하지 않게', () => {
+    const s = gateStopSpec('LONG', 64000.06, 63912.1, TICK);
+    eq(s.ok, false);
+    eq(s.triggerPrice, 64000);
+  });
+
+  test('손절가가 없으면 트리거 가격도 없다', () => {
+    eq(gateStopSpec('LONG', null, 63912.1, TICK).triggerPrice, null);
+  });
 }
