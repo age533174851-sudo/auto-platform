@@ -337,7 +337,12 @@ export async function POST(req: NextRequest) {
       liquidationPrice: risk?.liquidationPrice ?? null,
       side: String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
       margin: marginInput,
-    }, { market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto });
+    }, {
+      market: 'USDM', intent: isExit ? 'EXIT' : 'ENTRY', aiVeto: !!limits.aiVeto,
+      // 손절 없이 진입하겠다는 확인을 받았으면 그 항목은 막지 않는다.
+      // 청산 거리 검사는 그대로 돈다 — 손절이 없을수록 그 숫자가 더 중요하다.
+      noStopAcknowledged: body.acknowledgeNoStop === 'NO_STOP_UNDERSTOOD',
+    });
 
     preflightPassed = checklist.passed;
     preflightTotal = checklist.total;
@@ -440,6 +445,17 @@ export async function POST(req: NextRequest) {
     }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 손절 없이 진입하겠다는 **명시적 확인** ──
+  //
+  // 이 경로는 사람이 화면을 보며 누르는 자리다. 자동매매(아무도 안 보는
+  // 시간에 크론이 내는 것)와 같은 규칙을 걸면, 사용자는 자기 계좌에서
+  // 자기가 정한 방식으로 거래할 수 없다.
+  //
+  // 다만 **기본은 여전히 막는 쪽**이다. 화면이 위험을 적어 보여주고
+  // 확인을 받은 뒤에만 이 값을 보낸다 — 실수로 손절 칸을 비운 것과
+  // 일부러 안 거는 것을 구분할 방법이 이것뿐이다.
+  const noStopAck = body.acknowledgeNoStop === 'NO_STOP_UNDERSTOOD';
+
   const built = buildManualPlan({
     symbol, side: String(side).toUpperCase() as 'BUY' | 'SELL',
     quantity: orderQty,
@@ -448,6 +464,7 @@ export async function POST(req: NextRequest) {
     liquidationPrice: preflightRisk?.liquidationPrice ?? null,
     stopPrice: preflightStop,
     refPrice: preflightRef,
+    allowNoStop: noStopAck,
   });
 
   if (!built.plan.approved) {
@@ -480,6 +497,12 @@ export async function POST(req: NextRequest) {
     // 여기는 truthy 검사라 이 칸이 비면 실전으로 떨어진다 — 모르는 값이
     // 실제 돈 쪽으로 기울면 안 된다. 위 quantize도 이미 `!== false`를 쓴다.
     mode: conn.is_testnet !== false ? 'TESTNET' : 'LIVE',
+    // **사람이 누른 주문이다.** 손절 부착이 실패해도 방금 연 포지션을
+    // 되돌리지 않는다 — 되돌리면 사용자가 의도한 포지션이 수수료만 남기고
+    // 사라진다. 대신 '보호되지 않은 포지션'이라고 크게 알린다.
+    // 자동매매는 이 값을 넘기지 않으므로 지금까지처럼 REQUIRED다.
+    source: 'MANUAL',
+    protectionPolicy: built.noStop ? 'NONE' : 'OPTIONAL',
     plan: built.plan,
     orderType: type === 'LIMIT' ? 'LIMIT' : 'MARKET',
     // **정규화한 가격을 보낸다.**
@@ -519,6 +542,10 @@ export async function POST(req: NextRequest) {
     filledQty: exec.filledQty,
     avgPrice: exec.avgPrice,
     slOrderId: exec.slOrderId,
+    // 손절이 실제로 걸렸는가. 화면이 메시지 문자열을 읽지 않고도
+    // '보호되지 않은 포지션'을 붉게 그릴 수 있어야 한다.
+    unprotected: exec.unprotected ?? (built.noStop ? true : undefined),
+    noStop: built.noStop ?? false,
     duplicate: exec.duplicate,
     message: exec.message,
     // 수량을 조용히 바꾸지 않는다 — 바뀌었으면 화면이 그대로 보여준다.

@@ -39,8 +39,16 @@ export interface ManualOrderInput {
   reduceOnly?: boolean;
   /** 거래소가 알려준 청산가. 없으면 0 (executeOrder의 손절 검사가 건너뛴다) */
   liquidationPrice?: number | null;
-  /** 손절가. 진입인데 없으면 거부한다 */
+  /** 손절가. 진입인데 없으면 거부한다 — allowNoStop을 켜지 않는 한 */
   stopPrice?: number | null;
+  /**
+   * 손절 없는 진입을 허용하는가.
+   *
+   * **기본은 false다.** 화면이 "손절 없이 진입하는 위험을 이해했습니다"를
+   * 받은 뒤에만 켠다. 자동매매는 절대 켜지 않는다 — 아무도 안 보는 시간에
+   * 손절 없는 포지션이 열리면 그건 계좌 전체를 건 것이다.
+   */
+  allowNoStop?: boolean;
   /** 기준가 (지정가면 그 값, 아니면 마크가). 명목가 계산에 쓴다 */
   refPrice?: number | null;
 }
@@ -49,6 +57,8 @@ export interface ManualPlanResult {
   plan: PositionPlan;
   /** 거부 사유. plan.approved가 false일 때만 채워진다 */
   reason: string;
+  /** 손절 없이 나가는가. 화면·기록이 이걸 그대로 적어야 한다 */
+  noStop?: boolean;
 }
 
 /** 최대 배율. 거래소가 더 높게 허용해도 이 경로에서는 막는다 */
@@ -62,6 +72,7 @@ export const MANUAL_MAX_LEVERAGE = 100;
  * 반드시 걸러낸다.
  */
 export function buildManualPlan(input: ManualOrderInput): ManualPlanResult {
+  const inp = input;
   const {
     symbol, side, quantity, leverage, reduceOnly,
     liquidationPrice, stopPrice, refPrice,
@@ -141,7 +152,29 @@ export function buildManualPlan(input: ManualOrderInput): ManualPlanResult {
   // 따로 건다). 수동 진입에 그 관용을 그대로 두면, 손절 없는 포지션이 이
   // 경로로만 열린다 — 그리고 그게 가장 흔한 계좌 소멸 경로다.
   if (stopPrice == null || !Number.isFinite(stopPrice) || stopPrice <= 0) {
-    return deny('손절가가 없습니다. 손절 없는 진입은 이 경로에서 허용하지 않습니다');
+    // ── 손절 없는 진입을 **사람에게는** 허용한다 ──
+    //
+    // 지금까지 무조건 막았다. 그런데 이 경로는 사람이 화면을 보며 누르는
+    // 자리다. 자동매매(아무도 안 보는 새벽에 크론이 내는 것)와 같은 규칙을
+    // 걸면, 사용자는 자기 계좌에서 자기가 정한 방식으로 거래할 수 없다.
+    //
+    // **다만 기본값은 여전히 막는 쪽이다.** 호출부가 명시적으로
+    // `allowNoStop`을 켜야 열린다 — 화면이 "손절 없이 진입하는 위험을
+    // 이해했습니다"를 받은 뒤에만 켜게 되어 있고, 그 확인이 없으면
+    // 지금까지와 똑같이 거부된다.
+    if (!inp.allowNoStop) {
+      return deny('손절가가 없습니다. 손절 없는 진입은 이 경로에서 허용하지 않습니다');
+    }
+    return {
+      plan: {
+        ...base, approved: true,
+        // 기록에 남긴다. 나중에 이 거래를 되짚을 때 "손절이 실패한 것"과
+        // "처음부터 안 걸기로 한 것"은 완전히 다른 얘기다.
+        notes: [...base.notes, '손절 없이 진입 — 사용자가 위험을 확인했습니다'],
+      },
+      reason: '손절 없이 진입합니다 — 청산가가 유일한 방어선입니다',
+      noStop: true,
+    };
   }
 
   // 손절 방향. executeOrder도 같은 검사를 하지만 거기는 청산가가 0이면
