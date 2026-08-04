@@ -21,7 +21,7 @@
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autotradeHealth } from '@/lib/engine/autotradeHealth';
-import { stopPctForLeverage } from '@/lib/engine/leverageMath';
+import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation, riskMarginVerdict } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -46,6 +46,7 @@ export default function AutotradeControl() {
   // 점검 결과. **주문을 내지 않고** 진짜 관문을 끝까지 돌린 결과다.
   const [check, setCheck] = useState<any>(null);
   const [checking, setChecking] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [symbol, setSymbol] = useState('BTCUSDT');
@@ -115,6 +116,37 @@ export default function AutotradeControl() {
     tick();
     return () => { alive = false; clearInterval(t); };
   }, [ticking, auth, load]);
+
+  /**
+   * 미확정 주문을 거래소와 대조해 확정한다.
+   *
+   * **왜 이 화면에 있어야 하나**
+   * 결과를 모르는 주문이 남아 있으면 신규 진입이 막힌다. 그건 맞는
+   * 동작이다 — 나갔는지 모르는 주문 위에 또 얹으면 두 배로 들어간다.
+   *
+   * 문제는 이 화면이 "아래 '미확정 주문 확정' 버튼을 눌러..."라고
+   * 안내하면서 **그 버튼을 여기 두지 않았다**는 것이다. 버튼은 매매
+   * 화면에만 있었다. 막힌 자리에서 푸는 방법이 없으면, 안내는 안내가
+   * 아니라 막다른 길이다.
+   */
+  const reconcile = async () => {
+    if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 고르세요' }); return; }
+    setReconciling(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/orders/reconcile?connectionId=${encodeURIComponent(connId)}`,
+        { headers: { Authorization: auth } });
+      const j = await r.json();
+      // 몇 건을 어떻게 했는지 그대로 보여준다. 모르면 다시 눌러야 하는지
+      // 알 수 없고, "확정했다"만 뜨면 아직 남은 것을 놓친다.
+      setMsg({ ok: !!j?.ok, text: j?.ok
+        ? `대조 완료 — ${j?.resolved ?? 0}건 확정`
+          + (j?.stillUnknown ? ` · ${j.stillUnknown}건은 거래소에도 없어 아직 모름` : '')
+        : errorTextOf(j, `대조 실패 (${r.status})`) });
+      if (j?.ok) { load(); setCheck(null); }
+    } catch (e: any) {
+      setMsg({ ok: false, text: `대조 요청이 응답하지 않았습니다 (${e?.message || e})` });
+    } finally { setReconciling(false); }
+  };
 
   /**
    * **지금 눌러서 내일을 확인한다.**
@@ -199,6 +231,9 @@ export default function AutotradeControl() {
   const box: React.CSSProperties = {
     background: T.card, border: `1px solid ${T.border}`,
     borderRadius: 12, padding: 14, marginBottom: 12,
+    // 안쪽에서 무엇이 넘치든 카드가 화면을 밀어내지는 않게 한다.
+    // 넘치는 것을 고치는 것이 먼저고, 이건 마지막 방어선이다.
+    minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere',
   };
 
   const schedules: any[] = Array.isArray(data?.schedules) ? data.schedules : [];
@@ -359,8 +394,21 @@ export default function AutotradeControl() {
         </div>
 
         {/* 크기와 배율 — 10슬롯 방식이면 위험 10% · 상한 100배 */}
-        <div style={{ display: 'flex', gap: 6 }}>
-          <div style={{ flex: 1 }}>
+        {/* ── 왜 grid이고 왜 auto-fit인가 ──
+            여기가 `display:flex` + `flex:1`이었다. flex 아이템의 기본
+            min-width는 auto라서 **input의 기본 폭 아래로는 안 줄어든다.**
+            네 칸이면 최소 폭이 600px쯤 되고, 폰(360px)에서는 이 줄 하나가
+            카드 전체를 화면 밖으로 밀어낸다 — 그래서 위아래 모든 글자가
+            오른쪽에서 잘렸다. 한 줄이 넘치면 카드가 통째로 넘친다.
+
+            minmax(112px, 1fr)이면 좁은 화면에서 두 칸씩 두 줄로 접히고
+            넓은 화면에서는 네 칸으로 편다. 미디어 쿼리 없이 된다. */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(112px, 1fr))',
+          gap: 6,
+        }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>1회 위험 (%)</div>
             <input value={riskPct} inputMode="decimal"
               onChange={e => setRiskPct(e.target.value.replace(/[^0-9.]/g, ''))}
@@ -369,7 +417,7 @@ export default function AutotradeControl() {
                 borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ minWidth: 0 }}>
             {/* **배율을 실제로 결정하는 값.**
                 배율 = 명목가 ÷ 증거금 예산이다. 이 칸이 없던 동안 예산이
                 '가용 전액'이라 배율이 낮게 역산됐다 — 상한에 100을 적어도
@@ -383,7 +431,7 @@ export default function AutotradeControl() {
                 borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>배율 상한 (배)</div>
             <input value={levCap} inputMode="numeric"
               onChange={e => setLevCap(e.target.value.replace(/[^0-9]/g, ''))}
@@ -393,7 +441,7 @@ export default function AutotradeControl() {
                 color: Number(levCap) >= 50 ? T.ylw : T.txt, fontSize: 12, outline: 'none',
               }}/>
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>간격 (분)</div>
             <input value={intervalMin} inputMode="numeric"
               onChange={e => setIntervalMin(e.target.value.replace(/[^0-9]/g, ''))}
@@ -404,6 +452,26 @@ export default function AutotradeControl() {
           </div>
         </div>
 
+        {/* ── 위험% 대 증거금% ──
+            손절 거리를 아무리 조절해도 안 되는 조합이 있다. 손절 손실이
+            증거금 전액이면 손절 자리가 곧 청산 자리이고, 유지증거금만큼
+            청산이 항상 먼저다. 고칠 곳은 손절이 아니라 이 비율이다. */}
+        {(() => {
+          const v = riskMarginVerdict(Number(riskPct), Number(marginPct));
+          if (!v) return null;
+          return (
+            <div style={{
+              background: A(v.ok ? T.grn : T.red, '12'),
+              border: `1px solid ${A(v.ok ? T.grn : T.red, '40')}`,
+              borderRadius: 8, padding: '9px 10px',
+              color: v.ok ? T.grn : T.red, fontSize: 10.5, lineHeight: 1.65,
+            }}>
+              {v.message.split('**').map((part, i) =>
+                i % 2 === 1 ? <b key={i}>{part}</b> : <span key={i}>{part}</span>)}
+            </div>
+          );
+        })()}
+
         {/* **간격을 짧게 잡아도 실행기가 없으면 그 간격으로 안 돈다.**
             이걸 안 적으면 '5분으로 해놨는데 왜 안 돌지'가 된다. */}
         <div style={{
@@ -412,11 +480,17 @@ export default function AutotradeControl() {
           borderRadius: 8, padding: '9px 10px',
           color: ticking ? T.grn : T.ylw, fontSize: 10.5, lineHeight: 1.6,
         }}>
+          {/* **폰을 닫아도 돈다.** 예약은 DB에 있고, 서버 쪽 실행기가
+              15분마다 물어본다(GitHub Actions: autotrade-tick). 실제 진입
+              간격은 아래 '간격(분)'이 정한다 — 15분마다 물어봐도 간격이
+              안 됐으면 건너뛴다. 배포해도, 화면을 닫아도 안 꺼진다.
+              끄는 방법은 이 화면의 스위치뿐이다. */}
           {ticking
-            ? <>이 화면이 열려 있는 동안 <b>{intervalMin || '?'}분</b> 간격으로 진입을 봅니다.
-                <b> 화면을 닫으면 멈추고</b>, 그때부터는 하루 1회 크론만 남습니다.</>
-            : <>지금은 <b>하루 1회 크론</b>만 있습니다 (한국 아침 8시).
-                아래 스위치를 켜면 이 화면이 열려 있는 동안 자주 봅니다.</>}
+            ? <>서버가 <b>15분마다</b> 확인하고, 실제 진입은 <b>{intervalMin || '?'}분</b> 간격으로 봅니다.
+                이 화면은 추가로 더 자주 볼 뿐이라 <b>닫아도 자동매매는 계속 돕니다.</b></>
+            : <>서버가 <b>15분마다</b> 확인합니다 (실제 진입 간격은 <b>{intervalMin || '?'}분</b>).
+                <b> 폰을 닫아도, 배포를 해도 계속 돕니다</b> — 예약은 서버에 저장돼 있습니다.
+                아래 스위치는 이 화면이 열려 있는 동안만 더 자주 보는 용도입니다.</>}
         </div>
 
         <button onClick={() => setTicking(v => !v)} style={{
@@ -434,6 +508,17 @@ export default function AutotradeControl() {
           background: A(T.ylw, '14'), color: T.ylw, border: `1px solid ${A(T.ylw, '40')}`,
           fontSize: 11.5, fontWeight: 800,
         }}>{checking ? '점검 중…' : '지금 점검하기 (주문은 안 냅니다)'}</button>
+
+        {/* ── 미확정 주문 확정 ──
+            막힌 자리에서 푸는 방법이 있어야 한다. 예전에는 이 화면이
+            "아래 버튼을 눌러"라고 안내하면서 그 버튼을 안 뒀다. */}
+        <button onClick={reconcile} disabled={reconciling || !connId} style={{
+          minHeight: 34, borderRadius: 8,
+          cursor: reconciling || !connId ? 'default' : 'pointer',
+          background: 'transparent', color: T.muted,
+          border: `1px solid ${T.border}`, fontSize: 11, fontWeight: 700,
+          opacity: reconciling ? 0.6 : 1,
+        }}>{reconciling ? '거래소와 대조 중…' : '미확정 주문 확정 (거래소와 대조)'}</button>
 
         {check?.checklist && (
           <div style={{
@@ -459,6 +544,45 @@ export default function AutotradeControl() {
                 </div>
               ))}
             </div>
+            {/* ── 무엇이 어긋났는가 ──
+                "불일치 10건 (심각 1 · 경고 9)"만 적으면 고칠 수가 없다.
+                개수는 상태가 아니라 개수일 뿐이다. 심각한 것부터 적는다. */}
+            {Array.isArray(check.mismatches) && check.mismatches.length > 0 && (
+              <div style={{ marginTop: 8, borderTop: `1px solid ${T.border}`, paddingTop: 7 }}>
+                <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 5 }}>
+                  앱과 거래소가 어긋난 곳 ({check.mismatches.length}건)
+                </div>
+                {[...check.mismatches]
+                  .sort((a: any, b: any) => (b.severity === 'critical' ? 1 : 0) - (a.severity === 'critical' ? 1 : 0))
+                  .slice(0, 12)
+                  .map((m: any, i: number) => (
+                    <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'baseline', padding: '3px 0' }}>
+                      <span style={{ fontSize: 10 }}>
+                        {m.severity === 'critical' ? '🛑' : m.severity === 'warn' ? '⚠️' : 'ℹ️'}
+                      </span>
+                      <span style={{ color: T.txt, fontSize: 10.5, fontWeight: 700, minWidth: 66 }}>
+                        {m.symbol || '—'}
+                      </span>
+                      <span style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.5, flex: 1 }}>
+                        {m.detail}
+                        {(m.app != null || m.exchange != null) && (
+                          <> <span style={{ opacity: 0.8 }}>(앱 {String(m.app ?? '—')} · 거래소 {String(m.exchange ?? '—')})</span></>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                {check.mismatches.length > 12 && (
+                  <div style={{ color: T.muted, fontSize: 10, marginTop: 3 }}>
+                    …외 {check.mismatches.length - 12}건
+                  </div>
+                )}
+                <div style={{ color: T.ylw, fontSize: 10, marginTop: 5, lineHeight: 1.55 }}>
+                  → 대부분 위 [미확정 주문 확정]으로 풀립니다. 그래도 남으면 거래소에
+                  실제로 열려 있는 포지션·주문을 정리하거나, 매매 화면에서 직접 닫으세요.
+                </div>
+              </div>
+            )}
+
             {check.syntheticPlan && (
               <div style={{ color: T.muted, fontSize: 10, marginTop: 6, lineHeight: 1.55 }}>
                 지금은 진입 신호가 없어서, 계획이 필요한 항목은 <b style={{ color: T.txt }}>지금 설정으로 만든 가상 계획</b>으로 확인했습니다.
@@ -478,10 +602,22 @@ export default function AutotradeControl() {
           {(() => {
             const st = stopPctForLeverage(Number(levCap), Number(riskPct), Number(marginPct));
             if (st == null) return null;
+            // **청산이 손절보다 먼저 오는가.** 이걸 안 보면 손절을 걸어
+            // 두고도 청산당한다 — 이 계좌에서 실제로 두 번 일어났다.
+            const liq = liquidationDistancePct(Number(levCap));
+            const safeLev = maxLeverageBeforeLiquidation(st);
             return (
               <> {levCap}배가 실제로 나오려면 (1회 위험 {riskPct}% · 1회 증거금 {marginPct}%에서)
                 손절이 약 <b style={{ color: T.ylw }}>{st.toFixed(2)}%</b> 안쪽이어야 합니다.
-                {st < 0.5 && ' 그건 BTC 노이즈 수준이라 진입 직후 손절될 수 있습니다.'}</>
+                {liq != null && (
+                  <><br/>그런데 {levCap}배의 <b>청산은 약 {liq.toFixed(2)}%</b>에 옵니다
+                    (유지증거금 0.4% 기준).{' '}
+                    {st >= liq
+                      ? <b style={{ color: T.red }}>손절 {st.toFixed(2)}%는 청산 뒤에 있어 작동하지 못합니다 —
+                          증거금 전액이 사라집니다. 이 손절이면 {safeLev != null ? Math.floor(safeLev) : '?'}배까지가 안전합니다.</b>
+                      : <span style={{ color: T.grn }}>손절이 청산보다 먼저 닿습니다 — 이 조합은 안전합니다.</span>}
+                  </>
+                )}</>
             );
           })()}
         </div>
@@ -494,7 +630,7 @@ export default function AutotradeControl() {
             그래서 고르게 하되 **기본은 테스트넷**이고, 실전은 고른 연결이
             실계좌일 때만 켤 수 있다. 서버도 같은 검사를 한다(모드와 연결이
             어긋나면 거부) — 화면만 막으면 화면을 우회하는 순간 뚫린다. */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
           {([[false, '테스트넷'], [true, '실전']] as const).map(([v, label]) => {
             const on = live === v;
             const tone = v ? T.red : T.acl;

@@ -401,7 +401,10 @@ export async function POST(req: NextRequest) {
 
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
     const gate = await assertStateConsistent(sb, userId, useTestnet, body.connectionId || null);
-    if (!gate.allowed) {
+    // 점검일 때는 여기서 끊지 않는다. **무엇이 어긋났는지**까지 보여줘야
+    // 고칠 수 있고, 상태 불일치 말고 다른 관문도 같이 봐야 한다.
+    // 아래 체크리스트가 이 판정을 그대로 받아 항목으로 만든다.
+    if (!gate.allowed && !checkOnly) {
       await releaseReservation(sb, result.ladder?.reservationId);
       return NextResponse.json({
         ...base, executed: false,
@@ -596,8 +599,14 @@ export async function POST(req: NextRequest) {
       regime: { status: regimeFacts.verdict.status, reason: regimeFacts.verdict.reason },
       subAccount: subAccountFact,
       clock: serverMs != null ? { localMs, serverMs } : null,
-      // 여기까지 왔다는 것은 assertStateConsistent를 통과했다는 뜻이다
-      reconcile: { reachable: true, blockNewOrders: false, summary: gate.verdict?.summary || '일치' },
+      // 점검 모드에서는 통과 못 한 상태로도 여기 오므로 **실제 판정을**
+      // 넘긴다. 예전처럼 true/false를 박아 두면 점검이 "일치"라고 적고
+      // 정작 주문은 막힌다 — 미리보기가 거짓말을 하는 것이다.
+      reconcile: {
+        reachable: gate.gather.reachable,
+        blockNewOrders: !gate.allowed,
+        summary: gate.verdict?.summary || gate.reason || '일치',
+      },
       unresolvedOrderCount: gate.gather.unresolvedOrders.length,
       marginType: risk?.marginType ?? null,
       leverage: risk?.leverage != null
@@ -632,6 +641,8 @@ export async function POST(req: NextRequest) {
         ...base, executed: false, checkOnly: true,
         approvedByPipeline: result.approved,
         syntheticPlan: usedSyntheticPlan,
+        // **몇 건인지가 아니라 무엇인지.** 개수만 주면 고칠 수가 없다.
+        mismatches: gate.verdict?.mismatches ?? [],
         error: checklist.allowed ? null : checklist.summary,
         checklist: {
           allowed: checklist.allowed,
