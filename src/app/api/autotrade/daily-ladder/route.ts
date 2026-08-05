@@ -38,25 +38,31 @@ interface DailyBars {
   highs: number[]; lows: number[]; closes: number[]; volumes: number[];
 }
 
-/** Binance 일봉. 변동성 기준선(40일 중앙값)에 충분한 길이를 받는다. */
-async function fetchDailyBars(symbol: string, limit = 120): Promise<DailyBars | null> {
-  try {
-    const r = await fetch(
-      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=${limit}`,
-      { signal: AbortSignal.timeout(10_000) },
-    );
-    if (!r.ok) return null;
-    const data = await r.json();
-    if (!Array.isArray(data) || data.length === 0) return null;
-
-    const highs: number[] = [], lows: number[] = [], closes: number[] = [], volumes: number[] = [];
-    for (const k of data) {
-      if (!Array.isArray(k) || k.length < 6) continue;
-      const h = parseFloat(k[2]), l = parseFloat(k[3]), c = parseFloat(k[4]), v = parseFloat(k[5]);
-      if ([h, l, c].every(Number.isFinite)) { highs.push(h); lows.push(l); closes.push(c); volumes.push(Number.isFinite(v) ? v : 0); }
-    }
-    return closes.length ? { highs, lows, closes, volumes } : null;
-  } catch { return null; }
+/**
+ * 일봉. **주문이 나갈 시장에서 읽는다.**
+ *
+ * 예전에는 `api.binance.com/api/v3`(바이낸스 **현물**)에서 읽었다. 그런데
+ * 주문은 바이낸스 **선물**이나 **Gate 선물**로 나간다 — 현물 가격으로
+ * 판단하고 선물 호가로 체결하고 있었다.
+ *
+ * 현물과 선물은 다른 가격이다. 베이시스가 0.05~0.5%씩 벌어지는데, 손절
+ * 폭이 1%인 전략에서 그건 **손절 거리의 절반**이다. 그리고 진입가·손절가·
+ * 청산 거리가 전부 마지막 종가에서 나오므로 시세가 틀리면 그 뒤가 전부
+ * 틀린다. 거래소가 다르면 더 나쁘다 — 일어나지 않은 신호로 주문을 낸다.
+ *
+ * 미완성 봉도 여기서 잘라 낸다. 진행 중인 봉의 '종가'는 종가가 아니라
+ * 지금 가격이고, 사다리 전략은 그 값으로 손절가를 만든다.
+ */
+async function fetchDailyBars(
+  symbol: string, exchange: 'binance' | 'gate', testnet: boolean, limit = 120,
+): Promise<{ bars: DailyBars | null; source: string; error: string | null }> {
+  const { fetchVenueBars } = await import('@/lib/markets/venueBars');
+  const r = await fetchVenueBars({ exchange, symbol, interval: '1d', limit, testnet });
+  if (!r.bars) return { bars: null, source: r.source, error: r.error };
+  return {
+    bars: { highs: r.bars.highs, lows: r.bars.lows, closes: r.bars.closes, volumes: r.bars.volumes },
+    source: r.source, error: null,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -147,9 +153,12 @@ export async function POST(req: NextRequest) {
   // 연결의 is_testnet이 바뀌었거나 예전에 저장된 줄이면 그 검사를
   // 통과한 적이 없다.** 주문 직전에 실물로 다시 본다.
   let connIsLive: boolean | null = null;
+  // 시세를 **어느 거래소에서** 읽을지도 여기서 정해진다. 예전에는 시세가
+  // 바이낸스 현물로 고정이라 이 값이 필요 없었다 — 그게 문제였다.
+  let connExchange: 'binance' | 'gate' = 'binance';
   if (body.connectionId) {
     const { data: c, error: cErr } = await sb.from('exchange_connections')
-      .select('is_testnet').eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
+      .select('is_testnet, exchange_id').eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
     if (cErr) {
       return NextResponse.json({
         ok: false, error: 'connection_lookup_failed',
@@ -163,6 +172,8 @@ export async function POST(req: NextRequest) {
       }, { status: 404 });
     }
     connIsLive = (c as any).is_testnet === false;
+    connExchange = String((c as any).exchange_id || '').toLowerCase().includes('gate')
+      ? 'gate' : 'binance';
 
     const modeIsLive = capability(opMode).needsLiveKey;
     if (connIsLive !== modeIsLive) {
@@ -178,9 +189,20 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 시장 데이터 ──
-  const bars = await fetchDailyBars(symbol);
+  //
+  // **주문이 나갈 시장에서 읽는다.** 연결이 없으면(점검 호출 등) 바이낸스
+  // 선물을 기본으로 쓴다 — 그래도 현물은 아니다.
+  const barsRes = await fetchDailyBars(symbol, connExchange, connIsLive === true ? false : useTestnet);
+  const bars = barsRes.bars;
   if (!bars) {
-    return NextResponse.json({ ok: false, error: `${symbol} 일봉을 가져오지 못했습니다` }, { status: 502 });
+    return NextResponse.json({
+      ok: false,
+      error: `${symbol} 일봉을 가져오지 못했습니다`,
+      // 왜 못 읽었는지·어디서 읽으려 했는지를 남긴다. 이게 없으면
+      // 화면에는 '못 가져왔습니다'만 뜨고 원인은 아무도 모른다.
+      barsSource: barsRes.source,
+      barsError: barsRes.error,
+    }, { status: 502 });
   }
 
   // 파생 지표는 선택 — 없으면 Expansion 점수에서 해당 항목만 빠진다

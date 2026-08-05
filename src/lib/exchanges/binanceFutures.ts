@@ -12,6 +12,14 @@ const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
 function base(testnet: boolean): string {
   return testnet ? TESTNET_FUTURES_BASE : FUTURES_BASE;
 }
+
+/**
+ * 선물 호스트. **호스트를 두 벌로 적지 않는다.**
+ *
+ * 봉을 읽는 쪽(venueBars)이 자기 상수를 따로 들고 있으면, 데모 주소를
+ * 한쪽만 고치는 순간 시세와 주문이 다른 서버를 보게 된다.
+ */
+export function futuresBase(testnet: boolean): string { return base(testnet); }
 function sign(query: string, secret: string): string {
   return createHmac('sha256', secret).update(query).digest('hex');
 }
