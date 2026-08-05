@@ -757,7 +757,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // **규격을 못 읽으면 주문하지 않는다.** 배수를 1로 가정하면 이번엔 반대로
     // 10000배가 나간다.
     const gspec = await gf.getGateContractSpec(contract, testnet);
-    const sized = gp.gateSizeFromBase(plan.quantity, plan.side, gspec);
+    // ── **부호는 주문 방향을 따른다. 포지션 방향이 아니다.** ──
+    //
+    // `plan.side`는 '무슨 포지션을 다루는가'다. 진입에서는 그게 곧 주문
+    // 방향이지만, **청산에서는 반대**다 — 롱을 닫는 주문은 SELL이다.
+    //
+    // 그런데 여기서 plan.side를 그대로 썼다. 그래서 롱 청산이 **양수
+    // 계약 수**로 나갔고, Gate는 reduce_only 주문이 포지션을 늘릴 수
+    // 없으므로 거부했다. 화면에서는 눌러도 아무 일이 안 일어나는 것처럼
+    // 보인다 — 실제로 그 상태였다.
+    //
+    // 바이낸스 분기는 위에서 이미 `side`(뒤집힌 값)를 쓴다. Gate만
+    // 빠져 있었다. 같은 실수를 두 번 하지 않으려면 여기서도 같은 값을
+    // 봐야 한다: side === 'BUY'면 양수, 'SELL'이면 음수.
+    const orderDir: 'LONG' | 'SHORT' = side === 'BUY' ? 'LONG' : 'SHORT';
+    const sized = gp.gateSizeFromBase(plan.quantity, orderDir, gspec);
     if (!sized.ok) {
       await update({ status: 'REJECTED', error_message: sized.reason });
       return { ok: false, status: 'REJECTED', clientOrderId, message: sized.reason };

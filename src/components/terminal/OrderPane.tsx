@@ -368,6 +368,26 @@ export const OrderFormPanel = memo(function OrderFormPanel({
    * 닫을지 다시 적어야 하고, 0.976을 0.97로 잘못 적으면 일부만 닫힌다.
    */
   const [posAmt, setPosAmt] = useState<number | null>(null);
+  /**
+   * 지금 들고 있는 방향. 없으면 null.
+   *
+   * 버튼 라벨이 이걸 본다 — 롱을 들고 있는데 '숏 진입'이라고만 적혀 있으면
+   * 사람은 그걸 파는 버튼으로 읽는다.
+   */
+  const holding: 'LONG' | 'SHORT' | null =
+    posAmt == null || !(Math.abs(posAmt) > 0) ? null : (posAmt > 0 ? 'LONG' : 'SHORT');
+  /**
+   * 화면에 적을 수량. **부동소수 꼬리를 보여주지 않는다.**
+   *
+   * 거래소가 0.976을 주면 자바스크립트 안에서 0.9760000000000001이 되고,
+   * 그대로 그리면 사용자는 그게 진짜 보유량이라고 읽는다. 그리고 그 숫자를
+   * 다른 곳에 옮겨 적으면 거래소가 -1111로 거부한다.
+   *
+   * 자릿수를 **만들어내지는 않는다** — 8자리에서 잘라 꼬리만 지우고,
+   * 실제로 다른 값이 되지는 않는다. 보내는 수량은 서버가 거래소 규격에
+   * 맞춰 다시 자른다(quantizeOrder).
+   */
+  const showQty = (n: number) => String(Number(n.toFixed(8)));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // **왜 막혔는지**를 따로 들고 있는다.
@@ -1068,8 +1088,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               // 몇 배가 열린다.
               if (close && posAmt != null && Math.abs(posAmt) > 0) {
                 const base = Math.abs(posAmt);
-                setQty(String(Number((unit === 'BASE' ? base : base * (unitPx || 0))
-                  .toFixed(unit === 'BASE' ? 6 : 2))));
+                setQty(unit === 'BASE'
+                  ? showQty(base)
+                  : String(Number((base * (unitPx || 0)).toFixed(2))));
               } else {
                 setQty('');
               }
@@ -1184,7 +1205,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           <span style={{ color: C.dim }}>
             보유{' '}
             <b style={{ color: posAmt > 0 ? C.up : C.down }}>
-              {posAmt > 0 ? '롱' : '숏'} {Math.abs(posAmt)}
+              {posAmt > 0 ? '롱' : '숏'} {showQty(Math.abs(posAmt))}
             </b>
           </span>
           {/* 닫으려면 어디를 눌러야 하는지 그 자리에서 알려준다 */}
@@ -1192,8 +1213,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             <button onClick={() => {
               setReduceOnly(true);
               const base = Math.abs(posAmt);
-              setQty(String(Number((unit === 'BASE' ? base : base * (unitPx || 0))
-                .toFixed(unit === 'BASE' ? 6 : 2))));
+              setQty(unit === 'BASE'
+                ? showQty(base)
+                : String(Number((base * (unitPx || 0)).toFixed(2))));
             }} style={{
               padding: '3px 8px', borderRadius: 6, cursor: 'pointer',
               background: C.panel, color: C.text, border: `1px solid ${C.hair}`,
@@ -1632,10 +1654,32 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         paddingTop: 6, marginTop: 'auto',
         background: C.panel, boxShadow: `0 -8px 12px -6px ${C.bg}`,
       }}>
-      <button onClick={() => submit('BUY')} disabled={busy}
-        style={{ ...primaryBtn(C.up, busy), minHeight: dense ? 42 : 46, display: 'flex',
+      {/* ── 버튼이 **무슨 일이 일어나는지** 말한다 ──
+
+          롱을 들고 있는데 빨간 버튼에 그냥 '숏 진입'이라고 적혀 있으면,
+          사람은 그걸 **파는 버튼**으로 읽는다. 실제로는 반대 방향 신규
+          진입이고, 눌리면 포지션이 정리되는 대신 양쪽이 열리거나(헤지)
+          의도보다 큰 반대 포지션이 된다.
+
+          같은 방향이면 '추가'다 — 그것도 '진입'과는 다른 일이다.
+          평균가가 바뀌고 이미 걸어 둔 손절의 의미도 달라진다. */}
+      {/* ── 안 들고 있는 방향의 청산은 누를 수 없다 ──
+          롱만 있는데 '숏 청산'이 눌리면, 그 주문은 닫을 것이 없으므로
+          거래소가 거부하거나 아무 일도 안 일어난다. 사용자는 눌렀는데
+          아무 변화가 없는 화면을 보고 "청산이 안 된다"고 읽는다.
+          **모르면(posAmt null) 막지 않는다** — 조회 실패가 청산을 막으면
+          못 닫는 상황이 된다. 못 여는 것은 불편이고 못 닫는 것은 사고다. */}
+      <button onClick={() => submit('BUY')}
+        disabled={busy || (reduceOnly && holding === 'LONG')}
+        title={reduceOnly && holding === 'LONG' ? '숏 포지션이 없습니다' : undefined}
+        style={{ ...primaryBtn(C.up, busy || (reduceOnly && holding === 'LONG')),
+                 minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
-        <span>{busy && side === 'BUY' ? '전송 중…' : reduceOnly ? '롱 청산' : '롱 진입'}</span>
+        <span>{busy && side === 'BUY' ? '전송 중…'
+          : reduceOnly ? '롱 청산'
+          : holding === 'LONG' ? '롱 추가'
+          : holding === 'SHORT' ? '숏 정리 · 롱 진입'
+          : '롱 진입'}</span>
         <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
           {reduceOnly ? 'Sell' : `Buy · ${leverage}×`}
         </span>
@@ -1644,11 +1688,26 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       <button onClick={() => submit('SELL')} disabled={busy}
         style={{ ...primaryBtn(C.down, busy), minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
-        <span>{busy && side === 'SELL' ? '전송 중…' : reduceOnly ? '숏 청산' : '숏 진입'}</span>
+        <span>{busy && side === 'SELL' ? '전송 중…'
+          : reduceOnly ? '숏 청산'
+          : holding === 'SHORT' ? '숏 추가'
+          : holding === 'LONG' ? '롱 정리 · 숏 진입'
+          : '숏 진입'}</span>
         <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
           {reduceOnly ? 'Buy' : `Sell · ${leverage}×`}
         </span>
       </button>
+
+      {/* 반대 방향을 누르려는 상태면 그 사실을 버튼 바로 아래에 적는다.
+          라벨만으로는 '정리'가 청산인지 반전인지 알 수 없다 — 거래소
+          설정(헤지/원웨이)에 따라 결과가 다르므로 단정하지 않고,
+          **닫으려는 것이면 청산 탭을 쓰라고** 알려 준다. */}
+      {!reduceOnly && holding && (
+        <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.45, textAlign: 'center' }}>
+          {holding === 'LONG' ? '롱' : '숏'} {showQty(Math.abs(posAmt as number))} 보유 중 —{' '}
+          반대 방향 버튼은 <b>닫는 버튼이 아닙니다</b>. 닫으려면 위에서 <b>청산</b>을 고르세요.
+        </div>
+      )}
       </div>
 
       {/* 실자금 여부는 버튼 바로 아래에. 상단 점만으로는 부족하다.
