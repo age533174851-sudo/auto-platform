@@ -17,10 +17,25 @@ export type RejectCode =
   | 'LIQUIDATION_BEFORE_STOP'
   | 'INSUFFICIENT_MARGIN'
   | 'POSITION_TOO_SMALL'
-  | 'EXPANSION_NO_TRADE';
+  | 'EXPANSION_NO_TRADE'
+  | 'ACCOUNT_EQUITY_UNKNOWN';
 
 export interface RiskConfig {
   accountEquity: number;
+  /**
+   * accountEquity를 **거래소에서 실제로 읽었는가.**
+   *
+   * `buildRiskContext`는 잔고 조회가 실패하면 폴백 $10,000으로 계속
+   * 진행했다. 경고는 남지만 주문은 그대로 나간다. 실제 계좌가 100 USDT인데
+   * 10,000으로 계산하면, 위험 1% 설정이 **계좌 전액**을 거는 주문이 된다.
+   *
+   * 0이 아니라 '모른다'다. dailyPnlKnown과 정확히 같은 이유로 갈라 둔다 —
+   * 확인하지 못한 것은 통과가 아니다.
+   *
+   * 안 넘기면(undefined) 예전처럼 동작한다. 백테스트·시뮬레이터는 자기
+   * 자산을 자기가 알고 넘기므로 검사 대상이 아니다.
+   */
+  equityKnown?: boolean;
   availableMargin?: number;
   dailyPnl?: number;
   /**
@@ -117,6 +132,29 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
   const slippagePct = cfg.slippagePct ?? 0.05;
   const minNotional = cfg.minNotional ?? 5;
   const mmr = cfg.maintMarginRate ?? 0.005;
+
+  // ── 0-a) 계좌 자산을 실제로 읽었는가 ──
+  //
+  // **폴백 자산으로 실주문 크기를 계산하지 않는다.**
+  //
+  // buildRiskContext는 잔고 조회가 실패하면 $10,000을 가정하고 계속
+  // 진행했다. 경고 문자열은 남지만 아무도 그것 때문에 멈추지 않는다.
+  // 실제 계좌가 100 USDT일 때 10,000으로 계산하면:
+  //
+  //   위험 1% → 엔진은 100 USDT를 감당 가능하다고 본다
+  //           → 그건 계좌 전액이다
+  //
+  // 포지션 크기가 자산에서 나오므로, 자산이 틀리면 **다른 모든 한도가
+  // 같이 틀린다** — 일일 손실 한도도, 명목가 상한도, 계좌 위험 상한도
+  // 전부 이 숫자의 비율이다. 하나만 틀린 게 아니라 전부 틀린다.
+  //
+  // 못 읽었으면 막는다. 못 여는 것은 불편이고, 가짜 자산으로 여는 것은 사고다.
+  if (cfg.equityKnown === false) {
+    return reject('ACCOUNT_EQUITY_UNKNOWN',
+      '거래소에서 계좌 자산을 확인하지 못했습니다 — 가정한 자산으로 포지션 크기를 '
+      + '정하면 위험 한도가 전부 틀린 값이 됩니다. 연결·API 키를 확인한 뒤 다시 시도하세요',
+      signal.symbol, side, notes);
+  }
 
   // ── 0) 일일 손실 한도 (최우선 차단) ──
   const maxDailyLossPct = cfg.maxDailyLossPct ?? 3;

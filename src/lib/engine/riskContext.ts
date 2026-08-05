@@ -381,6 +381,17 @@ export async function buildRiskContext(
       maxAccountRiskPct: limits.maxAccountRiskPct,
       maxDailyLossPct: limits.maxDailyLossPct,
       maxNotionalPct: limits.maxNotionalPct,
+      // ── 계좌 자산을 실제로 읽었는가 ──
+      //
+      // planPosition이 false면 주문을 거부한다. 폴백 $10,000으로 포지션
+      // 크기를 정하면 **위험 한도가 전부 틀린 값이 된다** — 일일 손실
+      // 한도도, 명목가 상한도, 계좌 위험 상한도 전부 이 숫자의 비율이다.
+      //
+      // **연결이 없으면 막지 않는다.** 모의매매·백테스트는 거래소에 물어볼
+      // 곳이 없고 자기 자산을 자기가 안다. 여기서 같이 막으면 실계좌를
+      // 지키려다 연습 화면을 죽인다 — 확인할 대상이 없는 것과 확인에
+      // 실패한 것은 다르다.
+      equityKnown: opts.connectionId ? source === 'exchange' : true,
       feeRatePct: limits.feeRatePct,
       slippagePct: limits.slippagePct,
     },
