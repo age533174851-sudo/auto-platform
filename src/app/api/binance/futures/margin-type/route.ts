@@ -80,6 +80,10 @@ export async function GET(req: NextRequest) {
     // 못 읽으면 null이다 — 0으로 채우면 '포지션 없음'이 사실이 된다.
     positionAmt: rr.risk?.positionAmt ?? null,
     entryPrice: rr.risk?.entryPrice ?? null,
+    // **거래소가 계산한 실제 청산가.** 화면이 100/배율로 어림잡지 않게.
+    // 못 읽으면 null이다 — 추정치를 실제값 자리에 넣으면 안 된다.
+    liquidationPrice: rr.risk?.liquidationPrice ?? null,
+    markPrice: rr.risk?.markPrice ?? null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 

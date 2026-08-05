@@ -469,4 +469,38 @@ export function runGatePlanTests() {
       assert(r.message.includes('트리거 가격'), r.message);
     }
   });
+
+  // ── 청산은 부호가 뒤집힌다 ──────────────────────────
+  //
+  // **여기서 틀리면 청산 버튼이 아무 일도 안 하는 것처럼 보인다.**
+  //
+  // `plan.side`는 '무슨 포지션을 다루는가'다. 진입에서는 그게 곧 주문
+  // 방향이지만 청산에서는 반대다 — 롱을 닫는 주문은 SELL이다.
+  //
+  // 실행기가 plan.side를 그대로 넘겨서 롱 청산이 **양수 계약 수**로
+  // 나갔다. Gate는 reduce_only 주문이 포지션을 늘릴 수 없으므로 거부한다.
+  // 화면에서는 눌러도 변화가 없는 것처럼 보이고, 사용자는 "청산이 안
+  // 된다"고 읽는다.
+  //
+  // 이 테스트는 변환 함수가 **받은 방향대로** 부호를 정하는지만 못 박는다.
+  // 실행기가 어느 값을 넘기는지는 그쪽 책임이고, 주석으로 규칙을 적어 뒀다.
+  console.log('[Gate — 청산 부호]');
+
+  test('롱을 닫는 주문(SELL 방향)은 음수 계약이다', () => {
+    // 0.976 BTC 롱을 닫는다 → SHORT 방향 → 음수
+    eq(gateSizeFromBase(0.976, 'SHORT', BTC).size, -9760);
+  });
+
+  test('숏을 닫는 주문(BUY 방향)은 양수 계약이다', () => {
+    eq(gateSizeFromBase(0.976, 'LONG', BTC).size, 9760);
+  });
+
+  // 같은 수량이면 방향만 다르고 크기는 같아야 한다. 크기가 달라지면
+  // 청산이 부분만 되거나 초과된다.
+  test('방향이 달라도 계약 수는 같다', () => {
+    const a = gateSizeFromBase(0.976, 'LONG', BTC).size;
+    const b = gateSizeFromBase(0.976, 'SHORT', BTC).size;
+    eq(Math.abs(a), Math.abs(b));
+    assert(a > 0 && b < 0, `부호가 갈리지 않았다: ${a} / ${b}`);
+  });
 }
