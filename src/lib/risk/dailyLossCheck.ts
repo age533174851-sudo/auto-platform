@@ -49,7 +49,9 @@ export async function collectDailyLoss(args: {
   env?: (k: string) => string | undefined;
 }): Promise<DailyLossFacts> {
   const now = args.nowMs ?? Date.now();
-  const cfg = readDailyLossConfig(args.env ?? ((k) => process.env[k]));
+  // **연습과 실전의 한도를 다르게 읽는다.** 실전은 예전 그대로다.
+  const { scopeOf } = await import('./limitScope');
+  const cfg = readDailyLossConfig(args.env ?? ((k) => process.env[k]), scopeOf(args.testnet));
   const dayStart = utcDayStart(now);
 
   let todayNetUsd: number | null = null;
@@ -99,7 +101,9 @@ export async function collectPaperDailyLoss(args: {
   env?: (k: string) => string | undefined;
 }): Promise<DailyLossFacts> {
   const now = args.nowMs ?? Date.now();
-  const cfg = readDailyLossConfig(args.env ?? ((k) => process.env[k]));
+  // 모의도 연습이다. 실전 한도로 잠그면 연습을 못 한다.
+  const { scopeOf: scopeOfPaper } = await import('./limitScope');
+  const cfg = readDailyLossConfig(args.env ?? ((k) => process.env[k]), scopeOfPaper(true));
   const dayStart = utcDayStart(now);
 
   let todayNetUsd: number | null = null;

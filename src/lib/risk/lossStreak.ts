@@ -282,6 +282,11 @@ export function nextUtcWeekStart(ms: number): number {
 
 export function readWeeklyLossConfig(
   env: (k: string) => string | undefined,
+  /**
+   * 실전인가 연습인가. 기본은 LIVE — **안 넘기면 예전과 똑같이 동작한다.**
+   * 스코프를 새로 넣으면서 기존 호출부가 조용히 느슨해지면 안 된다.
+   */
+  scope: import('./limitScope').LimitScope = 'LIVE',
 ): { cfg: WeeklyLossConfig; note: string } {
   const notes: string[] = [];
   const num = (k: string, fallback: number | null): number | null => {
@@ -293,19 +298,40 @@ export function readWeeklyLossConfig(
     notes.push(`${k}='${raw}'는 쓸 수 없는 값이라 기본값을 씁니다`);
     return fallback;
   };
+  const { scopedEnv, scopedDefault } = require('./limitScope');
+  const e = scopedEnv(env, scope);
+  const pctDefault = scopedDefault(scope, 'weeklyMaxLossPct', DEFAULT_WEEKLY.maxLossPct);
+  if (scope === 'TESTNET') notes.push('연습 환경 한도');
   return {
     cfg: {
-      maxLossPct: num('WEEKLY_MAX_LOSS_PCT', DEFAULT_WEEKLY.maxLossPct),
-      maxLossUsd: num('WEEKLY_MAX_LOSS_USD', DEFAULT_WEEKLY.maxLossUsd),
+      maxLossPct: numFrom(e, notes, 'WEEKLY_MAX_LOSS_PCT', pctDefault),
+      maxLossUsd: numFrom(e, notes, 'WEEKLY_MAX_LOSS_USD', DEFAULT_WEEKLY.maxLossUsd),
     },
     note: notes.join(' · '),
   };
 }
 
+/** 스코프를 적용한 환경변수 읽기. `num`과 규칙이 같다 */
+function numFrom(
+  env: (k: string) => string | undefined, notes: string[],
+  k: string, fallback: number | null,
+): number | null {
+  const raw = env(k);
+  if (raw == null || String(raw).trim() === '') return fallback;
+  if (/^(off|none|false|0)$/i.test(String(raw).trim())) return null;
+  const v = Number(raw);
+  if (Number.isFinite(v) && v > 0) return v;
+  notes.push(`${k}='${raw}'는 쓸 수 없는 값이라 기본값을 씁니다`);
+  return fallback;
+}
+
 export function readStreakConfig(
   env: (k: string) => string | undefined,
+  scope: import('./limitScope').LimitScope = 'LIVE',
 ): { cfg: StreakConfig; note: string } {
   const notes: string[] = [];
+  const { scopedEnv: sE, scopedDefault: sDefault } = require('./limitScope');
+  const sEnv = sE(env, scope);
   const num = (k: string, fallback: number | null): number | null => {
     const raw = env(k);
     if (raw == null || String(raw).trim() === '') return fallback;
@@ -317,8 +343,9 @@ export function readStreakConfig(
   };
   return {
     cfg: {
-      maxConsecutiveLosses: num('MAX_CONSECUTIVE_LOSSES', DEFAULT_STREAK.maxConsecutiveLosses),
-      lockHours: num('LOSS_STREAK_LOCK_HOURS', DEFAULT_STREAK.lockHours),
+      maxConsecutiveLosses: numFrom(sEnv, notes, 'MAX_CONSECUTIVE_LOSSES',
+        sDefault(scope, 'maxConsecutiveLosses', DEFAULT_STREAK.maxConsecutiveLosses)),
+      lockHours: numFrom(sEnv, notes, 'LOSS_STREAK_LOCK_HOURS', DEFAULT_STREAK.lockHours),
     },
     note: notes.join(' · '),
   };

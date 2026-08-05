@@ -59,8 +59,13 @@ export async function collectStreakLimits(args: {
 }): Promise<StreakFacts> {
   const now = args.nowMs ?? Date.now();
   const env = args.env ?? ((k: string) => process.env[k]);
-  const w = readWeeklyLossConfig(env);
-  const s = readStreakConfig(env);
+  // **연습과 실전의 한도를 다르게 읽는다.** 실전은 예전 그대로다 —
+  // 테스트넷 한도가 계좌의 7%면 손절 한 번에 닿아서 자동매매를 한 번도
+  // 못 돌려 본다. 규칙을 없애는 것이 아니라 닿는 지점을 옮기는 것이다.
+  const { scopeOf } = await import('./limitScope');
+  const scope = scopeOf(args.testnet);
+  const w = readWeeklyLossConfig(env, scope);
+  const s = readStreakConfig(env, scope);
   const weekStart = utcWeekStart(now);
 
   let rows: any[] | null = null;
@@ -107,8 +112,10 @@ export async function collectPaperStreakLimits(args: {
 }): Promise<StreakFacts> {
   const now = args.nowMs ?? Date.now();
   const env = args.env ?? ((k: string) => process.env[k]);
-  const w = readWeeklyLossConfig(env);
-  const s = readStreakConfig(env);
+  // 모의도 연습이다.
+  const { scopeOf: scopeOfPaper } = await import('./limitScope');
+  const w = readWeeklyLossConfig(env, scopeOfPaper(true));
+  const s = readStreakConfig(env, scopeOfPaper(true));
   const weekStart = utcWeekStart(now);
 
   let trades: StreakTrade[] | null = null;
