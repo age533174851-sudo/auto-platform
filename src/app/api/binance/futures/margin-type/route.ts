@@ -72,6 +72,14 @@ export async function GET(req: NextRequest) {
     error: marginType == null ? (rr.error || '거래소가 마진 모드를 돌려주지 않았습니다') : null,
     exchange: creds.exchange,
     hasPosition: rr.risk?.positionAmt != null ? Math.abs(Number(rr.risk.positionAmt)) > 0 : null,
+    // **들고 있는 수량.** 부호 있음(롱 양수).
+    //
+    // 이게 없어서 청산 탭을 눌러도 수량 칸이 비어 있었다. 사용자가 이미
+    // 가진 것을 닫으려는데 얼마를 닫을지 다시 적어야 했고, 그 사이에
+    // 0.976을 0.97로 잘못 적으면 **일부만 닫히고 나머지는 그대로 남는다.**
+    // 못 읽으면 null이다 — 0으로 채우면 '포지션 없음'이 사실이 된다.
+    positionAmt: rr.risk?.positionAmt ?? null,
+    entryPrice: rr.risk?.entryPrice ?? null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
