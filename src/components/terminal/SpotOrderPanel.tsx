@@ -22,6 +22,7 @@ import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn } from './theme';
 import { useTerminal } from './TerminalContext';
 import { AccountLine } from './AccountLine';
+import { marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { usePaperAccount } from './PaperWallet';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { capability, checkIntent } from '@/lib/markets/marketType';
@@ -145,6 +146,9 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
     if (!paper) {
       if (!modeResolution.ok) { setMsg({ ok: false, text: modeResolution.reason || '이 모드에서 쓸 계좌가 없습니다' }); return; }
       if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 등록하세요' }); return; }
+      const chosen = (connections || []).find((c: any) => c.id === connId);
+      const sup = marketSupportsExchange((chosen as any)?.exchange_id, 'SPOT');
+      if (!sup.ok) { setMsg({ ok: false, text: sup.reason }); return; }
     }
     if (paper && side === 'SELL') {
       // 모의 현물 매도는 **보유분 청산**이다. 새 포지션이 아니다.

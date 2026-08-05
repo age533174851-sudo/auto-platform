@@ -48,25 +48,18 @@ interface Bars { highs: number[]; lows: number[]; closes: number[]; volumes: num
  * 실패는 null이다. 빈 배열로 돌려주면 위쪽에서 '봉이 모자랍니다'가 되어,
  * 시세를 못 가져온 것과 시장이 조용한 것이 같은 문구가 된다.
  */
-async function fetchBars(symbol: string, interval: string, limit: number): Promise<Bars | null> {
-  try {
-    const r = await fetch(
-      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-      { signal: AbortSignal.timeout(10_000) },
-    );
-    if (!r.ok) return null;
-    const data = await r.json();
-    if (!Array.isArray(data) || data.length === 0) return null;
-    const highs: number[] = [], lows: number[] = [], closes: number[] = [], volumes: number[] = [];
-    for (const k of data) {
-      if (!Array.isArray(k) || k.length < 6) continue;
-      const h = parseFloat(k[2]), l = parseFloat(k[3]), c = parseFloat(k[4]), v = parseFloat(k[5]);
-      if ([h, l, c].every(Number.isFinite)) {
-        highs.push(h); lows.push(l); closes.push(c); volumes.push(Number.isFinite(v) ? v : 0);
-      }
-    }
-    return closes.length ? { highs, lows, closes, volumes } : null;
-  } catch { return null; }
+async function fetchBars(
+  symbol: string, interval: string, limit: number,
+  exchange: 'binance' | 'gate' = 'binance', testnet = true,
+): Promise<Bars | null> {
+  // **주문이 나갈 시장에서 읽는다.** 예전에는 바이낸스 **현물**로 고정이라,
+  // 현물 가격으로 돌파를 판단하고 선물 호가로 체결했다. 돌파 전략에서
+  // 그건 특히 나쁘다 — 두 시장의 고점이 다르면 **일어나지 않은 돌파**로
+  // 진입한다. 미완성 봉도 여기서 잘린다(돌파가 생겼다 사라지는 원인).
+  const { fetchVenueBars } = await import('@/lib/markets/venueBars');
+  const r = await fetchVenueBars({ exchange, symbol, interval, limit, testnet });
+  if (!r.bars) return null;
+  return { highs: r.bars.highs, lows: r.bars.lows, closes: r.bars.closes, volumes: r.bars.volumes };
 }
 
 export async function POST(req: NextRequest) {
@@ -147,7 +140,24 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 시세 ──
-  const bars = await fetchBars(symbol, interval, barsNeeded(cfg.lookback, cfg.atrPeriod));
+  //
+  // **주문이 나갈 시장에서 읽는다.** 연결을 여기서 미리 한 번 본다 —
+  // 아래에서 키를 읽을 때 또 조회하지만, 시세를 고르려면 거래소를 지금
+  // 알아야 한다. 못 읽으면 바이낸스 선물이 기본이다(현물은 아니다).
+  let barExchange: 'binance' | 'gate' = 'binance';
+  let barTestnet = true;
+  if (body.connectionId) {
+    try {
+      const { data: bc } = await (sb.from('exchange_connections') as any)
+        .select('exchange_id, is_testnet').eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
+      if (bc) {
+        barExchange = String(bc.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+        barTestnet = bc.is_testnet !== false;
+      }
+    } catch { /* 기본값으로 진행 — 아래 연결 조회가 다시 확인한다 */ }
+  }
+  const bars = await fetchBars(
+    symbol, interval, barsNeeded(cfg.lookback, cfg.atrPeriod), barExchange, barTestnet);
   if (!bars) {
     return NextResponse.json({ ok: false, error: `${symbol} ${interval} 봉을 가져오지 못했습니다` }, { status: 502 });
   }

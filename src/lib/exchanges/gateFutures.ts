@@ -257,14 +257,32 @@ export async function placeStopGateFutures(
   key: string, secret: string,
   input: {
     contract: string;
-    /** 1 = 가격 이상, 2 = 가격 이하 */
-    rule: 1 | 2;
-    triggerPrice: number;
-    autoSize: 'close_long' | 'close_short';
+    /**
+     * `gateStopSpec()`이 돌려준 것을 **그대로** 넘긴다.
+     *
+     * 예전에는 rule·autoSize·triggerPrice를 따로 받았다. 그래서 이런 일이
+     * 났다 — 호출부가 rule과 autoSize는 spec에서 꺼내 쓰면서 triggerPrice는
+     * **원본 손절가를 그대로** 넘겼다. spec이 호가 단위에 맞춰 둔 값은
+     * 아무 데도 안 쓰였고, 거래소는 그대로 거부했다:
+     *
+     *   Gate 400: trigger.price price is not an integer multiple of a price unit
+     *
+     * 계산을 만들어 놓고 배선을 안 한 것이다. 이 저장소에서 반복된 실패라
+     * (roundToStep이 자동매매에서만 불리던 것과 같다) 아예 **섞을 수 없는
+     * 모양**으로 바꿨다. 세 값이 한 덩어리로 들어오면 하나만 옛날 값일 수 없다.
+     */
+    spec: { rule: 1 | 2; autoSize: 'close_long' | 'close_short'; triggerPrice: number | null };
     clientOrderId?: string;
   },
   testnet = true,
 ): Promise<{ success: boolean; orderId?: string; message: string }> {
+  const trigger = Number(input?.spec?.triggerPrice);
+  if (!Number.isFinite(trigger) || trigger <= 0) {
+    // 여기까지 오면 안 되지만, 온다면 **보내지 않는다.** 0이나 NaN을 보내면
+    // 거래소가 무엇으로 해석할지 모른다.
+    return { success: false,
+      message: `손절 설정 실패: 트리거 가격이 유효하지 않습니다 (${input?.spec?.triggerPrice})` };
+  }
   try {
     const body: Record<string, any> = {
       initial: {
@@ -274,13 +292,15 @@ export async function placeStopGateFutures(
         price: '0',       // 시장가
         tif: 'ioc',
         reduce_only: true,
-        auto_size: input.autoSize,
+        auto_size: input.spec.autoSize,
       },
       trigger: {
         strategy_type: 0,          // 가격 트리거
         price_type: 1,             // 마크 가격
-        price: String(input.triggerPrice),
-        rule: input.rule,
+        // **호가 단위에 맞춰진 값이다.** gateStopSpec이 계약 규격을 보고
+        // 진입에서 멀어지는 쪽으로 밀어 둔다.
+        price: String(trigger),
+        rule: input.spec.rule,
       },
     };
     const text = toGateText(input.clientOrderId);

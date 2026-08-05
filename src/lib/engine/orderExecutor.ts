@@ -25,6 +25,33 @@ export interface ExecuteArgs {
   exchange: 'binance' | 'gate';
   mode: 'TESTNET' | 'LIVE';
   plan: PositionPlan;
+  /**
+   * 이 주문을 낸 것이 누구인가.
+   *
+   * 사람이 화면을 보며 누른 것과, 아무도 안 보는 새벽에 크론이 낸 것은
+   * **같은 규칙으로 다루면 안 된다.** 아래 protectionPolicy가 이 값에
+   * 따라 정해진다.
+   */
+  source?: 'MANUAL' | 'AUTOTRADE' | 'TRADINGVIEW' | 'CREATOR_SIGNAL';
+  /**
+   * 손절을 못 걸었을 때 어떻게 할 것인가.
+   *
+   *   REQUIRED — 방금 연 포지션을 **즉시 되돌린다.** 자동매매의 기본값이다.
+   *              포지션 크기 자체가 손절 거리로 역산된 값이라(허용손실 ÷
+   *              손절거리), 손절이 없으면 그 크기를 정당화하는 근거가
+   *              사라진다. 그리고 아무도 안 보고 있다.
+   *
+   *   OPTIONAL — 포지션을 **유지한다.** 사람이 화면 앞에 있고, 손절 없이
+   *              들고 가겠다는 것도 그 사람의 선택이다. 다만 손절을
+   *              요청했는데 못 걸린 것은 **크게 알린다** — 보호되지 않은
+   *              포지션이라는 사실을 모르고 넘어가면 안 된다.
+   *
+   *   NONE     — 손절을 아예 시도하지 않는다.
+   *
+   * **기본값은 REQUIRED다.** 안 넘긴 호출부는 지금까지와 똑같이 동작한다 —
+   * 정책을 새로 만들면서 기존 경로가 조용히 느슨해지면 안 된다.
+   */
+  protectionPolicy?: 'REQUIRED' | 'OPTIONAL' | 'NONE';
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -58,6 +85,14 @@ export interface ExecuteResult {
   ok: boolean;
   status: OrderStatus;
   clientOrderId: string;
+  /**
+   * **손절이 실제로 걸렸는가.**
+   *
+   * `slOrderId`가 있으면 걸린 것이고, 요청했는데 없으면 보호되지 않은
+   * 포지션이다. 화면이 그 둘을 구분해 그릴 수 있어야 한다 — 지금까지는
+   * 메시지 문자열을 읽어야만 알 수 있었다.
+   */
+  unprotected?: boolean;
   exchangeOrderId?: string;
   filledQty?: number;
   avgPrice?: number;
@@ -98,6 +133,8 @@ export function roundQuantity(qty: number, stepSize: number): number {
 export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteResult> {
   const { clientOrderId, plan, exchange, mode, apiKey, apiSecret } = args;
   const testnet = mode !== 'LIVE';
+  // 안 넘기면 REQUIRED — 기존 호출부의 동작이 바뀌지 않는다.
+  const policy = args.protectionPolicy ?? 'REQUIRED';
   const orderType = args.orderType ?? 'MARKET';
   // 청산이면 방향이 뒤집힌다. plan.side는 '무슨 포지션을 다루는가'이고
   // reduceOnly는 그것을 줄이는 주문이므로 반대 방향으로 보내야 한다.
@@ -350,7 +387,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       let slError = '';
       // 청산 주문에는 보호주문을 붙이지 않는다. 붙이면 포지션이 없어진 뒤에도
       // 남아서 다음 진입을 예상치 못하게 닫는다.
-      if (!args.reduceOnly && args.stopLoss) {
+      if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
         const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
           symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
           // 1차는 closePosition(그때 있는 전량)이 맞다. 그게 이 환경에서
@@ -441,6 +478,28 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       // 손절이 없으면 그 크기를 정당화하는 근거가 사라진다. 방치하면 계단식
       // 1회 증거금을 넘어 손실이 커질 수 있다.
       // 진입 근거가 사라졌으므로 되돌린다.
+      // ── **되돌릴지 말지는 정책이 정한다** ──
+      //
+      // 자동매매(REQUIRED)는 되돌린다. 포지션 크기 자체가 손절 거리로
+      // 역산된 값이라(허용손실 ÷ 손절거리) 손절이 없으면 그 크기를
+      // 정당화하는 근거가 사라지고, 아무도 안 보고 있다.
+      //
+      // 수동(OPTIONAL)은 **유지한다.** 사람이 화면 앞에 있고, 손절 없이
+      // 들고 가겠다는 것도 그 사람의 선택이다. 다만 요청한 손절이 안
+      // 걸렸다는 사실은 크게 알린다 — 모르고 넘어가면 안 된다.
+      if (args.stopLoss && !slId && policy !== 'REQUIRED') {
+        const warn = `⚠ 진입은 체결됐지만 요청한 손절이 등록되지 않았습니다`
+          + (slError ? ` (${slError})` : '')
+          + '. **지금 보호되지 않은 포지션입니다** — 거래소에서 직접 손절을 걸거나 포지션을 닫으세요.';
+        await update({ status: 'ACKED', error_message: warn });
+        return {
+          ok: true, status: 'ACKED', clientOrderId,
+          exchangeOrderId: res.orderId ? String(res.orderId) : undefined,
+          filledQty: res.qty, avgPrice: res.avgPrice,
+          tpOrderId: tpId, unprotected: true, message: warn,
+        };
+      }
+
       if (args.stopLoss && !slId) {
         let closed = false, closeErr = '';
         try {
@@ -711,15 +770,30 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 특히 중요하다 — API 모양이 틀렸더라도 결과는 '보호 없는 포지션'이 아니라
     // '포지션 없음 + 실패 보고'가 된다.
     let gateSlId: string | undefined;
-    if (!args.reduceOnly && args.stopLoss) {
+    if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
+      // spec을 통째로 넘긴다. 예전에는 rule·autoSize만 spec에서 꺼내고
+      // triggerPrice는 원본 손절가를 넘겨서, 호가 단위에 맞춰 둔 값이
+      // 아무 데도 안 쓰였다 — 계산해 놓고 배선을 안 한 것이다.
       const sl = await gf.placeStopGateFutures(apiKey, apiSecret, {
-        contract, rule: stopSpec.rule, triggerPrice: args.stopLoss,
-        autoSize: stopSpec.autoSize, clientOrderId: `${clientOrderId}SL`,
+        contract, spec: stopSpec, clientOrderId: `${clientOrderId}SL`,
       }, testnet);
 
       if (sl.success) {
         gateSlId = sl.orderId;
         await update({ sl_order_id: sl.orderId ?? null });
+      } else if (policy !== 'REQUIRED') {
+        // 수동 진입 — 되돌리지 않는다. 사람이 보고 있고, 되돌리면 그 사람이
+        // 의도한 포지션이 수수료만 남기고 사라진다. 대신 크게 알린다.
+        const warn = `⚠ 진입은 체결됐지만 요청한 손절이 등록되지 않았습니다 (${sl.message})`
+          + '. **지금 보호되지 않은 포지션입니다** — 거래소에서 직접 손절을 걸거나 포지션을 닫으세요.';
+        await update({ status: 'ACKED', error_message: warn });
+        return {
+          ok: true, status: 'ACKED', clientOrderId,
+          exchangeOrderId: gres?.id != null ? String(gres.id) : undefined,
+          filledQty: fill.filledQty ?? undefined,
+          avgPrice: fill.avgPrice ?? undefined,
+          unprotected: true, message: warn,
+        };
       } else {
         const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
         const msg = `손절을 걸지 못해 포지션을 되돌렸습니다 — ${sl.message}`
@@ -738,6 +812,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       slOrderId: gateSlId,
       message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
         + (sized.reason ? ` · ${sized.reason}` : '')
+        + (stopSpec.note ? ` · ${stopSpec.note}` : '')
         + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
             ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')
         + (gateSlId ? ' · 손절 부착' : ''),

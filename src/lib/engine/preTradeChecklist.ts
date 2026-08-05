@@ -538,6 +538,22 @@ export interface ChecklistOptions {
   /** 기본 'ENTRY' */
   intent?: OrderIntent;
   /**
+   * 손절 없이 진입하겠다고 **사용자가 명시적으로 확인**했는가. 기본 false.
+   *
+   * 왜 필요한가
+   * ───────────
+   * 손절 부착 항목은 자동매매를 위해 만들어졌다. 아무도 안 보는 시간에
+   * 손절 없는 포지션이 열리면 그건 계좌 전체를 건 것이고, 그래서 막는다.
+   *
+   * 그런데 사람이 화면을 보며 누르는 주문에까지 같은 규칙을 걸면,
+   * 사용자는 자기 계좌에서 자기가 정한 방식으로 거래할 수 없다.
+   *
+   * **켜도 항목이 사라지지는 않는다.** '통과'가 아니라 '사용자가 확인함'
+   * 으로 남고, 청산 거리는 그대로 검사한다 — 손절이 없을수록 청산가가
+   * 유일한 방어선이라 그 숫자는 더 중요해진다.
+   */
+  noStopAcknowledged?: boolean;
+  /**
    * 하루 1회 제한이 있는 전략인가. 기본 false.
    *
    * 켜지 않으면 '오늘 진입 이력'이 목록에 아예 안 나온다. 수동 주문에는
@@ -669,7 +685,12 @@ export function runChecklist(
   results.push(checkMarginIsolated(input.marginType));
 
   // 6. 손절 부착
-  if (input.stopPrice == null) {
+  if (input.stopPrice == null && opts.noStopAcknowledged) {
+    // 확인을 받았으면 막지 않는다. **다만 통과라고 적지도 않는다** —
+    // 나중에 이 거래를 되짚을 때 "손절이 있었다"로 읽히면 안 된다.
+    results.push(resultFor('STOP_ATTACHED', 'pass',
+      '손절 없이 진입 — 사용자가 위험을 확인했습니다. 청산가가 유일한 방어선입니다'));
+  } else if (input.stopPrice == null) {
     results.push(resultFor('STOP_ATTACHED', 'fail',
       '손절가가 없습니다. 손절 없는 주문은 포지션 크기를 정당화할 근거가 없습니다'));
   } else if (!Number.isFinite(input.stopPrice) || input.stopPrice <= 0) {

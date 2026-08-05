@@ -226,4 +226,55 @@ export function runManualPlanTests() {
       assert((r.plan as any).rejectReason === r.reason, 'plan에도 사유가 담겨야 한다');
     }
   });
+
+  // ── 수동과 자동을 같은 규칙으로 묶지 않는다 ──────────
+  //
+  // 손절 부착 강제는 **자동매매를 위해** 만들어졌다. 아무도 안 보는
+  // 시간에 손절 없는 포지션이 열리면 그건 계좌 전체를 건 것이다.
+  //
+  // 그런데 사람이 화면을 보며 누르는 주문에까지 같은 규칙을 걸면,
+  // 사용자는 자기 계좌에서 자기가 정한 방식으로 거래할 수 없다.
+  console.log('[수동 계획 — 손절 없는 진입]');
+
+  const ENTRY = {
+    symbol: 'BTCUSDT', side: 'BUY' as const, quantity: 0.01,
+    leverage: 5, refPrice: 60000, liquidationPrice: 50000,
+  };
+
+  // **기본은 여전히 막는 쪽이다.** 확인 없이 열리면 실수로 손절 칸을
+  // 비운 것과 일부러 안 거는 것을 구분할 수 없다.
+  test('확인이 없으면 손절 없는 진입은 거부한다 — 기본값이 바뀌지 않았다', () => {
+    const r = buildManualPlan({ ...ENTRY, stopPrice: null });
+    eq(r.plan.approved, false);
+    assert(r.reason.includes('손절'), r.reason);
+  });
+
+  test('확인을 받으면 열린다', () => {
+    const r = buildManualPlan({ ...ENTRY, stopPrice: null, allowNoStop: true });
+    eq(r.plan.approved, true, r.reason);
+    eq(r.noStop, true);
+  });
+
+  // 나중에 이 거래를 되짚을 때 "손절이 실패한 것"과 "처음부터 안 걸기로
+  // 한 것"은 완전히 다른 얘기다. 기록에 남아야 구분된다.
+  test('손절 없이 나간 것을 기록에 남긴다', () => {
+    const r = buildManualPlan({ ...ENTRY, stopPrice: null, allowNoStop: true });
+    assert(r.plan.notes.some(n => n.includes('손절 없이')),
+      '기록에 안 남겼다: ' + r.plan.notes.join(' / '));
+  });
+
+  // 확인은 손절 하나만 푼다. 나머지 검사는 그대로다.
+  test('확인을 받아도 다른 검사는 그대로 막는다', () => {
+    eq(buildManualPlan({ ...ENTRY, quantity: 0, stopPrice: null, allowNoStop: true })
+      .plan.approved, false, '수량 0이 통과했다');
+    eq(buildManualPlan({ ...ENTRY, leverage: 0, stopPrice: null, allowNoStop: true })
+      .plan.approved, false, '배율 0이 통과했다');
+  });
+
+  // 손절을 **적었으면** 방향 검사는 그대로다. allowNoStop은 '손절이 없을 때'
+  // 만 쓰는 열쇠이지 잘못된 손절까지 통과시키는 열쇠가 아니다.
+  test('손절을 적었으면 방향 검사는 확인과 무관하게 돈다', () => {
+    const r = buildManualPlan({ ...ENTRY, stopPrice: 61000, allowNoStop: true });
+    eq(r.plan.approved, false, 'LONG인데 손절이 진입가 위인 주문이 통과했다');
+  });
 }

@@ -233,4 +233,44 @@ export function runRiskManagerTests() {
     eq(p.approved, false);
     eq(p.rejectCode, 'INVALID_STOP');
   });
+
+  // ── 가짜 자산으로 주문 크기를 정하지 않는다 ──────────
+  //
+  // buildRiskContext는 잔고 조회가 실패하면 폴백 $10,000을 가정하고 계속
+  // 진행했다. 경고 문자열은 남지만 아무도 그것 때문에 멈추지 않는다.
+  //
+  // 실제 계좌가 100 USDT일 때 10,000으로 계산하면, 위험 1% 설정이
+  // **계좌 전액**을 거는 주문이 된다. 그리고 포지션 크기가 자산에서
+  // 나오므로 자산이 틀리면 일일 손실 한도도·명목가 상한도·계좌 위험
+  // 상한도 전부 같이 틀린다. 하나가 아니라 전부다.
+  console.log('[위험 관리 — 계좌 자산을 못 읽으면 막는다]');
+
+  test('자산을 확인하지 못했으면 거부한다', () => {
+    const p = planPosition(signal(), cfg({ equityKnown: false }));
+    eq(p.approved, false);
+    eq((p as any).rejectCode, 'ACCOUNT_EQUITY_UNKNOWN');
+  });
+
+  test('거부 사유에 무엇을 해야 하는지 적는다', () => {
+    const p = planPosition(signal(), cfg({ equityKnown: false }));
+    assert(/연결|API/.test(p.rejectReason || ''), p.rejectReason || '');
+  });
+
+  // 자산이 틀리면 모든 한도가 같이 틀리므로, 다른 한도가 여유롭더라도
+  // 이 검사가 **먼저** 걸려야 한다.
+  test('다른 한도가 아무리 여유로워도 이게 먼저 막는다', () => {
+    const p = planPosition(signal(), cfg({
+      equityKnown: false,
+      accountEquity: 1_000_000, dailyPnl: 0, dailyPnlKnown: true,
+    }));
+    eq((p as any).rejectCode, 'ACCOUNT_EQUITY_UNKNOWN');
+  });
+
+  // **안 넘기면 예전처럼 동작한다.** 백테스트·시뮬레이터는 자기 자산을
+  // 자기가 알고 넘기므로 검사 대상이 아니다 — 새 검사를 넣으면서 기존
+  // 호출부가 조용히 막히면 안 된다.
+  test('값을 안 넘기면 막지 않는다 — 기존 호출부가 그대로 돈다', () => {
+    eq(planPosition(signal(), cfg()).approved, true);
+    eq(planPosition(signal(), cfg({ equityKnown: true })).approved, true);
+  });
 }
