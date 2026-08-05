@@ -808,7 +808,20 @@ export async function cancelFuturesOrder(key: string, secret: string, symbol: st
 }
 
 // 미체결 주문 조회 (TP/SL 등) — type별 stopPrice 추출용
-export interface FuturesOpenOrder { orderId: number; symbol: string; type: string; side: string; stopPrice: number; closePosition: boolean; reduceOnly: boolean; }
+export interface FuturesOpenOrder {
+  orderId: number; symbol: string; type: string; side: string; stopPrice: number;
+  closePosition: boolean; reduceOnly: boolean;
+  // ── 아래 넷은 예전에 **읽어 놓고 버렸다** ──
+  // 미체결 탭이 수량·가격 칸을 origQty/price로 그리는데 이 매핑이 그 둘을
+  // 떨어뜨려서, 화면에는 언제나 빈칸이 떴다. 조회는 성공했고 응답에
+  // 안 실은 것 — 이 저장소에서 가장 자주 반복된 실패다.
+  origQty: number | null;
+  price: number | null;
+  /** MARK_PRICE | CONTRACT_PRICE — 발동 기준 */
+  workingType: string | null;
+  time: number | null;
+  status: string | null;
+}
 export async function getFuturesOpenOrders(key: string, secret: string, testnet = true, symbol?: string) {
   try {
     const params: Record<string, string | number> = {};
@@ -818,6 +831,13 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
+      // 0과 없음을 구분한다. 수량 0은 '0개 주문'이 아니라 '못 읽었다'이고,
+      // 화면이 그 둘을 같게 그리면 사용자는 없는 수량을 믿는다.
+      origQty: Number.isFinite(parseFloat(o.origQty)) ? parseFloat(o.origQty) : null,
+      price: Number.isFinite(parseFloat(o.price)) && parseFloat(o.price) > 0 ? parseFloat(o.price) : null,
+      workingType: o.workingType ? String(o.workingType) : null,
+      time: Number.isFinite(Number(o.time)) ? Number(o.time) : null,
+      status: o.status ? String(o.status) : null,
     }));
     return { success: true, orders };
   } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[] }; }

@@ -689,3 +689,44 @@ export async function closeAllPositionsGateFutures(
       : `포지션 ${remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
   };
 }
+
+/**
+ * 주문 하나 취소.
+ *
+ * Gate는 주문을 **두 통에 나눠 담는다.** 일반 주문은 `/orders`, 조건부
+ * 주문(손절·익절)은 `/price_orders`. 같은 id 공간이 아니고, 엉뚱한 통에
+ * 지우러 가면 404가 난다.
+ *
+ * 그래서 통을 아는 쪽이 알려 준다(`bucket`). 모르면 조건부 쪽을 먼저
+ * 본다 — 화면의 취소 버튼이 붙는 주문은 대부분 손절이고, 손절을 못 지우면
+ * 사용자는 거래소 앱까지 들어가야 한다.
+ *
+ * **첫 통에서 실패해도 실패로 끝내지 않는다.** 다른 통에서 다시 시도하고,
+ * 둘 다 실패했을 때만 실패다. 취소는 여러 번 해도 결과가 같은 동작이라
+ * 재시도가 안전하다.
+ */
+export async function cancelOrderGateFutures(
+  key: string, secret: string, orderId: string | number,
+  opts?: { bucket?: 'price' | 'normal' | null; testnet?: boolean },
+): Promise<{ success: boolean; bucket: 'price' | 'normal' | null; message: string }> {
+  const testnet = opts?.testnet !== false;
+  const id = String(orderId ?? '').trim();
+  if (!id) return { success: false, bucket: null, message: '주문 번호가 없어 취소하지 못했습니다' };
+
+  const order: Array<'price' | 'normal'> =
+    opts?.bucket === 'normal' ? ['normal', 'price'] : ['price', 'normal'];
+
+  const errs: string[] = [];
+  for (const b of order) {
+    const path = b === 'price'
+      ? `/api/v4/futures/usdt/price_orders/${encodeURIComponent(id)}`
+      : `/api/v4/futures/usdt/orders/${encodeURIComponent(id)}`;
+    try {
+      await gateReq<any>('DELETE', path, { key, secret, testnet });
+      return { success: true, bucket: b, message: '주문을 취소했습니다' };
+    } catch (e: any) {
+      errs.push(`${b}: ${e?.message || e}`);
+    }
+  }
+  return { success: false, bucket: null, message: `취소 실패 — ${errs.join(' / ')}` };
+}

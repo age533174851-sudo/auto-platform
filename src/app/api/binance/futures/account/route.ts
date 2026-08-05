@@ -131,7 +131,10 @@ export async function GET(req: NextRequest) {
     //
     // 못 읽었으면 **null**이다. 빈 배열로 바꾸면 조회 실패가
     // '손절 없음'으로 읽히고, 그건 없는 안전을 믿게 만든다.
-    openOrders: openOrd.success ? orders : null,
+    // Gate와 모양을 맞춘다. 바이낸스는 조건부 주문도 같은 통에 있으므로
+    // 전부 'normal'이다 — 통이 하나라는 사실도 명시해야 취소 경로가 갈리지
+    // 않는다.
+    openOrders: openOrd.success ? orders.map((o: any) => ({ ...o, bucket: 'normal' })) : null,
     openOrdersReadable: !!openOrd.success,
     openOrdersMsg: openOrd.success ? null : String((openOrd as any)?.message || '미체결 주문 조회 실패'),
     funding:   { total: fund.total, bySymbol: fund.bySymbol, items: fund.items.slice(0, 50) },
@@ -184,6 +187,45 @@ async function gateAccount(apiKey: string, secret: string, testnet: boolean) {
   const gateOpenOrders: any[] = [];
   let gateOrdersReadable = true;
 
+  // ── 일반 미체결 주문 ──
+  //
+  // 예전에는 조건부 주문(price_orders)만 실었다. 그래서 Gate에 지정가 진입
+  // 예약을 걸어 두면 앱의 미체결 탭에는 **아무것도 없었다.** 화면에 없는
+  // 예약은 취소할 생각도 못 하고, 그게 어느 날 체결되면 열린 적 없는
+  // 포지션이 생긴 것처럼 보인다.
+  try {
+    const plain = await gf.getOpenOrdersGateFutures(apiKey, secret, testnet);
+    for (const o of Array.isArray(plain) ? plain : []) {
+      const c = String((o as any)?.contract || '');
+      if (!c) continue;
+      const sz = Number((o as any)?.size);
+      const px = Number((o as any)?.price);
+      // 계약 수 → 기초자산 수량. 배수를 못 읽으면 **null이다** — 계약 수를
+      // 수량 칸에 그대로 적으면 0.98 BTC가 9800 BTC로 보인다.
+      const oSpec = await gf.getGateContractSpec(c, testnet);
+      const oBase = gp.gateBaseFromContracts(sz, oSpec);
+      gateOpenOrders.push({
+        symbol: c.replace('_', ''),
+        // Gate는 계약 수의 부호가 방향이다. 양수 매수, 음수 매도.
+        side: sz > 0 ? 'BUY' : sz < 0 ? 'SELL' : null,
+        type: Number.isFinite(px) && px > 0 ? 'LIMIT' : 'MARKET',
+        price: Number.isFinite(px) && px > 0 ? px : null,
+        origQty: oBase == null ? null : Math.abs(oBase),
+        reduceOnly: (o as any)?.is_reduce_only === true,
+        closePosition: (o as any)?.is_close === true,
+        orderId: (o as any)?.id != null ? String((o as any).id) : null,
+        status: (o as any)?.status ?? null,
+        time: Number.isFinite(Number((o as any)?.create_time))
+          ? Number((o as any).create_time) * 1000 : null,
+        bucket: 'normal',
+      });
+    }
+  } catch {
+    // **못 읽으면 그 사실이 남아야 한다.** 조용히 넘어가면 "미체결 없음"이
+    // 되고, 그건 확인한 적 없는 사실이다.
+    gateOrdersReadable = false;
+  }
+
   let rawPositions: any[] = [];
   let positionMsg = '';
   let positionsReadable = false;
@@ -227,6 +269,13 @@ async function gateAccount(apiKey: string, secret: string, testnet: boolean) {
           closePosition: true,
           reduceOnly: true,
           orderId: o?.id != null ? String(o.id) : null,
+          // Gate의 조건부 주문은 마크가 기준이다. 화면이 '기준가'라고만
+          // 적으면 사용자는 체결가로 착각하고 발동 시점을 잘못 계산한다.
+          workingType: 'MARK_PRICE',
+          // Gate 시각은 **초**다. 밀리초로 바꾸지 않으면 1970년으로 찍힌다.
+          time: Number.isFinite(Number(o?.create_time)) ? Number(o.create_time) * 1000 : null,
+          // 취소는 통이 다르다 — 조건부는 /price_orders로 지운다.
+          bucket: 'price',
         });
       }
     } else {
@@ -244,7 +293,13 @@ async function gateAccount(apiKey: string, secret: string, testnet: boolean) {
     return {
       symbol: contract.replace('_', ''),
       side: contracts > 0 ? 'LONG' : contracts < 0 ? 'SHORT' : 'FLAT',
-      amount: amtBase != null ? Math.abs(amtBase) : null,
+      // **부호를 지우지 않는다.** 예전에는 `Math.abs(amtBase)`였다. 그러면
+      // 화면의 derivePosition이 부호에서 방향을 뽑을 때 Gate 숏이 전부
+      // 롱으로 떴고, 그 뒤로 손절 조회·경고문·청산 방향이 줄줄이 뒤집혔다.
+      // 순노출 합계(현물+선물)도 숏을 플러스로 세어 정반대 숫자를 냈다.
+      // 바이낸스는 여기에 부호 있는 값을 넣는다 — 두 거래소가 같은 모양이어야
+      // 화면이 한 벌의 코드로 읽는다.
+      amount: amtBase,
       // 계약 수도 함께 보낸다. Gate에서 실제로 거래되는 단위이고,
       // 거래소 화면과 대조할 때 이 숫자가 필요하다.
       contracts: Math.abs(contracts),
