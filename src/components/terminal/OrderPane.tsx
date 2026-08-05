@@ -26,6 +26,7 @@ import { CoinMOrderPanel } from './CoinMOrderPanel';
 import { StockOrderPanel } from './StockOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/markets/tradeMode';
+import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
 import { AccountLine } from './AccountLine';
 
@@ -95,6 +96,20 @@ const PAPER_MARGIN_KEY = 'tg_paper_margin_mode';
  * 이 배율에서 청산까지의 대략 거리(%).
  * 정확한 값은 유지증거금 구간에 따라 달라지므로 이 값은 **상한**에 가깝다.
  * 실제 청산은 이보다 가깝다. 화면에도 그렇게 적는다.
+ */
+/**
+ * 배율만 보고 어림잡은 청산 거리(%).
+ *
+ * ⚠ **포지션이 있으면 이 값을 쓰지 않는다.** 거래소가 계산한 실제
+ * 청산가가 있으면 그걸 써야 한다 — 이 식은 유지증거금도, 이미 열린
+ * 포지션의 평균가도, 추가 증거금도 모르기 때문이다.
+ *
+ * 그리고 이 식은 `100 / leverage`라 **유지증거금을 빼지 않는다.**
+ * 5배에서 정확히 20.0%가 나오는데 실제로는 19.6%쯤이다. 그래서
+ * 판정에는 `lib/engine/leverageMath.ts`의 `liquidationDistancePct`를
+ * 쓴다 — 그쪽은 MMR을 빼고, 성립하지 않으면 null을 준다.
+ *
+ * 여기 남겨 둔 것은 **포지션이 아직 없을 때의 눈금**뿐이다.
  */
 export function roughLiqDistancePct(leverage: number): number {
   if (leverage <= 1) return 100;
@@ -368,6 +383,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
    * 닫을지 다시 적어야 하고, 0.976을 0.97로 잘못 적으면 일부만 닫힌다.
    */
   const [posAmt, setPosAmt] = useState<number | null>(null);
+  /** 거래소가 계산한 실제 청산가. 못 읽으면 null — 추정치로 채우지 않는다 */
+  const [posLiq, setPosLiq] = useState<number | null>(null);
+  /** 청산 거리를 재는 기준가(마크가). 못 읽으면 null */
+  const [posMark, setPosMark] = useState<number | null>(null);
   /**
    * 지금 들고 있는 방향. 없으면 null.
    *
@@ -563,10 +582,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         setMarginErr(j?.marginType ? '' : (errorTextOf(j, '마진 모드를 읽지 못했습니다')));
         const amt = Number(j?.positionAmt);
         setPosAmt(Number.isFinite(amt) ? amt : null);
+        const lq = Number(j?.liquidationPrice);
+        setPosLiq(Number.isFinite(lq) && lq > 0 ? lq : null);
+        const mk = Number(j?.markPrice);
+        setPosMark(Number.isFinite(mk) && mk > 0 ? mk : null);
       } catch (e: any) {
         // **격리로 가정하지 않는다.** 여기서 기본값을 넣으면 화면이 다시
         // 거짓말을 시작한다.
-        if (alive) { setMarginType(null); setMarginErr(`조회 실패 (${e?.message || e})`); setPosAmt(null); }
+        if (alive) { setMarginType(null); setMarginErr(`조회 실패 (${e?.message || e})`); setPosAmt(null); setPosLiq(null); setPosMark(null); }
       }
     })();
     return () => { alive = false; };
@@ -663,7 +686,26 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     : (unitPx > 0 ? typedQty / unitPx : NaN);
   const notional = (Number.isFinite(baseQty) ? baseQty : 0) * unitPx;
   const margin = leverage > 0 ? notional / leverage : 0;
-  const liqPct = roughLiqDistancePct(leverage);
+  // ── 청산 거리 ──
+  //
+  // **포지션이 있으면 거래소가 계산한 값을 쓴다.** 예전에는 언제나
+  // `100 / leverage`였다 — 5배에서 정확히 20.0%가 나오는데, Gate가 준
+  // 실제 값은 19.7%였다. 우연히 비슷해서 안 들켰을 뿐 다른 숫자다.
+  //
+  // 그 식은 유지증거금도, 이미 열린 포지션의 평균가도, 추가 증거금도
+  // 모른다. 그리고 화면에 '청산 20.0%'라고만 적혀 있으면 그게 추정인지
+  // 실제인지 알 방법이 없다.
+  //
+  // 포지션이 없을 때는 판정용 식(leverageMath)을 쓴다 — 그쪽은 유지
+  // 증거금을 빼고, 성립하지 않으면 null을 준다.
+  const liqActualPct = (posLiq != null && posMark != null && posMark > 0)
+    ? Math.abs(posMark - posLiq) / posMark * 100
+    : null;
+  const liqPlannedPct = liquidationDistancePct(leverage);
+  /** 손절이 청산 안쪽인지 판정할 때 쓰는 값. 실제값이 있으면 그것이 우선 */
+  const liqPct = liqActualPct ?? liqPlannedPct ?? roughLiqDistancePct(leverage);
+  /** 이 숫자가 거래소가 준 것인가, 우리가 계산한 것인가 */
+  const liqIsActual = liqActualPct != null;
   // 이 잔고와 배율로 열 수 있는 최대 명목가. 잔고를 모르면 null이다 —
   // 0으로 적으면 '주문 불가'로 읽히고, 큰 수를 임의로 넣으면 더 나쁘다.
   const maxOpenUsd = balanceUsd == null ? null : balanceUsd * leverage;
@@ -988,13 +1030,20 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           color: leverage >= 50 ? C.down : C.text,
           fontSize: FS.small, fontWeight: 700, ...NUM,
         }}>{leverage}×</button>
-        <span title="이 배율에서 청산까지의 대략적인 거리" style={{
+        <span style={{
           flex: 1.15, display: 'flex', alignItems: 'center', justifyContent: 'center',
           minHeight: dense ? 28 : 30, borderRadius: 7, background: C.raised,
           border: `1px solid ${liqPct < 3 ? A(liqTone, '55') : C.hair}`,
           color: liqTone, fontSize: FS.micro, fontWeight: 700, ...NUM,
           whiteSpace: 'nowrap',
-        }}>청산 {liqPct.toFixed(1)}%</span>
+        }} title={liqIsActual
+            ? `거래소 청산가 ${posLiq} · 마크가 ${posMark} 기준`
+            : `배율 ${leverage}배 기준 예상 (유지증거금 반영)`}>
+          {/* **추정인지 실제인지 적는다.** 같은 숫자라도 뜻이 다르다 —
+              포지션이 없을 때는 '이 배율로 열면 이 정도'이고,
+              열린 뒤에는 '거래소가 이 가격에 강제로 닫는다'이다. */}
+          청산가까지 {liqIsActual ? '' : '약 '}{liqPct.toFixed(1)}%
+        </span>
       </div>
 
       {/* 모의는 왜 못 바꾸는가.
