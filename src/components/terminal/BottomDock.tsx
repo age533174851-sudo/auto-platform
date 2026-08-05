@@ -17,6 +17,7 @@ import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
 import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
+import { splitOrders } from '@/lib/markets/orderView';
 import { findAnyStop } from '@/lib/engine/stopVerify';
 import { linearLiquidationPrice } from '@/lib/engine/paperPlan';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
@@ -132,8 +133,12 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
   };
 
   const positions: any[] = Array.isArray(acct?.positions) ? acct.positions : [];
-  const open: any[] = Array.isArray(acct?.openOrders) ? acct.openOrders
-    : Array.isArray(acct?.orders) ? acct.orders : [];
+  // **못 읽었으면 null이다.** 예전에는 `: []`로 떨어졌다 — 조회 실패가
+  // "미체결 주문이 없습니다"로 그려졌고, 그건 확인한 적 없는 사실이다.
+  // 못 여는 것은 불편이고 못 닫는 것은 사고다: 손절이 있는데 없다고 하면
+  // 사용자는 없는 위험을 감수한다.
+  const open: any[] | null = Array.isArray(acct?.openOrders) ? acct.openOrders
+    : Array.isArray(acct?.orders) ? acct.orders : null;
 
   return (
     <div style={{
@@ -224,22 +229,8 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         )}
 
         {tab === '미체결' && !isPaper && (
-          open.length === 0
-            ? <Empty t="미체결 주문이 없습니다"/>
-            : <Table
-                head={['종목', '종류', '방향', '수량', '가격', 'Stop']}
-                rows={open.map((o: any, i: number) => ({
-                  key: String(o.orderId ?? i),
-                  cells: [
-                    <span key="s" style={{ color: C.text, fontWeight: 600 }}>{o.symbol}</span>,
-                    <span key="t" style={{ color: C.dim }}>{o.type}</span>,
-                    <span key="d" style={{ color: o.side === 'BUY' ? C.up : C.down }}>{o.side}</span>,
-                    fmtPrice(o.origQty, 4),
-                    fmtPrice(o.price),
-                    fmtPrice(o.stopPrice),
-                  ],
-                }))}
-              />
+          <OpenOrdersPanel orders={open} why={acct?.openOrdersMsg ?? null}
+            auth={auth} connId={connId} onChanged={load}/>
         )}
 
         {tab === '상태대조' && (
@@ -513,8 +504,14 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }
     () => findAnyStop(openOrders, {
       symbol: String(p?.symbol || ''),
       positionSide: side === 'LONG' ? 'LONG' : 'SHORT',
+      // **방향을 모르면 조회하지 않는다.** 반대편을 뒤지면 멀쩡히 걸려 있는
+      // 손절이 '없음'으로 나온다. 실제로 그랬다 — Gate가 수량을 절대값으로
+      // 보내 숏이 롱으로 읽혔고, 숏의 손절(BUY)을 롱의 손절(SELL)로
+      // 찾다가 못 찾아 "손절 없음"이라고 적었다.
+      sideKnown: v.sideKnown,
+      refPrice: mark,
     }),
-    [openOrders, p?.symbol, side]);
+    [openOrders, p?.symbol, side, v.sideKnown, mark]);
 
   /**
    * 시장가 전량 청산.
@@ -533,6 +530,19 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }
     if (!Number.isFinite(qty) || qty <= 0) {
       setCloseMsg({ ok: false, text:
         `청산할 수량을 읽지 못했습니다 (${qty}) — 거래소에서 직접 닫으세요` });
+      return;
+    }
+
+    // **방향을 모르면 청산하지 않는다.**
+    //
+    // 청산은 포지션의 반대 방향으로 나간다. 방향이 틀리면 reduceOnly가
+    // 거래소에서 거절되거나(아무 일도 안 일어남) — 더 나쁘게는 —
+    // reduceOnly가 안 붙은 경로에서 **포지션이 두 배가 된다.**
+    // 여기서 막지 않으면 그 판단을 거래소에 떠넘기는 셈이다.
+    if (!v.sideKnown) {
+      setCloseMsg({ ok: false, text:
+        `포지션 방향을 확인하지 못해 청산하지 않았습니다`
+        + `${v.sideConflict ? ` — ${v.sideConflict}` : ''}. 거래소 앱에서 직접 닫으세요.` });
       return;
     }
 
@@ -620,10 +630,42 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }
           stopCheck.status === 'attached' ? C.upBg
             : stopCheck.status === 'missing' ? C.downBg : undefined,
         )} title={stopCheck.reason}>
-          {stopCheck.status === 'attached' ? '손절 있음'
-            : stopCheck.status === 'missing' ? '손절 없음' : '손절 ?'}
+          {/* '확인 못 함'을 '없음'처럼 읽히게 두지 않는다. `손절 ?`는
+              물음표 하나라 지나쳤다 — 조회에 실패했다고 글자로 적는다. */}
+          {stopCheck.status === 'attached'
+            ? (stopCheck.foundStopPrice != null
+                ? `손절 ${fmtPrice(stopCheck.foundStopPrice)}`
+                : '손절 있음')
+            : stopCheck.status === 'missing' ? '손절 없음' : '손절 조회 실패'}
         </span>
       </div>
+
+      {/* ── 방향을 확인하지 못했다 ──
+          방향이 틀리면 이 카드의 **전부**가 틀린다: 손절 조회가 반대편을
+          뒤지고, 청산 버튼이 반대로 나가고, 경고문이 반대로 계산된다.
+          그래서 숫자를 그리기 전에 이 사실을 먼저 적는다. */}
+      {!v.sideKnown && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7, marginBottom: 9,
+          background: C.warnBg, color: C.warn, fontSize: FS.micro, lineHeight: 1.6,
+        }}>
+          <b>포지션 방향을 확인하지 못했습니다.</b>{' '}
+          {v.sideConflict
+            ? `${v.sideConflict}. `
+            : '거래소가 방향도 수량 부호도 주지 않았습니다. '}
+          화면의 롱/숏 표시와 아래 경고는 <b>믿을 수 없습니다</b> —
+          거래소 앱에서 방향을 확인한 뒤 조작하세요.
+        </div>
+      )}
+
+      {/* 손절은 있는데 방향이 이상하다. '있음'과 '쓸모 있음'은 다르다 —
+          롱의 손절이 현재가 위에 있으면 걸자마자 발동한다. */}
+      {stopCheck.status === 'attached' && stopCheck.warning && (
+        <div style={{
+          padding: '7px 9px', borderRadius: 7, marginBottom: 9,
+          background: C.warnBg, color: C.warn, fontSize: FS.micro, lineHeight: 1.55,
+        }}>{stopCheck.warning}</div>
+      )}
 
       {/* 손절 없는 레버리지 포지션은 이 화면에서 가장 급한 사실이다.
           칩 하나로는 지나친다 — 무엇을 하라는 말까지 적는다. */}
@@ -644,7 +686,10 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }
           padding: '7px 9px', borderRadius: 7, marginBottom: 9,
           background: C.raised, color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
         }}>
-          손절이 걸렸는지 확인하지 못했습니다 — 미체결 주문을 읽지 못했습니다.
+          {/* 사유를 그대로 적는다. 예전에는 원인이 무엇이든 "미체결 주문을
+              읽지 못했습니다"로 고정이라, 방향을 못 읽어서 못 찾은 경우까지
+              조회 실패로 보였다. */}
+          손절이 걸렸는지 확인하지 못했습니다 — {stopCheck.reason}
           <b> 없다는 뜻이 아닙니다.</b>
           {/* **왜 못 읽었는지를 적는다.**
 
@@ -1640,6 +1685,270 @@ function Empty({ t }: { t: string }) {
   return (
     <div style={{ padding: '32px 16px', textAlign: 'center', color: C.faint, fontSize: FS.small }}>
       {t}
+    </div>
+  );
+}
+
+/**
+ * 미체결 주문 — **표가 아니라 카드다.**
+ *
+ * 표였을 때 375px 화면에 이렇게 떴다:
+ *
+ *   BTCUSDT | STOP_MARKET | BUY | — | Stop 65,352.50
+ *
+ * 여섯 열이 가로 스크롤 안으로 들어가 글자가 잘렸고, 남은 글자는 거래소
+ * 원문이라 뜻이 안 보였다. `BUY`는 사는 것이니 신규 롱처럼 읽히는데
+ * 실제로는 **숏을 닫는 손절**이다 — 정확히 반대로 읽힌다. 그리고 그
+ * 오독은 위험한 쪽으로 기운다: "롱 예약이 걸려 있네, 지워야지" 하고
+ * 자기 포지션의 유일한 보호 장치를 취소한다.
+ *
+ * 그래서 셋을 바꾼다.
+ *  · 한 열 카드 — 가로 스크롤이 없으면 잘릴 것도 없다
+ *  · 거래소 원문 대신 뜻 — '숏 포지션 종료용 매수', '조건부 시장가'
+ *  · 보호 주문과 일반 주문을 **갈라 놓는다** — 섞어 두면 [전체 취소]를
+ *    누르는 사람이 자기가 손절까지 지우는 줄 모른다
+ *
+ * 판단(용도·방향·부등호)은 전부 orderView가 한다. 화면에서 계산하면
+ * 테스트가 안 붙고, 이 화면에서 조용히 틀리면 사고가 된다.
+ */
+function OpenOrdersPanel({ orders, why, auth, connId, onChanged }: {
+  /** **못 읽었으면 null.** 빈 배열(진짜로 없음)과 다르다 */
+  orders: any[] | null;
+  /** 못 읽었을 때의 거래소 원문 */
+  why?: string | null;
+  auth: string;
+  connId: string;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const split = useMemo(() => splitOrders(orders), [orders]);
+
+  const cancelOne = async (v: any) => {
+    if (!auth || !connId) { setMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
+    if (!v.orderId) { setMsg({ ok: false, text: '주문 번호를 읽지 못해 취소할 수 없습니다' }); return; }
+    // 보호 주문을 지우는 것은 **포지션을 벗기는 일**이다. 한 번 더 묻는다.
+    const warn = v.protection === 'PROTECTIVE'
+      ? `${v.symbol} ${v.purposeLabel}을 취소합니다.\n\n이 주문이 사라지면 포지션을 지키는 것이 없어집니다.`
+      : `${v.symbol} ${v.purposeLabel}을 취소합니다.`;
+    if (!window.confirm(warn)) return;
+    setBusy(v.orderId); setMsg(null);
+    try {
+      const r = await fetch('/api/binance/futures/cancel-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          connectionId: connId, orderId: v.orderId, symbol: v.symbol, bucket: v.bucket,
+        }),
+      });
+      const j = await r.json();
+      setMsg({ ok: r.ok, text: r.ok ? (j?.message || '취소했습니다') : errorTextOf(j, '취소 실패') });
+      if (r.ok) onChanged();
+    } catch (e: any) {
+      setMsg({ ok: false, text: `취소 실패: ${e?.message || e}` });
+    } finally { setBusy(null); }
+  };
+
+  const cancelAll = async () => {
+    if (!auth || !connId) { setMsg({ ok: false, text: '로그인·연결이 필요합니다' }); return; }
+    // 보호 주문이 섞여 있으면 그 숫자를 **먼저** 말한다. '전체'가 무엇을
+    // 포함하는지 모르고 누르면 손절이 조용히 사라진다.
+    const p = split.protective.length;
+    const warn = p > 0
+      ? `미체결 ${split.total}건을 모두 취소합니다.\n\n이 중 ${p}건은 포지션을 지키는 보호 주문입니다 — 취소하면 손절 없는 포지션이 남습니다.`
+      : `미체결 ${split.total}건을 모두 취소합니다.`;
+    if (!window.confirm(warn)) return;
+    setBusy('ALL'); setMsg(null);
+    try {
+      const r = await fetch('/api/binance/futures/cancel-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ connectionId: connId }),
+      });
+      const j = await r.json();
+      setMsg({ ok: r.ok, text: r.ok ? (j?.message || '전체 취소했습니다') : errorTextOf(j, '취소 실패') });
+      if (r.ok) onChanged();
+    } catch (e: any) {
+      setMsg({ ok: false, text: `취소 실패: ${e?.message || e}` });
+    } finally { setBusy(null); }
+  };
+
+  // **못 읽은 것은 '없음'이 아니다.** 여기서 빈 화면을 그리면 손절이
+  // 걸려 있는데도 사용자는 없다고 믿는다.
+  if (orders == null) {
+    return (
+      <div style={{ padding: 14 }}>
+        <div style={{
+          padding: '12px 14px', borderRadius: 10, background: C.warnBg,
+          color: C.warn, fontSize: FS.small, lineHeight: 1.6,
+        }}>
+          <b>미체결 주문 조회 실패</b>
+          <div style={{ color: C.dim, marginTop: 4 }}>
+            {why || '거래소가 주문 목록을 주지 않았습니다'}
+          </div>
+          <div style={{ color: C.faint, marginTop: 6, fontSize: FS.micro }}>
+            &lsquo;주문 없음&rsquo;이 아닙니다 — 걸려 있는 손절이 여기 안 보일 수 있습니다.
+            거래소 앱에서 직접 확인하세요.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: 10 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+        padding: '0 4px 10px',
+      }}>
+        <span style={{ color: C.text, fontWeight: 700, fontSize: FS.small }}>
+          미체결 주문 <span style={{ ...NUM, color: C.accent }}>{split.total}</span>
+        </span>
+        {split.protective.length > 0 && (
+          <span style={chip(C.up, C.upBg)}>보호 {split.protective.length}</span>
+        )}
+        {split.normal.length > 0 && (
+          <span style={chip(C.dim)}>일반 {split.normal.length}</span>
+        )}
+        <div style={{ flex: 1 }}/>
+        {split.total > 0 && (
+          <button onClick={cancelAll} disabled={busy != null} style={{
+            ...ghostBtn(), color: C.down, borderColor: `${C.down}55`,
+            cursor: busy != null ? 'default' : 'pointer',
+          }}>{busy === 'ALL' ? '취소 중…' : '전체 취소'}</button>
+        )}
+      </div>
+
+      {msg && (
+        <div style={{
+          margin: '0 4px 10px', padding: '9px 12px', borderRadius: 8,
+          background: msg.ok ? C.upBg : C.warnBg, color: msg.ok ? C.up : C.warn,
+          fontSize: FS.micro, lineHeight: 1.55,
+        }}>{msg.text}</div>
+      )}
+
+      {split.total === 0 && <Empty t="미체결 주문이 없습니다"/>}
+
+      {split.protective.length > 0 && (
+        <Section title="보호 주문" note="포지션을 지키는 주문입니다 — 지우면 보호가 사라집니다">
+          {split.protective.map((v, i) => (
+            <OrderCard key={v.orderId ?? `p${i}`} v={v}
+              busy={busy === v.orderId} onCancel={() => cancelOne(v)}/>
+          ))}
+        </Section>
+      )}
+      {split.normal.length > 0 && (
+        <Section title="일반 주문" note="아직 체결되지 않은 진입 예약입니다">
+          {split.normal.map((v, i) => (
+            <OrderCard key={v.orderId ?? `n${i}`} v={v}
+              busy={busy === v.orderId} onCancel={() => cancelOne(v)}/>
+          ))}
+        </Section>
+      )}
+      {split.unknown.length > 0 && (
+        // 보호인지 신규인지 못 가른 주문. **어느 칸에도 넣지 않는다** —
+        // 보호로 세면 없는 안전을 믿고, 신규로 두면 취소 대상으로 보인다.
+        <Section title="용도 확인 불가" note="보호 주문인지 신규 주문인지 거래소 응답만으로는 가리지 못했습니다">
+          {split.unknown.map((v, i) => (
+            <OrderCard key={v.orderId ?? `u${i}`} v={v}
+              busy={busy === v.orderId} onCancel={() => cancelOne(v)}/>
+          ))}
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function Section({ title, note, children }: {
+  title: string; note: string; children: React.ReactNode;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ padding: '0 4px 6px' }}>
+        <div style={{ color: C.dim, fontSize: FS.micro, fontWeight: 700, letterSpacing: '0.03em' }}>
+          {title}
+        </div>
+        <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2 }}>{note}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** 주문 한 장. 한 열이다 — 가로로 넘치는 것이 없어야 잘리지 않는다 */
+function OrderCard({ v, busy, onCancel }: {
+  v: any; busy: boolean; onCancel: () => void;
+}) {
+  const tone = v.purpose === 'STOP' ? C.down
+    : v.purpose === 'TAKE_PROFIT' ? C.up
+    : v.protection === 'UNKNOWN' ? C.warn : C.dim;
+
+  // **기본은 쉬운 말, 자세한 건 접어 둔다.**
+  //
+  // 한 화면에 열두 줄을 다 펴 놓으면 카드가 표로 되돌아간다. 늘 필요한
+  // 것은 "언제 발동하는가 · 얼마나 나가는가" 둘뿐이고, 나머지(원문 타입·
+  // 주문 번호·생성 시각)는 거래소와 대조할 때만 본다.
+  const [more, setMore] = useState(false);
+
+  const detail: Array<[string, React.ReactNode]> = [];
+  detail.push(['방향', v.sideLabel]);
+  detail.push(['상태', v.statusLabel]);
+  if (v.triggerBasisLabel) detail.push(['발동 기준', v.triggerBasisLabel]);
+  if (v.createdAt) {
+    detail.push(['주문 시각', new Date(v.createdAt).toLocaleString('ko-KR', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    })]);
+  }
+  detail.push(['거래소 원문', `${v.rawType} · ${v.rawSide}${v.orderId ? ` · #${v.orderId}` : ''}`]);
+
+  return (
+    <div style={{
+      background: C.raised, borderRadius: 10, padding: '12px 14px',
+      marginBottom: 8, borderLeft: `2px solid ${tone}`,
+      // 카드 안에서도 넘치지 않게. 긴 값이 카드를 밀면 다시 가로 스크롤이 생긴다.
+      minWidth: 0, overflowWrap: 'anywhere',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ color: C.text, fontWeight: 700 }}>{v.symbol}</span>
+        <span style={{ color: tone, fontSize: FS.micro, fontWeight: 700 }}>{v.purposeLabel}</span>
+        <span style={{ color: C.faint, fontSize: FS.micro }}>· {v.kindLabel}</span>
+      </div>
+
+      {/* 늘 보이는 두 줄. 이것만으로 "언제 · 얼마나"가 읽혀야 한다. */}
+      <div style={{ marginTop: 7, color: C.text, fontSize: FS.small, lineHeight: 1.6 }}>
+        {v.triggerLabel && <div>{v.triggerLabel}</div>}
+        <div style={{ color: C.dim }}>{v.execLabel} · {v.qtyLabel}</div>
+      </div>
+
+      {more && (
+        <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {detail.map(([k, val]) => (
+            <div key={k} style={{ display: 'flex', gap: 10, alignItems: 'baseline', minWidth: 0 }}>
+              <span style={{
+                color: C.faint, fontSize: FS.micro, flexShrink: 0, width: 68,
+              }}>{k}</span>
+              <span style={{ color: C.dim, fontSize: FS.micro, minWidth: 0 }}>{val}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 터치 영역을 키운다. 44px 아래로 내려가면 좁은 화면에서 옆 버튼이
+          같이 눌리고, 여기서 잘못 눌리는 버튼은 [취소]다. */}
+      <div style={{ display: 'flex', gap: 8, marginTop: 11 }}>
+        <button onClick={() => setMore(m => !m)} style={{
+          ...ghostBtn(), flex: 1, minHeight: 44, cursor: 'pointer',
+        }}>{more ? '접기' : '자세히'}</button>
+        <button onClick={onCancel} disabled={busy || !v.orderId} style={{
+          ...ghostBtn(), flex: 1, minHeight: 44,
+          color: busy || !v.orderId ? C.faint : C.down,
+          borderColor: busy || !v.orderId ? C.hair : `${C.down}55`,
+          cursor: busy || !v.orderId ? 'default' : 'pointer',
+        }}>
+          {busy ? '취소 중…' : !v.orderId ? '취소 불가' : '주문 취소'}
+        </button>
+      </div>
     </div>
   );
 }

@@ -333,3 +333,33 @@ export async function futuresCancelProtection(
     return { cancelled: null, note: ` · ⚠ 남은 보호 주문을 정리하지 못했습니다 (${e?.message || e})` };
   }
 }
+
+/**
+ * 주문 하나 취소 — 거래소를 가리지 않는다.
+ *
+ * 화면의 미체결 카드마다 [취소]가 붙으려면 이게 있어야 한다. 없을 때는
+ * [전체 취소]뿐이었고, 그건 **손절 하나를 지우려다 전부 지우는** 버튼이다.
+ *
+ * 취소는 위험을 줄이는 동작이므로 거래소를 이유로 조용히 안 도는 일이
+ * 없어야 한다 — 이 저장소에서 반복된 사고가 정확히 그 모양이었다.
+ */
+export async function futuresCancelOrder(
+  ex: FuturesExchange,
+  key: string, secret: string, testnet: boolean,
+  args: { symbol?: string | null; orderId: string | number; bucket?: 'price' | 'normal' | null },
+): Promise<{ success: boolean; message: string }> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    const r = await gf.cancelOrderGateFutures(key, secret, args.orderId, {
+      bucket: args.bucket ?? null, testnet,
+    });
+    return { success: r.success, message: r.message };
+  }
+  const bf = await import('./binanceFutures');
+  const sym = String(args.symbol || '').toUpperCase().replace('/', '');
+  if (!sym) {
+    // 바이낸스는 심볼 없이 주문을 못 지운다. **지웠다고 말하지 않는다.**
+    return { success: false, message: '종목을 알 수 없어 취소하지 못했습니다' };
+  }
+  return await bf.cancelFuturesOrder(key, secret, sym, args.orderId, testnet);
+}

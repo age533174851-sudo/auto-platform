@@ -1727,7 +1727,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <span>{busy && side === 'BUY' ? '전송 중…'
           : reduceOnly ? '롱 청산'
           : holding === 'LONG' ? '롱 추가'
-          : holding === 'SHORT' ? '숏 정리 · 롱 진입'
+          : holding === 'SHORT' ? '롱 반전'
           : '롱 진입'}</span>
         <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
           {reduceOnly ? 'Sell' : `Buy · ${leverage}×`}
@@ -1740,7 +1740,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <span>{busy && side === 'SELL' ? '전송 중…'
           : reduceOnly ? '숏 청산'
           : holding === 'SHORT' ? '숏 추가'
-          : holding === 'LONG' ? '롱 정리 · 숏 진입'
+          : holding === 'LONG' ? '숏 반전'
           : '숏 진입'}</span>
         <span style={{ fontSize: FS.small, fontWeight: 600, opacity: 0.85 }}>
           {reduceOnly ? 'Buy' : `Sell · ${leverage}×`}
@@ -1753,8 +1753,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           **닫으려는 것이면 청산 탭을 쓰라고** 알려 준다. */}
       {!reduceOnly && holding && (
         <div style={{ color: C.warn, fontSize: FS.micro, lineHeight: 1.45, textAlign: 'center' }}>
-          {holding === 'LONG' ? '롱' : '숏'} {showQty(Math.abs(posAmt as number))} 보유 중 —{' '}
-          반대 방향 버튼은 <b>닫는 버튼이 아닙니다</b>. 닫으려면 위에서 <b>청산</b>을 고르세요.
+          {/* 짧게. 예전 문구는 두 줄이라 좁은 화면에서 주문 버튼을 밀어냈고,
+              길어서 아무도 안 읽었다. 말해야 하는 것은 한 가지뿐이다 —
+              **반전은 닫는 게 아니다.** */}
+          <b>반전</b>은 닫는 것이 아닙니다. 종료는 <b>청산</b> 탭.
         </div>
       )}
       </div>

@@ -50,6 +50,14 @@ export interface StopCheck {
   orderId: string | null;
   /** 실제로 걸려 있는 발동가 (요청한 값과 다를 수 있다 — 틱 반올림) */
   foundStopPrice: number | null;
+  /**
+   * 찾긴 찾았는데 이상하다. null이면 이상 없음.
+   *
+   * '있음'과 '쓸모 있음'은 다르다. 롱의 손절이 현재가 **위**에 걸려 있으면
+   * 그건 손절이 아니라 즉시 발동 예약이다 — 목록에는 있으니 '있음'으로
+   * 통과하지만 포지션을 지키지 못한다. 그래서 통과시키되 그 사실을 적는다.
+   */
+  warning?: string | null;
 }
 
 const num = (v: any): number | null => {
@@ -141,13 +149,33 @@ export function verifyStopAttached(
  */
 export function findAnyStop(
   orders: OpenOrderLike[] | null | undefined,
-  want: { symbol: string; positionSide: 'LONG' | 'SHORT' },
+  want: {
+    symbol: string;
+    positionSide: 'LONG' | 'SHORT';
+    /**
+     * 방향을 **확인했는가.** 기본값은 true(예전과 같은 동작).
+     *
+     * false면 조회하지 않고 '확인 불가'로 끝낸다. 방향을 모르는 채로 찾으면
+     * 반대편을 뒤지게 되고, 멀쩡히 걸려 있는 손절이 '없음'으로 나온다.
+     * 실제로 그 일이 있었다 — Gate가 수량을 절대값으로 보내는 바람에 숏이
+     * 롱으로 읽혔고, 숏의 손절(BUY)을 롱의 손절(SELL)로 찾다가 못 찾았다.
+     * 그리고 화면에는 '손절 없음'이라고 떴다. **조회 실패를 부재로 말한
+     * 것이다.**
+     */
+    sideKnown?: boolean;
+    /** 발동 방향 검증용 현재가. 없으면 검증을 건너뛴다 */
+    refPrice?: number | null;
+  },
 ): StopCheck {
   const none = (status: StopVerdict, reason: string): StopCheck =>
-    ({ status, reason, orderId: null, foundStopPrice: null });
+    ({ status, reason, orderId: null, foundStopPrice: null, warning: null });
 
   if (!Array.isArray(orders)) {
     return none('unknown', '미체결 주문을 읽지 못해 손절이 걸렸는지 확인하지 못했습니다');
+  }
+  if (want?.sideKnown === false) {
+    return none('unknown',
+      '포지션 방향을 확인하지 못해 손절을 조회하지 못했습니다 — 방향을 모르면 반대편을 뒤지게 됩니다');
   }
 
   const sym = String(want?.symbol || '').toUpperCase();
@@ -161,6 +189,22 @@ export function findAnyStop(
     if (!isStopType(o.type)) continue;
 
     const px = num(o.stopPrice) ?? num(o.triggerPrice) ?? num(o.price);
+
+    // ── 발동 방향이 말이 되는가 ──
+    //
+    // 롱의 손절은 현재가 **아래**여야 한다. 위에 있으면 걸자마자 발동해서
+    // 손절이 아니라 즉시 청산이 된다. 숏은 반대. 이건 '없음'으로 볼 일은
+    // 아니지만 — 주문은 실재한다 — 이대로 두면 포지션이 곧 사라진다.
+    const ref = num(want?.refPrice);
+    let warning: string | null = null;
+    if (px != null && ref != null && ref > 0) {
+      const wrong = want.positionSide === 'LONG' ? px > ref : px < ref;
+      if (wrong) {
+        warning = `${want.positionSide} 손절 ${px}가 현재가 ${ref} `
+          + `${want.positionSide === 'LONG' ? '위' : '아래'}입니다 — 걸자마자 발동합니다`;
+      }
+    }
+
     return {
       status: 'attached',
       reason: px == null
@@ -168,6 +212,7 @@ export function findAnyStop(
         : `손절 ${px}에 걸려 있습니다`,
       orderId: o.orderId == null ? null : String(o.orderId),
       foundStopPrice: px,
+      warning,
     };
   }
 

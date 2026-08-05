@@ -118,4 +118,76 @@ export function runPositionViewTests() {
     assert(near(derivePosition({ amount: -3, entryPrice: 100 }).notional, 300));
     eq(derivePosition({ amount: 3 }).notional, null);
   });
+
+  console.log('[포지션 카드 — 방향을 어디서 읽는가]');
+
+  test('Gate처럼 수량이 절대값으로 와도 side 필드가 있으면 숏이다', () => {
+    // 실제로 났던 사고다. Gate 라우트가 `Math.abs()`로 수량을 실어 보냈고,
+    // 이 함수는 부호에서 방향을 뽑았다 — 그래서 **모든 Gate 숏이 롱으로**
+    // 표시됐다. 그리고 방향이 뒤집히자 손절 조회가 반대편을 뒤져
+    // "손절 없음"이 됐고, 청산가 경고문도 반대로 계산됐다.
+    const v = derivePosition({
+      symbol: 'BTCUSDT', side: 'SHORT', amount: 0.9748,
+      entryPrice: 64071.1, liquidationPrice: 76579.2,
+    });
+    eq(v.side, 'SHORT');
+    eq(v.sideKnown, true);
+    eq(v.sideSource, 'field');
+    eq(v.sideConflict, null, '청산가가 진입가 위이므로 숏과 일치한다');
+    eq(closeSideFor(v.side), 'BUY', '숏은 사서 닫는다');
+  });
+
+  test('side 필드가 없으면 예전처럼 부호로 판정한다', () => {
+    eq(derivePosition({ amount: 1.5 }).sideSource, 'sign');
+    eq(derivePosition({ amount: -1.5 }).side, 'SHORT');
+    eq(derivePosition({ amount: -1.5 }).sideKnown, true);
+  });
+
+  test('수량 0이고 방향 필드도 없으면 방향을 모른다', () => {
+    const v = derivePosition({ amount: 0 });
+    eq(v.sideKnown, false, '모르는 것을 안다고 하지 않는다');
+    eq(v.sideSource, 'none');
+  });
+
+  test('FLAT·BOTH는 방향이 아니다', () => {
+    eq(derivePosition({ side: 'FLAT', amount: 0 }).sideKnown, false);
+    eq(derivePosition({ positionSide: 'BOTH', amount: 0 }).sideKnown, false);
+  });
+
+  test('양수는 진술이 아니다 — 필드가 SHORT면 SHORT다', () => {
+    // 어떤 어댑터는 수량을 절대값으로 보낸다. 그때 양수는 '롱이다'가 아니라
+    // '부호가 지워졌다'이다. 이걸 모순으로 세면 그런 거래소의 모든 숏
+    // 포지션에서 청산 버튼이 막힌다 — 못 닫는 것은 사고다.
+    const v = derivePosition({ side: 'SHORT', amount: 1.5 });
+    eq(v.side, 'SHORT');
+    eq(v.sideKnown, true);
+    eq(v.sideConflict, null);
+  });
+
+  test('음수는 진술이다 — LONG인데 음수면 진짜 모순이다', () => {
+    // 롱에 -0.97을 보내는 거래소는 없다. 이건 어느 한쪽이 확실히 틀렸다.
+    const v = derivePosition({ side: 'LONG', amount: -1.5 });
+    eq(v.sideKnown, false);
+    assert(v.sideConflict != null, '어긋난 사실을 들고 나간다');
+  });
+
+  test('청산가가 방향과 반대 모양이면 어긋남으로 잡는다', () => {
+    // 숏인데 청산가가 진입가 아래 — 롱의 모양이다. 둘 중 하나는 틀렸고,
+    // 어느 쪽인지 모르는 채로 청산 버튼을 누르게 두면 안 된다.
+    const v = derivePosition({
+      side: 'SHORT', amount: -1, entryPrice: 64000, liquidationPrice: 50000,
+    });
+    eq(v.sideKnown, false);
+    assert(String(v.sideConflict).includes('LONG'));
+  });
+
+  test('교차마진의 청산가 0은 어긋남이 아니다', () => {
+    // 교차는 청산가를 0/없음으로 준다. 그걸 모순으로 세면 교차 포지션마다
+    // 가짜 경고가 뜨고, 곧 아무도 경고를 안 읽는다.
+    const v = derivePosition({
+      side: 'LONG', amount: 1, entryPrice: 64000, liquidationPrice: 0,
+    });
+    eq(v.sideConflict, null);
+    eq(v.sideKnown, true);
+  });
 }
