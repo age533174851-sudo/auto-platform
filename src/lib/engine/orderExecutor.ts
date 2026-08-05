@@ -93,6 +93,13 @@ export interface ExecuteResult {
    * 메시지 문자열을 읽어야만 알 수 있었다.
    */
   unprotected?: boolean;
+  /**
+   * 청산 뒤 **거래소에 남아 있는 수량.** 0이면 실제로 닫힌 것이 확인됐다.
+   *
+   * **못 읽었으면 null이다** — 0으로 적으면 '전부 닫혔다'가 사실이 되고,
+   * 사용자는 확인하지 않는다. 진입에는 채우지 않는다.
+   */
+  remainingQty?: number | null;
   exchangeOrderId?: string;
   filledQty?: number;
   avgPrice?: number;
@@ -128,6 +135,60 @@ export function roundQuantity(qty: number, stepSize: number): number {
   if (!stepSize || stepSize <= 0) return qty;
   const precision = Math.max(0, Math.round(-Math.log10(stepSize)));
   return Number((Math.floor(qty / stepSize) * stepSize).toFixed(precision));
+}
+
+/**
+ * **청산이 실제로 됐는지 거래소에 다시 물어본다.**
+ *
+ * 주문이 접수됐다는 것과 포지션이 없어졌다는 것은 다른 얘기다. 부분
+ * 체결로 끝나거나, 리스크 엔진이 접수 직후 취소하거나, reduceOnly가
+ * 조용히 무시될 수 있다.
+ *
+ * 그런데 화면에는 "주문 접수"만 떴다. **닫았다고 믿고 손을 떼는 것**이
+ * 이 앱에서 가장 위험한 착각이다 — 열려 있는 줄 알면 다시 누르지만,
+ * 닫힌 줄 알면 아무것도 안 한다.
+ *
+ * 진입 쪽 되돌리기는 이미 되읽어 확인한다(7-b). 사용자가 직접 누르는
+ * 청산만 안 하고 있었다.
+ *
+ * 못 읽으면 null이다 — 0으로 적으면 '전부 닫혔다'가 사실이 된다.
+ */
+async function remainingAfterClose(
+  creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean },
+  symbol: string,
+): Promise<{ remaining: number | null; note: string }> {
+  try {
+    if (creds.exchange === 'gate') {
+      const gf = await import('@/lib/exchanges/gateFutures');
+      const gp = await import('@/lib/exchanges/gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return { remaining: null, note: '' };
+      const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
+      const size = Math.abs(Number(pos?.size ?? 0));
+      const spec = await gf.getGateContractSpec(contract, creds.testnet);
+      const base = gp.gateBaseFromContracts(size, spec);
+      const left = base != null ? base : size;
+      return {
+        remaining: left,
+        note: left === 0 ? ' · 포지션 종료 확인'
+          : ` · ⚠ 아직 ${left} 남아 있습니다 — 다시 확인하세요`,
+      };
+    }
+    const bf = await import('@/lib/exchanges/binanceFutures');
+    const rr = await bf.getSymbolPositionRiskEx(creds.apiKey, creds.apiSecret, symbol, creds.testnet);
+    if (!rr.risk) {
+      // 조회 자체가 실패했다. **'닫혔다'고 말하지 않는다.**
+      return { remaining: null, note: ` · ⚠ 종료를 확인하지 못했습니다 (${rr.error || '조회 실패'})` };
+    }
+    const left = Math.abs(Number(rr.risk.positionAmt) || 0);
+    return {
+      remaining: left,
+      note: left === 0 ? ' · 포지션 종료 확인'
+        : ` · ⚠ 아직 ${left} 남아 있습니다 — 다시 확인하세요`,
+    };
+  } catch (e: any) {
+    return { remaining: null, note: ` · ⚠ 종료를 확인하지 못했습니다 (${e?.message || e})` };
+  }
 }
 
 export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteResult> {
@@ -623,13 +684,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           (args.exitPlan.trailingQty > 0 ? ` · 잔량 ${args.exitPlan.trailingQty}는 트레일링 대기` : '')
         : '';
 
+      // **청산이면 실제로 닫혔는지 되읽는다.** 접수됐다는 것과 없어졌다는
+      // 것은 다른 얘기다 — 닫았다고 믿고 손을 떼는 것이 가장 위험하다.
+      const closeCheck = args.reduceOnly
+        ? await remainingAfterClose({ exchange, apiKey, apiSecret, testnet }, plan.symbol)
+        : { remaining: null, note: '' };
+      if (args.reduceOnly) {
+        await update({ error_message: closeCheck.remaining === 0 ? null : closeCheck.note.trim() || null });
+      }
+
       return {
         ok: true, status: 'ACKED', clientOrderId,
         exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
         slOrderId: slId, tpOrderId: tpId,
+        remainingQty: closeCheck.remaining,
         // 손절이 걸렸는지 **확인하지 못했으면** 그 사실을 메시지에 남긴다.
         // 조용히 지나가면 "접수됨"만 보이고, 사용자는 손절이 확인된 줄 안다.
-        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})${exitNote}${stopCheckNote}`,
+        message: `주문 접수 (${plan.leverage}배 · ${plan.quantity})${exitNote}${stopCheckNote}${closeCheck.note}`,
       };
     }
 
@@ -804,15 +875,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
     }
 
+    const gClose = args.reduceOnly
+      ? await remainingAfterClose({ exchange, apiKey, apiSecret, testnet }, plan.symbol)
+      : { remaining: null, note: '' };
+
     return {
       ok: true, status: 'ACKED', clientOrderId,
       exchangeOrderId: gres?.id != null ? String(gres.id) : undefined,
       filledQty: fill.filledQty ?? undefined,
       avgPrice: fill.avgPrice ?? undefined,
       slOrderId: gateSlId,
+      remainingQty: gClose.remaining,
       message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
         + (sized.reason ? ` · ${sized.reason}` : '')
         + (stopSpec.note ? ` · ${stopSpec.note}` : '')
+        + gClose.note
         + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
             ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')
         + (gateSlId ? ' · 손절 부착' : ''),

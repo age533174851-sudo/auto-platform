@@ -383,13 +383,58 @@ export async function countOpen(key: string, secret: string, testnet = true) {
   return { positions: posN, orders: ordN };
 }
 
-export async function setFuturesLeverage(key: string, secret: string, symbol: string, leverage: number, testnet = true) {
+/**
+ * 레버리지를 설정하고 **되읽어 확인한다.**
+ *
+ * 예전에는 POST가 200을 주면 그대로 `success: true`였다. 그런데 200은
+ * "요청을 받았다"이지 "그 값이 됐다"가 아니다. 실제로 화면에 이렇게 떴다:
+ *
+ *   거래소 100배 · 의도 50배
+ *
+ * 배율이 의도와 다르면 **계산한 모든 것이 틀린다** — 청산가도, 필요
+ * 증거금도, 손절이 청산 안쪽인지도. 100배에서 청산 거리는 1%보다 좁은데
+ * 손절을 1.57%에 걸어 두면 손절이 작동하기 전에 청산된다. 그게 이 계좌에서
+ * 실제로 일어난 일이다.
+ *
+ * Gate 경로는 이미 되읽어 확인하고 있었다(setLeverageGateFutures).
+ * 바이낸스만 빠져 있었다.
+ *
+ * **못 읽으면 success:false다.** 확인하지 못한 것은 통과가 아니다.
+ */
+export async function setFuturesLeverage(
+  key: string, secret: string, symbol: string, leverage: number, testnet = true,
+): Promise<{ success: boolean; leverage: number | null; message: string }> {
+  const want = Math.max(1, Math.min(125, Math.round(leverage)));
+  const sym = symbol.toUpperCase().replace('/', '');
   try {
-    await fapiSigned('POST', '/fapi/v1/leverage', key, secret, testnet, {
-      symbol: symbol.toUpperCase().replace('/', ''), leverage: Math.max(1, Math.min(125, Math.round(leverage))),
-    });
-    return { success: true, message: `레버리지 ${leverage}x` };
-  } catch (e: any) { return { success: false, message: e.message || '레버리지 설정 실패' }; }
+    await fapiSigned('POST', '/fapi/v1/leverage', key, secret, testnet, { symbol: sym, leverage: want });
+  } catch (e: any) {
+    return { success: false, leverage: null, message: e?.message || '레버리지 설정 실패' };
+  }
+
+  // 되읽는다. 설정이 200을 줬다는 것과 계좌가 그 배율이라는 것은 다르다.
+  const rr = await getSymbolPositionRiskEx(key, secret, sym, testnet);
+  const actual = rr.risk?.leverage ?? null;
+  if (actual == null) {
+    return { success: false, leverage: null,
+      message: `레버리지를 되읽지 못해 확인할 수 없습니다 (${rr.error || '조회 실패'}) — `
+             + '배율을 모르면 청산가도 필요 증거금도 계산할 수 없습니다' };
+  }
+  if (actual === want) return { success: true, leverage: actual, message: `레버리지 ${actual}x 확인` };
+
+  // ── 요청보다 **높으면** 막는다 ──
+  //
+  // 청산 거리가 계획보다 짧아진다. 손절이 청산 너머로 밀리면 손절은
+  // 영원히 발동하지 않는다 — 계획의 전제가 무너진 것이다.
+  if (actual > want) {
+    return { success: false, leverage: actual,
+      message: `거래소 배율이 ${actual}배인데 ${want}배로 설정하지 못했습니다 — `
+             + '계획보다 청산이 가까워져 손절이 작동하지 않을 수 있습니다' };
+  }
+  // 낮게 잡힌 것은 거래소가 상한으로 깎은 경우다. 포지션당 위험은 줄지만
+  // 필요 증거금이 늘어 주문이 거부될 수 있다. 막지 않고 사실만 남긴다.
+  return { success: true, leverage: actual,
+    message: `요청 ${want}배 / 실제 ${actual}배 — 거래소가 낮췄습니다` };
 }
 
 /**

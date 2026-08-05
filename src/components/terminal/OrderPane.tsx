@@ -361,6 +361,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 청산 전용. 켜면 보유분을 줄이는 주문만 나간다 — 반대로 새 포지션이
   // 열리는 사고를 막는다.
   const [reduceOnly, setReduceOnly] = useState(false);
+  /**
+   * 지금 들고 있는 수량 (부호 있음, 롱 양수). 못 읽으면 null.
+   *
+   * 청산 탭이 이걸 쓴다. 없으면 사용자가 이미 가진 것을 닫으려는데 얼마를
+   * 닫을지 다시 적어야 하고, 0.976을 0.97로 잘못 적으면 일부만 닫힌다.
+   */
+  const [posAmt, setPosAmt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // **왜 막혔는지**를 따로 들고 있는다.
@@ -534,10 +541,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         if (!alive) return;
         setMarginType(j?.marginType ?? null);
         setMarginErr(j?.marginType ? '' : (errorTextOf(j, '마진 모드를 읽지 못했습니다')));
+        const amt = Number(j?.positionAmt);
+        setPosAmt(Number.isFinite(amt) ? amt : null);
       } catch (e: any) {
         // **격리로 가정하지 않는다.** 여기서 기본값을 넣으면 화면이 다시
         // 거짓말을 시작한다.
-        if (alive) { setMarginType(null); setMarginErr(`조회 실패 (${e?.message || e})`); }
+        if (alive) { setMarginType(null); setMarginErr(`조회 실패 (${e?.message || e})`); setPosAmt(null); }
       }
     })();
     return () => { alive = false; };
@@ -672,6 +681,18 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   };
 
   const setPct = (pct: number) => {
+    // ── 청산이면 **보유 수량의 비율**이다 ──
+    //
+    // 신규는 '잔고의 몇 %를 걸까'이고 청산은 '가진 것의 몇 %를 닫을까'다.
+    // 같은 버튼이 두 뜻을 갖는데 예전에는 언제나 잔고 기준이라, 청산 탭에서
+    // 50%를 누르면 **가진 것과 무관한 수량**이 들어갔다.
+    if (reduceOnly) {
+      if (posAmt == null || !(Math.abs(posAmt) > 0)) return;   // 모르면 채우지 않는다
+      const base = Math.abs(posAmt) * (pct / 100);
+      const v = unit === 'BASE' ? base : base * (unitPx || 0);
+      setQty(v > 0 ? String(Number(v.toFixed(unit === 'BASE' ? 6 : 2))) : '');
+      return;
+    }
     const px = Number(price) || mid || 0;
     // 잔고를 모르면 비율 계산이 불가능하다. 임의 값으로 채우지 않는다.
     if (px <= 0 || balanceUsd == null) return;
@@ -1031,7 +1052,28 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           flex: 1, minWidth: 0,
         }}>
           {([['OPEN', '신규'], ['CLOSE', '청산']] as const).map(([v, label]) => (
-            <button key={v} onClick={() => setReduceOnly(v === 'CLOSE')} style={{
+            <button key={v} onClick={() => {
+              const close = v === 'CLOSE';
+              setReduceOnly(close);
+              // ── 청산으로 바꾸면 **보유 수량을 채운다** ──
+              //
+              // 예전에는 칸이 빈 채로 남았다. 이미 가진 것을 닫으려는데
+              // 얼마를 닫을지 다시 적어야 했고, 0.976을 0.97로 잘못 적으면
+              // **일부만 닫히고 나머지는 그대로 남는다.** 닫는 동작에서
+              // 그건 가장 나쁜 결과다.
+              //
+              // 못 읽었으면(posAmt null) 채우지 않는다 — 지어낸 수량으로
+              // 청산 주문을 내면 안 된다. 신규로 돌아갈 때도 비운다:
+              // 청산용으로 채워 둔 전량이 신규 진입 수량이 되면 의도의
+              // 몇 배가 열린다.
+              if (close && posAmt != null && Math.abs(posAmt) > 0) {
+                const base = Math.abs(posAmt);
+                setQty(String(Number((unit === 'BASE' ? base : base * (unitPx || 0))
+                  .toFixed(unit === 'BASE' ? 6 : 2))));
+              } else {
+                setQty('');
+              }
+            }} style={{
               flex: 1, minWidth: 0,
               minHeight: dense ? 28 : 34, border: 'none', borderRadius: 6, cursor: 'pointer',
               background: (v === 'CLOSE') === reduceOnly ? C.panel : 'transparent',
@@ -1121,6 +1163,43 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           {unitPx > 0
             ? `→ 약 ${Number(baseQty.toFixed(6))} ${base} (${fmtPrice(unitPx)} 기준)`
             : `가격을 확인하지 못해 ${base} 수량으로 바꿀 수 없습니다`}
+        </div>
+      )}
+
+      {/* ── 지금 들고 있는 것 ──
+
+          롱을 들고 있는데 화면에 [숏 진입]만 보이면, 그걸 '파는 버튼'으로
+          읽는다. 실제로는 **반대 방향 신규 진입**이고, 눌리면 포지션이
+          정리되는 대신 양쪽이 열리거나(헤지) 의도보다 큰 반대 포지션이 된다.
+
+          버튼 이름은 이미 신규/청산에 따라 바뀐다. 그런데 **무엇을 들고
+          있는지**가 화면에 없으면 어느 탭에 있어야 하는지를 알 수 없다.
+          그래서 여기 한 줄로 적는다. */}
+      {posAmt != null && Math.abs(posAmt) > 0 && (
+        <div style={{
+          padding: '6px 9px', borderRadius: 7,
+          background: C.raised, fontSize: FS.micro, lineHeight: 1.5,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
+        }}>
+          <span style={{ color: C.dim }}>
+            보유{' '}
+            <b style={{ color: posAmt > 0 ? C.up : C.down }}>
+              {posAmt > 0 ? '롱' : '숏'} {Math.abs(posAmt)}
+            </b>
+          </span>
+          {/* 닫으려면 어디를 눌러야 하는지 그 자리에서 알려준다 */}
+          {!reduceOnly && (
+            <button onClick={() => {
+              setReduceOnly(true);
+              const base = Math.abs(posAmt);
+              setQty(String(Number((unit === 'BASE' ? base : base * (unitPx || 0))
+                .toFixed(unit === 'BASE' ? 6 : 2))));
+            }} style={{
+              padding: '3px 8px', borderRadius: 6, cursor: 'pointer',
+              background: C.panel, color: C.text, border: `1px solid ${C.hair}`,
+              fontSize: FS.micro, fontWeight: 700, flexShrink: 0,
+            }}>전량 청산으로</button>
+          )}
         </div>
       )}
 

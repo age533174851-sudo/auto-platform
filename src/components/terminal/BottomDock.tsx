@@ -100,10 +100,18 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
   const loadRecon = useCallback(async () => {
     if (!auth) return;
     try {
-      const r = await fetch('/api/reconcile/state', { headers: { Authorization: auth } });
+      // **지금 화면이 보고 있는 연결로 대조한다.**
+      //
+      // 예전에는 아무 인자도 안 보냈다. 그러면 서버가 활성 연결 중 하나를
+      // 임의로 집고, 연결이 여럿이면 **다른 거래소 상태로 판정**한다.
+      // Gate 키가 죽었다는 이유로 바이낸스 주문이 막히는 식이다.
+      const q = new URLSearchParams();
+      q.set('mode', tradeMode === 'LIVE' ? 'LIVE' : 'TESTNET');
+      if (connId) q.set('connectionId', connId);
+      const r = await fetch(`/api/reconcile/state?${q}`, { headers: { Authorization: auth } });
       setRecon(await r.json());
     } catch (e: any) { setRecon({ ok: false, error: e?.message || '대조 실패' }); }
-  }, [auth]);
+  }, [auth, connId, tradeMode]);
 
   useEffect(() => { if (tab === '상태대조') loadRecon(); }, [tab, loadRecon]);
 
