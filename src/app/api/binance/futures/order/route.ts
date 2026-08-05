@@ -545,6 +545,9 @@ export async function POST(req: NextRequest) {
     // 손절이 실제로 걸렸는가. 화면이 메시지 문자열을 읽지 않고도
     // '보호되지 않은 포지션'을 붉게 그릴 수 있어야 한다.
     unprotected: exec.unprotected ?? (built.noStop ? true : undefined),
+    // 청산이면 **실제로 닫혔는지**. 0이면 확인됨, null이면 확인 못 함.
+    // 화면이 "주문 접수"만 보고 '정리됨'으로 그리면 안 된다.
+    remainingQty: exec.remainingQty ?? null,
     noStop: built.noStop ?? false,
     duplicate: exec.duplicate,
     message: exec.message,
