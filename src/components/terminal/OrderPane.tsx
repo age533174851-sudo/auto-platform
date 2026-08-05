@@ -686,6 +686,22 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     : (unitPx > 0 ? typedQty / unitPx : NaN);
   const notional = (Number.isFinite(baseQty) ? baseQty : 0) * unitPx;
   const margin = leverage > 0 ? notional / leverage : 0;
+  // 비용을 **계산할 수 있었는가.** 수량을 못 읽었거나(USDT로 적었는데
+  // 가격이 없음) 가격이 0이면 명목가가 0이 되고, 화면에는 '비용 0.00'이
+  // 뜬다. 그건 "공짜"로 읽히지만 사실은 **모른다**이다.
+  const costKnown = Number.isFinite(baseQty) && unitPx > 0;
+
+  // ── 이 모드로 주문할 연결이 정해졌는가 ──
+  //
+  // 화면에 이런 상태가 실제로 떴다: 상단은 'USDⓈ-M · 테스트넷'인데
+  // "거래소 연결이 없습니다"이고, 잔고는 확인 불가, 포지션 칸은 "연결을
+  // 선택하면 표시됩니다" — 그런데 **롱 진입·숏 진입 버튼은 눌렸다.**
+  //
+  // 공개 시세는 연결 없이도 오므로 차트와 호가는 정상으로 보인다. 그
+  // 화면만 보면 주문도 될 것 같다. submit()이 막고는 있었지만, 막는
+  // 자리가 클릭 뒤라 사용자는 **누를 수 있는 버튼**을 본다.
+  // 누를 수 없는 것은 눌러 보고 알 일이 아니다.
+  const noConn = !isPaper && !modeResolution.ok;
   // ── 청산 거리 ──
   //
   // **포지션이 있으면 거래소가 계산한 값을 쓴다.** 예전에는 언제나
@@ -1534,15 +1550,19 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           <span style={{ color: maxOpenUsd == null ? C.warn : C.faint }}>
             최대 {maxOpenUsd == null ? '확인 불가' : fmtPrice(maxOpenUsd)}
           </span>
-          <span style={{ color: C.dim }}>
-            비용 {margin > 0 ? fmtPrice(margin) : '0.00'}
+          {/* **못 읽은 것을 0으로 적지 않는다.** '비용 0.00'은 공짜로
+              읽히지만 실제로는 가격이나 수량을 못 읽은 상태다. */}
+          <span style={{ color: costKnown ? C.dim : C.warn }}>
+            비용 {!costKnown ? '확인 불가' : margin > 0 ? fmtPrice(margin) : '—'}
           </span>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3, ...NUM, fontSize: FS.micro }}>
           <Kv k="최대 주문" v={maxOpenUsd == null ? '확인 불가' : `${fmtPrice(maxOpenUsd)} USDT`}
               warn={maxOpenUsd == null}/>
-          <Kv k="비용(증거금)" v={margin > 0 ? `${fmtPrice(margin)} USDT` : '0.00 USDT'}/>
+          <Kv k="비용(증거금)"
+              v={!costKnown ? '확인 불가' : margin > 0 ? `${fmtPrice(margin)} USDT` : '—'}
+              warn={!costKnown}/>
           <Kv k="명목가" v={notional > 0 ? `${fmtPrice(notional)} USDT` : '—'}/>
         </div>
       )}
@@ -1719,12 +1739,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           **모르면(posAmt null) 막지 않는다** — 조회 실패가 청산을 막으면
           못 닫는 상황이 된다. 못 여는 것은 불편이고 못 닫는 것은 사고다. */}
       <button onClick={() => submit('BUY')}
-        disabled={busy || (reduceOnly && holding === 'LONG')}
-        title={reduceOnly && holding === 'LONG' ? '숏 포지션이 없습니다' : undefined}
-        style={{ ...primaryBtn(C.up, busy || (reduceOnly && holding === 'LONG')),
+        disabled={busy || noConn || (reduceOnly && holding === 'LONG')}
+        title={noConn ? modeResolution.reason
+          : reduceOnly && holding === 'LONG' ? '숏 포지션이 없습니다' : undefined}
+        style={{ ...primaryBtn(C.up, busy || noConn || (reduceOnly && holding === 'LONG')),
                  minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'BUY' ? '전송 중…'
+          : noConn ? '계좌 선택 필요'
           : reduceOnly ? '롱 청산'
           : holding === 'LONG' ? '롱 추가'
           : holding === 'SHORT' ? '롱 반전'
@@ -1734,10 +1756,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </span>
       </button>
 
-      <button onClick={() => submit('SELL')} disabled={busy}
-        style={{ ...primaryBtn(C.down, busy), minHeight: dense ? 42 : 46, display: 'flex',
+      <button onClick={() => submit('SELL')} disabled={busy || noConn}
+        title={noConn ? modeResolution.reason : undefined}
+        style={{ ...primaryBtn(C.down, busy || noConn), minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'SELL' ? '전송 중…'
+          : noConn ? '계좌 선택 필요'
           : reduceOnly ? '숏 청산'
           : holding === 'SHORT' ? '숏 추가'
           : holding === 'LONG' ? '숏 반전'
