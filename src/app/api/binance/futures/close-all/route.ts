@@ -31,6 +31,20 @@ export async function POST(req: NextRequest) {
   const cancel = await futuresCancelAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!);
   const close = await futuresCloseAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!, 5);
 
+  // ── 닫은 **뒤에** 한 번 더 쓸어낸다 ──
+  //
+  // 취소를 먼저 하는 이유는 위에 적혀 있다(미체결 지정가가 종료 직후
+  // 체결되어 포지션이 다시 열리는 것을 막는다). 그런데 그 사이에 손절이
+  // 발동해 새 주문이 생기거나, 첫 취소가 일부만 성공했을 수 있다.
+  //
+  // 남은 보호 주문은 포지션이 없어진 뒤에 트리거되면 **반대 방향으로 새
+  // 포지션을 연다.** 닫으려고 누른 버튼이 여는 버튼이 되는 것이다.
+  // 전부 닫힌 것이 확인됐을 때만 한다 — 남아 있으면 그 보호는 필요하다.
+  let sweep: any = null;
+  if (close?.success && close?.remaining === 0) {
+    sweep = await futuresCancelAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!);
+  }
+
   return NextResponse.json({
     ok: !!close?.success,
     queued: false,
@@ -38,6 +52,8 @@ export async function POST(req: NextRequest) {
     // 취소 실패는 막지 않되 숨기지도 않는다. 종료가 됐는데 취소가 안 됐으면
     // 사용자가 그 사실을 알아야 한다.
     cancel: { success: !!cancel?.success, count: cancel?.count ?? null, results: cancel?.results },
+    // 종료 뒤 쓸어낸 결과. null이면 종료가 확인되지 않아 하지 않았다는 뜻이다.
+    sweep: sweep ? { success: !!sweep.success, count: sweep.count ?? null } : null,
     remaining: close?.remaining ?? null,
     retries: close?.retries ?? null,
     testnet: creds.testnet,

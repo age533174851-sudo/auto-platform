@@ -264,3 +264,72 @@ export async function futuresCloseAll(
                         : `포지션 ${r?.remaining ?? '?'}개가 남았습니다 — 거래소에서 직접 확인하세요`,
   };
 }
+
+/**
+ * **포지션을 닫은 뒤 남은 보호 주문을 지운다.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 손절은 포지션을 닫는 주문이다. 그런데 포지션이 이미 없어진 뒤에도 그
+ * 주문이 거래소에 남아 있으면, 가격이 트리거에 닿는 순간 **반대 방향으로
+ * 새 포지션이 열린다.** 닫으려고 누른 버튼이 결과적으로 포지션을 여는 것이다.
+ *
+ * 바이낸스의 `closePosition: true` 주문은 포지션이 사라지면 거래소가
+ * 알아서 취소한다. 그런데 이 저장소는 그게 거절될 때(-4120) **수량 기반
+ * reduceOnly**로 한 번 더 시도한다 — 그쪽은 자동으로 안 없어진다.
+ * Gate의 `price_orders`도 남는다.
+ *
+ * 언제 부르는가
+ * ─────────────
+ * **전량이 닫힌 것을 확인한 뒤에만.** 부분 청산 뒤에 지우면 남은 포지션이
+ * 보호 없이 남는다 — 닫으려다 더 위험해진다.
+ */
+export interface CancelProtectionResult {
+  /** 지운 건수. 못 세면 null */
+  cancelled: number | null;
+  /** 사람이 읽는 한 줄. 지운 것이 없으면 빈 문자열 */
+  note: string;
+}
+
+export async function futuresCancelProtection(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean, symbol: string,
+): Promise<CancelProtectionResult> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const gp = await import('./gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return { cancelled: null, note: '' };
+      const rows = await gf.gateReq<any[]>('DELETE', '/api/v4/futures/usdt/price_orders', {
+        key, secret, qs: `contract=${contract}`, testnet,
+      });
+      const n = Array.isArray(rows) ? rows.length : 0;
+      return { cancelled: n, note: n > 0 ? ` · 남은 보호 주문 ${n}건 취소` : '' };
+    }
+
+    const bf = await import('./binanceFutures');
+    const { orders } = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
+    // **포지션을 닫는 주문만** 지운다. 진입 예약(지정가)은 사용자가 일부러
+    // 걸어 둔 것일 수 있어 건드리지 않는다.
+    const targets = (orders || []).filter((o: any) => {
+      const t = String(o?.type || '').toUpperCase();
+      const isProtective = t.includes('STOP') || t.includes('TAKE_PROFIT');
+      return isProtective && (o?.closePosition === true || o?.reduceOnly === true);
+    });
+    let n = 0;
+    for (const o of targets) {
+      try { await bf.cancelFuturesOrder(key, secret, symbol, o.orderId, testnet); n++; }
+      catch { /* 개별 실패는 넘긴다 — 아래에서 몇 건 지웠는지 그대로 적는다 */ }
+    }
+    return {
+      cancelled: n,
+      note: targets.length === 0 ? ''
+        : n === targets.length ? ` · 남은 보호 주문 ${n}건 취소`
+        : ` · ⚠ 보호 주문 ${targets.length}건 중 ${n}건만 취소됐습니다 — 거래소에서 확인하세요`,
+    };
+  } catch (e: any) {
+    // **지웠다고 말하지 않는다.** 남아 있으면 반대 포지션이 열릴 수 있으므로
+    // 확인하지 못한 것은 그대로 알린다.
+    return { cancelled: null, note: ` · ⚠ 남은 보호 주문을 정리하지 못했습니다 (${e?.message || e})` };
+  }
+}

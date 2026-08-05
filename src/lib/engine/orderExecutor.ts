@@ -157,6 +157,29 @@ async function remainingAfterClose(
   creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean },
   symbol: string,
 ): Promise<{ remaining: number | null; note: string }> {
+  const r = await readRemaining(creds, symbol);
+  // ── 전량이 닫혔으면 **남은 보호 주문을 지운다** ──
+  //
+  // 손절은 포지션을 닫는 주문이다. 포지션이 없어진 뒤에도 남아 있으면
+  // 트리거에 닿는 순간 **반대 방향으로 새 포지션이 열린다.** 닫으려고
+  // 누른 버튼이 결과적으로 포지션을 여는 것이다.
+  //
+  // **전량 확인된 경우에만.** 부분 청산 뒤에 지우면 남은 포지션이 보호
+  // 없이 남는다 — 닫으려다 더 위험해진다.
+  if (r.remaining === 0) {
+    const { futuresCancelProtection } = await import('@/lib/exchanges/futuresAdapter');
+    const c = await futuresCancelProtection(
+      creds.exchange, creds.apiKey, creds.apiSecret, creds.testnet, symbol);
+    return { remaining: 0, note: r.note + c.note };
+  }
+  return r;
+}
+
+/** 거래소에 남아 있는 수량만 읽는다 (정리는 위에서 한다) */
+async function readRemaining(
+  creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean },
+  symbol: string,
+): Promise<{ remaining: number | null; note: string }> {
   try {
     if (creds.exchange === 'gate') {
       const gf = await import('@/lib/exchanges/gateFutures');
