@@ -92,9 +92,20 @@ export function TradeModeSwitch({ compact }: { compact?: boolean }) {
           background: C.warnBg, color: C.warn, fontSize: FS.micro, lineHeight: 1.5,
         }}>
           {modeResolution.reason}
+          {/* **지금 고른 모드에 맞는 안내를 적는다.**
+
+              예전에는 조건 없이 "모의투자는 연결 없이 바로 쓸 수
+              있습니다"였다. 그래서 테스트넷 탭에서 연결이 없을 때도
+              그 문장이 떴고, 화면은 "연결이 없습니다"와 "연결 없이 쓸 수
+              있습니다"를 **동시에** 말했다. 읽는 사람은 지금 상태가
+              정상인지 아닌지 알 수 없다. */}
           {connections.length === 0 && (
             <div style={{ color: C.dim, marginTop: 3 }}>
-              모의투자는 연결 없이 바로 쓸 수 있습니다.
+              {tradeMode === 'PAPER'
+                ? '모의투자는 연결 없이 바로 쓸 수 있습니다.'
+                : tradeMode === 'TESTNET'
+                  ? '테스트넷 거래를 하려면 Gate 또는 Binance 테스트넷 계좌를 연결하세요. 연결 없이 연습만 하려면 모의를 고르세요.'
+                  : '실전 거래를 하려면 실계좌를 연결하세요. 연결 없이 연습하려면 모의를 고르세요.'}
             </div>
           )}
         </div>
