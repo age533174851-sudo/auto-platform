@@ -69,6 +69,39 @@ export interface BacktestConfig {
    * DCA는 어떤 경우에도 숏을 안 한다 — 정기 적립 전략에 숏은 뜻이 없다.
    */
   allowShort?: boolean;
+
+  // ── 수수료 말고도 나가는 것들 ───────────────────────────
+  //
+  // 지금까지 비용은 수수료 하나뿐이었다. 그런데 실제로 체결되는 가격은
+  // 화면에 찍힌 가격이 아니고, 선물은 들고만 있어도 펀딩비가 나간다.
+  // 둘 다 **한 방향으로만** 작동한다 — 빼면 성적이 언제나 좋아진다.
+  //
+  // 스캘핑처럼 손절이 0.3%인 전략에서는 이게 곁가지가 아니다.
+  // 왕복 슬리피지 0.05%면 손익분기 승률이 몇 %p 움직인다.
+
+  /**
+   * 편도 슬리피지(%). 진입도 청산도 **불리한 쪽으로** 밀린다.
+   *
+   * 롱 진입은 더 비싸게, 롱 청산은 더 싸게. 유리한 쪽으로 밀리는 경우도
+   * 물론 있지만, 그걸 평균 0으로 놓으면 시장가 주문의 성질을 지운다 —
+   * 시장가는 호가를 먹고 들어가므로 기댓값이 음수다.
+   *
+   * 안 주면 0이다. **0을 기본으로 두는 것은 낙관이지만**, 여기서 임의의
+   * 값을 넣으면 예전 결과와 말없이 달라진다. 대신 결과에 slippageApplied를
+   * 실어서 0으로 돌았다는 사실이 성적표에 남게 한다.
+   */
+  slippagePct?: number;
+
+  /**
+   * 8시간당 펀딩비(%). 명목가 대비. 롱이 낼 때가 양수다.
+   *
+   * 보유 시간에 비례해 나간다. 스윙처럼 며칠씩 들고 가는 전략에서는
+   * 수수료보다 클 수 있다.
+   *
+   * **방향을 구분한다** — 양수 펀딩에서 숏은 받는다. 둘 다 빼면
+   * 숏 전략이 실제보다 나쁘게 나오고, 그것도 틀린 성적표다.
+   */
+  fundingRatePct8h?: number;
 }
 
 export interface Trade {
@@ -120,6 +153,19 @@ export interface BacktestResult {
    * 남으면 그 차이가 안 보이므로 결과에 같이 싣는다.
    */
   rulesNote?: string | null;
+
+  /** 슬리피지로 나간 총액. 0이면 **슬리피지를 안 넣고 돌린 것**이다 */
+  slippageCost?: number;
+  /** 펀딩비 순액. 양수면 냈고 음수면 받았다 */
+  fundingPaid?: number;
+  /**
+   * **비용 모델이 무엇을 포함했는가.**
+   *
+   * 숫자만 남으면 슬리피지 0으로 돌린 성적표와 넣고 돌린 성적표가
+   * 똑같이 생겼다. 스캘핑처럼 손절이 0.3%인 전략에서는 그 차이가
+   * 손익분기 승률 몇 %p다 — 결론이 뒤집히는 크기다.
+   */
+  costNote?: string | null;
 }
 
 /* ─── Indicators ─────────────────────────────────────────── */
@@ -281,12 +327,41 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     ? false
     : (cfg.allowShort ?? lev > 1);
 
+  // ── 슬리피지·펀딩 ──
+  const slipPct = Math.max(0, cfg.slippagePct ?? 0);
+  const fundingPct8h = Number.isFinite(cfg.fundingRatePct8h as any) ? Number(cfg.fundingRatePct8h) : 0;
+  /**
+   * 체결가를 **불리한 쪽으로** 민다.
+   *
+   * 사는 쪽은 비싸게, 파는 쪽은 싸게. 모르는 것을 유리하게 읽으면
+   * 그 성적표는 검증이 아니라 희망이다 — 이 파일이 이미 봉 안의
+   * 순서에 대해 쓰고 있는 규칙과 같다.
+   */
+  const slip = (px: number, buying: boolean): number =>
+    slipPct <= 0 ? px : px * (1 + (buying ? slipPct : -slipPct) / 100);
+  /** 누적 펀딩·슬리피지 — 성적표에 얼마가 비용으로 나갔는지 남긴다 */
+  let fundingPaid = 0;
+  let slippageCost = 0;
+
   /** 청산 손익 한 곳. 롱은 (나간값-들어간값), 숏은 그 반대다 */
-  const closeAt = (px: number, t: number, why: string) => {
+  const closeAt = (rawPx: number, t: number, why: string) => {
+    // 롱 청산은 파는 것, 숏 청산은 사는 것이다.
+    const px = slip(rawPx, side === 'SHORT');
+    slippageCost += Math.abs(px - rawPx) * position;
     const exitFee = position * px * fee;
     const dir = side === 'SHORT' ? -1 : 1;
     const grossPnL = (px - entryPrice) * position * dir;
-    const netPnL = grossPnL - entryFeePaid - exitFee;
+
+    // 펀딩은 **들고 있던 시간에 비례**한다. 양수 펀딩은 롱이 내고
+    // 숏이 받는다 — 둘 다 빼면 숏 전략이 실제보다 나쁘게 나온다.
+    let funding = 0;
+    if (fundingPct8h !== 0 && entryTs > 0 && t > entryTs) {
+      const periods = (t - entryTs) / (8 * 3600 * 1000);
+      funding = (entryPrice * position) * (fundingPct8h / 100) * periods * dir;
+    }
+    fundingPaid += funding;
+
+    const netPnL = grossPnL - entryFeePaid - exitFee - funding;
     const pnlPct = entryPrice > 0 ? ((px - entryPrice) / entryPrice) * 100 * lev * dir : 0;
     cash += netPnL;
     trades.push({
@@ -301,11 +376,14 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
   };
 
   /** 진입 한 곳. 손절·익절·청산가를 방향에 맞춰 건다 */
-  const openAt = (dir: 'LONG' | 'SHORT', px: number, i: number, t: number, why: string) => {
+  const openAt = (dir: 'LONG' | 'SHORT', rawPx: number, i: number, t: number, why: string) => {
+    // 롱 진입은 사는 것, 숏 진입은 파는 것이다.
+    const px = slip(rawPx, dir === 'LONG');
     const margin   = cash * positionPct;
     const notional = margin * lev;
     const qty      = notional / px;
     const f        = notional * fee;
+    slippageCost += Math.abs(px - rawPx) * qty;
     position = qty; side = dir;
     entryPrice = px; entryFeePaid = f; investedMargin = margin;
     entryBarIdx = i; entryTs = t;
@@ -494,6 +572,17 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
       + `${allowShort ? ' · 숏 포함' : ' · 롱만'}`
     : '⚠️ 손절 없이 돌렸습니다 — 데모·실전은 손절을 걸고 돕니다. 이 결과는 그쪽과 비교할 수 없습니다.';
 
+  // **무엇을 비용으로 넣었는지 적는다.** 안 적으면 슬리피지 0짜리
+  // 성적표가 넣고 돌린 것과 똑같이 생겼고, 그 둘은 다른 기계의 성적이다.
+  const costNote =
+    `수수료 편도 ${(fee * 100).toFixed(3)}%`
+    + (slipPct > 0
+        ? ` · 슬리피지 편도 ${slipPct}%`
+        : ' · ⚠️ 슬리피지 0 (시장가는 호가를 먹고 들어갑니다 — 실제보다 좋게 나옵니다)')
+    + (fundingPct8h !== 0
+        ? ` · 펀딩 8시간당 ${fundingPct8h}%`
+        : (lev > 1 ? ' · ⚠️ 펀딩비 미반영' : ''));
+
   return {
     config: cfg,
     candleCount: safeCandles.length,
@@ -513,6 +602,7 @@ export function runBacktest(candles: Candle[], cfg: BacktestConfig): BacktestRes
     avgTradePct,
     sanityWarning,
     stopExits, liqExits, gapExits, shortTrades, rulesNote,
+    slippageCost, fundingPaid, costNote,
   };
 }
 
