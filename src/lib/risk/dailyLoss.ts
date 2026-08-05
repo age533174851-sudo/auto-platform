@@ -223,9 +223,15 @@ export function judgeDailyLoss(i: DailyLossInput): DailyLossVerdict {
  * 오타 하나로 한도가 사라지는데 화면에는 아무 표시도 없다. 잘못된 값은
  * '설정 없음'이 아니라 그대로 무시하고, 나머지 한도만 쓴다.
  */
-export function readDailyLossConfig(env: (k: string) => string | undefined): DailyLossConfig {
+export function readDailyLossConfig(
+  env: (k: string) => string | undefined,
+  /** 기본은 LIVE — 안 넘기면 예전과 똑같이 동작한다 */
+  scope: import('./limitScope').LimitScope = 'LIVE',
+): DailyLossConfig {
+  const { scopedEnv, scopedDefault } = require('./limitScope');
+  const e = scopedEnv(env, scope);
   const num = (k: string): number | null => {
-    const raw = env(k);
+    const raw = e(k);
     if (raw == null || String(raw).trim() === '') return null;
     const v = Number(raw);
     return Number.isFinite(v) && v > 0 ? v : null;
@@ -237,7 +243,13 @@ export function readDailyLossConfig(env: (k: string) => string | undefined): Dai
   // 둘 다 없으면 기본 비율 한도를 쓴다. 한도가 아예 없는 상태로 자동매매가
   // 도는 것이 이 파일이 막으려는 것이다.
   if (usd == null && pct == null) {
-    return { maxLossUsd: null, maxLossPct: DEFAULT_DAILY_LOSS.maxLossPct, profitTargetPct: target };
+    // 연습 환경은 더 넉넉한 기본값을 쓴다. **끄지는 않는다** — 한도 없이
+    // 도는 것이 이 파일이 막으려는 것이다.
+    return {
+      maxLossUsd: null,
+      maxLossPct: scopedDefault(scope, 'dailyMaxLossPct', DEFAULT_DAILY_LOSS.maxLossPct),
+      profitTargetPct: target,
+    };
   }
   return { maxLossUsd: usd, maxLossPct: pct, profitTargetPct: target };
 }

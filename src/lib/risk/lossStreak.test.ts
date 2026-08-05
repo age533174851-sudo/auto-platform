@@ -10,6 +10,7 @@
 // 그리고 연패: 잠금 해제를 **지금 시각** 기준으로 재면 조회할 때마다
 // 뒤로 밀려 영원히 안 풀린다. 마지막 손절 시각 기준이어야 한다.
 
+import { scopeOf } from './limitScope';
 import { test, eq, assert } from '../../test/harness';
 import {
   judgeWeeklyLoss, judgeLossStreak,
@@ -225,5 +226,69 @@ export function runLossStreakTests() {
     const r = readWeeklyLossConfig(envOf({ WEEKLY_MAX_LOSS_PCT: 'abc' }));
     eq(r.cfg.maxLossPct, DEFAULT_WEEKLY.maxLossPct);
     assert(r.note.includes('WEEKLY_MAX_LOSS_PCT'), `오타를 알려야 한다: ${r.note}`);
+  });
+
+  // ── 연습과 실전의 한도를 다르게 읽는다 ─────────────
+  //
+  // 주간 한도가 계좌의 7%다. 테스트넷 계좌가 121 USDT면 한도가 8.48이고,
+  // 손절 한 번이면 거기에 닿는다. 그러면 **자동매매를 한 번도 못 돌려 본다.**
+  //
+  // 규칙을 없애는 것이 아니다. 규칙이 실전과 다르면 그 연습은 쓸모가
+  // 없다 — 연패해도 계속 넣어도 되는 화면에서 익힌 습관이 실계좌에서
+  // 그대로 나온다. **닿는 지점만 옮긴다.**
+  console.log('[손실 한도 — 연습과 실전을 가른다]');
+
+  const noEnv = (_k: string) => undefined;
+
+  // **실전은 손대지 않는다.** 이게 이 변경에서 가장 중요한 확인이다.
+  test('실전 기본값이 그대로다 — 스코프를 안 넘겨도 같다', () => {
+    eq(readWeeklyLossConfig(noEnv).cfg.maxLossPct, 7);
+    eq(readWeeklyLossConfig(noEnv, 'LIVE').cfg.maxLossPct, 7);
+    eq(readStreakConfig(noEnv, 'LIVE').cfg.maxConsecutiveLosses, 5);
+  });
+
+  test('연습은 더 넉넉하되 꺼지지 않는다', () => {
+    const w = readWeeklyLossConfig(noEnv, 'TESTNET').cfg;
+    assert(w.maxLossPct != null && w.maxLossPct > 7, `연습 한도가 안 늘었다: ${w.maxLossPct}`);
+    assert(w.maxLossPct != null, '연습에서 한도가 사라졌다 — 없는 것과 넉넉한 것은 다르다');
+
+    const st = readStreakConfig(noEnv, 'TESTNET').cfg;
+    assert(st.maxConsecutiveLosses != null && st.maxConsecutiveLosses > 5,
+      `연패 한도가 안 늘었다: ${st.maxConsecutiveLosses}`);
+  });
+
+  // 테스트넷만 다르게 하고 싶을 때 키 하나만 추가하면 된다.
+  test('TESTNET_ 접두 키가 먼저다', () => {
+    const env = (k: string) =>
+      k === 'TESTNET_WEEKLY_MAX_LOSS_PCT' ? '35' :
+      k === 'WEEKLY_MAX_LOSS_PCT' ? '7' : undefined;
+    eq(readWeeklyLossConfig(env, 'TESTNET').cfg.maxLossPct, 35);
+    // **실전은 접두 키를 보지 않는다.** 연습용 값이 실계좌에 새면 안 된다.
+    eq(readWeeklyLossConfig(env, 'LIVE').cfg.maxLossPct, 7);
+  });
+
+  test('접두 키가 없으면 공용 키로 떨어진다 — 지금 설정이 그대로 산다', () => {
+    const env = (k: string) => (k === 'WEEKLY_MAX_LOSS_PCT' ? '9' : undefined);
+    eq(readWeeklyLossConfig(env, 'TESTNET').cfg.maxLossPct, 9);
+    eq(readWeeklyLossConfig(env, 'LIVE').cfg.maxLossPct, 9);
+  });
+
+  test('연습에서도 명시적으로 끌 수는 있다 — 다만 기본은 아니다', () => {
+    const env = (k: string) => (k === 'TESTNET_WEEKLY_MAX_LOSS_PCT' ? 'off' : undefined);
+    eq(readWeeklyLossConfig(env, 'TESTNET').cfg.maxLossPct, null);
+  });
+
+  test('연습이라는 사실을 사유에 남긴다 — 왜 한도가 다른지 알 수 있게', () => {
+    assert(readWeeklyLossConfig(noEnv, 'TESTNET').note.includes('연습'),
+      readWeeklyLossConfig(noEnv, 'TESTNET').note);
+    eq(readWeeklyLossConfig(noEnv, 'LIVE').note, '');
+  });
+
+  // is_testnet === false 일 때만 실전이다 (저장소 공통 규칙).
+  test('모르는 값은 연습으로 본다 — 실전으로 치지 않는다', () => {
+    eq(scopeOf(false), 'LIVE');
+    eq(scopeOf(true), 'TESTNET');
+    eq(scopeOf(null), 'TESTNET');
+    eq(scopeOf(undefined), 'TESTNET');
   });
 }
