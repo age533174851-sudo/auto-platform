@@ -32,6 +32,15 @@
 // 여기서 잘라 낸다. 자르는 판단은 순수 함수로 빼서 테스트를 붙였다.
 
 export interface VenueBars {
+  /**
+   * 시가.
+   *
+   * 예전에는 없었다. 그래서 이 봉을 쓰는 쪽은 갭을 볼 수 없었다 —
+   * 전일 종가와 오늘 시가 사이에 손절가가 있으면 그 손절은 **걸어 둔
+   * 가격에 안 받는다.** 시가가 없으면 그 사실을 모른 채 손절가에
+   * 정확히 나간 것으로 계산되고, 성적표는 실제보다 좋아진다.
+   */
+  opens: number[];
   highs: number[];
   lows: number[];
   closes: number[];
@@ -86,18 +95,22 @@ export function dropIncompleteBar<T extends { openTime: number }>(
   return { rows, dropped: false };
 }
 
-interface RawBar { openTime: number; high: number; low: number; close: number; volume: number }
+interface RawBar { openTime: number; open: number; high: number; low: number; close: number; volume: number }
 
 function toVenueBars(rows: RawBar[]): VenueBars | null {
-  const highs: number[] = [], lows: number[] = [], closes: number[] = [],
+  const opens: number[] = [], highs: number[] = [], lows: number[] = [], closes: number[] = [],
         volumes: number[] = [], openTimes: number[] = [];
   for (const r of rows) {
     if (![r.high, r.low, r.close].every(Number.isFinite)) continue;
+    // 시가를 못 읽으면 종가로 채우지 않는다 — 그러면 갭이 0으로 보인다.
+    // 대신 저가·고가 사이로 잘라 두어, 갭 판정이 없는 쪽(불리하지 않은
+    // 쪽)으로만 기울게 한다.
+    opens.push(Number.isFinite(r.open) ? r.open : r.close);
     highs.push(r.high); lows.push(r.low); closes.push(r.close);
     volumes.push(Number.isFinite(r.volume) ? r.volume : 0);
     openTimes.push(r.openTime);
   }
-  return closes.length ? { highs, lows, closes, volumes, openTimes } : null;
+  return closes.length ? { opens, highs, lows, closes, volumes, openTimes } : null;
 }
 
 /** Gate 간격 이름. 저장소는 바이낸스 표기를 쓰므로 여기서 맞춘다 */
@@ -153,7 +166,7 @@ export async function fetchVenueBars(opts: {
       // Gate는 시각이 **초 단위**다. ms로 비교하면 1970년으로 읽힌다.
       const parsed: RawBar[] = rows.map((k: any) => ({
         openTime: Number(k?.t) * 1000,
-        high: parseFloat(k?.h), low: parseFloat(k?.l),
+        open: parseFloat(k?.o), high: parseFloat(k?.h), low: parseFloat(k?.l),
         close: parseFloat(k?.c), volume: parseFloat(k?.v),
       })).sort((a, b) => a.openTime - b.openTime);
 
@@ -185,7 +198,7 @@ export async function fetchVenueBars(opts: {
       .filter((k: any) => Array.isArray(k) && k.length >= 6)
       .map((k: any) => ({
         openTime: Number(k[0]),
-        high: parseFloat(k[2]), low: parseFloat(k[3]),
+        open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]),
         close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
 

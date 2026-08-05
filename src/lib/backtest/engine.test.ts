@@ -185,4 +185,71 @@ export function runBacktestTests() {
     const withFee = runBacktest(C, { symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000, feeRate: 0.001, leverage: 5, positionPct: 0.1, emaFast: 3, emaSlow: 10 } as any);
     lt(withFee.finalEquity, noFee.finalEquity, '수수료 있으면 최종자산 더 작아야');
   });
+
+  console.log('[백테스트 엔진 — 수수료 말고도 나가는 것들]');
+
+  const BASE_CFG = (extra: any = {}) => ({
+    symbol: 'BTC', strategy: 'ema-cross', initialCash: 10_000_000,
+    feeRate: 0, leverage: 5, positionPct: 0.1, emaFast: 3, emaSlow: 10, ...extra,
+  }) as any;
+
+  test('슬리피지는 진입도 청산도 불리한 쪽으로 민다', () => {
+    // 롱은 비싸게 사고 싸게 판다. 유리한 쪽으로 밀면 그 성적표는
+    // 검증이 아니라 희망이다.
+    const C = candles([[98, 20], [100, 1], [100, 10], [102, 1]]);
+    const r = runBacktest(C, BASE_CFG({ slippagePct: 0.1 }));
+    const buy = r.trades.find(t => t.side === 'buy');
+    const sell = r.trades.find(t => t.side === 'sell');
+    gt(buy!.price, 100, '롱 진입은 더 비싸게 체결돼야');
+    lt(sell!.price, 102, '롱 청산은 더 싸게 체결돼야');
+  });
+
+  test('슬리피지를 넣으면 최종자산이 줄어든다', () => {
+    const C = candles([[98, 20], [100, 1], [100, 10], [102, 1]]);
+    const noSlip = runBacktest(C, BASE_CFG({ slippagePct: 0 }));
+    const withSlip = runBacktest(C, BASE_CFG({ slippagePct: 0.1 }));
+    lt(withSlip.finalEquity, noSlip.finalEquity, '슬리피지가 공짜면 안 된다');
+    gt(withSlip.slippageCost ?? 0, 0, '얼마 나갔는지 성적표에 남아야');
+  });
+
+  test('슬리피지 0으로 돌면 성적표에 그 사실이 적힌다', () => {
+    // 숫자만 남으면 슬리피지 0짜리와 넣고 돌린 것이 똑같이 생겼다.
+    const C = candles([[98, 20], [100, 1], [100, 10], [102, 1]]);
+    const r = runBacktest(C, BASE_CFG({ slippagePct: 0 }));
+    eq(r.slippageCost, 0);
+    assert(String(r.costNote).includes('슬리피지 0'),
+      `성적표에 안 적혀 있다: ${r.costNote}`);
+  });
+
+  test('펀딩비는 보유 시간에 비례한다', () => {
+    const short = candles([[98, 20], [100, 1], [100, 2], [102, 1]]);
+    const long  = candles([[98, 20], [100, 1], [100, 40], [102, 1]]);
+    const a = runBacktest(short, BASE_CFG({ fundingRatePct8h: 0.01, maxHoldHours: 0 }));
+    const b = runBacktest(long,  BASE_CFG({ fundingRatePct8h: 0.01, maxHoldHours: 0 }));
+    gt(b.fundingPaid ?? 0, a.fundingPaid ?? 0, '오래 들고 있으면 더 낸다');
+  });
+
+  test('양수 펀딩에서 숏은 받는다 — 둘 다 빼면 숏 성적이 틀린다', () => {
+    // 하락 신호 → 숏. 같은 펀딩률에서 롱은 내고 숏은 받아야 한다.
+    const DOWN = candles([[102, 20], [100, 1], [99, 20], [99, 1]]);
+    const r = runBacktest(DOWN, BASE_CFG({
+      fundingRatePct8h: 0.01, allowShort: true, stopPct: 0, takeProfitPct: 0, maxHoldHours: 0,
+    }));
+    gt(r.shortTrades ?? 0, 0, '숏 진입이 있어야 이 테스트가 뜻이 있다');
+    lt(r.fundingPaid ?? 0, 0, '숏은 양수 펀딩을 받는다 — 순액이 음수여야');
+  });
+
+  test('펀딩비를 안 넣고 배율로 돌리면 성적표가 그렇다고 말한다', () => {
+    const C = candles([[98, 20], [100, 1], [100, 10], [102, 1]]);
+    const r = runBacktest(C, BASE_CFG({ leverage: 5 }));
+    assert(String(r.costNote).includes('펀딩비 미반영'),
+      `성적표에 안 적혀 있다: ${r.costNote}`);
+  });
+
+  test('현물(1배)에는 펀딩 경고를 붙이지 않는다', () => {
+    const C = candles([[98, 20], [100, 1], [100, 10], [102, 1]]);
+    const r = runBacktest(C, BASE_CFG({ leverage: 1 }));
+    assert(!String(r.costNote).includes('펀딩'),
+      '현물에는 펀딩비가 없다 — 없는 경고를 띄우면 곧 아무도 안 읽는다');
+  });
 }
