@@ -840,6 +840,96 @@ export interface ReconcileResult {
   details: string[];
 }
 
+/**
+ * **확정된 뒤에 손절이 없으면 지금 건다.**
+ *
+ * 왜 필요한가 — 실제로 이렇게 됐다
+ * ─────────────────────────────────
+ * 진입 요청이 응답을 못 받으면 executeOrder는 UNKNOWN으로 기록하고 **즉시
+ * 반환한다.** 그 자리에서 끝나므로 손절 부착 단계는 **한 번도 실행되지
+ * 않는다.** 그런데 주문은 거래소에 실제로 들어가 있을 수 있다.
+ *
+ * 그러면 이런 상태가 남는다:
+ *
+ *   거래소:  Positions (1) · Orders (0)     ← 포지션은 있고 손절은 없다
+ *   앱:      UNKNOWN → 나중에 RECONCILED
+ *
+ * 대조는 주문 상태만 맞추고 끝났다. **보호되지 않은 포지션이 그대로
+ * 남는다** — 그리고 아무도 그걸 다시 걸어 주지 않았다.
+ *
+ * 규칙
+ * ────
+ * · 포지션이 **실제로 있을 때만** 건다. 없는 포지션에 손절을 걸면 다음
+ *   진입을 예상치 못하게 닫는다
+ * · 계획에 손절가가 적혀 있을 때만 건다. 없는 값을 지어내지 않는다
+ * · 실패해도 포지션을 되돌리지 않는다. 여기는 **복구**이지 진입이 아니고,
+ *   이미 열려 있는 것을 닫는 판단은 사람의 몫이다. 대신 그 사실을 남긴다
+ */
+async function attachStopIfMissing(
+  sb: any,
+  creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean },
+  o: any,
+): Promise<string | null> {
+  // 청산 주문에는 보호주문을 붙이지 않는다.
+  if (o?.reduce_only) return null;
+  if (o?.sl_order_id) return null;               // 이미 걸려 있다
+  const stop = Number(o?.stop_loss);
+  if (!Number.isFinite(stop) || stop <= 0) return null;   // 계획에 없던 값
+
+  const symbol = String(o?.symbol || '').toUpperCase();
+  if (!symbol) return null;
+  // 진입 방향. BUY로 들어갔으면 롱이고, 닫는 주문은 SELL이다.
+  const posSide: 'LONG' | 'SHORT' = String(o?.side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT';
+  const closeSide: 'BUY' | 'SELL' = posSide === 'LONG' ? 'SELL' : 'BUY';
+
+  try {
+    if (creds.exchange === 'gate') {
+      const gf = await import('@/lib/exchanges/gateFutures');
+      const gp = await import('@/lib/exchanges/gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return null;
+
+      // **포지션이 실제로 있는지 먼저 본다.**
+      const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
+      const size = Number(pos?.size ?? 0);
+      if (!size) return null;                     // 포지션 없음 — 걸 이유가 없다
+      // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
+      if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
+        return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다`;
+      }
+
+      const spec = await gf.getGateContractSpec(contract, creds.testnet);
+      const stopSpec = gp.gateStopSpec(posSide, stop, null, spec);
+      if (!stopSpec.ok) return `손절 복구 실패 — ${stopSpec.reason}`;
+
+      const sl = await gf.placeStopGateFutures(creds.apiKey, creds.apiSecret, {
+        contract, spec: stopSpec, clientOrderId: `${o.client_order_id}R`,
+      }, creds.testnet);
+      if (!sl.success) return `손절 복구 실패 — ${sl.message}`;
+      await updateOrderRow(sb, o.id, { sl_order_id: sl.orderId ?? null });
+      return `손절 복구 완료 (${stopSpec.triggerPrice})`;
+    }
+
+    const bf = await import('@/lib/exchanges/binanceFutures');
+    const rr = await bf.getSymbolPositionRiskEx(creds.apiKey, creds.apiSecret, symbol, creds.testnet);
+    const amt = Number(rr.risk?.positionAmt ?? 0);
+    if (!amt) return null;
+    if ((amt > 0 ? 'LONG' : 'SHORT') !== posSide) {
+      return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
+    }
+
+    const sl: any = await bf.placeFuturesTPSL(creds.apiKey, creds.apiSecret, {
+      symbol, side: closeSide, stopPrice: stop, type: 'STOP_MARKET',
+      fallbackQuantity: Math.abs(amt),
+    }, creds.testnet);
+    if (!sl?.success) return `손절 복구 실패 — ${sl?.message || '원인 불명'}`;
+    await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
+    return `손절 복구 완료 (${stop})`;
+  } catch (e: any) {
+    return `손절 복구 실패 — ${e?.message || e}`;
+  }
+}
+
 export async function reconcilePendingOrders(
   sb: any,
   creds: {
@@ -979,6 +1069,13 @@ export async function reconcilePendingOrders(
           });
           out.resolved++;
           out.details.push(`${o.symbol} ${o.client_order_id} → ${verdict.state} (${verdict.reason})`);
+          // **확정만 하고 끝내지 않는다.** 응답을 못 받아 UNKNOWN이 된
+          // 주문은 손절 부착 단계에 도달한 적이 없다 — 포지션은 열렸는데
+          // 보호가 없는 상태로 남는다. 여기서 한 번 더 건다.
+          if (st === 'FILLED' || st === 'RECONCILED') {
+            const rep = await attachStopIfMissing(sb, creds, o);
+            if (rep) out.details.push(`${o.symbol} ${rep}`);
+          }
         } else {
           // 확정 못 함. 시도 횟수가 넘었거나 모순이면 사람에게 넘긴다.
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
@@ -1035,6 +1132,13 @@ export async function reconcilePendingOrders(
           });
           out.resolved++;
           out.details.push(`${o.symbol} ${o.client_order_id} → ${verdict.state} (Gate)`);
+          // 실패로 확정된 것은 포지션이 없다. 그 외에는 열려 있을 수 있으므로
+          // 손절이 비어 있으면 지금 건다 — attachStopIfMissing이 포지션
+          // 존재를 다시 확인한다.
+          if (verdict.state !== 'FAILED') {
+            const rep = await attachStopIfMissing(sb, creds, o);
+            if (rep) out.details.push(`${o.symbol} ${rep}`);
+          }
         } else {
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
           await updateOrderRow(sb, o.id, {

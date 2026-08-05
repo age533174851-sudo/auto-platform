@@ -202,6 +202,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
                     // 빈 배열로 바꾸면 조회 실패가 '손절 없음'으로 읽힌다.
                     openOrders={Array.isArray(acct?.openOrders) ? acct.openOrders
                       : Array.isArray(acct?.orders) ? acct.orders : null}
+                    stopWhy={acct?.openOrdersMsg ?? null}
                     onPick={() => {
                       const s = symbols.find(x => x.id === p.symbol);
                       if (s) setSymbol(s);
@@ -467,7 +468,7 @@ function StrategyTab() {
  * 값이 없을 때 0을 적지 않는다. 청산가 0은 '0달러에 청산'이 아니라
  * '청산가를 못 받았다'인데, 화면만 봐서는 둘이 같아 보인다.
  */
-function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
+function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }: {
   p: any;
   onPick: () => void;
   auth: string;
@@ -476,6 +477,8 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
   onClosed: () => void;
   /** 거래소 미체결 주문. **못 읽었으면 null** — 빈 배열과 다르다 */
   openOrders?: any[] | null;
+  /** 미체결 주문을 못 읽었을 때의 거래소 원문. 없으면 표시하지 않는다 */
+  stopWhy?: string | null;
 }) {
   const [closing, setClosing] = useState(false);
   const [closeMsg, setCloseMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -635,6 +638,22 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders }: {
         }}>
           손절이 걸렸는지 확인하지 못했습니다 — 미체결 주문을 읽지 못했습니다.
           <b> 없다는 뜻이 아닙니다.</b>
+          {/* **왜 못 읽었는지를 적는다.**
+
+              이 문구만 있을 때는 원인이 네트워크인지·인증인지·연결
+              불일치인지 알 방법이 없었다. 실제 원인은 그중 아무것도
+              아니었고 — 서버가 읽어 놓고 응답에 안 실은 것이었다.
+              거래소 오류 원문과 어느 연결로 물어봤는지를 같이 적으면
+              그런 것을 화면에서 바로 가른다. */}
+          {stopWhy && (
+            <div style={{ color: C.dim, marginTop: 4 }}>
+              거래소 응답: {stopWhy}
+            </div>
+          )}
+          <div style={{ color: C.faint, marginTop: 3 }}>
+            연결 {String(connId || '').slice(0, 8) || '알 수 없음'}
+            {' · '}거래소에서 직접 확인하는 것이 가장 확실합니다.
+          </div>
         </div>
       )}
 

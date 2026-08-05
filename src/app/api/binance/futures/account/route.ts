@@ -114,8 +114,26 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     testnet,
+    exchange: 'binance',
     balances:  bal.success ? bal.balances : [],
     positions,
+    // ── **미체결 주문을 응답에 싣는다** ──
+    //
+    // 이 라우트는 위에서 이미 openOrders를 읽어 놓고, TP/SL 가격만 뽑은 뒤
+    // **배열을 버렸다.** 그래서 화면은 `acct.openOrders`를 찾다가 언제나
+    // undefined를 받았고, 포지션 카드에 40분 내내 이렇게 떴다:
+    //
+    //   손절이 걸렸는지 확인하지 못했습니다 — 미체결 주문을 읽지 못했습니다
+    //
+    // 네트워크 오류도, 인증 오류도, 연결 불일치도 아니었다. **요청은
+    // 성공했고 응답에 안 실었다.** 읽어 놓고 배선을 안 한 것 —
+    // 이 저장소에서 가장 자주 반복된 실패다.
+    //
+    // 못 읽었으면 **null**이다. 빈 배열로 바꾸면 조회 실패가
+    // '손절 없음'으로 읽히고, 그건 없는 안전을 믿게 만든다.
+    openOrders: openOrd.success ? orders : null,
+    openOrdersReadable: !!openOrd.success,
+    openOrdersMsg: openOrd.success ? null : String((openOrd as any)?.message || '미체결 주문 조회 실패'),
     funding:   { total: fund.total, bySymbol: fund.bySymbol, items: fund.items.slice(0, 50) },
     balanceMsg:  bal.message,
     positionMsg: pos.message,
@@ -160,6 +178,12 @@ async function gateAccount(apiKey: string, secret: string, testnet: boolean) {
     balanceMsg = `잔고 조회 실패: ${e?.message || e}`;
   }
 
+  // Gate의 조건부 주문(손절·익절)은 계약별로만 조회된다. 포지션을 도는
+  // 동안 모아서 **바이낸스와 같은 모양**으로 실어 보낸다 — 화면이 한 벌의
+  // 코드로 두 거래소를 읽어야 findAnyStop이 갈라지지 않는다.
+  const gateOpenOrders: any[] = [];
+  let gateOrdersReadable = true;
+
   let rawPositions: any[] = [];
   let positionMsg = '';
   let positionsReadable = false;
@@ -193,7 +217,22 @@ async function gateAccount(apiKey: string, secret: string, testnet: boolean) {
         // SHORT은 반대다. 부호를 여기서 틀리면 손절칸에 익절가가 뜬다.
         const isStop = contracts > 0 ? rule === 2 : rule === 1;
         if (isStop) sl = trig; else tp = trig;
+        // 화면이 읽는 모양으로도 실어 보낸다. 포지션을 닫는 주문이므로
+        // side는 보유 방향의 반대다 — 여기서 틀리면 손절을 못 찾는다.
+        gateOpenOrders.push({
+          symbol: contract.replace('_', ''),
+          side: contracts > 0 ? 'SELL' : 'BUY',
+          type: isStop ? 'STOP_MARKET' : 'TAKE_PROFIT_MARKET',
+          stopPrice: trig,
+          closePosition: true,
+          reduceOnly: true,
+          orderId: o?.id != null ? String(o.id) : null,
+        });
       }
+    } else {
+      // **못 읽었으면 그 사실이 전체에 남아야 한다.** 한 계약이라도 실패하면
+      // '손절 없음'이라고 말할 수 없다.
+      gateOrdersReadable = false;
     }
 
     const entry = Number(p.entry_price);
@@ -235,6 +274,11 @@ async function gateAccount(apiKey: string, secret: string, testnet: boolean) {
     // **읽지 못했으면 그 사실을 남긴다.** 빈 배열만 보내면 화면은
     // "포지션 없음"으로 그리고, 그게 이 앱에서 가장 위험한 거짓말이다.
     positionsReadable,
+    // 조건부 주문을 하나라도 못 읽었으면 null이다 — 빈 배열이면 화면이
+    // '손절 없음'으로 그리고, 그건 없는 안전을 믿게 만든다.
+    openOrders: gateOrdersReadable ? gateOpenOrders : null,
+    openOrdersReadable: gateOrdersReadable,
+    openOrdersMsg: gateOrdersReadable ? null : 'Gate 조건부 주문을 읽지 못했습니다',
     // Gate의 펀딩 내역은 account_book에 섞여 있다. 아직 안 갈라 놨으므로
     // 0으로 채우지 않고 비어 있다고 말한다.
     funding: { total: null, bySymbol: {}, items: [] },
