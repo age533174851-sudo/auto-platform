@@ -24,7 +24,7 @@
 // 이 프로젝트에서 이미 여러 번 그렇게 갈렸다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 import { POST as placeOrder } from '../order/route';
 
 export const dynamic = 'force-dynamic';
@@ -70,28 +70,43 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
 
-  const creds = await loadBinanceCreds(sb, uid, body.connectionId);
+  // **거래소를 가리지 않는다.**
+  //
+  // 예전에는 loadBinanceCreds라 Gate 연결이 첫 줄에서 `not_binance`로
+  // 거절됐다. 그런데 이 라우트가 실제로 주문을 내는 곳(../order/route)은
+  // 이미 두 거래소를 다룬다 — **읽는 쪽만 안 고쳐진** 그 모양이다.
+  //
+  // 그래서 Gate 사용자는 뒤집기를 아예 못 썼다. 손으로 닫고 손으로 여는
+  // 수밖에 없는데, 그 사이가 이 라우트가 막으려는 바로 그 구간이다.
+  const creds = await loadFuturesCreds(sb, uid, body.connectionId);
   if (!creds.ok) {
     return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status });
   }
 
-  const bf = await import('@/lib/exchanges/binanceFutures');
+  const { futuresPositionRisk } = await import('@/lib/exchanges/futuresAdapter');
+  /** 지금 이 심볼의 포지션. 못 읽으면 null — **0이 아니다** */
+  const readRisk = async () => {
+    const rr = await futuresPositionRisk(
+      creds.exchange!, creds.key!, creds.secret!, symbol, creds.testnet!);
+    return rr.risk;
+  };
 
   // ── 1) 지금 포지션이 화면이 본 것과 같은가 ──
   //
   // 화면의 값은 최대 10초 전 것이다(BottomDock 새로고침 주기). 그 사이 손절이
   // 걸렸거나 일부가 청산됐을 수 있다. 다른 수량을 뒤집으면 그건 사용자가
   // 누른 것과 다른 거래다.
-  const risk = await bf.getSymbolPositionRisk(creds.key, creds.secret, symbol, creds.testnet);
-  if (!risk) {
+  const risk = await readRisk();
+  if (!risk || risk.positionAmt == null) {
     return NextResponse.json({
       ok: false, stage: 'precheck', error: 'position_lookup_failed',
       message: '포지션을 확인하지 못해 아무것도 하지 않았습니다.',
     }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
   }
 
-  const qty = Math.abs(Number(risk.positionAmt) || 0);
-  const side = risk.positionAmt > 0 ? 'LONG' : risk.positionAmt < 0 ? 'SHORT' : null;
+  const amt = Number(risk.positionAmt);
+  const qty = Math.abs(amt) || 0;
+  const side = amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : null;
   if (!qty || !side) {
     return NextResponse.json({
       ok: false, stage: 'precheck', error: 'no_position',
@@ -157,8 +172,11 @@ export async function POST(req: NextRequest) {
   let lastQty: number | null = null;
   for (let i = 0; i < FLAT_RETRIES; i++) {
     await new Promise(r => setTimeout(r, FLAT_WAIT_MS));
-    const after = await bf.getSymbolPositionRisk(creds.key, creds.secret, symbol, creds.testnet);
-    if (!after) continue;                      // 조회 실패는 '0'이 아니다
+    const after = await readRisk();
+    // 조회 실패는 '0'이 아니다. **positionAmt가 null인 것도 실패다** —
+    // Gate에서 계약 배수를 못 읽으면 수량이 null로 오는데, 그걸 0으로
+    // 접으면 '평평하다'가 되어 반대 포지션이 열린다.
+    if (!after || after.positionAmt == null) continue;
     lastQty = Math.abs(Number(after.positionAmt) || 0);
     // 먼지처럼 남는 수량은 있을 수 있다. 원래의 1% 미만이면 닫힌 것으로 본다.
     if (lastQty <= qty * 0.01) { flat = true; break; }

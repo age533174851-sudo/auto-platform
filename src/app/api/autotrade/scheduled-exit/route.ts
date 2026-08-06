@@ -157,17 +157,23 @@ export async function GET(req: NextRequest) {
 
     // ── 실제 청산 ──
     try {
-      const { loadBinanceCreds } = await import('@/lib/exchanges/loadCreds');
-      const creds = await loadBinanceCreds(sb, row.user_id, row.connection_id);
+      // **거래소를 가리지 않는다.**
+      //
+      // 예전에는 loadBinanceCreds라 Gate 연결이면 `not_binance`로 끝났다.
+      // 그래서 Gate 사용자가 예약 청산을 걸어 두면 **실행 시각에 조용히
+      // 실패했다.** 기록에는 남지만 아무도 안 보고, 사용자는 닫힐 것이라
+      // 믿고 자고 있다. 못 여는 것은 불편이고 못 닫는 것은 사고다.
+      const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
+      const creds = await loadFuturesCreds(sb, row.user_id, row.connection_id);
       if (!creds.ok) { await close('failed', `연결을 쓸 수 없습니다: ${creds.message}`); continue; }
 
-      const bf = await import('@/lib/exchanges/binanceFutures');
+      const { futuresPositionRisk } = await import('@/lib/exchanges/futuresAdapter');
 
       // 어느 방향을 들고 있는지 먼저 읽는다. **모르면 주문하지 않는다** —
       // 방향을 찍으면 청산이 아니라 반대 진입이 된다.
-      const rr = await bf.getSymbolPositionRiskEx(
-        creds.key!, creds.secret!, String(row.symbol), creds.testnet === true);
-      if (!rr.risk) {
+      const rr = await futuresPositionRisk(
+        creds.exchange!, creds.key!, creds.secret!, String(row.symbol), creds.testnet === true);
+      if (!rr.risk || rr.risk.positionAmt == null) {
         await close('failed', `포지션을 확인하지 못했습니다: ${rr.error || '알 수 없음'}`);
         continue;
       }
@@ -179,6 +185,32 @@ export async function GET(req: NextRequest) {
       }
 
       const pct = row.portion_pct == null ? 100 : Number(row.portion_pct);
+
+      if (creds.exchange === 'gate') {
+        // Gate는 심볼별 전량 종료가 있다. **부분 청산은 아직 없다** —
+        // 여기서 계약 수를 직접 계산해 넣으면 배수 오독이 그대로 수량
+        // 오류가 되고, 그건 이 저장소에서 이미 한 번 밟은 자리다.
+        // 지원 안 하는 것을 지원하는 척하지 않고 그렇다고 적는다.
+        if (pct < 100) {
+          await close('failed',
+            `Gate는 아직 부분 예약 청산(${pct}%)을 지원하지 않습니다 — `
+            + '전량(100%)으로 다시 예약하거나 거래소에서 직접 닫으세요');
+          continue;
+        }
+        const gf = await import('@/lib/exchanges/gateFutures');
+        const gp = await import('@/lib/exchanges/gatePlan');
+        const contract = gp.toGateContract(String(row.symbol));
+        if (!contract) {
+          await close('failed', `Gate 계약 이름을 만들 수 없습니다 (${row.symbol})`);
+          continue;
+        }
+        const r = await gf.closePositionGateFutures(
+          creds.key!, creds.secret!, contract, creds.testnet === true);
+        await close(r.success ? 'ok' : 'failed', r.message);
+        continue;
+      }
+
+      const bf = await import('@/lib/exchanges/binanceFutures');
       const r = await bf.closePositionPercent(
         creds.key!, creds.secret!, String(row.symbol),
         amt > 0 ? 'LONG' : 'SHORT', pct, creds.testnet === true);
