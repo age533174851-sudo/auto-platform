@@ -17,7 +17,7 @@
 // 않는다. 실제로 가짜 호가가 실시간처럼 보이던 사고가 있었다.
 import React, { useEffect, useState } from 'react';
 import { T } from '@/lib/constants';
-import { assess, badgeStyle, type DataSource, type BadgeTone } from '@/lib/engine/dataQuality';
+import { assess, badgeStyle, worst, type DataSource, type BadgeTone } from '@/lib/engine/dataQuality';
 
 const TONE: Record<BadgeTone, string> = {
   good: T.grn,
@@ -99,6 +99,13 @@ export function DataValue(
   const now = useNow();
   const a = assess(source, now);
   if (a.tradeable) return <span style={style}>{children}</span>;
+  return <MarkedValue assessment={a} style={style}>{children}</MarkedValue>;
+}
+
+function MarkedValue(
+  { assessment: a, children, style }:
+  { assessment: ReturnType<typeof assess>; children: React.ReactNode; style?: React.CSSProperties },
+) {
 
   const dimmed = a.freshness === 'STALE' || a.freshness === 'NONE';
   return (
@@ -115,6 +122,54 @@ export function DataValue(
       }}
     >
       {children}
+    </span>
+  );
+}
+
+/**
+ * 여러 값 중 **가장 나쁜 상태 하나**를 띄운다.
+ *
+ * 왜 필요한가
+ * ───────────
+ * 호가창 한 화면에 현재가(WebSocket 100ms) · 24h 변동률(REST 5초) ·
+ * 호가 잔량 계산값이 같이 있다. 배지를 각각 붙이면 셋을 다 읽어야
+ * "지금 이 화면을 믿어도 되는가"를 알 수 있는데, 급할 때 그걸 읽는
+ * 사람은 없다.
+ *
+ * **하나라도 문제면 문제다.** 그래서 최악만 앞에 세운다 — 전부 정상이면
+ * 눈에 안 띄고, 하나라도 멈추면 그것이 대표로 뜬다.
+ *
+ * 판정은 dataQuality.worst가 한다. 여기서 다시 고르면 화면마다 '나쁨'의
+ * 순서가 달라진다.
+ */
+export function DataHealth(
+  { sources, compact, style }:
+  { sources: DataSource[]; compact?: boolean; style?: React.CSSProperties },
+) {
+  const now = useNow();
+  const list = (Array.isArray(sources) ? sources : []).filter(Boolean);
+  // **빈 목록을 '정상'으로 그리지 않는다.** 볼 것이 없는 것과 다 괜찮은
+  // 것은 다르다.
+  if (list.length === 0) return null;
+  const a = worst(list.map(s => assess(s, now)));
+  if (!a) return null;
+  const { shape, tone } = badgeStyle(a);
+  const color = TONE[tone];
+  const others = list.length - 1;
+
+  return (
+    <span
+      title={list.map(s => assess(s, now).text).join('\n')}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        fontSize: compact ? 8 : 9, color,
+        fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap', ...style,
+      }}
+    >
+      <Mark shape={shape} color={color}/>
+      <span>{compact ? a.text.split(' · ').slice(-2).join(' · ') : a.text}</span>
+      {others > 0 && <span style={{ opacity: 0.6 }}>외 {others}</span>}
     </span>
   );
 }

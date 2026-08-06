@@ -9,7 +9,7 @@ import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, closePap
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
-import { DataBadge } from '@/components/ui/DataBadge';
+import { DataBadge, DataValue, DataHealth } from '@/components/ui/DataBadge';
 import type { DataSource } from '@/lib/engine/dataQuality';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
 import type { Asset, Order } from '@/types';
@@ -1058,8 +1058,13 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                     <div style={{background:T.bg,borderRadius:8,padding:'4px 0',border:`1px solid ${T.border}`}}>
                       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'2px 6px 4px',fontSize:8,color:T.muted,borderBottom:`1px solid ${T.border}`}}>
                         <span>가격 (USDT)</span>
+                        {/* 이 화면에는 출처가 셋이다 — 현재가(WebSocket 100ms) ·
+                            변동률(REST 5초) · 호가 잔량 계산값. 배지를 각각만
+                            붙이면 셋을 다 읽어야 "지금 이 화면을 믿어도 되는가"를
+                            알 수 있는데, 급할 때 그걸 읽는 사람은 없다.
+                            **하나라도 문제면 문제다** — 최악만 여기 세운다. */}
                         {stream.status === 'live'
-                          ? <DataBadge source={depthSrc} compact/>
+                          ? <DataHealth sources={[depthSrc, priceSrc, changeSrc, pressureSrc]} compact/>
                           : <span style={{color:sColor,fontWeight:700}}>{sLabel}</span>}
                         <span>수량</span>
                       </div>
@@ -1072,12 +1077,20 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         <>
                           {showAsks.map((l,i)=><Row key={'a'+i} lv={l} buy={false}/>)}
                           <div style={{padding:'4px 6px',textAlign:'center',borderTop:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,margin:'1px 0'}}>
+                            {/* **숫자 자체에 표시가 남아야 한다.** 배지는 아래
+                                작은 글씨로 붙는데, 사람은 큰 숫자를 먼저 보고
+                                작은 글씨는 나중에 본다. 연결이 끊겨 멈춘 값이
+                                평소와 똑같이 크고 선명하면 그 값을 보고 주문을 낸다. */}
                             <div style={{color:(chg ?? 0)>=0?T.grn:T.red,fontWeight:900,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-                              {px != null ? fmt(px) : '—'}
+                              <DataValue source={priceSrc}>{px != null ? fmt(px) : '—'}</DataValue>
                               <span style={{color:T.muted,fontSize:8,fontWeight:600,marginLeft:3}}>USDT</span>
                             </div>
+                            {/* 변동률은 REST 폴링이라 언제나 실시간이 아니다 —
+                                점선 밑줄이 늘 남는 것이 맞다. */}
                             <div style={{color:T.muted,fontSize:8}}>
-                              {chg != null ? `${chg>=0?'▲':'▼'}${Math.abs(chg).toFixed(2)}%` : '변동률 수신 중'}
+                              <DataValue source={changeSrc}>
+                                {chg != null ? `${chg>=0?'▲':'▼'}${Math.abs(chg).toFixed(2)}%` : '변동률 수신 중'}
+                              </DataValue>
                             </div>
                             {/* 현재가와 변동률은 출처도 주기도 다르다. 각각 표기한다. */}
                             <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1,marginTop:3}}>
@@ -1093,8 +1106,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                       {pressure != null && (
                         <div style={{padding:'6px 6px 3px',borderTop:`1px solid ${T.border}`,marginTop:2}}>
                           <div style={{display:'flex',justifyContent:'space-between',fontSize:8,color:T.muted,marginBottom:3}}>
-                            <span style={{color:T.grn}}>호가 잔량 매수 {pressure.toFixed(1)}%</span>
-                            <span style={{color:T.red}}>{(100-pressure).toFixed(1)}% 매도</span>
+                            <DataValue source={pressureSrc}>
+                              <span style={{color:T.grn}}>호가 잔량 매수 {pressure.toFixed(1)}%</span>
+                            </DataValue>
+                            <DataValue source={pressureSrc}>
+                              <span style={{color:T.red}}>{(100-pressure).toFixed(1)}% 매도</span>
+                            </DataValue>
                           </div>
                           <div style={{marginBottom:3}}><DataBadge source={pressureSrc} compact/></div>
                           <div style={{display:'flex',height:4,borderRadius:2,overflow:'hidden',background:T.border}}>
