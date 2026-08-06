@@ -275,8 +275,8 @@ export async function POST(req: NextRequest) {
       const qty = body.quantity || (px > 0 ? (body.amount || 0) / px : 0);
 
       // ── 중복 신호 차단 (멱등성) — TradingView 중복 발사·재시도 방어 ──
-      const { signalKey, claimSignal } = await import('@/lib/risk/idempotency');
-      const dedupKey = signalKey({
+      const { signalKeySet, claimSignal } = await import('@/lib/risk/idempotency');
+      const dedupKeys = signalKeySet({
         clientId: body.id || body.alertId || null,
         connectionId: body.connectionId,
         symbol: tradeSymbol,
@@ -284,14 +284,25 @@ export async function POST(req: NextRequest) {
         side: (body.side || 'buy').toUpperCase(),
         windowSec: 15,
       });
-      const claim = await claimSignal(sb, dedupKey, 15);
+      const claim = await claimSignal(sb, dedupKeys, 15);
       if (claim.duplicate) {
         entry.status = 'duplicate';
         signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
         return NextResponse.json({
           ok: true, id: webhookId, duplicate: true, dropped: true,
-          message: '⚠️ 중복 신호 무시됨 — 동일 신호가 이미 처리되었습니다 (이중 주문 방지)',
+          message: `⚠️ 중복 신호 무시됨 — ${claim.reason || '동일 신호가 이미 처리되었습니다'} (이중 주문 방지)`,
         }, { status: 200 });
+      }
+      // **중복 차단이 안 돌았으면 그렇다고 적는다.** 표가 없어서 통과한
+      // 것과 중복이 아니어서 통과한 것은 다르다. 아래 응답에 실어 보내지
+      // 않으면 사용자는 지금 이중 주문 방어가 없는 상태라는 것을 모른다.
+      if (claim.installed === false) {
+        const { log } = await import('@/lib/log/logger');
+        log.warn('webhook', '중복 차단이 돌지 않았습니다', { reason: claim.reason });
+      }
+      // 표가 무한히 자라지 않게 가끔 치운다. 실패해도 주문 경로를 막지 않는다.
+      if (Math.random() < 0.02) {
+        void import('@/lib/risk/idempotency').then(m => m.cleanupDedup(sb)).catch(() => {});
       }
 
       // ── 직접 실행 ──
