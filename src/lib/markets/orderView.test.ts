@@ -6,6 +6,9 @@
 //  2. 보호 주문이 일반 미체결과 섞여 [전체 취소]에 조용히 딸려 나가는 것
 //  3. 발동 부등호를 반대로 적어 발동 시점을 거꾸로 계산하게 하는 것
 //  4. reduceOnly 필드가 없는 것을 '신규 주문'으로 단정하는 것
+//  5. **90% 체결된 주문이 아무것도 안 된 주문과 똑같이 보이는 것.**
+//     그 상태로 [취소]를 누르면 사용자는 "아무 일도 없었다"고 생각하는데,
+//     취소된 것은 남은 10%뿐이고 이미 체결된 90%는 포지션으로 남는다
 import { test, assert, eq } from '../../test/harness';
 import { describeOrder, splitOrders, protectionOf, closesSideOf, purposeOf, fmtNum } from './orderView';
 
@@ -142,5 +145,77 @@ export function runOrderViewTests() {
   test('용도를 못 가리면 그렇다고 적는다', () => {
     eq(purposeOf({ type: 'SOMETHING_NEW' }), 'UNKNOWN');
     eq(describeOrder({ type: 'SOMETHING_NEW', side: 'BUY' }).purposeLabel, '용도 확인 불가');
+  });
+
+  console.log('[미체결 카드 — 부분 체결]');
+
+  test('일부 체결된 주문을 활성으로 뭉개지 않는다', () => {
+    const v = describeOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT',
+      origQty: 1, executedQty: 0.9, price: 64000, status: 'PARTIALLY_FILLED',
+    });
+    eq(v.statusLabel, '일부 체결 90%');
+    eq(v.partiallyFilled, true);
+    eq(v.filledQty, 0.9);
+    eq(v.remainingQty, 0.1);
+  });
+
+  test('상태를 안 줘도 수량 차이로 안다', () => {
+    // Gate는 상태를 'open'으로만 주고 체결분은 수량 차이로 알린다.
+    const v = describeOrder({
+      symbol: 'BTC_USDT', side: 'BUY', type: 'LIMIT',
+      origQty: 4, executedQty: 1, price: 64000, status: 'open',
+    });
+    eq(v.partiallyFilled, true);
+    eq(v.statusLabel, '일부 체결 25%');
+  });
+
+  test('남은 수량을 앞에 적는다 — 여기서 궁금한 것은 앞으로 나갈 양이다', () => {
+    const v = describeOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', origQty: 1, executedQty: 0.9, price: 6e4,
+    });
+    eq(v.qtyLabel, '0.1 남음 / 1');
+  });
+
+  test('한 개도 안 붙었으면 부분 체결이 아니다', () => {
+    // executedQty: 0은 '아직 하나도 안 붙었다'이지 '일부 체결'이 아니다.
+    const v = describeOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', origQty: 1, executedQty: 0, price: 6e4,
+    });
+    eq(v.partiallyFilled, false);
+    eq(v.statusLabel, '활성');
+    eq(v.qtyLabel, '1');
+    eq(v.fillPct, 0, '0%는 모름이 아니다');
+  });
+
+  test('전량 체결도 부분 체결이 아니다', () => {
+    const v = describeOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', origQty: 1, executedQty: 1, price: 6e4,
+    });
+    eq(v.partiallyFilled, false);
+  });
+
+  test('체결 수량을 안 주면 모른다 — 0으로 치지 않는다', () => {
+    const v = describeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', origQty: 1, price: 6e4 });
+    eq(v.filledQty, null);
+    eq(v.fillPct, null);
+    eq(v.partiallyFilled, false, '모르는 것을 부분 체결로 단정하지 않는다');
+    eq(v.qtyLabel, '1');
+  });
+
+  test('마지막 자리 차이로 일부 체결이 뜨지 않는다', () => {
+    const v = describeOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT',
+      origQty: 0.976, executedQty: 0.9760000000000001, price: 6e4,
+    });
+    eq(v.partiallyFilled, false, '매번 뜨는 경고는 아무도 안 읽는다');
+  });
+
+  test('우리 장부의 칸 이름도 읽는다', () => {
+    const v = describeOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', origQty: 2, filled_qty: 0.5, price: 6e4,
+    });
+    eq(v.filledQty, 0.5);
+    eq(v.partiallyFilled, true);
   });
 }
