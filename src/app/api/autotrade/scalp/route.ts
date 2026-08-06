@@ -326,6 +326,53 @@ export async function POST(req: NextRequest) {
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 경제일정·변동성·펀딩 거부권 ──
+  //
+  // **이 라우트에는 이게 하나도 없었다.**
+  //
+  // 일봉 사다리(daily-ladder)는 runTradingPipeline을 통과하면서 캘린더·
+  // 변동성 기준선·펀딩·갭 거부권을 전부 받는다. 그런데 단타는 체크리스트만
+  // 돌았다 — 그리고 체크리스트에는 이벤트 항목이 없다.
+  //
+  // 즉 **CPI나 FOMC 발표 순간에도 단타는 그대로 진입한다.** 분 단위로
+  // 도는 쪽이라 오히려 더 자주 맞는다. 발표 직후에는 호가가 벌어지고
+  // 손절이 건너뛰어지는데, 그 자리가 정확히 이 전략이 들어가는 자리다.
+  //
+  // 새 경로를 만들지 않는다 — 웹훅이 쓰는 applyVetoToSignal을 그대로 쓴다.
+  // 규칙을 두 벌 두면 한쪽만 고쳐진다.
+  try {
+    const { applyVetoToSignal } = await import('@/lib/engine/tradingPipeline');
+    const veto = await applyVetoToSignal(sb, {
+      side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
+      symbol,
+      leverage: plan.leverage ?? 1,
+      // 변동성 기준선은 일봉이 필요하다. 단타는 분봉만 갖고 있으므로
+      // **넘기지 않는다** — 분봉으로 계산한 값을 일봉 기준선 자리에
+      // 넣으면 비교 대상이 달라져 언제나 '평소보다 크다'가 된다.
+      currentVolume: bars?.volumes?.[bars.volumes.length - 1],
+      avgVolume: bars?.volumes?.length
+        ? bars.volumes.reduce((a: number, b: number) => a + b, 0) / bars.volumes.length
+        : undefined,
+    });
+    if (!veto.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'RISK_VETO',
+        error: veto.reason,
+        veto: veto.veto ?? null,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  } catch (e: any) {
+    // **거부권 조회가 실패하면 진입하지 않는다.**
+    //
+    // 캘린더를 못 읽었다는 것은 "발표가 없다"가 아니라 "모른다"이다.
+    // 여기서 통과시키면 발표 시각에 정확히 들어가고, 그건 이 검사를
+    // 만든 이유의 정반대다. riskVeto의 CALENDAR_UNAVAILABLE도 같은 규칙이다.
+    return NextResponse.json({
+      ...base, executed: false, blocked: 'VETO_UNAVAILABLE',
+      error: `거부권 검사를 돌리지 못해 진입하지 않았습니다 (${e?.message || e})`,
+    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   // ── 숏은 롱의 부호 반전이 아니다 ──
   //
   // 지금까지 `allowShort`는 켜고 끄는 스위치일 뿐이었고, 진입 검사는

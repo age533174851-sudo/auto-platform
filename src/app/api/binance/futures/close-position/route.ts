@@ -100,6 +100,23 @@ export async function POST(req: NextRequest) {
   const r = await closePositionPercent(
     creds.key, creds.secret, String(symbol), positionSide, Number(percent) || 100, creds.testnet);
 
+  // **수동 청산은 기록에 남는다.** 자동매매가 연 포지션을 사람이 닫으면
+  // 그 뒤로 재진입을 막는데(manualOverride), 왜 막혔는지를 되짚으려면
+  // 누가 언제 닫았는지가 있어야 한다.
+  {
+    const { recordAudit } = await import('@/lib/safety/auditStore');
+    recordAudit(sb, {
+      userId: uid, action: 'MANUAL_CLOSE', resource: String(symbol),
+      result: r.success ? 'success' : 'failed',
+      connectionId: body?.connectionId ?? null,
+      detail: {
+        side: positionSide, percent: Number(percent) || 100,
+        closedQty: r.closedQty, fullClose: r.fullClose,
+        testnet: creds.testnet, message: r.message,
+      },
+    });
+  }
+
   return NextResponse.json({
     ok: r.success,
     queued: false,
