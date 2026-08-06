@@ -655,3 +655,71 @@ img[loading="lazy"] {
 .kb-open .hide-on-kb {
   display: none !important;
 }
+
+/* ─── 주문판 상단 메타 줄 (격리 · 배율 · 청산거리) ───
+ *
+ * 무엇이 깨졌나
+ * ─────────────
+ * 이 줄이 `display:flex` + `flex:1` 세 칸이었고, 세 번째 칸에는
+ * `white-space:nowrap`이 붙어 있었다. flex 아이템의 기본 `min-width`는
+ * `auto`라 **내용보다 좁아지지 않는다.** 그래서 폰(360px)에서
+ * "청산가까지 약 19.6%"가 줄지도 접히지도 못하고 주문판을 뚫고 나가
+ * 오른쪽 호가창 위에 겹쳐 그려졌다.
+ *
+ * 글자만 줄여서는 안 된다 — 배율이 세 자리가 되거나 청산가가 실제값으로
+ * 바뀌면 같은 자리에서 또 넘친다. 줄 자체를 다시 배치한다.
+ *
+ * 모바일: 격리·배율이 첫 줄, 청산거리가 둘째 줄 전체 폭
+ * 데스크톱(768px~): 예전처럼 한 줄에 셋
+ */
+.order-meta-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 5px;
+  align-items: stretch;
+  /* 넘치는 것을 고치는 것이 먼저고 이건 마지막 방어선이다.
+     그래도 둔다 — 다음에 칸이 하나 더 붙어도 호가창을 침범하진 않게. */
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* min-width:auto가 기본이라 이 한 줄이 없으면 위 minmax(0,1fr)도 무력해진다 */
+.order-meta-grid > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.liquidation-distance-card {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  /* nowrap을 지운다. 이 줄이 넘침의 직접 원인이었다 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* 한국어는 단어 중간에서 끊지 않는다 — '청산 거리'가 '청산 거/리'가 되면 안 된다 */
+  word-break: keep-all;
+  line-height: 1.25;
+  font-size: clamp(9px, 3.2vw, 11px);
+}
+
+@media (min-width: 768px) {
+  .order-meta-grid {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 1.4fr);
+  }
+  .liquidation-distance-card {
+    grid-column: auto;
+  }
+}
+
+/* 주문판 안의 어떤 요소도 자기 칸을 넘지 않는다.
+   input은 기본 size 속성 때문에 부모보다 넓어지려 한다. */
+.order-pane {
+  overflow-x: hidden;
+  min-width: 0;
+}
+.order-pane input,
+.order-pane select,
+.order-pane button {
+  max-width: 100%;
+  min-width: 0;
+}

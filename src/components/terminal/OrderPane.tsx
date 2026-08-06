@@ -725,7 +725,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 이 잔고와 배율로 열 수 있는 최대 명목가. 잔고를 모르면 null이다 —
   // 0으로 적으면 '주문 불가'로 읽히고, 큰 수를 임의로 넣으면 더 나쁘다.
   const maxOpenUsd = balanceUsd == null ? null : balanceUsd * leverage;
-  const liqTone = liqPct < 1 ? C.down : liqPct < 3 ? C.warn : C.dim;
+  /** 청산 거리를 실제로 구했는가. 못 구한 것을 0%로 적으면 '지금 청산'이 된다 */
+  const liqOk = Number.isFinite(liqPct);
+  const liqTone = !liqOk ? C.warn : liqPct < 1 ? C.down : liqPct < 3 ? C.warn : C.dim;
   const base = symbol.id.replace(/USDT$/, '');
 
   /** 배율을 1~MAX_LEVERAGE로 자른다. 범위 밖을 조용히 통과시키지 않는다 */
@@ -998,7 +1000,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   };
 
   return (
-    <div style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', minHeight: '100%' }}>
+    // 주문판 안의 어떤 요소도 자기 칸을 넘어 호가창을 침범하지 않는다.
+    // 넘치는 것을 고치는 것이 먼저이고 이건 마지막 방어선이다 — 그래도
+    // 둔다. 한 줄이 넘치면 그 줄만이 아니라 옆 패널까지 망가진다.
+    <div className="order-pane" style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', minHeight: '100%' }}>
       {/* 이 주문이 **어느 계좌로 나가는가.**
           지금까지 화면에 없던 값이다. 연결을 여러 개 등록해 두면(테스트넷
           하나 + 실전 하나가 정상이다) 모드만 보고는 어느 키로 나가는지 알
@@ -1013,7 +1018,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
 
           청산거리를 지우지 않는 이유: 배율 숫자만으로는 위험이 안 읽힌다.
           5×와 50×의 차이는 '10배'가 아니라 '20% 여유'와 '2% 여유'다. */}
-      <div style={{ display: 'flex', gap: 5, alignItems: 'stretch' }}>
+      {/* **글자만 줄이면 다음에 또 넘친다.** flex + flex:1 세 칸이었고
+          세 번째 칸에 nowrap이 붙어 있었다. flex 아이템의 기본 min-width는
+          auto라 내용보다 좁아지지 않으므로, 폰에서 이 줄이 주문판을 뚫고
+          나가 오른쪽 호가창 위에 겹쳐 그려졌다.
+          배치는 globals.css의 .order-meta-grid가 정한다 — 모바일은 두 줄,
+          768px부터 한 줄. 인라인 스타일로는 미디어 쿼리를 쓸 수 없다. */}
+      <div className="order-meta-grid">
         {/* **읽어 온 값만 적는다.** 못 읽었으면 '확인 못 함'이다 —
             여기에 '격리'를 박아 두면, 아래 점검이 "CROSS인지 알 수 없다"고
             말하는 동안 위에서는 격리라고 단정하게 된다. 실제로 그랬다. */}
@@ -1027,8 +1038,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         <button onClick={() => setMarginOpen(v => !v)}
           title={marginErr || undefined}
           style={{
-            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3,
-            minHeight: dense ? 28 : 30, borderRadius: 7,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3,
+            minWidth: 0, minHeight: dense ? 28 : 30, borderRadius: 7,
             background: marginType === 'CROSSED' ? C.downBg : C.raised,
             border: `1px solid ${marginType == null ? A(C.warn, '55')
               : marginType === 'CROSSED' ? A(C.down, '55') : C.hair}`,
@@ -1040,25 +1051,32 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           <span style={{ opacity: .5, fontSize: FS.micro }}>▾</span>
         </button>
         <button onClick={() => setLevOpen(v => !v)} style={{
-          flex: 1, minHeight: dense ? 28 : 30, borderRadius: 7, cursor: 'pointer',
+          minWidth: 0, minHeight: dense ? 28 : 30, borderRadius: 7, cursor: 'pointer',
           background: leverage >= 50 ? C.downBg : C.raised,
           border: `1px solid ${leverage >= 50 ? A(C.down,'55') : C.hair}`,
           color: leverage >= 50 ? C.down : C.text,
           fontSize: FS.small, fontWeight: 700, ...NUM,
         }}>{leverage}×</button>
-        <span style={{
-          flex: 1.15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        <span className="liquidation-distance-card" style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: 1, padding: '2px 4px',
           minHeight: dense ? 28 : 30, borderRadius: 7, background: C.raised,
-          border: `1px solid ${liqPct < 3 ? A(liqTone, '55') : C.hair}`,
-          color: liqTone, fontSize: FS.micro, fontWeight: 700, ...NUM,
-          whiteSpace: 'nowrap',
-        }} title={liqIsActual
-            ? `거래소 청산가 ${posLiq} · 마크가 ${posMark} 기준`
-            : `배율 ${leverage}배 기준 예상 (유지증거금 반영)`}>
-          {/* **추정인지 실제인지 적는다.** 같은 숫자라도 뜻이 다르다 —
-              포지션이 없을 때는 '이 배율로 열면 이 정도'이고,
-              열린 뒤에는 '거래소가 이 가격에 강제로 닫는다'이다. */}
-          청산가까지 {liqIsActual ? '' : '약 '}{liqPct.toFixed(1)}%
+          border: `1px solid ${liqOk && liqPct < 3 ? A(liqTone, '55') : C.hair}`,
+          color: liqTone, fontWeight: 700, ...NUM,
+        }} title={!liqOk ? '청산 거리를 계산하지 못했습니다'
+            : liqIsActual
+              ? `거래소 청산가 ${posLiq} · 마크가 ${posMark} 기준`
+              : `배율 ${leverage}배 기준 예상 (유지증거금 반영)`}>
+          {/* **짧게 두 줄로 적는다.** '청산가까지 약 19.6%'는 한 줄로는
+              폰 폭을 넘고, 넘으면 줄 전체가 밀린다. 라벨과 숫자를 나누면
+              칸이 좁아져도 접히기만 한다.
+              그리고 **추정인지 실제인지 적는다** — 같은 숫자라도 뜻이 다르다.
+              포지션이 없을 때는 '이 배율로 열면 이 정도'이고, 열린 뒤에는
+              '거래소가 이 가격에 강제로 닫는다'이다. */}
+          <span style={{ opacity: .65, fontWeight: 600 }}>청산 거리</span>
+          {/* **계산 못 한 것을 0%로 적지 않는다.** 0%는 '지금 청산'이라는
+              뜻이고, 그건 모름과 정반대다. */}
+          <span>{liqOk ? `${liqIsActual ? '' : '약 '}${liqPct.toFixed(1)}%` : '확인 불가'}</span>
         </span>
       </div>
 
