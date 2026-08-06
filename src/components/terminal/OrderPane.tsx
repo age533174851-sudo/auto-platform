@@ -1,6 +1,7 @@
 'use client';
 import { A } from '@/lib/theme/colors';
 import { errorTextOf } from '@/lib/http/errorText';
+import { lossPreview } from '@/lib/engine/orderSizing';
 // src/components/terminal/OrderPane.tsx
 //
 // 호가판과 주문판. **따로 export한다.**
@@ -361,6 +362,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 서버(manualPlan)가 손절 없는 진입을 막는데 화면이 값을 보내지 않았다.
   // 화면에서 못 넣는 값을 서버가 요구하면 그 기능은 죽은 것이다.
   const [slPct, setSlPct] = useState(2);
+  /** 마지막으로 고른 계좌 위험 %. 버튼을 칠해 두기 위한 것 */
+  const [riskPick, setRiskPick] = useState<number | null>(null);
   // 직접 입력 중인 문자열. 숫자 상태와 따로 두는 이유: '1.'이나 '0.'처럼
   // **아직 숫자가 아닌 중간 상태**를 그대로 보여줘야 지우고 다시 쓸 수 있다.
   // 숫자만 들고 있으면 '10'에서 한 글자 지운 '1'이 곧바로 확정돼 버린다.
@@ -799,6 +802,38 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     // 사용자가 보는 숫자와 나가는 주문이 어긋난다.
     const v = unit === 'BASE' ? notionalUsd / px : notionalUsd;
     setQty(v > 0 ? String(Number(v.toFixed(unit === 'BASE' ? 6 : 2))) : '');
+  };
+
+  /**
+   * **위험에서 수량을 낸다.**
+   *
+   * 위의 setPct(25/50/75/100%)는 잔고의 몇 %를 걸까이고, 그건 위험과
+   * 무관한 숫자다. 잔고의 50%를 5배로 열면 계좌의 250%가 노출되는데
+   * 잃는 돈은 손절이 어디인지에 따라 완전히 달라진다.
+   *
+   * 이 버튼은 "이 거래에서 계좌의 몇 %를 잃어도 되는가"만 묻고, 손절
+   * 거리로 나눠 수량을 만든다. 계산은 orderSizing 한 곳에서 온다 —
+   * 여기서 다시 쓰면 확인창에 적히는 손실과 어긋난다.
+   */
+  const setByRisk = async (riskPct: number) => {
+    const px = orderType === 'LIMIT' ? (Number(price) || mid || 0) : (mid || 0);
+    const { planSize } = await import('@/lib/engine/orderSizing');
+    const r = planSize({
+      equity: balanceUsd, entryPrice: px,
+      // 방향은 손절이 위인지 아래인지만 정한다. **거리는 같으므로 수량은
+      // 방향과 무관하다** — 아직 롱/숏을 안 눌렀어도 계산할 수 있다.
+      side: side === 'BUY' ? 'LONG' : 'SHORT',
+      basis: 'ACCOUNT_RISK', pct: riskPct, leverage,
+    }, { pricePctForAccountRisk: slPct });
+
+    // **못 냈으면 채우지 않고 이유를 적는다.** 조용히 아무 일도 안
+    // 일어나면 사용자는 버튼이 고장 난 줄 안다.
+    if (r.qty == null || !(r.qty > 0)) { setMsg({ ok: false, text: r.reason }); return; }
+    setQty(unit === 'BASE'
+      ? String(Number(r.qty.toFixed(6)))
+      : String(Number((r.qty * px).toFixed(2))));
+    setRiskPick(riskPct);
+    setMsg(r.ok ? null : { ok: false, text: r.reason });
   };
 
   /** 단위를 바꾼다. **적어 둔 값을 그대로 두지 않고 환산한다** */
@@ -1310,6 +1345,38 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </div>
       )}
 
+      {/* ── 위험에서 수량 내기 ──
+
+          위의 25/50/75/100%는 '잔고의 몇 %를 걸까'다. 그건 위험과 무관한
+          숫자다 — 잔고의 50%를 5배로 열면 계좌의 250%가 노출되는데, 잃는
+          돈은 손절이 어디인지에 따라 완전히 달라진다.
+
+          이 줄은 "이 거래에서 계좌의 몇 %를 잃어도 되는가"만 묻는다.
+          그게 실제로 정해야 하는 유일한 값이고, 나머지는 계산이다. */}
+      {!reduceOnly && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: C.faint, fontSize: FS.micro, minWidth: 26 }}>위험</span>
+          {[0.5, 1, 2].map(p => (
+            <button key={p} onClick={() => setByRisk(p)}
+              style={{
+                flex: 1, minHeight: 26, borderRadius: 6, cursor: 'pointer',
+                background: riskPick === p ? C.accentBg : C.raised,
+                color: riskPick === p ? C.accent : C.dim,
+                border: `1px solid ${riskPick === p ? A(C.accent, '55') : C.hair}`,
+                fontSize: FS.micro, fontWeight: 700, ...NUM,
+              }}>계좌 {p}%</button>
+          ))}
+          <button onClick={() => { setRiskPick(null); setQty(''); }}
+            style={{
+              flex: 1, minHeight: 26, borderRadius: 6, cursor: 'pointer',
+              background: riskPick == null ? C.accentBg : C.raised,
+              color: riskPick == null ? C.accent : C.dim,
+              border: `1px solid ${riskPick == null ? A(C.accent, '55') : C.hair}`,
+              fontSize: FS.micro, fontWeight: 700,
+            }}>직접</button>
+        </div>
+      )}
+
       {/* ── 지금 들고 있는 것 ──
 
           롱을 들고 있는데 화면에 [숏 진입]만 보이면, 그걸 '파는 버튼'으로
@@ -1398,6 +1465,49 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                 fontSize: FS.micro, fontWeight: 700, outline: 'none', ...NUM,
               }}/>
           </div>
+          {/* ── **2%가 무엇의 2%인가** ──
+
+              버튼에 `2%`만 적혀 있으면 넷 다 말이 된다: 가격이 2% /
+              증거금의 2% / 계좌의 2% / ROI −2%. 5배에서 전부 다른 가격이고
+              100배에서는 쉰 배 차이가 난다. "2%면 안전하지"라고 생각한
+              것이 실제로는 계좌의 20%일 수 있다.
+
+              그래서 **기준을 적고 결과를 숫자로 보여준다.** 계산은
+              orderSizing에서 온다 — 확인창과 같은 함수다. */}
+          {(() => {
+            const refPx = orderType === 'LIMIT' ? (Number(price) || mid) : mid;
+            const lp = lossPreview({
+              equity: balanceUsd, entryPrice: refPx, qty: baseQty,
+              side: side === 'BUY' ? 'LONG' : 'SHORT', pricePct: slPct,
+            });
+            return (
+              <div style={{
+                marginTop: 4, padding: '5px 7px', borderRadius: 6,
+                background: C.raised, fontSize: FS.micro, lineHeight: 1.5, ...NUM,
+              }}>
+                <span style={{ color: C.faint }}>기준 </span>
+                <b style={{ color: C.text }}>가격 변동률</b>
+                <span style={{ color: C.faint }}> · 손절 </span>
+                <b style={{ color: C.text }}>
+                  {lp.stopPrice != null ? fmtPrice(lp.stopPrice) : '—'}
+                </b>
+                <br/>
+                <span style={{ color: C.faint }}>계좌 예상 손실 </span>
+                {/* **못 구한 것을 0으로 적지 않는다.** 0은 '안 잃는다'는 뜻이다. */}
+                {lp.loss != null ? (
+                  <>
+                    <b style={{ color: C.down }}>−{fmtPrice(lp.loss)} USDT</b>
+                    {lp.lossPctOfEquity != null && (
+                      <span style={{ color: C.faint }}> · 계좌의 {lp.lossPctOfEquity.toFixed(2)}%</span>
+                    )}
+                  </>
+                ) : (
+                  <span style={{ color: C.warn }}>{lp.reason || '수량을 넣으면 계산합니다'}</span>
+                )}
+              </div>
+            );
+          })()}
+
           {/* ── 손절을 **가격으로** 정하고 싶을 때 ──
 
               %는 계산의 단위이지 사람이 보는 단위가 아니다. 차트에서
