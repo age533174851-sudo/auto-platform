@@ -20,8 +20,8 @@
 // 두 곳에서 말하기 시작하면 둘이 어긋났을 때 어느 쪽이 맞는지 알 수 없다.
 import { NextRequest, NextResponse } from 'next/server';
 import { resolveUserId, getSupabaseAdmin } from '@/lib/supabase/server';
-import { loadBinanceCreds } from '@/lib/exchanges/loadCreds';
-import { getFuturesPositions, setFuturesLeverage } from '@/lib/exchanges/binanceFutures';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
+import { futuresPositionRisk, futuresSetLeverage } from '@/lib/exchanges/futuresAdapter';
 import { linearLiquidationPrice } from '@/lib/engine/paperPlan';
 
 export const dynamic = 'force-dynamic';
@@ -43,7 +43,10 @@ export async function POST(req: NextRequest) {
   }
 
   const sb = getSupabaseAdmin();
-  const creds = await loadBinanceCreds(sb, uid, body?.connectionId);
+  // **거래소를 가리지 않는다.** Gate에도 배율 설정이 있는데(그리고
+  // Gate는 leverage 0이 교차라 격리 확인이 더 중요한데) 여기서 막혀
+  // Gate 사용자는 앱에서 배율을 못 바꿨다.
+  const creds = await loadFuturesCreds(sb, uid, body?.connectionId);
   if (!creds.ok) {
     return NextResponse.json({ error: creds.error, message: creds.message }, { status: creds.status || 400 });
   }
@@ -54,9 +57,17 @@ export async function POST(req: NextRequest) {
   // 올리면, 있었을 경우 청산가가 어디로 가는지 아무도 모른다.
   let pos: any = null;
   try {
-    const list = await getFuturesPositions(creds.key!, creds.secret!, creds.testnet === true);
-    pos = (Array.isArray(list) ? list : []).find(
-      (p: any) => String(p.symbol).toUpperCase() === symbol && Math.abs(Number(p.amount) || 0) > 0) || null;
+    const rr = await futuresPositionRisk(
+      creds.exchange!, creds.key!, creds.secret!, symbol, creds.testnet === true);
+    // **못 읽은 것은 '포지션 없음'이 아니다.** 아래에서 pos가 null이면
+    // "들고 있는 것이 없다"로 흘러가 청산가 검사를 건너뛴다.
+    if (!rr.risk || rr.risk.positionAmt == null) {
+      throw new Error(rr.error || '포지션 응답을 읽지 못했습니다');
+    }
+    const amt = Number(rr.risk.positionAmt) || 0;
+    pos = Math.abs(amt) > 0
+      ? { symbol, amount: amt, entryPrice: rr.risk.entryPrice, markPrice: rr.risk.markPrice }
+      : null;
   } catch (e: any) {
     return NextResponse.json({
       error: 'positions_unreachable',
@@ -99,7 +110,8 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const r = await setFuturesLeverage(creds.key!, creds.secret!, symbol, leverage, creds.testnet === true);
+  const r = await futuresSetLeverage(
+    creds.exchange!, creds.key!, creds.secret!, symbol, leverage, creds.testnet === true);
   if (!r.success) {
     return NextResponse.json({ error: 'leverage_failed', message: r.message }, { status: 400 });
   }

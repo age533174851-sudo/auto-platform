@@ -91,19 +91,21 @@ export async function POST(req: NextRequest) {
       const { data: conn } = await sb.from('exchange_connections').select('user_id').eq('id', connectionId).maybeSingle();
       if (!conn?.user_id) { await answer(cbId, '연결 소유자를 확인할 수 없음'); return NextResponse.json({ ok: true }); }
 
-      const { loadBinanceCreds } = await import('@/lib/exchanges/loadCreds');
-      const creds = await loadBinanceCreds(sb, conn.user_id, connectionId);
+      // 텔레그램 버튼은 급할 때 누르는 것이다. 거래소를 이유로 안 돌면
+      // 누른 사람은 정리됐다고 믿고 손을 뗀다.
+      const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
+      const creds = await loadFuturesCreds(sb, conn.user_id, connectionId);
 
       let ok = false;
       let detail = '';
       if (!creds.ok) {
         detail = creds.message || creds.error || 'API 키를 읽지 못했습니다';
       } else {
-        const bf = await import('@/lib/exchanges/binanceFutures');
+        const { futuresCancelAll, futuresCloseAll } = await import('@/lib/exchanges/futuresAdapter');
         // 취소를 먼저 한다. 미체결 지정가가 남아 있으면 종료 직후 그 주문이
         // 체결되어 포지션이 다시 열린다.
-        const cancel = await bf.cancelAllOpenOrders(creds.key!, creds.secret!, creds.testnet!);
-        const close = await bf.closeAllPositions(creds.key!, creds.secret!, creds.testnet!, 5);
+        const cancel = await futuresCancelAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!);
+        const close = await futuresCloseAll(creds.exchange!, creds.key!, creds.secret!, creds.testnet!, 5);
         ok = !!close?.success;
         detail = ok
           ? `미체결 ${cancel?.count ?? 0}건 취소 · 포지션 전체 종료`

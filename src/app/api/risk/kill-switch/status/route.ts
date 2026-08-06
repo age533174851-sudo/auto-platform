@@ -51,15 +51,23 @@ export async function GET(req: NextRequest) {
         // 실행했는데, 그 워커를 쓰지 않게 된 뒤로 한도를 넘겨 자동 발동해도
         // 포지션이 그대로 남았다. 수동 발동(trigger)과 같은 문제였다.
         try {
-          const { loadBinanceCreds } = await import('@/lib/exchanges/loadCreds');
+          // **거래소를 가리지 않는다.** executeKillActions는 이미 Gate를
+          // 받는데(opts.exchange), 이 라우트가 loadBinanceCreds라 Gate
+          // 연결이면 시작도 못 했다 — 만들어 놓고 배선을 안 한 자리다.
+          //
+          // 킬스위치는 "문을 잠그고 안에 있는 것을 꺼내는" 동작이다.
+          // 꺼내는 쪽이 안 돌면 잠그기만 하고 끝나는데, 급할 때 누른
+          // 사람은 정리됐다고 믿고 손을 뗀다.
+          const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
           const { executeKillActions } = await import('@/lib/risk/killSwitch');
-          const creds = await loadBinanceCreds(sb, uid, connectionId);
+          const creds = await loadFuturesCreds(sb, uid, connectionId);
           if (!creds.ok) {
             exec = { ran: false, error: creds.error,
               message: creds.message || 'API 키를 읽지 못해 취소·종료를 실행하지 못했습니다' };
           } else {
             const r = await executeKillActions(sb, uid, connectionId, {
               key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+              exchange: creds.exchange!,
               actionMode: state.actionMode,
             });
             exec = { ran: true, ...r };

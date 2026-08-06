@@ -95,6 +95,7 @@ import { runWebhookAuthTests } from './src/lib/security/webhookAuth.test';
 import { runCheckOverrideTests } from './src/lib/engine/checkOverride.test';
 import { runMarketHoursTests } from './src/lib/markets/marketHours.test';
 import { runFuturesHoursTests } from './src/lib/markets/futuresHours.test';
+import { runProxyAssetTests } from './src/lib/markets/proxyAsset.test';
 import { runKisCoreTests } from './src/lib/exchanges/kisCore.test';
 import { runSpreadGuardTests } from './src/lib/markets/spreadGuard.test';
 import { runInstrumentTests } from './src/lib/markets/instrument.test';
@@ -119,7 +120,8 @@ runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); ru
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runGatePlanTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
 runWebhookAuthTests(); runCheckOverrideTests(); runMarketHoursTests();
-runFuturesHoursTests(); runKisCoreTests(); runSpreadGuardTests(); runInstrumentTests();
+runFuturesHoursTests();
+runProxyAssetTests(); runKisCoreTests(); runSpreadGuardTests(); runInstrumentTests();
 runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusReportTests(); runPositionParseTests(); runTraderScoreTests(); runConsensusSignalTests(); runWedomDisciplineTests(); runYoutubeLiveTests(); runCreatorEdgeTests();
 runCreatorLedgerTests();
 runCreatorIntakeTests();
