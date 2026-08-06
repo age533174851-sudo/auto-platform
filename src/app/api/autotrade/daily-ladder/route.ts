@@ -750,6 +750,60 @@ export async function POST(req: NextRequest) {
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    // ── 주문 직전에 배율을 맞추고 되읽어 확인한다 ──
+    //
+    // 점검 목록의 배율 항목은 blocking:false다. 즉 **거래소가 5배인데
+    // 계획이 50배여도 경고만 뜨고 주문이 그대로 나갔다.**
+    //
+    // 수량은 손절 거리에서 역산된 값이고 필요 증거금은 명목가 ÷ 배율이라,
+    // 배율이 10분의 1이면 필요 증거금이 열 배가 된다. 대개는 증거금
+    // 부족으로 거부되고 그 거부는 "왜 안 됐는지 모르겠다"로 남는다.
+    //
+    // **배율을 맞췄다는 이유로 청산 안전 검사를 통과시키지는 않는다.**
+    // 그건 위 체크리스트가 이미 봤고, 여기는 '의도한 배율이 실제로
+    // 걸렸는가'만 답한다.
+    const { ensureLeverage } = await import('@/lib/engine/leverageSync');
+    const apiSecretForLev = decryptSecret(conn.api_secret_enc ?? '');
+    const levSync = await ensureLeverage(result.plan!.leverage, {
+      read: async () => {
+        if (exchange === 'gate') {
+          const gf = await import('@/lib/exchanges/gateFutures');
+          const gp = await import('@/lib/exchanges/gatePlan');
+          const c = gp.toGateContract(symbol);
+          if (!c) return null;
+          const pos = await gf.getPositionGateFutures(conn.api_key, apiSecretForLev, c, useTestnet);
+          const r = gp.gatePositionToRisk(pos);
+          // Gate는 leverage 0이 교차다. 0을 '0배'로 읽으면 안 된다.
+          return r && r.leverage ? r.leverage : null;
+        }
+        const bf = await import('@/lib/exchanges/binanceFutures');
+        const r = await bf.getSymbolPositionRisk(conn.api_key, apiSecretForLev, symbol, useTestnet);
+        return r && Number(r.leverage) > 0 ? Number(r.leverage) : null;
+      },
+      write: async (lev: number) => {
+        try {
+          const { futuresSetLeverage } = await import('@/lib/exchanges/futuresAdapter');
+          const w: any = await futuresSetLeverage(
+            exchange, conn.api_key, apiSecretForLev, symbol, lev, useTestnet);
+          return { ok: w?.success !== false, message: w?.message };
+        } catch (e: any) { return { ok: false, message: e?.message || String(e) }; }
+      },
+    }, { positionOpen: !!risk && Math.abs(Number(risk.positionAmt) || 0) > 0 });
+
+    if (!levSync.ok) {
+      // 오늘 하루를 돌려준다 — 주문이 안 나갔으므로 슬롯을 쓴 것이 아니다.
+      await releaseReservation(sb, reservationId);
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'LEVERAGE_MISMATCH',
+        error: levSync.reason,
+        // **거래소 원문을 뭉개지 않는다.** 뭉개면 무엇을 고쳐야 할지 모른다.
+        leverage: {
+          intended: levSync.intended, before: levSync.before, after: levSync.after,
+          code: levSync.code, exchangeMessage: levSync.exchangeMessage ?? null,
+        },
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,

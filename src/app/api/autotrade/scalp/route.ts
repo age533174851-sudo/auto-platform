@@ -614,6 +614,47 @@ export async function POST(req: NextRequest) {
     if (claim.installed === false) (base as any).dedupInstalled = false;
   }
 
+  // ── 주문 직전에 배율을 맞추고 되읽어 확인한다 ──
+  //
+  // 점검 목록의 배율 항목은 blocking:false라, 거래소가 5배인데 계획이
+  // 50배여도 경고만 뜨고 주문이 그대로 나갔다. 필요 증거금이 열 배가
+  // 되어 대개 거부되고, 그 거부는 "왜 안 됐는지 모르겠다"로 남는다.
+  //
+  // **규칙은 leverageSync 한 곳에만 둔다** — 일봉 사다리와 단타가 다른
+  // 규칙을 쓰면 언젠가 한쪽만 고쳐진다.
+  const { ensureLeverage } = await import('@/lib/engine/leverageSync');
+  const levSync = await ensureLeverage(plan.leverage, {
+    read: async () => {
+      const { futuresPositionRisk, futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+      const ex = futuresExchangeOf(conn.exchange);
+      if (!ex) return null;
+      const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
+      // **0을 배율로 읽지 않는다.** Gate에서 0은 교차 증거금이라는 뜻이다.
+      const lev = Number(rr?.risk?.leverage);
+      return Number.isFinite(lev) && lev > 0 ? lev : null;
+    },
+    write: async (lev: number) => {
+      try {
+        const { futuresSetLeverage, futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+        const ex = futuresExchangeOf(conn.exchange);
+        if (!ex) return { ok: false, message: `알 수 없는 거래소입니다 (${conn.exchange})` };
+        const w = await futuresSetLeverage(ex, conn.apiKey, conn.apiSecret, symbol, lev, !connIsLive);
+        return { ok: w.success, message: w.message };
+      } catch (e: any) { return { ok: false, message: e?.message || String(e) }; }
+    },
+  });
+
+  if (!levSync.ok) {
+    return NextResponse.json({
+      ...base, executed: false, blocked: 'LEVERAGE_MISMATCH',
+      error: levSync.reason,
+      leverage: {
+        intended: levSync.intended, before: levSync.before, after: levSync.after,
+        code: levSync.code, exchangeMessage: levSync.exchangeMessage ?? null,
+      },
+    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const { executeOrder } = await import('@/lib/engine/orderExecutor');
   const exec = await executeOrder(sb, {
     userId,
