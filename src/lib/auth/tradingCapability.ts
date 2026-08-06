@@ -38,11 +38,22 @@ export type TradingCapability =
   /** 실전이지만 **손으로 누르는 것만.** 자동매매는 못 켠다 */
   | 'LIVE_MANUAL'
   /** 실전 자동매매까지 */
-  | 'LIVE_AUTO';
+  | 'LIVE_AUTO'
+  /**
+   * 전부.
+   *
+   * **회원 등급의 admin과 다르다.** 등급은 여전히 권한을 주지 않는다 —
+   * 이 값은 누군가가 **명시적으로 부여해야만** 붙는다. 등급이 admin인
+   * 것과 이 사람이 실전 자동매매를 켜도 되는 것은 여전히 다른 질문이다.
+   *
+   * 있어야 하는 이유: 저장소 소유자가 자기 계좌에서 잠기면 푸는 방법이
+   * SQL뿐이다. 그건 안전이 아니라 고장이다.
+   */
+  | 'ADMIN';
 
 /** 넓은 쪽이 큰 수. 좁은 권한이 넓은 것을 포함하지 않는다 */
 export const CAP_RANK: Record<TradingCapability, number> = {
-  VIEW_ONLY: 0, PAPER_ONLY: 1, TESTNET: 2, LIVE_MANUAL: 3, LIVE_AUTO: 4,
+  VIEW_ONLY: 0, PAPER_ONLY: 1, TESTNET: 2, LIVE_MANUAL: 3, LIVE_AUTO: 4, ADMIN: 5,
 };
 
 export const CAP_INFO: Record<TradingCapability, { label: string; desc: string }> = {
@@ -51,6 +62,7 @@ export const CAP_INFO: Record<TradingCapability, { label: string; desc: string }
   TESTNET:     { label: '테스트넷',  desc: '테스트넷까지 됩니다 — 실제 돈은 나가지 않습니다' },
   LIVE_MANUAL: { label: '실전 수동',  desc: '실전 주문을 손으로 낼 수 있습니다. 자동매매는 못 켭니다' },
   LIVE_AUTO:   { label: '실전 자동',  desc: '실전 자동매매까지 됩니다' },
+  ADMIN:       { label: '관리자',    desc: '전부 됩니다 — 명시적으로 부여된 경우에만' },
 };
 
 /**
@@ -62,11 +74,25 @@ export const CAP_INFO: Record<TradingCapability, { label: string; desc: string }
  */
 export const DEFAULT_CAPABILITY: TradingCapability = 'VIEW_ONLY';
 
+/**
+ * 같은 뜻인데 다르게 적힌 값.
+ *
+ * 'PAPER'와 'PAPER_ONLY'는 같은 것이다. 하나만 받으면 다른 쪽을 적은
+ * 행이 조용히 VIEW_ONLY로 떨어지고, 그 사람은 이유를 모른 채 막힌다.
+ * **넓히는 별칭은 두지 않는다** — 오타가 권한이 되면 안 되므로,
+ * 여기 있는 것은 이름만 다른 같은 등급뿐이다.
+ */
+const ALIASES: Record<string, TradingCapability> = {
+  PAPER: 'PAPER_ONLY',
+  PAPER_TRADING: 'PAPER_ONLY',
+};
+
 export function capabilityOf(raw: any): TradingCapability {
-  const s = String(raw ?? '').trim().toUpperCase() as TradingCapability;
+  const s = String(raw ?? '').trim().toUpperCase();
+  if (s in ALIASES) return ALIASES[s];
   // **모르는 값은 기본값이다.** 여기서 넓은 쪽으로 떨어지면 오타 하나가
   // 권한이 된다.
-  return s in CAP_RANK ? s : DEFAULT_CAPABILITY;
+  return (s in CAP_RANK ? s : DEFAULT_CAPABILITY) as TradingCapability;
 }
 
 /** 이 사람의 권한이 요구 수준 이상인가 */

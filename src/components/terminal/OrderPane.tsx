@@ -1398,20 +1398,51 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               {posAmt > 0 ? '롱' : '숏'} {showQty(Math.abs(posAmt))}
             </b>
           </span>
-          {/* 닫으려면 어디를 눌러야 하는지 그 자리에서 알려준다 */}
-          {!reduceOnly && (
-            <button onClick={() => {
+        </div>
+      )}
+
+      {/* ── 포지션이 있으면 할 일이 다르다 ──
+
+          지금까지 이 화면은 포지션이 있든 없든 같은 모양이었다. 신규
+          진입·청산·반전이 한 줄에 섞여 있고, 무엇을 하려는지는 사용자가
+          [신규]/[청산] 스위치로 스스로 골라야 했다.
+
+          그런데 포지션을 들고 있을 때 실제로 하는 일은 넷뿐이다 —
+          더 넣거나, 일부 닫거나, 전부 닫거나, 뒤집거나. 그 넷을 버튼으로
+          두면 스위치를 고르고 수량을 적는 두 단계가 한 번으로 준다.
+
+          **반전은 여기 두지 않는다.** 청산과 신규가 연달아 나가는 것이라
+          중간에 실패하면 포지션이 없는 상태로 끝날 수 있고, 그 확인은
+          여기 한 줄이 아니라 따로 받아야 한다. */}
+      {holding && (
+        <div style={{ display: 'flex', gap: 4 }}>
+          {([
+            ['추가', () => {
+              // 같은 방향으로 더 넣는다. 수량은 비운다 — 청산용으로 채워
+              // 둔 전량이 신규 수량이 되면 의도의 몇 배가 열린다.
+              setReduceOnly(false); setQty(''); setRiskPick(null);
+            }],
+            ['부분청산 50%', () => {
               setReduceOnly(true);
-              const base = Math.abs(posAmt);
+              const half = Math.abs(posAmt as number) / 2;
               setQty(unit === 'BASE'
-                ? showQty(base)
-                : String(Number((base * (unitPx || 0)).toFixed(2))));
-            }} style={{
-              padding: '3px 8px', borderRadius: 6, cursor: 'pointer',
-              background: C.panel, color: C.text, border: `1px solid ${C.hair}`,
-              fontSize: FS.micro, fontWeight: 700, flexShrink: 0,
-            }}>전량 청산으로</button>
-          )}
+                ? showQty(half)
+                : String(Number((half * (unitPx || 0)).toFixed(2))));
+            }],
+            ['전량청산', () => {
+              setReduceOnly(true);
+              const all = Math.abs(posAmt as number);
+              setQty(unit === 'BASE'
+                ? showQty(all)
+                : String(Number((all * (unitPx || 0)).toFixed(2))));
+            }],
+          ] as const).map(([label, fn]) => (
+            <button key={label} onClick={fn} style={{
+              flex: 1, minWidth: 0, minHeight: 30, borderRadius: 7, cursor: 'pointer',
+              background: C.raised, color: C.text, border: `1px solid ${C.hair}`,
+              fontSize: FS.micro, fontWeight: 700,
+            }}>{label}</button>
+          ))}
         </div>
       )}
 
