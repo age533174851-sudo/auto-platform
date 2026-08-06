@@ -476,6 +476,15 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     // 뜬 잔고와 실제로 주문이 깎는 잔고가 다른 계좌의 것이 된다.
     const wid = isPaper ? '' : (modeResolution.connId || '');
     if (!auth || !wid) { setWallet(null); setWalletErr(''); return; }
+    // ── 계좌가 바뀌면 **먼저 비운다** ──
+    //
+    // 예전에는 새 잔고가 도착할 때까지 앞 계좌의 값이 화면에 남아 있었다.
+    // Gate에서 Binance로 바꾼 직후의 몇 초 동안, 화면은 **Binance 계좌
+    // 이름 아래에 Gate의 잔고**를 그린다. 그 사이에 수량을 정하면 없는
+    // 돈을 기준으로 주문을 만든다.
+    //
+    // 비우면 '읽는 중'이 되고, 그건 틀린 숫자보다 언제나 낫다.
+    setWallet(null); setWalletErr('');
     let alive = true;
     const load = async () => {
       try {
@@ -514,6 +523,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   useEffect(() => {
     if (!auth) { setDailyLimit(null); return; }
     if (!isPaper && !modeResolution.connId) { setDailyLimit(null); return; }
+    // 한도도 계좌마다 다르다. 앞 계좌의 '오늘 -1.2%'를 새 계좌 아래에
+    // 두면, 아직 아무것도 안 한 계좌가 이미 손실 중인 것으로 보인다.
+    setDailyLimit(null);
     let alive = true;
     const load = async () => {
       try {
@@ -570,6 +582,11 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     }
     const connId = modeResolution.connId;
     if (!auth || !connId) { setMarginType(null); setMarginErr('연결이 없어 확인하지 못했습니다'); return; }
+    // 포지션과 마진 모드도 계좌마다 다르다. 계좌를 바꾼 직후에 앞 계좌의
+    // 포지션이 남아 있으면, 화면은 없는 포지션의 청산가를 그리고 주문판은
+    // '보유 중'으로 동작한다 — 그 상태에서 [전량청산]이 눌린다.
+    setMarginType(null); setMarginErr('');
+    setPosAmt(null); setPosLiq(null); setPosMark(null);
     let alive = true;
     (async () => {
       try {

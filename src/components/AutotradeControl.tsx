@@ -77,9 +77,11 @@ export default function AutotradeControl() {
         // 테스트넷 연결을 먼저 고른다. 실전을 기본으로 두면, 아무 생각
         // 없이 켠 사람이 진짜 돈으로 시작한다.
         if (!connId) {
-          const list = Array.isArray(j.connections) ? j.connections : [];
-          const testnet = list.find((c: any) => c.is_testnet !== false);
-          setConnId((testnet || list[0])?.id || '');
+          // **규칙은 pickConnection 한 곳에만 있다.** 여기가 자기 규칙을
+          // 들고 있던 동안, 이 화면과 매매 화면이 같은 계정 같은 순간에
+          // 서로 다른 계좌를 고른 채로 열렸다.
+          const { pickConnection } = await import('@/lib/exchanges/pickConnection');
+          setConnId(pickConnection(j.connections).id || '');
         }
       } else setErr(errorTextOf(j, '읽지 못했습니다'));
     } catch (e: any) { setErr(`읽지 못했습니다 (${e?.message || e})`); }

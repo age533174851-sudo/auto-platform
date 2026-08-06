@@ -18,6 +18,7 @@ import React, { createContext, useContext, useState, useEffect, useMemo, useCall
 import { loadFavorites, saveFavorites } from './SymbolSearch';
 import { parseMarketType, type MarketType } from '@/lib/markets/marketType';
 import { resolveTradeMode, TRADE_MODES, type TradeMode, type ModeResolution } from '@/lib/markets/tradeMode';
+import { pickConnection } from '@/lib/exchanges/pickConnection';
 import { watchAuthToken } from '@/lib/auth/authToken';
 
 export interface TerminalSymbol {
@@ -65,6 +66,8 @@ interface TerminalState {
   connId: string;
   setConnId: (id: string) => void;
   connections: any[];
+  /** 계좌를 자동으로 고르거나 바꾼 사실. 없으면 빈 문자열 */
+  connNotice: string;
   mode: ModeInfo;
   /**
    * 어디에 주문을 보내는가 — 모의 / 테스트넷 / 실전.
@@ -129,6 +132,14 @@ export function TerminalProvider(
   const [auth, setAuth] = useState('');
   const [connections, setConnections] = useState<any[]>([]);
   const [connId, setConnId] = useState('');
+  /**
+   * 계좌를 자동으로 골랐거나 바꿨을 때 사용자에게 말해야 하는 것.
+   *
+   * **말없이 옮기지 않는다.** 저장해 둔 계좌가 지워지면 다른 계좌로
+   * 옮기는 것이 맞지만, 옮겼다는 사실을 안 적으면 다음 주문이 사용자가
+   * 모르는 계좌로 나간다.
+   */
+  const [connNotice, setConnNotice] = useState('');
   const [mode, setMode] = useState<ModeInfo>(UNKNOWN_MODE);
   // **기본은 모의다.** 새로 열었을 때 실전에 서 있으면 안 된다 —
   // 모르고 누르는 첫 주문이 실제 돈이 되는 것이 이 화면의 최악이다.
@@ -226,14 +237,25 @@ export function TerminalProvider(
           .filter((c: any) => !c.has_withdrawal);
         if (cancelled) return;
         setConnections(usable);
-        // 지난번에 고른 계좌가 아직 있으면 그것을 쓴다. 없으면 첫 번째.
-        // **저장값을 그대로 믿지 않는다** — 지운 연결의 id가 남아 있으면
-        // 아무 계좌도 못 고른 상태가 되고, 화면은 그것을 '계좌 없음'으로
-        // 그린다.
+
+        // ── 어느 계좌를 쓸 것인가 ──
+        //
+        // 규칙은 pickConnection 한 곳에만 있다. 예전에는 여기가
+        // `usable[0]`(첫 번째)이고 자동매매 화면은 테스트넷 우선이라,
+        // 실전 연결이 먼저 등록돼 있으면 **같은 계정 같은 순간에 두 화면이
+        // 서로 다른 계좌를 고른 채로** 열렸다.
         let saved = '';
-        try { saved = localStorage.getItem(CONN_KEY) || ''; } catch { /* 못 읽으면 첫 번째 */ }
-        const keep = saved && usable.some((c: any) => c.id === saved) ? saved : (usable[0]?.id || '');
-        if (keep) setConnId(keep);
+        try { saved = localStorage.getItem(CONN_KEY) || ''; } catch { /* 못 읽으면 자동 선택 */ }
+        const picked = pickConnection(usable, { saved });
+
+        // **자동으로 고른 것도 저장한다.** 예전에는 setConnId를 직접 불러
+        // localStorage를 안 거쳤고, 그래서 손으로 고른 것만 기억됐다.
+        //
+        // 그리고 **목록에 없으면 비운다.** `if (keep)` 이었을 때는 쓸 수
+        // 있는 연결이 하나도 없어도 예전 id가 화면에 남아, 화면은 계좌가
+        // 선택된 것처럼 그리는데 그 계좌는 없었다.
+        chooseConn(picked.id || '');
+        setConnNotice(picked.reason || '');
       } catch { /* 연결 목록 실패 — 주문 패널이 안내한다 */ }
 
       try {
@@ -270,10 +292,10 @@ export function TerminalProvider(
   const value = useMemo<TerminalState>(() => ({
     symbol, setSymbol, symbols, favorites, toggleFavorite,
     marketType, setMarketType,
-    auth, connId, setConnId: chooseConn, connections, mode, navigateApp,
+    auth, connId, setConnId: chooseConn, connections, connNotice, mode, navigateApp,
     tradeMode, setTradeMode, modeResolution,
   }), [symbol, setSymbol, symbols, favorites, toggleFavorite,
-       marketType, setMarketType, auth, connId, chooseConn, connections, mode, navigateApp,
+       marketType, setMarketType, auth, connId, chooseConn, connections, connNotice, mode, navigateApp,
        tradeMode, setTradeMode, modeResolution]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
