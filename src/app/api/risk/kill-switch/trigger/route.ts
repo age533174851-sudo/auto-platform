@@ -61,11 +61,81 @@ export async function POST(req: NextRequest) {
         exec = { ran: false, error: creds.error, message: creds.message
           || 'API 키를 읽지 못해 취소·종료를 실행하지 못했습니다' };
       } else {
+        // ── 단계를 받는다 ──
+        //
+        // 예전에는 저장된 actionMode 하나뿐이라, 버튼이 실질적으로
+        // 하나였다. 그리고 그 하나가 **손매매 포지션까지** 닫았다 —
+        // 봇이 이상해서 눌렀는데 어제부터 들고 있던 것도 같이 나간다.
+        // 한 번 겪으면 다음부터 그 버튼을 못 누른다.
+        //
+        // 단계를 안 주면 예전 동작 그대로다(저장된 actionMode).
+        const { levelOf, actionModeOf, automatedSymbols, closeTargets } =
+          await import('@/lib/risk/emergencyLevel');
+        const spec = levelOf(body?.level);
+
+        // ── 심볼별로 닫는 단계 ──
+        //
+        // executeKillActions의 'D'는 **계좌의 모든 포지션**을 닫는다.
+        // "자동매매가 연 것만" 또는 "절반만"은 그걸로 못 한다 —
+        // 손매매까지 나가면 이 단계를 만든 이유의 정반대다.
+        let autoNote = '';
+        let closed: Array<{ symbol: string; ok: boolean; message: string }> = [];
+        if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
+          const { futuresPositionRisk, futuresClosePosition } =
+            await import('@/lib/exchanges/futuresAdapter');
+          const { strategyOf } = await import('@/lib/strategies/ledger');
+
+          // 어느 심볼이 봇이 연 것인가. **못 가리면 빈 집합이고,
+          // 그러면 CLOSE_AUTOMATED는 아무것도 안 닫는다.**
+          const { data: rows } = await (sb as any).from('live_orders')
+            .select('symbol, signal_id, status')
+            .eq('connection_id', connectionId).eq('status', 'FILLED')
+            .order('created_at', { ascending: false }).limit(200);
+          const auto = automatedSymbols(rows || [], strategyOf);
+
+          // 지금 들고 있는 포지션. 후보는 봇이 손댄 심볼과 지금 열려
+          // 있는 것의 교집합이다.
+          const candidates: string[] = spec.automatedOnly
+            ? Array.from(auto)
+            : Array.from(new Set<string>(
+                (rows || []).map((r: any) => String(r.symbol || '').toUpperCase()).filter(Boolean)));
+
+          const live: Array<{ symbol: string; qty: number }> = [];
+          for (const sym of candidates) {
+            const rr = await futuresPositionRisk(
+              creds.exchange!, creds.key!, creds.secret!, sym, creds.testnet!);
+            const amt = rr.risk?.positionAmt;
+            if (amt != null && Math.abs(Number(amt)) > 0) live.push({ symbol: sym, qty: Math.abs(Number(amt)) });
+          }
+
+          const plan = closeTargets(spec, live, auto);
+          autoNote = plan.note;
+          for (const t of plan.targets) {
+            const r = await futuresClosePosition(
+              creds.exchange!, creds.key!, creds.secret!, creds.testnet!,
+              t.symbol, spec.closePct);
+            closed.push({ symbol: t.symbol, ok: !!r.success, message: r.message });
+          }
+        }
+
         const r = await executeKillActions(sb, uid, connectionId, {
           key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
-          exchange: creds.exchange, actionMode: s.actionMode,
+          exchange: creds.exchange,
+          // 단계가 있으면 그 조합, 없으면 저장된 값.
+          actionMode: spec ? actionModeOf(spec) : s.actionMode,
         });
-        exec = { ran: true, ...r };
+        exec = {
+          ran: true, ...r,
+          level: spec?.level ?? null,
+          levelLabel: spec?.label ?? null,
+          // **무엇을 안 했는지도 적는다.** 자동매매 것만 닫는 단계인데
+          // 대상이 없으면 "정리됨"으로 보이면 안 된다.
+          note: autoNote || null,
+          // **닫으려다 실패한 것을 숨기지 않는다.** 하나라도 실패했으면
+          // "정리됨"으로 그리면 안 된다.
+          closed: closed.length ? closed : null,
+          closeFailed: closed.filter(c => !c.ok).length,
+        };
       }
     } catch (e: any) {
       exec = { ran: false, error: 'execute_failed', message: e?.message || '취소·종료 실행 실패' };

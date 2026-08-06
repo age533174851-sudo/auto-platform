@@ -93,6 +93,7 @@ import { runStopVerifyTests } from './src/lib/engine/stopVerify.test';
 import { runManualOverrideTests } from './src/lib/engine/manualOverride.test';
 import { runWebhookAuthTests } from './src/lib/security/webhookAuth.test';
 import { runShortGuardTests } from './src/lib/engine/shortGuard.test';
+import { runEmergencyLevelTests } from './src/lib/risk/emergencyLevel.test';
 import { runCheckOverrideTests } from './src/lib/engine/checkOverride.test';
 import { runMarketHoursTests } from './src/lib/markets/marketHours.test';
 import { runFuturesHoursTests } from './src/lib/markets/futuresHours.test';
@@ -122,7 +123,8 @@ runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); ru
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runGatePlanTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
 runWebhookAuthTests();
-runShortGuardTests(); runCheckOverrideTests(); runMarketHoursTests();
+runShortGuardTests();
+runEmergencyLevelTests(); runCheckOverrideTests(); runMarketHoursTests();
 runFuturesHoursTests();
 runProxyAssetTests();
 runTrendTests(); runKisCoreTests(); runSpreadGuardTests(); runInstrumentTests();
