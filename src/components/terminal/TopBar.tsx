@@ -10,7 +10,8 @@
 // 안 읽힌다. 실자금이면 상단 왼쪽에 붉은 띠가 서고 배경이 물든다.
 import React, { memo, useState } from 'react';
 import { C, FS, NUM, chip, fmtPrice, pnlColor } from './theme';
-import { DataBadge } from '@/components/ui/DataBadge';
+import { DataBadge, DataValue } from '@/components/ui/DataBadge';
+import type { DataSource } from '@/lib/engine/dataQuality';
 import { useTerminal } from './TerminalContext';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { SymbolSearch } from './SymbolSearch';
@@ -115,6 +116,12 @@ function TopBarInner({ balance, compact, right }: {
   const px = stream.lastPrice;
   const chg = stream.changePct;
   const live = stream.status === 'live' && !stream.stale;
+  // 배지와 숫자가 **같은 출처 하나**를 본다. 두 군데서 따로 만들면
+  // 배지는 '실시간'인데 숫자에는 표시가 없는 상태가 난다.
+  const priceSrc: DataSource = {
+    kind: live ? 'REALTIME' : 'UNAVAILABLE',
+    origin: compact ? '' : 'Binance', asOf: stream.priceAt, expectedIntervalMs: 100,
+  };
 
   return (
     <div style={{
@@ -140,11 +147,17 @@ function TopBarInner({ balance, compact, right }: {
         minWidth: 0, flex: compact ? 1 : undefined, overflow: 'hidden',
       }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
-          <span style={{
-            ...NUM, color: pnlColor(chg), fontWeight: 700,
-            fontSize: compact ? FS.lead : FS.num,
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-          }}>{fmtPrice(px)}</span>
+          {/* **숫자 자체에 표시가 남아야 한다.** 배지는 아래 작은 글씨로
+              붙는데, 사람은 큰 숫자를 먼저 보고 작은 글씨는 나중에 본다.
+              연결이 끊겨 멈춘 값이 평소와 똑같이 크고 선명하면, 그 값을
+              보고 주문을 낸다. */}
+          <DataValue source={priceSrc}>
+            <span style={{
+              ...NUM, color: pnlColor(chg), fontWeight: 700,
+              fontSize: compact ? FS.lead : FS.num,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>{fmtPrice(px)}</span>
+          </DataValue>
           {chg != null && (
             <span style={{
               ...NUM, color: pnlColor(chg), fontSize: FS.micro,
@@ -157,10 +170,7 @@ function TopBarInner({ balance, compact, right }: {
             좁은 화면에서도 지우지 않는다 — 출처를 지우면 그 순간
             "가짜를 진짜처럼 보여주던" 상태로 돌아간다. 대신 짧게 쓴다. */}
         <div style={{ overflow: 'hidden' }}>
-          <DataBadge compact source={{
-            kind: live ? 'REALTIME' : 'UNAVAILABLE',
-            origin: compact ? '' : 'Binance', asOf: stream.priceAt, expectedIntervalMs: 100,
-          }}/>
+          <DataBadge compact source={priceSrc}/>
         </div>
       </div>
 
