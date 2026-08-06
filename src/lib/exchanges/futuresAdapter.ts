@@ -375,3 +375,59 @@ export async function futuresCancelOrder(
   }
   return await bf.cancelFuturesOrder(key, secret, sym, args.orderId, testnet);
 }
+
+/**
+ * 이 심볼의 **계약 명세.** 금·원유·지수와 같은 모양으로 돌려준다.
+ *
+ * 왜 코인에도 이걸 두는가
+ * ───────────────────────
+ * Gate 선물은 **이미 계약형 상품**이다 — 수량이 정수 계약이고 1계약이
+ * 0.0001 BTC다. 금 1계약이 100온스인 것과 구조가 같다. 다른 것은 숫자뿐이다.
+ *
+ * 그러니 금을 붙일 때 새 계산을 만들 이유가 없다. 지금 Gate가 쓰는 길에
+ * 명세만 다르게 넣으면 된다. 반대로, 코인만 특별 취급하는 경로를 남겨
+ * 두면 금이 들어올 때 경로가 둘이 되고 — 그게 이 저장소에서 반복된
+ * 사고의 모양이다.
+ *
+ * **배수를 못 읽으면 multiplier가 null이다.** sizeByRisk가 그걸 보고
+ * 수량을 안 만든다. 1로 채우면 Gate에서는 10,000배, 금에서는 100배
+ * 크기가 조용히 나간다.
+ */
+export async function futuresContractSpec(
+  ex: FuturesExchange, symbol: string, testnet: boolean,
+): Promise<import('../markets/contractSpec').ContractSpec | null> {
+  const cs = await import('../markets/contractSpec');
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    const gp = await import('./gatePlan');
+    const contract = gp.toGateContract(symbol);
+    if (!contract) return null;
+    const spec = await gf.getGateContractSpec(contract, testnet);
+    return {
+      symbol: contract,
+      // Gate는 정수 계약이다. 0.5계약은 없다.
+      style: 'CONTRACT',
+      // 못 읽으면 null 그대로 넘긴다 — 여기서 1로 채우면 1계약을 1 BTC로
+      // 계산하고, 실제 크기가 10,000배가 된다.
+      multiplier: spec?.quantoMultiplier ?? null,
+      tickSize: spec?.orderPriceRound ?? null,
+      tickValue: null,
+      minQty: spec?.orderSizeMin ?? 1,
+      qtyStep: 1,
+      currency: 'USDT',
+      timezone: '',
+      expiry: null,
+    };
+  }
+
+  // 바이낸스 USDⓈ-M은 연속 수량이다. stepSize가 곧 최소 증분이고,
+  // 1계약 같은 개념이 없으므로 배수는 1이다.
+  const bf = await import('./binanceFutures');
+  const f = await bf.getSymbolFilters(symbol, testnet);
+  if (!f) return null;
+  return cs.continuousSpec(symbol, {
+    tickSize: (f as any).tickSize ?? null,
+    qtyStep: (f as any).stepSize ?? null,
+    minQty: (f as any).minQty ?? null,
+  });
+}
