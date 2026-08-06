@@ -337,6 +337,36 @@ export async function POST(req: NextRequest) {
   // 계좌가 통째로 날아간다.
   if (plan.side === 'SHORT') {
     const { shortGuard } = await import('@/lib/engine/shortGuard');
+
+    // ── 펀딩과 상위 시간봉을 실제로 읽는다 ──
+    //
+    // 이 둘을 안 넘기면 shortGuard의 해당 검사는 **한 번도 돌지 않는다.**
+    // 함수는 받을 준비가 돼 있는데 값이 안 들어가는, 이 저장소에서 가장
+    // 자주 반복된 모양이다.
+    //
+    // **못 읽으면 null로 넘긴다.** 0이나 'RANGE'로 채우면 확인한 적 없는
+    // 것을 확인했다고 적는 셈이고, 그러면 검사가 도는 것처럼 보이면서
+    // 실제로는 아무것도 안 본다.
+    let fundingPct: number | null = null;
+    let htf: 'UP' | 'DOWN' | 'RANGE' | null = null;
+    try {
+      const { futuresFundingRate } = await import('@/lib/exchanges/futuresAdapter');
+      fundingPct = await futuresFundingRate(barExchange, symbol, barTestnet);
+    } catch { /* null — 그 검사를 건너뛴다 */ }
+    try {
+      // 상위 시간봉은 현재 주기의 4배로 본다. 15분이면 1시간,
+      // 1시간이면 4시간. 같은 봉으로 '상위'를 판정하면 뜻이 없다.
+      const { klineInterval: ki } = await import('@/lib/strategies/scalpRun');
+      const upper = ki(intervalMin * 4);
+      if (upper) {
+        const ub = await fetchBars(symbol, upper, 120, barExchange, barTestnet);
+        if (ub?.closes?.length) {
+          const { trendOf } = await import('@/lib/markets/trend');
+          htf = trendOf(ub.closes, 50).dir;
+        }
+      }
+    } catch { /* null — 못 읽었다고 숏을 막지는 않는다 */ }
+
     // 청산가는 계획이 계산한 값을 쓴다. **없으면 그 검사만 건너뛴다** —
     // 못 읽었다고 숏을 통째로 막으면 조회가 흔들릴 때마다 멈춘다.
     const sg = shortGuard({
@@ -346,10 +376,15 @@ export async function POST(req: NextRequest) {
       recentHighs: bars?.highs ?? null,
       recentLows: bars?.lows ?? null,
       atr: (scalp as any)?.atr ?? null,
-      // 펀딩·상위 시간봉은 이 라우트가 아직 안 읽는다. **넘기지 않으면
-      // 그 검사를 건너뛴다** — 0이나 'RANGE'로 채우면 확인한 적 없는
-      // 것을 확인했다고 적는 셈이다.
+      fundingRatePct8h: fundingPct,
+      higherTrend: htf,
     });
+    // 무엇을 읽었고 무엇을 못 읽었는지 응답에 남긴다. 이게 없으면
+    // "검사를 통과했다"와 "검사가 안 돌았다"가 화면에서 같아 보인다.
+    (base as any).shortInputs = {
+      fundingPct, higherTrend: htf,
+      liquidationPrice: plan.liquidationPrice ?? null,
+    };
     if (!sg.allowed) {
       return NextResponse.json({
         ...base, executed: false, blocked: 'SHORT_GUARD',

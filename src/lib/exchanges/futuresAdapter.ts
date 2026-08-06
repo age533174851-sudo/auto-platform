@@ -460,3 +460,34 @@ export async function futuresSetLeverage(
   const bf = await import('./binanceFutures');
   return bf.setFuturesLeverage(key, secret, symbol, leverage, testnet);
 }
+
+/**
+ * 8시간 펀딩률(%). **못 읽으면 null이다 — 0이 아니다.**
+ *
+ * 0으로 떨어뜨리면 "펀딩이 없다"가 되고, 숏 검사는 그걸 중립으로 읽어
+ * 통과시킨다. 실제로는 숏이 크게 내는 자리일 수 있다.
+ *
+ * 부호 규칙: **양수면 롱이 내고 숏이 받는다.** 두 거래소가 같은 규칙을
+ * 쓰지만, 단위가 다르다 — 거래소는 비율(0.0001)로 주고 이 함수는
+ * 퍼센트(0.01)로 돌려준다. 여기서 100을 곱하는 것을 잊으면 검사 문턱이
+ * 100배 어긋난다.
+ */
+export async function futuresFundingRate(
+  ex: FuturesExchange, symbol: string, testnet: boolean,
+): Promise<number | null> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const gp = await import('./gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return null;
+      const t = await gf.getTickerGateFutures(contract, testnet);
+      const v = Number(t?.funding_rate);
+      return Number.isFinite(v) ? v * 100 : null;
+    }
+    const bf = await import('./binanceFutures');
+    const p = await bf.getPremiumIndex(symbol, testnet);
+    const v = Number(p?.lastFundingRate);
+    return Number.isFinite(v) ? v * 100 : null;
+  } catch { return null; }
+}
