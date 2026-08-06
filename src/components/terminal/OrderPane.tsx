@@ -28,6 +28,7 @@ import { StockOrderPanel } from './StockOrderPanel';
 import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
+import { basisGap } from '@/lib/markets/priceBasis';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
 import { AccountLine } from './AccountLine';
 
@@ -747,6 +748,16 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const maxOpenUsd = balanceUsd == null ? null : balanceUsd * leverage;
   /** 청산 거리를 실제로 구했는가. 못 구한 것을 0%로 적으면 '지금 청산'이 된다 */
   const liqOk = Number.isFinite(liqPct);
+  // ── 화면의 가격과 거래소가 판정하는 가격이 다를 때 ──
+  //
+  // 차트와 호가는 **체결가**로 그려진다. 그런데 청산과 손절 발동은
+  // **마크가**로 판정된다. 평소에는 0.0x% 차이라 같은 값처럼 보이지만,
+  // 급락 몇 초 동안은 1%씩 벌어진다.
+  //
+  // 그 구간에서 이런 일이 난다: 차트의 체결가는 손절선을 안 건드렸는데
+  // 손절이 발동한다. 마크가가 건드렸기 때문인데, 화면 어디에도 그 말이
+  // 없으면 사용자에게는 이유 없는 손절로 보인다.
+  const priceGap = basisGap({ last: mid, mark: posMark });
   const liqTone = !liqOk ? C.warn : liqPct < 1 ? C.down : liqPct < 3 ? C.warn : C.dim;
   const base = symbol.id.replace(/USDT$/, '');
 
@@ -1154,6 +1165,19 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           <span>{liqOk ? `${liqIsActual ? '' : '약 '}${liqPct.toFixed(1)}%` : '확인 불가'}</span>
         </span>
       </div>
+
+      {/* **체결가와 마크가가 벌어진 구간.**
+          이때만 띄운다 — 평소에도 띄우면 글자만 늘고, 정작 벌어졌을 때의
+          경고가 그 사이에 묻힌다. */}
+      {priceGap.diverged && (
+        <div style={{
+          padding: '6px 9px', borderRadius: 7,
+          background: C.warnBg, color: C.warn,
+          fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          {priceGap.text}. 차트의 가격이 손절선을 안 건드려도 발동할 수 있습니다.
+        </div>
+      )}
 
       {/* 모의는 왜 못 바꾸는가.
           "안 됩니다"만 적으면 고장으로 읽힌다 — 되는 곳을 같이 알려준다. */}
