@@ -21,6 +21,11 @@ function goodInput(): ChecklistInput {
     marginType: 'ISOLATED',
     leverage: { actual: 10, intended: 10 },
     existingPositionQty: 0,
+    // 포지션 모드도 **읽은 값**이어야 통과다. 안 넘기면 '확인 못 함'이
+    // 되는데, 그건 실제 동작이 맞고 그래서 픽스처가 이 값을 넘긴다 —
+    // 앱은 롱·숏을 따로 보여주는데 거래소가 단방향이면 두 포지션이
+    // 하나로 합쳐지고, 그때 '숏 청산'이 롱까지 줄인다.
+    positionMode: { mode: 'ONE_WAY' },
     todayEntry: { alreadyTraded: false },
     dailyLoss: { status: 'ok', reason: '오늘 −10.00 / 한도 50.00 USDT' },
     weeklyLoss: { status: 'ok', reason: '주간 여유 400.00 USDT' },
@@ -131,6 +136,25 @@ export function runPreTradeChecklistTests() {
   });
 
   console.log('[거래 전 점검 — 전체 판정]');
+
+  test('포지션 모드를 못 읽으면 확인 못 함으로 남는다 — 막지는 않는다', () => {
+    // 지금까지 아무도 이 값을 안 읽었다. 갑자기 차단 항목으로 만들면
+    // 조회가 안 되는 계정의 주문이 전부 멎는다. 사실을 먼저 보이고,
+    // 실제 차단은 주문 구성(orderIntent)이 한다 — 거기는 방향이 이미
+    // 정해진 자리라 판단이 더 정확하다.
+    const v = runChecklist({ ...goodInput(), positionMode: null });
+    eq(v.allowed, true, '막으면 안 된다');
+    const row = v.results.find(r => r.id === 'POSITION_MODE')!;
+    eq(row.status, 'unknown');
+    assert(v.unknownCount >= 1, String(v.unknownCount));
+  });
+
+  test('헤지 모드도 통과다 — 사실을 적을 뿐이다', () => {
+    const v = runChecklist({ ...goodInput(), positionMode: { mode: 'HEDGE' } });
+    const row = v.results.find(r => r.id === 'POSITION_MODE')!;
+    eq(row.status, 'pass');
+    assert(row.detail.includes('헤지'), row.detail);
+  });
 
   test('전부 통과하면 주문을 허용한다', () => {
     const v = runChecklist(goodInput());

@@ -49,6 +49,7 @@ export type CheckId =
   | 'LEVERAGE'
   /** 이미 열린 포지션이 있는가 */
   | 'EXISTING_POSITION'
+  | 'POSITION_MODE'
   /** 오늘 이미 진입했는가 */
   | 'TODAY_ENTRY'
   /** 손절이 계획에 붙어 있는가 */
@@ -311,6 +312,8 @@ export const CHECK_SPECS: CheckSpec[] = [
     blocking: false, requiredToKnow: false },
   { id: 'EXISTING_POSITION', label: '기존 포지션',        markets: DERIV, intents: BOTH,
     blocking: false, requiredToKnow: false },
+  { id: 'POSITION_MODE',     label: '포지션 모드',        markets: DERIV, intents: BOTH,
+    blocking: false, requiredToKnow: false },
 ];
 
 const SPEC_BY_ID: Record<CheckId, CheckSpec> =
@@ -446,6 +449,13 @@ export interface ChecklistInput {
   unresolvedOrderCount?: number | null;
   marginType?: string | null;
   leverage?: { actual: number | null; intended: number | null } | null;
+  /**
+   * 거래소의 포지션 모드. **못 읽었으면 null이다.**
+   *
+   * 앱은 롱·숏을 따로 보여주는데 거래소가 단방향이면 두 포지션이 하나로
+   * 합쳐진다. 그 상태에서 '숏 청산'을 누르면 롱까지 줄어든다.
+   */
+  positionMode?: { mode: 'ONE_WAY' | 'HEDGE' | null; reason?: string } | null;
   /** 지금 열려 있는 포지션 수량. 0이면 없음, null이면 모름 */
   existingPositionQty?: number | null;
   /** ladderGate 결과 */
@@ -843,6 +853,20 @@ export function runChecklist(
       `거래소 ${input.leverage.actual}배 / 의도 ${input.leverage.intended}배 — 주문 전에 맞추세요`));
   } else {
     results.push(resultFor('LEVERAGE', 'pass', `${input.leverage.actual}배`));
+  }
+
+  // 10-b. 포지션 모드 (막지 않는다 — 사실 전달)
+  //
+  // **여기서 막지 않는 이유:** 지금까지 아무도 이 값을 안 읽었고, 갑자기
+  // 차단 항목으로 만들면 조회가 안 되는 계정의 주문이 전부 멎는다.
+  // 사실을 먼저 보이고, 실제 차단은 주문 구성(orderIntent)이 한다 —
+  // 거기는 방향이 이미 정해진 자리라 판단이 더 정확하다.
+  if (!input.positionMode || input.positionMode.mode == null) {
+    results.push(resultFor('POSITION_MODE', 'unknown',
+      input.positionMode?.reason || '포지션 모드(단방향/헤지)를 확인하지 못했습니다'));
+  } else {
+    results.push(resultFor('POSITION_MODE', 'pass',
+      input.positionMode.mode === 'HEDGE' ? '헤지 모드' : '단방향 모드'));
   }
 
   // 11. 기존 포지션 (막지 않는다 — 사실 전달)

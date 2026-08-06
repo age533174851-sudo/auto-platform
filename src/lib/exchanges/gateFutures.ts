@@ -74,6 +74,32 @@ export async function getAccountGateFutures(key: string, secret: string, testnet
   return gateReq<GateFuturesAccount>('GET', '/api/v4/futures/usdt/accounts', { key, secret, testnet });
 }
 
+/**
+ * Gate 계좌가 **단방향인가 헤지(듀얼) 모드인가.**
+ *
+ * Gate는 계좌 단위 설정이고 `accounts` 응답의 `in_dual_mode`에 들어 있다.
+ * 바이낸스와 같은 이유로 필요하다 — 앱은 롱·숏을 따로 보여주는데 거래소가
+ * 단방향이면 두 포지션이 하나로 합쳐지고, 그 상태에서 '숏 청산'이 롱까지
+ * 줄인다.
+ *
+ * **못 읽으면 null이다.** 추측하지 않는다.
+ */
+export async function getPositionModeGateFutures(
+  key: string, secret: string, testnet = true,
+): Promise<{ mode: 'ONE_WAY' | 'HEDGE' | null; error: string | null }> {
+  try {
+    const a = await getAccountGateFutures(key, secret, testnet);
+    const dual = (a as any)?.in_dual_mode;
+    if (dual === true || dual === 'true') return { mode: 'HEDGE', error: null };
+    if (dual === false || dual === 'false') return { mode: 'ONE_WAY', error: null };
+    // 칸이 아예 없는 것도 '모름'이다. 없으면 단방향이라고 치면, 헤지
+    // 계좌에서 청산이 엉뚱한 쪽을 줄인다.
+    return { mode: null, error: 'in_dual_mode 칸이 응답에 없습니다' };
+  } catch (e: any) {
+    return { mode: null, error: e?.message || String(e) };
+  }
+}
+
 // ── 포지션 조회 ──────────────────────────────────────
 export interface GatePosition { contract: string; size: number; entry_price: string; leverage: string; unrealised_pnl: string; liq_price?: string }
 

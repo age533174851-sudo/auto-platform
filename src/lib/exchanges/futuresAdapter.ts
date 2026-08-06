@@ -442,6 +442,28 @@ export async function futuresContractSpec(
  * Gate는 leverage 0이 **교차 마진**이다. 격리를 확인하지 못하면
  * 성공으로 치지 않는다 — 교차에서는 이 계좌의 다른 포지션까지 물린다.
  */
+/**
+ * 이 계좌의 포지션 모드 — 단방향인가 헤지인가.
+ *
+ * **거래소마다 다른 자리에 있다.** 바이낸스는 전용 엔드포인트,
+ * Gate는 계좌 응답의 칸 하나다. 부르는 쪽이 그걸 알 필요는 없다 —
+ * 알아야 하면 라우트마다 분기가 생기고, 그 분기 중 하나는 언젠가
+ * 안 고쳐진다.
+ *
+ * **못 읽으면 null이다.** 추측한 모드로 주문을 만들면, 틀렸을 때
+ * 거부가 아니라 반대 포지션이 열릴 수 있다.
+ */
+export async function futuresPositionMode(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+): Promise<{ mode: 'ONE_WAY' | 'HEDGE' | null; error: string | null }> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    return gf.getPositionModeGateFutures(key, secret, testnet);
+  }
+  const bf = await import('./binanceFutures');
+  return bf.getFuturesPositionMode(key, secret, testnet);
+}
+
 export async function futuresSetLeverage(
   ex: FuturesExchange, key: string, secret: string, symbol: string,
   leverage: number, testnet: boolean,

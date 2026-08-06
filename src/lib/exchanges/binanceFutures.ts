@@ -616,6 +616,37 @@ export async function getFuturesServerTime(testnet = true): Promise<number | nul
   } catch { return null; }
 }
 
+/**
+ * 이 계좌가 **단방향인가 헤지 모드인가.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 헤지 모드에서는 주문에 `positionSide`(LONG/SHORT)가 필요하고, 단방향
+ * 에서는 그걸 보내면 거부된다. 반대로 헤지 모드인데 안 보내면 거래소가
+ * 어느 쪽을 줄일지 스스로 고르는데, **그 선택이 우리 의도와 다를 수 있다.**
+ *
+ * 앱은 롱·숏을 따로 보여주는데 거래소가 단방향이면 두 포지션이 하나로
+ * 합쳐진다. 그 상태에서 '숏 청산'을 누르면 롱까지 줄어든다.
+ *
+ * **못 읽으면 null이다.** 추측한 모드로 주문을 만들면, 틀렸을 때 거부가
+ * 아니라 반대 포지션이 열릴 수 있다 — 거부는 불편이고 반대 포지션은 사고다.
+ */
+export async function getFuturesPositionMode(
+  key: string, secret: string, testnet = true,
+): Promise<{ mode: 'ONE_WAY' | 'HEDGE' | null; error: string | null }> {
+  try {
+    const d = await fapiSigned('GET', '/fapi/v1/positionSide/dual', key, secret, testnet);
+    const dual = (d as any)?.dualSidePosition;
+    // **불리언이 아니면 모른다.** 문자열 'false'가 오는 환경이 있어
+    // 그것만 따로 받고, 그 밖의 값은 추측하지 않는다.
+    if (dual === true || dual === 'true') return { mode: 'HEDGE', error: null };
+    if (dual === false || dual === 'false') return { mode: 'ONE_WAY', error: null };
+    return { mode: null, error: `포지션 모드를 알 수 없는 응답입니다 (${JSON.stringify(dual)})` };
+  } catch (e: any) {
+    return { mode: null, error: e?.message || String(e) };
+  }
+}
+
 export interface FuturesOrderResult {
   success: boolean; message: string; orderId?: number | string;
   symbol?: string; side?: string; qty?: number; price?: number; raw?: any;
