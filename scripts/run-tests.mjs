@@ -94,6 +94,7 @@ import { runManualOverrideTests } from './src/lib/engine/manualOverride.test';
 import { runWebhookAuthTests } from './src/lib/security/webhookAuth.test';
 import { runShortGuardTests } from './src/lib/engine/shortGuard.test';
 import { runEmergencyLevelTests } from './src/lib/risk/emergencyLevel.test';
+import { runTradingCapabilityTests } from './src/lib/auth/tradingCapability.test';
 import { runCheckOverrideTests } from './src/lib/engine/checkOverride.test';
 import { runMarketHoursTests } from './src/lib/markets/marketHours.test';
 import { runFuturesHoursTests } from './src/lib/markets/futuresHours.test';
@@ -124,7 +125,8 @@ runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests
 runManualOverrideTests();
 runWebhookAuthTests();
 runShortGuardTests();
-runEmergencyLevelTests(); runCheckOverrideTests(); runMarketHoursTests();
+runEmergencyLevelTests();
+runTradingCapabilityTests(); runCheckOverrideTests(); runMarketHoursTests();
 runFuturesHoursTests();
 runProxyAssetTests();
 runTrendTests(); runKisCoreTests(); runSpreadGuardTests(); runInstrumentTests();
