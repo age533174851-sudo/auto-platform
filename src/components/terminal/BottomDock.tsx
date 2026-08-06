@@ -20,6 +20,7 @@ import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
 import { splitOrders } from '@/lib/markets/orderView';
 import { cycleState } from '@/lib/engine/orderCycle';
 import { findAnyStop } from '@/lib/engine/stopVerify';
+import { repairPlan, protectionFactsOf } from '@/lib/engine/protectionRepair';
 import { linearLiquidationPrice } from '@/lib/engine/paperPlan';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
 import { CombinedPanel } from './CombinedPanel';
@@ -570,6 +571,31 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }
     }),
     [openOrders, p?.symbol, side, v.sideKnown, mark]);
 
+  // ── 보호 주문 수량이 포지션과 맞는가 ──
+  //
+  // **부분청산을 한 번이라도 하면 여기가 어긋난다.** 절반을 닫아도 손절은
+  // 그대로 전량을 덮고 있고, 물타기로 늘리면 손절은 처음 크기만 덮는다.
+  // 지금까지 이 사실은 화면 어디에도 안 떴고, 손절이 발동하는 순간에야
+  // "왜 이만큼만 닫혔지"가 된다.
+  //
+  // 판정과 순서는 protectionRepair가 정한다 — 화면에서 다시 계산하면
+  // 규칙이 두 벌이 되고, 두 벌이 되면 한쪽만 고쳐진다.
+  const repair = useMemo(() => {
+    if (stopCheck.status !== 'attached' || !stopCheck.orderId) return null;
+    const list = Array.isArray(openOrders) ? openOrders : [];
+    const raw = list.find((o: any) => String(o?.orderId ?? '') === String(stopCheck.orderId));
+    if (!raw) return null;
+    const plan = repairPlan({
+      symbol: String(p?.symbol || ''),
+      // **못 읽었으면 null로 넘긴다.** 0으로 눕히면 계획이 '남은 보호
+      // 취소'가 되고, 멀쩡한 포지션의 유일한 손절을 지우자고 말한다.
+      positionQty: Number.isFinite(qty as number) ? Math.abs(qty as number) : null,
+      positionSide: v.sideKnown ? (side === 'LONG' ? 'LONG' : 'SHORT') : null,
+      ...protectionFactsOf(raw),
+    });
+    return plan.kind === 'NONE' || plan.kind === 'WAIT' ? null : plan;
+  }, [openOrders, stopCheck.status, stopCheck.orderId, qty, side, v.sideKnown, p?.symbol]);
+
   /**
    * 시장가 전량 청산.
    *
@@ -738,6 +764,41 @@ function PositionCard({ p, onPick, auth, connId, onClosed, openOrders, stopWhy }
           아래 <b>TP/SL</b>에서 손절을 걸거나 포지션을 닫으세요.
         </div>
       )}
+      {/* 손절은 걸려 있는데 **수량이 포지션과 다르다.** 부분청산 뒤에
+          생기는 상태이고, 지금까지 화면 어디에도 안 떴다. */}
+      {repair && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7, marginBottom: 9,
+          background: repair.urgent ? C.downBg : C.warnBg,
+          color: repair.urgent ? C.down : C.warn,
+          fontSize: FS.micro, lineHeight: 1.6,
+        }}>
+          <b>{repair.urgent ? '🛑' : '⚠'} {repair.reason}</b>
+          {repair.steps.length > 0 && (
+            <div style={{ color: C.dim, marginTop: 4 }}>
+              {/* **순서를 그대로 보여준다.** 어느 쪽을 먼저 하느냐가
+                  '보호가 잠깐 둘'과 '보호가 잠깐 없음'을 가른다. */}
+              {repair.steps.map((s, n) => (
+                <div key={n}>{n + 1}. {s.label}</div>
+              ))}
+            </div>
+          )}
+          {repair.momentaryGap && (
+            <div style={{ color: C.warn, marginTop: 4 }}>
+              이 순서에는 <b>보호가 잠깐 비는 구간</b>이 있습니다 — 기존 주문에
+              reduceOnly가 확인되지 않아, 둘을 함께 두면 발동 시 반대 포지션이
+              열릴 수 있습니다.
+            </div>
+          )}
+          {repair.kind === 'MANUAL' && (
+            <div style={{ color: C.dim, marginTop: 4 }}>
+              거래소 앱에서 직접 수정하세요 — 여기서 자동으로 만들 수 있는
+              계획이 없습니다.
+            </div>
+          )}
+        </div>
+      )}
+
       {stopCheck.status === 'unknown' && (
         <div style={{
           padding: '7px 9px', borderRadius: 7, marginBottom: 9,
