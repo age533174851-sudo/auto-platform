@@ -317,12 +317,28 @@ export interface Scored {
   /** 누적 R 곡선의 최대 낙폭 (R) */
   maxDrawdownR: number;
   totalR: number;
+  /**
+   * R의 표준편차. **기대값만으로는 우위를 말할 수 없다.**
+   *
+   * 기대값 +0.10R은 산포가 0.3R일 때와 3.0R일 때 전혀 다른 얘기다.
+   * 앞은 실제 우위일 수 있고 뒤는 그냥 소음이다 — 표본이 20건이면
+   * 후자는 우연히 그 값이 나올 확률이 흔하다.
+   */
+  stdevR: number;
+  /**
+   * 기대값의 표준오차 = stdevR / √n. null이면 계산할 수 없다(n<2).
+   *
+   * "이 우위가 우연일 수 있는가"를 재는 자다. 세그먼트를 잘게 쪼갤수록
+   * n이 작아지고 이 값이 커진다 — 그게 잘게 쪼개는 일의 대가다.
+   */
+  stderrR: number | null;
 }
 
 export function scoreR(rs: number[]): Scored {
   const xs = (Array.isArray(rs) ? rs : []).filter(r => Number.isFinite(Number(r))).map(Number);
   if (xs.length === 0) {
-    return { n: 0, expectancyR: 0, winRate: 0, profitFactor: null, maxDrawdownR: 0, totalR: 0 };
+    return { n: 0, expectancyR: 0, winRate: 0, profitFactor: null,
+             maxDrawdownR: 0, totalR: 0, stdevR: 0, stderrR: null };
   }
   let total = 0, wins = 0, gain = 0, loss = 0, peak = 0, mdd = 0;
   for (const r of xs) {
@@ -332,15 +348,26 @@ export function scoreR(rs: number[]): Scored {
     const dd = peak - total;
     if (dd > mdd) mdd = dd;
   }
+  // 표본표준편차(n-1). 모집단 공식(n)을 쓰면 작은 표본에서 산포를
+  // 실제보다 작게 잡고, 그러면 우연한 우위가 통과한다.
+  const mean = total / xs.length;
+  let ss = 0;
+  for (const r of xs) ss += (r - mean) * (r - mean);
+  const sd = xs.length >= 2 ? Math.sqrt(ss / (xs.length - 1)) : 0;
+
   return {
     n: xs.length,
-    expectancyR: total / xs.length,
+    expectancyR: mean,
     winRate: wins / xs.length,
     // 손실이 하나도 없으면 나눌 수 없다. Infinity를 적으면 화면이 그것을
     // '무한히 좋다'로 그리는데, 실제로는 표본이 부족한 것이다.
     profitFactor: loss > 0 ? gain / loss : null,
     maxDrawdownR: mdd,
     totalR: total,
+    stdevR: sd,
+    // n=1이면 산포를 말할 수 없다. 0을 적으면 "오차가 없다"가 되고,
+    // 그건 한 건짜리 표본을 확실한 우위로 통과시킨다.
+    stderrR: xs.length >= 2 ? sd / Math.sqrt(xs.length) : null,
   };
 }
 
