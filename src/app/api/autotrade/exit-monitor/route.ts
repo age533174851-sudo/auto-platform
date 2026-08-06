@@ -143,9 +143,21 @@ async function recoverUnresolvedOrders(
         .eq('id', cid).maybeSingle();
       if (!conn || (conn as any).has_withdrawal) continue;
 
-      const ex = String((conn as any).exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+      const ex = (await import('@/lib/exchanges/futuresAdapter')).futuresExchangeOf((conn as any).exchange_id);
+      // **건너뛰되 조용히 넘어가지 않는다.** 이 루프는 사람이 안 보는
+      // 사이에 도는 경로라, 여기서 말없이 continue하면 그 연결의 미확정
+      // 주문은 영영 확정되지 않는다 — 그리고 미확정이 하나 남으면
+      // 다음 진입이 상태 대조에서 막힌다.
+      if (!ex) {
+        out.details.push(
+          `연결 ${String(cid).slice(0, 8)}: 선물을 지원하지 않는 거래소라 대조하지 못했습니다`
+          + ` (${(conn as any).exchange_id || '알 수 없음'}) — 미확정 주문이 남아 있으면 `
+          + '다음 진입이 상태 대조에서 막힙니다');
+        out.needsAttention += 1;
+        continue;
+      }
       const r = await reconcilePendingOrders(sb, {
-        exchange: ex as 'binance' | 'gate',
+        exchange: ex,
         apiKey: (conn as any).api_key,
         apiSecret: decryptSecret((conn as any).api_secret_enc ?? ''),
         // **연결이 정한다. 전역 기본값을 섞지 않는다.**

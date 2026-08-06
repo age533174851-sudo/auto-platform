@@ -346,7 +346,18 @@ export async function POST(req: NextRequest) {
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
       const { executeOrder } = await import('@/lib/engine/orderExecutor');
 
-      const exchange = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+      // 모르는 거래소를 binance로 떨어뜨리지 않는다 — 그러면 남의 키로
+      // 바이낸스에 서명 요청이 나간다. 판정은 futuresExchangeOf 한 곳에 있다.
+      const exchange = (await import('@/lib/exchanges/futuresAdapter')).futuresExchangeOf(conn.exchange_id);
+      // **모르면 주문하지 않는다.** 예전에는 여기서 'binance'로 떨어졌고,
+      // 그러면 Gate도 아니고 바이낸스도 아닌 연결의 키로 바이낸스에
+      // 서명 요청이 나간다. 실패하면 다행이고, 실패하지 않으면 사고다.
+      if (!exchange) {
+        return NextResponse.json({
+          ok: false, error: 'unsupported_exchange',
+          message: `이 연결(${conn.exchange_id || '알 수 없음'})로는 선물 주문을 내지 않습니다`,
+        }, { status: 400 });
+      }
       const clientOrderId = `TG${signalId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 30)}`;
 
       const r = await executeOrder(sb, {

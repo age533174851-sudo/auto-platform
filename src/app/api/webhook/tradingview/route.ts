@@ -282,9 +282,19 @@ export async function POST(req: NextRequest) {
       // 찾으므로 Gate 연결이 그대로 들어오는데, 그러면 Gate 키로 바이낸스에
       // 서명해 보내는 셈이다 — 점검용 조회는 전부 실패하고(전 항목 unknown →
       // 차단), 통과했다면 엉뚱한 거래소로 주문이 나갔다.
-      const exchange: 'binance' | 'gate' =
-        String(conn.exchange_id ?? conn.exchange ?? '').toLowerCase().includes('gate')
-          ? 'gate' : 'binance';
+      // 판정은 futuresExchangeOf 한 곳에 있다. 여기서 손으로 다시 적으면
+      // 규칙이 갈리고, 갈리면 한쪽만 고쳐진다.
+      const exchange = (await import('@/lib/exchanges/futuresAdapter'))
+        .futuresExchangeOf(conn.exchange_id ?? conn.exchange);
+      if (!exchange) {
+        // **모르면 주문하지 않는다.** 예전에는 'binance'로 떨어졌다.
+        // 웹훅은 사람이 안 보는 사이에 도는 경로라, 여기서 엉뚱한
+        // 거래소로 나가면 아무도 그 사실을 모른다.
+        return NextResponse.json({
+          ok: false, error: 'unsupported_exchange',
+          message: `이 연결(${conn.exchange_id ?? conn.exchange ?? '알 수 없음'})로는 주문을 내지 않습니다`,
+        }, { status: 400 });
+      }
 
       const apiSecret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
 

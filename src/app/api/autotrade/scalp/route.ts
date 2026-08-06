@@ -151,7 +151,7 @@ export async function POST(req: NextRequest) {
       const { data: bc } = await (sb.from('exchange_connections') as any)
         .select('exchange_id, is_testnet').eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
       if (bc) {
-        barExchange = String(bc.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+        barExchange = (await import('@/lib/exchanges/futuresAdapter')).futuresExchangeOf(bc.exchange_id) ?? barExchange;
         barTestnet = bc.is_testnet !== false;
       }
     } catch { /* 기본값으로 진행 — 아래 연결 조회가 다시 확인한다 */ }

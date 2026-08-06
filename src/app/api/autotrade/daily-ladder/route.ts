@@ -172,8 +172,16 @@ export async function POST(req: NextRequest) {
       }, { status: 404 });
     }
     connIsLive = (c as any).is_testnet === false;
-    connExchange = String((c as any).exchange_id || '').toLowerCase().includes('gate')
-      ? 'gate' : 'binance';
+    // 판정은 futuresExchangeOf 한 곳에 있다. 여기서 손으로 다시 적으면
+    // 규칙이 갈리고, 갈리면 한쪽만 고쳐진다.
+    connExchange = (await import('@/lib/exchanges/futuresAdapter'))
+      .futuresExchangeOf((c as any).exchange_id) as any;
+    if (!connExchange) {
+      return NextResponse.json({
+        ok: false, error: 'unsupported_exchange',
+        message: `이 연결(${(c as any).exchange_id || '알 수 없음'})로는 자동매매를 돌리지 않습니다`,
+      }, { status: 400 });
+    }
 
     const modeIsLive = capability(opMode).needsLiveKey;
     if (connIsLive !== modeIsLive) {
@@ -455,7 +463,16 @@ export async function POST(req: NextRequest) {
     const { decryptSecret } = await import('@/lib/exchanges/crypto');
     const { executeOrder } = await import('@/lib/engine/orderExecutor');
 
-    const exchange = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+    const exchange = (await import('@/lib/exchanges/futuresAdapter')).futuresExchangeOf(conn.exchange_id);
+    // **모르면 주문하지 않는다.** null을 그대로 흘려보내면 아래에서
+    // `exchange === 'gate'`가 false라 바이낸스 분기로 가고, 그러면
+    // 남의 키로 바이낸스에 서명 요청이 나간다. 캐스팅이 그것을 숨긴다.
+    if (!exchange) {
+      return NextResponse.json({
+        ok: false, error: 'unsupported_exchange',
+        message: `이 연결(${conn.exchange_id || '알 수 없음'})로는 주문을 내지 않습니다`,
+      }, { status: 400 });
+    }
     const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
     const clientOrderId = `LD${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36);
 
@@ -620,7 +637,7 @@ export async function POST(req: NextRequest) {
       const { collectDailyLoss } = await import('@/lib/risk/dailyLossCheck');
       const f = await collectDailyLoss({
         apiKey: conn.api_key, apiSecret: apiSecretPre, testnet: useTestnet,
-        exchange: exchange === 'gate' ? 'gate' : 'binance',
+        exchange,
         // 계좌 자산은 riskContext가 이미 읽어 뒀다. 여기서 또 부르면
         // 레이트리밋을 두 배로 쓰고, 두 조회 사이에 값이 달라진다.
         currentEquityUsd: ctx.config.accountEquity ?? null,
@@ -632,7 +649,7 @@ export async function POST(req: NextRequest) {
       const { collectStreakLimits } = await import('@/lib/risk/lossStreakCheck');
       const sf = await collectStreakLimits({
         apiKey: conn.api_key, apiSecret: apiSecretPre, testnet: useTestnet,
-        exchange: exchange === 'gate' ? 'gate' : 'binance',
+        exchange,
         currentEquityUsd: ctx.config.accountEquity ?? null,
       });
       weeklyFact = { status: sf.weekly.status, reason: sf.weekly.reason };
@@ -740,7 +757,7 @@ export async function POST(req: NextRequest) {
       // 누구 것인지 알 수 없고, 장부가 '주인 미상'으로 쌓인다.
       signalId: tagStrategy(`daily-ladder-${tradeDate}-${symbol}`, 'daily-ladder'),
       clientOrderId,
-      exchange: exchange as 'binance' | 'gate',
+      exchange,
       mode: mode as 'TESTNET' | 'LIVE',
       plan: result.plan!,
       stopLoss,

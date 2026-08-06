@@ -94,8 +94,20 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
       conn = data;
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
       secret = decryptSecret(data.api_secret_enc ?? '');
-      const tag = String(data.exchange_id ?? '').toLowerCase();
-      isGate = tag.includes('gate');
+      // **모르는 거래소를 바이낸스로 읽지 않는다.**
+      //
+      // 예전에는 `.includes('gate')`가 false면 곧 바이낸스였다. 그러면
+      // 업비트 연결의 키로 바이낸스에 서명 조회를 보내고, 실패하면
+      // 전 항목이 unknown이 되어 막히기는 한다 — 다만 화면에 뜨는 이유가
+      // "조회 실패"라, 진짜 원인(지원하지 않는 거래소)이 안 남는다.
+      const { futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+      const ex = futuresExchangeOf(data.exchange_id);
+      if (!ex) {
+        // 연결을 안 쓴다. 아래 항목들은 unknown으로 남고 점검이 막는다.
+        conn = null;
+      } else {
+        isGate = ex === 'gate';
+      }
     }
   } catch {
     /* conn이 null로 남는다 → 아래 항목들은 unknown */

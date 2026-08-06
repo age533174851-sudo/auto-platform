@@ -67,8 +67,18 @@ export async function gatherAndReconcile(
   //
   // 판정(reconcileState)은 거래소를 모른다 — PositionView만 받는다. 그래서
   // 읽는 쪽만 갈라 준다.
-  const isGate = String((conn as any).exchange_id ?? '')
-    .toLowerCase().includes('gate');
+  // 판정은 futuresExchangeOf 한 곳에 있다. 모르는 거래소를 바이낸스로
+  // 읽으면, 그 거래소에 있는 포지션을 바이낸스에서 못 찾고 **'포지션
+  // 없음'으로 대조**해 버린다 — 앱에는 있는데 거래소에는 없다는 결론이
+  // 나오고, 그건 가장 위험한 거짓말이다.
+  const { futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+  const exResolved = futuresExchangeOf((conn as any).exchange_id);
+  if (!exResolved) {
+    return { reachable: false, verdict: null,
+      error: `선물을 지원하지 않는 거래소라 대조하지 못했습니다 `
+           + `(${(conn as any).exchange_id || '알 수 없음'})`, ...empty };
+  }
+  const isGate = exResolved === 'gate';
 
   const exchangePositions: PositionView[] = [];
   let exchangeOpenOrders: OrderView[] | undefined;

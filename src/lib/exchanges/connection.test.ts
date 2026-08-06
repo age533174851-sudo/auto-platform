@@ -20,6 +20,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import { loadConnection, normalizeExchange, CONN_SELECT } from './connection';
+import { futuresExchangeOf } from './futuresAdapter';
 
 /** 004/028 마이그레이션에 실제로 있는 칸 */
 const REAL_COLUMNS = new Set([
@@ -169,5 +170,43 @@ export function runConnectionTests() {
     eq(normalizeExchange(''), '');
     eq(normalizeExchange(null), '');
     eq(normalizeExchange(undefined), '');
+  });
+
+  console.log('[거래소 해석 — 모르는 것을 바이낸스로 떨어뜨리지 않는다]');
+
+  test('두 해석기가 같은 문자열을 같게 읽는다', () => {
+    // 예전에는 futuresExchangeOf가 정확히 'gate'|'gateio'|'gate.io'만 봤고
+    // normalizeExchange는 `.includes('gate')`였다. 두 해석기가 갈리면
+    // 한쪽이 통과시킨 연결을 다른 쪽이 막고, 그때 화면에는 이유가 안 남는다.
+    for (const raw of ['gate', 'gateio', 'Gate.io', 'GATE_FUTURES', 'gate futures']) {
+      eq(normalizeExchange(raw), 'gate', raw);
+      eq(futuresExchangeOf(raw), 'gate', raw);
+    }
+    for (const raw of ['binance', 'BINANCE_FUTURES', 'binance-usdm']) {
+      eq(normalizeExchange(raw), 'binance', raw);
+      eq(futuresExchangeOf(raw), 'binance', raw);
+    }
+  });
+
+  test('선물을 안 하는 거래소는 null이다 — binance가 아니다', () => {
+    // 아홉 곳이 손으로 이렇게 적고 있었다:
+    //   .includes('gate') ? 'gate' : 'binance'
+    // 그러면 exchange_id가 비었거나 오타이거나 새 거래소일 때
+    // **바이낸스 코드가 남의 키로 돈다.**
+    for (const raw of ['upbit', 'bithumb', 'kis', '한국투자', 'okx', '', null, undefined, 'ㅁㄴㅇㄹ']) {
+      eq(futuresExchangeOf(raw), null, String(raw));
+    }
+  });
+
+  test('모르는 값을 정규화가 지어내지 않는다', () => {
+    // normalizeExchange는 원문을 그대로 둔다. 그래야 위쪽에서
+    // "이 거래소는 못 다룬다"고 말할 수 있다.
+    eq(normalizeExchange('okx'), 'okx');
+    eq(futuresExchangeOf('okx'), null);
+  });
+
+  test('공백과 대소문자에 흔들리지 않는다', () => {
+    eq(futuresExchangeOf('  GATE  '), 'gate');
+    eq(futuresExchangeOf('  Binance '), 'binance');
   });
 }

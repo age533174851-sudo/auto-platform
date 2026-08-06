@@ -383,9 +383,25 @@ export function runGatePlanTests() {
   // **모르는 거래소를 바이낸스로 치지 않는다.** 그러면 Gate가 아닌 키로
   // 바이낸스에 서명 요청을 보내고, 그 실패는 '주문 실패'로만 보인다.
   test('모르는 거래소는 null이다', () => {
-    for (const v of ['upbit', 'bybit', 'okx', '', null, undefined, 'binance-futures']) {
+    for (const v of ['upbit', 'bybit', 'okx', '', null, undefined]) {
       eq(futuresExchangeOf(v), null, `${String(v)}가 통과했다`);
     }
+  });
+
+  test('접미사가 붙어도 바이낸스는 바이낸스다', () => {
+    // 예전에는 'binance-futures'도 위 목록에 있었다. 그런데 그건 모르는
+    // 거래소가 아니라 **바이낸스**다 — null로 두면 멀쩡한 연결이 거부된다.
+    //
+    // 그리고 이 저장소에는 모순된 기대가 둘 있었다: connection.test는
+    // `normalizeExchange('BINANCE_FUTURES') === 'binance'`를 요구하고
+    // 여기는 같은 문자열이 null이기를 요구했다. 두 해석기가 갈려 있었기
+    // 때문이고, 지금은 futuresExchangeOf가 normalizeExchange에 위임한다.
+    //
+    // 규칙은 하나다: **어느 거래소인지는 느슨하게 알아보되, 모르면
+    // 지어내지 않는다.**
+    eq(futuresExchangeOf('binance-futures'), 'binance');
+    eq(futuresExchangeOf('BINANCE_FUTURES'), 'binance');
+    eq(futuresExchangeOf('gate futures'), 'gate');
   });
 
   // ── 손절 트리거 가격도 호가 단위에 맞아야 한다 ──────
