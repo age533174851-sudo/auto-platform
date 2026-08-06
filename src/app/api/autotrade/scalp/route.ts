@@ -294,6 +294,38 @@ export async function POST(req: NextRequest) {
   // 실주문을 내는 경로가 점검 없이 도는 것은, 안전장치를 만들어 두고
   // 한쪽 문만 잠그지 않은 것과 같다. 수동 주문과 같은 수집기를 쓴다 —
   // 여기서 따로 모으면 언젠가 한쪽만 고치게 된다.
+  // ── 미확정 주문을 **먼저 확정해 본다** ──
+  //
+  // 아래 체크리스트는 결과를 모르는 주문이 남아 있으면 막는다. 그건 맞는
+  // 판정인데, 지금까지 그걸 **푸는 것**은 하루 한 번 도는 크론뿐이었다.
+  // 그래서 00시 05분에 응답을 못 받으면 그날 하루 자동매매가 통째로 멎었고,
+  // 더 나쁘게는 거래소에 열려 있을지 모르는 포지션을 하루 종일 아무도
+  // 확인하지 않았다.
+  //
+  // 대조가 필요한 순간은 크론이 도는 시각이 아니라 **다음 주문을 내려는
+  // 지금**이다. 여기서 한 번 물어보고 들어간다.
+  //
+  // 실패해도 진입을 막지 않는다 — 못 풀었으면 아래 체크리스트가 원래대로
+  // 막는다. 여기서 또 막으면 같은 이유로 두 번 막는 것이고, 사유는 한 곳에
+  // 적히는 게 낫다.
+  let reconcileTried: { resolved: number; error?: string } | null = null;
+  try {
+    const { reconcilePendingOrders } = await import('@/lib/engine/orderExecutor');
+    const r = await reconcilePendingOrders(sb, {
+      exchange: conn.exchange as 'binance' | 'gate',
+      apiKey: conn.apiKey,
+      apiSecret: conn.apiSecret,
+      testnet: !connIsLive,
+      // 언제나 좁힌다. 안 좁히면 이 사람의 키로 남의 주문을 물어보고,
+      // 없다는 답을 남의 행에 쓴다.
+      userId,
+      connectionId: body.connectionId,
+    });
+    reconcileTried = { resolved: r.resolved };
+  } catch (e: any) {
+    reconcileTried = { resolved: 0, error: e?.message || '대조 실패' };
+  }
+
   const { collectChecklistInput } = await import('@/lib/engine/preflight');
   const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
   const checkInput = await collectChecklistInput({
@@ -341,6 +373,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ...base, executed: false, blocked: 'CHECKLIST_BLOCKED',
       error: checklist.summary,
+      // **대조를 시도했다는 사실을 적는다.** 미확정 주문 때문에 막혔는데
+      // 화면에 아무 말이 없으면, 사용자는 그저 막힌 것으로 읽고 크론이
+      // 돌 때까지 기다리는 수밖에 없다고 생각한다.
+      reconcile: reconcileTried,
       checklist: {
         allowed: false, passed: checklist.passed, total: checklist.total,
         unknownCount: checklist.unknownCount,

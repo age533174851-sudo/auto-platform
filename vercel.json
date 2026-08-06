@@ -19,6 +19,10 @@
       "schedule": "0 1 * * *"
     },
     {
+      "path": "/api/cron/reconcile",
+      "schedule": "0 * * * *"
+    },
+    {
       "path": "/api/cron/ai-scoring",
       "schedule": "30 3 * * *"
     },
