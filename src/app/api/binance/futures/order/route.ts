@@ -61,6 +61,41 @@ export async function POST(req: NextRequest) {
       message: '연결을 찾지 못했습니다 — 지워졌거나 내 연결이 아닙니다',
     }, { status: 404 });
   }
+  // ── 이 사람이 이 거래를 할 수 있는가 ──
+  //
+  // **화면에서 버튼을 안 그리는 것으로는 부족하다.** 화면은 우회할 수
+  // 있고 이 API는 직접 부를 수 있다. 막는 것은 여기서 한다.
+  //
+  // 회원 등급(role)과 다른 축이다 — 관리자는 사용자를 관리하는 사람이지
+  // 돈을 걸 사람이 아니다. 친구에게 화면을 보여 주려고 등급을 올렸는데
+  // 실전 주문까지 열리면 그건 아무도 의도하지 않은 일이다.
+  //
+  // **못 읽으면 가장 좁은 권한으로 본다.** 조회 실패가 넓은 쪽으로
+  // 떨어지면, 데이터베이스가 흔들리는 순간 모두가 실전을 켤 수 있게 된다.
+  {
+    const { loadCapability } = await import('@/lib/auth/loadCapability');
+    const { canDo, intentOf } = await import('@/lib/auth/tradingCapability');
+    const capRead = await loadCapability(sb, uid);
+    // 이 라우트는 손으로 누르는 경로다. 자동매매는 executeOrder를
+    // 직접 부르므로 여기 안 온다.
+    const intent = intentOf({ testnet: conn.is_testnet !== false ? true : false });
+    const v = canDo(capRead.capability, intent);
+    // **설치 안 된 정책은 강제하지 않는다.** 마이그레이션 전에는 표가
+    // 없는데, 그때 막으면 아무도 주문을 못 내고 그걸 푸는 유일한 방법이
+    // SQL 실행이라 사용자가 자기 계좌에서 잠긴다. 그건 안전이 아니라
+    // 고장이다 — 지금 상태는 권한 체계가 없던 어제와 같고, 표를 만드는
+    // 순간 엄격해진다.
+    //
+    // 표는 있는데 **조회가 실패한 것**은 진짜 모름이라 막는다.
+    if (!v.allowed && capRead.installed) {
+      return NextResponse.json({
+        error: 'capability_denied',
+        message: v.reason + (capRead.known ? '' : ` (${capRead.reason})`),
+        capability: v.capability, required: v.required,
+      }, { status: 403 });
+    }
+  }
+
   // ── 어느 거래소로 나가는가 ──
   //
   // 예전에는 여기서 `!== 'binance'`면 거절했다. Gate 연결을 고른 사용자는
