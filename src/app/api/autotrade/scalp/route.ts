@@ -313,7 +313,30 @@ export async function POST(req: NextRequest) {
       return Number.isFinite(n) && n > 0 ? n : null;
     })(),
   });
-  const checklist = runChecklist(checkInput, { market: 'USDM', intent: 'ENTRY' });
+  // ── 시장 국면 ──
+  //
+  // **이것도 단타에만 없었다.** 일봉 사다리는 collectRegime을 부르고
+  // 그 판정을 체크리스트 항목으로 넣는다. 단타는 안 불렀고, 안 부르면
+  // `regimeFilter`도 꺼진 채라 항목이 목록에 아예 안 나온다 —
+  // "통과했다"가 아니라 **물어본 적이 없다**인데 화면은 구분이 안 됐다.
+  //
+  // 일봉을 따로 받는다(closes를 안 넘긴다). 단타가 들고 있는 것은
+  // 분봉이고, 그걸 일봉 국면 판정에 넣으면 200일선 자리에 200분선이
+  // 들어간다 — 위의 거래량 기준선을 안 넘기는 것과 같은 이유다.
+  const { collectRegime } = await import('@/lib/risk/regimeCheck');
+  const regimeFacts = await collectRegime({
+    symbol,
+    side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
+  });
+  checkInput.regime = {
+    status: regimeFacts.verdict.status,
+    reason: regimeFacts.verdict.reason,
+  };
+
+  const checklist = runChecklist(checkInput, {
+    market: 'USDM', intent: 'ENTRY',
+    regimeFilter: regimeFacts.enabled,
+  });
   if (!checklist.allowed) {
     return NextResponse.json({
       ...base, executed: false, blocked: 'CHECKLIST_BLOCKED',
@@ -520,6 +543,41 @@ export async function POST(req: NextRequest) {
   // 중복으로 거부한다 — 재진입 간격 검사가 실수로 빠져도 마지막 방어선이
   // 하나 남는다.
   const barBucket = Math.floor(Date.now() / (intervalMin * 60_000));
+
+  // ── 같은 봉에서 두 번 들어가지 않는다 (멱등 키) ──
+  //
+  // **이 경로에는 중복 차단이 없었다.** 웹훅에는 webhook_dedup을 쓰는
+  // claimSignal이 있는데 단타에는 없었고, 단타가 이 저장소에서 가장
+  // 자주 도는 경로다. 스케줄러가 겹쳐 돌거나 사용자가 두 번 누르면
+  // 같은 봉에서 두 번 들어간다.
+  //
+  // 지금까지 유일한 방어는 clientOrderId였다. 그건 거래소가 막아 주는
+  // 것이라 **거래소까지 다녀와야** 알고, Gate는 바이낸스와 중복 판정
+  // 규칙이 다르다. 여기서 먼저 끊으면 둘 다 해결된다.
+  //
+  // 봉 하나에 한 번이므로 이웃 버킷을 보지 않는다 — 다음 봉의 진입은
+  // 재발사가 아니라 새 기회다. 만료는 두 봉으로 둬서 늦게 온 재시도까지
+  // 덮는다.
+  {
+    const { claimSignal } = await import('@/lib/risk/idempotency');
+    const barSec = Math.max(60, intervalMin * 60);
+    const claim = await claimSignal(
+      sb,
+      { key: `scalp:${body.connectionId}:${symbol}:${interval}:${barBucket}`, neighbors: [], clientScoped: true },
+      barSec * 2,
+    );
+    if (claim.duplicate) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'DUPLICATE_SIGNAL',
+        error: `이 봉(${interval})에서는 이미 진입했습니다 — ${claim.reason || '중복 신호'}`,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+    // **막았다고 적지 않는다.** 표가 없어서 통과한 것과 중복이 아니어서
+    // 통과한 것은 다르다. 응답에 실어 보내 사용자가 지금 이중 진입
+    // 방어가 없는 상태라는 것을 알게 한다.
+    if (claim.installed === false) (base as any).dedupInstalled = false;
+  }
+
   const { executeOrder } = await import('@/lib/engine/orderExecutor');
   const exec = await executeOrder(sb, {
     userId,
