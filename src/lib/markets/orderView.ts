@@ -36,6 +36,10 @@ export interface OpenOrderRaw {
   triggerPrice?: any;
   reduceOnly?: any;
   closePosition?: any;
+  /** 이미 체결된 수량. 바이낸스는 executedQty, 우리 장부는 filled_qty */
+  executedQty?: any;
+  filledQty?: any;
+  filled_qty?: any;
   orderId?: any;
   time?: any;
   updateTime?: any;
@@ -76,6 +80,19 @@ export interface OrderCardView {
   qtyLabel: string;
   /** 전량 종료 주문인가 */
   closeAll: boolean;
+  /** 이미 체결된 수량. 거래소가 안 알려주면 null (0과 다르다) */
+  filledQty: number | null;
+  /** 아직 나갈 수 있는 수량. 못 구하면 null */
+  remainingQty: number | null;
+  /** 체결 비율(%). 못 구하면 null */
+  fillPct: number | null;
+  /**
+   * 일부만 체결된 주문인가.
+   *
+   * **취소 버튼이 이 값을 봐야 한다.** 일부 체결된 주문을 취소하면
+   * 취소되는 것은 남은 수량뿐이고, 이미 체결된 만큼은 포지션으로 남는다.
+   */
+  partiallyFilled: boolean;
   /** '활성' | 원문 상태 */
   statusLabel: string;
   /** 생성 시각(ms). 포맷은 화면이 한다 — 순수 함수에 로캘을 넣지 않는다 */
@@ -221,9 +238,39 @@ export function describeOrder(
 
   const closeAll = o?.closePosition === true;
   const qty = num(o?.origQty) ?? num(o?.quantity);
+
+  // ── 얼마가 이미 체결됐는가 ──
+  //
+  // **이 줄이 없어서 90% 체결된 주문이 아무것도 안 된 주문과 똑같이
+  // 보였다.** 목록에는 '활성'이라고만 뜬다.
+  //
+  // 그 상태에서 [주문 취소]를 누르면 사용자는 "아무 일도 없었다"고
+  // 생각한다. 실제로는 취소된 것이 **남은 10%뿐**이고, 이미 체결된 90%는
+  // 포지션으로 남는다 — 그리고 그 포지션에는 손절이 없다. 지정가 진입에
+  // 손절을 같이 걸었더라도 그건 체결 뒤에 붙는다.
+  //
+  // 0과 없음을 가른다. `executedQty: 0`은 "아직 하나도 안 붙었다"이고,
+  // 필드 자체가 없는 것은 "거래소가 안 알려줬다"이다.
+  const filled = num(o?.executedQty) ?? num(o?.filledQty) ?? num(o?.filled_qty);
+  // 빼기의 부동소수 찌꺼기를 그대로 내보내지 않는다 — 1 - 0.9는
+  // 0.09999999999999998이고, 그 숫자가 화면에 뜨면 사람은 자릿수를 센다.
+  // 8자리는 사토시 단위이므로 실제 수량을 깎지 않는다.
+  const remaining = (qty != null && filled != null)
+    ? Number(Math.max(0, Math.abs(qty) - Math.abs(filled)).toFixed(8)) : null;
+  /** 부분 체결 비율(%). 못 구하면 null */
+  const fillPct = (qty != null && Math.abs(qty) > 0 && filled != null)
+    ? (Math.abs(filled) / Math.abs(qty)) * 100 : null;
+  // 마지막 자리 차이로 '일부 체결'이 뜨면 매번 뜬다.
+  const partiallyFilled = fillPct != null && fillPct > 1e-6 && fillPct < 100 - 1e-6;
+
   const qtyLabel = closeAll ? '전량 종료'
-    : qty != null && qty !== 0 ? fmtNum(Math.abs(qty))
-    : '수량 미상';
+    : qty != null && qty !== 0
+      ? (partiallyFilled
+          // **남은 수량을 앞에 적는다.** 이 줄은 미체결 목록이고, 여기서
+          // 궁금한 것은 "앞으로 얼마가 더 나갈 수 있는가"다.
+          ? `${fmtNum(remaining)} 남음 / ${fmtNum(Math.abs(qty))}`
+          : fmtNum(Math.abs(qty)))
+      : '수량 미상';
 
   const execLabel =
     kindLabelOf(o).includes('시장가') || upper(o?.type).includes('MARKET') ? '시장가'
@@ -231,8 +278,14 @@ export function describeOrder(
     : '지정가';
 
   const st = upper(o?.status);
+  // **부분 체결을 '활성'으로 뭉개지 않는다.** 거래소가 상태로 말해 주든
+  // (PARTIALLY_FILLED) 수량으로만 말해 주든(executedQty) 같게 다룬다 —
+  // Gate는 상태를 'open'으로만 주고 체결분은 수량 차이로 알린다.
   const statusLabel =
-    st === '' || st === 'NEW' || st === 'OPEN' || st === 'PARTIALLY_FILLED' ? '활성' : st;
+    (st === 'PARTIALLY_FILLED' || partiallyFilled)
+      ? `일부 체결${fillPct != null ? ` ${fillPct.toFixed(0)}%` : ''}`
+    : st === '' || st === 'NEW' || st === 'OPEN' ? '활성'
+    : st;
 
   const created = num(o?.time) ?? num(o?.createdAt) ?? num(o?.updateTime);
 
@@ -253,6 +306,10 @@ export function describeOrder(
     execLabel,
     qtyLabel,
     closeAll,
+    filledQty: filled,
+    remainingQty: remaining,
+    fillPct,
+    partiallyFilled,
     statusLabel,
     createdAt: created,
     orderId: o?.orderId == null ? null : String(o.orderId),

@@ -17,7 +17,7 @@ import { MarketCompare } from './MarketSwitch';
 import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
 import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
-import { splitOrders } from '@/lib/markets/orderView';
+import { splitOrders, fmtNum } from '@/lib/markets/orderView';
 import { cycleState } from '@/lib/engine/orderCycle';
 import { findAnyStop } from '@/lib/engine/stopVerify';
 import { repairPlan, protectionFactsOf } from '@/lib/engine/protectionRepair';
@@ -2107,6 +2107,22 @@ function OrderCard({ v, busy, onCancel }: {
         {v.triggerLabel && <div>{v.triggerLabel}</div>}
         <div style={{ color: C.dim }}>{v.execLabel} · {v.qtyLabel}</div>
       </div>
+
+      {/* **이미 체결된 만큼은 취소되지 않는다.**
+          목록에 '활성'이라고만 떠 있으면 사용자는 [취소]를 누르고 "아무
+          일도 없었다"고 생각한다. 실제로는 남은 수량만 취소되고, 이미
+          체결된 만큼은 포지션으로 남는다 — 그리고 지정가 진입에 손절을
+          같이 걸어 뒀더라도 그 손절은 체결 뒤에 붙는다. */}
+      {v.partiallyFilled && (
+        <div style={{
+          marginTop: 7, padding: '6px 9px', borderRadius: 7,
+          background: C.warnBg, color: C.warn, fontSize: FS.micro, lineHeight: 1.55,
+        }}>
+          이미 <b>{fmtNum(v.filledQty)}</b>가 체결됐습니다. 취소하면 남은{' '}
+          <b>{fmtNum(v.remainingQty)}</b>만 사라지고, <b>체결된 만큼은 포지션으로
+          남습니다</b> — 포지션 탭에서 손절이 걸렸는지 확인하세요.
+        </div>
+      )}
 
       {more && (
         <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
