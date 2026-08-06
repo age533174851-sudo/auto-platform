@@ -147,20 +147,75 @@ export async function POST(req: NextRequest) {
   // real  → 연결의 is_testnet 플래그를 따름 (라이브 키면 라이브, 테스트 키면 테스트넷)
   // testnet → 연결 플래그와 무관하게 항상 거래소 테스트넷으로 강제 라우팅
   if (mode === 'real' || mode === 'testnet') {
-    // 보안: 웹훅 시크릿 검증 (아무나 주문 못 넣게). 미설정 시 fail-closed.
-    const expectedSecret = process.env.WEBHOOK_SECRET || '';
-    if (!expectedSecret) {
+    // ── 웹훅 시크릿 검증 ──
+    //
+    // **사람마다 다른 시크릿을 쓴다.** 예전에는 환경변수 하나를
+    // `body.secret !== expectedSecret`로 비교했다. 문제가 셋이었다:
+    //
+    //  1) 공용이라 그 값을 아는 사람이 아무 계정으로나 들어왔다.
+    //     이 값은 트레이딩뷰 알림 본문에 **평문으로** 들어가므로
+    //     화면 공유 한 번이면 새어 나간다
+    //  2) `!==`는 다른 글자를 만나면 즉시 끝나서, 응답 시간으로
+    //     앞에서부터 한 글자씩 맞춰 볼 수 있었다
+    //  3) 환경변수라 폐기·교체가 재배포였다
+    //
+    // 이제 해시를 저장하고 상수 시간으로 비교한다. 발급된 것이 없으면
+    // **전역 시크릿으로 떨어지지 않는다** — 떨어지면 나누는 의미가 사라진다.
+    const { verifyWebhookSecret, hashSecret, redactSecrets } =
+      await import('@/lib/security/webhookAuth');
+    const { getSupabaseAdmin: getSbAuth } = await import('@/lib/supabase/admin');
+    const sbAuth = getSbAuth();
+
+    let authed: { ok: boolean; reason: string; userId: string | null } =
+      { ok: false, reason: 'supabase가 설정되지 않아 웹훅 시크릿을 확인할 수 없습니다', userId: null };
+
+    if (sbAuth) {
+      const presented = String(body.secret ?? '').trim();
+      // 해시로 찾는다 — 평문을 질의에 넣지 않으므로 로그·모니터링에
+      // 시크릿이 남지 않는다.
+      const { data: row } = presented
+        ? await (sbAuth as any).from('webhook_secrets')
+            .select('user_id, secret_hash, revoked_at')
+            .eq('secret_hash', hashSecret(presented)).maybeSingle()
+        : { data: null };
+      authed = verifyWebhookSecret(presented, row ? {
+        userId: String(row.user_id), secretHash: String(row.secret_hash), revokedAt: row.revoked_at,
+      } : null);
+      if (authed.ok && row) {
+        // 마지막 사용 시각. 안 쓰이는 시크릿을 지울 때 본다.
+        await (sbAuth as any).from('webhook_secrets')
+          .update({ last_used_at: new Date().toISOString() })
+          .eq('secret_hash', hashSecret(presented));
+      }
+    }
+
+    if (!authed.ok) {
+      // **실패 기록에 시크릿을 남기지 않는다.** 요청 본문을 통째로
+      // 넣으면 로그에 평문이 들어가고, 그 로그는 대개 더 오래 남는다.
       entry.status = 'blocked_auth';
+      entry.payload = redactSecrets(body) as any;
+      signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
+      logAudit({
+        userId: body.userId || 'anon', action: 'WEBHOOK_AUTH_FAIL',
+        resource: body.symbol || '?', detail: { ip: req.ip, reason: authed.reason },
+        result: 'blocked',
+      });
+      return NextResponse.json({
+        ok: false, dropped: true, id: webhookId,
+        message: `Signal dropped — ${authed.reason}`,
+      }, { status: 200 });
+    }
+
+    // **시크릿의 주인과 요청이 말하는 사용자가 같아야 한다.**
+    // 다르면 남의 시크릿을 들고 자기 userId를 적은 것이거나 그 반대다.
+    if (body.userId && String(body.userId) !== String(authed.userId)) {
+      entry.status = 'blocked_auth';
+      entry.payload = redactSecrets(body) as any;
       signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
       return NextResponse.json({
         ok: false, dropped: true, id: webhookId,
-        message: 'WEBHOOK_SECRET 미설정 — 실주문 경로를 사용할 수 없습니다',
-      }, { status: 503 });
-    }
-    if (body.secret !== expectedSecret) {
-      entry.status = 'blocked_auth';
-      signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
-      return NextResponse.json({ ok: false, dropped: true, id: webhookId, message: 'Signal dropped — 웹훅 시크릿 불일치' }, { status: 200 });
+        message: 'Signal dropped — 시크릿의 주인과 userId가 다릅니다',
+      }, { status: 200 });
     }
     if (!body.connectionId) {
       entry.status = 'blocked';
