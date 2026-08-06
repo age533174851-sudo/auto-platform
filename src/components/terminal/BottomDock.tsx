@@ -18,6 +18,7 @@ import { WalletTreePanel } from './WalletTree';
 import { LedgerPanel } from './LedgerPanel';
 import { derivePosition, closeSideFor } from '@/lib/markets/positionView';
 import { splitOrders } from '@/lib/markets/orderView';
+import { cycleState } from '@/lib/engine/orderCycle';
 import { findAnyStop } from '@/lib/engine/stopVerify';
 import { linearLiquidationPrice } from '@/lib/engine/paperPlan';
 import { SpotStrategyPanel } from './SpotStrategyPanel';
@@ -230,8 +231,15 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         )}
 
         {tab === '미체결' && !isPaper && (
-          <OpenOrdersPanel orders={open} why={acct?.openOrdersMsg ?? null}
-            auth={auth} connId={connId} onChanged={load}/>
+          <>
+            {/* **포지션이 없는데 살아 있는 보호 주문**을 먼저 띄운다.
+                이 자리가 사이클의 마지막 단계('남은 보호 주문 제거')이고,
+                지금까지 아무도 안 보고 있었다. 두면 다음 진입이 이 손절에
+                걸린다 — 반대 방향으로 들어가면 즉시 발동한다. */}
+            <OrphanProtectionNotice orders={open} positions={positions}/>
+            <OpenOrdersPanel orders={open} why={acct?.openOrdersMsg ?? null}
+              auth={auth} connId={connId} onChanged={load}/>
+          </>
         )}
 
         {tab === '상태대조' && (
@@ -1681,6 +1689,75 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
             }}>{busy ? '저장 중…' : '저장'}</button>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * **포지션이 없는데 살아 있는 보호 주문.**
+ *
+ * 사이클의 마지막 단계는 '남은 보호 주문 제거'인데, 그 단계가 실패해도
+ * 지금까지 화면 어디에도 안 떴다. 청산 경로는 스스로 지우지만, 포지션이
+ * **손으로 닫혔거나 거래소가 청산한 경우**에는 아무도 안 지운다.
+ *
+ * 남으면 무슨 일이 나나: 같은 심볼에 반대 방향으로 들어가는 순간 그
+ * 손절이 즉시 발동한다. 같은 방향이면 엉뚱한 가격에 걸린 채로 남아
+ * 있다가, 사용자가 새로 건 손절과 둘 다 발동한다.
+ *
+ * 판정은 orderCycle.cycleState가 한다 — 화면에서 다시 계산하면 이 규칙이
+ * 두 벌이 되고, 두 벌이 되면 한쪽만 고쳐진다.
+ */
+function OrphanProtectionNotice(
+  { orders, positions }: { orders: any[] | null; positions: any[] },
+) {
+  const orphans = useMemo(() => {
+    // **못 읽었으면 판정하지 않는다.** 빈 배열과 null은 다르다 —
+    // 조회 실패를 '주문 없음'으로 읽으면 고아가 없다고 단정하게 된다.
+    if (!Array.isArray(orders) || orders.length === 0) return [];
+    const symbolsWithPosition = new Set(
+      (Array.isArray(positions) ? positions : [])
+        .filter(p => Math.abs(Number(p?.amount ?? p?.positionAmt ?? 0)) > 0)
+        .map(p => String(p?.symbol || '').toUpperCase()),
+    );
+    const bySymbol = new Map<string, any[]>();
+    for (const o of orders) {
+      const sym = String(o?.symbol || '').toUpperCase();
+      if (!sym || symbolsWithPosition.has(sym)) continue;
+      if (!bySymbol.has(sym)) bySymbol.set(sym, []);
+      bySymbol.get(sym)!.push(o);
+    }
+
+    const out: Array<{ symbol: string; reason: string; action: string }> = [];
+    for (const [sym, list] of bySymbol) {
+      // 이 심볼에 보호 주문이 살아 있는가. 방향을 모르므로 양쪽 다 본다 —
+      // 어느 쪽이든 포지션이 없는 심볼에 남아 있으면 고아다.
+      for (const dir of ['LONG', 'SHORT'] as const) {
+        const stop = findAnyStop(list, { symbol: sym, positionSide: dir, sideKnown: true });
+        if (stop.status !== 'attached') continue;
+        const v = cycleState({ orderStatus: 'FILLED', positionQty: 0, stop });
+        if (v.broken === 'ORPHAN_PROTECTION') {
+          out.push({ symbol: sym, reason: v.reason, action: v.action });
+          break;   // 심볼당 한 번만 적는다
+        }
+      }
+    }
+    return out;
+  }, [orders, positions]);
+
+  if (orphans.length === 0) return null;
+
+  return (
+    <div style={{
+      margin: '10px 12px 0', padding: '9px 11px', borderRadius: 8,
+      background: C.downBg, border: `1px solid ${A(C.down, '55')}`,
+    }}>
+      <div style={{ color: C.down, fontWeight: 800, fontSize: FS.small, marginBottom: 3 }}>
+        🛑 포지션 없는 보호 주문 {orphans.length}건
+      </div>
+      <div style={{ color: C.dim, fontSize: FS.micro, lineHeight: 1.55 }}>
+        {orphans.map(o => o.symbol).join(' · ')} — 두면 <b>다음 진입이 이 손절에 걸립니다.</b>
+        {' '}반대 방향으로 들어가면 즉시 발동합니다. 아래 목록에서 취소하세요.
+      </div>
     </div>
   );
 }
