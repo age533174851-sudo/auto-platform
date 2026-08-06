@@ -358,3 +358,72 @@ export function gateBaseFromContracts(
   if (!Number.isFinite(m) || m <= 0) return null;
   return c * m;
 }
+
+/**
+ * Gate 익절 조건. **손절과 부등호가 반대다.**
+ *
+ * gateStopSpec을 그대로 못 쓰는 이유
+ * ───────────────────────────────────
+ * 손절은 LONG이면 아래(rule 2), SHORT면 위(rule 1)에서 발동한다.
+ * 익절은 정확히 그 반대다 — LONG이면 위(rule 1), SHORT면 아래(rule 2).
+ *
+ * 이걸 손절 함수로 대신 쓰면 **익절이 손절 자리에 걸린다.** 롱의 익절을
+ * 현재가 아래에 걸어 두는 셈이라, 오르지 않고 조금만 내려도 "익절"이라는
+ * 이름으로 손실 확정된다. 화면에는 익절이 걸렸다고 뜬다.
+ *
+ * 호가 반올림 방향도 반대다. 손절은 진입에서 **멀어지는** 쪽으로 밀어
+ * 한 틱 일찍 터지지 않게 하는데, 익절은 멀어지는 쪽으로 밀면 안 닿는다.
+ * 익절도 같은 원칙(불리한 쪽)을 쓴다 — LONG 익절은 올림, SHORT는 내림.
+ * 한 틱 늦게 익절되는 쪽이 안 익절되는 것보다 낫다.
+ */
+export function gateTakeProfitSpec(
+  side: 'LONG' | 'SHORT',
+  tpPrice: number | null | undefined,
+  refPrice?: number | null,
+  spec?: GateSpecLike | null,
+): GateStopSpec {
+  // autoSize는 손절과 같다 — 어느 쪽이든 **그 포지션을 닫는** 주문이다.
+  // rule만 뒤집는다.
+  const base: GateStopSpec = side === 'LONG'
+    ? { rule: 1, autoSize: 'close_long', ok: true, reason: '', triggerPrice: null, note: '' }
+    : { rule: 2, autoSize: 'close_short', ok: true, reason: '', triggerPrice: null, note: '' };
+
+  const p0 = Number(tpPrice);
+  if (!Number.isFinite(p0) || p0 <= 0) {
+    return { ...base, ok: false, reason: `익절가가 유효하지 않습니다 (${tpPrice})` };
+  }
+
+  const tick = Number(spec?.orderPriceRound);
+  let p = p0;
+  let note = '';
+  if (Number.isFinite(tick) && tick > 0) {
+    const n = p0 / tick;
+    const eps = 1e-9;
+    // LONG 익절은 위에 있으므로 올림, SHORT는 아래이므로 내림 —
+    // 손절과 반대 방향이다.
+    const k = side === 'LONG' ? Math.ceil(n - eps) : Math.floor(n + eps);
+    const dec = Math.max(0, Math.min(12, Math.round(-Math.log10(tick))));
+    p = Number((k * tick).toFixed(dec));
+    if (!(p > 0)) {
+      return { ...base, ok: false,
+        reason: `익절가 ${p0}을 호가 단위(${tick})에 맞추면 0이 됩니다` };
+    }
+    if (p !== p0) note = `익절가 ${p0} → ${p} (호가 단위 ${tick})`;
+  }
+
+  // 방향 검사. LONG 익절이 현재가 아래면 걸자마자 체결된다 — 익절이
+  // 아니라 즉시 청산이고, 그건 사용자가 정한 것이 아니다.
+  if (refPrice != null && Number.isFinite(Number(refPrice)) && Number(refPrice) > 0) {
+    const ref = Number(refPrice);
+    const badLong = side === 'LONG' && p <= ref;
+    const badShort = side === 'SHORT' && p >= ref;
+    if (badLong || badShort) {
+      return {
+        ...base, ok: false, triggerPrice: p, note,
+        reason: `${side} 기준가 ${ref} / 익절 ${p} — 익절이 `
+              + `${side === 'LONG' ? '아래' : '위'}에 있어 즉시 체결됩니다`,
+      };
+    }
+  }
+  return { ...base, triggerPrice: p, note };
+}

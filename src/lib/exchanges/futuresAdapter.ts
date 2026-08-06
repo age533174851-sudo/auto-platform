@@ -431,3 +431,32 @@ export async function futuresContractSpec(
     minQty: (f as any).minQty ?? null,
   });
 }
+
+/**
+ * 배율 설정 — **되읽어 확인한다.**
+ *
+ * 두 거래소 다 "요청이 200을 받았다"와 "배율이 그 값이다"가 다르다.
+ * 요청한 것보다 **높게** 설정돼 있으면 주문을 내면 안 된다 — 청산가가
+ * 사용자가 계산한 자리보다 가까워져 있다.
+ *
+ * Gate는 leverage 0이 **교차 마진**이다. 격리를 확인하지 못하면
+ * 성공으로 치지 않는다 — 교차에서는 이 계좌의 다른 포지션까지 물린다.
+ */
+export async function futuresSetLeverage(
+  ex: FuturesExchange, key: string, secret: string, symbol: string,
+  leverage: number, testnet: boolean,
+): Promise<{ success: boolean; leverage: number | null; message: string }> {
+  if (ex === 'gate') {
+    const gf = await import('./gateFutures');
+    const gp = await import('./gatePlan');
+    const contract = gp.toGateContract(symbol);
+    if (!contract) {
+      return { success: false, leverage: null,
+        message: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
+    }
+    const r = await gf.setLeverageGateFutures(key, secret, contract, leverage, testnet);
+    return { success: r.success, leverage: r.leverage, message: r.message };
+  }
+  const bf = await import('./binanceFutures');
+  return bf.setFuturesLeverage(key, secret, symbol, leverage, testnet);
+}

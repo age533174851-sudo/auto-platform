@@ -8,7 +8,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   toGateContract, toGateSize, isGateIsolated, gateStopSpec, gatePositionToRisk, gateFillOf,
-  gateSizeFromBase, gateFiltersOf, gateBaseFromContracts,
+  gateSizeFromBase, gateFiltersOf, gateBaseFromContracts, gateTakeProfitSpec,
 } from './gatePlan';
 import { quantizeOrder } from './quantize';
 import { futuresExchangeOf } from './futuresAdapter';
@@ -518,5 +518,68 @@ export function runGatePlanTests() {
     const b = gateSizeFromBase(0.976, 'SHORT', BTC).size;
     eq(Math.abs(a), Math.abs(b));
     assert(a > 0 && b < 0, `부호가 갈리지 않았다: ${a} / ${b}`);
+  });
+
+  console.log('[Gate 익절 — 손절과 부등호가 반대다]');
+
+  test('롱 익절은 위에서 발동한다 (rule 1)', () => {
+    // 손절 함수로 익절을 만들면 rule 2가 나오고, 그러면 롱의 익절이
+    // **현재가 아래**에 걸린다. 오르지 않고 조금만 내려도 '익절'이라는
+    // 이름으로 손실이 확정되는데, 화면에는 익절이 걸렸다고 뜬다.
+    const tp = gateTakeProfitSpec('LONG', 66000, 64000, null);
+    eq(tp.ok, true, tp.reason);
+    eq(tp.rule, 1, '가격이 올라갈 때 발동');
+    eq(tp.autoSize, 'close_long');
+
+    const sl = gateStopSpec('LONG', 62000, 64000, null);
+    eq(sl.rule, 2, '손절은 내려갈 때');
+    assert(tp.rule !== sl.rule, '둘이 같으면 하나는 틀린 것이다');
+  });
+
+  test('숏 익절은 아래에서 발동한다 (rule 2)', () => {
+    const tp = gateTakeProfitSpec('SHORT', 62000, 64000, null);
+    eq(tp.ok, true, tp.reason);
+    eq(tp.rule, 2);
+    eq(tp.autoSize, 'close_short');
+  });
+
+  test('반올림 방향도 손절과 반대다', () => {
+    // 손절은 진입에서 **멀어지는** 쪽으로 밀어 한 틱 일찍 안 터지게 한다.
+    // 익절을 같은 방향으로 밀면 안 닿는다 — 그래서 반대로 민다.
+    const spec = { quantoMultiplier: 0.0001, orderPriceRound: 0.1 };
+    const tpLong = gateTakeProfitSpec('LONG', 66000.05, 64000, spec);
+    eq(tpLong.triggerPrice, 66000.1, '롱 익절은 올림');
+
+    const tpShort = gateTakeProfitSpec('SHORT', 61999.95, 64000, spec);
+    eq(tpShort.triggerPrice, 61999.9, '숏 익절은 내림');
+  });
+
+  test('즉시 체결되는 익절은 거부한다', () => {
+    // 롱 익절이 현재가 아래면 걸자마자 체결된다 — 익절이 아니라
+    // 즉시 청산이고, 사용자가 정한 것이 아니다.
+    const bad = gateTakeProfitSpec('LONG', 62000, 64000, null);
+    eq(bad.ok, false);
+    assert(bad.reason.includes('즉시 체결'), bad.reason);
+
+    const badShort = gateTakeProfitSpec('SHORT', 66000, 64000, null);
+    eq(badShort.ok, false);
+  });
+
+  test('기준가를 모르면 방향 검사를 건너뛴다', () => {
+    // 못 읽은 것 때문에 멀쩡한 익절을 막지는 않는다.
+    eq(gateTakeProfitSpec('LONG', 62000, null, null).ok, true);
+  });
+
+  test('익절가가 없으면 만들지 않는다', () => {
+    eq(gateTakeProfitSpec('LONG', 0, 64000, null).ok, false);
+    eq(gateTakeProfitSpec('LONG', null, 64000, null).ok, false);
+    eq(gateTakeProfitSpec('LONG', NaN, 64000, null).ok, false);
+  });
+
+  test('autoSize는 손절과 같다 — 어느 쪽이든 그 포지션을 닫는다', () => {
+    eq(gateTakeProfitSpec('LONG', 66000, 64000, null).autoSize,
+       gateStopSpec('LONG', 62000, 64000, null).autoSize);
+    eq(gateTakeProfitSpec('SHORT', 62000, 64000, null).autoSize,
+       gateStopSpec('SHORT', 66000, 64000, null).autoSize);
   });
 }
