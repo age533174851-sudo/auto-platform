@@ -27,6 +27,8 @@
 
 import type { SymbolFilters } from './quantize';
 
+import { normalizeExchange } from './connection';
+
 export type FuturesExchange = 'binance' | 'gate';
 
 /**
@@ -38,9 +40,19 @@ export type FuturesExchange = 'binance' | 'gate';
  * 서명 요청을 보내게 된다.
  */
 export function futuresExchangeOf(raw: any): FuturesExchange | null {
-  const s = String(raw ?? '').trim().toLowerCase();
+  // **이름 정규화는 connection.normalizeExchange 한 곳에서만 한다.**
+  //
+  // 예전에는 여기서 정확히 'gate'|'gateio'|'gate.io'만 봤다. 그런데
+  // normalizeExchange는 `.includes('gate')`라 'gate futures' 같은 값을
+  // 받아 준다. 두 해석기가 같은 문자열을 다르게 읽으면, 한쪽이 통과시킨
+  // 연결을 다른 쪽이 막는다 — 그리고 그때 화면에는 이유가 안 남는다.
+  //
+  // 여기서 하는 판단은 하나뿐이다: **그 거래소로 선물을 낼 수 있는가.**
+  const s = normalizeExchange(raw);
   if (s === 'binance') return 'binance';
-  if (s === 'gate' || s === 'gateio' || s === 'gate.io') return 'gate';
+  if (s === 'gate') return 'gate';
+  // 모르는 거래소는 null이다. **binance로 떨어뜨리지 않는다** —
+  // 그러면 남의 키로 바이낸스에 주문이 나간다.
   return null;
 }
 

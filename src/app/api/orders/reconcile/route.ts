@@ -120,9 +120,18 @@ export async function GET(req: NextRequest) {
     const { decryptSecret } = await import('@/lib/exchanges/crypto');
     const { reconcilePendingOrders } = await import('@/lib/engine/orderExecutor');
 
-    const ex = String(conn.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+    const ex = (await import('@/lib/exchanges/futuresAdapter')).futuresExchangeOf(conn.exchange_id);
+    // 모르는 거래소를 바이낸스로 대조하면, 그 거래소에 있는 주문을
+    // 바이낸스에서 못 찾고 **'체결 안 됨'으로 확정**해 버린다.
+    if (!ex) {
+      return NextResponse.json({
+        ok: false, error: 'unsupported_exchange',
+        message: `이 연결(${conn.exchange_id || '알 수 없음'})의 주문은 대조하지 못합니다 — `
+               + '엉뚱한 거래소에 물어보면 있는 주문을 없다고 확정합니다',
+      }, { status: 400 });
+    }
     const result = await reconcilePendingOrders(sb, {
-      exchange: ex as 'binance' | 'gate',
+      exchange: ex,
       apiKey: conn.api_key,
       apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
       // exchange_connections에는 mode 컬럼이 없다. 테스트넷 여부는 is_testnet이며,

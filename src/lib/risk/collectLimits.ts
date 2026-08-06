@@ -191,15 +191,31 @@ export async function collectAllLimits(args: CollectLimitsArgs): Promise<LimitVe
       // `gate`와 `gateio` 두 이름이 저장소 안에 같이 돌아다닌다. 정확히
       // 'gate'만 보면 `gateio` 연결이 **바이낸스로 읽혀** Gate 키로 바이낸스
       // 원장을 조회하고, 실패 → 오늘 손실이 null → 한도가 통째로 사라진다.
-      exchange = String(c.exchange_id || '').toLowerCase().includes('gate') ? 'gate' : 'binance';
+      exchange = (await import('@/lib/exchanges/futuresAdapter')).futuresExchangeOf(c.exchange_id);
     }
     if (testnet == null) testnet = c.is_testnet !== false;
   } catch { return out; }
 
+  // **모르는 거래소를 바이낸스로 조회하지 않는다.**
+  //
+  // 예전에는 `exchange ?? 'binance'`였다. 그러면 남의 키로 바이낸스
+  // 원장을 물어보고, 실패하면 오늘 손실이 null이 된다 — 그리고 null은
+  // '한도 확인 불가'라 결국 막히기는 한다. 다만 화면에는 "조회 실패"라고만
+  // 뜨고, 진짜 원인(지원하지 않는 거래소)은 어디에도 안 남는다.
+  if (exchange == null) {
+    const why = '지원하지 않는 거래소라 손실 한도를 조회하지 못했습니다';
+    out.dailyLoss = { status: 'unknown', reason: why };
+    out.weeklyLoss = { status: 'unknown', reason: why };
+    out.lossStreak = { status: 'unknown', reason: why };
+    await fillAiVeto(out, args, now);
+    await fillSubAccount(out, args);
+    return out;
+  }
+
   const common = {
     apiKey, apiSecret,
     testnet: testnet === true,
-    exchange: exchange ?? 'binance',
+    exchange,
     currentEquityUsd: args.equityUsd ?? null,
     nowMs: now,
   };

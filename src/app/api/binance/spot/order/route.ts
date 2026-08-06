@@ -76,7 +76,19 @@ export async function POST(req: NextRequest) {
     const { data: sconn } = await (sb.from('exchange_connections') as any)
       .select('exchange_id, is_testnet').eq('id', body.connectionId).eq('user_id', uid).maybeSingle();
     const spotTestnet = sconn?.is_testnet !== false;
-    const spotExchange = String(sconn?.exchange_id || 'binance').toLowerCase();
+    // **이름 정규화는 한 곳에서.** 예전에는 `String(...).toLowerCase()`
+    // 원문을 그대로 들고 `=== 'gate'`로 비교했다. 그러면 `gateio` 연결이
+    // 바이낸스로 읽혀, Gate 주문을 넣으면서 **바이낸스 시각으로 시계
+    // 오차를 잰다** — 확인한 적 없는 것을 확인했다고 적는 셈이다.
+    // 그리고 `|| 'binance'` 기본값은 모르는 거래소를 바이낸스로 만든다.
+    const { normalizeExchange } = await import('@/lib/exchanges/connection');
+    const spotExchange = normalizeExchange(sconn?.exchange_id);
+    if (spotExchange !== 'binance' && spotExchange !== 'gate') {
+      return NextResponse.json({
+        ok: false, error: 'unsupported_exchange',
+        message: `이 연결(${sconn?.exchange_id || '알 수 없음'})로는 현물 주문을 내지 않습니다`,
+      }, { status: 400 });
+    }
 
     // 시각은 **주문이 나갈 거래소**에서 읽는다. Gate 주문을 넣으면서
     // 바이낸스 시각으로 시계 오차를 재면, 그 초록 체크는 다른 거래소에
@@ -110,7 +122,7 @@ export async function POST(req: NextRequest) {
       ? { dailyLoss: null, weeklyLoss: null, lossStreak: null, aiVeto: null, aiPredictionId: null }
       : await (await import('@/lib/risk/collectLimits')).collectAllLimits({
           sb, userId: uid, connectionId: body.connectionId,
-          exchange: spotExchange === 'gate' ? 'gate' : 'binance',
+          exchange: spotExchange,
           testnet: spotTestnet,
           // AI 거부권이 볼 종목·방향. 현물 매수는 LONG으로 본다 —
           // 매도(EXIT)에는 어차피 이 검사가 붙지 않는다.
