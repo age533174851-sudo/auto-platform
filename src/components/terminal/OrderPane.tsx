@@ -29,6 +29,9 @@ import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { basisGap } from '@/lib/markets/priceBasis';
+import {
+  switchScope, fieldsToClearOnSwitch, clearNotice, type SwitchKey,
+} from '@/lib/terminal/contextSwitch';
 import { PaperWallet, usePaperAccount } from './PaperWallet';
 import { AccountLine } from './AccountLine';
 
@@ -458,6 +461,52 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   });
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
+
+  // ── 종목·계좌를 바꾸면 **앞 맥락의 입력을 비운다** ──
+  //
+  // 이 줄이 없어서 이런 상태가 만들어졌다: BTCUSDT에 지정가 64,000을
+  // 적어 두고 ETHUSDT로 종목을 바꾼다. **가격 칸에는 여전히 64,000이
+  // 있다.** 그대로 [롱 진입]을 누르면 ETH를 64,000에 사겠다는 지정가가
+  // 나가고, ETH는 2,500 근처이므로 그 주문은 지정가인데 **호가창을
+  // 쓸어 담으며 즉시 체결된다.** 지정가를 넣었으니 안전하다고 믿는
+  // 자리에서 정확히 반대가 일어난다.
+  //
+  // 무엇을 비우고 무엇을 남길지는 contextSwitch가 정한다 — 이 저장소에는
+  // 주문판이 하나가 아니고, 규칙을 화면마다 쓰면 언젠가 한쪽만 고쳐진다.
+  const switchKeyRef = React.useRef<SwitchKey | null>(null);
+  const [switchNote, setSwitchNote] = useState('');
+  useEffect(() => {
+    const next: SwitchKey = {
+      symbol: symbol.id, connectionId: modeResolution.connId || '', paper: isPaper,
+    };
+    const prev = switchKeyRef.current;
+    switchKeyRef.current = next;
+    // **첫 렌더는 전환이 아니다.** 여기서 지우면 새로고침 한 번에
+    // 사용자가 적어 둔 값이 사라진다.
+    const v = switchScope(prev, next);
+    if (v.scope === 'NONE') return;
+
+    const fields = fieldsToClearOnSwitch(v.scope, { unit });
+    const cleared: typeof fields = [];
+    const had = (cond: boolean, f: (typeof fields)[number]) => {
+      if (cond && fields.includes(f)) cleared.push(f);
+      return cond && fields.includes(f);
+    };
+
+    if (had(price !== '', 'price')) setPrice('');
+    if (had(qty !== '', 'quantity')) setQty('');
+    if (had(riskPick != null, 'riskPick')) setRiskPick(null);
+    if (had(reduceOnly, 'reduceOnly')) setReduceOnly(false);
+    if (had(slPriceText !== '', 'stopPrice')) setSlPriceText('');
+    if (had(msg != null, 'lastResult')) setMsg(null);
+
+    // 안내는 **실제로 비운 게 있을 때만.** 매번 띄우면 그 줄을 안 읽게
+    // 되고, 안 읽는 줄은 없는 줄이다.
+    setSwitchNote(clearNotice(v, cleared));
+    // 입력값은 의도적으로 의존성에서 뺀다 — 이 effect는 '전환'에만 돌아야
+    // 하고, 사용자가 타자를 칠 때마다 돌면 안 된다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol.id, modeResolution.connId, isPaper, unit]);
 
   // 호가·현재가를 눌러 들어온 가격.
   //
@@ -1169,6 +1218,23 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* **체결가와 마크가가 벌어진 구간.**
           이때만 띄운다 — 평소에도 띄우면 글자만 늘고, 정작 벌어졌을 때의
           경고가 그 사이에 묻힌다. */}
+      {/* **비운 것을 말 없이 비우지 않는다.** 사용자는 자기가 적은 값이
+          어디 갔는지 모른 채 다시 적게 된다. */}
+      {switchNote && (
+        <div style={{
+          padding: '6px 9px', borderRadius: 7,
+          background: C.raised, color: C.dim,
+          fontSize: FS.micro, lineHeight: 1.5,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{switchNote}</span>
+          <button onClick={() => setSwitchNote('')} style={{
+            flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer',
+            color: C.faint, fontSize: FS.micro, padding: '2px 4px',
+          }}>닫기</button>
+        </div>
+      )}
+
       {priceGap.diverged && (
         <div style={{
           padding: '6px 9px', borderRadius: 7,
