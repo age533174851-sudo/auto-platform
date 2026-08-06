@@ -226,6 +226,31 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
     /* unknown */
   }
 
+  // ── 3-b. 포지션 모드 ──
+  //
+  // **아무도 이 값을 안 읽고 있었다.** 앱은 롱·숏을 따로 보여주는데
+  // 거래소가 단방향이면 두 포지션이 하나로 합쳐진다. 그 상태에서
+  // '숏 청산'을 누르면 롱까지 줄어든다.
+  //
+  // 한 곳에서 채운다 — 라우트마다 따로 부르면 언젠가 한쪽이 빠지고,
+  // 빠진 쪽은 '모름'이 되어 조용히 다르게 동작한다.
+  try {
+    if (conn) {
+      const { futuresPositionMode, futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+      const ex = futuresExchangeOf(conn.exchange_id);
+      if (ex) {
+        const pm = await futuresPositionMode(ex, conn.api_key, secret, testnet);
+        input.positionMode = { mode: pm.mode, reason: pm.error || undefined };
+      } else {
+        input.positionMode = { mode: null, reason: `알 수 없는 거래소입니다 (${conn.exchange_id})` };
+      }
+    }
+  } catch (e: any) {
+    // **못 읽은 것을 단방향으로 치지 않는다.** 헤지 계좌에서 청산이
+    // 엉뚱한 쪽을 줄인다.
+    input.positionMode = { mode: null, reason: e?.message || String(e) };
+  }
+
   // 4. 증거금
   try {
     if (conn && requiredMargin != null) {
