@@ -92,6 +92,7 @@ import { runSubAccountTests } from './src/lib/portfolio/subAccount.test';
 import { runStopVerifyTests } from './src/lib/engine/stopVerify.test';
 import { runManualOverrideTests } from './src/lib/engine/manualOverride.test';
 import { runWebhookAuthTests } from './src/lib/security/webhookAuth.test';
+import { runShortGuardTests } from './src/lib/engine/shortGuard.test';
 import { runCheckOverrideTests } from './src/lib/engine/checkOverride.test';
 import { runMarketHoursTests } from './src/lib/markets/marketHours.test';
 import { runFuturesHoursTests } from './src/lib/markets/futuresHours.test';
@@ -119,7 +120,8 @@ console.log('════════ TRAIGO 코어 유닛 테스트 ═══�
 runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests();
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runGatePlanTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
-runWebhookAuthTests(); runCheckOverrideTests(); runMarketHoursTests();
+runWebhookAuthTests();
+runShortGuardTests(); runCheckOverrideTests(); runMarketHoursTests();
 runFuturesHoursTests();
 runProxyAssetTests(); runKisCoreTests(); runSpreadGuardTests(); runInstrumentTests();
 runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusReportTests(); runPositionParseTests(); runTraderScoreTests(); runConsensusSignalTests(); runWedomDisciplineTests(); runYoutubeLiveTests(); runCreatorEdgeTests();

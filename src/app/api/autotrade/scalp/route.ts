@@ -326,6 +326,41 @@ export async function POST(req: NextRequest) {
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 숏은 롱의 부호 반전이 아니다 ──
+  //
+  // 지금까지 `allowShort`는 켜고 끄는 스위치일 뿐이었고, 진입 검사는
+  // 방향을 안 봤다. 그래서 숏이 롱과 **똑같은 검사**를 통과해 나갔다.
+  //
+  // 숏에만 있는 위험이 있다. 가장 비싼 것은 **청산가가 손절보다 가까운**
+  // 경우다 — 숏은 청산가도 손절도 진입가 위에 있어서, 순서가 뒤집히면
+  // 손절이 발동하기 전에 청산된다. 사용자는 "손절 1%"라고 믿는 채로
+  // 계좌가 통째로 날아간다.
+  if (plan.side === 'SHORT') {
+    const { shortGuard } = await import('@/lib/engine/shortGuard');
+    // 청산가는 계획이 계산한 값을 쓴다. **없으면 그 검사만 건너뛴다** —
+    // 못 읽었다고 숏을 통째로 막으면 조회가 흔들릴 때마다 멈춘다.
+    const sg = shortGuard({
+      entryPrice: Number(scalp.signal.entry),
+      stopPrice: scalp.signal.stop ?? null,
+      liquidationPrice: plan.liquidationPrice ?? null,
+      recentHighs: bars?.highs ?? null,
+      recentLows: bars?.lows ?? null,
+      atr: (scalp as any)?.atr ?? null,
+      // 펀딩·상위 시간봉은 이 라우트가 아직 안 읽는다. **넘기지 않으면
+      // 그 검사를 건너뛴다** — 0이나 'RANGE'로 채우면 확인한 적 없는
+      // 것을 확인했다고 적는 셈이다.
+    });
+    if (!sg.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'SHORT_GUARD',
+        error: sg.summary,
+        shortFindings: sg.findings,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+    // 막지는 않지만 적어 둘 것들. 응답에 실어 화면이 보여줄 수 있게 한다.
+    (base as any).shortFindings = sg.findings;
+  }
+
   // ── 사용자가 손으로 닫았는가 ──
   //
   // 자동매매가 롱을 열었는데 사용자가 거래소 앱에서 손으로 닫았다면,
