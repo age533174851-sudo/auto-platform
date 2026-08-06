@@ -878,13 +878,36 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       if (shouldConfirm(loadPrefs(), kind, !!modeResolution.realMoney)) {
         const { confirmDialog } = await import('@/lib/confirm/dialog');
         const real = !!modeResolution.realMoney;
+        // ── 무엇이 나가는지 숫자로 적는다 ──
+        //
+        // 예전에는 방향·수량·손절%·증거금까지만 있었다. **정작 가장
+        // 알아야 하는 숫자가 없었다** — 이 거래에서 얼마를 잃는가.
+        // '손절 2%'만 보고는 그게 계좌의 0.2%인지 20%인지 알 수 없고,
+        // 5배와 100배에서 그 답은 쉰 배 차이다.
+        //
+        // 계산은 orderSizing 한 곳에서 온다. 확인창이 자기 식을 들고
+        // 있으면 여기 적힌 손실과 실제로 나가는 수량이 어긋난다.
+        const { lossPreview } = await import('@/lib/engine/orderSizing');
+        const refPx = orderType === 'LIMIT' ? Number(price) : (mid ?? 0);
+        const lp = lossPreview({
+          equity: balanceUsd, entryPrice: refPx, qty: q,
+          side: orderSide === 'BUY' ? 'LONG' : 'SHORT', pricePct: slPct,
+        });
+        const acct = connections.find((c: any) => c.id === modeResolution.connId);
         const okToGo = await confirmDialog([
           `${real ? '실전' : tradeMode === 'PAPER' ? '모의' : '테스트넷'} `
             + `${orderSide === 'BUY' ? 'LONG' : 'SHORT'} ${q} ${base} · ${leverage}배`,
           '',
-          `기준가   ${orderType === 'LIMIT' ? fmtPrice(Number(price)) : (mid != null ? fmtPrice(mid) : '시장가')}`,
-          `손절     ${slPct}%`,
-          `증거금   약 ${fmtPrice(margin)} USDT`,
+          // **어느 계좌인가.** 이 화면에서 되돌릴 수 없는 질문의 절반이다.
+          isPaper ? '계좌      모의 (거래소에 나가지 않음)'
+                  : `계좌      ${acct?.label || acct?.exchange_id || '연결'} · ${real ? '실전' : '테스트넷'}`,
+          `기준가    ${orderType === 'LIMIT' ? fmtPrice(Number(price)) : (mid != null ? fmtPrice(mid) : '시장가')}`,
+          `손절      ${lp.stopPrice != null ? fmtPrice(lp.stopPrice) : '—'} (가격 ${slPct}%)`,
+          // 못 구한 것을 0으로 적지 않는다. 0은 '안 잃는다'는 뜻이 된다.
+          `예상 최대 손실  ${lp.loss != null ? `${fmtPrice(lp.loss)} USDT` : '계산 불가'}`
+            + (lp.lossPctOfEquity != null ? ` · 계좌의 ${lp.lossPctOfEquity.toFixed(2)}%` : ''),
+          `증거금    약 ${fmtPrice(margin)} USDT`,
+          liqOk ? `청산 거리  약 ${liqPct.toFixed(1)}%${liqIsActual ? ' (거래소 값)' : ''}` : '청산 거리  확인 불가',
           '',
           real ? '실제 자금이 사용됩니다. 되돌릴 수 없습니다.' : '가상 자금입니다.',
         ].join('\n'), { danger: real });
