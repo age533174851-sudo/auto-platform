@@ -7,7 +7,8 @@
 //  3. 검수 안 된 신호를 판정에 넣어, 그 사람이 아니라 우리 파서의 성과를 재는 것
 //  4. 못 태운 행을 조용히 버려 화면이 아무 말도 안 하게 되는 것
 import { test, assert, eq } from '../../test/harness';
-import { intakeSignal, intakeAll, delaySecOf, msOf, kindOf, regimeOf } from './creatorIntake';
+import { intakeSignal, intakeAll, delaySecOf, msOf, kindOf, regimeOf,
+         confidenceFromTier, kindFromAction } from './creatorIntake';
 
 const SAID = '2026-01-01T00:00:00.000Z';
 const DETECTED = '2026-01-01T00:00:45.000Z';   // 45초 뒤
@@ -162,5 +163,31 @@ export function runCreatorIntakeTests() {
     eq(intakeAll(null).accepted.length, 0);
     eq(intakeAll(undefined).rejected.length, 0);
     eq(intakeSignal(null).ok, false);
+  });
+
+  console.log('[신호 반입 — 등급 사다리]');
+
+  test('등급을 숫자로 바꾸는 곳은 한 곳뿐이다', () => {
+    eq(confidenceFromTier('confirmed'), 0.95);
+    eq(confidenceFromTier('likely'), 0.80);
+    eq(confidenceFromTier('uncertain'), 0.40);
+  });
+
+  test('uncertain은 기본 문턱 아래라 막힌다', () => {
+    const c = confidenceFromTier('uncertain');
+    assert(c != null && c < 0.7, '문턱 위로 올리면 불확실한 신호가 장부에 들어간다');
+    eq(intakeSignal(row({ extract_confidence: c })).ok, false);
+  });
+
+  test('모르는 등급은 숫자를 만들지 않는다', () => {
+    eq(confidenceFromTier('아무거나'), null, '0.5쯤으로 채우면 확신도 검사가 무력해진다');
+    eq(confidenceFromTier(null), null);
+  });
+
+  test('ENTRY만 진입 발언이다', () => {
+    eq(kindFromAction('ENTRY'), 'EXPLICIT_ENTRY');
+    for (const a of ['ADD', 'PARTIAL_EXIT', 'EXIT', 'MODIFY', '']) {
+      eq(kindFromAction(a), 'UNKNOWN', `${a}가 진입으로 읽혔다`);
+    }
   });
 }

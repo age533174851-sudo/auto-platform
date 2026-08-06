@@ -225,3 +225,47 @@ export function intakeAll(
   }
   return { accepted, rejected, reasonCounts };
 }
+
+/**
+ * 등급 → 숫자 확신도.
+ *
+ * **이건 세 칸짜리 사다리이지 연속적인 확신도가 아니다.** 파서는 0~1
+ * 사이의 값을 만들지 않는다 — 만들 근거가 없다. 그런데 gateSignal은
+ * 숫자를 요구하므로 여기서 한 번만 변환한다.
+ *
+ * 변환을 두 곳에 적으면 한쪽만 고쳐지고, 그때 넣을 때 통과한 신호가
+ * 읽을 때 막히거나 그 반대가 된다. 그래서 이 함수 하나뿐이다.
+ *
+ * 숫자의 뜻:
+ *   confirmed  0.95 — 발언 + **화면의 포지션까지** 확인했다
+ *   likely     0.80 — 발언이 명확했다. 화면은 못 봤다
+ *   uncertain  0.40 — 기본 문턱(0.7) 아래다. 일부러 막는다
+ *
+ * uncertain을 0.7 위로 올리고 싶어지면, 그건 문턱을 낮추고 싶은 것이지
+ * 그 신호가 확실해진 것이 아니다.
+ */
+export function confidenceFromTier(tier: any): number | null {
+  const t = String(tier ?? '').trim().toLowerCase();
+  if (t === 'confirmed') return 0.95;
+  if (t === 'likely') return 0.80;
+  if (t === 'uncertain') return 0.40;
+  // 모르는 등급은 **숫자를 만들지 않는다.** 0.5쯤으로 채우면
+  // "확신도를 모르는 신호는 태우지 않는다"가 무력해진다.
+  return null;
+}
+
+/**
+ * 신호의 action → 발언 종류.
+ *
+ * ENTRY만 진입 발언이다. 나머지(추가·부분청산·청산·수정)는 진입이
+ * 아니므로 장부에 안 들어간다 — 장부는 "이 사람 말대로 **들어갔으면**
+ * 어땠나"를 재는 것이라 진입이 없으면 잴 것이 없다.
+ *
+ * 그리고 이건 **추정**이다. 사람이 검수할 때 바꿀 수 있어야 한다 —
+ * "여기서 롱도 가능하다"를 파서가 ENTRY로 읽는 경우가 있고, 그건
+ * EXPLICIT_ENTRY가 아니라 QUESTION이다.
+ */
+export function kindFromAction(action: any): UtteranceKind {
+  const a = String(action ?? '').trim().toUpperCase();
+  return a === 'ENTRY' ? 'EXPLICIT_ENTRY' : 'UNKNOWN';
+}
