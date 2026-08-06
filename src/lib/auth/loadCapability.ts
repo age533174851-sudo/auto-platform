@@ -48,8 +48,8 @@ export interface CapabilityRead {
  *
  * 넓히는 쪽으로만 얹는다 — 저장된 값이 이미 더 넓으면 그대로 둔다.
  */
-function withBootstrap(read: CapabilityRead, userId: string): CapabilityRead {
-  const boot = ownerBootstrap(userId);
+function withBootstrap(read: CapabilityRead, userId: string, email?: string | null): CapabilityRead {
+  const boot = ownerBootstrap({ userId, email });
   const r = applyBootstrap(read.capability, boot, CAP_RANK);
   if (!r.bootstrapped) return read;
   return {
@@ -60,11 +60,28 @@ function withBootstrap(read: CapabilityRead, userId: string): CapabilityRead {
 
 export async function loadCapability(
   sb: any, userId: string | null | undefined,
+  /**
+   * 이메일. **OWNER_EMAIL로 지정한 경우 이게 없으면 영영 안 맞는다.**
+   * 안 넘겨도 되지만, 그러면 이메일 지정은 동작하지 않는다 — 그래서
+   * 못 넘긴 경우 아래에서 한 번 조회한다.
+   */
+  email?: string | null,
 ): Promise<CapabilityRead> {
   if (!sb || !userId) {
     return { capability: DEFAULT_CAPABILITY, known: false, installed: true,
       reason: '사용자를 확인하지 못해 가장 좁은 권한으로 봅니다' };
   }
+  // 이메일을 안 받았고 OWNER_EMAIL이 설정돼 있으면 한 번 찾아본다.
+  // **설정이 없으면 조회도 안 한다** — 아무도 안 쓰는 값을 위해 매
+  // 주문마다 요청을 하나 더 보낼 이유가 없다.
+  let mail = String(email ?? '').trim();
+  if (!mail && String(process.env.OWNER_EMAIL ?? '').trim()) {
+    try {
+      const r = await (sb as any).auth?.admin?.getUserById?.(userId);
+      mail = String(r?.data?.user?.email ?? '').trim();
+    } catch { /* 못 읽으면 id로만 맞춰 본다 */ }
+  }
+
   try {
     const { data, error } = await (sb as any).from('trading_capabilities')
       .select('capability').eq('user_id', userId).maybeSingle();
@@ -83,10 +100,11 @@ export async function loadCapability(
       // 행이 없는 것은 오류가 아니다. **아직 아무 권한도 안 준 것**이고,
       // 그건 기본값이 맞다.
       return withBootstrap({ capability: DEFAULT_CAPABILITY, known: true, installed: true,
-        reason: '아직 거래 권한이 부여되지 않았습니다' }, userId);
+        reason: '아직 거래 권한이 부여되지 않았습니다' }, userId, mail);
     }
     return withBootstrap(
-      { capability: capabilityOf(data.capability), known: true, installed: true, reason: '' }, userId);
+      { capability: capabilityOf(data.capability), known: true, installed: true, reason: '' },
+      userId, mail);
   } catch (e: any) {
     if (isMissingTable(e)) {
       return { capability: DEFAULT_CAPABILITY, known: false, installed: false,
