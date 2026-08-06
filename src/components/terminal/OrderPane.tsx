@@ -29,6 +29,7 @@ import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { basisGap } from '@/lib/markets/priceBasis';
+import { canDo, intentOf } from '@/lib/auth/tradingCapability';
 import {
   switchScope, fieldsToClearOnSwitch, clearNotice, type SwitchKey,
 } from '@/lib/terminal/contextSwitch';
@@ -772,6 +773,57 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 자리가 클릭 뒤라 사용자는 **누를 수 있는 버튼**을 본다.
   // 누를 수 없는 것은 눌러 보고 알 일이 아니다.
   const noConn = !isPaper && !modeResolution.ok;
+
+  // ── 이 사람이 이 거래를 할 수 있는가 ──
+  //
+  // **화면이 이 값을 한 번도 안 읽고 있었다.** 서버는 막는데 화면은
+  // 모르니, 버튼은 멀쩡히 눌리고 사용자는 [롱 진입]을 누른 **뒤에야**
+  // "현재 권한: VIEW_ONLY / 필요 권한: TESTNET 이상"을 본다.
+  //
+  // 이 화면에 이미 적혀 있는 규칙이다 — 누를 수 없는 것은 눌러 보고
+  // 알 일이 아니다.
+  //
+  // 판정은 서버와 같은 순수 함수(canDo)가 한다. 화면에서 등급을 다시
+  // 비교하면 규칙이 두 벌이 되고, 두 벌이 되면 한쪽만 고쳐진다.
+  const [capRead, setCapRead] = useState<
+    { capability: string; label: string; installed: boolean; known: boolean; reason?: string } | null
+  >(null);
+  useEffect(() => {
+    if (!auth) { setCapRead(null); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/admin/capability', { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (alive) setCapRead(j?.ok ? j : null);
+      } catch { if (alive) setCapRead(null); }
+    })();
+    return () => { alive = false; };
+  }, [auth]);
+
+  /**
+   * 권한 때문에 막히는가.
+   *
+   * **표가 설치되기 전에는 막지 않는다.** 서버가 정확히 그렇게 판단한다
+   * (`capRead.installed`) — 화면만 먼저 막으면 서버가 허용하는 주문을
+   * 화면이 거부하게 되고, 그건 사용자가 풀 방법이 없는 고장이다.
+   *
+   * 모의는 거래소에 안 나가므로 PAPER_ORDER로 본다.
+   */
+  const capBlock = useMemo(() => {
+    if (!capRead || !capRead.installed) return null;
+    const intent = isPaper
+      ? ('PAPER_ORDER' as const)
+      : intentOf({ testnet: !modeResolution.realMoney });
+    const v = canDo(capRead.capability, intent);
+    if (v.allowed) return null;
+    return {
+      reason: v.reason + (capRead.known ? '' : ` (${capRead.reason || '조회 실패'})`),
+      capability: v.capability, required: v.required,
+    };
+  }, [capRead, isPaper, modeResolution.realMoney]);
+  /** 진입·청산 버튼을 막는 모든 사유를 한 곳에서 본다 */
+  const blockedReason = capBlock?.reason ?? (noConn ? modeResolution.reason : null);
   // ── 청산 거리 ──
   //
   // **포지션이 있으면 거래소가 계산한 값을 쓴다.** 예전에는 언제나
@@ -1218,6 +1270,23 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* **체결가와 마크가가 벌어진 구간.**
           이때만 띄운다 — 평소에도 띄우면 글자만 늘고, 정작 벌어졌을 때의
           경고가 그 사이에 묻힌다. */}
+      {/* **왜 못 누르는지를 버튼 위에 적는다.**
+          비활성 버튼만 있으면 사용자는 고장으로 읽는다 — 무엇을 해야
+          풀리는지까지 있어야 한다. */}
+      {capBlock && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7,
+          background: C.warnBg, color: C.warn,
+          fontSize: FS.micro, lineHeight: 1.6,
+        }}>
+          <b>거래 권한이 없습니다.</b> {capBlock.reason}
+          <div style={{ color: C.dim, marginTop: 3 }}>
+            현재 {capRead?.label || capBlock.capability} · 필요 {capBlock.required} —
+            관리자가 <b>설정 → 권한</b>에서 올려 줘야 합니다. 시세와 차트는 그대로 보입니다.
+          </div>
+        </div>
+      )}
+
       {/* **비운 것을 말 없이 비우지 않는다.** 사용자는 자기가 적은 값이
           어디 갔는지 모른 채 다시 적게 된다. */}
       {switchNote && (
@@ -2028,13 +2097,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           **모르면(posAmt null) 막지 않는다** — 조회 실패가 청산을 막으면
           못 닫는 상황이 된다. 못 여는 것은 불편이고 못 닫는 것은 사고다. */}
       <button onClick={() => submit('BUY')}
-        disabled={busy || noConn || (reduceOnly && holding === 'LONG')}
-        title={noConn ? modeResolution.reason
-          : reduceOnly && holding === 'LONG' ? '숏 포지션이 없습니다' : undefined}
-        style={{ ...primaryBtn(C.up, busy || noConn || (reduceOnly && holding === 'LONG')),
+        disabled={busy || noConn || !!capBlock || (reduceOnly && holding === 'LONG')}
+        title={blockedReason
+          ?? (reduceOnly && holding === 'LONG' ? '숏 포지션이 없습니다' : undefined)}
+        style={{ ...primaryBtn(C.up, busy || noConn || !!capBlock || (reduceOnly && holding === 'LONG')),
                  minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'BUY' ? '전송 중…'
+          : capBlock ? '거래 권한 없음'
           : noConn ? '계좌 선택 필요'
           : reduceOnly ? '롱 청산'
           : holding === 'LONG' ? '롱 추가'
@@ -2045,11 +2115,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </span>
       </button>
 
-      <button onClick={() => submit('SELL')} disabled={busy || noConn}
-        title={noConn ? modeResolution.reason : undefined}
-        style={{ ...primaryBtn(C.down, busy || noConn), minHeight: dense ? 42 : 46, display: 'flex',
+      <button onClick={() => submit('SELL')} disabled={busy || noConn || !!capBlock}
+        title={blockedReason ?? undefined}
+        style={{ ...primaryBtn(C.down, busy || noConn || !!capBlock), minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'SELL' ? '전송 중…'
+          : capBlock ? '거래 권한 없음'
           : noConn ? '계좌 선택 필요'
           : reduceOnly ? '숏 청산'
           : holding === 'SHORT' ? '숏 추가'
