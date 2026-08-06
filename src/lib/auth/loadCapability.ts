@@ -6,7 +6,8 @@
 // 떨어지면, 데이터베이스가 흔들리는 순간 모두가 실전 자동매매를 켤 수
 // 있게 된다. 확인하지 못한 것은 통과가 아니다.
 
-import { capabilityOf, DEFAULT_CAPABILITY, type TradingCapability } from './tradingCapability';
+import { capabilityOf, CAP_RANK, DEFAULT_CAPABILITY, type TradingCapability } from './tradingCapability';
+import { ownerBootstrap, applyBootstrap } from './ownerBootstrap';
 
 export interface CapabilityRead {
   capability: TradingCapability;
@@ -33,6 +34,28 @@ export interface CapabilityRead {
   installed: boolean;
   /** 왜 그렇게 봤는가. 통과했으면 빈 문자열 */
   reason: string;
+  /** OWNER_USER_ID 부트스트랩으로 넓어졌는가 */
+  bootstrapped?: boolean;
+}
+
+/**
+ * 저장된 값에 소유자 부트스트랩을 얹는다.
+ *
+ * **표에 값을 넣을 방법이 SQL뿐이면 잠긴 사람을 풀 수 없다.** 첫 권한을
+ * 줄 사람을 데이터베이스에서 정하면 데이터베이스에 넣을 방법이 다시
+ * 필요해지고, 그게 지금 막힌 자리다. 배포 설정은 이미 사람이 손으로
+ * 넣는 곳이라 순환이 끊긴다.
+ *
+ * 넓히는 쪽으로만 얹는다 — 저장된 값이 이미 더 넓으면 그대로 둔다.
+ */
+function withBootstrap(read: CapabilityRead, userId: string): CapabilityRead {
+  const boot = ownerBootstrap(userId);
+  const r = applyBootstrap(read.capability, boot, CAP_RANK);
+  if (!r.bootstrapped) return read;
+  return {
+    ...read, capability: r.capability, known: true, bootstrapped: true,
+    reason: r.reason,
+  };
 }
 
 export async function loadCapability(
@@ -51,16 +74,19 @@ export async function loadCapability(
           reason: '거래 권한 체계가 아직 설치되지 않았습니다 — '
                 + '마이그레이션 039_trading_capability.sql을 실행하기 전까지는 권한을 강제하지 않습니다' };
       }
+      // **조회 실패에는 부트스트랩을 얹지 않는다.** 진짜 모르는 상태이고,
+      // 여기서 넓히면 데이터베이스가 흔들릴 때마다 소유자 권한이 살아난다.
       return { capability: DEFAULT_CAPABILITY, known: false, installed: true,
         reason: `권한을 읽지 못했습니다 (${error.message}) — 가장 좁은 권한으로 봅니다` };
     }
     if (!data) {
       // 행이 없는 것은 오류가 아니다. **아직 아무 권한도 안 준 것**이고,
       // 그건 기본값이 맞다.
-      return { capability: DEFAULT_CAPABILITY, known: true, installed: true,
-        reason: '아직 거래 권한이 부여되지 않았습니다' };
+      return withBootstrap({ capability: DEFAULT_CAPABILITY, known: true, installed: true,
+        reason: '아직 거래 권한이 부여되지 않았습니다' }, userId);
     }
-    return { capability: capabilityOf(data.capability), known: true, installed: true, reason: '' };
+    return withBootstrap(
+      { capability: capabilityOf(data.capability), known: true, installed: true, reason: '' }, userId);
   } catch (e: any) {
     if (isMissingTable(e)) {
       return { capability: DEFAULT_CAPABILITY, known: false, installed: false,
