@@ -160,12 +160,35 @@ export async function POST(req: NextRequest) {
                    : body.screenMatches === false ? false : null;
       const sig = withScreenCheck(parsed, screen)!;
 
+      // ── 장부에 필요한 값들 ──
+      //
+      // 이 셋이 없으면 반입(creatorIntake)에서 전부 막힌다. 예전에는
+      // 넣지 않았고, 그래서 **저장은 되는데 장부는 한 건도 안 만들어지는**
+      // 상태였다 — 만들어 놓고 배선을 안 한 그 모양이다.
+      const { confidenceFromTier, kindFromAction, msOf } = await import('@/lib/signals/creatorIntake');
+
+      // 발언 시각. **감지 시각으로 대신 채우지 않는다** — 그러면 지연이
+      // 0초가 되고, 그 신호는 성적이 가장 좋게 나오는 칸에 앉는다.
+      // 사용자가 안 넣었으면 null로 두고, 검수할 때 채우게 한다.
+      const saidAt = msOf(body.saidAt);
+
+      // 발언 종류는 파서가 추정하고 사람이 검수할 때 고친다.
+      // 명시적으로 넘어온 값이 있으면 그쪽이 우선이다.
+      const kind = String(body.utteranceKind || '').trim().toUpperCase()
+        || kindFromAction(sig.action);
+
       const { error } = await (sb as any).from('trader_signals').insert({
         user_id: uid, channel_id: channelId,
         symbol: sig.symbol, side: sig.side, action: sig.action,
         entry_price: sig.entryPrice, leverage: sig.leverage,
         stop_loss: sig.stopLoss, take_profit: sig.takeProfit,
         confidence: sig.confidence,
+        // 등급 → 숫자. 변환은 creatorIntake 한 곳에만 있다.
+        extract_confidence: confidenceFromTier(sig.confidence),
+        utterance_kind: kind,
+        said_at: saidAt != null ? new Date(saidAt).toISOString() : null,
+        // 검수 전이다. 기본을 approved로 두면 아무도 검수하지 않는다.
+        review_status: 'pending',
         evidence: sig.evidence,
         source_url: String(body.sourceUrl || '').trim() || null,
         // 신호 당시 시장가. 화면이 알면 넘기고, 모르면 null이다 —
@@ -177,6 +200,62 @@ export async function POST(req: NextRequest) {
       if (error) throw new Error(error.message);
 
       return NextResponse.json({ ok: true, parsed: sig });
+    }
+
+    // ── 검수 ──
+    //
+    // 신호 자체는 읽기 전용이다(진 신호를 지워 성적을 좋게 만들 수 없게).
+    // 그런데 검수 상태와 발언 시각은 **고칠 수 있어야 한다** — 둘 다
+    // 나중에 사람이 채우는 값이고, 못 고치면 장부가 영원히 안 만들어진다.
+    //
+    // 고칠 수 있는 것을 여기 적힌 넷으로 못박는다. 손익에 영향을 주는
+    // 값(방향·손절가·진입가)은 여기서 못 바꾼다 — 바꿀 수 있으면
+    // 성적을 좋게 만들 수 있고, 그러면 이 기록의 존재 이유가 사라진다.
+    if (action === 'review') {
+      const id = String(body.signalId || '').trim();
+      const status = String(body.status || '').trim().toLowerCase();
+      if (!id) return NextResponse.json({ ok: false, error: 'missing_signalId' }, { status: 400 });
+      if (!['pending', 'approved', 'rejected'].includes(status)) {
+        return NextResponse.json({ ok: false, error: 'bad_status',
+          message: "status는 pending·approved·rejected 중 하나여야 합니다" }, { status: 400 });
+      }
+
+      const { msOf } = await import('@/lib/signals/creatorIntake');
+      const patch: any = {
+        review_status: status,
+        reviewed_at: new Date().toISOString(),
+      };
+      if (body.reviewNote != null) patch.review_note = String(body.reviewNote).slice(0, 500);
+      if (body.utteranceKind) patch.utterance_kind = String(body.utteranceKind).toUpperCase();
+      if (body.regime) patch.regime = String(body.regime).toUpperCase();
+      // 발언 시각을 여기서 채운다. **못 읽으면 안 바꾼다** — 지금 시각으로
+      // 떨어뜨리면 지연이 음수가 되고, 그건 기록이 깨진 것이다.
+      if (body.saidAt != null) {
+        const t = msOf(body.saidAt);
+        if (t == null) {
+          return NextResponse.json({ ok: false, error: 'bad_saidAt',
+            message: '발언 시각을 읽지 못했습니다 — 지금 시각으로 대신 채우지 않습니다' }, { status: 400 });
+        }
+        patch.said_at = new Date(t).toISOString();
+      }
+
+      // **승인하려면 발언 시각이 있어야 한다.** 없이 승인하면 반입에서
+      // 막히고, 화면에는 '승인됨'이라고 뜬 채 장부는 안 만들어진다.
+      if (status === 'approved' && patch.said_at == null) {
+        const { data: cur } = await (sb as any).from('trader_signals')
+          .select('said_at').eq('id', id).eq('user_id', uid).single();
+        if (!cur?.said_at) {
+          return NextResponse.json({ ok: false, error: 'said_at_required',
+            message: '발언 시각 없이는 승인할 수 없습니다 — 지연을 모르면 '
+                   + '볼 수 없었던 가격에 체결한 성과가 나옵니다',
+            hint: 'saidAt을 함께 넘기세요' }, { status: 400 });
+        }
+      }
+
+      const { error } = await (sb as any).from('trader_signals')
+        .update(patch).eq('id', id).eq('user_id', uid);
+      if (error) throw new Error(error.message);
+      return NextResponse.json({ ok: true, signalId: id, status });
     }
 
     // ── 미리보기 (저장 안 함) ──

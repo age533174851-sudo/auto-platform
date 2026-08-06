@@ -33,11 +33,12 @@ import { loadPrefs } from '@/lib/ui/preferences';
 import { KisConnectPanel } from './KisConnectPanel';
 import { SystemStatusPanel } from './SystemStatusPanel';
 import { TraderSignalPanel } from './TraderSignalPanel';
+import { CreatorLedgerPanel } from './CreatorLedgerPanel';
 import { LoginDiagnosticPanel } from './LoginDiagnosticPanel';
 import { DemoRunner } from './DemoRunner';
 
-type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '설정' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
-const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '설정', '증권사', '상태', '방송자', '로그인', '전략장부', '현물전략', '현물·선물', '상태대조', '전략'];
+type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '설정' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '방송장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
+const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '설정', '증권사', '상태', '방송자', '로그인', '전략장부', '방송장부', '현물전략', '현물·선물', '상태대조', '전략'];
 
 /**
  * `flow` — 스크롤을 자기가 갖지 않는다.
@@ -296,6 +297,9 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {tab === '증권사' && <KisConnectPanel/>}
         {tab === '상태' && <SystemStatusPanel/>}
         {tab === '방송자' && <TraderSignalPanel/>}
+        {/* 검수 → 장부 → 판정. 방송자 탭과 나눈 이유는 하는 일이 다르기
+            때문이다 — 저쪽은 기록이고 여기는 **그 기록으로 판정**한다. */}
+        {tab === '방송장부' && <CreatorLedgerPanel/>}
         {tab === '로그인' && <LoginDiagnosticPanel/>}
         {tab === '데모' && (
           <div style={{ padding: 12 }}>
