@@ -37,6 +37,7 @@ import { TraderSignalPanel } from './TraderSignalPanel';
 import { CreatorLedgerPanel } from './CreatorLedgerPanel';
 import { LoginDiagnosticPanel } from './LoginDiagnosticPanel';
 import { DemoRunner } from './DemoRunner';
+import { splitTabs, groupMoreTabs } from '@/lib/terminal/tabGroups';
 
 type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '설정' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '방송장부' | '현물전략' | '현물·선물' | '상태대조' | '전략';
 const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '설정', '증권사', '상태', '방송자', '로그인', '전략장부', '방송장부', '현물전략', '현물·선물', '상태대조', '전략'];
@@ -65,9 +66,13 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
   const isPaper = tradeMode === 'PAPER';
   const paper = usePaperAccount(isPaper);
   const [tab, setTab] = useState<Tab>('포지션');
+  const [moreOpen, setMoreOpen] = useState(false);
   // '데모'는 모의일 때만 나온다. 실전 화면에 '데모 자동매매' 탭이 떠 있으면
   // 그게 지금 도는 것인지 헷갈린다 — 모드가 다르면 아예 안 보이는 편이 낫다.
   const TABS = isPaper ? ALL_TABS : ALL_TABS.filter(t => t !== '데모');
+  // `flow`가 모바일이다(페이지 스크롤에 얹혀 있는 배치). PC 하단 독은
+  // 자리가 있으니 접지 않는다 — 자리가 있는데 숨기면 클릭이 한 번 는다.
+  const split = splitTabs(TABS, { compact: !!flow, active: tab });
   const [acct, setAcct] = useState<any>(null);
   const [err, setErr] = useState('');
   const [recon, setRecon] = useState<any>(null);
@@ -156,13 +161,18 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
           position: 'sticky' as const, top: stickyTop ?? 0, zIndex: 5, background: C.panel,
         } : null),
       }}>
-        {/* 탭은 넘치면 가로로 스크롤한다. Kill Switch를 밀어내면 안 된다. */}
+        {/* ── 탭은 열여덟 개다 ──
+            폰에서는 앞줄에 셋만 두고 나머지를 '더보기'로 접는다. 예전에는
+            전부 한 줄에 가로 스크롤이라 `포지션 / 데모 / 미체결 / 자산 /
+            자금배분 / 안전장...` 까지만 보이고, 끝이 잘려 보이니 **스크롤이
+            되는 줄인지도 몰랐다.**
+            지우는 것이 아니라 접는 것이다 — 갈래 나누기는 tabGroups가 한다. */}
         <div style={{
           display: 'flex', gap: 4, minWidth: 0, flex: 1,
           overflowX: 'auto', scrollbarWidth: 'none',
         }}>
-          {TABS.map(t => (
-            <button key={t} onClick={() => setTab(t)}
+          {split.primary.map(t => (
+            <button key={t} onClick={() => setTab(t as Tab)}
               style={{ ...tabStyle(tab === t), flexShrink: 0 }}>
               {t}
               {t === '포지션' && positions.length > 0 && (
@@ -172,6 +182,12 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
               )}
             </button>
           ))}
+          {split.more.length > 0 && (
+            <button onClick={() => setMoreOpen(v => !v)}
+              style={{ ...tabStyle(moreOpen), flexShrink: 0 }}>
+              {split.moreLabel} {moreOpen ? '▴' : '▾'}
+            </button>
+          )}
         </div>
         {killMsg && (
           <span style={{ fontSize: FS.micro, color: C.warn, whiteSpace: 'nowrap' }}>{killMsg}</span>
@@ -192,6 +208,35 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
             margin: 10, padding: '10px 12px', borderRadius: 8,
             background: C.warnBg, color: C.warn, fontSize: FS.small, lineHeight: 1.55,
           }}>{err}</div>
+        )}
+
+        {/* ── 더보기 ──
+            열두 개를 한 줄로 늘어놓으면 그것대로 못 읽는다. 성격이 같은
+            것끼리 묶으면 "안전 관련은 여기"가 눈에 들어온다. */}
+        {moreOpen && split.more.length > 0 && (
+          <div style={{ padding: '10px 12px', borderBottom: `1px solid ${C.hair}` }}>
+            {groupMoreTabs(split.more).map(g => (
+              <div key={g.title} style={{ marginBottom: 9 }}>
+                <div style={{ color: C.faint, fontSize: FS.micro, fontWeight: 700, marginBottom: 5 }}>
+                  {g.title}
+                </div>
+                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                  {g.tabs.map(t => (
+                    <button key={t}
+                      onClick={() => { setTab(t as Tab); setMoreOpen(false); }}
+                      style={{
+                        ...tabStyle(tab === t),
+                        // 터치 영역을 키운다. 접어 둔 목록에서 옆 항목이
+                        // 눌리면 축약이 오히려 손해다.
+                        minHeight: 34, padding: '0 11px',
+                      }}>
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {tab === '포지션' && (isPaper ? (

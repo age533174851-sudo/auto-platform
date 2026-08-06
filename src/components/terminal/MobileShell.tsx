@@ -269,6 +269,27 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   const { pick, presetPrice, presetSeq } = usePickedPrice();
   const [search, setSearch] = useState(false);
   const [info, setInfo] = useState(false);
+  /**
+   * 호가창을 펴 둘 것인가.
+   *
+   * **기본은 펴짐이다.** 접힌 채로 처음 열면 이 화면이 무엇을 보는
+   * 화면인지 알 수 없다 — 폰에서 실제로 하는 일이 호가를 보며 주문을
+   * 넣는 것이다.
+   *
+   * 고른 상태는 기억한다. 매번 접는 사람에게 매번 펴진 화면을 주면
+   * 그 버튼이 설정이 아니라 잡일이 된다.
+   */
+  const [bookOpen, setBookOpen] = useState(true);
+  useEffect(() => {
+    try {
+      // 저장값이 없으면 기본(펴짐)이다. '0'만 접힘으로 읽는다 —
+      // 깨진 값이 화면을 접어 버리면 안 된다.
+      if (localStorage.getItem('tg_mobile_book') === '0') setBookOpen(false);
+    } catch { /* 못 읽으면 기본값 */ }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem('tg_mobile_book', bookOpen ? '1' : '0'); } catch {}
+  }, [bookOpen]);
   const [menu, setMenu] = useState(false);
 
   // ── 가로 ── 차트를 옆에 세울 공간이 생긴다
@@ -364,16 +385,41 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
             그건 **내용이 다 들어간다는 전제**에서만 맞다. 스크롤이 겹치는
             불편과 주문 버튼이 사라지는 사고를 비교하면 답은 하나다. */}
         <div style={{
-          width: '56%', flexShrink: 0, minHeight: 0,
+          width: bookOpen ? '58%' : '100%', flexShrink: 0, minHeight: 0,
           overflowY: 'auto', overscrollBehavior: 'contain',
           WebkitOverflowScrolling: 'touch' as any,
-          borderRight: `1px solid ${C.hair}`,
+          borderRight: bookOpen ? `1px solid ${C.hair}` : 'none',
+          position: 'relative',
         }}>
           <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
         </div>
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
-          <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
-        </div>
+
+        {/* ── 호가창 접기 ──
+            주문 설정을 만질 때는 호가를 볼 일이 없고, 그때 주문판이 좁으면
+            수량·손절 칸이 다 눌린다. 접으면 폼이 화면 전부를 쓴다.
+            **닫아도 호가는 계속 받는다** — 다시 펴는 순간의 값이 낡아
+            있으면 그걸 보고 주문한다. */}
+        {bookOpen ? (
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+            <button onClick={() => setBookOpen(false)} aria-label="호가 접기"
+              style={{
+                position: 'absolute', top: 2, right: 4, zIndex: 3,
+                minHeight: 0, padding: '2px 6px', borderRadius: 5,
+                background: C.raised, border: `1px solid ${C.hair}`,
+                color: C.faint, fontSize: FS.micro, fontWeight: 700, cursor: 'pointer',
+              }}>호가 접기 ›</button>
+            <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
+          </div>
+        ) : (
+          <button onClick={() => setBookOpen(true)} aria-label="호가 펴기"
+            style={{
+              width: 26, flexShrink: 0, minHeight: 0,
+              background: C.raised, border: 'none', borderLeft: `1px solid ${C.hair}`,
+              color: C.faint, fontSize: FS.micro, fontWeight: 700, cursor: 'pointer',
+              // 세로로 세운다. 26px 폭에 가로 글자를 넣으면 잘린다.
+              writingMode: 'vertical-rl' as any, letterSpacing: '0.1em',
+            }}>‹ 호가</button>
+        )}
       </div>
 
       {/* 포지션 — 탭 줄은 첫 화면 안에 있고, 카드는 내리면 나온다.
