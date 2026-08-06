@@ -370,6 +370,17 @@ export function runRoundLedgerTests() {
     eq(v.code, 'NEGATIVE_EXPECTANCY');
   });
 
+  test('명목가 상한이 기본으로 걸린다 — 수조 원이 안 나오게', () => {
+    // 상한이 없으면 복리가 시장에 없는 크기까지 가고, 그 결과가 화면에
+    // 수익으로 뜬다. 화면만 봐서는 "전략이 좋다"와 구분이 안 된다.
+    const inp = monteCarloInputOf(DAILY, {});
+    assert(inp.maxNotional != null && inp.maxNotional > 0, String(inp.maxNotional));
+    eq(inp.maxNotional, SEED * 200);
+    // 연구용으로 끄고 싶으면 명시적으로 null을 준다.
+    eq(monteCarloInputOf(DAILY, { maxNotional: null }).maxNotional, null);
+    eq(monteCarloInputOf(DAILY, { maxNotional: 5000 }).maxNotional, 5000);
+  });
+
   test('연구용 설정은 상한에 잘리는 거래가 많다 — 그 사실이 결과에 남는다', () => {
     // 1회 위험 10% / 손절 0.5%면 명목가가 계좌의 20배다. 상한 100배라
     // 안 잘리지만, 안정화(위험 1% · 상한 20배)로 좁히면 잘리지 않는다.

@@ -34,6 +34,14 @@ export const MAX_PATHS = 1000;
 export const DEFAULT_TRADES = 1000;
 
 /**
+ * 명목가 상한의 기본 배수(시작 자산 대비).
+ *
+ * 유동성은 계좌 크기와 무관하게 시장이 정한다. 이 값이 없으면 복리가
+ * **시장에 없는 크기**까지 가고, 그 결과가 화면에 수익으로 뜬다.
+ */
+export const DEFAULT_MAX_NOTIONAL_MULTIPLE = 200;
+
+/**
  * 시드.
  *
  * **벽시계를 쓰지 않는다.** 쓰면 같은 설정에서 매번 다른 숫자가 나오고,
@@ -59,7 +67,18 @@ export interface ProfileMcOptions {
   trades?: number;
   /** 목표를 무시하고 싶을 때 (목표 없는 프로필과 같게 본다) */
   ignoreTarget?: boolean;
+  /**
+   * 명목가 상한(절대액). 생략하면 시작 자산 × 200.
+   * **명시적으로 null을 주면 상한 없음** — 연구용이고 기본이 되면 안 된다.
+   */
+  maxNotional?: number | null;
 }
+
+const num = (v: any): number | null => {
+  if (v == null || v === '' || typeof v === 'boolean') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
 
 /**
  * 프로필 → 몬테카를로 입력.
@@ -91,7 +110,25 @@ export function monteCarloInputOf(p: StrategyProfile, opts: ProfileMcOptions = {
     lossNetPct: p.stopLossPct + fee,
     stopLossPct: p.stopLossPct,
     maxLeverage: p.maxLeverage,
-    maxNotional: null,
+    // ── 왜 명목가 상한이 필요한가 ──
+    //
+    // 이게 null이던 동안 연속 복리에서 **수조 원**이 나왔다. 계좌가
+    // 커질수록 같은 비율로 복리를 돌리면 한 번에 유동성이 없는 크기까지
+    // 간다 — 시장에 그만한 반대편이 없으므로 그 체결은 일어나지 않는다.
+    //
+    // 화면이 "수익 확률 99.7%"와 그 숫자를 같이 띄우면, 그건 전략이 좋다는
+    // 뜻이 아니라 **시뮬이 실행 불가능한 크기로 벌었다**는 뜻이다.
+    // 그런데 화면만 봐서는 구분이 안 된다.
+    //
+    // 상한을 두면 잘린 거래가 cappedTradeRatio에 쌓이고, verdictOf가
+    // 10%를 넘는 순간 SIZE_NOT_EXECUTABLE로 막는다 — 즉 **그 숫자가
+    // 나올 수 없게** 된다.
+    //
+    // 기본값은 시드의 200배. BTC 무기한에서 시장가 한 방에 무리 없이
+    // 나가는 크기의 대략적인 상한이고, 정확한 값은 심볼·시각마다 다르다.
+    // **정확하지 않아도 없는 것보다 낫다** — 없으면 상한이 무한이다.
+    maxNotional: opts.maxNotional === null ? null
+      : (num(opts.maxNotional) ?? start * DEFAULT_MAX_NOTIONAL_MULTIPLE),
     targetEquity: target,
     // 시드의 5%. profileRisk의 파산선(0.5%)보다 높지만, 그쪽은 '더는
     // 못 돈다'는 실행 한계이고 이쪽은 '사실상 회복 불가'라는 판정이다.
