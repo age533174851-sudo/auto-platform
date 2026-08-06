@@ -45,7 +45,7 @@ import { connectionsFor } from '@/lib/markets/tradeMode';
  * 실제로 쓰이는 계좌가 갈린다.
  */
 export const AccountLine = memo(function AccountLine() {
-  const { connections, tradeMode, modeResolution, connId, setConnId, navigateApp } = useTerminal();
+  const { connections, tradeMode, modeResolution, connId, setConnId, connNotice, navigateApp } = useTerminal();
   const [open, setOpen] = useState(false);
 
   // 이 모드에서 쓸 수 있는 계좌. 테스트넷 탭에 실전 키가 섞이면 안 된다.
@@ -124,6 +124,16 @@ export const AccountLine = memo(function AccountLine() {
         live ? '실전 계좌' : '테스트넷 계좌',
         `${label(conn)}${key ? ` · ${key}` : ''}`,
         () => setOpen(v => !v),
+      )}
+
+      {/* 켤 때 계좌를 **자동으로 골랐거나 바꾼** 사실.
+          저장해 둔 계좌가 지워지면 다른 계좌로 옮기는 것이 맞지만,
+          말없이 옮기면 다음 주문이 사용자가 모르는 계좌로 나간다. */}
+      {connNotice && (
+        <div style={{
+          padding: '5px 8px', borderRadius: 7, background: C.warnBg,
+          color: C.warn, fontSize: FS.micro, lineHeight: 1.45,
+        }}>{connNotice}</div>
       )}
 
       {/* 고른 연결이 이 모드에 안 맞아 다른 것이 쓰이는 경우.
