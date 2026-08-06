@@ -23,6 +23,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autotradeHealth } from '@/lib/engine/autotradeHealth';
 import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation, riskMarginVerdict } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
+import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/autotrade/runOutcome';
+import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 
@@ -48,6 +50,19 @@ export default function AutotradeControl() {
   const [checking, setChecking] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  /**
+   * 켜는 것과 첫 점검은 **다른 단계다.**
+   *
+   * 예전에는 둘 다 `busy` 하나였다. 그래서 예약이 저장된 뒤 첫 점검이
+   * 도는 동안 화면은 여전히 '저장 중…'이었고, 사용자는 저장이 오래
+   * 걸린다고 읽었다. 무엇을 기다리는지 모르면 기다리지 못한다.
+   */
+  const [phase, setPhase] = useState<'' | 'SAVING' | 'FIRST_RUN'>('');
+  /** 첫 점검 결과. 예약 저장 성공과 **따로** 표시한다 */
+  const [firstRun, setFirstRun] = useState<OutcomeVerdict | null>(null);
+  /** 방금 켠 예약의 id — 그 줄에만 '지금 첫 점검 중'을 적는다 */
+  const [justEnabled, setJustEnabled] = useState('');
+  const [showUtc, setShowUtc] = useState(false);
 
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [connId, setConnId] = useState('');
@@ -102,16 +117,19 @@ export default function AutotradeControl() {
     const tick = async () => {
       if (busyRef.current || !alive) return;
       busyRef.current = true;
-      try {
-        const r = await fetch('/api/autotrade/daily-ladder', { headers: { Authorization: auth } });
-        const j = await r.json();
-        if (!alive) return;
-        // 실제로 무언가 실행됐을 때만 목록을 다시 읽는다. 건너뛴 것까지
-        // 새로 고치면 화면이 30초마다 깜빡인다.
-        const did = Array.isArray(j?.results) && j.results.some((x: any) => !x?.skipped);
-        if (did) load();
-        if (j?.ok === false && j?.message) setMsg({ ok: false, text: j.message });
-      } catch { /* 다음 주기에 다시 본다 */ }
+      // **상태만 다시 읽는다. 진입 엔진을 부르지 않는다.**
+      //
+      // 예전에는 이 타이머가 daily-ladder를 직접 불렀다. 즉 화면이
+      // 열려 있는 동안에는 브라우저가 **실행기 노릇을 했다.** 그러면
+      // 두 가지가 어긋난다:
+      //
+      //   · 화면을 닫으면 실행 주기가 바뀐다 — 사용자는 같은 예약이
+      //     화면 여부에 따라 다르게 도는 것을 알 수 없다
+      //   · 서버 실행기와 겹쳐 같은 예약을 동시에 두 번 부른다
+      //
+      // 실행기는 서버(autotrade-tick)다. 이 스위치는 **보조 새로고침**일
+      // 뿐이고, 꺼도 예약은 그대로 돈다.
+      try { await load(); } catch { /* 다음 주기에 다시 본다 */ }
       finally { busyRef.current = false; }
     };
     const t = setInterval(tick, 30_000);
@@ -179,8 +197,51 @@ export default function AutotradeControl() {
     finally { setChecking(false); }
   };
 
+  /**
+   * **켜는 순간 한 번 돌린다.**
+   *
+   * 예전에는 `enabled=true`만 저장하고 끝이었다. 화면에는 '켜짐'이라고
+   * 뜨는데 실제 점검은 서버 실행기가 올 때까지(최대 15분) 시작되지
+   * 않았다. 사용자는 켜 놓고 아무 일도 안 일어나는 것을 본다.
+   *
+   * **안전장치를 건너뛴다는 뜻이 아니다.** 크론이 부르는 것과 같은 경로를
+   * 그대로 부른다 — 체크리스트도, 거부권도, 하루 1회 제약도 전부 돈다.
+   * 켠 순간부터 점검과 조건 판정을 시작한다는 뜻일 뿐이다.
+   *
+   * 서버 실행기와 겹칠 수 있다. 그때 두 번째가 받는 ALREADY_* 는 오류가
+   * 아니라 중복 방지가 일한 것이고, classifyRun이 그렇게 읽는다.
+   */
+  const runFirstCheck = async () => {
+    setPhase('FIRST_RUN');
+    try {
+      const r = await fetch('/api/autotrade/daily-ladder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          // **예약에 저장한 것과 같은 값을 보낸다.** 다른 값을 보내면
+          // 첫 점검과 이후 실행이 서로 다른 설정으로 돌고, 첫 결과가
+          // 앞으로 일어날 일을 대표하지 못한다.
+          symbol, connectionId: connId,
+          mode: live ? 'LIVE_LIMITED' : 'TESTNET',
+          leverageCap: levCap === '' ? undefined : Number(levCap),
+          riskPct: riskPct === '' ? undefined : Number(riskPct),
+          marginPct: marginPct === '' ? undefined : Number(marginPct),
+        }),
+      });
+      const body = await r.json().catch(() => null);
+      setFirstRun(classifyRun({ status: r.status, body }));
+    } catch (e: any) {
+      setFirstRun(classifyRun(null));
+      void e;
+    } finally {
+      setPhase('');
+      setJustEnabled('');
+      load();
+    }
+  };
+
   const save = async (enabled: boolean) => {
-    setBusy(true); setMsg(null);
+    setBusy(true); setPhase('SAVING'); setMsg(null); setFirstRun(null);
     try {
       const r = await fetch('/api/autotrade/schedule', {
         method: 'POST',
@@ -201,9 +262,17 @@ export default function AutotradeControl() {
       });
       const j = await r.json();
       setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
-      if (j?.ok) load();
+      if (!j?.ok) { setBusy(false); setPhase(''); return; }
+
+      load();
+      // **저장이 성공했을 때만** 첫 점검을 돌린다. 저장이 실패했는데
+      // 돌리면, 켜지지도 않은 예약의 첫 결과를 보여주게 된다.
+      if (enabled) {
+        setJustEnabled(`${symbol}:${connId}`);
+        await runFirstCheck();
+      }
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setPhase(''); }
   };
 
   const toggle = async (row: any) => {
@@ -357,9 +426,52 @@ export default function AutotradeControl() {
                   {s.connection_id ? '연결 있음' : <span style={{ color: T.red }}>연결 없음 — 주문을 낼 수 없습니다</span>}
                   {s.risk_pct != null ? ` · 위험 ${s.risk_pct}%` : ''}
                   {s.leverage_cap != null ? ` · 상한 ${s.leverage_cap}배` : ''}
-                  {s.interval_min != null ? ` · ${s.interval_min}분마다` : ''}
-                  {s.last_run_at ? ` · 마지막 ${fmt(s.last_run_at)}` : ' · 실행된 적 없음'}
                 </div>
+
+                {/* ── 언제 다음에 보는가 ──
+                    예전에는 이 자리가 없고 맨 아래에 "크론은 매일 23:00
+                    UTC(한국 아침 8시)"라고 **고정 문구**가 적혀 있었다.
+                    그 문구는 vercel.json 크론 시절 것이고, 지금 실행기는
+                    15분마다 돈다. 실제 진입 가능 시각은 예약마다 다르고
+                    마지막 점검이 언제였느냐로 움직인다. */}
+                {(() => {
+                  const input = {
+                    nowMs: Date.now(),
+                    enabledAtMs: msOf(s.updated_at ?? s.created_at),
+                    lastRunAtMs: msOf(s.last_run_at),
+                    lastEntryAtMs: msOf(s.last_entry_at),
+                    intervalMin: s.interval_min,
+                    firstCheckRunning: phase === 'FIRST_RUN'
+                      && justEnabled === `${s.symbol}:${s.connection_id}`,
+                  };
+                  const plan = nextRunPlan(input, !!s.enabled);
+                  return (
+                    <div style={{ marginTop: 4 }}>
+                      <div style={{
+                        color: plan.state === 'FIRST_CHECK_RUNNING' ? T.ylw : T.muted,
+                        fontSize: 10, fontWeight: 700,
+                      }}>{plan.summary}</div>
+                      <div style={{ marginTop: 3, display: 'grid', gap: 1 }}>
+                        {nextRunLines(input, plan).map(l => (
+                          <div key={l.label} style={{
+                            display: 'flex', gap: 6, fontSize: 9.5, lineHeight: 1.5,
+                            color: l.unknown ? T.muted : T.txt, opacity: l.unknown ? 0.75 : 1,
+                          }}>
+                            <span style={{ color: T.muted, minWidth: 74, flexShrink: 0 }}>{l.label}</span>
+                            <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                              {l.value}
+                              {/* UTC 원문은 **기본으로 안 보여준다.** 한국 사용자가
+                                  매번 9시간을 더해 읽어야 하는 화면은 읽히지 않는다. */}
+                              {showUtc && l.utc && (
+                                <span style={{ color: T.muted, marginLeft: 5 }}>({l.utc})</span>
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
               <button onClick={() => toggle(s)} disabled={busy} style={{
                 minHeight: 30, padding: '0 12px', borderRadius: 8, cursor: busy ? 'default' : 'pointer',
@@ -494,14 +606,63 @@ export default function AutotradeControl() {
               "실제 진입 간격 60분"이라고 적었는데, 그건 60분마다 포지션이
               생긴다는 뜻으로 읽힌다. 실제로는 하루 한 번이다. */}
           {ticking
-            ? <>서버가 <b>15분마다</b>, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다.
+            ? <>서버가 <b>{RUNNER_INTERVAL_MIN}분마다</b>, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다.
                 진입은 <b>하루 최대 1회</b>입니다(계단식 전략의 하루 1회 제약).
                 이 화면은 더 자주 볼 뿐이라 <b>닫아도 자동매매는 계속 돕니다.</b></>
-            : <>서버가 <b>15분마다</b> 확인하고, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다 —
+            : <>서버가 <b>{RUNNER_INTERVAL_MIN}분마다</b> 확인하고, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다 —
                 조건이 맞으면 그때 들어가고, <b>진입은 하루 최대 1회</b>입니다.
                 <b> 폰을 닫아도, 배포를 해도 계속 돕니다</b> — 예약은 서버에 저장돼 있습니다.
                 아래 스위치는 이 화면이 열려 있는 동안만 더 자주 보는 용도입니다.</>}
         </div>
+
+        {/* ── 첫 점검 결과 ──
+            **예약이 켜졌다는 사실을 숨기지 않는다.** 첫 실행이 막혔다고
+            "실패"만 적으면 사용자는 자동매매가 안 켜진 줄 알고 다시
+            누르고, 그러면 같은 자리에서 또 막힌다. */}
+        {(phase === 'FIRST_RUN' || firstRun) && (
+          <div style={{
+            background: A(phase === 'FIRST_RUN' ? T.ylw
+              : firstRun?.tone === 'good' ? T.grn
+              : firstRun?.tone === 'bad' ? T.red : T.ylw, '12'),
+            border: `1px solid ${A(phase === 'FIRST_RUN' ? T.ylw
+              : firstRun?.tone === 'good' ? T.grn
+              : firstRun?.tone === 'bad' ? T.red : T.ylw, '40')}`,
+            borderRadius: 10, padding: '10px 11px',
+          }}>
+            <div style={{
+              fontWeight: 800, fontSize: 12,
+              color: phase === 'FIRST_RUN' ? T.ylw
+                : firstRun?.tone === 'good' ? T.grn
+                : firstRun?.tone === 'bad' ? T.red : T.ylw,
+            }}>
+              {phase === 'FIRST_RUN' ? '첫 점검 실행 중…' : firstRun?.label}
+            </div>
+            {phase !== 'FIRST_RUN' && firstRun && (
+              <>
+                <div style={{ color: T.muted, fontSize: 10.5, marginTop: 4, lineHeight: 1.6 }}>
+                  {firstRun.detail}
+                </div>
+                {firstRun.action && (
+                  <div style={{ color: T.ylw, fontSize: 10.5, marginTop: 4, lineHeight: 1.6 }}>
+                    → {firstRun.action}
+                  </div>
+                )}
+                {savedButBlockedText(firstRun) && (
+                  <div style={{
+                    color: T.txt, fontSize: 10.5, marginTop: 6, lineHeight: 1.6,
+                    borderTop: `1px solid ${T.border}`, paddingTop: 6,
+                  }}>{savedButBlockedText(firstRun)}</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        <button onClick={() => setShowUtc(v => !v)} style={{
+          minHeight: 28, borderRadius: 8, cursor: 'pointer',
+          background: 'transparent', color: T.muted,
+          border: `1px solid ${T.border}`, fontSize: 10, fontWeight: 700,
+        }}>{showUtc ? 'UTC 원문 숨기기' : '자세히 — UTC 원문 함께 보기'}</button>
 
         <button onClick={() => setTicking(v => !v)} style={{
           minHeight: 34, borderRadius: 8, cursor: 'pointer',
@@ -509,7 +670,16 @@ export default function AutotradeControl() {
           color: ticking ? T.grn : T.muted,
           border: `1px solid ${ticking ? A(T.grn, '40') : T.border}`,
           fontSize: 11.5, fontWeight: 800,
-        }}>{ticking ? '자주 보기 켜짐 — 끄기' : '이 화면이 열려 있는 동안 자주 보기'}</button>
+        }}>{ticking
+          ? '실행 상태 자주 새로고침 — 끄기'
+          : '화면에서 실행 상태 자주 새로고침'}</button>
+        {/* **이름이 동작을 말해야 한다.** '자주 보기'는 더 자주 진입한다는
+            뜻으로 읽혔다. 이 스위치는 화면을 새로 읽을 뿐이고, 주문은
+            서버 실행기만 낸다 — 꺼도 예약은 그대로 돈다. */}
+        <div style={{ color: T.muted, fontSize: 9.5, lineHeight: 1.55, marginTop: -2 }}>
+          이 스위치는 <b style={{ color: T.txt }}>화면을 새로 읽기만</b> 합니다.
+          주문은 서버 실행기가 냅니다 — 꺼도, 화면을 닫아도 예약은 그대로 돕니다.
+        </div>
 
         {/* ── 지금 눌러서 내일을 확인한다 ──
             켜 놓고 다음 날 아침에 "안 됐네"를 아는 것은 너무 늦다. */}
@@ -720,8 +890,11 @@ export default function AutotradeControl() {
         )}
         {!data?.runsError && runs.length === 0 && (
           <div style={{ color: T.muted, fontSize: 11, lineHeight: 1.6 }}>
-            아직 없습니다. 크론은 매일 <b style={{ color: T.txt }}>23:00 UTC(한국 아침 8시)</b>에
-            한 번 돕니다 — 그 전에는 비어 있는 것이 정상입니다.
+            {/* **"매일 23:00 UTC"는 사실이 아니었다.** 그 문구는 vercel.json
+                크론(하루 1회) 시절 것이다. 지금 실행기는 GitHub Actions이고
+                15분마다 예약을 확인한다 — 위 예약 줄이 실제 시각을 적는다. */}
+            아직 없습니다. 서버 실행기가 <b style={{ color: T.txt }}>{RUNNER_INTERVAL_MIN}분마다</b> 예약을
+            확인하고, 실제 진입 가능 시각은 예약마다 다릅니다 — 위 예약 줄에 적혀 있습니다.
           </div>
         )}
         {runs.map((r, i) => (
@@ -737,6 +910,18 @@ export default function AutotradeControl() {
       </div>
     </div>
   );
+}
+
+/**
+ * ISO 문자열 → ms. **없으면 null이다.**
+ *
+ * `Number(null)`은 0이라 그냥 넘기면 1970년이 된다 — nextRun이 같은
+ * 실수로 한 번 깨졌던 자리다.
+ */
+function msOf(v: any): number | null {
+  if (v == null || v === '') return null;
+  const t = Date.parse(String(v));
+  return Number.isFinite(t) ? t : null;
 }
 
 function fmt(iso: any): string {
