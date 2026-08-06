@@ -25,6 +25,7 @@ import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidatio
 import { errorTextOf } from '@/lib/http/errorText';
 import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/autotrade/runOutcome';
 import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
+import { recoveryPlan } from '@/lib/engine/mismatchRecovery';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 
@@ -158,11 +159,25 @@ export default function AutotradeControl() {
       const j = await r.json();
       // 몇 건을 어떻게 했는지 그대로 보여준다. 모르면 다시 눌러야 하는지
       // 알 수 없고, "확정했다"만 뜨면 아직 남은 것을 놓친다.
+      // **몇 건을 어떻게 했는지 그대로 보여준다.** '확정했다'만 뜨면
+      // 아직 남은 것을 놓치고, 다시 눌러야 하는지도 알 수 없다.
+      const still = Number(j?.stillUnknown) || 0;
       setMsg({ ok: !!j?.ok, text: j?.ok
         ? `대조 완료 — ${j?.resolved ?? 0}건 확정`
-          + (j?.stillUnknown ? ` · ${j.stillUnknown}건은 거래소에도 없어 아직 모름` : '')
+          + (still ? ` · ${still}건은 거래소에도 없어 아직 모름` : '')
+          + (still ? ' (거래소에 없다고 성공으로 확정하지 않았습니다)' : '')
         : errorTextOf(j, `대조 실패 (${r.status})`) });
-      if (j?.ok) { load(); setCheck(null); }
+      if (j?.ok) {
+        load();
+        // ── 대조 뒤에 점검을 **자동으로 다시 돌린다** ──
+        //
+        // 예전에는 setCheck(null)이라 결과가 사라지기만 했다. 그러면
+        // 사용자는 "지금 풀렸나?"를 알려면 [지금 점검하기]를 따로 눌러야
+        // 하는데, 방금 누른 버튼이 무엇을 바꿨는지 모르는 채로 다음 버튼을
+        // 찾는 것은 막다른 길과 다르지 않다.
+        setCheck(null);
+        await runCheck();
+      }
     } catch (e: any) {
       setMsg({ ok: false, text: `대조 요청이 응답하지 않았습니다 (${e?.message || e})` });
     } finally { setReconciling(false); }
@@ -756,10 +771,50 @@ export default function AutotradeControl() {
                     …외 {check.mismatches.length - 12}건
                   </div>
                 )}
-                <div style={{ color: T.ylw, fontSize: 10, marginTop: 5, lineHeight: 1.55 }}>
-                  → 대부분 위 [미확정 주문 확정]으로 풀립니다. 그래도 남으면 거래소에
-                  실제로 열려 있는 포지션·주문을 정리하거나, 매매 화면에서 직접 닫으세요.
-                </div>
+                {/* ── 어떻게 되돌리는가 ──
+                    예전에는 "무엇이 다른지"까지만 적고 끝났다. 사용자가 볼 수
+                    있는 것은 막혔다는 사실과 목록뿐이었고, 그 목록을 어떻게
+                    없애는지는 아무 데도 없었다 — 막힌 자리에서 푸는 방법이
+                    없으면 그건 안전장치가 아니라 막다른 길이다. */}
+                {(() => {
+                  const plan = recoveryPlan(check.mismatches);
+                  if (plan.steps.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: 7, borderTop: `1px solid ${T.border}`, paddingTop: 7 }}>
+                      <div style={{ color: T.txt, fontSize: 10, fontWeight: 800, marginBottom: 5 }}>
+                        복구 방법 — {plan.summary}
+                      </div>
+                      {plan.steps.filter(st => st.action !== 'NONE').slice(0, 8).map((st, i) => (
+                        <div key={i} style={{
+                          padding: '5px 0',
+                          borderBottom: i < Math.min(plan.steps.length, 8) - 1 ? `1px solid ${T.border}` : 'none',
+                        }}>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 10 }}>{st.destructive ? '⚠️' : st.safeToAutomate ? '🔧' : '👤'}</span>
+                            <span style={{ color: T.txt, fontSize: 10.5, fontWeight: 700 }}>{st.symbol}</span>
+                            <span style={{ color: st.destructive ? T.red : T.ylw, fontSize: 10.5, fontWeight: 700 }}>
+                              {st.label}
+                            </span>
+                            <span style={{ color: T.muted, fontSize: 10 }}>
+                              앱 {st.appValue} → 거래소 {st.exchangeValue}
+                            </span>
+                          </div>
+                          <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginTop: 2, paddingLeft: 18 }}>
+                            {st.why}
+                            {st.destructive && (
+                              <b style={{ color: T.red }}> · 되돌릴 수 없어 확인을 받습니다</b>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      <div style={{ color: T.ylw, fontSize: 10, marginTop: 5, lineHeight: 1.55 }}>
+                        → 🔧 표시는 위 [미확정 주문 확정]으로 대부분 풀립니다.
+                        {plan.manualSteps.length > 0 && ' 👤 표시는 거래소에서 직접 확인해야 합니다 — 앱이 임의로 정하면 안 되는 것들입니다.'}
+                        {plan.destructiveSteps.length > 0 && ' ⚠️ 표시는 앱 기록을 지웁니다. 거래소의 포지션·체결 이력은 건드리지 않습니다.'}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
