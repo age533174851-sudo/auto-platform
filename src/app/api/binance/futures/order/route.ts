@@ -184,6 +184,9 @@ export async function POST(req: NextRequest) {
   let preflightRef: number | null = null;
   let preflightPassed = 0;
   let preflightTotal = 0;
+  // 거래소의 포지션 모드(단방향/헤지). **못 읽었으면 null이다** —
+  // 단방향으로 가정하면 헤지 계좌에서 청산이 엉뚱한 쪽을 줄인다.
+  let positionMode: { mode: 'ONE_WAY' | 'HEDGE' | null; reason?: string } | null = null;
   // 점검을 통과해서 나간 것과 **사용자가 넘겨서 나간 것**은 다르다.
   // 응답에 적어야 화면이 "점검 통과"라고 쓰지 않는다.
   let overrideNote: string | null = null;
@@ -191,7 +194,7 @@ export async function POST(req: NextRequest) {
   {
     const { fromLegacyMode, gateOrder, modeForDestination } = await import('@/lib/engine/operatingMode');
     const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
-    const { futuresServerTime, futuresPositionRisk, futuresAvailableUsd } =
+    const { futuresServerTime, futuresPositionRisk, futuresAvailableUsd, futuresPositionMode } =
       await import('@/lib/exchanges/futuresAdapter');
     const { assertStateConsistent } = await import('@/lib/engine/reconcileCheck');
 
@@ -270,6 +273,26 @@ export async function POST(req: NextRequest) {
     }
 
     preflightRisk = risk;
+
+    // ── 포지션 모드 ──
+    //
+    // preflight.ts에도 같은 조회가 있다. 그런데 이 라우트는 preflight를
+    // 거치지 않고 runChecklist를 직접 부른다 — 그래서 여기만 비워 두면
+    // **손으로 누른 주문에서만 이 값이 '모름'이 된다.** 이 저장소에서
+    // 가장 자주 나는 고장이 "경로가 둘인데 한쪽만 고침"이다.
+    //
+    // 못 읽어도 막지 않는다. 이 값이 실제로 쓰이는 자리는 아래 청산
+    // 방향 검사이고, 그쪽은 모드가 아니라 보유 수량으로 판단한다.
+    if (connKey) {
+      try {
+        const pm = await futuresPositionMode(ex, connKey, connSecret, useTestnet);
+        positionMode = { mode: pm.mode, reason: pm.error || undefined };
+      } catch (e: any) {
+        positionMode = { mode: null, reason: e?.message || String(e) };
+      }
+    } else {
+      positionMode = { mode: null, reason: '연결의 API 키를 읽지 못했습니다' };
+    }
 
     // 기준가: 지정가면 그 가격, 아니면 마크가. 둘 다 없으면 명목가를 계산할
     // 수 없고, 그러면 증거금도 모드 상한도 판정할 수 없다.
@@ -368,6 +391,7 @@ export async function POST(req: NextRequest) {
       // 못 읽으면 null이다 — 계약 수를 수량 칸에 적으면 "기존 포지션 500 BTC"가
       // 사실인 것처럼 화면에 뜬다.
       existingPositionQty: risk?.positionAmt != null ? Math.abs(risk.positionAmt) : null,
+      positionMode,
       stopPrice,
       liquidationPrice: risk?.liquidationPrice ?? null,
       side: String(side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
@@ -491,8 +515,72 @@ export async function POST(req: NextRequest) {
   // 일부러 안 거는 것을 구분할 방법이 이것뿐이다.
   const noStopAck = body.acknowledgeNoStop === 'NO_STOP_UNDERSTOOD';
 
+  // ── 전송 직전에 주문을 다시 구성한다 ──
+  //
+  // 여기서 막으려는 것은 **청산하려다 반대 포지션을 여는 것**이다.
+  //
+  //   롱 보유 + [청산] + 매도  →  롱이 줄어든다
+  //   롱 보유 + [청산] + 매수  →  reduceOnly가 없으면 **숏이 새로 열린다**
+  //
+  // 화면에서는 둘 다 '매도/매수 주문'으로 보인다. 위 점검 목록은 진입
+  // 검사이고, 청산에는 대부분 안 걸린다 — 즉 여기까지 오는 청산 주문의
+  // 방향은 지금까지 아무도 확인하지 않았다.
+  //
+  // 판정은 buildOrderPayload 한 곳에서 한다. 라우트 안에서 같은 규칙을
+  // 다시 쓰면 자동매매 경로와 갈린다.
+  let intentDropped: string[] = [];
+  let intentAdjusted: string[] = [];
+  // 실제로 나갈 방향. 청산이면 화면이 보낸 값이 아니라 **포지션이 정한다.**
+  let orderSide = String(side).toUpperCase() as 'BUY' | 'SELL';
+  {
+    const { buildOrderPayload } = await import('@/lib/engine/orderIntent');
+    const intent = buildOrderPayload({
+      symbol,
+      kind: type === 'LIMIT' ? 'LIMIT' : 'MARKET',
+      side: String(side).toUpperCase(),
+      quantity: orderQty,
+      price: orderPrice,
+      reduceOnly: !!reduceOnly,
+      // **못 읽었으면 null이다.** 0으로 눕히면 '포지션 없음'이 되고,
+      // 청산이 신규 진입으로 나간다.
+      positionQty: preflightRisk?.positionAmt != null ? Number(preflightRisk.positionAmt) : null,
+      positionMode: positionMode?.mode ?? null,
+      // requirePositionMode는 아직 켜지 않는다. 켜는 순간 모드 조회가
+      // 안 되는 계정의 신규 주문이 전부 멎는다 — 조회를 붙인 첫날에
+      // 켜면 안전장치가 아니라 고장이다.
+    });
+
+    // POSITION_UNKNOWN은 **막지 않는다.** 조회가 실패했다고 청산을 막으면
+    // 거래소가 흔들릴 때 정확히 닫아야 하는 순간에 못 닫는다. 이 주문에는
+    // reduceOnly가 붙어 나가므로, 방향이 틀려도 거래소가 새 포지션을
+    // 열지는 않는다 — 최악이 '아무 일도 안 일어남'이다.
+    // 못 여는 것은 불편이고 못 닫는 것은 사고다.
+    const fatal: Record<string, true> = {
+      CLOSE_SIDE_WRONG: true, NOTHING_TO_CLOSE: true,
+      BAD_QUANTITY: true, MISSING_FIELD: true, UNKNOWN_KIND: true,
+    };
+    if (intent.blocked && fatal[intent.blocked]) {
+      return NextResponse.json({
+        ok: false, error: 'order_intent_blocked', code: intent.blocked,
+        message: intent.reason, riskError,
+      }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (intent.ok) {
+      // **잘라 낸 수량을 실제로 쓴다.** 판정만 하고 원래 값을 보내면
+      // 검사한 주문과 나간 주문이 다르다 — 그게 가장 조용히 틀리는 모양이다.
+      if (intent.payload.quantity != null) orderQty = Number(intent.payload.quantity);
+      if (intent.payload.side) orderSide = intent.payload.side;
+      intentDropped = intent.dropped;
+      intentAdjusted = intent.adjusted;
+    } else {
+      // 막지 않기로 한 사유(POSITION_UNKNOWN)는 화면에 그대로 전한다.
+      intentAdjusted = [intent.reason];
+    }
+  }
+
   const built = buildManualPlan({
-    symbol, side: String(side).toUpperCase() as 'BUY' | 'SELL',
+    symbol, side: orderSide,
     quantity: orderQty,
     leverage: levNum,
     reduceOnly: !!reduceOnly,
@@ -516,7 +604,7 @@ export async function POST(req: NextRequest) {
   // 1분 뒤에는 다른 키가 되므로 의도적인 반복은 가능하다.
   const minute = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const clientOrderId =
-    `MF${minute}${symbol}${String(side)[0]}${String(orderQty).replace('.', '')}`
+    `MF${minute}${symbol}${orderSide[0]}${String(orderQty).replace('.', '')}`
       .slice(0, 36);
 
   const exec = await executeOrder(sb, {
@@ -589,6 +677,13 @@ export async function POST(req: NextRequest) {
     // 수량을 조용히 바꾸지 않는다 — 바뀌었으면 화면이 그대로 보여준다.
     quantizeNote,
     quantity: orderQty,
+    // **서버가 고치거나 버린 것을 조용히 넘기지 않는다.**
+    // "지정가를 넣었는데 시장가로 나갔다", "수량이 줄었다"를 화면이
+    // 설명할 수 있어야 한다.
+    side: orderSide,
+    droppedFields: intentDropped.length ? intentDropped : undefined,
+    intentNotes: intentAdjusted.length ? intentAdjusted : undefined,
+    positionMode: positionMode?.mode ?? null,
     checklist: {
       allowed: true, passed: preflightPassed, total: preflightTotal,
       // 넘겨서 나갔으면 그렇게 적는다. '통과'로 적으면 기록이 거짓이 된다.

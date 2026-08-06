@@ -144,12 +144,20 @@ export function runOrderIntentTests() {
     eq(r.blocked, 'NOTHING_TO_CLOSE');
   });
 
-  test('포지션 모드를 모르면 신규 주문을 안 만든다', () => {
-    // 추측한 모드로 만들면, 틀렸을 때 거부가 아니라 반대 포지션이 열릴 수 있다.
+  test('포지션 모드 검사는 켜야 돈다 — 기본은 안 막는다', () => {
+    // 켜는 순간 모드 조회가 안 되는 계정의 신규 주문이 전부 멎는다.
+    // 안전장치를 켜다가 기능을 죽이면 그 안전장치는 꺼진다.
+    const input = { symbol: 'BTCUSDT', kind: 'MARKET', side: 'BUY' as const, quantity: 1 };
+    eq(buildOrderPayload(input).ok, true, '기본은 통과');
+    eq(buildOrderPayload(input, { requirePositionMode: true }).blocked, 'POSITION_MODE_UNKNOWN');
+  });
+
+  test('켜져 있어도 청산은 막지 않는다 — 방향이 이미 확정됐다', () => {
     const r = buildOrderPayload({
-      symbol: 'BTCUSDT', kind: 'MARKET', side: 'BUY', quantity: 1,
-    });
-    eq(r.blocked, 'POSITION_MODE_UNKNOWN');
+      symbol: 'BTCUSDT', kind: 'MARKET', quantity: 0.5,
+      reduceOnly: true, positionQty: 1,
+    }, { requirePositionMode: true });
+    eq(r.ok, true, r.reason);
   });
 
   test('청산은 모드를 몰라도 만든다 — 방향이 이미 확정됐다', () => {
