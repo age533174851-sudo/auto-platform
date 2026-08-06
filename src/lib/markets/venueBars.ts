@@ -136,10 +136,21 @@ export async function fetchVenueBars(opts: {
   testnet: boolean;
   /** 테스트가 시계를 고정하기 위해 쓴다 */
   nowMs?: number;
+  /**
+   * 구간 조회 — **과거 시점의 봉**을 가져온다.
+   *
+   * 안 주면 예전과 같이 가장 최근 limit개를 가져온다. 크리에이터 장부는
+   * "그 사람이 말한 그 시각의 가격"이 필요해서 이게 있어야 한다 —
+   * 최신 봉으로 대신 계산하면 몇 달 전 발언을 오늘 가격으로 채점하게 된다.
+   */
+  startTimeMs?: number | null;
+  endTimeMs?: number | null;
 }): Promise<VenueBarsResult> {
   const now = opts.nowMs ?? Date.now();
   // 미완성 봉을 하나 버리므로 하나 더 받는다. 안 그러면 지표 길이가 모자란다.
   const want = Math.max(1, Math.min(1000, Math.floor(opts.limit) + 1));
+  const st = Number.isFinite(Number(opts.startTimeMs)) ? Number(opts.startTimeMs) : null;
+  const et = Number.isFinite(Number(opts.endTimeMs)) ? Number(opts.endTimeMs) : null;
 
   try {
     if (opts.exchange === 'gate') {
@@ -157,8 +168,15 @@ export async function fetchVenueBars(opts: {
                + '바꿔치면 다른 시간축의 신호로 주문을 내게 됩니다' };
       }
       const src = `gate:${opts.testnet ? 'demo' : 'live'}:futures:${contract}:${gi}`;
+      // Gate의 from/to는 **초**다. ms로 넘기면 서기 5만년을 조회한다.
+      // 그리고 from을 주면 Gate는 limit을 무시하므로 둘을 같이 보내지 않는다.
+      const gq = st != null || et != null
+        ? `contract=${contract}&interval=${gi}`
+          + (st != null ? `&from=${Math.floor(st / 1000)}` : '')
+          + (et != null ? `&to=${Math.floor(et / 1000)}` : '')
+        : `contract=${contract}&interval=${gi}&limit=${want}`;
       const rows = await gf.gateReq<any[]>('GET', '/api/v4/futures/usdt/candlesticks', {
-        qs: `contract=${contract}&interval=${gi}&limit=${want}`, testnet: opts.testnet,
+        qs: gq, testnet: opts.testnet,
       });
       if (!Array.isArray(rows) || rows.length === 0) {
         return { bars: null, source: src, error: 'Gate 봉 응답이 비어 있습니다', droppedIncomplete: false };
@@ -184,7 +202,12 @@ export async function fetchVenueBars(opts: {
     const src = `binance:${opts.testnet ? 'demo' : 'live'}:futures:${opts.symbol}:${opts.interval}`;
     const r = await fetch(
       `${host}/fapi/v1/klines?symbol=${encodeURIComponent(opts.symbol)}`
-      + `&interval=${encodeURIComponent(opts.interval)}&limit=${want}`,
+      + `&interval=${encodeURIComponent(opts.interval)}&limit=${want}`
+      // 바이낸스는 ms다. Gate와 단위가 다르다 — 한쪽 규칙을 다른 쪽에
+      // 쓰면 조회 구간이 통째로 어긋나고, 그때 응답은 비어 있을 뿐
+      // 오류가 아니라서 '시장이 조용했다'로 읽힌다.
+      + (st != null ? `&startTime=${Math.floor(st)}` : '')
+      + (et != null ? `&endTime=${Math.floor(et)}` : ''),
       { signal: AbortSignal.timeout(10_000), cache: 'no-store' },
     );
     if (!r.ok) {
