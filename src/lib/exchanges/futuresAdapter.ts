@@ -491,3 +491,51 @@ export async function futuresFundingRate(
     return Number.isFinite(v) ? v * 100 : null;
   } catch { return null; }
 }
+
+/**
+ * 심볼 하나를 닫는다. 두 거래소 다.
+ *
+ * 왜 futuresCloseAll로 안 되는가
+ * ──────────────────────────────
+ * 그건 **계좌의 모든 포지션**을 닫는다. "자동매매가 연 것만" 또는
+ * "절반만" 같은 단계에는 못 쓴다 — 손매매까지 나가면 그 단계를 만든
+ * 이유의 정반대다.
+ *
+ * @param pct 닫을 비율(1~100). Gate는 부분 청산을 아직 지원하지 않아
+ *            100 미만이면 거절한다 — 계약 수를 여기서 계산하면 배수
+ *            오독이 그대로 수량 오류가 되고, 이미 한 번 밟은 자리다.
+ */
+export async function futuresClosePosition(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+  symbol: string, pct = 100,
+): Promise<{ success: boolean; message: string }> {
+  const p = Number(pct);
+  if (!Number.isFinite(p) || p <= 0 || p > 100) {
+    return { success: false, message: `닫을 비율이 유효하지 않습니다 (${pct})` };
+  }
+
+  if (ex === 'gate') {
+    if (p < 100) {
+      return { success: false,
+        message: `Gate는 아직 부분 청산(${p}%)을 지원하지 않습니다 — 전량으로 닫거나 거래소에서 직접 하세요` };
+    }
+    const gf = await import('./gateFutures');
+    const gp = await import('./gatePlan');
+    const contract = gp.toGateContract(symbol);
+    if (!contract) return { success: false, message: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
+    return gf.closePositionGateFutures(key, secret, contract, testnet);
+  }
+
+  // 바이낸스는 방향을 알아야 한다. **찍지 않는다** — 틀리면 청산이
+  // 아니라 반대 진입이 된다.
+  const rr = await futuresPositionRisk(ex, key, secret, symbol, testnet);
+  if (!rr.risk || rr.risk.positionAmt == null) {
+    return { success: false, message: `포지션을 확인하지 못해 닫지 않았습니다: ${rr.error || '사유 미상'}` };
+  }
+  const amt = Number(rr.risk.positionAmt) || 0;
+  if (Math.abs(amt) === 0) return { success: true, message: '이미 포지션이 없습니다' };
+
+  const bf = await import('./binanceFutures');
+  const r = await bf.closePositionPercent(key, secret, symbol, amt > 0 ? 'LONG' : 'SHORT', p, testnet);
+  return { success: !!r.success, message: r.message };
+}
