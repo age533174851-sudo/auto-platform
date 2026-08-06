@@ -137,7 +137,19 @@ const sideOf = (v: any): 'BUY' | 'SELL' | null => {
  * 한 번 빠뜨렸을 때 그 값이 그대로 나가고, 그 빠뜨림은 코드를 봐서는
  * 안 보인다. 허용 목록에서 뽑아 오면 빠뜨릴 수가 없다.
  */
-export function buildOrderPayload(input: BuildInput | null | undefined): BuildResult {
+export interface BuildOptions {
+  /**
+   * 포지션 모드를 못 읽었을 때 **막을 것인가.** 기본은 막지 않는다.
+   *
+   * 켜는 순간 모드 조회가 안 되는 계정의 신규 주문이 전부 멎는다.
+   * 조회를 붙이고 값이 실제로 오는 것을 확인한 뒤에 켠다.
+   */
+  requirePositionMode?: boolean;
+}
+
+export function buildOrderPayload(
+  input: BuildInput | null | undefined, opts: BuildOptions = {},
+): BuildResult {
   const i = input ?? ({} as BuildInput);
   const fail = (blocked: BuildBlock, reason: string, extra: Partial<BuildResult> = {}): BuildResult =>
     ({ ok: false, blocked, reason, payload: {}, dropped: [], adjusted: [], ...extra });
@@ -203,14 +215,17 @@ export function buildOrderPayload(input: BuildInput | null | undefined): BuildRe
   // ── 포지션 모드 ──
   //
   // 단방향인데 헤지용 파라미터를 붙이거나 그 반대면 거래소가 거부한다.
-  // **모르면 보내지 않는다** — 추측한 모드로 주문을 만들면, 틀렸을 때
-  // 거부가 아니라 반대 포지션이 열릴 수 있다.
-  if (i.positionMode === undefined || i.positionMode === null) {
-    // 청산이 아닐 때만 막는다. 청산은 위에서 방향을 이미 확정했다.
-    if (!wantClose) {
-      return fail('POSITION_MODE_UNKNOWN',
-        '거래소 포지션 모드(단방향/헤지)를 확인하지 못했습니다 — 추측한 모드로 주문을 만들지 않습니다');
-    }
+  // 추측한 모드로 주문을 만들면, 틀렸을 때 거부가 아니라 반대 포지션이
+  // 열릴 수 있다.
+  //
+  // **기본은 막지 않는다.** 이 검사를 켜는 순간 모드 조회가 안 되는
+  // 계정의 신규 주문이 전부 멎는다. 조회를 붙이고, 실제로 값이 오는
+  // 것을 확인한 뒤에 켜는 것이 순서다 — 안전장치를 켜다가 기능을
+  // 죽이면 그 안전장치는 꺼진다.
+  if (opts.requirePositionMode && !wantClose
+      && (i.positionMode === undefined || i.positionMode === null)) {
+    return fail('POSITION_MODE_UNKNOWN',
+      '거래소 포지션 모드(단방향/헤지)를 확인하지 못했습니다 — 추측한 모드로 주문을 만들지 않습니다');
   }
 
   // ── 허용 필드만 새로 뽑는다 ──
