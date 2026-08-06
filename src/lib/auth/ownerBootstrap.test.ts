@@ -53,6 +53,49 @@ export function runOwnerBootstrapTests() {
     eq(ownerBootstrap(undefined, env).applies, false);
   });
 
+  console.log('[소유자 부트스트랩 — 이메일도 받는다]');
+
+  test('OWNER_EMAIL로 지정할 수 있다', () => {
+    // 사람이 손으로 적는 값이고, 처음 손이 가는 것은 이메일이다.
+    // id만 받으면 "이메일 넣었는데 왜 안 되지"가 된다.
+    const env = envOf({ OWNER_EMAIL: 'me@example.com' });
+    eq(ownerBootstrap({ userId: OWNER, email: 'me@example.com' }, env).applies, true);
+    eq(ownerBootstrap({ userId: OWNER, email: 'other@example.com' }, env).applies, false);
+  });
+
+  test('이메일은 대소문자를 안 가린다', () => {
+    // 대문자 하나로 잠긴 채 이유를 모르는 것이 지금 고치려는 문제다.
+    const env = envOf({ OWNER_EMAIL: 'Me@Example.COM' });
+    eq(ownerBootstrap({ userId: OWNER, email: 'me@example.com' }, env).applies, true);
+    eq(ownerBootstrap({ userId: OWNER, email: '  ME@EXAMPLE.COM  ' }, env).applies, true);
+  });
+
+  test('id도 대소문자를 안 가린다 — 어디서 복사했든 통해야 한다', () => {
+    // 여기서 엄격하게 굴어 얻는 것은 없고, 잃는 것은 "넣었는데 왜 안
+    // 되지"로 잠긴 채 이유를 모르는 시간이다.
+    const id = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    const env = envOf({ OWNER_USER_ID: id.toUpperCase() });
+    eq(ownerBootstrap({ userId: id }, env).applies, true);
+  });
+
+  test('id와 이메일을 같이 적어도 된다', () => {
+    const env = envOf({ OWNER_USER_ID: OWNER, OWNER_EMAIL: 'me@example.com' });
+    eq(ownerBootstrap({ userId: OWNER }, env).applies, true, 'id로 맞음');
+    eq(ownerBootstrap({ userId: OTHER, email: 'me@example.com' }, env).applies, true, '이메일로 맞음');
+    eq(ownerBootstrap({ userId: OTHER, email: 'x@y.com' }, env).applies, false);
+  });
+
+  test('이메일 자리에 id를, id 자리에 이메일을 적어도 섞이지 않는다', () => {
+    // @가 있으면 이메일로 본다. UUID에는 @가 없으므로 갈리지 않는다.
+    const env = envOf({ OWNER_USER_ID: 'me@example.com' });
+    eq(ownerBootstrap({ userId: OWNER, email: 'me@example.com' }, env).applies, true);
+  });
+
+  test('예전처럼 문자열 하나만 넘겨도 된다', () => {
+    const env = envOf({ OWNER_USER_ID: OWNER });
+    eq(ownerBootstrap(OWNER, env).applies, true);
+  });
+
   console.log('[소유자 부트스트랩 — 기본은 실전이 아니다]');
 
   test('지정이 없으면 TESTNET이다', () => {

@@ -47,25 +47,38 @@ export interface OwnerBootstrap {
 /**
  * 이 사용자가 지정된 소유자인가.
  *
- * `OWNER_USER_ID` — auth 사용자 id 하나. 쉼표로 여럿도 받는다(개발자
- * 계정이 둘인 경우). 비어 있으면 아무에게도 적용되지 않는다.
+ * `OWNER_USER_ID` — auth 사용자 id. `OWNER_EMAIL` — 이메일. **둘 다 받는다.**
+ * 사람이 손으로 적는 값이고, 처음 손이 가는 것은 이메일이다. id만 받으면
+ * "이메일 넣었는데 왜 안 되지"가 되고, 그건 지금 고치려는 잠금과 같은
+ * 모양의 막다른 길이다. 쉼표로 여럿도 받는다.
+ *
+ * **둘 다 대소문자를 안 가린다.** UUID는 16진수라 대소문자가 달라도
+ * 가리키는 값이 같다. 여기서 엄격하게 굴어 얻는 것은 없고, 잃는 것은
+ * "넣었는데 왜 안 되지"로 잠긴 채 이유를 모르는 시간이다.
  *
  * `OWNER_CAPABILITY` — 줄 권한. 없으면 TESTNET이다. **LIVE_AUTO가
  * 기본이 되면 안 된다** — 잠긴 것을 푸는 것이 목적이지 실전을 켜는 것이
  * 아니고, 실전은 언제나 한 번 더 명시적으로 고르는 것이어야 한다.
  */
 export function ownerBootstrap(
-  userId: string | null | undefined,
+  who: string | null | undefined | { userId?: string | null; email?: string | null },
   env: (k: string) => string | undefined = k => process.env[k],
 ): OwnerBootstrap {
-  const raw = String(env('OWNER_USER_ID') ?? '').trim();
-  const uid = String(userId ?? '').trim();
+  // OWNER_EMAIL도 같은 목록으로 본다. **둘을 다른 변수로 나누면 한쪽만
+  // 적어 놓고 왜 안 되는지 모르게 된다.**
+  const raw = [env('OWNER_USER_ID'), env('OWNER_EMAIL')]
+    .map(v => String(v ?? '').trim()).filter(Boolean).join(',');
+
+  const uid = typeof who === 'string' ? who.trim() : String(who?.userId ?? '').trim();
+  // **이메일은 대소문자를 안 가린다.** 사람이 손으로 적는 값이고,
+  // 대문자 하나로 잠긴 채 이유를 모르는 것이 지금 고치려는 문제다.
+  const email = (typeof who === 'string' ? '' : String(who?.email ?? '')).trim().toLowerCase();
 
   if (!raw) {
     return { applies: false, capability: null, configured: false,
-      reason: 'OWNER_USER_ID가 설정되지 않았습니다 — 부트스트랩이 아무에게도 적용되지 않습니다' };
+      reason: 'OWNER_USER_ID(또는 OWNER_EMAIL)가 설정되지 않았습니다 — 부트스트랩이 아무에게도 적용되지 않습니다' };
   }
-  if (!uid) {
+  if (!uid && !email) {
     return { applies: false, capability: null, configured: true,
       reason: '사용자를 확인하지 못했습니다' };
   }
@@ -73,7 +86,19 @@ export function ownerBootstrap(
   const owners = raw.split(',').map(s => s.trim()).filter(Boolean);
   // **부분 일치를 받지 않는다.** 앞 몇 글자만 맞아도 통과하면 그건
   // 권한 검사가 아니다.
-  if (!owners.includes(uid)) {
+  //
+  // `@`가 있으면 이메일로 본다 — UUID에는 `@`가 없으므로 둘이 섞이지 않는다.
+  //
+  // **양쪽 다 대소문자를 안 가린다.** UUID는 16진수라 대소문자가 달라도
+  // 가리키는 값이 같고, 여기서 엄격하게 굴어 봐야 얻는 것은 없다 —
+  // 잃는 것은 "넣었는데 왜 안 되지"로 잠긴 채 이유를 모르는 시간이다.
+  // 그게 지금 고치려는 문제 그 자체다.
+  const uidLower = uid.toLowerCase();
+  const matched = owners.some(o => {
+    const t = o.toLowerCase();
+    return o.includes('@') ? (!!email && t === email) : (!!uidLower && t === uidLower);
+  });
+  if (!matched) {
     return { applies: false, capability: null, configured: true,
       reason: '지정된 소유자가 아닙니다' };
   }
