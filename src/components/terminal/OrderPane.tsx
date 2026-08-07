@@ -30,6 +30,7 @@ import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/marke
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { basisGap } from '@/lib/markets/priceBasis';
 import { checkSpread } from '@/lib/markets/spreadGuard';
+import { effectiveQtyFor, percentLabel } from '@/lib/markets/quantityInput';
 import { canDo, intentOf } from '@/lib/auth/tradingCapability';
 import { progressOf, shouldRefresh, type ProgressView } from '@/lib/engine/orderProgress';
 import {
@@ -1883,8 +1884,20 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               orderSizing에서 온다 — 확인창과 같은 함수다. */}
           {(() => {
             const refPx = orderType === 'LIMIT' ? (Number(price) || mid) : mid;
+            // ── 어느 수량으로 계산하는가 ──
+            //
+            // **화면에 이 문구가 떠 있었다:** "수량이 없어 손실을
+            // 계산하지 못했습니다". 그런데 그때 포지션은 0.2079 BTC를
+            // 들고 있었다. 주문 입력칸만 보고 계산했기 때문이다.
+            //
+            // 들고 있는 것의 손실은 입력칸과 무관하게 계산할 수 있고,
+            // 오히려 그게 지금 가장 알고 싶은 숫자다.
+            const eq = effectiveQtyFor({
+              orderQty: Number.isFinite(baseQty) ? baseQty : null,
+              positionQty: posAmt,
+            });
             const lp = lossPreview({
-              equity: balanceUsd, entryPrice: refPx, qty: baseQty,
+              equity: balanceUsd, entryPrice: refPx, qty: eq.qty,
               side: side === 'BUY' ? 'LONG' : 'SHORT', pricePct: slPct,
             });
             return (
@@ -1898,6 +1911,16 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                 <b style={{ color: C.text }}>
                   {lp.stopPrice != null ? fmtPrice(lp.stopPrice) : '—'}
                 </b>
+                <br/>
+                {/* **어느 수량으로 계산했는지 적는다.** 입력칸이 비어
+                    보유 수량으로 계산했는데 그 사실을 안 적으면,
+                    사용자는 자기가 적은 수량의 손실로 읽는다. */}
+                {eq.source === 'POSITION' && (
+                  <>
+                    <span style={{ color: C.faint }}> · </span>
+                    <b style={{ color: C.dim }}>{eq.label}</b>
+                  </>
+                )}
                 <br/>
                 <span style={{ color: C.faint }}>계좌 예상 손실 </span>
                 {/* **못 구한 것을 0으로 적지 않는다.** 0은 '안 잃는다'는 뜻이다. */}
@@ -1986,6 +2009,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* 비율 슬라이더 — 바이낸스의 눈금 슬라이더 자리.
           잔고를 모르면 비율을 계산할 수 없다. 그때는 눈금만 두고 막는다. */}
       <div style={{ padding: dense ? 0 : '2px 2px 0' }}>
+        {/* **무엇의 비율인지 적는다.**
+            라벨이 없으면 잔고 비율인지 청산 비율인지 알 수 없다. 청산
+            탭에서 100%를 눌렀는데 그게 잔고의 100%였다면, 그건 전량청산이
+            아니라 계좌를 통째로 건 신규 주문이다. */}
+        <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 3 }}>
+          {percentLabel(reduceOnly ? 'EXIT' : 'ENTRY')}
+        </div>
         <div style={{ display: 'flex', gap: 3 }}>
           {[25, 50, 75, 100].map(pct => (
             <button key={pct} onClick={() => setPct(pct)}
