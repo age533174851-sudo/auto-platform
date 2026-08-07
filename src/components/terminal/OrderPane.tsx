@@ -30,7 +30,11 @@ import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/marke
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { basisGap } from '@/lib/markets/priceBasis';
 import { checkSpread } from '@/lib/markets/spreadGuard';
-import { effectiveQtyFor, percentLabel } from '@/lib/markets/quantityInput';
+import { BottomSheet } from './BottomSheet';
+import {
+  effectiveQtyFor, percentLabel, convertQuantity, needsEquity,
+  MODE_LABEL, MODE_HINT, type QuantityInputMode,
+} from '@/lib/markets/quantityInput';
 import { canDo, intentOf } from '@/lib/auth/tradingCapability';
 import { progressOf, shouldRefresh, type ProgressView } from '@/lib/engine/orderProgress';
 import {
@@ -98,6 +102,8 @@ export function useCountdown(nextAt: number | null): string {
 const LEV_KEY = 'tg_terminal_leverage';
 /** 수량 단위(코인 개수 / USDT 금액) 기억용 */
 const UNIT_KEY = 'tg_terminal_unit';
+// 수량 단위 모드. 예전 UNIT_KEY(BASE/QUOTE)는 처음 한 번 이어받는다.
+const MODE_KEY = 'tg_terminal_qty_mode';
 /** 모의에서 마지막으로 고른 마진 모드 */
 const PAPER_MARGIN_KEY = 'tg_paper_margin_mode';
 
@@ -491,18 +497,35 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 거래소는 늘 코인 개수로 받는다. USDT로 적으면 화면이 나눠서 개수를
   // 만든다. **환산은 화면에서 하고, 서버로는 개수만 보낸다** — 두 곳에서
   // 나누기 시작하면 어느 쪽이 실제로 나간 수량인지 알 수 없다.
-  const [unit, setUnit] = useState<'BASE' | 'QUOTE'>(() => {
-    // 마지막에 쓰던 값이 먼저다. 없으면 **설정의 기본값**을 쓴다 —
-    // 설정을 바꿔 놓고 매번 다시 고르게 하면 그 설정은 없는 것과 같다.
+  /**
+   * 수량을 무엇으로 적는가.
+   *
+   * **USDT의 뜻이 둘이라 토글 하나로는 안 된다.** 주문 총액 10,000과
+   * 초기 증거금 10,000은 5배 계좌에서 다섯 배 차이다 — 틀린 쪽이
+   * 다섯 배 큰 주문이다.
+   */
+  const [qtyMode, setQtyMode] = useState<QuantityInputMode>(() => {
+    try {
+      const saved = localStorage.getItem(MODE_KEY);
+      if (saved && saved in MODE_LABEL) return saved as QuantityInputMode;
+    } catch { /* 아래 예전 값으로 */ }
+    // 예전 BASE/QUOTE 저장값을 이어받는다. 안 이어받으면 쓰던 사람이
+    // 어느 날 갑자기 다른 단위로 주문하게 된다.
     try {
       const last = localStorage.getItem(UNIT_KEY);
-      if (last === 'QUOTE' || last === 'BASE') return last;
+      if (last === 'QUOTE') return 'QUOTE_NOTIONAL';
+      if (last === 'BASE') return 'BASE_ASSET';
     } catch { /* 설정으로 */ }
+    // 마지막에 쓴 값이 없으면 설정의 기본값. 설정을 바꿔 놓고 매번
+    // 다시 고르게 하면 그 설정은 없는 것과 같다.
     try {
       const { loadPrefs } = require('@/lib/ui/preferences');
-      return loadPrefs().unit;
-    } catch { return 'BASE'; }
+      return loadPrefs().unit === 'QUOTE' ? 'QUOTE_NOTIONAL' : 'BASE_ASSET';
+    } catch { return 'BASE_ASSET'; }
   });
+  const [unitSheet, setUnitSheet] = useState(false);
+  /** 기존 코드가 쓰던 두 갈래. 코인 개수인가 아닌가 */
+  const unit: 'BASE' | 'QUOTE' = qtyMode === 'BASE_ASSET' ? 'BASE' : 'QUOTE';
   const [wallet, setWallet] = useState<WalletTree | null>(null);
   const [walletErr, setWalletErr] = useState('');
 
@@ -795,9 +818,18 @@ export const OrderFormPanel = memo(function OrderFormPanel({
    * USDT로 적었는데 **가격을 모르면 NaN이다.** 0으로 두면 아래 검사에서
    * '수량을 입력하세요'로 끝나 버리는데, 실제 문제는 가격을 못 읽은 것이다.
    */
-  const baseQty = unit === 'BASE'
+  // ── 적은 값 → 거래소로 나갈 코인 개수 ──
+  //
+  // 환산은 quantityInput 한 곳에서 한다. 여기서 다시 나누면 "USDT가
+  // 주문 총액인가 증거금인가"라는 판정이 두 벌이 되고, 그 둘이 갈리면
+  // 다섯 배 차이가 난다.
+  const conv = convertQuantity({
+    mode: qtyMode, value: qty, price: unitPx,
+    leverage, availableUsd: balanceUsd,
+  });
+  const baseQty = qtyMode === 'BASE_ASSET'
     ? typedQty
-    : (unitPx > 0 ? typedQty / unitPx : NaN);
+    : (conv.baseQty != null ? conv.baseQty : NaN);
   const notional = (Number.isFinite(baseQty) ? baseQty : 0) * unitPx;
   const margin = leverage > 0 ? notional / leverage : 0;
   // 비용을 **계산할 수 있었는가.** 수량을 못 읽었거나(USDT로 적었는데
@@ -1047,19 +1079,6 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setMsg(r.ok ? null : { ok: false, text: r.reason });
   };
 
-  /** 단위를 바꾼다. **적어 둔 값을 그대로 두지 않고 환산한다** */
-  const switchUnit = (next: 'BASE' | 'QUOTE') => {
-    if (next === unit) return;
-    setUnit(next);
-    try { localStorage.setItem(UNIT_KEY, next); } catch {}
-    // 값이 없거나 가격을 모르면 환산할 수 없다. 그때는 **비운다** —
-    // 숫자를 그대로 두면 0.09 BTC가 0.09 USDT로 읽히고, 그 상태로 눌리면
-    // 의도한 것의 70만분의 1이 나간다.
-    const cur = Number(qty);
-    if (!Number.isFinite(cur) || cur <= 0 || unitPx <= 0) { setQty(''); return; }
-    const v = next === 'BASE' ? cur / unitPx : cur * unitPx;
-    setQty(String(Number(v.toFixed(next === 'BASE' ? 6 : 2))));
-  };
 
   // 방향을 인자로 받는다. 바이낸스처럼 롱·숏 버튼을 동시에 두면
   // 누른 버튼이 곧 방향이다 — 토글 상태를 따로 기억하지 않는다.
@@ -1506,6 +1525,60 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </div>
       )}
 
+      {/* ── 수량 단위 고르기 ──
+          토글 하나로 두면 USDT가 무엇인지 알 수 없다. 주문 총액 10,000과
+          초기 증거금 10,000은 5배 계좌에서 다섯 배 차이고, 틀린 쪽이
+          다섯 배 큰 주문이다. 그래서 뜻을 적어 고르게 한다.
+          lockDrag: 수량을 고르다 손이 미끄러져 닫히면 처음부터 다시다. */}
+      <BottomSheet open={unitSheet} title="수량 단위" lockDrag
+        onClose={() => setUnitSheet(false)}>
+        <div style={{ padding: '4px 14px 14px', display: 'grid', gap: 7 }}>
+          {(Object.keys(MODE_LABEL) as QuantityInputMode[]).map(m => {
+            const on = m === qtyMode;
+            // **못 쓰는 모드를 고를 수 있게 두지 않는다.** 잔고를 못
+            // 읽었는데 '계좌 %'를 고르면 수량이 영영 안 나온다.
+            const blocked = needsEquity(m) && balanceUsd == null;
+            return (
+              <button key={m} disabled={blocked}
+                onClick={() => {
+                  setQtyMode(m);
+                  try { localStorage.setItem(MODE_KEY, m); } catch { /* 저장 실패는 치명적이지 않다 */ }
+                  // **적어 둔 값을 그대로 두지 않는다.** 0.09 BTC가
+                  // 0.09 USDT로 읽히면 의도한 것의 70만분의 1이 나간다.
+                  setQty('');
+                  setRiskPick(null);
+                  setUnitSheet(false);
+                }}
+                style={{
+                  textAlign: 'left', padding: '11px 12px', borderRadius: 9,
+                  background: on ? C.accentBg : C.raised,
+                  border: `1px solid ${on ? C.accent : C.hair}`,
+                  cursor: blocked ? 'default' : 'pointer', opacity: blocked ? 0.45 : 1,
+                  display: 'grid', gap: 3,
+                }}>
+                <span style={{
+                  color: on ? C.accent : C.text, fontWeight: 700, fontSize: FS.small,
+                }}>
+                  {on ? '● ' : '○ '}{MODE_LABEL[m]}
+                </span>
+                <span style={{ color: C.dim, fontSize: FS.micro, lineHeight: 1.5 }}>
+                  {MODE_HINT[m]}
+                </span>
+                {blocked && (
+                  <span style={{ color: C.warn, fontSize: FS.micro }}>
+                    가용자산을 읽지 못해 이 단위는 쓸 수 없습니다
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6, marginTop: 2 }}>
+            단위를 바꾸면 적어 둔 값을 비웁니다 — 숫자를 그대로 두면
+            <b> 0.09 BTC가 0.09 USDT로</b> 읽힙니다.
+          </div>
+        </div>
+      </BottomSheet>
+
       {/* **이 매매가 비용을 이길 수 있는가.**
           'unwinnable'은 넓다/좁다의 문제가 아니라 성립하지 않는 매매다 —
           노리는 폭이 왕복 비용보다 작으면 이겨도 손해다. 그 사실은
@@ -1688,21 +1761,25 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden',
       }}>
         <input value={qty} onChange={e => setQty(e.target.value)}
-          placeholder={unit === 'BASE' ? '수량' : '주문금액'} inputMode="decimal"
+          placeholder={MODE_LABEL[qtyMode]} inputMode="decimal"
           style={{
             flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
             color: C.text, padding: '9px 11px', fontSize: dense ? FS.small : FS.body, ...NUM,
           }}/>
-        <button onClick={() => switchUnit(unit === 'BASE' ? 'QUOTE' : 'BASE')}
-          title="단위 바꾸기"
+        <button onClick={() => setUnitSheet(true)}
+          title="수량 단위 바꾸기"
           style={{
             padding: '0 10px', minHeight: 34, background: 'transparent', cursor: 'pointer',
             color: C.dim, fontSize: FS.micro, fontWeight: 700,
             border: 'none', borderLeft: `1px solid ${C.hair}`,
             display: 'flex', alignItems: 'center', gap: 3,
           }}>
-          {unit === 'BASE' ? base : 'USDT'}
-          <span style={{ opacity: .5 }}>⇄</span>
+          {qtyMode === 'BASE_ASSET' ? base
+            : qtyMode === 'INITIAL_MARGIN' ? '증거금'
+            : qtyMode === 'ACCOUNT_PERCENT' ? '계좌%'
+            : qtyMode === 'ACCOUNT_RISK' ? '위험%'
+            : 'USDT'}
+          <span style={{ opacity: .5 }}>▾</span>
         </button>
       </div>
 
@@ -1711,14 +1788,24 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           그 값을 안 보여주면 사용자가 확인할 방법이 없고, 그러면 이 칸은
           '얼마인지 모르는 주문'을 만드는 칸이 된다.
           가격을 못 읽었으면 환산도 못 한다 — 그 사실을 그대로 적는다. */}
-      {unit === 'QUOTE' && Number(qty) > 0 && (
+      {qtyMode !== 'BASE_ASSET' && Number(qty) > 0 && (
         <div style={{
-          margin: '-4px 0 0', fontSize: FS.micro, lineHeight: 1.5,
-          color: unitPx > 0 ? C.faint : C.warn, ...NUM,
+          margin: '-4px 0 0', fontSize: FS.micro, lineHeight: 1.6,
+          color: conv.ok ? C.faint : C.warn, ...NUM,
         }}>
-          {unitPx > 0
-            ? `→ 약 ${Number(baseQty.toFixed(6))} ${base} (${fmtPrice(unitPx)} 기준)`
-            : `가격을 확인하지 못해 ${base} 수량으로 바꿀 수 없습니다`}
+          {conv.ok && conv.baseQty != null ? (
+            <>
+              → 약 <b style={{ color: C.text }}>{Number(conv.baseQty.toFixed(6))} {base}</b>
+              {conv.notionalUsd != null && ` · 명목가 ${fmtPrice(conv.notionalUsd, 2)} USDT`}
+              {/* **증거금을 같이 적는다.** '내 돈 얼마 들어가나'가
+                  초기 증거금 모드를 쓰는 이유 자체다. */}
+              {conv.marginUsd != null && ` · 증거금 ${fmtPrice(conv.marginUsd, 2)} USDT`}
+            </>
+          ) : (
+            // **못 구한 이유를 그대로 적는다.** '수량 0'으로 적으면
+            // 사용자는 자기가 잘못 적었다고 읽는다.
+            conv.reason
+          )}
         </div>
       )}
 
