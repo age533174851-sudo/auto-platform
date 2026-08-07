@@ -38,23 +38,36 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
-  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, leverage_cap, risk_pct, interval_min, margin_pct';
-  const WITHOUT_MARGIN = FULL.replace(', margin_pct', '');
+  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct';
 
   let { data: rows, error } = await (sb as any)
     .from('autotrade_schedules').select(FULL).eq('user_id', uid).order('symbol');
 
-  // **margin_pct 칸이 없으면 이 조회가 통째로 실패한다.** 그러면 화면은
-  // "예약을 읽지 못했습니다"만 띄우고, 진짜 원인(마이그레이션 036 미적용)은
-  // 어디에도 안 나온다. 칸을 빼고 다시 읽어서 화면은 살리고, 무엇이
-  // 빠졌는지는 점검 목록이 말하게 한다.
-  let marginColumnPresent: boolean | null = error ? null : true;
-  if (error && /margin_pct/i.test(String(error.message))) {
-    marginColumnPresent = false;
+  // **칸 하나가 없으면 이 조회가 통째로 실패한다.** 그러면 화면은
+  // "예약을 읽지 못했습니다"만 띄우고, 진짜 원인(마이그레이션 미적용)은
+  // 어디에도 안 나온다. 없는 칸만 빼고 다시 읽어서 화면은 살리고,
+  // 무엇이 빠졌는지는 점검 목록이 말하게 한다.
+  //
+  // **한 번만 재시도하지 않는다.** Postgres는 모르는 칸을 만나면 첫 번째
+  // 것만 이름을 대고 멈춘다. 036과 043이 둘 다 안 돌아간 계정에서
+  // margin_pct만 빼고 한 번 재시도하면 last_decision 때문에 또 실패하고,
+  // 화면은 여전히 죽는다. 이름이 나올 때마다 빼고, 더 이상 안 나올 때까지 돈다.
+  const OPTIONAL = ['margin_pct', 'last_decision'];
+  const missing: string[] = [];
+
+  for (let i = 0; i < OPTIONAL.length && error; i++) {
+    const named = OPTIONAL.find(c => !missing.includes(c) && new RegExp(c, 'i').test(String(error!.message)));
+    if (!named) break;
+    missing.push(named);
+    const cols = FULL.split(', ').filter(c => !missing.includes(c)).join(', ');
     const retry = await (sb as any)
-      .from('autotrade_schedules').select(WITHOUT_MARGIN).eq('user_id', uid).order('symbol');
+      .from('autotrade_schedules').select(cols).eq('user_id', uid).order('symbol');
     rows = retry.data; error = retry.error;
   }
+
+  // **읽기가 끝내 실패했으면 '있다'고도 '없다'고도 말하지 않는다.**
+  const marginColumnPresent: boolean | null = error ? null : !missing.includes('margin_pct');
+  const decisionColumnPresent: boolean | null = error ? null : !missing.includes('last_decision');
 
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
@@ -125,6 +138,9 @@ export async function GET(req: NextRequest) {
     liveGate: (() => { const g = liveTradingGate(); return { env: g.env, reason: g.reason, previewOverride: g.previewOverride }; })(),
     // 마이그레이션 036이 적용됐는가. 없으면 배율이 낮게 역산된다.
     marginColumnPresent,
+    // 마이그레이션 043이 적용됐는가. 없으면 화면이 판단 점수를
+    // 문장에서 되짚는다 — 돌긴 돌지만 문장이 바뀌면 숫자를 잃는다.
+    decisionColumnPresent,
     // 포지션을 닫아 줄 크론이 돌고 있는가 + 지금 열려 있는 거래 수
     exitRuns, openTradeCount,
     // 크론이 도는 시각. 화면이 '언제 도는지'를 적을 수 있어야 한다 —

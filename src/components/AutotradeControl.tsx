@@ -403,6 +403,9 @@ export default function AutotradeControl() {
     ? decisionCardOf({
       symbol: latestDecided.s.symbol,
       lastResult: latestDecided.s.last_result,
+      // 구조화 기록이 있으면 이쪽이 쓰인다. 없으면(마이그레이션 043 전)
+      // 예전처럼 문장에서 되짚는다 — 화면이 죽지는 않는다.
+      stored: latestDecided.s.last_decision ?? null,
       lastRunAtMs: latestDecided.t, nowMs: Date.now(),
     })
     : null;
@@ -486,8 +489,11 @@ export default function AutotradeControl() {
               </div>
             </div>
           ) : (
-            <div style={{ color: T.muted, fontSize: 10, marginTop: 6 }}>
+            <div style={{ color: T.muted, fontSize: 10, marginTop: 6, lineHeight: 1.55 }}>
               이 판단에는 점수가 기록되지 않았습니다 — 아래 원문을 보세요
+              {data?.decisionColumnPresent === false && (
+                <><br />판단 기록 칸이 없습니다 (마이그레이션 043) — 적용하면 다음 판단부터 점수가 남습니다</>
+              )}
             </div>
           )}
 

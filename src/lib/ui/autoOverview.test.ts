@@ -13,7 +13,7 @@ import { test, assert, eq } from '../../test/harness';
 import {
   AUTO_TABS, tabOf, envOf, autoTitle, ENV_TONE, headerEnvOf,
   healthSummaryOf, healthTone,
-  parseScores, decisionCardOf,
+  parseScores, decisionCardOf, decisionRecordOf,
   primaryCardOf, stopStrategyEffect,
   alertsOf, FEED_LAG_WARN_SEC,
   scheduleSummaryOf,
@@ -251,6 +251,89 @@ export function runAutoOverviewTests() {
     const c = decisionCardOf({ lastResult: '진입 안 함: x', nowMs: 1000, lastRunAtMs: 400 });
     eq(c.agoMs, 600);
     eq(decisionCardOf({ lastResult: 'x' }).agoMs, null);
+  });
+
+  console.log('[자동매매 개요 — 저장된 판단이 문장보다 먼저다]');
+
+  test('실행기가 적은 기록을 그대로 만든다', () => {
+    const rec = decisionRecordOf('WATCHING', '점수 차이 8점', {
+      side: 'NO_TRADE', longTotal: 54.4, shortTotal: 46.2,
+      margin: 8.2, minMarginRequired: 12,
+    });
+    eq(rec.verdict, 'WATCHING');
+    eq(rec.side, 'NO_TRADE');
+    eq(rec.longScore, 54.4);
+    eq(rec.margin, 8.2);
+    eq(rec.minMargin, 12);
+  });
+
+  test('승부까지 못 갔으면 점수 칸을 0으로 채우지 않는다', () => {
+    // 0을 넣으면 나중에 이 행을 보는 사람이 엔진이 0점을 매겼다고 읽는다.
+    const rec = decisionRecordOf('ERROR', 'timeout', null);
+    eq(rec.longScore, null);
+    eq(rec.shortScore, null);
+    eq(rec.margin, null);
+    eq(rec.minMargin, null);
+    eq(rec.side, null);
+  });
+
+  test('점수차가 없으면 두 점수에서 계산한다', () => {
+    const rec = decisionRecordOf('ENTERED', 'x', { longTotal: 60, shortTotal: 40 });
+    eq(rec.margin, 20);
+  });
+
+  test('사유는 잘라서 담는다 — 칸을 넘기지 않는다', () => {
+    const rec = decisionRecordOf('WATCHING', 'ㄱ'.repeat(500), null);
+    eq(String(rec.reason).length, 300);
+  });
+
+  test('저장된 점수가 있으면 문장을 안 읽는다', () => {
+    // 문장에는 다른 숫자가 들어 있어도 저장된 쪽이 이겨야 한다.
+    const c = decisionCardOf({
+      lastResult: '진입 안 함: (LONG 99 : 1 SHORT)',
+      stored: { verdict: 'WATCHING', longScore: 54, shortScore: 46, margin: 8, minMargin: 12 },
+    });
+    eq(c.longScore, 54);
+    eq(c.shortScore, 46);
+    eq(c.verdict, 'WATCHING');
+  });
+
+  test('저장된 판정이 문장 해석을 이긴다', () => {
+    // 문장은 '진입'으로 시작하지만 실행기는 차단이라고 적었다.
+    const c = decisionCardOf({
+      lastResult: '진입: 무언가',
+      stored: { verdict: 'BLOCKED', reason: '실거래 잠금' },
+    });
+    eq(c.verdict, 'BLOCKED');
+    eq(c.tone, 'bad');
+    eq(c.detail, '실거래 잠금');
+  });
+
+  test('저장 칸이 비어 있으면 예전처럼 문장에서 되짚는다', () => {
+    const c = decisionCardOf({
+      lastResult: '진입 안 함: 점수 차이 8점이 최소 우위 12점 미만 (LONG 54 : 46 SHORT)',
+      stored: null,
+    });
+    eq(c.verdict, 'WATCHING');
+    eq(c.longScore, 54);
+    eq(c.minMargin, 12);
+  });
+
+  test('저장 칸에 점수만 없으면 문장에서 점수만 되짚는다', () => {
+    const c = decisionCardOf({
+      lastResult: '진입 안 함: 점수 차이 8점이 최소 우위 12점 미만 (LONG 54 : 46 SHORT)',
+      stored: { verdict: 'WATCHING', longScore: null, shortScore: null },
+    });
+    eq(c.verdict, 'WATCHING');
+    eq(c.longScore, 54, '판정은 저장된 것을 쓰고 점수는 문장에서 읽는다');
+  });
+
+  test('모르는 판정 값은 무시하고 문장으로 간다', () => {
+    const c = decisionCardOf({
+      lastResult: '진입: 체결',
+      stored: { verdict: '아무거나' as any },
+    });
+    eq(c.verdict, 'ENTERED');
   });
 
   console.log('[자동매매 개요 — 무엇을 위에 두는가]');
