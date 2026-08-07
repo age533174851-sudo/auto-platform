@@ -617,15 +617,48 @@ export async function POST(req: NextRequest) {
   // **막는 자리를 좁게 잡는다.** 전략 계좌를 지목한 주문만 따진다.
   // 손으로 누르는 청산까지 막으면 사용자가 자기 포지션을 못 닫는다.
   const sleeveId = String(body.strategyAccountId ?? body.sleeveId ?? '').trim().toUpperCase();
-  if (sleeveId && reduceOnly) {
+  if (sleeveId) {
     const { loadSleeves, checkOwnership } = await import('@/lib/strategies/sleeveStore');
     const load = await loadSleeves(sb, uid);
-    const own = checkOwnership(load, sleeveId, symbol, orderQty);
-    if (!own.allowed) {
-      return NextResponse.json({
-        ok: false, error: 'not_owned_by_strategy',
-        message: own.reason, sleeveId, ownedQty: own.ownedQty,
-      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+
+    if (reduceOnly) {
+      const own = checkOwnership(load, sleeveId, symbol, orderQty);
+      if (!own.allowed) {
+        return NextResponse.json({
+          ok: false, error: 'not_owned_by_strategy',
+          message: own.reason, sleeveId, ownedQty: own.ownedQty,
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+    } else if (load.installed && load.known) {
+      // ── 이 전략 계좌가 지금 새로 들어가도 되는가 ──
+      //
+      // **한 전략이 망가졌다고 전체 계좌를 끄지 않는다.** 이 판정은
+      // 계좌 하나만 본다 — 그것이 전략별로 나눈 이유의 절반이다.
+      //
+      // 청산에는 안 건다. 낙폭 한도에 걸린 계좌일수록 정리는 되어야
+      // 한다 — 못 여는 것은 불편이고 못 닫는 것은 사고다.
+      //
+      // 표를 못 읽었으면 여기서는 안 막는다. 진입을 막는 쪽은 이미
+      // 점검 목록이 여럿 보고 있고, 조회 실패로 신규 진입까지 세우면
+      // 전략 계좌를 쓰는 순간 거래가 데이터베이스 상태에 매인다.
+      const { sleeveGate } = await import('@/lib/strategies/sleeveLedger');
+      const rec = load.records.find(r => r.spec.id === sleeveId);
+      const g = sleeveGate(rec?.state, rec?.spec, {
+        requireLive: conn.is_testnet === false,
+      });
+      if (!g.allowed) {
+        return NextResponse.json({
+          ok: false, error: 'strategy_account_halted', halted: g.halted,
+          message: g.reason, sleeveId,
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+      if (rec?.halted) {
+        return NextResponse.json({
+          ok: false, error: 'strategy_account_halted', halted: 'MANUAL',
+          message: `이 전략 계좌는 멈춰 있습니다 — ${rec.haltReason || '사유 없음'}`,
+          sleeveId,
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
     }
   }
 
@@ -707,7 +740,7 @@ export async function POST(req: NextRequest) {
   if (sleeveId && exec.ok) {
     try {
       const { loadSleeves, saveSleeve } = await import('@/lib/strategies/sleeveStore');
-      const { applyFill } = await import('@/lib/strategies/sleeveLedger');
+      const { applyPricedFill } = await import('@/lib/strategies/sleeveLedger');
       const load = await loadSleeves(sb, uid);
       const rec = load.known ? load.records.find(r => r.spec.id === sleeveId) : null;
 
@@ -724,12 +757,19 @@ export async function POST(req: NextRequest) {
           // 부호는 방향이 정한다. 매수는 +, 매도는 − — 청산이든 진입이든
           // 같다. 롱을 SELL로 닫으면 −가 되어 +포지션이 줄어든다.
           const delta = orderSide === 'BUY' ? filled : -filled;
-          const saved = await saveSleeve(sb, uid, {
-            ...rec, state: applyFill(rec.state, symbol, delta),
-          });
+          // **체결가를 같이 넘긴다.** 수량만 옮기면 realized_pnl이 영영
+          // 0이고, 그러면 낙폭이 언제나 0%라 낙폭 정지가 한 번도 못 걸린다.
+          // 못 읽었으면 null로 넘어가 수량만 반영되고, 그 사실이 note에 남는다.
+          const fillPx = Number(exec.avgPrice);
+          const applied = applyPricedFill(
+            rec.state, symbol, delta,
+            Number.isFinite(fillPx) && fillPx > 0 ? fillPx : 0,
+          );
+          const saved = await saveSleeve(sb, uid, { ...rec, state: applied.state });
           // **실패를 삼키지 않는다.** 장부가 안 적히면 다음 청산이
           // 남의 것으로 판정되거나, 반대로 남의 몫까지 닫힌다.
           if (!saved.ok) sleeveNote = `전략 계좌 장부를 적지 못했습니다 — ${saved.error}`;
+          else if (applied.note) sleeveNote = applied.note;
         } else {
           sleeveNote = '체결 수량을 확인하지 못해 전략 계좌 장부에 적지 못했습니다';
         }

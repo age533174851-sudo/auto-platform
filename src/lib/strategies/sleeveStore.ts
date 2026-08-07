@@ -41,6 +41,7 @@ export interface SleeveRow {
   peak_equity?: any;
   max_drawdown_seen_pct?: any;
   positions?: any;
+  cost_basis?: any;
   halted?: any;
   halt_reason?: any;
 }
@@ -94,6 +95,26 @@ export function positionsOf(v: any): Record<string, number> {
 }
 
 /**
+ * 매입 평균가 맵을 읽는다.
+ *
+ * **0과 음수는 버린다.** 가격이 0인 매입은 없고, 0을 그대로 쓰면
+ * 청산 손익이 통째로 이익으로 잡힌다 — 그 숫자가 낙폭 계산에 들어가고,
+ * 낙폭은 계좌를 멈추는 근거다.
+ */
+export function avgPricesOf(v: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const k of Object.keys(v)) {
+    const p = num((v as any)[k]);
+    if (p == null || p <= 0) continue;
+    const sym = str(k).trim().toUpperCase();
+    if (!sym) continue;
+    out[sym] = p;
+  }
+  return out;
+}
+
+/**
  * 표의 행 → 계좌 기록.
  *
  * **peak_equity가 0이면 배정액으로 올린다.** 0으로 두면 낙폭이 언제나
@@ -125,6 +146,7 @@ export function recordOf(row: SleeveRow | null | undefined): SleeveRecord | null
     peakEquity: Math.max(n0(row.peak_equity), allocated),
     maxDrawdownPct: Math.max(0, n0(row.max_drawdown_seen_pct)),
     positions: positionsOf(row.positions),
+    avgPrices: avgPricesOf(row.cost_basis),
   };
 
   return {
@@ -155,6 +177,7 @@ export function rowOf(r: SleeveRecord): SleeveRow {
     peak_equity: r.state.peakEquity,
     max_drawdown_seen_pct: r.state.maxDrawdownPct,
     positions: r.state.positions,
+    cost_basis: r.state.avgPrices ?? {},
     halted: r.halted,
     halt_reason: r.haltReason,
   };
