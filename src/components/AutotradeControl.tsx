@@ -20,12 +20,17 @@
 //  · 마지막으로 **실제로** 돌았는가 (cron_runs)
 //  · 언제 도는가 — 켠 직후에 안 도는 것을 고장으로 읽지 않게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { autotradeHealth } from '@/lib/engine/autotradeHealth';
+import { autotradeHealth, agoText } from '@/lib/engine/autotradeHealth';
 import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation, riskMarginVerdict } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
 import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/autotrade/runOutcome';
 import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
 import { recoveryPlan } from '@/lib/engine/mismatchRecovery';
+import {
+  autoTitle, headerEnvOf, ENV_LABEL, ENV_TONE,
+  healthSummaryOf, healthTone, decisionCardOf, alertsOf,
+  stopStrategyEffect, type Tone,
+} from '@/lib/ui/autoOverview';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 
@@ -82,6 +87,16 @@ export default function AutotradeControl() {
   // 앱이 열려 있는 동안 진입 엔진을 부를 것인가.
   // **기본은 꺼짐** — 화면을 열었다는 이유만으로 주문이 나가면 안 된다.
   const [ticking, setTicking] = useState(false);
+  /**
+   * 점검 목록을 펼쳤는가.
+   *
+   * **null은 '사용자가 아직 안 건드렸다'**는 뜻이고, 그때는 판정이 정한다
+   * (막힌 항목이 있으면 펼침). 한 번 누르면 그 선택을 존중한다 — 사용자가
+   * 접었는데 다음 새로고침에서 도로 펴지면 그건 화면이 말을 안 듣는 것이다.
+   */
+  const [checksOpen, setChecksOpen] = useState<boolean | null>(null);
+  /** 예약 전체 목록은 기본으로 접는다 — 기본 화면에는 요약 한 줄이면 된다 */
+  const [schedOpen, setSchedOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!auth) { setErr('로그인이 필요합니다'); setData(null); return; }
@@ -368,11 +383,58 @@ export default function AutotradeControl() {
     };
   }
 
+  // ── 접기·올리기 판정 ──
+  //
+  // 무엇을 접고 무엇을 올릴지는 `lib/ui/autoOverview`가 정한다. 여기서
+  // 하면 "정상인데 왜 펼쳐졌나"를 아무도 확인할 수 없다.
+  const env = headerEnvOf(schedules);
+  const checks = healthSummaryOf(health.items);
+  const checksExpanded = checksOpen ?? checks.expandByDefault;
+  const stopNote = stopStrategyEffect().note;
+
+  // 가장 최근에 판단한 예약 하나. **맨 아래 작은 글씨가 아니라 위로 올린다** —
+  // 사용자가 이 화면에 오는 이유가 대부분 이것이다.
+  const decidedRows = schedules
+    .map(s => ({ s, t: msOf(s.last_run_at) }))
+    .filter(x => Number.isFinite(x.t) && (x.t as number) > 0)
+    .sort((a, b) => (b.t as number) - (a.t as number));
+  const latestDecided = decidedRows[0] || null;
+  const decision = latestDecided
+    ? decisionCardOf({
+      symbol: latestDecided.s.symbol,
+      lastResult: latestDecided.s.last_result,
+      lastRunAtMs: latestDecided.t, nowMs: Date.now(),
+    })
+    : null;
+
+  // 정상일 때는 경고 자리를 아예 안 쓴다. 늘 자리를 차지하면 그 자리는
+  // 배경이 되고, 진짜 경고가 떠도 아무도 안 본다.
+  const alerts = alertsOf({ blockingLabels: checks.blockingLabels });
+
+  const toneColor = (t: Tone): string =>
+    t === 'good' ? T.grn : t === 'bad' ? T.red : t === 'live' ? T.red
+      : t === 'warn' ? T.ylw : T.muted;
+
   return (
     <div style={box}>
-      <div style={{ color: T.txt, fontWeight: 900, fontSize: 14, marginBottom: 10 }}>
-        자동매매 (실제 실행)
+      <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ color: T.txt, fontWeight: 900, fontSize: 14 }}>{autoTitle(env)}</span>
+        <span style={{
+          background: A(toneColor(ENV_TONE[env]), '18'),
+          color: toneColor(ENV_TONE[env]),
+          border: `1px solid ${A(toneColor(ENV_TONE[env]), '40')}`,
+          borderRadius: 6, padding: '2px 6px', fontSize: 9, fontWeight: 900,
+        }}>{ENV_LABEL[env]}</span>
       </div>
+
+      {/* ── 문제가 있을 때만 뜨는 경고 ── */}
+      {alerts.map(a => (
+        <div key={a.id} style={{
+          background: A(toneColor(a.tone), '15'), border: `1px solid ${A(toneColor(a.tone), '40')}`,
+          borderRadius: 10, padding: '9px 11px', marginBottom: 8,
+          color: toneColor(a.tone), fontSize: 11.5, fontWeight: 800, lineHeight: 1.5,
+        }}>⚠️ {a.text}</div>
+      ))}
 
       {/* 판정 한 줄 */}
       <div style={{
@@ -385,14 +447,87 @@ export default function AutotradeControl() {
         )}
       </div>
 
-      {/* ── 항목별 점검 ──
-          판정 한 줄만 있으면 "왜 안 도는지"를 알 수 없다. 무엇을 확인했고
-          무엇이 막혔는지를 줄마다 보여준다. **확인 못 한 것은 물음표다** —
-          통과로도 실패로도 세지 않는다. */}
+      {/* ── 마지막 판단 ──
+          예전에는 이 정보가 점검 목록 안쪽 한 줄로 묻혀 있었다. '돌았다'와
+          '진입했다'는 다르고, 대부분의 날은 조건이 안 맞아 진입하지 않는다 —
+          그게 정상이라는 것이 보여야 사용자가 기다릴 수 있다. */}
+      {decision && (
+        <div style={{
+          border: `1px solid ${A(toneColor(decision.tone), '45')}`,
+          background: A(toneColor(decision.tone), '10'),
+          borderRadius: 10, padding: '11px 12px', marginBottom: 12,
+        }}>
+          <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ color: T.txt, fontWeight: 900, fontSize: 13 }}>
+              {decision.symbol || '심볼 미상'}
+            </span>
+            <span style={{
+              background: A(toneColor(decision.tone), '22'), color: toneColor(decision.tone),
+              borderRadius: 6, padding: '2px 7px', fontSize: 10, fontWeight: 900,
+            }}>{decision.badge}</span>
+            {decision.agoMs != null && latestDecided && (
+              <span style={{ color: T.muted, fontSize: 10 }}>
+                {agoText(latestDecided.t as number, Date.now())}
+              </span>
+            )}
+          </div>
+
+          {/* 점수는 **읽었을 때만** 그린다. 못 읽었는데 0:0을 그리면
+              그건 '모름'이 아니라 '완전한 무승부'로 읽힌다. */}
+          {decision.scoresKnown ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 8 }}>
+              <div style={{ background: T.alt, borderRadius: 8, padding: '6px 8px' }}>
+                <div style={{ color: T.muted, fontSize: 9 }}>LONG</div>
+                <div style={{ color: T.grn, fontSize: 15, fontWeight: 900 }}>{decision.longScore}</div>
+              </div>
+              <div style={{ background: T.alt, borderRadius: 8, padding: '6px 8px' }}>
+                <div style={{ color: T.muted, fontSize: 9 }}>SHORT</div>
+                <div style={{ color: T.red, fontSize: 15, fontWeight: 900 }}>{decision.shortScore}</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: T.muted, fontSize: 10, marginTop: 6 }}>
+              이 판단에는 점수가 기록되지 않았습니다 — 아래 원문을 보세요
+            </div>
+          )}
+
+          <div style={{ color: T.txt, fontSize: 11.5, fontWeight: 700, marginTop: 8, lineHeight: 1.55 }}>
+            {decision.headline}
+          </div>
+          {decision.detail && (
+            <div style={{ color: T.muted, fontSize: 10.5, marginTop: 4, lineHeight: 1.55 }}>
+              {decision.detail}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── 안전 점검 ──
+          예전에는 여덟 줄이 늘 펼쳐져 있어서, 이 화면이 조작 화면이
+          아니라 진단 로그처럼 보였다. **정상일 때는 한 줄이다.**
+          막힌 항목이 있을 때만 저절로 펼쳐진다. */}
       {health.items.length > 0 && (
         <div style={{ marginBottom: 12, background: T.alt, borderRadius: 10, padding: '9px 11px' }}>
-          <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 7 }}>점검</div>
-          {health.items.map((it, i) => (
+          <button
+            onClick={() => setChecksOpen(!checksExpanded)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', gap: 7,
+              background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+              // 손가락으로 누르는 줄이라 44px을 지킨다.
+              minHeight: 40, textAlign: 'left',
+            }}>
+            <span style={{ fontSize: 12 }}>
+              {checks.bad > 0 ? '⚠️' : checks.unknown > 0 ? '❔' : '✅'}
+            </span>
+            <span style={{ color: T.txt, fontSize: 11.5, fontWeight: 800, flex: 1, minWidth: 0 }}>
+              안전 점검 <span style={{ color: toneColor(healthTone(checks)) }}>{checks.label}</span>
+            </span>
+            <span style={{ color: T.muted, fontSize: 10, fontWeight: 700 }}>
+              {checksExpanded ? '접기 ▲' : '상세보기 ▼'}
+            </span>
+          </button>
+
+          {checksExpanded && health.items.map((it, i) => (
             <div key={it.id} style={{
               padding: '6px 0',
               borderBottom: i < health.items.length - 1 ? `1px solid ${T.border}` : 'none',
@@ -419,11 +554,26 @@ export default function AutotradeControl() {
         </div>
       )}
 
-      {/* 지금 켜져 있는 예약 */}
+      {/* ── 예약 ──
+          **켜 놓은 것만 기본으로 보여준다.** 꺼 둔 예약은 오늘 아무것도
+          안 하는데, 켜진 것과 같은 크기로 늘어서 있으면 매번 그 사이를
+          찾아 스크롤해야 한다. 지우는 것이 아니라 접는다. */}
       {schedules.length > 0 && (
         <div style={{ marginBottom: 12 }}>
-          <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 6 }}>등록된 예약</div>
-          {schedules.map(s => (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={{ color: T.muted, fontSize: 10, fontWeight: 700, flex: 1 }}>
+              등록된 예약 · 켜짐 {on.length}개 / 전체 {schedules.length}개
+            </span>
+            {schedules.length > on.length && (
+              <button onClick={() => setSchedOpen(v => !v)} style={{
+                background: 'transparent', border: 'none', color: T.muted,
+                fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: '6px 0', minHeight: 32,
+              }}>
+                {schedOpen ? '꺼진 예약 접기 ▲' : `꺼진 예약 ${schedules.length - on.length}개 보기 ▼`}
+              </button>
+            )}
+          </div>
+          {schedules.filter(s => s.enabled || schedOpen).map(s => (
             <div key={s.id} style={{
               display: 'flex', alignItems: 'center', gap: 8,
               padding: '8px 0', borderBottom: `1px solid ${T.border}`,
@@ -488,13 +638,23 @@ export default function AutotradeControl() {
                   );
                 })()}
               </div>
-              <button onClick={() => toggle(s)} disabled={busy} style={{
-                minHeight: 30, padding: '0 12px', borderRadius: 8, cursor: busy ? 'default' : 'pointer',
-                background: s.enabled ? A(T.grn, '18') : 'transparent',
-                color: s.enabled ? T.grn : T.muted,
-                border: `1px solid ${s.enabled ? A(T.grn, '40') : T.border}`,
-                fontSize: 11, fontWeight: 800,
-              }}>{s.enabled ? '켜짐' : '꺼짐'}</button>
+              {/* **끄면 무엇이 멈추는지 적는다.** 이 줄이 없으면 사용자는
+                  끄는 순간 손절까지 꺼졌다고 믿거나, 반대로 포지션이
+                  정리된 줄 안다. 못 여는 것은 불편이고 못 닫는 것은 사고다. */}
+              <div style={{ display: 'grid', gap: 3, justifyItems: 'end', flexShrink: 0 }}>
+                <button onClick={() => toggle(s)} disabled={busy} style={{
+                  minHeight: 30, padding: '0 12px', borderRadius: 8, cursor: busy ? 'default' : 'pointer',
+                  background: s.enabled ? A(T.grn, '18') : 'transparent',
+                  color: s.enabled ? T.grn : T.muted,
+                  border: `1px solid ${s.enabled ? A(T.grn, '40') : T.border}`,
+                  fontSize: 11, fontWeight: 800,
+                }}>{s.enabled ? '켜짐' : '꺼짐'}</button>
+                {s.enabled && (
+                  <span style={{ color: T.muted, fontSize: 8.5, textAlign: 'right', maxWidth: 150, lineHeight: 1.45 }}>
+                    끄면 {stopNote}
+                  </span>
+                )}
+              </div>
             </div>
           ))}
         </div>
