@@ -12,6 +12,7 @@ import { test, assert, eq, close } from '../../test/harness';
 import {
   loadBook, appendRound, summarize, clearBook, clearAllBooks,
   nextStartEquity, roundModeOf, nextRoundNo, DEFAULT_ROUND_MODE,
+  endReasonOf, END_REASON_LABEL,
   __clearRoundLedgerMemory, type RoundMode,
 } from './roundLedger';
 import {
@@ -456,5 +457,84 @@ export function runRoundLedgerTests() {
     eq(sum.totalRounds, 0);
     eq(sum.totalNetPnl, 0);
     eq(sum.targetHitRate, null);
+  });
+
+  console.log('[회차 장부 — 성공률이 무엇을 뜻하는가]');
+
+  test('목표 달성과 수익은 다른 사실이다', () => {
+    // '성공률 0%'인데 실제 회수액이 원금 이상인 회차가 있었다.
+    // 원금보다 플러스로 끝나도 목표를 못 찍으면 실패로 세어졌기 때문이다.
+    clearAll();
+    playRound('INDEPENDENT_ROUNDS', 500);            // 벌었지만 목표 미달
+    playRound('INDEPENDENT_ROUNDS', 99_500, { reached: true });
+    const sum = summarize(loadBook('DAILY_HIGH_LEV', 'INDEPENDENT_ROUNDS'));
+    eq(sum.targetHitRate, 0.5, '목표는 두 판 중 한 판');
+    eq(sum.profitableRate, 1, '두 판 다 벌었다');
+  });
+
+  test('잃은 회차는 수익 회차로 안 센다', () => {
+    clearAll();
+    playRound('INDEPENDENT_ROUNDS', -500);
+    const sum = summarize(loadBook('DAILY_HIGH_LEV', 'INDEPENDENT_ROUNDS'));
+    eq(sum.profitableRate, 0);
+    eq(sum.profitableRounds, 0);
+  });
+
+  test('본전은 수익이 아니다', () => {
+    clearAll();
+    playRound('INDEPENDENT_ROUNDS', 0);
+    eq(summarize(loadBook('DAILY_HIGH_LEV', 'INDEPENDENT_ROUNDS')).profitableRate, 0);
+  });
+
+  test('회차가 없으면 0%가 아니라 없음이다', () => {
+    clearAll();
+    const sum = summarize(loadBook('DAILY_HIGH_LEV', 'INDEPENDENT_ROUNDS'));
+    eq(sum.profitableRate, null, '한 판도 안 돌린 전략이 수익률 0%로 보이면 안 된다');
+    eq(sum.targetHitRate, null);
+  });
+
+  console.log('[회차 장부 — 왜 끝났는가]');
+
+  test('파산을 목표보다 먼저 본다', () => {
+    // 둘 다 참으로 기록된 회차가 있으면 나쁜 쪽이 사실이다.
+    eq(endReasonOf({ reached: true, ruined: true, reason: '' }), 'RUIN');
+    eq(endReasonOf({ reached: true, ruined: false, reason: '' }), 'TARGET_HIT');
+  });
+
+  test('옛 회차는 문장에서 되짚는다', () => {
+    // 통째로 UNKNOWN으로 만들면 지금까지의 통계가 전부 사라진다.
+    eq(endReasonOf({ reason: '낙폭 15% 도달 — 중단' }), 'MDD_STOP');
+    eq(endReasonOf({ reason: '손으로 회차 종료' }), 'MANUAL_STOP');
+    eq(endReasonOf({ reason: '모의 90일 도달 — 목표 미달' }), 'MAX_TIME');
+    eq(endReasonOf({ reason: '' }), 'UNKNOWN');
+    eq(endReasonOf(null), 'UNKNOWN');
+  });
+
+  test('저장된 코드가 있으면 그것이 우선이다', () => {
+    eq(endReasonOf({ endReason: 'MAX_TRADES', reason: '손으로 회차 종료' } as any), 'MAX_TRADES');
+  });
+
+  test('모르는 코드는 되짚기로 떨어진다', () => {
+    eq(endReasonOf({ endReason: '아무거나', ruined: true } as any), 'RUIN');
+  });
+
+  test('사유별로 센다 — 실패 12회로는 아무것도 못 한다', () => {
+    clearAll();
+    playRound('INDEPENDENT_ROUNDS', 99_500, { reached: true });
+    playRound('INDEPENDENT_ROUNDS', -9_995_000, { ruined: true });
+    playRound('INDEPENDENT_ROUNDS', -100);
+    const sum = summarize(loadBook('DAILY_HIGH_LEV', 'INDEPENDENT_ROUNDS'));
+    eq(sum.byEndReason.TARGET_HIT, 1);
+    eq(sum.byEndReason.RUIN, 1);
+    // 세 번째는 playRound의 기본 문장('모의 90일 도달')이라 기간 소진이다
+    eq(sum.byEndReason.MAX_TIME, 1);
+    const total = Object.values(sum.byEndReason).reduce((a, b) => a + b, 0);
+    eq(total, sum.totalRounds, '어떤 회차도 빠지면 안 된다');
+  });
+
+  test('모든 사유에 한국어 이름이 있다', () => {
+    for (const k of Object.keys(END_REASON_LABEL)) {
+      assert(END_REASON_LABEL[k as keyof typeof END_REASON_LABEL].length > 0, k);
+    }
   });
 }
