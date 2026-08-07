@@ -121,6 +121,37 @@ export function runRoundLedgerTests() {
     eq(next.injected, SEED, '다시 넣은 돈이 투입으로 안 세어졌다');
   });
 
+  test('잔고가 남아 있어도 파산이면 다시 넣는다', () => {
+    // **이 저장소의 파산은 잔고 0이 아니다.** 시드의 0.5% 아래로
+    // 떨어지면 파산이고, 그건 여전히 양수다.
+    //
+    // 예전 구현은 endEquity <= 0만 봐서 이런 일이 났다:
+    //   1회차 10,000,000 → 파산 → 잔고 49,819
+    //   2회차 49,819에서 시작 → 249
+    // 죽은 잔고를 계속 복리로 굴렸고, 그 위에서 계산된 수익률·낙폭·
+    // 목표 도달률이 전부 오염됐다.
+    clearAll();
+    playRound('CONTINUOUS_COMPOUND', -(SEED - 49_819), { ruined: true });
+    const book = loadBook('DAILY_HIGH_LEV', 'CONTINUOUS_COMPOUND');
+    const last = book.rounds[book.rounds.length - 1];
+    assert(last.endEquity > 0, `이 테스트는 양수 잔고여야 뜻이 있다: ${last.endEquity}`);
+    eq(last.ruined, true);
+
+    const next = nextStartEquity('DAILY_HIGH_LEV', 'CONTINUOUS_COMPOUND', SEED);
+    eq(next.equity, SEED, '죽은 잔고를 이어받으면 안 된다');
+    eq(next.injected, SEED, '다시 넣은 돈은 투입으로 세어야 한다');
+  });
+
+  test('파산이 아니면 잔고가 적어도 이어받는다', () => {
+    // 반대로 뒤집으면 안 된다 — 손실이 컸다고 시드를 새로 넣으면
+    // 그건 복리가 아니라 무한 재투입이 된다.
+    clearAll();
+    playRound('CONTINUOUS_COMPOUND', -(SEED * 0.9));
+    const next = nextStartEquity('DAILY_HIGH_LEV', 'CONTINUOUS_COMPOUND', SEED);
+    close(next.equity, SEED * 0.1, 1e-6);
+    eq(next.injected, 0);
+  });
+
   test('두 모드의 장부는 서로를 못 본다', () => {
     clearAll();
     playRound('INDEPENDENT_ROUNDS', 100);

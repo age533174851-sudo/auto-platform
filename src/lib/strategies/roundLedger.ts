@@ -171,6 +171,19 @@ export function nextRoundNo(id: StrategyType, mode: RoundMode): number {
  * 이름과 동작이 갈리는 쪽이 조용히 틀리는 쪽이다.
  *
  * 파산으로 끝났으면 이어 갈 잔고가 없다. 그때는 시드를 다시 넣는다.
+ *
+ * ⚠ 여기서 한 번 틀렸다. 예전 구현은 `endEquity <= 0`만 봤다.
+ *
+ * 그런데 이 저장소의 **파산은 잔고 0이 아니다** — 시드의 0.5% 아래로
+ * 떨어지면 파산이고, 그건 여전히 양수다. 그래서 이런 일이 났다:
+ *
+ *   1회차  10,000,000 → 파산 판정 → 잔고 49,819
+ *   2회차  49,819에서 시작(시드 재투입 안 함) → 249
+ *
+ * 죽은 잔고를 계속 복리로 굴린 것이다. 그 회차들의 수익률·낙폭·목표
+ * 도달률이 전부 그 위에서 계산되므로, **전략을 판단하는 통계가 통째로
+ * 오염된다.** 주석은 ruined를 말하는데 코드는 0만 봤다 — 설명과 동작이
+ * 갈리면 아무도 안 읽는 쪽(코드)이 이긴다.
  */
 export function nextStartEquity(
   id: StrategyType, mode: RoundMode, seed: number,
@@ -184,6 +197,10 @@ export function nextStartEquity(
   const end = Number(last.endEquity);
   // 파산한 계좌에서 이어 갈 수는 없다. 새로 넣는다 — 그리고 그것은
   // '투입'이므로 총 투입에 더해져야 한다.
+  //
+  // **ruined를 먼저 본다.** 잔고가 양수여도 파산은 파산이다. 0만 보면
+  // 시드의 0.5%인 죽은 잔고를 계속 굴리게 된다.
+  if (last.ruined === true) return { equity: seed, injected: seed };
   if (!Number.isFinite(end) || end <= 0) return { equity: seed, injected: seed };
   return { equity: end, injected: 0 };
 }
