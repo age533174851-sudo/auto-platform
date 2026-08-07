@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
+import { decisionRecordOf, type StoredDecision } from '@/lib/ui/autoOverview';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -272,7 +273,18 @@ export async function POST(req: NextRequest) {
     stage: result.stage,
     approved: result.approved,
     reason: result.reason,
-    battle: result.battle ? { side: result.battle.side, confidence: result.battle.confidence } : null,
+    // **점수를 그대로 실어 보낸다.** 예전에는 side와 confidence만 보냈고,
+    // 그래서 화면이 LONG 54 : SHORT 46을 그리려고 `reason` 문장을 정규식으로
+    // 파싱했다 — 사람에게 보여주려고 쓴 문장을 다듬는 순간 화면이 조용히
+    // 숫자를 잃는 구조였다.
+    battle: result.battle ? {
+      side: result.battle.side,
+      confidence: result.battle.confidence,
+      longTotal: result.battle.longTotal,
+      shortTotal: result.battle.shortTotal,
+      margin: result.battle.margin,
+      minMarginRequired: result.battle.minMarginRequired,
+    } : null,
     ladder: result.ladder ? {
       allowed: result.ladder.allowed,
       rejectCode: result.ladder.rejectCode,
@@ -965,7 +977,8 @@ export async function GET(req: NextRequest) {
       // 여기서 걸러야 왜 안 됐는지가 이 표에 남는다.
       if (!r.connection_id) {
         results.push({ symbol: r.symbol, ok: false, error: '연결(connectionId)이 지정되지 않았습니다' });
-        await noteRun(sb, r.id, '연결 없음');
+        await noteRun(sb, r.id, '연결 없음',
+          decisionRecordOf('BLOCKED', '거래소 연결이 지정되지 않았습니다'));
         continue;
       }
 
@@ -1017,13 +1030,22 @@ export async function GET(req: NextRequest) {
           symbol: r.symbol, mode: r.mode, ok, executed,
           detail: j?.message || j?.error || j?.reason || null,
         });
-        await noteRun(sb, r.id,
-          ok ? (executed ? `진입: ${j?.message || '체결'}`
-                         : `진입 안 함: ${j?.reason || j?.message || '조건 불충족'}`)
-             : (j?.error || `실패 (${res.status})`));
+        const text = ok
+          ? (executed ? `진입: ${j?.message || '체결'}`
+            : `진입 안 함: ${j?.reason || j?.message || '조건 불충족'}`)
+          : (j?.error || `실패 (${res.status})`);
+        // 점수는 문장이 아니라 숫자로 남긴다. j.battle이 없으면(엔진이
+        // 승부까지 가지 못했으면) 점수 칸은 **비운다** — 0으로 채우면
+        // 나중에 이 행을 보는 사람이 엔진이 0점을 매겼다고 읽는다.
+        await noteRun(sb, r.id, text,
+          decisionRecordOf(
+            ok ? (executed ? 'ENTERED' : 'WATCHING') : 'ERROR',
+            j?.reason || j?.message || j?.error || text,
+            j?.battle ?? null));
       } catch (e: any) {
         results.push({ symbol: r.symbol, ok: false, error: String(e?.message || e) });
-        await noteRun(sb, r.id, `호출 실패: ${e?.message || e}`);
+        await noteRun(sb, r.id, `호출 실패: ${e?.message || e}`,
+          decisionRecordOf('ERROR', String(e?.message || e)));
       }
     }
   }
@@ -1058,12 +1080,26 @@ export async function GET(req: NextRequest) {
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-/** 이 설정이 언제 마지막으로 돌았는지 남긴다 */
-async function noteRun(sb: any, id: string, result: string): Promise<void> {
+/**
+ * 이 설정이 언제 마지막으로 돌았는지 남긴다.
+ *
+ * `decision`은 화면이 읽는 **구조화 기록**이다. 칸이 아직 없으면
+ * (마이그레이션 043 전) 그 칸만 빼고 다시 쓴다 — 칸 하나 때문에
+ * `last_run_at`까지 못 남기면 간격 검사가 통째로 망가져서 조건이 맞는
+ * 동안 매 분 진입한다. **기록이 실행보다 중요할 수는 없다.**
+ */
+async function noteRun(
+  sb: any, id: string, result: string, decision?: StoredDecision | null,
+): Promise<void> {
+  const base = { last_run_at: new Date().toISOString(), last_result: String(result).slice(0, 300) };
   try {
-    await (sb as any).from('autotrade_schedules')
-      .update({ last_run_at: new Date().toISOString(), last_result: String(result).slice(0, 300) })
-      .eq('id', id);
+    if (decision) {
+      const { error } = await (sb as any).from('autotrade_schedules')
+        .update({ ...base, last_decision: decision }).eq('id', id);
+      if (!error) return;
+      if (!/last_decision/i.test(String(error.message))) return;
+    }
+    await (sb as any).from('autotrade_schedules').update(base).eq('id', id);
   } catch { /* 기록 실패가 실행을 되돌리지는 않는다 */ }
 }
 

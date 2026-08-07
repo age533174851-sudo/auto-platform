@@ -274,10 +274,71 @@ export function parseScores(text: any): {
   };
 }
 
+/**
+ * 저장되는 판단 기록 (`autotrade_schedules.last_decision`).
+ *
+ * **문장이 아니라 숫자로 담는다.** 예전에는 이 값이 없어서 화면이
+ * dailyBattle의 한국어 문장을 정규식으로 파싱했다 — 말을 다듬는 순간
+ * 화면이 조용히 숫자를 잃는 구조였다.
+ */
+export interface StoredDecision {
+  verdict?: DecisionVerdict | string | null;
+  side?: 'LONG' | 'SHORT' | 'NO_TRADE' | string | null;
+  longScore?: number | null;
+  shortScore?: number | null;
+  margin?: number | null;
+  minMargin?: number | null;
+  reason?: string | null;
+}
+
+export interface BattleLike {
+  side?: any;
+  longTotal?: any;
+  shortTotal?: any;
+  margin?: any;
+  minMarginRequired?: any;
+  reason?: any;
+}
+
+/**
+ * 실행 결과를 저장할 모양으로 만든다.
+ *
+ * **읽지 못한 값은 넣지 않는다.** 0을 넣으면 그게 '완전한 무승부'로
+ * 저장되고, 나중에 그 행을 보는 사람은 엔진이 실제로 0점을 매겼다고
+ * 읽는다. 없는 것과 0은 다르다.
+ */
+export function decisionRecordOf(
+  verdict: DecisionVerdict, reason: any, battle?: BattleLike | null,
+): StoredDecision {
+  const n = (v: any): number | null => {
+    if (v == null || v === '' || typeof v === 'boolean') return null;
+    const x = Number(v);
+    return Number.isFinite(x) ? Number(x.toFixed(2)) : null;
+  };
+  const b = battle ?? {};
+  const long = n(b.longTotal);
+  const short = n(b.shortTotal);
+  let margin = n(b.margin);
+  if (margin == null && long != null && short != null) margin = Math.abs(long - short);
+
+  return {
+    verdict,
+    side: b.side == null ? null : String(b.side),
+    longScore: long, shortScore: short,
+    margin, minMargin: n(b.minMarginRequired),
+    reason: reason == null ? null : String(reason).slice(0, 300),
+  };
+}
+
 export interface DecisionInput {
   symbol?: any;
   /** `autotrade_schedules.last_result` */
   lastResult?: any;
+  /**
+   * `autotrade_schedules.last_decision` — 있으면 **이쪽이 우선이다.**
+   * 문장 파싱은 이 칸이 없는 옛 기록을 위한 대비책일 뿐이다.
+   */
+  stored?: StoredDecision | null;
   lastRunAtMs?: number | null;
   nowMs?: number | null;
 }
@@ -299,40 +360,73 @@ export function decisionCardOf(input: DecisionInput | null | undefined): Decisio
   const agoMs = Number.isFinite(now) && Number.isFinite(at) && at > 0
     ? Math.max(0, now - at) : null;
 
-  const scores = parseScores(raw);
+  // **저장된 숫자가 있으면 문장을 안 읽는다.** 문장 파싱은 이 칸이
+  // 생기기 전의 기록을 위한 대비책이지, 정상 경로가 아니다.
+  const st = i.stored ?? null;
+  const numOf = (v: any): number | null => {
+    if (v == null || v === '' || typeof v === 'boolean') return null;
+    const x = Number(v);
+    return Number.isFinite(x) ? x : null;
+  };
+  const storedLong = numOf(st?.longScore);
+  const storedShort = numOf(st?.shortScore);
+
+  const scores = storedLong != null && storedShort != null
+    ? {
+      longScore: storedLong, shortScore: storedShort,
+      margin: numOf(st?.margin) ?? Math.abs(storedLong - storedShort),
+      minMargin: numOf(st?.minMargin),
+    }
+    : parseScores(raw);
   const scoresKnown = scores.longScore != null && scores.shortScore != null;
+
+  // 원문은 저장된 reason을 먼저 쓴다 — 같은 값이지만, last_result가
+  // 300자에서 잘렸을 때 이쪽이 남아 있을 수 있다.
+  const detail = String(st?.reason ?? '').trim() || raw;
 
   const make = (verdict: DecisionVerdict, headline: string): DecisionCard => ({
     verdict, tone: DECISION_TONE[verdict], badge: DECISION_LABEL[verdict],
-    symbol, headline, detail: raw,
+    symbol, headline, detail,
     longScore: scores.longScore, shortScore: scores.shortScore,
     margin: scores.margin, minMargin: scores.minMargin,
     scoresKnown, agoMs,
   });
 
-  if (!raw) return make('UNKNOWN', '아직 판단 기록이 없습니다');
+  const headlineFor = (v: DecisionVerdict): string => {
+    if (v === 'WATCHING') {
+      const gapText = scores.margin != null && scores.minMargin != null
+        ? `실제 차이 ${scores.margin}점 · 진입 필요 최소차이 ${scores.minMargin}점`
+        : '';
+      return gapText ? `신호 우위가 부족해 관망했습니다 — ${gapText}`
+        : '조건이 맞지 않아 진입하지 않았습니다';
+    }
+    if (v === 'ENTERED') return '진입했습니다';
+    if (v === 'ERROR') return '실행이 실패했습니다';
+    if (v === 'BLOCKED') return '안전장치에 막혀 주문을 내지 않았습니다';
+    return '판단 결과를 해석하지 못했습니다';
+  };
 
+  // **저장된 판정이 있으면 그것을 믿는다.** 실행기가 직접 적은 값이고,
+  // 문장에서 되짚는 것보다 언제나 정확하다.
+  const storedVerdict = String(st?.verdict ?? '').trim().toUpperCase();
+  if (storedVerdict && storedVerdict in DECISION_TONE && storedVerdict !== 'UNKNOWN') {
+    return make(storedVerdict as DecisionVerdict, headlineFor(storedVerdict as DecisionVerdict));
+  }
+
+  if (!detail) return make('UNKNOWN', '아직 판단 기록이 없습니다');
+
+  // ── 옛 기록: 문장에서 되짚는다 ──
+  //
   // **'진입 안 함'을 먼저 본다.** '진입'으로 시작하는지만 보면 관망이
   // 진입으로 읽힌다 — 포지션이 없는데 있다고 믿게 된다.
-  if (raw.startsWith('진입 안 함')) {
-    const gapText = scores.margin != null && scores.minMargin != null
-      ? `실제 차이 ${scores.margin}점 · 진입 필요 최소차이 ${scores.minMargin}점`
-      : '';
-    return make('WATCHING',
-      gapText ? `신호 우위가 부족해 관망했습니다 — ${gapText}`
-        : '조건이 맞지 않아 진입하지 않았습니다');
-  }
-  if (raw.startsWith('진입')) {
-    return make('ENTERED', '진입했습니다');
-  }
-  if (/^(호출 실패|실패)/.test(raw)) {
-    return make('ERROR', '실행이 실패했습니다');
-  }
-  if (raw.startsWith('연결 없음')) {
+  if (detail.startsWith('진입 안 함')) return make('WATCHING', headlineFor('WATCHING'));
+  if (detail.startsWith('진입')) return make('ENTERED', headlineFor('ENTERED'));
+  if (/^(호출 실패|실패)/.test(detail)) return make('ERROR', headlineFor('ERROR'));
+  if (detail.startsWith('연결 없음')) {
     return make('BLOCKED', '거래소 연결이 없어 주문을 낼 수 없습니다');
   }
   // 모르는 문장은 **오류로도 정상으로도 세지 않는다.** 원문을 그대로 보여준다.
-  return make('UNKNOWN', '판단 결과를 해석하지 못했습니다');
+  return make('UNKNOWN', headlineFor('UNKNOWN'));
 }
 
 // ── 무엇을 맨 위에 둘 것인가 ──────────────────────────────
