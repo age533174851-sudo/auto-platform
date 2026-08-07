@@ -27,6 +27,9 @@ function goodInput(): ChecklistInput {
     // 하나로 합쳐지고, 그때 '숏 청산'이 롱까지 줄인다.
     positionMode: { mode: 'ONE_WAY' },
     todayEntry: { alreadyTraded: false },
+    // 과매매 한도도 **켠 사람에게만** 도는 항목이다(TODAY_ENTRY와 같은
+    // 결). 픽스처가 이 값을 넘겨야 '파생 전체 목록'에 들어온다.
+    overtrading: { allowed: true, reason: '오늘 1/5회' },
     dailyLoss: { status: 'ok', reason: '오늘 −10.00 / 한도 50.00 USDT' },
     weeklyLoss: { status: 'ok', reason: '주간 여유 400.00 USDT' },
     lossStreak: { status: 'ok', reason: '연패 없음' },
@@ -180,12 +183,14 @@ export function runPreTradeChecklistTests() {
     }).total, CHECK_SPECS.length - stockOnly);
   });
 
-  test('기본값은 하루제한·국면필터·AI거부권 없음 — 세 항목이 빠진다 (+ 주식 전용 항목)', () => {
-    const v = runChecklist(goodInput());
+  test('기본값은 하루제한·국면필터·AI거부권·과매매 없음 — 네 항목이 빠진다 (+ 주식 전용 항목)', () => {
+    // 과매매 한도는 입력으로 켠다(정책이 없으면 판정 자체가 없다).
+    const { overtrading, ...noPolicy } = goodInput() as any;
+    const v = runChecklist(noPolicy);
     eq(v.market, 'USDM');
     eq(v.intent, 'ENTRY');
     const stockOnly = CHECK_SPECS.filter(sp => !sp.markets.includes('USDM')).length;
-    eq(v.total, CHECK_SPECS.length - 3 - stockOnly);
+    eq(v.total, CHECK_SPECS.length - 4 - stockOnly);
     assert(!v.results.some(r => r.id === 'MARKET_HOURS'),
       '코인은 24시간이라 장 시간 항목이 목록에 있으면 영원히 unknown이 된다');
     assert(!v.results.some(r => r.id === 'TODAY_ENTRY'),
@@ -194,6 +199,8 @@ export function runPreTradeChecklistTests() {
       '보지 않기로 한 검사를 "확인 못 함"으로 남기면 확인할 것이 있다고 읽힌다');
     assert(!v.results.some(r => r.id === 'AI_VETO'),
       'AI를 안 쓰기로 했는데 목록에 남으면 확인할 것이 있다고 읽힌다');
+    assert(!v.results.some(r => r.id === 'OVERTRADING'),
+      '아무도 정하지 않은 규율을 "확인 못 함"으로 남기면 확인할 것이 있다고 읽힌다');
   });
 
   console.log('[거래 전 점검 — 시장 국면 필터]');

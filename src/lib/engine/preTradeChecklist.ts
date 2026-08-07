@@ -52,6 +52,8 @@ export type CheckId =
   | 'POSITION_MODE'
   /** 오늘 이미 진입했는가 */
   | 'TODAY_ENTRY'
+  /** 너무 자주 들어가고 있는가 (하루 상한·종목 쿨다운) */
+  | 'OVERTRADING'
   /** 손절이 계획에 붙어 있는가 */
   | 'STOP_ATTACHED'
   /** 손절이 청산보다 먼저 닿는가 */
@@ -307,6 +309,15 @@ export const CHECK_SPECS: CheckSpec[] = [
   { id: 'TODAY_ENTRY', label: '오늘 진입 이력', markets: ALL_MARKETS, intents: ENTRY_ONLY,
     blocking: true, requiredToKnow: false },
 
+  // 과매매 게이트. **정책을 켠 사람에게만 나온다** — 안 켰으면 목록에도
+  // 없다. 아무도 정하지 않은 규율을 강제하면 그건 규율이 아니라 고장이다.
+  //
+  // requiredToKnow가 true인 이유: 상한을 켜 놓고 이력을 못 읽으면,
+  // '모름'을 통과로 치는 순간 상한이 통째로 열린다. 검사를 켜 놓고
+  // 안 거는 것과 같다.
+  { id: 'OVERTRADING', label: '과매매 한도', markets: ALL_MARKETS, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
+
   // 막지 않는 항목
   { id: 'LEVERAGE',          label: '배율이 의도와 같음', markets: DERIV, intents: ENTRY_ONLY,
     blocking: false, requiredToKnow: false },
@@ -441,6 +452,17 @@ export function checkLiquidationDistance(input: {
  * 'isolated'로 두면, 조회 실패가 통과로 바뀐다.
  */
 export interface ChecklistInput {
+  /**
+   * 과매매 게이트의 판정 (`conviction.overtradingGate`).
+   *
+   * **없으면 정책이 꺼진 것이고, 항목은 목록에 아예 안 나온다.**
+   * 아무도 정하지 않은 규율을 '확인 못 함'으로 남겨 두면 사용자는
+   * 확인해야 할 것이 있다고 읽는다.
+   *
+   * `known: false`는 다르다 — 한도는 켰는데 이력을 못 읽은 것이고,
+   * 그때는 막는다.
+   */
+  overtrading?: { allowed: boolean; reason: string; known?: boolean } | null;
   /** operatingMode.gateOrder 결과 */
   mode?: { disposition: 'SEND' | 'RECORD' | 'BLOCK'; reason?: string } | null;
   clock?: { localMs: number; serverMs: number; recvWindowMs?: number } | null;
@@ -619,11 +641,14 @@ function resultFor(
 /** 이 시장·이 방향에서 의미가 있는 검사인가 */
 export function appliesTo(
   id: CheckId, market: MarketKind, intent: OrderIntent, dailyLimit: boolean,
-  regimeFilter = false, aiVeto = false,
+  regimeFilter = false, aiVeto = false, overtrading = false,
 ): boolean {
   const spec = SPEC_BY_ID[id];
   if (!spec) return false;
   if (id === 'TODAY_ENTRY' && !dailyLimit) return false;
+  // 정책을 안 켰으면 목록에 아예 안 나온다. '확인 못 함'으로 남겨 두면
+  // 사용자는 확인해야 할 것이 있다고 읽는다.
+  if (id === 'OVERTRADING' && !overtrading) return false;
   if (id === 'REGIME_FILTER' && !regimeFilter) return false;
   if (id === 'AI_VETO' && !aiVeto) return false;
   return spec.markets.includes(market) && spec.intents.includes(intent);
@@ -807,6 +832,25 @@ export function runChecklist(
     }
   }
 
+  // ── 과매매 게이트 ──
+  //
+  // 막는 것이 실패가 아니다. 신호가 없는 날 안 들어간 것은 관망 성공이고,
+  // 여기서 막힌 것도 규칙이 일한 것이다. 그래서 사유를 그대로 적는다 —
+  // "차단됨"만 뜨면 사용자는 규칙을 끄고 싶어진다.
+  if (!input.overtrading || input.overtrading.known === false) {
+    // 정책이 꺼져 있으면 아래 scoped 단계에서 목록에서 빠진다. 여기까지
+    // 오는 '모름'은 **한도를 켜 놓고 이력을 못 읽은 것**이고, 그때
+    // 통과로 치면 상한이 통째로 열린다.
+    results.push(resultFor('OVERTRADING', 'unknown',
+      input.overtrading?.reason
+        || '최근 진입 이력을 확인하지 못했습니다 — 한도가 켜져 있어 통과로 보지 않습니다'));
+  } else if (!input.overtrading.allowed) {
+    results.push(resultFor('OVERTRADING', 'fail',
+      input.overtrading.reason || '과매매 한도에 걸렸습니다'));
+  } else {
+    results.push(resultFor('OVERTRADING', 'pass', input.overtrading.reason || '한도 안입니다'));
+  }
+
   if (!input.todayEntry) {
     results.push(resultFor('TODAY_ENTRY', 'unknown', '오늘 진입 이력을 확인하지 못했습니다'));
   } else if (input.todayEntry.alreadyTraded) {
@@ -881,7 +925,8 @@ export function runChecklist(
 
   // 여기서 걸러낸다. 위에서 조건마다 분기하면 검사 하나 추가할 때 적용
   // 규칙을 두 곳에 적게 되고, 언젠가 한 곳만 고친다.
-  const scoped = all.filter(r => appliesTo(r.id, market, intent, dailyLimit, regimeFilter, aiVeto));
+  const scoped = all.filter(r =>
+    appliesTo(r.id, market, intent, dailyLimit, regimeFilter, aiVeto, input.overtrading != null));
 
   const blockers = scoped.filter(r => r.blocks);
   const passed = scoped.filter(r => r.status === 'pass').length;

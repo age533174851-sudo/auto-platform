@@ -48,6 +48,7 @@ export const NEVER_OVERRIDABLE: readonly string[] = [
   'DAILY_LOSS_LIMIT',
   'WEEKLY_LOSS_LIMIT',
   'LOSS_STREAK',
+  'OVERTRADING',
 ];
 
 /** 왜 못 넘기는지. 회색 버튼만 두면 사용자는 화면이 고장 났다고 생각한다. */
@@ -55,6 +56,7 @@ export const NEVER_REASON: Record<string, string> = {
   DAILY_LOSS_LIMIT: '오늘 손실 한도는 눌러서 넘길 수 없습니다. 넘길 수 있으면 한도가 아닙니다 — 한도 자체를 바꾸려면 설정에서 바꾸세요.',
   WEEKLY_LOSS_LIMIT: '이번 주 손실 한도는 눌러서 넘길 수 없습니다. 설정에서 한도를 바꾸는 방법으로만 풉니다.',
   LOSS_STREAK: '연패 잠금은 눌러서 넘길 수 없습니다. 연달아 잃은 뒤가 정확히 넘기고 싶어지는 순간이라, 그때 풀리면 잠금이 아닙니다.',
+  OVERTRADING: '과매매 한도는 눌러서 넘길 수 없습니다. 한 번 더 들어가고 싶은 순간이 정확히 이 한도를 만든 이유이고, 그때 풀리면 한도가 아닙니다 — 한도 자체는 설정(환경변수)에서 바꾸세요.',
 };
 
 /**
