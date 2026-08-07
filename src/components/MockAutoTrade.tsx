@@ -9,6 +9,10 @@ import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { SliderField } from '@/components/ui/SettingField';
+import {
+  SOURCE_LABEL, SOURCE_DESC, SOURCE_SUMMARY, sourceBadge, feedStatusOf, sourceOf,
+  type PriceSource,
+} from '@/lib/ui/priceSource';
 import { notify } from '@/lib/notify/center';
 import { writeMockHeartbeat } from '@/lib/engineStatus';
 import { logDecision } from '@/lib/autotrade/auditLog';
@@ -43,7 +47,9 @@ function mkLog(action: 'buy' | 'sell', price: number, extra: Partial<ExecutionLo
 export default function MockAutoTrade() {
   const [running, setRunning]   = useState(false);
   const [intervalSec, setIv]    = useState(10);
-  const [priceMode, setPriceMode] = useState<'sim' | 'real'>('sim');
+  const [priceMode, setPriceMode] = useState<PriceSource>('SIMULATED');
+  /** 실시간을 골랐는데 못 읽은 상태. **가상으로 안 바꾼다** */
+  const [feedDown, setFeedDown] = useState<string>('');
   const [lastRunAt, setLastRunAt] = useState<number | null>(null);
   const [lastCheck, setLastCheck] = useState<string>('아직 실행 안 함');
   const [now, setNow] = useState(Date.now());
@@ -75,14 +81,31 @@ export default function MockAutoTrade() {
   const refresh   = useCallback(() => setTick(t => t + 1), []);
 
   // 현재가 조회 (sim = 랜덤워크, real = /api/prices)
-  const getMarkPrice = useCallback(async (): Promise<number> => {
-    if (priceMode === 'real') {
+  const getMarkPrice = useCallback(async (): Promise<number | null> => {
+    if (priceMode === 'LIVE_MARKET') {
+      // ── 못 읽으면 **가상으로 바꾸지 않는다** ──
+      //
+      // 예전에는 여기서 조용히 아래로 흘러 랜덤워크를 만들었다.
+      // 사용자는 실제 시장으로 검증하고 있다고 믿는데 실제로는 ±0.2%
+      // 난수를 보고 있었고, 그 승률·손익은 아무 뜻이 없다. 화면에도
+      // 한 글자 안 떴다.
+      //
+      // 자동 전환은 사용자가 고른 것과 다른 것을 돌리는 일이다.
+      // 멈추고 그렇다고 말하는 쪽이 언제나 낫다.
+      let live: number | null = null;
       try {
         const r = await fetch(`/api/prices?action=coin&symbol=${ASSET}`);
         const d = await r.json();
-        if (d?.price && d.price > 0) { simPriceRef.current = d.price; return d.price; }
-      } catch {}
+        if (d?.price && d.price > 0) live = Number(d.price);
+      } catch { /* live는 null로 남는다 */ }
+
+      const v = feedStatusOf('LIVE_MARKET', live);
+      setFeedDown(v.canTrade ? '' : v.reason);
+      if (!v.canTrade) return null;
+      simPriceRef.current = live!;
+      return live;
     }
+    setFeedDown('');
     // sim: 직전가 기준 ±0.2% 랜덤워크 (익절/손절이 몇 틱 안에 걸리도록)
     let base = simPriceRef.current;
     if (!base || base <= 0) {
@@ -104,6 +127,9 @@ export default function MockAutoTrade() {
     busyRef.current = true;
     try {
       const price = await getMarkPrice();
+      // **가격이 없으면 이 회차를 통째로 건너뛴다.** 지어낸 값으로
+      // 지표를 채우면 그 위에서 나온 판단이 전부 뜻을 잃는다.
+      if (price == null) { setLastRunAt(Date.now()); return; }
       // 가격 버퍼 업데이트 (지표 계산용, 최근 40개)
       const hist = [...priceHistRef.current, price].slice(-40);
       priceHistRef.current = hist;
@@ -165,6 +191,7 @@ export default function MockAutoTrade() {
   // ── 테스트 버튼 핸들러 ──
   const testBuy = async () => {
     const price = await getMarkPrice();
+    if (price == null) { showToast('시세를 읽지 못해 매수하지 않았습니다'); return; }
     const r = paperBuy(ASSET, price, ENTRY_KRW, { side: 'long', stratId: STRAT_ID, takeProfitPct: TP_PCT, stopLossPct: SL_PCT });
     if (r.ok) { saveLog(mkLog('buy', price, { filledAmount: ENTRY_KRW, filledQuantity: r.qty, reason: '수동 테스트 매수' })); showToast('테스트 매수 체결'); }
     else showToast(`매수 실패: ${r.reason}`);
@@ -172,6 +199,9 @@ export default function MockAutoTrade() {
   };
   const testSell = async () => {
     const price = await getMarkPrice();
+    // **못 읽었으면 청산도 지어낸 가격으로 하지 않는다.** 손익 기록이
+    // 난수 위에서 만들어지면 그 장부 전체가 뜻을 잃는다.
+    if (price == null) { showToast('시세를 읽지 못해 청산하지 않았습니다'); return; }
     const pos = getOpenPositions().find(p => p.asset === ASSET);
     if (!pos) { showToast('청산할 포지션 없음'); return; }
     const res = closePaperPosition(ASSET, price);
@@ -226,11 +256,39 @@ export default function MockAutoTrade() {
             style={{ padding: '8px 10px', borderRadius: 8, background: T.alt, color: T.txt, border: `1px solid ${T.border}`, fontSize: 12, fontWeight: 700 }}>
             <option value={5}>5초</option><option value={10}>10초</option><option value={30}>30초</option>
           </select>
-          <select value={priceMode} onChange={e => setPriceMode(e.target.value as any)}
+          {/* **'실제 시세'라고 쓰지 않는다.** 그 말은 실제 주문으로
+              읽힌다 — 가격만 진짜고 체결은 여전히 MOCK이다. */}
+          <select value={priceMode} onChange={e => setPriceMode(sourceOf(e.target.value))}
             style={{ padding: '8px 10px', borderRadius: 8, background: T.alt, color: T.txt, border: `1px solid ${T.border}`, fontSize: 12, fontWeight: 700 }}>
-            <option value="sim">시뮬 시세</option><option value="real">실제 시세</option>
+            <option value="SIMULATED">{SOURCE_LABEL.SIMULATED}</option>
+            <option value="LIVE_MARKET">{SOURCE_LABEL.LIVE_MARKET}</option>
           </select>
+          {/* 실시간을 골라도 MOCK 표시는 사라지지 않는다 */}
+          <span style={{
+            padding: '4px 8px', borderRadius: 6, background: T.alt,
+            color: T.muted, fontSize: 10, fontWeight: 700,
+          }}>{sourceBadge(priceMode)}</span>
         </div>
+
+        {/* **고른 것이 무엇인지 늘 한 줄로 적는다.**
+            이름만으로는 둘의 차이를 알 수 없다. */}
+        <div style={{ marginTop: 6, fontSize: 10, color: T.muted, lineHeight: 1.6 }}>
+          {SOURCE_SUMMARY[priceMode]} — {SOURCE_DESC[priceMode]}
+        </div>
+
+        {/* ── 시세가 끊겼다 ──
+            **가상 가격으로 바꾸지 않는다.** 자동 전환은 사용자가 고른 것과
+            다른 것을 돌리는 일이고, 그 결과로 나온 승률은 아무 뜻이 없다. */}
+        {feedDown && (
+          <div style={{
+            marginTop: 8, padding: '8px 10px', borderRadius: 8,
+            background: T.alt, color: T.red, fontSize: 11, lineHeight: 1.6,
+            border: `1px solid ${T.red}55`,
+          }}>
+            <b>시세 연결 끊김</b>
+            <div style={{ color: T.muted, marginTop: 2 }}>{feedDown}</div>
+          </div>
+        )}
 
         {/* 상태 그리드 */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 12 }}>
