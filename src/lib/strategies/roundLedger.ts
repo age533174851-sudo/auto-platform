@@ -77,7 +77,72 @@ export interface RoundEntry {
   /** 파산으로 끝났나. 목표 미달과 파산은 다른 결과다 */
   ruined: boolean;
   reason: string;
+  /**
+   * 종료 사유 코드. **옛 회차에는 없다** — 그때는 endReasonOf가
+   * 문장에서 되짚는다. 통째로 UNKNOWN으로 만들면 지금까지의 통계가
+   * 전부 사라진다.
+   */
+  endReason?: RoundEndReason;
   simSeconds: number;
+}
+
+/**
+ * 회차가 **왜** 끝났는가.
+ *
+ * 지금은 `reason`이 사람이 읽는 문장 하나뿐이라("손으로 회차 종료",
+ * "파산", "모의 90일 도달 — 목표 미달") 통계를 낼 수 없다. 목표를
+ * 못 찍고 끝난 것과 손으로 멈춘 것과 낙폭에 걸려 선 것이 전부
+ * '실패'로 뭉쳐 있으면, 그 실패율은 아무 뜻이 없다.
+ */
+export type RoundEndReason =
+  /** 목표 잔고에 닿았다 */
+  | 'TARGET_HIT'
+  /** 파산선 아래로 떨어졌다 */
+  | 'RUIN'
+  /** 낙폭 한도에 걸려 멈췄다 — 파산과 다르다 */
+  | 'MDD_STOP'
+  /** 정해진 거래 수를 다 썼다 */
+  | 'MAX_TRADES'
+  /** 정해진 기간을 다 썼다 */
+  | 'MAX_TIME'
+  /** 사람이 멈췄다 */
+  | 'MANUAL_STOP'
+  /** 무엇 때문인지 모른다 */
+  | 'UNKNOWN';
+
+export const END_REASON_LABEL: Record<RoundEndReason, string> = {
+  TARGET_HIT: '목표 달성',
+  RUIN: '파산',
+  MDD_STOP: '낙폭 한도 중단',
+  MAX_TRADES: '거래 수 소진',
+  MAX_TIME: '기간 소진',
+  MANUAL_STOP: '수동 종료',
+  UNKNOWN: '사유 미상',
+};
+
+/**
+ * 회차의 종료 사유를 정한다.
+ *
+ * **저장된 코드가 있으면 그것이 우선이다.** 없으면(이 필드가 생기기
+ * 전에 쌓인 회차) 문장에서 되짚는다 — 옛 기록을 통째로 UNKNOWN으로
+ * 만들면 지금까지의 통계가 전부 사라진다.
+ */
+export function endReasonOf(r: Partial<RoundEntry> | null | undefined): RoundEndReason {
+  if (!r) return 'UNKNOWN';
+  const stored = String((r as any).endReason ?? '').trim().toUpperCase();
+  if (stored in END_REASON_LABEL) return stored as RoundEndReason;
+
+  // **파산을 목표보다 먼저 본다.** 파산선에서 목표를 찍을 수는 없고,
+  // 둘 다 참으로 기록된 회차가 있으면 나쁜 쪽이 사실이다.
+  if (r.ruined === true) return 'RUIN';
+  if (r.reached === true) return 'TARGET_HIT';
+
+  const t = String(r.reason ?? '');
+  if (t.includes('낙폭') || t.includes('MDD')) return 'MDD_STOP';
+  if (t.includes('손으로') || t.includes('수동')) return 'MANUAL_STOP';
+  if (t.includes('거래') && t.includes('도달')) return 'MAX_TRADES';
+  if (t.includes('일') || t.includes('기간')) return 'MAX_TIME';
+  return 'UNKNOWN';
 }
 
 export interface LedgerBook {
@@ -98,10 +163,27 @@ export interface LedgerSummary {
   successfulRounds: number;
   failedRounds: number;
   ruinedRounds: number;
+  /**
+   * **돈을 번 회차 수.** 목표 달성과 다르다.
+   *
+   * 지금까지 '성공률 0%'가 무엇을 뜻하는지 애매했다 — 원금보다
+   * 플러스로 끝나도 목표를 못 찍으면 실패로 세어졌기 때문이다.
+   * 그 둘은 완전히 다른 사실이라 따로 센다.
+   */
+  profitableRounds: number;
   /** 목표 달성률 0~1. 회차가 없으면 null — 0%가 아니다 */
   targetHitRate: number | null;
+  /** 수익 회차율 0~1. 회차가 없으면 null */
+  profitableRate: number | null;
   /** 파산률 0~1. 회차가 없으면 null */
   ruinRate: number | null;
+  /**
+   * 종료 사유별 회차 수.
+   *
+   * '실패 12회'로는 아무것도 못 한다 — 낙폭에 걸려 선 것과 손으로
+   * 멈춘 것과 목표를 못 찍은 것은 각각 다음에 할 일이 다르다.
+   */
+  byEndReason: Record<RoundEndReason, number>;
   /** 회차 끝 잔고의 중앙값. 회차가 없으면 null */
   medianRoundEquity: number | null;
   totalTrades: number;
@@ -215,6 +297,8 @@ export interface AppendInput {
   reached: boolean;
   ruined: boolean;
   reason: string;
+  /** 종료 사유. 안 주면 reached·ruined·문장에서 되짚는다 */
+  endReason?: RoundEndReason;
   simSeconds: number;
 }
 
@@ -233,6 +317,8 @@ export function appendRound(id: StrategyType, mode: RoundMode, r: AppendInput): 
     reached: !!r.reached,
     ruined: !!r.ruined,
     reason: String(r.reason ?? ''),
+    // 넘어온 코드가 있으면 그것을, 없으면 지금 사실에서 정한다.
+    endReason: endReasonOf({ ...r, endReason: (r as any).endReason } as any),
     simSeconds: Math.max(0, Number(r.simSeconds) || 0),
   });
   saveBook(b);
@@ -266,6 +352,15 @@ export function summarize(book: LedgerBook): LedgerSummary {
 
   const successfulRounds = rounds.filter(r => r.reached).length;
   const ruinedRounds = rounds.filter(r => r.ruined).length;
+  // **원금과 비교한다.** 시작 잔고보다 많이 끝났으면 번 회차다.
+  // 목표를 못 찍었어도 번 것은 번 것이다.
+  const profitableRounds = rounds.filter(
+    r => (Number(r.endEquity) || 0) > (Number(r.startEquity) || 0)).length;
+
+  const byEndReason = Object.keys(END_REASON_LABEL).reduce((acc, k) => {
+    acc[k as RoundEndReason] = 0; return acc;
+  }, {} as Record<RoundEndReason, number>);
+  for (const r of rounds) byEndReason[endReasonOf(r)]++;
   const presets = Array.from(new Set(rounds.map(r => presetOf(r.preset))));
 
   return {
@@ -279,8 +374,11 @@ export function summarize(book: LedgerBook): LedgerSummary {
     ruinedRounds,
     // **회차가 없으면 0%가 아니라 '아직 없음'이다.** 0%로 적으면
     // 한 판도 안 돌린 전략이 '성공률 0%'로 보인다.
+    profitableRounds,
     targetHitRate: n > 0 ? successfulRounds / n : null,
+    profitableRate: n > 0 ? profitableRounds / n : null,
     ruinRate: n > 0 ? ruinedRounds / n : null,
+    byEndReason,
     medianRoundEquity: median(rounds.map(r => Number(r.endEquity) || 0)),
     totalTrades: rounds.reduce((a, r) => a + (Number(r.trades) || 0), 0),
     totalWins: rounds.reduce((a, r) => a + (Number(r.wins) || 0), 0),

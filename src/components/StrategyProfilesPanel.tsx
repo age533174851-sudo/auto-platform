@@ -40,7 +40,7 @@ import {
 } from '@/lib/strategies/profilePreset';
 import {
   loadBook, summarize, clearBook, clearAllBooks, MODE_INFO, ALL_ROUND_MODES,
-  DEFAULT_ROUND_MODE, nextStartEquity, type RoundMode,
+  DEFAULT_ROUND_MODE, nextStartEquity, END_REASON_LABEL, type RoundMode,
 } from '@/lib/strategies/roundLedger';
 import { finishRound, restartCurrentRound } from '@/lib/strategies/roundRunner';
 import { runProfileMonteCarlo, DEFAULT_PATHS, DEFAULT_TRADES } from '@/lib/strategies/profileMonteCarlo';
@@ -498,7 +498,13 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
               {chip('총 투입', fmtMoney(sum.totalCapitalInjected, cur))}
               {chip('총 회수', fmtMoney(sum.totalFinalEquity, cur))}
               {chip('전체 순손익', fmtMoney(sum.totalNetPnl, cur, true), sum.totalNetPnl >= 0 ? T.grn : T.red)}
-              {chip('성공률', `${pctText(sum.targetHitRate, 0)} (${sum.successfulRounds}/${sum.totalRounds})`,
+              {/* **'성공률' 하나로는 무엇이 성공인지 알 수 없었다.**
+                  원금보다 플러스로 끝나도 목표를 못 찍으면 실패로
+                  세어졌고, 그래서 '성공률 0%'인데 회수액이 원금 이상인
+                  회차가 나왔다. 둘은 다른 사실이라 따로 적는다. */}
+              {chip('수익 회차율', `${pctText(sum.profitableRate, 0)} (${sum.profitableRounds}/${sum.totalRounds})`,
+                    (sum.profitableRate ?? 0) >= 0.5 ? T.grn : T.ylw)}
+              {chip('목표 달성률', `${pctText(sum.targetHitRate, 0)} (${sum.successfulRounds}/${sum.totalRounds})`,
                     (sum.targetHitRate ?? 0) >= 0.5 ? T.grn : T.ylw)}
               {chip('파산률', `${pctText(sum.ruinRate, 0)} (${sum.ruinedRounds}/${sum.totalRounds})`,
                     (sum.ruinRate ?? 0) > 0 ? T.red : T.grn)}
@@ -506,6 +512,18 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
               {chip('전체 거래', `${sum.totalTrades.toLocaleString('ko-KR')}건`)}
               {chip('전체 모의 기간', fmtDur(sum.totalSimSeconds))}
             </div>
+            {/* **왜 끝났는가.** '실패 12회'로는 아무것도 못 한다 —
+                낙폭에 걸려 선 것과 손으로 멈춘 것과 목표를 못 찍은 것은
+                각각 다음에 할 일이 다르다. */}
+            {sum.totalRounds > 0 && (
+              <div style={{ fontSize: 8.5, color: T.sub, marginTop: 6, lineHeight: 1.6 }}>
+                종료 사유 —{' '}
+                {Object.entries(sum.byEndReason)
+                  .filter(([, n]) => (n as number) > 0)
+                  .map(([k, n]) => `${END_REASON_LABEL[k as keyof typeof END_REASON_LABEL]} ${n}회`)
+                  .join(' · ')}
+              </div>
+            )}
             {sum.mixedPresets && (
               <div style={{ fontSize: 8.5, color: T.red, marginTop: 6, lineHeight: 1.5 }}>
                 ⚠️ 이 장부에는 <b>안정화와 연구용 회차가 섞여</b> 있습니다 — 합계는 그 사실 위의 값입니다.
