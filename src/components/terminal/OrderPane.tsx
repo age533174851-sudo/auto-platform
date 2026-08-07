@@ -30,6 +30,7 @@ import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/marke
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { basisGap } from '@/lib/markets/priceBasis';
 import { canDo, intentOf } from '@/lib/auth/tradingCapability';
+import { progressOf, shouldRefresh, type ProgressView } from '@/lib/engine/orderProgress';
 import {
   switchScope, fieldsToClearOnSwitch, clearNotice, type SwitchKey,
 } from '@/lib/terminal/contextSwitch';
@@ -417,6 +418,46 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const showQty = (n: number) => String(Number(n.toFixed(8)));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  /**
+   * 방금 낸 주문이 어디까지 갔는가.
+   *
+   * **이게 없어서 "주문 접수됨" 하나로 끝났다.** 접수만 되고 체결이
+   * 안 됐는데 사용자는 다 됐다고 읽고, 반대로 체결됐는데 화면이 안
+   * 바뀌면 안 됐다고 읽는다. 뒤가 더 비싸다 — 한 번 더 누르면 포지션이
+   * 두 배가 되고, 그건 사용자가 정한 크기가 아니다.
+   */
+  const [progress, setProgress] = useState<ProgressView | null>(null);
+  /**
+   * 체결이 확인되면 올린다 — 포지션·잔고 조회가 이 값을 보고 다시 돈다.
+   *
+   * **하나만 읽으면 화면이 반쯤만 맞는다.** 포지션은 새 값인데 잔고가
+   * 옛 값이면, 사용자는 그 차이를 보고 계산을 다시 한다.
+   */
+  const [refreshSeq, setRefreshSeq] = useState(0);
+
+  /**
+   * **잠금은 반드시 풀려야 한다.**
+   *
+   * 서버가 이미 약 8초를 재조회하고도 확정을 못 했으면, 화면이 계속
+   * 잠가 봐야 새 사실이 생기지 않는다. 그런데 안 풀면 사용자는 자기
+   * 계좌에서 아무것도 못 하는 상태가 된다 — 그건 안전이 아니라 고장이다.
+   *
+   * 그래서 포지션을 다시 읽고 푼다. 푼 뒤에도 진행 줄은 남겨서, 결과가
+   * 확정되지 않았다는 사실 자체는 사라지지 않게 한다.
+   */
+  const UNLOCK_AFTER_MS = 15_000;
+  useEffect(() => {
+    if (!progress?.locked) return;
+    const t = setTimeout(() => {
+      setRefreshSeq(n => n + 1);
+      setProgress(p => (p && p.locked
+        ? { ...p, locked: false,
+            label: `${p.label} · 확정되지 않아 잠금을 풀었습니다 — 포지션 탭에서 확인하세요`,
+            lockReason: '' }
+        : p));
+    }, UNLOCK_AFTER_MS);
+    return () => clearTimeout(t);
+  }, [progress?.locked, progress?.stage]);
   // **왜 막혔는지**를 따로 들고 있는다.
   //
   // 예전에는 "7개 항목이 주문을 막습니다: 운영 모드가 주문을 허용,
@@ -570,7 +611,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     load();
     const t = setInterval(load, 20_000);
     return () => { alive = false; clearInterval(t); };
-  }, [auth, isPaper, modeResolution.connId]);
+  }, [auth, isPaper, modeResolution.connId, refreshSeq]);
 
   // 한도 현황은 주기적으로 다시 읽는다. 판정은 서버가 하고 화면은 같은
   // 답을 보여줄 뿐이다 — 각자 계산하면 서로 다른 숫자를 말하게 된다.
@@ -664,7 +705,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       }
     })();
     return () => { alive = false; };
-  }, [auth, modeResolution.connId, symbol.id, isPaper]);
+  }, [auth, modeResolution.connId, symbol.id, isPaper, refreshSeq]);
 
   /** 마진 모드를 바꾼다. 교차는 되돌릴 수 없는 성격이라 한 번 묻는다. */
   const switchMargin = async (want: 'ISOLATED' | 'CROSSED') => {
@@ -823,7 +864,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     };
   }, [capRead, isPaper, modeResolution.realMoney]);
   /** 진입·청산 버튼을 막는 모든 사유를 한 곳에서 본다 */
-  const blockedReason = capBlock?.reason ?? (noConn ? modeResolution.reason : null);
+  const blockedReason = capBlock?.reason
+    ?? (noConn ? modeResolution.reason : null)
+    ?? (progress?.locked ? progress.lockReason : null);
 
   // ── 이 주문은 누구 몫인가 ──
   //
@@ -1128,6 +1171,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         });
       };
 
+      // 보내는 동안 잠근다. 응답을 기다리는 사이가 가장 위험하다 —
+      // 사용자는 아무 반응 없는 화면을 보고 다시 누른다.
+      setProgress(progressOf({ sent: true, responded: false }));
+
       let r = await send();
       let j = await r.json();
 
@@ -1168,12 +1215,31 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           // 어디에도 없었다.
           + (j?.quantizeNote ? ` · ${j.quantizeNote}` : '');
         setMsg({ ok: true, text: okText });
+        // ── 어디까지 갔는지 적는다 ──
+        //
+        // 서버가 settled를 준다(Gate 경로). false는 '안 됐다'가 아니라
+        // '아직 모른다'이고, 그동안 재주문을 잠근다.
+        // 안 주는 경로(바이낸스)는 예전처럼 잠기지 않는다 — 여기서
+        // 잠그면 지금까지 되던 주문이 갑자기 한 번씩 막힌다.
+        const pv = progressOf({
+          sent: true, responded: true, ok: true,
+          settled: typeof j?.settled === 'boolean' ? j.settled : null,
+          protectedNow: j?.slOrderId ? true : null,
+          unprotected: j?.unprotected === true ? true : null,
+        });
+        setProgress(pv);
+        // 체결이 확인됐으면 포지션·잔고를 **바로** 다시 읽는다. 사용자가
+        // 새로고침하거나 탭을 다시 누를 때까지 옛 값을 보고 있으면,
+        // 그 사이에 같은 주문을 한 번 더 낸다.
+        if (shouldRefresh(pv)) setRefreshSeq(n => n + 1);
         // 토스트로도 띄운다 — 4초 뒤 저절로 사라지고, 탭하면 바로 닫히고,
         // 알림 센터에 남아서 나중에 다시 볼 수 있다.
         notifySuccess('주문 접수됨', okText);
         setQty('');
         if (isPaper) paper.reload();
       } else {
+        // 실패는 잠그지 않는다. 사유를 고치고 다시 시도할 수 있어야 한다.
+        setProgress(progressOf({ sent: true, responded: true, ok: false }));
         // ── 인증 오류인데 쓸 수 있는 연결이 여럿이면 그 사실을 함께 적는다 ──
         //
         // 바이낸스 테스트넷은 **두 개**다. 현물은 testnet.binance.vision,
@@ -1332,6 +1398,53 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         }}>
           이 계좌가 <b>소유한 수량까지만</b> 닫힙니다. 거래소에 더 있어도
           나머지는 다른 전략의 몫입니다.
+        </div>
+      )}
+
+      {/* ── 주문이 어디까지 갔는가 ──
+          "주문 접수됨" 하나로 끝나면 접수와 체결을 구분할 수 없다.
+          다섯 단계를 그대로 보여주고, 확정 전에는 잠겼다는 것도 적는다 —
+          비활성 버튼만 있으면 사용자는 고장으로 읽는다. */}
+      {progress && progress.stage !== 'IDLE' && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7,
+          background: progress.stage === 'UNPROTECTED' ? C.downBg
+            : progress.locked ? C.raised : C.upBg,
+          color: progress.stage === 'UNPROTECTED' ? C.down
+            : progress.locked ? C.dim : C.up,
+          fontSize: FS.micro, lineHeight: 1.6,
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <b>{progress.label}</b>
+            {/* 다섯 칸 중 몇 칸 왔는지. 숫자보다 눈에 빨리 들어온다 */}
+            <span style={{ marginLeft: 6, opacity: .6, ...NUM }}>
+              {'●'.repeat(progress.step)}{'○'.repeat(Math.max(0, 5 - progress.step))}
+            </span>
+            {progress.locked && (
+              <div style={{ color: C.warn, marginTop: 3 }}>
+                {progress.lockReason}
+                {/* **기다리기만 하게 두지 않는다.** 거래소 앱에서 이미
+                    확인한 사용자는 여기서 바로 풀 수 있어야 한다. */}
+                <button onClick={() => {
+                  setRefreshSeq(n => n + 1);
+                  setProgress(p => (p ? { ...p, locked: false, lockReason: '' } : p));
+                }} style={{
+                  marginLeft: 8, background: 'none', border: `1px solid ${C.hair}`,
+                  borderRadius: 6, cursor: 'pointer', color: C.dim,
+                  fontSize: FS.micro, padding: '2px 7px',
+                }}>지금 확인하고 잠금 해제</button>
+              </div>
+            )}
+          </span>
+          {/* 확정된 뒤에는 닫을 수 있다. 잠겨 있는 동안에는 못 닫는다 —
+              닫아 놓고 다시 누르면 잠금이 없는 것과 같다. */}
+          {!progress.locked && (
+            <button onClick={() => setProgress(null)} style={{
+              flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer',
+              color: C.faint, fontSize: FS.micro, padding: '2px 4px',
+            }}>닫기</button>
+          )}
         </div>
       )}
 
@@ -2162,13 +2275,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           **모르면(posAmt null) 막지 않는다** — 조회 실패가 청산을 막으면
           못 닫는 상황이 된다. 못 여는 것은 불편이고 못 닫는 것은 사고다. */}
       <button onClick={() => submit('BUY')}
-        disabled={busy || noConn || !!capBlock || (reduceOnly && holding === 'LONG')}
+        disabled={busy || noConn || !!capBlock || !!progress?.locked || (reduceOnly && holding === 'LONG')}
         title={blockedReason
           ?? (reduceOnly && holding === 'LONG' ? '숏 포지션이 없습니다' : undefined)}
-        style={{ ...primaryBtn(C.up, busy || noConn || !!capBlock || (reduceOnly && holding === 'LONG')),
+        style={{ ...primaryBtn(C.up, busy || noConn || !!capBlock || !!progress?.locked || (reduceOnly && holding === 'LONG')),
                  minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'BUY' ? '전송 중…'
+          : progress?.locked ? '체결 확인 중…'
           : capBlock ? '거래 권한 없음'
           : noConn ? '계좌 선택 필요'
           : reduceOnly ? '롱 청산'
@@ -2180,11 +2294,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         </span>
       </button>
 
-      <button onClick={() => submit('SELL')} disabled={busy || noConn || !!capBlock}
+      <button onClick={() => submit('SELL')} disabled={busy || noConn || !!capBlock || !!progress?.locked}
         title={blockedReason ?? undefined}
-        style={{ ...primaryBtn(C.down, busy || noConn || !!capBlock), minHeight: dense ? 42 : 46, display: 'flex',
+        style={{ ...primaryBtn(C.down, busy || noConn || !!capBlock || !!progress?.locked), minHeight: dense ? 42 : 46, display: 'flex',
                  alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
         <span>{busy && side === 'SELL' ? '전송 중…'
+          : progress?.locked ? '체결 확인 중…'
           : capBlock ? '거래 권한 없음'
           : noConn ? '계좌 선택 필요'
           : reduceOnly ? '숏 청산'
