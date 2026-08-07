@@ -27,6 +27,10 @@ import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/aut
 import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
 import { recoveryPlan } from '@/lib/engine/mismatchRecovery';
 import {
+  leverageLadder, tierAllowedIn, TIER_LIMITS, DEFAULT_SAFETY_BUFFER_PCT,
+  type RiskTier, type TierLimit,
+} from '@/lib/engine/leverageLadder';
+import {
   autoTitle, headerEnvOf, ENV_LABEL, ENV_TONE,
   healthSummaryOf, healthTone, decisionCardOf, alertsOf,
   stopStrategyEffect, type Tone,
@@ -413,6 +417,32 @@ export default function AutotradeControl() {
   // 정상일 때는 경고 자리를 아예 안 쓴다. 늘 자리를 차지하면 그 자리는
   // 배경이 되고, 진짜 경고가 떠도 아무도 안 본다.
   const alerts = alertsOf({ blockingLabels: checks.blockingLabels });
+
+  // ── 배율 사다리 ──
+  //
+  // 사용자 상한 · 전략 상한 · 청산안전 상한 · 위험엔진 배율은 **서로 다른
+  // 값이다.** 하나로 뭉뚱그리는 동안 화면은 71배가 한계라고 계산해 놓고
+  // 100배를 그대로 허용했다.
+  const stopForLadder = stopPctForLeverage(Number(levCap), Number(riskPct), Number(marginPct));
+  const ladder = leverageLadder({
+    userCap: levCap === '' ? null : Number(levCap),
+    stopPct: stopForLadder,
+  });
+
+  // 이 설정이 어느 위험 등급인가. **10%/100배는 매매 설정이 아니다.**
+  const tierNow: TierLimit = (() => {
+    const r = Number(riskPct), l = Number(levCap);
+    const order: RiskTier[] = ['STABILIZE', 'AGGRESSIVE', 'RESEARCH', 'STRESS'];
+    for (const k of order) {
+      const t = TIER_LIMITS[k];
+      if (Number.isFinite(r) && r <= t.maxRiskPct && Number.isFinite(l) && l <= t.maxLeverage) return t;
+    }
+    return TIER_LIMITS.STRESS;
+  })();
+  const tierCheck = tierAllowedIn(
+    (Object.keys(TIER_LIMITS) as RiskTier[]).find(k => TIER_LIMITS[k] === tierNow) ?? 'STRESS',
+    live ? 'LIVE' : 'TESTNET',
+  );
 
   const toneColor = (t: Tone): string =>
     t === 'good' ? T.grn : t === 'bad' ? T.red : t === 'live' ? T.red
@@ -1023,6 +1053,68 @@ export default function AutotradeControl() {
           })()}
         </div>
 
+        {/* ── 배율 사다리 ──
+            **설명만 하고 막지 않으면 그건 경고가 아니라 장식이다.**
+            화면이 스스로 "이 손절이면 71배까지가 안전"이라고 계산해 놓고
+            설정은 100배를 그대로 허용하고 있었다. 이제 가장 낮은 상한이
+            실제 상한이고, 그 값이 여기 뜬다. */}
+        {ladder && (
+          <div style={{
+            background: T.alt, borderRadius: 10, padding: '9px 11px',
+            border: `1px solid ${ladder.blocked ? A(T.red, '40') : T.border}`,
+          }}>
+            <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 6 }}>배율</div>
+            {ladder.rows.map(r => (
+              <div key={r.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0' }}>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1, minWidth: 0 }}>{r.label}</span>
+                <span style={{
+                  color: !r.known ? (r.required ? T.red : T.muted)
+                    : ladder.boundBy === r.label ? T.ylw : T.txt,
+                  fontSize: 11, fontWeight: 800, flexShrink: 0,
+                }}>
+                  {/* **모르는 것을 빈칸이나 0으로 두지 않는다.** 필수인데
+                      모르면 빨갛게, 없어도 되는 것이면 '제한 없음'이다. */}
+                  {r.known ? `${Math.floor(r.value!)}x` : (r.required ? '확인 실패' : '제한 없음')}
+                </span>
+              </div>
+            ))}
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800, flex: 1 }}>이번 주문</span>
+                <span style={{ color: ladder.blocked ? T.red : T.grn, fontSize: 14, fontWeight: 900 }}>
+                  {ladder.allowed != null ? `${ladder.allowed}x` : '불가'}
+                </span>
+              </div>
+              <div style={{ color: ladder.blocked ? T.red : T.muted, fontSize: 9.5, marginTop: 4, lineHeight: 1.55 }}>
+                {ladder.blocked ? `🚫 ${ladder.blockReason}` : ladder.summary}
+              </div>
+              {ladder.liquidationTheoreticalCap != null && !ladder.blocked && (
+                <div style={{ color: T.muted, fontSize: 9, marginTop: 3, lineHeight: 1.5 }}>
+                  이론 최대 {Math.floor(ladder.liquidationTheoreticalCap)}배 ·
+                  안전 버퍼 {DEFAULT_SAFETY_BUFFER_PCT}% 적용 → {ladder.liquidationSafeCap}배.
+                  유지증거금 변동·수수료·슬리피지·마크가격 튐이 이론값의 여유를 갉아먹습니다.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── 위험 등급 ──
+            1회 위험 10% + 100배는 일반 설정이 아니다. 한 번 손절할 때
+            계좌의 10%가 사라지는 구조인데, 지금까지 아무 표시 없이
+            기본 화면에 앉아 있었다. */}
+        {tierCheck && !tierCheck.ok && (
+          <div style={{
+            background: A(T.red, '12'), border: `1px solid ${A(T.red, '35')}`,
+            borderRadius: 10, padding: '9px 11px', color: T.red, fontSize: 10.5, lineHeight: 1.6,
+          }}>
+            ⚠️ {tierCheck.reason}
+            <div style={{ color: T.muted, fontSize: 9.5, marginTop: 4 }}>
+              이 설정은 <b style={{ color: T.ylw }}>{tierNow.label}</b> 등급입니다 — {tierNow.desc}
+            </div>
+          </div>
+        )}
+
         {/* ── 테스트넷 / 실전 ──
             예전에는 mode가 'TESTNET'으로 코드에 박혀 있어서 **실전 자동매매를
             켤 방법이 아예 없었다.** 사다리를 지키려던 것인데, 결과는 기능이
@@ -1093,11 +1185,16 @@ export default function AutotradeControl() {
             }
             save(true);
           }}
-          disabled={busy || !connId} style={{
-          minHeight: 40, borderRadius: 10, cursor: busy || !connId ? 'default' : 'pointer',
+          // **여기서 실제로 막는다.** 지금까지는 화면이 "이 손절이면
+          // 71배까지가 안전"이라고 적어 놓고도 켜기 버튼은 멀쩡했다.
+          // 설명만 하고 막지 않으면 그건 경고가 아니라 장식이다.
+          disabled={busy || !connId || ladder.blocked || !tierCheck.ok} style={{
+          minHeight: 40, borderRadius: 10,
+          cursor: busy || !connId || ladder.blocked || !tierCheck.ok ? 'default' : 'pointer',
           background: A(live ? T.red : T.acl, '18'), color: live ? T.red : T.acl,
           border: `1px solid ${A(live ? T.red : T.acl, '45')}`,
-          fontSize: 12.5, fontWeight: 800, opacity: busy || !connId ? .5 : 1,
+          fontSize: 12.5, fontWeight: 800,
+          opacity: busy || !connId || ladder.blocked || !tierCheck.ok ? .5 : 1,
         }}>{busy ? '저장 중…' : `자동매매 켜기 (${live ? '실전 · 진짜 돈' : '테스트넷'})`}</button>
       </div>
 
