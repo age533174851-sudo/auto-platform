@@ -374,7 +374,35 @@ export async function POST(req: NextRequest) {
             : null,
         });
 
+    // ── 과매매 게이트 ──
+    //
+    // `conviction.overtradingGate`는 만들어 놓고 **한 번도 안 돌았다** —
+    // 볼 사실을 아무도 채워 주지 않았기 때문이다.
+    //
+    // 정책은 환경변수로만 켠다. 기본값으로 상한을 넣으면 아무 설정도 안
+    // 한 사용자가 어느 날 갑자기 막히고, 그건 규율이 아니라 고장이다.
+    //
+    // 청산에는 안 건다 — 과매매는 들어가는 쪽의 문제이고, 나가는 것을
+    // 막으면 정리하려 할수록 못 정리하게 된다.
+    let overtrading: { allowed: boolean; reason: string; known?: boolean } | null = null;
+    if (!isExit) {
+      const { overtradingPolicyOf, collectTradingHistory } = await import('@/lib/risk/tradingHistory');
+      const { overtradingGate } = await import('@/lib/risk/conviction');
+      const policy = overtradingPolicyOf();
+      if (policy) {
+        const read = await collectTradingHistory(sb, {
+          userId: uid, connectionId, symbol, nowMs: localMs,
+        });
+        // **못 읽은 것을 '진입 0회'로 치지 않는다.** 상한을 켜 놓고 조회가
+        // 흔들릴 때마다 통째로 열리면, 검사를 켜 놓고 안 거는 것과 같다.
+        overtrading = read.known
+          ? { ...overtradingGate(policy, read.history), known: true }
+          : { allowed: false, reason: read.reason, known: false };
+      }
+    }
+
     const checklist = runChecklist({
+      overtrading,
       mode: { disposition: g.disposition, reason: g.reason },
       clock: serverMs != null ? { localMs, serverMs } : null,
       ...limits,
