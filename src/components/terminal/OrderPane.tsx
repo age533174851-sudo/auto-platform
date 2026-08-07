@@ -29,6 +29,7 @@ import { canOpenFutures, type WalletTree } from '@/lib/markets/wallets';
 import { MODE_INFO, orderEndpointFor, marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { basisGap } from '@/lib/markets/priceBasis';
+import { checkSpread } from '@/lib/markets/spreadGuard';
 import { canDo, intentOf } from '@/lib/auth/tradingCapability';
 import { progressOf, shouldRefresh, type ProgressView } from '@/lib/engine/orderProgress';
 import {
@@ -934,6 +935,28 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   // 손절이 발동한다. 마크가가 건드렸기 때문인데, 화면 어디에도 그 말이
   // 없으면 사용자에게는 이유 없는 손절로 보인다.
   const priceGap = basisGap({ last: mid, mark: posMark });
+
+  // ── 이 매매가 비용을 이길 수 있는가 ──
+  //
+  // **spreadGuard는 만들어져 있었는데 부르는 곳이 한 곳도 없었다.**
+  // CI에 배선 검사를 붙이고 나서야 드러났다 — 스프레드·슬리피지가
+  // 기대값을 먹는지 판정하는 함수인데, 정작 그 판정이 한 번도 안 돌았다.
+  //
+  // 여기가 붙일 자리다. 호가창이 이미 이 화면에 흐르고 있고, 사용자가
+  // 누르기 **전에** 말해 줄 수 있는 유일한 지점이다.
+  //
+  // 서버 점검에 넣지 않은 이유: 서버는 호가를 안 읽는다. 거기서
+  // 판정하려면 조회를 하나 더 붙여야 하고, 그 조회가 실패하면
+  // '확인 불가'로 모든 주문이 막힌다.
+  const spread = useMemo(() => checkSpread(
+    { bid: stream.bids?.[0]?.price, ask: stream.asks?.[0]?.price },
+    {
+      feePct: 0.045,
+      // **손절 폭을 목표로 넣는다.** 이 매매로 노리는 폭이 왕복 비용보다
+      // 작으면 이겨도 손해다 — 승률이 아무리 높아도 산수가 안 맞는다.
+      targetPct: reduceOnly ? null : (Number.isFinite(slPct) && slPct > 0 ? slPct : null),
+    },
+  ), [stream.bids, stream.asks, slPct, reduceOnly]);
   const liqTone = !liqOk ? C.warn : liqPct < 1 ? C.down : liqPct < 3 ? C.warn : C.dim;
   const base = symbol.id.replace(/USDT$/, '');
 
@@ -1479,6 +1502,22 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer',
             color: C.faint, fontSize: FS.micro, padding: '2px 4px',
           }}>닫기</button>
+        </div>
+      )}
+
+      {/* **이 매매가 비용을 이길 수 있는가.**
+          'unwinnable'은 넓다/좁다의 문제가 아니라 성립하지 않는 매매다 —
+          노리는 폭이 왕복 비용보다 작으면 이겨도 손해다. 그 사실은
+          누르기 전에 알아야 한다. */}
+      {(spread.status === 'unwinnable' || spread.status === 'wide') && (
+        <div style={{
+          padding: '8px 10px', borderRadius: 7,
+          background: spread.status === 'unwinnable' ? C.downBg : C.warnBg,
+          color: spread.status === 'unwinnable' ? C.down : C.warn,
+          fontSize: FS.micro, lineHeight: 1.6,
+        }}>
+          <b>{spread.status === 'unwinnable' ? '이겨도 손해인 구조입니다' : '호가가 벌어져 있습니다'}</b>
+          <div style={{ color: C.dim, marginTop: 3 }}>{spread.reason}</div>
         </div>
       )}
 
