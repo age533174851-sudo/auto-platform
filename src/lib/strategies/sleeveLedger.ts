@@ -71,6 +71,14 @@ export interface SleeveState {
   maxDrawdownPct: number;
   /** 심볼 → 이 계좌가 소유한 수량 (롱 +, 숏 −) */
   positions: Record<string, number>;
+  /**
+   * 심볼 → 이 계좌의 매입 평균가.
+   *
+   * **없는 것과 0은 다르다.** 없으면 "이 계좌가 얼마에 샀는지 모른다"이고,
+   * 그때는 청산 손익을 장부에 안 적는다 — 지어낸 평균가로 낸 손익이
+   * 낙폭이 되고, 낙폭은 계좌를 멈추는 근거가 된다.
+   */
+  avgPrices?: Record<string, number>;
 }
 
 const num = (v: any): number | null => {
@@ -92,6 +100,7 @@ export function freshSleeve(spec: SleeveSpec): SleeveState {
     peakEquity: allocated,
     maxDrawdownPct: 0,
     positions: {},
+    avgPrices: {},
   };
 }
 
@@ -240,6 +249,102 @@ export function applyFill(
   if (Math.abs(v) < 1e-12) delete next.positions[sym];
   else next.positions[sym] = v;
   return next;
+}
+
+export interface PricedFill {
+  state: SleeveState;
+  /** 이번 체결로 확정된 손익. 진입이면 0 */
+  realized: number;
+  /** 무슨 일이 있었는가 — 화면과 로그에 그대로 적는다 */
+  note: string;
+}
+
+/**
+ * 가격을 아는 체결.
+ *
+ * **이게 없어서 전략 계좌의 손익이 영영 0이었다.**
+ *
+ * `applyFill`은 수량만 옮긴다. 그래서 진입도 청산도 `realizedPnl`을
+ * 건드리지 않았고, 그러면 이런 일이 난다:
+ *
+ *   · `equityOf`가 언제나 배정액과 같다 — 얼마를 잃어도
+ *   · 낙폭이 영원히 0% → `sleeveGate`의 낙폭 정지가 **한 번도 못 걸린다**
+ *   · `availableOf`가 안 줄어 → 잃은 계좌가 계속 새로 들어간다
+ *
+ * "한 전략이 손실 한도에 걸려 그 전략만 멈춘다"가 전략 계좌를 나눈
+ * 이유인데, 그 절반이 통째로 안 돌고 있었다.
+ *
+ * 평균가는 **줄일 때 안 바꾼다.** 절반을 닫아도 남은 절반의 매입가는
+ * 그대로다. 늘릴 때만 가중평균으로 다시 낸다.
+ *
+ * 방향이 뒤집히는 체결(롱 1을 −3 해서 숏 2가 되는 것)은 **닫은 만큼만
+ * 실현하고 나머지를 새 평균가로 연다.** 통째로 실현하면 열지도 않은
+ * 구간의 손익이 장부에 들어간다.
+ */
+export function applyPricedFill(
+  s: SleeveState, symbol: string, deltaQty: number, price: number, fee = 0,
+): PricedFill {
+  const sym = String(symbol ?? '').toUpperCase();
+  const d = n0(deltaQty);
+  const px = num(price);
+
+  if (!sym || d === 0) {
+    return { state: s, realized: 0, note: '' };
+  }
+  // **가격을 모르면 수량만 옮긴다.** 지어낸 가격으로 손익을 적으면
+  // 그 숫자가 낙폭이 되고, 낙폭은 계좌를 멈추는 근거가 된다.
+  if (px == null || px <= 0) {
+    return {
+      state: applyFill(s, sym, d), realized: 0,
+      note: '체결가를 몰라 수량만 반영했습니다 — 이 체결의 손익은 장부에 없습니다',
+    };
+  }
+
+  const before = n0(s.positions?.[sym]);
+  const avgs = { ...(s.avgPrices ?? {}) };
+  const avg = num(avgs[sym]);
+
+  // 같은 방향으로 늘리거나, 없던 자리에 새로 여는 것
+  const opening = before === 0 || Math.sign(before) === Math.sign(d);
+  if (opening) {
+    const total = Math.abs(before) + Math.abs(d);
+    avgs[sym] = (avg != null && before !== 0)
+      ? (avg * Math.abs(before) + px * Math.abs(d)) / total
+      : px;
+    const next = applyFill(s, sym, d);
+    return {
+      state: applyRealized({ ...next, avgPrices: avgs }, 0, fee),
+      realized: 0,
+      note: before === 0 ? '' : `평균가 ${avgs[sym].toFixed(8)}로 갱신`,
+    };
+  }
+
+  // 줄이는 것. 닫히는 수량은 보유분을 넘지 않는다.
+  const closedQty = Math.min(Math.abs(d), Math.abs(before));
+  // 평균가를 모르면 손익을 낼 수 없다. **0으로 치지 않는다** —
+  // 0은 '본전'이고 그건 확인한 사실이 아니다.
+  const realized = avg == null ? 0
+    : (px - avg) * closedQty * Math.sign(before);
+
+  let next = applyFill(s, sym, d);
+  const after = n0(next.positions?.[sym]);
+
+  if (after === 0) {
+    delete avgs[sym];
+  } else if (Math.sign(after) !== Math.sign(before)) {
+    // 방향이 뒤집혔다. 남은 것은 이 체결가로 새로 연 것이다.
+    avgs[sym] = px;
+  }
+  // 같은 방향으로 줄기만 했으면 평균가는 그대로 둔다.
+
+  next = applyRealized({ ...next, avgPrices: avgs }, realized, fee);
+  return {
+    state: next,
+    realized,
+    note: avg == null
+      ? '매입 평균가를 몰라 이 청산의 손익을 장부에 적지 못했습니다'
+      : `${closedQty} 청산 · 실현 ${realized.toFixed(4)}`,
+  };
 }
 
 /** 실현손익을 반영하고 낙폭을 갱신한다 */

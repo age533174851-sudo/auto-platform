@@ -13,7 +13,7 @@
 import { test, assert, eq, close } from '../../test/harness';
 import {
   freshSleeve, equityOf, availableOf, checkAllocation, canClose,
-  applyFill, applyRealized, sleeveGate, reconcileSleeves,
+  applyFill, applyRealized, applyPricedFill, sleeveGate, reconcileSleeves,
   stageSpendsRealMoney, STAGE_ORDER,
 } from './sleeveLedger';
 
@@ -250,5 +250,106 @@ export function runSleeveLedgerTests() {
     eq(equityOf(undefined), 0);
     eq(canClose(null, 'BTCUSDT', 1).allowed, false);
     eq(sleeveGate(null, null).allowed, false);
+  });
+
+  console.log('[전략 계좌 — 가격을 아는 체결]');
+
+  // 이게 없어서 realized_pnl이 영영 0이었다. 그러면 낙폭이 언제나 0%라
+  // 낙폭 정지가 한 번도 못 걸린다 — 전략 계좌를 나눈 이유의 절반이
+  // 통째로 안 돌고 있었다.
+  const sleeve = () => freshSleeve({ id: 'S1', label: 'S1', allocated: 10000 });
+
+  test('진입은 손익을 만들지 않고 평균가만 남긴다', () => {
+    const r = applyPricedFill(sleeve(), 'BTCUSDT', 1, 60000);
+    eq(r.realized, 0);
+    eq(r.state.positions.BTCUSDT, 1);
+    eq(r.state.avgPrices!.BTCUSDT, 60000);
+    eq(r.state.realizedPnl, 0);
+  });
+
+  test('추가 진입은 가중평균으로 다시 낸다', () => {
+    let s2 = applyPricedFill(sleeve(), 'BTCUSDT', 1, 60000).state;
+    s2 = applyPricedFill(s2, 'BTCUSDT', 3, 64000).state;
+    // (60000×1 + 64000×3) / 4 = 63000
+    close(s2.avgPrices!.BTCUSDT, 63000, 1e-9);
+  });
+
+  test('롱 청산은 이익을 실현한다', () => {
+    const s2 = applyPricedFill(sleeve(), 'BTCUSDT', 2, 60000).state;
+    const r = applyPricedFill(s2, 'BTCUSDT', -1, 63000);
+    close(r.realized, 3000, 1e-9);
+    eq(r.state.realizedPnl, 3000);
+    eq(r.state.positions.BTCUSDT, 1);
+    eq(r.state.avgPrices!.BTCUSDT, 60000, '줄일 때는 평균가를 안 바꾼다');
+  });
+
+  test('숏 청산은 부호가 반대다', () => {
+    // 부호를 잘못 보면 손실이 이익으로 적히고, 그 계좌는 영영 안 멈춘다.
+    const s2 = applyPricedFill(sleeve(), 'ETHUSDT', -2, 3000).state;
+    const r = applyPricedFill(s2, 'ETHUSDT', 1, 2800);
+    close(r.realized, 200, 1e-9);
+  });
+
+  test('전량 청산하면 평균가를 지운다', () => {
+    const s2 = applyPricedFill(sleeve(), 'BTCUSDT', 1, 60000).state;
+    const r = applyPricedFill(s2, 'BTCUSDT', -1, 58000);
+    close(r.realized, -2000, 1e-9);
+    eq(r.state.positions.BTCUSDT, undefined);
+    eq(r.state.avgPrices!.BTCUSDT, undefined, '남겨 두면 다음 진입의 손익이 옛 가격으로 계산된다');
+  });
+
+  test('방향이 뒤집히면 닫은 만큼만 실현한다', () => {
+    // 롱 1을 −3 하면 숏 2가 된다. 통째로 실현하면 열지도 않은 구간의
+    // 손익이 장부에 들어간다.
+    const s2 = applyPricedFill(sleeve(), 'BTCUSDT', 1, 60000).state;
+    const r = applyPricedFill(s2, 'BTCUSDT', -3, 63000);
+    close(r.realized, 3000, 1e-9, '닫힌 것은 1뿐이다');
+    eq(r.state.positions.BTCUSDT, -2);
+    eq(r.state.avgPrices!.BTCUSDT, 63000, '남은 숏은 이 가격에 연 것이다');
+  });
+
+  test('체결가를 모르면 수량만 옮기고 그렇다고 적는다', () => {
+    // 지어낸 가격으로 손익을 적으면 그 숫자가 낙폭이 되고,
+    // 낙폭은 계좌를 멈추는 근거가 된다.
+    const r = applyPricedFill(sleeve(), 'BTCUSDT', 1, 0);
+    eq(r.state.positions.BTCUSDT, 1);
+    eq(r.state.avgPrices!.BTCUSDT, undefined);
+    assert(r.note.includes('체결가를 몰라'), r.note);
+  });
+
+  test('평균가를 모르는 포지션의 청산은 손익을 안 적는다', () => {
+    // 041 이전에 열린 포지션이 이 상태다.
+    const s2 = { ...sleeve(), positions: { BTCUSDT: 1 } };
+    const r = applyPricedFill(s2, 'BTCUSDT', -1, 63000);
+    eq(r.realized, 0, '0은 본전이 아니라 모른다는 뜻이다');
+    eq(r.state.realizedPnl, 0);
+    assert(r.note.includes('매입 평균가를 몰라'), r.note);
+  });
+
+  test('수수료는 이기든 지든 나간다', () => {
+    const s2 = applyPricedFill(sleeve(), 'BTCUSDT', 1, 60000, 12).state;
+    eq(s2.fees, 12);
+    close(equityOf(s2), 10000 - 12, 1e-9);
+  });
+
+  console.log('[전략 계좌 — 손익이 낙폭 정지로 이어진다]');
+
+  test('잃으면 낙폭이 쌓이고 그 계좌만 멈춘다', () => {
+    const spec = { id: 'S1', label: 'S1', allocated: 10000, maxDrawdownPct: 10 };
+    let s2 = freshSleeve(spec);
+    // 진입 → 15% 손실로 청산
+    s2 = applyPricedFill(s2, 'BTCUSDT', 10, 1000).state;
+    s2 = applyPricedFill(s2, 'BTCUSDT', -10, 850).state;
+    close(s2.realizedPnl, -1500, 1e-9);
+    assert(s2.maxDrawdownPct >= 10, `낙폭이 안 쌓였다: ${s2.maxDrawdownPct}`);
+    const g = sleeveGate(s2, spec);
+    eq(g.allowed, false);
+    eq(g.halted, 'DRAWDOWN');
+    assert(g.reason.includes('이 전략만'), g.reason);
+  });
+
+  test('그 옆 계좌는 멀쩡하다 — 나눈 이유의 절반이 이것이다', () => {
+    const spec = { id: 'S2', label: 'S2', allocated: 10000, maxDrawdownPct: 10 };
+    eq(sleeveGate(freshSleeve(spec), spec).allowed, true);
   });
 }

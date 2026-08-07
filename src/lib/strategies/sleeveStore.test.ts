@@ -11,7 +11,7 @@
 //  4. jsonb에 섞인 문자열 하나가 NaN을 만들어, 비교가 조용히 통과하는 것
 import { test, assert, eq } from '../../test/harness';
 import {
-  recordOf, rowOf, positionsOf, stageOf, checkOwnership, type SleeveLoad,
+  recordOf, rowOf, positionsOf, avgPricesOf, stageOf, checkOwnership, type SleeveLoad,
 } from './sleeveStore';
 
 const row = (over: any = {}) => ({
@@ -20,6 +20,7 @@ const row = (over: any = {}) => ({
   reserved_margin: 100, realized_pnl: 250, unrealized_pnl: -30, fees: 12,
   peak_equity: 5300, max_drawdown_seen_pct: 2.4,
   positions: { BTCUSDT: 0.6 },
+  cost_basis: { BTCUSDT: 62000 },
   ...over,
 });
 
@@ -159,5 +160,27 @@ export function runSleeveStoreTests() {
     const v = checkOwnership(loadOf({ records: [rec()] }), 'MINERVINI_TREND', 'ETHUSDT', 1);
     eq(v.allowed, false);
     assert(v.reason.includes('남의 것'), v.reason);
+  });
+
+  console.log('[전략 계좌 저장 — 매입 평균가]');
+
+  test('평균가를 읽고 쓴다', () => {
+    const r = recordOf(row())!;
+    eq(r.state.avgPrices!.BTCUSDT, 62000);
+    eq((rowOf(r).cost_basis as any).BTCUSDT, 62000);
+  });
+
+  test('0과 음수는 가격이 아니다', () => {
+    // 0을 그대로 쓰면 청산 손익이 통째로 이익으로 잡히고,
+    // 그 숫자가 낙폭이 되어 계좌를 멈춘다.
+    eq(Object.keys(avgPricesOf({ BTCUSDT: 0 })).length, 0);
+    eq(Object.keys(avgPricesOf({ BTCUSDT: -1 })).length, 0);
+    eq(Object.keys(avgPricesOf({ BTCUSDT: 'cheap' })).length, 0);
+  });
+
+  test('칸이 없으면 빈 것으로 본다 — 042 이전 행', () => {
+    // 그 포지션은 평균가를 모르고, 그 청산은 손익이 안 적힌다.
+    const r = recordOf(row({ cost_basis: undefined }))!;
+    eq(Object.keys(r.state.avgPrices!).length, 0);
   });
 }
