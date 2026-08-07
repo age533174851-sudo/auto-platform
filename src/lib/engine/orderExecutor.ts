@@ -100,6 +100,15 @@ export interface ExecuteResult {
    * 사용자는 확인하지 않는다. 진입에는 채우지 않는다.
    */
   remainingQty?: number | null;
+  /**
+   * **체결 결과가 확정됐는가.**
+   *
+   * false면 "아직 모른다"이지 "안 됐다"가 아니다. 화면은 이 값이
+   * false인 동안 **같은 방향 재주문을 잠가야 한다** — 사용자가 "안
+   * 됐네" 하고 한 번 더 누르는 사이에 앞 주문이 붙으면 포지션이 두
+   * 배가 되고, 그건 사용자가 의도한 크기가 아니다.
+   */
+  settled?: boolean;
   exchangeOrderId?: string;
   filledQty?: number;
   avgPrice?: number;
@@ -850,13 +859,62 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // `left`(미체결 수량)를 그대로 담아 돌려준다 — "정상 처리됐고 하나도 안
     // 붙었다"는 뜻이다. 이걸 ACKED로 기록하면 없는 포지션에 손절을 걸려 하고,
     // 화면에는 손절 실패라는 엉뚱한 이유가 뜬다.
-    const fill = gp.gateFillOf(gres);
-    if (fill.unfilled) {
+    let fill = gp.gateFillOf(gres);
+
+    // ── 접수를 체결로 치지 않는다 ──
+    //
+    // **화면에 이렇게 떴다:** "부분 체결 0/2079 · 손절 부착".
+    // 한 문장 안에 "하나도 안 붙었다"와 "손절을 걸었다"가 같이 있다.
+    //
+    // 원인은 응답을 **한 번만** 읽은 것이다. 거래소는 200을 주면서 그
+    // 순간의 체결량을 담아 돌려주는데, 시장가라도 그 값이 0일 수 있다 —
+    // 접수와 체결 반영 사이에 짧은 지연이 있다.
+    //
+    // 그 0을 믿고 다음으로 가면 세 가지가 한꺼번에 틀어진다:
+    //   · 화면은 '체결 0'인데 잠시 뒤 거래소에 포지션이 생긴다
+    //   · 사용자가 한 번 더 누른다 → **포지션이 두 배**
+    //   · 손절이 요청 수량으로 걸린다 → 실제 포지션보다 큰 보호 주문
+    //
+    // 그래서 확정될 때까지 다시 묻는다. 판정은 fillPoll이 한다 —
+    // 여기서 규칙을 또 적으면 바이낸스 쪽과 갈린다.
+    const { fillPhaseOf, shouldPoll, protectionQtyFor, FILL_POLL_DELAYS_MS } =
+      await import('./fillPoll');
+
+    let verdict = fillPhaseOf({
+      filledQty: fill.filledQty, requestedQty: sized.size, status: gres?.status,
+    });
+    let pollNote = '';
+
+    for (let attempt = 0; shouldPoll(verdict, attempt); attempt++) {
+      await new Promise(r => setTimeout(r, FILL_POLL_DELAYS_MS[attempt]));
+      try {
+        const look = await gf.findOrderByClientIdGateFutures(
+          apiKey, apiSecret, contract, clientOrderId, testnet);
+        // **못 찾은 것을 '체결 0'으로 치지 않는다.** 조회가 실패했거나
+        // 거래소가 아직 목록에 안 올렸을 수 있다.
+        if (!look.ok || !look.order) continue;
+        const again = gp.gateFillOf(look.order);
+        verdict = fillPhaseOf({
+          filledQty: again.filledQty, requestedQty: sized.size,
+          status: (look.order as any)?.status,
+        });
+        // 다시 읽은 값이 더 최신이다. 체결가도 같이 갱신한다.
+        if (again.filledQty != null) fill = again;
+      } catch { /* 조회 실패는 확정이 아니다 — 다음 차례에 다시 묻는다 */ }
+    }
+
+    if (!verdict.settled) {
+      // 다 물어봤는데 확정이 안 됐다. **실패로 찍지 않는다** — 재시도가
+      // 열리고 그 재시도가 그대로 중복 체결이 된다. 대조가 나중에 푼다.
+      pollNote = ` · ⚠ ${verdict.reason} — 결과가 확정되지 않았습니다`;
+    }
+
+    if (verdict.phase === 'UNFILLED') {
       await update({ status: 'REJECTED', exchange_order_id: String(gres?.id ?? ''),
-        filled_qty: 0, error_message: fill.reason });
+        filled_qty: 0, error_message: verdict.reason });
       return { ok: false, status: 'REJECTED', clientOrderId,
         exchangeOrderId: gres?.id != null ? String(gres.id) : undefined, filledQty: 0,
-        message: `체결되지 않았습니다 — ${fill.reason}` };
+        message: `체결되지 않았습니다 — ${verdict.reason}` };
     }
 
     await update({
@@ -878,6 +936,59 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 특히 중요하다 — API 모양이 틀렸더라도 결과는 '보호 없는 포지션'이 아니라
     // '포지션 없음 + 실패 보고'가 된다.
     let gateSlId: string | undefined;
+    // ── 체결을 확인하기 전에는 손절을 걸지 않는다 ──
+    //
+    // Gate의 손절은 `auto_size: close_long|close_short`다 — **수량으로
+    // 걸지 않고 발동 시점의 남은 전부를 닫는다.** 그래서 "보호 주문이
+    // 포지션보다 크다"는 문제는 여기서 안 생긴다.
+    //
+    // 그런데 **포지션이 없을 때 거는 것**은 다른 문제다. 그 손절은
+    // 고아로 남아 다음 진입을 친다 — 반대 방향으로 들어가면 즉시
+    // 발동한다(orderCycle의 ORPHAN_PROTECTION이 그 자리다).
+    //
+    // 그리고 무엇보다, 체결 0에 '손절 부착'이라고 적으면 사용자가
+    // 보호된 줄 알고 손을 뗀다. 그 한 줄이 가장 비싸다.
+    const protectQty = protectionQtyFor(verdict);
+
+    // 체결이 확정되지 않았으면 **거래소 포지션을 직접 본다.**
+    //
+    // 주문 응답보다 이쪽이 진짜 근거다. 체결 조회가 늦어도 포지션은
+    // 이미 생겼을 수 있고, 그때 손절을 안 걸면 보호 없는 포지션이 남는다.
+    // 반대로 정말 아무것도 없으면 걸어서는 안 된다 — 고아 손절이 다음
+    // 진입을 친다.
+    //
+    // **못 읽으면 거는 쪽으로 기운다.** 있는데 안 건 것(보호 없는 포지션)이
+    // 없는데 건 것(고아 손절)보다 나쁘다. 고아는 화면이 잡아내지만,
+    // 보호 없는 포지션은 가격이 잡아낸다.
+    let posAfter: number | null = null;
+    if (!args.reduceOnly && args.stopLoss && policy !== 'NONE' && protectQty == null) {
+      try {
+        const p2 = await gf.getPositionGateFutures(apiKey, apiSecret, contract, testnet);
+        posAfter = p2 ? Number(p2.size) || 0 : 0;
+      } catch { posAfter = null; }
+    }
+    const nothingToProtect =
+      !args.reduceOnly && args.stopLoss && policy !== 'NONE'
+      && protectQty == null && posAfter === 0;
+
+    if (nothingToProtect) {
+      // 진입은 나갔는데 포지션이 없다. **'손절 부착'이라고 적지 않는다** —
+      // 그 한 줄 때문에 사용자가 보호된 줄 알고 손을 뗀다.
+      const warn = `체결이 확인되지 않았고 거래소에도 포지션이 없어 손절을 걸지 않았습니다`
+        + ` (${verdict.reason}). 체결이 확인되면 포지션 탭에서 손절을 걸어 주세요.`;
+      await update({ status: 'ACKED', exchange_order_id: String(gres?.id ?? ''),
+        error_message: warn });
+      return {
+        ok: true, status: 'ACKED', clientOrderId,
+        exchangeOrderId: gres?.id != null ? String(gres.id) : undefined,
+        filledQty: verdict.filledQty ?? undefined,
+        avgPrice: fill.avgPrice ?? undefined,
+        settled: verdict.settled,
+        unprotected: false,   // 지킬 포지션이 없다 — '보호 안 됨'이 아니다
+        message: `주문 접수 (Gate · ${sized.size}계약) · ${verdict.reason}`
+          + ' · 포지션 없음 · 손절 대기' + pollNote,
+      };
+    }
     if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
       // spec을 통째로 넘긴다. 예전에는 rule·autoSize만 spec에서 꺼내고
       // triggerPrice는 원본 손절가를 넘겨서, 호가 단위에 맞춰 둔 값이
@@ -919,17 +1030,20 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     return {
       ok: true, status: 'ACKED', clientOrderId,
       exchangeOrderId: gres?.id != null ? String(gres.id) : undefined,
-      filledQty: fill.filledQty ?? undefined,
+      settled: verdict.settled,
+      filledQty: verdict.filledQty ?? undefined,
       avgPrice: fill.avgPrice ?? undefined,
       slOrderId: gateSlId,
       remainingQty: gClose.remaining,
+      // **접수와 체결을 한 문장에 섞지 않는다.** 예전에는 "부분 체결
+      // 0/2079 · 손절 부착"이 한 줄에 같이 나왔다 — 둘 다 사실일 수 없다.
       message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
+        + ` · ${verdict.reason}`
         + (sized.reason ? ` · ${sized.reason}` : '')
         + (stopSpec.note ? ` · ${stopSpec.note}` : '')
         + gClose.note
-        + (fill.filledQty != null && fill.filledQty < Math.abs(sized.size)
-            ? ` · 부분 체결 ${fill.filledQty}/${Math.abs(sized.size)}` : '')
-        + (gateSlId ? ' · 손절 부착' : ''),
+        + (gateSlId ? ' · 손절 부착 (전량 종료형)' : '')
+        + pollNote,
     };
 
   } catch (e: any) {

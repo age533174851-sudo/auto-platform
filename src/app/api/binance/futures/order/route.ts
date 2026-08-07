@@ -807,6 +807,10 @@ export async function POST(req: NextRequest) {
     clientOrderId: exec.clientOrderId,
     exchangeOrderId: exec.exchangeOrderId,
     filledQty: exec.filledQty,
+    // **확정 전에는 화면이 재주문을 잠가야 한다.** false는 '안 됐다'가
+    // 아니라 '아직 모른다'이고, 그 사이에 한 번 더 누르면 포지션이 두 배가
+    // 된다. 값이 없으면(바이낸스 경로) 예전처럼 동작한다.
+    settled: exec.settled,
     avgPrice: exec.avgPrice,
     slOrderId: exec.slOrderId,
     // 손절이 실제로 걸렸는가. 화면이 메시지 문자열을 읽지 않고도
