@@ -83,6 +83,7 @@ import { runProtectionRepairTests } from './src/lib/engine/protectionRepair.test
 import { runPriceBasisTests } from './src/lib/markets/priceBasis.test';
 import { runContextSwitchTests } from './src/lib/terminal/contextSwitch.test';
 import { runMobileSheetTests } from './src/lib/ui/mobileSheet.test';
+import { runSleeveStoreTests } from './src/lib/strategies/sleeveStore.test';
 import { runScheduleExitTests } from './src/lib/engine/scheduleExit.test';
 import { runOAuthProvidersTests } from './src/lib/auth/oauthProviders.test';
 import { runCloseQtyTests } from './src/lib/exchanges/closeQty.test';
@@ -152,7 +153,7 @@ runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusRep
 runCreatorLedgerTests();
 runCreatorIntakeTests();
 runSignalPathTests(); runVenueBarsTests(); runLoginDiagnosticTests(); runPairTests(); runTpslPlanTests(); runPreferencesTests(); runScalpSignalTests(); runRiskContextTests(); runConnectionTests(); runScalpRunTests(); runScheduleExitTests(); runOAuthProvidersTests(); runProfileSimTests();
-runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
+runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runSleeveStoreTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {

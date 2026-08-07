@@ -824,6 +824,38 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   }, [capRead, isPaper, modeResolution.realMoney]);
   /** 진입·청산 버튼을 막는 모든 사유를 한 곳에서 본다 */
   const blockedReason = capBlock?.reason ?? (noConn ? modeResolution.reason : null);
+
+  // ── 이 주문은 누구 몫인가 ──
+  //
+  // 전략 계좌를 만들어 두지 않았으면 이 줄은 아예 안 뜬다. 계좌가 하나도
+  // 없는 사람에게 "전략 선택" 칸을 보여 주면, 비워 둬도 되는 칸인지
+  // 반드시 골라야 하는 칸인지 알 수 없다.
+  //
+  // 고르지 않으면 안 보낸다 — 지목하지 않은 주문은 소유권을 따지지
+  // 않는다. 손으로 누르는 주문의 기본값이 그것이어야 한다.
+  const [sleeves, setSleeves] = useState<Array<{ sleeveId: string; label: string; stage: string }>>([]);
+  const [sleevePick, setSleevePick] = useState('');
+  useEffect(() => {
+    if (!auth || isPaper) { setSleeves([]); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/strategy-accounts', { headers: { Authorization: auth } });
+        const j = await r.json();
+        // **못 읽으면 빈 목록이다.** 여기서 실패를 크게 알리지 않는 이유:
+        // 이 칸은 선택이고, 전략 계좌를 안 쓰는 사람에게는 조회 실패가
+        // 아무 의미도 없다. 실제로 막히는 자리(청산)에서는 서버가 막고
+        // 그 사유를 그대로 돌려준다.
+        if (alive) setSleeves(j?.ok && Array.isArray(j.accounts) ? j.accounts : []);
+      } catch { if (alive) setSleeves([]); }
+    })();
+    return () => { alive = false; };
+  }, [auth, isPaper]);
+  // 계좌가 사라졌는데 고른 값이 남아 있으면, 없는 계좌를 지목한 주문이
+  // 나가고 서버가 막는다. 목록에 없으면 비운다.
+  useEffect(() => {
+    if (sleevePick && !sleeves.some(s => s.sleeveId === sleevePick)) setSleevePick('');
+  }, [sleeves, sleevePick]);
   // ── 청산 거리 ──
   //
   // **포지션이 있으면 거래소가 계산한 값을 쓴다.** 예전에는 언제나
@@ -1084,6 +1116,9 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               reduceOnly: reduceOnly || undefined,
               // 이 값이 빠져서 신규 진입이 전부 거부되고 있었다
               stopLossPct: reduceOnly ? undefined : slPct,
+              // **누구 몫인가.** 안 고르면 안 보낸다 — 지목하지 않은
+              // 주문은 소유권을 따지지 않는다(수동 주문의 기본).
+              strategyAccountId: sleevePick || undefined,
               overrideChecks,
             };
         return fetch(endpoint, {
@@ -1270,6 +1305,36 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       {/* **체결가와 마크가가 벌어진 구간.**
           이때만 띄운다 — 평소에도 띄우면 글자만 늘고, 정작 벌어졌을 때의
           경고가 그 사이에 묻힌다. */}
+      {/* ── 이 주문은 누구 몫인가 ──
+          전략 계좌를 안 만든 사람에게는 아예 안 뜬다. 비워 둬도 되는
+          칸인지 반드시 골라야 하는 칸인지 알 수 없게 만들지 않는다. */}
+      {sleeves.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ color: C.faint, fontSize: FS.micro, flexShrink: 0 }}>전략 계좌</span>
+          <select value={sleevePick} onChange={e => setSleevePick(e.target.value)} style={{
+            flex: 1, minWidth: 0, background: C.raised, border: `1px solid ${C.hair}`,
+            borderRadius: 7, padding: '6px 8px', color: sleevePick ? C.text : C.faint,
+            fontSize: 16, outline: 'none',
+          }}>
+            <option value="">지정 안 함 (수동 주문)</option>
+            {sleeves.map(s => (
+              <option key={s.sleeveId} value={s.sleeveId}>{s.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {/* 지목하면 그 계좌의 몫으로만 닫을 수 있다는 것을 미리 적는다 —
+          청산이 막힌 뒤에 알게 되면 늦다. */}
+      {sleevePick && reduceOnly && (
+        <div style={{
+          padding: '6px 9px', borderRadius: 7, background: C.raised,
+          color: C.dim, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          이 계좌가 <b>소유한 수량까지만</b> 닫힙니다. 거래소에 더 있어도
+          나머지는 다른 전략의 몫입니다.
+        </div>
+      )}
+
       {/* **왜 못 누르는지를 버튼 위에 적는다.**
           비활성 버튼만 있으면 사용자는 고장으로 읽는다 — 무엇을 해야
           풀리는지까지 있어야 한다. */}

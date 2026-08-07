@@ -97,7 +97,7 @@ export function splitTabs(all: readonly string[] | null | undefined, opts: Split
 export const TAB_GROUPS: Array<{ title: string; tabs: readonly string[] }> = [
   { title: '자금', tabs: ['자금배분', '현물·선물'] },
   { title: '안전', tabs: ['안전장치', '손절이동', '시간예약', '상태대조'] },
-  { title: '전략', tabs: ['전략', '전략장부', '현물전략', '방송자', '방송장부', '데모'] },
+  { title: '전략', tabs: ['전략', '전략계좌', '전략장부', '현물전략', '방송자', '방송장부', '데모'] },
   { title: '계정·진단', tabs: ['설정', '증권사', '상태', '로그인'] },
 ];
 

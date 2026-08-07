@@ -579,6 +579,28 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 이 포지션이 누구 것인가 ──
+  //
+  // 전략을 여럿 돌리면 거래소에는 계좌가 하나다. 그 하나에 BTCUSDT 롱이
+  // 1.0 있을 때 **그게 누구 것인지 아무도 몰랐다.** 그래서 단타 전략의
+  // [전량청산]이 장기 전략의 몫까지 닫고, 그 전략은 자기가 아직 들고
+  // 있다고 믿는다 — 손절도 익절도 안 걸린 채로.
+  //
+  // **막는 자리를 좁게 잡는다.** 전략 계좌를 지목한 주문만 따진다.
+  // 손으로 누르는 청산까지 막으면 사용자가 자기 포지션을 못 닫는다.
+  const sleeveId = String(body.strategyAccountId ?? body.sleeveId ?? '').trim().toUpperCase();
+  if (sleeveId && reduceOnly) {
+    const { loadSleeves, checkOwnership } = await import('@/lib/strategies/sleeveStore');
+    const load = await loadSleeves(sb, uid);
+    const own = checkOwnership(load, sleeveId, symbol, orderQty);
+    if (!own.allowed) {
+      return NextResponse.json({
+        ok: false, error: 'not_owned_by_strategy',
+        message: own.reason, sleeveId, ownedQty: own.ownedQty,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   const built = buildManualPlan({
     symbol, side: orderSide,
     quantity: orderQty,
@@ -645,6 +667,60 @@ export async function POST(req: NextRequest) {
     apiSecret: decryptSecret(keyRow.api_secret_enc ?? keyRow.encrypted_secret ?? ''),
   });
 
+  // ── 체결을 전략 계좌 장부에 적는다 ──
+  //
+  // **이게 없으면 소유권 검사가 영영 "안 갖고 있다"로만 답한다.**
+  // 판정만 만들어 놓고 그 판정이 볼 값을 아무도 안 쓰면, 그 검사는
+  // 켜져 있는 것처럼 보이면서 아무것도 안 한다.
+  //
+  // 체결된 수량으로 적는다 — 주문한 수량이 아니다. 부분 체결이면
+  // 그만큼만 이 계좌의 몫이다.
+  let sleeveNote: string | null = null;
+  if (sleeveId && exec.ok) {
+    try {
+      const { loadSleeves, saveSleeve } = await import('@/lib/strategies/sleeveStore');
+      const { applyFill } = await import('@/lib/strategies/sleeveLedger');
+      const load = await loadSleeves(sb, uid);
+      const rec = load.known ? load.records.find(r => r.spec.id === sleeveId) : null;
+
+      if (!rec) {
+        sleeveNote = load.installed
+          ? `전략 계좌 ${sleeveId}를 찾지 못해 장부에 적지 못했습니다`
+          : load.reason;
+      } else {
+        // 체결된 수량으로 적는다 — 주문한 수량이 아니다. 부분 체결이면
+        // 그만큼만 이 계좌의 몫이다. **못 읽었으면 안 적는다** — 지어낸
+        // 수량이 장부에 들어가면 다음 청산이 그 값을 기준으로 막힌다.
+        const filled = Number(exec.filledQty);
+        if (Number.isFinite(filled) && filled > 0) {
+          // 부호는 방향이 정한다. 매수는 +, 매도는 − — 청산이든 진입이든
+          // 같다. 롱을 SELL로 닫으면 −가 되어 +포지션이 줄어든다.
+          const delta = orderSide === 'BUY' ? filled : -filled;
+          const saved = await saveSleeve(sb, uid, {
+            ...rec, state: applyFill(rec.state, symbol, delta),
+          });
+          // **실패를 삼키지 않는다.** 장부가 안 적히면 다음 청산이
+          // 남의 것으로 판정되거나, 반대로 남의 몫까지 닫힌다.
+          if (!saved.ok) sleeveNote = `전략 계좌 장부를 적지 못했습니다 — ${saved.error}`;
+        } else {
+          sleeveNote = '체결 수량을 확인하지 못해 전략 계좌 장부에 적지 못했습니다';
+        }
+
+        // 주문 행에 소유자를 새긴다. 나중에 로그만 보고도 누가 낸
+        // 주문인지 알 수 있어야 한다. 실패해도 주문은 이미 나갔다.
+        if (rec.rowId) {
+          try {
+            await (sb.from('live_orders') as any)
+              .update({ strategy_account_id: rec.rowId })
+              .eq('client_order_id', clientOrderId);
+          } catch { /* 041 이전에는 칸이 없다 */ }
+        }
+      }
+    } catch (e: any) {
+      sleeveNote = `전략 계좌 장부 기록 실패 (${e?.message || e})`;
+    }
+  }
+
   // UNKNOWN은 502다 — 보냈는데 결과를 모르는 상태다. 200으로 돌려주면
   // 화면이 성공으로 그리고, 그게 중복 주문을 부른다.
   const status = exec.ok ? 200 : exec.status === 'UNKNOWN' ? 502 : 400;
@@ -684,6 +760,10 @@ export async function POST(req: NextRequest) {
     droppedFields: intentDropped.length ? intentDropped : undefined,
     intentNotes: intentAdjusted.length ? intentAdjusted : undefined,
     positionMode: positionMode?.mode ?? null,
+    // 전략 계좌 장부에 적혔는가. **못 적었으면 그렇다고 말한다** —
+    // 조용히 넘어가면 다음 청산이 남의 것으로 판정된다.
+    sleeveId: sleeveId || null,
+    sleeveNote,
     checklist: {
       allowed: true, passed: preflightPassed, total: preflightTotal,
       // 넘겨서 나갔으면 그렇게 적는다. '통과'로 적으면 기록이 거짓이 된다.
