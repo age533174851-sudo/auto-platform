@@ -797,6 +797,8 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 // ─────────────────────────────────────────────────────────────
 import { loadLogs, clearLogs, loadPaperBalance, resetPaperBalance } from '@/lib/autotrade/store';
 import { calcPerformance, calcStrategyPerformance } from '@/lib/autotrade/performance';
+import { attributionOf, rowsWithResidual, topMoversOf } from '@/lib/portfolio/attribution';
+import { timeWeightedReturn, moneyWeightedReturn, naiveCheck, pnlBreakdown } from '@/lib/portfolio/returns';
 import { getTodayPnL, checkRiskGuard, clearCooldown, resetTodayPnL } from '@/lib/risk/guard';
 import type { ExecutionLog } from '@/lib/autotrade/types';
 import { Wallet, ListChecks, Trash2, RefreshCw, AlertCircle, CheckCircle2, MinusCircle, Ban, Clock, BarChart3, TrendingUp as TrendingUpIc, TrendingDown as TrendingDownIc } from 'lucide-react';
@@ -1001,6 +1003,58 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
         </Card>
       )}
 
+      {/* ── 성과 귀속 ──
+          "총손익 +₩120,000"만으로는 무엇을 해야 할지 알 수 없다. 전략이
+          스무 개일 때, 하나가 벌고 열아홉이 잃는 상황과 스물이 조금씩 버는
+          상황이 화면에서 똑같이 보인다 — 그 둘은 다음에 할 일이 정반대다.
+
+          그리고 이 카드는 **합이 맞는지 검사한다.** calcStrategyPerformance는
+          strategyId가 없는 기록을 빼고 세는데(`if (!log.strategyId) continue`),
+          calcPerformance는 전부 센다. 그래서 전략 태그가 안 붙은 체결이 있으면
+          두 숫자가 갈리고, 지금까지는 그 사실이 어디에도 안 떴다. */}
+      {stratPerf.filter(sp => sp.metrics.totalTrades > 0).length > 0 && (() => {
+        const attr = attributionOf(
+          stratPerf.filter(sp => sp.metrics.totalTrades > 0)
+            .map(sp => ({ key: sp.strategyId, label: sp.strategyName, amount: sp.metrics.totalPnl })),
+          perf.totalPnl,
+        );
+        const rows = rowsWithResidual(attr);
+        const movers = topMoversOf(attr);
+        return (
+          <Card style={{padding:'14px 16px',marginBottom:10, borderLeft:`3px solid ${T.prp}`}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
+              <BarChart3 size={14} strokeWidth={2.2} color={T.prp}/>
+              <span style={{color:T.txt,fontWeight:800,fontSize:13}}>성과 귀속 — 무엇이 벌었나</span>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              {rows.map(r=>{
+                const resid = r.key === '__unexplained__';
+                const c = resid ? T.ylw : r.amount >= 0 ? T.grn : T.red;
+                return (
+                  <div key={r.key} style={{display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{color:resid?T.ylw:T.sub,fontSize:11,flex:1,minWidth:0,overflowWrap:'anywhere'}}>{r.label}</span>
+                    {!resid && r.known && (
+                      <span style={{color:T.muted,fontSize:9,flexShrink:0}}>{r.sharePct.toFixed(0)}%</span>
+                    )}
+                    <span style={{color:r.known?c:T.muted,fontSize:11,fontWeight:800,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',flexShrink:0}}>
+                      {r.known?`${r.amount>=0?'+':''}${cvt(Math.abs(r.amount),currency)}`:'—'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            {/* **합이 안 맞으면 숨기지 않는다.** 남는 만큼을 아무 항목에나
+                얹으면 화면은 깔끔해지지만, 그게 대개 진짜 문제다. */}
+            {attr.reason && (
+              <div style={{marginTop:8,background:A(T.ylw,'10'),border:`1px solid ${A(T.ylw,'25')}`,borderRadius:8,padding:'7px 9px',color:T.ylw,fontSize:9.5,lineHeight:1.55}}>
+                ⚠️ {attr.reason}
+              </div>
+            )}
+            <div style={{color:T.muted,fontSize:9.5,marginTop:7,lineHeight:1.55}}>{movers.summary}</div>
+          </Card>
+        );
+      })()}
+
       {/* 전략 포트폴리오 */}
       {stratPerf.filter(sp => sp.metrics.totalTrades > 0).length > 0 && (
         <Card style={{padding:'14px 16px',marginBottom:10, borderLeft:`3px solid ${T.acl}`}}>
@@ -1085,6 +1139,29 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
             보유: {Object.entries(balance.positions).map(([asset, p]: any) => `${asset} ${p.qty.toFixed(4)}@${cvt(Math.floor(p.avgPrice), currency)}`).join(', ')}
           </div>
         )}
+        {/* ── 이 '누적 PnL'을 수익률로 읽으면 안 되는 이유 ──
+            잔고 증가만으로 계산한 수익률은 입출금이 있으면 틀린다. 그리고
+            지금 이 화면은 수수료·펀딩비를 아예 세지 않는다 — 그 둘을 0으로
+            치고 더하면 순손익이 언제나 실제보다 좋게 나온다.
+
+            그 사실을 화면이 직접 말한다. 숫자를 지우는 것보다 무엇이
+            빠졌는지 적는 쪽이 낫다. */}
+        {(() => {
+          const twr = timeWeightedReturn([]);
+          const mwr = moneyWeightedReturn([]);
+          const check = naiveCheck(balance.krw - balance.totalPnL, balance.krw + totalPositionVal, twr, mwr);
+          const parts = pnlBreakdown({ realized: balance.totalPnL, unrealized: 0, fees: null, funding: null });
+          const notes = [
+            !check.safeToShowNaive ? '입출금을 반영한 시간가중 수익률(TWR)을 아직 계산하지 않습니다 — 이 숫자는 입출금이 있으면 왜곡됩니다' : '',
+            parts.missing.length > 0 ? `${parts.missing.join(' · ')}를 세지 않아 순손익이 실제보다 좋게 나옵니다` : '',
+          ].filter(Boolean);
+          if (notes.length === 0) return null;
+          return (
+            <div style={{marginTop:8,background:A(T.ylw,'10'),border:`1px solid ${A(T.ylw,'25')}`,borderRadius:8,padding:'7px 9px',color:T.ylw,fontSize:9,lineHeight:1.55}}>
+              {notes.map((n,i)=>(<div key={i}>⚠️ {n}</div>))}
+            </div>
+          );
+        })()}
       </Card>
 
       {/* 실행 로그 헤더 */}

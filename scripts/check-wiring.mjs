@@ -40,6 +40,9 @@ import { join, basename } from 'node:path';
 const WATCH_DIRS = [
   'src/lib/engine', 'src/lib/risk', 'src/lib/strategies', 'src/lib/markets',
   'src/lib/exchanges', 'src/lib/auth', 'src/lib/terminal', 'src/lib/ui', 'src/lib/nav',
+  // 수익률·성과 귀속. **이 칸이 없던 동안 여기는 검사 밖이었다** —
+  // 새 판정 디렉터리를 만들면 이 목록에도 같이 넣어야 한다.
+  'src/lib/portfolio',
 ];
 
 /** 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다 */
