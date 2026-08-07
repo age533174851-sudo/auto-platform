@@ -45,6 +45,11 @@ import {
 import { finishRound, restartCurrentRound } from '@/lib/strategies/roundRunner';
 import { runProfileMonteCarlo, DEFAULT_PATHS, DEFAULT_TRADES } from '@/lib/strategies/profileMonteCarlo';
 import { verdictOf } from '@/lib/strategies/monteCarlo';
+import {
+  sweepEdges, sweepGrid, EXPECTANCY_IDENTITY_NOTE,
+  type SweepResult, type GridResult,
+} from '@/lib/strategies/edgeSweep';
+import { GRADE_LABEL } from '@/lib/strategies/robustness';
 
 /** 시뮬 한 건의 결과.
  *  이 저장소는 `strict: false`라 `{ok:true}|{ok:false}` 판별 유니온이
@@ -120,6 +125,16 @@ export default function StrategyProfilesPanel() {
 // 프로필 카드
 // ────────────────────────────────────────────────────────────
 
+/**
+ * 훑기에 쓸 경로당 거래 수.
+ *
+ * 몬테카를로를 41번 돌리는 일이라 기본값(1,000)을 그대로 쓰면 화면이
+ * 눈에 띄게 멎는다. 300이면 분포의 모양은 남고 시간은 3분의 1이다.
+ * **줄였다는 사실을 화면에 적는다** — 안 적으면 위쪽 몬테카를로와
+ * 숫자가 다른 이유를 아무도 모른다.
+ */
+const SWEEP_TRADES = 300;
+
 function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: string) => void }) {
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick(t => t + 1), []);
@@ -135,6 +150,16 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
   const [armClear, setArmClear] = useState(false);
   /** 기대값이 음수인데도 돌리겠다고 명시적으로 고른 상태 */
   const [ackNegative, setAckNegative] = useState(false);
+  /**
+   * 우위 사다리·설정 격자.
+   *
+   * **자동으로 안 돈다.** 사다리 16점 + 격자 25칸이면 몬테카를로를
+   * 41번 돌리는 일이라, 카드가 그려질 때마다 돌면 화면이 눈에 띄게 멎는다.
+   * 버튼을 눌렀을 때만 돈다.
+   */
+  const [sweep, setSweep] = useState<{ key: string; ladder: SweepResult; grid: GridResult } | null>(null);
+  const [sweeping, setSweeping] = useState(false);
+  const [showSweep, setShowSweep] = useState(false);
 
   // **프리셋이 얹힌 프로필이 진짜 프로필이다.** 아래 모든 계산과 표시가
   // 이 값을 쓴다. 한 군데라도 원본 `base`를 쓰면 화면과 계산이 갈린다.
@@ -169,6 +194,34 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
     } catch { return null; }
   }, [p, edgePp, preset, roundStart]);
   const verdict = mc ? verdictOf(mc) : null;
+
+  // **프리셋이 바뀌면 이전 훑기 결과는 이 화면의 것이 아니다.**
+  // 지우지 않고 그대로 두면, 안정화 화면에 연구용 숫자가 남는다.
+  const sweepKey = `${p.id}|${preset}`;
+  const freshSweep = sweep && sweep.key === sweepKey ? sweep : null;
+
+  const runSweep = useCallback(() => {
+    setSweeping(true);
+    // 브라우저가 버튼 눌린 상태를 그리고 나서 돌게 한다 — 안 그러면
+    // 계산이 끝날 때까지 화면이 아무 반응도 안 한 것처럼 보인다.
+    setTimeout(() => {
+      try {
+        // 거래 수를 300으로 줄인다. 분포의 모양은 유지되고, 41번 돌리는
+        // 비용은 감당할 만해진다. 화면에 이 숫자를 적는다.
+        const opts = { preset, trades: SWEEP_TRADES } as const;
+        setSweep({
+          key: sweepKey,
+          ladder: sweepEdges(base, opts),
+          grid: sweepGrid(base, opts),
+        });
+        setShowSweep(true);
+      } catch (e: any) {
+        onToast(`훑기 실패: ${e?.message || e}`);
+      } finally {
+        setSweeping(false);
+      }
+    }, 0);
+  }, [base, preset, sweepKey, onToast]);
 
   const highLev = p.maxLeverage >= 20;
   const accent = highLev ? T.red : T.grn;
@@ -441,6 +494,98 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
                 <div style={{ fontSize: 8.5, color: T.muted, lineHeight: 1.5 }}>{verdict.reason}</div>
               </div>
             )}
+          </>
+        )}
+      </div>
+
+      {/* ── 고급 진단: 우위 사다리 + 설정 격자 ──
+          세 점(0/+5/+10)으로는 어디서 뒤집히는지 알 수 없다. 여기서
+          0~15%p를 1%p 간격으로 훑고, TP/SL을 주변으로 흔들어 본다.
+          기본은 접혀 있다 — 41번 돌리는 계산이라 자동으로 돌면 안 된다. */}
+      <div style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: 10, marginBottom: 8 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <b style={{ fontSize: 9.5, color: T.txt }}>🔬 우위 사다리 · 설정 격자</b>
+          <button onClick={runSweep} disabled={sweeping}
+            style={{ ...btn(sweeping ? T.muted : T.card), border: `1px solid ${T.ylw}`, color: T.ylw, fontSize: 9, padding: '4px 9px' }}>
+            {sweeping ? '훑는 중…' : (freshSweep ? '다시 훑기' : '훑기 실행')}
+          </button>
+          {freshSweep && (
+            <button onClick={() => setShowSweep(v => !v)} style={tab(showSweep)}>
+              {showSweep ? '▾ 접기' : '▸ 펴기'}
+            </button>
+          )}
+          {sweep && !freshSweep && (
+            <span style={{ fontSize: 8, color: T.ylw }}>프리셋이 바뀌었습니다 — 다시 훑어야 합니다</span>
+          )}
+        </div>
+        <div style={{ fontSize: 8, color: T.muted, marginTop: 5, lineHeight: 1.5 }}>
+          우위 0~15%p를 1%p 간격으로 16번, TP/SL을 ±30%로 흔들어 25번 —
+          경로당 {SWEEP_TRADES}건으로 줄여 돌립니다(위 몬테카를로는 {DEFAULT_TRADES}건이라 숫자가 조금 다릅니다).
+        </div>
+
+        {freshSweep && showSweep && (
+          <>
+            {/* ── 사다리 ── */}
+            <div style={{ fontSize: 9, color: T.ylw, marginTop: 8, lineHeight: 1.55, fontWeight: 700 }}>
+              {freshSweep.ladder.summary}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 6, marginTop: 6 }}>
+              {chip('공식 손익분기', `+${freshSweep.ladder.breakevenPp.toFixed(1)}%p`, T.txt)}
+              {chip('공식 안전 우위', `+${freshSweep.ladder.safePp.toFixed(1)}%p`, T.txt)}
+              {chip('시뮬 견고 시작', freshSweep.ladder.firstRobustPp == null ? '없음'
+                : `+${freshSweep.ladder.firstRobustPp}%p`,
+                freshSweep.ladder.firstRobustPp == null ? T.red : T.grn)}
+              {chip('견고 구간', freshSweep.ladder.robustFromPp == null ? '없음'
+                : `+${freshSweep.ladder.robustFromPp}~+${freshSweep.ladder.robustToPp}%p`,
+                freshSweep.ladder.broadRobustZone ? T.grn : T.ylw)}
+            </div>
+            <div style={{ overflowX: 'auto', marginTop: 6 }}>
+              <table style={{ borderCollapse: 'collapse', fontSize: 8.5, minWidth: 420, width: '100%' }}>
+                <thead>
+                  <tr style={{ color: T.muted }}>
+                    {['우위', '기대값', '수익 경로', '파산', 'MDD', '등급'].map(h => (
+                      <th key={h} style={{ textAlign: 'right', padding: '3px 5px', fontWeight: 700 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {freshSweep.ladder.points.map(pt => (
+                    <tr key={pt.edgePp} style={{ borderTop: `1px solid ${T.border}` }}>
+                      <td style={{ textAlign: 'right', padding: '3px 5px', color: T.txt, fontWeight: 700 }}>+{pt.edgePp}%p</td>
+                      <td style={{ textAlign: 'right', padding: '3px 5px', color: pt.expectancyAfterCost > 0 ? T.grn : T.red }}>
+                        {pt.expectancyAfterCost >= 0 ? '+' : ''}{pt.expectancyAfterCost.toFixed(4)}%
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '3px 5px', color: T.muted }}>{pctText(pt.profitProb, 0)}</td>
+                      <td style={{ textAlign: 'right', padding: '3px 5px', color: pt.ruinProb > 0 ? T.red : T.muted }}>{pctText(pt.ruinProb, 1)}</td>
+                      <td style={{ textAlign: 'right', padding: '3px 5px', color: T.muted }}>-{pt.medianMddPct.toFixed(1)}%</td>
+                      <td style={{ textAlign: 'right', padding: '3px 5px', color: pt.tradable ? T.grn : T.muted }}>{GRADE_LABEL[pt.grade]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* ── 격자 ── */}
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 8, paddingTop: 8 }}>
+              <div style={{ fontSize: 9, color: T.txt, fontWeight: 700, marginBottom: 4 }}>
+                설정 격자 (TP/SL ±30%)
+              </div>
+              <div style={{ fontSize: 8.5, color: T.muted, lineHeight: 1.55 }}>{freshSweep.grid.summary}</div>
+              {freshSweep.grid.best && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 6, marginTop: 6 }}>
+                  {chip('원래 설정', freshSweep.grid.base ? freshSweep.grid.base.key : '-', T.txt)}
+                  {chip('경로 점수 최고', freshSweep.grid.best.key, T.txt)}
+                  {chip('과최적화 위험', freshSweep.grid.overfitRisk ? '있음' : '낮음',
+                    freshSweep.grid.overfitRisk ? T.red : T.grn)}
+                </div>
+              )}
+              {/* **이 줄이 없으면 기대값 열이 조언으로 읽힌다.** */}
+              <div style={{ fontSize: 8, color: T.ylw, marginTop: 6, lineHeight: 1.55 }}>
+                ⚠️ 기대값 기준 1위는 {freshSweep.grid.expectancyWinnerKey ?? '-'}
+                {freshSweep.grid.expectancyWinnerIsWidest && ' (격자에서 가장 넓은 설정)'} 입니다 —
+                {' '}{EXPECTANCY_IDENTITY_NOTE}
+              </div>
+            </div>
           </>
         )}
       </div>
