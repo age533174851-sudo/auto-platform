@@ -82,8 +82,6 @@ const ALLOW = new Map([
     '전략 견고성 등급. 격자 실행기가 붙으면 그때 소비자가 생긴다'],
   ['src/lib/strategies/costAnalysis.ts',
     '비용 전/후 기대값 분리. 위와 같은 실행기에서 함께 쓴다'],
-  ['src/lib/markets/quantityInput.ts',
-    '수량 단위 변환. 주문판 재배치 PR에서 배선한다'],
 ]);
 
 const files = [];
