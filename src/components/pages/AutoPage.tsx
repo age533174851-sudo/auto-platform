@@ -36,6 +36,13 @@ import AdaptiveLeveragePanel from '../AdaptiveLeveragePanel';
 import StrategyScorePanel from '../StrategyScorePanel';
 import MetaStrategyPanel from '../MetaStrategyPanel';
 import AuditLogPanel from '../AuditLogPanel';
+import {
+  kindOf, KIND_LABEL, showsTpSl, cardRowsOf, unwiredFieldsOf,
+  activityOf, ACTIVITY_LABEL, ACTIVITY_TONE, DEFAULT_FILTERS,
+  filterCountsOf, passesFilter, ALL_ACTIVITIES,
+  actionsOf, isCompact, envLineOf, perfSummaryOf,
+  type Activity, type Tone as CardTone,
+} from '@/lib/ui/strategyCard';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
   ema_cross:     {label:'EMA 크로스',      icon:'📈',color:'#3B82F6',desc:'EMA20/60 골든·데드 크로스 추세 추종'},
@@ -143,6 +150,15 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
     setNotWiredWarn(true);
   };
   const [notWiredWarn, setNotWiredWarn] = useState(false);
+  /**
+   * 어떤 칸의 전략을 볼 것인가.
+   *
+   * 기본은 실행중 + 기회 근접 + 오류다. **정지된 전략 스무 개를 매번
+   * 스크롤할 이유가 없다.** 오류는 기본에 넣는다 — 숨기면 고장이 조용해진다.
+   */
+  const [stratFilter, setStratFilter] = useState<Activity[]>(DEFAULT_FILTERS);
+  /** 어느 카드의 ⋯ 메뉴가 열려 있는가 */
+  const [cardMenu, setCardMenu] = useState('');
   const stopStrat=(id:string)=>setStrats(p=>p.map(s=>s.id===id?{...s,status:'stopped',enabled:false}:s));
 
   const handleGlobalStop=()=>{
@@ -261,48 +277,163 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
               방금 누른 [시작]은 <b>아무 주문도 내지 않았습니다.</b> 위 안내를 보세요.
             </div>
           )}
+          {/* ── 칸 필터 ──
+              정지된 전략과 실행중인 전략을 같은 크기로 늘어놓으면, 매번
+              그 사이를 찾아 스크롤해야 한다. */}
+          {(() => {
+            const acts = (Array.isArray(strats)?strats:[]).map(s=>activityOf({
+              status:s.status, enabled:s.enabled,
+              // **점수를 지어내지 않는다.** 지금 이 카드들의 신호 점수를
+              // 계산하는 곳이 없으므로 언제나 null이고, 그래서 '기회 근접'은
+              // 아직 한 번도 뜨지 않는다 — 그게 사실이다.
+              score:null, requiredScore:null,
+            }));
+            const counts = filterCountsOf(acts);
+            return (
+              <div style={{display:'flex',gap:5,marginBottom:10,overflowX:'auto'}}>
+                {ALL_ACTIVITIES.map(a=>{
+                  const on = stratFilter.includes(a);
+                  const c = ACTIVITY_TONE[a]==='good'?T.grn:ACTIVITY_TONE[a]==='bad'?T.red:ACTIVITY_TONE[a]==='warn'?T.ylw:T.muted;
+                  return (
+                    <button key={a} onClick={()=>setStratFilter(p=>p.includes(a)?p.filter(x=>x!==a):[...p,a])}
+                      style={{flexShrink:0,minHeight:32,padding:'5px 10px',borderRadius:8,cursor:'pointer',
+                        background:on?A(c,'18'):'transparent',color:on?c:T.muted,
+                        border:`1px solid ${on?A(c,'45'):T.border}`,fontSize:10,fontWeight:800}}>
+                      {ACTIVITY_LABEL[a]} {counts[a]}
+                    </button>
+                  );
+                })}
+                <button onClick={()=>setStratFilter([])}
+                  style={{flexShrink:0,minHeight:32,padding:'5px 10px',borderRadius:8,cursor:'pointer',
+                    background:stratFilter.length===0?T.acg:'transparent',
+                    color:stratFilter.length===0?T.acl:T.muted,
+                    border:`1px solid ${stratFilter.length===0?T.acl:T.border}`,fontSize:10,fontWeight:800}}>
+                  전체 {acts.length}
+                </button>
+              </div>
+            );
+          })()}
+
           {(Array.isArray(strats)?strats:[]).map(s=>{
             const si=STRAT_INFO[s.type];
+            const kind=kindOf(s.type);
+            const act=activityOf({status:s.status,enabled:s.enabled,score:null,requiredScore:null});
+            if(!passesFilter(act,stratFilter)) return null;
+
+            const actTone:CardTone=ACTIVITY_TONE[act];
+            const actColor=actTone==='good'?T.grn:actTone==='bad'?T.red:actTone==='warn'?T.ylw:T.muted;
+            const acts=actionsOf(act);
+            // **값을 만들지 않는다.** 이 카드들의 지표를 계산하는 곳이
+            // 아직 없으므로 전부 '—'로 나오고, 무엇이 없는지를 카드가
+            // 직접 말한다. 그 목록이 그대로 다음 할 일이 된다.
+            const rows=cardRowsOf(kind,null);
+            const missing=unwiredFieldsOf(kind,null);
+            const envLine=envLineOf(execMode==='real'?'LIVE':execMode==='testnet'?'TESTNET':'PAPER');
+
+            // ── 정지된 전략은 한 줄 ──
+            if(isCompact(act)) return (
+              <Card key={s.id} style={{padding:'9px 11px',marginBottom:6,borderLeft:`3px solid ${si.color}`}}>
+                <div style={{display:'flex',alignItems:'center',gap:8}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{color:T.txt,fontSize:11.5,fontWeight:700,overflowWrap:'anywhere'}}>{s.name}</div>
+                    <div style={{color:T.muted,fontSize:9,marginTop:1}}>
+                      {s.asset} · {s.timeframe} · {KIND_LABEL[kind]}
+                    </div>
+                  </div>
+                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flexShrink:0,minHeight:32,padding:'0 12px',background:A(T.grn,'15'),color:T.grn,border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,fontSize:10,fontWeight:800,cursor:'pointer'}}>시작</button>
+                </div>
+              </Card>
+            );
+
             return (
-              <Card key={s.id} style={{padding:'14px',marginBottom:10,border:`1px solid ${statusColor[s.status]}20`,borderLeft:`4px solid ${si.color}`}} onClick={()=>setSelStrat(selStrat?.id===s.id?null:s)}>
+              <Card key={s.id} style={{padding:'14px',marginBottom:10,border:`1px solid ${A(actColor,'25')}`,borderLeft:`4px solid ${si.color}`}}>
                 {/* Header */}
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
-                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,gap:8}}>
+                  <div style={{display:'flex',gap:8,alignItems:'center',minWidth:0}}>
                     <div style={{position:'relative',width:38,height:38,flexShrink:0}}>
                       <AssetLogo ticker={s.asset} name={s.assetNameKr} size={38} />
                       <div style={{position:'absolute',right:-4,bottom:-4,width:20,height:20,borderRadius:'50%',background:si.color,border:`2px solid ${T.bg||'var(--t-card)'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11}}>{si.icon}</div>
                     </div>
-                    <div>
+                    <div style={{minWidth:0}}>
                       <div style={{display:'flex',gap:5,alignItems:'center',flexWrap:'wrap'}}>
-                        <span style={{color:T.txt,fontWeight:700,fontSize:13}}>{s.name}</span>
-                        <span style={{background:`${statusColor[s.status]}20`,color:statusColor[s.status],fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:99}}>{statusLabel[s.status]}</span>
-                        <span style={{background:T.alt,color:T.muted,fontSize:9,padding:'1px 5px',borderRadius:5}}>{s.timeframe}</span>
+                        <span style={{color:T.txt,fontWeight:700,fontSize:13,overflowWrap:'anywhere'}}>{s.name}</span>
+                        <span style={{background:A(actColor,'20'),color:actColor,fontSize:9,fontWeight:800,padding:'1px 6px',borderRadius:99}}>{ACTIVITY_LABEL[act]}</span>
                       </div>
-                      <div style={{color:T.muted,fontSize:10,marginTop:2}}>{s.description}</div>
+                      <div style={{color:T.muted,fontSize:10,marginTop:2}}>
+                        {s.asset} · {s.timeframe} · {KIND_LABEL[kind]}
+                      </div>
                     </div>
                   </div>
+                  {/* 성적은 표본을 같이 말한다 — 3건짜리 승률은 정보가 아니다 */}
                   <div style={{textAlign:'right',flexShrink:0}}>
                     <div style={{color:s.totalPnl>=0?T.grn:T.red,fontSize:12,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{s.totalPnl>=0?'+':''}{cvt(Math.abs(s.totalPnl),currency)}</div>
-                    <div style={{color:T.muted,fontSize:9,marginTop:1}}>승률 {s.winRate}% · {s.trades}건</div>
+                    <div style={{color:T.muted,fontSize:9,marginTop:1}}>
+                      {s.trades>0?`승률 ${s.winRate}% · ${s.trades}건`:'거래 없음'}
+                    </div>
                   </div>
                 </div>
-                {/* Quick stats */}
-                <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,marginBottom:8}}>
-                  {[{l:'자산',v:s.asset},{l:'레버리지',v:`${s.leverage}x`},{l:'익절',v:`${s.tp}%`},{l:'손절',v:`${s.sl}%`}].map(r=>(
-                    <div key={r.l} style={{background:T.alt,borderRadius:7,padding:'5px 6px',textAlign:'center'}}>
-                      <div style={{color:T.muted,fontSize:8}}>{r.l}</div>
-                      <div style={{color:T.txt,fontSize:10,fontWeight:700,marginTop:1}}>{r.v}</div>
+
+                {/* 실행 환경 — 모의/테스트넷/실전이 카드에도 보여야 한다 */}
+                <div style={{background:T.alt,borderRadius:7,padding:'5px 8px',marginBottom:8,
+                  color:envLine.realMoney?T.red:T.muted,fontSize:9,fontWeight:700}}>
+                  {envLine.text}
+                </div>
+
+                {/* ── 이 전략이 보고 있는 것 ──
+                    예전에는 여기가 자산/레버리지/익절/손절 네 칸이라
+                    일곱 전략이 전부 같은 카드였다. 종류마다 다른 칸을
+                    보여줘야 왜 서로 다른 전략인지 알 수 있다. */}
+                <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:8}}>
+                  {rows.map(r=>(
+                    <div key={r.key} style={{background:T.alt,borderRadius:7,padding:'5px 8px'}}>
+                      <div style={{color:T.muted,fontSize:8}}>{r.label}</div>
+                      <div style={{color:r.known?T.txt:T.muted,fontSize:11,fontWeight:700,marginTop:1}}>{r.value}</div>
                     </div>
                   ))}
                 </div>
-                {/* Controls */}
-                <div style={{display:'flex',gap:6}}>
-                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,padding:'7px',background:s.status==='running'?A(T.ylw,'15'):A(T.grn,'15'),color:s.status==='running'?T.ylw:T.grn,border:`1px solid ${s.status==='running'?T.ylw:T.grn}30`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
-                    {s.status==='running'?'⏸ 일시중지':'▶ 시작'}
+
+                {/* 익절·손절은 적립 전략에서는 뜻이 없다 */}
+                {showsTpSl(kind)&&(
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:8}}>
+                    {[{l:'레버리지',v:`${s.leverage}x`},{l:'익절',v:`${s.tp}%`},{l:'손절',v:`${s.sl}%`}].map(r=>(
+                      <div key={r.l} style={{background:T.alt,borderRadius:7,padding:'5px 6px',textAlign:'center'}}>
+                        <div style={{color:T.muted,fontSize:8}}>{r.l}</div>
+                        <div style={{color:T.txt,fontSize:10,fontWeight:700,marginTop:1}}>{r.v}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* **무엇이 아직 계산되지 않는지 카드가 직접 말한다.**
+                    빈 칸을 그럴듯한 숫자로 채우는 것보다 이쪽이 낫다 —
+                    이 목록이 그대로 "안 붙인 배선 목록"이 된다. */}
+                {missing.length>0&&(
+                  <div style={{background:A(T.ylw,'10'),border:`1px solid ${A(T.ylw,'25')}`,borderRadius:8,padding:'7px 9px',marginBottom:8,color:T.ylw,fontSize:9,lineHeight:1.55}}>
+                    아직 계산되지 않는 값: {missing.join(' · ')} — 지어내지 않고 비워 둡니다
+                  </div>
+                )}
+
+                {/* Controls — 버튼 세 개가 늘 자리를 차지할 이유가 없다 */}
+                <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,minHeight:36,padding:'7px',background:acts.primary.id==='pause'?A(T.ylw,'15'):A(T.grn,'15'),color:acts.primary.id==='pause'?T.ylw:T.grn,border:`1px solid ${acts.primary.id==='pause'?A(T.ylw,'30'):A(T.grn,'30')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
+                    {acts.primary.label}
                   </button>
-                  <button onClick={e=>{e.stopPropagation();stopStrat(s.id);}} style={{flex:1,padding:'7px',background:A(T.red,'12'),color:T.red,border:`1px solid ${A(T.red,'25')}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>⏹ 중지</button>
-                  <button onClick={e=>{e.stopPropagation();setEditStrat(s);}} style={{padding:'7px 10px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>설정</button>
+                  <button onClick={e=>{e.stopPropagation();setSelStrat(selStrat?.id===s.id?null:s);}} style={{minHeight:36,padding:'7px 12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
+                    {acts.secondary.label}
+                  </button>
+                  <button onClick={e=>{e.stopPropagation();setCardMenu(m=>m===s.id?'':s.id);}} aria-label="더보기" style={{minHeight:36,minWidth:36,background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,fontSize:13,fontWeight:800,cursor:'pointer'}}>⋯</button>
                 </div>
+                {cardMenu===s.id&&(
+                  <div style={{display:'flex',gap:6,marginTop:6}}>
+                    {acts.inMenu.map(m=>(
+                      <button key={m.id} onClick={e=>{e.stopPropagation();setCardMenu('');if(m.id==='settings')setEditStrat(s);else stopStrat(s.id);}}
+                        style={{flex:1,minHeight:34,padding:'6px',background:m.id==='stop'?A(T.red,'12'):'transparent',color:m.id==='stop'?T.red:T.muted,border:`1px solid ${m.id==='stop'?A(T.red,'25'):T.border}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 {/* Expanded detail */}
                 {selStrat?.id===s.id&&(
                   <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${T.border}`}}>
@@ -323,18 +454,43 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                         <div style={{color:T.acl,fontSize:10,fontWeight:700,marginTop:1}}>{cvt(s.maxPositionSize,currency)}</div>
                       </div>
                     </div>
-                    {/* AI assistant note */}
-                    <div style={{marginTop:8,background:A(T.prp,'10'),border:`1px solid ${A(T.prp,'25')}`,borderRadius:8,padding:'8px 10px'}}>
-                      <div style={{color:T.prp,fontSize:10,fontWeight:700,marginBottom:2}}>AI 어시스턴트</div>
-                      <div style={{color:T.sub,fontSize:10,lineHeight:1.5}}>
-                        {s.status==='running'?'전략이 정상 실행 중입니다. 현재 시장 변동성이 보통 수준으로 설정된 레버리지가 적절합니다.':s.status==='paused'?'일시 중지 상태입니다. 시장 상황 확인 후 재개를 권장합니다.':'전략이 중지되었습니다. 파라미터를 검토한 후 다시 시작하세요.'}
-                      </div>
-                    </div>
+                    {/* ── 성과 ──
+                        **표본을 같이 적는다.** 3건에서 나온 승률 67%는
+                        정보가 아니라 우연이고, 그걸 다른 전략의 46%와
+                        나란히 놓으면 잘못된 비교가 된다. */}
+                    {(() => {
+                      const perf = perfSummaryOf({ winRatePct: s.trades>0?s.winRate:null, trades: s.trades });
+                      return (
+                        <div style={{marginTop:8}}>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6}}>
+                            {perf.rows.map(r=>(
+                              <div key={r.label} style={{background:T.alt,borderRadius:7,padding:'5px 6px',textAlign:'center'}}>
+                                <div style={{color:T.muted,fontSize:8}}>{r.label}</div>
+                                <div style={{color:r.known?T.txt:T.muted,fontSize:10,fontWeight:700,marginTop:1}}>{r.value}</div>
+                              </div>
+                            ))}
+                          </div>
+                          {perf.note&&(
+                            <div style={{color:T.ylw,fontSize:9,marginTop:5,lineHeight:1.5}}>⚠️ {perf.note}</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {/* **여기 있던 'AI 어시스턴트' 조언을 지웠다.**
+                        "현재 시장 변동성이 보통 수준으로 설정된 레버리지가
+                        적절합니다"라고 적혀 있었는데, 이 화면은 변동성을
+                        읽지 않는다. 아무것도 모르면서 안다고 말하는 쪽이
+                        아무 말도 안 하는 쪽보다 훨씬 나쁘다. */}
                   </div>
                 )}
               </Card>
             );
           })}
+          {(Array.isArray(strats)?strats:[]).every(s=>!passesFilter(activityOf({status:s.status,enabled:s.enabled,score:null,requiredScore:null}),stratFilter))&&(
+            <div style={{color:T.muted,fontSize:11,textAlign:'center',padding:'18px 10px',lineHeight:1.6}}>
+              고른 칸에 해당하는 전략이 없습니다 — 위 필터를 바꿔 보세요
+            </div>
+          )}
         </div>
       )}
 
