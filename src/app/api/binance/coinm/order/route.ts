@@ -72,6 +72,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'withdrawal_key_blocked' }, { status: 403 });
   }
 
+  // ── 킬 스위치 ──
+  //
+  // **여기 없었다.** 킬스위치가 선물(USDT-M)에만 있고 COIN-M에는
+  // 없으면, 사용자가 켠 뒤에도 COIN-M 주문은 계속 나간다.
+  // 경로가 둘인데 한쪽만 고친 자리다.
+  {
+    const { killSwitchGate } = await import('@/lib/risk/killSwitch');
+    const ksg = await killSwitchGate(sb, body.connectionId);
+    if (!ksg.allowed) {
+      return NextResponse.json({ error: ksg.error, message: ksg.message }, { status: ksg.status });
+    }
+  }
+
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const dapi = await import('@/lib/exchanges/binanceCoinFutures');
   const apiKey = conn.api_key || '';

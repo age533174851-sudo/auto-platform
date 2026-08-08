@@ -257,6 +257,21 @@ export async function POST(req: NextRequest) {
       ...base, executed: false, blocked: 'NO_CONNECTION', error: connErr,
     }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
   }
+  // ── 킬 스위치 ──
+  //
+  // **여기 없었다.** liveTradingGate와 킬스위치는 다른 장치다 —
+  // 앞엣것은 "이 배포에서 실거래를 허용하는가", 뒤엣것은 "이 계좌를
+  // 지금 멈춰라"다. 사용자가 누르는 건 뒤엣것이다.
+  {
+    const { killSwitchGate } = await import('@/lib/risk/killSwitch');
+    const ksg = await killSwitchGate(sb, body.connectionId);
+    if (!ksg.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'KILL_SWITCH', error: ksg.message,
+      }, { status: ksg.status, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   if (conn.exchange !== 'binance' && conn.exchange !== 'gate') {
     return NextResponse.json({
       ...base, executed: false, blocked: 'NO_CONNECTION',

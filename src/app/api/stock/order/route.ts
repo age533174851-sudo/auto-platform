@@ -117,6 +117,19 @@ export async function POST(req: NextRequest) {
     cash = bal.cash;
   }
 
+
+  // ── 킬 스위치 ──
+  //
+  // **여기 없었다.** 킬스위치가 일곱 주문 경로 중 둘에서만 돌면 그건
+  // 없는 것보다 나쁘다 — 사용자는 다 멈춘 줄 알고 화면을 닫는다.
+  {
+    const { killSwitchGate } = await import('@/lib/risk/killSwitch');
+    const ksg = await killSwitchGate(sb, conn.id);
+    if (!ksg.allowed) {
+      return NextResponse.json({ error: ksg.error, message: ksg.message }, { status: ksg.status });
+    }
+  }
+
   // ── 5) 점검 목록 ──
   const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
   const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');

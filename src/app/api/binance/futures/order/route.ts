@@ -30,7 +30,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateOrder } from '@/lib/engine/orderValidation';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { isKillSwitchActive } from '@/lib/risk/killSwitch';
+import { killSwitchGate } from '@/lib/risk/killSwitch';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -124,7 +124,13 @@ export async function POST(req: NextRequest) {
 
   // 킬스위치 가드: 신규 진입 차단 (reduce-only 종료는 허용)
   if (!reduceOnly) {
-    try { const ks = await isKillSwitchActive(sb, connectionId); if (ks.active) return NextResponse.json({ error: 'kill_switch_active', message: `🛑 킬스위치 발동 중 (${ks.reason || '계좌 보호'})` }, { status: 423 }); } catch {}
+    // **`try {} catch {}`로 감싸면 안 된다.** 예전에는 감싸져 있어서
+    // 조회가 실패하면 조용히 통과했다 — 막으라고 만든 장치가 못 읽는
+    // 순간 사라졌다. killSwitchGate가 '확인 못 함'을 차단으로 바꾼다.
+    const ksg = await killSwitchGate(sb, connectionId);
+    if (!ksg.allowed) {
+      return NextResponse.json({ error: ksg.error, message: ksg.message }, { status: ksg.status });
+    }
   }
 
   // ── 거래소 수량·가격 단위 ──
