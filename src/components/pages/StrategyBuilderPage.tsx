@@ -307,22 +307,35 @@ function StrategyList({
   // 이 사실이 화면에 안 뜨면 사용자는 "왜 안 돌지"를 타이머 문제로
   // 오해한다. 그리고 기기를 바꾸거나 브라우저 데이터를 지우면
   // 전략이 통째로 사라진다는 것도 모른다.
-  const loc = locationVerdict('EXECUTION', 'BROWSER_ONLY');
+  // ── 같은 화면이 서로 반대되는 말을 하고 있었다 ──
+  //
+  // 이 카드는 "전략이 이 브라우저에만 저장됩니다"라고 적었다. 그런데
+  // 같은 파일이 위에서 `pullStrategies()`·`pushStrategies()`를 실제로
+  // 부르고 있다 — 서버에 미러링되고 있다는 뜻이다.
+  //
+  // 둘 중 하나는 거짓이고, 이 경우 거짓은 경고문이었다. 사용자는 다른
+  // 기기에서 안 보일 거라고 믿고 전략을 다시 만든다 — 그러면 같은 전략이
+  // 둘이 되고, 둘 다 켜지면 같은 신호에 주문이 두 번 나간다.
+  //
+  // 진짜로 아직 안 된 것은 **서버 실행기**다. 서버는 전략을 읽을 수 있지만
+  // 그걸 주기적으로 읽고 돌리는 Worker가 없다. 그래서 이 화면을 닫으면
+  // 아무것도 돌지 않는다 — 저장 위치 문제가 아니라 실행기 문제다.
+  const loc = locationVerdict('EXECUTION', 'SERVER_MIRROR');
   const storageWarning = (
     <div style={{
       background: A(T.ylw, '10'), border: `1px solid ${A(T.ylw, '30')}`,
       borderRadius: R.sm, padding: '9px 11px', marginBottom: SP.sm,
     }}>
       <div style={{ color: T.ylw, fontSize: 10.5, fontWeight: 700, lineHeight: 1.55 }}>
-        ⚠ 전략이 이 브라우저에만 저장됩니다
+        ⚠ 저장은 되지만 이 화면을 닫으면 돌지 않습니다
       </div>
       <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.6 }}>
         {loc.warning}
       </div>
       <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.6 }}>
-        · 다른 기기에서는 보이지 않습니다<br />
-        · 브라우저 데이터를 지우면 사라집니다<br />
-        · 시크릿 모드에서는 남지 않습니다
+        · 전략은 서버에도 복사됩니다 — 다른 기기에서 로그인하면 보입니다<br />
+        · 복사가 실패하면 위에 <b style={{ color: T.red }}>목록 확인 실패</b>가 뜹니다<br />
+        · <b style={{ color: T.ylw }}>실행은 이 화면이 열려 있을 때만</b> 됩니다 (60초마다 평가)
       </div>
     </div>
   );
@@ -335,7 +348,7 @@ function StrategyList({
         </div>
         <div style={{ ...F.body, color: T.txt, marginBottom: 4 }}>아직 만든 전략이 없습니다</div>
         <div style={{ ...F.muted, marginBottom: 6, color: T.ylw, lineHeight: 1.55 }}>
-          만든 전략은 이 브라우저에만 저장됩니다 — 다른 기기에서는 보이지 않습니다
+          만든 전략은 서버에도 저장됩니다 — 다만 실행은 이 화면이 열려 있을 때만 됩니다
         </div>
         <div style={{ ...F.muted, marginBottom: SP.md }}>AI 생성 또는 직접 생성 탭에서 만들어보세요</div>
         <button onClick={onNew}

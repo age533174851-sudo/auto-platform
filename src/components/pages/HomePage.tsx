@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import type { ScheduleDisplay } from '@/lib/engine/decisionTrace';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -63,7 +64,14 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   const [favs, setFavs] = useState<string[]>([]);
   useEffect(() => { setFavs(getFavorites()); return subscribeFavorites(() => setFavs(getFavorites())); }, []);
   const top5=useMemo(()=>[...prices].sort((a,b)=>b.c-a.c).slice(0,5),[prices]);
-  const [autoAll,setAutoAll]=useState(true);
+  // ── 자동매매 상태는 지어내지 않는다 ──
+  //
+  // **`useState(true)`였다.** 그래서 홈은 화면을 열자마자 "자동매매
+  // 실행중 · EMA 추세 + DCA 실행 중"이라고 적었다. 실행기를 물어본
+  // 적도 없고, 그 두 전략이 실제로 돌고 있는지도 확인한 적이 없다.
+  //
+  // 사용자는 그 문장을 보고 앱을 닫는다. 그리고 아무것도 돌지 않는다.
+  const [autoState, setAutoState] = useState<ScheduleDisplay | null>(null);
 
   // top5 자산의 로고 batch 로드
   const logoSymbols = useMemo(() => {
@@ -76,11 +84,59 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   }, [top5]);
   const logoMap = useLogoMap(logoSymbols);
 
-  const LONG_VALUE  = 48500000;
-  const SHORT_VALUE = 1230000;
-  const CASH_VALUE  = 5000000;
-  const TOTAL = LONG_VALUE + SHORT_VALUE + CASH_VALUE;
-  const TOTAL_PNL   = 2870000;
+  // ── 총자산도 지어내지 않는다 ──
+  //
+  // 여기에 이런 값이 박혀 있었다:
+  //
+  //   LONG_VALUE  = 48500000
+  //   SHORT_VALUE = 1230000
+  //   CASH_VALUE  = 5000000
+  //   TOTAL_PNL   = 2870000
+  //
+  // 4,850만원이 실제 총자산처럼, 287만원이 오늘 손익처럼 떴다.
+  // **이건 예시라고 어디에도 안 적혀 있었다.** 사용자는 자기 계좌를
+  // 보고 있다고 믿는다 — 그 숫자를 근거로 자금을 더 넣거나 뺀다.
+  //
+  // 홈은 계좌를 직접 조회하지 않는다(홈이 무거워지면 첫 화면이 늦다).
+  // 대신 **모른다고 적고 지갑으로 보낸다.** 그게 그럴듯한 숫자보다 낫다.
+  const [equity, setEquity] = useState<{ total: number | null; note: string }>(
+    { total: null, note: '' });
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [{ loadExchangeConnectionsResult }, wa, dt] = await Promise.all([
+          import('@/lib/supabase/hooks'),
+          import('@/lib/portfolio/walletAccounts'),
+          import('@/lib/engine/decisionTrace'),
+        ]);
+        if (!alive) return;
+
+        // 자동매매: 예약이 있는지 / 켜져 있는지 / 마지막에 언제 돌았는지.
+        // 셋은 서로 다른 사실이고, 하나로 뭉개면 "실행중"이 거짓이 된다.
+        setAutoState(dt.scheduleDisplay({ scheduleCount: 0, enabledCount: null }));
+
+        const r = await loadExchangeConnectionsResult();
+        if (!alive) return;
+        if (!r.ok) {
+          setEquity({ total: null, note: '계좌 목록을 확인하지 못했습니다 — 자산이 없다는 뜻이 아닙니다' });
+          return;
+        }
+        const accts = wa.accountsFromConnections(r.connections);
+        if (accts.length === 0) {
+          setEquity({ total: null, note: '연결된 거래소 계좌가 없습니다' });
+          return;
+        }
+        // 계좌가 있다는 것까지만 안다. 잔고는 지갑에서 읽는다 —
+        // 여기서 또 조회하면 지갑과 홈이 서로 다른 순간의 값을 보여 준다.
+        setEquity({ total: null, note: `연결된 계좌 ${accts.length}개 · 잔고는 지갑에서 확인하세요` });
+      } catch {
+        if (alive) setEquity({ total: null, note: '자산을 확인하지 못했습니다' });
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   return (
     <div>
@@ -100,26 +156,48 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
       {/* ── 총자산 히어로 ── */}
       <div style={{background:'linear-gradient(145deg,var(--t-card),var(--t-bg))',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>
-        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>내 총자산 · {tr(lang,'mock')}</span></div>
-        <div style={{color:T.txt,fontSize:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1.5}}>{cvt(TOTAL,currency)}</div>
-        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
-          <span style={{color:T.muted,fontSize:12}}>오늘 손익</span>
-          <span style={{color:TOTAL_PNL>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>{TOTAL_PNL>=0?'+':''}{cvt(Math.abs(TOTAL_PNL),currency)}</span>
-          <Bdg c={TOTAL_PNL>=0?T.grn:T.red} ch={fmtPct(TOTAL_PNL/TOTAL*100)}/>
+        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>내 총자산</span></div>
+        {/* **못 읽은 것을 숫자로 그리지 않는다.** 0도 아니고 예시도 아니다. */}
+        <div style={{color:equity.total==null?T.muted:T.txt,fontSize:equity.total==null?20:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:equity.total==null?0:-1.5}}>
+          {equity.total==null?'확인 불가':cvt(equity.total,currency)}
         </div>
+        <div style={{color:T.muted,fontSize:10.5,marginTop:6,lineHeight:1.55}}>
+          {equity.note || '자산을 읽는 중…'}
+        </div>
+        <button onClick={()=>onNav('wallet')} style={{marginTop:10,minHeight:34,padding:'6px 12px',borderRadius:9,background:T.acg,color:T.acl,border:`1px solid ${T.acl}`,fontSize:11,fontWeight:800,cursor:'pointer'}}>
+          지갑에서 자산 보기
+        </button>
       </div>
 
       {/* ── 자동매매 상태 ── */}
-      <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${autoAll?A(T.grn,'40'):T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
-        <div style={{flexShrink:0,width:40,height:40,borderRadius:11,background:(autoAll?T.grn:T.muted)+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
-          <Bot size={20} color={autoAll?T.grn:T.muted}/>
-        </div>
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{color:T.txt,fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:6}}>자동매매 <span style={{width:7,height:7,borderRadius:'50%',background:autoAll?T.grn:T.muted,display:'inline-block'}}/><span style={{color:autoAll?T.grn:T.muted,fontSize:11,fontWeight:700}}>{autoAll?'실행중':'정지'}</span></div>
-          <div style={{color:T.muted,fontSize:11,marginTop:1}}>{autoAll?'EMA 추세 + DCA 실행 중':'탭하여 자동매매 시작'}</div>
-        </div>
-        <ChevronRight size={18} color={T.muted}/>
-      </button>
+      {/* **켜짐과 돌고 있음은 다른 사실이다.**
+          예전에는 useState(true)로 시작해 무조건 "실행중 · EMA 추세 + DCA
+          실행 중"이라고 적었다. 실행기를 물어본 적이 없다. 사용자는 그
+          문장을 보고 앱을 닫고, 아무것도 돌지 않는다. */}
+      {(() => {
+        const running = autoState?.running === true;
+        const c = running ? T.grn : T.muted;
+        return (
+          <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${running?A(T.grn,'40'):T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
+            <div style={{flexShrink:0,width:40,height:40,borderRadius:11,background:c+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <Bot size={20} color={c}/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{color:T.txt,fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:6}}>
+                자동매매
+                <span style={{width:7,height:7,borderRadius:'50%',background:c,display:'inline-block'}}/>
+                <span style={{color:c,fontSize:11,fontWeight:700}}>
+                  {autoState==null?'확인 중':running?'실행 중':'정지'}
+                </span>
+              </div>
+              <div style={{color:T.muted,fontSize:10.5,marginTop:2,lineHeight:1.5}}>
+                {autoState?.text ?? '실행기 상태를 확인하고 있습니다'}
+              </div>
+            </div>
+            <ChevronRight size={18} color={T.muted}/>
+          </button>
+        );
+      })()}
 
       {/* ── 핵심 4버튼 (2×2) ── */}
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:18}}>
