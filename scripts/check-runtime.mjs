@@ -42,6 +42,11 @@ const CLASSIFIED = new Map([
     'EXEC — 전략빌더 전략을 60초마다 평가한다. 화면이 닫히면 안 돈다'],
   ['src/components/terminal/DemoRunner.tsx',
     'EXEC — 데모 실행기. 데모라 서버로 옮길 필요는 없지만 상시 실행이 아니다'],
+  ['src/components/SeasonDashboard.tsx',
+    'REFRESH — 시장 점수를 60초마다 다시 읽는다. 주문이나 판단을 만들지 '
+    + '않고 화면의 숫자만 새로 그린다. 예전에는 마운트할 때 한 번뿐이라 '
+    + '몇 시간 전 점수가 계속 떠 있었다 — 그런데 언제 것인지도 안 적혀 '
+    + '있었다. 화면을 닫으면 안 돌아도 되는 종류다'],
   ['src/components/terminal/ScheduledExitPanel.tsx',
     'EXEC — 예약 청산 감시. 화면이 닫히면 청산이 안 걸린다. '
     + '못 여는 것은 불편이고 못 닫는 것은 사고다 — 우선순위가 높다'],

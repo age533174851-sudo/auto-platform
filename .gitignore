@@ -21,3 +21,6 @@ tsconfig.tsbuildinfo
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# 워커 빌드 산출물 — tsc가 만든다. 추적하면 커밋마다 diff가 낀다
+worker/dist/

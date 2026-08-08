@@ -45,6 +45,7 @@ const HomePageComp    = dynamic(() => import('@/components/pages/HomePage'),    
 const MarketPageComp  = dynamic(() => import('@/components/pages/MarketPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const WatchlistPage   = dynamic(() => import('@/components/pages/WatchlistPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const WalletPageComp = dynamic(() => import('@/components/pages/WalletPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const TestnetReadinessComp = dynamic(() => import('@/components/pages/TestnetReadinessPage'),{ ssr: false });
 const PortfolioPageComp = dynamic(() => import('@/components/pages/PortfolioPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const TradingPageComp = dynamic(() => import('@/components/pages/TradingPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const AutoPageComp    = dynamic(() => import('@/components/pages/AutoPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -222,6 +223,7 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
   {id:'wallet',       label:'지갑',       Icon: Wallet2, core: true},
   {id:'watchlist',    label:'왓치리스트', Icon: Star, core: true},
   {id:'season',       label:'시즌전략',   Icon: Sprout},
+  {id:'testnet_ready',label:'테스트넷 준비', Icon: FlaskConical, core: true},
   {id:'ai_usage',     label:'AI 관리센터', Icon: Cpu},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
@@ -755,6 +757,7 @@ export default function App() {
         case 'risk_settings':return <RiskSettingsPage/>;
         case 'season':       return <SeasonDashboard/>;
         case 'wallet':       return <WalletPageComp/>;
+        case 'testnet_ready':return <TestnetReadinessComp/>;
         case 'portfolio':    return <PortfolioPageComp prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'history':      return <HistoryPage/>;
         case 'backtest':     return <BacktestPage/>;
@@ -921,7 +924,15 @@ export default function App() {
             </div>
             <div className="hdr-actions" style={{display:'flex',alignItems:'center',gap:4}}>
               <div style={{display:'flex',alignItems:'center',gap:3,background:priceStatus==='live'?'rgba(16,185,129,.12)':priceStatus==='mock'?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)',border:`1px solid ${priceStatus==='live'?'rgba(16,185,129,.3)':priceStatus==='mock'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}`,borderRadius:20,padding:'2px 7px'}}>
-                <Dot c={priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red}/><span style={{color:priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red,fontSize:9,fontWeight:700}}>{priceStatus==='live'?'LIVE':priceStatus==='mock'?'MOCK':'ERR'}</span>
+                {/* ── '시세'라고 반드시 적는다 ──
+                    예전에는 그냥 `LIVE`였다. 이건 **시세 연결 상태**인데,
+                    초록 LIVE를 본 사용자는 당연히 '실전 환경'으로 읽는다.
+                    모의매매·전략빌더·시즌전략을 보고 있어도 초록 LIVE가
+                    떴다 — 실제 돈이 걸린 화면과 구분이 안 됐다.
+
+                    거래환경(MOCK/TESTNET/LIVE)은 각 화면이 자기 배지로
+                    말한다. 여기서는 시세만 말한다. */}
+                <Dot c={priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red}/><span style={{color:priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red,fontSize:9,fontWeight:700}}>{priceStatus==='live'?'시세 LIVE':priceStatus==='mock'?'시세 MOCK':'시세 오류'}</span>
               </div>
               {/* 테마는 설정에도 있지만 여기에도 둔다. 밝기는 자주 바꾸는
                   것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.

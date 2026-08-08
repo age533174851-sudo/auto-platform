@@ -21,6 +21,7 @@
 //   900~    좌측 숨김 + 우측 좁게
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { C, FS } from './theme';
+import { layoutPlanOf, type LayoutPlan } from '@/lib/ui/layoutMode';
 import { TerminalProvider, useTerminal } from './TerminalContext';
 import { TopBar } from './TopBar';
 import { LeftRail } from './LeftRail';
@@ -46,13 +47,17 @@ function clampLayout(l: Partial<Layout>): Layout {
   };
 }
 
-type Tier = 'wide' | 'mid' | 'narrow' | 'mobile';
-function tierOf(w: number): Tier {
-  if (w >= 1400) return 'wide';
-  if (w >= 1100) return 'mid';
-  if (w >= 900) return 'narrow';
-  return 'mobile';
-}
+// 배치 판정은 `lib/ui/layoutMode`가 한다.
+//
+// 예전에는 여기서 `window.innerWidth`만 보고 900/1100/1400으로 갈랐다.
+// 두 가지가 문제였다:
+//
+//   1. **뷰포트만 봤다.** 갤럭시탭 분할화면에서 innerWidth는 1280인데
+//      우리 앱에 주어진 폭은 700px일 수 있다. 그때 3열을 그리면 깨진다
+//   2. **이 파일 안에만 있었다.** 다른 화면은 각자 다른 기준을 쓰거나
+//      아예 안 썼다 — 한 화면을 고치면 다른 화면에서 또 패드가 깨진다
+//
+// 이제 실제 컨테이너 폭을 재고, 판정은 다른 화면과 공유한다.
 
 function Splitter({ vertical, onDrag }: { vertical?: boolean; onDrag: (deltaPx: number) => void }) {
   const [active, setActive] = useState(false);
@@ -106,7 +111,7 @@ function Pane({ children, style }: { children: React.ReactNode; style?: React.CS
   );
 }
 
-function DesktopShell({ tier, embedded }: { tier: Exclude<Tier, 'mobile'>; embedded?: boolean }) {
+function DesktopShell({ plan, embedded }: { plan: LayoutPlan; embedded?: boolean }) {
   const { mode, symbol } = useTerminal();
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT);
   const [balance, setBalance] = useState<number | null>(null);
@@ -151,9 +156,13 @@ function DesktopShell({ tier, embedded }: { tier: Exclude<Tier, 'mobile'>; embed
     });
   }, []);
 
-  const showLeft = tier !== 'narrow' && layout.leftOpen;
+  // **패드에서 전체 메뉴를 펼치지 않는다.** 220px는 여기서 너무 비싸고,
+  // 그만큼 주문판이 눌린다.
+  const showLeft = plan.sidebar === 'FULL' && layout.leftOpen;
   const leftPct = showLeft ? layout.left : 0;
-  const rightPct = tier === 'narrow' ? Math.min(layout.right, 32) : layout.right;
+  // **오른쪽 시세·뉴스는 거래 실행보다 우선순위가 낮다.** 시세를 못 보면
+  // 불편하지만, 주문 버튼이 호가 위로 겹치면 잘못된 주문이 나간다.
+  const rightPct = plan.rightRailVisible ? layout.right : 0;
   const centerPct = 100 - leftPct - rightPct;
 
   return (
@@ -182,7 +191,7 @@ function DesktopShell({ tier, embedded }: { tier: Exclude<Tier, 'mobile'>; embed
             width: `${centerPct}%`, flex: showLeft ? undefined : 1, position: 'relative',
           }}>
             {/* 접어놓고 못 찾으면 접힌 게 아니라 사라진 것이다 */}
-            {tier !== 'narrow' && (
+            {plan.rightRailVisible && (
               <button
                 onClick={() => save({ ...layout, leftOpen: !showLeft })}
                 title={showLeft ? '시장 패널 접기' : '시장 패널 열기'}
@@ -215,22 +224,48 @@ function DesktopShell({ tier, embedded }: { tier: Exclude<Tier, 'mobile'>; embed
 function ShellInner({ embedded }: { embedded?: boolean }) {
   // 서버·첫 렌더에서는 폭을 모른다. 모르는 채로 PC를 그리면 모바일에서
   // 한 번 깜빡이므로, 정해진 뒤에 그린다.
-  const [tier, setTier] = useState<Tier | null>(null);
+  // ── 실제로 우리에게 주어진 폭을 잰다 ──
+  //
+  // `window.innerWidth`가 아니라 이 컨테이너의 폭이다. 분할화면·사이드
+  // 패널·확대 때문에 둘은 자주 다르고, 큰 쪽을 믿으면 안 들어가는
+  // 배치를 그린다.
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [plan, setPlan] = useState<LayoutPlan | null>(null);
 
   useEffect(() => {
-    const onResize = () => setTier(tierOf(window.innerWidth));
-    onResize();
-    window.addEventListener('resize', onResize);
-    window.addEventListener('orientationchange', onResize);
+    const measure = () => {
+      const w = boxRef.current?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 0);
+      const vw = typeof window !== 'undefined' ? window.innerWidth : undefined;
+      const portrait = typeof window !== 'undefined' && window.innerHeight > window.innerWidth;
+      setPlan(layoutPlanOf(w, { viewportWidthPx: vw, portrait }));
+    };
+    measure();
+    // ResizeObserver가 있으면 컨테이너 변화까지 잡는다 — 분할화면 손잡이를
+    // 끌 때 resize 이벤트가 안 오는 경우가 있다.
+    let ro: any = null;
+    if (typeof ResizeObserver !== 'undefined' && boxRef.current) {
+      ro = new ResizeObserver(measure);
+      ro.observe(boxRef.current);
+    }
+    window.addEventListener('resize', measure);
+    window.addEventListener('orientationchange', measure);
     return () => {
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('orientationchange', onResize);
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('orientationchange', measure);
     };
   }, []);
 
-  if (tier === null) return <div style={{ background: C.bg, height: embedded ? '100%' : '100dvh' }}/>;
-  if (tier === 'mobile') return <MobileShell embedded={embedded}/>;
-  return <DesktopShell tier={tier} embedded={embedded}/>;
+  // 폭을 재기 전에 그리면 한 번 깜빡인다.
+  return (
+    <div ref={boxRef} style={{ width: '100%', height: embedded ? '100%' : '100dvh', minWidth: 0 }}>
+      {plan === null
+        ? <div style={{ background: C.bg, height: '100%' }}/>
+        : plan.mode === 'MOBILE'
+          ? <MobileShell embedded={embedded}/>
+          : <DesktopShell plan={plan} embedded={embedded}/>}
+    </div>
+  );
 }
 
 export default function TerminalShell(

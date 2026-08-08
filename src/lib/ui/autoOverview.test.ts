@@ -412,4 +412,41 @@ export function runAutoOverviewTests() {
   test('심볼이 없으면 빈 칸으로 두지 않는다', () => {
     eq(scheduleSummaryOf({}).symbol, '심볼 없음');
   });
+
+  console.log('[자동매매 개요 — 화면이 서로 다른 이유를 말하지 않는다]');
+
+  test('신호가 통과했으면 신호가 부족하다고 하지 않는다', () => {
+    // 실제로 찍힌 화면:
+    //   LONG 58.23 / SHORT 41.77 (차이 16.46) · 최소 12점
+    //   "최소차이 12점보다 부족해 관망"   ← 16.46 > 12인데?
+    //   차단 이유: 전체 위험 한도 초과    ← 진짜 이유
+    //
+    // 맨 위 문구가 신호를 가리키면 사용자는 신호 설정을 고치려 들고,
+    // 고쳐도 계속 막힌다. 고칠 곳은 위험 설정이다.
+    const c = decisionCardOf({
+      symbol: 'BTCUSDT',
+      stored: {
+        verdict: 'WATCHING', reason: '전체 위험 한도 초과',
+        longScore: 58.23, shortScore: 41.77, margin: 16.46, minMargin: 12,
+      },
+    } as any);
+    assert(!c.headline.includes('부족해'), c.headline);
+    assert(c.headline.includes('신호는 통과'), c.headline);
+    assert(c.headline.includes('차단 사유'), c.headline);
+  });
+
+  test('신호가 진짜 부족하면 그렇게 적는다', () => {
+    const c = decisionCardOf({
+      symbol: 'BTCUSDT',
+      stored: {
+        verdict: 'WATCHING', longScore: 52, shortScore: 48, margin: 4, minMargin: 12,
+      },
+    } as any);
+    assert(c.headline.includes('부족해'), c.headline);
+  });
+
+  test('점수를 못 읽으면 부족하다고 단정하지 않는다', () => {
+    const c = decisionCardOf({ symbol: 'BTCUSDT', stored: { verdict: 'WATCHING' } } as any);
+    assert(!c.headline.includes('부족해'), c.headline);
+  });
 }

@@ -1,0 +1,37 @@
+-- 049_worker_heartbeat_note.sql
+--
+-- **이 번호는 비어 있다. 실행할 것이 없다.**
+--
+-- 원래 여기에 `worker_heartbeats`(복수) 표를 만드는 마이그레이션이 있었다.
+-- 지웠다. 이 파일은 그 자리에 왜 아무것도 없는지를 남기기 위한 것이다 —
+-- 안 그러면 다음 사람이 같은 표를 다시 만든다.
+--
+-- 왜 지웠나
+-- ─────────
+-- **심장박동 표는 이미 있다.** `worker_heartbeat`(단수)이고
+-- `supabase/migrations/kill_switch.sql`에서 만든다:
+--
+--     worker_heartbeat (worker_id PK, last_seen, status,
+--                       current_task, error_count, updated_at)
+--
+-- Worker가 실제로 쓰는 곳도 그쪽이다 (`worker/src/supabase.ts`의
+-- `heartbeat()` → `.from('worker_heartbeat').upsert(...)`).
+-- 화면이 읽는 곳도 그쪽이다 (`/api/worker/status` → `judgeExecutor`).
+--
+-- 즉 049는 **아무도 쓰지 않는 두 번째 표**를 만들고 있었다. 그게 왜
+-- 나쁜가: 표가 둘이면 언젠가 한쪽에만 쓰고 다른 쪽을 읽는다. 그때 화면은
+-- "실행기가 죽었다"고 적는데 Worker는 멀쩡히 주문을 내고 있다. 이 저장소에서
+-- 반복된 사고가 정확히 그 모양이다 — **경로가 둘인데 한쪽만 고침.**
+--
+-- 049가 하려던 구분("실행기는 정상인데 시킬 일이 없다" vs "실행기가 죽었다")은
+-- 표를 새로 만들 필요가 없었다. 단수 표의 `status`·`current_task`가 이미 그것을
+-- 담고 있고, 판정은 `src/lib/jobs/executorHealth.ts`의 `judgeExecutor` 한 곳에 있다.
+--
+-- 새 칸이 필요해지면
+-- ──────────────────
+-- 표를 새로 만들지 말고 `ALTER TABLE worker_heartbeat ADD COLUMN`으로 붙이고,
+-- **같은 커밋에서 `worker/src/supabase.ts`의 `heartbeat()`가 그 칸을 쓰게**
+-- 하세요. 쓰는 쪽 없이 칸만 만들면 그 칸은 영원히 NULL이고, 화면은 그것을
+-- '값이 없다'로 읽는다.
+
+SELECT 1;

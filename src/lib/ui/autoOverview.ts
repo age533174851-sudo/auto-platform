@@ -25,6 +25,8 @@
 
 // ── 탭 ────────────────────────────────────────────────────
 
+import { signalGate } from '../engine/decisionTrace';
+
 export type AutoTabId = 'overview' | 'strategies' | 'schedule' | 'history' | 'diagnostics';
 
 /**
@@ -394,11 +396,37 @@ export function decisionCardOf(input: DecisionInput | null | undefined): Decisio
 
   const headlineFor = (v: DecisionVerdict): string => {
     if (v === 'WATCHING') {
+      // ── 숫자를 보고 말한다 ──
+      //
+      // **여기가 화면이 거짓말하던 자리다.** 예전에는 점수가 있으면
+      // 무조건 "신호 우위가 부족해 관망했습니다"라고 썼다. 그래서
+      // 실제로 이런 화면이 떴다:
+      //
+      //   LONG 58.23 / SHORT 41.77          ← 차이 16.46점
+      //   "최소차이 12점보다 부족해 관망"     ← 16.46 > 12인데?
+      //   차단 이유: 전체 위험 한도 초과      ← 진짜 이유
+      //
+      // 신호는 통과했는데 위험엔진에서 막힌 것이다. 그런데 맨 위 문구가
+      // 신호를 가리키니 **사용자는 신호 설정을 고치려 들고, 고쳐도
+      // 계속 막힌다.** 고칠 곳은 위험 설정이다.
+      //
+      // 판정은 engine/decisionTrace가 한다 — 화면마다 다른 기준으로
+      // 문구를 만들면 같은 순간에 서로 다른 이유가 뜬다.
+      const sg = signalGate(scores.longScore, scores.shortScore, scores.minMargin);
       const gapText = scores.margin != null && scores.minMargin != null
         ? `실제 차이 ${scores.margin}점 · 진입 필요 최소차이 ${scores.minMargin}점`
         : '';
-      return gapText ? `신호 우위가 부족해 관망했습니다 — ${gapText}`
-        : '조건이 맞지 않아 진입하지 않았습니다';
+
+      if (sg.status === 'PASS') {
+        // 신호는 넘었다. 그러면 관망의 원인은 신호가 아니다.
+        return `신호는 통과했는데 진입하지 않았습니다 — ${gapText}.`
+          + ' 아래 차단 사유를 보세요 (위험 한도·실행기·주문 조건 중 하나입니다)';
+      }
+      if (sg.status === 'BLOCK') {
+        return `신호 우위가 부족해 관망했습니다 — ${gapText}`;
+      }
+      // 점수를 못 읽었다. **부족하다고 단정하지 않는다.**
+      return '조건이 맞지 않아 진입하지 않았습니다 (점수를 읽지 못해 이유를 좁히지 못했습니다)';
     }
     if (v === 'ENTERED') return '진입했습니다';
     if (v === 'ERROR') return '실행이 실패했습니다';

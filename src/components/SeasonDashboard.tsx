@@ -2,7 +2,6 @@
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { getCurrentSeasonMode, getAdjustedParams, SEASON_CONFIGS, formatSeasonMode } from '@/lib/season';
-import { getMockMarketScore } from '@/lib/market';
 import type { MarketScore } from '@/lib/market';
 import type { SeasonMode } from '@/lib/season';
 
@@ -61,18 +60,36 @@ export default function SeasonDashboard() {
     setSeason(getCurrentSeasonMode());
   }, []);
 
+  // ── 조회 실패를 MOCK으로 조용히 바꾸지 않는다 ──
+  //
+  // 예전에는 `/api/market-score`가 실패하면 `getMockMarketScore()`를
+  // 넣었다. 그런데 화면 제목은 그대로 "AI 시장 분석"이다.
+  //
+  // **사용자는 그것이 지금 시장이라고 믿는다.** 그 점수를 보고 계절
+  // 전략을 켜거나 끈다 — 실제로는 아무 데이터도 없는데.
+  //
+  // 조용히 틀리는 쪽이 언제나 더 나쁘다. 못 읽으면 못 읽었다고 적는다.
+  const [scoreError, setScoreError] = useState('');
+  const [scoreAtMs, setScoreAtMs] = useState<number | null>(null);
+
   const fetchScore = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/market-score');
+      const r = await fetch('/api/market-score', { cache: 'no-store' });
       if (r.ok) {
         const d = await r.json();
         setScore(d);
+        setScoreError('');
+        setScoreAtMs(Date.now());
       } else {
-        setScore(getMockMarketScore());
+        // **점수를 지우고 실패를 남긴다.** 앞 값을 남겨 두면 그것이
+        // 지금 시장인 줄 알고 본다.
+        setScore(null);
+        setScoreError(`시장 점수를 읽지 못했습니다 (HTTP ${r.status}) — 점수가 없다는 뜻이 아닙니다`);
       }
-    } catch {
-      setScore(getMockMarketScore());
+    } catch (e: any) {
+      setScore(null);
+      setScoreError(`시장 점수를 읽지 못했습니다 (${String(e?.message || e)})`);
     } finally {
       setLoading(false);
     }
@@ -80,6 +97,17 @@ export default function SeasonDashboard() {
 
   useEffect(() => {
     if (mounted) fetchScore();
+  }, [mounted, fetchScore]);
+
+  // ── 자동 갱신 ──
+  //
+  // 예전에는 마운트할 때 한 번 + 수동 새로고침뿐이었다. 시장 점수는
+  // 시간이 지나면 틀린 값이 되는데, 화면은 몇 시간 전 점수를 계속
+  // 보여 준다 — 그리고 언제 것인지도 안 적혀 있었다.
+  useEffect(() => {
+    if (!mounted) return;
+    const t = setInterval(fetchScore, 60_000);
+    return () => clearInterval(t);
   }, [mounted, fetchScore]);
 
   if (!mounted) return (
@@ -156,15 +184,39 @@ export default function SeasonDashboard() {
           </div>
         </div>
 
+        {/* ── 못 읽었으면 그렇다고 적는다 ──
+            예전에는 실패하면 MOCK 점수를 넣었고 제목은 그대로
+            "AI 시장 분석"이었다. 사용자는 그것이 지금 시장이라고 믿고
+            계절 전략을 켜거나 끈다 — 실제로는 아무 데이터도 없는데. */}
+        {scoreError && (
+          <div style={{
+            background: A(T.red, '12'), border: `1px solid ${T.red}44`,
+            borderRadius: 8, padding: '8px 10px', marginBottom: 10,
+            color: T.red, fontSize: 10.5, lineHeight: 1.6,
+          }}>
+            <b>시장 점수 확인 불가</b>
+            <div style={{ color: T.muted, marginTop: 2 }}>{scoreError}</div>
+          </div>
+        )}
+
         {/* Overall score gauge */}
         <div style={{ marginBottom:10 }}>
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
-            <span style={{ color:T.muted, fontSize:10 }}>시장 점수</span>
-            <span style={{ color: (score?.overall||0) >= 0 ? T.grn : T.red, fontWeight:700, fontSize:12 }}>
-              {score?.overall ?? 0 >= 0 ? '+' : ''}{score?.overall ?? 0}
+            <span style={{ color:T.muted, fontSize:10 }}>
+              시장 점수
+              {scoreAtMs != null && (
+                <span style={{ marginLeft: 5, fontSize: 8.5 }}>
+                  · {Math.max(0, Math.round((Date.now() - scoreAtMs) / 1000))}초 전
+                </span>
+              )}
+            </span>
+            {/* **0으로 그리지 않는다.** 0은 '중립'이라는 뜻이고,
+                못 읽은 것과 전혀 다르다. */}
+            <span style={{ color: score == null ? T.muted : (score.overall || 0) >= 0 ? T.grn : T.red, fontWeight:700, fontSize:12 }}>
+              {score == null ? '확인 불가' : `${(score.overall ?? 0) >= 0 ? '+' : ''}${score.overall ?? 0}`}
             </span>
           </div>
-          <ScoreBar value={score?.overall ?? 0} color={T.grn}/>
+          <ScoreBar value={score?.overall ?? 0} color={score == null ? T.muted : T.grn}/>
           <div style={{ display:'flex', justifyContent:'space-between', marginTop:2 }}>
             <span style={{ color:T.muted, fontSize:8 }}>-100 (강한 하락)</span>
             <span style={{ color:T.muted, fontSize:8 }}>(강한 상승) +100</span>

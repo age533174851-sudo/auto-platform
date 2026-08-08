@@ -44,6 +44,10 @@ import {
   type Activity, type Tone as CardTone,
 } from '@/lib/ui/strategyCard';
 import { AUTO_TABS, tabOf as autoTabOf, type AutoTabId } from '@/lib/ui/autoOverview';
+import {
+  STAGE_ORDER, STAGE_LABEL, stageOf, stageIndex, isRealMoney,
+  promotionVerdict,
+} from '@/lib/strategies/validationStage';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
   ema_cross:     {label:'EMA 크로스',      icon:'📈',color:'#3B82F6',desc:'EMA20/60 골든·데드 크로스 추세 추종'},
@@ -1147,6 +1151,56 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                     <span>PnL <b style={{color:sp.metrics.totalPnl>=0?T.grn:T.red}}>{sp.metrics.totalPnl>=0?'+':''}{(sp.metrics.totalPnl/10000).toFixed(1)}만</b></span>
                     <span>{sp.metrics.totalTrades}건</span>
                   </div>
+                  {/* ── 이 전략이 어느 단계까지 검증됐는가 ──
+                      **"모의 결과가 좋아 보인다"에서 끝내지 않는다.**
+                      확률 시뮬과 백테스트는 "가정한 승률에서 자금관리가
+                      버티나"와 "과거에 우위가 있었나"만 답한다. 주문이
+                      실제로 나가는지, 손절이 실제로 붙는지, 비용을 빼고도
+                      남는지는 테스트넷과 실전 소액에서만 알 수 있다.
+
+                      단계가 내려갈수록 우위는 깎인다(백테스트 +10%p →
+                      실전 +2%p). 그건 정상이고, 문제는 그 감소를 못 보는
+                      것이다 — 백테스트 숫자를 믿고 금액을 키우면 거기서
+                      처음 알게 된다. */}
+                  {(() => {
+                    const st = stageOf((sp as any).stage);
+                    const cur = stageIndex(st);
+                    const pv = promotionVerdict(st, {
+                      entries: sp.metrics.totalTrades,
+                      // 나머지 지표는 아직 측정하는 곳이 없다. **0으로
+                      // 채우지 않는다** — 모르는 것을 통과로 치면 검증
+                      // 안 된 전략이 실전 단계로 올라간다.
+                    });
+                    const SHOW = ['BACKTESTED','PAPER','TESTNET','LIVE_SMALL','LIVE_LIMITED'] as const;
+                    return (
+                      <div style={{marginTop:6}}>
+                        <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:4}}>
+                          {SHOW.map(k=>{
+                            const i = STAGE_ORDER.indexOf(k);
+                            const done = cur >= i;
+                            const here = st === k;
+                            const real = isRealMoney(k);
+                            const c = here ? T.ylw : done ? T.grn : T.muted;
+                            return (
+                              <span key={k} style={{
+                                padding:'1px 6px',borderRadius:4,fontSize:8,fontWeight:800,
+                                background:A(c,'18'),color:c,border:`1px solid ${A(c,'35')}`,
+                              }}>
+                                {done && !here ? '✓ ' : here ? '● ' : real ? '🔒 ' : ''}{STAGE_LABEL[k]}
+                              </span>
+                            );
+                          })}
+                        </div>
+                        {/* **자동으로 실전에 올라가지 않는다는 사실을 적는다.** */}
+                        <div style={{fontSize:8.5,color:T.muted,lineHeight:1.5}}>
+                          {pv.requiresHuman
+                            ? `${STAGE_LABEL[pv.to]}은(는) 실제 돈이 걸려 자동 승격하지 않습니다 — 사람이 승인해야 합니다`
+                            : pv.reason || `다음 단계: ${STAGE_LABEL[pv.to]}`}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* ── 이 전략에 돈이 얼마나 걸려 있는가 ──
                       승률과 손익비만 있으면 "얘가 잘한다"는 알아도
                       **"얘한테 얼마가 걸려 있나"는 모른다.** 승률 70%인

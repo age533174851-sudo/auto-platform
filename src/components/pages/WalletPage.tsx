@@ -22,7 +22,7 @@
 //   총자산 → 오늘 손익 → 그래프 → 빠른 액션 → 자산 배분 → 보유자산
 //
 // 매일 보는 것이 위다. 진단에 가까운 것일수록 아래로 내린다.
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { Card } from './SharedUI';
@@ -36,9 +36,14 @@ import {
   RANGES, rangeOf, curveOf, dailyRowsOf, type RangeId,
 } from '@/lib/portfolio/equityCurve';
 import {
+  accountsFromConnections, accountsVerdict, equitySumOf,
+  futuresStateOf,
+  type LoadPhase, type WalletAccount, type WalletFetchResult,
+} from '@/lib/portfolio/walletAccounts';
+import {
   cellOf, futuresRowsOf, syncTextOf, spotRowsOf,
-  strategyTotalOf, allocationOf, accountsForEnv, accountsNoteOf,
-  type AccountOption, type SpotAsset, type StrategyAccount, type LongtermHolding,
+  strategyTotalOf, allocationOf,
+  type SpotAsset, type StrategyAccount, type LongtermHolding,
 } from '@/lib/portfolio/walletDetail';
 
 const ENVS: WalletEnv[] = ['LIVE', 'TESTNET', 'MOCK'];
@@ -54,6 +59,59 @@ export default function WalletPage() {
   const [range, setRange] = useState<RangeId>('30D');
   const [cur, setCur] = useState<Currency>('USDT');
   const [account, setAccount] = useState('');
+
+  // ── 진짜 계좌를 읽는다 ──
+  //
+  // **여기가 이 화면의 고장이었다.** 지갑이 자기만의 임시 목록을 들고
+  // 있어서, Gate 테스트넷 연결이 멀쩡히 있는데도 "계좌 없음"이 떴다.
+  // 같은 순간 매매 화면은 그 계좌로 주문을 내고 있었다.
+  //
+  // 그래서 매매·자동매매가 쓰는 것과 **같은 목록**을 읽고, 환경 판정도
+  // 같은 함수(isLiveConnection)를 쓴다.
+  const [phase, setPhase] = useState<LoadPhase>('LOADING');
+  const [loadErr, setLoadErr] = useState('');
+  const [allAccounts, setAllAccounts] = useState<WalletAccount[]>([]);
+  const [results, setResults] = useState<Map<string, WalletFetchResult>>(new Map());
+  const [syncedAtMs, setSyncedAtMs] = useState<number | null>(null);
+
+  const loadAll = useCallback(async () => {
+    const { loadExchangeConnectionsResult } = await import('@/lib/supabase/hooks');
+    const r = await loadExchangeConnectionsResult();
+    if (!r.ok) { setPhase('FAILED'); setLoadErr(r.error); return; }
+
+    const accts = accountsFromConnections(r.connections);
+    setAllAccounts(accts);
+    setPhase('READY');
+
+    // 잔고는 계좌마다 따로 묻는다 — 하나가 실패해도 나머지는 보여야 한다.
+    const { getSupabaseClient, getClientUserId } = await import('@/lib/supabase/client');
+    const sb = getSupabaseClient();
+    const uid = await getClientUserId();
+    if (!sb || !uid) return;
+    const { data } = await sb.auth.getSession();
+    const headers: Record<string, string> = { 'x-user-id': uid };
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`;
+
+    const next = new Map<string, WalletFetchResult>();
+    await Promise.all(accts.filter(a => a.queryable).map(async a => {
+      try {
+        const res = await fetch(`/api/wallets?connectionId=${encodeURIComponent(a.connectionId)}`, { headers });
+        const j = await res.json().catch(() => null);
+        next.set(a.connectionId, {
+          connectionId: a.connectionId,
+          ok: res.ok && j?.ok === true,
+          tree: j?.tree ?? null,
+          error: String(j?.message || j?.error || (res.ok ? '' : `HTTP ${res.status}`)),
+        });
+      } catch (e: any) {
+        next.set(a.connectionId, { connectionId: a.connectionId, ok: false, tree: null, error: String(e?.message || e) });
+      }
+    }));
+    setResults(next);
+    setSyncedAtMs(Date.now());
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   // ── 아직 거래소를 안 붙였다 ──
   //
@@ -92,12 +150,36 @@ export default function WalletPage() {
   ]);
 
   // ── 계좌 ──
-  const allAccounts: AccountOption[] = [];
-  const accounts = accountsForEnv(env, allAccounts);
-  const accountsNote = accountsNoteOf(accounts);
+  //
+  // 읽는 중 · 없음 · 못 읽음을 절대 섞지 않는다. 셋을 하나로 뭉갠 것이
+  // "이 환경에 연결된 계좌가 없습니다"였다.
+  const av = accountsVerdict(env, phase, allAccounts, loadErr);
+  const accounts = av.accounts;
+  const accountsNote = av.message;
+  const sum = equitySumOf(accounts, results);
 
   // ── 탭별 자료 ──
-  const futuresAccounts: Array<{ name: string; rows: ReturnType<typeof futuresRowsOf>; sync: string }> = [];
+  const shownAccounts = account ? accounts.filter(a => a.connectionId === account) : accounts;
+  const futuresAccounts = shownAccounts.map(a => {
+    const r = results.get(a.connectionId);
+    const st = a.queryable ? futuresStateOf(r) : 'UNSUPPORTED';
+    const f = r?.tree?.futures ?? null;
+    const g = (k: string) => cellOf(st === 'OK' ? f?.[k] : null, st === 'OK' ? 'OK' : st);
+    return {
+      name: a.label,
+      blocked: a.blockedReason || (st === 'OK' ? '' : (r?.error || '')),
+      rows: futuresRowsOf({
+        name: a.label, env: a.env, exchange: a.exchange,
+        walletBalance: g('walletBalance'), availableBalance: g('availableBalance'),
+        usedMargin: g('usedMargin'), maintenanceMargin: g('maintenanceMargin'),
+        unrealizedPnl: g('unrealizedPnl'), realizedPnl: g('realizedPnl'),
+        marginRatio: g('marginRatio'), openPositions: g('positionsCount'),
+        openOrders: g('openOrdersCount'),
+        lastSyncAtMs: syncedAtMs, connection: st, note: '',
+      }),
+      sync: syncTextOf(syncedAtMs, Date.now()),
+    };
+  });
   const spot: SpotAsset[] = spotRowsOf([]);
   const strategies: StrategyAccount[] = [];
   const stratTotal = strategyTotalOf(strategies);
@@ -159,11 +241,11 @@ export default function WalletPage() {
           border: `1px solid ${account === '' ? T.acl : T.border}`, fontSize: 10, fontWeight: 700,
         }}>전체 계좌</button>
         {accounts.map(a => (
-          <button key={a.key} onClick={() => setAccount(a.key)} style={{
+          <button key={a.connectionId} onClick={() => setAccount(a.connectionId)} style={{
             flexShrink: 0, minHeight: 30, padding: '5px 10px', borderRadius: 8, cursor: 'pointer',
-            background: account === a.key ? T.acg : 'transparent',
-            color: account === a.key ? T.acl : T.muted,
-            border: `1px solid ${account === a.key ? T.acl : T.border}`, fontSize: 10, fontWeight: 700,
+            background: account === a.connectionId ? T.acg : 'transparent',
+            color: account === a.connectionId ? T.acl : T.muted,
+            border: `1px solid ${account === a.connectionId ? T.acl : T.border}`, fontSize: 10, fontWeight: 700,
           }}>{a.label}</button>
         ))}
       </div>
@@ -184,14 +266,23 @@ export default function WalletPage() {
             ))}
           </div>
         </div>
+        {/* **부분 합계를 총자산이라 적지 않는다.** 두 계좌 중 하나만
+            더하면 못 읽은 계좌의 돈이 사라진 것처럼 보인다. */}
         <div style={{
-          color: total.total == null ? T.muted : T.txt,
-          fontSize: total.total == null ? 16 : 26, fontWeight: 900, ...numFont,
+          color: sum.total == null ? T.muted : T.txt,
+          fontSize: sum.total == null ? 16 : 26, fontWeight: 900, ...numFont,
         }}>
-          {total.total == null ? '확인 불가' : `${total.total.toLocaleString('ko-KR')} ${cur}`}
+          {phase === 'LOADING' ? '불러오는 중…'
+            : sum.total == null ? '확인 불가'
+            : `${sum.total.toLocaleString('ko-KR')} ${cur}`}
         </div>
-        {total.note && (
-          <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{total.note}</div>
+        {sum.note && (
+          <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{sum.note}</div>
+        )}
+        {sum.complete && sum.readCount > 0 && (
+          <div style={{ ...muted, marginTop: 4 }}>
+            계좌 {sum.readCount}개 · {syncTextOf(syncedAtMs, Date.now())}
+          </div>
         )}
 
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 10, paddingTop: 10 }}>
@@ -366,6 +457,9 @@ export default function WalletPage() {
                   </div>
                 ))}
                 <div style={{ ...muted, marginTop: 5 }}>{a.sync}</div>
+                {a.blocked && (
+                  <div style={{ ...muted, color: T.ylw, marginTop: 3 }}>{a.blocked}</div>
+                )}
               </div>
             ))}
         </Card>
