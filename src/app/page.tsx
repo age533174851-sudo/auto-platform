@@ -13,6 +13,7 @@ import { useLivePrices, statusLabel } from '@/lib/api/hooks';
 import type { LucideIcon } from 'lucide-react';
 import {
   Home as HomeIc, Star, BarChart3, Zap, Bot, Sprout,
+  Wallet as Wallet2,
   Briefcase, NotebookPen, FlaskConical, MessageSquare, GraduationCap,
   Newspaper, Bell, Users, Landmark, Brain, CalendarClock, BadgeDollarSign,
   Link as LinkIc, ArrowLeftRight, Percent, Microscope, Building2, Sparkles,
@@ -43,6 +44,7 @@ import dynamic from 'next/dynamic';
 const HomePageComp    = dynamic(() => import('@/components/pages/HomePage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const MarketPageComp  = dynamic(() => import('@/components/pages/MarketPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const WatchlistPage   = dynamic(() => import('@/components/pages/WatchlistPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const WalletPageComp = dynamic(() => import('@/components/pages/WalletPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const PortfolioPageComp = dynamic(() => import('@/components/pages/PortfolioPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const TradingPageComp = dynamic(() => import('@/components/pages/TradingPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const AutoPageComp    = dynamic(() => import('@/components/pages/AutoPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -197,15 +199,29 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
 
 /* ── WorldClock ── */
 
+// ── 하단 탭 ──
+//
+// **지갑을 하단에 둔다.** 홈에 계좌 정보를 다 몰아넣으면 홈이 관리자
+// 화면이 된다. 바이낸스가 Assets를 따로 두는 이유와 같다.
+//
+// 자리를 만들려고 '왓치'와 '시즌전략'을 뺐다 — 둘 다 지운 것이 아니라
+// 더보기에서 그대로 열린다(MTABS). 매일 보는 것과 가끔 보는 것을 같은
+// 줄에 두면, 매일 보는 것이 밀린다.
 const BTABS: { id: string; label: string; Icon: IconComp }[] = [
-  {id:'home',     label:'홈',       Icon: HomeIc},
-  {id:'watchlist',label:'왓치',     Icon: Star},
-  {id:'market',   label:'시장',     Icon: BarChart3},
-  {id:'trading',  label:'매매',     Icon: Zap},
-  {id:'auto',     label:'자동',     Icon: Bot},
-  {id:'season',   label:'시즌전략', Icon: Sprout},
+  {id:'home',     label:'홈',   Icon: HomeIc},
+  {id:'market',   label:'시장', Icon: BarChart3},
+  {id:'trading',  label:'매매', Icon: Zap},
+  {id:'auto',     label:'자동', Icon: Bot},
+  {id:'wallet',   label:'지갑', Icon: Wallet2},
+  // '더보기'는 여기 없다. 하단바 마지막 칸은 BTABS.map 뒤에 따로 그려지는
+  // 시트 토글이고, 여는 화면이 아니라 겹쳐 뜨는 층이다. 여기에 넣으면
+  // 더보기 버튼이 둘이 되고, 그중 하나는 renderPage에 case가 없어
+  // 빈 화면으로 간다. **화면이 아닌 것을 화면 목록에 넣지 않는다.**
 ];
 const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
+  {id:'wallet',       label:'지갑',       Icon: Wallet2, core: true},
+  {id:'watchlist',    label:'왓치리스트', Icon: Star, core: true},
+  {id:'season',       label:'시즌전략',   Icon: Sprout},
   {id:'ai_usage',     label:'AI 관리센터', Icon: Cpu},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
@@ -738,6 +754,7 @@ export default function App() {
         case 'strategies':   return <StrategyBuilderPage onNav={nav}/>;
         case 'risk_settings':return <RiskSettingsPage/>;
         case 'season':       return <SeasonDashboard/>;
+        case 'wallet':       return <WalletPageComp/>;
         case 'portfolio':    return <PortfolioPageComp prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'history':      return <HistoryPage/>;
         case 'backtest':     return <BacktestPage/>;
