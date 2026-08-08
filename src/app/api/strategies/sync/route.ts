@@ -105,8 +105,42 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'too_many_strategies (max 50)' }, { status: 400 });
     }
 
-    // upsert 한 번에
     const rows = strategies.map(s => strategyToRow(s, uid));
+
+    // ── 남의 줄을 덮어쓰지 못하게 막는다 ──
+    //
+    // **여기가 위험했다.** 이 라우트는 service role로 돈다 — RLS를
+    // 지나간다. 그런데 upsert의 열쇠가 `id` 하나뿐이라, 다른 사람의
+    // 전략 id를 그대로 실어 보내면 그 줄이 덮어써지고 `user_id`까지
+    // 내 것으로 바뀐다. 주인이 통째로 넘어간다.
+    //
+    // 노려서 하기는 어렵다(id에 난수가 붙는다). 하지만 우연히도 난다 —
+    // `duplicateStrategy`가 만드는 id에는 난수가 없어서
+    // 'str-' + 밀리초뿐이고, 두 사용자가 같은 밀리초에 복제하면 충돌한다.
+    // 그때 한쪽 전략이 소리 없이 사라지고, 그걸 알아챌 방법이 없다.
+    //
+    // 그래서 **먼저 주인을 확인한다.** 남의 것이면 조용히 건너뛰지 않고
+    // 거절한다 — 조용히 빼면 사용자는 저장된 줄 안다.
+    const ids = rows.map(r => r.id);
+    const { data: owners, error: ownerErr } = await (sb.from('user_strategies') as any)
+      .select('id, user_id').in('id', ids);
+
+    if (ownerErr) {
+      // **주인을 확인 못 했으면 쓰지 않는다.** 확인하지 못한 것은 통과가 아니다.
+      return NextResponse.json({
+        error: ownerErr.message, synced: false,
+        reason: '기존 전략의 주인을 확인하지 못해 저장하지 않았습니다',
+      }, { status: 500 });
+    }
+
+    const foreign = (owners || []).filter((o: any) => o.user_id && o.user_id !== uid).map((o: any) => o.id);
+    if (foreign.length > 0) {
+      return NextResponse.json({
+        error: 'id_owned_by_another_user', synced: false, ids: foreign,
+        reason: '다른 계정의 전략과 id가 겹칩니다 — 덮어쓰면 그쪽 전략이 사라지므로 저장하지 않았습니다',
+      }, { status: 409 });
+    }
+
     const { error } = await (sb.from('user_strategies') as any)
       .upsert(rows, { onConflict: 'id' });
 
