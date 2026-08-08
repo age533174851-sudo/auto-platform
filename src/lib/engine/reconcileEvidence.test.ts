@@ -18,6 +18,7 @@
 import { test, eq, assert } from '../../test/harness';
 import { RECONCILE_STEPS, reconcileRunOf, type StepResult } from './reconcilePlan';
 import { runChecklist, CHECK_SPECS, type CheckId } from './preTradeChecklist';
+import { gateProtectiveKind } from '../exchanges/gatePlan';
 
 /**
  * 화면(AutotradeControl)이 쓰는 짝. **여기와 화면이 같아야 한다.**
@@ -44,7 +45,7 @@ const fullInput = () => ({
   leverage: { actual: 10, intended: 10 },
   existingPositionQty: 0.5,
   positionMode: { mode: 'ONE_WAY' as const },
-  protectiveOrders: { count: 1, reason: 'BTC_USDT 보호 주문 1건' },
+  protectiveOrders: { stopCount: 1, takeProfitCount: 0, reason: 'BTC_USDT 손절 1건 · 익절 0건' },
   stopPrice: 60000,
   liquidationPrice: 55000,
   side: 'LONG' as const,
@@ -105,7 +106,7 @@ export function runReconcileEvidenceTests() {
   });
 
   test('보호 주문을 못 읽으면 신규 진입을 막는다 — 0과 모름은 다르다', () => {
-    const inp: any = { ...fullInput(), protectiveOrders: { count: null, reason: '조회 실패' } };
+    const inp: any = { ...fullInput(), protectiveOrders: { stopCount: null, reason: '조회 실패' } };
     const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
     const hit: any = byId(v).get('PROTECTIVE_ORDER');
     eq(hit.status, 'unknown');
@@ -113,7 +114,7 @@ export function runReconcileEvidenceTests() {
   });
 
   test('포지션이 있는데 거래소에 보호 주문이 0건이면 막는다', () => {
-    const inp: any = { ...fullInput(), protectiveOrders: { count: 0 } };
+    const inp: any = { ...fullInput(), protectiveOrders: { stopCount: 0, takeProfitCount: 0 } };
     const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
     const hit: any = byId(v).get('PROTECTIVE_ORDER');
     eq(hit.status, 'fail');
@@ -121,7 +122,7 @@ export function runReconcileEvidenceTests() {
   });
 
   test('포지션이 없으면 보호 주문이 없어도 막지 않는다 — 아직 지킬 것이 없다', () => {
-    const inp: any = { ...fullInput(), existingPositionQty: 0, protectiveOrders: { count: 0 } };
+    const inp: any = { ...fullInput(), existingPositionQty: 0, protectiveOrders: { stopCount: 0, takeProfitCount: 0 } };
     const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
     const hit: any = byId(v).get('PROTECTIVE_ORDER');
     eq(hit.status, 'pass');
@@ -130,7 +131,7 @@ export function runReconcileEvidenceTests() {
 
   test('계획에 손절가가 있어도 거래소에 없으면 통과가 아니다 — 둘은 다른 질문이다', () => {
     // stopPrice(계획)는 멀쩡한데 거래소에는 아무것도 없는 상태.
-    const inp: any = { ...fullInput(), stopPrice: 60000, protectiveOrders: { count: 0 } };
+    const inp: any = { ...fullInput(), stopPrice: 60000, protectiveOrders: { stopCount: 0, takeProfitCount: 0 } };
     const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
     const m = byId(v);
     eq((m.get('STOP_ATTACHED') as any).status, 'pass', '계획의 손절가는 멀쩡하다');
@@ -141,7 +142,7 @@ export function runReconcileEvidenceTests() {
     const inp: any = {
       ...fullInput(),
       positionMode: { mode: null, reason: '조회 실패' },
-      protectiveOrders: { count: null, reason: '조회 실패' },
+      protectiveOrders: { stopCount: null, reason: '조회 실패' },
     };
     const v = runChecklist(inp, { market: 'USDM', intent: 'EXIT', exchangeEvidence: true });
     const m = byId(v);
@@ -179,5 +180,68 @@ export function runReconcileEvidenceTests() {
     const run = reconcileRunOf(results);
     eq(run.completed, true);
     eq(run.stoppedAt, null);
+  });
+
+  console.log('[자동 대조 — 익절은 방어선이 아니다]');
+
+  test('익절 1건 · 손절 0건이면 FAIL — 총 개수로 세면 이게 통과한다', () => {
+    const inp: any = { ...fullInput(), protectiveOrders: { stopCount: 0, takeProfitCount: 1 } };
+    const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
+    const hit: any = byId(v).get('PROTECTIVE_ORDER');
+    eq(hit.status, 'fail', '익절만 있는데 통과했다');
+    eq(hit.blocks, true);
+    assert(hit.detail.includes('손절은 0건'), `무엇이 없는지 적혀야 한다: ${hit.detail}`);
+    eq(v.allowed, false);
+  });
+
+  test('손절이 있으면 익절이 없어도 통과한다 — 방어선은 손절이다', () => {
+    const inp: any = { ...fullInput(), protectiveOrders: { stopCount: 1, takeProfitCount: 0 } };
+    const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
+    eq((byId(v).get('PROTECTIVE_ORDER') as any).status, 'pass');
+  });
+
+  console.log('[Gate — 걸린 조건부 주문이 손절인가 익절인가]');
+
+  // gateStopSpec / gateTakeProfitSpec이 만드는 조합 넷. 이 표가 판별의 전부다.
+  const gateRow = (autoSize: string, rule: number, extra: any = {}) =>
+    ({ initial: { contract: 'BTC_USDT', size: 0, auto_size: autoSize, reduce_only: true, ...extra },
+       trigger: { rule, price: '60000' } });
+
+  test('LONG 손절은 rule 2, LONG 익절은 rule 1', () => {
+    eq(gateProtectiveKind(gateRow('close_long', 2)).kind, 'STOP');
+    eq(gateProtectiveKind(gateRow('close_long', 1)).kind, 'TAKE_PROFIT');
+  });
+
+  test('SHORT은 정확히 반대다 — 여기서 뒤집히면 익절을 손절로 센다', () => {
+    eq(gateProtectiveKind(gateRow('close_short', 1)).kind, 'STOP');
+    eq(gateProtectiveKind(gateRow('close_short', 2)).kind, 'TAKE_PROFIT');
+  });
+
+  test('닫는 주문이 아니면 보호 주문이 아니다 — 진입 예약을 손절로 세지 않는다', () => {
+    const entry = { initial: { contract: 'BTC_USDT', size: 500, reduce_only: false },
+                    trigger: { rule: 2, price: '60000' } };
+    eq(gateProtectiveKind(entry).kind, 'NOT_PROTECTIVE');
+  });
+
+  test('Gate가 쓰는 다른 이름표도 닫는 주문으로 읽는다', () => {
+    // 응답 스키마에 따라 reduce_only / is_reduce_only / is_close가 섞여 나온다.
+    const a = { initial: { size: -500, is_reduce_only: true }, trigger: { rule: 2 } };
+    const b = { initial: { size: -500, is_close: true }, trigger: { rule: 2 } };
+    eq(gateProtectiveKind(a).kind, 'STOP');
+    eq(gateProtectiveKind(b).kind, 'STOP');
+  });
+
+  test('auto_size가 없으면 size 부호로 방향을 읽는다 — 닫는 주문은 반대 부호다', () => {
+    // 음수 = 파는 주문 = 롱을 닫는다
+    eq(gateProtectiveKind({ initial: { size: -500, reduce_only: true }, trigger: { rule: 2 } }).closes, 'LONG');
+    eq(gateProtectiveKind({ initial: { size: 500, reduce_only: true }, trigger: { rule: 1 } }).closes, 'SHORT');
+  });
+
+  test('판별할 값이 없으면 UNKNOWN이다 — 손절이라고 치지 않는다', () => {
+    // rule이 없다
+    eq(gateProtectiveKind({ initial: { auto_size: 'close_long', reduce_only: true }, trigger: {} }).kind, 'UNKNOWN');
+    // 방향을 모른다
+    eq(gateProtectiveKind({ initial: { size: 0, reduce_only: true }, trigger: { rule: 2 } }).kind, 'UNKNOWN');
+    eq(gateProtectiveKind(null).kind, 'UNKNOWN');
   });
 }

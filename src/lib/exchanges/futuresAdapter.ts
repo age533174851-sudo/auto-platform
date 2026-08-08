@@ -297,17 +297,29 @@ export async function futuresCloseAll(
  * 보호 없이 남는다 — 닫으려다 더 위험해진다.
  */
 export interface ProtectiveOrdersResult {
-  /** 조회 자체가 성공했는가. false면 count가 null이고 '없음'이 아니다 */
+  /** 조회 자체가 성공했는가. false면 수가 전부 null이고 '없음'이 아니다 */
   ok: boolean;
-  /** 지금 거래소에 걸려 있는 보호 주문 수. **못 읽으면 null이다** */
+  /** 닫는 주문 총수(손절+익절). **못 읽으면 null이다** */
   count: number | null;
+  /**
+   * **손절 주문 수.** 이 값이 방어선의 유무다.
+   *
+   * `count`와 따로 두는 이유가 이 파일에서 가장 중요한 줄이다 — 익절만
+   * 걸려 있어도 `count`는 1이 된다. 그걸로 통과시키면 "보호 주문 있음"이
+   * 화면에 뜬 채로 **아래쪽을 막는 것이 아무것도 없는** 포지션이 남는다.
+   */
+  stopCount: number | null;
+  /** 익절 주문 수. 사실 전달용 — 이것만으로는 통과시키지 않는다 */
+  takeProfitCount: number | null;
+  /** 손절·익절 중 어느 쪽인지 판별하지 못한 주문 수 */
+  unclassified: number;
   /** 사람이 읽는 근거 한 줄 */
   detail: string;
   error: string | null;
 }
 
 /**
- * **지금 거래소에 손절·익절이 실제로 걸려 있는가.**
+ * **지금 거래소에 손절이 실제로 걸려 있는가.**
  *
  * 왜 따로 필요한가
  * ────────────────
@@ -316,48 +328,90 @@ export interface ProtectiveOrdersResult {
  * 진입은 성공했는데 손절 부착만 실패한 상황이 정확히 그 차이에 숨는다:
  * 계획에는 손절가가 있으니 점검은 통과하고, 거래소에는 아무것도 없다.
  *
- * **0과 모름을 구분한다.** 조회가 실패했는데 0으로 적으면 "보호 주문이
- * 없다"가 사실이 되고, 화면은 그걸 보고 손절을 다시 걸거나 — 더 나쁘게 —
- * 이미 걸려 있다고 안심한다.
+ * 손절과 익절을 **반드시 나눠 센다**
+ * ──────────────────────────────────
+ * 처음에는 걸려 있는 조건부 주문의 개수만 셌다. 그러면 **익절만 있고
+ * 손절은 없는 포지션이 통과한다.** 익절은 이익을 확정하는 주문이지
+ * 방어선이 아니다 — 가격이 반대로 가면 막을 것이 없다.
+ *
+ * **0과 모름을 구분한다.** 조회가 실패했는데 0으로 적으면 "손절이 없다"가
+ * 사실이 되고, 화면은 그걸 보고 손절을 다시 걸거나 — 더 나쁘게 — 이미
+ * 걸려 있다고 안심한다.
  *
  * 진입 예약(지정가)은 세지 않는다. 포지션을 **닫는** 주문만 본다.
  */
 export async function futuresProtectiveOrders(
   ex: FuturesExchange, key: string, secret: string, testnet: boolean, symbol: string,
 ): Promise<ProtectiveOrdersResult> {
+  const fail = (error: string): ProtectiveOrdersResult => ({
+    ok: false, count: null, stopCount: null, takeProfitCount: null,
+    unclassified: 0, detail: '', error,
+  });
+
   try {
     if (ex === 'gate') {
       const gf = await import('./gateFutures');
       const gp = await import('./gatePlan');
       const contract = gp.toGateContract(symbol);
-      if (!contract) {
-        return { ok: false, count: null, detail: '', error: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
-      }
+      if (!contract) return fail(`Gate 계약 이름을 만들 수 없습니다 (${symbol})`);
+
       // Gate의 조건부 주문(price_orders)이 손절·익절이다. **null은 조회 실패다.**
       const rows = await gf.getPriceOrdersGateFutures(key, secret, contract, testnet);
-      if (rows == null) {
-        return { ok: false, count: null, detail: '',
-          error: 'Gate 조건부 주문(price_orders)을 읽지 못했습니다' };
+      if (rows == null) return fail('Gate 조건부 주문(price_orders)을 읽지 못했습니다');
+
+      let stop = 0, tp = 0, unclassified = 0;
+      for (const row of rows) {
+        // 손절/익절 판정은 gatePlan 한 곳에만 둔다 — 거는 쪽과 세는 쪽이
+        // 각자 부등호를 쓰면 한쪽만 고쳐지고, 그때 "손절 있음"이 거짓이 된다.
+        const k = gp.gateProtectiveKind(row);
+        if (k.kind === 'STOP') stop++;
+        else if (k.kind === 'TAKE_PROFIT') tp++;
+        else if (k.kind === 'UNKNOWN') unclassified++;
+        // NOT_PROTECTIVE(진입 예약 등)는 세지 않는다.
       }
-      return { ok: true, count: rows.length, detail: `${contract} 보호 주문 ${rows.length}건`, error: null };
+
+      // **판별 못 한 것이 있으면 손절 수를 확정하지 않는다.**
+      // 그 주문이 손절일 수도 있는데 0으로 적으면 없는 것이 사실이 되고,
+      // 손절일 수도 있다고 1로 세면 없는 방어선을 있다고 적는다.
+      if (unclassified > 0 && stop === 0) {
+        return {
+          ok: false, count: stop + tp + unclassified, stopCount: null, takeProfitCount: tp,
+          unclassified, detail: '',
+          error: `조건부 주문 ${unclassified}건이 손절인지 익절인지 판별되지 않아 `
+               + '손절 유무를 확정할 수 없습니다',
+        };
+      }
+
+      return {
+        ok: true, count: stop + tp, stopCount: stop, takeProfitCount: tp, unclassified,
+        detail: `${contract} 손절 ${stop}건 · 익절 ${tp}건`,
+        error: null,
+      };
     }
 
     const bf = await import('./binanceFutures');
     const { orders } = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
-    if (!Array.isArray(orders)) {
-      return { ok: false, count: null, detail: '', error: '미체결 주문을 읽지 못했습니다' };
-    }
+    if (!Array.isArray(orders)) return fail('미체결 주문을 읽지 못했습니다');
+
     // futuresCancelProtection이 지우는 것과 **같은 조건**으로 센다.
     // 세는 기준과 지우는 기준이 다르면 "1건 있다"고 적고 0건을 지운다.
-    const targets = orders.filter((o: any) => {
+    let stop = 0, tp = 0;
+    for (const o of orders as any[]) {
       const t = String(o?.type || '').toUpperCase();
-      const isProtective = t.includes('STOP') || t.includes('TAKE_PROFIT');
-      return isProtective && (o?.closePosition === true || o?.reduceOnly === true);
-    });
-    return { ok: true, count: targets.length,
-      detail: `${symbol} 보호 주문 ${targets.length}건`, error: null };
+      const closing = o?.closePosition === true || o?.reduceOnly === true;
+      if (!closing) continue;
+      // **익절을 먼저 가른다.** TAKE_PROFIT 계열을 stop으로 세면 안 되고,
+      // TRAILING_STOP_MARKET은 손절이 맞다.
+      if (t.includes('TAKE_PROFIT')) tp++;
+      else if (t.includes('STOP')) stop++;
+    }
+    return {
+      ok: true, count: stop + tp, stopCount: stop, takeProfitCount: tp, unclassified: 0,
+      detail: `${symbol} 손절 ${stop}건 · 익절 ${tp}건`,
+      error: null,
+    };
   } catch (e: any) {
-    return { ok: false, count: null, detail: '', error: String(e?.message || e) };
+    return fail(String(e?.message || e));
   }
 }
 

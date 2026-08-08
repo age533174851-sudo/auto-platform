@@ -692,26 +692,32 @@ export async function POST(req: NextRequest) {
     // **실패를 '없음'으로 적지 않는다.** 못 읽으면 null을 그대로 넘기고,
     // 점검 목록이 unknown으로 남겨 신규 진입을 막는다.
     let positionModeFact: { mode: 'ONE_WAY' | 'HEDGE' | null; reason?: string } | null = null;
-    let protectiveFact: { count: number | null; reason?: string } | null = null;
+    let protectiveFact: {
+      stopCount: number | null; takeProfitCount?: number | null; reason?: string;
+    } | null = null;
     try {
       const fa = await import('@/lib/exchanges/futuresAdapter');
       const fex = fa.futuresExchangeOf(exchange);
       if (!fex) {
         const why = `이 실행기가 지원하지 않는 거래소입니다 (${exchange})`;
         positionModeFact = { mode: null, reason: why };
-        protectiveFact = { count: null, reason: why };
+        protectiveFact = { stopCount: null, reason: why };
       } else {
         const [pm, po] = await Promise.all([
           fa.futuresPositionMode(fex, conn.api_key, apiSecretPre, useTestnet),
           fa.futuresProtectiveOrders(fex, conn.api_key, apiSecretPre, useTestnet, symbol),
         ]);
         positionModeFact = { mode: pm.mode, reason: pm.error || undefined };
-        protectiveFact = { count: po.count, reason: po.error || po.detail || undefined };
+        // **손절 수로 판정한다.** 총 개수를 넘기면 익절만 있는 상태가 통과한다.
+        protectiveFact = {
+          stopCount: po.stopCount, takeProfitCount: po.takeProfitCount,
+          reason: po.error || po.detail || undefined,
+        };
       }
     } catch (e: any) {
       const why = `조회에 실패했습니다 (${e?.message || e})`;
       positionModeFact = { mode: null, reason: why };
-      protectiveFact = { count: null, reason: why };
+      protectiveFact = { stopCount: null, reason: why };
     }
 
     // 시장 국면. 일봉은 위에서 이미 받아 뒀다(bars.closes) — 다시 받으면

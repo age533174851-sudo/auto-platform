@@ -427,3 +427,95 @@ export function gateTakeProfitSpec(
   }
   return { ...base, triggerPrice: p, note };
 }
+
+// ── 걸려 있는 조건부 주문이 손절인가 익절인가 ────────────
+
+export type ProtectiveKind = 'STOP' | 'TAKE_PROFIT' | 'NOT_PROTECTIVE' | 'UNKNOWN';
+
+export interface ProtectiveClass {
+  kind: ProtectiveKind;
+  /** 이 주문이 닫는 포지션의 방향. 못 읽으면 null */
+  closes: 'LONG' | 'SHORT' | null;
+  reason: string;
+}
+
+/**
+ * Gate의 `price_orders` 한 줄이 **손절인지 익절인지** 가른다.
+ *
+ * 왜 세는 것만으로는 안 되는가
+ * ────────────────────────────
+ * 처음에는 `price_orders`의 개수만 세서 "보호 주문 있음"으로 통과시켰다.
+ * 그러면 **익절만 걸려 있고 손절은 없는 포지션이 통과한다.** 화면에는
+ * "거래소에 보호 주문 1건"이 뜨는데, 가격이 반대로 가면 막을 것이 없다.
+ * 익절은 이익을 확정하는 주문이지 방어선이 아니다.
+ *
+ * 어떻게 가르는가 — `gateStopSpec`·`gateTakeProfitSpec`의 표를 뒤집는다
+ * ──────────────────────────────────────────────────────────────────
+ * 두 함수가 만드는 조합이 정확히 넷이고, 그게 그대로 판별표가 된다:
+ *
+ *   close_long  + rule 2(이하)  → 손절   (LONG은 내려갈 때 닫는다)
+ *   close_long  + rule 1(이상)  → 익절   (LONG은 올라갈 때 이익)
+ *   close_short + rule 1(이상)  → 손절   (SHORT는 올라갈 때 닫는다)
+ *   close_short + rule 2(이하)  → 익절
+ *
+ * **이 표를 여기 한 곳에만 둔다.** 거는 쪽과 세는 쪽이 각자 부등호를
+ * 쓰면 한쪽만 고쳐지고, 그때 화면은 "손절 있음"이라고 적는데 실제로는
+ * 익절이 걸려 있다.
+ *
+ * 닫는 주문이 아니면(진입 예약 등) NOT_PROTECTIVE다 — 사용자가 일부러
+ * 걸어 둔 지정가를 손절로 세면 안 된다.
+ *
+ * 판별에 필요한 값이 없으면 **UNKNOWN이다.** 손절이라고 치지 않는다.
+ */
+export function gateProtectiveKind(row: any | null | undefined): ProtectiveClass {
+  if (!row || typeof row !== 'object') {
+    return { kind: 'UNKNOWN', closes: null, reason: '주문 내용을 읽지 못했습니다' };
+  }
+  const initial = row.initial ?? row;
+  const trigger = row.trigger ?? {};
+
+  // 1) 포지션을 **닫는** 주문인가.
+  //    Gate는 응답 스키마에 따라 reduce_only / is_reduce_only / is_close가
+  //    섞여 나온다. 셋 중 하나라도 참이면 닫는 주문이고, auto_size가
+  //    붙어 있으면 그 자체가 전량 청산 주문이라는 뜻이다.
+  const autoSize = String(initial.auto_size ?? '').toLowerCase();
+  const closing =
+    initial.reduce_only === true || initial.is_reduce_only === true
+    || initial.is_close === true || initial.close === true
+    || autoSize === 'close_long' || autoSize === 'close_short';
+  if (!closing) {
+    return { kind: 'NOT_PROTECTIVE', closes: null,
+      reason: '포지션을 닫는 주문이 아닙니다 (진입 예약일 수 있습니다)' };
+  }
+
+  // 2) 어느 방향을 닫는가.
+  //    auto_size가 있으면 그것이 답이다. 없으면 size의 부호로 읽는다 —
+  //    닫는 주문의 size는 포지션과 반대 부호다(롱은 음수로 판다).
+  let closes: 'LONG' | 'SHORT' | null = null;
+  if (autoSize === 'close_long') closes = 'LONG';
+  else if (autoSize === 'close_short') closes = 'SHORT';
+  else {
+    const size = Number(initial.size);
+    if (Number.isFinite(size) && size < 0) closes = 'LONG';
+    else if (Number.isFinite(size) && size > 0) closes = 'SHORT';
+  }
+  if (!closes) {
+    return { kind: 'UNKNOWN', closes: null,
+      reason: '어느 방향을 닫는 주문인지 읽지 못했습니다 (auto_size·size 없음)' };
+  }
+
+  // 3) 트리거 방향. rule이 없으면 손절인지 익절인지 알 수 없다.
+  const rule = Number(trigger.rule);
+  if (rule !== 1 && rule !== 2) {
+    return { kind: 'UNKNOWN', closes,
+      reason: `트리거 조건(rule)을 읽지 못했습니다 (${trigger.rule})` };
+  }
+
+  // gateStopSpec의 표를 그대로 뒤집은 것이다.
+  const isStop = closes === 'LONG' ? rule === 2 : rule === 1;
+  return {
+    kind: isStop ? 'STOP' : 'TAKE_PROFIT',
+    closes,
+    reason: `${closes} ${isStop ? '손절' : '익절'} (rule ${rule})`,
+  };
+}

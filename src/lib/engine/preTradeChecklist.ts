@@ -498,10 +498,20 @@ export interface ChecklistInput {
    */
   positionMode?: { mode: 'ONE_WAY' | 'HEDGE' | null; reason?: string } | null;
   /**
-   * 거래소에 지금 걸려 있는 보호 주문 수. **못 읽었으면 count가 null이다.**
-   * 0과 null을 섞으면 "손절이 없다"와 "모른다"가 같은 값이 된다.
+   * 거래소에 지금 걸려 있는 보호 주문.
+   *
+   * **판정은 `stopCount`로만 한다.** 익절은 이익을 확정하는 주문이지
+   * 방어선이 아니다 — 익절만 걸린 포지션은 가격이 반대로 갈 때 막을 것이
+   * 없는데, 총 개수로 세면 "보호 주문 1건"으로 통과한다.
+   *
+   * **못 읽었으면 stopCount가 null이다.** 0과 null을 섞으면 "손절이 없다"와
+   * "모른다"가 같은 값이 된다.
    */
-  protectiveOrders?: { count: number | null; reason?: string } | null;
+  protectiveOrders?: {
+    stopCount: number | null;
+    takeProfitCount?: number | null;
+    reason?: string;
+  } | null;
   /** 지금 열려 있는 포지션 수량. 0이면 없음, null이면 모름 */
   existingPositionQty?: number | null;
   /** ladderGate 결과 */
@@ -979,19 +989,30 @@ export function runChecklist(
   //
   // **포지션이 없으면 붙일 손절도 없다.** 그때 '없음'을 실패로 적으면
   // 첫 진입이 영원히 막힌다 — 아직 열지 않았으니 보호할 것이 없는 게 맞다.
+  //
+  // **익절은 방어선이 아니다.** 그래서 총 개수가 아니라 `stopCount`로 판정한다.
+  // 익절만 걸린 포지션을 통과시키면, 화면에는 "보호 주문 있음"이 뜬 채로
+  // 가격이 반대로 갈 때 막을 것이 아무것도 없다.
+  const po = input.protectiveOrders;
+  const tpN = po?.takeProfitCount ?? null;
   if (input.existingPositionQty != null && Math.abs(input.existingPositionQty) === 0) {
     results.push(resultFor('PROTECTIVE_ORDER', 'pass', '열린 포지션이 없어 붙일 보호 주문이 없습니다'));
-  } else if (!input.protectiveOrders || input.protectiveOrders.count == null) {
+  } else if (!po || po.stopCount == null) {
     results.push(resultFor('PROTECTIVE_ORDER', 'unknown',
-      input.protectiveOrders?.reason
+      po?.reason
       || '거래소의 보호 주문을 조회하지 못했습니다 — 손절이 붙어 있는지 알 수 없습니다'));
-  } else if (input.protectiveOrders.count === 0) {
+  } else if (po.stopCount === 0) {
     results.push(resultFor('PROTECTIVE_ORDER', 'fail',
-      '열린 포지션이 있는데 거래소에 손절·익절이 하나도 없습니다. '
-      + '계획에 손절가가 있어도 거래소에 안 걸렸으면 방어선은 청산가뿐입니다'));
+      tpN != null && tpN > 0
+        ? `열린 포지션에 익절 ${tpN}건만 걸려 있고 **손절은 0건**입니다. `
+          + '익절은 이익을 확정하는 주문이지 방어선이 아닙니다 — '
+          + '가격이 반대로 가면 막을 것이 없습니다'
+        : '열린 포지션이 있는데 거래소에 손절이 하나도 없습니다. '
+          + '계획에 손절가가 있어도 거래소에 안 걸렸으면 방어선은 청산가뿐입니다'));
   } else {
     results.push(resultFor('PROTECTIVE_ORDER', 'pass',
-      input.protectiveOrders.reason || `거래소에 보호 주문 ${input.protectiveOrders.count}건`));
+      po.reason
+      || `거래소에 손절 ${po.stopCount}건${tpN != null ? ` · 익절 ${tpN}건` : ''}`));
   }
 
   // 11. 기존 포지션 (막지 않는다 — 사실 전달)
