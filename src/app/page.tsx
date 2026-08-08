@@ -45,6 +45,7 @@ const HomePageComp    = dynamic(() => import('@/components/pages/HomePage'),    
 const MarketPageComp  = dynamic(() => import('@/components/pages/MarketPage'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const WatchlistPage   = dynamic(() => import('@/components/pages/WatchlistPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const WalletPageComp = dynamic(() => import('@/components/pages/WalletPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const TestnetReadinessComp = dynamic(() => import('@/components/pages/TestnetReadinessPage'),{ ssr: false });
 const PortfolioPageComp = dynamic(() => import('@/components/pages/PortfolioPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const TradingPageComp = dynamic(() => import('@/components/pages/TradingPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const AutoPageComp    = dynamic(() => import('@/components/pages/AutoPage'),    { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -222,6 +223,7 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
   {id:'wallet',       label:'지갑',       Icon: Wallet2, core: true},
   {id:'watchlist',    label:'왓치리스트', Icon: Star, core: true},
   {id:'season',       label:'시즌전략',   Icon: Sprout},
+  {id:'testnet_ready',label:'테스트넷 준비', Icon: FlaskConical, core: true},
   {id:'ai_usage',     label:'AI 관리센터', Icon: Cpu},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
@@ -755,6 +757,7 @@ export default function App() {
         case 'risk_settings':return <RiskSettingsPage/>;
         case 'season':       return <SeasonDashboard/>;
         case 'wallet':       return <WalletPageComp/>;
+        case 'testnet_ready':return <TestnetReadinessComp/>;
         case 'portfolio':    return <PortfolioPageComp prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'history':      return <HistoryPage/>;
         case 'backtest':     return <BacktestPage/>;
