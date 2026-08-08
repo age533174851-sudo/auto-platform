@@ -546,10 +546,6 @@ export default function AutotradeControl() {
   // 값이다.** 하나로 뭉뚱그리는 동안 화면은 71배가 한계라고 계산해 놓고
   // 100배를 그대로 허용했다.
   const stopForLadder = stopPctForLeverage(Number(levCap), Number(riskPct), Number(marginPct));
-  const ladder = leverageLadder({
-    userCap: levCap === '' ? null : Number(levCap),
-    stopPct: stopForLadder,
-  });
 
   // 이 설정이 어느 위험 등급인가. **10%/100배는 매매 설정이 아니다.**
   const tierNow: TierLimit = (() => {
@@ -561,10 +557,24 @@ export default function AutotradeControl() {
     }
     return TIER_LIMITS.STRESS;
   })();
-  const tierCheck = tierAllowedIn(
-    (Object.keys(TIER_LIMITS) as RiskTier[]).find(k => TIER_LIMITS[k] === tierNow) ?? 'STRESS',
-    live ? 'LIVE' : 'TESTNET',
-  );
+  const tierKey: RiskTier =
+    (Object.keys(TIER_LIMITS) as RiskTier[]).find(k => TIER_LIMITS[k] === tierNow) ?? 'STRESS';
+  const tierCheck = tierAllowedIn(tierKey, live ? 'LIVE' : 'TESTNET');
+
+  // ── 테스트넷 스트레스면 깎지 않는다 ──
+  //
+  // 사용자가 100배를 명시했는데 청산안전 상한이 57배라고 57배로 낮춰
+  // 주문하면, 그건 실험이 아니라 다른 설정으로 매매한 것이다. 화면에는
+  // '이번 주문 57배'가 뜨고, 보려던 100배의 거동은 어디에도 안 남는다.
+  //
+  // **실전에서는 절대 켜지 않는다.** 등급 관문이 이미 막지만 여기서도
+  // `!live`를 같이 본다 — 조건이 한 곳에만 있으면 언젠가 그 한 곳이 바뀐다.
+  const stressTestnet = !live && tierKey === 'STRESS';
+  const ladder = leverageLadder({
+    userCap: levCap === '' ? null : Number(levCap),
+    stopPct: stopForLadder,
+    stressTestnet,
+  });
 
   const toneColor = (t: Tone): string =>
     t === 'good' ? T.grn : t === 'bad' ? T.red : t === 'live' ? T.red
@@ -1274,8 +1284,25 @@ export default function AutotradeControl() {
               </div>
             ))}
             <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 6 }}>
+              {/* ── 요청 · 권고 · 실제는 서로 다른 값이다 ──
+                  한 칸에 뭉치면 "100배로 켰는데 왜 57배로 나갔나"가 설명되지
+                  않는다. 세 숫자를 나란히 둔다. */}
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800, flex: 1 }}>이번 주문</span>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1 }}>요청 배율</span>
+                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800 }}>
+                  {ladder.requested != null ? `${ladder.requested}x` : '—'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1 }}>청산안전 권고</span>
+                <span style={{ color: T.muted, fontSize: 11, fontWeight: 800 }}>
+                  {ladder.liquidationSafeCap != null ? `${ladder.liquidationSafeCap}x` : '확인 실패'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
+                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800, flex: 1 }}>
+                  {stressTestnet ? '실제 주문 요청' : '이번 주문'}
+                </span>
                 <span style={{ color: ladder.blocked ? T.red : T.grn, fontSize: 14, fontWeight: 900 }}>
                   {ladder.allowed != null ? `${ladder.allowed}x` : '불가'}
                 </span>
@@ -1283,6 +1310,12 @@ export default function AutotradeControl() {
               <div style={{ color: ladder.blocked ? T.red : T.muted, fontSize: 9.5, marginTop: 4, lineHeight: 1.55 }}>
                 {ladder.blocked ? `🚫 ${ladder.blockReason}` : ladder.summary}
               </div>
+              {/* 스트레스 실험이라 깎지 않고 넘어간 것들. **경고이지 실패가 아니다.** */}
+              {ladder.warnings.map((w, i) => (
+                <div key={i} style={{ color: T.ylw, fontSize: 9.5, marginTop: 3, lineHeight: 1.55 }}>
+                  ⚠ {w}
+                </div>
+              ))}
               {ladder.liquidationTheoreticalCap != null && !ladder.blocked && (
                 <div style={{ color: T.muted, fontSize: 9, marginTop: 3, lineHeight: 1.5 }}>
                   이론 최대 {Math.floor(ladder.liquidationTheoreticalCap)}배 ·

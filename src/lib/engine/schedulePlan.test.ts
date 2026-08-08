@@ -13,7 +13,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import { scheduleConnState, rebindVerdict, type ConnRow } from './schedulePlan';
-import { tierAllowedIn, withinTier } from './leverageLadder';
+import { tierAllowedIn, withinTier, leverageLadder } from './leverageLadder';
 import { runChecklist } from './preTradeChecklist';
 import { leverageVerdict } from '../exchanges/futuresExec';
 
@@ -182,5 +182,83 @@ export function runSchedulePlanTests() {
       `배율이 다른데 통과로 적혔다: ${JSON.stringify(lev(mismatched))}`);
     assert(String(lev(mismatched).detail).includes('75'),
       `실제 배율이 근거에 남아야 한다: ${lev(mismatched).detail}`);
+  });
+
+  console.log('[스트레스 배율 — 100배를 57배로 몰래 낮추지 않는다]');
+
+  // 손절 0.5% · 유지증거금 0.4%면 청산안전 상한이 100배보다 한참 낮게 나온다.
+  // 그게 지금 화면에 뜨던 '이번 주문 57배'의 정체다.
+  const stressSrc = (over: any = {}) => ({
+    userCap: 100, stopPct: 1.5, venueCap: 125, stressTestnet: true, ...over,
+  });
+
+  test('요청 100배 · 거래소 125배 · 청산안전이 더 낮아도 100배 그대로 간다', () => {
+    const l = leverageLadder(stressSrc());
+    eq(l.blocked, false, `막혔다: ${l.blockReason}`);
+    eq(l.allowed, 100, '요청 배율이 깎였다');
+    eq(l.requested, 100);
+    // 청산안전 상한은 여전히 계산하고 여전히 보여 준다 — 깎지만 않는다.
+    assert(l.liquidationSafeCap != null, '청산안전 상한을 계산하지 않았다');
+    assert(l.liquidationSafeCap! < 100, '이 손절이면 청산안전이 100배보다 낮아야 한다');
+    assert(l.warnings.some(w => w.includes('청산안전 권고')),
+      `경고가 남아야 한다: ${l.warnings.join(' / ')}`);
+  });
+
+  test('요청 100배 · 거래소 75배 → 75배로 낮추지 않고 막는다', () => {
+    const l = leverageLadder(stressSrc({ venueCap: 75 }));
+    eq(l.blocked, true, '75배로 낮춰 통과시켰다');
+    eq(l.blockCode, 'VENUE_CAPPED');
+    eq(l.allowed, null, '막았는데 배율이 정해졌다');
+    assert(l.blockReason.includes('75'), l.blockReason);
+    assert(l.blockReason.includes('낮춰 보내지 않습니다'), l.blockReason);
+  });
+
+  test('요청 100배 · 거래소 상한 UNKNOWN → 막는다', () => {
+    for (const v of [null, undefined, '', 0]) {
+      const l = leverageLadder(stressSrc({ venueCap: v }));
+      eq(l.blocked, true, `venueCap=${JSON.stringify(v)}가 통과했다`);
+      eq(l.blockCode, 'VENUE_UNKNOWN');
+    }
+  });
+
+  test('전략 상한이 요청보다 낮아도 낮추지 않고 막는다', () => {
+    const l = leverageLadder(stressSrc({ strategyCap: 50 }));
+    eq(l.blocked, true);
+    eq(l.blockCode, 'CAP_BELOW_REQUEST');
+  });
+
+  test('청산안전 상한을 못 구하면 스트레스여도 막는다 — 실험에서도 알아야 하는 값이다', () => {
+    const l = leverageLadder(stressSrc({ stopPct: null }));
+    eq(l.blocked, true, '청산까지의 거리를 모르는데 통과했다');
+    eq(l.blockCode, 'MISSING_REQUIRED');
+  });
+
+  test('LIVE(스트레스 아님)는 기존 정책 그대로 — 가장 낮은 상한이 이긴다', () => {
+    const l = leverageLadder({ userCap: 100, stopPct: 1.5, venueCap: 125 });
+    eq(l.blocked, false);
+    assert(l.allowed! < 100, `실전에서 청산안전 상한이 안 걸렸다: ${l.allowed}`);
+    eq(l.allowed, l.liquidationSafeCap, '청산안전 상한이 이겨야 한다');
+    eq(l.boundBy, '청산안전 최대');
+    // 요청은 그대로 남는다 — 화면이 요청과 실제를 구분해 보여줘야 한다.
+    eq(l.requested, 100);
+  });
+
+  test('요청·권고·실제가 서로 다른 값으로 남는다', () => {
+    const stress = leverageLadder(stressSrc());
+    // 스트레스: 요청 100 · 권고 <100 · 실제 100
+    eq(stress.requested, 100);
+    eq(stress.allowed, 100);
+    assert(stress.liquidationSafeCap! < 100);
+
+    const live = leverageLadder({ userCap: 100, stopPct: 1.5, venueCap: 125 });
+    // 실전: 요청 100 · 권고 <100 · 실제 = 권고
+    eq(live.requested, 100);
+    eq(live.allowed, live.liquidationSafeCap);
+  });
+
+  test('스트레스여도 배율 되읽기 불일치는 그대로 막는다', () => {
+    // 사다리가 100배를 내줘도, 거래소에 실제로 걸린 값이 다르면 주문은 안 나간다.
+    eq(leverageVerdict(100, 100, 57).ok, false, '되읽은 57배로 주문이 나갔다');
+    eq(leverageVerdict(100, 100, 100).ok, true);
   });
 }

@@ -61,6 +61,31 @@ export interface LeverageSources {
   venueCap?: any;
   /** 위험엔진이 산출한 이번 주문 배율 */
   riskEngineLeverage?: any;
+  /**
+   * **테스트넷 스트레스 실험인가.** 기본 false.
+   *
+   * 켜면 사다리가 "가장 낮은 값"을 고르지 않는다. 사용자가 100배를 명시했으면
+   * 100배로 요청하고, 못 하겠으면 **막는다** — 조용히 57배로 낮추지 않는다.
+   *
+   * 왜 필요한가
+   * ───────────
+   * 스트레스 실험의 목적은 **망가지는 지점을 보는 것**이다. 100배를
+   * 요청했는데 청산안전 상한이 57배라고 57배로 낮춰 주문하면, 그건
+   * 실험이 아니라 다른 설정으로 매매한 것이다. 화면에는 '이번 주문 57배'가
+   * 뜨는데 사용자가 보려던 100배의 거동은 어디에도 안 남는다.
+   *
+   * 무엇이 달라지고 무엇이 안 달라지나
+   * ──────────────────────────────────
+   *  · 청산안전 상한 → **경고**로 바뀐다. 여전히 계산하고 여전히 보여 주되
+   *    배율을 깎지 않는다. 못 구하면 그때는 막는다.
+   *  · 거래소·전략 상한 → **깎지 않고 막는다.** 100배를 요청했는데 거래소가
+   *    75배까지면 75배로 내려 보내지 않는다. 그건 다른 실험이다.
+   *  · 거래소 상한을 **못 읽으면 막는다.** 스트레스에서는 특히, 무엇이
+   *    한계인지 모르는 채로 최대 배율을 보낼 수 없다.
+   *  · LIVE에서는 절대 켜지 않는다. 등급 관문(tierAllowedIn)이 이미 막지만,
+   *    여기서도 부르는 쪽이 실수로 켜지 못하게 환경을 같이 받는다.
+   */
+  stressTestnet?: boolean;
   /** 손절 거리(%) — 청산안전 상한을 여기서 역산한다 */
   stopPct?: any;
   /** 유지증거금률(%) */
@@ -100,6 +125,17 @@ export interface LadderResult {
   blockReason: string;
   /** 사람이 읽는 한 줄 */
   summary: string;
+  /**
+   * 사용자가 **요청한** 배율. 실제 주문 배율(allowed)과 **다른 값이다.**
+   *
+   * 화면이 이 둘을 같은 칸에 쓰면 "100배로 켰는데 왜 57배로 나갔나"가
+   * 설명되지 않는다. 요청·권고·실제를 각각 보여 줘야 한다.
+   */
+  requested: number | null;
+  /** 스트레스 실험이라 깎지 않고 넘어간 상한들. 사람이 읽는 문장 */
+  warnings: string[];
+  /** 막았으면 그 이유의 기계 코드 */
+  blockCode: 'VENUE_CAPPED' | 'VENUE_UNKNOWN' | 'CAP_BELOW_REQUEST' | 'MISSING_REQUIRED' | 'NO_CAPS' | 'SUB_ONE' | null;
 }
 
 const num = (v: any): number | null => {
@@ -159,15 +195,95 @@ export function leverageLadder(src: LeverageSources | null | undefined): LadderR
     },
   ];
 
+  const requested = num(s.userCap);
+  const stress = s.stressTestnet === true;
+
   // **필수 항목을 못 구했으면 막는다.** 확인하지 못한 것은 통과가 아니다.
+  // 스트레스라고 이걸 열지 않는다 — 청산까지 얼마나 남았는지는 실험에서도
+  // 알아야 하는 값이다. 다만 아래에서 그 값으로 **깎지는** 않는다.
   const missingRequired = rows.filter(r => r.required && !r.known);
   if (missingRequired.length > 0) {
     return {
       rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
-      allowed: null, boundBy: null, blocked: true,
+      allowed: null, boundBy: null, blocked: true, blockCode: 'MISSING_REQUIRED',
+      requested, warnings: [],
       blockReason: `${missingRequired.map(r => r.label).join(' · ')}을 계산하지 못했습니다`
         + ' — 청산까지 얼마나 남았는지 모르는 채로 주문을 낼 수 없습니다',
       summary: '배율을 정할 수 없습니다',
+    };
+  }
+
+  // ── 스트레스 실험: 깎지 않는다. 못 하면 막는다 ──
+  if (stress) {
+    if (requested == null) {
+      return {
+        rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
+        allowed: null, boundBy: null, blocked: true, blockCode: 'NO_CAPS',
+        requested: null, warnings: [],
+        blockReason: '요청 배율이 없습니다 — 스트레스 실험은 얼마를 시험할지 사용자가 정해야 합니다',
+        summary: '배율을 정할 수 없습니다',
+      };
+    }
+
+    // 거래소 상한을 **모르면 막는다.** 최대 배율을 시험하는 자리에서
+    // 무엇이 한계인지 모르는 채로 보낼 수는 없다.
+    const venue = num(s.venueCap);
+    if (venue == null) {
+      return {
+        rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
+        allowed: null, boundBy: '거래소 최대', blocked: true, blockCode: 'VENUE_UNKNOWN',
+        requested, warnings: [],
+        blockReason: `거래소가 이 심볼에서 몇 배까지 허용하는지 읽지 못했습니다 — `
+          + `${requested}배를 시험하려면 그 한계를 먼저 알아야 합니다`,
+        summary: '배율을 정할 수 없습니다',
+      };
+    }
+    if (venue < requested) {
+      // **75배로 낮춰 보내지 않는다.** 그건 사용자가 요청한 실험이 아니다.
+      return {
+        rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
+        allowed: null, boundBy: '거래소 최대', blocked: true, blockCode: 'VENUE_CAPPED',
+        requested, warnings: [],
+        blockReason: `요청 ${requested}배인데 거래소 최대는 ${venue}배입니다 — `
+          + `${venue}배로 낮춰 보내지 않습니다. 요청한 실험과 다른 설정이 되기 때문입니다. `
+          + `${venue}배로 시험하려면 요청 배율을 직접 바꾸세요`,
+        summary: `${requested}배를 낼 수 없습니다`,
+      };
+    }
+
+    // 전략 상한도 같은 규칙 — 조용히 낮추지 않는다.
+    const strat = num(s.strategyCap);
+    if (strat != null && strat < requested) {
+      return {
+        rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
+        allowed: null, boundBy: '전략 최대', blocked: true, blockCode: 'CAP_BELOW_REQUEST',
+        requested, warnings: [],
+        blockReason: `요청 ${requested}배인데 전략 상한은 ${strat}배입니다 — `
+          + '낮춰 보내지 않습니다. 전략 상한을 올리거나 요청 배율을 내리세요',
+        summary: `${requested}배를 낼 수 없습니다`,
+      };
+    }
+
+    // 여기부터는 **경고만** 한다. 깎지 않는다.
+    const warnings: string[] = [];
+    if (liqSafe != null && liqSafe < requested) {
+      warnings.push(
+        `청산안전 권고는 ${liqSafe}배인데 ${requested}배로 시험합니다 — `
+        + '손절이 닿기 전에 청산될 수 있습니다. 스트레스 실험이라 낮추지 않았습니다');
+    }
+    const risk = num(s.riskEngineLeverage);
+    if (risk != null && risk < requested) {
+      warnings.push(
+        `위험엔진 역산은 ${risk}배인데 ${requested}배로 시험합니다 — `
+        + '1회 위험이 설정한 비율보다 커집니다');
+    }
+
+    return {
+      rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
+      allowed: requested, boundBy: '요청 배율', blocked: false, blockReason: '',
+      blockCode: null, requested, warnings,
+      summary: `이번 주문 ${requested}배 — 요청 그대로 시험합니다`
+        + (warnings.length > 0 ? ` (경고 ${warnings.length}건)` : ''),
     };
   }
 
@@ -175,7 +291,8 @@ export function leverageLadder(src: LeverageSources | null | undefined): LadderR
   if (candidates.length === 0) {
     return {
       rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
-      allowed: null, boundBy: null, blocked: true,
+      allowed: null, boundBy: null, blocked: true, blockCode: 'NO_CAPS',
+      requested, warnings: [],
       blockReason: '배율 상한을 하나도 읽지 못했습니다',
       summary: '배율을 정할 수 없습니다',
     };
@@ -187,7 +304,8 @@ export function leverageLadder(src: LeverageSources | null | undefined): LadderR
   if (allowed < 1) {
     return {
       rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
-      allowed: null, boundBy: min.label, blocked: true,
+      allowed: null, boundBy: min.label, blocked: true, blockCode: 'SUB_ONE',
+      requested, warnings: [],
       blockReason: `${min.label}이 1배 미만입니다 — 이 손절로는 어떤 배율도 안전하지 않습니다`,
       summary: '배율을 정할 수 없습니다',
     };
@@ -196,6 +314,7 @@ export function leverageLadder(src: LeverageSources | null | undefined): LadderR
   return {
     rows, liquidationSafeCap: liqSafe, liquidationTheoreticalCap: theoretical,
     allowed, boundBy: min.label, blocked: false, blockReason: '',
+    blockCode: null, requested, warnings: [],
     summary: `이번 주문 ${allowed}배 — ${min.label}이 가장 낮습니다`,
   };
 }
