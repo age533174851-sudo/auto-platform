@@ -71,7 +71,15 @@ jobs:
           if [ -n "$missing" ]; then
             echo "::error::예약 청산 크론이 설정되지 않았습니다 —$missing 이(가) 없습니다."
             echo "::error::이 값이 없으면 앱을 닫아 둔 동안 예약 청산이 실행되지 않습니다."
-            echo "::error::저장소 Settings → Secrets and variables → Actions 에서 등록하세요."
+            echo ""
+            echo "APP_URL   은 Variables 탭  (비밀이 아님 · 배포 주소)"
+            echo "CRON_SECRET 은 Secrets 탭  (비밀값 · Vercel 환경변수와 같은 값)"
+            echo ""
+            echo "탭을 바꿔 넣으면 워크플로가 못 읽습니다 —"
+            echo "  vars.APP_URL      ← Variables"
+            echo "  secrets.CRON_SECRET ← Secrets"
+            echo "Environment secret이 아니라 Repository secret이어야 합니다."
+            echo "https://github.com/${{ github.repository }}/settings/secrets/actions"
             exit 1
           fi
 
@@ -83,15 +91,33 @@ jobs:
           set -o pipefail
           # **응답 본문을 로그에 남긴다.** 상태 코드만 보면 '몇 건을
           # 어떻게 했는지'를 나중에 못 찾는다.
+          # **끝 슬래시를 벗긴다.**
+          #
+          # 사람이 주소를 넣을 때 'https://x.vercel.app/'처럼 슬래시를
+          # 붙이는 것은 아주 흔하다. 그대로 이으면 '//api/...'가 되고,
+          # 대개는 동작하지만 배포 설정에 따라 리다이렉트되거나 404가 난다.
+          # 사용자에게 "슬래시 빼세요"라고 하는 것보다 코드가 흡수하는
+          # 쪽이 낫다 — 같은 실수가 반복되는 자리다.
+          base="${APP_URL%/}"
+          echo "대상: $base/api/autotrade/scheduled-exit"
           code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
             --max-time 60 \
             -H "Authorization: Bearer $CRON_SECRET" \
-            "$APP_URL/api/autotrade/scheduled-exit" || echo "000")
+            "$base/api/autotrade/scheduled-exit" || echo "000")
           echo "HTTP $code"
           cat /tmp/out.json || true
           echo
           if [ "$code" = "000" ]; then
             echo "::error::앱에 연결하지 못했습니다 — 예약 청산이 이번 주기에 실행되지 않았습니다"
+            exit 1
+          fi
+          if [ "$code" = "401" ]; then
+            # **401은 원인이 하나다: 값이 다르다.**
+            # 응답의 cronSecretSet을 같이 보면 어느 쪽이 문제인지 갈린다.
+            echo "::error::앱이 인증을 거절했습니다 (401)."
+            echo "::error::GitHub의 CRON_SECRET과 Vercel의 CRON_SECRET이 다릅니다."
+            echo "::error::위 응답의 cronSecretSet이 false면 Vercel 쪽에 값이 아예 없는 것이고,"
+            echo "::error::true면 두 값이 서로 다른 것입니다. Vercel에 넣은 뒤 재배포했는지도 확인하세요."
             exit 1
           fi
           if [ "$code" != "200" ]; then
