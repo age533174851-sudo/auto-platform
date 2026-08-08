@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { leverageNote } from '@/lib/engine/leverageMath';
 import { liveTradingGate } from '@/lib/engine/liveTradingGate';
+import { scheduleConnState, rebindVerdict } from '@/lib/engine/schedulePlan';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -113,20 +114,38 @@ export async function GET(req: NextRequest) {
 
   // 고를 수 있는 연결. 화면이 이 목록에서만 고르게 해야 '없는 연결 id'가
   // 저장되는 일이 없다.
-  let connections: any[] = [];
+  //
+  // **못 읽은 것을 빈 배열로 두지 않는다.** 빈 배열이면 아래 판정이 모든
+  // 예약을 '연결 없음(낡음)'으로 적고, 사용자는 멀쩡한 예약을 다시 연결한다.
+  let connections: any[] | null = null;
   try {
-    const { data } = await (sb as any)
+    const { data, error: cErr } = await (sb as any)
       .from('exchange_connections')
       .select('id, exchange_id, label, is_testnet')
       .eq('user_id', uid);
-    connections = (data || []).filter((c: any) => String(c.exchange_id).toLowerCase() !== 'kis');
-  } catch { /* 목록을 못 읽으면 화면이 그렇게 말한다 */ }
+    if (!cErr) {
+      connections = (data || []).filter((c: any) => String(c.exchange_id).toLowerCase() !== 'kis');
+    }
+  } catch { /* null 그대로 — 화면이 '확인하지 못했습니다'로 적는다 */ }
+
+  // ── 예약이 가리키는 연결이 아직 있는가 ──
+  //
+  // 연결을 다시 등록하면 id가 새로 생긴다. 예약의 id는 그대로 남고, 그
+  // 연결은 더 이상 없다. 그 상태로 화면의 스위치를 누르면 **낡은 id로
+  // POST가 나가서 404로 끝난다** — 켤 수도 끌 수도 없는 줄이 된다.
+  // 화면에는 '연결 있음'이라고 적혀 있었다.
+  const annotated = (rows || []).map((r: any) => {
+    const v = scheduleConnState(r.connection_id, connections as any);
+    return { ...r, connectionState: v.state, connectionNote: v.message, needsRebind: v.needsRebind };
+  });
 
   return NextResponse.json({
     ok: true,
-    schedules: rows || [],
+    schedules: annotated,
     runs, runsError,
-    connections,
+    // **null이면 못 읽은 것이다.** 화면이 빈 목록과 구분해야 한다.
+    connections: connections ?? [],
+    connectionsReadOk: connections != null,
     // 크론이 실제로 인증될 수 있는가. **값은 싣지 않는다**
     adminSecretSet: !!process.env.ADMIN_SECRET,
     cronSecretSet: !!process.env.CRON_SECRET,
@@ -249,10 +268,65 @@ export async function POST(req: NextRequest) {
     .select('id, is_testnet, exchange_id')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
   if (!conn) {
+    // ── 무엇을 해야 하는지까지 적는다 ──
+    //
+    // 예전에는 "그 거래소 연결을 찾지 못했습니다"가 전부였다. 사용자가
+    // 화면에서 고른 적이 없는 id라 어디서 온 값인지도 알 수 없었다 —
+    // **예약에 저장돼 있던 낡은 id였다.** 연결을 다시 등록하면 id가
+    // 새로 생기고, 예약은 옛 id를 계속 들고 있다.
+    //
+    // 그 상태를 여기서 구분해 준다. 지금 쓸 수 있는 연결이 무엇인지도
+    // 같이 알려 주되, **대신 골라 주지는 않는다.**
+    let mine: any[] = [];
+    try {
+      const { data } = await (sb as any)
+        .from('exchange_connections')
+        .select('id, exchange_id, label, is_testnet').eq('user_id', uid);
+      mine = (data || []).filter((c: any) => String(c.exchange_id).toLowerCase() !== 'kis');
+    } catch { /* 못 읽으면 아래에서 목록 없이 안내한다 */ }
+
+    const { data: existing } = await (sb as any)
+      .from('autotrade_schedules')
+      .select('id, connection_id').eq('user_id', uid).eq('symbol', symbol).maybeSingle();
+    const stale = existing && String(existing.connection_id) === connectionId;
+
     return NextResponse.json({
       ok: false, error: 'connection_not_found',
-      message: '그 거래소 연결을 찾지 못했습니다',
+      // 화면이 [이 연결로 재연결] 버튼을 띄울 근거다.
+      needsRebind: !!stale,
+      message: stale
+        ? `${symbol} 예약이 가리키는 거래소 연결이 더 이상 없습니다 — `
+          + '연결을 다시 등록하면 id가 새로 생기고, 예약은 옛 id를 그대로 들고 있습니다. '
+          + '화면에서 지금 쓸 연결을 고른 뒤 다시 시도하세요. 대신 골라 주지 않습니다 — '
+          + '어느 계좌로 주문이 나가는지는 사용자가 정해야 합니다.'
+        : '그 거래소 연결을 찾지 못했습니다',
+      // 값이 아니라 고를 수 있는 것들의 이름표만 싣는다.
+      availableConnections: mine.map((c: any) => ({
+        id: c.id, exchange_id: c.exchange_id, label: c.label, is_testnet: c.is_testnet,
+      })),
     }, { status: 404 });
+  }
+
+  // ── 명시적 재연결 ──
+  //
+  // 화면이 `rebind: true`로 부르면 "이 예약의 연결을 지금 고른 것으로
+  // 바꾸겠다"는 뜻이다. 판정은 schedulePlan 한 곳에 있다 — 여기서 다시
+  // 쓰면 화면과 서버가 다른 규칙을 갖게 된다.
+  if (body?.rebind === true) {
+    let mine: any[] | null = null;
+    try {
+      const { data, error: cErr } = await (sb as any)
+        .from('exchange_connections')
+        .select('id, exchange_id, label, is_testnet').eq('user_id', uid);
+      if (!cErr) mine = data || [];
+    } catch { /* null → 아래 판정이 '확인하지 못했다'로 막는다 */ }
+
+    const v = rebindVerdict({ currentConnectionId: connectionId, connections: mine as any, mode: modeRaw });
+    if (!v.ok) {
+      return NextResponse.json({
+        ok: false, error: 'rebind_rejected', code: v.code, message: v.message,
+      }, { status: v.code === 'CONNECTIONS_UNKNOWN' ? 503 : 400 });
+    }
   }
 
   // **모드와 연결이 어긋나면 막는다.**

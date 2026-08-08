@@ -415,15 +415,31 @@ export default function AutotradeControl() {
     finally { setBusy(false); setPhase(''); }
   };
 
-  const toggle = async (row: any) => {
+  /**
+   * 예약을 켜고 끈다.
+   *
+   * `rebindTo`를 주면 **이 예약의 연결을 그것으로 바꾼다.** 연결을 다시
+   * 등록하면 id가 새로 생기는데 예약은 옛 id를 그대로 들고 있어서, 그
+   * 상태로 스위치를 누르면 낡은 id가 그대로 나가 404로 끝난다 —
+   * 켤 수도 끌 수도 없는 줄이 된다.
+   *
+   * **대신 골라 주지 않는다.** 화면에서 지금 고른 연결만 쓴다. 계좌가
+   * 둘 이상이면 어느 쪽으로 주문이 나가는지 모르는 채 바뀌기 때문이다.
+   */
+  const toggle = async (row: any, rebindTo?: string) => {
     setBusy(true); setMsg(null);
     try {
       const r = await fetch('/api/autotrade/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
-          symbol: row.symbol, connectionId: row.connection_id,
-          mode: row.mode, enabled: !row.enabled,
+          symbol: row.symbol,
+          connectionId: rebindTo || row.connection_id,
+          ...(rebindTo ? { rebind: true } : {}),
+          mode: row.mode,
+          // 재연결은 **연결만 바꾼다.** 켜짐 상태를 뒤집지 않는다 —
+          // 껐던 예약이 연결을 고쳤다고 저절로 켜지면 안 된다.
+          enabled: rebindTo ? !!row.enabled : !row.enabled,
           // 켜고 끌 때 크기 설정을 **지우지 않는다.** 안 실어 보내면
           // null로 덮여서, 껐다 켠 것만으로 배율 상한이 사라진다.
           leverageCap: row.leverage_cap ?? undefined,
@@ -730,10 +746,39 @@ export default function AutotradeControl() {
                   }}>{s.mode}</span>
                 </div>
                 <div style={{ color: T.muted, fontSize: 10, marginTop: 2 }}>
-                  {s.connection_id ? '연결 있음' : <span style={{ color: T.red }}>연결 없음 — 주문을 낼 수 없습니다</span>}
+                  {/* 서버가 판정한 상태를 그대로 쓴다. 화면이 다시 판단하면
+                      규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다. */}
+                  {s.connectionState === 'OK' ? '연결 있음'
+                    : s.connectionState === 'UNKNOWN'
+                      ? <span style={{ color: T.ylw }}>{s.connectionNote}</span>
+                      : <span style={{ color: T.red }}>{s.connectionNote || '연결 없음 — 주문을 낼 수 없습니다'}</span>}
                   {s.risk_pct != null ? ` · 위험 ${s.risk_pct}%` : ''}
                   {s.leverage_cap != null ? ` · 상한 ${s.leverage_cap}배` : ''}
                 </div>
+
+                {/* ── 연결이 낡았으면 고칠 길을 준다 ──
+                    안내만 하고 방법을 안 주면 사용자는 예약을 지우고 다시
+                    만든다. 그러면 설정도 이력도 같이 사라진다.
+                    **지금 위에서 고른 연결로만** 바꾼다 — 대신 고르지 않는다. */}
+                {s.needsRebind && (
+                  <div style={{ marginTop: 5, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => toggle(s, connId)}
+                      disabled={busy || !connId}
+                      style={{
+                        fontSize: 9.5, fontWeight: 800, padding: '4px 8px', borderRadius: 6,
+                        border: `1px solid ${T.ylw}`, background: 'transparent', color: T.ylw,
+                        cursor: busy || !connId ? 'default' : 'pointer',
+                        opacity: busy || !connId ? 0.5 : 1,
+                      }}
+                    >지금 고른 연결로 재연결</button>
+                    <span style={{ fontSize: 9, color: T.muted }}>
+                      {connId
+                        ? '아래에서 고른 연결로 이 예약의 연결만 바꿉니다 (켜짐 상태는 그대로)'
+                        : '아래에서 연결을 먼저 고르세요 — 대신 골라 주지 않습니다'}
+                    </span>
+                  </div>
+                )}
 
                 {/* ── 언제 다음에 보는가 ──
                     예전에는 이 자리가 없고 맨 아래에 "크론은 매일 23:00

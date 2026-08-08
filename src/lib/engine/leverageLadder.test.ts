@@ -179,13 +179,20 @@ export function runLeverageLadderTests() {
 
   console.log('[배율 사다리 — 연구용이 실전으로 승격되면 안 된다]');
 
-  test('스트레스 테스트 등급은 모의에서만 쓴다', () => {
+  test('스트레스 테스트 등급은 테스트넷까지 쓰고 실전에서는 막는다', () => {
     // 1회 위험 10% · 100배는 매매 설정이 아니라 망가지는 지점을 보는 것이다.
     eq(TIER_LIMITS.STRESS.maxRiskPct, 10);
     eq(TIER_LIMITS.STRESS.maxLeverage, 100);
     eq(tierAllowedIn('STRESS', 'MOCK').ok, true);
-    eq(tierAllowedIn('STRESS', 'TESTNET').ok, false);
-    eq(tierAllowedIn('STRESS', 'LIVE').ok, false);
+    // **테스트넷에서 허용한다.** MOCK에서 100배를 돌리는 것은 아무것도
+    // 증명하지 않는다 — 체결도 청산도 우리가 만든 숫자다. 거래소가 실제로
+    // 어떻게 거절하고 청산하는지를 보려면 테스트넷이어야 하고,
+    // 거기서 잃을 돈은 없다.
+    eq(tierAllowedIn('STRESS', 'TESTNET').ok, true);
+    // **실전은 계속 막는다.** 여기가 열리면 이 등급을 나눈 이유가 없어진다.
+    const live = tierAllowedIn('STRESS', 'LIVE');
+    eq(live.ok, false);
+    assert(live.reason.includes('LIVE'), live.reason);
   });
 
   test('연구용은 실전에서 막힌다', () => {
