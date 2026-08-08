@@ -296,6 +296,201 @@ export async function futuresCloseAll(
  * **전량이 닫힌 것을 확인한 뒤에만.** 부분 청산 뒤에 지우면 남은 포지션이
  * 보호 없이 남는다 — 닫으려다 더 위험해진다.
  */
+export interface ProtectiveOrdersResult {
+  /** 조회 자체가 성공했는가. false면 수가 전부 null이고 '없음'이 아니다 */
+  ok: boolean;
+  /** 닫는 주문 총수(방향 무관). **못 읽으면 null이다** */
+  count: number | null;
+  /**
+   * **지금 그 포지션을 지키는 손절 주문 수.** 이 값이 방어선의 유무다.
+   *
+   * 두 가지를 걸러서 센다:
+   *   · 익절은 빼고 손절만 — 익절은 이익을 확정하는 주문이지 방어선이 아니다
+   *   · **지금 포지션과 같은 방향을 닫는 것만** — 롱을 들고 있는데 숏용
+   *     손절이 남아 있으면 그건 이 포지션을 아무것도 지키지 않는다
+   *
+   * 둘 중 하나라도 안 걸러 세면 화면에 "손절 있음"이 뜬 채로 아래쪽을
+   * 막는 것이 없는 포지션이 남는다.
+   */
+  stopCount: number | null;
+  /** 지금 포지션을 닫는 익절 주문 수. 사실 전달용 — 이것만으로는 통과시키지 않는다 */
+  takeProfitCount: number | null;
+  /** **반대 방향**을 닫는 손절 수. 사실 전달용 — 보호 증거로 인정하지 않는다 */
+  oppositeStopCount: number;
+  /** 손절·익절 중 어느 쪽인지 판별하지 못한 주문 수 */
+  unclassified: number;
+  /** 사람이 읽는 근거 한 줄 */
+  detail: string;
+  error: string | null;
+}
+
+/**
+ * **지금 이 포지션을 지키는 손절이 거래소에 실제로 걸려 있는가.**
+ *
+ * 왜 따로 필요한가
+ * ────────────────
+ * 점검 목록의 `STOP_ATTACHED`는 **계획의 손절가**를 본다 — 즉 "우리가 손절을
+ * 붙일 생각인가"다. 그건 "거래소에 손절이 붙어 있는가"와 다른 질문이다.
+ * 진입은 성공했는데 손절 부착만 실패한 상황이 정확히 그 차이에 숨는다:
+ * 계획에는 손절가가 있으니 점검은 통과하고, 거래소에는 아무것도 없다.
+ *
+ * 세 번 거른다
+ * ────────────
+ *  1. **닫는 주문만.** 사용자가 걸어 둔 진입 예약을 손절로 세지 않는다.
+ *  2. **손절만.** 익절만 걸린 포지션은 가격이 반대로 갈 때 막을 것이 없다.
+ *  3. **지금 포지션과 같은 방향만.** 롱을 들고 있는데 남아 있는 숏용 손절은
+ *     이 포지션을 지키지 않는다 — 방향이 반대면 트리거돼도 열리는 쪽이다.
+ *
+ * **0과 모름을 구분한다.** 조회가 실패했는데 0으로 적으면 "손절이 없다"가
+ * 사실이 되고, 판별을 못 했는데 1로 세면 없는 방어선을 있다고 적는다.
+ *
+ * @param positionSide 지금 열려 있는 포지션의 방향. **모르면 null** —
+ *   그때는 어느 손절이 이 포지션을 지키는지 판별할 수 없으므로
+ *   stopCount를 null로 돌려준다(포지션이 없으면 점검이 그 앞에서 통과시킨다).
+ */
+/** 분류가 끝난 조건부 주문 한 건 */
+export interface ProtectiveItem {
+  kind: 'STOP' | 'TAKE_PROFIT' | 'UNKNOWN';
+  /** 이 주문이 닫는 방향. 모르면 null */
+  closes: 'LONG' | 'SHORT' | null;
+}
+
+export interface ProtectiveTally {
+  stopCount: number | null;
+  takeProfitCount: number | null;
+  oppositeStopCount: number;
+  unclassified: number;
+  count: number;
+  error: string | null;
+}
+
+/**
+ * 분류된 주문들 → 방어선이 있는가.
+ *
+ * **순수 함수다.** 네트워크를 안 탄다. 여기가 이 기능에서 틀리면 가장
+ * 위험한 자리라(없는 손절을 있다고 적는 곳) 거래소 응답 없이 값으로
+ * 검증할 수 있어야 한다.
+ *
+ * 두 번 거른다:
+ *   · 익절은 방어선이 아니다
+ *   · **지금 포지션과 같은 방향을 닫는 것만** 방어선이다 — 롱을 들고
+ *     있는데 남아 있는 숏용 손절은 이 포지션을 아무것도 지키지 않는다
+ */
+export function protectiveTally(
+  items: ProtectiveItem[], positionSide: 'LONG' | 'SHORT' | null,
+): ProtectiveTally {
+  let stop = 0, tp = 0, opposite = 0, unclassified = 0;
+  for (const it of items) {
+    if (it.kind === 'UNKNOWN') { unclassified++; continue; }
+    if (positionSide != null && it.closes !== positionSide) {
+      if (it.kind === 'STOP') opposite++;
+      continue;
+    }
+    if (it.kind === 'STOP') stop++; else tp++;
+  }
+  const count = items.length;
+
+  // **포지션 방향을 모르면 손절 수를 확정하지 않는다.** 어느 손절이 이
+  // 포지션을 지키는지 가릴 수 없다. 포지션이 아예 없으면 점검 목록이
+  // 이 값을 보기 전에 통과시킨다.
+  if (positionSide == null) {
+    return { stopCount: null, takeProfitCount: null, oppositeStopCount: opposite,
+      unclassified, count,
+      error: '현재 포지션 방향을 몰라 어느 손절이 이 포지션을 지키는지 판별할 수 없습니다' };
+  }
+
+  // **판별 못 한 것이 있고 손절이 0이면 확정하지 않는다.** 그 주문이 손절일
+  // 수도 있는데 0으로 적으면 없는 것이 사실이 되고, 1로 세면 없는 방어선을
+  // 있다고 적는다. 둘 다 안 되므로 모른다고 말한다.
+  if (unclassified > 0 && stop === 0) {
+    return { stopCount: null, takeProfitCount: tp, oppositeStopCount: opposite,
+      unclassified, count,
+      error: `조건부 주문 ${unclassified}건이 손절인지 익절인지 판별되지 않아 `
+           + '손절 유무를 확정할 수 없습니다' };
+  }
+
+  return { stopCount: stop, takeProfitCount: tp, oppositeStopCount: opposite,
+    unclassified, count, error: null };
+}
+
+export async function futuresProtectiveOrders(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean, symbol: string,
+  positionSide: 'LONG' | 'SHORT' | null = null,
+): Promise<ProtectiveOrdersResult> {
+  const fail = (error: string): ProtectiveOrdersResult => ({
+    ok: false, count: null, stopCount: null, takeProfitCount: null,
+    oppositeStopCount: 0, unclassified: 0, detail: '', error,
+  });
+
+  try {
+    const items: ProtectiveItem[] = [];
+    let label = symbol;
+
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const gp = await import('./gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return fail(`Gate 계약 이름을 만들 수 없습니다 (${symbol})`);
+      label = contract;
+
+      // Gate의 조건부 주문(price_orders)이 손절·익절이다. **null은 조회 실패다.**
+      const rows = await gf.getPriceOrdersGateFutures(key, secret, contract, testnet);
+      if (rows == null) return fail('Gate 조건부 주문(price_orders)을 읽지 못했습니다');
+
+      for (const row of rows) {
+        // 손절/익절 판정은 gatePlan 한 곳에만 둔다 — 거는 쪽과 세는 쪽이
+        // 각자 부등호를 쓰면 한쪽만 고쳐지고, 그때 "손절 있음"이 거짓이 된다.
+        const k = gp.gateProtectiveKind(row);
+        // 진입 예약은 보호 주문이 아니다 — 사용자가 걸어 둔 지정가를 손절로 세지 않는다.
+        if (k.kind === 'NOT_PROTECTIVE') continue;
+        items.push({ kind: k.kind, closes: k.closes });
+      }
+    } else {
+      const bf = await import('./binanceFutures');
+      const { orders } = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
+      if (!Array.isArray(orders)) return fail('미체결 주문을 읽지 못했습니다');
+
+      for (const o of orders as any[]) {
+        const t = String(o?.type || '').toUpperCase();
+        // futuresCancelProtection이 지우는 것과 **같은 조건**으로 센다.
+        // 세는 기준과 지우는 기준이 다르면 "1건 있다"고 적고 0건을 지운다.
+        if (!(o?.closePosition === true || o?.reduceOnly === true)) continue;
+        if (!t.includes('STOP') && !t.includes('TAKE_PROFIT')) continue;
+
+        // 닫는 주문의 side가 곧 방향이다 — SELL이 롱을 닫는다.
+        const side = String(o?.side || '').toUpperCase();
+        const closes: 'LONG' | 'SHORT' | null =
+          side === 'SELL' ? 'LONG' : side === 'BUY' ? 'SHORT' : null;
+        if (!closes) { items.push({ kind: 'UNKNOWN', closes: null }); continue; }
+
+        // **익절을 먼저 가른다.** TAKE_PROFIT 계열을 stop으로 세면 안 되고,
+        // TRAILING_STOP_MARKET은 손절이 맞다.
+        items.push({ kind: t.includes('TAKE_PROFIT') ? 'TAKE_PROFIT' : 'STOP', closes });
+      }
+    }
+
+    const tally = protectiveTally(items, positionSide);
+    if (tally.error) {
+      return {
+        ok: false, count: tally.count, stopCount: tally.stopCount,
+        takeProfitCount: tally.takeProfitCount, oppositeStopCount: tally.oppositeStopCount,
+        unclassified: tally.unclassified, detail: '', error: tally.error,
+      };
+    }
+    return {
+      ok: true, count: tally.count, stopCount: tally.stopCount,
+      takeProfitCount: tally.takeProfitCount, oppositeStopCount: tally.oppositeStopCount,
+      unclassified: tally.unclassified,
+      detail: `${label} ${positionSide} 손절 ${tally.stopCount}건 · 익절 ${tally.takeProfitCount}건`
+            + (tally.oppositeStopCount > 0
+                ? ` (반대 방향 손절 ${tally.oppositeStopCount}건은 이 포지션을 지키지 않습니다)` : ''),
+      error: null,
+    };
+  } catch (e: any) {
+    return fail(String(e?.message || e));
+  }
+}
+
 export interface CancelProtectionResult {
   /** 지운 건수. 못 세면 null */
   cancelled: number | null;
