@@ -40,9 +40,10 @@ import {
   kindOf, KIND_LABEL, showsTpSl, cardRowsOf, unwiredFieldsOf,
   activityOf, ACTIVITY_LABEL, ACTIVITY_TONE, DEFAULT_FILTERS,
   filterCountsOf, passesFilter, ALL_ACTIVITIES,
-  actionsOf, isCompact, envLineOf, perfSummaryOf,
+  actionsOf, isCompact, envLineOf, perfSummaryOf, moneyRowsOf,
   type Activity, type Tone as CardTone,
 } from '@/lib/ui/strategyCard';
+import { AUTO_TABS, tabOf as autoTabOf, type AutoTabId } from '@/lib/ui/autoOverview';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
   ema_cross:     {label:'EMA 크로스',      icon:'📈',color:'#3B82F6',desc:'EMA20/60 골든·데드 크로스 추세 추종'},
@@ -116,7 +117,37 @@ export const STRAT_DEFAULTS = {
 } as const;
 
 function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void; requireAuth?: (reason: string, action: () => void) => void } = {}) {
+  // ── 3단계 정보 구조 ──
+  //
+  // 하위 탭이 여섯 개였다: 봇 목록 / AI 분석 / 신호 / 리스크 / 실행기록 /
+  // 전략 추가. 여섯 개가 한 줄에 나란히 있으면 **매일 보는 것과 일 년에
+  // 한 번 보는 것이 같은 무게로 보인다.** 그래서 매일 보는 것이 밀린다.
+  //
+  // 기존 화면을 지우지 않는다 — 묶기만 한다. 여섯 개는 그대로 있고
+  // 다섯 갈래(개요/전략/예약/기록/진단) 아래로 들어간다.
+  //
+  // 묶음 정의(AUTO_TABS)는 `lib/ui/autoOverview`에 있다. 화면 안에서
+  // 정하면 "왜 이 탭이 여기 있지"를 테스트할 수 없다.
+  const [group,setGroup]=useState<AutoTabId>('overview');
   const [tab,setTab]=useState<'bots'|'ai'|'signals'|'risk'|'runs'|'create'>('bots');
+
+  // 어느 묶음에 무엇이 들어가는가.
+  const GROUP_MEMBERS: Record<AutoTabId, Array<[typeof tab, string]>> = {
+    overview:    [],
+    strategies:  [['bots','봇 목록'],['create','전략 추가']],
+    schedule:    [],
+    history:     [['runs','실행기록'],['signals','신호']],
+    diagnostics: [['risk','리스크'],['ai','AI 분석']],
+  };
+  const members = GROUP_MEMBERS[group];
+
+  // 묶음을 옮기면 그 묶음의 첫 항목으로 간다. 안 그러면 '기록'을 눌렀는데
+  // 이전에 보던 '봇 목록'이 그대로 떠서 아무 일도 안 일어난 것처럼 보인다.
+  const goGroup = useCallback((g: AutoTabId) => {
+    setGroup(g);
+    const first = GROUP_MEMBERS[g][0];
+    if (first) setTab(first[0]);
+  }, []);
   const [aiSection,setAiSection]=useState<'decision'|'risk'|'analysis'>('decision');
   const [strats,setStrats]=useState<Strategy[]>(INITIAL_STRATS);
   const [signals]=useState<Signal[]>(INITIAL_SIGNALS);
@@ -241,15 +272,51 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
         ))}
       </div>
 
-      {/* Sub tabs */}
-      <div style={{display:'flex',gap:5,marginBottom:14,overflowX:'auto'}}>
-        {([['bots','봇 목록'],['ai','AI 분석'],['signals','신호'],['risk','리스크'],['runs','실행기록'],['create','전략 추가']] as const).map(([id,l])=>(
-          <button key={id} onClick={()=>setTab(id)} style={{flexShrink:0,padding:'7px 11px',background:tab===id?T.acg:'transparent',color:tab===id?T.acl:T.muted,border:`1px solid ${tab===id?T.acl:T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>{l}</button>
-        ))}
+      {/* ── 1단계: 묶음 ──
+          매일 보는 것(개요)과 가끔 보는 것(진단)을 같은 줄에 두지 않는다. */}
+      <div style={{display:'flex',gap:5,marginBottom:6,overflowX:'auto'}}>
+        {AUTO_TABS.map(t=>{
+          const on = group === t.id;
+          return (
+            <button key={t.id} onClick={()=>goGroup(autoTabOf(t.id))} style={{flexShrink:0,padding:'8px 13px',background:on?T.acg:'transparent',color:on?T.acl:T.muted,border:`1px solid ${on?T.acl:T.border}`,borderRadius:10,fontSize:11.5,fontWeight:800,cursor:'pointer'}}>{t.label}</button>
+          );
+        })}
+      </div>
+      {/* **탭 이름만으로는 무엇이 들었는지 모른다.** 한 줄로 적는다 —
+          안 적으면 사용자가 다섯 탭을 다 눌러 보고 나서야 안다. */}
+      <div style={{color:T.muted,fontSize:9.5,marginBottom:10,lineHeight:1.55}}>
+        {AUTO_TABS.find(t=>t.id===group)?.desc}
       </div>
 
+      {/* ── 2단계: 묶음 안의 화면 ──
+          하나뿐이면 선택지를 안 그린다. 고를 것이 없는 선택지는
+          화면만 차지하고 아무것도 안 한다. */}
+      {members.length > 1 && (
+        <div style={{display:'flex',gap:5,marginBottom:14,overflowX:'auto'}}>
+          {members.map(([id,l])=>(
+            <button key={id} onClick={()=>setTab(id)} style={{flexShrink:0,padding:'7px 11px',background:tab===id?T.acg:'transparent',color:tab===id?T.acl:T.muted,border:`1px solid ${tab===id?T.acl:T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer'}}>{l}</button>
+          ))}
+        </div>
+      )}
+
+      {/* ── 예약 ──
+          예약은 위의 자동매매 판(AutotradeControl)에서 만들고 끈다.
+          그 판을 여기서 한 번 더 그리면 같은 화면이 둘이 되고, 둘 중
+          하나만 새로 고쳐지면 서로 다른 값을 보여 준다. */}
+      {group==='schedule'&&(
+        <Card style={{padding:'14px 16px',marginBottom:12}}>
+          <div style={{color:T.txt,fontSize:12.5,fontWeight:800,marginBottom:6}}>예약은 맨 위 판에서 켜고 끕니다</div>
+          <div style={{color:T.muted,fontSize:10.5,lineHeight:1.7}}>
+            실행 주기와 조건은 이 화면 맨 위의 <b style={{color:T.acl}}>자동매매</b> 판에 있습니다.
+            여기서 같은 판을 한 번 더 그리지 않는 이유는, 같은 화면이 둘이 되면
+            한쪽만 새로 고쳐졌을 때 <b style={{color:T.ylw}}>서로 다른 값</b>을 보여 주기 때문입니다 —
+            그러면 어느 쪽이 진짜인지 알 방법이 없습니다.
+          </div>
+        </Card>
+      )}
+
       {/* ── BOTS ── */}
-      {tab==='bots'&&(
+      {group==='strategies'&&tab==='bots'&&(
         <div>
           {/* **이 목록은 실행기에 연결돼 있지 않다.**
               '시작'을 눌러도 이 화면의 상태만 바뀌고, 어떤 주문도 나가지
@@ -495,7 +562,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       )}
 
       {/* ── SIGNALS ── */}
-      {tab==='ai'&&(<>
+      {group==='diagnostics'&&tab==='ai'&&(<>
       {/* AI 서브탭 */}
       <div style={{display:'flex',gap:6,marginBottom:14}}>
         {([['decision','의사결정'],['risk','리스크'],['analysis','분석']] as const).map(([id,l])=>(
@@ -546,7 +613,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       </>)}
       </>)}
 
-      {tab==='signals'&&(
+      {group==='history'&&tab==='signals'&&(
         <div>
           <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}>
             <div style={{color:T.ylw,fontSize:11,fontWeight:700}}>신호 처리 엔진 — 내부 지표 · TradingView · AI (준비중)</div>
@@ -592,7 +659,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       )}
 
       {/* ── RISK ── */}
-      {tab==='risk'&&(() => {
+      {group==='diagnostics'&&tab==='risk'&&(() => {
         const rs = loadRiskSettings();
         const modeInfo = MODE_LABEL[rs.mode];
         return (
@@ -651,7 +718,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       })()}
 
       {/* ── RUNS ── */}
-      {tab==='runs'&&(
+      {group==='history'&&tab==='runs'&&(
         <div>
           {/* 실시간 자동매매 실행 로그 */}
           <AutoTradeLogPanel onOpenAsset={onOpenAsset} currency={currency}/>
@@ -681,7 +748,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       )}
 
       {/* ── CREATE ── */}
-      {tab==='create'&&(
+      {group==='strategies'&&tab==='create'&&(
         <div>
           <div style={{color:T.txt,fontWeight:700,marginBottom:12}}>➕ 새 자동매매 전략 생성</div>
           {/* Strategy type grid */}
@@ -1080,6 +1147,32 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                     <span>PnL <b style={{color:sp.metrics.totalPnl>=0?T.grn:T.red}}>{sp.metrics.totalPnl>=0?'+':''}{(sp.metrics.totalPnl/10000).toFixed(1)}만</b></span>
                     <span>{sp.metrics.totalTrades}건</span>
                   </div>
+                  {/* ── 이 전략에 돈이 얼마나 걸려 있는가 ──
+                      승률과 손익비만 있으면 "얘가 잘한다"는 알아도
+                      **"얘한테 얼마가 걸려 있나"는 모른다.** 승률 70%인
+                      전략에 10만원이 걸려 있고 승률 40%인 전략에 500만원이
+                      걸려 있으면, 잘하는 쪽을 봐도 계좌는 망한다.
+
+                      배정·위험은 아직 계산하는 곳이 없어 '—'로 나온다.
+                      0으로 적지 않는 이유는 배정 0이 '돈을 안 맡겼다'는
+                      뜻이고 그건 '아직 계산 안 됨'과 전혀 다르기 때문이다. */}
+                  {(() => {
+                    const money = moneyRowsOf({
+                      pnl: sp.metrics.totalPnl,
+                      allocated: null, equity: null, riskPct: null,
+                      openPositions: null,
+                    });
+                    return (
+                      <div style={{display:'flex',gap:10,flexWrap:'wrap',fontSize:9,color:T.muted,marginTop:3}}>
+                        {money.map(r=>(
+                          <span key={r.label}>
+                            {r.label} <b style={{color:r.known?T.txt:T.muted}}>{r.value}</b>
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
+
                   {sp.shouldDisable && sp.enabled && (
                     <div style={{display:'flex',alignItems:'center',gap:6,marginTop:6,padding:'5px 8px',background:A(T.red,'12'),borderRadius:6}}>
                       <span style={{flex:1,color:T.red,fontSize:9,lineHeight:1.3}}>⚠️ {sp.healthReason} — 비활성화 권장</span>
