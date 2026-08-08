@@ -27,6 +27,9 @@ import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/aut
 import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
 import { recoveryPlan } from '@/lib/engine/mismatchRecovery';
 import {
+  RECONCILE_STEPS, reconcileRunOf, blockCountsOf, type StepResult,
+} from '@/lib/engine/reconcilePlan';
+import {
   leverageLadder, tierAllowedIn, TIER_LIMITS, DEFAULT_SAFETY_BUFFER_PCT,
   type RiskTier, type TierLimit,
 } from '@/lib/engine/leverageLadder';
@@ -101,6 +104,8 @@ export default function AutotradeControl() {
   const [checksOpen, setChecksOpen] = useState<boolean | null>(null);
   /** 예약 전체 목록은 기본으로 접는다 — 기본 화면에는 요약 한 줄이면 된다 */
   const [schedOpen, setSchedOpen] = useState(false);
+  /** [모두 자동 대조]가 지금까지 끝낸 단계들 */
+  const [runSteps, setRunSteps] = useState<StepResult[]>([]);
 
   const load = useCallback(async () => {
     if (!auth) { setErr('로그인이 필요합니다'); setData(null); return; }
@@ -199,6 +204,107 @@ export default function AutotradeControl() {
       }
     } catch (e: any) {
       setMsg({ ok: false, text: `대조 요청이 응답하지 않았습니다 (${e?.message || e})` });
+    } finally { setReconciling(false); }
+  };
+
+  /**
+   * **모두 자동 대조.**
+   *
+   * 대조할 것이 여러 개인데 버튼은 흩어져 있었다. 그런데 이것들은
+   * **순서가 있다** — 미확정 주문을 먼저 확정하지 않으면 나머지 비교가
+   * 전부 흔들린다. 나갔는지 모르는 주문이 있는 상태에서 포지션을
+   * 비교하면, 그 차이가 미확정 때문인지 진짜 불일치인지 알 수 없다.
+   *
+   * 사용자가 버튼을 순서대로 누르기를 기대하면 안 된다. 한 번 누르면
+   * 정해진 순서로 돈다. 순서는 `lib/engine/reconcilePlan`이 정한다.
+   */
+  const reconcileAll = async () => {
+    if (!connId) { setMsg({ ok: false, text: '거래소 연결을 먼저 고르세요' }); return; }
+    setReconciling(true); setMsg(null); setRunSteps([]);
+    const steps: StepResult[] = [];
+    const push = (id: any, state: any, fixed?: number | null, detail?: string) => {
+      steps.push({ id, state, fixed, detail });
+      setRunSteps([...steps]);
+    };
+    try {
+      // ── 주문 대조 ──
+      //
+      // 지금 이 저장소에는 주문 대조 엔드포인트 하나(/api/orders/reconcile)가
+      // 이 네 단계를 함께 처리한다. **네 줄로 나눠 적되, 실제로 한 번에
+      // 처리됐다는 것을 detail에 남긴다** — 안 그러면 돌지도 않은 단계를
+      // 통과로 세게 된다.
+      const r = await fetch(`/api/orders/reconcile?connectionId=${encodeURIComponent(connId)}`,
+        { headers: { Authorization: auth } });
+      const j = await r.json();
+      const okOrders = r.ok && j?.ok !== false;
+      const resolved = Number(j?.resolved) || 0;
+      const still = Number(j?.stillUnknown) || 0;
+      const note = '/api/orders/reconcile가 함께 처리';
+
+      for (const id of ['OPEN_ORDERS', 'ORDER_HISTORY'] as const) {
+        push(id, okOrders ? 'OK' : 'FAILED', null, okOrders ? note : errorTextOf(j, `실패 (${r.status})`));
+      }
+      push('MATCH_UNKNOWN', okOrders ? 'OK' : 'FAILED', resolved,
+        okOrders
+          ? (still ? `${resolved}건 확정 · ${still}건은 거래소에도 없어 아직 모름` : `${resolved}건 확정`)
+          : errorTextOf(j, `실패 (${r.status})`));
+      // **거래소에도 없는 것을 성공으로 확정하지 않는다.**
+      push('SETTLE_LOCAL_ONLY', okOrders ? (still > 0 ? 'FAILED' : 'OK') : 'FAILED',
+        null,
+        still > 0 ? `${still}건은 최종 상태를 못 찾았습니다 — 지우지 않고 남겨 둡니다` : note);
+
+      if (!okOrders || still > 0) {
+        // 여기가 안 풀리면 뒤 단계의 비교가 뜻을 잃는다.
+        setMsg({ ok: false, text: reconcileRunOf(steps).summary });
+        load();
+        return;
+      }
+
+      // ── 포지션·설정 대조 ──
+      //
+      // 점검 경로가 포지션·배율·포지션 모드·청산가·보호주문·잔고를
+      // 한 번에 확인한다. 그 결과를 단계별로 옮겨 적는다.
+      const c = await fetch('/api/autotrade/daily-ladder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          symbol, connectionId: connId, mode: live ? 'LIVE_SMALL' : 'TESTNET',
+          checkOnly: true,
+        }),
+      });
+      const cj = await c.json();
+      const list: any[] = Array.isArray(cj?.checklist) ? cj.checklist : [];
+      const stateOf = (needle: string) => {
+        const hit = list.find(x => String(x?.id ?? '').toLowerCase().includes(needle));
+        if (!hit) return { state: 'FAILED' as const, detail: '점검 항목을 찾지 못했습니다' };
+        return hit.state === 'ok'
+          ? { state: 'OK' as const, detail: hit.detail }
+          : { state: 'FAILED' as const, detail: hit.detail || hit.label };
+      };
+      const okCheck = c.ok && cj?.ok !== false;
+      if (!okCheck) {
+        for (const id of ['POSITIONS','LEVERAGE','POSITION_MODE','LIQUIDATION','PROTECTIVE_STOP','BALANCE'] as const) {
+          push(id, 'FAILED', null, errorTextOf(cj, `점검 실패 (${c.status})`));
+        }
+      } else {
+        const map: Array<[any, string]> = [
+          ['POSITIONS', 'position'], ['LEVERAGE', 'leverage'], ['POSITION_MODE', 'mode'],
+          ['LIQUIDATION', 'liquid'], ['PROTECTIVE_STOP', 'stop'], ['BALANCE', 'balance'],
+        ];
+        for (const [id, needle] of map) {
+          const v = stateOf(needle);
+          push(id, v.state, null, v.detail);
+        }
+      }
+
+      setCheck(cj);
+      push('RECHECK', okCheck ? 'OK' : 'FAILED', null, okCheck ? '' : '점검을 다시 돌리지 못했습니다');
+      const run = reconcileRunOf(steps);
+      setMsg({ ok: run.completed, text: run.summary });
+      load();
+    } catch (e: any) {
+      push('RECHECK', 'FAILED', null, String(e?.message || e));
+      setMsg({ ok: false, text: `대조가 응답하지 않았습니다 (${e?.message || e})` });
     } finally { setReconciling(false); }
   };
 
@@ -910,6 +1016,50 @@ export default function AutotradeControl() {
           border: `1px solid ${T.border}`, fontSize: 11, fontWeight: 700,
           opacity: reconciling ? 0.6 : 1,
         }}>{reconciling ? '거래소와 대조 중…' : '미확정 주문 확정 (거래소와 대조)'}</button>
+
+        {/* ── 모두 자동 대조 ──
+            대조할 것이 여러 개인데 버튼은 흩어져 있었다. 그런데 순서가
+            있다 — 미확정 주문을 먼저 확정하지 않으면 나머지 비교가 전부
+            흔들린다. 한 번 누르면 정해진 순서로 돈다. */}
+        <button onClick={reconcileAll} disabled={reconciling || !connId} style={{
+          minHeight: 40, borderRadius: 10,
+          cursor: reconciling || !connId ? 'default' : 'pointer',
+          background: A(T.acl, '16'), color: T.acl,
+          border: `1px solid ${A(T.acl, '45')}`, fontSize: 12, fontWeight: 800,
+          opacity: reconciling || !connId ? 0.5 : 1,
+        }}>{reconciling ? '대조 중…' : `모두 자동 대조 (${RECONCILE_STEPS.length}단계)`}</button>
+
+        {runSteps.length > 0 && (() => {
+          const run = reconcileRunOf(runSteps);
+          return (
+            <div style={{ background: T.alt, borderRadius: 10, padding: '9px 11px' }}>
+              <div style={{
+                color: run.completed ? T.grn : run.stoppedAt ? T.red : T.ylw,
+                fontSize: 11, fontWeight: 800, marginBottom: 6,
+              }}>{run.summary}</div>
+              {run.results.map(r => {
+                const step = RECONCILE_STEPS.find(x => x.id === r.id);
+                const c = r.state === 'OK' ? T.grn : r.state === 'FAILED' ? T.red : T.muted;
+                return (
+                  <div key={r.id} style={{ display: 'flex', gap: 7, alignItems: 'baseline', padding: '2px 0' }}>
+                    <span style={{ fontSize: 10, flexShrink: 0 }}>
+                      {r.state === 'OK' ? '✅' : r.state === 'FAILED' ? '❌' : '·'}
+                    </span>
+                    <span style={{ color: c, fontSize: 10, flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
+                      {step?.label ?? r.id}
+                      {r.detail ? <span style={{ color: T.muted }}> — {r.detail}</span> : null}
+                    </span>
+                  </div>
+                );
+              })}
+              {run.remaining.length > 0 && (
+                <div style={{ color: T.ylw, fontSize: 9.5, marginTop: 6, lineHeight: 1.55 }}>
+                  남은 문제: {run.remaining.join(' · ')}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {check?.checklist && (
           <div style={{

@@ -98,7 +98,8 @@ export function runAutoOverviewTests() {
 
   test('막힌 것이 있으면 펼치고 개수를 적는다', () => {
     const s = healthSummaryOf([ok('a'), ok('b'), bad('연결')]);
-    eq(s.label, '2/3 · 주문 차단 항목 1개');
+    // '2/3'은 성공이 2개인지 막힌 게 2개인지 헷갈린다 — 세 숫자로 나눈다.
+    eq(s.label, '정상 2 · 차단 1 · 미확정 0');
     eq(s.expandByDefault, true);
     eq(s.blockingCount, 1);
     eq(s.blockingLabels[0], '연결');
@@ -110,8 +111,8 @@ export function runAutoOverviewTests() {
     const s = healthSummaryOf([ok('a'), ok('b'), unk('크론')]);
     eq(s.ok, 2);
     eq(s.allGood, false);
-    assert(!s.label.includes('정상'), s.label);
-    assert(s.label.includes('확인 못 한 항목 1개'), s.label);
+    assert(!/\d+\/\d+ 정상/.test(s.label), s.label);
+    assert(s.label.includes('미확정 1'), s.label);
     eq(healthTone(s), 'warn');
   });
 
@@ -119,7 +120,7 @@ export function runAutoOverviewTests() {
     // 이것까지 펼치면 거의 언제나 펼쳐져 있고, 그러면 접는 뜻이 없다.
     const s = healthSummaryOf([ok('a'), unk('b')]);
     eq(s.expandByDefault, false);
-    assert(s.label.includes('1개'), s.label);
+    assert(s.label.includes('미확정 1'), s.label);
   });
 
   test('항목을 하나도 못 읽으면 정상이라고 하지 않는다', () => {
