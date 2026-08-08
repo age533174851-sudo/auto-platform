@@ -122,8 +122,31 @@ export interface Bucket {
   id: string;
   label: string;
   env: WalletEnv;
+  /**
+   * 어느 탭에 속하는가.
+   *
+   * **id 문자열을 잘라서 알아내지 않는다.** `id.endsWith('-futures')`
+   * 같은 것은 id 짓는 방식이 바뀌는 순간 조용히 틀린다 — 아무 칸도
+   * 안 걸리는데 화면은 "선물 없음"이라고 그럴듯하게 그린다.
+   */
+  kind?: WalletTabId;
   /** 이 칸의 평가액 */
   amount: Amount;
+}
+
+/**
+ * 이 탭에서 보여 줄 칸만 고른다.
+ *
+ * 개요는 전부 보여 준다. 나머지는 자기 것만.
+ *
+ * **어느 탭인지 모르는 칸(`kind` 없음)은 개요에만 넣는다.** 아무 탭에나
+ * 끼워 넣으면 선물 탭에 현물이 섞이고, 빼 버리면 총자산에는 잡히는데
+ * 어느 탭에도 안 보이는 돈이 생긴다 — 뒤쪽이 더 나쁘다.
+ */
+export function bucketsForTab(tab: WalletTabId, buckets: Bucket[] | null | undefined): Bucket[] {
+  const list = Array.isArray(buckets) ? buckets : [];
+  if (tab === 'overview') return list;
+  return list.filter(b => b?.kind === tab);
 }
 
 export interface TotalEquity {
