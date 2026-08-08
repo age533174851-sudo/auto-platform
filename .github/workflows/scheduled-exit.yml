@@ -1,0 +1,105 @@
+# .github/workflows/scheduled-exit.yml
+#
+# **화면을 닫으면 예약 청산이 안 걸린다.**
+#
+# 실행 주소(`/api/autotrade/scheduled-exit`)는 이미 서버에 있다. 문제는
+# 그것을 **분 단위로 부르는 것이 브라우저 타이머뿐**이라는 것이다:
+#
+#   ScheduledExitPanel이 열려 있는 동안  →  30초마다 부름
+#   화면을 떠나면                        →  아무도 안 부름
+#   Vercel 크론                          →  하루 1회 (01:00 UTC)
+#
+# 즉 앱을 닫아 두면 예약 청산이 **최대 24시간 늦는다.** 그런데 늦은
+# 청산은 자동 실행하지 않으므로(유예 30분), 사실상 안 나간다.
+#
+# 이건 수익 기회 문제가 아니라 **기존 포지션의 위험관리 문제**다.
+# 못 여는 것은 불편이고 못 닫는 것은 사고다.
+#
+# 왜 GitHub Actions인가
+# ─────────────────────
+# Vercel 크론은 이 요금제에서 하루 1회가 한계다(시간당으로 올렸을 때
+# 배포가 실패한 이력이 있다). 진짜 Worker(Railway 등)를 띄우는 것이
+# 정답이지만 그건 인프라 결정이 필요하다.
+#
+# 그 사이 **이것이 실제로 브라우저 없이 도는 유일한 실행기**다.
+#
+# 정직하게 적어 둘 한계
+# ─────────────────────
+#   · GitHub 예약은 **best-effort다.** 부하가 몰리면 5~15분, 드물게 더
+#     늦는다. '정확히 5분마다'가 아니다
+#   · 저장소가 60일간 조용하면 GitHub이 예약 워크플로를 **끈다**
+#   · 그래서 이것은 "상시 실행 Worker"가 아니라 "24시간보다 훨씬 나은
+#     차선책"이다. 화면에도 그렇게 적어야 한다
+#
+# 중복 실행은 어떻게 되는가
+# ─────────────────────────
+# 걱정하지 않아도 된다. 실행 주소가 `fired_at IS NULL`인 줄만 집어
+# 처리하고, **실패해도 fired_at을 채운다.** 브라우저 타이머와 이 크론이
+# 동시에 불러도 같은 예약이 두 번 나가지 않는다.
+
+name: scheduled-exit
+
+on:
+  schedule:
+    # 5분마다. GitHub은 이보다 촘촘한 예약을 받지 않는다.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+# 앞 실행이 아직 돌고 있으면 새로 시작하지 않는다 — 겹쳐 부를 이유가 없다.
+concurrency:
+  group: scheduled-exit
+  cancel-in-progress: false
+
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # **설정이 없으면 조용히 성공하지 않는다.**
+      #
+      # 비밀값이 안 걸려 있는데 워크플로가 초록으로 끝나면, 예약 청산이
+      # 안 도는 채로 "크론이 돌고 있다"고 믿게 된다. 그게 이 저장소에서
+      # 가장 자주 난 고장이다.
+      - name: 설정 확인
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          missing=""
+          [ -z "$APP_URL" ] && missing="$missing APP_URL(변수)"
+          [ -z "$CRON_SECRET" ] && missing="$missing CRON_SECRET(비밀값)"
+          if [ -n "$missing" ]; then
+            echo "::error::예약 청산 크론이 설정되지 않았습니다 —$missing 이(가) 없습니다."
+            echo "::error::이 값이 없으면 앱을 닫아 둔 동안 예약 청산이 실행되지 않습니다."
+            echo "::error::저장소 Settings → Secrets and variables → Actions 에서 등록하세요."
+            exit 1
+          fi
+
+      - name: 예약 청산 실행
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -o pipefail
+          # **응답 본문을 로그에 남긴다.** 상태 코드만 보면 '몇 건을
+          # 어떻게 했는지'를 나중에 못 찾는다.
+          code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
+            --max-time 60 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/autotrade/scheduled-exit" || echo "000")
+          echo "HTTP $code"
+          cat /tmp/out.json || true
+          echo
+          if [ "$code" = "000" ]; then
+            echo "::error::앱에 연결하지 못했습니다 — 예약 청산이 이번 주기에 실행되지 않았습니다"
+            exit 1
+          fi
+          if [ "$code" != "200" ]; then
+            echo "::error::예약 청산 실행이 HTTP $code 로 끝났습니다"
+            exit 1
+          fi
+          # ok:false 를 성공으로 세지 않는다.
+          if grep -q '"ok"[[:space:]]*:[[:space:]]*false' /tmp/out.json; then
+            echo "::error::앱이 ok:false 로 답했습니다 — 위 본문을 보세요"
+            exit 1
+          fi
