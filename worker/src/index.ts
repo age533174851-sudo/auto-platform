@@ -12,7 +12,28 @@ console.log('🚀 TRAIGO Worker started');
 console.log('📡 Connecting to Supabase...');
 console.log('🔁 Polling jobs...');
 
-const WORKER_ID = process.env.WORKER_ID || `worker-${Math.random().toString(36).slice(2, 8)}`;
+// ── Worker id ──
+//
+// **호스트가 준 값을 먼저 쓴다.** 예전에는 WORKER_ID가 없으면 난수로
+// 만들었는데, Fly에서는 그게 문제가 된다:
+//
+//   Machine 재시작 → 새 난수 id → 아래 stale 회수가 "이건 다른 워커가
+//   쥔 잡인데 heartbeat가 끊겼다"로 읽는다 → 정당하게 회수한다 →
+//   그런데 그 잡은 방금 재시작한 자신이 쥐고 있던 것이다
+//
+// Fly는 배포·스케일·호스트 이전마다 Machine을 갈아 끼우므로 이건 예외가
+// 아니라 정상 경로다. FLY_MACHINE_ID는 같은 Machine이면 같은 값이라
+// "재시작한 나"와 "다른 워커"를 구분할 수 있다.
+//
+// 난수 폴백은 남겨 둔다 — 로컬에서 돌릴 때 필요하다. 다만 호스트가 준
+// 값이 있으면 그것이 언제나 먼저다.
+const WORKER_ID =
+  process.env.WORKER_ID
+  || process.env.FLY_MACHINE_ID          // Fly
+  || process.env.RAILWAY_REPLICA_ID      // Railway
+  || process.env.CLOUD_RUN_EXECUTION     // Cloud Run
+  || process.env.HOSTNAME                // 컨테이너 일반
+  || `worker-local-${Math.random().toString(36).slice(2, 8)}`;
 const POLL_SEC = Math.max(1, Math.min(15, parseInt(process.env.WORKER_POLL_SEC || '3', 10)));
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 

@@ -21,3 +21,16 @@ tsconfig.tsbuildinfo
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# ── Worker 이미지에는 웹이 들어가지 않는다 ──
+#
+# 이 Dockerfile은 worker/만 빌드한다. 웹 소스가 이미지에 들어가면
+# 브라우저 전용 코드가 Worker 이미지에 섞이고 이미지도 커진다.
+# (웹은 Vercel에서 따로 빌드된다)
+src/
+public/
+supabase/
+scripts/
+docs/
+worker/dist/
+worker/node_modules/

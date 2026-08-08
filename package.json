@@ -10,7 +10,10 @@
     "vercel-build": "next build",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
-    "validate:real": "node scripts/validate-real-data.mjs"
+    "validate:real": "node scripts/validate-real-data.mjs",
+    "worker": "npm start --prefix worker",
+    "worker:build": "npm run build --prefix worker",
+    "worker:dev": "npm run dev --prefix worker"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
