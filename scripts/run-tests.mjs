@@ -106,6 +106,8 @@ import { runWalletTests as runWalletScreenTests } from './src/lib/portfolio/wall
 import { runMockSessionTests } from './src/lib/runtime/mockSession.test';
 import { runStrategySyncTests } from './src/lib/strategies/syncPlan.test';
 import { runKillSwitchGateTests } from './src/lib/risk/killSwitchGate.test';
+import { runEquityCurveTests } from './src/lib/portfolio/equityCurve.test';
+import { runWalletDetailTests } from './src/lib/portfolio/walletDetail.test';
 import { runScheduleExitTests } from './src/lib/engine/scheduleExit.test';
 import { runOAuthProvidersTests } from './src/lib/auth/oauthProviders.test';
 import { runCloseQtyTests } from './src/lib/exchanges/closeQty.test';
@@ -175,7 +177,7 @@ runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusRep
 runCreatorLedgerTests();
 runCreatorIntakeTests();
 runSignalPathTests(); runVenueBarsTests(); runLoginDiagnosticTests(); runPairTests(); runTpslPlanTests(); runPreferencesTests(); runScalpSignalTests(); runRiskContextTests(); runConnectionTests(); runScalpRunTests(); runScheduleExitTests(); runOAuthProvidersTests(); runProfileSimTests();
-runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runPriceSourceTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runRobustnessTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runDataLocationTests(); runWalletScreenTests(); runMockSessionTests(); runStrategySyncTests(); runKillSwitchGateTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
+runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runPriceSourceTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runRobustnessTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runDataLocationTests(); runWalletScreenTests(); runMockSessionTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
