@@ -14,8 +14,7 @@ import { test, assert, eq, close } from '../../test/harness';
 import {
   cellOf, CELL_TEXT, futuresRowsOf, marginRatioOf, syncTextOf,
   spotRowsOf, strategyReturnOf, strategyTotalOf, allocationOf,
-  accountsForEnv, accountsNoteOf,
-  type SpotAsset, type StrategyAccount, type AccountOption,
+  type SpotAsset, type StrategyAccount,
 } from './walletDetail';
 
 const ok = (n: number) => cellOf(n);
@@ -200,31 +199,4 @@ export function runWalletDetailTests() {
     eq(allocationOf([]).complete, false);
   });
 
-  console.log('[지갑 상세 — 계좌 선택]');
-
-  const AC = (key: string, env: any, conn: any = 'OK'): AccountOption =>
-    ({ key, label: key, env, connection: conn });
-
-  test('다른 환경 계좌는 고를 수 없다', () => {
-    // 목록에 보이면 고를 수 있다고 읽히고, 고르는 순간 실전 화면에
-    // 테스트넷 잔고가 뜬다.
-    const list = [AC('live-gate', 'LIVE'), AC('test-gate', 'TESTNET'), AC('mock', 'MOCK')];
-    eq(accountsForEnv('LIVE', list).length, 1);
-    eq(accountsForEnv('LIVE', list)[0].key, 'live-gate');
-    eq(accountsForEnv('MOCK', list)[0].key, 'mock');
-  });
-
-  test('끊긴 계좌가 있으면 그 사실을 먼저 적는다', () => {
-    const n = accountsNoteOf([AC('a', 'LIVE'), AC('b', 'LIVE', 'DISCONNECTED')]);
-    assert(n.includes('연결이 끊긴'), n);
-    assert(n.includes('옛날 값입니다'), n);
-  });
-
-  test('다 정상이면 군말이 없다', () => {
-    eq(accountsNoteOf([AC('a', 'LIVE')]), '');
-  });
-
-  test('계좌가 없으면 그렇다고 한다', () => {
-    assert(accountsNoteOf([]).includes('연결된 계좌가 없습니다'), '빈 목록');
-  });
 }

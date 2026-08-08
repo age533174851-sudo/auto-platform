@@ -321,41 +321,13 @@ export function allocationOf(
   };
 }
 
-// ── 계좌 선택 ─────────────────────────────────────────────
-
-export interface AccountOption {
-  key: string;
-  label: string;
-  env: WalletEnv;
-  exchange?: string;
-  connection: CellState;
-}
-
-/**
- * 이 환경에서 고를 수 있는 계좌.
- *
- * **다른 환경 계좌를 목록에 남기지 않는다.** 목록에 보이면 고를 수 있다고
- * 읽히고, 고르는 순간 실전 화면에 테스트넷 잔고가 뜬다.
- */
-export function accountsForEnv(
-  env: WalletEnv,
-  accounts: AccountOption[] | null | undefined,
-): AccountOption[] {
-  const list = Array.isArray(accounts) ? accounts : [];
-  return list.filter(a => a && a.env === env);
-}
-
-/**
- * 계좌 목록 아래 적을 한 줄.
- *
- * 연결이 끊긴 계좌가 있으면 그 사실이 먼저다 — 그 계좌의 잔고는 지금
- * 화면에 없거나 옛날 값이다.
- */
-export function accountsNoteOf(accounts: AccountOption[] | null | undefined): string {
-  const list = Array.isArray(accounts) ? accounts : [];
-  if (list.length === 0) return '이 환경에 연결된 계좌가 없습니다';
-  const bad = list.filter(a => a.connection === 'DISCONNECTED' || a.connection === 'FAILED');
-  if (bad.length === 0) return '';
-  return `연결이 끊긴 계좌가 ${bad.length}개 있습니다 (${bad.map(a => a.label).join(', ')}) —`
-    + ' 이 계좌의 잔고는 화면에 없거나 옛날 값입니다';
-}
+// ── 계좌 선택은 여기 없다 ────────────────────────────────
+//
+// 예전에는 이 파일에 accountsForEnv/accountsNoteOf가 있었다. 그런데
+// 실제로 계좌를 읽어 보니 판정에 더 필요한 것이 있었다 — 읽는 중인지,
+// 못 읽은 건지, 진짜 없는 건지, 그리고 주문이 쓰는 것과 같은
+// connectionId인지.
+//
+// 그래서 `walletAccounts.ts`로 옮겼다. **같은 일을 하는 판정을 두 곳에
+// 두지 않는다** — 이 저장소에서 가장 자주 나는 고장이 "경로가 둘인데
+// 한쪽만 고침"이고, 계좌 판정이 갈리면 지갑과 주문이 다른 계좌를 본다.

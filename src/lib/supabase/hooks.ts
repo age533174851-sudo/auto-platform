@@ -244,14 +244,38 @@ export async function deleteStrategy(id: string): Promise<void> {
 // 5. EXCHANGE CONNECTIONS (read-only on client — no secrets)
 // ═══════════════════════════════════════════════════════════════
 export async function loadExchangeConnections(): Promise<any[]> {
+  return (await loadExchangeConnectionsResult()).connections;
+}
+
+/**
+ * 연결 목록 — **실패와 '없음'을 구분해서** 돌려준다.
+ *
+ * `loadExchangeConnections`는 실패해도 빈 배열을 준다. 그래서 지갑이
+ * "이 환경에 연결된 계좌가 없습니다"를 띄웠다 — 실제로는 Gate 테스트넷
+ * 연결이 멀쩡히 있고 같은 순간 매매 화면은 그 계좌로 주문을 내고 있었다.
+ *
+ * **0개와 못 읽음은 다른 사실이다.** 앞은 "키를 등록하세요"이고 뒤는
+ * "다시 시도하세요"인데, 뭉개면 사용자는 연결이 풀린 줄 알고 키를
+ * 다시 등록한다.
+ *
+ * 기존 함수는 그대로 둔다 — 부르는 곳이 여럿이고, 한쪽만 고치면
+ * 이 저장소의 단골 고장이 난다.
+ */
+export async function loadExchangeConnectionsResult(): Promise<{
+  ok: boolean; connections: any[]; error: string;
+}> {
   const uid = await getClientUserId();
-  if (!uid) return [];
+  // 로그인을 안 한 것은 실패가 아니다. 연결이 없는 것이 맞다.
+  if (!uid) return { ok: true, connections: [], error: '' };
   try {
     const token = await getAccessToken();
     const res = await fetch('/api/exchange?action=list', { headers: buildHeaders(token, uid) });
-    if (res.ok) return (await res.json()).connections || [];
-  } catch {}
-  return [];
+    if (!res.ok) return { ok: false, connections: [], error: `HTTP ${res.status}` };
+    const j = await res.json();
+    return { ok: true, connections: Array.isArray(j?.connections) ? j.connections : [], error: '' };
+  } catch (e: any) {
+    return { ok: false, connections: [], error: String(e?.message || e) };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
