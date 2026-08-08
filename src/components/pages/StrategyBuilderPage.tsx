@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { T } from '@/lib/constants';
 import { aiResultView } from '@/lib/ai/resultSource';
+import { locationVerdict } from '@/lib/runtime/dataLocation';
 import { ErrorBoundary } from './ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
@@ -261,6 +262,35 @@ function StrategyList({
   onNew:       () => void;
   onBacktest:  (s: UserStrategy) => void;
 }) {
+  // ── 이 전략들이 어디 사는가 ──
+  //
+  // AutoTradeEngine이 60초마다 이 전략들을 평가한다. 그런데 전략은
+  // localStorage에만 있어서 **서버가 그 존재조차 모른다.** 크론을
+  // 아무리 잘 붙여도 읽을 것이 없다.
+  //
+  // 이 사실이 화면에 안 뜨면 사용자는 "왜 안 돌지"를 타이머 문제로
+  // 오해한다. 그리고 기기를 바꾸거나 브라우저 데이터를 지우면
+  // 전략이 통째로 사라진다는 것도 모른다.
+  const loc = locationVerdict('EXECUTION', 'BROWSER_ONLY');
+  const storageWarning = (
+    <div style={{
+      background: A(T.ylw, '10'), border: `1px solid ${A(T.ylw, '30')}`,
+      borderRadius: R.sm, padding: '9px 11px', marginBottom: SP.sm,
+    }}>
+      <div style={{ color: T.ylw, fontSize: 10.5, fontWeight: 700, lineHeight: 1.55 }}>
+        ⚠ 전략이 이 브라우저에만 저장됩니다
+      </div>
+      <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.6 }}>
+        {loc.warning}
+      </div>
+      <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.6 }}>
+        · 다른 기기에서는 보이지 않습니다<br />
+        · 브라우저 데이터를 지우면 사라집니다<br />
+        · 시크릿 모드에서는 남지 않습니다
+      </div>
+    </div>
+  );
+
   if (items.length === 0) {
     return (
       <div style={cardStyle({ padding: '40px 20px', textAlign: 'center' })}>
@@ -268,6 +298,9 @@ function StrategyList({
           <Sparkles size={32} strokeWidth={2} color={T.muted}/>
         </div>
         <div style={{ ...F.body, color: T.txt, marginBottom: 4 }}>아직 만든 전략이 없습니다</div>
+        <div style={{ ...F.muted, marginBottom: 6, color: T.ylw, lineHeight: 1.55 }}>
+          만든 전략은 이 브라우저에만 저장됩니다 — 다른 기기에서는 보이지 않습니다
+        </div>
         <div style={{ ...F.muted, marginBottom: SP.md }}>AI 생성 또는 직접 생성 탭에서 만들어보세요</div>
         <button onClick={onNew}
           style={{
@@ -282,6 +315,7 @@ function StrategyList({
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: SP.sm }}>
+      {storageWarning}
       <button onClick={onNew}
         style={{
           ...buttonStyle('ghost', 'md'),
