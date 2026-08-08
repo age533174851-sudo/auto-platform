@@ -1,0 +1,23 @@
+node_modules/
+.next/
+
+# TypeScript 증분 빌드 캐시 — typecheck를 돌릴 때마다 갱신되는 238KB 바이너리다.
+# 추적하면 실제 변경이 없는 커밋에도 diff가 끼어 이력이 지저분해지고,
+# 브랜치를 옮길 때마다 충돌한다. 빌드가 알아서 다시 만든다.
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+.env
+.env.local
+.env*.local
+.vercel
+
+# 로컬 자격증명 — Supabase / Vercel 토큰. 절대 커밋 금지
+.secrets.local.ps1
+*.local.ps1
+
+# 로그 / OS
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
