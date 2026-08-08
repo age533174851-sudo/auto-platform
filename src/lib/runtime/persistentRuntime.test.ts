@@ -285,6 +285,25 @@ export function runPersistentRuntimeTests() {
     eq(g.shouldCatchUp, false);
   });
 
+  test('마지막 실행 시각이 null이면 1970년으로 읽지 않는다', () => {
+    // Number(null)은 0이다. 그냥 Number로 받으면 '모름'이 '1970-01-01에
+    // 마지막으로 돌았음'이 되고, 짧은 주기에서는 "빈 구간 없음"이,
+    // 긴 주기에서는 "수천만 틱 누락"이 나온다. 둘 다 틀렸는데 둘 다
+    // 그럴듯해서 아무도 안 본다.
+    for (const bad of [null, undefined, '', true, 'abc']) {
+      const g = gapCheck({ lastTickAtMs: bad, nowMs: NOW, intervalSec: 60 });
+      eq(g.missedTicks, null, String(bad));
+      eq(g.hasGap, false, String(bad));
+    }
+  });
+
+  test('시각 0은 못 읽은 것이 아니다', () => {
+    // 진짜 0이면 1970년이 맞다 — 놓친 것이 어마어마하게 많다.
+    const g = gapCheck({ lastTickAtMs: 0, nowMs: 3_600_000, intervalSec: 60 });
+    eq(g.missedTicks, 59);
+    eq(g.hasGap, true);
+  });
+
   test('따라잡기는 어떤 경우에도 하지 않는다', () => {
     for (const ms of [0, 10_000, 180_000, 86_400_000]) {
       eq(gapCheck({ lastTickAtMs: NOW - ms, nowMs: NOW, intervalSec: 10 }).shouldCatchUp, false, String(ms));

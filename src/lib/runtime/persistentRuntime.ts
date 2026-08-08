@@ -468,11 +468,20 @@ export function gapCheck(input: {
   lastTickAtMs?: any; nowMs?: any; intervalSec?: any;
 } | null | undefined): GapCheck {
   const i = input ?? {};
-  const last = Number(i.lastTickAtMs);
-  const now = Number(i.nowMs);
-  const iv = Number(i.intervalSec);
+  // **`Number(null)`은 0이다.** 그냥 Number로 받으면 '마지막 실행 시각을
+  // 모름'이 '1970년 1월 1일에 마지막으로 돌았음'이 된다. 그러면 지금이
+  // 언제냐에 따라 "빈 구간 없음"이 나오기도 하고 수천만 틱을 놓쳤다고
+  // 나오기도 한다 — 둘 다 틀렸는데 둘 다 그럴듯하다.
+  const parse = (v: any): number | null => {
+    if (v == null || v === '' || typeof v === 'boolean') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const last = parse(i.lastTickAtMs) as number;
+  const now = parse(i.nowMs) as number;
+  const iv = parse(i.intervalSec) as number;
 
-  if (!Number.isFinite(last) || !Number.isFinite(now) || !Number.isFinite(iv) || iv <= 0) {
+  if (last == null || now == null || iv == null || iv <= 0) {
     return { missedTicks: null, hasGap: false, shouldCatchUp: false,
       reason: '마지막 실행 시각이나 주기를 몰라 빈 구간을 계산하지 못했습니다' };
   }

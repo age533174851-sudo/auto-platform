@@ -72,6 +72,15 @@ interface PaperBalance {
   krw:       number;
   positions: Record<string, PaperPosition>;
   totalPnL:  number;
+  /**
+   * 저장된 값을 **읽지 못했다**는 표시.
+   *
+   * 키가 없는 것(처음 쓰는 사용자)과 읽기가 깨진 것은 다르다. 둘 다
+   * 종잣돈 1000만원으로 그리면, 사흘 돌린 모의 성과가 사라진 자리에
+   * 멀쩡해 보이는 초기 잔고가 뜬다 — 그리고 사용자는 그게 조회 실패였다는
+   * 것을 영영 모른다. 화면이 구분할 수 있게 사실만 붙여 둔다.
+   */
+  readFailed?: boolean;
 }
 
 const DEFAULT_BALANCE: PaperBalance = {
@@ -91,7 +100,10 @@ export function loadPaperBalance(): PaperBalance {
       positions: parsed.positions && typeof parsed.positions === 'object' ? parsed.positions : {},
       totalPnL:  typeof parsed.totalPnL === 'number' ? parsed.totalPnL : 0,
     };
-  } catch { return { ...DEFAULT_BALANCE }; }
+  } catch {
+    // 파싱이 깨졌다. 값은 기본값으로 두되 **깨졌다는 사실을 지우지 않는다.**
+    return { ...DEFAULT_BALANCE, readFailed: true };
+  }
 }
 
 export function savePaperBalance(b: PaperBalance): void {
