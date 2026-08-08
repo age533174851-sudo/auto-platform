@@ -18,7 +18,8 @@
 import { test, eq, assert } from '../../test/harness';
 import { RECONCILE_STEPS, reconcileRunOf, type StepResult } from './reconcilePlan';
 import { runChecklist, CHECK_SPECS, type CheckId } from './preTradeChecklist';
-import { gateProtectiveKind } from '../exchanges/gatePlan';
+import { gateProtectiveKind, gateCloseSideFromOrderType } from '../exchanges/gatePlan';
+import { protectiveTally, type ProtectiveItem } from '../exchanges/futuresAdapter';
 
 /**
  * 화면(AutotradeControl)이 쓰는 짝. **여기와 화면이 같아야 한다.**
@@ -243,5 +244,139 @@ export function runReconcileEvidenceTests() {
     // 방향을 모른다
     eq(gateProtectiveKind({ initial: { size: 0, reduce_only: true }, trigger: { rule: 2 } }).kind, 'UNKNOWN');
     eq(gateProtectiveKind(null).kind, 'UNKNOWN');
+  });
+
+  console.log('[Gate — order_type만 있어도 방향을 읽는다]');
+
+  test('close/reduce 플래그가 없어도 order_type으로 방향을 식별한다', () => {
+    // Gate 공식 응답에는 initial에 플래그 없이 order_type만 오는 경우가 있다.
+    // 플래그만 보면 "보호 주문이 아니다"로 오판해 실제 손절을 없는 것으로 센다.
+    const row = { order_type: 'close-long-order',
+                  initial: { contract: 'BTC_USDT', size: 0 },
+                  trigger: { rule: 2, price: '60000' } };
+    const k = gateProtectiveKind(row);
+    eq(k.closes, 'LONG', 'order_type으로 방향을 못 읽었다');
+    eq(k.kind, 'STOP');
+  });
+
+  test('order_type 네 갈래를 다 읽는다', () => {
+    for (const t of ['close-long-order', 'close-long-position', 'plan-close-long-position']) {
+      eq(gateCloseSideFromOrderType(t), 'LONG', t);
+    }
+    for (const t of ['close-short-order', 'close-short-position', 'plan-close-short-position']) {
+      eq(gateCloseSideFromOrderType(t), 'SHORT', t);
+    }
+    // 닫는 주문이 아니면 방향 정보가 아니다.
+    eq(gateCloseSideFromOrderType('plan-open-long-position'), null);
+    eq(gateCloseSideFromOrderType(''), null);
+    eq(gateCloseSideFromOrderType(null), null);
+  });
+
+  test('판정 근거끼리 충돌하면 UNKNOWN — 추측하지 않는다', () => {
+    // order_type은 롱을 닫는다는데 auto_size는 숏을 닫는다고 한다.
+    const conflict = { order_type: 'close-long-order',
+                       initial: { auto_size: 'close_short', reduce_only: true },
+                       trigger: { rule: 2 } };
+    const k = gateProtectiveKind(conflict);
+    eq(k.kind, 'UNKNOWN', '근거가 엇갈리는데 한쪽을 골랐다');
+    eq(k.closes, null);
+    assert(k.reason.includes('엇갈'), `무엇이 엇갈렸는지 적혀야 한다: ${k.reason}`);
+  });
+
+  test('order_type과 size 부호가 충돌해도 UNKNOWN', () => {
+    // close-long이면 파는 주문(음수)이어야 하는데 양수다.
+    const conflict = { order_type: 'close-long-order',
+                       initial: { size: 500 }, trigger: { rule: 2 } };
+    eq(gateProtectiveKind(conflict).kind, 'UNKNOWN');
+  });
+
+  console.log('[자동 대조 — 반대 방향 손절은 방어선이 아니다]');
+
+  test('LONG 보유 + SHORT용 손절 1건 + LONG용 손절 0건 → FAIL', () => {
+    // futuresProtectiveOrders가 방향으로 걸러 stopCount 0을 돌려주는 상황.
+    const inp: any = {
+      ...fullInput(),
+      protectiveOrders: {
+        stopCount: 0, takeProfitCount: 0,
+        reason: 'BTC_USDT LONG 손절 0건 · 익절 0건 (반대 방향 손절 1건은 이 포지션을 지키지 않습니다)',
+      },
+    };
+    const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
+    const hit: any = byId(v).get('PROTECTIVE_ORDER');
+    eq(hit.status, 'fail', '반대 방향 손절이 방어선으로 인정됐다');
+    eq(hit.blocks, true);
+    eq(v.allowed, false);
+  });
+
+  test('LONG 보유 + LONG용 익절 1건 + LONG용 손절 0건 → FAIL', () => {
+    const inp: any = { ...fullInput(), protectiveOrders: { stopCount: 0, takeProfitCount: 1 } };
+    const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
+    const hit: any = byId(v).get('PROTECTIVE_ORDER');
+    eq(hit.status, 'fail');
+    assert(hit.detail.includes('손절은 0건'), hit.detail);
+  });
+
+  test('LONG 보유 + LONG용 손절 1건 → PASS', () => {
+    const inp: any = { ...fullInput(), protectiveOrders: { stopCount: 1, takeProfitCount: 0 } };
+    const v = runChecklist(inp, { market: 'USDM', intent: 'ENTRY', dailyLimit: true, exchangeEvidence: true });
+    eq((byId(v).get('PROTECTIVE_ORDER') as any).status, 'pass');
+  });
+
+  test('SHORT 손절은 rule 1이다 — LONG 표를 그대로 쓰면 익절을 손절로 센다', () => {
+    const shortStop = { order_type: 'close-short-order', initial: { size: 500 }, trigger: { rule: 1 } };
+    const shortTp = { order_type: 'close-short-order', initial: { size: 500 }, trigger: { rule: 2 } };
+    eq(gateProtectiveKind(shortStop).kind, 'STOP');
+    eq(gateProtectiveKind(shortTp).kind, 'TAKE_PROFIT');
+  });
+
+  console.log('[보호 주문 집계 — 방향 필터가 실제로 도는가]');
+
+  const stopFor = (side: 'LONG' | 'SHORT'): ProtectiveItem => ({ kind: 'STOP', closes: side });
+  const tpFor = (side: 'LONG' | 'SHORT'): ProtectiveItem => ({ kind: 'TAKE_PROFIT', closes: side });
+
+  test('LONG 보유인데 SHORT용 손절만 있으면 stopCount 0이다', () => {
+    const t = protectiveTally([stopFor('SHORT')], 'LONG');
+    eq(t.stopCount, 0, '반대 방향 손절이 방어선으로 세어졌다');
+    eq(t.oppositeStopCount, 1, '사실 전달용으로는 세어야 한다');
+  });
+
+  test('LONG 보유 + LONG용 손절이 있으면 stopCount 1이다', () => {
+    eq(protectiveTally([stopFor('LONG'), stopFor('SHORT')], 'LONG').stopCount, 1);
+  });
+
+  test('SHORT 보유면 반대가 된다 — 필터가 방향을 실제로 본다', () => {
+    const t = protectiveTally([stopFor('LONG'), stopFor('SHORT')], 'SHORT');
+    eq(t.stopCount, 1);
+    eq(t.oppositeStopCount, 1);
+  });
+
+  test('익절은 방향이 맞아도 손절로 세지 않는다', () => {
+    const t = protectiveTally([tpFor('LONG')], 'LONG');
+    eq(t.stopCount, 0);
+    eq(t.takeProfitCount, 1);
+  });
+
+  test('포지션 방향을 모르면 stopCount를 확정하지 않는다', () => {
+    const t = protectiveTally([stopFor('LONG')], null);
+    eq(t.stopCount, null, '방향을 모르는데 손절이 있다고 단정했다');
+    assert(String(t.error).includes('방향'), t.error || '');
+  });
+
+  test('판별 못 한 주문이 있고 손절이 0이면 확정하지 않는다 — 0도 1도 아니다', () => {
+    const t = protectiveTally([{ kind: 'UNKNOWN', closes: null }], 'LONG');
+    eq(t.stopCount, null);
+    eq(t.unclassified, 1);
+  });
+
+  test('판별 못 한 것이 있어도 확실한 손절이 있으면 확정한다', () => {
+    const t = protectiveTally([{ kind: 'UNKNOWN', closes: null }, stopFor('LONG')], 'LONG');
+    eq(t.stopCount, 1, '확실한 방어선이 있는데 모른다고 막았다');
+    eq(t.unclassified, 1);
+  });
+
+  test('아무것도 없으면 손절 0 — 모름이 아니다', () => {
+    const t = protectiveTally([], 'LONG');
+    eq(t.stopCount, 0);
+    eq(t.error, null);
   });
 }

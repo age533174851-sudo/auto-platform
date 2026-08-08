@@ -467,6 +467,24 @@ export interface ProtectiveClass {
  *
  * 판별에 필요한 값이 없으면 **UNKNOWN이다.** 손절이라고 치지 않는다.
  */
+/**
+ * `order_type` 하나만으로도 어느 포지션을 닫는 주문인지 알 수 있다.
+ *
+ * Gate 응답에는 `initial`에 close/reduce 플래그가 **없이** `order_type`만
+ * 오는 경우가 있다. 그때 플래그만 보면 "보호 주문이 아니다"로 오판한다 —
+ * 실제로는 손절인데 없는 것으로 세게 된다.
+ *
+ *   close-long-order · close-long-position · plan-close-long-position   → LONG 청산
+ *   close-short-order · close-short-position · plan-close-short-position → SHORT 청산
+ */
+export function gateCloseSideFromOrderType(orderType: any): 'LONG' | 'SHORT' | null {
+  const t = String(orderType ?? '').toLowerCase().replace(/_/g, '-');
+  if (!t.includes('close')) return null;
+  if (t.includes('long')) return 'LONG';
+  if (t.includes('short')) return 'SHORT';
+  return null;
+}
+
 export function gateProtectiveKind(row: any | null | undefined): ProtectiveClass {
   if (!row || typeof row !== 'object') {
     return { kind: 'UNKNOWN', closes: null, reason: '주문 내용을 읽지 못했습니다' };
@@ -474,37 +492,59 @@ export function gateProtectiveKind(row: any | null | undefined): ProtectiveClass
   const initial = row.initial ?? row;
   const trigger = row.trigger ?? {};
 
-  // 1) 포지션을 **닫는** 주문인가.
-  //    Gate는 응답 스키마에 따라 reduce_only / is_reduce_only / is_close가
-  //    섞여 나온다. 셋 중 하나라도 참이면 닫는 주문이고, auto_size가
-  //    붙어 있으면 그 자체가 전량 청산 주문이라는 뜻이다.
+  // ── 1) 어느 방향을 닫는 주문인가 ──
+  //
+  // 근거가 셋이다. **하나라도 있으면 읽고, 서로 다르면 추측하지 않는다.**
+  //   · order_type   'close-long-order' 같은 명시 값 (플래그가 없어도 온다)
+  //   · auto_size    'close_long' | 'close_short'
+  //   · size 부호    닫는 주문은 포지션과 반대 부호다(롱은 음수로 판다)
   const autoSize = String(initial.auto_size ?? '').toLowerCase();
+  const fromOrderType = gateCloseSideFromOrderType(row.order_type ?? initial.order_type);
+  const fromAutoSize: 'LONG' | 'SHORT' | null =
+    autoSize === 'close_long' ? 'LONG' : autoSize === 'close_short' ? 'SHORT' : null;
+
+  const size = Number(initial.size);
+  // size 0은 auto_size와 함께 쓰는 '전량 청산' 표기라 방향 정보가 없다.
+  const fromSize: 'LONG' | 'SHORT' | null =
+    Number.isFinite(size) && size < 0 ? 'LONG'
+    : Number.isFinite(size) && size > 0 ? 'SHORT'
+    : null;
+
+  const opinions = [fromOrderType, fromAutoSize, fromSize].filter(Boolean) as Array<'LONG' | 'SHORT'>;
+  const distinct = Array.from(new Set(opinions));
+  if (distinct.length > 1) {
+    // **근거가 엇갈리면 UNKNOWN이다.** 어느 쪽이 맞는지 여기서 고를 수 없고,
+    // 틀리게 고르면 없는 손절을 있다고 적거나 있는 손절을 없다고 적는다.
+    return {
+      kind: 'UNKNOWN', closes: null,
+      reason: `어느 방향을 닫는지 근거가 엇갈립니다 `
+            + `(order_type=${fromOrderType ?? '-'} · auto_size=${fromAutoSize ?? '-'} · size=${fromSize ?? '-'})`,
+    };
+  }
+  const closes = distinct[0] ?? null;
+
+  // ── 2) 포지션을 **닫는** 주문인가 ──
+  //
+  // order_type이 close-* 계열이면 그 자체가 증거다. 플래그가 없어도 된다.
+  // Gate는 응답 스키마에 따라 reduce_only / is_reduce_only / is_close가
+  // 섞여 나오고, auto_size가 붙어 있으면 전량 청산 주문이라는 뜻이다.
   const closing =
-    initial.reduce_only === true || initial.is_reduce_only === true
+    fromOrderType != null
+    || initial.reduce_only === true || initial.is_reduce_only === true
     || initial.is_close === true || initial.close === true
-    || autoSize === 'close_long' || autoSize === 'close_short';
+    || fromAutoSize != null;
   if (!closing) {
     return { kind: 'NOT_PROTECTIVE', closes: null,
       reason: '포지션을 닫는 주문이 아닙니다 (진입 예약일 수 있습니다)' };
   }
 
-  // 2) 어느 방향을 닫는가.
-  //    auto_size가 있으면 그것이 답이다. 없으면 size의 부호로 읽는다 —
-  //    닫는 주문의 size는 포지션과 반대 부호다(롱은 음수로 판다).
-  let closes: 'LONG' | 'SHORT' | null = null;
-  if (autoSize === 'close_long') closes = 'LONG';
-  else if (autoSize === 'close_short') closes = 'SHORT';
-  else {
-    const size = Number(initial.size);
-    if (Number.isFinite(size) && size < 0) closes = 'LONG';
-    else if (Number.isFinite(size) && size > 0) closes = 'SHORT';
-  }
   if (!closes) {
     return { kind: 'UNKNOWN', closes: null,
-      reason: '어느 방향을 닫는 주문인지 읽지 못했습니다 (auto_size·size 없음)' };
+      reason: '어느 방향을 닫는 주문인지 읽지 못했습니다 (order_type·auto_size·size 없음)' };
   }
 
-  // 3) 트리거 방향. rule이 없으면 손절인지 익절인지 알 수 없다.
+  // ── 3) 트리거 방향 ──
+  // rule이 없으면 손절인지 익절인지 알 수 없다.
   const rule = Number(trigger.rule);
   if (rule !== 1 && rule !== 2) {
     return { kind: 'UNKNOWN', closes,

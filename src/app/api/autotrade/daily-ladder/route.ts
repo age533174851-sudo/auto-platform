@@ -703,9 +703,19 @@ export async function POST(req: NextRequest) {
         positionModeFact = { mode: null, reason: why };
         protectiveFact = { stopCount: null, reason: why };
       } else {
+        // **지금 열려 있는 포지션의 방향.** 이걸 넘겨야 "이 포지션을 지키는
+        // 손절"만 센다. 안 넘기면 롱을 들고 있는데 남아 있는 숏용 손절이
+        // 방어선으로 잡힌다 — 그건 아무것도 지키지 않는다.
+        // 포지션이 없거나 못 읽었으면 null이고, 그때는 손절 수를 확정하지
+        // 않는다(포지션이 없으면 점검이 그 앞에서 통과시킨다).
+        const amt = Number(risk?.positionAmt);
+        const posSide: 'LONG' | 'SHORT' | null =
+          Number.isFinite(amt) && amt > 0 ? 'LONG'
+          : Number.isFinite(amt) && amt < 0 ? 'SHORT'
+          : null;
         const [pm, po] = await Promise.all([
           fa.futuresPositionMode(fex, conn.api_key, apiSecretPre, useTestnet),
-          fa.futuresProtectiveOrders(fex, conn.api_key, apiSecretPre, useTestnet, symbol),
+          fa.futuresProtectiveOrders(fex, conn.api_key, apiSecretPre, useTestnet, symbol, posSide),
         ]);
         positionModeFact = { mode: pm.mode, reason: pm.error || undefined };
         // **손절 수로 판정한다.** 총 개수를 넘기면 익절만 있는 상태가 통과한다.
