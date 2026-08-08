@@ -19,6 +19,9 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { leverageNote } from '@/lib/engine/leverageMath';
 import { liveTradingGate } from '@/lib/engine/liveTradingGate';
 import { scheduleConnState, rebindVerdict } from '@/lib/engine/schedulePlan';
+import {
+  resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
+} from '@/lib/strategies/registry';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -136,7 +139,23 @@ export async function GET(req: NextRequest) {
   // 화면에는 '연결 있음'이라고 적혀 있었다.
   const annotated = (rows || []).map((r: any) => {
     const v = scheduleConnState(r.connection_id, connections as any);
-    return { ...r, connectionState: v.state, connectionNote: v.message, needsRebind: v.needsRebind };
+    // **어느 전략인지 화면이 알아야 한다.** 지금까지 예약 줄에는 종목만
+    // 있었고, 실제로 도는 것이 계단식이라는 사실은 어디에도 없었다.
+    const sid = strategyIdOfRow(r);
+    const sv = resolveStrategy({
+      id: sid, version: r.strategy_version,
+      env: String(r.mode || '').toUpperCase().startsWith('LIVE') ? 'LIVE' : 'TESTNET',
+    });
+    return {
+      ...r,
+      connectionState: v.state, connectionNote: v.message, needsRebind: v.needsRebind,
+      strategyId: sid,
+      strategyName: sv.spec?.name ?? sid,
+      strategyVersion: r.strategy_version ?? sv.spec?.version ?? null,
+      // 이 예약이 지금 코드로 돌 수 있는가. 못 돌면 왜 못 도는지까지.
+      strategyRunnable: sv.ok,
+      strategyNote: sv.ok ? (sv.spec?.note ?? '') : sv.message,
+    };
   });
 
   return NextResponse.json({
@@ -146,6 +165,15 @@ export async function GET(req: NextRequest) {
     // **null이면 못 읽은 것이다.** 화면이 빈 목록과 구분해야 한다.
     connections: connections ?? [],
     connectionsReadOk: connections != null,
+    // ── 고를 수 있는 전략 ──
+    //
+    // **실행 경로가 있는 것만 내려보낸다.** 연구 모듈을 이름만 섞어 놓으면
+    // 사용자는 켰다고 믿고 아무 일도 일어나지 않는다 — 이 저장소에서 가장
+    // 자주 난 고장이다. 환경별로 다르다(실행 이력이 없는 전략은 실전을 닫는다).
+    strategies: {
+      TESTNET: runnableStrategies('TESTNET'),
+      LIVE: runnableStrategies('LIVE'),
+    },
     // 크론이 실제로 인증될 수 있는가. **값은 싣지 않는다**
     adminSecretSet: !!process.env.ADMIN_SECRET,
     cronSecretSet: !!process.env.CRON_SECRET,
@@ -243,6 +271,15 @@ export async function POST(req: NextRequest) {
   }
 
   if (!symbol) return NextResponse.json({ ok: false, error: 'missing_symbol' }, { status: 400 });
+
+  // ── 어떤 전략인가 ──
+  //
+  // 안 주면 계단식으로 본다 — 이 칸이 생기기 전에 만든 예약과 옛 화면이
+  // 그렇다. **짐작이 아니다**: 그 줄을 읽는 실행기가 하나뿐이었다.
+  // 준 값이 목록에 없으면 **막는다.** 기본 전략으로 대신 돌리면 사용자가
+  // 고르지 않은 전략이 그 사람 계좌에서 돈다.
+  const strategyId = String(body?.strategyId || '').trim() || LEGACY_STRATEGY_ID;
+  const strategyVersionIn = body?.strategyVersion == null ? '' : String(body.strategyVersion).trim();
 
   // **연결이 없으면 만들지 않는다.** 연결 없는 줄은 크론이 읽어도 주문을
   // 못 내고, 화면에는 '켜짐'으로 보인다 — 가장 조용한 실패다.
@@ -349,18 +386,43 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
 
+  // 전략 판정. **실행기까지 가기 전에 여기서 막는다** — 거기까지 가면
+  // "왜 안 돌지"의 답이 실행기 로그에 묻힌다.
+  const sv = resolveStrategy({
+    id: strategyId, version: strategyVersionIn,
+    env: modeIsLive ? 'LIVE' : 'TESTNET',
+    intervalMin,
+  });
+  if (!sv.ok || !sv.spec) {
+    return NextResponse.json({
+      ok: false, error: 'strategy_rejected', code: sv.code, message: sv.message,
+      // 무엇을 고를 수 있는지 같이 준다. 막기만 하면 사용자가 할 일이 없다.
+      available: runnableStrategies(modeIsLive ? 'LIVE' : 'TESTNET')
+        .map(x => ({ id: x.id, name: x.name, version: x.version })),
+    }, { status: 400 });
+  }
+
   const { data, error } = await (sb as any)
     .from('autotrade_schedules')
     .upsert({
       user_id: uid, symbol, connection_id: connectionId,
+      strategy_id: sv.spec.id,
+      // **저장할 때는 지금 코드의 버전을 적는다.** 사용자가 보낸 값을 그대로
+      // 적으면 옛 버전이 영원히 남고, 다음 실행이 매번 VERSION_MISMATCH가 된다.
+      strategy_version: sv.spec.version,
       mode: modeRaw, enabled, margin_pct: marginPct,
       leverage_cap: leverageCap, risk_pct: riskPct,
       ...(intervalMin != null ? { interval_min: intervalMin } : {}),
-    }, { onConflict: 'user_id,symbol' })
-    .select('id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct, interval_min').single();
+    }, { onConflict: 'user_id,strategy_id,symbol,connection_id,mode' })
+    .select('id, symbol, mode, enabled, connection_id, strategy_id, strategy_version, leverage_cap, risk_pct, interval_min').single();
 
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
+    // strategy_id 칸이 없으면 마이그레이션 050이 안 돌아간 것이다.
+    // 그 사실을 말해야 사용자가 '저장 실패'만 보고 헤매지 않는다.
+    if (/strategy_id|strategy_version|user_id,strategy_id/i.test(String(error.message))) {
+      return tableMissing('050', 'autotrade_schedules.strategy_id');
+    }
     return NextResponse.json({ ok: false, error: 'upsert_failed', message: error.message }, { status: 500 });
   }
 
@@ -378,11 +440,12 @@ export async function POST(req: NextRequest) {
     // 주문하지 않는 것이 정상이다. '실행'이라고 적으면 주기마다 주문이
     // 나가는 기능으로 읽힌다.
     message: enabled
-      ? `${symbol} 자동매매를 켰습니다`
+      ? `${symbol} · ${sv.spec.name} 자동매매 시작됨`
         + (leverageCap ? ` · 배율 상한 ${leverageCap}배` : '')
         + (riskPct ? ` · 1회 위험 ${riskPct}%` : '')
         + ' — 서버 실행기가 주기적으로 조건을 평가합니다'
-      : `${symbol} 자동매매를 껐습니다`,
+      : `${symbol} · ${sv.spec.name} 자동매매를 껐습니다`,
+    strategy: { id: sv.spec.id, name: sv.spec.name, version: sv.spec.version },
     // **상한이지 목표가 아니다.** 손절이 넓으면 역산 결과가 더 작게 나오고,
     // 그때는 작은 쪽이 나간다. 화면이 이걸 '100배로 나간다'로 읽으면 안 된다.
     // 식은 leverageMath 한 곳에만 둔다. 여기 있던 숫자는 1회 증거금
