@@ -31,8 +31,16 @@
 // 순서는 거기 있는 것이 맞다. **실행에 필요한 것이 거기 있는 것**이 문제다.
 
 export type DataLocation =
-  /** 서버 DB. 어느 기기에서든 보이고 서버가 읽을 수 있다 */
+  /** 서버 DB가 원본. 어느 기기에서든 보이고 서버가 읽을 수 있다 */
   | 'SERVER'
+  /**
+   * 브라우저가 원본이고 서버에는 best-effort로 복사만 해 둔다.
+   *
+   * **서버가 읽을 수는 있다.** 그래서 '못 읽는다'와는 다르다 — 실행기를
+   * 붙이면 돌릴 수 있다. 다만 복사가 조용히 실패할 수 있고, 그때
+   * 서버의 것은 옛날 것이다.
+   */
+  | 'SERVER_MIRROR'
   /** 이 브라우저에만 있다 */
   | 'BROWSER_ONLY'
   /** 확인하지 못했다 */
@@ -92,6 +100,23 @@ export function locationVerdict(kind: DataKind, location: DataLocation): Locatio
     return { ...base, ok: true, warning: '', nextStep: '' };
   }
 
+  // ── 서버에 복사는 돼 있다 ──
+  //
+  // **여기를 BROWSER_ONLY와 같이 취급하면 고칠 곳을 잘못 짚는다.**
+  // 서버가 읽을 수 있으니 저장 위치 문제가 아니고, 실행기를 붙이는
+  // 문제다. "옮겨야 한다"고 적으면 이미 돼 있는 일을 또 하게 된다.
+  if (location === 'SERVER_MIRROR') {
+    if (kind === 'EXECUTION') {
+      return { ...base, ok: false,
+        warning: '서버에 복사돼 있지만 **그것을 읽고 돌리는 실행기가 없습니다.**'
+          + ' 저장 위치 문제가 아니라 실행기 문제입니다 —'
+          + ' 이 화면을 닫으면 아무것도 돌지 않습니다.',
+        nextStep: '서버 실행기를 붙이세요. 표와 라우트는 이미 있습니다'
+          + ' — 복사가 조용히 실패했을 때 서버의 것이 옛날 것이라는 점도 같이 봐야 합니다' };
+    }
+    return { ...base, ok: true, warning: '', nextStep: '' };
+  }
+
   // 여기부터 BROWSER_ONLY.
   if (kind === 'EXECUTION') {
     return { ...base, ok: false,
@@ -129,8 +154,13 @@ export interface DataItem {
 export const DATA_ITEMS: DataItem[] = [
   {
     id: 'user_strategies', label: '전략빌더 전략',
-    kind: 'EXECUTION', location: 'BROWSER_ONLY',
-    where: 'localStorage (src/lib/strategies/store.ts)',
+    // **처음에 BROWSER_ONLY로 적었는데 틀렸다.** 확인해 보니 005 마이그레이션에
+    // user_strategies 표가 있고, /api/strategies/sync에 pull·push·delete가
+    // 있고, StrategyBuilderPage가 실제로 부르고 있다. 서버는 읽을 수 있다.
+    // 없는 것은 그것을 읽고 돌리는 실행기다 — 고칠 곳이 다르다.
+    kind: 'EXECUTION', location: 'SERVER_MIRROR',
+    where: 'localStorage가 원본, user_strategies 표에 미러링'
+      + ' (src/lib/strategies/sync.ts ↔ /api/strategies/sync)',
   },
   {
     id: 'autotrade_schedules', label: '자동매매 예약',

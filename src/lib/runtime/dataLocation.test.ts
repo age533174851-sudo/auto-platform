@@ -57,13 +57,31 @@ export function runDataLocationTests() {
 
   console.log('[저장 위치 — 전수 판정]');
 
-  test('전략빌더 전략이 자동 실행을 막는 것으로 잡힌다', () => {
+  test('서버에 복사돼 있는 것을 못 읽는 것으로 몰지 않는다', () => {
+    // **처음에 이걸 BROWSER_ONLY로 적었는데 틀렸다.** 005 마이그레이션에
+    // 표가 있고, /api/strategies/sync에 pull·push·delete가 있고,
+    // StrategyBuilderPage가 실제로 부른다. 서버는 읽을 수 있다.
+    // 못 읽는 것으로 몰면 "옮겨야 한다"고 적게 되고, 이미 돼 있는 일을
+    // 또 하면서 진짜 원인(실행기 없음)은 그대로 남는다.
+    const v = locationVerdict('EXECUTION', 'SERVER_MIRROR');
+    eq(v.ok, false);
+    assert(v.warning.includes('실행기가 없습니다'), v.warning);
+    assert(v.nextStep.includes('이미 있습니다'), v.nextStep);
+    assert(!v.nextStep.includes('옮겨야'), v.nextStep);
+  });
+
+  test('미러링이라도 실행에 쓰이면 통과는 아니다', () => {
+    // 복사가 조용히 실패하면 서버의 것은 옛날 것이다.
     const a = auditDataLocations();
     const strat = a.misplaced.find(x => x.id === 'user_strategies');
     assert(!!strat, '전략빌더 전략이 목록에 없다');
     eq(strat!.kind, 'EXECUTION');
-    eq(strat!.location, 'BROWSER_ONLY');
+    eq(strat!.location, 'SERVER_MIRROR');
     assert(a.blocksExecution > 0, String(a.blocksExecution));
+  });
+
+  test('편의 설정은 미러링이면 통과다', () => {
+    eq(locationVerdict('PREFERENCE', 'SERVER_MIRROR').ok, true);
   });
 
   test('요약이 자동 실행을 막는 개수를 따로 적는다', () => {

@@ -1,91 +1,96 @@
 -- 045_user_strategies.sql
 --
--- **전략빌더 전략은 이 브라우저에만 있다.**
+-- **이 파일의 앞 판은 틀렸다. 고쳐 두는 이유부터 적는다.**
 --
--- `AutoTradeEngine`이 60초마다 전략을 평가한다. 그런데 그 전략들은
--- `listStrategies()`가 읽고, 그건 이렇다:
+-- 앞 판은 이렇게 시작했다:
 --
---   src/lib/strategies/store.ts
---   // 사용자 전략 CRUD (localStorage 기반)
---   window.localStorage.getItem(KEY)
+--   CREATE TABLE IF NOT EXISTS user_strategies ( id UUID PRIMARY KEY … )
 --
--- 즉 전략이 **브라우저 안에만** 있다. 서버는 그 전략이 있는지조차 모른다.
+-- 그리고 주석에 "전략빌더 전략은 이 브라우저에만 있다, 크론을 붙여도
+-- 돌릴 것이 없다"고 적었다. **둘 다 사실이 아니었다.**
 --
--- 그래서 이건 타이머 문제가 아니다
--- ────────────────────────────────
--- 예약 청산은 실행 주소가 이미 서버에 있어서, 그것을 부르는 크론만
--- 붙이면 됐다. 여기는 다르다 — **크론을 붙여도 돌릴 것이 없다.**
--- 서버가 읽을 수 있는 곳에 전략이 없기 때문이다.
+--   supabase/migrations/005_user_strategies.sql   표가 이미 있다 (id는 TEXT)
+--   src/app/api/strategies/sync/route.ts          pull·push·delete 라우트가 있다
+--   src/lib/strategies/sync.ts                    클라이언트 쪽도 있다
+--   StrategyBuilderPage.tsx                       실제로 부르고 있다
 --
--- 그리고 이건 실행 문제만이 아니다:
+-- 그래서 앞 판은 **조용한 무효 파일**이었다. 표가 이미 있으니
+-- `IF NOT EXISTS`가 통째로 건너뛰고, 적용해도 아무 일이 안 일어난다.
+-- 그런데 파일 이름과 주석은 "표를 만든다"고 말하니, 적용한 사람은
+-- stage·version 칸이 생긴 줄 안다. **조용히 틀리는 쪽이 언제나 더 나쁘다.**
 --
---   · 휴대폰에서 만든 전략이 PC에 없다
---   · 브라우저 데이터를 지우면 전략이 사라진다
---   · 시크릿 모드에서는 아예 안 남는다
---   · 기기를 바꾸면 처음부터 다시 만들어야 한다
+-- 그리고 id 타입이 다르다. 005는 TEXT('str-m8x1k2-a9f3')이고 앞 판은
+-- UUID였다. 만약 표가 없는 새 프로젝트에 앞 판이 먼저 적용됐다면,
+-- 기존 sync 라우트의 INSERT가 전부 깨진다.
 --
--- 이 표가 그 전제를 바꾼다
--- ────────────────────────
--- 표를 만드는 것이 첫 걸음이다. 이 표가 없으면 서버 실행기를 아무리
--- 잘 만들어도 읽을 것이 없다.
---
--- **다만 이 표만으로 전략이 상시 실행되는 것은 아니다.** 화면이 여기에
--- 저장하도록 바꾸고, 서버 실행기가 이 표를 읽도록 붙이는 것이 남아 있다.
--- 그때까지 화면은 "이 브라우저에만 있습니다"라고 사실대로 적어야 한다.
+-- 이 판이 하는 일
+-- ───────────────
+-- 표를 만들지 않는다. **005가 만든 표에 없는 칸만 더한다.**
+-- 그래서 이 파일은 표가 있든 없든(005 다음에 도는 한) 안전하다.
 
+-- 005가 아직 안 돈 환경을 위한 최소 보장. 005의 정의를 그대로 따른다
+-- (id는 TEXT다 — 브라우저가 만든 'str-…'를 그대로 쓴다).
 CREATE TABLE IF NOT EXISTS user_strategies (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       UUID NOT NULL,
-
-  name          TEXT NOT NULL,
-  -- ema_cross / rsi_reversal / breakout / dca / funding_rate / ai_strategy …
-  strategy_type TEXT NOT NULL DEFAULT '',
-  market        TEXT NOT NULL DEFAULT 'crypto',
-  asset         TEXT NOT NULL DEFAULT '',
-  timeframe     TEXT NOT NULL DEFAULT '',
-
-  -- 진입 조건·주문·위험 설정. 모양이 계속 바뀌므로 JSONB로 둔다.
-  conditions    JSONB NOT NULL DEFAULT '[]'::JSONB,
-  order_spec    JSONB NOT NULL DEFAULT '{}'::JSONB,
-  risk_spec     JSONB NOT NULL DEFAULT '{}'::JSONB,
-
-  -- ── 생명주기 ──
-  --
-  -- DRAFT / BACKTESTED / PAPER / SHADOW / TESTNET / LIVE_SMALL / LIVE
-  --
-  -- **검증 안 된 전략을 토글 하나로 실행할 수 없게 하는 근거다.**
-  -- enabled와 따로 두는 이유: '사용자가 켰다'와 '실행해도 되는 단계다'는
-  -- 다른 사실이고, 하나로 합치면 검증 단계가 화면에서 사라진다.
-  stage         TEXT NOT NULL DEFAULT 'DRAFT',
-  enabled       BOOLEAN NOT NULL DEFAULT false,
-
-  -- 이 전략을 무엇이 만들었는가. AI가 만든 것을 검증된 것처럼 다루지 않는다.
-  -- AI_GENERATED / FALLBACK_TEMPLATE / MANUAL
-  source        TEXT NOT NULL DEFAULT 'MANUAL',
-
-  -- ── 버전 ──
-  --
-  -- 전략을 고치면 버전이 오른다. **과거 성과를 수정된 전략의 성과와
-  -- 섞지 않기 위해서다** — TP/SL을 언제 바꿨는지 모르면 비교가 안 된다.
-  version       INTEGER NOT NULL DEFAULT 1,
-  -- 복제해서 만든 것이면 어디서 왔는지 남긴다.
-  parent_id     UUID REFERENCES user_strategies(id) ON DELETE SET NULL,
-  parent_version INTEGER,
-
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  id          TEXT PRIMARY KEY,
+  user_id     UUID NOT NULL,
+  name        TEXT NOT NULL DEFAULT '',
+  asset       TEXT NOT NULL DEFAULT '',
+  market      TEXT NOT NULL DEFAULT 'crypto',
+  timeframe   TEXT NOT NULL DEFAULT '',
+  mode        TEXT NOT NULL DEFAULT 'paper',
+  action      TEXT NOT NULL DEFAULT 'buy',
+  conditions  JSONB NOT NULL DEFAULT '[]'::JSONB,
+  order_spec  JSONB NOT NULL DEFAULT '{}'::JSONB,
+  risk        JSONB NOT NULL DEFAULT '{}'::JSONB,
+  enabled     BOOLEAN NOT NULL DEFAULT false,
+  source      TEXT DEFAULT 'manual',
+  prompt      TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS user_strategies_user_idx
-  ON user_strategies (user_id, updated_at DESC);
+-- ── 여기부터가 이 마이그레이션의 알맹이 ───────────────────
+
+-- **검증 단계.** enabled와 따로 두는 이유: '사용자가 켰다'와
+-- '실행해도 되는 단계다'는 다른 사실이고, 하나로 합치면 검증 단계가
+-- 화면에서 사라진다. 토글 하나로 백테스트도 안 한 전략이 실전에 간다.
+--
+-- DRAFT / BACKTESTED / PAPER / SHADOW / TESTNET / LIVE_SMALL / LIVE
+ALTER TABLE user_strategies
+  ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'DRAFT';
+
+-- **전략을 고치면 오른다.** 과거 성과를 수정된 전략의 성과와 섞지
+-- 않기 위해서다 — TP/SL을 언제 바꿨는지 모르면 비교 자체가 안 된다.
+ALTER TABLE user_strategies
+  ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+
+-- 복제해서 만든 것이면 어디서 왔는지 남긴다. 005의 id가 TEXT이므로
+-- 여기도 TEXT다 — 타입을 UUID로 두면 참조가 아예 안 걸린다.
+ALTER TABLE user_strategies
+  ADD COLUMN IF NOT EXISTS parent_id TEXT;
+ALTER TABLE user_strategies
+  ADD COLUMN IF NOT EXISTS parent_version INTEGER;
+
+-- ema_cross / rsi_reversal / breakout / dca / funding_rate …
+ALTER TABLE user_strategies
+  ADD COLUMN IF NOT EXISTS strategy_type TEXT NOT NULL DEFAULT '';
 
 -- 서버 실행기가 읽을 줄만 빠르게 집는다.
 CREATE INDEX IF NOT EXISTS user_strategies_active_idx
   ON user_strategies (enabled, stage) WHERE enabled = true;
+CREATE INDEX IF NOT EXISTS user_strategies_user_idx
+  ON user_strategies (user_id, updated_at DESC);
 
-COMMENT ON TABLE user_strategies IS
-  '전략빌더 전략. 이 표가 생기기 전에는 localStorage에만 있어서 서버가 읽을 수 없었다';
 COMMENT ON COLUMN user_strategies.stage IS
   '검증 단계. enabled와 따로 둔다 — 사용자가 켠 것과 실행해도 되는 단계인 것은 다른 사실이다';
 COMMENT ON COLUMN user_strategies.version IS
   '전략을 고치면 오른다. 과거 성과를 수정된 전략의 성과와 섞지 않기 위해서다';
+
+-- ── 남아 있는 것 ──────────────────────────────────────────
+--
+-- **이 표가 있다고 전략이 상시 실행되는 것은 아니다.**
+-- 서버가 읽을 수는 있는데, 읽고 돌리는 실행기가 아직 없다.
+-- 그때까지 화면은 "이 화면에서만 돕니다"라고 사실대로 적어야 한다.
+--
+-- 그리고 미러링은 best-effort다 — 조용히 실패하면 서버의 것은 옛날
+-- 것이고, 그 상태로 실행기를 붙이면 옛날 전략이 돈다.
