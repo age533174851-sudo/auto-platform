@@ -47,8 +47,18 @@ const WATCH_DIRS = [
   'src/lib/backtest', 'src/lib/ai', 'src/lib/runtime',
 ];
 
-/** 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다 */
-const SEARCH_DIRS = ['src', 'scripts'];
+/**
+ * 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다.
+ *
+ * `worker`가 여기 있는 이유
+ * ─────────────────────────
+ * 24시간 워커는 웹이 쓰는 바로 그 거래소 모듈을 부른다
+ * (`worker/src/index.ts` → `../../src/lib/exchanges/futuresExec`).
+ * 그런데 이 목록이 src·scripts뿐이면 **워커만 부르는 모듈이 "아무도 안
+ * 부른다"로 잡힌다.** 그러면 멀쩡히 배선된 것을 ALLOW에 적게 되고,
+ * 그 순간 이 검사는 진짜로 끊긴 모듈을 덮기 시작한다.
+ */
+const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
 
 /**
  * 아직 안 붙였지만 그럴 만한 이유가 있는 것.

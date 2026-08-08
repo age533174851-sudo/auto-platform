@@ -4,7 +4,15 @@
     "module": "CommonJS",
     "moduleResolution": "Node",
     "outDir": "dist",
-    "rootDir": "src",
+    // rootDir이 저장소 루트인 이유
+    // ─────────────────────────────
+    // 워커는 웹(Vercel)이 쓰는 바로 그 거래소 모듈을 부른다
+    // (`../src/lib/exchanges/*`). 사본을 두면 한쪽만 고쳐지고, 이 저장소에서
+    // 반복된 사고가 정확히 그 모양이었다.
+    //
+    // 그래서 출력이 `dist/worker/src/index.js`가 된다 — package.json의
+    // `start`가 그 경로를 가리킨다.
+    "rootDir": "..",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -13,5 +21,12 @@
     "lib": ["ES2021", "DOM"],
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  // 공유 모듈은 **파일 단위로** 적는다. `../src/lib/exchanges/*.ts`로 쓰면
+  // 같은 폴더의 `*.test.ts`가 딸려 오고, 그건 테스트 하네스를 import한다.
+  // 여기서 필요한 것은 실행 경로뿐이다. 나머지는 transitive import로 따라온다.
+  "include": [
+    "src/**/*.ts",
+    "../src/lib/exchanges/futuresExec.ts",
+    "../src/lib/exchanges/futuresAdapter.ts"
+  ]
 }

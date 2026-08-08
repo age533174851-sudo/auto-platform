@@ -1,11 +1,36 @@
-// worker/src/index.ts — TRAIGO 24h 워커 (Railway)
+// worker/src/index.ts — TRAIGO 24h 워커
+//
 // 유일한 거래소 실행자: jobs 큐를 polling → 락 획득 → PROCESSING → 거래소 실행 → COMPLETED/FAILED
 // + 모니터: Ghost Sync(읽기) / 킬스위치 active면 KILL_SWITCH_EXECUTE job 보장
+//
+// **거래소 로직은 여기 없다.**
+// ────────────────────────────
+// 예전에는 `./binance`를 직접 import해서 모든 job을 바이낸스 함수로 실행했다.
+// 모니터도 `exchange_id = 'binance'`인 연결만 조회했다. 그래서 Gate 연결의
+// job이 큐에 들어가면 **Gate 키를 들고 바이낸스에 서명 요청을 보냈다.**
+//
+// 지금은 웹(Vercel)이 쓰는 바로 그 모듈을 부른다
+// (`src/lib/exchanges/futuresExec.ts` · `futuresAdapter.ts`). 거래소 코드를
+// 두 벌로 두면 한쪽만 고쳐지고, 이 저장소에서 반복된 사고가 정확히 그
+// 모양이었다 — **경로가 둘인데 한쪽만 고침.**
+//
+// 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat } from './supabase';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
-import { getPositions, cancelAllOrders, closeAllPositions, countOpen, placeOrder, closePositionPct, setTpsl } from './binance';
 import { alert } from './telegram';
+
+import {
+  resolveExecExchange, jobExchangeCheck, futuresPlaceOrder, futuresSetTpsl,
+  futuresClosePositionPct, futuresListPositions, futuresCountOpen,
+  futuresFindOrderByClientId, unknownResultVerdict, reconcileDecision,
+  UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
+} from '../../src/lib/exchanges/futuresExec';
+import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
+
+// 이 워커가 실행할 수 있는 거래소. 모니터 조회도 이 목록을 쓴다 —
+// 목록이 두 곳에 있으면 하나만 늘어난다.
+const SUPPORTED_EXCHANGE_IDS = ['binance', 'gate', 'gateio', 'gate.io'];
 
 // ── 부팅 즉시 출력 (파일이 로드되는 순간 찍힘 — Railway "빈 로그" 진단용) ──
 console.log('🚀 TRAIGO Worker started');
@@ -65,59 +90,135 @@ function connCreds(conn: any): { key: string; secret: string; testnet: boolean }
   return { key: conn.api_key || '', secret: decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''), testnet: conn.is_testnet === true };
 }
 
+/**
+ * 이 잡의 멱등 키.
+ *
+ * **없으면 UNKNOWN에서 대조할 방법이 없다.** 예전 워커는 `placeOrder`에
+ * clientOrderId 칸을 만들어 두고 index.ts에서 넘기지 않았다 — 만들어 놓고
+ * 배선을 안 한 것이고, 그래서 중복 확인이 한 번도 돌지 않았다.
+ *
+ * 잡 id는 재시도해도 같다. 그게 정확히 필요한 성질이다.
+ */
+function idempotencyKey(job: any): string {
+  const given = (job?.payload || {}).clientOrderId;
+  if (given) return String(given);
+  return `tg${String(job.id).replace(/-/g, '').slice(0, 20)}`;
+}
+
 // ── 거래소 실행 (action 분기) ────────────────────────────────────
-async function runAction(job: any, conn: any): Promise<{ ok: boolean; result?: any; error?: string }> {
+//
+// 거래소별 분기는 여기 없다. `ExecTarget` 하나를 만들어 공용 실행기에 넘긴다.
+async function runAction(
+  job: any, conn: any,
+): Promise<{ ok: boolean; result?: any; error?: string; code?: string }> {
+  // 1) 거래소 판정. **모르면 실행하지 않는다.**
+  const match = jobExchangeCheck(job.exchange, conn.exchange_id);
+  if (!match.ok) return { ok: false, error: match.message, code: match.code };
+  const resolved = resolveExecExchange(conn.exchange_id);
+  if (!resolved.exchange) {
+    return { ok: false, error: resolved.message, code: UNSUPPORTED_EXCHANGE };
+  }
+
   const { key, secret, testnet } = connCreds(conn);
   if (!key || !secret) return { ok: false, error: 'API 키 복호화 실패' };
+  const t: ExecTarget = { exchange: resolved.exchange, key, secret, testnet };
   const p = job.payload || {};
   const mode = testnet ? 'TESTNET' : 'LIVE';
 
   switch (job.action) {
     case 'PLACE_ORDER': {
-      const r = await placeOrder(key, secret, testnet, { symbol: job.symbol, side: job.side, type: p.type || 'MARKET', quantity: Number(job.quantity), price: p.price, leverage: p.leverage, reduceOnly: !!p.reduceOnly });
-      return r.ok ? { ok: true, result: r } : { ok: false, error: r.error };
+      const cid = idempotencyKey(job);
+      // ── 보내기 전에 이미 나갔는지 본다 ──
+      // 이 잡은 재시도될 수 있다. 앞선 시도가 응답만 못 받았을 수 있으므로,
+      // 같은 clientOrderId가 거래소에 있으면 **다시 보내지 않는다.**
+      if ((job.attempts || 0) > 0) {
+        const look = await futuresFindOrderByClientId(t, job.symbol, cid);
+        const d = reconcileDecision(look);
+        if (d.action === 'ALREADY_PLACED') {
+          return { ok: true, result: { reconciled: true, order: look.order, note: d.message } };
+        }
+        if (d.action === 'STILL_UNKNOWN') {
+          return { ok: false, error: `${d.message} (${look.error || '사유 미상'})`, code: 'UNKNOWN' };
+        }
+      }
+      const r = await futuresPlaceOrder(t, {
+        symbol: job.symbol, side: job.side, type: (p.type || 'MARKET').toUpperCase(),
+        quantity: Number(job.quantity), price: p.price ?? null,
+        leverage: p.leverage ?? null, reduceOnly: !!p.reduceOnly, clientOrderId: cid,
+      });
+      return r.ok
+        ? { ok: true, result: r }
+        : { ok: false, error: r.error || '주문 실패', result: r, code: r.status };
     }
     case 'CLOSE_POSITION': {
-      const r = await closePositionPct(key, secret, testnet, job.symbol, job.side, Number(job.percent ?? 100));
-      return r.ok ? { ok: true, result: r } : { ok: false, error: r.error };
+      const r = await futuresClosePositionPct(t, job.symbol, Number(job.percent ?? 100));
+      return r.ok ? { ok: true, result: r } : { ok: false, error: r.message };
     }
     case 'CLOSE_ALL_POSITIONS': {
-      const r = await closeAllPositions(key, secret, testnet, 5);
-      return r.ok ? { ok: true, result: r } : { ok: false, error: `잔여 ${r.remaining}` };
+      const r = await futuresCloseAll(t.exchange, key, secret, testnet, 5);
+      return r.success
+        ? { ok: true, result: r }
+        // remaining이 null이면 **못 읽은 것**이다. '잔여 0'으로 적지 않는다.
+        : { ok: false, error: `잔여 ${r.remaining == null ? '확인 실패' : r.remaining}`, result: r };
     }
     case 'CANCEL_ALL_ORDERS': {
-      const r = await cancelAllOrders(key, secret, testnet);
-      return { ok: r.ok, result: r };
+      const r = await futuresCancelAll(t.exchange, key, secret, testnet);
+      return { ok: r.success, result: r, error: r.success ? undefined : r.message };
     }
     case 'SET_TPSL': {
-      const r = await setTpsl(key, secret, testnet, job.symbol, job.side, p.tpPrice ?? null, p.slPrice ?? null);
-      return r.ok ? { ok: true, result: r } : { ok: false, error: r.error };
+      const r = await futuresSetTpsl(t, {
+        symbol: job.symbol, positionSide: job.side,
+        tpPrice: p.tpPrice ?? null, slPrice: p.slPrice ?? null,
+        refPrice: p.refPrice ?? null, quantity: p.quantity ?? null,
+        clientOrderId: idempotencyKey(job),
+        // 손절 이동·본전 이동으로 같은 포지션에 여러 번 온다. 쌓이면
+        // 포지션이 닫힌 뒤 남은 하나가 반대 포지션을 연다.
+        replaceExisting: true,
+      });
+      return r.ok ? { ok: true, result: r } : { ok: false, error: r.message, result: r };
     }
     case 'REVERSE_POSITION': {
-      const close = await closePositionPct(key, secret, testnet, job.symbol, job.side, 100);
-      if (!close.ok) return { ok: false, error: `역방향 전 종료 실패: ${close.error}` };
-      const newSide = job.side === 'LONG' ? 'SELL' : 'BUY';
-      const open = await placeOrder(key, secret, testnet, { symbol: job.symbol, side: newSide, type: 'MARKET', quantity: Number(job.quantity), leverage: p.leverage });
-      return open.ok ? { ok: true, result: { close, open } } : { ok: false, error: open.error };
+      const close = await futuresClosePositionPct(t, job.symbol, 100);
+      if (!close.ok) return { ok: false, error: `역방향 전 종료 실패: ${close.message}` };
+      const newSide: 'BUY' | 'SELL' = job.side === 'LONG' ? 'SELL' : 'BUY';
+      const open = await futuresPlaceOrder(t, {
+        symbol: job.symbol, side: newSide, type: 'MARKET',
+        quantity: Number(job.quantity), leverage: p.leverage ?? null,
+        clientOrderId: `${idempotencyKey(job)}R`,
+      });
+      return open.ok
+        ? { ok: true, result: { close, open } }
+        : { ok: false, error: open.error || '역방향 진입 실패', result: { close, open }, code: open.status };
     }
     case 'KILL_SWITCH_EXECUTE': {
       const actionMode = (p.actionMode || 'BC').toUpperCase();
       const wantClose = actionMode.includes('D');
       // 1) Cancel All (Close 선행)
-      const c = await cancelAllOrders(key, secret, testnet);
+      const c = await futuresCancelAll(t.exchange, key, secret, testnet);
       // 2) Close All (D)
       let close: any = null;
-      if (wantClose) close = await closeAllPositions(key, secret, testnet, 5);
+      if (wantClose) close = await futuresCloseAll(t.exchange, key, secret, testnet, 5);
       // 3) Reconcile
-      const rc = await countOpen(key, secret, testnet);
-      const clean = (wantClose ? rc.positions === 0 : true) && rc.orders === 0;
+      const rc = await futuresCountOpen(t);
+      // **못 센 것은 0이 아니다.** null을 0으로 읽으면 잔여가 남은 채로
+      // '킬스위치 완료'가 되고, 그게 정확히 이 기능이 막으려던 상황이다.
+      const counted = rc.positions != null && rc.orders != null;
+      const clean = counted && (wantClose ? rc.positions === 0 : true) && rc.orders === 0;
       if (clean) {
-        await alert('money', 'critical', 'Kill Switch 완료 (Worker)', { Mode: mode, Cancel: c.ok ? 'OK' : '일부실패', Close: wantClose ? (close?.ok ? 'OK' : `잔여 ${close?.remaining}`) : 'N/A' }, `ks_done:${job.connection_id}`);
+        await alert('money', 'critical', 'Kill Switch 완료 (Worker)', {
+          Exchange: resolved.message, Mode: mode, Cancel: c.success ? 'OK' : '일부실패',
+          Close: wantClose ? (close?.success ? 'OK' : `잔여 ${close?.remaining ?? '확인 실패'}`) : 'N/A',
+        }, `ks_done:${job.connection_id}`);
         return { ok: true, result: { cancel: c, close, reconcile: rc } };
       }
-      // 잔여 → 실패로 반환해 재시도 (포지션 0까지)
-      await alert('money', 'critical', 'Kill Switch 잔여 — 거래소 직접 확인', { Mode: mode, Positions: rc.positions, Orders: rc.orders }, `ks_remain:${job.connection_id}`);
-      return { ok: false, error: `잔여 포지션 ${rc.positions} · 주문 ${rc.orders}`, result: { cancel: c, close, reconcile: rc } } as any;
+      const remain = counted
+        ? `잔여 포지션 ${rc.positions} · 주문 ${rc.orders}`
+        : `잔여를 확인하지 못했습니다 (${rc.error || '조회 실패'}) — 거래소에서 직접 확인하세요`;
+      await alert('money', 'critical', 'Kill Switch 잔여 — 거래소 직접 확인', {
+        Exchange: resolved.message, Mode: mode,
+        Positions: rc.positions ?? '확인 실패', Orders: rc.orders ?? '확인 실패',
+      }, `ks_remain:${job.connection_id}`);
+      return { ok: false, error: remain, result: { cancel: c, close, reconcile: rc } };
     }
     default:
       return { ok: false, error: `알 수 없는 action: ${job.action}` };
@@ -223,18 +324,32 @@ async function processPendingJobs() {
       if (conn.has_withdrawal === true) { await finalize(job, false, null, '출금권한 키 거부'); continue; }
 
       const attempts = (job.attempts || 0) + 1;
-      let res: { ok: boolean; result?: any; error?: string };
+      let res: { ok: boolean; result?: any; error?: string; code?: string };
       try { res = await runAction(job, conn); }
       catch (e: any) { res = { ok: false, error: e?.message || '실행 예외' }; }
 
       if (res.ok) {
         await finalize(job, true, res.result, null);
       } else {
+        // ── 거래소가 안 맞으면 재시도해도 영원히 안 맞는다 ──
+        // 다섯 번 더 시도해서 다섯 번 더 실패할 이유가 없고, 그 사이 로그는
+        // 진짜 문제를 덮는다. 한 번에 끝내고 사람이 보게 한다.
+        if (res.code === UNSUPPORTED_EXCHANGE || res.code === EXCHANGE_MISMATCH) {
+          await finalize(job, false, res.result, res.error || res.code);
+          await alert('system', 'critical', '거래소를 실행할 수 없어 잡을 종료했습니다',
+            { Symbol: job.symbol || '-', Action: job.action, 사유: res.error || res.code || '?' },
+            `job_exchange:${job.id}`);
+          continue;
+        }
+
         // ── UNKNOWN은 재시도하지 않는다 ──
         // "거래소가 받았는지 모르는" 상태다. 다시 보내면 중복 체결이 된다.
         // 조회로 확정한 뒤에만 다음 판단을 할 수 있으므로 여기서 멈춘다.
-        const unknown = /응답 없음|타임아웃|timeout|ETIMEDOUT|ECONNRESET|socket hang up/i
-          .test(String(res.error || ''));
+        //
+        // 판정은 웹과 같은 함수를 쓴다(`unknownResultVerdict`). 예전에는 이
+        // 정규식이 워커 안에만 있었고, 웹 경로에는 없었다.
+        const unknown = res.code === 'UNKNOWN'
+          || unknownResultVerdict(res.error).unknown;
         if (unknown) {
           await finalize(job, false, res.result,
             `응답을 받지 못해 결과를 확정할 수 없습니다(UNKNOWN). 중복 체결을 막기 위해 재시도하지 않습니다 — ` +
@@ -267,22 +382,45 @@ async function finalize(job: any, ok: boolean, result: any, error: string | null
 }
 
 // ── 모니터: Ghost Sync(읽기) + 킬스위치 active면 job 보장 ──────────
+//
+// **`exchange_id = 'binance'`만 보지 않는다.**
+// 예전에는 그랬다. 그래서 Gate 연결은 Ghost Sync도 안 돌고, 킬스위치가
+// active여도 워커가 job을 만들어 주지 않았다 — 웹이 job 만드는 데 실패하면
+// 아무도 안 만든다. **자가복구가 있다고 믿는 쪽이 없는 것보다 나쁘다.**
 async function monitorConnections() {
-  const { data: conns } = await sb().from('exchange_connections').select('*').eq('exchange_id', 'binance');
+  const { data: conns } = await sb().from('exchange_connections')
+    .select('*').in('exchange_id', SUPPORTED_EXCHANGE_IDS);
   if (!conns) return;
   for (const conn of (conns as any[])) {
     if (conn.has_withdrawal === true) continue;
+
+    const resolved = resolveExecExchange(conn.exchange_id);
+    if (!resolved.exchange) continue;   // 여기 오면 안 되지만, 오면 건드리지 않는다
+
     const { key, secret, testnet } = connCreds(conn);
     if (!key || !secret) continue;
     const mode = testnet ? 'TESTNET' : 'LIVE';
+    const t: ExecTarget = { exchange: resolved.exchange, key, secret, testnet };
 
     // Ghost Sync (읽기 전용)
-    let positions: any[] = [];
-    try { positions = await getPositions(key, secret, testnet); errorCount = Math.max(0, errorCount - 1); }
-    catch (e: any) { errorCount++; if (errorCount >= 3) await alert('system', 'warning', 'Worker API 3회+ 실패', { Mode: mode, Error: e?.message || '?' }, `api_fail:${conn.id}`); continue; }
-    const symset = new Set(positions.map((p: any) => p.symbol));
+    const pr = await futuresListPositions(t);
+    if (!pr.ok) {
+      // **조회 실패를 '포지션 없음'으로 읽지 않는다.** 그러면 열린 포지션
+      // 전부에 대해 "거래소에서 사라졌다" 경고가 나간다.
+      errorCount++;
+      if (errorCount >= 3) {
+        await alert('system', 'warning', 'Worker API 3회+ 실패',
+          { Exchange: resolved.message, Mode: mode, Error: pr.error || '?' }, `api_fail:${conn.id}`);
+      }
+      continue;
+    }
+    errorCount = Math.max(0, errorCount - 1);
+    const symset = new Set(pr.positions.map(p => p.symbol));
     const prev = prevPos[conn.id];
-    if (prev) for (const s of prev) if (!symset.has(s)) await alert('system', 'warning', 'Ghost Sync: 포지션 거래소 미존재', { Symbol: s, Mode: mode }, `ghost:${conn.id}:${s}`);
+    if (prev) for (const s of prev) if (!symset.has(s)) {
+      await alert('system', 'warning', 'Ghost Sync: 포지션 거래소 미존재',
+        { Symbol: s, Exchange: resolved.message, Mode: mode }, `ghost:${conn.id}:${s}`);
+    }
     prevPos[conn.id] = symset;
 
     // 킬스위치 active면 KILL_SWITCH_EXECUTE job 보장 (Vercel이 못 만들었어도 자가복구)
@@ -291,7 +429,17 @@ async function monitorConnections() {
       const { data: existing } = await sb().from('jobs').select('id')
         .eq('connection_id', conn.id).eq('action', 'KILL_SWITCH_EXECUTE').in('status', ['PENDING', 'PROCESSING']).limit(1);
       if (!existing || existing.length === 0) {
-        await sb().from('jobs').insert({ user_id: conn.user_id, connection_id: conn.id, exchange: 'binance', mode, action: 'KILL_SWITCH_EXECUTE', payload: { actionMode: ks.action_mode || 'BC' }, status: 'PENDING', priority: 0, max_attempts: 10, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+        await sb().from('jobs').insert({
+          user_id: conn.user_id, connection_id: conn.id,
+          // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
+          // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
+          // 즉 킬스위치가 영원히 실행되지 않는다.
+          exchange: String(conn.exchange_id),
+          mode, action: 'KILL_SWITCH_EXECUTE',
+          payload: { actionMode: ks.action_mode || 'BC' },
+          status: 'PENDING', priority: 0, max_attempts: 10,
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        });
       }
     }
   }
@@ -321,15 +469,39 @@ async function startupChecks() {
   console.log(`  id=${WORKER_ID}  poll=${POLL_SEC}s  redis=${redisAvailable() ? 'ON(액션락 활성)' : 'OFF(액션락 생략·atomic claim으로 중복방지)'}`);
   console.log('════════════════════════════════════════');
 
-  // 필수 env 검증 (값은 노출 안 함)
+  // ── 필수 env 검증 — 없으면 **종료한다** ──
+  //
+  // 값은 절대 출력하지 않는다. 이름만 적는다.
+  //
+  // 예전에는 누락을 console.error로 적고 **그대로 계속 돌았다.** 그러면:
+  //   · Supabase 키가 없으니 jobs 조회가 매 초 실패한다
+  //   · 암호화 키가 없으니 모든 주문이 'API 키 복호화 실패'로 끝난다
+  //   · heartbeat는 계속 찍히므로 **화면에는 워커가 살아 있다고 뜬다**
+  //
+  // 마지막 줄이 문제다. 죽은 워커는 알아채지만, "돌고 있는데 아무것도 안
+  // 하는" 워커는 아무도 모른다. Fly는 restart=always라 종료하면 재시작하고,
+  // 크래시 루프는 로그에 그대로 남는다 — 그게 훨씬 잘 보인다.
   const missing: string[] = [];
   if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
-  if (!process.env.EXCHANGE_ENCRYPTION_KEY && !process.env.ENCRYPTION_KEY) missing.push('ENCRYPTION_KEY (또는 EXCHANGE_ENCRYPTION_KEY)');
+  if (!process.env.EXCHANGE_ENCRYPTION_KEY && !process.env.ENCRYPTION_KEY) missing.push('EXCHANGE_ENCRYPTION_KEY (또는 ENCRYPTION_KEY)');
   if (missing.length) {
     console.error('❌ 필수 환경변수 누락:', missing.join(', '));
-    console.error('   Railway → Variables 에서 설정 후 재배포하세요.');
+    console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
+    console.error('   돌기만 하고 아무것도 못 하는 상태를 만들지 않기 위해 종료합니다.');
+    console.error('   Fly: flyctl secrets set <NAME>=<VALUE> (값은 Secrets로만 넣습니다)');
+    process.exit(1);
   }
+
+  // 암호화 키 지문(6자리)만 찍는다. **값은 절대 찍지 않는다.**
+  // Vercel과 같은 키인지 눈으로 대조하는 용도다 — 다르면 저장된 API secret을
+  // 복호화할 수 없고, 그 증상은 '키가 틀렸다'로 보인다.
+  try {
+    const { createHash } = await import('crypto');
+    const raw = String(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || '');
+    console.log(`  🔑 암호화 키 지문: ${createHash('sha256').update(raw).digest('hex').slice(0, 6)}`
+      + ' (Vercel의 EXCHANGE_ENCRYPTION_KEY 지문과 같아야 합니다)');
+  } catch { /* 지문을 못 만들어도 워커는 돈다 */ }
 
   // Supabase 연결 확인 (jobs 테이블 조회)
   try {

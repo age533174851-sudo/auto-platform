@@ -29,6 +29,21 @@ FROM base AS build
 COPY worker/package.json worker/package-lock.json ./worker/
 RUN cd worker && npm ci --include=dev
 
+# ── 공용 거래소 모듈 ──
+#
+# 워커는 웹(Vercel)이 쓰는 바로 그 모듈을 컴파일한다
+# (`src/lib/exchanges/futuresExec.ts` · `futuresAdapter.ts`와 그것이 부르는
+# `binanceFutures` · `gateFutures` · `gatePlan` · `quantize`).
+#
+# 워커용 사본을 두지 않는 이유는 하나다 — 사본이 있으면 한쪽만 고쳐지고,
+# 그 실수가 **Gate 키를 들고 바이낸스에 서명 요청을 보내는** 모양으로 나온다.
+# 실제로 그 상태였다.
+#
+# 이 파일들은 node 내장 모듈(crypto)과 fetch만 쓴다. next·react가 딸려오지
+# 않고, 최종 스테이지는 `/app/worker`만 가져가므로 이미지에는 컴파일된 JS만
+# 남는다.
+COPY src/lib ./src/lib
+
 COPY worker/ ./worker/
 RUN cd worker && npm run build
 

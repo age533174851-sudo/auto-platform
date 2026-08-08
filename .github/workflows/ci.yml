@@ -77,6 +77,21 @@ jobs:
       - name: 유닛 테스트
         run: npm test
 
+      # ── 워커 빌드 ──
+      #
+      # 워커는 루트 tsconfig 밖에 있다. 그래서 `npx tsc --noEmit`도,
+      # `next build`도 워커를 컴파일하지 않는다 — **워커가 깨져도 CI는
+      # 초록이었다.**
+      #
+      # 지금은 워커가 웹과 **같은 거래소 모듈**을 컴파일한다
+      # (`src/lib/exchanges/futuresExec.ts` 등). 즉 이 단계는 두 가지를
+      # 동시에 지킨다: 워커가 빌드되는가, 그리고 공유 모듈이 워커의
+      # strict 설정에서도 통과하는가.
+      - name: 워커 빌드 (웹과 같은 거래소 모듈을 컴파일한다)
+        run: |
+          npm ci --prefix worker
+          npm run worker:build
+
       # ── 죽은 메뉴 항목 ──
       #
       # 더보기에서 눌러도 화면이 안 바뀌는 회귀가 한 번 있었다. MENU에

@@ -27,7 +27,19 @@ Thumbs.db
 # 이 Dockerfile은 worker/만 빌드한다. 웹 소스가 이미지에 들어가면
 # 브라우저 전용 코드가 Worker 이미지에 섞이고 이미지도 커진다.
 # (웹은 Vercel에서 따로 빌드된다)
-src/
+#
+# **`src/`를 통째로 빼지 않는 이유**
+# ──────────────────────────────────
+# 워커는 웹이 쓰는 바로 그 거래소 모듈(`src/lib/exchanges/*`)을 컴파일한다.
+# 사본을 두면 한쪽만 고쳐지고, 그 실수는 'Gate 키로 바이낸스에 주문'으로
+# 나온다. 그래서 `src/lib`는 빌드 컨텍스트에 남긴다.
+#
+# 화면·페이지는 그대로 뺀다. 이미지에 실제로 들어가는 것은 Dockerfile의
+# COPY가 정하고, 최종 스테이지는 `/app/worker`만 가져간다 — 즉 컴파일된
+# JS만 남고 웹 소스는 이미지에 없다.
+src/app/
+src/components/
+src/test/
 public/
 supabase/
 scripts/
