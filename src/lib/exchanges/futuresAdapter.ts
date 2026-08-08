@@ -296,6 +296,71 @@ export async function futuresCloseAll(
  * **전량이 닫힌 것을 확인한 뒤에만.** 부분 청산 뒤에 지우면 남은 포지션이
  * 보호 없이 남는다 — 닫으려다 더 위험해진다.
  */
+export interface ProtectiveOrdersResult {
+  /** 조회 자체가 성공했는가. false면 count가 null이고 '없음'이 아니다 */
+  ok: boolean;
+  /** 지금 거래소에 걸려 있는 보호 주문 수. **못 읽으면 null이다** */
+  count: number | null;
+  /** 사람이 읽는 근거 한 줄 */
+  detail: string;
+  error: string | null;
+}
+
+/**
+ * **지금 거래소에 손절·익절이 실제로 걸려 있는가.**
+ *
+ * 왜 따로 필요한가
+ * ────────────────
+ * 점검 목록의 `STOP_ATTACHED`는 **계획의 손절가**를 본다 — 즉 "우리가 손절을
+ * 붙일 생각인가"다. 그건 "거래소에 손절이 붙어 있는가"와 다른 질문이다.
+ * 진입은 성공했는데 손절 부착만 실패한 상황이 정확히 그 차이에 숨는다:
+ * 계획에는 손절가가 있으니 점검은 통과하고, 거래소에는 아무것도 없다.
+ *
+ * **0과 모름을 구분한다.** 조회가 실패했는데 0으로 적으면 "보호 주문이
+ * 없다"가 사실이 되고, 화면은 그걸 보고 손절을 다시 걸거나 — 더 나쁘게 —
+ * 이미 걸려 있다고 안심한다.
+ *
+ * 진입 예약(지정가)은 세지 않는다. 포지션을 **닫는** 주문만 본다.
+ */
+export async function futuresProtectiveOrders(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean, symbol: string,
+): Promise<ProtectiveOrdersResult> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const gp = await import('./gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) {
+        return { ok: false, count: null, detail: '', error: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
+      }
+      // Gate의 조건부 주문(price_orders)이 손절·익절이다. **null은 조회 실패다.**
+      const rows = await gf.getPriceOrdersGateFutures(key, secret, contract, testnet);
+      if (rows == null) {
+        return { ok: false, count: null, detail: '',
+          error: 'Gate 조건부 주문(price_orders)을 읽지 못했습니다' };
+      }
+      return { ok: true, count: rows.length, detail: `${contract} 보호 주문 ${rows.length}건`, error: null };
+    }
+
+    const bf = await import('./binanceFutures');
+    const { orders } = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
+    if (!Array.isArray(orders)) {
+      return { ok: false, count: null, detail: '', error: '미체결 주문을 읽지 못했습니다' };
+    }
+    // futuresCancelProtection이 지우는 것과 **같은 조건**으로 센다.
+    // 세는 기준과 지우는 기준이 다르면 "1건 있다"고 적고 0건을 지운다.
+    const targets = orders.filter((o: any) => {
+      const t = String(o?.type || '').toUpperCase();
+      const isProtective = t.includes('STOP') || t.includes('TAKE_PROFIT');
+      return isProtective && (o?.closePosition === true || o?.reduceOnly === true);
+    });
+    return { ok: true, count: targets.length,
+      detail: `${symbol} 보호 주문 ${targets.length}건`, error: null };
+  } catch (e: any) {
+    return { ok: false, count: null, detail: '', error: String(e?.message || e) };
+  }
+}
+
 export interface CancelProtectionResult {
   /** 지운 건수. 못 세면 null */
   cancelled: number | null;

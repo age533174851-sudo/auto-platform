@@ -273,13 +273,38 @@ export default function AutotradeControl() {
         }),
       });
       const cj = await c.json();
-      const list: any[] = Array.isArray(cj?.checklist) ? cj.checklist : [];
-      const stateOf = (needle: string) => {
-        const hit = list.find(x => String(x?.id ?? '').toLowerCase().includes(needle));
-        if (!hit) return { state: 'FAILED' as const, detail: '점검 항목을 찾지 못했습니다' };
-        return hit.state === 'ok'
-          ? { state: 'OK' as const, detail: hit.detail }
-          : { state: 'FAILED' as const, detail: hit.detail || hit.label };
+
+      // ── 점검 결과를 읽는 법 ──
+      //
+      // 여기가 세 군데 어긋나 있었고, 그래서 여섯 항목이 전부 '점검 항목을
+      // 찾지 못했습니다'로 떴다. 서버는 멀쩡히 조회하고 있었다:
+      //
+      //   1. `cj.checklist`는 **배열이 아니라 객체**다. 항목은 `.results`에
+      //      들어 있다. Array.isArray가 false라 목록이 통째로 빈 배열이 됐다.
+      //   2. 항목의 상태 칸 이름은 `state`가 아니라 **`status`**이고,
+      //      값은 'ok'가 아니라 **'pass' | 'warn' | 'fail' | 'unknown'**이다.
+      //   3. id를 부분 문자열로 찾고 있었다. 'mode'는 POSITION_MODE보다
+      //      **운영 모드(MODE)**에 먼저 걸리고, 'balance'는 아무 항목에도
+      //      안 걸린다(잔고 항목의 id는 MARGIN_SUFFICIENT다).
+      //
+      // 그래서 **정확한 id로 맞춘다.** 부분 일치는 항목이 하나 늘 때마다
+      // 조용히 다른 것을 가리키기 시작한다.
+      const list: any[] = Array.isArray(cj?.checklist?.results) ? cj.checklist.results
+        : Array.isArray(cj?.checklist) ? cj.checklist : [];
+      const stateOf = (checkId: string) => {
+        const hit = list.find(x => String(x?.id ?? '') === checkId);
+        if (!hit) {
+          return { state: 'UNKNOWN' as const,
+            detail: `점검 항목(${checkId})이 결과에 없습니다 — 서버가 이 값을 조회하지 못했습니다` };
+        }
+        const status = String(hit.status ?? hit.state ?? '').toLowerCase();
+        const detail = hit.detail || hit.label || '';
+        // **모름과 실패를 구분한다.** 앞은 연결을 봐야 하고 뒤는 값을 고쳐야 한다.
+        if (status === 'unknown' || status === '') return { state: 'UNKNOWN' as const, detail };
+        if (status === 'pass' || status === 'ok') return { state: 'OK' as const, detail };
+        // warn은 사실 전달이다(기존 포지션 보유 등). 막지 않지만 통과로도 적지 않는다.
+        if (status === 'warn') return { state: 'OK' as const, detail };
+        return { state: 'FAILED' as const, detail };
       };
       const okCheck = c.ok && cj?.ok !== false;
       if (!okCheck) {
@@ -287,12 +312,21 @@ export default function AutotradeControl() {
           push(id, 'FAILED', null, errorTextOf(cj, `점검 실패 (${c.status})`));
         }
       } else {
+        // 대조 단계 → 점검 항목 id. **정확히 하나씩** 짝을 짓는다.
+        //
+        // PROTECTIVE_STOP이 STOP_ATTACHED가 아니라 PROTECTIVE_ORDER인 것이
+        // 요점이다. STOP_ATTACHED는 **계획의 손절가**를 보고, 이 단계가
+        // 물어보는 것은 "거래소에 손절이 실제로 걸려 있는가"다.
         const map: Array<[any, string]> = [
-          ['POSITIONS', 'position'], ['LEVERAGE', 'leverage'], ['POSITION_MODE', 'mode'],
-          ['LIQUIDATION', 'liquid'], ['PROTECTIVE_STOP', 'stop'], ['BALANCE', 'balance'],
+          ['POSITIONS', 'EXISTING_POSITION'],
+          ['LEVERAGE', 'LEVERAGE'],
+          ['POSITION_MODE', 'POSITION_MODE'],
+          ['LIQUIDATION', 'LIQUIDATION_DISTANCE'],
+          ['PROTECTIVE_STOP', 'PROTECTIVE_ORDER'],
+          ['BALANCE', 'MARGIN_SUFFICIENT'],
         ];
-        for (const [id, needle] of map) {
-          const v = stateOf(needle);
+        for (const [id, checkId] of map) {
+          const v = stateOf(checkId);
           push(id, v.state, null, v.detail);
         }
       }
@@ -1039,11 +1073,14 @@ export default function AutotradeControl() {
               }}>{run.summary}</div>
               {run.results.map(r => {
                 const step = RECONCILE_STEPS.find(x => x.id === r.id);
-                const c = r.state === 'OK' ? T.grn : r.state === 'FAILED' ? T.red : T.muted;
+                const c = r.state === 'OK' ? T.grn
+                  : r.state === 'FAILED' ? T.red
+                  : r.state === 'UNKNOWN' ? T.ylw : T.muted;
                 return (
                   <div key={r.id} style={{ display: 'flex', gap: 7, alignItems: 'baseline', padding: '2px 0' }}>
                     <span style={{ fontSize: 10, flexShrink: 0 }}>
-                      {r.state === 'OK' ? '✅' : r.state === 'FAILED' ? '❌' : '·'}
+                      {r.state === 'OK' ? '✅' : r.state === 'FAILED' ? '❌'
+                        : r.state === 'UNKNOWN' ? '❓' : '·'}
                     </span>
                     <span style={{ color: c, fontSize: 10, flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
                       {step?.label ?? r.id}
