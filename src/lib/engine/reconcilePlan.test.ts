@@ -19,6 +19,8 @@ import { test, assert, eq } from '../../test/harness';
 import {
   RECONCILE_STEPS, reconcileRunOf, blockCountsOf, localOnlyVerdict,
   VENUE_REFLECT_GRACE_MS, type StepResult,
+  resolveOrder, resolutionFromVenueStatus, reconcileOrdersSummary,
+  reconcileGraceMs, VENUE_RECONCILE_GRACE_MS, DEFAULT_RECONCILE_GRACE_MS,
 } from './reconcilePlan';
 
 export function runReconcilePlanTests() {
@@ -189,5 +191,137 @@ export function runReconcilePlanTests() {
   test('보낸 시각을 모르면 기다리지 않는다', () => {
     // 언제 보냈는지 모르는 채로 무한정 기다리면 영영 안 풀린다.
     eq(localOnlyVerdict({}).action, 'ESCALATE');
+  });
+
+  console.log('[주문 대조 — endpoint가 200이라고 주문이 다 풀린 게 아니다]');
+
+  const NOW = 1_700_000_000_000;
+
+  test('C. 이력 조회가 실패하면 로컬 주문을 지우지 않는다', () => {
+    // Gate history를 못 읽었는데 '거래소에 없다'고 지우면, 나갔는지
+    // 아닌지가 영영 기록에서 사라진다.
+    const v = resolveOrder({
+      clientOrderId: 'c1', inOpenOrders: false,
+      sentAtMs: NOW - 60_000, nowMs: NOW,
+    });
+    eq(v.resolution, 'STILL_UNKNOWN');
+    eq(v.blocksClear, true);
+    eq(v.evidence.source, 'NONE');
+    assert(v.reason.includes('지우지 않고'), v.reason);
+  });
+
+  test('D. 보낸 지 2초면 유예 안이라 미확정을 유지한다', () => {
+    const v = resolveOrder({
+      clientOrderId: 'c1', inOpenOrders: false,
+      sentAtMs: NOW - 2000, nowMs: NOW, graceMs: 5000,
+    });
+    eq(v.resolution, 'GRACE_PERIOD');
+    eq(v.blocksClear, true, '반영 대기도 통과가 아니다 — 모르는 것이지 괜찮은 것이 아니다');
+  });
+
+  test('E. 10초 뒤 이력에서 FILLED를 찾으면 증거와 함께 확정한다', () => {
+    const v = resolveOrder({
+      clientOrderId: 'c1', inOpenOrders: false,
+      historyStatus: 'FILLED', historyOrderId: 'v-991',
+      filledQty: 1, orderQty: 1,
+      sentAtMs: NOW - 10_000, nowMs: NOW, graceMs: 5000,
+    });
+    eq(v.resolution, 'RESOLVED_FILLED');
+    eq(v.blocksClear, false);
+    eq(v.evidence.source, 'ORDER_HISTORY');
+    eq(v.evidence.venueStatus, 'FILLED');
+    eq(v.evidence.venueOrderId, 'v-991');
+  });
+
+  test('거래소에 살아 있으면 미확정이 아니라 진행 중이다', () => {
+    const v = resolveOrder({ clientOrderId: 'c1', inOpenOrders: true, nowMs: NOW });
+    eq(v.resolution, 'GRACE_PERIOD');
+    eq(v.evidence.source, 'OPEN_ORDERS');
+  });
+
+  test('모르는 상태 문자열을 체결로 읽지 않는다', () => {
+    // 거래소가 새 표기를 내면 조용히 체결로 세는 것이 가장 위험하다.
+    const v = resolveOrder({
+      clientOrderId: 'c1', inOpenOrders: false,
+      historyStatus: 'SETTLING', sentAtMs: NOW - 60_000, nowMs: NOW,
+    });
+    eq(v.resolution, 'STILL_UNKNOWN');
+    assert(v.reason.includes('해석하지 못했습니다'), v.reason);
+  });
+
+  test('취소인데 일부 체결된 것을 취소로만 적지 않는다', () => {
+    // 그 체결분은 실제로 포지션이 됐다.
+    eq(resolutionFromVenueStatus('CANCELED', 0.3, 1), 'RESOLVED_PARTIAL');
+    eq(resolutionFromVenueStatus('CANCELED', 0, 1), 'RESOLVED_CANCELED');
+  });
+
+  test('체결 수량을 모르면 전량 체결로 단정하지 않는다', () => {
+    // 거래소가 'closed'만 주고 수량을 안 주면 취소로 닫힌 것일 수도 있다.
+    eq(resolutionFromVenueStatus('closed', null, 1), null);
+    eq(resolutionFromVenueStatus('closed', 1, 1), 'RESOLVED_FILLED');
+    eq(resolutionFromVenueStatus('FILLED', 0.4, 1), 'RESOLVED_PARTIAL');
+  });
+
+  test('살아 있는 상태는 확정이 아니다', () => {
+    for (const s of ['NEW', 'OPEN', 'LIVE', '', null]) {
+      eq(resolutionFromVenueStatus(s), null, String(s));
+    }
+  });
+
+  console.log('[주문 대조 — 한 건이라도 남으면 통과가 아니다]');
+
+  test('아홉 건이 풀리고 한 건이 남으면 통과가 아니다', () => {
+    // 90%가 아니라 '아직 미확정이 있다'이다. 그 한 건이 중복 주문을 만든다.
+    const vs = [
+      ...Array.from({ length: 9 }, (_, i) => resolveOrder({
+        clientOrderId: `c${i}`, historyStatus: 'FILLED', filledQty: 1, orderQty: 1, nowMs: NOW,
+      })),
+      resolveOrder({ clientOrderId: 'c9', sentAtMs: NOW - 60_000, nowMs: NOW }),
+    ];
+    const sum = reconcileOrdersSummary(vs);
+    eq(sum.total, 10);
+    eq(sum.resolved, 9);
+    eq(sum.stillUnknown, 1);
+    eq(sum.canClear, false);
+    assert(sum.reason.includes('중복될 수 있습니다'), sum.reason);
+  });
+
+  test('반영 대기도 통과를 막는다', () => {
+    const sum = reconcileOrdersSummary([
+      resolveOrder({ clientOrderId: 'c1', sentAtMs: NOW - 1000, nowMs: NOW, graceMs: 5000 }),
+    ]);
+    eq(sum.inGrace, 1);
+    eq(sum.canClear, false);
+  });
+
+  test('전부 확정되면 통과한다', () => {
+    const sum = reconcileOrdersSummary([
+      resolveOrder({ clientOrderId: 'c1', historyStatus: 'FILLED', filledQty: 1, orderQty: 1, nowMs: NOW }),
+      resolveOrder({ clientOrderId: 'c2', historyStatus: 'CANCELED', nowMs: NOW }),
+    ]);
+    eq(sum.canClear, true);
+    eq(sum.reason, '');
+    eq(sum.byResolution.RESOLVED_FILLED, 1);
+    eq(sum.byResolution.RESOLVED_CANCELED, 1);
+  });
+
+  console.log('[주문 대조 — 거래소마다 반영 속도가 다르다]');
+
+  test('국내 증권사는 유예가 더 길다', () => {
+    // 체결 통보가 느리다. 짧게 잡으면 멀쩡한 주문을 미확정으로 몬다.
+    assert(reconcileGraceMs('KIS') > reconcileGraceMs('BINANCE'),
+      `KIS ${reconcileGraceMs('KIS')} vs BINANCE ${reconcileGraceMs('BINANCE')}`);
+    eq(reconcileGraceMs('GATE'), VENUE_RECONCILE_GRACE_MS.GATE);
+  });
+
+  test('대소문자를 가리지 않는다', () => {
+    eq(reconcileGraceMs('gate'), reconcileGraceMs('GATE'));
+  });
+
+  test('모르는 거래소를 가장 빠른 쪽으로 가정하지 않는다', () => {
+    // 짧게 잡으면 멀쩡한 주문이 미확정으로 몰리고, 사람이 경고에 무뎌진다.
+    const unknown = reconcileGraceMs('아무거나');
+    eq(unknown, DEFAULT_RECONCILE_GRACE_MS);
+    assert(unknown >= Math.min(...Object.values(VENUE_RECONCILE_GRACE_MS)), String(unknown));
   });
 }
