@@ -133,17 +133,17 @@ export interface LeverageVerdict {
   ok: boolean;
   code:
     | 'NOT_REQUESTED'       // 배율을 지정하지 않았다 — 거래소 설정 그대로 간다
-    | 'MATCH'               // 요청 = 실제
-    | 'VENUE_CAPPED'        // 거래소가 더 낮게 잡았다. 우리가 낮춘 것이 아니다
+    | 'MATCH'               // 요청 = 실제. 이것만 통과다
+    | 'VENUE_CAPPED'        // 거래소가 더 낮게 잡았다 — 요청과 다르므로 막는다
     | 'HIGHER_THAN_REQUESTED'  // 실제가 더 높다 — 청산가가 계산보다 가깝다
     | 'UNVERIFIED';         // 확인하지 못했다
-  /** 실제로 확인된 배율. 못 읽었으면 null */
+  /** **독립적으로 되읽어 확인한** 배율. 못 읽었으면 null */
   observed: number | null;
   message: string;
 }
 
 /**
- * **요청한 배율과 거래소의 실제 배율을 대조한다.**
+ * **요청한 배율과 거래소의 실제 배율을 대조한다. 같을 때만 통과한다.**
  *
  * 왜 되읽는가
  * ───────────
@@ -153,17 +153,29 @@ export interface LeverageVerdict {
  * 100배에서 청산 거리는 1%보다 좁은데 손절을 1.57%에 걸어 두면 손절이
  * 작동하기 전에 청산된다.
  *
- * 방향에 따라 다르게 판정한다
- * ───────────────────────────
- *  · 실제 > 요청 → **막는다.** 청산가가 사용자가 계산한 자리보다 가깝다.
- *  · 실제 < 요청 → **진행하되 크게 적는다.** 거래소가 상한을 건 것이고
- *    청산가는 오히려 멀다. 여기서 막으면 전략이 아예 못 돈다.
- *    **우리가 낮춘 것이 아니다** — 사용자가 만든 100배 전략의 숫자는
- *    그대로 두고, 거래소가 무엇을 했는지만 그대로 전한다.
- *  · 못 읽음 → **막는다.** 확인하지 못한 것은 통과가 아니다.
+ * 왜 '더 낮은 것'도 막는가
+ * ────────────────────────
+ * 처음에는 실제가 요청보다 **낮으면** 통과시켰다. 청산가가 오히려 멀어지니
+ * 안전하다고 봤다. 그 판단이 틀렸다.
  *
- * @param applied  설정 응답이 알려준 값(있으면). 되읽기가 실패했을 때만 쓴다
- * @param observed 독립적으로 되읽은 값
+ * 100배로 잡은 전략은 **수량을 100배 기준으로 계산한다.** 거래소가 75배로
+ * 깎으면 같은 수량에 증거금이 1.33배 더 필요하고, 위험 금액·목표 수익·
+ * 손절 거리 대비 기대값이 전부 전략이 계산한 것과 달라진다. 즉 사용자가
+ * 검증한 그 전략이 아니라 **다른 전략**이 도는 것이다. 화면에는 100배
+ * 전략이 실행 중이라고 뜬 채로.
+ *
+ * 그래서 요청과 실제가 다르면 방향에 관계없이 막는다. 사용자가 만든
+ * 100배 설정은 **그대로 둔다** — 우리가 낮추지도, 낮아진 값으로 대신
+ * 실행하지도 않는다. 어느 쪽으로 갈지는 사용자가 정한다.
+ *
+ * 왜 설정 응답을 근거로 쓰지 않는가
+ * ─────────────────────────────────
+ * 설정 응답은 "요청을 받았다"이지 "그 값이 됐다"가 아니다. 그것으로
+ * 판정하면 되읽기 검사가 있으나 마나다 — **독립적으로 되읽은 값이
+ * 없으면 UNVERIFIED다.** 확인하지 못한 것은 통과가 아니다.
+ *
+ * @param applied  설정 응답이 알려준 값. **판정에 쓰지 않는다.** 메시지에만 남긴다
+ * @param observed 독립적으로 되읽은 값. 판정은 오직 이것으로 한다
  */
 export function leverageVerdict(
   requested: number | null | undefined,
@@ -177,16 +189,17 @@ export function leverageVerdict(
   }
 
   const obs = Number(observed);
+  const actual = Number.isFinite(obs) && obs > 0 ? obs : null;
+
+  // 설정 응답 값은 참고로만 적는다. 판정에는 절대 쓰지 않는다.
   const app = Number(applied);
-  const useObserved = Number.isFinite(obs) && obs > 0;
-  const useApplied = !useObserved && Number.isFinite(app) && app > 0;
-  const actual = useObserved ? obs : useApplied ? app : null;
-  const from = useObserved ? '되읽음' : '설정 응답';
+  const appNote = Number.isFinite(app) && app > 0 ? ` (설정 응답은 ${app}배였습니다)` : '';
 
   if (actual == null) {
     return {
       ok: false, code: 'UNVERIFIED', observed: null,
-      message: `요청 ${req}배가 실제로 적용됐는지 확인하지 못했습니다. `
+      message: `요청 ${req}배가 실제로 적용됐는지 **되읽어 확인하지 못했습니다**${appNote}. `
+             + '설정 응답은 "요청을 받았다"이지 "그 값이 됐다"가 아니므로 근거로 쓰지 않습니다. '
              + '배율을 모르면 청산가도 필요 증거금도 계산할 수 없어 주문하지 않습니다.',
     };
   }
@@ -194,22 +207,26 @@ export function leverageVerdict(
   if (actual > req) {
     return {
       ok: false, code: 'HIGHER_THAN_REQUESTED', observed: actual,
-      message: `거래소 배율이 ${actual}배인데 요청은 ${req}배입니다(${from}). `
+      message: `거래소 배율이 ${actual}배인데 요청은 ${req}배입니다(되읽음)${appNote}. `
              + '실제가 더 높으면 청산가가 계산한 자리보다 가까워 주문하지 않습니다.',
     };
   }
 
   if (actual < req) {
     return {
-      ok: true, code: 'VENUE_CAPPED', observed: actual,
-      message: `요청 ${req}배 → 거래소 실제 ${actual}배(${from}). `
-             + '거래소가 이 종목·수량에 상한을 걸었습니다. 전략 설정을 낮추지 않았습니다 — '
-             + '청산가는 계산보다 멀어지고, 필요 증거금은 늘어납니다.',
+      ok: false, code: 'VENUE_CAPPED', observed: actual,
+      message: `요청 ${req}배인데 거래소 실제 배율은 ${actual}배입니다(되읽음)${appNote} — `
+             + `거래소가 이 종목·수량에 상한을 걸었습니다. `
+             + `${actual}배로는 같은 수량에 증거금이 ${(req / actual).toFixed(2)}배 더 들고, `
+             + '위험 금액과 기대값이 전략이 계산한 것과 달라집니다 — '
+             + `사용자가 검증한 ${req}배 전략이 아니라 다른 전략이 도는 셈이라 주문하지 않습니다. `
+             + '전략 설정은 그대로 두었습니다. 수량을 줄이거나, 배율을 직접 조정하거나, '
+             + '다른 종목을 쓸지는 사용자가 정할 일입니다.',
     };
   }
 
   return { ok: true, code: 'MATCH', observed: actual,
-    message: `배율 ${actual}배 확인(${from})` };
+    message: `배율 ${actual}배 확인(되읽음)` };
 }
 
 /**
@@ -265,7 +282,7 @@ export interface PositionModeVerdict {
 }
 
 /**
- * **이 실행기는 단방향(One-way) 주문만 만든다.**
+ * **이 실행기는 단방향(One-way) 주문만 만든다. 확인될 때만 신규 진입한다.**
  *
  * 헤지 모드 계좌에 단방향 주문을 보내면 어떻게 되는가
  * ──────────────────────────────────────────────────
@@ -274,9 +291,16 @@ export interface PositionModeVerdict {
  * 거기엔 고칠 것이 없다. 그래서 **확인된 헤지 모드는 여기서 막고 그렇게
  * 적는다.**
  *
- * 못 읽었으면 진행한다. 모드가 틀리면 거래소가 거부할 뿐 조용히 반대
- * 포지션이 열리지는 않기 때문이다 — 여기서 막으면 조회 한 번 실패에
- * 전체 자동매매가 멈춘다. 대신 그 사실을 주문 기록에 남긴다.
+ * 왜 '못 읽음'도 막는가
+ * ─────────────────────
+ * 처음에는 못 읽으면 진행시켰다. "어차피 거래소가 거부할 뿐 조용히 틀리지는
+ * 않는다"고 봤다. 그 판단이 틀렸다 — 거절만 나는 것이 아니다. Gate는 이중
+ * 모드에서 방향 인자를 다르게 해석하고, 그 경우 **의도와 다른 쪽 포지션이
+ * 열릴 수 있다.** 조용히 틀리는 쪽이 언제나 더 나쁘다.
+ *
+ * 그리고 이 검사는 **신규 진입에만** 건다. 청산(reduceOnly)은 모드를 못
+ * 읽어도 그대로 나간다 — 못 여는 것은 불편이고 못 닫는 것은 사고다.
+ * 조회 한 번 실패로 새 포지션은 안 열리지만, 이미 연 것은 언제나 닫힌다.
  */
 export function positionModeVerdict(
   mode: 'ONE_WAY' | 'HEDGE' | null | undefined, error?: string | null,
@@ -285,7 +309,7 @@ export function positionModeVerdict(
     return {
       ok: false, mode: 'HEDGE', code: 'HEDGE_BLOCKED',
       message: '이 계좌가 헤지 모드(양방향)입니다. 이 실행기는 단방향 주문만 만들기 때문에 '
-             + '거래소가 거부합니다 — 거래소에서 포지션 모드를 단방향(One-way)으로 바꾸세요. '
+             + '거래소에서 포지션 모드를 단방향(One-way)으로 바꾸세요. '
              + '키·수량·잔고 문제가 아닙니다.',
     };
   }
@@ -293,14 +317,22 @@ export function positionModeVerdict(
     return { ok: true, mode: 'ONE_WAY', code: 'ONE_WAY', message: '포지션 모드 단방향 확인' };
   }
   return {
-    ok: true, mode: null, code: 'UNKNOWN',
-    message: `포지션 모드를 읽지 못했습니다${error ? ` (${error})` : ''} — `
-           + '헤지 모드면 거래소가 주문을 거부합니다',
+    ok: false, mode: null, code: 'UNKNOWN',
+    message: `포지션 모드를 읽지 못했습니다${error ? ` (${error})` : ''}. `
+           + '헤지 모드였다면 이 단방향 주문이 의도와 다른 쪽 포지션을 열 수 있어 '
+           + '신규 진입을 하지 않습니다 — 확인하지 못한 것은 통과가 아닙니다. '
+           + '(청산은 이 검사를 받지 않습니다. 열린 포지션은 언제나 닫을 수 있습니다.)',
   };
 }
 
-/** 모드 조회는 주문마다 하지 않는다. 계좌 설정이라 자주 바뀌지 않는다 */
-const _modeCache: Record<string, { mode: 'ONE_WAY' | 'HEDGE' | null; error: string | null; at: number }> = {};
+/**
+ * 모드 조회는 주문마다 하지 않는다. 계좌 설정이라 자주 바뀌지 않는다.
+ *
+ * **실패는 캐시하지 않는다.** 못 읽음이 신규 진입을 막게 됐으므로, 실패를
+ * 60초 담아 두면 순간적인 조회 오류 하나가 그 시간 내내 진입을 막는다.
+ * 성공한 값만 담고, 실패는 다음 주문에서 다시 물어본다.
+ */
+const _modeCache: Record<string, { mode: 'ONE_WAY' | 'HEDGE'; at: number }> = {};
 const MODE_TTL_MS = 60_000;
 
 export async function futuresCheckPositionMode(
@@ -309,15 +341,15 @@ export async function futuresCheckPositionMode(
   // 키 전체를 캐시 열쇠에 넣지 않는다. 앞 8자로 계좌를 구분하기에 충분하다.
   const cacheKey = `${t.exchange}:${t.testnet ? 'demo' : 'live'}:${t.key.slice(0, 8)}`;
   const hit = _modeCache[cacheKey];
-  if (hit && nowMs - hit.at < MODE_TTL_MS) return positionModeVerdict(hit.mode, hit.error);
+  if (hit && nowMs - hit.at < MODE_TTL_MS) return positionModeVerdict(hit.mode, null);
   try {
     const r = await futuresPositionMode(t.exchange, t.key, t.secret, t.testnet);
-    _modeCache[cacheKey] = { mode: r.mode, error: r.error, at: nowMs };
+    if (r.mode === 'ONE_WAY' || r.mode === 'HEDGE') {
+      _modeCache[cacheKey] = { mode: r.mode, at: nowMs };
+    }
     return positionModeVerdict(r.mode, r.error);
   } catch (e: any) {
-    const error = String(e?.message || e);
-    _modeCache[cacheKey] = { mode: null, error, at: nowMs };
-    return positionModeVerdict(null, error);
+    return positionModeVerdict(null, String(e?.message || e));
   }
 }
 

@@ -85,17 +85,35 @@ export function runFuturesExecTests() {
     eq(r.ok, false); eq(r.code, 'HIGHER_THAN_REQUESTED'); eq(r.observed, 100);
   });
 
-  test('거래소가 낮게 잡으면 진행하되 그렇게 적는다 — 우리가 낮춘 것이 아니다', () => {
-    const r = leverageVerdict(100, 20, 20);
-    eq(r.ok, true); eq(r.code, 'VENUE_CAPPED'); eq(r.observed, 20);
+  test('거래소가 낮게 잡아도 막는다 — 100배 전략이 75배로 도는 것은 다른 전략이다', () => {
+    const r = leverageVerdict(100, 75, 75);
+    eq(r.ok, false, '75배로 통과시켰다');
+    eq(r.code, 'VENUE_CAPPED'); eq(r.observed, 75);
     assert(r.message.includes('100'), '요청한 100배가 메시지에 남아야 한다');
-    assert(r.message.includes('20'), '실제 20배가 메시지에 남아야 한다');
+    assert(r.message.includes('75'), '실제 75배가 메시지에 남아야 한다');
+    assert(r.message.includes('그대로'), '전략 설정을 건드리지 않았다고 적어야 한다');
   });
 
-  test('되읽기가 실패하면 설정 응답으로 판정하고 출처를 적는다', () => {
+  test('1배라도 다르면 막는다 — 안전한 방향이라는 이유로 통과시키지 않는다', () => {
+    eq(leverageVerdict(100, 99, 99).ok, false);
+    eq(leverageVerdict(10, 9, 9).ok, false);
+    eq(leverageVerdict(3, 2, 2).ok, false);
+  });
+
+  test('되읽기가 실패하면 설정 응답으로 판정하지 않는다 — 그건 "받았다"이지 "됐다"가 아니다', () => {
     const r = leverageVerdict(75, 75, null);
-    eq(r.ok, true); eq(r.code, 'MATCH');
-    assert(r.message.includes('설정 응답'), '어디서 읽은 값인지 남아야 한다');
+    eq(r.ok, false, '설정 응답만 보고 통과시켰다');
+    eq(r.code, 'UNVERIFIED'); eq(r.observed, null);
+    assert(r.message.includes('75배'), '설정 응답 값은 참고로 남아야 한다');
+  });
+
+  test('설정 응답이 무엇이든 판정은 되읽은 값만 쓴다', () => {
+    // 설정 응답 100 · 되읽음 50 → 되읽은 50이 요청과 다르므로 막힌다
+    eq(leverageVerdict(100, 100, 50).code, 'VENUE_CAPPED');
+    // 설정 응답 50 · 되읽음 100 → 되읽은 100이 요청보다 높으므로 막힌다
+    eq(leverageVerdict(50, 50, 100).code, 'HIGHER_THAN_REQUESTED');
+    // 설정 응답이 요청과 같아도, 되읽지 못했으면 통과가 아니다
+    eq(leverageVerdict(100, 100, null).code, 'UNVERIFIED');
   });
 
   test('둘 다 못 읽으면 주문하지 않는다 — 확인하지 못한 것은 통과가 아니다', () => {
@@ -107,6 +125,11 @@ export function runFuturesExecTests() {
     // Gate는 leverage 0이 교차 마진이다. 0을 배율로 쓰면 안 된다.
     const r = leverageVerdict(100, 0, 0);
     eq(r.ok, false); eq(r.code, 'UNVERIFIED');
+  });
+
+  test('요청과 실제가 같을 때만 통과한다 — 통과 경로는 이것 하나다', () => {
+    eq(leverageVerdict(100, 100, 100).ok, true);
+    eq(leverageVerdict(100, 100, 100).code, 'MATCH');
   });
 
   test('배율을 지정하지 않았으면 검사하지 않는다', () => {
@@ -129,10 +152,13 @@ export function runFuturesExecTests() {
     eq(r.ok, true); eq(r.code, 'ONE_WAY');
   });
 
-  test('못 읽으면 진행하되 적는다 — 조회 한 번 실패로 자동매매를 멈추지 않는다', () => {
+  test('못 읽으면 신규 진입을 막는다 — 헤지였다면 반대 포지션이 열릴 수 있다', () => {
     const r = positionModeVerdict(null, '타임아웃');
-    eq(r.ok, true); eq(r.code, 'UNKNOWN'); eq(r.mode, null);
+    eq(r.ok, false, '못 읽었는데 진입을 허용했다');
+    eq(r.code, 'UNKNOWN'); eq(r.mode, null);
     assert(r.message.includes('타임아웃'), '왜 못 읽었는지 남아야 한다');
+    assert(r.message.includes('청산은 이 검사를 받지 않습니다'),
+      '닫는 길이 막히지 않는다는 것을 명시해야 한다');
   });
 
   console.log('[실행기 — UNKNOWN 판정]');
@@ -241,6 +267,8 @@ export function runFuturesExecTests() {
     let placed: any = null;
     const urls = await withFetch((url, init) => {
       if (!mine(url)) return null;
+      // 단방향 계좌 — 이게 없으면 신규 진입이 막힌다(그게 맞는 동작이다)
+      if (url.includes('/futures/usdt/accounts')) return { body: { in_dual_mode: false, total: '1000', available: '1000' } };
       if (url.includes('/futures/usdt/contracts/')) {
         // 1계약 = 0.0001 BTC
         return { body: { name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1, order_price_round: '0.1' } };
@@ -279,6 +307,7 @@ export function runFuturesExecTests() {
     let placed: any = null;
     await withFetch((url, init) => {
       if (!mine(url)) return null;
+      if (url.includes('/futures/usdt/accounts')) return { body: { in_dual_mode: false, total: '1000', available: '1000' } };
       if (url.includes('/futures/usdt/contracts/')) {
         return { body: { name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1, order_price_round: '0.1' } };
       }
@@ -300,6 +329,7 @@ export function runFuturesExecTests() {
     await withFetch((url, init) => {
       if (!mine(url)) return null;
       if (init?.method === 'POST') posted++;
+      if (url.includes('/futures/usdt/accounts')) return { body: { in_dual_mode: false } };
       if (url.includes('/futures/usdt/contracts/')) return { status: 500, body: { message: 'down' } };
       return { body: {} };
     }, async () => {
@@ -315,6 +345,7 @@ export function runFuturesExecTests() {
     const t: ExecTarget = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
     const urls = await withFetch((url) => {
       if (!mine(url)) return null;
+      if (url.includes('/fapi/v1/positionSide/dual')) return { body: { dualSidePosition: false } };
       if (url.includes('/fapi/v1/exchangeInfo')) {
         return { body: { symbols: [{ symbol: 'BTCUSDT', filters: [
           { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
@@ -335,6 +366,82 @@ export function runFuturesExecTests() {
     }
   });
 
+  // ── 판정이 실제로 주문을 막는가 ──
+  //
+  // 판정 함수만 고치고 배선을 안 하는 것이 이 저장소의 1번 고장이다.
+  // 아래 셋은 **POST가 한 번도 안 나갔는지**를 센다.
+
+  netTest('포지션 모드를 못 읽으면 신규 진입 주문이 나가지 않는다', async () => {
+    __clearGateSpecCache(); __clearPositionModeCache();
+    const t: ExecTarget = { exchange: 'gate', key: 'k1', secret: 's', testnet: true };
+    let posted = 0;
+    await withFetch((url, init) => {
+      if (!mine(url)) return null;
+      if (init?.method === 'POST') posted++;
+      // 계좌 조회만 실패한다 — 나머지는 정상
+      if (url.includes('/futures/usdt/accounts')) return { status: 500, body: { message: 'rate limit' } };
+      if (url.includes('/futures/usdt/contracts/')) {
+        return { body: { name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1, order_price_round: '0.1' } };
+      }
+      return { body: { id: 1, size: 500, left: 0, status: 'finished' } };
+    }, async () => {
+      const r = await futuresPlaceOrder(t, { symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.05 });
+      eq(r.ok, false, '모드를 못 읽었는데 주문이 성공으로 끝났다');
+      eq(r.status, 'REJECTED');
+    });
+    eq(posted, 0, '포지션 모드를 모르는데 주문이 나갔다');
+  });
+
+  netTest('청산(reduceOnly)은 포지션 모드를 못 읽어도 나간다 — 못 닫게 만들지 않는다', async () => {
+    __clearGateSpecCache(); __clearPositionModeCache();
+    const t: ExecTarget = { exchange: 'gate', key: 'k2', secret: 's', testnet: true };
+    let orderPosts = 0;
+    await withFetch((url, init) => {
+      if (!mine(url)) return null;
+      if (url.includes('/futures/usdt/accounts')) return { status: 500, body: { message: 'rate limit' } };
+      if (url.includes('/futures/usdt/contracts/')) {
+        return { body: { name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1, order_price_round: '0.1' } };
+      }
+      if (url.includes('/futures/usdt/orders') && init?.method === 'POST') {
+        orderPosts++;
+        return { body: { id: 7, size: -500, left: 0, status: 'finished', fill_price: '63000' } };
+      }
+      return { body: {} };
+    }, async () => {
+      const r = await futuresPlaceOrder(t, {
+        symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.05, reduceOnly: true,
+      });
+      eq(r.ok, true, `청산이 막혔다: ${r.error}`);
+    });
+    eq(orderPosts, 1, '청산 주문이 안 나갔다');
+  });
+
+  netTest('배율이 요청과 다르면 주문이 나가지 않는다 — 100배 요청에 거래소 75배', async () => {
+    __clearGateSpecCache(); __clearPositionModeCache();
+    const t: ExecTarget = { exchange: 'binance', key: 'k3', secret: 's', testnet: true };
+    let orderPosts = 0;
+    await withFetch((url, init) => {
+      if (!mine(url)) return null;
+      if (url.includes('/fapi/v1/positionSide/dual')) return { body: { dualSidePosition: false } };
+      // 설정 응답은 100배라고 답한다 — 그런데 되읽으면 75배다.
+      if (url.includes('/fapi/v1/leverage')) return { body: { leverage: 100, symbol: 'BTCUSDT' } };
+      if (url.includes('/fapi/v2/positionRisk')) {
+        return { body: [{ symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '0', markPrice: '63000',
+          leverage: '75', marginType: 'isolated', liquidationPrice: '0', unRealizedProfit: '0' }] };
+      }
+      if (url.includes('/fapi/v1/order')) { orderPosts++; return { body: { orderId: 9 } }; }
+      return { body: {} };
+    }, async () => {
+      const r = await futuresPlaceOrder(t, {
+        symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.05, leverage: 100,
+      });
+      eq(r.ok, false, '배율이 75배인데 100배 주문이 나갔다');
+      eq(r.status, 'REJECTED');
+      assert(String(r.error).includes('75'), `실제 배율이 사유에 남아야 한다: ${r.error}`);
+    });
+    eq(orderPosts, 0, '배율이 요청과 다른데 주문이 나갔다');
+  });
+
   netTest('Gate 조회 실패는 "주문 없음"이 아니다', async () => {
     const t: ExecTarget = { exchange: 'gate', key: 'k', secret: 's', testnet: true };
     await withFetch((url) => (mine(url) ? { status: 500, body: { message: 'rate limit' } } : null), async () => {
@@ -349,6 +456,7 @@ export function runFuturesExecTests() {
     const t: ExecTarget = { exchange: 'gate', key: 'k', secret: 's', testnet: true };
     await withFetch((url, init) => {
       if (!mine(url)) return null;
+      if (url.includes('/futures/usdt/accounts')) return { body: { in_dual_mode: false, total: '1000', available: '1000' } };
       if (url.includes('/futures/usdt/contracts/')) {
         return { body: { name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1, order_price_round: '0.1' } };
       }
