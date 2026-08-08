@@ -249,17 +249,28 @@ export function runFuturesExecTests() {
     return urls;
   };
 
-  // **거래 경로만** 가로챈다. 같이 도는 다른 파일의 시세 테스트(klines 등)가
-  // 같은 호스트를 쓰는데, 그것까지 잡으면 남의 테스트를 깨뜨리고 이 테스트의
-  // 기록도 더럽힌다. 여기서 확인하려는 것은 "주문이 어느 거래소로 나가는가"다.
-  const TRADING_PATH =
-    /\/fapi\/v[12]\/(order|batchOrders|openOrders|allOrders|positionRisk|leverage|exchangeInfo|positionSide)|\/api\/v4\/futures\//;
+  // ── 거래소 호스트로는 **실제 네트워크를 타지 않는다** ──
+  //
+  // 처음에는 "주문 경로"만 목록으로 골라 가로채고 나머지는 원래 fetch로
+  // 넘겼다. 그게 CI를 멈춰 세웠다 — 유닛 테스트 단계가 13분을 넘겼다.
+  //
+  // 이유: 가로챌 목록에 없던 보조 호출이 **진짜 바이낸스로 나갔다.**
+  // `getSymbolPositionRiskEx`가 `/fapi/v1/premiumIndex`를 부르는데 목록에
+  // 없었고, GitHub 러너에서 그 요청이 응답을 안 줬다. 로컬 6.7초짜리
+  // 테스트가 CI에서만 멈추는 모양이 정확히 이것이다.
+  //
+  // 그래서 규칙을 뒤집었다: **거래소 호스트면 전부 가로챈다.** 모르는
+  // 주소는 핸들러의 마지막 줄이 빈 응답으로 답한다 — 느려도 몇 마이크로초다.
+  //
+  // 예외는 klines 하나다. 같이 도는 `exitMonitor.test.ts`가 그 주소로 실제
+  // 봉을 읽는다(그 파일은 fetch를 갈아 끼우지 않는다). 그것까지 가로채면
+  // 남의 테스트를 이 파일이 깨뜨린다.
+  const EXCHANGE_HOSTS = [GATE_TESTNET, GATE_LIVE, BINANCE_TESTNET, 'fapi.binance.com'];
+  const NOT_MINE = /\/klines/;
 
-  /** 이 테스트가 다루는 주소인가. 아니면 null을 돌려 원래 fetch로 넘긴다 */
+  /** 이 테스트가 답할 주소인가. 아니면 null을 돌려 원래 fetch로 넘긴다 */
   const mine = (url: string) =>
-    (url.includes(GATE_TESTNET) || url.includes(GATE_LIVE)
-      || url.includes(BINANCE_TESTNET) || url.includes('fapi.binance.com'))
-    && TRADING_PATH.test(url);
+    EXCHANGE_HOSTS.some(h => url.includes(h)) && !NOT_MINE.test(url);
 
   netTest('Gate TESTNET 주문은 Gate 테스트넷 호스트로만 나간다', async () => {
     __clearGateSpecCache(); __clearPositionModeCache();
