@@ -20,7 +20,7 @@ import { A } from '@/lib/theme/colors';
 import { Card } from './SharedUI';
 import {
   WALLET_TABS, tabOf, ENV_LABEL, ENV_NOTE,
-  amountOf, totalEquityOf, totalAcrossEnvs,
+  amountOf, totalEquityOf, totalAcrossEnvs, bucketsForTab,
   equityChangeOf, todayPnlLabel,
   type WalletEnv, type WalletTabId, type Bucket,
 } from '@/lib/portfolio/wallet';
@@ -40,16 +40,20 @@ export default function WalletPage() {
   // 이 화면이 지금 정직하게 할 수 있는 일은 "아직 안 붙였다"고 말하는
   // 것뿐이고, 그게 그럴듯한 숫자를 그리는 것보다 낫다.
   const buckets: Bucket[] = ENVS.flatMap(e => ([
-    { id: `${e}-futures`, label: '선물', env: e, amount: amountOf(null, 'LOADING') },
-    { id: `${e}-spot`, label: '현물', env: e, amount: amountOf(null, 'LOADING') },
-    { id: `${e}-strategy`, label: '전략계좌', env: e, amount: amountOf(null, 'LOADING') },
-    { id: `${e}-longterm`, label: '장기투자', env: e, amount: amountOf(null, 'LOADING') },
+    { id: `${e}-futures`, label: '선물', env: e, kind: 'futures' as const, amount: amountOf(null, 'LOADING') },
+    { id: `${e}-spot`, label: '현물', env: e, kind: 'spot' as const, amount: amountOf(null, 'LOADING') },
+    { id: `${e}-strategy`, label: '전략계좌', env: e, kind: 'strategy' as const, amount: amountOf(null, 'LOADING') },
+    { id: `${e}-longterm`, label: '장기투자', env: e, kind: 'longterm' as const, amount: amountOf(null, 'LOADING') },
   ]));
 
   const total = totalEquityOf(env, buckets);
   const change = equityChangeOf(null, {});
   const pnl = todayPnlLabel(change);
   const cross = totalAcrossEnvs();
+  // 이 탭에서 보여 줄 칸. **총자산은 탭과 무관하게 전부 더한다** —
+  // 선물 탭에 있다고 총자산이 선물만 세면, 탭을 옮길 때마다 총자산이
+  // 달라져서 어느 것이 진짜인지 알 수 없다.
+  const shown = bucketsForTab(tab, total.buckets);
 
   const envColor = (e: WalletEnv) => e === 'LIVE' ? T.red : e === 'TESTNET' ? T.ylw : T.muted;
 
@@ -140,9 +144,18 @@ export default function WalletPage() {
         {WALLET_TABS.find(t => t.id === tab)?.desc}
       </div>
 
-      {/* ── 칸별 잔고 ── */}
+      {/* ── 칸별 잔고 ──
+          **탭을 누르면 목록이 바뀌어야 한다.** 처음 붙일 때 설명 줄만
+          바꾸고 목록은 그대로였는데, 눌러도 아무것도 안 변하는 탭은
+          사용자에게 화면이 고장 난 것으로 보인다. */}
       <Card style={{ padding: '12px 14px', marginBottom: 10 }}>
-        {total.buckets.map(b => (
+        {shown.length === 0 && (
+          <div style={{ color: T.muted, fontSize: 10.5, padding: '6px 0', lineHeight: 1.6 }}>
+            이 환경에 <b style={{ color: T.txt }}>{WALLET_TABS.find(t => t.id === tab)?.label}</b> 계좌가 없습니다 —
+            잔고가 0이라는 뜻이 아니라 <b style={{ color: T.ylw }}>연결된 계좌가 없다</b>는 뜻입니다.
+          </div>
+        )}
+        {shown.map(b => (
           <div key={b.id} style={{
             display: 'flex', alignItems: 'baseline', gap: 8, padding: '7px 0',
             borderBottom: `1px solid ${T.border}`,

@@ -12,7 +12,7 @@ import { test, assert, eq, close } from '../../test/harness';
 import {
   envOf, ENV_NOTE, WALLET_TABS, tabOf,
   amountOf, totalEquityOf, totalAcrossEnvs,
-  equityChangeOf, todayPnlLabel, RECONCILE_EPS,
+  equityChangeOf, todayPnlLabel, RECONCILE_EPS, bucketsForTab,
   type Bucket,
 } from './wallet';
 
@@ -195,5 +195,38 @@ export function runWalletTests() {
     eq(tabOf(null), 'overview');
     eq(tabOf('아무거나'), 'overview');
     eq(tabOf('strategy'), 'strategy');
+  });
+
+  test('탭을 고르면 그 탭 것만 나온다', () => {
+    // **이게 없어서 탭이 설명 줄만 바꾸고 있었다.** 눌러도 목록이
+    // 그대로면 사용자는 화면이 고장 났다고 본다.
+    const bs: Bucket[] = [
+      { id: 'f', label: '선물', env: 'LIVE', kind: 'futures', amount: amountOf(1) },
+      { id: 's', label: '현물', env: 'LIVE', kind: 'spot', amount: amountOf(2) },
+    ];
+    eq(bucketsForTab('futures', bs).length, 1);
+    eq(bucketsForTab('futures', bs)[0].id, 'f');
+    eq(bucketsForTab('spot', bs)[0].id, 's');
+  });
+
+  test('개요는 전부 보여 준다', () => {
+    const bs: Bucket[] = [
+      { id: 'f', label: '선물', env: 'LIVE', kind: 'futures', amount: amountOf(1) },
+      { id: 's', label: '현물', env: 'LIVE', kind: 'spot', amount: amountOf(2) },
+    ];
+    eq(bucketsForTab('overview', bs).length, 2);
+  });
+
+  test('어느 탭인지 모르는 칸은 개요에만 넣는다', () => {
+    // 아무 탭에나 끼우면 선물 탭에 현물이 섞인다. 빼 버리면 총자산에는
+    // 잡히는데 어느 탭에도 안 보이는 돈이 생긴다 — 뒤쪽이 더 나쁘다.
+    const bs: Bucket[] = [{ id: 'x', label: '?', env: 'LIVE', amount: amountOf(9) }];
+    eq(bucketsForTab('overview', bs).length, 1);
+    eq(bucketsForTab('futures', bs).length, 0);
+  });
+
+  test('빈 목록에도 안 터진다', () => {
+    eq(bucketsForTab('futures', null).length, 0);
+    eq(bucketsForTab('overview', undefined).length, 0);
   });
 }
