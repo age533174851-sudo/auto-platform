@@ -44,7 +44,7 @@ const WATCH_DIRS = [
   // 새 판정 디렉터리를 만들면 이 목록에도 같이 넣어야 한다.
   'src/lib/portfolio',
   // 백테스트 판정과 AI 출처 판정. 여기도 검사 밖이었다.
-  'src/lib/backtest', 'src/lib/ai',
+  'src/lib/backtest', 'src/lib/ai', 'src/lib/runtime',
 ];
 
 /** 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다 */
@@ -139,6 +139,13 @@ for (const file of files) {
   for (const s of sources) {
     if (s.path === file) continue;                     // 자기 자신
     if (s.path === file.replace(/\.ts$/, '.test.ts')) continue;   // 자기 테스트
+    // **이 스크립트 자신은 소비자가 아니다.**
+    //
+    // WATCH_DIRS에 'src/lib/runtime'을 넣자마자 `src/lib/ai/runtime.ts`가
+    // "이미 배선됨"으로 뒤집혔다. 이 파일의 설정 문자열이 import 경로처럼
+    // 보였기 때문이다. 검사기가 자기 설정을 근거로 통과시키면, 진짜로
+    // 끊긴 모듈이 조용히 살아난다.
+    if (s.path === 'scripts/check-wiring.mjs') continue;
     if (re.test(s.text)) consumers++;
   }
 

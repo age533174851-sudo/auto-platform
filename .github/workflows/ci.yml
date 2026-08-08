@@ -97,6 +97,14 @@ jobs:
       - name: 판정 모듈 배선 검사
         run: node scripts/check-wiring.mjs
 
+      # ── 상시 실행 검사 ──
+      #
+      # 화면 안의 setInterval이 '실행'인지 '새로고침'인지 적게 한다.
+      # 브라우저가 살아 있어야만 동작하는 것을 '상시 실행'이라고 부르면
+      # 안 된다 — 사용자는 앱을 닫아도 된다는 뜻으로 읽는다.
+      - name: 화면 타이머 분류 검사
+        run: node scripts/check-runtime.mjs
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그

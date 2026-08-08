@@ -8,6 +8,7 @@ import { A } from '@/lib/theme/colors';
 // ─────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { T } from '@/lib/constants';
+import { DURABILITY_NOTE } from '@/lib/runtime/persistentRuntime';
 import { SliderField } from '@/components/ui/SettingField';
 import {
   SOURCE_LABEL, SOURCE_DESC, SOURCE_SUMMARY, sourceBadge, feedStatusOf, sourceOf,
@@ -242,8 +243,11 @@ export default function MockAutoTrade() {
             <span style={{ fontSize: 14, fontWeight: 800, color: T.txt }}>🧪 MOCK 자동매매</span>
             <span style={{ background: A(T.prp,'20'), color: T.prp, fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 5 }}>MOCK</span>
           </div>
-          <span style={{ fontSize: 11, fontWeight: 800, color: running ? T.grn : T.muted }}>
-            {running ? '● 실행중' : '○ 정지'}
+          <span style={{ fontSize: 11, fontWeight: 800, color: running ? T.ylw : T.muted }}>
+            {/* **'실행중'이라고만 쓰지 않는다.** 이건 브라우저 타이머라
+                이 화면을 떠나면 멈춘다. 그 사실을 상태 옆에 붙인다 —
+                사용자는 '실행중'을 앱을 닫아도 된다는 뜻으로 읽는다. */}
+            {running ? '● 이 화면에서만 실행중' : '○ 정지'}
           </span>
         </div>
 
@@ -371,10 +375,21 @@ export default function MockAutoTrade() {
             min={40} max={95} step={5}
             onChange={setConfThreshold}/>
         </div>
+        {/* ── 이 실행기는 상시 실행이 아니다 ──
+            브라우저가 살아 있어야만 동작하는 것을 '상시 실행'이라고 부르면
+            사용자는 앱을 닫아도 된다는 뜻으로 읽는다. 돌고 있을 때 늘 적는다. */}
+        {running && (
+          <div style={{ background: A(T.ylw,'10'), border: `1px solid ${A(T.ylw,'28')}`, borderRadius: 8, padding: '8px 10px', marginTop: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: T.ylw }}>⚠ 상시 실행이 아닙니다</div>
+            <div style={{ fontSize: 9, color: T.muted, marginTop: 3, lineHeight: 1.55 }}>
+              {DURABILITY_NOTE.BROWSER}
+            </div>
+          </div>
+        )}
         {stoppedReason && (
           <div style={{ background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: 8, padding: '8px 10px', marginTop: 8 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: T.ylw }}>정지 사유: {stoppedReason}</div>
-            <div style={{ fontSize: 9, color: T.muted, marginTop: 3 }}>참고: 브라우저 탭이 백그라운드로 가면 타이머가 느려질 수 있습니다 (상시 실행은 Worker 필요).</div>
+            <div style={{ fontSize: 9, color: T.muted, marginTop: 3 }}>참고: 이 실행기는 이 화면 안에서만 돕니다 — 상시 실행은 서버 Worker가 필요합니다.</div>
           </div>
         )}
 
