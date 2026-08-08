@@ -14,6 +14,7 @@ import {
   runtimeHealth, leaseCheck, tickKey, canCallAlwaysOn,
   HEARTBEAT_STALE_MS, TICK_LATE_FACTOR, DURABILITY_NOTE,
   fenceCheck, nextFencingToken, orderKey, shouldSubmit, gapCheck,
+  runtimeView, desiredOf,
 } from './persistentRuntime';
 
 const NOW = 1_700_000_000_000;
@@ -288,5 +289,64 @@ export function runPersistentRuntimeTests() {
     for (const ms of [0, 10_000, 180_000, 86_400_000]) {
       eq(gapCheck({ lastTickAtMs: NOW - ms, nowMs: NOW, intervalSec: 10 }).shouldCatchUp, false, String(ms));
     }
+  });
+
+  console.log('[상시 실행 — H. 원하는 상태와 실제 상태를 나눈다]');
+
+  test('켰는데 Worker가 죽었으면 둘 다 보여준다', () => {
+    // "나는 분명 켰는데 왜 정지야?"를 없앤다.
+    const v = runtimeView({
+      desiredState: 'RUNNING', enabled: true, intervalSec: 10,
+      workerHeartbeatAt: iso(NOW - 42_000), lastTickAt: iso(NOW - 5000),
+    }, NOW);
+    eq(v.desired, 'RUNNING');
+    eq(v.observed, 'DEGRADED');
+    eq(v.diverged, true);
+    eq(v.actuallyRunning, false);
+    assert(v.headline.includes('원하는 상태: 실행'), v.headline);
+    assert(v.headline.includes('실제 상태'), v.headline);
+  });
+
+  test('둘이 같으면 하나만 보여준다', () => {
+    const v = runtimeView({
+      desiredState: 'RUNNING', enabled: true, intervalSec: 10,
+      workerHeartbeatAt: iso(NOW - 1000), lastTickAt: iso(NOW - 1000),
+    }, NOW);
+    eq(v.diverged, false);
+    eq(v.headline, '실행 중');
+    eq(v.actuallyRunning, true);
+  });
+
+  test('사용자가 멈춰 둔 것은 어긋남이 아니다', () => {
+    const v = runtimeView({ desiredState: 'STOPPED', enabled: false }, NOW);
+    eq(v.diverged, false);
+    eq(v.headline, '정지');
+  });
+
+  test('H. 앱 재접속에서 정지가 잠깐 보이지 않는다', () => {
+    // 서버 응답 전에는 UNKNOWN이고, 그건 정지가 아니다.
+    const v = runtimeView(null, NOW);
+    eq(v.headline, '상태 확인 중…');
+    eq(v.actuallyRunning, false);
+    eq(v.diverged, false, '아직 모르는 것을 어긋남으로 세지 않는다');
+  });
+
+  test('모르는 desired를 정지로 읽지 않는다', () => {
+    // 끈 적 없는데 껐다고 말하게 된다.
+    eq(desiredOf(null), 'UNKNOWN');
+    eq(desiredOf('아무거나'), 'UNKNOWN');
+    eq(desiredOf('running'), 'RUNNING');
+  });
+
+  test('옛 행은 enabled로 되짚되 모르면 UNKNOWN이다', () => {
+    eq(runtimeView({ enabled: true, intervalSec: 10,
+      workerHeartbeatAt: iso(NOW - 1000), lastTickAt: iso(NOW - 1000) }, NOW).desired, 'RUNNING');
+    eq(runtimeView({ enabled: false }, NOW).desired, 'STOPPED');
+    eq(runtimeView({ intervalSec: 10 }, NOW).desired, 'UNKNOWN');
+  });
+
+  test('시작하는 중은 어긋남이 아니다', () => {
+    const v = runtimeView({ desiredState: 'RUNNING', enabled: true, status: 'STARTING' }, NOW);
+    eq(v.diverged, false);
   });
 }

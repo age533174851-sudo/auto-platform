@@ -490,3 +490,99 @@ export function gapCheck(input: {
       + ' — 지어낸 체결은 없던 거래를 만듭니다',
   };
 }
+
+// ── 원하는 상태와 관측된 상태를 나눈다 ────────────────────
+//
+// **"나는 분명 켰는데 왜 정지야?"**
+//
+// `enabled` 하나로는 이 혼란을 못 없앤다. Worker가 죽으면 화면이 둘 중
+// 하나로 거짓말한다 — '실행 중'이라고 하거나(안 도는데) '정지'라고
+// 하거나(끈 적 없는데).
+//
+// 둘은 서로 다른 사실이다:
+//
+//   원하는 상태   사용자가 무엇을 시켰는가
+//   관측된 상태   실제로 무엇이 일어나고 있는가
+//
+// 둘이 다르면 그 자체가 화면에 뜰 정보다. 하나로 뭉개면 그 정보가 사라지고,
+// 사용자는 자기가 뭘 잘못 눌렀는지 찾게 된다.
+
+export type DesiredState = 'RUNNING' | 'PAUSED' | 'STOPPED' | 'UNKNOWN';
+
+export const DESIRED_LABEL: Record<DesiredState, string> = {
+  RUNNING: '실행', PAUSED: '일시정지', STOPPED: '정지', UNKNOWN: '확인 중',
+};
+
+export interface RuntimeView {
+  desired: DesiredState;
+  observed: RuntimeStatus;
+  /** 둘이 어긋났는가 */
+  diverged: boolean;
+  /** 화면 큰 글씨 */
+  headline: string;
+  /** 그 아래 한 줄 */
+  detail: string;
+  tone: Tone;
+  /** 실제로 돌고 있다고 말해도 되는가 */
+  actuallyRunning: boolean;
+  health: RuntimeHealth;
+}
+
+export function desiredOf(v: any): DesiredState {
+  const s = String(v ?? '').trim().toUpperCase();
+  if (s === 'RUNNING' || s === 'PAUSED' || s === 'STOPPED') return s;
+  // **모르는 값을 '정지'로 읽지 않는다.** 끈 적 없는데 껐다고 말하게 된다.
+  return 'UNKNOWN';
+}
+
+/**
+ * 화면이 쓸 모양.
+ *
+ * **어긋났을 때 둘 다 보여준다.** 하나만 보여주면 어느 쪽이든 거짓말이
+ * 된다 — 원하는 상태만 보여주면 안 도는데 돈다고 하는 것이고, 관측된
+ * 상태만 보여주면 사용자가 켠 사실이 사라진다.
+ */
+export function runtimeView(
+  row: (RuntimeRow & { desiredState?: any }) | null | undefined, nowMs?: any,
+): RuntimeView {
+  const health = runtimeHealth(row, nowMs);
+  const desired = desiredOf(row?.desiredState ?? (
+    // 옛 행에는 desiredState 칸이 없다. enabled로 되짚되, **모르면
+    // UNKNOWN이다** — false를 '사용자가 껐다'로 읽지 않는다.
+    row == null ? null : (row.enabled === true ? 'RUNNING' : row.enabled === false ? 'STOPPED' : null)
+  ));
+
+  const observed = health.status;
+  // 원하는 것이 실행인데 관측이 실행이 아니면 어긋난 것이다.
+  // 사용자가 멈춰 둔 상태는 어긋남이 아니다.
+  const diverged = desired === 'RUNNING' && observed !== 'RUNNING' && observed !== 'STARTING';
+
+  if (desired === 'UNKNOWN' || observed === 'UNKNOWN') {
+    return {
+      desired, observed, diverged: false,
+      headline: '상태 확인 중…',
+      detail: health.reason || '서버에서 실행 상태를 읽고 있습니다',
+      tone: 'muted', actuallyRunning: false, health,
+    };
+  }
+
+  if (!diverged) {
+    return {
+      desired, observed, diverged: false,
+      headline: STATUS_LABEL[observed],
+      detail: health.reason,
+      tone: STATUS_TONE[observed],
+      actuallyRunning: health.actuallyRunning, health,
+    };
+  }
+
+  return {
+    desired, observed, diverged: true,
+    // **둘 다 적는다.** 이게 "나는 켰는데 왜 정지야?"를 없앤다.
+    headline: `원하는 상태: 실행 · 실제 상태: ${STATUS_LABEL[observed]}`,
+    detail: health.reason
+      || '켜 두셨지만 실제로 도는 것을 확인하지 못했습니다',
+    tone: STATUS_TONE[observed],
+    actuallyRunning: false, health,
+  };
+}
