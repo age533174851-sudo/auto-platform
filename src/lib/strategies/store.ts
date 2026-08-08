@@ -56,7 +56,10 @@ export function duplicateStrategy(id: string): UserStrategy | null {
   const now = Date.now();
   const copy: UserStrategy = {
     ...src,
-    id:        'str-' + now.toString(36),
+    // **`newStrategyId()`를 쓴다.** 여기만 'str-' + 밀리초였다 — 난수가
+    // 없어서 두 사람이 같은 밀리초에 복제하면 id가 겹친다. 그러면 서버
+    // upsert에서 한쪽 전략이 소리 없이 사라진다.
+    id:        newStrategyId(),
     name:      `${src.name} (복사)`,
     enabled:   false,
     createdAt: now,

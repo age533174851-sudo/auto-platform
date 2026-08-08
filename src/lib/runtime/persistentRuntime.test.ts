@@ -13,6 +13,8 @@ import { test, assert, eq } from '../../test/harness';
 import {
   runtimeHealth, leaseCheck, tickKey, canCallAlwaysOn,
   HEARTBEAT_STALE_MS, TICK_LATE_FACTOR, DURABILITY_NOTE,
+  fenceCheck, nextFencingToken, orderKey, shouldSubmit, gapCheck,
+  runtimeView, desiredOf,
 } from './persistentRuntime';
 
 const NOW = 1_700_000_000_000;
@@ -179,5 +181,191 @@ export function runPersistentRuntimeTests() {
   test('브라우저 실행은 그 사실을 적는다', () => {
     assert(DURABILITY_NOTE.BROWSER.includes('상시 실행이 아닙니다'), DURABILITY_NOTE.BROWSER);
     assert(DURABILITY_NOTE.BROWSER.includes('멈춥니다'), DURABILITY_NOTE.BROWSER);
+  });
+
+  console.log('[상시 실행 — F. 늦게 깨어난 Worker는 주문 못 낸다]');
+
+  test('임대가 넘어간 뒤 늦게 깨어난 Worker를 막는다', () => {
+    // 10:00 A가 잡음(7) → A 멈춤 → 10:01 만료, B가 잡음(8)
+    // → 10:02 A가 깨어남. A는 자기가 주인인 줄 안다.
+    // leaseCheck는 이걸 못 막는다 — A는 이미 통과한 뒤에 멈췄다.
+    const v = fenceCheck(7, 8);
+    eq(v.ok, false);
+    eq(v.code, 'STALE');
+    assert(v.reason.includes('두 번 나갑니다'), v.reason);
+  });
+
+  test('번호가 같으면 아직 주인이다', () => {
+    const v = fenceCheck(8, 8);
+    eq(v.ok, true);
+    eq(v.code, 'CURRENT');
+  });
+
+  test('번호를 못 읽으면 진행하지 않는다', () => {
+    // 모르는 채로 주문을 내면 겹쳤을 때 되돌릴 방법이 없다.
+    eq(fenceCheck(null, 8).code, 'UNKNOWN');
+    eq(fenceCheck(7, null).code, 'UNKNOWN');
+    eq(fenceCheck('abc', 8).code, 'UNKNOWN');
+    eq(fenceCheck(1.5, 8).code, 'UNKNOWN');
+  });
+
+  test('내 번호가 더 크면 있을 수 없는 상태다 — 역시 막는다', () => {
+    const v = fenceCheck(9, 8);
+    eq(v.ok, false);
+    eq(v.code, 'UNKNOWN');
+  });
+
+  test('임대를 새로 잡을 때마다 번호가 오른다', () => {
+    eq(nextFencingToken(7), 8);
+    eq(nextFencingToken(0), 1);
+    eq(nextFencingToken(null), 1, '없으면 1부터');
+    eq(nextFencingToken('abc'), 1);
+  });
+
+  console.log('[상시 실행 — G. tick 중복과 주문 중복은 다른 문제다]');
+
+  test('같은 tick 안의 두 주문은 다른 열쇠다', () => {
+    // tickKey 하나로 합치면 두 번째 주문이 첫 번째와 같은 열쇠를 갖는다.
+    const k = tickKey('rt1', NOW, 10)!;
+    assert(orderKey(k, 0) !== orderKey(k, 1), '같은 tick의 두 주문이 같은 열쇠다');
+  });
+
+  test('같은 주문의 재시도는 같은 열쇠다', () => {
+    // tick은 한 번 돌았는데 네트워크 타임아웃으로 제출이 두 번 나가는 사고.
+    const k = tickKey('rt1', NOW, 10)!;
+    eq(orderKey(k, 0), orderKey(k, 0));
+  });
+
+  test('열 번 재시도해도 한 번만 보낸다', () => {
+    const k = tickKey('rt1', NOW, 10)!;
+    const key = orderKey(k, 0)!;
+    const sent: string[] = [];
+    let submitted = 0;
+    for (let i = 0; i < 10; i++) {
+      if (shouldSubmit(key, sent).ok) { submitted++; sent.push(key); }
+    }
+    eq(submitted, 1);
+  });
+
+  test('보낸 목록을 못 읽으면 보내지 않는다', () => {
+    // 이미 나간 주문 위에 하나를 더 얹는 쪽이 훨씬 나쁘다.
+    const v = shouldSubmit('k#0', null);
+    eq(v.ok, false);
+    assert(v.reason.includes('모르는 채로'), v.reason);
+  });
+
+  test('열쇠를 못 만들면 보내지 않는다', () => {
+    eq(orderKey(null, 0), null);
+    eq(orderKey('k', -1), null);
+    eq(orderKey('k', 1.5), null);
+    eq(shouldSubmit(null, []).ok, false);
+  });
+
+  console.log('[상시 실행 — 멈춘 동안을 지어내지 않는다]');
+
+  test('3분 죽어 있었다고 18번을 따라잡지 않는다', () => {
+    // 그건 일어나지 않은 거래 18건을 만드는 것이다.
+    const g = gapCheck({ lastTickAtMs: NOW - 180_000, nowMs: NOW, intervalSec: 10 });
+    eq(g.hasGap, true);
+    eq(g.missedTicks, 17);
+    eq(g.shouldCatchUp, false);
+    assert(g.reason.includes('없던 거래를 만듭니다'), g.reason);
+  });
+
+  test('제때 돌았으면 빈 구간이 없다', () => {
+    const g = gapCheck({ lastTickAtMs: NOW - 10_000, nowMs: NOW, intervalSec: 10 });
+    eq(g.hasGap, false);
+    eq(g.missedTicks, 0);
+  });
+
+  test('주기를 모르면 빈 구간을 계산하지 않는다', () => {
+    const g = gapCheck({ lastTickAtMs: NOW - 180_000, nowMs: NOW });
+    eq(g.missedTicks, null);
+    eq(g.hasGap, false);
+    eq(g.shouldCatchUp, false);
+  });
+
+  test('마지막 실행 시각이 null이면 1970년으로 읽지 않는다', () => {
+    // Number(null)은 0이다. 그냥 Number로 받으면 '모름'이 '1970-01-01에
+    // 마지막으로 돌았음'이 되고, 짧은 주기에서는 "빈 구간 없음"이,
+    // 긴 주기에서는 "수천만 틱 누락"이 나온다. 둘 다 틀렸는데 둘 다
+    // 그럴듯해서 아무도 안 본다.
+    for (const bad of [null, undefined, '', true, 'abc']) {
+      const g = gapCheck({ lastTickAtMs: bad, nowMs: NOW, intervalSec: 60 });
+      eq(g.missedTicks, null, String(bad));
+      eq(g.hasGap, false, String(bad));
+    }
+  });
+
+  test('시각 0은 못 읽은 것이 아니다', () => {
+    // 진짜 0이면 1970년이 맞다 — 놓친 것이 어마어마하게 많다.
+    const g = gapCheck({ lastTickAtMs: 0, nowMs: 3_600_000, intervalSec: 60 });
+    eq(g.missedTicks, 59);
+    eq(g.hasGap, true);
+  });
+
+  test('따라잡기는 어떤 경우에도 하지 않는다', () => {
+    for (const ms of [0, 10_000, 180_000, 86_400_000]) {
+      eq(gapCheck({ lastTickAtMs: NOW - ms, nowMs: NOW, intervalSec: 10 }).shouldCatchUp, false, String(ms));
+    }
+  });
+
+  console.log('[상시 실행 — H. 원하는 상태와 실제 상태를 나눈다]');
+
+  test('켰는데 Worker가 죽었으면 둘 다 보여준다', () => {
+    // "나는 분명 켰는데 왜 정지야?"를 없앤다.
+    const v = runtimeView({
+      desiredState: 'RUNNING', enabled: true, intervalSec: 10,
+      workerHeartbeatAt: iso(NOW - 42_000), lastTickAt: iso(NOW - 5000),
+    }, NOW);
+    eq(v.desired, 'RUNNING');
+    eq(v.observed, 'DEGRADED');
+    eq(v.diverged, true);
+    eq(v.actuallyRunning, false);
+    assert(v.headline.includes('원하는 상태: 실행'), v.headline);
+    assert(v.headline.includes('실제 상태'), v.headline);
+  });
+
+  test('둘이 같으면 하나만 보여준다', () => {
+    const v = runtimeView({
+      desiredState: 'RUNNING', enabled: true, intervalSec: 10,
+      workerHeartbeatAt: iso(NOW - 1000), lastTickAt: iso(NOW - 1000),
+    }, NOW);
+    eq(v.diverged, false);
+    eq(v.headline, '실행 중');
+    eq(v.actuallyRunning, true);
+  });
+
+  test('사용자가 멈춰 둔 것은 어긋남이 아니다', () => {
+    const v = runtimeView({ desiredState: 'STOPPED', enabled: false }, NOW);
+    eq(v.diverged, false);
+    eq(v.headline, '정지');
+  });
+
+  test('H. 앱 재접속에서 정지가 잠깐 보이지 않는다', () => {
+    // 서버 응답 전에는 UNKNOWN이고, 그건 정지가 아니다.
+    const v = runtimeView(null, NOW);
+    eq(v.headline, '상태 확인 중…');
+    eq(v.actuallyRunning, false);
+    eq(v.diverged, false, '아직 모르는 것을 어긋남으로 세지 않는다');
+  });
+
+  test('모르는 desired를 정지로 읽지 않는다', () => {
+    // 끈 적 없는데 껐다고 말하게 된다.
+    eq(desiredOf(null), 'UNKNOWN');
+    eq(desiredOf('아무거나'), 'UNKNOWN');
+    eq(desiredOf('running'), 'RUNNING');
+  });
+
+  test('옛 행은 enabled로 되짚되 모르면 UNKNOWN이다', () => {
+    eq(runtimeView({ enabled: true, intervalSec: 10,
+      workerHeartbeatAt: iso(NOW - 1000), lastTickAt: iso(NOW - 1000) }, NOW).desired, 'RUNNING');
+    eq(runtimeView({ enabled: false }, NOW).desired, 'STOPPED');
+    eq(runtimeView({ intervalSec: 10 }, NOW).desired, 'UNKNOWN');
+  });
+
+  test('시작하는 중은 어긋남이 아니다', () => {
+    const v = runtimeView({ desiredState: 'RUNNING', enabled: true, status: 'STARTING' }, NOW);
+    eq(v.diverged, false);
   });
 }

@@ -23,6 +23,10 @@ import {
 } from '@/lib/autotrade/store';
 import type { ExecutionLog } from '@/lib/autotrade/types';
 import { decide, type Decision } from '@/lib/autotrade/decision';
+import {
+  restoreVerdict, resumePlan, applyGap, performanceOf, equityOf,
+  type MockSession,
+} from '@/lib/runtime/mockSession';
 
 const ASSET = 'BTC';
 const STRAT_ID = 'mock-test-btc';
@@ -31,6 +35,37 @@ const ENTRY_KRW = 1_000_000;   // 진입당 100만원 (시드 1000만의 10%)
 const TP_PCT = 0.3;            // +0.3% 익절
 const SL_PCT = 0.2;            // -0.2% 손절
 const FALLBACK_PRICE = 140_000_000; // BTC 원화 대략치 (실시세 실패 시)
+
+// ── 세션의 뼈대만 브라우저에 남긴다 ──────────────────────
+//
+// 잔고와 포지션은 이미 autotrade/store에 있다. 여기서 따로 챙기는 것은
+// **"언제 마지막으로 돌았고, 얼마나 꺼져 있었나"** 뿐이다.
+//
+// 이게 왜 필요한가: 새로고침하면 컴포넌트 상태가 날아가면서 `lastRunAt`이
+// null이 된다. 그러면 12시간을 꺼 두고 다시 켜도 화면은 아무 일 없었던
+// 것처럼 이어 그린다. 사흘치 성과에 "그중 이틀은 안 돌았다"가 안 붙는다.
+//
+// **놓친 구간은 채우지 않고 센다.** 채우려면 그 사이 시장을 알아야 하는데
+// 우리는 모르고, 지어낸 체결은 없던 거래를 만든다.
+const SESSION_KEY = 'tg_mock_session_v1';
+const MOCK_SEED = 10_000_000;
+
+function loadSession(): { row: any; readFailed: boolean } {
+  if (typeof window === 'undefined') return { row: null, readFailed: false };
+  try {
+    const raw = window.localStorage.getItem(SESSION_KEY);
+    if (!raw) return { row: null, readFailed: false };
+    return { row: JSON.parse(raw), readFailed: false };
+  } catch {
+    // 깨진 것을 '없음'으로 읽으면 빈 구간이 통째로 사라진다.
+    return { row: null, readFailed: true };
+  }
+}
+
+function saveSession(s: MockSession): void {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch {}
+}
 
 function mkLog(action: 'buy' | 'sell', price: number, extra: Partial<ExecutionLog> = {}): ExecutionLog {
   return {
@@ -60,6 +95,37 @@ export default function MockAutoTrade() {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [running]);
+  // ── 세션 ──
+  //
+  // `session`은 잔고가 아니라 **시간에 대한 기록**이다. 마지막 틱 시각과
+  // 빈 구간 통계만 들고 있다.
+  const [session, setSession] = useState<MockSession | null>(null);
+  /** 세션을 못 읽었다 — 새로 시작하면 기록이 사라진다 */
+  const [sessionBlock, setSessionBlock] = useState('');
+  /** 마지막으로 재개할 때 빈 구간이 있었는가 */
+  const [gapNote, setGapNote] = useState('');
+  /** 이번 틱에서 실제로 읽은 가격. 못 읽으면 null — 직전 값을 안 남긴다 */
+  const [mark, setMark] = useState<number | null>(null);
+
+  useEffect(() => {
+    const { row, readFailed } = loadSession();
+    const v = restoreVerdict(readFailed ? undefined : row, { readFailed });
+    if (v.action === 'BLOCK') { setSessionBlock(v.reason); return; }
+    if (v.action === 'START_FRESH') {
+      setSession({
+        id: 'mock-btc', seed: MOCK_SEED, cash: MOCK_SEED,
+        positions: [], openOrders: [],
+        // 아직 안 켰다. **여기서 Date.now()를 넣으면 안 된다** — 화면을
+        // 열어만 두고 안 켠 시간이 가동률의 분모에 들어간다.
+        startedAtMs: null,
+        lastTickAtMs: null, intervalSec: 10,
+        status: 'STOPPED', configVersion: 1, gapCount: 0, gapMs: 0,
+      });
+      return;
+    }
+    setSession(v.session);
+  }, []);
+
   const [tick, setTick]         = useState(0);          // 리렌더 트리거
   const [toast, setToast]       = useState('');
   const [decision, setDecision] = useState<Decision | null>(null);   // 최근 AI 판단 (XAI)
@@ -130,10 +196,15 @@ export default function MockAutoTrade() {
       const price = await getMarkPrice();
       // **가격이 없으면 이 회차를 통째로 건너뛴다.** 지어낸 값으로
       // 지표를 채우면 그 위에서 나온 판단이 전부 뜻을 잃는다.
-      if (price == null) { setLastRunAt(Date.now()); return; }
+      // **못 읽었으면 직전 가격을 지운다.** 남겨 두면 평가액이 멈춘 시계
+      // 위에서 계속 그려지고, 급락 중에도 화면이 평온하다.
+      if (price == null) { setMark(null); setLastRunAt(Date.now()); return; }
       // 가격 버퍼 업데이트 (지표 계산용, 최근 40개)
       const hist = [...priceHistRef.current, price].slice(-40);
       priceHistRef.current = hist;
+      // 이 틱에서 실제로 읽은 가격. 평가에는 **이것만** 쓴다 —
+      // 시세가 끊긴 뒤에는 아래에서 지운다.
+      setMark(price);
       const pos = getOpenPositions().find(p => p.asset === ASSET);
       setLastRunAt(Date.now());
 
@@ -177,6 +248,14 @@ export default function MockAutoTrade() {
       // hold / wait → 알림 없이 판단 카드에만 표시 (아무것도 안 하는 이유가 UI에 항상 보임)
     } finally {
       busyRef.current = false;
+      // **실제로 한 틱을 돈 시각만 남긴다.** 이 줄이 없으면 새로고침
+      // 이후의 빈 구간을 잴 기준이 없다.
+      setSession(s => {
+        if (!s) return s;
+        const next: MockSession = { ...s, lastTickAtMs: Date.now(), status: 'RUNNING' };
+        saveSession(next);
+        return next;
+      });
       refresh();
     }
   }, [getMarkPrice, refresh, confThreshold]);
@@ -184,6 +263,22 @@ export default function MockAutoTrade() {
   // 자동 루프
   useEffect(() => {
     if (!running) { if (timerRef.current) clearInterval(timerRef.current); timerRef.current = null; return; }
+
+    // ── 다시 켤 때: 빈 구간을 세되 채우지 않는다 ──
+    //
+    // 12시간 꺼져 있었으면 12시간 안 돈 것이다. 놓친 720번을 되돌려
+    // 계산하면 실제로 한 번도 일어나지 않은 거래로 성과가 채워지고,
+    // **사용자는 그 성과를 보고 실전 전환을 결정한다.**
+    setSession(s => {
+      if (!s) return s;
+      const plan = resumePlan(s, Date.now());
+      setGapNote(plan.note);
+      if (!plan.markGap) return s;
+      const next = applyGap(s, plan, Date.now());
+      saveSession(next);
+      return next;
+    });
+
     runOnce();  // 시작 즉시 1회
     timerRef.current = setInterval(runOnce, intervalSec * 1000);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
@@ -213,6 +308,22 @@ export default function MockAutoTrade() {
 
   // ── 표시 데이터 ──
   const bal = loadPaperBalance();
+  // 모의 성과. **가동률과 '모의라서 좋게 나온다'는 사실을 같이 낸다.**
+  // 수익률만 크게 띄우면 그 숫자가 실전에서도 나올 거라고 읽힌다.
+  // 평가액 = 현금 + 포지션. **현재가를 못 읽었으면 내지 않는다.**
+  // bal.krw만 쓰면 포지션을 든 동안 평가액이 통째로 빠져 수익률이
+  // 실제보다 나쁘게 나오고, 직전 가격을 쓰면 급락이 안 보인다.
+  const mockEq = equityOf(
+    bal.readFailed ? null : {
+      cash: bal.krw,
+      positions: Object.entries(bal.positions || {}).map(([symbol, p]: [string, any]) => ({
+        symbol, side: p?.side === 'short' ? 'SHORT' as const : 'LONG' as const,
+        qty: p?.qty, entryPrice: p?.avgPrice,
+      })),
+    },
+    mark != null ? { [ASSET]: mark } : {},
+  );
+  const perf = performanceOf(session, mockEq.equity, now);
   const openPos = getOpenPositions().filter(p => p.asset === ASSET);
   const allLogs = Array.isArray(loadLogs()) ? loadLogs() : [];
   const logs = allLogs.filter(l => l.strategyId === STRAT_ID).slice(0, 12);
@@ -253,7 +364,27 @@ export default function MockAutoTrade() {
 
         {/* 컨트롤 */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={() => setRunning(r => { const nv = !r; notify('bot', nv ? 'MOCK 자동매매 시작' : 'MOCK 자동매매 중지', nv ? `BTC · ${intervalSec}초 주기` : undefined); writeMockHeartbeat({ running: nv, intervalSec }); return nv; })} style={btn(running ? T.red : T.grn)}>
+          {/* **못 여는 것은 불편이고 못 닫는 것은 사고다** — 그래서
+              세션을 못 읽었을 때도 정지는 언제나 눌린다. 막는 것은
+              시작뿐이다. */}
+          <button
+            disabled={!!sessionBlock && !running}
+            onClick={() => setRunning(r => {
+              const nv = !r;
+              if (nv) {
+                // 처음 켜는 순간을 남긴다. 이게 가동률의 분모다.
+                setSession(s => {
+                  if (!s) return s;
+                  const next = s.startedAtMs == null ? { ...s, startedAtMs: Date.now() } : s;
+                  if (next !== s) saveSession(next);
+                  return next;
+                });
+              }
+              notify('bot', nv ? 'MOCK 자동매매 시작' : 'MOCK 자동매매 중지', nv ? `BTC · ${intervalSec}초 주기` : undefined);
+              writeMockHeartbeat({ running: nv, intervalSec });
+              return nv;
+            })}
+            style={{ ...btn(running ? T.red : T.grn), opacity: (!!sessionBlock && !running) ? 0.45 : 1, cursor: (!!sessionBlock && !running) ? 'not-allowed' : 'pointer' }}>
             {running ? '정지' : '자동매매 시작'}
           </button>
           <select value={intervalSec} onChange={e => setIv(Number(e.target.value))}
@@ -279,6 +410,36 @@ export default function MockAutoTrade() {
         <div style={{ marginTop: 6, fontSize: 10, color: T.muted, lineHeight: 1.6 }}>
           {SOURCE_SUMMARY[priceMode]} — {SOURCE_DESC[priceMode]}
         </div>
+
+        {/* ── 세션을 못 읽었다 ──
+            **여기서 새로 시작하면 사흘치 기록이 사라진다.** 그리고
+            잔고가 종잣돈으로 되돌아가 아무 일 없던 것처럼 보인다 —
+            사용자는 그게 조회 실패였다는 것을 영영 모른다. */}
+        {sessionBlock && (
+          <div style={{
+            marginTop: 8, padding: '9px 11px', borderRadius: 8,
+            background: T.alt, color: T.red, fontSize: 11, lineHeight: 1.6,
+            border: `1px solid ${T.red}55`,
+          }}>
+            <b>세션을 읽지 못했습니다 — 시작을 막았습니다</b>
+            <div style={{ color: T.muted, marginTop: 3 }}>{sessionBlock}</div>
+          </div>
+        )}
+
+        {/* ── 꺼져 있던 구간 ──
+            **놓친 만큼 되돌려 계산하지 않는다.** 12시간 꺼져 있었으면
+            12시간 안 돈 것이고, 그 720번을 지어내면 실제로 한 번도
+            일어나지 않은 거래로 성과가 채워진다. */}
+        {gapNote && (
+          <div style={{
+            marginTop: 8, padding: '9px 11px', borderRadius: 8,
+            background: T.alt, color: T.ylw, fontSize: 11, lineHeight: 1.6,
+            border: `1px solid ${T.ylw}55`,
+          }}>
+            <b>꺼져 있던 구간이 있습니다</b>
+            <div style={{ color: T.muted, marginTop: 3 }}>{gapNote}</div>
+          </div>
+        )}
 
         {/* ── 시세가 끊겼다 ──
             **가상 가격으로 바꾸지 않는다.** 자동 전환은 사용자가 고른 것과
@@ -420,6 +581,34 @@ export default function MockAutoTrade() {
         ))}
         <div style={{ fontSize: 10, color: T.muted, marginTop: 8 }}>
           모의 잔고: {Math.round(bal.krw).toLocaleString('ko-KR')}원 · 누적 PnL {bal.totalPnL >= 0 ? '+' : ''}{Math.round(bal.totalPnL).toLocaleString('ko-KR')}원
+        </div>
+
+        {/* ── 평가액과 성과 ──
+            **수익률만 크게 띄우지 않는다.** 이 숫자에는 슬리피지도
+            부분체결도 거래소 지연도 없고, 꺼져 있던 시간도 안 들어 있다.
+            그 사실을 같이 안 적으면 사용자는 이 숫자가 실전에서도
+            나올 거라고 읽고, 그 믿음으로 실전 전환을 결정한다. */}
+        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 8, paddingTop: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 10, color: T.muted }}>평가액</span>
+            <span style={{ fontSize: 12, fontWeight: 800, color: mockEq.equity == null ? T.muted : T.txt }}>
+              {mockEq.equity == null ? '확인 불가' : `${Math.round(mockEq.equity).toLocaleString('ko-KR')}원`}
+            </span>
+            {perf.returnPct != null && (
+              <span style={{ fontSize: 11, fontWeight: 800, color: perf.returnPct >= 0 ? T.grn : T.red }}>
+                {perf.returnPct >= 0 ? '+' : ''}{perf.returnPct.toFixed(2)}%
+              </span>
+            )}
+            {perf.uptimePct != null && (
+              <span style={{ fontSize: 10, color: perf.uptimePct >= 99 ? T.muted : T.ylw }}>
+                가동 {perf.uptimePct.toFixed(0)}%
+              </span>
+            )}
+          </div>
+          {mockEq.note && (
+            <div style={{ fontSize: 9.5, color: T.ylw, marginTop: 4, lineHeight: 1.6 }}>{mockEq.note}</div>
+          )}
+          <div style={{ fontSize: 9.5, color: T.muted, marginTop: 4, lineHeight: 1.6 }}>{perf.note}</div>
         </div>
       </div>
 

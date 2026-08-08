@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { T } from '@/lib/constants';
 import { aiResultView } from '@/lib/ai/resultSource';
+import { locationVerdict } from '@/lib/runtime/dataLocation';
 import { ErrorBoundary } from './ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
@@ -72,7 +73,12 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
   const [tab,   setTab]   = useState<'list'|'manual'|'ai'>('list');
   const [items, setItems] = useState<UserStrategy[]>([]);
   const [editing, setEditing] = useState<UserStrategy | null>(null);
-  const [syncStatus, setSyncStatus] = useState<'idle'|'syncing'|'synced'|'offline'>('idle');
+  // **'failed'가 원래 없었다.** pull이 실패하면 상태가 'idle'로 남아
+  // 배지 자체가 안 뜨고, 사용자는 이 브라우저의 목록이 전부인 줄 안다.
+  // 없다고 새로 만들면 나중에 같은 전략이 둘이 되고, 둘 다 켜지면
+  // 같은 신호에 주문이 두 번 나간다.
+  const [syncStatus, setSyncStatus] = useState<'idle'|'syncing'|'synced'|'offline'|'failed'>('idle');
+  const [syncWarning, setSyncWarning] = useState('');
 
   // 마운트 시: 로컬 목록 + 클라우드 pull (best-effort)
   useEffect(() => {
@@ -86,10 +92,23 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
         if (r.ok) {
           setItems(listStrategies());
           setSyncStatus('synced');
+          setSyncWarning('');
         } else if (r.error === 'not_logged_in') {
+          // 로그인을 안 한 것은 실패가 아니다. 경고를 띄우면 경고가
+          // 배경이 되고 진짜 실패가 묻힌다.
           setSyncStatus('offline');
+        } else {
+          // **못 읽었다는 사실을 화면에 남긴다.** 판정은 syncPlan이 한다.
+          const { listVerdict } = await import('@/lib/strategies/syncPlan');
+          setSyncStatus('failed');
+          setSyncWarning(listVerdict(listStrategies(), null, false).warning);
         }
-      } catch { /* best-effort */ }
+      } catch (e) {
+        if (cancelled) return;
+        const { listVerdict } = await import('@/lib/strategies/syncPlan');
+        setSyncStatus('failed');
+        setSyncWarning(listVerdict(listStrategies(), null, false).warning);
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -155,23 +174,41 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
             background:
               syncStatus === 'synced'  ? A(T.grn,'20') :
               syncStatus === 'syncing' ? A(T.acl,'20') :
+              syncStatus === 'failed'  ? A(T.red,'20') :
                                           A(T.muted,'20'),
             color:
               syncStatus === 'synced'  ? T.grn :
               syncStatus === 'syncing' ? T.acl :
+              syncStatus === 'failed'  ? T.red :
                                           T.muted,
             border: `1px solid ${
               syncStatus === 'synced'  ? T.grn :
               syncStatus === 'syncing' ? T.acl :
+              syncStatus === 'failed'  ? T.red :
                                           T.border
             }40`,
           }}>
             {syncStatus === 'synced'  ? '☁ 동기화됨' :
              syncStatus === 'syncing' ? '동기화 중...' :
+             syncStatus === 'failed'  ? '목록 확인 실패' :
                                          '오프라인'}
           </div>
         )}
       </div>
+
+      {/* **못 읽었을 때 조용하지 않는다.**
+          배지만으로는 "그래서 뭘 조심해야 하는지"를 알 수 없다.
+          여기 없다고 새로 만들면 중복이 된다는 것까지 적는다. */}
+      {syncWarning && (
+        <div style={{
+          marginBottom: SP.md, padding: '9px 11px', borderRadius: 9,
+          background: A(T.red,'12'), border: `1px solid ${T.red}44`,
+          color: T.red, fontSize: 10.5, lineHeight: 1.65,
+        }}>
+          <b>서버 목록을 읽지 못했습니다</b>
+          <div style={{ color: T.muted, marginTop: 3 }}>{syncWarning}</div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 6, marginBottom: SP.md }}>
@@ -261,6 +298,35 @@ function StrategyList({
   onNew:       () => void;
   onBacktest:  (s: UserStrategy) => void;
 }) {
+  // ── 이 전략들이 어디 사는가 ──
+  //
+  // AutoTradeEngine이 60초마다 이 전략들을 평가한다. 그런데 전략은
+  // localStorage에만 있어서 **서버가 그 존재조차 모른다.** 크론을
+  // 아무리 잘 붙여도 읽을 것이 없다.
+  //
+  // 이 사실이 화면에 안 뜨면 사용자는 "왜 안 돌지"를 타이머 문제로
+  // 오해한다. 그리고 기기를 바꾸거나 브라우저 데이터를 지우면
+  // 전략이 통째로 사라진다는 것도 모른다.
+  const loc = locationVerdict('EXECUTION', 'BROWSER_ONLY');
+  const storageWarning = (
+    <div style={{
+      background: A(T.ylw, '10'), border: `1px solid ${A(T.ylw, '30')}`,
+      borderRadius: R.sm, padding: '9px 11px', marginBottom: SP.sm,
+    }}>
+      <div style={{ color: T.ylw, fontSize: 10.5, fontWeight: 700, lineHeight: 1.55 }}>
+        ⚠ 전략이 이 브라우저에만 저장됩니다
+      </div>
+      <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.6 }}>
+        {loc.warning}
+      </div>
+      <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.6 }}>
+        · 다른 기기에서는 보이지 않습니다<br />
+        · 브라우저 데이터를 지우면 사라집니다<br />
+        · 시크릿 모드에서는 남지 않습니다
+      </div>
+    </div>
+  );
+
   if (items.length === 0) {
     return (
       <div style={cardStyle({ padding: '40px 20px', textAlign: 'center' })}>
@@ -268,6 +334,9 @@ function StrategyList({
           <Sparkles size={32} strokeWidth={2} color={T.muted}/>
         </div>
         <div style={{ ...F.body, color: T.txt, marginBottom: 4 }}>아직 만든 전략이 없습니다</div>
+        <div style={{ ...F.muted, marginBottom: 6, color: T.ylw, lineHeight: 1.55 }}>
+          만든 전략은 이 브라우저에만 저장됩니다 — 다른 기기에서는 보이지 않습니다
+        </div>
         <div style={{ ...F.muted, marginBottom: SP.md }}>AI 생성 또는 직접 생성 탭에서 만들어보세요</div>
         <button onClick={onNew}
           style={{
@@ -282,6 +351,7 @@ function StrategyList({
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: SP.sm }}>
+      {storageWarning}
       <button onClick={onNew}
         style={{
           ...buttonStyle('ghost', 'md'),

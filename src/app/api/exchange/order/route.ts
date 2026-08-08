@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
+import { killSwitchGate } from '@/lib/risk/killSwitch';
 import { placeOrderBinance } from '@/lib/exchanges/binance';
 import { placeOrderGate } from '@/lib/exchanges/gate';
 
@@ -82,6 +83,19 @@ export async function POST(req: NextRequest) {
   }
   if (conn.perm_trading !== true) {
     return NextResponse.json({ error: 'no_trading_permission', message: '거래 권한이 없는 키입니다.' }, { status: 403 });
+  }
+
+  // ── 가드 3.5: 킬 스위치 ───────────────────────────────────
+  //
+  // **여기 없었다.** 이 라우트는 `AutoTradeEngine`이 실주문을 낼 때
+  // 부르는 곳인데, 킬스위치를 아무도 물어보지 않았다. 사용자가 계좌를
+  // 지키려고 킬스위치를 켜도 자동매매는 계속 주문을 냈다.
+  //
+  // 킬스위치가 일곱 경로 중 둘에서만 돌면, 그건 없는 것보다 나쁘다 —
+  // 사용자는 다 멈춘 줄 알고 화면을 닫는다.
+  const ksg = await killSwitchGate(sb, connectionId);
+  if (!ksg.allowed) {
+    return NextResponse.json({ error: ksg.error, message: ksg.message }, { status: ksg.status });
   }
 
   // ── 가드 4: 1회 주문 금액 상한 ────────────────────────────

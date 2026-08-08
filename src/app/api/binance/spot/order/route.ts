@@ -67,6 +67,19 @@ export async function POST(req: NextRequest) {
   // 검사를 물리면 정작 팔아서 현금을 만들려는 주문이 막힌다.
   const spotSide = String(body.side || '').toUpperCase();
   const isSell = spotSide === 'SELL';
+
+  // ── 킬 스위치 ──
+  //
+  // **여기 없었다.** 킬스위치가 일곱 주문 경로 중 둘에서만 돌면 그건
+  // 없는 것보다 나쁘다 — 사용자는 다 멈춘 줄 알고 화면을 닫는다.
+  {
+    const { killSwitchGate } = await import('@/lib/risk/killSwitch');
+    const ksg = await killSwitchGate(sb, body.connectionId);
+    if (!ksg.allowed) {
+      return NextResponse.json({ error: ksg.error, message: ksg.message }, { status: ksg.status });
+    }
+  }
+
   // 점검을 통과해서 나간 것과 **사용자가 넘겨서 나간 것**은 다르다.
   let overrideNote: string | null = null;
   let safetyLogError: string | null = null;

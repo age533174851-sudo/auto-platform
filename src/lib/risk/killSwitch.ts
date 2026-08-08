@@ -182,12 +182,63 @@ export async function logKillEvent(sb: any, userId: string, connectionId: string
 }
 
 // webhook용 빠른 확인 (connectionId만으로, active 여부) — 테이블 없거나 미설정이면 fail-open(false)
-export async function isKillSwitchActive(sb: any, connectionId: string): Promise<{ active: boolean; reason: string | null }> {
+/**
+ * 킬 스위치가 켜져 있는가.
+ *
+ * **읽기 실패를 '꺼져 있음'으로 치지 않는다.**
+ *
+ * 예전에는 `catch { return { active: false } }`였다. DB가 한 번 흔들리면
+ * 킬 스위치가 조용히 없어지고, 화면에는 여전히 '발동 중'이라고 떠 있는
+ * 채로 주문이 나간다. **막으라고 만든 장치가 못 읽는 순간 사라지는 것이
+ * 가장 나쁘다** — 계좌를 지키라고 켠 것인데 정작 지켜야 할 때 없다.
+ *
+ * 그래서 세 번째 사실을 돌려준다:
+ *
+ *   active === true    켜져 있다. 막아라
+ *   active === false + readOk === true    꺼져 있다. 통과
+ *   readOk === false   **확인하지 못했다.** 이때 통과시킬지는 부르는
+ *                      쪽이 정하되, 주문 경로에서는 막아야 한다 —
+ *                      못 여는 것은 불편이고 못 닫는 것은 사고다
+ *
+ * 행이 없는 것(`!data`)은 실패가 아니다 — 킬 스위치를 한 번도 안 켠
+ * 계좌다. 그건 정상적으로 꺼진 상태다.
+ */
+export async function isKillSwitchActive(
+  sb: any, connectionId: string,
+): Promise<{ active: boolean; reason: string | null; readOk: boolean }> {
   try {
     const { data, error } = await sb.from('kill_switch_state').select('active,trigger_reason').eq('connection_id', connectionId).limit(1).maybeSingle();
-    if (error || !data) return { active: false, reason: null };
-    return { active: !!data.active, reason: data.trigger_reason ?? null };
-  } catch { return { active: false, reason: null }; }
+    if (error) return { active: false, reason: String(error.message || error), readOk: false };
+    if (!data) return { active: false, reason: null, readOk: true };
+    return { active: !!data.active, reason: data.trigger_reason ?? null, readOk: true };
+  } catch (e: any) {
+    return { active: false, reason: String(e?.message || e), readOk: false };
+  }
+}
+
+/**
+ * 주문을 내도 되는가 — 킬 스위치 관점에서.
+ *
+ * **`isKillSwitchActive`를 직접 부르지 말고 이걸 부른다.** 직접 부르면
+ * `if (ks.active)` 한 줄로 끝내게 되고, 그러면 `readOk === false`가
+ * 통과로 새어 나간다. 그 실수를 한 곳에서만 막는다.
+ */
+export async function killSwitchGate(
+  sb: any, connectionId: string,
+): Promise<{ allowed: boolean; status: number; error: string; message: string }> {
+  const ks = await isKillSwitchActive(sb, connectionId);
+
+  if (!ks.readOk) {
+    return { allowed: false, status: 503, error: 'kill_switch_unknown',
+      message: '킬스위치 상태를 확인하지 못해 주문을 막았습니다 —'
+        + ' 확인하지 못한 것은 꺼진 것이 아닙니다'
+        + (ks.reason ? ` (${ks.reason})` : '') };
+  }
+  if (ks.active) {
+    return { allowed: false, status: 423, error: 'kill_switch_active',
+      message: `🛑 킬스위치 발동 중 (${ks.reason || '계좌 보호'})` };
+  }
+  return { allowed: true, status: 200, error: '', message: '' };
 }
 
 // ── 분산 lock (Vercel ↔ Worker 동시 Close All 방지) ─────────────

@@ -251,6 +251,12 @@ export async function POST(req: NextRequest) {
       // 킬스위치 가드: active면 신규 진입 차단 (reduce-only 종료는 허용)
       const { isKillSwitchActive } = await import('@/lib/risk/killSwitch');
       const ks = await isKillSwitchActive(sb, body.connectionId);
+      // **상태를 못 읽었으면 꺼진 것으로 치지 않는다.** 청산(reduceOnly)은
+      // 계속 허용한다 — 못 여는 것은 불편이고 못 닫는 것은 사고다.
+      if (!ks.readOk && !body.reduceOnly) {
+        throw new Error('킬스위치 상태를 확인하지 못해 신규 진입을 막았습니다 —'
+          + ' 확인하지 못한 것은 꺼진 것이 아닙니다');
+      }
       if (ks.active && !body.reduceOnly) {
         entry.status = 'blocked_killswitch';
         signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();

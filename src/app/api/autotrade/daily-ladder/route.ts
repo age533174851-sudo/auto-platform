@@ -397,6 +397,18 @@ export async function POST(req: NextRequest) {
   try {
     if (!body.connectionId) throw new Error('connectionId가 없어 주문할 수 없습니다');
 
+    // ── 킬 스위치 ──
+    //
+    // **여기 없었다.** 이 라우트는 liveTradingGate는 물어보는데
+    // 킬스위치는 안 물어봤다. 둘은 다른 장치다 — liveTradingGate는
+    // "이 배포에서 실거래를 허용하는가"이고, 킬스위치는 "이 계좌를
+    // 지금 멈춰라"다. 사용자가 누르는 건 뒤엣것이다.
+    {
+      const { killSwitchGate } = await import('@/lib/risk/killSwitch');
+      const ksg = await killSwitchGate(sb, body.connectionId);
+      if (!ksg.allowed) throw new Error(ksg.message);
+    }
+
     // ── 점검용 가상 계획 ──
     //
     // 진입 신호가 없으면 파이프라인은 계획을 만들지 않는다. 그러면 손절가·
