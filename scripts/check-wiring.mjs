@@ -86,8 +86,16 @@ const ALLOW = new Map([
     + '파일 머리말에 "모든 AI 호출은 이 계층을 거쳐야 비용이 통제된다"고 '
     + '적혀 있는데 부르는 곳이 0곳이다 — 즉 할당량 확인·캐시 조회·사용량 '
     + '기록이 전부 안 돌고 있다. 429가 자주 나는 것과도 무관하지 않다. '
-    + '막는 것: /api/ai/route.ts가 callAI를 직접 부르고 있어, 이 계층을 '
-    + '끼우려면 라우트의 호출 경로를 통째로 바꿔야 한다(별도 작업)'],
+    + '세어 보니 AI를 직접 부르는 라우트가 13개다 (ai, ai/news/analyze, '
+    + 'daily-briefing, hub, strategies/parse, translate, intel, '
+    + 'briefing/analyze-news, news/analyze, diagnostics, asset-analysis …). '
+    + '전부 이 계층을 지나가지 않는다. 표(ai_usage·ai_cache)는 011에 이미 있다. '
+    + '막는 것은 기술이 아니라 **결정이다**: gateAiRequest는 할당량이 다 되면 '
+    + 'proceed:false를 돌려주고 기본 plan이 free다. 그대로 배선하면 지금까지 '
+    + '제한 없이 쓰이던 AI가 무료 할당량에서 막히기 시작한다 — 비용을 통제하는 '
+    + '대신 기능이 멎는 것이라, 어느 쪽을 원하는지는 사용자가 정할 일이다. '
+    + '덧붙여 getUsedCredits는 조회 실패 시 0을 돌려준다(= 항상 통과). '
+    + '붙일 때 그것부터 고쳐야 한다 — 못 읽은 것은 안 쓴 것이 아니다'],
 ]);
 
 const files = [];

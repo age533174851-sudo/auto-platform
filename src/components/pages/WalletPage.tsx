@@ -6,14 +6,22 @@
 // 홈에 계좌 정보를 다 몰아넣으면 홈이 관리자 화면이 된다. 그래서 지갑을
 // 독립된 화면으로 뺀다 — 홈은 그대로 두고, 하단에서 바로 들어온다.
 //
-// 이 화면의 규칙 셋
+// 이 화면의 규칙 넷
 // ─────────────────
 //   1. **환경을 절대 섞지 않는다.** 실전·테스트넷·모의는 더할 수 없다
 //   2. **입금은 수익이 아니다.** 자산이 는 것과 번 것은 다르다
 //   3. **못 읽은 것을 0으로 그리지 않는다.** 0은 '없다'이고 실패는 '모른다'다
+//   4. **없는 과거를 그리지 않는다.** 지금 잔고로 곡선을 역산하면
+//      입출금이 빠져서, 넣은 날이 번 날로 그려진다
 //
-// 판정은 전부 `lib/portfolio/wallet`에 있다. 화면 안에서 합산 규칙을
+// 판정은 전부 `lib/portfolio/*`에 있다. 화면 안에서 합산·비율 규칙을
 // 정하면 "왜 이 숫자가 나왔지"를 테스트할 수 없다.
+//
+// 화면 순서는 바이낸스 Assets를 따른다
+// ────────────────────────────────────
+//   총자산 → 오늘 손익 → 그래프 → 빠른 액션 → 자산 배분 → 보유자산
+//
+// 매일 보는 것이 위다. 진단에 가까운 것일수록 아래로 내린다.
 import React, { useState } from 'react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -24,18 +32,33 @@ import {
   equityChangeOf, todayPnlLabel,
   type WalletEnv, type WalletTabId, type Bucket,
 } from '@/lib/portfolio/wallet';
+import {
+  RANGES, rangeOf, curveOf, dailyRowsOf, type RangeId,
+} from '@/lib/portfolio/equityCurve';
+import {
+  cellOf, futuresRowsOf, syncTextOf, spotRowsOf,
+  strategyTotalOf, allocationOf, accountsForEnv, accountsNoteOf,
+  type AccountOption, type SpotAsset, type StrategyAccount, type LongtermHolding,
+} from '@/lib/portfolio/walletDetail';
 
 const ENVS: WalletEnv[] = ['LIVE', 'TESTNET', 'MOCK'];
+const CURRENCIES = ['USDT', 'USD', 'KRW'] as const;
+type Currency = typeof CURRENCIES[number];
+
+/** 아직 아무것도 못 읽었다는 뜻의 칸 */
+const pending = () => cellOf(null, 'SYNCING');
 
 export default function WalletPage() {
   const [env, setEnv] = useState<WalletEnv>('LIVE');
   const [tab, setTab] = useState<WalletTabId>('overview');
+  const [range, setRange] = useState<RangeId>('30D');
+  const [cur, setCur] = useState<Currency>('USDT');
+  const [account, setAccount] = useState('');
 
-  // ── 아직 아무것도 안 읽는다 ──
+  // ── 아직 거래소를 안 붙였다 ──
   //
-  // 거래소 조회를 붙이기 전이다. **그렇다고 0을 그리지 않는다** — 0은
-  // '없다'이고 지금은 '모른다'다. 잔고 0을 본 사용자는 자기 돈이
-  // 사라졌다고 믿는다.
+  // **그렇다고 0을 그리지 않는다.** 0은 '없다'이고 지금은 '모른다'다.
+  // 잔고 0을 본 사용자는 자기 돈이 사라졌다고 믿는다.
   //
   // 이 화면이 지금 정직하게 할 수 있는 일은 "아직 안 붙였다"고 말하는
   // 것뿐이고, 그게 그럴듯한 숫자를 그리는 것보다 낫다.
@@ -50,24 +73,67 @@ export default function WalletPage() {
   const change = equityChangeOf(null, {});
   const pnl = todayPnlLabel(change);
   const cross = totalAcrossEnvs();
-  // 이 탭에서 보여 줄 칸. **총자산은 탭과 무관하게 전부 더한다** —
-  // 선물 탭에 있다고 총자산이 선물만 세면, 탭을 옮길 때마다 총자산이
-  // 달라져서 어느 것이 진짜인지 알 수 없다.
   const shown = bucketsForTab(tab, total.buckets);
 
+  // ── 그래프 ──
+  //
+  // 찍어 둔 시점(account_equity_snapshots)이 아직 없다. 그래서 곡선도
+  // 없다 — **그게 정직한 상태다.** 오늘 표를 만들어도 어제 값은 생기지 않는다.
+  const snapshots: any[] = [];
+  const curve = curveOf(snapshots, range, Date.now(), env);
+  const daily = dailyRowsOf(snapshots);
+
+  // ── 자산 배분 ──
+  const alloc = allocationOf([
+    { label: '현물', cell: pending() },
+    { label: '선물', cell: pending() },
+    { label: '장기투자', cell: pending() },
+    { label: '현금', cell: pending() },
+  ]);
+
+  // ── 계좌 ──
+  const allAccounts: AccountOption[] = [];
+  const accounts = accountsForEnv(env, allAccounts);
+  const accountsNote = accountsNoteOf(accounts);
+
+  // ── 탭별 자료 ──
+  const futuresAccounts: Array<{ name: string; rows: ReturnType<typeof futuresRowsOf>; sync: string }> = [];
+  const spot: SpotAsset[] = spotRowsOf([]);
+  const strategies: StrategyAccount[] = [];
+  const stratTotal = strategyTotalOf(strategies);
+  const longterm: LongtermHolding[] = [];
+
   const envColor = (e: WalletEnv) => e === 'LIVE' ? T.red : e === 'TESTNET' ? T.ylw : T.muted;
+  const muted: React.CSSProperties = { color: T.muted, fontSize: 9.5, lineHeight: 1.6 };
+  const numFont: React.CSSProperties = { fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums' };
+
+  /** 못 읽은 값은 회색 + 사유. 여기서 0을 그리면 안 된다 */
+  const cellText = (c: { value: number | null; text: string }) =>
+    c.value == null ? c.text : c.value.toLocaleString('ko-KR');
+
+  const sectionTitle = (s: string) => (
+    <div style={{ color: T.txt, fontSize: 12, fontWeight: 800, marginBottom: 8 }}>{s}</div>
+  );
+
+  /** 아직 안 붙인 목록 자리 — 왜 비었는지까지 적는다 */
+  const emptyBox = (what: string, why: string) => (
+    <div style={{ ...muted, padding: '10px 0' }}>
+      <b style={{ color: T.txt }}>{what}</b>
+      <div style={{ marginTop: 3 }}>{why}</div>
+    </div>
+  );
 
   return (
     <div>
       {/* ── 환경 전환 ──
           여기가 이 화면에서 가장 중요한 줄이다. 실전 화면에 모의 총자산이
           섞여 있던 것이 이 화면을 만든 이유다. */}
-      <div style={{ display: 'flex', gap: 5, marginBottom: 10 }}>
+      <div style={{ display: 'flex', gap: 5, marginBottom: 8 }}>
         {ENVS.map(e => {
           const on = env === e;
           const c = envColor(e);
           return (
-            <button key={e} onClick={() => setEnv(e)} style={{
+            <button key={e} onClick={() => { setEnv(e); setAccount(''); }} style={{
               flex: 1, minHeight: 38, borderRadius: 10, cursor: 'pointer',
               background: on ? A(c, '18') : 'transparent',
               color: on ? c : T.muted,
@@ -78,38 +144,64 @@ export default function WalletPage() {
         })}
       </div>
 
-      <div style={{ color: envColor(env), fontSize: 9.5, marginBottom: 12, lineHeight: 1.55 }}>
+      <div style={{ color: envColor(env), fontSize: 9.5, marginBottom: 10, lineHeight: 1.55 }}>
         {ENV_NOTE[env]}
       </div>
 
-      {/* ── 총자산 ── */}
+      {/* ── 계좌 선택 ──
+          **다른 환경 계좌는 목록에 두지 않는다.** 보이면 고를 수 있다고
+          읽히고, 고르는 순간 실전 화면에 테스트넷 잔고가 뜬다. */}
+      <div style={{ display: 'flex', gap: 5, marginBottom: 10, overflowX: 'auto', alignItems: 'center' }}>
+        <button onClick={() => setAccount('')} style={{
+          flexShrink: 0, minHeight: 30, padding: '5px 10px', borderRadius: 8, cursor: 'pointer',
+          background: account === '' ? T.acg : 'transparent',
+          color: account === '' ? T.acl : T.muted,
+          border: `1px solid ${account === '' ? T.acl : T.border}`, fontSize: 10, fontWeight: 700,
+        }}>전체 계좌</button>
+        {accounts.map(a => (
+          <button key={a.key} onClick={() => setAccount(a.key)} style={{
+            flexShrink: 0, minHeight: 30, padding: '5px 10px', borderRadius: 8, cursor: 'pointer',
+            background: account === a.key ? T.acg : 'transparent',
+            color: account === a.key ? T.acl : T.muted,
+            border: `1px solid ${account === a.key ? T.acl : T.border}`, fontSize: 10, fontWeight: 700,
+          }}>{a.label}</button>
+        ))}
+      </div>
+      {accountsNote && <div style={{ ...muted, color: T.ylw, marginBottom: 10 }}>{accountsNote}</div>}
+
+      {/* ── 1. 총자산 + 2. 오늘 손익 ── */}
       <Card style={{ padding: '16px', marginBottom: 10 }}>
-        <div style={{ color: T.muted, fontSize: 10, marginBottom: 4 }}>
-          총 평가자산 · {ENV_LABEL[env]}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <span style={{ color: T.muted, fontSize: 10 }}>총 평가자산 · {ENV_LABEL[env]}</span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 3 }}>
+            {CURRENCIES.map(c => (
+              <button key={c} onClick={() => setCur(c)} style={{
+                minHeight: 22, padding: '2px 7px', borderRadius: 6, cursor: 'pointer',
+                background: cur === c ? T.acg : 'transparent',
+                color: cur === c ? T.acl : T.muted,
+                border: `1px solid ${cur === c ? T.acl : T.border}`, fontSize: 9, fontWeight: 700,
+              }}>{c}</button>
+            ))}
+          </div>
         </div>
         <div style={{
           color: total.total == null ? T.muted : T.txt,
-          fontSize: total.total == null ? 16 : 26, fontWeight: 900,
-          fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums',
+          fontSize: total.total == null ? 16 : 26, fontWeight: 900, ...numFont,
         }}>
-          {total.total == null ? '확인 불가' : total.total.toLocaleString('ko-KR')}
+          {total.total == null ? '확인 불가' : `${total.total.toLocaleString('ko-KR')} ${cur}`}
         </div>
         {total.note && (
-          <div style={{ color: T.ylw, fontSize: 9.5, marginTop: 6, lineHeight: 1.55 }}>
-            {total.note}
-          </div>
+          <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{total.note}</div>
         )}
 
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 10, paddingTop: 10 }}>
           <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>오늘 손익</div>
           <div style={{
             color: pnl.headline === '확인 불가' ? T.muted : T.txt,
-            fontSize: 15, fontWeight: 800, fontFamily: 'Inter,monospace',
+            fontSize: 15, fontWeight: 800, ...numFont,
           }}>{pnl.headline}</div>
           {pnl.caution && (
-            <div style={{ color: T.ylw, fontSize: 9.5, marginTop: 4, lineHeight: 1.55 }}>
-              {pnl.caution}
-            </div>
+            <div style={{ ...muted, color: T.ylw, marginTop: 4 }}>{pnl.caution}</div>
           )}
         </div>
       </Card>
@@ -117,68 +209,62 @@ export default function WalletPage() {
       {/* **환경을 합칠 수 없다는 사실을 화면에 남긴다.**
           이 줄이 없으면 "왜 전체 합계가 없지"를 사용자가 혼자 추측한다. */}
       <div style={{
-        background: T.alt, borderRadius: 10, padding: '8px 10px', marginBottom: 10,
-        color: T.muted, fontSize: 9.5, lineHeight: 1.6,
-      }}>
-        {cross.reason}
-      </div>
+        background: T.alt, borderRadius: 10, padding: '8px 10px', marginBottom: 10, ...muted,
+      }}>{cross.reason}</div>
 
-      {/* ── 탭 ── */}
-      <div style={{ display: 'flex', gap: 5, marginBottom: 10, overflowX: 'auto' }}>
-        {WALLET_TABS.map(t => {
-          const on = tab === t.id;
-          return (
-            <button key={t.id} onClick={() => setTab(tabOf(t.id))} style={{
-              flexShrink: 0, minHeight: 34, padding: '6px 11px', borderRadius: 9,
-              cursor: 'pointer',
-              background: on ? T.acg : 'transparent',
-              color: on ? T.acl : T.muted,
-              border: `1px solid ${on ? T.acl : T.border}`,
-              fontSize: 11, fontWeight: 700,
-            }}>{t.label}</button>
-          );
-        })}
-      </div>
+      {/* ── 3. 자산 그래프 ──
+          **지금 잔고로 과거를 역산하지 않는다.** 입출금이 빠지면 100만원을
+          넣은 날이 100만원 번 날로 그려지고, 그 그림은 틀렸는데 매끄럽다. */}
+      <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 10, overflowX: 'auto' }}>
+          {RANGES.map(r => {
+            const on = range === r.id;
+            return (
+              <button key={r.id} onClick={() => setRange(rangeOf(r.id))} style={{
+                flexShrink: 0, minHeight: 28, padding: '4px 9px', borderRadius: 7, cursor: 'pointer',
+                background: on ? T.acg : 'transparent',
+                color: on ? T.acl : T.muted,
+                border: `1px solid ${on ? T.acl : T.border}`, fontSize: 10, fontWeight: 700,
+              }}>{r.label}</button>
+            );
+          })}
+        </div>
 
-      <div style={{ color: T.muted, fontSize: 9.5, marginBottom: 10, lineHeight: 1.55 }}>
-        {WALLET_TABS.find(t => t.id === tab)?.desc}
-      </div>
-
-      {/* ── 칸별 잔고 ──
-          **탭을 누르면 목록이 바뀌어야 한다.** 처음 붙일 때 설명 줄만
-          바꾸고 목록은 그대로였는데, 눌러도 아무것도 안 변하는 탭은
-          사용자에게 화면이 고장 난 것으로 보인다. */}
-      <Card style={{ padding: '12px 14px', marginBottom: 10 }}>
-        {shown.length === 0 && (
-          <div style={{ color: T.muted, fontSize: 10.5, padding: '6px 0', lineHeight: 1.6 }}>
-            이 환경에 <b style={{ color: T.txt }}>{WALLET_TABS.find(t => t.id === tab)?.label}</b> 계좌가 없습니다 —
-            잔고가 0이라는 뜻이 아니라 <b style={{ color: T.ylw }}>연결된 계좌가 없다</b>는 뜻입니다.
+        {curve.hasData ? (
+          <svg viewBox="0 0 300 90" preserveAspectRatio="none" style={{ width: '100%', height: 90 }}>
+            {/* 구간마다 따로 그린다 — 구멍을 이으면 그 동안 자산이
+                매끄럽게 변한 것처럼 보인다. */}
+            {curve.segments.map((seg, i) => {
+              const lo = curve.min as number, hi = curve.max as number;
+              const span = hi - lo || 1;
+              const t0 = seg.points[0].atMs;
+              const t1 = seg.points[seg.points.length - 1].atMs;
+              const tspan = t1 - t0 || 1;
+              const d = seg.points.map((p, j) => {
+                const x = ((p.atMs - t0) / tspan) * 300;
+                const y = 90 - ((p.equity - lo) / span) * 80 - 5;
+                return `${j === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+              }).join(' ');
+              return <path key={i} d={d} fill="none" stroke={T.acl} strokeWidth={2} />;
+            })}
+          </svg>
+        ) : (
+          <div style={{
+            height: 90, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: T.alt, borderRadius: 8, padding: '10px 14px',
+          }}>
+            <div style={{ ...muted, textAlign: 'center' }}>{curve.note}</div>
           </div>
         )}
-        {shown.map(b => (
-          <div key={b.id} style={{
-            display: 'flex', alignItems: 'baseline', gap: 8, padding: '7px 0',
-            borderBottom: `1px solid ${T.border}`,
-          }}>
-            <span style={{ color: T.sub, fontSize: 11, flex: 1 }}>{b.label}</span>
-            <span style={{
-              color: b.amount.value == null ? T.muted : T.txt,
-              fontSize: 11.5, fontWeight: 800,
-              fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums',
-            }}>{b.amount.text}</span>
-          </div>
-        ))}
-        <div style={{ color: T.muted, fontSize: 9.5, marginTop: 8, lineHeight: 1.6 }}>
-          거래소 조회를 아직 붙이지 않았습니다. <b style={{ color: T.ylw }}>0으로 그리지 않는 이유</b>는
-          0이 &lsquo;없다&rsquo;이고 지금은 &lsquo;모른다&rsquo;이기 때문입니다 —
-          잔고 0을 본 사용자는 자기 돈이 사라졌다고 믿습니다.
-        </div>
+        {curve.hasData && curve.note && (
+          <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{curve.note}</div>
+        )}
       </Card>
 
-      {/* ── 빠른 액션 ──
-          **없는 기능을 있는 것처럼 두지 않는다.** 출금은 구현되지 않았고,
-          누르면 아무 일도 안 일어나는 버튼은 있는 것보다 나쁘다. */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 6 }}>
+      {/* ── 4. 빠른 액션 ──
+          **없는 기능을 있는 것처럼 두지 않는다.** 누르면 아무 일도
+          안 일어나는 버튼은 있는 것보다 나쁘다. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 6, marginBottom: 6 }}>
         {['입금', '출금', '이체', '거래'].map(label => (
           <button key={label} disabled style={{
             minHeight: 40, borderRadius: 10, cursor: 'default',
@@ -187,10 +273,214 @@ export default function WalletPage() {
           }}>{label}</button>
         ))}
       </div>
-      <div style={{ color: T.muted, fontSize: 9, marginTop: 6, lineHeight: 1.55 }}>
+      <div style={{ ...muted, marginBottom: 10 }}>
         입금·출금·이체는 아직 구현되지 않았습니다 — 눌러도 아무 일이 없는 버튼을
         만드는 것보다 잠가 두는 쪽이 낫습니다.
       </div>
+
+      {/* ── 5. 자산 배분 ──
+          **한 조각이라도 못 읽으면 비율을 안 낸다.** 분모가 작아져서
+          나머지가 실제보다 커 보이고, 그 그림에는 틀렸다는 표시가 없다. */}
+      <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+        {sectionTitle('자산 배분')}
+        {alloc.slices.map(s => (
+          <div key={s.label} style={{ marginBottom: 7 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              <span style={{ color: T.sub, fontSize: 11, flex: 1 }}>{s.label}</span>
+              <span style={{
+                color: s.pct == null ? T.muted : T.txt, fontSize: 11, fontWeight: 800, ...numFont,
+              }}>{s.pct == null ? '—' : `${s.pct.toFixed(1)}%`}</span>
+            </div>
+            <div style={{ height: 4, background: T.alt, borderRadius: 2, marginTop: 3, overflow: 'hidden' }}>
+              {s.pct != null && (
+                <div style={{ width: `${Math.min(100, s.pct)}%`, height: '100%', background: T.acl }} />
+              )}
+            </div>
+          </div>
+        ))}
+        {alloc.note && <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{alloc.note}</div>}
+      </Card>
+
+      {/* ── 6. 보유자산 (탭) ── */}
+      <div style={{ display: 'flex', gap: 5, marginBottom: 8, overflowX: 'auto' }}>
+        {WALLET_TABS.map(t => {
+          const on = tab === t.id;
+          return (
+            <button key={t.id} onClick={() => setTab(tabOf(t.id))} style={{
+              flexShrink: 0, minHeight: 34, padding: '6px 11px', borderRadius: 9, cursor: 'pointer',
+              background: on ? T.acg : 'transparent',
+              color: on ? T.acl : T.muted,
+              border: `1px solid ${on ? T.acl : T.border}`, fontSize: 11, fontWeight: 700,
+            }}>{t.label}</button>
+          );
+        })}
+      </div>
+      <div style={{ ...muted, marginBottom: 10 }}>
+        {WALLET_TABS.find(t => t.id === tab)?.desc}
+      </div>
+
+      {/* 개요 — 칸별 잔고 */}
+      {tab === 'overview' && (
+        <Card style={{ padding: '12px 14px', marginBottom: 10 }}>
+          {shown.map(b => (
+            <div key={b.id} style={{
+              display: 'flex', alignItems: 'baseline', gap: 8, padding: '7px 0',
+              borderBottom: `1px solid ${T.border}`,
+            }}>
+              <span style={{ color: T.sub, fontSize: 11, flex: 1 }}>{b.label}</span>
+              <span style={{
+                color: b.amount.value == null ? T.muted : T.txt,
+                fontSize: 11.5, fontWeight: 800, ...numFont,
+              }}>{b.amount.text}</span>
+            </div>
+          ))}
+          <div style={{ ...muted, marginTop: 8 }}>
+            거래소 조회를 아직 붙이지 않았습니다. <b style={{ color: T.ylw }}>0으로 그리지 않는 이유</b>는
+            0이 &lsquo;없다&rsquo;이고 지금은 &lsquo;모른다&rsquo;이기 때문입니다 —
+            잔고 0을 본 사용자는 자기 돈이 사라졌다고 믿습니다.
+          </div>
+        </Card>
+      )}
+
+      {/* 선물 — 거래소별 한 장씩 */}
+      {tab === 'futures' && (
+        <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+          {futuresAccounts.length === 0
+            ? emptyBox('연결된 선물 계좌가 없습니다',
+                '잔고가 0이라는 뜻이 아니라 이 환경에 연결된 계좌가 없다는 뜻입니다. '
+                + '거래소를 연결하면 지갑잔고·주문가능·사용증거금·유지증거금·미실현/실현손익·'
+                + '증거금비율을 거래소별로 나눠 보여 줍니다.')
+            : futuresAccounts.map(a => (
+              <div key={a.name} style={{ marginBottom: 12 }}>
+                {sectionTitle(a.name)}
+                {a.rows.map(r => (
+                  <div key={r.label} style={{
+                    display: 'flex', alignItems: 'baseline', gap: 8, padding: '5px 0',
+                    borderBottom: `1px solid ${T.border}`,
+                  }}>
+                    <span style={{ color: T.sub, fontSize: 10.5, flex: 1 }}>{r.label}</span>
+                    <span style={{
+                      color: r.cell.value == null ? T.muted : T.txt,
+                      fontSize: 11, fontWeight: 800, ...numFont,
+                    }}>{cellText(r.cell)}</span>
+                  </div>
+                ))}
+                <div style={{ ...muted, marginTop: 5 }}>{a.sync}</div>
+              </div>
+            ))}
+        </Card>
+      )}
+
+      {/* 현물 — 코인별 */}
+      {tab === 'spot' && (
+        <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+          {spot.length === 0
+            ? emptyBox('보유 중인 현물이 없습니다',
+                '조회를 아직 붙이지 않았습니다 — 잔고가 0이라는 뜻이 아닙니다. '
+                + '붙이면 코인별 수량·주문가능·잠김·평가액·24시간 변동률을 보여 줍니다.')
+            : spot.map(a => (
+              <div key={a.symbol} style={{
+                display: 'flex', alignItems: 'baseline', gap: 8, padding: '8px 0',
+                borderBottom: `1px solid ${T.border}`,
+              }}>
+                <span style={{ color: T.txt, fontSize: 11.5, fontWeight: 800, minWidth: 52 }}>{a.symbol}</span>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1, ...numFont }}>
+                  {cellText(a.quantity)}
+                </span>
+                <span style={{
+                  color: a.valuation.value == null ? T.muted : T.txt,
+                  fontSize: 11, fontWeight: 800, ...numFont,
+                }}>{cellText(a.valuation)}</span>
+              </div>
+            ))}
+        </Card>
+      )}
+
+      {/* 전략계좌 — TRAIGO가 바이낸스보다 더 보여 주는 부분 */}
+      {tab === 'strategy' && (
+        <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+          <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>총 전략 자산</div>
+          <div style={{
+            color: stratTotal.total == null ? T.muted : T.txt,
+            fontSize: 18, fontWeight: 900, marginBottom: 8, ...numFont,
+          }}>
+            {stratTotal.total == null ? '확인 불가' : stratTotal.total.toLocaleString('ko-KR')}
+          </div>
+          {stratTotal.note && <div style={{ ...muted, color: T.ylw, marginBottom: 8 }}>{stratTotal.note}</div>}
+
+          {strategies.length === 0
+            ? emptyBox('전략계좌가 없습니다',
+                '전략별 배정 자금·현재 자산·실현/미실현손익·수수료·펀딩·수익률·MDD·'
+                + '보유 포지션을 여기서 나눠 봅니다. 배정 자금을 계산하는 곳이 아직 없어 '
+                + '전략별 자금이 전부 "—"입니다 — 0으로 적으면 "돈을 안 맡겼다"로 읽히고, '
+                + '그건 "아직 계산 안 됨"과 다릅니다.')
+            : strategies.map(s => (
+              <div key={s.strategyName} style={{
+                background: T.alt, borderRadius: 8, padding: '9px 11px', marginBottom: 6,
+              }}>
+                <div style={{ color: T.txt, fontSize: 11.5, fontWeight: 800, marginBottom: 3 }}>
+                  {s.strategyName}
+                </div>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 9.5, color: T.muted }}>
+                  <span>자산 <b style={{ color: T.txt }}>{cellText(s.currentEquity)}</b></span>
+                  <span>수익률 <b style={{ color: T.txt }}>{cellText(s.returnPct)}</b></span>
+                  <span>MDD <b style={{ color: T.txt }}>{cellText(s.mddPct)}</b></span>
+                </div>
+              </div>
+            ))}
+        </Card>
+      )}
+
+      {/* 장기투자 — 주식·ETF */}
+      {tab === 'longterm' && (
+        <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+          {longterm.length === 0
+            ? emptyBox('장기투자 보유 종목이 없습니다',
+                '주식·ETF 계좌를 연결하면 종목별 수량·평단·평가액·미실현손익·배당·비중을 '
+                + '여기서 봅니다. 코인과 같은 화면에 섞지 않는 이유는 세금·거래시간·'
+                + '결제주기가 전부 다르기 때문입니다.')
+            : longterm.map(h => (
+              <div key={h.symbol} style={{
+                display: 'flex', alignItems: 'baseline', gap: 8, padding: '8px 0',
+                borderBottom: `1px solid ${T.border}`,
+              }}>
+                <span style={{ color: T.txt, fontSize: 11.5, fontWeight: 800, minWidth: 60 }}>{h.symbol}</span>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1, ...numFont }}>{cellText(h.quantity)}</span>
+                <span style={{
+                  color: h.marketValue.value == null ? T.muted : T.txt,
+                  fontSize: 11, fontWeight: 800, ...numFont,
+                }}>{cellText(h.marketValue)}</span>
+              </div>
+            ))}
+        </Card>
+      )}
+
+      {/* ── 일별 손익 ──
+          **자산 차이를 손익이라고 적지 않는다.** 어제보다 100만원 늘었어도
+          그게 입금이면 번 것은 0원이다. */}
+      <Card style={{ padding: '14px 16px', marginBottom: 10 }}>
+        {sectionTitle('일별 손익')}
+        {daily.length === 0
+          ? emptyBox('아직 기록된 날이 없습니다',
+              '날짜별 손익은 그때그때 찍어 둔 자산 시점에서 나옵니다. '
+              + '지금 잔고로 과거를 되돌려 만들지 않습니다 — 입출금이 빠지면 '
+              + '돈을 넣은 날이 번 날로 기록됩니다.')
+          : daily.slice(0, 30).map(d => (
+            <div key={d.day} style={{
+              display: 'flex', alignItems: 'baseline', gap: 8, padding: '6px 0',
+              borderBottom: `1px solid ${T.border}`,
+            }}>
+              <span style={{ color: T.sub, fontSize: 10.5, flex: 1 }}>{d.day}</span>
+              <span style={{
+                color: d.pnl == null ? T.muted : d.pnl >= 0 ? T.grn : T.red,
+                fontSize: 11, fontWeight: 800, ...numFont,
+              }}>
+                {d.pnl == null ? '확인 불가' : `${d.pnl >= 0 ? '+' : ''}${d.pnl.toLocaleString('ko-KR')}`}
+              </span>
+              {d.hadFlow && <span style={{ color: T.ylw, fontSize: 9 }}>입출금</span>}
+            </div>
+          ))}
+      </Card>
     </div>
   );
 }
