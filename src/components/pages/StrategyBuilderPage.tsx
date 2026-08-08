@@ -9,6 +9,7 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
+import { aiResultView } from '@/lib/ai/resultSource';
 import { ErrorBoundary } from './ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
@@ -457,13 +458,56 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
       {/* 결과 미리보기 */}
       {result && (
         <div style={cardStyle({ background: A(T.acl,'08'), borderColor: A(T.acl,'40') })}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: SP.sm }}>
-            <CheckCircle2 size={16} strokeWidth={IC_STROKE} color={T.acl}/>
-            <span style={{ ...F.section, color: T.acl }}>AI 분석 결과</span>
-            <span style={{ marginLeft: 'auto', ...F.muted }}>
-              신뢰도 {Math.round((result.confidence ?? 0) * 100)}% · {result.source}
-            </span>
-          </div>
+          {/* ── 출처를 먼저 말한다 ──
+              여기가 'AI 분석 결과 · 신뢰도 75% · fallback'이라고 적고
+              있었다. OpenAI가 429로 거절했고 내부 템플릿이 결과를 만든
+              상황인데, 아래 작은 글씨를 안 읽으면 AI가 실제로 분석했다고
+              믿게 된다. 그리고 그 75%는 모델의 확신이 아니라 템플릿에
+              박힌 상수였다. */}
+          {(() => {
+            const view = aiResultView({
+              source: result.source,
+              // API는 0~1로 준다. aiResultView는 0~100을 받는다.
+              confidence: result.confidence == null ? null : Number(result.confidence) * 100,
+              errorCode: (result as any).errorCode ?? (result as any).error ?? null,
+            });
+            const isAi = view.source === 'AI_GENERATED';
+            const tone = isAi ? T.acl : T.ylw;
+            return (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: SP.sm, flexWrap: 'wrap' }}>
+                  {isAi
+                    ? <CheckCircle2 size={16} strokeWidth={IC_STROKE} color={tone}/>
+                    : <AlertTriangle size={16} strokeWidth={IC_STROKE} color={tone}/>}
+                  <span style={{ ...F.section, color: tone }}>{view.title}</span>
+                  <span style={{ marginLeft: 'auto', ...F.muted }}>
+                    {/* **fallback에는 신뢰도를 붙이지 않는다.** */}
+                    {view.confidencePct != null
+                      ? `신뢰도 ${Math.round(view.confidencePct)}% · ${view.badge}`
+                      : view.badge}
+                  </span>
+                </div>
+
+                {!isAi && (
+                  <div style={{
+                    marginBottom: SP.sm, padding: '8px 10px',
+                    background: A(T.ylw,'10'), border: `1px solid ${A(T.ylw,'30')}`, borderRadius: R.sm,
+                  }}>
+                    <div style={{ color: T.ylw, fontSize: 10.5, fontWeight: 700, lineHeight: 1.55 }}>
+                      ⚠ AI 분석을 사용할 수 없음
+                    </div>
+                    <div style={{ color: T.muted, fontSize: 10, marginTop: 3, lineHeight: 1.55 }}>
+                      {view.desc}
+                      {view.failureNote ? ` (${view.failureNote})` : ''}
+                    </div>
+                    <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.5 }}>
+                      {view.confidenceNote}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
           {result.warnings && result.warnings.length > 0 && (
             <div style={{ marginBottom: SP.sm }}>
@@ -476,16 +520,35 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
             </div>
           )}
 
-          <pre style={{
-            background: T.bg, border: `1px solid ${T.border}`,
-            borderRadius: R.sm, padding: 10,
-            color: T.sub, fontSize: 10, lineHeight: 1.5,
-            overflow: 'auto', maxHeight: 260,
-            fontFamily: 'ui-monospace, monospace',
-            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-          }}>
-            {JSON.stringify(result.strategy, null, 2)}
-          </pre>
+          {/* ── 사람이 읽는 요약이 먼저 ──
+              기본 화면에 raw JSON을 통째로 띄우면, 이 전략이 무엇을
+              하는지 읽을 수 있는 사람이 거의 없다. 원문은 접어 둔다. */}
+          <div style={{ display: 'grid', gap: 5, marginBottom: SP.sm }}>
+            {strategySummaryRows(result.strategy).map(row => (
+              <div key={row.label} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span style={{ color: T.muted, fontSize: 10, minWidth: 74 }}>{row.label}</span>
+                <span style={{ color: row.known ? T.txt : T.muted, fontSize: 11, fontWeight: 700, overflowWrap: 'anywhere' }}>
+                  {row.value}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <details style={{ marginBottom: SP.sm }}>
+            <summary style={{ color: T.muted, fontSize: 10, cursor: 'pointer', padding: '4px 0' }}>
+              개발자 정보 (원본 JSON)
+            </summary>
+            <pre style={{
+              background: T.bg, border: `1px solid ${T.border}`,
+              borderRadius: R.sm, padding: 10, marginTop: 5,
+              color: T.sub, fontSize: 10, lineHeight: 1.5,
+              overflow: 'auto', maxHeight: 260,
+              fontFamily: 'ui-monospace, monospace',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            }}>
+              {JSON.stringify(result.strategy, null, 2)}
+            </pre>
+          </details>
 
           <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
             <button onClick={() => onParsed(result.strategy)}
@@ -514,6 +577,36 @@ function AIPromptPanel({ onParsed }: { onParsed: (s: Partial<UserStrategy>) => v
       )}
     </div>
   );
+}
+
+/**
+ * 전략 초안을 사람이 읽는 줄로.
+ *
+ * **모르는 칸을 지어내지 않는다.** 빠진 값은 '지정 안 됨'이고, 그건
+ * 0이나 빈칸과 다르다 — 편집기로 가져가기 전에 무엇을 채워야 하는지가
+ * 그대로 이 목록이 된다.
+ */
+function strategySummaryRows(st: any): Array<{ label: string; value: string; known: boolean }> {
+  const s = st ?? {};
+  const row = (label: string, raw: any, suffix = '') => {
+    const empty = raw == null || raw === '' || (typeof raw === 'number' && !Number.isFinite(raw));
+    return { label, value: empty ? '지정 안 됨' : `${raw}${suffix}`, known: !empty };
+  };
+  const cond = Array.isArray(s.conditions) ? s.conditions : [];
+  const condText = cond.length === 0 ? null
+    : cond.map((c: any) => [c?.indicator, c?.operator, c?.value].filter(v => v != null && v !== '').join(' ')).join(' · ');
+
+  return [
+    row('전략명', s.name),
+    row('시장', s.asset),
+    row('시간 단위', s.timeframe),
+    row('진입 조건', condText),
+    row('주문 방식', s.order?.type),
+    row('주문 금액', s.order?.amount == null ? null : Number(s.order.amount).toLocaleString('ko-KR')),
+    row('익절', s.risk?.takeProfitPct, '%'),
+    row('손절', s.risk?.stopLossPct, '%'),
+    row('일 최대 손실', s.risk?.dailyLossLimitPct, '%'),
+  ];
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -40,6 +40,11 @@ import { join, basename } from 'node:path';
 const WATCH_DIRS = [
   'src/lib/engine', 'src/lib/risk', 'src/lib/strategies', 'src/lib/markets',
   'src/lib/exchanges', 'src/lib/auth', 'src/lib/terminal', 'src/lib/ui', 'src/lib/nav',
+  // 수익률·성과 귀속. **이 칸이 없던 동안 여기는 검사 밖이었다** —
+  // 새 판정 디렉터리를 만들면 이 목록에도 같이 넣어야 한다.
+  'src/lib/portfolio',
+  // 백테스트 판정과 AI 출처 판정. 여기도 검사 밖이었다.
+  'src/lib/backtest', 'src/lib/ai', 'src/lib/runtime',
 ];
 
 /** 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다 */
@@ -74,6 +79,15 @@ const ALLOW = new Map([
 
   // robustness.ts / costAnalysis.ts는 edgeSweep.ts(격자 실행기)가
   // 부르면서 여기서 빠졌다. 빚 하나를 갚을 때마다 이렇게 줄인다.
+
+  // ── src/lib/backtest·src/lib/ai를 검사 대상에 넣자마자 나온 것 ──
+  ['src/lib/ai/runtime.ts',
+    '이건 새로 만든 것이 아니라 **원래 끊겨 있던 것을 이제야 찾은 것이다.** '
+    + '파일 머리말에 "모든 AI 호출은 이 계층을 거쳐야 비용이 통제된다"고 '
+    + '적혀 있는데 부르는 곳이 0곳이다 — 즉 할당량 확인·캐시 조회·사용량 '
+    + '기록이 전부 안 돌고 있다. 429가 자주 나는 것과도 무관하지 않다. '
+    + '막는 것: /api/ai/route.ts가 callAI를 직접 부르고 있어, 이 계층을 '
+    + '끼우려면 라우트의 호출 경로를 통째로 바꿔야 한다(별도 작업)'],
 ]);
 
 const files = [];
@@ -125,6 +139,13 @@ for (const file of files) {
   for (const s of sources) {
     if (s.path === file) continue;                     // 자기 자신
     if (s.path === file.replace(/\.ts$/, '.test.ts')) continue;   // 자기 테스트
+    // **이 스크립트 자신은 소비자가 아니다.**
+    //
+    // WATCH_DIRS에 'src/lib/runtime'을 넣자마자 `src/lib/ai/runtime.ts`가
+    // "이미 배선됨"으로 뒤집혔다. 이 파일의 설정 문자열이 import 경로처럼
+    // 보였기 때문이다. 검사기가 자기 설정을 근거로 통과시키면, 진짜로
+    // 끊긴 모듈이 조용히 살아난다.
+    if (s.path === 'scripts/check-wiring.mjs') continue;
     if (re.test(s.text)) consumers++;
   }
 

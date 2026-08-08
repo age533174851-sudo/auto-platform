@@ -221,25 +221,51 @@ export function accuracyNote(runners: {
   appOpen?: boolean;
   /** 분 단위로 우리 주소를 부르는 외부 스케줄러 */
   external?: boolean;
+  /**
+   * 저장소 예약 워크플로(GitHub Actions, 5분마다).
+   *
+   * **브라우저 없이 도는 유일한 실행기다.** 다만 GitHub 예약은
+   * best-effort라 부하가 몰리면 5~15분씩 늦고, 저장소가 60일간 조용하면
+   * GitHub이 꺼 버린다. 그래서 '상시 실행 Worker'라고 부르지 않는다.
+   */
+  repoCron?: boolean;
   /** 하루 1회 크론 */
   dailyCron?: boolean;
-}): { canBeOnTime: boolean; text: string } {
+}): { canBeOnTime: boolean; text: string; browserFree: boolean } {
+  // **브라우저 없이 도는 것이 하나라도 있는가.**
+  //
+  // 이게 이 함수가 답해야 할 진짜 질문이다. 앱이 열려 있으면 제 시각에
+  // 나가지만, 그건 사용자가 화면을 보고 있을 때만이다 — 예약 청산은
+  // 자고 있을 때 걸리라고 만든 기능이다.
+  const browserFree = runners.external === true || runners.repoCron === true;
+
   if (runners.external) {
-    return { canBeOnTime: true, text: '외부 스케줄러가 분 단위로 확인합니다 — 제 시각에 나갑니다.' };
+    return { browserFree: true, canBeOnTime: true,
+      text: '외부 스케줄러가 분 단위로 확인합니다 — 앱을 닫아도 제 시각에 나갑니다.' };
+  }
+  if (runners.repoCron) {
+    return {
+      browserFree: true, canBeOnTime: true,
+      text: '저장소 예약(5분마다)이 앱을 닫아도 실행합니다. '
+        + '다만 GitHub 예약은 부하에 따라 5~15분 늦을 수 있어 **분 단위 정확도는 보장되지 않습니다** '
+        + '— 정확도가 필요하면 상시 Worker가 필요합니다.'
+        + (runners.appOpen ? ' 앱이 열려 있는 동안은 30초마다 함께 확인합니다.' : ''),
+    };
   }
   if (runners.appOpen) {
     return {
-      canBeOnTime: true,
+      browserFree: false, canBeOnTime: true,
       text: '이 앱이 열려 있는 동안에만 제 시각에 나갑니다. '
         + '**앱을 닫거나 화면이 잠기면 그 시각에 안 나갑니다.**',
     };
   }
   if (runners.dailyCron) {
     return {
-      canBeOnTime: false,
+      browserFree: false, canBeOnTime: false,
       text: '지금은 하루 1회 크론만 있습니다 — 예약 시각에 나가지 않습니다. '
         + '늦으면 자동 실행하지 않으므로, 이 예약은 사실상 알림에 가깝습니다.',
     };
   }
-  return { canBeOnTime: false, text: '이 예약을 실행할 것이 없습니다 — 저장은 되지만 나가지 않습니다.' };
+  return { browserFree: false, canBeOnTime: false,
+    text: '이 예약을 실행할 것이 없습니다 — 저장은 되지만 나가지 않습니다.' };
 }

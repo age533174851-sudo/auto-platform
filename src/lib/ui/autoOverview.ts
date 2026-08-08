@@ -147,14 +147,14 @@ export function healthSummaryOf(items: HealthLike[] | null | undefined): HealthS
 
   const blockingLabels = bad.map(i => String(i?.label ?? i?.id ?? '이름 없는 항목'));
 
+  // **'11/16'은 성공이 11개인지 막힌 게 11개인지 순간적으로 헷갈린다.**
+  // 세 숫자로 나눈다 — 정상·차단·미확정. 그리고 '정상'이라고 쓰는 것은
+  // 셋 다 아무 문제가 없을 때뿐이다(확인하지 못한 것은 통과가 아니다).
   let label: string;
   if (total === 0) {
     label = '점검할 항목을 읽지 못했습니다';
-  } else if (bad.length > 0) {
-    label = `${ok}/${total} · 주문 차단 항목 ${bad.length}개`;
-  } else if (unknown.length > 0) {
-    // **'정상'이라고 쓰지 않는다.** 확인하지 못한 것은 통과가 아니다.
-    label = `${ok}/${total} · 확인 못 한 항목 ${unknown.length}개`;
+  } else if (bad.length > 0 || unknown.length > 0) {
+    label = `정상 ${ok} · 차단 ${bad.length} · 미확정 ${unknown.length}`;
   } else {
     label = `${ok}/${total} 정상`;
   }

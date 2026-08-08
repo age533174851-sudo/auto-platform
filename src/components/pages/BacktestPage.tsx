@@ -8,6 +8,7 @@ import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
 import { safeNumber, formatKRW, safePercent } from '@/lib/format';
 import { validateBacktest } from '@/lib/backtest/validation';
+import { backtestVerdict, compoundAllowed, rangeCheck, VERDICT_LABEL } from '@/lib/backtest/verdict';
 import { DurationPicker } from '@/components/inputs/QuickInput';
 
 type Strategy = 'ema-cross' | 'rsi' | 'macd' | 'bollinger' | 'dca';
@@ -393,7 +394,12 @@ export default function BacktestPage() {
       )}
 
       {/* Result */}
-      {result && (
+      {result && (() => {
+        // **판정을 먼저 만든다.** 숫자를 어떻게 보여줄지가 여기에 달려
+        // 있다 — 표본이 8건이면 큰 글씨도, 복리 분석도 붙이지 않는다.
+        const bv = backtestVerdict(result.summary);
+        const compoundGate = compoundAllowed(bv);
+        return (
         <>
           {/* Data source banner */}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
@@ -417,11 +423,45 @@ export default function BacktestPage() {
                 <div style={{ color: T.muted, fontSize: 9, marginTop: 3 }}>이 결과는 신뢰할 수 없습니다. 레버리지·수량·기간 설정을 확인하세요.</div>
               </div>
             )}
+            {/* ── 판정을 숫자보다 먼저 ──
+                거래 8회에서 나온 승률 25%는 2승 6패다. 동전 여덟 번으로도
+                나온다. 그런데 그 숫자를 다른 검증 결과와 똑같은 크기로
+                보여주면 사람은 "승률이 낮구나"라고 읽는다 — 실제로 알 수
+                있는 것은 **아무것도 없다는 것**뿐인데도. */}
+            {(() => {
+              const range = rangeCheck(result.candleCount, timeframe);
+              return (
+                <div style={{
+                  background: A(bv.promotable ? T.grn : T.red, '12'),
+                  border: `1px solid ${A(bv.promotable ? T.grn : T.red, '35')}`,
+                  borderRadius: 10, padding: '10px 12px', marginBottom: 12,
+                }}>
+                  <div style={{ color: bv.promotable ? T.grn : T.red, fontSize: 13, fontWeight: 900 }}>
+                    {bv.promotable ? '✅ 승격 검토 가능' : '❌ 승격 불가'} · {VERDICT_LABEL[bv.verdict]}
+                  </div>
+                  {bv.reasons.map((r, i) => (
+                    <div key={i} style={{ color: T.muted, fontSize: 10, marginTop: 4, lineHeight: 1.55 }}>· {r}</div>
+                  ))}
+                  {!range.enough && (
+                    <div style={{ color: T.ylw, fontSize: 10, marginTop: 4, lineHeight: 1.55 }}>· {range.note}</div>
+                  )}
+                  <div style={{ color: T.ylw, fontSize: 10, marginTop: 6, lineHeight: 1.55 }}>
+                    → {bv.nextStep}
+                  </div>
+                </div>
+              );
+            })()}
+
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline',
               marginBottom: 12 }}>
               <span style={{ color: T.muted, fontSize: 11 }}>총 수익률</span>
-              <span style={{ color: result.summary.totalReturnPct >= 0 ? T.grn : T.red,
-                fontSize: 24, fontWeight: 900, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
+              <span style={{
+                // **표본이 모자라면 큰 글씨로 띄우지 않는다.** 크기가 곧
+                // 확신으로 읽힌다.
+                color: !bv.statsMeaningful ? T.muted
+                  : result.summary.totalReturnPct >= 0 ? T.grn : T.red,
+                fontSize: bv.statsMeaningful ? 24 : 16,
+                fontWeight: 900, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
                 {safePercent(result.summary.totalReturnPct)}
               </span>
             </div>
@@ -482,12 +522,28 @@ export default function BacktestPage() {
             )}
           </Card>
 
-          {/* 복리 성장 분석 */}
-          <CompoundAnalysisView
-            totalReturnPct={result.summary.totalReturnPct}
-            periodDays={periodDays}
-            initialCapital={result.summary.finalEquity && result.summary.totalReturnPct ? Math.round(result.summary.finalEquity / (1 + result.summary.totalReturnPct / 100)) : 10000000}
-          />
+          {/* ── 복리 성장 분석은 마지막이다 ──
+              기대값이 음수인 전략에 복리를 곱하면 그건 손실을 복리로 키우는
+              그림이다. 그런데 화면은 그것을 '성장 분석'이라는 이름으로
+              -2.27% 바로 아래에 보여주고 있었다.
+
+              순서: 우위 → 위험 → 표본 → 강건성 → 그다음이 복리다. */}
+          {compoundGate.allowed ? (
+            <CompoundAnalysisView
+              totalReturnPct={result.summary.totalReturnPct}
+              periodDays={periodDays}
+              initialCapital={result.summary.finalEquity && result.summary.totalReturnPct ? Math.round(result.summary.finalEquity / (1 + result.summary.totalReturnPct / 100)) : 10000000}
+            />
+          ) : (
+            <Card style={{ marginBottom: 10, borderLeft: `3px solid ${T.muted}` }}>
+              <div style={{ color: T.muted, fontSize: 12, fontWeight: 800, marginBottom: 5 }}>
+                🔒 복리 성장 분석 잠금
+              </div>
+              <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.6 }}>
+                {compoundGate.reason}
+              </div>
+            </Card>
+          )}
 
           {/* 실전 적합도 판정 */}
           {(() => {
@@ -615,7 +671,8 @@ export default function BacktestPage() {
             과거 성과가 미래 수익을 보장하지 않습니다.
           </div>
         </>
-      )}
+        );
+      })()}
     </div>
   );
 }

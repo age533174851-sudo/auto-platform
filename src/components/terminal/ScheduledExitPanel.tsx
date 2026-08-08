@@ -45,8 +45,13 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
 
   // 지금 이 화면이 열려 있으니 앱 타이머는 살아 있다.
   // 외부 스케줄러가 붙었는지는 앱이 알 수 없다 — **모르는 것을 켜졌다고
-  // 적지 않는다.** 크론은 vercel.json에 등록돼 있으므로 true다.
-  const acc = accuracyNote({ appOpen: true, dailyCron: true });
+  // 적지 않는다.**
+  //
+  // repoCron: 저장소 예약 워크플로(.github/workflows/scheduled-exit.yml)가
+  // 5분마다 실행 주소를 부른다. **브라우저 없이 도는 유일한 실행기다.**
+  // 이게 붙기 전에는 앱을 닫아 두면 하루 1회 크론이 전부라, 예약 시각에
+  // 사실상 안 나갔다.
+  const acc = accuracyNote({ appOpen: true, repoCron: true, dailyCron: true });
 
   const load = useCallback(async () => {
     if (!auth) { setRows(null); setLoadErr('로그인이 필요합니다'); return; }

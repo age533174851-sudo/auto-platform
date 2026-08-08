@@ -139,6 +139,38 @@ export function runScheduleExitTests() {
     assert(a.text.includes('나가지 않습니다'), a.text);
   });
 
+  // ── 브라우저 없이 도는 것이 있는가 ──────────────────────
+  //
+  // 이게 진짜 질문이다. 예약 청산은 **자고 있을 때 걸리라고** 만든
+  // 기능이고, 앱이 열려 있어야만 나가면 그건 예약이 아니다.
+  test('앱 타이머는 브라우저 없이 도는 것이 아니다', () => {
+    eq(accuracyNote({ appOpen: true, dailyCron: true }).browserFree, false);
+    eq(accuracyNote({ dailyCron: true }).browserFree, false);
+    eq(accuracyNote({}).browserFree, false);
+  });
+
+  test('저장소 예약이 붙으면 앱을 닫아도 나간다', () => {
+    const a = accuracyNote({ appOpen: true, repoCron: true, dailyCron: true });
+    eq(a.browserFree, true);
+    eq(a.canBeOnTime, true);
+    assert(a.text.includes('앱을 닫아도'), a.text);
+  });
+
+  test('저장소 예약을 상시 Worker인 것처럼 말하지 않는다', () => {
+    // GitHub 예약은 best-effort다. 부하가 몰리면 5~15분 늦는다.
+    // 그걸 안 적으면 사용자가 초 단위 정확도를 기대한다.
+    const a = accuracyNote({ repoCron: true });
+    assert(a.text.includes('보장되지 않습니다'), a.text);
+    assert(a.text.includes('Worker'), a.text);
+  });
+
+  test('외부 스케줄러가 저장소 예약보다 우선이다', () => {
+    // 분 단위로 부르는 것이 있으면 그쪽이 더 정확하다.
+    const a = accuracyNote({ external: true, repoCron: true });
+    eq(a.browserFree, true);
+    assert(a.text.includes('분 단위'), a.text);
+  });
+
   test('간격 표시', () => {
     eq(fmtGap(30_000), '30초');
     eq(fmtGap(90_000), '2분');
