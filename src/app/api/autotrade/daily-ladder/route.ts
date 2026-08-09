@@ -680,6 +680,56 @@ export async function POST(req: NextRequest) {
       streakFact = { status: sf.streak.status, reason: sf.streak.reason };
     } catch { /* null → unknown → 막힌다 */ }
 
+    // ── 포지션 모드 · 거래소 보호 주문 ──
+    //
+    // **이 둘을 안 넘기고 있었다.** 그래서 점검 목록의 POSITION_MODE는
+    // 언제나 '확인하지 못했습니다'였고, 거래소에 손절이 실제로 걸려 있는지는
+    // 아무도 묻지 않았다 — STOP_ATTACHED는 계획의 손절가만 본다.
+    //
+    // 거래소별 분기는 여기 없다. futuresAdapter가 binance·gate를 같은
+    // 계약으로 감싼다 — 분기를 라우트마다 다시 쓰면 한쪽만 고쳐진다.
+    //
+    // **실패를 '없음'으로 적지 않는다.** 못 읽으면 null을 그대로 넘기고,
+    // 점검 목록이 unknown으로 남겨 신규 진입을 막는다.
+    let positionModeFact: { mode: 'ONE_WAY' | 'HEDGE' | null; reason?: string } | null = null;
+    let protectiveFact: {
+      stopCount: number | null; takeProfitCount?: number | null; reason?: string;
+    } | null = null;
+    try {
+      const fa = await import('@/lib/exchanges/futuresAdapter');
+      const fex = fa.futuresExchangeOf(exchange);
+      if (!fex) {
+        const why = `이 실행기가 지원하지 않는 거래소입니다 (${exchange})`;
+        positionModeFact = { mode: null, reason: why };
+        protectiveFact = { stopCount: null, reason: why };
+      } else {
+        // **지금 열려 있는 포지션의 방향.** 이걸 넘겨야 "이 포지션을 지키는
+        // 손절"만 센다. 안 넘기면 롱을 들고 있는데 남아 있는 숏용 손절이
+        // 방어선으로 잡힌다 — 그건 아무것도 지키지 않는다.
+        // 포지션이 없거나 못 읽었으면 null이고, 그때는 손절 수를 확정하지
+        // 않는다(포지션이 없으면 점검이 그 앞에서 통과시킨다).
+        const amt = Number(risk?.positionAmt);
+        const posSide: 'LONG' | 'SHORT' | null =
+          Number.isFinite(amt) && amt > 0 ? 'LONG'
+          : Number.isFinite(amt) && amt < 0 ? 'SHORT'
+          : null;
+        const [pm, po] = await Promise.all([
+          fa.futuresPositionMode(fex, conn.api_key, apiSecretPre, useTestnet),
+          fa.futuresProtectiveOrders(fex, conn.api_key, apiSecretPre, useTestnet, symbol, posSide),
+        ]);
+        positionModeFact = { mode: pm.mode, reason: pm.error || undefined };
+        // **손절 수로 판정한다.** 총 개수를 넘기면 익절만 있는 상태가 통과한다.
+        protectiveFact = {
+          stopCount: po.stopCount, takeProfitCount: po.takeProfitCount,
+          reason: po.error || po.detail || undefined,
+        };
+      }
+    } catch (e: any) {
+      const why = `조회에 실패했습니다 (${e?.message || e})`;
+      positionModeFact = { mode: null, reason: why };
+      protectiveFact = { stopCount: null, reason: why };
+    }
+
     // 시장 국면. 일봉은 위에서 이미 받아 뒀다(bars.closes) — 다시 받으면
     // 두 조회 사이에 값이 달라져 점검과 실제 판단이 다른 봉을 본다.
     const { collectRegime } = await import('@/lib/risk/regimeCheck');
@@ -708,6 +758,8 @@ export async function POST(req: NextRequest) {
         ? { actual: risk.leverage, intended: result.plan!.leverage }
         : null,
       existingPositionQty: risk ? Math.abs(risk.positionAmt) : null,
+      positionMode: positionModeFact,
+      protectiveOrders: protectiveFact,
       // 계단 게이트가 예약을 내줬다 = 오늘 아직 거래하지 않았다.
       // 여기서 ladderGate를 다시 부르면 슬롯이 또 예약된다.
       todayEntry: { alreadyTraded: false },
@@ -724,6 +776,9 @@ export async function POST(req: NextRequest) {
       // USDⓈ-M 진입이고, 이 전략은 하루 1회 제한이 있다.
       // dailyLimit를 켜야 '오늘 진입 이력'이 목록에 들어온다.
       market: 'USDM', intent: 'ENTRY', dailyLimit: true,
+      // **이 경로는 거래소에 직접 물어봤다.** 포지션 모드와 보호 주문을
+      // 위에서 조회해 넘긴다 — 그래서 그 둘을 차단 항목으로 올린다.
+      exchangeEvidence: true,
       // 국면 필터는 켠 경우에만 목록에 들어온다 (REGIME_FILTER 환경변수).
       regimeFilter: regimeFacts.enabled,
     });
