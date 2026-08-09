@@ -89,7 +89,21 @@ export const RECONCILE_STEPS: ReconcileStep[] = [
     why: '고친 뒤에 다시 봐야 무엇이 남았는지 안다', continueOnFail: true },
 ];
 
-export type StepState = 'OK' | 'FAILED' | 'SKIPPED' | 'PENDING';
+/**
+ * `UNKNOWN`이 `FAILED`와 따로 있는 이유
+ * ─────────────────────────────────────
+ * "거래소가 손절이 없다고 답했다"와 "거래소에 못 물어봤다"는 다른 사실이고,
+ * 사용자가 할 일도 다르다 — 앞은 손절을 걸어야 하고, 뒤는 연결을 봐야 한다.
+ * 둘을 FAILED로 뭉치면 화면이 원인을 못 짚는다.
+ *
+ * **다만 통과는 아니다.** 아래 판정에서 UNKNOWN은 FAILED와 똑같이
+ * '완료 아님'이고, 뒤 단계로 못 넘어가는 단계에서는 똑같이 멈춘다.
+ * 확인하지 못한 것은 통과가 아니다.
+ */
+export type StepState = 'OK' | 'FAILED' | 'UNKNOWN' | 'SKIPPED' | 'PENDING';
+
+/** 통과가 아닌 상태 — 실패든 모름이든 */
+const isBad = (s: StepState) => s === 'FAILED' || s === 'UNKNOWN';
 
 export interface StepResult {
   id: ReconcileStepId;
@@ -130,12 +144,12 @@ export function reconcileRunOf(results: StepResult[] | null | undefined): Reconc
 
   let stoppedAt: ReconcileStepId | null = null;
   for (const r of ordered) {
-    if (r.state !== 'FAILED') continue;
+    if (!isBad(r.state)) continue;
     if (stepOf(r.id)?.continueOnFail === false) { stoppedAt = r.id; break; }
   }
 
-  const ran = ordered.filter(r => r.state === 'OK' || r.state === 'FAILED');
-  const failed = ordered.filter(r => r.state === 'FAILED');
+  const ran = ordered.filter(r => r.state === 'OK' || isBad(r.state));
+  const failed = ordered.filter(r => isBad(r.state));
   const pending = ordered.filter(r => r.state === 'PENDING');
   // **실패가 하나라도 있으면 완료가 아니다.** 이어서 할 수 있는 단계라도
   // 실패는 실패다 — '대조 완료'는 장부가 맞았다는 뜻으로 읽힌다.
@@ -149,7 +163,10 @@ export function reconcileRunOf(results: StepResult[] | null | undefined): Reconc
     : null;
 
   const remaining = [
-    ...failed.map(r => `${stepOf(r.id)?.label ?? r.id}${r.detail ? ` — ${r.detail}` : ''}`),
+    // 모름은 모름이라고 적는다. '실패'로 뭉뚱그리면 연결 문제를 손절 문제로 읽는다.
+    ...failed.map(r => `${stepOf(r.id)?.label ?? r.id}`
+      + (r.state === 'UNKNOWN' ? ' — 확인하지 못했습니다' : '')
+      + (r.detail ? ` — ${r.detail}` : '')),
     ...(pending.length > 0 && stoppedAt != null
       ? [`${pending.length}단계가 아직 안 돌았습니다 (앞 단계에서 멈춤)`] : []),
   ];

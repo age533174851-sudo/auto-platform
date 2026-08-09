@@ -50,6 +50,8 @@ export type CheckId =
   /** 이미 열린 포지션이 있는가 */
   | 'EXISTING_POSITION'
   | 'POSITION_MODE'
+  /** 거래소에 손절·익절이 **실제로** 걸려 있는가 (계획이 아니라 사실) */
+  | 'PROTECTIVE_ORDER'
   /** 오늘 이미 진입했는가 */
   | 'TODAY_ENTRY'
   /** 너무 자주 들어가고 있는가 (하루 상한·종목 쿨다운) */
@@ -323,8 +325,25 @@ export const CHECK_SPECS: CheckSpec[] = [
     blocking: false, requiredToKnow: false },
   { id: 'EXISTING_POSITION', label: '기존 포지션',        markets: DERIV, intents: BOTH,
     blocking: false, requiredToKnow: false },
+  // 포지션 모드는 여기서는 **사실 전달**이다. 조회한 경로에서만 차단으로
+  // 올린다 (`opts.exchangeEvidence` — 아래 runChecklist 참조). 값을 넘기지도
+  // 않는 경로까지 막으면, 조회를 안 했다는 이유로 멀쩡한 주문이 멎는다.
   { id: 'POSITION_MODE',     label: '포지션 모드',        markets: DERIV, intents: BOTH,
     blocking: false, requiredToKnow: false },
+
+  // ── 거래소에 손절이 실제로 걸려 있는가 ──
+  //
+  // STOP_ATTACHED와 다른 질문이다. 그쪽은 **계획의 손절가**를 보고, 이쪽은
+  // **거래소의 주문**을 본다. 진입은 성공했는데 손절 부착만 실패한 상황이
+  // 정확히 그 차이에 숨는다 — 계획에는 손절가가 있으니 점검은 통과하고,
+  // 거래소에는 아무것도 없다.
+  //
+  // **거래소에 실제로 물어본 경로에서만 목록에 들어온다**
+  // (`opts.exchangeEvidence`). 안 그러면 이 값을 안 넘기는 일곱 경로가
+  // 전부 '확인 못 함'으로 막힌다 — 켜져 있지만 아무도 안 먹이는 검사는
+  // 안전장치가 아니라 고장이다.
+  { id: 'PROTECTIVE_ORDER',  label: '거래소에 보호 주문 존재', markets: DERIV, intents: ENTRY_ONLY,
+    blocking: true, requiredToKnow: true },
 ];
 
 const SPEC_BY_ID: Record<CheckId, CheckSpec> =
@@ -478,6 +497,21 @@ export interface ChecklistInput {
    * 합쳐진다. 그 상태에서 '숏 청산'을 누르면 롱까지 줄어든다.
    */
   positionMode?: { mode: 'ONE_WAY' | 'HEDGE' | null; reason?: string } | null;
+  /**
+   * 거래소에 지금 걸려 있는 보호 주문.
+   *
+   * **판정은 `stopCount`로만 한다.** 익절은 이익을 확정하는 주문이지
+   * 방어선이 아니다 — 익절만 걸린 포지션은 가격이 반대로 갈 때 막을 것이
+   * 없는데, 총 개수로 세면 "보호 주문 1건"으로 통과한다.
+   *
+   * **못 읽었으면 stopCount가 null이다.** 0과 null을 섞으면 "손절이 없다"와
+   * "모른다"가 같은 값이 된다.
+   */
+  protectiveOrders?: {
+    stopCount: number | null;
+    takeProfitCount?: number | null;
+    reason?: string;
+  } | null;
   /** 지금 열려 있는 포지션 수량. 0이면 없음, null이면 모름 */
   existingPositionQty?: number | null;
   /** ladderGate 결과 */
@@ -565,6 +599,24 @@ export interface ChecklistInput {
 }
 
 export interface ChecklistOptions {
+  /**
+   * **이 경로가 거래소에 직접 물어봤는가.** 기본 false.
+   *
+   * 켜면 두 가지가 달라진다:
+   *   · `PROTECTIVE_ORDER`(거래소에 손절이 실제로 걸려 있는가)가 목록에 들어온다
+   *   · `POSITION_MODE`가 사실 전달에서 **차단**으로 올라간다 —
+   *     못 읽었거나 헤지 모드면 신규 진입을 막는다
+   *
+   * 왜 옵션인가
+   * ───────────
+   * 이 값을 넘기지 않는 호출자가 일곱이다(수동 주문·웹훅·COIN-M 등).
+   * 기본으로 켜면 그 경로들이 **조회를 안 했다는 이유로** 전부 막힌다 —
+   * 켜져 있지만 아무도 안 먹이는 검사는 안전장치가 아니라 고장이다.
+   *
+   * 반대로 켜 놓고 값을 안 넘기면 unknown이 되어 막힌다. 그게 맞다:
+   * 물어봤다고 선언했으면 답이 있어야 한다.
+   */
+  exchangeEvidence?: boolean;
   /** 기본 'USDM' — 기존 호출자(daily-ladder)의 동작을 바꾸지 않는다 */
   market?: MarketKind;
   /** 기본 'ENTRY' */
@@ -642,10 +694,13 @@ function resultFor(
 export function appliesTo(
   id: CheckId, market: MarketKind, intent: OrderIntent, dailyLimit: boolean,
   regimeFilter = false, aiVeto = false, overtrading = false,
+  exchangeEvidence = false,
 ): boolean {
   const spec = SPEC_BY_ID[id];
   if (!spec) return false;
   if (id === 'TODAY_ENTRY' && !dailyLimit) return false;
+  // 거래소에 물어보지 않은 경로에는 이 항목이 아예 안 나온다.
+  if (id === 'PROTECTIVE_ORDER' && !exchangeEvidence) return false;
   // 정책을 안 켰으면 목록에 아예 안 나온다. '확인 못 함'으로 남겨 두면
   // 사용자는 확인해야 할 것이 있다고 읽는다.
   if (id === 'OVERTRADING' && !overtrading) return false;
@@ -669,6 +724,7 @@ export function runChecklist(
   const dailyLimit = opts.dailyLimit ?? false;
   const regimeFilter = opts.regimeFilter ?? false;
   const aiVeto = opts.aiVeto ?? false;
+  const exchangeEvidence = opts.exchangeEvidence ?? false;
 
   const all: CheckResult[] = [];
   const results = all;   // 아래 push는 그대로 두고, 마지막에 걸러낸다
@@ -905,12 +961,58 @@ export function runChecklist(
   // 차단 항목으로 만들면 조회가 안 되는 계정의 주문이 전부 멎는다.
   // 사실을 먼저 보이고, 실제 차단은 주문 구성(orderIntent)이 한다 —
   // 거기는 방향이 이미 정해진 자리라 판단이 더 정확하다.
+  //
+  // **거래소에 물어본 경로에서는 차단으로 올린다**(exchangeEvidence).
+  // 이중(헤지) 모드에서는 방향 인자 해석이 달라 의도와 다른 쪽 포지션이
+  // 열릴 수 있다. 주문 실행기(futuresExec.positionModeVerdict)는 이미 같은
+  // 이유로 신규 진입을 막는데, 점검 목록만 통과시키면 화면은 ✅인데 주문은
+  // 막힌다 — 그 어긋남이 원인을 못 찾게 만든다.
+  //
+  // 청산(EXIT)에는 올리지 않는다. 못 여는 것은 불편이고 못 닫는 것은 사고다.
+  const modeStrict = exchangeEvidence && intent === 'ENTRY';
   if (!input.positionMode || input.positionMode.mode == null) {
-    results.push(resultFor('POSITION_MODE', 'unknown',
-      input.positionMode?.reason || '포지션 모드(단방향/헤지)를 확인하지 못했습니다'));
+    const r = resultFor('POSITION_MODE', 'unknown',
+      input.positionMode?.reason || '포지션 모드(단방향/헤지)를 확인하지 못했습니다');
+    results.push(modeStrict ? { ...r, blocks: true } : r);
+  } else if (input.positionMode.mode === 'HEDGE') {
+    const r = modeStrict
+      ? resultFor('POSITION_MODE', 'fail',
+          '헤지 모드(양방향)입니다. 이 실행기는 단방향 주문만 만들어 거래소가 거부합니다 — '
+          + '거래소에서 단방향(One-way)으로 바꾸세요')
+      : resultFor('POSITION_MODE', 'pass', '헤지 모드');
+    results.push(modeStrict ? { ...r, blocks: true } : r);
   } else {
-    results.push(resultFor('POSITION_MODE', 'pass',
-      input.positionMode.mode === 'HEDGE' ? '헤지 모드' : '단방향 모드'));
+    results.push(resultFor('POSITION_MODE', 'pass', '단방향 모드'));
+  }
+
+  // 10-b. 거래소에 보호 주문이 실제로 걸려 있는가.
+  //
+  // **포지션이 없으면 붙일 손절도 없다.** 그때 '없음'을 실패로 적으면
+  // 첫 진입이 영원히 막힌다 — 아직 열지 않았으니 보호할 것이 없는 게 맞다.
+  //
+  // **익절은 방어선이 아니다.** 그래서 총 개수가 아니라 `stopCount`로 판정한다.
+  // 익절만 걸린 포지션을 통과시키면, 화면에는 "보호 주문 있음"이 뜬 채로
+  // 가격이 반대로 갈 때 막을 것이 아무것도 없다.
+  const po = input.protectiveOrders;
+  const tpN = po?.takeProfitCount ?? null;
+  if (input.existingPositionQty != null && Math.abs(input.existingPositionQty) === 0) {
+    results.push(resultFor('PROTECTIVE_ORDER', 'pass', '열린 포지션이 없어 붙일 보호 주문이 없습니다'));
+  } else if (!po || po.stopCount == null) {
+    results.push(resultFor('PROTECTIVE_ORDER', 'unknown',
+      po?.reason
+      || '거래소의 보호 주문을 조회하지 못했습니다 — 손절이 붙어 있는지 알 수 없습니다'));
+  } else if (po.stopCount === 0) {
+    results.push(resultFor('PROTECTIVE_ORDER', 'fail',
+      tpN != null && tpN > 0
+        ? `열린 포지션에 익절 ${tpN}건만 걸려 있고 **손절은 0건**입니다. `
+          + '익절은 이익을 확정하는 주문이지 방어선이 아닙니다 — '
+          + '가격이 반대로 가면 막을 것이 없습니다'
+        : '열린 포지션이 있는데 거래소에 손절이 하나도 없습니다. '
+          + '계획에 손절가가 있어도 거래소에 안 걸렸으면 방어선은 청산가뿐입니다'));
+  } else {
+    results.push(resultFor('PROTECTIVE_ORDER', 'pass',
+      po.reason
+      || `거래소에 손절 ${po.stopCount}건${tpN != null ? ` · 익절 ${tpN}건` : ''}`));
   }
 
   // 11. 기존 포지션 (막지 않는다 — 사실 전달)
@@ -926,7 +1028,8 @@ export function runChecklist(
   // 여기서 걸러낸다. 위에서 조건마다 분기하면 검사 하나 추가할 때 적용
   // 규칙을 두 곳에 적게 되고, 언젠가 한 곳만 고친다.
   const scoped = all.filter(r =>
-    appliesTo(r.id, market, intent, dailyLimit, regimeFilter, aiVeto, input.overtrading != null));
+    appliesTo(r.id, market, intent, dailyLimit, regimeFilter, aiVeto,
+      input.overtrading != null, exchangeEvidence));
 
   const blockers = scoped.filter(r => r.blocks);
   const passed = scoped.filter(r => r.status === 'pass').length;

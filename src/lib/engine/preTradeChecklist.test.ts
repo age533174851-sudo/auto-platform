@@ -178,8 +178,11 @@ export function runPreTradeChecklistTests() {
     // 장 시간(MARKET_HOURS)은 주식에만 있다. 코인은 24시간이라 그 질문
     // 자체가 없다 — 목록에 두면 영원히 unknown이 된다.
     const stockOnly = CHECK_SPECS.filter(sp => !sp.markets.includes('USDM')).length;
+    // PROTECTIVE_ORDER는 **거래소에 직접 물어본 경로에서만** 목록에 들어온다
+    // (exchangeEvidence). '전체 목록'을 재려면 그 스위치도 켜야 한다.
     eq(runChecklist(goodInput(), {
       market: 'USDM', intent: 'ENTRY', dailyLimit: true, regimeFilter: true, aiVeto: true,
+      exchangeEvidence: true,
     }).total, CHECK_SPECS.length - stockOnly);
   });
 
@@ -190,7 +193,9 @@ export function runPreTradeChecklistTests() {
     eq(v.market, 'USDM');
     eq(v.intent, 'ENTRY');
     const stockOnly = CHECK_SPECS.filter(sp => !sp.markets.includes('USDM')).length;
-    eq(v.total, CHECK_SPECS.length - 4 - stockOnly);
+    // 하루제한·국면필터·AI거부권·과매매 네 개에 더해, 거래소 증거 항목
+    // (PROTECTIVE_ORDER)도 물어본 경로에서만 나온다 — 여기서는 다섯이 빠진다.
+    eq(v.total, CHECK_SPECS.length - 5 - stockOnly);
     assert(!v.results.some(r => r.id === 'MARKET_HOURS'),
       '코인은 24시간이라 장 시간 항목이 목록에 있으면 영원히 unknown이 된다');
     assert(!v.results.some(r => r.id === 'TODAY_ENTRY'),
