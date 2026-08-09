@@ -27,6 +27,20 @@ export const AUTO_MERGE_LABEL = 'auto-merge';
 /** 자동으로 합칠 수 있는 유일한 대상 브랜치 */
 export const INTENDED_BASE = 'main';
 
+/**
+ * **이 판정 자신의 검사 이름.**
+ *
+ * 라벨을 붙이면 `pull_request_target`으로 이 워크플로가 깨어나고, 그
+ * 실행은 PR head 커밋에 자기 이름의 check run을 하나 만든다. 그러면
+ * 판정기는 "아직 도는 검사가 있다"며 **자기 자신을 기다린다.** 자기가
+ * 끝나야 통과인데 통과를 판단하는 게 자기라서, 그 실행에서는 절대
+ * 합쳐지지 않는다.
+ *
+ * 그래서 검사 목록에서 자기 것만 빼고 센다. **다른 검사는 하나도 빼지
+ * 않는다** — 이름이 정확히 일치하는 것만이다.
+ */
+export const SELF_CHECK_NAME = 'auto-merge-gate';
+
 export type CheckConclusion =
   | 'success' | 'neutral' | 'skipped'
   | 'failure' | 'cancelled' | 'timed_out' | 'action_required' | 'stale'
@@ -166,8 +180,15 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
   }
 
   // 5. 검사. **최신 head SHA의 것만 본다.**
-  const mine = pr.checks.filter(c => !c.headSha || c.headSha === pr.headSha);
-  const stale = pr.checks.length - mine.length;
+  //
+  //    그리고 자기 자신은 세지 않는다. 자기가 도는 중에 자기를 기다리면
+  //    끝나지 않는다 — 위 SELF_CHECK_NAME 설명 참고.
+  const others = pr.checks.filter(c => c.name !== SELF_CHECK_NAME);
+  const self = pr.checks.length - others.length;
+  if (self > 0) d.push(`자동 머지 판정 자신의 검사 ${self}건은 세지 않았습니다`);
+
+  const mine = others.filter(c => !c.headSha || c.headSha === pr.headSha);
+  const stale = others.length - mine.length;
   if (mine.length === 0 && pr.statuses.length === 0) {
     return {
       merge: false, code: 'CHECKS_MISSING', details: d,
