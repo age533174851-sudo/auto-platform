@@ -79,6 +79,19 @@ export default function AutotradeControl() {
 
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [connId, setConnId] = useState('');
+  // ── 거래소가 이 심볼에서 몇 배까지 허용하는가 ──
+  //
+  // 배율 사다리의 '거래소 최대' 칸을 **아무도 채우지 않고 있었다.** 그래서
+  // 일반 경로는 상한이 없는 것처럼 통과하고, 스트레스 실험은 "몇 배까지
+  // 되는지 모른다"로 매번 막혔다.
+  //
+  // 브라우저가 직접 거래소를 부를 수는 없다(바이낸스는 서명이 필요하고
+  // 키는 서버에만 있다). 서버가 읽어 준 값을 받는다.
+  //
+  // **못 읽으면 null로 둔다.** 여기서 125를 채우면 없는 상한을 있다고
+  // 적는 것이고, 그 숫자로 청산가·증거금이 전부 계산된다.
+  const [venueMax, setVenueMax] = useState<number | null>(null);
+  const [venueMaxNote, setVenueMaxNote] = useState<string>('');
   // 10슬롯 방식: 1회 위험 10% · 배율 상한 100. 이게 기본값이다.
   const [levCap, setLevCap] = useState('100');
   // 실전으로 켤 것인가. **기본은 테스트넷이다** — 화면을 열자마자 실전이
@@ -126,6 +139,36 @@ export default function AutotradeControl() {
       } else setErr(errorTextOf(j, '읽지 못했습니다'));
     } catch (e: any) { setErr(`읽지 못했습니다 (${e?.message || e})`); }
   }, [auth, connId]);
+
+  useEffect(() => {
+    if (!connId || !symbol) { setVenueMax(null); setVenueMaxNote(''); return; }
+    let alive = true;
+    setVenueMax(null);
+    setVenueMaxNote('읽는 중…');
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/exchange/max-leverage?connectionId=${encodeURIComponent(connId)}`
+          + `&symbol=${encodeURIComponent(symbol)}`,
+          { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (!alive) return;
+        const n = Number(j?.maxLeverage);
+        if (j?.ok && Number.isFinite(n) && n > 0) {
+          setVenueMax(n);
+          setVenueMaxNote(String(j?.source || ''));
+        } else {
+          setVenueMax(null);
+          setVenueMaxNote(String(j?.message || j?.error || '거래소 배율 상한을 읽지 못했습니다'));
+        }
+      } catch (e: any) {
+        if (!alive) return;
+        setVenueMax(null);
+        setVenueMaxNote(`거래소 배율 상한을 읽지 못했습니다 (${e?.message || e})`);
+      }
+    })();
+    return () => { alive = false; };
+  }, [auth, connId, symbol]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -573,6 +616,9 @@ export default function AutotradeControl() {
   const ladder = leverageLadder({
     userCap: levCap === '' ? null : Number(levCap),
     stopPct: stopForLadder,
+    // 서버가 거래소에서 실제로 읽은 값. 못 읽었으면 null이 그대로 간다 —
+    // 사다리가 '확인 실패'로 표시하고, 스트레스에서는 막는다.
+    venueCap: venueMax,
     stressTestnet,
   });
 
@@ -1279,10 +1325,20 @@ export default function AutotradeControl() {
                 }}>
                   {/* **모르는 것을 빈칸이나 0으로 두지 않는다.** 필수인데
                       모르면 빨갛게, 없어도 되는 것이면 '제한 없음'이다. */}
-                  {r.known ? `${Math.floor(r.value!)}x` : (r.required ? '확인 실패' : '제한 없음')}
+                  {/* 거래소 최대는 못 읽으면 '제한 없음'이 아니다 — 모르는 것이다.
+                      '제한 없음'으로 적으면 상한이 없다는 뜻이 되어, 사용자가
+                      거래소가 거절할 배율을 그대로 밀어 넣는다. */}
+                  {r.known ? `${Math.floor(r.value!)}x`
+                    : r.id === 'venue' ? '확인 실패'
+                    : (r.required ? '확인 실패' : '제한 없음')}
                 </span>
               </div>
             ))}
+            {venueMaxNote && venueMax == null && (
+              <div style={{ color: T.ylw, fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
+                거래소 최대: {venueMaxNote}
+              </div>
+            )}
             <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 6 }}>
               {/* ── 요청 · 권고 · 실제는 서로 다른 값이다 ──
                   한 칸에 뭉치면 "100배로 켰는데 왜 57배로 나갔나"가 설명되지
