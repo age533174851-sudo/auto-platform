@@ -121,7 +121,8 @@ export function nextCronText(cronUtcHour: number | null | undefined, nowMs: numb
   if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1);
   const mins = Math.round((next.getTime() - nowMs) / 60000);
   const kstHour = (h + 9) % 24;
-  return `다음 실행 약 ${Math.floor(mins / 60)}시간 ${mins % 60}분 뒤 (한국 ${String(kstHour).padStart(2, '0')}:00)`;
+  // '실행'이 아니라 '평가'다 — 주기가 와도 조건이 안 맞으면 주문하지 않는다.
+  return `다음 평가 약 ${Math.floor(mins / 60)}시간 ${mins % 60}분 뒤 (한국 ${String(kstHour).padStart(2, '0')}:00)`;
 }
 
 export function autotradeHealth(input: HealthInput): HealthReport {
@@ -301,7 +302,10 @@ export function autotradeHealth(input: HealthInput): HealthReport {
   } else if (!runs || runs.length === 0) {
     items.push(item('ran', '실제 실행', 'bad',
       '실행 기록이 없습니다 — 아직 한 번도 안 돌았습니다',
-      input.cronUtcHour != null ? nextCronText(input.cronUtcHour, now) : '크론 등록을 확인하세요'));
+      // 고정 시각이 있으면 그것만 적고, 없으면 **없다고 말한다.**
+      // 예전에는 없을 때도 '아침 8시'를 만들어 냈다.
+      input.cronUtcHour != null ? nextCronText(input.cronUtcHour, now)
+        : '서버 실행기가 주기적으로 확인합니다 — 몇 분 뒤에도 비어 있으면 실행기 상태를 보세요'));
     running = false;
   } else {
     const last = runs[0];
