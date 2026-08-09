@@ -1,3 +1,25 @@
+-- ═══════════════════════════════════════════════════════════════
+-- TRAIGO — PHASE B · 전략 선택 (050)
+--
+-- ⚠ **PR #112가 main에 배포된 다음에 실행하세요.**
+--
+-- 왜 순서가 강제되나
+-- ──────────────────
+-- 이 파일은 `(user_id, symbol)` 유니크를 지우고
+-- `(user_id, strategy_id, symbol, connection_id, mode)`로 바꿉니다.
+--
+-- 그런데 **지금 배포된 코드는 아직 `onConflict: 'user_id,symbol'`로
+-- upsert 합니다.** 코드보다 먼저 이걸 넣으면 그 upsert가 기댈 유니크가
+-- 없어져서, 지금 잘 되는 저장 경로가 깨집니다.
+--
+-- 반대로 #112 코드가 먼저 배포돼도 괜찮습니다 — 그쪽은 strategy_id 칸이
+-- 없으면 옛 방식으로 되돌아가 저장하고, 화면에 "PHASE B 미적용"이라고
+-- 알려 줍니다. 그러니 **코드 먼저, SQL 나중**이 안전한 순서입니다.
+--
+-- PHASE A(031·034·035·036·043)를 먼저 넣었는지 확인하세요.
+-- 여러 번 실행해도 안전합니다.
+-- ═══════════════════════════════════════════════════════════════
+
 -- 050_schedule_strategy.sql
 --
 -- **예약에 "무슨 전략인지"를 적는다.**
@@ -90,3 +112,17 @@ COMMENT ON COLUMN autotrade_schedules.strategy_id IS
   '어떤 전략인가. registry.ts의 STRATEGIES에 있는 id만 실행된다 — 모르는 값은 실행하지 않고 막는다';
 COMMENT ON COLUMN autotrade_schedules.strategy_version IS
   '저장 당시의 전략 버전. 지금 코드와 다르면 임의로 최신 버전을 돌리지 않고 막는다 — 사용자가 검증한 것은 그때의 규칙이다';
+
+-- ═══════════════════════════════════════════════════════════════
+-- 확인
+--   1) strategy_id · strategy_version 두 칸이 보이면 칸 추가 완료
+--   2) autotrade_schedules_identity_idx 가 보이면 정체 재설계 완료
+-- ═══════════════════════════════════════════════════════════════
+SELECT column_name FROM information_schema.columns
+ WHERE table_name = 'autotrade_schedules'
+   AND column_name IN ('strategy_id','strategy_version')
+ ORDER BY column_name;
+
+SELECT indexname FROM pg_indexes
+ WHERE tablename = 'autotrade_schedules'
+   AND indexname = 'autotrade_schedules_identity_idx';

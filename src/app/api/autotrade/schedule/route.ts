@@ -402,27 +402,55 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
 
-  const { data, error } = await (sb as any)
+  // ── 배포 순서에 묶이지 않게 한다 ──
+  //
+  // 새 정체(user_id, strategy_id, symbol, connection_id, mode)는 마이그레이션
+  // 050이 만든다. 그런데 **코드 배포와 SQL 적용이 같은 순간에 일어나지
+  // 않는다.** 둘 사이에 반드시 틈이 있고, 그 틈에서 저장이 통째로 실패하면
+  // 사용자는 자동매매를 켤 수 없다.
+  //
+  // 그래서 새 방식으로 먼저 시도하고, **050이 아직이라는 신호가 오면**
+  // 옛 방식(user_id, symbol)으로 되돌아가 저장한다. 되돌아갔다는 사실은
+  // 응답에 남긴다 — 조용히 옛 모양으로 저장하면 "왜 두 번째 전략이
+  // 안 켜지지"의 답이 사라진다.
+  const FULL_SELECT =
+    'id, symbol, mode, enabled, connection_id, strategy_id, strategy_version, leverage_cap, risk_pct, interval_min';
+  const LEGACY_SELECT =
+    'id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct, interval_min';
+
+  const baseRow: Record<string, any> = {
+    user_id: uid, symbol, connection_id: connectionId,
+    mode: modeRaw, enabled, margin_pct: marginPct,
+    leverage_cap: leverageCap, risk_pct: riskPct,
+    ...(intervalMin != null ? { interval_min: intervalMin } : {}),
+  };
+
+  let { data, error } = await (sb as any)
     .from('autotrade_schedules')
     .upsert({
-      user_id: uid, symbol, connection_id: connectionId,
+      ...baseRow,
       strategy_id: sv.spec.id,
       // **저장할 때는 지금 코드의 버전을 적는다.** 사용자가 보낸 값을 그대로
       // 적으면 옛 버전이 영원히 남고, 다음 실행이 매번 VERSION_MISMATCH가 된다.
       strategy_version: sv.spec.version,
-      mode: modeRaw, enabled, margin_pct: marginPct,
-      leverage_cap: leverageCap, risk_pct: riskPct,
-      ...(intervalMin != null ? { interval_min: intervalMin } : {}),
     }, { onConflict: 'user_id,strategy_id,symbol,connection_id,mode' })
-    .select('id, symbol, mode, enabled, connection_id, strategy_id, strategy_version, leverage_cap, risk_pct, interval_min').single();
+    .select(FULL_SELECT).single();
+
+  // 050이 아직인가. 칸이 없거나 그 이름의 제약이 없으면 그 신호다.
+  const needsPhaseB = !!error && /strategy_id|strategy_version|no unique|on conflict|constraint matching/i
+    .test(String(error.message));
+  let phaseBPending = false;
+  if (needsPhaseB) {
+    phaseBPending = true;
+    const retry = await (sb as any)
+      .from('autotrade_schedules')
+      .upsert(baseRow, { onConflict: 'user_id,symbol' })
+      .select(LEGACY_SELECT).single();
+    data = retry.data; error = retry.error;
+  }
 
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
-    // strategy_id 칸이 없으면 마이그레이션 050이 안 돌아간 것이다.
-    // 그 사실을 말해야 사용자가 '저장 실패'만 보고 헤매지 않는다.
-    if (/strategy_id|strategy_version|user_id,strategy_id/i.test(String(error.message))) {
-      return tableMissing('050', 'autotrade_schedules.strategy_id');
-    }
     return NextResponse.json({ ok: false, error: 'upsert_failed', message: error.message }, { status: 500 });
   }
 
@@ -446,6 +474,14 @@ export async function POST(req: NextRequest) {
         + ' — 서버 실행기가 주기적으로 조건을 평가합니다'
       : `${symbol} · ${sv.spec.name} 자동매매를 껐습니다`,
     strategy: { id: sv.spec.id, name: sv.spec.name, version: sv.spec.version },
+    // **되돌아갔으면 그렇게 말한다.** 이 값이 true면 저장은 됐지만 전략
+    // 칸이 비어 있고, 같은 종목에 두 번째 전략을 켤 수 없다.
+    phaseBPending,
+    ...(phaseBPending ? {
+      warning: '마이그레이션 050(PHASE B)이 아직 적용되지 않아 옛 방식으로 저장했습니다 — '
+        + '전략 구분 없이 종목당 한 줄입니다. supabase/migrations/RUN_PHASE_B_strategy.sql을 '
+        + '실행하면 같은 종목에 여러 전략을 켤 수 있습니다',
+    } : {}),
     // **상한이지 목표가 아니다.** 손절이 넓으면 역산 결과가 더 작게 나오고,
     // 그때는 작은 쪽이 나간다. 화면이 이걸 '100배로 나간다'로 읽으면 안 된다.
     // 식은 leverageMath 한 곳에만 둔다. 여기 있던 숫자는 1회 증거금
