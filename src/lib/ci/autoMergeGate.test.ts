@@ -7,7 +7,9 @@
 // 파일은 **통과하는 경로가 하나뿐**이라는 것을 값으로 못 박는다.
 
 import { test, eq, assert } from '../../test/harness';
-import { autoMergeGate, gateComment, AUTO_MERGE_LABEL, type PrFacts } from './autoMergeGate';
+import {
+  autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, type PrFacts,
+} from './autoMergeGate';
 
 /** 모든 조건을 만족하는 상태. 각 테스트는 여기서 하나씩만 망가뜨린다 */
 const good = (over: Partial<PrFacts> = {}): PrFacts => ({
@@ -164,6 +166,51 @@ export function runAutoMergeGateTests() {
       eq(autoMergeGate(good({
         checks: [{ name: 'x', status: 'completed', conclusion: c, headSha: 'abc1234def5678' }],
       })).merge, true, `${c}가 막았다`);
+    }
+  });
+
+  console.log('[자동 머지 — 자기 자신을 기다리지 않는다]');
+
+  test('자기 판정 검사가 도는 중이어도 그것 때문에 막히지 않는다', () => {
+    // 라벨을 붙이면 이 워크플로가 깨어나면서 head 커밋에 자기 이름의
+    // check run을 만든다. 그걸 세면 **자기가 끝나기를 자기가 기다린다.**
+    const v = autoMergeGate(good({
+      checks: [
+        { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+        { name: SELF_CHECK_NAME, status: 'in_progress', conclusion: null, headSha: 'abc1234def5678' },
+      ],
+    }));
+    eq(v.merge, true, v.reason);
+    assert(v.details.some(x => x.includes('자신의 검사')), v.details.join(' / '));
+  });
+
+  test('자기 판정 검사가 실패로 남아 있어도 그것 때문에 막히지 않는다', () => {
+    // 이전 판정 실행이 취소되면 conclusion이 cancelled로 남는다.
+    // 그것을 세면 **다시는 합쳐지지 않는다.**
+    const v = autoMergeGate(good({
+      checks: [
+        { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+        { name: SELF_CHECK_NAME, status: 'completed', conclusion: 'cancelled', headSha: 'abc1234def5678' },
+      ],
+    }));
+    eq(v.merge, true, v.reason);
+  });
+
+  test('자기 검사만 있으면 검사가 없는 것이다 — 합치지 않는다', () => {
+    const v = autoMergeGate(good({
+      checks: [{ name: SELF_CHECK_NAME, status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' }],
+      statuses: [],
+    }));
+    eq(v.merge, false); eq(v.code, 'CHECKS_MISSING');
+  });
+
+  test('이름이 비슷할 뿐인 검사는 빼지 않는다 — 정확히 일치할 때만이다', () => {
+    for (const n of ['gate', 'auto-merge', 'auto-merge-gate-2', 'AUTO-MERGE-GATE']) {
+      const v = autoMergeGate(good({
+        checks: [{ name: n, status: 'completed', conclusion: 'failure', headSha: 'abc1234def5678' }],
+      }));
+      eq(v.merge, false, `${n}이 제외됐다`);
+      eq(v.code, 'CHECKS_FAILED', n);
     }
   });
 

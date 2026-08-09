@@ -20,7 +20,7 @@
 // 옵션은 언젠가 켜지고, 그때 켜는 사람은 왜 그것이 있는지 모른다.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +48,33 @@ function loadGate() {
     '--skipLibCheck', '--esModuleInterop',
   ], { stdio: 'pipe' });
   return join(dir, 'autoMergeGate.js');
+}
+
+/**
+ * **워크플로 job 이름과 판정기의 자기 이름이 실제로 같은가.**
+ *
+ * 둘이 어긋나면 조용히 망가진다 — 판정기가 자기 검사를 못 알아보고
+ * "아직 도는 검사가 있습니다"로 자기를 기다리다가, 라벨을 붙인 그
+ * 실행에서는 영원히 안 합쳐진다. 로그만 보면 정상처럼 보인다.
+ *
+ * 그래서 여기서 파일을 직접 읽어 확인하고, 다르면 **판정을 시작하지도
+ * 않는다.** 조용히 틀리는 쪽이 언제나 더 나쁘다.
+ */
+function assertSelfCheckWired(selfName) {
+  const path = '.github/workflows/auto-merge.yml';
+  if (!existsSync(path)) throw new Error(`${path}을 찾지 못했습니다`);
+  const yml = readFileSync(path, 'utf8');
+  // `jobs:` 아래만 본다 — `on:` 아래 트리거 이름도 같은 들여쓰기라서
+  // 통째로 훑으면 트리거를 job으로 착각한다.
+  const at = yml.search(/^jobs:$/m);
+  if (at < 0) throw new Error(`${path}에 jobs: 블록이 없습니다`);
+  const jobs = [...yml.slice(at).matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)].map(m => m[1]);
+  if (!jobs.includes(selfName)) {
+    throw new Error(
+      `워크플로 job 이름이 판정기의 SELF_CHECK_NAME('${selfName}')과 다릅니다. `
+      + `찾은 job: ${jobs.join(', ') || '(없음)'} — `
+      + '이대로 두면 판정기가 자기 검사를 기다리다 영원히 안 합칩니다.');
+  }
 }
 
 async function api(path, init = {}) {
@@ -128,7 +155,10 @@ async function upsertComment(number, body) {
 
 async function main() {
   const gatePath = loadGate();
-  const { autoMergeGate, gateComment, AUTO_MERGE_LABEL } = await import(`file://${gatePath}`);
+  const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME } =
+    await import(`file://${gatePath}`);
+
+  assertSelfCheckWired(SELF_CHECK_NAME);
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
 
