@@ -22,6 +22,7 @@ import { scheduleConnState, rebindVerdict } from '@/lib/engine/schedulePlan';
 import {
   resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
 } from '@/lib/strategies/registry';
+import { runtimeStateOf, RUNTIME_LABEL } from '@/lib/autotrade/evaluationLoop';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -131,6 +132,20 @@ export async function GET(req: NextRequest) {
     }
   } catch { /* null 그대로 — 화면이 '확인하지 못했습니다'로 적는다 */ }
 
+  // ── 실행기가 마지막으로 온 시각 ──
+  //
+  // `enabled`는 `running`이 아니다. DB에 켜져 있다고 실제로 돌고 있는
+  // 것이 아니다 — 실행기가 죽어 있으면 그건 '설정이 켜져 있다'일 뿐이고,
+  // 화면이 그걸 '감시 중'이라고 적으면 거짓말이 된다.
+  //
+  // **못 읽으면 null이다.** 0이나 '정상'으로 눕히면 멈춘 실행기를 못 본다.
+  const runnerLastSeenMs = (() => {
+    const first = Array.isArray(runs) ? runs[0] : null;
+    const t = first?.started_at ? Date.parse(String(first.started_at)) : NaN;
+    return Number.isFinite(t) ? t : null;
+  })();
+  const nowMs = Date.now();
+
   // ── 예약이 가리키는 연결이 아직 있는가 ──
   //
   // 연결을 다시 등록하면 id가 새로 생긴다. 예약의 id는 그대로 남고, 그
@@ -155,6 +170,21 @@ export async function GET(req: NextRequest) {
       // 이 예약이 지금 코드로 돌 수 있는가. 못 돌면 왜 못 도는지까지.
       strategyRunnable: sv.ok,
       strategyNote: sv.ok ? (sv.spec?.note ?? '') : sv.message,
+      // ── 지금 실제로 어떤 상태인가 ──
+      //
+      // 켜짐/꺼짐만으로는 부족하다. 켜져 있는데 실행기가 안 오면 그건
+      // 감시 중이 아니다. 마지막 평가 결과와 다음 평가 시각까지 함께
+      // 준다 — 화면이 '다음 실행 아침 8시' 같은 없는 사실을 적지 않도록.
+      runtime: runtimeStateOf({
+        nowMs, enabled: r.enabled,
+        lastRunAtMs: r.last_run_at,
+        // 새 값(outcome)이 있으면 그것을, 없으면 옛 값(verdict)을 읽는다.
+        // 옛 기록만 있는 계정에서 상태가 통째로 '확인 못 함'이 되지 않게.
+        lastOutcome: r.last_decision?.outcome ?? r.last_decision?.verdict ?? null,
+        lastReason: r.last_decision?.reason ?? r.last_result ?? null,
+        intervalMin: r.interval_min,
+        runnerLastSeenMs,
+      }),
     };
   });
 
@@ -194,6 +224,20 @@ export async function GET(req: NextRequest) {
     // 화면이 이걸 받으면 '다음 실행 아침 8시'라는 없는 사실을 적는다.
     // 실제 다음 평가 시각은 예약마다 다르고 마지막 평가에서 계산된다.
     cronUtcHour: null,
+    // ── 실행기가 살아 있는가 ──
+    //
+    // **못 읽었으면 null이다.** 빈 값을 '정상'으로 그리면, 멈춘 실행기
+    // 위에서 예약이 켜져 있는 상태가 화면에는 정상으로 보인다.
+    runner: {
+      lastSeenMs: runnerLastSeenMs,
+      lastSeenAt: runnerLastSeenMs == null ? null : new Date(runnerLastSeenMs).toISOString(),
+      note: runnerLastSeenMs == null
+        ? '실행기 실행 기록을 읽지 못했습니다'
+        : `${Math.round((nowMs - runnerLastSeenMs) / 60_000)}분 전에 확인했습니다`,
+    },
+    // 화면이 상태 배지 글자를 서버와 똑같이 쓰게 한다 — 두 곳에 적으면
+    // 한쪽만 바뀌고, 그때 같은 상태가 두 이름으로 보인다.
+    runtimeLabels: RUNTIME_LABEL,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -454,8 +498,62 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'upsert_failed', message: error.message }, { status: 500 });
   }
 
+  // ── 켠 직후 첫 평가 ────────────────────────────────────
+  //
+  // 예전에는 스위치를 켜면 DB에 `enabled=true`만 적히고 **아무 일도
+  // 일어나지 않았다.** 실행기가 오기까지 최대 15분 동안 화면에는 근거가
+  // 없고, 사용자는 "켰는데 왜 아무것도 안 하지"로 스위치를 껐다 켰다 한다.
+  //
+  // 그래서 여기서 한 번 평가한다. **실행기와 같은 함수를 쓴다** —
+  // 여기서 따로 실행기를 부르면 첫 평가와 그 뒤 평가가 서로 다른 검사를
+  // 받게 되고, 그때 한쪽만 고쳐진다.
+  //
+  // 두 번 눌러도 두 번 돌지 않는다: `dueCheck`의 최소 간격(60초)이
+  // 막는다. **평가가 두 번 도는 것은 주문이 두 번 나가는 것과 같다.**
+  let firstEvaluation: any = null;
+  if (enabled && data?.id) {
+    const adminSecret = process.env.ADMIN_SECRET || '';
+    if (!adminSecret) {
+      // 값이 아니라 없다는 사실만 적는다.
+      firstEvaluation = { ran: false, outcome: null,
+        note: 'ADMIN_SECRET이 없어 첫 평가를 부를 수 없습니다 — 실행기가 주기적으로 확인합니다' };
+    } else {
+      try {
+        const { evaluateIfDue } = await import('@/lib/autotrade/evaluationRunner');
+        const origin = new URL(req.url).origin;
+        // 방금 저장한 줄을 그대로 쓴다. `last_run_at`은 upsert가 건드리지
+        // 않으므로 예전 값 그대로이고, 그게 중복 방지의 근거다.
+        const { data: fresh } = await (sb as any)
+          .from('autotrade_schedules')
+          .select('id, user_id, symbol, connection_id, mode, enabled, last_run_at, interval_min, leverage_cap, risk_pct, margin_pct')
+          .eq('id', data.id).maybeSingle();
+        const row = { ...(fresh || {}), ...data, user_id: uid, strategy_version: sv.spec.version };
+        const r = await evaluateIfDue(sb, row as any, {
+          origin, adminSecret,
+          // 화면이 기다리는 시간이다. 넘어가면 평가는 서버에서 계속
+          // 진행될 수 있으므로 **실패라고 적지 않는다.**
+          timeoutMs: 25_000,
+        }, Date.now());
+        firstEvaluation = r.record
+          ? { ran: true, outcome: r.record.outcome, summary: r.record.summary,
+              executed: r.record.executed, strategyId: r.record.strategyId,
+              ...(r.saveError ? { saveError: r.saveError } : {}) }
+          : { ran: false, outcome: null, code: r.due.code, note: r.due.reason };
+      } catch (e: any) {
+        // 첫 평가 실패가 예약 저장을 되돌리지는 않는다. 예약은 이미
+        // 저장됐고 실행기가 주기적으로 본다 — 그 사실을 적는다.
+        firstEvaluation = { ran: false, outcome: null,
+          note: `첫 평가를 부르지 못했습니다 — ${e?.message || e}. 예약은 저장됐고 실행기가 주기적으로 확인합니다` };
+      }
+    }
+  }
+
   return NextResponse.json({
     ok: true, schedule: data,
+    // **켠 직후 무슨 일이 있었는지 화면이 바로 말할 수 있어야 한다.**
+    // outcome은 ENTERED · NO_SIGNAL · BLOCKED · FAILED 중 하나이고,
+    // NO_SIGNAL은 **정상이다** — 조건이 안 맞았을 뿐이다.
+    firstEvaluation,
     // ── 고정 시각을 적지 않는다 ──
     //
     // 예전에는 '다음 실행은 매일 23:00 UTC(한국 08:00)'라고 적었다.

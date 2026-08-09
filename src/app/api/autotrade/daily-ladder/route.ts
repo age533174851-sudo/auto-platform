@@ -20,7 +20,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
-import { decisionRecordOf, type StoredDecision } from '@/lib/ui/autoOverview';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -1039,81 +1038,49 @@ export async function GET(req: NextRequest) {
   const results: any[] = [];
   if (!readError) {
     const origin = new URL(req.url).origin;
+    const { evaluateIfDue } = await import('@/lib/autotrade/evaluationRunner');
+    const nowMs = Date.now();
+
     for (const r of rows) {
-      // 연결이 없으면 부르지 않는다. 진입 엔진이 어차피 거부하지만,
-      // 여기서 걸러야 왜 안 됐는지가 이 표에 남는다.
-      if (!r.connection_id) {
-        results.push({ symbol: r.symbol, ok: false, error: '연결(connectionId)이 지정되지 않았습니다' });
-        await noteRun(sb, r.id, '연결 없음',
-          decisionRecordOf('BLOCKED', '거래소 연결이 지정되지 않았습니다'));
+      // ── 예약 줄이 고른 전략으로 부른다 ──
+      //
+      // 예전에는 이 자리에서 **daily-ladder POST를 직접** 불렀다. 그래서
+      // 예약에 `strategy_id`를 저장해도 실제로 도는 것은 언제나 계단식
+      // 하나였다 — 화면에서 스캘프를 골라도 계단식이 돌았고, 아무 오류도
+      // 안 났다. 이 저장소에서 제일 자주 난 사고("만들어 놓고 배선을
+      // 안 함")가 정확히 여기 있었다.
+      //
+      // 간격 검사·전략 판정·기록은 전부 evaluationRunner 한 곳에 있다.
+      // 예약을 켠 직후의 첫 평가도 **같은 함수**를 쓴다 — 경로가 둘이면
+      // 한쪽만 고쳐진다.
+      const { due, record, saveError } = await evaluateIfDue(sb, r as any, {
+        origin, adminSecret,
+      }, nowMs);
+
+      if (!record) {
+        results.push({
+          symbol: r.symbol, mode: r.mode,
+          // 건너뛴 것은 실패가 아니다. 간격이 안 됐거나 꺼져 있는 것이다.
+          ok: due.code !== 'NO_CONNECTION',
+          skipped: due.code !== 'NO_CONNECTION',
+          code: due.code, detail: due.reason,
+          ...(saveError ? { saveError } : {}),
+        });
         continue;
       }
 
-      // ── 너무 자주 부르면 건너뛴다 ──
-      //
-      // 이 주소를 분 단위로 부를 수 있게 열어 뒀다(앱 타이머·외부 스케줄러).
-      // 간격을 안 보면 조건이 맞는 동안 **매 분 진입**한다 — 그건 자동매매가
-      // 아니라 사고다.
-      //
-      // interval_min이 없으면(마이그레이션 035 전) 하루로 본다. 0으로 읽으면
-      // 간격이 통째로 사라진다.
-      const intervalMin = Number(r.interval_min);
-      const gapMs = (Number.isFinite(intervalMin) && intervalMin >= 1 ? intervalMin : 1440) * 60_000;
-      const lastMs = r.last_run_at ? new Date(r.last_run_at).getTime() : null;
-      if (lastMs != null && Number.isFinite(lastMs) && Date.now() - lastMs < gapMs) {
-        const leftMin = Math.ceil((gapMs - (Date.now() - lastMs)) / 60_000);
-        results.push({ symbol: r.symbol, ok: true, skipped: true,
-          detail: `아직 간격 안 됨 — ${leftMin}분 남음` });
-        // **여기서는 last_run_at을 건드리지 않는다.** 건너뛴 것을 실행으로
-        // 적으면 간격이 매번 갱신돼서 영원히 안 돈다.
-        continue;
-      }
-      try {
-        // **같은 POST 경로를 그대로 부른다.** 여기서 로직을 다시 쓰면
-        // 수동 주문과 자동 주문이 서로 다른 검사를 받게 된다.
-        const res = await fetch(`${origin}/api/autotrade/daily-ladder`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-admin-secret': adminSecret },
-          body: JSON.stringify({
-            userId: r.user_id, symbol: r.symbol,
-            mode: r.mode, connectionId: r.connection_id,
-            // 마이그레이션 034 전이면 undefined다. ?? null로 눕혀서 보내면
-            // 받는 쪽이 '정하지 않음'으로 읽고 기본값을 쓴다 — 0으로 읽히면
-            // 배율 상한 0이 되어 주문이 통째로 막힌다.
-            leverageCap: r.leverage_cap ?? null,
-            riskPct: r.risk_pct ?? null,
-            marginPct: r.margin_pct ?? null,
-          }),
-        });
-        const j = await res.json().catch(() => null);
-        const ok = res.ok && j?.ok !== false;
-        // **'엔진이 답했다'와 '진입했다'는 다르다.**
-        //
-        // 대부분의 날은 조건이 안 맞아 진입하지 않는다. 그건 정상이고
-        // 실패도 아니다. 그런데 둘을 같은 '성공'으로 세면 화면에
-        // "성공 1건"이 뜨고, 사람은 포지션이 생긴 줄 안다.
-        const executed = j?.executed === true;
-        results.push({
-          symbol: r.symbol, mode: r.mode, ok, executed,
-          detail: j?.message || j?.error || j?.reason || null,
-        });
-        const text = ok
-          ? (executed ? `진입: ${j?.message || '체결'}`
-            : `진입 안 함: ${j?.reason || j?.message || '조건 불충족'}`)
-          : (j?.error || `실패 (${res.status})`);
-        // 점수는 문장이 아니라 숫자로 남긴다. j.battle이 없으면(엔진이
-        // 승부까지 가지 못했으면) 점수 칸은 **비운다** — 0으로 채우면
-        // 나중에 이 행을 보는 사람이 엔진이 0점을 매겼다고 읽는다.
-        await noteRun(sb, r.id, text,
-          decisionRecordOf(
-            ok ? (executed ? 'ENTERED' : 'WATCHING') : 'ERROR',
-            j?.reason || j?.message || j?.error || text,
-            j?.battle ?? null));
-      } catch (e: any) {
-        results.push({ symbol: r.symbol, ok: false, error: String(e?.message || e) });
-        await noteRun(sb, r.id, `호출 실패: ${e?.message || e}`,
-          decisionRecordOf('ERROR', String(e?.message || e)));
-      }
+      results.push({
+        symbol: r.symbol, mode: r.mode,
+        strategyId: record.strategyId,
+        // **'평가했다'와 '진입했다'는 다르다.** 대부분의 평가는 진입하지
+        // 않고 그건 정상이다. 둘을 같은 '성공'으로 세면 화면에 "성공 1건"이
+        // 뜨고, 사람은 포지션이 생긴 줄 안다.
+        ok: record.outcome !== 'FAILED',
+        outcome: record.outcome,
+        executed: record.executed,
+        detail: record.summary,
+        ...(saveError ? { saveError } : {}),
+      });
     }
   }
 
@@ -1145,29 +1112,6 @@ export async function GET(req: NextRequest) {
     cronLogError,
     liveTradingLocked: !(await import('@/lib/engine/liveTradingGate')).liveTradingGate().allowed,
   }, { headers: { 'Cache-Control': 'no-store' } });
-}
-
-/**
- * 이 설정이 언제 마지막으로 돌았는지 남긴다.
- *
- * `decision`은 화면이 읽는 **구조화 기록**이다. 칸이 아직 없으면
- * (마이그레이션 043 전) 그 칸만 빼고 다시 쓴다 — 칸 하나 때문에
- * `last_run_at`까지 못 남기면 간격 검사가 통째로 망가져서 조건이 맞는
- * 동안 매 분 진입한다. **기록이 실행보다 중요할 수는 없다.**
- */
-async function noteRun(
-  sb: any, id: string, result: string, decision?: StoredDecision | null,
-): Promise<void> {
-  const base = { last_run_at: new Date().toISOString(), last_result: String(result).slice(0, 300) };
-  try {
-    if (decision) {
-      const { error } = await (sb as any).from('autotrade_schedules')
-        .update({ ...base, last_decision: decision }).eq('id', id);
-      if (!error) return;
-      if (!/last_decision/i.test(String(error.message))) return;
-    }
-    await (sb as any).from('autotrade_schedules').update(base).eq('id', id);
-  } catch { /* 기록 실패가 실행을 되돌리지는 않는다 */ }
 }
 
 /**

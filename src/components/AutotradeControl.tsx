@@ -541,6 +541,9 @@ export default function AutotradeControl() {
   };
 
   const schedules: any[] = Array.isArray(data?.schedules) ? data.schedules : [];
+  // 상태 배지 글자는 **서버가 준 것을 그대로 쓴다.** 같은 표를 화면에도
+  // 적어 두면 한쪽만 바뀌고, 그때 같은 상태가 두 이름으로 보인다.
+  const runtimeLabels = data?.runtimeLabels ?? null;
   const on = schedules.filter(s => s.enabled);
   const runs: any[] = Array.isArray(data?.runs) ? data.runs : [];
   const lastRun = runs[0] || null;
@@ -845,6 +848,28 @@ export default function AutotradeControl() {
                   {s.risk_pct != null ? ` · 위험 ${s.risk_pct}%` : ''}
                   {s.leverage_cap != null ? ` · 상한 ${s.leverage_cap}배` : ''}
                 </div>
+
+                {/* ── 지금 실제로 돌고 있는가 ──
+                    **`켜짐`은 `돌고 있음`이 아니다.** 실행기가 죽어 있으면
+                    켜짐 배지만 초록이고 아무 일도 안 일어난다 — 사용자는
+                    자동매매가 자기 돈을 지키고 있다고 믿는다.
+                    판정은 서버(evaluationLoop)가 한다. 화면이 다시 판단하면
+                    규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다. */}
+                {s.runtime && (
+                  <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.5 }}>
+                    <span style={{
+                      fontWeight: 800,
+                      color: s.runtime.tone === 'good' ? T.grn
+                        : s.runtime.tone === 'bad' ? T.red
+                          : s.runtime.tone === 'warn' ? T.ylw : T.muted,
+                    }}>
+                      {(runtimeLabels as any)?.[s.runtime.state] || s.runtime.state}
+                    </span>
+                    <span style={{ color: T.muted, marginLeft: 6, overflowWrap: 'anywhere' }}>
+                      {s.runtime.reason}
+                    </span>
+                  </div>
+                )}
 
                 {/* ── 연결이 낡았으면 고칠 길을 준다 ──
                     안내만 하고 방법을 안 주면 사용자는 예약을 지우고 다시
