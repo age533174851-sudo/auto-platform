@@ -156,6 +156,40 @@ function parseBrackets(raw: any): BracketTier[] {
     .sort((a: BracketTier, b: BracketTier) => a[0] - b[0]);
 }
 
+/**
+ * 이 심볼에서 거래소가 허용하는 **최대 배율**.
+ *
+ * `getLeverageBrackets`를 쓸 수 없다 — `parseBrackets`가 명목가 구간과
+ * 유지증거금률만 남기고 **`initialLeverage`를 버린다.** 청산가 계산에는
+ * 그 둘이면 되지만, "몇 배까지 되나"는 거기 없다.
+ *
+ * 브래킷은 명목가가 커질수록 상한이 내려간다. 첫 구간(가장 작은 명목가)의
+ * 상한이 그 심볼의 최대다.
+ *
+ * **못 읽으면 null이다.** 125를 채우면 없는 상한을 있다고 적는 것이다.
+ */
+export async function getMaxLeverage(
+  key: string, secret: string, symbol: string, testnet = true,
+): Promise<{ maxLeverage: number | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const data = await fapiSigned('GET', '/fapi/v1/leverageBracket', key, secret, testnet, { symbol: sym });
+    const list = Array.isArray(data) ? data : [data];
+    const hit = list.find((x: any) => String(x?.symbol) === sym) ?? list[0];
+    const arr = Array.isArray(hit?.brackets) ? hit.brackets : [];
+    let best: number | null = null;
+    for (const b of arr) {
+      const lev = Number(b?.initialLeverage);
+      if (Number.isFinite(lev) && lev > 0 && (best == null || lev > best)) best = lev;
+    }
+    return best == null
+      ? { maxLeverage: null, error: `${sym}의 브래킷에서 최대 배율을 읽지 못했습니다` }
+      : { maxLeverage: best, error: null };
+  } catch (e: any) {
+    return { maxLeverage: null, error: e?.message || '레버리지 브래킷 조회 실패' };
+  }
+}
+
 export async function getLeverageBrackets(
   key: string, secret: string, testnet = true, symbol?: string,
 ) {

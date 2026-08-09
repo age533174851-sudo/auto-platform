@@ -540,6 +540,14 @@ export interface GateContractSpec {
   orderSizeMax: number | null;
   /** 가격 호가 단위. 못 읽으면 null */
   orderPriceRound: number | null;
+  /**
+   * 이 계약에서 거래소가 허용하는 **최대 배율**. 못 읽으면 null.
+   *
+   * 이 칸이 없어서 배율 사다리의 '거래소 최대'가 늘 비어 있었다. 그러면
+   * 스트레스 실험에서 "몇 배까지 되는지 모른다"로 막히고, 일반 경로에서는
+   * 반대로 **상한이 없는 것처럼** 통과한다. 둘 다 사실이 아니다.
+   */
+  leverageMax: number | null;
 }
 
 const _gateSpecCache: Record<string, GateContractSpec & { at: number }> = {};
@@ -569,6 +577,7 @@ export async function getGateContractSpec(
     const minRaw = Number(c?.order_size_min);
     const maxRaw = Number(c?.order_size_max);
     const roundRaw = Number(c?.order_price_round);
+    const levRaw = Number(c?.leverage_max);
 
     const spec: GateContractSpec & { at: number } = {
       contract: String(c?.name || name),
@@ -578,6 +587,9 @@ export async function getGateContractSpec(
       orderSizeMin: Number.isFinite(minRaw) && minRaw > 0 ? minRaw : 1,
       orderSizeMax: Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null,
       orderPriceRound: Number.isFinite(roundRaw) && roundRaw > 0 ? roundRaw : null,
+      // **못 읽으면 null이다.** 기본값을 채우면 없는 상한을 있다고 적거나
+      // 있는 상한을 지운다.
+      leverageMax: Number.isFinite(levRaw) && levRaw > 0 ? levRaw : null,
       at: Date.now(),
     };
     _gateSpecCache[cacheKey] = spec;
