@@ -1,41 +1,57 @@
 -- ═══════════════════════════════════════════════════════════════
--- TRAIGO — PHASE A · 지금 배포된 코드가 요구하는 것까지만
+-- TRAIGO — 자동매매 예약 표 · PHASE A
 --
--- **Supabase 대시보드 → SQL Editor에 통째로 붙여넣고 Run** 하세요.
+-- 지금 배포돼 있는 코드(main)와 호환되는 스키마만 담았습니다.
 --
--- 이걸로 무엇이 풀리나
--- ────────────────────
+-- ⚠ 이 파일에 **없는 것** — 그리고 없어야 하는 이유
+-- ─────────────────────────────────────────────────
+-- 마이그레이션 050(strategy_id · strategy_version · 예약 정체 재설계)은
+-- **일부러 뺐습니다.**
+--
+-- 050은 `(user_id, symbol)` 유니크를 지우고
+-- `(user_id, strategy_id, symbol, connection_id, mode)`로 바꿉니다.
+-- 그런데 지금 배포된 저장 경로는 아직
+--
+--     .upsert(..., { onConflict: 'user_id,symbol' })
+--
+-- 를 씁니다. 코드보다 먼저 050을 넣으면 그 upsert가 기댈 유니크가
+-- 사라져서 **지금 잘 되는 저장이 깨집니다.**
+--
+-- 050은 PR #112가 배포된 뒤에 `RUN_PHASE_B_strategy.sql`로 따로 넣습니다.
+-- 이 파일은 그때까지 안전합니다.
+--
+-- 무엇이 풀리나
+-- ─────────────
 -- 화면 아래의 "autotrade_schedules 표가 없습니다 — 마이그레이션 031을
 -- 적용하세요". 그 표가 없으면 예약을 켜도 저장할 곳이 없어서, 화면에서
 -- 무엇을 눌러도 여기서 막힙니다.
 --
--- **031만 넣으면 조회가 깨집니다**
--- ────────────────────────────────
--- 지금 배포된 GET은 leverage_cap · risk_pct · interval_min · margin_pct ·
--- last_decision을 한 번에 select 합니다. 그중 margin_pct와 last_decision만
--- '없으면 빼고 재시도'하고, 나머지 셋은 없으면 **조회가 통째로 실패**해서
--- 화면이 "예약을 읽지 못했습니다"만 띄웁니다.
--- 그래서 031·034·035·036·043을 같이 넣습니다.
+-- 031만 넣으면 안 되는 이유
+-- ─────────────────────────
+-- 지금 배포된 GET은 이 다섯 칸을 한 번에 select 합니다:
 --
--- 여기 없는 것 — 그리고 그 이유
--- ─────────────────────────────
--- **050(strategy_id · 예약 정체 재설계)은 이 파일에 없습니다.**
--- 050은 지금의 (user_id, symbol) 유니크를 **지웁니다.** 그런데 현재
--- 배포된 코드는 아직 `onConflict: 'user_id,symbol'`로 upsert 합니다 —
--- 코드보다 먼저 050을 넣으면 **지금 잘 되는 저장 경로가 깨집니다.**
+--     leverage_cap · risk_pct · interval_min · margin_pct · last_decision
 --
--- 050은 PR #112가 main에 배포된 다음에 `RUN_PHASE_B_strategy.sql`로
--- 따로 실행하세요.
+-- 그중 **margin_pct와 last_decision만** '없으면 빼고 재시도'합니다.
+-- 나머지 셋(leverage_cap · risk_pct · interval_min)이 없으면 조회가
+-- 통째로 실패해서, 화면은 "예약을 읽지 못했습니다"만 띄웁니다.
 --
--- 여러 번 실행해도 안전합니다
--- ───────────────────────────
--- 전부 IF NOT EXISTS / ADD COLUMN IF NOT EXISTS 입니다.
+-- 그래서 031 · 034 · 035 · 036 · 043을 같이 넣습니다.
+--
+-- 실행 방법
+-- ─────────
+-- Supabase 대시보드 → SQL Editor → 새 쿼리 → 아래 전체 붙여넣기 → Run
+--
+-- 여러 번 실행해도 안전합니다 — 전부 IF NOT EXISTS /
+-- ADD COLUMN IF NOT EXISTS / DROP POLICY IF EXISTS 입니다.
 -- ═══════════════════════════════════════════════════════════════
 
 
 -- ───────────────────────────────────────────────────────────────
--- 031_autotrade_schedule.sql — 표를 만든다 — (user_id, symbol) 유니크
+-- [1/5] 031_autotrade_schedule.sql
+--     표를 만든다 — id · user_id · symbol · connection_id · mode · enabled · last_run_at · last_result + (user_id, symbol) 유니크 + RLS
 -- ───────────────────────────────────────────────────────────────
+
 -- 031_autotrade_schedule.sql
 --
 -- **자동매매를 누구에게 무엇으로 돌릴 것인가.**
@@ -103,9 +119,12 @@ DROP POLICY IF EXISTS autotrade_schedules_owner ON autotrade_schedules;
 CREATE POLICY autotrade_schedules_owner ON autotrade_schedules
   FOR ALL TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
 
+
 -- ───────────────────────────────────────────────────────────────
--- 034_autotrade_sizing.sql — leverage_cap · risk_pct
+-- [2/5] 034_autotrade_sizing.sql
+--     leverage_cap · risk_pct
 -- ───────────────────────────────────────────────────────────────
+
 -- 034_autotrade_sizing.sql
 --
 -- **자동매매의 크기와 배율을 화면에서 정한다.**
@@ -151,9 +170,12 @@ ALTER TABLE autotrade_schedules
   ADD CONSTRAINT autotrade_schedules_risk_chk
   CHECK (risk_pct IS NULL OR (risk_pct > 0 AND risk_pct <= 100));
 
+
 -- ───────────────────────────────────────────────────────────────
--- 035_autotrade_interval.sql — interval_min
+-- [3/5] 035_autotrade_interval.sql
+--     interval_min
 -- ───────────────────────────────────────────────────────────────
+
 -- 035_autotrade_interval.sql
 --
 -- **얼마나 자주 진입을 볼 것인가.**
@@ -184,9 +206,12 @@ ALTER TABLE autotrade_schedules
   ADD CONSTRAINT autotrade_schedules_interval_chk
   CHECK (interval_min >= 1 AND interval_min <= 10080);
 
+
 -- ───────────────────────────────────────────────────────────────
--- 036_autotrade_margin_pct.sql — margin_pct
+-- [4/5] 036_autotrade_margin_pct.sql
+--     margin_pct
 -- ───────────────────────────────────────────────────────────────
+
 -- 036_autotrade_margin_pct.sql
 --
 -- **"100배로 10%씩 10번"을 실제로 돌리기 위한 칸.**
@@ -224,9 +249,12 @@ ALTER TABLE autotrade_schedules
   ADD CONSTRAINT autotrade_schedules_margin_chk
   CHECK (margin_pct IS NULL OR (margin_pct > 0 AND margin_pct <= 100));
 
+
 -- ───────────────────────────────────────────────────────────────
--- 043_autotrade_last_decision.sql — last_decision
+-- [5/5] 043_autotrade_last_decision.sql
+--     last_decision
 -- ───────────────────────────────────────────────────────────────
+
 -- 043_autotrade_last_decision.sql
 --
 -- **판단 결과를 문장에서 다시 읽어내고 있었다.**
@@ -279,11 +307,36 @@ COMMENT ON COLUMN autotrade_schedules.last_decision IS
 
 
 -- ═══════════════════════════════════════════════════════════════
--- 확인 — 다섯 칸이 다 나오면 끝난 것입니다.
--- (strategy_id는 여기서 안 나오는 게 정상입니다. PHASE B에서 들어갑니다.)
+-- 확인 1 — 칸이 다 들어갔는가. 다섯 줄이 나오면 끝난 것입니다.
 -- ═══════════════════════════════════════════════════════════════
-SELECT column_name
+SELECT column_name, data_type
   FROM information_schema.columns
  WHERE table_name = 'autotrade_schedules'
    AND column_name IN ('leverage_cap','risk_pct','interval_min','margin_pct','last_decision')
  ORDER BY column_name;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 확인 2 — 지금 코드가 기대는 유니크가 그대로 있는가.
+--
+-- `user_id, symbol` 두 칸짜리 유니크가 **한 줄 나와야 합니다.**
+-- 안 나오면 이미 050이 적용된 것이고, 그 상태에서 지금 배포된 코드는
+-- 예약을 저장하지 못합니다.
+-- ═══════════════════════════════════════════════════════════════
+SELECT con.conname,
+       (SELECT string_agg(att.attname, ', ' ORDER BY att.attname)
+          FROM unnest(con.conkey) AS k(attnum)
+          JOIN pg_attribute att
+            ON att.attrelid = con.conrelid AND att.attnum = k.attnum) AS columns
+  FROM pg_constraint con
+  JOIN pg_class rel ON rel.oid = con.conrelid
+ WHERE rel.relname = 'autotrade_schedules'
+   AND con.contype = 'u';
+
+-- ═══════════════════════════════════════════════════════════════
+-- 확인 3 — strategy_id는 **안 나오는 게 정상입니다.**
+-- 0행이면 이 파일이 의도대로 050을 건드리지 않은 것입니다.
+-- ═══════════════════════════════════════════════════════════════
+SELECT column_name
+  FROM information_schema.columns
+ WHERE table_name = 'autotrade_schedules'
+   AND column_name IN ('strategy_id','strategy_version');
