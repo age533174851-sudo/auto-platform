@@ -79,6 +79,19 @@ export default function AutotradeControl() {
 
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [connId, setConnId] = useState('');
+  // ── 거래소가 이 심볼에서 몇 배까지 허용하는가 ──
+  //
+  // 배율 사다리의 '거래소 최대' 칸을 **아무도 채우지 않고 있었다.** 그래서
+  // 일반 경로는 상한이 없는 것처럼 통과하고, 스트레스 실험은 "몇 배까지
+  // 되는지 모른다"로 매번 막혔다.
+  //
+  // 브라우저가 직접 거래소를 부를 수는 없다(바이낸스는 서명이 필요하고
+  // 키는 서버에만 있다). 서버가 읽어 준 값을 받는다.
+  //
+  // **못 읽으면 null로 둔다.** 여기서 125를 채우면 없는 상한을 있다고
+  // 적는 것이고, 그 숫자로 청산가·증거금이 전부 계산된다.
+  const [venueMax, setVenueMax] = useState<number | null>(null);
+  const [venueMaxNote, setVenueMaxNote] = useState<string>('');
   // 10슬롯 방식: 1회 위험 10% · 배율 상한 100. 이게 기본값이다.
   const [levCap, setLevCap] = useState('100');
   // 실전으로 켤 것인가. **기본은 테스트넷이다** — 화면을 열자마자 실전이
@@ -126,6 +139,36 @@ export default function AutotradeControl() {
       } else setErr(errorTextOf(j, '읽지 못했습니다'));
     } catch (e: any) { setErr(`읽지 못했습니다 (${e?.message || e})`); }
   }, [auth, connId]);
+
+  useEffect(() => {
+    if (!connId || !symbol) { setVenueMax(null); setVenueMaxNote(''); return; }
+    let alive = true;
+    setVenueMax(null);
+    setVenueMaxNote('읽는 중…');
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/exchange/max-leverage?connectionId=${encodeURIComponent(connId)}`
+          + `&symbol=${encodeURIComponent(symbol)}`,
+          { headers: { Authorization: auth } });
+        const j = await r.json();
+        if (!alive) return;
+        const n = Number(j?.maxLeverage);
+        if (j?.ok && Number.isFinite(n) && n > 0) {
+          setVenueMax(n);
+          setVenueMaxNote(String(j?.source || ''));
+        } else {
+          setVenueMax(null);
+          setVenueMaxNote(String(j?.message || j?.error || '거래소 배율 상한을 읽지 못했습니다'));
+        }
+      } catch (e: any) {
+        if (!alive) return;
+        setVenueMax(null);
+        setVenueMaxNote(`거래소 배율 상한을 읽지 못했습니다 (${e?.message || e})`);
+      }
+    })();
+    return () => { alive = false; };
+  }, [auth, connId, symbol]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -449,15 +492,31 @@ export default function AutotradeControl() {
     finally { setBusy(false); setPhase(''); }
   };
 
-  const toggle = async (row: any) => {
+  /**
+   * 예약을 켜고 끈다.
+   *
+   * `rebindTo`를 주면 **이 예약의 연결을 그것으로 바꾼다.** 연결을 다시
+   * 등록하면 id가 새로 생기는데 예약은 옛 id를 그대로 들고 있어서, 그
+   * 상태로 스위치를 누르면 낡은 id가 그대로 나가 404로 끝난다 —
+   * 켤 수도 끌 수도 없는 줄이 된다.
+   *
+   * **대신 골라 주지 않는다.** 화면에서 지금 고른 연결만 쓴다. 계좌가
+   * 둘 이상이면 어느 쪽으로 주문이 나가는지 모르는 채 바뀌기 때문이다.
+   */
+  const toggle = async (row: any, rebindTo?: string) => {
     setBusy(true); setMsg(null);
     try {
       const r = await fetch('/api/autotrade/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
         body: JSON.stringify({
-          symbol: row.symbol, connectionId: row.connection_id,
-          mode: row.mode, enabled: !row.enabled,
+          symbol: row.symbol,
+          connectionId: rebindTo || row.connection_id,
+          ...(rebindTo ? { rebind: true } : {}),
+          mode: row.mode,
+          // 재연결은 **연결만 바꾼다.** 켜짐 상태를 뒤집지 않는다 —
+          // 껐던 예약이 연결을 고쳤다고 저절로 켜지면 안 된다.
+          enabled: rebindTo ? !!row.enabled : !row.enabled,
           // 켜고 끌 때 크기 설정을 **지우지 않는다.** 안 실어 보내면
           // null로 덮여서, 껐다 켠 것만으로 배율 상한이 사라진다.
           leverageCap: row.leverage_cap ?? undefined,
@@ -564,10 +623,6 @@ export default function AutotradeControl() {
   // 값이다.** 하나로 뭉뚱그리는 동안 화면은 71배가 한계라고 계산해 놓고
   // 100배를 그대로 허용했다.
   const stopForLadder = stopPctForLeverage(Number(levCap), Number(riskPct), Number(marginPct));
-  const ladder = leverageLadder({
-    userCap: levCap === '' ? null : Number(levCap),
-    stopPct: stopForLadder,
-  });
 
   // 이 설정이 어느 위험 등급인가. **10%/100배는 매매 설정이 아니다.**
   const tierNow: TierLimit = (() => {
@@ -579,10 +634,27 @@ export default function AutotradeControl() {
     }
     return TIER_LIMITS.STRESS;
   })();
-  const tierCheck = tierAllowedIn(
-    (Object.keys(TIER_LIMITS) as RiskTier[]).find(k => TIER_LIMITS[k] === tierNow) ?? 'STRESS',
-    live ? 'LIVE' : 'TESTNET',
-  );
+  const tierKey: RiskTier =
+    (Object.keys(TIER_LIMITS) as RiskTier[]).find(k => TIER_LIMITS[k] === tierNow) ?? 'STRESS';
+  const tierCheck = tierAllowedIn(tierKey, live ? 'LIVE' : 'TESTNET');
+
+  // ── 테스트넷 스트레스면 깎지 않는다 ──
+  //
+  // 사용자가 100배를 명시했는데 청산안전 상한이 57배라고 57배로 낮춰
+  // 주문하면, 그건 실험이 아니라 다른 설정으로 매매한 것이다. 화면에는
+  // '이번 주문 57배'가 뜨고, 보려던 100배의 거동은 어디에도 안 남는다.
+  //
+  // **실전에서는 절대 켜지 않는다.** 등급 관문이 이미 막지만 여기서도
+  // `!live`를 같이 본다 — 조건이 한 곳에만 있으면 언젠가 그 한 곳이 바뀐다.
+  const stressTestnet = !live && tierKey === 'STRESS';
+  const ladder = leverageLadder({
+    userCap: levCap === '' ? null : Number(levCap),
+    stopPct: stopForLadder,
+    // 서버가 거래소에서 실제로 읽은 값. 못 읽었으면 null이 그대로 간다 —
+    // 사다리가 '확인 실패'로 표시하고, 스트레스에서는 막는다.
+    venueCap: venueMax,
+    stressTestnet,
+  });
 
   const toneColor = (t: Tone): string =>
     t === 'good' ? T.grn : t === 'bad' ? T.red : t === 'live' ? T.red
@@ -764,10 +836,39 @@ export default function AutotradeControl() {
                   }}>{s.mode}</span>
                 </div>
                 <div style={{ color: T.muted, fontSize: 10, marginTop: 2 }}>
-                  {s.connection_id ? '연결 있음' : <span style={{ color: T.red }}>연결 없음 — 주문을 낼 수 없습니다</span>}
+                  {/* 서버가 판정한 상태를 그대로 쓴다. 화면이 다시 판단하면
+                      규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다. */}
+                  {s.connectionState === 'OK' ? '연결 있음'
+                    : s.connectionState === 'UNKNOWN'
+                      ? <span style={{ color: T.ylw }}>{s.connectionNote}</span>
+                      : <span style={{ color: T.red }}>{s.connectionNote || '연결 없음 — 주문을 낼 수 없습니다'}</span>}
                   {s.risk_pct != null ? ` · 위험 ${s.risk_pct}%` : ''}
                   {s.leverage_cap != null ? ` · 상한 ${s.leverage_cap}배` : ''}
                 </div>
+
+                {/* ── 연결이 낡았으면 고칠 길을 준다 ──
+                    안내만 하고 방법을 안 주면 사용자는 예약을 지우고 다시
+                    만든다. 그러면 설정도 이력도 같이 사라진다.
+                    **지금 위에서 고른 연결로만** 바꾼다 — 대신 고르지 않는다. */}
+                {s.needsRebind && (
+                  <div style={{ marginTop: 5, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => toggle(s, connId)}
+                      disabled={busy || !connId}
+                      style={{
+                        fontSize: 9.5, fontWeight: 800, padding: '4px 8px', borderRadius: 6,
+                        border: `1px solid ${T.ylw}`, background: 'transparent', color: T.ylw,
+                        cursor: busy || !connId ? 'default' : 'pointer',
+                        opacity: busy || !connId ? 0.5 : 1,
+                      }}
+                    >지금 고른 연결로 재연결</button>
+                    <span style={{ fontSize: 9, color: T.muted }}>
+                      {connId
+                        ? '아래에서 고른 연결로 이 예약의 연결만 바꿉니다 (켜짐 상태는 그대로)'
+                        : '아래에서 연결을 먼저 고르세요 — 대신 골라 주지 않습니다'}
+                    </span>
+                  </div>
+                )}
 
                 {/* ── 언제 다음에 보는가 ──
                     예전에는 이 자리가 없고 맨 아래에 "크론은 매일 23:00
@@ -1261,13 +1362,40 @@ export default function AutotradeControl() {
                 }}>
                   {/* **모르는 것을 빈칸이나 0으로 두지 않는다.** 필수인데
                       모르면 빨갛게, 없어도 되는 것이면 '제한 없음'이다. */}
-                  {r.known ? `${Math.floor(r.value!)}x` : (r.required ? '확인 실패' : '제한 없음')}
+                  {/* 거래소 최대는 못 읽으면 '제한 없음'이 아니다 — 모르는 것이다.
+                      '제한 없음'으로 적으면 상한이 없다는 뜻이 되어, 사용자가
+                      거래소가 거절할 배율을 그대로 밀어 넣는다. */}
+                  {r.known ? `${Math.floor(r.value!)}x`
+                    : r.id === 'venue' ? '확인 실패'
+                    : (r.required ? '확인 실패' : '제한 없음')}
                 </span>
               </div>
             ))}
+            {venueMaxNote && venueMax == null && (
+              <div style={{ color: T.ylw, fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
+                거래소 최대: {venueMaxNote}
+              </div>
+            )}
             <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 6 }}>
+              {/* ── 요청 · 권고 · 실제는 서로 다른 값이다 ──
+                  한 칸에 뭉치면 "100배로 켰는데 왜 57배로 나갔나"가 설명되지
+                  않는다. 세 숫자를 나란히 둔다. */}
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800, flex: 1 }}>이번 주문</span>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1 }}>요청 배율</span>
+                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800 }}>
+                  {ladder.requested != null ? `${ladder.requested}x` : '—'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+                <span style={{ color: T.muted, fontSize: 10, flex: 1 }}>청산안전 권고</span>
+                <span style={{ color: T.muted, fontSize: 11, fontWeight: 800 }}>
+                  {ladder.liquidationSafeCap != null ? `${ladder.liquidationSafeCap}x` : '확인 실패'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
+                <span style={{ color: T.txt, fontSize: 11, fontWeight: 800, flex: 1 }}>
+                  {stressTestnet ? '실제 주문 요청' : '이번 주문'}
+                </span>
                 <span style={{ color: ladder.blocked ? T.red : T.grn, fontSize: 14, fontWeight: 900 }}>
                   {ladder.allowed != null ? `${ladder.allowed}x` : '불가'}
                 </span>
@@ -1275,6 +1403,12 @@ export default function AutotradeControl() {
               <div style={{ color: ladder.blocked ? T.red : T.muted, fontSize: 9.5, marginTop: 4, lineHeight: 1.55 }}>
                 {ladder.blocked ? `🚫 ${ladder.blockReason}` : ladder.summary}
               </div>
+              {/* 스트레스 실험이라 깎지 않고 넘어간 것들. **경고이지 실패가 아니다.** */}
+              {ladder.warnings.map((w, i) => (
+                <div key={i} style={{ color: T.ylw, fontSize: 9.5, marginTop: 3, lineHeight: 1.55 }}>
+                  ⚠ {w}
+                </div>
+              ))}
               {ladder.liquidationTheoreticalCap != null && !ladder.blocked && (
                 <div style={{ color: T.muted, fontSize: 9, marginTop: 3, lineHeight: 1.5 }}>
                   이론 최대 {Math.floor(ladder.liquidationTheoreticalCap)}배 ·

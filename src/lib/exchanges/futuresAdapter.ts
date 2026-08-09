@@ -277,25 +277,6 @@ export async function futuresCloseAll(
   };
 }
 
-/**
- * **포지션을 닫은 뒤 남은 보호 주문을 지운다.**
- *
- * 왜 필요한가
- * ───────────
- * 손절은 포지션을 닫는 주문이다. 그런데 포지션이 이미 없어진 뒤에도 그
- * 주문이 거래소에 남아 있으면, 가격이 트리거에 닿는 순간 **반대 방향으로
- * 새 포지션이 열린다.** 닫으려고 누른 버튼이 결과적으로 포지션을 여는 것이다.
- *
- * 바이낸스의 `closePosition: true` 주문은 포지션이 사라지면 거래소가
- * 알아서 취소한다. 그런데 이 저장소는 그게 거절될 때(-4120) **수량 기반
- * reduceOnly**로 한 번 더 시도한다 — 그쪽은 자동으로 안 없어진다.
- * Gate의 `price_orders`도 남는다.
- *
- * 언제 부르는가
- * ─────────────
- * **전량이 닫힌 것을 확인한 뒤에만.** 부분 청산 뒤에 지우면 남은 포지션이
- * 보호 없이 남는다 — 닫으려다 더 위험해진다.
- */
 export interface ProtectiveOrdersResult {
   /** 조회 자체가 성공했는가. false면 수가 전부 null이고 '없음'이 아니다 */
   ok: boolean;
@@ -491,6 +472,84 @@ export async function futuresProtectiveOrders(
   }
 }
 
+export interface MaxLeverageResult {
+  /** 거래소가 이 심볼에서 허용하는 최대 배율. **못 읽으면 null** */
+  maxLeverage: number | null;
+  /** 어디서 읽었는지. 화면이 근거를 적을 수 있어야 한다 */
+  source: string;
+  error: string | null;
+}
+
+/**
+ * **이 심볼에서 거래소가 몇 배까지 허용하는가.**
+ *
+ * 왜 없었나 — 그리고 그게 왜 문제인가
+ * ───────────────────────────────────
+ * 배율 사다리에 '거래소 최대' 칸은 처음부터 있었는데 **아무도 채우지
+ * 않았다.** 그래서 두 가지가 동시에 일어났다:
+ *
+ *   · 일반 경로에서는 상한이 **없는 것처럼** 통과했다 — 거래소가 거절할
+ *     배율로 주문이 나가고, 화면에는 그 이유가 안 남는다
+ *   · 스트레스 실험에서는 "몇 배까지 되는지 모른다"로 **매번 막혔다**
+ *
+ * 둘 다 "확인하지 않았다"에서 나온 결과다.
+ *
+ * **못 읽으면 null이다.** 125를 채우면 없는 상한을 있다고 적는 것이고,
+ * 그 숫자로 청산가·증거금이 전부 계산된다.
+ */
+export async function futuresMaxLeverage(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean, symbol: string,
+): Promise<MaxLeverageResult> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const gp = await import('./gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) {
+        return { maxLeverage: null, source: 'gate', error: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
+      }
+      // 계약 규격에 들어 있다. **서명이 필요 없는 공개 조회다** — 키가
+      // 없거나 권한이 부족해도 이 값은 읽을 수 있어야 한다.
+      const spec = await gf.getGateContractSpec(contract, testnet);
+      if (!spec) {
+        return { maxLeverage: null, source: `gate:${contract}`,
+          error: 'Gate 계약 규격을 읽지 못했습니다' };
+      }
+      if (spec.leverageMax == null) {
+        return { maxLeverage: null, source: `gate:${contract}`,
+          error: 'Gate 계약 규격에 leverage_max가 없습니다' };
+      }
+      return { maxLeverage: spec.leverageMax, source: `gate:${contract}`, error: null };
+    }
+
+    const bf = await import('./binanceFutures');
+    const sym = symbol.toUpperCase().replace('/', '');
+    const r = await bf.getMaxLeverage(key, secret, sym, testnet);
+    return { maxLeverage: r.maxLeverage, source: `binance:${sym}`, error: r.error };
+  } catch (e: any) {
+    return { maxLeverage: null, source: ex, error: String(e?.message || e) };
+  }
+}
+
+/**
+ * **포지션을 닫은 뒤 남은 보호 주문을 지운다.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 손절은 포지션을 닫는 주문이다. 그런데 포지션이 이미 없어진 뒤에도 그
+ * 주문이 거래소에 남아 있으면, 가격이 트리거에 닿는 순간 **반대 방향으로
+ * 새 포지션이 열린다.** 닫으려고 누른 버튼이 결과적으로 포지션을 여는 것이다.
+ *
+ * 바이낸스의 `closePosition: true` 주문은 포지션이 사라지면 거래소가
+ * 알아서 취소한다. 그런데 이 저장소는 그게 거절될 때(-4120) **수량 기반
+ * reduceOnly**로 한 번 더 시도한다 — 그쪽은 자동으로 안 없어진다.
+ * Gate의 `price_orders`도 남는다.
+ *
+ * 언제 부르는가
+ * ─────────────
+ * **전량이 닫힌 것을 확인한 뒤에만.** 부분 청산 뒤에 지우면 남은 포지션이
+ * 보호 없이 남는다 — 닫으려다 더 위험해진다.
+ */
 export interface CancelProtectionResult {
   /** 지운 건수. 못 세면 null */
   cancelled: number | null;

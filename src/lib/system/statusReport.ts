@@ -254,11 +254,16 @@ export function autotradeStatus(p: AutotradeProbe, nowMs: number): StatusItem {
   if (p.lastRunMs == null) {
     return { id, label, health: 'warn',
       detail: '설정은 끝났는데 아직 한 번도 실행된 기록이 없습니다',
-      action: '크론은 하루 1회(23:00 UTC · 한국 08:00)입니다. 그 시각이 지난 뒤에도 비어 있으면 재배포를 확인하세요' };
+      // **하루 1회가 아니다.** 실행기는 주기적으로 예약을 확인한다.
+      // 고정 시각을 적으면 "그 시각까지는 안 도는 게 정상"으로 읽힌다.
+      action: '서버 실행기가 주기적으로 예약을 확인합니다. 몇 분 뒤에도 기록이 비어 있으면 실행기 상태를 확인하세요' };
   }
   const gap = nowMs - p.lastRunMs;
-  // 하루 1회 + Vercel의 한 시간 오차 + 여유
-  const stale = gap > 30 * 3_600_000;
+  // **하루 1회 전제로 잡아 둔 값이다.** 실행기는 그보다 자주 도는데
+  // 30시간을 기준으로 두면 반나절 멈춰 있어도 '정상'으로 보인다.
+  // 다만 예약마다 확인 주기가 달라서 여기서 정확한 값을 쓸 수 없다 —
+  // 예약별 판정은 화면(nextRun)이 하고, 여기서는 확실히 이상한 구간만 잡는다.
+  const stale = gap > 6 * 3_600_000;
   if (p.lastResult === 'failed') {
     return bad(`마지막 실행이 실패했습니다 (${ago(p.lastRunMs, nowMs)})`,
       '실행기록에서 실패 사유를 확인하세요');

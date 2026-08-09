@@ -18,6 +18,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { leverageNote } from '@/lib/engine/leverageMath';
 import { liveTradingGate } from '@/lib/engine/liveTradingGate';
+import { scheduleConnState, rebindVerdict } from '@/lib/engine/schedulePlan';
+import {
+  resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
+} from '@/lib/strategies/registry';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -113,20 +117,63 @@ export async function GET(req: NextRequest) {
 
   // 고를 수 있는 연결. 화면이 이 목록에서만 고르게 해야 '없는 연결 id'가
   // 저장되는 일이 없다.
-  let connections: any[] = [];
+  //
+  // **못 읽은 것을 빈 배열로 두지 않는다.** 빈 배열이면 아래 판정이 모든
+  // 예약을 '연결 없음(낡음)'으로 적고, 사용자는 멀쩡한 예약을 다시 연결한다.
+  let connections: any[] | null = null;
   try {
-    const { data } = await (sb as any)
+    const { data, error: cErr } = await (sb as any)
       .from('exchange_connections')
       .select('id, exchange_id, label, is_testnet')
       .eq('user_id', uid);
-    connections = (data || []).filter((c: any) => String(c.exchange_id).toLowerCase() !== 'kis');
-  } catch { /* 목록을 못 읽으면 화면이 그렇게 말한다 */ }
+    if (!cErr) {
+      connections = (data || []).filter((c: any) => String(c.exchange_id).toLowerCase() !== 'kis');
+    }
+  } catch { /* null 그대로 — 화면이 '확인하지 못했습니다'로 적는다 */ }
+
+  // ── 예약이 가리키는 연결이 아직 있는가 ──
+  //
+  // 연결을 다시 등록하면 id가 새로 생긴다. 예약의 id는 그대로 남고, 그
+  // 연결은 더 이상 없다. 그 상태로 화면의 스위치를 누르면 **낡은 id로
+  // POST가 나가서 404로 끝난다** — 켤 수도 끌 수도 없는 줄이 된다.
+  // 화면에는 '연결 있음'이라고 적혀 있었다.
+  const annotated = (rows || []).map((r: any) => {
+    const v = scheduleConnState(r.connection_id, connections as any);
+    // **어느 전략인지 화면이 알아야 한다.** 지금까지 예약 줄에는 종목만
+    // 있었고, 실제로 도는 것이 계단식이라는 사실은 어디에도 없었다.
+    const sid = strategyIdOfRow(r);
+    const sv = resolveStrategy({
+      id: sid, version: r.strategy_version,
+      env: String(r.mode || '').toUpperCase().startsWith('LIVE') ? 'LIVE' : 'TESTNET',
+    });
+    return {
+      ...r,
+      connectionState: v.state, connectionNote: v.message, needsRebind: v.needsRebind,
+      strategyId: sid,
+      strategyName: sv.spec?.name ?? sid,
+      strategyVersion: r.strategy_version ?? sv.spec?.version ?? null,
+      // 이 예약이 지금 코드로 돌 수 있는가. 못 돌면 왜 못 도는지까지.
+      strategyRunnable: sv.ok,
+      strategyNote: sv.ok ? (sv.spec?.note ?? '') : sv.message,
+    };
+  });
 
   return NextResponse.json({
     ok: true,
-    schedules: rows || [],
+    schedules: annotated,
     runs, runsError,
-    connections,
+    // **null이면 못 읽은 것이다.** 화면이 빈 목록과 구분해야 한다.
+    connections: connections ?? [],
+    connectionsReadOk: connections != null,
+    // ── 고를 수 있는 전략 ──
+    //
+    // **실행 경로가 있는 것만 내려보낸다.** 연구 모듈을 이름만 섞어 놓으면
+    // 사용자는 켰다고 믿고 아무 일도 일어나지 않는다 — 이 저장소에서 가장
+    // 자주 난 고장이다. 환경별로 다르다(실행 이력이 없는 전략은 실전을 닫는다).
+    strategies: {
+      TESTNET: runnableStrategies('TESTNET'),
+      LIVE: runnableStrategies('LIVE'),
+    },
     // 크론이 실제로 인증될 수 있는가. **값은 싣지 않는다**
     adminSecretSet: !!process.env.ADMIN_SECRET,
     cronSecretSet: !!process.env.CRON_SECRET,
@@ -143,9 +190,10 @@ export async function GET(req: NextRequest) {
     decisionColumnPresent,
     // 포지션을 닫아 줄 크론이 돌고 있는가 + 지금 열려 있는 거래 수
     exitRuns, openTradeCount,
-    // 크론이 도는 시각. 화면이 '언제 도는지'를 적을 수 있어야 한다 —
-    // 안 적으면 켠 직후에 안 도는 것을 고장으로 읽는다.
-    cronUtcHour: 23,
+    // **고정 시각을 안 내려보낸다.** 하루 1회 크론 시절의 값이라,
+    // 화면이 이걸 받으면 '다음 실행 아침 8시'라는 없는 사실을 적는다.
+    // 실제 다음 평가 시각은 예약마다 다르고 마지막 평가에서 계산된다.
+    cronUtcHour: null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -224,6 +272,15 @@ export async function POST(req: NextRequest) {
 
   if (!symbol) return NextResponse.json({ ok: false, error: 'missing_symbol' }, { status: 400 });
 
+  // ── 어떤 전략인가 ──
+  //
+  // 안 주면 계단식으로 본다 — 이 칸이 생기기 전에 만든 예약과 옛 화면이
+  // 그렇다. **짐작이 아니다**: 그 줄을 읽는 실행기가 하나뿐이었다.
+  // 준 값이 목록에 없으면 **막는다.** 기본 전략으로 대신 돌리면 사용자가
+  // 고르지 않은 전략이 그 사람 계좌에서 돈다.
+  const strategyId = String(body?.strategyId || '').trim() || LEGACY_STRATEGY_ID;
+  const strategyVersionIn = body?.strategyVersion == null ? '' : String(body.strategyVersion).trim();
+
   // **연결이 없으면 만들지 않는다.** 연결 없는 줄은 크론이 읽어도 주문을
   // 못 내고, 화면에는 '켜짐'으로 보인다 — 가장 조용한 실패다.
   if (!connectionId) {
@@ -249,10 +306,65 @@ export async function POST(req: NextRequest) {
     .select('id, is_testnet, exchange_id')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
   if (!conn) {
+    // ── 무엇을 해야 하는지까지 적는다 ──
+    //
+    // 예전에는 "그 거래소 연결을 찾지 못했습니다"가 전부였다. 사용자가
+    // 화면에서 고른 적이 없는 id라 어디서 온 값인지도 알 수 없었다 —
+    // **예약에 저장돼 있던 낡은 id였다.** 연결을 다시 등록하면 id가
+    // 새로 생기고, 예약은 옛 id를 계속 들고 있다.
+    //
+    // 그 상태를 여기서 구분해 준다. 지금 쓸 수 있는 연결이 무엇인지도
+    // 같이 알려 주되, **대신 골라 주지는 않는다.**
+    let mine: any[] = [];
+    try {
+      const { data } = await (sb as any)
+        .from('exchange_connections')
+        .select('id, exchange_id, label, is_testnet').eq('user_id', uid);
+      mine = (data || []).filter((c: any) => String(c.exchange_id).toLowerCase() !== 'kis');
+    } catch { /* 못 읽으면 아래에서 목록 없이 안내한다 */ }
+
+    const { data: existing } = await (sb as any)
+      .from('autotrade_schedules')
+      .select('id, connection_id').eq('user_id', uid).eq('symbol', symbol).maybeSingle();
+    const stale = existing && String(existing.connection_id) === connectionId;
+
     return NextResponse.json({
       ok: false, error: 'connection_not_found',
-      message: '그 거래소 연결을 찾지 못했습니다',
+      // 화면이 [이 연결로 재연결] 버튼을 띄울 근거다.
+      needsRebind: !!stale,
+      message: stale
+        ? `${symbol} 예약이 가리키는 거래소 연결이 더 이상 없습니다 — `
+          + '연결을 다시 등록하면 id가 새로 생기고, 예약은 옛 id를 그대로 들고 있습니다. '
+          + '화면에서 지금 쓸 연결을 고른 뒤 다시 시도하세요. 대신 골라 주지 않습니다 — '
+          + '어느 계좌로 주문이 나가는지는 사용자가 정해야 합니다.'
+        : '그 거래소 연결을 찾지 못했습니다',
+      // 값이 아니라 고를 수 있는 것들의 이름표만 싣는다.
+      availableConnections: mine.map((c: any) => ({
+        id: c.id, exchange_id: c.exchange_id, label: c.label, is_testnet: c.is_testnet,
+      })),
     }, { status: 404 });
+  }
+
+  // ── 명시적 재연결 ──
+  //
+  // 화면이 `rebind: true`로 부르면 "이 예약의 연결을 지금 고른 것으로
+  // 바꾸겠다"는 뜻이다. 판정은 schedulePlan 한 곳에 있다 — 여기서 다시
+  // 쓰면 화면과 서버가 다른 규칙을 갖게 된다.
+  if (body?.rebind === true) {
+    let mine: any[] | null = null;
+    try {
+      const { data, error: cErr } = await (sb as any)
+        .from('exchange_connections')
+        .select('id, exchange_id, label, is_testnet').eq('user_id', uid);
+      if (!cErr) mine = data || [];
+    } catch { /* null → 아래 판정이 '확인하지 못했다'로 막는다 */ }
+
+    const v = rebindVerdict({ currentConnectionId: connectionId, connections: mine as any, mode: modeRaw });
+    if (!v.ok) {
+      return NextResponse.json({
+        ok: false, error: 'rebind_rejected', code: v.code, message: v.message,
+      }, { status: v.code === 'CONNECTIONS_UNKNOWN' ? 503 : 400 });
+    }
   }
 
   // **모드와 연결이 어긋나면 막는다.**
@@ -274,15 +386,68 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
 
-  const { data, error } = await (sb as any)
+  // 전략 판정. **실행기까지 가기 전에 여기서 막는다** — 거기까지 가면
+  // "왜 안 돌지"의 답이 실행기 로그에 묻힌다.
+  const sv = resolveStrategy({
+    id: strategyId, version: strategyVersionIn,
+    env: modeIsLive ? 'LIVE' : 'TESTNET',
+    intervalMin,
+  });
+  if (!sv.ok || !sv.spec) {
+    return NextResponse.json({
+      ok: false, error: 'strategy_rejected', code: sv.code, message: sv.message,
+      // 무엇을 고를 수 있는지 같이 준다. 막기만 하면 사용자가 할 일이 없다.
+      available: runnableStrategies(modeIsLive ? 'LIVE' : 'TESTNET')
+        .map(x => ({ id: x.id, name: x.name, version: x.version })),
+    }, { status: 400 });
+  }
+
+  // ── 배포 순서에 묶이지 않게 한다 ──
+  //
+  // 새 정체(user_id, strategy_id, symbol, connection_id, mode)는 마이그레이션
+  // 050이 만든다. 그런데 **코드 배포와 SQL 적용이 같은 순간에 일어나지
+  // 않는다.** 둘 사이에 반드시 틈이 있고, 그 틈에서 저장이 통째로 실패하면
+  // 사용자는 자동매매를 켤 수 없다.
+  //
+  // 그래서 새 방식으로 먼저 시도하고, **050이 아직이라는 신호가 오면**
+  // 옛 방식(user_id, symbol)으로 되돌아가 저장한다. 되돌아갔다는 사실은
+  // 응답에 남긴다 — 조용히 옛 모양으로 저장하면 "왜 두 번째 전략이
+  // 안 켜지지"의 답이 사라진다.
+  const FULL_SELECT =
+    'id, symbol, mode, enabled, connection_id, strategy_id, strategy_version, leverage_cap, risk_pct, interval_min';
+  const LEGACY_SELECT =
+    'id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct, interval_min';
+
+  const baseRow: Record<string, any> = {
+    user_id: uid, symbol, connection_id: connectionId,
+    mode: modeRaw, enabled, margin_pct: marginPct,
+    leverage_cap: leverageCap, risk_pct: riskPct,
+    ...(intervalMin != null ? { interval_min: intervalMin } : {}),
+  };
+
+  let { data, error } = await (sb as any)
     .from('autotrade_schedules')
     .upsert({
-      user_id: uid, symbol, connection_id: connectionId,
-      mode: modeRaw, enabled, margin_pct: marginPct,
-      leverage_cap: leverageCap, risk_pct: riskPct,
-      ...(intervalMin != null ? { interval_min: intervalMin } : {}),
-    }, { onConflict: 'user_id,symbol' })
-    .select('id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct, interval_min').single();
+      ...baseRow,
+      strategy_id: sv.spec.id,
+      // **저장할 때는 지금 코드의 버전을 적는다.** 사용자가 보낸 값을 그대로
+      // 적으면 옛 버전이 영원히 남고, 다음 실행이 매번 VERSION_MISMATCH가 된다.
+      strategy_version: sv.spec.version,
+    }, { onConflict: 'user_id,strategy_id,symbol,connection_id,mode' })
+    .select(FULL_SELECT).single();
+
+  // 050이 아직인가. 칸이 없거나 그 이름의 제약이 없으면 그 신호다.
+  const needsPhaseB = !!error && /strategy_id|strategy_version|no unique|on conflict|constraint matching/i
+    .test(String(error.message));
+  let phaseBPending = false;
+  if (needsPhaseB) {
+    phaseBPending = true;
+    const retry = await (sb as any)
+      .from('autotrade_schedules')
+      .upsert(baseRow, { onConflict: 'user_id,symbol' })
+      .select(LEGACY_SELECT).single();
+    data = retry.data; error = retry.error;
+  }
 
   if (error) {
     if (isMissing(error.message)) return tableMissing('031', 'autotrade_schedules');
@@ -291,13 +456,32 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     ok: true, schedule: data,
-    // 켠 직후에 안 도는 것을 고장으로 읽지 않게, 언제 도는지 같이 말한다.
+    // ── 고정 시각을 적지 않는다 ──
+    //
+    // 예전에는 '다음 실행은 매일 23:00 UTC(한국 08:00)'라고 적었다.
+    // **사실이 아니다.** 그 문구는 vercel.json 크론(하루 1회) 시절 것이고,
+    // 지금 실행기는 주기적으로 예약을 확인한다. 그래서 켠 직후 화면은
+    // 아침 8시를 가리키는데 실제로는 몇 분 뒤에 첫 평가가 돈다 —
+    // 사용자는 그 사이를 '고장'으로 읽는다.
+    //
+    // 그리고 '실행'이 아니라 **'평가'**다. 주기가 와도 조건이 안 맞으면
+    // 주문하지 않는 것이 정상이다. '실행'이라고 적으면 주기마다 주문이
+    // 나가는 기능으로 읽힌다.
     message: enabled
-      ? `${symbol} 자동매매를 켰습니다`
+      ? `${symbol} · ${sv.spec.name} 자동매매 시작됨`
         + (leverageCap ? ` · 배율 상한 ${leverageCap}배` : '')
         + (riskPct ? ` · 1회 위험 ${riskPct}%` : '')
-        + ' — 다음 실행은 매일 23:00 UTC(한국 08:00)입니다'
-      : `${symbol} 자동매매를 껐습니다`,
+        + ' — 서버 실행기가 주기적으로 조건을 평가합니다'
+      : `${symbol} · ${sv.spec.name} 자동매매를 껐습니다`,
+    strategy: { id: sv.spec.id, name: sv.spec.name, version: sv.spec.version },
+    // **되돌아갔으면 그렇게 말한다.** 이 값이 true면 저장은 됐지만 전략
+    // 칸이 비어 있고, 같은 종목에 두 번째 전략을 켤 수 없다.
+    phaseBPending,
+    ...(phaseBPending ? {
+      warning: '마이그레이션 050(PHASE B)이 아직 적용되지 않아 옛 방식으로 저장했습니다 — '
+        + '전략 구분 없이 종목당 한 줄입니다. supabase/migrations/RUN_PHASE_B_strategy.sql을 '
+        + '실행하면 같은 종목에 여러 전략을 켤 수 있습니다',
+    } : {}),
     // **상한이지 목표가 아니다.** 손절이 넓으면 역산 결과가 더 작게 나오고,
     // 그때는 작은 쪽이 나간다. 화면이 이걸 '100배로 나간다'로 읽으면 안 된다.
     // 식은 leverageMath 한 곳에만 둔다. 여기 있던 숫자는 1회 증거금

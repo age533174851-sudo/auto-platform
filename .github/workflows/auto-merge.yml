@@ -1,0 +1,101 @@
+# 라벨이 붙고 모든 검사가 통과한 PR만 자동으로 합친다.
+#
+# 무엇이 스위치인가
+# ─────────────────
+# **`auto-merge` 라벨 하나뿐이다.** 라벨이 없는 PR은 어떤 조건에서도
+# 자동으로 안 합쳐진다. 이 워크플로가 설치돼 있다는 것만으로 Claude가
+# 만든 코드가 main에 꽂히지는 않는다.
+#
+# 판단은 여기 없다
+# ────────────────
+# 조건 판정은 `src/lib/ci/autoMergeGate.ts`에 있고 유닛 테스트가 붙어
+# 있다. 워크플로 YAML에 조건을 적으면 값으로 확인할 방법이 없는데,
+# 이건 **실주문 코드를 main에 넣는 판단**이다.
+#
+# 왜 native auto-merge를 안 쓰나
+# ──────────────────────────────
+# GitHub의 `--auto`는 **브랜치 보호에 필수 체크가 등록돼 있어야** 켜진다.
+# 지금 이 저장소에는 그 설정이 없어서 `gh pr merge --auto`는 실패한다.
+# 그리고 native auto-merge는 "필수로 등록된 체크"만 본다 — 등록을 깜빡한
+# 체크가 빨개도 합쳐진다.
+#
+# 여기 판정기는 **그 커밋에서 돈 모든 체크와 상태**를 본다. 등록 여부와
+# 무관하다. 나중에 브랜치 보호를 켜도 이 워크플로는 그대로 유효하다 —
+# 둘은 서로를 대체하지 않고 겹쳐서 막는다.
+name: auto-merge
+
+on:
+  # 검사가 끝났을 때. 자동 머지가 실제로 발동하는 주 신호다.
+  check_suite:
+    types: [completed]
+  # Vercel 같은 commit status가 바뀌었을 때
+  status:
+  # 라벨을 붙였을 때 · 새 커밋이 올라왔을 때 · 초안을 해제했을 때
+  pull_request_target:
+    types: [labeled, unlabeled, synchronize, reopened, ready_for_review]
+  # 리뷰가 달렸을 때
+  pull_request_review:
+    types: [submitted, dismissed]
+  # 저장소 CI가 끝났을 때 (check_suite로 안 오는 경우가 있다)
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  # **안전망.** 위 신호는 놓칠 수 있다 — 그때 라벨만 붙은 채로 영원히
+  # 기다리게 두지 않는다. 30분마다 한 번 훑는다.
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: '특정 PR 번호만 (비우면 열린 PR 전부)'
+        required: false
+
+# 두 실행이 겹치면 같은 PR을 두 번 합치려 한다. GitHub이 409로 막지만
+# 그 로그가 '실패'로 남아 진짜 실패를 덮는다.
+concurrency:
+  group: auto-merge
+  cancel-in-progress: false
+
+# **최소 권한만.**
+#   contents: write        — 머지에 필요
+#   pull-requests: write   — 판정 결과를 PR에 적는 데 필요
+#   checks / statuses      — 검사 결과를 읽는 데 필요 (read)
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # `pull_request_target`은 base 브랜치의 코드로 돈다 — 그래서 PR이
+      # 이 워크플로나 판정기를 고쳐서 자기를 통과시킬 수 없다.
+      # 다른 이벤트에서도 기본 브랜치를 받는다.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # 판정기를 컴파일하려면 typescript만 있으면 된다.
+      - name: 의존성 설치
+        run: npm ci
+
+      # 판정기가 바뀌었는데 테스트가 깨져 있으면 그 판정으로 머지하면 안 된다.
+      - name: 판정기 테스트
+        run: npm test
+
+      - name: 자동 머지 판정
+        env:
+          # **값은 로그에 찍지 않는다.** 스크립트 어디에도 토큰을 출력하는
+          # 줄이 없고, 실패 메시지에도 싣지 않는다.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr || github.event.pull_request.number || '' }}
+        run: node scripts/auto-merge.mjs
