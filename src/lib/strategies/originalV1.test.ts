@@ -292,12 +292,12 @@ export function runOriginalV1Tests() {
     eq(v.code, 'BARS_UNAVAILABLE');
   });
 
-  console.log('[원본 v1 — 손절·익절 규칙은 아직 비어 있다]');
+  console.log('[원본 v1 — 진입은 원본, 청산은 별도 정책]');
 
-  test('진입 규칙은 들어왔고 청산 규칙은 아직이다', () => {
+  test('진입 규칙과 청산 정책이 각각 있다', () => {
     eq(signalRuleConfigured(), true);
-    // **이 값이 true가 되기 전에는 주문이 나가면 안 된다.**
-    // 손절 없이 100배로 들어가는 것이 이 저장소가 가장 피하는 일이다.
-    eq(exitRuleConfigured(), false);
+    // **이 값이 false면 주문이 나가면 안 된다.** 손절 없이 100배로
+    // 들어가는 것이 이 저장소가 가장 피하는 일이다.
+    eq(exitRuleConfigured(), true);
   });
 }
