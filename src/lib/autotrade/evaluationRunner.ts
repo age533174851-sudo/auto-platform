@@ -114,6 +114,12 @@ export async function evaluateSchedule(
           symbol: ctx.symbol,
           mode: ctx.mode,
           connectionId: ctx.connectionId,
+          // **평가 주기를 반드시 싣는다.**
+          //
+          // 안 실으면 받는 쪽이 자기 기본값을 쓴다. scalp은
+          // `Number(body.intervalMin ?? 60)`이라 예약에 5분을 저장해도
+          // **항상 60분봉으로 돌았다** — 오류 없이 다른 전략이 되는 모양이다.
+          intervalMin: ctx.intervalMin ?? null,
           // **`?? null`로 눕혀 보낸다.** undefined는 JSON에서 사라지고,
           // 받는 쪽이 0으로 읽으면 배율 상한 0이 되어 주문이 통째로 막힌다.
           leverageCap: ctx.leverageCap ?? null,

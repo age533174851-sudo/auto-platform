@@ -43,7 +43,16 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
-  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct';
+  // **strategy_id를 반드시 고른다.**
+  //
+  // 예전에는 이 목록에 없었다. 그런데 아래에서 `strategyIdOfRow(r)`을
+  // 부르고, 그 함수는 값이 없으면 계단식으로 되돌린다 — 그래서 scalp
+  // 예약을 만들어도 화면은 **언제나 '일봉 계단식'**이라고 적었다.
+  // 실행기는 `select('*')`라 제대로 돌았으므로, 화면과 실제가 갈렸다.
+  //
+  // 050이 아직인 계정에서는 이 칸이 없어서 조회가 실패한다 —
+  // 아래 OPTIONAL 되읽기가 그 이름을 빼고 다시 읽는다.
+  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version';
 
   let { data: rows, error } = await (sb as any)
     .from('autotrade_schedules').select(FULL).eq('user_id', uid).order('symbol');
@@ -57,7 +66,7 @@ export async function GET(req: NextRequest) {
   // 것만 이름을 대고 멈춘다. 036과 043이 둘 다 안 돌아간 계정에서
   // margin_pct만 빼고 한 번 재시도하면 last_decision 때문에 또 실패하고,
   // 화면은 여전히 죽는다. 이름이 나올 때마다 빼고, 더 이상 안 나올 때까지 돈다.
-  const OPTIONAL = ['margin_pct', 'last_decision'];
+  const OPTIONAL = ['margin_pct', 'last_decision', 'strategy_id', 'strategy_version'];
   const missing: string[] = [];
 
   for (let i = 0; i < OPTIONAL.length && error; i++) {
