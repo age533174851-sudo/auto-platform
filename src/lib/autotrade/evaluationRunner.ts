@@ -26,6 +26,7 @@
 
 import { runStrategy, evaluationKey, type EvaluationOutcome } from '../strategies/runStrategy';
 import { strategyIdOfRow } from '../strategies/registry';
+import { strategyRunRequest } from '../strategies/runRequest';
 import { decisionRecordOf } from '../ui/autoOverview';
 import { dueCheck, verdictOfOutcome, resultLineOf, type DueVerdict } from './evaluationLoop';
 
@@ -106,27 +107,25 @@ export async function evaluateSchedule(
     }),
   }, {
     call: async (route, ctx) => {
-      const res = await doFetch(`${deps.origin}${route}`, {
+      // **본문을 여기서 짜지 않는다.** 화면의 [점검]·첫 평가와 같은
+      // 함수로 만든다 — 세 곳이 각자 적으면 전략을 추가할 때 한 곳이
+      // 빠지고, 그때 예약에 저장한 전략과 실제로 도는 전략이 갈린다.
+      const req = strategyRunRequest({
+        strategyId, strategyVersion: row.strategy_version,
+        env, symbol: ctx.symbol, connectionId: ctx.connectionId, mode: ctx.mode,
+        intervalMin: ctx.intervalMin, leverageCap: ctx.leverageCap,
+        riskPct: ctx.riskPct, marginPct: ctx.marginPct,
+        userId: row.user_id, idempotencyKey: ctx.idempotencyKey,
+      });
+      // resolveStrategy는 runStrategy가 앞에서 이미 통과시켰다. 여기서
+      // 막히면 그 사이에 규칙이 바뀐 것이므로 그대로 실패로 올린다.
+      if (!req.ok || !req.route || !req.body) {
+        return { httpOk: false, status: null, body: { ok: false, message: req.message } };
+      }
+      const res = await doFetch(`${deps.origin}${req.route}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-admin-secret': deps.adminSecret },
-        body: JSON.stringify({
-          userId: row.user_id,
-          symbol: ctx.symbol,
-          mode: ctx.mode,
-          connectionId: ctx.connectionId,
-          // **평가 주기를 반드시 싣는다.**
-          //
-          // 안 실으면 받는 쪽이 자기 기본값을 쓴다. scalp은
-          // `Number(body.intervalMin ?? 60)`이라 예약에 5분을 저장해도
-          // **항상 60분봉으로 돌았다** — 오류 없이 다른 전략이 되는 모양이다.
-          intervalMin: ctx.intervalMin ?? null,
-          // **`?? null`로 눕혀 보낸다.** undefined는 JSON에서 사라지고,
-          // 받는 쪽이 0으로 읽으면 배율 상한 0이 되어 주문이 통째로 막힌다.
-          leverageCap: ctx.leverageCap ?? null,
-          riskPct: ctx.riskPct ?? null,
-          marginPct: ctx.marginPct ?? null,
-          idempotencyKey: ctx.idempotencyKey ?? null,
-        }),
+        body: JSON.stringify(req.body),
         signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await res.json().catch(() => null);
