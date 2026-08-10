@@ -50,6 +50,8 @@ async function runPositionGuards(
   if (decisions.length === 0) return [];
 
   const bf = await import('@/lib/exchanges/binanceFutures');
+  const { readPositions, closeVerdict, exitReasonLine } = await import('@/lib/engine/closeEvidence');
+  const { futuresListPositions, futuresPlaceOrder } = await import('@/lib/exchanges/futuresExec');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const out: { tradeId: string; symbol: string; verdict: GuardVerdict }[] = [];
 
@@ -258,21 +260,30 @@ export async function GET(req: NextRequest) {
   // 전부 조용히. **못 여는 것은 불편이고 못 닫는 것은 사고다.**
   //
   // 한 번 읽고 캐시한다 — 사용자 수만큼만 조회한다.
-  const connCache = new Map<string, { key: string; secret: string; testnet: boolean } | null>();
-  const connFor = async (uid: string): Promise<{ key: string; secret: string; testnet: boolean } | null> => {
+  type ConnCreds = { key: string; secret: string; testnet: boolean; exchange: 'binance' | 'gate' | null };
+  const connCache = new Map<string, ConnCreds | null>();
+  const connFor = async (uid: string): Promise<ConnCreds | null> => {
     if (!connCache.has(uid)) {
-      let v: { key: string; secret: string; testnet: boolean } | null = null;
+      let v: ConnCreds | null = null;
       try {
         const { data: c } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, has_withdrawal, is_testnet')
+          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
           .eq('user_id', uid).eq('is_active', true).limit(1).maybeSingle();
         if (c && !(c as any).has_withdrawal) {
           const { decryptSecret } = await import('@/lib/exchanges/crypto');
+          // **어느 거래소인지 같이 들고 다닌다.**
+          //
+          // 예전에는 이 값을 안 읽고 무조건 바이낸스 함수로 조회했다.
+          // Gate 연결이면 Gate 키로 바이낸스를 부르는 것이라 인증 오류로
+          // 끝나고, 그 실패가 아래에서 "포지션 없음"으로 읽혔다.
+          const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
+          const ex = resolveExecExchange((c as any).exchange_id).exchange;
           v = {
             key: (c as any).api_key,
             secret: decryptSecret((c as any).api_secret_enc ?? ''),
             // 저장소 전체 규칙: is_testnet === false 만 실전이다.
             testnet: (c as any).is_testnet !== false,
+            exchange: ex,
           };
         }
       } catch { v = null; }
@@ -371,6 +382,8 @@ export async function GET(req: NextRequest) {
   }
 
   const bf = await import('@/lib/exchanges/binanceFutures');
+  const { readPositions, closeVerdict, exitReasonLine } = await import('@/lib/engine/closeEvidence');
+  const { futuresListPositions, futuresPlaceOrder } = await import('@/lib/exchanges/futuresExec');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const results: any[] = [];
 
@@ -389,29 +402,61 @@ export async function GET(req: NextRequest) {
       const exitSide: 'BUY' | 'SELL' = d.side === 'LONG' ? 'SELL' : 'BUY';
 
       if (d.action === 'CLOSE') {
-        // 보유 수량을 먼저 읽는다. reduceOnly라도 수량은 필요하다.
-        const posRes: any = await bf.getFuturesPositions(key, secret, testnet);
-        const list: any[] = Array.isArray(posRes?.positions) ? posRes.positions : [];
-        const pos = list.find(p => String(p.symbol) === d.symbol && Math.abs(Number(p.amount)) > 0);
-
-        let ok: boolean;
-        if (!pos) {
-          ok = true;   // 이미 포지션이 없다 — 목표가 달성된 상태로 본다
-        } else {
-          const r: any = await bf.placeFuturesOrder(key, secret, {
-            symbol: d.symbol, side: exitSide, type: 'MARKET',
-            quantity: Math.abs(Number(pos.amount)), reduceOnly: true,
-          }, testnet);
-          ok = r?.success === true;
+        // ── 무엇을 근거로 '닫혔다'고 적는가 ──
+        //
+        // 예전에는 조회 결과가 배열이 아니면 `list = []`가 되어
+        // "포지션이 이미 없다"로 읽었다. `getFuturesPositions`는 실패하면
+        // `{ success:false, message }`를 돌려준다 — `positions` 칸이
+        // 아예 없다. 그래서 인증 오류·타임아웃·레이트리밋이 전부
+        // **아무것도 안 닫고 장부에 CLOSED로 적히는** 결과가 됐다.
+        //
+        // 판정은 `closeEvidence`에 있고 유닛 테스트가 붙어 있다.
+        // **조회에 실패했으면 닫힘이 아니다.**
+        if (!cr.exchange) {
+          results.push({ symbol: d.symbol, action: 'CLOSE', ok: false,
+            error: `선물을 지원하지 않는 거래소라 청산할 수 없습니다 — 거래소에서 직접 닫아 주세요` });
+          continue;
         }
+        const t = { exchange: cr.exchange, key, secret, testnet };
+        const before = readPositions(await futuresListPositions(t as any), d.symbol);
+
+        let order: { attempted: boolean; ok: boolean; error?: string | null } | null = null;
+        let after: ReturnType<typeof readPositions> | null = null;
+
+        if (before.ok && before.found) {
+          // 수량을 못 읽었으면 보내지 않는다. 임의 수량으로 reduceOnly를
+          // 내면 남는 쪽이 생기고, 그 사실을 아무도 모른다.
+          if (before.amount == null) {
+            order = { attempted: false, ok: false, error: '보유 수량을 읽지 못했습니다' };
+          } else {
+            const r: any = await futuresPlaceOrder(t as any, {
+              symbol: d.symbol, side: exitSide, type: 'MARKET' as const,
+              quantity: before.amount, reduceOnly: true,
+              clientOrderId: `xm${String(d.tradeId).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20)}`,
+            });
+            order = { attempted: true, ok: r?.ok === true, error: r?.error ?? r?.message ?? null };
+            // **접수는 체결이 아니다.** 보낸 뒤 다시 읽어 확인한다.
+            if (order.ok) after = readPositions(await futuresListPositions(t as any), d.symbol);
+          }
+        }
+
+        const verdict = closeVerdict({ before, order, after });
         if (!dryRun) {
           await sb.from('ladder_daily_trades').update({
-            status: ok ? 'CLOSED' : 'OPEN',
-            exit_reason: `${d.reason}${ok ? '' : ' (청산 실패)'}`,
-            ...(ok ? { closed_at: new Date().toISOString() } : {}),
+            // **닫힘으로 적는 것은 verdict.closed 하나뿐이다.**
+            status: verdict.closed ? 'CLOSED' : 'OPEN',
+            // 못 닫았으면 왜 못 닫았는지가 장부에 남는다 — 로그에만
+            // 있으면 다음 사람이 처음부터 다시 조사한다.
+            exit_reason: exitReasonLine(d.reason, verdict),
+            ...(verdict.closed ? { closed_at: new Date().toISOString() } : {}),
           }).eq('id', d.tradeId);
         }
-        results.push({ symbol: d.symbol, action: 'CLOSE', ok, reason: d.reason });
+        results.push({
+          symbol: d.symbol, action: 'CLOSE', exchange: cr.exchange,
+          ok: verdict.closed, code: verdict.code,
+          needsReconcile: verdict.needsReconcile, retry: verdict.retry,
+          reason: d.reason, detail: verdict.reason,
+        });
         continue;
       }
 

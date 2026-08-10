@@ -178,19 +178,29 @@ export function windowVerdict(i: {
 // ── 진입 방향 ────────────────────────────────────────
 
 export type SignalCode =
-  /** **아직 규칙을 받지 못했다.** 추측해서 만들지 않는다 */
-  | 'RULE_NOT_CONFIGURED'
   | 'LONG'
   | 'SHORT'
+  /** 시가와 종가가 같다 — 방향이 없다 */
   | 'NO_TRADE'
   /** 봉을 못 읽었다 */
-  | 'BARS_UNAVAILABLE';
+  | 'BARS_UNAVAILABLE'
+  /** 구간을 덮는 봉이 없다 */
+  | 'WINDOW_BARS_MISSING';
+
+export interface CandleStrength {
+  /** (종가 - 시가) / 시가 × 100. 부호가 곧 방향이다 */
+  bodyPct: number;
+  /** (고가 - 저가) / 시가 × 100 */
+  rangePct: number;
+  /** 몸통 / 고저폭. 1에 가까울수록 꼬리가 없다. 고저폭이 0이면 null */
+  bodyToRangeRatio: number | null;
+}
 
 export interface SignalVerdict {
   side: 'LONG' | 'SHORT' | null;
   code: SignalCode;
   reason: string;
-  /** 사람이 볼 근거. 규칙이 들어오면 여기 숫자가 찬다 */
+  /** 사람이 볼 근거 + 파생 전략이 나중에 비교할 값 */
   evidence: Record<string, any>;
 }
 
@@ -200,36 +210,130 @@ export interface WindowBar {
   high: number;
   low: number;
   close: number;
-  volume: number;
+  volume?: number;
 }
 
+/** 이 구간을 덮는 봉만 고른다. 창 밖의 봉을 섞으면 다른 구간을 판단하게 된다 */
+export function barsInWindow(bars: WindowBar[], tradingDay: string): WindowBar[] {
+  const out: WindowBar[] = [];
+  for (const b of Array.isArray(bars) ? bars : []) {
+    const t = Number(b?.openTimeMs);
+    if (!Number.isFinite(t)) continue;
+    if (tradingDayKst(t) !== tradingDay) continue;
+    const m = kstMinuteOfDay(t);
+    // 봉의 시작 시각이 창 안이면 그 봉은 이 구간에 속한다.
+    // 09:30 시작 봉은 창을 넘어가므로 넣지 않는다.
+    if (m == null || m < startMin || m >= endMin) continue;
+    out.push(b);
+  }
+  return out.sort((a, b) => a.openTimeMs - b.openTimeMs);
+}
+
+/** 값이 유한한 양수인가. **0과 NaN을 가격으로 쓰지 않는다** */
+const price = (v: any): number | null => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
 /**
- * 09:10~09:30 구간의 봉을 보고 방향을 정한다.
+ * 09:10~09:30 구간을 **하나의 합성 봉**으로 보고 방향을 정한다.
  *
- * **이 함수만 비어 있다.** 나머지(시간창·하루 1회·크기·배율·안전 관문·
- * 주문 경로·기록)는 전부 실제로 돈다. 규칙이 들어오면 여기만 채운다 —
- * 그때 다른 파일은 건드리지 않는다.
+ * 규칙 (사용자 확정)
+ * ──────────────────
+ *   시가  = 09:10의 첫 가격
+ *   종가  = 09:30까지의 마지막 확정 가격
+ *   종가 > 시가 → LONG
+ *   종가 < 시가 → SHORT
  *
- * 무엇이 필요한가 (사용자 확인 대기):
- *   · 무슨 봉을 보는가 — 09:10~09:30 한 덩어리인가, 그 안의 5분봉 4개인가
- *   · 무엇과 비교하는가 — 시가 대비 종가, 전일 종가, 그 구간의 고저
- *   · 임계값이 있는가 — 몇 % 이상이어야 방향으로 인정하는가
- *   · 방향이 안 나오면 NO_TRADE인가, 아니면 다른 조건으로 넘어가는가
+ * **구간 안의 5분봉 네 개를 각각 투표시키지 않는다.** 전체 구간 하나의
+ * 방향이 기준이다 — 봉을 쪼개면 같은 구간에서 다른 답이 나올 수 있고,
+ * 그건 사용자가 하던 방식이 아니다.
+ *
+ * 봉의 힘은 왜 계산만 하는가
+ * ──────────────────────────
+ * `bodyPct` · `rangePct` · `bodyToRangeRatio`를 함께 남긴다. 하지만
+ * **v1에서는 이 값으로 진입을 취소하거나 주문 금액·배율을 바꾸지
+ * 않는다.** 원본 전략은 방향이 나오면 들어가는 전략이고, 여기에 세기
+ * 필터를 넣는 순간 그건 다른 전략이다 — 그러면 원본의 성적을 알 수 없다.
+ *
+ * 이 값들은 나중에 v2(강한 봉만 진입 · 세기별 크기)와 **숫자로 비교**
+ * 하기 위한 기록이다.
  */
-export function originalV1Signal(_input: {
+export function originalV1Signal(input: {
   bars: WindowBar[];
+  tradingDay?: string | null;
   prevDayClose?: number | null;
 }): SignalVerdict {
-  return {
-    side: null,
-    code: 'RULE_NOT_CONFIGURED',
-    reason: '진입 방향 규칙이 아직 입력되지 않았습니다 — 추측해서 만들지 않습니다. '
-          + '규칙이 들어오기 전까지 이 전략은 평가만 하고 진입하지 않습니다',
-    evidence: {},
+  const day = input.tradingDay ?? null;
+  const all = Array.isArray(input.bars) ? input.bars : [];
+  if (all.length === 0) {
+    return { side: null, code: 'BARS_UNAVAILABLE', evidence: {},
+      reason: '봉을 받지 못했습니다 — 방향을 정하지 않습니다' };
+  }
+
+  const win = day ? barsInWindow(all, day) : all;
+  if (win.length === 0) {
+    return { side: null, code: 'WINDOW_BARS_MISSING', evidence: { received: all.length },
+      reason: `${day ?? ''} 09:10~09:30 구간을 덮는 봉이 없습니다 — 없는 봉으로 방향을 만들지 않습니다` };
+  }
+
+  const open = price(win[0].open);
+  const close = price(win[win.length - 1].close);
+  if (open == null || close == null) {
+    return { side: null, code: 'BARS_UNAVAILABLE', evidence: { bars: win.length },
+      reason: '구간의 시가/종가를 읽지 못했습니다' };
+  }
+
+  // 고가·저가는 구간 전체에서 모은다. 못 읽은 봉은 세지 않는다 —
+  // 0으로 채우면 저가가 0이 되어 고저폭이 터무니없어진다.
+  let high = -Infinity, low = Infinity;
+  for (const b of win) {
+    const h = price(b.high); const l = price(b.low);
+    if (h != null) high = Math.max(high, h);
+    if (l != null) low = Math.min(low, l);
+  }
+  const haveRange = Number.isFinite(high) && Number.isFinite(low) && high >= low;
+
+  const bodyPct = ((close - open) / open) * 100;
+  const rangePct = haveRange ? ((high - low) / open) * 100 : 0;
+  const strength: CandleStrength = {
+    bodyPct: Number(bodyPct.toFixed(4)),
+    rangePct: Number(rangePct.toFixed(4)),
+    bodyToRangeRatio: haveRange && high > low
+      ? Number((Math.abs(close - open) / (high - low)).toFixed(4))
+      : null,
   };
+
+  const evidence = {
+    windowOpen: open, windowClose: close,
+    windowHigh: haveRange ? high : null, windowLow: haveRange ? low : null,
+    bars: win.length,
+    strength,
+    // **이 값들은 판단에 쓰이지 않았다는 사실을 같이 남긴다.**
+    // 기록만 보고 "세기로 걸렀다"고 읽으면 안 된다.
+    strengthUsedForEntry: false,
+    prevDayClose: input.prevDayClose ?? null,
+  };
+
+  if (close > open) {
+    return { side: 'LONG', code: 'LONG', evidence,
+      reason: `09:10 ${open} → 09:30 ${close} 양봉 (몸통 ${strength.bodyPct}%) — LONG` };
+  }
+  if (close < open) {
+    return { side: 'SHORT', code: 'SHORT', evidence,
+      reason: `09:10 ${open} → 09:30 ${close} 음봉 (몸통 ${strength.bodyPct}%) — SHORT` };
+  }
+  // **시가와 종가가 같을 때만 방향이 없다.** 약한 봉은 NO_TRADE가 아니다.
+  return { side: null, code: 'NO_TRADE', evidence,
+    reason: `09:10과 09:30 가격이 같습니다 (${open}) — 방향이 없어 진입하지 않습니다` };
 }
 
 /** 규칙이 실제로 들어왔는가. 화면·응답이 이 값을 그대로 적는다 */
 export function signalRuleConfigured(): boolean {
-  return originalV1Signal({ bars: [] }).code !== 'RULE_NOT_CONFIGURED';
+  return true;
+}
+
+/** 손절·익절 규칙이 들어왔는가. **아직 아니다** */
+export function exitRuleConfigured(): boolean {
+  return false;
 }

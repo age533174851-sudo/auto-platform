@@ -35,6 +35,7 @@ import { STRATEGY_MY_ORIGINAL_V1 } from '@/lib/strategies/registry';
 import { cycleStatusOf, CYCLE_TARGET_USD } from '@/lib/strategies/ladderCycle';
 import {
   windowVerdict, originalV1Signal, tradingDayKst,
+  signalRuleConfigured, exitRuleConfigured,
   WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
 } from '@/lib/strategies/originalV1';
 
@@ -298,21 +299,15 @@ export async function POST(req: NextRequest) {
   const sig = barsError
     ? { side: null, code: 'BARS_UNAVAILABLE' as const,
         reason: `봉을 읽지 못했습니다 — ${barsError}`, evidence: {} }
-    : originalV1Signal({ bars: bars as any });
+    : originalV1Signal({ bars: bars as any, tradingDay: wv.tradingDay });
 
   base.signal = { side: sig.side, code: sig.code, reason: sig.reason, evidence: sig.evidence };
 
-  if (sig.code === 'RULE_NOT_CONFIGURED') {
-    // **거래일을 소진하지 않는다.** 판단한 것이 아니라 판단할 규칙이
-    // 없는 것이다. 규칙이 오늘 안에 들어오면 오늘도 판단할 수 있어야 한다.
+  if (sig.code === 'WINDOW_BARS_MISSING') {
+    // **거래일을 소진하지 않는다.** 판단한 것이 아니라 볼 봉이 아직
+    // 없는 것이다 — 창이 막 열렸을 때 이 상태가 될 수 있다.
     return NextResponse.json({
-      ...base, outcome: 'NO_SIGNAL', ruleConfigured: false,
-      reason: sig.reason,
-      needsInput: [
-        '09:10~09:30 구간에서 롱/숏/관망을 나누는 조건 (무슨 봉을 · 무엇과 비교해 · 어떤 임계값으로)',
-        '손절 규칙 (진입가 대비 몇 % 또는 그 구간의 저가/고가 등)',
-        '익절 규칙 (목표가 · 분할 여부)',
-      ],
+      ...base, outcome: 'NO_SIGNAL', reason: sig.reason,
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
@@ -339,8 +334,13 @@ export async function POST(req: NextRequest) {
   // 여기서 임의의 손절폭(2%·ATR 등)을 넣으면 그건 사용자의 전략이 아니다.
   // 그리고 손절 없이 100배로 들어가는 것은 이 저장소가 무엇보다 피해 온
   // 일이다. 그래서 방향까지만 기록하고 주문은 만들지 않는다.
-  const why = '진입 방향은 정해졌지만 손절·익절 규칙이 아직 입력되지 않아 주문을 만들지 않습니다 — '
-    + '손절 없이 100배로 들어가지 않습니다';
+  //
+  // **`exitRuleConfigured()`가 true가 되기 전에는 여기서 멈춘다.**
+  // 임의의 손절폭(2%·ATR 등)을 넣으면 그건 사용자의 전략이 아니고,
+  // 손절 없이 100배로 들어가는 것은 이 저장소가 가장 피하는 일이다.
+  if (!exitRuleConfigured()) {
+    const why = `진입 방향은 ${sig.side}로 정해졌지만 손절·익절 규칙이 아직 입력되지 않아 `
+      + '주문을 만들지 않습니다 — 손절 없이 100배로 들어가지 않습니다';
   await noteCycle(sb, cycle.id, {
     last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: why,
   });
@@ -354,6 +354,13 @@ export async function POST(req: NextRequest) {
       dryRun,
     },
     message: why,
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // 여기 아래는 청산 규칙이 들어온 뒤에 채운다.
+  return NextResponse.json({
+    ...base, outcome: 'BLOCKED', blocked: 'NOT_IMPLEMENTED',
+    message: '주문 경로가 아직 연결되지 않았습니다',
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -384,7 +391,12 @@ export async function GET(req: NextRequest) {
     ok: !cyclesError,
     strategyId: STRATEGY_MY_ORIGINAL_V1,
     // **규칙이 비어 있다는 사실을 화면이 그대로 적을 수 있어야 한다.**
-    ruleConfigured: originalV1Signal({ bars: [] }).code !== 'RULE_NOT_CONFIGURED',
+    // **진입 규칙과 청산 규칙을 따로 말한다.** 하나로 묶으면 화면이
+    // '규칙 있음'만 보고 주문이 나갈 거라고 읽는다.
+    entryRuleConfigured: signalRuleConfigured(),
+    exitRuleConfigured: exitRuleConfigured(),
+    entryRule: 'KST 09:10~09:30 합성 봉 · 종가 > 시가 → LONG · 종가 < 시가 → SHORT '
+      + '(봉의 세기는 기록만 하고 진입·크기·배율에 쓰지 않습니다)',
     tradingDayKst: tradingDayKst(now),
     window: {
       startKst: '09:10', endKst: '09:30', graceMin: LATE_GRACE_MIN,

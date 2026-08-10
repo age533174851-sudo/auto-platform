@@ -11,8 +11,9 @@ import {
   CYCLE_TARGET_USD, CYCLE_FLOOR_USD, LADDER_BANDS,
 } from './ladderCycle';
 import {
-  windowVerdict, tradingDayKst, kstMinuteOfDay, originalV1Signal,
-  signalRuleConfigured, WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
+  windowVerdict, tradingDayKst, kstMinuteOfDay, originalV1Signal, barsInWindow,
+  signalRuleConfigured, exitRuleConfigured,
+  WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
 } from './originalV1';
 
 /** 한국시간 그 날 그 시각의 ms. KST는 UTC+9 고정(서머타임 없음) */
@@ -191,19 +192,112 @@ export function runOriginalV1Tests() {
     eq(kstMinuteOfDay(NaN), null);
   });
 
-  console.log('[원본 v1 — 진입 규칙은 아직 비어 있다]');
+  console.log('[원본 v1 — 09:10~09:30 합성 봉이 방향을 정한다]');
 
-  test('규칙을 받기 전에는 방향을 만들지 않는다', () => {
-    const v = originalV1Signal({ bars: [] });
-    eq(v.side, null);
-    eq(v.code, 'RULE_NOT_CONFIGURED');
-    eq(signalRuleConfigured(), false);
+  /** 09:10부터 5분 간격 봉 */
+  const bar = (i: number, o: number, h: number, l: number, c: number) => ({
+    openTimeMs: kst(2026, 8, 10, 9, 10 + i * 5), open: o, high: h, low: l, close: c,
+  });
+  const DAY = '2026-08-10';
+
+  test('종가가 시가보다 높으면 LONG', () => {
+    const v = originalV1Signal({
+      bars: [bar(0, 100, 101, 99, 100.5), bar(1, 100.5, 102, 100, 101),
+             bar(2, 101, 103, 101, 102), bar(3, 102, 104, 102, 103)],
+      tradingDay: DAY,
+    });
+    eq(v.side, 'LONG'); eq(v.code, 'LONG');
+    eq(v.evidence.windowOpen, 100);
+    eq(v.evidence.windowClose, 103);
   });
 
-  test('규칙이 없다는 사실이 사유에 그대로 적힌다', () => {
-    // 이 문장이 응답과 화면에 그대로 나가야 한다. "조건 불충족"으로
-    // 뭉개면 사용자는 규칙이 들어간 줄 안다.
-    assert(originalV1Signal({ bars: [] }).reason.includes('입력되지 않았습니다'),
-      originalV1Signal({ bars: [] }).reason);
+  test('종가가 시가보다 낮으면 SHORT', () => {
+    const v = originalV1Signal({
+      bars: [bar(0, 100, 100, 98, 99), bar(1, 99, 99, 97, 97.5)],
+      tradingDay: DAY,
+    });
+    eq(v.side, 'SHORT'); eq(v.code, 'SHORT');
+  });
+
+  test('약한 봉이라고 진입을 취소하지 않는다 — 원본은 방향이 나오면 들어간다', () => {
+    // 몸통 0.001%. 세기 필터를 넣으면 여기서 NO_TRADE가 나온다.
+    const v = originalV1Signal({
+      bars: [bar(0, 100_000, 100_500, 99_500, 100_001)], tradingDay: DAY,
+    });
+    eq(v.side, 'LONG', v.reason);
+    eq(v.evidence.strengthUsedForEntry, false, '세기를 진입 판단에 썼다고 기록되면 안 된다');
+  });
+
+  test('시가와 종가가 같을 때만 방향이 없다', () => {
+    const v = originalV1Signal({ bars: [bar(0, 100, 105, 95, 100)], tradingDay: DAY });
+    eq(v.side, null); eq(v.code, 'NO_TRADE');
+  });
+
+  test('구간 안의 5분봉을 각각 투표시키지 않는다 — 전체 구간 하나로 본다', () => {
+    // 봉별로는 음봉 3 : 양봉 1이지만, 09:10 시가 100 → 09:30 종가 110이다.
+    const v = originalV1Signal({
+      bars: [bar(0, 100, 130, 100, 128), bar(1, 128, 128, 120, 121),
+             bar(2, 121, 121, 114, 115), bar(3, 115, 115, 109, 110)],
+      tradingDay: DAY,
+    });
+    eq(v.side, 'LONG', v.reason);
+  });
+
+  test('봉의 세기를 근거로 남긴다 — 나중에 파생 전략과 비교한다', () => {
+    const v = originalV1Signal({ bars: [bar(0, 100, 110, 90, 105)], tradingDay: DAY });
+    eq(v.evidence.strength.bodyPct, 5);
+    eq(v.evidence.strength.rangePct, 20);
+    eq(v.evidence.strength.bodyToRangeRatio, 0.25);
+  });
+
+  test('고저폭이 0이면 비율을 지어내지 않는다', () => {
+    const v = originalV1Signal({ bars: [bar(0, 100, 100, 100, 100)], tradingDay: DAY });
+    eq(v.evidence.strength.bodyToRangeRatio, null);
+  });
+
+  console.log('[원본 v1 — 창 밖의 봉을 섞지 않는다]');
+
+  test('창을 덮는 봉만 고른다', () => {
+    const bars = [
+      { openTimeMs: kst(2026, 8, 10, 9, 5), open: 1, high: 1, low: 1, close: 1 },   // 창 전
+      bar(0, 100, 101, 99, 100.5),
+      bar(3, 102, 104, 102, 103),
+      { openTimeMs: kst(2026, 8, 10, 9, 30), open: 9, high: 9, low: 9, close: 9 },  // 창 밖(시작이 09:30)
+      { openTimeMs: kst(2026, 8, 9, 9, 15), open: 7, high: 7, low: 7, close: 7 },   // 어제
+    ];
+    const win = barsInWindow(bars as any, DAY);
+    eq(win.length, 2);
+    eq(win[0].open, 100);
+    eq(win[1].close, 103);
+  });
+
+  test('구간을 덮는 봉이 없으면 방향을 만들지 않는다', () => {
+    const v = originalV1Signal({
+      bars: [{ openTimeMs: kst(2026, 8, 10, 14, 0), open: 1, high: 1, low: 1, close: 1 }] as any,
+      tradingDay: DAY,
+    });
+    eq(v.side, null); eq(v.code, 'WINDOW_BARS_MISSING');
+  });
+
+  test('봉이 아예 없으면 조회 실패로 적는다 — 관망이 아니다', () => {
+    const v = originalV1Signal({ bars: [], tradingDay: DAY });
+    eq(v.code, 'BARS_UNAVAILABLE');
+  });
+
+  test('0이나 NaN을 가격으로 쓰지 않는다', () => {
+    const v = originalV1Signal({
+      bars: [{ openTimeMs: kst(2026, 8, 10, 9, 15), open: 0, high: 1, low: 1, close: 1 }] as any,
+      tradingDay: DAY,
+    });
+    eq(v.code, 'BARS_UNAVAILABLE');
+  });
+
+  console.log('[원본 v1 — 손절·익절 규칙은 아직 비어 있다]');
+
+  test('진입 규칙은 들어왔고 청산 규칙은 아직이다', () => {
+    eq(signalRuleConfigured(), true);
+    // **이 값이 true가 되기 전에는 주문이 나가면 안 된다.**
+    // 손절 없이 100배로 들어가는 것이 이 저장소가 가장 피하는 일이다.
+    eq(exitRuleConfigured(), false);
   });
 }
