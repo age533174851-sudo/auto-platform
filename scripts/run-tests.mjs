@@ -10,7 +10,7 @@ const root = process.cwd();
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
-writeFileSync(join(dir, 'run.ts'), `
+const RUN_SRC = `
 import { runPnlTests } from './src/lib/pnl/pnl.test';
 import { runBacktestTests } from './src/lib/backtest/engine.test';
 import { runRiskManagerTests } from './src/lib/engine/riskManager.test';
@@ -22,10 +22,8 @@ import { runLadderGateTests } from './src/lib/strategies/ladderGate.test';
 import { runStrategyRegistryTests } from './src/lib/strategies/registry.test';
 import { runOriginalV1Tests } from './src/lib/strategies/originalV1.test';
 import { runCloseEvidenceTests } from './src/lib/engine/closeEvidence.test';
-<<<<<<< HEAD
 import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
-=======
->>>>>>> origin/main
+import { runRunRequestTests } from './src/lib/strategies/runRequest.test';
 import { runExcursionTests } from './src/lib/backtest/excursion.test';
 import { runPositionGuardTests } from './src/lib/engine/positionGuard.test';
 import { runStateReconcileTests } from './src/lib/engine/stateReconcile.test';
@@ -190,11 +188,7 @@ runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusRep
 runCreatorLedgerTests();
 runCreatorIntakeTests();
 runSignalPathTests(); runVenueBarsTests(); runLoginDiagnosticTests(); runPairTests(); runTpslPlanTests(); runPreferencesTests(); runScalpSignalTests(); runRiskContextTests(); runConnectionTests(); runScalpRunTests(); runScheduleExitTests(); runOAuthProvidersTests(); runProfileSimTests();
-<<<<<<< HEAD
-runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runEvaluationLoopTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runPriceSourceTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runRobustnessTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runSchedulePlanTests(); runStrategyRegistryTests(); runOriginalV1Tests(); runCloseEvidenceTests(); runExitPolicyTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runDataLocationTests(); runWalletScreenTests(); runMockSessionTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
-=======
-runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runEvaluationLoopTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runPriceSourceTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runRobustnessTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runSchedulePlanTests(); runStrategyRegistryTests(); runOriginalV1Tests(); runCloseEvidenceTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runDataLocationTests(); runWalletScreenTests(); runMockSessionTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
->>>>>>> origin/main
+runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runEvaluationLoopTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runPriceSourceTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runRobustnessTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runSchedulePlanTests(); runStrategyRegistryTests(); runOriginalV1Tests(); runCloseEvidenceTests(); runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runDataLocationTests(); runWalletScreenTests(); runMockSessionTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runExitMonitorTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
@@ -204,7 +198,27 @@ runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingRe
   if (s.failed > 0) { s.failures.forEach(f => console.log('  FAIL:', f)); (globalThis).process.exitCode = 1; }
   else console.log('✅ 전체 통과');
 })();
-`);
+`;
+
+// ── 충돌 마커가 남아 있으면 아예 돌리지 않는다 ──
+//
+// 실제로 이런 일이 있었다: 병합 충돌 마커가 이 파일에 커밋됐는데
+// **마커가 템플릿 리터럴 안에 들어가 있어서** run-tests.mjs 자체는
+// 파싱되고, 테스트도 3,600건 통과로 끝났다. 그래서 아무도 못 봤고
+// 마커가 그대로 main에 들어갔다.
+//
+// '테스트가 통과했다'가 '러너 파일이 멀쩡하다'를 뜻하지 않는다.
+// 그 둘을 여기서 갈라 둔다.
+for (const mark of ['<<<<<<< ', '>>>>>>> ', '\n=======\n']) {
+  if (RUN_SRC.includes(mark)) {
+    console.error('❌ scripts/run-tests.mjs에 병합 충돌 마커가 남아 있습니다.');
+    console.error('   테스트가 통과해도 이 파일은 고장 난 상태입니다 — 먼저 해소하세요.');
+    process.exit(1);
+  }
+}
+
+writeFileSync(join(dir, 'run.ts'), RUN_SRC);
+
 
 // 임시 디렉터리에는 node_modules가 없다. npx로 tsc를 찾게 두면 npm 레지스트리의
 // 동명이인 `tsc` 패키지를 받아와 컴파일이 조용히 실패한다. 프로젝트에 설치된

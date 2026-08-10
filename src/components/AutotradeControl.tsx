@@ -40,6 +40,8 @@ import {
 } from '@/lib/ui/autoOverview';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
+import { strategyRunRequest } from '@/lib/strategies/runRequest';
+import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 
 export default function AutotradeControl() {
   // 토큰을 **직접 지켜본다.** 한 번 읽고 마는 화면은 접근 토큰이 만료되면
@@ -90,6 +92,9 @@ export default function AutotradeControl() {
   //
   // **못 읽으면 null로 둔다.** 여기서 125를 채우면 없는 상한을 있다고
   // 적는 것이고, 그 숫자로 청산가·증거금이 전부 계산된다.
+  // **어느 전략을 켤 것인가.** 지금까지 이 상태가 아예 없었다 —
+  // 서버는 strategies 목록을 내려주는데 화면은 언제나 계단식을 불렀다.
+  const [strategyId, setStrategyId] = useState<string>(LEGACY_STRATEGY_ID);
   const [venueMax, setVenueMax] = useState<number | null>(null);
   const [venueMaxNote, setVenueMaxNote] = useState<string>('');
   // 10슬롯 방식: 1회 위험 10% · 배율 상한 100. 이게 기본값이다.
@@ -393,19 +398,39 @@ export default function AutotradeControl() {
    * 모드 관문, 시계, 상태 대조, 마진 모드, 손실 한도, 서브계좌 한도까지.
    * 마지막 주문만 안 낸다.
    */
+  /**
+   * 지금 고른 전략을 부를 요청 하나.
+   *
+   * **주소와 본문을 화면이 직접 적지 않는다.** 서버의 주기 평가와
+   * 같은 함수(`strategyRunRequest`)를 쓴다 — 세 곳이 각자 적으면
+   * 전략을 추가할 때 한 곳이 빠지고, 그때 예약에 저장한 전략과 실제로
+   * 도는 전략이 갈린다. 실제로 그랬다.
+   */
+  const buildRun = (opts: { checkOnly?: boolean } = {}) => strategyRunRequest({
+    strategyId,
+    env: live ? 'LIVE' : 'TESTNET',
+    symbol, connectionId: connId,
+    mode: live ? 'LIVE_LIMITED' : 'TESTNET',
+    intervalMin: intervalMin === '' ? null : Number(intervalMin),
+    leverageCap: levCap === '' ? null : Number(levCap),
+    riskPct: riskPct === '' ? null : Number(riskPct),
+    marginPct: marginPct === '' ? null : Number(marginPct),
+    checkOnly: opts.checkOnly,
+  });
+
   const runCheck = async () => {
     setChecking(true); setCheck(null); setMsg(null);
+    const req = buildRun({ checkOnly: true });
+    if (!req.ok || !req.route) {
+      setChecking(false);
+      setMsg({ ok: false, text: req.message });
+      return;
+    }
     try {
-      const r = await fetch('/api/autotrade/daily-ladder', {
+      const r = await fetch(req.route, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({
-          checkOnly: true, symbol, connectionId: connId,
-          mode: live ? 'LIVE_LIMITED' : 'TESTNET',
-          leverageCap: levCap === '' ? undefined : Number(levCap),
-          riskPct: riskPct === '' ? undefined : Number(riskPct),
-          marginPct: marginPct === '' ? undefined : Number(marginPct),
-        }),
+        body: JSON.stringify(req.body),
       });
       const j = await r.json();
       setCheck(j);
@@ -430,20 +455,19 @@ export default function AutotradeControl() {
    */
   const runFirstCheck = async () => {
     setPhase('FIRST_RUN');
+    // **예약에 저장한 것과 같은 전략·같은 값을 보낸다.** 다른 것을
+    // 보내면 첫 결과가 앞으로 일어날 일을 대표하지 못한다.
+    const req = buildRun();
+    if (!req.ok || !req.route) {
+      setFirstRun(classifyRun({ status: 400, body: { ok: false, message: req.message } }));
+      setPhase(''); setJustEnabled(''); load();
+      return;
+    }
     try {
-      const r = await fetch('/api/autotrade/daily-ladder', {
+      const r = await fetch(req.route, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({
-          // **예약에 저장한 것과 같은 값을 보낸다.** 다른 값을 보내면
-          // 첫 점검과 이후 실행이 서로 다른 설정으로 돌고, 첫 결과가
-          // 앞으로 일어날 일을 대표하지 못한다.
-          symbol, connectionId: connId,
-          mode: live ? 'LIVE_LIMITED' : 'TESTNET',
-          leverageCap: levCap === '' ? undefined : Number(levCap),
-          riskPct: riskPct === '' ? undefined : Number(riskPct),
-          marginPct: marginPct === '' ? undefined : Number(marginPct),
-        }),
+        body: JSON.stringify(req.body),
       });
       const body = await r.json().catch(() => null);
       setFirstRun(classifyRun({ status: r.status, body }));
@@ -471,6 +495,9 @@ export default function AutotradeControl() {
           // 안 나간다. 예약은 사람이 없을 때 도는 것이므로, 켜는 순간에
           // 한 번 확인받고(아래 확인창) 그 뒤로는 확인 없이 나가는 모드를 쓴다.
           mode: live ? 'LIVE_LIMITED' : 'TESTNET', enabled,
+          // **어느 전략인지 저장한다.** 이걸 안 보내면 서버가 계단식으로
+          // 되돌리고, 화면에서 고른 전략은 아무 데도 안 남는다.
+          strategyId,
           leverageCap: levCap === '' ? undefined : Number(levCap),
           riskPct: riskPct === '' ? undefined : Number(riskPct),
           marginPct: marginPct === '' ? undefined : Number(marginPct),
@@ -544,6 +571,35 @@ export default function AutotradeControl() {
   // 상태 배지 글자는 **서버가 준 것을 그대로 쓴다.** 같은 표를 화면에도
   // 적어 두면 한쪽만 바뀌고, 그때 같은 상태가 두 이름으로 보인다.
   const runtimeLabels = data?.runtimeLabels ?? null;
+  // ── 지금 환경에서 켤 수 있는 전략 ──
+  //
+  // **서버가 정한 목록만 쓴다.** 화면에 목록을 또 적으면 한쪽만 바뀌고,
+  // 그때 실행 경로가 없는 전략을 고를 수 있게 된다.
+  //
+  // 못 읽었으면 빈 배열이 아니라 null이다 — 빈 목록을 '고를 게 없다'로
+  // 그리면 서버가 잠깐 안 뜬 것과 구분이 안 된다.
+  const strategyList: any[] | null = (() => {
+    const byEnv = data?.strategies;
+    if (!byEnv) return null;
+    const arr = live ? byEnv.LIVE : byEnv.TESTNET;
+    return Array.isArray(arr) ? arr : null;
+  })();
+  const pickedSpec = (strategyList || []).find((x: any) => x.id === strategyId) || null;
+  // ── 이미 있는 예약의 전략을 덮어쓰지 않는다 ──
+  //
+  // 선택기 기본값은 계단식이다. 그런데 화면의 심볼이 **이미 다른 전략으로
+  // 켜져 있는 예약**과 같으면, 그 상태로 저장을 누르는 순간 그 예약의
+  // 전략이 조용히 계단식으로 바뀐다. 사용자는 설정 하나만 고치려던 것이다.
+  //
+  // 그래서 심볼이 바뀌면 그 예약이 쓰는 전략으로 선택기를 맞춘다.
+  const existingStrategyId = (schedules.find(
+    (x: any) => String(x.symbol).toUpperCase() === String(symbol).toUpperCase(),
+  ) as any)?.strategyId ?? null;
+  useEffect(() => {
+    if (existingStrategyId && existingStrategyId !== strategyId) setStrategyId(existingStrategyId);
+    // 심볼이 바뀔 때만 맞춘다 — 사용자가 방금 고른 값을 되돌리면 안 된다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, existingStrategyId]);
   const on = schedules.filter(s => s.enabled);
   const runs: any[] = Array.isArray(data?.runs) ? data.runs : [];
   const lastRun = runs[0] || null;
@@ -1032,6 +1088,59 @@ export default function AutotradeControl() {
                 borderRadius: 8, padding: '9px 10px',
                 color: Number(levCap) >= 50 ? T.ylw : T.txt, fontSize: 12, outline: 'none',
               }}/>
+          </div>
+          {/* ── 어느 전략을 켤 것인가 ──
+              이 칸이 없어서, 서버가 strategies 목록을 내려주는데도 화면은
+              언제나 계단식을 불렀다. 예약에 strategy_id를 저장해도 점검과
+              첫 평가는 daily-ladder였다 — 그리고 아무 오류도 안 났다.
+              **서버가 준 목록만 그린다.** 실행 경로가 없는 전략은 여기
+              나오지 않는다. */}
+          <div style={{ minWidth: 0, gridColumn: '1 / -1' }}>
+            <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>전략</div>
+            {strategyList == null ? (
+              <div style={{
+                background: T.alt, border: `1px solid ${T.border}`, borderRadius: 8,
+                padding: '9px 10px', color: T.muted, fontSize: 11,
+              }}>전략 목록을 읽지 못했습니다 — 새로고침 뒤에도 같으면 서버 상태를 확인하세요</div>
+            ) : strategyList.length === 0 ? (
+              <div style={{
+                background: T.alt, border: `1px solid ${T.red}`, borderRadius: 8,
+                padding: '9px 10px', color: T.red, fontSize: 11,
+              }}>{live ? '실전' : '테스트넷'}에서 켤 수 있는 전략이 없습니다</div>
+            ) : (
+              <select
+                value={strategyId}
+                onChange={e => setStrategyId(e.target.value)}
+                style={{
+                  width: '100%', background: T.alt, border: `1px solid ${T.border}`,
+                  borderRadius: 8, padding: '9px 10px', color: T.txt, fontSize: 12, outline: 'none',
+                }}
+              >
+                {/* 저장돼 있던 전략이 지금 환경에서 못 도는 경우가 있다
+                    (원본 v1은 실전이 아직 닫혀 있다). 그때 목록에 없는 값이
+                    선택돼 있으면 브라우저가 첫 항목으로 바꿔 버려서, 사용자가
+                    모르는 사이에 다른 전략이 저장된다. 그래서 그 사실을
+                    항목으로 보여 준다. */}
+                {!pickedSpec && (
+                  <option value={strategyId}>
+                    {strategyId} — {live ? '실전에서는 켤 수 없습니다' : '이 환경에서 켤 수 없습니다'}
+                  </option>
+                )}
+                {strategyList.map((x: any) => (
+                  <option key={x.id} value={x.id}>{x.name} (v{x.version})</option>
+                ))}
+              </select>
+            )}
+            {pickedSpec?.note && (
+              <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.5 }}>
+                {pickedSpec.note}
+              </div>
+            )}
+            {!pickedSpec && strategyList != null && strategyList.length > 0 && (
+              <div style={{ color: T.red, fontSize: 9.5, marginTop: 3, lineHeight: 1.5 }}>
+                지금 고른 전략은 {live ? '실전' : '테스트넷'}에서 켤 수 없습니다 — 목록에서 다시 고르세요
+              </div>
+            )}
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>간격 (분)</div>

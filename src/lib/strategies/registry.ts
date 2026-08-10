@@ -62,6 +62,14 @@ export interface StrategySpec {
    * 연구 전용이면 null.
    */
   route: string | null;
+  /**
+   * **주문을 내지 말고 판정만 하라는 깃발의 이름.**
+   *
+   * 전략마다 다르다 — `daily-ladder`·`scalp`은 `checkOnly`, 원본 v1은
+   * `dryRun`이다. 부르는 쪽이 이걸 외우면 언젠가 틀리고, **틀리면
+   * 점검인 줄 알았던 호출이 진짜 주문을 낸다.** 그래서 명세에 적는다.
+   */
+  checkFlag: 'checkOnly' | 'dryRun';
   /** 왜 아직 못 켜는가 / 무엇을 알아야 하는가. 사람이 읽는 한 줄 */
   note: string;
 }
@@ -81,6 +89,7 @@ export const STRATEGIES: StrategySpec[] = [
     testnetReady: true,
     liveReady: true,
     route: '/api/autotrade/daily-ladder',
+    checkFlag: 'checkOnly',
     note: '진입은 하루 한 번으로 제한됩니다 — 평가 주기를 짧게 잡아도 그 규칙은 그대로입니다',
   },
   {
@@ -99,6 +108,7 @@ export const STRATEGIES: StrategySpec[] = [
     // 이 저장소가 반복해서 피해 온 일이다.
     liveReady: false,
     route: '/api/autotrade/scalp',
+    checkFlag: 'checkOnly',
     note: '지금까지 스케줄된 적이 없어 실제 실행 이력이 없습니다 — 테스트넷에서 먼저 돌려야 합니다',
   },
   {
@@ -122,6 +132,7 @@ export const STRATEGIES: StrategySpec[] = [
     // 실계좌에 여는 것이 이 저장소가 반복해서 피해 온 일이다.
     liveReady: false,
     route: '/api/autotrade/my-original-v1',
+    checkFlag: 'dryRun',
     note: '진입 방향과 손절·익절 규칙이 아직 입력되지 않았습니다 — 평가·시간창·하루 1회·'
       + '주문 크기 계산·기록은 실제로 돌지만 주문은 나가지 않습니다',
   },
