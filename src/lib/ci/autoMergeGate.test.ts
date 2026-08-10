@@ -8,7 +8,8 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, type PrFacts,
+  autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
+  type PrFacts,
 } from './autoMergeGate';
 
 /** 모든 조건을 만족하는 상태. 각 테스트는 여기서 하나씩만 망가뜨린다 */
@@ -156,7 +157,10 @@ export function runAutoMergeGateTests() {
 
   test('결론이 null인데 완료로 표시된 검사는 막는다 — 모르는 값을 통과로 세지 않는다', () => {
     const v = autoMergeGate(good({
-      checks: [{ name: 'weird', status: 'completed', conclusion: null, headSha: 'abc1234def5678' }],
+      checks: [
+        { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+        { name: 'weird', status: 'completed', conclusion: null, headSha: 'abc1234def5678' },
+      ],
     }));
     eq(v.merge, false); eq(v.code, 'CHECKS_FAILED');
   });
@@ -164,7 +168,10 @@ export function runAutoMergeGateTests() {
   test('skipped·neutral은 막지 않는다 — 안 돌았지만 실패도 아니다', () => {
     for (const c of ['skipped', 'neutral']) {
       eq(autoMergeGate(good({
-        checks: [{ name: 'x', status: 'completed', conclusion: c, headSha: 'abc1234def5678' }],
+        checks: [
+          { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+          { name: 'x', status: 'completed', conclusion: c, headSha: 'abc1234def5678' },
+        ],
       })).merge, true, `${c}가 막았다`);
     }
   });
@@ -207,10 +214,64 @@ export function runAutoMergeGateTests() {
   test('이름이 비슷할 뿐인 검사는 빼지 않는다 — 정확히 일치할 때만이다', () => {
     for (const n of ['gate', 'auto-merge', 'auto-merge-gate-2', 'AUTO-MERGE-GATE']) {
       const v = autoMergeGate(good({
-        checks: [{ name: n, status: 'completed', conclusion: 'failure', headSha: 'abc1234def5678' }],
+        checks: [
+          { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+          { name: n, status: 'completed', conclusion: 'failure', headSha: 'abc1234def5678' },
+        ],
       }));
       eq(v.merge, false, `${n}이 제외됐다`);
       eq(v.code, 'CHECKS_FAILED', n);
+    }
+  });
+
+  console.log('[자동 머지 — 돌아야 할 검사가 실제로 돌았는가]');
+
+  test('필수 검사가 아예 없으면 다른 검사가 초록이어도 안 합친다', () => {
+    // PR #119에서 실제로 났다. ci 워크플로 실행이 생성되지 않았고,
+    // 같은 커밋에 Vercel 체크 두 건만 붙어 있었다. 둘 다 통과라
+    // '있는 것이 다 초록'이 되어 통과할 뻔했다 — 유닛 테스트가 한 번도
+    // 안 돈 실주문 코드였다.
+    const v = autoMergeGate(good({
+      checks: [{ name: 'Vercel Preview Comments', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' }],
+      statuses: [{ context: 'Vercel', state: 'success' }],
+    }));
+    eq(v.merge, false);
+    eq(v.code, 'REQUIRED_CHECK_MISSING');
+    assert(v.reason.includes('verify'), v.reason);
+  });
+
+  test('필수 검사가 이전 커밋에서만 돌았으면 안 합친다', () => {
+    const v = autoMergeGate(good({
+      checks: [{ name: 'verify', status: 'completed', conclusion: 'success', headSha: '옛커밋' }],
+    }));
+    eq(v.merge, false); eq(v.code, 'REQUIRED_CHECK_MISSING');
+  });
+
+  test('필수 검사가 있으면 통과한다', () => {
+    eq(autoMergeGate(good()).merge, true);
+    assert(REQUIRED_CHECKS.includes('verify'), '필수 검사 목록에 verify가 있어야 한다');
+  });
+
+  test('필수 검사가 도는 중이면 기다린다 — 없는 것과 다르다', () => {
+    const v = autoMergeGate(good({
+      checks: [{ name: 'verify', status: 'in_progress', conclusion: null, headSha: 'abc1234def5678' }],
+    }));
+    eq(v.code, 'CHECKS_PENDING');
+  });
+
+  test('필수 검사가 실패면 실패로 막는다', () => {
+    const v = autoMergeGate(good({
+      checks: [{ name: 'verify', status: 'completed', conclusion: 'failure', headSha: 'abc1234def5678' }],
+    }));
+    eq(v.code, 'CHECKS_FAILED');
+  });
+
+  test('이름이 비슷할 뿐인 검사는 필수 검사로 세지 않는다', () => {
+    for (const n of ['verify-2', 'Verify', 'ci / verify', 'verified']) {
+      const v = autoMergeGate(good({
+        checks: [{ name: n, status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' }],
+      }));
+      eq(v.code, 'REQUIRED_CHECK_MISSING', n);
     }
   });
 

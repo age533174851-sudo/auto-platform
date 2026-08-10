@@ -41,6 +41,25 @@ export const INTENDED_BASE = 'main';
  */
 export const SELF_CHECK_NAME = 'auto-merge-gate';
 
+/**
+ * **이 이름의 검사가 그 커밋에 존재하고 성공해야 합친다.**
+ *
+ * 왜 필요한가 — 실제로 일어난 일
+ * ──────────────────────────────
+ * PR #119에서 `ci` 워크플로가 **실행 자체가 생성되지 않았다.** 큐에
+ * 걸린 것도 실패한 것도 아니고 없었다. 같은 커밋에 Vercel 체크 두 건은
+ * 정상으로 붙어 있었고, 둘 다 통과였다.
+ *
+ * 그때 이 판정기는 "있는 검사가 전부 통과"라고 읽었다. 검사가 하나도
+ * 없는 것은 `CHECKS_MISSING`으로 막지만, **하나라도 있으면 그것으로
+ * 충분하다고 본 것이다.** 유닛 테스트가 한 번도 안 돈 실주문 코드가
+ * 합쳐질 수 있었다.
+ *
+ * "있는 것이 다 초록"과 "돌아야 할 것이 돌았다"는 다른 문장이다.
+ * 이름을 박아 두지 않으면 그 차이를 값으로 확인할 방법이 없다.
+ */
+export const REQUIRED_CHECKS = ['verify'];
+
 export type CheckConclusion =
   | 'success' | 'neutral' | 'skipped'
   | 'failure' | 'cancelled' | 'timed_out' | 'action_required' | 'stale'
@@ -96,6 +115,7 @@ export type GateCode =
   | 'CHECKS_FAILED'
   | 'CHECKS_PENDING'
   | 'CHECKS_MISSING'
+  | 'REQUIRED_CHECK_MISSING'
   | 'CHECKS_STALE'
   | 'REVIEW_UNRESOLVED'
   | 'CHANGES_REQUESTED'
@@ -198,6 +218,23 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
   }
   if (stale > 0) {
     d.push(`이전 커밋의 검사 ${stale}건은 세지 않았습니다`);
+  }
+
+  // **돌아야 할 검사가 실제로 이 커밋에서 돌았는가.**
+  //
+  // 위 CHECKS_MISSING은 '검사가 하나도 없다'만 막는다. 그런데 Vercel
+  // 같은 외부 앱 검사는 붙었는데 저장소 CI만 생성되지 않는 경우가 있고
+  // (PR #119에서 실제로 났다), 그때는 '있는 것이 다 초록'이 되어 통과한다.
+  //
+  // 이름으로 확인한다. 없으면 못 돈 것이고, **확인하지 못한 것은 통과가 아니다.**
+  const absent = REQUIRED_CHECKS.filter(
+    name => !mine.some(c => c.name === name));
+  if (absent.length > 0) {
+    return {
+      merge: false, code: 'REQUIRED_CHECK_MISSING', details: d,
+      reason: `이 커밋(${pr.headSha.slice(0, 7)})에서 필수 검사가 돌지 않았습니다: ${absent.join(' · ')} — `
+            + '다른 검사가 초록이어도 합치지 않습니다. 워크플로를 다시 돌린 뒤에 판단합니다',
+    };
   }
 
   const bad = mine.filter(c =>
