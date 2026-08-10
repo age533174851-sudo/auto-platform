@@ -29,7 +29,10 @@
 // 그래서 이 파일의 규칙은 하나다:
 // **`executionReady: false`인 것은 자동매매로 켤 수 없다.**
 
-export type StrategyId = 'daily-ladder' | 'scalp';
+export type StrategyId = 'daily-ladder' | 'scalp' | 'my-original-v1';
+
+/** 원본 전략의 id. 문자열을 여기저기 적으면 오타가 조용히 다른 전략이 된다 */
+export const STRATEGY_MY_ORIGINAL_V1 = 'my-original-v1';
 
 export type StrategyMarket = 'USDM';
 
@@ -97,6 +100,30 @@ export const STRATEGIES: StrategySpec[] = [
     liveReady: false,
     route: '/api/autotrade/scalp',
     note: '지금까지 스케줄된 적이 없어 실제 실행 이력이 없습니다 — 테스트넷에서 먼저 돌려야 합니다',
+  },
+  {
+    id: 'my-original-v1',
+    name: '내 원본 v1',
+    version: '1',
+    description:
+      '한국시간 09:10~09:30 구간을 보고 하루 한 번 판단합니다. 주문 크기는 가상 원장의 '
+      + '자릿수 구간이 정합니다($100대→$10 · $1,000대→$100 · $10,000대→$1,000). 100배 요청.',
+    supportedMarkets: ['USDM'],
+    // **하루 주기(1440)를 열지 않는다.**
+    //
+    // 판단은 하루 한 번이지만 평가 주기는 그것보다 짧아야 한다. 1440으로
+    // 두면 마지막 평가가 오후 2시였을 때 다음 평가도 다음 날 오후 2시가
+    // 되어, 09:10~09:30 창을 **매일 놓친다.** 실행기가 15분마다 오므로
+    // 그 안에서 창을 만날 수 있는 값만 연다.
+    supportedIntervals: [5, 15, 30, 60],
+    executionReady: true,
+    testnetReady: true,
+    // 실전은 닫는다. 진입 규칙이 아직 비어 있고, 검증되지 않은 것을
+    // 실계좌에 여는 것이 이 저장소가 반복해서 피해 온 일이다.
+    liveReady: false,
+    route: '/api/autotrade/my-original-v1',
+    note: '진입 방향과 손절·익절 규칙이 아직 입력되지 않았습니다 — 평가·시간창·하루 1회·'
+      + '주문 크기 계산·기록은 실제로 돌지만 주문은 나가지 않습니다',
   },
 ];
 
