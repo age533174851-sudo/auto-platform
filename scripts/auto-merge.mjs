@@ -77,6 +77,36 @@ function assertSelfCheckWired(selfName) {
   }
 }
 
+/**
+ * **필수 검사 이름이 실제 워크플로의 job 이름과 같은가.**
+ *
+ * `REQUIRED_CHECKS`에 오타가 있으면 그 이름의 검사는 영원히 '없음'이
+ * 되어 **모든 PR이 REQUIRED_CHECK_MISSING으로 막힌다.** 반대로 워크플로
+ * job 이름만 바꾸면 같은 일이 난다.
+ *
+ * 막히는 쪽이라 위험하지는 않지만, 원인이 안 보이면 사람이 게이트를
+ * 꺼 버린다. 그래서 시작할 때 파일로 확인하고 다르면 이름을 대 준다.
+ */
+function assertRequiredChecksWired(required) {
+  const names = Array.isArray(required) ? required : [];
+  if (names.length === 0) {
+    throw new Error('REQUIRED_CHECKS가 비어 있습니다 — 검사 없이 합쳐질 수 있습니다');
+  }
+  const path = '.github/workflows/ci.yml';
+  if (!existsSync(path)) throw new Error(`${path}을 찾지 못했습니다`);
+  const yml = readFileSync(path, 'utf8');
+  const at = yml.search(/^jobs:$/m);
+  if (at < 0) throw new Error(`${path}에 jobs: 블록이 없습니다`);
+  const jobs = [...yml.slice(at).matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)].map(m => m[1]);
+  const missing = names.filter(n => !jobs.includes(n));
+  if (missing.length > 0) {
+    throw new Error(
+      `필수 검사 이름이 ${path}의 job에 없습니다: ${missing.join(', ')} — `
+      + `찾은 job: ${jobs.join(', ') || '(없음)'}. `
+      + '이대로 두면 모든 PR이 REQUIRED_CHECK_MISSING으로 막힙니다');
+  }
+}
+
 async function api(path, init = {}) {
   const r = await fetch(`https://api.github.com${path}`, {
     ...init,
@@ -155,10 +185,11 @@ async function upsertComment(number, body) {
 
 async function main() {
   const gatePath = loadGate();
-  const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME } =
+  const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS } =
     await import(`file://${gatePath}`);
 
   assertSelfCheckWired(SELF_CHECK_NAME);
+  assertRequiredChecksWired(REQUIRED_CHECKS);
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
 
