@@ -34,6 +34,9 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { STRATEGY_MY_ORIGINAL_V1 } from '@/lib/strategies/registry';
 import { cycleStatusOf, CYCLE_TARGET_USD } from '@/lib/strategies/ladderCycle';
 import {
+  resolveExitPolicy, exitPricesFor, liquidationGuard, DEFAULT_EXIT_POLICY_ID,
+} from '@/lib/strategies/exitPolicy';
+import {
   windowVerdict, originalV1Signal, tradingDayKst,
   signalRuleConfigured, exitRuleConfigured,
   WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
@@ -341,27 +344,168 @@ export async function POST(req: NextRequest) {
   if (!exitRuleConfigured()) {
     const why = `진입 방향은 ${sig.side}로 정해졌지만 손절·익절 규칙이 아직 입력되지 않아 `
       + '주문을 만들지 않습니다 — 손절 없이 100배로 들어가지 않습니다';
-  await noteCycle(sb, cycle.id, {
-    last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: why,
-  });
-  return NextResponse.json({
-    ...base, outcome: 'BLOCKED', blocked: 'EXIT_RULE_NOT_CONFIGURED',
-    plan: {
-      side: sig.side,
-      requestedLeverage: REQUESTED_LEVERAGE,
-      orderMarginUsd: status.size.marginUsd,
-      notionalUsd: status.size.marginUsd == null ? null : status.size.marginUsd * REQUESTED_LEVERAGE,
-      dryRun,
-    },
-    message: why,
+    await noteCycle(sb, cycle.id, {
+      last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: why,
+    });
+    return NextResponse.json({
+      ...base, outcome: 'BLOCKED', blocked: 'EXIT_RULE_NOT_CONFIGURED', message: why,
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
-  // 여기 아래는 청산 규칙이 들어온 뒤에 채운다.
-  return NextResponse.json({
-    ...base, outcome: 'BLOCKED', blocked: 'NOT_IMPLEMENTED',
-    message: '주문 경로가 아직 연결되지 않았습니다',
-  }, { headers: { 'Cache-Control': 'no-store' } });
+  // ── 청산 정책 ──
+  //
+  // **진입 전략과 별개다.** 원본은 청산이 재량이었고, 여기 걸리는
+  // 손절·익절은 검증용으로 정한 정책이다. id·버전이 따로 붙어 기록되므로
+  // 나중에 청산만 바꿔 가며 비교할 수 있다.
+  const ep = resolveExitPolicy(body?.exitPolicyId ?? DEFAULT_EXIT_POLICY_ID);
+  if (!ep.ok || !ep.spec) {
+    return NextResponse.json({ ...base, ok: false, blocked: 'UNKNOWN_EXIT_POLICY', message: ep.message },
+      { status: 400 });
+  }
+  base.exitPolicy = {
+    id: ep.spec.id, version: ep.spec.version, name: ep.spec.name,
+    stopPct: ep.spec.stopPct, takeProfitPct: ep.spec.takeProfitPct,
+    partial: ep.spec.partial, note: ep.spec.note,
+    // **이 값이 원본 전략의 규칙이 아니라는 사실을 응답에도 적는다.**
+    isOriginalRule: false,
+  };
+
+  // ── 손절이 청산보다 먼저 오는가 ──
+  //
+  // 100배·유지증거금 0.4%면 청산 거리는 0.6%다. 손절을 그 바깥에 두면
+  // 손절이 작동하기 전에 청산된다 — 증거금 전액이 사라진다.
+  // **모르면 막는다.**
+  const lg = liquidationGuard({ leverage: REQUESTED_LEVERAGE, stopPct: ep.spec.stopPct });
+  base.liquidationGuard = lg;
+  if (!lg.ok) {
+    await noteCycle(sb, cycle.id, {
+      last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: lg.reason,
+    });
+    return NextResponse.json({
+      ...base, outcome: 'BLOCKED', blocked: lg.code, message: lg.reason,
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // ── 크기 ──
+  //
+  // 증거금은 자릿수 구간이 정했다. 수량 = 증거금 × 배율 ÷ 진입가.
+  // 진입가는 방금 읽은 구간 종가를 기준으로 한다.
+  const entryRef = Number(sig.evidence?.windowClose);
+  const marginUsd = Number(status.size.marginUsd);
+  if (!Number.isFinite(entryRef) || entryRef <= 0 || !Number.isFinite(marginUsd) || marginUsd <= 0) {
+    const why = '진입가나 증거금을 확정하지 못했습니다 — 주문을 만들지 않습니다';
+    await noteCycle(sb, cycle.id, {
+      last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: why,
+    });
+    return NextResponse.json({ ...base, ok: false, outcome: 'BLOCKED', message: why },
+      { headers: { 'Cache-Control': 'no-store' } });
+  }
+  const notionalUsd = marginUsd * REQUESTED_LEVERAGE;
+  const quantity = notionalUsd / entryRef;
+
+  const prices = exitPricesFor({ side: sig.side, entryPrice: entryRef, spec: ep.spec });
+  if (!prices.ok || prices.stop == null) {
+    return NextResponse.json({ ...base, ok: false, outcome: 'BLOCKED', message: prices.reason },
+      { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  base.plan = {
+    side: sig.side, requestedLeverage: REQUESTED_LEVERAGE,
+    orderMarginUsd: marginUsd, notionalUsd,
+    entryRef, quantity,
+    stopLoss: prices.stop, takeProfit: prices.takeProfit,
+  };
+
+  if (dryRun) {
+    return NextResponse.json({ ...base, outcome: 'NO_SIGNAL', dryRun: true,
+      reason: '미리보기 — 주문을 보내지 않았습니다' }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // ── 주문 ──
+  //
+  // **주문 경로는 기존 실행기를 그대로 쓴다.** 배율 적용·포지션 모드 확인·
+  // 수량 규격·보호 주문 부착·되돌리기가 전부 거기 있다. 여기서 다시 짜면
+  // 수동 주문과 자동 주문이 서로 다른 검사를 받게 된다.
+  //
+  // `protectionPolicy: 'REQUIRED'` — 손절을 못 걸면 **방금 연 포지션을
+  // 즉시 되돌린다.** 아무도 안 보는 시각에 100배 포지션이 보호 없이
+  // 남는 것보다 낫다.
+  try {
+    const { executeOrder } = await import('@/lib/engine/orderExecutor');
+    const { tagStrategy } = await import('@/lib/strategies/ledger');
+    const clientOrderId = `mo1${wv.tradingDay?.replace(/-/g, '') ?? ''}${String(cycle.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}`;
+
+    const exec = await executeOrder(sb, {
+      userId, connectionId,
+      // 장부에 소유 전략을 새긴다 — 다른 전략의 충돌 검사가 이걸 읽는다.
+      signalId: tagStrategy(`${STRATEGY_MY_ORIGINAL_V1}:${wv.tradingDay}`, STRATEGY_MY_ORIGINAL_V1),
+      clientOrderId,
+      exchange, mode: 'TESTNET',
+      source: 'AUTOTRADE',
+      protectionPolicy: 'REQUIRED',
+      stopLoss: prices.stop,
+      ...(prices.takeProfit != null ? { takeProfit: prices.takeProfit } : {}),
+      apiKey: (creds as any).key,
+      apiSecret: (creds as any).secret,
+      plan: {
+        approved: true,
+        symbol, side: sig.side,
+        riskAmount: marginUsd, riskAmountWithCosts: marginUsd,
+        stopDistancePct: ep.spec.stopPct, effectiveStopPct: ep.spec.stopPct,
+        positionSize: notionalUsd, quantity,
+        requiredMargin: marginUsd, leverage: REQUESTED_LEVERAGE,
+        // 청산가는 실행기가 거래소에서 다시 읽는다. 여기서는 추정 거리만
+        // 넘긴다 — 0을 넣으면 손절 방향 재확인이 통째로 꺼진다.
+        liquidationPrice: sig.side === 'LONG'
+          ? entryRef * (1 - (lg.liquidationDistancePct ?? 0.6) / 100)
+          : entryRef * (1 + (lg.liquidationDistancePct ?? 0.6) / 100),
+        liquidationDistancePct: lg.liquidationDistancePct ?? 0,
+        notes: [
+          `자릿수 구간 ${status.size.bandLabel} · 증거금 $${marginUsd}`,
+          `청산 정책 ${ep.spec.id} v${ep.spec.version} (원본 규칙 아님)`,
+        ],
+      } as any,
+    } as any);
+
+    const entered = exec?.ok === true;
+    const why = entered
+      ? `${sig.side} 진입 · 증거금 $${marginUsd} · ${REQUESTED_LEVERAGE}배 · `
+        + `손절 ${prices.stop}${prices.takeProfit != null ? ` · 익절 ${prices.takeProfit}` : ''}`
+      : `진입 실패: ${exec?.message || exec?.status || '사유 없음'}`;
+
+    await noteCycle(sb, cycle.id, {
+      last_trading_day: wv.tradingDay,
+      last_outcome: entered ? 'ENTERED' : 'FAILED',
+      last_reason: why,
+      ...(entered ? { entries: Number(cycle.entries || 0) + 1 } : {}),
+    });
+
+    return NextResponse.json({
+      ...base,
+      executed: entered,
+      outcome: entered ? 'ENTERED' : 'FAILED',
+      ok: entered,
+      order: {
+        status: exec?.status ?? null, clientOrderId,
+        exchangeOrderId: exec?.exchangeOrderId ?? null,
+        filledQty: exec?.filledQty ?? null, avgPrice: exec?.avgPrice ?? null,
+        // **손절이 실제로 걸렸는가.** slOrderId가 없는데 요청했으면
+        // 보호되지 않은 포지션이다 — 화면이 그 둘을 구분해야 한다.
+        slOrderId: exec?.slOrderId ?? null, tpOrderId: exec?.tpOrderId ?? null,
+        unprotected: exec?.unprotected ?? null,
+        // false면 '아직 모른다'이지 '안 됐다'가 아니다.
+        settled: exec?.settled ?? null,
+      },
+      message: why,
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (e: any) {
+    const why = `주문 경로에서 예외가 났습니다 — ${e?.message || e}`;
+    await noteCycle(sb, cycle.id, {
+      last_trading_day: wv.tradingDay, last_outcome: 'FAILED', last_reason: why,
+    });
+    return NextResponse.json({ ...base, ok: false, outcome: 'FAILED', message: why },
+      { status: 200, headers: { 'Cache-Control': 'no-store' } });
+  }
 }
 
 /** GET은 상태만 본다. 주문을 내지 않으므로 로그인만으로 연다 */

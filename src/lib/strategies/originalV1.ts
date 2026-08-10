@@ -333,7 +333,14 @@ export function signalRuleConfigured(): boolean {
   return true;
 }
 
-/** 손절·익절 규칙이 들어왔는가. **아직 아니다** */
+/**
+ * 청산 규칙이 들어왔는가.
+ *
+ * **여기서 true인 것은 '원본의 청산 규칙이 있다'는 뜻이 아니다.**
+ * 사용자의 원본은 청산이 재량이었다. 지금 걸리는 손절·익절은
+ * `exitPolicy.ts`의 **검증용 정책**이고, 버전이 따로 붙어 있어 언제든
+ * 교체된다. 진입(my-original-v1 v1)과 섞이지 않는다.
+ */
 export function exitRuleConfigured(): boolean {
-  return false;
+  return true;
 }

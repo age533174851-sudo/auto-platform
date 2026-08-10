@@ -33,6 +33,7 @@ const ORDER_ROUTES = [
   'src/app/api/webhook/tradingview/route.ts',
   'src/app/api/autotrade/daily-ladder/route.ts',
   'src/app/api/autotrade/scalp/route.ts',
+  'src/app/api/autotrade/my-original-v1/route.ts',
 ];
 
 // 각 경로가 반드시 물어봐야 하는 것.
