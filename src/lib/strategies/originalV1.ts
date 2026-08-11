@@ -213,6 +213,104 @@ export interface WindowBar {
   volume?: number;
 }
 
+/**
+ * **열 단위 봉을 줄 단위로 바꾼다.**
+ *
+ * 실제로 있던 고장
+ * ────────────────
+ * `fetchVenueBars`는 배열이 아니라 **열 단위 객체**를 준다:
+ *
+ *     { opens: [...], highs: [...], lows: [...], closes: [...],
+ *       volumes: [...], openTimes: [...] }
+ *
+ * 그런데 부르는 쪽이 `Array.isArray(r.bars)`로 검사했다. 객체는 배열이
+ * 아니므로 **정상적으로 받은 봉이 매번 빈 배열이 됐고**, "봉을 받지
+ * 못했습니다"로 실패했다. Gate는 멀쩡히 봉을 주고 있었다.
+ *
+ * 그래서 변환을 한 곳에 둔다. 부르는 쪽이 모양을 짐작하지 않는다.
+ *
+ * 추측하지 않는다
+ * ───────────────
+ * 열의 길이가 서로 다르거나 값이 가격·시각으로 쓸 수 없으면 **그 자리에서
+ * 실패**한다. 짧은 쪽에 맞춰 자르거나 빠진 값을 0으로 채우면, 없는 봉으로
+ * 방향을 정하게 된다.
+ */
+export function venueBarsToWindowBars(v: any): {
+  ok: boolean; bars: WindowBar[]; error: string | null;
+} {
+  if (v == null || typeof v !== 'object') {
+    return { ok: false, bars: [], error: '봉 데이터가 없습니다' };
+  }
+  const cols = ['openTimes', 'opens', 'highs', 'lows', 'closes'] as const;
+  for (const c of cols) {
+    if (!Array.isArray((v as any)[c])) {
+      return { ok: false, bars: [], error: `봉 데이터에 ${c}가 배열로 들어 있지 않습니다` };
+    }
+  }
+  const n = v.openTimes.length;
+  if (n === 0) return { ok: false, bars: [], error: '봉이 0개입니다' };
+  for (const c of cols) {
+    if ((v as any)[c].length !== n) {
+      return {
+        ok: false, bars: [],
+        error: `봉 데이터의 길이가 서로 다릅니다 (openTimes ${n} · ${c} ${(v as any)[c].length}) — `
+             + '짧은 쪽에 맞춰 자르면 없는 봉으로 방향을 정하게 됩니다',
+      };
+    }
+  }
+  const vols = Array.isArray(v.volumes) && v.volumes.length === n ? v.volumes : null;
+
+  const out: WindowBar[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = Number(v.openTimes[i]);
+    const o = price(v.opens[i]); const h = price(v.highs[i]);
+    const l = price(v.lows[i]); const c = price(v.closes[i]);
+    if (!Number.isFinite(t) || t <= 0 || o == null || h == null || l == null || c == null) {
+      return {
+        ok: false, bars: [],
+        error: `${i}번째 봉의 시각이나 가격을 읽지 못했습니다 — 빠진 값을 채우지 않습니다`,
+      };
+    }
+    out.push({
+      openTimeMs: t, open: o, high: h, low: l, close: c,
+      ...(vols ? { volume: Number(vols[i]) } : {}),
+    });
+  }
+  return { ok: true, bars: out, error: null };
+}
+
+/**
+ * 이 결과가 **오늘의 하루 1회 슬롯을 써 버리는가.**
+ *
+ * 실제로 있던 고장
+ * ────────────────
+ * 봉을 못 읽어 실패했는데 `last_trading_day`를 오늘로 적었다. 그러면
+ * 다음 tick은 `ALREADY_DONE`으로 건너뛰고, **같은 창·같은 유예 안인데도
+ * 다시 시도할 수 없다.** 화면에는 나중에 '조건 없음'처럼 보였다.
+ *
+ * 조회 실패는 판단이 아니다. **방향 판정이 실제로 끝났을 때만** 슬롯을
+ * 쓴다 — 그때만 "오늘은 봤다"고 말할 수 있다.
+ */
+export function consumesTradingDay(code: SignalCode | 'MISSED' | string): boolean {
+  switch (code) {
+    // 방향이 나왔거나, 방향이 없다고 판정했다 — 둘 다 판단이다.
+    case 'LONG':
+    case 'SHORT':
+    case 'NO_TRADE':
+      return true;
+    // 창을 통째로 놓쳤다. 오늘은 더 시도하지 않는다.
+    case 'MISSED':
+      return true;
+    // 데이터를 못 읽었다. **판단한 적이 없으므로 슬롯을 쓰지 않는다.**
+    case 'BARS_UNAVAILABLE':
+    case 'WINDOW_BARS_MISSING':
+      return false;
+    default:
+      // 모르는 코드는 쓰지 않는다 — 잘못 소비하면 그날이 사라진다.
+      return false;
+  }
+}
+
 /** 이 구간을 덮는 봉만 고른다. 창 밖의 봉을 섞으면 다른 구간을 판단하게 된다 */
 export function barsInWindow(bars: WindowBar[], tradingDay: string): WindowBar[] {
   const out: WindowBar[] = [];

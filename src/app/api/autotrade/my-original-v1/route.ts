@@ -38,6 +38,7 @@ import {
 } from '@/lib/strategies/exitPolicy';
 import {
   windowVerdict, originalV1Signal, tradingDayKst,
+  venueBarsToWindowBars, consumesTradingDay,
   signalRuleConfigured, exitRuleConfigured,
   WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
 } from '@/lib/strategies/originalV1';
@@ -192,9 +193,9 @@ export async function POST(req: NextRequest) {
     const { killSwitchGate } = await import('@/lib/risk/killSwitch');
     const ksg = await killSwitchGate(sb, connectionId);
     if (!ksg.allowed) {
-      await noteCycle(sb, cycle.id, {
-        last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: ksg.message,
-      });
+      // **거래일을 소비하지 않는다.** 킬스위치는 판단이 아니라 환경이다 —
+      // 사람이 풀면 같은 날 안에 다시 볼 수 있어야 한다.
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: ksg.message });
       return NextResponse.json({ ...base, ok: false, error: ksg.error, message: ksg.message },
         { status: ksg.status });
     }
@@ -230,9 +231,9 @@ export async function POST(req: NextRequest) {
     if (holders.length > 0) {
       const why = `${symbol}을(를) 다른 전략(${holders.join(' · ')})이 들고 있습니다 — `
         + '포지션 소유권이 생기기 전까지 같은 종목에 두 전략이 들어가지 않습니다';
-      await noteCycle(sb, cycle.id, {
-        last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: why,
-      });
+      // 다른 전략이 들고 있는 것도 환경이다. 그 포지션이 닫히면 같은
+      // 날 안에 다시 볼 수 있어야 한다 — 거래일을 소비하지 않는다.
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });
       return NextResponse.json({ ...base, ok: false, blocked: 'BLOCK_CONFLICT', message: why },
         { status: 409 });
     }
@@ -265,9 +266,8 @@ export async function POST(req: NextRequest) {
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
   if (!status.size.ok) {
-    await noteCycle(sb, cycle.id, {
-      last_trading_day: wv.tradingDay, last_outcome: 'BLOCKED', last_reason: status.size.reason,
-    });
+    // 크기를 못 정하는 것도 판단이 아니다 — 거래일을 소비하지 않는다.
+    await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: status.size.reason });
     return NextResponse.json({ ...base, ok: false, blocked: status.size.code, message: status.size.reason },
       { status: 200, headers: { 'Cache-Control': 'no-store' } });
   }
@@ -284,16 +284,30 @@ export async function POST(req: NextRequest) {
   base.exchange = exchange;
   base.testnet = testnet;
 
+  // ── 봉을 줄 단위로 바꾼다 ──
+  //
+  // `fetchVenueBars`는 배열이 아니라 **열 단위 객체**를 준다
+  // ({ opens, highs, lows, closes, volumes, openTimes }). 예전에는
+  // `Array.isArray(r.bars)`로 검사해서 **정상 수신한 봉이 매번 빈 배열**이
+  // 됐고, Gate가 멀쩡히 봉을 주는데도 "봉을 받지 못했습니다"로 실패했다.
+  //
+  // 변환은 originalV1 한 곳에 있다 — 여기서 모양을 다시 짐작하지 않는다.
   let bars: any[] = [];
   let barsError: string | null = null;
   try {
     const { fetchVenueBars } = await import('@/lib/markets/venueBars');
     // 09:10~09:30은 5분봉 네 개다. 여유를 두고 받아서 판정 함수가 고른다.
-    const r: any = await fetchVenueBars({
+    const r = await fetchVenueBars({
       exchange, symbol, interval: '5m', limit: 60, testnet, nowMs,
     });
-    bars = Array.isArray(r?.bars) ? r.bars : Array.isArray(r) ? r : [];
-    if (bars.length === 0) barsError = r?.error || '봉을 받지 못했습니다';
+    if (r?.error || !r?.bars) {
+      barsError = r?.error || '봉을 받지 못했습니다';
+    } else {
+      const conv = venueBarsToWindowBars(r.bars);
+      if (!conv.ok) barsError = conv.error;
+      else bars = conv.bars;
+      base.barsSource = (r as any).source ?? null;
+    }
   } catch (e: any) { barsError = String(e?.message || e); }
 
   // ── 7. 방향 ──
@@ -309,22 +323,34 @@ export async function POST(req: NextRequest) {
   if (sig.code === 'WINDOW_BARS_MISSING') {
     // **거래일을 소진하지 않는다.** 판단한 것이 아니라 볼 봉이 아직
     // 없는 것이다 — 창이 막 열렸을 때 이 상태가 될 수 있다.
+    // 그래도 사유는 남긴다: 아무 기록이 없으면 "왜 아직 아무것도 없지"의
+    // 답이 어디에도 없다.
+    await noteCycle(sb, cycle.id, { last_outcome: 'FAILED', last_reason: sig.reason });
     return NextResponse.json({
-      ...base, outcome: 'NO_SIGNAL', reason: sig.reason,
+      ...base, outcome: 'FAILED', retryable: true, reason: sig.reason,
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   if (sig.code === 'BARS_UNAVAILABLE') {
-    await noteCycle(sb, cycle.id, {
-      last_trading_day: wv.tradingDay, last_outcome: 'FAILED', last_reason: sig.reason,
-    });
-    return NextResponse.json({ ...base, ok: false, outcome: 'FAILED', message: sig.reason },
-      { status: 200, headers: { 'Cache-Control': 'no-store' } });
+    // ── 조회 실패로 그 거래일을 잃지 않는다 ──
+    //
+    // 예전에는 여기서 `last_trading_day`를 오늘로 적었다. 그러면 다음
+    // tick이 ALREADY_DONE으로 건너뛰어, **같은 창·같은 유예 안인데도
+    // 다시 시도할 수 없었다.** 실제로 그래서 하루를 통째로 잃었다.
+    //
+    // 조회 실패는 판단이 아니다. 사유만 남기고 슬롯은 그대로 둔다.
+    await noteCycle(sb, cycle.id, { last_outcome: 'FAILED', last_reason: sig.reason });
+    return NextResponse.json({
+      ...base, ok: false, outcome: 'FAILED', retryable: true, message: sig.reason,
+    }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
   }
 
   if (!sig.side) {
+    // **판정이 끝났다 — 여기서만 오늘의 슬롯을 쓴다.**
+    // 어떤 결과가 슬롯을 쓰는지는 consumesTradingDay 한 곳이 정한다.
     await noteCycle(sb, cycle.id, {
-      last_trading_day: wv.tradingDay, last_outcome: 'NO_TRADE', last_reason: sig.reason,
+      ...(consumesTradingDay(sig.code) ? { last_trading_day: wv.tradingDay } : {}),
+      last_outcome: 'NO_TRADE', last_reason: sig.reason,
     });
     return NextResponse.json({ ...base, outcome: 'NO_SIGNAL', reason: sig.reason },
       { headers: { 'Cache-Control': 'no-store' } });
