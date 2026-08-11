@@ -29,6 +29,7 @@ import { strategyIdOfRow } from '../strategies/registry';
 import { strategyRunRequest } from '../strategies/runRequest';
 import { decisionRecordOf } from '../ui/autoOverview';
 import { dueCheck, verdictOfOutcome, resultLineOf, type DueVerdict } from './evaluationLoop';
+import { claimVerdict, type ClaimVerdict } from './schedulePoll';
 
 /** `autotrade_schedules` 한 줄 중 이 파일이 쓰는 칸만 */
 export interface ScheduleRow {
@@ -203,6 +204,45 @@ export async function recordEvaluation(
 }
 
 /**
+ * **이 예약을 지금 내가 평가한다고 못 박는다.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 이제 예약을 보는 곳이 둘이다 — GitHub Actions(`autotrade-tick`)와
+ * 24시간 도는 Fly Worker. 둘이 같은 순간에 같은 줄을 보면 **평가가 두 번
+ * 돌고, 조건이 맞았으면 주문도 두 번 나간다.**
+ *
+ * 어떻게 막는가
+ * ─────────────
+ * `last_run_at`을 지금으로 바꾸되 **읽었을 때와 값이 같을 때만** 바꾼다.
+ * 그 사이 다른 쪽이 먼저 바꿨으면 0줄이 갱신되고, 그때는 물러난다.
+ *
+ * 새 표도 새 칸도 필요 없다. 이미 있는 칸이 그대로 번호표다.
+ *
+ * **선점에 실패한 것과 남이 가져간 것은 다르다.** 조회 오류를 '남이
+ * 가져갔다'로 읽으면 그 예약은 아무도 안 도는데 로그는 정상으로 보인다.
+ */
+export async function claimSchedule(
+  sb: any, row: ScheduleRow, nowMs: number,
+): Promise<ClaimVerdict> {
+  try {
+    let q = sb.from('autotrade_schedules')
+      .update({ last_run_at: new Date(nowMs).toISOString() })
+      .eq('id', row.id);
+    // **null과 값은 다른 조건이다.** `.eq(col, null)`은 SQL에서 항상
+    // 거짓이라 첫 평가를 영원히 못 가져온다.
+    q = row.last_run_at == null ? q.is('last_run_at', null)
+      : q.eq('last_run_at', row.last_run_at);
+
+    const { data, error } = await q.select('id');
+    if (error) return claimVerdict(null, error);
+    return claimVerdict(Array.isArray(data) ? data.length : null);
+  } catch (e: any) {
+    return claimVerdict(null, e);
+  }
+}
+
+/**
  * 예약 한 줄을 **차례일 때만** 평가하고 기록까지 한다.
  *
  * 부르는 쪽이 둘(첫 평가·주기 실행)이라 간격 검사와 기록을 여기 묶어
@@ -228,6 +268,20 @@ export async function evaluateIfDue(
   // **건너뛸 때는 `last_run_at`을 건드리지 않는다.** 건너뛴 것을 실행으로
   // 적으면 간격이 매번 갱신돼서 영원히 안 돈다.
   if (!due.due) return { due, record: null, saveError: null };
+
+  // ── 선점 ──
+  //
+  // 예약을 보는 곳이 둘(GitHub 실행기 · Fly Worker)이다. 여기서 한 번
+  // 못 박지 않으면 같은 순간에 둘 다 평가하고, 조건이 맞았으면 주문이
+  // 두 번 나간다. **부르는 쪽마다 막지 않고 이 한 곳에서 막는다.**
+  const claim = await claimSchedule(sb, row, nowMs);
+  if (!claim.ok) {
+    return {
+      due: { ...due, due: false, code: claim.code === 'LOST' ? 'TOO_SOON' : due.code,
+        reason: claim.reason },
+      record: null, saveError: claim.code === 'FAILED' ? claim.reason : null,
+    };
+  }
 
   let record: EvaluationRecord;
   try {
