@@ -12,6 +12,7 @@ import {
 } from './ladderCycle';
 import {
   windowVerdict, tradingDayKst, kstMinuteOfDay, originalV1Signal, barsInWindow,
+  venueBarsToWindowBars, consumesTradingDay,
   signalRuleConfigured, exitRuleConfigured,
   WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
 } from './originalV1';
@@ -290,6 +291,112 @@ export function runOriginalV1Tests() {
       tradingDay: DAY,
     });
     eq(v.code, 'BARS_UNAVAILABLE');
+  });
+
+  console.log('[원본 v1 — 열 단위 봉을 줄 단위로 바꾼다]');
+
+  /** fetchVenueBars가 실제로 주는 모양 */
+  const venue = (rows: Array<[number, number, number, number, number]>) => ({
+    openTimes: rows.map(r => r[0]),
+    opens: rows.map(r => r[1]),
+    highs: rows.map(r => r[2]),
+    lows: rows.map(r => r[3]),
+    closes: rows.map(r => r[4]),
+    volumes: rows.map(() => 1),
+  });
+
+  test('Gate가 준 열 단위 봉 → 09:10~09:30 5분봉 4개 → 합성 봉 → LONG', () => {
+    // **이게 실제로 났던 고장이다.** fetchVenueBars는 배열이 아니라
+    // { opens, highs, lows, closes, openTimes } 객체를 준다. 부르는 쪽이
+    // Array.isArray로 검사해서 정상 수신한 봉이 매번 빈 배열이 됐고,
+    // "봉을 받지 못했습니다"로 하루를 통째로 잃었다.
+    const v = venue([
+      [kst(2026, 8, 11, 9, 0), 99, 99.5, 98.5, 99],      // 창 전
+      [kst(2026, 8, 11, 9, 10), 100, 101, 99, 100.5],
+      [kst(2026, 8, 11, 9, 15), 100.5, 102, 100, 101],
+      [kst(2026, 8, 11, 9, 20), 101, 103, 101, 102],
+      [kst(2026, 8, 11, 9, 25), 102, 104, 102, 103],
+      [kst(2026, 8, 11, 9, 30), 103, 105, 103, 104],     // 창 밖
+    ]);
+    const conv = venueBarsToWindowBars(v);
+    eq(conv.ok, true, conv.error || '');
+    eq(conv.bars.length, 6);
+
+    const sig = originalV1Signal({ bars: conv.bars, tradingDay: '2026-08-11' });
+    eq(sig.side, 'LONG', sig.reason);
+    eq(sig.evidence.bars, 4, '창을 덮는 5분봉은 4개다');
+    eq(sig.evidence.windowOpen, 100);
+    eq(sig.evidence.windowClose, 103);
+  });
+
+  test('같은 모양으로 음봉이면 SHORT', () => {
+    const conv = venueBarsToWindowBars(venue([
+      [kst(2026, 8, 11, 9, 10), 100, 100.5, 98, 99],
+      [kst(2026, 8, 11, 9, 25), 99, 99, 97, 97.5],
+    ]));
+    eq(originalV1Signal({ bars: conv.bars, tradingDay: '2026-08-11' }).side, 'SHORT');
+  });
+
+  test('열 길이가 다르면 짧은 쪽에 맞춰 자르지 않는다', () => {
+    // 자르면 없는 봉으로 방향을 정하게 된다.
+    const v: any = venue([[kst(2026, 8, 11, 9, 10), 100, 101, 99, 100.5]]);
+    v.closes = [];
+    const conv = venueBarsToWindowBars(v);
+    eq(conv.ok, false);
+    assert(String(conv.error).includes('길이'), conv.error || '');
+  });
+
+  test('가격이나 시각을 못 읽으면 채우지 않고 실패한다', () => {
+    const bad: any = venue([[kst(2026, 8, 11, 9, 10), 100, 101, 99, 100.5]]);
+    bad.opens = [0];
+    eq(venueBarsToWindowBars(bad).ok, false);
+    const bad2: any = venue([[kst(2026, 8, 11, 9, 10), 100, 101, 99, 100.5]]);
+    bad2.openTimes = [NaN];
+    eq(venueBarsToWindowBars(bad2).ok, false);
+  });
+
+  test('배열이 아닌 것을 봉으로 받지 않는다', () => {
+    for (const v of [null, undefined, [], 'x', { opens: 1 }]) {
+      eq(venueBarsToWindowBars(v as any).ok, false, JSON.stringify(v));
+    }
+  });
+
+  test('거래량이 없어도 봉은 만든다 — 방향 판정에 안 쓴다', () => {
+    const v: any = venue([[kst(2026, 8, 11, 9, 10), 100, 101, 99, 100.5]]);
+    delete v.volumes;
+    const conv = venueBarsToWindowBars(v);
+    eq(conv.ok, true, conv.error || '');
+    eq(conv.bars[0].open, 100);
+  });
+
+  console.log('[원본 v1 — 조회 실패로 그 거래일을 잃지 않는다]');
+
+  test('봉 조회 실패는 하루 1회 슬롯을 쓰지 않는다 — 다음 tick에 다시 시도한다', () => {
+    // 예전에는 실패에도 last_trading_day를 오늘로 적었다. 그러면 다음
+    // tick이 ALREADY_DONE으로 건너뛰어 같은 창 안에서도 재시도가 막혔다.
+    eq(consumesTradingDay('BARS_UNAVAILABLE'), false);
+    eq(consumesTradingDay('WINDOW_BARS_MISSING'), false);
+  });
+
+  test('방향 판정이 끝났을 때만 슬롯을 쓴다', () => {
+    eq(consumesTradingDay('LONG'), true);
+    eq(consumesTradingDay('SHORT'), true);
+    eq(consumesTradingDay('NO_TRADE'), true);
+    eq(consumesTradingDay('MISSED'), true);
+  });
+
+  test('모르는 코드는 슬롯을 쓰지 않는다 — 잘못 소비하면 그날이 사라진다', () => {
+    eq(consumesTradingDay('WHATEVER'), false);
+    eq(consumesTradingDay(''), false);
+  });
+
+  test('실패한 거래일은 다음 tick이 다시 판단할 수 있다', () => {
+    // 실패 뒤 last_trading_day가 비어 있으면 창 안에서 다시 평가된다.
+    const v = windowVerdict({ nowMs: kst(2026, 8, 11, 9, 25), lastEvaluatedDay: null });
+    eq(v.evaluate, true); eq(v.code, 'IN_WINDOW');
+    // 유예 안에서도 마찬가지다.
+    const late = windowVerdict({ nowMs: kst(2026, 8, 11, 9, 50), lastEvaluatedDay: null });
+    eq(late.evaluate, true); eq(late.code, 'LATE');
   });
 
   console.log('[원본 v1 — 진입은 원본, 청산은 별도 정책]');
