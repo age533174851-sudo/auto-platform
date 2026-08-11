@@ -27,10 +27,21 @@ import {
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
 } from '../../src/lib/exchanges/futuresExec';
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
+import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
+import { selectDueSchedules } from '../../src/lib/autotrade/schedulePoll';
 
 // 이 워커가 실행할 수 있는 거래소. 모니터 조회도 이 목록을 쓴다 —
 // 목록이 두 곳에 있으면 하나만 늘어난다.
 const SUPPORTED_EXCHANGE_IDS = ['binance', 'gate', 'gateio', 'gate.io'];
+
+// ── 자동매매 예약을 이 워커도 본다 ──
+//
+// **평가기를 새로 만들지 않는다.** 웹의 실행기가 쓰는 바로 그 함수를
+// 부른다 — 판정·간격·선점·기록이 전부 거기 있다.
+//
+// 값은 어디에도 찍지 않는다. 있는지 없는지만 본다.
+const APP_URL = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/+$/, '');
+const APP_ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 
 // ── 부팅 즉시 출력 (파일이 로드되는 순간 찍힘 — Railway "빈 로그" 진단용) ──
 console.log('🚀 TRAIGO Worker started');
@@ -445,6 +456,81 @@ async function monitorConnections() {
   }
 }
 
+// ── 예약 평가 (TESTNET 전용) ─────────────────────────
+//
+// 왜 워커가 이걸 하는가
+// ─────────────────────
+// 지금까지 평가를 깨우는 것은 GitHub Actions(cron */15) 하나뿐이었다.
+// 그런데 **실제 실행이 40~80분씩 밀린 기록이 있다.** 원본 전략의 판단
+// 창은 09:10~09:30이고 유예를 더해도 10:00까지라, 한 번 크게 밀리면
+// 그날이 통째로 사라진다.
+//
+// 이 워커는 이미 몇 초마다 깨어난다. 예약도 같이 보면 스케줄러 지연에
+// 기대지 않아도 된다. GitHub 쪽은 **예비로 남긴다** — 둘 중 하나가
+// 죽어도 평가는 돈다.
+//
+// 두 개가 보는데 왜 두 번 안 들어가는가
+// ────────────────────────────────────
+// `evaluateIfDue`가 평가 직전에 `last_run_at`을 compare-and-set으로
+// 선점한다. 먼저 가져간 쪽만 평가한다 — 그 판정은 웹과 같은 함수다.
+let pollWarned = false;
+async function pollSchedules(): Promise<void> {
+  if (!APP_URL || !APP_ADMIN_SECRET) {
+    // **한 번만 크게 말한다.** 매 tick 찍으면 로그가 덮여서 안 읽힌다.
+    if (!pollWarned) {
+      pollWarned = true;
+      const missing = [!APP_URL ? 'APP_URL' : '', !APP_ADMIN_SECRET ? 'ADMIN_SECRET' : '']
+        .filter(Boolean).join(', ');
+      console.warn(`[schedules] 예약 평가를 건너뜁니다 — 없는 환경변수: ${missing}`);
+      console.warn('[schedules] 이 상태에서는 GitHub autotrade-tick만 평가합니다 '
+        + '— 스케줄이 밀리면 판단 창을 놓칠 수 있습니다.');
+    }
+    return;
+  }
+
+  const nowMs = Date.now();
+  let rows: any[] = [];
+  try {
+    const { data, error } = await sb().from('autotrade_schedules')
+      .select('*').eq('enabled', true).limit(100);
+    if (error) throw new Error(error.message);
+    rows = Array.isArray(data) ? data : [];
+  } catch (e: any) {
+    // **'못 읽었다'를 '없다'로 읽지 않는다.** 조용히 넘기면 예약이 하나도
+    // 없는 것과 구분이 안 된다.
+    console.error('[schedules] 예약을 읽지 못했습니다:', e?.message || e);
+    return;
+  }
+
+  const sel = selectDueSchedules(rows as any, nowMs);
+  if (sel.due.length === 0) {
+    // 건너뛴 이유는 가끔만 남긴다 — 매 tick 찍으면 로그가 덮인다.
+    if (tickCount % 100 === 1 && sel.skipped.length > 0) {
+      console.log(`[schedules] due 0건 · 건너뜀 ${sel.skipped.length}건 `
+        + sel.skipped.slice(0, 3).map(x => `${x.symbol}:${x.code}`).join(' '));
+    }
+    return;
+  }
+
+  for (const { row, verdict } of sel.due) {
+    try {
+      console.log(`[schedules] ${row.symbol} 평가 시작 — ${verdict.code}`);
+      const r = await evaluateIfDue(sb(), row as any, {
+        origin: APP_URL, adminSecret: APP_ADMIN_SECRET, timeoutMs: 60_000,
+      }, nowMs);
+      if (r.record) {
+        console.log(`[schedules] ${row.symbol} ${r.record.outcome} — ${r.record.summary}`);
+      } else {
+        // 선점을 놓쳤거나 그 사이 차례가 아니게 됐다. 오류가 아니다.
+        console.log(`[schedules] ${row.symbol} 건너뜀 — ${r.due.reason}`);
+      }
+      if (r.saveError) console.warn(`[schedules] ${row.symbol} 기록 경고: ${r.saveError}`);
+    } catch (e: any) {
+      console.error(`[schedules] ${row.symbol} 평가 실패:`, e?.message || e);
+    }
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -456,6 +542,9 @@ async function tick() {
   try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
   await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount);
   if (isMain) await monitorConnections();
+  // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
+  // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
+  if (isMain) await pollSchedules();
   // 계단식 청산 감시(트레일링·본전이동·시간청산)는 이 워커가 하지 않는다.
   // Binance가 이 서버의 IP 지역을 차단해 주문이 나가지 않기 때문이다
   // (jobs 테이블에 "Service unavailable from a restricted location" 기록).
