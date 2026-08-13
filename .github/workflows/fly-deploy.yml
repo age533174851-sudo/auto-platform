@@ -33,6 +33,22 @@ on:
 
   push:
     branches: [main]
+  # ── 자동 머지로 들어온 커밋도 배포한다 ──
+  #
+  # **2026-08-13에 이것 때문에 하루를 잃었다.**
+  #
+  # GitHub은 `secrets.GITHUB_TOKEN`으로 만든 push에 워크플로를 발동시키지
+  # 않는다(루프 방지). 자동 머지 봇이 합친 커밋이 정확히 그것이라, main이
+  # 여러 번 바뀌는 동안 **fly-deploy는 한 번도 안 돌았다.** Fly에는
+  # 8월 9일 버전이 그대로 떠 있었고, 워커의 예약 폴링 코드는 들어간 적이
+  # 없었다. 그날 09:10~09:30 판단 창을 아무도 보지 않았다.
+  #
+  # `workflow_run`은 그 제약을 받지 않는다. main의 ci가 끝나면 여기가
+  # 깨어난다. 아래 job이 `conclusion == 'success'`와 브랜치를 다시 확인한다
+  # — 빨간 검사 위로 워커를 바꾸지 않는다.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
 
 concurrency:
   group: fly-deploy
@@ -40,6 +56,12 @@ concurrency:
 
 jobs:
   deploy:
+    # workflow_run으로 들어왔으면 **성공한 main의 ci만** 받는다.
+    # 다른 브랜치의 ci나 실패한 ci로 워커를 바꾸지 않는다.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     name: Fly Worker 배포
     runs-on: ubuntu-latest
     timeout-minutes: 20

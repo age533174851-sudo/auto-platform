@@ -32,6 +32,36 @@
 
 import { dueCheck, type DueVerdict } from './evaluationLoop';
 
+/**
+ * **누가 이 평가를 깨웠는가.**
+ *
+ * 2026-08-13에 판단 창을 133분 놓쳤다. 그때 "왜 아무도 안 왔나"의 답을
+ * 찾으려면 로그를 뒤져야 했다 — 예약 줄에는 누가 깨웠는지가 없었다.
+ * 이제 기록에 남는다.
+ */
+export type DispatchSource = 'FLY_WORKER' | 'GITHUB_FALLBACK' | 'MANUAL';
+
+/**
+ * Worker가 예약을 들여다보는 주기.
+ *
+ * 워커의 주 루프는 몇 초마다 깨어난다. 그때마다 DB를 두드릴 이유는
+ * 없다 — 예약의 최소 간격은 분 단위다. 다만 **판단 창이 20분**이므로
+ * 이보다 촘촘해야 한다. 1분이면 창 안에 최소 20번 본다.
+ */
+export const POLL_INTERVAL_MS = 60_000;
+
+/**
+ * 지금 예약을 볼 차례인가.
+ *
+ * **한 번도 안 봤으면 본다.** `lastPollMs`를 0으로 읽으면 1970년이 되어
+ * 언제나 true가 되는데, 그건 우연히 맞는 것이고 다음 사람이 못 읽는다.
+ */
+export function shouldPollNow(lastPollMs: number | null, nowMs: number,
+  intervalMs = POLL_INTERVAL_MS): boolean {
+  if (lastPollMs == null || !Number.isFinite(lastPollMs)) return true;
+  return nowMs - lastPollMs >= intervalMs;
+}
+
 export interface PollRow {
   id: string;
   user_id: string;

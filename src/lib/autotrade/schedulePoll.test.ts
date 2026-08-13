@@ -11,7 +11,10 @@
 // 못 박는 것은 그 둘이다: 무엇을 고르는가, 어떻게 한 번만 도는가.
 
 import { test, eq, assert } from '../../test/harness';
-import { selectDueSchedules, claimVerdict, isLiveMode } from './schedulePoll';
+import {
+  selectDueSchedules, claimVerdict, isLiveMode, shouldPollNow, POLL_INTERVAL_MS,
+} from './schedulePoll';
+import { runtimeStateOf, WORKER_STALE_MS } from './evaluationLoop';
 
 const MIN = 60_000;
 const NOW = 1_800_000_000_000;
@@ -127,5 +130,95 @@ export function runSchedulePollTests() {
     for (const [n, e] of [[0, null], [null, null], [-1, null], [0, new Error('x')]] as any[]) {
       eq(claimVerdict(n, e).ok, false, `${n}/${e}`);
     }
+  });
+
+  console.log('[예약 폴링 — 판단 창 안에서 반드시 본다]');
+
+  /** 한국시간 그 날 그 시각의 ms */
+  const kst = (d: number, hh: number, mm: number) => Date.UTC(2026, 7, d, hh - 9, mm);
+
+  test('09:10~09:30 창 안에서 폴링이 최소 한 번은 평가한다', () => {
+    // 2026-08-13에 GitHub cron이 133분 밀려 이 창을 통째로 놓쳤다.
+    // 워커는 1분마다 보므로 20분 창 안에서 최소 20번 기회가 있다.
+    let lastPoll: number | null = null;
+    let evaluated = 0;
+    // 워커 주 루프를 3초 간격으로 흉내낸다.
+    for (let t = kst(13, 9, 10); t <= kst(13, 9, 30); t += 3_000) {
+      if (!shouldPollNow(lastPoll, t)) continue;
+      lastPoll = t;
+      const sel = selectDueSchedules([row({ last_run_at: null })], t);
+      if (sel.due.length > 0) evaluated++;
+    }
+    assert(evaluated >= 1, '창 안에서 한 번도 평가하지 않았다');
+    assert(evaluated >= 20, `창 20분 동안 ${evaluated}번만 봤다 — 너무 성기다`);
+  });
+
+  test('폴링 주기가 판단 창보다 촘촘하다', () => {
+    // 창은 20분이다. 폴링이 그보다 성기면 창을 통째로 건너뛸 수 있다.
+    assert(POLL_INTERVAL_MS <= 5 * 60_000, '폴링 주기가 5분을 넘는다');
+  });
+
+  test('한 번도 안 봤으면 본다', () => {
+    eq(shouldPollNow(null, NOW), true);
+  });
+
+  test('주기 안에는 다시 보지 않는다 — 몇 초마다 DB를 두드리지 않는다', () => {
+    eq(shouldPollNow(NOW - 10_000, NOW), false);
+    eq(shouldPollNow(NOW - POLL_INTERVAL_MS, NOW), true);
+  });
+
+  console.log('[예약 폴링 — 두 실행기가 깨워도 주문은 한 번]');
+
+  test('같은 줄을 둘이 동시에 봐도 선점은 하나만 성공한다', () => {
+    // 둘 다 due로 고른다 — 그건 정상이다. 갈리는 곳은 선점이다.
+    const r = row({ last_run_at: null });
+    eq(selectDueSchedules([r], NOW).due.length, 1);
+    eq(selectDueSchedules([r], NOW).due.length, 1);
+    // 먼저 UPDATE가 닿은 쪽만 1줄을 바꾼다. 나머지는 0줄이다.
+    eq(claimVerdict(1).ok, true);
+    eq(claimVerdict(0).ok, false);
+    eq(claimVerdict(0).code, 'LOST');
+  });
+
+  console.log('[예약 폴링 — 주 실행기가 죽으면 화면이 그렇게 말한다]');
+
+  test('Worker heartbeat가 끊기면 STALE이다 — 마지막 결과가 좋아도', () => {
+    // 2026-08-13에 워커에 폴링 코드가 배포되지 않았는데 화면은
+    // 아무것도 이상하다고 말하지 않았다.
+    const s = runtimeStateOf({
+      nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - 2 * MIN, lastOutcome: 'NO_SIGNAL',
+      runnerLastSeenMs: NOW - 2 * MIN, intervalMin: 15,
+      workerLastSeenMs: NOW - 30 * MIN,
+    });
+    eq(s.state, 'STALE');
+    eq(s.tone, 'bad');
+    assert(s.reason.includes('Worker'), s.reason);
+  });
+
+  test('Worker가 살아 있으면 평소대로 판정한다', () => {
+    const s = runtimeStateOf({
+      nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - 2 * MIN, lastOutcome: 'NO_SIGNAL',
+      runnerLastSeenMs: NOW - 2 * MIN, intervalMin: 15,
+      workerLastSeenMs: NOW - 10_000,
+    });
+    eq(s.state, 'WATCHING');
+  });
+
+  test('Worker heartbeat를 못 읽었으면 죽었다고도 살았다고도 하지 않는다', () => {
+    const s = runtimeStateOf({
+      nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - 2 * MIN, lastOutcome: 'NO_SIGNAL',
+      runnerLastSeenMs: NOW - 2 * MIN, intervalMin: 15,
+      workerLastSeenMs: null,
+    });
+    eq(s.workerStale, null);
+    eq(s.state, 'WATCHING', '못 읽은 것을 죽음으로 읽었다');
+  });
+
+  test('재배포로 잠깐 끊긴 것과 죽은 것을 가른다', () => {
+    assert(WORKER_STALE_MS >= 120_000, '유예가 너무 짧으면 재배포마다 빨강이 된다');
+    assert(WORKER_STALE_MS <= 600_000, '유예가 너무 길면 죽은 워커를 못 본다');
   });
 }

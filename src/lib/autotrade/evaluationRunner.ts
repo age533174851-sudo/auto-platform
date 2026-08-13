@@ -29,7 +29,7 @@ import { strategyIdOfRow } from '../strategies/registry';
 import { strategyRunRequest } from '../strategies/runRequest';
 import { decisionRecordOf } from '../ui/autoOverview';
 import { dueCheck, verdictOfOutcome, resultLineOf, type DueVerdict } from './evaluationLoop';
-import { claimVerdict, type ClaimVerdict } from './schedulePoll';
+import { claimVerdict, type ClaimVerdict, type DispatchSource } from './schedulePoll';
 
 /** `autotrade_schedules` 한 줄 중 이 파일이 쓰는 칸만 */
 export interface ScheduleRow {
@@ -74,6 +74,11 @@ export interface DispatchDeps {
   fetchImpl?: typeof fetch;
   /** 실행기 한 번에 허용할 시간(ms) */
   timeoutMs?: number;
+  /**
+   * **누가 깨웠는가.** 기록에 그대로 남는다 — "왜 아무도 안 왔나"를
+   * 로그가 아니라 예약 줄에서 답할 수 있어야 한다.
+   */
+  source?: DispatchSource;
 }
 
 /**
@@ -173,7 +178,8 @@ function bucketOf(row: ScheduleRow): string {
  * 동안 매 분 진입한다.
  */
 export async function recordEvaluation(
-  sb: any, scheduleId: string, rec: { outcome: EvaluationOutcome | string; summary: any; raw?: any },
+  sb: any, scheduleId: string,
+  rec: { outcome: EvaluationOutcome | string; summary: any; raw?: any; source?: DispatchSource },
 ): Promise<{ saved: boolean; error: string | null }> {
   const base = {
     last_run_at: new Date().toISOString(),
@@ -184,6 +190,9 @@ export async function recordEvaluation(
   const decision = {
     ...decisionRecordOf(verdictOfOutcome(rec.outcome), rec.summary, rec.raw ?? null),
     outcome: String(rec.outcome),
+    // 누가 깨웠는지. **모르면 적지 않는다** — 'MANUAL'로 채우면
+    // 사람이 누른 것과 구분이 안 된다.
+    ...(rec.source ? { source: rec.source, sourceAt: new Date().toISOString() } : {}),
   };
 
   try {
@@ -260,7 +269,7 @@ export async function evaluateIfDue(
   // 화면에는 '켜짐'만 보이고 왜 아무 일도 없는지가 어디에도 없다.
   if (due.code === 'NO_CONNECTION') {
     const save = await recordEvaluation(sb, row.id, {
-      outcome: 'BLOCKED', summary: due.reason,
+      outcome: 'BLOCKED', summary: due.reason, source: deps.source,
     });
     return { due, record: null, saveError: save.error };
   }
@@ -294,6 +303,6 @@ export async function evaluateIfDue(
       executed: false, raw: null,
     };
   }
-  const save = await recordEvaluation(sb, row.id, record);
+  const save = await recordEvaluation(sb, row.id, { ...record, source: deps.source });
   return { due, record, saveError: save.error };
 }
