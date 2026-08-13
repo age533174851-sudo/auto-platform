@@ -155,6 +155,22 @@ export async function GET(req: NextRequest) {
   })();
   const nowMs = Date.now();
 
+  // ── 주 실행기(Fly Worker)가 살아 있는가 ──
+  //
+  // 2026-08-13에 워커에 폴링 코드가 배포되지 않아 판단 창을 133분
+  // 놓쳤다. 그때 화면은 아무것도 이상하다고 말하지 않았다.
+  // **못 읽으면 null이다** — 죽었다고도 살았다고도 말하지 않는다.
+  const workerLastSeenMs = await (async () => {
+    try {
+      const { data } = await (sb as any).from('worker_heartbeat')
+        .select('last_seen, status').order('last_seen', { ascending: false }).limit(1);
+      const first = Array.isArray(data) ? data[0] : null;
+      if (!first || String(first.status) === 'stopped') return null;
+      const t = first?.last_seen ? Date.parse(String(first.last_seen)) : NaN;
+      return Number.isFinite(t) ? t : null;
+    } catch { return null; }
+  })();
+
   // ── 예약이 가리키는 연결이 아직 있는가 ──
   //
   // 연결을 다시 등록하면 id가 새로 생긴다. 예약의 id는 그대로 남고, 그
@@ -193,6 +209,7 @@ export async function GET(req: NextRequest) {
         lastReason: r.last_decision?.reason ?? r.last_result ?? null,
         intervalMin: r.interval_min,
         runnerLastSeenMs,
+        workerLastSeenMs,
       }),
     };
   });
@@ -237,6 +254,15 @@ export async function GET(req: NextRequest) {
     //
     // **못 읽었으면 null이다.** 빈 값을 '정상'으로 그리면, 멈춘 실행기
     // 위에서 예약이 켜져 있는 상태가 화면에는 정상으로 보인다.
+    // 주 실행기(Fly Worker). 예비(GitHub)와 나눠서 적는다 — 어느 쪽이
+    // 죽었는지 모르면 스케줄러 고장을 진단할 수 없다.
+    worker: {
+      lastSeenMs: workerLastSeenMs,
+      lastSeenAt: workerLastSeenMs == null ? null : new Date(workerLastSeenMs).toISOString(),
+      note: workerLastSeenMs == null
+        ? 'Worker heartbeat를 읽지 못했습니다 — 살아 있는지 확인되지 않았습니다'
+        : `${Math.round((nowMs - workerLastSeenMs) / 60_000)}분 전에 확인했습니다`,
+    },
     runner: {
       lastSeenMs: runnerLastSeenMs,
       lastSeenAt: runnerLastSeenMs == null ? null : new Date(runnerLastSeenMs).toISOString(),

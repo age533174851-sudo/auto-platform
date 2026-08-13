@@ -219,6 +219,10 @@ export interface RuntimeStatus {
   runnerLastSeenMs: number | null;
   /** 실행기가 늦고 있는가. 못 읽었으면 null — false가 아니다 */
   runnerStale: boolean | null;
+  /** 주 실행기(Fly Worker) heartbeat. 못 읽었으면 null */
+  workerLastSeenMs: number | null;
+  /** 주 실행기가 끊겼는가. 못 읽었으면 null */
+  workerStale: boolean | null;
 }
 
 /**
@@ -228,6 +232,14 @@ export interface RuntimeStatus {
  * 경고가 상시로 켜져 있고, 그러면 진짜 멈췄을 때 아무도 안 본다.
  */
 export const RUNNER_LATE_FACTOR = 3;
+
+/**
+ * 주 실행기(Fly Worker)를 끊겼다고 볼 때까지.
+ *
+ * 워커는 몇 초마다 heartbeat를 쓴다. 3분이면 재배포로 잠깐 끊긴 것과
+ * 정말 죽은 것을 가른다.
+ */
+export const WORKER_STALE_MS = 180_000;
 
 /**
  * 이 예약이 지금 어떤 상태인가.
@@ -253,6 +265,14 @@ export function runtimeStateOf(i: {
   /** 실행기(cron)가 마지막으로 돈 시각. **못 읽었으면 undefined/null** */
   runnerLastSeenMs?: any;
   runnerIntervalMin?: any;
+  /**
+   * 주 실행기(Fly Worker)의 heartbeat. **못 읽었으면 null.**
+   *
+   * 2026-08-13에 워커에 폴링 코드가 배포되지 않아 판단 창을 133분
+   * 놓쳤다. 그때 화면은 아무것도 이상하다고 말하지 않았다 — 워커가
+   * 살아 있는지를 이 판정이 보지 않았기 때문이다.
+   */
+  workerLastSeenMs?: any;
 }): RuntimeStatus {
   const last = msOf(i.lastRunAtMs);
   const next = nextEvaluationAtMs({ lastRunAtMs: i.lastRunAtMs, intervalMin: i.intervalMin });
@@ -263,9 +283,16 @@ export function runtimeStateOf(i: {
     ? null
     : i.nowMs - runnerSeen > runnerInterval * RUNNER_LATE_FACTOR * 60_000;
 
+  // 주 실행기가 살아 있는가. **못 읽으면 null이다** — 죽었다고도
+  // 살았다고도 말하지 않는다.
+  const workerSeen = msOf(i.workerLastSeenMs);
+  const workerStale = workerSeen == null ? null
+    : i.nowMs - workerSeen > WORKER_STALE_MS;
+
   const base = {
     lastEvaluationAtMs: last, nextEvaluationAtMs: next,
     runnerLastSeenMs: runnerSeen, runnerStale,
+    workerLastSeenMs: workerSeen, workerStale,
   };
   const done = (state: RuntimeState, reason: string): RuntimeStatus =>
     ({ state, tone: RUNTIME_TONE[state], reason, ...base });
@@ -273,6 +300,18 @@ export function runtimeStateOf(i: {
   if (i.enabled !== true) return done('OFF', '꺼져 있습니다 — 평가하지 않습니다');
 
   const interval = intervalMinOf(i.intervalMin);
+
+  // ── 주 실행기가 끊겼으면 그것이 먼저다 ──
+  //
+  // 마지막 평가가 방금이어도, 지금 아무도 안 보고 있으면 '감시 중'이
+  // 아니다. 예비 실행기(GitHub)가 있지만 그건 몇십 분 밀릴 수 있다 —
+  // 실제로 2026-08-13에 133분 밀려 판단 창을 놓쳤다.
+  if (workerStale === true) {
+    const mins = Math.round((i.nowMs - (workerSeen as number)) / 60_000);
+    return done('STALE',
+      `주 실행기(Worker)가 ${mins}분째 응답이 없습니다 — 예비 실행기만 남았고 `
+      + '그쪽은 수십 분 밀릴 수 있습니다. 판단 창을 놓칠 수 있습니다');
+  }
 
   // 켜져 있는데 한 번도 안 돌았다.
   if (last == null) {

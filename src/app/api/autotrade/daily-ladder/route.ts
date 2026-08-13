@@ -1055,6 +1055,10 @@ export async function GET(req: NextRequest) {
       // 한쪽만 고쳐진다.
       const { due, record, saveError } = await evaluateIfDue(sb, r as any, {
         origin, adminSecret,
+        // **이 경로는 예비다.** 주 실행기는 24시간 도는 Fly Worker이고,
+        // 여기는 그것이 죽었을 때를 위한 것이다. 기록에 그렇게 남는다 —
+        // 어느 쪽이 깨웠는지 모르면 스케줄러 고장을 진단할 수 없다.
+        source: 'GITHUB_FALLBACK',
       }, nowMs);
 
       if (!record) {

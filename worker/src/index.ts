@@ -28,7 +28,7 @@ import {
 } from '../../src/lib/exchanges/futuresExec';
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
-import { selectDueSchedules } from '../../src/lib/autotrade/schedulePoll';
+import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
 
 // 이 워커가 실행할 수 있는 거래소. 모니터 조회도 이 목록을 쓴다 —
 // 목록이 두 곳에 있으면 하나만 늘어난다.
@@ -474,6 +474,7 @@ async function monitorConnections() {
 // `evaluateIfDue`가 평가 직전에 `last_run_at`을 compare-and-set으로
 // 선점한다. 먼저 가져간 쪽만 평가한다 — 그 판정은 웹과 같은 함수다.
 let pollWarned = false;
+let lastPollMs: number | null = null;
 async function pollSchedules(): Promise<void> {
   if (!APP_URL || !APP_ADMIN_SECRET) {
     // **한 번만 크게 말한다.** 매 tick 찍으면 로그가 덮여서 안 읽힌다.
@@ -489,6 +490,12 @@ async function pollSchedules(): Promise<void> {
   }
 
   const nowMs = Date.now();
+  // 주 루프는 몇 초마다 깨어난다. 그때마다 DB를 두드릴 이유는 없다 —
+  // 예약의 최소 간격은 분 단위다. 다만 판단 창이 20분이라 이보다는
+  // 촘촘해야 한다(1분이면 창 안에 최소 20번 본다).
+  if (!shouldPollNow(lastPollMs, nowMs, POLL_INTERVAL_MS)) return;
+  lastPollMs = nowMs;
+
   let rows: any[] = [];
   try {
     const { data, error } = await sb().from('autotrade_schedules')
@@ -517,6 +524,9 @@ async function pollSchedules(): Promise<void> {
       console.log(`[schedules] ${row.symbol} 평가 시작 — ${verdict.code}`);
       const r = await evaluateIfDue(sb(), row as any, {
         origin: APP_URL, adminSecret: APP_ADMIN_SECRET, timeoutMs: 60_000,
+        // **누가 깨웠는지 기록에 남는다.** 판단 창을 놓쳤을 때
+        // "왜 아무도 안 왔나"를 예약 줄에서 답할 수 있어야 한다.
+        source: 'FLY_WORKER',
       }, nowMs);
       if (r.record) {
         console.log(`[schedules] ${row.symbol} ${r.record.outcome} — ${r.record.summary}`);
