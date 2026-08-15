@@ -16,6 +16,7 @@ import type { ExitPlan } from './exitPlan';
 import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
 import { fillBasis, exitFromFill } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
+import { protectiveClientOrderId } from './orderOwnership';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -1081,7 +1082,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       // triggerPrice는 원본 손절가를 넘겨서, 호가 단위에 맞춰 둔 값이
       // 아무 데도 안 쓰였다 — 계산해 놓고 배선을 안 한 것이다.
       const sl = await gf.placeStopGateFutures(apiKey, apiSecret, {
-        contract, spec: liveStopSpec, clientOrderId: `${clientOrderId}SL`,
+        // **문자열을 이어 붙이지 않는다.** `…E0SL`은 소유권 형식이 아니라
+        // 되읽을 때 UNKNOWN이 되고, 그러면 안전을 이유로 안 지워서
+        // 거래소에 계속 쌓인다 — 실제로 스모크 SL/TP가 그렇게 남았다.
+        contract, spec: liveStopSpec,
+        clientOrderId: protectiveClientOrderId(clientOrderId, 'STOP_LOSS'),
       }, testnet);
 
       if (sl.success) {
@@ -1126,7 +1131,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         tpNote = ` · ⚠ 익절을 걸지 못했습니다: ${tpSpec.reason}`;
       } else {
         const tp = await gf.placeStopGateFutures(apiKey, apiSecret, {
-          contract, spec: tpSpec, clientOrderId: `${clientOrderId}TP`,
+          contract, spec: tpSpec,
+          clientOrderId: protectiveClientOrderId(clientOrderId, 'TAKE_PROFIT'),
         }, testnet);
         if (tp.success) {
           gateTpId = tp.orderId;

@@ -17,6 +17,7 @@ import {
 import {
   ownedClientOrderId, parseOwnedClientOrderId, classifyOrder,
   orphanCleanupPlan, cleanupOutcome, symbolOwnershipConflict, strategyPrefixOf,
+  protectiveClientOrderId, residualVerdict, ownershipTextOf,
 } from './orderOwnership';
 import { fillBasis, exitFromFill, roundTrigger } from './fillBasedExit';
 import { readbackProtective, triggerMatches } from './protectiveReadback';
@@ -266,6 +267,163 @@ export function runPositionLifecycleTests() {
     eq(classifyOrder(FOREIGN, 'my-original-v1').class, 'FOREIGN');
     eq(classifyOrder(NAMELESS, 'my-original-v1').class, 'UNKNOWN');
     eq(classifyOrder(MINE, 'daily-ladder').class, 'FOREIGN');
+  });
+
+  console.log('[스모크 cleanup P0 — 실제로 남은 ETHUSDT 2건]');
+
+  // ETHUSDT 스모크가 만든 SL/TP. 진입 id는 `smo-…ETHUSDE0`이고,
+  // 실행기가 거기에 'SL'/'TP'를 이어 붙이면 `…E0SL`이 되어 소유권
+  // 형식이 깨진다 — 그래서 UNKNOWN이 되고, 안전을 이유로 안 지워졌다.
+  const ENTRY_ID = ownedClientOrderId({
+    owner: { strategyId: 'smoke-test', symbol: 'ETHUSDT' },
+    logicalKey: 'abcdef1234', purpose: 'ENTRY',
+  });
+
+  /** Gate `price_orders` 응답 한 줄의 실제 모양 */
+  const gatePriceOrder = (id: string, autoSize: string, rule: 1 | 2, price: string, text?: string) => ({
+    id,
+    user: 12345,
+    status: 'open',
+    order_type: autoSize === 'close_long' ? 'close-long-order' : 'close-short-order',
+    initial: {
+      contract: 'ETH_USDT', size: 0, price: '0', tif: 'ioc',
+      reduce_only: true, auto_size: autoSize,
+      ...(text === undefined ? {} : { text }),
+    },
+    trigger: { strategy_type: 0, price_type: 1, price, rule },
+  });
+
+  test('P0-1. 옛 방식(문자열 이어 붙이기)은 소유권을 잃는다 — 이게 원인이었다', () => {
+    eq(parseOwnedClientOrderId(`t-${ENTRY_ID}SL`).ok, false, '이게 통과하면 원인 재현이 안 된 것이다');
+    eq(parseOwnedClientOrderId(`t-${ENTRY_ID}TP`).ok, false);
+    // 그래서 Gate에 남은 두 줄이 UNKNOWN으로 분류됐다.
+    eq(classifyOrder(gatePriceOrder('1', 'close_long', 2, '1870.6', `t-${ENTRY_ID}SL`), 'smoke-test').class,
+      'UNKNOWN');
+  });
+
+  test('P0-1. 목적 글자를 바꿔 끼우면 왕복이 보장된다', () => {
+    const slId = protectiveClientOrderId(ENTRY_ID, 'STOP_LOSS');
+    const tpId = protectiveClientOrderId(ENTRY_ID, 'TAKE_PROFIT');
+    // 길이가 안 늘어난다 — Gate 28자에서 잘리면 소유권을 잃는다.
+    eq(slId.length, ENTRY_ID.length);
+    assert(slId.length <= 28, `${slId} (${slId.length}자)`);
+
+    const sp = parseOwnedClientOrderId(`t-${slId}`);
+    eq(sp.ok, true); eq(sp.purpose, 'STOP_LOSS'); eq(sp.strategyPrefix, 'smo');
+    const tp = parseOwnedClientOrderId(`t-${tpId}`);
+    eq(tp.ok, true); eq(tp.purpose, 'TAKE_PROFIT');
+    // 진입·손절·익절이 서로 다른 id다.
+    eq(new Set([ENTRY_ID, slId, tpId]).size, 3);
+  });
+
+  test('P0-1. 형식이 아닌 옛 id는 예전처럼 이어 붙인다 — 기존 호출부를 깨지 않는다', () => {
+    eq(protectiveClientOrderId('LD20260814BTC', 'STOP_LOSS'), 'LD20260814BTCSL');
+    eq(protectiveClientOrderId('LD20260814BTC', 'TAKE_PROFIT'), 'LD20260814BTCTP');
+  });
+
+  test('P0-1. Gate 실제 응답 모양에서 소유권이 읽힌다 (fixture)', () => {
+    const slId = protectiveClientOrderId(ENTRY_ID, 'STOP_LOSS');
+    const row = gatePriceOrder('444213', 'close_long', 2, '1870.6', `t-${slId}`);
+    eq(ownershipTextOf(row), `t-${slId}`);
+    const c = classifyOrder(row, 'smoke-test');
+    eq(c.class, 'MINE'); eq(c.purpose, 'STOP_LOSS'); eq(c.id, '444213');
+  });
+
+  test('P0-1. Gate가 채워 넣는 기본 text를 우리 식별자로 읽지 않는다', () => {
+    for (const t of ['api', 'web', 'apiv4', '']) {
+      eq(classifyOrder(gatePriceOrder('9', 'close_long', 2, '1870.6', t), 'smoke-test').class, 'UNKNOWN', t);
+    }
+  });
+
+  test('P0-2. 판별 못 한 주문 2건이 남았는데 PASS로 읽지 않는다', () => {
+    // **이것이 거짓 PASS의 정체다.** 예전 판정은 "내 것으로 판별된
+    // 개수"만 셌고, 둘 다 UNKNOWN이면 0이 되어 통과로 찍혔다.
+    const leftover = [
+      gatePriceOrder('1', 'close_long', 2, '1870.6', `t-${ENTRY_ID}SL`),
+      gatePriceOrder('2', 'close_long', 1, '1893.2', `t-${ENTRY_ID}TP`),
+    ];
+    // 옛 판정 방식이 왜 0을 줬는지 그대로 보여 둔다.
+    eq(orphanCleanupPlan({
+      position: { ok: true, found: false }, orders: leftover, myStrategyId: 'smoke-test',
+    }).cancel.length, 0, '옛 방식은 0을 준다 — 그래서 PASS였다');
+
+    // 새 판정은 통과시키지 않는다.
+    const rv = residualVerdict({
+      position: { ok: true, found: false }, orders: leftover, myStrategyId: 'smoke-test',
+    });
+    eq(rv.ok, false, '실제 잔여 2건인데 통과로 읽었다');
+    eq(rv.code, 'UNKNOWN_PRESENT');
+    eq(rv.unknown.length, 2);
+  });
+
+  test('P0-2. 걸었던 주문 번호가 아직 있으면 무조건 FAIL이다', () => {
+    const leftover = [gatePriceOrder('444213', 'close_long', 2, '1870.6')];
+    const rv = residualVerdict({
+      position: { ok: true, found: false }, orders: leftover,
+      myStrategyId: 'smoke-test', ownedIds: ['444213', '444214'],
+    });
+    eq(rv.ok, false); eq(rv.code, 'KNOWN_ORDER_PRESENT');
+    eq(rv.knownStillPresent.join(','), '444213');
+    assert(rv.reason.includes('취소 응답이 성공이어도'), rv.reason);
+  });
+
+  test('P0-3. SL/TP 둘 다 취소되고 재조회 0이면 PASS다', () => {
+    const rv = residualVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders: [],
+      myStrategyId: 'smoke-test', ownedIds: ['444213', '444214'],
+    });
+    eq(rv.ok, true); eq(rv.code, 'CLEAR');
+  });
+
+  test('P0-3. 포지션이 0이 아니면 잔여 판정 자체가 통과가 아니다', () => {
+    eq(residualVerdict({ position: { ok: true, found: true, qty: 0.01 }, orders: [], myStrategyId: 'smoke-test' }).code,
+      'POSITION_NOT_ZERO');
+    eq(residualVerdict({ position: { ok: false, found: false }, orders: [], myStrategyId: 'smoke-test' }).code,
+      'POSITION_NOT_ZERO');
+    eq(residualVerdict({ position: { ok: true, found: false }, orders: null, myStrategyId: 'smoke-test' }).code,
+      'ORDERS_UNKNOWN');
+  });
+
+  test('P0-2. text가 없어도 저장해 둔 주문 번호로 그 둘만 취소한다', () => {
+    const rows = [
+      gatePriceOrder('444213', 'close_long', 2, '1870.6'),          // text 없음
+      gatePriceOrder('444214', 'close_long', 1, '1893.2'),          // text 없음
+      gatePriceOrder('999', 'close_short', 1, '2100', 't-dl-20260814ETHUSDS0'), // 남의 것
+    ];
+    const plan = orphanCleanupPlan({
+      position: { ok: true, found: false }, orders: rows,
+      myStrategyId: 'smoke-test', ownedIds: ['444213', '444214'],
+    });
+    eq(plan.cancel.join(','), '444213,444214', '저장된 번호로도 못 지웠다');
+    eq(plan.keep.length, 1);
+    eq(plan.keep[0].class, 'FOREIGN', '남의 주문을 지우려 했다');
+  });
+
+  test('P0-4. 무관한 주문만 남으면 보존하고 PASS다 — Cancel All을 쓰지 않는다', () => {
+    const foreign = [gatePriceOrder('999', 'close_short', 1, '2100', 't-dl-20260814ETHUSDS0')];
+    const plan = orphanCleanupPlan({
+      position: { ok: true, found: false }, orders: foreign,
+      myStrategyId: 'smoke-test', ownedIds: [],
+    });
+    eq(plan.cancel.length, 0, '남의 손절을 취소 목록에 넣었다');
+    const rv = residualVerdict({
+      position: { ok: true, found: false }, orders: foreign, myStrategyId: 'smoke-test',
+    });
+    eq(rv.ok, true); eq(rv.foreign.join(','), '999');
+  });
+
+  test('P0-4. 판별 못 한 무관한 주문도 자동으로 지우지 않는다 (FAIL로만 적는다)', () => {
+    const unknownRow = [gatePriceOrder('777', 'close_long', 2, '1500')];
+    const plan = orphanCleanupPlan({
+      position: { ok: true, found: false }, orders: unknownRow,
+      myStrategyId: 'smoke-test', ownedIds: [],
+    });
+    eq(plan.cancel.length, 0, 'UNKNOWN을 취소했다 — Cancel All과 같아진다');
+    const rv = residualVerdict({
+      position: { ok: true, found: false }, orders: unknownRow, myStrategyId: 'smoke-test',
+    });
+    eq(rv.ok, false); eq(rv.code, 'UNKNOWN_PRESENT');
+    assert(rv.reason.includes('자동으로 지우지도 않습니다'), rv.reason);
   });
 
   console.log('[같은 종목 다중 전략 — L]');
