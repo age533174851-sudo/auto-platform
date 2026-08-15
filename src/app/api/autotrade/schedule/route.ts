@@ -35,6 +35,7 @@ import {
 } from '@/lib/strategies/registry';
 import { runtimeStateOf, RUNTIME_LABEL } from '@/lib/autotrade/evaluationLoop';
 import { parseTogglePatch, enabledUpdate, notFoundMessage } from '@/lib/autotrade/scheduleToggle';
+import { workerPlan } from '@/lib/runtime/workerPlan';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -282,6 +283,28 @@ export async function GET(req: NextRequest) {
         ? '실행기 실행 기록을 읽지 못했습니다'
         : `${Math.round((nowMs - runnerLastSeenMs) / 60_000)}분 전에 확인했습니다`,
     },
+    // ── 지금 전체가 정상인가 ──
+    //
+    // 줄마다 배지를 그리고 사람이 눈으로 합산하게 두지 않는다.
+    // **켜져 있다(desired)와 돌고 있다(observed)를 맞춰 본 결과**를
+    // 값으로 준다 — 8/13에는 예약이 켜져 있었고 화면은 조용했는데
+    // 아무도 그 예약을 보지 않았다.
+    plan: workerPlan({
+      nowMs,
+      desired: annotated.map((r: any) => ({
+        id: String(r.id), symbol: String(r.symbol),
+        strategyId: String(r.strategyId ?? ''),
+        enabled: r.enabled === true,
+        connectionId: r.connection_id ?? null,
+        mode: String(r.mode ?? ''),
+      })),
+      observed: annotated.map((r: any) => ({
+        id: String(r.id), state: r.runtime?.state,
+        lastRunAtMs: r.last_run_at ? Date.parse(String(r.last_run_at)) : null,
+        source: r.last_decision?.source ?? null,
+      })),
+      workerLastSeenMs,
+    }),
     // 화면이 상태 배지 글자를 서버와 똑같이 쓰게 한다 — 두 곳에 적으면
     // 한쪽만 바뀌고, 그때 같은 상태가 두 이름으로 보인다.
     runtimeLabels: RUNTIME_LABEL,

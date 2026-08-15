@@ -35,13 +35,32 @@ const CRONS: CronExpectation[] = [
 ];
 
 /** 있어야 하는 표 */
-const TABLES: Array<{ name: string; label: string; migration: string }> = [
-  { name: 'sub_accounts',  label: '가상 서브계좌', migration: '024' },
-  { name: 'safety_events', label: '안전장치 기록', migration: '026' },
-  { name: 'cron_runs',     label: '크론 실행 기록', migration: '029' },
-  { name: 'trader_signals', label: '방송자 신호',   migration: '030' },
-  { name: 'autotrade_schedules', label: '자동매매 예약', migration: '031' },
-  { name: 'scheduled_exits', label: '시간 예약 청산', migration: '032' },
+// ── 실제로 진입을 막는 표만 센다 ──
+//
+// 이 목록이 032에서 멈춰 있었다. 그동안 진입 경로에 표가 넷 더 생겼고,
+// 그중 `strategy_cycles`가 없으면 원본 전략은 **503으로 매번 막힌다.**
+// 그런데 상태판은 "8/8 정상"이라고 적었다 — 검사 목록에 없으니까.
+//
+// **화면이 정상이라고 말하려면 진입에 필요한 것을 전부 봐야 한다.**
+// 표가 늘면 여기도 같이 늘려야 하고, 그걸 잊으면 이 고장이 그대로 돌아온다.
+const TABLES: Array<{ name: string; label: string; migration: string; blocksEntry: boolean }> = [
+  { name: 'sub_accounts',  label: '가상 서브계좌', migration: '024', blocksEntry: false },
+  { name: 'safety_events', label: '안전장치 기록', migration: '026', blocksEntry: false },
+  { name: 'cron_runs',     label: '크론 실행 기록', migration: '029', blocksEntry: false },
+  { name: 'trader_signals', label: '방송자 신호',   migration: '030', blocksEntry: false },
+  { name: 'autotrade_schedules', label: '자동매매 예약', migration: '031', blocksEntry: true },
+  { name: 'scheduled_exits', label: '시간 예약 청산', migration: '032', blocksEntry: false },
+  // 여기부터가 빠져 있던 것들이다.
+  { name: 'mock_sessions', label: '모의 세션(서버 보관)', migration: '046', blocksEntry: false },
+  { name: 'account_equity_snapshots', label: '자산 스냅샷', migration: '048', blocksEntry: false },
+  // **없으면 원본 전략이 매번 503이다.** 가상 원장을 못 읽으면 주문 크기를
+  // 정할 수 없고, 거래소 잔고로 대신 계산하지 않는다.
+  { name: 'strategy_cycles', label: '전략 회차 원장', migration: '051', blocksEntry: true },
+  { name: 'smoke_tests', label: '스모크 테스트', migration: '052', blocksEntry: false },
+  { name: 'smoke_runs', label: '반복 스모크', migration: '053', blocksEntry: false },
+  // 마이그레이션 번호가 아니라 워커가 만든다. 없으면 화면이 워커가
+  // 살아 있는지 판단할 수 없다.
+  { name: 'worker_heartbeat', label: '워커 심장박동', migration: '워커', blocksEntry: false },
 ];
 
 export async function GET(req: NextRequest) {
@@ -75,6 +94,30 @@ export async function GET(req: NextRequest) {
     probes.push({ ...t, exists });
   }
   items.push(...tableStatus(probes));
+
+  // ── 진입을 막는 표가 빠졌는가 ──
+  //
+  // 표 목록이 전부 초록이어도 "그래서 진입이 되나?"에는 답이 안 된다.
+  // **진입을 막는 표 하나가 없으면 나머지가 다 있어도 주문은 안 나간다** —
+  // 실제로 `strategy_cycles`가 없으면 원본 전략은 매번 503이었는데,
+  // 그 표가 검사 목록에 없어서 상태판은 정상이라고 적었다.
+  {
+    const blockers = probes.filter(p => (p as any).blocksEntry);
+    const absent = blockers.filter(p => p.exists === false);
+    const unknown = blockers.filter(p => p.exists == null);
+    items.push({
+      key: 'entry_tables',
+      label: '진입에 필요한 표',
+      // **확인하지 못한 것은 통과가 아니다.**
+      state: absent.length > 0 ? 'bad' : unknown.length > 0 ? 'warn' : 'good',
+      detail: absent.length > 0
+        ? `${absent.map(a => `${a.label}(마이그레이션 ${a.migration})`).join(' · ')}이(가) 없습니다 — `
+          + '이 표가 없으면 다른 항목이 전부 정상이어도 주문이 나가지 않습니다'
+        : unknown.length > 0
+          ? `${unknown.map(u => u.label).join(' · ')}을(를) 확인하지 못했습니다 — 정상이라고 적지 않습니다`
+          : `진입에 필요한 표 ${blockers.length}개가 모두 있습니다`,
+    } as any);
+  }
 
   // ── 자동매매가 지금 돌 수 있는가 ──
   //

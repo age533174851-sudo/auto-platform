@@ -213,16 +213,23 @@ export async function POST(req: NextRequest) {
     }, { status: 502 });
   }
 
-  // 파생 지표는 선택 — 없으면 Expansion 점수에서 해당 항목만 빠진다
-  let fundingRate: number | undefined;
-  let oiChangePct: number | undefined;
-  try {
-    const bf = await import('@/lib/exchanges/binanceFutures');
-    const premium = await bf.getPremiumIndex(symbol, useTestnet);
-    if (premium && typeof (premium as any).lastFundingRate === 'string') {
-      fundingRate = parseFloat((premium as any).lastFundingRate) * 100;
-    }
-  } catch { /* 없으면 그대로 진행 */ }
+  // ── 파생 지표 ──
+  //
+  // **이 거래를 낼 거래소에서 읽는다.** 예전에는 연결이 Gate여도
+  // 바이낸스 펀딩비를 읽었다 — 봉은 이미 연결된 거래소에서 읽도록
+  // 고쳐 뒀는데 파생 지표만 남아 있었다. 펀딩비는 거래소마다 다르므로,
+  // 그건 다른 시장을 보고 주문하는 것이다.
+  //
+  // 그리고 `oiChangePct`는 **선언만 있고 대입이 없었다.** 언제나
+  // undefined라 Expansion 점수에서 통째로 빠진 채 돌았고, 화면 어디에도
+  // 그 사실이 없었다. 이제 실제로 읽고, **못 읽으면 못 읽었다고 적는다.**
+  const { readDerivatives } = await import('@/lib/markets/venueDerivatives');
+  const deriv = await readDerivatives(
+    connExchange, symbol, connIsLive === true ? false : useTestnet);
+  // null이면 파이프라인에 넘기지 않는다 — 0으로 넘기면 "펀딩비 0%"가
+  // 판단에 들어간다. 측정한 적 없는 값을 근거로 쓰지 않는다.
+  const fundingRate = deriv.fundingRatePct ?? undefined;
+  const oiChangePct = deriv.oiChangePct ?? undefined;
 
   const vols = bars.volumes;
   const currentVolume = vols[vols.length - 1];
@@ -269,6 +276,15 @@ export async function POST(req: NextRequest) {
   const base = {
     ok: true,
     symbol, mode: opMode, dryRun,
+    // **무엇을 읽었고 무엇을 못 읽었는지 값으로 준다.**
+    // 예전에는 펀딩비를 바이낸스에서 읽고 oiChangePct는 아예 비어 있었는데,
+    // 화면 어디에도 그 사실이 없었다.
+    derivatives: {
+      venue: deriv.venue,
+      fundingRatePct: deriv.fundingRatePct,
+      oiChangePct: deriv.oiChangePct,
+      missing: deriv.missing,
+    },
     stage: result.stage,
     approved: result.approved,
     reason: result.reason,
@@ -338,7 +354,10 @@ export async function POST(req: NextRequest) {
         client_order_id: `SH${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36),
         signal_id: `daily-ladder-${tradeDate}-${symbol}`,
         user_id: userId, connection_id: body.connectionId || null,
-        exchange: 'binance', mode: opMode,
+        // **연결된 거래소를 적는다.** 'binance' 하드코딩이 남아 있어서
+        // Gate로 돌린 샤도우 기록이 바이낸스 거래로 남았다 — 나중에
+        // "보냈으면 어떻게 됐나"를 대조할 때 다른 시장과 비교하게 된다.
+        exchange: connExchange, mode: opMode,
         symbol, side: result.plan.side === 'LONG' ? 'BUY' : 'SELL',
         order_type: 'MARKET',
         quantity: result.plan.quantity, leverage: result.plan.leverage,
