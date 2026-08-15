@@ -260,7 +260,12 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       entry_avg_price: exec?.exitBasis?.basisPrice ?? exec?.avgPrice ?? null,
       entry_qty: exec?.filledQty ?? null,
       ref_price: ref,
-      sl_order_id: sl?.orderId ?? null, tp_order_id: tp?.orderId ?? null,
+      // **되읽기 번호를 먼저 쓰고, 없으면 등록 응답 번호를 쓴다.**
+      // 둘 중 하나만 저장하면 나머지 경우에 번호가 비고, 번호가 없으면
+      // 정리할 때 소유 증거가 text 파싱뿐이 된다 — 그게 깨져서
+      // Gate에 조건부 주문이 남았다(2026-08-15).
+      sl_order_id: sl?.orderId ?? (exec as any)?.slOrderId ?? null,
+      tp_order_id: tp?.orderId ?? (exec as any)?.tpOrderId ?? null,
       sl_trigger: sl?.triggerPrice ?? null, tp_trigger: tp?.triggerPrice ?? null,
       entry_latency_ms: entryLatencyMs,
       slippage_pct: exec?.exitBasis?.slippagePct ?? null,

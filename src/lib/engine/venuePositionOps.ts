@@ -152,6 +152,75 @@ export async function cancelProtectiveOrders(
   return { cancelled, failed };
 }
 
+/**
+ * **이 id들만 취소하고, 재조회로 사라진 것까지 확인한다.**
+ *
+ * `cancelProtectiveOrders`는 거래소가 200을 주면 취소된 것으로 적었다.
+ * 200은 **접수**다. 2026-08-15에 Gate 조건부 주문 2건이 그 뒤에도
+ * 남았고, 장부에는 정리된 것으로 적혀 있었다.
+ *
+ * 그래서 여기서는 한 바퀴가 이렇게 돈다:
+ *
+ *   요청 → 거래소 응답 → **목록 재조회** → 아직 있으면 다시 요청
+ *
+ * `attempts`번까지만 돈다(기본 3). **끝까지 남으면 그건 FAIL이지
+ * PASS가 아니다** — 판정은 `cancelLedger`가 한다. 목록을 못 읽으면
+ * UNKNOWN이고, 그것도 통과가 아니다.
+ *
+ * `cancelAll`은 쓰지 않는다. 같은 계좌의 다른 전략이 걸어 둔 손절까지
+ * 지운다 — 호출부가 내 것이라고 확인한 id만 온다.
+ */
+export async function cancelExact(
+  c: VenueCreds, symbol: string, ids: string[],
+  opts: { attempts?: number } = {},
+): Promise<{
+  attempts: Array<{ id: string; requested: boolean; httpOk: boolean; response: string | null; tries: number }>;
+  /** 마지막으로 읽은 조건부 주문 목록. **null이면 못 읽었다** */
+  leftover: any[] | null;
+  rounds: number;
+}> {
+  const maxRounds = Math.max(1, Math.min(5, Math.round(Number(opts?.attempts) || 3)));
+  const wanted = (Array.isArray(ids) ? ids : []).map(v => String(v ?? '').trim()).filter(Boolean);
+  const record = new Map<string, { id: string; requested: boolean; httpOk: boolean; response: string | null; tries: number }>();
+  for (const id of wanted) record.set(id, { id, requested: false, httpOk: false, response: null, tries: 0 });
+
+  let leftover: any[] | null = null;
+  let rounds = 0;
+  let pending = [...wanted];
+
+  while (pending.length > 0 && rounds < maxRounds) {
+    rounds++;
+    for (const id of pending) {
+      const r = record.get(id)!;
+      r.tries++;
+      try {
+        if (c.exchange === 'gate') {
+          const gf = await import('../exchanges/gateFutures');
+          const res = await gf.cancelOrderGateFutures(c.apiKey, c.apiSecret, id, { bucket: 'price', testnet: c.testnet });
+          r.requested = true; r.httpOk = !!res.success;
+          r.response = res.success ? `취소 접수 (${res.bucket})` : res.message;
+        } else {
+          const bf = await import('../exchanges/binanceFutures');
+          const res: any = await bf.cancelFuturesOrder(c.apiKey, c.apiSecret, symbol, id, c.testnet);
+          const okish = res?.success === true || res?.ok === true || res?.orderId != null;
+          r.requested = true; r.httpOk = !!okish;
+          r.response = okish ? '취소 접수' : String(res?.message || res?.error || '취소 실패');
+        }
+      } catch (e: any) {
+        r.requested = true; r.httpOk = false; r.response = String(e?.message || e);
+      }
+    }
+
+    // **여기가 핵심이다.** 요청 결과가 아니라 목록을 다시 읽어 확인한다.
+    leftover = await readProtectiveOrders(c, symbol);
+    if (leftover == null) break;   // 못 읽었다 — 더 지워도 확인할 수 없다
+    const present = leftover.map(row => String((row as any)?.id ?? (row as any)?.orderId ?? '')).filter(Boolean);
+    pending = pending.filter(id => present.includes(id));
+  }
+
+  return { attempts: [...record.values()], leftover, rounds };
+}
+
 /** 계약 규격의 호가 단위. 못 읽으면 null — 보정 없이 그대로 간다 */
 export async function readTickSize(c: VenueCreds, symbol: string): Promise<number | null> {
   try {

@@ -62,6 +62,8 @@ export default function SmokeTestPanel({
   const [data, setData] = useState<any>(null);
   const [open, setOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // 거래소에 남은 보호주문. **null은 '아직 안 봤다'이고 []는 '없다'이다.**
+  const [orphans, setOrphans] = useState<any>(null);
 
   const load = useCallback(async () => {
     if (!auth) return;
@@ -127,6 +129,47 @@ export default function SmokeTestPanel({
       await load();
     } catch (e: any) {
       setMsg({ ok: false, text: `실패 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  // ── 거래소에 남은 보호주문 ──
+  //
+  // **아무것도 지우지 않고 먼저 보여 준다.** 2026-08-15에 포지션 0인데
+  // 조건부 주문 2건이 남았을 때, 그 두 건의 정확한 주문 번호를 볼
+  // 방법이 없어서 화면의 트리거 가격으로 추측해야 했다.
+  const scanOrphans = async () => {
+    if (!connectionId) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(
+        `/api/autotrade/smoke-test/orphans?connectionId=${encodeURIComponent(connectionId)}&symbol=${encodeURIComponent(symbol)}`,
+        { headers: { Authorization: auth } });
+      const j = await r.json().catch(() => null);
+      setOrphans(j);
+      if (!j?.ok) setMsg({ ok: false, text: errorTextOf(j, `확인 실패 (${r.status})`) });
+    } catch (e: any) {
+      setMsg({ ok: false, text: `확인 실패 (${e?.message || e})` });
+    } finally { setBusy(false); }
+  };
+
+  // **번호 하나만 지운다.** 전체 취소 버튼은 만들지 않는다 —
+  // 만들면 언젠가 눌리고, 그때 다른 전략의 손절이 같이 사라진다.
+  const cancelOne = async (id: string) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/autotrade/smoke-test/orphans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ connectionId, symbol, ids: [id] }),
+      });
+      const j = await r.json().catch(() => null);
+      setMsg({
+        ok: !!j?.ok,
+        text: j?.ledger?.entries?.[0]?.note || errorTextOf(j, `취소 실패 (${r.status})`),
+      });
+      await scanOrphans();
+    } catch (e: any) {
+      setMsg({ ok: false, text: `취소 실패 (${e?.message || e})` });
     } finally { setBusy(false); }
   };
 
@@ -308,6 +351,68 @@ export default function SmokeTestPanel({
           {data?.error === 'table_missing' && (
             <div style={{ fontSize: 10.5, color: T.ylw, lineHeight: 1.6 }}>{data.message}</div>
           )}
+
+          {/* ── 거래소에 남은 보호주문 ──
+              포지션 0인데 조건부 주문이 남으면 다음 진입이 예상치 못하게
+              닫힌다. **추측하지 않고 거래소가 준 번호를 그대로 보여 준다.** */}
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, display: 'grid', gap: 6 }}>
+            <button
+              onClick={scanOrphans}
+              disabled={busy || !connectionId}
+              style={{
+                minHeight: 34, borderRadius: 9, fontSize: 11.5, fontWeight: 700,
+                background: 'transparent', color: T.acl,
+                border: `1px solid ${A(T.acl, '45')}`,
+                cursor: busy || !connectionId ? 'default' : 'pointer',
+                opacity: busy || !connectionId ? 0.55 : 1,
+              }}
+            >{busy ? '확인 중…' : `${symbol} 남은 보호주문 확인 (지우지 않습니다)`}</button>
+
+            {orphans && (
+              <div style={{ display: 'grid', gap: 6 }}>
+                <div style={{ fontSize: 10, color: T.muted, lineHeight: 1.6 }}>
+                  포지션 {orphans?.position?.ok === false ? '확인 불가'
+                    : orphans?.position?.found ? `${orphans?.position?.qty ?? '?'} 열림` : '0'}
+                  {' · '}
+                  {orphans?.ordersReadable === false
+                    ? '조건부 주문 목록을 읽지 못했습니다 (0건과 다릅니다)'
+                    : `조건부 주문 ${(orphans?.orders ?? []).length}건`}
+                </div>
+                {(orphans?.orders ?? []).map((o: any) => (
+                  <div key={o.id} style={{
+                    border: `1px solid ${T.border}`, borderRadius: 9, padding: 8,
+                    display: 'grid', gap: 4, minWidth: 0,
+                  }}>
+                    <div style={{ fontSize: 10.5, color: T.txt, overflowWrap: 'anywhere' }}>
+                      <b>#{o.id}</b> · 트리거 {o.triggerPrice ?? '?'} · rule {o.rule ?? '?'}
+                      {o.autoSize ? ` · ${o.autoSize}` : ''}
+                    </div>
+                    <div style={{ fontSize: 10, color: T.muted, overflowWrap: 'anywhere' }}>
+                      식별자 {o.text ?? '없음'} · 판정 <b style={{
+                        color: o.ownership === 'MINE' ? T.grn : o.ownership === 'FOREIGN' ? T.ylw : T.red,
+                      }}>{o.ownership}</b>
+                    </div>
+                    {/* **남의 전략 주문에는 취소 버튼을 만들지 않는다.** */}
+                    {o.ownership !== 'FOREIGN' && (
+                      <button
+                        onClick={() => cancelOne(o.id)}
+                        disabled={busy}
+                        style={{
+                          minHeight: 30, borderRadius: 8, fontSize: 11, fontWeight: 700,
+                          background: A(T.red, '14'), color: T.red,
+                          border: `1px solid ${A(T.red, '40')}`,
+                          cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.55 : 1,
+                        }}
+                      >이 주문만 취소 (#{o.id})</button>
+                    )}
+                  </div>
+                ))}
+                {(orphans?.orders ?? []).length === 0 && orphans?.ordersReadable !== false && (
+                  <div style={{ fontSize: 10, color: T.grn }}>남은 조건부 주문이 없습니다.</div>
+                )}
+              </div>
+            )}
+          </div>
 
           {runs.slice(0, 3).map(r => (
             <RunCard key={r.id} run={r} remainText={r.id === liveRun?.id ? remainText : null}
