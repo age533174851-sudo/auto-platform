@@ -14,6 +14,8 @@
 import type { PositionPlan } from './riskManager';
 import type { ExitPlan } from './exitPlan';
 import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
+import { fillBasis, exitFromFill } from './fillBasedExit';
+import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -54,6 +56,22 @@ export interface ExecuteArgs {
   protectionPolicy?: 'REQUIRED' | 'OPTIONAL' | 'NONE';
   stopLoss?: number;
   takeProfit?: number;
+  /**
+   * **실제 체결가에서 보호주문 가격을 다시 계산한다.**
+   *
+   * 주면 `stopLoss`/`takeProfit`(판단 참고가로 계산된 값) 대신, 체결이
+   * 확정된 뒤의 평균 체결가에 이 %를 적용한 값을 건다. 시장가 100배는
+   * 참고가에서 밀리고, 0.2% 밀리면 −0.4% 손절이 −0.2%가 된다 —
+   * 청산 거리가 0.6%인 자리에서 그건 손절이 아니다.
+   *
+   * **안 주면 지금까지와 똑같이 동작한다.** 기존 호출부를 바꾸지 않는다.
+   */
+  exitPct?: {
+    stopPct: number;
+    takeProfitPct?: number | null;
+    /** 익절이 없으면 진입을 완료로 보지 않는가 */
+    requireTakeProfit?: boolean;
+  };
   /**
    * 비대칭 청산 계획. 주면 단일 익절 대신 분할 익절 사다리를 건다.
    * 손절은 이 계획에 포함돼 있어도 stopLoss와 동일하게 전량 STOP_MARKET이다.
@@ -114,6 +132,27 @@ export interface ExecuteResult {
   avgPrice?: number;
   slOrderId?: string;
   tpOrderId?: string;
+  /**
+   * **거래소에서 다시 읽어 확인한** 보호주문.
+   *
+   * 생성 응답(`slOrderId`)은 접수를 뜻하고, 이 값은 사실을 뜻한다.
+   * 진입 완료 판정(`enteredVerdict`)은 이쪽만 본다.
+   */
+  protection?: {
+    readOk: boolean;
+    stop: ProtectiveEvidence;
+    takeProfit: ProtectiveEvidence;
+    reason: string;
+  } | null;
+  /** 실제 체결가 기준으로 다시 계산한 보호주문 가격 */
+  exitBasis?: {
+    basisPrice: number | null; slippagePct: number | null;
+    stop: number | null; takeProfit: number | null; note: string;
+  } | null;
+  /** 요청 배율이 거래소에서 확인됐는가. null은 모름 */
+  leverageConfirmed?: boolean | null;
+  /** 포지션 모드를 읽었는가. null은 모름 */
+  positionModeConfirmed?: boolean | null;
   message: string;
   duplicate?: boolean;
 }
@@ -989,12 +1028,60 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           + ' · 포지션 없음 · 손절 대기' + pollNote,
       };
     }
+    // ── 실제 체결가에서 보호주문 가격을 다시 만든다 ──
+    //
+    // `stopSpec`은 판단 참고가로 계산된 값이다. 시장가 100배는 그 가격에
+    // 체결되지 않는다 — 밀린 만큼 손절 거리가 달라지고, 청산 거리가
+    // 0.6%인 자리에서 그건 손절이 아니라 청산이 된다.
+    //
+    // **`exitPct`를 안 준 호출부는 지금까지와 똑같이 동작한다.**
+    let liveStopSpec = stopSpec;
+    let tpSpec: ReturnType<typeof gp.gateTakeProfitSpec> | null =
+      args.takeProfit != null ? gp.gateTakeProfitSpec(plan.side, args.takeProfit, null, gspec) : null;
+    let exitBasis: ExecuteResult['exitBasis'] = null;
+
+    if (!args.reduceOnly && args.exitPct && policy !== 'NONE') {
+      const basis = fillBasis({
+        avgPrice: fill.avgPrice, filledQty: verdict.filledQty ?? fill.filledQty,
+        settled: verdict.settled,
+      });
+      const e = exitFromFill({
+        side: plan.side, basis,
+        stopPct: args.exitPct.stopPct,
+        takeProfitPct: args.exitPct.takeProfitPct ?? null,
+        tickSize: Number((gspec as any)?.orderPriceRound) || null,
+        // 판단 참고가. 얼마나 밀렸는지를 **기록만** 한다 — 판정에는 안 쓴다.
+        referencePrice: Number((plan as any).entryPrice) || null,
+      });
+      if (!e.ok) {
+        // **체결가를 모르면 참고가로 대신 걸지 않는다.** 그 손절은 아무
+        // 근거가 없다. 자동매매(REQUIRED)에서는 방금 연 포지션을 되돌린다.
+        if (policy === 'REQUIRED') {
+          const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
+          const msg = `실제 체결가를 확정하지 못해 보호주문을 걸 수 없었습니다 — ${e.reason}`
+            + (undo.success ? ' · 방금 연 포지션을 되돌렸습니다'
+              : ` / ⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+          await update({ status: 'FAILED', error_message: msg });
+          return { ok: false, status: 'FAILED', clientOrderId,
+            exchangeOrderId: gres?.id != null ? String(gres.id) : undefined, message: msg };
+        }
+      } else {
+        liveStopSpec = gp.gateStopSpec(plan.side, e.stop, e.basisPrice, gspec);
+        tpSpec = e.takeProfit != null
+          ? gp.gateTakeProfitSpec(plan.side, e.takeProfit, e.basisPrice, gspec) : null;
+        exitBasis = {
+          basisPrice: e.basisPrice, slippagePct: e.slippagePct,
+          stop: e.stop, takeProfit: e.takeProfit, note: e.note,
+        };
+      }
+    }
+
     if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
       // spec을 통째로 넘긴다. 예전에는 rule·autoSize만 spec에서 꺼내고
       // triggerPrice는 원본 손절가를 넘겨서, 호가 단위에 맞춰 둔 값이
       // 아무 데도 안 쓰였다 — 계산해 놓고 배선을 안 한 것이다.
       const sl = await gf.placeStopGateFutures(apiKey, apiSecret, {
-        contract, spec: stopSpec, clientOrderId: `${clientOrderId}SL`,
+        contract, spec: liveStopSpec, clientOrderId: `${clientOrderId}SL`,
       }, testnet);
 
       if (sl.success) {
@@ -1023,6 +1110,69 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
     }
 
+    // ── 익절도 실제로 건다 ──
+    //
+    // **여기가 비어 있었다.** `takeProfit`과 `exitPlan`이 Gate 분기에서
+    // 아무 데도 안 쓰였다 — 화면은 "익절 +0.8%"라고 적는데 거래소에는
+    // 아무것도 없었다. 만들어 놓고 배선을 안 한 이 저장소의 대표 고장이다.
+    //
+    // 익절은 손절과 달리 **못 걸어도 포지션을 되돌리지 않는다** —
+    // 이익을 확정하는 주문이지 방어선이 아니다. 다만 전략이 필수로
+    // 요구하면(`requireTakeProfit`) 아래 되읽기 판정에서 걸린다.
+    let gateTpId: string | undefined;
+    let tpNote = '';
+    if (!args.reduceOnly && policy !== 'NONE' && tpSpec) {
+      if (!tpSpec.ok) {
+        tpNote = ` · ⚠ 익절을 걸지 못했습니다: ${tpSpec.reason}`;
+      } else {
+        const tp = await gf.placeStopGateFutures(apiKey, apiSecret, {
+          contract, spec: tpSpec, clientOrderId: `${clientOrderId}TP`,
+        }, testnet);
+        if (tp.success) {
+          gateTpId = tp.orderId;
+          await update({ tp_order_id: tp.orderId ?? null });
+        } else {
+          tpNote = ` · ⚠ 익절을 걸지 못했습니다: ${tp.message}`;
+        }
+      }
+    }
+
+    // ── 걸었다고 적기 전에 다시 읽는다 ──
+    //
+    // 생성 응답은 **접수**다. 트리거가 반대편이거나 포지션이 없으면
+    // 접수된 주문이 조용히 사라진다. 그래서 목록을 다시 읽어 종목·닫는
+    // 방향·트리거 가격으로 대조한다.
+    //
+    // **못 읽은 것을 '없음'으로 적지 않는다.** 그때는 위쪽 진입 완료
+    // 판정이 UNKNOWN이 되고, 되돌리지도 재시도하지도 않는다.
+    let protection: ExecuteResult['protection'] = null;
+    if (!args.reduceOnly && policy !== 'NONE' && args.stopLoss) {
+      const rows = await gf.getPriceOrdersGateFutures(apiKey, apiSecret, contract, testnet);
+      const rb = readbackProtective({
+        orders: rows, venue: 'gate', positionSide: plan.side,
+        expectedStop: liveStopSpec.triggerPrice,
+        expectedTakeProfit: tpSpec?.ok ? tpSpec.triggerPrice : null,
+      });
+      protection = { readOk: rb.readOk, stop: rb.stop, takeProfit: rb.takeProfit, reason: rb.reason };
+
+      // **조회에 성공했는데 손절이 없다** — 접수는 됐지만 등록되지 않았다.
+      // 이건 '모른다'가 아니라 확인된 사실이므로 REQUIRED에서는 되돌린다.
+      const stopConfirmedMissing = rb.readOk && !rb.stop.found;
+      const tpConfirmedMissing = rb.readOk && args.exitPct?.requireTakeProfit === true && !rb.takeProfit.found;
+      if ((stopConfirmedMissing || tpConfirmedMissing) && policy === 'REQUIRED') {
+        const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
+        const msg = `보호주문을 거래소에서 확인하지 못했습니다 (${rb.reason}) — `
+          + (undo.success ? '방금 연 포지션을 되돌렸습니다'
+            : `⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+        await update({ status: 'FAILED', error_message: msg });
+        return {
+          ok: false, status: 'FAILED', clientOrderId,
+          exchangeOrderId: gres?.id != null ? String(gres.id) : undefined,
+          protection, exitBasis, message: msg,
+        };
+      }
+    }
+
     const gClose = args.reduceOnly
       ? await remainingAfterClose({ exchange, apiKey, apiSecret, testnet }, plan.symbol)
       : { remaining: null, note: '' };
@@ -1034,15 +1184,26 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       filledQty: verdict.filledQty ?? undefined,
       avgPrice: fill.avgPrice ?? undefined,
       slOrderId: gateSlId,
+      tpOrderId: gateTpId,
+      protection, exitBasis,
+      // 배율·마진 모드는 위에서 `setLeverageGateFutures`가 확정했고,
+      // 실패하면 주문 전에 멈춘다. 여기까지 왔으면 확인된 것이다.
+      leverageConfirmed: args.reduceOnly ? null : true,
+      positionModeConfirmed: true,
       remainingQty: gClose.remaining,
       // **접수와 체결을 한 문장에 섞지 않는다.** 예전에는 "부분 체결
       // 0/2079 · 손절 부착"이 한 줄에 같이 나왔다 — 둘 다 사실일 수 없다.
       message: `주문 접수 (Gate · ${sized.size}계약 = ${plan.quantity} ${plan.symbol.replace(/USDT$/, '')})`
         + ` · ${verdict.reason}`
         + (sized.reason ? ` · ${sized.reason}` : '')
-        + (stopSpec.note ? ` · ${stopSpec.note}` : '')
+        + (liveStopSpec.note ? ` · ${liveStopSpec.note}` : '')
+        + (exitBasis ? ` · 실제 체결가 ${exitBasis.basisPrice} 기준`
+          + (exitBasis.slippagePct != null ? ` (참고가 대비 ${exitBasis.slippagePct > 0 ? '+' : ''}${exitBasis.slippagePct}%)` : '') : '')
         + gClose.note
         + (gateSlId ? ' · 손절 부착 (전량 종료형)' : '')
+        + (gateTpId ? ' · 익절 부착' : '')
+        + tpNote
+        + (protection ? ` · 되읽기: ${protection.reason}` : '')
         + pollNote,
     };
 
