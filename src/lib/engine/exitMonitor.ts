@@ -105,7 +105,14 @@ export async function decideExits(
      * 그래서 진입 손절은 DB가, 지금 걸린 손절은 거래소가 갖는다.
      * 못 읽은 심볼은 진입 손절을 그대로 쓴다.
      */
-    liveStopFor?: (userId: string, symbol: string) => Promise<number | null>;
+    /**
+     * 지금 거래소에 걸려 있는 손절가.
+     *
+     * **방향을 같이 넘긴다.** 반대 방향을 닫는 조건부 주문은 남의 것이거나
+     * 옛 포지션의 고아라, 그걸 이 포지션의 손절로 읽으면 트레일링이
+     * 엉뚱한 값에서 출발한다.
+     */
+    liveStopFor?: (userId: string, symbol: string, side?: 'LONG' | 'SHORT') => Promise<number | null>;
     /** 트레일링 설정. 없으면 기본값 */
     cfg?: Partial<import('./trailPlan').TrailConfig>;
     /**
@@ -173,7 +180,7 @@ export async function decideExits(
     // 여기서 계산을 다시 적으면 두 벌이 되고, 그중 한쪽만 고쳐진다.
     const { planTrail } = await import('./trailPlan');
     let liveStop: number | null = null;
-    try { liveStop = (await opts.liveStopFor?.(t.user_id, String(t.symbol))) ?? null; }
+    try { liveStop = (await opts.liveStopFor?.(t.user_id, String(t.symbol), side)) ?? null; }
     catch { liveStop = null; }   // 못 읽으면 진입 손절을 그대로 쓴다
     const v = planTrail({
       side,

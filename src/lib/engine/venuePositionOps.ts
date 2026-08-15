@@ -221,6 +221,195 @@ export async function cancelExact(
   return { attempts: [...record.values()], leftover, rounds };
 }
 
+// ── 청산 감시가 묻는 것 ─────────────────────────────
+//
+// exit-monitor는 오래 Binance 함수를 직접 불렀다. 진입은 Gate로 나가는데
+// 트레일링·본전이동·손절 확인은 바이낸스에 물어보는 상태였고, 화면에는
+// "청산 감시 정상"이 떠 있었다. 아래 셋이 그 자리를 메운다.
+
+export interface GuardSnapshot {
+  /** 조회가 성공했는가 */
+  ok: boolean;
+  /** 그 종목의 포지션이 있는가 */
+  found: boolean;
+  side: 'LONG' | 'SHORT' | null;
+  entryPrice: number | null;
+  /** **못 읽으면 null이다.** 0으로 눕히면 "청산가를 지났다"가 된다 */
+  markPrice: number | null;
+  liquidationPrice: number | null;
+  marginType: string | null;
+  /** 이 포지션을 닫는 손절이 거래소에 살아 있는가. **못 읽으면 null** */
+  hasProtectiveStop: boolean | null;
+  error: string | null;
+}
+
+/** `BTC_USDT` · `BTC/USDT` · `btcusdt` 를 한 모양으로 */
+const norm = (v: any): string => String(v ?? '').toUpperCase().replace(/[_/\-\s]/g, '');
+
+const EMPTY_SNAPSHOT = (error: string | null): GuardSnapshot => ({
+  ok: false, found: false, side: null, entryPrice: null, markPrice: null,
+  liquidationPrice: null, marginType: null, hasProtectiveStop: null, error,
+});
+
+/**
+ * 사고 점검이 보는 한 장면.
+ *
+ * **거래소를 가리지 않는다.** 포지션은 `futuresListPositions`(공용)이,
+ * 손절 존재는 `readProtectiveOrders` + 판별표가 답한다.
+ *
+ * Gate는 포지션 응답에 지금 가격이 없다 — ticker를 따로 읽는다.
+ * 그래도 못 읽으면 **null로 남긴다.** 0으로 채우면 멀쩡한 포지션이
+ * "청산가 도달"로 읽혀 강제 청산된다.
+ */
+export async function readGuardSnapshot(c: VenueCreds, symbol: string): Promise<GuardSnapshot> {
+  try {
+    const { futuresListPositions } = await import('../exchanges/futuresExec');
+    const res = await futuresListPositions({
+      exchange: c.exchange, key: c.apiKey, secret: c.apiSecret, testnet: c.testnet,
+    } as any);
+    if (!res?.ok) return EMPTY_SNAPSHOT(res?.error ?? '포지션 조회 실패');
+
+    const want = norm(symbol);
+    const p = (res.positions || []).find((x: any) => norm(x?.symbol) === want);
+    if (!p) return { ...EMPTY_SNAPSHOT(null), ok: true, found: false };
+
+    // 지금 가격. Gate는 포지션에 없으므로 ticker로 채운다.
+    let mark = Number((p as any).markPrice);
+    if (!Number.isFinite(mark) || mark <= 0) {
+      const t = await tickerOf(c, symbol);
+      mark = t == null ? NaN : t;
+    }
+
+    // 이 포지션을 닫는 손절이 있는가. **못 읽으면 null이다** —
+    // 없는 것으로 읽으면 "손절이 사라졌다"로 포지션을 닫는다.
+    const orders = await readProtectiveOrders(c, symbol);
+    let hasStop: boolean | null = null;
+    if (orders != null && (p as any).side) {
+      const { readbackProtective } = await import('./protectiveReadback');
+      const rb = readbackProtective({
+        orders, venue: c.exchange, positionSide: (p as any).side,
+      });
+      hasStop = rb.stop.found;
+    }
+
+    return {
+      ok: true, found: true,
+      side: (p as any).side ?? null,
+      entryPrice: numOrNull((p as any).entryPrice),
+      markPrice: Number.isFinite(mark) && mark > 0 ? mark : null,
+      liquidationPrice: numOrNull((p as any).liquidationPrice),
+      marginType: (p as any).marginType ?? null,
+      hasProtectiveStop: hasStop,
+      error: null,
+    };
+  } catch (e: any) {
+    return EMPTY_SNAPSHOT(String(e?.message || e));
+  }
+}
+
+const numOrNull = (v: any): number | null => {
+  if (v == null || v === '' || typeof v === 'boolean') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/** 지금 가격. **못 읽으면 null** */
+export async function tickerOf(c: VenueCreds, symbol: string): Promise<number | null> {
+  try {
+    if (c.exchange === 'gate') {
+      const gf = await import('../exchanges/gateFutures');
+      const gp = await import('../exchanges/gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return null;
+      const t: any = await gf.getTickerGateFutures(contract, c.testnet);
+      const n = Number(t?.mark_price ?? t?.last);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+    const bf = await import('../exchanges/binanceFutures');
+    const n = await bf.getFuturesTicker(symbol, c.testnet);
+    return Number.isFinite(Number(n)) && Number(n) > 0 ? Number(n) : null;
+  } catch { return null; }
+}
+
+/**
+ * 지금 거래소에 **실제로 걸려 있는** 손절 트리거 가격.
+ *
+ * 트레일링이 이 값을 읽는다. DB의 `stop_loss`는 진입 시점 값이고 1R을
+ * 정의하므로, 그 칸을 옮길 때마다 덮어쓰면 1R이 매번 커져 트레일링이
+ * 한 번 움직인 뒤 멈춘다.
+ *
+ * **못 읽으면 null이다** — 0을 주면 손절이 바닥에 있는 것으로 읽힌다.
+ */
+export async function liveStopPrice(
+  c: VenueCreds, symbol: string, positionSide: 'LONG' | 'SHORT',
+): Promise<number | null> {
+  const orders = await readProtectiveOrders(c, symbol);
+  if (orders == null) return null;
+  const { readbackProtective } = await import('./protectiveReadback');
+  const rb = readbackProtective({ orders, venue: c.exchange, positionSide });
+  return rb.stop.found ? rb.stop.triggerPrice : null;
+}
+
+/**
+ * 손절을 새로 건다.
+ *
+ * **거래소별 분기는 `futuresSetTpsl` 한 곳에 있다** — 여기서 다시 짜면
+ * 진입 경로와 청산 감시가 서로 다른 방식으로 손절을 걸게 된다.
+ */
+export async function placeStop(
+  c: VenueCreds,
+  i: { symbol: string; positionSide: 'LONG' | 'SHORT'; stopPrice: number; refPrice?: number | null },
+): Promise<{ ok: boolean; orderId: string | null; message: string }> {
+  try {
+    const { futuresSetTpsl } = await import('../exchanges/futuresExec');
+    const r: any = await futuresSetTpsl({
+      exchange: c.exchange, key: c.apiKey, secret: c.apiSecret, testnet: c.testnet,
+    } as any, {
+      symbol: i.symbol, positionSide: i.positionSide,
+      tpPrice: null, slPrice: i.stopPrice, refPrice: i.refPrice ?? null,
+    } as any);
+    const id = r?.sl?.orderId ?? r?.sl?.id ?? null;
+    return { ok: r?.ok === true, orderId: id != null ? String(id) : null,
+      message: String(r?.message ?? '') };
+  } catch (e: any) {
+    return { ok: false, orderId: null, message: String(e?.message || e) };
+  }
+}
+
+/**
+ * 이 포지션을 닫는 손절 중 **방금 건 것 말고** 전부 취소한다.
+ *
+ * `keepId`가 null이면 아무것도 취소하지 않는다 — 무엇을 남겨야 할지
+ * 모르는 채로 지우면 손절이 없는 포지션이 된다.
+ * **익절과 분할 사다리는 건드리지 않는다.**
+ */
+export async function cancelOtherStops(
+  c: VenueCreds, symbol: string, positionSide: 'LONG' | 'SHORT', keepId: string | null,
+): Promise<{ cancelled: number; note: string }> {
+  if (!keepId) return { cancelled: 0, note: '남길 손절을 모르므로 아무것도 취소하지 않았습니다' };
+  const orders = await readProtectiveOrders(c, symbol);
+  if (orders == null) return { cancelled: 0, note: '주문 목록을 읽지 못해 옛 손절을 취소하지 못했습니다' };
+
+  const { gateProtectiveKind } = await import('../exchanges/gatePlan');
+  const { binanceProtectiveKind } = await import('./protectiveReadback');
+  const ids: string[] = [];
+  for (const row of orders) {
+    const cls = c.exchange === 'binance' ? binanceProtectiveKind(row) : gateProtectiveKind(row);
+    if (cls.kind !== 'STOP' || cls.closes !== positionSide) continue;
+    const id = String((c.exchange === 'binance' ? (row?.orderId ?? row?.id) : row?.id) ?? '');
+    if (!id || id === keepId) continue;
+    ids.push(id);
+  }
+  if (ids.length === 0) return { cancelled: 0, note: '취소할 옛 손절이 없습니다' };
+  const r = await cancelProtectiveOrders(c, symbol, ids);
+  return {
+    cancelled: r.cancelled.length,
+    note: r.failed.length
+      ? `옛 손절 ${r.failed.length}건을 취소하지 못했습니다 — 손절이 둘 남습니다(위험하지는 않습니다)`
+      : `옛 손절 ${r.cancelled.length}건 취소`,
+  };
+}
+
 /** 계약 규격의 호가 단위. 못 읽으면 null — 보정 없이 그대로 간다 */
 export async function readTickSize(c: VenueCreds, symbol: string): Promise<number | null> {
   try {
