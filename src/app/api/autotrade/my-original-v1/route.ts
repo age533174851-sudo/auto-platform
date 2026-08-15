@@ -88,7 +88,12 @@ export async function POST(req: NextRequest) {
   const symbol = String(body?.symbol || '').toUpperCase().replace('/', '');
   const connectionId = String(body?.connectionId || '');
   const mode = String(body?.mode || 'TESTNET').toUpperCase();
-  const dryRun = body?.dryRun === true;
+  // **플래그 이름을 여기서 직접 쓰지 않는다.** 레지스트리가 선언한 이름과
+  // 라우트가 읽는 이름이 갈리면, 점검 호출이 주문을 낸다(scalp에서 실제로
+  // 그랬다). checkOnlyOf는 두 이름을 다 점검으로 읽는다 — 점검을 실주문으로
+  // 읽는 것이 그 반대보다 훨씬 비싸다.
+  const { checkOnlyOf } = await import('@/lib/strategies/checkFlag');
+  const dryRun = checkOnlyOf(STRATEGY_MY_ORIGINAL_V1, body).checkOnly;
   const nowMs = Date.now();
 
   if (!symbol) return NextResponse.json({ ok: false, error: 'missing_symbol' }, { status: 400 });

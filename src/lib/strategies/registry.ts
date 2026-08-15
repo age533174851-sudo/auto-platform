@@ -29,6 +29,10 @@
 // 그래서 이 파일의 규칙은 하나다:
 // **`executionReady: false`인 것은 자동매매로 켤 수 없다.**
 
+// scalp의 주기 목록은 여기서 직접 적지 않는다 — 라우트가 막는 기준과
+// 같은 함수가 정한다(아래 supportedIntervals 주석 참고).
+import { usableIntervals } from './scalpSignal';
+
 export type StrategyId = 'daily-ladder' | 'scalp' | 'my-original-v1';
 
 /** 원본 전략의 id. 문자열을 여기저기 적으면 오타가 조용히 다른 전략이 된다 */
@@ -99,7 +103,13 @@ export const STRATEGIES: StrategySpec[] = [
     description:
       '고른 분봉에서 돌파 자리를 보고 들어갑니다. 크기·배율·안전 관문은 계단식과 같은 것을 씁니다.',
     supportedMarkets: ['USDM'],
-    supportedIntervals: [1, 5, 15, 60],
+    // **고를 수 있는 것과 돌릴 수 있는 것을 같은 함수가 정한다.**
+    //
+    // 예전에는 여기 `[1, 5, 15, 60]`을 직접 적었다. 그런데 라우트는
+    // `timeframeVerdict`로 막는다 — 기본 왕복 비용 0.15%에서는 1·5·15분이
+    // 전부 `timeframe_unusable`이라 **화면에서 고를 수는 있는데 실행하면
+    // 409로 끝났다.** 목록을 두 곳에 적으면 한쪽만 바뀐다.
+    supportedIntervals: usableIntervals([1, 5, 15, 60]),
     // **주문 경로는 있다.** riskManager·executeOrder를 그대로 쓴다.
     executionReady: true,
     testnetReady: true,
@@ -109,7 +119,8 @@ export const STRATEGIES: StrategySpec[] = [
     liveReady: false,
     route: '/api/autotrade/scalp',
     checkFlag: 'checkOnly',
-    note: '지금까지 스케줄된 적이 없어 실제 실행 이력이 없습니다 — 테스트넷에서 먼저 돌려야 합니다',
+    note: '왕복 비용을 넘길 수 있는 주기만 고를 수 있습니다 — 짧은 봉은 방향을 맞춰도 수수료로 잃습니다. '
+      + '지금까지 스케줄된 적이 없어 실제 실행 이력이 없습니다',
   },
   {
     id: 'my-original-v1',

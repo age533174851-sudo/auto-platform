@@ -223,6 +223,34 @@ export function scalpSignal(
  * 화면이 이 판정을 그대로 적는다. 사용자가 1분봉을 고르면 왜 안 되는지
  * 숫자로 보여야 한다.
  */
+/**
+ * 이 비용에서 **실제로 돌릴 수 있는** 주기만 고른다.
+ *
+ * 왜 필요한가
+ * ───────────
+ * 레지스트리는 scalp의 `supportedIntervals`를 `[1, 5, 15, 60]`로 내려보냈다.
+ * 그런데 라우트는 `timeframeVerdict`로 막는다 — 기본 왕복 비용 0.15%에서는
+ * 1·5·15분이 전부 `timeframe_unusable`이라 **화면에서 고를 수는 있는데
+ * 실행하면 409로 끝났다.**
+ *
+ * 목록을 두 곳에 적으면 한쪽만 바뀐다. **고를 수 있는 것과 돌릴 수 있는
+ * 것을 같은 함수가 정한다.**
+ *
+ * 전부 걸러지면 **빈 배열을 주지 않는다** — 그러면 예약을 아예 만들 수
+ * 없고, 사용자는 왜인지 알 수 없다. 그때는 가장 긴 후보 하나를 남기고
+ * 라우트가 이유를 말한다.
+ */
+export function usableIntervals(
+  candidates: number[], roundTripCostPct = SCALP_DEFAULTS.roundTripCostPct,
+): number[] {
+  const list = (Array.isArray(candidates) ? candidates : [])
+    .map(Number).filter(n => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  if (list.length === 0) return [];
+  const usable = list.filter(m => timeframeVerdict(m, roundTripCostPct).usable);
+  return usable.length > 0 ? usable : [list[list.length - 1]];
+}
+
 export function timeframeVerdict(
   intervalMin: number, roundTripCostPct = SCALP_DEFAULTS.roundTripCostPct,
 ): { usable: boolean; typicalMovePct: number; text: string } {

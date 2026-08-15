@@ -52,6 +52,19 @@ export interface PreflightOptions {
   overrideMaxNotionalUsd?: number | null;
   /** 어느 시장인가. 서브계좌 한도를 어느 바구니에서 셀지 정한다. 없으면 USDM */
   market?: 'USDM' | 'COINM' | 'SPOT' | 'STOCK' | 'TOKENIZED';
+  /**
+   * **어느 연결을 점검하는가.**
+   *
+   * 예전에는 이 칸이 없었다. 그래서 아래에서 `is_active = true`인 연결을
+   * `limit(1)`로 아무거나 하나 집었다. 연결이 하나일 때는 우연히 맞지만,
+   * Gate와 Binance를 같이 붙이면 **내 Gate로 거래하면서 다른 계좌의
+   * 시계·포지션·잔고를 보고 통과/차단하게 된다.**
+   *
+   * 안 넘기면 예전 동작을 그대로 유지한다(기존 호출부를 깨지 않는다).
+   * 다만 어느 연결을 봤는지는 결과에 남는다 — 화면이 "무엇을 점검한
+   * 것인지"를 말할 수 있어야 한다.
+   */
+  connectionId?: string | null;
 }
 
 export async function collectChecklistInput(opts: PreflightOptions): Promise<ChecklistInput> {
@@ -87,9 +100,15 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
   let secret = '';
   let isGate = false;
   try {
-    const { data } = await sb.from('exchange_connections')
-      .select('api_key, api_secret_enc, exchange_id')
-      .eq('user_id', userId).eq('is_active', true).limit(1).maybeSingle();
+    // **연결을 지정했으면 그것만 본다.** 지정하지 않았을 때만 예전처럼
+    // 활성 연결 하나를 집는다 — 그 경우 어느 것을 봤는지 아래에 남긴다.
+    let q = sb.from('exchange_connections')
+      .select('id, api_key, api_secret_enc, exchange_id')
+      .eq('user_id', userId);
+    q = opts.connectionId
+      ? q.eq('id', String(opts.connectionId))
+      : q.eq('is_active', true).limit(1);
+    const { data } = await q.maybeSingle();
     if (data) {
       conn = data;
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
@@ -324,6 +343,22 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
   if (alreadyTradedToday != null) {
     input.todayEntry = { alreadyTraded: alreadyTradedToday };
   }
+
+  // ── 무엇을 점검한 것인가 ──
+  //
+  // **어느 연결을 봤는지 결과에 남긴다.** 이 값이 없으면 화면은
+  // "8/8 정상"이라고만 적고, 그게 어느 계좌 이야기인지 아무도 모른다.
+  // 요청한 연결과 실제로 읽은 연결이 다르면 그 사실도 그대로 적는다.
+  input.checkedConnection = {
+    requestedId: opts.connectionId ?? null,
+    usedId: conn?.id != null ? String(conn.id) : null,
+    exchangeId: conn?.exchange_id ?? null,
+    // 지정했는데 그 연결을 못 읽었으면 아래 항목들이 전부 unknown이다.
+    // '아무거나 하나'로 대신 읽지 않는다.
+    matched: opts.connectionId == null
+      ? null
+      : conn?.id != null && String(conn.id) === String(opts.connectionId),
+  };
 
   return input;
 }

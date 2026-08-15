@@ -130,6 +130,17 @@ jobs:
       - name: 주문 경로 안전장치 검사
         run: node scripts/check-order-guards.mjs
 
+      # ── 전략 점검 플래그 검사 ──
+      #
+      # 레지스트리는 scalp의 점검 플래그를 `checkOnly`로 선언했고 화면은
+      # 그 이름으로 보냈는데, 라우트는 `dryRun`만 읽었다. 그래서 **점검
+      # 요청이 주문 경로까지 갈 수 있었다** — 사용자는 "주문은 안 냅니다"라고
+      # 적힌 버튼을 누른다.
+      #
+      # 타입은 이걸 못 잡는다. 두 곳 다 any 본문이고 이름은 문자열이다.
+      - name: 전략 점검 플래그 검사
+        run: node scripts/check-strategy-flags.mjs
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그
