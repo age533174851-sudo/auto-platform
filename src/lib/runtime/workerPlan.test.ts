@@ -7,7 +7,7 @@
 // 그 예약을 보지 않았다. 판단 창을 133분 놓쳤다.
 
 import { test, eq, assert } from '../../test/harness';
-import { workerPlan, workerAlive, deploymentVerdict } from './workerPlan';
+import { workerPlan, workerAlive, deploymentVerdict, runtimeSkew } from './workerPlan';
 import { WORKER_STALE_MS } from '../autotrade/evaluationLoop';
 
 const NOW = 1_800_000_000_000;
@@ -126,5 +126,26 @@ export function runWorkerPlanTests() {
       eq(v.code, 'UNKNOWN', missing);
       eq(v.matched, false, missing);
     }
+  });
+
+  console.log('[배포 — 서버는 main을 모른다. 그래도 웹↔워커는 볼 수 있다]');
+
+  test('웹과 워커가 다르면 그 자체로 사고다 — 8/15에 실제로 난 일', () => {
+    // Vercel은 #135, Fly는 #127이었다. 이 한 줄만 있었어도 바로 찾았다.
+    const v = runtimeSkew({ vercelSha: '6e05d7a1', flySha: '470d8db2' });
+    eq(v.code, 'MISMATCH'); eq(v.matched, false);
+    assert(v.reason.includes('6e05d7a'), v.reason);
+    assert(v.reason.includes('470d8db'), v.reason);
+  });
+
+  test('같으면 통과 — 짧은 SHA와 긴 SHA를 섞어도', () => {
+    eq(runtimeSkew({ vercelSha: 'abc123def456', flySha: 'abc123d' }).matched, true);
+  });
+
+  test('워커가 자기 버전을 안 적었으면 "같다"로 읽지 않는다', () => {
+    // 054 이전 배포이거나 GIT_SHA가 안 들어간 이미지다. 둘 다 '모름'이다.
+    const v = runtimeSkew({ vercelSha: 'abc1234', flySha: '' });
+    eq(v.code, 'UNKNOWN'); eq(v.matched, false);
+    assert(v.reason.includes('Fly'), v.reason);
   });
 }

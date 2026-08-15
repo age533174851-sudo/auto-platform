@@ -46,6 +46,21 @@ on:
   # `workflow_run`은 그 제약을 받지 않는다. main의 ci가 끝나면 여기가
   # 깨어난다. 아래 job이 `conclusion == 'success'`와 브랜치를 다시 확인한다
   # — 빨간 검사 위로 워커를 바꾸지 않는다.
+  #
+  # ⚠ **이것만으로는 부족했다 (2026-08-15에 다시 확인됨).**
+  #
+  # `workflow_run`은 ci가 끝났을 때 온다. 그런데 자동 머지가 합친 뒤
+  # main에서는 **ci 자체가 안 돈다** — 같은 GITHUB_TOKEN 제약이다.
+  # 그래서 여기 도착하는 `workflow_run`은 전부 PR 브랜치의 ci이고,
+  # 아래 `head_branch == 'main'` 가드가 그걸 정확히 걸러 낸다.
+  #
+  #   fly-deploy 실행 기록: 4ca49bf(#128) skipped · 63a8a9c(#129) skipped ·
+  #   마지막 실제 배포는 470d8db(#127)의 workflow_dispatch 하나뿐이었다.
+  #
+  # 실행은 남고 job은 항상 skipped라 **배포가 도는 것처럼 보였다.**
+  # 진짜 신호는 `scripts/auto-merge.mjs`가 머지 직후 보내는
+  # `workflow_dispatch`다(GITHUB_TOKEN 재귀 방지의 명시적 예외).
+  # 이 트리거는 손으로 ci를 돌린 경우를 위해 남겨 둔다.
   workflow_run:
     workflows: [ci]
     types: [completed]
@@ -102,8 +117,13 @@ jobs:
       # `--remote-only`: 이미지를 Fly의 빌더에서 만든다. 러너에 Docker
       # 데몬을 띄우지 않아도 되고, 빌드 캐시가 Fly 쪽에 남아 다음 배포가
       # 빨라진다.
+      # `--build-arg GIT_SHA`: **이미지에 커밋을 새겨 넣는다.**
+      # 워커가 이 값을 heartbeat에 적고, /api/system/deployment가
+      # Vercel의 SHA와 나란히 보여 준다. 이게 없으면 "Fly에 무엇이 떠
+      # 있는가"에 답할 방법이 없다 — 실제로 그래서 #128이 배포됐는지를
+      # 아무도 확인하지 못했다.
       - name: flyctl deploy
-        run: flyctl deploy --remote-only
+        run: flyctl deploy --remote-only --build-arg GIT_SHA=${{ github.sha }}
 
       # 배포가 끝났다고 워커가 도는 것은 아니다. 상태를 찍어 둔다.
       # (판정은 하지 않는다 — 이 워크플로는 배포까지가 책임이고,

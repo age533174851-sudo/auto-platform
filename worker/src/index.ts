@@ -694,6 +694,12 @@ async function startupChecks() {
   console.log('════════════════════════════════════════');
   console.log('  🚀 TRAIGO Worker started');
   console.log(`  id=${WORKER_ID}  poll=${POLL_SEC}s  redis=${redisAvailable() ? 'ON(액션락 활성)' : 'OFF(액션락 생략·atomic claim으로 중복방지)'}`);
+  // **이 워커가 어느 커밋인지 첫 줄에 적는다.**
+  //
+  // 8/13과 8/15에 같은 사고가 났다 — main에 있는 코드가 Fly에는 없었고,
+  // 로그만 보면 알 수 없었다. 배포 직후 이 한 줄만 보면 끝난다.
+  // 비어 있으면 GIT_SHA 없이 빌드된 이미지다(= 어느 커밋인지 모른다).
+  console.log(`  build=${String(process.env.GIT_SHA || '').slice(0, 7) || '(모름 — GIT_SHA 없이 빌드된 이미지)'}`);
   console.log('════════════════════════════════════════');
 
   // ── 필수 env 검증 — 없으면 **종료한다** ──

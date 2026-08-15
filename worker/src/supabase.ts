@@ -37,11 +37,33 @@ export async function releaseLock(name: string, holder: string): Promise<void> {
 }
 
 // ── Heartbeat ──────────────────────────────────────────────────
+//
+// **이 워커가 어느 커밋인지 같이 적는다.**
+//
+// 두 번 사고가 났다. 8/13에는 fly-deploy가 안 돌아 워커가 8/9 코드로
+// 돌았고, 8/15에는 #128(고아주문 정리)·#129(반복 스모크)가 워커에 없는
+// 채로 스모크를 돌렸다. 두 번 다 **"Fly에 무엇이 떠 있나"에 답할
+// 방법이 없어서** 원인을 찾는 데 시간을 다 썼다.
+//
+// `GIT_SHA`는 Dockerfile의 ARG로 들어온다(fly-deploy가 --build-arg로
+// 넘긴다). 없으면 빈 문자열이고, 그건 **"모름"이지 "같음"이 아니다** —
+// 읽는 쪽(`/api/system/deployment`)이 그렇게 처리한다.
 export async function heartbeat(workerId: string, status: string, task: string, errorCount: number): Promise<void> {
+  const base: Record<string, any> = {
+    worker_id: workerId, last_seen: new Date().toISOString(), status,
+    current_task: task, error_count: errorCount, updated_at: new Date().toISOString(),
+  };
+  const sha = String(process.env.GIT_SHA || '').trim();
   try {
-    await sb().from('worker_heartbeat').upsert({
-      worker_id: workerId, last_seen: new Date().toISOString(), status, current_task: task, error_count: errorCount, updated_at: new Date().toISOString(),
-    }, { onConflict: 'worker_id' });
+    const { error } = await sb().from('worker_heartbeat')
+      .upsert(sha ? { ...base, version: sha } : base, { onConflict: 'worker_id' });
+    if (!error) return;
+    // 054가 아직 안 적용된 배포에서는 `version` 칸이 없다. 그때 생존
+    // 신호까지 같이 잃으면 **살아 있는 워커가 죽은 것으로 보인다** —
+    // 버전을 빼고 다시 적는다.
+    if (sha && /column|schema cache/i.test(String(error.message))) {
+      await sb().from('worker_heartbeat').upsert(base, { onConflict: 'worker_id' });
+    }
   } catch {}
 }
 
