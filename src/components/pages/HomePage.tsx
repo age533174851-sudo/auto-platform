@@ -63,7 +63,34 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   const [favs, setFavs] = useState<string[]>([]);
   useEffect(() => { setFavs(getFavorites()); return subscribeFavorites(() => setFavs(getFavorites())); }, []);
   const top5=useMemo(()=>[...prices].sort((a,b)=>b.c-a.c).slice(0,5),[prices]);
-  const [autoAll,setAutoAll]=useState(true);
+  // ── 자동매매가 실제로 돌고 있는가 ──
+  //
+  // **예전에는 `useState(true)`였다.** 예약이 전부 꺼져 있어도 홈은
+  // "실행중"이라고 적었다. 켜져 있다는 사실조차 아닌, 그냥 화면의 기본값이다.
+  //
+  // 판정은 서버가 한다(`workerPlan`) — 화면이 배지를 합산하면 관제판과
+  // 다른 말을 하게 된다. **못 읽으면 '확인 못 함'이지 '실행중'이 아니다.**
+  const [autoPlan,setAutoPlan]=useState<any>(null);
+  const [autoErr,setAutoErr]=useState(false);
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      try{
+        const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
+        if(!tok) return;
+        const r = await fetch('/api/autotrade/schedule',{headers:{Authorization:`Bearer ${tok}`}});
+        const j = await r.json();
+        if(!alive) return;
+        if(j?.ok && j.plan) setAutoPlan(j.plan); else setAutoErr(true);
+      }catch{ if(alive) setAutoErr(true); }
+    })();
+    return()=>{alive=false;};
+  },[]);
+  const autoOn = autoPlan?.code === 'HEALTHY';
+  const autoLabel = autoPlan
+    ? (autoPlan.code==='IDLE' ? '정지' : autoPlan.code==='HEALTHY' ? '실행중' : '확인 필요')
+    : (autoErr ? '확인 못 함' : '읽는 중…');
+  const autoNote = autoPlan?.headline ?? (autoErr ? '자동매매 상태를 읽지 못했습니다' : '');
 
   // top5 자산의 로고 batch 로드
   const logoSymbols = useMemo(() => {
@@ -76,11 +103,40 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   }, [top5]);
   const logoMap = useLogoMap(logoSymbols);
 
-  const LONG_VALUE  = 48500000;
-  const SHORT_VALUE = 1230000;
-  const CASH_VALUE  = 5000000;
-  const TOTAL = LONG_VALUE + SHORT_VALUE + CASH_VALUE;
-  const TOTAL_PNL   = 2870000;
+  // ── 총자산 ──
+  //
+  // **예전에는 여기에 4,850만 원이 적혀 있었다.** 하드코딩이다.
+  // 로그인하지 않아도, 계좌를 붙이지 않아도 같은 숫자가 나왔다.
+  //
+  // 지금은 지갑과 **같은 곳**에서 읽는다(`/api/wallets/overview`).
+  // 홈이 자기 숫자를 따로 계산하면 지갑과 홈이 다른 총자산을 보여준다.
+  // **못 읽으면 숫자를 만들지 않는다** — '확인하지 못했습니다'라고 적는다.
+  const [wallet,setWallet]=useState<any>(null);
+  const [walletErr,setWalletErr]=useState('');
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      try{
+        const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
+        if(!tok){ if(alive) setWalletErr('로그인하면 실제 자산을 읽습니다'); return; }
+        const r = await fetch('/api/wallets/overview',{headers:{Authorization:`Bearer ${tok}`}});
+        const j = await r.json();
+        if(!alive) return;
+        if(j?.ok) setWallet(j);
+        else setWalletErr(String(j?.message||j?.error||'자산을 읽지 못했습니다'));
+      }catch(e:any){ if(alive) setWalletErr(`자산을 읽지 못했습니다 (${e?.message||e})`); }
+    })();
+    return()=>{alive=false;};
+  },[]);
+
+  // **환경을 합치지 않는다.** 실전이 있으면 실전을, 없으면 테스트넷을
+  // 보여주고 어느 환경인지 라벨로 밝힌다. 둘을 더한 숫자는 뜻이 없다.
+  const shownEnv = (()=>{
+    const envs:any[] = Array.isArray(wallet?.envs)?wallet.envs:[];
+    const live = envs.find((e:any)=>e.env==='LIVE' && e.connections>0);
+    return live ?? envs.find((e:any)=>e.connections>0) ?? null;
+  })();
+  const totalCell = shownEnv?.futures ?? null;
 
   return (
     <div>
@@ -100,23 +156,37 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
       {/* ── 총자산 히어로 ── */}
       <div style={{background:'linear-gradient(145deg,var(--t-card),var(--t-bg))',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>
-        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>내 총자산 · {tr(lang,'mock')}</span></div>
-        <div style={{color:T.txt,fontSize:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:-1.5}}>{cvt(TOTAL,currency)}</div>
-        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
-          <span style={{color:T.muted,fontSize:12}}>오늘 손익</span>
-          <span style={{color:TOTAL_PNL>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>{TOTAL_PNL>=0?'+':''}{cvt(Math.abs(TOTAL_PNL),currency)}</span>
-          <Bdg c={TOTAL_PNL>=0?T.grn:T.red} ch={fmtPct(TOTAL_PNL/TOTAL*100)}/>
+        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:6}}><Dot/><span style={{color:T.muted,fontSize:11,fontWeight:600}}>
+          내 총자산{shownEnv? ` · ${shownEnv.env}`:''}
+        </span></div>
+        {/* **못 읽으면 숫자를 만들지 않는다.** 0을 그리면 사용자는 돈이
+            사라졌다고 믿고, 하드코딩을 그리면 없는 돈을 셈한다. */}
+        <div style={{color:totalCell?.value==null?T.muted:T.txt,fontSize:totalCell?.value==null?15:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:totalCell?.value==null?0:-1.5,overflowWrap:'anywhere'}}>
+          {totalCell?.value==null
+            ? (walletErr || totalCell?.text || '확인하지 못했습니다')
+            : cvt(totalCell.value,currency)}
         </div>
+        {shownEnv?.unrealizedPnl?.value!=null && (
+          <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
+            <span style={{color:T.muted,fontSize:12}}>미실현 손익</span>
+            <span style={{color:shownEnv.unrealizedPnl.value>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>
+              {shownEnv.unrealizedPnl.value>=0?'+':''}{cvt(Math.abs(shownEnv.unrealizedPnl.value),currency)}
+            </span>
+          </div>
+        )}
+        {shownEnv?.note && (
+          <div style={{color:T.muted,fontSize:10,marginTop:6,overflowWrap:'anywhere'}}>{shownEnv.note}</div>
+        )}
       </div>
 
       {/* ── 자동매매 상태 ── */}
-      <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${autoAll?A(T.grn,'40'):T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
-        <div style={{flexShrink:0,width:40,height:40,borderRadius:11,background:(autoAll?T.grn:T.muted)+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
-          <Bot size={20} color={autoAll?T.grn:T.muted}/>
+      <button onClick={()=>onNav('auto')} style={{width:'100%',display:'flex',alignItems:'center',gap:12,background:T.card,border:`1px solid ${autoOn?A(T.grn,'40'):T.border}`,borderRadius:16,padding:'14px 16px',marginBottom:16,cursor:'pointer',textAlign:'left'}}>
+        <div style={{flexShrink:0,width:40,height:40,borderRadius:11,background:(autoOn?T.grn:T.muted)+'1F',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <Bot size={20} color={autoOn?T.grn:T.muted}/>
         </div>
         <div style={{flex:1,minWidth:0}}>
-          <div style={{color:T.txt,fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:6}}>자동매매 <span style={{width:7,height:7,borderRadius:'50%',background:autoAll?T.grn:T.muted,display:'inline-block'}}/><span style={{color:autoAll?T.grn:T.muted,fontSize:11,fontWeight:700}}>{autoAll?'실행중':'정지'}</span></div>
-          <div style={{color:T.muted,fontSize:11,marginTop:1}}>{autoAll?'EMA 추세 + DCA 실행 중':'탭하여 자동매매 시작'}</div>
+          <div style={{color:T.txt,fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:6}}>자동매매 <span style={{width:7,height:7,borderRadius:'50%',background:autoOn?T.grn:T.muted,display:'inline-block'}}/><span style={{color:autoOn?T.grn:T.muted,fontSize:11,fontWeight:700}}>{autoLabel}</span></div>
+          <div style={{color:T.muted,fontSize:11,marginTop:1,overflowWrap:'anywhere'}}>{autoNote||'탭하여 자동매매 시작'}</div>
         </div>
         <ChevronRight size={18} color={T.muted}/>
       </button>

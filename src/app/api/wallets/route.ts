@@ -10,14 +10,7 @@
 // "한쪽이라도 모르면 null"로 처리한다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
-import {
-  buildWalletTree, spotAllocation, usdtFromFuturesBalances,
-  SPOT_UNAVAILABLE, FUTURES_UNAVAILABLE,
-  type SpotWallet, type FuturesWallet,
-} from '@/lib/markets/wallets';
-// 가격 매기기는 통합 자산과 현물 전략이 함께 쓴다. 각자 계산하면
-// 한 화면은 리밸런싱이 돌고 다른 화면은 안 도는 식으로 어긋난다.
-import { priceAssets } from '@/lib/markets/pricing';
+import { readConnectionWallet } from '@/lib/markets/readWallet';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -39,127 +32,21 @@ export async function GET(req: NextRequest) {
 
   if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
 
-  // 지원 거래소인가.
-  //
-  // 예전에는 바이낸스가 아니면 무조건 400 'not_binance'였다. 화면은 그걸
-  // "잔고 확인 불가"로 그리므로, **게이트로 연결한 사람은 가용 잔고가
-  // 영원히 확인 불가**였고 25%·50% 버튼도 계속 비활성이었다. 조회에 실패한
-  // 것이 아니라 아예 물어보지 않은 것인데 화면에서는 구분이 안 된다.
-  const exch = String(conn.exchange_id || '').toLowerCase();
-  if (exch !== 'binance' && exch !== 'gate') {
-    return NextResponse.json({
-      error: 'unsupported_exchange',
-      message: `${conn.exchange_id} 지갑 조회는 아직 지원하지 않습니다 (바이낸스·게이트만)`,
-    }, { status: 400 });
+  // **조회는 readWallet 한 곳에 있다.** 지갑 개요(연결 여럿)가 같은
+  // 함수를 쓴다 — 라우트 안에 두면 개요 쪽이 사본을 갖게 되고,
+  // 그때 한쪽만 고쳐진다.
+  const r = await readConnectionWallet(sb, uid, connectionId);
+  if (!r.ok) {
+    return NextResponse.json(
+      { error: r.error, ...(r.message ? { message: r.message } : {}) },
+      { status: r.status });
   }
-  if (conn.has_withdrawal === true) {
-    return NextResponse.json({ error: 'withdrawal_key_blocked' }, { status: 403 });
-  }
-
-  const { decryptSecret } = await import('@/lib/exchanges/crypto');
-  let secret: string;
-  try { secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''); }
-  catch { return NextResponse.json({ error: 'decrypt_failed' }, { status: 500 }); }
-  const apiKey = conn.api_key || '';
-  // 프로젝트 공통 규칙: `is_testnet === false`일 때만 실전이다.
-  // `=== true`로 두면 값이 없거나 이상할 때 **실계좌**를 조회한다.
-  const testnet = conn.is_testnet !== false;
-
-  // ── 두 지갑을 나란히, 각각 ──
-  const [spotRes, futRes] = await Promise.allSettled(exch === 'gate' ? [
-    // ── 게이트 ──
-    (async (): Promise<SpotWallet> => {
-      const { getBalancesGate } = await import('@/lib/exchanges/gate');
-      const list = await getBalancesGate(apiKey, secret, testnet);
-      const raw = (Array.isArray(list) ? list : [])
-        .map(b => ({
-          asset: String((b as any).currency || (b as any).asset || ''),
-          free: Number((b as any).free) || 0,
-          locked: Number((b as any).locked) || 0,
-        }))
-        .filter(b => b.asset && (b.free > 0 || b.locked > 0));
-      const assets = await priceAssets(raw);
-      const usdt = assets.find(a => a.asset === 'USDT');
-      return { ok: true, assets, usdt: usdt ? usdt.free : 0 };
-    })(),
-    (async (): Promise<FuturesWallet> => {
-      const { getAccountGateFutures, getPositionsGateFutures } = await import('@/lib/exchanges/gateFutures');
-      const [acct, pos] = await Promise.all([
-        getAccountGateFutures(apiKey, secret, testnet),
-        getPositionsGateFutures(apiKey, secret, testnet).catch(() => [] as any[]),
-      ]);
-      const walletBalance = Number(acct?.total);
-      const availableMargin = Number(acct?.available);
-      // **못 읽은 값을 0으로 채우지 않는다.** 0은 '돈이 없다'이고 조회
-      // 실패는 '모른다'인데, 화면에서는 둘 다 "0.00 USDT"로 보인다.
-      if (!Number.isFinite(walletBalance) || !Number.isFinite(availableMargin)) {
-        throw new Error('게이트 선물 잔고를 읽지 못했습니다');
-      }
-      const positions: any[] = Array.isArray(pos) ? pos : [];
-      const unrealized = positions.reduce((sm, p) => sm + (Number(p.unrealised_pnl) || 0), 0);
-      // 게이트 포지션 응답에는 증거금 칸이 따로 없다. 지갑 잔고에서
-      // 가용을 뺀 것이 묶여 있는 금액이다.
-      const positionMargin = Math.max(0, walletBalance - availableMargin);
-      return { ok: true, walletBalance, availableMargin, positionMargin, unrealizedPnl: unrealized };
-    })(),
-  ] : [
-    (async (): Promise<SpotWallet> => {
-      const { getBalancesBinance } = await import('@/lib/exchanges/binance');
-      const list = await getBalancesBinance(apiKey, secret, testnet);
-      const raw = (Array.isArray(list) ? list : [])
-        .map(b => ({
-          asset: String(b.currency || ''),
-          free: Number(b.free) || 0,
-          locked: Number(b.locked) || 0,
-        }))
-        .filter(b => b.asset && (b.free > 0 || b.locked > 0));
-      const assets = await priceAssets(raw);
-      const usdt = assets.find(a => a.asset === 'USDT');
-      return {
-        ok: true, assets,
-        usdt: usdt ? usdt.free : 0,
-      };
-    })(),
-    (async (): Promise<FuturesWallet> => {
-      const { getFuturesBalance, getFuturesPositions } = await import('@/lib/exchanges/binanceFutures');
-      const [bal, pos] = await Promise.all([
-        getFuturesBalance(apiKey, secret, testnet),
-        getFuturesPositions(apiKey, secret, testnet),
-      ]);
-      const positions: any[] = (pos as any)?.success ? (pos as any).positions : [];
-      const unrealized = positions.reduce(
-        (s, p) => s + (Number(p.unrealizedPnl ?? p.unRealizedProfit) || 0), 0);
-      const positionMargin = positions.reduce(
-        (s, p) => s + (Number(p.isolatedMargin ?? p.initialMargin) || 0), 0);
-
-      // 응답 모양을 여기서 추측하지 않는다 — 정확히 그래서 틀렸었다.
-      // (lib/markets/wallets의 usdtFromFuturesBalances 주석 참조)
-      const w = usdtFromFuturesBalances(bal);
-      if (!w.ok) throw new Error(w.error || '선물 잔고를 읽지 못했습니다');
-
-      return {
-        ok: true,
-        walletBalance: w.walletBalance,
-        availableMargin: w.availableMargin,
-        positionMargin, unrealizedPnl: unrealized,
-      };
-    })(),
-  ]);
-
-  const spot: SpotWallet = spotRes.status === 'fulfilled'
-    ? spotRes.value
-    : { ...SPOT_UNAVAILABLE, error: String((spotRes as any).reason?.message || '현물 지갑 조회 실패') };
-
-  const futures: FuturesWallet = futRes.status === 'fulfilled'
-    ? futRes.value
-    : { ...FUTURES_UNAVAILABLE, error: String((futRes as any).reason?.message || '선물 지갑 조회 실패') };
-
-  const tree = buildWalletTree(spot, futures);
+  const tree = r.tree!;
 
   return NextResponse.json({
     ok: true,
     tree,
-    allocation: spotAllocation(spot),
+    allocation: r.allocation,
     // 화면이 이 문장을 그대로 쓸 수 있게 여기서 정해 둔다.
     // 각 화면이 알아서 쓰면 어딘가는 "총자산으로 주문 가능"이라고 쓴다.
     note: '현물 잔고는 선물 증거금이 아닙니다. 선물에서 쓰려면 이체가 필요합니다.',
