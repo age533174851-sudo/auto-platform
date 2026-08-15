@@ -111,8 +111,11 @@ export default function WalletPage() {
   // 없다 — **그게 정직한 상태다.** 오늘 표를 만들어도 어제 값은 생기지 않는다.
   // 자산 곡선은 찍어 둔 시점(account_equity_snapshots)에서만 나온다.
   // **지금 잔고로 과거를 역산하지 않는다** — 오늘 표를 만들어도 어제
-  // 값은 생기지 않는다. 아직 비어 있는 것이 정직한 상태다.
+  // 값은 생기지 않는다. 서버가 지갑을 읽을 때마다 찍어 두므로
+  // 두 번째 방문부터 곡선이 생긴다.
   const snapshots: any[] = [];
+  // 이 환경의 성과. **없으면 만들지 않는다.**
+  const perf: any = data?.performance?.[env] ?? null;
   const curve = curveOf(snapshots, range, Date.now(), env);
   const daily = dailyRowsOf(snapshots);
 
@@ -176,6 +179,56 @@ export default function WalletPage() {
           color: T.ylw, fontSize: 11, lineHeight: 1.6, overflowWrap: 'anywhere',
         }}>
           {err} — <b>잔고가 0이라는 뜻이 아닙니다.</b>
+        </div>
+      )}
+
+      {/* ── 이 환경에서 얼마나 벌었나 ──
+          **잔고 증가는 수익이 아니다.** 입금해서 늘어난 것을 수익으로
+          적으면 사용자는 자기 성과를 몇 배 좋게 읽는다. 그래서
+          자산 증가 · 매매 손익 · 순입출금을 나눠서 적는다. */}
+      {perf && (
+        <div style={{
+          background: T.card, border: `1px solid ${T.border}`, borderRadius: 12,
+          padding: 11, marginBottom: 8, minWidth: 0,
+        }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11.5, fontWeight: 800, color: T.txt }}>{env} 성과</span>
+            {perf.elapsedText && perf.startedAt && (
+              <span style={{ fontSize: 10, color: T.muted }}>운용 {perf.elapsedText}</span>
+            )}
+          </div>
+          {perf.code === 'NO_SNAPSHOTS' || perf.code === 'ONE_SNAPSHOT' ? (
+            <div style={{ ...muted, marginTop: 5, lineHeight: 1.6 }}>{perf.note}</div>
+          ) : (
+            <div style={{ marginTop: 6, display: 'grid', gap: 3 }}>
+              {[
+                ['시작 자산', perf.startEquity],
+                ['현재 자산', perf.currentEquity],
+                ['자산 증가', perf.equityChange],
+                ['순입출금', perf.cashFlow?.net],
+                ['매매 손익', perf.tradingPnl],
+                ['최고 자산', perf.peakEquity],
+                ['최대 낙폭(%)', perf.maxDrawdownPct],
+              ].map(([label, v]: any) => (
+                <div key={label} style={{ display: 'flex', gap: 8, fontSize: 10.5, lineHeight: 1.6 }}>
+                  <span style={{ color: T.muted, minWidth: 78, flexShrink: 0 }}>{label}</span>
+                  {/* **못 읽은 것을 0으로 그리지 않는다.** */}
+                  <span style={{ color: v == null ? T.muted : T.txt, fontWeight: v == null ? 600 : 800 }}>
+                    {v == null ? '확인하지 못했습니다' : Number(v).toLocaleString('ko-KR')}
+                  </span>
+                </div>
+              ))}
+              {perf.tradingReturnPct != null && (
+                <div style={{ display: 'flex', gap: 8, fontSize: 10.5, lineHeight: 1.6 }}>
+                  <span style={{ color: T.muted, minWidth: 78, flexShrink: 0 }}>매매 수익률</span>
+                  <span style={{ color: perf.tradingReturnPct >= 0 ? T.grn : T.red, fontWeight: 800 }}>
+                    {perf.tradingReturnPct >= 0 ? '+' : ''}{perf.tradingReturnPct}%
+                  </span>
+                </div>
+              )}
+              {perf.note && <div style={{ ...muted, marginTop: 3 }}>{perf.note}</div>}
+            </div>
+          )}
         </div>
       )}
 
