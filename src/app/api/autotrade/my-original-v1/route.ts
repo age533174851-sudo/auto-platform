@@ -204,6 +204,33 @@ export async function POST(req: NextRequest) {
       message: `킬스위치를 확인하지 못해 막았습니다: ${e?.message || e}` }, { status: 503 });
   }
 
+  // ── 4-a. 같은 종목에 다른 전략이 **켜져 있는가** ──
+  //
+  // ONE_WAY 계좌는 종목당 포지션이 하나다. daily-ladder BTCUSDT와
+  // my-original-v1 BTCUSDT가 둘 다 켜져 있으면, 한쪽의 청산이 다른 쪽
+  // 포지션을 닫고 한쪽의 손절이 다른 쪽 진입에 발동한다.
+  // 주문에 소유권을 새겨도 **포지션은 가를 수 없다.**
+  try {
+    const { symbolOwnershipConflict } = await import('@/lib/engine/orderOwnership');
+    const { data, error } = await (sb as any).from('autotrade_schedules')
+      .select('symbol, connection_id, strategy_id, enabled')
+      .eq('user_id', userId);
+    // **못 읽은 것을 '겹치는 것 없음'으로 읽지 않는다.**
+    const v = symbolOwnershipConflict({
+      rows: error ? null : (data ?? []),
+      myStrategyId: STRATEGY_MY_ORIGINAL_V1, symbol, connectionId,
+    });
+    if (!v.ok) {
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: v.reason });
+      return NextResponse.json({ ...base, ok: false, blocked: v.code, message: v.reason },
+        { status: v.code === 'SCHEDULES_UNKNOWN' ? 503 : 409 });
+    }
+  } catch (e: any) {
+    const why = `같은 종목의 다른 예약을 확인하지 못했습니다: ${e?.message || e}`;
+    return NextResponse.json({ ...base, ok: false, error: 'conflict_unknown', message: why },
+      { status: 503 });
+  }
+
   // ── 4. 이 종목을 다른 전략이 들고 있는가 ──
   //
   // 포지션 소유권이 아직 없다. 같은 계좌·같은 종목에 두 전략이 들어가면
@@ -447,6 +474,102 @@ export async function POST(req: NextRequest) {
       reason: '미리보기 — 주문을 보내지 않았습니다' }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 9. 어제 것이 아직 열려 있는가 ─────────────────────
+  //
+  // **이 블록이 없어서 어제 사고가 났다.**
+  //
+  //   BTCUSDT  기존 SHORT + 같은 방향 SHORT → 수량이 2배가 됐다
+  //   ETHUSDT  기존 SHORT + 반대 LONG → 상계되어 0.01 ETH 찌꺼기가 남았다
+  //   Gate     이전 날짜 조건부 주문이 안 치워진 채 새것까지 4개가 쌓였다
+  //
+  // 순서는 하나뿐이다: 포지션 확인 → (필요하면) 전량 청산 → **거래소
+  // 재조회로 0 확인** → 옛 보호주문 정리 → 그 다음에만 신규 진입.
+  // 어느 단계든 '모른다'면 들어가지 않는다.
+  const venue = {
+    exchange, apiKey: (creds as any).key, apiSecret: (creds as any).secret, testnet,
+  };
+  let lifecycle: any = null;
+  try {
+    const ops = await import('@/lib/engine/venuePositionOps');
+    const { entryGate, reversalProgress } = await import('@/lib/engine/positionLifecycle');
+    const { orphanCleanupPlan, cleanupOutcome } = await import('@/lib/engine/orderOwnership');
+    const { closeVerdict } = await import('@/lib/engine/closeEvidence');
+
+    const before = await ops.readOpenPosition(venue, symbol);
+    const gate = entryGate({ read: before, desiredSide: sig.side });
+    lifecycle = {
+      before: { ok: before.ok, found: before.found, side: before.side, qty: before.qty },
+      gate: { ok: gate.ok, code: gate.code, reason: gate.reason },
+    };
+
+    if (!gate.ok && !gate.needsReversal) {
+      // 같은 방향이거나 조회 실패다. **거래일을 소비하지 않는다** —
+      // 그 포지션이 정리되면 같은 창 안에 다시 볼 수 있어야 한다.
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: gate.reason });
+      return NextResponse.json({
+        ...base, ok: false, outcome: 'BLOCKED', blocked: gate.code,
+        lifecycle, message: gate.reason,
+      }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (gate.needsReversal) {
+      // ── 반전 ──
+      //
+      // 반대 주문 하나로 뒤집지 않는다. 닫는 것과 여는 것은 다른 주문이고,
+      // 그 사이에 **닫혔다는 증거**가 들어가야 한다.
+      const closeRes = await ops.closeSymbolPosition(venue, symbol, before.side);
+      const after = await ops.readOpenPosition(venue, symbol);
+      const cv = closeVerdict({
+        before: { ok: before.ok, found: before.found, amount: before.qty ?? null, error: before.error },
+        order: { attempted: closeRes.attempted, ok: closeRes.ok, error: closeRes.error },
+        after: { ok: after.ok, found: after.found, amount: after.qty ?? null, error: after.error },
+      });
+
+      // 포지션이 0으로 확인됐을 때만 고아 정리로 넘어간다.
+      const orders = cv.closed ? await ops.readProtectiveOrders(venue, symbol) : null;
+      const plan = orphanCleanupPlan({
+        position: { ok: after.ok, found: after.found, qty: after.qty },
+        orders, myStrategyId: STRATEGY_MY_ORIGINAL_V1,
+      });
+      // **내 것이라고 확인된 id만** 취소한다. cancelAll은 남의 손절을 지운다.
+      const cancelRes = plan.cancel.length
+        ? await ops.cancelProtectiveOrders(venue, symbol, plan.cancel)
+        : { cancelled: [] as string[], failed: [] as any[] };
+      const cleaned = cleanupOutcome({ plan, cancelled: plan.ok ? cancelRes.cancelled : null });
+
+      const rv = reversalProgress({
+        closeRequested: closeRes.attempted,
+        closeAccepted: closeRes.attempted ? closeRes.ok : null,
+        closeVerdict: cv,
+        protectionCleaned: cleaned.cleaned,
+      });
+      lifecycle.reversal = {
+        stage: rv.stage, code: rv.code, ok: rv.ok,
+        close: { attempted: closeRes.attempted, accepted: closeRes.ok, error: closeRes.error },
+        closeVerdict: { closed: cv.closed, code: cv.code, reason: cv.reason },
+        cleanup: { code: plan.code, cancelled: cancelRes.cancelled, kept: plan.keep, reason: cleaned.reason },
+      };
+
+      if (!rv.ok) {
+        // **여기서 멈춘다.** 열려 있을 수 있는 포지션 위로 신규 진입을
+        // 내지 않는다 — 그게 어제의 2배 포지션과 찌꺼기다.
+        const why = `${gate.reason} · ${rv.reason}`;
+        await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });
+        return NextResponse.json({
+          ...base, ok: false, outcome: 'BLOCKED', blocked: rv.code,
+          lifecycle, message: why,
+        }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
+  } catch (e: any) {
+    // **예외를 '깨끗하다'로 읽지 않는다.** 확인하지 못한 것은 통과가 아니다.
+    const why = `기존 포지션 상태를 확인하지 못했습니다 — ${e?.message || e}. 신규 진입을 내지 않습니다`;
+    await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });
+    return NextResponse.json({ ...base, ok: false, outcome: 'BLOCKED', blocked: 'LIFECYCLE_UNKNOWN',
+      lifecycle, message: why }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+  }
+  base.lifecycle = lifecycle;
+
   // ── 주문 ──
   //
   // **주문 경로는 기존 실행기를 그대로 쓴다.** 배율 적용·포지션 모드 확인·
@@ -459,7 +582,19 @@ export async function POST(req: NextRequest) {
   try {
     const { executeOrder } = await import('@/lib/engine/orderExecutor');
     const { tagStrategy } = await import('@/lib/strategies/ledger');
-    const clientOrderId = `mo1${wv.tradingDay?.replace(/-/g, '') ?? ''}${String(cycle.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}`;
+    const { ownedClientOrderId } = await import('@/lib/engine/orderOwnership');
+
+    // ── 같은 행동은 같은 id ──
+    //
+    // Worker가 재시도하든 GitHub 예비 실행기가 동시에 깨우든 HTTP
+    // 타임아웃 뒤 다시 보내든, **같은 (전략 · 거래일 · 종목 · 목적)이면
+    // 같은 id**다. 시각을 섞으면 재시도마다 새 주문이 되고 그건 중복이다.
+    // 이 id에 소유권이 새겨져 있어서, 나중에 이 주문의 보호주문만 골라
+    // 취소할 수 있다 — 남의 손절을 지우지 않는다.
+    const clientOrderId = ownedClientOrderId({
+      owner: { strategyId: STRATEGY_MY_ORIGINAL_V1, strategyVersion: '1', symbol, connectionId, mode },
+      logicalKey: wv.tradingDay ?? '', purpose: 'ENTRY',
+    });
 
     const exec = await executeOrder(sb, {
       userId, connectionId,
@@ -471,6 +606,17 @@ export async function POST(req: NextRequest) {
       protectionPolicy: 'REQUIRED',
       stopLoss: prices.stop,
       ...(prices.takeProfit != null ? { takeProfit: prices.takeProfit } : {}),
+      // **판단 참고가가 아니라 실제 체결가에서 다시 잰다.**
+      // 위 prices는 09:10~09:30 합성 봉 종가로 계산한 값이고, 시장가
+      // 100배는 그 가격에 체결되지 않는다. 0.2% 밀리면 −0.4% 손절이
+      // −0.2%가 되는데, 청산 거리가 0.6%인 자리에서 그건 손절이 아니다.
+      exitPct: {
+        stopPct: ep.spec.stopPct,
+        takeProfitPct: ep.spec.takeProfitPct ?? null,
+        // 이 청산 정책은 손절과 익절이 한 쌍이다 — 익절이 없으면
+        // 진입을 완료로 보지 않는다.
+        requireTakeProfit: ep.spec.takeProfitPct != null && ep.spec.takeProfitPct > 0,
+      },
       apiKey: (creds as any).key,
       apiSecret: (creds as any).secret,
       plan: {
@@ -493,35 +639,73 @@ export async function POST(req: NextRequest) {
       } as any,
     } as any);
 
-    const entered = exec?.ok === true;
+    // ── 진입했다고 적어도 되는가 ──
+    //
+    // **`exec.ok === true`는 진입이 아니다.** 접수만 됐어도 true고,
+    // 체결이 확정되지 않아도 true고, 포지션이 없어 손절을 안 걸었을
+    // 때도 true다. 어제 장부에 ENTERED가 적혀 있었고 거래소는 다른
+    // 말을 하고 있었다.
+    //
+    // 증거를 전부 모아 판정한다: 체결 확정 · 수량 · 방향 · **거래소
+    // 재조회** · 배율/포지션 모드 · 손절 되읽기 · (필수면) 익절 되읽기.
+    const ops = await import('@/lib/engine/venuePositionOps');
+    const { enteredVerdict, outcomeOf } = await import('@/lib/engine/entryEvidence');
+    const posAfter = await ops.readOpenPosition(venue, symbol);
+
+    const ev = enteredVerdict({
+      expectedSide: sig.side,
+      settled: exec?.settled ?? null,
+      filledQty: exec?.filledQty ?? null,
+      avgPrice: exec?.avgPrice ?? null,
+      rejected: exec?.ok === false,
+      position: posAfter,
+      leverageConfirmed: exec?.leverageConfirmed ?? null,
+      positionModeConfirmed: exec?.positionModeConfirmed ?? null,
+      stop: exec?.protection?.stop ?? null,
+      takeProfit: exec?.protection?.takeProfit ?? null,
+      takeProfitRequired: ep.spec.takeProfitPct != null && ep.spec.takeProfitPct > 0,
+    });
+
+    const entered = ev.entered;
+    const outcome = outcomeOf(ev);
     const why = entered
-      ? `${sig.side} 진입 · 증거금 $${marginUsd} · ${REQUESTED_LEVERAGE}배 · `
-        + `손절 ${prices.stop}${prices.takeProfit != null ? ` · 익절 ${prices.takeProfit}` : ''}`
-      : `진입 실패: ${exec?.message || exec?.status || '사유 없음'}`;
+      ? `${sig.side} 진입 확인 · 증거금 $${marginUsd} · ${REQUESTED_LEVERAGE}배 · `
+        + `실제 체결가 ${exec?.exitBasis?.basisPrice ?? exec?.avgPrice} · `
+        + `손절 ${exec?.protection?.stop?.triggerPrice ?? '?'}`
+        + (exec?.protection?.takeProfit?.found ? ` · 익절 ${exec.protection.takeProfit.triggerPrice}` : '')
+      : `${ev.reason}${exec?.message ? ` (실행기: ${exec.message})` : ''}`;
 
     await noteCycle(sb, cycle.id, {
       last_trading_day: wv.tradingDay,
-      last_outcome: entered ? 'ENTERED' : 'FAILED',
+      last_outcome: outcome,
       last_reason: why,
+      // **확인된 진입만 센다.** UNKNOWN에서 세면 실제보다 많아지고,
+      // 그 숫자로 자금관리 구간이 움직인다.
       ...(entered ? { entries: Number(cycle.entries || 0) + 1 } : {}),
     });
 
     return NextResponse.json({
       ...base,
       executed: entered,
-      outcome: entered ? 'ENTERED' : 'FAILED',
+      outcome,
       ok: entered,
+      // **재시도해도 되는가.** UNKNOWN이면 false다 — 여기서 재시도를
+      // 열면 앞 주문이 붙는 사이에 한 번 더 나가고, 그게 2배 포지션이다.
+      retryable: ev.retryable,
+      entryEvidence: { code: ev.code, have: ev.have, missing: ev.missing },
       order: {
         status: exec?.status ?? null, clientOrderId,
         exchangeOrderId: exec?.exchangeOrderId ?? null,
         filledQty: exec?.filledQty ?? null, avgPrice: exec?.avgPrice ?? null,
-        // **손절이 실제로 걸렸는가.** slOrderId가 없는데 요청했으면
-        // 보호되지 않은 포지션이다 — 화면이 그 둘을 구분해야 한다.
+        // **거래소에서 다시 읽어 확인한 것만 적는다.** 생성 응답은 접수다.
         slOrderId: exec?.slOrderId ?? null, tpOrderId: exec?.tpOrderId ?? null,
+        protection: exec?.protection ?? null,
+        exitBasis: exec?.exitBasis ?? null,
         unprotected: exec?.unprotected ?? null,
         // false면 '아직 모른다'이지 '안 됐다'가 아니다.
         settled: exec?.settled ?? null,
       },
+      position: { ok: posAfter.ok, found: posAfter.found, side: posAfter.side, qty: posAfter.qty },
       message: why,
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
