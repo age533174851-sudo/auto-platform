@@ -36,7 +36,11 @@ const ORDER_ROUTES = [
   'src/app/api/autotrade/my-original-v1/route.ts',
   // 강제 스모크 테스트도 **실제 주문을 낸다.** 테스트넷 전용이라고
   // 목록에서 빼면, 킬스위치가 켜진 계좌에서도 주문이 나간다.
-  'src/app/api/autotrade/smoke-test/route.ts',
+  //
+  // 라우트가 아니라 이 파일이다 — 1회차는 사람이(POST), 2회차부터는
+  // 워커가(advance) 부르는데 **시작 절차는 여기 하나뿐**이다.
+  // 라우트 둘을 각각 검사하면 실제 주문을 내는 곳은 아무도 안 본다.
+  'src/lib/smoke/startAttempt.ts',
 ];
 
 // 각 경로가 반드시 물어봐야 하는 것.

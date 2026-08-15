@@ -153,9 +153,18 @@ async function settleOne(sb: any, row: any): Promise<any> {
     //
     // reduceOnly 전량청산이다. **진입 관문이 막혀 있어도 이건 나간다** —
     // 못 여는 것은 불편이고 못 닫는 것은 사고다.
+    //
+    // 청산 지연을 잰다: 마감 시각과 실제로 닫힌 순간 사이. 10회를
+    // 돌리는 이유의 절반은 "되는가"이고 나머지 절반은 "얼마나 걸리는가"다.
+    const closeT0 = Date.now();
     const before = await ops.readOpenPosition(venue, row.symbol);
     const closeRes = await ops.closeSymbolPosition(venue, row.symbol, before.side ?? row.side);
     const after = await ops.readOpenPosition(venue, row.symbol);
+    const closeMs = Date.now() - closeT0;
+    // 마감 시각으로부터 얼마나 늦게 닫혔는가. **못 읽으면 null이다.**
+    const dueMs = row.hold_until ? Date.parse(String(row.hold_until)) : NaN;
+    patch.exit_latency_ms = Number.isFinite(dueMs) ? Math.max(0, Math.round(closeT0 - dueMs)) : null;
+    patch.api_latency_ms_max = Math.max(Number(row.api_latency_ms_max) || 0, closeMs);
 
     const cv = closeVerdict({
       before: { ok: before.ok, found: before.found, amount: before.qty ?? null, error: before.error },

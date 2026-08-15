@@ -609,6 +609,58 @@ async function pollSmokeTests(): Promise<void> {
   }
 }
 
+// ── 반복 스모크: 다음 회차 ────────────────────────────
+//
+// 1회차는 사람이 버튼을 눌러 시작한다. 그런데 2회차는 유지 시간이
+// 지난 뒤에 시작해야 하고, 그때 사람은 화면을 닫고 있다.
+//
+// **다음 회차를 열어도 되는지는 서버가 판정한다.** 직전 회차가 PASS이고
+// 포지션 0 · 잔여 보호주문 0이 증명됐을 때만 열린다 — 그 판정을 워커에도
+// 한 벌 두면 둘이 갈리고, 그때 정리 안 된 계좌 위로 다음 회차가 열린다.
+let lastAdvanceMs: number | null = null;
+async function pollSmokeRuns(): Promise<void> {
+  if (!APP_URL || !APP_ADMIN_SECRET) return;   // 위에서 이미 한 번 경고했다
+
+  const nowMs = Date.now();
+  if (!shouldPollNow(lastAdvanceMs, nowMs, POLL_INTERVAL_MS)) return;
+  lastAdvanceMs = nowMs;
+
+  // **진행 중인 묶음이 있을 때만 부른다.** 매분 라우트를 두드리면 로그가 덮인다.
+  let running = 0;
+  try {
+    const { data, error } = await sb().from('smoke_runs')
+      .select('id').eq('state', 'RUNNING').limit(10);
+    if (error) throw new Error(error.message);
+    running = Array.isArray(data) ? data.length : 0;
+  } catch (e: any) {
+    // 053이 아직인 배포도 있다. 그건 오류가 아니라 '아직'이다.
+    if (!/does not exist|schema cache|relation/i.test(String(e?.message || e))) {
+      console.error('[smoke] 반복 묶음을 읽지 못했습니다:', e?.message || e);
+    }
+    return;
+  }
+  if (running === 0) return;
+
+  try {
+    const r = await fetch(`${APP_URL}/api/autotrade/smoke-test/advance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-secret': APP_ADMIN_SECRET },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    for (const s of (Array.isArray(j?.started) ? j.started : [])) {
+      console.log(`[smoke] ${s.attemptNo}회차 ${s.side} 시작 → ${s.code} — ${s.message}`);
+    }
+    for (const h of (Array.isArray(j?.held) ? j.held : [])) {
+      // 진행 중은 정상이므로 조용히 넘긴다. 멈춘 이유는 크게 남긴다.
+      if (h.code !== 'IN_PROGRESS') console.log(`[smoke] 묶음 ${h.code} — ${h.reason}`);
+    }
+  } catch (e: any) {
+    console.error('[smoke] 다음 회차 요청 실패:', e?.message || e);
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -628,6 +680,9 @@ async function tick() {
   // 안 닫으면, 락 인프라가 흔들리는 동안 100배 포지션이 남는다.
   // 중복은 라우트의 선점(claim)이 막는다.
   await pollSmokeTests();
+  // 청산이 끝난 뒤에 다음 회차를 본다 — 순서가 반대면 방금 닫힌 회차를
+  // 아직 '진행 중'으로 읽어 한 주기를 통째로 흘린다.
+  await pollSmokeRuns();
   // 계단식 청산 감시(트레일링·본전이동·시간청산)는 이 워커가 하지 않는다.
   // Binance가 이 서버의 IP 지역을 차단해 주문이 나가지 않기 때문이다
   // (jobs 테이블에 "Service unavailable from a restricted location" 기록).
