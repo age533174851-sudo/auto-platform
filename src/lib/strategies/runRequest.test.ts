@@ -74,7 +74,11 @@ export function runRunRequestTests() {
   test('전략마다 주소가 다르다', () => {
     eq(strategyRunRequest({ ...ETH, strategyId: 'daily-ladder', intervalMin: 60 }).route,
       '/api/autotrade/daily-ladder');
-    eq(strategyRunRequest({ ...ETH, strategyId: 'scalp' }).route, '/api/autotrade/scalp');
+    // scalp의 주기 목록은 이제 `timeframeVerdict`에서 나온다 — 기본 왕복
+    // 비용에서 실제로 돌릴 수 있는 것만 남는다. 예전에는 15분을 고를 수
+    // 있었지만 라우트가 409로 막았다(고를 수는 있는데 실행하면 끝났다).
+    eq(strategyRunRequest({ ...ETH, strategyId: 'scalp', intervalMin: 60 }).route,
+      '/api/autotrade/scalp');
     eq(strategyRunRequest({ ...ETH, strategyId: 'my-original-v1' }).route,
       '/api/autotrade/my-original-v1');
   });

@@ -472,6 +472,20 @@ export function checkLiquidationDistance(input: {
  */
 export interface ChecklistInput {
   /**
+   * **어느 연결을 점검한 것인가.**
+   *
+   * 점검 결과가 "8/8 정상"이어도 그게 다른 계좌 이야기면 아무 의미가
+   * 없다. 판정에는 쓰지 않고 기록으로만 남긴다 — 화면이 무엇을 본
+   * 것인지 말할 수 있어야 한다.
+   */
+  checkedConnection?: {
+    requestedId: string | null;
+    usedId: string | null;
+    exchangeId: string | null;
+    /** 요청한 연결을 실제로 읽었는가. 지정하지 않았으면 null */
+    matched: boolean | null;
+  };
+  /**
    * 과매매 게이트의 판정 (`conviction.overtradingGate`).
    *
    * **없으면 정책이 꺼진 것이고, 항목은 목록에 아예 안 나온다.**

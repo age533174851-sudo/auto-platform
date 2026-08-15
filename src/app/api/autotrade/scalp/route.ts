@@ -67,7 +67,18 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); } catch { /* 빈 본문 허용 */ }
 
   const symbol = String(body.symbol || 'BTCUSDT').toUpperCase().replace('/', '');
-  const dryRun = body.dryRun === true;
+
+  // ── 점검인가 실주문인가 ──
+  //
+  // **플래그 이름을 여기서 직접 쓰지 않는다.** 예전에는 `body.dryRun`만
+  // 읽었는데, 레지스트리가 선언한 이 전략의 점검 플래그는 `checkOnly`다.
+  // 화면의 [지금 점검하기]는 `strategyRunRequest()`가 만든 `{checkOnly:true}`를
+  // 보내므로 **그 값을 아무도 안 읽었고**, `dryRun`은 undefined라 조건이
+  // 맞으면 주문 경로까지 갔다. 사용자는 "주문은 안 냅니다"라고 적힌
+  // 버튼을 눌렀다.
+  const { checkOnlyOf, checkFlagNote } = await import('@/lib/strategies/checkFlag');
+  const check = checkOnlyOf('scalp', body);
+  const dryRun = check.checkOnly;
   const intervalMin = Number(body.intervalMin ?? 60);
 
   const { fromLegacyMode, gateOrder, capability, toLegacyMode } =
@@ -203,6 +214,10 @@ export async function POST(req: NextRequest) {
 
   const base = {
     ok: true, symbol, mode: opMode, dryRun,
+    // 왜 주문이 안 나갔는지를 **값으로** 준다 — 문장에서 되짚게 하면
+    // 문장이 바뀔 때 화면이 조용히 틀린다.
+    checkOnly: check.checkOnly, checkFlag: { via: check.via, declared: check.declared, mismatch: check.mismatch },
+    checkNote: checkFlagNote(check),
     timeframe: timeframeInfo,
     signal: {
       side: scalp.signal.side, entry: scalp.signal.entry,
@@ -345,6 +360,10 @@ export async function POST(req: NextRequest) {
   const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
   const checkInput = await collectChecklistInput({
     sb, userId,
+    // **어느 연결을 점검하는지 명시한다.** 안 넘기면 preflight가
+    // '활성 연결 아무거나 하나'를 집는다 — 연결이 둘 이상이면 내 Gate로
+    // 거래하면서 다른 계좌 상태를 보고 통과/차단하게 된다.
+    connectionId: body.connectionId || null,
     testnet: !connIsLive,
     symbol,
     side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
