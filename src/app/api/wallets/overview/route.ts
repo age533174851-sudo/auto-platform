@@ -21,6 +21,8 @@ import { readConnectionWallet } from '@/lib/markets/readWallet';
 import {
   envWalletOf, bucketsOf, totalAcrossEnvs, type ConnectionWallet,
 } from '@/lib/portfolio/walletOverview';
+import { snapshotVerdict, snapshotRow } from '@/lib/portfolio/snapshotPlan';
+import { equityPerformanceOf, elapsedText, type EquitySnapshot } from '@/lib/portfolio/performance';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -85,10 +87,82 @@ export async function GET(req: NextRequest) {
 
   const envs = (['LIVE', 'TESTNET'] as const).map(e => envWalletOf(e, reads));
 
+  // ── 자산을 찍어 둔다 ──
+  //
+  // **표(048)는 있는데 채우는 코드가 없었다.** 그래서 지갑 곡선은
+  // 구조적으로 영원히 비어 있었다. 지금 잔고로 과거를 역산할 수는
+  // 없으므로, 지금부터 찍어 두는 것 말고는 방법이 없다.
+  //
+  // 여기서 찍는 이유: 자산을 방금 읽었고, 사람이 지갑을 열 때마다
+  // 자연스럽게 기록이 쌓인다. 워커가 도는 주기와 별개로 동작한다.
+  // **읽기 요청이 쓰기를 하는 것이 어색하지만**, 표를 채우는 다른
+  // 경로가 없는 상태를 더 두는 것이 나쁘다.
+  const nowMs = Date.now();
+  const snapshotNotes: Array<{ env: string; code: string; reason: string }> = [];
+  const perf: Record<string, any> = {};
+
+  for (const e of envs) {
+    let history: EquitySnapshot[] = [];
+    let lastTakenMs: number | null = null;
+    try {
+      const { data } = await (sb as any).from('account_equity_snapshots')
+        .select('taken_at, total_equity, realized_pnl, unrealized_pnl, deposit, withdrawal, transfer, fees, funding')
+        .eq('user_id', uid).eq('env', e.env)
+        .order('taken_at', { ascending: true }).limit(2000);
+      history = (Array.isArray(data) ? data : []).map((r: any) => ({
+        takenAt: Date.parse(String(r.taken_at)),
+        totalEquity: r.total_equity == null ? null : Number(r.total_equity),
+        realizedPnl: r.realized_pnl == null ? null : Number(r.realized_pnl),
+        unrealizedPnl: r.unrealized_pnl == null ? null : Number(r.unrealized_pnl),
+        deposit: r.deposit == null ? null : Number(r.deposit),
+        withdrawal: r.withdrawal == null ? null : Number(r.withdrawal),
+        fees: r.fees == null ? null : Number(r.fees),
+        funding: r.funding == null ? null : Number(r.funding),
+      }));
+      const lastRow = history[history.length - 1];
+      lastTakenMs = lastRow && Number.isFinite(lastRow.takenAt) ? lastRow.takenAt : null;
+    } catch {
+      // 표가 없거나 못 읽었다. **찍지 않는다** — 마지막 시각을 모르면
+      // 매 요청마다 찍게 되고, 그건 표를 부풀린다.
+      snapshotNotes.push({ env: e.env, code: 'HISTORY_UNREADABLE',
+        reason: '기록을 읽지 못했습니다 — 마이그레이션 048이 필요할 수 있습니다' });
+      perf[e.env] = equityPerformanceOf([]);
+      continue;
+    }
+
+    const v = snapshotVerdict({
+      nowMs, lastTakenMs,
+      connections: e.connections,
+      totalEquity: e.futures.value,
+    });
+    snapshotNotes.push({ env: e.env, code: v.code, reason: v.reason });
+
+    if (v.take && e.futures.value != null) {
+      const row = snapshotRow({
+        userId: uid, env: e.env, takenAtMs: nowMs,
+        totalEquity: e.futures.value,
+        unrealizedPnl: e.unrealizedPnl.value,
+      });
+      try {
+        await (sb as any).from('account_equity_snapshots').insert(row);
+        history = [...history, {
+          takenAt: nowMs, totalEquity: e.futures.value,
+          unrealizedPnl: e.unrealizedPnl.value,
+        }];
+      } catch { /* 못 남겨도 화면은 보여준다 — 다음 주기에 다시 찍는다 */ }
+    }
+
+    const p = equityPerformanceOf(history);
+    perf[e.env] = { ...p, elapsedText: elapsedText(p.elapsedMs) };
+  }
+
   return NextResponse.json({
     ok: true,
     // 환경별 합계. **서로 더하지 않는다.**
     envs,
+    // 성과. **찍어 둔 시점에서만 나온다** — 지금 잔고로 과거를 역산하지 않는다.
+    performance: perf,
+    snapshots: snapshotNotes,
     buckets: bucketsOf(envs),
     // 화면이 고를 계좌.
     accounts: reads.map(r => ({
