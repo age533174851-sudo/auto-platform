@@ -22,7 +22,7 @@
 //   총자산 → 오늘 손익 → 그래프 → 빠른 액션 → 자산 배분 → 보유자산
 //
 // 매일 보는 것이 위다. 진단에 가까운 것일수록 아래로 내린다.
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { Card } from './SharedUI';
@@ -55,19 +55,49 @@ export default function WalletPage() {
   const [cur, setCur] = useState<Currency>('USDT');
   const [account, setAccount] = useState('');
 
-  // ── 아직 거래소를 안 붙였다 ──
+  // ── 실제 잔고를 읽는다 ──
   //
-  // **그렇다고 0을 그리지 않는다.** 0은 '없다'이고 지금은 '모른다'다.
-  // 잔고 0을 본 사용자는 자기 돈이 사라졌다고 믿는다.
+  // 예전에는 여기서 모든 버킷을 `amountOf(null, 'LOADING')`으로 채우고
+  // 계좌 목록도 빈 배열이었다. 주석에는 "아직 거래소를 안 붙였다"고
+  // 정직하게 적혀 있었지만, **붙일 것은 이미 있었다** — `/api/wallets`가
+  // Gate·Binance 현물·선물을 읽을 수 있다. 돈을 못 읽은 게 아니라
+  // 화면이 안 물어본 것이다.
   //
-  // 이 화면이 지금 정직하게 할 수 있는 일은 "아직 안 붙였다"고 말하는
-  // 것뿐이고, 그게 그럴듯한 숫자를 그리는 것보다 낫다.
-  const buckets: Bucket[] = ENVS.flatMap(e => ([
-    { id: `${e}-futures`, label: '선물', env: e, kind: 'futures' as const, amount: amountOf(null, 'LOADING') },
-    { id: `${e}-spot`, label: '현물', env: e, kind: 'spot' as const, amount: amountOf(null, 'LOADING') },
-    { id: `${e}-strategy`, label: '전략계좌', env: e, kind: 'strategy' as const, amount: amountOf(null, 'LOADING') },
-    { id: `${e}-longterm`, label: '장기투자', env: e, kind: 'longterm' as const, amount: amountOf(null, 'LOADING') },
-  ]));
+  // 합치는 규칙(환경을 섞지 않는다 · 부분 합계를 총자산이라 하지 않는다)은
+  // 서버가 갖는다. 화면에 두면 화면마다 따로 구현되고 언젠가 하나가 어긴다.
+  const [data, setData] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const auth = typeof window !== 'undefined' ? (localStorage.getItem('sb_access_token') || '') : '';
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/wallets/overview', {
+          headers: auth ? { Authorization: `Bearer ${auth}` } : undefined,
+        });
+        const j = await r.json();
+        if (!alive) return;
+        if (j?.ok) { setData(j); setErr(''); }
+        // **못 읽은 것을 "계좌 없음"으로 그리지 않는다.**
+        else setErr(String(j?.message || j?.error || '지갑을 읽지 못했습니다'));
+      } catch (e: any) {
+        if (alive) setErr(`지갑을 읽지 못했습니다 (${e?.message || e})`);
+      }
+    })();
+    return () => { alive = false; };
+  }, [auth]);
+
+  // 서버가 준 버킷을 그대로 쓴다. 아직 안 읽었으면 '조회 중'이고,
+  // 읽기에 실패했으면 '확인 불가'다 — 둘 다 0이 아니다.
+  const buckets: Bucket[] = Array.isArray(data?.buckets) && data.buckets.length > 0
+    ? data.buckets
+    : ENVS.flatMap(e => ([
+      { id: `${e}-futures`, label: '선물', env: e, kind: 'futures' as const, amount: amountOf(null, err ? 'FAILED' : 'LOADING') },
+      { id: `${e}-spot`, label: '현물', env: e, kind: 'spot' as const, amount: amountOf(null, err ? 'FAILED' : 'LOADING') },
+      { id: `${e}-strategy`, label: '전략계좌', env: e, kind: 'strategy' as const, amount: amountOf(null, 'NOT_APPLICABLE') },
+      { id: `${e}-longterm`, label: '장기투자', env: e, kind: 'longterm' as const, amount: amountOf(null, 'NOT_APPLICABLE') },
+    ]));
 
   const total = totalEquityOf(env, buckets);
   const change = equityChangeOf(null, {});
@@ -79,6 +109,9 @@ export default function WalletPage() {
   //
   // 찍어 둔 시점(account_equity_snapshots)이 아직 없다. 그래서 곡선도
   // 없다 — **그게 정직한 상태다.** 오늘 표를 만들어도 어제 값은 생기지 않는다.
+  // 자산 곡선은 찍어 둔 시점(account_equity_snapshots)에서만 나온다.
+  // **지금 잔고로 과거를 역산하지 않는다** — 오늘 표를 만들어도 어제
+  // 값은 생기지 않는다. 아직 비어 있는 것이 정직한 상태다.
   const snapshots: any[] = [];
   const curve = curveOf(snapshots, range, Date.now(), env);
   const daily = dailyRowsOf(snapshots);
@@ -92,7 +125,15 @@ export default function WalletPage() {
   ]);
 
   // ── 계좌 ──
-  const allAccounts: AccountOption[] = [];
+  // **서버가 준 계좌 목록.** 빈 배열을 직접 넣던 자리다.
+  const allAccounts: AccountOption[] = Array.isArray(data?.accounts)
+    ? data.accounts.map((a: any) => ({
+      id: String(a.id),
+      label: a.label || a.exchangeId || a.id,
+      env: a.env ?? 'LIVE',
+      exchange: a.exchangeId ?? '',
+    })) as any
+    : [];
   const accounts = accountsForEnv(env, allAccounts);
   const accountsNote = accountsNoteOf(accounts);
 
@@ -125,6 +166,19 @@ export default function WalletPage() {
 
   return (
     <div>
+      {/* ── 못 읽었으면 그렇게 말한다 ──
+          0을 그리거나 "계좌 없음"으로 그리면 사용자는 돈이 사라졌거나
+          연결이 풀린 줄 안다. 조회 실패는 그 둘과 다른 사실이다. */}
+      {err && (
+        <div style={{
+          background: A(T.ylw, '12'), border: `1px solid ${A(T.ylw, '35')}`,
+          borderRadius: 10, padding: '9px 11px', marginBottom: 8,
+          color: T.ylw, fontSize: 11, lineHeight: 1.6, overflowWrap: 'anywhere',
+        }}>
+          {err} — <b>잔고가 0이라는 뜻이 아닙니다.</b>
+        </div>
+      )}
+
       {/* ── 환경 전환 ──
           여기가 이 화면에서 가장 중요한 줄이다. 실전 화면에 모의 총자산이
           섞여 있던 것이 이 화면을 만든 이유다. */}
