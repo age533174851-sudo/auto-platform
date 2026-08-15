@@ -60,11 +60,18 @@ concurrency:
 #   contents: write        — 머지에 필요
 #   pull-requests: write   — 판정 결과를 PR에 적는 데 필요
 #   checks / statuses      — 검사 결과를 읽는 데 필요 (read)
+#   actions: write         — 합친 뒤 fly-deploy를 부르는 데 필요
+#
+# **왜 actions: write가 필요한가.** 자동 머지가 만든 push로는 워크플로가
+# 발동하지 않는다(GITHUB_TOKEN 재귀 방지). 그래서 #128·#129가 main에만
+# 있고 Fly에는 없었다. `workflow_dispatch`는 그 규칙의 명시적 예외라
+# 합친 쪽이 배포를 직접 부를 수 있다 — 그러려면 이 권한이 있어야 한다.
 permissions:
   contents: write
   pull-requests: write
   checks: read
   statuses: read
+  actions: write
 
 jobs:
   # **이름이 판정기의 `SELF_CHECK_NAME`과 정확히 같아야 한다.**

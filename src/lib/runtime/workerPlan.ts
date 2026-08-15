@@ -221,6 +221,43 @@ export interface DeploymentVerdict {
  * **모르면 MATCHED가 아니다.** 못 읽은 것을 "같다"로 읽으면 이 검사가
  * 있으나 마나다.
  */
+/**
+ * main을 모를 때도 답할 수 있는 것: **웹과 워커가 같은 코드인가.**
+ *
+ * `deploymentVerdict`는 셋을 다 요구한다. 그런데 서버는 main의 SHA를
+ * 모른다 — GitHub에 물어야 하고, 그 호출이 실패하면 판정 전체가
+ * UNKNOWN이 되어 아무것도 못 본다.
+ *
+ * 웹(Vercel)과 워커(Fly)는 **둘 다 자기 커밋을 안다.** 둘이 다르면 그
+ * 자체로 사고다 — 실제로 8/15에 Vercel은 #135, Fly는 #127이었다.
+ * 그 한 줄만 있었어도 원인을 바로 찾았다.
+ *
+ * **하나라도 못 읽으면 MATCHED가 아니다.**
+ */
+export function runtimeSkew(i: {
+  vercelSha?: string | null;
+  flySha?: string | null;
+}): DeploymentVerdict {
+  const norm = (v: any) => String(v ?? '').trim().slice(0, 40).toLowerCase();
+  const vercel = norm(i?.vercelSha);
+  const fly = norm(i?.flySha);
+
+  const missing: string[] = [];
+  if (!vercel) missing.push('Vercel');
+  if (!fly) missing.push('Fly');
+  if (missing.length > 0) {
+    return { code: 'UNKNOWN', matched: false,
+      reason: `${missing.join(' · ')} 버전을 읽지 못했습니다 — `
+        + '같은 코드가 도는지 확인되지 않았습니다 (모르는 것을 "같다"로 읽지 않습니다)' };
+  }
+  const same = vercel.startsWith(fly) || fly.startsWith(vercel);
+  return same
+    ? { code: 'MATCHED', matched: true, reason: '웹(Vercel)과 워커(Fly)가 같은 코드를 돌리고 있습니다' }
+    : { code: 'MISMATCH', matched: false,
+      reason: `웹은 ${vercel.slice(0, 7)}, 워커는 ${fly.slice(0, 7)} — 다른 코드를 돌리고 있습니다. `
+        + '머지됐다고 배포된 것이 아닙니다' };
+}
+
 export function deploymentVerdict(i: {
   mainSha?: string | null;
   vercelSha?: string | null;

@@ -43,11 +43,11 @@ function loadGate() {
   const tsc = join('node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
-    tsc, 'src/lib/ci/autoMergeGate.ts',
+    tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
   ], { stdio: 'pipe' });
-  return join(dir, 'autoMergeGate.js');
+  return dir;
 }
 
 /**
@@ -184,9 +184,11 @@ async function upsertComment(number, body) {
 }
 
 async function main() {
-  const gatePath = loadGate();
+  const outDir = loadGate();
   const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS } =
-    await import(`file://${gatePath}`);
+    await import(`file://${join(outDir, 'autoMergeGate.js')}`);
+  const { deployDispatchPlan, deployDispatchRequest, dispatchResultNote } =
+    await import(`file://${join(outDir, 'deployDispatch.js')}`);
 
   assertSelfCheckWired(SELF_CHECK_NAME);
   assertRequiredChecksWired(REQUIRED_CHECKS);
@@ -273,6 +275,26 @@ async function main() {
         `<!-- traigo-auto-merge -->\n❌ **자동 머지가 거절됐습니다** · \`${headSha.slice(0, 7)}\`\n\n`
         + `${why}\n\n조건을 다시 확인한 뒤 다음 신호에서 재시도합니다. 강제로 합치지 않습니다.`);
     }
+  }
+
+  // ── 합쳤으면 **배포까지 부른다** ──
+  //
+  // 여기가 없어서 #128·#129가 main에만 있고 Fly에는 없었다.
+  // `secrets.GITHUB_TOKEN`으로 만든 push는 워크플로를 발동시키지 않으므로
+  // main에서는 ci도 fly-deploy도 안 돈다. 그래서 fly-deploy의
+  // `workflow_run` 가드가 받을 "main의 ci"는 애초에 존재하지 않았고,
+  // 실제로 도착한 PR 브랜치 ci는 전부 skipped 처리됐다 —
+  // **로그에는 실행이 남아서 배포가 도는 것처럼 보였다.**
+  //
+  // `workflow_dispatch`는 그 재귀 방지의 명시적 예외라 GITHUB_TOKEN으로도
+  // 새 실행이 만들어진다. 머지가 끝난 뒤에 부르므로 checkout이 잡는
+  // main은 반드시 합쳐진 코드다.
+  const dp = deployDispatchPlan({ merged, hasToken: !!TOKEN });
+  console.log(`배포: ${dp.code} — ${dp.reason}`);
+  if (dp.dispatch) {
+    const req = deployDispatchRequest(REPO);
+    const r = await api(req.path, { method: req.method, body: req.body });
+    console.log(dispatchResultNote({ ok: r.ok, status: r.status, message: r.body?.message ?? null }));
   }
 
   console.log(`끝 — ${merged}건 합침`);
