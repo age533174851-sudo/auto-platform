@@ -2,7 +2,18 @@
 //
 // GET    : 내 예약 + 최근 실행 기록
 // POST   : 만들거나 고친다 (같은 심볼은 한 줄)
+// PATCH  : 이미 있는 줄의 enabled 한 칸만 바꾼다 (id가 권위)
 // DELETE : 끈다 (지우지 않는다)
+//
+// POST와 PATCH를 왜 나누는가
+// ──────────────────────────
+// 화면의 [켜짐] 버튼이 POST(upsert)를 부르고 있었다. 그런데 그 요청에는
+// strategyId가 없었고, POST는 그럴 때 계단식으로 되돌린다 — 그래서
+// my-original-v1 예약을 끄려고 눌러도 **정체가 다른 줄이 만들어지거나
+// 바뀌었고**, 사용자가 누른 줄은 계속 켜져 있었다. 응답은 200이었다.
+//
+// 켜고 끄는 것은 정체를 다시 정하는 일이 아니다. 이미 그 줄의 기본키가
+// 있으므로, **`id` 하나만 권위로 삼아 `enabled` 한 칸만 UPDATE한다.**
 //
 // 왜 이 라우트가 필요한가
 // ───────────────────────
@@ -23,6 +34,7 @@ import {
   resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
 } from '@/lib/strategies/registry';
 import { runtimeStateOf, RUNTIME_LABEL } from '@/lib/autotrade/evaluationLoop';
+import { parseTogglePatch, enabledUpdate, notFoundMessage } from '@/lib/autotrade/scheduleToggle';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -623,6 +635,85 @@ export async function POST(req: NextRequest) {
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
+// ── 켜짐 한 칸만 바꾸는 한 곳 ─────────────────────────
+//
+// PATCH와 DELETE가 같은 함수를 쓴다. **끄는 방법이 둘이면 한쪽만
+// 고쳐진다** — 이 저장소에서 가장 자주 난 고장이다.
+//
+// 바꾸는 칸은 `enabled` 하나뿐이고, 조건은 `id`와 `user_id` **둘 다**다.
+// id만으로 걸면 남의 예약을 끌 수 있고, upsert로 하면 없는 줄을 새로
+// 만든다 — 여기서는 없으면 없다고 말한다.
+const ROW_SELECT =
+  'id, symbol, connection_id, mode, enabled, last_run_at, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version';
+/** 050·043·036이 아직인 계정에서 없을 수 있는 칸들 */
+const ROW_OPTIONAL = ['margin_pct', 'strategy_id', 'strategy_version'];
+
+async function setEnabledById(sb: any, uid: string, id: string, enabled: boolean) {
+  const patch = enabledUpdate(enabled);
+  let cols = ROW_SELECT;
+  const missing: string[] = [];
+
+  // 칸 하나가 없어서 되읽기가 실패하면 **UPDATE는 됐는데 500이 나간다.**
+  // 그러면 화면은 실패로 적고 사용자는 다시 누른다. 없는 이름만 빼고 다시 읽는다.
+  for (let i = 0; i <= ROW_OPTIONAL.length; i++) {
+    const { data, error } = await sb
+      .from('autotrade_schedules')
+      .update(patch).eq('id', id).eq('user_id', uid)
+      .select(cols).maybeSingle();
+
+    if (!error) return { ok: true as const, row: data ?? null, error: null };
+
+    const named = ROW_OPTIONAL.find(c => !missing.includes(c) && new RegExp(c, 'i').test(String(error.message)));
+    if (!named) return { ok: false as const, row: null, error };
+    missing.push(named);
+    cols = ROW_SELECT.split(', ').filter(c => !missing.includes(c)).join(', ');
+  }
+  return { ok: false as const, row: null, error: { message: '예약을 되읽지 못했습니다' } as any };
+}
+
+/**
+ * PATCH — 이미 있는 예약의 켜짐만 바꾼다.
+ *
+ * 본문은 `{ id, enabled }` 둘뿐이다. 정체(strategy_id·symbol·
+ * connection_id·mode)와 크기 설정은 **읽지도 않으므로** 덮일 수 없다.
+ */
+export async function PATCH(req: NextRequest) {
+  const uid = await resolveUserId(
+    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+  if (!uid) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  const sb = getSupabaseAdmin();
+  if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+
+  let body: any;
+  try { body = await req.json(); } catch { return NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 }); }
+
+  const p = parseTogglePatch(body);
+  if (!p.ok) {
+    return NextResponse.json({ ok: false, error: p.code.toLowerCase(), message: p.message }, { status: p.status });
+  }
+
+  const r = await setEnabledById(sb, uid, p.id, p.enabled === true);
+  if (!r.ok) {
+    if (isMissing(r.error?.message)) return tableMissing('031', 'autotrade_schedules');
+    return NextResponse.json({
+      ok: false, error: 'update_failed', message: String(r.error?.message || r.error),
+    }, { status: 500 });
+  }
+  // **없으면 만들지 않는다.** 여기서 upsert로 되돌아가면 정체가 다시
+  // 조립되고, 그게 이 라우트를 나눈 이유 그 자체다.
+  if (!r.row) {
+    return NextResponse.json({
+      ok: false, error: 'not_found', message: notFoundMessage(p.id),
+    }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  return NextResponse.json({
+    ok: true, schedule: r.row,
+    message: `${r.row.symbol} 자동매매를 ${p.enabled ? '켰습니다' : '껐습니다'}`
+      + (p.enabled ? ' — 서버 실행기가 주기적으로 조건을 평가합니다' : ' — 새 진입을 더 내지 않습니다'),
+  }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
 export async function DELETE(req: NextRequest) {
   const uid = await resolveUserId(
     req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
@@ -634,11 +725,13 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ ok: false, error: 'missing_id' }, { status: 400 });
 
   // 지우지 않고 끈다. 지우면 '켠 적 없다'와 '껐다'가 같아진다.
-  const { error } = await (sb as any)
-    .from('autotrade_schedules')
-    .update({ enabled: false }).eq('id', id).eq('user_id', uid);
-  if (error) {
-    return NextResponse.json({ ok: false, error: 'update_failed', message: error.message }, { status: 500 });
+  // PATCH와 같은 함수를 쓰되 **응답 모양은 그대로 둔다** — 이걸 부르는
+  // 곳이 `{ok:true}`만 보고 있으므로, 의미를 바꾸면 그쪽이 깨진다.
+  const r = await setEnabledById(sb, uid, id, false);
+  if (!r.ok) {
+    return NextResponse.json({
+      ok: false, error: 'update_failed', message: String(r.error?.message || r.error),
+    }, { status: 500 });
   }
   return NextResponse.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
 }

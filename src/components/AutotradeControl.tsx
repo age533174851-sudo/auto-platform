@@ -25,6 +25,10 @@ import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidatio
 import { errorTextOf } from '@/lib/http/errorText';
 import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/autotrade/runOutcome';
 import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
+// 켜고 끄기는 정체를 다시 조립하지 않는다 — 판정은 한 곳에만 둔다.
+import {
+  toggleRequest, rebindRequest, applyToggleResult, toggleFailureNote,
+} from '@/lib/autotrade/scheduleToggle';
 import { recoveryPlan } from '@/lib/engine/mismatchRecovery';
 import {
   RECONCILE_STEPS, reconcileRunOf, blockCountsOf, type StepResult,
@@ -522,39 +526,67 @@ export default function AutotradeControl() {
   /**
    * 예약을 켜고 끈다.
    *
-   * `rebindTo`를 주면 **이 예약의 연결을 그것으로 바꾼다.** 연결을 다시
-   * 등록하면 id가 새로 생기는데 예약은 옛 id를 그대로 들고 있어서, 그
-   * 상태로 스위치를 누르면 낡은 id가 그대로 나가 404로 끝난다 —
-   * 켤 수도 끌 수도 없는 줄이 된다.
+   * **정체를 다시 조립하지 않는다.** 예전에는 이 함수가 POST(upsert)로
+   * `{symbol, connectionId, mode, enabled}`를 보냈는데, 거기에 전략이
+   * 없어서 서버가 계단식으로 되돌렸다 — my-original-v1 예약을 끄려고
+   * 눌러도 **정체가 다른 줄이 바뀌었고**, 화면은 200을 받아 성공이라고
+   * 적었다. 실제로는 예약이 계속 켜져 있었다.
    *
-   * **대신 골라 주지 않는다.** 화면에서 지금 고른 연결만 쓴다. 계좌가
-   * 둘 이상이면 어느 쪽으로 주문이 나가는지 모르는 채 바뀌기 때문이다.
+   * 지금은 그 줄의 기본키(`id`)만 보내고 `enabled` 한 칸만 바꾼다.
+   * 재연결은 별개다(아래 `rebind`).
    */
-  const toggle = async (row: any, rebindTo?: string) => {
+  const toggle = async (row: any) => {
+    const req = toggleRequest(row);
+    if (!req.ok) { setMsg({ ok: false, text: req.message }); return; }
     setBusy(true); setMsg(null);
     try {
-      const r = await fetch('/api/autotrade/schedule', {
+      const r = await fetch(req.route!, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify(req.body),
+      });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j?.ok) {
+        // **실패를 성공처럼 뒤집지 않는다.** 서버가 말한 이유를 그대로 적고
+        // 화면 상태는 건드리지 않는다.
+        setMsg({ ok: false, text: toggleFailureNote(r.status, j) });
+        return;
+      }
+      // 돌아온 줄로 먼저 반영하고(누른 즉시 보이게), GET으로 다시 대조한다.
+      // 반영에 실패했으면 짐작으로 뒤집지 않는다 — GET 결과만 믿는다.
+      setData((prev: any) => {
+        const next = applyToggleResult(prev?.schedules, j.schedule);
+        return next ? { ...prev, schedules: next } : prev;
+      });
+      setMsg({ ok: true, text: errorTextOf(j, '바꿨습니다') });
+      await load();
+    } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
+    finally { setBusy(false); }
+  };
+
+  /**
+   * 이 예약의 연결만 바꾼다(재연결).
+   *
+   * 연결을 다시 등록하면 id가 새로 생기는데 예약은 옛 id를 그대로 들고
+   * 있어서, 그 상태로는 켤 수도 끌 수도 없다. **이건 켜고 끄기와 다른
+   * 일이다** — 실제로 정체의 한 칸(connection_id)을 바꾸므로 POST 경로를
+   * 그대로 쓰되, **어느 전략의 줄인지 명시해서** 보낸다.
+   *
+   * **대신 골라 주지 않는다.** 화면에서 지금 고른 연결만 쓴다.
+   */
+  const rebind = async (row: any, rebindTo: string) => {
+    const req = rebindRequest(row, rebindTo);
+    if (!req.ok) { setMsg({ ok: false, text: req.message }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(req.route!, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({
-          symbol: row.symbol,
-          connectionId: rebindTo || row.connection_id,
-          ...(rebindTo ? { rebind: true } : {}),
-          mode: row.mode,
-          // 재연결은 **연결만 바꾼다.** 켜짐 상태를 뒤집지 않는다 —
-          // 껐던 예약이 연결을 고쳤다고 저절로 켜지면 안 된다.
-          enabled: rebindTo ? !!row.enabled : !row.enabled,
-          // 켜고 끌 때 크기 설정을 **지우지 않는다.** 안 실어 보내면
-          // null로 덮여서, 껐다 켠 것만으로 배율 상한이 사라진다.
-          leverageCap: row.leverage_cap ?? undefined,
-          riskPct: row.risk_pct ?? undefined,
-          marginPct: row.margin_pct ?? undefined,
-          intervalMin: row.interval_min ?? undefined,
-        }),
+        body: JSON.stringify(req.body),
       });
-      const j = await r.json();
-      setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
-      if (j?.ok) load();
+      const j = await r.json().catch(() => null);
+      setMsg({ ok: !!j?.ok, text: j?.ok ? errorTextOf(j, '연결을 바꿨습니다') : toggleFailureNote(r.status, j) });
+      if (j?.ok) await load();
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
     finally { setBusy(false); }
   };
@@ -934,7 +966,7 @@ export default function AutotradeControl() {
                 {s.needsRebind && (
                   <div style={{ marginTop: 5, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                     <button
-                      onClick={() => toggle(s, connId)}
+                      onClick={() => rebind(s, connId)}
                       disabled={busy || !connId}
                       style={{
                         fontSize: 9.5, fontWeight: 800, padding: '4px 8px', borderRadius: 6,
