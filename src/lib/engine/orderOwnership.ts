@@ -96,6 +96,46 @@ export function ownedClientOrderId(i: {
   return `${p}-${key}${sym}${PURPOSE_CODE[i.purpose]}${seq}`;
 }
 
+/**
+ * 진입 주문의 id에서 그 주문의 **보호주문 id**를 만든다.
+ *
+ * 실제로 났던 고장
+ * ────────────────
+ * 실행기가 이렇게 만들고 있었다:
+ *
+ *     clientOrderId: `${clientOrderId}SL`
+ *
+ * 진입 id가 `smo-abcdef1234ETHUSDE0`이므로 손절 id는
+ * `smo-abcdef1234ETHUSDE0SL`이 된다. 그런데 소유권 형식은 **목적 글자 +
+ * 회차 숫자로 끝나야** 한다 — `...E0SL`은 그 형식이 아니다.
+ *
+ * 그래서 `parseOwnedClientOrderId`가 UNKNOWN을 돌려주고,
+ * `orphanCleanupPlan`은 "누구 것인지 모르니 건드리지 않는다"로 그 주문을
+ * 남겼다. **스모크 테스트가 만든 SL/TP가 매번 거래소에 남았다** —
+ * 실제로 ETHUSDT 스모크 뒤 Gate Orders에 2건(트리거 1870.6 / 1893.2)이
+ * 그대로 있었다.
+ *
+ * 문자열을 이어 붙이지 않는다. **목적 글자를 바꿔 끼운다** — 그러면
+ * 왕복(round-trip)이 보장된다.
+ *
+ * 형식이 아닌 옛 id(daily-ladder의 `LD…` 등)는 예전처럼 이어 붙인다 —
+ * 기존 호출부의 동작을 바꾸지 않는다.
+ */
+export function protectiveClientOrderId(
+  entryClientOrderId: string, purpose: OrderPurpose, seq = 0,
+): string {
+  const raw = String(entryClientOrderId ?? '');
+  const p = parseOwnedClientOrderId(raw);
+  if (p.ok) {
+    // `smo-…ETHUSDE0` → `smo-…ETHUSDS0`. 길이가 늘지 않으므로 Gate의
+    // 28자 제한에서 잘릴 일도 없다(잘리면 소유권을 잃는다).
+    const body = raw.replace(/([ESPX])(\d+)$/, `${PURPOSE_CODE[purpose]}${Math.max(0, Math.round(seq))}`);
+    return body;
+  }
+  const suffix = purpose === 'STOP_LOSS' ? 'SL' : purpose === 'TAKE_PROFIT' ? 'TP' : 'X';
+  return `${raw}${suffix}`.slice(0, 36);
+}
+
 export interface ParsedOwnership {
   ok: boolean;
   strategyPrefix: string | null;
@@ -145,11 +185,45 @@ export interface ClassifiedOrder {
   reason: string;
 }
 
-/** 조건부 주문 한 줄이 내 것인가 */
-export function classifyOrder(row: any, myStrategyId: string): ClassifiedOrder {
+/**
+ * 조건부 주문 한 줄에서 우리가 넣은 식별자를 꺼낸다.
+ *
+ * **Gate 응답의 모양을 한 곳에서만 읽는다.** 조건부 주문(`price_orders`)은
+ * 우리가 넣은 `text`를 `initial.text`에 담아 돌려주는데, 스키마에 따라
+ * 위쪽에 `text`로 오기도 하고 `me_order_id`/`user`가 섞이기도 한다.
+ * 여기서 놓치면 내가 만든 주문이 '누구 것인지 모름'이 되고, 그러면
+ * 안전을 이유로 안 지워서 **거래소에 계속 쌓인다.**
+ */
+export function ownershipTextOf(row: any): string {
+  const candidates = [
+    row?.initial?.text, row?.text, row?.initial?.client_order_id,
+    row?.clientOrderId, row?.client_order_id, row?.initial?.clientOrderId,
+  ];
+  for (const c of candidates) {
+    const s = String(c ?? '').trim();
+    // Gate는 사용자가 안 넣으면 `api`·`web` 같은 값을 채워 넣는다.
+    // 그건 우리 식별자가 아니다.
+    if (s && s !== 'api' && s !== 'web' && s !== 'apiv4') return s;
+  }
+  return '';
+}
+
+/**
+ * 조건부 주문 한 줄이 내 것인가.
+ *
+ * `ownedIds`는 **주문을 걸 때 우리가 받아 적어 둔 거래소 주문 번호**다.
+ * 식별자(text)를 못 읽어도 이 번호가 맞으면 내 것이 확실하다 —
+ * 내가 만들 때 거래소가 준 번호이기 때문이다. 이게 있어야 위 형식
+ * 버그처럼 text가 깨진 상황에서도 **내 것만** 정확히 지울 수 있다.
+ */
+export function classifyOrder(row: any, myStrategyId: string, ownedIds?: string[] | null): ClassifiedOrder {
   const id = String(row?.id ?? row?.orderId ?? '');
-  // Gate의 조건부 주문은 `initial.text`에 우리가 넣은 값이 들어 있다.
-  const text = row?.initial?.text ?? row?.text ?? row?.clientOrderId ?? row?.client_order_id;
+  const known = Array.isArray(ownedIds) ? ownedIds.filter(Boolean).map(String) : [];
+  if (id && known.includes(id)) {
+    return { id, class: 'MINE', purpose: null,
+      reason: '이 테스트가 만들 때 거래소가 준 주문 번호와 일치합니다' };
+  }
+  const text = ownershipTextOf(row);
   const p = parseOwnedClientOrderId(text);
   if (!p.ok) {
     return { id, class: 'UNKNOWN', purpose: null,
@@ -190,6 +264,14 @@ export function orphanCleanupPlan(i: {
   /** 조건부 주문 목록. **null은 '못 읽음'이고 []는 '없음'이다** */
   orders: any[] | null;
   myStrategyId: string;
+  /**
+   * 걸 때 받아 적어 둔 거래소 주문 번호들(SL·TP).
+   *
+   * 식별자가 깨져도 이 번호로는 내 것을 확정할 수 있다. 실제로
+   * 스모크 SL/TP의 clientOrderId 형식이 깨져 UNKNOWN이 되면서
+   * 거래소에 2건이 남았고, 그때 이 경로가 있었으면 지워졌다.
+   */
+  ownedIds?: string[] | null;
 }): CleanupPlan {
   const empty = { cancel: [] as string[], keep: [] as CleanupPlan['keep'] };
 
@@ -211,7 +293,7 @@ export function orphanCleanupPlan(i: {
   const cancel: string[] = [];
   const keep: CleanupPlan['keep'] = [];
   for (const row of i.orders) {
-    const c = classifyOrder(row, i.myStrategyId);
+    const c = classifyOrder(row, i.myStrategyId, i.ownedIds);
     if (c.class === 'MINE' && c.id) cancel.push(c.id);
     else keep.push({ id: c.id, class: c.class, reason: c.reason });
   }
@@ -224,6 +306,120 @@ export function orphanCleanupPlan(i: {
     cancel, keep, ok: true, code: 'CLEAN',
     reason: `포지션 0 확인 — 이 전략이 만든 조건부 주문 ${cancel.length}건을 취소합니다`
       + (keep.length ? ` · 다른 소유/불명 ${keep.length}건은 그대로 둡니다` : ''),
+  };
+}
+
+// ── 정말로 0인가 ─────────────────────────────────────
+
+export type ResidualCode =
+  /** 포지션 0 · 내 보호주문 0 · 판별 못 한 주문도 없다 */
+  | 'CLEAR'
+  /** 목록을 못 읽었다 */
+  | 'ORDERS_UNKNOWN'
+  /** 포지션이 아직 남아 있거나 확인되지 않았다 */
+  | 'POSITION_NOT_ZERO'
+  /** 걸었던 그 주문 번호가 아직 거래소에 있다 */
+  | 'KNOWN_ORDER_PRESENT'
+  /** 내 것으로 판별된 주문이 남아 있다 */
+  | 'MINE_PRESENT'
+  /** 누구 것인지 못 읽은 주문이 남아 있다 — **내 것일 가능성을 배제 못 한다** */
+  | 'UNKNOWN_PRESENT';
+
+export interface ResidualVerdict {
+  /** **잔여 0으로 적어도 되는가.** 이 값만 그 판단을 한다 */
+  ok: boolean;
+  code: ResidualCode;
+  mine: string[];
+  unknown: string[];
+  foreign: string[];
+  /** 걸었던 번호 중 아직 살아 있는 것 */
+  knownStillPresent: string[];
+  reason: string;
+}
+
+/**
+ * 정리를 끝내고 **정말 0인지** 판정한다.
+ *
+ * 왜 따로 만드나 — 실제로 났던 거짓 PASS
+ * ──────────────────────────────────────
+ * 정리 뒤 판정이 이랬다:
+ *
+ *     const mineLeft = orphanCleanupPlan({...}).cancel.length;
+ *     steps.ORDERS_ZERO = mineLeft === 0 ? PASS : FAIL;
+ *
+ * `cancel`에는 **내 것으로 판별된 것만** 들어간다. 그래서 거래소에
+ * 주문이 2건 남아 있어도 둘 다 소유권을 못 읽으면(UNKNOWN) `cancel`이
+ * 비고 `mineLeft === 0`이 되어 **PASS로 적힌다.** 실제로 ETHUSDT
+ * 스모크 뒤 Gate Orders에 2건이 남아 있었는데 판정은 통과였다.
+ *
+ * 그래서 규칙을 뒤집는다
+ * ──────────────────────
+ * "내 것이 없으면 통과"가 아니라 **"내 것이 아님이 증명된 것만 남아
+ * 있어야 통과"**다. 판별하지 못한 주문은 통과가 아니다.
+ *
+ * 이 엄격함이 정당한 이유: 스모크 테스트는 **시작 전에 조건부 주문이
+ * 0건임을 확인**하고서만 시작한다(`preflightVerdict`). 그러니 끝났을 때
+ * 남아 있는 주문은 이 테스트가 만든 것일 수밖에 없다.
+ *
+ * 그리고 **취소하지 못하는 것과 통과시키는 것은 다르다.** 판별 못 한
+ * 주문은 여전히 건드리지 않는다(cancelAll 금지). 다만 **FAIL로 적는다** —
+ * 사람이 보고 직접 지우면 된다.
+ */
+export function residualVerdict(i: {
+  position: { ok: boolean; found: boolean; qty?: number | null } | null;
+  /** 정리 **뒤** 다시 읽은 목록. null은 '못 읽음' */
+  orders: any[] | null;
+  myStrategyId: string;
+  /** 이번에 걸었던 거래소 주문 번호들(SL·TP) */
+  ownedIds?: Array<string | null | undefined>;
+}): ResidualVerdict {
+  const known = (i.ownedIds ?? []).filter(Boolean).map(String);
+  const none = { mine: [] as string[], unknown: [] as string[], foreign: [] as string[], knownStillPresent: [] as string[] };
+
+  if (!i.position || i.position.ok !== true || i.position.found) {
+    return { ...none, ok: false, code: 'POSITION_NOT_ZERO',
+      reason: i.position?.ok !== true
+        ? '포지션을 재조회하지 못했습니다 — 0이라고 적지 않습니다'
+        : `포지션이 남아 있습니다${i.position.qty != null ? ` (${i.position.qty})` : ''}` };
+  }
+  if (i.orders == null) {
+    return { ...none, ok: false, code: 'ORDERS_UNKNOWN',
+      reason: '조건부 주문 목록을 읽지 못했습니다 — 0건과 다릅니다. 통과로 적지 않습니다' };
+  }
+
+  const mine: string[] = [];
+  const unknown: string[] = [];
+  const foreign: string[] = [];
+  const knownStillPresent: string[] = [];
+
+  for (const row of i.orders) {
+    const c = classifyOrder(row, i.myStrategyId, known);
+    if (c.id && known.includes(c.id)) knownStillPresent.push(c.id);
+    if (c.class === 'MINE') mine.push(c.id);
+    else if (c.class === 'FOREIGN') foreign.push(c.id);
+    else unknown.push(c.id || '(번호 없음)');
+  }
+
+  // **걸었던 그 번호가 아직 있으면 무조건 실패다.** 취소 응답이 성공이었어도.
+  if (knownStillPresent.length > 0) {
+    return { ok: false, code: 'KNOWN_ORDER_PRESENT', mine, unknown, foreign, knownStillPresent,
+      reason: `이번에 건 보호주문이 거래소에 아직 있습니다: ${knownStillPresent.join(', ')} — `
+        + '취소 응답이 성공이어도 목록에 남아 있으면 남은 것입니다' };
+  }
+  if (mine.length > 0) {
+    return { ok: false, code: 'MINE_PRESENT', mine, unknown, foreign, knownStillPresent,
+      reason: `이 테스트가 만든 조건부 주문이 ${mine.length}건 남았습니다: ${mine.join(', ')}` };
+  }
+  if (unknown.length > 0) {
+    return { ok: false, code: 'UNKNOWN_PRESENT', mine, unknown, foreign, knownStillPresent,
+      reason: `누구 것인지 판별하지 못한 조건부 주문이 ${unknown.length}건 남아 있습니다 `
+        + `(${unknown.join(', ')}) — 시작 전에 0건임을 확인했으므로 이 테스트가 만들었을 가능성을 `
+        + '배제할 수 없습니다. 통과로 적지 않습니다. 자동으로 지우지도 않습니다 — 직접 확인하세요' };
+  }
+  return {
+    ok: true, code: 'CLEAR', mine, unknown, foreign, knownStillPresent,
+    reason: `포지션 0 · 이 테스트의 조건부 주문 0건`
+      + (foreign.length ? ` (다른 전략 소유 ${foreign.length}건은 그대로 뒀습니다)` : ''),
   };
 }
 

@@ -22,7 +22,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { closeDue, stepsOf, smokeVerdict, SMOKE_STRATEGY_ID } from '@/lib/smoke/smokePlan';
 import { closeVerdict } from '@/lib/engine/closeEvidence';
-import { orphanCleanupPlan, cleanupOutcome } from '@/lib/engine/orderOwnership';
+import { orphanCleanupPlan, cleanupOutcome, residualVerdict } from '@/lib/engine/orderOwnership';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -177,41 +177,60 @@ async function settleOne(sb: any, row: any): Promise<any> {
     // 여기가 어제 Gate에 조건부 주문 4개가 쌓인 자리다. **내 것만**
     // 취소한다 — 같은 계좌의 다른 전략이 걸어 둔 손절을 지우지 않는다.
     const orders = await ops.readProtectiveOrders(venue, row.symbol);
+
+    // **걸 때 받아 적어 둔 주문 번호를 쓴다.** 식별자(text)가 깨져도 이
+    // 번호로는 내 것을 확정할 수 있다. 실제로 스모크 SL/TP의
+    // clientOrderId 형식이 깨져 UNKNOWN이 되면서 Gate에 2건이 남았다.
+    const ownedIds = [row.sl_order_id, row.tp_order_id].filter(Boolean).map(String);
+
     const plan = orphanCleanupPlan({
       position: { ok: after.ok, found: after.found, qty: after.qty },
-      orders, myStrategyId: SMOKE_STRATEGY_ID,
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds,
     });
     const cancelRes = plan.cancel.length
       ? await ops.cancelProtectiveOrders(venue, row.symbol, plan.cancel)
       : { cancelled: [] as string[], failed: [] as any[] };
     const cleaned = cleanupOutcome({ plan, cancelled: plan.ok ? cancelRes.cancelled : null });
 
-    // 취소한 뒤 **다시 읽어서** 0인지 확인한다. 취소 응답은 접수다.
-    const leftover = plan.ok ? await ops.readProtectiveOrders(venue, row.symbol) : null;
-    const mineLeft = leftover == null ? null
-      : orphanCleanupPlan({
-        position: { ok: after.ok, found: after.found, qty: after.qty },
-        orders: leftover, myStrategyId: SMOKE_STRATEGY_ID,
-      }).cancel.length;
+    // ── 취소한 뒤 **다시 읽어서** 정말 0인지 확인한다 ──
+    //
+    // 취소 응답은 접수다. 그리고 판정은 `residualVerdict`가 한다 —
+    // 예전에는 여기서 "내 것으로 판별된 개수"만 셌고, 그래서 **판별하지
+    // 못한 주문 2건이 남아 있는데 0으로 읽혀 PASS가 찍혔다.**
+    const leftover = plan.ok ? await ops.readProtectiveOrders(venue, row.symbol) : orders;
+    const rv = residualVerdict({
+      position: { ok: after.ok, found: after.found, qty: after.qty },
+      orders: leftover, myStrategyId: SMOKE_STRATEGY_ID, ownedIds,
+    });
 
-    steps.ORDERS_ZERO = mineLeft == null
-      ? step('UNKNOWN', `남은 조건부 주문을 확인하지 못했습니다 — ${cleaned.reason}`)
-      : mineLeft === 0
-        ? step('PASS', `이 테스트의 조건부 주문 0건`
-          + (plan.keep.length ? ` (다른 소유/불명 ${plan.keep.length}건은 그대로 뒀습니다)` : ''))
-        // **고아가 남으면 FAIL이다.** 그 주문이 다음 진입을 친다.
-        : step('FAIL', `이 테스트의 조건부 주문이 ${mineLeft}건 남았습니다 — ${cleaned.reason}`);
+    // 취소가 실제로 됐는지도 SL·TP **각각** 적는다. 하나로 뭉치면
+    // "무엇이 안 지워졌는지"가 사라진다.
+    const gone = (id: any) => id && !rv.knownStillPresent.includes(String(id));
+    const slNote = row.sl_order_id ? (gone(row.sl_order_id) ? `손절 ${row.sl_order_id} 취소 확인` : `손절 ${row.sl_order_id} 남음`) : '손절 번호 없음';
+    const tpNote = row.tp_order_id ? (gone(row.tp_order_id) ? `익절 ${row.tp_order_id} 취소 확인` : `익절 ${row.tp_order_id} 남음`) : '익절 번호 없음';
+
+    steps.ORDERS_ZERO = rv.ok
+      ? step('PASS', `${slNote} · ${tpNote} · ${rv.reason}`)
+      : rv.code === 'ORDERS_UNKNOWN'
+        ? step('UNKNOWN', `${rv.reason} — ${cleaned.reason}`)
+        // **남으면 FAIL이다.** 그 주문이 다음 진입을 친다.
+        : step('FAIL', `${slNote} · ${tpNote} · ${rv.reason}`);
 
     // ── 대조 ──
     //
-    // 장부(이 줄)와 거래소가 같은 말을 하는가. 포지션 0 + 내 고아 0이면
-    // 맞는 것이고, 하나라도 못 읽었으면 '모른다'다.
-    steps.RECONCILE = (cv.closed && mineLeft === 0)
-      ? step('PASS', '장부와 거래소가 일치합니다 — 포지션 0 · 이 테스트의 잔여 주문 0')
-      : step(cv.closed === false && !cv.needsReconcile ? 'FAIL' : 'UNKNOWN',
-        `대조하지 못했습니다 — 포지션 ${cv.code} · 잔여 주문 ${mineLeft ?? '확인 실패'}`);
+    // 장부(이 줄)와 거래소가 같은 말을 하는가. **네 가지가 전부 증명돼야
+    // 한다:** 손절 취소 · 익절 취소 · 포지션 0 · 이 테스트 소유 잔여 0.
+    steps.RECONCILE = (cv.closed && rv.ok)
+      ? step('PASS', '장부와 거래소가 일치합니다 — 손절/익절 취소 확인 · 포지션 0 · 잔여 0')
+      : step(cv.closed === false && !cv.needsReconcile ? 'FAIL' : rv.ok === false && rv.code !== 'ORDERS_UNKNOWN' ? 'FAIL' : 'UNKNOWN',
+        `대조하지 못했습니다 — 포지션 ${cv.code} · 잔여 ${rv.code}`);
 
     patch.closed_at = new Date().toISOString();
+    // 남은 주문의 자세한 내역. **`steps` 안에 둔다** — 새 칸을 만들면
+    // 052를 다시 적용해야 하고, 그 사이에 이 갱신이 통째로 실패한다.
+    // `stepsOf`는 정해진 단계 이름만 읽으므로 이 키는 화면에 안 나온다.
+    steps._residual = { code: rv.code, mine: rv.mine, unknown: rv.unknown,
+      foreign: rv.foreign, knownStillPresent: rv.knownStillPresent };
   } catch (e: any) {
     steps.CLOSE = steps.CLOSE ?? step('UNKNOWN', `청산 경로에서 예외: ${e?.message || e}`);
     steps.RECONCILE = step('UNKNOWN', String(e?.message || e));
