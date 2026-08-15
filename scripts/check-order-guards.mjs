@@ -34,6 +34,9 @@ const ORDER_ROUTES = [
   'src/app/api/autotrade/daily-ladder/route.ts',
   'src/app/api/autotrade/scalp/route.ts',
   'src/app/api/autotrade/my-original-v1/route.ts',
+  // 강제 스모크 테스트도 **실제 주문을 낸다.** 테스트넷 전용이라고
+  // 목록에서 빼면, 킬스위치가 켜진 계좌에서도 주문이 나간다.
+  'src/app/api/autotrade/smoke-test/route.ts',
 ];
 
 // 각 경로가 반드시 물어봐야 하는 것.

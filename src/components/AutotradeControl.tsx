@@ -46,6 +46,7 @@ import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
+import SmokeTestPanel from './SmokeTestPanel';
 
 export default function AutotradeControl() {
   // 토큰을 **직접 지켜본다.** 한 번 읽고 마는 화면은 접근 토큰이 만료되면
@@ -1329,6 +1330,22 @@ export default function AutotradeControl() {
           border: `1px solid ${A(T.acl, '45')}`, fontSize: 12, fontWeight: 800,
           opacity: reconciling || !connId ? 0.5 : 1,
         }}>{reconciling ? '대조 중…' : `모두 자동 대조 (${RECONCILE_STEPS.length}단계)`}</button>
+
+        {/* ── 강제 스모크 테스트 ──
+            위의 [지금 점검하기]는 주문을 내지 않는다 — 조건만 본다.
+            그런데 "진입이 실제로 나가나 · 손절이 붙나 · 익절이 붙나 ·
+            브라우저를 닫아도 청산이 도나 · 고아 주문이 남나"는 주문을
+            내 봐야만 알 수 있고, 그걸 확인할 수 있는 것은 하루에 한 번
+            아침 20분 창뿐이었다. 이 판이 그 한 바퀴를 지금 돌린다. */}
+        <SmokeTestPanel
+          auth={auth} connectionId={connId}
+          // **is_testnet === false 만 실전이다** (저장소 전체 규칙).
+          // 여기서만 다르게 읽으면 값이 빈 연결이 실전으로 보인다.
+          isTestnet={(() => {
+            const c = conns.find((x: any) => String(x.id) === String(connId));
+            return !!c && c.is_testnet !== false;
+          })()}
+        />
 
         {runSteps.length > 0 && (() => {
           const run = reconcileRunOf(runSteps);

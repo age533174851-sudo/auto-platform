@@ -231,6 +231,33 @@ export async function POST(req: NextRequest) {
       { status: 503 });
   }
 
+  // ── 4-b. 이 종목에 스모크 테스트가 도는가 ──
+  //
+  // 스모크 테스트는 사람이 방향을 골라 지금 열어 둔 포지션이다.
+  // ONE_WAY 계좌는 종목당 포지션이 하나라, 그 위로 전략이 들어가면
+  // 어제 사고(수량 2배 · netting 찌꺼기)가 그대로 재현된다.
+  try {
+    const { smokeBlocksStrategy } = await import('@/lib/smoke/smokePlan');
+    const { data, error } = await (sb as any).from('smoke_tests')
+      .select('state, symbol, connection_id')
+      .eq('user_id', userId)
+      .in('state', ['PREFLIGHT', 'ENTERING', 'HOLDING', 'CLOSING']).limit(20);
+    // 표가 없는 배포(052 미적용)는 '스모크가 없다'와 같다 — 기능 자체가 없다.
+    const missingTable = !!error && isMissing(error.message);
+    const v = smokeBlocksStrategy({
+      rows: missingTable ? [] : (error ? null : (data ?? [])),
+      symbol, connectionId,
+    });
+    if (v.blocked) {
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: v.reason });
+      return NextResponse.json({ ...base, ok: false, blocked: v.code, message: v.reason },
+        { status: v.code === 'SMOKE_UNKNOWN' ? 503 : 409 });
+    }
+  } catch (e: any) {
+    const why = `스모크 테스트 진행 여부를 확인하지 못했습니다: ${e?.message || e}`;
+    return NextResponse.json({ ...base, ok: false, error: 'smoke_unknown', message: why }, { status: 503 });
+  }
+
   // ── 4. 이 종목을 다른 전략이 들고 있는가 ──
   //
   // 포지션 소유권이 아직 없다. 같은 계좌·같은 종목에 두 전략이 들어가면

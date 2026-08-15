@@ -541,6 +541,74 @@ async function pollSchedules(): Promise<void> {
   }
 }
 
+// ── 스모크 테스트 청산 ───────────────────────────────
+//
+// **브라우저를 닫아도 닫힌다** — 그러라고 만든 기능이다.
+//
+// 스모크 테스트는 "지금 진입하고 10분 뒤에 닫는다"이고, 그 10분 사이에
+// 사람은 화면을 닫는다. 화면 타이머로 닫으면 탭을 닫는 순간 100배
+// 포지션이 그대로 남는다.
+//
+// 마감 시각은 `smoke_tests.hold_until`에 있고, 실제 청산·고아 정리·
+// 대조는 서버 라우트가 한다. 여기서는 **깨우기만** 한다 — 청산 절차를
+// 워커에도 한 벌 두면 둘이 갈리고, 그때 한쪽만 고쳐진다.
+let smokeWarned = false;
+let lastSmokePollMs: number | null = null;
+async function pollSmokeTests(): Promise<void> {
+  if (!APP_URL || !APP_ADMIN_SECRET) {
+    if (!smokeWarned) {
+      smokeWarned = true;
+      const missing = [!APP_URL ? 'APP_URL' : '', !APP_ADMIN_SECRET ? 'ADMIN_SECRET' : '']
+        .filter(Boolean).join(', ');
+      console.warn(`[smoke] 스모크 테스트 청산을 건너뜁니다 — 없는 환경변수: ${missing}`);
+      console.warn('[smoke] 이 상태에서 스모크 테스트를 시작하면 포지션이 자동으로 닫히지 않습니다.');
+    }
+    return;
+  }
+
+  const nowMs = Date.now();
+  // 유지 시간의 최소 단위가 1분이므로 1분마다 본다. 더 성기면 1분짜리
+  // 테스트가 늦게 닫히고, 더 촘촘하면 DB를 헛되이 두드린다.
+  if (!shouldPollNow(lastSmokePollMs, nowMs, POLL_INTERVAL_MS)) return;
+  lastSmokePollMs = nowMs;
+
+  // **닫을 것이 있을 때만 부른다.** 매분 라우트를 두드리면 로그가 덮인다.
+  let due = 0;
+  try {
+    const { data, error } = await sb().from('smoke_tests')
+      .select('id, hold_until').eq('state', 'HOLDING')
+      .lte('hold_until', new Date(nowMs).toISOString()).limit(20);
+    if (error) throw new Error(error.message);
+    due = Array.isArray(data) ? data.length : 0;
+  } catch (e: any) {
+    // 표가 아직 없는 배포도 있다(052 미적용). 그건 오류가 아니라 '아직'이다.
+    if (!/does not exist|schema cache|relation/i.test(String(e?.message || e))) {
+      console.error('[smoke] 스모크 테스트를 읽지 못했습니다:', e?.message || e);
+    }
+    return;
+  }
+  if (due === 0) return;
+
+  try {
+    const r = await fetch(`${APP_URL}/api/autotrade/smoke-test/settle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-secret': APP_ADMIN_SECRET },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    const list = Array.isArray(j?.settled) ? j.settled : [];
+    for (const s of list) console.log(`[smoke] ${s.symbol ?? s.id} → ${s.verdict} — ${s.reason}`);
+    if (list.length === 0) {
+      console.log(`[smoke] 마감 ${due}건을 부탁했지만 정산된 것이 없습니다 — ${j?.skipped?.length ?? 0}건 건너뜀`);
+    }
+  } catch (e: any) {
+    // **여기서 조용히 넘기면 포지션이 열린 채로 남는다.** 다음 주기에
+    // 다시 시도하지만, 실패했다는 사실은 로그에 남아야 한다.
+    console.error('[smoke] 청산 요청 실패:', e?.message || e);
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -555,6 +623,11 @@ async function tick() {
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
   // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
   if (isMain) await pollSchedules();
+  // **스모크 테스트 청산은 락과 무관하게 항상 본다.**
+  // 여는 것과 닫는 것은 다르다 — main 락을 못 쥔 워커라고 열린 포지션을
+  // 안 닫으면, 락 인프라가 흔들리는 동안 100배 포지션이 남는다.
+  // 중복은 라우트의 선점(claim)이 막는다.
+  await pollSmokeTests();
   // 계단식 청산 감시(트레일링·본전이동·시간청산)는 이 워커가 하지 않는다.
   // Binance가 이 서버의 IP 지역을 차단해 주문이 나가지 않기 때문이다
   // (jobs 테이블에 "Service unavailable from a restricted location" 기록).
