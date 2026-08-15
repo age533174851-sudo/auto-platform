@@ -49,6 +49,10 @@ const CLASSIFIED = new Map([
   // ── B. 새로고침 (화면에 있어도 된다) ──
   ['src/components/AutotradeControl.tsx', 'POLL — 서버 예약 상태를 다시 읽기만 한다'],
   ['src/components/AutoStatusBoard.tsx', 'POLL — 상태판 새로고침'],
+  ['src/components/SmokeTestPanel.tsx',
+    'POLL — 스모크 테스트 진행 상태를 다시 읽고 남은 시간을 센다. '
+    + '**청산은 화면이 하지 않는다** — 마감 시각은 smoke_tests.hold_until에 있고 '
+    + 'Fly Worker가 닫는다. 탭을 닫아도 포지션은 정리된다'],
   ['src/components/ApiHealthMonitor.tsx', 'POLL — API 상태 확인'],
   ['src/components/terminal/PaperWallet.tsx', 'POLL — 모의 지갑 잔고 새로고침'],
   ['src/components/terminal/OrderPane.tsx', 'POLL — 호가·포지션 새로고침'],
