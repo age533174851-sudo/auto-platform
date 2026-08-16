@@ -17,6 +17,7 @@ import { applyTransition, type OrderState as LifecycleState } from './orderLifec
 import { fillBasis, exitFromFill } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 import { protectiveClientOrderId } from './orderOwnership';
+import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -717,6 +718,36 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           }
         }
 
+        // ── 되돌릴 때 **익절도 같이 지운다** ──
+        //
+        // 손절을 못 걸어 포지션을 되돌리는데, 이미 걸어 둔 분할 익절은
+        // 그대로 남았다. 포지션이 없어졌으니 그 주문들은 고아가 되고,
+        // 다음 진입을 예상치 못하게 닫는다. Gate에서 정확히 그 모양으로
+        // 조건부 주문 2건이 남았다(2026-08-15).
+        let tpCleanupNote = '';
+        if (tpIds.length > 0) {
+          const attempts: CancelAttempt[] = [];
+          for (const id of tpIds) {
+            try {
+              const r: any = await bf.cancelFuturesOrder(apiKey, apiSecret, plan.symbol, id, testnet);
+              const okish = r?.success === true || r?.ok === true || r?.orderId != null;
+              attempts.push({ id, requested: true, httpOk: !!okish, response: okish ? null : String(r?.message || '취소 실패') });
+            } catch (e: any) {
+              attempts.push({ id, requested: true, httpOk: false, response: String(e?.message || e) });
+            }
+          }
+          // **취소 응답이 아니라 목록을 다시 읽어 확인한다.**
+          let leftover: any[] | null = null;
+          try {
+            const open: any = await bf.getFuturesOpenOrders(apiKey, apiSecret, testnet, plan.symbol);
+            leftover = Array.isArray(open) ? open : Array.isArray(open?.orders) ? open.orders : null;
+          } catch { leftover = null; }
+          const ledger = cancelLedger({ ids: tpIds, attempts, leftover });
+          tpCleanupNote = ledger.ok
+            ? ` · 걸어 둔 익절 ${tpIds.length}건도 취소 확인`
+            : ` · ⚠ ${ledger.reason}`;
+        }
+
         const detail = `손절 부착 실패(${slError})`;
         if (closed) {
           await update({ status: 'FAILED', error_message: `${detail} — 포지션을 즉시 청산했습니다` });
@@ -727,8 +758,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
             message: posAmt === 0
               // 되돌릴 것이 없었다. '청산했다'고 적으면 하지도 않은 일을
               // 했다고 말하는 것이고, 사용자는 체결된 줄 안다.
-              ? `${detail}. 거래소에 열린 포지션이 없어 되돌릴 것이 없었습니다 — 진입은 체결되지 않았습니다.`
-              : `${detail}. 손절 없는 포지션을 남기지 않기 위해 진입을 즉시 청산했습니다.`,
+              ? `${detail}. 거래소에 열린 포지션이 없어 되돌릴 것이 없었습니다 — 진입은 체결되지 않았습니다.${tpCleanupNote}`
+              : `${detail}. 손절 없는 포지션을 남기지 않기 위해 진입을 즉시 청산했습니다.${tpCleanupNote}`,
           };
         }
 
@@ -747,7 +778,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           ok: false, status: 'UNKNOWN', clientOrderId,
           exchangeOrderId: String(res.orderId), filledQty: res.qty, avgPrice: res.price,
           tpOrderId: tpId,
-          message: `⚠️ 긴급: ${detail}이고 자동 청산도 실패했습니다(${closeErr}). ${posLine}`,
+          message: `⚠️ 긴급: ${detail}이고 자동 청산도 실패했습니다(${closeErr}). ${posLine}${tpCleanupNote}`,
         };
       }
 
@@ -976,6 +1007,40 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 특히 중요하다 — API 모양이 틀렸더라도 결과는 '보호 없는 포지션'이 아니라
     // '포지션 없음 + 실패 보고'가 된다.
     let gateSlId: string | undefined;
+    // ── 되돌릴 때 **같이 지워야 하는 것** ──
+    //
+    // **2026-08-15 21:16:16에 Gate에 남은 조건부 주문 2건이 여기서 나왔다.**
+    // 되읽기 실패로 포지션을 되돌리면서 방금 건 SL·TP는 그대로 뒀다.
+    // 포지션이 없어졌으니 그 주문들은 아무도 청구하지 않는 고아가 되고,
+    // 그 회차는 HOLDING이 된 적이 없어 settle의 정리 코드가 **실행조차
+    // 되지 않는다.** 그래서 등록에 성공한 번호를 여기 모아 둔다.
+    const placedProtective: string[] = [];
+
+    /**
+     * 진입을 되돌린다 — **포지션과 보호주문을 같이.**
+     *
+     * 취소 확인은 재조회로만 한다. 거래소가 200을 줬다는 것은 접수이지
+     * 지워졌다는 뜻이 아니다.
+     */
+    const undoEntry = async (): Promise<{ closed: boolean; note: string }> => {
+      const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
+      const targets = ownedOrderIds({ placed: placedProtective });
+      const attempts: CancelAttempt[] = [];
+      for (const id of targets) {
+        try {
+          const r = await gf.cancelOrderGateFutures(apiKey, apiSecret, id, { bucket: 'price', testnet });
+          attempts.push({ id, requested: true, httpOk: !!r.success, response: r.success ? null : r.message });
+        } catch (e: any) {
+          attempts.push({ id, requested: true, httpOk: false, response: String(e?.message || e) });
+        }
+      }
+      // **취소한 뒤 다시 읽는다.** 못 읽으면 UNKNOWN이고, 그것도 통과가 아니다.
+      const leftover = targets.length
+        ? await gf.getPriceOrdersGateFutures(apiKey, apiSecret, contract, testnet)
+        : [];
+      const ledger = cancelLedger({ ids: targets, attempts, leftover });
+      return { closed: !!undo.success, note: rollbackNote({ positionClosed: !!undo.success, ledger }) };
+    };
     // ── 체결을 확인하기 전에는 손절을 걸지 않는다 ──
     //
     // Gate의 손절은 `auto_size: close_long|close_short`다 — **수량으로
@@ -1058,10 +1123,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         // **체결가를 모르면 참고가로 대신 걸지 않는다.** 그 손절은 아무
         // 근거가 없다. 자동매매(REQUIRED)에서는 방금 연 포지션을 되돌린다.
         if (policy === 'REQUIRED') {
-          const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
+          const undo = await undoEntry();
           const msg = `실제 체결가를 확정하지 못해 보호주문을 걸 수 없었습니다 — ${e.reason}`
-            + (undo.success ? ' · 방금 연 포지션을 되돌렸습니다'
-              : ` / ⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+            + ` · ${undo.note}`;
           await update({ status: 'FAILED', error_message: msg });
           return { ok: false, status: 'FAILED', clientOrderId,
             exchangeOrderId: gres?.id != null ? String(gres.id) : undefined, message: msg };
@@ -1091,6 +1155,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
       if (sl.success) {
         gateSlId = sl.orderId;
+        // **등록에 성공한 번호를 즉시 적어 둔다.** 되읽기가 실패해도
+        // 이 번호로는 내 주문임을 확정할 수 있다.
+        if (sl.orderId) placedProtective.push(String(sl.orderId));
         await update({ sl_order_id: sl.orderId ?? null });
       } else if (policy !== 'REQUIRED') {
         // 수동 진입 — 되돌리지 않는다. 사람이 보고 있고, 되돌리면 그 사람이
@@ -1106,9 +1173,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           unprotected: true, message: warn,
         };
       } else {
-        const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
-        const msg = `손절을 걸지 못해 포지션을 되돌렸습니다 — ${sl.message}`
-          + (undo.success ? '' : ` / ⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+        const undo = await undoEntry();
+        const msg = `손절을 걸지 못했습니다 — ${sl.message} · ${undo.note}`;
         await update({ status: 'FAILED', error_message: msg });
         return { ok: false, status: 'FAILED', clientOrderId,
           exchangeOrderId: String(gres?.id), message: msg };
@@ -1136,6 +1202,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }, testnet);
         if (tp.success) {
           gateTpId = tp.orderId;
+          if (tp.orderId) placedProtective.push(String(tp.orderId));
           await update({ tp_order_id: tp.orderId ?? null });
         } else {
           tpNote = ` · ⚠ 익절을 걸지 못했습니다: ${tp.message}`;
@@ -1166,10 +1233,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const stopConfirmedMissing = rb.readOk && !rb.stop.found;
       const tpConfirmedMissing = rb.readOk && args.exitPct?.requireTakeProfit === true && !rb.takeProfit.found;
       if ((stopConfirmedMissing || tpConfirmedMissing) && policy === 'REQUIRED') {
-        const undo = await gf.closePositionGateFutures(apiKey, apiSecret, contract, testnet);
-        const msg = `보호주문을 거래소에서 확인하지 못했습니다 (${rb.reason}) — `
-          + (undo.success ? '방금 연 포지션을 되돌렸습니다'
-            : `⚠ 되돌리기도 실패: ${undo.message} — 거래소에서 직접 확인하세요`);
+        // 되읽기에서 확인된 번호도 되돌리기 대상이다. 등록 응답이 번호를
+        // 안 줬는데 거래소에는 걸려 있는 경우가 그것이다 — 그 주문이
+        // 8/15에 남았다.
+        for (const id of ownedOrderIds({ readback: [rb.stop.orderId, rb.takeProfit.orderId] })) {
+          if (!placedProtective.includes(id)) placedProtective.push(id);
+        }
+        const undo = await undoEntry();
+        const msg = `보호주문을 거래소에서 확인하지 못했습니다 (${rb.reason}) — ${undo.note}`;
         await update({ status: 'FAILED', error_message: msg });
         return {
           ok: false, status: 'FAILED', clientOrderId,
