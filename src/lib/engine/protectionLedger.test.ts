@@ -111,6 +111,28 @@ export function runProtectionLedgerTests() {
     assert(good.includes('취소 확인'), good);
   });
 
+  test('취소 요청이 비면 "지웠다"의 증거가 아니다 — 시도조차 안 한 것이다', () => {
+    // **2026-08-16에 이걸로 다시 물어봤다.** 장부가 ok:true를 주는데
+    // 거래소에는 주문이 남아 있는 경우가 정확히 이것이다: 소유 판정이
+    // 내 것을 못 알아봐서 `plan.cancel`이 비었고, 그래서 취소를 한 번도
+    // 요청하지 않았다. 장부는 "요청한 것이 전부 사라졌다"만 말할 수
+    // 있으므로, 요청이 0건이면 그건 **정리 성공의 증거가 아니다.**
+    const l = cancelLedger({ ids: [], attempts: [], leftover: [O('1'), O('2')] });
+    eq(l.code, 'NOTHING_TO_CANCEL');
+    // 통과 판정은 잔여 판정(residualVerdict)이 따로 해야 한다 —
+    // 이 장부 하나로 ORDERS_ZERO를 PASS로 적으면 거짓 PASS가 된다.
+    eq(l.entries.length, 0);
+  });
+
+  test('CANCEL_CONFIRMED는 재조회 없이는 절대 찍히지 않는다', () => {
+    // leftover가 null이면 HTTP가 200이든 아니든 전부 UNKNOWN이어야 한다.
+    for (const httpOk of [true, false]) {
+      const l = cancelLedger({ ids: ['1'], attempts: [A('1', { httpOk })], leftover: null });
+      eq(l.entries[0].state, 'CANCEL_UNKNOWN', `httpOk=${httpOk}`);
+      eq(l.ok, false, `httpOk=${httpOk}`);
+    }
+  });
+
   test('지울 것이 없으면 되돌리기 문구만 남는다', () => {
     const s = rollbackNote({ positionClosed: false, ledger: cancelLedger({ ids: [], attempts: [], leftover: [] }) });
     assert(s.includes('되돌리기 실패'), s);
