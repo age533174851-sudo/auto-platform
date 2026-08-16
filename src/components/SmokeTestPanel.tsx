@@ -64,6 +64,8 @@ export default function SmokeTestPanel({
   const [nowMs, setNowMs] = useState(() => Date.now());
   // 거래소에 남은 보호주문. **null은 '아직 안 봤다'이고 []는 '없다'이다.**
   const [orphans, setOrphans] = useState<any>(null);
+  // 취소 시도의 **전체 증거**. 한 줄 요약만 남기면 "거래소가 뭐라 했나"가 사라진다.
+  const [cancelRes, setCancelRes] = useState<any>(null);
 
   const load = useCallback(async () => {
     if (!auth) return;
@@ -146,6 +148,7 @@ export default function SmokeTestPanel({
         { headers: { Authorization: auth } });
       const j = await r.json().catch(() => null);
       setOrphans(j);
+      setCancelRes(null);
       if (!j?.ok) setMsg({ ok: false, text: errorTextOf(j, `확인 실패 (${r.status})`) });
     } catch (e: any) {
       setMsg({ ok: false, text: `확인 실패 (${e?.message || e})` });
@@ -168,6 +171,9 @@ export default function SmokeTestPanel({
         text: j?.ledger?.entries?.[0]?.note || errorTextOf(j, `취소 실패 (${r.status})`),
       });
       await scanOrphans();
+      // **scanOrphans가 cancelRes를 비운 뒤에 넣는다.** 순서가 반대면
+      // 방금 받은 증거가 지워지고, 그러면 또 "왜 안 지워졌나"를 못 본다.
+      setCancelRes({ httpStatus: r.status, body: j });
     } catch (e: any) {
       setMsg({ ok: false, text: `취소 실패 (${e?.message || e})` });
     } finally { setBusy(false); }
@@ -410,6 +416,59 @@ export default function SmokeTestPanel({
                 {(orphans?.orders ?? []).length === 0 && orphans?.ordersReadable !== false && (
                   <div style={{ fontSize: 10, color: T.grn }}>남은 조건부 주문이 없습니다.</div>
                 )}
+
+                {/* ── DB가 들고 있는 번호 ↔ 거래소가 준 번호 ──
+                    소유 증거의 1순위다. 둘이 어긋나면 "내 주문인데 못
+                    알아본다"가 되어 정리 대상에서 통째로 빠진다. */}
+                {(orphans?.smoke?.rows ?? []).length > 0 && (
+                  <div style={{ borderTop: `1px dashed ${T.border}`, paddingTop: 6, display: 'grid', gap: 3 }}>
+                    <div style={{ fontSize: 9.5, color: T.muted, fontWeight: 800 }}>DB에 적힌 주문 번호</div>
+                    {(orphans.smoke.rows ?? []).slice(0, 5).map((r: any) => {
+                      const live = (orphans?.orders ?? []).map((o: any) => String(o.id));
+                      const mark = (id: any) => !id ? '없음'
+                        : live.includes(String(id)) ? `${id} · 거래소에 남아 있음` : `${id} · 거래소에 없음`;
+                      return (
+                        <div key={r.id} style={{ fontSize: 9.5, color: T.muted, lineHeight: 1.55, overflowWrap: 'anywhere' }}>
+                          {String(r.id).slice(0, 8)} · {r.state}{r.verdict ? `/${r.verdict}` : ''} ·
+                          {' '}손절 {mark(r.slOrderId)} · 익절 {mark(r.tpOrderId)}
+                        </div>
+                      );
+                    })}
+                    {orphans?.smoke?.error && (
+                      <div style={{ fontSize: 9.5, color: T.ylw }}>
+                        DB 기록을 읽지 못했습니다 ({orphans.smoke.error}) — 0건과 다릅니다
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── 취소를 눌렀을 때 거래소가 실제로 뭐라고 했는가 ── */}
+                {cancelRes && (
+                  <div style={{ borderTop: `1px dashed ${T.border}`, paddingTop: 6, display: 'grid', gap: 3 }}>
+                    <div style={{ fontSize: 9.5, color: T.muted, fontWeight: 800 }}>
+                      취소 응답 · HTTP {cancelRes.httpStatus} · {cancelRes.body?.rounds ?? 0}바퀴 ·
+                      {' '}재조회 {cancelRes.body?.leftoverReadable === false ? '실패(모름)' : '성공'}
+                    </div>
+                    {(cancelRes.body?.ledger?.entries ?? []).map((e: any) => {
+                      const a = (cancelRes.body?.attempts ?? []).find((x: any) => String(x?.id) === String(e?.id));
+                      return (
+                        <div key={e.id} style={{ fontSize: 9.5, lineHeight: 1.55, overflowWrap: 'anywhere' }}>
+                          <span style={{
+                            fontWeight: 800,
+                            color: e.state === 'CANCEL_CONFIRMED' ? T.grn : e.state === 'STILL_PRESENT' ? T.red : T.ylw,
+                          }}>{e.state}</span>
+                          <span style={{ color: T.muted }}> · {e.note}</span>
+                          {a && <span style={{ color: T.muted }}>
+                            {' · 거래소 '}{a.httpOk ? 'OK' : (a.response || '실패')}{a.tries != null ? ` (${a.tries}회)` : ''}
+                          </span>}
+                        </div>
+                      );
+                    })}
+                    {cancelRes.body?.note && (
+                      <div style={{ fontSize: 9.5, color: T.muted, overflowWrap: 'anywhere' }}>{cancelRes.body.note}</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -432,6 +491,88 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
       <span style={{ color: T.muted, fontSize: 10.5, minWidth: 42, flexShrink: 0 }}>{label}</span>
       <div style={{ display: 'flex', gap: 5, flex: 1, minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+/**
+ * **왜 안 지워졌는지를 화면에서 답한다.**
+ *
+ * settle은 취소 한 건 한 건의 증거를 `steps._cancel`에, 잔여 판정을
+ * `steps._residual`에 적어 왔다. 그런데 화면은 정해진 단계 이름만
+ * 그려서 **이 둘이 한 번도 나온 적이 없다.** 그래서 "포지션 0인데
+ * 주문 2개가 남았다"를 만났을 때, DB를 직접 열지 않으면
+ *
+ *   · DB에 적힌 주문 번호가 무엇인지
+ *   · 취소를 실제로 요청했는지
+ *   · 거래소가 뭐라고 답했는지
+ *   · 재조회에서 왜 아직 있는지
+ *
+ * 네 가지 중 어느 것도 답할 수 없었다. 적어 두고 그리지 않은 것은
+ * 없는 것과 같다.
+ */
+function CleanupEvidence({ test }: { test: any }) {
+  const cancel = test?.evidence?.cancel ?? null;
+  const residual = test?.evidence?.residual ?? null;
+  const slId = test?.entry?.slOrderId ?? null;
+  const tpId = test?.entry?.tpOrderId ?? null;
+  if (!cancel && !residual && !slId && !tpId) return null;
+
+  const entries: any[] = Array.isArray(cancel?.entries) ? cancel.entries : [];
+  const attempts: any[] = Array.isArray(cancel?.attempts) ? cancel.attempts : [];
+  const stateTone = (st: string) =>
+    st === 'CANCEL_CONFIRMED' ? T.grn : st === 'STILL_PRESENT' ? T.red : T.ylw;
+
+  return (
+    <div style={{ marginTop: 6, borderTop: `1px dashed ${T.border}`, paddingTop: 6, display: 'grid', gap: 3 }}>
+      <div style={{ fontSize: 9.5, color: T.muted, fontWeight: 800 }}>보호주문 정리 증거</div>
+
+      {/* DB가 들고 있는 주문 번호 — 소유권의 1순위 증거다 */}
+      <div style={{ fontSize: 10, color: T.txt, overflowWrap: 'anywhere' }}>
+        DB 손절 <b>{slId ?? '없음'}</b> · DB 익절 <b>{tpId ?? '없음'}</b>
+      </div>
+
+      {/* 취소를 **요청했는가**. 요청 목록이 비어 있으면 취소는 시도조차 되지 않았다 */}
+      {cancel ? (
+        <>
+          <div style={{ fontSize: 10, color: T.muted, overflowWrap: 'anywhere' }}>
+            취소 요청 {Array.isArray(cancel.requested) && cancel.requested.length
+              ? cancel.requested.join(', ')
+              : '없음 — 취소를 시도하지 않았습니다'}
+            {' · '}판정 <b style={{ color: cancel.code === 'CLEAR' ? T.grn : T.red }}>{cancel.code}</b>
+            {' · '}{cancel.rounds ?? 0}바퀴
+            {' · '}재조회 {cancel.leftoverReadable === false ? '실패(모름)' : '성공'}
+          </div>
+          {entries.map((e: any) => {
+            const a = attempts.find((x: any) => String(x?.id) === String(e?.id));
+            return (
+              <div key={e.id} style={{ fontSize: 9.5, lineHeight: 1.55, overflowWrap: 'anywhere' }}>
+                <span style={{ color: stateTone(String(e.state)), fontWeight: 800 }}>{e.state}</span>
+                <span style={{ color: T.muted }}> · {e.note}</span>
+                {a && (
+                  <span style={{ color: T.muted }}>
+                    {' · 거래소 응답 '}{a.httpOk ? 'OK' : (a.response || '실패')}
+                    {a.tries != null ? ` (${a.tries}회 요청)` : ''}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </>
+      ) : (
+        <div style={{ fontSize: 10, color: T.ylw, overflowWrap: 'anywhere' }}>
+          취소 기록이 없습니다 — 이 회차는 청산 정리 단계까지 가지 않았습니다
+          (되돌리기로 끝났거나 HOLDING이 되기 전에 종료)
+        </div>
+      )}
+
+      {residual && (
+        <div style={{ fontSize: 9.5, color: T.muted, overflowWrap: 'anywhere' }}>
+          잔여 {residual.code} · 내 것 {residual.mine ?? 0} · 불명 {residual.unknown ?? 0} · 남 {residual.foreign ?? 0}
+          {Array.isArray(residual.knownStillPresent) && residual.knownStillPresent.length
+            ? ` · 남은 내 주문 ${residual.knownStillPresent.join(', ')}` : ''}
+        </div>
+      )}
     </div>
   );
 }
@@ -519,6 +660,7 @@ function RunCard({ run, remainText, onStop, busy }: {
                 </div>
               ))}
             </div>
+            <CleanupEvidence test={t} />
           </div>
         );
       })()}

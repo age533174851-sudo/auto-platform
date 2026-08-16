@@ -33,6 +33,18 @@ export function viewTest(r: any) {
       slippagePct: r?.slippage_pct ?? null, apiLatencyMsMax: r?.api_latency_ms_max ?? null,
     },
     steps, verdict: v, reason: r?.reason ?? null,
+    // ── 정리 증거 ──
+    //
+    // **적어 두고 그리지 않았다.** settle은 취소 한 건 한 건의 증거를
+    // `steps._cancel`에, 잔여 판정을 `steps._residual`에 남긴다. 그런데
+    // `stepsOf`는 정해진 단계 이름만 읽으므로 이 둘은 화면에 한 번도
+    // 나온 적이 없다 — "왜 안 지워졌나"를 물었을 때 DB를 직접 열지
+    // 않고는 답할 수 없었던 이유다. 이 저장소의 대표 고장(만들어 놓고
+    // 배선 안 함)을 증거 경로에서 또 낸 것이다.
+    evidence: {
+      cancel: r?.steps?._cancel ?? null,
+      residual: r?.steps?._residual ?? null,
+    },
     createdAt: r?.created_at, closedAt: r?.closed_at,
   };
 }
