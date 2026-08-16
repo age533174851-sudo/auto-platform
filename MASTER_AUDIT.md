@@ -1,7 +1,8 @@
 # MASTER_AUDIT — TRAIGO 저장소 전수감사
 
-기준 커밋: `4ca49bf` (main, PR #128 머지 직후)
-작성일: 2026-08-15
+기준 커밋: `4ca49bf` (main, PR #128 머지 직후) — **본문은 이 시점의 감사다**
+갱신: `3711f35` (main, PR #132 머지 직후) · §0.1에 그 뒤 변화를 적는다
+작성일: 2026-08-15 · 갱신 2026-08-16
 
 ---
 
@@ -37,6 +38,92 @@
 | P1-2 | 홈이 하드코딩 숫자 | 🔴 | `LONG_VALUE=48500000` 등 · `autoAll=true` |
 | P1-3 | `workerPlan.ts` 없음 | ❌ | `src/lib/runtime/`에 파일 자체가 없다 |
 | P1-4 | registry note가 코드보다 뒤처짐 | 🟡 | my-original-v1이 아직 "규칙이 입력되지 않았습니다" |
+
+---
+
+## 0.1 갱신 — `4ca49bf` 이후 실제로 무엇이 바뀌었나
+
+**감사 본문은 고치지 않는다.** 그때 무엇이 보였는지가 기록이고, 그것을 지우면
+"이미 다 알고 있었다"는 착각이 남는다. 대신 여기에 그 뒤의 사실을 덧붙인다.
+
+### §0의 표 — 지금 상태
+
+| # | 항목 | 그때 | 지금 | 들어간 PR |
+|---|---|---|---|---|
+| P0-1 | scalp 점검 플래그 불일치 | 🔴 | ✅ | #131 (`checkOnlyOf` + `check-strategy-flags.mjs`) |
+| P0-2 | scalp 지원 주기 ↔ 실행 판정 모순 | 🔴 | ✅ | #131 |
+| P0-3 | scalp preflight에 `connectionId` 없음 | 🔴 | ✅ | #131 |
+| P0-4 | exit-monitor가 Binance 전용 | 🔴 | ✅ | #132 (`readGuardSnapshot`·`liveStopPrice`·`placeStop`·`cancelOtherStops`) |
+| P0-5 | daily-ladder가 Gate에서 Binance를 읽음 | 🔴 | ✅ | #133 (`readDerivatives`) |
+| P0-6 | `oiChangePct` 값이 없음 | 🔴 | ✅ | #133 |
+| P0-7 | system/status 필수 표 목록이 낡음 | 🟡 | ✅ | #133 |
+| P1-1 | 지갑이 `/api/wallets`를 안 부름 | ❌ | ✅ | #134 (`/api/wallets/overview`) |
+| P1-2 | 홈이 하드코딩 숫자 | 🔴 | ✅ | #134 |
+| P1-3 | `workerPlan.ts` 없음 | ❌ | ✅ | #133 (배선까지) |
+| P1-4 | registry note가 코드보다 뒤처짐 | 🟡 | ✅ | #133 |
+
+§9의 "자동 발견"도 둘이 닫혔다 — `account_equity_snapshots`(048)를 채우는 코드가
+생겼고(#135), `smoke_tests`/`smoke_runs`가 상태판 필수 표에 들어갔다(#133).
+
+### 감사 뒤에 **새로 터진** P0 둘
+
+이 문서가 잡지 못한 것이라 따로 적는다. 둘 다 "확인할 방법이 없었다"가 원인이다.
+
+**① 배포가 안 되고 있었다 (#136)**
+
+`fly-deploy`의 `workflow_run` 트리거는 ci가 끝났을 때 오는데, 자동 머지가 합친 뒤
+main에서는 ci 자체가 안 돈다(GITHUB_TOKEN 재귀 방지). 그래서 도착하는 건 전부 PR
+브랜치의 ci이고 `head_branch == 'main'` 가드가 그걸 걸러 냈다.
+
+```
+4ca49bf(#128) workflow_run skipped · 63a8a9c(#129) workflow_run skipped
+마지막 실제 배포는 470d8db(#127)의 workflow_dispatch 하나뿐
+```
+
+**실행 기록은 남고 job은 항상 skipped라 배포가 도는 것처럼 보였다.**
+그 상태로 #128·#129가 워커에 없는 채 스모크를 돌렸다.
+
+고친 것: 머지에 성공한 스크립트가 `workflow_dispatch`로 배포를 **직접 부른다**
+(재귀 방지의 명시적 예외). Dockerfile `ARG GIT_SHA` → 워커가 자기 커밋을 시작
+로그와 `worker_heartbeat.version`(054)에 적고, `/api/system/deployment`가 Vercel
+SHA와 나란히 보여 준다. **#133에서 만든 `deploymentVerdict()`는 그때까지
+아무 데도 배선되지 않았다** — 이 문서가 경계한 바로 그 고장이었다.
+
+검증: `3711f35`·`fa0e5f5` 둘 다 머지 직후 `workflow_dispatch`가 `success`로 실행됨.
+
+**② 되돌리기가 보호주문을 남겼다 (#137)**
+
+진입 → SL 등록 → TP 등록 → 되읽기 실패 → REQUIRED이므로 포지션을 되돌린다.
+그런데 **등록에 성공한 SL·TP를 취소하지 않았다.** 그 회차는 `state='FAIL'`로 끝나
+HOLDING이 된 적이 없으므로 settle이 돌지 않고, **#128의 정리 코드는 실행조차
+되지 않았다.** 바이낸스 분기에도 같은 누락(분할 익절)이 있었다.
+
+두 번째 원인: 취소를 **HTTP 200만 보고 완료로 적었다.** 200은 접수다.
+
+고친 것: `protectionLedger.ts`(소유 증거 1순위 = 거래소 주문 번호, 취소 확인은
+재조회로만) · `cancelExact()`(요청 → 재조회 → 재시도, 최대 3바퀴) · 되돌리기 4곳
+전부 포지션과 보호주문을 같이 정리 · settle은 취소 장부와 잔여 판정이 **둘 다**
+통과해야 PASS · `/api/autotrade/smoke-test/orphans`(GET은 증거 보존, POST는 번호를
+명시한 것만, FOREIGN은 거절, 전체 취소 경로 없음).
+
+### §10 PR 순서 — 진행
+
+| PR | 내용 | 상태 |
+|---|---|---|
+| **A** | 반복 스모크 | ✅ #129 |
+| **B** | 실행계층 잔여 P0 | ✅ #131(B1) · #132(B2) · #133(B3) |
+| **B+** | 배포 진실 · 보호주문 생명주기 | ✅ #136 · #137 (감사 후 발견) |
+| **C** | 지갑 실배선 + 스냅샷/성과 | 🟡 #134 · #135 — **통합 장부는 아직** |
+| **D~I** | 다중전략 · 백테스트 · UI · 멀티에셋 · 관측 · E2E | ❌ |
+
+**아직 닫히지 않은 것 (코드가 아니라 검증):**
+
+- 마이그레이션 **052 · 053 · 054** 미적용
+- Gate TESTNET에 남아 있는 ETHUSDT 조건부 주문 2건 정리 — 증거로 보존 중
+- **1분 × 10회 LONG↔SHORT 반복 스모크 10/10 PASS**
+
+이 셋이 끝나기 전에는 실행계층을 "완료"로 적지 않는다. 코드가 main에 있고
+배포까지 됐다는 것은 §8의 runtime 검증과 다른 사실이다.
 
 ---
 
