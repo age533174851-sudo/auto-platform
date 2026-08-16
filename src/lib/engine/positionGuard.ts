@@ -26,7 +26,12 @@ export type GuardFault =
   | 'MARK_PRICE_SHOCK'
   | 'EXCHANGE_UNREACHABLE'
   | 'PROTECTIVE_ORDER_LOST'
-  | 'MARGIN_MODE_CHANGED';
+  | 'MARGIN_MODE_CHANGED'
+  /**
+   * 지금 가격을 못 읽었다. **경고이지 청산 사유가 아니다** —
+   * 모르는 것을 "청산가 도달"로 읽으면 멀쩡한 포지션을 닫는다.
+   */
+  | 'MARK_PRICE_UNKNOWN';
 
 export interface GuardFinding {
   code: GuardFault;
@@ -45,7 +50,21 @@ export interface PositionSnapshot {
   symbol: string;
   side: 'LONG' | 'SHORT';
   entryPrice: number;
-  markPrice: number;
+  /**
+   * 지금 가격. **못 읽었으면 null이다.**
+   *
+   * 예전에는 `number`였고, 호출부가 못 읽은 값을 0으로 넘겼다. 그러면
+   * 아래 청산 거리 계산이 이렇게 된다:
+   *
+   *     remainingDist = 0 - 청산가        (LONG)
+   *     ratio         = 음수 → "청산가를 지났습니다" → CLOSE
+   *
+   * **정상 포지션이 강제 청산된다.** Gate는 포지션 조회에 mark price가
+   * 없어서(ticker를 따로 읽어야 한다) 이 경로가 실제로 열려 있었다.
+   * 모르는 것을 사고로 읽지 않는다 — 모르면 그 검사를 건너뛰고 그
+   * 사실만 남긴다.
+   */
+  markPrice: number | null;
   liquidationPrice: number;
   /** 거래소가 보고한 마진 타입. 'isolated'가 아니면 사고다. */
   marginType?: string | null;
@@ -119,24 +138,36 @@ export function checkPositionGuard(
   }
 
   // ── 1. 청산가 접근 ──
+  //
+  // **지금 가격을 모르면 이 검사를 하지 않는다.** 0으로 눕히면 LONG에서
+  // "청산가를 이미 지났다"가 되어 멀쩡한 포지션을 닫는다.
   const isLong = pos.side === 'LONG';
-  const initialDist = Math.abs(pos.entryPrice - pos.liquidationPrice);
-  const remainingDist = isLong
-    ? pos.markPrice - pos.liquidationPrice
-    : pos.liquidationPrice - pos.markPrice;
+  const mark = Number(pos.markPrice);
+  const markKnown = pos.markPrice != null && Number.isFinite(mark) && mark > 0;
 
-  if (initialDist > 0 && pos.liquidationPrice > 0) {
+  if (!markKnown) {
+    faults.push({
+      code: 'MARK_PRICE_UNKNOWN', severity: 'warn',
+      detail: '지금 가격을 읽지 못해 청산까지 남은 거리를 확인하지 못했습니다 — '
+        + '모르는 것을 "청산가 도달"로 읽지 않습니다',
+    });
+  }
+
+  const initialDist = Math.abs(pos.entryPrice - pos.liquidationPrice);
+  const remainingDist = isLong ? mark - pos.liquidationPrice : pos.liquidationPrice - mark;
+
+  if (markKnown && initialDist > 0 && pos.liquidationPrice > 0) {
     const ratio = remainingDist / initialDist;
     if (ratio <= 0) {
       faults.push({
         code: 'LIQUIDATION_PROXIMITY', severity: 'critical',
-        detail: `Mark Price가 청산가를 지났습니다 (${pos.markPrice} vs ${pos.liquidationPrice})`,
+        detail: `Mark Price가 청산가를 지났습니다 (${mark} vs ${pos.liquidationPrice})`,
       });
     } else if (ratio <= c.liquidationProximityRatio) {
       faults.push({
         code: 'LIQUIDATION_PROXIMITY', severity: 'critical',
         detail: `청산까지 초기 거리의 ${(ratio * 100).toFixed(0)}%만 남았습니다 ` +
-                `(Mark ${pos.markPrice.toFixed(2)} · 청산 ${pos.liquidationPrice.toFixed(2)})`,
+                `(Mark ${mark.toFixed(2)} · 청산 ${pos.liquidationPrice.toFixed(2)})`,
       });
     }
   }

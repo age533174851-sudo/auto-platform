@@ -19,6 +19,38 @@ const base = (over: Partial<PositionSnapshot> = {}): PositionSnapshot => ({
 });
 
 export function runPositionGuardTests() {
+  console.log('[사고 점검 — 모르는 것을 사고로 읽지 않는다]');
+
+  test('지금 가격을 못 읽으면 청산가 도달로 읽지 않는다', () => {
+    // **여기가 위험했다.** 예전에는 호출부가 못 읽은 값을 0으로 넘겼고,
+    // LONG에서 `0 - 청산가`는 음수라 "청산가를 지났습니다" → CLOSE가 됐다.
+    // Gate는 포지션 응답에 mark price가 없어서 이 경로가 실제로 열려 있었다.
+    const v = checkPositionGuard(base({ markPrice: null }));
+    assert(v.action !== 'CLOSE', `모르는 가격으로 포지션을 닫았다 — ${v.reason}`);
+    assert(v.faults.some(f => f.code === 'MARK_PRICE_UNKNOWN'), '못 읽었다는 사실이 안 남았다');
+    // 경고이지 청산 사유가 아니다.
+    eq(v.faults.find(f => f.code === 'MARK_PRICE_UNKNOWN')!.severity, 'warn');
+  });
+
+  test('0·NaN도 "모른다"로 읽는다 — 청산가 도달이 아니다', () => {
+    for (const bad of [0, NaN, -1] as any[]) {
+      const v = checkPositionGuard(base({ markPrice: bad }));
+      assert(v.action !== 'CLOSE', `markPrice=${bad}로 포지션을 닫았다`);
+    }
+  });
+
+  test('가격을 못 읽어도 다른 사고는 그대로 잡는다', () => {
+    // 손절이 사라진 것은 가격과 무관한 사실이다 — 같이 묻히면 안 된다.
+    const v = checkPositionGuard(base({ markPrice: null, hasProtectiveStop: false }));
+    assert(v.faults.some(f => f.code === 'PROTECTIVE_ORDER_LOST'), v.faults.map(f => f.code).join(','));
+  });
+
+  test('가격을 읽었으면 예전과 똑같이 판정한다', () => {
+    // 이 변경이 기존 동작을 느슨하게 만들지 않았는지 못 박는다.
+    const v = checkPositionGuard(base({ markPrice: 99_400 }));
+    eq(v.action, 'CLOSE');
+  });
+
   console.log('[포지션 보호 — 방향으로는 닫지 않는다]');
 
   test('이상 없으면 아무것도 하지 않는다', () => {

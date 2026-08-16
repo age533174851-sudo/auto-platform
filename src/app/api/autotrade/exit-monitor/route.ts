@@ -49,65 +49,66 @@ async function runPositionGuards(
 ): Promise<{ tradeId: string; symbol: string; verdict: GuardVerdict }[]> {
   if (decisions.length === 0) return [];
 
-  const bf = await import('@/lib/exchanges/binanceFutures');
-  const { readPositions, closeVerdict, exitReasonLine } = await import('@/lib/engine/closeEvidence');
-  const { futuresListPositions, futuresPlaceOrder } = await import('@/lib/exchanges/futuresExec');
+  // **거래소를 가리지 않는다.** 예전에는 여기서 바이낸스 함수를 직접
+  // 불렀다 — Gate 연결이면 포지션 조회가 실패하고, 그 실패가 "포지션
+  // 없음"으로 읽혀 **점검 대상에서 통째로 빠졌다.**
+  const ops = await import('@/lib/engine/venuePositionOps');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const out: { tradeId: string; symbol: string; verdict: GuardVerdict }[] = [];
 
   // 사용자별로 키를 한 번만 읽는다
-  const credCache = new Map<string, { key: string; secret: string; testnet: boolean } | null>();
+  const credCache = new Map<string, { key: string; secret: string; testnet: boolean; exchange: 'binance' | 'gate' } | null>();
 
   for (const d of decisions) {
     try {
       if (!credCache.has(d.userId)) {
         if (connFor) {
-          const c = await connFor(d.userId);
-          credCache.set(d.userId, c ? { key: c.key, secret: c.secret, testnet: c.testnet } : null);
+          const c: any = await connFor(d.userId);
+          credCache.set(d.userId, c
+            ? { key: c.key, secret: c.secret, testnet: c.testnet, exchange: c.exchange ?? 'binance' }
+            : null);
         } else {
           const { data: conn } = await sb.from('exchange_connections')
-            .select('api_key, api_secret_enc, is_testnet')
+            .select('api_key, api_secret_enc, is_testnet, exchange_id')
             .eq('user_id', d.userId).eq('is_active', true).limit(1).maybeSingle();
-          credCache.set(d.userId, conn
-            ? { key: (conn as any).api_key, secret: decryptSecret((conn as any).api_secret_enc ?? ''),
-                testnet: (conn as any).is_testnet !== false }
-            : null);
+          if (conn) {
+            const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
+            const ex = resolveExecExchange((conn as any).exchange_id).exchange;
+            // **모르는 거래소를 바이낸스로 읽지 않는다.**
+            credCache.set(d.userId, ex ? {
+              key: (conn as any).api_key,
+              secret: decryptSecret((conn as any).api_secret_enc ?? ''),
+              testnet: (conn as any).is_testnet !== false,
+              exchange: ex,
+            } : null);
+          } else credCache.set(d.userId, null);
         }
       }
       const cred = credCache.get(d.userId);
       if (!cred) continue;
-      // **이 사용자의 망으로 본다.** 다른 망을 보면 포지션이 없는 것처럼
-      // 보이고, 위의 "포지션 없으면 이미 닫힌 것" 분기로 빠져서 실제로
-      // 열려 있는 포지션이 점검에서 통째로 사라진다.
-      const tnet = cred.testnet;
 
-      const posRes: any = await bf.getFuturesPositions(cred.key, cred.secret, tnet);
-      const reachable = posRes?.success === true;
-      const pos = reachable
-        ? (posRes.positions as any[]).find(p => String(p.symbol) === d.symbol && Math.abs(Number(p.amount)) > 0)
-        : null;
+      const venue = {
+        exchange: cred.exchange, apiKey: cred.key, apiSecret: cred.secret, testnet: cred.testnet,
+      };
+      const snap = await ops.readGuardSnapshot(venue, d.symbol);
 
-      // 거래소에 포지션이 없으면 이미 닫힌 것 — 점검 대상이 아니다
-      if (reachable && !pos) continue;
-
-      let hasStop = false;
-      if (reachable) {
-        try {
-          const open = await bf.getFuturesOpenOrders(cred.key, cred.secret, tnet, d.symbol);
-          hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
-            String(o?.type || '').toUpperCase() === 'STOP_MARKET');
-        } catch { hasStop = false; }
-      }
+      // 거래소에 포지션이 없으면 이미 닫힌 것 — 점검 대상이 아니다.
+      // **조회에 성공했을 때만 그렇게 읽는다.**
+      if (snap.ok && !snap.found) continue;
 
       const verdict = checkPositionGuard({
         symbol: d.symbol,
         side: d.side,
-        entryPrice: pos ? Number(pos.entryPrice) : 0,
-        markPrice: pos ? Number(pos.markPrice) : 0,
-        liquidationPrice: pos ? Number(pos.liquidationPrice) : 0,
-        marginType: pos ? pos.marginType : null,
-        hasProtectiveStop: hasStop,
-        exchangeReachable: reachable,
+        entryPrice: snap.entryPrice ?? 0,
+        // **못 읽었으면 null이다.** 0으로 넘기면 "청산가를 지났다"가 되어
+        // 멀쩡한 포지션이 강제 청산된다.
+        markPrice: snap.markPrice,
+        liquidationPrice: snap.liquidationPrice ?? 0,
+        marginType: snap.marginType,
+        // 손절 여부를 못 읽었으면 **있다고도 없다고도 하지 않는다** —
+        // 없는 것으로 읽으면 "손절이 사라졌다"로 포지션을 닫는다.
+        hasProtectiveStop: snap.hasProtectiveStop !== false,
+        exchangeReachable: snap.ok,
       });
 
       if (verdict.action !== 'NONE') out.push({ tradeId: d.tradeId, symbol: d.symbol, verdict });
@@ -316,32 +317,31 @@ export async function GET(req: NextRequest) {
   // 움직인 뒤 멈춘다 — 첫 이동은 일어나므로 동작하는 것처럼 보인다.
   //
   // 사용자마다 키가 다르므로 사용자 단위로 한 번만 읽어 캐시한다.
-  const stopCache = new Map<string, Map<string, number> | null>();
-  const liveStopFor = async (uid: string, symbol: string): Promise<number | null> => {
-    if (!stopCache.has(uid)) {
-      let m: Map<string, number> | null = null;
+  // **거래소를 가리지 않는다.** 예전에는 바이낸스 미체결 주문만 읽었다 —
+  // Gate 연결이면 언제나 null이 되어 진입 손절을 계속 1R로 썼고,
+  // 그러면 트레일링이 한 번도 움직이지 않는다.
+  //
+  // 방향까지 봐야 한다. 반대 방향을 닫는 손절은 남의 것이거나 옛 포지션의
+  // 고아다(protectiveReadback이 그 판별표를 갖고 있다).
+  const stopCache = new Map<string, number | null>();
+  const liveStopFor = async (
+    uid: string, symbol: string, side?: 'LONG' | 'SHORT',
+  ): Promise<number | null> => {
+    const key = `${uid}:${String(symbol).toUpperCase()}:${side ?? ''}`;
+    if (!stopCache.has(key)) {
+      let v: number | null = null;
       try {
-        const c = await connFor(uid);
-        if (c) {
-          const bfx = await import('@/lib/exchanges/binanceFutures');
-          // getFuturesOpenOrders는 {success, orders} 모양을 돌려준다.
-          // 배열로 착각하면 조용히 0건이 되고, 그러면 진입 손절을 계속 쓴다.
-          // **망은 이 사용자의 연결이 정한다** — 다른 망의 주문 목록을
-          // 읽으면 손절이 없는 것처럼 보인다.
-          const res: any = await bfx.getFuturesOpenOrders(c.key, c.secret, c.testnet);
-          const open: any[] = Array.isArray(res) ? res : (res?.orders ?? []);
-          m = new Map<string, number>();
-          for (const o of open) {
-            if (String(o?.type).toUpperCase() !== 'STOP_MARKET') continue;
-            if (o?.closePosition !== true) continue;   // 분할 익절 사다리는 제외
-            const p = Number(o?.stopPrice);
-            if (Number.isFinite(p) && p > 0) m.set(String(o.symbol).toUpperCase(), p);
-          }
+        const c: any = await connFor(uid);
+        if (c && (side === 'LONG' || side === 'SHORT')) {
+          const ops = await import('@/lib/engine/venuePositionOps');
+          v = await ops.liveStopPrice(
+            { exchange: c.exchange ?? 'binance', apiKey: c.key, apiSecret: c.secret, testnet: c.testnet },
+            symbol, side);
         }
-      } catch { m = null; }   // 못 읽으면 진입 손절을 그대로 쓴다
-      stopCache.set(uid, m);
+      } catch { v = null; }   // 못 읽으면 진입 손절을 그대로 쓴다
+      stopCache.set(key, v);
     }
-    return stopCache.get(uid)?.get(String(symbol).toUpperCase()) ?? null;
+    return stopCache.get(key) ?? null;
   };
 
   const { readTrailConfig } = await import('@/lib/engine/trailPlan');
@@ -381,7 +381,8 @@ export async function GET(req: NextRequest) {
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
-  const bf = await import('@/lib/exchanges/binanceFutures');
+  // **바이낸스 모듈을 더 이상 부르지 않는다.** 청산·손절 이동·손절 확인이
+  // 전부 거래소 공통 경로(venuePositionOps · futuresExec)로 간다.
   const { readPositions, closeVerdict, exitReasonLine } = await import('@/lib/engine/closeEvidence');
   const { futuresListPositions, futuresPlaceOrder } = await import('@/lib/exchanges/futuresExec');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
@@ -465,28 +466,25 @@ export async function GET(req: NextRequest) {
       // 손절 없는 포지션이 남는다. 반대로 하면 잠깐 손절이 둘이 되는데,
       // 둘 다 closePosition이라 먼저 걸리는 쪽이 전량을 닫고 나머지는
       // 자동으로 무효가 된다. 겹치는 편이 비는 것보다 안전하다.
-      const placed = await bf.placeFuturesTPSL(key, secret, {
-        symbol: d.symbol, side: exitSide, stopPrice: d.newStop!, type: 'STOP_MARKET',
-      }, testnet);
+      // **거래소를 가리지 않는다.** 예전에는 바이낸스 함수를 직접 불러서,
+      // Gate 포지션은 진입은 되는데 손절을 옮길 수가 없었다 — 화면에는
+      // "청산 감시 정상"이 떠 있었다.
+      const opsMv = await import('@/lib/engine/venuePositionOps');
+      const venueMv = { exchange: cr.exchange, apiKey: key, apiSecret: secret, testnet };
+      const placed = await opsMv.placeStop(venueMv, {
+        symbol: d.symbol, positionSide: d.side, stopPrice: d.newStop!,
+      });
 
-      if (!(placed as any)?.success) {
-        results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: `새 손절 실패: ${(placed as any)?.message}` });
+      if (!placed.ok) {
+        results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: `새 손절 실패: ${placed.message}` });
         continue;
       }
 
-      // 기존 STOP_MARKET(closePosition) 중 방금 건 것 외에는 취소
-      const newId = String((placed as any).orderId);
-      let cancelled = 0;
-      try {
-        const open = await bf.getFuturesOpenOrders(key, secret, testnet, d.symbol);
-        for (const o of (Array.isArray(open) ? open : []) as any[]) {
-          if (String(o.orderId) === newId) continue;
-          if (String(o.type).toUpperCase() !== 'STOP_MARKET') continue;
-          if (o.closePosition !== true) continue;    // 분할 익절은 건드리지 않는다
-          await bf.cancelFuturesOrder(key, secret, d.symbol, o.orderId, testnet);
-          cancelled++;
-        }
-      } catch { /* 취소 실패 시 손절이 둘 남는다 — 위험하지 않다 */ }
+      // 기존 손절 중 방금 건 것 외에는 취소한다.
+      // **남길 것을 모르면 아무것도 지우지 않는다** — 지우면 손절 없는
+      // 포지션이 남는다. 익절과 분할 사다리는 건드리지 않는다.
+      const { cancelled, note: cancelNote } =
+        await opsMv.cancelOtherStops(venueMv, d.symbol, d.side, placed.orderId);
 
       if (!dryRun) {
         // **stop_loss를 덮어쓰지 않는다.** 그 칸은 진입 시점 값이고 1R을
@@ -496,7 +494,8 @@ export async function GET(req: NextRequest) {
           exit_reason: d.reason,
         }).eq('id', d.tradeId);
       }
-      results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: true, newStop: d.newStop, cancelledOld: cancelled, reason: d.reason });
+      results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: true, exchange: cr.exchange,
+        newStop: d.newStop, cancelledOld: cancelled, cancelNote, reason: d.reason });
     } catch (e: any) {
       results.push({ symbol: d.symbol, action: d.action, ok: false, error: e?.message || '실행 실패' });
     }
