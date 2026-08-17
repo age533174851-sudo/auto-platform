@@ -13,6 +13,7 @@ import { stepsOf, smokeVerdict } from './smokePlan';
 import {
   runProgress, runMetrics, runSummary, advanceVerdict, type AttemptSummary,
 } from './smokeRun';
+import { cancelPhase } from './cancelRun';
 
 /** 회차 한 줄 */
 export function viewTest(r: any) {
@@ -107,6 +108,15 @@ export function viewRun(run: any, tests: any[]) {
     failurePolicy: run?.failure_policy, attempts: total,
     marginUsd: run?.margin_usd, leverage: run?.leverage, holdMin: run?.hold_min,
     state: run?.state, reason: run?.reason ?? null,
+    // ── 중지가 어디까지 왔는가 ──
+    //
+    // **누른 직후 '완료'로 그리지 않는다.** 화면은 여기 적힌 관측 상태만
+    // 그린다: 중지 요청됨 → 포지션 청산 중 → 보호주문 정리 중 → 중지 완료.
+    // 낙관적으로 앞질러 그리면 청산이 실패해도 끝난 것처럼 보이고,
+    // 그때 사람은 화면을 닫는다.
+    cancel: cancelPhase(run?.state),
+    stopIntent: run?.stop_intent ?? null,
+    cancelNote: run?.cancel_note ?? null,
     progress, advance,
     summary: runSummary({ total, attempts: summaries, stepPass, advance }),
     metrics: runMetrics(list),

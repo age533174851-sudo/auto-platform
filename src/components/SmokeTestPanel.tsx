@@ -40,9 +40,12 @@ const STEP_MARK: Record<StepState, string> = {
 };
 const ATTEMPT_MARK: Record<StepMark, string> = {
   PASS: '✅', FAIL: '❌', RUNNING: '⏳', WAITING: '·', BLOCKED: '⛔', UNKNOWN: '⚠️',
+  // 사람이 종료한 회차. **실패가 아니다** — 고장을 찾으러 가지 않게 한다.
+  CANCELLED: '■',
 };
 const ATTEMPT_TONE: Record<StepMark, string> = {
   PASS: T.grn, FAIL: T.red, RUNNING: T.acl, WAITING: T.muted, BLOCKED: T.ylw, UNKNOWN: T.ylw,
+  CANCELLED: T.muted,
 };
 
 export default function SmokeTestPanel({
@@ -79,17 +82,24 @@ export default function SmokeTestPanel({
 
   const runs: any[] = Array.isArray(data?.runs) ? data.runs : [];
   const liveRun = runs.find(r => String(r?.state) === 'RUNNING');
+  // **중지 절차가 도는 동안에도 화면을 계속 읽는다.**
+  // 예전에는 RUNNING인 묶음만 폴링해서, 중지를 누르는 순간 상태가
+  // RUNNING이 아니게 되고 화면이 '중지 요청됨'에서 얼어붙었다 —
+  // 청산이 끝났는지 사람이 알 방법이 없었다.
+  const cancellingRun = runs.find(r => r?.cancel?.inFlight === true);
   const liveTest = liveRun?.tests?.find((t: any) =>
     ['PREFLIGHT', 'ENTERING', 'HOLDING', 'CLOSING'].includes(String(t?.state)));
 
   // 남은 시간은 **표시용**이다. 실제 청산과 다음 회차 시작은 서버(Fly
   // Worker)가 한다 — 탭을 닫아도 끝까지 돈다.
   useEffect(() => {
-    if (!open || !liveRun) return;
-    const poll = setInterval(() => { setNowMs(Date.now()); load(); }, 10_000);
+    if (!open || (!liveRun && !cancellingRun)) return;
+    // 중지 절차가 도는 동안에는 더 자주 본다 — 단계가 몇 초 만에 바뀐다.
+    const everyMs = cancellingRun ? 3_000 : 10_000;
+    const poll = setInterval(() => { setNowMs(Date.now()); load(); }, everyMs);
     const tick = setInterval(() => setNowMs(Date.now()), 1_000);
     return () => { clearInterval(poll); clearInterval(tick); };
-  }, [open, liveRun, load]);
+  }, [open, liveRun, cancellingRun, load]);
 
   const effectiveAttempts = (() => {
     const n = Number(customAttempts);
@@ -118,13 +128,23 @@ export default function SmokeTestPanel({
     } finally { setBusy(false); }
   };
 
-  const stop = async (runId: string) => {
+  // ── 중지는 두 가지다 ──
+  //
+  // **하나로 뭉치면 사람이 시킨 것과 서버가 한 것이 갈린다.** 실제로
+  // 그랬다 — 사람은 "지금 당장 그만"을 눌렀는데 서버는 "다음 회차부터
+  // 그만"을 했고, 화면에는 포지션이 계속 진행 중이었다.
+  //
+  // 그래서 요청에 **intent를 명시**한다. 그리고 **누른 직후 '완료'로
+  // 그리지 않는다** — 화면은 서버가 관측해 적은 상태만 그린다.
+  const sendStop = async (runId: string, intent: 'STOP_AFTER_CURRENT' | 'CANCEL_NOW') => {
+    if (intent === 'CANCEL_NOW'
+      && !window.confirm('지금 회차를 즉시 청산하고 그 회차의 보호주문까지 정리합니다. 진행할까요?')) return;
     setBusy(true); setMsg(null);
     try {
-      const r = await fetch('/api/autotrade/smoke-test/advance', {
+      const r = await fetch('/api/autotrade/smoke-test/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({ stop: true, runId }),
+        body: JSON.stringify({ intent, runId }),
       });
       const j = await r.json().catch(() => null);
       setMsg({ ok: !!j?.ok, text: errorTextOf(j, `실패 (${r.status})`) });
@@ -298,14 +318,22 @@ export default function SmokeTestPanel({
             </Row>
 
             {/* ── 실패 정책 ──
+                **이건 취소 버튼이 아니다.** 한 회차가 실패했을 때 다음
+                회차를 열 것인가를 미리 정하는 것이고, 지금 열려 있는
+                포지션과는 아무 상관이 없다. 예전 문구가 "즉시 중지"여서
+                사용자가 이걸 "지금 당장 그만"으로 읽었다 — 실제 종료는
+                진행 중 카드의 '지금 테스트 종료'다.
                 어느 쪽이든 UNKNOWN에서는 다음 회차로 가지 않는다. 모르는
                 상태에서 새 주문을 내는 것이 이번 사고의 뿌리다. */}
             <Row label="실패 시">
               <button onClick={() => setFailurePolicy('SAFE')}
-                style={chip(failurePolicy === 'SAFE', T.red)}>즉시 중지</button>
+                style={chip(failurePolicy === 'SAFE', T.red)}>실패 시 중지</button>
               <button onClick={() => setFailurePolicy('DURABLE')}
-                style={chip(failurePolicy === 'DURABLE', T.ylw)}>정리 확인 시 계속</button>
+                style={chip(failurePolicy === 'DURABLE', T.ylw)}>정리 확인 후 계속</button>
             </Row>
+            <div style={{ fontSize: 9.5, color: T.muted, lineHeight: 1.5, marginTop: -2 }}>
+              한 회차가 실패하면 다음 회차를 열지 말지를 정합니다 — 지금 열린 포지션을 닫는 설정이 아닙니다.
+            </div>
 
             <Row label="증거금">
               <input value={marginUsd} onChange={e => setMarginUsd(e.target.value)} inputMode="decimal" style={input} />
@@ -475,7 +503,9 @@ export default function SmokeTestPanel({
 
           {runs.slice(0, 3).map(r => (
             <RunCard key={r.id} run={r} remainText={r.id === liveRun?.id ? remainText : null}
-              onStop={r.state === 'RUNNING' ? () => stop(r.id) : null} busy={busy} />
+              onStopAfter={r.state === 'RUNNING' ? () => sendStop(r.id, 'STOP_AFTER_CURRENT') : null}
+              onCancelNow={r.state === 'RUNNING' ? () => sendStop(r.id, 'CANCEL_NOW') : null}
+              busy={busy} />
           ))}
           {runs.length === 0 && !data?.error && (
             <div style={{ fontSize: 10, color: T.muted }}>아직 돌린 테스트가 없습니다.</div>
@@ -577,8 +607,9 @@ function CleanupEvidence({ test }: { test: any }) {
   );
 }
 
-function RunCard({ run, remainText, onStop, busy }: {
-  run: any; remainText: string | null; onStop: (() => void) | null; busy: boolean;
+function RunCard({ run, remainText, onStopAfter, onCancelNow, busy }: {
+  run: any; remainText: string | null;
+  onStopAfter: (() => void) | null; onCancelNow: (() => void) | null; busy: boolean;
 }) {
   const s = run?.summary ?? {};
   const p = run?.progress ?? {};
@@ -596,7 +627,7 @@ function RunCard({ run, remainText, onStop, busy }: {
           {run.symbol} {run.directionMode === 'ALTERNATE' ? `${run.firstSide}↔` : run.directionMode}
         </span>
         <span style={{ fontSize: 9.5, color: T.muted }}>
-          ${run.marginUsd} · {run.leverage}배 · {run.holdMin}분 · {run.failurePolicy === 'SAFE' ? '즉시중지' : '정리확인'}
+          ${run.marginUsd} · {run.leverage}배 · {run.holdMin}분 · 실패 시 {run.failurePolicy === 'SAFE' ? '중지' : '정리 확인 후 계속'}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 900, color: tone }}>
           {s.code === 'PASS' ? 'PASS' : s.code === 'FAIL' ? 'FAIL'
@@ -692,16 +723,74 @@ function RunCard({ run, remainText, onStop, busy }: {
         </div>
       )}
 
-      {onStop && (
-        <button onClick={onStop} disabled={busy} style={{
-          marginTop: 7, minHeight: 30, width: '100%', borderRadius: 8,
-          background: 'transparent', color: T.muted, border: `1px solid ${T.border}`,
-          fontSize: 10.5, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
-        }}>다음 회차 중지 (열려 있는 회차는 마감 시각에 청산됩니다)</button>
+      {/* ── 중지 절차 ──
+          **누른 직후 '완료'가 없다.** 서버가 관측해 적은 것만 그린다:
+          중지 요청됨 → 포지션 청산 중 → 보호주문 정리 중 → 중지 완료.
+          앞질러 그리면 청산이 실패해도 끝난 것처럼 보이고, 그때 사람은
+          화면을 닫는다. */}
+      {run.cancel && (run.cancel.inFlight || run.cancel.state === 'CANCELLED' || run.cancel.state === 'CANCEL_FAILED') && (
+        <div style={{
+          marginTop: 7, padding: '6px 8px', borderRadius: 8,
+          border: `1px solid ${A(run.cancel.ok ? T.grn : run.cancel.inFlight ? T.acl : T.red, '35')}`,
+          background: A(run.cancel.ok ? T.grn : run.cancel.inFlight ? T.acl : T.red, '10'),
+        }}>
+          <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap' }}>
+            {CANCEL_STEPS.map((cs, k) => {
+              const at = CANCEL_STEPS.findIndex(x => x.state === run.cancel.state);
+              const done = at >= 0 && k < at;
+              const now = at === k;
+              return (
+                <span key={cs.state} style={{
+                  fontSize: 9.5, fontWeight: now ? 900 : 700,
+                  color: now ? T.acl : done ? T.grn : T.muted,
+                }}>{k > 0 ? '→ ' : ''}{cs.label}</span>
+              );
+            })}
+          </div>
+          <div style={{
+            marginTop: 3, fontSize: 10.5, fontWeight: 800,
+            color: run.cancel.ok ? T.grn : run.cancel.inFlight ? T.acl : T.red,
+          }}>{run.cancel.label}</div>
+          {run.cancelNote && (
+            <div style={{ marginTop: 2, fontSize: 9.5, color: T.muted, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+              {run.cancelNote}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── 버튼 둘 ──
+          왼쪽은 예약을 끊는 것이고 오른쪽은 지금 포지션을 닫는 것이다.
+          **다른 일이므로 다른 버튼이다.** */}
+      {(onStopAfter || onCancelNow) && (
+        <div style={{ marginTop: 7, display: 'grid', gap: 5 }}>
+          {onStopAfter && (
+            <button onClick={onStopAfter} disabled={busy} style={{
+              minHeight: 30, width: '100%', borderRadius: 8,
+              background: 'transparent', color: T.muted, border: `1px solid ${T.border}`,
+              fontSize: 10.5, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
+            }}>반복만 중지 (지금 회차는 마감 시각까지 그대로 진행)</button>
+          )}
+          {onCancelNow && (
+            <button onClick={onCancelNow} disabled={busy} style={{
+              minHeight: 32, width: '100%', borderRadius: 8,
+              background: A(T.red, '18'), color: T.red, border: `1px solid ${A(T.red, '55')}`,
+              fontSize: 11, fontWeight: 900, cursor: busy ? 'default' : 'pointer',
+            }}>지금 테스트 종료 (즉시 청산 → 보호주문 정리 → 0 확인)</button>
+          )}
+        </div>
       )}
     </div>
   );
 }
+
+/** 중지 절차의 단계 — 화면은 이 순서대로만 그린다 */
+const CANCEL_STEPS = [
+  { state: 'CANCEL_REQUESTED', label: '중지 요청됨' },
+  { state: 'CLOSING', label: '포지션 청산 중' },
+  { state: 'CLEANING_PROTECTION', label: '보호주문 정리 중' },
+  { state: 'CANCELLED', label: '중지 완료' },
+] as const;
 
 const fmtMs = (v: number | null | undefined) =>
   v == null ? '측정 없음' : v >= 1000 ? `${(v / 1000).toFixed(1)}초` : `${Math.round(v)}ms`;

@@ -161,8 +161,12 @@ export type AdvanceCode =
   | 'STOP_UNKNOWN'
   /** 계좌가 깨끗하다는 증거가 없어 멈춘다 */
   | 'STOP_NOT_CLEAN'
-  /** 사람이 중지시켰다 */
-  | 'STOPPED';
+  /** 사람이 중지시켰다 — 다음 회차를 열지 않는다 */
+  | 'STOPPED'
+  /** 사람이 "지금 테스트 종료"를 눌렀고 그 절차가 도는 중이다 */
+  | 'CANCELLING'
+  /** 중지 절차가 끝났다 */
+  | 'CANCELLED';
 
 export interface AdvanceVerdict {
   code: AdvanceCode;
@@ -212,8 +216,26 @@ export function advanceVerdict(i: {
   const stop = (code: AdvanceCode, reason: string): AdvanceVerdict =>
     ({ code, nextAttemptNo: null, nextSide: null, reason });
 
-  if (String(run.state ?? '').toUpperCase() === 'STOPPED') {
-    return stop('STOPPED', '사람이 중지시킨 반복 테스트입니다');
+  // **RUNNING이 아니면 어떤 이유로든 새 회차를 열지 않는다.**
+  //
+  // 예전에는 'STOPPED' 한 가지만 봤다. 그런데 "지금 테스트 종료"가
+  // 생기면서 중지가 **절차**가 됐다 — CANCEL_REQUESTED · CLOSING ·
+  // CLEANING_PROTECTION을 지나는 동안 묶음은 STOPPED가 아니다.
+  // 그 사이에 다음 회차가 열리면 **청산 중인 포지션 위로 새 진입**이
+  // 올라간다. 그래서 이름 하나를 보는 대신 RUNNING만 통과시킨다.
+  const runState = String(run.state ?? 'RUNNING').toUpperCase();
+  if (runState === 'CANCELLED' || runState === 'CANCEL_FAILED') {
+    return stop('CANCELLED', runState === 'CANCELLED'
+      ? '사람이 종료한 반복 테스트입니다 — 청산과 보호주문 정리까지 확인됐습니다'
+      : '사람이 종료했지만 정리가 확인되지 않은 반복 테스트입니다 — 거래소에서 직접 확인하세요');
+  }
+  if (runState === 'CANCEL_REQUESTED' || runState === 'CLOSING' || runState === 'CLEANING_PROTECTION') {
+    return stop('CANCELLING', '중지 절차가 도는 중입니다 — 끝날 때까지 새 회차를 열지 않습니다');
+  }
+  if (runState !== 'RUNNING') {
+    return stop('STOPPED', runState === 'STOPPED'
+      ? '사람이 중지시킨 반복 테스트입니다 — 열린 회차는 마감 시각에 청산됩니다'
+      : `묶음이 ${runState} 상태입니다 — 새 회차를 열지 않습니다`);
   }
 
   // **도는 것이 있으면 기다린다.** 이 한 줄이 순차 실행의 전부다.
@@ -291,7 +313,7 @@ export interface RunProgress {
   marks: Array<{ attemptNo: number; state: StepMark; side: 'LONG' | 'SHORT' | null; label: string }>;
 }
 
-export type StepMark = 'PASS' | 'FAIL' | 'RUNNING' | 'WAITING' | 'BLOCKED' | 'UNKNOWN';
+export type StepMark = 'PASS' | 'FAIL' | 'RUNNING' | 'WAITING' | 'BLOCKED' | 'UNKNOWN' | 'CANCELLED';
 
 /**
  * 진행 상황 한 덩어리.
@@ -318,15 +340,21 @@ export function runProgress(i: {
     else if (LIVE_STATES.includes(String(a.state).toUpperCase())) { state = 'RUNNING'; running++; }
     else {
       const v = String(a.verdict ?? '').toUpperCase();
-      state = v === 'PASS' ? 'PASS' : v === 'BLOCKED' ? 'BLOCKED' : v === 'FAIL' ? 'FAIL' : 'UNKNOWN';
+      // **사람이 종료한 회차는 FAIL이 아니다.** 고장이 아니라 사람이
+      // 그만둔 것이고, 그 둘을 같은 칸에 넣으면 다음에 로그를 읽는
+      // 사람이 없던 고장을 찾게 된다. 통과도 아니다 — 유지 시간을
+      // 안 채웠으므로 무엇도 증명하지 않았다.
+      state = v === 'PASS' ? 'PASS' : v === 'BLOCKED' ? 'BLOCKED' : v === 'FAIL' ? 'FAIL'
+        : v === 'CANCELLED' ? 'CANCELLED' : 'UNKNOWN';
       completed++;
-      if (state === 'PASS') passed++; else failed++;
+      if (state === 'PASS') passed++;
+      else if (state !== 'CANCELLED') failed++;
     }
     marks.push({
       attemptNo: n, state, side,
       label: state === 'PASS' ? 'PASS' : state === 'FAIL' ? 'FAIL'
         : state === 'RUNNING' ? '진행 중' : state === 'WAITING' ? '대기'
-          : state === 'BLOCKED' ? '시작 못 함' : '확인 못 함',
+          : state === 'BLOCKED' ? '시작 못 함' : state === 'CANCELLED' ? '중지됨' : '확인 못 함',
     });
   }
 
