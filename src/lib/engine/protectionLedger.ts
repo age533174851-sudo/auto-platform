@@ -31,6 +31,8 @@
 // UNKNOWN은 안전을 이유로 안 지우므로 거래소에 계속 쌓인다.
 // 실제로 그렇게 쌓였다.
 
+import { venueIdOf, isLostPrecisionId } from '../exchanges/losslessJson';
+
 const str = (v: any): string => String(v ?? '').trim();
 
 /**
@@ -49,9 +51,11 @@ export function ownedOrderIds(i: {
   const out: string[] = [];
   for (const list of [i?.placed, i?.readback, i?.extra]) {
     for (const raw of Array.isArray(list) ? list : []) {
-      const s = str(raw);
-      // 'null'·'undefined' 문자열이 DB를 거쳐 오는 경우가 있다.
-      if (!s || s === 'null' || s === 'undefined') continue;
+      // **정밀도를 잃은 숫자는 번호가 아니다.** 그대로 담으면 소유 판정이
+      // 같은 틀린 값끼리 비교해 통과하고, 취소만 실패한다.
+      if (isLostPrecisionId(raw)) continue;
+      const s = venueIdOf(raw) ?? '';
+      if (!s) continue;
       if (!out.includes(s)) out.push(s);
     }
   }
@@ -96,10 +100,16 @@ export interface CancelLedger {
   reason: string;
 }
 
-/** 거래소 주문 한 줄에서 번호를 뽑는다 (Gate: id · 바이낸스: orderId) */
+/**
+ * 거래소 주문 한 줄에서 번호를 뽑는다 (Gate: id · 바이낸스: orderId).
+ *
+ * **숫자로 읽혀 정밀도를 잃은 값은 빈 문자열이다.** `String(2089...400)`을
+ * 돌려주면 없는 주문 번호를 만들어 내는 것이고, 그 번호로 취소를 보내면
+ * 거래소는 "그런 주문 없다"고 답한다 — 2026-08-16에 실제로 그랬다.
+ */
 export function orderIdOf(row: any): string {
   if (!row || typeof row !== 'object') return '';
-  return str(row.id ?? row.orderId ?? row.order_id);
+  return venueIdOf(row.id ?? row.orderId ?? row.order_id) ?? '';
 }
 
 /**

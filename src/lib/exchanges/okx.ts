@@ -1,6 +1,7 @@
 // OKX API Adapter (server-side only)
 // Docs: https://www.okx.com/docs-v5/en/
 import { createHmac } from 'crypto';
+import { parseLossless } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
 const BASE = 'https://www.okx.com';
@@ -24,7 +25,7 @@ async function okxFetch(path: string, key: string, secret: string, passphrase: s
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
+  const data = parseLossless(await r.text());
   if (data.code !== '0') throw new Error(data.msg || 'OKX error');
   return data.data;
 }

@@ -1,6 +1,7 @@
 // Bithumb API Adapter (server-side only)
 // Docs: https://apidocs.bithumb.com/
 import { createHmac } from 'crypto';
+import { parseLossless } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
 const BASE = 'https://api.bithumb.com';
@@ -28,7 +29,7 @@ async function bithumbFetch(path: string, key: string, secret: string) {
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
+  const data = parseLossless(await r.text());
   if (data.status !== '0000') throw new Error(data.message || '빗썸 오류');
   return data.data;
 }

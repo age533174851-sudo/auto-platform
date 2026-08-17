@@ -12,6 +12,7 @@
 // 주문이 된다. 반대로 BTCUSD_PERP에 0.003을 보내면 소수 계약이라 거부된다.
 // 전자는 사고고 후자는 그나마 거부다.
 import { createHmac } from 'crypto';
+import { parseLossless } from './losslessJson';
 
 const DAPI = 'https://dapi.binance.com';
 const DAPI_TESTNET = 'https://testnet.binancefuture.com';
@@ -43,10 +44,10 @@ async function dapiSigned(
     signal: AbortSignal.timeout(10_000),
   });
   if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
+    const err = parseLossless(await r.text()).catch(() => ({}));
     throw new Error(err.msg || `HTTP ${r.status}`);
   }
-  return r.json();
+  return parseLossless(await r.text());
 }
 
 /**
@@ -60,7 +61,7 @@ export async function getCoinMContractSize(
     const r = await fetch(`${base(testnet)}/dapi/v1/exchangeInfo`,
       { signal: AbortSignal.timeout(10_000) });
     if (!r.ok) return null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const s = (d.symbols || []).find((x: any) =>
       String(x.symbol).toUpperCase() === symbol.toUpperCase());
     const v = Number(s?.contractSize);
@@ -76,7 +77,7 @@ export async function getCoinMMarkPrice(
     const r = await fetch(`${base(testnet)}/dapi/v1/premiumIndex?symbol=${symbol}`,
       { signal: AbortSignal.timeout(8000) });
     if (!r.ok) return null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const row = Array.isArray(d) ? d[0] : d;
     const v = parseFloat(row?.markPrice);
     return Number.isFinite(v) ? v : null;
@@ -106,7 +107,7 @@ export async function getCoinMServerTime(testnet = false): Promise<number | null
   try {
     const r = await fetch(`${base(testnet)}/dapi/v1/time`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) return null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const t = Number(d?.serverTime);
     return Number.isFinite(t) && t > 0 ? t : null;
   } catch { return null; }

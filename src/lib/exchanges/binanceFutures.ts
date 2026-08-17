@@ -5,6 +5,7 @@
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
 import { createHmac } from 'crypto';
+import { parseLossless, venueIdOf } from './losslessJson';
 
 const FUTURES_BASE         = 'https://fapi.binance.com';
 const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
@@ -42,12 +43,19 @@ async function fapiSigned(
     method, headers: { 'X-MBX-APIKEY': key }, signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
+    // 에러 본문에서는 code/msg만 쓴다 — 주문 번호를 읽지 않으므로 안전하다.
+    const err = await r.json().catch(() => ({})); // eslint-disable-line -- error message only
     console.log('[Binance] ERROR:', r.status, '| code:', err.code, '| msg:', err.msg);
     // 바이낸스 에러코드 + 메시지 그대로 전달
     throw new Error(err.msg ? `[${err.code}] ${err.msg}` : `HTTP ${r.status}`);
   }
-  return r.json();
+  // ── **주문 번호를 숫자로 읽지 않는다** ──
+  //
+  // 바이낸스 `orderId`도 스키마상 int64다. 지금 값은 아직
+  // Number.MAX_SAFE_INTEGER 안이지만, Gate에서 이미 같은 고장이 났다
+  // (2026-08-16: 2089209928026685400 → 마지막 자릿수 반올림 → 취소 실패).
+  // **거래소가 번호를 키우기 시작한 뒤에 알아채면 늦는다.**
+  return parseLossless(await r.text());
 }
 
 export interface FuturesBalance { asset: string; balance: number; availableBalance: number; unrealizedPnl: number; }
@@ -239,7 +247,7 @@ export async function getPremiumIndex(symbol: string, testnet = true): Promise<P
   try {
     const r = await fetch(`${base(testnet)}/fapi/v1/premiumIndex?symbol=${sym}`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) return hit ? hit.data : null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const data: PremiumIndex = {
       symbol: d.symbol,
       markPrice: parseFloat(d.markPrice || '0'),
@@ -512,7 +520,7 @@ export async function getFuturesTicker(symbol: string, testnet = true): Promise<
     const sym = symbol.toUpperCase().replace('/', '');
     const r = await fetch(`${base(testnet)}/fapi/v1/ticker/price?symbol=${sym}`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) return null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     return parseFloat(d.price) || null;
   } catch { return null; }
 }
@@ -644,7 +652,7 @@ export async function getFuturesServerTime(testnet = true): Promise<number | nul
   try {
     const r = await fetch(`${base(testnet)}/fapi/v1/time`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) return null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const t = Number(d?.serverTime);
     return Number.isFinite(t) && t > 0 ? t : null;
   } catch { return null; }
@@ -977,7 +985,7 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
   try {
     const r = await fetch(`${base(testnet)}/fapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(8000) });
     if (!r.ok) return null;
-    const data = await r.json();
+    const data = parseLossless(await r.text());
     const s = (data.symbols || []).find((x: any) => x.symbol === sym);
     if (!s) return null;
     const lot = (s.filters || []).find((f: any) => f.filterType === 'LOT_SIZE');
@@ -1180,7 +1188,7 @@ export async function futuresOrderTypes(
       signal: AbortSignal.timeout(10_000),
     });
     if (!r.ok) return { ok: false, orderTypes: [], detail: `HTTP ${r.status}` };
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const row = (Array.isArray(d?.symbols) ? d.symbols : []).find(
       (s: any) => String(s?.symbol).toUpperCase() === sym);
     if (!row) return { ok: false, orderTypes: [], detail: `${sym}을(를) 찾지 못했습니다` };

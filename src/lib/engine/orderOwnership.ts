@@ -1,3 +1,4 @@
+import { venueIdOf } from '../exchanges/losslessJson';
 // src/lib/engine/orderOwnership.ts
 //
 // **이 조건부 주문은 누구 것인가.**
@@ -217,7 +218,9 @@ export function ownershipTextOf(row: any): string {
  * 버그처럼 text가 깨진 상황에서도 **내 것만** 정확히 지울 수 있다.
  */
 export function classifyOrder(row: any, myStrategyId: string, ownedIds?: string[] | null): ClassifiedOrder {
-  const id = String(row?.id ?? row?.orderId ?? '');
+  // **번호는 십진 문자열이다.** 숫자로 읽혀 반올림된 int64는 번호로 쓰지
+  // 않는다 — 같은 틀린 값끼리 비교해 "내 것"이 되고, 취소만 실패한다.
+  const id = venueIdOf(row?.id ?? row?.orderId) ?? '';
   const known = Array.isArray(ownedIds) ? ownedIds.filter(Boolean).map(String) : [];
   if (id && known.includes(id)) {
     return { id, class: 'MINE', purpose: null,

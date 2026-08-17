@@ -141,6 +141,20 @@ jobs:
       - name: 전략 점검 플래그 검사
         run: node scripts/check-strategy-flags.mjs
 
+      # ── 거래소 주문 번호 검사 ──
+      #
+      # 2026-08-16: Gate 조건부 주문 번호가 `2089209928026685400`으로
+      # 저장돼 있었다. 끝이 `400`으로 뭉개진 것이 지문이다 —
+      # Number.MAX_SAFE_INTEGER(9007199254740991)를 300배 넘게 벗어나
+      # `JSON.parse`가 만든 순간 마지막 자릿수가 반올림됐다. 그 번호로
+      # 보낸 취소는 전부 `400 No order found with the given ID`였고,
+      # 포지션 0인데 보호주문 2건이 남았다.
+      #
+      # **타입은 이걸 못 잡는다.** 응답은 any이고 번호는 그냥 숫자다.
+      # 그리고 다음 사람이 `await r.json()` 한 줄만 새로 써도 돌아온다.
+      - name: 거래소 주문 번호 검사
+        run: node scripts/check-venue-ids.mjs
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그

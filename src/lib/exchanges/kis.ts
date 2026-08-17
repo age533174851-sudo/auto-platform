@@ -20,6 +20,7 @@ import {
   buildOrderBody, splitAccountNo, priceFrom, holdingsFrom, cashFrom,
   type KisEnv, type KisSide, type KisOrderType, type KisResult, type KisToken,
 } from './kisCore';
+import { parseLossless } from './losslessJson';
 
 export interface KisCreds {
   appKey: string;
@@ -40,7 +41,7 @@ async function kisFetch(
     const r = await fetch(url, { ...init, signal: ctl.signal, cache: 'no-store' });
     const text = await r.text();
     let body: any = null;
-    try { body = text ? JSON.parse(text) : null; } catch {
+    try { body = text ? parseLossless(text) : null; } catch {
       // JSON이 아니다. 점검 페이지나 프록시 오류일 수 있다. 본문 앞부분을
       // 그대로 남긴다 — '알 수 없는 오류'로 적으면 원인을 못 찾는다.
       return { status: r.status, body: null, error: `한국투자증권 응답이 JSON이 아닙니다 (${r.status}): ${text.slice(0, 200)}` };
