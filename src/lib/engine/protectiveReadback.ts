@@ -28,6 +28,7 @@
 // 이라고 적는 것이 이 저장소에서 가장 비싼 한 줄이다.
 
 import { gateProtectiveKind, type ProtectiveClass } from '../exchanges/gatePlan';
+import { venueIdOf } from '../exchanges/losslessJson';
 
 /**
  * 바이낸스 미체결 주문 한 줄이 손절인가 익절인가.
@@ -149,8 +150,9 @@ export function readbackProtective(i: {
     const trigger = num(binance
       ? (row?.stopPrice ?? row?.triggerPrice)
       : (row?.trigger?.price ?? row?.triggerPrice));
-    const id = (binance ? (row?.orderId ?? row?.id) : row?.id) != null
-      ? String(binance ? (row?.orderId ?? row?.id) : row?.id) : null;
+    // **번호는 십진 문자열이다.** 숫자로 읽혀 반올림된 int64를 여기서
+    // 받아 적으면, 그 번호로 나가는 취소가 전부 "그런 주문 없다"가 된다.
+    const id = venueIdOf(binance ? (row?.orderId ?? row?.id) : row?.id);
 
     // **이 포지션을 닫는 주문만 센다.** 반대 방향을 닫는 주문은 남의
     // 것이거나 옛 포지션의 고아다.

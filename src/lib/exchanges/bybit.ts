@@ -1,6 +1,7 @@
 // Bybit API Adapter (server-side only)
 // Docs: https://bybit-exchange.github.io/docs/v5/
 import { createHmac } from 'crypto';
+import { parseLossless } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
 const BASE = 'https://api.bybit.com';
@@ -25,7 +26,7 @@ async function bbFetch(path: string, key: string, secret: string, params: Record
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
+  const data = parseLossless(await r.text());
   if (data.retCode !== 0) throw new Error(data.retMsg || 'Bybit error');
   return data.result;
 }

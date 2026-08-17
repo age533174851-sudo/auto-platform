@@ -3,6 +3,7 @@
 // 테스트넷 우선. 서명은 Gate v4 규격: 본문 SHA-512 해시 + HMAC-SHA512 서명.
 // 주문 식별자(text)는 Gate 규격상 't-' 접두사가 필요하다 → clientOrderId 추적에 사용.
 import { createHmac, createHash } from 'crypto';
+import { parseLossless, venueIdOf } from './losslessJson';
 
 const LIVE_BASE = 'https://api.gateio.ws';
 const TESTNET_BASE = 'https://api-testnet.gateapi.io';
@@ -56,7 +57,22 @@ export async function gateReq<T>(
     try { const j = JSON.parse(text); msg = j.message || j.label || text; } catch {}
     throw new Error(`Gate ${res.status}: ${msg}`);
   }
-  return text ? JSON.parse(text) : ({} as T);
+  // ── **주문 번호를 숫자로 읽지 않는다** ──
+  //
+  // Gate의 주문 id는 스키마상 int64다. 실제로 받은 값이 이랬다:
+  //
+  //   2089209928026685400
+  //   2089209928399978500
+  //
+  // Number.MAX_SAFE_INTEGER(9007199254740991)를 300배 넘게 벗어나서,
+  // `JSON.parse`가 만든 순간 마지막 자릿수가 반올림됐다. 그 번호를
+  // DB에 저장하고, 소유 판정은 **같은 틀린 값끼리** 비교하니 통과하고,
+  // 취소는 틀린 번호로 나가 `400 No order found with the given ID`가
+  // 돌아왔다. 포지션은 0인데 조건부 주문 2건이 그대로 남은 이유다.
+  //
+  // `JSON.parse` 뒤에 `String(obj.id)`로 바꾸는 것은 복구가 아니다 —
+  // 그때는 이미 자릿수가 사라졌다. **파싱 시점에** 잡아야 한다.
+  return text ? parseLossless<T>(text) : ({} as T);
 }
 
 // ── 공개 시세 (서명 불필요) ──────────────────────────
@@ -334,7 +350,9 @@ export async function placeStopGateFutures(
 
     const r = await gateReq<{ id?: number | string }>(
       'POST', '/api/v4/futures/usdt/price_orders', { key, secret, body, testnet });
-    return { success: true, orderId: r?.id != null ? String(r.id) : undefined, message: '손절 설정' };
+    // **번호를 문자열 그대로 받는다.** 숫자로 읽힌 int64는 이미 망가진
+    // 값이라 `venueIdOf`가 null을 준다 — 그 번호로는 취소가 안 된다.
+    return { success: true, orderId: venueIdOf(r?.id) ?? undefined, message: '손절 설정' };
   } catch (e: any) {
     return { success: false, message: `손절 설정 실패: ${e?.message || e}` };
   }
@@ -748,8 +766,16 @@ export async function cancelOrderGateFutures(
   opts?: { bucket?: 'price' | 'normal' | null; testnet?: boolean },
 ): Promise<{ success: boolean; bucket: 'price' | 'normal' | null; message: string }> {
   const testnet = opts?.testnet !== false;
-  const id = String(orderId ?? '').trim();
-  if (!id) return { success: false, bucket: null, message: '주문 번호가 없어 취소하지 못했습니다' };
+  // **십진 문자열 그대로 쓴다.** 안전 범위를 벗어난 `number`가 들어오면
+  // 그건 이미 반올림된 값이므로 보내지 않는다 — 보내 봐야 거래소는
+  // "그런 주문 없다"고 답하고, 진짜 주문은 그대로 남는다.
+  const id = venueIdOf(orderId) ?? '';
+  if (!id) {
+    return { success: false, bucket: null,
+      message: typeof orderId === 'number' && !Number.isSafeInteger(orderId)
+        ? `주문 번호가 숫자로 읽혀 정밀도를 잃었습니다 (${orderId}) — 이 번호로는 취소할 수 없습니다`
+        : '주문 번호가 없어 취소하지 못했습니다' };
+  }
 
   const order: Array<'price' | 'normal'> =
     opts?.bucket === 'normal' ? ['normal', 'price'] : ['price', 'normal'];

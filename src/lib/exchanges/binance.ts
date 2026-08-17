@@ -3,6 +3,7 @@
 // Docs: https://binance-docs.github.io/apidocs/spot/en/
 // ─────────────────────────────────────────────────────────────
 import { createHmac } from 'crypto';
+import { parseLossless } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
 const BASE = 'https://api.binance.com';
@@ -44,7 +45,7 @@ export async function getSpotServerTime(testnet?: boolean): Promise<number | nul
   try {
     const r = await fetch(`${spotBase(testnet)}/api/v3/time`, { signal: AbortSignal.timeout(5000) });
     if (!r.ok) return null;
-    const d = await r.json();
+    const d = parseLossless(await r.text());
     const t = Number(d?.serverTime);
     return Number.isFinite(t) && t > 0 ? t : null;
   } catch { return null; }
@@ -64,10 +65,10 @@ async function bnFetch(
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
+    const err = parseLossless(await r.text()).catch(() => ({}));
     throw new Error(annotateAuthError(err.msg || `HTTP ${r.status}`, testnet));
   }
-  return r.json();
+  return parseLossless(await r.text());
 }
 
 /**
@@ -253,10 +254,10 @@ async function bnPost(
     signal:  AbortSignal.timeout(8000),
   });
   if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
+    const err = parseLossless(await r.text()).catch(() => ({}));
     throw new Error(annotateAuthError(err.msg || `HTTP ${r.status}`, testnet));
   }
-  return r.json();
+  return parseLossless(await r.text());
 }
 
 export interface OrderResult {
@@ -390,7 +391,7 @@ export async function getSpotSymbolFilters(
   try {
     const r = await fetch(`${spotBase(testnet)}/api/v3/exchangeInfo?symbol=${sym}`, { signal: AbortSignal.timeout(8000) });
     if (!r.ok) return null;
-    const data = await r.json();
+    const data = parseLossless(await r.text());
     const s = (data.symbols || [])[0];
     if (!s) return null;
     const lot = (s.filters || []).find((f: any) => f.filterType === 'LOT_SIZE');
