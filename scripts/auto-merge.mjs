@@ -157,15 +157,42 @@ async function reviewFacts(number) {
   };
 }
 
-/** head가 base tip을 조상으로 갖는가. **못 읽으면 null** */
+/**
+ * head가 base tip을 조상으로 갖는가. **못 읽으면 null**
+ *
+ * 2026-08-17에 이 확인이 **네 번 연속 실패**했다. #139는 검사가 전부
+ * 초록이고 로컬에서 `a919bd5 → 67bb099`가 ahead임이 확인되는데도
+ * `MERGEABILITY_UNKNOWN`으로 계속 막혔다. 그 사이 로그에 남은 것은
+ * "확인하지 못했습니다" 한 줄뿐이라 **왜 실패했는지 알 방법이 없었다.**
+ *
+ * 그래서 둘을 더한다:
+ *   · 한 번 실패했다고 포기하지 않는다 — 짧게 재시도한다
+ *   · 실패하면 **HTTP 상태와 응답 요약을 로그에 남긴다**
+ *
+ * **판정 규칙은 그대로다.** 모르면 여전히 null이고, null이면 합치지
+ * 않는다. 확인하지 못한 것을 통과로 바꾸는 것이 아니라, 확인을 실제로
+ * 할 수 있게 만들고 못 했을 때 이유가 보이게 하는 것이다.
+ */
 async function headContainsBase(baseSha, headSha) {
-  const r = await api(`/repos/${REPO}/compare/${baseSha}...${headSha}`);
-  if (!r.ok) return null;
-  const s = r.body?.status;
-  // 'ahead' | 'identical' 이면 head가 base를 포함한다.
-  // 'behind' | 'diverged' 이면 아니다.
-  if (s === 'ahead' || s === 'identical') return true;
-  if (s === 'behind' || s === 'diverged') return false;
+  const path = `/repos/${REPO}/compare/${baseSha}...${headSha}`;
+  let last = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const r = await api(path);
+    last = r;
+    if (r.ok) {
+      const s = r.body?.status;
+      // 'ahead' | 'identical' 이면 head가 base를 포함한다.
+      // 'behind' | 'diverged' 이면 아니다.
+      if (s === 'ahead' || s === 'identical') return true;
+      if (s === 'behind' || s === 'diverged') return false;
+      console.log(`compare 응답에 status가 없습니다 (${JSON.stringify(s)}) — ${path}`);
+      return null;
+    }
+    if (attempt < 3) await new Promise(res => setTimeout(res, attempt * 1000));
+  }
+  // **왜 못 읽었는지 남긴다.** 이 한 줄이 없어서 네 번을 헤맸다.
+  console.log(`compare 실패 HTTP ${last?.status} — ${path}`
+    + (last?.body?.message ? ` :: ${String(last.body.message).slice(0, 200)}` : ''));
   return null;
 }
 
