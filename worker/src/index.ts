@@ -661,6 +661,60 @@ async function pollSmokeRuns(): Promise<void> {
   }
 }
 
+// ── 반복 스모크: 끊긴 "지금 테스트 종료" 이어받기 ──────
+//
+// **브라우저가 닫혀도 끝난다.**
+//
+// 사람이 "지금 테스트 종료"를 누르면 중지는 한 순간이 아니라 절차가
+// 된다: 청산 → 포지션 0 재조회 → 그 회차 SL/TP를 정확한 번호로 취소 →
+// 재조회 확인. 그 사이에 탭이 닫히거나 서버가 재시작하면 묶음은
+// CANCEL_REQUESTED · CLOSING · CLEANING_PROTECTION 중 하나에 멈춘다.
+//
+// 멈춘 채로 두면 **포지션이나 보호주문이 거래소에 남는다.** 화면은
+// 닫혔으니 아무도 못 본다. 그래서 워커가 이어받는다 — 절차는 서버
+// 라우트에 있는 것 하나뿐이고, 여기서는 깨우기만 한다.
+const CANCEL_IN_FLIGHT_STATES = ['CANCEL_REQUESTED', 'CLOSING', 'CLEANING_PROTECTION'];
+let lastCancelPollMs: number | null = null;
+async function pollSmokeCancels(): Promise<void> {
+  if (!APP_URL || !APP_ADMIN_SECRET) return;   // 위에서 이미 한 번 경고했다
+
+  const nowMs = Date.now();
+  if (!shouldPollNow(lastCancelPollMs, nowMs, POLL_INTERVAL_MS)) return;
+  lastCancelPollMs = nowMs;
+
+  // **끝내야 할 것이 있을 때만 부른다.**
+  let pending = 0;
+  try {
+    const { data, error } = await sb().from('smoke_runs')
+      .select('id').in('state', CANCEL_IN_FLIGHT_STATES).limit(10);
+    if (error) throw new Error(error.message);
+    pending = Array.isArray(data) ? data.length : 0;
+  } catch (e: any) {
+    // 055가 아직인 배포도 있다. 그건 오류가 아니라 '아직'이다.
+    if (!/does not exist|schema cache|relation/i.test(String(e?.message || e))) {
+      console.error('[smoke] 중지 중인 묶음을 읽지 못했습니다:', e?.message || e);
+    }
+    return;
+  }
+  if (pending === 0) return;
+
+  try {
+    const r = await fetch(`${APP_URL}/api/autotrade/smoke-test/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-secret': APP_ADMIN_SECRET },
+      body: JSON.stringify({ resume: true }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    for (const c of (Array.isArray(j?.resumed) ? j.resumed : [])) {
+      console.log(`[smoke] 중지 이어받기 ${c.runId} → ${c.code} — ${c.message}`);
+    }
+  } catch (e: any) {
+    // **여기서 조용히 넘기면 중지가 끝나지 않은 채로 남는다.**
+    console.error('[smoke] 중지 이어받기 실패:', e?.message || e);
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -683,6 +737,9 @@ async function tick() {
   // 청산이 끝난 뒤에 다음 회차를 본다 — 순서가 반대면 방금 닫힌 회차를
   // 아직 '진행 중'으로 읽어 한 주기를 통째로 흘린다.
   await pollSmokeRuns();
+  // **사람이 누른 "지금 테스트 종료"를 끝까지 처리한다.**
+  // 브라우저를 닫아도 청산과 보호주문 정리가 끝나야 한다.
+  await pollSmokeCancels();
   // 계단식 청산 감시(트레일링·본전이동·시간청산)는 이 워커가 하지 않는다.
   // Binance가 이 서버의 IP 지역을 차단해 주문이 나가지 않기 때문이다
   // (jobs 테이블에 "Service unavailable from a restricted location" 기록).

@@ -23,6 +23,8 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { advanceVerdict, runProgress, runSummary } from '@/lib/smoke/smokeRun';
 import { startAttempt, type AttemptSource } from '@/lib/smoke/startAttempt';
 import { attemptSummaryOf, stepPassCounts } from '@/lib/smoke/view';
+import { stopIntentVerdict } from '@/lib/smoke/cancelRun';
+import { stopAfterCurrent } from '@/lib/smoke/cancelOps';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -56,23 +58,32 @@ export async function POST(req: NextRequest) {
 
   // ── 사람이 중지시키는 경우 ──
   //
-  // 반복 중에 "그만"이 있어야 한다. 없으면 사용자는 예약을 지우거나
-  // 거래소에서 직접 닫게 되고, 그게 더 위험하다.
-  // **도는 회차는 그대로 둔다** — 열린 포지션은 워커가 마감 시각에 닫는다.
-  // 여기서 멈추는 것은 '다음 회차를 더 열지 않는다'이다.
-  if (body?.stop === true && body?.runId) {
-    const { data, error } = await (sb as any).from('smoke_runs')
-      .update({ state: 'STOPPED', reason: '사람이 중지했습니다 — 이미 열린 회차는 마감 시각에 청산됩니다',
-        closed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', String(body.runId)).eq('user_id', userId ?? '').eq('state', 'RUNNING').select('id');
-    if (error) return NextResponse.json({ ok: false, error: 'update_failed', message: error.message }, { status: 500 });
-    if (!Array.isArray(data) || data.length === 0) {
-      return NextResponse.json({ ok: false, error: 'not_found',
-        message: '진행 중인 그 반복 테스트를 찾지 못했습니다' }, { status: 404 });
+  // **이 경로는 언제나 '다음 회차 중지'다.** 지금 회차는 원래 마감
+  // 시각까지 그대로 가고, 워커가 그때 닫는다. 그 동작은 옳다 — 틀렸던
+  // 것은 화면이 그걸 "즉시중지"로 읽히게 한 것이었다.
+  //
+  // **지금 당장 그만**은 다른 요청이고 다른 경로다(`/cancel`의
+  // `intent: 'CANCEL_NOW'`). 뜻이 둘인데 이름이 하나면 서버가 하나를
+  // 고르게 되고, 고른 쪽이 사람이 생각한 쪽이라는 보장이 없다.
+  // 그래서 **둘을 한 요청에 섞어 보내면 거절한다.**
+  if (body?.stop !== undefined || body?.intent !== undefined) {
+    const iv = stopIntentVerdict(body);
+    if (!iv.ok || !iv.intent || !iv.runId) {
+      return NextResponse.json({ ok: false, error: iv.code.toLowerCase(), message: iv.message },
+        { status: 400 });
     }
-    return NextResponse.json({ ok: true, stopped: String(body.runId),
-      message: '다음 회차를 더 시작하지 않습니다 — 이미 열린 회차는 마감 시각에 청산됩니다' },
-      { headers: { 'Cache-Control': 'no-store' } });
+    if (iv.intent === 'CANCEL_NOW') {
+      return NextResponse.json({
+        ok: false, error: 'wrong_route',
+        message: '지금 테스트 종료는 /api/autotrade/smoke-test/cancel 로 보내세요 — '
+          + '이 경로는 다음 회차 중지만 합니다',
+      }, { status: 400 });
+    }
+    const r = await stopAfterCurrent(sb, { runId: iv.runId, userId });
+    return NextResponse.json({
+      ok: r.ok, intent: iv.intent, code: r.code, state: r.state,
+      stopped: r.ok ? r.runId : null, message: r.message,
+    }, { status: r.status, headers: { 'Cache-Control': 'no-store' } });
   }
 
   // ── 진행 중인 묶음을 본다 ──
