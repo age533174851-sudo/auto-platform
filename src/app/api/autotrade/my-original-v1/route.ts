@@ -524,8 +524,19 @@ export async function POST(req: NextRequest) {
   try {
     const ops = await import('@/lib/engine/venuePositionOps');
     const { entryGate, reversalProgress } = await import('@/lib/engine/positionLifecycle');
-    const { orphanCleanupPlan, cleanupOutcome } = await import('@/lib/engine/orderOwnership');
     const { closeVerdict } = await import('@/lib/engine/closeEvidence');
+    // **정리 절차는 한 곳뿐이다.** 반전 뒤에도, 이미 0인 경우에도,
+    // 청산 감시가 포지션이 사라진 것을 본 뒤에도 같은 함수를 부른다.
+    const { cleanupOwnedProtectionWhenFlat, loadOwnedProtectionIds } =
+      await import('@/lib/engine/protectionCleanup');
+
+    // **걸 때 받아 적어 둔 거래소 주문 번호가 1순위 소유 증거다.**
+    // 식별자(text)는 형식이 한 번 깨지면 내 주문이 UNKNOWN이 되고,
+    // UNKNOWN은 안전을 이유로 안 지우므로 거래소에 계속 쌓인다.
+    // `live_orders.sl_order_id`·`tp_order_id`는 TEXT라 Gate의 int64
+    // 번호도 자릿수 그대로 남아 있다(#139).
+    const owned = await loadOwnedProtectionIds(sb, { connectionId, symbol, limit: 5 });
+    const ownedProtectionIds = owned.ids;
 
     const before = await ops.readOpenPosition(venue, symbol);
     const gate = entryGate({ read: before, desiredSide: sig.side });
@@ -544,6 +555,43 @@ export async function POST(req: NextRequest) {
       }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    // ── 이미 0인데 보호주문이 남아 있는 경우 ──
+    //
+    // **이 블록이 없어서 실제 자동매매에 고아가 남았다.**
+    //
+    // `entryGate`는 `read.ok && !found`면 곧바로 PROCEED를 준다. 그래서
+    // 거래소 SL이나 TP가 포지션을 닫아 준 다음 날, 남은 형제 주문
+    // (SL이 맞았으면 TP, TP가 맞았으면 SL)이 아무에게도 청구되지 않고
+    // 그대로 있었다. 실제 Gate: **Positions 0 / Orders 1.**
+    //
+    // 그 위로 새 SL/TP를 얹으면 다음 진입이 옛 주문에 맞아 예상치 못하게
+    // 닫힌다. 그래서 **진입 직전에** 치우고, 치웠는지 재조회로 확인하고,
+    // 확인하지 못하면 들어가지 않는다.
+    if (gate.ok && !gate.needsReversal) {
+      const flat = await cleanupOwnedProtectionWhenFlat(venue, symbol, {
+        position: { ok: before.ok, found: before.found, qty: before.qty },
+        myStrategyId: STRATEGY_MY_ORIGINAL_V1,
+        ownedIds: ownedProtectionIds,
+      });
+      lifecycle.flatCleanup = {
+        code: flat.code, ok: flat.ok, blockEntry: flat.blockEntry,
+        cancelled: flat.cancelled, stillPresent: flat.stillPresent,
+        unknown: flat.unknown, kept: flat.kept,
+        rounds: flat.rounds, leftoverReadable: flat.leftoverReadable,
+        reason: flat.reason,
+      };
+
+      if (flat.blockEntry) {
+        // **거래일을 소비하지 않는다.** 정리가 되면 같은 창 안에 다시 본다.
+        const why = `기존 보호주문을 정리하지 못했습니다 — ${flat.reason}`;
+        await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });
+        return NextResponse.json({
+          ...base, ok: false, outcome: 'BLOCKED', blocked: flat.code,
+          lifecycle, message: why,
+        }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
+
     if (gate.needsReversal) {
       // ── 반전 ──
       //
@@ -558,28 +606,33 @@ export async function POST(req: NextRequest) {
       });
 
       // 포지션이 0으로 확인됐을 때만 고아 정리로 넘어간다.
-      const orders = cv.closed ? await ops.readProtectiveOrders(venue, symbol) : null;
-      const plan = orphanCleanupPlan({
+      //
+      // **예전에는 여기서 HTTP 200을 '지웠다'로 적었다.** 조건부 주문은
+      // 200 뒤에도 남아 있을 수 있고 실제로 남았다. 이제 이 경로도
+      // 신규 진입 직전 경로와 **같은 함수**를 쓴다 — 요청 → 재조회 →
+      // 아직 있으면 재시도, 끝까지 남으면 통과가 아니다.
+      const cleaned = await cleanupOwnedProtectionWhenFlat(venue, symbol, {
         position: { ok: after.ok, found: after.found, qty: after.qty },
-        orders, myStrategyId: STRATEGY_MY_ORIGINAL_V1,
+        myStrategyId: STRATEGY_MY_ORIGINAL_V1,
+        ownedIds: ownedProtectionIds,
       });
-      // **내 것이라고 확인된 id만** 취소한다. cancelAll은 남의 손절을 지운다.
-      const cancelRes = plan.cancel.length
-        ? await ops.cancelProtectiveOrders(venue, symbol, plan.cancel)
-        : { cancelled: [] as string[], failed: [] as any[] };
-      const cleaned = cleanupOutcome({ plan, cancelled: plan.ok ? cancelRes.cancelled : null });
 
       const rv = reversalProgress({
         closeRequested: closeRes.attempted,
         closeAccepted: closeRes.attempted ? closeRes.ok : null,
         closeVerdict: cv,
-        protectionCleaned: cleaned.cleaned,
+        protectionCleaned: cleaned.ok,
       });
       lifecycle.reversal = {
         stage: rv.stage, code: rv.code, ok: rv.ok,
         close: { attempted: closeRes.attempted, accepted: closeRes.ok, error: closeRes.error },
         closeVerdict: { closed: cv.closed, code: cv.code, reason: cv.reason },
-        cleanup: { code: plan.code, cancelled: cancelRes.cancelled, kept: plan.keep, reason: cleaned.reason },
+        cleanup: {
+          code: cleaned.code, cancelled: cleaned.cancelled, kept: cleaned.kept,
+          stillPresent: cleaned.stillPresent, unknown: cleaned.unknown,
+          rounds: cleaned.rounds, leftoverReadable: cleaned.leftoverReadable,
+          reason: cleaned.reason,
+        },
       };
 
       if (!rv.ok) {

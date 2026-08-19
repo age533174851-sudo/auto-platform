@@ -46,6 +46,13 @@ async function runPositionGuards(
   testnet: boolean,
   /** 사용자별 키·망. 없으면 예전처럼 전역 망을 쓴다(하위 호환). */
   connFor?: (uid: string) => Promise<{ key: string; secret: string; testnet: boolean } | null>,
+  /**
+   * 포지션이 이미 0인 종목에서 치운 보호주문 기록을 담는다.
+   *
+   * **결과를 응답에 싣기 위한 것이지 판단에 쓰지 않는다** — 정리 여부가
+   * 청산 판단을 바꾸면 안 된다.
+   */
+  orphanCleanups?: any[],
 ): Promise<{ tradeId: string; symbol: string; verdict: GuardVerdict }[]> {
   if (decisions.length === 0) return [];
 
@@ -92,9 +99,49 @@ async function runPositionGuards(
       };
       const snap = await ops.readGuardSnapshot(venue, d.symbol);
 
-      // 거래소에 포지션이 없으면 이미 닫힌 것 — 점검 대상이 아니다.
+      // ── 거래소에 포지션이 없다 ──
+      //
+      // 이미 닫힌 것이므로 청산 점검 대상은 아니다.
       // **조회에 성공했을 때만 그렇게 읽는다.**
-      if (snap.ok && !snap.found) continue;
+      //
+      // 그런데 예전에는 여기서 그냥 넘어갔다. 그래서 **거래소 SL이나
+      // TP가 포지션을 닫아 준 직후, 남은 형제 주문이 아무에게도
+      // 청구되지 않고 그대로 남았다.** 다음 날 신규 진입이 그 위에 새
+      // SL/TP를 얹기 전까지 아무도 안 치웠고, 그게 정상 동작처럼
+      // 굳어 있었다 — 실제 Gate에 Positions 0 / Orders 1이 남은 이유다.
+      //
+      // 다음 진입 때까지 기다리지 않는다. **닫힌 그 순간 치운다.**
+      // 여기서는 전략 id를 들고 있지 않으므로 **적어 둔 주문 번호와
+      // 일치하는 것만** 지운다(`ownedOnly`) — 남의 손절은 절대 안 지운다.
+      if (snap.ok && !snap.found) {
+        if (orphanCleanups) {
+          try {
+            const { cleanupOwnedProtectionWhenFlat, loadOwnedProtectionIds } =
+              await import('@/lib/engine/protectionCleanup');
+            const owned = await loadOwnedProtectionIds(sb, { userId: d.userId, symbol: d.symbol, limit: 5 });
+            if (owned.ids.length > 0) {
+              const r = await cleanupOwnedProtectionWhenFlat(venue, d.symbol, {
+                position: { ok: snap.ok, found: snap.found, qty: null },
+                myStrategyId: '', ownedIds: owned.ids, ownedOnly: true,
+              });
+              // **아무것도 안 지운 경우는 적지 않는다** — 매 분 도는
+              // 경로라 로그가 그것만으로 덮인다.
+              if (r.code !== 'NOTHING_TO_DO') {
+                orphanCleanups.push({
+                  symbol: d.symbol, tradeId: d.tradeId, code: r.code, ok: r.ok,
+                  cancelled: r.cancelled, stillPresent: r.stillPresent, unknown: r.unknown,
+                  reason: r.reason,
+                });
+              }
+            }
+          } catch (e: any) {
+            // **조용히 넘기지 않는다.** 못 치웠다는 사실이 남아야 한다.
+            orphanCleanups.push({ symbol: d.symbol, tradeId: d.tradeId, code: 'CLEANUP_ERROR',
+              ok: false, reason: String(e?.message || e) });
+          }
+        }
+        continue;
+      }
 
       const verdict = checkPositionGuard({
         symbol: d.symbol,
@@ -355,7 +402,10 @@ export async function GET(req: NextRequest) {
   // 포지션을 닫아야 할 때다.
   //
   // 이 점검은 방향으로 판단하지 않는다 (positionGuard.ts 참고).
-  const guardFindings = await runPositionGuards(sb, decisions, testnet, connFor);
+  // 포지션이 이미 0이 된 종목에서 치운 보호주문. **판단에 쓰지 않고
+  // 응답에만 싣는다** — 정리 여부가 청산 판단을 바꾸면 안 된다.
+  const orphanCleanups: any[] = [];
+  const guardFindings = await runPositionGuards(sb, decisions, testnet, connFor, orphanCleanups);
   for (const g of guardFindings) {
     if (g.verdict.action !== 'CLOSE') continue;
     const d = decisions.find(x => x.tradeId === g.tradeId);
@@ -372,7 +422,7 @@ export async function GET(req: NextRequest) {
   if (dryRun || actionable.length === 0) {
     return NextResponse.json({
       ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
-      alerts, recovery,
+      alerts, recovery, orphanCleanups,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
         highWaterR: Number(d.highWaterR.toFixed(3)),
@@ -510,7 +560,7 @@ export async function GET(req: NextRequest) {
     `${decisions.length}건 확인 · ${actionable.length}건 처리`, cronStartedAt);
 
   return NextResponse.json({
-    ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, results,
+    ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, orphanCleanups, results,
     cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
