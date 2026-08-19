@@ -22,7 +22,7 @@ import {
   envWalletOf, bucketsOf, totalAcrossEnvs, type ConnectionWallet,
 } from '@/lib/portfolio/walletOverview';
 import { snapshotVerdict, snapshotRow } from '@/lib/portfolio/snapshotPlan';
-import { equityPerformanceOf, elapsedText, type EquitySnapshot } from '@/lib/portfolio/performance';
+import { equityPerformanceOf, elapsedText, newestFirstToAsc, latestTakenMs, type EquitySnapshot } from '@/lib/portfolio/performance';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -41,9 +41,12 @@ export async function GET(req: NextRequest) {
   let conns: any[] | null = null;
   let connError: string | null = null;
   try {
+    // **기본 합산은 살아 있는 연결만.** 비활성/옛 연결까지 조회하면 그
+    // 실패 하나 때문에 환경 전체 총자산이 "확인 불가"가 되고, 쓸데없는
+    // 거래소 호출도 늘어난다. 비활성은 아래에서 따로 보여준다.
     const { data, error } = await (sb as any).from('exchange_connections')
-      .select('id, exchange_id, label, is_testnet, has_withdrawal')
-      .eq('user_id', uid);
+      .select('id, exchange_id, label, is_testnet, has_withdrawal, is_active')
+      .eq('user_id', uid).eq('is_active', true);
     if (error) throw new Error(error.message);
     conns = (data || []).filter((c: any) => {
       const ex = String(c.exchange_id ?? '').toLowerCase();
@@ -76,12 +79,22 @@ export async function GET(req: NextRequest) {
       error: r.ok ? null : (r.message ?? r.error),
       futures: r.futures ? {
         ok: r.futures.ok,
+        // **포지션을 못 읽었으면 미실현손익은 모르는 값이다.**
+        positionsOk: r.positionsOk,
         walletBalance: (r.futures as any).walletBalance ?? null,
         availableMargin: (r.futures as any).availableMargin ?? null,
         positionMargin: (r.futures as any).positionMargin ?? null,
         unrealizedPnl: (r.futures as any).unrealizedPnl ?? null,
       } : null,
-      spot: r.spot ? { ok: r.spot.ok, usdt: (r.spot as any).usdt ?? null } : null,
+      // **현물은 USDT만이 아니라 전체 평가액을 넘긴다.** 예전에는
+      // `usdt`만 넘겨서 BTC·ETH가 총자산에서 통째로 빠졌다.
+      spot: r.spot ? {
+        ok: r.spot.ok,
+        usdt: (r.spot as any).usdt ?? null,
+        valueUsd: r.tree?.spotValueUsd ?? null,
+        knownValueUsd: r.tree?.spotKnownValueUsd ?? null,
+        unpriced: r.tree?.spotUnpriced ?? [],
+      } : null,
     };
   }));
 
@@ -108,8 +121,13 @@ export async function GET(req: NextRequest) {
       const { data } = await (sb as any).from('account_equity_snapshots')
         .select('taken_at, total_equity, realized_pnl, unrealized_pnl, deposit, withdrawal, transfer, fees, funding')
         .eq('user_id', uid).eq('env', e.env)
-        .order('taken_at', { ascending: true }).limit(2000);
-      history = (Array.isArray(data) ? data : []).map((r: any) => ({
+        // **최신부터 읽는다.** 예전에는 `ascending: true` + `limit(2000)`
+        // 이라 15분마다 찍으면 약 3주 뒤부터 **가장 오래된 2000개**만
+        // 계속 읽었다. 그러면 `lastTakenMs`가 옛 시각에 고정되고,
+        // "15분 지났다"는 판정이 매 요청마다 참이 되어 표가 부풀며,
+        // 성과 곡선과 현재 자산 기준점도 전부 옛 구간을 본다.
+        .order('taken_at', { ascending: false }).limit(2000);
+      history = newestFirstToAsc((Array.isArray(data) ? data : []).map((r: any) => ({
         takenAt: Date.parse(String(r.taken_at)),
         totalEquity: r.total_equity == null ? null : Number(r.total_equity),
         realizedPnl: r.realized_pnl == null ? null : Number(r.realized_pnl),
@@ -118,9 +136,9 @@ export async function GET(req: NextRequest) {
         withdrawal: r.withdrawal == null ? null : Number(r.withdrawal),
         fees: r.fees == null ? null : Number(r.fees),
         funding: r.funding == null ? null : Number(r.funding),
-      }));
-      const lastRow = history[history.length - 1];
-      lastTakenMs = lastRow && Number.isFinite(lastRow.takenAt) ? lastRow.takenAt : null;
+      })));
+      // **가장 최근 시각을 값으로 고른다.** 배열의 끝을 믿지 않는다.
+      lastTakenMs = latestTakenMs(history);
     } catch {
       // 표가 없거나 못 읽었다. **찍지 않는다** — 마지막 시각을 모르면
       // 매 요청마다 찍게 되고, 그건 표를 부풀린다.
@@ -130,23 +148,32 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
+    // **찍는 값은 canonical 총자산이다.**
+    //
+    // 예전에는 `e.futures.value`(선물 지갑잔고)를 `total_equity`로 적었다.
+    // 현물도 미실현손익도 빠진 값이다. 그런데 화면은 그걸 "시작 자산 ·
+    // 현재 자산 · 최고 자산 · MDD"로 보여줬다 — 이름과 내용이 달랐다.
+    //
+    // 그리고 **하나라도 모르면 찍지 않는다.** 값을 못 매긴 자산이 있는
+    // 순간의 부분합계를 찍으면, 그날 자산이 줄어든 것으로 곡선에 남고
+    // 그 기록은 되돌릴 수 없다.
     const v = snapshotVerdict({
       nowMs, lastTakenMs,
       connections: e.connections,
-      totalEquity: e.futures.value,
+      totalEquity: e.total.value,
     });
     snapshotNotes.push({ env: e.env, code: v.code, reason: v.reason });
 
-    if (v.take && e.futures.value != null) {
+    if (v.take && e.total.value != null && e.unpricedAssets.length === 0) {
       const row = snapshotRow({
         userId: uid, env: e.env, takenAtMs: nowMs,
-        totalEquity: e.futures.value,
+        totalEquity: e.total.value,
         unrealizedPnl: e.unrealizedPnl.value,
       });
       try {
         await (sb as any).from('account_equity_snapshots').insert(row);
         history = [...history, {
-          takenAt: nowMs, totalEquity: e.futures.value,
+          takenAt: nowMs, totalEquity: e.total.value,
           unrealizedPnl: e.unrealizedPnl.value,
         }];
       } catch { /* 못 남겨도 화면은 보여준다 — 다음 주기에 다시 찍는다 */ }
@@ -173,6 +200,7 @@ export async function GET(req: NextRequest) {
     // **합치지 않는 이유를 값으로 준다** — 화면이 문장을 지어내지 않게.
     across: totalAcrossEnvs(),
     note: '실전 · 테스트넷 · 모의 자산은 합치지 않습니다. '
-      + '한 연결이라도 읽지 못하면 그 환경의 합계는 "확인 불가"입니다 — 부분 합계를 총자산으로 적지 않습니다',
+      + '한 연결이라도 읽지 못하거나 값을 매기지 못한 자산이 있으면 그 환경의 총자산은 "확인 불가"입니다 — '
+      + '부분 합계를 총자산으로 적지 않습니다. 총자산 = 현물 전체 평가액 + 선물 순자산(지갑잔고 + 미실현손익)',
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

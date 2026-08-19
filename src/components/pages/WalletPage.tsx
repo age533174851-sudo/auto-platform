@@ -26,6 +26,8 @@ import React, { useEffect, useState } from 'react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { Card } from './SharedUI';
+// 지갑 숫자는 **USD 기준**이다. 라벨만 바꾸는 통화 전환을 막는다.
+import { moneyView, currencyAvailable } from '@/lib/portfolio/walletMoney';
 import {
   WALLET_TABS, tabOf, ENV_LABEL, ENV_NOTE,
   amountOf, totalEquityOf, totalAcrossEnvs, bucketsForTab,
@@ -99,11 +101,24 @@ export default function WalletPage() {
       { id: `${e}-longterm`, label: '장기투자', env: e, kind: 'longterm' as const, amount: amountOf(null, 'NOT_APPLICABLE') },
     ]));
 
+  // **총자산은 서버가 만든 canonical 값이다.**
+  //
+  // 버킷을 화면에서 다시 더하면 화면마다 다른 총자산이 생긴다. 서버가
+  // 준 값이 있으면 그것을 쓰고, 없을 때만(로딩·실패) 버킷 합계를 쓴다.
+  const envTotal: any = (Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env)?.total ?? null;
   const total = totalEquityOf(env, buckets);
   const change = equityChangeOf(null, {});
   const pnl = todayPnlLabel(change);
   const cross = totalAcrossEnvs();
+  // 환율 공급원이 아직 없다. **null은 '1:1'이 아니라 '모른다'이다** —
+  // 그래서 KRW 버튼이 잠긴다. 환율을 붙이면 여기에만 넣으면 된다.
+  const fxRate = null;
   const shown = bucketsForTab(tab, total.buckets);
+  // **총자산은 USD 기준 한 값이고, 통화 전환은 환율이 있을 때만 한다.**
+  const totalUsd: number | null = envTotal?.value ?? total.total ?? null;
+  const totalMoney = moneyView(totalUsd, cur as any, fxRate);
+  const envNote: string = (Array.isArray(data?.envs) ? data.envs : [])
+    .find((e: any) => e?.env === env)?.note ?? '';
 
   // ── 그래프 ──
   //
@@ -133,12 +148,21 @@ export default function WalletPage() {
     ? data.accounts.map((a: any) => ({
       id: String(a.id),
       label: a.label || a.exchangeId || a.id,
-      env: a.env ?? 'LIVE',
+      // **모르는 환경을 LIVE로 승격하지 않는다.**
+      //
+      // 서버는 `is_testnet`을 못 읽으면 `env: null`을 정직하게 보낸다.
+      // 그걸 여기서 'LIVE'로 바꾸면, 정체를 모르는 연결이 **실계좌
+      // 합계**에 들어간다 — 이 저장소가 계속 지켜 온 "모르면 LIVE라고
+      // 하지 않는다"와 정면으로 충돌한다. null은 null로 둔다.
+      env: a.env ?? null,
       exchange: a.exchangeId ?? '',
     })) as any
     : [];
   const accounts = accountsForEnv(env, allAccounts);
   const accountsNote = accountsNoteOf(accounts);
+  // 환경을 못 읽은 연결. **어느 환경 합계에도 넣지 않고 따로 알린다** —
+  // 안 보여주면 사용자는 그 계좌가 사라진 줄 안다.
+  const unknownEnvAccounts = allAccounts.filter((a: any) => a?.env == null);
 
   // ── 탭별 자료 ──
   const futuresAccounts: Array<{ name: string; rows: ReturnType<typeof futuresRowsOf>; sync: string }> = [];
@@ -281,24 +305,38 @@ export default function WalletPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
           <span style={{ color: T.muted, fontSize: 10 }}>총 평가자산 · {ENV_LABEL[env]}</span>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 3 }}>
-            {CURRENCIES.map(c => (
-              <button key={c} onClick={() => setCur(c)} style={{
-                minHeight: 22, padding: '2px 7px', borderRadius: 6, cursor: 'pointer',
-                background: cur === c ? T.acg : 'transparent',
-                color: cur === c ? T.acl : T.muted,
-                border: `1px solid ${cur === c ? T.acl : T.border}`, fontSize: 9, fontWeight: 700,
-              }}>{c}</button>
-            ))}
+            {/* **환율이 없으면 그 통화는 잠근다.**
+                예전에는 숫자를 그대로 두고 라벨만 바꿨다 — 5,000 USDT가
+                버튼 한 번에 ₩5,000으로 보일 수 있었다. */}
+            {CURRENCIES.map(c => {
+              const on = currencyAvailable(c as any, fxRate);
+              return (
+                <button key={c} onClick={() => on && setCur(c)} disabled={!on}
+                  title={on ? '' : '환율을 읽지 못해 이 통화로 볼 수 없습니다'}
+                  style={{
+                    minHeight: 22, padding: '2px 7px', borderRadius: 6,
+                    cursor: on ? 'pointer' : 'not-allowed', opacity: on ? 1 : 0.45,
+                    background: cur === c ? T.acg : 'transparent',
+                    color: cur === c ? T.acl : T.muted,
+                    border: `1px solid ${cur === c ? T.acl : T.border}`, fontSize: 9, fontWeight: 700,
+                  }}>{c}</button>
+              );
+            })}
           </div>
         </div>
+        {/* **서버가 만든 canonical 총자산을 그대로 쓴다.**
+            = 현물 전체 평가액 + 선물 순자산. 화면에서 다시 더하지 않는다 —
+            그러면 홈과 지갑이 서로 다른 총자산을 보인다. */}
         <div style={{
-          color: total.total == null ? T.muted : T.txt,
-          fontSize: total.total == null ? 16 : 26, fontWeight: 900, ...numFont,
+          color: totalUsd == null ? T.muted : T.txt,
+          fontSize: totalUsd == null ? 16 : 26, fontWeight: 900, ...numFont,
         }}>
-          {total.total == null ? '확인 불가' : `${total.total.toLocaleString('ko-KR')} ${cur}`}
+          {totalUsd == null ? '확인 불가' : totalMoney.text}
         </div>
-        {total.note && (
-          <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{total.note}</div>
+        {(total.note || envNote || totalUsd != null) && (
+          <div style={{ ...muted, color: T.ylw, marginTop: 6, overflowWrap: 'anywhere' }}>
+            {[envNote, total.note, totalUsd != null ? totalMoney.reason : ''].filter(Boolean).join(' · ')}
+          </div>
         )}
 
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 10, paddingTop: 10 }}>

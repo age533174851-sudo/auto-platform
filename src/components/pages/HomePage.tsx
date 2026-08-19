@@ -3,6 +3,9 @@ import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
+// 지갑 숫자는 **USD 기준**이다. cvt()는 입력이 KRW라고 가정하므로
+// 여기 쓰면 원화 기호만 붙거나 환율로 나눠 버린다 — 둘 다 몇 배 틀린다.
+import { moneyView } from '@/lib/portfolio/walletMoney';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
 import type { Asset } from '@/types';
 import NewsDetailModal from '@/components/NewsDetailModal';
@@ -136,7 +139,13 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
     const live = envs.find((e:any)=>e.env==='LIVE' && e.connections>0);
     return live ?? envs.find((e:any)=>e.connections>0) ?? null;
   })();
-  const totalCell = shownEnv?.futures ?? null;
+  // **총자산은 서버가 만든 canonical 값 하나만 쓴다.**
+  //
+  // 예전에는 `shownEnv.futures`(선물 **지갑잔고**)를 '내 총자산'이라고
+  // 적었다. 현물도, 미실현손익도 빠진 값이다 — 현물에 BTC가 있어도
+  // 홈에서는 없는 돈이었고, 같은 계좌가 지갑 화면과 다른 총자산을
+  // 보였다. 화면이 자기 방식으로 합치면 언제나 이렇게 갈린다.
+  const totalCell = shownEnv?.total ?? null;
 
   return (
     <div>
@@ -164,13 +173,13 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
         <div style={{color:totalCell?.value==null?T.muted:T.txt,fontSize:totalCell?.value==null?15:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:totalCell?.value==null?0:-1.5,overflowWrap:'anywhere'}}>
           {totalCell?.value==null
             ? (walletErr || totalCell?.text || '확인하지 못했습니다')
-            : cvt(totalCell.value,currency)}
+            : moneyView(totalCell.value,currency as any).text}
         </div>
         {shownEnv?.unrealizedPnl?.value!=null && (
           <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
             <span style={{color:T.muted,fontSize:12}}>미실현 손익</span>
             <span style={{color:shownEnv.unrealizedPnl.value>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>
-              {shownEnv.unrealizedPnl.value>=0?'+':''}{cvt(Math.abs(shownEnv.unrealizedPnl.value),currency)}
+              {shownEnv.unrealizedPnl.value>=0?'+':''}{moneyView(Math.abs(shownEnv.unrealizedPnl.value),currency as any).text}
             </span>
           </div>
         )}
