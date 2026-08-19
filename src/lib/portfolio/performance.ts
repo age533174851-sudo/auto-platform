@@ -51,21 +51,88 @@ function sumKnown(rows: Array<number | null | undefined>): number | null {
   return seen === 0 ? null : Number(total.toFixed(8));
 }
 
-export interface CashFlow {
-  /** 입금 합계. **못 읽으면 null** */
-  deposit: number | null;
-  withdrawal: number | null;
-  /** 순입출금 = 입금 − 출금. 둘 중 하나라도 모르면 null */
-  net: number | null;
+/**
+ * **최신부터 읽은 목록을 오래된 순으로 되돌린다.**
+ *
+ * 왜 함수로 두나
+ * ──────────────
+ * 지갑 개요가 스냅샷을 `ascending: true` + `limit(2000)`으로 읽고 있었다.
+ * 15분마다 찍으면 하루 96개, 약 3주면 2000개를 넘는다. 그 뒤로는
+ * **가장 오래된 2000개**만 계속 읽는다:
+ *
+ *   · `lastTakenMs`가 3주 전 시각에 고정된다
+ *   · 그래서 "15분 지났다"가 매 요청마다 참이 되어 표가 부풀고
+ *   · 성과 곡선과 현재 자산 기준점이 전부 옛 구간을 본다
+ *
+ * 나중에 조용히 터지는 종류라, 정렬을 코드가 아니라 **값으로** 확인한다.
+ */
+export function newestFirstToAsc<T extends { takenAt: number }>(rows: T[] | null | undefined): T[] {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  // 이미 정렬돼 온다고 믿지 않는다 — DB 정렬이 바뀌어도 여기서 잡는다.
+  return list.sort((a, b) => (Number(a?.takenAt) || 0) - (Number(b?.takenAt) || 0));
 }
 
+/** 목록에서 가장 최근에 찍힌 시각. **없으면 null이지 0이 아니다** */
+export function latestTakenMs(rows: Array<{ takenAt: number }> | null | undefined): number | null {
+  const list = Array.isArray(rows) ? rows : [];
+  let best: number | null = null;
+  for (const r of list) {
+    const t = Number(r?.takenAt);
+    if (!Number.isFinite(t)) continue;
+    if (best == null || t > best) best = t;
+  }
+  return best;
+}
+
+export interface CashFlow {
+  /** 입금 합계. **기간 전체를 다 읽었을 때만 숫자다** */
+  deposit: number | null;
+  withdrawal: number | null;
+  /** 순입출금 = 입금 − 출금. 하나라도 모르면 null */
+  net: number | null;
+  /**
+   * **기간 전체의 입출금을 빠짐없이 읽었는가.**
+   *
+   * 이게 없으면 매매 손익이 조용히 틀린다. 예전 `sumKnown`은 아는 것만
+   * 더해서 숫자를 만들었다 — 첫날 입금 100, 둘째 날 입금 UNKNOWN이면
+   * 합계가 **정확한 100**처럼 나왔다. 그 값으로
+   * `매매손익 = 자산증가 − 순입출금`을 계산하면, 못 읽은 입금이 전부
+   * 수익으로 둔갑한다. 통합 장부를 붙이기 시작하면 가장 위험해지는
+   * 지점이라 여기서 막는다.
+   */
+  complete: boolean;
+  /** 몇 개 구간을 못 읽었는가 */
+  unknownRows: number;
+  reason: string;
+}
+
+/**
+ * 기간 전체의 입출금.
+ *
+ * **한 구간이라도 모르면 숫자를 만들지 않는다.** 부분합계는 입출금에서
+ * 특히 위험하다 — 빠진 입금이 그대로 '번 돈'이 되기 때문이다.
+ */
 export function cashFlowOf(snaps: EquitySnapshot[]): CashFlow {
   const list = Array.isArray(snaps) ? snaps : [];
+  const unknownRows = list.filter(s => num(s.deposit) == null || num(s.withdrawal) == null).length;
+  const complete = list.length > 0 && unknownRows === 0;
+
+  if (!complete) {
+    return {
+      deposit: null, withdrawal: null, net: null, complete: false, unknownRows,
+      reason: list.length === 0
+        ? '입출금 기록이 없습니다 — 0이 아니라 모르는 것입니다'
+        : `${list.length}개 구간 중 ${unknownRows}개의 입출금을 읽지 못했습니다 — `
+          + '부분 합계로 매매 손익을 계산하지 않습니다',
+    };
+  }
+
   const deposit = sumKnown(list.map(s => s.deposit));
   const withdrawal = sumKnown(list.map(s => s.withdrawal));
   const net = deposit == null || withdrawal == null ? null
     : Number((deposit - withdrawal).toFixed(8));
-  return { deposit, withdrawal, net };
+  return { deposit, withdrawal, net, complete: true, unknownRows: 0,
+    reason: `${list.length}개 구간의 입출금을 모두 읽었습니다` };
 }
 
 export type PerfCode = 'OK' | 'NO_SNAPSHOTS' | 'ONE_SNAPSHOT' | 'EQUITY_UNKNOWN';

@@ -21,7 +21,7 @@ const spot = (over: Partial<SpotWallet> = {}): SpotWallet => ({
 
 const fut = (over: Partial<FuturesWallet> = {}): FuturesWallet => ({
   ok: true, walletBalance: 200, availableMargin: 150,
-  positionMargin: 50, unrealizedPnl: 10,
+  positionsOk: true, positionMargin: 50, unrealizedPnl: 10,
   ...over,
 });
 
@@ -88,14 +88,20 @@ export function runWalletTests() {
 
   console.log('[통합 자산 — 값을 못 매긴 자산]');
 
-  test('가격을 모르는 자산은 합계에서 빼되 이름을 남긴다', () => {
+  test('**가격을 모르는 자산이 하나라도 있으면 현물 평가액도 총자산도 만들지 않는다**', () => {
+    // 예전에는 아는 것만 더해 `spotValueUsd = 1000`을 만들었다. 그러면
+    // 화면에 "현물 1,000"이 뜨는데 실제로는 값을 모르는 XYZ가 더 있다 —
+    // 부분합계를 총액이라고 적은 것이다. 부분합계가 필요하면
+    // `spotKnownValueUsd`로 따로 본다.
     const t = buildWalletTree(spot({
       assets: [
         { asset: 'USDT', free: 1000, locked: 0, valueUsd: 1000 },
         { asset: 'XYZ', free: 5, locked: 0, valueUsd: null },
       ],
     }), fut());
-    eq(t.spotValueUsd, 1000, '값을 모르는 자산을 0으로 더했다');
+    eq(t.spotValueUsd, null, '값을 모르는 자산이 있는데 현물 평가액을 확정했다');
+    eq(t.totalUsd, null, '미평가 자산이 있는데 총자산을 만들었다');
+    eq(t.spotKnownValueUsd, 1000, '확인된 부분합계는 따로 남아야 한다');
     eq(t.spotUnpriced.join(','), 'XYZ', '빠진 자산을 알려주지 않으면 이유를 알 수 없다');
   });
 

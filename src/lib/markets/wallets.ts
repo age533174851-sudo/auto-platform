@@ -51,21 +51,39 @@ export interface FuturesWallet {
   walletBalance: number;
   /** 신규 주문에 쓸 수 있는 증거금 */
   availableMargin: number;
-  /** 열린 포지션이 잡고 있는 증거금 */
-  positionMargin: number;
-  /** 미실현 손익 */
-  unrealizedPnl: number;
+  /**
+   * **포지션 목록을 읽었는가.**
+   *
+   * 잔고 조회와 포지션 조회는 다른 호출이고 따로 실패한다. 예전에는
+   * 포지션 조회가 실패하면 빈 배열로 바꿔서 미실현손익이 **0**이 됐다 —
+   * 주문 엔진에서 몇 번이나 고쳤던 "조회 실패를 0으로 읽는" 바로 그
+   * 패턴이 지갑에 남아 있었다. 0은 '손익이 없다'이고 실패는 '모른다'다.
+   */
+  positionsOk: boolean;
+  /** 열린 포지션이 잡고 있는 증거금. **못 읽었으면 null** */
+  positionMargin: number | null;
+  /** 미실현 손익. **못 읽었으면 null이지 0이 아니다** */
+  unrealizedPnl: number | null;
   error?: string;
 }
 
 export interface WalletTree {
   spot: SpotWallet;
   futures: FuturesWallet;
-  /** 현물 총 평가액(USD). 값을 못 매긴 자산이 있으면 그만큼 빠진다 */
+  /**
+   * 현물 총 평가액(USD).
+   *
+   * **가격을 못 매긴 자산이 하나라도 있으면 null이다.** 예전에는 아는
+   * 것만 더해서 숫자를 만들었고, 그러면 "현물 10,000"이라고 적히지만
+   * 실제로는 값을 모르는 코인이 더 있는 상태였다. 부분합계는 총액이
+   * 아니다 — 부분합계가 필요하면 `spotKnownValueUsd`를 쓴다.
+   */
   spotValueUsd: number | null;
+  /** 값을 매길 수 있었던 자산만의 합. **총액이라고 적으면 안 된다** */
+  spotKnownValueUsd: number | null;
   /** 현물에서 USD 값을 못 매긴 자산 이름들 — 화면에 그대로 알려야 한다 */
   spotUnpriced: string[];
-  /** 선물 순자산 = 지갑잔고 + 미실현손익 */
+  /** 선물 순자산 = 지갑잔고 + 미실현손익. **미실현을 모르면 null** */
   futuresEquity: number | null;
   /** 총자산. 한쪽이라도 모르면 null */
   totalUsd: number | null;
@@ -127,9 +145,10 @@ export function usdtFromFuturesBalances(
 
 export function buildWalletTree(spot: SpotWallet, futures: FuturesWallet): WalletTree {
   // ── 현물 평가액 ──
-  // 가격을 못 매긴 자산은 합계에서 빼되, 이름을 남긴다. 조용히 빼면
-  // 총자산이 실제보다 적게 보이고 그 이유를 알 수 없다.
-  let spotValueUsd: number | null = null;
+  // 가격을 못 매긴 자산이 있으면 **총액을 만들지 않는다.** 이름만 남기고
+  // 숫자를 내면, 화면에는 "총자산 10,000"이 뜨는데 실제로는 값을 모르는
+  // 코인이 더 있는 상태가 된다. 그건 틀린 총자산이다.
+  let spotKnownValueUsd: number | null = null;
   const unpriced: string[] = [];
   if (spot.ok) {
     let sum = 0;
@@ -137,10 +156,15 @@ export function buildWalletTree(spot: SpotWallet, futures: FuturesWallet): Walle
       if (a.valueUsd == null) { unpriced.push(a.asset); continue; }
       sum += a.valueUsd;
     }
-    spotValueUsd = sum;
+    spotKnownValueUsd = Number(sum.toFixed(8));
   }
+  const spotValueUsd = spot.ok && unpriced.length === 0 ? spotKnownValueUsd : null;
 
-  const futuresEquity = futures.ok ? futures.walletBalance + futures.unrealizedPnl : null;
+  // 미실현손익을 못 읽었으면 순자산도 모른다. 0으로 두면 포지션이
+  // 열려 있는 계좌의 순자산이 지갑잔고와 같아진다.
+  const futuresEquity = futures.ok && futures.unrealizedPnl != null
+    ? Number((futures.walletBalance + futures.unrealizedPnl).toFixed(8))
+    : null;
 
   // 한쪽이라도 모르면 합계를 내지 않는다. 반쪽 합계는 틀린 합계다.
   const totalUsd = spotValueUsd != null && futuresEquity != null
@@ -150,6 +174,7 @@ export function buildWalletTree(spot: SpotWallet, futures: FuturesWallet): Walle
   return {
     spot, futures,
     spotValueUsd,
+    spotKnownValueUsd,
     spotUnpriced: unpriced,
     futuresEquity,
     totalUsd,
@@ -228,5 +253,7 @@ export function spotAllocation(spot: SpotWallet): { asset: string; valueUsd: num
 /** 조회 실패를 나타내는 값. 0으로 채운 지갑과 구분된다 */
 export const SPOT_UNAVAILABLE: SpotWallet = { ok: false, assets: [], usdt: 0 };
 export const FUTURES_UNAVAILABLE: FuturesWallet = {
-  ok: false, walletBalance: 0, availableMargin: 0, positionMargin: 0, unrealizedPnl: 0,
+  ok: false, walletBalance: 0, availableMargin: 0,
+  // **0이 아니라 null이다.** 조회 실패를 '손익 0'으로 읽지 않는다.
+  positionsOk: false, positionMargin: null, unrealizedPnl: null,
 };

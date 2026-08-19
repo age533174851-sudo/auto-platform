@@ -134,4 +134,54 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`);
+// ── 조회 실패를 0으로 만드는 길 ────────────────────────
+//
+// **0은 '없다'이고 조회 실패는 '모른다'인데, 화면에서는 둘 다 0.00이다.**
+//
+// 주문 엔진에서 몇 번이나 고친 패턴이 지갑에 그대로 남아 있었다:
+//
+//   getPositionsGateFutures(...).catch(() => [])        ← 실패 → 포지션 없음
+//   const positions = res?.success ? res.positions : [] ← 실패 → 포지션 없음
+//
+// 둘 다 미실현손익을 **0**으로 만든다. 포지션이 열려 있는데 손익 0이면
+// 사용자는 본전이라고 읽는다. 한 줄만 새로 써도 그대로 돌아오므로
+// 배선 검사에 넣는다.
+let zeroFiles = [];
+try {
+  const fs = await import('node:fs');
+  zeroFiles = typeof fs.globSync === 'function'
+    ? [...fs.globSync('src/lib/markets/**/*.ts'), ...fs.globSync('src/lib/engine/**/*.ts')]
+    : [];
+} catch { zeroFiles = []; }
+const zeroErrors = [];
+{
+  for (const f of zeroFiles) {
+    if (!f.endsWith('.ts') || f.endsWith('.test.ts')) continue;
+    const src = readFileSync(f, 'utf8');
+    const lines = src.split('\n');
+    lines.forEach((line, i) => {
+      // 주석은 검사하지 않는다 — 고친 이력을 설명하려면 옛 코드를
+      // 인용해야 하는데, 그것까지 잡으면 설명을 못 쓰게 된다.
+      const t = line.trim();
+      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return;
+      // 의도적으로 허용한 곳은 같은 줄에 사유를 적는다.
+      if (line.includes('조회 실패 아님')) return;
+      if (/\.catch\s*\(\s*\(\s*\)\s*=>\s*\[\s*\]\s*\)/.test(line)) {
+        zeroErrors.push(`${f.replaceAll('\\', '/')}:${i + 1}\n     `
+          + '조회 실패를 빈 배열로 바꿉니다 — 실패는 null이지 "없음"이 아닙니다'
+          + ' (허용하려면 같은 줄에 "조회 실패 아님" 사유를 적으세요)');
+      }
+    });
+  }
+}
+if (zeroErrors.length > 0) {
+  console.error('❌ 조회 실패를 0으로 만드는 길이 있습니다:');
+  for (const e of zeroErrors) console.error(`   · ${e}`);
+  console.error('');
+  console.error('   포지션을 못 읽은 것과 포지션이 없는 것은 다릅니다 —');
+  console.error('   전자를 후자로 적으면 미실현손익이 0으로 기록됩니다.');
+  process.exit(1);
+}
+
+console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
+  + ' · 조회 실패를 0으로 만드는 길 0개');
