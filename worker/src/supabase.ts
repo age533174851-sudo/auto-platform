@@ -48,6 +48,48 @@ export async function releaseLock(name: string, holder: string): Promise<void> {
 // `GIT_SHA`는 Dockerfile의 ARG로 들어온다(fly-deploy가 --build-arg로
 // 넘긴다). 없으면 빈 문자열이고, 그건 **"모름"이지 "같음"이 아니다** —
 // 읽는 쪽(`/api/system/deployment`)이 그렇게 처리한다.
+// **그리고 이 기록이 실패하면 그 사실을 말한다.**
+//
+// 2026-08-19에 이것 때문에 사흘을 잃었다. `/api/system/deployment`는
+// Fly 워커를 `alive: false`, 버전은 8/16 커밋이라고 했다. 그 사이 배포는
+// 네 번 전부 success로 끝났고, Fly는 머신이 `started`라고 했다.
+//
+// 그런데 **어느 쪽이 사실인지 알 방법이 없었다.** 워커가 죽은 것인지,
+// 살아서 돌고 있는데 heartbeat 쓰기만 실패하는 것인지 — 둘은 완전히
+// 다른 고장이고 고치는 방법도 다른데, 아래 `catch {}`가 그 구분을
+// 통째로 삼키고 있었다. 054 관련 오류만 다시 시도하고 나머지는 조용히
+// 사라졌다.
+//
+// **조용히 틀리는 쪽이 언제나 더 나쁘다.** 살아 있는 워커가 죽은 것으로
+// 보이는 것도, 죽은 워커와 구분되지 않는 것도 같은 뿌리다.
+//
+// 다만 3초마다 도는 경로다. 매번 찍으면 로그가 그것만으로 덮이고,
+// 그러면 진짜 원인 줄이 스크롤 밖으로 밀려난다. 그래서 **처음 한 번과
+// 그 뒤 1분에 한 번만** 찍고, 복구되면 복구됐다고 한 줄 남긴다.
+// 값은 절대 찍지 않는다 — 실패 메시지만 옮긴다.
+let hbFailedSince: number | null = null;
+let hbLastLogMs = 0;
+const HB_LOG_EVERY_MS = 60_000;
+
+function noteHeartbeatFailure(why: string): void {
+  const now = Date.now();
+  if (hbFailedSince == null) hbFailedSince = now;
+  if (hbLastLogMs !== 0 && now - hbLastLogMs < HB_LOG_EVERY_MS) return;
+  hbLastLogMs = now;
+  const forSec = Math.round((now - hbFailedSince) / 1000);
+  console.error(
+    `[worker] ⚠ heartbeat 기록 실패 (${forSec}초째): ${why}`
+    + ' — 워커는 돌고 있지만 화면에는 죽은 것으로 보입니다.'
+    + ' worker_heartbeat 쓰기 권한·서비스 키·네트워크를 확인하세요.');
+}
+
+function noteHeartbeatRecovered(): void {
+  if (hbFailedSince == null) return;
+  const forSec = Math.round((Date.now() - hbFailedSince) / 1000);
+  hbFailedSince = null; hbLastLogMs = 0;
+  console.log(`[worker] heartbeat 기록 복구됨 (${forSec}초 동안 실패했습니다)`);
+}
+
 export async function heartbeat(workerId: string, status: string, task: string, errorCount: number): Promise<void> {
   const base: Record<string, any> = {
     worker_id: workerId, last_seen: new Date().toISOString(), status,
@@ -57,14 +99,38 @@ export async function heartbeat(workerId: string, status: string, task: string, 
   try {
     const { error } = await sb().from('worker_heartbeat')
       .upsert(sha ? { ...base, version: sha } : base, { onConflict: 'worker_id' });
-    if (!error) return;
+    if (!error) { noteHeartbeatRecovered(); return; }
     // 054가 아직 안 적용된 배포에서는 `version` 칸이 없다. 그때 생존
     // 신호까지 같이 잃으면 **살아 있는 워커가 죽은 것으로 보인다** —
     // 버전을 빼고 다시 적는다.
     if (sha && /column|schema cache/i.test(String(error.message))) {
-      await sb().from('worker_heartbeat').upsert(base, { onConflict: 'worker_id' });
+      const retry = await sb().from('worker_heartbeat').upsert(base, { onConflict: 'worker_id' });
+      if (!retry.error) {
+        noteHeartbeatRecovered();
+        // **이건 조용히 넘어가면 안 되는 성공이다.** 생존 신호는 적혔지만
+        // 버전은 못 적었고, 그러면 배포 대조가 영원히 '모름'이 된다.
+        noteMissingVersionColumn();
+        return;
+      }
+      noteHeartbeatFailure(String(retry.error.message || retry.error));
+      return;
     }
-  } catch {}
+    noteHeartbeatFailure(String(error.message || error));
+  } catch (e: any) {
+    // 예외도 실패다. 예전에는 이 자리가 비어 있었다.
+    noteHeartbeatFailure(String(e?.message || e));
+  }
+}
+
+// 054 미적용은 배포 대조를 통째로 무력화한다. 자주 찍을 필요는 없지만
+// **한 번은 반드시 보여야 한다.**
+let missingVersionWarned = false;
+function noteMissingVersionColumn(): void {
+  if (missingVersionWarned) return;
+  missingVersionWarned = true;
+  console.warn(
+    '[worker] worker_heartbeat.version 칸이 없습니다 — 마이그레이션 054를 적용하세요.'
+    + ' 그때까지 /api/system/deployment의 Fly SHA는 "모름"입니다(같음이 아닙니다).');
 }
 
 export async function logKill(connectionId: string, ev: { reason: string; action: string; mode: string; equity?: number }): Promise<void> {
