@@ -28,6 +28,9 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+// **값을 보여주지 않고 '같은 값인가'만 묻는다.** 워커도 같은 지문을
+// 로그에 남기므로, 둘을 비교하면 같은 DB를 보고 있는지 알 수 있다.
+import { fingerprintOf } from '@/lib/system/fingerprint';
 import { runtimeSkew, deploymentVerdict, workerAlive } from '@/lib/runtime/workerPlan';
 
 export const dynamic = 'force-dynamic';
@@ -104,6 +107,20 @@ export async function GET(req: NextRequest) {
     fly: { ...fly, short: fly.sha ? fly.sha.slice(0, 7) : null },
     main: { sha: mainSha, short: mainSha ? mainSha.slice(0, 7) : null,
       note: mainSha ? '요청에서 받은 값입니다' : '서버는 main의 SHA를 모릅니다 — ?main=<sha>로 주면 셋을 대조합니다' },
+    // ── 웹과 워커가 같은 데이터베이스를 보고 있는가 ──
+    //
+    // 2026-08-19에 이 질문에 답할 방법이 없었다. 워커는 살아서 tick을
+    // 찍는데(build=5a45fa2), heartbeat 실패 로그도 없고, 표의 최신 줄은
+    // 8/16이었다. 셋이 동시에 참이려면 **쓰기는 성공하는데 다른 곳에
+    // 쓰고 있어야** 한다 — 그런데 그걸 확인할 값이 어디에도 없었다.
+    //
+    // 값은 안 보여준다. 지문 6자리만 준다. 워커도 부팅·heartbeat 로그에
+    // 같은 방식의 지문을 남기므로 눈으로 대조하면 끝난다.
+    supabase: {
+      fingerprint: fingerprintOf(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL),
+      note: '워커 로그의 `[heartbeat] ok ... target=<지문>`과 같아야 같은 DB입니다 — '
+        + '다르면 워커가 다른 프로젝트에 쓰고 있습니다',
+    },
     // 서버가 스스로 답할 수 있는 것.
     skew,
     // main까지 준 경우의 판정. 안 줬으면 UNKNOWN이고 그게 정직한 값이다.

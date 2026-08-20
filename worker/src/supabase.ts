@@ -71,6 +71,48 @@ let hbFailedSince: number | null = null;
 let hbLastLogMs = 0;
 const HB_LOG_EVERY_MS = 60_000;
 
+// **성공했을 때도 말한다.**
+//
+// #144는 실패를 찍게 만들었다. 그런데 그것만으로는 부족했다 —
+// 로그에 heartbeat 줄이 하나도 없을 때 그게 "잘 되고 있다"인지
+// "코드가 그 자리에 없다"인지 구분할 수 없었고, 실제로 그 구분이 안 돼
+// 하루를 더 썼다. **아무 말도 안 하는 성공은 침묵과 같다.**
+//
+// 그래서 첫 성공 한 번과 그 뒤 60초에 한 번, 무엇을 어디에 썼는지
+// 남긴다. 값은 없다 — worker_id · 버전 · 시각 · Supabase 지문뿐이다.
+let hbLastOkLogMs = 0;
+let hbEverLoggedOk = false;
+
+function noteHeartbeatOk(workerId: string, sha: string, lastSeen: string): void {
+  const now = Date.now();
+  if (hbEverLoggedOk && now - hbLastOkLogMs < HB_LOG_EVERY_MS) return;
+  hbLastOkLogMs = now; hbEverLoggedOk = true;
+  console.log(
+    `[heartbeat] ok worker=${workerId} version=${sha || '(없음)'} last_seen=${lastSeen}`
+    + ` target=${supabaseFingerprint()}`);
+}
+
+/**
+ * 지금 쓰고 있는 Supabase의 **지문 6자리**.
+ *
+ * 값은 절대 찍지 않는다. 웹(`/api/system/deployment`)도 같은 방식으로
+ * 자기 지문을 알려 주므로, 둘을 비교하면 **같은 데이터베이스를 보고
+ * 있는지**를 값 없이 확인할 수 있다. 이 저장소가 암호화 키를 다루는
+ * 방식과 같다.
+ */
+let supabaseFp: string | null = null;
+function supabaseFingerprint(): string {
+  if (supabaseFp == null) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { createHash } = require('crypto');
+      const raw = String(process.env.SUPABASE_URL || '').trim();
+      supabaseFp = raw ? String(createHash('sha256').update(raw).digest('hex')).slice(0, 6) : '(없음)';
+    } catch { supabaseFp = '(모름)'; }
+  }
+  return supabaseFp ?? '(모름)';
+}
+
 function noteHeartbeatFailure(why: string): void {
   const now = Date.now();
   if (hbFailedSince == null) hbFailedSince = now;
@@ -78,16 +120,16 @@ function noteHeartbeatFailure(why: string): void {
   hbLastLogMs = now;
   const forSec = Math.round((now - hbFailedSince) / 1000);
   console.error(
-    `[worker] ⚠ heartbeat 기록 실패 (${forSec}초째): ${why}`
-    + ' — 워커는 돌고 있지만 화면에는 죽은 것으로 보입니다.'
-    + ' worker_heartbeat 쓰기 권한·서비스 키·네트워크를 확인하세요.');
+    `[heartbeat] ⚠ 기록 실패 (${forSec}초째): ${why}`
+    + ` — 워커는 돌고 있지만 화면에는 죽은 것으로 보입니다. target=${supabaseFingerprint()}`
+    + ' · worker_heartbeat 쓰기 권한·서비스 키·네트워크를 확인하세요.');
 }
 
 function noteHeartbeatRecovered(): void {
   if (hbFailedSince == null) return;
   const forSec = Math.round((Date.now() - hbFailedSince) / 1000);
   hbFailedSince = null; hbLastLogMs = 0;
-  console.log(`[worker] heartbeat 기록 복구됨 (${forSec}초 동안 실패했습니다)`);
+  console.log(`[heartbeat] 기록 복구됨 (${forSec}초 동안 실패했습니다)`);
 }
 
 export async function heartbeat(workerId: string, status: string, task: string, errorCount: number): Promise<void> {
@@ -99,7 +141,11 @@ export async function heartbeat(workerId: string, status: string, task: string, 
   try {
     const { error } = await sb().from('worker_heartbeat')
       .upsert(sha ? { ...base, version: sha } : base, { onConflict: 'worker_id' });
-    if (!error) { noteHeartbeatRecovered(); return; }
+    if (!error) {
+      noteHeartbeatRecovered();
+      noteHeartbeatOk(workerId, sha, base.last_seen);
+      return;
+    }
     // 054가 아직 안 적용된 배포에서는 `version` 칸이 없다. 그때 생존
     // 신호까지 같이 잃으면 **살아 있는 워커가 죽은 것으로 보인다** —
     // 버전을 빼고 다시 적는다.
@@ -107,6 +153,7 @@ export async function heartbeat(workerId: string, status: string, task: string, 
       const retry = await sb().from('worker_heartbeat').upsert(base, { onConflict: 'worker_id' });
       if (!retry.error) {
         noteHeartbeatRecovered();
+        noteHeartbeatOk(workerId, '', base.last_seen);
         // **이건 조용히 넘어가면 안 되는 성공이다.** 생존 신호는 적혔지만
         // 버전은 못 적었고, 그러면 배포 대조가 영원히 '모름'이 된다.
         noteMissingVersionColumn();
@@ -129,7 +176,7 @@ function noteMissingVersionColumn(): void {
   if (missingVersionWarned) return;
   missingVersionWarned = true;
   console.warn(
-    '[worker] worker_heartbeat.version 칸이 없습니다 — 마이그레이션 054를 적용하세요.'
+    '[heartbeat] worker_heartbeat.version 칸이 없습니다 — 마이그레이션 054를 적용하세요.'
     + ' 그때까지 /api/system/deployment의 Fly SHA는 "모름"입니다(같음이 아닙니다).');
 }
 
