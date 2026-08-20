@@ -231,8 +231,8 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       {/* **실제로 도는 자동매매**를 여기서 켜고 끈다.
           지금까지는 Supabase SQL 편집기에서 INSERT를 쳐야 했고, 그동안
           크론은 돌면서 아무 일도 하지 않았다. AutoStatusBoard보다 위에
-          둔다 — 그쪽은 브라우저 엔진 이야기라 '실제로 돌고 있는가'와
-          다른 질문이다. */}
+          둔다 — 그쪽은 실행기·모의 판의 상태이고, 여기는 '이 전략을
+          지금 켤 것인가'라는 다른 질문이다. */}
       <AutotradeControl />
 
       <AutoStatusBoard />

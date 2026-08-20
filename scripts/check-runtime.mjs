@@ -120,6 +120,57 @@ if (stale.length > 0) {
 if (bad) process.exit(1);
 
 const exec = [...CLASSIFIED.entries()].filter(([, v]) => v.startsWith('EXEC'));
-console.log(`✅ 화면 타이머 ${found.length}개 · 분류 안 된 것 0개`);
+
+// ── 화면이 운영 사실을 지어내지 않는가 ──────────────────
+//
+// **2026-08-19에 화면이 자신 있게 거짓말을 했다.**
+//
+//   실제:  main = Vercel = Fly = 3c46151 · MATCHED · Fly Worker alive
+//   화면:  "Worker (Railway) · 없음"
+//          "지금은 쓰지 않습니다 — 자동매매는 Vercel 크론이 돌립니다"
+//          "Railway 워커는 Binance 지역 차단으로 쓰지 않습니다"
+//
+// 셋 다 **예전에는 사실**이었다. 그래서 더 위험하다 — 코드는 안 틀렸고
+// 문장만 늙었는데, 사용자는 살아 있는 워커를 없다고 읽는다.
+//
+// 운영 사실(어디서 도는가 · 무엇이 돌리는가)은 **서버 값에서만** 와야
+// 한다. 화면 파일에 상수로 적힌 순간, 다음에 옮길 때 또 늙는다.
+const STALE_CLAIMS = [
+  { pattern: /Railway/, why: '실행기 공급자 이름을 화면에 적어 두면 옮긴 뒤에도 남는다 — 서버가 준 provider를 쓰세요' },
+  { pattern: /Vercel\s*크론이\s*돌립니다/, why: '무엇이 자동매매를 돌리는지는 서버 상태에서 읽으세요' },
+  { pattern: /브라우저\s*엔진\s*상태입니다/, why: '실제 실행기 상태와 브라우저 모의 판을 한 문장으로 섞지 마세요' },
+];
+
+let uiFiles = [];
+try {
+  const fs = await import('node:fs');
+  uiFiles = typeof fs.globSync === 'function'
+    ? [...fs.globSync('src/components/**/*.tsx'), ...fs.globSync('src/app/**/*.tsx')]
+    : [];
+} catch { uiFiles = []; }
+
+const staleErrors = [];
+for (const f of uiFiles) {
+  const lines = readFileSync(f, 'utf8').split('\n');
+  lines.forEach((line, i) => {
+    const t = line.trim();
+    // 주석은 검사하지 않는다 — 고친 이력을 설명하려면 옛 문구를 인용해야 한다.
+    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*') || t.startsWith('{/*')) return;
+    for (const c of STALE_CLAIMS) {
+      if (c.pattern.test(line)) {
+        staleErrors.push(`${f.replaceAll('\\', '/')}:${i + 1}\n     ${c.why}`);
+      }
+    }
+  });
+}
+if (staleErrors.length > 0) {
+  console.error('❌ 화면이 운영 사실을 직접 적고 있습니다:');
+  for (const e of staleErrors) console.error(`   · ${e}`);
+  console.error('');
+  console.error('   문장은 늙지만 코드는 안 늙습니다 — 그때 화면만 거짓말을 합니다.');
+  process.exit(1);
+}
+
+console.log(`✅ 운영 사실 문구 0건 · 화면 타이머 ${found.length}개 · 분류 안 된 것 0개`);
 console.log(`   서버로 옮겨야 하는 실행 타이머 ${exec.length}개 — 이게 갚아야 할 빚입니다:`);
 for (const [f] of exec) console.log(`     · ${f}`);
