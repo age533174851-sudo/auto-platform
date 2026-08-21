@@ -236,6 +236,32 @@ export async function settleAttempt(sb: any, row: any, opts: SettleOptions = {})
     residualMine: evidence.residualMine, residualUnknown: evidence.residualUnknown,
   }) : null;
 
+  // ── 장부: 청산을 적는다 ──
+  //
+  // **포지션이 0으로 증명됐을 때만** 적는다. 청산 주문을 보낸 것과
+  // 닫힌 것은 다른 사실이고, 장부는 사실만 담는다.
+  if (evidence.positionZero === true) {
+    try {
+      const { recordLedgerEvent } = await import('../ledger/writeLedger');
+      await recordLedgerEvent(sb, {
+        userId: row.user_id,
+        // 스모크는 TESTNET 전용이다(052 CHECK). 그래도 값에서 읽는다.
+        env: 'TESTNET',
+        connectionId: row.connection_id, kind: 'FILL',
+        strategyId: SMOKE_STRATEGY_ID, symbol: row.symbol,
+        venueOrderId: row.exit_order_id != null ? String(row.exit_order_id) : null,
+        orderIntentId: row.entry_order_id != null ? String(row.entry_order_id) : null,
+        amount: 0,
+        quantity: row.entry_qty == null ? null : Number(row.entry_qty),
+        price: row.exit_avg_price == null ? null : Number(row.exit_avg_price),
+        occurredAtMs: Date.now(),
+        source: 'EXCHANGE_FILL',
+        correlationId: String(row.id ?? ''),
+        note: opts.cancel ? '사람이 중지 — 즉시 청산' : '마감 시각 청산',
+      }, 'smoke-settle');
+    } catch { /* 기록 실패가 청산을 막지 않는다 */ }
+  }
+
   const list = stepsOf(steps);
   const v = smokeVerdict(list);
   const state = opts.cancel

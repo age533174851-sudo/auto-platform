@@ -113,12 +113,45 @@
 
 ---
 
+## 3. Unified Ledger — 잔고 변화로 수익을 추측하지 않는다
+
+### 3-1. 테스트넷 충전이 수익으로 잡힐 수 있었다
+
+- **ISSUE** 손익을 자산 스냅샷 차이로 추측했다. 자산은 매매가 아닌
+  이유로도 변한다 — 입출금 · 이체 · 수수료 · 펀딩 · **Gate 테스트넷 일일
+  충전 · Binance 테스트 자금 초기화**.
+- **ROOT CAUSE** 사건 단위 기록이 아예 없었다. 합계밖에 없으니 "왜
+  늘었는지"를 물을 수 없다.
+- **FILES** `supabase/migrations/056_ledger_events.sql` ·
+  `src/lib/ledger/ledgerEvent.ts` · `src/lib/ledger/writeLedger.ts`
+- **FIX** 불변 사건 장부. `매매손익 = 자산변화 − 외부유입 − 수수료 − 펀딩`
+  이고 **네 항을 전부 알 때만** 숫자를 만든다. 장부가 기간을 다 덮지
+  못하면(`ledgerComplete !== true`) `null`이다 — 사건을 절반만 읽고
+  계산하면 나머지 절반이 전부 수익으로 둔갑한다.
+- **UNIT** 21건 — 충전 10,000 + 실현 12일 때 매매손익이 **12**로 나오는지,
+  int64 주문번호가 문자열로 남는지, 끝자리만 다른 두 체결이 한 열쇠로
+  합쳐지지 않는지
+- **STATUS** `FIXED` `TESTED` — 마이그레이션 **056 적용 필요**
+
+### 3-2. 표만 만들고 채우는 코드가 없는 고장을 반복하지 않았다
+
+- 048(자산 스냅샷)이 그랬고 그래서 지갑 곡선이 구조적으로 비어 있었다.
+- **FIX** 같은 PR에서 writer를 붙였다 — `my-original-v1` 진입 확인
+  시점과 스모크 청산(포지션 0 증명 시점). **접수가 아니라 증거가 확인된
+  뒤에만** 적는다.
+- 장부 쓰기 실패가 매매를 막지 않는다. 다만 조용히 삼키지도 않는다.
+- **STATUS** `FIXED`
+
+---
+
 ## 아직 남은 것 (다음 PR에서 **이어서** 진행)
 
 | # | 항목 | 상태 |
 |---|---|---|
 | 2 | Wallet: snapshot writer → Worker + bucket unique | `NOT_STARTED` (마이그레이션 필요) |
-| 2 | Wallet: TESTNET credit/reset 분리 | `NOT_STARTED` (Ledger 선행) |
+| 2 | Wallet: TESTNET credit/reset 분리 | `PARTIAL` — 장부 분류는 됨, 거래소 income 수집 미구현 |
+| 3 | Ledger: 거래소 income(FEE/FUNDING) 수집 | `NOT_STARTED` |
+| 3 | Ledger: Wallet 화면 배선(tradingPnl 표시) | `NOT_STARTED` |
 | 2 | Wallet: 전략계좌·장기투자 귀속 | `NOT_STARTED` (Ledger 선행) |
 | 2 | Wallet: price/FX provenance | `NOT_STARTED` |
 | 3 | Unified Ledger | `NOT_STARTED` |
