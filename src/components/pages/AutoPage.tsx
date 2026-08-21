@@ -37,7 +37,7 @@ import StrategyScorePanel from '../StrategyScorePanel';
 import MetaStrategyPanel from '../MetaStrategyPanel';
 import AuditLogPanel from '../AuditLogPanel';
 import {
-  kindOf, KIND_LABEL, showsTpSl, cardRowsOf, unwiredFieldsOf,
+  kindOf, KIND_LABEL, showsTpSl, cardRowsOf, unwiredFieldsOf, edgeRowOf,
   activityOf, ACTIVITY_LABEL, ACTIVITY_TONE, DEFAULT_FILTERS,
   filterCountsOf, passesFilter, ALL_ACTIVITIES,
   actionsOf, isCompact, envLineOf, perfSummaryOf, moneyRowsOf,
@@ -393,7 +393,15 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             // **값을 만들지 않는다.** 이 카드들의 지표를 계산하는 곳이
             // 아직 없으므로 전부 '—'로 나오고, 무엇이 없는지를 카드가
             // 직접 말한다. 그 목록이 그대로 다음 할 일이 된다.
-            const rows=cardRowsOf(kind,null);
+            // **실제 전략 카드에는 잰 값만 적는다.**
+            //
+            // 가정값(+N%p)은 연구 화면의 것이다. 여기 오면 사용자는 그
+            // 숫자를 자기 전략의 성질로 읽는다 — "우위 10%를 켜면 돈을
+            // 번다"는 관찰이 나온 자리가 정확히 그곳이다.
+            //
+            // 아직 아무도 재지 않았으므로 지금은 전부 '검증된 우위 없음'이
+            // 나온다. **비워 두면 사용자는 좋은 뜻으로 읽는다.**
+            const rows=[edgeRowOf(null), ...cardRowsOf(kind,null)];
             const missing=unwiredFieldsOf(kind,null);
             const envLine=envLineOf(execMode==='real'?'LIVE':execMode==='testnet'?'TESTNET':'PAPER');
 

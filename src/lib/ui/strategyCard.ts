@@ -157,6 +157,8 @@ export function showsTpSl(kind: StrategyKind): boolean {
 
 // ── 값 채우기 ─────────────────────────────────────────────
 
+import { measuredEdgeOf, edgeDisplay } from '../strategies/edgeTypes';
+
 export interface CardRow {
   key: string;
   label: string;
@@ -204,6 +206,34 @@ export function cardRowsOf(
       value: text ?? UNKNOWN_TEXT, known: text != null,
     };
   });
+}
+
+/**
+ * 이 전략 카드에 적을 **우위 한 줄**.
+ *
+ * 실제 전략 카드에는 **잰 값만** 적는다. 가정값(`edgePp`)은 연구 화면의
+ * 것이고, 여기 오면 사용자는 그 숫자를 자기 전략의 성질로 읽는다 —
+ * "우위 10%를 켜면 돈을 번다"는 관찰이 나온 자리가 정확히 그곳이다.
+ *
+ * **증거가 없으면 "검증된 우위 없음"이다.** 비워 두면 사용자는 좋은
+ * 뜻으로 읽는다.
+ */
+export function edgeRowOf(metrics: Record<string, any> | null | undefined): CardRow {
+  const m = metrics ?? {};
+  const r = measuredEdgeOf({
+    trades: m.trades ?? m.tradeCount ?? null,
+    wins: m.wins ?? m.winCount ?? null,
+    // **비용을 뺀 뒤가 아니면 우위가 아니다.**
+    expectancyAfterCost: m.expectancyAfterCost ?? null,
+    oosTrades: m.oosTrades ?? null,
+  });
+  const d = edgeDisplay(r);
+  return {
+    key: 'edge', label: '우위',
+    value: d.label,
+    // 증거일 때만 known이다 — 화면이 색을 다르게 준다.
+    known: d.isEvidence,
+  };
 }
 
 /**

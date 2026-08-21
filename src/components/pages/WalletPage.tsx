@@ -26,6 +26,7 @@ import React, { useEffect, useState } from 'react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 import { Card } from './SharedUI';
+import { walletTruthOf, envNoteOf, otherEnvNote } from '@/lib/portfolio/walletTruthView';
 // 지갑 숫자는 **USD 기준**이다. 라벨만 바꾸는 통화 전환을 막는다.
 import { moneyView, currencyAvailable } from '@/lib/portfolio/walletMoney';
 import {
@@ -68,27 +69,46 @@ export default function WalletPage() {
   // 합치는 규칙(환경을 섞지 않는다 · 부분 합계를 총자산이라 하지 않는다)은
   // 서버가 갖는다. 화면에 두면 화면마다 따로 구현되고 언젠가 하나가 어긴다.
   const [data, setData] = useState<any>(null);
-  const [err, setErr] = useState('');
+  // **판정은 화면이 하지 않는다.** walletTruthOf가 '없음'과 '확인 못 함'을
+  // 가르고, 화면은 그 결과를 그리기만 한다.
+  //
+  // 예전에는 여기서 `String(j?.message || j?.error)`를 그대로 err에 넣었다.
+  // 그래서 화면에 `auth_required`라는 **서버 내부 코드**가 그대로 떴고,
+  // 동시에 아래쪽에서는 "이 환경에 연결된 계좌가 없습니다"라고 단정했다.
+  // 인증이 안 돼 아무것도 못 읽은 상태에서 그 둘은 서로 모순이다.
+  const [truth, setTruth] = useState<any>(null);
   const auth = typeof window !== 'undefined' ? (localStorage.getItem('sb_access_token') || '') : '';
 
   useEffect(() => {
     let alive = true;
     (async () => {
+      let status: number | null = null;
+      let body: any = null;
+      let networkError: string | null = null;
       try {
         const r = await fetch('/api/wallets/overview', {
           headers: auth ? { Authorization: `Bearer ${auth}` } : undefined,
         });
-        const j = await r.json();
-        if (!alive) return;
-        if (j?.ok) { setData(j); setErr(''); }
-        // **못 읽은 것을 "계좌 없음"으로 그리지 않는다.**
-        else setErr(String(j?.message || j?.error || '지갑을 읽지 못했습니다'));
+        status = r.status;
+        body = await r.json().catch(() => null);
       } catch (e: any) {
-        if (alive) setErr(`지갑을 읽지 못했습니다 (${e?.message || e})`);
+        networkError = String(e?.message || e);
       }
+      if (!alive) return;
+      const t = walletTruthOf({
+        status, body, networkError,
+        // 계좌 수는 **서버가 준 목록에서만** 센다. 화면이 따로 세면
+        // 두 숫자가 갈리고, 실제로 못 읽은 화면이 "8개"라고 말한 적이 있다.
+        connections: Array.isArray(body?.accounts) ? body.accounts.length : null,
+      });
+      setTruth(t);
+      setData(t.code === 'OK' || t.code === 'NO_ACCOUNT' ? body : null);
     })();
     return () => { alive = false; };
   }, [auth]);
+
+  // 화면 곳곳이 쓰던 이름. 사람이 읽을 문장만 들어간다.
+  const err = truth && truth.code !== 'OK' ? String(truth.message ?? '') : '';
 
   // 서버가 준 버킷을 그대로 쓴다. 아직 안 읽었으면 '조회 중'이고,
   // 읽기에 실패했으면 '확인 불가'다 — 둘 다 0이 아니다.
@@ -159,9 +179,29 @@ export default function WalletPage() {
   // **총자산은 USD 기준 한 값이고, 통화 전환은 환율이 있을 때만 한다.**
   const totalUsd: number | null = envTotal?.value ?? total.total ?? null;
   const totalMoney = moneyView(totalUsd, cur as any, fxRate);
+  // **"없음"과 "확인 못 함"을 화면이 섞지 않는다.**
+  //
+  // 예전에는 서버가 준 note를 그대로 썼다. 그런데 인증 실패로 아무것도
+  // 못 읽었을 때도 그 note가 "이 환경에 연결된 계좌가 없습니다"였다 —
+  // 화면은 그 문장과 `auth_required`를 **동시에** 보여 줬다.
+  const envConnections: number | null = truth?.canStateAccounts
+    ? (Array.isArray(data?.accounts)
+      ? data.accounts.filter((a: any) => String(a?.env ?? '') === env).length : null)
+    : null;
   const envNote: string = selectedAccount
     ? (selectedAccount.note ?? '')
-    : ((Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env)?.note ?? '');
+    : envNoteOf({
+      truth: truth ?? { canStateAccounts: false, message: '지갑을 읽는 중입니다' } as any,
+      env, envConnections,
+      serverNote: (Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env)?.note ?? '',
+    });
+
+  // "다른 환경의 계좌 N개는 합산에서 제외" — **못 읽었으면 숫자를 만들지 않는다.**
+  const otherEnvLine = otherEnvNote({
+    truth: truth ?? { canStateAccounts: false } as any,
+    accountEnvs: Array.isArray(data?.accounts) ? data.accounts.map((a: any) => a?.env ?? null) : null,
+    currentEnv: env,
+  });
 
   // ── 그래프 ──
   //
@@ -284,7 +324,14 @@ export default function WalletPage() {
           borderRadius: 10, padding: '9px 11px', marginBottom: 8,
           color: T.ylw, fontSize: 11, lineHeight: 1.6, overflowWrap: 'anywhere',
         }}>
-          {err} — <b>잔고가 0이라는 뜻이 아닙니다.</b>
+          {/* 문구는 walletTruthOf가 만든다 — 서버 코드가 여기까지 오지 않는다.
+              "0이 아니다"는 이미 그 문장 안에 들어 있다. */}
+          {err}
+          {truth?.needsLogin && (
+            <div style={{ marginTop: 4, color: T.sub }}>
+              다시 로그인하면 잔고를 읽습니다. 로그인 전까지는 계좌 수도 잔고도 알 수 없습니다.
+            </div>
+          )}
         </div>
       )}
 
@@ -380,7 +427,16 @@ export default function WalletPage() {
           }}>{a.label}</button>
         ))}
       </div>
-      {accountsNote && <div style={{ ...muted, color: T.ylw, marginBottom: 10 }}>{accountsNote}</div>}
+      {/* **못 읽었으면 계좌 수를 말하지 않는다.**
+          예전에는 인증이 안 된 상태에서도 "다른 환경의 계좌 8개"라는
+          숫자가 떴다 — 아무것도 못 읽었는데 어디선가 만들어 낸 값이다.
+          이제 같은 목록(서버가 준 accounts)에서만 센다. */}
+      {truth?.canStateAccounts && accountsNote && (
+        <div style={{ ...muted, color: T.ylw, marginBottom: 10 }}>{accountsNote}</div>
+      )}
+      {otherEnvLine && (
+        <div style={{ ...muted, marginBottom: 10 }}>{otherEnvLine}</div>
+      )}
 
       {/* ── 1. 총자산 + 2. 오늘 손익 ── */}
       <Card style={{ padding: '16px', marginBottom: 10 }}>
