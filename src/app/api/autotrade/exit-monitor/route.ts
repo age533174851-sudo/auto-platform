@@ -1,14 +1,27 @@
 // /api/autotrade/exit-monitor
 //
 // 계단식 거래의 트레일링 · 본전 이동 · 시간 청산을 실행한다.
-// Vercel Cron이 주기적으로 호출한다 (vercel.json의 crons).
 //
-// 왜 Vercel인가: Railway 워커는 Binance가 IP 지역을 차단해 주문이 나가지
-// 않는다. Vercel은 regions가 hnd1(도쿄)이라 정상 연결된다.
+// 누가 부르는가
+// ─────────────
+//   Fly Worker   5분마다. **주 실행자다.** 이미 가진 ADMIN_SECRET으로
+//                부르므로 맞춰야 할 비밀이 따로 없다
+//   Vercel Cron  하루 1회 (무료 플랜 한도). 워커가 죽었을 때의 그물
+//   GitHub       선택. 시크릿이 있으면 백업으로 돈다
+//
+// 예전에는 GitHub Actions가 15분마다 별도 시크릿(EXIT_MONITOR_SECRET)으로
+// 불렀다. 그 값이 Vercel의 ADMIN_SECRET과 한 글자만 달라도 401이었고,
+// **2026-08-03부터 30번 연속 401이었다.** 그동안 트레일링·본전 이동·
+// 시간 청산은 한 번도 돌지 않았다. 시크릿을 맞추는 일을 자동화하는 것보다
+// 그 시크릿이 필요 없게 만드는 쪽이 맞다.
+//
+// 왜 여기서 주문을 내는가: Binance가 Fly/Railway의 IP 지역을 차단한다.
+// Vercel은 regions가 hnd1(도쿄)이라 정상 연결된다. 그래서 **판단과 주문은
+// 여기, 깨우는 일은 워커**다.
 //
 // 인증: Vercel Cron은 CRON_SECRET이 설정돼 있으면
 //       Authorization: Bearer <CRON_SECRET> 을 붙여 호출한다.
-//       수동 점검용으로 x-admin-secret도 허용한다.
+//       워커·수동 점검용으로 x-admin-secret도 허용한다.
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
@@ -555,9 +568,18 @@ export async function GET(req: NextRequest) {
   // 모른다 — 캘린더 동기화가 vercel.json에 등록조차 안 된 채로 몇 달을
   // 보낸 것이 정확히 그 결과였다.
   const { recordCronRun } = await import('@/lib/system/cronLog');
+  // **누가 불렀는지 같이 적는다.** 워커가 도는데 화면이 '안 돎'으로
+  // 보이거나, 백업만 돌고 있는 상태를 구분할 방법이 이 한 줄뿐이다.
+  const caller = (() => {
+    const src = String(req.headers.get('x-traigo-source') || '').trim().toLowerCase();
+    if (src === 'worker') return 'worker';
+    if (src) return src.slice(0, 16).replace(/[^a-z0-9_-]/g, '');
+    const auth = req.headers.get('authorization') || '';
+    return auth.startsWith('Bearer ') ? 'cron' : 'manual';
+  })();
   const cronLog = await recordCronRun(sb, 'exit-monitor',
     actionable.length > 0 ? 'ok' : 'skipped',
-    `${decisions.length}건 확인 · ${actionable.length}건 처리`, cronStartedAt);
+    `${decisions.length}건 확인 · ${actionable.length}건 처리 (${caller})`, cronStartedAt);
 
   return NextResponse.json({
     ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, orphanCleanups, results,

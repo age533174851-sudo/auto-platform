@@ -155,7 +155,7 @@ export function TrailPanel() {
       <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
         이 화면은 아무것도 실행하지 않습니다 — 판정만 보여줍니다.
         {data.liveStopKnown === false && ' 거래소에 지금 걸린 손절가는 조회하지 않았습니다(화면을 여는 것만으로 요청이 나가지 않게). 위 손절가는 진입 시점 값 기준입니다.'}
-        {' '}실제 이동은 청산 감시 크론이 합니다.
+        {' '}실제 이동은 청산 감시가 5분마다 확인해서 합니다.
       </div>
 
       <button onClick={load} disabled={busy}
