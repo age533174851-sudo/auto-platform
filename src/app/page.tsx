@@ -22,6 +22,7 @@ import {
   Search as SearchIc, Globe, Globe2, Workflow, FolderKanban, ClipboardList,
   Wallet,
   Stethoscope, Settings, CreditCard, Presentation, Shield, LayoutGrid,
+  Terminal as TerminalIcon,
   MoreHorizontal, X as XIcon, TriangleAlert,
   User2, Link2, ShieldCheck, LogOut, Download, Sun, Moon, Clock, Cpu,
 } from 'lucide-react';
@@ -100,6 +101,7 @@ const AnalysisHubPage = dynamic(() => import('@/components/pages/AnalysisHubPage
 const IntelligencePage = dynamic(() => import('@/components/IntelligencePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const PnLCalculatorPage = dynamic(() => import('@/components/PnLCalculator'),  { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const DiagnosticsPage    = dynamic(() => import('@/components/pages/DiagnosticsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
+const OpsPage            = dynamic(() => import('@/components/pages/OpsPage'), { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const SearchPage         = dynamic(() => import('@/components/pages/SearchPage'),       { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const JournalReviewPage  = dynamic(() => import('@/components/pages/JournalReviewPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
 const AutoBotLabPage     = dynamic(() => import('@/components/pages/AutoBotLabPage'),   { ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -265,6 +267,7 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
   {id:'groups',       label:'관심그룹',   Icon: FolderKanban},
   {id:'paper',        label:'모의매매',   Icon: ClipboardList},
   {id:'diagnostics',  label:'API 진단',   Icon: Stethoscope},
+  {id:'ops',          label:'운영',       Icon: TerminalIcon},
   {id:'settings',     label:'설정',       Icon: Settings, core: true},
   {id:'subscription', label:'구독',       Icon: CreditCard},
   {id:'posters',      label:'강의',       Icon: Presentation},
@@ -718,6 +721,7 @@ export default function App() {
     dividends:'배당금·이자 일정을 관리해요',
     safety:'로그인·키 보안을 점검해요',
     diagnostics:'외부 연동 상태를 점검해요',
+    ops:'명령 하나로 점검·배포·복구를 해요',
     posters:'투자 기초를 카드로 배워요',
     social:'다른 투자자 의견을 봐요',
     watchlist:'관심 종목을 모아봐요',
@@ -789,6 +793,7 @@ export default function App() {
         case 'paper':        return <PaperTradingPage prices={prices} onOpenAsset={openAsset}/>;
         case 'paper':        return <PaperTradingPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'diagnostics':  return <DiagnosticsPage/>;
+        case 'ops':          return <OpsPage/>;
         case 'settings':     return <SettingsPage lang={lang} setLang={setLang} currency={currency} setCurrency={setCurrency}/>;
         case 'analysis':     return <AnalysisHubPage/>;
         case 'hedgeos':      return <HedgeOSPage/>;
@@ -1104,7 +1109,7 @@ export default function App() {
                       {title:'거래',ids:['strategies','autobot','fear_dca','paper','season']},
                       {title:'분석',ids:['backtest','scanner','seasonality','review','briefing','news','calendar','analysis','pine_guide']},
                       {title:'자산',ids:['portfolio','ai_portfolio','growth','dividends','accounts','manual_accounts']},
-                      {title:'관리',ids:['ai_usage','risk_settings','history','alerts','safety','diagnostics']},
+                      {title:'관리',ids:['ai_usage','risk_settings','history','alerts','safety','diagnostics','ops']},
                       {title:'기타',ids:['academy','posters','social','settings']},
                     ];
                     return mGroups.map((g,gi)=>{
