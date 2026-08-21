@@ -44,6 +44,7 @@ function loadGate() {
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
     tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
+    'src/lib/ci/autoRebase.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
   ], { stdio: 'pipe' });
@@ -316,6 +317,27 @@ async function main() {
   // `workflow_dispatch`는 그 재귀 방지의 명시적 예외라 GITHUB_TOKEN으로도
   // 새 실행이 만들어진다. 머지가 끝난 뒤에 부르므로 checkout이 잡는
   // main은 반드시 합쳐진 코드다.
+  // ── 남은 PR을 곧바로 끌어올린다 ──
+  //
+  // main이 움직이면 `auto-merge` 라벨이 붙은 다른 PR은 전부 뒤처진다.
+  // 파일이 겹치는 것은 곧바로 충돌 상태가 되고, 그때부터 자동 머지는
+  // 영원히 "병합 충돌이 있습니다"만 적는다 — 라벨은 붙어 있고 검사도
+  // 초록인데 아무 일도 안 일어난다.
+  //
+  // **push 신호를 기다릴 수 없다.** GITHUB_TOKEN이 만든 push는 워크플로를
+  // 발동시키지 않는다(재귀 방지). `workflow_dispatch`가 그 예외다.
+  const { rebaseDispatchPlan, rebaseDispatchRequest } =
+    await import(`file://${join(outDir, 'autoRebase.js')}`);
+  const rp = rebaseDispatchPlan({ merged, hasToken: !!TOKEN });
+  console.log(`재배치: ${rp.code} — ${rp.reason}`);
+  if (rp.dispatch) {
+    const rq = rebaseDispatchRequest(REPO);
+    const rr = await api(rq.path, { method: rq.method, body: rq.body });
+    console.log(rr.ok
+      ? 'auto-rebase 실행을 요청했습니다 — 깨끗하게 재배치되는 PR만 끌어올립니다'
+      : `⚠ auto-rebase를 부르지 못했습니다 (HTTP ${rr.status}) — 30분 뒤 안전망이 훑습니다`);
+  }
+
   const dp = deployDispatchPlan({ merged, hasToken: !!TOKEN });
   console.log(`배포: ${dp.code} — ${dp.reason}`);
   if (dp.dispatch) {

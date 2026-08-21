@@ -1,0 +1,90 @@
+# main이 움직이면 뒤처진 PR을 자동으로 끌어올린다.
+#
+# 무엇을 없애려는 것인가
+# ──────────────────────
+# `auto-merge` 라벨이 붙은 PR이 여럿 열려 있으면, 하나가 합쳐질 때마다
+# 나머지가 옛 main 위에 남는다. 파일이 겹치면 곧바로 충돌 상태가 되고,
+# 그때부터 자동 머지 판정은 영원히 "병합 충돌이 있습니다"만 적는다.
+# 라벨은 붙어 있고 검사도 초록인데 아무 일도 일어나지 않는다.
+#
+# 그걸 푸는 유일한 방법이 **사람이 로컬에서 재배치해 다시 올리는 것**
+# 이었다. 한 번 합칠 때마다 남은 PR 수만큼 반복된다.
+#
+# 체크리스트를 자동으로 눌러 주는 것이 아니라, 체크리스트 자체를 없앤다.
+#
+# 어디까지 하는가
+# ───────────────
+# **깨끗하게 재배치되는 것만.** 충돌이 나면 손을 떼고 그 사실을 PR에
+# 적는다 — 충돌은 두 변경이 같은 자리를 다르게 바꿨다는 뜻이라 기계가
+# 고를 수 없다. 실제로 이 저장소에서 한 번 났고, 기계적으로 합쳤으면
+# **타입은 통과하는데 지갑 판정만 죽는** 상태가 됐을 것이다.
+#
+# 판정은 여기 없다
+# ────────────────
+# `src/lib/ci/autoRebase.ts`에 있고 유닛 테스트가 붙어 있다. YAML에
+# 조건을 적으면 값으로 확인할 방법이 없다.
+#
+# **검사를 건너뛰는 경로는 없다.** 재배치는 새 커밋이고, 그 커밋에서
+# CI가 처음부터 다시 돈다. 합치는 판정은 auto-merge가 따로 한다.
+name: auto-rebase
+
+on:
+  # main이 움직였을 때. 이게 주 신호다.
+  push:
+    branches: [main]
+  # 라벨을 방금 붙였을 때 — 이미 뒤처진 PR일 수 있다.
+  pull_request_target:
+    types: [labeled]
+  # **안전망.** 위 신호는 놓칠 수 있다. 30분마다 훑는다.
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: '특정 PR 번호만 (비우면 열린 PR 전부)'
+        required: false
+
+# 두 실행이 겹치면 같은 브랜치를 두 번 force-push한다.
+concurrency:
+  group: auto-rebase
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # 브랜치에 재배치 결과를 올린다
+  pull-requests: write   # 결과를 PR에 적는다
+
+jobs:
+  auto-rebase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # base 브랜치의 코드로 돈다 — PR이 이 워크플로나 판정기를 고쳐서
+      # 자기를 통과시킬 수 없다.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          # 재배치하려면 전체 이력이 필요하다.
+          fetch-depth: 0
+          # **기본 토큰을 원격에 심어 두지 않는다.** 스크립트가 필요한
+          # 순간에만 인자로 넘긴다 — .git/config에 남으면 로그로 샌다.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      # 판정기가 바뀌었는데 테스트가 깨져 있으면 그 판정으로 남의
+      # 브랜치 이력을 고치면 안 된다.
+      - name: 판정기 테스트
+        run: npm test
+
+      - name: 자동 재배치
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr || '' }}
+        run: node scripts/auto-rebase.mjs

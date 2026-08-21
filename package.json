@@ -13,6 +13,8 @@
     "gen:migrations": "node scripts/gen-migration-manifest.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "check:db-columns": "node scripts/check-db-columns.mjs",
+    "check:get-writes": "node scripts/check-get-writes.mjs",
+    "check:test-registry": "node scripts/check-test-registry.mjs",
     "check:entry-gates": "node scripts/check-entry-gates.mjs",
     "check:research": "node scripts/check-research-isolation.mjs",
     "check:browser-orders": "node scripts/check-browser-orders.mjs",
