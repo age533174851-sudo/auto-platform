@@ -265,7 +265,7 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 
 | # | 항목 | 상태 |
 |---|---|---|
-| 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `NOT_STARTED` |
+| 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `FIXED` `TESTED` — 어긋나면 **신규 진입 차단**. 동기화는 확인이 기본이고 적용은 명시적 승인 |
 | 3 | **exit-monitor를 Worker 내부 스케줄로 이동** — 공유 secret 자체 제거 | `MERGED` (#152) + 회차기록·임차·밀림관문 (#154) |
 | 4 | Worker boot 자가기록(provider·sha·지문·startup check) + `/api/system/runtime-health` | `MERGED` (#153) |
 | 5 | 배포 워크플로가 main/Vercel/Fly SHA를 스스로 대조 → `DEPLOYMENT_VERIFIED` | `FIXED` `TESTED` — 여섯 가지(코드 셋·워커 생존·마이그레이션·스키마)가 전부 확인돼야 VERIFIED |

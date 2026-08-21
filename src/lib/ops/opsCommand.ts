@@ -130,6 +130,17 @@ export interface StepResult {
   did: string[];
   /** 자동으로 못 한 이유. 없으면 null */
   blockedReason: string | null;
+  /**
+   * 이 막힘이 **최초 1회 권한 연결**로 풀리는가.
+   *
+   * `BOOTSTRAP` — 토큰을 한 번 연결하면 끝난다
+   * `FAULT`     — 연결해도 안 풀린다 (값이 서로 다르다, 워커가 죽었다 …)
+   *
+   * 이 둘을 섞으면 사용자는 "권한만 연결하면 되는구나"라고 읽고, 연결한
+   * 뒤에도 같은 화면을 보게 된다. 기본값은 FAULT다 — **권한 문제라고
+   * 말하려면 그렇다고 적어야 한다.**
+   */
+  kind?: 'BOOTSTRAP' | 'FAULT';
 }
 
 /**
@@ -179,7 +190,7 @@ export function opsVerdictOf(command: OpsCommand, steps: StepResult[]): OpsResul
   // 사용자는 매번 같은 목록을 보게 되고, 그러면 곧 안 본다.
   const bootstrapOnly = blocked.length > 0
     && unknown.length === 0
-    && blocked.every(s => s.step === 'secrets');
+    && blocked.every(s => s.step === 'secrets' && s.kind === 'BOOTSTRAP');
 
   let verdict: OpsVerdict;
   let summary: string;

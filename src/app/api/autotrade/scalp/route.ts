@@ -287,6 +287,17 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 웹과 워커가 같은 것을 보고 있는가 ──
+  {
+    const { parityGate } = await import('@/lib/ops/parityGate');
+    const pg = await parityGate(sb);
+    if (!pg.entryAllowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'SECRET_MISMATCH', error: pg.entryReason,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // ── 닫아 줄 사람이 있는가 ──
   //
   // 청산 감시가 죽어 있으면 트레일링·본전이동·시간청산이 안 돈다.
