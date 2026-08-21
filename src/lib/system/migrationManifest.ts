@@ -72,6 +72,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '055_smoke_cancel.sql', id: 55, risk: 'ADDITIVE', checksum: '00694ca473e93cf3' },
   { name: '056_ledger_events.sql', id: 56, risk: 'ADDITIVE', checksum: 'bb5fda192a7a30db' },
   { name: '057_worker_runtime.sql', id: 57, risk: 'ADDITIVE', checksum: '0a975e0ca5e287af' },
+  { name: '058_exit_monitor_runs.sql', id: 58, risk: 'ADDITIVE', checksum: '6898a6d6b5cdd060' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */

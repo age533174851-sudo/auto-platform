@@ -765,6 +765,11 @@ async function pollExitMonitor(isMain: boolean): Promise<void> {
         'x-admin-secret': APP_ADMIN_SECRET,
         // 누가 불렀는지 남긴다. 백업(GitHub Actions)과 구분된다.
         'x-traigo-source': 'worker',
+        // **누가 임차를 쥐는지**를 이 값으로 정한다. 두 워커가 동시에
+        // 떠도 하나만 돌게 하는 열쇠다.
+        'x-traigo-worker': WORKER_ID,
+        // 어느 커밋이 돌렸는가. 비어 있으면 '같음'이 아니라 '모름'이다.
+        'x-traigo-sha': String(process.env.GIT_SHA || '').slice(0, 40),
       },
       signal: AbortSignal.timeout(90_000),
     });
