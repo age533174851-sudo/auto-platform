@@ -266,19 +266,19 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 | # | 항목 | 상태 |
 |---|---|---|
 | 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `NOT_STARTED` |
-| 3 | **exit-monitor를 Worker 내부 스케줄로 이동** — 공유 secret 자체 제거 | `NOT_STARTED` |
-| 4 | Worker boot 자가기록(provider·sha·지문·startup check) + `/api/system/runtime-health` | `PARTIAL` (#146의 지문 비교까지) |
+| 3 | **exit-monitor를 Worker 내부 스케줄로 이동** — 공유 secret 자체 제거 | `MERGED` (#152) + 회차기록·임차·밀림관문 (#154) |
+| 4 | Worker boot 자가기록(provider·sha·지문·startup check) + `/api/system/runtime-health` | `MERGED` (#153) |
 | 5 | 배포 워크플로가 main/Vercel/Fly SHA를 스스로 대조 → `DEPLOYMENT_VERIFIED` | `NOT_STARTED` |
-| 6 | `WORKER_PROVIDER` 수동 env 제거 — Worker가 heartbeat에 스스로 적는다 | `NOT_STARTED` |
+| 6 | `WORKER_PROVIDER` 수동 env 제거 — Worker가 heartbeat에 스스로 적는다 | `MERGED` (#153) |
 | 7 | Self-healing Worker (stale → probe → restart → 재확인 → rollback) | `NOT_STARTED` |
 | 8 | Deployment Orchestrator (migration→deploy→verify→verdict 한 줄) | `PARTIAL` (migration 구간만) |
 | 9 | 배포 후 자동 TESTNET 읽기전용 검증 | `NOT_STARTED` |
-| 10 | #142 자동 검증 (position 0 · owned SL/TP absent · reread) | `NOT_STARTED` |
+| 10 | #142 자동 검증 (position 0 · owned SL/TP absent · reread) | `PARTIAL` — 정리 증거를 `exit_monitor_runs.cleanup_detail`에 저장 (#154) |
 | 11 | Ledger health 자동 검사 + 표 없으면 migration이 먼저 복구 | `PARTIAL` (표 자동 적용은 됨) |
 | 12 | Recovery Center 자동 우선 (자동 가능/사람 결정 분리) | `NOT_STARTED` |
-| 13 | 운영 명령 인터페이스 (`전체 점검해`·`배포해`·`복구해`) | `NOT_STARTED` |
+| 13 | 운영 명령 인터페이스 (`전체 점검해`·`배포해`·`복구해`) | `PARTIAL` — 명령 파싱·전체 점검·판정 합치기·bootstrap 완료. 값을 바꾸는 명령(배포·복구·중지) 실행 배선은 다음 |
 | 14 | UI에서 운영 숙제 문구 금지 (CI 검사) | `PARTIAL` (마이그레이션 문구만) |
-| 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `NOT_STARTED` |
+| 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `FIXED` `TESTED` |
 | 2 | Wallet: price/FX provenance | `NOT_STARTED` |
 | 3 | Unified Ledger | `NOT_STARTED` |
 | — | #142 cleanup evidence UI (actual-auto) | `NOT_STARTED` |
