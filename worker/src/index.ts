@@ -15,7 +15,7 @@
 // 모양이었다 — **경로가 둘인데 한쪽만 고침.**
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
-import { sb, acquireLock, releaseLock, heartbeat } from './supabase';
+import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult } from './supabase';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -724,7 +724,7 @@ async function tick() {
   // 모니터(Ghost Sync/킬스위치 job 보장)는 main 락으로 중복 방지 — 락 인프라 없으면 단일 워커로 간주해 진행
   let isMain = true;
   try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
-  await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount);
+  await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
   if (isMain) await monitorConnections();
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
   // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
@@ -757,6 +757,14 @@ async function startupChecks() {
   // 로그만 보면 알 수 없었다. 배포 직후 이 한 줄만 보면 끝난다.
   // 비어 있으면 GIT_SHA 없이 빌드된 이미지다(= 어느 커밋인지 모른다).
   console.log(`  build=${String(process.env.GIT_SHA || '').slice(0, 7) || '(모름 — GIT_SHA 없이 빌드된 이미지)'}`);
+  // **어디서 도는지는 이 프로세스가 안다.** 사람이 WORKER_PROVIDER를
+  // 넣어 줘야만 화면에 이름이 나오던 구조를 없앴다.
+  {
+    const { workerIdentityOf } = await import('../../src/lib/runtime/workerIdentity');
+    const id = workerIdentityOf(process.env as any);
+    console.log(`  where=${id.provider || '(모름)'}${id.region ? ` region=${id.region}` : ''}`
+      + `${id.machineId ? ` machine=${id.machineId}` : ''}`);
+  }
   console.log('════════════════════════════════════════');
 
   // ── 필수 env 검증 — 없으면 **종료한다** ──
@@ -794,12 +802,22 @@ async function startupChecks() {
   } catch { /* 지문을 못 만들어도 워커는 돈다 */ }
 
   // Supabase 연결 확인 (jobs 테이블 조회)
+  //
+  // **결과를 로그에만 남기지 않는다.** 로그는 사람이 열어야 보이고,
+  // 2026-08-19에 그걸 사흘 동안 열었다. heartbeat에 같이 적으면
+  // `/api/system/runtime-health` 한 곳에서 답이 나온다.
   try {
     const { error } = await sb().from('jobs').select('id').limit(1);
-    if (error) console.error('⚠️  Supabase 연결됨 but jobs 조회 실패:', error.message, '— jobs.sql 실행했는지 확인');
-    else console.log('✅ Connected to Supabase (jobs 테이블 확인됨)');
+    if (error) {
+      console.error('⚠️  Supabase 연결됨 but jobs 조회 실패:', error.message, '— jobs.sql 실행했는지 확인');
+      noteStartupResult(false, `jobs 조회 실패: ${error.message}`);
+    } else {
+      console.log('✅ Connected to Supabase (jobs 테이블 확인됨)');
+      noteStartupResult(true, null);
+    }
   } catch (e: any) {
     console.error('❌ Supabase 연결 실패:', e?.message || e, '— SUPABASE_URL/SERVICE_ROLE_KEY 확인');
+    noteStartupResult(false, `Supabase 연결 실패: ${String(e?.message || e)}`);
   }
 }
 
@@ -809,13 +827,13 @@ async function main() {
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig as any, async () => {
     if (stopping) return; stopping = true;
     console.log('[worker] 종료 신호 수신 — heartbeat stopped 기록 후 종료');
-    try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount); await releaseLock('main', WORKER_ID); } catch {}
+    try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount, tickCount); await releaseLock('main', WORKER_ID); } catch {}
     process.exit(0);
   });
   while (!stopping) {
     const t0 = Date.now();
     try { await tick(); }
-    catch (e: any) { errorCount++; console.error('[worker] tick error', e?.message); try { await heartbeat(WORKER_ID, 'degraded', 'tick error', errorCount); } catch {} }
+    catch (e: any) { errorCount++; console.error('[worker] tick error', e?.message); try { await heartbeat(WORKER_ID, 'degraded', 'tick error', errorCount, tickCount); } catch {} }
     await sleep(Math.max(500, POLL_SEC * 1000 - (Date.now() - t0)));
   }
 }

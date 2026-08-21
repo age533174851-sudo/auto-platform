@@ -142,12 +142,46 @@ const STALE_CLAIMS = [
 ];
 
 let uiFiles = [];
+let srcFiles = [];
 try {
   const fs = await import('node:fs');
   uiFiles = typeof fs.globSync === 'function'
     ? [...fs.globSync('src/components/**/*.tsx'), ...fs.globSync('src/app/**/*.tsx')]
     : [];
-} catch { uiFiles = []; }
+  srcFiles = typeof fs.globSync === 'function'
+    ? [...fs.globSync('src/**/*.ts'), ...fs.globSync('worker/src/**/*.ts')].filter(f => !f.endsWith('.test.ts'))
+    : [];
+} catch { uiFiles = []; srcFiles = []; }
+
+// ── 사람이 넣어야만 맞는 값으로 운영 사실을 만들지 않는다 ──
+//
+// `WORKER_PROVIDER=Fly`가 그랬다. 화면에 'Railway'가 글자로 박혀 있던 것을
+// 고치면서 환경변수로 옮겼는데, **아무도 안 넣어서** 화면은 계속
+// '실행기'라고만 적었다. 사람이 넣는 값은 사람이 안 넣거나 틀리게 넣는다.
+//
+// 워커는 자기가 어디서 도는지 안다(FLY_APP_NAME 등). 그걸 heartbeat에
+// 적고 화면은 읽기만 한다 — `src/lib/runtime/workerIdentity.ts`.
+const HUMAN_ENV_FACTS = [
+  { pattern: /process\.env\.WORKER_PROVIDER/, why: '실행기 이름을 사람이 넣는 env로 정하지 마세요 — 워커가 heartbeat에 적습니다 (workerIdentity.ts)' },
+];
+{
+  const bad = [];
+  for (const f of srcFiles) {
+    const lines = readFileSync(f, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      const t = line.trim();
+      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return;
+      for (const c of HUMAN_ENV_FACTS) {
+        if (c.pattern.test(line)) bad.push(`${f.replaceAll('\\', '/')}:${i + 1}\n     ${c.why}`);
+      }
+    });
+  }
+  if (bad.length > 0) {
+    console.error('❌ 운영 사실이 사람이 넣는 환경변수에 걸려 있습니다:');
+    for (const e of bad) console.error(`   · ${e}`);
+    process.exit(1);
+  }
+}
 
 const staleErrors = [];
 for (const f of uiFiles) {
