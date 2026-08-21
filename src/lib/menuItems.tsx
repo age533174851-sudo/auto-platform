@@ -6,7 +6,7 @@ import {
   Bot, Cpu, ScrollText, ShieldAlert, LineChart, Newspaper, Sparkles,
   Snowflake, FileText, CalendarDays, Radar, PieChart, Sprout, Coins,
   Scale, GraduationCap, BookOpen, ClipboardCheck, Users, Link2, Settings,
-  Stethoscope, Bell, ShieldCheck,
+  Stethoscope, Bell, ShieldCheck, Terminal,
 } from 'lucide-react';
 
 export interface MenuItem {
@@ -55,6 +55,8 @@ export const MENU: MenuItem[] = [
   { id:'settings',  label:'설정',      desc:'통화·언어·알림',           cat:'설정', kw:'통화 언어 알림', Icon:Settings,    color:'#64748B' },
   { id:'alerts',    label:'알림',      desc:'가격·체결 알림 설정',      cat:'설정', kw:'알림 notification',Icon:Bell,      color:'#F59E0B' },
   { id:'diagnostics',label:'API 진단', desc:'연결 상태 점검',           cat:'설정', kw:'진단 상태',      Icon:Stethoscope, color:'#0891B2' },
+  // **사용자는 명령만 한다.** 이 화면이 그 자리다 — 점검·배포·복구·중지.
+  { id:'ops',       label:'운영',      desc:'점검·배포·복구를 명령 하나로', cat:'설정', kw:'운영 점검 배포 복구 ops', Icon:Terminal, color:'#8B5CF6' },
   { id:'safety',    label:'보안',      desc:'계정 보안·안전장치',       cat:'설정', kw:'보안 안전',      Icon:ShieldCheck, color:'#22C55E' },
 ];
 
