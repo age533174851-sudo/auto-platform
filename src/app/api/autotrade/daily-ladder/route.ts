@@ -427,6 +427,29 @@ export async function POST(req: NextRequest) {
       if (!ksg.allowed) throw new Error(ksg.message);
     }
 
+    // ── 같은 종목에 다른 전략이 켜져 있는가 ──
+    //
+    // **이 검사가 여기 없었다.** my-original-v1에만 있었고, 그래서
+    // daily-ladder는 같은 계좌·같은 종목에 그대로 들어갈 수 있었다.
+    // ONE_WAY 계좌는 종목당 포지션이 하나라, 한쪽의 청산이 다른 쪽
+    // 포지션을 닫고 한쪽의 손절이 다른 쪽 진입에 발동한다.
+    //
+    // 판정은 strategyConflictGate 한 곳에 있다 — 복사하지 않는다.
+    {
+      const { strategyConflictGate, sleeveCapitalGate } = await import('@/lib/engine/strategyConflictGate');
+      const cf = await strategyConflictGate(sb, {
+        userId: userId!, myStrategyId: 'daily-ladder', symbol, connectionId: body.connectionId,
+      });
+      if (!cf.ok) throw new Error(cf.reason);
+
+      // **다른 전략의 돈을 끌어오지 않는다.** 전략 계좌를 안 만들었으면
+      // 막지 않는다 — 지금까지 돌던 전략이 갑자기 멈추면 안 된다.
+      const sl = await sleeveCapitalGate(sb, {
+        userId: userId!, strategyId: 'daily-ladder', connectionId: body.connectionId,
+      });
+      if (!sl.allowed) throw new Error(sl.reason);
+    }
+
     // ── 웹과 워커가 같은 것을 보고 있는가 ──
     //
     // 암호화 키가 다르면 워커는 거래소 키를 못 푼다. 증상은 "키가

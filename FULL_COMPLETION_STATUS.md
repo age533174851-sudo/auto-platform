@@ -37,7 +37,7 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 1. Auto Runtime Truth
 2. Wallet Completion (#145가 남긴 것)
 3. Unified Ledger
-4. Multi Strategy Ownership
+4. Multi Strategy Ownership ← 진행 중
 5. MOCK Runtime Unification
 6. Backtest Truth
 7. Feature / Promotion Registry
