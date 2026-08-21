@@ -753,6 +753,39 @@ export async function POST(req: NextRequest) {
 
     const entered = ev.entered;
     const outcome = outcomeOf(ev);
+
+    // ── 장부에 적는다 ──
+    //
+    // **진입이 증거로 확인됐을 때만** 적는다. 접수(ok)로 적으면 체결되지
+    // 않은 주문이 장부에 남고, 그 위에서 계산한 손익은 처음부터 틀린다.
+    //
+    // 장부 기록이 실패해도 매매를 되돌리지 않는다 — 기록 장애가 매매
+    // 장애가 되면 안 된다. 다만 조용히 넘기지도 않는다.
+    if (entered) {
+      try {
+        const { recordLedgerEvent } = await import('@/lib/ledger/writeLedger');
+        const qty = Number(exec?.filledQty);
+        const px = Number(exec?.avgPrice ?? exec?.exitBasis?.basisPrice);
+        await recordLedgerEvent(sb, {
+          userId, env: testnet ? 'TESTNET' : 'LIVE',
+          connectionId, exchange, kind: 'FILL',
+          strategyId: STRATEGY_MY_ORIGINAL_V1,
+          symbol,
+          // **거래소 주문 번호는 문자열 그대로다** (#139)
+          venueOrderId: exec?.exchangeOrderId != null ? String(exec.exchangeOrderId) : null,
+          orderIntentId: clientOrderId,
+          // 진입은 증거금이 묶이는 것이지 손익이 아니다. 명목가치를
+          // 부호 없이 적고, 실현손익은 청산 때 따로 적는다.
+          amount: 0,
+          quantity: Number.isFinite(qty) ? qty : null,
+          price: Number.isFinite(px) ? px : null,
+          occurredAtMs: Date.now(),
+          source: 'EXCHANGE_FILL',
+          correlationId: clientOrderId,
+          note: `${sig.side} 진입 · ${REQUESTED_LEVERAGE}배 · 증거금 $${marginUsd}`,
+        }, 'my-original-v1');
+      } catch { /* 기록 실패가 매매를 막지 않는다 */ }
+    }
     const why = entered
       ? `${sig.side} 진입 확인 · 증거금 $${marginUsd} · ${REQUESTED_LEVERAGE}배 · `
         + `실제 체결가 ${exec?.exitBasis?.basisPrice ?? exec?.avgPrice} · `
