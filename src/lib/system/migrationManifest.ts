@@ -76,6 +76,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '059_ops_requests.sql', id: 59, risk: 'ADDITIVE', checksum: '3d014c816a33bf6c' },
   { name: '060_ops_bootstrap.sql', id: 60, risk: 'ADDITIVE', checksum: 'dde6ca4cdd62c43a' },
   { name: '061_self_heal.sql', id: 61, risk: 'ADDITIVE', checksum: 'b28f327cd9b64365' },
+  { name: '062_ledger_ingest.sql', id: 62, risk: 'ADDITIVE', checksum: 'f6c2f9d88cf3dc2d' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */
