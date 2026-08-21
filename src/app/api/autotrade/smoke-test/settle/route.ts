@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
     if (isMissing(e?.message)) {
       return NextResponse.json({
         ok: false, error: 'table_missing',
-        message: 'smoke_tests 표가 없습니다 — 마이그레이션 052를 적용하세요',
+        message: 'smoke_tests 표가 아직 없습니다 — 마이그레이션 052를 자동으로 적용하는 중입니다',
       }, { status: 503 });
     }
     return NextResponse.json({ ok: false, error: 'query_failed', message: String(e?.message || e) }, { status: 500 });

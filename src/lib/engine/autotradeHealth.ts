@@ -133,7 +133,7 @@ export function autotradeHealth(input: HealthInput): HealthReport {
   if (input.tableMissing) {
     items.push(item('table', '예약 표', 'bad',
       'autotrade_schedules 표가 없습니다',
-      'Supabase SQL Editor에서 마이그레이션 031~035를 적용하세요'));
+      '마이그레이션 031~035를 자동으로 적용하는 중입니다'));
     return {
       items, running: false,
       verdict: '자동매매가 돌 수 없습니다 — 예약을 저장할 표가 없습니다',
@@ -282,7 +282,7 @@ export function autotradeHealth(input: HealthInput): HealthReport {
   if (input.marginColumnPresent === false) {
     items.push(item('margincol', '1회 증거금 칸', 'bad',
       'margin_pct 칸이 없어 배율이 낮게 역산됩니다 (화면에 100을 넣어도 그대로 안 나갑니다)',
-      'Supabase SQL Editor에서 마이그레이션 036을 적용하세요'));
+      '마이그레이션 036을 자동으로 적용하는 중입니다'));
   } else if (input.marginColumnPresent === true) {
     items.push(item('margincol', '1회 증거금 칸', 'ok', '있습니다 (마이그레이션 036 적용됨)'));
   }

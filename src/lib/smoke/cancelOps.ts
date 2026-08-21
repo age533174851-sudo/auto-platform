@@ -87,7 +87,7 @@ export async function stopAfterCurrent(
   if (error) {
     if (isMissingTable(error.message)) {
       return { ...base, ok: false, code: 'TABLE_MISSING', status: 503,
-        message: 'smoke_runs 표가 없습니다 — 마이그레이션 053을 적용하세요' };
+        message: 'smoke_runs 표가 아직 없습니다 — 마이그레이션 053을 자동으로 적용하는 중입니다' };
     }
     return { ...base, ok: false, code: 'UPDATE_FAILED', status: 500, message: String(error.message) };
   }

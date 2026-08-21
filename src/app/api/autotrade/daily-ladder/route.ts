@@ -427,6 +427,17 @@ export async function POST(req: NextRequest) {
       if (!ksg.allowed) throw new Error(ksg.message);
     }
 
+    // ── DB가 코드를 따라왔는가 ──
+    //
+    // 코드가 요구하는 칸이 DB에 없으면 쓰기는 조용히 실패하고 매매는
+    // 계속된다(054에서 실제로 일어난 일). **적용이 안 끝났으면 막는다.**
+    // 적용 자체는 migrate 워크플로가 자동으로 한다 — 사람이 할 일은 없다.
+    {
+      const { migrationGate } = await import('@/lib/system/migrationGate');
+      const mg = await migrationGate(sb);
+      if (!mg.entryAllowed) throw new Error(mg.entryReason);
+    }
+
     // ── 점검용 가상 계획 ──
     //
     // 진입 신호가 없으면 파이프라인은 계획을 만들지 않는다. 그러면 손절가·
@@ -1050,7 +1061,7 @@ export async function GET(req: NextRequest) {
   } catch (e: any) {
     const msg = String(e?.message || e);
     readError = /autotrade_schedules/i.test(msg) && /(does not exist|schema cache|relation)/i.test(msg)
-      ? 'autotrade_schedules 표가 없습니다 — 마이그레이션 031을 적용하세요'
+      ? 'autotrade_schedules 표가 아직 없습니다 — 마이그레이션 031을 자동으로 적용하는 중입니다'
       : msg;
   }
 

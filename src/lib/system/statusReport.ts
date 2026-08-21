@@ -89,7 +89,7 @@ export function cronStatus(
       return {
         id: `cron:${e.job}`, label: e.label, health: 'unknown' as Health,
         detail: '실행 이력을 읽지 못했습니다 — 안 돌았다는 뜻이 아닙니다',
-        action: '마이그레이션 029를 적용했는지 확인하세요',
+        action: '기록표(cron_runs)를 자동으로 적용하는 중입니다',
       };
     }
 
@@ -172,7 +172,7 @@ export function tableStatus(probes: TableProbe[]): StatusItem[] {
         // **무엇을 해야 하는지 적는다.** '표 없음'만 적으면 사용자가
         // 할 수 있는 일이 없다.
         detail: `${p.name} 표가 없습니다 — 이 기능은 아무것도 기록하지 못합니다`,
-        action: `마이그레이션 ${p.migration}을 적용하세요`,
+        action: `마이그레이션 ${p.migration}을 자동으로 적용하는 중입니다`,
       };
     }
     return {
@@ -224,7 +224,7 @@ export function autotradeStatus(p: AutotradeProbe, nowMs: number): StatusItem {
   }
   if (!p.tableExists) {
     return bad('autotrade_schedules 표가 없습니다 — 크론이 읽을 것이 없습니다',
-      '마이그레이션 031을 적용하세요');
+      '마이그레이션 031을 자동으로 적용하는 중입니다');
   }
   if (p.enabledRows === null) {
     return { id, label, health: 'unknown',

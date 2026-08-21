@@ -84,7 +84,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({
         ok: false, error: missing ? 'table_missing' : 'query_failed',
         message: missing
-          ? 'scheduled_exits 표가 없습니다 — 마이그레이션 032를 적용하세요'
+          ? 'scheduled_exits 표가 아직 없습니다 — 마이그레이션 032를 자동으로 적용하는 중입니다'
           : error.message,
       }, { status: missing ? 503 : 500 });
     }
@@ -113,7 +113,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ok: false, error: missing ? 'table_missing' : 'query_failed',
       message: missing
-        ? 'scheduled_exits 표가 없습니다 — 마이그레이션 032를 적용하세요'
+        ? 'scheduled_exits 표가 아직 없습니다 — 마이그레이션 032를 자동으로 적용하는 중입니다'
         : error.message,
     }, { status: missing ? 503 : 500 });
   }
@@ -301,7 +301,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: false, error: missing ? 'table_missing' : 'insert_failed',
       message: missing
-        ? 'scheduled_exits 표가 없습니다 — 마이그레이션 032를 적용하세요'
+        ? 'scheduled_exits 표가 아직 없습니다 — 마이그레이션 032를 자동으로 적용하는 중입니다'
         : error.message,
     }, { status: missing ? 503 : 500 });
   }

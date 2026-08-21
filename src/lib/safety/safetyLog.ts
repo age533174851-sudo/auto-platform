@@ -164,7 +164,7 @@ export async function recordSafetyBlocks(
     return {
       saved: 0,
       error: missing
-        ? 'safety_events 표가 없습니다 — 마이그레이션 026을 적용하세요'
+        ? 'safety_events 표가 아직 없습니다 — 마이그레이션 026을 자동으로 적용하는 중입니다'
         : msg,
     };
   }

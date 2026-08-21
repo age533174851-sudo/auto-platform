@@ -195,8 +195,9 @@ export default function AdminPage() {
           <div style={{background:T.alt,borderRadius:10,padding:'10px 14px',marginBottom:20,textAlign:'left'}}>
             <div style={{color:T.sub,fontSize:10,fontWeight:700,marginBottom:4}}>관리자 승격 방법</div>
             <div style={{color:T.muted,fontSize:10,lineHeight:1.6}}>
-              Supabase Dashboard → SQL Editor에서:<br/>
-              <code style={{color:T.acl}}>UPDATE profiles SET role = &apos;admin&apos; WHERE email = &apos;your@email.com&apos;;</code>
+              사람이 SQL을 실행할 필요는 없습니다. 서버의 <code style={{color:T.acl}}>ADMIN_EMAILS</code>에
+              들어 있는 계정으로 로그인하면 다음 로그인 때 자동으로 승격됩니다.<br/>
+              그 목록에 없다면 <b>권한이 없어 자동으로 처리하지 못하는 경우</b>입니다.
             </div>
           </div>
           <a href="/" style={{display:'block',padding:'10px',background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,fontWeight:700,fontSize:12,textDecoration:'none'}}>← 홈으로</a>
@@ -532,13 +533,10 @@ export default function AdminPage() {
             <Card style={{padding:16,marginTop:12,background:T.alt}}>
               <div style={{color:T.sub,fontSize:11,fontWeight:700,marginBottom:6}}>🔒 관리자 승격 방법</div>
               <div style={{color:T.muted,fontSize:10,lineHeight:1.8}}>
-                프론트엔드에서 관리자 역할을 부여할 수 없습니다.<br/>
-                Supabase Dashboard → SQL Editor에서 직접 실행하세요:<br/>
-                <code style={{color:T.acl,display:'block',marginTop:4,background:T.surf,padding:'6px 10px',borderRadius:6}}>
-                  UPDATE profiles<br/>
-                  SET role = &apos;admin&apos;<br/>
-                  WHERE email = &apos;user@example.com&apos;;
-                </code>
+                화면에서 임의로 관리자 역할을 부여하지 않습니다 — 브라우저가 보낸 값으로
+                권한을 올리면 그 순간 권한 검사가 의미를 잃습니다.<br/>
+                승격은 서버의 <code style={{color:T.acl}}>ADMIN_EMAILS</code> 목록으로만 이루어지고,
+                해당 계정이 로그인하면 자동으로 반영됩니다. 사람이 SQL을 실행하는 절차는 없습니다.
               </div>
             </Card>
           </div>

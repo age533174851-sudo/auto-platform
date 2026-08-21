@@ -102,6 +102,45 @@ jobs:
           fi
           echo "FLY_API_TOKEN 존재 확인 (값은 출력하지 않습니다)"
 
+      # ── DB가 코드를 따라왔는가 ──
+      #
+      # **코드만 앞서 나가면 조용히 틀린다.** 054가 없던 동안 워커는
+      # 멀쩡히 돌면서 버전을 못 적었고, 화면은 '모름'을 계속 보여 줬다.
+      # 새 워커가 요구하는 칸이 DB에 없으면 쓰기는 실패하는데 매매는
+      # 계속된다 — 그래서 배포 전에 먼저 묻는다.
+      #
+      # 접속 정보가 아직 연결되지 않았으면(최초 1회 권한 연결) 경고만
+      # 남기고 배포는 진행한다. 워커 배포를 막는 것이 더 위험하다.
+      # 연결된 뒤부터는 남은 마이그레이션이 있으면 **배포를 멈춘다.**
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: 마이그레이션 상태 확인
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MIGRATION_REPORT_PATH: ${{ github.workspace }}/migration-report.json
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::warning::SUPABASE_DB_URL이 없어 마이그레이션 상태를 확인하지 못했습니다 — 배포는 진행합니다"
+            exit 0
+          fi
+          node scripts/apply-migrations.mjs --check || true
+          CODE=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('migration-report.json','utf8')).code)}catch(e){console.log('UNKNOWN')}")
+          echo "마이그레이션 상태: ${CODE}"
+          case "${CODE}" in
+            UP_TO_DATE) echo "DB가 코드를 따라와 있습니다" ;;
+            NO_CREDENTIAL) echo "::warning::접속 정보 없음 — 확인하지 못했습니다" ;;
+            *)
+              echo "::error::마이그레이션이 끝나지 않았습니다 (${CODE}) — 이 상태로 워커를 바꾸지 않습니다"
+              echo "migrate 워크플로가 먼저 끝나야 합니다. 승인이 필요한 변경이면 migration-report를 보세요."
+              exit 1 ;;
+          esac
+
       - name: flyctl 설치
         uses: superfly/flyctl-actions/setup-flyctl@master
 

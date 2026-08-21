@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
     if (isMissing(msg)) {
       return NextResponse.json({
         ok: false, error: 'table_missing',
-        message: 'smoke_runs 표가 없습니다 — 마이그레이션 053을 적용하세요',
+        message: 'smoke_runs 표가 아직 없습니다 — 마이그레이션 053을 자동으로 적용하는 중입니다',
       }, { status: 503 });
     }
     if (/duplicate key|unique constraint/i.test(msg)) {
@@ -169,7 +169,7 @@ export async function GET(req: NextRequest) {
     ok: !tableMissing,
     ...(tableMissing ? {
       error: 'table_missing',
-      message: 'smoke_runs 표가 없습니다 — 마이그레이션 052·053을 적용하세요',
+      message: 'smoke_runs 표가 아직 없습니다 — 마이그레이션 052·053을 자동으로 적용하는 중입니다',
     } : {}),
     runs: runs.map(r => viewRun(r, tests.filter((t: any) => String(t.run_id) === String(r.id)))),
     soloTests: solo.map(viewTest),

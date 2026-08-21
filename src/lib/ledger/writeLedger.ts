@@ -62,7 +62,7 @@ export async function writeLedgerEvent(sb: any, raw: Partial<LedgerEvent>): Prom
     }
     if (isMissingTable(error.message)) {
       return { ok: false, code: 'TABLE_MISSING', idempotencyKey: e.idempotencyKey,
-        reason: 'ledger_events 표가 없습니다 — 마이그레이션 056을 적용하세요' };
+        reason: 'ledger_events 표가 아직 없습니다 — 마이그레이션 056을 자동으로 적용하는 중입니다' };
     }
     return { ok: false, code: 'FAILED', idempotencyKey: e.idempotencyKey,
       reason: String(error.message || error) };
