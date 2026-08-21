@@ -65,15 +65,26 @@ export function migrationStatusOf(i: {
   const required = Array.isArray(i?.required) ? i.required.slice() : [];
 
   if (i?.tracked === false) {
+    // **기록표가 없다는 것은 "적용됐다"가 아니다.**
+    //
+    // 처음에는 여기서 진입을 막지 않았다. 이 기능을 배포한 순간 자동매매가
+    // 꺼지는 것이 더 나쁘다고 봤기 때문이다. 그건 틀린 판단이었다 —
+    // 실제 돈이 걸린 시스템에서 **DB 스키마와 코드 버전이 다른데 신규
+    // 주문을 계속 허용하면 안 된다.** 코드가 요구하는 칸이 없으면 쓰기는
+    // 조용히 실패하고 매매는 계속된다(054가 정확히 그랬다).
+    //
+    // 막는 것은 **새로 여는 것뿐이다.** 이미 열린 포지션의 청산·보호주문
+    // 정리·대조는 이 관문을 지나지 않는다 — 못 여는 것은 불편이고
+    // 못 닫는 것은 사고다.
     return {
-      health: 'warn', code: 'NOT_TRACKED',
-      detail: '마이그레이션 기록 파이프라인이 아직 연결되지 않았습니다 — 다음 배포에서 기록표가 만들어집니다',
+      health: 'bad', code: 'NOT_TRACKED',
+      detail: `마이그레이션 적용 기록이 없습니다 — 코드가 요구하는 ${required.length}개가 DB에 있는지 확인할 수 없습니다`,
       // 최초 1회 권한 연결이 필요한 자리. **사람이 SQL을 붙여 넣는 일은 아니다.**
-      blockedReason: 'DB 접속 권한(SUPABASE_DB_URL)이 연결되면 이후로는 자동으로 적용하고 기록합니다',
-      required: required.length, applied: 0, pending: [], failed: [],
-      // 기록이 없다고 매매를 막지 않는다. 진입에 필요한 표 검사가 따로 있다.
-      entryAllowed: true,
-      entryReason: '마이그레이션 기록이 없어 이 기준으로는 막지 않습니다 (표 존재 검사로 대신합니다)',
+      blockedReason: 'DB 접속 권한(SUPABASE_DB_URL)이 한 번 연결되면 이후 마이그레이션은 전부 자동입니다',
+      required: required.length, applied: 0, pending: required.slice(), failed: [],
+      entryAllowed: false,
+      entryReason: '마이그레이션 적용 여부를 확인할 수 없어 신규 진입을 막습니다 — '
+        + '이미 열린 포지션의 청산·보호·복구는 계속 동작합니다',
     };
   }
 

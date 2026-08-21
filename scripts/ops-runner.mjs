@@ -96,6 +96,50 @@ if (probe.rows[0]?.[0] !== 't') {
   process.exit(0);
 }
 
+// ── 자격을 실제로 써 본다 ──
+//
+// **"있을 것으로 보입니다"를 없앤다.** 값이 있는지가 아니라 그 값으로
+// 실제로 되는지를 본다 — 있는데 만료된 토큰이 가장 흔한 고장이고,
+// 그건 "없음"과 완전히 다른 사실이다.
+//
+// 값은 어디에도 적지 않는다. 상태 세 가지와 한 줄 설명뿐이다.
+function noteCredential(name, state, detail) {
+  const has = q(`SELECT to_regclass('public.ops_bootstrap') IS NOT NULL`);
+  if (!has.ok || has.rows[0]?.[0] !== 't') return;   // 060이 아직이면 조용히 넘어간다
+  q(`INSERT INTO ops_bootstrap (credential, state, checked_at, checked_by, detail)
+     VALUES (${lit(name)}, ${lit(state)}, now(), 'github-actions', ${lit(detail)})
+     ON CONFLICT (credential) DO UPDATE
+     SET state = EXCLUDED.state, checked_at = now(), checked_by = EXCLUDED.checked_by, detail = EXCLUDED.detail`);
+  console.log(`  ${name}: ${state} — ${detail}`);
+}
+
+console.log('권한 연결 확인 (값은 출력하지 않습니다)');
+// 여기까지 왔다는 것은 DB 접속이 실제로 됐다는 뜻이다.
+noteCredential('SUPABASE_DB_URL', 'CONNECTED', '요청 큐를 읽고 썼습니다');
+
+{
+  const token = String(process.env.FLY_API_TOKEN || '').trim();
+  if (!token) {
+    noteCredential('FLY_API_TOKEN', 'MISSING', '워커를 자동으로 재시작·재배포할 수 없습니다');
+  } else {
+    try {
+      execFileSync('flyctl', ['apps', 'list', '--json'],
+        { stdio: 'pipe', encoding: 'utf8', timeout: 60_000 });
+      noteCredential('FLY_API_TOKEN', 'CONNECTED', 'Fly 앱 목록을 읽었습니다');
+    } catch (e) {
+      // **값은 있는데 안 된다.** 만료됐거나 이 앱에 권한이 없다.
+      noteCredential('FLY_API_TOKEN', 'INVALID',
+        `토큰은 있으나 Fly에 닿지 못했습니다: ${scrub(String(e?.stderr || e?.message || e), DB).slice(0, 150)}`);
+    }
+  }
+}
+
+{
+  const token = String(process.env.GITHUB_TOKEN || '').trim();
+  noteCredential('GITHUB_TOKEN', token ? 'CONNECTED' : 'MISSING',
+    token ? '워크플로를 깨울 수 있습니다' : '배포·마이그레이션을 자동으로 시작할 수 없습니다');
+}
+
 const listed = q(`
   SELECT id, command, status, approved,
          EXTRACT(EPOCH FROM requested_at) * 1000,

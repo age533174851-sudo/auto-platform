@@ -148,4 +148,38 @@ export function runWorkerPlanTests() {
     eq(v.code, 'UNKNOWN'); eq(v.matched, false);
     assert(v.reason.includes('Fly'), v.reason);
   });
+
+  // ── 코드가 같아도 DB가 따라오지 않았으면 배포 완료가 아니다 ──
+
+  test('**SHA가 셋 다 같아도 마이그레이션이 남았으면 MATCHED가 아니다**', () => {
+    // 코드만 앞서 나가면 새 칸에 대한 쓰기가 조용히 실패하고 매매는 계속된다.
+    const v = deploymentVerdict({
+      mainSha: 'abc1234', vercelSha: 'abc1234', flySha: 'abc1234',
+      migrationsApplied: false, pendingMigrations: ['057_worker_runtime.sql', '058_exit_monitor_runs.sql'],
+    });
+    eq(v.matched, false);
+    eq(v.code, 'MISMATCH');
+    assert(/057/.test(v.reason), v.reason);
+  });
+
+  test('마이그레이션까지 확인되면 MATCHED이고 그렇다고 적는다', () => {
+    const v = deploymentVerdict({
+      mainSha: 'abc1234', vercelSha: 'abc1234', flySha: 'abc1234', migrationsApplied: true,
+    });
+    eq(v.matched, true);
+    assert(/DB 스키마도 따라와/.test(v.reason), v.reason);
+  });
+
+  test('마이그레이션 상태를 안 넘기면 예전처럼 동작한다 — 갑자기 UNKNOWN이 되지 않는다', () => {
+    const v = deploymentVerdict({ mainSha: 'abc1234', vercelSha: 'abc1234', flySha: 'abc1234' });
+    eq(v.matched, true);
+  });
+
+  test('마이그레이션 상태를 확인하려다 못 읽으면 배포 완료로 보지 않는다', () => {
+    const v = deploymentVerdict({
+      mainSha: 'abc1234', vercelSha: 'abc1234', flySha: 'abc1234', migrationsApplied: null,
+    });
+    eq(v.code, 'UNKNOWN');
+    eq(v.matched, false);
+  });
 }

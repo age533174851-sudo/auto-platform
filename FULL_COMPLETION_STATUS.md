@@ -278,7 +278,8 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 | 12 | Recovery Center 자동 우선 (자동 가능/사람 결정 분리) | `NOT_STARTED` |
 | 13 | 운영 명령 인터페이스 (`전체 점검해`·`배포해`·`복구해`) | `FIXED` `TESTED` — 점검은 즉시, 중지는 즉시(킬 스위치), 배포·복구는 요청 큐 → ops-runner가 실행 |
 | 14 | UI에서 운영 숙제 문구 금지 (CI 검사) | `PARTIAL` (마이그레이션 문구만) |
-| 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `FIXED` `TESTED` |
+| 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `FIXED` `TESTED` — 실행기가 **실제로 써 보고** CONNECTED/MISSING/INVALID를 적는다 |
+| — | **Bootstrap Gate** — 필요한 마이그레이션이 미적용이면 신규 진입 BLOCK · 배포 verified 금지 · 청산/보호/복구는 계속 | `FIXED` `TESTED` |
 | 2 | Wallet: price/FX provenance | `NOT_STARTED` |
 | 3 | Unified Ledger | `NOT_STARTED` |
 | — | #142 cleanup evidence UI (actual-auto) | `NOT_STARTED` |

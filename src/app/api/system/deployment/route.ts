@@ -98,11 +98,38 @@ export async function GET(req: NextRequest) {
   }
 
   const skew = runtimeSkew({ vercelSha: web.sha, flySha: fly.sha });
-  const full = deploymentVerdict({ mainSha, vercelSha: web.sha, flySha: fly.sha });
+  // ── 코드가 같아도 DB가 따라오지 않았으면 '배포 완료'가 아니다 ──
+  //
+  // **SHA 셋이 같다는 것과 그 코드가 제대로 돈다는 것은 다른 사실이다.**
+  // 054가 없던 동안 세 SHA는 완벽히 같았고, 워커는 버전을 못 적었다.
+  // 그래서 스키마까지 봐야 배포가 끝났다고 말할 수 있다.
+  let migrationsApplied: boolean | null | undefined = undefined;
+  let pendingMigrations: string[] = [];
+  try {
+    if (!sb) throw new Error('supabase_not_configured');
+    const { migrationGate } = await import('@/lib/system/migrationGate');
+    const ms = await migrationGate(sb);
+    // UNKNOWN(기록을 못 읽음)은 null — **모르는 것을 '됐다'로 읽지 않는다**
+    migrationsApplied = ms.code === 'UP_TO_DATE' ? true
+      : ms.code === 'UNKNOWN' ? null : false;
+    pendingMigrations = ms.pending;
+  } catch {
+    migrationsApplied = null;
+  }
+
+  const full = deploymentVerdict({
+    mainSha, vercelSha: web.sha, flySha: fly.sha, migrationsApplied, pendingMigrations,
+  });
 
   return NextResponse.json({
     ok: true,
     nowIso: new Date(nowMs).toISOString(),
+    // 배포가 끝났다고 말하려면 스키마도 따라와야 한다.
+    migrations: {
+      applied: migrationsApplied,
+      pending: pendingMigrations.slice(0, 10),
+      pendingCount: pendingMigrations.length,
+    },
     vercel: { sha: web.sha, short: web.sha ? web.sha.slice(0, 7) : null, source: web.source },
     fly: { ...fly, short: fly.sha ? fly.sha.slice(0, 7) : null },
     main: { sha: mainSha, short: mainSha ? mainSha.slice(0, 7) : null,

@@ -6,7 +6,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import { parseOpsCommand, opsVerdictOf, specOf, type StepResult } from './opsCommand';
-import { bootstrapStatus } from './opsBootstrap';
+import { bootstrapStatus, credentialStateOf } from './opsBootstrap';
 
 const step = (over: Partial<StepResult>): StepResult => ({
   step: 'worker', label: '워커', state: 'PASS', detail: '', did: [], blockedReason: null, ...over,
@@ -45,18 +45,39 @@ export function runOpsCommandTests() {
 
   // ── 판정 합치기 ──
 
-  test('전부 정상이면 PASS', () => {
+  test('전부 정상이면 READY', () => {
     const r = opsVerdictOf('CHECK_ALL', [step({}), step({ step: 'ledger', label: '장부' })]);
-    eq(r.verdict, 'PASS');
+    eq(r.verdict, 'READY');
     eq(r.needsHuman.length, 0);
   });
 
-  test('**하나라도 확인 못 하면 PASS가 아니다**', () => {
+  test('**하나라도 확인 못 하면 READY가 아니다**', () => {
     const r = opsVerdictOf('CHECK_ALL', [
       step({}), step({ step: 'ledger', label: '장부', state: 'UNKNOWN' }),
     ]);
-    eq(r.verdict, 'UNKNOWN');
+    // '모름'과 '막힘'은 사용자 입장에서 대응이 같다 — 지금 매매하면 안 된다.
+    eq(r.verdict, 'BLOCKED');
     assert(/정상이라는 뜻이 아닙니다/.test(r.summary), r.summary);
+  });
+
+  test('**권한 연결만 남았으면 BOOTSTRAP_REQUIRED다** — 그 밖의 고장과 구분한다', () => {
+    // 최초 1회 사람이 할 일과 시스템이 고쳐야 할 것을 한 통에 담으면
+    // 사용자는 매번 같은 목록을 보게 되고, 그러면 곧 안 본다.
+    const r = opsVerdictOf('CHECK_ALL', [
+      step({}),
+      step({ step: 'secrets', label: '권한 연결', state: 'BLOCKED',
+        blockedReason: 'SUPABASE_DB_URL (GitHub Secrets)' }),
+    ]);
+    eq(r.verdict, 'BOOTSTRAP_REQUIRED');
+    assert(/최초 1회/.test(r.summary), r.summary);
+  });
+
+  test('권한 말고 다른 것도 막혀 있으면 BOOTSTRAP_REQUIRED가 아니다', () => {
+    const r = opsVerdictOf('CHECK_ALL', [
+      step({ step: 'secrets', label: '권한 연결', state: 'BLOCKED', blockedReason: 'X' }),
+      step({ step: 'worker', label: '워커', state: 'BLOCKED', blockedReason: '멈춤' }),
+    ]);
+    eq(r.verdict, 'BLOCKED');
   });
 
   test('스스로 고쳤으면 SELF_HEALED로 적는다 — 사람이 한 일이 아니다', () => {
@@ -75,15 +96,15 @@ export function runOpsCommandTests() {
         blockedReason: 'DB 접속 권한이 연결되지 않았습니다' }),
       step({ step: 'ledger', label: '장부', state: 'UNKNOWN' }),
     ]);
-    // BLOCKED가 UNKNOWN보다 먼저다 — 손댈 수 있는 것을 먼저 말한다.
+    // BLOCKED가 먼저다 — 손댈 수 있는 것을 먼저 말한다.
     eq(r.verdict, 'BLOCKED');
     eq(r.needsHuman.length, 1);
     assert(/DB 접속 권한/.test(r.needsHuman[0]), r.needsHuman[0]);
   });
 
-  test('본 것이 하나도 없으면 PASS가 아니다', () => {
-    eq(opsVerdictOf('CHECK_ALL', []).verdict, 'UNKNOWN');
-    eq(opsVerdictOf('CHECK_ALL', [step({ state: 'SKIPPED' })]).verdict, 'UNKNOWN');
+  test('본 것이 하나도 없으면 READY가 아니다', () => {
+    eq(opsVerdictOf('CHECK_ALL', []).verdict, 'BLOCKED');
+    eq(opsVerdictOf('CHECK_ALL', [step({ state: 'SKIPPED' })]).verdict, 'BLOCKED');
   });
 
   // ── 권한 연결 ──
@@ -114,5 +135,41 @@ export function runOpsCommandTests() {
     // EXIT_MONITOR_SECRET은 없앤 값이다. 워커가 이미 가진 ADMIN_SECRET을 쓴다.
     const b = bootstrapStatus(allOn);
     assert(!/EXIT_MONITOR_SECRET/.test(JSON.stringify(b)), 'EXIT_MONITOR_SECRET을 다시 요구하면 안 된다');
+  });
+
+  // ── 실제로 써 본 결과 ──
+
+  test('**값이 있는 것과 그 값으로 되는 것은 다르다**', () => {
+    // 만료된 토큰은 있는데 안 된다. 없는 것과 대응이 다르다.
+    const b = bootstrapStatus({
+      ...allOn,
+      probes: [{ credential: 'FLY_API_TOKEN', state: 'INVALID', checkedAtMs: 1, detail: null }],
+    });
+    eq(b.code, 'OPS_BOOTSTRAP_MISSING');
+    assert(/만료·권한 부족/.test(b.missing[0].missing[0]), b.missing[0].missing[0]);
+  });
+
+  test('실제로 써 본 결과가 추측을 이긴다', () => {
+    // 화면(Vercel)은 GitHub Secrets를 볼 수 없다. 그래서 dbUrl:false여도
+    // 실행기가 CONNECTED로 적었으면 그게 사실이다.
+    const b = bootstrapStatus({
+      ...allOn, dbUrl: false,
+      probes: [{ credential: 'SUPABASE_DB_URL', state: 'CONNECTED', checkedAtMs: 1, detail: null }],
+    });
+    eq(b.code, 'READY');
+  });
+
+  test('확인 기록이 없으면 없는 대로 읽는다 — 아마 있겠지로 읽지 않는다', () => {
+    eq(credentialStateOf(null, 'FLY_API_TOKEN'), 'UNKNOWN');
+    eq(credentialStateOf([], 'FLY_API_TOKEN'), 'UNKNOWN');
+    eq(credentialStateOf([{ credential: 'FLY_API_TOKEN', state: 'CONNECTED', checkedAtMs: 1, detail: null }],
+      'FLY_API_TOKEN'), 'CONNECTED');
+  });
+
+  test('MIGRATE가 없으면 신규 진입이 막힌다고 말한다', () => {
+    const b = bootstrapStatus({ ...allOn, dbUrl: false });
+    assert(/신규 자동매매 진입이 막힙니다/.test(b.missing[0].withoutIt), b.missing[0].withoutIt);
+    // **이미 열린 포지션의 청산·보호는 계속 동작한다**
+    assert(/청산·보호는 계속/.test(b.missing[0].withoutIt), b.missing[0].withoutIt);
   });
 }

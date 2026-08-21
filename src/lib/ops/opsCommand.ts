@@ -132,7 +132,18 @@ export interface StepResult {
   blockedReason: string | null;
 }
 
-export type OpsVerdict = 'PASS' | 'SELF_HEALED' | 'BLOCKED' | 'UNKNOWN';
+/**
+ * 최종 보고는 이 넷 중 하나뿐이다.
+ *
+ *   READY               다 확인했고 다 정상이다
+ *   SELF_HEALED         문제가 있었는데 **시스템이 스스로 고쳤다**
+ *   BOOTSTRAP_REQUIRED  **최초 1회 권한 연결**만 남았다 (사람이 할 일 하나)
+ *   BLOCKED             그 밖의 이유로 막혔다 — 확인 못 한 것도 여기다
+ *
+ * `UNKNOWN`을 따로 두지 않는다. **확인하지 못한 것은 통과가 아니고**,
+ * 사용자가 볼 때 "모름"과 "막힘"의 대응은 같다 — 지금 매매하면 안 된다.
+ */
+export type OpsVerdict = 'READY' | 'SELF_HEALED' | 'BOOTSTRAP_REQUIRED' | 'BLOCKED';
 
 export interface OpsResult {
   command: OpsCommand;
@@ -161,24 +172,38 @@ export function opsVerdictOf(command: OpsCommand, steps: StepResult[]): OpsResul
   const needsHuman = blocked
     .map(s => s.blockedReason ? `${s.label}: ${s.blockedReason}` : `${s.label}: 자동으로 처리하지 못했습니다`);
 
+  // **최초 1회 권한 연결과 그 밖의 고장을 가른다.**
+  //
+  // 앞엣것은 사람이 딱 한 번 해야 하는 일이고(그리고 그 뒤로는 영원히
+  // 없다), 뒤엣것은 시스템이 고쳐야 하는 것이다. 둘을 한 통에 담으면
+  // 사용자는 매번 같은 목록을 보게 되고, 그러면 곧 안 본다.
+  const bootstrapOnly = blocked.length > 0
+    && unknown.length === 0
+    && blocked.every(s => s.step === 'secrets');
+
   let verdict: OpsVerdict;
   let summary: string;
-  if (blocked.length > 0) {
+  if (bootstrapOnly) {
+    verdict = 'BOOTSTRAP_REQUIRED';
+    summary = blocked[0].blockedReason
+      ? `최초 1회 권한 연결이 필요합니다 — ${blocked[0].blockedReason}`
+      : '최초 1회 권한 연결이 필요합니다';
+  } else if (blocked.length > 0) {
     verdict = 'BLOCKED';
     summary = `${blocked.length}가지를 자동으로 처리하지 못했습니다 — ${blocked[0].label}`;
   } else if (unknown.length > 0) {
     // **확인하지 못한 것은 통과가 아니다.**
-    verdict = 'UNKNOWN';
+    verdict = 'BLOCKED';
     summary = `${unknown.length}가지를 확인하지 못했습니다 (${unknown.map(u => u.label).slice(0, 3).join(' · ')}) — 정상이라는 뜻이 아닙니다`;
   } else if (healed.length > 0) {
     verdict = 'SELF_HEALED';
     summary = `${healed.length}가지를 자동으로 복구했습니다 — ${healed.map(h => h.label).join(' · ')}`;
+  } else if (seen.length === 0) {
+    verdict = 'BLOCKED';
+    summary = '확인한 것이 없습니다 — 정상이라는 뜻이 아닙니다';
   } else {
-    verdict = 'PASS';
-    summary = seen.length > 0
-      ? `${seen.length}가지를 확인했고 모두 정상입니다`
-      : '확인한 것이 없습니다';
-    if (seen.length === 0) verdict = 'UNKNOWN';
+    verdict = 'READY';
+    summary = `${seen.length}가지를 확인했고 모두 정상입니다`;
   }
 
   return {

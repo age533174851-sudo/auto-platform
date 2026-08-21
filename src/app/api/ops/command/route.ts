@@ -77,7 +77,27 @@ export async function POST(req: NextRequest) {
 
   // ── 권한 연결 ──
   if (want.has('secrets')) {
+    // **"있을 것으로 보입니다"를 없앤다.**
+    //
+    // 화면(Vercel)은 GitHub Secrets에 무엇이 있는지 볼 수 없다. 그래서
+    // 자격을 가진 쪽(GitHub Actions)이 **직접 써 보고** 적은 결과를 읽는다.
+    // 값이 있는 것과 그 값으로 되는 것은 다른 사실이고, 만료된 토큰이
+    // 가장 흔한 고장이다.
+    let probes: any[] | null = null;
+    try {
+      const { data, error } = await (sb as any)
+        .from('ops_bootstrap').select('credential, state, checked_at, detail');
+      if (!error && Array.isArray(data)) {
+        probes = data.map((r: any) => ({
+          credential: String(r.credential), state: String(r.state),
+          checkedAtMs: Date.parse(String(r.checked_at)) || null,
+          detail: r.detail ?? null,
+        }));
+      }
+    } catch { /* null — 확인 기록이 없다. '아마 있겠지'로 읽지 않는다 */ }
+
     const b = bootstrapStatus({
+      probes,
       // **값이 아니라 있는지만 본다.**
       dbUrl: !!(process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL),
       flyToken: !!process.env.FLY_API_TOKEN,

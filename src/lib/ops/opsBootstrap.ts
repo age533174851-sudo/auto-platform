@@ -35,11 +35,40 @@ export interface CapabilityStatus {
   missing: string[];
 }
 
+export type CredentialState = 'CONNECTED' | 'MISSING' | 'INVALID' | 'UNKNOWN';
+
+export interface CredentialProbe {
+  credential: string;
+  state: CredentialState;
+  checkedAtMs: number | null;
+  detail: string | null;
+}
+
 export interface BootstrapStatus {
   code: 'READY' | 'OPS_BOOTSTRAP_MISSING';
   ready: OpsCapability[];
   missing: CapabilityStatus[];
   summary: string;
+}
+
+/**
+ * 실제로 써 본 결과를 읽는다.
+ *
+ * **"값이 있다"와 "그 값으로 된다"는 다른 사실이다.** 만료된 토큰은
+ * 있는데 안 되고, 그건 없는 것과 대응이 다르다. 그래서 GitHub Actions가
+ * 직접 써 보고 적은 결과(`ops_bootstrap`)를 그대로 읽는다.
+ *
+ * **기록이 없으면 UNKNOWN이다.** '아마 있겠지'로 읽지 않는다 — 그게
+ * 화면에 'Railway'라고 적어 두던 것과 같은 종류의 거짓말이다.
+ */
+export function credentialStateOf(
+  probes: CredentialProbe[] | null | undefined, name: string,
+): CredentialState {
+  if (!Array.isArray(probes)) return 'UNKNOWN';
+  const row = probes.find(p => p && String(p.credential) === name);
+  if (!row) return 'UNKNOWN';
+  const s = String(row.state).toUpperCase();
+  return (s === 'CONNECTED' || s === 'MISSING' || s === 'INVALID') ? (s as CredentialState) : 'UNKNOWN';
 }
 
 /**
@@ -60,19 +89,40 @@ export function bootstrapStatus(present: {
   encryptionKey: boolean;
   /** 서비스 롤 (읽기·쓰기) */
   serviceRole: boolean;
+  /**
+   * GitHub Actions가 실제로 써 보고 적은 결과. 없으면 undefined.
+   *
+   * 이게 있으면 `dbUrl`·`flyToken` 같은 추측 대신 이 값을 쓴다 —
+   * **화면(Vercel)은 GitHub Secrets에 무엇이 있는지 볼 수 없다.**
+   */
+  probes?: CredentialProbe[] | null;
 }): BootstrapStatus {
+  // 실제로 써 본 결과가 있으면 그것이 우선이다.
+  const probed = (name: string, fallback: boolean): { ready: boolean; note: string | null } => {
+    const st = credentialStateOf(present?.probes, name);
+    if (st === 'CONNECTED') return { ready: true, note: null };
+    if (st === 'MISSING') return { ready: false, note: '값이 없습니다' };
+    if (st === 'INVALID') return { ready: false, note: '값은 있으나 실제로 동작하지 않습니다 (만료·권한 부족)' };
+    // 확인 기록이 없다. **추측하지 않는다** — 화면이 볼 수 있는 것만 본다.
+    return { ready: fallback, note: fallback ? null : '아직 확인된 적이 없습니다' };
+  };
+  const db = probed('SUPABASE_DB_URL', !!present?.dbUrl);
+  const fly = probed('FLY_API_TOKEN', !!present?.flyToken);
   const all: CapabilityStatus[] = [
     {
       capability: 'MIGRATE', label: '마이그레이션 자동 적용',
-      ready: !!present?.dbUrl,
-      withoutIt: '새 표·칸이 생겨도 DB에 반영되지 않습니다 — 코드만 앞서 나갑니다',
-      missing: present?.dbUrl ? [] : ['SUPABASE_DB_URL (GitHub Secrets)'],
+      ready: db.ready,
+      // **이게 없으면 신규 진입도 막힌다.** 코드가 요구하는 칸이 DB에
+      // 없는 채로 주문을 내면 쓰기가 조용히 실패하기 때문이다.
+      withoutIt: '새 표·칸이 DB에 반영되지 않고, 그 상태에서는 신규 자동매매 진입이 막힙니다'
+        + ' (이미 열린 포지션의 청산·보호는 계속 동작합니다)',
+      missing: db.ready ? [] : [`SUPABASE_DB_URL (GitHub Secrets)${db.note ? ` — ${db.note}` : ''}`],
     },
     {
       capability: 'WORKER_CONTROL', label: '워커 자동 재시작·재배포',
-      ready: !!present?.flyToken,
+      ready: fly.ready,
       withoutIt: '워커가 멈춰도 시스템이 스스로 되살리지 못합니다',
-      missing: present?.flyToken ? [] : ['FLY_API_TOKEN (GitHub Secrets)'],
+      missing: fly.ready ? [] : [`FLY_API_TOKEN (GitHub Secrets)${fly.note ? ` — ${fly.note}` : ''}`],
     },
     {
       capability: 'EXIT_MONITOR', label: '청산 감시 자동 실행',

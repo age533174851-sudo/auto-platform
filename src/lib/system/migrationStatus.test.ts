@@ -78,13 +78,18 @@ export function runMigrationStatusTests() {
     eq(s.pending.length, 2);
   });
 
-  test('기록표가 아직 없으면 매매를 막지 않는다 — 기록 없음과 DB 뒤처짐은 다르다', () => {
-    // **이 기능을 배포한 순간 멀쩡히 돌던 자동매매가 멈추면 안 된다.**
+  test('**기록표가 없으면 신규 진입을 막는다** — 기록 없음은 "적용됨"이 아니다', () => {
+    // 실제 돈이 걸린 시스템에서 DB 스키마와 코드 버전이 다른데 신규
+    // 주문을 계속 허용하면 안 된다. 054가 정확히 그 상태였다 —
+    // 쓰기는 조용히 실패하고 매매는 계속됐다.
     const s = migrationStatusOf({ required: REQ, rows: [], tracked: false });
     eq(s.code, 'NOT_TRACKED');
-    eq(s.entryAllowed, true);
+    eq(s.entryAllowed, false);
+    eq(s.health, 'bad');
     assert(!!s.blockedReason, '왜 자동으로 못 했는지는 적어야 한다');
     assert(!/SQL 편집기|붙여 넣/.test(String(s.blockedReason)), '사람에게 SQL을 시키지 않는다');
+    // **막는 것은 새로 여는 것뿐이다**
+    assert(/청산·보호·복구는 계속/.test(s.entryReason), s.entryReason);
   });
 
   test('기록표가 생긴 뒤에는 남은 것이 진입을 막는다', () => {
