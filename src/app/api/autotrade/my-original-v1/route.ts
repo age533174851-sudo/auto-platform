@@ -191,44 +191,48 @@ export async function POST(req: NextRequest) {
       { headers: { 'Cache-Control': 'no-store' } });
   }
 
-  // ── 2-b. DB가 코드를 따라왔는가 ──
+  // ── 2-b. 새 진입을 막을 이유를 모은다 (아직 돌려보내지 않는다) ──
   //
-  // **코드만 앞서 나가면 조용히 틀린다.** 054가 없던 동안 워커는 멀쩡히
-  // 돌면서 버전을 못 적었다 — 쓰기는 실패하는데 매매는 계속됐다.
-  // 적용이 안 끝났으면 주문을 내지 않는다.
+  // **막는 것은 '새로 여는 것'뿐이다.**
   //
-  // 사람이 할 일은 없다. 적용은 migrate 워크플로가 자동으로 하고,
-  // 여기서는 끝났는지만 본다.
+  // DB가 코드를 따라오지 못했거나 청산 감시가 죽었으면 새 포지션을 열면
+  // 안 된다. 그런데 그 이유로 이 라우트를 여기서 돌려보내면, 아래 9번의
+  // **기존 보호주문 정리와 반전 청산까지 같이 멈춘다.** 그건 정확히
+  // 반대 방향의 사고다 — 못 여는 것은 불편이고 못 닫는 것은 사고다.
+  //
+  // 그래서 여기서는 이유만 모으고, 정리·청산을 다 마친 **주문 직전**에
+  // 그 이유로 막는다.
+  const entryBlocks: Array<{ code: string; message: string; extra?: any }> = [];
+
   try {
     const { migrationGate } = await import('@/lib/system/migrationGate');
     const mg = await migrationGate(sb);
     if (!mg.entryAllowed) {
-      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: mg.entryReason });
-      return NextResponse.json({ ...base, ok: false, error: 'migration_pending',
-        message: mg.entryReason, migration: { code: mg.code, pending: mg.pending.slice(0, 5) } },
-        { status: 503 });
+      entryBlocks.push({
+        code: 'migration_pending', message: mg.entryReason,
+        extra: { migration: { code: mg.code, pending: mg.pending.slice(0, 5) } },
+      });
     }
   } catch (e: any) {
     // **확인하지 못한 것은 통과가 아니다.**
-    return NextResponse.json({ ...base, ok: false, error: 'migration_unknown',
-      message: `마이그레이션 상태를 확인하지 못해 막았습니다: ${e?.message || e}` }, { status: 503 });
+    entryBlocks.push({
+      code: 'migration_unknown',
+      message: `마이그레이션 상태를 확인하지 못했습니다: ${e?.message || e}`,
+    });
   }
 
   // ── 2-c. 닫아 줄 사람이 있는가 ──
   //
-  // **못 여는 것은 불편이고 못 닫는 것은 사고다.** 청산 감시가 죽어 있으면
-  // 트레일링도 본전 이동도 시간 청산도 안 돈다. 그 상태에서 새 포지션을
-  // 열면 닫아 줄 사람이 없는 포지션이 하나 더 생긴다 — 2026-08-03부터
-  // 다섯 달 동안 정확히 그 상태였다.
-  //
-  // 한두 번 밀린 것으로는 막지 않는다(배포 한 번에 하루가 멈춘다).
+  // 청산 감시가 죽어 있으면 트레일링도 본전 이동도 시간 청산도 안 돈다.
+  // 그 상태에서 새 포지션을 열면 닫아 줄 사람이 없는 포지션이 하나 더 생긴다.
   try {
     const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
     const em = await exitMonitorGate(sb, nowMs);
     if (em.blockEntry) {
-      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: em.reason });
-      return NextResponse.json({ ...base, ok: false, error: 'exit_monitor_stale',
-        message: em.reason, exitMonitor: { code: em.code, sinceSec: em.sinceSec } }, { status: 503 });
+      entryBlocks.push({
+        code: 'exit_monitor_stale', message: em.reason,
+        extra: { exitMonitor: { code: em.code, sinceSec: em.sinceSec } },
+      });
     }
   } catch (e: any) {
     // 관문 자체가 고장 나서 매매를 멈추지는 않는다 — 다만 조용히 넘기지도 않는다.
@@ -698,6 +702,28 @@ export async function POST(req: NextRequest) {
       lifecycle, message: why }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
   }
   base.lifecycle = lifecycle;
+
+  // ── 새로 열어도 되는가 ──
+  //
+  // 위 2-b에서 모은 이유를 **여기서** 쓴다. 정리와 청산은 이미 끝났고,
+  // 남은 것은 새 포지션을 여는 일뿐이다.
+  //
+  // **DB 스키마와 코드가 어긋난 채로 새 주문을 내지 않는다.** 코드가
+  // 요구하는 칸이 DB에 없으면 쓰기는 조용히 실패하고 매매는 계속된다 —
+  // 054에서 실제로 일어난 일이고, 그때는 워커 버전이 영영 '모름'이었다.
+  if (entryBlocks.length > 0) {
+    const why = entryBlocks.map(b => b.message).join(' · ');
+    // **거래일을 소비하지 않는다.** 마이그레이션이 적용되면 같은 창 안에
+    // 다시 볼 수 있어야 한다.
+    await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });
+    return NextResponse.json({
+      ...base, ok: false, outcome: 'BLOCKED', blocked: entryBlocks[0].code,
+      message: why,
+      // 정리·청산은 막지 않았다는 증거를 같이 싣는다.
+      lifecycle,
+      ...Object.assign({}, ...entryBlocks.map(b => b.extra || {})),
+    }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+  }
 
   // ── 주문 ──
   //

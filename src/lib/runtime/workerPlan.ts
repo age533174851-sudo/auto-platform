@@ -263,6 +263,20 @@ export function deploymentVerdict(i: {
   vercelSha?: string | null;
   /** 워커 자체가 보고한 SHA */
   flySha?: string | null;
+  /**
+   * 이 코드가 요구하는 마이그레이션이 DB에 다 들어갔는가.
+   *
+   * **SHA가 셋 다 같아도 이게 아니면 배포가 끝난 것이 아니다.** 코드만
+   * 앞서 나가면 새 칸에 대한 쓰기가 조용히 실패하고 매매는 계속된다 —
+   * 054에서 실제로 일어난 일이다. 그래서 배포 검증에 스키마를 포함한다.
+   *
+   * `undefined`는 **확인하지 않았다**는 뜻이고, 그때는 이 조건을 보지 않는다
+   * (예전 호출부를 갑자기 UNKNOWN으로 만들지 않기 위해서다).
+   * `false`는 확인했고 안 됐다는 뜻이다.
+   */
+  migrationsApplied?: boolean | null;
+  /** 남은 마이그레이션 이름 (사유에 적기 위해서만 쓴다) */
+  pendingMigrations?: string[] | null;
 }): DeploymentVerdict {
   const norm = (v: any) => String(v ?? '').trim().slice(0, 40).toLowerCase();
   const main = norm(i.mainSha);
@@ -289,5 +303,25 @@ export function deploymentVerdict(i: {
       reason: `${behind.join(' · ')}가 main과 다른 코드를 돌리고 있습니다 — `
         + '머지됐다고 배포된 것이 아닙니다. 배포를 확인하세요' };
   }
-  return { code: 'MATCHED', matched: true, reason: 'main · Vercel · Fly가 같은 코드를 돌리고 있습니다' };
+  // ── 코드가 같아도 DB가 따라오지 않았으면 '배포 완료'가 아니다 ──
+  if (i.migrationsApplied === false) {
+    const pend = Array.isArray(i.pendingMigrations) ? i.pendingMigrations : [];
+    return {
+      code: 'MISMATCH', matched: false,
+      reason: 'main · Vercel · Fly가 같은 코드를 돌리고 있지만 **DB 스키마가 따라오지 않았습니다**'
+        + (pend.length ? ` (남은 마이그레이션 ${pend.length}개: ${pend.slice(0, 3).join(', ')})` : '')
+        + ' — 이 상태는 배포 완료가 아닙니다',
+    };
+  }
+  if (i.migrationsApplied == null && i.migrationsApplied !== undefined) {
+    // null = 확인하려 했는데 못 읽었다. **모르는 것을 '됐다'로 읽지 않는다.**
+    return { code: 'UNKNOWN', matched: false,
+      reason: 'main · Vercel · Fly는 같지만 마이그레이션 적용 여부를 확인하지 못했습니다 — 배포 완료로 보지 않습니다' };
+  }
+  return {
+    code: 'MATCHED', matched: true,
+    reason: i.migrationsApplied === true
+      ? 'main · Vercel · Fly가 같은 코드를 돌리고 있고 DB 스키마도 따라와 있습니다'
+      : 'main · Vercel · Fly가 같은 코드를 돌리고 있습니다',
+  };
 }
