@@ -248,7 +248,8 @@ function gh(args) {
     '-H', `Authorization: Bearer ${token}`,
     '-H', 'X-GitHub-Api-Version: 2022-11-28',
     `https://api.github.com/repos/${REPO}/actions/workflows/${args.workflow}/dispatches`,
-    '-d', JSON.stringify({ ref: args.ref || 'main' }),
+    '-d', JSON.stringify({ ref: args.ref || 'main',
+      ...(args.inputs ? { inputs: args.inputs } : {}) }),
   ], { encoding: 'utf8', timeout: 60_000 });
   const code = String(out).trim().split('\n').pop();
   if (code !== '204') throw new Error(`${args.workflow} 요청이 HTTP ${code}로 끝났습니다`);
@@ -262,7 +263,30 @@ function flyctl(args) {
 }
 
 const cmd = d.row.command;
-if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
+if (cmd === 'SYNC_SECRETS') {
+  // ── 시크릿 동기화 ──
+  //
+  // **사람이 두 대시보드를 오가는 일을 없앤다.**
+  //
+  // 여기서 값을 직접 만지지 않는다. `sync-secrets` 워크플로가
+  // 검사 → 반영 → 재배포 → **지문 재확인**까지 하고, 지문이 안 맞으면
+  // 실패로 끝난다("밀어 넣었다"와 "맞았다"는 다르다).
+  //
+  // 값은 이 실행기의 로그에도 저 워크플로의 로그에도 남지 않는다 —
+  // 이름과 지문(sha256 앞 6자)뿐이다.
+  //
+  // **"요청됨"을 "맞춰짐"으로 적지 않는다.** 이 실행기가 아는 것은
+  // 워크플로를 깨웠다는 것까지다. 실제로 맞았는지는 저쪽이 지문으로
+  // 확인하고, 안 맞으면 실패로 끝난다.
+  //
+  // 그리고 안 맞은 상태는 이미 진입을 막는다 — `parityGate`가 모든
+  // 진입 경로에 있고 웹·워커 지문이 다르면 신규 주문을 세운다.
+  // (이미 열린 포지션의 청산·보호는 계속 돈다.)
+  step('시크릿 동기화', () => {
+    const r = gh({ workflow: 'sync-secrets.yml', inputs: { apply: 'true' } });
+    return `${r} — 반영·재배포·지문 확인은 저 워크플로가 하고, 지문이 다르면 실패로 끝납니다`;
+  });
+} else if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
   // **마이그레이션이 먼저다.** 코드만 앞서 나가면 조용히 틀린다.
   step('마이그레이션', () => gh({ workflow: 'migrate.yml' }));
   step('워커 배포', () => gh({ workflow: 'fly-deploy.yml' }));

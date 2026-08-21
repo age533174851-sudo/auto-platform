@@ -191,4 +191,26 @@ export function runOpsCommandTests() {
     ]);
     eq(r.verdict, 'BLOCKED');
   });
+  console.log('[운영 명령 — 시크릿 동기화]');
+
+  test('"시크릿 동기화해"를 읽는다', () => {
+    eq(parseOpsCommand('시크릿 동기화해'), 'SYNC_SECRETS');
+    eq(parseOpsCommand('시크릿 맞춰줘'), 'SYNC_SECRETS');
+    eq(parseOpsCommand('sync secrets'), 'SYNC_SECRETS');
+  });
+
+  test('"지금 중지"가 시크릿보다 먼저 걸린다', () => {
+    // 위험한 것이 먼저 걸려야 한다.
+    eq(parseOpsCommand('지금 중지하고 시크릿 동기화해'), 'STOP_NOW');
+  });
+
+  test('시크릿 동기화는 값을 바꾸지만 승인을 요구하지 않는다', () => {
+    // 값이 한 곳(GitHub Secrets)에서만 오고 여러 번 해도 결과가 같다.
+    // 승인을 붙이면 그 승인이 곧 사람이 눌러야 할 버튼이 된다.
+    const s = specOf('SYNC_SECRETS')!;
+    eq(s.mutates, true);
+    eq(s.needsApproval, false);
+    assert(s.steps.includes('secrets'), s.steps.join(','));
+  });
+
 }

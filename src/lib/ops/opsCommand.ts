@@ -23,6 +23,7 @@ export type OpsCommand =
   | 'VERIFY_TESTNET'
   | 'RECOVER'
   | 'STOP_NOW'
+  | 'SYNC_SECRETS'
   | 'APPROVE_LIVE_SMALL';
 
 export type OpsStepId =
@@ -68,6 +69,20 @@ export const OPS_COMMANDS: OpsCommandSpec[] = [
     mutates: true, needsApproval: false,
   },
   {
+    // **값을 맞추는 일을 사람이 두 대시보드를 오가며 하지 않게 한다.**
+    //
+    // 기준은 GitHub Secrets 하나다. 세 곳이 서로를 보고 있으면 무엇이
+    // 맞는지 아무도 모른다. 그래서 되돌릴 이전 값이라는 것도 없다 —
+    // 밀어 넣은 뒤 지문이 안 맞으면 되돌리는 대신 **크게 말하고
+    // 신규 진입을 막는다**(이미 열린 포지션의 청산·보호는 계속 돈다).
+    //
+    // 승인을 요구하지 않는 이유: 값이 한 곳에서만 오고 여러 번 해도
+    // 결과가 같다. 승인을 붙이면 그 승인이 곧 사람이 눌러야 할 버튼이 된다.
+    command: 'SYNC_SECRETS', label: '시크릿 동기화',
+    steps: ['secrets', 'deployment', 'worker'],
+    mutates: true, needsApproval: false,
+  },
+  {
     // **실제 자금이 걸린 결정.** 자동화의 예외 세 가지 중 하나다.
     command: 'APPROVE_LIVE_SMALL', label: 'LIVE 소액 승인',
     steps: ['migrations', 'deployment', 'worker', 'exitMonitor', 'exchange', 'orders', 'protection', 'ledger'],
@@ -83,6 +98,7 @@ const PHRASES: Array<{ re: RegExp; command: OpsCommand }> = [
   { re: /복구해|복구하자|고쳐줘|recover|heal/i, command: 'RECOVER' },
   { re: /지금\s*중지|당장\s*중지|즉시\s*중지|긴급\s*정지|stop\s*now/i, command: 'STOP_NOW' },
   { re: /LIVE[_\s-]?SMALL\s*승인|실전\s*소액\s*승인/i, command: 'APPROVE_LIVE_SMALL' },
+  { re: /시크릿\s*동기화|비밀값\s*동기화|시크릿\s*맞춰|secret\s*sync|sync\s*secrets?/i, command: 'SYNC_SECRETS' },
 ];
 
 /**
@@ -95,7 +111,8 @@ export function parseOpsCommand(text: string): OpsCommand | null {
   const t = String(text ?? '').trim();
   if (!t) return null;
   // 위험한 것부터 본다 — '지금 중지'가 '점검'보다 먼저 걸려야 한다.
-  const order: OpsCommand[] = ['STOP_NOW', 'APPROVE_LIVE_SMALL', 'VERIFY_TESTNET', 'DEPLOY', 'RECOVER', 'CHECK_ALL'];
+  const order: OpsCommand[] = ['STOP_NOW', 'APPROVE_LIVE_SMALL', 'SYNC_SECRETS',
+    'VERIFY_TESTNET', 'DEPLOY', 'RECOVER', 'CHECK_ALL'];
   for (const c of order) {
     const p = PHRASES.find(x => x.command === c);
     if (p && p.re.test(t)) return c;
