@@ -15,6 +15,7 @@
     "check:db-columns": "node scripts/check-db-columns.mjs",
     "check:entry-gates": "node scripts/check-entry-gates.mjs",
     "check:research": "node scripts/check-research-isolation.mjs",
+    "check:browser-orders": "node scripts/check-browser-orders.mjs",
     "migrate:check": "node scripts/apply-migrations.mjs --check",
     "migrate:apply": "node scripts/apply-migrations.mjs --apply",
     "validate:real": "node scripts/validate-real-data.mjs",

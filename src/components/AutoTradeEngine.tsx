@@ -266,183 +266,43 @@ export default function AutoTradeEngine() {
             }
 
             // ── live 모드: 실제 거래소 주문 ──────────────────────
+            // ── 브라우저는 주문을 내지 않는다 ──
+            //
+            // **여기에 실주문 코드가 있었다.** 141줄이었고, 하는 일은
+            // 이랬다: 60초 타이머가 전략을 평가하고, 조건이 맞으면
+            // `/api/binance/futures/order`에 `LIVE_ORDER_CONFIRMED`를
+            // 붙여 실제 주문을 냈다.
+            //
+            // 그 전략 목록은 전략빌더가 **localStorage**에 넣어 둔 것이다.
+            // 그래서:
+            //
+            //   · 탭을 닫으면 **진입한 포지션을 아무도 청산하지 않는다**
+            //   · 다른 기기에서는 그 전략이 존재하지도 않는다
+            //   · 저장소를 지우면 열린 포지션의 주인이 사라진다
+            //   · 워커가 지키는 관문(마이그레이션·청산감시·지문·소유권·
+            //     킬스위치)을 **하나도 지나지 않는다**
+            //
+            // 즉 워커와 별개인 **두 번째 실행 권한**이었다. 실제 돈이
+            // 들어가기 전에 없애야 하는 종류다.
+            //
+            // 관문으로 막는 대신 코드를 들어냈다. 관문은 되돌릴 수 있지만
+            // 없는 코드는 되돌릴 수 없다 — 그리고 `scripts/check-browser-orders.mjs`가
+            // 이 파일에 주문 호출이 다시 생기면 CI에서 실패시킨다.
+            //
+            // 실거래·테스트넷 자동매매는 **서버 예약**(autotrade_schedules)이
+            // 유일한 경로다. 워커가 돌리고, 브라우저와 무관하게 청산·보호까지
+            // 책임진다. 아래 모의(paper) 경로는 거래소에 닿지 않으므로 그대로 둔다.
             if (strat.mode === 'live') {
-              // ── 브라우저 탭에서 실제 돈을 내보내지 않는다 ──
-              //
-              // **여기가 "화면을 켜 둬야 돈이 되는" 구조의 자리였다.**
-              //
-              // 이 엔진은 전략빌더가 localStorage에 넣어 둔 목록을 60초마다
-              // 읽어 실주문을 냈다. 그러면:
-              //   · 탭을 닫으면 **진입한 포지션을 아무도 청산하지 않는다**
-              //   · 다른 기기에서는 그 전략이 존재하지도 않는다
-              //   · 저장소를 지우면 열린 포지션의 주인이 사라진다
-              //
-              // 실거래는 서버 예약(autotrade_schedules)으로만 나간다.
-              // 서버 경로는 워커가 돌리고, 브라우저와 무관하게 청산·보호까지
-              // 책임진다. 모의·테스트넷은 아래 경로로 그대로 계속된다.
-              //
-              // 판정은 executionRuntime.ts에 있고 테스트가 붙어 있다.
-              {
-                const { runtimeOf } = await import('@/lib/runtime/executionRuntime');
-                const rv = runtimeOf({
-                  // 이 엔진은 서버 예약을 읽지 않는다 — 읽었다면 애초에
-                  // 서버가 돌렸을 것이다.
-                  hasServerSchedule: false,
-                  inBrowserEngine: true,
-                  mode: 'LIVE',
-                });
-                if (!rv.mayPlaceRealOrders) {
-                  saveLog({
-                    id: `log-${Date.now()}-${strat.id.slice(-6)}`,
-                    strategyId: strat.id, strategyName: strat.name,
-                    asset: strat.asset, timeframe: strat.timeframe,
-                    action: strat.action, status: 'blocked', at: Date.now(), mode: 'live',
-                    conditionsAll: evaluation.details.length, conditionsPass: evaluation.passCount,
-                    conditionDetails: evaluation.details, indicators: snapshot,
-                    reason: `${rv.reason} — 자동 → 예약에서 서버 실행으로 등록하세요`,
-                  });
-                  continue;
-                }
-              }
-
-              // 안전: 거래소 연결 ID 없으면 차단
-              if (!strat.connectionId) {
-                saveLog({
-                  id: `log-${Date.now()}-${strat.id.slice(-6)}`,
-                  strategyId: strat.id, strategyName: strat.name,
-                  asset: strat.asset, timeframe: strat.timeframe,
-                  action: strat.action, status: 'blocked', at: Date.now(), mode: 'live',
-                  conditionsAll: evaluation.details.length, conditionsPass: evaluation.passCount,
-                  conditionDetails: evaluation.details, indicators: snapshot,
-                  reason: '거래소 연결이 지정되지 않았습니다. 전략에 거래소를 연결하세요.',
-                });
-                continue;
-              }
-
-              const amt = strat.order.amount;
-              // 심볼 정규화: 'BTC' → 'BTCUSDT'
-              const tradeSymbol = strat.asset.toUpperCase().replace(/USDT$/, '') + 'USDT';
-
-              try {
-                // 인증 토큰
-                let authHeader = '';
-                try {
-                  const { getSupabaseClient } = await import('@/lib/supabase/client');
-                  const sbc = getSupabaseClient();
-                  if (sbc) {
-                    const { data } = await sbc.auth.getSession();
-                    if (data?.session?.access_token) authHeader = `Bearer ${data.session.access_token}`;
-                  }
-                } catch {}
-
-                // 선물(futures) 전략이면 선물 API, 아니면 현물 API
-                const isFutures = strat.market === 'futures';
-                let orderRes: Response;
-
-                if (isFutures) {
-                  // 선물: 수량(quantity) 기반.
-                  let qty = 0;
-                  let dynLeverage = strat.risk?.leverage;
-                  let dynSlPct = strat.risk?.stopLossPct;
-                  let dynTpPct = strat.risk?.takeProfitPct;
-
-                  if (strat.risk?.useFixedRisk && snapshot.atr && snapshot.atr > 0) {
-                    // 고정 리스크 모델: 시드의 N%만 노출되도록 수량 역산
-                    try {
-                      const { calcFixedRiskSize, atrToPct } = await import('@/lib/risk/sizing');
-                      const equityUsdt = amt / usdKrw;   // order.amount를 가용 자본으로 사용
-                      const sized = calcFixedRiskSize({
-                        equity:          equityUsdt,
-                        entryPrice:      price,
-                        atr:             snapshot.atr,
-                        riskPerTradePct: strat.risk.riskPerTradePct || 2,
-                        atrMultiplier:   strat.risk.atrMultiplier || 1.5,
-                        maxLeverage:     strat.risk.maxLeverage || 10,
-                      });
-                      if ('qty' in sized) {
-                        qty = sized.qty;
-                        dynLeverage = Math.ceil(sized.impliedLeverage);
-                        // ATR 기반 SL/TP% 자동 (손절=ATR배수, 익절=2배)
-                        dynSlPct = atrToPct(snapshot.atr, price, strat.risk.atrMultiplier || 1.5);
-                        dynTpPct = atrToPct(snapshot.atr, price, (strat.risk.atrMultiplier || 1.5) * 2);
-                      }
-                    } catch {}
-                  }
-                  if (qty <= 0) {
-                    // 폴백: 기존 방식
-                    const usdt = amt / usdKrw;
-                    qty = price > 0 ? usdt / price : 0;
-                  }
-
-                  orderRes = await fetch('/api/binance/futures/order', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', ...(authHeader ? { Authorization: authHeader } : {}) },
-                    body: JSON.stringify({
-                      connectionId: strat.connectionId,
-                      symbol:       tradeSymbol,
-                      side:         strat.action === 'buy' ? 'BUY' : 'SELL',
-                      type:         'MARKET',
-                      quantity:     Number(qty.toFixed(3)),
-                      leverage:     dynLeverage || undefined,
-                      stopLossPct:   dynSlPct || undefined,
-                      takeProfitPct: dynTpPct || undefined,
-                      confirmToken: 'LIVE_ORDER_CONFIRMED',
-                    }),
-                  });
-                } else {
-                  // 현물
-                  orderRes = await fetch('/api/exchange/order', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', ...(authHeader ? { Authorization: authHeader } : {}) },
-                    body: JSON.stringify({
-                      connectionId: strat.connectionId,
-                      symbol:       tradeSymbol,
-                      side:         strat.action === 'buy' ? 'BUY' : 'SELL',
-                      type:         'MARKET',
-                      amount:       strat.action === 'buy' ? amt / usdKrw : undefined,
-                      confirmToken: 'LIVE_ORDER_CONFIRMED',
-                    }),
-                  });
-                }
-                const od = await orderRes.json().catch(() => ({}));
-
-                saveLog({
-                  id: `log-${Date.now()}-${strat.id.slice(-6)}`,
-                  strategyId: strat.id, strategyName: strat.name,
-                  asset: strat.asset, timeframe: strat.timeframe,
-                  action: strat.action,
-                  status: orderRes.ok && od.ok ? 'triggered' : 'error',
-                  at: Date.now(), mode: 'live',
-                  conditionsAll: evaluation.details.length, conditionsPass: evaluation.passCount,
-                  conditionDetails: evaluation.details, indicators: snapshot,
-                  filledPrice: orderRes.ok && od.ok ? (od.price || price) : undefined,
-                  filledAmount: orderRes.ok && od.ok ? amt : undefined,
-                  filledQuantity: od.qty,
-                  reason: orderRes.ok && od.ok
-                    ? `실전 체결 (주문ID ${od.orderId})`
-                    : `실전 주문 실패: ${od.message || errorTextOf(od, '알 수 없음')}`,
-                });
-
-                if (typeof window !== 'undefined' && 'Notification' in window &&
-                    Notification.permission === 'granted') {
-                  try {
-                    new Notification(`TRAIGO — 실전 ${strat.action === 'buy' ? '매수' : '매도'} ${orderRes.ok && od.ok ? '체결' : '실패'}`, {
-                      body: `${strat.asset} (${strat.name})${od.message ? ' · ' + od.message : ''}`,
-                      icon: '/icon-192.png',
-                    });
-                  } catch {}
-                }
-              } catch (e) {
-                saveLog({
-                  id: `log-${Date.now()}-${strat.id.slice(-6)}`,
-                  strategyId: strat.id, strategyName: strat.name,
-                  asset: strat.asset, timeframe: strat.timeframe,
-                  action: strat.action, status: 'error', at: Date.now(), mode: 'live',
-                  conditionsAll: evaluation.details.length, conditionsPass: evaluation.passCount,
-                  conditionDetails: evaluation.details, indicators: snapshot,
-                  reason: `실전 주문 오류: ${e instanceof Error ? e.message : '네트워크 오류'}`,
-                });
-              }
+              saveLog({
+                id: `log-${Date.now()}-${strat.id.slice(-6)}`,
+                strategyId: strat.id, strategyName: strat.name,
+                asset: strat.asset, timeframe: strat.timeframe,
+                action: strat.action, status: 'blocked', at: Date.now(), mode: 'live',
+                conditionsAll: evaluation.details.length, conditionsPass: evaluation.passCount,
+                conditionDetails: evaluation.details, indicators: snapshot,
+                reason: '브라우저는 자동 주문을 내지 않습니다 — 탭을 닫으면 진입한 포지션을 '
+                  + '아무도 청산하지 않기 때문입니다. 자동 → 예약에서 서버 실행으로 등록하세요',
+              });
               continue;
             }
 
