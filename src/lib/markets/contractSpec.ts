@@ -141,7 +141,7 @@ export interface SizeResult {
 /**
  * 위험에서 수량을 역산한다 — **계약 단위를 지켜서.**
  *
- * 기존 `calcFixedRiskSize`(risk/sizing.ts)와 뼈대가 같다: 위험금액 ÷
+ * `planSize`(engine/orderSizing.ts)와 뼈대가 같다: 위험금액 ÷
  * 손절거리. 다른 것은 그 뒤다 — 계약 배수로 나누고, 정수로 내리고,
  * 내린 뒤의 실제 위험을 다시 계산한다.
  *
