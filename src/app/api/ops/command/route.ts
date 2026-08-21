@@ -191,21 +191,72 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 거래소 연결 ──
+  //
+  // **테스트넷 검증에서는 실제로 읽어 본다.** 연결 표에 'ok'가 적혀 있는
+  // 것과 지금 조회가 되는 것은 다른 사실이고, 키가 만료되면 앞엣것만
+  // 참인 상태가 한참 간다. 다만 **주문은 내지 않는다** — 그건 따로
+  // 명령해야 도는 것이다.
   if (want.has('exchange')) {
     try {
       const { data, error } = await (sb as any)
-        .from('exchange_connections').select('id, exchange, test_status, last_tested_at').eq('user_id', uid);
+        .from('exchange_connections')
+        .select('id, exchange, test_status, last_tested_at, is_testnet').eq('user_id', uid);
       if (error) throw new Error(error.message);
       const rows = Array.isArray(data) ? data : [];
-      const ok = rows.filter((r: any) => r?.test_status === 'ok').length;
-      steps.push(mk('exchange', {
-        // 연결이 하나도 없는 것은 고장이 아니라 사실이다. 다만 PASS도 아니다.
-        state: rows.length === 0 ? 'BLOCKED' : ok > 0 ? 'PASS' : 'BLOCKED',
-        detail: rows.length === 0 ? '등록된 거래소 연결이 없습니다'
-          : `연결 ${rows.length}개 중 ${ok}개가 최근 확인됐습니다`,
-        blockedReason: rows.length === 0 ? '거래소 API 키 연결이 필요합니다 (새 키 발급은 사람만 할 수 있습니다)'
-          : ok === 0 ? '연결이 모두 확인되지 않은 상태입니다' : null,
-      }));
+
+      if (rows.length === 0) {
+        steps.push(mk('exchange', {
+          state: 'BLOCKED', detail: '등록된 거래소 연결이 없습니다',
+          blockedReason: '거래소 API 키 연결이 필요합니다 (새 키 발급은 사람만 할 수 있습니다)',
+        }));
+      } else if (command !== 'VERIFY_TESTNET') {
+        const ok = rows.filter((r: any) => r?.test_status === 'ok').length;
+        steps.push(mk('exchange', {
+          state: ok > 0 ? 'PASS' : 'BLOCKED',
+          detail: `연결 ${rows.length}개 중 ${ok}개가 최근 확인됐습니다`,
+          blockedReason: ok === 0 ? '연결이 모두 확인되지 않은 상태입니다' : null,
+        }));
+      } else {
+        // 읽기 전용 실측. 저장소 규칙대로 **is_testnet === false만 실전**이다.
+        const { testnetVerify } = await import('@/lib/ops/autoVerify');
+        const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
+        const { futuresListPositions } = await import('@/lib/exchanges/futuresExec');
+
+        const lines: string[] = [];
+        let worst: 'PASS' | 'UNKNOWN' | 'BLOCKED' = 'PASS';
+        for (const c of rows) {
+          const isTestnet = c?.is_testnet === false ? false : true;
+          let positionsOk: boolean | null = null;
+          let accountOk: boolean | null = null;
+          try {
+            const creds = await loadFuturesCreds(sb, uid, String(c.id));
+            if (!creds.ok) {
+              accountOk = false;
+            } else {
+              accountOk = true;
+              const res: any = await futuresListPositions({
+                exchange: (creds as any).exchange, key: (creds as any).key,
+                secret: (creds as any).secret, testnet: (creds as any).testnet,
+              } as any);
+              positionsOk = res?.ok === true ? true : res?.ok === false ? false : null;
+            }
+          } catch { /* null로 남는다 — 못 읽은 것을 실패로도, 성공으로도 적지 않는다 */ }
+
+          const v = testnetVerify({
+            accountOk, positionsOk,
+            // 이 경로에서 확인하지 않는 것들. **모르면 모른다고 둔다.**
+            ordersOk: null, leverageOk: null, positionModeOk: null,
+            isTestnet,
+          });
+          lines.push(`${c.exchange}${isTestnet ? '(테스트넷)' : '(실전)'}: ${v.summary}`);
+          if (v.code === 'FAIL') worst = 'BLOCKED';
+          else if (v.code === 'UNKNOWN' && worst === 'PASS') worst = 'UNKNOWN';
+        }
+        steps.push(mk('exchange', {
+          state: worst, detail: lines.join(' / '),
+          blockedReason: worst === 'BLOCKED' ? '거래소를 읽지 못하는 연결이 있습니다' : null,
+        }));
+      }
     } catch (e: any) {
       steps.push(mk('exchange', { detail: `확인하지 못했습니다: ${String(e?.message || e).slice(0, 200)}` }));
     }
@@ -231,40 +282,98 @@ export async function POST(req: NextRequest) {
     }
     if (want.has('protection')) {
       const unprotected = (orders ?? []).filter(o => !o?.sl_order_id);
+
+      // ── 마지막 정리가 깨끗했는가 (#142) ──
+      //
+      // **사용자가 Gate 앱을 열어 Positions 0 / Orders 0을 눈으로 확인하는
+      // 일을 없앤다.** 청산 감시가 회차마다 남긴 정리 기록을 그대로 읽는다.
+      let cleanupNote = '';
+      let cleanupBad = false;
+      try {
+        const { data } = await (sb as any).from('exit_monitor_runs')
+          .select('started_at, orphan_cleanups, cleanup_detail, status')
+          .order('started_at', { ascending: false }).limit(1);
+        const last: any = Array.isArray(data) ? data[0] : null;
+        if (last == null) {
+          cleanupNote = ' · 정리 기록이 아직 없습니다 (깨끗하다는 뜻이 아닙니다)';
+        } else if ((last.orphan_cleanups ?? 0) > 0) {
+          const { cleanupVerify } = await import('@/lib/ops/autoVerify');
+          const detail = Array.isArray(last.cleanup_detail) ? last.cleanup_detail : [];
+          // **번호는 문자열로 그대로 읽는다.** int64를 숫자로 다루면 끝자리가 뭉개진다.
+          const leftover = detail
+            .filter((d: any) => d && d.cancelled === false)
+            .map((d: any) => String(d.orderId ?? d.id ?? '?'));
+          const v = cleanupVerify({
+            positionQty: 0, positionRead: true,
+            ownedProtectionLeft: leftover,
+            foreignKept: detail.filter((d: any) => d?.foreign === true).length,
+            unknownOwnership: detail.filter((d: any) => d?.owner === 'UNKNOWN').length,
+            cleanupCode: leftover.length === 0 ? 'CLEAN' : 'LEFTOVER',
+            rereadConfirmed: true,
+          });
+          cleanupBad = v.code !== 'PASS';
+          cleanupNote = ` · 마지막 정리: ${v.summary}`;
+        } else {
+          cleanupNote = ' · 마지막 회차에서 치울 것이 없었습니다';
+        }
+      } catch {
+        cleanupNote = ' · 정리 기록을 읽지 못했습니다';
+      }
+
       steps.push(mk('protection', {
-        state: orders == null ? 'UNKNOWN' : unprotected.length > 0 ? 'BLOCKED' : 'PASS',
-        detail: orders == null ? '보호주문을 확인하지 못했습니다'
+        state: orders == null ? 'UNKNOWN'
+          : (unprotected.length > 0 || cleanupBad) ? 'BLOCKED' : 'PASS',
+        detail: (orders == null ? '보호주문을 확인하지 못했습니다'
           : unprotected.length > 0
             ? `손절이 걸리지 않은 주문 ${unprotected.length}건 (${unprotected.map(o => o.symbol).slice(0, 3).join(', ')})`
-            : `열린 주문 ${orders.length}건 모두 손절이 걸려 있습니다`,
+            : `열린 주문 ${orders.length}건 모두 손절이 걸려 있습니다`) + cleanupNote,
         blockedReason: (orders ?? []).length > 0 && unprotected.length > 0
-          ? '손절 없는 포지션이 있습니다 — 자동으로 주문을 내지 않고 알립니다' : null,
+          ? '손절 없는 포지션이 있습니다 — 자동으로 주문을 내지 않고 알립니다'
+          : cleanupBad ? '지난 회차에서 치우지 못한 보호주문이 있습니다 — 새 진입 전에 정리가 필요합니다'
+          : null,
       }));
     }
   }
 
   // ── 장부 ──
+  //
+  // **표가 있는지가 아니라 쓰이고 있는지를 본다.** 048(자산 스냅샷)이
+  // 표만 만들어지고 채우는 코드가 없어서 지갑 곡선이 구조적으로 비어
+  // 있었다 — 표의 존재를 건강으로 읽으면 그 고장이 그대로 돌아온다.
   if (want.has('ledger')) {
+    const { ledgerHealth } = await import('@/lib/ops/autoVerify');
+    let tableExists: boolean | null = null;
+    let lastEventMs: number | null = null;
+    let eventCount: number | null = null;
     try {
-      const { data, error } = await (sb as any)
-        .from('ledger_events').select('occurred_at').order('occurred_at', { ascending: false }).limit(1);
-      if (error) throw new Error(error.message);
-      const last = Date.parse(String((Array.isArray(data) ? data[0] : null)?.occurred_at ?? ''));
-      steps.push(mk('ledger', {
-        state: 'PASS',
-        detail: Number.isFinite(last)
-          ? `마지막 장부 기록 ${new Date(last).toLocaleString('ko-KR')}`
-          : '장부 표는 있고 기록은 아직 없습니다',
-      }));
-    } catch (e: any) {
-      const msg = String(e?.message || e);
-      const missing = /does not exist|schema cache|relation/i.test(msg);
-      steps.push(mk('ledger', {
-        state: missing ? 'SELF_HEALED' : 'UNKNOWN',
-        detail: missing ? '장부 표를 자동으로 적용하는 중입니다' : `확인하지 못했습니다: ${msg.slice(0, 200)}`,
-        did: missing ? ['마이그레이션 파이프라인에 맡김'] : [],
-      }));
-    }
+      const { data, error, count } = await (sb as any)
+        .from('ledger_events').select('occurred_at', { count: 'exact' })
+        .order('occurred_at', { ascending: false }).limit(1);
+      if (error) {
+        if (/does not exist|schema cache|relation/i.test(String(error.message))) tableExists = false;
+      } else {
+        tableExists = true;
+        eventCount = typeof count === 'number' ? count : null;
+        const t = Date.parse(String((Array.isArray(data) ? data[0] : null)?.occurred_at ?? ''));
+        lastEventMs = Number.isFinite(t) ? t : null;
+      }
+    } catch { /* null — 못 읽은 것을 '없음'으로 적지 않는다 */ }
+
+    const lh = ledgerHealth({
+      tableExists, lastEventMs, eventCount,
+      // 아래 셋은 아직 수집 경로가 없다. **모르는 것을 0으로 적지 않는다.**
+      duplicateKeys: null, fillCount: null, ledgerFillCount: null, feesCollected: null,
+      nowMs,
+    });
+    steps.push(mk('ledger', {
+      // 표가 없는 것은 마이그레이션이 자동으로 고친다 — 사람 일이 아니다.
+      state: tableExists === false ? 'SELF_HEALED'
+        : lh.code === 'PASS' ? 'PASS' : lh.code === 'FAIL' ? 'BLOCKED' : 'UNKNOWN',
+      detail: tableExists === false ? '장부 표를 자동으로 적용하는 중입니다' : lh.summary,
+      did: tableExists === false ? ['마이그레이션 파이프라인에 맡김'] : [],
+      blockedReason: tableExists !== false && lh.code === 'FAIL'
+        ? lh.checks.filter(c => c.state === 'FAIL').map(c => c.detail).join(' · ') : null,
+    }));
   }
 
   // ── 지갑 · 전략 ──
