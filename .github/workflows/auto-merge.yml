@@ -114,3 +114,51 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.inputs.pr || github.event.pull_request.number || '' }}
         run: node scripts/auto-merge.mjs
+
+  # ── 뒤처진 PR을 곧바로 끌어올린다 ──
+  #
+  # **왜 별도 워크플로가 아닌가.**
+  #
+  # 처음에는 `auto-rebase.yml`을 따로 만들고, 합친 뒤 `workflow_dispatch`로
+  # 부르게 했다. `secrets.GITHUB_TOKEN`이 만든 push는 워크플로를 발동시키지
+  # 않기 때문이다(재귀 방지).
+  #
+  # 그런데 **부품이 하나 더 늘어난다** — 워크플로 파일 하나, 디스패치
+  # 판정 하나, 그리고 "부르지 못했을 때"라는 새 실패 모드 하나.
+  # 여기 job으로 두면 그 셋이 전부 없어진다. 합친 바로 그 실행이
+  # 이어서 돌기 때문에 신호를 기다릴 일도 없다.
+  #
+  # 자동화를 하나 더 만드는 것보다 **실패 지점을 없애는 것**이 낫다.
+  #
+  # `needs`로 묶은 이유: 판정기 테스트가 통과한 뒤에만 남의 브랜치
+  # 이력을 고쳐 쓴다. 게이트가 실패하면 재배치도 하지 않는다.
+  auto-rebase:
+    needs: auto-merge-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          # 재배치하려면 전체 이력이 필요하다.
+          fetch-depth: 0
+          # **기본 토큰을 원격에 심어 두지 않는다.** 스크립트가 필요한
+          # 순간에만 인자로 넘긴다 — .git/config에 남으면 로그로 샌다.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      # 판정기 테스트는 위 job이 같은 커밋에서 이미 돌렸다 — 두 번 돌리면
+      # 모든 검사 신호마다 2분씩 더 든다.
+      - name: 자동 재배치
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr || '' }}
+        run: node scripts/auto-rebase.mjs
