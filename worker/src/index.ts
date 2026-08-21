@@ -850,6 +850,65 @@ async function pollLedgerSync(isMain: boolean): Promise<void> {
   }
 }
 
+// ── 자산 스냅샷 ──────────────────────────────────────────
+//
+// **읽기 요청이 쓰기를 하고 있었다.**
+//
+// `/api/wallets/overview`는 GET인데 `account_equity_snapshots`에 INSERT를
+// 했다. 그래서 자산 곡선은 **사람이 앱을 여는 시간에만** 남았다.
+// 자동매매는 24시간 도는데 밤사이 자산이 어떻게 움직였는지는 영원히
+// 알 수 없었다. 탭을 두 개 열면 같은 순간이 두 번 찍히기도 했다 —
+// "마지막 기록에서 15분" 판정은 동시 요청 둘을 다 통과시킨다.
+//
+// 이제 이 워커가 15분마다 깨운다. 거래소를 부르는 것은 여전히
+// Vercel이다(Binance가 이 서버의 IP 지역을 차단한다) — 청산 감시·원장
+// 수집과 같은 구조이고, **새 비밀은 필요 없다.**
+//
+// 중복은 판정이 아니라 064의 칸 키 제약이 막는다. 그래서 이 폴링이
+// 겹쳐 돌아도 표는 부풀지 않는다.
+const EQUITY_SNAPSHOT_MS = Number(process.env.EQUITY_SNAPSHOT_INTERVAL_MS || 15 * 60_000);
+let lastEquitySnapshotMs: number | null = null;
+
+async function pollEquitySnapshot(isMain: boolean): Promise<void> {
+  if (!isMain) return;                       // 같은 칸을 두 번 부를 이유가 없다
+  if (!APP_URL || !APP_ADMIN_SECRET) return; // 위에서 이미 한 번 경고했다
+  const now = Date.now();
+  if (lastEquitySnapshotMs != null && now - lastEquitySnapshotMs < EQUITY_SNAPSHOT_MS) return;
+  lastEquitySnapshotMs = now;
+
+  try {
+    const r = await fetch(`${APP_URL}/api/wallets/snapshot`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-secret': APP_ADMIN_SECRET,
+        'x-traigo-source': 'worker',
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) {
+      // **실패를 조용히 넘기지 않는다.** 안 찍으면 곡선이 조용히 멈추고,
+      // 화면의 마지막 점이 지금 자산인 척한다.
+      console.error(`[equity] 자산 기록 실패 (HTTP ${r.status}): ${String(j?.error || j?.message || '').slice(0, 200)}`);
+      for (const x of (Array.isArray(j?.results) ? j.results : [])) {
+        if (x && x.ok === false) console.error(`[equity] ${x.env ?? ''} ${x.error}`);
+      }
+      return;
+    }
+    const wrote = Number(j.written) || 0;
+    if (wrote > 0) console.log(`[equity] 자산 기록 ${wrote}건 (사용자 ${j.scanned}명)`);
+    // 못 찍은 이유는 한 번은 보여야 한다 — 조용히 넘기면 곡선이 왜
+    // 비어 있는지 아무도 모른다.
+    for (const x of (Array.isArray(j.results) ? j.results : [])) {
+      if (x?.code === 'EQUITY_UNKNOWN') console.warn(`[equity] ${x.env}: ${x.reason}`);
+    }
+  } catch (e: any) {
+    console.error('[equity] 자산 기록 호출 실패:', e?.message || e);
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -888,6 +947,9 @@ async function tick() {
   // **수수료·펀딩을 모아야 "번 것"을 말할 수 있다.**
   // main 락을 쥔 워커만 한다 — 같은 구간을 두 번 읽을 이유가 없다.
   await pollLedgerSync(isMain);
+  // **자산 곡선은 사람이 앱을 열 때가 아니라 15분마다 남는다.**
+  // 예전에는 GET이 찍어서, 밤사이 자산 변화가 통째로 비어 있었다.
+  await pollEquitySnapshot(isMain);
 }
 
 async function startupChecks() {

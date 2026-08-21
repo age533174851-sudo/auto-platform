@@ -199,6 +199,18 @@ jobs:
       - name: 연구/실행 분리 검사
         run: node scripts/check-research-isolation.mjs
 
+      # ── GET이 쓰는 경로 ──
+      #
+      # `/api/wallets/overview`는 GET인데 자산 스냅샷을 INSERT했다.
+      # 그래서 자산 곡선은 **사람이 앱을 여는 시간에만** 남았고, 탭을
+      # 두 개 열면 같은 순간이 두 번 찍혔다("마지막에서 15분" 판정은
+      # 동시 요청 둘을 다 통과시킨다).
+      #
+      # 지우는 검사가 아니라 **늘어나는 것을 막는 검사**다. 이미
+      # 스케줄러가 GET으로 깨우는 경로는 이유와 함께 면제돼 있다.
+      - name: GET 라우트가 DB에 쓰지 않는지
+        run: node scripts/check-get-writes.mjs
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그

@@ -359,3 +359,106 @@ export function accountsNoteOf(accounts: AccountOption[] | null | undefined): st
   return `연결이 끊긴 계좌가 ${bad.length}개 있습니다 (${bad.map(a => a.label).join(', ')}) —`
     + ' 이 계좌의 잔고는 화면에 없거나 옛날 값입니다';
 }
+
+// ── 전략계좌를 실제 행에서 만든다 ─────────────────────────
+//
+// **화면에 `const strategies: StrategyAccount[] = []`가 박혀 있었다.**
+//
+// 붙어 있던 주석은 "전략별 귀속 장부가 붙어야 실제 값이 생긴다"였다.
+// 그런데 **그 표는 041이 이미 만들어 뒀다** — `strategy_accounts`에
+// 배정 자금·실현손익·미실현손익·수수료·최고자산·최대낙폭이 다 있다.
+// 만들어 놓고 배선을 안 한 것이고, 이 저장소가 반복해서 겪은 고장이다.
+//
+// 여기서 하는 일은 행을 화면이 쓰는 모양으로 옮기는 것뿐이다.
+// **판정은 이미 위에 있는 것들을 쓴다**(`strategyReturnOf` 등) — 같은
+// 계산을 두 벌 두면 언젠가 한쪽만 고쳐진다.
+
+export interface SleeveRow {
+  sleeve_id?: string | null;
+  label?: string | null;
+  connection_id?: string | null;
+  allocated?: any;
+  realized_pnl?: any;
+  unrealized_pnl?: any;
+  fees?: any;
+  max_drawdown_seen_pct?: any;
+  positions?: any;
+  stage?: string | null;
+  halted?: boolean | null;
+}
+
+export interface SleeveAccount extends StrategyAccount {
+  /** 이 계좌가 붙은 환경. **모르면 null — LIVE로 승격하지 않는다** */
+  env: 'LIVE' | 'TESTNET' | null;
+  stage: string;
+  halted: boolean;
+}
+
+/** `Number(null)`은 0이다. 못 읽은 것을 0으로 적지 않으려면 이걸 거쳐야 한다 */
+const numOrNull = (v: any): number | null => {
+  if (v == null || v === '' || typeof v === 'boolean') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const cellOrFail = (v: any): Cell => {
+  const n = numOrNull(v);
+  return n == null ? cellOf(null, 'FAILED') : cellOf(n);
+};
+
+/**
+ * `strategy_accounts` 행 → 화면의 전략계좌.
+ *
+ * **현재 자산 = 배정 + 실현손익 + 미실현손익 − 수수료.** 네 항 중
+ * 하나라도 못 읽으면 자산을 만들지 않는다 — 빠진 항이 있으면 그만큼이
+ * 전부 손익으로 보인다.
+ */
+export function sleeveAccountsOf(
+  rows: SleeveRow[] | null | undefined,
+  /** 연결 id → 환경. **모르는 연결은 넣지 않는다** */
+  envByConnection: Record<string, 'LIVE' | 'TESTNET'> | null | undefined,
+): SleeveAccount[] {
+  const list = Array.isArray(rows) ? rows : [];
+  const envMap = envByConnection || {};
+
+  return list.map((r): SleeveAccount => {
+    const allocated = cellOrFail(r?.allocated);
+    const realized = cellOrFail(r?.realized_pnl);
+    const unrealized = cellOrFail(r?.unrealized_pnl);
+    const fees = cellOrFail(r?.fees);
+
+    // **네 항을 다 알 때만 자산을 만든다.**
+    const known = [allocated, realized, unrealized, fees].every(c => c.value !== null);
+    const equity: Cell = known
+      ? cellOf((allocated.value as number) + (realized.value as number)
+        + (unrealized.value as number) - (fees.value as number))
+      : cellOf(null, 'FAILED');
+
+    // 보유 포지션 수. `positions`는 {심볼: 수량}이고 0은 없는 것이다.
+    const pos = r?.positions;
+    const activePositions: Cell = pos && typeof pos === 'object' && !Array.isArray(pos)
+      ? cellOf(Object.values(pos).filter(v => numOrNull(v) != null && Number(v) !== 0).length)
+      : cellOf(null, 'FAILED');
+
+    const connId = String(r?.connection_id ?? '');
+    return {
+      strategyName: String(r?.label || r?.sleeve_id || '(이름 없음)'),
+      allocatedCapital: allocated,
+      currentEquity: equity,
+      // 쓸 수 있는 돈은 예약 증거금을 빼야 나온다. 이 조회에 없는 값이므로
+      // **0이 아니라 '안 줌'이다.**
+      availableCapital: cellOf(null, 'UNSUPPORTED'),
+      realizedPnl: realized,
+      unrealizedPnl: unrealized,
+      fees,
+      // 펀딩은 이 표가 따로 안 들고 있다. 수수료에 합쳐 적지 않는다.
+      funding: cellOf(null, 'UNSUPPORTED'),
+      returnPct: strategyReturnOf(allocated, equity),
+      mddPct: cellOrFail(r?.max_drawdown_seen_pct),
+      activePositions,
+      // **모르는 환경을 LIVE로 승격하지 않는다.**
+      env: connId && envMap[connId] ? envMap[connId] : null,
+      stage: String(r?.stage ?? ''),
+      halted: r?.halted === true,
+    };
+  });
+}

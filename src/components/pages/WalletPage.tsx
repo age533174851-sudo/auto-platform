@@ -43,13 +43,29 @@ import {
   strategyTotalOf, allocationOf, accountsForEnv, accountsNoteOf,
   type AccountOption, type SpotAsset, type StrategyAccount, type LongtermHolding,
 } from '@/lib/portfolio/walletDetail';
+// **토큰을 한 번 복사해 두지 않는다.** 갱신·복귀·포커스를 따라간다.
+import { watchAuthToken } from '@/lib/auth/authToken';
+// **환율이 없으면 통화를 바꾸지 않는다.** 폴백 상수를 쓰지 않는다.
+import { fxFreshness } from '@/lib/portfolio/fxRate';
+// 자산 기록이 오래됐으면 화면이 그렇게 말한다.
+import { snapshotFreshness } from '@/lib/portfolio/snapshotBucket';
 
 const ENVS: WalletEnv[] = ['LIVE', 'TESTNET', 'MOCK'];
 const CURRENCIES = ['USDT', 'USD', 'KRW'] as const;
 type Currency = typeof CURRENCIES[number];
 
-/** 아직 아무것도 못 읽었다는 뜻의 칸 */
-const pending = () => cellOf(null, 'SYNCING');
+/**
+ * **`Number(null)`은 0이다.**
+ *
+ * 그래서 `Number(x) || 0`으로 읽으면 못 읽은 값이 "0개"로 화면에 적힌다.
+ * 0은 "없다"이고 못 읽은 것은 "모른다"다 — 지갑에서 그 둘을 섞으면
+ * 사용자는 자산이 사라졌다고 읽는다.
+ */
+const numOrNull = (v: any): number | null => {
+  if (v == null || v === '' || typeof v === 'boolean') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
 
 export default function WalletPage() {
   const [env, setEnv] = useState<WalletEnv>('LIVE');
@@ -77,9 +93,43 @@ export default function WalletPage() {
   // 동시에 아래쪽에서는 "이 환경에 연결된 계좌가 없습니다"라고 단정했다.
   // 인증이 안 돼 아무것도 못 읽은 상태에서 그 둘은 서로 모순이다.
   const [truth, setTruth] = useState<any>(null);
-  const auth = typeof window !== 'undefined' ? (localStorage.getItem('sb_access_token') || '') : '';
+
+  // ── 토큰은 canonical 세션에서 온다 ──
+  //
+  // 예전에는 `localStorage.getItem('sb_access_token')`을 **한 번** 읽어
+  // 문자열로 들고 있었다. Supabase의 access token은 기본 1시간짜리라,
+  // 라이브러리가 뒤에서 갱신해도 이미 복사해 둔 문자열은 안 바뀐다.
+  // 그래서 한 시간 뒤부터 모든 요청이 401이고, 사용자에게는
+  // **"가만히 있었는데 로그아웃됐다"** 로 보인다.
+  //
+  // `watchAuthToken`은 갱신·복귀·포커스를 전부 보고, **확인하지 못한
+  // 것을 로그아웃으로 바꾸지 않는다**(지하철에서 끊긴 것과 로그아웃은
+  // 다르다). 그래서 이 값은 **세 가지**다 — 'Bearer …' / '' / null.
+  // null은 아직 확인 전이고, 그때 요청하면 401이 뜬다.
+  const [auth, setAuth] = useState<string | null>(null);
+  useEffect(() => watchAuthToken(setAuth), []);
+
+  // ── 환율 ──
+  //
+  // 서버가 값 검증(범위)까지 하고 준다. **못 읽으면 null이고, null은
+  // '1:1'이 아니라 '모른다'이다** — 그때 KRW 버튼이 잠긴다.
+  const [fx, setFx] = useState<any>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/fx/usd');
+        const j = await r.json();
+        if (alive) setFx(j?.fx ?? null);
+      } catch { /* 못 읽었으면 null 그대로 — 숫자를 지어내지 않는다 */ }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
+    // 아직 토큰을 확인하기 전이다. **여기서 요청하면 401이 뜨고 화면이
+    // "계좌 없음"을 그린다** — 로그인은 멀쩡한데.
+    if (auth == null) return;
     let alive = true;
     (async () => {
       let status: number | null = null;
@@ -87,7 +137,7 @@ export default function WalletPage() {
       let networkError: string | null = null;
       try {
         const r = await fetch('/api/wallets/overview', {
-          headers: auth ? { Authorization: `Bearer ${auth}` } : undefined,
+          headers: auth ? { Authorization: auth } : undefined,
         });
         status = r.status;
         body = await r.json().catch(() => null);
@@ -171,9 +221,16 @@ export default function WalletPage() {
   });
   const pnl = todayPnlLabel(change);
   const cross = totalAcrossEnvs();
-  // 환율 공급원이 아직 없다. **null은 '1:1'이 아니라 '모른다'이다** —
-  // 그래서 KRW 버튼이 잠긴다. 환율을 붙이면 여기에만 넣으면 된다.
-  const fxRate = null;
+  // ── 환율 ──
+  //
+  // 예전에는 `const fxRate = null`이 박혀 있었고 주석은 정직했다 —
+  // "공급원이 아직 없다. null은 '1:1'이 아니라 '모른다'이다."
+  // **이제 공급원이 있다**(`/api/fx/usd`). 못 읽으면 여전히 null이고
+  // KRW 버튼이 잠긴다 — `src/lib/currency.ts`처럼 1375로 채우지 않는다.
+  // 못 바꾸는 것은 불편이고, 잘못 바꾼 숫자는 사고다.
+  const fxRate = fx;
+  // 이 환율을 지금 쓸 수 있는가. **없으면 통화를 바꾸지 않는다.**
+  const fxNote = fxFreshness(fxRate, Date.now());
 
   const shown = bucketsForTab(tab, total.buckets);
   // **총자산은 USD 기준 한 값이고, 통화 전환은 환율이 있을 때만 한다.**
@@ -219,16 +276,34 @@ export default function WalletPage() {
     : [];
   // 이 환경의 성과. **없으면 만들지 않는다.**
   const perf: any = data?.performance?.[env] ?? null;
+  // 서버가 이미 판정해서 준다. **화면이 다시 계산하지 않는다** —
+  // 기준이 두 곳에 생기면 언젠가 갈린다.
+  const snapNote: any = (Array.isArray(data?.snapshots) ? data.snapshots : [])
+    .find((n: any) => n?.env === env) ?? null;
   const curve = curveOf(snapshots, range, Date.now(), env);
   const daily = dailyRowsOf(snapshots);
 
   // ── 자산 배분 ──
-  const alloc = allocationOf([
-    { label: '현물', cell: pending() },
-    { label: '선물', cell: pending() },
-    { label: '장기투자', cell: pending() },
-    { label: '현금', cell: pending() },
-  ]);
+  //
+  // 예전에는 네 조각을 전부 `pending()`으로 넣었다. 그러면 배분은
+  // 구조적으로 영원히 "조회 중"이다 — 서버가 값을 이미 주고 있었는데도.
+  //
+  // **없는 계좌를 조각으로 넣지 않는다.** 장기투자 계좌를 연결한 적이
+  // 없으면 그건 "못 읽은 조각"이 아니라 **없는 조각**이다. 그걸 null로
+  // 넣으면 `allocationOf`가 (맞게) 비율을 거부해서, 실제로 다 읽은
+  // 현물·선물 배분까지 영영 안 나온다.
+  //
+  // 그래서 이 환경에 실제로 존재하는 버킷만 조각으로 만든다. 그중 하나라도
+  // 못 읽었으면 그때는 비율을 내지 않는다 — 그건 맞는 거부다.
+  const alloc = allocationOf(
+    total.buckets
+      .filter((b: Bucket) => b.amount.readiness !== 'NOT_APPLICABLE')
+      .map((b: Bucket) => ({
+        label: b.label,
+        cell: cellOf(b.amount.value, b.amount.value == null
+          ? (b.amount.readiness === 'LOADING' ? 'SYNCING' : 'FAILED') : 'OK'),
+      })),
+  );
 
   // ── 계좌 ──
   // **서버가 준 계좌 목록.** 빈 배열을 직접 넣던 자리다.
@@ -278,19 +353,39 @@ export default function WalletPage() {
   const spot: SpotAsset[] = spotRowsOf(shownAccounts.flatMap((a: any) =>
     (Array.isArray(a?.spotAssets) ? a.spotAssets : []).map((x: any) => ({
       symbol: String(x?.asset ?? ''),
-      quantity: cellOf((Number(x?.free) || 0) + (Number(x?.locked) || 0), 'OK'),
-      available: cellOf(Number(x?.free) || 0, 'OK'),
-      locked: cellOf(Number(x?.locked) || 0, 'OK'),
+      // **`Number(x) || 0`을 쓰지 않는다.** `Number(null)`은 0이고,
+      // 그러면 "못 읽었다"가 "0개 있다"로 화면에 적힌다. 이 저장소가
+      // 반복해서 잡아 온 고장이 정확히 그 모양이다 — 0 ≠ 없음.
+      quantity: (() => {
+        const f = numOrNull(x?.free); const l = numOrNull(x?.locked);
+        return f == null || l == null ? cellOf(null, 'FAILED') : cellOf(f + l);
+      })(),
+      available: cellOf(numOrNull(x?.free), numOrNull(x?.free) == null ? 'FAILED' : 'OK'),
+      locked: cellOf(numOrNull(x?.locked), numOrNull(x?.locked) == null ? 'FAILED' : 'OK'),
       // **가격을 못 매겼으면 0이 아니라 확인 불가다.**
       valuation: cellOf(x?.valueUsd ?? null, x?.valueUsd == null ? 'FAILED' : 'OK'),
       // 24시간 변동률은 이 경로가 안 주는 값이다. **0이 아니라 '안 줌'이다**
       change24hPct: cellOf(null, 'UNSUPPORTED'),
     })) as SpotAsset[]));
 
-  // 전략계좌·장기투자는 아직 읽을 곳이 없다. **0을 그리지 않는다** —
-  // 통합 장부(전략별 귀속)가 붙어야 실제 값이 생긴다.
-  const strategies: StrategyAccount[] = [];
+  // ── 전략계좌 — 서버가 준 값으로 ──
+  //
+  // 예전에는 `const strategies = []`가 박혀 있었고 주석은 "전략별 귀속
+  // 장부가 붙어야 실제 값이 생긴다"였다. **그 장부는 041이 이미 만들어
+  // 뒀다**(`strategy_accounts`) — 만들어 놓고 배선을 안 한 것이다.
+  //
+  // **못 읽은 것을 '전략 없음'으로 그리지 않는다.** 서버가 null을 주면
+  // 그건 조회 실패이고, 빈 배열과 다르다.
+  const strategiesRaw: any[] | null = Array.isArray(data?.strategies) ? data.strategies : null;
+  const strategiesUnreadable = data != null && strategiesRaw == null;
+  // **환경을 모르는 전략계좌는 어느 환경에도 넣지 않는다.** 따로 알린다 —
+  // 안 보여주면 사용자는 그 전략이 사라진 줄 안다.
+  const strategies: StrategyAccount[] = (strategiesRaw ?? [])
+    .filter((x: any) => x?.env === env) as StrategyAccount[];
+  const strategiesNoEnv = (strategiesRaw ?? []).filter((x: any) => x?.env == null);
   const stratTotal = strategyTotalOf(strategies);
+  // 장기투자(주식·ETF)는 연결할 계좌 종류 자체가 아직 없다. **0을 그리지
+  // 않는다** — 아래 빈 상자가 왜 비었는지까지 적는다.
   const longterm: LongtermHolding[] = [];
 
   const envColor = (e: WalletEnv) => e === 'LIVE' ? T.red : e === 'TESTNET' ? T.ylw : T.muted;
@@ -462,6 +557,11 @@ export default function WalletPage() {
             })}
           </div>
         </div>
+        {/* **오래된 환율로 바꾼 값도 바꾼 값이다** — 다만 사용자가 그
+            사실을 알아야 한다. 막지는 않고 말한다. */}
+        {cur === 'KRW' && fxNote.stale && (
+          <div style={{ ...muted, color: T.ylw, marginBottom: 4 }}>{fxNote.reason}</div>
+        )}
         {/* **서버가 만든 canonical 총자산을 그대로 쓴다.**
             = 현물 전체 평가액 + 선물 순자산. 화면에서 다시 더하지 않는다 —
             그러면 홈과 지갑이 서로 다른 총자산을 보인다. */}
@@ -585,6 +685,18 @@ export default function WalletPage() {
         )}
         {curve.hasData && curve.note && (
           <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{curve.note}</div>
+        )}
+        {/* **곡선이 조용히 멈추는 것을 막는다.**
+
+            자산을 찍는 일이 이 화면(GET)에서 워커로 옮겨 갔다. 좋은
+            바꿈이지만 새 실패 모드가 하나 생긴다 — **워커가 멈추면
+            곡선도 멈추는데, 마지막 점은 지금 자산인 척한다.**
+            그래서 오래됐으면 오래됐다고 적는다. */}
+        {snapNote?.stale && (
+          <div style={{
+            ...muted, color: T.ylw, marginTop: 6, background: T.alt,
+            borderRadius: 6, padding: '7px 9px',
+          }}>{snapNote.reason}</div>
         )}
       </Card>
 
@@ -735,12 +847,29 @@ export default function WalletPage() {
           </div>
           {stratTotal.note && <div style={{ ...muted, color: T.ylw, marginBottom: 8 }}>{stratTotal.note}</div>}
 
+          {/* **못 읽은 것을 '전략 없음'으로 적지 않는다.** 빈 목록이면
+              사용자는 배정한 돈이 사라진 줄 안다. */}
+          {strategiesUnreadable && (
+            <div style={{ ...muted, color: T.ylw, marginBottom: 8 }}>
+              전략계좌를 읽지 못했습니다{data?.strategiesError ? ` (${data.strategiesError})` : ''} —
+              전략이 없다는 뜻이 아닙니다
+            </div>
+          )}
+          {/* 환경을 못 읽은 연결에 붙은 전략계좌. **어느 환경 합계에도
+              넣지 않고 따로 알린다** — 안 보여주면 사라진 줄 안다. */}
+          {strategiesNoEnv.length > 0 && (
+            <div style={{ ...muted, color: T.ylw, marginBottom: 8 }}>
+              전략계좌 {strategiesNoEnv.length}개는 거래소 연결이 없거나 환경(실전/테스트넷)을
+              확인하지 못해 어느 환경에도 넣지 않았습니다 — 모르는 것을 실전으로 올리지 않습니다
+            </div>
+          )}
           {strategies.length === 0
-            ? emptyBox('전략계좌가 없습니다',
-                '전략별 배정 자금·현재 자산·실현/미실현손익·수수료·펀딩·수익률·MDD·'
-                + '보유 포지션을 여기서 나눠 봅니다. 배정 자금을 계산하는 곳이 아직 없어 '
-                + '전략별 자금이 전부 "—"입니다 — 0으로 적으면 "돈을 안 맡겼다"로 읽히고, '
-                + '그건 "아직 계산 안 됨"과 다릅니다.')
+            ? emptyBox(strategiesUnreadable ? '전략계좌를 확인하지 못했습니다'
+                : `${ENV_LABEL[env]}에 전략계좌가 없습니다`,
+                '전략별 배정 자금·현재 자산·실현/미실현손익·수수료·수익률·MDD·'
+                + '보유 포지션을 여기서 나눠 봅니다. 자산은 배정 + 실현손익 + 미실현손익 − 수수료로 '
+                + '내고, 네 항 중 하나라도 못 읽으면 "—"입니다 — 빠진 항이 있으면 '
+                + '그만큼이 전부 손익으로 보입니다.')
             : strategies.map(s => (
               <div key={s.strategyName} style={{
                 background: T.alt, borderRadius: 8, padding: '9px 11px', marginBottom: 6,
@@ -752,7 +881,16 @@ export default function WalletPage() {
                   <span>자산 <b style={{ color: T.txt }}>{cellText(s.currentEquity)}</b></span>
                   <span>수익률 <b style={{ color: T.txt }}>{cellText(s.returnPct)}</b></span>
                   <span>MDD <b style={{ color: T.txt }}>{cellText(s.mddPct)}</b></span>
+                  <span>보유 <b style={{ color: T.txt }}>{cellText(s.activePositions)}</b></span>
+                  {(s as any).stage && <span>단계 <b style={{ color: T.txt }}>{(s as any).stage}</b></span>}
                 </div>
+                {/* **멈춰 있는 전략을 조용히 두지 않는다.** 낙폭·한도로
+                    자동으로 섰든 사람이 세웠든, 화면에 보여야 한다. */}
+                {(s as any).halted && (
+                  <div style={{ ...muted, color: T.ylw, marginTop: 3 }}>
+                    이 전략은 멈춰 있습니다 — 신규 진입이 나가지 않습니다
+                  </div>
+                )}
               </div>
             ))}
         </Card>

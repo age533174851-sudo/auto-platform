@@ -16,6 +16,7 @@ import {
   spotRowsOf, strategyReturnOf, strategyTotalOf, allocationOf,
   accountsForEnv, accountsNoteOf,
   type SpotAsset, type StrategyAccount, type AccountOption,
+  sleeveAccountsOf,
 } from './walletDetail';
 
 const ok = (n: number) => cellOf(n);
@@ -227,4 +228,44 @@ export function runWalletDetailTests() {
   test('계좌가 없으면 그렇다고 한다', () => {
     assert(accountsNoteOf([]).includes('연결된 계좌가 없습니다'), '빈 목록');
   });
+  console.log('[전략계좌 — 표는 041이 만들었는데 화면이 안 물어봤다]');
+
+  test('행에서 전략계좌를 만든다 — 자산 = 배정 + 실현 + 미실현 − 수수료', () => {
+    const [a] = sleeveAccountsOf([{
+      sleeve_id: 'MINERVINI', label: '미너비니', connection_id: 'c1',
+      allocated: 1000, realized_pnl: 120, unrealized_pnl: -20, fees: 5,
+      max_drawdown_seen_pct: 8, positions: { BTCUSDT: 0.5, ETHUSDT: 0 },
+      stage: 'TESTNET', halted: false,
+    }], { c1: 'TESTNET' });
+    eq(a.strategyName, '미너비니');
+    eq(a.currentEquity.value, 1095);
+    eq(a.env, 'TESTNET');
+    eq(a.activePositions.value, 1, '수량 0인 심볼은 보유가 아니다');
+    // 수익률은 배정 대비다. (1095 - 1000) / 1000
+    eq(Math.round((a.returnPct.value as number) * 100) / 100, 9.5);
+  });
+
+  test('한 항이라도 못 읽으면 자산을 만들지 않는다', () => {
+    // 빠진 항이 있으면 그만큼이 전부 손익으로 보인다.
+    const [a] = sleeveAccountsOf([{
+      sleeve_id: 's', allocated: 1000, realized_pnl: null,
+      unrealized_pnl: 0, fees: 0, connection_id: 'c1',
+    }], { c1: 'LIVE' });
+    eq(a.currentEquity.value, null);
+    eq(a.returnPct.value, null, '자산을 모르는데 수익률이 나오면 안 된다');
+  });
+
+  test('연결이 없는 전략계좌를 LIVE로 승격하지 않는다', () => {
+    const [a] = sleeveAccountsOf([{ sleeve_id: 's', connection_id: null, allocated: 1 }], { c1: 'LIVE' });
+    eq(a.env, null);
+    const [b] = sleeveAccountsOf([{ sleeve_id: 's', connection_id: 'zzz', allocated: 1 }], { c1: 'LIVE' });
+    eq(b.env, null, '모르는 연결을 아무 환경에나 넣지 않는다');
+  });
+
+  test('이 조회가 안 주는 값은 0이 아니라 안 줌이다', () => {
+    const [a] = sleeveAccountsOf([{ sleeve_id: 's', allocated: 1 }], {});
+    eq(a.availableCapital.value, null);
+    eq(a.funding.value, null, '펀딩을 0으로 적으면 수수료가 실제보다 작아 보인다');
+  });
+
 }

@@ -11,7 +11,6 @@ import {
   equityPerformanceOf, cashFlowOf, tradeStatsOf, elapsedText,
   type EquitySnapshot,
 } from './performance';
-import { snapshotVerdict, snapshotRow, SNAPSHOT_INTERVAL_MS } from './snapshotPlan';
 
 const DAY = 86_400_000;
 const T0 = 1_800_000_000_000;
@@ -142,46 +141,5 @@ export function runPerformanceTests() {
     const s = tradeStatsOf([]);
     eq(s.winRatePct, null); eq(s.expectancy, null);
     assert(s.note.includes('닫힌 거래가 없습니다'), s.note);
-  });
-
-  console.log('[스냅샷 — 표는 있는데 채우는 코드가 없었다]');
-
-  test('첫 기록은 무조건 찍는다 — 안 찍으면 영원히 안 찍힌다', () => {
-    const v = snapshotVerdict({ nowMs: T0, lastTakenMs: null, connections: 1, totalEquity: 1000 });
-    eq(v.take, true); eq(v.code, 'TAKE');
-  });
-
-  test('자산을 못 읽었으면 0으로 찍지 않는다', () => {
-    // **되돌릴 수 없는 기록이다.** 0을 남기면 곡선이 바닥으로 떨어진다.
-    const v = snapshotVerdict({ nowMs: T0, lastTakenMs: null, connections: 1, totalEquity: null });
-    eq(v.take, false); eq(v.code, 'EQUITY_UNKNOWN');
-    assert(v.reason.includes('0으로 찍지 않습니다'), v.reason);
-  });
-
-  test('연결이 없으면 찍을 자산이 없다', () => {
-    eq(snapshotVerdict({ nowMs: T0, lastTakenMs: null, connections: 0, totalEquity: 1000 }).code, 'NO_ACCOUNT');
-  });
-
-  test('간격 안에는 다시 찍지 않는다 — 표가 부풀지 않게', () => {
-    eq(snapshotVerdict({ nowMs: T0, lastTakenMs: T0 - 1000, connections: 1, totalEquity: 1 }).code, 'TOO_SOON');
-    eq(snapshotVerdict({ nowMs: T0, lastTakenMs: T0 - SNAPSHOT_INTERVAL_MS, connections: 1, totalEquity: 1 }).take, true);
-  });
-
-  test('못 읽은 칸은 행에 넣지 않는다 — 0으로 기록되면 성과가 틀린다', () => {
-    const row = snapshotRow({
-      userId: 'u1', env: 'TESTNET', takenAtMs: T0, totalEquity: 1000,
-      unrealizedPnl: null, fees: null,
-    });
-    eq(row.total_equity, 1000);
-    eq('unrealized_pnl' in row, false, '못 읽은 값이 0으로 기록된다');
-    eq('fees' in row, false);
-    eq(row.env, 'TESTNET');
-  });
-
-  test('읽은 칸은 넣는다', () => {
-    const row = snapshotRow({
-      userId: 'u1', env: 'LIVE', takenAtMs: T0, totalEquity: 500, unrealizedPnl: -3,
-    });
-    eq(row.unrealized_pnl, -3);
   });
 }
