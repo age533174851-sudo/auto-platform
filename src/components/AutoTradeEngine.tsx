@@ -267,6 +267,44 @@ export default function AutoTradeEngine() {
 
             // ── live 모드: 실제 거래소 주문 ──────────────────────
             if (strat.mode === 'live') {
+              // ── 브라우저 탭에서 실제 돈을 내보내지 않는다 ──
+              //
+              // **여기가 "화면을 켜 둬야 돈이 되는" 구조의 자리였다.**
+              //
+              // 이 엔진은 전략빌더가 localStorage에 넣어 둔 목록을 60초마다
+              // 읽어 실주문을 냈다. 그러면:
+              //   · 탭을 닫으면 **진입한 포지션을 아무도 청산하지 않는다**
+              //   · 다른 기기에서는 그 전략이 존재하지도 않는다
+              //   · 저장소를 지우면 열린 포지션의 주인이 사라진다
+              //
+              // 실거래는 서버 예약(autotrade_schedules)으로만 나간다.
+              // 서버 경로는 워커가 돌리고, 브라우저와 무관하게 청산·보호까지
+              // 책임진다. 모의·테스트넷은 아래 경로로 그대로 계속된다.
+              //
+              // 판정은 executionRuntime.ts에 있고 테스트가 붙어 있다.
+              {
+                const { runtimeOf } = await import('@/lib/runtime/executionRuntime');
+                const rv = runtimeOf({
+                  // 이 엔진은 서버 예약을 읽지 않는다 — 읽었다면 애초에
+                  // 서버가 돌렸을 것이다.
+                  hasServerSchedule: false,
+                  inBrowserEngine: true,
+                  mode: 'LIVE',
+                });
+                if (!rv.mayPlaceRealOrders) {
+                  saveLog({
+                    id: `log-${Date.now()}-${strat.id.slice(-6)}`,
+                    strategyId: strat.id, strategyName: strat.name,
+                    asset: strat.asset, timeframe: strat.timeframe,
+                    action: strat.action, status: 'blocked', at: Date.now(), mode: 'live',
+                    conditionsAll: evaluation.details.length, conditionsPass: evaluation.passCount,
+                    conditionDetails: evaluation.details, indicators: snapshot,
+                    reason: `${rv.reason} — 자동 → 예약에서 서버 실행으로 등록하세요`,
+                  });
+                  continue;
+                }
+              }
+
               // 안전: 거래소 연결 ID 없으면 차단
               if (!strat.connectionId) {
                 saveLog({
