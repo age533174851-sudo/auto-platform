@@ -8,6 +8,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
+  migrateDispatchPlan, migrateDispatchRequest, migrateResultNote, MIGRATE_WORKFLOW,
   DEPLOY_WORKFLOW, DEPLOY_REF,
 } from './deployDispatch';
 
@@ -64,4 +65,51 @@ export function runDeployDispatchTests() {
     assert(s.includes('403'), s);
     assert(s.includes('손으로'), s);
   });
+  console.log('[마이그레이션 호출 — 파이프라인이 한 번도 돈 적이 없었다]');
+
+  test('합쳤으면 마이그레이션을 부른다', () => {
+    // `migrate.yml`은 `workflow_run: [ci]`로 깨우게 돼 있었는데 ci는
+    // PR에서만 돈다. 도착하는 이벤트는 언제나 PR 브랜치 것이고
+    // `head_branch == 'main'` 가드가 전부 걸러냈다 — 33번 실행이 전부
+    // skipped, 운영 DB에는 62개가 전부 PENDING이었다.
+    const p = migrateDispatchPlan({ merged: 1, hasToken: true });
+    eq(p.dispatch, true); eq(p.code, 'DISPATCH');
+    assert(p.reason.includes('배포보다 먼저'), p.reason);
+  });
+
+  test('아무것도 안 합쳤으면 부르지 않는다', () => {
+    eq(migrateDispatchPlan({ merged: 0, hasToken: true }).dispatch, false);
+  });
+
+  test('토큰이 없으면 조용히 넘기지 않는다', () => {
+    const p = migrateDispatchPlan({ merged: 3, hasToken: false });
+    eq(p.dispatch, false); eq(p.code, 'NO_TOKEN');
+    assert(p.reason.includes('없는 칸을 읽습니다'), p.reason);
+  });
+
+  test('부르는 대상은 언제나 main의 migrate다', () => {
+    // PR 브랜치의 마이그레이션을 운영 DB에 적용하면 되돌릴 수 없다.
+    const r = migrateDispatchRequest('o/r');
+    assert(r.path.endsWith(`/actions/workflows/${MIGRATE_WORKFLOW}/dispatches`), r.path);
+    eq(JSON.parse(r.body).ref, 'main');
+  });
+
+  test('저장소 이름이 이상하면 부르지 않는다', () => {
+    let threw = false;
+    try { migrateDispatchRequest('nope'); } catch { threw = true; }
+    eq(threw, true);
+  });
+
+  test('204를 받은 것을 "적용됐다"로 적지 않는다', () => {
+    // 이 구분이 무너져서 fly-deploy가 두 번 조용히 죽었다.
+    const note = migrateResultNote({ ok: true, status: 204 });
+    assert(note.includes('실행을 요청했습니다'), note);
+    assert(note.includes('pendingCount'), note);
+  });
+
+  test('못 불렀으면 스키마가 뒤처진다고 적는다', () => {
+    const note = migrateResultNote({ ok: false, status: 403 });
+    assert(note.includes('뒤처진 채로 배포됩니다'), note);
+  });
+
 }
