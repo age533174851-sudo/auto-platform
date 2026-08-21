@@ -24,6 +24,8 @@ import {
   type StrategyProfile,
 } from '@/lib/strategies/profiles';
 import { buildOrder, type Signal } from '@/lib/strategies/ruleEngine';
+// 가정을 측정처럼 말하지 않기 위한 판정들.
+import { edgeClaimOf, edgeFragility } from '@/lib/strategies/tradeIdentity';
 import {
   loadProfileRisk, recordProfileTrade, canProfileEnter, skipToNextSimDay,
   resetProfileKill, resetProfileRisk, simTargetOf, winRate,
@@ -439,6 +441,22 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
             </button>
           ))}
         </div>
+        {/* **가정을 측정처럼 보이게 두지 않는다.**
+            "우위 10%를 넣으면 수익이 난다"는 전략의 성질이 아니라
+            산수의 성질이다 — 승률을 올려 넣었으니 당연히 좋아진다. */}
+        {(() => {
+          const claim = edgeClaimOf({ edgePp });
+          if (claim.proven) return null;
+          return (
+            <div style={{
+              marginBottom: 5, padding: '5px 7px', borderRadius: 6,
+              border: `1px solid ${T.ylw}55`, background: T.ylw + '12',
+              color: T.ylw, fontSize: 8.5, lineHeight: 1.55,
+            }}>
+              <b>{claim.label}</b> · {claim.reason}
+            </div>
+          );
+        })()}
         <div style={{ fontSize: 8.5, color: T.muted, lineHeight: 1.55 }}>
           가정 승률 <b style={{ color: T.txt }}>{(w * 100).toFixed(0)}%</b>
           {' '}(무우위 기준선 {(noEdgeWinRate(p) * 100).toFixed(0)}% = 손절 {p.stopLossPct}% ÷ (익절 {p.takeProfitPct}% + 손절 {p.stopLossPct}%))
@@ -564,6 +582,16 @@ function ProfileCard({ base, onToast }: { base: StrategyProfile; onToast: (m: st
                 </tbody>
               </table>
             </div>
+            {/* **한 점에서만 좋은 것은 우위가 아니다.** */}
+            {(() => {
+              const f = edgeFragility(freshSweep.ladder.points);
+              return (
+                <div style={{
+                  marginTop: 5, fontSize: 8.5, lineHeight: 1.55,
+                  color: f.ok ? T.grn : T.ylw, overflowWrap: 'anywhere',
+                }}>{f.reason}</div>
+              );
+            })()}
 
             {/* ── 격자 ── */}
             <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 8, paddingTop: 8 }}>
