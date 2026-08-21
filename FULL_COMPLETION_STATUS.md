@@ -65,14 +65,62 @@
 
 ---
 
+---
+
+## 2. Wallet Completion — 계좌 선택과 상세 배선
+
+### 2-1. 계좌 선택 버튼이 장식이었다
+
+- **ISSUE** 계좌 버튼을 눌러도 `account` 상태만 바뀌고 합계는 환경 전체
+  그대로. Gate를 눌러도 Binance를 눌러도 같은 숫자.
+- **ROOT CAUSE** **서버에 계좌 단위 집계 경로가 아예 없었다.** UI만
+  고치면 "선택은 되는데 숫자는 그대로"가 또 난다.
+- **FILES** `src/lib/portfolio/walletOverview.ts` ·
+  `src/app/api/wallets/overview/route.ts` · `src/components/pages/WalletPage.tsx`
+- **FIX** `accountWalletOf()` — **환경 합계와 같은 함수**를 재사용해 계좌
+  하나를 계산한다(두 규칙이 갈리지 않게). 라우트가 계좌별 total·spot·
+  futuresEquity·available·positionMargin·unrealized·unpriced를 내려주고,
+  화면은 고른 계좌 값을 쓴다.
+- **UNIT** 7건 — A와 B가 다른 숫자 · 계좌 합 = 환경 합 · 한 계좌 실패가
+  다른 계좌를 망가뜨리지 않음 · 환경 모르는 계좌는 합계 없음
+- **STATUS** `FIXED` `TESTED`
+
+### 2-2. 자산 곡선이 구조적으로 영원히 비어 있었다
+
+- **ISSUE** `const snapshots: any[] = []`
+- **ROOT CAUSE** 서버는 기록을 읽어 성과까지 계산하면서 **원본을 안
+  내려줬고**, 화면은 빈 배열을 직접 넣었다. 데이터가 없어서가 아니라
+  배선이 없어서.
+- **FIX** 라우트가 `snapshotSeries`(환경별, 오래된 순)를 준다. 없는
+  구간은 지어내지 않는다.
+- **STATUS** `FIXED`
+
+### 2-3. 선물/현물 상세 탭이 빈 배열이었다
+
+- **ISSUE** `futuresAccounts = []`, `spotRowsOf([])`
+- **FIX** 라우트가 계좌별 `spotAssets`·`futuresDetail`을 준다. 포지션
+  조회 실패면 미실현손익 칸은 **0이 아니라 `FAILED`**, 가격을 못 매긴
+  자산의 평가액도 `FAILED`, 24h 변동률은 이 경로가 안 주므로 `UNSUPPORTED`.
+- **STATUS** `FIXED`
+
+### 2-4. 오늘 손익이 아무 자료도 없이 계산되고 있었다
+
+- **ISSUE** `equityChangeOf(null, {})`
+- **FIX** 아는 것(오늘 스냅샷 델타 · 미실현손익)은 넣고, 모르는 것
+  (입출금 · 수수료 · 펀딩)은 null로 둔다 → 화면이 **무엇을 몰라서
+  확정 못 했는지** 말한다. 통합 장부가 붙으면 그 자리가 채워진다.
+- **STATUS** `FIXED` (완전한 값은 Ledger 이후)
+
+---
+
 ## 아직 남은 것 (다음 PR에서 **이어서** 진행)
 
 | # | 항목 | 상태 |
 |---|---|---|
-| 2 | Wallet: account selector 실제 배선 | `NOT_STARTED` |
-| 2 | Wallet: placeholder 상세 제거(`snapshots=[]` 등) | `NOT_STARTED` |
-| 2 | Wallet: snapshot writer → Worker + bucket unique | `NOT_STARTED` |
-| 2 | Wallet: TESTNET credit/reset 분리 | `NOT_STARTED` |
+| 2 | Wallet: snapshot writer → Worker + bucket unique | `NOT_STARTED` (마이그레이션 필요) |
+| 2 | Wallet: TESTNET credit/reset 분리 | `NOT_STARTED` (Ledger 선행) |
+| 2 | Wallet: 전략계좌·장기투자 귀속 | `NOT_STARTED` (Ledger 선행) |
+| 2 | Wallet: price/FX provenance | `NOT_STARTED` |
 | 3 | Unified Ledger | `NOT_STARTED` |
 | — | #142 cleanup evidence UI (actual-auto) | `NOT_STARTED` |
 | — | #142 Gate 실측 `Positions 0 / Orders 0` | **`BLOCKED`** — 아래 참조 |
