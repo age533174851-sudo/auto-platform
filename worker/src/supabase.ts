@@ -1,5 +1,6 @@
 // worker/src/supabase.ts — service role 클라이언트 + lock + heartbeat
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { workerIdentityOf } from '../../src/lib/runtime/workerIdentity';
 
 let _sb: SupabaseClient | null = null;
 export function sb(): SupabaseClient {
@@ -132,15 +133,79 @@ function noteHeartbeatRecovered(): void {
   console.log(`[heartbeat] 기록 복구됨 (${forSec}초 동안 실패했습니다)`);
 }
 
-export async function heartbeat(workerId: string, status: string, task: string, errorCount: number): Promise<void> {
+/**
+ * 이 프로세스의 신원. **사람이 넣는 값이 아니라 플랫폼이 넣어 준 값에서 읽는다.**
+ *
+ * `WORKER_PROVIDER=Fly`를 사람이 넣어야만 화면에 이름이 나오는 구조였다.
+ * 아무도 안 넣어서 화면은 계속 '실행기'라고만 적었다 — 그전엔 화면에
+ * 'Railway'가 글자로 박혀 있었고. 두 번 다 **사실을 아는 쪽이 적지
+ * 않아서** 생긴 일이다. 워커는 자기가 Fly 위에 있는 걸 안다.
+ */
+const IDENTITY = workerIdentityOf(process.env as any);
+const STARTED_AT = new Date().toISOString();
+
+/** 기동 점검 결과. index.ts의 startupChecks가 채운다 */
+let startupOk: boolean | null = null;
+let startupDetail: string | null = null;
+export function noteStartupResult(ok: boolean, detail: string | null): void {
+  startupOk = ok;
+  startupDetail = detail ? String(detail).slice(0, 300) : null;
+}
+
+/** 값을 안 보여 주고 같은지만 말한다 */
+function fp(raw: string): string | null {
+  const v = String(raw || '').trim();
+  if (!v) return null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createHash } = require('crypto');
+    return String(createHash('sha256').update(v).digest('hex')).slice(0, 6);
+  } catch { return null; }
+}
+
+/**
+ * 057이 적용되기 전 배포에서는 이 칸들이 없다. 그때 **생존 신호까지 같이
+ * 잃으면 살아 있는 워커가 죽은 것으로 보인다** — 054에서 이미 겪었다.
+ * 그래서 칸이 없다는 오류가 나면 부가 정보를 빼고 다시 적는다.
+ */
+function runtimeColumns(tickCount: number | null): Record<string, any> {
+  return {
+    provider: IDENTITY.provider,
+    region: IDENTITY.region,
+    machine_id: IDENTITY.machineId,
+    started_at: STARTED_AT,
+    tick_count: tickCount,
+    supabase_fingerprint: fp(process.env.SUPABASE_URL || ''),
+    encryption_fingerprint: fp(process.env.EXCHANGE_ENCRYPTION_KEY || ''),
+    startup_ok: startupOk,
+    startup_detail: startupDetail,
+  };
+}
+
+let runtimeColumnsMissing = false;
+
+export async function heartbeat(
+  workerId: string, status: string, task: string, errorCount: number, tickCount?: number,
+): Promise<void> {
   const base: Record<string, any> = {
     worker_id: workerId, last_seen: new Date().toISOString(), status,
     current_task: task, error_count: errorCount, updated_at: new Date().toISOString(),
   };
   const sha = String(process.env.GIT_SHA || '').trim();
+  const withSha = sha ? { ...base, version: sha } : base;
+  const full = runtimeColumnsMissing
+    ? withSha
+    : { ...withSha, ...runtimeColumns(Number.isFinite(tickCount as number) ? (tickCount as number) : null) };
   try {
-    const { error } = await sb().from('worker_heartbeat')
-      .upsert(sha ? { ...base, version: sha } : base, { onConflict: 'worker_id' });
+    const first = await sb().from('worker_heartbeat').upsert(full, { onConflict: 'worker_id' });
+    // 057이 아직인 배포. 부가 정보만 빼고 예전처럼 적는다.
+    if (first.error && !runtimeColumnsMissing && /column|schema cache/i.test(String(first.error.message))) {
+      runtimeColumnsMissing = true;
+      noteMissingRuntimeColumns();
+    }
+    const { error } = runtimeColumnsMissing && first.error
+      ? await sb().from('worker_heartbeat').upsert(withSha, { onConflict: 'worker_id' })
+      : first;
     if (!error) {
       noteHeartbeatRecovered();
       noteHeartbeatOk(workerId, sha, base.last_seen);
@@ -171,6 +236,15 @@ export async function heartbeat(workerId: string, status: string, task: string, 
 
 // 054 미적용은 배포 대조를 통째로 무력화한다. 자주 찍을 필요는 없지만
 // **한 번은 반드시 보여야 한다.**
+let missingRuntimeWarned = false;
+function noteMissingRuntimeColumns(): void {
+  if (missingRuntimeWarned) return;
+  missingRuntimeWarned = true;
+  console.warn(
+    '[heartbeat] worker_heartbeat에 실행 정보 칸이 없습니다 — 마이그레이션 057을 자동으로 적용하는 중입니다.'
+    + ' 그때까지 공급자·지문·기동점검은 "모름"입니다(정상이 아니라 모름입니다).');
+}
+
 let missingVersionWarned = false;
 function noteMissingVersionColumn(): void {
   if (missingVersionWarned) return;
