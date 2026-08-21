@@ -215,8 +215,10 @@ async function main() {
   const outDir = loadGate();
   const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS } =
     await import(`file://${join(outDir, 'autoMergeGate.js')}`);
-  const { deployDispatchPlan, deployDispatchRequest, dispatchResultNote } =
-    await import(`file://${join(outDir, 'deployDispatch.js')}`);
+  const {
+    deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
+    migrateDispatchPlan, migrateDispatchRequest, migrateResultNote,
+  } = await import(`file://${join(outDir, 'deployDispatch.js')}`);
 
   assertSelfCheckWired(SELF_CHECK_NAME);
   assertRequiredChecksWired(REQUIRED_CHECKS);
@@ -336,6 +338,26 @@ async function main() {
     console.log(rr.ok
       ? 'auto-rebase 실행을 요청했습니다 — 깨끗하게 재배치되는 PR만 끌어올립니다'
       : `⚠ auto-rebase를 부르지 못했습니다 (HTTP ${rr.status}) — 30분 뒤 안전망이 훑습니다`);
+  }
+
+  // ── 마이그레이션이 먼저다 ──
+  //
+  // **`migrate.yml`은 한 번도 실제로 돈 적이 없었다.** `workflow_run:
+  // [ci]`로 깨우게 돼 있었는데, `ci`는 PR에서만 돈다 — 자동 머지가
+  // main을 움직여도 main에서 ci가 새로 돌지 않으므로 도착하는 이벤트는
+  // 언제나 PR 브랜치의 것이고, job의 `head_branch == 'main'` 가드가
+  // 전부 걸러냈다. 33번 실행이 전부 skipped였고, 2026-08-21에 운영
+  // DB에는 마이그레이션 62개가 전부 PENDING이었다.
+  //
+  // fly-deploy가 받은 진짜 해법(`workflow_dispatch`)을 여기도 준다.
+  // **배포보다 먼저 부른다** — 코드만 앞서 나가면 새 코드가 없는 칸을
+  // 읽고 조용히 틀린다.
+  const mp = migrateDispatchPlan({ merged, hasToken: !!TOKEN });
+  console.log(`마이그레이션: ${mp.code} — ${mp.reason}`);
+  if (mp.dispatch) {
+    const mreq = migrateDispatchRequest(REPO);
+    const mr = await api(mreq.path, { method: mreq.method, body: mreq.body });
+    console.log(migrateResultNote({ ok: mr.ok, status: mr.status, message: mr.body?.message ?? null }));
   }
 
   const dp = deployDispatchPlan({ merged, hasToken: !!TOKEN });

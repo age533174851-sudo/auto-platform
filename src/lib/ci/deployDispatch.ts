@@ -136,3 +136,83 @@ export function dispatchResultNote(i: { ok: boolean; status: number; message?: s
   return `⚠ fly-deploy를 부르지 못했습니다 (HTTP ${i?.status}${i?.message ? `: ${i.message}` : ''}) — `
     + 'Fly Worker가 옛 코드로 계속 돕니다. Actions에서 fly-deploy를 손으로 실행하세요';
 }
+
+// ── 마이그레이션도 같은 함정에 빠져 있었다 ─────────────────
+//
+// **`migrate.yml`은 한 번도 실제로 돈 적이 없다.**
+//
+// 그 파일의 주석은 이렇게 적혀 있었다:
+//
+//   # 자동 머지 봇이 만든 커밋에는 push 워크플로가 발동하지 않는다
+//   # (GITHUB_TOKEN 재귀 방지). fly-deploy가 겪은 것과 같은 문제라
+//   # 같은 해법을 쓴다 — ci가 끝나면 여기가 깨어난다.
+//   workflow_run:
+//     workflows: [ci]
+//
+// 진단은 맞았는데 **처방이 듣지 않았다.** `ci`는 PR에서만 돈다. 자동
+// 머지가 main을 움직여도 main에서 `ci`가 새로 돌지 않으므로,
+// 도착하는 `workflow_run`은 언제나 PR 브랜치의 것이다. 그리고 job에
+// 걸린 `head_branch == 'main'` 가드가 그걸 전부 걸러낸다.
+//
+// 결과: 33번의 실행이 전부 `skipped`. 2026-08-21에 운영 DB를 확인하니
+// **마이그레이션 62개가 전부 PENDING**이었다 — 파이프라인은 있고,
+// 배선은 있고, 한 번도 적용된 적이 없다.
+//
+// fly-deploy가 받은 진짜 해법은 `workflow_dispatch`였다. 마이그레이션도
+// 같은 것을 받아야 한다.
+//
+// **순서가 중요하다.** 마이그레이션이 배포보다 먼저다 — 코드만 앞서
+// 나가면 새 코드가 없는 칸을 읽고 조용히 틀린다. `ops-runner`는 이미
+// 그 순서를 지키고 있었다.
+
+export const MIGRATE_WORKFLOW = 'migrate.yml';
+
+/**
+ * 방금 머지한 뒤 마이그레이션을 불러야 하는가.
+ *
+ * **파일이 바뀌었을 때만으로 좁히지 않는다.** 무엇이 스키마에 영향을
+ * 주는지 이 스크립트가 다시 판단하면 한쪽만 고쳐진다 — 이 저장소에서
+ * 가장 자주 난 고장이다. 그리고 적용기는 이미 멱등이다: 적용된 것은
+ * 건너뛰고, 파괴적인 것은 스스로 멈춘다.
+ */
+export function migrateDispatchPlan(i: {
+  merged: number;
+  hasToken?: boolean;
+}): DispatchPlan {
+  const merged = Math.max(0, Math.round(Number(i?.merged) || 0));
+  if (merged === 0) {
+    return { dispatch: false, code: 'NOTHING_MERGED',
+      reason: '합친 PR이 없습니다 — 마이그레이션을 부르지 않습니다' };
+  }
+  if (i?.hasToken === false) {
+    return { dispatch: false, code: 'NO_TOKEN',
+      reason: `${merged}건을 합쳤지만 토큰이 없어 마이그레이션을 부르지 못했습니다 — `
+        + '스키마가 코드를 못 따라가면 새 코드가 없는 칸을 읽습니다' };
+  }
+  return { dispatch: true, code: 'DISPATCH',
+    reason: `${merged}건을 합쳤습니다 — 배포보다 먼저 스키마를 맞춥니다 `
+      + '(자동 머지 push로는 workflow_run이 오지 않습니다)' };
+}
+
+export function migrateDispatchRequest(repo: string, ref: string = DEPLOY_REF): DispatchRequest {
+  const r = String(repo ?? '').trim();
+  if (!/^[^/\s]+\/[^/\s]+$/.test(r)) {
+    throw new Error(`저장소 이름이 올바르지 않습니다 (${repo})`);
+  }
+  return {
+    path: `/repos/${r}/actions/workflows/${MIGRATE_WORKFLOW}/dispatches`,
+    method: 'POST',
+    // **ref는 언제나 main이다.** PR 브랜치의 마이그레이션을 운영 DB에
+    // 적용하면 되돌릴 수 없다.
+    body: JSON.stringify({ ref: String(ref ?? '').trim() || DEPLOY_REF }),
+  };
+}
+
+export function migrateResultNote(i: { ok: boolean; status: number; message?: string | null }): string {
+  if (i?.ok) {
+    return 'migrate 실행을 요청했습니다 — 실제 적용 여부는 '
+      + '/api/system/deployment 의 migrations.pendingCount로 확인하세요';
+  }
+  return `⚠ migrate를 부르지 못했습니다 (HTTP ${i?.status}${i?.message ? `: ${i.message}` : ''}) — `
+    + '스키마가 코드보다 뒤처진 채로 배포됩니다. Actions에서 migrate를 손으로 실행하세요';
+}

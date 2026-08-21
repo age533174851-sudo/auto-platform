@@ -170,3 +170,50 @@ jobs:
       - name: 배포 후 상태
         if: always()
         run: flyctl status || true
+
+      # ── 떠 있는 것과 돌고 있는 것은 다르다 ──
+      #
+      # 2026-08-21에 이 워크플로가 success로 끝났고 `flyctl status`도
+      # `started`를 찍었다. 그런데 워커의 heartbeat는 **27시간 전 것**
+      # 이었다 — 머신은 새 코드로 떠 있는데 프로세스가 DB에 한 줄도
+      # 못 쓰고 있었다.
+      #
+      # 그 상태에서는 청산 감시도, 원장 수집도, 자산 스냅샷도, 예약
+      # 평가도 전부 멈춘다. **그런데 배포 로그는 초록이다.** #136에서
+      # 하루를 잃은 것과 같은 모양이고, `flyctl status`는 그걸 못 잡는다.
+      #
+      # 그래서 배포가 끝난 뒤 **워커가 실제로 한 줄 썼는지**를 본다.
+      # 인증이 필요 없는 경로이고, 값은 아무것도 안 찍는다.
+      #
+      # 못 확인한 것을 성공으로 적지 않는다 — 다만 주소 시크릿이 없으면
+      # 그건 배포 실패가 아니라 확인 불가이므로 경고로 남긴다.
+      - name: 워커가 실제로 살아났는가
+        if: success()
+        env:
+          BASE: ${{ secrets.EXIT_MONITOR_URL }}
+        run: |
+          set -uo pipefail
+          BASE="${BASE%/}"
+          if [ -z "${BASE:-}" ]; then
+            echo "::warning::EXIT_MONITOR_URL이 없어 워커 생존을 확인하지 못했습니다 — 배포가 됐다는 뜻이 아닙니다"
+            exit 0
+          fi
+          # 워커가 뜨고 첫 heartbeat를 쓸 때까지 기다린다. 3초 × 40 = 2분.
+          for i in $(seq 1 40); do
+            body=$(curl -sS --max-time 20 "${BASE}/api/system/deployment" || echo '')
+            alive=$(printf '%s' "$body" | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('fly',{}).get('alive'))
+except Exception: print('None')" 2>/dev/null || echo 'None')
+            age=$(printf '%s' "$body" | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('fly',{}).get('ageSec'))
+except Exception: print('')" 2>/dev/null || echo '')
+            if [ "$alive" = "True" ]; then
+              echo "워커가 살아났습니다 (마지막 기록 ${age}초 전)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::배포는 끝났는데 워커가 2분 동안 한 줄도 쓰지 않았습니다 (마지막 기록 ${age}초 전)."
+          echo "머신이 started여도 프로세스가 DB에 못 쓰면 청산 감시·원장 수집·자산 스냅샷·예약 평가가 전부 멈춥니다."
+          echo "Fly 쪽 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 를 먼저 확인하세요 (값이 아니라 지문으로)."
+          exit 1
