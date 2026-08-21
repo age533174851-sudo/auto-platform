@@ -75,6 +75,10 @@ export async function POST(req: NextRequest) {
   const want = new Set<OpsStepId>(spec.steps);
   const nowMs = Date.now();
 
+  // 복구 센터가 쓸 원자료. **단계 요약이 아니라 판정 그대로**를 모은다 —
+  // 요약을 다시 해석하면 기준이 두 곳에 생긴다.
+  const raw: any = {};
+
   // ── 권한 연결 ──
   if (want.has('secrets')) {
     // **"있을 것으로 보입니다"를 없앤다.**
@@ -112,6 +116,7 @@ export async function POST(req: NextRequest) {
     // 응답에 싣지 않는다.
     const { parityGate } = await import('@/lib/ops/parityGate');
     const pg = await parityGate(sb);
+    raw.parity = { code: pg.code, summary: pg.summary, entryAllowed: pg.entryAllowed, entryReason: pg.entryReason };
 
     const secretsBlocked = b.code !== 'READY' || !pg.entryAllowed;
     steps.push(mk('secrets', {
@@ -134,6 +139,7 @@ export async function POST(req: NextRequest) {
     try {
       const { migrationGate } = await import('@/lib/system/migrationGate');
       const ms = await migrationGate(sb);
+      raw.migration = { code: ms.code, detail: ms.detail, blockedReason: ms.blockedReason, entryAllowed: ms.entryAllowed };
       steps.push(mk('migrations', {
         state: ms.code === 'UP_TO_DATE' ? 'PASS'
           : ms.code === 'UNKNOWN' ? 'UNKNOWN'
@@ -167,6 +173,7 @@ export async function POST(req: NextRequest) {
       webSha, nowMs,
     });
 
+    raw.worker = { code: h.code, summary: h.summary, canRun: h.canRun };
     if (want.has('worker')) {
       const fix = autoFixPlan(h, { openOrders: null });
       steps.push(mk('worker', {
@@ -194,6 +201,7 @@ export async function POST(req: NextRequest) {
     try {
       const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
       const em = await exitMonitorGate(sb, nowMs);
+      raw.exitMonitor = { code: em.code, reason: em.reason, blockEntry: em.blockEntry };
       steps.push(mk('exitMonitor', {
         state: em.code === 'OK' ? 'PASS'
           : em.code === 'UNKNOWN' ? 'UNKNOWN'
@@ -428,6 +436,27 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 복구 센터 ──
+  //
+  // **시스템이 이미 한 것**과 **사람의 결정이 필요한 것**을 가른다.
+  // 두 번째가 비어 있는 것이 목표다.
+  let recovery: any = null;
+  try {
+    const { recoveryView } = await import('@/lib/ops/recoveryCenter');
+    let heals: any[] = [];
+    try {
+      const { data } = await (sb as any).from('self_heal_runs')
+        .select('trigger, action, outcome, verified, detail')
+        .order('started_at', { ascending: false }).limit(5);
+      heals = Array.isArray(data) ? data : [];
+    } catch { /* [] */ }
+    recovery = recoveryView({ ...raw, heals });
+  } catch (e: any) {
+    // 복구 화면이 고장 나도 점검 결과는 나와야 한다. 다만 조용히 넘기지 않는다.
+    recovery = { handled: [], decisions: [], canTrade: false,
+      summary: `복구 상태를 만들지 못했습니다: ${String(e?.message || e).slice(0, 150)}` };
+  }
+
   const result = opsVerdictOf(command, steps);
 
   // ── 값을 바꾸는 명령은 실제로 실행한다 ──
@@ -492,7 +521,7 @@ export async function POST(req: NextRequest) {
     ok: true, ...result,
     // **접수와 실행은 다르다.** 큐에 적힌 것을 '실행됨'으로 적지 않는다.
     executed: !spec.mutates || !!stopped,
-    queued, queueError, stopped,
+    queued, queueError, stopped, recovery,
     next: queued
       ? '실행기가 5분 안에 집어 갑니다 — 결과는 이 요청 번호로 확인할 수 있습니다'
       : null,

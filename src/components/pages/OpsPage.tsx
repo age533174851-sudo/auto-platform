@@ -171,6 +171,70 @@ export default function OpsPage() {
         </Card>
       )}
 
+      {/* ── 복구 센터 ── */}
+      {result?.recovery && (
+        <Card style={{ padding: 14, marginBottom: 12 }}>
+          <div style={{ color: T.sub, fontSize: 11, fontWeight: 800, marginBottom: 8 }}>복구</div>
+          <div style={{ color: T.txt, fontSize: 12, lineHeight: 1.7, marginBottom: 10 }}>
+            {result.recovery.summary}
+          </div>
+
+          {/* 시스템이 이미 한 것 — 누를 것이 없다 */}
+          {(result.recovery.handled || []).length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ color: '#10B981', fontSize: 11, fontWeight: 800, marginBottom: 6 }}>
+                시스템이 처리했습니다
+              </div>
+              {result.recovery.handled.map((h: any) => (
+                <div key={h.id} style={{ marginBottom: 6 }}>
+                  <div style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>{h.label}</div>
+                  <div style={{ color: T.muted, fontSize: 11, lineHeight: 1.6 }}>
+                    {h.detail}
+                    {(h.did || []).length > 0 && ` — ${h.did.join(' · ')}`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 사람의 결정이 필요한 것 — **여기가 비어 있어야 완성이다** */}
+          {(result.recovery.decisions || []).length > 0 ? (
+            <div style={{ padding: '10px 12px', borderRadius: 10,
+              background: '#F59E0B12', border: '1px solid #F59E0B33' }}>
+              <div style={{ color: '#F59E0B', fontSize: 11, fontWeight: 800, marginBottom: 6 }}>
+                결정이 필요합니다
+              </div>
+              {result.recovery.decisions.map((d: any) => (
+                <div key={d.id} style={{ marginBottom: 8 }}>
+                  <div style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>
+                    {d.label}
+                    {d.kind === 'NEVER_AUTO' && (
+                      <span style={{ marginLeft: 6, fontSize: 10, color: '#EF4444', fontWeight: 800 }}>
+                        자동 처리 안 함
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ color: T.muted, fontSize: 11, lineHeight: 1.6 }}>{d.detail}</div>
+                  {d.needed && (
+                    <div style={{ marginTop: 2, color: T.sub, fontSize: 11, lineHeight: 1.6 }}>
+                      → {d.needed}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: T.muted, fontSize: 11 }}>결정이 필요한 것은 없습니다.</div>
+          )}
+
+          {result.recovery.canTrade === false && (
+            <div style={{ marginTop: 10, color: '#EF4444', fontSize: 11, lineHeight: 1.7 }}>
+              지금은 새 진입이 막혀 있습니다. 이미 열린 포지션의 청산·보호주문 정리는 계속 동작합니다.
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* ── 보낸 요청 ── */}
       {requests.length > 0 && (
         <Card style={{ padding: 14 }}>
