@@ -65,7 +65,7 @@ export function runOpsCommandTests() {
     // 사용자는 매번 같은 목록을 보게 되고, 그러면 곧 안 본다.
     const r = opsVerdictOf('CHECK_ALL', [
       step({}),
-      step({ step: 'secrets', label: '권한 연결', state: 'BLOCKED',
+      step({ step: 'secrets', label: '권한 연결', state: 'BLOCKED', kind: 'BOOTSTRAP',
         blockedReason: 'SUPABASE_DB_URL (GitHub Secrets)' }),
     ]);
     eq(r.verdict, 'BOOTSTRAP_REQUIRED');
@@ -171,5 +171,24 @@ export function runOpsCommandTests() {
     assert(/신규 자동매매 진입이 막힙니다/.test(b.missing[0].withoutIt), b.missing[0].withoutIt);
     // **이미 열린 포지션의 청산·보호는 계속 동작한다**
     assert(/청산·보호는 계속/.test(b.missing[0].withoutIt), b.missing[0].withoutIt);
+  });
+
+  test('**값이 어긋난 것은 BOOTSTRAP_REQUIRED가 아니다**', () => {
+    // 권한을 연결해도 안 풀린다. 둘을 섞으면 사용자는 연결한 뒤에도
+    // 같은 화면을 보게 되고, 그러면 이 화면을 안 믿게 된다.
+    const r = opsVerdictOf('CHECK_ALL', [
+      step({}),
+      step({ step: 'secrets', label: '권한 연결', state: 'BLOCKED', kind: 'FAULT',
+        blockedReason: '암호화 키가 웹과 워커에서 다릅니다' }),
+    ]);
+    eq(r.verdict, 'BLOCKED');
+  });
+
+  test('종류를 안 적으면 권한 문제로 보지 않는다', () => {
+    // 기본값은 FAULT다 — 권한 문제라고 말하려면 그렇다고 적어야 한다.
+    const r = opsVerdictOf('CHECK_ALL', [
+      step({ step: 'secrets', label: '권한 연결', state: 'BLOCKED', blockedReason: 'X' }),
+    ]);
+    eq(r.verdict, 'BLOCKED');
   });
 }

@@ -427,6 +427,16 @@ export async function POST(req: NextRequest) {
       if (!ksg.allowed) throw new Error(ksg.message);
     }
 
+    // ── 웹과 워커가 같은 것을 보고 있는가 ──
+    //
+    // 암호화 키가 다르면 워커는 거래소 키를 못 푼다. 증상은 "키가
+    // 틀렸다"로 보여서 엉뚱한 곳을 고치게 된다.
+    {
+      const { parityGate } = await import('@/lib/ops/parityGate');
+      const pg = await parityGate(sb);
+      if (!pg.entryAllowed) throw new Error(pg.entryReason);
+    }
+
     // ── 닫아 줄 사람이 있는가 ──
     //
     // 청산 감시가 죽어 있으면 트레일링·본전이동·시간청산이 안 돈다.

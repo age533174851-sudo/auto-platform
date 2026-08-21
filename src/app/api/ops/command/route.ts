@@ -105,11 +105,27 @@ export async function POST(req: NextRequest) {
       encryptionKey: !!(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY),
       serviceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
     });
+    // ── 웹과 워커가 같은 것을 보고 있는가 ──
+    //
+    // 권한이 다 연결돼 있어도 **값이 서로 다르면** 워커는 거래소 키를
+    // 못 풀거나 다른 데이터베이스에 쓴다. 지문만 비교한다 — 값은 절대
+    // 응답에 싣지 않는다.
+    const { parityGate } = await import('@/lib/ops/parityGate');
+    const pg = await parityGate(sb);
+
+    const secretsBlocked = b.code !== 'READY' || !pg.entryAllowed;
     steps.push(mk('secrets', {
-      state: b.code === 'READY' ? 'PASS' : 'BLOCKED',
-      detail: b.summary,
-      blockedReason: b.code === 'READY' ? null
-        : b.missing.map(m => `${m.label} — ${m.missing.join(' · ')}`).join(' / '),
+      state: secretsBlocked ? 'BLOCKED' : pg.code === 'UNKNOWN' ? 'UNKNOWN' : 'PASS',
+      // **값이 어긋난 것은 권한 연결로 안 풀린다.** 최초 1회 연결과 섞으면
+      // 사용자가 연결한 뒤에도 같은 화면을 보게 된다.
+      kind: !pg.entryAllowed ? 'FAULT' : 'BOOTSTRAP',
+      detail: `${b.summary} / ${pg.summary}`,
+      blockedReason: !pg.entryAllowed
+        // 값이 어긋난 것은 **권한 연결과 다른 종류의 고장이다.** 최초 1회
+        // 연결로 해결되지 않으므로 BOOTSTRAP_REQUIRED로 뭉뚱그리지 않는다.
+        ? `${pg.entryReason} (지문만 비교했습니다 — 값은 보여 주지 않습니다)`
+        : b.code === 'READY' ? null
+          : b.missing.map(m => `${m.label} — ${m.missing.join(' · ')}`).join(' / '),
     }));
   }
 

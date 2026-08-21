@@ -221,6 +221,26 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // ── 2-b2. 웹과 워커가 같은 것을 보고 있는가 ──
+  //
+  // 암호화 키가 다르면 워커는 저장된 거래소 키를 풀지 못한다. 그런데 그
+  // 증상은 **"키가 틀렸다"**로 보이고, 사람은 거래소에서 키를 다시
+  // 발급받는다. 새 키를 넣어도 똑같이 안 되고, 그 사이 자동매매는 계속
+  // 시도한다. 데이터베이스가 다르면 더 조용하다.
+  try {
+    const { parityGate } = await import('@/lib/ops/parityGate');
+    const pg = await parityGate(sb);
+    if (!pg.entryAllowed) {
+      entryBlocks.push({
+        code: 'secret_mismatch', message: pg.entryReason,
+        // **값은 싣지 않는다.** 지문 비교 결과만 남는다.
+        extra: { parity: { code: pg.code, pairs: pg.pairs.map(x => ({ name: x.name, parity: x.parity })) } },
+      });
+    }
+  } catch (e: any) {
+    console.error('[my-original-v1] 지문을 대조하지 못했습니다:', e?.message || e);
+  }
+
   // ── 2-c. 닫아 줄 사람이 있는가 ──
   //
   // 청산 감시가 죽어 있으면 트레일링도 본전 이동도 시간 청산도 안 돈다.
