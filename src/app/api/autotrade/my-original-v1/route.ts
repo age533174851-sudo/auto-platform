@@ -214,6 +214,27 @@ export async function POST(req: NextRequest) {
       message: `마이그레이션 상태를 확인하지 못해 막았습니다: ${e?.message || e}` }, { status: 503 });
   }
 
+  // ── 2-c. 닫아 줄 사람이 있는가 ──
+  //
+  // **못 여는 것은 불편이고 못 닫는 것은 사고다.** 청산 감시가 죽어 있으면
+  // 트레일링도 본전 이동도 시간 청산도 안 돈다. 그 상태에서 새 포지션을
+  // 열면 닫아 줄 사람이 없는 포지션이 하나 더 생긴다 — 2026-08-03부터
+  // 다섯 달 동안 정확히 그 상태였다.
+  //
+  // 한두 번 밀린 것으로는 막지 않는다(배포 한 번에 하루가 멈춘다).
+  try {
+    const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
+    const em = await exitMonitorGate(sb, nowMs);
+    if (em.blockEntry) {
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: em.reason });
+      return NextResponse.json({ ...base, ok: false, error: 'exit_monitor_stale',
+        message: em.reason, exitMonitor: { code: em.code, sinceSec: em.sinceSec } }, { status: 503 });
+    }
+  } catch (e: any) {
+    // 관문 자체가 고장 나서 매매를 멈추지는 않는다 — 다만 조용히 넘기지도 않는다.
+    console.error('[my-original-v1] 청산 감시 상태를 확인하지 못했습니다:', e?.message || e);
+  }
+
   // ── 3. 킬스위치 ──
   //
   // 다른 실행기와 **같은 관문**을 쓴다. 확인하지 못하면 막힌다.

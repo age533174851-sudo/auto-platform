@@ -287,6 +287,20 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 닫아 줄 사람이 있는가 ──
+  //
+  // 청산 감시가 죽어 있으면 트레일링·본전이동·시간청산이 안 돈다.
+  // **못 여는 것은 불편이고 못 닫는 것은 사고다.**
+  {
+    const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
+    const em = await exitMonitorGate(sb);
+    if (em.blockEntry) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'EXIT_MONITOR_STALE', error: em.reason,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // ── DB가 코드를 따라왔는가 ──
   //
   // 코드가 요구하는 칸이 DB에 없으면 쓰기는 조용히 실패하고 매매는

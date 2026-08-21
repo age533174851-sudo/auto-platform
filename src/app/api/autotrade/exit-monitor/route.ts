@@ -263,12 +263,12 @@ export async function GET(req: NextRequest) {
     const cronSet = !!process.env.CRON_SECRET;
     const sent = req.headers.get('x-admin-secret') || '';
     const hint = !adminSet
-      ? '서버에 ADMIN_SECRET이 없습니다 — Vercel → Settings → Environment Variables에 넣고 **재배포**하세요. 저장만 하면 기존 배포에는 적용되지 않습니다.'
+      ? '서버에 ADMIN_SECRET이 없습니다 — 이 값이 없으면 워커도 청산 감시를 부를 수 없습니다.'
       : !sent
         ? 'x-admin-secret 헤더가 오지 않았습니다.'
         : sent.length !== String(process.env.ADMIN_SECRET).length
           ? `보낸 값의 길이가 서버 값과 다릅니다 (보낸 ${sent.length}자 / 서버 ${String(process.env.ADMIN_SECRET).length}자) — 복사할 때 앞뒤 공백이나 줄바꿈이 딸려 들어갔는지 확인하세요.`
-          : '길이는 같은데 값이 다릅니다 — GitHub의 EXIT_MONITOR_SECRET을 Vercel의 ADMIN_SECRET과 똑같이 맞추세요.';
+          : '길이는 같은데 값이 다릅니다 — 부른 쪽이 들고 있는 값이 이 서버의 ADMIN_SECRET과 다릅니다.';
 
     // ── 지문 ──
     //
@@ -306,6 +306,99 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
   const cronStartedAt = Date.now();
+
+  // ── 두 번 돌지 않는다 ──
+  //
+  // 청산 감시는 이제 워커가 5분마다 깨운다. 워커가 재시작하거나 두 대가
+  // 동시에 뜨면 같은 순간에 두 번 깨울 수 있고, 그러면 **같은 포지션에
+  // 손절 이동이 두 번 나간다.** 되돌릴 수 없는 종류다.
+  //
+  // 한 줄짜리 임차로 막고, 울타리 번호로 "느린 실행이 뒤늦게 깨어나
+  // 자기가 아직 주인인 줄 아는 것"까지 막는다.
+  // 판정은 exitMonitorLease.ts에 있고 테스트가 붙어 있다.
+  const { leaseDecision, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
+  const runner = String(req.headers.get('x-traigo-source') || '').trim() || 'manual';
+  const holder = `${runner}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
+
+  let myFence: number | null = null;
+  let leaseTracked = true;
+  {
+    let current: any = undefined;
+    try {
+      const { data, error } = await (sb as any)
+        .from('exit_monitor_lease').select('holder, fence, expires_at').eq('id', 1).maybeSingle();
+      if (!error) current = data ?? null;
+      else if (/does not exist|schema cache|relation/i.test(String(error.message))) {
+        // 058이 아직인 배포. **여기서 막으면 청산 감시가 통째로 멈춘다** —
+        // 그건 이 안전장치가 막으려던 것보다 나쁘다. 예전처럼 돈다.
+        leaseTracked = false;
+      }
+    } catch { /* undefined로 남는다 → 실행하지 않는다 */ }
+
+    if (leaseTracked) {
+      const d = leaseDecision({
+        current: current == null ? current : {
+          holder: String(current.holder), fence: Number(current.fence) || 0,
+          expiresAtMs: Date.parse(String(current.expires_at)),
+        },
+        me: holder, nowMs: cronStartedAt,
+      });
+      if (!d.granted) {
+        // **기다리지 않는다.** 그쪽이 하면 되는 일이다.
+        return NextResponse.json({ ok: true, skipped: true, code: d.code, message: d.reason },
+          { headers: { 'Cache-Control': 'no-store' } });
+      }
+      myFence = d.nextFence;
+      const { error: upErr } = await (sb as any).from('exit_monitor_lease').upsert({
+        id: 1, holder, fence: myFence,
+        acquired_at: new Date(cronStartedAt).toISOString(),
+        expires_at: new Date(cronStartedAt + LEASE_TTL_MS).toISOString(),
+      }, { onConflict: 'id' });
+      if (upErr) {
+        return NextResponse.json({ ok: true, skipped: true, code: 'LEASE_WRITE_FAILED',
+          message: `임차를 적지 못해 이번은 건너뜁니다: ${String(upErr.message).slice(0, 200)}` },
+          { headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
+  }
+
+  /** 주문을 내기 직전에 다시 묻는다 — 내 울타리가 아직 최신인가 */
+  const stillMine = async (): Promise<boolean> => {
+    if (!leaseTracked) return true;
+    let cur: number | null | undefined = undefined;
+    try {
+      const { data, error } = await (sb as any)
+        .from('exit_monitor_lease').select('fence').eq('id', 1).maybeSingle();
+      if (!error) cur = data == null ? null : Number(data.fence);
+    } catch { /* undefined */ }
+    return fenceStillMine({ myFence, currentFence: cur }).ok;
+  };
+
+  // 회차를 연다. **돌기 시작했다는 사실부터 남긴다** — 중간에 죽으면
+  // finished_at이 비어 있는 줄이 남고, 그게 "돌다 죽었다"의 증거다.
+  const EXIT_MONITOR_INTERVAL_MS = 5 * 60_000;
+  let runId: string | null = null;
+  try {
+    const { data } = await (sb as any).from('exit_monitor_runs').insert({
+      started_at: new Date(cronStartedAt).toISOString(),
+      source: runner,
+      worker_id: String(req.headers.get('x-traigo-worker') || '').trim() || null,
+      worker_sha: String(req.headers.get('x-traigo-sha') || '').trim() || null,
+      status: 'RUNNING',
+      next_expected_at: new Date(cronStartedAt + EXIT_MONITOR_INTERVAL_MS).toISOString(),
+    }).select('id').single();
+    runId = data?.id ?? null;
+  } catch { /* 058이 아직이면 null로 남는다 — 감시는 계속 돈다 */ }
+
+  /** 회차를 닫는다. **실패도 닫는다** — 열린 채로 두면 다음 회차가 밀린 것으로 읽는다 */
+  const closeRun = async (fields: Record<string, any>): Promise<void> => {
+    if (!runId) return;
+    try {
+      await (sb as any).from('exit_monitor_runs')
+        .update({ finished_at: new Date().toISOString(), ...fields }).eq('id', runId);
+    } catch { /* 기록 실패가 청산을 막지는 않는다 */ }
+  };
+
 
   // ── 사용자별 연결 ──
   //
@@ -451,6 +544,25 @@ export async function GET(req: NextRequest) {
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const results: any[] = [];
 
+  // **주문을 내기 직전에 다시 묻는다: 내 울타리가 아직 최신인가.**
+  //
+  // 여기까지 오는 데 거래소 조회로 수십 초가 걸릴 수 있다. 그 사이 임차가
+  // 넘어갔다면 남이 같은 일을 하고 있는 것이고, 내가 마저 내면 **같은
+  // 포지션에 손절 이동이 두 번 나간다.**
+  if (actionable.length > 0 && !dryRun && !(await stillMine())) {
+    await closeRun({
+      status: 'OK', positions_scanned: decisions.length, actions: 0,
+      orphan_cleanups: Array.isArray(orphanCleanups) ? orphanCleanups.length : null,
+      cleanup_detail: Array.isArray(orphanCleanups) && orphanCleanups.length ? orphanCleanups : null,
+      errors: '임차가 넘어가 주문을 내지 않았습니다',
+    });
+    return NextResponse.json({
+      ok: true, skipped: true, code: 'LEASE_LOST', checked: decisions.length, actionable: 0,
+      orphanCleanups,
+      message: '실행 도중 임차가 다른 워커에게 넘어가 주문을 내지 않았습니다 — 그쪽이 같은 판단을 합니다',
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
   for (const d of actionable) {
     try {
       // 키도 망도 이 사용자의 연결에서 온다. 환경변수로 정하면 실계좌
@@ -581,8 +693,22 @@ export async function GET(req: NextRequest) {
     actionable.length > 0 ? 'ok' : 'skipped',
     `${decisions.length}건 확인 · ${actionable.length}건 처리 (${caller})`, cronStartedAt);
 
+  // 회차를 닫는다. **#142 증거(정확한 번호로 취소한 남은 보호주문)를
+  // 그대로 담는다** — 사용자가 Gate 앱을 열어 확인하지 않아도 되게.
+  const failed = results.filter(r => r && r.ok === false);
+  await closeRun({
+    status: failed.length > 0 ? 'FAILED' : 'OK',
+    positions_scanned: decisions.length,
+    actions: results.filter(r => r && r.ok === true).length,
+    orphan_cleanups: Array.isArray(orphanCleanups) ? orphanCleanups.length : null,
+    cleanup_detail: Array.isArray(orphanCleanups) && orphanCleanups.length ? orphanCleanups : null,
+    errors: failed.length > 0
+      ? failed.map(r => `${r.symbol}: ${String(r.error || '').slice(0, 120)}`).join(' · ').slice(0, 1000)
+      : null,
+  });
+
   return NextResponse.json({
     ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, orphanCleanups, results,
-    cronLogError: cronLog.error,
+    runId, cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

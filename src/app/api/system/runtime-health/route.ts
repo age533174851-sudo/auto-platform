@@ -60,6 +60,20 @@ export async function GET(req: NextRequest) {
 
   const fix = autoFixPlan(health, { openOrders });
 
+  // ── 청산 감시가 제때 돌고 있는가 ──
+  //
+  // 워커가 살아 있는 것과 청산 감시가 도는 것은 **다른 사실이다.**
+  // 2026-08-03부터 다섯 달 동안 워커는 멀쩡했고 청산 감시만 죽어 있었다.
+  const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
+  const em = await exitMonitorGate(sb);
+  let lastRun: any = null;
+  try {
+    const { data } = await (sb as any).from('exit_monitor_runs')
+      .select('id, started_at, finished_at, status, source, worker_sha, positions_scanned, actions, orphan_cleanups, next_expected_at, errors')
+      .order('started_at', { ascending: false }).limit(1);
+    lastRun = Array.isArray(data) ? (data[0] ?? null) : null;
+  } catch { /* null — 못 읽은 것을 '안 돌았다'로 적지 않는다 */ }
+
   return NextResponse.json({
     ok: true,
     health,
@@ -82,6 +96,28 @@ export async function GET(req: NextRequest) {
     web: { supabaseFingerprint: webSupabaseFp, encryptionFingerprint: webEncryptionFp, sha: webSha },
     openOrders,
     autoFix: fix,
+    // **사람이 Fly 로그나 Actions 화면을 열 이유가 없게** 한 곳에 모은다.
+    exitMonitor: {
+      code: em.code,
+      overdue: em.overdue,
+      // 밀렸다고 바로 막지는 않는다. 막는 순간은 이 값이 true가 될 때다.
+      blocksEntry: em.blockEntry,
+      sinceSec: em.sinceSec,
+      reason: em.reason,
+      lastRun: lastRun == null ? null : {
+        startedAt: lastRun.started_at ?? null,
+        finishedAt: lastRun.finished_at ?? null,
+        status: lastRun.status ?? null,
+        source: lastRun.source ?? null,
+        workerSha: lastRun.worker_sha ?? null,
+        positionsScanned: lastRun.positions_scanned ?? null,
+        actions: lastRun.actions ?? null,
+        // #142 증거. 포지션이 0인데 남아 있던 보호주문을 정확한 번호로 치운 수.
+        orphanCleanups: lastRun.orphan_cleanups ?? null,
+        nextExpectedAt: lastRun.next_expected_at ?? null,
+        errors: lastRun.errors ?? null,
+      },
+    },
     checkedAt: Date.now(),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
