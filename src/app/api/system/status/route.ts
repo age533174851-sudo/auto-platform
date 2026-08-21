@@ -29,7 +29,11 @@ const CRONS: CronExpectation[] = [
   // **자동매매 진입이 여기 없어서**, 이 화면은 '자동매매가 도는가'에
   // 답하지 못했다. 정작 그게 가장 자주 묻는 질문이다.
   { job: 'daily-ladder',   label: '자동매매 진입', maxGapMs: 30 * HOUR },
-  { job: 'exit-monitor',   label: '청산 감시',     maxGapMs: 30 * HOUR },
+  // **청산 감시는 이제 Fly Worker가 5분마다 부른다.**
+  // 예전엔 GitHub Actions가 유일한 실행자라 하루치 여유를 뒀지만, 지금은
+  // 2시간을 넘겼다면 워커가 죽었거나 라우트가 막힌 것이다 — 30시간으로
+  // 두면 그 사실이 하루 넘게 초록불 뒤에 숨는다.
+  { job: 'exit-monitor',   label: '청산 감시',     maxGapMs: 2 * HOUR },
   { job: 'scheduled-exit', label: '시간 예약 청산', maxGapMs: 30 * HOUR },
   { job: 'calendar-sync',  label: '일정 동기화',   maxGapMs: 30 * HOUR },
 ];

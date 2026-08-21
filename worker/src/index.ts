@@ -29,6 +29,7 @@ import {
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
+import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 
 // 이 워커가 실행할 수 있는 거래소. 모니터 조회도 이 목록을 쓴다 —
 // 목록이 두 곳에 있으면 하나만 늘어난다.
@@ -715,6 +716,78 @@ async function pollSmokeCancels(): Promise<void> {
   }
 }
 
+// ── 청산 감시: 워커가 부른다 ────────────────────────────────
+//
+// **두 서비스가 같은 비밀을 맞춰야 하는 구조를 없앤다.**
+//
+// 예전에는 GitHub Actions가 15분마다 Vercel의 exit-monitor를 불렀다.
+// 그러려면 GitHub의 `EXIT_MONITOR_SECRET`과 Vercel의 `ADMIN_SECRET`이
+// 같은 값이어야 했고, 사람이 두 대시보드를 오가며 맞춰야 했다.
+// 한 글자만 달라도 401이다 — **2026-08-03부터 30번 연속 401이었고,
+// 그동안 트레일링·본전 이동·시간 청산은 한 번도 돌지 않았다.**
+//
+// 이 워커는 이미 `ADMIN_SECRET`을 가지고 있고, 그 값으로 스모크 청산과
+// 중지 이어받기를 매일 성공적으로 부르고 있다. 같은 자격으로 청산 감시도
+// 부른다 — **새 비밀이 하나도 필요 없다.**
+//
+// 왜 여기서 직접 청산하지 않는가: Binance가 이 서버의 IP 지역을 차단한다.
+// 판단과 주문은 그대로 Vercel(hnd1)에 두고 **깨우는 일만** 한다.
+const EXIT_MONITOR_MS = Number(process.env.EXIT_MONITOR_INTERVAL_MS || EXIT_MONITOR_INTERVAL_MS);
+let lastExitMonitorMs: number | null = null;
+let exitMonitorWarned = false;
+
+async function pollExitMonitor(isMain: boolean): Promise<void> {
+  const plan = exitMonitorPlan({
+    lastRunMs: lastExitMonitorMs, nowMs: Date.now(),
+    intervalMs: EXIT_MONITOR_MS, isMain,
+    hasCredential: !!(APP_URL && APP_ADMIN_SECRET),
+  });
+  if (!plan.run) {
+    // **자격이 없는 것은 한 번만 크게 말한다.** 매 tick 찍으면 로그가
+    // 덮여서 안 읽힌다 — 그런데 조용히 넘기면 안 도는 것을 아무도 모른다.
+    if (plan.skip === 'NO_CREDENTIAL' && !exitMonitorWarned) {
+      exitMonitorWarned = true;
+      console.error(`[exit-monitor] ⚠ ${plan.reason} — 트레일링·본전이동·시간청산이 돌지 않습니다`);
+    }
+    return;
+  }
+  lastExitMonitorMs = Date.now();
+
+  let status: number | null = null;
+  let body: any = null;
+  let error: string | null = null;
+  try {
+    // GET이다. 이 라우트는 크론이 부르는 자리라 GET만 열려 있다 —
+    // POST로 부르면 405로 끝나고, 그건 '할 일 없음'과 로그에서 구분되지 않는다.
+    const r = await fetch(`${APP_URL}/api/autotrade/exit-monitor`, {
+      method: 'GET',
+      headers: {
+        'x-admin-secret': APP_ADMIN_SECRET,
+        // 누가 불렀는지 남긴다. 백업(GitHub Actions)과 구분된다.
+        'x-traigo-source': 'worker',
+      },
+      signal: AbortSignal.timeout(90_000),
+    });
+    status = r.status;
+    body = await r.json().catch(() => null);
+  } catch (e: any) {
+    error = String(e?.message || e);
+  }
+
+  const out = exitMonitorOutcome({ status, body, error });
+  if (out.code === 'OK') {
+    // 할 일이 없던 회차까지 매번 찍으면 로그가 덮인다. 뭔가 한 회차와
+    // 가끔 한 번만 남긴다 — **돈 흔적은 남기고 소음은 줄인다.**
+    if ((out.actionable ?? 0) > 0 || (out.orphanCleanups ?? 0) > 0 || tickCount % 20 === 1) {
+      console.log(`[exit-monitor] ${out.message}`);
+    }
+  } else {
+    // **401을 '처리 0건'으로 적지 않는다.** 지난 다섯 달의 사고가
+    // 정확히 그 둘을 섞은 것이다.
+    console.error(`[exit-monitor] ✗ ${out.code} — ${out.message}`);
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -740,11 +813,16 @@ async function tick() {
   // **사람이 누른 "지금 테스트 종료"를 끝까지 처리한다.**
   // 브라우저를 닫아도 청산과 보호주문 정리가 끝나야 한다.
   await pollSmokeCancels();
-  // 계단식 청산 감시(트레일링·본전이동·시간청산)는 이 워커가 하지 않는다.
-  // Binance가 이 서버의 IP 지역을 차단해 주문이 나가지 않기 때문이다
-  // (jobs 테이블에 "Service unavailable from a restricted location" 기록).
-  // Vercel(regions: hnd1)의 /api/autotrade/exit-monitor가 담당한다.
-  // 여기서 다시 켜면 같은 포지션에 손절 이동이 두 번 나갈 수 있다.
+  // **계단식 청산 감시를 이 워커가 깨운다.**
+  //
+  // 주문은 여전히 Vercel(hnd1)이 낸다 — Binance가 이 서버의 IP 지역을
+  // 차단하기 때문이다(jobs 표에 "Service unavailable from a restricted
+  // location" 기록). 바뀐 것은 **누가 깨우는가**다: GitHub Actions가
+  // 별도 시크릿으로 깨우던 것을 이 워커가 이미 가진 ADMIN_SECRET으로
+  // 깨운다. 맞춰야 할 비밀이 하나 사라진다.
+  //
+  // 같은 포지션에 손절 이동이 두 번 나가지 않게 main 락을 쥔 워커만 부른다.
+  await pollExitMonitor(isMain);
 }
 
 async function startupChecks() {
