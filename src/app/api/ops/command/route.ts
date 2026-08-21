@@ -71,10 +71,6 @@ export async function POST(req: NextRequest) {
     }, { status: 409 });
   }
 
-  // 지금은 읽기 명령만 실행한다. 값을 바꾸는 명령(배포·복구·중지)은
-  // 각자의 실행 경로가 붙는 대로 여기에 연결한다 — **UI만 만들어 두고
-  // 배선을 안 하는 것**이 이 저장소의 단골 고장이라, 안 된 것은 안 됐다고
-  // 말한다.
   const steps: StepResult[] = [];
   const want = new Set<OpsStepId>(spec.steps);
   const nowMs = Date.now();
@@ -286,13 +282,102 @@ export async function POST(req: NextRequest) {
 
   const result = opsVerdictOf(command, steps);
 
-  // 값을 바꾸는 명령은 아직 실행 경로가 없다. **안 된 것은 안 됐다고 말한다** —
-  // "돌렸습니다"라고 적고 아무것도 안 하는 것이 이 저장소에서 가장 자주 난 고장이다.
-  const notYet = spec.mutates
-    ? `${spec.label} 실행은 아직 이 명령에 연결되지 않았습니다 — 지금은 상태 확인만 했습니다`
-    : null;
+  // ── 값을 바꾸는 명령은 실제로 실행한다 ──
+  //
+  // "돌렸습니다"라고 적고 아무것도 안 하는 것이 이 저장소에서 가장 자주 난
+  // 고장이다. 그래서 두 갈래로 나눈다:
+  //
+  //   지금 중지해   여기서 바로 한다. **멈추는 일을 5분 기다리게 하지 않는다**
+  //   배포해·복구해 요청을 적는다. 실행 자격(GITHUB_TOKEN·FLY_API_TOKEN)은
+  //                 GitHub Actions가 이미 가지고 있고, 화면에는 없다
+  let queued: { id: string; command: OpsCommand } | null = null;
+  let queueError: string | null = null;
+  let stopped: any = null;
+
+  if (command === 'STOP_NOW') {
+    // 킬 스위치는 이 화면이 직접 켤 수 있다. 기다릴 이유가 없다.
+    try {
+      const { data: conns } = await (sb as any)
+        .from('exchange_connections').select('id').eq('user_id', uid);
+      const ids: string[] = (Array.isArray(conns) ? conns : []).map((c: any) => String(c.id));
+      const { loadKillSwitch, saveKillSwitch, logKillEvent } = await import('@/lib/risk/killSwitch');
+      const done: string[] = [];
+      for (const cid of ids) {
+        const st = await loadKillSwitch(sb, uid, cid);
+        const next = {
+          ...st, active: true, triggeredAt: nowMs,
+          triggerReason: '사용자 명령: 지금 중지해',
+        } as any;
+        if (await saveKillSwitch(sb, uid, cid, next)) done.push(cid);
+        await logKillEvent(sb, uid, cid, {
+          reason: '사용자 명령: 지금 중지해', equity: 0, drawdownPct: 0,
+          action: 'KILL_SWITCH_ON', mode: 'MANUAL',
+        });
+      }
+      stopped = { connections: ids.length, activated: done.length };
+      // **켠 것과 켜려고 한 것은 다르다.** 하나라도 못 켰으면 그렇게 적는다.
+      if (done.length < ids.length) {
+        queueError = `연결 ${ids.length}개 중 ${done.length}개만 중지됐습니다 — 나머지는 다시 시도해야 합니다`;
+      }
+      // **포지션을 자동으로 청산하지 않는다.** 중지는 "더 열지 마라"이고,
+      // 닫는 것은 별개의 결정이다 — 사용자 확인 없이 포지션을 정리하지 않는다.
+    } catch (e: any) {
+      queueError = `킬 스위치를 켜지 못했습니다: ${String(e?.message || e).slice(0, 200)}`;
+    }
+  } else if (spec.mutates) {
+    try {
+      const { data, error } = await (sb as any).from('ops_requests').insert({
+        command, requested_by: uid, approved: command === 'APPROVE_LIVE_SMALL' ? body?.approved === true : true,
+        status: 'PENDING',
+      }).select('id').single();
+      if (error) throw new Error(error.message);
+      queued = { id: String(data?.id), command };
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      queueError = /does not exist|schema cache|relation/i.test(msg)
+        ? '요청 표(059)를 자동으로 적용하는 중입니다 — 적용이 끝나면 이 명령이 실행됩니다'
+        : `요청을 적지 못했습니다: ${msg.slice(0, 200)}`;
+    }
+  }
 
   return NextResponse.json({
-    ok: true, ...result, executed: !spec.mutates, notYet, checkedAt: nowMs,
+    ok: true, ...result,
+    // **접수와 실행은 다르다.** 큐에 적힌 것을 '실행됨'으로 적지 않는다.
+    executed: !spec.mutates || !!stopped,
+    queued, queueError, stopped,
+    next: queued
+      ? '실행기가 5분 안에 집어 갑니다 — 결과는 이 요청 번호로 확인할 수 있습니다'
+      : null,
+    checkedAt: nowMs,
   }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+// GET /api/ops/command?id=<요청번호> — 그 명령이 어떻게 끝났는가
+export async function GET(req: NextRequest) {
+  const uid = await resolveUserId(
+    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+  if (!uid) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  const sb = getSupabaseAdmin();
+  if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+
+  const id = String(req.nextUrl.searchParams.get('id') || '').trim();
+  try {
+    let query = (sb as any).from('ops_requests')
+      .select('id, command, status, approved, requested_at, claimed_at, finished_at, result, error')
+      .eq('requested_by', uid).order('requested_at', { ascending: false }).limit(id ? 1 : 10);
+    if (id) query = query.eq('id', id);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    const rows = Array.isArray(data) ? data : [];
+    return NextResponse.json({ ok: true, requests: rows }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    const missing = /does not exist|schema cache|relation/i.test(msg);
+    return NextResponse.json({
+      ok: !missing, requests: [],
+      // **못 읽은 것을 '요청 없음'으로 적지 않는다.**
+      error: missing ? null : msg.slice(0, 200),
+      note: missing ? '요청 표(059)를 자동으로 적용하는 중입니다' : null,
+    }, { status: missing ? 200 : 503, headers: { 'Cache-Control': 'no-store' } });
+  }
 }

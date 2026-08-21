@@ -1,0 +1,75 @@
+# 운영 명령 실행기.
+#
+# **"배포해" 한 마디를 실제 배포로 바꾼다.**
+#
+# 왜 여기인가
+# ───────────
+# 화면(Vercel)은 GitHub 워크플로를 부를 자격도, Fly 머신을 만질 자격도
+# 없다. 그 자격은 여기가 이미 가지고 있다 — `GITHUB_TOKEN`과
+# `FLY_API_TOKEN`. 새 토큰을 하나 더 만드는 대신 **이미 자격을 가진 쪽이
+# 요청을 집어 간다.**
+#
+# 큐를 읽고 쓰는 데 쓰는 것은 `SUPABASE_DB_URL` 하나뿐이고, 그건
+# 마이그레이션 자동화에 이미 필요한 값이다 — **이 기능이 새로 요구하는
+# 권한은 0이다.**
+#
+# 두 번 실행하지 않는다
+# ────────────────────
+# 집어 갈 때 PENDING → CLAIMED로 바꾸면서 가져간다. 이미 남이 가져간 것은
+# 0줄이 돌아오고 그때는 아무것도 하지 않는다. 가져간 채로 죽으면 15분 뒤
+# 만료로 본다. 판정은 `src/lib/ops/opsQueue.ts`에 있고 테스트가 붙어 있다.
+name: ops-runner
+
+on:
+  schedule:
+    # 5분마다. 사람이 명령을 누르고 기다리는 시간이라 너무 길면 안 되고,
+    # 실행기가 쉬는 동안에도 요청은 큐에 그대로 남아 있다.
+    - cron: '*/5 * * * *'
+
+  # 화면에서 명령을 누르면 바로 돌 수 있게. (지금은 큐만 쓰지만,
+  # 나중에 화면이 직접 깨울 수 있는 자리를 남겨 둔다.)
+  workflow_dispatch:
+
+concurrency:
+  # 실행기 둘이 같은 요청을 집어 가지 않게 한다.
+  # (DB 쪽 claim이 진짜 방어선이고, 이건 한 겹 더 두는 것이다.)
+  group: ops-runner
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: 운영 요청 처리
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      # 다른 워크플로(migrate · fly-deploy)를 workflow_dispatch로 깨운다.
+      actions: write
+      contents: read
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # opsQueue.ts를 프로젝트 tsc로 컴파일해서 쓴다 — 판정을 복제하지
+      # 않는다. 복제하면 언젠가 한쪽만 고쳐진다.
+      - name: 의존성 설치
+        run: npm ci
+
+      # flyctl은 RECOVER에서만 쓴다. 없어도 다른 명령은 돌아야 하므로
+      # 여기서 실패시키지 않는다.
+      - name: flyctl 설치
+        uses: superfly/flyctl-actions/setup-flyctl@master
+        continue-on-error: true
+
+      - name: 요청 처리
+        run: node scripts/ops-runner.mjs
