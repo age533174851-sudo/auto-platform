@@ -74,9 +74,48 @@ export async function GET(req: NextRequest) {
     lastRun = Array.isArray(data) ? (data[0] ?? null) : null;
   } catch { /* null — 못 읽은 것을 '안 돌았다'로 적지 않는다 */ }
 
+  // ── 배포가 정말 끝났는가 · 시스템이 스스로 고친 적이 있는가 ──
+  //
+  // **사람이 GitHub Actions 화면을 열 이유가 없어야 한다.** 실행기가
+  // 적어 둔 검증 결과와 복구 이력을 그대로 읽는다.
+  let deployVerified: any = null;
+  let heals: any[] = [];
+  try {
+    const { data } = await (sb as any).from('deployment_verifications')
+      .select('checked_at, main_sha, fly_sha, worker_fresh, migrations_applied, verdict, reason')
+      .order('checked_at', { ascending: false }).limit(1);
+    deployVerified = Array.isArray(data) ? (data[0] ?? null) : null;
+  } catch { /* null — 못 읽은 것을 '검증됨'으로 적지 않는다 */ }
+  try {
+    const { data } = await (sb as any).from('self_heal_runs')
+      .select('started_at, finished_at, trigger, action, attempt, outcome, verified, detail, open_orders')
+      .order('started_at', { ascending: false }).limit(5);
+    heals = Array.isArray(data) ? data : [];
+  } catch { /* [] */ }
+
   return NextResponse.json({
     ok: true,
     health,
+    // **검증되지 않은 배포를 '완료'로 적지 않는다.**
+    deployment: deployVerified == null ? {
+      verdict: 'UNKNOWN',
+      reason: '배포 검증 기록이 없습니다 — 검증됐다는 뜻이 아닙니다',
+      checkedAt: null,
+    } : {
+      verdict: deployVerified.verdict,
+      reason: deployVerified.reason,
+      checkedAt: deployVerified.checked_at,
+      mainSha: deployVerified.main_sha, flySha: deployVerified.fly_sha,
+      workerFresh: deployVerified.worker_fresh,
+      migrationsApplied: deployVerified.migrations_applied,
+    },
+    // 시스템이 스스로 한 일. 사람이 한 일이 아니다.
+    selfHeal: heals.map((h: any) => ({
+      startedAt: h.started_at, finishedAt: h.finished_at,
+      trigger: h.trigger, action: h.action, attempt: h.attempt,
+      outcome: h.outcome, verified: h.verified, detail: h.detail,
+      openOrders: h.open_orders,
+    })),
     worker: worker == null ? null : {
       workerId: worker.worker_id ?? null,
       // **사람이 넣는 값이 아니다.** 워커가 플랫폼 변수에서 읽어 적은 것이다.

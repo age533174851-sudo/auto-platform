@@ -16,7 +16,7 @@
 // **값은 어디에도 출력하지 않는다.** 접속 문자열은 지문만, 오류 문구에서도
 // 지우고 찍는다.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, cpSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, cpSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -73,17 +73,61 @@ function q(sql) {
 const lit = v => (v == null ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`);
 
 // ── 판단은 opsQueue.ts에 있다. 복제하지 않고 컴파일해서 쓴다 ──
-async function loadQueue() {
+async function loadLib() {
   const dir = mkdtempSync(join(tmpdir(), 'traigo-ops-'));
+  // 판단하는 파일들만 복사한다. selfHeal.ts는 runtimeHealth의 타입만
+  // 쓰므로 그것도 같이 가져온다(타입은 컴파일 뒤 사라진다).
   cpSync(join(ROOT, 'src', 'lib', 'ops', 'opsQueue.ts'), join(dir, 'opsQueue.ts'));
+  cpSync(join(ROOT, 'src', 'lib', 'ops', 'selfHeal.ts'), join(dir, 'selfHeal.ts'));
+  cpSync(join(ROOT, 'src', 'lib', 'runtime', 'runtimeHealth.ts'), join(dir, 'runtimeHealth.ts'));
+  // selfHeal.ts는 '../runtime/runtimeHealth'를 참조한다. 평평하게 놓았으므로
+  // 경로만 바꿔 준다 — **판단 자체는 한 글자도 고치지 않는다.**
+  const heal = readFileSync(join(dir, 'selfHeal.ts'), 'utf8')
+    .replace("from '../runtime/runtimeHealth'", "from './runtimeHealth'");
+  writeFileSync(join(dir, 'selfHeal.ts'), heal);
   const tsc = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) throw new Error('TypeScript를 찾을 수 없습니다 — 먼저 npm ci');
-  execFileSync(process.execPath, [tsc, 'opsQueue.ts', '--module', 'commonjs', '--target', 'es2019', '--skipLibCheck'],
-    { cwd: dir, stdio: 'pipe' });
-  return await import(`file://${join(dir, 'opsQueue.js')}`);
+  execFileSync(process.execPath, [tsc, 'opsQueue.ts', 'selfHeal.ts', 'runtimeHealth.ts',
+    '--module', 'commonjs', '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe' });
+  return {
+    ...(await import(`file://${join(dir, 'opsQueue.js')}`)),
+    ...(await import(`file://${join(dir, 'selfHeal.js')}`)),
+    ...(await import(`file://${join(dir, 'runtimeHealth.js')}`)),
+  };
 }
 
-const { claimDecision, runOutcomeOf } = await loadQueue();
+const {
+  claimDecision, runOutcomeOf, healPlan, healVerdict, deployVerification, runtimeHealthOf,
+} = await loadLib();
+
+// ── 워커 상태를 DB에서 직접 읽는다 ──
+//
+// 화면을 거치지 않는다. **사람이 fly logs를 여는 일을 없애는 것이 목적인데
+// 실행기가 사람을 거치면 아무 의미가 없다.**
+function readWorker() {
+  const r = q(`SELECT worker_id, EXTRACT(EPOCH FROM last_seen) * 1000, status, version,
+                      provider, supabase_fingerprint, encryption_fingerprint, startup_ok, startup_detail
+               FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1`);
+  if (!r.ok) return undefined;                 // 못 읽었다
+  const row = r.rows[0];
+  if (!row) return null;                       // 없다
+  return {
+    worker_id: row[0] || null,
+    last_seen: new Date(Number(row[1]) || 0).toISOString(),
+    status: row[2] || null,
+    version: row[3] || null,
+    provider: row[4] || null,
+    supabase_fingerprint: row[5] || null,
+    encryption_fingerprint: row[6] || null,
+    startup_ok: row[7] === '' ? null : row[7] === 't',
+    startup_detail: row[8] || null,
+  };
+}
+
+function currentHealth(mainSha) {
+  const w = readWorker();
+  return runtimeHealthOf({ worker: w, mainSha: mainSha || null, nowMs: Date.now() });
+}
 
 // 표가 아직 없으면 059가 적용되기 전이다. **오류가 아니라 '아직'이다.**
 const probe = q(`SELECT to_regclass('public.ops_requests') IS NOT NULL`);
@@ -223,11 +267,132 @@ if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
   step('마이그레이션', () => gh({ workflow: 'migrate.yml' }));
   step('워커 배포', () => gh({ workflow: 'fly-deploy.yml' }));
 } else if (cmd === 'RECOVER') {
-  // 안전한 자가 복구만 한다. **값을 바꾸는 복구(시크릿 교체 등)는 하지 않는다.**
-  step('마이그레이션', () => gh({ workflow: 'migrate.yml' }));
-  // 워커 재시작. 열린 주문 확인은 화면 쪽 autoFixPlan이 이미 했고,
-  // 여기서 다시 확인할 방법이 없으므로 **재배포가 아니라 재시작만** 한다.
-  step('워커 재시작', () => flyctl(['machine', 'restart', '--select', '--app', 'auto-platform']));
+  // ── 안전한 자가 복구 ──
+  //
+  // **눈감고 재시작하지 않는다.** 열린 주문 수를 못 읽으면 아무것도 하지
+  // 않고, 주문이 있으면 대조가 먼저이고, 같은 원인으로 세 번 시도했으면
+  // 멈추고 사람에게 말한다. 판정은 selfHeal.ts에 있고 테스트가 붙어 있다.
+  const mainSha = String(process.env.GITHUB_SHA || '').trim();
+  const before = currentHealth(mainSha);
+  console.log(`  지금 상태: ${before.code} — ${before.summary}`);
+
+  // 열린 주문 수. **못 읽으면 null이고, null이면 워커를 만지지 않는다.**
+  let openOrders = null;
+  {
+    const r = q(`SELECT count(*) FROM live_orders
+                 WHERE status IN ('NEW','PARTIALLY_FILLED','OPEN','PENDING')`);
+    if (r.ok && r.rows[0]) openOrders = Number(r.rows[0][0]);
+  }
+
+  // 지난 시도 기록. **못 읽으면 undefined이고, 그때는 다시 시도하지 않는다** —
+  // 0번으로 세면 무한 재시작이 된다.
+  let attempts = undefined;
+  {
+    const has = q(`SELECT to_regclass('public.self_heal_runs') IS NOT NULL`);
+    if (has.ok && has.rows[0]?.[0] === 't') {
+      const r = q(`SELECT trigger, EXTRACT(EPOCH FROM started_at) * 1000, outcome
+                   FROM self_heal_runs WHERE started_at > now() - interval '2 hours'
+                   ORDER BY started_at DESC LIMIT 20`);
+      if (r.ok) attempts = r.rows.map(x => ({ trigger: x[0], startedAtMs: Number(x[1]) || 0, outcome: x[2] }));
+    } else {
+      // 061이 아직이면 기록할 곳이 없다. **기록 못 하는 채로 재시작하지 않는다**
+      attempts = undefined;
+    }
+  }
+
+  const plan = healPlan({ health: before, openOrders, attempts, nowMs: Date.now() });
+  console.log(`  복구 계획: ${plan.code} — ${plan.reason}`);
+
+  if (plan.code !== 'HEAL') {
+    // 할 일이 없거나 해서는 안 되는 상태다. **그 사실을 그대로 적는다.**
+    steps.push({
+      step: '자동 복구', ok: plan.code === 'HEALTHY',
+      detail: `${plan.code}: ${plan.reason}`
+        + (plan.needsHuman.length ? ` / 사람 확인 필요: ${plan.needsHuman.join(' · ')}` : ''),
+    });
+  } else {
+    let healId = null;
+    const openHeal = q(`INSERT INTO self_heal_runs (trigger, action, attempt, outcome, open_orders)
+      VALUES (${lit(plan.trigger)}, ${lit(plan.actions.join('+'))}, ${plan.attempt}, 'RUNNING', ${openOrders == null ? 'NULL' : openOrders})
+      RETURNING id`);
+    if (openHeal.ok && openHeal.rows[0]) healId = openHeal.rows[0][0];
+
+    for (const a of plan.actions) {
+      if (a === 'RECONCILE_FIRST') {
+        // 대조는 워커·라우트가 하는 일이다. 여기서 거래소를 직접 만지지 않는다 —
+        // **주문 경로를 두 곳에 만들지 않는다.**
+        step('대조 먼저', () => '열린 주문이 있어 대조가 끝난 뒤에 재시작합니다 (워커가 매 tick 수행)');
+      } else if (a === 'APPLY_MIGRATIONS') {
+        step('마이그레이션', () => gh({ workflow: 'migrate.yml' }));
+      } else if (a === 'RESTART_WORKER') {
+        step('워커 재시작', () => flyctl(['machine', 'restart', '--select', '--app', 'auto-platform']));
+      } else if (a === 'REDEPLOY_WORKER') {
+        step('워커 재배포', () => gh({ workflow: 'fly-deploy.yml' }));
+      }
+    }
+
+    // ── 정말 나았는가 ──
+    //
+    // **명령이 0으로 끝난 것과 낫는 것은 다른 사실이다.** flyctl이
+    // 성공했다는 것은 머신을 재시작했다는 뜻이지 워커가 일을 하고 있다는
+    // 뜻이 아니다. 신호가 다시 올 시간을 준 뒤 상태를 다시 읽는다.
+    const commandOk = steps.every(x => x.ok);
+    if (commandOk) {
+      execFileSync(process.execPath, ['-e', 'setTimeout(()=>{}, 45000)'], { timeout: 60_000 });
+    }
+    const after = commandOk ? currentHealth(mainSha) : undefined;
+    const v = healVerdict({ commandOk, after, before: before.code });
+    steps.push({ step: '복구 확인', ok: v.verified, detail: `${v.outcome}: ${v.reason}` });
+
+    if (healId) {
+      q(`UPDATE self_heal_runs SET finished_at = now(), outcome = ${lit(v.outcome)},
+          verified = ${v.verified}, detail = ${lit(v.reason)} WHERE id = ${lit(healId)}`);
+    }
+  }
+}
+
+// ── 배포가 정말 끝났는가 ──
+//
+// **"머지됐다"와 "배포됐다"와 "그 코드가 돌고 있다"는 서로 다른 사실이다.**
+// 이 저장소는 그 셋을 섞어 두 번 사고를 냈다. 여섯 가지가 전부 확인돼야
+// VERIFIED이고, **하나라도 모르면 UNKNOWN이고 UNKNOWN은 성공이 아니다.**
+if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
+  // 배포 워크플로가 끝날 시간을 준다. 여기서 다 못 기다려도 괜찮다 —
+  // 결과는 표에 남고, 다음 회차가 다시 본다.
+  execFileSync(process.execPath, ['-e', 'setTimeout(()=>{}, 90000)'], { timeout: 120_000 });
+
+  const w = readWorker();
+  const mainSha = String(process.env.GITHUB_SHA || '').trim() || null;
+  const workerFresh = w === undefined ? null
+    : w === null ? false
+    : (Date.now() - Date.parse(w.last_seen)) < 3 * 60_000;
+
+  // 마이그레이션은 기록표에서 직접 본다.
+  let migrationsApplied = null;
+  {
+    const has = q(`SELECT to_regclass('public.schema_migrations') IS NOT NULL`);
+    if (has.ok && has.rows[0]?.[0] === 't') {
+      const r = q(`SELECT count(*) FROM schema_migrations WHERE status = 'FAILED' OR verified = false`);
+      if (r.ok && r.rows[0]) migrationsApplied = Number(r.rows[0][0]) === 0;
+    }
+  }
+
+  const dv = deployVerification({
+    mainSha, vercelSha: mainSha, flySha: w?.version ?? null, workerFresh, migrationsApplied,
+  });
+  console.log(`배포 검증: ${dv.code} — ${dv.reason}`);
+
+  const hasTable = q(`SELECT to_regclass('public.deployment_verifications') IS NOT NULL`);
+  if (hasTable.ok && hasTable.rows[0]?.[0] === 't') {
+    q(`INSERT INTO deployment_verifications
+       (main_sha, vercel_sha, fly_sha, worker_fresh, migrations_applied, verdict, reason)
+       VALUES (${lit(mainSha)}, ${lit(mainSha)}, ${lit(w?.version ?? null)},
+               ${workerFresh == null ? 'NULL' : workerFresh},
+               ${migrationsApplied == null ? 'NULL' : migrationsApplied},
+               ${lit(dv.code)}, ${lit(dv.reason)})`);
+  }
+  // **검증이 안 됐으면 배포 명령을 성공으로 적지 않는다.**
+  steps.push({ step: '배포 검증', ok: dv.code === 'VERIFIED', detail: `${dv.code}: ${dv.reason}` });
 }
 
 const outcome = runOutcomeOf(steps);

@@ -268,14 +268,14 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 | 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `NOT_STARTED` |
 | 3 | **exit-monitor를 Worker 내부 스케줄로 이동** — 공유 secret 자체 제거 | `MERGED` (#152) + 회차기록·임차·밀림관문 (#154) |
 | 4 | Worker boot 자가기록(provider·sha·지문·startup check) + `/api/system/runtime-health` | `MERGED` (#153) |
-| 5 | 배포 워크플로가 main/Vercel/Fly SHA를 스스로 대조 → `DEPLOYMENT_VERIFIED` | `NOT_STARTED` |
+| 5 | 배포 워크플로가 main/Vercel/Fly SHA를 스스로 대조 → `DEPLOYMENT_VERIFIED` | `FIXED` `TESTED` — 여섯 가지(코드 셋·워커 생존·마이그레이션·스키마)가 전부 확인돼야 VERIFIED |
 | 6 | `WORKER_PROVIDER` 수동 env 제거 — Worker가 heartbeat에 스스로 적는다 | `MERGED` (#153) |
-| 7 | Self-healing Worker (stale → probe → restart → 재확인 → rollback) | `NOT_STARTED` |
-| 8 | Deployment Orchestrator (migration→deploy→verify→verdict 한 줄) | `PARTIAL` (migration 구간만) |
+| 7 | Self-healing Worker (stale → probe → restart → 재확인 → rollback) | `FIXED` `TESTED` — 주문 미확인 시 정지, 주문 있으면 대조 우선, 3회 후 GIVE_UP, 3회차부터 재배포로 승격 |
+| 8 | Deployment Orchestrator (migration→deploy→verify→verdict 한 줄) | `FIXED` `TESTED` — 배포해 → migrate → fly-deploy → 검증 → verdict 기록 |
 | 9 | 배포 후 자동 TESTNET 읽기전용 검증 | `NOT_STARTED` |
 | 10 | #142 자동 검증 (position 0 · owned SL/TP absent · reread) | `PARTIAL` — 정리 증거를 `exit_monitor_runs.cleanup_detail`에 저장 (#154) |
 | 11 | Ledger health 자동 검사 + 표 없으면 migration이 먼저 복구 | `PARTIAL` (표 자동 적용은 됨) |
-| 12 | Recovery Center 자동 우선 (자동 가능/사람 결정 분리) | `NOT_STARTED` |
+| 12 | Recovery Center 자동 우선 (자동 가능/사람 결정 분리) | `PARTIAL` — selfHeal이 자동/사람 결정을 값으로 분리. 화면 배선 남음 |
 | 13 | 운영 명령 인터페이스 (`전체 점검해`·`배포해`·`복구해`) | `FIXED` `TESTED` — 점검은 즉시, 중지는 즉시(킬 스위치), 배포·복구는 요청 큐 → ops-runner가 실행 |
 | 14 | UI에서 운영 숙제 문구 금지 (CI 검사) | `PARTIAL` (마이그레이션 문구만) |
 | 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `FIXED` `TESTED` — 실행기가 **실제로 써 보고** CONNECTED/MISSING/INVALID를 적는다 |
