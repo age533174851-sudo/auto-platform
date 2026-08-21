@@ -1,9 +1,9 @@
 // /api/wallets/overview
 //
-// **지갑 화면이 물어보는 곳.**
+// **지갑 화면이 물어보는 곳. 이제 읽기만 한다.**
 //
-// 왜 새로 만드나
-// ──────────────
+// 왜 새로 만들었나
+// ────────────────
 // `/api/wallets`는 **연결 하나**의 지갑을 준다(`?connectionId=`). 그런데
 // 지갑 화면은 "실전/테스트넷 각각 얼마인가"를 물어야 한다 — 연결이
 // 여럿일 수 있고, 환경이 다르면 다른 돈이다.
@@ -12,16 +12,22 @@
 // 규칙이 브라우저에 생긴다. 그러면 "실전과 테스트넷을 합치지 않는다"가
 // 화면마다 따로 구현되고, 언젠가 한 화면이 그걸 어긴다.
 //
-// **조회는 readWallet 하나, 합산은 walletOverview 하나.**
-// 이 라우트는 그 둘을 잇기만 한다.
-
+// **조회는 readUserWallets 하나, 합산은 walletOverview 하나.**
+//
+// 쓰기를 들어냈다
+// ───────────────
+// 이 GET은 `account_equity_snapshots`에 INSERT를 했다. 그래서
+// **사람이 앱을 여는 시간에만 자산이 기록됐고**, 탭을 두 개 열면 같은
+// 순간이 두 번 찍혔다(간격 판정은 동시 요청 둘을 다 통과시킨다).
+//
+// 지금은 워커가 `/api/wallets/snapshot`을 15분마다 깨우고, 중복은
+// 064의 칸 키 제약이 막는다. 이 라우트는 **찍힌 것을 읽고, 오래됐으면
+// 오래됐다고 말한다** — 조용히 옛 곡선을 지금 자산인 척 보여주지 않는다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { readConnectionWallet } from '@/lib/markets/readWallet';
-import {
-  envWalletOf, bucketsOf, totalAcrossEnvs, accountWalletsOf, type ConnectionWallet,
-} from '@/lib/portfolio/walletOverview';
-import { snapshotVerdict, snapshotRow } from '@/lib/portfolio/snapshotPlan';
+import { readUserWallets } from '@/lib/portfolio/walletRead';
+import { bucketsOf, totalAcrossEnvs, accountWalletsOf } from '@/lib/portfolio/walletOverview';
+import { snapshotFreshness } from '@/lib/portfolio/snapshotBucket';
 import { equityPerformanceOf, elapsedText, newestFirstToAsc, latestTakenMs, type EquitySnapshot } from '@/lib/portfolio/performance';
 
 export const dynamic = 'force-dynamic';
@@ -34,133 +40,49 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
-  // ── 내 연결 ──
+  // ── 지갑을 읽는다 ──
   //
   // **못 읽은 것을 빈 목록으로 두지 않는다.** 빈 목록이면 화면이
   // "연결된 계좌가 없습니다"라고 적고, 사용자는 연결이 풀린 줄 안다.
-  let conns: any[] | null = null;
-  let connError: string | null = null;
-  try {
-    // **기본 합산은 살아 있는 연결만.** 비활성/옛 연결까지 조회하면 그
-    // 실패 하나 때문에 환경 전체 총자산이 "확인 불가"가 되고, 쓸데없는
-    // 거래소 호출도 늘어난다. 비활성은 아래에서 따로 보여준다.
-    const { data, error } = await (sb as any).from('exchange_connections')
-      .select('id, exchange_id, label, is_testnet, has_withdrawal, is_active')
-      .eq('user_id', uid).eq('is_active', true);
-    if (error) throw new Error(error.message);
-    conns = (data || []).filter((c: any) => {
-      const ex = String(c.exchange_id ?? '').toLowerCase();
-      return ex === 'binance' || ex === 'gate';
-    });
-  } catch (e: any) { connError = String(e?.message || e); }
-
-  if (conns == null) {
+  const w = await readUserWallets(sb, uid);
+  if (!w.ok) {
     return NextResponse.json({
       ok: false, error: 'connections_unreadable',
-      message: `거래소 연결 목록을 읽지 못했습니다 (${connError}) — `
+      message: `거래소 연결 목록을 읽지 못했습니다 (${w.error}) — `
         + '연결이 없다는 뜻이 아닙니다',
     }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
+  const { reads, envs, detail } = w;
 
-  // ── 연결마다 지갑을 읽는다 ──
-  //
-  // 하나가 실패해도 나머지는 보여준다. **실패한 것을 0으로 채우지
-  // 않는다** — 합산 쪽이 "하나라도 모르면 null"로 처리한다.
-  // 계좌별 상세도 같이 모은다 — 화면의 '선물/현물' 탭이 빈 배열을
-  // 직접 넣고 있었다. 서버가 이미 읽은 값을 안 내려준 것뿐이다.
-  const detail: Record<string, { spotAssets: any[]; futures: any }> = {};
-
-  const reads = await Promise.all(conns.map(async (c: any): Promise<ConnectionWallet> => {
-    const r = await readConnectionWallet(sb, uid, String(c.id));
-    detail[String(c.id)] = {
-      // **못 읽었으면 빈 목록이 아니라 그 사실을 남긴다.**
-      spotAssets: r.spotOk && Array.isArray(r.spot?.assets)
-        ? r.spot!.assets.map(a => ({
-          asset: a.asset, free: a.free, locked: a.locked, valueUsd: a.valueUsd,
-        }))
-        : [],
-      futures: r.futuresOk ? {
-        walletBalance: r.futures?.walletBalance ?? null,
-        availableMargin: r.futures?.availableMargin ?? null,
-        positionMargin: r.futures?.positionMargin ?? null,
-        unrealizedPnl: r.futures?.unrealizedPnl ?? null,
-        positionsOk: r.positionsOk,
-      } : null,
-    };
-    return {
-      connectionId: String(c.id),
-      exchangeId: String(c.exchange_id ?? ''),
-      // **저장소 공통 규칙: `is_testnet === false`일 때만 실전이다.**
-      // 여기서만 다르게 읽으면 값이 빈 연결이 실전 합계에 들어간다.
-      testnet: c.is_testnet === false ? false : c.is_testnet === true ? true : null,
-      label: c.label ?? null,
-      ok: r.ok,
-      error: r.ok ? null : (r.message ?? r.error),
-      futures: r.futures ? {
-        ok: r.futures.ok,
-        // **포지션을 못 읽었으면 미실현손익은 모르는 값이다.**
-        positionsOk: r.positionsOk,
-        walletBalance: (r.futures as any).walletBalance ?? null,
-        availableMargin: (r.futures as any).availableMargin ?? null,
-        positionMargin: (r.futures as any).positionMargin ?? null,
-        unrealizedPnl: (r.futures as any).unrealizedPnl ?? null,
-      } : null,
-      // **현물은 USDT만이 아니라 전체 평가액을 넘긴다.** 예전에는
-      // `usdt`만 넘겨서 BTC·ETH가 총자산에서 통째로 빠졌다.
-      spot: r.spot ? {
-        ok: r.spot.ok,
-        usdt: (r.spot as any).usdt ?? null,
-        valueUsd: r.tree?.spotValueUsd ?? null,
-        knownValueUsd: r.tree?.spotKnownValueUsd ?? null,
-        unpriced: r.tree?.spotUnpriced ?? [],
-      } : null,
-    };
-  }));
-
-  const envs = (['LIVE', 'TESTNET'] as const).map(e => envWalletOf(e, reads));
-
-  // **계좌 선택이 실제로 숫자를 바꾸게 한다.**
-  //
-  // 예전에는 화면에 계좌 버튼이 있었지만 서버에 계좌 단위 집계가 없어서,
-  // 무엇을 눌러도 환경 전체 합계가 그대로 보였다. 사용자는 계좌별 잔고를
-  // 보고 있다고 믿었다. 환경 합계와 **같은 함수**로 계산한다 — 두 규칙이
-  // 갈리면 전체와 계좌별이 안 맞는 날이 온다.
+  // **계좌 선택이 실제로 숫자를 바꾸게 한다.** 환경 합계와 **같은
+  // 함수**로 계산한다 — 두 규칙이 갈리면 전체와 계좌별이 안 맞는 날이 온다.
   const accountWallets = accountWalletsOf(reads);
 
-  // ── 자산을 찍어 둔다 ──
+  // ── 찍힌 자산을 읽는다 ──
   //
-  // **표(048)는 있는데 채우는 코드가 없었다.** 그래서 지갑 곡선은
-  // 구조적으로 영원히 비어 있었다. 지금 잔고로 과거를 역산할 수는
-  // 없으므로, 지금부터 찍어 두는 것 말고는 방법이 없다.
-  //
-  // 여기서 찍는 이유: 자산을 방금 읽었고, 사람이 지갑을 열 때마다
-  // 자연스럽게 기록이 쌓인다. 워커가 도는 주기와 별개로 동작한다.
-  // **읽기 요청이 쓰기를 하는 것이 어색하지만**, 표를 채우는 다른
-  // 경로가 없는 상태를 더 두는 것이 나쁘다.
+  // **여기서 찍지 않는다.** 찍는 것은 워커가 깨우는
+  // `/api/wallets/snapshot`이다. 이 라우트가 찍으면 사람이 앱을 여는
+  // 시간에만 곡선이 생기고, 동시 요청이 같은 순간을 두 번 남긴다.
   const nowMs = Date.now();
-  const snapshotNotes: Array<{ env: string; code: string; reason: string }> = [];
+  const snapshotNotes: Array<{ env: string; code: string; reason: string; stale: boolean }> = [];
   const perf: Record<string, any> = {};
-  // **곡선을 그릴 원본을 화면에 준다.**
-  //
-  // 지갑 화면에는 `const snapshots: any[] = []`가 박혀 있었다. 서버는
-  // 기록을 읽어 성과까지 계산하면서도 **원본을 내려주지 않았고**, 화면은
-  // 빈 배열을 직접 넣었다. 그래서 자산 곡선은 구조적으로 영원히 비어
-  // 있었다 — 데이터가 없어서가 아니라 배선이 없어서.
+  // 화면이 곡선을 그릴 원본. **없는 구간을 지어내지 않는다** — 찍힌 시점만.
   const rawSnapshots: Record<string, Array<{ takenAt: number; totalEquity: number | null; unrealizedPnl: number | null }>> = {};
 
   for (const e of envs) {
     let history: EquitySnapshot[] = [];
-    let lastTakenMs: number | null = null;
+    let historyOk = true;
     try {
-      const { data } = await (sb as any).from('account_equity_snapshots')
+      const { data, error } = await (sb as any).from('account_equity_snapshots')
         .select('taken_at, total_equity, realized_pnl, unrealized_pnl, deposit, withdrawal, transfer, fees, funding')
         .eq('user_id', uid).eq('env', e.env)
         // **최신부터 읽는다.** 예전에는 `ascending: true` + `limit(2000)`
         // 이라 15분마다 찍으면 약 3주 뒤부터 **가장 오래된 2000개**만
-        // 계속 읽었다. 그러면 `lastTakenMs`가 옛 시각에 고정되고,
-        // "15분 지났다"는 판정이 매 요청마다 참이 되어 표가 부풀며,
-        // 성과 곡선과 현재 자산 기준점도 전부 옛 구간을 본다.
+        // 계속 읽었다 — 곡선과 기준점이 전부 옛 구간을 봤다.
         .order('taken_at', { ascending: false }).limit(2000);
+      // **오류를 반드시 받아 본다.** 예전에는 `catch`만 있어서, 조회가
+      // 오류 객체로 실패하면(던지지 않는다) 빈 기록이 정상처럼 통과했다.
+      if (error) throw new Error(error.message);
       history = newestFirstToAsc((Array.isArray(data) ? data : []).map((r: any) => ({
         takenAt: Date.parse(String(r.taken_at)),
         totalEquity: r.total_equity == null ? null : Number(r.total_equity),
@@ -171,53 +93,26 @@ export async function GET(req: NextRequest) {
         fees: r.fees == null ? null : Number(r.fees),
         funding: r.funding == null ? null : Number(r.funding),
       })));
-      // **가장 최근 시각을 값으로 고른다.** 배열의 끝을 믿지 않는다.
-      lastTakenMs = latestTakenMs(history);
     } catch {
-      // 표가 없거나 못 읽었다. **찍지 않는다** — 마지막 시각을 모르면
-      // 매 요청마다 찍게 되고, 그건 표를 부풀린다.
-      snapshotNotes.push({ env: e.env, code: 'HISTORY_UNREADABLE',
-        reason: '기록을 읽지 못했습니다 — 마이그레이션 048이 필요할 수 있습니다' });
-      perf[e.env] = equityPerformanceOf([]);
-      continue;
+      historyOk = false;
     }
 
-    // **찍는 값은 canonical 총자산이다.**
+    // **오래됐으면 오래됐다고 말한다.**
     //
-    // 예전에는 `e.futures.value`(선물 지갑잔고)를 `total_equity`로 적었다.
-    // 현물도 미실현손익도 빠진 값이다. 그런데 화면은 그걸 "시작 자산 ·
-    // 현재 자산 · 최고 자산 · MDD"로 보여줬다 — 이름과 내용이 달랐다.
-    //
-    // 그리고 **하나라도 모르면 찍지 않는다.** 값을 못 매긴 자산이 있는
-    // 순간의 부분합계를 찍으면, 그날 자산이 줄어든 것으로 곡선에 남고
-    // 그 기록은 되돌릴 수 없다.
-    const v = snapshotVerdict({
-      nowMs, lastTakenMs,
+    // 이 판정은 쓰기를 워커로 옮기면서 필요해졌다. 예전에는 화면을 여는
+    // 행위가 곧 기록이라 "오래됨"이 존재할 수 없었다. 이제는 워커가
+    // 멈추면 곡선이 조용히 멈춘다 — 그러면 마지막 점이 지금 자산인 척한다.
+    const f = snapshotFreshness({
+      nowMs,
+      lastTakenMs: historyOk ? latestTakenMs(history) : null,
+      historyOk,
       connections: e.connections,
-      totalEquity: e.total.value,
     });
-    snapshotNotes.push({ env: e.env, code: v.code, reason: v.reason });
+    snapshotNotes.push({ env: e.env, code: f.code, reason: f.reason, stale: f.stale });
 
-    if (v.take && e.total.value != null && e.unpricedAssets.length === 0) {
-      const row = snapshotRow({
-        userId: uid, env: e.env, takenAtMs: nowMs,
-        totalEquity: e.total.value,
-        unrealizedPnl: e.unrealizedPnl.value,
-      });
-      try {
-        await (sb as any).from('account_equity_snapshots').insert(row);
-        history = [...history, {
-          takenAt: nowMs, totalEquity: e.total.value,
-          unrealizedPnl: e.unrealizedPnl.value,
-        }];
-      } catch { /* 못 남겨도 화면은 보여준다 — 다음 주기에 다시 찍는다 */ }
-    }
-
-    const p = equityPerformanceOf(history);
+    const p = equityPerformanceOf(historyOk ? history : []);
     perf[e.env] = { ...p, elapsedText: elapsedText(p.elapsedMs) };
-    // 화면이 곡선을 그릴 원본. **없는 구간을 지어내지 않는다** —
-    // 찍힌 시점만 준다.
-    rawSnapshots[e.env] = history.map(h => ({
+    rawSnapshots[e.env] = (historyOk ? history : []).map(h => ({
       takenAt: h.takenAt,
       totalEquity: h.totalEquity ?? null,
       unrealizedPnl: h.unrealizedPnl ?? null,
@@ -227,55 +122,55 @@ export async function GET(req: NextRequest) {
   // ── 오늘 매매로 번 것 ──
   //
   // **매매손익 = 자산변화 − 외부유입 − 수수료 − 펀딩.**
-  // 네 항을 전부 알 때만 숫자를 만든다(056). 지금까지 수수료와 펀딩을
-  // 아무도 안 모아서 이 값은 언제나 null이었다. 062가 어디까지 읽었는지
-  // 기록하므로, 이제 **완전한 기간에 한해** 숫자를 만들 수 있다.
+  // 네 항을 전부 알 때만 숫자를 만든다(056).
   //
-  // 화면이 다시 계산하지 않게 서버가 판정까지 해서 내려준다.
+  // 완전성 판정을 고쳤다
+  // ────────────────────
+  // 예전에는 `ledger_ingest_state`에서 읽은 **행만** `every()`로 봤다.
+  // `every()`는 배열에 있는 것만 본다 — 연결이 셋인데 상태 행이 하나면,
+  // 그 하나가 오늘을 덮는 순간 참이다. **한 번도 수집된 적 없는 두
+  // 연결은 검사에 등장조차 하지 않는다.** 그 연결의 수수료와 펀딩이
+  // 빠진 채로 매매손익이 확정되고, 빠진 비용은 전부 수익으로 보인다.
+  //
+  // 이제 **활성 연결 집합과 덮인 집합을 대조한다**(`ledgerCompleteness`).
   const ledger: Record<string, any> = {};
   try {
     const { ledgerTotals, tradingPnlOf } = await import('@/lib/ledger/ledgerEvent');
-    const { ledgerCovers } = await import('@/lib/ledger/incomeIngest');
+    const { ledgerCompleteness } = await import('@/lib/ledger/coverageSet');
     const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
     const fromMs = dayStart.getTime();
 
     for (const e of ['LIVE', 'TESTNET'] as const) {
-      // 이 환경의 모든 연결이 오늘 구간을 덮고 있어야 한다.
-      // **하나라도 덜 읽었으면 완전하지 않다.**
-      let complete = false;
-      let reason = '거래소 원장을 아직 읽은 적이 없습니다';
+      // **못 읽은 것을 빈 배열로 두지 않는다.** null이면 판정이
+      // "완전하다고 말하지 않는다"로 간다.
+      let states: any[] | null = null;
       try {
-        const { data: states } = await (sb as any).from('ledger_ingest_state')
+        const { data, error } = await (sb as any).from('ledger_ingest_state')
           .select('connection_id, covered_from, covered_to')
           .eq('user_id', uid).eq('env', e);
-        const rows = Array.isArray(states) ? states : [];
-        if (rows.length === 0) {
-          complete = false;
-        } else {
-          const checks = rows.map((r: any) => ledgerCovers({
-            coverage: {
-              fromMs: Date.parse(String(r.covered_from ?? '')) || null,
-              toMs: Date.parse(String(r.covered_to ?? '')) || null,
-            },
-            periodFromMs: fromMs, periodToMs: nowMs,
-          }));
-          complete = checks.every(c => c.complete);
-          reason = complete ? '오늘 구간이 모두 덮여 있습니다'
-            : (checks.find(c => !c.complete)?.reason ?? '일부 구간이 덮이지 않았습니다');
-        }
-      } catch {
-        // 062가 아직이거나 못 읽었다. **완전하다고 말하지 않는다.**
-        complete = false;
-        reason = '수집 상태를 읽지 못했습니다 — 완전하다는 뜻이 아닙니다';
-      }
+        if (error) throw new Error(error.message);
+        states = (Array.isArray(data) ? data : []).map((r: any) => ({
+          connectionId: String(r.connection_id ?? ''),
+          fromMs: Date.parse(String(r.covered_from ?? '')) || null,
+          toMs: Date.parse(String(r.covered_to ?? '')) || null,
+        }));
+      } catch { states = null; }
+
+      const cov = ledgerCompleteness({
+        // 기대 집합 = 이 환경의 활성 연결. **환경을 모르는 연결은 빠진다.**
+        expected: w.connectionIdsByEnv?.[e] ?? null,
+        states,
+        periodFromMs: fromMs, periodToMs: nowMs,
+      });
 
       let totals: any = null;
       try {
-        const { data: evs } = await (sb as any).from('ledger_events')
+        const { data, error } = await (sb as any).from('ledger_events')
           .select('kind, amount')
           .eq('user_id', uid).eq('env', e)
           .gte('occurred_at', new Date(fromMs).toISOString());
-        totals = ledgerTotals((Array.isArray(evs) ? evs : []).map((r: any) => ({
+        if (error) throw new Error(error.message);
+        totals = ledgerTotals((Array.isArray(data) ? data : []).map((r: any) => ({
           kind: r.kind, amount: Number(r.amount),
         })) as any);
       } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
@@ -287,18 +182,48 @@ export async function GET(req: NextRequest) {
         ? Number(today[today.length - 1].totalEquity) - Number(today[0].totalEquity)
         : null;
 
-      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: complete });
+      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: cov.complete });
       ledger[e] = {
-        complete, reason,
+        complete: cov.complete, reason: cov.reason, code: cov.code,
+        // **무엇이 빠졌는지 값으로 준다** — 화면이 문장을 지어내지 않게.
+        missingConnections: cov.missing, partialConnections: cov.partial,
         totals,
         equityChange,
-        // **네 항을 다 알 때만 값이 있다.** 아니면 무엇을 몰라서인지 적힌다.
         tradingPnl: tp,
       };
     }
   } catch (e: any) {
     // 장부가 고장 나도 지갑은 보여야 한다. 다만 조용히 넘기지 않는다.
     ledger.error = String(e?.message || e).slice(0, 200);
+  }
+
+  // ── 전략계좌 ──
+  //
+  // **표는 041이 만들었는데 화면이 물어보지 않고 있었다.**
+  //
+  // 지갑의 전략계좌 탭에는 `const strategies = []`가 박혀 있었고, 주석은
+  // "전략별 귀속 장부가 붙어야 실제 값이 생긴다"였다. 그 장부는
+  // `strategy_accounts`로 이미 있다 — 만들어 놓고 배선을 안 한 것이다.
+  //
+  // **못 읽은 것을 '전략 없음'으로 적지 않는다.** 빈 목록이면 화면이
+  // "전략계좌가 없습니다"라고 적고, 사용자는 배정한 돈이 사라진 줄 안다.
+  let strategies: any[] | null = null;
+  let strategiesError: string | null = null;
+  try {
+    const { sleeveAccountsOf } = await import('@/lib/portfolio/walletDetail');
+    const { data, error } = await (sb as any).from('strategy_accounts')
+      .select('sleeve_id, label, connection_id, allocated, realized_pnl, unrealized_pnl, fees, max_drawdown_seen_pct, positions, stage, halted')
+      .eq('user_id', uid);
+    if (error) throw new Error(error.message);
+    // 연결 id → 환경. **환경을 못 읽은 연결은 넣지 않는다.**
+    const envByConnection: Record<string, 'LIVE' | 'TESTNET'> = {};
+    for (const r of reads) {
+      if (r.testnet === false) envByConnection[r.connectionId] = 'LIVE';
+      else if (r.testnet === true) envByConnection[r.connectionId] = 'TESTNET';
+    }
+    strategies = sleeveAccountsOf(Array.isArray(data) ? data : [], envByConnection);
+  } catch (e: any) {
+    strategiesError = String(e?.message || e).slice(0, 200);
   }
 
   return NextResponse.json({
@@ -310,10 +235,14 @@ export async function GET(req: NextRequest) {
     ledger,
     // 성과. **찍어 둔 시점에서만 나온다** — 지금 잔고로 과거를 역산하지 않는다.
     performance: perf,
+    // 자산 기록이 지금 것인가. `stale: true`면 화면이 경고를 띄운다.
     snapshots: snapshotNotes,
     // 자산 곡선의 원본. 환경별로 오래된 순이다.
     snapshotSeries: rawSnapshots,
     buckets: bucketsOf(envs),
+    // 전략계좌. **null은 '없다'가 아니라 '못 읽었다'이다.**
+    strategies,
+    strategiesError,
     // 화면이 고를 계좌 — **숫자까지 같이 준다.**
     accounts: accountWallets.map(a => ({
       id: a.connectionId, exchangeId: a.exchangeId, label: a.label,
