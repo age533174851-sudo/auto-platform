@@ -14,6 +14,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
 import { verdictView, stepView, requestView } from '@/lib/ui/opsView';
+// **토큰을 한 번 복사해 두지 않는다.** 갱신·복귀·포커스를 따라간다.
+import { watchAuthToken } from '@/lib/auth/authToken';
 
 const TONE: Record<string, string> = {
   ok: '#10B981', warn: '#F59E0B', bad: '#EF4444', info: '#3B82F6', muted: '#64748B',
@@ -25,6 +27,11 @@ const COMMANDS: Array<{ command: string; label: string; desc: string; danger?: b
   { command: 'DEPLOY', label: '배포해', desc: '마이그레이션 → 워커 배포 → 검증까지' },
   { command: 'VERIFY_TESTNET', label: '테스트넷 검증해', desc: '읽기 전용 확인 (주문을 내지 않습니다)' },
   { command: 'RECOVER', label: '복구해', desc: '안전한 자동 복구만 — 주문이 있으면 대조가 먼저입니다' },
+  {
+    command: 'SYNC_SECRETS', label: '시크릿 동기화해',
+    desc: 'GitHub Secrets 기준으로 Vercel·Fly에 맞추고 → 재배포 → 지문으로 실제 확인까지. '
+      + '값은 어디에도 안 남습니다 (이름·지문만)',
+  },
   { command: 'STOP_NOW', label: '지금 중지해', desc: '킬 스위치를 켭니다 (포지션은 자동 청산하지 않습니다)', danger: true },
 ];
 
@@ -34,9 +41,16 @@ export default function OpsPage() {
   const [err, setErr] = useState('');
   const [requests, setRequests] = useState<any[]>([]);
 
-  const auth = typeof window !== 'undefined' ? (localStorage.getItem('sb_access_token') || '') : '';
-  const headers = auth
-    ? { 'Content-Type': 'application/json', Authorization: `Bearer ${auth}` }
+  // ── 토큰은 canonical 세션에서 온다 ──
+  //
+  // 예전에는 `localStorage.getItem('sb_access_token')`을 한 번 읽어
+  // 들고 있었다. access token은 1시간짜리라 갱신돼도 복사본은 안 바뀐다 —
+  // 한 시간 뒤부터 모든 운영 명령이 401이고, 사용자에게는
+  // **"가만히 있었는데 로그아웃됐다"** 로 보인다.
+  const [auth, setAuth] = useState<string | null>(null);
+  useEffect(() => watchAuthToken(setAuth), []);
+  const headers: Record<string, string> = auth
+    ? { 'Content-Type': 'application/json', Authorization: auth }
     : { 'Content-Type': 'application/json' };
 
   const loadRequests = useCallback(async () => {
