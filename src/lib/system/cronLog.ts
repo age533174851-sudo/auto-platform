@@ -32,7 +32,7 @@ export async function recordCronRun(
     const missing = /cron_runs/i.test(msg) && /(does not exist|schema cache|relation)/i.test(msg);
     return {
       saved: false,
-      error: missing ? 'cron_runs 표가 없습니다 — 마이그레이션 029를 적용하세요' : msg,
+      error: missing ? 'cron_runs 표가 아직 없습니다 — 마이그레이션 029를 자동으로 적용하는 중입니다' : msg,
     };
   }
 }

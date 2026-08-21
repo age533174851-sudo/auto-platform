@@ -158,6 +158,39 @@ export async function GET(req: NextRequest) {
     items.push(autotradeStatus(probe, now));
   }
 
+  // ── 마이그레이션 ──
+  //
+  // 표 하나하나를 세는 위 항목과 다르다. 여기는 **코드가 요구하는 파일
+  // 목록과 DB의 적용 기록을 맞춰 본다.** 표가 있어도 마지막 마이그레이션이
+  // 안 돌았으면 칸이 빠져 있을 수 있고, 그러면 쓰기가 조용히 실패한다.
+  //
+  // 적용은 migrate 워크플로가 자동으로 한다. 여기서는 **시스템이 무엇을
+  // 했는지**만 적는다 — "SQL 편집기를 여세요"라고 쓰지 않는다.
+  {
+    const { migrationStatusOf } = await import('@/lib/system/migrationStatus');
+    const { MIGRATION_MANIFEST, REQUIRED_MIGRATIONS } = await import('@/lib/system/migrationManifest');
+    let rows: any[] | null = null;
+    try {
+      const { data, error } = await (sb as any)
+        .from('schema_migrations')
+        .select('filename, checksum, status, verified, applied_at');
+      if (!error && Array.isArray(data)) rows = data;
+      else if (error && /does not exist|schema cache|relation/i.test(String(error.message))) rows = [];
+      // 그 밖의 오류는 null로 남는다 — **못 읽은 것을 '없음'으로 적지 않는다**
+    } catch { /* null */ }
+
+    const checksums: Record<string, string> = {};
+    for (const m of MIGRATION_MANIFEST) checksums[m.name] = m.checksum;
+    const ms = migrationStatusOf({ required: REQUIRED_MIGRATIONS, rows, checksums });
+    items.push({
+      id: 'migrations', label: '데이터베이스 마이그레이션',
+      health: ms.health,
+      detail: ms.detail,
+      // 사람이 할 일은 자동으로 못 한 것이 있을 때만 나온다.
+      action: ms.blockedReason,
+    });
+  }
+
   // ── 연결 ──
   let count: number | null = null;
   let lastOkMs: number | null = null;

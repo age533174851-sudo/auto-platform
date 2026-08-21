@@ -176,7 +176,7 @@ function noteMissingVersionColumn(): void {
   if (missingVersionWarned) return;
   missingVersionWarned = true;
   console.warn(
-    '[heartbeat] worker_heartbeat.version 칸이 없습니다 — 마이그레이션 054를 적용하세요.'
+    '[heartbeat] worker_heartbeat.version 칸이 없습니다 — 마이그레이션 054를 자동으로 적용하는 중입니다.'
     + ' 그때까지 /api/system/deployment의 Fly SHA는 "모름"입니다(같음이 아닙니다).');
 }
 

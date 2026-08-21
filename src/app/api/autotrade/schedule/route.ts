@@ -44,7 +44,7 @@ export const runtime = 'nodejs';
 function tableMissing(migration: string, table: string) {
   return NextResponse.json({
     ok: false, error: 'table_missing',
-    message: `${table} 표가 없습니다 — 마이그레이션 ${migration}을 적용하세요`,
+    message: `${table} 표가 아직 없습니다 — 마이그레이션 ${migration}을 자동으로 적용하는 중입니다`,
   }, { status: 503 });
 }
 const isMissing = (msg: any) => /does not exist|schema cache|relation/i.test(String(msg));

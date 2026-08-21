@@ -29,7 +29,7 @@ async function auth(req: NextRequest) {
 /** 표가 없을 때 무엇을 해야 하는지 알려준다 */
 function tableHint(msg: string): string | null {
   return /trader_(channels|signals)/i.test(msg) && /(does not exist|schema cache|relation)/i.test(msg)
-    ? '마이그레이션 030을 적용하세요'
+    ? '마이그레이션 030을 자동으로 적용하는 중입니다'
     : null;
 }
 

@@ -138,7 +138,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (isMissing(msg)) {
-      return fail('ERROR', 'smoke_tests 표가 없습니다 — 마이그레이션 052·053을 적용하세요', 503);
+      return fail('ERROR', 'smoke_tests 표가 아직 없습니다 — 마이그레이션 052·053을 자동으로 적용하는 중입니다', 503);
     }
     if (/duplicate key|unique constraint/i.test(msg)) {
       // 같은 회차를 둘이 동시에 시작하려 했거나, 같은 종목에 이미 돈다.

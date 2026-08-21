@@ -176,7 +176,7 @@ async function runSync() {
     } catch (e: any) {
       const msg = String(e?.message || e);
       storageWarning = /time_known/i.test(msg)
-        ? 'time_known 칸이 없습니다 — 마이그레이션 027을 적용하세요.'
+        ? 'time_known 칸이 없습니다 — 마이그레이션 027을 자동으로 적용하는 중입니다.'
         : `FRED 저장 실패: ${msg}`;
     }
   }

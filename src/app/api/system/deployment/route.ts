@@ -92,7 +92,7 @@ export async function GET(req: NextRequest) {
     } catch (e: any) {
       const msg = String(e?.message || e);
       fly.error = /column|schema cache/i.test(msg)
-        ? 'version_column_missing — 마이그레이션 054를 적용하세요'
+        ? 'version_column_missing — 마이그레이션 054를 자동으로 적용하는 중입니다'
         : msg;
     }
   }

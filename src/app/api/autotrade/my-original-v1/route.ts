@@ -163,7 +163,7 @@ export async function POST(req: NextRequest) {
       ...base, ok: false,
       error: isMissing(msg) ? 'table_missing' : 'cycle_read_failed',
       message: isMissing(msg)
-        ? 'strategy_cycles 표가 없습니다 — 마이그레이션 051을 적용하세요. '
+        ? 'strategy_cycles 표가 아직 없습니다 — 마이그레이션(051)을 자동으로 적용하는 중입니다. '
           + '이 표가 없으면 가상 원장을 읽을 수 없고, 거래소 잔고로 대신 계산하지 않습니다'
         : `가상 원장을 읽지 못했습니다: ${msg}`,
     }, { status: 503 });
@@ -189,6 +189,29 @@ export async function POST(req: NextRequest) {
   if (!wv.evaluate) {
     return NextResponse.json({ ...base, reason: wv.reason, skipped: true },
       { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // ── 2-b. DB가 코드를 따라왔는가 ──
+  //
+  // **코드만 앞서 나가면 조용히 틀린다.** 054가 없던 동안 워커는 멀쩡히
+  // 돌면서 버전을 못 적었다 — 쓰기는 실패하는데 매매는 계속됐다.
+  // 적용이 안 끝났으면 주문을 내지 않는다.
+  //
+  // 사람이 할 일은 없다. 적용은 migrate 워크플로가 자동으로 하고,
+  // 여기서는 끝났는지만 본다.
+  try {
+    const { migrationGate } = await import('@/lib/system/migrationGate');
+    const mg = await migrationGate(sb);
+    if (!mg.entryAllowed) {
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: mg.entryReason });
+      return NextResponse.json({ ...base, ok: false, error: 'migration_pending',
+        message: mg.entryReason, migration: { code: mg.code, pending: mg.pending.slice(0, 5) } },
+        { status: 503 });
+    }
+  } catch (e: any) {
+    // **확인하지 못한 것은 통과가 아니다.**
+    return NextResponse.json({ ...base, ok: false, error: 'migration_unknown',
+      message: `마이그레이션 상태를 확인하지 못해 막았습니다: ${e?.message || e}` }, { status: 503 });
   }
 
   // ── 3. 킬스위치 ──
@@ -855,7 +878,7 @@ export async function GET(req: NextRequest) {
   } catch (e: any) {
     const msg = String(e?.message || e);
     cyclesError = isMissing(msg)
-      ? 'strategy_cycles 표가 없습니다 — 마이그레이션 051을 적용하세요' : msg;
+      ? 'strategy_cycles 표가 아직 없습니다 — 마이그레이션 051을 자동으로 적용하는 중입니다' : msg;
   }
 
   const now = Date.now();

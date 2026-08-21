@@ -4,6 +4,23 @@
 확인돼야 항목이 DONE이 된다. `RUNTIME_VERIFIED`는 배포·마이그레이션·워커
 생존·실제 거래소 증거·화면 일치가 **전부** 충족됐을 때만 적는다.
 
+## 최상위 원칙 — ZERO-TOUCH OPS
+
+> **사용자는 명령만 한다.** 기술적으로 자동화 가능한 수동 절차를
+> 사용자에게 넘기지 않는다. "사용자가 해야 할 것"이 발생하면 먼저 그것을
+> 자동화하는 기능을 구현한다.
+
+작업 보고에 아래 문장이 나오면 **자동화 미완성**으로 본다:
+"마이그레이션을 적용해 주세요" · "Vercel 환경변수를 확인해 주세요" ·
+"Fly secret을 맞춰 주세요" · "fly logs를 열어 보세요" · "SHA를 비교해 주세요" ·
+"heartbeat를 확인해 주세요" · "exit-monitor가 도는지 봐 주세요".
+
+그리고 **자동화를 많이 만드는 것보다 실패 지점 자체를 없애는 것이 낫다.**
+`EXIT_MONITOR_SECRET`을 두 곳에서 맞추는 일을 자동화하는 것보다,
+exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 쪽이 옳다.
+
+전체 규칙은 `CLAUDE.md`에 있다.
+
 ## 완료 기준
 
 | 단계 | 뜻 |
@@ -16,7 +33,8 @@
 
 ## PR 체인
 
-1. **Auto Runtime Truth** ← 진행 중
+0. **ZERO-TOUCH OPS** ← 지금 여기 (P0)
+1. Auto Runtime Truth
 2. Wallet Completion (#145가 남긴 것)
 3. Unified Ledger
 4. Multi Strategy Ownership
@@ -189,6 +207,50 @@
 
 ---
 
+## 5. ZERO-TOUCH OPS — 1. 마이그레이션 완전 자동화
+
+### 5-1. 마이그레이션 적용이 사람의 기억에 달려 있었다
+
+- **ISSUE** 파일은 커밋됐는데 아무도 적용하지 않는 상태가 반복됐다.
+  054가 빠져 워커 버전이 영영 `모름`이었고, 055 없이 중지가 반쪽으로
+  돌았고, 056 없이 장부 writer가 조용히 `TABLE_MISSING`만 남겼다.
+  **셋 다 코드는 맞고 DB만 뒤처진 상태였고, 알아채는 유일한 방법이
+  사람의 기억이었다.**
+- **FILES** `src/lib/system/migrationPlan.ts` ·
+  `src/lib/system/migrationStatus.ts` · `scripts/apply-migrations.mjs` ·
+  `scripts/gen-migration-manifest.mjs` · `scripts/check-migrations.mjs` ·
+  `.github/workflows/migrate.yml` · `supabase/migrations/000_schema_migrations.sql`
+- **FIX** main에 머지되면 `detect → classify → adopt → lock → apply →
+  verify → record`가 자동으로 돈다. 사람이 SQL 편집기를 여는 절차가
+  사라졌다.
+- **분류** 더하는 것(표·칸·인덱스·정책·제약·조건부 backfill)은 자동 적용.
+  **DROP TABLE · DROP COLUMN · 타입 변경 · 조건 없는 DELETE/UPDATE는
+  자동 실행하지 않는다.** 판정하지 못한 문장도 자동 실행하지 않는다 —
+  '아마 괜찮겠지'가 데이터를 지운다.
+- **기존 53개** 카탈로그에서 표·인덱스·칸·정책이 실제로 있는지 확인한
+  뒤에만 `BASELINE`으로 기록한다. **실행하지 않고, 추측으로 적지도 않는다.**
+- **적용 후 확인** psql이 0으로 끝난 것과 표가 생긴 것은 다른 사실이다.
+  `migrationTargets()`가 뽑은 대상을 `information_schema`·`pg_indexes`·
+  `pg_policies`에 다시 물어보고, 확인 실패면 그 자리에서 멈춘다.
+- **잠금** 배포 두 개가 겹치면 같은 파일을 두 번 실행한다.
+  `schema_migration_lock` 한 줄 + 워크플로 concurrency 두 겹.
+- **배포 차단** 남은 마이그레이션이 있으면 fly-deploy가 워커를 바꾸지 않는다.
+- **진입 차단** `migrationEntryGate()` — 적용이 안 끝났으면 새 주문을 막는다.
+- **비밀 유출 방지** 접속 문자열은 지문 6자만 찍는다. psql 오류 문구에서도
+  URL·호스트·비밀번호를 지우고 출력하며, DB에 남는 `error` 칸에도 지운
+  문구만 들어간다.
+- **CI** `check-migrations` — 번호 없는 파일이 목록에 없거나 번호가
+  겹치거나 `migrationManifest.ts`가 낡으면 실패한다
+  (**"만들어 놓고 배선을 안 함"을 CI가 잡는다**).
+- **화면** `/api/system/status`와 `/api/system/migrations`가 Required /
+  Applied / Pending / Failed를 그대로 보여 준다. 문구는 "적용하세요"가
+  아니라 **"자동으로 적용하는 중"**이다.
+- **UNIT** 38건 (`migrationPlan` 31 · `migrationStatus` 7)
+- **STATUS** `FIXED` `TESTED` — 최초 1회 `SUPABASE_DB_URL` 권한 연결 후
+  `RUNTIME_VERIFIED`
+
+---
+
 ## 아직 남은 것 (다음 PR에서 **이어서** 진행)
 
 | # | 항목 | 상태 |
@@ -198,6 +260,25 @@
 | 3 | Ledger: 거래소 income(FEE/FUNDING) 수집 | `NOT_STARTED` |
 | 3 | Ledger: Wallet 화면 배선(tradingPnl 표시) | `NOT_STARTED` |
 | 2 | Wallet: 전략계좌·장기투자 귀속 | `NOT_STARTED` (Ledger 선행) |
+
+### ZERO-TOUCH OPS 남은 축
+
+| # | 항목 | 상태 |
+|---|---|---|
+| 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `NOT_STARTED` |
+| 3 | **exit-monitor를 Worker 내부 스케줄로 이동** — 공유 secret 자체 제거 | `NOT_STARTED` |
+| 4 | Worker boot 자가기록(provider·sha·지문·startup check) + `/api/system/runtime-health` | `PARTIAL` (#146의 지문 비교까지) |
+| 5 | 배포 워크플로가 main/Vercel/Fly SHA를 스스로 대조 → `DEPLOYMENT_VERIFIED` | `NOT_STARTED` |
+| 6 | `WORKER_PROVIDER` 수동 env 제거 — Worker가 heartbeat에 스스로 적는다 | `NOT_STARTED` |
+| 7 | Self-healing Worker (stale → probe → restart → 재확인 → rollback) | `NOT_STARTED` |
+| 8 | Deployment Orchestrator (migration→deploy→verify→verdict 한 줄) | `PARTIAL` (migration 구간만) |
+| 9 | 배포 후 자동 TESTNET 읽기전용 검증 | `NOT_STARTED` |
+| 10 | #142 자동 검증 (position 0 · owned SL/TP absent · reread) | `NOT_STARTED` |
+| 11 | Ledger health 자동 검사 + 표 없으면 migration이 먼저 복구 | `PARTIAL` (표 자동 적용은 됨) |
+| 12 | Recovery Center 자동 우선 (자동 가능/사람 결정 분리) | `NOT_STARTED` |
+| 13 | 운영 명령 인터페이스 (`전체 점검해`·`배포해`·`복구해`) | `NOT_STARTED` |
+| 14 | UI에서 운영 숙제 문구 금지 (CI 검사) | `PARTIAL` (마이그레이션 문구만) |
+| 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `NOT_STARTED` |
 | 2 | Wallet: price/FX provenance | `NOT_STARTED` |
 | 3 | Unified Ledger | `NOT_STARTED` |
 | — | #142 cleanup evidence UI (actual-auto) | `NOT_STARTED` |

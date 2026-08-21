@@ -287,6 +287,21 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── DB가 코드를 따라왔는가 ──
+  //
+  // 코드가 요구하는 칸이 DB에 없으면 쓰기는 조용히 실패하고 매매는
+  // 계속된다(054에서 실제로 일어난 일). 적용은 migrate 워크플로가
+  // 자동으로 하고, 여기서는 끝났는지만 본다.
+  {
+    const { migrationGate } = await import('@/lib/system/migrationGate');
+    const mg = await migrationGate(sb);
+    if (!mg.entryAllowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'MIGRATION_PENDING', error: mg.entryReason,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   if (conn.exchange !== 'binance' && conn.exchange !== 'gate') {
     return NextResponse.json({
       ...base, executed: false, blocked: 'NO_CONNECTION',

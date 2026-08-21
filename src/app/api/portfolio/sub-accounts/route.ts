@@ -38,7 +38,7 @@ function dbError(e: any, status = 500) {
     ok: false,
     error: missing ? 'migration_required' : 'db_error',
     message: missing
-      ? '서브계좌 표가 없습니다 — supabase/migrations/024_sub_accounts.sql을 적용하세요'
+      ? '서브계좌 표가 없습니다 — supabase/migrations/024_sub_accounts.sql을 자동으로 적용하는 중입니다'
       : msg,
   }, { status: missing ? 503 : status });
 }
