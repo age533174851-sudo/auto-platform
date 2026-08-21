@@ -233,6 +233,20 @@ jobs:
       - name: 테스트 등록 검사
         run: node scripts/check-test-registry.mjs
 
+      # ── 상태판이 늙는 문장을 담지 않는가 ──
+      #
+      # `FULL_COMPLETION_STATUS.md`에 `main = Vercel = Fly = <SHA>` ·
+      # `MATCHED` · `Fly Worker alive`가 적혀 있었다. 2026-08-21에
+      # 확인해 보니 워커는 27시간째 멈춰 있었고 배포는 어긋나 있었다.
+      #
+      # **그 문장들은 적힐 때는 참이었다.** 검증할 수 없는 형태로 참을
+      # 적어 두면 거짓이 되는 순간을 아무도 모른다 — 같은 날 코드
+      # 주석에서도 같은 모양을 잡았다(my-original-v1).
+      #
+      # 상태판을 자동 갱신해 주는 대신 **늙는 문장 자체를 못 쓰게** 한다.
+      - name: 상태판 문장 검사
+        run: node scripts/check-status-claims.mjs
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그

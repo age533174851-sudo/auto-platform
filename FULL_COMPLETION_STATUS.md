@@ -21,6 +21,30 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 
 전체 규칙은 `CLAUDE.md`에 있다.
 
+## 이 문서가 적지 않는 것
+
+**런타임 사실은 여기 없다.** 배포 SHA · 워커 생존 · 마이그레이션 적용
+여부는 적는 순간부터 늙고, 거짓이 되는 순간을 아무도 모른다.
+
+2026-08-21에 실제로 그랬다. 이 문서에는 커밋 SHA 하나와 배포 일치·워커
+생존을 단정하는 문장이 적혀 있었는데, 그날 확인해 보니 워커는 27시간째
+한 줄도 쓰지 못하고 있었고 배포도 어긋나 있었다. **그 문장들은 적힐
+때는 참이었다** — 그게 이 고장의 핵심이다.
+
+그래서 지금 상태는 언제나 살아 있는 곳에서 읽는다:
+
+| 무엇 | 어디 |
+|---|---|
+| main · Vercel · Fly SHA와 verdict | `/api/system/deployment` |
+| 워커 생존 · 지문 · 청산 감시 | `/api/system/runtime-health` |
+| Required / Applied / Pending / Failed | `/api/system/migrations` |
+
+`scripts/check-status-claims.mjs`가 CI에서 이 규칙을 지킨다 — 커밋 SHA,
+워커 생존이나 배포 일치를 단정하는 문장, 날짜 없이 잰 값을 적은 줄이
+들어오면 실패한다.
+
+이 문서에는 **무엇을 왜 고쳤는지**를 적는다. 그건 늙지 않는다.
+
 ## 완료 기준
 
 | 단계 | 뜻 |
@@ -51,8 +75,7 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 
 ### 1-1. 화면이 죽은 워커를 말하고 살아 있는 워커를 숨겼다
 
-- **ISSUE** 실측 `main = Vercel = Fly = 3c46151` · `MATCHED` · Fly Worker alive.
-  그런데 자동 화면은 `Worker (Railway) · 없음`, `자동매매는 Vercel 크론이
+- **ISSUE** 배포·워커가 정상인데도 자동 화면은 `Worker (Railway) · 없음`, `자동매매는 Vercel 크론이
   돌립니다`, `Railway 워커는 Binance 지역 차단으로 쓰지 않습니다`,
   `이 판은 브라우저 엔진 상태입니다`라고 표시.
 - **ROOT CAUSE** 운영 사실(공급자 이름·무엇이 돌리는가)이 **화면 파일에
@@ -255,17 +278,18 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 
 | # | 항목 | 상태 |
 |---|---|---|
-| 2 | Wallet: snapshot writer → Worker + bucket unique | `NOT_STARTED` (마이그레이션 필요) |
+| 2 | Wallet: snapshot writer → Worker + bucket unique | `MERGED` (#169) — 064가 15분 칸 키에 유일 인덱스를 걸고, 워커가 `/api/wallets/snapshot`을 깨운다. GET은 더 이상 쓰지 않는다 |
 | 2 | Wallet: TESTNET credit/reset 분리 | `PARTIAL` — 장부 분류는 됨, 거래소 income 수집 미구현 |
 | 3 | Ledger: 거래소 income(FEE/FUNDING) 수집 | `FIXED` `TESTED` — 062가 덮인 구간을 기록. **절반만 읽고 계산하지 않는다** |
 | 3 | Ledger: Wallet 화면 배선(tradingPnl 표시) | `FIXED` — 지갑이 '그중 매매로 번 것'을 보여 주고, 못 만들면 무엇을 몰라서인지 적는다 |
-| 2 | Wallet: 전략계좌·장기투자 귀속 | `NOT_STARTED` (Ledger 선행) |
+| 2 | Wallet: 전략계좌 귀속 | `MERGED` (#169) — 041의 `strategy_accounts`를 읽는다. 자산 = 배정 + 실현 + 미실현 − 수수료, 한 항이라도 모르면 만들지 않는다 |
+| 2 | Wallet: 장기투자(주식·ETF) 귀속 | `NOT_STARTED` — 연결할 계좌 종류 자체가 없다. 0을 그리지 않고 왜 비었는지 적는다 |
 
 ### ZERO-TOUCH OPS 남은 축
 
 | # | 항목 | 상태 |
 |---|---|---|
-| 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `FIXED` `TESTED` — 어긋나면 **신규 진입 차단**. 동기화는 확인이 기본이고 적용은 명시적 승인 |
+| 2 | Secret 단일 출처 + Vercel/Fly 자동 동기화 (지문 비교) | `MERGED` (#171) — "시크릿 동기화해" 한 명령으로 검사 → 반영 → 재배포 → **지문 재확인**까지. Vercel 쪽 배선이 없던 것을 채웠다. 롤백은 만들지 않았다(되돌릴 이전 값을 아무도 갖고 있지 않다) — 대신 어긋나면 신규 진입 차단 |
 | 3 | **exit-monitor를 Worker 내부 스케줄로 이동** — 공유 secret 자체 제거 | `MERGED` (#152) + 회차기록·임차·밀림관문 (#154) |
 | 4 | Worker boot 자가기록(provider·sha·지문·startup check) + `/api/system/runtime-health` | `MERGED` (#153) |
 | 5 | 배포 워크플로가 main/Vercel/Fly SHA를 스스로 대조 → `DEPLOYMENT_VERIFIED` | `FIXED` `TESTED` — 여섯 가지(코드 셋·워커 생존·마이그레이션·스키마)가 전부 확인돼야 VERIFIED |
@@ -280,14 +304,17 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 | 14 | UI에서 운영 숙제 문구 금지 (CI 검사) | `PARTIAL` (마이그레이션 문구만) |
 | 15 | 권한 bootstrap — 없는 credential만 `OPS_BOOTSTRAP_MISSING` | `FIXED` `TESTED` — 실행기가 **실제로 써 보고** CONNECTED/MISSING/INVALID를 적는다 |
 | — | **Bootstrap Gate** — 필요한 마이그레이션이 미적용이면 신규 진입 BLOCK · 배포 verified 금지 · 청산/보호/복구는 계속 | `FIXED` `TESTED` |
-| 2 | Wallet: price/FX provenance | `NOT_STARTED` |
+| 2 | Wallet: price/FX provenance | `MERGED` (#169) — `/api/fx/usd`가 범위 검증까지 해서 준다. 못 읽으면 null이고 KRW가 잠긴다 — `currency.ts`의 폴백 상수 1375를 쓰지 않는다 |
 | 3 | Unified Ledger | `NOT_STARTED` |
 | — | #142 cleanup evidence UI (actual-auto) | `NOT_STARTED` |
-| — | #142 Gate 실측 `Positions 0 / Orders 0` | **`BLOCKED`** — 아래 참조 |
-| — | TypeScript 73 → 0 | `NOT_STARTED` (현재 73, 기준선) |
+| — | #142 Gate에서 `Positions 0 / Orders 0` 확인 | **`BLOCKED`** — 아래 참조 |
+| — | TypeScript 73 → 0 | `NOT_STARTED` (기준선 73 유지 중) |
+| — | 마이그레이션 워크플로가 한 번도 발동하지 않았다 | `MERGED` (#172) — `workflow_run: [ci]`는 PR에서만 오므로 `head_branch == 'main'` 가드가 전부 걸러냈다. 실행 33건이 전부 skipped. auto-merge가 `workflow_dispatch`로 직접 부른다 |
+| — | 배포는 초록인데 워커가 안 사는 상태 | `MERGED` (#172) — `flyctl status`의 `started`는 프로세스가 DB에 쓴다는 뜻이 아니다. 배포 뒤 워커가 실제로 한 줄 썼는지 2분간 확인한다 |
+| — | 재배치를 사람이 눌러 주는 구조 | `MERGED` (#170) — 깨끗하게 재배치되는 것만 자동. 충돌은 기계가 고르지 않는다 |
+| — | 상태판이 런타임 사실을 직접 적는 것 | `FIXED` `TESTED` — `check-status-claims`가 커밋 SHA·생존 단정·날짜 없는 실측 주장을 CI에서 막는다 |
 
 ### #142 런타임 검증이 막힌 이유
 
-코드는 main에 있고 배포도 MATCHED다. 남은 것은 **새 actual-auto 사이클
-한 번**이다 — 진입 → 보호주문 → 청산 → 형제 정리 → 재조회. 그 사이클이
+코드는 main에 있다. 남은 것은 **새 actual-auto 사이클 한 번**이다 — 진입 → 보호주문 → 청산 → 형제 정리 → 재조회. 그 사이클이
 돌아야 Gate에서 0/0을 증거로 확인할 수 있다.
