@@ -284,23 +284,34 @@ export async function POST(req: NextRequest) {
   // 포지션을 닫고 한쪽의 손절이 다른 쪽 진입에 발동한다.
   // 주문에 소유권을 새겨도 **포지션은 가를 수 없다.**
   try {
-    const { symbolOwnershipConflict } = await import('@/lib/engine/orderOwnership');
-    const { data, error } = await (sb as any).from('autotrade_schedules')
-      .select('symbol, connection_id, strategy_id, enabled')
-      .eq('user_id', userId);
-    // **못 읽은 것을 '겹치는 것 없음'으로 읽지 않는다.**
-    const v = symbolOwnershipConflict({
-      rows: error ? null : (data ?? []),
-      myStrategyId: STRATEGY_MY_ORIGINAL_V1, symbol, connectionId,
+    // **판정은 한 곳에 있다.** 예전에는 이 라우트만 이 검사를 했고,
+    // daily-ladder와 scalp는 같은 계좌·같은 종목에 그대로 들어갈 수
+    // 있었다 — 경로가 셋인데 하나만 고쳐져 있었다.
+    const { strategyConflictGate, sleeveCapitalGate } = await import('@/lib/engine/strategyConflictGate');
+    const v = await strategyConflictGate(sb, {
+      userId, myStrategyId: STRATEGY_MY_ORIGINAL_V1, symbol, connectionId,
     });
     if (!v.ok) {
       await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: v.reason });
       return NextResponse.json({ ...base, ok: false, blocked: v.code, message: v.reason },
         { status: v.code === 'SCHEDULES_UNKNOWN' ? 503 : 409 });
     }
+
+    // **다른 전략의 돈을 끌어오지 않는다.**
+    const sl = await sleeveCapitalGate(sb, {
+      userId, strategyId: STRATEGY_MY_ORIGINAL_V1, connectionId,
+    });
+    if (!sl.allowed) {
+      await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: sl.reason });
+      return NextResponse.json({ ...base, ok: false, blocked: sl.code, message: sl.reason },
+        { status: 409 });
+    }
   } catch (e: any) {
-    const why = `같은 종목의 다른 예약을 확인하지 못했습니다: ${e?.message || e}`;
-    return NextResponse.json({ ...base, ok: false, error: 'conflict_unknown', message: why },
+    // **확인하지 못한 것은 통과가 아니다.** 다만 이 관문이 고장 나서
+    // 매매 전체가 멎지 않게, 사유를 남기고 막는다(거래일은 소비하지 않는다).
+    const why = `다른 전략과 겹치는지 확인하지 못했습니다: ${e?.message || e}`;
+    await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });
+    return NextResponse.json({ ...base, ok: false, blocked: 'CONFLICT_UNKNOWN', message: why },
       { status: 503 });
   }
 

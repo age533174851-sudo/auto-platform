@@ -287,6 +287,31 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 같은 종목에 다른 전략이 켜져 있는가 ──
+  //
+  // **이 검사가 여기 없었다.** my-original-v1에만 있었다.
+  // ONE_WAY 계좌는 종목당 포지션이 하나라, 두 전략이 같은 종목에 들어가면
+  // 한쪽의 손절이 다른 쪽 진입에 발동한다.
+  {
+    const { strategyConflictGate, sleeveCapitalGate } = await import('@/lib/engine/strategyConflictGate');
+    const cf = await strategyConflictGate(sb, {
+      userId: userId!, myStrategyId: 'scalp', symbol, connectionId: body.connectionId,
+    });
+    if (!cf.ok) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: cf.code, error: cf.reason,
+      }, { status: cf.code === 'SCHEDULES_UNKNOWN' ? 503 : 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+    const sl = await sleeveCapitalGate(sb, {
+      userId: userId!, strategyId: 'scalp', connectionId: body.connectionId,
+    });
+    if (!sl.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: sl.code, error: sl.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // ── 웹과 워커가 같은 것을 보고 있는가 ──
   {
     const { parityGate } = await import('@/lib/ops/parityGate');

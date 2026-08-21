@@ -343,6 +343,30 @@ export async function POST(req: NextRequest) {
       if (!conn) throw new Error('거래소 연결을 찾을 수 없거나 해당 사용자의 연결이 아닙니다');
       if (conn.has_withdrawal) throw new Error('출금 권한이 있는 키는 자동매매에 사용할 수 없습니다');
 
+      // ── 자동 진입 관문 ──
+      //
+      // **이 경로가 관문을 하나도 안 지나고 있었다.** 외부 신호로,
+      // 사람 없이, 반복해서 주문이 나간다. 워커 경로에는 여섯 겹을
+      // 쌓아 두고 여기 옆문이 열려 있었다.
+      //
+      // 이 라우트는 신규 진입만 만든다(반대 포지션 정리는 위에서
+      // closeOpposingPositions가 따로 한다) — 그래서 조건 없이 관문을 건다.
+      {
+        const { autoEntryGate } = await import('@/lib/engine/autoEntryGate');
+        const g = await autoEntryGate(sb, {
+          userId: String(raw.userId || ''),
+          strategyId: String(raw?.strategyId || 'signal-webhook'),
+          symbol: String(v.signal!.symbol),
+          connectionId: String(raw.connectionId || ''),
+        });
+        if (!g.allowed) {
+          return NextResponse.json({
+            ok: false, blocked: g.blocks[0]?.code ?? 'GATE_UNKNOWN', message: g.reason,
+            gates: { passed: g.passed, blocks: g.blocks },
+          }, { status: 409 });
+        }
+      }
+
       const { decryptSecret } = await import('@/lib/exchanges/crypto');
       const { executeOrder } = await import('@/lib/engine/orderExecutor');
 

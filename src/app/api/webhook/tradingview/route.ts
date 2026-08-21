@@ -327,6 +327,34 @@ export async function POST(req: NextRequest) {
         || /^close/i.test(String(body.orderType || ''))
         || /^(close|exit)/i.test(String(body.action || ''));
 
+      // ── 자동 진입 관문 ──
+      //
+      // **이 경로가 관문을 하나도 안 지나고 있었다.**
+      //
+      // 외부(트레이딩뷰)가 보낸 신호로, 사람 없이, 반복해서 주문이 나간다.
+      // 워커 경로에는 여섯 겹을 쌓아 두고 여기 옆문이 열려 있었다 —
+      // 마이그레이션·청산감시·지문·소유권·전략계좌를 전부 건너뛰었다.
+      //
+      // **막는 것은 새로 여는 것뿐이다.** 청산 신호(reduceOnly·close·exit)는
+      // 이 문을 지나지 않는다 — 못 여는 것은 불편이고 못 닫는 것은 사고다.
+      if (!isExit) {
+        const { autoEntryGate } = await import('@/lib/engine/autoEntryGate');
+        const g = await autoEntryGate(sb, {
+          userId,
+          strategyId: String(body.strategyId || 'tradingview-webhook'),
+          symbol: String(symbol),
+          connectionId: String(body.connectionId || ''),
+        });
+        if (!g.allowed) {
+          return NextResponse.json({
+            ok: false, id: webhookId, blocked: g.blocks[0]?.code ?? 'GATE_UNKNOWN',
+            message: g.reason,
+            // 무엇을 실제로 봤는지 증거로 남긴다.
+            gates: { passed: g.passed, blocks: g.blocks },
+          }, { status: 409 });
+        }
+      }
+
       const sideUp = (body.side || 'buy').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
       const levNum = Number(body.leverage ?? 0);
 

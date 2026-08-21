@@ -13,6 +13,7 @@
     "gen:migrations": "node scripts/gen-migration-manifest.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "check:db-columns": "node scripts/check-db-columns.mjs",
+    "check:entry-gates": "node scripts/check-entry-gates.mjs",
     "migrate:check": "node scripts/apply-migrations.mjs --check",
     "migrate:apply": "node scripts/apply-migrations.mjs --apply",
     "validate:real": "node scripts/validate-real-data.mjs",
