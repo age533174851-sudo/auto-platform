@@ -15,7 +15,9 @@
 //   · 입출금 일부를 못 읽어도 순입출금을 확정값처럼 만들었다
 
 import { test, eq, assert } from '../../test/harness';
-import { envWalletOf, bucketsOf, type ConnectionWallet } from './walletOverview';
+import {
+  envWalletOf, bucketsOf, accountWalletOf, accountWalletsOf, type ConnectionWallet,
+} from './walletOverview';
 import { totalEquityOf } from './wallet';
 import { moneyView, currencyAvailable } from './walletMoney';
 import { cashFlowOf, newestFirstToAsc, latestTakenMs } from './performance';
@@ -208,6 +210,77 @@ export function runWalletTruthTests() {
     const cf = cashFlowOf([]);
     eq(cf.complete, false);
     eq(cf.net, null);
+  });
+
+  console.log('[지갑 진실 — 계좌 선택이 실제로 숫자를 바꾼다]');
+
+  const twoAccounts = (): ConnectionWallet[] => ([
+    conn({
+      connectionId: 'gate-1', exchangeId: 'gate', label: 'Gate', testnet: false,
+      spot: { ok: true, usdt: 0, valueUsd: 100, knownValueUsd: 100, unpriced: [] },
+      futures: { ok: true, positionsOk: true, walletBalance: 200, availableMargin: 150,
+        positionMargin: 50, unrealizedPnl: 0 },
+    }),
+    conn({
+      connectionId: 'bn-1', exchangeId: 'binance', label: 'Binance', testnet: false,
+      spot: { ok: true, usdt: 0, valueUsd: 900, knownValueUsd: 900, unpriced: [] },
+      futures: { ok: true, positionsOk: true, walletBalance: 1000, availableMargin: 800,
+        positionMargin: 200, unrealizedPnl: 100 },
+    }),
+  ]);
+
+  test('**계좌 A와 계좌 B가 서로 다른 숫자를 준다**', () => {
+    // 예전에는 계좌 버튼만 바뀌고 숫자는 환경 전체 합계 그대로였다.
+    // Gate를 눌러도 Binance를 눌러도 같은 값이 보였다.
+    const rows = twoAccounts();
+    const a = accountWalletOf('gate-1', rows)!;
+    const b = accountWalletOf('bn-1', rows)!;
+    eq(a.total.value, 300);
+    eq(b.total.value, 2000);
+    assert(a.total.value !== b.total.value, '계좌를 바꿔도 총자산이 같다 — 버튼만 바뀐 것이다');
+  });
+
+  test('계좌별 값이 환경 전체 합계와 다르다', () => {
+    const rows = twoAccounts();
+    const env = envWalletOf('LIVE', rows);
+    eq(env.total.value, 2300);
+    eq(accountWalletOf('gate-1', rows)!.total.value, 300);
+  });
+
+  test('**계좌 합계를 다 더하면 환경 합계와 같다** — 두 규칙이 갈리지 않는다', () => {
+    const rows = twoAccounts();
+    const sum = accountWalletsOf(rows).reduce((s2, a) => s2 + (a.total.value ?? 0), 0);
+    eq(sum, envWalletOf('LIVE', rows).total.value);
+  });
+
+  test('계좌별로도 세부 항목이 각각이다', () => {
+    const rows = twoAccounts();
+    const b = accountWalletOf('bn-1', rows)!;
+    eq(b.spot.value, 900);
+    eq(b.futuresEquity.value, 1100);
+    eq(b.unrealizedPnl.value, 100);
+    eq(b.availableMargin.value, 800);
+  });
+
+  test('**한 계좌의 조회 실패가 다른 계좌 숫자를 망가뜨리지 않는다**', () => {
+    const rows = twoAccounts();
+    rows[0] = { ...rows[0], spot: { ok: false } };
+    eq(accountWalletOf('gate-1', rows)!.total.value, null, '실패한 계좌가 숫자를 만들었다');
+    eq(accountWalletOf('bn-1', rows)!.total.value, 2000, '멀쩡한 계좌까지 못 읽게 됐다');
+    // 환경 전체는 하나라도 모르면 모른다 — 그게 맞다.
+    eq(envWalletOf('LIVE', rows).total.value, null);
+  });
+
+  test('**환경을 모르는 계좌는 합계를 만들지 않고 그 사실을 말한다**', () => {
+    const rows = [conn({ connectionId: 'x', testnet: null })];
+    const a = accountWalletOf('x', rows)!;
+    eq(a.total.value, null);
+    assert(/환경.*읽지 못했습니다/.test(a.note), a.note);
+  });
+
+  test('없는 계좌를 고르면 null이다 — 빈 숫자를 지어내지 않는다', () => {
+    eq(accountWalletOf('없는것', twoAccounts()), null);
+    eq(accountWalletOf('', twoAccounts()), null);
   });
 
   console.log('[지갑 진실 — 스냅샷 2001개]');

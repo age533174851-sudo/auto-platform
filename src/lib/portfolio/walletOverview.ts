@@ -196,6 +196,67 @@ export function envWalletOf(env: WalletEnv, all: ConnectionWallet[]): EnvWallet 
   };
 }
 
+// ── 계좌 하나 ────────────────────────────────────────
+
+export interface AccountWallet extends EnvWallet {
+  connectionId: string;
+  exchangeId: string | null;
+  label: string | null;
+  /** 이 계좌를 읽었는가. **안의 지갑이 다 맞다는 뜻은 아니다** */
+  ok: boolean;
+  /** 안에서 하나라도 실패했는가 */
+  partial: boolean;
+}
+
+/**
+ * **계좌 하나의 합계 — 환경 합계와 같은 규칙으로.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 지갑 화면에 계좌 선택 버튼이 있었다. 그런데 `account` 상태만 바뀌고
+ * 숫자는 **환경 전체 합계 그대로**였다 — Gate를 눌러도 Binance를 눌러도
+ * 같은 값이 보였고, 사용자는 계좌별 잔고를 보고 있다고 믿었다.
+ *
+ * 서버에 계좌 단위 집계 경로가 아예 없었기 때문이다. 화면만 고치면
+ * "선택은 되는데 숫자는 그대로"가 또 나온다. 그래서 여기 만든다 —
+ * **환경 합계와 똑같은 함수를 재사용**해서, 계좌별과 전체가 다른
+ * 규칙으로 계산되는 일이 생기지 않게 한다.
+ */
+export function accountWalletOf(
+  connectionId: string, all: ConnectionWallet[],
+): AccountWallet | null {
+  const id = String(connectionId ?? '').trim();
+  if (!id) return null;
+  const c = (Array.isArray(all) ? all : []).find(x => String(x?.connectionId) === id);
+  if (!c) return null;
+
+  const env = envOfConnection(c);
+  // 환경을 모르는 연결은 어느 환경에도 넣지 않는다. 계좌 화면에서는
+  // 그 사실을 그대로 보여주되, 합계는 만들지 않는다.
+  const base = envWalletOf(env ?? 'LIVE', env ? [c] : []);
+
+  return {
+    ...base,
+    env: env ?? base.env,
+    connectionId: id,
+    exchangeId: c.exchangeId ?? null,
+    label: c.label ?? null,
+    ok: c.ok === true,
+    partial: c.ok === true
+      && (c.spot?.ok === false || c.futures?.ok === false || c.futures?.positionsOk === false),
+    note: env
+      ? base.note
+      : '이 연결의 환경(실전/테스트넷)을 읽지 못했습니다 — 어느 합계에도 넣지 않습니다',
+  };
+}
+
+/** 화면이 고를 수 있는 계좌 전부. **환경을 모르는 것도 숨기지 않는다** */
+export function accountWalletsOf(all: ConnectionWallet[]): AccountWallet[] {
+  return (Array.isArray(all) ? all : [])
+    .map(c => accountWalletOf(String(c?.connectionId ?? ''), all))
+    .filter((a): a is AccountWallet => a != null);
+}
+
 /**
  * 화면이 그리는 버킷.
  *

@@ -101,24 +101,56 @@ export default function WalletPage() {
       { id: `${e}-longterm`, label: '장기투자', env: e, kind: 'longterm' as const, amount: amountOf(null, 'NOT_APPLICABLE') },
     ]));
 
+  // ── 계좌 선택이 실제로 숫자를 바꾼다 ──
+  //
+  // 예전에는 `account` 상태만 바뀌고 합계는 환경 전체 그대로였다.
+  // Gate를 눌러도 Binance를 눌러도 같은 숫자가 보였고, 사용자는 계좌별
+  // 잔고를 보고 있다고 믿었다. 이제 서버가 계좌별 합계를 주므로
+  // **고른 계좌의 값**을 쓴다.
+  const selectedAccount: any = account && account !== 'ALL'
+    ? (Array.isArray(data?.accounts) ? data.accounts : []).find((a: any) => String(a?.id) === String(account)) ?? null
+    : null;
+
   // **총자산은 서버가 만든 canonical 값이다.**
   //
   // 버킷을 화면에서 다시 더하면 화면마다 다른 총자산이 생긴다. 서버가
   // 준 값이 있으면 그것을 쓰고, 없을 때만(로딩·실패) 버킷 합계를 쓴다.
-  const envTotal: any = (Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env)?.total ?? null;
+  const envTotal: any = selectedAccount
+    ? (selectedAccount.total ?? null)
+    : ((Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env)?.total ?? null);
   const total = totalEquityOf(env, buckets);
-  const change = equityChangeOf(null, {});
+  const envRow: any = (Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env) ?? null;
+  // **오늘 손익** — 아는 것만 넣고 모르는 것은 모른다고 둔다.
+  //
+  // 예전에는 `equityChangeOf(null, {})`였다. 아무 자료도 안 넣었으니
+  // 화면에 계산 근거가 하나도 없었다. 지금 서버가 주는 것(자산 곡선 ·
+  // 미실현손익)은 넣고, 아직 통합 장부가 없어 모르는 것(입출금 ·
+  // 수수료 · 펀딩)은 null로 둔다 — 그러면 `equityChangeOf`가
+  // "무엇을 몰라서 확정 못 했는지"를 그대로 말해 준다.
+  const todayDelta = (() => {
+    const list = Array.isArray(data?.snapshotSeries?.[env]) ? data.snapshotSeries[env] : [];
+    const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+    const today = list.filter((r: any) => Number(r?.takenAt) >= dayStart.getTime()
+      && r?.totalEquity != null);
+    if (today.length < 2) return null;   // 기준점이 없으면 만들지 않는다
+    return Number(today[today.length - 1].totalEquity) - Number(today[0].totalEquity);
+  })();
+  const change = equityChangeOf(todayDelta, {
+    unrealizedPnl: (selectedAccount?.unrealizedPnl ?? envRow?.unrealizedPnl)?.value ?? null,
+  });
   const pnl = todayPnlLabel(change);
   const cross = totalAcrossEnvs();
   // 환율 공급원이 아직 없다. **null은 '1:1'이 아니라 '모른다'이다** —
   // 그래서 KRW 버튼이 잠긴다. 환율을 붙이면 여기에만 넣으면 된다.
   const fxRate = null;
+
   const shown = bucketsForTab(tab, total.buckets);
   // **총자산은 USD 기준 한 값이고, 통화 전환은 환율이 있을 때만 한다.**
   const totalUsd: number | null = envTotal?.value ?? total.total ?? null;
   const totalMoney = moneyView(totalUsd, cur as any, fxRate);
-  const envNote: string = (Array.isArray(data?.envs) ? data.envs : [])
-    .find((e: any) => e?.env === env)?.note ?? '';
+  const envNote: string = selectedAccount
+    ? (selectedAccount.note ?? '')
+    : ((Array.isArray(data?.envs) ? data.envs : []).find((e: any) => e?.env === env)?.note ?? '');
 
   // ── 그래프 ──
   //
@@ -128,7 +160,12 @@ export default function WalletPage() {
   // **지금 잔고로 과거를 역산하지 않는다** — 오늘 표를 만들어도 어제
   // 값은 생기지 않는다. 서버가 지갑을 읽을 때마다 찍어 두므로
   // 두 번째 방문부터 곡선이 생긴다.
-  const snapshots: any[] = [];
+  // **서버가 준 원본으로 그린다.** 예전에는 여기에 `[]`가 박혀 있어
+  // 곡선이 구조적으로 영원히 비어 있었다 — 데이터가 없어서가 아니라
+  // 배선이 없어서였다. 없는 구간은 지어내지 않는다(찍힌 시점만).
+  const snapshots: any[] = Array.isArray(data?.snapshotSeries?.[env])
+    ? data.snapshotSeries[env]
+    : [];
   // 이 환경의 성과. **없으면 만들지 않는다.**
   const perf: any = data?.performance?.[env] ?? null;
   const curve = curveOf(snapshots, range, Date.now(), env);
@@ -165,8 +202,42 @@ export default function WalletPage() {
   const unknownEnvAccounts = allAccounts.filter((a: any) => a?.env == null);
 
   // ── 탭별 자료 ──
-  const futuresAccounts: Array<{ name: string; rows: ReturnType<typeof futuresRowsOf>; sync: string }> = [];
-  const spot: SpotAsset[] = spotRowsOf([]);
+  // ── 선물 계좌 상세 — 서버가 준 값으로 ──
+  //
+  // 예전에는 `[]`가 박혀 있어 이 탭이 영원히 비어 있었다.
+  const accountList: any[] = Array.isArray(data?.accounts) ? data.accounts : [];
+  const shownAccounts = selectedAccount ? [selectedAccount]
+    : accountList.filter((a: any) => a?.env === env);
+  const futuresAccounts = shownAccounts
+    .filter((a: any) => a?.futuresDetail)
+    .map((a: any) => ({
+      name: a.label || a.exchangeId || a.id,
+      rows: futuresRowsOf({
+        walletBalance: cellOf(a.futuresDetail.walletBalance, a.futuresDetail.walletBalance == null ? 'FAILED' : 'OK'),
+        availableBalance: cellOf(a.futuresDetail.availableMargin, a.futuresDetail.availableMargin == null ? 'FAILED' : 'OK'),
+        usedMargin: cellOf(a.futuresDetail.positionMargin, a.futuresDetail.positionMargin == null ? 'FAILED' : 'OK'),
+        // **못 읽은 것은 0이 아니다.** 포지션 조회가 실패하면 미실현손익은 모른다.
+        unrealizedPnl: cellOf(a.futuresDetail.unrealizedPnl,
+          a.futuresDetail.positionsOk === false || a.futuresDetail.unrealizedPnl == null ? 'FAILED' : 'OK'),
+      } as any),
+      sync: a.partial ? '일부 항목을 읽지 못했습니다' : '',
+    }));
+
+  // ── 현물 자산 — 서버가 준 값으로 ──
+  const spot: SpotAsset[] = spotRowsOf(shownAccounts.flatMap((a: any) =>
+    (Array.isArray(a?.spotAssets) ? a.spotAssets : []).map((x: any) => ({
+      symbol: String(x?.asset ?? ''),
+      quantity: cellOf((Number(x?.free) || 0) + (Number(x?.locked) || 0), 'OK'),
+      available: cellOf(Number(x?.free) || 0, 'OK'),
+      locked: cellOf(Number(x?.locked) || 0, 'OK'),
+      // **가격을 못 매겼으면 0이 아니라 확인 불가다.**
+      valuation: cellOf(x?.valueUsd ?? null, x?.valueUsd == null ? 'FAILED' : 'OK'),
+      // 24시간 변동률은 이 경로가 안 주는 값이다. **0이 아니라 '안 줌'이다**
+      change24hPct: cellOf(null, 'UNSUPPORTED'),
+    })) as SpotAsset[]));
+
+  // 전략계좌·장기투자는 아직 읽을 곳이 없다. **0을 그리지 않는다** —
+  // 통합 장부(전략별 귀속)가 붙어야 실제 값이 생긴다.
   const strategies: StrategyAccount[] = [];
   const stratTotal = strategyTotalOf(strategies);
   const longterm: LongtermHolding[] = [];

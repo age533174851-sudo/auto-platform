@@ -19,7 +19,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { readConnectionWallet } from '@/lib/markets/readWallet';
 import {
-  envWalletOf, bucketsOf, totalAcrossEnvs, type ConnectionWallet,
+  envWalletOf, bucketsOf, totalAcrossEnvs, accountWalletsOf, type ConnectionWallet,
 } from '@/lib/portfolio/walletOverview';
 import { snapshotVerdict, snapshotRow } from '@/lib/portfolio/snapshotPlan';
 import { equityPerformanceOf, elapsedText, newestFirstToAsc, latestTakenMs, type EquitySnapshot } from '@/lib/portfolio/performance';
@@ -66,8 +66,27 @@ export async function GET(req: NextRequest) {
   //
   // 하나가 실패해도 나머지는 보여준다. **실패한 것을 0으로 채우지
   // 않는다** — 합산 쪽이 "하나라도 모르면 null"로 처리한다.
+  // 계좌별 상세도 같이 모은다 — 화면의 '선물/현물' 탭이 빈 배열을
+  // 직접 넣고 있었다. 서버가 이미 읽은 값을 안 내려준 것뿐이다.
+  const detail: Record<string, { spotAssets: any[]; futures: any }> = {};
+
   const reads = await Promise.all(conns.map(async (c: any): Promise<ConnectionWallet> => {
     const r = await readConnectionWallet(sb, uid, String(c.id));
+    detail[String(c.id)] = {
+      // **못 읽었으면 빈 목록이 아니라 그 사실을 남긴다.**
+      spotAssets: r.spotOk && Array.isArray(r.spot?.assets)
+        ? r.spot!.assets.map(a => ({
+          asset: a.asset, free: a.free, locked: a.locked, valueUsd: a.valueUsd,
+        }))
+        : [],
+      futures: r.futuresOk ? {
+        walletBalance: r.futures?.walletBalance ?? null,
+        availableMargin: r.futures?.availableMargin ?? null,
+        positionMargin: r.futures?.positionMargin ?? null,
+        unrealizedPnl: r.futures?.unrealizedPnl ?? null,
+        positionsOk: r.positionsOk,
+      } : null,
+    };
     return {
       connectionId: String(c.id),
       exchangeId: String(c.exchange_id ?? ''),
@@ -100,6 +119,14 @@ export async function GET(req: NextRequest) {
 
   const envs = (['LIVE', 'TESTNET'] as const).map(e => envWalletOf(e, reads));
 
+  // **계좌 선택이 실제로 숫자를 바꾸게 한다.**
+  //
+  // 예전에는 화면에 계좌 버튼이 있었지만 서버에 계좌 단위 집계가 없어서,
+  // 무엇을 눌러도 환경 전체 합계가 그대로 보였다. 사용자는 계좌별 잔고를
+  // 보고 있다고 믿었다. 환경 합계와 **같은 함수**로 계산한다 — 두 규칙이
+  // 갈리면 전체와 계좌별이 안 맞는 날이 온다.
+  const accountWallets = accountWalletsOf(reads);
+
   // ── 자산을 찍어 둔다 ──
   //
   // **표(048)는 있는데 채우는 코드가 없었다.** 그래서 지갑 곡선은
@@ -113,6 +140,13 @@ export async function GET(req: NextRequest) {
   const nowMs = Date.now();
   const snapshotNotes: Array<{ env: string; code: string; reason: string }> = [];
   const perf: Record<string, any> = {};
+  // **곡선을 그릴 원본을 화면에 준다.**
+  //
+  // 지갑 화면에는 `const snapshots: any[] = []`가 박혀 있었다. 서버는
+  // 기록을 읽어 성과까지 계산하면서도 **원본을 내려주지 않았고**, 화면은
+  // 빈 배열을 직접 넣었다. 그래서 자산 곡선은 구조적으로 영원히 비어
+  // 있었다 — 데이터가 없어서가 아니라 배선이 없어서.
+  const rawSnapshots: Record<string, Array<{ takenAt: number; totalEquity: number | null; unrealizedPnl: number | null }>> = {};
 
   for (const e of envs) {
     let history: EquitySnapshot[] = [];
@@ -181,6 +215,13 @@ export async function GET(req: NextRequest) {
 
     const p = equityPerformanceOf(history);
     perf[e.env] = { ...p, elapsedText: elapsedText(p.elapsedMs) };
+    // 화면이 곡선을 그릴 원본. **없는 구간을 지어내지 않는다** —
+    // 찍힌 시점만 준다.
+    rawSnapshots[e.env] = history.map(h => ({
+      takenAt: h.takenAt,
+      totalEquity: h.totalEquity ?? null,
+      unrealizedPnl: h.unrealizedPnl ?? null,
+    }));
   }
 
   return NextResponse.json({
@@ -190,12 +231,25 @@ export async function GET(req: NextRequest) {
     // 성과. **찍어 둔 시점에서만 나온다** — 지금 잔고로 과거를 역산하지 않는다.
     performance: perf,
     snapshots: snapshotNotes,
+    // 자산 곡선의 원본. 환경별로 오래된 순이다.
+    snapshotSeries: rawSnapshots,
     buckets: bucketsOf(envs),
-    // 화면이 고를 계좌.
-    accounts: reads.map(r => ({
-      id: r.connectionId, exchangeId: r.exchangeId, label: r.label,
-      env: r.testnet === false ? 'LIVE' : r.testnet === true ? 'TESTNET' : null,
-      ok: r.ok, error: r.error,
+    // 화면이 고를 계좌 — **숫자까지 같이 준다.**
+    accounts: accountWallets.map(a => ({
+      id: a.connectionId, exchangeId: a.exchangeId, label: a.label,
+      // **모르는 환경을 LIVE로 승격하지 않는다.**
+      env: (reads.find(r => r.connectionId === a.connectionId)?.testnet === false) ? 'LIVE'
+        : (reads.find(r => r.connectionId === a.connectionId)?.testnet === true) ? 'TESTNET' : null,
+      ok: a.ok, partial: a.partial,
+      error: reads.find(r => r.connectionId === a.connectionId)?.error ?? null,
+      total: a.total, spot: a.spot, futures: a.futures, futuresEquity: a.futuresEquity,
+      availableMargin: a.availableMargin, positionMargin: a.positionMargin,
+      unrealizedPnl: a.unrealizedPnl, unpricedAssets: a.unpricedAssets,
+      note: a.note,
+      // 화면의 현물·선물 탭이 그릴 실제 값. **못 읽었으면 spotOk가 false다**
+      spotAssets: detail[a.connectionId]?.spotAssets ?? [],
+      spotOk: reads.find(r => r.connectionId === a.connectionId)?.spot?.ok ?? false,
+      futuresDetail: detail[a.connectionId]?.futures ?? null,
     })),
     // **합치지 않는 이유를 값으로 준다** — 화면이 문장을 지어내지 않게.
     across: totalAcrossEnvs(),
