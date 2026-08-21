@@ -257,8 +257,8 @@ exit-monitor를 Worker 안으로 옮겨 그 secret이 필요 없게 만드는 �
 |---|---|---|
 | 2 | Wallet: snapshot writer → Worker + bucket unique | `NOT_STARTED` (마이그레이션 필요) |
 | 2 | Wallet: TESTNET credit/reset 분리 | `PARTIAL` — 장부 분류는 됨, 거래소 income 수집 미구현 |
-| 3 | Ledger: 거래소 income(FEE/FUNDING) 수집 | `NOT_STARTED` |
-| 3 | Ledger: Wallet 화면 배선(tradingPnl 표시) | `NOT_STARTED` |
+| 3 | Ledger: 거래소 income(FEE/FUNDING) 수집 | `FIXED` `TESTED` — 062가 덮인 구간을 기록. **절반만 읽고 계산하지 않는다** |
+| 3 | Ledger: Wallet 화면 배선(tradingPnl 표시) | `FIXED` — 지갑이 '그중 매매로 번 것'을 보여 주고, 못 만들면 무엇을 몰라서인지 적는다 |
 | 2 | Wallet: 전략계좌·장기투자 귀속 | `NOT_STARTED` (Ledger 선행) |
 
 ### ZERO-TOUCH OPS 남은 축

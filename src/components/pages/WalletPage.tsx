@@ -135,6 +135,17 @@ export default function WalletPage() {
     if (today.length < 2) return null;   // 기준점이 없으면 만들지 않는다
     return Number(today[today.length - 1].totalEquity) - Number(today[0].totalEquity);
   })();
+  // ── 서버가 장부까지 보고 판정한 값 ──
+  //
+  // 예전 주석에 "아직 통합 장부가 없어 모르는 것(입출금·수수료·펀딩)은
+  // null로 둔다"고 적혀 있었다. **이제 있다** — 062가 거래소 원장을
+  // 모으고, 서버가 그 기간이 완전한지까지 판정해서 내려준다.
+  //
+  // **화면이 다시 계산하지 않는다.** 계산하면 기준이 두 곳에 생기고,
+  // 언젠가 서버는 "모른다"인데 화면은 숫자를 그리게 된다. 그래서 여기서는
+  // 서버가 만든 판정(tradingPnl)을 그대로 보여 준다.
+  const ledgerEnv: any = data?.ledger?.[env] ?? null;
+  const tradingPnl: any = ledgerEnv?.tradingPnl ?? null;
   const change = equityChangeOf(todayDelta, {
     unrealizedPnl: (selectedAccount?.unrealizedPnl ?? envRow?.unrealizedPnl)?.value ?? null,
   });
@@ -418,6 +429,50 @@ export default function WalletPage() {
           }}>{pnl.headline}</div>
           {pnl.caution && (
             <div style={{ ...muted, color: T.ylw, marginTop: 4 }}>{pnl.caution}</div>
+          )}
+
+          {/* ── 그중 매매로 번 것 ── */}
+          {/*
+            **잔고가 변한 것과 번 것은 다르다.** 테스트넷 일일 충전이
+            들어오면 자산은 늘지만 번 것은 아니다. 네 항(자산변화 ·
+            외부유입 · 수수료 · 펀딩)을 전부 알 때만 숫자가 나온다.
+          */}
+          {tradingPnl && (
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${T.border}` }}>
+              <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>그중 매매로 번 것</div>
+              {tradingPnl.value == null ? (
+                <>
+                  <div style={{ color: T.muted, fontSize: 13, fontWeight: 700 }}>확인 불가</div>
+                  <div style={{ ...muted, marginTop: 3 }}>
+                    {/* 무엇을 몰라서 확정 못 했는지 그대로 적는다 */}
+                    {tradingPnl.reason || ledgerEnv?.reason || '장부가 이 기간을 다 덮지 못했습니다'}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{
+                    color: tradingPnl.value >= 0 ? T.grn : T.red,
+                    fontSize: 15, fontWeight: 800, ...numFont,
+                  }}>
+                    {tradingPnl.value >= 0 ? '+' : ''}
+                    {Number(tradingPnl.value).toLocaleString('ko-KR', { maximumFractionDigits: 2 })} USDT
+                  </div>
+                  {ledgerEnv?.totals && (
+                    <div style={{ ...muted, marginTop: 3 }}>
+                      {/* 무엇을 빼고 남은 값인지 보여 준다 */}
+                      외부유입 {Number(ledgerEnv.totals.externalFlow ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}
+                      {' · '}수수료 {Number(ledgerEnv.totals.fees ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}
+                      {' · '}펀딩 {Number(ledgerEnv.totals.funding ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}
+                      {Number(ledgerEnv.totals.testnetCredit ?? 0) !== 0 && (
+                        <> {' · '}<span style={{ color: T.ylw }}>
+                          테스트넷 충전 {Number(ledgerEnv.totals.testnetCredit).toLocaleString('ko-KR', { maximumFractionDigits: 2 })} (수익 아님)
+                        </span></>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           )}
         </div>
       </Card>

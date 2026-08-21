@@ -793,6 +793,63 @@ async function pollExitMonitor(isMain: boolean): Promise<void> {
   }
 }
 
+// ── 거래소 원장 수집 ──────────────────────────────────────
+//
+// **수수료와 펀딩을 모으지 않으면 "번 것"을 말할 수 없다.**
+//
+// 056이 장부 표를 만들었고 진입·청산 사건은 적히고 있다. 그런데 수수료와
+// 펀딩은 아무도 안 모아서, 매매손익은 네 항 중 둘을 모른 채 언제나
+// null이었다 — 048(자산 스냅샷)이 표만 만들어지고 채우는 코드가 없던
+// 것과 같은 고장이다.
+//
+// 거래소를 부르는 것은 Vercel이 한다(Binance IP 차단). 여기서는 깨우기만
+// 한다 — 청산 감시와 같은 구조이고, **새 비밀은 필요 없다.**
+const LEDGER_SYNC_MS = Number(process.env.LEDGER_SYNC_INTERVAL_MS || 15 * 60_000);
+let lastLedgerSyncMs: number | null = null;
+
+async function pollLedgerSync(isMain: boolean): Promise<void> {
+  if (!isMain) return;                       // 같은 구간을 두 번 읽지 않는다
+  if (!APP_URL || !APP_ADMIN_SECRET) return; // 위에서 이미 한 번 경고했다
+  const now = Date.now();
+  if (lastLedgerSyncMs != null && now - lastLedgerSyncMs < LEDGER_SYNC_MS) return;
+  lastLedgerSyncMs = now;
+
+  try {
+    const r = await fetch(`${APP_URL}/api/ledger/sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-secret': APP_ADMIN_SECRET,
+        'x-traigo-source': 'worker',
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) {
+      // **실패를 조용히 넘기지 않는다.** 안 모으면 손익이 영원히 null이다.
+      console.error(`[ledger] 원장 수집 실패 (HTTP ${r.status}): ${String(j?.error || j?.message || '').slice(0, 200)}`);
+      return;
+    }
+    const rows: any[] = Array.isArray(j.results) ? j.results : [];
+    const wrote = rows.reduce((n, x) => n + (Number(x?.written) || 0), 0);
+    const bad = rows.filter(x => x && x.ok === false);
+    // 적은 것이 있거나 실패가 있을 때만 남긴다 — 매 회차 찍으면 로그가 덮인다.
+    if (wrote > 0 || bad.length > 0) {
+      console.log(`[ledger] 원장 수집: ${wrote}건 기록${bad.length ? ` · 실패 ${bad.length}건` : ''}`);
+    }
+    for (const b of bad) console.error(`[ledger] ${b.connectionId}: ${b.error}`);
+    // 알아보지 못한 종류는 한 번은 보여야 한다 — 조용히 버리면 그 금액이 사라진다.
+    for (const x of rows) {
+      for (const sk of (Array.isArray(x?.skipped) ? x.skipped : [])) {
+        console.warn(`[ledger] 알아보지 못한 원장 종류 ${sk.type} ${sk.count}건 — 적지 않았습니다`);
+      }
+    }
+  } catch (e: any) {
+    console.error('[ledger] 원장 수집 호출 실패:', e?.message || e);
+  }
+}
+
 let tickCount = 0;
 async function tick() {
   tickCount++;
@@ -828,6 +885,9 @@ async function tick() {
   //
   // 같은 포지션에 손절 이동이 두 번 나가지 않게 main 락을 쥔 워커만 부른다.
   await pollExitMonitor(isMain);
+  // **수수료·펀딩을 모아야 "번 것"을 말할 수 있다.**
+  // main 락을 쥔 워커만 한다 — 같은 구간을 두 번 읽을 이유가 없다.
+  await pollLedgerSync(isMain);
 }
 
 async function startupChecks() {

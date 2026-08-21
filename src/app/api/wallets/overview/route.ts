@@ -224,10 +224,90 @@ export async function GET(req: NextRequest) {
     }));
   }
 
+  // ── 오늘 매매로 번 것 ──
+  //
+  // **매매손익 = 자산변화 − 외부유입 − 수수료 − 펀딩.**
+  // 네 항을 전부 알 때만 숫자를 만든다(056). 지금까지 수수료와 펀딩을
+  // 아무도 안 모아서 이 값은 언제나 null이었다. 062가 어디까지 읽었는지
+  // 기록하므로, 이제 **완전한 기간에 한해** 숫자를 만들 수 있다.
+  //
+  // 화면이 다시 계산하지 않게 서버가 판정까지 해서 내려준다.
+  const ledger: Record<string, any> = {};
+  try {
+    const { ledgerTotals, tradingPnlOf } = await import('@/lib/ledger/ledgerEvent');
+    const { ledgerCovers } = await import('@/lib/ledger/incomeIngest');
+    const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+    const fromMs = dayStart.getTime();
+
+    for (const e of ['LIVE', 'TESTNET'] as const) {
+      // 이 환경의 모든 연결이 오늘 구간을 덮고 있어야 한다.
+      // **하나라도 덜 읽었으면 완전하지 않다.**
+      let complete = false;
+      let reason = '거래소 원장을 아직 읽은 적이 없습니다';
+      try {
+        const { data: states } = await (sb as any).from('ledger_ingest_state')
+          .select('connection_id, covered_from, covered_to')
+          .eq('user_id', uid).eq('env', e);
+        const rows = Array.isArray(states) ? states : [];
+        if (rows.length === 0) {
+          complete = false;
+        } else {
+          const checks = rows.map((r: any) => ledgerCovers({
+            coverage: {
+              fromMs: Date.parse(String(r.covered_from ?? '')) || null,
+              toMs: Date.parse(String(r.covered_to ?? '')) || null,
+            },
+            periodFromMs: fromMs, periodToMs: nowMs,
+          }));
+          complete = checks.every(c => c.complete);
+          reason = complete ? '오늘 구간이 모두 덮여 있습니다'
+            : (checks.find(c => !c.complete)?.reason ?? '일부 구간이 덮이지 않았습니다');
+        }
+      } catch {
+        // 062가 아직이거나 못 읽었다. **완전하다고 말하지 않는다.**
+        complete = false;
+        reason = '수집 상태를 읽지 못했습니다 — 완전하다는 뜻이 아닙니다';
+      }
+
+      let totals: any = null;
+      try {
+        const { data: evs } = await (sb as any).from('ledger_events')
+          .select('kind, amount')
+          .eq('user_id', uid).eq('env', e)
+          .gte('occurred_at', new Date(fromMs).toISOString());
+        totals = ledgerTotals((Array.isArray(evs) ? evs : []).map((r: any) => ({
+          kind: r.kind, amount: Number(r.amount),
+        })) as any);
+      } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
+
+      // 오늘 자산 변화. 스냅샷이 두 개 미만이면 만들지 않는다.
+      const series = Array.isArray(rawSnapshots?.[e]) ? rawSnapshots[e] : [];
+      const today = series.filter((r: any) => Number(r?.takenAt) >= fromMs && r?.totalEquity != null);
+      const equityChange = today.length >= 2
+        ? Number(today[today.length - 1].totalEquity) - Number(today[0].totalEquity)
+        : null;
+
+      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: complete });
+      ledger[e] = {
+        complete, reason,
+        totals,
+        equityChange,
+        // **네 항을 다 알 때만 값이 있다.** 아니면 무엇을 몰라서인지 적힌다.
+        tradingPnl: tp,
+      };
+    }
+  } catch (e: any) {
+    // 장부가 고장 나도 지갑은 보여야 한다. 다만 조용히 넘기지 않는다.
+    ledger.error = String(e?.message || e).slice(0, 200);
+  }
+
   return NextResponse.json({
     ok: true,
     // 환경별 합계. **서로 더하지 않는다.**
     envs,
+    // 오늘 매매로 번 것. 완전하지 않으면 tradingPnl.value가 null이고
+    // 무엇을 몰라서인지 적혀 있다.
+    ledger,
     // 성과. **찍어 둔 시점에서만 나온다** — 지금 잔고로 과거를 역산하지 않는다.
     performance: perf,
     snapshots: snapshotNotes,
