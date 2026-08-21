@@ -54,14 +54,39 @@ export async function POST(req: NextRequest) {
   const results: any[] = [];
 
   for (const userId of userIds) {
-    const { data: conns } = await (sb as any)
-      .from('exchange_connections').select('id, exchange, is_testnet').eq('user_id', userId);
+    // ── 실제 칸 이름은 `exchange_id`다 ──
+    //
+    // **처음에 `exchange`라고 썼다.** 그 칸은 없다(004 참조). 그런데 조회
+    // 오류를 안 받고 `Array.isArray(conns) ? conns : []`로 넘어갔으므로,
+    // 컬럼 오류가 나도 **연결 0개로 조용히 끝났다** — 기능은 있고
+    // 테스트도 통과하는데 실제로는 한 건도 수집하지 않는 상태다.
+    //
+    // 이 저장소가 계속 잡아 온 고장이 정확히 그 모양이라, 여기서는
+    // **오류를 반드시 받아 보고, 못 읽었으면 성공으로 적지 않는다.**
+    const { data: conns, error: connErr } = await (sb as any)
+      .from('exchange_connections')
+      .select('id, exchange_id, is_testnet, is_active')
+      .eq('user_id', userId)
+      // 꺼 둔 연결은 수집하지 않는다.
+      .eq('is_active', true);
 
-    for (const c of (Array.isArray(conns) ? conns : [])) {
+    if (connErr) {
+      results.push({ userId, ok: false,
+        error: `연결 목록을 읽지 못했습니다: ${String(connErr.message).slice(0, 200)}` });
+      continue;
+    }
+    const connRows = Array.isArray(conns) ? conns : null;
+    if (connRows == null) {
+      // **못 읽은 것을 '연결 없음'으로 적지 않는다.**
+      results.push({ userId, ok: false, error: '연결 목록을 읽지 못했습니다 — 연결이 없다는 뜻이 아닙니다' });
+      continue;
+    }
+
+    for (const c of connRows) {
       const connectionId = String(c.id);
       // **저장소 규칙: is_testnet === false만 실전이다.** 그 밖은 전부 테스트넷.
       const env: 'LIVE' | 'TESTNET' = c?.is_testnet === false ? 'LIVE' : 'TESTNET';
-      const exchange = String(c?.exchange ?? '');
+      const exchange = String(c?.exchange_id ?? '');
 
       // 어디까지 읽었는가
       let coverage: { fromMs: number | null; toMs: number | null } | null = null;
@@ -176,7 +201,21 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 연결이 있는데 한 건도 안 돌았으면 성공이 아니다 ──
+  //
+  // **이게 없으면 "구현했고 테스트도 통과"인데 실제로는 아무것도 수집하지
+  // 않는 상태를 아무도 못 알아챈다.** 컬럼 이름 하나가 틀렸을 때 정확히
+  // 그렇게 됐다.
+  const attempted = results.filter((r: any) => r && r.connectionId);
+  const failedUsers = results.filter((r: any) => r && r.ok === false && !r.connectionId);
+  const ok = failedUsers.length === 0;
+
   return NextResponse.json({
-    ok: true, users: userIds.length, results, checkedAt: nowMs,
-  }, { headers: { 'Cache-Control': 'no-store' } });
+    ok, users: userIds.length, results, checkedAt: nowMs,
+    // 몇 개 연결을 실제로 훑었는가. 0인데 사용자가 있으면 그 사실을 적는다.
+    scanned: attempted.length,
+    note: attempted.length === 0 && userIds.length > 0
+      ? '수집 대상 연결이 하나도 없었습니다 — 연결이 정말 없는지, 조회가 실패한 것인지 results를 보세요'
+      : null,
+  }, { status: ok ? 200 : 500, headers: { 'Cache-Control': 'no-store' } });
 }

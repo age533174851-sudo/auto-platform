@@ -216,7 +216,10 @@ export async function POST(req: NextRequest) {
     try {
       const { data, error } = await (sb as any)
         .from('exchange_connections')
-        .select('id, exchange, test_status, last_tested_at, is_testnet').eq('user_id', uid);
+        // **칸 이름은 `exchange_id`다** (004). `exchange`로 읽으면 컬럼
+        // 오류가 나고, 그걸 안 받으면 '연결 없음'으로 조용히 끝난다.
+        .select('id, exchange_id, test_status, last_tested_at, is_testnet, is_active')
+        .eq('user_id', uid).eq('is_active', true);
       if (error) throw new Error(error.message);
       const rows = Array.isArray(data) ? data : [];
 
@@ -264,7 +267,7 @@ export async function POST(req: NextRequest) {
             ordersOk: null, leverageOk: null, positionModeOk: null,
             isTestnet,
           });
-          lines.push(`${c.exchange}${isTestnet ? '(테스트넷)' : '(실전)'}: ${v.summary}`);
+          lines.push(`${c.exchange_id}${isTestnet ? '(테스트넷)' : '(실전)'}: ${v.summary}`);
           if (v.code === 'FAIL') worst = 'BLOCKED';
           else if (v.code === 'UNKNOWN' && worst === 'PASS') worst = 'UNKNOWN';
         }

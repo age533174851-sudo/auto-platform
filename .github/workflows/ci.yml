@@ -168,6 +168,19 @@ jobs:
       - name: 마이그레이션 배선 검사
         run: node scripts/check-migrations.mjs
 
+      # ── DB 칸 이름 검사 ──
+      #
+      # **테스트 4천 개가 초록이어도 칸 이름 하나가 틀리면 안전하지 않다.**
+      #
+      # `/api/ledger/sync`가 `exchange_connections.exchange`를 읽었다.
+      # 그 칸은 없다 — 실제 이름은 `exchange_id`다. 그런데 조회 오류를
+      # 안 받았으므로 **연결 0개로 조용히 끝났다.** 기능은 있고, 테스트는
+      # 통과하고, 실제로는 한 건도 수집하지 않는 상태였다.
+      #
+      # 타입은 이걸 못 잡는다 — 응답이 any이고 칸 이름은 문자열이다.
+      - name: DB 칸 이름 검사
+        run: node scripts/check-db-columns.mjs
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그
