@@ -43,6 +43,7 @@ import {
   actionsOf, isCompact, envLineOf, perfSummaryOf, moneyRowsOf,
   type Activity, type Tone as CardTone,
 } from '@/lib/ui/strategyCard';
+import { runtimeOf } from '@/lib/runtime/executionRuntime';
 import { AUTO_TABS, tabOf as autoTabOf, type AutoTabId } from '@/lib/ui/autoOverview';
 
 const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:string}> = {
@@ -401,7 +402,24 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             //
             // 아직 아무도 재지 않았으므로 지금은 전부 '검증된 우위 없음'이
             // 나온다. **비워 두면 사용자는 좋은 뜻으로 읽는다.**
-            const rows=[edgeRowOf(null), ...cardRowsOf(kind,null)];
+            // ── 이 전략이 어디서 도는가 ──
+            //
+            // **"화면을 켜 둬야 돈이 되는" 구조를 화면이 먼저 말한다.**
+            // 브라우저 엔진이 도는 전략은 탭을 닫으면 멈추고, 그러면
+            // 진입한 포지션을 아무도 청산하지 않는다. 사용자가 그걸
+            // 알아야 탭을 닫아도 되는지 판단할 수 있다.
+            //
+            // 서버 예약 여부를 이 화면이 읽지 않으므로 **모른다고 둔다** —
+            // '서버에서 돈다'로 치면 사용자가 탭을 닫는다.
+            const rt = runtimeOf({
+              hasServerSchedule: null, inBrowserEngine: false,
+              mode: execMode==='real'?'LIVE':execMode==='paper'?'PAPER':'TESTNET',
+            });
+            const rows=[
+              { key:'runtime', label:'실행 위치', value: rt.label, known: rt.survivesBrowserClose },
+              edgeRowOf(null),
+              ...cardRowsOf(kind,null),
+            ];
             const missing=unwiredFieldsOf(kind,null);
             const envLine=envLineOf(execMode==='real'?'LIVE':execMode==='testnet'?'TESTNET':'PAPER');
 
