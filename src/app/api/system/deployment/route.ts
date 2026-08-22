@@ -27,6 +27,7 @@
 // **비밀은 아무것도 내보내지 않는다.** SHA와 시각뿐이다.
 
 import { NextRequest, NextResponse } from 'next/server';
+import { deployEnvOf } from '@/lib/system/deployEnv';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 // **값을 보여주지 않고 '같은 값인가'만 묻는다.** 워커도 같은 지문을
 // 로그에 남기므로, 둘을 비교하면 같은 DB를 보고 있는지 알 수 있다.
@@ -124,6 +125,14 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     nowIso: new Date(nowMs).toISOString(),
+    // ── 어느 배포에서 보고 있는가 ──
+    //
+    // Preview에는 운영 Worker가 보고하지 않는다 — **그게 정상이다.**
+    // 화면이 그 사실을 모르면 "Worker · 없음"을 빨갛게 그리고, 운영이
+    // 멀쩡한데 사람이 운영을 고치러 간다.
+    //
+    // **값이 아니라 이름만 나간다.**
+    deployEnv: deployEnvOf(),
     // 배포가 끝났다고 말하려면 스키마도 따라와야 한다.
     migrations: {
       applied: migrationsApplied,

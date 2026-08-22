@@ -131,6 +131,17 @@ const HEALTH_LABEL: Record<RuntimeHealth, string> = {
 export function autoRuntimeView(i: {
   worker?: WorkerFacts | null;
   deployment?: DeploymentFacts | null;
+  /**
+   * **어느 배포에서 보고 있는가.**
+   *
+   * Preview에는 운영 Worker가 보고하지 않는다 — **그게 정상이다.**
+   * 그런데 여기서 그 사실을 모르면 화면에 "Worker · 없음 / 실행기가
+   * 한 번도 보고한 적이 없습니다"가 빨갛게 뜨고, 운영이 멀쩡한데
+   * 사람이 운영을 고치러 간다.
+   *
+   * **운영에서는 하나도 안 느슨해진다.** 안 주면 운영과 같은 엄격함이다.
+   */
+  deployEnv?: import('../system/deployEnv').DeployEnv | null;
 }): AutoRuntimeView {
   const f = i?.worker ?? {};
   const health = healthOf(f);
@@ -165,6 +176,16 @@ export function autoRuntimeView(i: {
   if (health === 'ABSENT') {
     sub = '실행기가 한 번도 보고한 적이 없습니다';
     action = '워커 배포를 확인하세요';
+    // ── Preview에는 안 오는 것이 정상이다 ──
+    //
+    // 미리보기 배포에 운영 Worker를 붙이지 않는다. 그 상태를 장애로
+    // 그리면 **운영이 멀쩡한데 미리보기를 운영처럼 진단**하게 된다.
+    if (i?.deployEnv === 'preview' || i?.deployEnv === 'development') {
+      const { envLabel } = require('../system/deployEnv');
+      tone = 'GRAY';
+      sub = `${envLabel(i.deployEnv)} 배포입니다 — 운영 Worker는 여기에 보고하지 않습니다`;
+      action = '자동매매 실행 여부는 운영 배포에서 확인하세요';
+    }
   }
   if (health === 'UNKNOWN') {
     // **'없음'과 다르다.** 못 읽은 것을 없다고 적으면 사람이 엉뚱한
@@ -212,15 +233,22 @@ export function runtimeContradictions(i: {
   scheduleEnabled?: boolean | null;
   worker?: WorkerFacts | null;
   deployment?: DeploymentFacts | null;
+  deployEnv?: import('../system/deployEnv').DeployEnv | null;
 }): Contradiction[] {
   const out: Contradiction[] = [];
-  const v = autoRuntimeView({ worker: i?.worker, deployment: i?.deployment });
+  const v = autoRuntimeView({
+    worker: i?.worker, deployment: i?.deployment, deployEnv: i?.deployEnv,
+  });
 
-  if (i?.autoRunning === true && !v.canRun) {
+  if (i?.autoRunning === true && !v.canRun && i?.deployEnv !== 'preview'
+      && i?.deployEnv !== 'development') {
     out.push({ code: 'RUNNING_WITHOUT_WORKER',
       message: `자동매매는 '실행 중'인데 실행기는 ${HEALTH_LABEL[v.health]}입니다 — 둘 중 하나는 틀렸습니다` });
   }
-  if (i?.scheduleEnabled === true && v.health === 'ABSENT') {
+  // **Preview에서는 이 모순이 모순이 아니다.** 운영 Worker가 여기에
+  // 보고하지 않는 것뿐이고, 예약은 운영 배포에서 돈다.
+  const previewLike = i?.deployEnv === 'preview' || i?.deployEnv === 'development';
+  if (i?.scheduleEnabled === true && v.health === 'ABSENT' && !previewLike) {
     out.push({ code: 'SCHEDULE_WITHOUT_WORKER',
       message: '예약은 켜져 있는데 실행기가 없습니다 — 예약 시각에 아무 일도 일어나지 않습니다' });
   }

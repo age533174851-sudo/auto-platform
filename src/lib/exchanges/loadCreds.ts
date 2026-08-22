@@ -96,21 +96,32 @@ export async function loadFuturesCreds(
     return { ok: false, status: 400, error: 'connection_key_missing' };
   }
 
-  let secret: string;
-  try {
-    const { decryptSecret } = await import('./crypto');
-    secret = decryptSecret(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
-  } catch (e: any) {
-    // 복호화 실패를 빈 문자열로 넘기면 거래소가 서명 오류를 주고, 화면에는
-    // '주문 실패'로만 보인다. 원인이 암호화 키 교체라는 것을 알 수 없다.
-    return { ok: false, status: 500, error: 'decrypt_failed',
-      message: `API 시크릿을 복호화하지 못했습니다 (${e?.message || '사유 미상'}). `
-             + '암호화 키가 바뀌었다면 연결을 다시 등록해야 합니다.' };
+  // ── 왜 못 읽었는지까지 말한다 ──
+  //
+  // **예전에는 네 가지가 한 문장으로 뭉개졌다:**
+  //
+  //   이 배포에 암호화 키가 없다 / 키가 다르다 / 저장된 모양이 깨졌다 /
+  //   정말로 비어 있다
+  //
+  // 전부 "API 시크릿이 비어 있습니다. 연결을 다시 등록하세요."였다.
+  // 그런데 원인이 앞의 둘일 때 그 말을 따르면 **더 나빠진다** —
+  // 그 배포의 키로 다시 암호화한 값이 저장되고, 원래 키를 쓰는
+  // 배포(운영)가 그 값을 못 읽는다.
+  //
+  // **고치라는 곳이 틀린 안내는 안내가 없는 것보다 나쁘다.**
+  const { decryptSecretResult } = await import('./crypto');
+  const dec = decryptSecretResult(conn.api_secret_enc ?? conn.encrypted_secret ?? '');
+  if (!dec.ok) {
+    return {
+      ok: false, status: dec.code === 'EMPTY' || dec.code === 'MALFORMED' ? 400 : 500,
+      // 원인을 코드로도 준다 — 화면이 문장을 다시 지어내지 않게.
+      error: dec.code === 'NO_KEY' ? 'encryption_key_missing'
+        : dec.code === 'KEY_MISMATCH' ? 'encryption_key_mismatch'
+        : 'decrypt_failed',
+      message: dec.message,
+    };
   }
-  if (!secret) {
-    return { ok: false, status: 500, error: 'decrypt_failed',
-      message: 'API 시크릿이 비어 있습니다. 연결을 다시 등록하세요.' };
-  }
+  const secret = dec.value;
 
   return {
     ok: true, key: conn.api_key, secret, exchange,
