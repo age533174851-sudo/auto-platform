@@ -20,6 +20,8 @@
 // 어긋난다. 대신 매번 진입 이후 캔들을 다시 읽어 최고점을 계산한다.
 // 느리지만 중복 실행·누락에 영향받지 않는다.
 
+import { MONITORED_STATUSES } from '../strategies/entryLedger';
+
 export const R_TRAIL_START = 2;   // 이 R을 넘으면 트레일링 시작
 export const R_TRAIL_DIST  = 1;   // 최고점에서 이만큼 R 물러나면 청산
 export const R_BREAK_EVEN  = 1;   // 이 R 도달 시 손절을 본전으로
@@ -143,7 +145,14 @@ export async function decideExits(
   let q = sb
     .from('ladder_daily_trades')
     .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id')
-    .eq('status', 'OPEN');
+    // ── `OPEN` 하나만 보지 않는다 ──
+    //
+    // 보호 없는 포지션(`UNPROTECTED`)과 나갔는지 모르는 주문
+    // (`RECONCILE_REQUIRED`)이야말로 **가장 먼저 봐야 할 것들이다.**
+    // 여기서 빼면 그 둘은 아무도 안 보는 상태로 남는다.
+    //
+    // 상태 목록은 entryLedger가 갖는다 — 두 곳에 적으면 갈린다.
+    .in('status', MONITORED_STATUSES);
   if (opts.userId) q = q.eq('user_id', opts.userId);
   const { data: open } = await q.limit(opts.limit ?? 25);
 

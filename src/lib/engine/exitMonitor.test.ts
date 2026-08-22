@@ -22,12 +22,15 @@ import { decideExits } from './exitMonitor';
 
 /** ladder_daily_trades 한 줄을 돌려주는 최소 supabase 흉내 */
 function sbWith(rows: any[]) {
+  /** 어떤 상태를 훑었는지. **보호 없는 포지션이 빠지면 안 된다** */
+  const scanned: any = { statuses: null as string[] | null };
   const chain: any = {
     select: () => chain,
     eq: () => chain,
+    in: (_col: string, vals: string[]) => { scanned.statuses = vals; return chain; },
     limit: async () => ({ data: rows, error: null }),
   };
-  return { from: () => chain };
+  return Object.assign({ from: () => chain }, { scanned });
 }
 
 const OPEN_ROW = {
@@ -163,6 +166,20 @@ export function runExitMonitorTests() {
     // 캔들 조회(네트워크)가 실패하면 여기까지 안 온다. 물어봤다면
     // 반드시 그 거래의 연결이어야 한다.
     for (const a of asked) eq(a.connectionId, 'conn-a', '엉뚱한 연결로 손절을 읽었다');
+  });
+
+  // ── 무엇을 훑는가 ──
+  //
+  // `OPEN` 하나만 보면 **보호 없는 포지션과 나갔는지 모르는 주문이
+  // 아무도 안 보는 상태로 남는다.** 그 둘이야말로 먼저 봐야 할 것들이다.
+  test('보호 없는 포지션과 미확정 주문도 훑는다', async () => {
+    const sb = sbWith([]);
+    await decideExits(sb as any, { testnet: true, limit: 5 });
+    const st = (sb as any).scanned.statuses;
+    assert(Array.isArray(st), '상태 목록으로 훑지 않았다');
+    assert(st.includes('OPEN'), 'OPEN이 빠졌다');
+    assert(st.includes('UNPROTECTED'), '보호 없는 포지션을 안 본다');
+    assert(st.includes('RECONCILE_REQUIRED'), '나갔는지 모르는 주문을 안 본다');
   });
 
   test('열린 거래가 없으면 빈 결과다', async () => {
