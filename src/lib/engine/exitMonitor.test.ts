@@ -18,7 +18,7 @@
 // 그래서 여기서 고정한다: 거래마다 그 거래의 연결이 망을 정한다.
 
 import { test, eq, assert } from '../../test/harness';
-import { decideExits } from './exitMonitor';
+import { decideExits, highWaterOf, HIGH_WATER_INTERVAL } from './exitMonitor';
 
 /** ladder_daily_trades 한 줄을 돌려주는 최소 supabase 흉내 */
 function sbWith(rows: any[]) {
@@ -180,6 +180,97 @@ export function runExitMonitorTests() {
     assert(st.includes('OPEN'), 'OPEN이 빠졌다');
     assert(st.includes('UNPROTECTED'), '보호 없는 포지션을 안 본다');
     assert(st.includes('RECONCILE_REQUIRED'), '나갔는지 모르는 주문을 안 본다');
+  });
+
+  console.log('[최고 도달 R — 순수 계산]');
+
+  test('롱은 고가로, 숏은 저가로 잰다', () => {
+    // 진입 100 · 손절 90 → 1R = 10
+    const long = highWaterOf({
+      highs: [105, 120, 110], lows: [98, 100, 105], closes: [104, 118, 108],
+      entry: 100, stop: 90, isLong: true,
+    })!;
+    eq(long.highWaterR, 2, '고가 120은 2R이다');
+    eq(long.lastPrice, 108);
+
+    // 진입 100 · 손절 110 → 1R = 10, 숏이므로 내려가면 이익
+    const short = highWaterOf({
+      highs: [102, 101, 100], lows: [95, 80, 90], closes: [96, 82, 92],
+      entry: 100, stop: 110, isLong: false,
+    })!;
+    eq(short.highWaterR, 2, '저가 80은 2R이다');
+  });
+
+  test('불리한 방향으로만 갔으면 0R이다', () => {
+    // 음수로 적으면 트레일링이 마이너스 R에서 출발한다.
+    const v = highWaterOf({
+      highs: [99, 98], lows: [95, 94], closes: [96, 95],
+      entry: 100, stop: 90, isLong: true,
+    })!;
+    eq(v.highWaterR, 0);
+  });
+
+  test('1R이 0이면 계산하지 않는다', () => {
+    // 0으로 나누면 Infinity가 되고, 그러면 무조건 트레일링이 걸린다.
+    eq(highWaterOf({ highs: [1], lows: [1], closes: [1], entry: 100, stop: 100, isLong: true }), null);
+  });
+
+  test('봉이 없으면 null이다 — 0R이 아니다', () => {
+    eq(highWaterOf({ highs: [], lows: [], closes: [], entry: 100, stop: 90, isLong: true }), null);
+  });
+
+  test('읽을 수 없는 봉은 건너뛰되 나머지는 센다', () => {
+    const v = highWaterOf({
+      highs: [NaN, 120], lows: [NaN, 100], closes: [NaN, 118],
+      entry: 100, stop: 90, isLong: true,
+    })!;
+    eq(v.highWaterR, 2);
+  });
+
+  console.log('[Gate 트레일링 — 시세를 그 거래소에서 읽는다]');
+
+  test('거래소를 못 읽으면 그 사실을 사유에 적는다', async () => {
+    // 예전에는 언제나 바이낸스였고, Gate 포지션은 조회가 실패해서
+    // 매 주기 "캔들 조회 실패"만 남았다 — 트레일링을 한 번도 못 받았다.
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true, limit: 5,
+      // venueFor를 안 준다 = 예전 경로
+    });
+    const skipped = out.find(d => d.reason.includes('캔들 조회 실패'));
+    if (skipped) {
+      assert(skipped.reason.includes('거래소를 못 읽어'),
+        '거래소를 추측한 사실이 안 적혔다: ' + skipped.reason);
+      assert(skipped.reason.includes('Gate 포지션이면'), skipped.reason);
+    }
+  });
+
+  test('거래에 적힌 연결로 거래소를 묻는다', async () => {
+    const asked: any[] = [];
+    const row = { ...OPEN_ROW, connection_id: 'conn-a' };
+    await decideExits(sbWith([row]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async (i) => { asked.push(i); return { exchange: 'gate', testnet: true }; },
+    });
+    eq(asked.length, 1, '거래소를 물어보지 않았다');
+    eq(asked[0].connectionId, 'conn-a');
+    eq(asked[0].userId, 'u1');
+  });
+
+  test('거래소를 알면 사유에 그 이름이 남는다', async () => {
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async () => ({ exchange: 'gate', testnet: true }),
+    });
+    const skipped = out.find(d => d.reason.includes('캔들 조회 실패'));
+    if (skipped) {
+      assert(skipped.reason.includes('gate'), skipped.reason);
+      assert(!skipped.reason.includes('거래소를 못 읽어'), skipped.reason);
+    }
+  });
+
+  test('최고가는 15분봉으로 잰다', () => {
+    // 간격을 바꾸면 R이 통째로 달라진다. 값으로 못 박는다.
+    eq(HIGH_WATER_INTERVAL, '15m');
   });
 
   test('열린 거래가 없으면 빈 결과다', async () => {

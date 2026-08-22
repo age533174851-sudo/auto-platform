@@ -566,7 +566,21 @@ export async function GET(req: NextRequest) {
   const { readTrailConfig } = await import('@/lib/engine/trailPlan');
   const { cfg: trailCfg } = readTrailConfig(k => process.env[k]);
 
-  const decisions = await decideExits(sb, { testnet, testnetFor, liveStopFor, cfg: trailCfg });
+  /**
+   * 이 거래의 **거래소와 망.**
+   *
+   * 예전에는 망(testnet)만 넘겼고, 시세는 언제나 바이낸스에서 읽었다.
+   * Gate 포지션이면 계약 이름이 달라 조회가 실패하고, 그 실패가 매 주기
+   * "캔들 조회 실패"로 남았다 — **Gate는 트레일링을 한 번도 못 받았다.**
+   */
+  const venueFor = async (i: { userId: string; connectionId: string | null }) => {
+    const c = await connForTrade(i);
+    return c && c.exchange ? { exchange: c.exchange, testnet: c.testnet } : null;
+  };
+
+  const decisions = await decideExits(sb, {
+    testnet, testnetFor, venueFor, liveStopFor, cfg: trailCfg,
+  });
 
   // ── 기술적 사고 점검 ──
   // 트레일링·시간청산 판단보다 먼저 본다. 청산가에 다다랐거나 손절이

@@ -48,35 +48,84 @@ export interface ExitDecision {
   reason: string;
 }
 
-/** 진입 이후 15분봉으로 최고 도달 R을 계산한다. */
+/** 진입 이후 최고 도달 R을 계산할 때 쓰는 봉 간격 */
+export const HIGH_WATER_INTERVAL = '15m';
+
+/**
+ * 봉에서 최고 도달 R과 마지막 가격을 뽑는다.
+ *
+ * **순수 함수다.** 네트워크 없이 값으로 확인할 수 있어야 한다 — 여기가
+ * 틀리면 트레일링이 엉뚱한 자리에서 출발하거나 아예 안 움직인다.
+ */
+export function highWaterOf(i: {
+  highs: number[]; lows: number[]; closes: number[];
+  entry: number; stop: number; isLong: boolean;
+}): { highWaterR: number; lastPrice: number } | null {
+  const riskDist = Math.abs(i.entry - i.stop);
+  if (!(riskDist > 0)) return null;
+  const n = Math.min(i.highs.length, i.lows.length, i.closes.length);
+  if (n === 0) return null;
+
+  let best = 0;
+  let lastPrice = i.entry;
+  for (let k = 0; k < n; k += 1) {
+    const high = Number(i.highs[k]), low = Number(i.lows[k]), close = Number(i.closes[k]);
+    if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+    const favorable = i.isLong ? high : low;
+    const move = i.isLong ? favorable - i.entry : i.entry - favorable;
+    const r2 = move / riskDist;
+    if (r2 > best) best = r2;
+    if (Number.isFinite(close)) lastPrice = close;
+  }
+  return { highWaterR: best, lastPrice };
+}
+
+/**
+ * 진입 이후 15분봉으로 최고 도달 R을 계산한다.
+ *
+ * **거래소를 가리지 않는다.**
+ * 예전에는 여기서 바이낸스 선물 주소를 직접 조립했다:
+ *
+ *     const host = testnet ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
+ *     fetch(`${host}/fapi/v1/klines?symbol=${symbol}...`)
+ *
+ * 그래서 **Gate에서 연 포지션의 R을 바이낸스 15분봉으로 계산했다.**
+ * Gate 심볼(`BTC_USDT`)을 그대로 바이낸스에 물어보므로 대개 400이 나고,
+ * 그러면 `null` → "캔들 조회 실패 — 이번 주기 건너뜀"이 매 주기 반복된다.
+ * 즉 Gate 포지션은 **트레일링도 본전 이동도 한 번도 못 받았다.**
+ * 그리고 그 사유는 조용해서 아무도 안 봤다.
+ *
+ * 봉을 읽는 자리는 이미 하나 있다(`venueBars.fetchVenueBars`) — Gate의
+ * 초 단위 시각, 계약 이름, 간격 이름을 전부 처리한다. 여기에 주소를 또
+ * 적을 이유가 없다.
+ *
+ * **진행 중인 봉을 남긴다.** 지금 봉에서 찍은 고가도 실제로 도달한
+ * 가격이다. 그걸 버리면 트레일링이 최대 한 봉(15분)만큼 늦어지고,
+ * 그 사이에 되돌아오면 이익을 그냥 반납한다. 신호 판정과 반대 이유다.
+ */
 export async function highWaterSince(
-  symbol: string, sinceMs: number, entry: number, stop: number, isLong: boolean, testnet: boolean,
+  symbol: string, sinceMs: number, entry: number, stop: number, isLong: boolean,
+  venue: { exchange: 'binance' | 'gate'; testnet: boolean },
+  nowMs?: number,
 ): Promise<{ highWaterR: number; lastPrice: number } | null> {
-  const host = testnet ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
   try {
-    const r = await fetch(
-      `${host}/fapi/v1/klines?symbol=${symbol}&interval=15m&startTime=${sinceMs}&limit=500`,
-      { signal: AbortSignal.timeout(10_000) },
-    );
-    if (!r.ok) return null;
-    const rows = await r.json();
-    if (!Array.isArray(rows) || rows.length === 0) return null;
-
-    const riskDist = Math.abs(entry - stop);
-    if (riskDist <= 0) return null;
-
-    let best = 0;
-    let lastPrice = entry;
-    for (const k of rows) {
-      const high = parseFloat(k[2]), low = parseFloat(k[3]), close = parseFloat(k[4]);
-      if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
-      const favorable = isLong ? high : low;
-      const move = isLong ? favorable - entry : entry - favorable;
-      const r2 = move / riskDist;
-      if (r2 > best) best = r2;
-      if (Number.isFinite(close)) lastPrice = close;
-    }
-    return { highWaterR: best, lastPrice };
+    const { fetchVenueBars } = await import('../markets/venueBars');
+    const r = await fetchVenueBars({
+      exchange: venue.exchange,
+      symbol,
+      interval: HIGH_WATER_INTERVAL,
+      limit: 500,
+      testnet: venue.testnet,
+      startTimeMs: sinceMs,
+      // **최고가는 아직 안 끝난 봉에도 있다.**
+      includeIncomplete: true,
+      nowMs,
+    });
+    if (!r.bars) return null;
+    return highWaterOf({
+      highs: r.bars.highs, lows: r.bars.lows, closes: r.bars.closes,
+      entry, stop, isLong,
+    });
   } catch { return null; }
 }
 
@@ -103,6 +152,18 @@ export async function decideExits(
      * 실제 포지션에 닿지 않는다. **못 여는 것은 불편이고 못 닫는 것은 사고다.**
      */
     testnetFor?: (userId: string) => Promise<boolean | null>;
+    /**
+     * 이 거래가 **어느 거래소**에 있는가.
+     *
+     * 이게 없으면 시세를 바이낸스에 물어본다. Gate 포지션이면 계약 이름이
+     * 달라 조회가 실패하고, 그 실패가 매 주기 "캔들 조회 실패"로 남는다 —
+     * 즉 **Gate 포지션은 트레일링을 한 번도 못 받는다.**
+     *
+     * 못 알아내면 null이다. 그때는 바이낸스로 조회하되 **그 사실을
+     * 사유에 적는다** — 추측한 것과 아는 것은 다르다.
+     */
+    venueFor?: (i: { userId: string; connectionId: string | null })
+      => Promise<{ exchange: 'binance' | 'gate'; testnet: boolean } | null>;
     maxHoldMs?: number; limit?: number;
     /**
      * 심볼별로 **거래소에 지금 걸려 있는** 손절가.
@@ -205,20 +266,34 @@ export async function decideExits(
       continue;
     }
 
-    // 이 거래가 실제로 어느 망에 있는가. 못 알아내면 기본값을 쓰되,
-    // 그건 '모르는 것'이므로 아래 사유에 적힌다.
+    // 이 거래가 실제로 어느 망·어느 거래소에 있는가. 못 알아내면
+    // 기본값을 쓰되, 그건 '모르는 것'이므로 아래 사유에 적힌다.
     let tnet = opts.testnet;
     let tnetKnown = true;
-    if (opts.testnetFor) {
+    let exchange: 'binance' | 'gate' = 'binance';
+    let venueKnown = false;
+
+    if (opts.venueFor) {
+      const v = await opts.venueFor({ userId: String(t.user_id), connectionId: common.connectionId });
+      if (v) { exchange = v.exchange; tnet = v.testnet; venueKnown = true; tnetKnown = true; }
+      else { tnetKnown = false; }
+    }
+    // venueFor가 없거나 못 읽었으면 예전 경로로 망만 물어본다 —
+    // 갑자기 동작이 바뀌지 않게 한다.
+    if (!venueKnown && opts.testnetFor) {
       const r = await opts.testnetFor(String(t.user_id));
-      if (r == null) tnetKnown = false; else tnet = r;
+      if (r == null) tnetKnown = false; else { tnet = r; tnetKnown = true; }
     }
 
-    const hw = await highWaterSince(t.symbol, openedAt, entry, stop, isLong, tnet);
+    const hw = await highWaterSince(
+      t.symbol, openedAt, entry, stop, isLong, { exchange, testnet: tnet });
     if (!hw) {
       out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,
         reason: '캔들 조회 실패 — 이번 주기 건너뜀'
-          + (tnetKnown ? '' : ' (이 거래의 연결을 못 읽어 기본 망으로 조회했습니다)') });
+          + (venueKnown ? ` (${exchange})` : '')
+          + (tnetKnown ? '' : ' (이 거래의 연결을 못 읽어 기본 망으로 조회했습니다)')
+          + (venueKnown ? '' : ' (거래소를 못 읽어 바이낸스 시세로 조회했습니다 — '
+              + 'Gate 포지션이면 이 조회는 계속 실패합니다)') });
       continue;
     }
 
