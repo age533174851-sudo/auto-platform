@@ -247,6 +247,34 @@ jobs:
       - name: 상태판 문장 검사
         run: node scripts/check-status-claims.mjs
 
+      # ── 워크플로 문법 검사 ──
+      #
+      # **유효한 YAML과 유효한 워크플로는 다르다.**
+      #
+      # `fly-deploy.yml`의 `run: |` 안에 넣은 여러 줄짜리 `python3 -c`가
+      # 블록 스칼라의 들여쓰기를 벗어나면서 `try:`와 `except Exception:`이
+      # 워크플로의 **최상위 키**가 됐다. GitHub은 그 파일을 Startup
+      # failure로 거절했고, fly-deploy는 아예 실행되지 않았으며
+      # `workflow_dispatch`는 HTTP 422를 돌려줬다 — 배포가 통째로 멈췄다.
+      #
+      # 그때 이 저장소가 쓰던 검사는 `python3 -c "yaml.safe_load(...)"`
+      # 였고, **그 파일을 통과시켰다.** 문법상 올바른 YAML이 맞기 때문이다.
+      # 스키마를 보는 검사가 필요하다.
+      #
+      # 버전과 체크섬을 박아 둔다 — 검사기가 조용히 바뀌면 검사도 조용히
+      # 달라진다.
+      - name: 워크플로 문법 검사 (actionlint)
+        env:
+          ACTIONLINT_VERSION: '1.7.7'
+          ACTIONLINT_SHA256: '023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757'
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSL -o /tmp/actionlint.tgz "$url"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tgz" | sha256sum -c -
+          tar xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -color
+
       # ── ESLint ──
       #
       # 전면 통과를 요구하면 지금 바로 실패한다(오류 53건). 그런데 그
