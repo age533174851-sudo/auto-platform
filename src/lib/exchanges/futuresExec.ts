@@ -791,10 +791,29 @@ export async function futuresCountOpen(
         gf.getOpenOrdersGateFutures(t.key, t.secret, t.testnet),
       ]);
 
-      // **조건부 주문도 미체결이다.** 손절이 price_orders에만 남아 있으면
-      // 일반 주문 목록은 비어 보이고, 킬스위치가 '정리 완료'라고 말한다.
-      // Gate는 조건부 주문을 계약별로만 조회할 수 있어, 포지션과 일반 주문에
-      // 등장한 계약을 전부 훑는다.
+      // ── 조건부 주문도 미체결이다 ──
+      //
+      // 손절이 `price_orders`에만 남아 있으면 일반 주문 목록은 비어
+      // 보이고, 킬스위치가 '정리 완료'라고 말한다.
+      //
+      // **예전에는 계약을 추측해서 훑었다.** 포지션과 일반 주문에 등장한
+      // 계약만 물어봤는데, 그러면 이런 상태에 눈이 먼다:
+      //
+      //   포지션      0
+      //   일반 주문   0
+      //   조건부      손절 1개  ← 이 계약을 알아낼 단서가 아무 데도 없다
+      //
+      // 훑을 계약이 하나도 없으니 조건부 0건이 되고 `clean: true`가 된다.
+      // **킬스위치의 최종 보증이 거기서 깨진다.**
+      //
+      // 그래서 계약을 추측하는 단계 자체를 없앤다 — `contract` 없이
+      // 전부 물어본다. 그 조회가 실패하면 계약별 조회로 내려가되,
+      // **그때는 "0건"이라고 말하지 않는다.**
+      const all = await gf.getAllPriceOrdersGateFutures(t.key, t.secret, t.testnet);
+      if (all != null) {
+        return { positions: pos.length, orders: ord.length + all.length, error: null };
+      }
+
       const contracts = new Set<string>();
       for (const p of pos) contracts.add(String(p.contract));
       for (const o of ord) if (o?.contract) contracts.add(String(o.contract));
@@ -808,12 +827,21 @@ export async function futuresCountOpen(
         priceOrders += rows.length;
       }
 
+      // **훑을 계약이 없었던 것은 "없다"가 아니다.**
+      //
+      // 전체 조회가 실패했고 계약도 못 찾았으면, 조건부 주문이 있는지
+      // 없는지 **아무것도 확인하지 않은 것**이다. 이걸 0으로 적으면
+      // 정확히 이 PR이 고치려는 오판이 된다.
+      const blind = contracts.size === 0;
       return {
         positions: pos.length,
-        orders: priceUnknown ? null : ord.length + priceOrders,
-        error: priceUnknown
-          ? '조건부 주문(손절·익절)을 일부 계약에서 조회하지 못했습니다 — 미체결 수를 확정할 수 없습니다'
-          : null,
+        orders: (priceUnknown || blind) ? null : ord.length + priceOrders,
+        error: blind
+          ? '조건부 주문(손절·익절) 전체 조회에 실패했고 훑을 계약도 찾지 못했습니다 — '
+            + '남은 손절이 없다는 뜻이 아닙니다'
+          : priceUnknown
+            ? '조건부 주문(손절·익절)을 일부 계약에서 조회하지 못했습니다 — 미체결 수를 확정할 수 없습니다'
+            : null,
       };
     }
     const bf = await import('./binanceFutures');
