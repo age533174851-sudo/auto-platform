@@ -23,7 +23,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { autotradeHealth, agoText } from '@/lib/engine/autotradeHealth';
 import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation, riskMarginVerdict } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
-import { classifyRun, savedButBlockedText, type OutcomeVerdict } from '@/lib/autotrade/runOutcome';
+import { savedButBlockedText, type OutcomeVerdict, firstEvaluationVerdict } from '@/lib/autotrade/runOutcome';
 import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
 // 켜고 끄기는 정체를 다시 조립하지 않는다 — 판정은 한 곳에만 둔다.
 import {
@@ -77,7 +77,7 @@ export default function AutotradeControl() {
    * 도는 동안 화면은 여전히 '저장 중…'이었고, 사용자는 저장이 오래
    * 걸린다고 읽었다. 무엇을 기다리는지 모르면 기다리지 못한다.
    */
-  const [phase, setPhase] = useState<'' | 'SAVING' | 'FIRST_RUN'>('');
+  const [phase, setPhase] = useState<'' | 'SAVING'>('');
   /** 첫 점검 결과. 예약 저장 성공과 **따로** 표시한다 */
   const [firstRun, setFirstRun] = useState<OutcomeVerdict | null>(null);
   /** 방금 켠 예약의 id — 그 줄에만 '지금 첫 점검 중'을 적는다 */
@@ -396,22 +396,24 @@ export default function AutotradeControl() {
   };
 
   /**
-   * **지금 눌러서 내일을 확인한다.**
-   *
-   * 예약을 켜 놓고 다음 날 아침을 기다렸다가 "안 됐네"를 아는 것은 너무
-   * 늦다. 이 버튼은 크론이 부르는 것과 **같은 경로**를 그대로 돌린다 —
-   * 모드 관문, 시계, 상태 대조, 마진 모드, 손실 한도, 서브계좌 한도까지.
-   * 마지막 주문만 안 낸다.
-   */
-  /**
-   * 지금 고른 전략을 부를 요청 하나.
+   * 지금 고른 전략을 **점검으로** 부를 요청 하나.
    *
    * **주소와 본문을 화면이 직접 적지 않는다.** 서버의 주기 평가와
    * 같은 함수(`strategyRunRequest`)를 쓴다 — 세 곳이 각자 적으면
    * 전략을 추가할 때 한 곳이 빠지고, 그때 예약에 저장한 전략과 실제로
    * 도는 전략이 갈린다. 실제로 그랬다.
+   *
+   * **`checkOnly`는 인자가 아니라 고정값이다.** 예전에는
+   * `buildRun({ checkOnly })`였고, 그 값 없이 부르는 곳이 하나
+   * 있었다(`runFirstCheck`) — 그게 브라우저에서 나가는 **진짜 실행**
+   * 요청이었다. 그래서 자동매매를 켤 때 실평가가 두 경로였다.
+   *
+   * 지금 실평가는 서버(`evaluateIfDue`)와 Worker poll뿐이고, 그 둘은
+   * `last_run_at` 선점으로 한 번만 돈다. 화면에서 나가는 요청에 실행
+   * 여지를 남겨 두면 그 방어 밖에 세 번째 경로가 다시 생긴다.
+   * **선택지를 없애서 막는다.**
    */
-  const buildRun = (opts: { checkOnly?: boolean } = {}) => strategyRunRequest({
+  const buildCheckRun = () => strategyRunRequest({
     strategyId,
     env: live ? 'LIVE' : 'TESTNET',
     symbol, connectionId: connId,
@@ -420,12 +422,20 @@ export default function AutotradeControl() {
     leverageCap: levCap === '' ? null : Number(levCap),
     riskPct: riskPct === '' ? null : Number(riskPct),
     marginPct: marginPct === '' ? null : Number(marginPct),
-    checkOnly: opts.checkOnly,
+    checkOnly: true,
   });
 
+  /**
+   * **지금 눌러서 내일을 확인한다.**
+   *
+   * 예약을 켜 놓고 다음 날 아침을 기다렸다가 "안 됐네"를 아는 것은 너무
+   * 늦다. 이 버튼은 크론이 부르는 것과 **같은 경로**를 그대로 돌린다 —
+   * 모드 관문, 시계, 상태 대조, 마진 모드, 손실 한도, 서브계좌 한도까지.
+   * 마지막 주문만 안 낸다.
+   */
   const runCheck = async () => {
     setChecking(true); setCheck(null); setMsg(null);
-    const req = buildRun({ checkOnly: true });
+    const req = buildCheckRun();
     if (!req.ok || !req.route) {
       setChecking(false);
       setMsg({ ok: false, text: req.message });
@@ -444,50 +454,14 @@ export default function AutotradeControl() {
     finally { setChecking(false); }
   };
 
-  /**
-   * **켜는 순간 한 번 돌린다.**
-   *
-   * 예전에는 `enabled=true`만 저장하고 끝이었다. 화면에는 '켜짐'이라고
-   * 뜨는데 실제 점검은 서버 실행기가 올 때까지(최대 15분) 시작되지
-   * 않았다. 사용자는 켜 놓고 아무 일도 안 일어나는 것을 본다.
-   *
-   * **안전장치를 건너뛴다는 뜻이 아니다.** 크론이 부르는 것과 같은 경로를
-   * 그대로 부른다 — 체크리스트도, 거부권도, 하루 1회 제약도 전부 돈다.
-   * 켠 순간부터 점검과 조건 판정을 시작한다는 뜻일 뿐이다.
-   *
-   * 서버 실행기와 겹칠 수 있다. 그때 두 번째가 받는 ALREADY_* 는 오류가
-   * 아니라 중복 방지가 일한 것이고, classifyRun이 그렇게 읽는다.
-   */
-  const runFirstCheck = async () => {
-    setPhase('FIRST_RUN');
-    // **예약에 저장한 것과 같은 전략·같은 값을 보낸다.** 다른 것을
-    // 보내면 첫 결과가 앞으로 일어날 일을 대표하지 못한다.
-    const req = buildRun();
-    if (!req.ok || !req.route) {
-      setFirstRun(classifyRun({ status: 400, body: { ok: false, message: req.message } }));
-      setPhase(''); setJustEnabled(''); load();
-      return;
-    }
-    try {
-      const r = await fetch(req.route, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify(req.body),
-      });
-      const body = await r.json().catch(() => null);
-      setFirstRun(classifyRun({ status: r.status, body }));
-    } catch (e: any) {
-      setFirstRun(classifyRun(null));
-      void e;
-    } finally {
-      setPhase('');
-      setJustEnabled('');
-      load();
-    }
-  };
-
   const save = async (enabled: boolean) => {
     setBusy(true); setPhase('SAVING'); setMsg(null); setFirstRun(null);
+    // **첫 평가는 이제 이 요청 안에서 돈다.** 그래서 '첫 점검 중' 표시도
+    // 응답을 받은 뒤가 아니라 **보내기 전에** 켠다. 예전에는 응답 뒤에
+    // 켰는데, 그때는 화면이 따로 한 번 더 돌렸기 때문이다.
+    // 끄는 경우에는 지난번 값을 지운다 — 안 지우면 엉뚱한 줄에
+    // '첫 점검 중'이 남는다.
+    setJustEnabled(enabled ? `${symbol}:${connId}` : '');
     try {
       const r = await fetch('/api/autotrade/schedule', {
         method: 'POST',
@@ -514,12 +488,28 @@ export default function AutotradeControl() {
       if (!j?.ok) { setBusy(false); setPhase(''); return; }
 
       load();
-      // **저장이 성공했을 때만** 첫 점검을 돌린다. 저장이 실패했는데
-      // 돌리면, 켜지지도 않은 예약의 첫 결과를 보여주게 된다.
-      if (enabled) {
-        setJustEnabled(`${symbol}:${connId}`);
-        await runFirstCheck();
-      }
+      // ── 첫 평가는 서버가 이미 돌렸다 ──
+      //
+      // 예전에는 여기서 `runFirstCheck()`를 불렀다. 그건 `checkOnly`가
+      // 아니라 **진짜 실행 요청**이었고, 그래서 자동매매를 켤 때마다
+      // 실평가 경로가 둘이었다:
+      //
+      //   POST /api/autotrade/schedule
+      //     ├ 예약 저장
+      //     └ 서버가 evaluateIfDue() 실행        ← 첫 번째
+      //   → runFirstCheck() → 전략 API POST      ← 두 번째
+      //
+      // 아래쪽 중복 방어가 받아 주고 있었다 — `last_run_at`
+      // compare-and-set, scalp의 봉 단위 키, 원본 v1의 거래일 기준
+      // 결정적 clientOrderId. 그래서 "무조건 두 번 나간다"는 아니었다.
+      //
+      // **그래도 둘을 유지할 이유가 없다.** 실평가 경로 둘을 아래쪽
+      // 방어에 기대어 두면, 그 방어 중 하나가 약해지는 날 주문이 두 번
+      // 나간다. 그리고 그 날은 이 구조를 모르는 사람이 코드를 고칠 때 온다.
+      //
+      // 서버는 첫 평가 결과를 `firstEvaluation`으로 이미 보내 준다.
+      // 화면은 그걸 그리기만 한다.
+      if (enabled) setFirstRun(firstEvaluationVerdict(j?.firstEvaluation));
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
     finally { setBusy(false); setPhase(''); }
   };
@@ -591,6 +581,16 @@ export default function AutotradeControl() {
     } catch (e: any) { setMsg({ ok: false, text: `실패 (${e?.message || e})` }); }
     finally { setBusy(false); }
   };
+
+  // ── '첫 점검 중'은 이제 저장 요청 중이라는 뜻이다 ──
+  //
+  // 예전에는 별도 단계(`phase === 'FIRST_RUN'`)가 있었다. 화면이 저장
+  // 뒤에 전략 실행기를 **한 번 더** 불렀기 때문이다. 그 두 번째 경로를
+  // 없앴으므로 그 단계도 없다 — 첫 평가는 저장 요청(`SAVING`) 안에서
+  // 서버가 돌리고, 응답에 결과가 실려 온다.
+  //
+  // 끄는 경우에는 `justEnabled`가 비어 있어서 켜지지 않는다.
+  const firstEvalRunning = phase === 'SAVING' && justEnabled !== '';
 
   const box: React.CSSProperties = {
     background: T.card, border: `1px solid ${T.border}`,
@@ -997,7 +997,11 @@ export default function AutotradeControl() {
                     lastRunAtMs: msOf(s.last_run_at),
                     lastEntryAtMs: msOf(s.last_entry_at),
                     intervalMin: s.interval_min,
-                    firstCheckRunning: phase === 'FIRST_RUN'
+                    // **판정을 여기서 다시 적지 않는다.** 위의
+                    // `firstEvalRunning`과 같은 뜻이어야 한다 — 두 곳에
+                    // 적으면 언젠가 한쪽만 바뀐다. 여기서 더하는 것은
+                    // "그게 이 줄인가"뿐이다.
+                    firstCheckRunning: firstEvalRunning
                       && justEnabled === `${s.symbol}:${s.connection_id}`,
                   };
                   const plan = nextRunPlan(input, !!s.enabled);
@@ -1238,25 +1242,25 @@ export default function AutotradeControl() {
             **예약이 켜졌다는 사실을 숨기지 않는다.** 첫 실행이 막혔다고
             "실패"만 적으면 사용자는 자동매매가 안 켜진 줄 알고 다시
             누르고, 그러면 같은 자리에서 또 막힌다. */}
-        {(phase === 'FIRST_RUN' || firstRun) && (
+        {(firstEvalRunning || firstRun) && (
           <div style={{
-            background: A(phase === 'FIRST_RUN' ? T.ylw
+            background: A(firstEvalRunning ? T.ylw
               : firstRun?.tone === 'good' ? T.grn
               : firstRun?.tone === 'bad' ? T.red : T.ylw, '12'),
-            border: `1px solid ${A(phase === 'FIRST_RUN' ? T.ylw
+            border: `1px solid ${A(firstEvalRunning ? T.ylw
               : firstRun?.tone === 'good' ? T.grn
               : firstRun?.tone === 'bad' ? T.red : T.ylw, '40')}`,
             borderRadius: 10, padding: '10px 11px',
           }}>
             <div style={{
               fontWeight: 800, fontSize: 12,
-              color: phase === 'FIRST_RUN' ? T.ylw
+              color: firstEvalRunning ? T.ylw
                 : firstRun?.tone === 'good' ? T.grn
                 : firstRun?.tone === 'bad' ? T.red : T.ylw,
             }}>
-              {phase === 'FIRST_RUN' ? '첫 점검 실행 중…' : firstRun?.label}
+              {firstEvalRunning ? '첫 점검 실행 중…' : firstRun?.label}
             </div>
-            {phase !== 'FIRST_RUN' && firstRun && (
+            {!firstEvalRunning && firstRun && (
               <>
                 <div style={{ color: T.muted, fontSize: 10.5, marginTop: 4, lineHeight: 1.6 }}>
                   {firstRun.detail}

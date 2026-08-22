@@ -207,6 +207,16 @@ jobs:
       - name: 브라우저 주문 권한 검사
         run: node scripts/check-browser-orders.mjs
 
+      # ── 첫 평가 단일 경로 검사 ──
+      #
+      # 자동매매를 켜면 서버가 저장 직후 `evaluateIfDue()`를 돌린다.
+      # 그런데 화면도 `runFirstCheck()`로 전략 실행기를 **checkOnly 없이**
+      # 불렀다. 켜는 순간 실평가가 두 경로였고, 아래쪽 중복 방어
+      # (`last_run_at` compare-and-set · 결정적 clientOrderId)에 기대고
+      # 있었다. 방어 하나가 약해지는 날 주문이 두 번 나간다.
+      - name: 첫 평가 단일 경로 검사
+        run: node scripts/check-first-eval.mjs
+
       # ── GET이 쓰는 경로 ──
       #
       # `/api/wallets/overview`는 GET인데 자산 스냅샷을 INSERT했다.
