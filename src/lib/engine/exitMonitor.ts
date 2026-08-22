@@ -163,7 +163,7 @@ export async function decideExits(
      * 사유에 적는다** — 추측한 것과 아는 것은 다르다.
      */
     venueFor?: (i: { userId: string; connectionId: string | null })
-      => Promise<{ exchange: 'binance' | 'gate'; testnet: boolean } | null>;
+      => Promise<{ exchange: 'binance' | 'gate'; testnet: boolean; guessed?: boolean } | null>;
     maxHoldMs?: number; limit?: number;
     /**
      * 심볼별로 **거래소에 지금 걸려 있는** 손절가.
@@ -275,8 +275,16 @@ export async function decideExits(
 
     if (opts.venueFor) {
       const v = await opts.venueFor({ userId: String(t.user_id), connectionId: common.connectionId });
-      if (v) { exchange = v.exchange; tnet = v.testnet; venueKnown = true; tnetKnown = true; }
-      else { tnetKnown = false; }
+      // **추측한 연결을 '안다'로 승격하지 않는다.**
+      //
+      // 연결이 안 적힌 옛 줄에서는 부르는 쪽이 사용자의 활성 연결 중
+      // 하나를 임의로 골라 준다(`guessed: true`). 그 값을 확정으로 읽으면
+      // **A 계좌 포지션의 손절을 B 계좌 시세로 옮기게 된다.**
+      if (v && v.guessed !== true) {
+        exchange = v.exchange; tnet = v.testnet; venueKnown = true; tnetKnown = true;
+      } else {
+        tnetKnown = false;
+      }
     }
     // venueFor가 없거나 못 읽었으면 예전 경로로 망만 물어본다 —
     // 갑자기 동작이 바뀌지 않게 한다.
@@ -285,15 +293,31 @@ export async function decideExits(
       if (r == null) tnetKnown = false; else { tnet = r; tnetKnown = true; }
     }
 
+    // ── 거래소를 모르면 가격으로 판단하지 않는다 ──
+    //
+    // **예전 초안은 바이낸스로 대신 조회했다.** 그 조회가 성공하면
+    // 최종 사유에 대체 사실이 남지도 않았고, 그러면 **Gate 포지션의
+    // 손절 이동을 바이낸스 가격으로 결정한다.**
+    //
+    // 트레일링·본전 이동은 주문을 내는 행동이다. 근거가 확실하지 않으면
+    // 하지 않는 쪽이 맞다 — 손절은 그 자리에 그대로 있고, 시간 청산과
+    // 포지션 점검(거래소를 직접 읽는다)은 위에서 이미 돌았다.
+    if (!venueKnown) {
+      out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,
+        reason: '이 거래의 거래소를 확정하지 못해 가격 판단을 하지 않았습니다 — '
+          + '다른 거래소 시세로 손절을 옮기지 않습니다. '
+          + (common.connectionId
+              ? '연결을 읽지 못했습니다'
+              : '이 거래에 연결이 적혀 있지 않습니다(065 이전 기록)') });
+      continue;
+    }
+
     const hw = await highWaterSince(
       t.symbol, openedAt, entry, stop, isLong, { exchange, testnet: tnet });
     if (!hw) {
       out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,
-        reason: '캔들 조회 실패 — 이번 주기 건너뜀'
-          + (venueKnown ? ` (${exchange})` : '')
-          + (tnetKnown ? '' : ' (이 거래의 연결을 못 읽어 기본 망으로 조회했습니다)')
-          + (venueKnown ? '' : ' (거래소를 못 읽어 바이낸스 시세로 조회했습니다 — '
-              + 'Gate 포지션이면 이 조회는 계속 실패합니다)') });
+        reason: `캔들 조회 실패 — 이번 주기 건너뜀 (${exchange})`
+          + (tnetKnown ? '' : ' (망을 못 읽어 기본값으로 조회했습니다)') });
       continue;
     }
 

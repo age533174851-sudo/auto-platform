@@ -575,7 +575,12 @@ export async function GET(req: NextRequest) {
    */
   const venueFor = async (i: { userId: string; connectionId: string | null }) => {
     const c = await connForTrade(i);
-    return c && c.exchange ? { exchange: c.exchange, testnet: c.testnet } : null;
+    // **`guessed`를 버리지 않는다.** 연결이 안 적힌 옛 줄에서는
+    // 사용자의 활성 연결 중 하나를 임의로 고른 값이다. 그걸 확정으로
+    // 넘기면 A 계좌 포지션의 손절을 B 계좌 시세로 옮기게 된다.
+    return c && c.exchange
+      ? { exchange: c.exchange, testnet: c.testnet, guessed: c.guessed }
+      : null;
   };
 
   const decisions = await decideExits(sb, {
