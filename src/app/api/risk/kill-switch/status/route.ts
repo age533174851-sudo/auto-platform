@@ -3,9 +3,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { decryptSecret } from '@/lib/exchanges/crypto';
-import { getFuturesBalance } from '@/lib/exchanges/binanceFutures';
-import { loadKillSwitch, saveKillSwitch, evaluate, computeUsdtEquity, logKillEvent, executeKillActions, reconcile, acquireLock, releaseLock } from '@/lib/risk/killSwitch';
+import { loadKillSwitch, saveKillSwitch, evaluate, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
+import { isTestnetConn, leftoverVerdict } from '@/lib/risk/killSwitchTruth';
+import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
+import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -23,15 +24,62 @@ export async function GET(req: NextRequest) {
     .select('*').eq('id', connectionId).eq('user_id', uid).single();
   if (error || !conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
 
-  let secret = '';
-  try { secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''); } catch {}
-  const apiKey = conn.api_key || '';
-  const testnet = conn.is_testnet === true;
+  // **저장소 전체 규칙: `is_testnet === false`만 실전이다.**
+  // 예전에는 `=== true`였다 — 칸이 비어 있으면(NULL) 실전으로 읽혀서
+  // 테스트넷 키로 실전 호스트에 물어보고, 실패하고, 그 실패가 아래에서
+  // `equity = 0`이 되어 킬스위치 발동으로 이어졌다.
+  const testnet = isTestnetConn(conn);
 
-  const bal = await getFuturesBalance(apiKey, secret, testnet);
-  const equity = bal.success ? computeUsdtEquity(bal.balances as any) : 0;
+  // **거래소를 가리지 않는다.** 예전에는 바이낸스 잔고 함수를 직접
+  // 불렀다 — Gate 연결이면 언제나 실패했고, 그 실패가 equity 0이었다.
+  const creds = await loadFuturesCreds(sb, uid, connectionId);
+  const bal = creds.ok && creds.exchange
+    ? await futuresEquityUsd(creds.exchange, creds.key!, creds.secret!, creds.testnet!)
+    : { equity: null as number | null, error: creds.message || creds.error || '연결을 읽지 못했습니다' };
 
   const prev = await loadKillSwitch(sb, uid, connectionId);
+
+  // ── 총자산을 못 읽으면 평가하지 않는다 ──
+  //
+  // **예전에는 실패를 `equity = 0`으로 만들어 evaluate에 넘겼다.**
+  // 그러면 낙폭이 -100%가 되어 한도를 무조건 넘고, 멀쩡한 계좌에서
+  // 킬스위치가 발동한다. `actionMode`에 D가 있으면 **실제 포지션이
+  // 전부 청산된다.** 조회 한 번 실패한 값으로 할 일이 아니다.
+  //
+  // 켜져 있던 상태를 끄지도 않는다 — 모르는 것은 해제 사유가 아니다.
+  if (bal.equity == null) {
+    // **평가하지 않는다고 해놓고 evaluate를 부르지 않는다.**
+    //
+    // 예전 초안은 표시값을 만들려고 `evaluate(prev, prev.dailyStartEquity ?? 0, ...)`을
+    // 다시 불렀다. 그러면 기준선 조합에 따라 낙폭이 0%로도 -100%로도
+    // 나온다 — DB에 저장되지는 않지만 **화면이 거짓을 말한다.**
+    // 모르는 것은 계산하지 않고 모른다고 적는다.
+    return NextResponse.json({
+      config: {
+        enabled: prev.enabled, dailyLimitPct: prev.dailyLimitPct,
+        weeklyLimitPct: prev.weeklyLimitPct, monthlyLimitPct: prev.monthlyLimitPct,
+        absLimitUsdt: prev.absLimitUsdt, actionMode: prev.actionMode,
+      },
+      // 켜져 있던 상태는 그대로 보여 준다 — 모르는 것은 해제 사유가 아니다.
+      active: prev.active,
+      level: prev.active ? 'active' : 'unknown',
+      triggeredAt: prev.triggeredAt, triggerReason: prev.triggerReason,
+      // **0으로 채우지 않는다.** 0은 "손실 100%"로 읽힌다.
+      equity: null,
+      daily: { startEquity: prev.dailyStartEquity, drawdownPct: null, remainingPct: null },
+      weekly: { startEquity: prev.weeklyStartEquity, drawdownPct: null, remainingPct: null },
+      monthly: { startEquity: prev.monthlyStartEquity, drawdownPct: null, remainingPct: null },
+      absLoss: null,
+      noTable: prev.noTable,
+      testnet, equityOk: false, equityError: bal.error,
+      evaluated: false,
+      message: '총자산을 읽지 못해 손실 한도를 평가하지 않았습니다 — '
+        + '0으로 계산하면 멀쩡한 계좌에서 킬스위치가 발동합니다',
+      exec: null, recon: null,
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  const equity = bal.equity;
   const wasActive = prev.active;
   const { state, status } = evaluate(prev, equity, Date.now());
 
@@ -58,9 +106,7 @@ export async function GET(req: NextRequest) {
           // 킬스위치는 "문을 잠그고 안에 있는 것을 꺼내는" 동작이다.
           // 꺼내는 쪽이 안 돌면 잠그기만 하고 끝나는데, 급할 때 누른
           // 사람은 정리됐다고 믿고 손을 뗀다.
-          const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
           const { executeKillActions } = await import('@/lib/risk/killSwitch');
-          const creds = await loadFuturesCreds(sb, uid, connectionId);
           if (!creds.ok) {
             exec = { ran: false, error: creds.error,
               message: creds.message || 'API 키를 읽지 못해 취소·종료를 실행하지 못했습니다' };
@@ -89,19 +135,38 @@ export async function GET(req: NextRequest) {
       }
       // 발동 중이면 잔여 재확인(읽기 전용) — 실제 종료는 Worker가 수행
       try {
-        recon = await reconcile(sb, uid, connectionId, { key: apiKey, secret, testnet, expectClosed: hasD });
+        // **거래소를 가리지 않는다.** 예전에는 바이낸스 `countOpen`을
+        // 직접 불렀다 — 실행은 Gate를 받는데 마지막 확인만 바이낸스라,
+        // Gate 연결에서는 잔여 확인이 인증 오류로 끝나고 조용히 넘어갔다.
+        recon = creds.ok && creds.exchange
+          ? await reconcile(sb, uid, connectionId, {
+              key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+              exchange: creds.exchange, expectClosed: hasD,
+            })
+          : { positions: null, orders: null, clean: false,
+              error: creds.message || '연결을 읽지 못해 잔여를 확인하지 못했습니다' };
         if (recon && !recon.clean) {
           const { sendTelegramAlert } = await import('@/lib/notify/telegram');
           await sendTelegramAlert({
             level: 'warning', eventType: 'reconcile_fail', exchange: 'Binance', mode: testnet ? 'TESTNET' : 'LIVE',
             title: '거래소 직접 확인 필요',
             message: '킬스위치 후 잔여 포지션/주문이 남아있습니다.',
-            fields: { Positions: recon.positions, Orders: recon.orders },
+            // **못 읽은 것을 0으로 적지 않는다.**
+            fields: {
+              Positions: recon.positions ?? '확인 못 함',
+              Orders: recon.orders ?? '확인 못 함',
+            },
           }, sb);
         }
       } catch {}
     }
   }
 
-  return NextResponse.json({ ...status, testnet, equityOk: bal.success, exec, recon }, { headers: { 'Cache-Control': 'no-store' } });
+  return NextResponse.json({
+    ...status, testnet, equityOk: true, evaluated: true, exec, recon,
+    // 잔여를 '정리됨'으로 단정하지 않는다 — 못 읽었으면 그 사실을 싣는다.
+    leftover: recon
+      ? leftoverVerdict({ leftover: recon, expectedClosed: (state.actionMode || '').includes('D') })
+      : null,
+  }, { headers: { 'Cache-Control': 'no-store' } });
 }

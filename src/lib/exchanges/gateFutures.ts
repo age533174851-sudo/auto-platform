@@ -170,6 +170,38 @@ export async function getPriceOrdersGateFutures(
 }
 
 /**
+ * **계약을 몰라도 열린 조건부 주문을 전부 읽는다.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 계약별 조회(`getPriceOrdersGateFutures`)는 **어느 계약을 물어볼지 알아야
+ * 한다.** 그런데 킬스위치의 잔여 확인은 계약 목록을 포지션과 일반 주문에서
+ * 만든다. 그래서 이런 상태가 되면:
+ *
+ *   포지션        0
+ *   일반 주문     0
+ *   조건부 주문   손절 1개  ← 이 계약을 알아낼 단서가 아무 데도 없다
+ *
+ * 훑을 계약이 하나도 없으니 조건부 주문 0건이 되고, **"전부 정리됨"이
+ * 사실로 기록된다.** 킬스위치의 최종 보증이 거기서 깨진다.
+ *
+ * Gate의 `price_orders`는 `contract` 없이도 조회된다. 계약을 추측하는
+ * 대신 **그냥 전부 물어본다** — 추측하는 단계 자체를 없앤다.
+ *
+ * **못 읽으면 null이다.** 빈 배열로 돌려주면 "남은 것이 없다"가 사실이 된다.
+ */
+export async function getAllPriceOrdersGateFutures(
+  key: string, secret: string, testnet = true,
+): Promise<any[] | null> {
+  try {
+    const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/price_orders', {
+      key, secret, qs: 'status=open', testnet,
+    });
+    return Array.isArray(rows) ? rows : null;
+  } catch { return null; }
+}
+
+/**
  * 계약 하나의 포지션. **수량이 0이어도 돌려준다.**
  *
  * getPositionsGateFutures는 `size !== 0`으로 걸러낸다. 목록에는 맞지만 신규
@@ -653,8 +685,21 @@ export async function cancelAllOpenOrdersGateFutures(
       message: `미체결 주문을 읽지 못해 취소하지 못했습니다: ${e?.message || e}` };
   }
 
-  // 조건부 주문(손절·익절)은 계약 없이 전체 조회가 안 된다. 포지션이 있는
-  // 계약도 함께 모아야 손절만 남는 일이 없다.
+  // ── 지울 계약을 어디서 모으는가 ──
+  //
+  // **예전에는 포지션과 일반 주문에서만 모았다.** 그래서 정확히 이
+  // 상태에서 눈이 멀었다:
+  //
+  //   포지션      0
+  //   일반 주문   0
+  //   조건부      손절 1개  ← 이 계약을 알아낼 단서가 아무 데도 없다
+  //
+  // `contracts`가 비어서 **`success: true, count: 0, "미체결 주문이
+  // 없습니다"`로 즉시 끝났다.** 킬스위치가 그 손절을 못 지운 채
+  // "전부 취소됨"이라고 답한 것이다.
+  //
+  // 조건부 주문은 `contract` 없이도 전부 조회된다. 계약을 추측하는 대신
+  // **거기서도 모은다.**
   const contracts = new Set<string>();
   for (const o of open) if (o?.contract) contracts.add(String(o.contract));
   try {
@@ -663,7 +708,26 @@ export async function cancelAllOpenOrdersGateFutures(
     }
   } catch { /* 포지션을 못 읽어도 열린 주문 쪽은 지운다 */ }
 
+  // **조건부 주문에만 남은 계약.** 여기가 이 함수의 눈먼 자리였다.
+  const priceRows = await getAllPriceOrdersGateFutures(key, secret, testnet);
+  if (priceRows != null) {
+    for (const r of priceRows) {
+      const c = (r as any)?.contract ?? (r as any)?.initial?.contract;
+      if (c) contracts.add(String(c));
+    }
+  }
+
   if (contracts.size === 0) {
+    // **조회를 못 했으면 "없다"가 아니다.**
+    //
+    // 조건부 주문 전체 조회에 실패했고 계약도 하나도 못 찾았으면,
+    // 남은 것이 있는지 없는지 **아무것도 확인하지 않은 것**이다.
+    // 이걸 성공 0건으로 적으면 킬스위치가 그 위에서 "정리 완료"라고 말한다.
+    if (priceRows == null) {
+      return { success: false, count: null, results,
+        message: '조건부 주문(손절·익절)을 조회하지 못했고 지울 계약도 찾지 못했습니다 — '
+          + '남은 주문이 없다는 뜻이 아닙니다' };
+    }
     return { success: true, count: 0, results, message: '미체결 주문이 없습니다' };
   }
 

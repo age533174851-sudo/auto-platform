@@ -4,8 +4,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
-import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions } from '@/lib/risk/killSwitch';
+import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions, reconcile } from '@/lib/risk/killSwitch';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
+import { isTestnetConn, intentOf, leftoverVerdict, retriggerPlan, killCompletion } from '@/lib/risk/killSwitchTruth';
+import { levelOf, actionModeOf } from '@/lib/risk/emergencyLevel';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -36,7 +38,8 @@ export async function POST(req: NextRequest) {
   const ok = await saveKillSwitch(sb, uid, connectionId, s);
   if (!ok) return NextResponse.json({ error: 'save_failed' }, { status: 500 });
 
-  const testnet = conn.is_testnet === true;
+  // 저장소 전체 규칙: `is_testnet === false`만 실전이다.
+  const testnet = isTestnetConn(conn);
   await logKillEvent(sb, uid, connectionId, { reason: s.triggerReason, equity: 0, drawdownPct: 0, action: 'MANUAL_TRIGGER', mode: testnet ? 'TESTNET' : 'LIVE' });
 
   // ── 발동 순간 실제로 실행한다 ──
@@ -51,10 +54,36 @@ export async function POST(req: NextRequest) {
   // 위험한 실패였다.
   //
   // executeKillActions는 이 파일이 이미 import하고 있었다. 부르지 않았을 뿐이다.
-  let exec: any = null;
-  if (!wasActive) {
+  const creds = await loadFuturesCreds(sb, uid, connectionId);
+
+  // ── 이미 발동 중인데 다시 눌렀다 ──
+  //
+  // **예전에는 무조건 건너뛰고 `ok: true`를 줬다.** 그런데 사용자가 다시
+  // 누르는 순간은 대부분 **첫 실행이 절반만 됐을 때**다. 그때 아무것도
+  // 안 하고 성공이라고 답하면 남은 포지션을 아무도 안 본다.
+  //
+  // 그래서 먼저 거래소에 물어본다. 남은 것이 없다고 **확인됐을 때만**
+  // 건너뛴다 — 모르면 다시 한다.
+  // **이번에 실제로 하기로 한 조합.** 저장된 actionMode와 다를 수 있다
+  // (단계를 골라 보내면 그 단계가 이긴다). 완료 문구는 반드시 이 값을
+  // 기준으로 적어야 한다 — 저장값으로 적으면 안 한 일을 말하게 된다.
+  const levelSpec = levelOf(body?.level);
+  const modeForCheck = levelSpec ? actionModeOf(levelSpec) : s.actionMode;
+  let preLeftover: any = null;
+  if (wasActive && creds.ok && creds.exchange) {
     try {
-      const creds = await loadFuturesCreds(sb, uid, connectionId);
+      const r = await reconcile(sb, uid, connectionId, {
+        key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+        exchange: creds.exchange, expectClosed: intentOf(modeForCheck).close,
+      });
+      preLeftover = leftoverVerdict({ leftover: r, expectedClosed: intentOf(modeForCheck).close });
+    } catch { preLeftover = null; }
+  }
+  const rerun = retriggerPlan({ wasActive, leftover: preLeftover });
+
+  let exec: any = null;
+  if (rerun.execute) {
+    try {
       if (!creds.ok) {
         // 실행하지 못했다는 사실을 숨기지 않는다. active=true는 이미 저장됐으므로
         // 신규 주문은 막힌 상태다 — 그 절반만 됐다는 것을 응답에 적는다.
@@ -69,9 +98,8 @@ export async function POST(req: NextRequest) {
         // 한 번 겪으면 다음부터 그 버튼을 못 누른다.
         //
         // 단계를 안 주면 예전 동작 그대로다(저장된 actionMode).
-        const { levelOf, actionModeOf, automatedSymbols, closeTargets } =
-          await import('@/lib/risk/emergencyLevel');
-        const spec = levelOf(body?.level);
+        const { automatedSymbols, closeTargets } = await import('@/lib/risk/emergencyLevel');
+        const spec = levelSpec;
 
         // ── 심볼별로 닫는 단계 ──
         //
@@ -79,7 +107,10 @@ export async function POST(req: NextRequest) {
         // "자동매매가 연 것만" 또는 "절반만"은 그걸로 못 한다 —
         // 손매매까지 나가면 이 단계를 만든 이유의 정반대다.
         let autoNote = '';
-        let closed: Array<{ symbol: string; ok: boolean; message: string }> = [];
+        let closed: Array<{
+          symbol: string; ok: boolean; message: string;
+          before?: number | null; after?: number | null; closePct?: number;
+        }> = [];
         if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
           const { futuresPositionRisk, futuresClosePosition } =
             await import('@/lib/exchanges/futuresAdapter');
@@ -111,10 +142,33 @@ export async function POST(req: NextRequest) {
           const plan = closeTargets(spec, live, auto);
           autoNote = plan.note;
           for (const t of plan.targets) {
+            const before = live.find(l => l.symbol === t.symbol)?.qty ?? null;
             const r = await futuresClosePosition(
               creds.exchange!, creds.key!, creds.secret!, creds.testnet!,
               t.symbol, spec.closePct);
-            closed.push({ symbol: t.symbol, ok: !!r.success, message: r.message });
+
+            // ── 접수는 체결이 아니다 ──
+            //
+            // **예전에는 `r.success`만 모았다.** 그런데 그건 주문이
+            // 접수됐다는 뜻이고, 실제로 줄었는지는 **포지션을 다시
+            // 읽어야** 안다. 이 저장소가 `closeEvidence`에서 이미 정한
+            // 규칙인데 이 경로만 안 따르고 있었다.
+            //
+            // 못 읽으면 null이다 — 0으로 적으면 "닫혔다"가 사실이 된다.
+            let after: number | null = null;
+            if (r.success) {
+              try {
+                const rr2 = await futuresPositionRisk(
+                  creds.exchange!, creds.key!, creds.secret!, t.symbol, creds.testnet!);
+                const amt2 = rr2.risk?.positionAmt;
+                after = amt2 == null ? null : Math.abs(Number(amt2));
+                if (!Number.isFinite(after as number)) after = null;
+              } catch { after = null; }
+            }
+            closed.push({
+              symbol: t.symbol, ok: !!r.success, message: r.message,
+              before, after, closePct: spec.closePct,
+            });
           }
         }
 
@@ -135,6 +189,9 @@ export async function POST(req: NextRequest) {
           // "정리됨"으로 그리면 안 된다.
           closed: closed.length ? closed : null,
           closeFailed: closed.filter(c => !c.ok).length,
+          // **완료 판정이 보는 것.** `D`가 없는 단계(CLOSE_AUTOMATED ·
+          // REDUCE_RISK)도 여기로 검사된다 — 주문 응답이 아니라 재조회 결과로.
+          targeted: closed.length ? closed : null,
         };
       }
     } catch (e: any) {
@@ -164,18 +221,44 @@ export async function POST(req: NextRequest) {
 
   // 취소·종료가 실패하면 ok:true로 돌려주지 않는다. 화면이 "정리됨"으로 그리면
   // 사용자는 거래소를 확인하지 않는다.
-  const execOk = !wasActive
-    ? !!(exec?.ran && (exec.cancel?.success !== false) && (exec.close?.success !== false))
-    : true;
+  // ── 무엇을 했다고 말해도 되는가 ──
+  //
+  // **예전 판정은 `close?.success !== false`였다.** 기본 actionMode는
+  // 'BC'라 D가 없고, 그러면 `exec.close`가 `null`이다.
+  // `undefined !== false` → 참. **한 적 없는 일이 성공으로 셌고**,
+  // 응답은 "미체결 취소·포지션 종료 완료"라고 적었다. 급할 때 그 문구를
+  // 읽은 사람은 거래소를 확인하지 않는다.
+  //
+  // 이제 하기로 한 것만 말하고, 그중 **거래소가 확인해 준 것만** 완료라고 적는다.
+  let postLeftover: any = null;
+  if (creds.ok && creds.exchange) {
+    try {
+      const r = await reconcile(sb, uid, connectionId, {
+        key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+        exchange: creds.exchange, expectClosed: intentOf(modeForCheck).close,
+      });
+      postLeftover = leftoverVerdict({ leftover: r, expectedClosed: intentOf(modeForCheck).close });
+    } catch { postLeftover = null; }
+  }
+
+  // **건너뛴 것과 못 한 것을 구분해서 넘긴다.** 안 그러면
+  // "이미 깨끗해서 재실행 생략"이 곧바로 502가 된다.
+  const done = killCompletion({
+    actionMode: modeForCheck, exec, leftover: postLeftover,
+    skipped: rerun.execute ? null : { reason: rerun.reason },
+  });
 
   return NextResponse.json({
-    ok: execOk,
+    ok: done.complete,
     active: true,
     queued: false,
     triggerReason: s.triggerReason,
     exec,
-    message: execOk
-      ? '킬스위치 발동 — 신규 주문 차단, 미체결 취소·포지션 종료 완료'
-      : '킬스위치는 켜졌지만(신규 주문 차단) 취소·종료가 완료되지 않았습니다 — 거래소에서 직접 확인하세요',
-  }, { status: execOk ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
+    // 다시 눌렀을 때 무엇을 했는지 숨기지 않는다.
+    reran: rerun.execute, reranReason: rerun.reason,
+    leftover: postLeftover,
+    missing: done.missing,
+    intendedClose: done.intendedClose,
+    message: done.message,
+  }, { status: done.complete ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
 }

@@ -13,7 +13,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict,
+  resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict, futuresCountOpen,
   reconcileDecision, futuresPlaceOrder, futuresFindOrderByClientId,
   positionModeVerdict, __clearPositionModeCache,
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
@@ -482,6 +482,139 @@ export function runFuturesExecTests() {
       eq(r.ok, false, '체결 0인데 성공으로 읽혔다');
       eq(r.status, 'UNFILLED');
       eq(r.filledQty, 0);
+    });
+  });
+
+  // ── Gate 잔여 세기: 조건부 주문만 남은 계약을 못 찾던 눈먼 자리 ──
+  //
+  // 예전에는 훑을 계약을 **포지션과 일반 주문에서만** 만들었다.
+  // 그래서 이 상태에 눈이 멀었다:
+  //
+  //   포지션      0
+  //   일반 주문   0
+  //   조건부      손절 1개  ← 이 계약을 알아낼 단서가 아무 데도 없다
+  //
+  // 훑을 계약이 없으니 조건부 0건이 되고 킬스위치가 '정리 완료'라고
+  // 말한다. **최종 보증이 거기서 깨진다.**
+  const GATE_T = 'https://api-testnet.gateapi.io';
+  const gateTarget: any = { exchange: 'gate', key: 'k', secret: 's', testnet: true };
+
+  netTest('포지션·일반주문이 0이어도 조건부 주문을 찾아낸다', async () => {
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) {
+        // contract 필터 없이 전부 조회 — 계약을 몰라도 나온다
+        return { body: [{ id: 1, contract: 'BTC_USDT' }] };
+      }
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await futuresCountOpen(gateTarget);
+      eq(r.positions, 0);
+      eq(r.orders, 1, '조건부 주문만 남은 계약을 못 찾았다 — 킬스위치가 정리 완료라고 말한다');
+      eq(r.error, null);
+    });
+  });
+
+  netTest('전체 조회는 contract 없이 나간다', async () => {
+    const urls = await withFetch((url) => {
+      if (url.startsWith(GATE_T)) return { body: [] };
+      return null;
+    }, async () => { await futuresCountOpen(gateTarget); });
+    const po = urls.find(u => u.includes('price_orders'));
+    assert(!!po, 'price_orders를 아예 안 불렀다');
+    assert(!/contract=/.test(po!), `계약을 추측해서 물어봤다 — ${po}`);
+  });
+
+  netTest('전체 조회가 실패하고 훑을 계약도 없으면 0이라고 말하지 않는다', async () => {
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) return { status: 500, body: { message: 'boom' } };
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await futuresCountOpen(gateTarget);
+      eq(r.orders, null, '아무것도 확인 못 했는데 0건이라고 적었다');
+      assert(/없다는 뜻이 아닙니다/.test(r.error || ''), r.error || '');
+    });
+  });
+
+  netTest('전체 조회가 실패해도 계약을 알면 계약별로 훑는다', async () => {
+    let n = 0;
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) {
+        n += 1;
+        // 첫 번째(전체 조회)는 실패, 그다음 계약별 조회는 성공
+        if (!url.includes('contract=')) return { status: 500, body: {} };
+        return { body: [{ id: 9 }] };
+      }
+      if (url.includes('/futures/usdt/positions')) return { body: [{ contract: 'BTC_USDT', size: 1 }] };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await futuresCountOpen(gateTarget);
+      eq(r.positions, 1);
+      eq(r.orders, 1);
+      assert(n >= 2, `계약별 조회로 안 내려갔다 (${n}회)`);
+    });
+  });
+
+  // ── 발견만 고치고 제거는 못 고친 자리 ──
+  //
+  // `futuresCountOpen`은 이제 조건부 주문만 남은 계약을 찾아낸다.
+  // 그런데 **취소 함수는 아직 포지션·일반주문에서만 계약을 모았다.**
+  // 그래서 정확히 그 사고 상태(포지션 0 · 일반 0 · price_order 1)에서
+  // `success: true, count: 0, "미체결 주문이 없습니다"`로 즉시 끝났다.
+  // 존재는 검출하는데 킬스위치가 스스로 지우지는 못한 것이다.
+  netTest('조건부 주문만 남은 계약도 취소 대상에 넣는다', async () => {
+    const gf = await import('./gateFutures');
+    const deleted: string[] = [];
+    await withFetch((url, init) => {
+      const method = String(init?.method || 'GET').toUpperCase();
+      if (url.includes('/futures/usdt/price_orders')) {
+        if (method === 'DELETE') { deleted.push(url); return { body: [{ id: 1 }] }; }
+        return { body: [{ id: 1, contract: 'BTC_USDT' }] };
+      }
+      if (url.includes('/futures/usdt/orders')) {
+        if (method === 'DELETE') { deleted.push(url); return { body: [] }; }
+        return { body: [] };
+      }
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await gf.cancelAllOpenOrdersGateFutures('k', 's', true);
+      assert(deleted.some(u => u.includes('price_orders') && u.includes('BTC_USDT')),
+        '조건부 주문만 남은 계약을 취소하지 않았다 — 킬스위치가 그것을 못 지운다');
+      eq(r.count, 1);
+    });
+  });
+
+  netTest('조건부 조회에 실패하고 계약도 없으면 "없다"고 말하지 않는다', async () => {
+    const gf = await import('./gateFutures');
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) return { status: 500, body: {} };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await gf.cancelAllOpenOrdersGateFutures('k', 's', true);
+      eq(r.success, false, '아무것도 확인 못 했는데 취소 성공이라고 적었다');
+      eq(r.count, null, '0건이라고 적었다');
+      assert(/없다는 뜻이 아닙니다/.test(r.message), r.message);
+    });
+  });
+
+  netTest('정말로 아무것도 없으면 0건 성공이다', async () => {
+    const gf = await import('./gateFutures');
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) return { body: [] };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await gf.cancelAllOpenOrdersGateFutures('k', 's', true);
+      eq(r.success, true);
+      eq(r.count, 0);
     });
   });
 }

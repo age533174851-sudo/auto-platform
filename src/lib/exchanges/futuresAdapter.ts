@@ -216,6 +216,59 @@ export async function futuresAvailableUsd(
   } catch { return null; }
 }
 
+/**
+ * **이 계좌의 총자산(equity).** 미실현 손익을 포함한다.
+ *
+ * 왜 available이 아니라 equity인가
+ * ────────────────────────────────
+ * 킬스위치는 낙폭(drawdown)으로 판단한다. 미실현 손실이 반영되지 않으면
+ * 포지션이 크게 밀리는 동안 낙폭이 0으로 보이고, 그때는 이미 늦다.
+ *
+ * **못 읽으면 null이다 — 절대 0이 아니다.**
+ * 예전에는 조회 실패를 `equity = 0`으로 만들어 평가에 넘겼다. 그러면
+ * 낙폭이 100%가 되어 **멀쩡한 계좌에서 킬스위치가 발동하고 실제 포지션이
+ * 전부 청산된다.** 조회 한 번 실패한 값으로 할 일이 아니다.
+ */
+export async function futuresEquityUsd(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+): Promise<{ equity: number | null; error: string | null }> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const acct = await gf.getAccountGateFutures(key, secret, testnet);
+      // Gate의 `total`은 미실현을 이미 포함한다. 그래도 칸이 없으면
+      // 0으로 채우지 않는다 — 없는 것과 0은 다르다.
+      const total = Number(acct?.total);
+      if (!Number.isFinite(total)) {
+        return { equity: null, error: 'Gate 계좌 응답에 total이 없습니다' };
+      }
+      return { equity: total, error: null };
+    }
+    const bf = await import('./binanceFutures');
+    const bal: any = await bf.getFuturesBalance(key, secret, testnet);
+    if (!bal?.success) {
+      return { equity: null, error: String(bal?.message || '잔고 조회 실패') };
+    }
+    const rows: any[] = Array.isArray(bal.balances) ? bal.balances : [];
+    const u = rows.find(b => b?.asset === 'USDT');
+    if (u) {
+      const v = Number(u.balance || 0) + Number(u.unrealizedPnl || 0);
+      return Number.isFinite(v)
+        ? { equity: v, error: null }
+        : { equity: null, error: 'USDT 잔고를 숫자로 읽지 못했습니다' };
+    }
+    if (rows.length === 0) {
+      // **빈 목록을 0으로 읽지 않는다.** 권한이 없거나 응답 모양이
+      // 바뀌었을 때도 빈 배열이 온다.
+      return { equity: null, error: '잔고 목록이 비어 있습니다 — 0이라는 뜻이 아닙니다' };
+    }
+    const sum = rows.reduce((a, b) => a + Number(b?.balance || 0) + Number(b?.unrealizedPnl || 0), 0);
+    return Number.isFinite(sum) ? { equity: sum, error: null } : { equity: null, error: '잔고 합산 실패' };
+  } catch (e: any) {
+    return { equity: null, error: String(e?.message || e) };
+  }
+}
+
 // ── 비상 정리 ────────────────────────────────────────
 //
 // **못 여는 것은 불편이고 못 닫는 것은 사고다.**
