@@ -81,6 +81,9 @@ async function loadLib() {
   // opsQueue는 실행 가능한 명령 목록을 opsCommand에서 뽑아 쓴다 —
   // **목록을 두 곳에 두지 않으려고 그렇게 했으므로** 같이 가져와야 한다.
   cpSync(join(ROOT, 'src', 'lib', 'ops', 'opsCommand.ts'), join(dir, 'opsCommand.ts'));
+  // 어느 워크플로를 어떤 입력으로 깨우는지도 판정이다 — 여기 문자열로
+  // 박아 두면 `apply: 'true'`가 빠져도 아무것도 못 잡는다.
+  cpSync(join(ROOT, 'src', 'lib', 'ops', 'opsDispatch.ts'), join(dir, 'opsDispatch.ts'));
   cpSync(join(ROOT, 'src', 'lib', 'ops', 'selfHeal.ts'), join(dir, 'selfHeal.ts'));
   cpSync(join(ROOT, 'src', 'lib', 'runtime', 'runtimeHealth.ts'), join(dir, 'runtimeHealth.ts'));
   // selfHeal.ts는 '../runtime/runtimeHealth'를 참조한다. 평평하게 놓았으므로
@@ -90,18 +93,20 @@ async function loadLib() {
   writeFileSync(join(dir, 'selfHeal.ts'), heal);
   const tsc = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) throw new Error('TypeScript를 찾을 수 없습니다 — 먼저 npm ci');
-  execFileSync(process.execPath, [tsc, 'opsQueue.ts', 'opsCommand.ts', 'selfHeal.ts', 'runtimeHealth.ts',
+  execFileSync(process.execPath, [tsc, 'opsQueue.ts', 'opsCommand.ts', 'opsDispatch.ts', 'selfHeal.ts', 'runtimeHealth.ts',
     '--module', 'commonjs', '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe' });
   return {
     ...(await import(`file://${join(dir, 'opsQueue.js')}`)),
+    ...(await import(`file://${join(dir, 'opsDispatch.js')}`)),
     ...(await import(`file://${join(dir, 'selfHeal.js')}`)),
     ...(await import(`file://${join(dir, 'runtimeHealth.js')}`)),
   };
 }
 
+const lib = await loadLib();
 const {
   claimDecision, runOutcomeOf, healPlan, healVerdict, deployVerification, runtimeHealthOf,
-} = await loadLib();
+} = lib;
 
 // ── 워커 상태를 DB에서 직접 읽는다 ──
 //
@@ -241,22 +246,32 @@ const step = (name, fn) => {
   }
 };
 
-function gh(args) {
+/**
+ * 워크플로 하나를 깨운다.
+ *
+ * **요청 본문도 판정이 만든다**(`opsDispatch.ts`). 여기서 문자열을
+ * 조립하면 `apply: 'true'`가 빠져도 아무것도 못 잡는다 — 그러면
+ * sync-secrets가 확인 모드로 돌고 로그에는 "실행 요청됨"이 남는다.
+ *
+ * **204만 성공이다.** 202나 200을 성공으로 보면 "요청됨"이 거짓이 된다.
+ */
+function ghStep(step) {
   const token = String(process.env.GITHUB_TOKEN || '').trim();
   if (!token) throw new Error('GITHUB_TOKEN이 없습니다');
   if (!REPO) throw new Error('GITHUB_REPOSITORY를 알 수 없습니다');
+  const req = lib.dispatchRequest(REPO, step);
   const out = execFileSync('curl', [
-    '-sS', '-X', 'POST', '-w', '\n%{http_code}',
+    '-sS', '-X', req.method, '-w', '\n%{http_code}',
     '-H', 'Accept: application/vnd.github+json',
     '-H', `Authorization: Bearer ${token}`,
     '-H', 'X-GitHub-Api-Version: 2022-11-28',
-    `https://api.github.com/repos/${REPO}/actions/workflows/${args.workflow}/dispatches`,
-    '-d', JSON.stringify({ ref: args.ref || 'main',
-      ...(args.inputs ? { inputs: args.inputs } : {}) }),
+    `https://api.github.com${req.path}`,
+    '-d', req.body,
   ], { encoding: 'utf8', timeout: 60_000 });
-  const code = String(out).trim().split('\n').pop();
-  if (code !== '204') throw new Error(`${args.workflow} 요청이 HTTP ${code}로 끝났습니다`);
-  return `${args.workflow} 실행 요청됨`;
+  const code = Number(String(out).trim().split('\n').pop());
+  const outcome = lib.dispatchOutcome({ status: code, workflow: step.workflow });
+  if (!outcome.ok) throw new Error(outcome.reason);
+  return outcome.reason;
 }
 
 function flyctl(args) {
@@ -285,14 +300,13 @@ if (cmd === 'SYNC_SECRETS') {
   // 그리고 안 맞은 상태는 이미 진입을 막는다 — `parityGate`가 모든
   // 진입 경로에 있고 웹·워커 지문이 다르면 신규 주문을 세운다.
   // (이미 열린 포지션의 청산·보호는 계속 돈다.)
-  step('시크릿 동기화', () => {
-    const r = gh({ workflow: 'sync-secrets.yml', inputs: { apply: 'true' } });
-    return `${r} — 반영·재배포·지문 확인은 저 워크플로가 하고, 지문이 다르면 실패로 끝납니다`;
-  });
+  for (const s of lib.dispatchStepsFor(cmd)) {
+    step(s.label, () => `${ghStep(s)} — 반영·재배포·지문 확인은 저 워크플로가 하고, 지문이 다르면 실패로 끝납니다`);
+  }
 } else if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
   // **마이그레이션이 먼저다.** 코드만 앞서 나가면 조용히 틀린다.
-  step('마이그레이션', () => gh({ workflow: 'migrate.yml' }));
-  step('워커 배포', () => gh({ workflow: 'fly-deploy.yml' }));
+  // 순서도 표(`opsDispatch.ts`)가 들고 있다.
+  for (const s of lib.dispatchStepsFor(cmd)) step(s.label, () => ghStep(s));
 } else if (cmd === 'RECOVER') {
   // ── 안전한 자가 복구 ──
   //

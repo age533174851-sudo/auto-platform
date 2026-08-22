@@ -164,6 +164,41 @@ export function approvalCommands(): OpsCommand[] {
   return OPS_COMMANDS.filter(s => s.needsApproval).map(s => s.command);
 }
 
+/**
+ * 이 명령을 요청 표(`ops_requests`)에 적을 것인가.
+ *
+ * **`mutates`로 판단하지 않는다.**
+ *
+ * 요청을 만드는 쪽은 원래 이렇게 돼 있었다:
+ *
+ *   if (command === 'STOP_NOW') { …킬 스위치… }
+ *   else if (spec.mutates)      { …큐에 적는다… }
+ *
+ * `runBy`를 만들어 놓고도 삽입 쪽은 여전히 `mutates`로 **독자 판단**을
+ * 했다. 지금 명령 구성에서는 우연히 맞는다 — 값을 바꾸면서 즉시
+ * 실행되는 명령이 `STOP_NOW` 하나뿐이고 그게 위에서 걸러지기 때문이다.
+ *
+ * 그런 명령이 하나 더 생기는 순간 조용히 큐로 들어가고, 사용자는
+ * "지금" 눌렀는데 5분 뒤에 실행된다. `SYNC_SECRETS`가 목록 하나 때문에
+ * 영원히 안 돌던 것과 **같은 종류의 배선 버그**다.
+ *
+ * 그래서 삽입 여부도 `runBy` 하나에서만 나온다.
+ */
+export function queueInsertPlan(command: OpsCommand | string | null | undefined): {
+  insert: boolean; reason: string;
+} {
+  const spec = OPS_COMMANDS.find(x => x.command === command) ?? null;
+  if (!spec) {
+    // **모르는 명령을 큐에 적지 않는다.** 적으면 실행기가 집어 가서
+    // UNKNOWN_COMMAND로 만료시키고, 사용자는 왜 아무 일도 없는지 모른다.
+    return { insert: false, reason: '모르는 명령입니다' };
+  }
+  if (spec.runBy === 'QUEUE') {
+    return { insert: true, reason: `${spec.label}는 실행 자격이 필요해 요청으로 적습니다` };
+  }
+  return { insert: false, reason: `${spec.label}는 이 자리에서 끝납니다 — 큐에 적지 않습니다` };
+}
+
 // ── 결과 ──
 
 export type StepState =

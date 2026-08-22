@@ -19,7 +19,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import {
-  parseOpsCommand, specOf, opsVerdictOf,
+  parseOpsCommand, specOf, opsVerdictOf, queueInsertPlan,
   type OpsCommand, type StepResult, type OpsStepId,
 } from '@/lib/ops/opsCommand';
 import { bootstrapStatus } from '@/lib/ops/opsBootstrap';
@@ -501,7 +501,21 @@ export async function POST(req: NextRequest) {
     } catch (e: any) {
       queueError = `킬 스위치를 켜지 못했습니다: ${String(e?.message || e).slice(0, 200)}`;
     }
-  } else if (spec.mutates) {
+  }
+
+  // ── 큐에 적을 것인가 ──
+  //
+  // **`spec.mutates`로 판단하지 않는다.**
+  //
+  // 예전에는 `else if (spec.mutates)`였다. `runBy`를 만들어 놓고도 삽입
+  // 쪽은 여전히 독자 판단을 했고, 지금 구성에서는 우연히 맞았다 —
+  // 값을 바꾸면서 즉시 실행되는 명령이 `STOP_NOW` 하나뿐이고 그게 위에서
+  // 걸러지기 때문이다. 그런 명령이 하나 더 생기면 조용히 큐로 들어가고,
+  // 사용자는 "지금" 눌렀는데 5분 뒤에 실행된다.
+  //
+  // 판정은 `queueInsertPlan`에 있고 테스트가 모든 명령을 훑는다.
+  const qp = queueInsertPlan(command);
+  if (qp.insert) {
     try {
       const { data, error } = await (sb as any).from('ops_requests').insert({
         command, requested_by: uid, approved: command === 'APPROVE_LIVE_SMALL' ? body?.approved === true : true,
@@ -520,7 +534,10 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ok: true, ...result,
     // **접수와 실행은 다르다.** 큐에 적힌 것을 '실행됨'으로 적지 않는다.
-    executed: !spec.mutates || !!stopped,
+    // **접수와 실행은 다르다.** 큐에 적힌 것은 아직 실행되지 않았다.
+    // 큐에 안 적는 명령은 이 자리에서 끝났고, 그중 STOP_NOW만 실제로
+    // 켰는지 따로 확인한다 — 하나라도 못 켰으면 켠 것이 아니다.
+    executed: qp.insert ? false : (command === 'STOP_NOW' ? !!stopped : true),
     queued, queueError, stopped, recovery,
     next: queued
       ? '실행기가 5분 안에 집어 갑니다 — 결과는 이 요청 번호로 확인할 수 있습니다'

@@ -7,7 +7,9 @@ import { test, eq, assert } from '../../test/harness';
 import {
   claimDecision, runOutcomeOf, CLAIM_TTL_MS, REQUEST_TTL_MS, type QueueRow,
 } from './opsQueue';
-import { parseOpsCommand, OPS_COMMANDS, runnableCommands, approvalCommands } from './opsCommand';
+import {
+  parseOpsCommand, OPS_COMMANDS, runnableCommands, approvalCommands, queueInsertPlan,
+} from './opsCommand';
 
 const NOW = 1_800_000_000_000;
 const row = (over: Partial<QueueRow>): QueueRow => ({
@@ -156,6 +158,48 @@ export function runOpsQueueTests() {
       me: 'r', nowMs: NOW,
     });
     eq(d.code, 'EXPIRED');
+  });
+
+  console.log('[운영 요청 큐 — 무엇을 큐에 적는가]');
+
+  test('IMMEDIATE 명령은 하나도 큐에 적지 않는다', () => {
+    // 요청 생성 쪽이 `spec.mutates`로 독자 판단하고 있었다. 지금
+    // 구성에서는 우연히 맞았지만, 값을 바꾸면서 즉시 실행되는 명령이
+    // 하나 더 생기면 조용히 큐로 들어간다 — 사용자는 "지금" 눌렀는데
+    // 5분 뒤에 실행된다.
+    for (const c of OPS_COMMANDS.filter(x => x.runBy === 'IMMEDIATE')) {
+      eq(queueInsertPlan(c.command).insert, false, c.command);
+    }
+  });
+
+  test('QUEUE 명령은 전부 큐에 적는다', () => {
+    for (const c of OPS_COMMANDS.filter(x => x.runBy === 'QUEUE')) {
+      eq(queueInsertPlan(c.command).insert, true, c.command);
+    }
+  });
+
+  test('값을 바꾸는데 즉시 실행인 명령도 큐에 안 적는다 — STOP_NOW', () => {
+    // **mutates로 판단하면 이게 큐로 간다.** 킬 스위치가 5분 뒤에
+    // 켜지면 안 켜진 것과 같다.
+    const stop = OPS_COMMANDS.find(c => c.command === 'STOP_NOW')!;
+    eq(stop.mutates, true);
+    eq(stop.runBy, 'IMMEDIATE');
+    eq(queueInsertPlan('STOP_NOW').insert, false);
+  });
+
+  test('모르는 명령을 큐에 적지 않는다', () => {
+    // 적으면 실행기가 집어 가서 UNKNOWN_COMMAND로 만료시키고,
+    // 사용자는 왜 아무 일도 없는지 모른다.
+    eq(queueInsertPlan('NOPE').insert, false);
+    eq(queueInsertPlan(null).insert, false);
+  });
+
+  test('큐에 적는 집합과 실행기가 집어 가는 집합이 정확히 같다', () => {
+    // 한쪽만 있으면 영원히 안 도는 요청이 쌓이거나, 실행기가 못 알아보는
+    // 명령이 큐에 들어간다.
+    const inserted = OPS_COMMANDS.filter(c => queueInsertPlan(c.command).insert)
+      .map(c => c.command).sort().join(',');
+    eq(inserted, runnableCommands().slice().sort().join(','));
   });
 
 }
