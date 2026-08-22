@@ -316,13 +316,40 @@ export async function executeKillActions(
 // ── Reconciliation: 발동 후 실제 거래소에 잔여가 있는지 재확인 ─────────
 export async function reconcile(
   sb: any, userId: string, connectionId: string,
-  opts: { key: string; secret: string; testnet: boolean; expectClosed: boolean },
-): Promise<{ positions: number; orders: number; clean: boolean }> {
-  const { countOpen } = await import('@/lib/exchanges/binanceFutures');
-  const c = await countOpen(opts.key, opts.secret, opts.testnet);
-  const clean = opts.expectClosed ? (c.positions === 0 && c.orders === 0) : (c.orders === 0);
+  opts: {
+    key: string; secret: string; testnet: boolean; expectClosed: boolean;
+    /**
+     * 어느 거래소인가. **안 주면 바이낸스** — 예전 호출부와 동작이 같다.
+     *
+     * 예전에는 이 칸이 아예 없었고 바이낸스 `countOpen`을 직접 불렀다.
+     * 실행(`executeKillActions`)은 Gate를 받는데 **마지막 확인만 바이낸스**라,
+     * Gate 연결에서는 잔여 확인이 인증 오류로 끝나고 그 실패가 조용히
+     * 넘어갔다. 문을 잠그고 안을 안 들여다본 것이다.
+     */
+    exchange?: 'binance' | 'gate';
+  },
+): Promise<{ positions: number | null; orders: number | null; clean: boolean; error: string | null }> {
+  const { futuresCountOpen } = await import('@/lib/exchanges/futuresExec');
+  const c = await futuresCountOpen({
+    exchange: opts.exchange ?? 'binance',
+    key: opts.key, secret: opts.secret, testnet: opts.testnet,
+  } as any);
+
+  // 판정은 killSwitchTruth가 한다 — **null을 0으로 읽지 않는 규칙**이
+  // 여기와 라우트 두 곳에 있으면 언젠가 한쪽만 고쳐진다.
+  const { leftoverVerdict } = await import('./killSwitchTruth');
+  const v = leftoverVerdict({
+    leftover: { positions: c.positions, orders: c.orders, error: c.error },
+    expectedClosed: opts.expectClosed,
+  });
+  const clean = v.code === 'CLEAR';
+
   if (!clean) {
-    await logKillEvent(sb, userId, connectionId, { reason: `재확인: 포지션 ${c.positions} · 미체결 ${c.orders} 잔존`, equity: 0, drawdownPct: 0, action: 'RECONCILE_WARN', mode: opts.testnet ? 'TESTNET' : 'LIVE' });
+    await logKillEvent(sb, userId, connectionId, {
+      reason: `재확인: ${v.reason}`,
+      equity: 0, drawdownPct: 0, action: 'RECONCILE_WARN',
+      mode: opts.testnet ? 'TESTNET' : 'LIVE',
+    });
   }
-  return { ...c, clean };
+  return { positions: c.positions, orders: c.orders, clean, error: c.error };
 }

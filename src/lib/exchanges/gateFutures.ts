@@ -170,6 +170,38 @@ export async function getPriceOrdersGateFutures(
 }
 
 /**
+ * **계약을 몰라도 열린 조건부 주문을 전부 읽는다.**
+ *
+ * 왜 필요한가
+ * ───────────
+ * 계약별 조회(`getPriceOrdersGateFutures`)는 **어느 계약을 물어볼지 알아야
+ * 한다.** 그런데 킬스위치의 잔여 확인은 계약 목록을 포지션과 일반 주문에서
+ * 만든다. 그래서 이런 상태가 되면:
+ *
+ *   포지션        0
+ *   일반 주문     0
+ *   조건부 주문   손절 1개  ← 이 계약을 알아낼 단서가 아무 데도 없다
+ *
+ * 훑을 계약이 하나도 없으니 조건부 주문 0건이 되고, **"전부 정리됨"이
+ * 사실로 기록된다.** 킬스위치의 최종 보증이 거기서 깨진다.
+ *
+ * Gate의 `price_orders`는 `contract` 없이도 조회된다. 계약을 추측하는
+ * 대신 **그냥 전부 물어본다** — 추측하는 단계 자체를 없앤다.
+ *
+ * **못 읽으면 null이다.** 빈 배열로 돌려주면 "남은 것이 없다"가 사실이 된다.
+ */
+export async function getAllPriceOrdersGateFutures(
+  key: string, secret: string, testnet = true,
+): Promise<any[] | null> {
+  try {
+    const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/price_orders', {
+      key, secret, qs: 'status=open', testnet,
+    });
+    return Array.isArray(rows) ? rows : null;
+  } catch { return null; }
+}
+
+/**
  * 계약 하나의 포지션. **수량이 0이어도 돌려준다.**
  *
  * getPositionsGateFutures는 `size !== 0`으로 걸러낸다. 목록에는 맞지만 신규
