@@ -29,6 +29,14 @@ export interface ExitDecision {
   userId: string;
   symbol: string;
   side: 'LONG' | 'SHORT';
+  /**
+   * **이 포지션이 있는 연결.** 없으면 065 이전에 만들어진 줄이다.
+   *
+   * 부르는 쪽은 이 값이 있으면 그 연결로만 조회·주문하고, 없으면
+   * 예전처럼 사용자 단위로 찾되 **그 사실을 기록에 남긴다** —
+   * 추측한 것과 아는 것은 다르다.
+   */
+  connectionId: string | null;
   action: 'NONE' | 'MOVE_STOP' | 'CLOSE';
   newStop?: number;
   currentStop: number;
@@ -112,7 +120,11 @@ export async function decideExits(
      * 옛 포지션의 고아라, 그걸 이 포지션의 손절로 읽으면 트레일링이
      * 엉뚱한 값에서 출발한다.
      */
-    liveStopFor?: (userId: string, symbol: string, side?: 'LONG' | 'SHORT') => Promise<number | null>;
+    liveStopFor?: (
+      userId: string, symbol: string, side?: 'LONG' | 'SHORT',
+      /** 이 거래의 연결. 있으면 **그 연결로만** 읽는다 */
+      connectionId?: string | null,
+    ) => Promise<number | null>;
     /** 트레일링 설정. 없으면 기본값 */
     cfg?: Partial<import('./trailPlan').TrailConfig>;
     /**
@@ -130,7 +142,7 @@ export async function decideExits(
 
   let q = sb
     .from('ladder_daily_trades')
-    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at')
+    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id')
     .eq('status', 'OPEN');
   if (opts.userId) q = q.eq('user_id', opts.userId);
   const { data: open } = await q.limit(opts.limit ?? 25);
@@ -142,19 +154,44 @@ export async function decideExits(
     const stop  = Number(t.stop_loss);
     const side: 'LONG' | 'SHORT' = String(t.side).toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
     const isLong = side === 'LONG';
-    if (!entry || !stop) continue;
-
     const openedAt = new Date(t.created_at).getTime();
     const common = {
       tradeId: t.id, userId: t.user_id, symbol: t.symbol, side,
-      currentStop: stop, entryPrice: entry,
+      connectionId: String(t.connection_id ?? '').trim() || null,
+      currentStop: stop || 0, entryPrice: entry || 0,
     };
 
-    // ── 시간 청산 ──
-    if (Date.now() - openedAt >= maxHoldMs) {
+    // ── 시간 청산이 손절가 검사보다 앞이다 ──
+    //
+    // **예전에는 반대였다.** `if (!entry || !stop) continue;`가 먼저 있고
+    // 시간 청산이 그 뒤였다. 그런데 진입 경로가 `stop_loss`를 안 적고
+    // 있었으므로(065 이전) 열린 거래 전부가 첫 줄에서 빠졌다 —
+    // **5일 강제 청산조차 한 번도 안 돌았다.**
+    //
+    // 시간 청산은 1R이 필요 없다. 필요한 것은 언제 열렸는가 하나뿐이고,
+    // 그건 장부에 있다. 손절가를 모른다고 **못 닫을 이유가 없다.**
+    // 못 여는 것은 불편이고 못 닫는 것은 사고다.
+    if (Number.isFinite(openedAt) && Date.now() - openedAt >= maxHoldMs) {
       out.push({
-        ...common, action: 'CLOSE', highWaterR: 0, lastPrice: entry,
+        ...common, action: 'CLOSE', highWaterR: 0, lastPrice: entry || 0,
         reason: `최대 보유 기간(${Math.round(maxHoldMs / 86_400_000)}일) 초과 — 시간 청산`,
+      });
+      continue;
+    }
+
+    // ── 손절가·진입가가 없는 줄 ──
+    //
+    // 판단은 안 한다 — 1R을 모르면 트레일링을 계산할 수 없다.
+    // 다만 **조용히 빼지는 않는다.** 예전에는 여기서 `continue`였고,
+    // 그래서 응답의 `checked`가 0이 되어 "볼 것이 없었다"로 읽혔다.
+    // 안 본 것과 이상 없는 것은 다르다.
+    if (!entry || !stop) {
+      out.push({
+        ...common, action: 'NONE', highWaterR: 0, lastPrice: entry || 0,
+        reason: !entry
+          ? '진입가가 장부에 없어 판단할 수 없습니다 — 0이라는 뜻이 아닙니다'
+          : '손절가가 장부에 없어 1R을 정할 수 없습니다 — 트레일링·본전이동을 계산하지 못합니다. '
+            + '시간 청산과 포지션 점검은 그대로 돕니다',
       });
       continue;
     }
@@ -180,7 +217,10 @@ export async function decideExits(
     // 여기서 계산을 다시 적으면 두 벌이 되고, 그중 한쪽만 고쳐진다.
     const { planTrail } = await import('./trailPlan');
     let liveStop: number | null = null;
-    try { liveStop = (await opts.liveStopFor?.(t.user_id, String(t.symbol), side)) ?? null; }
+    try {
+      liveStop = (await opts.liveStopFor?.(
+        t.user_id, String(t.symbol), side, common.connectionId)) ?? null;
+    }
     catch { liveStop = null; }   // 못 읽으면 진입 손절을 그대로 쓴다
     const v = planTrail({
       side,

@@ -55,10 +55,21 @@ function authorized(req: NextRequest): boolean {
  */
 async function runPositionGuards(
   sb: any,
-  decisions: { tradeId: string; userId: string; symbol: string; side: 'LONG' | 'SHORT' }[],
+  decisions: {
+    tradeId: string; userId: string; symbol: string; side: 'LONG' | 'SHORT';
+    /** 이 거래의 연결. 있으면 **그 연결로만** 조회한다 */
+    connectionId?: string | null;
+  }[],
   testnet: boolean,
-  /** 사용자별 키·망. 없으면 예전처럼 전역 망을 쓴다(하위 호환). */
-  connFor?: (uid: string) => Promise<{ key: string; secret: string; testnet: boolean } | null>,
+  /**
+   * 이 거래의 키·망.
+   *
+   * **거래를 통째로 넘긴다 — user_id만 넘기지 않는다.** 예전에는
+   * 사용자별이었고, 활성 연결이 둘 이상이면 A 계좌에서 연 포지션을
+   * B 계좌에서 찾았다. 조회는 조용히 "포지션 없음"으로 돌아온다.
+   */
+  connFor?: (d: { userId: string; connectionId?: string | null })
+    => Promise<{ key: string; secret: string; testnet: boolean } | null>,
   /**
    * 포지션이 이미 0인 종목에서 치운 보호주문 기록을 담는다.
    *
@@ -81,10 +92,14 @@ async function runPositionGuards(
 
   for (const d of decisions) {
     try {
-      if (!credCache.has(d.userId)) {
+      // **연결 단위로 캐시한다.** 사용자 단위로 캐시하면 같은 사용자의
+      // 두 연결이 한 키를 공유하게 되어, 두 번째 거래가 첫 번째의
+      // 계좌에서 조회된다.
+      const cacheKey = d.connectionId ? `c:${d.connectionId}` : `u:${d.userId}`;
+      if (!credCache.has(cacheKey)) {
         if (connFor) {
-          const c: any = await connFor(d.userId);
-          credCache.set(d.userId, c
+          const c: any = await connFor(d);
+          credCache.set(cacheKey, c
             ? { key: c.key, secret: c.secret, testnet: c.testnet, exchange: c.exchange ?? 'binance' }
             : null);
         } else {
@@ -95,16 +110,16 @@ async function runPositionGuards(
             const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
             const ex = resolveExecExchange((conn as any).exchange_id).exchange;
             // **모르는 거래소를 바이낸스로 읽지 않는다.**
-            credCache.set(d.userId, ex ? {
+            credCache.set(cacheKey, ex ? {
               key: (conn as any).api_key,
               secret: decryptSecret((conn as any).api_secret_enc ?? ''),
               testnet: (conn as any).is_testnet !== false,
               exchange: ex,
             } : null);
-          } else credCache.set(d.userId, null);
+          } else credCache.set(cacheKey, null);
         }
       }
-      const cred = credCache.get(d.userId);
+      const cred = credCache.get(cacheKey);
       if (!cred) continue;
 
       const venue = {
@@ -414,10 +429,56 @@ export async function GET(req: NextRequest) {
   // 전부 조용히. **못 여는 것은 불편이고 못 닫는 것은 사고다.**
   //
   // 한 번 읽고 캐시한다 — 사용자 수만큼만 조회한다.
-  type ConnCreds = { key: string; secret: string; testnet: boolean; exchange: 'binance' | 'gate' | null };
+  type ConnCreds = {
+    key: string; secret: string; testnet: boolean; exchange: 'binance' | 'gate' | null;
+    /** 이 자격이 **거래에 적힌 연결**에서 온 것인가, 사용자 단위 추측인가 */
+    guessed: boolean;
+  };
   const connCache = new Map<string, ConnCreds | null>();
-  const connFor = async (uid: string): Promise<ConnCreds | null> => {
-    if (!connCache.has(uid)) {
+
+  /** 거래에 적힌 연결을 그대로 읽는다 */
+  const connById = async (connectionId: string): Promise<ConnCreds | null> => {
+    const k = `c:${connectionId}`;
+    if (!connCache.has(k)) {
+      let v: ConnCreds | null = null;
+      try {
+        const { data: c } = await sb.from('exchange_connections')
+          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
+          .eq('id', connectionId).maybeSingle();
+        if (c && !(c as any).has_withdrawal) {
+          const { decryptSecret } = await import('@/lib/exchanges/crypto');
+          const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
+          v = {
+            key: (c as any).api_key,
+            secret: decryptSecret((c as any).api_secret_enc ?? ''),
+            testnet: (c as any).is_testnet !== false,
+            exchange: resolveExecExchange((c as any).exchange_id).exchange,
+            guessed: false,
+          };
+        }
+      } catch { v = null; }
+      connCache.set(k, v);
+    }
+    return connCache.get(k) ?? null;
+  };
+
+  /**
+   * **거래 하나의 자격.**
+   *
+   * 거래에 연결이 적혀 있으면(065 이후) 그것만 쓴다. 없으면 예전처럼
+   * 사용자 단위로 찾되 `guessed: true`로 표시한다 — 추측한 것과 아는
+   * 것은 다르고, 그 차이가 응답에 남아야 한다.
+   */
+  const connForTrade = async (
+    d: { userId: string; connectionId?: string | null },
+  ): Promise<ConnCreds | null> => {
+    if (d.connectionId) return connById(d.connectionId);
+    return connForUser(d.userId);
+  };
+
+  const connForUser = async (uid: string): Promise<ConnCreds | null> => {
+    const k = `u:${uid}`;
+    if (!connCache.has(k)) {
       let v: ConnCreds | null = null;
       try {
         const { data: c } = await sb.from('exchange_connections')
@@ -438,16 +499,19 @@ export async function GET(req: NextRequest) {
             // 저장소 전체 규칙: is_testnet === false 만 실전이다.
             testnet: (c as any).is_testnet !== false,
             exchange: ex,
+            // **하나를 골라 온 것이다.** 활성 연결이 둘 이상이면 이 값은
+            // 그 거래의 연결이 아닐 수 있다.
+            guessed: true,
           };
         }
       } catch { v = null; }
-      connCache.set(uid, v);
+      connCache.set(k, v);
     }
-    return connCache.get(uid) ?? null;
+    return connCache.get(k) ?? null;
   };
   /** 이 사용자의 포지션이 어느 망에 있나. 못 알아내면 null — 추측하지 않는다. */
   const testnetFor = async (uid: string): Promise<boolean | null> => {
-    const c = await connFor(uid);
+    const c = await connForUser(uid);
     return c ? c.testnet : null;
   };
 
@@ -478,13 +542,15 @@ export async function GET(req: NextRequest) {
   // 고아다(protectiveReadback이 그 판별표를 갖고 있다).
   const stopCache = new Map<string, number | null>();
   const liveStopFor = async (
-    uid: string, symbol: string, side?: 'LONG' | 'SHORT',
+    uid: string, symbol: string, side?: 'LONG' | 'SHORT', connectionId?: string | null,
   ): Promise<number | null> => {
-    const key = `${uid}:${String(symbol).toUpperCase()}:${side ?? ''}`;
+    // **연결이 열쇠에 들어간다.** 사용자+종목만으로 캐시하면 같은 사용자의
+    // 두 연결이 같은 손절가를 공유하게 된다.
+    const key = `${connectionId || uid}:${String(symbol).toUpperCase()}:${side ?? ''}`;
     if (!stopCache.has(key)) {
       let v: number | null = null;
       try {
-        const c: any = await connFor(uid);
+        const c: any = await connForTrade({ userId: uid, connectionId });
         if (c && (side === 'LONG' || side === 'SHORT')) {
           const ops = await import('@/lib/engine/venuePositionOps');
           v = await ops.liveStopPrice(
@@ -511,7 +577,7 @@ export async function GET(req: NextRequest) {
   // 포지션이 이미 0이 된 종목에서 치운 보호주문. **판단에 쓰지 않고
   // 응답에만 싣는다** — 정리 여부가 청산 판단을 바꾸면 안 된다.
   const orphanCleanups: any[] = [];
-  const guardFindings = await runPositionGuards(sb, decisions, testnet, connFor, orphanCleanups);
+  const guardFindings = await runPositionGuards(sb, decisions, testnet, connForTrade, orphanCleanups);
   for (const g of guardFindings) {
     if (g.verdict.action !== 'CLOSE') continue;
     const d = decisions.find(x => x.tradeId === g.tradeId);
@@ -567,7 +633,9 @@ export async function GET(req: NextRequest) {
     try {
       // 키도 망도 이 사용자의 연결에서 온다. 환경변수로 정하면 실계좌
       // 포지션을 테스트넷에서 닫으려 하고, 그건 조용히 실패한다.
-      const cr = await connFor(d.userId);
+      // **이 거래의 연결로 낸다.** 연결이 적혀 있지 않은 옛 줄은
+      // 사용자 단위로 찾되, 아래에서 그 사실을 결과에 남긴다.
+      const cr = await connForTrade(d);
       if (!cr) {
         results.push({ symbol: d.symbol, ok: false,
           error: '활성 거래소 연결 없음(또는 출금 권한 키) — 청산 주문을 낼 수 없습니다' });
@@ -617,6 +685,54 @@ export async function GET(req: NextRequest) {
         }
 
         const verdict = closeVerdict({ before, order, after });
+
+        // ── 닫았으면 그 자리에서 보호주문을 치운다 ──
+        //
+        // **여기가 비어 있었다.** `protectionCleanup.ts`의 주석은 이 절차가
+        // 필요한 세 곳을 적어 두었고 그중 셋째가 "청산 감시"인데, 정작
+        // 청산 감시는 그 함수를 안 불렀다.
+        //
+        // 다음 회차가 알아서 치워 줄 것이라는 보장도 없다. 성공한 거래는
+        // 바로 아래에서 `CLOSED`가 되므로 `decideExits`의 `status='OPEN'`
+        // 조회에서 빠진다 — **그 거래는 다시는 이 경로를 지나지 않는다.**
+        //
+        // 우리가 낸 청산은 reduceOnly라 남은 SL/TP를 자동으로 지우지
+        // 않는다. 안 치우면 다음 진입이 옛 주문에 맞아 예상치 못하게 닫힌다.
+        let closeCleanup: any = null;
+        if (verdict.closed && !dryRun) {
+          try {
+            const { cleanupOwnedProtectionWhenFlat, loadOwnedProtectionIds } =
+              await import('@/lib/engine/protectionCleanup');
+            const owned = await loadOwnedProtectionIds(sb, {
+              connectionId: d.connectionId ?? null,
+              userId: d.connectionId ? null : d.userId,
+              symbol: d.symbol, limit: 5,
+            });
+            if (owned.ids.length > 0) {
+              const venueCl = { exchange: cr.exchange, apiKey: key, apiSecret: secret, testnet };
+              const cl = await cleanupOwnedProtectionWhenFlat(venueCl, d.symbol, {
+                // 방금 재조회한 결과를 그대로 넘긴다. 여기서 또 읽으면
+                // 같은 순간에 두 답이 나올 수 있고, 그때 어느 쪽을 믿을지가
+                // 또 하나의 갈림길이 된다.
+                position: { ok: after?.ok === true, found: after?.found === true, qty: after?.amount ?? null },
+                // 전략 id를 들고 있지 않다. **적어 둔 번호와 일치하는 것만.**
+                myStrategyId: '', ownedIds: owned.ids, ownedOnly: true,
+              });
+              if (cl.code !== 'NOTHING_TO_DO') {
+                closeCleanup = {
+                  code: cl.code, ok: cl.ok, cancelled: cl.cancelled,
+                  stillPresent: cl.stillPresent, unknown: cl.unknown, reason: cl.reason,
+                };
+                orphanCleanups.push({ symbol: d.symbol, tradeId: d.tradeId, at: 'AFTER_CLOSE', ...closeCleanup });
+              }
+            }
+          } catch (e: any) {
+            // **조용히 넘기지 않는다.** 못 치웠다는 사실이 남아야 한다.
+            closeCleanup = { code: 'CLEANUP_ERROR', ok: false, reason: String(e?.message || e).slice(0, 200) };
+            orphanCleanups.push({ symbol: d.symbol, tradeId: d.tradeId, at: 'AFTER_CLOSE', ...closeCleanup });
+          }
+        }
+
         if (!dryRun) {
           await sb.from('ladder_daily_trades').update({
             // **닫힘으로 적는 것은 verdict.closed 하나뿐이다.**
@@ -631,7 +747,12 @@ export async function GET(req: NextRequest) {
           symbol: d.symbol, action: 'CLOSE', exchange: cr.exchange,
           ok: verdict.closed, code: verdict.code,
           needsReconcile: verdict.needsReconcile, retry: verdict.retry,
+          // **어느 연결로 냈는지, 그리고 그것이 확실한지.**
+          // 옛 줄(065 이전)은 사용자 단위로 고른 연결이라 그 거래의
+          // 계좌가 아닐 수 있다.
+          connectionKnown: !cr.guessed,
           reason: d.reason, detail: verdict.reason,
+          protectionCleanup: closeCleanup,
         });
         continue;
       }
@@ -670,6 +791,7 @@ export async function GET(req: NextRequest) {
         }).eq('id', d.tradeId);
       }
       results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: true, exchange: cr.exchange,
+        connectionKnown: !cr.guessed,
         newStop: d.newStop, cancelledOld: cancelled, cancelNote, reason: d.reason });
     } catch (e: any) {
       results.push({ symbol: d.symbol, action: d.action, ok: false, error: e?.message || '실행 실패' });

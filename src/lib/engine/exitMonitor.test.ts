@@ -97,10 +97,72 @@ export function runExitMonitorTests() {
     assert(close.reason.includes('시간 청산'), close.reason);
   });
 
-  test('진입가나 손절가가 없으면 판단하지 않는다 — 추측해서 닫지 않는다', async () => {
+  test('손절가가 없으면 손절을 옮기거나 닫지 않는다 — 추측해서 판단하지 않는다', async () => {
     const broken = { ...OPEN_ROW, stop_loss: null };
     const out = await decideExits(sbWith([broken]) as any, { testnet: true, limit: 5 });
-    eq(out.length, 0, '손절가를 모르는데 판단했다');
+    eq(out.filter(d => d.action !== 'NONE').length, 0, '손절가를 모르는데 판단했다');
+  });
+
+  // **예전에는 이 줄이 목록에서 통째로 사라졌다.**
+  //
+  // 그리고 진입 경로가 `stop_loss`를 안 적고 있었으므로(065 이전) 열린
+  // 거래 전부가 그렇게 사라졌다. 응답의 `checked`는 0이었고 그건
+  // "볼 것이 없었다"로 읽혔다 — 안 본 것과 이상 없는 것은 다르다.
+  test('손절가가 없다는 사실이 목록에 남는다', async () => {
+    const broken = { ...OPEN_ROW, stop_loss: null };
+    const out = await decideExits(sbWith([broken]) as any, { testnet: true, limit: 5 });
+    eq(out.length, 1, '조용히 목록에서 빠졌다 — 안 본 것이 0건으로 보인다');
+    eq(out[0].action, 'NONE');
+    assert(out[0].reason.includes('손절가가 장부에 없'), out[0].reason);
+  });
+
+  // **손절가는 시간 청산에 필요 없다.** 필요한 것은 언제 열렸는가 하나뿐이다.
+  // 예전에는 손절가 검사가 앞에 있어서, 손절가가 없으면 5일 강제 청산조차
+  // 돌지 않았다. 못 여는 것은 불편이고 못 닫는 것은 사고다.
+  test('손절가를 몰라도 시간 청산은 돈다', async () => {
+    const old = {
+      ...OPEN_ROW, stop_loss: null,
+      created_at: new Date(Date.now() - 10 * 86400_000).toISOString(),
+    };
+    const out = await decideExits(sbWith([old]) as any, {
+      testnet: true, maxHoldMs: 5 * 86400_000, limit: 5,
+    });
+    const close = out.find(d => d.action === 'CLOSE');
+    assert(!!close, '손절가가 없다고 10일 지난 포지션을 안 닫았다');
+    assert(close!.reason.includes('시간 청산'), close!.reason);
+  });
+
+  // ── 어느 계좌의 포지션인가 ──
+  //
+  // `ladder_daily_trades`에 연결이 없으면 청산 감시는 사용자의 활성 연결
+  // 중 하나를 `.limit(1)`로 고른다. 활성 연결이 둘 이상이면 A 계좌에서
+  // 연 포지션을 B 계좌에서 찾는다 — 조회는 조용히 "포지션 없음"이다.
+  test('거래에 적힌 연결을 그대로 들고 나온다', async () => {
+    const row = { ...OPEN_ROW, connection_id: 'conn-a' };
+    const out = await decideExits(sbWith([row]) as any, { testnet: true, limit: 5 });
+    eq(out.length, 1);
+    eq(out[0].connectionId, 'conn-a');
+  });
+
+  test('연결이 안 적힌 옛 줄은 null이다 — 아무거나 채우지 않는다', async () => {
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, { testnet: true, limit: 5 });
+    eq(out.length, 1);
+    eq(out[0].connectionId, null);
+  });
+
+  test('지금 걸린 손절도 그 거래의 연결로 읽는다', async () => {
+    const asked: any[] = [];
+    const row = { ...OPEN_ROW, connection_id: 'conn-a' };
+    await decideExits(sbWith([row]) as any, {
+      testnet: true, limit: 5,
+      liveStopFor: async (uid, sym, side, connectionId) => {
+        asked.push({ uid, sym, side, connectionId });
+        return null;
+      },
+    });
+    // 캔들 조회(네트워크)가 실패하면 여기까지 안 온다. 물어봤다면
+    // 반드시 그 거래의 연결이어야 한다.
+    for (const a of asked) eq(a.connectionId, 'conn-a', '엉뚱한 연결로 손절을 읽었다');
   });
 
   test('열린 거래가 없으면 빈 결과다', async () => {
