@@ -96,11 +96,95 @@ export function leftoverVerdict(i: {
       : '미체결 0을 거래소에서 확인했습니다 (이번 단계는 포지션을 닫지 않습니다)' };
 }
 
+/**
+ * 심볼 하나를 닫으려 한 결과.
+ *
+ * **주문 응답만으로는 닫혔다고 말할 수 없다.** `futuresClosePosition`이
+ * `success: true`를 줘도 그건 접수다. 실제로 줄었는지는 **포지션을 다시
+ * 읽어야** 안다 — 이 저장소가 `closeEvidence`에서 이미 정한 규칙이다.
+ */
+export interface TargetedClose {
+  symbol: string;
+  /** 주문이 접수됐는가 */
+  ok: boolean;
+  /** 닫기 전 수량 */
+  before?: number | null;
+  /** 닫은 뒤 **다시 읽은** 수량. **못 읽었으면 null이다 — 0이 아니다** */
+  after?: number | null;
+  /** 목표: 100이면 전량, 50이면 절반 */
+  closePct?: number;
+  message?: string;
+}
+
 export interface KillExecView {
   ran?: boolean;
   cancel?: { ran?: boolean; success?: boolean } | null;
   close?: { ran?: boolean; success?: boolean; remaining?: number | null } | null;
   closeFailed?: number | null;
+  /**
+   * 단계형 비상정지가 **심볼별로** 닫은 결과.
+   *
+   * `CLOSE_AUTOMATED`·`REDUCE_RISK`는 `D`가 없다 — `executeKillActions`의
+   * 전량 종료를 쓰지 않고 심볼별로 따로 닫는다. 그래서 `intent.close`만
+   * 보면 **이 실패를 통째로 놓친다.**
+   */
+  targeted?: TargetedClose[] | null;
+}
+
+export type TargetedCode =
+  /** 목표만큼 줄어든 것이 재조회로 확인됐다 */
+  | 'CONFIRMED'
+  /** 주문이 거절됐다 */
+  | 'ORDER_FAILED'
+  /** 접수는 됐는데 **재조회를 못 했다.** 닫혔다는 뜻이 아니다 */
+  | 'UNVERIFIED'
+  /** 재조회했는데 목표만큼 안 줄었다 */
+  | 'STILL_OPEN';
+
+export interface TargetedVerdict {
+  symbol: string;
+  code: TargetedCode;
+  reason: string;
+}
+
+/**
+ * 이 심볼이 **정말** 목표만큼 줄었는가.
+ *
+ * **주문 응답이 아니라 재조회 결과로 판단한다.**
+ */
+export function targetedCloseVerdict(t: TargetedClose): TargetedVerdict {
+  const sym = String(t?.symbol ?? '');
+  if (t?.ok !== true) {
+    return { symbol: sym, code: 'ORDER_FAILED',
+      reason: `${sym}: 청산 주문이 거절됐습니다${t?.message ? ` — ${t.message}` : ''}` };
+  }
+  const after = t?.after;
+  if (after == null || !Number.isFinite(Number(after))) {
+    return { symbol: sym, code: 'UNVERIFIED',
+      reason: `${sym}: 청산 주문은 접수됐지만 포지션을 다시 읽지 못했습니다 — `
+        + '접수는 체결이 아닙니다' };
+  }
+  const pct = Number(t?.closePct ?? 100);
+  const before = Number(t?.before);
+  const left = Math.abs(Number(after));
+
+  if (pct >= 100) {
+    return left <= 0
+      ? { symbol: sym, code: 'CONFIRMED', reason: `${sym}: 포지션 0 확인` }
+      : { symbol: sym, code: 'STILL_OPEN', reason: `${sym}: 아직 ${left} 남아 있습니다` };
+  }
+
+  // 부분 청산. 기준 수량을 모르면 확인할 수 없다.
+  if (!Number.isFinite(before) || before <= 0) {
+    return { symbol: sym, code: 'UNVERIFIED',
+      reason: `${sym}: 줄이기 전 수량을 몰라 목표만큼 줄었는지 확인할 수 없습니다` };
+  }
+  // 반올림·수량 단위 때문에 정확히 안 맞을 수 있다. 5% 여유를 준다.
+  const want = Math.abs(before) * (1 - pct / 100);
+  return left <= want * 1.05
+    ? { symbol: sym, code: 'CONFIRMED', reason: `${sym}: ${pct}% 축소 확인 (${before} → ${left})` }
+    : { symbol: sym, code: 'STILL_OPEN',
+        reason: `${sym}: ${pct}%를 줄이려 했는데 ${left} 남아 있습니다 (목표 ${want.toFixed(6)} 이하)` };
 }
 
 export interface KillCompletion {
@@ -124,11 +208,33 @@ export function killCompletion(i: {
   actionMode: any;
   exec: KillExecView | null | undefined;
   leftover?: LeftoverVerdict | null;
+  /**
+   * **실행을 건너뛴 것이 정상인가.**
+   *
+   * `retriggerPlan`이 "이미 발동 중이고 거래소에 남은 것이 없다"고
+   * 판정하면 실행을 안 한다. 그러면 `exec`가 `null`인데, 예전에는
+   * 그걸 곧바로 "실행하지 못했습니다"로 읽어 **502를 냈다.**
+   * 두 판정이 서로 모순됐다 — 깨끗해서 안 했는데 실패라고 답한 것이다.
+   */
+  skipped?: { reason: string } | null;
 }): KillCompletion {
   const intent = intentOf(i.actionMode);
   const e = i.exec ?? null;
   const missing: string[] = [];
   const did: string[] = ['신규 주문 차단'];
+  const lv0 = i.leftover ?? null;
+
+  // ── 이미 깨끗해서 재실행을 생략했다 ──
+  //
+  // **거래소가 0을 확인해 줬을 때만** 성공이다. `skipped`가 있어도
+  // 잔여가 CLEAR가 아니면 그건 건너뛰면 안 되는 상태였다는 뜻이므로
+  // 아래 일반 경로로 내려가 미완료로 적힌다.
+  if (!e && i.skipped && lv0?.code === 'CLEAR') {
+    return {
+      complete: true, intendedClose: intent.close, missing: [],
+      message: `킬스위치 발동 중 — ${i.skipped.reason} (거래소 확인됨)`,
+    };
+  }
 
   if (!e || e.ran === false) {
     return {
@@ -148,7 +254,23 @@ export function killCompletion(i: {
   if (intent.close) {
     if (e.close?.ran === true && e.close?.success === true) did.push('포지션 종료');
     else missing.push('포지션 종료');
-    if ((i.exec?.closeFailed ?? 0) > 0) missing.push(`심볼별 종료 실패 ${i.exec!.closeFailed}건`);
+  }
+
+  // ── 심볼별 청산은 **D와 무관하게** 검사한다 ──
+  //
+  // `CLOSE_AUTOMATED`(자동매매 것만)와 `REDUCE_RISK`(절반)는 `D`가 없다.
+  // 그런데 실제로는 심볼별로 포지션을 닫거나 줄인다. 예전에는
+  // `intent.close`일 때만 `closeFailed`를 봐서, **자동매매 포지션 청산이
+  // 실패했는데 일반 주문이 0이면 완료로 적혔다.**
+  const targeted = Array.isArray(e.targeted) ? e.targeted : null;
+  if (targeted && targeted.length > 0) {
+    const verdicts = targeted.map(targetedCloseVerdict);
+    const bad = verdicts.filter(v => v.code !== 'CONFIRMED');
+    if (bad.length === 0) did.push(`대상 ${verdicts.length}건 청산 확인`);
+    else for (const b of bad) missing.push(b.reason);
+  } else if ((e.closeFailed ?? 0) > 0) {
+    // 재조회 근거가 없는 옛 모양. 실패 건수만이라도 놓치지 않는다.
+    missing.push(`심볼별 종료 실패 ${e.closeFailed}건`);
   }
 
   // 거래소 확인. **없으면 '완료'라고 못 적는다.**

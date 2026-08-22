@@ -558,4 +558,63 @@ export function runFuturesExecTests() {
       assert(n >= 2, `계약별 조회로 안 내려갔다 (${n}회)`);
     });
   });
+
+  // ── 발견만 고치고 제거는 못 고친 자리 ──
+  //
+  // `futuresCountOpen`은 이제 조건부 주문만 남은 계약을 찾아낸다.
+  // 그런데 **취소 함수는 아직 포지션·일반주문에서만 계약을 모았다.**
+  // 그래서 정확히 그 사고 상태(포지션 0 · 일반 0 · price_order 1)에서
+  // `success: true, count: 0, "미체결 주문이 없습니다"`로 즉시 끝났다.
+  // 존재는 검출하는데 킬스위치가 스스로 지우지는 못한 것이다.
+  netTest('조건부 주문만 남은 계약도 취소 대상에 넣는다', async () => {
+    const gf = await import('./gateFutures');
+    const deleted: string[] = [];
+    await withFetch((url, init) => {
+      const method = String(init?.method || 'GET').toUpperCase();
+      if (url.includes('/futures/usdt/price_orders')) {
+        if (method === 'DELETE') { deleted.push(url); return { body: [{ id: 1 }] }; }
+        return { body: [{ id: 1, contract: 'BTC_USDT' }] };
+      }
+      if (url.includes('/futures/usdt/orders')) {
+        if (method === 'DELETE') { deleted.push(url); return { body: [] }; }
+        return { body: [] };
+      }
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await gf.cancelAllOpenOrdersGateFutures('k', 's', true);
+      assert(deleted.some(u => u.includes('price_orders') && u.includes('BTC_USDT')),
+        '조건부 주문만 남은 계약을 취소하지 않았다 — 킬스위치가 그것을 못 지운다');
+      eq(r.count, 1);
+    });
+  });
+
+  netTest('조건부 조회에 실패하고 계약도 없으면 "없다"고 말하지 않는다', async () => {
+    const gf = await import('./gateFutures');
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) return { status: 500, body: {} };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await gf.cancelAllOpenOrdersGateFutures('k', 's', true);
+      eq(r.success, false, '아무것도 확인 못 했는데 취소 성공이라고 적었다');
+      eq(r.count, null, '0건이라고 적었다');
+      assert(/없다는 뜻이 아닙니다/.test(r.message), r.message);
+    });
+  });
+
+  netTest('정말로 아무것도 없으면 0건 성공이다', async () => {
+    const gf = await import('./gateFutures');
+    await withFetch((url) => {
+      if (url.includes('/futures/usdt/price_orders')) return { body: [] };
+      if (url.includes('/futures/usdt/orders')) return { body: [] };
+      if (url.includes('/futures/usdt/positions')) return { body: [] };
+      return url.startsWith(GATE_T) ? { body: [] } : null;
+    }, async () => {
+      const r = await gf.cancelAllOpenOrdersGateFutures('k', 's', true);
+      eq(r.success, true);
+      eq(r.count, 0);
+    });
+  });
 }

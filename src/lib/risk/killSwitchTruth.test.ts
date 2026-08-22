@@ -7,6 +7,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   intentOf, leftoverVerdict, killCompletion, retriggerPlan, resetVerdict, isTestnetConn,
+  targetedCloseVerdict,
 } from './killSwitchTruth';
 
 const CLEAR = leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: true });
@@ -194,5 +195,106 @@ export function runKillSwitchTruthTests() {
     eq(isTestnetConn({ is_testnet: null }), true, 'NULL을 실전으로 읽었다');
     eq(isTestnetConn({}), true);
     eq(isTestnetConn(null), true);
+  });
+
+  console.log('[킬스위치 — 건너뛴 것과 못 한 것은 다르다]');
+
+  // ── 두 판정이 서로 모순됐던 자리 ──
+  //
+  // `retriggerPlan`이 "이미 발동 중이고 거래소에 남은 것이 없다"고
+  // 판정하면 실행을 안 한다. 그러면 `exec`가 null인데, 예전 `killCompletion`은
+  // 그걸 곧바로 "실행하지 못했습니다"로 읽어 **502를 냈다.**
+  // 깨끗해서 안 했는데 실패라고 답한 것이다.
+  test('이미 깨끗해서 재실행을 생략한 것은 성공이다', () => {
+    const plan = retriggerPlan({ wasActive: true, leftover: CLEAR });
+    eq(plan.execute, false);
+    const d = killCompletion({
+      actionMode: 'BCD', exec: null, leftover: CLEAR,
+      skipped: { reason: plan.reason },
+    });
+    eq(d.complete, true, '깨끗해서 안 했는데 실패라고 답했다 — 502가 나간다');
+    assert(d.message.includes('거래소 확인됨'), d.message);
+  });
+
+  test('건너뛰었다고 해도 거래소가 안 깨끗하면 성공이 아니다', () => {
+    // skipped를 무조건 성공으로 읽으면 그게 새 구멍이 된다.
+    eq(killCompletion({ actionMode: 'BCD', exec: null, leftover: REMAINS,
+      skipped: { reason: 'x' } }).complete, false);
+    eq(killCompletion({ actionMode: 'BCD', exec: null, leftover: UNKNOWN,
+      skipped: { reason: 'x' } }).complete, false);
+    eq(killCompletion({ actionMode: 'BCD', exec: null, leftover: null,
+      skipped: { reason: 'x' } }).complete, false);
+  });
+
+  test('건너뛴 적 없는데 exec가 없으면 여전히 실패다', () => {
+    eq(killCompletion({ actionMode: 'BCD', exec: null, leftover: CLEAR }).complete, false);
+  });
+
+  console.log('[킬스위치 — 심볼별 청산은 D 없이도 검사한다]');
+
+  const conf = (symbol: string) =>
+    ({ symbol, ok: true, before: 1, after: 0, closePct: 100 });
+
+  // CLOSE_AUTOMATED(actions A·B·C)와 REDUCE_RISK(A·B)는 **D가 없다.**
+  // 그런데 실제로는 심볼별로 포지션을 닫거나 줄인다. 예전에는
+  // `intent.close`일 때만 검사해서, 자동매매 포지션 청산이 실패했는데
+  // 일반 주문이 0이면 완료로 적혔다.
+  test('D가 없어도 심볼별 청산 실패를 잡는다', () => {
+    const d = killCompletion({
+      actionMode: 'ABC',                 // CLOSE_AUTOMATED — D 없음
+      exec: {
+        ran: true, cancel: { ran: true, success: true }, close: null,
+        targeted: [conf('BTCUSDT'), { symbol: 'ETHUSDT', ok: false, message: '거절' }],
+      },
+      leftover: leftoverVerdict({ leftover: { positions: 1, orders: 0 }, expectedClosed: false }),
+    });
+    eq(d.complete, false, '자동매매 포지션 청산이 실패했는데 완료로 적었다');
+    assert(d.missing.some(m => m.includes('ETHUSDT')), d.missing.join(' · '));
+  });
+
+  test('D가 없고 심볼별 청산이 전부 확인되면 완료다', () => {
+    const d = killCompletion({
+      actionMode: 'ABC',
+      exec: {
+        ran: true, cancel: { ran: true, success: true }, close: null,
+        targeted: [conf('BTCUSDT'), conf('ETHUSDT')],
+      },
+      leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: false }),
+    });
+    eq(d.complete, true, d.missing.join(' · '));
+  });
+
+  test('접수를 청산으로 읽지 않는다 — 재조회가 없으면 미확인이다', () => {
+    const v = targetedCloseVerdict({ symbol: 'BTCUSDT', ok: true, before: 1, after: null, closePct: 100 });
+    eq(v.code, 'UNVERIFIED');
+    assert(v.reason.includes('접수는 체결이 아닙니다'), v.reason);
+  });
+
+  test('전량 청산은 재조회 0일 때만 확인이다', () => {
+    eq(targetedCloseVerdict({ symbol: 'X', ok: true, before: 2, after: 0, closePct: 100 }).code, 'CONFIRMED');
+    eq(targetedCloseVerdict({ symbol: 'X', ok: true, before: 2, after: 0.5, closePct: 100 }).code, 'STILL_OPEN');
+  });
+
+  test('절반 축소는 목표 수량까지 줄었는지 본다', () => {
+    // 2 → 절반 → 1 이하여야 한다.
+    eq(targetedCloseVerdict({ symbol: 'X', ok: true, before: 2, after: 1, closePct: 50 }).code, 'CONFIRMED');
+    eq(targetedCloseVerdict({ symbol: 'X', ok: true, before: 2, after: 1.8, closePct: 50 }).code, 'STILL_OPEN');
+  });
+
+  test('줄이기 전 수량을 모르면 확인했다고 말하지 않는다', () => {
+    eq(targetedCloseVerdict({ symbol: 'X', ok: true, before: null, after: 1, closePct: 50 }).code, 'UNVERIFIED');
+  });
+
+  test('주문이 거절되면 재조회 값과 무관하게 실패다', () => {
+    eq(targetedCloseVerdict({ symbol: 'X', ok: false, before: 1, after: 0, closePct: 100 }).code, 'ORDER_FAILED');
+  });
+
+  test('재조회 근거가 없는 옛 모양도 실패 건수는 놓치지 않는다', () => {
+    const d = killCompletion({
+      actionMode: 'ABC',
+      exec: { ran: true, cancel: { ran: true, success: true }, close: null, closeFailed: 2 },
+      leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: false }),
+    });
+    eq(d.complete, false);
   });
 }
