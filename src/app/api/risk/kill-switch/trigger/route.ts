@@ -107,7 +107,10 @@ export async function POST(req: NextRequest) {
         // "자동매매가 연 것만" 또는 "절반만"은 그걸로 못 한다 —
         // 손매매까지 나가면 이 단계를 만든 이유의 정반대다.
         let autoNote = '';
-        let closed: Array<{ symbol: string; ok: boolean; message: string }> = [];
+        let closed: Array<{
+          symbol: string; ok: boolean; message: string;
+          before?: number | null; after?: number | null; closePct?: number;
+        }> = [];
         if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
           const { futuresPositionRisk, futuresClosePosition } =
             await import('@/lib/exchanges/futuresAdapter');
@@ -139,10 +142,33 @@ export async function POST(req: NextRequest) {
           const plan = closeTargets(spec, live, auto);
           autoNote = plan.note;
           for (const t of plan.targets) {
+            const before = live.find(l => l.symbol === t.symbol)?.qty ?? null;
             const r = await futuresClosePosition(
               creds.exchange!, creds.key!, creds.secret!, creds.testnet!,
               t.symbol, spec.closePct);
-            closed.push({ symbol: t.symbol, ok: !!r.success, message: r.message });
+
+            // ── 접수는 체결이 아니다 ──
+            //
+            // **예전에는 `r.success`만 모았다.** 그런데 그건 주문이
+            // 접수됐다는 뜻이고, 실제로 줄었는지는 **포지션을 다시
+            // 읽어야** 안다. 이 저장소가 `closeEvidence`에서 이미 정한
+            // 규칙인데 이 경로만 안 따르고 있었다.
+            //
+            // 못 읽으면 null이다 — 0으로 적으면 "닫혔다"가 사실이 된다.
+            let after: number | null = null;
+            if (r.success) {
+              try {
+                const rr2 = await futuresPositionRisk(
+                  creds.exchange!, creds.key!, creds.secret!, t.symbol, creds.testnet!);
+                const amt2 = rr2.risk?.positionAmt;
+                after = amt2 == null ? null : Math.abs(Number(amt2));
+                if (!Number.isFinite(after as number)) after = null;
+              } catch { after = null; }
+            }
+            closed.push({
+              symbol: t.symbol, ok: !!r.success, message: r.message,
+              before, after, closePct: spec.closePct,
+            });
           }
         }
 
@@ -163,6 +189,9 @@ export async function POST(req: NextRequest) {
           // "정리됨"으로 그리면 안 된다.
           closed: closed.length ? closed : null,
           closeFailed: closed.filter(c => !c.ok).length,
+          // **완료 판정이 보는 것.** `D`가 없는 단계(CLOSE_AUTOMATED ·
+          // REDUCE_RISK)도 여기로 검사된다 — 주문 응답이 아니라 재조회 결과로.
+          targeted: closed.length ? closed : null,
         };
       }
     } catch (e: any) {
@@ -212,7 +241,12 @@ export async function POST(req: NextRequest) {
     } catch { postLeftover = null; }
   }
 
-  const done = killCompletion({ actionMode: modeForCheck, exec, leftover: postLeftover });
+  // **건너뛴 것과 못 한 것을 구분해서 넘긴다.** 안 그러면
+  // "이미 깨끗해서 재실행 생략"이 곧바로 502가 된다.
+  const done = killCompletion({
+    actionMode: modeForCheck, exec, leftover: postLeftover,
+    skipped: rerun.execute ? null : { reason: rerun.reason },
+  });
 
   return NextResponse.json({
     ok: done.complete,

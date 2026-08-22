@@ -48,9 +48,29 @@ export async function GET(req: NextRequest) {
   //
   // 켜져 있던 상태를 끄지도 않는다 — 모르는 것은 해제 사유가 아니다.
   if (bal.equity == null) {
-    const { status: keep } = evaluate(prev, prev.dailyStartEquity ?? 0, Date.now());
+    // **평가하지 않는다고 해놓고 evaluate를 부르지 않는다.**
+    //
+    // 예전 초안은 표시값을 만들려고 `evaluate(prev, prev.dailyStartEquity ?? 0, ...)`을
+    // 다시 불렀다. 그러면 기준선 조합에 따라 낙폭이 0%로도 -100%로도
+    // 나온다 — DB에 저장되지는 않지만 **화면이 거짓을 말한다.**
+    // 모르는 것은 계산하지 않고 모른다고 적는다.
     return NextResponse.json({
-      ...keep,
+      config: {
+        enabled: prev.enabled, dailyLimitPct: prev.dailyLimitPct,
+        weeklyLimitPct: prev.weeklyLimitPct, monthlyLimitPct: prev.monthlyLimitPct,
+        absLimitUsdt: prev.absLimitUsdt, actionMode: prev.actionMode,
+      },
+      // 켜져 있던 상태는 그대로 보여 준다 — 모르는 것은 해제 사유가 아니다.
+      active: prev.active,
+      level: prev.active ? 'active' : 'unknown',
+      triggeredAt: prev.triggeredAt, triggerReason: prev.triggerReason,
+      // **0으로 채우지 않는다.** 0은 "손실 100%"로 읽힌다.
+      equity: null,
+      daily: { startEquity: prev.dailyStartEquity, drawdownPct: null, remainingPct: null },
+      weekly: { startEquity: prev.weeklyStartEquity, drawdownPct: null, remainingPct: null },
+      monthly: { startEquity: prev.monthlyStartEquity, drawdownPct: null, remainingPct: null },
+      absLoss: null,
+      noTable: prev.noTable,
       testnet, equityOk: false, equityError: bal.error,
       evaluated: false,
       message: '총자산을 읽지 못해 손실 한도를 평가하지 않았습니다 — '
