@@ -358,7 +358,18 @@ export async function liveStopPrice(
  */
 export async function placeStop(
   c: VenueCreds,
-  i: { symbol: string; positionSide: 'LONG' | 'SHORT'; stopPrice: number; refPrice?: number | null },
+  i: {
+    symbol: string; positionSide: 'LONG' | 'SHORT'; stopPrice: number; refPrice?: number | null;
+    /**
+     * 이 손절에 새길 식별자.
+     *
+     * **없으면 표식 없는 주문이 나간다.** 그러면 나중에 그 주문이 고아로
+     * 남았을 때 소유 증거가 거래소 주문 번호 하나뿐이고, 그 번호를
+     * 장부에 안 적어 두면 아무것도 증명하지 못한다 — 정리 코드는 안전을
+     * 이유로 안 지우고, 손절은 거래소에 계속 남는다.
+     */
+    clientOrderId?: string | null;
+  },
 ): Promise<{ ok: boolean; orderId: string | null; message: string }> {
   try {
     const { futuresSetTpsl } = await import('../exchanges/futuresExec');
@@ -367,6 +378,7 @@ export async function placeStop(
     } as any, {
       symbol: i.symbol, positionSide: i.positionSide,
       tpPrice: null, slPrice: i.stopPrice, refPrice: i.refPrice ?? null,
+      clientOrderId: i.clientOrderId ?? null,
     } as any);
     const id = r?.sl?.orderId ?? r?.sl?.id ?? null;
     return { ok: r?.ok === true, orderId: id != null ? String(id) : null,
