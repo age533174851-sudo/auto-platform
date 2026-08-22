@@ -272,17 +272,37 @@ export async function confirmReservation(
   fill: {
     leverage?: number; entryPrice?: number;
     stopLoss?: number; takeProfit?: number; liquidationPrice?: number;
+    /**
+     * **어느 연결로 들어간 포지션인가.**
+     *
+     * 이게 없으면 청산 감시가 사용자의 활성 연결 중 하나를 `.limit(1)`로
+     * 골라서 찾는다. 활성 연결이 둘 이상이면 A 계좌에서 연 포지션을
+     * B 계좌에서 찾게 되고, 조회는 조용히 "포지션 없음"으로 돌아온다.
+     */
+    connectionId?: string | null;
   },
 ): Promise<void> {
   if (!sb || !reservationId) return;
+  const row: Record<string, any> = {
+    status: 'OPEN',
+    leverage: fill.leverage ?? null,
+    entry_price: fill.entryPrice ?? null,
+    stop_loss: fill.stopLoss ?? null,
+    take_profit: fill.takeProfit ?? null,
+    liquidation_price: fill.liquidationPrice ?? null,
+    connection_id: fill.connectionId ?? null,
+  };
   try {
-    await sb.from('ladder_daily_trades').update({
-      status: 'OPEN',
-      leverage: fill.leverage ?? null,
-      entry_price: fill.entryPrice ?? null,
-      stop_loss: fill.stopLoss ?? null,
-      take_profit: fill.takeProfit ?? null,
-      liquidation_price: fill.liquidationPrice ?? null,
-    }).eq('id', reservationId);
+    const { error } = await sb.from('ladder_daily_trades').update(row).eq('id', reservationId);
+    if (!error) return;
+    // **칸 하나 때문에 진입 기록을 통째로 잃지 않는다.**
+    //
+    // 065 이전 배포에는 `connection_id`가 없다. 그 한 칸 때문에 update가
+    // 실패하면 `status`가 예약 상태로 남고, 그러면 **거래소에는 포지션이
+    // 있는데 장부에는 열린 거래가 없다.** 그 포지션은 청산 감시가
+    // 영원히 못 본다.
+    if (!/connection_id/i.test(String((error as any).message))) return;
+    const { connection_id, ...withoutConn } = row;
+    await sb.from('ladder_daily_trades').update(withoutConn).eq('id', reservationId);
   } catch { /* 기록 실패가 주문을 되돌리지는 않는다 */ }
 }

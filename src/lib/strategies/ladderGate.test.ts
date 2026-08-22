@@ -21,7 +21,7 @@
 // 제약이 풀려 같은 날 두 번 들어간다 — 막으려던 사고보다 크다.
 
 import { test, eq, assert } from '../../test/harness';
-import { openLadderGate } from './ladderGate';
+import { openLadderGate, confirmReservation } from './ladderGate';
 
 /** delete 호출을 기록하는 최소 supabase 흉내 */
 function makeSb(opts: { reserveError?: any } = {}) {
@@ -107,5 +107,90 @@ export function runLadderGateTests() {
     const { sb } = makeSb({ reserveError: { message: 'duplicate key value violates unique constraint' } });
     const r = await openLadderGate(sb, { userId: 'u1', realizedEquity: 5_000_000 } as any);
     eq(r.allowed, false, 'code 없는 unique 위반을 통과시켰다');
+  });
+
+  // ── 진입 장부에 손절가와 연결을 적는가 ──
+  //
+  // **여기가 비어 있어서 청산 감시가 통째로 멈춰 있었다.**
+  //
+  // daily-ladder는 손절가를 계산해 거래소에는 걸었지만
+  // `confirmReservation`에는 leverage · entryPrice · liquidationPrice만
+  // 넘겼다. 그래서 `ladder_daily_trades.stop_loss`가 언제나 NULL이었고,
+  // `decideExits`는 손절가가 없는 줄을 건너뛴다 — 트레일링도 본전
+  // 이동도 시간 청산도 청산가 점검도 한 번도 안 돌았다.
+  //
+  // 연결도 같다. 없으면 감시가 사용자의 활성 연결 중 하나를 `.limit(1)`로
+  // 골라서 찾는다.
+  test('진입이 확정되면 손절가·익절가·연결을 함께 적는다', async () => {
+    const writes: any[] = [];
+    const sb: any = {
+      from: () => ({
+        update: (row: any) => ({ eq: async () => { writes.push(row); return { error: null }; } }),
+      }),
+    };
+    await confirmReservation(sb, 'r1', {
+      leverage: 32, entryPrice: 60000, liquidationPrice: 58000,
+      stopLoss: 59000, takeProfit: 62000, connectionId: 'conn-a',
+    });
+    eq(writes.length, 1);
+    eq(writes[0].status, 'OPEN');
+    eq(writes[0].stop_loss, 59000, '손절가를 안 적으면 청산 감시가 이 거래를 못 본다');
+    eq(writes[0].take_profit, 62000);
+    eq(writes[0].connection_id, 'conn-a', '연결을 안 적으면 감시가 계좌를 추측한다');
+    eq(writes[0].entry_price, 60000);
+  });
+
+  test('없는 값은 0이 아니라 null로 적는다', async () => {
+    // 0으로 적으면 손절가 0인 포지션이 되고, 그건 1R이 진입가만큼이라는 뜻이다.
+    const writes: any[] = [];
+    const sb: any = {
+      from: () => ({
+        update: (row: any) => ({ eq: async () => { writes.push(row); return { error: null }; } }),
+      }),
+    };
+    await confirmReservation(sb, 'r1', { leverage: 10, entryPrice: 100 });
+    eq(writes[0].stop_loss, null);
+    eq(writes[0].connection_id, null);
+  });
+
+  // **칸 하나 때문에 진입 기록을 통째로 잃지 않는다.**
+  //
+  // 065 이전 배포에는 `connection_id`가 없다. 그 칸 때문에 update가
+  // 실패하면 status가 예약 상태로 남고, 그러면 거래소에는 포지션이
+  // 있는데 장부에는 열린 거래가 없다 — 감시가 영원히 못 본다.
+  test('connection_id 칸이 없는 배포에서는 그 칸만 빼고 다시 적는다', async () => {
+    const writes: any[] = [];
+    let first = true;
+    const sb: any = {
+      from: () => ({
+        update: (row: any) => ({
+          eq: async () => {
+            writes.push(row);
+            if (first) { first = false; return { error: { message: 'column "connection_id" does not exist' } }; }
+            return { error: null };
+          },
+        }),
+      }),
+    };
+    await confirmReservation(sb, 'r1', {
+      leverage: 32, entryPrice: 60000, stopLoss: 59000, connectionId: 'conn-a',
+    });
+    eq(writes.length, 2, '한 칸 때문에 진입 기록을 통째로 잃었다');
+    eq(writes[1].connection_id, undefined);
+    eq(writes[1].status, 'OPEN', '두 번째 쓰기에서 OPEN이 빠지면 안 된다');
+    eq(writes[1].stop_loss, 59000);
+  });
+
+  test('다른 이유로 실패하면 같은 쓰기를 반복하지 않는다', async () => {
+    const writes: any[] = [];
+    const sb: any = {
+      from: () => ({
+        update: (row: any) => ({
+          eq: async () => { writes.push(row); return { error: { message: 'permission denied' } }; },
+        }),
+      }),
+    };
+    await confirmReservation(sb, 'r1', { leverage: 1, entryPrice: 1, connectionId: 'c' });
+    eq(writes.length, 1, '같은 이유로 또 실패할 쓰기를 반복했다');
   });
 }

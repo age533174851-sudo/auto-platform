@@ -972,10 +972,32 @@ export async function POST(req: NextRequest) {
     });
 
     if (exec.ok) {
+      // ── 장부에 손절가와 연결을 같이 적는다 ──
+      //
+      // **예전에는 이 셋만 적었다: leverage · entryPrice · liquidationPrice.**
+      // 그래서 `ladder_daily_trades.stop_loss`가 언제나 NULL이었고,
+      // 청산 감시(`decideExits`)는 맨 앞에서 이렇게 판단한다:
+      //
+      //     if (!entry || !stop) continue;
+      //
+      // 그 `continue`가 **시간 청산 검사보다 앞에 있다.** 결과: 손절가를
+      // 실제로 거래소에 걸어 놓고도 그 거래는 트레일링도, 본전 이동도,
+      // 5일 시간 청산도, 청산가 근접 점검도 **한 번도 못 받았다.**
+      // 화면에는 "청산 감시 정상"이 떠 있었다.
+      //
+      // 손절가는 여기 스코프에 이미 있다(`stopLoss` — 위 executeOrder에
+      // 넘긴 바로 그 값). 익절 사다리의 첫 칸도 같이 적는다.
+      //
+      // `connectionId`는 이 포지션을 **어느 계좌에서 찾을지**를 정한다.
+      // 없으면 감시가 사용자의 활성 연결 중 하나를 임의로 고른다.
+      const firstTp = exitPlan.orders.find(o => o.kind === 'PARTIAL_TP');
       await confirmReservation(sb, reservationId, {
         leverage: result.plan!.leverage,
         entryPrice: exec.avgPrice,
         liquidationPrice: result.plan!.liquidationPrice,
+        stopLoss,
+        takeProfit: firstTp?.price,
+        connectionId: body.connectionId ?? null,
       });
     } else {
       // 주문이 나가지 않았으면 오늘 하루를 돌려준다
