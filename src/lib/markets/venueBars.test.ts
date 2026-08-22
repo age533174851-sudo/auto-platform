@@ -15,7 +15,7 @@
 // 하나 잃고, 그건 지표를 한 칸씩 밀어 놓는다 — 조용히 틀리는 쪽이다.
 
 import { test, eq, assert } from '../../test/harness';
-import { intervalMs, dropIncompleteBar } from './venueBars';
+import { intervalMs, dropIncompleteBar, barsRequestPlan } from './venueBars';
 
 const H = 3_600_000;
 const D = 86_400_000;
@@ -95,5 +95,45 @@ export function runVenueBarsTests() {
     const r = dropIncompleteBar([bar(0)], '1h', 1800_000);
     eq(r.dropped, true);
     eq(r.rows.length, 0);
+  });
+
+  // ── 진행 중인 봉을 남겨야 하는 자리 ──
+  //
+  // 기본은 자른다. 신호 판정에서 미완성 봉을 쓰면 '마지막 종가'가 종가가
+  // 아니라 지금 가격이라, 돌파가 생겼다 사라지고 같은 봉 안에서 판정이
+  // 계속 바뀐다.
+  //
+  // **그런데 최고 도달가(high-water)는 다르다.** 지금 봉에서 찍은 고가도
+  // 실제로 도달한 가격이고, 버리면 트레일링이 최대 한 봉만큼 늦어진다 —
+  // 15분봉이면 15분이다. 그 사이에 되돌아오면 이익을 그냥 반납한다.
+  console.log('[봉 요청 계획 — 자를 것인가, 몇 개를 받을 것인가]');
+
+  test('기본은 자른다', () => {
+    const p = barsRequestPlan({ limit: 100 });
+    eq(p.dropIncomplete, true);
+    eq(p.want, 101, '자를 건데 하나를 더 안 받으면 지표 길이가 모자란다');
+  });
+
+  test('켜면 안 자르고, 하나를 더 받지도 않는다', () => {
+    const p = barsRequestPlan({ limit: 100, includeIncomplete: true });
+    eq(p.dropIncomplete, false);
+    eq(p.want, 100);
+  });
+
+  test('거래소 상한(1000)을 넘기지 않는다', () => {
+    eq(barsRequestPlan({ limit: 1000 }).want, 1000);
+    eq(barsRequestPlan({ limit: 5000, includeIncomplete: true }).want, 1000);
+  });
+
+  test('0이나 이상한 값을 받아도 최소 1개는 받는다', () => {
+    eq(barsRequestPlan({ limit: 0, includeIncomplete: true }).want, 1);
+    eq(barsRequestPlan({ limit: NaN as any, includeIncomplete: true }).want, 1);
+    eq(barsRequestPlan({ limit: -5, includeIncomplete: true }).want, 1);
+  });
+
+  test('켜는 것은 명시적일 때만이다 — undefined는 자른다', () => {
+    // 기본값이 뒤집히면 모든 신호 경로가 조용히 흔들린다.
+    eq(barsRequestPlan({ limit: 10, includeIncomplete: undefined }).dropIncomplete, true);
+    eq(barsRequestPlan({ limit: 10, includeIncomplete: false }).dropIncomplete, true);
   });
 }

@@ -95,6 +95,30 @@ export function dropIncompleteBar<T extends { openTime: number }>(
   return { rows, dropped: false };
 }
 
+/**
+ * 몇 개를 받고, 마지막 봉을 자를 것인가.
+ *
+ * **순수 함수로 빼 둔다.** 이 판단이 틀리면 두 방향으로 조용히 나쁘다:
+ *
+ *   자를 건데 하나를 더 안 받으면 → 지표 길이가 한 칸 모자란다
+ *   안 자를 건데 하나를 더 받으면 → 필요 없는 봉을 하나 끌고 다닌다
+ *
+ * 그리고 `includeIncomplete`는 **최고 도달가(high-water)를 재는 자리에서만**
+ * 켠다. 신호 판정에서 켜면 마지막 종가가 종가가 아니라 지금 가격이 되어
+ * 같은 봉 안에서 판정이 계속 바뀐다.
+ */
+export function barsRequestPlan(i: { limit: number; includeIncomplete?: boolean }):
+  { want: number; dropIncomplete: boolean } {
+  const drop = !i.includeIncomplete;
+  const base = Math.floor(Number(i.limit));
+  const n = Number.isFinite(base) ? base : 1;
+  return {
+    // 자를 때만 하나 더 받는다.
+    want: Math.max(1, Math.min(1000, n + (drop ? 1 : 0))),
+    dropIncomplete: drop,
+  };
+}
+
 interface RawBar { openTime: number; open: number; high: number; low: number; close: number; volume: number }
 
 function toVenueBars(rows: RawBar[]): VenueBars | null {
@@ -145,10 +169,26 @@ export async function fetchVenueBars(opts: {
    */
   startTimeMs?: number | null;
   endTimeMs?: number | null;
+  /**
+   * **진행 중인 마지막 봉을 남긴다.**
+   *
+   * 기본은 자른다. 신호 판정에서 미완성 봉을 쓰면 '마지막 종가'가 종가가
+   * 아니라 지금 가격이라, 돌파가 생겼다 사라지고 같은 봉 안에서 판정이
+   * 계속 바뀐다.
+   *
+   * 그런데 **최고 도달가(high-water)는 다르다.** 지금 봉에서 찍은 고가도
+   * 실제로 도달한 가격이고, 그걸 버리면 트레일링이 최대 한 봉만큼
+   * 늦어진다 — 15분봉이면 15분이다. 그 사이에 되돌아오면 이익을 그냥
+   * 반납한다.
+   *
+   * 그래서 **부르는 쪽이 명시적으로 켠다.** 기본값을 바꾸지 않는 이유는
+   * 신호 경로가 훨씬 많고, 그쪽에서 켜지면 조용히 틀리기 때문이다.
+   */
+  includeIncomplete?: boolean;
 }): Promise<VenueBarsResult> {
   const now = opts.nowMs ?? Date.now();
-  // 미완성 봉을 하나 버리므로 하나 더 받는다. 안 그러면 지표 길이가 모자란다.
-  const want = Math.max(1, Math.min(1000, Math.floor(opts.limit) + 1));
+  const plan = barsRequestPlan({ limit: opts.limit, includeIncomplete: opts.includeIncomplete });
+  const want = plan.want;
   const st = Number.isFinite(Number(opts.startTimeMs)) ? Number(opts.startTimeMs) : null;
   const et = Number.isFinite(Number(opts.endTimeMs)) ? Number(opts.endTimeMs) : null;
 
@@ -188,7 +228,9 @@ export async function fetchVenueBars(opts: {
         close: parseFloat(k?.c), volume: parseFloat(k?.v),
       })).sort((a, b) => a.openTime - b.openTime);
 
-      const cut = dropIncompleteBar(parsed, opts.interval, now);
+      const cut = plan.dropIncomplete
+        ? dropIncompleteBar(parsed, opts.interval, now)
+        : { rows: parsed, dropped: false };
       return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
     }
 
@@ -225,7 +267,9 @@ export async function fetchVenueBars(opts: {
         close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
 
-    const cut = dropIncompleteBar(parsed, opts.interval, now);
+    const cut = plan.dropIncomplete
+      ? dropIncompleteBar(parsed, opts.interval, now)
+      : { rows: parsed, dropped: false };
     return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
   } catch (e: any) {
     return { bars: null, source: opts.exchange, error: String(e?.message || e), droppedIncomplete: false };

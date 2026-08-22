@@ -18,7 +18,7 @@
 // 그래서 여기서 고정한다: 거래마다 그 거래의 연결이 망을 정한다.
 
 import { test, eq, assert } from '../../test/harness';
-import { decideExits } from './exitMonitor';
+import { decideExits, highWaterOf, HIGH_WATER_INTERVAL } from './exitMonitor';
 
 /** ladder_daily_trades 한 줄을 돌려주는 최소 supabase 흉내 */
 function sbWith(rows: any[]) {
@@ -73,19 +73,29 @@ export function runExitMonitorTests() {
   // **모르는 것을 조용히 넘기지 않는다.**
   // 연결을 못 읽었으면 기본 망으로 조회하되, 그 사실이 사유에 남아야
   // 한다. 안 그러면 "캔들 조회 실패"만 보이고 원인을 영영 모른다.
-  test('연결을 못 읽으면 그 사실을 사유에 적는다', async () => {
+  test('연결을 못 읽으면 가격 판단을 하지 않고 그 사실을 적는다', async () => {
     const out = await decideExits(sbWith([OPEN_ROW]) as any, {
       testnet: true,
       testnetFor: async () => null,        // 못 알아냄
       limit: 5,
     });
-    // 캔들 조회는 네트워크라 이 환경에서는 실패한다. 그 사유에 연결을
-    // 못 읽었다는 말이 함께 붙어야 한다.
-    const skipped = out.find(d => d.reason && d.reason.includes('캔들 조회 실패'));
-    if (skipped) {
-      assert(skipped.reason.includes('연결을 못 읽어'),
-        '연결을 못 읽은 사실이 안 적혔다: ' + skipped.reason);
-    }
+    eq(out.length, 1, '조용히 목록에서 빠졌다');
+    eq(out[0].action, 'NONE');
+    // **모르는 것을 조용히 넘기지 않는다.** 안 그러면 "캔들 조회 실패"만
+    // 보이고 원인을 영영 모른다.
+    assert(out[0].reason.includes('거래소를 확정하지 못해'), out[0].reason);
+  });
+
+  test('망은 아는데 거래소를 모르면 그것만으로는 부족하다', async () => {
+    // 예전에는 `testnetFor`만 있으면 바이낸스로 조회했다. 망을 알아도
+    // 거래소를 모르면 어느 시세인지 모르는 것은 같다.
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true,
+      testnetFor: async () => false,       // 망은 안다(실전)
+      limit: 5,
+    });
+    eq(out[0].action, 'NONE');
+    assert(out[0].reason.includes('거래소를 확정하지 못해'), out[0].reason);
   });
 
   // 시간 청산은 시세를 안 보므로 망과 무관하게 나와야 한다. 이게 망
@@ -180,6 +190,137 @@ export function runExitMonitorTests() {
     assert(st.includes('OPEN'), 'OPEN이 빠졌다');
     assert(st.includes('UNPROTECTED'), '보호 없는 포지션을 안 본다');
     assert(st.includes('RECONCILE_REQUIRED'), '나갔는지 모르는 주문을 안 본다');
+  });
+
+  console.log('[최고 도달 R — 순수 계산]');
+
+  test('롱은 고가로, 숏은 저가로 잰다', () => {
+    // 진입 100 · 손절 90 → 1R = 10
+    const long = highWaterOf({
+      highs: [105, 120, 110], lows: [98, 100, 105], closes: [104, 118, 108],
+      entry: 100, stop: 90, isLong: true,
+    })!;
+    eq(long.highWaterR, 2, '고가 120은 2R이다');
+    eq(long.lastPrice, 108);
+
+    // 진입 100 · 손절 110 → 1R = 10, 숏이므로 내려가면 이익
+    const short = highWaterOf({
+      highs: [102, 101, 100], lows: [95, 80, 90], closes: [96, 82, 92],
+      entry: 100, stop: 110, isLong: false,
+    })!;
+    eq(short.highWaterR, 2, '저가 80은 2R이다');
+  });
+
+  test('불리한 방향으로만 갔으면 0R이다', () => {
+    // 음수로 적으면 트레일링이 마이너스 R에서 출발한다.
+    const v = highWaterOf({
+      highs: [99, 98], lows: [95, 94], closes: [96, 95],
+      entry: 100, stop: 90, isLong: true,
+    })!;
+    eq(v.highWaterR, 0);
+  });
+
+  test('1R이 0이면 계산하지 않는다', () => {
+    // 0으로 나누면 Infinity가 되고, 그러면 무조건 트레일링이 걸린다.
+    eq(highWaterOf({ highs: [1], lows: [1], closes: [1], entry: 100, stop: 100, isLong: true }), null);
+  });
+
+  test('봉이 없으면 null이다 — 0R이 아니다', () => {
+    eq(highWaterOf({ highs: [], lows: [], closes: [], entry: 100, stop: 90, isLong: true }), null);
+  });
+
+  test('읽을 수 없는 봉은 건너뛰되 나머지는 센다', () => {
+    const v = highWaterOf({
+      highs: [NaN, 120], lows: [NaN, 100], closes: [NaN, 118],
+      entry: 100, stop: 90, isLong: true,
+    })!;
+    eq(v.highWaterR, 2);
+  });
+
+  console.log('[Gate 트레일링 — 시세를 그 거래소에서 읽는다]');
+
+  // ── 거래소를 모르면 가격으로 판단하지 않는다 ──
+  //
+  // 트레일링·본전 이동은 **주문을 내는 행동**이다. 근거가 확실하지
+  // 않으면 하지 않는 쪽이 맞다 — 손절은 그 자리에 그대로 있고,
+  // 시간 청산과 포지션 점검(거래소를 직접 읽는다)은 그대로 돈다.
+  test('거래소를 모르면 가격 판단을 아예 하지 않는다', async () => {
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true, limit: 5,
+      // venueFor를 안 준다 = 거래소를 모른다
+    });
+    eq(out.length, 1);
+    eq(out[0].action, 'NONE', '거래소도 모르면서 손절을 옮기려 했다');
+    assert(out[0].reason.includes('거래소를 확정하지 못해'), out[0].reason);
+    assert(!out[0].reason.includes('캔들 조회 실패'),
+      '바이낸스로 대신 조회했다 — Gate 포지션의 손절을 남의 시세로 옮긴다');
+  });
+
+  test('추측한 연결을 "안다"로 승격하지 않는다', async () => {
+    // 연결이 안 적힌 옛 줄에서는 부르는 쪽이 사용자의 활성 연결 중
+    // 하나를 임의로 골라 준다. 그 값을 확정으로 읽으면 A 계좌 포지션의
+    // 손절을 B 계좌 시세로 옮기게 된다.
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async () => ({ exchange: 'binance', testnet: true, guessed: true }),
+    });
+    eq(out[0].action, 'NONE', '추측한 연결로 가격 판단을 했다');
+    assert(out[0].reason.includes('거래소를 확정하지 못해'), out[0].reason);
+  });
+
+  test('연결이 안 적힌 옛 줄이라는 사실을 적는다', async () => {
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async () => null,
+    });
+    assert(out[0].reason.includes('연결이 적혀 있지 않습니다'), out[0].reason);
+  });
+
+  test('연결은 있는데 못 읽은 경우와 구분한다', async () => {
+    const row = { ...OPEN_ROW, connection_id: 'conn-a' };
+    const out = await decideExits(sbWith([row]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async () => null,
+    });
+    assert(out[0].reason.includes('연결을 읽지 못했습니다'), out[0].reason);
+  });
+
+  test('거래소를 몰라도 시간 청산은 그대로 돈다', async () => {
+    // 못 여는 것은 불편이고 못 닫는 것은 사고다. 가격 판단만 막는다.
+    const old = { ...OPEN_ROW, created_at: new Date(Date.now() - 10 * 86400_000).toISOString() };
+    const out = await decideExits(sbWith([old]) as any, {
+      testnet: true, maxHoldMs: 5 * 86400_000, limit: 5,
+      venueFor: async () => null,
+    });
+    const close = out.find(d => d.action === 'CLOSE');
+    assert(!!close, '거래소를 모른다고 10일 지난 포지션을 안 닫았다');
+  });
+
+  test('거래에 적힌 연결로 거래소를 묻는다', async () => {
+    const asked: any[] = [];
+    const row = { ...OPEN_ROW, connection_id: 'conn-a' };
+    await decideExits(sbWith([row]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async (i) => { asked.push(i); return { exchange: 'gate', testnet: true, guessed: false }; },
+    });
+    eq(asked.length, 1, '거래소를 물어보지 않았다');
+    eq(asked[0].connectionId, 'conn-a');
+    eq(asked[0].userId, 'u1');
+  });
+
+  test('거래소를 알면 사유에 그 이름이 남는다', async () => {
+    const out = await decideExits(sbWith([OPEN_ROW]) as any, {
+      testnet: true, limit: 5,
+      venueFor: async () => ({ exchange: 'gate', testnet: true, guessed: false }),
+    });
+    const skipped = out.find(d => d.reason.includes('캔들 조회 실패'));
+    assert(!!skipped, '거래소를 아는데 조회를 안 했다');
+    assert(skipped!.reason.includes('gate'), skipped!.reason);
+  });
+
+  test('최고가는 15분봉으로 잰다', () => {
+    // 간격을 바꾸면 R이 통째로 달라진다. 값으로 못 박는다.
+    eq(HIGH_WATER_INTERVAL, '15m');
   });
 
   test('열린 거래가 없으면 빈 결과다', async () => {
