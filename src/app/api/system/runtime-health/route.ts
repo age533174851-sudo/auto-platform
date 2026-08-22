@@ -64,6 +64,7 @@ export async function GET(req: NextRequest) {
   //
   // 워커가 살아 있는 것과 청산 감시가 도는 것은 **다른 사실이다.**
   // 2026-08-03부터 다섯 달 동안 워커는 멀쩡했고 청산 감시만 죽어 있었다.
+  const { exitCoverage, exitCoverageLine } = await import('@/lib/engine/exitCoverage');
   const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
   const em = await exitMonitorGate(sb);
   let lastRun: any = null;
@@ -139,6 +140,16 @@ export async function GET(req: NextRequest) {
     exitMonitor: {
       code: em.code,
       overdue: em.overdue,
+      // ── 무엇을 안 보고 있는가 ──
+      //
+      // `code: 'OK'`는 **감시가 제때 돌았다**는 뜻이지, 모든 포지션을
+      // 봤다는 뜻이 아니다. 감시는 `ladder_daily_trades`만 읽는데 그건
+      // 계단식 전용 표라, scalp·my-original-v1 포지션은 트레일링·
+      // 본전이동·시간청산·포지션점검을 한 번도 못 받는다.
+      //
+      // 그 사실이 어디에도 안 적히면 화면은 "청산 감시 정상"만 보여준다.
+      // **안 보는 것은 이상 없음이 아니다.**
+      coverage: { line: exitCoverageLine(), strategies: exitCoverage() },
       // 밀렸다고 바로 막지는 않는다. 막는 순간은 이 값이 true가 될 때다.
       blocksEntry: em.blockEntry,
       sinceSec: em.sinceSec,

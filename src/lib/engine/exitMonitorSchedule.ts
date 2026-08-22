@@ -130,12 +130,23 @@ export function exitMonitorOutcome(i: {
       message: '청산 감시가 200을 줬지만 결과를 읽지 못했습니다 — 성공으로 적지 않습니다' };
   }
   const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-  const cleanups = Array.isArray(b.orphanCleanups) ? b.orphanCleanups.length : null;
+  // **두 정리 경로를 함께 센다.**
+  //
+  // `orphanCleanups`는 계단식 표에 있는 거래에서 치운 것이고, `sweep`은
+  // 전략을 가리지 않고 `live_orders`를 훑어 치운 것이다. 앞의 것만 세면
+  // scalp·my-original-v1에서 치운 건이 워커 로그에서 사라진다.
+  const ladderCleanups = Array.isArray(b.orphanCleanups) ? b.orphanCleanups.length : null;
+  const sweepCleaned = num(b?.sweep?.cleaned);
+  const cleanups = ladderCleanups == null && sweepCleaned == null
+    ? null : (ladderCleanups ?? 0) + (sweepCleaned ?? 0);
   const checked = num(b.checked);
   const actionable = num(b.actionable);
+  // 확인조차 못 한 곳이 있으면 **성공 문장 뒤에 숨기지 않는다.**
+  const blind = num(b?.sweep?.unreadable);
   return {
     code: 'OK', checked, actionable, orphanCleanups: cleanups,
     message: `${checked ?? '?'}건 확인 · ${actionable ?? '?'}건 처리`
-      + (cleanups ? ` · 남은 보호주문 ${cleanups}건 정리` : ''),
+      + (cleanups ? ` · 남은 보호주문 ${cleanups}건 정리` : '')
+      + (blind ? ` · 확인 못 한 곳 ${blind}` : ''),
   };
 }
