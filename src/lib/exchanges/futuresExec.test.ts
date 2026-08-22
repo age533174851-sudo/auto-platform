@@ -15,7 +15,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict,
   reconcileDecision, futuresPlaceOrder, futuresFindOrderByClientId,
-  positionModeVerdict, __clearPositionModeCache,
+  positionModeVerdict, __clearPositionModeCache, futuresSetTpsl,
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
 } from './futuresExec';
 import { __clearGateSpecCache } from './gateFutures';
@@ -482,6 +482,59 @@ export function runFuturesExecTests() {
       eq(r.ok, false, '체결 0인데 성공으로 읽혔다');
       eq(r.status, 'UNFILLED');
       eq(r.filledQty, 0);
+    });
+  });
+
+  // ── 보호주문에 표식이 실제로 붙어 나가는가 ──
+  //
+  // 판정 함수(`protectiveClientOrderId`)가 맞아도 **배선이 없으면**
+  // 표식 없는 주문이 나간다. 이 저장소가 반복해서 당한 모양이라
+  // 실제 요청 본문을 보고 확인한다.
+  netTest('바이낸스 보호주문에 식별자가 붙는다', async () => {
+    // 바이낸스는 서명 파라미터를 **쿼리 문자열**로 보낸다. 본문이 아니다.
+    const bodies: string[] = [];
+    await withFetch((url) => {
+      if (!url.includes('/fapi/')) return null;
+      bodies.push(url);
+      if (url.includes('/fapi/v1/order')) {
+        return { body: { orderId: 1, status: 'NEW' } };
+      }
+      return { body: {} };
+    }, async () => {
+      await futuresSetTpsl(
+        { exchange: 'binance', key: 'k', secret: 's', testnet: true } as any,
+        { symbol: 'ETHUSDT', positionSide: 'LONG', tpPrice: null, slPrice: 1800,
+          clientOrderId: 'mo1-20260822ETHUSDE0' } as any,
+      );
+      const sent = bodies.join(' | ');
+      // **예전에는 이 칸이 아예 없었다.**
+      assert(/newClientOrderId/.test(sent), `표식 없이 나갔다 — ${sent.slice(0, 200)}`);
+      assert(!/E0SL/.test(sent), `이어 붙인 id가 나갔다 — ${sent.slice(0, 200)}`);
+      assert(/ETHUSDS0/.test(sent), `목적 글자가 안 바뀌었다 — ${sent.slice(0, 200)}`);
+    });
+  });
+
+  netTest('Gate 보호주문 text도 이어 붙이지 않는다', async () => {
+    const bodies: string[] = [];
+    await withFetch((url, init) => {
+      if (!url.startsWith(`https://${GATE_TESTNET}`)) return null;
+      // Gate는 본문에 담는다.
+      if (init?.body) bodies.push(String(init.body));
+      if (url.includes('price_orders')) return { body: { id: 7 } };
+      if (url.includes('/futures/usdt/contracts/')) {
+        return { body: { name: 'ETH_USDT', quanto_multiplier: '0.01', order_price_round: '0.01' } };
+      }
+      return { body: [] };
+    }, async () => {
+      await futuresSetTpsl(
+        { exchange: 'gate', key: 'k', secret: 's', testnet: true } as any,
+        { symbol: 'ETHUSDT', positionSide: 'LONG', tpPrice: null, slPrice: 1800,
+          refPrice: 2000, clientOrderId: 'mo1-20260822ETHUSDE0' } as any,
+      );
+      const sent = bodies.join(' | ');
+      if (/text/.test(sent)) {
+        assert(!/E0SL/.test(sent), `이어 붙인 text가 나갔다 — ${sent.slice(0, 200)}`);
+      }
     });
   });
 }

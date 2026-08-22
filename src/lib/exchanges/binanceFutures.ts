@@ -748,6 +748,18 @@ export async function placeFuturesTPSL(
      * 원해도 방법이 없었다.
      */
     workingType?: 'MARK_PRICE' | 'CONTRACT_PRICE';
+    /**
+     * **이 보호주문이 내 것이라는 표식.**
+     *
+     * 예전에는 이 칸이 아예 없었다. Gate 쪽은 `text`로 표식을 새기고
+     * 있었는데 **바이낸스 보호주문은 아무 표식 없이 나갔다.**
+     *
+     * 그러면 나중에 그 손절이 고아로 남았을 때 소유 증거가 장부에
+     * 적어 둔 주문 번호 하나뿐이다. 그 번호를 잃으면(트레일링으로
+     * 옮겼거나 기록이 실패했으면) 정리 코드는 "누구 것인지 모른다"로
+     * 그 주문을 남긴다 — 안전한 판단이지만, 그 손절은 거래소에 계속 쌓인다.
+     */
+    clientOrderId?: string | null;
   },
   testnet = true,
 ): Promise<FuturesOrderResult> {
@@ -759,6 +771,10 @@ export async function placeFuturesTPSL(
       symbol: sym, side: opts.side, type: opts.type, stopPrice: opts.stopPrice,
       workingType: opts.workingType || 'MARK_PRICE',
     };
+    // **두 시도가 같은 id를 쓴다.** 1차(closePosition)가 -4120으로
+    // 거절되고 2차(quantity)로 넘어갈 때 다른 id를 쓰면, 1차가 실제로는
+    // 접수됐던 경우에 손절이 둘 걸린다.
+    if (opts.clientOrderId) params.newClientOrderId = String(opts.clientOrderId);
     if (shape === 'quantity') {
       const q = opts.quantity ?? opts.fallbackQuantity;
       if (q == null || !Number.isFinite(Number(q)) || Number(q) <= 0) {
