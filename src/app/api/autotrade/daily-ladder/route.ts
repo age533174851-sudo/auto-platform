@@ -570,7 +570,11 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
     const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
-    const clientOrderId = `LD${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36);
+    // **식별자를 여기서 조립하지 않는다.** 청산 감시가 손절을 옮길 때
+    // 같은 문자열을 다시 만들어야 하는데, 두 곳에 적으면 한쪽만 바뀐다.
+    // 그때 옮긴 손절이 고아가 되어도 "내 것"이라고 증명하지 못한다.
+    const { ladderEntryClientOrderId } = await import('@/lib/strategies/ladderIds');
+    const clientOrderId = ladderEntryClientOrderId({ tradeDate, symbol });
 
     // 손절가는 파이프라인이 쓴 것과 같은 기준(마지막 종가 ± 손절거리)으로
     // 되돌려 계산한다. plan에는 거리(%)만 있고 가격이 없다.

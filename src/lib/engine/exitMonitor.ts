@@ -39,6 +39,14 @@ export interface ExitDecision {
    * 추측한 것과 아는 것은 다르다.
    */
   connectionId: string | null;
+  /**
+   * 이 거래의 거래일.
+   *
+   * 손절을 옮길 때 **그 손절이 내 것이라는 표식**을 새기려면 진입
+   * 식별자와 같은 열쇠가 필요하다(`ladderIds`). 여기서 문자열을 다시
+   * 조립하지 않고 값만 들고 나간다.
+   */
+  tradeDate: string | null;
   action: 'NONE' | 'MOVE_STOP' | 'CLOSE';
   newStop?: number;
   currentStop: number;
@@ -205,7 +213,7 @@ export async function decideExits(
 
   let q = sb
     .from('ladder_daily_trades')
-    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id')
+    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id, trade_date')
     // ── `OPEN` 하나만 보지 않는다 ──
     //
     // 보호 없는 포지션(`UNPROTECTED`)과 나갔는지 모르는 주문
@@ -228,6 +236,7 @@ export async function decideExits(
     const common = {
       tradeId: t.id, userId: t.user_id, symbol: t.symbol, side,
       connectionId: String(t.connection_id ?? '').trim() || null,
+      tradeDate: String(t.trade_date ?? '').trim() || null,
       currentStop: stop || 0, entryPrice: entry || 0,
     };
 

@@ -785,14 +785,74 @@ export async function GET(req: NextRequest) {
       // Gate 포지션은 진입은 되는데 손절을 옮길 수가 없었다 — 화면에는
       // "청산 감시 정상"이 떠 있었다.
       const opsMv = await import('@/lib/engine/venuePositionOps');
+      const { ladderEntryClientOrderId, ladderStopClientOrderId } =
+        await import('@/lib/strategies/ladderIds');
+      const { stopLedgerVerdict, pickStopLedgerRow } = await import('@/lib/engine/stopLedger');
       const venueMv = { exchange: cr.exchange, apiKey: key, apiSecret: secret, testnet };
+
+      // **식별자를 여기서 조립하지 않는다.** 진입과 같은 함수를 쓴다 —
+      // 두 곳에 적으면 한쪽만 바뀌고, 그때 옮긴 손절의 소유를 증명하지
+      // 못한다. 거래일을 모르면 표식 없이 보낸다(장부 번호가 1순위 증거다).
+      const entryCid = d.tradeDate
+        ? ladderEntryClientOrderId({ tradeDate: d.tradeDate, symbol: d.symbol })
+        : null;
+      const stopCid = d.tradeDate
+        ? ladderStopClientOrderId({ tradeDate: d.tradeDate, symbol: d.symbol, stopPrice: d.newStop! })
+        : null;
+
       const placed = await opsMv.placeStop(venueMv, {
         symbol: d.symbol, positionSide: d.side, stopPrice: d.newStop!,
+        clientOrderId: stopCid,
       });
 
       if (!placed.ok) {
         results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: `새 손절 실패: ${placed.message}` });
         continue;
+      }
+
+      // ── 새 번호를 **먼저** 적는다 ──
+      //
+      // 진입 때는 `sl_order_id`를 적고 있었는데 트레일링은 안 적었다.
+      // 그래서 손절을 한 번이라도 옮긴 포지션은, 그 손절이 나중에
+      // 고아가 됐을 때 소유를 증명하지 못한다 — 고아 정리는 적어 둔
+      // 번호를 1순위 증거로 쓰고 `ownedOnly`로 그것만 지운다.
+      //
+      // **취소보다 먼저 한다.** 반대로 하면 그 사이에 요청이 끊겼을 때
+      // 장부에는 이미 없는 옛 번호만 남고, 실제로 걸린 새 손절은
+      // 장부에 없어서 남의 것으로 보인다.
+      let ledger: any = null;
+      {
+        let targetFound = false;
+        let writeOk: boolean | null = null;
+        try {
+          let q = (sb as any).from('live_orders')
+            .select('id, client_order_id, sl_order_id, created_at')
+            .eq('symbol', d.symbol);
+          q = d.connectionId ? q.eq('connection_id', d.connectionId) : q.eq('user_id', d.userId);
+          const { data: rows } = await q.order('created_at', { ascending: false }).limit(10);
+          const row = pickStopLedgerRow(rows as any, entryCid);
+          targetFound = !!row?.id;
+          if (row?.id) {
+            const { error } = await (sb as any).from('live_orders')
+              .update({ sl_order_id: String(placed.orderId) }).eq('id', row.id);
+            writeOk = !error;
+          }
+        } catch { writeOk = false; }
+
+        const v = stopLedgerVerdict({
+          newOrderId: placed.orderId, targetFound, writeOk,
+        });
+        ledger = { code: v.code, recorded: v.recorded, reason: v.reason };
+
+        if (!v.cancelOld) {
+          // 손절이 잠깐 둘인 것은 위험하지 않다 — 둘 다 전량을 닫으므로
+          // 먼저 걸리는 쪽이 끝낸다. **번호를 잃는 쪽이 훨씬 비싸다.**
+          results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: true, exchange: cr.exchange,
+            connectionKnown: !cr.guessed,
+            newStop: d.newStop, cancelledOld: 0, cancelNote: v.reason,
+            ledger, reason: d.reason });
+          continue;
+        }
       }
 
       // 기존 손절 중 방금 건 것 외에는 취소한다.
@@ -811,7 +871,7 @@ export async function GET(req: NextRequest) {
       }
       results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: true, exchange: cr.exchange,
         connectionKnown: !cr.guessed,
-        newStop: d.newStop, cancelledOld: cancelled, cancelNote, reason: d.reason });
+        newStop: d.newStop, cancelledOld: cancelled, cancelNote, ledger, reason: d.reason });
     } catch (e: any) {
       results.push({ symbol: d.symbol, action: d.action, ok: false, error: e?.message || '실행 실패' });
     }
