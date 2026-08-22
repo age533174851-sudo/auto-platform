@@ -101,6 +101,32 @@ export function runLadderGateTests() {
     }
   });
 
+  // ── 붙잡아 둔 예약이 같은 날 재진입을 막는가 ──
+  //
+  // 진입 판정이 UNKNOWN이면 예약 행을 지우지 않고 상태만
+  // `RECONCILE_REQUIRED`로 옮긴다(`holdReservation`). 그 행이 남아 있는
+  // 동안 `(user_id, strategy_id, trade_date)` unique가 살아 있으므로
+  // 같은 날 두 번째 예약은 ALREADY_TRADED로 막힌다.
+  //
+  // **여기서 지켜야 할 것은 묵은 예약 청소가 그 행을 건드리지 않는
+  // 것이다.** 청소가 지우면 10분 뒤에 하루 잠금이 풀린다.
+  test('붙잡아 둔 예약은 묵은 예약 청소가 건드리지 않는다', async () => {
+    const { sb, deletes } = makeSb();
+    await openLadderGate(sb, { userId: 'u1', realizedEquity: 5_000_000 } as any);
+    const d = deletes.find(x => x.table === 'ladder_daily_trades');
+    // 청소는 RESERVED만 지운다. RECONCILE_REQUIRED · UNPROTECTED · OPEN은
+    // 이 조건에 걸리지 않는다.
+    eq(d.filters['status'], 'RESERVED',
+      '청소가 상태를 안 가린다 — 붙잡아 둔 예약까지 지워 하루 잠금이 풀린다');
+  });
+
+  test('붙잡아 둔 행이 있으면 같은 날 두 번째 예약은 막힌다', async () => {
+    // 그 행이 남아 있으므로 insert가 unique에 걸린다.
+    const { sb } = makeSb({ reserveError: { code: '23505', message: 'duplicate key' } });
+    const r = await openLadderGate(sb, { userId: 'u1', realizedEquity: 5_000_000 } as any);
+    eq(r.allowed, false, '미확정 주문이 있는데 같은 날 또 들어갔다');
+  });
+
   test('unique 위반 문구를 duplicate/unique 문자열로도 잡는다', async () => {
     // 드라이버가 code를 안 주고 메시지만 줄 때가 있다. 그때 통과시키면
     // 같은 날 두 번 들어간다.

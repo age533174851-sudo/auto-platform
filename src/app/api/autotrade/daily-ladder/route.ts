@@ -971,42 +971,100 @@ export async function POST(req: NextRequest) {
       apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
     });
 
-    if (exec.ok) {
-      // ── 장부에 손절가와 연결을 같이 적는다 ──
-      //
-      // **예전에는 이 셋만 적었다: leverage · entryPrice · liquidationPrice.**
-      // 그래서 `ladder_daily_trades.stop_loss`가 언제나 NULL이었고,
-      // 청산 감시(`decideExits`)는 맨 앞에서 이렇게 판단한다:
-      //
-      //     if (!entry || !stop) continue;
-      //
-      // 그 `continue`가 **시간 청산 검사보다 앞에 있다.** 결과: 손절가를
-      // 실제로 거래소에 걸어 놓고도 그 거래는 트레일링도, 본전 이동도,
-      // 5일 시간 청산도, 청산가 근접 점검도 **한 번도 못 받았다.**
-      // 화면에는 "청산 감시 정상"이 떠 있었다.
-      //
+    // ── `exec.ok`는 진입이 아니다 ──
+    //
+    // **예전에는 두 갈래뿐이었다:**
+    //
+    //     exec.ok ? confirmReservation(...)   // → status OPEN
+    //             : releaseReservation(...)   // → 예약 행 DELETE
+    //
+    // 그래서 "모른다"가 갈 곳이 없었다. `executeOrder`의 `ok: false`에는
+    // REJECTED(거부됨) · FAILED(못 보냄) · **UNKNOWN(나갔는지 모름)**이
+    // 섞여 있는데, 마지막 것을 지우면 `(user_id, strategy_id, trade_date)`
+    // unique가 풀린다 — **하루 1회 잠금이 열린다.** 그 상태에서 다음
+    // 주기가 오면 같은 날 두 번째 주문이 나가고, 앞 주문이 실제로는
+    // 체결돼 있었다면 포지션이 두 배가 된다.
+    //
+    // 반대쪽도 같다. `ok: true`는 접수(ACKED)만으로도 참이다. 그걸 진입
+    // 완료로 적으면 체결되지 않은 주문이 장부에 남고, 그 위에서 계산한
+    // 손익은 처음부터 틀린다.
+    //
+    // 증거를 모아 판정하는 함수(`enteredVerdict`)는 이미 저장소에 있고
+    // my-original-v1은 쓰고 있었다. **여기만 안 쓰고 있었다.**
+    const { enteredVerdict, outcomeOf } = await import('@/lib/engine/entryEvidence');
+    const { entryLedgerPlan } = await import('@/lib/strategies/entryLedger');
+    const opsAfter = await import('@/lib/engine/venuePositionOps');
+
+    // **거래소에 직접 물어본다.** 주문 응답은 우리가 보낸 것에 대한
+    // 답이고, 포지션 조회는 계좌의 사실이다.
+    const posAfter = exchange
+      ? await opsAfter.readOpenPosition(
+          { exchange, apiKey: conn.api_key, apiSecret: decryptSecret(conn.api_secret_enc ?? ''), testnet: useTestnet },
+          symbol)
+      : { ok: false, found: false, qty: null, side: null, error: '선물을 지원하지 않는 거래소' };
+
+    const firstTp = exitPlan.orders.find(o => o.kind === 'PARTIAL_TP');
+    const ev = enteredVerdict({
+      expectedSide: result.plan!.side,
+      settled: exec?.settled ?? null,
+      filledQty: exec?.filledQty ?? null,
+      avgPrice: exec?.avgPrice ?? null,
+      // **거절과 미확정을 구분해서 넘긴다.** `ok === false`를 전부
+      // '거절'로 넘기면 UNKNOWN이 NOT_ENTERED로 접혀서, 지금 고치려는
+      // 바로 그 구조로 되돌아간다.
+      rejected: exec?.status === 'REJECTED' || exec?.status === 'FAILED',
+      position: posAfter as any,
+      leverageConfirmed: exec?.leverageConfirmed ?? null,
+      positionModeConfirmed: exec?.positionModeConfirmed ?? null,
+      stop: exec?.protection?.stop ?? null,
+      takeProfit: exec?.protection?.takeProfit ?? null,
+      // 계단식은 분할 익절 사다리를 건다. 사다리가 있으면 익절도 증거다.
+      takeProfitRequired: !!firstTp,
+    });
+    const plan = entryLedgerPlan(ev.code);
+    const outcome = outcomeOf(ev);
+
+    const fill = {
+      leverage: result.plan!.leverage,
+      entryPrice: exec.avgPrice,
+      liquidationPrice: result.plan!.liquidationPrice,
       // 손절가는 여기 스코프에 이미 있다(`stopLoss` — 위 executeOrder에
-      // 넘긴 바로 그 값). 익절 사다리의 첫 칸도 같이 적는다.
-      //
-      // `connectionId`는 이 포지션을 **어느 계좌에서 찾을지**를 정한다.
-      // 없으면 감시가 사용자의 활성 연결 중 하나를 임의로 고른다.
-      const firstTp = exitPlan.orders.find(o => o.kind === 'PARTIAL_TP');
-      await confirmReservation(sb, reservationId, {
-        leverage: result.plan!.leverage,
-        entryPrice: exec.avgPrice,
-        liquidationPrice: result.plan!.liquidationPrice,
-        stopLoss,
-        takeProfit: firstTp?.price,
-        connectionId: body.connectionId ?? null,
-      });
-    } else {
-      // 주문이 나가지 않았으면 오늘 하루를 돌려준다
+      // 넘긴 바로 그 값). 이게 장부에 없으면 청산 감시가 이 거래에서
+      // 트레일링·본전이동을 계산하지 못한다.
+      stopLoss,
+      takeProfit: firstTp?.price,
+      // 이 포지션을 **어느 계좌에서 찾을지**를 정한다. 없으면 감시가
+      // 사용자의 활성 연결 중 하나를 임의로 고른다.
+      connectionId: body.connectionId ?? null,
+    };
+
+    if (plan.status === 'OPEN') {
+      await confirmReservation(sb, reservationId, fill);
+    } else if (plan.releaseDay) {
+      // **여기만 하루를 돌려준다.** 안 들어간 것이 확인된 경우뿐이다.
       await releaseReservation(sb, reservationId);
+    } else {
+      // 모르는 것과 보호 없는 포지션. **예약 행을 지우지 않는다** —
+      // 지우면 하루 잠금이 풀리고, 보호 없는 포지션을 아무도 안 본다.
+      const { holdReservation } = await import('@/lib/strategies/ladderGate');
+      await holdReservation(sb, reservationId, {
+        status: plan.status!,
+        reason: `${ev.reason} — ${plan.note}`,
+        fill,
+      });
     }
 
     return NextResponse.json({
       ...base,
-      executed: exec.ok,
+      // **접수를 진입으로 적지 않는다.** 증거로 확인됐을 때만 참이다.
+      executed: ev.entered,
+      outcome,
+      entryEvidence: {
+        code: ev.code, have: ev.have, missing: ev.missing,
+        retryable: ev.retryable, reason: ev.reason,
+        // 오늘 한 번을 돌려줬는가. 돌려주지 않았으면 재주문은 막힌다.
+        dayReleased: plan.releaseDay, ledgerStatus: plan.status,
+      },
       // 통과한 점검도 실어 보낸다. 막힐 때만 보여주면 사용자는 "점검이
       // 돌았는지" 알 수 없고, 확인 못 한 항목(unknown)이 있었다는 사실도
       // 사라진다 — 통과했지만 두 개는 확인 못 했다는 것은 알아야 한다.

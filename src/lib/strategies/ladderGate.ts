@@ -257,12 +257,65 @@ export async function openLadderGate(
 }
 
 /**
- * 예약 취소 — 주문이 실패했을 때 호출한다.
- * 이걸 빼먹으면 주문이 안 나갔는데도 그 날 하루가 소진된다.
+ * 예약 취소 — **주문이 나가지 않은 것이 확인됐을 때만** 호출한다.
+ *
+ * 이 함수는 예약 행을 지운다. 그러면
+ * `(user_id, strategy_id, trade_date)` unique가 풀리고 **하루 1회 잠금이
+ * 열린다.** 그래서 "모른다"에는 절대 쓰면 안 된다 — 앞 주문이 실제로는
+ * 체결돼 있었다면 같은 날 두 번째 주문이 나가 포지션이 두 배가 된다.
+ *
+ * 모르는 경우는 `holdReservation`이다.
  */
 export async function releaseReservation(sb: any, reservationId?: string): Promise<void> {
   if (!sb || !reservationId) return;
   try { await sb.from('ladder_daily_trades').delete().eq('id', reservationId); } catch { /* 무시 */ }
+}
+
+/**
+ * **모르는 것을 놓아주지 않는다.**
+ *
+ * 진입 판정이 `UNKNOWN`(나갔는지 모름)이나 `ENTERED_UNPROTECTED`
+ * (포지션은 있는데 보호가 없음)일 때 쓴다. 예약 행을 지우지 않으므로
+ * 하루 1회 잠금이 유지되고, 상태를 `RESERVED`에서 옮기므로 10분짜리
+ * 묵은 예약 청소에도 지워지지 않는다 — 그 청소는 `status='RESERVED'`
+ * 이면서 `entry_price`가 없는 줄만 지운다.
+ *
+ * 아는 값은 같이 적는다. 진입가를 모르면 **0이 아니라 null이다.**
+ */
+export async function holdReservation(
+  sb: any,
+  reservationId: string | undefined,
+  i: {
+    status: 'RECONCILE_REQUIRED' | 'UNPROTECTED';
+    reason: string;
+    fill?: {
+      leverage?: number; entryPrice?: number;
+      stopLoss?: number; takeProfit?: number; liquidationPrice?: number;
+      connectionId?: string | null;
+    };
+  },
+): Promise<void> {
+  if (!sb || !reservationId) return;
+  const f = i.fill ?? {};
+  const row: Record<string, any> = {
+    status: i.status,
+    exit_reason: String(i.reason ?? '').slice(0, 500),
+    leverage: f.leverage ?? null,
+    entry_price: f.entryPrice ?? null,
+    stop_loss: f.stopLoss ?? null,
+    take_profit: f.takeProfit ?? null,
+    liquidation_price: f.liquidationPrice ?? null,
+    connection_id: f.connectionId ?? null,
+  };
+  try {
+    const { error } = await sb.from('ladder_daily_trades').update(row).eq('id', reservationId);
+    if (!error) return;
+    // 065 이전 배포. **한 칸 때문에 상태를 못 옮기면 그 줄은 RESERVED로
+    // 남고, 10분 뒤 청소가 지워서 하루 잠금이 풀린다.**
+    if (!/connection_id/i.test(String((error as any).message))) return;
+    const { connection_id, ...withoutConn } = row;
+    await sb.from('ladder_daily_trades').update(withoutConn).eq('id', reservationId);
+  } catch { /* 기록 실패가 주문을 되돌리지는 않는다 */ }
 }
 
 /** 주문이 나간 뒤 체결 정보를 예약 행에 채운다. */
