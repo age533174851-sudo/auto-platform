@@ -869,6 +869,29 @@ export interface TpslOutcome {
 export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<TpslOutcome> {
   const hasTp = input.tpPrice != null && Number(input.tpPrice) > 0;
   const hasSl = input.slPrice != null && Number(input.slPrice) > 0;
+
+  // ── 보호주문 식별자는 이어 붙이지 않는다 ──
+  //
+  // 예전에는 이랬다:
+  //
+  //     clientOrderId: `${input.clientOrderId}SL`
+  //
+  // 소유권 형식은 **목적 글자 + 회차 숫자로 끝나야** 한다. 진입 id가
+  // `smo-abcdef1234ETHUSDE0`이면 `...E0SL`이 되는데 그건 그 형식이
+  // 아니다. `parseOwnedClientOrderId`가 UNKNOWN을 돌려주고,
+  // `orphanCleanupPlan`은 "누구 것인지 모르니 건드리지 않는다"로 그
+  // 주문을 남긴다 — 실제로 Gate에 스모크 SL/TP가 매번 쌓였다.
+  //
+  // `protectiveClientOrderId`가 **목적 글자를 바꿔 끼운다.** 그러면
+  // 왕복이 보장되고 길이도 안 늘어난다.
+  //
+  // **옛 형식(daily-ladder의 `LD…` 등)은 동작이 안 바뀐다** — 그 함수가
+  // 소유권 형식이 아닌 id는 예전처럼 이어 붙인다. 멱등 열쇠가 바뀌는
+  // 것은 이미 깨져 있던 쪽뿐이다.
+  const { protectiveClientOrderId } = await import('../engine/orderOwnership');
+  const cid = input.clientOrderId ? String(input.clientOrderId) : null;
+  const tpCid = cid ? protectiveClientOrderId(cid, 'TAKE_PROFIT') : undefined;
+  const slCid = cid ? protectiveClientOrderId(cid, 'STOP_LOSS') : undefined;
   if (!hasTp && !hasSl) {
     return { ok: false, tp: null, sl: null, message: '걸 손절·익절 가격이 없습니다' };
   }
@@ -901,7 +924,7 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
       else {
         const r = await gf.placeStopGateFutures(t.key, t.secret, {
           contract, spec: s,
-          clientOrderId: input.clientOrderId ? `${input.clientOrderId}TP` : undefined,
+          clientOrderId: tpCid,
         }, t.testnet);
         tp = { ok: r.success, orderId: r.orderId ?? null,
           message: s.note ? `${r.message} · ${s.note}` : r.message };
@@ -913,7 +936,7 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
       else {
         const r = await gf.placeStopGateFutures(t.key, t.secret, {
           contract, spec: s,
-          clientOrderId: input.clientOrderId ? `${input.clientOrderId}SL` : undefined,
+          clientOrderId: slCid,
         }, t.testnet);
         sl = { ok: r.success, orderId: r.orderId ?? null,
           message: s.note ? `${r.message} · ${s.note}` : r.message };
@@ -940,6 +963,8 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
     const r = await bf.placeFuturesTPSL(t.key, t.secret, {
       symbol: input.symbol, side: closeSide, stopPrice: Number(input.tpPrice),
       type: 'TAKE_PROFIT_MARKET', fallbackQuantity: input.quantity ?? null,
+      // **바이낸스 보호주문에도 표식을 새긴다.** 예전에는 없었다.
+      clientOrderId: tpCid,
     }, t.testnet);
     tp = { ok: !!r.success, orderId: r.orderId != null ? String(r.orderId) : null, message: r.message };
   }
@@ -947,6 +972,7 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
     const r = await bf.placeFuturesTPSL(t.key, t.secret, {
       symbol: input.symbol, side: closeSide, stopPrice: Number(input.slPrice),
       type: 'STOP_MARKET', fallbackQuantity: input.quantity ?? null,
+      clientOrderId: slCid,
     }, t.testnet);
     sl = { ok: !!r.success, orderId: r.orderId != null ? String(r.orderId) : null, message: r.message };
   }
