@@ -180,6 +180,159 @@ async function runPositionGuards(
 }
 
 /**
+ * **전략을 가리지 않는 고아 보호주문 정리.**
+ *
+ * 위의 `runPositionGuards`는 `decideExits`가 준 목록만 본다. 그 함수가
+ * 읽는 표는 `ladder_daily_trades` 하나이고, 그건 계단식 전용 표다 —
+ * `scalp`과 `my-original-v1`의 포지션은 거기에 한 줄도 없다.
+ *
+ * 그래서 거래소 SL/TP가 그 전략들의 포지션을 닫아 준 뒤, 남은 형제
+ * 주문을 아무도 안 치웠다. `my-original-v1`에는 정리가 있지만 **다음
+ * 진입 직전**에만 돈다 — 하루 1회 전략이라 최소 하루, 예약을 끄면 영원히
+ * 남는다. 실제 Gate 계정의 Positions 0 / Orders 1이 그 경로다.
+ *
+ * 여기서는 모든 전략이 함께 쓰는 `live_orders`를 본다. 거기에는 걸 때
+ * 받아 적은 번호와 **어느 연결로 나갔는지**가 같이 있다.
+ *
+ * **연결을 추측하지 않는다.** `connection_id`가 없는 줄은 대상에서 빼고
+ * 그 사실을 응답에 남긴다 — 사용자의 활성 연결 중 아무거나 고르면
+ * 실계좌 포지션을 테스트넷에 물어보게 된다.
+ */
+async function sweepOrphanProtection(sb: any): Promise<{
+  targets: number; cleaned: number; stillPresent: number; unreadable: number;
+  skipped: Array<{ code: string; count: number; reason: string }>;
+  details: any[]; summary: string; error: string | null;
+}> {
+  const { sweepTargets, sweepDecision, sweepSummary } = await import('@/lib/engine/orphanSweep');
+  const out = {
+    targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0,
+    skipped: [] as Array<{ code: string; count: number; reason: string }>,
+    details: [] as any[], summary: '', error: null as string | null,
+  };
+
+  let rows: any[] = [];
+  try {
+    const { data, error } = await (sb as any).from('live_orders')
+      .select('connection_id, user_id, symbol, sl_order_id, tp_order_id, created_at')
+      .or('sl_order_id.not.is.null,tp_order_id.not.is.null')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    // **조회 실패를 '없음'으로 적지 않는다.** 0건과 못 읽은 것은 다르다.
+    if (error) {
+      out.error = String(error.message).slice(0, 200);
+      out.summary = `보호주문 기록을 읽지 못했습니다 — ${out.error}`;
+      return out;
+    }
+    rows = Array.isArray(data) ? data : [];
+  } catch (e: any) {
+    out.error = String(e?.message || e).slice(0, 200);
+    out.summary = `보호주문 기록을 읽지 못했습니다 — ${out.error}`;
+    return out;
+  }
+
+  const sel = sweepTargets(rows, { limit: 40 });
+  out.targets = sel.targets.length;
+  out.skipped = sel.skipped;
+  if (sel.targets.length === 0) {
+    out.summary = sweepSummary({ targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0,
+      skipped: sel.skipped.reduce((a, b) => a + b.count, 0) });
+    return out;
+  }
+
+  const ops = await import('@/lib/engine/venuePositionOps');
+  const { decryptSecret } = await import('@/lib/exchanges/crypto');
+  const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
+  const { cleanupOwnedProtectionWhenFlat, loadOwnedProtectionIds } =
+    await import('@/lib/engine/protectionCleanup');
+
+  /** 연결 하나당 한 번만 읽는다. **연결이 망과 거래소를 정한다** */
+  const credCache = new Map<string, any>();
+  const credsOf = async (connectionId: string) => {
+    if (!credCache.has(connectionId)) {
+      let v: any = null;
+      try {
+        const { data: c } = await sb.from('exchange_connections')
+          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
+          .eq('id', connectionId).maybeSingle();
+        if (c && !(c as any).has_withdrawal) {
+          const ex = resolveExecExchange((c as any).exchange_id).exchange;
+          // **모르는 거래소를 바이낸스로 읽지 않는다.**
+          if (ex) {
+            v = {
+              exchange: ex,
+              apiKey: (c as any).api_key,
+              apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),
+              testnet: (c as any).is_testnet !== false,
+            };
+          }
+        }
+      } catch { v = null; }
+      credCache.set(connectionId, v);
+    }
+    return credCache.get(connectionId);
+  };
+
+  for (const t of sel.targets) {
+    try {
+      const venue = await credsOf(t.connectionId);
+      if (!venue) {
+        out.unreadable += 1;
+        out.details.push({ symbol: t.symbol, code: 'NO_VENUE', ok: false,
+          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+        continue;
+      }
+
+      const pos = await ops.readOpenPosition(venue, t.symbol);
+      const owned = await loadOwnedProtectionIds(sb, {
+        connectionId: t.connectionId, symbol: t.symbol, limit: 5,
+      });
+      const d = sweepDecision({
+        position: { ok: pos.ok, found: pos.found },
+        ownedIdCount: owned.ids.length,
+      });
+
+      if (!d.cleanup) {
+        if (d.code === 'UNREADABLE') {
+          out.unreadable += 1;
+          out.details.push({ symbol: t.symbol, code: d.code, ok: false, reason: d.reason });
+        }
+        // 포지션이 있는 것과 번호가 없는 것은 **매 주기 도는 정상 상태**다.
+        // 그것까지 적으면 응답이 그것만으로 덮여 진짜 신호가 묻힌다.
+        continue;
+      }
+
+      const r = await cleanupOwnedProtectionWhenFlat(venue, t.symbol, {
+        position: { ok: pos.ok, found: pos.found, qty: pos.qty },
+        // 전략 id는 들고 있지 않다. **적어 둔 번호와 일치하는 것만** 지운다.
+        myStrategyId: '', ownedIds: owned.ids, ownedOnly: true,
+      });
+      if (r.code === 'NOTHING_TO_DO') continue;
+
+      if (r.ok) out.cleaned += 1;
+      else if (r.stillPresent && r.stillPresent.length > 0) out.stillPresent += 1;
+      else out.unreadable += 1;
+
+      out.details.push({
+        symbol: t.symbol, connectionId: String(t.connectionId).slice(0, 8),
+        code: r.code, ok: r.ok, cancelled: r.cancelled,
+        stillPresent: r.stillPresent, unknown: r.unknown, reason: r.reason,
+      });
+    } catch (e: any) {
+      // **조용히 넘기지 않는다.** 못 치웠다는 사실이 남아야 한다.
+      out.unreadable += 1;
+      out.details.push({ symbol: t.symbol, code: 'SWEEP_ERROR', ok: false,
+        reason: String(e?.message || e).slice(0, 200) });
+    }
+  }
+
+  out.summary = sweepSummary({
+    targets: out.targets, cleaned: out.cleaned, stillPresent: out.stillPresent,
+    unreadable: out.unreadable, skipped: sel.skipped.reduce((a, b) => a + b.count, 0),
+  });
+  return out;
+}
+
+/**
  * SENT/UNKNOWN으로 남은 주문을 거래소 조회로 확정한다.
  *
  * 연결이 끊겼다 붙은 뒤에 반드시 거쳐야 하는 단계다. 주문을 재전송하지
@@ -512,6 +665,26 @@ export async function GET(req: NextRequest) {
   // 응답에만 싣는다** — 정리 여부가 청산 판단을 바꾸면 안 된다.
   const orphanCleanups: any[] = [];
   const guardFindings = await runPositionGuards(sb, decisions, testnet, connFor, orphanCleanups);
+
+  // ── 전략을 가리지 않는 고아 보호주문 정리 ──
+  //
+  // 위 `runPositionGuards`는 계단식 표(`ladder_daily_trades`)에 있는
+  // 거래만 본다. scalp·my-original-v1의 포지션은 거기에 없어서, 거래소
+  // SL/TP가 닫아 준 뒤 남은 형제 주문을 아무도 안 치웠다.
+  //
+  // **dryRun에서는 돌리지 않는다.** 이 경로는 실제로 취소를 보낸다.
+  const sweep = dryRun
+    ? { targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0, skipped: [],
+        details: [], summary: '점검 모드라 고아 정리를 돌리지 않았습니다', error: null }
+    : await sweepOrphanProtection(sb);
+
+  // ── 무엇을 안 보고 있는가 ──
+  //
+  // 응답에 `checked`·`actionable` 숫자만 있으면, 어떤 전략이 아예 목록에
+  // 오르지 않은 것과 볼 것이 없던 것이 구분되지 않는다. **안 보는 것은
+  // '이상 없음'이 아니다.**
+  const { exitCoverage, exitCoverageLine } = await import('@/lib/engine/exitCoverage');
+  const coverage = { line: exitCoverageLine(), strategies: exitCoverage() };
   for (const g of guardFindings) {
     if (g.verdict.action !== 'CLOSE') continue;
     const d = decisions.find(x => x.tradeId === g.tradeId);
@@ -528,7 +701,7 @@ export async function GET(req: NextRequest) {
   if (dryRun || actionable.length === 0) {
     return NextResponse.json({
       ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
-      alerts, recovery, orphanCleanups,
+      alerts, recovery, orphanCleanups, sweep, coverage,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
         highWaterR: Number(d.highWaterR.toFixed(3)),
@@ -558,7 +731,7 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json({
       ok: true, skipped: true, code: 'LEASE_LOST', checked: decisions.length, actionable: 0,
-      orphanCleanups,
+      orphanCleanups, sweep, coverage,
       message: '실행 도중 임차가 다른 워커에게 넘어가 주문을 내지 않았습니다 — 그쪽이 같은 판단을 합니다',
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
@@ -700,15 +873,19 @@ export async function GET(req: NextRequest) {
     status: failed.length > 0 ? 'FAILED' : 'OK',
     positions_scanned: decisions.length,
     actions: results.filter(r => r && r.ok === true).length,
-    orphan_cleanups: Array.isArray(orphanCleanups) ? orphanCleanups.length : null,
-    cleanup_detail: Array.isArray(orphanCleanups) && orphanCleanups.length ? orphanCleanups : null,
+    // 계단식 경로에서 치운 것 + 전략 무관 정리에서 치운 것을 함께 센다.
+    orphan_cleanups: (Array.isArray(orphanCleanups) ? orphanCleanups.length : 0) + sweep.cleaned,
+    cleanup_detail: (orphanCleanups.length || sweep.details.length)
+      ? { ladder: orphanCleanups, sweep: sweep.details, sweepSummary: sweep.summary }
+      : null,
     errors: failed.length > 0
       ? failed.map(r => `${r.symbol}: ${String(r.error || '').slice(0, 120)}`).join(' · ').slice(0, 1000)
       : null,
   });
 
   return NextResponse.json({
-    ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery, orphanCleanups, results,
+    ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery,
+    orphanCleanups, sweep, coverage, results,
     runId, cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
