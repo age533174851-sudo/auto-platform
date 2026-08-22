@@ -1,6 +1,9 @@
 'use client';
 import { A } from '@/lib/theme/colors';
 import { errorTextOf } from '@/lib/http/errorText';
+// **서버는 주문을 왜 막았는지 다 보낸다.** 그걸 버리지 않는다.
+import PreTradeChecklist from '@/components/PreTradeChecklist';
+import { checklistFromResponse } from '@/lib/engine/checklistResponse';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import type { BotRun, ExecMode, RiskEvent, Signal, SignalState, StratStatus, StratType, Strategy } from '@/types/domain';
 import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
@@ -30,6 +33,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
   const [connections,setConnections]=useState<any[]>([]);
   const [connId,setConnId]=useState('');
   const [slEditAsset,setSlEditAsset]=useState('');
+  // ── 주문이 왜 막혔는가 ──
+  //
+  // 점검에 막히면 서버가 여덟 항목의 통과·차단·확인불가를 전부 보낸다.
+  // 예전에는 요약 한 줄만 토스트로 띄우고 나머지를 버렸다.
+  // **null은 "막힌 적 없음"이고, 값이 있으면 "이것 때문에 막혔다"이다.**
+  const [blockedChecklist,setBlockedChecklist]=useState<any>(null);
   const [quickActions,setQuickActions]=useState<string[]>(()=>{
     try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse','tpsl']; }
     catch { return ['close_all','close_50','close_25','add','reverse','tpsl']; }
@@ -526,6 +535,17 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         const d = await r.json();
         if (!r.ok || d.error) {
           const errMsg = d.message || errorTextOf(d, '주문 실패');
+          // ── 왜 막혔는지를 버리지 않는다 ──
+          //
+          // 주문 전 점검에 막히면 서버는 409와 함께 여덟 항목의 통과·
+          // 차단·확인불가를 **전부** 보낸다. 예전에는 `d.message` 한 줄만
+          // 토스트로 띄우고 나머지를 버렸다 — 사용자는 시계가 어긋났는지,
+          // 배율이 다른지, 미결 주문이 남았는지 알 수 없었고 그래서 같은
+          // 실패를 반복했다.
+          //
+          // `PreTradeChecklist`는 그걸 그리려고 만든 화면인데 어디에도
+          // 붙어 있지 않았다. 여기가 그 자리다.
+          setBlockedChecklist(checklistFromResponse(d));
           setOrders(prev=>[{ id:uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
             price:krwPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'failed', pnl:0, pnlPct:0,
             openedAt:new Date().toISOString(), note:errMsg, emotion:'😟' } as Order, ...prev]);
@@ -1702,6 +1722,36 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                 {side==='매수'?'매수 확인':'매도 확인'}
               </button>
             </div>
+          </div>
+        </>
+      )}
+
+      {/* ── 주문이 왜 막혔는가 ──
+
+          점검에 막히면 서버는 여덟 항목의 통과·차단·확인불가를 **전부**
+          보낸다. 예전에는 요약 한 줄만 토스트로 띄우고 나머지를 버렸다 —
+          사용자는 시계가 어긋났는지, 배율이 다른지, 미결 주문이 남았는지
+          알 수 없었고 그래서 같은 실패를 반복했다.
+
+          `PreTradeChecklist`는 그걸 그리려고 만든 화면인데 어디에도 붙어
+          있지 않았다(만들어 놓고 배선을 안 함). 여기가 그 자리다.
+
+          **주문 경로는 건드리지 않는다.** 이미 돌아온 응답을 그릴 뿐이다. */}
+      {blockedChecklist && (
+        <>
+          <div onClick={()=>setBlockedChecklist(null)}
+               style={{position:'fixed',inset:0,background:'rgba(0,0,0,.6)',zIndex:998}}/>
+          <div style={{position:'fixed',left:0,right:0,bottom:0,zIndex:999,background:T.surf,
+                       borderTopLeftRadius:18,borderTopRightRadius:18,padding:'18px 16px 24px',
+                       maxHeight:'80vh',overflowY:'auto'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+              <span style={{color:T.red,fontSize:14,fontWeight:800}}>주문이 나가지 않았습니다</span>
+              <button onClick={()=>setBlockedChecklist(null)}
+                      style={{marginLeft:'auto',minHeight:32,padding:'6px 12px',background:'transparent',
+                              color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,
+                              fontSize:12,cursor:'pointer'}}>닫기</button>
+            </div>
+            <PreTradeChecklist verdict={blockedChecklist}/>
           </div>
         </>
       )}

@@ -69,9 +69,6 @@ const KNOWN = {
   'api:strategies/list': '전략 목록. 화면에서 부르는 곳이 없다',
   'api:strategies/save': '전략 저장. 화면에서 부르는 곳이 없다',
   'api:translate/status': '번역 상태. 화면에서 부르는 곳이 없다',
-  'component:src/components/PreTradeChecklist.tsx':
-    '거래 전 점검 화면. **안전 기능인데 어디에도 안 붙어 있다** — '
-    + '주문이 막혔을 때 사용자가 어느 항목이 왜 막았는지 볼 수 없다',
   'component:src/components/SmartLogo.tsx':
     'AssetLogo가 같은 일을 하고 그쪽이 쓰인다',
   'component:src/components/SourceBadge.tsx':
