@@ -244,3 +244,116 @@ export function savedButBlockedText(v: OutcomeVerdict): string {
   if (v.tone !== 'bad') return '';
   return '자동매매는 켜졌지만 첫 실행이 안전 점검에서 차단되었습니다 — 예약은 그대로 살아 있고, 막힌 항목을 고치면 다음 확인 때 진입합니다';
 }
+
+// ── 첫 평가를 두 번 돌리지 않는다 ─────────────────────────
+//
+// **자동매매를 켜면 실평가 경로가 둘이었다.**
+//
+//   [켜기] → POST /api/autotrade/schedule
+//              ├ 예약 저장
+//              └ 서버가 evaluateIfDue() 실행        ← 첫 번째
+//          → 응답(firstEvaluation 포함)
+//          → AutotradeControl.save()
+//              └ runFirstCheck() → 전략 API POST     ← 두 번째
+//
+// 두 번째는 `checkOnly`가 아니다. **진짜 실행 요청**이다.
+//
+// 지금은 아래쪽 중복 방어가 받아 준다 — `last_run_at` compare-and-set,
+// scalp의 봉 단위 키, 원본 v1의 거래일 기준 결정적 clientOrderId.
+// 그래서 "주문이 무조건 두 번 나간다"고는 말할 수 없다.
+//
+// **그렇다고 둘을 유지할 이유는 없다.** 실평가 경로 둘을 아래쪽 방어에
+// 기대어 두는 것은, 그 방어 중 하나라도 약해지는 날 주문이 두 번 나간다는
+// 뜻이다. 그리고 그 날은 코드를 고치는 사람이 이 구조를 모를 때 온다.
+//
+// 서버는 이미 첫 평가 결과를 응답에 담아 준다. 화면은 그걸 그리면 된다.
+
+/** `/api/autotrade/schedule` 응답의 `firstEvaluation` */
+export interface FirstEvaluation {
+  ran?: boolean;
+  outcome?: string | null;
+  summary?: string | null;
+  executed?: boolean | null;
+  strategyId?: string | null;
+  code?: string | null;
+  note?: string | null;
+  saveError?: string | null;
+}
+
+/**
+ * 서버가 돌린 첫 평가를 화면이 쓰는 판정으로.
+ *
+ * **못 돌린 것과 조건이 안 맞은 것을 섞지 않는다.** 앞은 "아직 모른다"
+ * 이고 뒤는 "정상인데 지금은 아니다"다. 둘을 같은 문장으로 적으면
+ * 사용자는 켜졌는지 아닌지를 알 수 없다.
+ */
+export function firstEvaluationVerdict(
+  fe: FirstEvaluation | null | undefined,
+): OutcomeVerdict {
+  if (!fe) {
+    return {
+      outcome: 'SAVED_ONLY', tone: 'info', ordered: false,
+      label: '예약이 저장됐습니다',
+      detail: '첫 평가 결과가 응답에 없습니다 — 실행기가 주기적으로 확인합니다',
+    };
+  }
+
+  if (fe.ran !== true) {
+    // 못 돌린 이유가 있으면 그대로 적는다. 지어내지 않는다.
+    return {
+      outcome: 'SAVED_ONLY', tone: 'info', ordered: false,
+      label: '예약이 저장됐습니다 — 아직 평가하지 않았습니다',
+      detail: String(fe.note ?? fe.code ?? '첫 평가를 돌리지 않았습니다')
+        + ' · 실행기가 주기적으로 확인합니다',
+    };
+  }
+
+  const outcome = String(fe.outcome ?? '').toUpperCase();
+  const summary = String(fe.summary ?? '').trim();
+  // 저장에 실패했으면 그 사실을 덧붙인다 — 평가는 돌았는데 기록이
+  // 없으면 나중에 "왜 아무 기록이 없지"의 답이 어디에도 없다.
+  const saveNote = fe.saveError ? ` (실행 기록을 남기지 못했습니다: ${fe.saveError})` : '';
+
+  if (outcome === 'ENTERED') {
+    return {
+      // **주문이 나갔다는 것과 체결됐다는 것은 다르다.**
+      outcome: 'ORDER_SENT', tone: 'good', ordered: true,
+      label: '첫 주문이 나갔습니다',
+      detail: (summary || '진입 조건이 맞아 주문을 보냈습니다') + saveNote,
+      action: '체결과 보호주문은 아래 실행 기록에서 확인하세요',
+    };
+  }
+  if (outcome === 'NO_SIGNAL') {
+    return {
+      outcome: 'WAITING', tone: 'info', ordered: false,
+      label: '조건이 맞지 않아 관망합니다',
+      // **이건 실패가 아니다.** 실패로 읽히면 사용자가 설정을 헤집는다.
+      detail: (summary || '지금은 진입 조건이 아닙니다') + ' — 정상입니다' + saveNote,
+    };
+  }
+  if (outcome === 'BLOCKED') {
+    return {
+      outcome: 'BLOCKED_CHECKLIST', tone: 'warn', ordered: false,
+      label: '안전 점검이 막았습니다',
+      detail: (summary || '점검 항목 중 하나가 통과하지 못했습니다') + saveNote,
+      action: '아래 실행 기록에서 어느 항목인지 확인하세요',
+    };
+  }
+  if (outcome === 'FAILED') {
+    return {
+      outcome: 'ERROR', tone: 'bad', ordered: false,
+      label: '첫 평가가 실패했습니다',
+      detail: (summary || '이유를 확인하지 못했습니다') + saveNote,
+      action: '예약은 저장됐습니다 — 실행기가 다음 주기에 다시 시도합니다',
+    };
+  }
+
+  // **모르는 결과를 성공으로 적지 않는다.**
+  return {
+    outcome: 'ERROR', tone: 'warn', ordered: false,
+    label: '첫 평가 결과를 해석하지 못했습니다',
+    detail: `알 수 없는 결과(${outcome || '없음'})입니다${summary ? ` — ${summary}` : ''}`
+      + saveNote + ' · 정상이라는 뜻이 아닙니다',
+    action: '아래 실행 기록을 확인하세요',
+  };
+}
