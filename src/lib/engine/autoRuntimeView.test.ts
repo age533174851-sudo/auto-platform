@@ -124,4 +124,55 @@ export function runAutoRuntimeViewTests() {
     eq(agoText(null), '시각 모름');
     eq(agoText(undefined), '시각 모름');
   });
+
+  // ── Preview에서 운영 Worker가 없는 것은 장애가 아니다 ──
+  //
+  // 미리보기 배포에 운영 Worker를 붙이지 않는다. 그 상태를 빨갛게
+  // 그리면 **운영이 멀쩡한데 미리보기를 운영처럼 진단**하게 되고,
+  // 사람이 운영을 고치러 간다.
+  console.log('[실행기 — 어느 배포에서 보고 있는가]');
+
+  test('Preview에서 "한 번도 보고한 적이 없습니다"라고 적지 않는다', () => {
+    const v = autoRuntimeView({ worker: { status: 'absent' }, deployEnv: 'preview' });
+    eq(v.health, 'ABSENT');
+    eq(v.tone, 'GRAY', 'Preview에서 운영 Worker 없음을 빨갛게 칠했다');
+    assert(!/한 번도 보고한 적이 없습니다/.test(v.sub || ''), v.sub || '');
+    assert((v.sub || '').includes('운영 Worker는 여기에 보고하지 않습니다'), v.sub || '');
+    assert((v.action || '').includes('운영 배포에서 확인'), v.action || '');
+  });
+
+  test('운영에서는 그대로 장애다', () => {
+    const v = autoRuntimeView({ worker: { status: 'absent' }, deployEnv: 'production' });
+    eq(v.health, 'ABSENT');
+    eq(v.tone, 'RED', '운영에서 Worker가 없는데 회색으로 칠했다');
+    assert((v.sub || '').includes('한 번도 보고한 적이 없습니다'), v.sub || '');
+  });
+
+  test('배포를 모르면 운영과 같은 엄격함이다', () => {
+    // 느슨한 쪽이 기본값이면 언젠가 진짜 장애가 조용해진다.
+    eq(autoRuntimeView({ worker: { status: 'absent' } }).tone, 'RED');
+    eq(autoRuntimeView({ worker: { status: 'absent' }, deployEnv: null }).tone, 'RED');
+  });
+
+  test('Preview에서 "예약은 켜져 있는데 실행기가 없다"를 모순으로 적지 않는다', () => {
+    const c = runtimeContradictions({
+      scheduleEnabled: true, worker: { status: 'absent' }, deployEnv: 'preview',
+    });
+    eq(c.filter(x => x.code === 'SCHEDULE_WITHOUT_WORKER').length, 0,
+      'Preview에서 운영 예약을 모순으로 적었다');
+  });
+
+  test('운영에서는 그 모순을 그대로 적는다', () => {
+    const c = runtimeContradictions({
+      scheduleEnabled: true, worker: { status: 'absent' }, deployEnv: 'production',
+    });
+    eq(c.filter(x => x.code === 'SCHEDULE_WITHOUT_WORKER').length, 1);
+  });
+
+  test('Worker가 살아 있으면 배포 환경과 무관하게 정상이다', () => {
+    const v = autoRuntimeView({
+      worker: { ageSec: 3, status: 'running' }, deployEnv: 'preview',
+    });
+    assert(v.canRun, '살아 있는 워커를 못 돈다고 적었다');
+  });
 }

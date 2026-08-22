@@ -65,6 +65,9 @@ export default function AutoStatusBoard({ authHeader }: { authHeader?: string })
       setDeploy({
         code: dj?.verdict?.code ?? dj?.skew?.code ?? null,
         webSha: dj?.vercel?.sha ?? null, workerSha: dj?.fly?.sha ?? null,
+        // **어느 배포에서 보고 있는가.** Preview에 운영 Worker가 없는 것을
+        // 장애로 그리지 않으려면 이 값이 필요하다.
+        env: dj?.deployEnv ?? null,
       });
     } catch { setDeploy(null); }
     setRefreshing(false);
@@ -83,9 +86,10 @@ export default function AutoStatusBoard({ authHeader }: { authHeader?: string })
   const mockHealth: Health = mockFresh ? 'running' : mock.running ? 'degraded' : 'stopped';
 
   // **여기가 이 파일의 전부다.** 판정도 문장도 서버 값에서 나온다.
-  const rt = autoRuntimeView({ worker, deployment: deploy });
+  const rt = autoRuntimeView({ worker, deployment: deploy, deployEnv: deploy?.env ?? null });
   const contradictions = runtimeContradictions({
     autoRunning: null, scheduleEnabled: null, worker, deployment: deploy,
+    deployEnv: deploy?.env ?? null,
   });
   const TONE_COLOR: Record<Tone, string> = {
     GREEN: '#22C55E', YELLOW: '#F59E0B', RED: '#EF4444', GRAY: '#64748B',
