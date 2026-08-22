@@ -7,6 +7,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   claimDecision, runOutcomeOf, CLAIM_TTL_MS, REQUEST_TTL_MS, type QueueRow,
 } from './opsQueue';
+import { parseOpsCommand, OPS_COMMANDS, runnableCommands, approvalCommands } from './opsCommand';
 
 const NOW = 1_800_000_000_000;
 const row = (over: Partial<QueueRow>): QueueRow => ({
@@ -94,4 +95,67 @@ export function runOpsQueueTests() {
   test('아무 단계도 안 돌았으면 성공이 아니다', () => {
     eq(runOutcomeOf([]).status, 'FAILED');
   });
+  console.log('[운영 요청 큐 — 정의만 있고 실행되지 않던 명령]');
+
+  test('"시크릿 동기화해"가 말 → 명령 → 큐 → 집어감까지 이어진다', () => {
+    // **이 사슬의 한 칸이 비어 있었다.** opsCommand.ts에 SYNC_SECRETS를
+    // 정의하고 ops-runner.mjs에 실행 분기까지 붙였는데, opsQueue.ts가
+    // 따로 들고 있던 RUNNABLE 목록에만 안 들어갔다. 그래서 요청은 큐에
+    // 들어간 뒤 UNKNOWN_COMMAND로 만료됐고, 그 다음부터 화면에는
+    // "실행할 요청이 없습니다"만 떴다 — 영원히.
+    const cmd = parseOpsCommand('시크릿 동기화해');
+    eq(cmd, 'SYNC_SECRETS');
+    const d = claimDecision({ rows: [row({ command: cmd! })], me: 'runner1', nowMs: NOW });
+    eq(d.code, 'CLAIM');
+  });
+
+  test('실행 목록을 손으로 들지 않는다 — 명령 정의에서 뽑는다', () => {
+    // 목록이 둘이면 언젠가 한쪽만 고쳐진다. 그게 이 버그였다.
+    const fromSpec = OPS_COMMANDS.filter(c => c.runBy === 'QUEUE').map(c => c.command).sort();
+    eq(runnableCommands().slice().sort().join(','), fromSpec.join(','));
+    const needApproval = OPS_COMMANDS.filter(c => c.needsApproval).map(c => c.command).sort();
+    eq(approvalCommands().slice().sort().join(','), needApproval.join(','));
+  });
+
+  test('값을 바꾸는 명령은 즉시 실행이거나 큐 실행이거나 — 둘 중 하나다', () => {
+    // 값을 바꾸는데 어느 쪽도 아니면 그 명령은 아무 데서도 안 돈다.
+    for (const c of OPS_COMMANDS) {
+      assert(c.runBy === 'IMMEDIATE' || c.runBy === 'QUEUE',
+        `${c.command}: runBy가 없습니다`);
+    }
+  });
+
+  test('킬 스위치는 큐에 넣지 않는다 — 5분 뒤에 켜지면 안 켜진 것과 같다', () => {
+    // **동작을 바꾸지 않았다는 확인이다.** STOP_NOW는 값을 바꾸지만
+    // 요청받은 그 자리에서 켠다.
+    const d = claimDecision({ rows: [row({ command: 'STOP_NOW' })], me: 'r', nowMs: NOW });
+    eq(d.code, 'UNKNOWN_COMMAND');
+  });
+
+  test('조회 명령도 실행기가 집어 가지 않는다', () => {
+    for (const c of ['CHECK_ALL', 'VERIFY_TESTNET']) {
+      eq(claimDecision({ rows: [row({ command: c })], me: 'r', nowMs: NOW }).code, 'UNKNOWN_COMMAND');
+    }
+  });
+
+  test('LIVE 소액 승인은 여전히 승인 없이는 안 간다', () => {
+    const no = claimDecision({ rows: [row({ command: 'APPROVE_LIVE_SMALL', approved: false })], me: 'r', nowMs: NOW });
+    eq(no.code, 'NEEDS_APPROVAL');
+    const yes = claimDecision({ rows: [row({ command: 'APPROVE_LIVE_SMALL', approved: true })], me: 'r', nowMs: NOW });
+    eq(yes.code, 'CLAIM');
+  });
+
+  test('시크릿 동기화는 승인을 요구하지 않는다 — 값이 한 곳에서만 온다', () => {
+    const d = claimDecision({ rows: [row({ command: 'SYNC_SECRETS', approved: false })], me: 'r', nowMs: NOW });
+    eq(d.code, 'CLAIM');
+  });
+
+  test('오래된 시크릿 동기화 요청은 여전히 실행하지 않는다', () => {
+    const d = claimDecision({
+      rows: [row({ command: 'SYNC_SECRETS', requestedAtMs: NOW - REQUEST_TTL_MS - 1 })],
+      me: 'r', nowMs: NOW,
+    });
+    eq(d.code, 'EXPIRED');
+  });
+
 }

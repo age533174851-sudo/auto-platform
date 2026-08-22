@@ -78,6 +78,9 @@ async function loadLib() {
   // 판단하는 파일들만 복사한다. selfHeal.ts는 runtimeHealth의 타입만
   // 쓰므로 그것도 같이 가져온다(타입은 컴파일 뒤 사라진다).
   cpSync(join(ROOT, 'src', 'lib', 'ops', 'opsQueue.ts'), join(dir, 'opsQueue.ts'));
+  // opsQueue는 실행 가능한 명령 목록을 opsCommand에서 뽑아 쓴다 —
+  // **목록을 두 곳에 두지 않으려고 그렇게 했으므로** 같이 가져와야 한다.
+  cpSync(join(ROOT, 'src', 'lib', 'ops', 'opsCommand.ts'), join(dir, 'opsCommand.ts'));
   cpSync(join(ROOT, 'src', 'lib', 'ops', 'selfHeal.ts'), join(dir, 'selfHeal.ts'));
   cpSync(join(ROOT, 'src', 'lib', 'runtime', 'runtimeHealth.ts'), join(dir, 'runtimeHealth.ts'));
   // selfHeal.ts는 '../runtime/runtimeHealth'를 참조한다. 평평하게 놓았으므로
@@ -87,7 +90,7 @@ async function loadLib() {
   writeFileSync(join(dir, 'selfHeal.ts'), heal);
   const tsc = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) throw new Error('TypeScript를 찾을 수 없습니다 — 먼저 npm ci');
-  execFileSync(process.execPath, [tsc, 'opsQueue.ts', 'selfHeal.ts', 'runtimeHealth.ts',
+  execFileSync(process.execPath, [tsc, 'opsQueue.ts', 'opsCommand.ts', 'selfHeal.ts', 'runtimeHealth.ts',
     '--module', 'commonjs', '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe' });
   return {
     ...(await import(`file://${join(dir, 'opsQueue.js')}`)),

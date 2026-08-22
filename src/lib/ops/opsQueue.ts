@@ -47,11 +47,28 @@ export interface ClaimDecision {
   reason: string;
 }
 
+// ── 목록을 여기서 손으로 들지 않는다 ──
+//
+// 예전에는 이랬다:
+//
+//   const RUNNABLE = new Set(['DEPLOY', 'RECOVER', 'APPROVE_LIVE_SMALL']);
+//
+// `SYNC_SECRETS`를 `opsCommand.ts`에 정의하고 `ops-runner.mjs`에 실행
+// 분기까지 붙였는데 **이 목록에만 안 넣었다.** 그래서 "시크릿 동기화해"는
+// 큐에 들어간 뒤 `UNKNOWN_COMMAND`로 만료됐고, 그 다음부터는 화면에
+// "실행할 요청이 없습니다"만 떴다 — 명령도 있고 버튼도 있고 실행 코드도
+// 있는데 영원히 안 도는 상태다.
+//
+// 이 저장소가 가장 자주 겪은 고장이다: **경로가 둘인데 한쪽만 고침.**
+// 그래서 목록을 지우고 명령 정의(`runBy`)에서 뽑아 쓴다. 새 명령을 만들
+// 때 여기 와서 손볼 것이 없어야 한다.
+import { runnableCommands, approvalCommands } from './opsCommand';
+
 /** 승인이 필요한 명령 (실제 자금·파괴적 변경) */
-const NEEDS_APPROVAL = new Set(['APPROVE_LIVE_SMALL']);
+const NEEDS_APPROVAL = new Set<string>(approvalCommands());
 
 /** 실행기가 다룰 수 있는 명령. **모르는 명령은 실행하지 않는다** */
-const RUNNABLE = new Set(['DEPLOY', 'RECOVER', 'APPROVE_LIVE_SMALL']);
+const RUNNABLE = new Set<string>(runnableCommands());
 
 /**
  * 무엇을 집어 갈 것인가.

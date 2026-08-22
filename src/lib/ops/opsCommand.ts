@@ -39,6 +39,22 @@ export interface OpsCommandSpec {
   mutates: boolean;
   /** 사람의 명시적 승인이 필요한가 */
   needsApproval: boolean;
+  /**
+   * 누가 실행하는가.
+   *
+   * `IMMEDIATE`  요청을 받은 그 자리에서 끝난다(조회이거나, 늦으면 안 되는 것).
+   * `QUEUE`      큐에 넣고 ops-runner가 집어 간다(GitHub·Fly 자격이 필요한 것).
+   *
+   * **이 칸이 없어서 사고가 났다.** `opsQueue.ts`가 "실행기가 다룰 수 있는
+   * 명령" 목록을 **따로 손으로** 들고 있었고, `SYNC_SECRETS`를 여기 정의만
+   * 하고 그 목록에 안 넣었다. 그래서 "시크릿 동기화해"는 큐에 들어간 뒤
+   * `UNKNOWN_COMMAND`로 만료됐고, 다음부터는 "실행할 요청이 없습니다"만
+   * 나왔다 — 화면에도 있고 실행 분기도 있는데 영원히 안 도는 상태다.
+   *
+   * 이 저장소가 가장 자주 겪은 고장이다: **경로가 둘인데 한쪽만 고침.**
+   * 그래서 목록을 지우고 이 칸 하나에서 뽑아 쓴다.
+   */
+  runBy: 'IMMEDIATE' | 'QUEUE';
 }
 
 export const OPS_COMMANDS: OpsCommandSpec[] = [
@@ -46,27 +62,33 @@ export const OPS_COMMANDS: OpsCommandSpec[] = [
     command: 'CHECK_ALL', label: '전체 점검',
     steps: ['migrations', 'secrets', 'deployment', 'worker', 'exitMonitor',
       'exchange', 'orders', 'protection', 'ledger', 'wallet', 'strategies'],
-    mutates: false, needsApproval: false,
+    // 조회다. 그 자리에서 답이 나온다.
+    mutates: false, needsApproval: false, runBy: 'IMMEDIATE',
   },
   {
     command: 'DEPLOY', label: '배포',
     steps: ['migrations', 'deployment', 'worker', 'exitMonitor'],
-    mutates: true, needsApproval: false,
+    // GitHub 워크플로를 깨워야 한다 — 그 자격은 실행기에만 있다.
+    mutates: true, needsApproval: false, runBy: 'QUEUE',
   },
   {
     command: 'VERIFY_TESTNET', label: '테스트넷 검증',
     steps: ['exchange', 'orders', 'protection', 'ledger'],
-    mutates: false, needsApproval: false,
+    // 읽기 전용이다.
+    mutates: false, needsApproval: false, runBy: 'IMMEDIATE',
   },
   {
     command: 'RECOVER', label: '복구',
     steps: ['migrations', 'worker', 'exitMonitor', 'orders', 'protection'],
-    mutates: true, needsApproval: false,
+    // flyctl·마이그레이션 자격이 필요하다.
+    mutates: true, needsApproval: false, runBy: 'QUEUE',
   },
   {
     command: 'STOP_NOW', label: '지금 중지',
     steps: ['orders', 'protection'],
-    mutates: true, needsApproval: false,
+    // **값을 바꾸지만 큐에 넣지 않는다.** 킬 스위치는 5분 뒤에 켜지면
+    // 켜지지 않은 것과 같다. 요청을 받은 그 자리에서 켠다.
+    mutates: true, needsApproval: false, runBy: 'IMMEDIATE',
   },
   {
     // **값을 맞추는 일을 사람이 두 대시보드를 오가며 하지 않게 한다.**
@@ -80,13 +102,14 @@ export const OPS_COMMANDS: OpsCommandSpec[] = [
     // 결과가 같다. 승인을 붙이면 그 승인이 곧 사람이 눌러야 할 버튼이 된다.
     command: 'SYNC_SECRETS', label: '시크릿 동기화',
     steps: ['secrets', 'deployment', 'worker'],
-    mutates: true, needsApproval: false,
+    // sync-secrets 워크플로를 깨워야 한다 — 실행기 자격이 필요하다.
+    mutates: true, needsApproval: false, runBy: 'QUEUE',
   },
   {
     // **실제 자금이 걸린 결정.** 자동화의 예외 세 가지 중 하나다.
     command: 'APPROVE_LIVE_SMALL', label: 'LIVE 소액 승인',
     steps: ['migrations', 'deployment', 'worker', 'exitMonitor', 'exchange', 'orders', 'protection', 'ledger'],
-    mutates: true, needsApproval: true,
+    mutates: true, needsApproval: true, runBy: 'QUEUE',
   },
 ];
 
@@ -122,6 +145,23 @@ export function parseOpsCommand(text: string): OpsCommand | null {
 
 export function specOf(c: OpsCommand): OpsCommandSpec | null {
   return OPS_COMMANDS.find(x => x.command === c) ?? null;
+}
+
+/**
+ * 실행기가 집어 갈 수 있는 명령.
+ *
+ * **손으로 적은 목록을 두지 않는다.** `opsQueue.ts`가 그런 목록을 따로
+ * 들고 있다가 `SYNC_SECRETS`를 빠뜨렸고, 그 요청은 큐에 들어간 뒤
+ * `UNKNOWN_COMMAND`로 만료됐다 — 화면에도 있고 실행 분기도 있는데
+ * 영원히 안 도는 상태였다.
+ */
+export function runnableCommands(): OpsCommand[] {
+  return OPS_COMMANDS.filter(s => s.runBy === 'QUEUE').map(s => s.command);
+}
+
+/** 사람의 명시적 승인이 있어야 실행하는 명령 */
+export function approvalCommands(): OpsCommand[] {
+  return OPS_COMMANDS.filter(s => s.needsApproval).map(s => s.command);
 }
 
 // ── 결과 ──
