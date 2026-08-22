@@ -91,4 +91,35 @@ export function runExitMonitorScheduleTests() {
     eq(o.orphanCleanups, 2);
     assert(/보호주문 2건/.test(o.message), o.message);
   });
+
+  test('전략 무관 정리에서 치운 것도 함께 센다', () => {
+    // 계단식 표에 없는 전략(scalp·my-original-v1)에서 치운 건이
+    // 여기서 빠지면 워커 로그에서 사라진다.
+    const o = exitMonitorOutcome({
+      status: 200,
+      body: { ok: true, checked: 0, actionable: 0, orphanCleanups: [{ symbol: 'BTCUSDT' }],
+        sweep: { cleaned: 2, unreadable: 0 } },
+    });
+    eq(o.orphanCleanups, 3);
+    assert(o.message.includes('3건 정리'), o.message);
+  });
+
+  test('확인 못 한 곳을 성공 문장 뒤에 숨기지 않는다', () => {
+    const o = exitMonitorOutcome({
+      status: 200,
+      body: { ok: true, checked: 0, actionable: 0, sweep: { cleaned: 0, unreadable: 2 } },
+    });
+    eq(o.code, 'OK');
+    assert(o.message.includes('확인 못 한 곳 2'), o.message);
+  });
+
+  test('sweep이 없는 옛 응답도 그대로 읽는다', () => {
+    // 배포가 갈리는 순간(라우트는 새 것, 워커는 옛 것 또는 그 반대)에
+    // 숫자가 사라지면 안 된다.
+    const o = exitMonitorOutcome({
+      status: 200, body: { ok: true, checked: 1, actionable: 0, orphanCleanups: [{ symbol: 'X' }] },
+    });
+    eq(o.orphanCleanups, 1);
+    assert(/보호주문 1건/.test(o.message), o.message);
+  });
 }
