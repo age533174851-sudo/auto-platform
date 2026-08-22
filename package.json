@@ -16,6 +16,8 @@
     "check:get-writes": "node scripts/check-get-writes.mjs",
     "check:test-registry": "node scripts/check-test-registry.mjs",
     "check:status-claims": "node scripts/check-status-claims.mjs",
+    "check:fabricated": "node scripts/check-fabricated-data.mjs",
+    "check:dead-ends": "node scripts/check-dead-ends.mjs",
     "check:workflows": "actionlint",
     "check:entry-gates": "node scripts/check-entry-gates.mjs",
     "check:research": "node scripts/check-research-isolation.mjs",
