@@ -2,7 +2,7 @@
 // ALL actions verified server-side: JWT → profiles.role → ADMIN_ROLES set
 // Role promotion is only possible via Supabase SQL — never via this API
 import { NextRequest, NextResponse } from 'next/server';
-import { recordAudit } from '@/lib/safety/auditStore';
+import { recordAudit, recordCriticalAudit, auditResponseField } from '@/lib/safety/auditStore';
 import { requireAdmin } from '@/lib/auth/isAdmin';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
@@ -206,11 +206,16 @@ export async function POST(req: NextRequest) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     // **긴급 정지는 반드시 기록에 남는다.** 나중에 "누가 언제 왜
     // 눌렀나"를 가장 많이 묻게 되는 것이 이 버튼이다.
-    recordAudit(sb, {
+    // **기다린다.** 서버리스는 응답과 함께 얼어붙으므로 await하지 않은
+    // insert는 잘린다. 이 버튼이야말로 기록이 사라지면 안 되는 것이다.
+    const stopAudit = await recordCriticalAudit(sb, {
       userId, action: 'EMERGENCY_BOT_STOP', resource: 'all-strategies', result: 'success',
       detail: { stoppedCount: count ?? 'all', reason: body.reason ?? '관리자 긴급 정지' },
     });
-    return NextResponse.json({ success: true, message: '모든 실행 중 전략이 중지되었습니다.', stoppedCount: count ?? 0 });
+    return NextResponse.json({
+      success: true, message: '모든 실행 중 전략이 중지되었습니다.', stoppedCount: count ?? 0,
+      audit: auditResponseField(stopAudit),
+    });
   }
 
   // ── ban_user / unban_user ───────────────────────────────
@@ -224,12 +229,13 @@ export async function POST(req: NextRequest) {
       .update({ status: newStatus, updated_at: new Date().toISOString() })
       .eq('id', targetId);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    recordAudit(sb, {
+    // 계정을 막고 푸는 일도 나중에 반드시 되짚게 된다.
+    const banAudit = await recordCriticalAudit(sb, {
       userId, action: action === 'ban_user' ? 'BAN_USER' : 'UNBAN_USER',
       resource: String(targetId ?? ''), result: 'success',
       detail: { reason: body.reason ?? '' },
     });
-    return NextResponse.json({ success: true, status: newStatus });
+    return NextResponse.json({ success: true, status: newStatus, audit: auditResponseField(banAudit) });
   }
 
   // ── maintenance_mode: recorded in audit log (UI placeholder)

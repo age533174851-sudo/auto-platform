@@ -381,8 +381,9 @@ export async function POST(req: NextRequest) {
     // **자동매매 ON/OFF는 반드시 남는다.** 사람이 안 보는 사이에 도는
     // 것을 켜고 끄는 스위치라, 나중에 "언제부터 돌고 있었나"를 묻게 된다.
     {
-      const { recordAudit } = await import('@/lib/safety/auditStore');
-      recordAudit(sb, {
+      // 사람이 안 보는 사이에 도는 것을 켜고 끄는 스위치다. 기다린다.
+      const { recordCriticalAudit } = await import('@/lib/safety/auditStore');
+      await recordCriticalAudit(sb, {
         userId: uid, action: 'AUTOTRADE_TOGGLE', resource: connectionId,
         result: 'success', connectionId,
         detail: { enabled: !!enabled },
@@ -429,14 +430,13 @@ export async function POST(req: NextRequest) {
         .eq('id', connectionId).eq('user_id', uid);
       // 실전↔테스트넷 전환은 **어느 계좌로 돈이 나가는지**를 바꾼다.
       // 실패했을 때도 남긴다 — 안 바뀌었다는 사실이 곧 정보다.
-      {
-        const { recordAudit } = await import('@/lib/safety/auditStore');
-        recordAudit(sb, {
-          userId: uid, action: 'ENV_SWITCH', resource: connectionId,
-          result: error ? 'failed' : 'success', connectionId,
-          detail: { toTestnet: next, autotradeForcedOff: true, error: error?.message ?? null },
-        });
-      }
+      // **어느 계좌로 돈이 나가는지**가 바뀌는 자리다. 기다린다.
+      const { recordCriticalAudit } = await import('@/lib/safety/auditStore');
+      await recordCriticalAudit(sb, {
+        userId: uid, action: 'ENV_SWITCH', resource: connectionId,
+        result: error ? 'failed' : 'success', connectionId,
+        detail: { toTestnet: next, autotradeForcedOff: true, error: error?.message ?? null },
+      });
       if (error) {
         return NextResponse.json({
           error: `환경을 바꾸지 못했습니다: ${error.message}`,

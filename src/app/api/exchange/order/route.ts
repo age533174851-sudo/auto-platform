@@ -172,8 +172,16 @@ export async function POST(req: NextRequest) {
   //
   // 실제로 적용되는 표는 040의 `audit_events`이고, `recordAudit`이
   // 시크릿 걸러내기까지 한다.
-  const { recordAudit } = await import('@/lib/safety/auditStore');
-  recordAudit(sb, {
+  //
+  // **기다린다.** await하지 않으면 서버리스는 응답을 돌려주는 순간
+  // 얼어붙고, insert는 그 자리에서 잘린다 — 실거래 주문이 감사에서
+  // 조용히 빠지고 **빠졌다는 사실조차 남지 않는다.**
+  //
+  // 그렇다고 주문을 실패시키지는 않는다. 실패하면 영수증으로 돌아오고,
+  // 그 영수증을 응답에 그대로 싣는다(auditResponseField). 재시도는
+  // 붙이지 않는다 — 감사 때문에 주문이 두 번 나가면 안 된다.
+  const { recordCriticalAudit, auditResponseField } = await import('@/lib/safety/auditStore');
+  const auditReceipt = await recordCriticalAudit(sb, {
     userId: uid, action: 'LIVE_ORDER', resource: `${exchange}:${symbol}`,
     result: result.success ? 'success' : 'failed',
     detail: {
@@ -183,7 +191,10 @@ export async function POST(req: NextRequest) {
   });
 
   if (!result.success) {
-    return NextResponse.json({ error: 'order_failed', message: result.message }, { status: 502 });
+    return NextResponse.json({
+      error: 'order_failed', message: result.message,
+      audit: auditResponseField(auditReceipt),
+    }, { status: 502 });
   }
 
   return NextResponse.json({
@@ -194,5 +205,7 @@ export async function POST(req: NextRequest) {
     qty:     result.qty,
     price:   result.price,
     exchange,
+    // 주문은 됐는데 기록이 안 됐을 수 있다. 그 사실을 숨기지 않는다.
+    audit: auditResponseField(auditReceipt),
   });
 }

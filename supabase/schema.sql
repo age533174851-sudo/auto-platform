@@ -191,29 +191,29 @@ create policy "관리자 구독 전체 관리"
   );
 
 -- ════════════════════════════════════════════════════════════════════════
--- 4. WATCHLISTS  (왓치리스트)
+-- 4. WATCHLISTS  (왓치리스트) — **여기서 만들지 않는다**
 -- ════════════════════════════════════════════════════════════════════════
-create table if not exists watchlists (
-  id          uuid        primary key default gen_random_uuid(),
-  user_id     uuid        not null references profiles(id) on delete cascade,
-  name        text        not null default '기본 왓치리스트',
-  -- [{id, nameKr, sym, clr, t, addedAt}]
-  symbols     jsonb       not null default '[]',
-  is_default  boolean     not null default false,
-  created_at  timestamptz not null default now(),
-  updated_at  timestamptz not null default now()
-);
-
-create trigger trg_watchlists_updated
-  before update on watchlists
-  for each row execute function set_updated_at();
-
-create index idx_watchlists_user on watchlists(user_id);
-
-alter table watchlists enable row level security;
-
-create policy "본인 왓치리스트 관리"
-  on watchlists for all using (auth.uid() = user_id);
+--
+-- 예전에는 이 파일에도 `watchlists`가 있었다. 그런데 모양이 달랐다:
+--
+--   여기(옛것)         user_id · name · symbols(jsonb) · is_default
+--   schema_v2.sql      user_id · symbol · name_kr · symbol_ticker ·
+--                      color · category · exchange · tv_symbol · added_at
+--
+-- **코드는 뒤쪽을 쓴다** (`src/app/api/watchlist/sync/route.ts`는
+-- `symbol`로 upsert하고 `symbol_ticker`를 읽는다).
+--
+-- 그리고 둘 다 `create table if not exists`라서 **먼저 실행된 쪽이
+-- 이긴다.** 이 파일이 먼저 돌았다면 왓치리스트 동기화는 전부 조용히
+-- 실패한다 — 화면에는 담긴 것처럼 보이면서.
+--
+-- 그래서 옛 정의를 지웠다. 정의는 `supabase/schema_v2.sql` 한 곳에만
+-- 둔다. 실제 DB가 어느 쪽 모양인지는 `scripts/check-db-schema.mjs`가
+-- 진짜 DB에 물어본다.
+--
+-- **이미 옛 모양으로 만들어진 DB는 여기서 자동으로 바꾸지 않는다.**
+-- 칸을 지우는 변경이라 사람의 승인이 필요하다 — 검사가 그 사실을
+-- 알려 주면 그때 결정한다.
 
 -- ════════════════════════════════════════════════════════════════════════
 -- 5. PORTFOLIOS  (포트폴리오)

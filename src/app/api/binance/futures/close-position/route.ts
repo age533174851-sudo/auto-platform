@@ -103,23 +103,23 @@ export async function POST(req: NextRequest) {
   // **수동 청산은 기록에 남는다.** 자동매매가 연 포지션을 사람이 닫으면
   // 그 뒤로 재진입을 막는데(manualOverride), 왜 막혔는지를 되짚으려면
   // 누가 언제 닫았는지가 있어야 한다.
-  {
-    const { recordAudit } = await import('@/lib/safety/auditStore');
-    recordAudit(sb, {
-      userId: uid, action: 'MANUAL_CLOSE', resource: String(symbol),
-      result: r.success ? 'success' : 'failed',
-      connectionId: body?.connectionId ?? null,
-      detail: {
-        side: positionSide, percent: Number(percent) || 100,
-        closedQty: r.closedQty, fullClose: r.fullClose,
-        testnet: creds.testnet, message: r.message,
-      },
-    });
-  }
+  // **기다린다.** await하지 않으면 응답과 함께 잘린다.
+  const { recordCriticalAudit, auditResponseField } = await import('@/lib/safety/auditStore');
+  const closeAudit = await recordCriticalAudit(sb, {
+    userId: uid, action: 'MANUAL_CLOSE', resource: String(symbol),
+    result: r.success ? 'success' : 'failed',
+    connectionId: body?.connectionId ?? null,
+    detail: {
+      side: positionSide, percent: Number(percent) || 100,
+      closedQty: r.closedQty, fullClose: r.fullClose,
+      testnet: creds.testnet, message: r.message,
+    },
+  });
 
   return NextResponse.json({
     ok: r.success,
     queued: false,
+    audit: auditResponseField(closeAudit),
     executed: r.success,
     closedQty: r.closedQty,
     // 1%를 요청했는데 최소 단위 때문에 전량이 닫힌 경우를 숨기지 않는다

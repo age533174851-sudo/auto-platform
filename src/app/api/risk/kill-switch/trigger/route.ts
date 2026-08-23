@@ -145,22 +145,22 @@ export async function POST(req: NextRequest) {
   // **KILL은 반드시 기록에 남는다.** 급할 때 누른 버튼이라 나중에
   // "누가 언제 왜 눌렀나"를 가장 많이 묻게 된다. 그리고 실행이 절반만
   // 됐을 때 그 사실도 같이 남아야 한다.
-  {
-    const { recordAudit } = await import('@/lib/safety/auditStore');
-    recordAudit(sb, {
-      userId: uid, action: 'KILL_SWITCH', resource: connectionId,
-      result: exec?.ran === false ? 'failed' : 'success',
-      connectionId,
-      detail: {
-        level: exec?.level ?? null,
-        actionMode: s.actionMode,
-        reason: s.triggerReason,
-        wasActive,
-        cancelled: exec?.cancel?.count ?? null,
-        closeFailed: exec?.closeFailed ?? null,
-      },
-    });
-  }
+  // **기다린다.** 서버리스는 응답과 함께 얼어붙는다 — await하지 않은
+  // insert는 잘린다. 급할 때 누른 버튼일수록 기록이 사라지면 안 된다.
+  const { recordCriticalAudit, auditResponseField } = await import('@/lib/safety/auditStore');
+  const killAudit = await recordCriticalAudit(sb, {
+    userId: uid, action: 'KILL_SWITCH', resource: connectionId,
+    result: exec?.ran === false ? 'failed' : 'success',
+    connectionId,
+    detail: {
+      level: exec?.level ?? null,
+      actionMode: s.actionMode,
+      reason: s.triggerReason,
+      wasActive,
+      cancelled: exec?.cancel?.count ?? null,
+      closeFailed: exec?.closeFailed ?? null,
+    },
+  });
 
   // 취소·종료가 실패하면 ok:true로 돌려주지 않는다. 화면이 "정리됨"으로 그리면
   // 사용자는 거래소를 확인하지 않는다.
@@ -174,6 +174,7 @@ export async function POST(req: NextRequest) {
     queued: false,
     triggerReason: s.triggerReason,
     exec,
+    audit: auditResponseField(killAudit),
     message: execOk
       ? '킬스위치 발동 — 신규 주문 차단, 미체결 취소·포지션 종료 완료'
       : '킬스위치는 켜졌지만(신규 주문 차단) 취소·종료가 완료되지 않았습니다 — 거래소에서 직접 확인하세요',
