@@ -64,6 +64,8 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   // getSupabaseAdmin이 쓴 것과 **같은 해석 결과**다. 따로 계산하지 않는다.
   const supabaseUrl = serverSupabaseUrl();
+  /** worker_heartbeat의 최근 몇 줄. **읽기만 한다.** */
+  let workerRows: any[] = [];
   let fly: {
     sha: string | null; workerId: string | null; lastSeen: string | null;
     ageSec: number | null; alive: boolean | null; status: string | null; error: string | null;
@@ -73,11 +75,38 @@ export async function GET(req: NextRequest) {
     fly.error = 'supabase_not_configured';
   } else {
     try {
+      // ── 한 줄만 보면 모순을 좁힐 수 없다 ──
+      //
+      // 예전에는 `limit(1)`이었다. 그래서 "최신 줄이 8/21"만 보였고,
+      // **지금 도는 Fly machine의 줄이 아예 없는 것인지, 있는데 안
+      // 갱신되는 것인지** 구분할 수 없었다. 둘은 완전히 다른 고장이다.
+      //
+      // 몇 줄만 읽는다. worker_id·machine_id·project ref는 비밀이 아니다.
       const { data, error } = await (sb as any).from('worker_heartbeat')
-        .select('worker_id, last_seen, status, current_task, version')
-        .order('last_seen', { ascending: false }).limit(1);
+        .select('worker_id, last_seen, status, current_task, version, provider, region, machine_id, supabase_fingerprint, project_ref, tick_count, startup_ok')
+        .order('last_seen', { ascending: false }).limit(8);
       if (error) throw new Error(error.message);
-      const row = Array.isArray(data) ? data[0] : null;
+      const rows: any[] = Array.isArray(data) ? data : [];
+      workerRows = rows.map(r => {
+        const t = Date.parse(String(r.last_seen));
+        return {
+          workerId: r.worker_id ?? null,
+          lastSeen: r.last_seen ?? null,
+          ageSec: Number.isFinite(t) ? Math.max(0, Math.round((nowMs - t) / 1000)) : null,
+          version: String(r.version || '').trim() || null,
+          short: String(r.version || '').trim().slice(0, 7) || null,
+          provider: r.provider ?? null,
+          region: r.region ?? null,
+          machineId: r.machine_id ?? null,
+          // **워커가 스스로 적은 값이다.** 위 supabase.projectRef와
+          // 대조하면 같은 DB인지를 지문 6자에 기대지 않고 확인할 수 있다.
+          projectRef: r.project_ref ?? null,
+          supabaseFingerprint: r.supabase_fingerprint ?? null,
+          tickCount: r.tick_count ?? null,
+          startupOk: r.startup_ok ?? null,
+        };
+      });
+      const row = rows[0] ?? null;
       if (row) {
         const seenMs = Date.parse(String(row.last_seen));
         fly = {
@@ -149,9 +178,41 @@ export async function GET(req: NextRequest) {
         source: supabaseUrl.source,
         note: 'admin client가 읽은 곳입니다. migrate 워크플로는 SUPABASE_DB_URL로 붙습니다 — 둘이 다르면 남음 개수도 다릅니다',
       },
+      // ── 이 숫자는 **무엇을 근거로** 세는가 ──
+      //
+      // migrate 워크플로의 "남음 0"과 여기의 62가 다를 수 있는 이유는
+      // 데이터베이스만이 아니다. 두 경로는 같은 표(`schema_migrations`)를
+      // 보지만 **판정 기준이 다르다**:
+      //
+      //   migrate   파일을 실행했거나, 카탈로그에 이미 있어 '채택'한 것을
+      //             적용됨으로 기록한다 (scripts/apply-migrations.mjs)
+      //   여기      코드의 REQUIRED_MIGRATIONS(migrationManifest.ts)와
+      //             표의 줄을 대조하고 **체크섬까지 본다**
+      //
+      // 그래서 같은 DB라도 (a) 매니페스트가 파일보다 앞서거나
+      // (b) 체크섬이 어긋나면 여기만 남음으로 센다. 어느 쪽인지 보이게
+      // 기준을 적어 둔다 — 두 숫자를 비교하려면 기준부터 같아야 한다.
+      basis: {
+        source: 'schema_migrations',
+        comparedAgainst: 'REQUIRED_MIGRATIONS (src/lib/system/migrationManifest.ts)',
+        checksumChecked: true,
+        note: 'migrate 워크플로는 실행·채택 기준입니다. 이 값은 매니페스트 대조 + 체크섬 기준이라 같은 DB에서도 다를 수 있습니다',
+      },
     },
     vercel: { sha: web.sha, short: web.sha ? web.sha.slice(0, 7) : null, source: web.source },
     fly: { ...fly, short: fly.sha ? fly.sha.slice(0, 7) : null },
+    // ── 표에 실제로 어떤 줄들이 있는가 ──
+    //
+    // "최신 줄이 8/21"과 "지금 도는 machine의 줄이 없다"는 다른 사실이다.
+    // 한 줄만 보여 주면 그 둘을 구분할 수 없어서 몇 줄을 그대로 보여 준다.
+    // **읽기만 한다.** 값은 없다 — worker_id·machine_id·project ref뿐이다.
+    workers: {
+      rows: workerRows,
+      count: workerRows.length,
+      note: workerRows.length === 0
+        ? 'worker_heartbeat에 줄이 없습니다 — 워커가 이 데이터베이스에 한 번도 쓰지 못했습니다'
+        : '워커가 스스로 적은 projectRef와 위 supabase.projectRef가 다르면 서로 다른 프로젝트입니다',
+    },
     main: { sha: mainSha, short: mainSha ? mainSha.slice(0, 7) : null,
       note: mainSha ? '요청에서 받은 값입니다' : '서버는 main의 SHA를 모릅니다 — ?main=<sha>로 주면 셋을 대조합니다' },
     // ── 웹과 워커가 같은 데이터베이스를 보고 있는가 ──

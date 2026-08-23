@@ -88,6 +88,24 @@ jobs:
           fi
           echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
 
+      # ── migrate가 붙는 DB와 런타임이 읽는 DB가 같은가 ──
+      #
+      # migrate는 "남음 0"이라 하고 런타임 API는 `pendingCount: 62`라고
+      # 한 적이 있다. 원인은 둘 중 하나다: **다른 DB**이거나, 같은 DB인데
+      # **세는 기준이 다르거나**(migrate=실행·채택 / 런타임=매니페스트
+      # 대조+체크섬). 앞엣것을 먼저 배제해야 뒤를 볼 수 있다.
+      #
+      # DB에 붙지 않는다 — 접속 문자열을 파싱만 하고, 나가는 것은
+      # project ref뿐이다(공개 URL의 일부라 비밀이 아니다).
+      #
+      # `continue-on-error`: 이건 진단이다. 대조를 못 했다고 마이그레이션
+      # 적용을 막지 않는다.
+      - name: migrate ↔ 런타임 대상 대조
+        continue-on-error: true
+        env:
+          BASE: ${{ secrets.EXIT_MONITOR_URL }}
+        run: node scripts/check-migrate-target.mjs
+
       - name: 적용 계획
         run: node scripts/apply-migrations.mjs --check || true
 

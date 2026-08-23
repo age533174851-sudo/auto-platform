@@ -1,6 +1,8 @@
 // worker/src/supabase.ts — service role 클라이언트 + lock + heartbeat
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { workerIdentityOf } from '../../src/lib/runtime/workerIdentity';
+// **판정은 웹과 같은 파일을 쓴다.** 워커용 사본을 두면 한쪽만 고쳐진다.
+import { heartbeatVerdict, projectRefOf } from '../../src/lib/runtime/heartbeatVerify';
 
 let _sb: SupabaseClient | null = null;
 export function sb(): SupabaseClient {
@@ -90,7 +92,10 @@ function noteHeartbeatOk(workerId: string, sha: string, lastSeen: string): void 
   hbLastOkLogMs = now; hbEverLoggedOk = true;
   console.log(
     `[heartbeat] ok worker=${workerId} version=${sha || '(없음)'} last_seen=${lastSeen}`
-    + ` target=${supabaseFingerprint()}`);
+    // **6자 지문이 같다는 것만으로 같은 DB라고 단정하지 않는다.**
+    // project ref는 공개 URL의 일부라 비밀이 아니다.
+    + ` target=${supabaseFingerprint()} project=${supabaseProjectRef() ?? '(모름)'}`
+    + ' (다시 읽어 대조함)');
 }
 
 /**
@@ -112,6 +117,13 @@ function supabaseFingerprint(): string {
     } catch { supabaseFp = '(모름)'; }
   }
   return supabaseFp ?? '(모름)';
+}
+
+/** 지금 쓰고 있는 Supabase의 project ref. 값이 아니라 이름이다 */
+let supabaseRef: string | null | undefined;
+function supabaseProjectRef(): string | null {
+  if (supabaseRef === undefined) supabaseRef = projectRefOf(process.env.SUPABASE_URL || '');
+  return supabaseRef ?? null;
 }
 
 function noteHeartbeatFailure(why: string): void {
@@ -176,6 +188,9 @@ function runtimeColumns(tickCount: number | null): Record<string, any> {
     started_at: STARTED_AT,
     tick_count: tickCount,
     supabase_fingerprint: fp(process.env.SUPABASE_URL || ''),
+    // 지문만으로는 같은 DB인지 단정할 수 없다. ref는 비밀이 아니다.
+    // 칸이 아직 없는 배포에서는 아래 재시도가 이 값을 빼고 다시 적는다.
+    project_ref: supabaseProjectRef(),
     encryption_fingerprint: fp(process.env.EXCHANGE_ENCRYPTION_KEY || ''),
     startup_ok: startupOk,
     startup_detail: startupDetail,
@@ -197,26 +212,45 @@ export async function heartbeat(
     ? withSha
     : { ...withSha, ...runtimeColumns(Number.isFinite(tickCount as number) ? (tickCount as number) : null) };
   try {
-    const first = await sb().from('worker_heartbeat').upsert(full, { onConflict: 'worker_id' });
+    // **`.select()`를 붙인다.** 붙이지 않으면 몇 행이 갱신됐는지 알 수 없고,
+    // PostgREST에서 RLS가 UPDATE를 막으면 **오류가 아니라 0행**이다.
+    // 그 상태에서 예전 코드는 `error == null`만 보고 ok를 찍었다.
+    const first = await sb().from('worker_heartbeat')
+      .upsert(full, { onConflict: 'worker_id' }).select('worker_id, last_seen, version');
     // 057이 아직인 배포. 부가 정보만 빼고 예전처럼 적는다.
     if (first.error && !runtimeColumnsMissing && /column|schema cache/i.test(String(first.error.message))) {
       runtimeColumnsMissing = true;
       noteMissingRuntimeColumns();
     }
-    const { error } = runtimeColumnsMissing && first.error
-      ? await sb().from('worker_heartbeat').upsert(withSha, { onConflict: 'worker_id' })
+    const res: any = runtimeColumnsMissing && first.error
+      ? await sb().from('worker_heartbeat')
+          .upsert(withSha, { onConflict: 'worker_id' }).select('worker_id, last_seen, version')
       : first;
+    const { error } = res;
     if (!error) {
-      noteHeartbeatRecovered();
-      noteHeartbeatOk(workerId, sha, base.last_seen);
+      // ── 썼다고 말하기 전에 다시 읽는다 ──
+      //
+      // "요청이 성공했다"와 "행이 갱신됐다"는 다른 사실이다. 실제로
+      // 워커는 8/23에 ok를 찍고 있었고 표의 최신 줄은 8/21이었다.
+      const verdict = await verifyHeartbeatWrite(workerId, base.last_seen, sha || null, res);
+      if (verdict.ok) {
+        noteHeartbeatRecovered();
+        noteHeartbeatOk(workerId, sha, base.last_seen);
+        return;
+      }
+      noteHeartbeatFailure(verdict.message);
       return;
     }
     // 054가 아직 안 적용된 배포에서는 `version` 칸이 없다. 그때 생존
     // 신호까지 같이 잃으면 **살아 있는 워커가 죽은 것으로 보인다** —
     // 버전을 빼고 다시 적는다.
     if (sha && /column|schema cache/i.test(String(error.message))) {
-      const retry = await sb().from('worker_heartbeat').upsert(base, { onConflict: 'worker_id' });
+      const retry: any = await sb().from('worker_heartbeat')
+        .upsert(base, { onConflict: 'worker_id' }).select('worker_id, last_seen, version');
       if (!retry.error) {
+        // 버전을 못 적는 경로에서도 **행이 실제로 갱신됐는지는 확인한다.**
+        const v = await verifyHeartbeatWrite(workerId, base.last_seen, null, retry);
+        if (!v.ok) { noteHeartbeatFailure(v.message); return; }
         noteHeartbeatRecovered();
         noteHeartbeatOk(workerId, '', base.last_seen);
         // **이건 조용히 넘어가면 안 되는 성공이다.** 생존 신호는 적혔지만
@@ -232,6 +266,44 @@ export async function heartbeat(
     // 예외도 실패다. 예전에는 이 자리가 비어 있었다.
     noteHeartbeatFailure(String(e?.message || e));
   }
+}
+
+/**
+ * **쓰고 나서 다시 읽는다.**
+ *
+ * 두 가지를 본다:
+ *   1. upsert가 `.select()`로 몇 행을 돌려줬나 — 0행이면 조용히 막힌 것이다
+ *   2. 같은 client로 그 worker_id를 다시 읽어 last_seen·version이 맞나
+ *
+ * 판정은 `src/lib/runtime/heartbeatVerify.ts`에 있고 테스트가 붙어 있다.
+ * 여기서는 사실만 모은다.
+ *
+ * **다시 읽기가 실패한 것은 안 써진 것과 다르다** — 그 구분도 판정기가 한다.
+ */
+async function verifyHeartbeatWrite(
+  workerId: string, lastSeen: string, version: string | null, res: any,
+): Promise<{ ok: boolean; message: string }> {
+  const returnedRows = Array.isArray(res?.data) ? res.data.length : null;
+
+  let readError: string | null = null;
+  let readRow: any = null;
+  try {
+    const r: any = await sb().from('worker_heartbeat')
+      .select('worker_id, last_seen, version').eq('worker_id', workerId).maybeSingle();
+    if (r?.error) readError = String(r.error.message || r.error);
+    else readRow = r?.data ?? null;
+  } catch (e: any) {
+    readError = String(e?.message || e);
+  }
+
+  const v = heartbeatVerdict({
+    expected: { workerId, lastSeen, version },
+    writeError: null,
+    returnedRows,
+    readError,
+    readRow,
+  });
+  return { ok: v.ok, message: v.message };
 }
 
 // 054 미적용은 배포 대조를 통째로 무력화한다. 자주 찍을 필요는 없지만
