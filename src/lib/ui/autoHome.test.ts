@@ -82,14 +82,56 @@ export function runAutoHomeTests() {
   //
   // 예약 API도 지갑 API도 "오늘 몇 번 거래했는가"와 "이겼는가"를 주지
   // 않는다. 0으로 그리면 화면이 "오늘 한 번도 안 했다"고 말한다.
-  test('오늘 거래 수와 승률은 0이 아니라 "없음"이다', () => {
+  test('지갑이 stats를 주면 그대로 쓴다', () => {
+    const w = {
+      ...WALLET,
+      ledger: {
+        ...WALLET.ledger,
+        TESTNET: {
+          complete: true,
+          tradingPnl: { value: 340.5, reason: '' },
+          stats: {
+            fills: { known: true, value: 4, note: null },
+            winRate: { known: true, value: 0.75, note: null },
+            closed: { known: true, value: 4, note: null },
+          },
+        },
+      },
+    };
+    const v = autoHomeView({ env: 'TESTNET', schedule: SCHED, wallet: w });
+    eq(v.todayFills.value, 4);
+    eq(v.winRate.value, 0.75);
+    eq(v.closedTrades.value, 4);
+  });
+
+  test('옛 응답에 stats가 없으면 0으로 채우지 않는다', () => {
+    // 없는 칸을 0으로 채우면 화면이 "오늘 한 번도 안 했다"고 말한다.
     const v = autoHomeView({ env: 'TESTNET', schedule: SCHED, wallet: WALLET });
-    eq(v.todayTrades.known, false);
-    eq(v.todayTrades.value, null);
+    eq(v.todayFills.known, false);
+    eq(v.todayFills.value, null);
     eq(v.winRate.known, false);
-    eq(v.winRate.value, null);
-    assert((v.todayTrades.note || '').includes('아직'), v.todayTrades.note || '');
-    assert((v.winRate.note || '').includes('아직'), v.winRate.note || '');
+    assert((v.todayFills.note || '').length > 0);
+  });
+
+  test('지갑 계층이 "모른다"고 한 것을 아는 것으로 바꾸지 않는다', () => {
+    const w = {
+      ...WALLET,
+      ledger: {
+        TESTNET: {
+          complete: false,
+          tradingPnl: { value: null, reason: 'x' },
+          stats: {
+            fills: { known: true, value: 2, note: null },
+            winRate: { known: false, value: null, note: '장부가 완전하지 않습니다' },
+            closed: { known: false, value: null, note: '장부가 완전하지 않습니다' },
+          },
+        },
+      },
+    };
+    const v = autoHomeView({ env: 'TESTNET', schedule: SCHED, wallet: w });
+    eq(v.todayFills.value, 2, '센 만큼은 사실이다');
+    eq(v.winRate.known, false);
+    eq(v.winRate.note, '장부가 완전하지 않습니다');
   });
 
   console.log('[자동매매 홈 — 전략 이름을 지어내지 않는다]');

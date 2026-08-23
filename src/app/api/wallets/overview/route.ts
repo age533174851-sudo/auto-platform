@@ -164,13 +164,18 @@ export async function GET(req: NextRequest) {
       });
 
       let totals: any = null;
+      // **원본 줄도 들고 있는다.** 합계만으로는 승률을 낼 수 없다 —
+      // 실현손익 하나하나가 이겼는지 졌는지를 봐야 한다.
+      // 못 읽으면 null이다. 빈 배열(읽었는데 없음)과 구분한다.
+      let rawEvents: any[] | null = null;
       try {
         const { data, error } = await (sb as any).from('ledger_events')
           .select('kind, amount')
           .eq('user_id', uid).eq('env', e)
           .gte('occurred_at', new Date(fromMs).toISOString());
         if (error) throw new Error(error.message);
-        totals = ledgerTotals((Array.isArray(data) ? data : []).map((r: any) => ({
+        rawEvents = Array.isArray(data) ? data : [];
+        totals = ledgerTotals(rawEvents.map((r: any) => ({
           kind: r.kind, amount: Number(r.amount),
         })) as any);
       } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
@@ -183,8 +188,22 @@ export async function GET(req: NextRequest) {
         : null;
 
       const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: cov.complete });
+
+      // ── 오늘 체결 수와 승률 ──
+      //
+      // 자동매매 홈이 이 둘을 큰 글씨로 보여준다. 그런데 둘 다 **틀리기
+      // 쉬운 방향이 정해져 있다** — 못 읽으면 0건, 표본이 없으면 0%.
+      // 둘 다 사실이 아니고, 둘 다 사용자가 다음에 할 행동을 바꾼다.
+      // 판정은 `tradeStatsOf`가 한다.
+      const { tradeStatsOf } = await import('@/lib/portfolio/tradeStats');
+      const stats = tradeStatsOf({
+        rows: rawEvents, ledgerComplete: cov.complete, reason: cov.reason,
+      });
+
       ledger[e] = {
         complete: cov.complete, reason: cov.reason, code: cov.code,
+        // **체결 수와 승률.** 모르면 known:false로 나가고 이유가 붙는다.
+        stats,
         // **무엇이 빠졌는지 값으로 준다** — 화면이 문장을 지어내지 않게.
         missingConnections: cov.missing, partialConnections: cov.partial,
         totals,

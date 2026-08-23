@@ -55,10 +55,12 @@ export interface AutoHomeView {
   todayPnl: Known<number>;
   /** 실행 중 전략 수 */
   running: Known<number>;
-  /** 오늘 거래 횟수 */
-  todayTrades: Known<number>;
-  /** 승률 */
+  /** 오늘 체결 건수. **'거래 횟수'가 아니라 체결이다** — 이름이 곧 정의다 */
+  todayFills: Known<number>;
+  /** 승률 (0~1) */
   winRate: Known<number>;
+  /** 승률의 표본 수. 화면이 "4건 중"이라고 적을 수 있게 */
+  closedTrades: Known<number>;
   cards: StrategyCardView[];
   /** 예약을 아예 못 읽었는가. 빈 목록과 다르다 */
   schedulesReadOk: boolean;
@@ -88,15 +90,51 @@ export function autoHomeView(i: {
     running: schedulesReadOk
       ? known(rows.filter(r => !!r?.enabled).length)
       : unknown('예약을 읽지 못했습니다'),
-    // ── 아직 이 화면에 값이 오지 않는 것들 ──
+    // ── 체결 수와 승률 ──
     //
-    // **0으로 그리지 않는다.** 예약 API도 지갑 API도 "오늘 몇 번
-    // 거래했는가"와 "이겼는가"를 주지 않는다. 0을 그리면 화면이
-    // "오늘 한 번도 안 했다"고 말하는데, 실제로는 세는 곳이 없는 것이다.
-    todayTrades: unknown('오늘 거래 수를 세는 경로가 아직 없습니다'),
-    winRate: unknown('승률을 집계하는 경로가 아직 없습니다'),
+    // 지갑 계층(`tradeStatsOf`)이 이미 아는 것과 모르는 것을 갈라 뒀다.
+    // **여기서 다시 판정하지 않는다** — 같은 판단이 두 곳에 있으면 갈린다.
+    //
+    // **'오늘 거래 횟수'가 아니라 '오늘 체결'이다.** 체결 하나가 거래
+    // 하나가 아니다(진입과 청산이 각각 체결이다). 이름을 정확하게
+    // 두는 쪽이, 그럴듯한 이름을 붙이고 값을 어림잡는 쪽보다 낫다.
+    ...statsOf(i.wallet, env),
     cards: rows.map(cardOf),
     schedulesReadOk,
+  };
+}
+
+/**
+ * 오늘 체결 수와 승률.
+ *
+ * `/api/wallets/overview`의 `ledger[env].stats`를 그대로 옮긴다.
+ * **그 값이 없으면 만들지 않는다** — 옛 배포의 응답에는 이 칸이 없고,
+ * 그때 0으로 채우면 화면이 "오늘 한 번도 안 했다"고 말한다.
+ */
+function statsOf(wallet: any, env: RunEnv): {
+  todayFills: Known<number>; winRate: Known<number>; closedTrades: Known<number>;
+} {
+  const none = (note: string) => ({
+    todayFills: unknown<number>(note),
+    winRate: unknown<number>(note),
+    closedTrades: unknown<number>(note),
+  });
+  if (!wallet) return none('지갑 정보를 아직 읽지 않았습니다');
+  const row = wallet.ledger?.[String(env)] ?? null;
+  if (!row) return none(`이 환경(${env})의 장부가 없습니다`);
+  const st = row.stats ?? null;
+  // 옛 배포에는 이 칸이 없다. **없는 것을 0으로 채우지 않는다.**
+  if (!st) return none('체결·승률을 집계하는 값이 이 응답에 없습니다');
+
+  const take = (v: any, fallback: string): Known<number> =>
+    v && v.known === true && v.value != null && Number.isFinite(Number(v.value))
+      ? known(Number(v.value))
+      : unknown(String(v?.note || fallback));
+
+  return {
+    todayFills: take(st.fills, '오늘 체결 수를 확인하지 못했습니다'),
+    winRate: take(st.winRate, '승률을 확인하지 못했습니다'),
+    closedTrades: take(st.closed, '닫힌 거래 수를 확인하지 못했습니다'),
   };
 }
 
