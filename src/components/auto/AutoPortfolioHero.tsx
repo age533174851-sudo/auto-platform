@@ -35,7 +35,9 @@ export default function AutoPortfolioHero(props: {
   const pnl = statCell('오늘 손익', v.todayPnl, signedUsd, { signed: true });
   const stats = [
     statCell('실행 중', v.running, n => `${n}`),
-    statCell('오늘 거래', v.todayTrades, n => `${n}회`),
+    // **'거래'가 아니라 '체결'이다.** 진입과 청산이 각각 체결이라
+    // '거래 3회'라고 적으면 실제보다 두 배로 읽힌다. 이름이 곧 정의다.
+    statCell('오늘 체결', v.todayFills, n => `${n}건`),
     statCell('승률', v.winRate, n => `${Math.round(n * 100)}%`),
   ];
 
@@ -81,6 +83,7 @@ export default function AutoPortfolioHero(props: {
       </div>
 
       {/* ── 세 칸 ── 모르는 칸은 이유가 온다 */}
+      {/* 승률에는 표본 수를 붙인다 — "100%"만 있으면 1건인지 100건인지 모른다 */}
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8,
         marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}`,
@@ -92,7 +95,14 @@ export default function AutoPortfolioHero(props: {
               <div style={{
                 color: T.txt, fontSize: 15, fontWeight: 900, marginTop: 2,
                 fontVariantNumeric: 'tabular-nums',
-              }}>{s.text}</div>
+              }}>
+                {s.text}
+                {s.label === '승률' && v.closedTrades.known && (
+                  <span style={{ color: T.muted, fontSize: 9.5, fontWeight: 700 }}>
+                    {' '}/ {v.closedTrades.value}건
+                  </span>
+                )}
+              </div>
             ) : (
               // **'0'도 '—'도 쓰지 않는다.** 왜 모르는지가 그 자리에 있어야 한다.
               <div style={{ color: T.muted, fontSize: 9.5, marginTop: 3, lineHeight: 1.4 }}>
