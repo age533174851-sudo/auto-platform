@@ -191,7 +191,34 @@ jobs:
       # 그래서 여기에는 부르는 한 줄만 둔다. 들여쓰기로 깨질 것이 없고,
       # 판정에는 테스트가 붙어 있다(`src/lib/ops/workerAlive.ts`).
       - name: 워커가 실제로 살아났는가
+        id: alive
         if: success()
         env:
           BASE: ${{ secrets.EXIT_MONITOR_URL }}
         run: node scripts/wait-worker-alive.mjs
+
+      # ── 왜 조용한지를 사람이 Fly를 열어 찾지 않게 한다 ──
+      #
+      # 앞 단계가 실패하면 예전에는 여기서 끝났다. 남는 것은
+      # "워커가 한 줄도 쓰지 않았습니다"와 **추측한 원인 한 줄**뿐이었고,
+      # 그 다음은 사람이 `fly logs`를 여는 일이었다.
+      #
+      # 이 워크플로에는 이미 FLY_API_TOKEN이 있다. 사람이 볼 수 있는
+      # 것은 여기서도 볼 수 있다 — 그러면 사람이 볼 이유가 없다.
+      #
+      #   flyctl status         머신 상태
+      #   flyctl secrets list   **이름만.** 값은 flyctl도 주지 않는다
+      #   flyctl logs           워커가 스스로 남긴 이유
+      #
+      # 판정은 `src/lib/ops/workerDiagnosis.ts`에 있고 테스트가 붙어 있다
+      # (#174에서 배운 대로 판정을 YAML에 적지 않는다).
+      #
+      # `continue-on-error`: 진단이 배포 결과를 바꾸지 않는다. 앞 단계가
+      # 이미 실패로 적었고, 여기는 **왜인지를 덧붙이는 자리**다.
+      - name: 워커가 왜 조용한가 (진단)
+        if: failure() && steps.alive.conclusion == 'failure'
+        continue-on-error: true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          BASE: ${{ secrets.EXIT_MONITOR_URL }}
+        run: node scripts/diagnose-worker.mjs
