@@ -32,6 +32,9 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 // 로그에 남기므로, 둘을 비교하면 같은 DB를 보고 있는지 알 수 있다.
 import { fingerprintOf } from '@/lib/system/fingerprint';
 import { runtimeSkew, deploymentVerdict, workerAlive } from '@/lib/runtime/workerPlan';
+// **admin client가 URL을 고르는 바로 그 함수.** 진단이 따로 고르면
+// 화면의 지문과 실제로 읽는 DB가 갈린다 — 실제로 그랬다.
+import { serverSupabaseUrl } from '@/lib/supabase/url';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -59,6 +62,8 @@ export async function GET(req: NextRequest) {
   const mainSha = String(req.nextUrl.searchParams.get('main') || '').trim() || null;
 
   const sb = getSupabaseAdmin();
+  // getSupabaseAdmin이 쓴 것과 **같은 해석 결과**다. 따로 계산하지 않는다.
+  const supabaseUrl = serverSupabaseUrl();
   let fly: {
     sha: string | null; workerId: string | null; lastSeen: string | null;
     ageSec: number | null; alive: boolean | null; status: string | null; error: string | null;
@@ -129,6 +134,21 @@ export async function GET(req: NextRequest) {
       applied: migrationsApplied,
       pending: pendingMigrations.slice(0, 10),
       pendingCount: pendingMigrations.length,
+      // ── 이 숫자가 **어느 데이터베이스의 사실인가** ──
+      //
+      // migrate 워크플로는 `SUPABASE_DB_URL`로 psql을 붙어 "남음 0"이라
+      // 하고, 여기는 admin client로 `schema_migrations`를 읽어 62라고
+      // 한 적이 있다. 두 숫자가 다른 이유는 세는 방법이 아니라 **세는
+      // 대상이 달랐기** 때문이다.
+      //
+      // 그래서 어디서 읽었는지를 같이 준다. 이 지문이 migrate 로그의
+      // 지문과 다르면 두 숫자를 비교하는 것 자체가 틀린 것이다.
+      readFrom: {
+        fingerprint: supabaseUrl.fingerprint,
+        projectRef: supabaseUrl.projectRef,
+        source: supabaseUrl.source,
+        note: 'admin client가 읽은 곳입니다. migrate 워크플로는 SUPABASE_DB_URL로 붙습니다 — 둘이 다르면 남음 개수도 다릅니다',
+      },
     },
     vercel: { sha: web.sha, short: web.sha ? web.sha.slice(0, 7) : null, source: web.source },
     fly: { ...fly, short: fly.sha ? fly.sha.slice(0, 7) : null },
@@ -144,7 +164,20 @@ export async function GET(req: NextRequest) {
     // 값은 안 보여준다. 지문 6자리만 준다. 워커도 부팅·heartbeat 로그에
     // 같은 방식의 지문을 남기므로 눈으로 대조하면 끝난다.
     supabase: {
-      fingerprint: fingerprintOf(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL),
+      // **admin client가 실제로 고른 URL의 지문이다.**
+      //
+      // 예전에는 `SUPABASE_URL || NEXT_PUBLIC_SUPABASE_URL`로 따로
+      // 계산했다. 그런데 그 줄을 읽는 admin client는
+      // `NEXT_PUBLIC_SUPABASE_URL`만 썼다 — 둘이 다르면 **여기 뜨는
+      // 지문은 실제로 읽는 DB의 것이 아니었다.** 워커가 heartbeat를
+      // 잘 쓰고 있는데도 여기서는 8/20 줄이 최신으로 보인 이유다.
+      fingerprint: supabaseUrl.fingerprint,
+      projectRef: supabaseUrl.projectRef,
+      source: supabaseUrl.source,
+      code: supabaseUrl.code,
+      // 두 이름이 각각 무엇을 가리켰나. 값이 아니라 지문과 ref다.
+      saw: supabaseUrl.saw,
+      mismatch: supabaseUrl.code === 'URL_MISMATCH' ? supabaseUrl.message : null,
       note: '워커 로그의 `[heartbeat] ok ... target=<지문>`과 같아야 같은 DB입니다 — '
         + '다르면 워커가 다른 프로젝트에 쓰고 있습니다',
     },

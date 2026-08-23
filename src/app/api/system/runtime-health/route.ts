@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { runtimeHealthOf, autoFixPlan, type WorkerRow } from '@/lib/runtime/runtimeHealth';
 import { fingerprintOf } from '@/lib/system/fingerprint';
+import { serverSupabaseUrl } from '@/lib/supabase/url';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -38,7 +39,11 @@ export async function GET(req: NextRequest) {
   } catch { /* undefined로 남는다 */ }
 
   // 웹이 보고 있는 것들의 지문. 워커가 적은 것과 비교한다.
-  const webSupabaseFp = fingerprintOf(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '');
+  // **admin client가 실제로 고른 URL의 지문.** 예전에는 여기서 따로
+  // `SUPABASE_URL || NEXT_PUBLIC_SUPABASE_URL`을 계산했고, 그래서
+  // 워커와 지문이 같아 보이는데도 실제로는 다른 DB를 읽고 있었다.
+  const supabaseUrl = serverSupabaseUrl();
+  const webSupabaseFp = supabaseUrl.fingerprint;
   const webEncryptionFp = fingerprintOf(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || '');
   const webSha = String(process.env.VERCEL_GIT_COMMIT_SHA || '').trim() || null;
   // 서버는 main의 SHA를 모른다. 아는 척하지 않는다 — 워크플로가 넘겨준다.

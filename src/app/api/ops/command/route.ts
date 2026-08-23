@@ -164,10 +164,13 @@ export async function POST(req: NextRequest) {
 
     const { runtimeHealthOf, autoFixPlan } = await import('@/lib/runtime/runtimeHealth');
     const { fingerprintOf } = await import('@/lib/system/fingerprint');
+    const { serverSupabaseUrl } = await import('@/lib/supabase/url');
     const webSha = String(process.env.VERCEL_GIT_COMMIT_SHA || '').trim() || null;
     const h = runtimeHealthOf({
       worker,
-      webSupabaseFp: fingerprintOf(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || ''),
+      // **admin client가 고른 URL의 지문.** 여기서 따로 고르면 네 번째
+      // 갈래가 생긴다 — 그게 이 고장의 모양이었다.
+      webSupabaseFp: serverSupabaseUrl().fingerprint,
       webEncryptionFp: fingerprintOf(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || ''),
       mainSha: String(body?.mainSha ?? '').trim() || webSha,
       webSha, nowMs,

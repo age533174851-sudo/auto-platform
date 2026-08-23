@@ -219,6 +219,19 @@ jobs:
       - name: GET 라우트가 DB에 쓰지 않는지
         run: node scripts/check-get-writes.mjs
 
+      # ── 서버가 Supabase URL을 고르는 곳은 한 군데인가 ──
+      #
+      # `getSupabaseAdmin()`은 `NEXT_PUBLIC_SUPABASE_URL`만 봤고,
+      # 진단 API 넷은 `SUPABASE_URL || NEXT_PUBLIC_SUPABASE_URL`을 봤다.
+      # 그래서 **화면에 뜨는 지문이 실제로 읽는 DB의 지문이 아니었다** —
+      # 워커는 heartbeat를 잘 쓰는데 진단은 사흘 전 줄을 최신이라고 했고,
+      # migrate는 "남음 0", 런타임 API는 "pendingCount 62"였다.
+      #
+      # 있는지 묻는 것(`!!process.env...`)은 통과한다. 막는 것은
+      # **어디에 접속할지 고르는 것**이다.
+      - name: 서버 Supabase URL 선택 지점
+        run: node scripts/check-supabase-url.mjs
+
       # ── 테스트 등록 검사 ──
       #
       # 재배치 충돌을 기계적으로 해소하다 `run-tests.mjs`의 등록 줄이

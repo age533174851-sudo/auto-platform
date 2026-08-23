@@ -2,13 +2,26 @@
 // Server-only — service role key. Import ONLY from /api/... routes.
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from './types';
+import { serverSupabaseUrl } from './url';
 
-/** Fresh service-role client per request (never cached). */
+/**
+ * Fresh service-role client per request (never cached).
+ *
+ * **URL은 여기서 고르지 않는다.** `resolveServerSupabaseUrl`이 고르고,
+ * 진단 API들도 같은 함수를 쓴다 — 예전에는 이 자리가
+ * `NEXT_PUBLIC_SUPABASE_URL`만 보고, 진단은
+ * `SUPABASE_URL || NEXT_PUBLIC_SUPABASE_URL`을 봤다. 그래서 **화면에
+ * 뜨는 지문이 실제로 읽는 DB의 지문이 아니었다.**
+ *
+ * 두 이름이 서로 다른 곳을 가리키면 **null을 돌려준다.** 한쪽을 골라
+ * 계속 돌면 쓰기는 A로 가고 진단은 B를 말한다 — 지금 겪은 그 상태다.
+ * 왜 null인지는 `serverSupabaseUrl().message`가 말한다.
+ */
 export function getSupabaseAdmin(): SupabaseClient<Database> | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const resolved = serverSupabaseUrl();
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();   // 공백/줄바꿈 제거
-  if (!url || !key) return null;
-  return createClient<Database>(url, key, {
+  if (!resolved.url || !key) return null;
+  return createClient<Database>(resolved.url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 }
