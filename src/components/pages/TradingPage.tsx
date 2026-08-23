@@ -491,7 +491,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       setStatus(null); return;
     }
     setStatus('loading');
-    showToast(`${tradeMode==='real'?'실전':tradeMode==='testnet'?'테스트넷':'모의'} ${side} 주문 처리 중...`, 'pending');
+    // **`'real'`은 이 유니온에 없는 값이다.** `tradeMode`는
+    // `'mock' | 'testnet' | 'live'`라서 이 비교는 언제나 거짓이었고,
+    // 그래서 **실전 주문을 낼 때 "모의 주문 처리 중"이라고 떴다.**
+    // 진짜 돈이 나가는 순간에 화면이 모의라고 말한 것이다.
+    showToast(`${tradeMode==='live'?'실전':tradeMode==='testnet'?'테스트넷':'모의'} ${side} 주문 처리 중...`, 'pending');
     const orderAmt = amount ? +amount : 100_000;
 
     // ── 테스트넷/실전: 실제 거래소 선물 주문 ──

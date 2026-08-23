@@ -119,7 +119,7 @@ function HistoryPage() {
     <div>
       {/* Toast */}
       {toast && (
-        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:999,background:T.surf,border:`1px solid ${A(T.grn,'40')}`,borderRadius:12,padding:'10px 16px',fontSize:12,color:T.txt,fontWeight:700,boxShadow:'0 4px 20px rgba(0,0,0,.4)',whiteSpace:'nowrap',zIndex:999}}>
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',zIndex:999,background:T.surf,border:`1px solid ${A(T.grn,'40')}`,borderRadius:12,padding:'10px 16px',fontSize:12,color:T.txt,fontWeight:700,boxShadow:'0 4px 20px rgba(0,0,0,.4)',whiteSpace:'nowrap'}}>
           {toast}
         </div>
       )}
