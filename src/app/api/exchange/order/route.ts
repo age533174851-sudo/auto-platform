@@ -163,19 +163,24 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 가드 7: 감사 로그 ─────────────────────────────────────
-  try {
-    await (sb.from('audit_logs') as any).insert({
-      actor_id: uid,
-      action:   'LIVE_ORDER',
-      details:  {
-        exchange, symbol, side, type,
-        amount: orderUsdt, quantity,
-        success: result.success, orderId: result.orderId,
-        message: result.message,
-      },
-      result: result.success ? 'success' : 'failure',
-    });
-  } catch { /* best-effort */ }
+  // ── 실거래 주문은 반드시 기록에 남는다 ──
+  //
+  // **`audit_logs`는 마이그레이션 파이프라인에 없는 표다.** 여기 쓰던
+  // `result` 칸은 `supabase/schema.sql`의 정의에도 없다. 그런데 이
+  // 호출은 `try { } catch { }`로 감싸여 있어서, 실패해도 아무 흔적이
+  // 남지 않는다 — **실거래 주문이 감사에서 조용히 빠진다.**
+  //
+  // 실제로 적용되는 표는 040의 `audit_events`이고, `recordAudit`이
+  // 시크릿 걸러내기까지 한다.
+  const { recordAudit } = await import('@/lib/safety/auditStore');
+  recordAudit(sb, {
+    userId: uid, action: 'LIVE_ORDER', resource: `${exchange}:${symbol}`,
+    result: result.success ? 'success' : 'failed',
+    detail: {
+      side, type, amount: orderUsdt, quantity,
+      orderId: result.orderId, message: result.message,
+    },
+  });
 
   if (!result.success) {
     return NextResponse.json({ error: 'order_failed', message: result.message }, { status: 502 });

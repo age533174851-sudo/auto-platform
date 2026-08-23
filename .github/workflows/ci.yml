@@ -57,7 +57,7 @@ jobs:
       # **기준선은 실제 개수와 같아야 한다.**
       # 80으로 두면 지금(74)에서 새 오류 6개가 들어와도 통과한다.
       # 줄어들 때마다 같이 내린다 — 아래 단계가 그걸 알려 준다.
-      TS_ERROR_BASELINE: '73'
+      TS_ERROR_BASELINE: '56'
 
     steps:
       - uses: actions/checkout@v4
@@ -206,6 +206,16 @@ jobs:
       # 타이머는 아무도 안 볼 때 반복해서 낸다.
       - name: 브라우저 주문 권한 검사
         run: node scripts/check-browser-orders.mjs
+
+      # ── 표 어긋남 검사 ──
+      #
+      # 코드가 `audit_logs`에 여섯 곳에서 썼는데 그 표를 만드는
+      # 마이그레이션이 하나도 없었다. 정의는 supabase/schema.sql에만
+      # 있었고, 그마저도 코드가 쓰는 칸과 달랐다(`result`가 없다).
+      # 그 insert들은 전부 try/catch라 실패해도 흔적이 없었다 —
+      # 그중에 실거래 주문과 관리자 긴급 정지가 있었다.
+      - name: 표 어긋남 검사
+        run: node scripts/check-table-drift.mjs
 
       # ── GET이 쓰는 경로 ──
       #

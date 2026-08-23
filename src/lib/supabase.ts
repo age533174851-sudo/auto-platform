@@ -257,10 +257,12 @@ export async function adminChangePlan(
     granted_by: adminUserId, updated_at: new Date().toISOString(),
   }).eq('id', targetUserId);
   if (!error) {
-    await sb.from('audit_logs').insert({
-      actor_id: adminUserId, action: 'CHANGE_PLAN', target_id: targetUserId,
-      details: `Plan → ${plan} / Role → ${role}`,
-    });
+    // **`audit_logs`는 마이그레이션 파이프라인에 없는 표다.**
+    // 실제로 적용되는 것은 040의 `audit_events`다.
+    await sb.from('audit_events').insert({
+      user_id: adminUserId, action: 'CHANGE_PLAN', resource: targetUserId,
+      result: 'success', detail: { plan, role },
+    } as any);
   }
   return { error: error?.message || null };
 }
@@ -274,10 +276,10 @@ export async function adminBanUser(
     status: ban ? 'banned' : 'active', updated_at: new Date().toISOString(),
   }).eq('id', targetUserId);
   if (!error) {
-    await sb.from('audit_logs').insert({
-      actor_id: adminUserId, action: ban ? 'BAN_USER' : 'UNBAN_USER', target_id: targetUserId,
-      details: ban ? '계정 차단' : '차단 해제',
-    });
+    await sb.from('audit_events').insert({
+      user_id: adminUserId, action: ban ? 'BAN_USER' : 'UNBAN_USER',
+      resource: targetUserId, result: 'success', detail: {},
+    } as any);
   }
   return { error: error?.message || null };
 }
@@ -309,9 +311,10 @@ export async function adminCreateCode(code: {
   if (!sb) return { error: 'Supabase not configured' };
   const { error } = await sb.from('invite_codes').insert({ ...code, created_by: adminUserId });
   if (!error) {
-    await sb.from('audit_logs').insert({
-      actor_id: adminUserId, action: 'CREATE_INVITE_CODE', details: `코드 생성: ${code.code}`,
-    });
+    await sb.from('audit_events').insert({
+      user_id: adminUserId, action: 'CREATE_INVITE_CODE',
+      resource: code.code, result: 'success', detail: {},
+    } as any);
   }
   return { error: error?.message || null };
 }
@@ -332,7 +335,8 @@ export async function adminToggleCode(
 export async function getAuditLogs(limit = 50) {
   const sb = await getClient();
   if (!sb) return [];
-  const { data } = await sb.from('audit_logs').select('*')
+  // 쓰는 곳과 읽는 곳이 다른 표면 화면은 언제나 비어 있다.
+  const { data } = await sb.from('audit_events').select('*')
     .order('created_at', { ascending: false }).limit(limit);
   return data || [];
 }
