@@ -590,8 +590,14 @@ type ApiPermission    = { read:boolean; spot:boolean; futures:boolean; withdrawa
 type WalletEntry      = { id:string; name:string; icon:string; type:string; balance:number; usdtEq:number; color:string; exchange:string };
 type MarketplaceStrat = { id:string; name:string; author:string; pnl:number; winRate:number; subscribers:number; score:number; type:string; color:string; badge?:string; verified:boolean };
 type LiquidationPos   = { asset:string; clr:string; side:'long'|'short'; size:number; entryPrice:number; liqPrice:number; distPct:number; leverage:number };
-type ExchangeHealth   = { name:string; icon:string; status:'ok'|'slow'|'error'|'maintenance'; latency:number; wsStatus:boolean; lastCheck:string };
-type RecoveryEvent    = { id:string; type:string; desc:string; action:string; time:string; resolved:boolean };
+// ── 여기서 다시 적지 않는다 ──
+//
+// 같은 이름이 위에서 이미 import돼 있었다(`@/lib/mock`). 그리고 두
+// 정의가 **달랐다** — 이쪽 사본에는 `status`의 `'unknown'`이 빠져
+// 있었다. 즉 "확인 못 함"이 타입에서 사라진 상태였고, 그러면 그 값을
+// 다루는 가지를 쓸 수 없다.
+//
+// 정의는 `@/lib/mock` 한 곳에만 둔다.
 type BotMode          = 'normal'|'shadow'|'sandbox';
 
 interface KillSwitchState {

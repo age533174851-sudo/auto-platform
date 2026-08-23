@@ -1389,7 +1389,10 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                       {log.action==='buy'?'매수':'매도'}
                     </span>
                     <span style={{padding:'1px 5px',background:T.alt,color:T.muted,borderRadius:4,fontSize:9,fontWeight:700}}>
-                      {log.mode==='paper'?'모의':log.mode==='testnet'?'테넷':'실전'}
+                      {/* **모르는 값을 실전이라고 적지 않는다.**
+                          예전에는 `paper`가 아니면 전부 '실전'이었다 —
+                          저장소 규칙은 실전이라고 확인된 것만 실전이다. */}
+                      {log.mode==='paper'?'모의':log.mode==='testnet'?'테넷':log.mode==='live'?'실전':'환경 미상'}
                     </span>
                   </div>
                   <div style={{color:T.muted,fontSize:10,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{log.strategyName}</div>

@@ -8,7 +8,16 @@ import type {
 } from './types';
 import { DEFAULT_RISK_LIMITS } from './types';
 import { calcTradePnL } from '../pnl';
-import { getDefaultConfig, calcFeeAmount } from '../fees';
+// ── 수수료는 시장 유형을 아는 쪽에서 읽는다 ──
+//
+// **`../fees`와 `../fees/index`가 둘 다 `getDefaultConfig`를 내보낸다.**
+// 앞엣것은 인자를 하나만 받고 현물 요율만 안다. 그래서
+// `getDefaultConfig(exchange, 'futures')`라고 써도 **두 번째 인자가
+// 그냥 버려지고 현물 요율이 돌아왔다.**
+//
+// 바이낸스 기준으로 taker가 0.1% 대 0.05% — **2배 차이다.**
+// 선물 포지션의 비용을 현물 요율로 계산하고 있었다.
+import { getDefaultConfig, calcFeeAmount } from '../fees/index';
 import { getDefaultFundingRate } from '../funding';
 import type { ExchangeId } from '../exchanges/types';
 
