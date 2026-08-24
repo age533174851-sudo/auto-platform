@@ -95,7 +95,9 @@ function noteHeartbeatOk(workerId: string, sha: string, lastSeen: string): void 
     // **6자 지문이 같다는 것만으로 같은 DB라고 단정하지 않는다.**
     // project ref는 공개 URL의 일부라 비밀이 아니다.
     + ` target=${supabaseFingerprint()} project=${supabaseProjectRef() ?? '(모름)'}`
-    + ' (다시 읽어 대조함)');
+    // **판정 코드를 그대로 찍는다.** 로그를 읽는 사람이 문장을 해석해서
+    // 어느 경우인지 짐작하게 만들지 않는다.
+    + ' verdict=RECORDED (다시 읽어 대조함)');
 }
 
 /**
@@ -238,7 +240,7 @@ export async function heartbeat(
         noteHeartbeatOk(workerId, sha, base.last_seen);
         return;
       }
-      noteHeartbeatFailure(verdict.message);
+      noteHeartbeatFailure(`[${verdict.code}] ${verdict.message}`);
       return;
     }
     // 054가 아직 안 적용된 배포에서는 `version` 칸이 없다. 그때 생존
@@ -250,7 +252,7 @@ export async function heartbeat(
       if (!retry.error) {
         // 버전을 못 적는 경로에서도 **행이 실제로 갱신됐는지는 확인한다.**
         const v = await verifyHeartbeatWrite(workerId, base.last_seen, null, retry);
-        if (!v.ok) { noteHeartbeatFailure(v.message); return; }
+        if (!v.ok) { noteHeartbeatFailure(`[${v.code}] ${v.message}`); return; }
         noteHeartbeatRecovered();
         noteHeartbeatOk(workerId, '', base.last_seen);
         // **이건 조용히 넘어가면 안 되는 성공이다.** 생존 신호는 적혔지만
@@ -258,13 +260,13 @@ export async function heartbeat(
         noteMissingVersionColumn();
         return;
       }
-      noteHeartbeatFailure(String(retry.error.message || retry.error));
+      noteHeartbeatFailure(`[WRITE_FAILED] ${String(retry.error.message || retry.error)}`);
       return;
     }
-    noteHeartbeatFailure(String(error.message || error));
+    noteHeartbeatFailure(`[WRITE_FAILED] ${String(error.message || error)}`);
   } catch (e: any) {
     // 예외도 실패다. 예전에는 이 자리가 비어 있었다.
-    noteHeartbeatFailure(String(e?.message || e));
+    noteHeartbeatFailure(`[WRITE_FAILED] ${String(e?.message || e)}`);
   }
 }
 
@@ -282,7 +284,7 @@ export async function heartbeat(
  */
 async function verifyHeartbeatWrite(
   workerId: string, lastSeen: string, version: string | null, res: any,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; code: string; message: string }> {
   const returnedRows = Array.isArray(res?.data) ? res.data.length : null;
 
   let readError: string | null = null;
@@ -303,7 +305,7 @@ async function verifyHeartbeatWrite(
     readError,
     readRow,
   });
-  return { ok: v.ok, message: v.message };
+  return { ok: v.ok, code: v.code, message: v.message };
 }
 
 // 054 미적용은 배포 대조를 통째로 무력화한다. 자주 찍을 필요는 없지만
