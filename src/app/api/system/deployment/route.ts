@@ -34,6 +34,8 @@ import { fingerprintOf } from '@/lib/system/fingerprint';
 import { runtimeSkew, deploymentVerdict, workerAlive } from '@/lib/runtime/workerPlan';
 // **관측만 한다.** 접속 대상을 고르지 않고, 불일치를 이유로 무엇도 막지 않는다.
 import { observeServerSupabaseUrls } from '@/lib/supabase/urlObserve';
+// 키의 **역할**만 본다 — 값도 서명도 내보내지 않는다.
+import { keyIdentityOf } from '@/lib/supabase/keyIdentity';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -97,6 +99,78 @@ export async function GET(req: NextRequest) {
         ? 'version_column_missing — 마이그레이션 054를 자동으로 적용하는 중입니다'
         : msg;
     }
+  }
+
+  // ── 이 client가 worker_heartbeat를 어떻게 보는가 ──
+  //
+  // **라우트가 실제로 쓰는 `sb`를 그대로 쓴다.** 진단용으로 client를
+  // 새로 만들면 "진단은 되는데 실제 경로는 안 되는" 상태를 못 잡는다 —
+  // 그게 지금 겪는 고장의 모양이다.
+  //
+  // 읽기만 한다. count · 최근 8줄 · 특정 worker_id 존재 여부 셋을
+  // **같은 client로** 물어서, 어느 단계에서 갈라지는지 본다.
+  //
+  //   count가 0인데 워커는 RECORDED  → 이 client에게 줄이 안 보인다
+  //   count는 있는데 최근 줄이 낡음   → 새 줄만 안 보인다
+  //   특정 id를 콕 집으면 보임        → 정렬·필터 쪽 문제다
+  //
+  // `?worker=<id>`로 찾을 id를 준다. 없으면 그 항목은 건너뛴다 —
+  // **id를 코드에 박지 않는다.**
+  const wantWorker = String(req.nextUrl.searchParams.get('worker') || '').trim() || null;
+  let visibility: any = { probed: false, note: 'supabase 미연결 — 조회하지 않았습니다' };
+  if (sb) {
+    const v: any = {
+      probed: true,
+      count: null as number | null,
+      countError: null as string | null,
+      recent: [] as any[],
+      recentError: null as string | null,
+      lookup: wantWorker ? { workerId: wantWorker, found: null as boolean | null, lastSeen: null as string | null, error: null as string | null } : null,
+      note: '',
+    };
+    try {
+      const r: any = await (sb as any).from('worker_heartbeat')
+        .select('*', { count: 'exact', head: true });
+      if (r?.error) v.countError = String(r.error.message || r.error);
+      else v.count = typeof r?.count === 'number' ? r.count : null;
+    } catch (e: any) { v.countError = String(e?.message || e); }
+
+    try {
+      const r: any = await (sb as any).from('worker_heartbeat')
+        .select('worker_id, last_seen, version, provider, machine_id')
+        .order('last_seen', { ascending: false }).limit(8);
+      if (r?.error) v.recentError = String(r.error.message || r.error);
+      else v.recent = (Array.isArray(r?.data) ? r.data : []).map((x: any) => {
+        const t = Date.parse(String(x.last_seen));
+        return {
+          workerId: x.worker_id ?? null,
+          lastSeen: x.last_seen ?? null,
+          ageSec: Number.isFinite(t) ? Math.max(0, Math.round((nowMs - t) / 1000)) : null,
+          short: String(x.version || '').trim().slice(0, 7) || null,
+          provider: x.provider ?? null,
+          machineId: x.machine_id ?? null,
+        };
+      });
+    } catch (e: any) { v.recentError = String(e?.message || e); }
+
+    if (wantWorker) {
+      try {
+        const r: any = await (sb as any).from('worker_heartbeat')
+          .select('worker_id, last_seen').eq('worker_id', wantWorker).maybeSingle();
+        if (r?.error) v.lookup.error = String(r.error.message || r.error);
+        else {
+          v.lookup.found = !!r?.data;
+          v.lookup.lastSeen = r?.data?.last_seen ?? null;
+        }
+      } catch (e: any) { v.lookup.error = String(e?.message || e); }
+    }
+
+    v.note = v.count === 0
+      ? '이 client에게는 worker_heartbeat가 **0줄**입니다 — 워커가 쓰고 있다면 권한/RLS로 가려진 것입니다'
+      : v.count == null
+        ? '줄 수를 세지 못했습니다 — 0줄이라는 뜻이 아닙니다'
+        : `이 client에게 ${v.count}줄이 보입니다`;
+    visibility = v;
   }
 
   const skew = runtimeSkew({ vercelSha: web.sha, flySha: fly.sha });
@@ -170,7 +244,23 @@ export async function GET(req: NextRequest) {
       // 붙는지도, 불일치일 때 무엇을 막을지도 여기서 정하지 않는다.
       // 값을 본 뒤에 그것을 정한다.
       ...observeServerSupabaseUrls(),
+
+      // ── 무슨 자격으로 붙는가 ──
+      //
+      // URL이 같고 표도 같고 질의 모양도 같은데 결과가 다르면 남는 것은
+      // **역할**이다. RLS는 역할에 따라 같은 질의를 다른 결과로 만들고,
+      // SELECT를 막을 때는 오류가 아니라 **0줄**이다.
+      //
+      // 값도 서명도 내보내지 않는다 — 형식 · role · ref · 지문 6자뿐이다.
+      // 워커도 부팅 때 같은 모양을 로그에 남기므로 눈으로 대조하면 된다.
+      serviceKey: keyIdentityOf(process.env.SUPABASE_SERVICE_ROLE_KEY),
     },
+
+    // ── 이 client에게 worker_heartbeat가 어떻게 보이는가 ──
+    //
+    // **라우트가 실제로 쓰는 client로 조회한 결과다.** 진단 전용 client를
+    // 따로 만들지 않는다.
+    visibility,
     // 서버가 스스로 답할 수 있는 것.
     skew,
     // main까지 준 경우의 판정. 안 줬으면 UNKNOWN이고 그게 정직한 값이다.

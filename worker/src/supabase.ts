@@ -1,6 +1,8 @@
 // worker/src/supabase.ts — service role 클라이언트 + lock + heartbeat
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { workerIdentityOf } from '../../src/lib/runtime/workerIdentity';
+// **웹과 같은 판정기를 쓴다.** 워커용 사본을 두면 한쪽만 고쳐진다.
+import { keyIdentityOf } from '../../src/lib/supabase/keyIdentity';
 
 let _sb: SupabaseClient | null = null;
 export function sb(): SupabaseClient {
@@ -9,7 +11,32 @@ export function sb(): SupabaseClient {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 미설정');
   _sb = createClient(url, key, { auth: { persistSession: false } });
+  noteServiceKeyIdentity(key);
   return _sb;
+}
+
+/**
+ * **이 워커가 무슨 자격으로 붙는지 한 번만 남긴다.**
+ *
+ * 웹의 `/api/system/deployment`가 `supabase.serviceKey`로 같은 모양을
+ * 보여 준다. 둘을 나란히 놓으면 **같은 키인지, 같은 역할인지**를 값 없이
+ * 대조할 수 있다.
+ *
+ * URL도 같고 표도 같고 질의 모양도 같은데 결과가 다르면 남는 것은
+ * 역할이다 — RLS는 역할에 따라 같은 질의를 다른 결과로 만든다.
+ *
+ * 값도 서명도 찍지 않는다. 형식 · role · ref · 지문 6자뿐이다.
+ */
+let keyNoted = false;
+function noteServiceKeyIdentity(key: string): void {
+  if (keyNoted) return;
+  keyNoted = true;
+  try {
+    const id = keyIdentityOf(key);
+    console.log(
+      `[service-key] kind=${id.kind} role=${id.role ?? '(모름)'} ref=${id.ref ?? '(모름)'}`
+      + ` fp=${id.fingerprint ?? '(없음)'} — ${id.note}`);
+  } catch { /* 진단이 워커를 멈추지 않는다 */ }
 }
 
 // ── 분산 lock (Vercel killSwitch.ts와 동일 로직/테이블) ──────────
