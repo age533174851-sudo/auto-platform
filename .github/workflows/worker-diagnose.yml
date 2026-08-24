@@ -1,0 +1,60 @@
+# 워커가 왜 조용한지를 시스템이 스스로 말한다.
+#
+# **없애려는 문장은 이것이다: "fly logs를 열어 확인해 주세요."**
+#
+# 지금까지는 이랬다. 배포는 success, `flyctl status`는 started,
+# 그런데 heartbeat는 38시간 전 것. 그 상태에서 남는 안내가
+# "Fly 쪽 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 를 확인하세요"였고,
+# **그 둘은 실제로 맞아 있었다** (sync-secrets가 ALREADY_SAME을 찍는
+# 동안에도 그 문장이 나갔다). 추측한 원인을 단정으로 적으면 사람은
+# 엉뚱한 곳을 판다.
+#
+# 이 워크플로에는 FLY_API_TOKEN이 있다. 사람이 대시보드에서 볼 수 있는
+# 것은 여기서도 볼 수 있다 — 그러면 사람이 볼 이유가 없다.
+#
+# 값은 로그에 남지 않는다
+# ───────────────────────
+# 시크릿은 **이름만** 옮긴다 (flyctl도 값은 주지 않는다). 로그는 값처럼
+# 생긴 것을 지우고 단서가 되는 줄만 옮긴다.
+name: worker-diagnose
+
+on:
+  workflow_dispatch:
+
+  # 아무도 안 물어봐도 하루 두 번 스스로 본다. 워커가 조용해진 것을
+  # **사람이 화면을 열어야 아는 상태**로 두지 않는다.
+  schedule:
+    - cron: '23 1,13 * * *'
+
+concurrency:
+  group: worker-diagnose
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    name: 워커 진단
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      BASE: ${{ secrets.EXIT_MONITOR_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: flyctl 설치
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # ALIVE면 0, 그 밖은 1이다. **확인하지 못한 것(UNVERIFIED)도 실패다** —
+      # 못 물어본 것을 통과로 적으면 검사가 꺼진 것과 같다.
+      - name: 진단
+        run: node scripts/diagnose-worker.mjs
