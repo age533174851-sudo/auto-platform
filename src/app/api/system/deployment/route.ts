@@ -36,6 +36,8 @@ import { runtimeSkew, deploymentVerdict, workerAlive } from '@/lib/runtime/worke
 import { observeServerSupabaseUrls } from '@/lib/supabase/urlObserve';
 // 키의 **역할**만 본다 — 값도 서명도 내보내지 않는다.
 import { keyIdentityOf } from '@/lib/supabase/keyIdentity';
+// 캐시 A/B — **판정은 여기 없다.** 사실만 모아서 넘긴다.
+import { cacheProbeVerdict, noStoreFetch, type ProbeArm } from '@/lib/supabase/cacheProbe';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -173,6 +175,81 @@ export async function GET(req: NextRequest) {
     visibility = v;
   }
 
+  // ── 같은 client가 같은 표를 읽는데 왜 한 질의만 낡았나 ──
+  //
+  // 실측(2026-08-24): 같은 요청 안에서 기존 fly 조회는 8/20을,
+  // #195가 새로 넣은 조회는 1초 전을 돌려줬다. 권한도(service_role),
+  // 프로젝트도(sameProject=true), 워커 쓰기도(RECORDED) 전부 정상이다.
+  //
+  // 남은 차이는 **질의의 모양**뿐이다. supabase-js는 PostgREST에 GET으로
+  // 가고 컬럼 목록이 URL에 들어가므로, URL 단위로 캐시되는 무엇이 있다면
+  // 정확히 이 모양이 된다.
+  //
+  // **그래도 단정하지 않는다.** 이 라우트에는 이미 force-dynamic이 있고,
+  // 문서대로라면 그것만으로 데이터 캐시를 우회해야 한다. 그래서 잰다.
+  //
+  //   A 기존 질의        위에서 이미 돌았다 — **건드리지 않는다**
+  //   B 같은 뜻 · 다른 URL  컬럼 하나만 더한다
+  //   C no-store 강제     fetch에 cache:'no-store'를 준 client
+  //
+  // C는 **대조군 전용 client**다. 운영 경로(getSupabaseAdmin)는 그대로다 —
+  // 캐시가 원인이라고 확정된 뒤에 붙일지 정한다.
+  let cacheProbe: any = { probed: false, note: 'supabase 미연결 — 재지 않았습니다' };
+  if (sb) {
+    const armOf = async (run: () => Promise<any>): Promise<ProbeArm> => {
+      try {
+        const r: any = await run();
+        if (r?.error) return { ran: true, lastSeen: null, error: String(r.error.message || r.error) };
+        const row = Array.isArray(r?.data) ? r.data[0] : r?.data;
+        return { ran: true, lastSeen: row?.last_seen ?? null, error: null };
+      } catch (e: any) {
+        return { ran: true, lastSeen: null, error: String(e?.message || e) };
+      }
+    };
+
+    // A — 위에서 이미 돈 기존 질의의 결과를 그대로 쓴다. 다시 부르지 않는다.
+    const baseline: ProbeArm = { ran: true, lastSeen: fly.lastSeen, error: fly.error };
+
+    // B — 같은 뜻인데 컬럼 하나(machine_id)를 더해 URL만 다르게 한다.
+    const variantUrl = await armOf(() => (sb as any).from('worker_heartbeat')
+      .select('worker_id, last_seen, status, current_task, version, machine_id')
+      .order('last_seen', { ascending: false }).limit(1));
+
+    // C — 기존과 **완전히 같은 질의**를 no-store client로.
+    //     URL이 같으므로 URL 때문인지 캐시 때문인지가 갈린다.
+    let noStore: ProbeArm = { ran: false, lastSeen: null, error: 'no-store client를 만들지 못했습니다' };
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+      const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+      if (url && key) {
+        // **운영 client와 같은 URL·키를 쓴다.** 다른 것은 fetch뿐이다 —
+        // 그래야 이 팔의 차이가 캐시 때문이라고 말할 수 있다.
+        const probeClient: any = createClient(url, key, {
+          auth: { autoRefreshToken: false, persistSession: false },
+          global: { fetch: noStoreFetch() },
+        });
+        noStore = await armOf(() => probeClient.from('worker_heartbeat')
+          .select('worker_id, last_seen, status, current_task, version')
+          .order('last_seen', { ascending: false }).limit(1));
+      }
+    } catch (e: any) {
+      noStore = { ran: false, lastSeen: null, error: String(e?.message || e) };
+    }
+
+    const verdict = cacheProbeVerdict({ baseline, variantUrl, noStore, nowMs });
+    cacheProbe = {
+      probed: true,
+      ...verdict,
+      arms: {
+        baseline: { lastSeen: baseline.lastSeen, error: baseline.error, shape: 'worker_id,last_seen,status,current_task,version' },
+        variantUrl: { lastSeen: variantUrl.lastSeen, error: variantUrl.error, shape: '+ machine_id (URL만 다름)' },
+        noStore: { lastSeen: noStore.lastSeen, error: noStore.error, shape: '기존과 같은 컬럼 · fetch에 no-store' },
+      },
+      note: '이 조회들은 읽기만 합니다. 운영 client(getSupabaseAdmin)는 바꾸지 않았습니다.',
+    };
+  }
+
   const skew = runtimeSkew({ vercelSha: web.sha, flySha: fly.sha });
   // ── 코드가 같아도 DB가 따라오지 않았으면 '배포 완료'가 아니다 ──
   //
@@ -255,6 +332,12 @@ export async function GET(req: NextRequest) {
       // 워커도 부팅 때 같은 모양을 로그에 남기므로 눈으로 대조하면 된다.
       serviceKey: keyIdentityOf(process.env.SUPABASE_SERVICE_ROLE_KEY),
     },
+
+    // ── 같은 client인데 왜 한 질의만 낡았나 (A/B) ──
+    //
+    // 기존 질의는 손대지 않는다. 그 옆에 URL만 다른 팔과 no-store 팔을
+    // 나란히 두고 어느 쪽이 신선한지만 본다.
+    cacheProbe,
 
     // ── 이 client에게 worker_heartbeat가 어떻게 보이는가 ──
     //
