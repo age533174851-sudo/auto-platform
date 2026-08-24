@@ -75,7 +75,18 @@ async function main() {
     return 0;
   }
   console.log(`::error::${last.reason}`);
-  console.log('Fly 쪽 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 를 먼저 확인하세요 (값이 아니라 지문으로).');
+  // **원인을 추측해서 적지 않는다.**
+  //
+  // 예전에는 여기서 "Fly 쪽 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 를
+  // 먼저 확인하세요"라고 했다. 두 가지가 틀렸다:
+  //
+  //   · 확인은 사람이 대시보드를 여는 일이다 — 없애기로 한 문장이다
+  //   · 그리고 실제로 그 둘은 맞아 있었다. sync-secrets가
+  //     `fly/SUPABASE_URL: ALREADY_SAME`을 찍는 동안에도 이 문장이 나갔다
+  //
+  // 이제 이유는 다음 단계(`scripts/diagnose-worker.mjs`)가 Fly에 직접
+  // 물어서 말한다. 여기서는 사실만 적는다.
+  console.log('이유는 다음 단계(워커 진단)가 Fly에 직접 물어서 말합니다.');
   return 1;
 }
 
