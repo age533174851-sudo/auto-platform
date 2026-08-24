@@ -66,6 +66,8 @@ export async function GET(req: NextRequest) {
   const supabaseUrl = serverSupabaseUrl();
   /** worker_heartbeat의 최근 몇 줄. **읽기만 한다.** */
   let workerRows: any[] = [];
+  /** schema_migrations를 실제로 몇 줄 읽었는가. 개수와 다른 사실이다 */
+  let migrationRead: any = null;
   let fly: {
     sha: string | null; workerId: string | null; lastSeen: string | null;
     ageSec: number | null; alive: boolean | null; status: string | null; error: string | null;
@@ -143,6 +145,7 @@ export async function GET(req: NextRequest) {
     if (!sb) throw new Error('supabase_not_configured');
     const { migrationGate } = await import('@/lib/system/migrationGate');
     const ms = await migrationGate(sb);
+    migrationRead = (ms as any).read ?? null;
     // UNKNOWN(기록을 못 읽음)은 null — **모르는 것을 '됐다'로 읽지 않는다**
     migrationsApplied = ms.code === 'UP_TO_DATE' ? true
       : ms.code === 'UNKNOWN' ? null : false;
@@ -192,6 +195,9 @@ export async function GET(req: NextRequest) {
       // 그래서 같은 DB라도 (a) 매니페스트가 파일보다 앞서거나
       // (b) 체크섬이 어긋나면 여기만 남음으로 센다. 어느 쪽인지 보이게
       // 기준을 적어 둔다 — 두 숫자를 비교하려면 기준부터 같아야 한다.
+      // **몇 줄을 실제로 읽었는가.** "62개가 밀렸다"와 "표를 못 읽어서
+      // 62개를 못 찾았다"는 다른 사실이고, 개수만으로는 구분되지 않는다.
+      read: migrationRead,
       basis: {
         source: 'schema_migrations',
         comparedAgainst: 'REQUIRED_MIGRATIONS (src/lib/system/migrationManifest.ts)',
