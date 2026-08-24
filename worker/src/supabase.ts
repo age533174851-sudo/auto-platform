@@ -305,7 +305,59 @@ async function verifyHeartbeatWrite(
     readError,
     readRow,
   });
+  if (v.ok) await noteNewestAsWebSeesIt(workerId);
   return { ok: v.ok, code: v.code, message: v.message };
+}
+
+/**
+ * **웹과 같은 방식으로 읽으면 무엇이 보이는가.**
+ *
+ * 2026-08-24에 이런 상태를 봤다:
+ *
+ *   워커 로그   [heartbeat] ok ... verdict=RECORDED (다시 읽어 대조함)
+ *               1분마다 · target=1351b7 · project=sgbysrvvxlluzffmgcho
+ *   웹          마지막 기록 296,267초 전 (8/20에서 멈춤) · alive=false
+ *
+ * 워커는 쓰고 **다시 읽어 확인까지 했다.** 즉 쓰기도 되고 자기 줄
+ * 읽기도 된다. 그런데 웹은 사흘 전 줄을 최신이라고 한다.
+ *
+ * 두 읽기는 모양이 다르다:
+ *
+ *   워커  .eq('worker_id', 나).maybeSingle()          — 내 줄
+ *   웹    .order('last_seen', desc).limit(1)          — 제일 최신 줄
+ *
+ * **어느 쪽이 거짓말을 하는지 가르려면 같은 프로세스에서 두 모양을 다
+ * 돌려 봐야 한다.** 여기서 웹과 같은 질의를 던지고 결과를 남긴다.
+ *
+ *   내 줄이 최신으로 나온다   → DB는 정상. **웹의 읽기가 문제다**
+ *   사흘 전 줄이 나온다       → 정렬·타입·표 자체의 문제다
+ *
+ * 값은 남기지 않는다 — worker_id와 시각뿐이다. 1분에 한 번만 찍는다.
+ */
+let newestLastLogMs = 0;
+async function noteNewestAsWebSeesIt(myWorkerId: string): Promise<void> {
+  const now = Date.now();
+  if (newestLastLogMs !== 0 && now - newestLastLogMs < HB_LOG_EVERY_MS) return;
+  newestLastLogMs = now;
+  try {
+    const r: any = await sb().from('worker_heartbeat')
+      .select('worker_id, last_seen').order('last_seen', { ascending: false }).limit(1);
+    if (r?.error) {
+      console.log(`[heartbeat] 웹과 같은 질의(최신 1줄)를 못 읽었습니다: ${String(r.error.message || r.error)}`);
+      return;
+    }
+    const row = Array.isArray(r?.data) ? r.data[0] : null;
+    if (!row) {
+      console.log('[heartbeat] 웹과 같은 질의(최신 1줄)가 **0줄**입니다 — 방금 내가 쓴 줄도 안 보입니다');
+      return;
+    }
+    const mine = row.worker_id === myWorkerId;
+    console.log(
+      `[heartbeat] 웹과 같은 질의(최신 1줄): worker=${row.worker_id} last_seen=${row.last_seen}`
+      + ` ${mine ? '= 내 줄입니다 (DB는 정상 — 웹이 다른 것을 읽고 있습니다)' : '= 내 줄이 아닙니다'}`);
+  } catch (e: any) {
+    console.log(`[heartbeat] 웹과 같은 질의 중 예외: ${String(e?.message || e).slice(0, 160)}`);
+  }
 }
 
 // 054 미적용은 배포 대조를 통째로 무력화한다. 자주 찍을 필요는 없지만
