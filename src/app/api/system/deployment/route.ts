@@ -32,6 +32,8 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 // 로그에 남기므로, 둘을 비교하면 같은 DB를 보고 있는지 알 수 있다.
 import { fingerprintOf } from '@/lib/system/fingerprint';
 import { runtimeSkew, deploymentVerdict, workerAlive } from '@/lib/runtime/workerPlan';
+// **관측만 한다.** 접속 대상을 고르지 않고, 불일치를 이유로 무엇도 막지 않는다.
+import { observeServerSupabaseUrls } from '@/lib/supabase/urlObserve';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -144,9 +146,30 @@ export async function GET(req: NextRequest) {
     // 값은 안 보여준다. 지문 6자리만 준다. 워커도 부팅·heartbeat 로그에
     // 같은 방식의 지문을 남기므로 눈으로 대조하면 끝난다.
     supabase: {
+      // ⚠ 이 지문은 **`SUPABASE_URL || NEXT_PUBLIC_SUPABASE_URL`**에서 온다.
+      // 그런데 `getSupabaseAdmin()`은 `NEXT_PUBLIC_SUPABASE_URL`만 쓴다.
+      // 둘이 다르면 **여기 뜨는 지문은 실제로 읽는 곳의 것이 아니다.**
+      // 아래 `saw`가 그 두 이름을 각각 보여 준다.
       fingerprint: fingerprintOf(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL),
       note: '워커 로그의 `[heartbeat] ok ... target=<지문>`과 같아야 같은 DB입니다 — '
         + '다르면 워커가 다른 프로젝트에 쓰고 있습니다',
+
+      // ── 두 이름이 각각 무엇을 가리키나 (관측만) ──
+      //
+      // 2026-08-24 실측: Fly 워커는 `verdict=RECORDED`로 쓰고 다시 읽어
+      // 확인까지 했고, **웹과 같은 질의를 워커가 던지면 자기 줄이 최신으로
+      // 나왔다.** 즉 DB는 정상이다. 그런데 이 API는 8/20 14:18의 줄을
+      // 최신이라고 한다. 질의 모양이 같은데 결과가 다르면 남는 것은
+      // **어디에 붙는가**뿐이다.
+      //
+      // 그래서 그 두 이름을 그대로 보여 준다. **값은 없다** — 있는지 ·
+      // project ref · 지문 6자뿐이고, project ref는 브라우저 번들의
+      // `NEXT_PUBLIC_SUPABASE_URL`에 이미 들어 있는 공개 값이다.
+      //
+      // **이 필드는 아무 동작도 바꾸지 않는다.** admin client가 무엇에
+      // 붙는지도, 불일치일 때 무엇을 막을지도 여기서 정하지 않는다.
+      // 값을 본 뒤에 그것을 정한다.
+      ...observeServerSupabaseUrls(),
     },
     // 서버가 스스로 답할 수 있는 것.
     skew,
