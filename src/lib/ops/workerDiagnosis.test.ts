@@ -92,6 +92,31 @@ export function runWorkerDiagnosisTests() {
     eq(d.code, 'CRASH_LOOP', '재시작 반복');
   });
 
+  // ── 2026-08-24에 이 검사가 틀렸던 자리 ──
+  test('배포 중 SIGTERM이 있어도 heartbeat가 돌면 CRASH_LOOP이 아니다', () => {
+    const d = diagnoseWorker({
+      queried: true, machines: [{ id: '784ed315f23358', state: 'started' }], secretNames: ALL_SECRETS,
+      logLines: [
+        "Main child exited with signal (with signal 'SIGTERM', core dumped? false)",
+        'Machine created and started in 7.157s',
+        '[heartbeat] ok worker=784ed315f23358 last_seen=2026-08-24T00:36:17.154Z verdict=RECORDED (다시 읽어 대조함)',
+      ],
+      heartbeatAgeSec: 296270,
+    });
+    assert(d.code !== 'CRASH_LOOP', '성공 신호가 있는데 죽었다고 적으면 엉뚱한 곳을 판다');
+    eq(d.code, 'WEB_SEES_STALE', '쓰기가 아니라 읽기 쪽 문제다');
+    assert(/읽기|읽는/.test(d.nextStep), '읽기 쪽을 보라고 말해야 한다');
+  });
+
+  test('성공 신호가 없으면 여전히 CRASH_LOOP으로 본다', () => {
+    const d = diagnoseWorker({
+      queried: true, machines: [{ id: 'm1', state: 'started' }], secretNames: ALL_SECRETS,
+      logLines: ["Main child exited with signal (with signal 'SIGTERM')", 'Restarting machine'],
+      heartbeatAgeSec: 99999,
+    });
+    eq(d.code, 'CRASH_LOOP', '성공 신호가 없으면 판정은 그대로다');
+  });
+
   test('heartbeat 실패 로그가 있으면 DB_WRITE_FAILED — 죽은 것과 구분한다', () => {
     const d = diagnoseWorker({
       queried: true, machines: [{ id: 'm1', state: 'started' }], secretNames: ALL_SECRETS,

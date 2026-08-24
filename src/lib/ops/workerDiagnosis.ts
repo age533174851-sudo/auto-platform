@@ -68,6 +68,7 @@ export type DiagnosisCode =
   | 'CRASH_LOOP'        // 뜨자마자 죽기를 반복한다
   | 'DB_WRITE_FAILED'   // 로그가 heartbeat 쓰기 실패를 말한다
   | 'STARTED_BUT_SILENT'// 떠 있는데 로그에 아무 단서가 없다
+  | 'WEB_SEES_STALE'    // 워커는 썼다는데 웹이 읽는 값이 낡았다 — **읽기 쪽 문제다**
   | 'ALIVE'             // heartbeat가 있다 — 진단할 것이 없다
   | 'UNVERIFIED';       // 물어보지 못했다. **없다는 뜻이 아니다**
 
@@ -229,12 +230,42 @@ export function diagnoseWorker(i: DiagnosisInput): Diagnosis {
     };
   }
 
-  if (/exit|crash|restarting|Restarting/i.test(logText)) {
+  // ── 배포 중의 SIGTERM은 재시작 반복이 아니다 ──
+  //
+  // 2026-08-24에 이 검사가 CRASH_LOOP이라고 적었다. 근거로 든 줄은
+  // 이것이었다:
+  //
+  //   Main child exited with signal (with signal 'SIGTERM', ...)
+  //   Machine created and started in 7.157s
+  //
+  // **배포가 옛 머신을 갈아 끼우는 정상 절차다.** 그리고 같은 로그에
+  // 그 뒤로 `[heartbeat] ok ... verdict=RECORDED`가 1분마다 찍히고
+  // 있었다 — 죽기를 반복하는 프로세스는 그렇게 못 한다.
+  //
+  // **검사가 틀리면 사람들은 검사를 끈다.** 그래서 성공 신호가 로그에
+  // 있으면 재시작 판정을 내리지 않는다.
+  const heartbeatWorking = /\[heartbeat\]\s*ok|verdict=RECORDED/i.test(logText);
+  if (!heartbeatWorking && /exit|crash|restarting|Restarting/i.test(logText)) {
     return {
       code: 'CRASH_LOOP',
       headline: '워커가 떴다가 죽기를 반복하고 있습니다',
       evidence: [...ev, ...logs], degraded,
       nextStep: '아래 로그 줄이 이유입니다. 코드 문제면 고쳐서 다시 배포합니다.',
+    };
+  }
+
+  // ── 워커는 썼다는데 웹은 못 본다 ──
+  //
+  // 로그에 성공 신호가 있는데 heartbeat 나이가 기준을 넘었다. 둘 다
+  // 참이면 **쓰기가 아니라 읽기 쪽 문제다.** 죽었다고 적으면 엉뚱한
+  // 곳을 파게 된다.
+  if (heartbeatWorking) {
+    return {
+      code: 'WEB_SEES_STALE',
+      headline: '워커는 기록에 성공하고 있는데 웹이 읽는 값은 낡았습니다',
+      evidence: [...ev, ...logs], degraded,
+      nextStep: '워커가 쓰고 다시 읽어 확인까지 했습니다 — 쓰기 문제가 아닙니다.'
+        + ' 웹이 어느 줄을 읽는지(정렬·필터·권한)를 봐야 합니다.',
     };
   }
 
