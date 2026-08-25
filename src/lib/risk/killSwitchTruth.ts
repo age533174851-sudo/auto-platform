@@ -217,6 +217,15 @@ export function killCompletion(i: {
    * 두 판정이 서로 모순됐다 — 깨끗해서 안 했는데 실패라고 답한 것이다.
    */
   skipped?: { reason: string } | null;
+  /**
+   * 줄일 대상을 **실제로 확인했는가.**
+   *
+   * `targeted`가 비어 있는 것은 두 가지다 — 줄일 게 정말 없었거나,
+   * **못 찾았거나.** 예전에는 그 둘을 구분하지 않아서 한 건도 못 줄인
+   * 채 완료라고 답할 수 있었다. REDUCE_RISK는 actionMode에 D도 C도
+   * 없어서(actions: A·B) 다른 어떤 조건에도 걸리지 않는다.
+   */
+  discovery?: DiscoveryVerdict | null;
 }): KillCompletion {
   const intent = intentOf(i.actionMode);
   const e = i.exec ?? null;
@@ -271,6 +280,29 @@ export function killCompletion(i: {
   } else if ((e.closeFailed ?? 0) > 0) {
     // 재조회 근거가 없는 옛 모양. 실패 건수만이라도 놓치지 않는다.
     missing.push(`심볼별 종료 실패 ${e.closeFailed}건`);
+  }
+
+  // ── 대상이 비어 있는 이유를 묻는다 ──
+  //
+  // **`targeted: []`만 보고 넘어가면 한 건도 못 줄인 채 완료가 된다.**
+  //
+  // REDUCE_RISK는 `actions: ['A','B']`라 actionMode에 C도 D도 없다.
+  // 그래서 위의 `intent.cancel`·`intent.close` 어느 쪽에도 안 걸리고,
+  // leftover는 `expectedClosed=false`라 남은 포지션을 세지 않는다.
+  // 즉 **거래소에 포지션이 둘 남아 있어도 complete=true**였다.
+  //
+  // 그래서 이 단계가 포지션을 줄이기로 한 것이면 **대상을 실제로
+  // 확인했다는 근거**를 요구한다.
+  const dv = i.discovery ?? null;
+  if (dv && dv.code === 'UNKNOWN') {
+    missing.push(dv.reason);
+  } else if (dv && dv.code === 'VERIFIED_TARGETS') {
+    // 찾았는데 실행 기록이 없으면 찾은 것과 한 것이 어긋난 것이다.
+    if (!targeted || targeted.length === 0) {
+      missing.push(`줄일 대상 ${dv.count}건을 찾았는데 청산 기록이 없습니다`);
+    }
+  } else if (dv && dv.code === 'VERIFIED_EMPTY') {
+    did.push('줄일 포지션 없음(거래소 확인)');
   }
 
   // 거래소 확인. **없으면 '완료'라고 못 적는다.**
@@ -385,4 +417,148 @@ export function resetVerdict(i: {
  */
 export function isTestnetConn(conn: any): boolean {
   return (conn?.is_testnet) !== false;
+}
+
+// ── 대상을 못 찾은 것과 대상이 없는 것 ──────────────────────────
+//
+// **REDUCE_RISK는 "모든 열린 포지션을 절반으로"다.** 그런데 실제
+// 실행은 `live_orders`에 있는 심볼만 후보로 만들었다. 거래소에는
+// 포지션이 둘 있는데 그 표에 줄이 없으면 후보가 0이 되고, 아무것도
+// 줄이지 않은 채 `targeted: []`로 끝났다.
+//
+// CLOSE_AUTOMATED도 같은 모양이다. `live_orders` 조회가 **실패**해도
+// `rows`가 null이라 "자동매매 대상 0개"와 구분되지 않았다.
+//
+// 그리고 `killCompletion`은 `targeted`가 비어 있으면 아무것도 요구하지
+// 않았다. 즉 **한 건도 못 줄였는데 complete=true**가 가능했다.
+//
+// 급할 때 누른 버튼이 "완료"라고 답하면 사람은 거래소를 안 본다.
+// 그래서 "대상이 없다"와 "대상을 못 찾았다"를 갈라야 한다.
+
+export type DiscoveryCode =
+  | 'NOT_APPLICABLE'   // 이 단계는 포지션을 줄이지 않는다
+  | 'VERIFIED_TARGETS' // 줄일 것을 찾았다
+  | 'VERIFIED_EMPTY'   // **읽었고**, 줄일 것이 정말 없었다
+  | 'UNKNOWN';         // 못 읽었다. **없다는 뜻이 아니다**
+
+export interface DiscoveryVerdict {
+  code: DiscoveryCode;
+  /** 찾은 대상 수. 못 읽었으면 null */
+  count: number | null;
+  reason: string;
+}
+
+/**
+ * 줄일 대상을 **실제로 확인했는가.**
+ *
+ * `positionsRead`는 거래소에서 열린 포지션 목록을 읽었는가다.
+ * `ledgerRead`는 `live_orders`를 읽었는가로, **automatedOnly일 때만**
+ * 필요하다 — "봇이 연 것만"을 가리려면 장부가 있어야 한다.
+ *
+ * 셋 중 하나라도 못 읽었으면 UNKNOWN이고, UNKNOWN은 완료가 아니다.
+ */
+export function discoveryVerdict(i: {
+  spec: { closePct: number; automatedOnly: boolean } | null | undefined;
+  /** 거래소 포지션 목록을 읽었는가 */
+  positionsRead: boolean;
+  /** live_orders를 읽었는가 (automatedOnly에서만 본다) */
+  ledgerRead: boolean;
+  /** 찾은 대상 수 */
+  targetCount: number;
+}): DiscoveryVerdict {
+  const spec = i.spec ?? null;
+  if (!spec || !(spec.closePct > 0)) {
+    return { code: 'NOT_APPLICABLE', count: 0, reason: '이번 단계는 포지션을 줄이지 않습니다' };
+  }
+  if (!i.positionsRead) {
+    return {
+      code: 'UNKNOWN', count: null,
+      reason: '거래소에서 열린 포지션을 읽지 못했습니다 — 줄일 것이 없다는 뜻이 아닙니다',
+    };
+  }
+  if (spec.automatedOnly && !i.ledgerRead) {
+    return {
+      code: 'UNKNOWN', count: null,
+      reason: '자동매매 장부(live_orders)를 읽지 못해 어느 포지션이 봇의 것인지 가리지 못했습니다 — '
+        + '대상이 없다는 뜻이 아닙니다',
+    };
+  }
+  const n = Math.max(0, Math.floor(Number(i.targetCount) || 0));
+  if (n > 0) {
+    return { code: 'VERIFIED_TARGETS', count: n, reason: `줄일 대상 ${n}건을 확인했습니다` };
+  }
+  return {
+    code: 'VERIFIED_EMPTY', count: 0,
+    reason: spec.automatedOnly
+      ? '거래소와 장부를 읽었고, 자동매매가 연 열린 포지션이 없었습니다'
+      : '거래소를 읽었고, 열린 포지션이 없었습니다',
+  };
+}
+
+// ── 이번 발동을 만든 것이 무엇인가 ─────────────────────────────
+//
+// **설정값과 이번에 실제로 실행한 것은 다르다.**
+//
+// `body.level`로 CLOSE_ALL을 눌러도 저장되는 건 설정의 `actionMode`
+// (예: 'BC')였다. 나중에 status·reset은 그 저장값으로 판단한다.
+//
+//   설정 BC → 수동 CLOSE_ALL(ABCD) 실행 → 포지션 일부 남음 → reset
+//   → reset은 BC로 읽어 `expectedClosed = false`
+//   → leftover가 포지션을 세지 않음 → CLEAR
+//   → **남은 포지션 위에서 신규 진입 잠금이 풀린다**
+//
+// 그래서 이번 발동의 실제 조합을 따로 남긴다. 그리고 **남기지 못했을
+// 때가 더 중요하다** — 칸이 없거나 쓰기가 실패하면 모르는 상태가 되고,
+// 모르는 상태에서 약한 쪽(설정값)으로 판단하면 위 시나리오가 그대로
+// 재현된다. 그래서 모르면 **가장 강한 쪽**으로 본다.
+
+export interface EffectiveMode {
+  /** 판단에 쓸 조합 */
+  mode: string;
+  /** 포지션을 닫았을 것으로 보고 확인해야 하는가 */
+  expectedClosed: boolean;
+  /** 어디서 온 값인가 */
+  source: 'EFFECTIVE' | 'CONFIG' | 'ASSUMED_STRICT';
+  reason: string;
+}
+
+/**
+ * status·reset이 쓸 조합을 고른다.
+ *
+ * `effective`가 있으면 그것이다 — 이번 발동을 실제로 만든 값이다.
+ * 없을 때가 갈림길이다:
+ *
+ *   발동 중이 아니다        설정값을 써도 위험하지 않다
+ *   발동 중인데 모른다      **가장 강한 쪽으로 본다.** 무엇으로 켜졌는지
+ *                           모르는 채 "포지션은 닫을 대상이 아니었다"고
+ *                           단정하면 남은 포지션 위에서 잠금이 풀린다
+ */
+export function effectiveModeOf(i: {
+  /** kill_switch_state에 남은 이번 발동의 조합. 없으면 null */
+  effective?: string | null;
+  /** 설정값 */
+  config?: string | null;
+  /** 지금 발동 중인가 */
+  active: boolean;
+}): EffectiveMode {
+  const eff = String(i.effective || '').trim().toUpperCase();
+  if (eff) {
+    return {
+      mode: eff, expectedClosed: intentOf(eff).close, source: 'EFFECTIVE',
+      reason: '이번 발동을 만든 조합입니다',
+    };
+  }
+  const cfg = String(i.config || '').trim().toUpperCase();
+  if (!i.active) {
+    return {
+      mode: cfg, expectedClosed: intentOf(cfg).close, source: 'CONFIG',
+      reason: '발동 중이 아니므로 설정값을 씁니다',
+    };
+  }
+  // **발동 중인데 무엇으로 켜졌는지 모른다.**
+  return {
+    mode: cfg, expectedClosed: true, source: 'ASSUMED_STRICT',
+    reason: '이번 발동의 조합이 기록돼 있지 않습니다 — '
+      + '포지션까지 닫았을 수 있다고 보고 확인합니다 (설정값으로 느슨하게 풀지 않습니다)',
+  };
 }

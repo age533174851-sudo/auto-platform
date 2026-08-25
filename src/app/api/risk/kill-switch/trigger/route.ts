@@ -6,7 +6,7 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions, reconcile } from '@/lib/risk/killSwitch';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
-import { isTestnetConn, intentOf, leftoverVerdict, retriggerPlan, killCompletion } from '@/lib/risk/killSwitchTruth';
+import { isTestnetConn, intentOf, leftoverVerdict, retriggerPlan, killCompletion, discoveryVerdict } from '@/lib/risk/killSwitchTruth';
 import { levelOf, actionModeOf } from '@/lib/risk/emergencyLevel';
 
 export const dynamic = 'force-dynamic';
@@ -31,9 +31,24 @@ export async function POST(req: NextRequest) {
   if (s.noTable) return NextResponse.json({ error: 'table_missing', message: 'kill_switch_state 테이블이 없습니다.' }, { status: 503 });
 
   const wasActive = s.active;
+
+  // ── 이번에 실제로 하기로 한 조합을 **저장 전에** 정한다 ──
+  //
+  // 예전에는 저장이 먼저였고 저장되는 값은 설정의 `actionMode`였다.
+  // 그래서 이런 일이 가능했다:
+  //
+  //   설정 BC → 수동 CLOSE_ALL(ABCD) 실행 → 포지션 일부 남음 → reset
+  //   → reset은 저장된 BC로 읽어 expectedClosed = false
+  //   → 잔여 판정이 포지션을 안 세고 CLEAR → **남은 포지션 위에서 잠금 해제**
+  //
+  // 설정값은 그대로 두고(사용자 설정이다) 이번 발동의 조합을 따로 남긴다.
+  const levelSpec = levelOf(body?.level);
+  const modeForCheck = levelSpec ? actionModeOf(levelSpec) : s.actionMode;
+
   s.active = true;
   s.triggeredAt = Date.now();
   s.triggerReason = reason || '수동 발동';
+  s.effectiveActionMode = modeForCheck;
 
   const ok = await saveKillSwitch(sb, uid, connectionId, s);
   if (!ok) return NextResponse.json({ error: 'save_failed' }, { status: 500 });
@@ -67,9 +82,11 @@ export async function POST(req: NextRequest) {
   // **이번에 실제로 하기로 한 조합.** 저장된 actionMode와 다를 수 있다
   // (단계를 골라 보내면 그 단계가 이긴다). 완료 문구는 반드시 이 값을
   // 기준으로 적어야 한다 — 저장값으로 적으면 안 한 일을 말하게 된다.
-  const levelSpec = levelOf(body?.level);
-  const modeForCheck = levelSpec ? actionModeOf(levelSpec) : s.actionMode;
   let preLeftover: any = null;
+  /** 줄일 대상을 실제로 확인했는가. **빈 배열과 못 찾음을 가른다** */
+  let discovery: any = null;
+  let positionsRead = false;
+  let ledgerRead = false;
   if (wasActive && creds.ok && creds.exchange) {
     try {
       const r = await reconcile(sb, uid, connectionId, {
@@ -114,32 +131,45 @@ export async function POST(req: NextRequest) {
         if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
           const { futuresPositionRisk, futuresClosePosition } =
             await import('@/lib/exchanges/futuresAdapter');
+          const { futuresListPositions } = await import('@/lib/exchanges/futuresExec');
           const { strategyOf } = await import('@/lib/strategies/ledger');
 
-          // 어느 심볼이 봇이 연 것인가. **못 가리면 빈 집합이고,
-          // 그러면 CLOSE_AUTOMATED는 아무것도 안 닫는다.**
-          const { data: rows } = await (sb as any).from('live_orders')
+          // ── 열린 포지션은 거래소에 물어본다 ──
+          //
+          // **예전에는 `live_orders`의 심볼만 후보로 만들었다.**
+          // REDUCE_RISK는 정의상 "모든 열린 포지션을 절반으로"인데,
+          // 그 표에 줄이 없으면 후보가 0이 되어 **거래소에 포지션이
+          // 둘 있어도 아무것도 줄이지 않고** `targeted: []`로 끝났다.
+          // 그리고 완료 판정은 빈 배열에 아무것도 요구하지 않았다.
+          //
+          // 장부는 "어느 것이 봇의 것인가"를 가릴 때만 쓴다. 무엇이
+          // 열려 있는지는 거래소가 답할 일이다.
+          const posList = await futuresListPositions({
+            exchange: creds.exchange as any, key: creds.key!, secret: creds.secret!,
+            testnet: creds.testnet!,
+          });
+          positionsRead = posList.ok;
+          const live: Array<{ symbol: string; qty: number }> = (posList.positions || [])
+            .map((p: any) => ({
+              symbol: String(p.symbol || '').toUpperCase(),
+              qty: Math.abs(Number(p.qty ?? p.positionAmt ?? 0)),
+            }))
+            .filter(p => p.symbol && Number.isFinite(p.qty) && p.qty > 0);
+
+          // 어느 심볼이 봇이 연 것인가. **automatedOnly일 때만 필요하다.**
+          // 그리고 조회 실패와 "봇이 연 것이 없음"을 가른다 — 예전에는
+          // `rows`가 null이라 둘이 구분되지 않았다.
+          const led = await (sb as any).from('live_orders')
             .select('symbol, signal_id, status')
             .eq('connection_id', connectionId).eq('status', 'FILLED')
             .order('created_at', { ascending: false }).limit(200);
-          const auto = automatedSymbols(rows || [], strategyOf);
-
-          // 지금 들고 있는 포지션. 후보는 봇이 손댄 심볼과 지금 열려
-          // 있는 것의 교집합이다.
-          const candidates: string[] = spec.automatedOnly
-            ? Array.from(auto)
-            : Array.from(new Set<string>(
-                (rows || []).map((r: any) => String(r.symbol || '').toUpperCase()).filter(Boolean)));
-
-          const live: Array<{ symbol: string; qty: number }> = [];
-          for (const sym of candidates) {
-            const rr = await futuresPositionRisk(
-              creds.exchange!, creds.key!, creds.secret!, sym, creds.testnet!);
-            const amt = rr.risk?.positionAmt;
-            if (amt != null && Math.abs(Number(amt)) > 0) live.push({ symbol: sym, qty: Math.abs(Number(amt)) });
-          }
+          ledgerRead = !led?.error && Array.isArray(led?.data);
+          const auto = automatedSymbols(ledgerRead ? led.data : [], strategyOf);
 
           const plan = closeTargets(spec, live, auto);
+          discovery = discoveryVerdict({
+            spec, positionsRead, ledgerRead, targetCount: plan.targets.length,
+          });
           autoNote = plan.note;
           for (const t of plan.targets) {
             const before = live.find(l => l.symbol === t.symbol)?.qty ?? null;
@@ -202,22 +232,6 @@ export async function POST(req: NextRequest) {
   // **KILL은 반드시 기록에 남는다.** 급할 때 누른 버튼이라 나중에
   // "누가 언제 왜 눌렀나"를 가장 많이 묻게 된다. 그리고 실행이 절반만
   // 됐을 때 그 사실도 같이 남아야 한다.
-  {
-    const { recordAudit } = await import('@/lib/safety/auditStore');
-    recordAudit(sb, {
-      userId: uid, action: 'KILL_SWITCH', resource: connectionId,
-      result: exec?.ran === false ? 'failed' : 'success',
-      connectionId,
-      detail: {
-        level: exec?.level ?? null,
-        actionMode: s.actionMode,
-        reason: s.triggerReason,
-        wasActive,
-        cancelled: exec?.cancel?.count ?? null,
-        closeFailed: exec?.closeFailed ?? null,
-      },
-    });
-  }
 
   // 취소·종료가 실패하면 ok:true로 돌려주지 않는다. 화면이 "정리됨"으로 그리면
   // 사용자는 거래소를 확인하지 않는다.
@@ -244,9 +258,44 @@ export async function POST(req: NextRequest) {
   // **건너뛴 것과 못 한 것을 구분해서 넘긴다.** 안 그러면
   // "이미 깨끗해서 재실행 생략"이 곧바로 502가 된다.
   const done = killCompletion({
-    actionMode: modeForCheck, exec, leftover: postLeftover,
+    actionMode: modeForCheck, exec, leftover: postLeftover, discovery,
     skipped: rerun.execute ? null : { reason: rerun.reason },
   });
+
+  // **KILL은 반드시 기록에 남는다.** 급할 때 누른 버튼이라 나중에
+  // "누가 언제 왜 눌렀나"를 가장 많이 묻게 된다.
+  //
+  // ── result는 실행 여부가 아니라 완료 여부다 ──
+  //
+  // 예전에는 `exec.ran === false`만 실패로 적었다. 그러면 **실행은
+  // 했는데 절반만 된 경우가 success로 남는다** — 나중에 감사 기록을
+  // 보고 "그때는 정리됐었다"고 읽게 된다. 화면에는 502를 주면서
+  // 기록에는 성공이라고 적는 것은 그 자체로 모순이다.
+  //
+  // 그리고 **이번에 실제로 실행한 조합**을 남긴다. 설정값을 적으면
+  // 안 한 일을 한 것처럼 읽힌다.
+  {
+    const { recordAudit } = await import('@/lib/safety/auditStore');
+    recordAudit(sb, {
+      userId: uid, action: 'KILL_SWITCH', resource: connectionId,
+      result: done.complete ? 'success' : 'failed',
+      connectionId,
+      detail: {
+        level: exec?.level ?? null,
+        // 실제로 실행한 조합 · 설정값 둘 다 남긴다.
+        actionMode: modeForCheck,
+        configuredActionMode: s.actionMode,
+        reason: s.triggerReason,
+        wasActive,
+        reran: rerun.execute,
+        cancelled: exec?.cancel?.count ?? null,
+        closeFailed: exec?.closeFailed ?? null,
+        discovery: discovery?.code ?? null,
+        complete: done.complete,
+        missing: done.missing,
+      },
+    });
+  }
 
   return NextResponse.json({
     ok: done.complete,
@@ -254,6 +303,8 @@ export async function POST(req: NextRequest) {
     queued: false,
     triggerReason: s.triggerReason,
     exec,
+    // 줄일 대상을 실제로 확인했는가. **빈 배열과 못 찾음은 다른 사실이다.**
+    discovery,
     // 다시 눌렀을 때 무엇을 했는지 숨기지 않는다.
     reran: rerun.execute, reranReason: rerun.reason,
     leftover: postLeftover,

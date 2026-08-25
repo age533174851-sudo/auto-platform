@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { loadKillSwitch, saveKillSwitch, evaluate, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
-import { isTestnetConn, leftoverVerdict } from '@/lib/risk/killSwitchTruth';
+import { isTestnetConn, leftoverVerdict , effectiveModeOf } from '@/lib/risk/killSwitchTruth';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
 
@@ -88,7 +88,12 @@ export async function GET(req: NextRequest) {
   if (!prev.noTable) {
     await saveKillSwitch(sb, uid, connectionId, state);
     if (state.active) {
-      const hasD = (state.actionMode || '').includes('D');
+      // **이번 발동을 만든 조합**으로 본다. 설정값으로 보면 수동으로
+      // 더 강한 단계를 실행한 경우를 놓친다.
+      const effNow = effectiveModeOf({
+        effective: state.effectiveActionMode, config: state.actionMode, active: state.active,
+      });
+      const hasD = effNow.expectedClosed;
       // 발동 순간(전이): KILL_SWITCH_EXECUTE job 적재 (Worker가 유일 실행자)
       if (!wasActive) {
         await logKillEvent(sb, uid, connectionId, {
@@ -166,7 +171,12 @@ export async function GET(req: NextRequest) {
     ...status, testnet, equityOk: true, evaluated: true, exec, recon,
     // 잔여를 '정리됨'으로 단정하지 않는다 — 못 읽었으면 그 사실을 싣는다.
     leftover: recon
-      ? leftoverVerdict({ leftover: recon, expectedClosed: (state.actionMode || '').includes('D') })
+      ? leftoverVerdict({
+          leftover: recon,
+          expectedClosed: effectiveModeOf({
+            effective: state.effectiveActionMode, config: state.actionMode, active: state.active,
+          }).expectedClosed,
+        })
       : null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

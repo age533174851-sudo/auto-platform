@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
-import { isTestnetConn, intentOf, leftoverVerdict, resetVerdict } from '@/lib/risk/killSwitchTruth';
+import { isTestnetConn, intentOf, leftoverVerdict, resetVerdict, effectiveModeOf } from '@/lib/risk/killSwitchTruth';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
 
@@ -48,7 +48,20 @@ export async function POST(req: NextRequest) {
     ? await futuresEquityUsd(creds.exchange, creds.key!, creds.secret!, creds.testnet!)
     : { equity: null as number | null, error: creds.message || creds.error || '연결을 읽지 못했습니다' };
 
-  const expectClosed = intentOf(s.actionMode).close;
+  // ── 이번 발동을 만든 조합으로 판단한다 ──
+  //
+  // **설정값으로 판단하면 잠금이 잘못 풀린다.**
+  //
+  //   설정 BC → 수동 CLOSE_ALL(ABCD) 실행 → 포지션 일부 남음 → reset
+  //   → BC로 읽으면 expectedClosed = false → 잔여가 포지션을 안 셈
+  //   → CLEAR → **남은 포지션 위에서 신규 진입 잠금 해제**
+  //
+  // 기록이 없으면(067 미적용 등) 가장 강한 쪽으로 본다 —
+  // 무엇으로 켜졌는지 모르는 채 느슨하게 풀지 않는다.
+  const eff = effectiveModeOf({
+    effective: s.effectiveActionMode, config: s.actionMode, active: s.active,
+  });
+  const expectClosed = eff.expectedClosed;
   let leftover: any = null;
   if (creds.ok && creds.exchange) {
     try {
@@ -68,12 +81,17 @@ export async function POST(req: NextRequest) {
       ok: false, reset: false, code: gate.code, message: gate.reason,
       equityOk: bal.equity != null, equityError: bal.error,
       leftover,
+      // 무엇을 기준으로 판단했는지 숨기지 않는다.
+      judgedBy: { mode: eff.mode, expectedClosed: eff.expectedClosed, source: eff.source, reason: eff.reason },
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const equity = bal.equity!;
   const now = Date.now();
   s.active = false; s.triggeredAt = null; s.triggerReason = null;
+  // 발동이 끝났으므로 이번 발동의 조합도 비운다 — 다음 판단에서
+  // 지난 발동의 값을 쓰면 안 된다.
+  s.effectiveActionMode = null;
   s.dailyStartEquity = equity;   s.dailyStartAt = now;
   s.weeklyStartEquity = equity;  s.weeklyStartAt = now;
   s.monthlyStartEquity = equity; s.monthlyStartAt = now;

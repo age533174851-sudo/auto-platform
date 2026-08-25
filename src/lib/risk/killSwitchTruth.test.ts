@@ -7,7 +7,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   intentOf, leftoverVerdict, killCompletion, retriggerPlan, resetVerdict, isTestnetConn,
-  targetedCloseVerdict,
+  targetedCloseVerdict, discoveryVerdict, effectiveModeOf,
 } from './killSwitchTruth';
 
 const CLEAR = leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: true });
@@ -296,5 +296,144 @@ export function runKillSwitchTruthTests() {
       leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: false }),
     });
     eq(d.complete, false);
+  });
+
+  // ══ 대상을 못 찾은 것과 대상이 없는 것 ══
+  //
+  // REDUCE_RISK는 actions ['A','B'] — actionMode에 C도 D도 없다.
+  // 그래서 cancel·close 어느 조건에도 안 걸리고, leftover는
+  // expectedClosed=false라 남은 포지션을 세지 않는다. 대상까지 비어
+  // 있으면 **아무것도 안 하고 complete=true**가 됐다.
+  const REDUCE = { closePct: 50, automatedOnly: false };
+  const AUTO = { closePct: 100, automatedOnly: true };
+
+  test('REDUCE_RISK + 거래소 포지션 2개 + live_orders 0개 → 두 포지션 모두 대상', () => {
+    // 후보를 장부가 아니라 거래소에서 만들면 장부가 비어도 2건이다.
+    const d = discoveryVerdict({ spec: REDUCE, positionsRead: true, ledgerRead: true, targetCount: 2 });
+    eq(d.code, 'VERIFIED_TARGETS', '두 건을 찾았다');
+    eq(d.count, 2, '2건');
+  });
+
+  test('REDUCE_RISK + 포지션 조회 실패 → 완료 아님', () => {
+    const d = discoveryVerdict({ spec: REDUCE, positionsRead: false, ledgerRead: true, targetCount: 0 });
+    eq(d.code, 'UNKNOWN', '못 읽었다');
+    eq(d.count, null, '0으로 적지 않는다');
+    const c = killCompletion({
+      actionMode: 'AB', exec: { ran: true, targeted: null, closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: d,
+    });
+    assert(!c.complete, '대상을 못 찾았는데 완료라고 적었다');
+    assert(c.missing.some(m => /읽지 못했습니다/.test(m)), '사유가 남아야 한다');
+  });
+
+  test('CLOSE_AUTOMATED + live_orders 조회 오류 → 완료 아님', () => {
+    const d = discoveryVerdict({ spec: AUTO, positionsRead: true, ledgerRead: false, targetCount: 0 });
+    eq(d.code, 'UNKNOWN', '장부를 못 읽으면 봇의 것을 가릴 수 없다');
+    const c = killCompletion({
+      actionMode: 'ABC',
+      exec: { ran: true, cancel: { ran: true, success: true }, targeted: null, closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: d,
+    });
+    assert(!c.complete, '장부를 못 읽었는데 완료라고 적었다');
+  });
+
+  test('CLOSE_AUTOMATED + 조회 성공 + 실제 대상 0 → VERIFIED_EMPTY이고 완료다', () => {
+    const d = discoveryVerdict({ spec: AUTO, positionsRead: true, ledgerRead: true, targetCount: 0 });
+    eq(d.code, 'VERIFIED_EMPTY', '읽었고 정말 없었다');
+    const c = killCompletion({
+      actionMode: 'ABC',
+      exec: { ran: true, cancel: { ran: true, success: true }, targeted: null, closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: d,
+    });
+    assert(c.complete, '정말 없는 것까지 실패로 만들면 안 된다');
+    assert(/줄일 포지션 없음/.test(c.message), '확인했다고 적어야 한다');
+  });
+
+  test('targeted가 비었는데 discovery UNKNOWN → complete=false', () => {
+    const c = killCompletion({
+      actionMode: 'AB', exec: { ran: true, targeted: [], closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: { code: 'UNKNOWN', count: null, reason: '거래소에서 열린 포지션을 읽지 못했습니다' } as any,
+    });
+    assert(!c.complete, '빈 배열을 확인됨으로 읽었다');
+  });
+
+  test('찾았는데 청산 기록이 없으면 완료가 아니다', () => {
+    const c = killCompletion({
+      actionMode: 'AB', exec: { ran: true, targeted: null, closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: { code: 'VERIFIED_TARGETS', count: 2, reason: '2건' } as any,
+    });
+    assert(!c.complete, '찾은 것과 한 것이 어긋났는데 완료라고 적었다');
+    assert(c.missing.some(m => /청산 기록이 없습니다/.test(m)), '사유');
+  });
+
+  test('포지션을 줄이지 않는 단계는 discovery를 요구하지 않는다', () => {
+    const d = discoveryVerdict({ spec: { closePct: 0, automatedOnly: false }, positionsRead: false, ledgerRead: false, targetCount: 0 });
+    eq(d.code, 'NOT_APPLICABLE', '해당 없음');
+    const c = killCompletion({
+      actionMode: 'BC',
+      exec: { ran: true, cancel: { ran: true, success: true }, targeted: null, closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: d,
+    });
+    assert(c.complete, 'BC는 원래 포지션을 안 닫는다');
+  });
+
+  // ══ 이번 발동을 만든 조합 ══
+  test('설정 BC → 수동 CLOSE_ALL → 일부 남음 → reset이 잠금을 풀지 않는다', () => {
+    // 이번 발동의 조합이 남아 있으면 D를 보고 포지션까지 확인한다.
+    const eff = effectiveModeOf({ effective: 'ABCD', config: 'BC', active: true });
+    eq(eff.expectedClosed, true, 'CLOSE_ALL은 포지션을 닫는다');
+    eq(eff.source, 'EFFECTIVE', '이번 발동의 값');
+
+    const lv = leftoverVerdict({
+      leftover: { positions: 1, orders: 0, error: null } as any,
+      expectedClosed: eff.expectedClosed,
+    });
+    eq(lv.code, 'REMAINS', '포지션이 남아 있다');
+    const g = resetVerdict({ equity: 1000, leftover: lv });
+    assert(!g.allowed, '남은 포지션 위에서 잠금을 풀면 안 된다');
+    eq(g.code, 'LEFTOVER_REMAINS', '사유');
+  });
+
+  test('설정값으로 판단하면 그 잠금이 풀린다 — 그래서 설정값을 쓰지 않는다', () => {
+    // 예전 동작 재현: 저장된 설정 BC로 판단
+    const lvOld = leftoverVerdict({
+      leftover: { positions: 1, orders: 0, error: null } as any,
+      expectedClosed: intentOf('BC').close,   // false
+    });
+    eq(lvOld.code, 'CLEAR', '설정값으로 보면 포지션을 안 센다');
+    assert(resetVerdict({ equity: 1000, leftover: lvOld }).allowed,
+      '이것이 예전에 잠금이 풀리던 경로다');
+  });
+
+  test('이번 발동의 조합이 없으면 가장 강한 쪽으로 본다 — 느슨하게 풀지 않는다', () => {
+    const eff = effectiveModeOf({ effective: null, config: 'BC', active: true });
+    eq(eff.expectedClosed, true, '모르면 닫았을 수 있다고 본다');
+    eq(eff.source, 'ASSUMED_STRICT', '가정한 것이라고 적는다');
+    const lv = leftoverVerdict({
+      leftover: { positions: 1, orders: 0, error: null } as any,
+      expectedClosed: eff.expectedClosed,
+    });
+    eq(lv.code, 'REMAINS', '포지션을 센다');
+    assert(!resetVerdict({ equity: 1000, leftover: lv }).allowed, '잠금이 풀리면 안 된다');
+  });
+
+  test('발동 중이 아니면 설정값을 써도 된다', () => {
+    const eff = effectiveModeOf({ effective: null, config: 'BC', active: false });
+    eq(eff.source, 'CONFIG', '설정값');
+    eq(eff.expectedClosed, false, 'BC는 포지션을 안 닫는다');
+  });
+
+  test('이번 발동의 조합이 설정값보다 약해도 그 값을 쓴다', () => {
+    // 설정이 ABCD인데 이번엔 PAUSE_ENTRIES(A)만 실행한 경우.
+    const eff = effectiveModeOf({ effective: 'A', config: 'ABCD', active: true });
+    eq(eff.mode, 'A', '이번 값');
+    eq(eff.expectedClosed, false, '이번엔 안 닫았다');
+    eq(eff.source, 'EFFECTIVE', '이번 발동의 값');
   });
 }

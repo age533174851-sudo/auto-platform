@@ -10,7 +10,15 @@ export interface KillSwitchConfig {
   weeklyLimitPct: number;
   monthlyLimitPct: number;
   absLimitUsdt: number;     // 0 = 미사용
-  actionMode: string;       // 예: 'BC' (B+C 기본)
+  actionMode: string;       // 예: 'BC' (B+C 기본) — **설정값**
+  /**
+   * 이번 발동을 **실제로 만든** 조합. 설정값과 다를 수 있다.
+   *
+   * 화면에서 단계를 골라 누르면(`body.level`) 그 조합이 여기 남는다.
+   * 리셋되면 비운다. **비어 있으면 읽는 쪽이 가장 강한 쪽으로 판단한다**
+   * (`effectiveModeOf`) — 무엇으로 켜졌는지 모른 채 느슨하게 풀지 않는다.
+   */
+  effectiveActionMode?: string | null;
 }
 
 export interface KillSwitchState extends KillSwitchConfig {
@@ -125,6 +133,7 @@ function rowToState(row: any): KillSwitchState {
     monthlyLimitPct: Number(row.monthly_limit_pct ?? DEFAULT_KILL.monthlyLimitPct),
     absLimitUsdt: Number(row.abs_limit_usdt ?? 0),
     actionMode: row.action_mode ?? DEFAULT_KILL.actionMode,
+    effectiveActionMode: row.effective_action_mode ?? null,
     active: !!row.active,
     triggeredAt: row.triggered_at ? new Date(row.triggered_at).getTime() : null,
     triggerReason: row.trigger_reason ?? null,
@@ -143,6 +152,7 @@ function stateToRow(userId: string, connectionId: string, s: KillSwitchState) {
     enabled: s.enabled,
     daily_limit_pct: s.dailyLimitPct, weekly_limit_pct: s.weeklyLimitPct, monthly_limit_pct: s.monthlyLimitPct,
     abs_limit_usdt: s.absLimitUsdt, action_mode: s.actionMode,
+    effective_action_mode: s.effectiveActionMode ?? null,
     active: s.active,
     triggered_at: s.triggeredAt ? new Date(s.triggeredAt).toISOString() : null,
     trigger_reason: s.triggerReason,
@@ -165,9 +175,24 @@ export async function loadKillSwitch(sb: any, userId: string, connectionId: stri
 }
 
 export async function saveKillSwitch(sb: any, userId: string, connectionId: string, s: KillSwitchState): Promise<boolean> {
+  const row: any = stateToRow(userId, connectionId, s);
   try {
-    const { error } = await sb.from('kill_switch_state').upsert(stateToRow(userId, connectionId, s), { onConflict: 'user_id,connection_id' });
-    return !error;
+    const { error } = await sb.from('kill_switch_state').upsert(row, { onConflict: 'user_id,connection_id' });
+    if (!error) return true;
+    // ── 067이 아직인 배포 ──
+    //
+    // 칸이 없다고 통째로 실패하면 **발동 사실 자체가 저장되지 않는다.**
+    // 그건 이 칸이 없는 것보다 훨씬 나쁘다. 그래서 그 값만 빼고 다시 쓴다.
+    //
+    // 빠진 상태로 저장되면 읽는 쪽은 `effectiveModeOf`에서
+    // ASSUMED_STRICT가 되어 **가장 강한 쪽으로** 판단한다 — 모르는 것을
+    // 느슨하게 읽지 않는다.
+    if (/column|schema cache/i.test(String(error.message))) {
+      const { effective_action_mode, ...rest } = row;
+      const retry = await sb.from('kill_switch_state').upsert(rest, { onConflict: 'user_id,connection_id' });
+      return !retry.error;
+    }
+    return false;
   } catch { return false; }
 }
 
