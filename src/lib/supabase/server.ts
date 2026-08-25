@@ -2,15 +2,32 @@
 // Server-only — service role key. Import ONLY from /api/... routes.
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from './types';
+import { adminClientOptions } from './serverFetch';
 
-/** Fresh service-role client per request (never cached). */
+/**
+ * Fresh service-role client per request (never cached).
+ *
+ * ── 읽은 값이 사흘 전 것이면 안 된다 ──
+ *
+ * 2026-08-24 Production 실측: **같은 요청 안에서 같은 client가** 한
+ * 조회에는 8/20 값을, 컬럼 하나만 다른 조회에는 1초 전 값을 돌려줬다
+ * (`cacheProbe.code = FETCH_CACHE_STALE`). 다른 원인은 전부 배제됐다 —
+ * 같은 프로젝트 · service_role 키 · RLS 아님 · 워커 쓰기 정상.
+ *
+ * supabase-js는 PostgREST에 GET으로 가고 컬럼 목록이 URL에 들어간다.
+ * 그래서 **오래 안 바뀐 조회일수록 더 오래된 값을 준다** — 가장
+ * 신뢰하던 코드가 가장 크게 틀린다.
+ *
+ * 증상이 보인 조회의 컬럼만 바꾸면 그 자리만 낫고 **나머지 264곳이
+ * 그대로 남는다.** 그래서 client를 만드는 이 한 곳에서 막는다.
+ * 붙는 것은 읽기(GET·HEAD)뿐이고 쓰기의 의미는 바뀌지 않는다
+ * (`serverFetch.ts`).
+ */
 export function getSupabaseAdmin(): SupabaseClient<Database> | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();   // 공백/줄바꿈 제거
   if (!url || !key) return null;
-  return createClient<Database>(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  return createClient<Database>(url, key, adminClientOptions());
 }
 
 /** SUPABASE_SERVICE_ROLE_KEY가 진짜 service_role 키인지 진단.
