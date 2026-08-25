@@ -153,17 +153,18 @@ export async function POST(req: NextRequest) {
   }
 
   // **누가 누구를 무엇에서 무엇으로.** 흔적이 없으면 나중에 가릴 수 없다.
-  try {
-    const { recordAudit } = await import('@/lib/safety/auditStore');
-    recordAudit(sb, {
-      userId: actorId, action: 'CAPABILITY_CHANGE',
-      detail: `${target}: ${before.capability} → ${capability}`,
-      meta: { target, from: before.capability, to: capability, note: body.note ?? '' },
-    } as any);
-  } catch { /* 기록 실패가 권한 부여를 되돌리지는 않는다 */ }
+  // detail은 객체다. 예전엔 문자열을 넣고 `meta`라는 없는 칸을 같이
+  // 넘겼다 — 그 칸은 표에 없으므로 insert가 통째로 실패했다.
+  const { recordCriticalAudit, auditResponseField } = await import('@/lib/safety/auditStore');
+  const capAudit = await recordCriticalAudit(sb, {
+    userId: actorId, action: 'CAPABILITY_CHANGE', resource: String(target ?? ''),
+    result: 'success',
+    detail: { target, from: before.capability, to: capability, note: body.note ?? '' },
+  });
 
   return NextResponse.json({
     ok: true, userId: target,
+    audit: auditResponseField(capAudit),
     from: before.capability, to: capability,
     label: CAP_INFO[capability]?.label ?? capability,
     // 넓혔는가 좁혔는가. 화면이 색을 정할 때 쓴다.

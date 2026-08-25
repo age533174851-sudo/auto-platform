@@ -115,20 +115,24 @@ export async function POST(req: NextRequest) {
 
   // **배율 변경은 청산가를 움직인다.** 나중에 "왜 여기서 청산됐지"를
   // 되짚을 때 누가 언제 몇 배로 바꿨는지가 없으면 재구성이 안 된다.
-  const { recordAudit } = await import('@/lib/safety/auditStore');
-  recordAudit(sb, {
+  const { recordCriticalAudit, auditResponseField } = await import('@/lib/safety/auditStore');
+  const levAudit = await recordCriticalAudit(sb, {
     userId: uid, action: 'LEVERAGE_CHANGE', resource: symbol,
     result: r.success ? 'success' : 'failed',
     connectionId: body?.connectionId ?? null,
     detail: { requested: leverage, actual: r.leverage, testnet: creds.testnet, message: r.message },
   });
   if (!r.success) {
-    return NextResponse.json({ error: 'leverage_failed', message: r.message }, { status: 400 });
+    return NextResponse.json({
+      error: 'leverage_failed', message: r.message,
+      audit: auditResponseField(levAudit),
+    }, { status: 400 });
   }
 
   return NextResponse.json({
     ok: true,
     symbol, leverage,
+    audit: auditResponseField(levAudit),
     hadPosition: !!pos,
     // 추정이라는 것을 응답에도 적는다. 화면이 이 값을 확정처럼 그리면 안 된다.
     projectedLiquidationPrice: projected,

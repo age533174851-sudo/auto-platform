@@ -447,7 +447,16 @@ export async function logClientAudit(action: string, detail: Record<string, unkn
   const sb  = getSupabaseClient();
   if (!sb || !uid) return;
   try {
-    await sb.from('audit_logs').insert({ actor_id: uid, action, details: detail, result: 'client' });
+    // **`audit_logs`가 아니라 `audit_events`다.** 앞의 표는
+    // 마이그레이션 파이프라인에 없다 — 이 insert는 지금까지 조용히
+    // 실패하고 있었을 가능성이 높다(try/catch로 감싸여 있다).
+    //
+    // `result`는 'success' | 'blocked' | 'failed' 셋뿐이다. 'client'는
+    // 그 중 하나가 아니라 **어디서 왔는가**이므로 detail로 옮긴다.
+    await sb.from('audit_events').insert({
+      user_id: uid, action, resource: '', result: 'success',
+      detail: { ...detail, source: 'client' },
+    } as any);
   } catch {}
 }
 

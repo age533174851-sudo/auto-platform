@@ -2,6 +2,7 @@
 // ALL actions verified server-side: JWT → profiles.role → ADMIN_ROLES set
 // Role promotion is only possible via Supabase SQL — never via this API
 import { NextRequest, NextResponse } from 'next/server';
+import { recordAudit, recordCriticalAudit, auditResponseField } from '@/lib/safety/auditStore';
 import { requireAdmin } from '@/lib/auth/isAdmin';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
@@ -86,9 +87,18 @@ export async function GET(req: NextRequest) {
   if (action === 'audit_logs') {
     if (!sb) return NextResponse.json({ logs: [] });
     const limit = Math.min(Number(searchParams.get('limit') ?? 100), 500);
+    // ── 감사 기록은 `audit_events`에 있다 ──
+    //
+    // **`audit_logs`는 마이그레이션 파이프라인에 없는 표다.**
+    // `supabase/schema.sql`에만 정의돼 있고(`details`가 TEXT이고
+    // `result`·`resource` 칸이 없다), 생성된 타입은 또 다른 모양
+    // (`user_id`·`entity_type`·`metadata`)을 말한다. 셋이 서로 다르다.
+    //
+    // 실제로 적용되는 표는 040이 만든 `audit_events`이고, 거기에는
+    // 이 화면이 읽으려던 `resource`·`result`·`detail`이 전부 있다.
     const { data, error } = await sb
-      .from('audit_logs')
-      .select('id,actor_id,action,target_id,resource,details,result,created_at')
+      .from('audit_events')
+      .select('id,user_id,action,resource,result,detail,connection_id,created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -132,8 +142,9 @@ export async function GET(req: NextRequest) {
       safeCount('user_strategies'),
       safeCount('user_strategies',     (q: any) => q.eq('enabled', true)),
       safeCount('exchange_connections'),
-      safeCount('audit_logs',          (q: any) => q.gte('created_at', since24h).in('action', ['BOT_START','BOT_STOP'])),
-      safeCount('audit_logs',          (q: any) => q.gte('created_at', since24h)),
+      // 여기도 같은 표를 본다 — 쓰는 곳과 세는 곳이 다르면 언제나 0이 나온다.
+      safeCount('audit_events',        (q: any) => q.gte('created_at', since24h).in('action', ['BOT_START','BOT_STOP'])),
+      safeCount('audit_events',        (q: any) => q.gte('created_at', since24h)),
     ]);
 
     return NextResponse.json({
@@ -193,13 +204,18 @@ export async function POST(req: NextRequest) {
       .update({ enabled: false, status: 'stopped' })
       .eq('enabled', true);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   'EMERGENCY_BOT_STOP',
-      details:  { stopped_count: count ?? 'all', reason: body.reason ?? '관리자 긴급 정지' },
-      result:   'success',
+    // **긴급 정지는 반드시 기록에 남는다.** 나중에 "누가 언제 왜
+    // 눌렀나"를 가장 많이 묻게 되는 것이 이 버튼이다.
+    // **기다린다.** 서버리스는 응답과 함께 얼어붙으므로 await하지 않은
+    // insert는 잘린다. 이 버튼이야말로 기록이 사라지면 안 되는 것이다.
+    const stopAudit = await recordCriticalAudit(sb, {
+      userId, action: 'EMERGENCY_BOT_STOP', resource: 'all-strategies', result: 'success',
+      detail: { stoppedCount: count ?? 'all', reason: body.reason ?? '관리자 긴급 정지' },
     });
-    return NextResponse.json({ success: true, message: '모든 실행 중 전략이 중지되었습니다.', stoppedCount: count ?? 0 });
+    return NextResponse.json({
+      success: true, message: '모든 실행 중 전략이 중지되었습니다.', stoppedCount: count ?? 0,
+      audit: auditResponseField(stopAudit),
+    });
   }
 
   // ── ban_user / unban_user ───────────────────────────────
@@ -213,25 +229,23 @@ export async function POST(req: NextRequest) {
       .update({ status: newStatus, updated_at: new Date().toISOString() })
       .eq('id', targetId);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id:  userId,
-      action:    action === 'ban_user' ? 'BAN_USER' : 'UNBAN_USER',
-      target_id: targetId,
-      details:   { reason: body.reason ?? '' },
-      result:    'success',
+    // 계정을 막고 푸는 일도 나중에 반드시 되짚게 된다.
+    const banAudit = await recordCriticalAudit(sb, {
+      userId, action: action === 'ban_user' ? 'BAN_USER' : 'UNBAN_USER',
+      resource: String(targetId ?? ''), result: 'success',
+      detail: { reason: body.reason ?? '' },
     });
-    return NextResponse.json({ success: true, status: newStatus });
+    return NextResponse.json({ success: true, status: newStatus, audit: auditResponseField(banAudit) });
   }
 
   // ── maintenance_mode: recorded in audit log (UI placeholder)
   if (action === 'maintenance_mode') {
     const enabled = !!body.enabled;
     if (!sb) return NextResponse.json({ error: 'Supabase 미연결' }, { status: 503 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   enabled ? 'MAINTENANCE_ON' : 'MAINTENANCE_OFF',
-      details:  { reason: body.reason ?? '' },
-      result:   'success',
+    recordAudit(sb, {
+      userId, action: enabled ? 'MAINTENANCE_ON' : 'MAINTENANCE_OFF',
+      resource: 'maintenance', result: 'success',
+      detail: { reason: body.reason ?? '' },
     });
     return NextResponse.json({ success: true, maintenanceMode: enabled });
   }
@@ -255,11 +269,9 @@ export async function POST(req: NextRequest) {
     };
     const { data, error } = await (sb.from('admin_notices') as any).insert(row).select().single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   'NOTICE_CREATE',
-      details:  { notice_id: data?.id, title },
-      result:   'success',
+    recordAudit(sb, {
+      userId, action: 'NOTICE_CREATE', resource: String(data?.id ?? ''), result: 'success',
+      detail: { title },
     });
     return NextResponse.json({ success: true, notice: data });
   }
@@ -291,11 +303,9 @@ export async function POST(req: NextRequest) {
 
     const { error } = await (sb.from('admin_notices') as any).delete().eq('id', id);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   'NOTICE_DELETE',
-      details:  { notice_id: id },
-      result:   'success',
+    recordAudit(sb, {
+      userId, action: 'NOTICE_DELETE', resource: String(id ?? ''), result: 'success',
+      detail: {},
     });
     return NextResponse.json({ success: true });
   }
