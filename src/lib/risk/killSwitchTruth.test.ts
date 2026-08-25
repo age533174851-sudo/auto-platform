@@ -7,7 +7,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   intentOf, leftoverVerdict, killCompletion, retriggerPlan, resetVerdict, isTestnetConn,
-  targetedCloseVerdict, discoveryVerdict, effectiveModeOf,
+  targetedCloseVerdict, discoveryVerdict, effectiveModeOf, retriggerDecision, targetedStateOf,
 } from './killSwitchTruth';
 
 const CLEAR = leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: true });
@@ -435,5 +435,124 @@ export function runKillSwitchTruthTests() {
     eq(eff.mode, 'A', '이번 값');
     eq(eff.expectedClosed, false, '이번엔 안 닫았다');
     eq(eff.source, 'EFFECTIVE', '이번 발동의 값');
+  });
+
+  // ══ targeted 단계는 미체결 0으로 건너뛰면 안 된다 ══
+  //
+  // REDUCE_RISK=AB, CLOSE_AUTOMATED=ABC — 둘 다 D가 없다. 그래서
+  // 일반 잔여 판정은 expectedClosed=false가 되어 **포지션을 세지 않고**,
+  // 미체결이 0이면 CLEAR다. 그 CLEAR로 건너뛰면 절반 축소가 실패한
+  // 채로 "이미 정리됨"이라고 답하게 된다.
+  const CLEAR_ORDERS_ONLY = leftoverVerdict({
+    leftover: { positions: 2, orders: 0, error: null } as any,
+    expectedClosed: false,   // AB·ABC가 만드는 그 값
+  });
+
+  test('일반 잔여 판정은 AB에서 포지션을 세지 않는다 — 이것이 함정이다', () => {
+    eq(CLEAR_ORDERS_ONLY.code, 'CLEAR', '포지션 2개가 남아도 CLEAR다');
+  });
+
+  test('active REDUCE_RISK + 포지션 남음 + 미체결 0 → 재발동을 건너뛰지 않는다', () => {
+    const d = retriggerDecision({
+      wasActive: true,
+      leftover: CLEAR_ORDERS_ONLY,
+      discovery: discoveryVerdict({
+        spec: { closePct: 50, automatedOnly: false },
+        positionsRead: true, ledgerRead: true, targetCount: 2,
+      }),
+    });
+    assert(d.execute, '줄일 것이 남았는데 건너뛰었다');
+    assert(/2건/.test(d.reason), '몇 건 남았는지 말해야 한다');
+  });
+
+  test('active CLOSE_AUTOMATED + 자동매매 포지션 남음 + 미체결 0 → 건너뛰지 않는다', () => {
+    const d = retriggerDecision({
+      wasActive: true,
+      leftover: CLEAR_ORDERS_ONLY,
+      discovery: discoveryVerdict({
+        spec: { closePct: 100, automatedOnly: true },
+        positionsRead: true, ledgerRead: true, targetCount: 1,
+      }),
+    });
+    assert(d.execute, '봇 포지션이 남았는데 건너뛰었다');
+  });
+
+  test('대상을 못 읽었으면 건너뛰지 않는다 — 모르는 것은 깨끗한 것이 아니다', () => {
+    const d = retriggerDecision({
+      wasActive: true,
+      leftover: CLEAR_ORDERS_ONLY,
+      discovery: discoveryVerdict({
+        spec: { closePct: 50, automatedOnly: false },
+        positionsRead: false, ledgerRead: true, targetCount: 0,
+      }),
+    });
+    assert(d.execute, 'UNKNOWN에서 건너뛰었다');
+  });
+
+  test('대상 0을 확인했고 미체결도 0이면 정상적으로 건너뛴다', () => {
+    const d = retriggerDecision({
+      wasActive: true,
+      leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 } as any, expectedClosed: false }),
+      discovery: discoveryVerdict({
+        spec: { closePct: 50, automatedOnly: false },
+        positionsRead: true, ledgerRead: true, targetCount: 0,
+      }),
+    });
+    assert(!d.execute, '정말 없는데 다시 하면 헛돈다');
+  });
+
+  test('첫 발동은 언제나 실행한다', () => {
+    assert(retriggerDecision({ wasActive: false, leftover: null, discovery: null }).execute, '첫 발동');
+  });
+
+  // ══ 끝나지 않은 targeted 작업 위에서 리셋 ══
+  test('REDUCE_RISK 실패 후 reset → 잠금 해제 금지', () => {
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: CLEAR_ORDERS_ONLY,      // 미체결 0이라 CLEAR
+      targeted: targetedStateOf({ pending: true, effective: 'AB', active: true }),
+    });
+    assert(!g.allowed, '축소가 실패했는데 잠금을 풀었다');
+    eq(g.code, 'TARGETED_INCOMPLETE', '사유');
+  });
+
+  test('CLOSE_AUTOMATED 실패 후 reset → 잠금 해제 금지', () => {
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: CLEAR_ORDERS_ONLY,
+      targeted: targetedStateOf({ pending: true, effective: 'ABC', active: true }),
+    });
+    assert(!g.allowed, '봇 포지션이 남았는데 잠금을 풀었다');
+    eq(g.code, 'TARGETED_INCOMPLETE', '사유');
+  });
+
+  test('끝났는지 기록이 없으면 열지 않는다 — 모르는 것은 끝난 것이 아니다', () => {
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: CLEAR_ORDERS_ONLY,
+      targeted: targetedStateOf({ pending: null, effective: 'AB', active: true }),
+    });
+    assert(!g.allowed, '기록이 없는데 풀었다');
+    eq(g.code, 'TARGETED_UNKNOWN', '사유');
+  });
+
+  test('실제 대상 0을 확인해 끝난 경우에만 리셋된다', () => {
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 } as any, expectedClosed: false }),
+      targeted: targetedStateOf({ pending: false, effective: 'AB', active: true }),
+    });
+    assert(g.allowed, '끝난 것까지 막으면 영원히 못 푼다');
+    eq(g.code, 'OK', '통과');
+  });
+
+  test('발동 중이 아니면 targeted는 NONE이고 리셋을 막지 않는다', () => {
+    eq(targetedStateOf({ pending: null, effective: null, active: false }), 'NONE', '발동 중 아님');
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 } as any, expectedClosed: true }),
+      targeted: 'NONE',
+    });
+    assert(g.allowed, 'NONE은 막지 않는다');
   });
 }

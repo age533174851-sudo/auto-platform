@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
-import { isTestnetConn, intentOf, leftoverVerdict, resetVerdict, effectiveModeOf } from '@/lib/risk/killSwitchTruth';
+import { isTestnetConn, leftoverVerdict, resetVerdict, effectiveModeOf, targetedStateOf } from '@/lib/risk/killSwitchTruth';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
 
@@ -75,14 +75,22 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const gate = resetVerdict({ equity: bal.equity, leftover });
+  // ── 끝나지 않은 targeted 작업 위에서 열지 않는다 ──
+  //
+  // REDUCE_RISK(AB)·CLOSE_AUTOMATED(ABC)는 D가 없어 잔여 판정이
+  // 포지션을 세지 않는다. **절반 축소가 실패한 채로도 미체결 0이면
+  // CLEAR다.** 그래서 그 단계가 끝났는지를 따로 본다.
+  const targeted = targetedStateOf({
+    pending: s.targetedPending, effective: s.effectiveActionMode, active: s.active,
+  });
+  const gate = resetVerdict({ equity: bal.equity, leftover, targeted });
   if (!gate.allowed) {
     return NextResponse.json({
       ok: false, reset: false, code: gate.code, message: gate.reason,
       equityOk: bal.equity != null, equityError: bal.error,
       leftover,
       // 무엇을 기준으로 판단했는지 숨기지 않는다.
-      judgedBy: { mode: eff.mode, expectedClosed: eff.expectedClosed, source: eff.source, reason: eff.reason },
+      judgedBy: { mode: eff.mode, expectedClosed: eff.expectedClosed, source: eff.source, reason: eff.reason, targeted },
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
@@ -92,6 +100,7 @@ export async function POST(req: NextRequest) {
   // 발동이 끝났으므로 이번 발동의 조합도 비운다 — 다음 판단에서
   // 지난 발동의 값을 쓰면 안 된다.
   s.effectiveActionMode = null;
+  s.targetedPending = null;
   s.dailyStartEquity = equity;   s.dailyStartAt = now;
   s.weeklyStartEquity = equity;  s.weeklyStartAt = now;
   s.monthlyStartEquity = equity; s.monthlyStartAt = now;

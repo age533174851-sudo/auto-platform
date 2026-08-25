@@ -19,6 +19,14 @@ export interface KillSwitchConfig {
    * (`effectiveModeOf`) — 무엇으로 켜졌는지 모른 채 느슨하게 풀지 않는다.
    */
   effectiveActionMode?: string | null;
+  /**
+   * 이번 발동의 포지션 축소·종료가 **아직 끝나지 않았는가.**
+   *
+   * `effectiveActionMode`만으로는 부족하다 — AB·ABC에는 D가 없어
+   * 잔여 판정이 포지션을 세지 않는다. 기록이 없으면(undefined) 읽는
+   * 쪽이 '모름'으로 보고 잠금을 풀지 않는다.
+   */
+  targetedPending?: boolean | null;
 }
 
 export interface KillSwitchState extends KillSwitchConfig {
@@ -134,6 +142,7 @@ function rowToState(row: any): KillSwitchState {
     absLimitUsdt: Number(row.abs_limit_usdt ?? 0),
     actionMode: row.action_mode ?? DEFAULT_KILL.actionMode,
     effectiveActionMode: row.effective_action_mode ?? null,
+    targetedPending: row.targeted_pending ?? null,
     active: !!row.active,
     triggeredAt: row.triggered_at ? new Date(row.triggered_at).getTime() : null,
     triggerReason: row.trigger_reason ?? null,
@@ -153,6 +162,7 @@ function stateToRow(userId: string, connectionId: string, s: KillSwitchState) {
     daily_limit_pct: s.dailyLimitPct, weekly_limit_pct: s.weeklyLimitPct, monthly_limit_pct: s.monthlyLimitPct,
     abs_limit_usdt: s.absLimitUsdt, action_mode: s.actionMode,
     effective_action_mode: s.effectiveActionMode ?? null,
+    targeted_pending: s.targetedPending ?? null,
     active: s.active,
     triggered_at: s.triggeredAt ? new Date(s.triggeredAt).toISOString() : null,
     trigger_reason: s.triggerReason,
@@ -188,7 +198,7 @@ export async function saveKillSwitch(sb: any, userId: string, connectionId: stri
     // ASSUMED_STRICT가 되어 **가장 강한 쪽으로** 판단한다 — 모르는 것을
     // 느슨하게 읽지 않는다.
     if (/column|schema cache/i.test(String(error.message))) {
-      const { effective_action_mode, ...rest } = row;
+      const { effective_action_mode, targeted_pending, ...rest } = row;
       const retry = await sb.from('kill_switch_state').upsert(rest, { onConflict: 'user_id,connection_id' });
       return !retry.error;
     }

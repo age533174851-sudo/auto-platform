@@ -361,7 +361,11 @@ export type ResetBlockCode =
   /** 거래소 잔여를 못 읽었다 */
   | 'LEFTOVER_UNKNOWN'
   /** 아직 남아 있다 */
-  | 'LEFTOVER_REMAINS';
+  | 'LEFTOVER_REMAINS'
+  /** 이번 발동의 포지션 축소·종료가 끝나지 않았다 (AB·ABC는 미체결 0으로 판단할 수 없다) */
+  | 'TARGETED_INCOMPLETE'
+  /** 끝났는지 기록이 없다. **끝난 것이 아니다** */
+  | 'TARGETED_UNKNOWN';
 
 export interface ResetVerdict {
   allowed: boolean;
@@ -382,6 +386,14 @@ export interface ResetVerdict {
 export function resetVerdict(i: {
   equity: number | null;
   leftover?: LeftoverVerdict | null;
+  /**
+   * 이번 발동의 targeted 작업이 끝났는가.
+   *
+   * **`leftover`만으로는 부족하다.** REDUCE_RISK(AB)·CLOSE_AUTOMATED(ABC)는
+   * D가 없어 `expectedClosed=false`가 되고, 그러면 잔여 판정이 포지션을
+   * 세지 않는다 — 절반 축소가 실패한 채로도 미체결 0이면 CLEAR다.
+   */
+  targeted?: TargetedState | null;
 }): ResetVerdict {
   if (i.equity == null || !Number.isFinite(i.equity)) {
     return {
@@ -402,6 +414,23 @@ export function resetVerdict(i: {
     return {
       allowed: false, code: 'LEFTOVER_REMAINS',
       reason: `${lv.reason} — 남은 것을 정리한 뒤에 잠금을 푸세요`,
+    };
+  }
+
+  // ── 끝나지 않은 targeted 작업 위에서 열지 않는다 ──
+  const ts = i.targeted ?? null;
+  if (ts === 'PENDING') {
+    return {
+      allowed: false, code: 'TARGETED_INCOMPLETE',
+      reason: '이번 발동의 포지션 축소·종료가 끝나지 않았습니다 — '
+        + '미체결이 0이어도 그 단계의 목표는 미체결이 아닙니다. 다시 발동해 정리한 뒤에 푸세요',
+    };
+  }
+  if (ts === 'UNKNOWN') {
+    return {
+      allowed: false, code: 'TARGETED_UNKNOWN',
+      reason: '이번 발동의 포지션 축소·종료가 끝났는지 기록이 없습니다 — '
+        + '끝났다고 단정하지 않습니다. 킬스위치를 다시 발동해 거래소 확인을 받은 뒤에 푸세요',
     };
   }
   return { allowed: true, code: 'OK', reason: '총자산과 거래소 잔여를 확인했습니다' };
@@ -561,4 +590,96 @@ export function effectiveModeOf(i: {
     reason: '이번 발동의 조합이 기록돼 있지 않습니다 — '
       + '포지션까지 닫았을 수 있다고 보고 확인합니다 (설정값으로 느슨하게 풀지 않습니다)',
   };
+}
+
+// ── targeted 단계는 미체결만 보고 건너뛰면 안 된다 ──────────────
+//
+// REDUCE_RISK는 `AB`, CLOSE_AUTOMATED는 `ABC`다. **둘 다 D가 없다.**
+// 그래서 `intentOf(mode).close === false`이고, 일반 잔여 판정은
+// `expectedClosed=false`에서 **포지션을 세지 않는다** — 미체결이 0이면
+// CLEAR다. 그 CLEAR를 재발동 근거로 쓰면:
+//
+//   REDUCE_RISK 발동 → 절반 축소 실패 → 포지션 그대로 · 미체결 0
+//   → 다시 누름 → preLeftover = CLEAR → "이미 깨끗함"으로 건너뜀
+//   → **대상 발굴은 그 뒤에 있어서 아예 실행되지 않는다**
+//
+// 즉 급해서 다시 누른 사람에게 "이미 정리됨"이라고 답한다.
+//
+// 그래서 targeted 단계의 건너뛰기는 **대상 확인 결과**로 판단한다.
+// 미체결 0은 그 단계의 목표가 아니다.
+
+export interface RetriggerDecision { execute: boolean; reason: string }
+
+/**
+ * 다시 눌렀을 때 실행할 것인가.
+ *
+ * targeted 단계(closePct > 0)에서는 **discovery가 근거다**:
+ *
+ *   VERIFIED_EMPTY   줄일 것이 정말 없다 → 미체결까지 깨끗하면 건너뛴다
+ *   VERIFIED_TARGETS 줄일 것이 남아 있다 → **다시 한다**
+ *   UNKNOWN          못 봤다 → **다시 한다.** 모르는 것은 깨끗한 것이 아니다
+ *
+ * targeted가 아닌 단계는 예전대로 잔여로 판단한다.
+ */
+export function retriggerDecision(i: {
+  wasActive: boolean;
+  leftover?: LeftoverVerdict | null;
+  discovery?: DiscoveryVerdict | null;
+}): RetriggerDecision {
+  if (!i.wasActive) return { execute: true, reason: '첫 발동입니다' };
+
+  const dv = i.discovery ?? null;
+  if (dv && dv.code !== 'NOT_APPLICABLE') {
+    if (dv.code === 'VERIFIED_TARGETS') {
+      return { execute: true, reason: `줄일 대상이 ${dv.count}건 남아 있어 다시 실행합니다` };
+    }
+    if (dv.code === 'UNKNOWN') {
+      return { execute: true, reason: `${dv.reason} — 모르는 상태에서 건너뛰지 않습니다` };
+    }
+    // VERIFIED_EMPTY — 대상은 없다. 미체결까지 확인돼야 건너뛴다.
+    const lv = i.leftover ?? null;
+    if (lv && lv.code === 'CLEAR') {
+      return { execute: false, reason: '줄일 포지션도 미체결도 없다고 거래소가 확인했습니다' };
+    }
+    return { execute: true, reason: lv?.reason ?? '미체결을 확인하지 못했습니다' };
+  }
+
+  // targeted가 아닌 단계
+  const lv = i.leftover ?? null;
+  if (lv && lv.code === 'CLEAR') {
+    return { execute: false, reason: '거래소에 남은 것이 없다고 확인했습니다' };
+  }
+  return { execute: true, reason: lv?.reason ?? '거래소 잔여를 확인하지 못했습니다' };
+}
+
+// ── 끝나지 않은 targeted 작업 위에서 잠금을 풀지 않는다 ────────
+//
+// `effective_action_mode`만으로는 부족하다. AB·ABC에는 D가 없어서
+// `expectedClosed=false`가 되고, 그러면 잔여 판정이 포지션을 세지
+// 않는다. **절반 축소가 실패한 채로도 미체결 0이면 잠금이 풀린다.**
+//
+// 그래서 그 단계가 **끝났는지**를 따로 남기고, 끝나지 않았으면 열지
+// 않는다. 남기지 못했으면(칸 없음 등) 열지 않는다 — 모르는 것은
+// 끝난 것이 아니다.
+
+export type TargetedState = 'DONE' | 'PENDING' | 'UNKNOWN' | 'NONE';
+
+/**
+ * 저장된 값을 상태로 읽는다.
+ *
+ * `NONE`은 애초에 targeted 단계가 아니었다는 뜻이고, `UNKNOWN`은
+ * **기록이 없다**는 뜻이다. 둘을 섞으면 안 된다.
+ */
+export function targetedStateOf(i: {
+  /** kill_switch_state.targeted_pending. 칸이 없거나 안 남았으면 undefined */
+  pending?: boolean | null;
+  /** 이번 발동의 조합 */
+  effective?: string | null;
+  active: boolean;
+}): TargetedState {
+  if (!i.active) return 'NONE';
+  if (i.pending === true) return 'PENDING';
+  if (i.pending === false) return 'DONE';
+  // 발동 중인데 기록이 없다.
+  return 'UNKNOWN';
 }

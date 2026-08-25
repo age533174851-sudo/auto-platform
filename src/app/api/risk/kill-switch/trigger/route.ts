@@ -6,7 +6,7 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions, reconcile } from '@/lib/risk/killSwitch';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
-import { isTestnetConn, intentOf, leftoverVerdict, retriggerPlan, killCompletion, discoveryVerdict } from '@/lib/risk/killSwitchTruth';
+import { isTestnetConn, intentOf, leftoverVerdict, retriggerDecision, killCompletion, targetedStateOf } from '@/lib/risk/killSwitchTruth';
 import { levelOf, actionModeOf } from '@/lib/risk/emergencyLevel';
 
 export const dynamic = 'force-dynamic';
@@ -96,7 +96,25 @@ export async function POST(req: NextRequest) {
       preLeftover = leftoverVerdict({ leftover: r, expectedClosed: intentOf(modeForCheck).close });
     } catch { preLeftover = null; }
   }
-  const rerun = retriggerPlan({ wasActive, leftover: preLeftover });
+  // ── targeted 단계는 대상을 먼저 본다 ──
+  //
+  // REDUCE_RISK(AB)·CLOSE_AUTOMATED(ABC)에는 D가 없다. 그래서 위의
+  // `preLeftover`는 `expectedClosed=false`로 계산되고, **포지션을 세지
+  // 않는다** — 절반 축소가 실패해 포지션이 그대로여도 미체결이 0이면
+  // CLEAR다. 그 CLEAR로 건너뛰면 급해서 다시 누른 사람에게
+  // "이미 정리됨"이라고 답하게 된다.
+  //
+  // 그래서 대상 확인을 **재발동 판단보다 먼저** 한다.
+  if (wasActive && creds.ok && creds.exchange && levelSpec && levelSpec.closePct > 0) {
+    try {
+      const pre = await discoverTargets(sb, connectionId, creds, levelSpec);
+      discovery = pre.discovery;
+      positionsRead = pre.positionsRead;
+      ledgerRead = pre.ledgerRead;
+    } catch { discovery = null; }
+  }
+
+  const rerun = retriggerDecision({ wasActive, leftover: preLeftover, discovery });
 
   let exec: any = null;
   if (rerun.execute) {
@@ -129,77 +147,32 @@ export async function POST(req: NextRequest) {
           before?: number | null; after?: number | null; closePct?: number;
         }> = [];
         if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
-          const { futuresPositionRisk, futuresClosePosition } =
+          const { futuresClosePosition, futuresPositionRisk } =
             await import('@/lib/exchanges/futuresAdapter');
-          const { futuresListPositions } = await import('@/lib/exchanges/futuresExec');
-          const { strategyOf } = await import('@/lib/strategies/ledger');
+          const { runTargetedCloses } = await import('@/lib/risk/killTargets');
 
-          // ── 열린 포지션은 거래소에 물어본다 ──
-          //
-          // **예전에는 `live_orders`의 심볼만 후보로 만들었다.**
-          // REDUCE_RISK는 정의상 "모든 열린 포지션을 절반으로"인데,
-          // 그 표에 줄이 없으면 후보가 0이 되어 **거래소에 포지션이
-          // 둘 있어도 아무것도 줄이지 않고** `targeted: []`로 끝났다.
-          // 그리고 완료 판정은 빈 배열에 아무것도 요구하지 않았다.
-          //
-          // 장부는 "어느 것이 봇의 것인가"를 가릴 때만 쓴다. 무엇이
-          // 열려 있는지는 거래소가 답할 일이다.
-          const posList = await futuresListPositions({
-            exchange: creds.exchange as any, key: creds.key!, secret: creds.secret!,
-            testnet: creds.testnet!,
+          // 대상은 **거래소 포지션**에서 만든다. 판정과 조립은
+          // `killTargets.ts`에 있고 테스트가 붙어 있다 — 라우트 안에
+          // 두면 칸 이름이 틀려도 아무도 못 잡는다(실제로 그랬다).
+          const found = await discoverTargets(sb, connectionId, creds, spec);
+          discovery = found.discovery;
+          positionsRead = found.positionsRead;
+          ledgerRead = found.ledgerRead;
+          autoNote = found.note;
+
+          closed = await runTargetedCloses({
+            targets: found.targets,
+            live: found.live,
+            closePct: spec.closePct,
+            close: (symbol, pct) => futuresClosePosition(
+              creds.exchange!, creds.key!, creds.secret!, creds.testnet!, symbol, pct),
+            readBack: async (symbol) => {
+              const rr = await futuresPositionRisk(
+                creds.exchange!, creds.key!, creds.secret!, symbol, creds.testnet!);
+              const amt = rr.risk?.positionAmt;
+              return amt == null ? null : Math.abs(Number(amt));
+            },
           });
-          positionsRead = posList.ok;
-          const live: Array<{ symbol: string; qty: number }> = (posList.positions || [])
-            .map((p: any) => ({
-              symbol: String(p.symbol || '').toUpperCase(),
-              qty: Math.abs(Number(p.qty ?? p.positionAmt ?? 0)),
-            }))
-            .filter(p => p.symbol && Number.isFinite(p.qty) && p.qty > 0);
-
-          // 어느 심볼이 봇이 연 것인가. **automatedOnly일 때만 필요하다.**
-          // 그리고 조회 실패와 "봇이 연 것이 없음"을 가른다 — 예전에는
-          // `rows`가 null이라 둘이 구분되지 않았다.
-          const led = await (sb as any).from('live_orders')
-            .select('symbol, signal_id, status')
-            .eq('connection_id', connectionId).eq('status', 'FILLED')
-            .order('created_at', { ascending: false }).limit(200);
-          ledgerRead = !led?.error && Array.isArray(led?.data);
-          const auto = automatedSymbols(ledgerRead ? led.data : [], strategyOf);
-
-          const plan = closeTargets(spec, live, auto);
-          discovery = discoveryVerdict({
-            spec, positionsRead, ledgerRead, targetCount: plan.targets.length,
-          });
-          autoNote = plan.note;
-          for (const t of plan.targets) {
-            const before = live.find(l => l.symbol === t.symbol)?.qty ?? null;
-            const r = await futuresClosePosition(
-              creds.exchange!, creds.key!, creds.secret!, creds.testnet!,
-              t.symbol, spec.closePct);
-
-            // ── 접수는 체결이 아니다 ──
-            //
-            // **예전에는 `r.success`만 모았다.** 그런데 그건 주문이
-            // 접수됐다는 뜻이고, 실제로 줄었는지는 **포지션을 다시
-            // 읽어야** 안다. 이 저장소가 `closeEvidence`에서 이미 정한
-            // 규칙인데 이 경로만 안 따르고 있었다.
-            //
-            // 못 읽으면 null이다 — 0으로 적으면 "닫혔다"가 사실이 된다.
-            let after: number | null = null;
-            if (r.success) {
-              try {
-                const rr2 = await futuresPositionRisk(
-                  creds.exchange!, creds.key!, creds.secret!, t.symbol, creds.testnet!);
-                const amt2 = rr2.risk?.positionAmt;
-                after = amt2 == null ? null : Math.abs(Number(amt2));
-                if (!Number.isFinite(after as number)) after = null;
-              } catch { after = null; }
-            }
-            closed.push({
-              symbol: t.symbol, ok: !!r.success, message: r.message,
-              before, after, closePct: spec.closePct,
-            });
-          }
         }
 
         const r = await executeKillActions(sb, uid, connectionId, {
@@ -262,6 +235,20 @@ export async function POST(req: NextRequest) {
     skipped: rerun.execute ? null : { reason: rerun.reason },
   });
 
+  // ── 이 단계가 끝났는지 남긴다 ──
+  //
+  // AB·ABC에는 D가 없어 잔여 판정이 포지션을 세지 않는다. 그래서
+  // **"미체결 0"만으로는 이 단계가 끝났다고 말할 수 없다.** 리셋이
+  // 그 사실을 알아야 남은 포지션 위에서 잠금을 풀지 않는다.
+  //
+  // 저장이 실패해도 발동 자체는 이미 저장됐다 — 그리고 기록이 없으면
+  // 읽는 쪽이 '모름'으로 보고 잠금을 풀지 않는다(fail-closed).
+  if (levelSpec && levelSpec.closePct > 0) {
+    s.targetedPending = !done.complete;
+    await saveKillSwitch(sb, uid, connectionId, s);
+  }
+
+
   // **KILL은 반드시 기록에 남는다.** 급할 때 누른 버튼이라 나중에
   // "누가 언제 왜 눌렀나"를 가장 많이 묻게 된다.
   //
@@ -312,4 +299,37 @@ export async function POST(req: NextRequest) {
     intendedClose: done.intendedClose,
     message: done.message,
   }, { status: done.complete ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
+}
+
+
+/**
+ * 줄일 대상을 찾는다. **거래소 포지션에서 시작한다.**
+ *
+ * 재발동 판단과 실제 실행이 **같은 함수**를 쓴다 — 두 벌로 두면
+ * 한쪽만 고쳐지고, 이 저장소에서 반복된 사고가 정확히 그 모양이었다.
+ */
+async function discoverTargets(sb: any, connectionId: string, creds: any, spec: any) {
+  const { futuresListPositions } = await import('@/lib/exchanges/futuresExec');
+  const { automatedSymbols } = await import('@/lib/risk/emergencyLevel');
+  const { strategyOf } = await import('@/lib/strategies/ledger');
+  const { targetPlan } = await import('@/lib/risk/killTargets');
+
+  const posList = await futuresListPositions({
+    exchange: creds.exchange, key: creds.key, secret: creds.secret, testnet: creds.testnet,
+  });
+
+  // 장부는 **어느 것이 봇의 것인가**를 가릴 때만 쓴다. 그리고 조회
+  // 실패와 "봇이 연 것 0개"를 가른다 — 예전에는 `data`만 봐서 둘이
+  // 구분되지 않았다.
+  const led = await (sb as any).from('live_orders')
+    .select('symbol, signal_id, status')
+    .eq('connection_id', connectionId).eq('status', 'FILLED')
+    .order('created_at', { ascending: false }).limit(200);
+  const ledgerRead = !led?.error && Array.isArray(led?.data);
+  const auto = automatedSymbols(ledgerRead ? led.data : [], strategyOf);
+
+  const plan = targetPlan({
+    spec, positions: posList.positions, positionsRead: posList.ok, ledgerRead, autoSymbols: auto,
+  });
+  return { ...plan, positionsRead: posList.ok, ledgerRead };
 }
