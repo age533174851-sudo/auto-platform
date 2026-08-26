@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { loadKillSwitch, saveKillSwitch, evaluate, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
 import { isTestnetConn, leftoverVerdict , effectiveModeOf } from '@/lib/risk/killSwitchTruth';
+import { killTriggerAlert, reconcileAlert } from '@/lib/risk/killAlert';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
 
@@ -84,7 +85,7 @@ export async function GET(req: NextRequest) {
   const { state, status } = evaluate(prev, equity, Date.now());
 
   // 롤오버/active 변화 영속
-  let exec: any = null, recon: any = null;
+  let exec: any = null, recon: any = null, leftover: any = null;
   if (!prev.noTable) {
     // ── 자동 발동도 "무엇으로 켜졌는지"를 반드시 남긴다 ──
     //
@@ -122,7 +123,9 @@ export async function GET(req: NextRequest) {
         effective: state.effectiveActionMode, config: state.actionMode, active: state.active,
       });
       const hasD = effNow.expectedClosed;
-      // 발동 순간(전이): KILL_SWITCH_EXECUTE job 적재 (Worker가 유일 실행자)
+      // 발동 순간(전이). **이 요청이 직접 실행한다** — Worker가 아니다.
+      // 예전에는 여기서 KILL_SWITCH_EXECUTE job만 적재하고 Worker가 실행했는데,
+      // 그 워커를 쓰지 않게 된 뒤로 적재만 되고 아무도 실행하지 않았다.
       if (!wasActive) {
         await logKillEvent(sb, uid, connectionId, {
           reason: state.triggerReason || '한도 초과', equity, drawdownPct: status.daily.drawdownPct,
@@ -155,18 +158,26 @@ export async function GET(req: NextRequest) {
           exec = { ran: false, error: 'execute_failed', message: e?.message || '취소·종료 실행 실패' };
         }
 
-        // 🚨 즉시 텔레그램 알림 (실행 결과는 위 exec에 담겨 응답으로 나간다)
+        // 🚨 즉시 텔레그램 알림
+        //
+        // **문구는 killAlert.ts가 만든다.** 여기서 손으로 쓰면 실행 경로가
+        // 바뀔 때마다 문구만 남는다 — 실제로 그렇게 됐다. 이 자리에는
+        // "Worker가 Cancel All → Close All 실행 예정"이 오래 붙어 있었고
+        // 네 가지가 동시에 거짓이었다(실행자·시점·조합·거래소 이름).
         try {
           const { sendTelegramAlert } = await import('@/lib/notify/telegram');
-          await sendTelegramAlert({
-            level: 'critical', eventType: 'kill_switch', exchange: 'Binance', mode: testnet ? 'TESTNET' : 'LIVE',
-            title: 'Kill Switch Active',
-            message: 'Worker가 Cancel All → Close All 실행 예정. 처리 결과는 추가 알림됩니다.',
-            fields: { Reason: state.triggerReason || '한도 초과', Equity: `${equity.toFixed(2)} USDT`, Action: state.actionMode },
-          }, sb);
+          await sendTelegramAlert(killTriggerAlert({
+            actionMode: state.actionMode,
+            // 하드코딩하지 않는다 — 이 연결이 실제로 붙은 거래소다.
+            exchange: creds.exchange,
+            testnet,
+            reason: state.triggerReason,
+            equity,
+            exec,
+          }) as any, sb);
         } catch {}
       }
-      // 발동 중이면 잔여 재확인(읽기 전용) — 실제 종료는 Worker가 수행
+      // 발동 중이면 잔여 재확인(읽기 전용). 종료는 위에서 이미 실행했다.
       try {
         // **거래소를 가리지 않는다.** 예전에는 바이낸스 `countOpen`을
         // 직접 불렀다 — 실행은 Gate를 받는데 마지막 확인만 바이낸스라,
@@ -178,18 +189,21 @@ export async function GET(req: NextRequest) {
             })
           : { positions: null, orders: null, clean: false,
               error: creds.message || '연결을 읽지 못해 잔여를 확인하지 못했습니다' };
-        if (recon && !recon.clean) {
+        // **`clean === false` 하나로 알림을 쓰지 않는다.**
+        // 거기에는 조회 실패(UNKNOWN)도 들어간다 — 확인된 잔여와
+        // 확인하지 못한 것을 다시 섞는 모양이고, 이 PR이 다른 자리에서
+        // 없앤 바로 그 혼동이다. 판정을 먼저 세우고 그것으로 나눈다.
+        leftover = leftoverVerdict({ leftover: recon, expectedClosed: hasD });
+        const alert = reconcileAlert({
+          leftover,
+          exchange: creds.exchange,
+          testnet,
+          positions: recon?.positions ?? null,
+          orders: recon?.orders ?? null,
+        });
+        if (alert) {
           const { sendTelegramAlert } = await import('@/lib/notify/telegram');
-          await sendTelegramAlert({
-            level: 'warning', eventType: 'reconcile_fail', exchange: 'Binance', mode: testnet ? 'TESTNET' : 'LIVE',
-            title: '거래소 직접 확인 필요',
-            message: '킬스위치 후 잔여 포지션/주문이 남아있습니다.',
-            // **못 읽은 것을 0으로 적지 않는다.**
-            fields: {
-              Positions: recon.positions ?? '확인 못 함',
-              Orders: recon.orders ?? '확인 못 함',
-            },
-          }, sb);
+          await sendTelegramAlert(alert as any, sb);
         }
       } catch {}
     }
@@ -198,13 +212,14 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     ...status, testnet, equityOk: true, evaluated: true, exec, recon,
     // 잔여를 '정리됨'으로 단정하지 않는다 — 못 읽었으면 그 사실을 싣는다.
-    leftover: recon
+    // 알림에 쓴 것과 **같은 판정**을 싣는다. 두 벌로 계산하면 언젠가 갈린다.
+    leftover: leftover ?? (recon
       ? leftoverVerdict({
           leftover: recon,
           expectedClosed: effectiveModeOf({
             effective: state.effectiveActionMode, config: state.actionMode, active: state.active,
           }).expectedClosed,
         })
-      : null,
+      : null),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

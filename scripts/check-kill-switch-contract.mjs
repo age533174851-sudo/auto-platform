@@ -136,6 +136,61 @@ for (const rel of ACTIVATORS) {
   }
 }
 
+// ── ⑤ 알림 문구를 라우트에 손으로 쓰지 않는다 ──
+//
+// 이 자리에 이런 문구가 오래 붙어 있었다:
+//
+//     Worker가 Cancel All → Close All 실행 예정
+//
+// 네 가지가 동시에 거짓이었다 — 실행자(이 요청이 실행한다) · 시점
+// (이미 실행한 뒤다) · 조합(기본 BC는 포지션을 닫지 않는다) · 거래소
+// (Gate 연결인데 'Binance' 하드코딩).
+//
+// 문구를 손으로 쓰면 실행 경로가 바뀔 때 코드만 바뀌고 문구는 남는다.
+// 그래서 **문구를 만드는 자리를 killAlert.ts 하나로 묶고**, 라우트에
+// 그 문구가 다시 나타나는 것을 막는다.
+{
+  const rel = 'src/app/api/risk/kill-switch/status/route.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    const FORBIDDEN = [
+      [/Worker가/, '알림·주석이 Worker를 실행자로 말합니다 — 이 요청이 직접 실행합니다'],
+      [/실행 예정/, '이미 실행한 뒤에 나가는 알림에 "실행 예정"이라 적었습니다'],
+      [/Cancel All/, '조합과 무관한 고정 문구입니다 — 실제 actionMode로 말하세요'],
+      [/Close All/, '기본 조합 BC는 포지션을 닫지 않습니다 — 한 적 없는 일입니다'],
+      [/exchange:\s*'(Binance|Gate|Gate\.io|binance|gate)'/,
+        "거래소 이름이 하드코딩됐습니다 — creds.exchange를 exchangeLabel()에 넘기세요"],
+      [/남아있습니다/, 'UNKNOWN(조회 실패)까지 "남아있습니다"로 단정하던 문구입니다'],
+    ];
+    for (const [re, why] of FORBIDDEN) {
+      if (re.test(code)) err(`${rel} — ${why}\n     문구는 src/lib/risk/killAlert.ts에서 만듭니다`);
+    }
+    // 검사가 대상을 잃으면 조용히 통과한다 — 배선 자체를 확인한다.
+    if (!/killTriggerAlert\s*\(/.test(code) || !/reconcileAlert\s*\(/.test(code)) {
+      err(`${rel} — killAlert의 문구 생성기를 쓰지 않습니다`
+        + '\n     라우트가 다시 문구를 손으로 쓰면 실행 경로와 갈립니다');
+    }
+  }
+}
+
+{
+  const rel = 'src/lib/risk/killAlert.ts';
+  const src = read(rel);
+  if (src) {
+    for (const name of ['killTriggerAlert', 'reconcileAlert', 'exchangeLabel']) {
+      if (!src.includes(`export function ${name}`)) {
+        err(`${rel}에 ${name}이 없습니다 — 검사가 대상을 잃었습니다`);
+      }
+    }
+    // REMAINS와 UNKNOWN이 한 문구로 합쳐지면 이 PR이 없앤 혼동이 돌아온다.
+    if (!src.includes('reconcile_unknown')) {
+      err(`${rel} — UNKNOWN 잔여를 REMAINS와 구분하지 않습니다`
+        + '\n     못 읽은 것을 "남아 있다"고도 "정리됐다"고도 적으면 안 됩니다');
+    }
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 킬스위치 배선 계약 유지 — 발동 시 targetedPending 기록 · 조합 추론 없음 · 수량은 amount');
 } else {
