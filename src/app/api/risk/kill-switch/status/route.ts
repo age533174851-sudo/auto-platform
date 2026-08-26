@@ -86,6 +86,16 @@ export async function GET(req: NextRequest) {
   // 롤오버/active 변화 영속
   let exec: any = null, recon: any = null;
   if (!prev.noTable) {
+    // ── 자동 발동에도 반드시 true/false를 남긴다 ──
+    //
+    // 이 경로(손실 한도 자동 발동)는 targeted 청산(REDUCE_RISK·
+    // CLOSE_AUTOMATED)을 타지 않는다. 마무리할 targeted 작업이 없으므로
+    // **false**다.
+    //
+    // 여기서 안 남기면 null로 남고, 읽는 쪽은 null을 legacy·기록 실패로
+    // 보고 리셋을 막는다 — **줄일 것이 애초에 없던 발동이 영원히
+    // 안 풀린다.**
+    if (!wasActive && state.active) state.targetedPending = false;
     await saveKillSwitch(sb, uid, connectionId, state);
     if (state.active) {
       // **이번 발동을 만든 조합**으로 본다. 설정값으로 보면 수동으로

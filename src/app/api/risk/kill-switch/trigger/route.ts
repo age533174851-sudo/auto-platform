@@ -45,10 +45,25 @@ export async function POST(req: NextRequest) {
   const levelSpec = levelOf(body?.level);
   const modeForCheck = levelSpec ? actionModeOf(levelSpec) : s.actionMode;
 
+  // ── 이 발동에 마무리할 targeted 작업이 있는가 ──
+  //
+  // **첫 저장에서 반드시 true/false 중 하나를 남긴다.** null을
+  // "targeted 아님"으로 쓰면 안 된다 — null은 legacy·기록 실패라는
+  // 뜻이고 읽는 쪽이 막는다(fail-closed). 그 상태로 두면
+  // PAUSE_ENTRIES처럼 애초에 줄일 것이 없던 발동조차 리셋이 영원히
+  // 막힌다.
+  //
+  // 그리고 **조합 문자열로 추론하지 않는다.** REDUCE_RISK와
+  // LOCK_ACCOUNT는 둘 다 'AB'다 — 같은 문자열이라 구분이 불가능하다.
+  // spec의 `closePct`가 유일한 근거다.
+  const isTargeted = !!(levelSpec && levelSpec.closePct > 0);
+
   s.active = true;
   s.triggeredAt = Date.now();
   s.triggerReason = reason || '수동 발동';
   s.effectiveActionMode = modeForCheck;
+  // targeted면 아직 안 끝났다(true). 아니면 마무리할 것이 없다(false).
+  s.targetedPending = isTargeted;
 
   const ok = await saveKillSwitch(sb, uid, connectionId, s);
   if (!ok) return NextResponse.json({ error: 'save_failed' }, { status: 500 });
@@ -243,7 +258,8 @@ export async function POST(req: NextRequest) {
   //
   // 저장이 실패해도 발동 자체는 이미 저장됐다 — 그리고 기록이 없으면
   // 읽는 쪽이 '모름'으로 보고 잠금을 풀지 않는다(fail-closed).
-  if (levelSpec && levelSpec.closePct > 0) {
+  if (isTargeted) {
+    // 거래소 재조회까지 확인됐으면 false, 실패·미확인이면 true.
     s.targetedPending = !done.complete;
     await saveKillSwitch(sb, uid, connectionId, s);
   }

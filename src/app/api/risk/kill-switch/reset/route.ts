@@ -80,9 +80,7 @@ export async function POST(req: NextRequest) {
   // REDUCE_RISK(AB)·CLOSE_AUTOMATED(ABC)는 D가 없어 잔여 판정이
   // 포지션을 세지 않는다. **절반 축소가 실패한 채로도 미체결 0이면
   // CLEAR다.** 그래서 그 단계가 끝났는지를 따로 본다.
-  const targeted = targetedStateOf({
-    pending: s.targetedPending, effective: s.effectiveActionMode, active: s.active,
-  });
+  const targeted = targetedStateOf({ pending: s.targetedPending, active: s.active });
   const gate = resetVerdict({ equity: bal.equity, leftover, targeted });
   if (!gate.allowed) {
     return NextResponse.json({

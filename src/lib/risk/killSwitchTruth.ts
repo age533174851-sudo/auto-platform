@@ -667,19 +667,34 @@ export type TargetedState = 'DONE' | 'PENDING' | 'UNKNOWN' | 'NONE';
 /**
  * 저장된 값을 상태로 읽는다.
  *
- * `NONE`은 애초에 targeted 단계가 아니었다는 뜻이고, `UNKNOWN`은
- * **기록이 없다**는 뜻이다. 둘을 섞으면 안 된다.
+ * **조합 문자열은 보지 않는다.** 애초에 인자로도 받지 않는다 —
+ * 받으면 언젠가 그것으로 추론하게 되고, 그건 틀린다:
+ *
+ *   REDUCE_RISK   actions ['A','B'] · closePct 50  → 'AB'  ← targeted
+ *   LOCK_ACCOUNT  actions ['A','B'] · closePct 0   → 'AB'  ← targeted 아님
+ *
+ * **같은 문자열이다.** 그래서 targeted 여부는 발동할 때 기록해 두는
+ * 것 말고 알 방법이 없다.
+ *
+ * 계약
+ * ────
+ *   true   targeted 작업이 남아 있다 → 리셋을 막는다
+ *   false  이 발동에는 마무리할 targeted 작업이 없다
+ *          (끝났거나, PAUSE_ENTRIES처럼 애초에 없었거나)
+ *   null   **legacy이거나 기록에 실패했다.** "없음"이 아니다 →
+ *          모르는 것은 끝난 것이 아니므로 막는다
+ *
+ * 067 이후의 새 발동은 **반드시 true/false 중 하나를 남긴다.**
+ * null이 남는 것은 067 이전 행이나 저장 실패뿐이다.
  */
 export function targetedStateOf(i: {
-  /** kill_switch_state.targeted_pending. 칸이 없거나 안 남았으면 undefined */
+  /** kill_switch_state.targeted_pending. 칸이 없거나 안 남았으면 null */
   pending?: boolean | null;
-  /** 이번 발동의 조합 */
-  effective?: string | null;
   active: boolean;
 }): TargetedState {
   if (!i.active) return 'NONE';
   if (i.pending === true) return 'PENDING';
   if (i.pending === false) return 'DONE';
-  // 발동 중인데 기록이 없다.
+  // 발동 중인데 기록이 없다 — legacy이거나 저장에 실패했다.
   return 'UNKNOWN';
 }

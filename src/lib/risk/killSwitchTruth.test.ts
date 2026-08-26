@@ -9,6 +9,7 @@ import {
   intentOf, leftoverVerdict, killCompletion, retriggerPlan, resetVerdict, isTestnetConn,
   targetedCloseVerdict, discoveryVerdict, effectiveModeOf, retriggerDecision, targetedStateOf,
 } from './killSwitchTruth';
+import { LEVELS, actionModeOf } from './emergencyLevel';
 
 const CLEAR = leftoverVerdict({ leftover: { positions: 0, orders: 0 }, expectedClosed: true });
 const REMAINS = leftoverVerdict({ leftover: { positions: 1, orders: 0 }, expectedClosed: true });
@@ -510,7 +511,7 @@ export function runKillSwitchTruthTests() {
     const g = resetVerdict({
       equity: 1000,
       leftover: CLEAR_ORDERS_ONLY,      // 미체결 0이라 CLEAR
-      targeted: targetedStateOf({ pending: true, effective: 'AB', active: true }),
+      targeted: targetedStateOf({ pending: true, active: true }),
     });
     assert(!g.allowed, '축소가 실패했는데 잠금을 풀었다');
     eq(g.code, 'TARGETED_INCOMPLETE', '사유');
@@ -520,7 +521,7 @@ export function runKillSwitchTruthTests() {
     const g = resetVerdict({
       equity: 1000,
       leftover: CLEAR_ORDERS_ONLY,
-      targeted: targetedStateOf({ pending: true, effective: 'ABC', active: true }),
+      targeted: targetedStateOf({ pending: true, active: true }),
     });
     assert(!g.allowed, '봇 포지션이 남았는데 잠금을 풀었다');
     eq(g.code, 'TARGETED_INCOMPLETE', '사유');
@@ -530,7 +531,7 @@ export function runKillSwitchTruthTests() {
     const g = resetVerdict({
       equity: 1000,
       leftover: CLEAR_ORDERS_ONLY,
-      targeted: targetedStateOf({ pending: null, effective: 'AB', active: true }),
+      targeted: targetedStateOf({ pending: null, active: true }),
     });
     assert(!g.allowed, '기록이 없는데 풀었다');
     eq(g.code, 'TARGETED_UNKNOWN', '사유');
@@ -540,19 +541,114 @@ export function runKillSwitchTruthTests() {
     const g = resetVerdict({
       equity: 1000,
       leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 } as any, expectedClosed: false }),
-      targeted: targetedStateOf({ pending: false, effective: 'AB', active: true }),
+      targeted: targetedStateOf({ pending: false, active: true }),
     });
     assert(g.allowed, '끝난 것까지 막으면 영원히 못 푼다');
     eq(g.code, 'OK', '통과');
   });
 
   test('발동 중이 아니면 targeted는 NONE이고 리셋을 막지 않는다', () => {
-    eq(targetedStateOf({ pending: null, effective: null, active: false }), 'NONE', '발동 중 아님');
+    eq(targetedStateOf({ pending: null, active: false }), 'NONE', '발동 중 아님');
     const g = resetVerdict({
       equity: 1000,
       leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 } as any, expectedClosed: true }),
       targeted: 'NONE',
     });
     assert(g.allowed, 'NONE은 막지 않는다');
+  });
+
+  // ══ NULL은 "targeted 아님"이 아니다 ══
+  //
+  // **REDUCE_RISK와 LOCK_ACCOUNT는 둘 다 'AB'다.** 그래서 조합
+  // 문자열로 targeted 여부를 추론할 수 없고, 추론하려 들면 틀린다.
+  // 그래서 `targetedStateOf`는 조합을 인자로 받지도 않는다.
+  //
+  // 그리고 발동할 때 반드시 true/false 중 하나를 남겨야 한다 —
+  // null을 "줄일 것 없음"으로 쓰면 PAUSE_ENTRIES 같은 발동이 영원히
+  // 리셋되지 않는다.
+  const CLEAN = leftoverVerdict({
+    leftover: { positions: 0, orders: 0 } as any, expectedClosed: true,
+  });
+
+  test('REDUCE_RISK와 LOCK_ACCOUNT는 같은 조합 문자열이다 — 추론 불가', () => {
+    // 둘 다 actions ['A','B'] → 'AB'. 다른 것은 closePct(50 vs 0)뿐이다.
+    // 조합만 보면 **완전히 같은 값**이라 targeted 여부를 알 수 없다.
+    const reduce = actionModeOf(LEVELS.REDUCE_RISK);
+    const lock = actionModeOf(LEVELS.LOCK_ACCOUNT);
+    eq(reduce, lock, '두 단계의 조합 문자열이 같다');
+    eq(reduce, 'AB', 'AB');
+    // 그런데 targeted 여부는 정반대다.
+    assert(LEVELS.REDUCE_RISK.closePct > 0, 'REDUCE_RISK는 줄인다');
+    eq(LEVELS.LOCK_ACCOUNT.closePct, 0, 'LOCK_ACCOUNT는 줄이지 않는다');
+  });
+
+  test('targetedStateOf는 조합을 보지 않는다 — 같은 값이면 같은 답', () => {
+    // 같은 'AB'라도 기록된 값이 다르면 답이 다르다. 조합을 봤다면
+    // 둘이 같은 답이 나왔을 것이다.
+    eq(targetedStateOf({ pending: true, active: true }), 'PENDING', 'targeted 남음');
+    eq(targetedStateOf({ pending: false, active: true }), 'DONE', '마무리할 것 없음');
+  });
+
+  test('067 이후 PAUSE_ENTRIES → 리셋 가능 (targeted 작업이 애초에 없다)', () => {
+    // closePct 0이므로 발동 시 false가 기록된다.
+    const g = resetVerdict({
+      equity: 1000, leftover: CLEAN,
+      targeted: targetedStateOf({ pending: false, active: true }),
+    });
+    assert(g.allowed, '줄일 것이 없던 발동이 안 풀리면 안 된다');
+    eq(g.code, 'OK', '통과');
+  });
+
+  test('067 이후 LOCK_ACCOUNT → 확인 뒤 리셋 가능', () => {
+    const g = resetVerdict({
+      equity: 1000, leftover: CLEAN,
+      targeted: targetedStateOf({ pending: false, active: true }),
+    });
+    assert(g.allowed, 'LOCK_ACCOUNT도 targeted 작업이 없다');
+  });
+
+  test('자동 손실한도 발동(BC)도 false여야 리셋된다', () => {
+    // status 라우트는 targeted 청산 경로를 타지 않는다 → false.
+    const g = resetVerdict({
+      equity: 1000, leftover: CLEAN,
+      targeted: targetedStateOf({ pending: false, active: true }),
+    });
+    assert(g.allowed, '자동 발동이 영원히 안 풀리면 안 된다');
+  });
+
+  test('REDUCE_RISK 완료 → false → 리셋 가능', () => {
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: leftoverVerdict({ leftover: { positions: 1, orders: 0 } as any, expectedClosed: false }),
+      targeted: targetedStateOf({ pending: false, active: true }),
+    });
+    // 절반 축소는 포지션이 남는 것이 정상이다. 끝났으면 열어야 한다.
+    assert(g.allowed, '완료된 축소까지 막으면 영원히 못 푼다');
+  });
+
+  test('CLOSE_AUTOMATED 완료·대상 0 확인 → false → 리셋 가능', () => {
+    const g = resetVerdict({
+      equity: 1000, leftover: CLEAN,
+      targeted: targetedStateOf({ pending: false, active: true }),
+    });
+    assert(g.allowed, '확인된 완료는 열어야 한다');
+  });
+
+  test('067 이전 active row(NULL) → TARGETED_UNKNOWN으로 막는다', () => {
+    const g = resetVerdict({
+      equity: 1000, leftover: CLEAN,
+      targeted: targetedStateOf({ pending: null, active: true }),
+    });
+    assert(!g.allowed, 'legacy 행은 모르는 것이다');
+    eq(g.code, 'TARGETED_UNKNOWN', '사유');
+  });
+
+  test('undefined도 NULL과 같게 막는다 — 칸 자체가 없던 배포', () => {
+    eq(targetedStateOf({ active: true }), 'UNKNOWN', '기록 없음');
+  });
+
+  test('발동 중이 아니면 NULL이어도 막지 않는다', () => {
+    eq(targetedStateOf({ pending: null, active: false }), 'NONE', '발동 중 아님');
+    assert(resetVerdict({ equity: 1000, leftover: CLEAN, targeted: 'NONE' }).allowed, '막지 않는다');
   });
 }
