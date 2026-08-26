@@ -86,16 +86,34 @@ export async function GET(req: NextRequest) {
   // 롤오버/active 변화 영속
   let exec: any = null, recon: any = null;
   if (!prev.noTable) {
-    // ── 자동 발동에도 반드시 true/false를 남긴다 ──
+    // ── 자동 발동도 "무엇으로 켜졌는지"를 반드시 남긴다 ──
     //
-    // 이 경로(손실 한도 자동 발동)는 targeted 청산(REDUCE_RISK·
-    // CLOSE_AUTOMATED)을 타지 않는다. 마무리할 targeted 작업이 없으므로
-    // **false**다.
+    // 이 경로(손실 한도 자동 발동)가 실제로 실행하는 것은
+    // `state.actionMode`다 — 아래 executeKillActions가 그 값을 쓴다.
+    // 그러니 **이번 발동을 만든 조합은 곧 actionMode다.**
     //
-    // 여기서 안 남기면 null로 남고, 읽는 쪽은 null을 legacy·기록 실패로
-    // 보고 리셋을 막는다 — **줄일 것이 애초에 없던 발동이 영원히
-    // 안 풀린다.**
-    if (!wasActive && state.active) state.targetedPending = false;
+    // 남기지 않으면 두 가지가 동시에 틀어진다:
+    //
+    //   effectiveActionMode = null
+    //     → effectiveModeOf(active=true, effective=null) = ASSUMED_STRICT
+    //     → expectedClosed = true
+    //     → 설정이 BC(포지션을 닫지 않는 조합)로 발동했는데도 이후
+    //       reconcile·reset이 **포지션 0을 요구**한다. 정상 발동인데
+    //       기존 포지션 때문에 리셋이 계속 막힌다
+    //
+    //   targeted_pending = null
+    //     → legacy·기록 실패로 읽혀 리셋이 막힌다
+    //
+    // 이 경로는 targeted 청산(REDUCE_RISK·CLOSE_AUTOMATED)을 타지
+    // 않으므로 마무리할 targeted 작업이 없다 → false.
+    //
+    // 067 미적용이라 두 칸 저장이 실패하면 `saveKillSwitch`가 그 값들을
+    // 빼고 다시 쓴다. 그러면 NULL이 남고 읽는 쪽은 ASSUMED_STRICT ·
+    // UNKNOWN으로 막는다 — 그 fail-closed는 그대로 유지한다.
+    if (!wasActive && state.active) {
+      state.effectiveActionMode = state.actionMode;
+      state.targetedPending = false;
+    }
     await saveKillSwitch(sb, uid, connectionId, state);
     if (state.active) {
       // **이번 발동을 만든 조합**으로 본다. 설정값으로 보면 수동으로

@@ -38,6 +38,19 @@ function read(rel) {
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
 
+/**
+ * 주석을 걷어 낸다.
+ *
+ * **이걸 안 해서 이 검사가 한 번 속았다.** 설명 주석에 적어 둔
+ * `effectiveActionMode = null`이 할당으로 잡혀서, 실제 할당을 지웠는데도
+ * 통과했다. 검사가 주석을 코드로 읽으면 그 검사는 없느니만 못하다.
+ */
+function stripComments(src) {
+  return String(src)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // 블록 주석
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1'); // 줄 주석 (URL의 // 는 앞이 ':')
+}
+
 // ── ① 발동하는 곳은 targetedPending을 남긴다 ──
 const ACTIVATORS = [
   'src/app/api/risk/kill-switch/trigger/route.ts',
@@ -52,13 +65,25 @@ for (const rel of ACTIVATORS) {
   //
   // 두 번째를 빠뜨리면 자동 손실한도 발동이 NULL로 남는다 — 실제로
   // 이 검사의 첫 판이 그걸 놓쳤다.
-  const activates = /\.active\s*=\s*true/.test(src)
-    || (/\bevaluate\s*\(/.test(src) && /saveKillSwitch\s*\(/.test(src));
+  const code = stripComments(src);
+  const activates = /\.active\s*=\s*true/.test(code)
+    || (/\bevaluate\s*\(/.test(code) && /saveKillSwitch\s*\(/.test(code));
   if (!activates) continue;
-  if (!/targetedPending\s*=/.test(src)) {
+  if (!/targetedPending\s*=[^=]/.test(code)) {
     err(`${rel} — 킬스위치를 발동시키면서 targetedPending을 남기지 않습니다`
       + '\n     NULL은 legacy·기록 실패라는 뜻이라 읽는 쪽이 리셋을 막습니다'
       + '\n     줄일 것이 애초에 없던 발동(PAUSE_ENTRIES·LOCK_ACCOUNT)이 영원히 안 풀립니다');
+  }
+  // ── 무엇으로 켜졌는지도 남겨야 한다 ──
+  //
+  // 안 남기면 `effectiveModeOf`가 ASSUMED_STRICT로 읽어 expectedClosed를
+  // true로 만든다. 설정이 BC(포지션을 안 닫는 조합)로 발동했는데도
+  // 이후 reconcile·reset이 **포지션 0을 요구**하게 되고, 정상 발동인데
+  // 기존 포지션 때문에 리셋이 계속 막힌다.
+  if (!/effectiveActionMode\s*=[^=]/.test(code)) {
+    err(`${rel} — 킬스위치를 발동시키면서 effectiveActionMode를 남기지 않습니다`
+      + '\n     남기지 않으면 ASSUMED_STRICT가 되어 포지션을 닫지 않는 조합(BC)에서도'
+      + '\n     포지션 0을 요구하게 되고, 정상 발동인데 리셋이 막힙니다');
   }
 }
 

@@ -651,4 +651,76 @@ export function runKillSwitchTruthTests() {
     eq(targetedStateOf({ pending: null, active: false }), 'NONE', '발동 중 아님');
     assert(resetVerdict({ equity: 1000, leftover: CLEAN, targeted: 'NONE' }).allowed, '막지 않는다');
   });
+
+  // ══ 자동 손실한도 발동도 "무엇으로 켜졌는지"를 남긴다 ══
+  //
+  // 자동 발동이 실제로 실행하는 것은 `state.actionMode`다. 그런데
+  // 그 값을 `effective`로 안 남기면 `effectiveModeOf`가
+  // ASSUMED_STRICT로 읽어 **expectedClosed=true**가 된다.
+  //
+  //   설정 BC 자동 발동 → 실제 실행 BC(미체결 취소만, 포지션 안 닫음)
+  //   → effective = null → ASSUMED_STRICT → 포지션 0을 요구
+  //   → **정상 발동인데 기존 포지션 때문에 리셋이 계속 막힌다**
+
+  test('자동 발동 BC: effective를 남기면 EFFECTIVE · expectedClosed=false', () => {
+    // status 라우트가 첫 저장에서 남기는 값 그대로.
+    const eff = effectiveModeOf({ effective: 'BC', config: 'BC', active: true });
+    eq(eff.source, 'EFFECTIVE', '이번 발동의 값');
+    eq(eff.expectedClosed, false, 'BC는 포지션을 닫지 않는다');
+  });
+
+  test('자동 발동 BC + 포지션 남음 + 미체결 0 → 리셋 가능', () => {
+    const eff = effectiveModeOf({ effective: 'BC', config: 'BC', active: true });
+    const lv = leftoverVerdict({
+      leftover: { positions: 3, orders: 0, error: null } as any,
+      expectedClosed: eff.expectedClosed,
+    });
+    eq(lv.code, 'CLEAR', 'BC는 포지션을 닫지 않으므로 남아 있는 것이 정상이다');
+    const g = resetVerdict({
+      equity: 1000, leftover: lv,
+      targeted: targetedStateOf({ pending: false, active: true }),
+    });
+    assert(g.allowed, '닫은 적 없는 포지션 때문에 리셋이 막히면 안 된다');
+    eq(g.code, 'OK', '통과');
+  });
+
+  test('effective를 안 남겼다면 그 리셋이 막혔을 것 — 그래서 남긴다', () => {
+    // 예전 동작 재현: 자동 발동인데 effective가 null
+    const eff = effectiveModeOf({ effective: null, config: 'BC', active: true });
+    eq(eff.source, 'ASSUMED_STRICT', '모르면 강하게 본다');
+    eq(eff.expectedClosed, true, '포지션까지 닫았을 수 있다고 본다');
+    const lv = leftoverVerdict({
+      leftover: { positions: 3, orders: 0, error: null } as any,
+      expectedClosed: eff.expectedClosed,
+    });
+    eq(lv.code, 'REMAINS', '포지션을 세게 된다');
+    assert(!resetVerdict({ equity: 1000, leftover: lv, targeted: 'DONE' }).allowed,
+      '이것이 정상 발동인데 리셋이 막히던 경로다');
+  });
+
+  test('자동 발동이 BCD·ABCD면 expectedClosed=true가 유지된다', () => {
+    for (const mode of ['BCD', 'ABCD']) {
+      const eff = effectiveModeOf({ effective: mode, config: mode, active: true });
+      eq(eff.source, 'EFFECTIVE', `${mode} 이번 값`);
+      eq(eff.expectedClosed, true, `${mode}는 포지션을 닫는다`);
+      const lv = leftoverVerdict({
+        leftover: { positions: 1, orders: 0, error: null } as any,
+        expectedClosed: eff.expectedClosed,
+      });
+      eq(lv.code, 'REMAINS', `${mode}에서 남은 포지션은 문제다`);
+    }
+  });
+
+  test('067 미적용으로 두 칸이 다 NULL이면 fail-closed가 유지된다', () => {
+    const eff = effectiveModeOf({ effective: null, config: 'BC', active: true });
+    eq(eff.expectedClosed, true, 'ASSUMED_STRICT');
+    eq(targetedStateOf({ pending: null, active: true }), 'UNKNOWN', 'UNKNOWN');
+    const g = resetVerdict({
+      equity: 1000,
+      leftover: leftoverVerdict({ leftover: { positions: 0, orders: 0 } as any, expectedClosed: true }),
+      targeted: 'UNKNOWN',
+    });
+    assert(!g.allowed, 'legacy는 막는다');
+    eq(g.code, 'TARGETED_UNKNOWN', '사유');
+  });
 }
