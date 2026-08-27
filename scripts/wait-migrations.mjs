@@ -38,8 +38,11 @@ function loadJudge() {
 function readState() {
   try {
     // --check는 아무것도 바꾸지 않는다. 실패해도 리포트는 남을 수 있다.
+    // apply-migrations는 **MIGRATION_REPORT_PATH가 있을 때만** 리포트를
+    // 쓴다. 없으면 우리가 읽을 파일이 영영 안 생기고, 그건 "못 읽음"이
+    // 되어 5분 뒤 배포가 막힌다 — 워크플로 밖에서 돌릴 때 그렇게 된다.
     execFileSync(process.execPath, ['scripts/apply-migrations.mjs', '--check'],
-      { stdio: 'inherit' });
+      { stdio: 'inherit', env: { ...process.env, MIGRATION_REPORT_PATH: REPORT } });
   } catch { /* 아래에서 리포트를 본다 */ }
   try {
     const r = JSON.parse(readFileSync(REPORT, 'utf8'));
