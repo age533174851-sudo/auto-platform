@@ -114,6 +114,54 @@ function stripComments(src) {
   }
 }
 
+// ── ⑤ 생명주기가 세 전략 모두에 배선돼 있는가 ──
+//
+// 판정 함수만 있고 라우트가 안 부르면 아무 일도 일어나지 않는다 —
+// 이 저장소에서 반복된 "만들어 놓고 배선을 안 함"이다.
+{
+  const rel = 'src/app/api/autotrade/exit-monitor/route.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    for (const [re, why] of [
+      // **정의가 있는 것과 부르는 것은 다르다.** 이 검사의 첫 판이
+      // `async function runLifecycleSweep(`을 호출로 세어 속았다.
+      [/await\s+runLifecycleSweep\s*\(/, '생명주기 경로를 부르지 않습니다 — scalp·my-original-v1이 다시 감시 밖으로 나갑니다'],
+      [/managedCandidates/, 'live_orders에서 후보를 만들지 않습니다'],
+      [/lifecycleDecide/, '생명주기 판정을 쓰지 않습니다'],
+      [/moveStopSafely/, '손절 이동을 안전한 순서로 하지 않습니다 (걸고 → 적고 → 치운다)'],
+      [/mutationKeyOf/, '같은 자리 중복 실행을 막지 않습니다'],
+    ]) {
+      if (!re.test(code)) err(`${rel} — ${why}`);
+    }
+  }
+}
+
+// ── ⑥ 손절 이동 순서가 살아 있는가 ──
+{
+  const rel = 'src/lib/engine/stopMove.ts';
+  const src = read(rel);
+  if (src) {
+    if (!/RECORD_FAILED/.test(src)) {
+      err(`${rel} — 장부 기록 실패 판정이 없습니다`
+        + '\n     기록에 실패했는데 기존 손절을 취소하면 손절 없는 포지션이 남습니다');
+    }
+  }
+}
+
+// ── ⑦ 커버리지 표를 손으로 true로 적지 않는다 ──
+{
+  const rel = 'src/lib/engine/exitCoverage.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    if (!/lifecyclePolicyOf\s*\(/.test(code)) {
+      err(`${rel} — 커버리지를 정책에서 읽지 않습니다`
+        + '\n     손으로 적은 true는 구현이 없어도 초록이 됩니다');
+    }
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 청산 감시 배선 유지 — 계좌는 거래로 고르고 · 봉은 그 거래소에서 가져온다');
 } else {

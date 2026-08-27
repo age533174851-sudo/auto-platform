@@ -10,6 +10,7 @@ import {
   sweepTargets, sweepDecision, sweepSummary,
 } from './orphanSweep';
 import { exitCoverage, exitCoverageGaps, exitCoverageLine } from './exitCoverage';
+import { lifecyclePolicyOf } from '../strategies/lifecyclePolicy';
 
 export function runOrphanSweepTests() {
   console.log('[고아 보호주문 — 대상 고르기]');
@@ -135,12 +136,50 @@ export function runOrphanSweepTests() {
     eq(undeclared.length, 0, `표에 없는 전략: ${undeclared.map(c => c.strategyId).join(', ')}`);
   });
 
-  test('계단식만 트레일링·시간청산을 받는다는 사실을 그대로 적는다', () => {
+  // 이 테스트는 예전에 **반대**를 고정하고 있었다:
+  //   scalp.trailing === false · my-original-v1.timeExit === false
+  // 그 빈 칸을 이번에 닫았으므로 지금은 세 전략 모두 true여야 한다.
+  test('세 실행 전략 모두 트레일링·본전이동·시간청산을 받는다', () => {
     const by = new Map(exitCoverage().map(c => [String(c.strategyId), c]));
-    eq(by.get('daily-ladder')!.trailing, true);
-    eq(by.get('daily-ladder')!.timeExit, true);
-    eq(by.get('scalp')!.trailing, false);
-    eq(by.get('my-original-v1')!.timeExit, false);
+    for (const id of ['daily-ladder', 'scalp', 'my-original-v1']) {
+      const c = by.get(id);
+      assert(c != null, `${id}가 표에 없다`);
+      eq(c!.trailing, true, `${id} 트레일링`);
+      eq(c!.breakEven, true, `${id} 본전이동`);
+      eq(c!.timeExit, true, `${id} 시간청산`);
+      eq(c!.positionGuard, true, `${id} 포지션 점검`);
+      eq(c!.gap, null, `${id} 빈 칸이 남아 있다: ${c!.gap}`);
+    }
+  });
+
+  test('표는 정책에서 나온다 — 손으로 true를 적을 수 없다', () => {
+    // 정책이 실제로 값을 갖고 있는지가 표의 유일한 근거다.
+    // 정책을 지우면 이 칸도 같이 false가 된다(구현 없는 true를 막는다).
+    for (const id of ['scalp', 'my-original-v1']) {
+      const p = lifecyclePolicyOf(id);
+      assert(p != null, `${id}에 생명주기 정책이 없다`);
+      assert(p!.trailStartR != null && p!.trailDistanceR != null, `${id} 트레일링 값`);
+      assert(p!.breakEvenR != null, `${id} 본전이동 값`);
+      assert(p!.maxHoldMs != null, `${id} 최대 보유`);
+    }
+  });
+
+  test('검증용으로 새로 정한 값과 원래 있던 값을 구분한다', () => {
+    eq(lifecyclePolicyOf('daily-ladder')!.source, 'STRATEGY_DECLARED', '원래 값 — 이 PR이 안 바꿨다');
+    eq(lifecyclePolicyOf('scalp')!.source, 'LIFECYCLE_TESTNET_V1', '새로 정한 값');
+    eq(lifecyclePolicyOf('my-original-v1')!.source, 'LIFECYCLE_TESTNET_V1', '새로 정한 값');
+  });
+
+  test('scalp의 트레일링 시작은 목표(2R)보다 앞이다 — 아니면 영원히 안 걸린다', () => {
+    const p = lifecyclePolicyOf('scalp')!;
+    assert(p.trailStartR! < 2, `목표가 2R인데 시작이 ${p.trailStartR}R이면 익절이 먼저 닿는다`);
+  });
+
+  test('전략마다 최대 보유가 다르다 — 계단식 5일을 복사하지 않았다', () => {
+    const ladder = lifecyclePolicyOf('daily-ladder')!.maxHoldMs!;
+    const scalp = lifecyclePolicyOf('scalp')!.maxHoldMs!;
+    assert(scalp < ladder, '분봉 돌파에 5일 보유는 뜻이 없다');
+    assert(lifecyclePolicyOf('my-original-v1')!.maxHoldMs! < ladder, '하루 1회 전략');
   });
 
   test('고아 정리는 전략을 가리지 않는다', () => {

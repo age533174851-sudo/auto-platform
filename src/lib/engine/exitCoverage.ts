@@ -22,6 +22,7 @@
 // **비어 있는 칸이 응답과 화면에 그대로 보여야** 한다.
 
 import { STRATEGIES, type StrategyId } from '../strategies/registry';
+import { lifecyclePolicyOf } from '../strategies/lifecyclePolicy';
 
 /** 청산 감시가 열린 포지션 목록을 읽는 표 */
 export const EXIT_MONITOR_SOURCE_TABLE = 'ladder_daily_trades';
@@ -59,21 +60,44 @@ const BY_MONITOR: Record<string, Omit<ExitCoverage, 'strategyId' | 'name'>> = {
     orphanSweep: true,
     gap: null,
   },
-  scalp: {
-    protectiveOrdersAtEntry: true,
-    // 청산 감시가 읽는 표에 이 전략의 줄이 없다.
-    trailing: false, breakEven: false, timeExit: false, positionGuard: false,
-    // 고아 정리는 전략을 가리지 않는다 — live_orders를 본다(orphanSweep.ts).
-    orphanSweep: true,
-    gap: `열린 포지션이 ${EXIT_MONITOR_SOURCE_TABLE}에 안 적혀서 트레일링·본전이동·시간청산·포지션점검을 받지 않습니다`,
-  },
-  'my-original-v1': {
-    protectiveOrdersAtEntry: true,
-    trailing: false, breakEven: false, timeExit: false, positionGuard: false,
-    orphanSweep: true,
-    gap: `열린 포지션이 ${EXIT_MONITOR_SOURCE_TABLE}에 안 적혀서 트레일링·본전이동·시간청산·포지션점검을 받지 않습니다`,
-  },
+  // ── 아래 둘은 `live_orders`를 원천으로 하는 생명주기 경로가 담당한다 ──
+  //
+  // managedPosition → 거래소 readback → 소유권 → lifecyclePolicy →
+  // lifecycleDecide. 계단식 표에 줄이 없어도 감시된다.
+  //
+  // **표를 손으로 true로 바꾸지 않는다.** 정책이 선언돼 있는지를 코드에
+  // 물어서 정한다 — 정책을 지우면 이 칸도 같이 false가 된다.
+  scalp: lifecycleBacked('scalp'),
+  'my-original-v1': lifecycleBacked('my-original-v1'),
 };
+
+/**
+ * 생명주기 경로가 담당하는 전략의 커버리지.
+ *
+ * **희망을 적지 않는다.** `lifecyclePolicyOf`가 실제로 값을 갖고 있을
+ * 때만 true다. 정책이 없으면 `lifecycleDecide`가 `NO_POLICY`로 아무것도
+ * 하지 않으므로, 표도 그대로 false여야 한다.
+ */
+function lifecycleBacked(id: string): Omit<ExitCoverage, 'strategyId' | 'name'> {
+  const p = lifecyclePolicyOf(id);
+  const trailing = !!(p && p.trailStartR != null && p.trailDistanceR != null);
+  const breakEven = !!(p && p.breakEvenR != null);
+  const timeExit = !!(p && p.maxHoldMs != null);
+  const missing: string[] = [];
+  if (!trailing) missing.push('트레일링');
+  if (!breakEven) missing.push('본전이동');
+  if (!timeExit) missing.push('시간청산');
+  return {
+    protectiveOrdersAtEntry: true,
+    trailing, breakEven, timeExit,
+    // 포지션 확인(열림/닫힘·소유권)은 생명주기 경로가 매 주기 한다.
+    positionGuard: !!p,
+    orphanSweep: true,
+    gap: missing.length
+      ? `생명주기 정책에 ${missing.join('·')} 값이 없어 그 항목은 돌지 않습니다`
+      : null,
+  };
+}
 
 /**
  * 모르는 전략은 **덮이는 것으로 치지 않는다.**
