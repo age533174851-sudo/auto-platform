@@ -710,10 +710,209 @@ export async function GET(req: NextRequest) {
   // SL/TP가 닫아 준 뒤 남은 형제 주문을 아무도 안 치웠다.
   //
   // **dryRun에서는 돌리지 않는다.** 이 경로는 실제로 취소를 보낸다.
+/**
+ * 전략을 가리지 않는 포지션 생명주기.
+ *
+ * `ladder_daily_trades`는 계단식 전용 표라 scalp·my-original-v1의
+ * 포지션은 트레일링·본전이동·시간청산을 **전혀 받지 못했다**(#201의
+ * 커버리지 표가 그 사실을 그대로 보여 준다).
+ *
+ * 세 전략이 함께 쓰는 표는 `live_orders`다. 다만 그건 **의도 장부**라,
+ * 줄이 있다고 포지션이 열려 있는 것이 아니다 — 반드시 그 연결·거래소에
+ * 물어서 확인한다.
+ *
+ * 판정은 전부 순수 함수가 한다:
+ *   managedCandidates  후보 만들기 · 소유권
+ *   lifecycleDecide    무엇을 할 것인가
+ *   moveStopSafely     걸고 → 적고 → 치운다
+ */
+async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
+  candidates: number; acted: number; skipped: any[];
+  results: any[]; summary: string; error: string | null;
+}> {
+  const out = {
+    candidates: 0, acted: 0, skipped: [] as any[],
+    results: [] as any[], summary: '', error: null as string | null,
+  };
+
+  const { managedCandidates, mayActOn, mutationKeyOf } = await import('@/lib/engine/managedPosition');
+  const { lifecycleDecide } = await import('@/lib/engine/exitLifecycle');
+  const { lifecyclePolicyOf } = await import('@/lib/strategies/lifecyclePolicy');
+
+  let rows: any[] = [];
+  try {
+    const { data, error } = await (sb as any).from('live_orders')
+      .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
+        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id, strategy_id')
+      .order('acked_at', { ascending: false })
+      .limit(200);
+    // **조회 실패를 '없음'으로 적지 않는다.**
+    if (error) {
+      out.error = String(error.message).slice(0, 200);
+      out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
+      return out;
+    }
+    rows = Array.isArray(data) ? data : [];
+  } catch (e: any) {
+    out.error = String(e?.message || e).slice(0, 200);
+    out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
+    return out;
+  }
+
+  const { positions, skipped } = managedCandidates(rows);
+  out.candidates = positions.length;
+  out.skipped = skipped;
+  if (positions.length === 0) {
+    out.summary = '감시할 후보가 없습니다';
+    return out;
+  }
+
+  const ops = await import('@/lib/engine/venuePositionOps');
+  const { decryptSecret } = await import('@/lib/exchanges/crypto');
+  const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
+  const { highWaterSince } = await import('@/lib/engine/exitMonitor');
+  const { moveStopSafely } = await import('@/lib/engine/stopMove');
+
+  /** 연결 하나당 한 번만 읽는다. **연결이 망을 정한다** */
+  const credCache = new Map<string, any>();
+  const credsOf = async (connectionId: string) => {
+    if (!credCache.has(connectionId)) {
+      let v: any = null;
+      try {
+        const { data: c } = await sb.from('exchange_connections')
+          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
+          .eq('id', connectionId).maybeSingle();
+        if (c && !(c as any).has_withdrawal) {
+          const ex = resolveExecExchange((c as any).exchange_id).exchange;
+          if (ex) {
+            v = { exchange: ex, apiKey: (c as any).api_key,
+              apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),
+              testnet: (c as any).is_testnet !== false };
+          }
+        }
+      } catch { v = null; }
+      credCache.set(connectionId, v);
+    }
+    return credCache.get(connectionId);
+  };
+
+  // **같은 자리에 두 번 주문하지 않는다.** 워커가 둘 떠 있거나 한 회차에
+  // 같은 포지션을 두 줄이 가리켜도 여기서 한 번만 실행한다.
+  const done = new Set<string>();
+
+  for (const p of positions) {
+    const key = mutationKeyOf(p);
+    if (done.has(key)) {
+      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
+        ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
+      continue;
+    }
+
+    try {
+      const venue = await credsOf(p.connectionId);
+      if (!venue) {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'NO_VENUE', ok: false,
+          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+        continue;
+      }
+      // **줄에 적힌 거래소와 연결의 거래소가 다르면 손대지 않는다.**
+      if (venue.exchange !== p.exchange) {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'VENUE_MISMATCH', ok: false,
+          reason: `주문은 ${p.exchange}로 적혀 있는데 연결은 ${venue.exchange}입니다` });
+        continue;
+      }
+
+      const live = await ops.readOpenPosition(venue, p.symbol);
+      // 봉·현재가는 **그 거래소에서** 가져온다.
+      let hw: { highWaterR: number; lastPrice: number } | null = null;
+      if (live.ok && live.found && mayActOn(p)) {
+        hw = await highWaterSince(p.symbol, p.openedAt, p.entryPrice, p.stopLoss,
+          p.side === 'LONG', venue.testnet, p.exchange);
+      }
+      // 지금 거래소에 걸려 있는 손절. **못 읽으면 진입 손절을 그대로 쓴다** —
+      // 방향을 같이 넘겨야 남의 조건부 주문을 이 포지션의 손절로 읽지 않는다.
+      let liveStop: number | null = null;
+      try { liveStop = await ops.liveStopPrice(venue, p.symbol, p.side); }
+      catch { liveStop = null; }
+
+      const v = lifecycleDecide({
+        position: p, policy: lifecyclePolicyOf(p.strategyId),
+        live, highWaterR: hw?.highWaterR ?? null, lastPrice: hw?.lastPrice ?? null,
+        liveStop, nowMs: Date.now(),
+      });
+
+      if (v.action === 'NONE') {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
+          ok: true, reason: v.reason, mayCleanProtection: v.mayCleanProtection });
+        continue;
+      }
+      if (dryRun) {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
+          ok: true, dryRun: true, reason: `점검 모드 — ${v.reason}` });
+        continue;
+      }
+
+      done.add(key);
+      if (v.action === 'CLOSE') {
+        const r = await ops.closeSymbolPosition(venue, p.symbol, p.side);
+        // **닫았다고 적기 전에 다시 읽는다.** 접수는 체결이 아니다.
+        const after = await ops.readOpenPosition(venue, p.symbol);
+        const flat = after.ok === true && after.found === false;
+        out.acted += 1;
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
+          ok: !!r?.ok && flat, closed: !!r?.ok,
+          flatVerified: after.ok === true ? flat : null,
+          reason: v.reason + (after.ok === true
+            ? (flat ? ' — 포지션 0 확인' : ' — 아직 남아 있습니다')
+            : ' — 종료 후 재조회 실패(0이라는 뜻이 아닙니다)') });
+        continue;
+      }
+
+      // MOVE_STOP — 걸고 → 적고 → 치운다
+      const mv = await moveStopSafely({
+        symbol: p.symbol, side: p.side, newStop: v.newStop!,
+        place: async (stopPrice) => {
+          const r = await ops.placeStop(venue, { symbol: p.symbol, positionSide: p.side, stopPrice });
+          return { ok: !!r?.ok, orderId: r?.orderId ?? null, message: r?.message };
+        },
+        record: async (orderId) => {
+          // **stop_loss는 덮어쓰지 않는다.** 그 칸은 진입 시점 값이고 1R을 정의한다.
+          if (!p.orderId) return { ok: false, message: '주문 줄 id가 없어 적을 곳이 없습니다' };
+          const { error } = await (sb as any).from('live_orders')
+            .update({ sl_order_id: orderId }).eq('id', p.orderId);
+          return error ? { ok: false, message: String(error.message).slice(0, 120) } : { ok: true };
+        },
+        cancelOthers: async (keep) => ops.cancelOtherStops(venue, p.symbol, p.side, keep),
+      });
+      out.acted += mv.ok ? 1 : 0;
+      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: mv.code,
+        ok: mv.ok, newStop: v.newStop, newOrderId: mv.newOrderId,
+        cancelledOld: mv.cancelledOld, oldStopKept: mv.oldStopKept,
+        reason: `${v.reason} — ${mv.reason}` });
+    } catch (e: any) {
+      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'FAILED', ok: false,
+        reason: String(e?.message || e).slice(0, 160) });
+    }
+  }
+
+  const unknown = out.results.filter(r => r.code === 'POSITION_UNKNOWN').length;
+  out.summary = `후보 ${out.candidates}건 · 실행 ${out.acted}건`
+    + (unknown > 0 ? ` · 확인 못 함 ${unknown}건` : '')
+    + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
+  return out;
+}
+
   const sweep = dryRun
     ? { targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0, skipped: [],
         details: [], summary: '점검 모드라 고아 정리를 돌리지 않았습니다', error: null }
     : await sweepOrphanProtection(sb);
+
+  // ── 전략을 가리지 않는 포지션 생명주기 ──
+  //
+  // 위 `decideExits`는 계단식 표만 본다. 이 경로가 scalp·my-original-v1의
+  // 트레일링·본전이동·시간청산을 담당한다. 점검 모드에서는 판단만 하고
+  // 주문을 내지 않는다.
+  const lifecycle = await runLifecycleSweep(sb, dryRun);
 
   // ── 무엇을 안 보고 있는가 ──
   //
@@ -738,7 +937,7 @@ export async function GET(req: NextRequest) {
   if (dryRun || actionable.length === 0) {
     return NextResponse.json({
       ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
-      alerts, recovery, orphanCleanups, sweep, coverage,
+      alerts, recovery, orphanCleanups, sweep, coverage, lifecycle,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
         highWaterR: Number(d.highWaterR.toFixed(3)),
@@ -768,7 +967,7 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json({
       ok: true, skipped: true, code: 'LEASE_LOST', checked: decisions.length, actionable: 0,
-      orphanCleanups, sweep, coverage,
+      orphanCleanups, sweep, coverage, lifecycle,
       message: '실행 도중 임차가 다른 워커에게 넘어가 주문을 내지 않았습니다 — 그쪽이 같은 판단을 합니다',
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
@@ -922,7 +1121,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery,
-    orphanCleanups, sweep, coverage, results,
+    orphanCleanups, sweep, coverage, lifecycle, results,
     runId, cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
