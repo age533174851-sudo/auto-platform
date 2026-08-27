@@ -119,6 +119,11 @@ export async function openLadderGate(
     signalId?: string;
     symbol?: string;
     side?: 'LONG' | 'SHORT';
+    /**
+     * **이 거래가 열리는 연결.** 청산 감시가 계좌를 고르는 근거다.
+     * 안 주면 감시는 "활성 연결이 하나뿐일 때만" 손을 댄다.
+     */
+    connectionId?: string | null;
     /** 거래소에서 조회한 확정 잔고. 주면 사이클 상태를 이 값으로 갱신한다. */
     realizedEquity?: number;
   },
@@ -215,22 +220,37 @@ export async function openLadderGate(
     // ── 하루 1회 예약 (unique 제약이 경쟁을 처리한다) ──
     const tradeDate = todayUtc();
 
-    const { data: reservation, error: resErr } = await sb
-      .from('ladder_daily_trades')
-      .insert({
-        user_id: opts.userId,
-        strategy_id: strategyId,
-        trade_date: tradeDate,
-        cycle_id: cycle.id,
-        cycle_number: state.cycleNumber,
-        tier_index: decision.tier.index,
-        allocated_margin: decision.margin,
-        signal_id: opts.signalId || null,
-        symbol: opts.symbol || null,
-        side: opts.side || null,
-        status: 'RESERVED',
-      })
-      .select('id').single();
+    const reservationRow: Record<string, any> = {
+      user_id: opts.userId,
+      strategy_id: strategyId,
+      trade_date: tradeDate,
+      cycle_id: cycle.id,
+      cycle_number: state.cycleNumber,
+      tier_index: decision.tier.index,
+      allocated_margin: decision.margin,
+      signal_id: opts.signalId || null,
+      symbol: opts.symbol || null,
+      side: opts.side || null,
+      status: 'RESERVED',
+    };
+    // **이 거래가 어느 계좌에서 열리는가.**
+    //
+    // 안 적으면 청산 감시가 "그 사용자의 활성 연결 첫 줄"을 쓴다 —
+    // 연결이 둘이면 Gate 포지션의 손절 이동이 바이낸스로 나간다.
+    if (opts.connectionId) reservationRow.connection_id = opts.connectionId;
+
+    let { data: reservation, error: resErr } = await sb
+      .from('ladder_daily_trades').insert(reservationRow).select('id').single();
+
+    // 068이 아직 안 붙은 DB에서는 그 칸이 없다. **진입을 막지 않는다** —
+    // 연결을 못 적는 것보다 진입 자체가 안 되는 쪽이 나쁘다. 못 적힌
+    // 줄은 읽는 쪽이 "모름"으로 다룬다(tradeVenue.ts).
+    if (resErr && 'connection_id' in reservationRow
+        && /connection_id|column|schema cache/i.test(String(resErr.message || ''))) {
+      delete reservationRow.connection_id;
+      ({ data: reservation, error: resErr } = await sb
+        .from('ladder_daily_trades').insert(reservationRow).select('id').single());
+    }
 
     if (resErr) {
       const dup = String(resErr.code) === '23505' || /duplicate|unique/i.test(resErr.message || '');

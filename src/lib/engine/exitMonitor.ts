@@ -20,6 +20,8 @@
 // 어긋난다. 대신 매번 진입 이후 캔들을 다시 읽어 최고점을 계산한다.
 // 느리지만 중복 실행·누락에 영향받지 않는다.
 
+import { highWaterOf, barFromBinance, barFromGate, gateContractOf, type Bar } from './highWater';
+
 export const R_TRAIL_START = 2;   // 이 R을 넘으면 트레일링 시작
 export const R_TRAIL_DIST  = 1;   // 최고점에서 이만큼 R 물러나면 청산
 export const R_BREAK_EVEN  = 1;   // 이 R 도달 시 손절을 본전으로
@@ -38,35 +40,45 @@ export interface ExitDecision {
   reason: string;
 }
 
-/** 진입 이후 15분봉으로 최고 도달 R을 계산한다. */
+/**
+ * 진입 이후 15분봉으로 최고 도달 R을 계산한다.
+ *
+ * **어느 거래소인지 묻는다.** 예전에는 호스트가
+ * `testnet ? demo-fapi.binance : fapi.binance`로 고정이라, Gate에서 연
+ * 포지션도 바이낸스에 물었다. 심볼 표기까지 달라서(`BTCUSDT` ↔
+ * `BTC_USDT`) 조회가 실패했고, 그 실패는 `null` → "캔들 조회 실패 —
+ * 이번 주기 건너뜀"으로 끝났다. **매 주기 조용히 반복되므로 Gate
+ * 포지션의 트레일링은 영원히 안 돌았다.**
+ *
+ * R 계산은 `highWater.ts`에 있다 — 망을 안 타고 확인할 수 있어야 한다.
+ */
 export async function highWaterSince(
   symbol: string, sinceMs: number, entry: number, stop: number, isLong: boolean, testnet: boolean,
+  exchange: 'binance' | 'gate' = 'binance',
 ): Promise<{ highWaterR: number; lastPrice: number } | null> {
-  const host = testnet ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
   try {
-    const r = await fetch(
-      `${host}/fapi/v1/klines?symbol=${symbol}&interval=15m&startTime=${sinceMs}&limit=500`,
-      { signal: AbortSignal.timeout(10_000) },
-    );
-    if (!r.ok) return null;
-    const rows = await r.json();
-    if (!Array.isArray(rows) || rows.length === 0) return null;
+    let bars: Bar[] = [];
 
-    const riskDist = Math.abs(entry - stop);
-    if (riskDist <= 0) return null;
-
-    let best = 0;
-    let lastPrice = entry;
-    for (const k of rows) {
-      const high = parseFloat(k[2]), low = parseFloat(k[3]), close = parseFloat(k[4]);
-      if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
-      const favorable = isLong ? high : low;
-      const move = isLong ? favorable - entry : entry - favorable;
-      const r2 = move / riskDist;
-      if (r2 > best) best = r2;
-      if (Number.isFinite(close)) lastPrice = close;
+    if (exchange === 'gate') {
+      const { getCandlesGateFutures } = await import('../exchanges/gateFutures');
+      const rows = await getCandlesGateFutures(
+        gateContractOf(symbol), Math.floor(sinceMs / 1000),
+        { interval: '15m', limit: 500, testnet },
+      );
+      bars = rows.map(barFromGate).filter(Boolean) as Bar[];
+    } else {
+      const host = testnet ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
+      const r = await fetch(
+        `${host}/fapi/v1/klines?symbol=${symbol}&interval=15m&startTime=${sinceMs}&limit=500`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (!r.ok) return null;
+      const rows = await r.json();
+      if (!Array.isArray(rows)) return null;
+      bars = rows.map(barFromBinance).filter(Boolean) as Bar[];
     }
-    return { highWaterR: best, lastPrice };
+
+    return highWaterOf({ bars, entry, stop, isLong });
   } catch { return null; }
 }
 
@@ -123,6 +135,17 @@ export async function decideExits(
      * 두 벌이 되면 화면이 말하는 것과 실제로 손절을 옮기는 것이 갈린다.
      */
     userId?: string | null;
+    /**
+     * **이 거래가 열린 계좌.**
+     *
+     * 예전에는 이런 것이 없었고, 부르는 쪽이 `user_id`로 활성 연결
+     * 첫 줄을 골랐다. 바이낸스·Gate를 둘 다 연결해 두면 Gate 포지션의
+     * 트레일링을 바이낸스 봉으로 계산하고 손절 이동도 바이낸스로 나간다.
+     *
+     * 못 고르면 `null`이고, 그때는 **손대지 않는다.**
+     */
+    venueFor?: (t: { userId: string; connectionId: string | null })
+      => Promise<import('./tradeVenue').VenueVerdict>;
   },
 ): Promise<ExitDecision[]> {
   const maxHoldMs = opts.maxHoldMs ?? 5 * 24 * 60 * 60 * 1000;
@@ -130,7 +153,7 @@ export async function decideExits(
 
   let q = sb
     .from('ladder_daily_trades')
-    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at')
+    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id')
     .eq('status', 'OPEN');
   if (opts.userId) q = q.eq('user_id', opts.userId);
   const { data: open } = await q.limit(opts.limit ?? 25);
@@ -159,20 +182,43 @@ export async function decideExits(
       continue;
     }
 
-    // 이 거래가 실제로 어느 망에 있는가. 못 알아내면 기본값을 쓰되,
-    // 그건 '모르는 것'이므로 아래 사유에 적힌다.
+    // ── 이 거래가 열린 계좌를 먼저 고른다 ──
+    //
+    // **거래를 보고 고른다.** 예전에는 이 자리가 없어서 부르는 쪽이
+    // `user_id`로 활성 연결 첫 줄을 썼다 — 연결이 둘이면 Gate 포지션의
+    // 손절 이동이 바이낸스로 나간다.
+    //
+    // 못 고르면 손대지 않는다. 시간 청산은 위에서 이미 처리했으므로
+    // 여기서 멈추는 것은 트레일링·본전이동뿐이고, **엉뚱한 계좌에
+    // 주문을 내는 것보다 이번 주기를 거르는 쪽이 낫다.**
     let tnet = opts.testnet;
-    let tnetKnown = true;
-    if (opts.testnetFor) {
+    let venueEx: 'binance' | 'gate' = 'binance';
+    let venueNote = '';
+    if (opts.venueFor) {
+      const v = await opts.venueFor({
+        userId: String(t.user_id),
+        connectionId: t.connection_id == null ? null : String(t.connection_id),
+      });
+      if (!v.actionable || !v.connection) {
+        out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,
+          reason: `계좌를 고르지 못해 건너뜁니다 (${v.code}) — ${v.reason}` });
+        continue;
+      }
+      tnet = v.connection.testnet;
+      venueEx = v.connection.exchange ?? 'binance';
+      if (v.code !== 'OWNED') venueNote = ` (${v.reason})`;
+    } else if (opts.testnetFor) {
+      // 예전 호출부 호환. 거래소는 모르므로 바이낸스로 남는다.
       const r = await opts.testnetFor(String(t.user_id));
-      if (r == null) tnetKnown = false; else tnet = r;
+      if (r == null) venueNote = ' (이 거래의 연결을 못 읽어 기본 망으로 조회했습니다)';
+      else tnet = r;
     }
 
-    const hw = await highWaterSince(t.symbol, openedAt, entry, stop, isLong, tnet);
+    // **봉을 그 거래소에서 가져온다.** 예전에는 언제나 바이낸스였다.
+    const hw = await highWaterSince(t.symbol, openedAt, entry, stop, isLong, tnet, venueEx);
     if (!hw) {
       out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,
-        reason: '캔들 조회 실패 — 이번 주기 건너뜀'
-          + (tnetKnown ? '' : ' (이 거래의 연결을 못 읽어 기본 망으로 조회했습니다)') });
+        reason: `캔들 조회 실패(${venueEx}) — 이번 주기 건너뜀${venueNote}` });
       continue;
     }
 

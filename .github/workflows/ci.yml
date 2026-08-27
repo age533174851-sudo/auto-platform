@@ -207,6 +207,27 @@ jobs:
       - name: 브라우저 주문 권한 검사
         run: node scripts/check-browser-orders.mjs
 
+      # ── 첫 평가 단일 경로 검사 ──
+      #
+      # 자동매매를 켜면 서버가 저장 직후 `evaluateIfDue()`를 돌린다.
+      # 그런데 화면도 `runFirstCheck()`로 전략 실행기를 **checkOnly 없이**
+      # 불렀다. 켜는 순간 실평가가 두 경로였고, 아래쪽 중복 방어
+      # (`last_run_at` compare-and-set · 결정적 clientOrderId)에 기대고
+      # 있었다. 방어 하나가 약해지는 날 주문이 두 번 나간다.
+      - name: 첫 평가 단일 경로 검사
+        run: node scripts/check-first-eval.mjs
+
+      # ── 청산 감시가 어느 계좌·어느 거래소인지 아는가 ──
+      #
+      # 계좌를 거래가 아니라 사용자로 골랐다(활성 연결 첫 줄). 바이낸스와
+      # Gate를 둘 다 연결해 두면 Gate 포지션의 손절 이동이 바이낸스로
+      # 나간다. 그리고 봉은 언제나 바이낸스에서 가져왔다 — Gate 계약을
+      # 물으면 400이고, 그 실패는 "이번 주기 건너뜀"으로 조용히 반복된다.
+      #
+      # 둘 다 판정기가 아니라 배선이라 순수 테스트로는 안 잡힌다.
+      - name: 청산 감시 배선 (계좌는 거래로 · 봉은 그 거래소에서)
+        run: node scripts/check-exit-venue.mjs
+
       # ── GET이 쓰는 경로 ──
       #
       # `/api/wallets/overview`는 GET인데 자산 스냅샷을 INSERT했다.

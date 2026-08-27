@@ -500,7 +500,44 @@ export async function GET(req: NextRequest) {
   const { readTrailConfig } = await import('@/lib/engine/trailPlan');
   const { cfg: trailCfg } = readTrailConfig(k => process.env[k]);
 
-  const decisions = await decideExits(sb, { testnet, testnetFor, liveStopFor, cfg: trailCfg });
+  // **거래마다 그 거래가 열린 계좌를 고른다.**
+  //
+  // 예전에는 `decideExits`가 `testnetFor(userId)`만 받았고, 그 함수는
+  // 사용자의 활성 연결 **첫 줄**을 읽었다. 바이낸스 테스트넷과 Gate
+  // 테스트넷을 둘 다 연결해 두면 Gate 포지션의 트레일링을 바이낸스 봉으로
+  // 계산하고 손절 이동도 바이낸스로 나간다.
+  //
+  // 고르는 규칙은 tradeVenue.ts에 있고 테스트가 붙어 있다.
+  const { tradeVenueOf } = await import('@/lib/engine/tradeVenue');
+  const activeCache = new Map<string, any[]>();
+  const venueFor = async (t: { userId: string; connectionId: string | null }) => {
+    if (!activeCache.has(t.userId)) {
+      let list: any[] = [];
+      try {
+        const { data } = await sb.from('exchange_connections')
+          .select('id, is_testnet, exchange_id')
+          .eq('user_id', t.userId).eq('is_active', true).limit(20);
+        const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
+        list = (Array.isArray(data) ? data : []).map((c: any) => ({
+          id: String(c.id),
+          exchange: resolveExecExchange(c.exchange_id).exchange,
+          // 저장소 전체 규칙: is_testnet === false 만 실전이다.
+          testnet: c.is_testnet !== false,
+        }));
+      } catch {
+        // **못 읽은 것을 "연결 없음"으로 적지 않는다.** 빈 목록이면
+        // tradeVenueOf가 NONE으로 막는다 — 그게 맞는 방향이다.
+        list = [];
+      }
+      activeCache.set(t.userId, list);
+    }
+    return tradeVenueOf({
+      tradeConnectionId: t.connectionId,
+      connections: activeCache.get(t.userId) as any,
+    });
+  };
+
+  const decisions = await decideExits(sb, { testnet, testnetFor, venueFor, liveStopFor, cfg: trailCfg });
 
   // ── 기술적 사고 점검 ──
   // 트레일링·시간청산 판단보다 먼저 본다. 청산가에 다다랐거나 손절이
