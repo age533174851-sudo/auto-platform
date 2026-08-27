@@ -10,7 +10,23 @@ export interface KillSwitchConfig {
   weeklyLimitPct: number;
   monthlyLimitPct: number;
   absLimitUsdt: number;     // 0 = 미사용
-  actionMode: string;       // 예: 'BC' (B+C 기본)
+  actionMode: string;       // 예: 'BC' (B+C 기본) — **설정값**
+  /**
+   * 이번 발동을 **실제로 만든** 조합. 설정값과 다를 수 있다.
+   *
+   * 화면에서 단계를 골라 누르면(`body.level`) 그 조합이 여기 남는다.
+   * 리셋되면 비운다. **비어 있으면 읽는 쪽이 가장 강한 쪽으로 판단한다**
+   * (`effectiveModeOf`) — 무엇으로 켜졌는지 모른 채 느슨하게 풀지 않는다.
+   */
+  effectiveActionMode?: string | null;
+  /**
+   * 이번 발동의 포지션 축소·종료가 **아직 끝나지 않았는가.**
+   *
+   * `effectiveActionMode`만으로는 부족하다 — AB·ABC에는 D가 없어
+   * 잔여 판정이 포지션을 세지 않는다. 기록이 없으면(undefined) 읽는
+   * 쪽이 '모름'으로 보고 잠금을 풀지 않는다.
+   */
+  targetedPending?: boolean | null;
 }
 
 export interface KillSwitchState extends KillSwitchConfig {
@@ -125,6 +141,8 @@ function rowToState(row: any): KillSwitchState {
     monthlyLimitPct: Number(row.monthly_limit_pct ?? DEFAULT_KILL.monthlyLimitPct),
     absLimitUsdt: Number(row.abs_limit_usdt ?? 0),
     actionMode: row.action_mode ?? DEFAULT_KILL.actionMode,
+    effectiveActionMode: row.effective_action_mode ?? null,
+    targetedPending: row.targeted_pending ?? null,
     active: !!row.active,
     triggeredAt: row.triggered_at ? new Date(row.triggered_at).getTime() : null,
     triggerReason: row.trigger_reason ?? null,
@@ -143,6 +161,8 @@ function stateToRow(userId: string, connectionId: string, s: KillSwitchState) {
     enabled: s.enabled,
     daily_limit_pct: s.dailyLimitPct, weekly_limit_pct: s.weeklyLimitPct, monthly_limit_pct: s.monthlyLimitPct,
     abs_limit_usdt: s.absLimitUsdt, action_mode: s.actionMode,
+    effective_action_mode: s.effectiveActionMode ?? null,
+    targeted_pending: s.targetedPending ?? null,
     active: s.active,
     triggered_at: s.triggeredAt ? new Date(s.triggeredAt).toISOString() : null,
     trigger_reason: s.triggerReason,
@@ -165,9 +185,24 @@ export async function loadKillSwitch(sb: any, userId: string, connectionId: stri
 }
 
 export async function saveKillSwitch(sb: any, userId: string, connectionId: string, s: KillSwitchState): Promise<boolean> {
+  const row: any = stateToRow(userId, connectionId, s);
   try {
-    const { error } = await sb.from('kill_switch_state').upsert(stateToRow(userId, connectionId, s), { onConflict: 'user_id,connection_id' });
-    return !error;
+    const { error } = await sb.from('kill_switch_state').upsert(row, { onConflict: 'user_id,connection_id' });
+    if (!error) return true;
+    // ── 067이 아직인 배포 ──
+    //
+    // 칸이 없다고 통째로 실패하면 **발동 사실 자체가 저장되지 않는다.**
+    // 그건 이 칸이 없는 것보다 훨씬 나쁘다. 그래서 그 값만 빼고 다시 쓴다.
+    //
+    // 빠진 상태로 저장되면 읽는 쪽은 `effectiveModeOf`에서
+    // ASSUMED_STRICT가 되어 **가장 강한 쪽으로** 판단한다 — 모르는 것을
+    // 느슨하게 읽지 않는다.
+    if (/column|schema cache/i.test(String(error.message))) {
+      const { effective_action_mode, targeted_pending, ...rest } = row;
+      const retry = await sb.from('kill_switch_state').upsert(rest, { onConflict: 'user_id,connection_id' });
+      return !retry.error;
+    }
+    return false;
   } catch { return false; }
 }
 
@@ -316,13 +351,40 @@ export async function executeKillActions(
 // ── Reconciliation: 발동 후 실제 거래소에 잔여가 있는지 재확인 ─────────
 export async function reconcile(
   sb: any, userId: string, connectionId: string,
-  opts: { key: string; secret: string; testnet: boolean; expectClosed: boolean },
-): Promise<{ positions: number; orders: number; clean: boolean }> {
-  const { countOpen } = await import('@/lib/exchanges/binanceFutures');
-  const c = await countOpen(opts.key, opts.secret, opts.testnet);
-  const clean = opts.expectClosed ? (c.positions === 0 && c.orders === 0) : (c.orders === 0);
+  opts: {
+    key: string; secret: string; testnet: boolean; expectClosed: boolean;
+    /**
+     * 어느 거래소인가. **안 주면 바이낸스** — 예전 호출부와 동작이 같다.
+     *
+     * 예전에는 이 칸이 아예 없었고 바이낸스 `countOpen`을 직접 불렀다.
+     * 실행(`executeKillActions`)은 Gate를 받는데 **마지막 확인만 바이낸스**라,
+     * Gate 연결에서는 잔여 확인이 인증 오류로 끝나고 그 실패가 조용히
+     * 넘어갔다. 문을 잠그고 안을 안 들여다본 것이다.
+     */
+    exchange?: 'binance' | 'gate';
+  },
+): Promise<{ positions: number | null; orders: number | null; clean: boolean; error: string | null }> {
+  const { futuresCountOpen } = await import('@/lib/exchanges/futuresExec');
+  const c = await futuresCountOpen({
+    exchange: opts.exchange ?? 'binance',
+    key: opts.key, secret: opts.secret, testnet: opts.testnet,
+  } as any);
+
+  // 판정은 killSwitchTruth가 한다 — **null을 0으로 읽지 않는 규칙**이
+  // 여기와 라우트 두 곳에 있으면 언젠가 한쪽만 고쳐진다.
+  const { leftoverVerdict } = await import('./killSwitchTruth');
+  const v = leftoverVerdict({
+    leftover: { positions: c.positions, orders: c.orders, error: c.error },
+    expectedClosed: opts.expectClosed,
+  });
+  const clean = v.code === 'CLEAR';
+
   if (!clean) {
-    await logKillEvent(sb, userId, connectionId, { reason: `재확인: 포지션 ${c.positions} · 미체결 ${c.orders} 잔존`, equity: 0, drawdownPct: 0, action: 'RECONCILE_WARN', mode: opts.testnet ? 'TESTNET' : 'LIVE' });
+    await logKillEvent(sb, userId, connectionId, {
+      reason: `재확인: ${v.reason}`,
+      equity: 0, drawdownPct: 0, action: 'RECONCILE_WARN',
+      mode: opts.testnet ? 'TESTNET' : 'LIVE',
+    });
   }
-  return { ...c, clean };
+  return { positions: c.positions, orders: c.orders, clean, error: c.error };
 }

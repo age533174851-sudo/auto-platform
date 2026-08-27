@@ -4,8 +4,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
-import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions } from '@/lib/risk/killSwitch';
+import { loadKillSwitch, saveKillSwitch, logKillEvent, executeKillActions, reconcile } from '@/lib/risk/killSwitch';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
+import { isTestnetConn, intentOf, leftoverVerdict, retriggerDecision, killCompletion, targetedStateOf } from '@/lib/risk/killSwitchTruth';
+import { levelOf, actionModeOf } from '@/lib/risk/emergencyLevel';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -29,14 +31,45 @@ export async function POST(req: NextRequest) {
   if (s.noTable) return NextResponse.json({ error: 'table_missing', message: 'kill_switch_state 테이블이 없습니다.' }, { status: 503 });
 
   const wasActive = s.active;
+
+  // ── 이번에 실제로 하기로 한 조합을 **저장 전에** 정한다 ──
+  //
+  // 예전에는 저장이 먼저였고 저장되는 값은 설정의 `actionMode`였다.
+  // 그래서 이런 일이 가능했다:
+  //
+  //   설정 BC → 수동 CLOSE_ALL(ABCD) 실행 → 포지션 일부 남음 → reset
+  //   → reset은 저장된 BC로 읽어 expectedClosed = false
+  //   → 잔여 판정이 포지션을 안 세고 CLEAR → **남은 포지션 위에서 잠금 해제**
+  //
+  // 설정값은 그대로 두고(사용자 설정이다) 이번 발동의 조합을 따로 남긴다.
+  const levelSpec = levelOf(body?.level);
+  const modeForCheck = levelSpec ? actionModeOf(levelSpec) : s.actionMode;
+
+  // ── 이 발동에 마무리할 targeted 작업이 있는가 ──
+  //
+  // **첫 저장에서 반드시 true/false 중 하나를 남긴다.** null을
+  // "targeted 아님"으로 쓰면 안 된다 — null은 legacy·기록 실패라는
+  // 뜻이고 읽는 쪽이 막는다(fail-closed). 그 상태로 두면
+  // PAUSE_ENTRIES처럼 애초에 줄일 것이 없던 발동조차 리셋이 영원히
+  // 막힌다.
+  //
+  // 그리고 **조합 문자열로 추론하지 않는다.** REDUCE_RISK와
+  // LOCK_ACCOUNT는 둘 다 'AB'다 — 같은 문자열이라 구분이 불가능하다.
+  // spec의 `closePct`가 유일한 근거다.
+  const isTargeted = !!(levelSpec && levelSpec.closePct > 0);
+
   s.active = true;
   s.triggeredAt = Date.now();
   s.triggerReason = reason || '수동 발동';
+  s.effectiveActionMode = modeForCheck;
+  // targeted면 아직 안 끝났다(true). 아니면 마무리할 것이 없다(false).
+  s.targetedPending = isTargeted;
 
   const ok = await saveKillSwitch(sb, uid, connectionId, s);
   if (!ok) return NextResponse.json({ error: 'save_failed' }, { status: 500 });
 
-  const testnet = conn.is_testnet === true;
+  // 저장소 전체 규칙: `is_testnet === false`만 실전이다.
+  const testnet = isTestnetConn(conn);
   await logKillEvent(sb, uid, connectionId, { reason: s.triggerReason, equity: 0, drawdownPct: 0, action: 'MANUAL_TRIGGER', mode: testnet ? 'TESTNET' : 'LIVE' });
 
   // ── 발동 순간 실제로 실행한다 ──
@@ -51,10 +84,56 @@ export async function POST(req: NextRequest) {
   // 위험한 실패였다.
   //
   // executeKillActions는 이 파일이 이미 import하고 있었다. 부르지 않았을 뿐이다.
-  let exec: any = null;
-  if (!wasActive) {
+  const creds = await loadFuturesCreds(sb, uid, connectionId);
+
+  // ── 이미 발동 중인데 다시 눌렀다 ──
+  //
+  // **예전에는 무조건 건너뛰고 `ok: true`를 줬다.** 그런데 사용자가 다시
+  // 누르는 순간은 대부분 **첫 실행이 절반만 됐을 때**다. 그때 아무것도
+  // 안 하고 성공이라고 답하면 남은 포지션을 아무도 안 본다.
+  //
+  // 그래서 먼저 거래소에 물어본다. 남은 것이 없다고 **확인됐을 때만**
+  // 건너뛴다 — 모르면 다시 한다.
+  // **이번에 실제로 하기로 한 조합.** 저장된 actionMode와 다를 수 있다
+  // (단계를 골라 보내면 그 단계가 이긴다). 완료 문구는 반드시 이 값을
+  // 기준으로 적어야 한다 — 저장값으로 적으면 안 한 일을 말하게 된다.
+  let preLeftover: any = null;
+  /** 줄일 대상을 실제로 확인했는가. **빈 배열과 못 찾음을 가른다** */
+  let discovery: any = null;
+  let positionsRead = false;
+  let ledgerRead = false;
+  if (wasActive && creds.ok && creds.exchange) {
     try {
-      const creds = await loadFuturesCreds(sb, uid, connectionId);
+      const r = await reconcile(sb, uid, connectionId, {
+        key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+        exchange: creds.exchange, expectClosed: intentOf(modeForCheck).close,
+      });
+      preLeftover = leftoverVerdict({ leftover: r, expectedClosed: intentOf(modeForCheck).close });
+    } catch { preLeftover = null; }
+  }
+  // ── targeted 단계는 대상을 먼저 본다 ──
+  //
+  // REDUCE_RISK(AB)·CLOSE_AUTOMATED(ABC)에는 D가 없다. 그래서 위의
+  // `preLeftover`는 `expectedClosed=false`로 계산되고, **포지션을 세지
+  // 않는다** — 절반 축소가 실패해 포지션이 그대로여도 미체결이 0이면
+  // CLEAR다. 그 CLEAR로 건너뛰면 급해서 다시 누른 사람에게
+  // "이미 정리됨"이라고 답하게 된다.
+  //
+  // 그래서 대상 확인을 **재발동 판단보다 먼저** 한다.
+  if (wasActive && creds.ok && creds.exchange && levelSpec && levelSpec.closePct > 0) {
+    try {
+      const pre = await discoverTargets(sb, connectionId, creds, levelSpec);
+      discovery = pre.discovery;
+      positionsRead = pre.positionsRead;
+      ledgerRead = pre.ledgerRead;
+    } catch { discovery = null; }
+  }
+
+  const rerun = retriggerDecision({ wasActive, leftover: preLeftover, discovery });
+
+  let exec: any = null;
+  if (rerun.execute) {
+    try {
       if (!creds.ok) {
         // 실행하지 못했다는 사실을 숨기지 않는다. active=true는 이미 저장됐으므로
         // 신규 주문은 막힌 상태다 — 그 절반만 됐다는 것을 응답에 적는다.
@@ -69,9 +148,8 @@ export async function POST(req: NextRequest) {
         // 한 번 겪으면 다음부터 그 버튼을 못 누른다.
         //
         // 단계를 안 주면 예전 동작 그대로다(저장된 actionMode).
-        const { levelOf, actionModeOf, automatedSymbols, closeTargets } =
-          await import('@/lib/risk/emergencyLevel');
-        const spec = levelOf(body?.level);
+        const { automatedSymbols, closeTargets } = await import('@/lib/risk/emergencyLevel');
+        const spec = levelSpec;
 
         // ── 심볼별로 닫는 단계 ──
         //
@@ -79,43 +157,37 @@ export async function POST(req: NextRequest) {
         // "자동매매가 연 것만" 또는 "절반만"은 그걸로 못 한다 —
         // 손매매까지 나가면 이 단계를 만든 이유의 정반대다.
         let autoNote = '';
-        let closed: Array<{ symbol: string; ok: boolean; message: string }> = [];
+        let closed: Array<{
+          symbol: string; ok: boolean; message: string;
+          before?: number | null; after?: number | null; closePct?: number;
+        }> = [];
         if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
-          const { futuresPositionRisk, futuresClosePosition } =
+          const { futuresClosePosition, futuresPositionRisk } =
             await import('@/lib/exchanges/futuresAdapter');
-          const { strategyOf } = await import('@/lib/strategies/ledger');
+          const { runTargetedCloses } = await import('@/lib/risk/killTargets');
 
-          // 어느 심볼이 봇이 연 것인가. **못 가리면 빈 집합이고,
-          // 그러면 CLOSE_AUTOMATED는 아무것도 안 닫는다.**
-          const { data: rows } = await (sb as any).from('live_orders')
-            .select('symbol, signal_id, status')
-            .eq('connection_id', connectionId).eq('status', 'FILLED')
-            .order('created_at', { ascending: false }).limit(200);
-          const auto = automatedSymbols(rows || [], strategyOf);
+          // 대상은 **거래소 포지션**에서 만든다. 판정과 조립은
+          // `killTargets.ts`에 있고 테스트가 붙어 있다 — 라우트 안에
+          // 두면 칸 이름이 틀려도 아무도 못 잡는다(실제로 그랬다).
+          const found = await discoverTargets(sb, connectionId, creds, spec);
+          discovery = found.discovery;
+          positionsRead = found.positionsRead;
+          ledgerRead = found.ledgerRead;
+          autoNote = found.note;
 
-          // 지금 들고 있는 포지션. 후보는 봇이 손댄 심볼과 지금 열려
-          // 있는 것의 교집합이다.
-          const candidates: string[] = spec.automatedOnly
-            ? Array.from(auto)
-            : Array.from(new Set<string>(
-                (rows || []).map((r: any) => String(r.symbol || '').toUpperCase()).filter(Boolean)));
-
-          const live: Array<{ symbol: string; qty: number }> = [];
-          for (const sym of candidates) {
-            const rr = await futuresPositionRisk(
-              creds.exchange!, creds.key!, creds.secret!, sym, creds.testnet!);
-            const amt = rr.risk?.positionAmt;
-            if (amt != null && Math.abs(Number(amt)) > 0) live.push({ symbol: sym, qty: Math.abs(Number(amt)) });
-          }
-
-          const plan = closeTargets(spec, live, auto);
-          autoNote = plan.note;
-          for (const t of plan.targets) {
-            const r = await futuresClosePosition(
-              creds.exchange!, creds.key!, creds.secret!, creds.testnet!,
-              t.symbol, spec.closePct);
-            closed.push({ symbol: t.symbol, ok: !!r.success, message: r.message });
-          }
+          closed = await runTargetedCloses({
+            targets: found.targets,
+            live: found.live,
+            closePct: spec.closePct,
+            close: (symbol, pct) => futuresClosePosition(
+              creds.exchange!, creds.key!, creds.secret!, creds.testnet!, symbol, pct),
+            readBack: async (symbol) => {
+              const rr = await futuresPositionRisk(
+                creds.exchange!, creds.key!, creds.secret!, symbol, creds.testnet!);
+              const amt = rr.risk?.positionAmt;
+              return amt == null ? null : Math.abs(Number(amt));
+            },
+          });
         }
 
         const r = await executeKillActions(sb, uid, connectionId, {
@@ -135,6 +207,9 @@ export async function POST(req: NextRequest) {
           // "정리됨"으로 그리면 안 된다.
           closed: closed.length ? closed : null,
           closeFailed: closed.filter(c => !c.ok).length,
+          // **완료 판정이 보는 것.** `D`가 없는 단계(CLOSE_AUTOMATED ·
+          // REDUCE_RISK)도 여기로 검사된다 — 주문 응답이 아니라 재조회 결과로.
+          targeted: closed.length ? closed : null,
         };
       }
     } catch (e: any) {
@@ -145,37 +220,132 @@ export async function POST(req: NextRequest) {
   // **KILL은 반드시 기록에 남는다.** 급할 때 누른 버튼이라 나중에
   // "누가 언제 왜 눌렀나"를 가장 많이 묻게 된다. 그리고 실행이 절반만
   // 됐을 때 그 사실도 같이 남아야 한다.
+
+  // 취소·종료가 실패하면 ok:true로 돌려주지 않는다. 화면이 "정리됨"으로 그리면
+  // 사용자는 거래소를 확인하지 않는다.
+  // ── 무엇을 했다고 말해도 되는가 ──
+  //
+  // **예전 판정은 `close?.success !== false`였다.** 기본 actionMode는
+  // 'BC'라 D가 없고, 그러면 `exec.close`가 `null`이다.
+  // `undefined !== false` → 참. **한 적 없는 일이 성공으로 셌고**,
+  // 응답은 "미체결 취소·포지션 종료 완료"라고 적었다. 급할 때 그 문구를
+  // 읽은 사람은 거래소를 확인하지 않는다.
+  //
+  // 이제 하기로 한 것만 말하고, 그중 **거래소가 확인해 준 것만** 완료라고 적는다.
+  let postLeftover: any = null;
+  if (creds.ok && creds.exchange) {
+    try {
+      const r = await reconcile(sb, uid, connectionId, {
+        key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+        exchange: creds.exchange, expectClosed: intentOf(modeForCheck).close,
+      });
+      postLeftover = leftoverVerdict({ leftover: r, expectedClosed: intentOf(modeForCheck).close });
+    } catch { postLeftover = null; }
+  }
+
+  // **건너뛴 것과 못 한 것을 구분해서 넘긴다.** 안 그러면
+  // "이미 깨끗해서 재실행 생략"이 곧바로 502가 된다.
+  const done = killCompletion({
+    actionMode: modeForCheck, exec, leftover: postLeftover, discovery,
+    skipped: rerun.execute ? null : { reason: rerun.reason },
+  });
+
+  // ── 이 단계가 끝났는지 남긴다 ──
+  //
+  // AB·ABC에는 D가 없어 잔여 판정이 포지션을 세지 않는다. 그래서
+  // **"미체결 0"만으로는 이 단계가 끝났다고 말할 수 없다.** 리셋이
+  // 그 사실을 알아야 남은 포지션 위에서 잠금을 풀지 않는다.
+  //
+  // 저장이 실패해도 발동 자체는 이미 저장됐다 — 그리고 기록이 없으면
+  // 읽는 쪽이 '모름'으로 보고 잠금을 풀지 않는다(fail-closed).
+  if (isTargeted) {
+    // 거래소 재조회까지 확인됐으면 false, 실패·미확인이면 true.
+    s.targetedPending = !done.complete;
+    await saveKillSwitch(sb, uid, connectionId, s);
+  }
+
+
+  // **KILL은 반드시 기록에 남는다.** 급할 때 누른 버튼이라 나중에
+  // "누가 언제 왜 눌렀나"를 가장 많이 묻게 된다.
+  //
+  // ── result는 실행 여부가 아니라 완료 여부다 ──
+  //
+  // 예전에는 `exec.ran === false`만 실패로 적었다. 그러면 **실행은
+  // 했는데 절반만 된 경우가 success로 남는다** — 나중에 감사 기록을
+  // 보고 "그때는 정리됐었다"고 읽게 된다. 화면에는 502를 주면서
+  // 기록에는 성공이라고 적는 것은 그 자체로 모순이다.
+  //
+  // 그리고 **이번에 실제로 실행한 조합**을 남긴다. 설정값을 적으면
+  // 안 한 일을 한 것처럼 읽힌다.
   {
     const { recordAudit } = await import('@/lib/safety/auditStore');
     recordAudit(sb, {
       userId: uid, action: 'KILL_SWITCH', resource: connectionId,
-      result: exec?.ran === false ? 'failed' : 'success',
+      result: done.complete ? 'success' : 'failed',
       connectionId,
       detail: {
         level: exec?.level ?? null,
-        actionMode: s.actionMode,
+        // 실제로 실행한 조합 · 설정값 둘 다 남긴다.
+        actionMode: modeForCheck,
+        configuredActionMode: s.actionMode,
         reason: s.triggerReason,
         wasActive,
+        reran: rerun.execute,
         cancelled: exec?.cancel?.count ?? null,
         closeFailed: exec?.closeFailed ?? null,
+        discovery: discovery?.code ?? null,
+        complete: done.complete,
+        missing: done.missing,
       },
     });
   }
 
-  // 취소·종료가 실패하면 ok:true로 돌려주지 않는다. 화면이 "정리됨"으로 그리면
-  // 사용자는 거래소를 확인하지 않는다.
-  const execOk = !wasActive
-    ? !!(exec?.ran && (exec.cancel?.success !== false) && (exec.close?.success !== false))
-    : true;
-
   return NextResponse.json({
-    ok: execOk,
+    ok: done.complete,
     active: true,
     queued: false,
     triggerReason: s.triggerReason,
     exec,
-    message: execOk
-      ? '킬스위치 발동 — 신규 주문 차단, 미체결 취소·포지션 종료 완료'
-      : '킬스위치는 켜졌지만(신규 주문 차단) 취소·종료가 완료되지 않았습니다 — 거래소에서 직접 확인하세요',
-  }, { status: execOk ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
+    // 줄일 대상을 실제로 확인했는가. **빈 배열과 못 찾음은 다른 사실이다.**
+    discovery,
+    // 다시 눌렀을 때 무엇을 했는지 숨기지 않는다.
+    reran: rerun.execute, reranReason: rerun.reason,
+    leftover: postLeftover,
+    missing: done.missing,
+    intendedClose: done.intendedClose,
+    message: done.message,
+  }, { status: done.complete ? 200 : 502, headers: { 'Cache-Control': 'no-store' } });
+}
+
+
+/**
+ * 줄일 대상을 찾는다. **거래소 포지션에서 시작한다.**
+ *
+ * 재발동 판단과 실제 실행이 **같은 함수**를 쓴다 — 두 벌로 두면
+ * 한쪽만 고쳐지고, 이 저장소에서 반복된 사고가 정확히 그 모양이었다.
+ */
+async function discoverTargets(sb: any, connectionId: string, creds: any, spec: any) {
+  const { futuresListPositions } = await import('@/lib/exchanges/futuresExec');
+  const { automatedSymbols } = await import('@/lib/risk/emergencyLevel');
+  const { strategyOf } = await import('@/lib/strategies/ledger');
+  const { targetPlan } = await import('@/lib/risk/killTargets');
+
+  const posList = await futuresListPositions({
+    exchange: creds.exchange, key: creds.key, secret: creds.secret, testnet: creds.testnet,
+  });
+
+  // 장부는 **어느 것이 봇의 것인가**를 가릴 때만 쓴다. 그리고 조회
+  // 실패와 "봇이 연 것 0개"를 가른다 — 예전에는 `data`만 봐서 둘이
+  // 구분되지 않았다.
+  const led = await (sb as any).from('live_orders')
+    .select('symbol, signal_id, status')
+    .eq('connection_id', connectionId).eq('status', 'FILLED')
+    .order('created_at', { ascending: false }).limit(200);
+  const ledgerRead = !led?.error && Array.isArray(led?.data);
+  const auto = automatedSymbols(ledgerRead ? led.data : [], strategyOf);
+
+  const plan = targetPlan({
+    spec, positions: posList.positions, positionsRead: posList.ok, ledgerRead, autoSymbols: auto,
+  });
+  return { ...plan, positionsRead: posList.ok, ledgerRead };
 }
