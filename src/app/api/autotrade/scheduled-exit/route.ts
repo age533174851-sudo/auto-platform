@@ -73,12 +73,26 @@ export async function GET(req: NextRequest) {
   //
   // 실행과 조회를 **같은 호출로 묶지 않는다.** 화면이 목록을 새로고침할
   // 때마다 주문이 나갈 수 있으면, 새로고침이 위험한 조작이 된다.
-  if (new URL(req.url).searchParams.get('list') === '1') {
+  const listMode = new URL(req.url).searchParams.get('list');
+  if (listMode === '1' || listMode === 'history') {
     if (!uid) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
-    const { data, error } = await (sb as any).from('scheduled_exits')
-      .select('id, symbol, run_at, time_zone, portion_pct, enabled')
-      .eq('user_id', uid).is('fired_at', null).eq('enabled', true)
-      .order('run_at', { ascending: true }).limit(50);
+
+    // ── 기록 ──
+    //
+    // 예전에는 예정된 것만 볼 수 있었다. 취소하거나 이미 쏜 줄은 목록에서
+    // 통째로 사라져서, **지운 것과 구분되지 않았다.** 지우지 않았으므로
+    // 볼 수 있어야 한다.
+    const history = listMode === 'history';
+    let q = (sb as any).from('scheduled_exits')
+      .select('id, symbol, run_at, time_zone, portion_pct, enabled, fired_at, result, detail')
+      .eq('user_id', uid);
+    q = history
+      // 끝난 것: 쐈거나 · 껐거나 (취소는 enabled=false로 남는다)
+      ? q.or('fired_at.not.is.null,enabled.eq.false')
+        .order('run_at', { ascending: false }).limit(50)
+      : q.is('fired_at', null).eq('enabled', true)
+        .order('run_at', { ascending: true }).limit(50);
+    const { data, error } = await q;
     if (error) {
       const missing = /does not exist|schema cache|relation/i.test(String(error.message));
       return NextResponse.json({

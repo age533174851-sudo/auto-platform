@@ -128,6 +128,8 @@ export default function AutotradeControl() {
   const [checksOpen, setChecksOpen] = useState<boolean | null>(null);
   /** 예약 전체 목록은 기본으로 접는다 — 기본 화면에는 요약 한 줄이면 된다 */
   const [schedOpen, setSchedOpen] = useState(false);
+  /** 취소한 예약은 기본으로 접는다 — 기본 화면에는 살아 있는 것만 */
+  const [cancelOpen, setCancelOpen] = useState(false);
   /** [모두 자동 대조]가 지금까지 끝낸 단계들 */
   const [runSteps, setRunSteps] = useState<StepResult[]>([]);
 
@@ -669,7 +671,17 @@ export default function AutotradeControl() {
     // 심볼이 바뀔 때만 맞춘다 — 사용자가 방금 고른 값을 되돌리면 안 된다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, existingStrategyId]);
-  const on = schedules.filter(s => s.enabled);
+  // ── 세 갈래로 나눈다 ──
+  //
+  // **취소는 끄기가 아니다.** 예전에는 `enabled`만 봐서 취소한 예약이
+  // '꺼진 예약 N개' 안에 그대로 남아 있었다 — 사용자는 삭제를 눌렀는데
+  // 목록에서 안 사라진다.
+  //
+  // 판정은 서버가 준 `state`를 그대로 쓴다(scheduleStateOf). 화면이 다시
+  // 판단하면 규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다.
+  const cancelled = schedules.filter(s => s.state === 'CANCELLED');
+  const living = schedules.filter(s => s.state !== 'CANCELLED');
+  const on = living.filter(s => s.enabled);
   const runs: any[] = Array.isArray(data?.runs) ? data.runs : [];
   const lastRun = runs[0] || null;
   const conns: any[] = Array.isArray(data?.connections) ? data.connections : [];
@@ -938,18 +950,18 @@ export default function AutotradeControl() {
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <span style={{ color: T.muted, fontSize: 10, fontWeight: 700, flex: 1 }}>
-              등록된 예약 · 켜짐 {on.length}개 / 전체 {schedules.length}개
+              등록된 예약 · 켜짐 {on.length}개 / 전체 {living.length}개
             </span>
-            {schedules.length > on.length && (
+            {living.length > on.length && (
               <button onClick={() => setSchedOpen(v => !v)} style={{
                 background: 'transparent', border: 'none', color: T.muted,
                 fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: '6px 0', minHeight: 32,
               }}>
-                {schedOpen ? '꺼진 예약 접기 ▲' : `꺼진 예약 ${schedules.length - on.length}개 보기 ▼`}
+                {schedOpen ? '꺼진 예약 접기 ▲' : `꺼진 예약 ${living.length - on.length}개 보기 ▼`}
               </button>
             )}
           </div>
-          {schedules.filter(s => s.enabled || schedOpen).map(s => (
+          {living.filter(s => s.enabled || schedOpen).map(s => (
             <div key={s.id} style={{
               display: 'flex', alignItems: 'center', gap: 8,
               padding: '8px 0', borderBottom: `1px solid ${T.border}`,
@@ -1098,6 +1110,53 @@ export default function AutotradeControl() {
               </div>
             </div>
           ))}
+
+          {/* ── 취소한 예약 ──
+              **지우지 않았으므로 볼 수 있어야 한다.** 활성 목록에서는
+              빠지지만 여기 남는다 — 나중에 "그 예약 어디 갔나"를 물었을 때
+              답할 자리가 없으면 지운 것과 같아진다. */}
+          {cancelled.length > 0 && (
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+              <button onClick={() => setCancelOpen(v => !v)} style={{
+                background: 'transparent', border: 'none', color: T.muted,
+                fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: '6px 0',
+                minHeight: 32, width: '100%', textAlign: 'left',
+              }}>
+                {cancelOpen ? '취소한 예약 접기 ▲' : `취소한 예약 ${cancelled.length}개 보기 ▼`}
+              </button>
+              {cancelOpen && cancelled.map(s => (
+                <div key={s.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 0', borderBottom: `1px solid ${T.border}`, opacity: 0.72,
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: T.muted, fontSize: 11.5, fontWeight: 700 }}>
+                      {s.symbol}
+                      <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 800, color: T.muted }}>
+                        {s.mode}
+                      </span>
+                    </div>
+                    <div style={{ color: T.muted, fontSize: 9.5, marginTop: 2 }}>
+                      {/* **시각을 지어내지 않는다.** 069 이전에 끈 줄에는
+                          취소 시각이 없다 — 그걸 '방금'으로 적으면 안 된다. */}
+                      {s.cancelled_at
+                        ? `${new Date(s.cancelled_at).toLocaleString('ko-KR')} 취소`
+                        : '취소 시각을 기록하지 못했습니다'}
+                    </div>
+                  </div>
+                  <span style={{
+                    fontSize: 9, fontWeight: 800, color: T.muted,
+                    border: `1px solid ${T.border}`, borderRadius: 5, padding: '3px 7px',
+                  }}>취소됨</span>
+                </div>
+              ))}
+              {cancelOpen && (
+                <div style={{ color: T.muted, fontSize: 9, marginTop: 6, lineHeight: 1.5 }}>
+                  같은 종목으로 예약을 다시 만들면 이 줄이 되살아납니다.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
