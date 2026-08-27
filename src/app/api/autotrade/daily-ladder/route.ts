@@ -269,6 +269,9 @@ export async function POST(req: NextRequest) {
     strategyId: 'daily-ladder',
     bucket: 'swing',
     userId,
+    // **이 진입이 어느 계좌로 나가는지 장부에 남긴다.**
+    // 청산 감시가 나중에 같은 계좌를 다시 찾는 유일한 근거다.
+    connectionId: body.connectionId ?? null,
     realizedEquity: ctx.config.accountEquity,
     ladderDryRun: dryRun,
   });

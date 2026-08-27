@@ -83,6 +83,32 @@ export async function getTickerGateFutures(contract: string, testnet = true): Pr
   return Array.isArray(list) && list.length ? list[0] : null;
 }
 
+/**
+ * 봉. **서명이 필요 없다.**
+ *
+ * 청산 감시의 트레일링·본전이동이 이 값으로 정해진다. 예전에는 이
+ * 함수가 없어서 Gate 포지션도 바이낸스 봉으로 계산했다 — 심볼 표기가
+ * 달라 조회가 실패했고, 그 실패가 "이번 주기 건너뜀"이 되어 **트레일링이
+ * 영원히 안 돌았다.**
+ *
+ * Gate는 배열이 아니라 객체로 준다: `{ t, o, h, l, c, v }`.
+ * `from`은 **초 단위**다(바이낸스는 밀리초다).
+ */
+export interface GateCandle { t: number; o: string; h: string; l: string; c: string; v?: number }
+
+export async function getCandlesGateFutures(
+  contract: string,
+  fromSec: number,
+  opts: { interval?: string; limit?: number; testnet?: boolean; timeoutMs?: number } = {},
+): Promise<GateCandle[]> {
+  const { interval = '15m', limit = 500, testnet = true, timeoutMs = 10_000 } = opts;
+  const qs = `contract=${encodeURIComponent(contract)}`
+    + `&from=${Math.floor(fromSec)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+  const rows = await gateReq<GateCandle[]>('GET', '/api/v4/futures/usdt/candlesticks',
+    { qs, testnet, timeoutMs });
+  return Array.isArray(rows) ? rows : [];
+}
+
 // ── 계좌 조회 (서명 필요) ────────────────────────────
 export interface GateFuturesAccount { total: string; available: string; unrealised_pnl?: string; currency?: string }
 

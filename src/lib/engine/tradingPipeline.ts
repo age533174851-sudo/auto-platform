@@ -53,6 +53,11 @@ export interface PipelineInput {
   // userId가 주어지면 하루 1회 제한과 사이클 상태를 DB에서 강제한다.
   // 주지 않으면 이 게이트를 건너뛴다 (기존 호출자 호환).
   userId?: string | null;
+  /**
+   * **이 진입이 나가는 연결.** 장부에 남겨야 청산 감시가 같은 계좌를
+   * 다시 찾을 수 있다. 안 주면 감시는 활성 연결이 하나뿐일 때만 손댄다.
+   */
+  connectionId?: string | null;
   /** 거래소에서 조회한 확정 잔고. 계단 판정의 기준이 된다. */
   realizedEquity?: number;
   /** true면 게이트를 통과해도 예약만 하고 되돌린다 (미리보기·백테스트용) */
@@ -248,6 +253,10 @@ export async function runTradingPipeline(sb: any, input: PipelineInput): Promise
       strategyId: input.strategyId,
       symbol: input.symbol,
       side: battle.side === 'SHORT' ? 'SHORT' : 'LONG',
+      // **어느 계좌에서 여는지를 장부에 남긴다.** 안 남기면 청산 감시가
+      // "그 사용자의 활성 연결 첫 줄"로 손절을 옮긴다 — 연결이 둘이면
+      // Gate 포지션의 주문이 바이낸스로 나간다.
+      connectionId: input.connectionId ?? null,
       realizedEquity: input.realizedEquity,
     });
 
