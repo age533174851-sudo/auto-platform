@@ -539,10 +539,22 @@ export async function POST(req: NextRequest) {
     ...(intervalMin != null ? { interval_min: intervalMin } : {}),
   };
 
+  // ── 되살릴 때 취소 표식을 지운다 ──
+  //
+  // `UNIQUE (user_id, symbol)`이라 같은 종목으로 다시 만들면 upsert가
+  // **취소된 그 줄을 되살린다.** 표식을 안 지우면 새로 만든 예약이
+  // 취소 상태로 남아 영영 안 돈다 — `isSchedulable`이 막고, 워커의 선점
+  // 조건도 막는다. 화면에는 '켜짐'만 보인다.
+  //
+  // 069가 아직인 DB에서는 이 칸이 없어서 upsert가 실패한다. 그때는
+  // 아래 재시도에서 이 두 칸을 빼고 다시 쓴다 — **예약 생성을 막지 않는다.**
+  const { REVIVE_PATCH } = await import('@/lib/autotrade/scheduleCancel');
+  const reviveRow = { ...baseRow, ...REVIVE_PATCH };
+
   let { data, error } = await (sb as any)
     .from('autotrade_schedules')
     .upsert({
-      ...baseRow,
+      ...reviveRow,
       strategy_id: sv.spec.id,
       // **저장할 때는 지금 코드의 버전을 적는다.** 사용자가 보낸 값을 그대로
       // 적으면 옛 버전이 영원히 남고, 다음 실행이 매번 VERSION_MISMATCH가 된다.
@@ -550,16 +562,35 @@ export async function POST(req: NextRequest) {
     }, { onConflict: 'user_id,strategy_id,symbol,connection_id,mode' })
     .select(FULL_SELECT).single();
 
+  // 069가 아직인가. 취소 칸이 없으면 그 두 칸만 빼고 바로 다시 쓴다 —
+  // **예약을 못 만드는 것이 취소 표식을 못 지우는 것보다 나쁘다.**
+  if (error && /cancelled_at|cancelled_by/i.test(String(error.message))) {
+    const again = await (sb as any)
+      .from('autotrade_schedules')
+      .upsert({ ...baseRow, strategy_id: sv.spec.id, strategy_version: sv.spec.version },
+        { onConflict: 'user_id,strategy_id,symbol,connection_id,mode' })
+      .select(FULL_SELECT).single();
+    data = again.data; error = again.error;
+  }
+
   // 050이 아직인가. 칸이 없거나 그 이름의 제약이 없으면 그 신호다.
   const needsPhaseB = !!error && /strategy_id|strategy_version|no unique|on conflict|constraint matching/i
     .test(String(error.message));
   let phaseBPending = false;
   if (needsPhaseB) {
     phaseBPending = true;
-    const retry = await (sb as any)
+    let retry = await (sb as any)
       .from('autotrade_schedules')
-      .upsert(baseRow, { onConflict: 'user_id,symbol' })
+      .upsert(reviveRow, { onConflict: 'user_id,symbol' })
       .select(LEGACY_SELECT).single();
+    // 069가 아직이면 취소 칸이 없다. **예약 생성을 막지 않는다** —
+    // 그 두 칸만 빼고 다시 쓴다.
+    if (retry.error && /cancelled_at|cancelled_by|column|schema cache/i.test(String(retry.error.message))) {
+      retry = await (sb as any)
+        .from('autotrade_schedules')
+        .upsert(baseRow, { onConflict: 'user_id,symbol' })
+        .select(LEGACY_SELECT).single();
+    }
     data = retry.data; error = retry.error;
   }
 
@@ -747,14 +778,64 @@ export async function DELETE(req: NextRequest) {
   const id = new URL(req.url).searchParams.get('id') || '';
   if (!id) return NextResponse.json({ ok: false, error: 'missing_id' }, { status: 400 });
 
-  // 지우지 않고 끈다. 지우면 '켠 적 없다'와 '껐다'가 같아진다.
-  // PATCH와 같은 함수를 쓰되 **응답 모양은 그대로 둔다** — 이걸 부르는
-  // 곳이 `{ok:true}`만 보고 있으므로, 의미를 바꾸면 그쪽이 깨진다.
-  const r = await setEnabledById(sb, uid, id, false);
-  if (!r.ok) {
-    return NextResponse.json({
-      ok: false, error: 'update_failed', message: String(r.error?.message || r.error),
-    }, { status: 500 });
+  // ── 지우지 않고 취소한다 ──
+  //
+  // 지우면 '켠 적 없다'와 '취소했다'가 같아지고, 이미 실행된 예약의
+  // 이력까지 사라진다. 그렇다고 `enabled = false`만 하면 **잠깐 끈 것과
+  // 구분되지 않는다** — 예전이 그랬다.
+  //
+  // 069가 `cancelled_at`·`cancelled_by`를 더했다. 끄고, 취소한 사실을
+  // 적는다. 활성 목록에서는 즉시 빠지고 기록에는 남는다.
+  const { cancelVerdict } = await import('@/lib/autotrade/scheduleCancel');
+  const nowIso = new Date().toISOString();
+
+  // 이미 취소된 것을 또 눌러도 오류가 아니다 — 결과가 같기 때문이다.
+  // 그걸 가르려면 지금 상태를 먼저 읽어야 한다.
+  let existed = false;
+  let alreadyCancelled = false;
+  try {
+    const { data } = await (sb as any).from('autotrade_schedules')
+      .select('id, cancelled_at').eq('id', id).eq('user_id', uid).maybeSingle();
+    if (data) { existed = true; alreadyCancelled = !!(data as any).cancelled_at; }
+  } catch { /* 아래에서 updated로 판단한다 */ }
+
+  let updated: number | null = null;
+  let errMsg: string | null = null;
+  try {
+    const { data, error } = await (sb as any).from('autotrade_schedules')
+      .update({ enabled: false, cancelled_at: nowIso, cancelled_by: uid })
+      .eq('id', id).eq('user_id', uid)
+      // **이미 취소된 줄의 시각을 덮어쓰지 않는다.** 처음 취소한 때가
+      // 기록이다. 두 번째 요청은 0줄이 되고 ALREADY_CANCELLED가 된다.
+      .is('cancelled_at', null)
+      .select('id');
+    if (error) errMsg = String(error.message);
+    else updated = Array.isArray(data) ? data.length : null;
+  } catch (e: any) {
+    errMsg = String(e?.message || e);
   }
-  return NextResponse.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
+
+  // 069가 아직 안 붙은 DB에서는 그 칸이 없다. **예약을 못 끄는 것보다
+  // 나쁘지 않게** 예전 방식(끄기)으로 내려간다 — 다만 그 사실을 응답에 적는다.
+  let degraded = false;
+  if (errMsg && /cancelled_at|cancelled_by|column|schema cache/i.test(errMsg)) {
+    const r = await setEnabledById(sb, uid, id, false);
+    if (r.ok) { updated = 1; errMsg = null; degraded = true; }
+    else errMsg = String(r.error?.message || r.error);
+  }
+
+  const v = cancelVerdict({ updated, existed, alreadyCancelled, error: errMsg });
+  if (!v.ok) {
+    return NextResponse.json({
+      ok: false, error: v.code === 'NOT_FOUND' ? 'not_found' : 'cancel_failed',
+      code: v.code, message: v.reason,
+    }, { status: v.code === 'NOT_FOUND' ? 404 : 500 });
+  }
+  // **응답 모양을 유지한다** — 이걸 부르는 곳이 `{ok:true}`만 본다.
+  return NextResponse.json({
+    ok: true, code: v.code, message: v.reason,
+    cancelledAt: v.code === 'CANCELLED' && !degraded ? nowIso : null,
+    // 취소 표식을 못 남긴 경우를 성공 문장 뒤에 숨기지 않는다.
+    note: degraded ? '취소 표식을 남기지 못해 끄기만 했습니다 (마이그레이션 069 대기)' : null,
+  }, { headers: { 'Cache-Control': 'no-store' } });
 }

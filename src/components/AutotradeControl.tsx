@@ -43,6 +43,7 @@ import {
   stopStrategyEffect, type Tone,
 } from '@/lib/ui/autoOverview';
 import { T } from '@/lib/constants';
+import { confirmDialog } from '@/lib/confirm/dialog';
 import { A } from '@/lib/theme/colors';
 import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
@@ -526,6 +527,41 @@ export default function AutotradeControl() {
    * 지금은 그 줄의 기본키(`id`)만 보내고 `enabled` 한 칸만 바꾼다.
    * 재연결은 별개다(아래 `rebind`).
    */
+  /**
+   * 예약 취소.
+   *
+   * 사용자에게는 "삭제"로 보이지만 서버는 **지우지 않고 취소를 기록한다**
+   * (069: `cancelled_at`). 이미 실행된 이력이 함께 사라지면 안 되기 때문이다.
+   *
+   * **서버가 실패라고 하면 목록에서 지우지 않는다.** 화면에서 사라졌는데
+   * 워커가 계속 도는 것이 이 기능에서 가장 나쁜 결과다.
+   */
+  const cancelSchedule = async (row: any) => {
+    const ok = await confirmDialog(
+      `${row.symbol} 예약을 취소할까요?\n\n`
+      + '자동매매가 이 종목을 더는 평가하지 않습니다.\n'
+      + '이미 열린 포지션과 보호주문은 그대로 남습니다 — 취소가 정리해 주지 않습니다.',
+      { title: '예약 취소', confirmText: '예약 취소', danger: true },
+    );
+    if (!ok) return;
+
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/autotrade/schedule?id=${encodeURIComponent(row.id)}`,
+        { method: 'DELETE', headers: { Authorization: auth } });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j?.ok) {
+        // 서버가 말한 이유를 그대로 적는다. 실패를 성공처럼 뒤집지 않는다.
+        setMsg({ ok: false, text: j?.message || '예약을 취소하지 못했습니다' });
+        return;
+      }
+      setMsg({ ok: true, text: j?.note ? `${j.message} (${j.note})` : (j?.message || '예약을 취소했습니다') });
+      await load();
+    } catch (e: any) {
+      setMsg({ ok: false, text: `예약을 취소하지 못했습니다 — ${e?.message || e}` });
+    } finally { setBusy(false); }
+  };
+
   const toggle = async (row: any) => {
     const req = toggleRequest(row);
     if (!req.ok) { setMsg({ ok: false, text: req.message }); return; }
@@ -1044,6 +1080,16 @@ export default function AutotradeControl() {
                   border: `1px solid ${s.enabled ? A(T.grn, '40') : T.border}`,
                   fontSize: 11, fontWeight: 800,
                 }}>{s.enabled ? '켜짐' : '꺼짐'}</button>
+                {/* **끄기와 취소는 다르다.** 끄기는 잠깐 멈추는 것이고
+                    취소는 이 예약을 목록에서 내리는 것이다. 예전에는
+                    삭제가 곧 끄기여서 둘이 구분되지 않았다. */}
+                <button onClick={() => cancelSchedule(s)} disabled={busy} aria-label={`${s.symbol} 예약 취소`}
+                  style={{
+                    minHeight: 26, padding: '0 8px', borderRadius: 6,
+                    cursor: busy ? 'default' : 'pointer',
+                    background: 'transparent', color: T.muted,
+                    border: `1px solid ${T.border}`, fontSize: 9.5, fontWeight: 700,
+                  }}>예약 취소</button>
                 {s.enabled && (
                   <span style={{ color: T.muted, fontSize: 8.5, textAlign: 'right', maxWidth: 150, lineHeight: 1.45 }}>
                     끄면 {stopNote}

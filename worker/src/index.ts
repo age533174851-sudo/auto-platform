@@ -499,8 +499,18 @@ async function pollSchedules(): Promise<void> {
 
   let rows: any[] = [];
   try {
-    const { data, error } = await sb().from('autotrade_schedules')
-      .select('*').eq('enabled', true).limit(100);
+    // 취소된 예약은 애초에 읽지 않는다. (선점 조건이 최종 방어선이지만,
+    // 여기서 거르면 취소된 줄이 매 주기 로그를 채우지 않는다.)
+    //
+    // 069가 아직인 DB에서는 그 칸이 없어 조회가 실패한다 — 그때는
+    // **예약 평가를 멈추지 않고** 칸 없이 다시 읽는다. 취소 여부는
+    // `evaluateIfDue`의 선점이 DB에서 다시 확인한다.
+    let { data, error } = await sb().from('autotrade_schedules')
+      .select('*').eq('enabled', true).is('cancelled_at', null).limit(100);
+    if (error && /cancelled_at|column|schema cache/i.test(String(error.message))) {
+      ({ data, error } = await sb().from('autotrade_schedules')
+        .select('*').eq('enabled', true).limit(100));
+    }
     if (error) throw new Error(error.message);
     rows = Array.isArray(data) ? data : [];
   } catch (e: any) {

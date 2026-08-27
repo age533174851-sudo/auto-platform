@@ -82,6 +82,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '066_worker_project_ref.sql', id: 66, risk: 'ADDITIVE', checksum: 'a65992a340fba36c' },
   { name: '067_kill_switch_effective_mode.sql', id: 67, risk: 'ADDITIVE', checksum: '03b63727a34c35fb' },
   { name: '068_ladder_trade_connection.sql', id: 68, risk: 'ADDITIVE', checksum: '10432ab0fcf111c7' },
+  { name: '069_schedule_cancel.sql', id: 69, risk: 'ADDITIVE', checksum: '3a17f6e16dc1b6a9' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */
