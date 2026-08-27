@@ -131,12 +131,61 @@ export async function GET(req: NextRequest) {
 
     if (due.verdict === 'waiting') continue;      // 아직 — 건드리지 않는다
 
-    // 여기부터는 어떤 결과든 fired_at을 채운다. **실패해도 채운다** —
-    // 안 채우면 다음 실행기가 같은 예약을 또 낸다.
+    // ── 선점 ──
+    //
+    // **예전에는 이 자리가 없었다.** 줄을 읽고 → 주문을 내고 → 그제서야
+    // `fired_at`을 썼다. 그 사이가 통째로 열려 있었다:
+    //
+    //   · 사용자가 취소해도(enabled=false) 주문이 그대로 나갔다
+    //   · 실행기가 둘이면(크론 5분 + 수동) 같은 줄을 둘 다 집어
+    //     **같은 예약이 두 번 발사됐다**
+    //
+    // `fired_at`을 **먼저** 못 박는다. 조건이 그대로일 때만 성공하므로
+    // 취소가 먼저면 0줄이고, 두 실행기 중 하나만 이긴다.
+    // (실패해도 fired_at은 남는다 — 예전 주석의 의도 그대로다.
+    //  안 남기면 다음 실행기가 같은 예약을 또 낸다.)
+    let claimed = false;
+    let claimErr: string | null = null;
+    const firedIso = new Date().toISOString();
+    try {
+      let q = (sb as any).from('scheduled_exits')
+        .update({ fired_at: firedIso })
+        .eq('id', row.id)
+        .eq('enabled', true)
+        .is('fired_at', null);
+      // 070이 아직인 DB에는 이 칸이 없다. 없으면 조건만 빠지고
+      // 나머지 선점은 그대로 동작한다.
+      const { data, error } = await q.is('cancelled_at', null).select('id');
+      if (error && /cancelled_at|column|schema cache/i.test(String(error.message))) {
+        const again = await (sb as any).from('scheduled_exits')
+          .update({ fired_at: firedIso })
+          .eq('id', row.id).eq('enabled', true).is('fired_at', null)
+          .select('id');
+        claimed = Array.isArray(again.data) && again.data.length > 0;
+        claimErr = again.error ? String(again.error.message) : null;
+      } else if (error) {
+        claimErr = String(error.message);
+      } else {
+        claimed = Array.isArray(data) && data.length > 0;
+      }
+    } catch (e: any) { claimErr = String(e?.message || e); }
+
+    if (!claimed) {
+      // **못 잡은 것을 실패로도 성공으로도 적지 않는다.** 취소됐거나,
+      // 다른 실행기가 이미 집었거나, 조회가 실패한 것이다.
+      results.push({ id: row.id, symbol: row.symbol,
+        result: claimErr ? 'claim_failed' : 'skipped',
+        detail: claimErr
+          ? `선점하지 못했습니다 — ${claimErr.slice(0, 140)}`
+          : '취소됐거나 다른 실행기가 이미 처리했습니다 — 주문하지 않습니다',
+        latenessMs: due.latenessMs });
+      continue;
+    }
+
+    // 선점했으므로 이제 결과만 채운다. fired_at은 위에서 이미 박혔다.
     const close = async (result: string, detail: string) => {
       await (sb as any).from('scheduled_exits')
         .update({
-          fired_at: new Date().toISOString(),
           result, detail,
           lateness_ms: due.latenessMs == null ? null : Math.round(due.latenessMs),
         })
@@ -326,10 +375,65 @@ export async function DELETE(req: NextRequest) {
   const id = new URL(req.url).searchParams.get('id') || '';
   if (!id) return NextResponse.json({ ok: false, error: 'missing_id' }, { status: 400 });
 
-  const { error } = await (sb as any).from('scheduled_exits')
-    .update({ enabled: false, result: 'cancelled', detail: '사용자가 취소했습니다' })
-    .eq('id', id).eq('user_id', uid);
+  // ── 몇 줄을 고쳤는지 본다 ──
+  //
+  // 예전에는 `.select()`가 없어서 **0줄을 고쳐도 `ok: true`** 였다.
+  // 남의 id를 넣거나 없는 id를 넣어도 "취소했습니다"가 나갔다 —
+  // 화면에서는 사라지고 예약은 그대로 남는다.
+  const { cancelVerdict } = await import('@/lib/autotrade/scheduleCancel');
+  const nowIso = new Date().toISOString();
 
-  if (error) return NextResponse.json({ ok: false, error: 'update_failed', message: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
+  let existed = false;
+  let alreadyCancelled = false;
+  try {
+    const { data } = await (sb as any).from('scheduled_exits')
+      .select('id, enabled, fired_at, result').eq('id', id).eq('user_id', uid).maybeSingle();
+    if (data) {
+      existed = true;
+      // 이미 쐈으면 취소할 것이 없다 — 그건 이력이다.
+      alreadyCancelled = (data as any).enabled === false || !!(data as any).fired_at;
+    }
+  } catch { /* 아래에서 updated로 판단한다 */ }
+
+  const patch: Record<string, any> = {
+    enabled: false, result: 'cancelled', detail: '사용자가 취소했습니다',
+    cancelled_at: nowIso, cancelled_by: uid,
+  };
+
+  let updated: number | null = null;
+  let errMsg: string | null = null;
+  try {
+    const { data, error } = await (sb as any).from('scheduled_exits')
+      .update(patch).eq('id', id).eq('user_id', uid)
+      // **이미 쏜 예약을 취소로 덮지 않는다.** 그 줄은 실행 이력이다.
+      .is('fired_at', null)
+      .select('id');
+    if (error) errMsg = String(error.message);
+    else updated = Array.isArray(data) ? data.length : null;
+  } catch (e: any) { errMsg = String(e?.message || e); }
+
+  // 070이 아직인 DB에서는 취소 칸이 없다. **예약을 못 끄는 것이 더 나쁘다.**
+  let degraded = false;
+  if (errMsg && /cancelled_at|cancelled_by|column|schema cache/i.test(errMsg)) {
+    delete patch.cancelled_at; delete patch.cancelled_by;
+    try {
+      const { data, error } = await (sb as any).from('scheduled_exits')
+        .update(patch).eq('id', id).eq('user_id', uid).is('fired_at', null).select('id');
+      if (error) errMsg = String(error.message);
+      else { updated = Array.isArray(data) ? data.length : null; errMsg = null; degraded = true; }
+    } catch (e: any) { errMsg = String(e?.message || e); }
+  }
+
+  const v = cancelVerdict({ updated, existed, alreadyCancelled, error: errMsg });
+  if (!v.ok) {
+    return NextResponse.json({
+      ok: false, error: v.code === 'NOT_FOUND' ? 'not_found' : 'cancel_failed',
+      code: v.code, message: v.reason,
+    }, { status: v.code === 'NOT_FOUND' ? 404 : 500 });
+  }
+  return NextResponse.json({
+    ok: true, code: v.code, message: v.reason,
+    cancelledAt: v.code === 'CANCELLED' && !degraded ? nowIso : null,
+    note: degraded ? '취소 표식을 남기지 못해 끄기만 했습니다 (마이그레이션 070 대기)' : null,
+  }, { headers: { 'Cache-Control': 'no-store' } });
 }

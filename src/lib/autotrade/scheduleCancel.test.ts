@@ -9,7 +9,7 @@
 // 실행과 취소의 경합 자체는 값으로 못 막는다 — DB 한 문장 안에서
 // 끝나야 하고, 그건 firstEvalRace.test.ts가 선점 조건으로 확인한다.
 import { test, assert, eq } from '../../test/harness';
-import { scheduleStateOf, isSchedulable, cancelVerdict, REVIVE_PATCH } from './scheduleCancel';
+import { scheduleStateOf, isSchedulable, cancelVerdict, REVIVE_PATCH, exitClaimVerdict } from './scheduleCancel';
 
 export function runScheduleCancelTests() {
   console.log('\n🗑️  예약 취소 (화면에서 사라졌는데 워커가 돌면 안 된다)');
@@ -80,4 +80,34 @@ export function runScheduleCancelTests() {
     eq(scheduleStateOf(revived), 'ACTIVE', '다시 돈다');
     assert(isSchedulable(revived), '워커가 집는다');
   });
+  // ══ 예약청산 선점 ══
+  //
+  // 예전에는 이 판정 자체가 없었다 — 읽고 · 쏘고 · 그제서야 기록했다.
+  // 그 사이에 취소가 커밋되거나 다른 실행기가 끼어들 수 있었다.
+  test('선점에 성공해야 주문한다', () => {
+    const v = exitClaimVerdict({ updated: 1 });
+    eq(v.code, 'CLAIMED', '잡았다');
+    assert(v.mayFire, '주문해도 된다');
+  });
+
+  test('0줄이면 주문하지 않는다 — 취소됐거나 남이 이미 집었다', () => {
+    const v = exitClaimVerdict({ updated: 0 });
+    eq(v.code, 'SKIPPED', '못 잡았다');
+    assert(!v.mayFire, '**같은 예약이 두 번 나가지 않는다**');
+    assert(!/실패/.test(v.reason), '못 잡은 것을 오류로 적지 않는다');
+  });
+
+  test('선점 조회가 실패하면 잡았다고 보지 않는다', () => {
+    const v = exitClaimVerdict({ updated: null, error: 'timeout' });
+    eq(v.code, 'CLAIM_FAILED', '모른다');
+    assert(!v.mayFire, '**모르면 쏘지 않는다**');
+    assert(v.reason.includes('timeout'), '이유를 싣는다');
+  });
+
+  test('결과를 못 읽어도 잡았다고 보지 않는다', () => {
+    const v = exitClaimVerdict({ updated: null });
+    eq(v.code, 'CLAIM_FAILED', '모른다');
+    assert(!v.mayFire, '0으로 읽지 않는다');
+  });
+
 }

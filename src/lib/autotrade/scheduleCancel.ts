@@ -121,3 +121,54 @@ export function cancelVerdict(i: {
  * 예약이 취소된 상태로 남아** 영영 안 돈다.
  */
 export const REVIVE_PATCH = { cancelled_at: null, cancelled_by: null };
+
+// ── 예약청산(scheduled_exits)의 선점 ────────────────────
+//
+// **예전에는 선점이 아예 없었다.** 실행기는 줄을 읽고 → 주문을 내고 →
+// 그제서야 `fired_at`을 썼다. 그 사이가 통째로 열려 있었다:
+//
+//   · 사용자가 취소해도 주문이 그대로 나갔다
+//   · 실행기가 둘이면(크론 5분 + 수동) 같은 줄을 둘 다 집어
+//     **같은 예약이 두 번 발사됐다**
+//
+// 고치는 방법은 자동매매 예약과 같다: `fired_at`을 **먼저** 못 박고,
+// 조건이 그대로일 때만 성공하게 한다.
+
+export type ExitClaimCode =
+  /** 이번 실행기가 잡았다. 주문해도 된다 */
+  | 'CLAIMED'
+  /** 취소됐거나 다른 실행기가 이미 집었다. **주문하지 않는다** */
+  | 'SKIPPED'
+  /** 선점 조회 자체가 실패했다. **잡았다고 보지 않는다** */
+  | 'CLAIM_FAILED';
+
+export interface ExitClaimVerdict {
+  code: ExitClaimCode;
+  /** 주문을 내도 되는가 */
+  mayFire: boolean;
+  reason: string;
+}
+
+/**
+ * 선점 UPDATE의 결과를 읽는다.
+ *
+ * @param updated 고쳐진 줄 수. **못 읽었으면 null이다 — 0이 아니다**
+ */
+export function exitClaimVerdict(i: {
+  updated: number | null;
+  error?: string | null;
+}): ExitClaimVerdict {
+  if (i.error) {
+    return { code: 'CLAIM_FAILED', mayFire: false,
+      reason: `선점하지 못했습니다 — ${String(i.error).slice(0, 140)}` };
+  }
+  if (i.updated == null) {
+    return { code: 'CLAIM_FAILED', mayFire: false,
+      reason: '선점 결과를 읽지 못했습니다 — 잡았다고 보지 않습니다' };
+  }
+  if (i.updated > 0) {
+    return { code: 'CLAIMED', mayFire: true, reason: '이번 실행기가 선점했습니다' };
+  }
+  return { code: 'SKIPPED', mayFire: false,
+    reason: '취소됐거나 다른 실행기가 이미 처리했습니다 — 주문하지 않습니다' };
+}

@@ -127,13 +127,42 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
     finally { setBusy(false); }
   };
 
-  const cancel = async (id: string) => {
+  /**
+   * 예약청산 취소.
+   *
+   * 예전에는 **응답을 아예 안 읽었다** — `await fetch()` 뒤에 바로
+   * `load()`였고 catch는 비어 있었다. 서버가 실패해도 화면에는 아무
+   * 말이 없고, 목록이 그대로인 이유를 사용자가 알 수 없었다.
+   *
+   * 그리고 확인 없이 한 번에 취소됐다. 예약청산은 "이 시각에 팔겠다"는
+   * 약속이라, 잘못 누르면 그 시각에 아무 일도 안 일어난다.
+   */
+  const cancel = async (row: any) => {
     if (!auth) return;
+    const { confirmDialog } = await import('@/lib/confirm/dialog');
+    const ok = await confirmDialog(
+      `${row?.symbol || '이'} 예약청산을 취소할까요?\n\n`
+      + '그 시각에 자동으로 팔지 않습니다.\n'
+      + '이미 열린 포지션은 그대로 남습니다 — 취소가 정리해 주지 않습니다.',
+      { title: '예약청산 취소', confirmText: '취소하기', danger: true },
+    );
+    if (!ok) return;
+
     try {
-      await fetch(`/api/autotrade/scheduled-exit?id=${encodeURIComponent(id)}`,
+      const r = await fetch(`/api/autotrade/scheduled-exit?id=${encodeURIComponent(row.id)}`,
         { method: 'DELETE', headers: { Authorization: auth } });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j?.ok) {
+        // **실패를 조용히 넘기지 않는다.** 목록만 다시 읽으면 왜 안
+        // 사라졌는지 알 방법이 없다.
+        setMsg({ ok: false, text: errorTextOf(j, `취소하지 못했습니다 (${r.status})`) });
+        return;
+      }
+      setMsg({ ok: true, text: j?.note ? `${j.message} (${j.note})` : (j?.message || '예약청산을 취소했습니다') });
       load();
-    } catch { /* 목록을 다시 읽으면 드러난다 */ }
+    } catch (e: any) {
+      setMsg({ ok: false, text: `취소하지 못했습니다 — ${e?.message || e}` });
+    }
   };
 
   return (
@@ -231,7 +260,7 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
                   {at != null && at > Date.now() && ` · ${fmtGap(at - Date.now())} 뒤`}
                 </div>
               </div>
-              <button onClick={() => cancel(r.id)} style={{
+              <button onClick={() => cancel(r)} style={{
                 minHeight: 28, padding: '0 10px', borderRadius: 6, cursor: 'pointer',
                 background: 'transparent', border: `1px solid ${C.hair}`,
                 color: C.dim, fontSize: FS.micro, fontWeight: 700,
