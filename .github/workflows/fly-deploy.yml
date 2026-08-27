@@ -120,26 +120,20 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
-      - name: 마이그레이션 상태 확인
+      # **판정은 그대로, 시간만 준다.**
+      #
+      # migrate와 이 워크플로는 같은 push에서 **동시에** 출발한다.
+      # #182에서 실제로 부딪혔다 — 01:36:03에 여기가 PENDING(067)을 읽고
+      # 멈췄고, migrate는 01:36:15에 그 067을 다 적용했다. 12초 차이로
+      # 배포가 실패했고 사람이 재실행 버튼을 눌러야 끝났다.
+      #
+      # 여전히 fail-closed다: 끝내 안 끝나면 배포하지 않는다.
+      # 판정과 대기 규칙은 src/lib/ops/migrationWait.ts에 있고 테스트가 붙어 있다.
+      - name: 마이그레이션이 끝나기를 기다린다
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MIGRATION_REPORT_PATH: ${{ github.workspace }}/migration-report.json
-        run: |
-          if [ -z "${SUPABASE_DB_URL}" ]; then
-            echo "::warning::SUPABASE_DB_URL이 없어 마이그레이션 상태를 확인하지 못했습니다 — 배포는 진행합니다"
-            exit 0
-          fi
-          node scripts/apply-migrations.mjs --check || true
-          CODE=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('migration-report.json','utf8')).code)}catch(e){console.log('UNKNOWN')}")
-          echo "마이그레이션 상태: ${CODE}"
-          case "${CODE}" in
-            UP_TO_DATE) echo "DB가 코드를 따라와 있습니다" ;;
-            NO_CREDENTIAL) echo "::warning::접속 정보 없음 — 확인하지 못했습니다" ;;
-            *)
-              echo "::error::마이그레이션이 끝나지 않았습니다 (${CODE}) — 이 상태로 워커를 바꾸지 않습니다"
-              echo "migrate 워크플로가 먼저 끝나야 합니다. 승인이 필요한 변경이면 migration-report를 보세요."
-              exit 1 ;;
-          esac
+        run: node scripts/wait-migrations.mjs
 
       - name: flyctl 설치
         uses: superfly/flyctl-actions/setup-flyctl@master
