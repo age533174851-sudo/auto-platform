@@ -185,7 +185,7 @@ export async function GET(req: NextRequest) {
   const ledger: Record<string, any> = {};
   try {
     const { ledgerTotals, tradingPnlOf } = await import('@/lib/ledger/ledgerEvent');
-    const { ledgerCompleteness } = await import('@/lib/ledger/coverageSet');
+    const { ledgerWindowOf } = await import('@/lib/ledger/coverageWindow');
     const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
     const fromMs = dayStart.getTime();
 
@@ -205,37 +205,61 @@ export async function GET(req: NextRequest) {
         }));
       } catch { states = null; }
 
-      const cov = ledgerCompleteness({
+      // ── **"지금까지 덮였는가"를 묻지 않는다** ──
+      //
+      // 수집은 15분마다 돈다. `covered_to`는 마지막 수집 시각이므로
+      // 지갑이 요청하는 시각보다 언제나 뒤에 있다 — 그 조건으로 물으면
+      // 연결이 정상이고 매 회차 성공해도 **오늘 손익은 영원히 확인
+      // 불가다.** 실제로 그 상태였다.
+      //
+      // 그래서 "오늘 중 어디까지 덮였는가"를 묻고, 그 구간에서만 센다.
+      // 덮이지 않은 구간을 덮었다고 하지 않으면서 값이 나온다.
+      const win = ledgerWindowOf({
         // 기대 집합 = 이 환경의 활성 연결. **환경을 모르는 연결은 빠진다.**
         expected: w.connectionIdsByEnv?.[e] ?? null,
         states,
-        periodFromMs: fromMs, periodToMs: nowMs,
+        dayStartMs: fromMs, nowMs,
       });
+      // **못 쓰는 창이면 아무 값도 만들지 않는다.** 0으로 바꾸지 않는다.
+      const asOf = win.usable ? (win.asOfMs as number) : null;
 
       let totals: any = null;
-      try {
-        const { data, error } = await (sb as any).from('ledger_events')
-          .select('kind, amount')
-          .eq('user_id', uid).eq('env', e)
-          .gte('occurred_at', new Date(fromMs).toISOString());
-        if (error) throw new Error(error.message);
-        totals = ledgerTotals((Array.isArray(data) ? data : []).map((r: any) => ({
-          kind: r.kind, amount: Number(r.amount),
-        })) as any);
-      } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
+      if (asOf != null) {
+        try {
+          const { data, error } = await (sb as any).from('ledger_events')
+            .select('kind, amount')
+            .eq('user_id', uid).eq('env', e)
+            .gte('occurred_at', new Date(fromMs).toISOString())
+            // **상한을 건다.** 없으면 덮였다고 판정한 구간 바깥의 사건까지
+            // 합계에 들어가, 자산 변화와 장부가 서로 다른 구간을 본다.
+            .lte('occurred_at', new Date(asOf).toISOString());
+          if (error) throw new Error(error.message);
+          totals = ledgerTotals((Array.isArray(data) ? data : []).map((r: any) => ({
+            kind: r.kind, amount: Number(r.amount),
+          })) as any);
+        } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
+      }
 
-      // 오늘 자산 변화. 스냅샷이 두 개 미만이면 만들지 않는다.
+      // 오늘 자산 변화. **장부와 같은 창에서 잰다** — 창이 어긋나면
+      // 매매손익 = 자산변화 − 유입 − 수수료 − 펀딩의 네 항이 서로 다른
+      // 기간을 가리킨다.
       const series = Array.isArray(rawSnapshots?.[e]) ? rawSnapshots[e] : [];
-      const today = series.filter((r: any) => Number(r?.takenAt) >= fromMs && r?.totalEquity != null);
+      const today = series.filter((r: any) => Number(r?.takenAt) >= fromMs
+        && (asOf == null || Number(r?.takenAt) <= asOf)
+        && r?.totalEquity != null);
       const equityChange = today.length >= 2
         ? Number(today[today.length - 1].totalEquity) - Number(today[0].totalEquity)
         : null;
 
-      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: cov.complete });
+      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: win.usable });
       ledger[e] = {
-        complete: cov.complete, reason: cov.reason, code: cov.code,
+        complete: win.usable, reason: win.reason, code: win.code,
+        // **언제까지의 자료인가.** 화면이 "N분 전 기준"을 말할 수 있게 한다.
+        asOf: asOf == null ? null : new Date(asOf).toISOString(),
+        lagMinutes: win.lagMs == null ? null : Math.round(win.lagMs / 60_000),
+        stale: win.stale,
         // **무엇이 빠졌는지 값으로 준다** — 화면이 문장을 지어내지 않게.
-        missingConnections: cov.missing, partialConnections: cov.partial,
+        missingConnections: win.missing, partialConnections: win.partial,
         totals,
         equityChange,
         tradingPnl: tp,
