@@ -120,6 +120,10 @@ export default function WalletPage() {
   const [starting, setStarting] = useState(false);
   const [startErr, setStartErr] = useState('');
   const [seedInput, setSeedInput] = useState('');
+  // 시작 흐름은 두 단계다: [모의투자 시작하기] → 초기자금 선택 → [계좌 만들기]
+  const [seedOpen, setSeedOpen] = useState(false);
+  // **진단은 접어 둔다.** DB 오류 원문은 사용자가 할 수 있는 일이 없다.
+  const [detailOpen, setDetailOpen] = useState(false);
 
   // ── 환율 ──
   //
@@ -244,6 +248,47 @@ export default function WalletPage() {
   // 이 환율을 지금 쓸 수 있는가. **없으면 통화를 바꾸지 않는다.**
   const fxNote = fxFreshness(fxRate, Date.now());
 
+  // ── 모의투자 ──
+  //
+  // **판정은 화면이 하지 않는다.** `paperPanelOf`가 네 가지로 답한다:
+  // 조회 중 · 못 읽음 · 시작 안 함 · 돌고 있음. 그중 **시작 버튼은
+  // '시작 안 함'에서만** 나온다 — 못 읽었는데 버튼을 내주면, 누르는
+  // 순간 읽지 못했을 뿐 살아 있던 장부가 초기화된다.
+  const paperPanel = paperPanelOf({ paper: (data as any)?.paper ?? null, loaded: truth != null });
+  // 시작 금액은 USDT 장부다. **원화는 환율이 있을 때만 병기한다.**
+  const seedOptions = seedOptionsOf(
+    Array.isArray((data as any)?.paper?.seedChoices)
+      ? (data as any).paper.seedChoices : PAPER_SEED_CHOICES,
+    fxRate);
+
+  async function startPaper(seed: number) {
+    if (starting) return;
+    // **읽지 못한 상태에서는 시작하지 않는다.**
+    if (!paperPanel.canStart) return;
+    const v = validateSeed(seed);
+    if (v.code !== 'OK' || v.value == null) { setStartErr(v.reason); return; }
+    setStarting(true); setStartErr('');
+    try {
+      const r = await fetch('/api/paper/account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) },
+        body: JSON.stringify({ action: 'reset', seed: v.value }),
+      });
+      const j = await r.json().catch(() => null);
+      // **성공을 지어내지 않는다.** 서버가 ok라고 한 것만 성공이다.
+      if (!r.ok || !j?.ok) {
+        setStartErr(String(j?.message || `모의투자를 시작하지 못했습니다 (HTTP ${r.status})`));
+      } else {
+        setSeedInput('');
+        setReload(n => n + 1);
+      }
+    } catch (e: any) {
+      setStartErr(`시작 요청이 실패했습니다 — ${String(e?.message || e)}`);
+    } finally {
+      setStarting(false);
+    }
+  }
+
   const shown = bucketsForTab(tab, total.buckets);
   // **총자산은 USD 기준 한 값이고, 통화 전환은 환율이 있을 때만 한다.**
   const totalUsd: number | null = envTotal?.value ?? total.total ?? null;
@@ -257,7 +302,15 @@ export default function WalletPage() {
     ? (Array.isArray(data?.accounts)
       ? data.accounts.filter((a: any) => String(a?.env ?? '') === env).length : null)
     : null;
-  const envNote: string = selectedAccount
+  // **MOCK은 거래소 연결로 판단하지 않는다.**
+  //
+  // `envNoteOf`는 이 환경의 **거래소 계좌 수**를 보고 "연결된 계좌가
+  // 없습니다"를 적는다. 모의는 거래소 연결이 없는 것이 정상이라, 시작한
+  // 계좌가 멀쩡히 있어도 그 문장이 떴다 — 게다가 그 위에는 0.00000000이
+  // 같이 있었다. 모의의 안내는 모의 판정에서 나온다.
+  const envNote: string = env === 'MOCK'
+    ? (paperPanel.code === 'ACTIVE' ? '' : paperPanel.note)
+    : selectedAccount
     ? (selectedAccount.note ?? '')
     : envNoteOf({
       truth: truth ?? { canStateAccounts: false, message: '지갑을 읽는 중입니다' } as any,
@@ -400,47 +453,6 @@ export default function WalletPage() {
   // 않는다** — 아래 빈 상자가 왜 비었는지까지 적는다.
   const longterm: LongtermHolding[] = [];
 
-  // ── 모의투자 ──
-  //
-  // **판정은 화면이 하지 않는다.** `paperPanelOf`가 네 가지로 답한다:
-  // 조회 중 · 못 읽음 · 시작 안 함 · 돌고 있음. 그중 **시작 버튼은
-  // '시작 안 함'에서만** 나온다 — 못 읽었는데 버튼을 내주면, 누르는
-  // 순간 읽지 못했을 뿐 살아 있던 장부가 초기화된다.
-  const paperPanel = paperPanelOf({ paper: (data as any)?.paper ?? null, loaded: truth != null });
-  // 시작 금액은 USDT 장부다. **원화는 환율이 있을 때만 병기한다.**
-  const seedOptions = seedOptionsOf(
-    Array.isArray((data as any)?.paper?.seedChoices)
-      ? (data as any).paper.seedChoices : PAPER_SEED_CHOICES,
-    fxRate);
-
-  async function startPaper(seed: number) {
-    if (starting) return;
-    // **읽지 못한 상태에서는 시작하지 않는다.**
-    if (!paperPanel.canStart) return;
-    const v = validateSeed(seed);
-    if (v.code !== 'OK' || v.value == null) { setStartErr(v.reason); return; }
-    setStarting(true); setStartErr('');
-    try {
-      const r = await fetch('/api/paper/account', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) },
-        body: JSON.stringify({ action: 'reset', seed: v.value }),
-      });
-      const j = await r.json().catch(() => null);
-      // **성공을 지어내지 않는다.** 서버가 ok라고 한 것만 성공이다.
-      if (!r.ok || !j?.ok) {
-        setStartErr(String(j?.message || `모의투자를 시작하지 못했습니다 (HTTP ${r.status})`));
-      } else {
-        setSeedInput('');
-        setReload(n => n + 1);
-      }
-    } catch (e: any) {
-      setStartErr(`시작 요청이 실패했습니다 — ${String(e?.message || e)}`);
-    } finally {
-      setStarting(false);
-    }
-  }
-
   const envColor = (e: WalletEnv) => e === 'LIVE' ? T.red : e === 'TESTNET' ? T.ylw : T.muted;
   const muted: React.CSSProperties = { color: T.muted, fontSize: 9.5, lineHeight: 1.6 };
   const numFont: React.CSSProperties = { fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums' };
@@ -575,8 +587,20 @@ export default function WalletPage() {
           {paperPanel.code === 'NOT_STARTED' ? (
             <>
               <div style={{ ...muted, marginBottom: 10 }}>{paperPanel.note}</div>
+
+              {/* ── 1단계: 시작하기 ──
+                  누르기 전에는 금액을 보여 주지 않는다. 계좌가 없는데
+                  숫자가 먼저 보이면 그게 잔고로 읽힌다. */}
+              {!seedOpen ? (
+                <button onClick={() => { setSeedOpen(true); setStartErr(''); }} style={{
+                  width: '100%', minHeight: 44, borderRadius: 10, cursor: 'pointer',
+                  background: T.acg, color: T.acl,
+                  border: `1px solid ${T.acl}`, fontSize: 12, fontWeight: 800,
+                }}>모의투자 시작하기</button>
+              ) : (
+              <>
               <div style={{ color: T.txt, fontSize: 11, fontWeight: 700, marginBottom: 6 }}>
-                시작 금액을 고르세요
+                초기자금
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
                 {seedOptions.map(o => (
@@ -611,11 +635,13 @@ export default function WalletPage() {
                     opacity: starting || seedInput.trim() === '' ? 0.5 : 1,
                     background: T.acg, color: T.acl,
                     border: `1px solid ${T.acl}`, fontSize: 11, fontWeight: 800,
-                  }}>{starting ? '시작하는 중…' : '시작하기'}</button>
+                  }}>{starting ? '만드는 중…' : '계좌 만들기'}</button>
               </div>
               <div style={muted}>
                 최소 100 · 최대 10,000,000 USDT. 모의 자산은 실전·테스트넷과 절대 합산하지 않습니다.
               </div>
+              </>
+              )}
             </>
           ) : (
             <>
@@ -653,9 +679,32 @@ export default function WalletPage() {
           {startErr && (
             <div style={{ ...muted, color: T.red, marginTop: 8 }}>{startErr}</div>
           )}
+
+          {/* ── 자세히 ──
+              **DB 오류 원문은 여기에만 있다.** 지갑 메인에
+              `column paper_accounts.started_at does not exist`가 그대로
+              뜬 적이 있다 — 사용자는 그 문장으로 할 수 있는 일이 없고,
+              자기 돈에 무슨 일이 났다고 읽는다. */}
+          {paperPanel.detail && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={() => setDetailOpen(v => !v)} style={{
+                background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+                color: T.muted, fontSize: 9.5, textDecoration: 'underline',
+              }}>{detailOpen ? '자세히 닫기' : '자세히'}</button>
+              {detailOpen && (
+                <div style={{ ...muted, marginTop: 4, wordBreak: 'break-all' }}>
+                  {paperPanel.detail}
+                </div>
+              )}
+            </div>
+          )}
         </Card>
       )}
 
+      {/* ── 아래는 "계좌가 있다"가 확인된 뒤에만 그린다 ──
+          모의 계좌가 없는데 총자산 칸을 그리면, 빈 합계가 0으로 보인다.
+          실제로 `0.00000000 USDT`와 "계좌가 없습니다"가 같은 화면에 있었다. */}
+      {!(env === 'MOCK' && paperPanel.code !== 'ACTIVE') && (<>
       {/* ── 계좌 선택 ──
           **다른 환경 계좌는 목록에 두지 않는다.** 보이면 고를 수 있다고
           읽히고, 고르는 순간 실전 화면에 테스트넷 잔고가 뜬다. */}
@@ -852,6 +901,8 @@ export default function WalletPage() {
           }}>{snapNote.reason}</div>
         )}
       </Card>
+
+      </>)}
 
       {/* ── 4. 빠른 액션 ──
           **없는 기능을 있는 것처럼 두지 않는다.** 누르면 아무 일도

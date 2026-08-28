@@ -26,7 +26,10 @@
 // 포지션 조회가 실패했는데 빈 배열로 두면 증거금이 0이 되고 총자산이
 // 현금과 같아진다 — 숫자는 그럴듯하고 틀렸다. 지갑에서 이미 같은
 // 실수를 했다(`positionsOk`). 여기서는 UNREADABLE로 끝낸다.
-import { paperEquityOf, paperStartedOf, type PaperAccountRow, type PaperEquity } from './paperAccount';
+import {
+  paperEquityOf, paperAccountStateOf,
+  type PaperAccountRow, type PaperEquity, type PaperAccountCode,
+} from './paperAccount';
 
 export interface PaperPositionRow {
   id?: string | null;
@@ -106,21 +109,46 @@ export function paperPositionViews(
   });
 }
 
-export type PaperReadCode =
-  /** 계좌를 읽었고 시작돼 있다 */
-  | 'OK'
-  /** 줄이 없거나, 줄은 있어도 시작한 적이 없다 */
-  | 'NOT_STARTED'
-  /** 조회가 실패했다. **'없다'가 아니다** */
-  | 'UNREADABLE';
+/** `paperAccountStateOf`와 같은 코드를 쓴다 — 판정을 두 벌로 만들지 않는다 */
+/**
+ * 이 오류가 **"그 칸이 아직 없다"**인가.
+ *
+ * 배포와 마이그레이션의 순서는 보장되지 않는다. 새 칸을 쓰는 코드가
+ * 먼저 떠 있는 창이 반드시 생기고, 그 창에서 PostgREST는 두 가지로
+ * 답한다:
+ *
+ *   select  → 42703  `column paper_accounts.started_at does not exist`
+ *   upsert  → PGRST204 `Could not find the 'started_at' column ... schema cache`
+ *
+ * **이 문자열들을 사용자 화면에 그대로 띄우지 않는다.** 판정에만 쓴다.
+ */
+export function missingColumnOf(err: any, column: string): boolean {
+  if (!err || !column) return false;
+  const code = String((err as any)?.code ?? '');
+  const msg = String((err as any)?.message ?? err ?? '');
+  if (!msg.includes(column)) return false;
+  if (code === '42703' || code === 'PGRST204') return true;
+  return /does not exist/i.test(msg) || /could not find/i.test(msg);
+}
+
+export type PaperReadCode = PaperAccountCode;
 
 export interface PaperReadResult {
   ok: boolean;
   code: PaperReadCode;
+  /** **원문 오류. 사용자 화면에 그대로 띄우지 않는다** — 진단용이다 */
   error: string | null;
   account: PaperAccountRow | null;
   positions: PaperPositionView[];
   equity: PaperEquity;
+  /**
+   * 이 DB가 코드가 기대하는 칸을 갖고 있는가.
+   *
+   * `startedAt: false`면 071이 아직 안 돌았다는 뜻이다. 그때도 **읽기는
+   * 성공해야 한다** — 마이그레이션이 늦었다는 이유로 사용자의 계좌를
+   * "없다"고 말하면 안 된다.
+   */
+  schema: { startedAt: boolean | null };
 }
 
 /** 심볼 → 현재가. 부르는 쪽이 갈아 끼울 수 있게 밖으로 뺀다(테스트) */
@@ -148,35 +176,57 @@ export async function readPaperEquity(
   userId: string,
   deps?: { markPrice?: MarkPriceFn },
 ): Promise<PaperReadResult> {
-  const empty = paperEquityOf({ account: null, positions: [] });
   const fail = (error: string): PaperReadResult => ({
     ok: false, code: 'UNREADABLE', error,
-    account: null, positions: [],
-    equity: {
-      ...empty, state: 'UNREADABLE',
-      note: `모의 계좌를 읽지 못했습니다 — ${error}`,
-    },
+    account: null, positions: [], schema: { startedAt: null },
+    // **원문 오류는 note에 넣지 않는다.** note는 사용자가 읽는 문장이고,
+    // `column paper_accounts.started_at does not exist` 같은 문자열이
+    // 지갑 메인에 그대로 뜬 적이 있다. 원문은 `error`에만 남는다.
+    equity: paperEquityOf({ account: null, positions: [], ok: false }),
   });
 
   let account: PaperAccountRow | null = null;
+  let hasStartedAt: boolean | null = null;
   try {
+    // ── **칸 목록을 적지 않는다** ──
+    //
+    // 예전에는 `select('... started_at ...')`였다. 071이 아직 안 돈
+    // DB에서는 그 select 자체가 실패하고, PostgREST가 돌려주는
+    // `column paper_accounts.started_at does not exist`가 그대로
+    // 지갑 화면에 떴다. **마이그레이션이 늦었다는 이유로 계좌를 못
+    // 읽으면 안 된다** — 배포와 마이그레이션의 순서는 보장되지 않는다.
+    //
+    // `*`로 읽고, 칸이 실제로 왔는지를 값으로 확인한다.
     const { data, error } = await sb.from('paper_accounts')
-      .select('user_id, balance, initial_balance, total_pnl, total_fees, trade_count, win_count, started_at, updated_at')
-      .eq('user_id', userId).maybeSingle();
+      .select('*').eq('user_id', userId).maybeSingle();
     // **오류를 반드시 받아 본다.** 던지지 않는 실패가 '계좌 없음'이 되면
     // 화면이 "시작하기"를 보여 주고, 누르면 있던 장부가 초기화된다.
     if (error) return fail(String((error as any)?.message ?? error).slice(0, 200));
     account = (data ?? null) as PaperAccountRow | null;
+    hasStartedAt = account == null
+      ? null   // 줄이 없으면 칸 유무를 알 수 없다 — 모른다고 둔다
+      : Object.prototype.hasOwnProperty.call(account, 'started_at');
   } catch (e: any) {
     return fail(String(e?.message || e).slice(0, 200));
   }
 
-  // 시작한 적이 없으면 포지션을 읽으러 가지 않는다 — 있을 수 없다.
-  if (!paperStartedOf(account).started) {
+  const state = paperAccountStateOf({
+    ok: true, row: account,
+    hasStartedAtColumn: hasStartedAt == null ? undefined : hasStartedAt,
+  });
+
+  // 계좌가 없거나 · 빈 껍데기이거나 · 줄은 있는데 잔고를 못 읽었다.
+  // 어느 쪽이든 포지션을 읽으러 가지 않는다.
+  if (state.code !== 'READY') {
     return {
-      ok: true, code: 'NOT_STARTED', error: null,
-      account, positions: [],
-      equity: paperEquityOf({ account: null, positions: [] }),
+      ok: state.code !== 'UNREADABLE',
+      code: state.code,
+      error: state.code === 'UNREADABLE' ? state.reason : null,
+      account, positions: [], schema: { startedAt: hasStartedAt },
+      equity: paperEquityOf({
+        account, positions: [],
+        hasStartedAtColumn: hasStartedAt == null ? undefined : hasStartedAt,
+      }),
     };
   }
 
@@ -203,6 +253,12 @@ export async function readPaperEquity(
   }));
 
   const positions = paperPositionViews(rows, marks);
-  const equity = paperEquityOf({ account, positions: positions as any });
-  return { ok: true, code: 'OK', error: null, account, positions, equity };
+  const equity = paperEquityOf({
+    account, positions: positions as any,
+    hasStartedAtColumn: hasStartedAt == null ? undefined : hasStartedAt,
+  });
+  return {
+    ok: true, code: 'READY', error: null,
+    account, positions, equity, schema: { startedAt: hasStartedAt },
+  };
 }

@@ -73,11 +73,12 @@ export async function GET(req: NextRequest) {
   } catch (e: any) {
     paper = {
       ok: false, code: 'UNREADABLE', error: String(e?.message || e).slice(0, 200),
-      account: null, positions: [],
-      equity: { state: 'UNREADABLE', cash: null, usedMargin: null, unrealizedPnl: null,
+      account: null, positions: [], schema: { startedAt: null },
+      equity: { state: 'UNREADABLE', code: 'UNREADABLE', cash: null, usedMargin: null, unrealizedPnl: null,
         totalEquity: null, knownCash: null, initialBalance: null, realizedPnl: null,
         totalFees: null, tradeCount: null, winCount: null, returnPct: null,
-        note: `모의 계좌를 읽지 못했습니다 — ${String(e?.message || e).slice(0, 160)}` },
+        // **원문은 note가 아니라 error에만.** note는 사용자가 읽는 문장이다.
+        note: '모의 계좌를 확인하지 못했습니다 — 계좌가 없다는 뜻이 아닙니다' },
     };
   }
   const { paperEnvWalletOf, paperTodayPnl, PAPER_SEED_CHOICES } =
@@ -298,7 +299,10 @@ export async function GET(req: NextRequest) {
     paper: {
       state: paper?.equity?.state ?? 'UNREADABLE',
       code: paper?.code ?? 'UNREADABLE',
+      // **원문 오류. 화면 메인이 아니라 '자세히'에서만 보여 준다.**
       error: paper?.error ?? null,
+      // 이 DB가 071을 적용했는가. 안 했으면 화면이 그 사실을 진단에 적는다.
+      schema: paper?.schema ?? { startedAt: null },
       currency: 'USDT',
       // 장부 통화는 USDT다. 원화는 **표시 계층에서만** 환율로 환산한다.
       seedChoices: PAPER_SEED_CHOICES,

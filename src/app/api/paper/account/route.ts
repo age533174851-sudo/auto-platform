@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
   const positions = pr.positions;
   const eq = pr.equity;
   const acct: any = pr.account ?? {};
-  const started = pr.code === 'OK';
+  const started = pr.code === 'READY';
 
   // **시작하지 않았으면 숫자를 만들지 않는다.** 0을 적으면 "다 잃었다"로
   // 읽히고, 자동 생성된 10,000을 적으면 고른 적 없는 종잣돈이 된다.
@@ -164,6 +164,7 @@ export async function POST(req: NextRequest) {
     // USDT이고 모의로 돌릴 전략도 USDT 선물이라, 장부 통화가 갈리면
     // 손익이 두 벌이 된다. 원화는 화면에서 환율로 환산해 **표시만** 한다.
     const { validateSeed } = await import('@/lib/portfolio/paperAccount');
+    const { missingColumnOf } = await import('@/lib/portfolio/paperRead');
     const seed = body?.seed == null ? { code: 'OK' as const, value: 10_000, reason: '' }
       : validateSeed(body.seed);
     if (seed.code !== 'OK' || seed.value == null) {
@@ -185,13 +186,33 @@ export async function POST(req: NextRequest) {
     // 돌려준다(RLS에 막혀도 같다). 그러면 화면은 시작됐다고 믿는다.
     //
     // `.select()`로 **실제로 돌아온 줄을 본다.** 0줄이면 실패다.
-    const { data: upRows, error: upErr } = await (sb as any).from('paper_accounts').upsert({
+    const base = {
       user_id: uid,
       balance: start, initial_balance: start,
       total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0,
-      started_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id' }).select('user_id, balance, started_at');
+    };
+    const save = (row: any, cols: string) => (sb as any).from('paper_accounts')
+      .upsert(row, { onConflict: 'user_id' }).select(cols);
+
+    let { data: upRows, error: upErr } = await save(
+      { ...base, started_at: new Date().toISOString() }, 'user_id, balance, started_at');
+
+    // ── 마이그레이션이 아직 안 돌았을 수 있다 ──
+    //
+    // 배포와 마이그레이션의 순서는 보장되지 않는다. 071이 아직 안 돈
+    // DB에서는 `started_at`을 쓰는 순간 PGRST204로 끝나고, **사용자는
+    // 모의투자를 시작할 수 없다.** 그 칸은 시작 여부를 더 정확히 알기
+    // 위한 것이지, 시작을 막으라고 만든 것이 아니다.
+    //
+    // 칸이 없으면 그 칸 없이 저장한다. 이때도 계좌는 제대로 만들어지고,
+    // `paperStartedOf`가 잔고 변화로 시작을 알아본다.
+    let startedAtRecorded = true;
+    if (upErr && missingColumnOf(upErr, 'started_at')) {
+      startedAtRecorded = false;
+      ({ data: upRows, error: upErr } = await save(base, 'user_id, balance'));
+    }
+
     // **실패를 성공으로 적지 않는다.** 화면이 시작됐다고 믿으면
     // 그 뒤의 모든 숫자가 남의 계좌 값이다.
     if (upErr) {
@@ -209,6 +230,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       ok: true, action: 'reset', balance: start, currency: 'USDT',
+      // 진단용. **화면에 띄우는 문장이 아니다.**
+      startedAtRecorded,
       message: `모의 계좌를 ${start.toLocaleString()} USDT로 시작했습니다`,
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
@@ -240,7 +263,7 @@ export async function POST(req: NextRequest) {
         + '계좌가 없다는 뜻이 아닙니다',
     }, { status: 503 });
   }
-  if (pr.code !== 'OK') {
+  if (pr.code !== 'READY') {
     return NextResponse.json({
       ok: false, error: 'not_started',
       message: '모의투자를 아직 시작하지 않았습니다 — 시작 금액을 고른 뒤에 충전할 수 있습니다',

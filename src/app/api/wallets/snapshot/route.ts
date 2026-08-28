@@ -155,7 +155,7 @@ export async function POST(req: NextRequest) {
         failed++;
         results.push({ userId, env: 'MOCK', ok: false,
           error: `모의 자산을 읽지 못했습니다: ${String(pr.error ?? '').slice(0, 200)}` });
-      } else if (pr.code === 'OK') {
+      } else if (pr.code === 'READY') {
         const peq = pr.equity;
         const prow = snapshotUpsert({
           userId, env: 'MOCK', nowMs,

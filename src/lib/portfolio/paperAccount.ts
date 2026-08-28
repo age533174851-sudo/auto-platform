@@ -59,6 +59,8 @@ export type PaperState =
 
 export interface PaperEquity {
   state: PaperState;
+  /** 세 상태를 가르는 정밀 코드. `state`보다 이쪽이 판정의 원본이다 */
+  code: PaperAccountCode;
   /** 현금 (실현된 잔고) */
   cash: number | null;
   /** 포지션에 묶인 증거금 */
@@ -77,6 +79,69 @@ export interface PaperEquity {
   /** 시작 대비 수익률(%). 종잣돈이 없으면 null */
   returnPct: number | null;
   note: string;
+}
+
+export type PaperAccountCode =
+  /** 조회가 실패했다. **'계좌 없음'이 아니다** */
+  | 'UNREADABLE'
+  /** 조회에 성공했고, 계좌 줄이 없다 */
+  | 'NO_ACCOUNT'
+  /** 줄은 있는데 사용자가 시작한 적이 없다 — 읽기 경로가 만든 빈 껍데기 */
+  | 'GHOST'
+  /** 계좌가 있다. **잔고 0도 READY다** — 0은 진짜 0이다 */
+  | 'READY';
+
+/**
+ * **계좌 없음 · 확인 못 함 · 잔고 0을 절대 섞지 않는다.**
+ *
+ * 화면에서 실제로 섞였다. 모의 계좌가 없는데 지갑이 `0.00000000 USDT`를
+ * 총자산으로 적고, 바로 아래 줄에 "계좌가 없습니다"를 같이 적었다.
+ * 두 문장은 동시에 참일 수 없다.
+ *
+ *   UNREADABLE  조회 실패        → "모의 계좌를 확인하지 못했습니다"
+ *   NO_ACCOUNT  줄 없음          → "모의투자 계좌가 없습니다"
+ *   GHOST       줄은 있으나 미시작 → 위와 같게 다루되 진단에는 남긴다
+ *   READY       줄 있음          → 잔고가 0이면 **"0 USDT"라고 적는다**
+ *
+ * `hasStartedAtColumn`이 false면 **GHOST를 판정할 수 없다.** 그때는
+ * 있는 줄을 부정하지 않고 READY로 둔다 — 마이그레이션이 아직 안 돌았다는
+ * 이유로 사용자의 계좌를 "없다"고 말하면 안 된다.
+ */
+export function paperAccountStateOf(i: {
+  ok: boolean;
+  row: PaperAccountRow | null | undefined;
+  /** 이 DB에 `started_at` 칸이 있는가(071). 모르면 true로 두지 않는다 */
+  hasStartedAtColumn?: boolean;
+}): { code: PaperAccountCode; startedCode: StartedCode | null; reason: string } {
+  if (!i || i.ok === false) {
+    return { code: 'UNREADABLE', startedCode: null,
+      reason: '모의 계좌 조회가 실패했습니다 — 계좌가 없다는 뜻이 아닙니다' };
+  }
+  if (!i.row) {
+    return { code: 'NO_ACCOUNT', startedCode: null,
+      reason: '모의 계좌 줄이 없습니다 — 아직 시작하지 않았습니다' };
+  }
+  // **줄은 있는데 잔고를 못 읽었다.**
+  //
+  // 이때 GHOST로 내려보내면 화면이 "시작하지 않았습니다 + 시작하기"를
+  // 그리고, 누르는 순간 읽지 못했을 뿐 살아 있던 장부가 초기화된다.
+  // 확인하지 못한 것은 통과가 아니다 — 미시작 판정보다 먼저다.
+  if (num(i.row.balance) == null) {
+    return { code: 'UNREADABLE', startedCode: null,
+      reason: '계좌 줄은 있으나 잔고를 읽지 못했습니다 — 0으로도 "없음"으로도 적지 않습니다' };
+  }
+  if (i.hasStartedAtColumn === false) {
+    // **071이 아직 안 돌았다.** 시작 여부를 증명할 칸이 없다 —
+    // 그렇다고 있는 계좌를 없다고 적지 않는다.
+    return { code: 'READY', startedCode: null,
+      reason: 'started_at 칸이 아직 없어 시작 여부를 가리지 못했습니다 — 있는 계좌를 그대로 씁니다' };
+  }
+  const st = paperStartedOf(i.row);
+  if (!st.started) {
+    return { code: 'GHOST', startedCode: st.code,
+      reason: '읽기 경로가 자동으로 만든 빈 계좌입니다 — 사용자가 고른 종잣돈이 아닙니다' };
+  }
+  return { code: 'READY', startedCode: st.code, reason: '' };
 }
 
 export type StartedCode =
@@ -129,40 +194,48 @@ export function paperStartedOf(row: PaperAccountRow | null | undefined): {
 export function paperEquityOf(i: {
   account: PaperAccountRow | null | undefined;
   positions: PaperPositionLike[] | null | undefined;
+  /** 조회 자체가 성공했는가. **기본은 true** — 옛 호출부와 같게 동작한다 */
+  ok?: boolean;
+  /** 이 DB에 `started_at` 칸이 있는가(071) */
+  hasStartedAtColumn?: boolean;
 }): PaperEquity {
   const a = i?.account;
-  const notStarted: PaperEquity = {
-    state: 'NOT_STARTED',
+  const st = paperAccountStateOf({
+    ok: i?.ok !== false, row: a, hasStartedAtColumn: i?.hasStartedAtColumn,
+  });
+
+  const empty = {
     cash: null, usedMargin: null, unrealizedPnl: null, totalEquity: null,
     knownCash: null, initialBalance: null, realizedPnl: null, totalFees: null,
     tradeCount: null, winCount: null, returnPct: null,
-    note: '아직 모의투자를 시작하지 않았습니다',
   };
-  if (!a) return notStarted;
-
-  const cash = num(a.balance);
-  const initial = num(a.initial_balance);
-  // **판정 순서가 중요하다.**
-  //
-  // 잔고를 못 읽은 줄을 '시작 안 함'으로 적으면 화면이 시작하기를 그리고,
-  // 누르는 순간 **읽지 못했을 뿐 살아 있던 장부가 초기화된다.**
-  // 못 읽은 것이 먼저다 — 확인하지 못한 것은 통과가 아니다.
-  if (cash == null) {
-    return {
-      state: 'UNREADABLE',
-      cash: null, usedMargin: null, unrealizedPnl: null, totalEquity: null,
-      knownCash: null, initialBalance: initial, realizedPnl: num(a.total_pnl),
-      totalFees: num(a.total_fees), tradeCount: num(a.trade_count), winCount: num(a.win_count),
-      returnPct: null,
-      note: '모의 계좌의 잔고를 읽지 못했습니다 — 0으로 적지 않습니다',
-    };
+  // **계좌 없음과 확인 못 함은 다른 문장이다.**
+  if (st.code === 'UNREADABLE') {
+    // 줄은 있는데 잔고만 못 읽은 경우는 아는 것을 남긴다.
+    if (a) {
+      return {
+        state: 'UNREADABLE', code: st.code,
+        cash: null, usedMargin: null, unrealizedPnl: null, totalEquity: null,
+        knownCash: null, initialBalance: num(a.initial_balance),
+        realizedPnl: num(a.total_pnl), totalFees: num(a.total_fees),
+        tradeCount: num(a.trade_count), winCount: num(a.win_count), returnPct: null,
+        note: '모의 계좌의 잔고를 읽지 못했습니다 — 0으로 적지 않습니다',
+      };
+    }
+    return { state: 'UNREADABLE', code: st.code, ...empty,
+      note: '모의 계좌를 확인하지 못했습니다 — 계좌가 없다는 뜻이 아닙니다' };
+  }
+  if (st.code === 'NO_ACCOUNT' || st.code === 'GHOST') {
+    return { state: 'NOT_STARTED', code: st.code, ...empty,
+      note: '아직 모의투자를 시작하지 않았습니다' };
   }
 
-  // **줄은 있는데 시작한 적이 없다.**
-  //
-  // 읽기 경로가 자동으로 만들어 둔 빈 계좌다. 그 10,000을 총자산이라고
-  // 적으면 사용자가 고른 적 없는 종잣돈이 화면에 뜬다.
-  if (!paperStartedOf(a).started) return notStarted;
+  // 여기까지 왔으면 READY다 — 줄이 있고 잔고를 읽었다.
+  // (잔고를 못 읽은 줄은 위에서 UNREADABLE로 끝났다.
+  //  '시작 안 함'으로 적으면 시작하기가 뜨고, 누르는 순간 읽지 못했을
+  //  뿐 살아 있던 장부가 초기화된다 — 그래서 순서가 중요하다.)
+  const cash = num(a!.balance) as number;
+  const initial = num(a!.initial_balance);
 
   const list = Array.isArray(i?.positions) ? i.positions : [];
   let usedMargin = 0;
@@ -181,14 +254,14 @@ export function paperEquityOf(i: {
   const totalEquity = unrealizedPnl == null ? null : cash + unrealizedPnl;
 
   return {
-    state: 'ACTIVE',
+    state: 'ACTIVE', code: 'READY',
     cash, usedMargin,
     unrealizedPnl, totalEquity, knownCash: cash,
     initialBalance: initial,
-    realizedPnl: num(a.total_pnl),
-    totalFees: num(a.total_fees),
-    tradeCount: num(a.trade_count),
-    winCount: num(a.win_count),
+    realizedPnl: num(a!.total_pnl),
+    totalFees: num(a!.total_fees),
+    tradeCount: num(a!.trade_count),
+    winCount: num(a!.win_count),
     returnPct: initial != null && initial > 0 && totalEquity != null
       ? ((totalEquity - initial) / initial) * 100 : null,
     note: unknownCount > 0

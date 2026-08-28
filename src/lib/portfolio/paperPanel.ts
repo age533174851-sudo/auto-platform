@@ -41,7 +41,16 @@ export interface PaperPanel {
   rows: PaperRow[];
   /** 시작 버튼을 내줘도 되는가. **못 읽었으면 false다** */
   canStart: boolean;
+  /** **사용자가 읽는 문장.** DB 오류 원문이 여기 들어가면 안 된다 */
   note: string;
+  /**
+   * 진단용 원문. 화면의 '자세히'에서만 보인다.
+   *
+   * `column paper_accounts.started_at does not exist`가 지갑 메인에
+   * 그대로 뜬 적이 있다. 사용자는 그 문장으로 할 수 있는 일이 없고,
+   * 자기 돈에 무슨 일이 났다고 읽는다.
+   */
+  detail: string;
 }
 
 const ROWS: Array<{ key: string; label: string; hint: string }> = [
@@ -79,7 +88,7 @@ export function paperPanelOf(i: {
   if (!i?.loaded) {
     return {
       code: 'LOADING', headline: '모의 계좌를 읽는 중입니다',
-      rows: blank('LOADING'), canStart: false, note: '',
+      rows: blank('LOADING'), canStart: false, note: '', detail: '',
     };
   }
 
@@ -88,31 +97,44 @@ export function paperPanelOf(i: {
     // **응답은 왔는데 모의 블록이 없다.** 서버가 옛 버전이거나 오류다 —
     // 어느 쪽이든 "시작하지 않았다"는 증명되지 않았다.
     return {
-      code: 'UNREADABLE', headline: '모의 계좌 정보를 받지 못했습니다',
+      code: 'UNREADABLE', headline: '모의 계좌를 확인하지 못했습니다',
       rows: blank('FAILED'), canStart: false,
-      note: '시작하지 않았다는 뜻이 아닙니다 — 시작하기는 확인된 뒤에만 누를 수 있습니다',
+      note: '잠시 뒤 다시 열어 보세요. 계좌가 없다는 뜻이 아닙니다.',
+      detail: '서버 응답에 모의 계좌 항목이 없습니다',
     };
   }
 
-  const state = String(p?.state ?? '');
-  if (state === 'UNREADABLE') {
+  // **판정의 원본은 `code`다.** 옛 응답만 `state`를 준다.
+  const code = String(p?.code ?? p?.state ?? '');
+  const eq = p?.equity ?? {};
+  // 원문은 여기에만 모은다 — note로 새어 나가면 안 된다.
+  const detail = [
+    p?.error, p?.schema?.startedAt === false
+      ? 'started_at 칸이 아직 없습니다 (071 미적용)' : '',
+  ].filter(Boolean).map(String).join(' · ');
+
+  if (code === 'UNREADABLE') {
     return {
-      code: 'UNREADABLE', headline: '모의 계좌를 읽지 못했습니다',
+      code: 'UNREADABLE', headline: '모의 계좌를 확인하지 못했습니다',
       rows: blank('FAILED'), canStart: false,
-      note: String(p?.error || p?.equity?.note
-        || '조회에 실패했습니다 — 계좌가 없다는 뜻이 아닙니다'),
+      // **사람이 읽는 문장만.** 원문은 detail에 있다.
+      note: '조회에 실패했습니다 — 계좌가 없다는 뜻이 아닙니다. 잠시 뒤 다시 열어 보세요.',
+      detail: detail || String(eq.note || '원인을 알 수 없습니다'),
     };
   }
-  if (state === 'NOT_STARTED') {
+
+  if (code === 'NO_ACCOUNT' || code === 'GHOST' || code === 'NOT_STARTED') {
     return {
-      code: 'NOT_STARTED', headline: '아직 모의투자를 시작하지 않았습니다',
+      code: 'NOT_STARTED', headline: '모의투자 계좌가 없습니다',
       rows: blank('NOT_APPLICABLE', () => '시작하면 값이 생깁니다'),
       canStart: true,
-      note: '시작 금액을 고르면 그때부터 장부가 쌓입니다. 실전·테스트넷과 절대 합산하지 않습니다.',
+      note: '아직 모의투자를 시작하지 않았습니다.',
+      // 빈 껍데기였는지 진짜 줄이 없었는지는 진단에만 남긴다.
+      detail: [code === 'GHOST' ? '자동으로 생긴 빈 계좌 줄이 있습니다' : '', detail]
+        .filter(Boolean).join(' · '),
     };
   }
 
-  const eq = p?.equity ?? {};
   const today = p?.today ?? {};
   const pick: Record<string, number | null> = {
     total: val(eq.totalEquity),
@@ -137,11 +159,13 @@ export function paperPanelOf(i: {
       return {
         key: r.key, label: r.label, usd: v,
         // **못 구한 값은 FAILED다.** 0으로 그리면 사용자가 그 숫자를 믿는다.
+        // 반대로 **진짜 0은 0이다** — 잔고가 0인 계좌는 "0 USDT"라고 적는다.
         readiness: (v == null ? 'FAILED' : 'OK') as Readiness,
         hint: v == null && why[r.key] ? why[r.key] : r.hint,
       };
     }),
     note: String(eq.note || ''),
+    detail,
   };
 }
 
