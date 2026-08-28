@@ -35,66 +35,45 @@ export async function GET(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
-  const { getPaperAccount } = await import('@/lib/engine/paperStore');
-  const acct = await getPaperAccount(sb, uid);
+  // **읽기는 계좌를 만들지 않는다.**
+  //
+  // 예전에는 `getPaperAccount()`였다. 그 함수는 줄이 없으면 10,000
+  // USDT짜리 계좌를 **만든다** — 화면을 여는 것만으로 시작된 계좌가
+  // 생겼고, 그래서 "모의투자 시작하기"는 영영 뜰 수 없었다.
+  //
+  // 읽고 계산하는 일은 `readPaperEquity` 한 곳에 있다 — 이 라우트와
+  // `/api/wallets/overview`, `/api/wallets/snapshot`이 같은 답을 낸다.
+  const { readPaperEquity } = await import('@/lib/portfolio/paperRead');
+  const pr = await readPaperEquity(sb, uid);
 
-  const { data: open } = await sb.from('paper_positions')
-    .select('*').eq('user_id', uid).eq('status', 'open')
-    .order('opened_at', { ascending: false });
+  // **못 읽은 것을 '계좌 없음'으로 적지 않는다.** 화면이 시작하기를
+  // 그리고 사용자가 누르면 있던 장부가 초기화된다.
+  if (!pr.ok) {
+    return NextResponse.json({
+      ok: false, error: 'paper_unreadable',
+      message: `모의 계좌를 읽지 못했습니다 (${String(pr.error ?? '').slice(0, 160)}) — `
+        + '계좌가 없다는 뜻이 아닙니다',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
 
-  const rows = Array.isArray(open) ? open : [];
+  const positions = pr.positions;
+  const eq = pr.equity;
+  const acct: any = pr.account ?? {};
+  const started = pr.code === 'OK';
 
-  // 현재가는 공개 시세에서 한 번만 받는다. 심볼마다 부르면 화면을 열
-  // 때마다 여러 번 나간다.
-  const symbols = Array.from(new Set(rows.map((p: any) => String(p.symbol))));
-  const marks = new Map<string, number>();
-  await Promise.all(symbols.map(async (s) => {
-    try {
-      const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
-      const px = await getPremiumIndex(s, false);
-      const v = Number(px?.markPrice);
-      if (Number.isFinite(v) && v > 0) marks.set(s, v);
-    } catch { /* 못 받으면 평가손익을 비운다 — 0으로 적지 않는다 */ }
-  }));
-
-  const positions = rows.map((p: any) => {
-    const mark = marks.get(String(p.symbol)) ?? null;
-    const fill = Number(p.fill_price);
-    const qty = Number(p.quantity);
-    // 못 받은 시세로 손익을 만들지 않는다. null은 '확인 불가'다.
-    const pnl = mark == null ? null
-      : (p.side === 'LONG' ? mark - fill : fill - mark) * qty;
-    const margin = Number(p.margin);
-    return {
-      id: p.id, symbol: p.symbol, side: p.side,
-      fillPrice: fill, quantity: qty, notional: Number(p.notional),
-      leverage: Number(p.leverage), margin,
-      stopLoss: p.stop_loss != null ? Number(p.stop_loss) : null,
-      takeProfit: p.take_profit != null ? Number(p.take_profit) : null,
-      liquidationPrice: Number(p.liquidation_price) || null,
-      markPrice: mark,
-      unrealizedPnl: pnl,
-      roiPct: pnl != null && margin > 0 ? (pnl / margin) * 100 : null,
-      openedAt: p.opened_at,
-    };
-  });
-
-  const balance = Number(acct.balance) || 0;
-  const initial = Number(acct.initial_balance) || 0;
+  // **시작하지 않았으면 숫자를 만들지 않는다.** 0을 적으면 "다 잃었다"로
+  // 읽히고, 자동 생성된 10,000을 적으면 고른 적 없는 종잣돈이 된다.
+  const balance = started ? (Number(acct.balance) || 0) : null;
+  const initial = started ? (Number(acct.initial_balance) || 0) : null;
   // 증거금은 열린 포지션이 물고 있다. 가용은 그만큼 뺀 값이다 —
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있게 된다.
   const usedMargin = positions.reduce((a, p) => a + (Number(p.margin) || 0), 0);
 
-  // ── 총자산 · 오늘 손익 ──
+  // ── 오늘 손익 ──
   //
-  // **판정을 여기서 다시 적지 않는다.** 지갑에서 이미 한 번 틀렸다 —
-  // 값을 못 매긴 자산이 있는데 부분합계를 총자산이라 적었다. 같은 규칙을
-  // `paperAccount.ts`에 두고 화면·API가 그것만 읽는다.
-  const { paperEquityOf, paperTodayPnl } = await import('@/lib/portfolio/paperAccount');
-  const eq = paperEquityOf({ account: acct as any, positions: positions as any });
-
   // 오늘의 기준점. **없으면 오늘 손익을 계산하지 않는다** — 시작 잔고로
   // 대신 재면 그건 '오늘'이 아니라 '누적'이다.
+  const { paperTodayPnl } = await import('@/lib/portfolio/paperAccount');
   let dayStartEquity: number | null = null;
   try {
     const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
@@ -114,16 +93,19 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
+    // **시작 전에는 전부 null이다.** 0은 '없다'이고 시작 전은 '아직'이다.
+    started,
     account: {
       balance,
-      available: Math.max(0, balance - usedMargin),
-      usedMargin,
+      available: balance == null ? null : Math.max(0, balance - usedMargin),
+      usedMargin: started ? usedMargin : null,
       initialBalance: initial,
-      totalPnl: Number(acct.total_pnl) || 0,
-      totalFees: Number(acct.total_fees) || 0,
-      tradeCount: Number(acct.trade_count) || 0,
-      winCount: Number(acct.win_count) || 0,
-      returnPct: initial > 0 ? ((balance - initial) / initial) * 100 : null,
+      totalPnl: started ? (Number(acct.total_pnl) || 0) : null,
+      totalFees: started ? (Number(acct.total_fees) || 0) : null,
+      tradeCount: started ? (Number(acct.trade_count) || 0) : null,
+      winCount: started ? (Number(acct.win_count) || 0) : null,
+      returnPct: started && initial != null && initial > 0 && balance != null
+        ? ((balance - initial) / initial) * 100 : null,
     },
     // ── 화면이 읽을 canonical 값 ──
     //
@@ -158,8 +140,6 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); }
   catch { return NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 }); }
 
-  const { getPaperAccount } = await import('@/lib/engine/paperStore');
-  const acct = await getPaperAccount(sb, uid);
   const action = String(body?.action || 'deposit');
 
   if (action === 'reset') {
@@ -193,17 +173,37 @@ export async function POST(req: NextRequest) {
     }
     const start = seed.value;
 
-    const { error: upErr } = await sb.from('paper_accounts').update({
+    // ── 시작을 기록으로 남긴다 ──
+    //
+    // `started_at`(071)이 있어야 **사용자가 고른 계좌**와 읽기 경로가
+    // 자동으로 만들어 둔 빈 계좌를 가를 수 있다.
+    //
+    // upsert인 이유: 예전 코드는 `update ... eq(user_id)`였고, 그 앞에
+    // `getPaperAccount()`가 줄을 만들어 줬기 때문에만 동작했다. 읽기
+    // 경로에서 생성을 걷어낸 지금은 **줄이 없는 것이 정상**이다.
+    // 그리고 update는 줄이 없어도 오류가 아니다 — 0줄을 고치고 성공을
+    // 돌려준다(RLS에 막혀도 같다). 그러면 화면은 시작됐다고 믿는다.
+    //
+    // `.select()`로 **실제로 돌아온 줄을 본다.** 0줄이면 실패다.
+    const { data: upRows, error: upErr } = await (sb as any).from('paper_accounts').upsert({
+      user_id: uid,
       balance: start, initial_balance: start,
       total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0,
+      started_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-    }).eq('user_id', uid);
+    }, { onConflict: 'user_id' }).select('user_id, balance, started_at');
     // **실패를 성공으로 적지 않는다.** 화면이 시작됐다고 믿으면
     // 그 뒤의 모든 숫자가 남의 계좌 값이다.
     if (upErr) {
       return NextResponse.json({
         ok: false, error: 'reset_failed',
         message: `모의 계좌를 시작하지 못했습니다 — ${String(upErr.message).slice(0, 160)}`,
+      }, { status: 500 });
+    }
+    if (!Array.isArray(upRows) || upRows.length === 0) {
+      return NextResponse.json({
+        ok: false, error: 'reset_no_row',
+        message: '모의 계좌를 시작하지 못했습니다 — 저장된 줄이 없습니다 (권한 문제일 수 있습니다)',
       }, { status: 500 });
     }
 
@@ -226,6 +226,27 @@ export async function POST(req: NextRequest) {
              + '자릿수를 잘못 넣으면 이후 수익률이 아무 의미가 없어집니다.',
     }, { status: 400 });
   }
+
+  // ── 충전은 시작한 계좌에만 ──
+  //
+  // 여기서도 계좌를 만들지 않는다. 시작하지 않았는데 충전이 계좌를
+  // 만들면, 사용자가 고른 적 없는 종잣돈이 다시 생긴다.
+  const { readPaperEquity } = await import('@/lib/portfolio/paperRead');
+  const pr = await readPaperEquity(sb, uid);
+  if (!pr.ok) {
+    return NextResponse.json({
+      ok: false, error: 'paper_unreadable',
+      message: `모의 계좌를 읽지 못했습니다 (${String(pr.error ?? '').slice(0, 160)}) — `
+        + '계좌가 없다는 뜻이 아닙니다',
+    }, { status: 503 });
+  }
+  if (pr.code !== 'OK') {
+    return NextResponse.json({
+      ok: false, error: 'not_started',
+      message: '모의투자를 아직 시작하지 않았습니다 — 시작 금액을 고른 뒤에 충전할 수 있습니다',
+    }, { status: 409 });
+  }
+  const acct: any = pr.account ?? {};
 
   const balance = (Number(acct.balance) || 0) + amount;
   // **초기자본도 같이 올린다.** 안 올리면 넣은 돈이 수익으로 잡혀

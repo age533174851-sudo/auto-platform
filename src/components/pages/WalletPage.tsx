@@ -49,6 +49,10 @@ import { watchAuthToken } from '@/lib/auth/authToken';
 import { fxFreshness } from '@/lib/portfolio/fxRate';
 // 자산 기록이 오래됐으면 화면이 그렇게 말한다.
 import { snapshotFreshness } from '@/lib/portfolio/snapshotBucket';
+// **모의투자 탭의 판정은 화면이 아니라 여기 있다.** 못 읽은 것을
+// '시작 안 함'으로 적으면 시작 버튼이 뜨고, 누르면 장부가 초기화된다.
+import { paperPanelOf, seedOptionsOf } from '@/lib/portfolio/paperPanel';
+import { PAPER_SEED_CHOICES, validateSeed } from '@/lib/portfolio/paperAccount';
 
 const ENVS: WalletEnv[] = ['LIVE', 'TESTNET', 'MOCK'];
 const CURRENCIES = ['USDT', 'USD', 'KRW'] as const;
@@ -109,6 +113,14 @@ export default function WalletPage() {
   const [auth, setAuth] = useState<string | null>(null);
   useEffect(() => watchAuthToken(setAuth), []);
 
+  // 모의투자를 시작한 뒤 같은 화면을 다시 읽는다. **화면이 값을 지어내
+  // 그리지 않는다** — 서버가 다시 말해 준 것만 그린다.
+  const [reload, setReload] = useState(0);
+  // 시작 요청이 도는 중인가 · 실패했으면 그 이유
+  const [starting, setStarting] = useState(false);
+  const [startErr, setStartErr] = useState('');
+  const [seedInput, setSeedInput] = useState('');
+
   // ── 환율 ──
   //
   // 서버가 값 검증(범위)까지 하고 준다. **못 읽으면 null이고, null은
@@ -155,7 +167,7 @@ export default function WalletPage() {
       setData(t.code === 'OK' || t.code === 'NO_ACCOUNT' ? body : null);
     })();
     return () => { alive = false; };
-  }, [auth]);
+  }, [auth, reload]);
 
   // 화면 곳곳이 쓰던 이름. 사람이 읽을 문장만 들어간다.
   const err = truth && truth.code !== 'OK' ? String(truth.message ?? '') : '';
@@ -388,6 +400,47 @@ export default function WalletPage() {
   // 않는다** — 아래 빈 상자가 왜 비었는지까지 적는다.
   const longterm: LongtermHolding[] = [];
 
+  // ── 모의투자 ──
+  //
+  // **판정은 화면이 하지 않는다.** `paperPanelOf`가 네 가지로 답한다:
+  // 조회 중 · 못 읽음 · 시작 안 함 · 돌고 있음. 그중 **시작 버튼은
+  // '시작 안 함'에서만** 나온다 — 못 읽었는데 버튼을 내주면, 누르는
+  // 순간 읽지 못했을 뿐 살아 있던 장부가 초기화된다.
+  const paperPanel = paperPanelOf({ paper: (data as any)?.paper ?? null, loaded: truth != null });
+  // 시작 금액은 USDT 장부다. **원화는 환율이 있을 때만 병기한다.**
+  const seedOptions = seedOptionsOf(
+    Array.isArray((data as any)?.paper?.seedChoices)
+      ? (data as any).paper.seedChoices : PAPER_SEED_CHOICES,
+    fxRate);
+
+  async function startPaper(seed: number) {
+    if (starting) return;
+    // **읽지 못한 상태에서는 시작하지 않는다.**
+    if (!paperPanel.canStart) return;
+    const v = validateSeed(seed);
+    if (v.code !== 'OK' || v.value == null) { setStartErr(v.reason); return; }
+    setStarting(true); setStartErr('');
+    try {
+      const r = await fetch('/api/paper/account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) },
+        body: JSON.stringify({ action: 'reset', seed: v.value }),
+      });
+      const j = await r.json().catch(() => null);
+      // **성공을 지어내지 않는다.** 서버가 ok라고 한 것만 성공이다.
+      if (!r.ok || !j?.ok) {
+        setStartErr(String(j?.message || `모의투자를 시작하지 못했습니다 (HTTP ${r.status})`));
+      } else {
+        setSeedInput('');
+        setReload(n => n + 1);
+      }
+    } catch (e: any) {
+      setStartErr(`시작 요청이 실패했습니다 — ${String(e?.message || e)}`);
+    } finally {
+      setStarting(false);
+    }
+  }
+
   const envColor = (e: WalletEnv) => e === 'LIVE' ? T.red : e === 'TESTNET' ? T.ylw : T.muted;
   const muted: React.CSSProperties = { color: T.muted, fontSize: 9.5, lineHeight: 1.6 };
   const numFont: React.CSSProperties = { fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums' };
@@ -395,6 +448,12 @@ export default function WalletPage() {
   /** 못 읽은 값은 회색 + 사유. 여기서 0을 그리면 안 된다 */
   const cellText = (c: { value: number | null; text: string }) =>
     c.value == null ? c.text : c.value.toLocaleString('ko-KR');
+
+  /** 모의 줄 한 칸. **못 구한 값은 0이 아니라 '확인 불가'다** */
+  const paperCell = (r: { usd: number | null; readiness: string }) =>
+    r.readiness === 'OK' ? moneyView(r.usd, cur as any, fxRate).text
+      : r.readiness === 'NOT_APPLICABLE' ? '—'
+        : r.readiness === 'LOADING' ? '조회 중…' : '확인 불가';
 
   const sectionTitle = (s: string) => (
     <div style={{ color: T.txt, fontSize: 12, fontWeight: 800, marginBottom: 8 }}>{s}</div>
@@ -502,6 +561,100 @@ export default function WalletPage() {
       <div style={{ color: envColor(env), fontSize: 9.5, marginBottom: 10, lineHeight: 1.55 }}>
         {ENV_NOTE[env]}
       </div>
+
+      {/* ── 모의투자 ──
+          이 탭은 오래 **만들어 놓고 배선이 없던** 자리다. 서버의 envs가
+          ['LIVE','TESTNET'] 고정이라, 눌러도 아무 숫자가 없었다. */}
+      {env === 'MOCK' && (
+        <Card style={{ padding: 14, marginBottom: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <span style={{ color: T.txt, fontSize: 12, fontWeight: 800 }}>{paperPanel.headline}</span>
+            <span style={{ marginLeft: 'auto', ...muted }}>장부 통화 USDT</span>
+          </div>
+
+          {paperPanel.code === 'NOT_STARTED' ? (
+            <>
+              <div style={{ ...muted, marginBottom: 10 }}>{paperPanel.note}</div>
+              <div style={{ color: T.txt, fontSize: 11, fontWeight: 700, marginBottom: 6 }}>
+                시작 금액을 고르세요
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                {seedOptions.map(o => (
+                  <button key={o.usd} disabled={starting} onClick={() => startPaper(o.usd)} style={{
+                    flex: '1 1 30%', minWidth: 96, minHeight: 52, borderRadius: 10,
+                    cursor: starting ? 'not-allowed' : 'pointer', opacity: starting ? 0.5 : 1,
+                    background: 'transparent', color: T.txt,
+                    border: `1px solid ${T.border}`, padding: '6px 8px', textAlign: 'left',
+                  }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 800, ...numFont }}>{o.usdText}</div>
+                    {/* **환율이 없으면 원화를 적지 않는다.** 달러 숫자에 ₩만
+                        붙이면 몇 배 틀린 값이 된다 — 이 저장소에 그 기록이 있다. */}
+                    <div style={{ ...muted, marginTop: 2 }}>
+                      {o.krwText ?? '원화 환산 불가'}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                <input value={seedInput} onChange={e => setSeedInput(e.target.value)}
+                  inputMode="decimal" placeholder="직접 입력 (USDT)"
+                  style={{
+                    flex: 1, minHeight: 34, borderRadius: 8, padding: '0 10px',
+                    background: 'transparent', color: T.txt,
+                    border: `1px solid ${T.border}`, fontSize: 11, ...numFont,
+                  }} />
+                <button disabled={starting || seedInput.trim() === ''}
+                  onClick={() => startPaper(Number(seedInput))}
+                  style={{
+                    minHeight: 34, padding: '0 14px', borderRadius: 8,
+                    cursor: starting || seedInput.trim() === '' ? 'not-allowed' : 'pointer',
+                    opacity: starting || seedInput.trim() === '' ? 0.5 : 1,
+                    background: T.acg, color: T.acl,
+                    border: `1px solid ${T.acl}`, fontSize: 11, fontWeight: 800,
+                  }}>{starting ? '시작하는 중…' : '시작하기'}</button>
+              </div>
+              <div style={muted}>
+                최소 100 · 최대 10,000,000 USDT. 모의 자산은 실전·테스트넷과 절대 합산하지 않습니다.
+              </div>
+            </>
+          ) : (
+            <>
+              {/* 총자산 · 현금 · 포지션 증거금 · 실현/미실현 · 오늘 손익.
+                  **못 구한 값은 0이 아니라 '확인 불가'다.** */}
+              {paperPanel.rows.map(r => {
+                const signed = r.readiness === 'OK' && r.usd != null
+                  && (r.key === 'unrealized' || r.key === 'realized' || r.key === 'today');
+                const c = !signed ? T.txt : (r.usd as number) > 0 ? T.grn : (r.usd as number) < 0 ? T.red : T.txt;
+                return (
+                  <div key={r.key} style={{
+                    display: 'flex', alignItems: 'baseline', gap: 8, padding: '7px 0',
+                    borderBottom: `1px solid ${T.border}`,
+                  }}>
+                    <span style={{ color: T.muted, fontSize: 10.5, minWidth: 84 }}>{r.label}</span>
+                    <span style={{
+                      marginLeft: 'auto', textAlign: 'right',
+                      color: r.readiness === 'OK' ? c : T.muted,
+                      fontSize: 12, fontWeight: 800, ...numFont,
+                    }}>{paperCell(r)}</span>
+                  </div>
+                );
+              })}
+              {paperPanel.rows.some(r => r.readiness !== 'OK') && (
+                <div style={{ ...muted, marginTop: 8 }}>
+                  {paperPanel.rows.find(r => r.readiness !== 'OK')?.hint}
+                </div>
+              )}
+              {paperPanel.code === 'UNREADABLE' && (
+                <div style={{ ...muted, color: T.ylw, marginTop: 8 }}>{paperPanel.note}</div>
+              )}
+            </>
+          )}
+
+          {startErr && (
+            <div style={{ ...muted, color: T.red, marginTop: 8 }}>{startErr}</div>
+          )}
+        </Card>
+      )}
 
       {/* ── 계좌 선택 ──
           **다른 환경 계좌는 목록에 두지 않는다.** 보이면 고를 수 있다고

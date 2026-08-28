@@ -52,7 +52,38 @@ export async function GET(req: NextRequest) {
         + '연결이 없다는 뜻이 아닙니다',
     }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
-  const { reads, envs, detail } = w;
+  const { reads, detail } = w;
+
+  // ── 모의투자(MOCK)를 환경 한 칸으로 붙인다 ──
+  //
+  // **지갑의 MOCK 탭은 만들어 놓고 배선이 없었다.** `readUserWallets`는
+  // 거래소 연결에서 환경을 만드는데 모의 계좌는 연결이 없다. 그래서
+  // `envs`는 `['LIVE','TESTNET']`뿐이었고, 화면의 세 번째 탭은 눌러도
+  // 아무 숫자가 없었다 — 이 저장소의 단골 고장 그대로다.
+  //
+  // 여기서 붙이면 아래 스냅샷·성과·곡선 루프가 **그대로** MOCK을 덮는다.
+  // MOCK만 다른 경로로 그리면 규칙이 두 벌이 되고 한쪽만 고쳐진다.
+  //
+  // **합산은 여전히 어디서도 하지 않는다.** `totalAcrossEnvs()`는 계속
+  // null을 돌려준다.
+  let paper: any = null;
+  try {
+    const { readPaperEquity } = await import('@/lib/portfolio/paperRead');
+    paper = await readPaperEquity(sb, uid);
+  } catch (e: any) {
+    paper = {
+      ok: false, code: 'UNREADABLE', error: String(e?.message || e).slice(0, 200),
+      account: null, positions: [],
+      equity: { state: 'UNREADABLE', cash: null, usedMargin: null, unrealizedPnl: null,
+        totalEquity: null, knownCash: null, initialBalance: null, realizedPnl: null,
+        totalFees: null, tradeCount: null, winCount: null, returnPct: null,
+        note: `모의 계좌를 읽지 못했습니다 — ${String(e?.message || e).slice(0, 160)}` },
+    };
+  }
+  const { paperEnvWalletOf, paperTodayPnl, PAPER_SEED_CHOICES } =
+    await import('@/lib/portfolio/paperAccount');
+  const { amountOf } = await import('@/lib/portfolio/wallet');
+  const envs = [...w.envs, paperEnvWalletOf(paper.equity, amountOf as any) as any];
 
   // **계좌 선택이 실제로 숫자를 바꾸게 한다.** 환경 합계와 **같은
   // 함수**로 계산한다 — 두 규칙이 갈리면 전체와 계좌별이 안 맞는 날이 온다.
@@ -118,6 +149,23 @@ export async function GET(req: NextRequest) {
       unrealizedPnl: h.unrealizedPnl ?? null,
     }));
   }
+
+  // ── 모의투자의 오늘 손익 ──
+  //
+  // **기준점이 없으면 계산하지 않는다.** 시작 잔고로 대신 재면 그건
+  // '오늘'이 아니라 '누적'이고, 화면은 그걸 오늘 것으로 읽는다.
+  // 기준점은 위에서 이미 읽은 MOCK 스냅샷의 **오늘 첫 점**이다 —
+  // 질의를 한 번 더 하지 않는다.
+  const paperToday = (() => {
+    const series = Array.isArray(rawSnapshots?.MOCK) ? rawSnapshots.MOCK : [];
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    const first = series.find((r: any) => Number(r?.takenAt) >= d.getTime() && r?.totalEquity != null);
+    const base = first == null ? null : Number((first as any).totalEquity);
+    return paperTodayPnl({
+      totalEquity: paper?.equity?.totalEquity ?? null,
+      dayStartEquity: base != null && Number.isFinite(base) ? base : null,
+    });
+  })();
 
   // ── 오늘 매매로 번 것 ──
   //
@@ -243,6 +291,33 @@ export async function GET(req: NextRequest) {
     // 전략계좌. **null은 '없다'가 아니라 '못 읽었다'이다.**
     strategies,
     strategiesError,
+    // ── 모의투자 ──
+    //
+    // **`envs`의 MOCK 칸과 같은 값에서 나온다** — 두 번 계산하지 않는다.
+    // `state: 'NOT_STARTED'`면 화면이 "모의투자 시작하기"를 그린다.
+    paper: {
+      state: paper?.equity?.state ?? 'UNREADABLE',
+      code: paper?.code ?? 'UNREADABLE',
+      error: paper?.error ?? null,
+      currency: 'USDT',
+      // 장부 통화는 USDT다. 원화는 **표시 계층에서만** 환율로 환산한다.
+      seedChoices: PAPER_SEED_CHOICES,
+      equity: {
+        cash: paper?.equity?.cash ?? null,
+        usedMargin: paper?.equity?.usedMargin ?? null,
+        unrealizedPnl: paper?.equity?.unrealizedPnl ?? null,
+        totalEquity: paper?.equity?.totalEquity ?? null,
+        initialBalance: paper?.equity?.initialBalance ?? null,
+        realizedPnl: paper?.equity?.realizedPnl ?? null,
+        totalFees: paper?.equity?.totalFees ?? null,
+        tradeCount: paper?.equity?.tradeCount ?? null,
+        winCount: paper?.equity?.winCount ?? null,
+        returnPct: paper?.equity?.returnPct ?? null,
+        note: paper?.equity?.note ?? '',
+      },
+      today: paperToday,
+      positions: Array.isArray(paper?.positions) ? paper.positions : [],
+    },
     // 화면이 고를 계좌 — **숫자까지 같이 준다.**
     accounts: accountWallets.map(a => ({
       id: a.connectionId, exchangeId: a.exchangeId, label: a.label,
