@@ -10,9 +10,13 @@ import {
   paperEquityOf, paperTodayPnl, validateSeed, PAPER_SEED_CHOICES,
 } from './paperAccount';
 
+// **시작한 계좌다.** `started_at`(071)이 없으면 흔적이 없는 이 줄은
+// '읽기 경로가 자동으로 만든 빈 계좌'와 구별되지 않는다 — 그때는
+// NOT_STARTED가 맞고, 그 판정은 `paperWiring.test.ts`가 따로 못 박는다.
 const ACCT = {
   balance: 10_000, initial_balance: 10_000,
   total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0,
+  started_at: '2026-08-01T00:00:00Z',
 };
 
 export function runPaperAccountTests() {
