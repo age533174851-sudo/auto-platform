@@ -18,6 +18,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { incomeToEvents, nextIngestFrom, type IncomeRow } from '@/lib/ledger/incomeIngest';
+import { ingestTargetsOf } from '@/lib/ledger/ingestTargets';
+import { ingestStatePatchOf } from '@/lib/ledger/ingestState';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -75,18 +77,20 @@ export async function POST(req: NextRequest) {
         error: `연결 목록을 읽지 못했습니다: ${String(connErr.message).slice(0, 200)}` });
       continue;
     }
-    const connRows = Array.isArray(conns) ? conns : null;
-    if (connRows == null) {
+    // **수집 대상은 지금 활성인 연결 전부다.** 별도 등록 목록을 두지
+    // 않는다 — 새 연결을 만들 때 어딘가에 또 적어야 하면, 언젠가 그
+    // 한 줄을 빼먹고 그 연결의 수수료만 조용히 빠진다.
+    const targets = ingestTargetsOf(conns as any);
+    if (targets == null) {
       // **못 읽은 것을 '연결 없음'으로 적지 않는다.**
       results.push({ userId, ok: false, error: '연결 목록을 읽지 못했습니다 — 연결이 없다는 뜻이 아닙니다' });
       continue;
     }
 
-    for (const c of connRows) {
-      const connectionId = String(c.id);
-      // **저장소 규칙: is_testnet === false만 실전이다.** 그 밖은 전부 테스트넷.
-      const env: 'LIVE' | 'TESTNET' = c?.is_testnet === false ? 'LIVE' : 'TESTNET';
-      const exchange = String(c?.exchange_id ?? '');
+    for (const t of targets) {
+      const connectionId = t.connectionId;
+      const env = t.env;
+      const exchange = t.exchange;
 
       // 어디까지 읽었는가
       let coverage: { fromMs: number | null; toMs: number | null } | null = null;
@@ -113,7 +117,7 @@ export async function POST(req: NextRequest) {
         if (!creds.ok) throw new Error((creds as any).message || (creds as any).error || '키를 읽지 못했습니다');
         const key = (creds as any).key, secret = (creds as any).secret, testnet = (creds as any).testnet;
 
-        if (exchange === 'binance') {
+        if (t.route === 'binance') {
           const { getFuturesIncome } = await import('@/lib/exchanges/binanceFutures');
           const raw = await getFuturesIncome(key, secret, testnet, { startTime: plan.fromMs, limit: 1000 });
           rows = raw == null ? null : raw.map((d: any) => ({
@@ -124,7 +128,7 @@ export async function POST(req: NextRequest) {
             // **문자열이다** — int64를 숫자로 다루면 끝자리가 뭉개진다 (#139)
             tranId: d?.tranId != null ? String(d.tranId) : null,
           }));
-        } else if (exchange === 'gate') {
+        } else if (t.route === 'gate') {
           const { getGateAccountBook } = await import('@/lib/exchanges/gateFutures');
           const raw = await getGateAccountBook(key, secret, testnet, {
             fromSec: Math.floor(plan.fromMs / 1000), limit: 1000,
@@ -133,70 +137,77 @@ export async function POST(req: NextRequest) {
             incomeType: r.incomeType, income: r.income, time: r.time, symbol: null, tranId: null,
           }));
         } else {
-          readError = `${exchange}는 아직 원장 수집을 지원하지 않습니다`;
+          readError = t.reason;
         }
       } catch (e: any) {
         readError = String(e?.message || e).slice(0, 200);
       }
 
-      if (rows == null) {
-        // **못 읽은 것을 '없음'으로 적지 않는다.** 덮인 구간을 늘리지도 않는다 —
-        // 늘리면 읽지 않은 구간을 읽었다고 말하는 것이 된다.
-        try {
-          await (sb as any).from('ledger_ingest_state').upsert({
-            user_id: userId, connection_id: connectionId, env,
-            last_run_at: new Date(nowMs).toISOString(),
-            last_error: readError || '거래소 원장을 읽지 못했습니다',
-          }, { onConflict: 'user_id,connection_id,env' });
-        } catch { /* 062가 아직이면 기록할 곳이 없다 */ }
-        results.push({ connectionId, env, ok: false, error: readError || '읽지 못했습니다' });
+      // ── 이번 회차의 결과를 하나의 판정으로 만든다 ──
+      //
+      // 판정은 `ingestStatePatchOf`에 있다(테스트가 붙어 있다).
+      // 여기서 다시 규칙을 쓰면 두 벌이 되고, 언젠가 한쪽만 고쳐진다.
+      const ing = rows == null ? null : incomeToEvents({ rows, userId, env, connectionId, exchange });
+
+      let written = 0, duplicate = 0, failed = 0;
+      if (ing) {
+        const { recordLedgerEvent } = await import('@/lib/ledger/writeLedger');
+        for (const ev of ing.events) {
+          const r = await recordLedgerEvent(sb, ev, 'income');
+          if (r.code === 'WRITTEN') written += 1;
+          else if (r.code === 'DUPLICATE') duplicate += 1;
+          else failed += 1;
+        }
+      }
+
+      const patch = ingestStatePatchOf({
+        userId, connectionId, env,
+        coverage, planFromMs: plan.fromMs,
+        readOk: rows != null,
+        readError,
+        eventsFromMs: ing?.fromMs ?? null,
+        eventsToMs: ing?.toMs ?? null,
+        written, failed,
+        skipped: ing?.skipped ?? null,
+        nowMs,
+      });
+
+      // ── 상태를 적는다. **오류를 반드시 받아 본다** ──
+      //
+      // 예전에는 `await sb.from(...).upsert(...)`만 하고 반환값을 버렸다.
+      // supabase-js는 DB 오류를 **던지지 않는다** — `{ error }`로 준다.
+      // 그래서 상태 기록이 실패해도 try/catch에 안 걸리고, 그 회차는
+      // 성공으로 보고됐다. **적히지 않은 coverage가 적힌 것처럼 보인다.**
+      let stateError: string | null = null;
+      try {
+        const { error: upErr } = await (sb as any).from('ledger_ingest_state')
+          .upsert(patch.row, { onConflict: 'user_id,connection_id,env' });
+        if (upErr) stateError = String(upErr.message ?? upErr).slice(0, 200);
+      } catch (e: any) {
+        stateError = String(e?.message || e).slice(0, 200);
+      }
+
+      if (stateError) {
+        // **DB 실패를 성공으로 기록하지 않는다.**
+        results.push({ connectionId, env, exchange, ok: false,
+          error: `수집 상태를 적지 못했습니다: ${stateError}` });
         continue;
       }
 
-      const ing = incomeToEvents({ rows, userId, env, connectionId, exchange });
-
-      let written = 0, duplicate = 0, failed = 0;
-      const { recordLedgerEvent } = await import('@/lib/ledger/writeLedger');
-      for (const ev of ing.events) {
-        const r = await recordLedgerEvent(sb, ev, 'income');
-        if (r.code === 'WRITTEN') written += 1;
-        else if (r.code === 'DUPLICATE') duplicate += 1;
-        else failed += 1;
-      }
-
-      // ── 덮인 구간을 넓힌다 ──
-      //
-      // 실패가 하나라도 있으면 **넓히지 않는다.** 못 적은 사건이 있는
-      // 구간을 '읽었다'고 하면 그 구간의 수수료가 영원히 빠진다.
-      const okToExtend = failed === 0;
-      const newFrom = coverage?.fromMs != null
-        ? Math.min(coverage.fromMs, ing.fromMs ?? plan.fromMs)
-        : (ing.fromMs ?? plan.fromMs);
-      const newTo = okToExtend
-        ? Math.max(coverage?.toMs ?? 0, ing.toMs ?? nowMs, nowMs)
-        : (coverage?.toMs ?? null);
-
-      try {
-        await (sb as any).from('ledger_ingest_state').upsert({
-          user_id: userId, connection_id: connectionId, env,
-          covered_from: new Date(newFrom).toISOString(),
-          covered_to: newTo == null ? null : new Date(newTo).toISOString(),
-          last_run_at: new Date(nowMs).toISOString(),
-          last_written: written,
-          // 알아보지 못한 종류를 조용히 버리지 않는다.
-          last_skipped: ing.skipped.length ? ing.skipped : null,
-          last_error: failed > 0 ? `${failed}건을 적지 못했습니다` : null,
-        }, { onConflict: 'user_id,connection_id,env' });
-      } catch (e: any) {
-        results.push({ connectionId, env, ok: false, error: `기록 상태를 적지 못했습니다: ${String(e?.message || e).slice(0, 150)}` });
+      if (rows == null) {
+        results.push({ connectionId, env, exchange, ok: false,
+          error: readError || '거래소 원장을 읽지 못했습니다', advanced: false });
         continue;
       }
 
       results.push({
         connectionId, env, exchange, ok: failed === 0,
         read: rows.length, written, duplicate, failed,
-        skipped: ing.skipped,
-        coveredTo: newTo == null ? null : new Date(newTo).toISOString(),
+        skipped: ing?.skipped ?? [],
+        // **성공 + 0건도 coverage 증거다.** 그 사실을 값으로 남긴다.
+        advanced: patch.advanced,
+        note: patch.reason,
+        coveredTo: patch.row.covered_to ?? null,
       });
     }
   }

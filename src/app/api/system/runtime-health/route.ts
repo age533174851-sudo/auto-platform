@@ -94,9 +94,55 @@ export async function GET(req: NextRequest) {
     heals = Array.isArray(data) ? data : [];
   } catch { /* [] */ }
 
+  // ── 원장 수집이 돌고 있는가 ──
+  //
+  // "오늘 손익 확인 불가"만 보고는 원인을 못 고른다. 한 번도 수집되지
+  // 않은 것인지 · 매 회차 실패하는 것인지 · 수집기가 멈춘 것인지는
+  // 전혀 다른 일이고 대응도 다르다. 그걸 알아내는 방법이 **사람이 Fly
+  // 로그를 여는 것**뿐이었다.
+  //
+  // 표를 새로 만들지 않는다 — `ledger_ingest_state`가 이미 다 갖고 있다.
+  let ledgerIngest: any = null;
+  try {
+    const { ingestTargetsOf } = await import('@/lib/ledger/ingestTargets');
+    const { ingestHealthOf } = await import('@/lib/ledger/ingestHealth');
+
+    let targets: any = null;
+    try {
+      const { data, error } = await (sb as any).from('exchange_connections')
+        .select('id, exchange_id, is_testnet, is_active').eq('user_id', uid);
+      if (error) throw new Error(error.message);
+      targets = ingestTargetsOf(data as any);
+    } catch { targets = null; }   // **못 읽은 것을 '대상 없음'으로 적지 않는다**
+
+    let states: any = null;
+    try {
+      const { data, error } = await (sb as any).from('ledger_ingest_state')
+        .select('connection_id, env, covered_from, covered_to, last_run_at, last_written, last_error')
+        .eq('user_id', uid);
+      if (error) throw new Error(error.message);
+      states = (Array.isArray(data) ? data : []).map((r: any) => ({
+        connectionId: String(r.connection_id ?? ''),
+        env: String(r.env ?? ''),
+        coveredFromMs: Date.parse(String(r.covered_from ?? '')) || null,
+        coveredToMs: Date.parse(String(r.covered_to ?? '')) || null,
+        lastRunAtMs: Date.parse(String(r.last_run_at ?? '')) || null,
+        lastWritten: r.last_written == null ? null : Number(r.last_written),
+        lastError: r.last_error ?? null,
+      }));
+    } catch { states = null; }
+
+    ledgerIngest = ingestHealthOf({ targets, states, nowMs: Date.now() });
+  } catch (e: any) {
+    ledgerIngest = { ok: false, code: 'STATES_UNKNOWN', rows: [],
+      summary: '원장 수집 상태를 읽지 못했습니다 — 수집이 안 됐다는 뜻이 아닙니다' };
+  }
+
   return NextResponse.json({
     ok: true,
     health,
+    // 원장 수집. **사유는 키처럼 생긴 값을 지운 뒤에 나간다.**
+    ledgerIngest,
     // **검증되지 않은 배포를 '완료'로 적지 않는다.**
     deployment: deployVerified == null ? {
       verdict: 'UNKNOWN',
