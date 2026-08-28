@@ -237,7 +237,17 @@ export async function claimSchedule(
   try {
     let q = sb.from('autotrade_schedules')
       .update({ last_run_at: new Date(nowMs).toISOString() })
-      .eq('id', row.id);
+      .eq('id', row.id)
+      // ── 취소가 먼저 커밋됐으면 여기서 진다 ──
+      //
+      // 워커는 `enabled = true`인 줄을 **읽고 나서** 선점한다. 그 사이에
+      // 사용자가 취소하면, 예전에는 이 UPDATE가 그대로 성공해서 **취소된
+      // 예약이 주문을 냈다.** 읽은 시점의 사실로 쓰는 것이기 때문이다.
+      //
+      // 조건을 여기 붙이면 그 경합이 DB 한 문장 안에서 끝난다:
+      // 취소가 먼저면 이 UPDATE가 0줄을 고치고 `LOST`가 된다.
+      .eq('enabled', true)
+      .is('cancelled_at', null);
     // **null과 값은 다른 조건이다.** `.eq(col, null)`은 SQL에서 항상
     // 거짓이라 첫 평가를 영원히 못 가져온다.
     q = row.last_run_at == null ? q.is('last_run_at', null)

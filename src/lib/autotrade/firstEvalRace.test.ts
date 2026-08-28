@@ -33,26 +33,29 @@ function fakeSb(row: any) {
       const b: any = {
         _patch: null as any,
         _id: null as any,
-        _guardCol: null as string | null,
-        _guardVal: undefined as any,
-        _guarded: false,
+        // **조건을 전부 모은다.** 예전에는 마지막 하나만 기억했다 —
+        // 그러면 `.eq('enabled', true).is('cancelled_at', null)`이 조용히
+        // 무시되고, 그걸 확인하는 테스트가 **통과해 버린다.**
+        _guards: [] as Array<{ col: string; val: any }>,
         update(patch: any) { b._patch = patch; return b; },
         eq(col: string, val: any) {
           if (col === 'id') b._id = val;
-          else { b._guarded = true; b._guardCol = col; b._guardVal = val; }
+          else b._guards.push({ col, val });
           return b;
         },
         is(col: string, val: any) {
-          b._guarded = true; b._guardCol = col; b._guardVal = val; return b;
+          b._guards.push({ col, val }); return b;
         },
         select(_cols: string) { return b; },
         _run() {
           if (b._id !== state.row.id) return { data: [], error: null };
-          if (b._guarded) {
-            const cur = state.row[b._guardCol as string] ?? null;
-            const want = b._guardVal ?? null;
-            // 값이 그 사이 바뀌었으면 진 것이다 — 0줄.
-            if (cur !== want) return { data: [], error: null };
+          if (b._guards.length) {
+            for (const g of b._guards) {
+              const cur = state.row[g.col] ?? null;
+              const want = g.val ?? null;
+              // 값이 그 사이 바뀌었으면 진 것이다 — 0줄.
+              if (cur !== want) return { data: [], error: null };
+            }
             state.claims++;
           }
           Object.assign(state.row, b._patch);
@@ -229,4 +232,61 @@ export function runFirstEvalRaceTests() {
     eq(r.due.due, false);
     eq(calls.length, 0);
   });
+  // ══ 취소와 실행의 경합 ══
+  //
+  // 워커는 `enabled = true`인 줄을 **읽고 나서** 선점한다. 그 사이에
+  // 사용자가 취소하면 예전에는 선점이 그대로 성공했다 —
+  // **취소된 예약이 주문을 냈다.**
+  //
+  // 이 경합은 값으로 못 막는다. 선점 UPDATE의 WHERE에
+  // `enabled = true AND cancelled_at IS NULL`이 들어가야 DB 한 문장 안에서
+  // 끝난다. 아래는 그 조건이 실제로 걸려 있는지를 확인한다.
+
+  test('취소가 먼저 커밋되면 워커는 주문을 내지 않는다', async () => {
+    const { sb, state } = fakeSb(baseRow());
+    const calls: string[] = [];
+    const row = { ...state.row };   // 워커가 읽어 둔 시점의 사실
+
+    // 사용자가 취소한다 (DB가 먼저 바뀐다)
+    state.row.enabled = false;
+    state.row.cancelled_at = '2026-08-27T00:00:00.000Z';
+
+    const r = await evaluateIfDue(sb as any, row, {
+      origin: 'https://x.test', adminSecret: 'k',
+      fetchImpl: countingFetch(calls), source: 'FLY_WORKER',
+    } as any, Date.parse('2026-08-27T00:00:01.000Z'));
+
+    eq(calls.length, 0, `실행기를 ${calls.length}번 불렀다 — **취소된 예약이 주문을 냈다**`);
+    eq(state.claims, 0, '선점에 성공하면 안 된다');
+    eq(r.record, null, '평가 기록도 남지 않는다');
+    eq(r.saveError, null, '선점 실패는 오류가 아니다');
+  });
+
+  test('끄기만 해도 진행 중인 회차가 주문을 내지 않는다', async () => {
+    const { sb, state } = fakeSb(baseRow());
+    const calls: string[] = [];
+    const row = { ...state.row };
+    state.row.enabled = false;      // 취소 표식 없이 끄기만
+
+    await evaluateIfDue(sb as any, row, {
+      origin: 'https://x.test', adminSecret: 'k',
+      fetchImpl: countingFetch(calls), source: 'FLY_WORKER',
+    } as any, Date.parse('2026-08-27T00:00:01.000Z'));
+
+    eq(calls.length, 0, '끈 예약이 주문을 냈다');
+  });
+
+  test('취소되지 않은 예약은 그대로 실행된다 — 조건이 과하게 막지 않는다', async () => {
+    const { sb, state } = fakeSb(baseRow());
+    const calls: string[] = [];
+    const r = await evaluateIfDue(sb as any, { ...state.row }, {
+      origin: 'https://x.test', adminSecret: 'k',
+      fetchImpl: countingFetch(calls), source: 'FLY_WORKER',
+    } as any, Date.parse('2026-08-27T00:00:01.000Z'));
+
+    eq(calls.length, 1, '멀쩡한 예약이 막히면 안 된다');
+    eq(state.claims, 1, '선점 성공');
+    eq(r.record!.outcome, 'ENTERED', '진입');
+  });
+
 }
