@@ -109,38 +109,104 @@ export async function POST(req: NextRequest) {
       const plan = nextIngestFrom({ coverage, nowMs });
 
       // ── 거래소에서 읽는다 ──
+      //
+      // **한 장으로 끝내지 않는다.** 두 거래소 모두 조회가 `limit` 한 장이라,
+      // 응답이 상한에 닿으면 뒤에 더 있는지 증명할 수 없다. 그대로
+      // `covered_to`를 지금까지 밀면 못 읽은 구간을 읽었다고 말하게 되고,
+      // 그 구간의 수수료·펀딩은 영원히 안 들어온다.
+      //
+      // 공식 문서는 이 환경에서 열리지 않는다(egress 차단). 그래서
+      // **검증하지 못한 파라미터를 지어내지 않는다** — `page`·`offset`·
+      // `endTime`을 상상해서 붙이는 대신, 이미 동작이 확인된 것만 쓰고
+      // **정렬은 응답에서 직접 확인한다.**
+      const PAGE_LIMIT = 1000;
       let rows: IncomeRow[] | null = null;
       let readError: string | null = null;
+      let pageComplete = true;
+      let provenThroughMs: number | null = null;
+      let incompleteReason: string | null = null;
+      let pagesRead = 0;
+
       try {
         const { loadFuturesCreds } = await import('@/lib/exchanges/loadCreds');
         const creds = await loadFuturesCreds(sb, userId, connectionId);
         if (!creds.ok) throw new Error((creds as any).message || (creds as any).error || '키를 읽지 못했습니다');
         const key = (creds as any).key, secret = (creds as any).secret, testnet = (creds as any).testnet;
 
-        if (t.route === 'binance') {
-          const { getFuturesIncome } = await import('@/lib/exchanges/binanceFutures');
-          const raw = await getFuturesIncome(key, secret, testnet, { startTime: plan.fromMs, limit: 1000 });
-          rows = raw == null ? null : raw.map((d: any) => ({
-            incomeType: String(d?.incomeType ?? ''),
-            income: Number(d?.income),
-            time: Number(d?.time),
-            symbol: d?.symbol ? String(d.symbol) : null,
-            // **문자열이다** — int64를 숫자로 다루면 끝자리가 뭉개진다 (#139)
-            tranId: d?.tranId != null ? String(d.tranId) : null,
-          }));
-        } else if (t.route === 'gate') {
-          const { getGateAccountBook } = await import('@/lib/exchanges/gateFutures');
-          const raw = await getGateAccountBook(key, secret, testnet, {
-            fromSec: Math.floor(plan.fromMs / 1000), limit: 1000,
-          });
-          rows = raw == null ? null : raw.map(r => ({
-            incomeType: r.incomeType, income: r.income, time: r.time, symbol: null, tranId: null,
-          }));
-        } else {
+        const { pageVerdictOf, pageBudgetExhausted, MAX_PAGES_PER_RUN } =
+          await import('@/lib/ledger/incomePaging');
+
+        // 거래소별로 **따로** 한 장을 읽는다. 한쪽의 규칙을 다른 쪽에
+        // 복사하지 않는다 — 파라미터 이름도 시각 단위도 다르다.
+        const readPage = async (fromMs: number): Promise<IncomeRow[] | null> => {
+          if (t.route === 'binance') {
+            const { getFuturesIncome } = await import('@/lib/exchanges/binanceFutures');
+            const raw = await getFuturesIncome(key, secret, testnet, { startTime: fromMs, limit: PAGE_LIMIT });
+            return raw == null ? null : raw.map((d: any) => ({
+              incomeType: String(d?.incomeType ?? ''),
+              income: Number(d?.income),
+              time: Number(d?.time),
+              symbol: d?.symbol ? String(d.symbol) : null,
+              // **문자열이다** — int64를 숫자로 다루면 끝자리가 뭉개진다 (#139)
+              tranId: d?.tranId != null ? String(d.tranId) : null,
+            }));
+          }
+          if (t.route === 'gate') {
+            const { getGateAccountBook } = await import('@/lib/exchanges/gateFutures');
+            // Gate의 `from`은 **초 단위**다. 바이낸스와 같은 값을 넣으면 안 된다.
+            const raw = await getGateAccountBook(key, secret, testnet, {
+              fromSec: Math.floor(fromMs / 1000), limit: PAGE_LIMIT,
+            });
+            return raw == null ? null : raw.map(r => ({
+              incomeType: r.incomeType, income: r.income, time: r.time, symbol: null, tranId: null,
+            }));
+          }
           readError = t.reason;
+          return null;
+        };
+
+        if (!t.supported) {
+          readError = t.reason;
+        } else {
+          const collected: IncomeRow[] = [];
+          let windowFrom = plan.fromMs;
+
+          for (;;) {
+            const page = await readPage(windowFrom);
+            if (page == null) { rows = null; break; }
+            pagesRead += 1;
+            collected.push(...page);
+
+            const v = pageVerdictOf({
+              times: page.map(r => Number(r.time)),
+              limit: PAGE_LIMIT, windowFromMs: windowFrom,
+            });
+
+            if (v.complete) { pageComplete = true; break; }
+
+            if (v.code === 'ADVANCE' && v.nextFromMs != null) {
+              // 증명된 지점을 계속 밀어 둔다 — 페이지 상한에 걸려도
+              // 여기까지는 읽었다고 말할 수 있다.
+              provenThroughMs = v.provenThroughMs;
+              if (pagesRead >= MAX_PAGES_PER_RUN) {
+                const b = pageBudgetExhausted(provenThroughMs);
+                pageComplete = false; incompleteReason = b.reason;
+                break;
+              }
+              windowFrom = v.nextFromMs;
+              continue;
+            }
+
+            // STUCK · UNPROVEN — **전진하지 않는다.**
+            pageComplete = false;
+            incompleteReason = v.reason;
+            break;
+          }
+          if (readError == null) rows = rows === null && pagesRead === 0 ? null : collected;
         }
       } catch (e: any) {
         readError = String(e?.message || e).slice(0, 200);
+        rows = null;
       }
 
       // ── 이번 회차의 결과를 하나의 판정으로 만든다 ──
@@ -169,6 +235,10 @@ export async function POST(req: NextRequest) {
         eventsToMs: ing?.toMs ?? null,
         written, failed,
         skipped: ing?.skipped ?? null,
+        // **끝까지 읽었는가.** 아니면 covered_to를 지금까지 밀지 않는다.
+        complete: pageComplete,
+        provenThroughMs,
+        incompleteReason,
         nowMs,
       });
 
@@ -206,6 +276,10 @@ export async function POST(req: NextRequest) {
         skipped: ing?.skipped ?? [],
         // **성공 + 0건도 coverage 증거다.** 그 사실을 값으로 남긴다.
         advanced: patch.advanced,
+        pages: pagesRead,
+        // 상한에 닿아 다 못 읽었으면 그 사실을 값으로 준다.
+        truncated: !pageComplete,
+        truncatedReason: incompleteReason,
         note: patch.reason,
         coveredTo: patch.row.covered_to ?? null,
       });

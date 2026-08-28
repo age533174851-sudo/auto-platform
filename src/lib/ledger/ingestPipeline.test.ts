@@ -16,6 +16,7 @@ import { ingestStatePatchOf } from './ingestState';
 import { ledgerWindowOf, LEDGER_LAG_STALE_MS } from './coverageWindow';
 import { ingestHealthOf, sanitizeReason } from './ingestHealth';
 import { nextIngestFrom, incomeToEvents, OVERLAP_MS } from './incomeIngest';
+import { pageOrderOf, pageVerdictOf, pageBudgetExhausted, MAX_PAGES_PER_RUN } from './incomePaging';
 import { idempotencyKeyOf } from './ledgerEvent';
 
 const HOUR = 3_600_000;
@@ -106,6 +107,158 @@ export function runIngestPipelineTests() {
       cov = { fromMs: Date.parse(p.row.covered_from), toMs: Date.parse(p.row.covered_to) };
     }
     eq(cov.toMs, NOW);
+  });
+
+  // ══ ④-2 페이지가 꽉 차면 "다 읽었다"가 아니다 ══
+  //
+  // 두 거래소 모두 조회가 limit 한 장이다. 응답이 상한에 닿았는데
+  // covered_to를 지금까지 밀면, 잘린 뒤쪽은 **영원히 안 읽힌다.**
+  const times = (n: number, from = 0, step = 1000) =>
+    Array.from({ length: n }, (_, k) => from + (k + 1) * step);
+
+  test('응답이 limit 미만이면 이 구간을 다 읽은 것이다', () => {
+    const v = pageVerdictOf({ times: times(3), limit: 1000, windowFromMs: 0 });
+    eq(v.code, 'COMPLETE');
+    eq(v.complete, true);
+  });
+
+  test('응답이 limit에 닿고 오름차순이면 다음 창으로 전진한다', () => {
+    const t = times(5, 0, 100);            // 100..500
+    const v = pageVerdictOf({ times: t, limit: 5, windowFromMs: 0 });
+    eq(v.code, 'ADVANCE');
+    eq(v.complete, false);
+    eq(v.nextFromMs, 500);
+    // **마지막 시각의 사건은 잘렸을 수 있다.** 그 직전까지만 증명된다.
+    eq(v.provenThroughMs, 499);
+  });
+
+  test('포화 페이지를 완전 수집으로 적지 않는다 — 이게 이 수정의 핵심이다', () => {
+    const v = pageVerdictOf({ times: times(1000), limit: 1000, windowFromMs: 0 });
+    eq(v.complete, false);
+    // provenThroughMs는 있어도 **지금(now)이 아니다.**
+    assert(v.provenThroughMs == null || v.provenThroughMs < 1_000_001,
+      '증명된 지점이 마지막 사건 시각을 넘으면 안 된다');
+  });
+
+  test('포화 + 최신순이면 옛 끝이 잘린 것이라 전진하지 않는다', () => {
+    const desc = times(5, 0, 100).slice().reverse();
+    const v = pageVerdictOf({ times: desc, limit: 5, windowFromMs: 0 });
+    eq(v.code, 'UNPROVEN');
+    eq(v.nextFromMs, null);
+    eq(v.provenThroughMs, null);
+    assert(v.reason.includes('옛 구간'), `왜 못 가는지 적는다 — ${v.reason}`);
+  });
+
+  test('포화 + 정렬이 뒤죽박죽이면 아무것도 증명하지 않는다', () => {
+    const v = pageVerdictOf({ times: [100, 300, 200, 500, 400], limit: 5, windowFromMs: 0 });
+    eq(v.order, 'UNORDERED');
+    eq(v.code, 'UNPROVEN');
+    eq(v.complete, false);
+  });
+
+  test('한 시각에 limit개 이상이면 STUCK — 같은 페이지를 무한히 다시 읽지 않는다', () => {
+    const same = [500, 500, 500, 500, 500];
+    const v = pageVerdictOf({ times: same, limit: 5, windowFromMs: 500 });
+    eq(v.code, 'STUCK');
+    eq(v.nextFromMs, null);
+  });
+
+  test('상한을 모르면 완전하다고 하지 않는다', () => {
+    eq(pageVerdictOf({ times: [1, 2], limit: 0, windowFromMs: 0 }).code, 'UNPROVEN');
+    eq(pageVerdictOf({ times: [1, 2], limit: NaN as any, windowFromMs: 0 }).complete, false);
+  });
+
+  test('정렬 판정은 응답만 보고 한다 — 문서를 믿지 않는다', () => {
+    eq(pageOrderOf([]), 'EMPTY');
+    eq(pageOrderOf([5]), 'SINGLE');
+    eq(pageOrderOf([1, 2, 3]), 'ASCENDING');
+    eq(pageOrderOf([3, 2, 1]), 'DESCENDING');
+    eq(pageOrderOf([1, 3, 2]), 'UNORDERED');
+    eq(pageOrderOf([7, 7, 7]), 'SINGLE');       // 방향이 없다
+  });
+
+  test('페이지 상한에 걸려도 증명된 지점까지는 전진한다 — 제자리걸음이 아니다', () => {
+    const b = pageBudgetExhausted(NOW - HOUR);
+    eq(b.complete, false);
+    eq(b.provenThroughMs, NOW - HOUR);
+    eq(b.pages, MAX_PAGES_PER_RUN);
+    assert(b.reason.includes('다음 회차'), '어떻게 이어지는지 적는다');
+  });
+
+  // ══ ④-3 그 판정이 covered_to에 실제로 반영되는가 ══
+  test('끝까지 못 읽었으면 covered_to를 지금까지 밀지 않는다', () => {
+    const p = ingestStatePatchOf({
+      userId: 'u', connectionId: 'c', env: 'TESTNET',
+      coverage: { fromMs: NOW - 5 * HOUR, toMs: NOW - 3 * HOUR },
+      planFromMs: NOW - 3 * HOUR, readOk: true,
+      written: 1000, failed: 0,
+      complete: false, provenThroughMs: NOW - 2 * HOUR,
+      incompleteReason: '응답이 상한에 닿았습니다',
+      nowMs: NOW,
+    });
+    // **여기서 NOW가 나오면 잘린 뒤쪽이 영원히 사라진다.**
+    eq(p.row.covered_to, new Date(NOW - 2 * HOUR).toISOString());
+    eq(p.advanced, true);
+    assert(String(p.row.last_error).includes('상한'), '정상 회차로 적지 않는다');
+  });
+
+  test('증명된 지점조차 없으면 아예 전진하지 않는다', () => {
+    const p = ingestStatePatchOf({
+      userId: 'u', connectionId: 'c', env: 'TESTNET',
+      coverage: { fromMs: NOW - 5 * HOUR, toMs: NOW - 3 * HOUR },
+      planFromMs: NOW - 3 * HOUR, readOk: true,
+      written: 1000, failed: 0,
+      complete: false, provenThroughMs: null,
+      incompleteReason: '최신순이라 옛 구간이 잘렸습니다',
+      nowMs: NOW,
+    });
+    eq(p.row.covered_to, new Date(NOW - 3 * HOUR).toISOString());   // 그대로
+    eq(p.advanced, false);
+  });
+
+  test('증명된 지점이 이미 덮인 지점보다 뒤면 되돌리지 않는다', () => {
+    const p = ingestStatePatchOf({
+      userId: 'u', connectionId: 'c', env: 'TESTNET',
+      coverage: { fromMs: NOW - 5 * HOUR, toMs: NOW - HOUR },
+      planFromMs: NOW - HOUR, readOk: true, written: 1000, failed: 0,
+      complete: false, provenThroughMs: NOW - 3 * HOUR,   // 과거
+      nowMs: NOW,
+    });
+    eq(p.row.covered_to, new Date(NOW - HOUR).toISOString());
+    eq(p.advanced, false);
+  });
+
+  test('끝까지 읽었으면 예전과 똑같이 지금까지 전진한다', () => {
+    const p = ingestStatePatchOf({
+      userId: 'u', connectionId: 'c', env: 'TESTNET',
+      coverage: { fromMs: NOW - 5 * HOUR, toMs: NOW - HOUR },
+      planFromMs: NOW - HOUR, readOk: true, written: 12, failed: 0,
+      complete: true, nowMs: NOW,
+    });
+    eq(p.row.covered_to, new Date(NOW).toISOString());
+    eq(p.advanced, true);
+    eq(p.row.last_error, null);
+  });
+
+  test('페이지 중간에 기록이 실패하면 잘림 여부와 무관하게 전진 금지', () => {
+    const p = ingestStatePatchOf({
+      userId: 'u', connectionId: 'c', env: 'TESTNET',
+      coverage: { fromMs: NOW - 5 * HOUR, toMs: NOW - HOUR },
+      planFromMs: NOW - HOUR, readOk: true, written: 900, failed: 3,
+      complete: false, provenThroughMs: NOW - 10 * MIN,
+      nowMs: NOW,
+    });
+    // 기록 실패가 먼저다 — 증명된 지점이 있어도 옮기지 않는다.
+    eq(p.advanced, false);
+    eq(p.row.covered_to, new Date(NOW - HOUR).toISOString());
+  });
+
+  test('잘린 구간을 다시 읽어도 같은 사건은 중복되지 않는다', () => {
+    const row = { incomeType: 'COMMISSION', income: -0.4, time: NOW - 20 * MIN,
+      symbol: 'BTCUSDT', tranId: '5150' };
+    const a = incomeToEvents({ rows: [row], userId: 'u', env: 'TESTNET', connectionId: 'c', exchange: 'binance' });
+    const b = incomeToEvents({ rows: [row], userId: 'u', env: 'TESTNET', connectionId: 'c', exchange: 'binance' });
+    eq(idempotencyKeyOf(a.events[0] as any), idempotencyKeyOf(b.events[0] as any));
   });
 
   // ══ ⑤ 실패는 절대 전진시키지 않는다 ══

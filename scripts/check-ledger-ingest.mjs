@@ -155,6 +155,72 @@ function stripComments(src) {
   }
 }
 
+// ── ⑦ 페이지가 꽉 찬 회차를 "다 읽었다"로 적지 않는다 ──
+//
+// 두 거래소 모두 조회가 `limit` 한 장이다. 응답이 상한에 닿으면 뒤에 더
+// 있는지 증명할 수 없는데, 성공 경로가 covered_to를 지금까지 밀고 있었다:
+//
+//   실제 1,200건 → 첫 페이지 1,000건 → covered_to = NOW
+//   → 나머지 200건은 **영원히 안 읽힌다**
+//
+// 중복보다 나쁘다. 빠진 수수료는 전부 수익으로 보인다.
+{
+  const rel = 'src/lib/ledger/ingestState.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    if (!/i\.complete\s*===\s*false/.test(code)) {
+      err(`${rel} — 끝까지 읽었는지를 보지 않습니다`
+        + '\n     응답이 API 상한에 닿아도 covered_to가 지금까지 갑니다');
+    }
+    if (!/provenThroughMs/.test(code)) {
+      err(`${rel} — 증명된 지점을 따로 다루지 않습니다`);
+    }
+  }
+}
+
+{
+  const rel = 'src/app/api/ledger/sync/route.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    if (!/pageVerdictOf\s*\(/.test(code)) {
+      err(`${rel} — 페이지 포화를 판정하지 않습니다`
+        + '\n     rows.length >= limit는 "그 구간을 다 읽었다"가 아닙니다');
+    }
+    if (!/complete\s*:\s*pageComplete/.test(code)) {
+      err(`${rel} — 잘림 여부를 상태 판정에 넘기지 않습니다`);
+    }
+    // 거래소별로 따로 읽어야 한다 — 한쪽 규칙을 다른 쪽에 복사하지 않는다.
+    if (!/t\.route\s*===\s*'binance'/.test(code) || !/t\.route\s*===\s*'gate'/.test(code)) {
+      err(`${rel} — 거래소별 조회 분기가 없습니다`);
+    }
+    // 검증하지 못한 파라미터를 지어내지 않는다.
+    for (const p of ['endTime', 'offset=', 'page=']) {
+      if (code.includes(p)) {
+        err(`${rel} — 확인되지 않은 조회 파라미터(${p})를 씁니다`
+          + '\n     공식 문서를 열 수 없는 상태에서 계약을 지어내면'
+          + '\n     조용히 빈 응답을 받고 "다 읽었다"가 됩니다');
+      }
+    }
+  }
+}
+
+{
+  const rel = 'src/lib/ledger/incomePaging.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    if (!/STUCK/.test(code)) {
+      err(`${rel} — 전진 불가 상태를 가르지 않습니다`
+        + '\n     같은 첫 페이지를 무한히 다시 읽는 구조가 됩니다');
+    }
+    if (!/MAX_PAGES_PER_RUN/.test(code)) {
+      err(`${rel} — 한 회차 페이지 상한이 없습니다`);
+    }
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 원장 수집 배선 유지 — 워커가 돌리고 · 덮인 만큼만 말하고 · 실패는 전진시키지 않는다');
 } else {

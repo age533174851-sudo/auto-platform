@@ -36,6 +36,23 @@ export interface IngestStateInput {
   failed?: number;
   /** 알아보지 못한 종류 — 조용히 버리지 않는다 */
   skipped?: Array<{ type: string; count: number }> | null;
+  /**
+   * 이 구간을 **끝까지 읽었는가.**
+   *
+   * 거래소 원장 조회는 `limit` 한 장이다. 응답이 상한에 닿으면 뒤에 더
+   * 있는지 증명할 수 없다 — 그때 `covered_to`를 '지금'까지 밀면 못 읽은
+   * 구간을 읽었다고 말하는 것이 되고, 그 구간의 사건은 영원히 안 들어온다.
+   *
+   * 기본은 `true`다(옛 호출부와 같게 동작).
+   */
+  complete?: boolean;
+  /**
+   * 완전하지 않을 때, **빠짐없이 읽었다고 말할 수 있는 시각.**
+   * null이면 그것조차 증명 못 했다는 뜻이라 전진하지 않는다.
+   */
+  provenThroughMs?: number | null;
+  /** 왜 완전하지 않은가. **키·값은 담지 않는다** */
+  incompleteReason?: string | null;
   nowMs: number;
 }
 
@@ -94,6 +111,31 @@ export function ingestStatePatchOf(i: IngestStateInput): IngestStatePatch {
       },
       advanced: false,
       reason: '기록 실패가 있어 덮인 지점을 전진시키지 않습니다 — 다음 회차가 겹쳐서 다시 읽습니다',
+    };
+  }
+
+  // ── 끝까지 읽지 못했다 ──
+  //
+  // 응답이 API 상한에 닿았다. 뒤에 더 있는지 **증명하지 못했으므로**
+  // '지금까지 덮었다'고 적지 않는다. 증명된 지점까지만 옮긴다.
+  if (i.complete === false) {
+    const proven = i.provenThroughMs;
+    const canMove = proven != null && Number.isFinite(proven) && proven > (prevTo ?? -Infinity);
+    return {
+      row: {
+        ...key,
+        covered_from: iso(newFrom),
+        covered_to: canMove ? iso(proven as number) : iso(prevTo),
+        last_written: written,
+        last_skipped: i.skipped?.length ? i.skipped : null,
+        // 운영 화면이 이 문장을 읽는다. 이 회차는 **정상이 아니다.**
+        last_error: (i.incompleteReason
+          || '거래소 응답이 상한에 닿아 이 구간을 다 읽었는지 증명하지 못했습니다').slice(0, 300),
+      },
+      advanced: canMove,
+      reason: canMove
+        ? '증명된 지점까지만 옮겼습니다 — 지금까지 덮었다고 적지 않습니다'
+        : '끝까지 읽었다는 증거가 없어 덮인 지점을 옮기지 않았습니다',
     };
   }
 
