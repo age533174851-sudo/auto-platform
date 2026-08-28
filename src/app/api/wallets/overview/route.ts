@@ -52,7 +52,39 @@ export async function GET(req: NextRequest) {
         + '연결이 없다는 뜻이 아닙니다',
     }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
-  const { reads, envs, detail } = w;
+  const { reads, detail } = w;
+
+  // ── 모의투자(MOCK)를 환경 한 칸으로 붙인다 ──
+  //
+  // **지갑의 MOCK 탭은 만들어 놓고 배선이 없었다.** `readUserWallets`는
+  // 거래소 연결에서 환경을 만드는데 모의 계좌는 연결이 없다. 그래서
+  // `envs`는 `['LIVE','TESTNET']`뿐이었고, 화면의 세 번째 탭은 눌러도
+  // 아무 숫자가 없었다 — 이 저장소의 단골 고장 그대로다.
+  //
+  // 여기서 붙이면 아래 스냅샷·성과·곡선 루프가 **그대로** MOCK을 덮는다.
+  // MOCK만 다른 경로로 그리면 규칙이 두 벌이 되고 한쪽만 고쳐진다.
+  //
+  // **합산은 여전히 어디서도 하지 않는다.** `totalAcrossEnvs()`는 계속
+  // null을 돌려준다.
+  let paper: any = null;
+  try {
+    const { readPaperEquity } = await import('@/lib/portfolio/paperRead');
+    paper = await readPaperEquity(sb, uid);
+  } catch (e: any) {
+    paper = {
+      ok: false, code: 'UNREADABLE', error: String(e?.message || e).slice(0, 200),
+      account: null, positions: [], schema: { startedAt: null },
+      equity: { state: 'UNREADABLE', code: 'UNREADABLE', cash: null, usedMargin: null, unrealizedPnl: null,
+        totalEquity: null, knownCash: null, initialBalance: null, realizedPnl: null,
+        totalFees: null, tradeCount: null, winCount: null, returnPct: null,
+        // **원문은 note가 아니라 error에만.** note는 사용자가 읽는 문장이다.
+        note: '모의 계좌를 확인하지 못했습니다 — 계좌가 없다는 뜻이 아닙니다' },
+    };
+  }
+  const { paperEnvWalletOf, paperTodayPnl, PAPER_SEED_CHOICES } =
+    await import('@/lib/portfolio/paperAccount');
+  const { amountOf } = await import('@/lib/portfolio/wallet');
+  const envs = [...w.envs, paperEnvWalletOf(paper.equity, amountOf as any) as any];
 
   // **계좌 선택이 실제로 숫자를 바꾸게 한다.** 환경 합계와 **같은
   // 함수**로 계산한다 — 두 규칙이 갈리면 전체와 계좌별이 안 맞는 날이 온다.
@@ -119,6 +151,23 @@ export async function GET(req: NextRequest) {
     }));
   }
 
+  // ── 모의투자의 오늘 손익 ──
+  //
+  // **기준점이 없으면 계산하지 않는다.** 시작 잔고로 대신 재면 그건
+  // '오늘'이 아니라 '누적'이고, 화면은 그걸 오늘 것으로 읽는다.
+  // 기준점은 위에서 이미 읽은 MOCK 스냅샷의 **오늘 첫 점**이다 —
+  // 질의를 한 번 더 하지 않는다.
+  const paperToday = (() => {
+    const series = Array.isArray(rawSnapshots?.MOCK) ? rawSnapshots.MOCK : [];
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    const first = series.find((r: any) => Number(r?.takenAt) >= d.getTime() && r?.totalEquity != null);
+    const base = first == null ? null : Number((first as any).totalEquity);
+    return paperTodayPnl({
+      totalEquity: paper?.equity?.totalEquity ?? null,
+      dayStartEquity: base != null && Number.isFinite(base) ? base : null,
+    });
+  })();
+
   // ── 오늘 매매로 번 것 ──
   //
   // **매매손익 = 자산변화 − 외부유입 − 수수료 − 펀딩.**
@@ -136,7 +185,7 @@ export async function GET(req: NextRequest) {
   const ledger: Record<string, any> = {};
   try {
     const { ledgerTotals, tradingPnlOf } = await import('@/lib/ledger/ledgerEvent');
-    const { ledgerCompleteness } = await import('@/lib/ledger/coverageSet');
+    const { ledgerWindowOf } = await import('@/lib/ledger/coverageWindow');
     const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
     const fromMs = dayStart.getTime();
 
@@ -156,37 +205,61 @@ export async function GET(req: NextRequest) {
         }));
       } catch { states = null; }
 
-      const cov = ledgerCompleteness({
+      // ── **"지금까지 덮였는가"를 묻지 않는다** ──
+      //
+      // 수집은 15분마다 돈다. `covered_to`는 마지막 수집 시각이므로
+      // 지갑이 요청하는 시각보다 언제나 뒤에 있다 — 그 조건으로 물으면
+      // 연결이 정상이고 매 회차 성공해도 **오늘 손익은 영원히 확인
+      // 불가다.** 실제로 그 상태였다.
+      //
+      // 그래서 "오늘 중 어디까지 덮였는가"를 묻고, 그 구간에서만 센다.
+      // 덮이지 않은 구간을 덮었다고 하지 않으면서 값이 나온다.
+      const win = ledgerWindowOf({
         // 기대 집합 = 이 환경의 활성 연결. **환경을 모르는 연결은 빠진다.**
         expected: w.connectionIdsByEnv?.[e] ?? null,
         states,
-        periodFromMs: fromMs, periodToMs: nowMs,
+        dayStartMs: fromMs, nowMs,
       });
+      // **못 쓰는 창이면 아무 값도 만들지 않는다.** 0으로 바꾸지 않는다.
+      const asOf = win.usable ? (win.asOfMs as number) : null;
 
       let totals: any = null;
-      try {
-        const { data, error } = await (sb as any).from('ledger_events')
-          .select('kind, amount')
-          .eq('user_id', uid).eq('env', e)
-          .gte('occurred_at', new Date(fromMs).toISOString());
-        if (error) throw new Error(error.message);
-        totals = ledgerTotals((Array.isArray(data) ? data : []).map((r: any) => ({
-          kind: r.kind, amount: Number(r.amount),
-        })) as any);
-      } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
+      if (asOf != null) {
+        try {
+          const { data, error } = await (sb as any).from('ledger_events')
+            .select('kind, amount')
+            .eq('user_id', uid).eq('env', e)
+            .gte('occurred_at', new Date(fromMs).toISOString())
+            // **상한을 건다.** 없으면 덮였다고 판정한 구간 바깥의 사건까지
+            // 합계에 들어가, 자산 변화와 장부가 서로 다른 구간을 본다.
+            .lte('occurred_at', new Date(asOf).toISOString());
+          if (error) throw new Error(error.message);
+          totals = ledgerTotals((Array.isArray(data) ? data : []).map((r: any) => ({
+            kind: r.kind, amount: Number(r.amount),
+          })) as any);
+        } catch { /* null — 못 읽은 것을 0으로 적지 않는다 */ }
+      }
 
-      // 오늘 자산 변화. 스냅샷이 두 개 미만이면 만들지 않는다.
+      // 오늘 자산 변화. **장부와 같은 창에서 잰다** — 창이 어긋나면
+      // 매매손익 = 자산변화 − 유입 − 수수료 − 펀딩의 네 항이 서로 다른
+      // 기간을 가리킨다.
       const series = Array.isArray(rawSnapshots?.[e]) ? rawSnapshots[e] : [];
-      const today = series.filter((r: any) => Number(r?.takenAt) >= fromMs && r?.totalEquity != null);
+      const today = series.filter((r: any) => Number(r?.takenAt) >= fromMs
+        && (asOf == null || Number(r?.takenAt) <= asOf)
+        && r?.totalEquity != null);
       const equityChange = today.length >= 2
         ? Number(today[today.length - 1].totalEquity) - Number(today[0].totalEquity)
         : null;
 
-      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: cov.complete });
+      const tp = tradingPnlOf({ equityChange, totals, ledgerComplete: win.usable });
       ledger[e] = {
-        complete: cov.complete, reason: cov.reason, code: cov.code,
+        complete: win.usable, reason: win.reason, code: win.code,
+        // **언제까지의 자료인가.** 화면이 "N분 전 기준"을 말할 수 있게 한다.
+        asOf: asOf == null ? null : new Date(asOf).toISOString(),
+        lagMinutes: win.lagMs == null ? null : Math.round(win.lagMs / 60_000),
+        stale: win.stale,
         // **무엇이 빠졌는지 값으로 준다** — 화면이 문장을 지어내지 않게.
-        missingConnections: cov.missing, partialConnections: cov.partial,
+        missingConnections: win.missing, partialConnections: win.partial,
         totals,
         equityChange,
         tradingPnl: tp,
@@ -243,6 +316,36 @@ export async function GET(req: NextRequest) {
     // 전략계좌. **null은 '없다'가 아니라 '못 읽었다'이다.**
     strategies,
     strategiesError,
+    // ── 모의투자 ──
+    //
+    // **`envs`의 MOCK 칸과 같은 값에서 나온다** — 두 번 계산하지 않는다.
+    // `state: 'NOT_STARTED'`면 화면이 "모의투자 시작하기"를 그린다.
+    paper: {
+      state: paper?.equity?.state ?? 'UNREADABLE',
+      code: paper?.code ?? 'UNREADABLE',
+      // **원문 오류. 화면 메인이 아니라 '자세히'에서만 보여 준다.**
+      error: paper?.error ?? null,
+      // 이 DB가 071을 적용했는가. 안 했으면 화면이 그 사실을 진단에 적는다.
+      schema: paper?.schema ?? { startedAt: null },
+      currency: 'USDT',
+      // 장부 통화는 USDT다. 원화는 **표시 계층에서만** 환율로 환산한다.
+      seedChoices: PAPER_SEED_CHOICES,
+      equity: {
+        cash: paper?.equity?.cash ?? null,
+        usedMargin: paper?.equity?.usedMargin ?? null,
+        unrealizedPnl: paper?.equity?.unrealizedPnl ?? null,
+        totalEquity: paper?.equity?.totalEquity ?? null,
+        initialBalance: paper?.equity?.initialBalance ?? null,
+        realizedPnl: paper?.equity?.realizedPnl ?? null,
+        totalFees: paper?.equity?.totalFees ?? null,
+        tradeCount: paper?.equity?.tradeCount ?? null,
+        winCount: paper?.equity?.winCount ?? null,
+        returnPct: paper?.equity?.returnPct ?? null,
+        note: paper?.equity?.note ?? '',
+      },
+      today: paperToday,
+      positions: Array.isArray(paper?.positions) ? paper.positions : [],
+    },
     // 화면이 고를 계좌 — **숫자까지 같이 준다.**
     accounts: accountWallets.map(a => ({
       id: a.connectionId, exchangeId: a.exchangeId, label: a.label,
