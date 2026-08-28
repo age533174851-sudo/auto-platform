@@ -184,11 +184,25 @@ export function totalEquityOf(
     .map(b => String(b?.label ?? b?.id ?? '이름 없는 칸'));
 
   const usable = mine.filter(b => b?.amount?.readiness === 'OK' && b.amount.value != null);
-  const complete = missing.length === 0 && mine.length > 0;
+  // ── **빈 합계를 0이라고 적지 않는다** ──
+  //
+  // 예전에는 `missing.length === 0 && mine.length > 0`이면 완전하다고
+  // 봤다. 그런데 NOT_APPLICABLE은 missing에서 빠진다 — 즉 **모든 칸이
+  // '해당 없음'이면 missing이 비고, 빈 배열의 합인 0이 총자산이 된다.**
+  //
+  // 실제로 그렇게 나왔다. 모의투자를 시작하지 않은 MOCK 탭은 네 칸이
+  // 전부 '해당 없음'인데 화면에는 **0.00000000 USDT**가 떴고, 바로
+  // 아래 줄에는 "계좌가 없습니다"가 같이 있었다. 두 문장이 동시에
+  // 있으면 안 된다 — 계좌 없음과 자산 0은 다른 사실이다.
+  const complete = missing.length === 0 && mine.length > 0 && usable.length > 0;
   const total = complete ? usable.reduce((s, b) => s + (b.amount.value as number), 0) : null;
 
   const bits: string[] = [];
   if (mine.length === 0) bits.push(`${ENV_LABEL[env]} 계좌가 없습니다`);
+  else if (usable.length === 0 && missing.length === 0) {
+    // 칸은 있는데 셀 수 있는 값이 하나도 없다 — **0이 아니라 '아직 없음'이다.**
+    bits.push(`${ENV_LABEL[env]}에 합산할 자산이 아직 없습니다`);
+  }
   if (missing.length > 0) {
     bits.push(`${missing.join(' · ')}를 확인하지 못해 총자산을 내지 않습니다`);
   }

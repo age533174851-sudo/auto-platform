@@ -228,6 +228,20 @@ jobs:
       - name: 청산 감시 배선 (계좌는 거래로 · 봉은 그 거래소에서)
         run: node scripts/check-exit-venue.mjs
 
+      # ── 모의투자 배선 ──
+      #
+      # `getPaperAccount()`는 줄이 없으면 10,000 USDT짜리 계좌를 만든다.
+      # 그 함수를 `/api/paper/account` GET과 **워커가 15분마다 부르는**
+      # `/api/wallets/snapshot`이 썼다 — 그래서 모의투자를 시작한 적 없는
+      # 사용자에게도 계좌가 있었고, 지갑 MOCK 탭을 배선하는 순간 그
+      # 10,000이 사용자가 고른 적 없는 총자산으로 화면에 뜬다.
+      #
+      # 그리고 지갑의 envs는 ['LIVE','TESTNET'] 고정이었다 — 화면에는
+      # MOCK 탭이 있는데 서버가 그 칸을 만든 적이 없었다.
+      #
+      # 둘 다 배선이라 순수 테스트로는 안 잡힌다.
+      - name: 모의투자 배선 (읽기는 계좌를 만들지 않는다)
+        run: node scripts/check-paper-wiring.mjs
       # ── 원장 수집 ──
       #
       # 지갑은 `covered_to >= now`를 요구했다. 수집은 15분마다 돌고
