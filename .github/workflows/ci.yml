@@ -228,6 +228,18 @@ jobs:
       - name: 청산 감시 배선 (계좌는 거래로 · 봉은 그 거래소에서)
         run: node scripts/check-exit-venue.mjs
 
+      # ── 예약청산 실행기 ──
+      #
+      # 브라우저 없이 도는 실행기가 GitHub 예약뿐이던 동안, 선언은
+      # */5였지만 실측은 중앙값 50분·최대 10시간이었다. 라우트는 유예
+      # 30분을 넘긴 예약을 stale로 닫고 주문하지 않는다 — 대부분의
+      # 구간에서 그 사이에 걸린 예약은 영원히 나가지 않았다.
+      #
+      # 그런데 화면은 하드코딩 true 세 개로 "앱을 닫아도 제 시각에
+      # 나갑니다"를 적고 있었다.
+      - name: 예약청산 실행기 (근거 없이 "제 시각"을 적지 않는다)
+        run: node scripts/check-scheduled-exit-runner.mjs
+
       # ── GET이 쓰는 경로 ──
       #
       # `/api/wallets/overview`는 GET인데 자산 스냅샷을 INSERT했다.

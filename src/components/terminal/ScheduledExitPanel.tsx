@@ -18,7 +18,9 @@ import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, input } from './theme';
 import { useTerminal } from './TerminalContext';
-import { toUtcMs, validateSchedule, accuracyNote, fmtGap } from '@/lib/engine/scheduleExit';
+import { toUtcMs, validateSchedule, fmtGap } from '@/lib/engine/scheduleExit';
+// **화면이 실행기 상태를 지어내지 않는다.** 서버가 준 사실로 판정한다.
+import { scheduledExitRunnerOf } from '@/lib/engine/scheduledExitRunner';
 import { notifyError, notifySuccess } from '@/lib/notify/center';
 
 const TZ = 'Asia/Seoul';
@@ -47,15 +49,26 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
   const [histErr, setHistErr] = useState('');
   const [histOpen, setHistOpen] = useState(false);
 
-  // 지금 이 화면이 열려 있으니 앱 타이머는 살아 있다.
-  // 외부 스케줄러가 붙었는지는 앱이 알 수 없다 — **모르는 것을 켜졌다고
-  // 적지 않는다.**
+  // ── 제 시각에 나갈 수 있는가 ──
   //
-  // repoCron: 저장소 예약 워크플로(.github/workflows/scheduled-exit.yml)가
-  // 5분마다 실행 주소를 부른다. **브라우저 없이 도는 유일한 실행기다.**
-  // 이게 붙기 전에는 앱을 닫아 두면 하루 1회 크론이 전부라, 예약 시각에
-  // 사실상 안 나갔다.
-  const acc = accuracyNote({ appOpen: true, repoCron: true, dailyCron: true });
+  // **예전에는 세 인자가 전부 하드코딩 true였다:**
+  //
+  //   accuracyNote({ appOpen: true, repoCron: true, dailyCron: true })
+  //
+  // 아무것도 확인하지 않고 "앱을 닫아도 제 시각에 나갑니다"를 적었다.
+  // 그리고 그 약속은 사실이 아니었다 — 브라우저 없이 도는 실행기는
+  // GitHub 예약 하나뿐이었고, 실측 간격은 중앙값 50분·최대 10시간인데
+  // 유예는 30분이다. 유예를 넘긴 예약은 **영원히 나가지 않는다.**
+  //
+  // 지금은 서버가 사실을 준다: 워커가 살아 있는가 · **이미 놓친 예약이
+  // 몇 건인가.** 판정은 `scheduledExitRunnerOf`에 있고 테스트가 붙어 있다.
+  const [runner, setRunner] = useState<any>(null);
+  const acc = scheduledExitRunnerOf({
+    workerLastSeenMs: runner?.workerLastSeenMs ?? null,
+    overdue: runner?.overdue ?? null,
+    nowMs: Date.now(),
+    appOpen: true,
+  });
 
   const load = useCallback(async () => {
     if (!auth) { setRows(null); setLoadErr('로그인이 필요합니다'); return; }
@@ -64,7 +77,12 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
         headers: { Authorization: auth },
       });
       const j = await r.json();
-      if (j?.ok) { setRows(Array.isArray(j.pending) ? j.pending : []); setLoadErr(''); }
+      if (j?.ok) {
+        setRows(Array.isArray(j.pending) ? j.pending : []);
+        // **못 받았으면 null 그대로.** 화면이 "확인하지 못했습니다"를 말한다.
+        setRunner(j?.runner ?? null);
+        setLoadErr('');
+      }
       else setLoadErr(errorTextOf(j, '예약을 읽지 못했습니다'));
     } catch (e: any) { setLoadErr(`예약을 읽지 못했습니다 (${e?.message || e})`); }
   }, [auth]);
@@ -201,12 +219,12 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
         fontSize: FS.micro,
       }}>
         {acc.text}
-        {acc.canBeOnTime && (
-          <div style={{ color: C.faint, marginTop: 4 }}>
-            앱을 닫아도 제 시각에 나가게 하려면 외부 스케줄러가 필요합니다
-            (분 단위로 <code>/api/autotrade/scheduled-exit</code>를 <code>x-admin-secret</code>과 함께 호출).
-          </div>
-        )}
+        {/* **사용자가 할 일을 여기에 적지 않는다.**
+            예전에는 "분 단위로 /api/autotrade/scheduled-exit를
+            x-admin-secret과 함께 호출하세요"가 적혀 있었다 — 그건
+            사용자에게 스케줄러를 붙이라고 시키는 문장이다. 이제 서버가
+            한다. 남는 것은 시스템이 한 일과, 못 한 이유뿐이다. */}
+        <div style={{ color: C.faint, marginTop: 4 }}>{acc.detail}</div>
       </div>
 
       <div style={{ color: C.faint, fontSize: FS.micro }}>

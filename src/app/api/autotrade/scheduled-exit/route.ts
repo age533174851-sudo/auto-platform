@@ -102,8 +102,45 @@ export async function GET(req: NextRequest) {
           : error.message,
       }, { status: missing ? 503 : 500 });
     }
-    return NextResponse.json({ ok: true, pending: data || [] },
-      { headers: { 'Cache-Control': 'no-store' } });
+    // ── 제 시각에 나갈 수 있는가 — **값으로 답한다** ──
+    //
+    // 화면은 이걸 `accuracyNote({ appOpen: true, repoCron: true, ... })`로
+    // 답하고 있었다. 세 인자가 전부 하드코딩 true다 — 아무것도 확인하지
+    // 않고 "앱을 닫아도 제 시각에 나갑니다"를 적었다.
+    //
+    // 이제 두 가지 사실을 준다: 워커가 살아 있는가 · **이미 놓친 예약이
+    // 몇 건인가.** 놓친 것이 있으면 그게 최종 답이다.
+    let workerLastSeenMs: number | null = null;
+    try {
+      const { data: hb, error: hbErr } = await (sb as any).from('worker_heartbeat')
+        .select('last_seen').order('last_seen', { ascending: false }).limit(1);
+      if (hbErr) throw new Error(hbErr.message);
+      const row0 = Array.isArray(hb) && hb.length ? hb[0] : null;
+      const t = row0 == null ? NaN : Date.parse(String(row0.last_seen ?? ''));
+      workerLastSeenMs = Number.isFinite(t) ? t : null;
+    } catch {
+      // **못 읽은 것을 '워커 없음'으로 적지 않는다.** null이면 화면이
+      // "확인하지 못했습니다"라고 말한다.
+      workerLastSeenMs = null;
+    }
+
+    let overdue: number | null = null;
+    try {
+      const { overdueExitsOf } = await import('@/lib/engine/scheduledExitRunner');
+      const { data: live, error: liveErr } = await (sb as any).from('scheduled_exits')
+        .select('run_at, fired_at, enabled')
+        .eq('user_id', uid).is('fired_at', null).eq('enabled', true);
+      if (liveErr) throw new Error(liveErr.message);
+      overdue = overdueExitsOf(live as any, Date.now(), DEFAULT_GRACE_MS);
+    } catch { overdue = null; }   // 못 셌으면 0이 아니라 null이다
+
+    return NextResponse.json({
+      ok: true,
+      pending: data || [],
+      // **화면이 지어내지 않게 사실만 준다.** null은 '못 읽었다'이지
+      // '없다'가 아니다.
+      runner: { workerLastSeenMs, overdue, graceMs: DEFAULT_GRACE_MS },
+    }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   const started = Date.now();
@@ -134,6 +171,8 @@ export async function GET(req: NextRequest) {
 
   const list = Array.isArray(rows) ? rows : [];
   const results: any[] = [];
+  /** 유예를 넘겨 나가지 못한 예약 수 */
+  let staleCount = 0;
 
   for (const row of list) {
     const runAtMs = row?.run_at ? new Date(row.run_at).getTime() : null;
@@ -144,6 +183,9 @@ export async function GET(req: NextRequest) {
     }, now, DEFAULT_GRACE_MS);
 
     if (due.verdict === 'waiting') continue;      // 아직 — 건드리지 않는다
+    // **유예를 넘긴 것을 센다.** 이게 "실행기가 제때 안 왔다"의 직접
+    // 증거다. 세지 않으면 화면도 운영 화면도 그 사실을 알 방법이 없다.
+    if (due.verdict === 'stale') staleCount += 1;
 
     // ── 선점 ──
     //
@@ -306,6 +348,8 @@ export async function GET(req: NextRequest) {
     ok: true,
     checked: list.length,
     fired: results.length,
+    // **유예를 넘겨 못 나간 예약.** 0이 아니면 실행기가 제때 안 온 것이다.
+    stale: staleCount,
     results,
     caller: byCron ? 'cron' : byAdmin ? 'external' : 'user',
     graceMs: DEFAULT_GRACE_MS,
