@@ -42,6 +42,10 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [rows, setRows] = useState<any[] | null>(null);
   const [loadErr, setLoadErr] = useState('');
+  /** 끝난 예약. **null은 '아직 안 읽음'이지 '없음'이 아니다** */
+  const [hist, setHist] = useState<any[] | null>(null);
+  const [histErr, setHistErr] = useState('');
+  const [histOpen, setHistOpen] = useState(false);
 
   // 지금 이 화면이 열려 있으니 앱 타이머는 살아 있다.
   // 외부 스케줄러가 붙었는지는 앱이 알 수 없다 — **모르는 것을 켜졌다고
@@ -63,6 +67,26 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
       if (j?.ok) { setRows(Array.isArray(j.pending) ? j.pending : []); setLoadErr(''); }
       else setLoadErr(errorTextOf(j, '예약을 읽지 못했습니다'));
     } catch (e: any) { setLoadErr(`예약을 읽지 못했습니다 (${e?.message || e})`); }
+  }, [auth]);
+
+  /**
+   * 끝난 예약(취소·발사).
+   *
+   * **지우지 않았으므로 볼 수 있어야 한다.** 예전에는 예정된 것만
+   * 조회해서, 취소한 줄이 목록에서 통째로 사라졌다 — 지운 것과
+   * 구분되지 않았다. 펼칠 때만 읽는다(기본 화면을 무겁게 하지 않는다).
+   */
+  const loadHistory = useCallback(async () => {
+    if (!auth) return;
+    setHistErr('');
+    try {
+      const r = await fetch('/api/autotrade/scheduled-exit?list=history', {
+        headers: { Authorization: auth },
+      });
+      const j = await r.json();
+      if (j?.ok) setHist(Array.isArray(j.pending) ? j.pending : []);
+      else { setHist(null); setHistErr(errorTextOf(j, '기록을 읽지 못했습니다')); }
+    } catch (e: any) { setHist(null); setHistErr(`기록을 읽지 못했습니다 (${e?.message || e})`); }
   }, [auth]);
 
   useEffect(() => { load(); }, [load]);
@@ -127,13 +151,42 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
     finally { setBusy(false); }
   };
 
-  const cancel = async (id: string) => {
+  /**
+   * 예약청산 취소.
+   *
+   * 예전에는 **응답을 아예 안 읽었다** — `await fetch()` 뒤에 바로
+   * `load()`였고 catch는 비어 있었다. 서버가 실패해도 화면에는 아무
+   * 말이 없고, 목록이 그대로인 이유를 사용자가 알 수 없었다.
+   *
+   * 그리고 확인 없이 한 번에 취소됐다. 예약청산은 "이 시각에 팔겠다"는
+   * 약속이라, 잘못 누르면 그 시각에 아무 일도 안 일어난다.
+   */
+  const cancel = async (row: any) => {
     if (!auth) return;
+    const { confirmDialog } = await import('@/lib/confirm/dialog');
+    const ok = await confirmDialog(
+      `${row?.symbol || '이'} 예약청산을 취소할까요?\n\n`
+      + '그 시각에 자동으로 팔지 않습니다.\n'
+      + '이미 열린 포지션은 그대로 남습니다 — 취소가 정리해 주지 않습니다.',
+      { title: '예약청산 취소', confirmText: '취소하기', danger: true },
+    );
+    if (!ok) return;
+
     try {
-      await fetch(`/api/autotrade/scheduled-exit?id=${encodeURIComponent(id)}`,
+      const r = await fetch(`/api/autotrade/scheduled-exit?id=${encodeURIComponent(row.id)}`,
         { method: 'DELETE', headers: { Authorization: auth } });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j?.ok) {
+        // **실패를 조용히 넘기지 않는다.** 목록만 다시 읽으면 왜 안
+        // 사라졌는지 알 방법이 없다.
+        setMsg({ ok: false, text: errorTextOf(j, `취소하지 못했습니다 (${r.status})`) });
+        return;
+      }
+      setMsg({ ok: true, text: j?.note ? `${j.message} (${j.note})` : (j?.message || '예약청산을 취소했습니다') });
       load();
-    } catch { /* 목록을 다시 읽으면 드러난다 */ }
+    } catch (e: any) {
+      setMsg({ ok: false, text: `취소하지 못했습니다 — ${e?.message || e}` });
+    }
   };
 
   return (
@@ -231,11 +284,69 @@ export const ScheduledExitPanel = memo(function ScheduledExitPanel() {
                   {at != null && at > Date.now() && ` · ${fmtGap(at - Date.now())} 뒤`}
                 </div>
               </div>
-              <button onClick={() => cancel(r.id)} style={{
+              <button onClick={() => cancel(r)} style={{
                 minHeight: 28, padding: '0 10px', borderRadius: 6, cursor: 'pointer',
                 background: 'transparent', border: `1px solid ${C.hair}`,
                 color: C.dim, fontSize: FS.micro, fontWeight: 700,
               }}>취소</button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── 끝난 예약 ──
+          취소했거나 이미 쏜 것. **지우지 않았으므로 볼 수 있어야 한다.**
+          기본은 접어 둔다 — 기본 화면에는 앞으로 일어날 일만 둔다. */}
+      <div style={{ borderTop: `1px solid ${C.hair}`, paddingTop: 7 }}>
+        <button
+          onClick={() => { const n = !histOpen; setHistOpen(n); if (n && hist == null) loadHistory(); }}
+          style={{
+            background: 'transparent', border: 'none', color: C.faint,
+            fontSize: FS.micro, fontWeight: 700, cursor: 'pointer',
+            padding: '5px 0', minHeight: 30, width: '100%', textAlign: 'left',
+          }}>
+          {histOpen ? '끝난 예약 접기 ▲' : '끝난 예약 보기 ▼'}
+        </button>
+
+        {histOpen && histErr && (
+          <div style={{ color: C.down, fontSize: FS.micro, padding: '4px 0' }}>{histErr}</div>
+        )}
+        {/* **못 읽은 것과 없는 것을 구분한다.** null은 아직 안 읽었거나
+            읽지 못한 것이고, 빈 배열이라야 '없음'이다. */}
+        {histOpen && !histErr && hist == null && (
+          <div style={{ color: C.faint, fontSize: FS.micro, padding: '4px 0' }}>불러오는 중…</div>
+        )}
+        {histOpen && !histErr && hist != null && hist.length === 0 && (
+          <div style={{ color: C.faint, fontSize: FS.micro, padding: '4px 0' }}>끝난 예약이 없습니다</div>
+        )}
+        {histOpen && !histErr && (hist ?? []).map((h: any) => {
+          const at = h?.run_at ? new Date(h.run_at).getTime() : null;
+          const done = !!h?.fired_at;
+          return (
+            <div key={h.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 0', borderTop: `1px solid ${C.hair}`, opacity: 0.72,
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: C.dim, fontSize: FS.micro, fontWeight: 700 }}>{h.symbol}</div>
+                <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 2, ...NUM }}>
+                  {at == null ? '시각 없음'
+                    : new Intl.DateTimeFormat('ko-KR', {
+                        timeZone: h.time_zone || TZ, dateStyle: 'short', timeStyle: 'short',
+                      }).format(new Date(at))}
+                  {/* 서버가 적은 결과를 그대로 쓴다. 화면이 다시 판단하지 않는다. */}
+                  {h.result ? ` · ${h.result}` : ''}
+                </div>
+                {h.detail && (
+                  <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 1, overflowWrap: 'anywhere' }}>
+                    {h.detail}
+                  </div>
+                )}
+              </div>
+              <span style={{
+                fontSize: FS.micro, fontWeight: 800, color: C.faint,
+                border: `1px solid ${C.hair}`, borderRadius: 5, padding: '2px 6px',
+              }}>{done ? '실행됨' : '취소됨'}</span>
             </div>
           );
         })}

@@ -26,6 +26,7 @@
 // 한 줄이 끼어 있었다. 그 줄을 안 친 동안 크론은 돌면서 아무 일도 하지
 // 않았고, 화면 어디에도 그 사실이 없었다.
 import { NextRequest, NextResponse } from 'next/server';
+import { scheduleStateOf } from '@/lib/autotrade/scheduleCancel';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { leverageNote } from '@/lib/engine/leverageMath';
 import { liveTradingGate } from '@/lib/engine/liveTradingGate';
@@ -65,7 +66,7 @@ export async function GET(req: NextRequest) {
   //
   // 050이 아직인 계정에서는 이 칸이 없어서 조회가 실패한다 —
   // 아래 OPTIONAL 되읽기가 그 이름을 빼고 다시 읽는다.
-  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version';
+  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version, cancelled_at';
 
   let { data: rows, error } = await (sb as any)
     .from('autotrade_schedules').select(FULL).eq('user_id', uid).order('symbol');
@@ -79,7 +80,7 @@ export async function GET(req: NextRequest) {
   // 것만 이름을 대고 멈춘다. 036과 043이 둘 다 안 돌아간 계정에서
   // margin_pct만 빼고 한 번 재시도하면 last_decision 때문에 또 실패하고,
   // 화면은 여전히 죽는다. 이름이 나올 때마다 빼고, 더 이상 안 나올 때까지 돈다.
-  const OPTIONAL = ['margin_pct', 'last_decision', 'strategy_id', 'strategy_version'];
+  const OPTIONAL = ['margin_pct', 'last_decision', 'strategy_id', 'strategy_version', 'cancelled_at'];
   const missing: string[] = [];
 
   for (let i = 0; i < OPTIONAL.length && error; i++) {
@@ -204,6 +205,13 @@ export async function GET(req: NextRequest) {
       connectionState: v.state, connectionNote: v.message, needsRebind: v.needsRebind,
       strategyId: sid,
       strategyName: sv.spec?.name ?? sid,
+      // ── 살아 있는가 · 잠깐 껐는가 · 취소했는가 ──
+      //
+      // **화면이 다시 판단하지 않는다.** `enabled`만 보면 취소와 끄기가
+      // 같아지고, 취소된 예약이 '꺼진 예약 N개' 안에 섞여 남는다.
+      // 069가 아직인 계정에서는 `cancelled_at`이 없으므로 PAUSED로 읽힌다
+      // — 그건 사실이다(취소 표식을 못 남긴 것이지 취소가 아니다).
+      state: scheduleStateOf(r),
       strategyVersion: r.strategy_version ?? sv.spec?.version ?? null,
       // 이 예약이 지금 코드로 돌 수 있는가. 못 돌면 왜 못 도는지까지.
       strategyRunnable: sv.ok,
