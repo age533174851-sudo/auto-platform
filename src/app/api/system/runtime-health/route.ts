@@ -94,9 +94,87 @@ export async function GET(req: NextRequest) {
     heals = Array.isArray(data) ? data : [];
   } catch { /* [] */ }
 
+  // ── 원장 수집이 돌고 있는가 ──
+  //
+  // "오늘 손익 확인 불가"만 보고는 원인을 못 고른다. 한 번도 수집되지
+  // 않은 것인지 · 매 회차 실패하는 것인지 · 수집기가 멈춘 것인지는
+  // 전혀 다른 일이고 대응도 다르다. 그걸 알아내는 방법이 **사람이 Fly
+  // 로그를 여는 것**뿐이었다.
+  //
+  // 표를 새로 만들지 않는다 — `ledger_ingest_state`가 이미 다 갖고 있다.
+  let ledgerIngest: any = null;
+  try {
+    const { ingestTargetsOf } = await import('@/lib/ledger/ingestTargets');
+    const { ingestHealthOf } = await import('@/lib/ledger/ingestHealth');
+
+    let targets: any = null;
+    try {
+      const { data, error } = await (sb as any).from('exchange_connections')
+        .select('id, exchange_id, is_testnet, is_active').eq('user_id', uid);
+      if (error) throw new Error(error.message);
+      targets = ingestTargetsOf(data as any);
+    } catch { targets = null; }   // **못 읽은 것을 '대상 없음'으로 적지 않는다**
+
+    let states: any = null;
+    try {
+      const { data, error } = await (sb as any).from('ledger_ingest_state')
+        .select('connection_id, env, covered_from, covered_to, last_run_at, last_written, last_error')
+        .eq('user_id', uid);
+      if (error) throw new Error(error.message);
+      states = (Array.isArray(data) ? data : []).map((r: any) => ({
+        connectionId: String(r.connection_id ?? ''),
+        env: String(r.env ?? ''),
+        coveredFromMs: Date.parse(String(r.covered_from ?? '')) || null,
+        coveredToMs: Date.parse(String(r.covered_to ?? '')) || null,
+        lastRunAtMs: Date.parse(String(r.last_run_at ?? '')) || null,
+        lastWritten: r.last_written == null ? null : Number(r.last_written),
+        lastError: r.last_error ?? null,
+      }));
+    } catch { states = null; }
+
+    ledgerIngest = ingestHealthOf({ targets, states, nowMs: Date.now() });
+  } catch (e: any) {
+    ledgerIngest = { ok: false, code: 'STATES_UNKNOWN', rows: [],
+      summary: '원장 수집 상태를 읽지 못했습니다 — 수집이 안 됐다는 뜻이 아닙니다' };
+  }
+
+  // ── 예약청산이 제 시각에 나가고 있는가 ──
+  //
+  // 워커가 살아 있는 것과 예약청산이 제때 나가는 것은 **다른 사실이다.**
+  // 브라우저 없이 도는 실행기가 GitHub 예약뿐이던 동안, 실측 간격은
+  // 중앙값 50분·최대 10시간이었고 유예는 30분이다 — 그 사이에 걸린
+  // 예약은 유예를 넘겨 도착해 영원히 나가지 않았다.
+  //
+  // **결과를 본다.** 유예를 넘겨 남아 있는 예약이 그 증거다.
+  let scheduledExit: any = null;
+  try {
+    const { scheduledExitRunnerOf, overdueExitsOf } = await import('@/lib/engine/scheduledExitRunner');
+    const { DEFAULT_GRACE_MS } = await import('@/lib/engine/scheduleExit');
+    let overdue: number | null = null;
+    try {
+      const { data, error } = await (sb as any).from('scheduled_exits')
+        .select('run_at, fired_at, enabled').eq('user_id', uid)
+        .is('fired_at', null).eq('enabled', true);
+      if (error) throw new Error(error.message);
+      overdue = overdueExitsOf(data as any, Date.now(), DEFAULT_GRACE_MS);
+    } catch { overdue = null; }   // **못 셌으면 0이 아니다**
+    const seen = worker?.last_seen ? Date.parse(String(worker.last_seen)) : NaN;
+    scheduledExit = scheduledExitRunnerOf({
+      workerLastSeenMs: Number.isFinite(seen) ? seen : null,
+      overdue, nowMs: Date.now(), appOpen: false,
+    });
+  } catch (e: any) {
+    scheduledExit = { code: 'UNKNOWN', canBeOnTime: false, browserFree: false, overdue: null,
+      text: '예약청산 실행기 상태를 확인하지 못했습니다', detail: '' };
+  }
+
   return NextResponse.json({
     ok: true,
     health,
+    // 원장 수집. **사유는 키처럼 생긴 값을 지운 뒤에 나간다.**
+    ledgerIngest,
+    // 예약청산. **"제 시각에 나간다"를 근거 없이 적지 않는다.**
+    scheduledExit,
     // **검증되지 않은 배포를 '완료'로 적지 않는다.**
     deployment: deployVerified == null ? {
       verdict: 'UNKNOWN',

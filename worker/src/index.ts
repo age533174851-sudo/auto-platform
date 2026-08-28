@@ -803,6 +803,66 @@ async function pollExitMonitor(isMain: boolean): Promise<void> {
   }
 }
 
+// ── 예약청산(시간예약) ────────────────────────────────────
+//
+// **"이 시각에 팔겠다"를 지킬 실행기가 사실상 없었다.**
+//
+// 브라우저 없이 도는 것은 `scheduled-exit.yml`(GitHub Actions) 하나뿐이고
+// `*/5 * * * *`로 적혀 있다. 실제 실행 간격을 재 보면 (29개 구간, 53시간):
+//
+//   5분 이내 0건 · 중앙값 50분 · 최대 600분 · 30분 초과 25건
+//
+// 라우트는 유예 30분을 넘긴 예약을 stale로 닫고 **주문하지 않는다.**
+// 즉 대부분의 구간에서, 그 사이에 걸린 예약은 유예를 넘겨 도착해
+// **영원히 나가지 않는다.**
+//
+// 청산 감시와 똑같이 여기서 깨운다 — 이 워커는 이미 ADMIN_SECRET을
+// 갖고 있고, 라우트는 이미 `x-admin-secret`을 받는다. **새 비밀이
+// 하나도 필요 없다.** GitHub 워크플로는 안전망으로 그대로 둔다
+// (중복은 라우트의 선점이 막는다 — 070).
+const SCHEDULED_EXIT_MS = Number(process.env.SCHEDULED_EXIT_INTERVAL_MS || 60_000);
+let lastScheduledExitMs: number | null = null;
+let scheduledExitWarned = false;
+
+async function pollScheduledExit(isMain: boolean): Promise<void> {
+  // 판정은 청산 감시와 **같은 함수**를 쓴다 — 규칙을 복제하지 않는다.
+  const plan = exitMonitorPlan({
+    lastRunMs: lastScheduledExitMs, nowMs: Date.now(),
+    intervalMs: SCHEDULED_EXIT_MS, isMain,
+    hasCredential: !!(APP_URL && APP_ADMIN_SECRET),
+  });
+  if (!plan.run) {
+    if (plan.skip === 'NO_CREDENTIAL' && !scheduledExitWarned) {
+      scheduledExitWarned = true;
+      console.error(`[scheduled-exit] ⚠ ${plan.reason} — 예약청산이 제 시각에 안 나갑니다`);
+    }
+    return;
+  }
+  lastScheduledExitMs = Date.now();
+
+  try {
+    const r = await fetch(`${APP_URL}/api/autotrade/scheduled-exit`, {
+      method: 'GET',
+      headers: { 'x-admin-secret': APP_ADMIN_SECRET, 'x-traigo-source': 'worker' },
+      signal: AbortSignal.timeout(60_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) {
+      // **실패를 조용히 넘기지 않는다.** 안 나간 청산은 되돌릴 수 없다.
+      console.error(`[scheduled-exit] ✗ HTTP ${r.status} — ${String(j?.error || j?.message || '').slice(0, 200)}`);
+      return;
+    }
+    const fired = Number(j?.fired ?? 0);
+    const stale = Number(j?.stale ?? 0);
+    // 한 것이 있을 때만 남긴다 — 매 분 찍으면 로그가 덮인다.
+    if (fired > 0 || stale > 0) {
+      console.log(`[scheduled-exit] 실행 ${fired}건${stale ? ` · 유예 초과 ${stale}건` : ''}`);
+    }
+  } catch (e: any) {
+    console.error(`[scheduled-exit] ✗ ${String(e?.message || e).slice(0, 200)}`);
+  }
+}
+
 // ── 거래소 원장 수집 ──────────────────────────────────────
 //
 // **수수료와 펀딩을 모으지 않으면 "번 것"을 말할 수 없다.**
@@ -956,6 +1016,9 @@ async function tick() {
   await pollExitMonitor(isMain);
   // **수수료·펀딩을 모아야 "번 것"을 말할 수 있다.**
   // main 락을 쥔 워커만 한다 — 같은 구간을 두 번 읽을 이유가 없다.
+  // **"이 시각에 팔겠다"는 약속을 지킬 실행기.**
+  // GitHub 예약은 중앙값 50분이라 유예 30분을 넘기는 구간이 대부분이었다.
+  await pollScheduledExit(isMain);
   await pollLedgerSync(isMain);
   // **자산 곡선은 사람이 앱을 열 때가 아니라 15분마다 남는다.**
   // 예전에는 GET이 찍어서, 밤사이 자산 변화가 통째로 비어 있었다.
