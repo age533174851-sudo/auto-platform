@@ -127,6 +127,81 @@ export async function POST(req: NextRequest) {
       results.push({ userId, env: e.env, ok: true, code: 'TAKEN',
         bucketStart: row.bucket_start, totalEquity: row.total_equity });
     }
+
+    // ── 모의투자(MOCK) ──
+    //
+    // `readUserWallets`는 **거래소 연결**에서 환경을 만든다. 모의 계좌는
+    // 거래소 연결이 없으므로 위 루프에 아예 안 들어왔다 — 그래서 MOCK
+    // 자산곡선이 한 줄도 안 찍혔고, '오늘 손익'의 기준점도 없었다.
+    //
+    // 같은 기록기에 붙인다. **환경은 여전히 섞지 않는다** — env='MOCK'으로
+    // 따로 찍히고, 합산은 어디서도 하지 않는다.
+    try {
+      const { getPaperAccount } = await import('@/lib/engine/paperStore');
+      const { paperEquityOf } = await import('@/lib/portfolio/paperAccount');
+      const pacct = await getPaperAccount(sb, userId);
+      if (pacct) {
+        const { data: popen } = await (sb as any).from('paper_positions')
+          .select('margin, quantity, fill_price, side, symbol')
+          .eq('user_id', userId).eq('status', 'open');
+        const prows = Array.isArray(popen) ? popen : [];
+
+        // 현재가를 못 받은 포지션이 하나라도 있으면 총자산이 null이 되고,
+        // `snapshotUpsert`가 그 회차를 건너뛴다 — 부분합계를 찍지 않는다.
+        const marks = new Map<string, number>();
+        await Promise.all(Array.from(new Set(prows.map((r: any) => String(r.symbol)))).map(async (sym) => {
+          try {
+            const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
+            const px = await getPremiumIndex(sym, false);
+            const v = Number(px?.markPrice);
+            if (Number.isFinite(v) && v > 0) marks.set(sym, v);
+          } catch { /* 못 받으면 null로 남는다 */ }
+        }));
+
+        const withPnl = prows.map((r: any) => {
+          const mark = marks.get(String(r.symbol)) ?? null;
+          const fill = Number(r.fill_price); const qty = Number(r.quantity);
+          return {
+            margin: r.margin,
+            unrealizedPnl: mark == null || !Number.isFinite(fill) || !Number.isFinite(qty)
+              ? null : (String(r.side) === 'LONG' ? mark - fill : fill - mark) * qty,
+          };
+        });
+        const peq = paperEquityOf({ account: pacct as any, positions: withPnl });
+
+        const prow = snapshotUpsert({
+          userId, env: 'MOCK', nowMs,
+          totalEquity: peq.totalEquity,
+          unrealizedPnl: peq.unrealizedPnl,
+          // 총자산이 null이면 위에서 이미 걸리지만, 뜻을 분명히 남긴다.
+          unpricedCount: peq.totalEquity == null ? 1 : 0,
+          intervalMs: SNAPSHOT_BUCKET_MS,
+          source: 'worker',
+        });
+        if (!prow) {
+          results.push({ userId, env: 'MOCK', ok: true, code: 'EQUITY_UNKNOWN',
+            reason: peq.note || '모의 총자산을 계산하지 못해 찍지 않았습니다 — 0으로 찍지 않습니다' });
+        } else {
+          const { error: perr } = await (sb as any).from('account_equity_snapshots')
+            .upsert(prow, { onConflict: SNAPSHOT_CONFLICT_KEY, ignoreDuplicates: false });
+          if (perr) {
+            failed++;
+            results.push({ userId, env: 'MOCK', ok: false,
+              error: `모의 자산 기록에 실패했습니다: ${String(perr.message ?? '').slice(0, 200)}` });
+          } else {
+            written++;
+            results.push({ userId, env: 'MOCK', ok: true, code: 'TAKEN',
+              bucketStart: prow.bucket_start, totalEquity: prow.total_equity });
+          }
+        }
+      }
+      // 계좌가 없으면 아무 것도 하지 않는다 — 아직 시작하지 않은 것이다.
+    } catch (e: any) {
+      // **모의 기록 실패가 실전·테스트넷 기록을 막지 않는다.**
+      results.push({ userId, env: 'MOCK', ok: false,
+        error: `모의 자산을 읽지 못했습니다: ${String(e?.message || e).slice(0, 200)}` });
+      failed++;
+    }
   }
 
   // **하나라도 못 적었으면 성공으로 적지 않는다.** 워커 로그에 남아야
