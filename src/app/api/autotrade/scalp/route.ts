@@ -248,9 +248,37 @@ export async function POST(req: NextRequest) {
   // 관문이고, SEND가 아니면 **주문을 만들지 않는다.**
   const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
   if (modeGate.disposition !== 'SEND') {
+    // ── 모의 모드면 **모의 계좌에 실제로 체결한다** ──
+    //
+    // 예전에는 여기서 그냥 200으로 끝났다 — 기록조차 없었다. 그래서
+    // 모의 자동매매를 켜면 scalp는 매 회차 "관문에 막혔다"만 남기고
+    // 모의 잔고는 영원히 그대로였다.
+    //
+    // 판정은 세 전략이 **같은 함수**를 쓴다. 각자 적으면 언젠가 한 곳만
+    // 고쳐지고, 그때 전략마다 모의 결과가 갈린다.
+    const { dispatchPaperEntry } = await import('@/lib/engine/paperDispatch');
+    // **신호가 제시한 진입가.** 못 구하면 아래 판정이 NO_PLAN으로
+    // 끝난다 — 지어낸 가격으로 체결하지 않는다.
+    const rawEntry = Number(scalp.signal?.entry);
+    const paperEntryPx = Number.isFinite(rawEntry) && rawEntry > 0 ? rawEntry : null;
+    const paper = await dispatchPaperEntry(sb, {
+      userId, mode: opMode, strategyId: 'scalp',
+      signalId: `scalp:${symbol}:${new Date().toISOString().slice(0, 13)}`,
+      plan: plan ?? null,
+      entryPrice: paperEntryPx,
+      stopLoss: paperEntryPx != null && plan
+        ? (plan.side === 'LONG'
+          ? paperEntryPx * (1 - plan.stopDistancePct / 100)
+          : paperEntryPx * (1 + plan.stopDistancePct / 100))
+        : null,
+      bucket: 'scalp',
+    });
     return NextResponse.json({
-      ...base, executed: false, blocked: 'MODE_GATE',
-      disposition: modeGate.disposition, error: modeGate.reason,
+      ...base,
+      executed: paper.code === 'FILLED',
+      paper: { code: paper.code, positionId: paper.positionId, reason: paper.reason },
+      blocked: paper.code === 'FILLED' ? null : 'MODE_GATE',
+      disposition: modeGate.disposition, error: paper.code === 'FILLED' ? null : modeGate.reason,
     }, { status: modeGate.disposition === 'BLOCK' ? 403 : 200,
          headers: { 'Cache-Control': 'no-store' } });
   }
