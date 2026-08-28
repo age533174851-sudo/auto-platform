@@ -85,6 +85,33 @@ export async function GET(req: NextRequest) {
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있게 된다.
   const usedMargin = positions.reduce((a, p) => a + (Number(p.margin) || 0), 0);
 
+  // ── 총자산 · 오늘 손익 ──
+  //
+  // **판정을 여기서 다시 적지 않는다.** 지갑에서 이미 한 번 틀렸다 —
+  // 값을 못 매긴 자산이 있는데 부분합계를 총자산이라 적었다. 같은 규칙을
+  // `paperAccount.ts`에 두고 화면·API가 그것만 읽는다.
+  const { paperEquityOf, paperTodayPnl } = await import('@/lib/portfolio/paperAccount');
+  const eq = paperEquityOf({ account: acct as any, positions: positions as any });
+
+  // 오늘의 기준점. **없으면 오늘 손익을 계산하지 않는다** — 시작 잔고로
+  // 대신 재면 그건 '오늘'이 아니라 '누적'이다.
+  let dayStartEquity: number | null = null;
+  try {
+    const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+    const { data: snap } = await (sb as any).from('account_equity_snapshots')
+      .select('total_equity, taken_at')
+      .eq('user_id', uid).eq('env', 'MOCK')
+      .gte('taken_at', dayStart.toISOString())
+      .order('taken_at', { ascending: true }).limit(1);
+    const first = Array.isArray(snap) && snap.length ? snap[0] : null;
+    const v = first == null ? null : Number((first as any).total_equity);
+    dayStartEquity = v != null && Number.isFinite(v) ? v : null;
+  } catch {
+    // **못 읽은 것을 0으로 두지 않는다.** null이면 아래에서 "기준점 없음"이 된다.
+    dayStartEquity = null;
+  }
+  const today = paperTodayPnl({ totalEquity: eq.totalEquity, dayStartEquity });
+
   return NextResponse.json({
     ok: true,
     account: {
@@ -98,6 +125,25 @@ export async function GET(req: NextRequest) {
       winCount: Number(acct.win_count) || 0,
       returnPct: initial > 0 ? ((balance - initial) / initial) * 100 : null,
     },
+    // ── 화면이 읽을 canonical 값 ──
+    //
+    // `account.balance`는 **현금**이지 총자산이 아니다. 지갑이 예전에
+    // 선물 지갑잔고 하나를 '내 총자산'이라 적었던 것과 같은 함정이다.
+    equity: {
+      state: eq.state,
+      cash: eq.cash, usedMargin: eq.usedMargin,
+      unrealizedPnl: eq.unrealizedPnl,
+      // **못 구했으면 null이다.** 화면이 0으로 그리면 안 된다.
+      totalEquity: eq.totalEquity,
+      knownCash: eq.knownCash,
+      initialBalance: eq.initialBalance,
+      realizedPnl: eq.realizedPnl,
+      totalFees: eq.totalFees,
+      returnPct: eq.returnPct,
+      currency: 'USDT',
+      note: eq.note,
+    },
+    today: { pnl: today.pnl, pct: today.pct, note: today.note, dayStartEquity },
     positions,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
@@ -129,16 +175,41 @@ export async function POST(req: NextRequest) {
       }, { status: 409 });
     }
 
-    const start = 10_000;
-    await sb.from('paper_accounts').update({
+    // ── 시작 금액을 고를 수 있다 ──
+    //
+    // 예전에는 10,000 USDT 고정이었다. 그러면 "모의투자 시작하기"가
+    // 사실상 없는 것과 같다 — 얼마로 시작할지가 곧 전략 비교의 기준이다.
+    //
+    // **장부 통화는 USDT다.** `paper_positions`의 체결가·수수료가 전부
+    // USDT이고 모의로 돌릴 전략도 USDT 선물이라, 장부 통화가 갈리면
+    // 손익이 두 벌이 된다. 원화는 화면에서 환율로 환산해 **표시만** 한다.
+    const { validateSeed } = await import('@/lib/portfolio/paperAccount');
+    const seed = body?.seed == null ? { code: 'OK' as const, value: 10_000, reason: '' }
+      : validateSeed(body.seed);
+    if (seed.code !== 'OK' || seed.value == null) {
+      return NextResponse.json({
+        ok: false, error: 'invalid_seed', code: seed.code, message: seed.reason,
+      }, { status: 400 });
+    }
+    const start = seed.value;
+
+    const { error: upErr } = await sb.from('paper_accounts').update({
       balance: start, initial_balance: start,
       total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0,
       updated_at: new Date().toISOString(),
     }).eq('user_id', uid);
+    // **실패를 성공으로 적지 않는다.** 화면이 시작됐다고 믿으면
+    // 그 뒤의 모든 숫자가 남의 계좌 값이다.
+    if (upErr) {
+      return NextResponse.json({
+        ok: false, error: 'reset_failed',
+        message: `모의 계좌를 시작하지 못했습니다 — ${String(upErr.message).slice(0, 160)}`,
+      }, { status: 500 });
+    }
 
     return NextResponse.json({
-      ok: true, action: 'reset', balance: start,
-      message: `모의 계좌를 ${start.toLocaleString()} USDT로 초기화했습니다`,
+      ok: true, action: 'reset', balance: start, currency: 'USDT',
+      message: `모의 계좌를 ${start.toLocaleString()} USDT로 시작했습니다`,
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
