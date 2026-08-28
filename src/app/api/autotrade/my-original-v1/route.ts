@@ -770,6 +770,54 @@ export async function POST(req: NextRequest) {
   // `protectionPolicy: 'REQUIRED'` — 손절을 못 걸면 **방금 연 포지션을
   // 즉시 되돌린다.** 아무도 안 보는 시각에 100배 포지션이 보호 없이
   // 남는 것보다 낫다.
+  // ── 모드 관문 ──
+  //
+  // **이 라우트에는 이 관문이 아예 없었다.** 위에서 막는 것은
+  // LIVE·SHADOW_LIVE뿐이라, 사용자가 자동매매 화면에서 '모의'를 골라
+  // `mode: 'PAPER'`로 예약해도 여기까지 그대로 내려와
+  // `executeOrder(mode: 'TESTNET')`로 **거래소 테스트넷에 실주문**이
+  // 나갔다. 실제 돈은 아니지만, 사용자가 고르지 않은 계좌에서 주문이
+  // 나가는 것은 그 자체가 사고다.
+  //
+  // 다른 두 전략과 **같은 함수**로 막는다.
+  {
+    const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
+    const opMode = fromLegacyMode(mode);
+    const modeGate = gateOrder(opMode, Number(notionalUsd) || 0);
+    if (modeGate.disposition !== 'SEND') {
+      // 모의 모드면 **모의 계좌에 체결한다.** 판단과 관문은 이미 끝났고
+      // 여기서 갈리는 것은 어디로 체결하는가 하나뿐이다.
+      const { dispatchPaperEntry } = await import('@/lib/engine/paperDispatch');
+      const paper = await dispatchPaperEntry(sb, {
+        userId, mode: opMode, strategyId: STRATEGY_MY_ORIGINAL_V1,
+        signalId: `${STRATEGY_MY_ORIGINAL_V1}:${wv.tradingDay}`,
+        // riskManager의 계획 대신 이 전략이 만든 값을 그대로 쓴다 —
+        // 거래소 경로가 쓰는 것과 **같은 수량·같은 배율·같은 손절**이다.
+        plan: {
+          symbol, side: sig.side,
+          quantity, positionSize: notionalUsd,
+          leverage: REQUESTED_LEVERAGE, requiredMargin: marginUsd,
+          liquidationPrice: 0, approved: true,
+          stopDistancePct: 0, effectiveStopPct: 0,
+          riskAmount: 0, riskAmountWithCosts: 0, liquidationDistancePct: 0, notes: [],
+        } as any,
+        entryPrice: Number.isFinite(Number(entryRef)) && Number(entryRef) > 0
+          ? Number(entryRef) : null,
+        stopLoss: prices.stop ?? null,
+        takeProfit: prices.takeProfit ?? null,
+        bucket: STRATEGY_MY_ORIGINAL_V1,
+      });
+      return NextResponse.json({
+        ...base,
+        executed: paper.code === 'FILLED',
+        paper: { code: paper.code, positionId: paper.positionId, reason: paper.reason },
+        disposition: modeGate.disposition,
+        reasonMode: modeGate.reason,
+      }, { status: modeGate.disposition === 'BLOCK' ? 403 : 200,
+           headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   try {
     const { executeOrder } = await import('@/lib/engine/orderExecutor');
     const { tagStrategy } = await import('@/lib/strategies/ledger');

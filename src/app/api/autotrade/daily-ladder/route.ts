@@ -348,6 +348,36 @@ export async function POST(req: NextRequest) {
   // 기록한다.** 기록하지 않으면 그냥 꺼둔 것과 같아서, 나중에 "그때 진짜
   // 보냈으면 어떻게 됐나"를 대조할 수가 없다.
   if (modeGate.disposition !== 'SEND') {
+    // ── 모의 모드면 **모의 계좌에 실제로 체결한다** ──
+    //
+    // 예전에는 여기서 live_orders에 INTENT 한 줄만 적고 끝났다. 그래서
+    // 모의 자동매매를 켜도 모의 잔고와 손익이 영원히 그대로였다 —
+    // 사용자는 자동매매가 도는 줄 알고, 성적표는 백지다.
+    //
+    // 판단·관문은 위에서 전부 끝났다. 여기서 갈리는 것은 **어디로
+    // 체결하는가** 하나뿐이다.
+    const { dispatchPaperEntry } = await import('@/lib/engine/paperDispatch');
+    const lastCloseForPaper = bars?.closes?.[bars.closes.length - 1];
+    const paperEntryPx = Number.isFinite(lastCloseForPaper) && Number(lastCloseForPaper) > 0
+      ? Number(lastCloseForPaper) : null;
+    const paper = await dispatchPaperEntry(sb, {
+      userId, mode: opMode, strategyId: 'daily-ladder',
+      signalId: `daily-ladder-${result.ladder?.tradeDate || new Date().toISOString().slice(0, 10)}-${symbol}`,
+      plan: result.plan ?? null,
+      // **체결 기준가는 실제로 읽은 마지막 종가다.** 없으면 아래
+      // 판정이 NO_PLAN으로 끝난다 — 지어낸 가격으로 체결하지 않는다.
+      entryPrice: paperEntryPx,
+      // 손절가는 거래소 경로와 **같은 기준**으로 되돌려 계산한다
+      // (마지막 종가 ± 손절거리). 두 경로가 다른 손절을 쓰면 모의 성적이
+      // 실전 성적을 예측하지 못한다.
+      stopLoss: paperEntryPx != null && result.plan
+        ? (result.plan.side === 'LONG'
+          ? paperEntryPx * (1 - result.plan.stopDistancePct / 100)
+          : paperEntryPx * (1 + result.plan.stopDistancePct / 100))
+        : null,
+      bucket: 'daily-ladder',
+    });
+
     let recorded = false;
     if (modeGate.disposition === 'RECORD' && result.plan) {
       const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
@@ -380,7 +410,11 @@ export async function POST(req: NextRequest) {
     await releaseReservation(sb, result.ladder?.reservationId);
 
     return NextResponse.json({
-      ...base, mode: opMode, executed: false,
+      ...base, mode: opMode,
+      // **모의 체결도 체결이다.** 거짓으로 적으면 화면이 "아무 일도
+      // 없었다"로 읽고, 실제로는 모의 포지션이 열려 있다.
+      executed: paper.code === 'FILLED',
+      paper: { code: paper.code, positionId: paper.positionId, reason: paper.reason },
       disposition: modeGate.disposition,
       shadowRecorded: recorded,
       reasonMode: modeGate.reason,

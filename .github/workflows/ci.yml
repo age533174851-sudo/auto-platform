@@ -264,6 +264,16 @@ jobs:
       # 나갑니다"를 적고 있었다.
       - name: 예약청산 실행기 (근거 없이 "제 시각"을 적지 않는다)
         run: node scripts/check-scheduled-exit-runner.mjs
+      # ── 모의 자동매매 ──
+      #
+      # '모의'로 켠 예약이 전략마다 다른 일을 했다:
+      #   daily-ladder   live_orders에 의도 한 줄, 모의 계좌는 그대로
+      #   scalp          아무것도 안 함
+      #   my-original-v1 모드 관문이 없어 테스트넷 실주문
+      #
+      # 셋 중 어느 것도 "모의 계좌에 체결한다"가 아니었다.
+      - name: 모의 자동매매 배선 (모의는 모의 계좌로)
+        run: node scripts/check-paper-autotrade.mjs
 
       # ── GET이 쓰는 경로 ──
       #
