@@ -888,7 +888,12 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 // ─────────────────────────────────────────────────────────────
 // AutoTradeLogPanel — 실시간 자동매매 실행 로그 + 모의 잔고
 // ─────────────────────────────────────────────────────────────
-import { loadLogs, clearLogs, loadPaperBalance, resetPaperBalance } from '@/lib/autotrade/store';
+import { loadLogs, clearLogs } from '@/lib/autotrade/store';
+// **모의 잔고는 서버에서만 온다.** 예전에는 loadPaperBalance()로
+// localStorage 원화 장부를 읽어 '모의 잔고'라고 적었다 — 지갑 MOCK 탭과
+// 다른 숫자가 나오는 자리였다.
+import { paperViewOf } from '@/lib/portfolio/paperView';
+import { watchAuthToken } from '@/lib/auth/authToken';
 import { calcPerformance, calcStrategyPerformance } from '@/lib/autotrade/performance';
 import { attributionOf, rowsWithResidual, topMoversOf } from '@/lib/portfolio/attribution';
 import { timeWeightedReturn, moneyWeightedReturn, naiveCheck, pnlBreakdown } from '@/lib/portfolio/returns';
@@ -898,7 +903,29 @@ import { Wallet, ListChecks, Trash2, RefreshCw, AlertCircle, CheckCircle2, Minus
 
 function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a: any, dest?: string) => void; currency?: string } = {}) {
   const [logs, setLogs]    = useState<ExecutionLog[]>([]);
-  const [balance, setBalance] = useState(loadPaperBalance());
+  // 서버 PAPER 장부. **localStorage를 읽지 않는다** — 읽지 않으므로
+  // 로컬 값이 서버 값을 덮을 수 없다.
+  const [paperAuth, setPaperAuth] = useState<string | null>(null);
+  const [paperPayload, setPaperPayload] = useState<any>(null);
+  const [paperLoaded, setPaperLoaded] = useState(false);
+  useEffect(() => watchAuthToken(setPaperAuth), []);
+  useEffect(() => {
+    if (paperAuth == null) return;
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/paper/account', {
+          headers: paperAuth ? { Authorization: paperAuth } : undefined,
+        });
+        const j = await r.json().catch(() => null);
+        if (alive) setPaperPayload(j);
+      } catch {
+        if (alive) setPaperPayload(null);   // 못 읽은 것을 0으로 두지 않는다
+      } finally { if (alive) setPaperLoaded(true); }
+    })();
+    return () => { alive = false; };
+  }, [paperAuth]);
+  const paper = paperViewOf({ loaded: paperLoaded, payload: paperPayload });
   const [filter, setFilter] = useState<'all'|'triggered'|'skipped'|'error'>('all');
   const [todayPnL, setTodayPnL] = useState(() => getTodayPnL());
   const [guard, setGuard] = useState(() => checkRiskGuard());
@@ -907,7 +934,6 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
 
   const refresh = useCallback(() => {
     setLogs(loadLogs());
-    setBalance(loadPaperBalance());
     setTodayPnL(getTodayPnL());
     setGuard(checkRiskGuard());
     setRiskMode(loadRiskSettings().mode);
@@ -931,8 +957,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
       refresh();
     } catch {}
   }, [refresh]);
-  const positionCount = Object.keys(balance.positions || {}).length;
-  const totalPositionVal = Object.entries(balance.positions || {}).reduce((acc, [_, p]: any) => acc + (p.qty * p.avgPrice), 0);
+  const positionCount = paper.positions.length;
 
   return (
     <div style={{marginBottom:12}}>
@@ -1218,69 +1243,58 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
         </Card>
       )}
 
-      {/* 모의 잔고 카드 */}
+      {/* ── 모의 잔고 카드 ──
+          **서버 PAPER 장부에서만 온다.** 예전에는 localStorage의 원화
+          장부를 읽어 '모의 잔고'라고 적었고, 지갑 MOCK 탭은 서버를 읽었다 —
+          같은 계좌를 두 화면이 다른 숫자로 보여 줬다. */}
       <Card style={{padding:'14px 16px',marginBottom:10, borderLeft:`3px solid ${T.acl}`}}>
         <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
           <Wallet size={14} strokeWidth={2.2} color={T.acl}/>
           <span style={{color:T.txt,fontWeight:800,fontSize:13}}>모의 잔고 (Paper)</span>
-          <button onClick={async () => {
-              if ((await confirmDialog('모의 잔고를 초기화하시겠습니까? (KRW 1,000만원 + 포지션 모두 청산)', { danger: true }))) {
-                resetPaperBalance(); refresh();
-              }
-            }}
-            aria-label="잔고 초기화"
-            style={{marginLeft:'auto',background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:6,padding:'4px 8px',fontSize:10,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:3}}>
-            <RefreshCw size={10} strokeWidth={2.4}/>초기화
-          </button>
+          <span style={{marginLeft:'auto',color:T.muted,fontSize:9}}>USDT · 서버 장부</span>
         </div>
+
+        {paper.code !== 'READY' ? (
+          // **없는 숫자를 0으로 그리지 않는다.** 못 읽음·미시작·조회 중을
+          // 각각 다른 문장으로 말한다.
+          <div style={{color:paper.code==='UNREADABLE'?T.ylw:T.muted,fontSize:10,lineHeight:1.6}}>
+            {paper.note}
+            {paper.code==='NOT_STARTED' && <div style={{marginTop:4}}>모의투자 화면에서 시작할 수 있습니다.</div>}
+          </div>
+        ) : (
+        <>
         <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
           <div style={{background:T.alt,padding:'8px 10px',borderRadius:8,border:`1px solid ${T.border}`}}>
             <div style={{color:T.muted,fontSize:9,marginBottom:2}}>현금</div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {cvt(Math.floor(balance.krw), currency)}
+              {paper.cash==null?'확인 불가':paper.cash.toLocaleString('ko-KR',{maximumFractionDigits:2})}
             </div>
           </div>
           <div style={{background:T.alt,padding:'8px 10px',borderRadius:8,border:`1px solid ${T.border}`}}>
-            <div style={{color:T.muted,fontSize:9,marginBottom:2}}>보유 {positionCount}개</div>
+            <div style={{color:T.muted,fontSize:9,marginBottom:2}}>보유 {positionCount}개 · 증거금</div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {cvt(Math.floor(totalPositionVal), currency)}
+              {paper.usedMargin==null?'확인 불가':paper.usedMargin.toLocaleString('ko-KR',{maximumFractionDigits:2})}
             </div>
           </div>
-          <div style={{background:balance.totalPnL>=0?A(T.grn,'15'):A(T.red,'15'),padding:'8px 10px',borderRadius:8,border:`1px solid ${balance.totalPnL>=0?T.grn:T.red}40`}}>
-            <div style={{color:balance.totalPnL>=0?T.grn:T.red,fontSize:9,marginBottom:2}}>누적 PnL</div>
-            <div style={{color:balance.totalPnL>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {balance.totalPnL>=0?'+':''}{cvt(Math.abs(Math.floor(balance.totalPnL)), currency)}
+          <div style={{background:(paper.realizedPnl??0)>=0?A(T.grn,'15'):A(T.red,'15'),padding:'8px 10px',borderRadius:8,border:`1px solid ${(paper.realizedPnl??0)>=0?T.grn:T.red}40`}}>
+            <div style={{color:(paper.realizedPnl??0)>=0?T.grn:T.red,fontSize:9,marginBottom:2}}>실현손익</div>
+            <div style={{color:(paper.realizedPnl??0)>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+              {paper.realizedPnl==null?'확인 불가':`${paper.realizedPnl>=0?'+':''}${paper.realizedPnl.toLocaleString('ko-KR',{maximumFractionDigits:2})}`}
             </div>
           </div>
         </div>
         {positionCount > 0 && (
           <div style={{marginTop:8,fontSize:10,color:T.muted}}>
-            보유: {Object.entries(balance.positions).map(([asset, p]: any) => `${asset} ${p.qty.toFixed(4)}@${cvt(Math.floor(p.avgPrice), currency)}`).join(', ')}
+            보유: {paper.positions.map(p => `${p.symbol??'?'} ${p.quantity==null?'?':p.quantity.toFixed(6)}`).join(', ')}
           </div>
         )}
-        {/* ── 이 '누적 PnL'을 수익률로 읽으면 안 되는 이유 ──
-            잔고 증가만으로 계산한 수익률은 입출금이 있으면 틀린다. 그리고
-            지금 이 화면은 수수료·펀딩비를 아예 세지 않는다 — 그 둘을 0으로
-            치고 더하면 순손익이 언제나 실제보다 좋게 나온다.
-
-            그 사실을 화면이 직접 말한다. 숫자를 지우는 것보다 무엇이
-            빠졌는지 적는 쪽이 낫다. */}
-        {(() => {
-          const twr = timeWeightedReturn([]);
-          const mwr = moneyWeightedReturn([]);
-          const check = naiveCheck(balance.krw - balance.totalPnL, balance.krw + totalPositionVal, twr, mwr);
-          const parts = pnlBreakdown({ realized: balance.totalPnL, unrealized: 0, fees: null, funding: null });
-          const notes = [
-            !check.safeToShowNaive ? '입출금을 반영한 시간가중 수익률(TWR)을 아직 계산하지 않습니다 — 이 숫자는 입출금이 있으면 왜곡됩니다' : '',
-            parts.missing.length > 0 ? `${parts.missing.join(' · ')}를 세지 않아 순손익이 실제보다 좋게 나옵니다` : '',
-          ].filter(Boolean);
-          if (notes.length === 0) return null;
-          return (
-            <div style={{marginTop:8,background:A(T.ylw,'10'),border:`1px solid ${A(T.ylw,'25')}`,borderRadius:8,padding:'7px 9px',color:T.ylw,fontSize:9,lineHeight:1.55}}>
-              {notes.map((n,i)=>(<div key={i}>⚠️ {n}</div>))}
-            </div>
-          );
-        })()}
+        {/* 이 화면은 실현손익만 보여 준다. 총자산·오늘 손익·자산곡선은
+            지갑의 모의 탭이 **같은 장부**로 그린다. */}
+        <div style={{marginTop:8,fontSize:9,color:T.muted,lineHeight:1.55}}>
+          지갑의 모의 탭과 같은 장부입니다. 총자산·오늘 손익은 그쪽에서 봅니다.
+        </div>
+        </>
+        )}
       </Card>
 
       {/* 실행 로그 헤더 */}

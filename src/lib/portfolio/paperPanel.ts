@@ -14,6 +14,9 @@
 //   2. **못 구한 값을 0으로 그리지 않는다.** 0은 '없다'이고 실패는 '모른다'다
 //   3. **환율이 없으면 원화를 적지 않는다.** 달러 숫자에 ₩만 붙이지 않는다
 import { moneyView, type FxRate } from './walletMoney';
+// **두 화면이 같은 정규화기를 쓴다.** 여기서 갈리면 지갑과 자동매매가
+// 다른 잔고를 보여 준다 — 5A가 닫으려는 바로 그 고장이다.
+import { paperViewOf } from './paperView';
 import type { Readiness } from './wallet';
 
 export type PaperPanelCode =
@@ -92,6 +95,10 @@ export function paperPanelOf(i: {
     };
   }
 
+  // **지갑도 자동매매 화면과 같은 값을 읽는다.** 아래 판정은 전부
+  // 이 뷰에서 나온다 — 두 화면이 다른 숫자를 보여 줄 통로를 없앤다.
+  const view = paperViewOf({ loaded: true, payload: i?.paper ?? null });
+
   const p = i?.paper;
   if (p == null) {
     // **응답은 왔는데 모의 블록이 없다.** 서버가 옛 버전이거나 오류다 —
@@ -136,14 +143,16 @@ export function paperPanelOf(i: {
   }
 
   const today = p?.today ?? {};
+  // **값은 정규화기에서만 온다.** 여기서 다시 꺼내면 자동매매 화면과
+  // 갈릴 수 있고, 갈리는 순간 어느 쪽이 진짜인지 알 방법이 없어진다.
   const pick: Record<string, number | null> = {
-    total: val(eq.totalEquity),
-    cash: val(eq.cash),
-    positionMargin: val(eq.usedMargin),
-    unrealized: val(eq.unrealizedPnl),
-    realized: val(eq.realizedPnl),
-    fees: val(eq.totalFees),
-    today: val(today.pnl),
+    total: view.totalEquity,
+    cash: view.cash,
+    positionMargin: view.usedMargin,
+    unrealized: view.unrealizedPnl,
+    realized: view.realizedPnl,
+    fees: view.totalFees,
+    today: view.todayPnl,
   };
   const why: Record<string, string> = {
     total: String(eq.note || ''),
