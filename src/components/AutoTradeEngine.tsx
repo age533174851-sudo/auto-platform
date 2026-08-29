@@ -4,7 +4,6 @@ import { errorTextOf } from '@/lib/http/errorText';
 import { listStrategies } from '@/lib/strategies/store';
 import {
   loadLogs, saveLog, getLastEvaluatedAt, setLastEvaluatedAt,
-  paperBuy, paperSell, checkPaperExits, getOpenPositions,
 } from '@/lib/autotrade/store';
 import { checkRiskGuard, autoDisableAllStrategies, recordTradePnL, recordTradeResult } from '@/lib/risk/guard';
 import type { ExecutionLog } from '@/lib/autotrade/types';
@@ -45,45 +44,15 @@ export default function AutoTradeEngine() {
           if (fxd?.rates?.USDKRW && fxd.rates.USDKRW > 500) usdKrw = fxd.rates.USDKRW;
         } catch {}
 
-        // SL/TP 자동청산 감시 (paper 포지션)
-        try {
-          const openPos = getOpenPositions();
-          if (openPos.length > 0) {
-            // 보유 자산 현재가 조회
-            const priceMap: Record<string, number> = {};
-            for (const p of openPos) {
-              try {
-                const pr = await fetch(`/api/prices?action=coin&symbol=${encodeURIComponent(p.asset)}`);
-                const pd = await pr.json();
-                if (pd?.price && pd.price > 0) priceMap[p.asset] = pd.price;
-              } catch {}
-            }
-            const exits = checkPaperExits(priceMap);
-            for (const ex of exits) {
-              recordTradePnL(ex.pnl);
-              recordTradeResult(ex.pnl);
-              saveLog({
-                id: `log-${Date.now()}-exit-${ex.asset}`,
-                strategyId: ex.stratId || 'auto-exit',
-                strategyName: ex.reason === 'take_profit' ? '익절 자동청산' : '손절 자동청산',
-                asset: ex.asset, timeframe: '-' as any, action: 'sell',
-                status: 'triggered', at: Date.now(), mode: 'paper',
-                conditionsAll: 1, conditionsPass: 1, conditionDetails: [],
-                indicators: {} as any,
-                filledPrice: ex.price, filledQuantity: ex.qty,
-                reason: `${ex.reason === 'take_profit' ? '✅ 익절' : '🛑 손절'} 청산 · PnL ${ex.pnl >= 0 ? '+' : ''}${Math.floor(ex.pnl).toLocaleString('ko-KR')}원`,
-              });
-              if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-                try {
-                  new Notification(`TRAIGO — ${ex.reason === 'take_profit' ? '익절' : '손절'} 자동청산`, {
-                    body: `${ex.asset} @ ${ex.price.toLocaleString('ko-KR')} · PnL ${ex.pnl >= 0 ? '+' : ''}${Math.floor(ex.pnl).toLocaleString('ko-KR')}원`,
-                    icon: '/icon-192.png',
-                  });
-                } catch {}
-              }
-            }
-          }
-        } catch {}
+        // ── 브라우저가 TP/SL을 감시하지 않는다 ──
+        //
+        // 예전에는 여기서 로컬 포지션의 익절·손절을 브라우저가 판단해
+        // 청산했다. **탭을 닫으면 그 감시가 멈춘다** — 그 상태로 열린
+        // 포지션은 아무도 지키지 않는다. 그리고 그 체결은 서버 PAPER
+        // 장부가 아니라 localStorage에 쌓여, 지갑 MOCK 탭과 다른 숫자가 됐다.
+        //
+        // 모의 포지션의 청산도 서버가 본다(exit-monitor · paperDispatch).
+
 
         // 리스크 가드 — 일일 한도/연속 손실/쿨다운 체크
         const guard = checkRiskGuard();
@@ -306,23 +275,23 @@ export default function AutoTradeEngine() {
               continue;
             }
 
-            // paper 모드 — 모의 체결
-            const amount = strat.order.amount;
-            const result = strat.action === 'buy'
-              ? paperBuy(strat.asset, price, amount, {
-                  stopLossPct:   strat.risk?.stopLossPct,
-                  takeProfitPct: strat.risk?.takeProfitPct,
-                  stratId:       strat.id,
-                })
-              : paperSell(strat.asset, price, amount);
-
-            // 매도 체결 시 PnL을 일일/연속 카운터에 기록
-            // (paperSell만 pnl 반환. paperBuy는 진입이라 pnl 없음)
-            if (result.ok && strat.action === 'sell' && typeof (result as any).pnl === 'number') {
-              const pnl = (result as any).pnl;
-              recordTradePnL(pnl);
-              recordTradeResult(pnl);
-            }
+            // ── 모의도 브라우저가 체결하지 않는다 ──
+            //
+            // 예전에는 여기서 `paperBuy`/`paperSell`로 **localStorage 원화
+            // 장부에** 체결했다. 그래서 모의계좌가 두 개였다 — 서버 PAPER
+            // (paper_accounts · USDT · 실제 전략)와 이 로컬 장부가 서로
+            // 다른 잔고를 보여 줬고, 어느 쪽이 진짜인지 알 수 없었다.
+            //
+            // 그리고 이 엔진은 **탭을 닫으면 멈춘다.** 진입만 하고 멈추면
+            // 그 포지션을 아무도 청산하지 않는다 — 실전에서 막아 둔 것과
+            // 같은 이유로 모의에서도 막는다.
+            //
+            // 모의 자동매매는 서버가 한다: 자동 → 예약에서 모드를 '모의'로
+            // 등록하면 워커가 평가하고 `paperDispatch`가 모의 계좌에 체결한다.
+            const result = { ok: false as const, reason:
+              '브라우저는 모의 체결도 하지 않습니다 — 탭을 닫으면 그 포지션을 '
+              + '아무도 청산하지 않기 때문입니다. 자동 → 예약에서 모드를 '
+              + "'모의'로 등록하면 서버가 체결합니다" };
 
             const log: ExecutionLog = {
               id:           `log-${Date.now()}-${strat.id.slice(-6)}`,
@@ -338,14 +307,12 @@ export default function AutoTradeEngine() {
               conditionsPass: evaluation.passCount,
               conditionDetails: evaluation.details,
               indicators:    snapshot,
-              filledPrice:    result.ok ? price : undefined,
-              filledAmount:   result.ok ? amount : undefined,
-              filledQuantity: result.qty,
-              reason:         result.ok
-                ? (typeof (result as any).pnl === 'number'
-                    ? `PnL ${(result as any).pnl >= 0 ? '+' : ''}${Math.floor((result as any).pnl).toLocaleString('ko-KR')}원`
-                    : undefined)
-                : result.reason,
+              // 브라우저는 체결하지 않으므로 체결 칸은 비운다.
+              // **0으로 적으면 "0원에 체결됐다"로 읽힌다.**
+              filledPrice:    undefined,
+              filledAmount:   undefined,
+              filledQuantity: undefined,
+              reason:         result.reason,
             };
             saveLog(log);
 

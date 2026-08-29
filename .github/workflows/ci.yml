@@ -275,6 +275,15 @@ jobs:
       - name: 모의 자동매매 배선 (모의는 모의 계좌로)
         run: node scripts/check-paper-autotrade.mjs
 
+      # ── 모의계좌 단일화 ──
+      #
+      # 모의계좌가 둘이었다: 서버 PAPER(USDT·실제 전략)와 브라우저
+      # localStorage(원화·자체 decide·자체 TP/SL). 자동매매 MOCK 화면과
+      # 지갑 MOCK 탭이 서로 다른 잔고를 보여 줬고, 어느 쪽이 진짜인지
+      # 알 방법이 없었다.
+      - name: 모의계좌 단일화 (진실은 서버 하나)
+        run: node scripts/check-mock-single-source.mjs
+
       # ── GET이 쓰는 경로 ──
       #
       # `/api/wallets/overview`는 GET인데 자산 스냅샷을 INSERT했다.
