@@ -14,10 +14,12 @@
 # 거래소에 올릴 수 있는 보호(지정가 손절)는 거래소에 올리는 편이 낫다 —
 # 그건 앱이 꺼져도, 이 워크플로가 멈춰도 살아 있다.
 #
-# ── 준비 ──
-# 저장소 Settings → Secrets and variables → Actions:
-#   EXIT_MONITOR_URL     예: https://auto-platform-zeta.vercel.app
-#   EXIT_MONITOR_SECRET  Vercel의 ADMIN_SECRET 과 같은 값
+# ── 인증 ──
+# `/api/watch/tick`은 `x-admin-secret`을 서버의 `ADMIN_SECRET`과 비교한다.
+# 그래서 **여기서도 `secrets.ADMIN_SECRET`을 그대로 보낸다.** 같은 비밀에
+# 이름을 둘 붙이지 않는다 — 붙이면 언젠가 갈리고, 갈린 것은 조용하다.
+#   EXIT_MONITOR_URL  예: https://auto-platform-zeta.vercel.app
+#   ADMIN_SECRET      sync-secrets가 Vercel·Fly로 밀어 넣는 그 값
 name: watch-tick
 
 on:
@@ -39,7 +41,7 @@ jobs:
       - name: 트레일링·예약 감시
         env:
           BASE:   ${{ secrets.EXIT_MONITOR_URL }}
-          SECRET: ${{ secrets.EXIT_MONITOR_SECRET }}
+          SECRET: ${{ secrets.ADMIN_SECRET }}
         run: |
           set -euo pipefail
           # 끝 슬래시를 떼어 낸다. 시크릿에 "https://x.app/"처럼 넣으면
@@ -48,7 +50,7 @@ jobs:
           # 원인을 알기 어렵다.
           BASE="${BASE%/}"
           if [ -z "${BASE:-}" ] || [ -z "${SECRET:-}" ]; then
-            echo "EXIT_MONITOR_URL 또는 EXIT_MONITOR_SECRET 시크릿이 설정되지 않았습니다."
+            echo "EXIT_MONITOR_URL 또는 ADMIN_SECRET 시크릿이 설정되지 않았습니다."
             exit 1
           fi
 
@@ -68,18 +70,11 @@ jobs:
           cat "$body"
           echo
 
-          # 조용히 지나가면 감시가 멈춘 것을 알 수 없다.
-          # 401은 시크릿이 서로 다르다는 뜻이다. 상태코드만 남기면
-          # "넣었는데 왜 안 되지"가 반복된다 — 무엇을 확인할지 적는다.
+          # 조용히 지나가면 감시가 멈춘 것을 알 수 없다. 다만 **사람이
+          # 확인할 목록을 적지 않는다** — 이름이 하나가 된 뒤의 401은
+          # 사람이 손으로 맞출 일이 아니라 동기화·배포가 밀린 것이다.
           if [ "$code" = "401" ]; then
-            echo "──────────────────────────────────────────────"
-            echo "인증 실패: GitHub의 EXIT_MONITOR_SECRET과"
-            echo "Vercel의 ADMIN_SECRET이 글자 하나까지 같아야 합니다."
-            echo "  1) Vercel에 ADMIN_SECRET이 있는지 (없으면 넣고 재배포)"
-            echo "  2) 넣은 뒤 Redeploy 했는지 (저장만으로는 반영 안 됨)"
-            echo "  3) 복사할 때 앞뒤 공백·줄바꿈이 딸려 들어갔는지"
-            echo "위 응답의 message에 어느 쪽인지 적혀 있습니다."
-            echo "──────────────────────────────────────────────"
+            echo "managed ADMIN_SECRET rejected — secret sync/deployment drift"
           fi
           if [ "$code" != "200" ]; then
             echo "감시 호출 실패 (HTTP ${code})"

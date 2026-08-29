@@ -22,10 +22,17 @@
 # 않으므로 간격이 밀리지 않는다). 간격 60분이면 15분마다 물어봐도
 # 실제 진입 기회는 한 시간에 한 번이다.
 #
-# ── 준비 ──
-# watch-tick과 **같은 시크릿을 쓴다.** 이미 넣어 뒀다면 추가 설정 없다.
-#   EXIT_MONITOR_URL     예: https://auto-platform-zeta.vercel.app
-#   EXIT_MONITOR_SECRET  Vercel의 ADMIN_SECRET 과 같은 값
+# ── 인증 ──
+# `/api/autotrade/daily-ladder`는 `x-admin-secret`을 서버의 `ADMIN_SECRET`과
+# 비교한다. 그래서 **여기서도 `secrets.ADMIN_SECRET`을 그대로 보낸다.**
+#
+# 예전에는 `secrets.EXIT_MONITOR_SECRET`이라는 다른 이름으로 같은 값을
+# 보냈다. 같은 비밀에 이름이 둘이면 언젠가 갈리고, 실제로 갈렸다 —
+# **2026-08-26부터 30회 넘게 연속 401이었고 예약 자동매매가 그동안
+# 한 번도 돌지 않았다.** sync-secrets는 `ADMIN_SECRET`을 동기화하고
+# 있었지만, 호출자가 보던 이름은 그게 아니었다.
+#   EXIT_MONITOR_URL  예: https://auto-platform-zeta.vercel.app
+#   ADMIN_SECRET      sync-secrets가 Vercel·Fly로 밀어 넣는 그 값
 name: autotrade-tick
 
 on:
@@ -49,7 +56,7 @@ jobs:
       - name: 자동매매 예약 확인
         env:
           BASE:   ${{ secrets.EXIT_MONITOR_URL }}
-          SECRET: ${{ secrets.EXIT_MONITOR_SECRET }}
+          SECRET: ${{ secrets.ADMIN_SECRET }}
         run: |
           set -euo pipefail
           # 끝 슬래시를 떼어 낸다. "https://x.app/"처럼 넣으면 "…app//api/…"가
@@ -57,7 +64,7 @@ jobs:
           # 308 한 줄만 남아 원인을 알기 어렵다.
           BASE="${BASE%/}"
           if [ -z "${BASE:-}" ] || [ -z "${SECRET:-}" ]; then
-            echo "EXIT_MONITOR_URL 또는 EXIT_MONITOR_SECRET 시크릿이 없습니다."
+            echo "EXIT_MONITOR_URL 또는 ADMIN_SECRET 시크릿이 없습니다."
             exit 1
           fi
 
@@ -73,21 +80,17 @@ jobs:
           cat "$body"
           echo
 
+          # **사람 할 일 목록을 여기에 적지 않는다.**
+          #
+          # 예전에는 401이면 "Vercel에 넣으세요 / 재배포하세요 / 공백을
+          # 확인하세요"를 출력했다. 그건 이름이 둘이라 사람이 맞춰야 했기
+          # 때문이고, 이제 이름은 하나다. 남은 401은 사람이 손으로 맞출
+          # 일이 아니라 **동기화나 배포가 밀린 것**이므로 그 사실만 적는다.
           if [ "$code" = "401" ]; then
-            echo "──────────────────────────────────────────────"
-            echo "인증 실패: GitHub의 EXIT_MONITOR_SECRET과"
-            echo "Vercel의 ADMIN_SECRET이 글자 하나까지 같아야 합니다."
-            echo "  1) Vercel에 ADMIN_SECRET이 있는지 (없으면 넣고 재배포)"
-            echo "  2) 넣은 뒤 Redeploy 했는지 (저장만으로는 반영 안 됨)"
-            echo "  3) 복사할 때 앞뒤 공백·줄바꿈이 딸려 들어갔는지"
-            echo "──────────────────────────────────────────────"
+            echo "managed ADMIN_SECRET rejected — secret sync/deployment drift"
           fi
           if [ "$code" = "503" ]; then
-            echo "──────────────────────────────────────────────"
-            echo "서버가 준비되지 않았습니다. 응답의 error를 보세요:"
-            echo "  admin_secret_missing → Vercel에 ADMIN_SECRET 넣고 재배포"
-            echo "  supabase_not_configured → Supabase 환경변수 확인"
-            echo "──────────────────────────────────────────────"
+            echo "server not ready — 응답의 error 값을 보세요 (admin_secret_missing · supabase_not_configured)"
           fi
           if [ "$code" != "200" ]; then
             echo "자동매매 호출 실패 (HTTP ${code})"
