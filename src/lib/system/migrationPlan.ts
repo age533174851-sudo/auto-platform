@@ -288,11 +288,11 @@ export function migrationEntryGate(plan: MigrationPlan | null | undefined): Entr
 // 실패를 삼키도록 우리가 직접 써 놓은 관용구다. 그래서 적용 뒤에
 // 카탈로그에 대고 다시 묻는다.
 
-export type TargetKind = 'table' | 'index' | 'column' | 'policy';
+export type TargetKind = 'table' | 'index' | 'column' | 'policy' | 'function';
 
 export interface MigrationTarget {
   kind: TargetKind;
-  /** 표 이름 (column·policy는 어느 표인지) */
+  /** 표 이름 (column·policy는 어느 표인지). **function은 표가 없어 스키마를 적는다** */
   table: string;
   /** index·column·policy의 이름. table이면 표 이름과 같다 */
   name: string;
@@ -347,6 +347,20 @@ export function migrationTargets(sql: string): MigrationTarget[] {
   scan(new RegExp(`\\bCREATE\\s+POLICY\\s+(${ident})\\s+ON\\s+(${ident})`, 'gi'), m => {
     const n = bareName(m[1]); const t = bareName(m[2]);
     if (n && t) push({ kind: 'policy', table: t, name: n });
+  });
+
+  // **함수도 확인 대상이다.**
+  //
+  // 072(모의 청산 원자 정산)는 표도 칸도 만들지 않고 함수 셋만 만든다.
+  // 그때까지 이 함수는 함수를 몰라서 대상 0개를 돌려줬고, 파이프라인은
+  // `확인할 대상 없음 (실행은 성공)`으로 적었다 — **psql이 0으로 끝났다는
+  // 것과 함수가 실제로 생겼다는 것은 다른 사실이다.**
+  //
+  // 이 저장소에서 앞으로 원자성은 대부분 함수로 들어온다. 확인하지 못한
+  // 것을 통과로 적는 자리를 여기서 닫는다.
+  scan(new RegExp(`\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+(${ident})`, 'gi'), m => {
+    const n = bareName(m[1]);
+    if (n) push({ kind: 'function', table: 'public', name: n });
   });
   return out;
 }

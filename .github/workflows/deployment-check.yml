@@ -10,8 +10,18 @@
 # 있는지, Fly Worker heartbeat가 어느 SHA를 보고하는지, 둘이 main과 같은지.
 # **인증이 필요 없는 경로다** — 여기서 부를 때 시크릿을 쓰지 않는다.
 #
-# 사람이 브라우저로 열어서 캡처해 보내는 대신, 필요할 때 눌러서 값으로
-# 받는다. 캡처는 다시 확인할 수 없고 로그는 남는다.
+# 사람이 브라우저로 열어서 캡처해 보내는 대신, 값으로 받는다. 캡처는
+# 다시 확인할 수 없고 로그는 남는다.
+#
+# ⚠ **누르는 것도 사람이 하는 일이다.**
+#
+# 이 워크플로는 오랫동안 `workflow_dispatch`뿐이었다. 그래서 배포가
+# 끝나도 아무도 안 눌렀고, 마지막 실행은 #206 시점(797639c9)에 멈춰
+# 있었다 — 그 뒤로 #207·#208·#209·#210이 main에 들어가는 동안
+# **main·Vercel·Fly가 같은 커밋인지 확인한 적이 한 번도 없다.**
+#
+# 최상위 규칙이 말하는 그대로다: 자동화할 수 있는 절차를 사람에게
+# 넘기지 않는다. fly-deploy가 끝나면 여기가 스스로 깨어난다.
 name: deployment-check
 
 on:
@@ -21,8 +31,22 @@ on:
         description: '비교할 main SHA (비우면 서버가 아는 값으로만 판정)'
         required: false
 
+  # 워커 배포가 끝난 뒤에 본다. `fly-deploy`의 마지막 단계는 워커가
+  # 살아났는지만 보고(`wait-worker-alive`), **main·Vercel·Fly 세 SHA가
+  # 같은지**는 여기서만 본다. 둘은 다른 질문이다.
+  workflow_run:
+    workflows: [fly-deploy]
+    types: [completed]
+
 jobs:
   check:
+    # 배포가 성공한 main에 대해서만 본다. 실패한 배포나 다른 브랜치를
+    # 두고 "배포가 어긋났다"고 적으면, 그 빨강은 진짜 어긋난 날의
+    # 빨강과 구별되지 않는다.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -49,5 +73,7 @@ jobs:
         env:
           # exit-monitor가 쓰는 것과 같은 주소 시크릿. **값은 안 찍는다.**
           BASE: ${{ secrets.EXIT_MONITOR_URL }}
-          MAIN: ${{ github.event.inputs.main }}
+          # 손으로 돌리면 입력값, 배포 뒤 자동이면 **그 배포가 만든 커밋**.
+          # 비워 두면 서버가 아는 값끼리만 비교하고 main과는 대조하지 않는다.
+          MAIN: ${{ github.event.inputs.main || github.event.workflow_run.head_sha }}
         run: node scripts/verify-deployment.mjs

@@ -1255,7 +1255,14 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
       {/* ── 모의 잔고 카드 ──
           **서버 PAPER 장부에서만 온다.** 예전에는 localStorage의 원화
           장부를 읽어 '모의 잔고'라고 적었고, 지갑 MOCK 탭은 서버를 읽었다 —
-          같은 계좌를 두 화면이 다른 숫자로 보여 줬다. */}
+          같은 계좌를 두 화면이 다른 숫자로 보여 줬다.
+
+          이 카드만 표시 계층으로 옮겼다. AutoPage의 나머지는 아직
+          예전 포맷이 많아 파일 전체를 잠그지 않는다 — 대신 이 구간만
+          `partial-migrated` 계약으로 잠근다
+          (scripts/check-display-layer.mjs). 표식을 지우면 검사가
+          실패한다. */}
+      {/* partial-migrated: AUTOPAGE-PAPER-CARD start */}
       <Card style={{padding:'14px 16px',marginBottom:10, borderLeft:`3px solid ${T.acl}`}}>
         <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
           <Wallet size={14} strokeWidth={2.2} color={T.acl}/>
@@ -1313,6 +1320,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
         </>
         )}
       </Card>
+      {/* partial-migrated: AUTOPAGE-PAPER-CARD end */}
 
       {/* 실행 로그 헤더 */}
       <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>

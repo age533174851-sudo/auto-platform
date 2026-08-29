@@ -140,6 +140,45 @@ const STATUS_SCREENS = [
   'src/components/pages/WalletPage.tsx',
 ];
 
+/**
+ * **일부만 옮긴 화면.**
+ *
+ * AutoPage는 파일 전체를 옮기지 않았다 — 아직 예전 포맷이 많다. 그런데
+ * 그 안의 모의 잔고 카드는 실제로 옮겼고, **그 부분이 되돌아가는 것을
+ * 아무도 막지 않고 있었다.** 실제로 이 카드에는 `(paper.realizedPnl ?? 0)
+ * >= 0`이 있어서, 손익을 못 읽으면 0으로 읽고 **이익인 것처럼 초록
+ * 박스**를 띄우고 있었다. 그 자리가 다시 열리면 안 된다.
+ *
+ * 파일 전체를 잠그면 나머지 legacy 때문에 CI가 항상 빨갛고, 항상 빨간
+ * 검사는 아무도 안 본다. 그래서 **구간만** 잠근다.
+ *
+ * 구간은 소스의 표식으로 정한다:
+ *   {(/* partial-migrated: <NAME> start *(/}  ...  {(/* ... end *(/}
+ */
+const PARTIAL_MIGRATED = [
+  {
+    file: 'src/components/pages/AutoPage.tsx',
+    region: 'AUTOPAGE-PAPER-CARD',
+    what: '모의 잔고 카드',
+    /** 이 구간에 반드시 있어야 하는 것 */
+    require: [
+      [/pnlText\(\s*paper\.realizedPnl/, '실현손익을 pnlText로 그리지 않습니다 — 부호·색이 값에서 나와야 합니다'],
+      [/paperMoney\(|moneyText\(/, '금액을 공통 포맷으로 그리지 않습니다'],
+      [/qtyText\(/, '수량을 qtyText로 그리지 않습니다'],
+    ],
+    /** 이 구간에 있으면 안 되는 것 */
+    forbid: [
+      // **가장 중요한 한 줄.** 못 읽은 손익을 0으로 읽으면 초록이 된다.
+      [/\?\?\s*0/, 'UNKNOWN을 0으로 읽습니다 — 손익을 못 읽었는데 이익처럼 초록으로 그리게 됩니다'],
+      [/\.toFixed\(/, 'toFixed로 자릿수를 직접 정합니다'],
+      [/maximumFractionDigits/, '자릿수를 직접 지정합니다'],
+      [/'확인 불가'/, "'확인 불가'를 직접 적습니다 — UNKNOWN_LABEL을 쓰세요"],
+      // `x >= 0 ? 초록 : 빨강`은 모름을 이익으로 판정하는 통로다
+      [/>=\s*0\s*\?[^\n]*grn/, '값이 0 이상인지로 색을 정합니다 — 모르는 값이 초록이 됩니다'],
+    ],
+  },
+];
+
 for (const rel of MIGRATED) {
   const src = read(rel);
   if (!src) { err(`${rel} — 파일이 없습니다`); continue; }
@@ -238,9 +277,40 @@ for (const rel of STATUS_SCREENS) {
   }
 }
 
+// ── ④ 일부만 옮긴 구간도 되돌아가지 못하게 ──
+for (const spec of PARTIAL_MIGRATED) {
+  const src = read(spec.file);
+  if (!src) { err(`${spec.file} — 파일이 없습니다`); continue; }
+
+  // 파일 자체는 표시 계층을 알아야 한다
+  if (!/from '@\/lib\/ui\/display'/.test(stripComments(src))) {
+    err(`${spec.file} — 표시 계층 import가 사라졌습니다 (${spec.what})`);
+    continue;
+  }
+
+  // **표식으로 구간을 찾는다.** 표식이 지워지면 잠금이 풀리므로 실패다.
+  const startAt = src.indexOf(`partial-migrated: ${spec.region} start`);
+  const endAt = src.indexOf(`partial-migrated: ${spec.region} end`);
+  if (startAt < 0 || endAt < 0 || endAt <= startAt) {
+    err(`${spec.file} — ${spec.region} 구간 표식이 없습니다 (${spec.what})`
+      + '\n     표식을 지우면 이 구간의 회귀를 아무도 막지 못합니다'
+      + `\n     {/* partial-migrated: ${spec.region} start *` + '/} … end 를 다시 넣으세요');
+    continue;
+  }
+  const region = stripComments(src.slice(startAt, endAt));
+
+  for (const [re, why] of spec.require) {
+    if (!re.test(region)) err(`${spec.file} · ${spec.what} — ${why}`);
+  }
+  for (const [re, why] of spec.forbid) {
+    if (re.test(region)) err(`${spec.file} · ${spec.what} — ${why}`);
+  }
+}
+
 if (bad === 0) {
   console.log(`✅ 표시 계층 유지 — 자릿수·부호·'확인 불가'·전략 이름·상태·환경은 한 곳에서 정한다`
-    + ` (옮긴 화면 ${MIGRATED.length}개 · 상태 화면 ${STATUS_SCREENS.length}개)`);
+    + ` (옮긴 화면 ${MIGRATED.length}개 · 상태 화면 ${STATUS_SCREENS.length}개`
+    + ` · 구간 잠금 ${PARTIAL_MIGRATED.length}개)`);
 } else {
   console.error('');
   console.error('   같은 값을 두 화면이 다르게 적으면 사용자는 둘 다 믿지 않습니다.');
