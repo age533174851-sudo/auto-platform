@@ -111,7 +111,17 @@ export async function closePaperPosition(
     closedAt: Date.now(),
   });
 
-  await sb.from('paper_positions').update({
+  // ── 선점: 같은 포지션을 두 번 청산하지 않는다 ──
+  //
+  // 예전에는 `read → status 확인 → update → 계좌 반영`이었다. 두 실행기가
+  // 같은 줄을 동시에 집으면 **둘 다 status를 봤을 때 'open'** 이고, 둘 다
+  // 계좌를 더한다 — 잔고·손익·수수료·매매횟수가 **두 번** 반영된다.
+  // 위의 status 검사는 경쟁을 막지 못한다(읽은 뒤에 바뀐다).
+  //
+  // 그래서 `status='open'`일 때만 바뀌는 **조건부 UPDATE**로 못 박고,
+  // 실제로 돌아온 줄이 있을 때만 계좌를 건드린다. 진 쪽은 0줄을 받고
+  // 조용히 물러난다 — 그게 멱등이다.
+  const { data: claimed, error: claimErr } = await sb.from('paper_positions').update({
     status: 'closed',
     exit_price: closed.exitPrice,
     exit_reason: closed.exitReason,
@@ -120,9 +130,18 @@ export async function closePaperPosition(
     realized_pnl: closed.realizedPnl,
     pnl_pct: closed.pnlPct,
     closed_at: new Date().toISOString(),
-  }).eq('id', positionId);
+  }).eq('id', positionId).eq('status', 'open').select('id');
 
-  // 계좌 반영
+  if (claimErr) {
+    // **실패를 성공으로 적지 않는다.** 계좌는 건드리지 않는다.
+    return { ok: false, error: `청산을 기록하지 못했습니다: ${String((claimErr as any).message ?? claimErr).slice(0, 160)}` };
+  }
+  if (!Array.isArray(claimed) || claimed.length === 0) {
+    // 다른 실행기가 먼저 닫았다. **계좌를 다시 더하지 않는다.**
+    return { ok: false, error: '이미 청산된 포지션' };
+  }
+
+  // 계좌 반영 — **선점에 성공한 쪽만 온다**
   try {
     const acct = await getPaperAccount(sb, pos.user_id);
     await sb.from('paper_accounts').update({

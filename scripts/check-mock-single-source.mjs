@@ -105,8 +105,63 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   }
 }
 
+// ── ⑥ **서버에 PAPER 청산 주체가 있다** ──
+//
+// "브라우저 청산이 없다"만 검사하면 부족하다. 브라우저에서 걷어내고
+// 서버에 아무도 없으면, 모의 자동매매는 **진입만 하고 자동청산이 안 되는**
+// 시스템이 된다. 두 조건을 같이 고정한다.
+{
+  const rel = 'src/app/api/paper/exit-monitor/route.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    if (!/paperExitPlan\s*\(/.test(code)) {
+      err(`${rel} — 청산 판정을 부르지 않습니다`);
+    }
+    if (!/closePaperPosition\s*\(/.test(code)) {
+      err(`${rel} — 청산을 실행하지 않습니다`);
+    }
+    // **모의 청산이 거래소를 건드릴 통로를 두지 않는다.**
+    for (const banned of ['executeOrder', 'placeOrder', 'orderExecutor', 'futuresAdapter']) {
+      if (code.includes(banned)) {
+        err(`${rel} — 모의 청산 경로에 거래소 주문(${banned})이 있습니다`
+          + '\n     MOCK 조작이 TESTNET/LIVE로 새는 통로입니다');
+      }
+    }
+  }
+}
+
+{
+  const rel = 'worker/src/index.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    // **정의가 아니라 호출을 본다.**
+    if (!/await\s+pollPaperExit\s*\(/.test(code)) {
+      err(`${rel} — 워커가 모의 청산 감시를 깨우지 않습니다`
+        + '\n     브라우저에서 걷어냈는데 서버에서 아무도 안 부르면'
+        + '\n     **모의 자동매매는 진입만 하고 손절이 안 걸립니다**');
+    }
+  }
+}
+
+// ── ⑦ 같은 포지션을 두 번 닫아 계좌가 두 번 반영되지 않는다 ──
+{
+  const rel = 'src/lib/engine/paperStore.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    // 조건부 UPDATE로 선점하고, 돌아온 줄을 봐야 한다.
+    if (!/\.eq\('status',\s*'open'\)[\s\S]{0,40}\.select\(/.test(code)) {
+      err(`${rel} — 청산에 선점(조건부 UPDATE)이 없습니다`
+        + '\n     read → status 확인 → update 구조는 경쟁을 막지 못합니다'
+        + '\n     두 실행기가 같은 줄을 집으면 **계좌가 두 번 반영됩니다**');
+    }
+  }
+}
+
 if (bad === 0) {
-  console.log('✅ 모의계좌 단일화 유지 — 진실은 서버 PAPER 하나, 두 화면이 같은 값을 읽는다');
+  console.log('✅ 모의계좌 단일화 유지 — 진실은 서버 PAPER 하나 · 진입도 청산도 서버가 한다');
 } else {
   console.error('');
   console.error('   같은 계좌를 두 화면이 다르게 보여 주는 것이 가장 나쁩니다.');

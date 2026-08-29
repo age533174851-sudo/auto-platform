@@ -803,6 +803,65 @@ async function pollExitMonitor(isMain: boolean): Promise<void> {
   }
 }
 
+// ── 모의 포지션 청산 감시 ──────────────────────────────────
+//
+// **모의 자동매매가 진입만 하고 청산이 안 되고 있었다.**
+//
+// #209가 PAPER 진입을 서버로 옮겼고 5A가 브라우저의 `checkPaperExits()`를
+// 걷어냈다. 그런데 열린 `paper_positions`를 주기적으로 읽어 SL/TP를 보는
+// 서버 실행자가 없었다 — `/api/autotrade/exit-monitor`는 거래소 포지션용이고
+// `/api/paper/run`은 브라우저 타이머가 깨우는 데모다.
+//
+// 청산 감시·예약청산과 같은 구조로 여기서 깨운다. 새 비밀은 필요 없다.
+// **거래소 주문은 나가지 않는다** — 그 경로에는 주문 어댑터가 아예 없다.
+const PAPER_EXIT_MS = Number(process.env.PAPER_EXIT_INTERVAL_MS || 60_000);
+let lastPaperExitMs: number | null = null;
+let paperExitWarned = false;
+
+async function pollPaperExit(isMain: boolean): Promise<void> {
+  // 판정은 청산 감시와 **같은 함수**를 쓴다 — 규칙을 복제하지 않는다.
+  const plan = exitMonitorPlan({
+    lastRunMs: lastPaperExitMs, nowMs: Date.now(),
+    intervalMs: PAPER_EXIT_MS, isMain,
+    hasCredential: !!(APP_URL && APP_ADMIN_SECRET),
+  });
+  if (!plan.run) {
+    if (plan.skip === 'NO_CREDENTIAL' && !paperExitWarned) {
+      paperExitWarned = true;
+      console.error(`[paper-exit] ⚠ ${plan.reason} — 모의 손절·익절이 돌지 않습니다`);
+    }
+    return;
+  }
+  lastPaperExitMs = Date.now();
+
+  try {
+    const r = await fetch(`${APP_URL}/api/paper/exit-monitor`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-secret': APP_ADMIN_SECRET,
+        'x-traigo-source': 'worker',
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) {
+      // **실패를 조용히 넘기지 않는다.** 안 닫힌 손절은 되돌릴 수 없다.
+      console.error(`[paper-exit] ✗ HTTP ${r.status} — ${String(j?.error || j?.message || '').slice(0, 200)}`);
+      return;
+    }
+    const closed = Number(j?.closed ?? 0);
+    const unknown = Number(j?.unknownMarks ?? 0);
+    // 한 것이 있을 때만 남긴다 — 매 분 찍으면 로그가 덮인다.
+    if (closed > 0 || unknown > 0) {
+      console.log(`[paper-exit] 청산 ${closed}건${unknown ? ` · 시세 미확인 ${unknown}건` : ''}`);
+    }
+  } catch (e: any) {
+    console.error(`[paper-exit] ✗ ${String(e?.message || e).slice(0, 200)}`);
+  }
+}
+
 // ── 예약청산(시간예약) ────────────────────────────────────
 //
 // **"이 시각에 팔겠다"를 지킬 실행기가 사실상 없었다.**
@@ -1018,6 +1077,8 @@ async function tick() {
   // main 락을 쥔 워커만 한다 — 같은 구간을 두 번 읽을 이유가 없다.
   // **"이 시각에 팔겠다"는 약속을 지킬 실행기.**
   // GitHub 예약은 중앙값 50분이라 유예 30분을 넘기는 구간이 대부분이었다.
+  // **모의 포지션의 손절·익절.** 브라우저가 보던 것을 서버가 본다.
+  await pollPaperExit(isMain);
   await pollScheduledExit(isMain);
   await pollLedgerSync(isMain);
   // **자산 곡선은 사람이 앱을 열 때가 아니라 15분마다 남는다.**
