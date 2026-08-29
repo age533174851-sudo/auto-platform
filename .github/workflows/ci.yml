@@ -281,6 +281,9 @@ jobs:
       # localStorage(원화·자체 decide·자체 TP/SL). 자동매매 MOCK 화면과
       # 지갑 MOCK 탭이 서로 다른 잔고를 보여 줬고, 어느 쪽이 진짜인지
       # 알 방법이 없었다.
+      - name: UI Inventory 일관 (registry가 진실 · 문서는 생성물)
+        run: node scripts/check-ui-inventory.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

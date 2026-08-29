@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
     "gen:migrations": "node scripts/gen-migration-manifest.mjs",
+    "gen:ui-inventory": "node scripts/generate-ui-inventory.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "check:db-columns": "node scripts/check-db-columns.mjs",
     "check:get-writes": "node scripts/check-get-writes.mjs",
