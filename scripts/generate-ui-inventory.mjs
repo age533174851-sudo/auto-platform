@@ -67,6 +67,7 @@ const list = (a) => (a && a.length ? a.join(' · ') : '—');
 export function render(inv) {
   const {
     SCREENS, NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS, UI_STATES,
+    UI_STATE_INVENTORY,
   } = inv;
   const L = [];
 
@@ -96,6 +97,11 @@ export function render(inv) {
   L.push(`| 겹쳐 뜨는 층 | ${OVERLAYS.length} |`);
   L.push(`| 피드백 | ${FEEDBACK.length} |`);
   L.push(`| 상태 종류 | ${UI_STATES.length} |`);
+  L.push(`| 상태별 재고 (공통 물건 있음 / 여러 벌 / 없음 / 미정) | `
+    + `${UI_STATE_INVENTORY.filter(u => u.status === 'EXISTS').length} / `
+    + `${UI_STATE_INVENTORY.filter(u => u.status === 'DUPLICATED').length} / `
+    + `${UI_STATE_INVENTORY.filter(u => u.status === 'MISSING').length} / `
+    + `${UI_STATE_INVENTORY.filter(u => u.status === 'PROPOSED').length} |`);
   L.push('');
   L.push('`LISTED_ONLY`는 **존재를 확인했지만 상태·액션까지는 아직 안 본 화면**입니다.');
   L.push('확인하지 못한 것을 통과로 적지 않습니다.');
@@ -155,10 +161,11 @@ export function render(inv) {
     }[st];
     L.push(`### ${title} (${rows.length})`);
     L.push('');
-    L.push('| id | 위치 | 쓰임 | 메모 |');
-    L.push('|---|---|---|---|');
+    L.push('| id | 지금 위치 | 쓰임 | **무엇으로 모을 것인가** | 메모 |');
+    L.push('|---|---|---|---|---|');
     for (const p of rows) {
-      L.push(`| \`${p.id}\` | ${p.file ? `\`${p.file}\`` : '—'} | ${p.purpose} | ${p.notes || '—'} |`);
+      L.push(`| \`${p.id}\` | ${p.file ? `\`${p.file}\`` : '—'} | ${p.purpose} `
+        + `| ${p.target} | ${p.notes || '—'} |`);
     }
     L.push('');
   }
@@ -167,8 +174,34 @@ export function render(inv) {
   L.push('> 화면은 여전히 인라인으로 만듭니다.');
   L.push('');
 
+  // ── 상태별 재고 ──
+  L.push('## 4. 화면 상태별 재고 — 의미는 모았는데 그리는 물건은?');
+  L.push('');
+  L.push('`status.ts`에 상태의 **의미**는 한 곳에 모았습니다. 그런데 그 의미를');
+  L.push('실제로 **그리는 컴포넌트**가 있는지, 몇 벌인지는 다른 문제입니다.');
+  L.push('의미가 한 곳에 있어도 그리는 물건이 20곳에 흩어져 있으면');
+  L.push('화면은 여전히 제각각입니다.');
+  L.push('');
+  L.push('| 상태 | 지금 그리는 것 | 여러 벌인 자리 | 공통 물건 | **목표** | 상태 |');
+  L.push('|---|---|---|---|---|---|');
+  for (const u of UI_STATE_INVENTORY) {
+    L.push(`| **${u.state}** | ${list(u.existing)} | ${list(u.duplicated)} `
+      + `| ${u.sharedPrimitive ? `\`${u.sharedPrimitive}\`` : '**없음**'} `
+      + `| ${u.targetPrimitive} | ${u.status} |`);
+  }
+  L.push('');
+  for (const u of UI_STATE_INVENTORY.filter(x => x.notes?.trim())) {
+    L.push(`- **${u.state}** — ${u.notes}`);
+  }
+  L.push('');
+  L.push('> 공통 물건이 없는 자리에 그럴듯한 이름을 미리 적어 두지 않습니다.');
+  L.push('> **없으면 없다고 적습니다** — "있는데 안 쓰는 것"으로 읽히면');
+  L.push('> 다음 사람은 만드는 대신 찾다가 시간을 씁니다.');
+  L.push('> 그리고 **없는 것을 지금 만들지 않습니다.** 여기 기록만 합니다.');
+  L.push('');
+
   // ── 오버레이 · 피드백 ──
-  L.push('## 4. 겹쳐 뜨는 층 (Modal / Sheet / Confirm)');
+  L.push('## 5. 겹쳐 뜨는 층 (Modal / Sheet / Confirm)');
   L.push('');
   L.push('| id | 위치 | 상태 | 쓰임 | 메모 |');
   L.push('|---|---|---|---|---|');
@@ -176,7 +209,7 @@ export function render(inv) {
     L.push(`| \`${o.id}\` | ${o.file ? `\`${o.file}\`` : '—'} | ${o.status} | ${o.purpose} | ${o.notes || '—'} |`);
   }
   L.push('');
-  L.push('## 5. 피드백 (Toast / Notice / Details)');
+  L.push('## 6. 피드백 (Toast / Notice / Details)');
   L.push('');
   L.push('| id | 위치 | 상태 | 쓰임 | 메모 |');
   L.push('|---|---|---|---|---|');
@@ -186,7 +219,7 @@ export function render(inv) {
   L.push('');
 
   // ── 의미 ──
-  L.push('## 6. 지켜야 할 의미 구분');
+  L.push('## 7. 지켜야 할 의미 구분');
   L.push('');
   L.push('**구분이 사라지는 것은 코드가 깨지는 것보다 조용합니다.**');
   L.push('');
@@ -196,7 +229,7 @@ export function render(inv) {
   L.push('');
 
   // ── CURRENT / TARGET / DECISION ──
-  L.push('## 7. 지금 / 목표 / 결정');
+  L.push('## 8. 지금 / 정본 / 섞지 않을 것 / 목표 / 결정');
   L.push('');
   L.push('**Inventory는 설계안만 적는 문서가 아닙니다.** "지금 무엇이 있는가"와');
   L.push('"무엇으로 통일할까"는 다른 사실이고, 후자는 아직 안 정한 것도 있습니다.');
@@ -210,25 +243,28 @@ export function render(inv) {
     for (const c of rows) {
       L.push(`#### \`${c.id}\``);
       L.push('');
-      L.push(`- **지금** — ${c.current}`);
-      L.push(`- **목표** — ${c.target}`);
+      L.push(`- **CURRENT (지금)** — ${c.current}`);
+      if (c.canonical) L.push(`- **CANONICAL (정본인가)** — ${c.canonical}`);
+      if (c.isolation) L.push(`- **ISOLATION (섞지 않을 것)** — ${c.isolation}`);
+      L.push(`- **TARGET (목표)** — ${c.target}`);
+      L.push(`- **DECISION (결정)** — ${{ OPEN: '미정', DECIDED: '정함', DONE: '끝남' }[c.decision]}`);
       L.push(`- **왜** — ${c.why}`);
       L.push('');
     }
   }
 
   // ── 다음 순서 ──
-  L.push('## 8. 다음 이관 순서');
+  L.push('## 9. 다음 이관 순서');
   L.push('');
   L.push('| 순서 | 대상 | 왜 이 순서인가 |');
   L.push('|--:|---|---|');
-  L.push('| 1 | Wallet (#213) | 이미 만들어져 있다. Inventory 검토 후 조정 |');
-  L.push('| 2 | Portfolio / Home | 같은 값(총자산·손익)을 보는 화면끼리 묶는다 |');
-  L.push('| 3 | Auto / Strategy | 자동매매 나머지 — 만원 단위 원화 표기가 남아 있다 |');
-  L.push('| 4 | Market | 환경과 무관한 화면이라 상태 종류가 적다 |');
-  L.push('| 5 | History / Backtest / Alerts | |');
-  L.push('| 6 | Settings / Diagnostics / Admin | 사용자 화면과 분리된 것을 마지막에 |');
-  L.push('| — | **Trading / Terminal** | **로컬 원화 연습 장부 결정이 먼저다** (7. `trading-local-ledger`) |');
+  L.push('| ✔ | Paper (#211) · Wallet (#213) | **끝남 — main에 있다** |');
+  L.push('| 1 | Portfolio / Home | 같은 값(총자산·손익)을 보는 화면끼리 묶는다 |');
+  L.push('| 2 | Auto / Strategy | 자동매매 나머지 — 만원 단위 원화 표기가 남아 있다 |');
+  L.push('| 3 | Market | 환경과 무관한 화면이라 상태 종류가 적다 |');
+  L.push('| 4 | History / Backtest / Alerts | |');
+  L.push('| 5 | Settings / Diagnostics / Admin | 사용자 화면과 분리된 것을 마지막에 |');
+  L.push('| — | **Trading / Terminal** | **로컬 원화 연습 장부 결정이 먼저다** (8. `trading-local-ledger` · `terminal-order-path`) |');
   L.push('');
 
   return L.join('\n') + '\n';
