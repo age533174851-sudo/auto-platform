@@ -30,14 +30,23 @@
 
 export type WalletEnv = 'LIVE' | 'TESTNET' | 'MOCK';
 
+// **환경 이름과 설명을 여기서 다시 적지 않는다.**
+//
+// 같은 세 문장이 이 파일과 `lib/ui/autoOverview.ts`에 따로 있었고,
+// 자동매매 화면과 지갑 화면이 같은 환경을 다른 말로 불렀다.
+// 정의는 `lib/ui/status.ts`의 ENV_VIEW 하나다.
+import { ENV_VIEW } from '../ui/status';
+
 export const ENV_LABEL: Record<WalletEnv, string> = {
-  LIVE: '실전', TESTNET: '테스트넷', MOCK: '모의',
+  LIVE: ENV_VIEW.LIVE.label,
+  TESTNET: ENV_VIEW.TESTNET.label,
+  MOCK: ENV_VIEW.MOCK.label,
 };
 
 export const ENV_NOTE: Record<WalletEnv, string> = {
-  LIVE: '실제 자금입니다',
-  TESTNET: '거래소 테스트넷의 가상 자금입니다 — 실제 가치가 없습니다',
-  MOCK: '앱 안에서만 존재하는 모의 자금입니다 — 거래소와 무관합니다',
+  LIVE: ENV_VIEW.LIVE.meaning,
+  TESTNET: ENV_VIEW.TESTNET.meaning,
+  MOCK: ENV_VIEW.MOCK.meaning,
 };
 
 /**

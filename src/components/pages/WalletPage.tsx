@@ -53,6 +53,14 @@ import { snapshotFreshness } from '@/lib/portfolio/snapshotBucket';
 // '시작 안 함'으로 적으면 시작 버튼이 뜨고, 누르면 장부가 초기화된다.
 import { paperPanelOf, seedOptionsOf } from '@/lib/portfolio/paperPanel';
 import { PAPER_SEED_CHOICES, validateSeed } from '@/lib/portfolio/paperAccount';
+// **숫자·상태·환경 표현을 이 화면이 다시 정하지 않는다.**
+//
+// 이 파일 하나에 '확인 불가' 계열 문구가 15곳, 빨강·노랑 색 지정이
+// 23곳 있었다. 전부 그 자리에서 따로 고른 것이라, 같은 사건이 화면
+// 위치에 따라 다른 색과 다른 문장으로 나왔다.
+import { moneyText, pnlText, pctText, shownValue, UNKNOWN_TEXT, UNKNOWN_LABEL } from '@/lib/ui/display';
+import { accountStatusOf, unknownSummaryOf, splitDiagnostics, envView, type StatusKind } from '@/lib/ui/status';
+import { StatusCard, Details, EnvBadge, SafeNote, toneColor } from '@/components/ui/Status';
 
 const ENVS: WalletEnv[] = ['LIVE', 'TESTNET', 'MOCK'];
 const CURRENCIES = ['USDT', 'USD', 'KRW'] as const;
@@ -453,19 +461,27 @@ export default function WalletPage() {
   // 않는다** — 아래 빈 상자가 왜 비었는지까지 적는다.
   const longterm: LongtermHolding[] = [];
 
-  const envColor = (e: WalletEnv) => e === 'LIVE' ? T.red : e === 'TESTNET' ? T.ylw : T.muted;
+  // 색을 여기서 고르지 않는다 — 어느 색인지의 **판단**은 status.ts에 있고
+  // 화면은 그 의미를 색으로 옮기기만 한다.
+  const envColor = (e: WalletEnv) => toneColor(envView(e as any).tone);
   const muted: React.CSSProperties = { color: T.muted, fontSize: 9.5, lineHeight: 1.6 };
   const numFont: React.CSSProperties = { fontFamily: 'Inter,monospace', fontVariantNumeric: 'tabular-nums' };
 
-  /** 못 읽은 값은 회색 + 사유. 여기서 0을 그리면 안 된다 */
+  /**
+   * 표 한 칸.
+   *
+   * **못 읽었으면 '—'만 적는다.** 예전에는 칸마다 사유를 적었고, 그래서
+   * 한 화면에 '확인 불가'가 열다섯 번 나왔다. 그렇게 되면 사용자는 어느
+   * 것이 진짜 문제인지 고를 수 없다 — 사유는 아래 상태 카드가 한 번만
+   * 말한다. 0을 그리지 않는 규칙은 그대로다.
+   */
   const cellText = (c: { value: number | null; text: string }) =>
-    c.value == null ? c.text : c.value.toLocaleString('ko-KR');
+    c.value == null ? UNKNOWN_TEXT : c.value.toLocaleString('ko-KR');
 
-  /** 모의 줄 한 칸. **못 구한 값은 0이 아니라 '확인 불가'다** */
+  /** 모의 줄 한 칸. 값이 없으면 0이 아니라 빈 자리다 */
   const paperCell = (r: { usd: number | null; readiness: string }) =>
     r.readiness === 'OK' ? moneyView(r.usd, cur as any, fxRate).text
-      : r.readiness === 'NOT_APPLICABLE' ? '—'
-        : r.readiness === 'LOADING' ? '조회 중…' : '확인 불가';
+      : r.readiness === 'LOADING' ? '조회 중…' : UNKNOWN_TEXT;
 
   const sectionTitle = (s: string) => (
     <div style={{ color: T.txt, fontSize: 12, fontWeight: 800, marginBottom: 8 }}>{s}</div>
@@ -517,7 +533,7 @@ export default function WalletPage() {
             )}
           </div>
           {perf.code === 'NO_SNAPSHOTS' || perf.code === 'ONE_SNAPSHOT' ? (
-            <div style={{ ...muted, marginTop: 5, lineHeight: 1.6 }}>{perf.note}</div>
+            <SafeNote text={perf.note} style={{ marginTop: 5 }} />
           ) : (
             <div style={{ marginTop: 6, display: 'grid', gap: 3 }}>
               {[
@@ -531,12 +547,32 @@ export default function WalletPage() {
               ].map(([label, v]: any) => (
                 <div key={label} style={{ display: 'flex', gap: 8, fontSize: 10.5, lineHeight: 1.6 }}>
                   <span style={{ color: T.muted, minWidth: 78, flexShrink: 0 }}>{label}</span>
-                  {/* **못 읽은 것을 0으로 그리지 않는다.** */}
+                  {/* **못 읽은 것을 0으로 그리지 않는다.** 다만 칸마다
+                      사유를 적지도 않는다 — 아래 카드가 한 번만 말한다. */}
                   <span style={{ color: v == null ? T.muted : T.txt, fontWeight: v == null ? 600 : 800 }}>
-                    {v == null ? '확인하지 못했습니다' : Number(v).toLocaleString('ko-KR')}
+                    {shownValue(v, 'money').text}
                   </span>
                 </div>
               ))}
+              {/* 못 읽은 항목을 **한 장으로 압축한다.** 여섯 줄에 여섯 번
+                  '확인하지 못했습니다'를 적으면 그 단어가 배경이 된다. */}
+              {(() => {
+                const u = unknownSummaryOf([
+                  { label: '시작 자산', known: perf.startEquity != null },
+                  { label: '현재 자산', known: perf.currentEquity != null },
+                  { label: '자산 증가', known: perf.equityChange != null },
+                  { label: '순입출금', known: perf.cashFlow?.net != null },
+                  { label: '매매 손익', known: perf.tradingPnl != null },
+                  { label: '최고 자산', known: perf.peakEquity != null },
+                  { label: '최대 낙폭(%)', known: perf.maxDrawdownPct != null },
+                ]);
+                if (!u.any) return null;
+                return (
+                  <div style={{ marginTop: 8 }}>
+                    <StatusCard kind={u.kind} headline={u.headline!} detail={u.detail!} compact />
+                  </div>
+                );
+              })()}
               {perf.tradingReturnPct != null && (
                 <div style={{ display: 'flex', gap: 8, fontSize: 10.5, lineHeight: 1.6 }}>
                   <span style={{ color: T.muted, minWidth: 78, flexShrink: 0 }}>매매 수익률</span>
@@ -545,7 +581,7 @@ export default function WalletPage() {
                   </span>
                 </div>
               )}
-              {perf.note && <div style={{ ...muted, marginTop: 3 }}>{perf.note}</div>}
+              <SafeNote text={perf.note} style={{ marginTop: 3 }} />
             </div>
           )}
         </div>
@@ -570,8 +606,10 @@ export default function WalletPage() {
         })}
       </div>
 
-      <div style={{ color: envColor(env), fontSize: 9.5, marginBottom: 10, lineHeight: 1.55 }}>
-        {ENV_NOTE[env]}
+      {/* **환경은 색과 글자 둘 다 달라야 한다.** 색만 다르면 실전 화면과
+          테스트넷 화면을 헷갈린 채로 주문을 누른다. */}
+      <div style={{ marginBottom: 10 }}>
+        <EnvBadge env={env as any} withMeaning />
       </div>
 
       {/* ── 모의투자 ──
@@ -586,7 +624,17 @@ export default function WalletPage() {
 
           {paperPanel.code === 'NOT_STARTED' ? (
             <>
-              <div style={{ ...muted, marginBottom: 10 }}>{paperPanel.note}</div>
+              {/* **'계좌 없음'과 '못 읽음'과 '잔고 0'은 서로 다른 문장이다.**
+                  예전에는 이 자리에 서버 note를 그대로 적었고, 그 위에
+                  0.00000000이 같이 떠 있었다. */}
+              <div style={{ marginBottom: 10 }}>
+                {(() => {
+                  const st = accountStatusOf({ code: 'NO_ACCOUNT', envLabel: '모의' });
+                  const d = splitDiagnostics(paperPanel.note, st.detail ?? '');
+                  return <StatusCard kind={st.kind} headline={st.headline}
+                    detail={d.body} diagnostics={d.diagnostics} compact />;
+                })()}
+              </div>
 
               {/* ── 1단계: 시작하기 ──
                   누르기 전에는 금액을 보여 주지 않는다. 계좌가 없는데
@@ -671,7 +719,16 @@ export default function WalletPage() {
                 </div>
               )}
               {paperPanel.code === 'UNREADABLE' && (
-                <div style={{ ...muted, color: T.ylw, marginTop: 8 }}>{paperPanel.note}</div>
+                <div style={{ marginTop: 8 }}>
+                  {(() => {
+                    const st = accountStatusOf({ code: 'UNREADABLE', envLabel: '모의' });
+                    // 서버가 준 원문에 DB·API 문장이 섞여 있으면 본문에서 뗀다.
+                    const d = splitDiagnostics(paperPanel.note, st.detail ?? '');
+                    return <StatusCard kind={st.kind} headline={st.headline}
+                      detail={d.body === st.detail ? st.detail : `${st.detail}\n${d.body}`}
+                      diagnostics={d.diagnostics} compact />;
+                  })()}
+                </div>
               )}
             </>
           )}
@@ -771,18 +828,33 @@ export default function WalletPage() {
           color: totalUsd == null ? T.muted : T.txt,
           fontSize: totalUsd == null ? 16 : 26, fontWeight: 900, ...numFont,
         }}>
-          {totalUsd == null ? '확인 불가' : totalMoney.text}
+          {totalUsd == null ? UNKNOWN_LABEL : totalMoney.text}
         </div>
-        {(total.note || envNote || totalUsd != null) && (
-          <div style={{ ...muted, color: T.ylw, marginTop: 6, overflowWrap: 'anywhere' }}>
-            {[envNote, total.note, totalUsd != null ? totalMoney.reason : ''].filter(Boolean).join(' · ')}
-          </div>
-        )}
+        {/* **세 문장을 ' · '로 이어 붙이지 않는다.**
+            예전에는 환경 안내 + 총자산 사유 + 환산 근거가 한 줄로 붙어
+            노란 긴 문장이 됐다. 사용자는 그걸 통째로 건너뛴다.
+            지금은 **왜 못 냈는지 한 줄**만 보이고 나머지는 접힌다. */}
+        {(() => {
+          const rest = [total.note, totalUsd != null ? totalMoney.reason : '']
+            .filter(Boolean).join('\n');
+          if (totalUsd == null) {
+            const d = splitDiagnostics(total.note || envNote, '값을 읽지 못해 총자산을 내지 않았습니다.');
+            return (
+              <div style={{ marginTop: 8 }}>
+                <StatusCard kind="UNKNOWN" headline="총자산을 내지 않았습니다"
+                  detail={`${d.body}\n0이라는 뜻이 아닙니다 — 값을 읽지 못했습니다.`}
+                  diagnostics={d.diagnostics} compact />
+              </div>
+            );
+          }
+          if (!rest && !envNote) return null;
+          return <Details summary="이 값의 근거">{[envNote, rest].filter(Boolean).join('\n')}</Details>;
+        })()}
 
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 10, paddingTop: 10 }}>
           <div style={{ color: T.muted, fontSize: 10, marginBottom: 3 }}>오늘 손익</div>
           <div style={{
-            color: pnl.headline === '확인 불가' ? T.muted : T.txt,
+            color: pnl.headline === UNKNOWN_LABEL ? T.muted : T.txt,
             fontSize: 15, fontWeight: 800, ...numFont,
           }}>{pnl.headline}</div>
           {pnl.caution && (
@@ -813,17 +885,20 @@ export default function WalletPage() {
                     fontSize: 15, fontWeight: 800, ...numFont,
                   }}>
                     {tradingPnl.value >= 0 ? '+' : ''}
-                    {Number(tradingPnl.value).toLocaleString('ko-KR', { maximumFractionDigits: 2 })} USDT
+                    {moneyText(tradingPnl.value, 'USDT').text}
                   </div>
                   {ledgerEnv?.totals && (
                     <div style={{ ...muted, marginTop: 3 }}>
                       {/* 무엇을 빼고 남은 값인지 보여 준다 */}
-                      외부유입 {Number(ledgerEnv.totals.externalFlow ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}
-                      {' · '}수수료 {Number(ledgerEnv.totals.fees ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}
-                      {' · '}펀딩 {Number(ledgerEnv.totals.funding ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}
+                      {/* **못 읽은 값을 0으로 적지 않는다.** `?? 0`이 여기
+                          있었다 — 외부유입을 못 읽으면 "유입 0"이 되고,
+                          그러면 그 돈이 전부 매매 손익으로 읽힌다. */}
+                      외부유입 {shownValue(ledgerEnv.totals.externalFlow, 'money').text}
+                      {' · '}수수료 {shownValue(ledgerEnv.totals.fees, 'money').text}
+                      {' · '}펀딩 {shownValue(ledgerEnv.totals.funding, 'money').text}
                       {Number(ledgerEnv.totals.testnetCredit ?? 0) !== 0 && (
                         <> {' · '}<span style={{ color: T.ylw }}>
-                          테스트넷 충전 {Number(ledgerEnv.totals.testnetCredit).toLocaleString('ko-KR', { maximumFractionDigits: 2 })} (수익 아님)
+                          테스트넷 충전 {shownValue(ledgerEnv.totals.testnetCredit, 'money').text} (수익 아님)
                         </span></>
                       )}
                     </div>
@@ -872,6 +947,8 @@ export default function WalletPage() {
               const d = seg.points.map((p, j) => {
                 const x = ((p.atMs - t0) / tspan) * 300;
                 const y = 90 - ((p.equity - lo) / span) * 80 - 5;
+                // display-layer-exempt: SVG 경로 좌표다. 사용자가 읽는 값이 아니라
+                // 픽셀 위치이므로 표시 규칙(자릿수·부호·모름)이 적용되지 않는다.
                 return `${j === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
               }).join(' ');
               return <path key={i} d={d} fill="none" stroke={T.acl} strokeWidth={2} />;
@@ -882,11 +959,11 @@ export default function WalletPage() {
             height: 90, display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: T.alt, borderRadius: 8, padding: '10px 14px',
           }}>
-            <div style={{ ...muted, textAlign: 'center' }}>{curve.note}</div>
+            <SafeNote text={curve.note} style={{ textAlign: 'center' }} />
           </div>
         )}
         {curve.hasData && curve.note && (
-          <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{curve.note}</div>
+          <SafeNote text={curve.note} tone="warn" style={{ marginTop: 6 }} />
         )}
         {/* **곡선이 조용히 멈추는 것을 막는다.**
 
@@ -932,7 +1009,7 @@ export default function WalletPage() {
               <span style={{ color: T.sub, fontSize: 11, flex: 1 }}>{s.label}</span>
               <span style={{
                 color: s.pct == null ? T.muted : T.txt, fontSize: 11, fontWeight: 800, ...numFont,
-              }}>{s.pct == null ? '—' : `${s.pct.toFixed(1)}%`}</span>
+              }}>{pctText(s.pct).text}</span>
             </div>
             <div style={{ height: 4, background: T.alt, borderRadius: 2, marginTop: 3, overflow: 'hidden' }}>
               {s.pct != null && (
@@ -941,7 +1018,7 @@ export default function WalletPage() {
             </div>
           </div>
         ))}
-        {alloc.note && <div style={{ ...muted, color: T.ylw, marginTop: 6 }}>{alloc.note}</div>}
+        <SafeNote text={alloc.note} tone="warn" style={{ marginTop: 6 }} />
       </Card>
 
       {/* ── 6. 보유자산 (탭) ── */}
@@ -1047,9 +1124,9 @@ export default function WalletPage() {
             color: stratTotal.total == null ? T.muted : T.txt,
             fontSize: 18, fontWeight: 900, marginBottom: 8, ...numFont,
           }}>
-            {stratTotal.total == null ? '확인 불가' : stratTotal.total.toLocaleString('ko-KR')}
+            {stratTotal.total == null ? UNKNOWN_LABEL : stratTotal.total.toLocaleString('ko-KR')}
           </div>
-          {stratTotal.note && <div style={{ ...muted, color: T.ylw, marginBottom: 8 }}>{stratTotal.note}</div>}
+          <SafeNote text={stratTotal.note} tone="warn" style={{ marginBottom: 8 }} />
 
           {/* **못 읽은 것을 '전략 없음'으로 적지 않는다.** 빈 목록이면
               사용자는 배정한 돈이 사라진 줄 안다. */}
@@ -1144,7 +1221,7 @@ export default function WalletPage() {
                 color: d.pnl == null ? T.muted : d.pnl >= 0 ? T.grn : T.red,
                 fontSize: 11, fontWeight: 800, ...numFont,
               }}>
-                {d.pnl == null ? '확인 불가' : `${d.pnl >= 0 ? '+' : ''}${d.pnl.toLocaleString('ko-KR')}`}
+                {d.pnl == null ? UNKNOWN_TEXT : pnlText(d.pnl, '').text}
               </span>
               {d.hadFlow && <span style={{ color: T.ylw, fontSize: 9 }}>입출금</span>}
             </div>
