@@ -72,10 +72,15 @@ export interface SchedulerReport {
   lastDueCount: number | null;
   /** 그때 건너뛴 줄 수 */
   lastSkippedCount: number | null;
-  /** 마지막으로 평가를 실제로 돌린 시각 */
+  /**
+   * 마지막으로 평가를 실제로 돌린 시각.
+   *
+   * **어느 종목을 무슨 결과로 평가했는지는 담지 않는다.** 이 값은 로그인
+   * 없이 열리는 `/api/system/deployment`로 나간다 — 예약 주 경로가 도는지
+   * 판정하는 데 종목이 필요하지 않고, 필요하지 않은 것을 공개 경로에
+   * 얹지 않는다. 판정에 쓰는 것은 시각과 횟수뿐이다.
+   */
   lastEvalIso: string | null;
-  lastEvalSymbol: string | null;
-  lastEvalOutcome: string | null;
   /** 마지막 오류. **조용히 지우지 않는다** */
   lastErrorIso: string | null;
   lastError: string | null;
@@ -100,6 +105,22 @@ export interface SchedulerVerdict {
 export const STALE_POLL_FACTOR = 5;
 /** 주기를 모를 때 쓰는 최소 여유 */
 export const STALE_POLL_FLOOR_MS = 5 * 60_000;
+
+/**
+ * 오류 문구에서 **주소와 토큰을 걷어낸다.**
+ *
+ * 이 값은 로그인 없이 열리는 경로로 나간다. 그런데 평가 실패 문구는
+ * `fetch failed: https://<앱 주소>/api/...` 처럼 **APP_URL을 그대로 물고
+ * 온다.** 있다/없다만 적기로 해 놓고 오류 문구로 주소가 새면 같은 일이다.
+ *
+ * 지우는 것이 아니라 가린다 — 무엇이 실패했는지는 남아야 고칠 수 있다.
+ */
+export function scrubEvidence(text: string): string {
+  return String(text ?? '')
+    .replace(/https?:\/\/[^\s"'`)]+/gi, '[주소 가림]')
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[가림]')
+    .slice(0, 300);
+}
 
 function iso(v: any): string | null {
   const s = String(v ?? '').trim();
@@ -137,14 +158,54 @@ export function parseSchedulerReport(raw: any): SchedulerReport | null {
     lastDueCount: num(o.lastDueCount),
     lastSkippedCount: num(o.lastSkippedCount),
     lastEvalIso: iso(o.lastEvalIso),
-    lastEvalSymbol: o.lastEvalSymbol ? String(o.lastEvalSymbol).slice(0, 40) : null,
-    lastEvalOutcome: o.lastEvalOutcome ? String(o.lastEvalOutcome).slice(0, 80) : null,
     lastErrorIso: iso(o.lastErrorIso),
-    lastError: o.lastError ? String(o.lastError).slice(0, 300) : null,
+    // 예전 배포가 적어 둔 줄에 종목·결과가 들어 있어도 **여기서 떨어진다.**
+    // 형식이 바뀌었다고 과거 줄을 고치러 가지 않는다 — 읽는 쪽이 버린다.
+    lastError: o.lastError ? scrubEvidence(String(o.lastError)) : null,
     pollCount: num(o.pollCount),
     evalCount: num(o.evalCount),
     source: (o.source === 'GITHUB_FALLBACK' || o.source === 'MANUAL') ? o.source : 'FLY_WORKER',
   };
+}
+
+/** 아직 아무것도 모르는 상태. 워커가 이 값에서 출발한다 */
+export const EMPTY_SCHEDULER_REPORT: SchedulerReport = {
+  hasAppUrl: null, hasAdminSecret: null, isMain: null, pollIntervalMs: null,
+  lastPollIso: null, lastDueCount: null, lastSkippedCount: null,
+  lastEvalIso: null, lastErrorIso: null, lastError: null,
+  pollCount: null, evalCount: null, source: 'FLY_WORKER',
+};
+
+/**
+ * 아는 만큼만 덮어쓴다 — 그리고 **절대 던지지 않는다.**
+ *
+ * 관측 장치는 본업보다 약해야 한다. 이 병합이 실패해서 예약 평가·주문
+ * 실행·heartbeat가 같이 멈추면, 고장을 보려고 만든 것이 고장을 만든다.
+ * 무엇이 들어와도 이전 상태를 그대로 돌려주는 것이 최악의 결과다.
+ *
+ * 부분 갱신이다. 락 상태를 적는 자리와 폴링 결과를 적는 자리가 다르고,
+ * **한쪽이 다른 쪽을 null로 지워 버리면 안 된다** — 지운 값과 아직 모르는
+ * 값이 같은 칸에 들어가면 판정이 갈린다.
+ */
+export function mergeSchedulerReport(
+  prev: SchedulerReport | null | undefined, patch: Partial<SchedulerReport> | null | undefined,
+): SchedulerReport {
+  const base = prev ?? EMPTY_SCHEDULER_REPORT;
+  try {
+    if (patch == null || typeof patch !== 'object') return base;
+    const next: any = { ...base };
+    for (const k of Object.keys(EMPTY_SCHEDULER_REPORT) as Array<keyof SchedulerReport>) {
+      if (!(k in patch)) continue;
+      const v = (patch as any)[k];
+      if (v === undefined) continue;
+      next[k] = k === 'lastError' && typeof v === 'string' ? scrubEvidence(v) : v;
+    }
+    next.source = 'FLY_WORKER';
+    return next as SchedulerReport;
+  } catch {
+    // 관측이 실패해도 본업은 돈다. 이전 상태를 그대로 둔다.
+    return base;
+  }
 }
 
 /**
@@ -200,11 +261,7 @@ export function schedulerVerdict(i: {
   evidence.push(`main 락 ${report.isMain === true ? '쥠' : report.isMain === false ? '예비' : '모름'}`);
   evidence.push(`마지막 폴링 ${report.lastPollIso ?? '없음'}`);
   evidence.push(`due ${report.lastDueCount ?? '모름'}건 · 건너뜀 ${report.lastSkippedCount ?? '모름'}건`);
-  if (report.lastEvalIso) {
-    evidence.push(`마지막 평가 ${report.lastEvalIso} ${report.lastEvalSymbol ?? ''} ${report.lastEvalOutcome ?? ''}`.trim());
-  } else {
-    evidence.push('마지막 평가 없음');
-  }
+  evidence.push(report.lastEvalIso ? `마지막 평가 ${report.lastEvalIso}` : '마지막 평가 없음');
   if (report.lastError) evidence.push(`마지막 오류 ${report.lastErrorIso ?? '시각 모름'} — ${report.lastError}`);
   evidence.push(`깨운 주체 ${report.source}`);
 

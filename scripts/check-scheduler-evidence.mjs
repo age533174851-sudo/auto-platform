@@ -62,6 +62,23 @@ function stripSql(src) {
   return src.split('\n').map(l => (l.trimStart().startsWith('--') ? '' : l)).join('\n');
 }
 
+/**
+ * `from`부터 시작하는 함수의 **본문만** 떼어 낸다.
+ *
+ * 길이로 잘라 읽었더니 **옆 함수의 try/catch를 이 함수의 것으로 읽었다** —
+ * 되돌림 시험에서 잡혔다. 중괄호를 세는 것 말고 정확한 방법이 없다.
+ */
+function bodyAt(src, from) {
+  const open = src.indexOf('{', from);
+  if (open < 0) return '';
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(open, i + 1); }
+  }
+  return src.slice(open);
+}
+
 function read(path) {
   if (!existsSync(path)) { fail(`${path} 이 없습니다`); return null; }
   return readFileSync(path, 'utf8');
@@ -90,6 +107,47 @@ if (judgeRaw) {
     if (!judge.includes(`'${c}'`)) fail(`${JUDGE}에 ${c} 판정이 없습니다`);
   }
   if (!/export function schedulerVerdict/.test(judge)) fail(`${JUDGE}에 schedulerVerdict()가 없습니다`);
+
+  // ── 공개 경로로 나가는 칸을 최소로 묶는다 ──
+  //
+  // 이 보고는 **로그인 없이 열리는** `/api/system/deployment`로 나간다.
+  // 예약이 도는지 판정하는 데 필요한 것은 유무·시각·횟수뿐이고,
+  // 종목·자격·사용자는 필요하지 않다. 필요하지 않은 것을 공개 경로에
+  // 얹지 않는다 — 한 번 얹히면 다음 사람이 그 자리에 더 얹는다.
+  const DENIED_FIELDS = [
+    'lastEvalSymbol', 'lastEvalOutcome', 'symbol', 'outcome',
+    'userId', 'user_id', 'accountId', 'account_id', 'connectionId', 'connection_id',
+    'apiKey', 'apiSecret', 'fingerprint', 'appUrl', 'adminSecret', 'token',
+  ];
+  const shape = judge.match(/export interface SchedulerReport \{([\s\S]*?)\n\}/);
+  if (!shape) fail(`${JUDGE}에서 SchedulerReport 형식을 찾지 못했습니다`);
+  else {
+    for (const f of DENIED_FIELDS) {
+      if (new RegExp(String.raw`(^|\s)${f}\s*\??:`, 'm').test(shape[1])) {
+        fail(`SchedulerReport에 ${f}이(가) 있습니다 — 이 보고는 인증 없이 공개됩니다`);
+      }
+    }
+    for (const f of ['hasAppUrl', 'hasAdminSecret']) {
+      if (!new RegExp(String.raw`${f}:\s*boolean\s*\|\s*null`).test(shape[1])) {
+        fail(`SchedulerReport의 ${f}이 boolean이 아닙니다 — 값이 아니라 있다/없다만 적습니다`);
+      }
+    }
+  }
+
+  // 오류 문구는 주소를 물고 온다(`fetch failed: https://<앱 주소>/…`).
+  // 있다/없다만 적기로 해 놓고 오류로 주소가 새면 같은 일이다.
+  if (!/export function scrubEvidence/.test(judge)) {
+    fail(`${JUDGE}에 scrubEvidence가 없습니다 — 오류 문구로 주소가 샙니다`);
+  } else if (!/lastError.*scrubEvidence|scrubEvidence\(String\(o\.lastError\)\)/.test(judge)) {
+    fail(`${JUDGE}이 lastError에 scrubEvidence를 걸지 않습니다`);
+  }
+
+  // 관측 장치는 본업보다 약해야 한다. 병합기가 던지면 예약도 같이 멈춘다.
+  const mergeStart = judge.indexOf('export function mergeSchedulerReport');
+  if (mergeStart < 0) fail(`${JUDGE}에 mergeSchedulerReport가 없습니다`);
+  else if (!/catch\s*\{/.test(bodyAt(judge, mergeStart))) {
+    fail('mergeSchedulerReport에 catch가 없습니다 — 관측 실패가 본업을 죽입니다');
+  }
   // **값은 이 파일을 지나가지 않는다.** 주소도 시크릿도 이름조차 다루지 않는다.
   if (/process\.env/.test(judge)) fail(`${JUDGE}이 process.env를 읽습니다 — 판정기는 값을 만지지 않습니다`);
   notes.push(`판정 ${JUDGE} — 코드 ${CODES.length}가지`);
@@ -136,7 +194,22 @@ if (workerRaw) {
       if (re.test(bare)) fail(`${WORKER}의 noteScheduler에 ${name} 값이 그대로 들어갑니다 — 있다/없다만 적으세요`);
     }
   }
+  // ── 관측이 본업을 죽이지 않는가 ──
+  //
+  // `noteScheduler`가 던지면 예약 평가도 주문 실행도 생존 신호도 같이
+  // 멈춘다. 고장을 보려고 만든 것이 고장을 만들면 안 된다.
+  const dbForTry = existsSync(WORKER_DB) ? stripJs(readFileSync(WORKER_DB, 'utf8')) : '';
+  const noteStart = dbForTry.indexOf('export function noteScheduler');
+  if (noteStart < 0) fail(`${WORKER_DB}에서 noteScheduler 본문을 찾지 못했습니다`);
+  else if (!/try\s*\{[\s\S]*?catch/.test(bodyAt(dbForTry, noteStart))) {
+    fail(`${WORKER_DB}의 noteScheduler가 try/catch 없이 적습니다 — 관측 실패가 워커를 멈춥니다`);
+  }
+  // 워커가 `await noteScheduler(...)` 하면 관측이 본업 경로에 끼어든다.
+  if (/await\s+noteScheduler\s*\(/.test(w)) {
+    fail(`${WORKER}이 noteScheduler를 await 합니다 — 관측은 본업을 기다리게 하지 않습니다`);
+  }
   notes.push('워커가 환경변수 유무·main 락·폴링 시각·오류를 적습니다 (값 아님)');
+  notes.push('관측 실패가 예약·주문·생존 신호를 멈추지 않습니다 (noteScheduler try/catch)');
 }
 
 // ── 3. heartbeat에 실려 나가는가 ──
@@ -167,12 +240,26 @@ if (routeRaw) {
   const r = stripJs(routeRaw);
   if (!/schedulerVerdict\s*\(/.test(r)) fail(`${ROUTE}이 schedulerVerdict를 부르지 않습니다 — 판정을 여기서 새로 하지 마세요`);
   if (!/scheduler\s*:\s*\{/.test(r)) fail(`${ROUTE}이 scheduler를 응답에 넣지 않습니다 — 적어 놓고 안 보여 주면 없는 것과 같습니다`);
-  if (!/column\|schema cache/.test(r)) fail(`${ROUTE}에 칸 없는 배포용 재조회가 없습니다 — 073 전에는 이 경로가 통째로 죽습니다`);
+  const withCol = /\.select\(`\$\{COLS\}, scheduler`\)/.test(r);
+  const withoutCol = /\.select\(COLS\)/.test(r);
+  if (!withCol || !withoutCol) {
+    fail(`${ROUTE}에 칸 없는 배포용 재조회가 없습니다 — 073 전에는 이 경로가 통째로 죽습니다`
+      + ` (scheduler 포함 조회 ${withCol ? '있음' : '없음'} · 뺀 조회 ${withoutCol ? '있음' : '없음'})`);
+  }
   if (!/pickSchedulerRow\s*\(/.test(r)) fail(`${ROUTE}이 main 락을 쥔 줄을 고르지 않습니다`);
   // 이 경로는 로그인 없이 열린다. 인증을 새로 붙이지 않았는지도 본다.
   if (/auth_required|resolveUserId/.test(r)) {
     fail(`${ROUTE}에 인증이 붙었습니다 — CI가 못 읽게 되면 다시 사람이 확인하게 됩니다`);
   }
+  // ── 관측 코드가 실행을 일으키면 안 된다 ──
+  //
+  // 이 경로는 **읽기만 한다.** 배포를 확인하러 부른 요청이 예약을
+  // 평가하거나 주문을 내면, 확인이 곧 실행이 된다.
+  if (/\.(insert|update|upsert|delete)\s*\(/.test(r)) fail(`${ROUTE}이 쓰기를 합니다 — 이 경로는 읽기만 합니다`);
+  if (/evaluateIfDue|pollSchedules|daily-ladder|dailyLadder/.test(r)) {
+    fail(`${ROUTE}이 평가 실행을 부릅니다 — 확인이 곧 실행이 되면 안 됩니다`);
+  }
+  notes.push(`${ROUTE}은 읽기 전용입니다 (쓰기·평가 실행 없음)`);
   notes.push(`${ROUTE}이 인증 없이 판정과 근거를 돌려줍니다`);
 }
 
@@ -181,6 +268,10 @@ const ciRaw = read(CI_SCRIPT);
 if (ciRaw) {
   const c = stripJs(ciRaw);
   if (!/scheduler/.test(c)) fail(`${CI_SCRIPT}이 예약 판정을 찍지 않습니다 — 사람이 다시 브라우저로 열게 됩니다`);
+  // 확인기가 실행을 일으키면 확인이 곧 실행이 된다. GET 말고는 없어야 한다.
+  if (/method\s*:\s*['"`](POST|PUT|PATCH|DELETE)/i.test(c)) {
+    fail(`${CI_SCRIPT}이 쓰기 요청을 보냅니다 — 배포 확인은 읽기만 합니다`);
+  }
 }
 
 // ── 7. 판정에 시험이 붙어 있는가 ──

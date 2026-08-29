@@ -540,7 +540,7 @@ async function pollSchedules(): Promise<void> {
     noteScheduler({
       pollCount,
       lastErrorIso: new Date(nowMs).toISOString(),
-      lastError: String(e?.message || e).slice(0, 300),
+      lastError: `예약을 읽지 못했습니다: ${String(e?.message || e)}`,
     });
     return;
   }
@@ -575,12 +575,9 @@ async function pollSchedules(): Promise<void> {
       if (r.record) {
         console.log(`[schedules] ${row.symbol} ${r.record.outcome} — ${r.record.summary}`);
         evalCount++;
-        noteScheduler({
-          lastEvalIso: new Date().toISOString(),
-          lastEvalSymbol: String(row.symbol || ''),
-          lastEvalOutcome: String(r.record.outcome || ''),
-          evalCount,
-        });
+        // **종목도 결과도 적지 않는다.** 이 값은 로그인 없이 열리는
+        // 경로로 나가고, 예약이 도는지 판정하는 데 종목은 필요 없다.
+        noteScheduler({ lastEvalIso: new Date().toISOString(), evalCount });
       } else {
         // 선점을 놓쳤거나 그 사이 차례가 아니게 됐다. 오류가 아니다.
         console.log(`[schedules] ${row.symbol} 건너뜀 — ${r.due.reason}`);
@@ -588,9 +585,11 @@ async function pollSchedules(): Promise<void> {
       if (r.saveError) console.warn(`[schedules] ${row.symbol} 기록 경고: ${r.saveError}`);
     } catch (e: any) {
       console.error(`[schedules] ${row.symbol} 평가 실패:`, e?.message || e);
+      // 오류 문구는 주소를 물고 오기 쉽다(`fetch failed: https://…`).
+      // 가리는 것은 `scrubEvidence`가 하고, 여기서는 종목을 빼서 넘긴다.
       noteScheduler({
         lastErrorIso: new Date().toISOString(),
-        lastError: `${row.symbol} 평가 실패: ${String(e?.message || e)}`.slice(0, 300),
+        lastError: `예약 평가 실패: ${String(e?.message || e)}`,
       });
     }
   }

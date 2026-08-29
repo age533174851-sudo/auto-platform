@@ -4,7 +4,9 @@ import { workerIdentityOf } from '../../src/lib/runtime/workerIdentity';
 // **판정은 웹과 같은 파일을 쓴다.** 워커용 사본을 두면 한쪽만 고쳐진다.
 import { heartbeatVerdict, projectRefOf } from '../../src/lib/runtime/heartbeatVerify';
 // 예약 폴러가 스스로 적는 상태. **형식과 판정은 웹과 같은 파일이다.**
-import type { SchedulerReport } from '../../src/lib/runtime/schedulerReport';
+import {
+  mergeSchedulerReport, EMPTY_SCHEDULER_REPORT, type SchedulerReport,
+} from '../../src/lib/runtime/schedulerReport';
 
 let _sb: SupabaseClient | null = null;
 export function sb(): SupabaseClient {
@@ -177,23 +179,14 @@ export function noteStartupResult(ok: boolean, detail: string | null): void {
 // 필요 없는 `/api/system/deployment`가 그대로 보여 준다.
 //
 // **값은 들어가지 않는다.** APP_URL도 ADMIN_SECRET도 있다/없다만 적는다.
-let scheduler: SchedulerReport = {
-  hasAppUrl: null, hasAdminSecret: null, isMain: null, pollIntervalMs: null,
-  lastPollIso: null, lastDueCount: null, lastSkippedCount: null,
-  lastEvalIso: null, lastEvalSymbol: null, lastEvalOutcome: null,
-  lastErrorIso: null, lastError: null, pollCount: null, evalCount: null,
-  source: 'FLY_WORKER',
-};
+let scheduler: SchedulerReport = EMPTY_SCHEDULER_REPORT;
 
-/**
- * 아는 만큼만 덮어쓴다.
- *
- * 부분 갱신이다 — 락 상태를 적는 자리와 폴링 결과를 적는 자리가 다르고,
- * 한쪽이 다른 쪽을 **null로 지워 버리면 안 된다.** 지운 값과 아직 모르는
- * 값이 같은 칸에 들어가면 판정이 갈린다.
- */
+/** 아는 만큼만 덮어쓴다. 판정과 병합 규칙은 schedulerReport.ts에 있다 */
 export function noteScheduler(patch: Partial<SchedulerReport>): void {
-  scheduler = { ...scheduler, ...patch, source: 'FLY_WORKER' };
+  // **관측 장치는 본업보다 약해야 한다.** 여기서 던지면 예약 평가도,
+  // 주문 실행도, 생존 신호도 같이 멈춘다 — 고장을 보려고 만든 것이
+  // 고장을 만드는 셈이다. 병합기도 던지지 않지만 한 겹 더 둔다.
+  try { scheduler = mergeSchedulerReport(scheduler, patch); } catch { /* 이전 상태 유지 */ }
 }
 
 /** 값을 안 보여 주고 같은지만 말한다 */
