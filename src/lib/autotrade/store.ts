@@ -2,6 +2,18 @@
 // 실행 로그 + 모의 잔고 (paper 모드용) localStorage
 
 import type { ExecutionLog } from './types';
+import { mayMutatePracticeLedger, practiceBlocked } from './practiceEnv';
+import type { TradeEnv } from './practiceEnv';
+
+// **이 파일은 브라우저 로컬 연습 장부다. 정본 모의 장부가 아니다.**
+//
+// 정본 모의(PAPER)는 서버에 있다 — `paper_accounts` · `paper_positions`,
+// 단위는 USDT. 여기 있는 것은 원화(KRW) 연습 장부이고, 통화도 체결 방식도
+// 다르다. **두 장부의 잔고·손익을 합치지 않는다.**
+//
+// 그리고 **TESTNET·LIVE는 여기에 적지 않는다.** 예전에는 적었고, 그래서
+// 한 장부에 세 환경이 섞였다(`practiceEnv.ts`의 머리말 참조). 이제 잔고를
+// 바꾸는 함수는 전부 환경을 받고, MOCK이 아니면 **아무것도 하지 않는다.**
 
 const LOG_KEY      = 'tg_autotrade_logs_v1';
 const PAPER_BAL_KEY = 'tg_paper_balance_v1';
@@ -106,23 +118,34 @@ export function loadPaperBalance(): PaperBalance {
   }
 }
 
-export function savePaperBalance(b: PaperBalance): void {
+/**
+ * 잔고를 실제로 쓴다. **환경을 받는다.**
+ *
+ * 환경을 인자로 강제하는 이유는 호출하는 쪽이 "지금 어느 환경인가"를
+ * 반드시 답하게 하기 위해서다. 기본값을 MOCK으로 두면 안 적은 자리가
+ * 곧 실전을 연습 장부에 적는 자리가 된다.
+ */
+export function savePaperBalance(env: TradeEnv | 'UNKNOWN', b: PaperBalance): void {
+  if (!mayMutatePracticeLedger(env)) return;
   if (typeof window === 'undefined') return;
   try { window.localStorage.setItem(PAPER_BAL_KEY, JSON.stringify(b)); } catch {}
 }
 
-export function resetPaperBalance(): void {
+export function resetPaperBalance(env: TradeEnv | 'UNKNOWN'): void {
+  if (!mayMutatePracticeLedger(env)) return;
   if (typeof window === 'undefined') return;
   try { window.localStorage.setItem(PAPER_BAL_KEY, JSON.stringify(DEFAULT_BALANCE)); } catch {}
 }
 
 // 모의 체결 — 진입 (롱/숏 모두)
 export function paperBuy(
+  env: TradeEnv | 'UNKNOWN',
   asset: string,
   price: number,
   amountKRW: number,
   opts?: { stopLossPct?: number; takeProfitPct?: number; stratId?: string; side?: 'long' | 'short' },
-): { ok: boolean; qty?: number; reason?: string } {
+): { ok: boolean; qty?: number; reason?: string; blocked?: true } {
+  if (!mayMutatePracticeLedger(env)) return practiceBlocked(env);
   const b = loadPaperBalance();
   if (b.krw < amountKRW) {
     return { ok: false, reason: `잔고 부족 (보유 ${Math.floor(b.krw).toLocaleString('ko-KR')}원, 필요 ${amountKRW.toLocaleString('ko-KR')}원)` };
@@ -142,16 +165,18 @@ export function paperBuy(
   const slPrice = slPct && slPct > 0 ? (side === 'short' ? newAvg * (1 + slPct/100) : newAvg * (1 - slPct/100)) : base.slPrice;
   const tpPrice = tpPct && tpPct > 0 ? (side === 'short' ? newAvg * (1 - tpPct/100) : newAvg * (1 + tpPct/100)) : base.tpPrice;
   b.positions[asset] = { qty: newQty, avgPrice: newAvg, side, slPrice, tpPrice, stratId: opts?.stratId ?? base.stratId };
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, qty };
 }
 
 // 모의 체결 — 매도
 export function paperSell(
+  env: TradeEnv | 'UNKNOWN',
   asset: string,
   price: number,
   amountKRW: number,
-): { ok: boolean; qty?: number; reason?: string; pnl?: number } {
+): { ok: boolean; qty?: number; reason?: string; pnl?: number; blocked?: true } {
+  if (!mayMutatePracticeLedger(env)) return practiceBlocked(env);
   const b = loadPaperBalance();
   const pos = b.positions[asset];
   if (!pos || pos.qty <= 0) return { ok: false, reason: `${asset} 보유 없음` };
@@ -167,7 +192,7 @@ export function paperSell(
   if (pos.qty < 0.000001) delete b.positions[asset];
   else b.positions[asset] = pos;
   b.totalPnL += pnl;
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, qty: qtyToSell, pnl };
 }
 
@@ -178,7 +203,11 @@ export interface ExitEvent {
   price: number; pnl: number; qty: number; stratId?: string;
 }
 
-export function checkPaperExits(priceMap: Record<string, number>): ExitEvent[] {
+export function checkPaperExits(env: TradeEnv | 'UNKNOWN', priceMap: Record<string, number>): ExitEvent[] {
+  // **연습 장부의 청산 감시다.** 정본 PAPER의 청산은 서버가 한다
+  // (`/api/paper/exit-monitor` · Worker). 여기서 TESTNET·LIVE를 돌리면
+  // 거래소가 이미 처리한 것을 연습 장부가 한 번 더 적는다.
+  if (!mayMutatePracticeLedger(env)) return [];
   const b = loadPaperBalance();
   const exits: ExitEvent[] = [];
   let mutated = false;
@@ -199,7 +228,7 @@ export function checkPaperExits(priceMap: Record<string, number>): ExitEvent[] {
         const proceeds = halfQty * cur;
         const cost = halfQty * pos.avgPrice;
         const halfPnl = (proceeds - cost) * (isShort ? -1 : 1);
-        b.krw += proceeds; b.totalPnL += halfPnl; recordDailyPnL(halfPnl);
+        b.krw += proceeds; b.totalPnL += halfPnl; recordDailyPnL(env, halfPnl);
         // 남은 절반 + 손절을 본전으로 (리스크 프리)
         b.positions[asset] = { ...pos, qty: pos.qty - halfQty, slPrice: pos.avgPrice, tp1Done: true };
         exits.push({ asset, reason: 'take_profit' as any, price: cur, pnl: halfPnl, qty: halfQty, stratId: pos.stratId });
@@ -239,12 +268,12 @@ export function checkPaperExits(priceMap: Record<string, number>): ExitEvent[] {
     const pnl      = (proceeds - cost) * (isShort ? -1 : 1);
     b.krw += proceeds;
     b.totalPnL += pnl;
-    recordDailyPnL(pnl);
+    recordDailyPnL(env, pnl);
     exits.push({ asset, reason: hit as any, price: cur, pnl, qty: p2.qty, stratId: p2.stratId });
     delete b.positions[asset];
     mutated = true;
   }
-  if (mutated || exits.length > 0) savePaperBalance(b);
+  if (mutated || exits.length > 0) savePaperBalance(env, b);
   return exits;
 }
 
@@ -255,7 +284,15 @@ export function getOpenPositions(): Array<{ asset: string } & PaperPosition> {
 }
 
 // ─── 포지션 청산 (수동 매매용) ────────────────────────────────
-export function closePaperPosition(asset: string, currentPrice: number, ratio = 1): { ok: boolean; pnl: number; reason?: string } {
+export function closePaperPosition(
+  env: TradeEnv | 'UNKNOWN',
+  asset: string,
+  currentPrice: number,
+  ratio = 1,
+): { ok: boolean; pnl: number; reason?: string; blocked?: true } {
+  // **거래소 청산이 끝난 뒤 여기를 부르지 않는다.** 예전에는 모드와 무관하게
+  // 불렀고, 그래서 TESTNET·LIVE 청산이 연습 장부의 손익으로 쌓였다.
+  if (!mayMutatePracticeLedger(env)) return { ...practiceBlocked(env), pnl: 0 };
   const b = loadPaperBalance();
   const pos = b.positions[asset];
   if (!pos || pos.qty <= 0) return { ok: false, pnl: 0, reason: '포지션 없음' };
@@ -267,14 +304,19 @@ export function closePaperPosition(asset: string, currentPrice: number, ratio = 
   const pnl = proceeds - cost;
   b.krw += proceeds;
   b.totalPnL += pnl;
-  recordDailyPnL(pnl);
+  recordDailyPnL(env, pnl);
   if (r >= 0.999) { delete b.positions[asset]; }
   else { b.positions[asset] = { ...pos, qty: pos.qty - closeQty }; }
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, pnl };
 }
 
-export function reversePaperPosition(asset: string, currentPrice: number): { ok: boolean; pnl: number; closedValue: number; newSide?: 'long'|'short' } {
+export function reversePaperPosition(
+  env: TradeEnv | 'UNKNOWN',
+  asset: string,
+  currentPrice: number,
+): { ok: boolean; pnl: number; closedValue: number; newSide?: 'long'|'short'; blocked?: true; reason?: string } {
+  if (!mayMutatePracticeLedger(env)) return { ...practiceBlocked(env), pnl: 0, closedValue: 0 };
   const b = loadPaperBalance();
   const pos = b.positions[asset];
   if (!pos || pos.qty <= 0) return { ok: false, pnl: 0, closedValue: 0 };
@@ -293,7 +335,7 @@ export function reversePaperPosition(asset: string, currentPrice: number): { ok:
   // 2) 잔고: 청산금 회수 + PnL 반영, 그리고 반대방향 같은 수량 재진입(증거금 차감)
   b.krw += pnl;            // 실현손익만 반영 (증거금은 그대로 재사용)
   b.totalPnL += pnl;
-  recordDailyPnL(pnl);
+  recordDailyPnL(env, pnl);
 
   // 3) 반대방향 신규 포지션 (같은 수량, 현재가 진입)
   b.positions[asset] = {
@@ -302,7 +344,7 @@ export function reversePaperPosition(asset: string, currentPrice: number): { ok:
     side: newSide,
     stratId: 'reverse',
   };
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, pnl, closedValue, newSide };
 }
 
@@ -355,19 +397,35 @@ export function canOpenNewPosition(seed = 10_000_000): { allowed: boolean; reaso
 }
 
 // 일일 손익 기록 (청산 시 호출)
-export function recordDailyPnL(pnl: number) {
+/**
+ * 연습 장부의 **실현손익 누계**. 이것도 장부다.
+ *
+ * 잔고·포지션만 막고 여기를 열어 두면, 실전 손익이 연습 성과로 남는다.
+ * 화면은 "오늘 얼마 벌었나"를 이 값으로 읽는다 — 잔고보다 눈에 먼저 띄는
+ * 숫자다. 그래서 같은 계약을 건다: **환경을 먼저 받고 MOCK에서만 쓴다.**
+ *
+ * `window.localStorage`로 통일했다. 예전에는 맨 `localStorage`를 썼는데,
+ * 그러면 창이 없는 곳에서 예외가 나고 `catch`가 삼켜 **아무 일도 안 한 것과
+ * 실패한 것이 같은 모양**이 됐다.
+ */
+export function recordDailyPnL(env: TradeEnv | 'UNKNOWN', pnl: number) {
+  if (!mayMutatePracticeLedger(env)) return;
+  if (typeof window === 'undefined') return;
   const today = new Date().toDateString();
   try {
-    const dayKey = localStorage.getItem('tg_day_pnl_date') || '';
-    let dayPnL = dayKey === today ? +(localStorage.getItem('tg_day_pnl') || '0') : 0;
+    const dayKey = window.localStorage.getItem(DAY_PNL_DATE_KEY) || '';
+    let dayPnL = dayKey === today ? +(window.localStorage.getItem(DAY_PNL_KEY) || '0') : 0;
     dayPnL += pnl;
-    localStorage.setItem('tg_day_pnl_date', today);
-    localStorage.setItem('tg_day_pnl', String(dayPnL));
+    window.localStorage.setItem(DAY_PNL_DATE_KEY, today);
+    window.localStorage.setItem(DAY_PNL_KEY, String(dayPnL));
   } catch {}
 }
 
 // ─── 급락 서킷브레이커 ────────────────────────────────
 const CIRCUIT_KEY = 'tg_circuit_breaker';
+/** 연습 장부의 실현손익 누계 — 잔고·포지션과 같은 장부다 */
+const DAY_PNL_KEY = 'tg_day_pnl';
+const DAY_PNL_DATE_KEY = 'tg_day_pnl_date';
 export interface CircuitState { tripped: boolean; reason: string; until: number; }
 
 export function checkCircuitBreaker(asset: string, changePct1h: number): CircuitState {
