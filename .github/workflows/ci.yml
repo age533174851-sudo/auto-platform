@@ -326,7 +326,7 @@ jobs:
 
       # ── 관리자 인증 계약 (같은 비밀에 이름을 둘 붙이지 않는다) ──
       #
-      # x-admin-secret 호출자가 `secrets.EXIT_MONITOR_SECRET`이라는 다른
+      # x-admin-secret 호출자가 `EXIT_MONITOR_SECRET`이라는 다른 GitHub secret
       # 이름을 쓰고 있었다. 서버와 sync-secrets는 `ADMIN_SECRET`을 본다.
       # 동기화가 매번 성공해도 호출자는 계속 401이었고, 그 401은 조용했다 —
       # exit-monitor가 30번, autotrade-tick이 30번 넘게 연속 실패하는 동안

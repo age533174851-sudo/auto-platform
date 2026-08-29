@@ -5,7 +5,7 @@
 //
 // 무슨 일이 있었나
 // ────────────────
-// `x-admin-secret`을 보내는 워크플로들이 `secrets.EXIT_MONITOR_SECRET`이라는
+// `x-admin-secret`을 보내는 워크플로들이 `EXIT_MONITOR_SECRET`이라는 GitHub secret
 // 이름을 썼다. 서버는 `ADMIN_SECRET`과 비교하고, `sync-secrets`도
 // `ADMIN_SECRET`을 Vercel·Fly로 밀어 넣는다. 즉 **동기화되는 이름과
 // 호출자가 보는 이름이 달랐다.**
@@ -37,7 +37,7 @@ const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
  * **주석을 걷어낸다. 안 걷어내면 검사기가 제 설명을 사용처로 읽는다.**
  *
  * 이 파일을 처음 돌렸을 때 실패한 이유가 그거였다 — autotrade-tick의
- * "예전에는 `secrets.EXIT_MONITOR_SECRET`을 썼다"는 **역사를 적은 주석**을
+ * "예전에는 `EXIT_MONITOR_SECRET`을 썼다"는 **역사를 적은 주석**을
  * 보고 지금도 쓰고 있다고 판정했다. 이 저장소는 같은 고장을 이미 겪었다
  * (#211에서 검사기가 주석을 코드로 읽고 59줄을 통째로 삼켰다).
  *
