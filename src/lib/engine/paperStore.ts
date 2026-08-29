@@ -32,7 +32,9 @@ export async function openPaperPosition(
      */
     marginMode?: 'ISOLATED' | 'CROSSED';
   }
-): Promise<{ ok: boolean; positionId?: string; fill?: PaperFill; error?: string; duplicate?: boolean }> {
+): Promise<{ ok: boolean; positionId?: string; fill?: PaperFill; error?: string; duplicate?: boolean;
+  /** 진입 수수료가 계좌에 반영됐는가. null이면 시도조차 못 했다 */
+  feeApplied?: boolean | null }> {
   const fill = simulateFill(args.plan, args.entryPrice, {
     feeRatePct: args.feeRatePct, slippagePct: args.slippagePct,
     stopLoss: args.stopLoss, takeProfit: args.takeProfit,
@@ -71,17 +73,27 @@ export async function openPaperPosition(
     return { ok: false, error: error.message };
   }
 
-  // 증거금 + 진입 수수료 차감
+  // 진입 수수료 차감 — **읽고 고쳐 쓰지 않는다.**
+  //
+  // 두 포지션이 동시에 열리면 예전 구조는 둘 다 옛 total_fees를 읽고 각자
+  // 덮어써서 한쪽 수수료가 사라졌다. 청산과 같은 고장이라 같은 방식으로
+  // 고친다 — SQL이 증가시킨다(마이그레이션 072).
+  //
+  // 아직 남은 것: 이 INSERT와 수수료 반영은 **한 트랜잭션이 아니다.**
+  // 진입은 중복 방지(signal_id 유니크)·규격 검증이 얽혀 있어 통째로 옮기는
+  // 것은 이 변경의 범위를 넘는다. 실패하면 아래에 사유가 남는다.
+  let feeApplied: boolean | null = null;
   try {
-    const acct = await getPaperAccount(sb, args.userId);
-    await sb.from('paper_accounts').update({
-      balance: Number(acct.balance) - fill.entryFee,
-      total_fees: Number(acct.total_fees) + fill.entryFee,
-      updated_at: new Date().toISOString(),
-    }).eq('user_id', args.userId);
-  } catch {}
+    const { data, error: feeErr } = await sb.rpc('paper_apply_entry_fee', {
+      p_user_id: args.userId, p_entry_fee: fill.entryFee,
+    });
+    if (feeErr) throw new Error(String((feeErr as any).message ?? feeErr));
+    const row = Array.isArray(data) ? data[0] : data;
+    feeApplied = row?.applied === true;
+  } catch { feeApplied = false; }
 
-  return { ok: true, positionId: data?.id, fill };
+  // 수수료가 반영되지 않았으면 **반영됐다고 적지 않는다.**
+  return { ok: true, positionId: data?.id, fill, feeApplied };
 }
 
 // 가상 포지션 청산
@@ -111,48 +123,51 @@ export async function closePaperPosition(
     closedAt: Date.now(),
   });
 
-  // ── 선점: 같은 포지션을 두 번 청산하지 않는다 ──
+  // ── 청산과 정산은 **하나의 트랜잭션**이다 ──
   //
-  // 예전에는 `read → status 확인 → update → 계좌 반영`이었다. 두 실행기가
-  // 같은 줄을 동시에 집으면 **둘 다 status를 봤을 때 'open'** 이고, 둘 다
-  // 계좌를 더한다 — 잔고·손익·수수료·매매횟수가 **두 번** 반영된다.
-  // 위의 status 검사는 경쟁을 막지 못한다(읽은 뒤에 바뀐다).
+  // 예전에는 조건부 UPDATE로 선점한 다음 계좌를 따로 고쳤다. 선점은 **같은
+  // 포지션**을 두 번 닫는 것만 막았고, 두 가지가 남아 있었다.
   //
-  // 그래서 `status='open'`일 때만 바뀌는 **조건부 UPDATE**로 못 박고,
-  // 실제로 돌아온 줄이 있을 때만 계좌를 건드린다. 진 쪽은 0줄을 받고
-  // 조용히 물러난다 — 그게 멱등이다.
-  const { data: claimed, error: claimErr } = await sb.from('paper_positions').update({
-    status: 'closed',
-    exit_price: closed.exitPrice,
-    exit_reason: closed.exitReason,
-    exit_fee: closed.exitFee,
-    gross_pnl: closed.grossPnl,
-    realized_pnl: closed.realizedPnl,
-    pnl_pct: closed.pnlPct,
-    closed_at: new Date().toISOString(),
-  }).eq('id', positionId).eq('status', 'open').select('id');
-
-  if (claimErr) {
-    // **실패를 성공으로 적지 않는다.** 계좌는 건드리지 않는다.
-    return { ok: false, error: `청산을 기록하지 못했습니다: ${String((claimErr as any).message ?? claimErr).slice(0, 160)}` };
+  //   · 포지션은 CLOSED가 됐는데 계좌 갱신이 실패하면 되돌릴 수 없다.
+  //     그 포지션은 다시 닫을 수도 없다 — 장부가 조용히 어긋난다.
+  //   · **서로 다른** 두 포지션이 같은 계좌에서 동시에 닫히면, 둘 다 옛
+  //     balance를 읽고 각자 덮어써서 한쪽 손익이 사라진다. 선점은 여기서
+  //     아무 일도 하지 않는다.
+  //
+  // 그래서 둘을 `paper_settle_close`(마이그레이션 072) 안으로 옮겼다.
+  // 함수 안에서 계좌 정산이 실패하면 **포지션 UPDATE까지 되돌아간다.**
+  // 계좌는 읽지 않고 `balance = balance + delta`로 증가시키므로 동시에
+  // 닫혀도 두 손익이 모두 남는다.
+  //
+  // 금액은 위 `computeClose`가 계산한 값을 그대로 넘긴다 — 공식을 SQL에
+  // 다시 적지 않는다. 함수가 보장하는 것은 계산이 아니라 원자성이다.
+  let settled: any = null;
+  try {
+    const { data, error: rpcErr } = await sb.rpc('paper_settle_close', {
+      p_position_id: positionId,
+      p_exit_price: closed.exitPrice,
+      p_exit_reason: closed.exitReason,
+      p_exit_fee: closed.exitFee,
+      p_gross_pnl: closed.grossPnl,
+      p_realized_pnl: closed.realizedPnl,
+      p_pnl_pct: closed.pnlPct,
+    });
+    if (rpcErr) throw new Error(String((rpcErr as any).message ?? rpcErr));
+    settled = Array.isArray(data) ? data[0] : data;
+  } catch (e: any) {
+    // **실패를 성공으로 적지 않는다.** 트랜잭션이 통째로 되돌아갔으므로
+    // 포지션은 열린 채로 남고, 다음 회차가 다시 집는다.
+    return { ok: false, error: `청산을 기록하지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}` };
   }
-  if (!Array.isArray(claimed) || claimed.length === 0) {
-    // 다른 실행기가 먼저 닫았다. **계좌를 다시 더하지 않는다.**
+
+  if (!settled) {
+    // 함수가 아무 줄도 돌려주지 않았다. **닫혔다고 말하지 않는다.**
+    return { ok: false, error: '청산을 기록하지 못했습니다: 정산 결과를 받지 못했습니다' };
+  }
+  if (settled.settled !== true) {
+    // 다른 실행기가 먼저 닫았다. 계좌는 그쪽에서 한 번만 움직였다.
     return { ok: false, error: '이미 청산된 포지션' };
   }
-
-  // 계좌 반영 — **선점에 성공한 쪽만 온다**
-  try {
-    const acct = await getPaperAccount(sb, pos.user_id);
-    await sb.from('paper_accounts').update({
-      balance: Number(acct.balance) + closed.grossPnl - closed.exitFee,
-      total_pnl: Number(acct.total_pnl) + closed.realizedPnl,
-      total_fees: Number(acct.total_fees) + closed.exitFee,
-      trade_count: Number(acct.trade_count) + 1,
-      win_count: Number(acct.win_count) + (closed.realizedPnl > 0 ? 1 : 0),
-      updated_at: new Date().toISOString(),
-    }).eq('user_id', pos.user_id);
-  } catch {}
 
   return { ok: true, realizedPnl: closed.realizedPnl, pnlPct: closed.pnlPct };
 }

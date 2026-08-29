@@ -27,6 +27,20 @@ function stripComments(src) {
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
+/**
+ * SQL 주석(`--`)을 지운다.
+ *
+ * **주석을 안 지우면 검사가 내 설명문을 읽는다.** 실제로 그랬다 —
+ * 마이그레이션 머리말에 `balance = balance + delta`라고 적어 뒀더니,
+ * 함수 본문에서 그 연산을 걷어내도 검사가 통과했다. 통과해도 거짓인
+ * 검사다.
+ */
+function stripSqlComments(src) {
+  return String(src)
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ');
+}
+
 /** 모의 잔고를 보여 주는 화면. **여기는 서버만 읽는다** */
 const MOCK_SCREENS = [
   'src/components/MockAutoTrade.tsx',
@@ -145,17 +159,101 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   }
 }
 
-// ── ⑦ 같은 포지션을 두 번 닫아 계좌가 두 번 반영되지 않는다 ──
+// ── ⑦ 청산과 계좌 정산이 **하나의 트랜잭션**이다 ──
+//
+// 조건부 UPDATE만으로는 부족하다. 그것은 **같은 포지션**을 두 번 닫는
+// 것만 막는다. 포지션은 닫혔는데 계좌 갱신이 실패하는 경우와, 서로
+// **다른** 두 포지션이 같은 계좌를 동시에 덮어써서 한쪽 손익이 사라지는
+// 경우는 못 막는다.
 {
   const rel = 'src/lib/engine/paperStore.ts';
   const src = read(rel);
   if (src) {
     const code = stripComments(src);
-    // 조건부 UPDATE로 선점하고, 돌아온 줄을 봐야 한다.
-    if (!/\.eq\('status',\s*'open'\)[\s\S]{0,40}\.select\(/.test(code)) {
-      err(`${rel} — 청산에 선점(조건부 UPDATE)이 없습니다`
-        + '\n     read → status 확인 → update 구조는 경쟁을 막지 못합니다'
-        + '\n     두 실행기가 같은 줄을 집으면 **계좌가 두 번 반영됩니다**');
+
+    // 청산은 정산 함수로만 나간다.
+    if (!/\.rpc\(\s*'paper_settle_close'/.test(code)) {
+      err(`${rel} — 청산이 원자적 정산 함수를 거치지 않습니다`
+        + '\n     포지션 UPDATE와 계좌 UPDATE가 따로면, 포지션만 닫히고'
+        + '\n     **손익·수수료·매매횟수가 반영되지 않는 상태**가 만들어집니다');
+    }
+
+    // 계좌를 JS에서 읽어 덮어쓰면 lost update가 남는다.
+    const readModifyWrite =
+      /from\(\s*'paper_accounts'\s*\)[\s\S]{0,400}?\.update\(/.test(code);
+    if (readModifyWrite) {
+      err(`${rel} — 계좌를 JS에서 직접 UPDATE합니다`
+        + '\n     `balance = 읽은 balance + 손익` 구조는 두 포지션이 동시에'
+        + '\n     닫히면 **한쪽 손익이 사라집니다**. SQL 증분 연산으로 미세요');
+    }
+  }
+}
+
+// ── ⑧ 정산 함수가 실제로 존재하고 원자적인가 ──
+//
+// 코드가 부르는 함수가 마이그레이션에 없으면 청산은 런타임에 통째로
+// 실패한다. **만들어 놓고 배선을 안 함**의 반대 방향 고장이다.
+//
+// **함수 하나씩 따로 본다.** 파일 전체를 한 덩어리로 보면 옆 함수에 있는
+// `RAISE EXCEPTION` 하나가 이 함수의 것인 양 통과한다 — 실제로 처음에
+// 그렇게 새서, 정산 함수에서 예외를 걷어내도 검사가 초록이었다.
+{
+  const rel = 'supabase/migrations/072_paper_settle_atomic.sql';
+  const sql = read(rel);
+  if (!sql) {
+    err(`${rel} — 정산 함수 마이그레이션이 없습니다`);
+  } else {
+    const body = stripSqlComments(sql);
+
+    /** `CREATE OR REPLACE FUNCTION public.<name>` 하나의 본문만 잘라 낸다 */
+    const bodyOf = (name) => {
+      const re = new RegExp(`CREATE\\s+OR\\s+REPLACE\\s+FUNCTION\\s+public\\.${name}\\b`, 'i');
+      const m = re.exec(body);
+      if (!m) return null;
+      const rest = body.slice(m.index + m[0].length);
+      const next = /CREATE\s+OR\s+REPLACE\s+FUNCTION/i.exec(rest);
+      return next ? rest.slice(0, next.index) : rest;
+    };
+
+    const settle = bodyOf('paper_settle_close');
+    if (!settle) {
+      err(`${rel} — 청산 정산 함수(paper_settle_close)가 없습니다`);
+    } else {
+      for (const [re, why] of [
+        [/WHERE[\s\S]{0,80}status\s*=\s*'open'/i,
+         "선점 조건(status='open')이 없습니다 — 같은 포지션을 두 번 닫습니다"],
+        [/RETURNING\s+user_id\s+INTO/i,
+         '정산 대상을 포지션 줄의 user_id로 정하지 않습니다 — 인자를 믿으면 남의 계좌를 움직입니다'],
+        [/balance\s*=\s*balance\s*[+-]/i,
+         '잔고를 증분 연산으로 갱신하지 않습니다 — 동시 청산에서 손익이 사라집니다'],
+        [/total_pnl\s*=\s*total_pnl\s*\+/i, '손익을 증분으로 더하지 않습니다'],
+        [/total_fees\s*=\s*total_fees\s*\+/i, '수수료를 증분으로 더하지 않습니다'],
+        [/trade_count\s*=\s*trade_count\s*\+\s*1/i, '매매횟수를 증분으로 올리지 않습니다'],
+        [/win_count\s*=\s*win_count\s*\+/i, '승수를 증분으로 올리지 않습니다'],
+        [/RAISE\s+EXCEPTION/i,
+         '정산 실패 시 예외를 던지지 않습니다 — 포지션만 닫힌 채로 남습니다'],
+      ]) {
+        if (!re.test(settle)) err(`${rel} — paper_settle_close: ${why}`);
+      }
+    }
+
+    // 계좌를 만지는 나머지 함수들도 **덮어쓰지 않고 더한다.**
+    for (const [name, need] of [
+      ['paper_apply_entry_fee', /balance\s*=\s*balance\s*-/i],
+      ['paper_deposit', /balance\s*=\s*balance\s*\+/i],
+    ]) {
+      const fn = bodyOf(name);
+      if (!fn) err(`${rel} — ${name} 함수가 없습니다`);
+      else if (!need.test(fn)) {
+        err(`${rel} — ${name}: 잔고를 증분 연산으로 갱신하지 않습니다`
+          + '\n     읽어서 덮어쓰면 같은 계좌를 동시에 건드릴 때 한쪽이 사라집니다');
+      }
+    }
+
+    // SECURITY DEFINER로 만들면 authenticated가 남의 계좌를 움직인다.
+    if (/SECURITY\s+DEFINER/i.test(body)) {
+      err(`${rel} — SECURITY DEFINER를 쓰고 있습니다`
+        + '\n     이 표들은 service_role 전용입니다(010의 정책). 문을 넓히지 마세요');
     }
   }
 }

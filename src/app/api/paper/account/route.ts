@@ -269,20 +269,29 @@ export async function POST(req: NextRequest) {
       message: '모의투자를 아직 시작하지 않았습니다 — 시작 금액을 고른 뒤에 충전할 수 있습니다',
     }, { status: 409 });
   }
-  const acct: any = pr.account ?? {};
-
-  const balance = (Number(acct.balance) || 0) + amount;
-  // **초기자본도 같이 올린다.** 안 올리면 넣은 돈이 수익으로 잡혀
-  // 수익률이 부풀려진다 — 성적표가 거짓말을 하기 시작한다.
-  const initial = (Number(acct.initial_balance) || 0) + amount;
-
-  const { error } = await sb.from('paper_accounts').update({
-    balance, initial_balance: initial, updated_at: new Date().toISOString(),
-  }).eq('user_id', uid);
-
-  if (error) {
+  // **읽은 잔고에 더해서 덮어쓰지 않는다.**
+  //
+  // 워커는 60초마다 모의 청산을 돈다. 충전과 청산이 겹치면 둘 다 옛
+  // balance를 읽고 각자 쓴다 — 한쪽이 조용히 사라진다. 그래서 증가
+  // 연산으로 민다(마이그레이션 072). 초기자본도 같이 올린다: 안 올리면
+  // 넣은 돈이 수익으로 잡혀 수익률이 부풀려진다.
+  let balance: number; let initial: number;
+  try {
+    const { data, error } = await (sb as any).rpc('paper_deposit', { p_user_id: uid, p_amount: amount });
+    if (error) throw new Error(String((error as any).message ?? error));
+    const row: any = Array.isArray(data) ? data[0] : data;
+    if (!row || row.applied !== true) {
+      return NextResponse.json({
+        ok: false, error: 'not_started',
+        message: '모의투자를 아직 시작하지 않았습니다 — 시작 금액을 고른 뒤에 충전할 수 있습니다',
+      }, { status: 409 });
+    }
+    balance = Number(row.new_balance);
+    initial = Number(row.new_initial);
+  } catch (e: any) {
     return NextResponse.json({
-      ok: false, error: 'update_failed', message: error.message,
+      ok: false, error: 'update_failed',
+      message: `충전을 기록하지 못했습니다 (${String(e?.message ?? e).slice(0, 160)})`,
     }, { status: 500 });
   }
 

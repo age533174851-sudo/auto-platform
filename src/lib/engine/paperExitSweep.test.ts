@@ -5,7 +5,7 @@
 // 서버에는 열린 `paper_positions`를 읽어 SL/TP를 보는 실행자가 없었다.
 // 이 파일은 그 실행자의 판정과, **같은 포지션을 두 번 닫아 계좌가 두 번
 // 반영되는 것**을 못 박는다.
-import { test, eq, assert } from '../../test/harness';
+import { test, eq, close, assert } from '../../test/harness';
 import { paperExitPlan, NO_TIME_EXIT_HOURS } from './paperExitSweep';
 import { closePaperPosition } from './paperStore';
 
@@ -23,6 +23,81 @@ const pos = (o: Partial<any> = {}) => ({
   liquidationPrice: o.liquidationPrice ?? 50_000,
   openedAt: o.openedAt ?? NOW - HOUR,
 });
+
+function fakeDb(opts: { settleFails?: boolean } = {}) {
+  const mk = (id: string, user: string) => ({
+    id, user_id: user, side: 'LONG', status: 'open',
+    entry_price: 100_000, fill_price: 100_000, quantity: 0.01,
+    notional: 1_000, leverage: 10, margin: 100, entry_fee: 0.5,
+    stop_loss: 98_000, take_profit: 104_000, liquidation_price: 50_000,
+    opened_at: new Date(NOW - HOUR).toISOString(),
+  } as any);
+  const state = {
+    positions: { p1: mk('p1', 'u1'), p2: mk('p2', 'u1'), pB: mk('pB', 'u2') } as Record<string, any>,
+    accounts: {
+      u1: { user_id: 'u1', balance: 10_000, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0 },
+      u2: { user_id: 'u2', balance: 10_000, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0 },
+    } as Record<string, any>,
+    /** 정산 함수를 몇 번이나 실제로 적용했나 */
+    settlements: 0,
+    /** JS가 직접 연 표 (rpc는 여기 안 든다) */
+    tablesTouched: [] as string[],
+  };
+  const sb: any = {
+    from(table: string) {
+      state.tablesTouched.push(table);
+      const b: any = {
+        _guards: [] as Array<{ col: string; val: any }>, _patch: null as any,
+        select() { return b; },
+        update(patch: any) { b._patch = patch; return b; },
+        eq(col: string, val: any) { b._guards.push({ col, val }); return b; },
+        _g(col: string) { return b._guards.find((x: any) => x.col === col)?.val; },
+        maybeSingle() {
+          if (table === 'paper_positions') {
+            const r = state.positions[String(b._g('id'))];
+            return Promise.resolve({ data: r ? { ...r } : null, error: null });
+          }
+          const a = state.accounts[String(b._g('user_id'))];
+          return Promise.resolve({ data: a ? { ...a } : null, error: null });
+        },
+        then(res: any, rej: any) { return Promise.resolve({ data: [], error: null }).then(res, rej); },
+      };
+      return b;
+    },
+    // ── 정산 함수: 하나의 트랜잭션 ──
+    async rpc(fn: string, args: any) {
+      if (fn !== 'paper_settle_close') return { data: null, error: { message: `모르는 함수 ${fn}` } };
+      const row = state.positions[String(args.p_position_id)];
+      // ① 선점 — status='open'인 줄만
+      if (!row || row.status !== 'open') {
+        return { data: [{ settled: false, owner_id: null, settled_pnl: null, settled_pnl_pct: null }], error: null };
+      }
+      const before = { ...row };
+      state.positions[row.id] = {
+        ...row, status: 'closed', exit_price: args.p_exit_price,
+        exit_reason: args.p_exit_reason, exit_fee: args.p_exit_fee,
+        gross_pnl: args.p_gross_pnl, realized_pnl: args.p_realized_pnl,
+        pnl_pct: args.p_pnl_pct, closed_at: new Date().toISOString(),
+      };
+      // ② 정산 — **읽어서 덮는 것이 아니라 더한다**
+      const acct = state.accounts[String(row.user_id)];
+      if (opts.settleFails || !acct) {
+        // 되돌린다. 포지션이 닫힌 채로 남지 않는다.
+        state.positions[row.id] = before;
+        return { data: null, error: { message: '계좌를 정산하지 못했습니다 — 청산을 되돌립니다' } };
+      }
+      acct.balance += args.p_gross_pnl - args.p_exit_fee;
+      acct.total_pnl += args.p_realized_pnl;
+      acct.total_fees += args.p_exit_fee;
+      acct.trade_count += 1;
+      acct.win_count += args.p_realized_pnl > 0 ? 1 : 0;
+      state.settlements += 1;
+      return { data: [{ settled: true, owner_id: row.user_id,
+        settled_pnl: args.p_realized_pnl, settled_pnl_pct: args.p_pnl_pct }], error: null };
+    },
+  };
+  return { sb, state };
+}
 
 export function runPaperExitSweepTests() {
   console.log('\n🧪 모의 포지션 청산 감시 (서버가 손절을 본다)');
@@ -107,115 +182,102 @@ export function runPaperExitSweepTests() {
     eq(paperExitPlan({ positions: null, marks: null, nowMs: NOW }).scanned, 0);
   });
 
-  // ══ ⑥ **같은 포지션을 두 번 닫아도 계좌는 한 번만** ══
+  // ══ ⑥ **청산과 정산은 하나다** ══
   //
-  // 예전 closePaperPosition은 read → status 확인 → update → 계좌 반영이라,
-  // 두 실행기가 동시에 집으면 둘 다 'open'을 보고 **둘 다 계좌를 더했다.**
-  function fakeSb() {
-    const state = {
-      position: {
-        id: 'p1', user_id: 'u1', side: 'LONG', status: 'open',
-        entry_price: 100_000, fill_price: 100_000, quantity: 0.01,
-        notional: 1_000, leverage: 10, margin: 100, entry_fee: 0.5,
-        stop_loss: 98_000, take_profit: 104_000, liquidation_price: 50_000,
-        opened_at: new Date(NOW - HOUR).toISOString(),
-      } as any,
-      account: { user_id: 'u1', balance: 10_000, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0 } as any,
-      accountUpdates: 0,
-    };
-    const sb: any = {
-      from(table: string) {
-        const b: any = {
-          _patch: null as any, _guards: [] as Array<{ col: string; val: any }>,
-          select() { return b; },
-          update(patch: any) { b._patch = patch; return b; },
-          eq(col: string, val: any) { b._guards.push({ col, val }); return b; },
-          maybeSingle() {
-            if (table === 'paper_positions') return Promise.resolve({ data: { ...state.position }, error: null });
-            return Promise.resolve({ data: { ...state.account }, error: null });
-          },
-          then(res: any, rej: any) {
-            let out: any = { data: null, error: null };
-            if (b._patch && table === 'paper_positions') {
-              // **조건부 UPDATE를 진짜로 흉내 낸다.** status 조건이 붙어
-              // 있으면 지금 값과 같을 때만 쓰고, 아니면 0줄이다.
-              const g = b._guards.find(x => x.col === 'status');
-              const ok = g == null || state.position.status === g.val;
-              if (ok) { state.position = { ...state.position, ...b._patch }; out = { data: [{ id: 'p1' }], error: null }; }
-              else out = { data: [], error: null };
-            } else if (b._patch && table === 'paper_accounts') {
-              state.accountUpdates += 1;
-              state.account = { ...state.account, ...b._patch };
-              out = { data: [{ user_id: 'u1' }], error: null };
-            }
-            return Promise.resolve(out).then(res, rej);
-          },
-        };
-        return b;
-      },
-    };
-    return { sb, state };
-  }
+  // 예전 구조: 조건부 UPDATE로 선점 → 계좌를 읽음 → 읽은 값 + 손익을 씀.
+  //   · 포지션만 닫히고 계좌 갱신이 실패하면 되돌릴 수 없었다
+  //   · **다른** 두 포지션이 동시에 닫히면 한쪽 손익이 사라졌다
+  //
+  // 지금은 `paper_settle_close`(마이그레이션 072) 하나로 나간다. 아래
+  // 가짜 DB는 그 함수의 계약을 그대로 흉내 낸다 — 선점에 성공한 줄에만
+  // **증분**을 적용하고, 정산이 실패하면 포지션 UPDATE까지 되돌린다.
+  //
+  // 이 파일이 증명하는 것은 **JS가 그 계약대로 부른다**는 것이다.
+  // SQL 쪽 성질(status='open' 선점 · balance = balance + delta ·
+  // RAISE EXCEPTION · RETURNING user_id)은
+  // `scripts/check-mock-single-source.mjs` ⑧이 CI에서 못 박는다.
 
   test('순차로 두 번 청산하면 두 번째는 이미 청산됨이다', async () => {
-    const { sb, state } = fakeSb();
+    const { sb, state } = fakeDb();
     const a = await closePaperPosition(sb, 'p1', 97_900, 'SL');
     const b = await closePaperPosition(sb, 'p1', 97_900, 'SL');
     eq(a.ok, true);
     eq(b.ok, false);
-    eq(state.accountUpdates, 1);
+    eq(state.settlements, 1);
   });
 
-  test('**동시에** 두 실행기가 같은 포지션을 집어도 계좌는 한 번만 반영된다', async () => {
-    // 이게 진짜 경쟁이다. 순차 호출은 예전 코드(read → status 확인)도
-    // 막았다 — **둘 다 읽은 뒤에 둘 다 쓰는 것**이 못 막던 자리다.
-    //
-    // `Promise.all`로 두 호출을 겹치면 둘 다 status='open'을 읽은 뒤에
-    // 각자 update를 시도한다. 선점이 없으면 둘 다 성공하고 계좌가 두 번
-    // 반영된다 — 잔고·손익·수수료·매매횟수가 전부 두 배다.
-    const { sb, state } = fakeSb();
+  test('**같은 포지션**을 동시에 두 번 닫아도 정산은 한 번이다', async () => {
+    const { sb, state } = fakeDb();
     const [a, b] = await Promise.all([
       closePaperPosition(sb, 'p1', 97_900, 'SL'),
       closePaperPosition(sb, 'p1', 97_900, 'SL'),
     ]);
-    const okCount = [a, b].filter(r => r.ok).length;
-    eq(okCount, 1, '한 쪽만 이겨야 한다');
-    // **여기가 핵심이다.** 2가 나오면 계좌가 두 배로 움직인 것이다.
-    eq(state.accountUpdates, 1);
-    eq(state.account.trade_count, 1);
+    eq([a, b].filter(r => r.ok).length, 1, '한 쪽만 이겨야 한다');
+    eq(state.settlements, 1);
+    eq(state.accounts.u1.trade_count, 1);
+  });
+
+  test('**서로 다른 두 포지션**을 동시에 닫으면 두 손익이 모두 남는다', async () => {
+    // 이게 선점만으로는 못 막던 자리다. 두 포지션은 서로 다르므로 둘 다
+    // 선점에 성공하고, 예전 구조에서는 **둘 다 옛 balance를 읽고** 각자
+    // 덮어써서 한쪽 손익이 사라졌다.
+    const { sb, state } = fakeDb();
+    const before = state.accounts.u1.balance;
+    const [a, b] = await Promise.all([
+      closePaperPosition(sb, 'p1', 97_900, 'SL'),
+      closePaperPosition(sb, 'p2', 104_500, 'TP'),
+    ]);
+    eq(a.ok, true);
+    eq(b.ok, true);
+    eq(state.settlements, 2, '둘 다 정산돼야 한다');
+    eq(state.accounts.u1.trade_count, 2);
+    close(state.accounts.u1.total_pnl, (a.realizedPnl as number) + (b.realizedPnl as number), 1e-6);
+
+    // 잔고는 **차례로 닫았을 때와 같아야 한다.** 수수료 공식을 여기서 다시
+    // 쓰지 않는다 — 한쪽 손익이 사라졌는지만 보면 되고, 그 답은 순차 결과와
+    // 같은지로 나온다.
+    const seq = fakeDb();
+    await closePaperPosition(seq.sb, 'p1', 97_900, 'SL');
+    await closePaperPosition(seq.sb, 'p2', 104_500, 'TP');
+    close(state.accounts.u1.balance, seq.state.accounts.u1.balance, 1e-6);
+    assert(state.accounts.u1.balance > before,
+      `두 손익이 모두 반영되면 잔고가 움직인다 — ${before} → ${state.accounts.u1.balance}`);
+  });
+
+  test('정산이 실패하면 포지션도 닫히지 않는다 — 반쯤 닫힌 상태를 만들지 않는다', async () => {
+    const { sb, state } = fakeDb({ settleFails: true });
+    const r = await closePaperPosition(sb, 'p1', 97_900, 'SL');
+    eq(r.ok, false);
+    eq(state.positions.p1.status, 'open', '되돌아가서 다음 회차가 다시 집을 수 있어야 한다');
+    eq(state.settlements, 0);
+    eq(state.accounts.u1.balance, 10_000);
+    assert(String(r.error).includes('기록하지 못했습니다'), `이유를 남긴다 — ${r.error}`);
   });
 
   test('선점에 실패하면 계좌를 아예 건드리지 않는다', async () => {
-    const { sb, state } = fakeSb();
-    state.position.status = 'closed';   // 다른 실행기가 이미 닫았다
+    const { sb, state } = fakeDb();
+    state.positions.p1.status = 'closed';   // 다른 실행기가 이미 닫았다
     const r = await closePaperPosition(sb, 'p1', 97_900, 'SL');
     eq(r.ok, false);
-    eq(state.accountUpdates, 0);
+    eq(state.settlements, 0);
+    eq(state.accounts.u1.balance, 10_000);
   });
 
-  test('청산 기록이 실패하면 성공으로 적지 않는다', async () => {
-    const sb: any = {
-      from(table: string) {
-        const b: any = {
-          select() { return b; }, update() { return b; }, eq() { return b; },
-          maybeSingle() {
-            return Promise.resolve({ data: table === 'paper_positions' ? {
-              id: 'p1', user_id: 'u1', side: 'LONG', status: 'open',
-              entry_price: 100_000, fill_price: 100_000, quantity: 0.01,
-              notional: 1_000, leverage: 10, margin: 100, entry_fee: 0.5,
-              liquidation_price: 50_000, opened_at: new Date(NOW - HOUR).toISOString(),
-            } : {}, error: null });
-          },
-          then(res: any, rej: any) {
-            return Promise.resolve({ data: null, error: { message: 'write denied' } }).then(res, rej);
-          },
-        };
-        return b;
-      },
-    };
-    const r = await closePaperPosition(sb, 'p1', 97_900, 'SL');
-    eq(r.ok, false);
-    assert(String(r.error).includes('기록하지 못했습니다'), `이유를 남긴다 — ${r.error}`);
+  test('JS는 paper_accounts를 직접 쓰지 않는다 — 정산 함수만 계좌를 움직인다', async () => {
+    const { sb, state } = fakeDb();
+    await closePaperPosition(sb, 'p1', 97_900, 'SL');
+    // 계좌를 읽는 것까지 막지는 않는다. **쓰기 경로가 없어야** 한다.
+    eq(state.settlements, 1, '정산은 함수를 통해서만 일어난다');
+    eq(state.accounts.u1.trade_count, 1);
+  });
+
+  test('정산 대상은 포지션 줄의 주인이다 — 다른 사용자의 계좌는 그대로다', async () => {
+    const { sb, state } = fakeDb();
+    const r = await closePaperPosition(sb, 'pB', 97_900, 'SL');   // 주인은 u2
+    eq(r.ok, true);
+    eq(state.accounts.u2.trade_count, 1);
+    eq(state.accounts.u1.trade_count, 0, '남의 계좌를 건드리지 않는다');
+    eq(state.accounts.u1.balance, 10_000);
   });
 }
 
@@ -251,84 +313,23 @@ export function runPaperExitSweepMoreTests() {
 
   // ══ ⑧ 사용자 격리 · 장부 격리 ══
   //
-  // 청산은 **그 포지션의 주인** 계좌에 적힌다. 부르는 쪽이 준 id가 아니다.
-  function multiUserSb() {
-    const state = {
-      positions: {
-        pA: { id: 'pA', user_id: 'userA', side: 'LONG', status: 'open',
-              entry_price: 100_000, fill_price: 100_000, quantity: 0.01,
-              notional: 1_000, leverage: 10, margin: 100, entry_fee: 0.5,
-              stop_loss: 98_000, take_profit: 104_000, liquidation_price: 50_000,
-              opened_at: new Date(NOW - HOUR).toISOString() } as any,
-        pB: { id: 'pB', user_id: 'userB', side: 'LONG', status: 'open',
-              entry_price: 100_000, fill_price: 100_000, quantity: 0.01,
-              notional: 1_000, leverage: 10, margin: 100, entry_fee: 0.5,
-              stop_loss: 98_000, take_profit: 104_000, liquidation_price: 50_000,
-              opened_at: new Date(NOW - HOUR).toISOString() } as any,
-      } as Record<string, any>,
-      accounts: {
-        userA: { user_id: 'userA', balance: 10_000, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0 },
-        userB: { user_id: 'userB', balance: 10_000, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0 },
-      } as Record<string, any>,
-      /** **어떤 표를 건드렸나.** 여기에 paper_ 아닌 이름이 들어오면 사고다 */
-      tablesTouched: [] as string[],
-    };
-    const sb: any = {
-      from(table: string) {
-        state.tablesTouched.push(table);
-        const b: any = {
-          _patch: null as any, _guards: [] as Array<{ col: string; val: any }>,
-          select() { return b; },
-          update(patch: any) { b._patch = patch; return b; },
-          eq(col: string, val: any) { b._guards.push({ col, val }); return b; },
-          _guard(col: string) { return b._guards.find((x: any) => x.col === col)?.val; },
-          maybeSingle() {
-            if (table === 'paper_positions') {
-              const row = state.positions[String(b._guard('id'))];
-              return Promise.resolve({ data: row ? { ...row } : null, error: null });
-            }
-            const acct = state.accounts[String(b._guard('user_id'))];
-            return Promise.resolve({ data: acct ? { ...acct } : null, error: null });
-          },
-          then(res: any, rej: any) {
-            let out: any = { data: null, error: null };
-            if (b._patch && table === 'paper_positions') {
-              const id = String(b._guard('id'));
-              const want = b._guards.find((x: any) => x.col === 'status')?.val;
-              const row = state.positions[id];
-              if (row && (want == null || row.status === want)) {
-                state.positions[id] = { ...row, ...b._patch };
-                out = { data: [{ id }], error: null };
-              } else out = { data: [], error: null };
-            } else if (b._patch && table === 'paper_accounts') {
-              const u = String(b._guard('user_id'));
-              if (state.accounts[u]) state.accounts[u] = { ...state.accounts[u], ...b._patch };
-              out = { data: [{ user_id: u }], error: null };
-            }
-            return Promise.resolve(out).then(res, rej);
-          },
-        };
-        return b;
-      },
-    };
-    return { sb, state };
-  }
-
+  // 정산 대상은 **그 포지션의 주인**이다. 부르는 쪽이 준 id가 아니다 —
+  // 함수가 `RETURNING user_id INTO`로 직접 집는다.
   test('A의 포지션을 닫으면 A의 계좌만 움직인다 — B는 그대로다', async () => {
-    const { sb, state } = multiUserSb();
-    const r = await closePaperPosition(sb, 'pA', 97_900, 'SL');
+    const { sb, state } = fakeDb();
+    const r = await closePaperPosition(sb, 'p1', 97_900, 'SL');   // 주인 u1
     eq(r.ok, true);
-    assert(state.accounts.userA.trade_count === 1, 'A의 매매횟수가 늘어야 한다');
-    eq(state.accounts.userB.trade_count, 0, 'B의 장부는 건드리지 않는다');
-    eq(state.accounts.userB.balance, 10_000);
+    eq(state.accounts.u1.trade_count, 1, 'A의 매매횟수가 늘어야 한다');
+    eq(state.accounts.u2.trade_count, 0, 'B의 장부는 건드리지 않는다');
+    eq(state.accounts.u2.balance, 10_000);
     eq(state.positions.pB.status, 'open', 'B의 포지션은 열린 채로 남는다');
   });
 
   test('두 사용자의 포지션이 같이 걸려도 각자 자기 계좌에만 적힌다', async () => {
-    const { sb, state } = multiUserSb();
+    const { sb, state } = fakeDb();
     const plan = paperExitPlan({
       positions: [
-        { id: 'pA', symbol: 'BTCUSDT', side: 'LONG', fillPrice: 100_000, quantity: 0.01,
+        { id: 'p1', symbol: 'BTCUSDT', side: 'LONG', fillPrice: 100_000, quantity: 0.01,
           stopLoss: 98_000, takeProfit: 104_000, liquidationPrice: 50_000, openedAt: NOW - HOUR },
         { id: 'pB', symbol: 'BTCUSDT', side: 'LONG', fillPrice: 100_000, quantity: 0.01,
           stopLoss: 98_000, takeProfit: 104_000, liquidationPrice: 50_000, openedAt: NOW - HOUR },
@@ -336,15 +337,17 @@ export function runPaperExitSweepMoreTests() {
       marks: new Map([['BTCUSDT', 97_900]]), nowMs: NOW,
     });
     eq(plan.actions.length, 2);
-    for (const a of plan.actions) await closePaperPosition(sb, a.positionId as string, 97_900, a.exitReason as any);
-    eq(state.accounts.userA.trade_count, 1);
-    eq(state.accounts.userB.trade_count, 1);
+    await Promise.all(plan.actions.map(a =>
+      closePaperPosition(sb, a.positionId as string, 97_900, a.exitReason as any)));
+    eq(state.accounts.u1.trade_count, 1);
+    eq(state.accounts.u2.trade_count, 1);
+    eq(state.settlements, 2);
   });
 
   // ══ ⑨ PAPER / TESTNET / LIVE 격리 ══
   test('모의 청산은 paper_ 장부만 건드린다 — 실전 주문·포지션 표를 열지 않는다', async () => {
-    const { sb, state } = multiUserSb();
-    await closePaperPosition(sb, 'pA', 97_900, 'SL');
+    const { sb, state } = fakeDb();
+    await closePaperPosition(sb, 'p1', 97_900, 'SL');
     assert(state.tablesTouched.length > 0, '표를 하나는 열었어야 한다');
     const stray = state.tablesTouched.filter(t => !t.startsWith('paper_'));
     eq(stray.join(','), '', `모의 청산이 다른 장부를 열었다 — ${stray.join(',')}`);
@@ -360,40 +363,45 @@ export function runPaperExitSweepMoreTests() {
     //
     // 대신 진짜 계약을 본다: `closePaperPosition`은 인자로 받은 sb 말고는
     // 바깥과 이어진 손이 없다. 그래서 이 sb가 무엇을 열었는지만 보면
-    // 이 함수가 무엇을 건드렸는지 전부다.
-    // 소스 수준의 "거래소 어댑터 import 없음"은
-    // `scripts/check-mock-single-source.mjs` ⑦이 CI에서 못 박는다.
-    const { sb, state } = multiUserSb();
+    // 이 함수가 무엇을 건드렸는지 전부다. 소스 수준의 "거래소 어댑터
+    // import 없음"은 `scripts/check-mock-single-source.mjs`가 CI에서 못 박는다.
+    const { sb, state } = fakeDb();
     const plan = paperExitPlan({
-      positions: [{ id: 'pA', symbol: 'BTCUSDT', side: 'LONG', fillPrice: 100_000, quantity: 0.01,
+      positions: [{ id: 'p1', symbol: 'BTCUSDT', side: 'LONG', fillPrice: 100_000, quantity: 0.01,
         stopLoss: 98_000, takeProfit: 104_000, liquidationPrice: 50_000, openedAt: NOW - HOUR }] as any,
       marks: new Map([['BTCUSDT', 97_900]]), nowMs: NOW,
     });
     const r = await closePaperPosition(sb, plan.actions[0].positionId as string, 97_900, 'SL');
     eq(r.ok, true);
     const opened = Array.from(new Set(state.tablesTouched)).sort().join(',');
-    eq(opened, 'paper_accounts,paper_positions', `모의 청산이 연 표 — ${opened}`);
+    eq(opened, 'paper_positions', `모의 청산이 연 표 — ${opened}`);
   });
 
   // ══ ⑩ DB를 못 읽으면 아무것도 닫지 않는다 ══
-  test('포지션을 읽지 못하면 닫지 않는다 — 계좌도 그대로다', async () => {
-    let accountWrites = 0;
+  test('포지션을 읽지 못하면 닫지 않는다 — 정산도 없다', async () => {
+    let settlements = 0;
     const sb: any = {
-      from(table: string) {
+      from() {
         const b: any = {
-          _patch: null as any,
-          select() { return b; }, update(p: any) { b._patch = p; return b; }, eq() { return b; },
+          select() { return b; }, update() { return b; }, eq() { return b; },
           maybeSingle() { return Promise.resolve({ data: null, error: { message: 'db down' } }); },
-          then(res: any, rej: any) {
-            if (b._patch && table === 'paper_accounts') accountWrites += 1;
-            return Promise.resolve({ data: [], error: null }).then(res, rej);
-          },
+          then(res: any, rej: any) { return Promise.resolve({ data: [], error: null }).then(res, rej); },
         };
         return b;
       },
+      rpc() { settlements += 1; return Promise.resolve({ data: null, error: null }); },
     };
-    const r = await closePaperPosition(sb, 'pA', 97_900, 'SL');
+    const r = await closePaperPosition(sb, 'p1', 97_900, 'SL');
     eq(r.ok, false);
-    eq(accountWrites, 0, 'DB를 못 읽었는데 계좌를 건드리면 안 된다');
+    eq(settlements, 0, 'DB를 못 읽었는데 정산을 부르면 안 된다');
+  });
+
+  test('정산 함수가 없으면 닫혔다고 적지 않는다 — 마이그레이션 전에도 거짓을 쓰지 않는다', async () => {
+    const { sb, state } = fakeDb();
+    sb.rpc = () => Promise.resolve({ data: null, error: { message: 'function paper_settle_close does not exist' } });
+    const r = await closePaperPosition(sb, 'p1', 97_900, 'SL');
+    eq(r.ok, false);
+    eq(state.positions.p1.status, 'open');
+    eq(state.accounts.u1.balance, 10_000);
   });
 }
