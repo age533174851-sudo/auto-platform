@@ -158,6 +158,7 @@ export function showsTpSl(kind: StrategyKind): boolean {
 // ── 값 채우기 ─────────────────────────────────────────────
 
 import { measuredEdgeOf, edgeDisplay } from '../strategies/edgeTypes';
+import { UNKNOWN_TEXT } from './display';
 
 export interface CardRow {
   key: string;
@@ -168,8 +169,8 @@ export interface CardRow {
   known: boolean;
 }
 
-/** 모르는 값 자리 */
-export const UNKNOWN_TEXT = '—';
+/** 모르는 값 자리. **정의는 display.ts 하나뿐이다** */
+export { UNKNOWN_TEXT } from './display';
 
 function fmt(v: any, format: FieldFormat): string | null {
   if (v == null || v === '') return null;
@@ -267,7 +268,11 @@ export const ACTIVITY_LABEL: Record<Activity, string> = {
   STOPPED: '정지', ERROR: '오류',
 };
 
-export type Tone = 'good' | 'warn' | 'bad' | 'muted';
+// **색조는 여기서 정의하지 않는다.** 예전에는 이 파일과 autoOverview.ts가
+// 각각 Tone을 선언했고, autoOverview 쪽에만 'live'가 있었다 — 같은 이름의
+// 타입 둘이 서로 다른 값을 갖는 상태였다.
+export type { Tone } from './display';
+import type { Tone } from './display';
 
 export const ACTIVITY_TONE: Record<Activity, Tone> = {
   RUNNING: 'good', OPPORTUNITY: 'warn', WAITING: 'muted',
