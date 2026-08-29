@@ -15,7 +15,7 @@
 // 모양이었다 — **경로가 둘인데 한쪽만 고침.**
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
-import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult } from './supabase';
+import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -43,6 +43,17 @@ const SUPPORTED_EXCHANGE_IDS = ['binance', 'gate', 'gateio', 'gate.io'];
 // 값은 어디에도 찍지 않는다. 있는지 없는지만 본다.
 const APP_URL = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/+$/, '');
 const APP_ADMIN_SECRET = process.env.ADMIN_SECRET || '';
+
+// **있는지 없는지를 heartbeat에 적는다 — 값은 적지 않는다.**
+//
+// 이걸 안 적어서 2026-08-29에 "워커에 APP_URL이 있는가"를 아무도 값으로
+// 답하지 못했다. Fly 시크릿은 이름조차 밖에서 셀 수 없고, 로그는 사람이
+// 열어야 한다. 사실을 아는 것은 이 프로세스뿐이다.
+noteScheduler({
+  hasAppUrl: !!APP_URL,
+  hasAdminSecret: !!APP_ADMIN_SECRET,
+  pollIntervalMs: POLL_INTERVAL_MS,
+});
 
 // ── 부팅 즉시 출력 (파일이 로드되는 순간 찍힘 — Railway "빈 로그" 진단용) ──
 console.log('🚀 TRAIGO Worker started');
@@ -476,6 +487,9 @@ async function monitorConnections() {
 // 선점한다. 먼저 가져간 쪽만 평가한다 — 그 판정은 웹과 같은 함수다.
 let pollWarned = false;
 let lastPollMs: number | null = null;
+// 몇 번 봤고 몇 번 평가했나. **로그를 세지 않고 값으로 답한다.**
+let pollCount = 0;
+let evalCount = 0;
 async function pollSchedules(): Promise<void> {
   if (!APP_URL || !APP_ADMIN_SECRET) {
     // **한 번만 크게 말한다.** 매 tick 찍으면 로그가 덮여서 안 읽힌다.
@@ -487,6 +501,9 @@ async function pollSchedules(): Promise<void> {
       console.warn('[schedules] 이 상태에서는 GitHub autotrade-tick만 평가합니다 '
         + '— 스케줄이 밀리면 판단 창을 놓칠 수 있습니다.');
     }
+    // **로그에만 남기지 않는다.** 이 경고를 읽으려면 사람이 fly logs를
+    // 열어야 하고, 그게 없애려던 바로 그 절차다.
+    noteScheduler({ hasAppUrl: !!APP_URL, hasAdminSecret: !!APP_ADMIN_SECRET });
     return;
   }
 
@@ -496,6 +513,7 @@ async function pollSchedules(): Promise<void> {
   // 촘촘해야 한다(1분이면 창 안에 최소 20번 본다).
   if (!shouldPollNow(lastPollMs, nowMs, POLL_INTERVAL_MS)) return;
   lastPollMs = nowMs;
+  pollCount++;
 
   let rows: any[] = [];
   try {
@@ -517,10 +535,25 @@ async function pollSchedules(): Promise<void> {
     // **'못 읽었다'를 '없다'로 읽지 않는다.** 조용히 넘기면 예약이 하나도
     // 없는 것과 구분이 안 된다.
     console.error('[schedules] 예약을 읽지 못했습니다:', e?.message || e);
+    // 오류도 값으로 남는다 — 다음 성공한 폴링이 이 시각을 앞지를 때까지
+    // 판정은 RUNTIME_BROKEN이다.
+    noteScheduler({
+      pollCount,
+      lastErrorIso: new Date(nowMs).toISOString(),
+      lastError: String(e?.message || e).slice(0, 300),
+    });
     return;
   }
 
   const sel = selectDueSchedules(rows as any, nowMs);
+  // **여기까지 왔다는 것이 "예약을 실제로 봤다"의 증거다.** due 0건은
+  // 안 도는 것이 아니라 볼 예약이 없었다는 뜻이고, 둘은 다른 사실이다.
+  noteScheduler({
+    lastPollIso: new Date(nowMs).toISOString(),
+    lastDueCount: sel.due.length,
+    lastSkippedCount: sel.skipped.length,
+    pollCount,
+  });
   if (sel.due.length === 0) {
     // 건너뛴 이유는 가끔만 남긴다 — 매 tick 찍으면 로그가 덮인다.
     if (tickCount % 100 === 1 && sel.skipped.length > 0) {
@@ -541,6 +574,13 @@ async function pollSchedules(): Promise<void> {
       }, nowMs);
       if (r.record) {
         console.log(`[schedules] ${row.symbol} ${r.record.outcome} — ${r.record.summary}`);
+        evalCount++;
+        noteScheduler({
+          lastEvalIso: new Date().toISOString(),
+          lastEvalSymbol: String(row.symbol || ''),
+          lastEvalOutcome: String(r.record.outcome || ''),
+          evalCount,
+        });
       } else {
         // 선점을 놓쳤거나 그 사이 차례가 아니게 됐다. 오류가 아니다.
         console.log(`[schedules] ${row.symbol} 건너뜀 — ${r.due.reason}`);
@@ -548,6 +588,10 @@ async function pollSchedules(): Promise<void> {
       if (r.saveError) console.warn(`[schedules] ${row.symbol} 기록 경고: ${r.saveError}`);
     } catch (e: any) {
       console.error(`[schedules] ${row.symbol} 평가 실패:`, e?.message || e);
+      noteScheduler({
+        lastErrorIso: new Date().toISOString(),
+        lastError: `${row.symbol} 평가 실패: ${String(e?.message || e)}`.slice(0, 300),
+      });
     }
   }
 }
@@ -1047,6 +1091,9 @@ async function tick() {
   // 모니터(Ghost Sync/킬스위치 job 보장)는 main 락으로 중복 방지 — 락 인프라 없으면 단일 워커로 간주해 진행
   let isMain = true;
   try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
+  // **예약은 main 락을 쥔 워커만 본다.** 그 사실을 heartbeat에 같이
+  // 적어야, 밖에서 예비 워커의 줄을 보고 "안 돈다"고 잘못 읽지 않는다.
+  noteScheduler({ isMain });
   await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
   if (isMain) await monitorConnections();
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점

@@ -75,6 +75,25 @@ async function main() {
   const d = v.detail;
   console.log(`main ${d.main ?? '?'} · vercel ${d.vercel ?? '?'} · fly ${d.fly ?? '?'}`
     + ` · 남은 마이그레이션 ${d.pendingCount == null ? '확인 못 함' : d.pendingCount}`);
+  // ── 예약 주 경로가 도는가 ──
+  //
+  // **여기서 실패로 만들지 않는다.** 이 워크플로가 답하는 질문은 "세 SHA가
+  // 같은가"이고, 예약 폴러 상태는 다른 질문이다. 두 빨강을 한 칸에 넣으면
+  // 배포가 어긋난 날과 예약이 멈춘 날이 구별되지 않는다.
+  //
+  // 대신 **판정과 근거를 같이 찍는다.** 예전에는 이 사실이 `fly logs`에만
+  // 있어서 사람이 열어야 읽혔고, 그래서 2026-08-29에 "확인 불가"로 끝났다.
+  const sch = body?.scheduler;
+  if (sch?.code) {
+    console.log(`예약 주 경로: ${sch.code} — ${sch.reason}`);
+    for (const e of Array.isArray(sch.evidence) ? sch.evidence : []) console.log(`  · ${e}`);
+    if (sch.code === 'WORKER_PRESENT_BUT_CONFIG_BLOCKED' || sch.code === 'WORKER_PRESENT_BUT_RUNTIME_BROKEN') {
+      console.log(`::warning::Fly Worker 예약 폴러가 돌지 않습니다 (${sch.code}) — ${sch.reason}`);
+    }
+  } else {
+    console.log('예약 주 경로: 응답에 없습니다 — 이 배포에는 아직 그 칸이 없습니다');
+  }
+
   // **결론은 로그 맨 끝 한 줄에서 읽힌다.**
   console.log(`verdict: ${v.code}${v.serverCode && v.serverCode !== v.code ? ` (서버 ${v.serverCode})` : ''}`);
 

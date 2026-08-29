@@ -3,6 +3,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { workerIdentityOf } from '../../src/lib/runtime/workerIdentity';
 // **판정은 웹과 같은 파일을 쓴다.** 워커용 사본을 두면 한쪽만 고쳐진다.
 import { heartbeatVerdict, projectRefOf } from '../../src/lib/runtime/heartbeatVerify';
+// 예약 폴러가 스스로 적는 상태. **형식과 판정은 웹과 같은 파일이다.**
+import type { SchedulerReport } from '../../src/lib/runtime/schedulerReport';
 
 let _sb: SupabaseClient | null = null;
 export function sb(): SupabaseClient {
@@ -166,6 +168,34 @@ export function noteStartupResult(ok: boolean, detail: string | null): void {
   startupDetail = detail ? String(detail).slice(0, 300) : null;
 }
 
+// ── 예약 폴러가 스스로 적는 상태 ──────────────────────
+//
+// **"fly logs를 열어 `[schedules]`가 찍히는지 봐 주세요"를 없앤다.**
+//
+// 사실을 아는 것은 워커다 — 환경변수가 있는지, main 락을 쥐었는지,
+// 예약을 마지막으로 언제 봤는지. 그걸 heartbeat에 같이 적으면 인증이
+// 필요 없는 `/api/system/deployment`가 그대로 보여 준다.
+//
+// **값은 들어가지 않는다.** APP_URL도 ADMIN_SECRET도 있다/없다만 적는다.
+let scheduler: SchedulerReport = {
+  hasAppUrl: null, hasAdminSecret: null, isMain: null, pollIntervalMs: null,
+  lastPollIso: null, lastDueCount: null, lastSkippedCount: null,
+  lastEvalIso: null, lastEvalSymbol: null, lastEvalOutcome: null,
+  lastErrorIso: null, lastError: null, pollCount: null, evalCount: null,
+  source: 'FLY_WORKER',
+};
+
+/**
+ * 아는 만큼만 덮어쓴다.
+ *
+ * 부분 갱신이다 — 락 상태를 적는 자리와 폴링 결과를 적는 자리가 다르고,
+ * 한쪽이 다른 쪽을 **null로 지워 버리면 안 된다.** 지운 값과 아직 모르는
+ * 값이 같은 칸에 들어가면 판정이 갈린다.
+ */
+export function noteScheduler(patch: Partial<SchedulerReport>): void {
+  scheduler = { ...scheduler, ...patch, source: 'FLY_WORKER' };
+}
+
 /** 값을 안 보여 주고 같은지만 말한다 */
 function fp(raw: string): string | null {
   const v = String(raw || '').trim();
@@ -196,6 +226,10 @@ function runtimeColumns(tickCount: number | null): Record<string, any> {
     encryption_fingerprint: fp(process.env.EXCHANGE_ENCRYPTION_KEY || ''),
     startup_ok: startupOk,
     startup_detail: startupDetail,
+    // 073이 아직인 배포에서는 이 칸이 없다. 그때는 위의
+    // `runtimeColumnsMissing` 경로가 이 값을 빼고 다시 적는다 —
+    // **생존 신호를 이것 때문에 잃지 않는다.**
+    scheduler,
   };
 }
 
