@@ -263,6 +263,41 @@ export function runMigrationPlanTests() {
     eq(t.find(x => x.kind === 'policy')!.name, 'ledger_own');
   });
 
+  // ── 함수도 확인 대상이다 ──
+  //
+  // 072(모의 청산 원자 정산)는 표도 칸도 만들지 않고 **함수 셋만** 만든다.
+  // 그때까지 이 함수는 함수를 몰라서 대상 0개를 돌려줬고, 파이프라인은
+  // `확인할 대상 없음 (실행은 성공)`으로 적었다 — psql이 0으로 끝난 것과
+  // 함수가 실제로 생긴 것은 다른 사실인데 둘을 같이 적은 것이다.
+  test('CREATE FUNCTION도 확인 대상으로 뽑는다 — 실행 성공을 존재 확인으로 적지 않는다', () => {
+    const t = migrationTargets(`
+      CREATE OR REPLACE FUNCTION public.paper_settle_close(p_id UUID)
+      RETURNS TABLE (settled BOOLEAN) LANGUAGE plpgsql AS $$
+      BEGIN RETURN QUERY SELECT TRUE; END;
+      $$;
+      CREATE FUNCTION public.paper_deposit(p_user UUID) RETURNS VOID LANGUAGE sql AS $$ SELECT 1 $$;
+    `);
+    const fns = t.filter(x => x.kind === 'function').map(x => x.name).sort();
+    eq(fns.join(','), 'paper_deposit,paper_settle_close');
+    eq(t.find(x => x.kind === 'function')!.table, 'public');
+  });
+
+  test('함수만 있는 마이그레이션이 대상 0개로 떨어지지 않는다', () => {
+    const t = migrationTargets('CREATE OR REPLACE FUNCTION public.f() RETURNS VOID LANGUAGE sql AS $$ SELECT 1 $$;');
+    assert(t.length > 0, '대상이 0개면 "확인할 대상 없음"으로 통과해 버린다');
+  });
+
+  test('주석 속 CREATE FUNCTION은 대상이 아니다', () => {
+    eq(migrationTargets('-- CREATE FUNCTION ghost() RETURNS VOID;').length, 0);
+  });
+
+  test('같은 함수를 두 번 적어도 대상은 하나다', () => {
+    eq(migrationTargets(
+      'CREATE OR REPLACE FUNCTION public.f() RETURNS VOID LANGUAGE sql AS $$ SELECT 1 $$;'
+      + 'CREATE OR REPLACE FUNCTION public.f() RETURNS VOID LANGUAGE sql AS $$ SELECT 2 $$;'
+    ).length, 1);
+  });
+
   test('주석 속 CREATE TABLE로 검증 대상을 만들지 않는다', () => {
     // **없는 것을 찾다가 멀쩡한 적용을 실패로 적으면 안 된다**
     eq(migrationTargets('-- CREATE TABLE ghost (id INT);\nCREATE TABLE real (id INT);').length, 1);

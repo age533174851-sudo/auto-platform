@@ -183,6 +183,11 @@ async function catalogHas(target) {
     column: `SELECT 1 FROM information_schema.columns WHERE table_name = ${t} AND column_name = ${n} LIMIT 1`,
     index: `SELECT 1 FROM pg_indexes WHERE indexname = ${n} LIMIT 1`,
     policy: `SELECT 1 FROM pg_policies WHERE tablename = ${t} AND policyname = ${n} LIMIT 1`,
+    // 함수는 pg_proc에 있다. 인자 조합이 여럿일 수 있으므로 이름만 본다 —
+    // **있는지 없는지**가 여기서 답할 질문이고, 시그니처까지는 SQL 자신이
+    // 트랜잭션 안에서 보장한다.
+    function: `SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+                WHERE ns.nspname = ${t} AND p.proname = ${n} LIMIT 1`,
   }[target.kind];
   if (!sql) return null;
   const q = query(url, sql);
