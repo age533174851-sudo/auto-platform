@@ -822,11 +822,41 @@ export const CONVERGENCE: Convergence[] = [
       + '두 장부를 더한 숫자를 어느 화면에도 만들지 않는다. '
       + '통화 단위가 다르므로(KRW vs USDT) 환산해서 합치는 것도 금지한다',
     target: '미정 — ① 별도 연습 모드로 남기되 화면에서 정본 PAPER와 완전히 '
-      + '분리해 표시 ② 서버 PAPER로 통합',
+      + '분리해 표시 ② 서버 PAPER로 통합. **환경 격리는 이미 끝났다**',
     decision: 'OPEN',
     why: '통화(원화 vs USDT)·체결 방식·TP/SL 규칙이 서버 PAPER와 다르다. '
       + '흡수하면 성과 데이터가 오염되고, 남기면 두 모의계좌라는 오해가 남는다. '
-      + '**Trading 이관 때 정한다. 이번 단계에서는 기록만 하고 바꾸지 않는다**',
+      + '**남길지 흡수할지는 Trading 이관 때 정한다** — 다만 환경 격리는 '
+      + '결정을 기다리지 않고 먼저 닫았다(`practice-ledger-env` 참조)',
+  },
+  {
+    id: 'practice-ledger-env',
+    current: '연습 장부는 MOCK에서만 움직인다. 장부를 바꾸는 통로 7개가 전부 '
+      + '환경을 인자로 받고, MOCK이 아니면 아무 일도 하지 않는다. '
+      + '`check-practice-ledger-env.mjs`가 우회로를 막는다',
+    canonical: '**TESTNET·LIVE의 정본은 거래소와 서버 기록이다.** '
+      + '브라우저 연습 장부가 그것을 대신 적지 않는다',
+    isolation: '**MOCK / TESTNET / LIVE의 장부를 절대 합산하지 않는다.** '
+      + '거래소 체결·청산·리버스 결과를 연습 장부에 쓰지 않는다',
+    target: '같음',
+    decision: 'DECIDED',
+    why: '한 장부에 세 환경이 섞여 있었다 — 장부를 바꾸는 여섯 자리 중 '
+      + '**다섯에 모드 검사가 없었다.** 거래소 체결·청산·리버스·추가진입·'
+      + 'TP/SL 편집이 전부 로컬 원화 장부로 흘러들었다. 줄마다 환경이 적혀 '
+      + '있지 않아 **사후에 가려낼 수 없다** — 그래서 과거분은 지우지도 '
+      + '재분류하지도 않고 성과·통계 근거에서 뺀다. 섞이기 전에 막는 수밖에 없다',
+  },
+  {
+    id: 'trading-live-fx',
+    current: 'TradingPage의 TESTNET·LIVE 주문이 KRW↔USDT 환산에 **1375를 '
+      + '상수로** 쓴다. 주문 수량(quantity)이 그 값에 그대로 의존한다',
+    canonical: '환율의 정본은 거래소·시세 소스다. 화면에 박힌 상수가 아니다',
+    isolation: null,
+    target: '미정 — 시세 소스를 붙일지, 거래소가 주는 값을 쓸지',
+    decision: 'OPEN',
+    why: '**주문 수량 계산이 바뀌는 일이라 장부 격리와 같은 PR에 넣지 않는다.** '
+      + '섞으면 주문 결과가 달라져 무엇 때문에 달라졌는지 가릴 수 없다. '
+      + '별도 correctness 작업으로 본다',
   },
   {
     id: 'terminal-order-path',

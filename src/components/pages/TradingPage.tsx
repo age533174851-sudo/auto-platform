@@ -5,7 +5,8 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import type { BotRun, ExecMode, RiskEvent, Signal, SignalState, StratStatus, StratType, Strategy } from '@/types/domain';
 import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
 import { notify, type NotifyKind } from '@/lib/notify/center';
-import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
+import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, savePaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
+import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
@@ -478,7 +479,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         showToast(`청산 주문 전송 · ${Math.round(ratio*100)}%`, true);
       } catch (e:any) { showToast(`청산 오류 · ${e?.message||'네트워크 오류'}`, false); return; }
     }
-    closePaperPosition(p.asset, cur, ratio);
+    // **거래소 청산 뒤에 연습 장부를 건드리지 않는다.**
+    //
+    // 예전에는 이 줄이 모드 밖에 있어서 TESTNET·LIVE 청산도 로컬 원화
+    // 장부의 손익으로 쌓였다. 거래소에서 닫힌 것의 정본은 거래소와 서버
+    // 기록이지 브라우저가 아니다.
+    closePaperPosition(tradeEnvOf(tradeMode), p.asset, cur, ratio);
     refreshPositions();
   };
 
@@ -538,14 +544,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           setStatus('done'); setTimeout(()=>setStatus(null),2000);
           const okJob = await pollJob(d.jobId, `${tradeSymbol} ${side} 주문`);
           if (okJob) {
-            try {
-              paperBuy(sel.id, krwPx, orderAmt, {
-                stopLossPct: sl && krwPx ? Math.abs(((+sl-krwPx)/krwPx)*100) : undefined,
-                takeProfitPct: tp && krwPx ? Math.abs(((+tp-krwPx)/krwPx)*100) : undefined,
-                stratId: tradeMode, side: side === '매수' ? 'long' : 'short',
-              });
-              refreshPositions();
-            } catch {}
+            // **여기서 연습 장부에 적지 않는다.**
+            //
+            // 예전에는 체결이 확인되면 `paperBuy(..., { stratId: tradeMode })`로
+            // 로컬 원화 장부에 같은 거래를 한 번 더 적었다. 그래서 하나의
+            // 연습 장부에 MOCK·TESTNET·LIVE가 섞였고, 줄마다 환경이 적혀
+            // 있지 않아 사후에 가려낼 수 없게 됐다.
+            //
+            // 이 주문의 정본은 거래소와 서버 기록이다. 화면은 아래
+            // `syncBinancePositions()`로 거래소에서 다시 읽는다.
             setOrders(prev=>[{ id:d.jobId||uid(), assetId:sel.id, nameKr:sel.nameKr, sym:sel.sym, side:side==='매수'?'buy':'sell',
               price:krwPx, amount:orderAmt, leverage, fee:0, slippage:0, status:'filled', pnl:0, pnlPct:0,
               openedAt:new Date().toISOString(), note:`${tradeMode==='testnet'?'테스트넷':'실전'} 주문 (job ${String(d.jobId).slice(0,8)})`, emotion:'😊' } as Order, ...prev]);
@@ -598,7 +605,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             return;
           }
           const px = r.data?.filledPrice || sel.p || 0;
-          paperBuy(sel.id, px, orderAmt, {
+          paperBuy(tradeEnvOf(tradeMode), sel.id, px, orderAmt, {
             stopLossPct: sl ? Math.abs(((+sl - px) / px) * 100) : undefined,
             takeProfitPct: tp ? Math.abs(((+tp - px) / px) * 100) : undefined,
             stratId: 'manual',
@@ -1495,10 +1502,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                       {quickActions.includes('close_25')&&<button onClick={()=>closePosition(p,cur,0.25)}
                         style={{padding:'9px',background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>25% 종료</button>}
                       {quickActions.includes('add')&&<button onClick={()=>{
+                        // 이 버튼은 **연습 장부만** 늘린다 — 거래소로 주문을 보내지
+                        // 않는다. TESTNET·LIVE에서 누르면 거래소에 없는 포지션이
+                        // 장부에만 생긴다. 그래서 그 환경에서는 막는다.
+                        const env = tradeEnvOf(tradeMode);
+                        if(!mayMutatePracticeLedger(env)){ showToast(practiceBlockReason(env), false); return; }
                         const addAmt = amount ? +amount : 100000;
                         const rc = canOpenNewPosition();
                         if(!rc.allowed){ showToast(`추가 진입 차단 · ${rc.reason}`, false); return; }
-                        paperBuy(p.asset, cur, addAmt, { stratId:'manual', side: p.side==='short'?'short':'long' });
+                        paperBuy(env, p.asset, cur, addAmt, { stratId:'manual', side: p.side==='short'?'short':'long' });
                         refreshPositions();
                         showToast(`추가 진입 완료 · ${p.asset} ${p.side==='short'?'숏':'롱'} · +₩${fmt(addAmt)}`, true);
                       }} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
@@ -1521,7 +1533,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                             if(!r2.ok||d2.error){ showToast(`리버스 실패 · ${d2.message||d2.error}`, false); return; }
                           } catch(e:any){ showToast(`리버스 오류 · ${e?.message||'네트워크 오류'}`, false); return; }
                         }
-                        const res = reversePaperPosition(p.asset, cur);
+                        // 거래소 리버스는 위에서 끝났다. **그 결과를 연습 장부에
+                        // 다시 적지 않는다** — MOCK일 때만 로컬 장부가 움직인다.
+                        const res = reversePaperPosition(tradeEnvOf(tradeMode), p.asset, cur);
                         refreshPositions();
                         if(res.ok){
                           showToast(`리버스 완료 · 실현손익 ${Math.round(res.pnl).toLocaleString('ko-KR')}원 → ${res.newSide==='long'?'롱':'숏'} 전환`, true);
@@ -1615,13 +1629,20 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
 
                         <div style={{display:'flex',gap:6}}>
                           <button onClick={()=>{
+                            // **localStorage에 직접 쓰지 않는다.** 예전에는 여기서
+                            // 키를 직접 건드려 장부 판정을 통째로 건너뛰었다 —
+                            // 모드 검사도, 저장 규칙도 지나가지 않았다.
+                            // 이 편집은 연습 포지션의 TP/SL이다. 거래소 포지션의
+                            // TP/SL은 별도 경로(`submitTpsl` → /api/binance/futures/tpsl)다.
+                            const envTpsl = tradeEnvOf(tradeMode);
+                            if(!mayMutatePracticeLedger(envTpsl)){ showToast(practiceBlockReason(envTpsl), false); return; }
                             try { const b=loadPaperBalance(); if(b.positions[p.asset]){
                               if(tpslTab==='trailing'){
                                 b.positions[p.asset]={...b.positions[p.asset], slPrice: trailPct? cur*(1-(+trailPct)/100):undefined};
                               } else {
                                 b.positions[p.asset]={...b.positions[p.asset], tpPrice:tpPrice>0?tpPrice:undefined, slPrice:slPrice>0?slPrice:undefined};
                               }
-                              try{localStorage.setItem('tg_paper_balance_v1',JSON.stringify(b));}catch{} } refreshPositions(); } catch {}
+                              savePaperBalance(envTpsl, b); } refreshPositions(); } catch {}
                             setSlEditAsset('');setTpEditVal('');setSlEditVal('');setTpRoi('');setSlRoi('');setTrailPct('');
                             showToast('TP/SL 설정 완료', true);
                           }} style={{flex:1,padding:'12px',background:T.acc,color:'#fff',border:'none',borderRadius:8,fontSize:13,fontWeight:800,cursor:'pointer'}}>확인</button>

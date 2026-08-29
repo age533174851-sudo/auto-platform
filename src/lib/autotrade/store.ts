@@ -2,6 +2,18 @@
 // 실행 로그 + 모의 잔고 (paper 모드용) localStorage
 
 import type { ExecutionLog } from './types';
+import { mayMutatePracticeLedger, practiceBlocked } from './practiceEnv';
+import type { TradeEnv } from './practiceEnv';
+
+// **이 파일은 브라우저 로컬 연습 장부다. 정본 모의 장부가 아니다.**
+//
+// 정본 모의(PAPER)는 서버에 있다 — `paper_accounts` · `paper_positions`,
+// 단위는 USDT. 여기 있는 것은 원화(KRW) 연습 장부이고, 통화도 체결 방식도
+// 다르다. **두 장부의 잔고·손익을 합치지 않는다.**
+//
+// 그리고 **TESTNET·LIVE는 여기에 적지 않는다.** 예전에는 적었고, 그래서
+// 한 장부에 세 환경이 섞였다(`practiceEnv.ts`의 머리말 참조). 이제 잔고를
+// 바꾸는 함수는 전부 환경을 받고, MOCK이 아니면 **아무것도 하지 않는다.**
 
 const LOG_KEY      = 'tg_autotrade_logs_v1';
 const PAPER_BAL_KEY = 'tg_paper_balance_v1';
@@ -106,23 +118,34 @@ export function loadPaperBalance(): PaperBalance {
   }
 }
 
-export function savePaperBalance(b: PaperBalance): void {
+/**
+ * 잔고를 실제로 쓴다. **환경을 받는다.**
+ *
+ * 환경을 인자로 강제하는 이유는 호출하는 쪽이 "지금 어느 환경인가"를
+ * 반드시 답하게 하기 위해서다. 기본값을 MOCK으로 두면 안 적은 자리가
+ * 곧 실전을 연습 장부에 적는 자리가 된다.
+ */
+export function savePaperBalance(env: TradeEnv | 'UNKNOWN', b: PaperBalance): void {
+  if (!mayMutatePracticeLedger(env)) return;
   if (typeof window === 'undefined') return;
   try { window.localStorage.setItem(PAPER_BAL_KEY, JSON.stringify(b)); } catch {}
 }
 
-export function resetPaperBalance(): void {
+export function resetPaperBalance(env: TradeEnv | 'UNKNOWN'): void {
+  if (!mayMutatePracticeLedger(env)) return;
   if (typeof window === 'undefined') return;
   try { window.localStorage.setItem(PAPER_BAL_KEY, JSON.stringify(DEFAULT_BALANCE)); } catch {}
 }
 
 // 모의 체결 — 진입 (롱/숏 모두)
 export function paperBuy(
+  env: TradeEnv | 'UNKNOWN',
   asset: string,
   price: number,
   amountKRW: number,
   opts?: { stopLossPct?: number; takeProfitPct?: number; stratId?: string; side?: 'long' | 'short' },
-): { ok: boolean; qty?: number; reason?: string } {
+): { ok: boolean; qty?: number; reason?: string; blocked?: true } {
+  if (!mayMutatePracticeLedger(env)) return practiceBlocked(env);
   const b = loadPaperBalance();
   if (b.krw < amountKRW) {
     return { ok: false, reason: `잔고 부족 (보유 ${Math.floor(b.krw).toLocaleString('ko-KR')}원, 필요 ${amountKRW.toLocaleString('ko-KR')}원)` };
@@ -142,16 +165,18 @@ export function paperBuy(
   const slPrice = slPct && slPct > 0 ? (side === 'short' ? newAvg * (1 + slPct/100) : newAvg * (1 - slPct/100)) : base.slPrice;
   const tpPrice = tpPct && tpPct > 0 ? (side === 'short' ? newAvg * (1 - tpPct/100) : newAvg * (1 + tpPct/100)) : base.tpPrice;
   b.positions[asset] = { qty: newQty, avgPrice: newAvg, side, slPrice, tpPrice, stratId: opts?.stratId ?? base.stratId };
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, qty };
 }
 
 // 모의 체결 — 매도
 export function paperSell(
+  env: TradeEnv | 'UNKNOWN',
   asset: string,
   price: number,
   amountKRW: number,
-): { ok: boolean; qty?: number; reason?: string; pnl?: number } {
+): { ok: boolean; qty?: number; reason?: string; pnl?: number; blocked?: true } {
+  if (!mayMutatePracticeLedger(env)) return practiceBlocked(env);
   const b = loadPaperBalance();
   const pos = b.positions[asset];
   if (!pos || pos.qty <= 0) return { ok: false, reason: `${asset} 보유 없음` };
@@ -167,7 +192,7 @@ export function paperSell(
   if (pos.qty < 0.000001) delete b.positions[asset];
   else b.positions[asset] = pos;
   b.totalPnL += pnl;
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, qty: qtyToSell, pnl };
 }
 
@@ -178,7 +203,11 @@ export interface ExitEvent {
   price: number; pnl: number; qty: number; stratId?: string;
 }
 
-export function checkPaperExits(priceMap: Record<string, number>): ExitEvent[] {
+export function checkPaperExits(env: TradeEnv | 'UNKNOWN', priceMap: Record<string, number>): ExitEvent[] {
+  // **연습 장부의 청산 감시다.** 정본 PAPER의 청산은 서버가 한다
+  // (`/api/paper/exit-monitor` · Worker). 여기서 TESTNET·LIVE를 돌리면
+  // 거래소가 이미 처리한 것을 연습 장부가 한 번 더 적는다.
+  if (!mayMutatePracticeLedger(env)) return [];
   const b = loadPaperBalance();
   const exits: ExitEvent[] = [];
   let mutated = false;
@@ -244,7 +273,7 @@ export function checkPaperExits(priceMap: Record<string, number>): ExitEvent[] {
     delete b.positions[asset];
     mutated = true;
   }
-  if (mutated || exits.length > 0) savePaperBalance(b);
+  if (mutated || exits.length > 0) savePaperBalance(env, b);
   return exits;
 }
 
@@ -255,7 +284,15 @@ export function getOpenPositions(): Array<{ asset: string } & PaperPosition> {
 }
 
 // ─── 포지션 청산 (수동 매매용) ────────────────────────────────
-export function closePaperPosition(asset: string, currentPrice: number, ratio = 1): { ok: boolean; pnl: number; reason?: string } {
+export function closePaperPosition(
+  env: TradeEnv | 'UNKNOWN',
+  asset: string,
+  currentPrice: number,
+  ratio = 1,
+): { ok: boolean; pnl: number; reason?: string; blocked?: true } {
+  // **거래소 청산이 끝난 뒤 여기를 부르지 않는다.** 예전에는 모드와 무관하게
+  // 불렀고, 그래서 TESTNET·LIVE 청산이 연습 장부의 손익으로 쌓였다.
+  if (!mayMutatePracticeLedger(env)) return { ...practiceBlocked(env), pnl: 0 };
   const b = loadPaperBalance();
   const pos = b.positions[asset];
   if (!pos || pos.qty <= 0) return { ok: false, pnl: 0, reason: '포지션 없음' };
@@ -270,11 +307,16 @@ export function closePaperPosition(asset: string, currentPrice: number, ratio = 
   recordDailyPnL(pnl);
   if (r >= 0.999) { delete b.positions[asset]; }
   else { b.positions[asset] = { ...pos, qty: pos.qty - closeQty }; }
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, pnl };
 }
 
-export function reversePaperPosition(asset: string, currentPrice: number): { ok: boolean; pnl: number; closedValue: number; newSide?: 'long'|'short' } {
+export function reversePaperPosition(
+  env: TradeEnv | 'UNKNOWN',
+  asset: string,
+  currentPrice: number,
+): { ok: boolean; pnl: number; closedValue: number; newSide?: 'long'|'short'; blocked?: true; reason?: string } {
+  if (!mayMutatePracticeLedger(env)) return { ...practiceBlocked(env), pnl: 0, closedValue: 0 };
   const b = loadPaperBalance();
   const pos = b.positions[asset];
   if (!pos || pos.qty <= 0) return { ok: false, pnl: 0, closedValue: 0 };
@@ -302,7 +344,7 @@ export function reversePaperPosition(asset: string, currentPrice: number): { ok:
     side: newSide,
     stratId: 'reverse',
   };
-  savePaperBalance(b);
+  savePaperBalance(env, b);
   return { ok: true, pnl, closedValue, newSide };
 }
 

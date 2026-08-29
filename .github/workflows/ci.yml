@@ -337,6 +337,15 @@ jobs:
       - name: 관리자 인증 계약 (호출자 · 서버 · 동기화가 같은 이름을 보는가)
         run: node scripts/check-admin-auth-contract.mjs
 
+      # ── 연습 장부 환경 격리 ──
+      #
+      # 브라우저 원화 연습 장부에 TESTNET·LIVE 체결이 함께 쌓이고 있었다.
+      # 장부를 바꾸는 자리가 여섯이었고 다섯에 모드 검사가 없었다.
+      # 한 장부에 세 환경이 섞이면 줄마다 환경이 적혀 있지 않아 사후에
+      # 가려낼 수 없다 — 섞이기 전에 막는 수밖에 없다.
+      - name: 연습 장부 환경 격리 (실전을 연습 장부에 적지 않는다)
+        run: node scripts/check-practice-ledger-env.mjs
+
       # ── 테스트 등록 검사 ──
       #
       # 재배치 충돌을 기계적으로 해소하다 `run-tests.mjs`의 등록 줄이

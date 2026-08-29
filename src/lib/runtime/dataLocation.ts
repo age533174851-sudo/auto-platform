@@ -183,9 +183,24 @@ export const DATA_ITEMS: DataItem[] = [
     where: '컴포넌트 상태 (MockAutoTrade.tsx) — 새로고침하면 사라진다',
   },
   {
-    id: 'paper_balance', label: '모의 잔고·포지션',
+    // **정본 모의 장부는 서버다.** 5A(#210)에서 옮겼다.
+    id: 'paper_ledger_canonical', label: '모의 잔고·포지션 (정본 PAPER)',
+    kind: 'USER_ASSET', location: 'SERVER',
+    where: 'paper_accounts · paper_positions 표 (USDT). 서버가 체결·청산까지 한다',
+  },
+  {
+    // **이것은 정본이 아니다.** 위와 이름이 비슷하지만 다른 장부다 —
+    // 통화(KRW)도, 체결 판정 주체(브라우저)도 다르다. 예전 항목이
+    // '모의 잔고·포지션 / BROWSER_ONLY' 한 줄이었는데, 그렇게 적어 두면
+    // 정본 모의 장부가 브라우저에만 있는 것처럼 읽힌다.
+    //
+    // 게다가 여기에는 TESTNET·LIVE 체결이 섞여 들어간 시기가 있었다.
+    // 줄마다 환경이 적혀 있지 않아 **사후에 가려낼 수 없다** — 그래서
+    // 지우지도 재분류하지도 않고, 성과·통계의 근거에서 뺀다.
+    id: 'local_krw_practice', label: '로컬 원화 연습 장부 (정본 아님)',
     kind: 'USER_ASSET', location: 'BROWSER_ONLY',
-    where: 'localStorage (src/lib/autotrade/store.ts)',
+    where: "localStorage 'tg_paper_balance_v1' (src/lib/autotrade/store.ts, KRW) — "
+      + '정본 PAPER와 합산·대체 금지. 과거분은 TESTNET·LIVE가 섞여 오염 가능',
   },
   {
     id: 'exec_logs', label: '자동매매 실행 기록',
