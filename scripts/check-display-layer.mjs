@@ -24,9 +24,54 @@ import { readFileSync, existsSync } from 'node:fs';
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
 const read = (p) => existsSync(p) ? readFileSync(p, 'utf8') : null;
-const stripComments = (src) => String(src)
-  .replace(/\/\*[\s\S]*?\*\//g, ' ')
-  .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+/**
+ * 주석을 지운다.
+ *
+ * **정규식 두 줄로는 안 된다.** 처음엔 그렇게 했다가 조용히 틀렸다:
+ * WalletPage 머리말에 `` `portfolio/*` `` 라는 줄 주석이 있는데,
+ * 블록 주석 정규식이 그 `/*`를 시작으로 읽고 **59줄을 통째로 삼켰다.**
+ * 그 구간의 import도 `toFixed`도 검사에 보이지 않았다 — 통과해도
+ * 거짓이고 실패해도 거짓인 상태였다.
+ *
+ * 그래서 문자열·템플릿·주석 상태를 따라가며 훑는다. 느리지만 정확하다.
+ */
+function stripComments(src) {
+  const s = String(src ?? '');
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i], d = s[i + 1];
+    // 줄 주석 — `//`가 문자열 밖에 있을 때만
+    if (c === '/' && d === '/') {
+      while (i < s.length && s[i] !== '\n') i += 1;
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      i += 2;
+      // 줄 번호가 어긋나면 오류 위치가 틀린다 — 개행은 남긴다
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) {
+        if (s[i] === '\n') out += '\n';
+        i += 1;
+      }
+      i += 2;
+      continue;
+    }
+    // 문자열·템플릿은 통째로 남긴다 — 그 안의 `/*`는 주석이 아니다
+    if (c === '"' || c === "'" || c === '`') {
+      const q = c;
+      out += c; i += 1;
+      while (i < s.length) {
+        if (s[i] === '\\') { out += s[i] + (s[i + 1] ?? ''); i += 2; continue; }
+        out += s[i];
+        if (s[i] === q) { i += 1; break; }
+        i += 1;
+      }
+      continue;
+    }
+    out += c; i += 1;
+  }
+  return out;
+}
 
 // ── ① 표시 계층이 판단을 갖고 있는가 ──
 const DISPLAY = 'src/lib/ui/display.ts';
@@ -81,6 +126,18 @@ for (const rel of ['src/lib/ui/strategyCard.ts', 'src/lib/ui/autoOverview.ts']) 
 // 이 목록은 **늘어나는 목록**이다. 화면을 옮길 때마다 여기 추가한다.
 const MIGRATED = [
   'src/components/MockAutoTrade.tsx',
+  'src/components/pages/WalletPage.tsx',
+];
+
+/**
+ * 상태를 말해야 하는 화면.
+ *
+ * 여기 있는 화면은 색과 문구를 **직접 고르지 않는다.** 지갑 한 화면에만
+ * 빨강·노랑 지정이 23곳 있었고, 같은 사건(계좌를 못 읽음)이 화면 위치에
+ * 따라 다른 색과 다른 문장으로 나왔다.
+ */
+const STATUS_SCREENS = [
+  'src/components/pages/WalletPage.tsx',
 ];
 
 for (const rel of MIGRATED) {
@@ -92,15 +149,37 @@ for (const rel of MIGRATED) {
     err(`${rel} — 표시 계층을 쓰지 않습니다`);
     continue;
   }
-  // 사설 자릿수 결정
-  if (/\.toFixed\(/.test(code)) {
-    err(`${rel} — toFixed로 자릿수를 직접 정합니다`
-      + '\n     자릿수는 값의 크기가 정합니다(display.digitsFor). 고정하면'
-      + '\n     잔고 0이 `0.00000000`이 되거나 작은 수량이 `0.00`이 됩니다');
-  }
-  if (/maximumFractionDigits/.test(code)) {
-    err(`${rel} — 자릿수를 직접 지정합니다. display.ts를 쓰세요`);
-  }
+  // 사설 자릿수 결정.
+  //
+  // **줄 단위로 본다.** 화면에는 값이 아닌 숫자도 있다 — SVG 경로 좌표가
+  // 그렇다. 그런 줄은 바로 위에 이유를 적고 빠져나갈 수 있게 하되,
+  // **이유 없이는 못 빠져나간다**: 표식만 있고 설명이 없으면 실패다.
+  const rawLines = src.split('\n');
+  const exempt = new Set();
+  rawLines.forEach((line, i) => {
+    const m = /display-layer-exempt:\s*(.*)$/.exec(line);
+    if (!m) return;
+    if (!String(m[1] || '').trim()) {
+      err(`${rel}:${i + 1} — display-layer-exempt에 이유가 없습니다`);
+      return;
+    }
+    // 표식 줄부터 아래 3줄까지 봐 준다 (여러 줄 주석 + 코드 한 줄)
+    for (let k = i; k <= i + 3; k += 1) exempt.add(k);
+  });
+
+  const codeLines = stripComments(src).split('\n');
+  codeLines.forEach((line, i) => {
+    if (exempt.has(i)) return;
+    if (/\.toFixed\(/.test(line)) {
+      err(`${rel}:${i + 1} — toFixed로 자릿수를 직접 정합니다`
+        + '\n     자릿수는 값의 크기가 정합니다(display.digitsFor). 고정하면'
+        + '\n     잔고 0이 `0.00000000`이 되거나 작은 수량이 `0.00`이 됩니다'
+        + '\n     값이 아니라 좌표 같은 것이면 위 줄에 `display-layer-exempt: 이유`를 적으세요');
+    }
+    if (/maximumFractionDigits/.test(line)) {
+      err(`${rel}:${i + 1} — 자릿수를 직접 지정합니다. display.ts를 쓰세요`);
+    }
+  });
   // 문구를 화면이 다시 적으면 화면마다 갈린다
   const inlineUnknown = (code.match(/'확인 불가'/g) || []).length;
   if (inlineUnknown > 0) {
@@ -109,8 +188,59 @@ for (const rel of MIGRATED) {
   }
 }
 
+// ── ④ 상태·환경 표현도 한 곳에서 나온다 ──
+{
+  const rel = 'src/lib/ui/status.ts';
+  const src = read(rel);
+  if (!src) {
+    err(`${rel} — 상태 표현 계층이 없습니다`);
+  } else {
+    const code = stripComments(src);
+    for (const [re, why] of [
+      [/export type StatusKind\s*=[\s\S]{0,160}DISABLED/, 'SUCCESS·WARNING·ERROR·UNKNOWN·DISABLED 다섯 상태가 없습니다'],
+      [/export function accountStatusOf\s*\(/, '계좌 상태 판정이 없습니다 — 없음·못 읽음·잔고 0이 다시 섞입니다'],
+      [/export function unknownSummaryOf\s*\(/, "못 읽은 것을 한 장으로 압축하는 판정이 없습니다"],
+      [/export function splitDiagnostics\s*\(/, '개발자용 원문을 본문에서 떼는 판정이 없습니다'],
+      [/export const ENV_VIEW/, '환경(LIVE·TESTNET·MOCK) 표현이 없습니다'],
+    ]) if (!re.test(code)) err(`${rel} — ${why}`);
+
+    // 못 읽은 것을 빨강으로 그리면, 진짜 막힌 빨강과 구별되지 않는다.
+    if (!/UNKNOWN:\s*'muted'/.test(code)) {
+      err(`${rel} — 확인 불가를 회색이 아닌 색으로 그립니다`
+        + '\n     전부 빨가면 어느 것도 빨갛지 않은 것과 같습니다');
+    }
+  }
+}
+
+for (const rel of STATUS_SCREENS) {
+  const src = read(rel);
+  if (!src) { err(`${rel} — 파일이 없습니다`); continue; }
+  const code = stripComments(src);
+
+  if (!/from '@\/lib\/ui\/status'/.test(code) || !/from '@\/components\/ui\/Status'/.test(code)) {
+    err(`${rel} — 공통 상태 표현을 쓰지 않습니다`);
+    continue;
+  }
+  // 서버가 준 원문을 **본문에 그대로 그리는** 자리.
+  //
+  // `text={x.note}`처럼 SafeNote에 넘기는 것은 정상이다 — 그쪽이 원문을
+  // 갈라 준다. 문제는 JSX 자식으로 바로 그리는 `>{x.note}<`다.
+  // (처음엔 둘을 구분하지 못해 올바른 코드를 실패로 적었다.)
+  if (/[>}]\s*\{\s*\w+\.note\s*\}/.test(code)) {
+    err(`${rel} — 서버 note를 본문에 그대로 그립니다`
+      + '\n     DB·API 원문이 섞여 있으면 사용자 화면에 샙니다.'
+      + '\n     splitDiagnostics로 본문과 진단을 가르세요');
+  }
+  // 긴 설명 여러 개를 한 줄로 이어 붙이면 사용자는 통째로 건너뛴다
+  if (/\.filter\(Boolean\)\.join\(' · '\)/.test(code)) {
+    err(`${rel} — 안내 문장 여러 개를 한 줄로 이어 붙입니다`
+      + '\n     짧은 요약 + 접는 상세(Details)로 나누세요');
+  }
+}
+
 if (bad === 0) {
-  console.log(`✅ 표시 계층 유지 — 자릿수·부호·'확인 불가'·전략 이름은 한 곳에서 정한다 (옮긴 화면 ${MIGRATED.length}개)`);
+  console.log(`✅ 표시 계층 유지 — 자릿수·부호·'확인 불가'·전략 이름·상태·환경은 한 곳에서 정한다`
+    + ` (옮긴 화면 ${MIGRATED.length}개 · 상태 화면 ${STATUS_SCREENS.length}개)`);
 } else {
   console.error('');
   console.error('   같은 값을 두 화면이 다르게 적으면 사용자는 둘 다 믿지 않습니다.');
