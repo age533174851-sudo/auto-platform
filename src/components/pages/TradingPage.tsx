@@ -7,6 +7,7 @@ import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
 import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, savePaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
+import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/lib/autotrade/practiceActions';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
@@ -457,34 +458,23 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
     return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
   }, []);
 
-  // 포지션 종료 — paper 정리 + testnet/live면 거래소 청산
-  const closePosition = async (p: any, cur: number, ratio: number) => {
-    // testnet/live: 거래소에 reduce-only 반대주문
-    if ((tradeMode === 'testnet' || tradeMode === 'live') && connId) {
-      try {
-        const tradeSymbol = p.asset.toUpperCase().replace(/USDT$/,'') + 'USDT';
-        const closeQty = Number((p.qty * ratio).toFixed(3));
-        const r = await fetch('/api/binance/futures/order', {
-          method:'POST',
-          headers:{'Content-Type':'application/json',...(authHeaderRef.current?{Authorization:authHeaderRef.current}:{})},
-          body: JSON.stringify({
-            connectionId: connId, symbol: tradeSymbol,
-            side: p.side==='short'?'BUY':'SELL',   // 청산은 반대방향
-            type:'MARKET', quantity: closeQty, leverage, reduceOnly: true,
-            confirmToken:'LIVE_ORDER_CONFIRMED',
-          }),
-        });
-        const d = await r.json();
-        if (!r.ok || d.error) { showToast(`청산 실패 · ${d.message||d.error}`, false); return; }
-        showToast(`청산 주문 전송 · ${Math.round(ratio*100)}%`, true);
-      } catch (e:any) { showToast(`청산 오류 · ${e?.message||'네트워크 오류'}`, false); return; }
+  // ── 연습 포지션 종료 — **거래소를 부르지 않는다** ──
+  //
+  // 예전에는 이 핸들러가 전역 `tradeMode`를 보고 목적지를 골랐다. 그래서
+  // **로컬 연습 장부의 수량(p.asset · p.qty)으로 실제 거래소 주문이 나갔다.**
+  // 거래소에 그 포지션이 있는지조차 확인하지 않았다.
+  //
+  // 실포지션에는 이미 별도 경로가 있다(`realPos` → `closeReal`). 목적지를
+  // 모드로 고르는 구조 자체를 없앴다 — **출처가 경로를 정한다.**
+  const closePosition = (p: any, cur: number, ratio: number) => {
+    const plan = planPracticeClose(tradeEnvOf(tradeMode), p, ratio);
+    // 기대한 종류가 아니면 아무것도 하지 않는다 — 종류가 늘어났을 때
+    // 새 종류가 조용히 연습 청산으로 흘러들지 않게 한다.
+    if (plan.kind !== 'PRACTICE_CLOSE') {
+      showToast(plan.kind === 'BLOCKED' ? plan.reason : '연습 청산을 수행하지 않았습니다', false);
+      return;
     }
-    // **거래소 청산 뒤에 연습 장부를 건드리지 않는다.**
-    //
-    // 예전에는 이 줄이 모드 밖에 있어서 TESTNET·LIVE 청산도 로컬 원화
-    // 장부의 손익으로 쌓였다. 거래소에서 닫힌 것의 정본은 거래소와 서버
-    // 기록이지 브라우저가 아니다.
-    closePaperPosition(tradeEnvOf(tradeMode), p.asset, cur, ratio);
+    closePaperPosition(tradeEnvOf(tradeMode), plan.asset, cur, plan.ratio);
     refreshPositions();
   };
 
@@ -1476,6 +1466,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           {positions.length>0&&(
             <Card style={{padding:'14px 16px',marginBottom:12,borderLeft:`3px solid ${T.prp}`}}>
               <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>모의 포지션 ({positions.length})<span style={{background:A(T.prp,'20'),color:T.prp,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>MOCK</span></div>
+              {/* **연습 장부는 거래소와 연결돼 있지 않다.** 지금 화면이 테스트넷·실전이면
+                  이 카드의 동작은 읽기 전용이다 — 여기 수량으로 거래소에 주문을 내면
+                  거래소에 없는 포지션을 닫으려 드는 것이 된다. */}
+              {!practiceCardEditable(tradeEnvOf(tradeMode))&&(
+                <div style={{background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',marginBottom:10}}>
+                  <div style={{color:T.sub,fontSize:10,fontWeight:700}}>읽기 전용 — 이 연습 장부는 거래소와 연결돼 있지 않습니다</div>
+                  <div style={{color:T.muted,fontSize:9,marginTop:2}}>거래소 포지션은 위의 실포지션 카드에서 다루세요</div>
+                </div>
+              )}
               {positions.map((p,i)=>{
                 const cur = prices.find(a=>a.id===p.asset)?.p || p.avgPrice;
                 const isShort = p.side === 'short';
@@ -1516,26 +1515,20 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                       }} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
                     </div>
                     {(quickActions.includes('reverse')||quickActions.includes('tpsl'))&&<div style={{display:'flex',gap:6,marginTop:6}}>
-                      {quickActions.includes('reverse')&&<button onClick={async()=>{
-                        // testnet/live: 거래소에 청산(reduce-only) + 반대방향 신규 주문
-                        if((tradeMode==='testnet'||tradeMode==='live')&&connId){
-                          try {
-                            const tradeSymbol = p.asset.toUpperCase().replace(/USDT$/,'')+'USDT';
-                            const qty = Number(p.qty.toFixed(3));
-                            const isShort = p.side==='short';
-                            // 1) 기존 청산 (반대방향 reduce-only)
-                            await fetch('/api/binance/futures/order',{method:'POST',headers:{'Content-Type':'application/json',...(authHeaderRef.current?{Authorization:authHeaderRef.current}:{})},
-                              body:JSON.stringify({connectionId:connId,symbol:tradeSymbol,side:isShort?'BUY':'SELL',type:'MARKET',quantity:qty,leverage,reduceOnly:true,confirmToken:'LIVE_ORDER_CONFIRMED'})});
-                            // 2) 반대방향 신규 진입
-                            const r2 = await fetch('/api/binance/futures/order',{method:'POST',headers:{'Content-Type':'application/json',...(authHeaderRef.current?{Authorization:authHeaderRef.current}:{})},
-                              body:JSON.stringify({connectionId:connId,symbol:tradeSymbol,side:isShort?'BUY':'SELL',type:'MARKET',quantity:qty,leverage,confirmToken:'LIVE_ORDER_CONFIRMED'})});
-                            const d2=await r2.json();
-                            if(!r2.ok||d2.error){ showToast(`리버스 실패 · ${d2.message||d2.error}`, false); return; }
-                          } catch(e:any){ showToast(`리버스 오류 · ${e?.message||'네트워크 오류'}`, false); return; }
+                      {quickActions.includes('reverse')&&<button onClick={()=>{
+                        // **연습 포지션 리버스는 거래소를 부르지 않는다.**
+                        //
+                        // 예전에는 여기서 로컬 연습 포지션의 asset·qty로
+                        // 거래소 청산 + 반대방향 신규 주문을 보냈다. 거래소에
+                        // 그 포지션이 있는지 확인하지도 않았다. 실포지션의
+                        // 리버스는 실포지션 카드의 경로가 따로 한다.
+                        const envRev = tradeEnvOf(tradeMode);
+                        const plan = planPracticeReverse(envRev, p);
+                        if(plan.kind !== 'PRACTICE_REVERSE'){
+                          showToast(plan.kind === 'BLOCKED' ? plan.reason : '연습 리버스를 수행하지 않았습니다', false);
+                          return;
                         }
-                        // 거래소 리버스는 위에서 끝났다. **그 결과를 연습 장부에
-                        // 다시 적지 않는다** — MOCK일 때만 로컬 장부가 움직인다.
-                        const res = reversePaperPosition(tradeEnvOf(tradeMode), p.asset, cur);
+                        const res = reversePaperPosition(envRev, plan.asset, cur);
                         refreshPositions();
                         if(res.ok){
                           showToast(`리버스 완료 · 실현손익 ${Math.round(res.pnl).toLocaleString('ko-KR')}원 → ${res.newSide==='long'?'롱':'숏'} 전환`, true);

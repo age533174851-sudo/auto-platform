@@ -7,9 +7,12 @@
 import { test, eq, assert } from '../../test/harness';
 import { tradeEnvOf, mayMutatePracticeLedger, LEGACY_LEDGER_STATUS } from './practiceEnv';
 import {
-  loadPaperBalance, savePaperBalance, resetPaperBalance,
+  loadPaperBalance, savePaperBalance, resetPaperBalance, recordDailyPnL,
   paperBuy, paperSell, closePaperPosition, reversePaperPosition, checkPaperExits,
 } from './store';
+import {
+  planPracticeClose, planPracticeReverse, practiceCardEditable, PRACTICE_ACTION_KINDS,
+} from './practiceActions';
 
 /** localStorage 흉내. **네트워크도 거래소도 건드리지 않는다.** */
 function fakeWindow() {
@@ -23,6 +26,20 @@ function fakeWindow() {
   } as any;
 }
 
+/**
+ * 장부 전체를 한 문자열로 찍는다.
+ *
+ * **잔고·포지션만 보면 부족하다.** 실현손익 누계(`tg_day_pnl`)는 별도 키에
+ * 있고, 화면은 "오늘 얼마 벌었나"를 그 값으로 읽는다. 그것만 새어 나가도
+ * 실전 손익이 연습 성과로 남는다.
+ */
+const LEDGER_SNAPSHOT_KEYS = ['tg_day_pnl', 'tg_day_pnl_date'];
+function ledgerSnapshot(): string {
+  const w: any = (globalThis as any).window;
+  const extra = LEDGER_SNAPSHOT_KEYS.map(k => `${k}=${w?.localStorage?.getItem(k) ?? ''}`).join('|');
+  return JSON.stringify(loadPaperBalance()) + '||' + extra;
+}
+
 /** 장부를 놓고 한 가지 동작을 시킨 뒤, 장부가 변했는지만 본다 */
 function withLedger(run: () => void): { before: string; after: string; changed: boolean } {
   const g: any = globalThis;
@@ -33,9 +50,9 @@ function withLedger(run: () => void): { before: string; after: string; changed: 
     // 시작 상태: 잔고와 롱 포지션 하나
     savePaperBalance('MOCK', { krw: 10_000_000, positions: {}, totalPnL: 0 } as any);
     paperBuy('MOCK', 'btc', 100, 1_000_000, { side: 'long' });
-    const before = JSON.stringify(loadPaperBalance());
+    const before = ledgerSnapshot();
     run();
-    const after = JSON.stringify(loadPaperBalance());
+    const after = ledgerSnapshot();
     return { before, after, changed: before !== after };
   } finally {
     if (had) g.window = prev; else delete g.window;
@@ -176,6 +193,85 @@ export function runPracticeEnvTests() {
         eq(checkPaperExits(env, { btc: 1 }).length, 0, `${env}: 청산 사건을 만들었다`);
       } finally { if (had) g.window = prev; else delete g.window; }
     }
+  });
+
+  // ══ ⑤-2 실현손익 누계도 같은 계약을 받는다 ══
+  //
+  // 잔고·포지션만 막고 여기를 열어 두면 실전 손익이 연습 성과로 남는다.
+
+  test('연습 실현손익은 MOCK에서 쌓인다', () => {
+    const r = withLedger(() => { recordDailyPnL('MOCK', 12345); });
+    assert(r.changed, 'MOCK인데 실현손익이 안 쌓였다');
+    assert(r.after.includes('tg_day_pnl=12345'), `실현손익이 안 적혔다 — ${r.after.slice(-60)}`);
+  });
+
+  test('TESTNET·LIVE·UNKNOWN은 실현손익도 쌓지 않는다', () => {
+    for (const env of ['TESTNET', 'LIVE', 'UNKNOWN'] as const) {
+      const r = withLedger(() => { recordDailyPnL(env, 12345); });
+      eq(r.changed, false, `${env}: 실현손익이 쌓였다`);
+    }
+  });
+
+  test('MOCK 밖 청산은 실현손익 키까지 그대로 둔다', () => {
+    // 청산이 막히면 잔고뿐 아니라 **손익 누계도** 그대로여야 한다.
+    for (const env of ['TESTNET', 'LIVE'] as const) {
+      const r = withLedger(() => { closePaperPosition(env, 'btc', 200, 1); });
+      eq(r.after, r.before, `${env}: 청산이 장부(손익 포함)를 바꿨다`);
+    }
+  });
+
+  // ══ ⑤-3 연습 포지션으로 거래소를 부르지 않는다 ══
+  //
+  // 반대 방향 오염이다. 예전에는 '모의 포지션' 카드의 종료·리버스가
+  // 전역 tradeMode를 보고 **로컬 연습 장부의 수량으로 거래소 주문**을 냈다.
+  //
+  // 여기서는 실제 네트워크를 부르지 않는다. 대신 **부를 수 있는 선택지가
+  // 아예 없다**는 것을 본다 — 그게 더 강한 증거다.
+
+  test('연습 동작의 결과 종류에 거래소를 부르는 것이 없다', () => {
+    for (const k of PRACTICE_ACTION_KINDS) {
+      assert(/^(PRACTICE_|BLOCKED)/.test(k), `거래소를 부를 수 있는 종류가 생겼다 — ${k}`);
+    }
+    eq(PRACTICE_ACTION_KINDS.length, 3, '종류가 늘었다면 이 계약을 다시 보라');
+  });
+
+  test('TESTNET에서 연습 포지션 종료·리버스는 막힌다 (거래소 호출 0)', () => {
+    const p = { asset: 'btc', qty: 1, avgPrice: 100, side: 'long' };
+    for (const plan of [planPracticeClose('TESTNET', p, 1), planPracticeReverse('TESTNET', p)]) {
+      eq(plan.kind, 'BLOCKED', 'TESTNET인데 연습 동작이 통과했다');
+    }
+    // 장부도 안 변한다
+    eq(withLedger(() => { closePaperPosition('TESTNET', 'btc', 200, 1); }).changed, false);
+    eq(withLedger(() => { reversePaperPosition('TESTNET', 'btc', 200); }).changed, false);
+  });
+
+  test('LIVE에서 연습 포지션 종료·리버스는 막힌다 (거래소 호출 0)', () => {
+    const p = { asset: 'btc', qty: 1, avgPrice: 100, side: 'long' };
+    for (const plan of [planPracticeClose('LIVE', p, 1), planPracticeReverse('LIVE', p)]) {
+      eq(plan.kind, 'BLOCKED', 'LIVE인데 연습 동작이 통과했다');
+    }
+    eq(withLedger(() => { closePaperPosition('LIVE', 'btc', 200, 1); }).changed, false);
+    eq(withLedger(() => { reversePaperPosition('LIVE', 'btc', 200); }).changed, false);
+  });
+
+  test('MOCK에서는 연습 종료·리버스가 연습 장부만 바꾼다', () => {
+    const p = { asset: 'btc', qty: 1, avgPrice: 100, side: 'long' };
+    eq(planPracticeClose('MOCK', p, 0.5).kind, 'PRACTICE_CLOSE');
+    eq(planPracticeReverse('MOCK', p).kind, 'PRACTICE_REVERSE');
+  });
+
+  test('연습 카드는 MOCK 밖에서 읽기 전용이다', () => {
+    eq(practiceCardEditable('MOCK'), true);
+    for (const env of ['TESTNET', 'LIVE', 'UNKNOWN'] as const) {
+      eq(practiceCardEditable(env), false, `${env}: 연습 카드가 편집 가능하다`);
+    }
+  });
+
+  test('종목을 모르면 연습 동작도 하지 않는다', () => {
+    // 종목을 못 읽었는데 진행하면 엉뚱한 자산을 닫는다.
+    eq(planPracticeClose('MOCK', {}, 1).kind, 'BLOCKED');
+    eq(planPracticeClose('MOCK', null, 1).kind, 'BLOCKED');
+    eq(planPracticeReverse('MOCK', { qty: 1 }).kind, 'BLOCKED');
   });
 
   // ══ ⑥ 이미 섞인 과거는 추측으로 정리하지 않는다 ══

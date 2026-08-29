@@ -228,7 +228,7 @@ export function checkPaperExits(env: TradeEnv | 'UNKNOWN', priceMap: Record<stri
         const proceeds = halfQty * cur;
         const cost = halfQty * pos.avgPrice;
         const halfPnl = (proceeds - cost) * (isShort ? -1 : 1);
-        b.krw += proceeds; b.totalPnL += halfPnl; recordDailyPnL(halfPnl);
+        b.krw += proceeds; b.totalPnL += halfPnl; recordDailyPnL(env, halfPnl);
         // 남은 절반 + 손절을 본전으로 (리스크 프리)
         b.positions[asset] = { ...pos, qty: pos.qty - halfQty, slPrice: pos.avgPrice, tp1Done: true };
         exits.push({ asset, reason: 'take_profit' as any, price: cur, pnl: halfPnl, qty: halfQty, stratId: pos.stratId });
@@ -268,7 +268,7 @@ export function checkPaperExits(env: TradeEnv | 'UNKNOWN', priceMap: Record<stri
     const pnl      = (proceeds - cost) * (isShort ? -1 : 1);
     b.krw += proceeds;
     b.totalPnL += pnl;
-    recordDailyPnL(pnl);
+    recordDailyPnL(env, pnl);
     exits.push({ asset, reason: hit as any, price: cur, pnl, qty: p2.qty, stratId: p2.stratId });
     delete b.positions[asset];
     mutated = true;
@@ -304,7 +304,7 @@ export function closePaperPosition(
   const pnl = proceeds - cost;
   b.krw += proceeds;
   b.totalPnL += pnl;
-  recordDailyPnL(pnl);
+  recordDailyPnL(env, pnl);
   if (r >= 0.999) { delete b.positions[asset]; }
   else { b.positions[asset] = { ...pos, qty: pos.qty - closeQty }; }
   savePaperBalance(env, b);
@@ -335,7 +335,7 @@ export function reversePaperPosition(
   // 2) 잔고: 청산금 회수 + PnL 반영, 그리고 반대방향 같은 수량 재진입(증거금 차감)
   b.krw += pnl;            // 실현손익만 반영 (증거금은 그대로 재사용)
   b.totalPnL += pnl;
-  recordDailyPnL(pnl);
+  recordDailyPnL(env, pnl);
 
   // 3) 반대방향 신규 포지션 (같은 수량, 현재가 진입)
   b.positions[asset] = {
@@ -397,19 +397,35 @@ export function canOpenNewPosition(seed = 10_000_000): { allowed: boolean; reaso
 }
 
 // 일일 손익 기록 (청산 시 호출)
-export function recordDailyPnL(pnl: number) {
+/**
+ * 연습 장부의 **실현손익 누계**. 이것도 장부다.
+ *
+ * 잔고·포지션만 막고 여기를 열어 두면, 실전 손익이 연습 성과로 남는다.
+ * 화면은 "오늘 얼마 벌었나"를 이 값으로 읽는다 — 잔고보다 눈에 먼저 띄는
+ * 숫자다. 그래서 같은 계약을 건다: **환경을 먼저 받고 MOCK에서만 쓴다.**
+ *
+ * `window.localStorage`로 통일했다. 예전에는 맨 `localStorage`를 썼는데,
+ * 그러면 창이 없는 곳에서 예외가 나고 `catch`가 삼켜 **아무 일도 안 한 것과
+ * 실패한 것이 같은 모양**이 됐다.
+ */
+export function recordDailyPnL(env: TradeEnv | 'UNKNOWN', pnl: number) {
+  if (!mayMutatePracticeLedger(env)) return;
+  if (typeof window === 'undefined') return;
   const today = new Date().toDateString();
   try {
-    const dayKey = localStorage.getItem('tg_day_pnl_date') || '';
-    let dayPnL = dayKey === today ? +(localStorage.getItem('tg_day_pnl') || '0') : 0;
+    const dayKey = window.localStorage.getItem(DAY_PNL_DATE_KEY) || '';
+    let dayPnL = dayKey === today ? +(window.localStorage.getItem(DAY_PNL_KEY) || '0') : 0;
     dayPnL += pnl;
-    localStorage.setItem('tg_day_pnl_date', today);
-    localStorage.setItem('tg_day_pnl', String(dayPnL));
+    window.localStorage.setItem(DAY_PNL_DATE_KEY, today);
+    window.localStorage.setItem(DAY_PNL_KEY, String(dayPnL));
   } catch {}
 }
 
 // ─── 급락 서킷브레이커 ────────────────────────────────
 const CIRCUIT_KEY = 'tg_circuit_breaker';
+/** 연습 장부의 실현손익 누계 — 잔고·포지션과 같은 장부다 */
+const DAY_PNL_KEY = 'tg_day_pnl';
+const DAY_PNL_DATE_KEY = 'tg_day_pnl_date';
 export interface CircuitState { tripped: boolean; reason: string; until: number; }
 
 export function checkCircuitBreaker(asset: string, changePct1h: number): CircuitState {
