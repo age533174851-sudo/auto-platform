@@ -11,10 +11,10 @@
 
 | | 수 |
 |---|--:|
-| 화면 | 17 |
+| **실제 화면 (SCREEN_INDEX)** | 66 |
 | 들여다본 화면 (SURVEYED) | 6 |
-| 존재만 확인 (LISTED_ONLY) | 11 |
-| 이관 완료 / 일부 / PR 대기 / 미이관 | 2 / 1 / 0 / 14 |
+| 존재만 확인 (LISTED_ONLY) | 60 |
+| 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
 | 겹쳐 뜨는 층 | 8 |
@@ -23,66 +23,125 @@
 | 상태별 재고 (공통 물건 있음 / 여러 벌 / 없음 / 미정) | 1 / 2 / 2 / 2 |
 
 `LISTED_ONLY`는 **존재를 확인했지만 상태·액션까지는 아직 안 본 화면**입니다.
-확인하지 못한 것을 통과로 적지 않습니다.
+그런 화면의 목적·상태·primitive 칸은 비어 있는 것이 아니라
+`UNSURVEYED`로 나옵니다 — **비어 있음과 조사 안 함은 다른 사실입니다.**
+
+실제 화면이 이 목록에 없으면 **CI가 실패합니다.** 적은 것만 목록에
+있는 상태는 목록이 없는 것과 같습니다 — 목록 밖 화면은 이름이
+바뀌어도 사라져도 아무도 모릅니다.
 
 ## 1. 화면
 
-| 화면 | 위치 | 목적 | 환경 | 이관 | 깊이 | 대상 |
-|---|---|---|---|---|---|---|
-| **홈** `home` | `tab:home` | 오늘 무슨 일이 있었는지 한 화면에서 본다 | LIVE · TESTNET · PAPER | LEGACY | 본 것 | USER |
-| **시장 보기** `market` | `tab:market` | 실시간 코인·주식 시세 | NA | LEGACY | 본 것 | USER |
-| **매매하기** `trading` | `tab:trading` | 차트·호가·주문 통합 화면 | LIVE · TESTNET · PAPER | LEGACY | 본 것 | USER |
-| **터미널** `terminal` | `/terminal` | 주문·호가·차트를 붙인 전문 화면 | LIVE · TESTNET | LEGACY | 목록만 | USER |
-| **자동매매** `auto` | `tab:auto` | AI가 대신 자동 거래 | LIVE · TESTNET · PAPER | PARTIAL | 본 것 | USER |
-| **모의매매** `paper` | `tab:paper` | 가짜 돈으로 연습 | PAPER | MIGRATED | 본 것 | USER |
-| **전략빌더** `strategies` | `tab:strategies` | 나만의 매매 규칙 만들기 | NA | LEGACY | 목록만 | USER |
-| **포트폴리오** `portfolio` | `tab:portfolio` | 내 자산 현황 | LIVE · TESTNET | LEGACY | 목록만 | USER |
-| **지갑** `wallet` | `tab:wallet` | 환경별 총자산·오늘 손익·모의계좌 | LIVE · TESTNET · PAPER | MIGRATED | 본 것 | USER |
-| **실행기록** `history` | `tab:history` | 자동매매 체결 내역 | LIVE · TESTNET · PAPER | LEGACY | 목록만 | USER |
-| **백테스트** `backtest` | `tab:backtest` | 과거 데이터로 전략 검증 | NA | LEGACY | 목록만 | USER |
-| **알림** `alerts` | `tab:alerts` | 가격·체결 알림 설정 | NA | LEGACY | 목록만 | USER |
-| **API 진단** `diagnostics` | `tab:diagnostics` | 연결 상태 점검 | LIVE · TESTNET | LEGACY | 목록만 | DIAGNOSTICS |
-| **운영** `ops` | `tab:ops` | 점검·배포·복구를 명령 하나로 | LIVE · TESTNET | LEGACY | 목록만 | DIAGNOSTICS |
-| **API 연결** `accounts` | `tab:accounts` | 거래소 API 연결 | LIVE · TESTNET | LEGACY | 목록만 | USER |
-| **설정** `settings` | `tab:settings` | 통화·언어·알림 | NA | LEGACY | 목록만 | USER |
-| **관리자** `admin` | `/admin` | 운영자 전용 관리 | NA | LEGACY | 목록만 | ADMIN |
+### 1-1. 전체 화면 목록 (존재)
 
-### 화면별 주요 액션 · 상태 · primitive
-
-| 화면 | 주요 액션 | 그리는 상태 | 쓰는 primitive | 진단 노출 |
+| 화면 | 위치 | 어디서 가는가 | 조사 | 목적 |
 |---|---|---|---|---|
-| `home` | 자산 열기 · 화면 이동 | LOADING · SUCCESS · UNKNOWN | Card · Badge | — |
-| `market` | 종목 열기 · 통화 전환 | LOADING · SUCCESS · UNKNOWN | Card · Badge | — |
-| `trading` | 주문 · 수동 연습 매매 | LOADING · SUCCESS · WARNING · ERROR | Card · Button · Badge | — |
-| `terminal` | 주문 · 호가 보기 | LOADING · SUCCESS · ERROR | Card · Button | — |
-| `auto` | 전략 켜기/끄기 · 예약 등록 · 지금 중지 | LOADING · EMPTY · SUCCESS · WARNING · ERROR · UNKNOWN | Card · Badge · MoneyValue · PnlValue | 진단 탭 |
-| `paper` | 모의투자 시작 · 초기화 | LOADING · EMPTY · SUCCESS · UNKNOWN · DISABLED | Card · ValueRow · MoneyValue | — |
-| `strategies` | 전략 생성 · 전략 저장 | LOADING · EMPTY · SUCCESS · ERROR | Card · Button · Input | — |
-| `portfolio` | 자산 열기 | LOADING · EMPTY · SUCCESS · UNKNOWN | Card · MoneyValue | — |
-| `wallet` | 환경 전환 · 통화 전환 · 모의투자 시작·충전 | LOADING · EMPTY · SUCCESS · WARNING · ERROR · UNKNOWN · DISABLED | StatusCard · EnvBadge · Details · SafeNote · MoneyValue · PnlValue | 각 상태 카드의 접히는 "진단 정보" |
-| `history` | 기록 보기 | LOADING · EMPTY · SUCCESS · UNKNOWN | Card · ValueRow | — |
-| `backtest` | 백테스트 실행 | LOADING · EMPTY · SUCCESS · ERROR | Card · Button | — |
-| `alerts` | 알림 추가 · 알림 끄기 | LOADING · EMPTY · SUCCESS · ERROR | Card · Toast | — |
-| `diagnostics` | 점검 실행 | LOADING · SUCCESS · WARNING · ERROR · UNKNOWN | Card · Badge | 화면 전체가 진단이다 |
-| `ops` | 전체 점검 · 배포 · 복구 | LOADING · SUCCESS · WARNING · ERROR · UNKNOWN | Card · Button | 단계별 결과 로그 |
-| `accounts` | 거래소 연결 · 연결 해제 | LOADING · EMPTY · SUCCESS · ERROR | Card · Button · Input · Toast | — |
-| `settings` | 설정 변경 | LOADING · SUCCESS | Card · SettingField | — |
-| `admin` | 사용자 관리 | LOADING · SUCCESS · ERROR | Card | 화면 전체가 관리자용이다 |
+| **홈** `home` | `tab:home` | BTABS · SWITCH | 본 것 | 오늘 무슨 일이 있었는지 한 화면에서 본다 |
+| **시장 보기** `market` | `tab:market` | MENU · BTABS · SWITCH | 본 것 | 실시간 코인·주식 시세 |
+| **매매하기** `trading` | `tab:trading` | MENU · BTABS · SWITCH | 본 것 | 차트·호가·주문 통합 화면 |
+| **자동매매** `auto` | `tab:auto` | MENU · BTABS · SWITCH | 본 것 | AI가 대신 자동 거래 |
+| **지갑** `wallet` | `tab:wallet` | BTABS · MTABS · SWITCH | 본 것 | 환경별 총자산·오늘 손익·모의계좌 |
+| **모의매매** `paper` | `tab:paper` | MENU · MTABS · SWITCH | 본 것 | 가짜 돈으로 연습 |
+| **포트폴리오** `portfolio` | `tab:portfolio` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **전략빌더** `strategies` | `tab:strategies` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **매매일지** `history` | `tab:history` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **백테스트** `backtest` | `tab:backtest` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **알림** `alerts` | `tab:alerts` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **API 진단** `diagnostics` | `tab:diagnostics` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **운영** `ops` | `tab:ops` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **거래소연결** `accounts` | `tab:accounts` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **설정** `settings` | `tab:settings` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **아카데미** `academy` | `tab:academy` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **AI채팅** `ai` | `tab:ai` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **AI추천** `ai_portfolio` | `tab:ai_portfolio` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **AI 관리센터** `ai_usage` | `tab:ai_usage` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **분석허브** `analysis` | `tab:analysis` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **분석** `analytics` | `tab:analytics` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **AutoBot Lab** `autobot` | `tab:autobot` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **AI브리핑** `briefing` | `tab:briefing` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **경제캘린더** `calendar` | `tab:calendar` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **차트** `chart` | `tab:chart` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **세계시장** `clock` | `tab:clock` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **자동적립** `dca` | `tab:dca` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **배당캘린더** `dividends` | `tab:dividends` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **공포 DCA** `fear_dca` | `tab:fear_dca` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **입출금** `funding` | `tab:funding` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **관심그룹** `groups` | `tab:groups` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **성장** `growth` | `tab:growth` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **히트맵** `heatmap` | `tab:heatmap` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **Hedge OS** `hedgeos` | `tab:hedgeos` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **허브** `hub` | `tab:hub` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **통합운용** `hub_accounts` | `tab:hub_accounts` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **인텔리전스** `intelligence` | `tab:intelligence` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **수동자산등록** `manual_accounts` | `tab:manual_accounts` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **메뉴 허브** `menu_hub` | `tab:menu_hub` | SWITCH | 목록만 | `UNSURVEYED` |
+| **뉴스** `news` | `tab:news` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **Pine 가이드** `pine_guide` | `tab:pine_guide` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **수익계산** `pnl` | `tab:pnl` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **강의** `posters` | `tab:posters` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **실시간** `realtime` | `tab:realtime` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **AI 복기** `review` | `tab:review` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **리스크관리** `risk_settings` | `tab:risk_settings` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **안전제어** `safety` | `tab:safety` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **스캐너** `scanner` | `tab:scanner` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **검색** `search` | `tab:search` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **시즌전략** `season` | `tab:season` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **계절성 분석** `seasonality` | `tab:seasonality` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **소셜** `social` | `tab:social` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **구독** `subscription` | `tab:subscription` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **손익·세금** `tax` | `tab:tax` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **TradFi** `tradfi` | `tab:tradfi` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **왓치리스트** `watchlist` | `tab:watchlist` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **WUNDER봇** `wunder` | `tab:wunder` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **터미널** `terminal` | `/terminal` | ROUTE | 목록만 | `UNSURVEYED` |
+| **관리자** `admin` | `/admin` | ROUTE | 목록만 | `UNSURVEYED` |
+| **차트 (전용 라우트)** `route_chart` | `/chart` | ROUTE | 목록만 | `UNSURVEYED` |
+| **개발자** `developer` | `/developer` | ROUTE | 목록만 | `UNSURVEYED` |
+| **로그인** `auth` | `/auth` | ROUTE | 목록만 | `UNSURVEYED` |
+| **로그인 콜백** `auth_callback` | `/auth/callback` | ROUTE | 목록만 | `UNSURVEYED` |
+| **개인정보처리방침** `privacy` | `/privacy` | ROUTE | 목록만 | `UNSURVEYED` |
+| **이용약관** `terms` | `/terms` | ROUTE | 목록만 | `UNSURVEYED` |
+| **권한 없음** `unauthorized` | `/unauthorized` | ROUTE | 목록만 | `UNSURVEYED` |
 
-### 화면 메모
+> `SWITCH`만 있는 화면은 **어떤 메뉴에도 없습니다** — 코드에서만 갈 수 있습니다.
 
-- **`home`** — '확인 불가'를 직접 적는 자리가 남아 있다
-- **`market`** — 시세는 환경과 무관하다 — 환경 배지를 붙이지 않는다
-- **`trading`** — **로컬 원화 연습 장부가 남아 있다** — canonical PAPER가 아니다. DECISION 참조. 이번 단계에서 바꾸지 않는다
-- **`terminal`** — Inventory 완료 전에는 이관을 시작하지 않는다
-- **`auto`** — 모의 잔고 카드만 표시 계층으로 옮겼다(구간 잠금 AUTOPAGE-PAPER-CARD). 나머지는 만원 단위 원화 표기 등 legacy
-- **`paper`** — MockAutoTrade가 이 화면의 본체. 표시 계층 전체 이관 완료(파일 잠금)
-- **`strategies`** — `my-original-v1` 원본 전략은 덮어쓰거나 삭제하지 않는다
-- **`wallet`** — #213에서 이관 완료(main). **MENU에 없고 BTABS·MTABS에만 있다** — 스캐너가 MENU만 읽었을 때 통째로 빠졌던 화면이다
+#### 조사와 무관하게 이미 아는 것 (지켜야 할 제약)
+
+- **`trading`** — **로컬 원화 연습 장부가 남아 있다** — 정본 PAPER가 아니다 (`trading-local-ledger` 결정)
+- **`wallet`** — **MENU에 없고 BTABS·MTABS에만 있다** — MENU만 읽었을 때 통째로 빠졌던 화면이다
+- **`strategies`** — **`my-original-v1` 원본 전략은 덮어쓰거나 삭제하지 않는다**
 - **`backtest`** — 청산 규칙은 실전과 같은 `exitRules`를 쓴다
 - **`ops`** — 사용자가 명령 하나로 부르는 자리 — 최상위 규칙의 "사용자는 명령만 한다"
 - **`accounts`** — **키·시크릿 값은 화면에도 로그에도 남기지 않는다.** 지문만 비교한다
+- **`chart`** — 같은 이름의 `/chart` 라우트가 따로 있다 — 다른 화면이다
+- **`menu_hub`** — **어떤 메뉴에도 없다.** 코드에서만 갈 수 있는 화면이다 — 사용자가 스스로 찾아갈 방법이 없다
+- **`terminal`** — 주문을 직접 내는 화면 (`terminal-order-path` 결정). Inventory 완료 전에는 이관을 시작하지 않는다
 - **`admin`** — 일반 사용자 화면 목록에 넣지 않는다
+- **`route_chart`** — 탭의 `chart`와 이름이 같지만 다른 화면이다
+- **`auth`** — **키·시크릿을 화면에 남기지 않는다**
+- **`auth_callback`** — 사용자가 머무는 화면이 아니라 거쳐 가는 자리다
+
+### 1-2. 들여다본 화면만 — 액션 · 상태 · primitive
+
+**여기 없는 화면의 의미는 아무도 확인하지 않았습니다.** 지어내지 않습니다.
+
+| 화면 | 주요 액션 | 그리는 상태 | 쓰는 primitive | 환경 | 이관 | 진단 노출 | 대상 |
+|---|---|---|---|---|---|---|---|
+| `home` | 자산 열기 · 화면 이동 | LOADING · SUCCESS · UNKNOWN | Card · Badge | LIVE · TESTNET · PAPER | LEGACY | — | USER |
+| `market` | 종목 열기 · 통화 전환 | LOADING · SUCCESS · UNKNOWN | Card · Badge | NA | LEGACY | — | USER |
+| `trading` | 주문 · 수동 연습 매매 | LOADING · SUCCESS · WARNING · ERROR | Card · Button · Badge | LIVE · TESTNET · PAPER | LEGACY | — | USER |
+| `auto` | 전략 켜기/끄기 · 예약 등록 · 지금 중지 | LOADING · EMPTY · SUCCESS · WARNING · ERROR · UNKNOWN | Card · Badge · MoneyValue · PnlValue | LIVE · TESTNET · PAPER | PARTIAL | 진단 탭 | USER |
+| `paper` | 모의투자 시작 · 초기화 | LOADING · EMPTY · SUCCESS · UNKNOWN · DISABLED | Card · ValueRow · MoneyValue | PAPER | MIGRATED | — | USER |
+| `wallet` | 환경 전환 · 통화 전환 · 모의투자 시작·충전 | LOADING · EMPTY · SUCCESS · WARNING · ERROR · UNKNOWN · DISABLED | StatusCard · EnvBadge · Details · SafeNote · MoneyValue · PnlValue | LIVE · TESTNET · PAPER | MIGRATED | 각 상태 카드의 접히는 "진단 정보" | USER |
+
+#### 조사 메모
+
+- **`home`** — '확인 불가'를 직접 적는 자리가 남아 있다
+- **`market`** — 시세는 환경과 무관하다 — 환경 배지를 붙이지 않는다
+- **`trading`** — **로컬 원화 연습 장부가 남아 있다** — 정본 PAPER가 아니다. `trading-local-ledger` 결정 참조. 이번 단계에서 바꾸지 않는다
+- **`auto`** — 모의 잔고 카드만 표시 계층으로 옮겼다(구간 잠금 AUTOPAGE-PAPER-CARD). 나머지는 만원 단위 원화 표기 등 legacy
+- **`paper`** — MockAutoTrade가 이 화면의 본체. 표시 계층 전체 이관 완료(파일 잠금)
+- **`wallet`** — #213에서 이관 완료(main)
 
 ## 2. 네비게이션 — 목록이 여러 곳에 있다
 
@@ -303,6 +362,7 @@
 | 순서 | 대상 | 왜 이 순서인가 |
 |--:|---|---|
 | ✔ | Paper (#211) · Wallet (#213) | **끝남 — main에 있다** |
+| 0 | 남은 화면 조사 | 지금은 66개 중 6개만 들여다봤다. 이관 전에 조사가 먼저다 |
 | 1 | Portfolio / Home | 같은 값(총자산·손익)을 보는 화면끼리 묶는다 |
 | 2 | Auto / Strategy | 자동매매 나머지 — 만원 단위 원화 표기가 남아 있다 |
 | 3 | Market | 환경과 무관한 화면이라 상태 종류가 적다 |

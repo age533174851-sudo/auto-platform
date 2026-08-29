@@ -66,9 +66,12 @@ const list = (a) => (a && a.length ? a.join(' · ') : '—');
 
 export function render(inv) {
   const {
-    SCREENS, NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS, UI_STATES,
-    UI_STATE_INVENTORY,
+    NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS, UI_STATES,
+    UI_STATE_INVENTORY, SCREEN_INDEX, SCREEN_SURVEY, screenRows, UNSURVEYED,
   } = inv;
+  const SCREENS = screenRows();
+  /** 조사 안 한 칸은 빈칸이 아니라 UNSURVEYED로 보인다 — 둘은 다른 사실이다 */
+  const uns = (v) => (v === null || v === undefined || v === '' ? `\`${UNSURVEYED}\`` : v);
   const L = [];
 
   L.push('# UI Inventory');
@@ -82,16 +85,16 @@ export function render(inv) {
   L.push('');
 
   // ── 요약 ──
-  const byMig = (m) => SCREENS.filter(s => s.migration === m).length;
+  const byMig = (m) => SCREEN_SURVEY.filter(s => s.migration === m).length;
   const byPrim = (st) => PRIMITIVES.filter(p => p.status === st).length;
   L.push('## 요약');
   L.push('');
   L.push('| | 수 |');
   L.push('|---|--:|');
-  L.push(`| 화면 | ${SCREENS.length} |`);
+  L.push(`| **실제 화면 (SCREEN_INDEX)** | ${SCREEN_INDEX.length} |`);
   L.push(`| 들여다본 화면 (SURVEYED) | ${SCREENS.filter(s => s.depth === 'SURVEYED').length} |`);
   L.push(`| 존재만 확인 (LISTED_ONLY) | ${SCREENS.filter(s => s.depth === 'LISTED_ONLY').length} |`);
-  L.push(`| 이관 완료 / 일부 / PR 대기 / 미이관 | ${byMig('MIGRATED')} / ${byMig('PARTIAL')} / ${byMig('PENDING_PR')} / ${byMig('LEGACY')} |`);
+  L.push(`| 조사한 것 중 이관 완료 / 일부 / 미이관 | ${byMig('MIGRATED')} / ${byMig('PARTIAL')} / ${byMig('LEGACY')} |`);
   L.push(`| primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | ${byPrim('EXISTS')} / ${byPrim('DUPLICATED')} / ${byPrim('MISSING')} / ${byPrim('LEGACY')} / ${byPrim('PROPOSED')} |`);
   L.push(`| 네비게이션 정의 위치 | ${NAVIGATION.length} |`);
   L.push(`| 겹쳐 뜨는 층 | ${OVERLAYS.length} |`);
@@ -104,35 +107,54 @@ export function render(inv) {
     + `${UI_STATE_INVENTORY.filter(u => u.status === 'PROPOSED').length} |`);
   L.push('');
   L.push('`LISTED_ONLY`는 **존재를 확인했지만 상태·액션까지는 아직 안 본 화면**입니다.');
-  L.push('확인하지 못한 것을 통과로 적지 않습니다.');
+  L.push('그런 화면의 목적·상태·primitive 칸은 비어 있는 것이 아니라');
+  L.push(`\`${UNSURVEYED}\`로 나옵니다 — **비어 있음과 조사 안 함은 다른 사실입니다.**`);
+  L.push('');
+  L.push('실제 화면이 이 목록에 없으면 **CI가 실패합니다.** 적은 것만 목록에');
+  L.push('있는 상태는 목록이 없는 것과 같습니다 — 목록 밖 화면은 이름이');
+  L.push('바뀌어도 사라져도 아무도 모릅니다.');
   L.push('');
 
   // ── 화면 ──
   L.push('## 1. 화면');
   L.push('');
-  L.push('| 화면 | 위치 | 목적 | 환경 | 이관 | 깊이 | 대상 |');
-  L.push('|---|---|---|---|---|---|---|');
-  for (const s of SCREENS) {
-    L.push(`| **${s.label}** \`${s.id}\` | \`${s.routeOrSurface}\` | ${s.purpose} `
-      + `| ${list(s.environments)} | ${s.migration} | ${s.depth === 'SURVEYED' ? '본 것' : '목록만'} | ${s.audience} |`);
-  }
+  L.push('### 1-1. 전체 화면 목록 (존재)');
   L.push('');
-
-  L.push('### 화면별 주요 액션 · 상태 · primitive');
-  L.push('');
-  L.push('| 화면 | 주요 액션 | 그리는 상태 | 쓰는 primitive | 진단 노출 |');
+  L.push('| 화면 | 위치 | 어디서 가는가 | 조사 | 목적 |');
   L.push('|---|---|---|---|---|');
   for (const s of SCREENS) {
-    L.push(`| \`${s.id}\` | ${list(s.primaryActions)} | ${list(s.states)} `
-      + `| ${list(s.primitives)} | ${s.diagnostics ?? '—'} |`);
+    L.push(`| **${s.label}** \`${s.id}\` | \`${s.routeOrSurface}\` | ${list(s.sources)} `
+      + `| ${s.depth === 'SURVEYED' ? '본 것' : '목록만'} | ${uns(s.survey?.purpose)} |`);
   }
   L.push('');
+  L.push('> `SWITCH`만 있는 화면은 **어떤 메뉴에도 없습니다** — 코드에서만 갈 수 있습니다.');
+  L.push('');
 
-  const noted = SCREENS.filter(s => s.notes.trim());
-  if (noted.length) {
-    L.push('### 화면 메모');
+  const noteOnly = SCREEN_INDEX.filter(s => s.note);
+  if (noteOnly.length) {
+    L.push('#### 조사와 무관하게 이미 아는 것 (지켜야 할 제약)');
     L.push('');
-    for (const s of noted) L.push(`- **\`${s.id}\`** — ${s.notes}`);
+    for (const s of noteOnly) L.push(`- **\`${s.id}\`** — ${s.note}`);
+    L.push('');
+  }
+
+  L.push('### 1-2. 들여다본 화면만 — 액션 · 상태 · primitive');
+  L.push('');
+  L.push('**여기 없는 화면의 의미는 아무도 확인하지 않았습니다.** 지어내지 않습니다.');
+  L.push('');
+  L.push('| 화면 | 주요 액션 | 그리는 상태 | 쓰는 primitive | 환경 | 이관 | 진단 노출 | 대상 |');
+  L.push('|---|---|---|---|---|---|---|---|');
+  for (const v of SCREEN_SURVEY) {
+    L.push(`| \`${v.id}\` | ${list(v.primaryActions)} | ${list(v.states)} `
+      + `| ${list(v.primitives)} | ${list(v.environments)} | ${v.migration} `
+      + `| ${v.diagnostics ?? '—'} | ${v.audience} |`);
+  }
+  L.push('');
+  const noted = SCREEN_SURVEY.filter(v => v.notes.trim());
+  if (noted.length) {
+    L.push('#### 조사 메모');
+    L.push('');
+    for (const v of noted) L.push(`- **\`${v.id}\`** — ${v.notes}`);
     L.push('');
   }
 
@@ -259,6 +281,7 @@ export function render(inv) {
   L.push('| 순서 | 대상 | 왜 이 순서인가 |');
   L.push('|--:|---|---|');
   L.push('| ✔ | Paper (#211) · Wallet (#213) | **끝남 — main에 있다** |');
+  L.push('| 0 | 남은 화면 조사 | 지금은 66개 중 6개만 들여다봤다. 이관 전에 조사가 먼저다 |');
   L.push('| 1 | Portfolio / Home | 같은 값(총자산·손익)을 보는 화면끼리 묶는다 |');
   L.push('| 2 | Auto / Strategy | 자동매매 나머지 — 만원 단위 원화 표기가 남아 있다 |');
   L.push('| 3 | Market | 환경과 무관한 화면이라 상태 종류가 적다 |');
@@ -274,5 +297,7 @@ const isMain = process.argv[1] && process.argv[1].endsWith('generate-ui-inventor
 if (isMain) {
   const inv = await loadInventory();
   writeFileSync(OUT, render(inv));
-  console.log(`${OUT} — 화면 ${inv.SCREENS.length}개 · primitive ${inv.PRIMITIVES.length}개`);
+  const rows = inv.screenRows();
+  console.log(`${OUT} — 화면 ${inv.SCREEN_INDEX.length}개(조사 ${rows.filter(r => r.depth === 'SURVEYED').length}개)`
+    + ` · primitive ${inv.PRIMITIVES.length}개`);
 }

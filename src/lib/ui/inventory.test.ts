@@ -7,19 +7,24 @@
 // 않았는가 · **안 본 것을 봤다고 적지 않았는가.**
 import { test, eq, assert } from '../../test/harness';
 import {
-  SCREENS, NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS,
+  screenRows, SCREEN_INDEX, SCREEN_SURVEY, SURFACE_SOURCES, UNSURVEYED,
+  NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS,
   ENVIRONMENTS, UI_STATES, MIGRATION_STATUSES, PRIMITIVE_STATUSES, UI_STATE_INVENTORY,
 } from './inventory';
 
 export function runInventoryTests() {
   console.log('\n🧪 UI Inventory — 목록이 자기모순이 아닌가');
 
+  const SCREENS = screenRows();
+
   // ══ ① id가 겹치지 않는다 ══
   const dupOf = (ids: string[]) => ids.filter((v, i) => ids.indexOf(v) !== i);
 
   test('화면 id가 겹치지 않는다', () => {
-    const d = dupOf(SCREENS.map(s => s.id));
+    const d = dupOf(SCREEN_INDEX.map(s => s.id));
     eq(d.join(','), '', `겹치는 화면 id — ${d.join(',')}`);
+    const d2 = dupOf(SCREEN_SURVEY.map(s => s.id));
+    eq(d2.join(','), '', `같은 화면을 두 번 조사했다고 적었다 — ${d2.join(',')}`);
   });
 
   test('primitive id가 겹치지 않는다', () => {
@@ -39,42 +44,60 @@ export function runInventoryTests() {
     }
   });
 
-  // ══ ② 필수 칸이 비어 있지 않다 ══
-  test('화면에 목적과 라우트가 반드시 있다', () => {
-    for (const s of SCREENS) {
+  // ══ ② 존재와 의미를 나눠서 본다 ══
+  //
+  // **identity에 의미를 요구하지 않는다.** 조사 안 한 화면에 목적·상태를
+  // 채우라고 하면 사람은 지어내서 채운다. 그렇게 채운 문서를 보고 내리는
+  // 판단은 전부 틀린다.
+
+  test('화면 존재 목록에는 이름과 위치가 반드시 있다', () => {
+    for (const s of SCREEN_INDEX) {
       assert(!!s.label.trim(), `${s.id}: label 없음`);
       assert(!!s.routeOrSurface.trim(), `${s.id}: routeOrSurface 없음`);
-      assert(!!s.purpose.trim(), `${s.id}: purpose 없음`);
-    }
-  });
-
-  test('화면에 환경과 상태가 하나 이상 있다 — 비워 두지 않는다', () => {
-    for (const s of SCREENS) {
-      assert(s.environments.length > 0, `${s.id}: environments가 비었다`);
-      assert(s.states.length > 0, `${s.id}: states가 비었다`);
-    }
-  });
-
-  // ══ ③ 값이 정해진 것 중에 있다 ══
-  test('환경 값이 정해진 넷 중에 있다', () => {
-    for (const s of SCREENS) {
-      for (const e of s.environments) {
-        assert(ENVIRONMENTS.includes(e), `${s.id}: 모르는 환경 ${e}`);
+      assert(s.sources.length > 0, `${s.id}: 어디서 가는지가 비었다`);
+      for (const x of s.sources) {
+        assert(SURFACE_SOURCES.includes(x), `${s.id}: 모르는 발견 위치 ${x}`);
       }
     }
   });
 
-  test('상태 값이 정해진 일곱 중에 있다', () => {
-    for (const s of SCREENS) {
-      for (const st of s.states) {
-        assert(UI_STATES.includes(st), `${s.id}: 모르는 상태 ${st}`);
+  test('존재 목록에 목적·상태 칸 자체가 없다 — 있으면 채우고 싶어진다', () => {
+    for (const s of SCREEN_INDEX) {
+      for (const k of ['purpose', 'states', 'primitives', 'primaryActions']) {
+        assert(!(k in s), `${s.id}: 존재 목록에 ${k}가 있다 — 조사 결과는 SCREEN_SURVEY에만 둔다`);
+      }
+    }
+  });
+
+  test('조사 목록의 화면이 전부 실재 목록에 있다', () => {
+    const known = new Set(SCREEN_INDEX.map(s => s.id));
+    for (const v of SCREEN_SURVEY) {
+      assert(known.has(v.id), `${v.id}: 조사했다면서 존재 목록에 없다`);
+    }
+  });
+
+  // ══ ③ 값이 정해진 것 중에 있다 (조사한 화면만) ══
+  test('조사한 화면의 환경 값이 정해진 넷 중에 있다', () => {
+    for (const v of SCREEN_SURVEY) {
+      assert(v.environments.length > 0, `${v.id}: environments가 비었다`);
+      for (const e of v.environments) {
+        assert(ENVIRONMENTS.includes(e), `${v.id}: 모르는 환경 ${e}`);
+      }
+    }
+  });
+
+  test('조사한 화면의 상태 값이 정해진 일곱 중에 있다', () => {
+    for (const v of SCREEN_SURVEY) {
+      assert(v.states.length > 0, `${v.id}: states가 비었다`);
+      for (const st of v.states) {
+        assert(UI_STATES.includes(st), `${v.id}: 모르는 상태 ${st}`);
       }
     }
   });
 
   test('이관 상태와 primitive 상태 값이 정해진 것 중에 있다', () => {
-    for (const s of SCREENS) {
-      assert(MIGRATION_STATUSES.includes(s.migration), `${s.id}: 모르는 이관 상태 ${s.migration}`);
+    for (const v of SCREEN_SURVEY) {
+      assert(MIGRATION_STATUSES.includes(v.migration), `${v.id}: 모르는 이관 상태 ${v.migration}`);
     }
     for (const p of PRIMITIVES) {
       assert(PRIMITIVE_STATUSES.includes(p.status), `${p.id}: 모르는 상태 ${p.status}`);
@@ -85,8 +108,8 @@ export function runInventoryTests() {
   test('화면이 목록에 없는 primitive를 쓴다고 적지 않는다', () => {
     const known = new Set(PRIMITIVES.map(p => p.id));
     const missing: string[] = [];
-    for (const s of SCREENS) {
-      for (const p of s.primitives) if (!known.has(p)) missing.push(`${s.id}→${p}`);
+    for (const v of SCREEN_SURVEY) {
+      for (const p of v.primitives) if (!known.has(p)) missing.push(`${v.id}→${p}`);
     }
     eq(missing.join(', '), '', `목록에 없는 primitive — ${missing.join(', ')}`);
   });
@@ -94,7 +117,7 @@ export function runInventoryTests() {
   // ══ ⑤ 안 본 것을 봤다고 적지 않는다 ══
   test('LISTED_ONLY 화면이 있다는 것을 숨기지 않는다', () => {
     // **전부 SURVEYED로 적혀 있으면 오히려 의심스럽다.**
-    // 57개 화면을 전부 들여다본 적이 없다면, 그렇게 적는 것이 거짓이다.
+    // 66개 화면을 전부 들여다본 적이 없다면, 그렇게 적는 것이 거짓이다.
     const listed = SCREENS.filter(s => s.depth === 'LISTED_ONLY');
     const surveyed = SCREENS.filter(s => s.depth === 'SURVEYED');
     assert(surveyed.length > 0, '들여다본 화면이 하나도 없다');
@@ -102,9 +125,49 @@ export function runInventoryTests() {
       '전부 SURVEYED로 적혀 있다 — 실제로 전부 확인했는지 다시 보라');
   });
 
-  test('깊이 값이 둘 중 하나다', () => {
+  test('조사 안 한 화면은 survey가 null이고 깊이가 LISTED_ONLY다', () => {
+    const surveyed = new Set(SCREEN_SURVEY.map(v => v.id));
     for (const s of SCREENS) {
-      assert(s.depth === 'SURVEYED' || s.depth === 'LISTED_ONLY', `${s.id}: ${s.depth}`);
+      if (surveyed.has(s.id)) {
+        eq(s.depth, 'SURVEYED', `${s.id}: 조사했는데 목록만으로 적혔다`);
+        assert(s.survey !== null, `${s.id}: 조사 결과가 붙지 않았다`);
+      } else {
+        eq(s.depth, 'LISTED_ONLY', `${s.id}: 조사 안 했는데 봤다고 적혔다`);
+        eq(s.survey, null, `${s.id}: 조사 안 했는데 결과가 있다`);
+      }
+    }
+  });
+
+  test('조사 안 한 것을 빈칸이 아니라 UNSURVEYED로 부른다', () => {
+    // 빈칸은 "그런 게 없다"로도 읽힌다. **없는 것과 안 본 것은 다르다.**
+    assert(typeof UNSURVEYED === 'string' && UNSURVEYED.length > 0,
+      '안 본 것을 부르는 이름이 없다');
+  });
+
+  // ══ ⑤-2 실제 화면이 전부 목록에 있다 ══
+  //
+  // 이 저장소는 "적은 것만 목록에 있는" 상태를 이미 겪었다 — 실제 66개
+  // 중 17개만 적혀 있었고 검사는 나머지를 발견하고도 통과했다.
+  // **목록 밖 화면은 이름이 바뀌어도 사라져도 아무도 모른다.**
+
+  test('화면이 66개 근처다 — 17개짜리 목록으로 되돌아가지 않는다', () => {
+    assert(SCREEN_INDEX.length >= 60,
+      `화면이 ${SCREEN_INDEX.length}개뿐이다 — 실제 앱에는 탭 57개와 라우트 9개가 있다`);
+  });
+
+  test('하단 탭 다섯 개가 전부 목록에 있다', () => {
+    for (const id of ['home', 'market', 'trading', 'auto', 'wallet']) {
+      assert(SCREEN_INDEX.some(s => s.routeOrSurface === `tab:${id}`), `${id}가 목록에 없다`);
+    }
+  });
+
+  test('어떤 메뉴에도 없는 화면을 그 사실과 함께 적는다', () => {
+    // menu_hub는 코드에서만 갈 수 있다. 목록에 있는 것과
+    // **사용자가 갈 수 있는 것은 다른 사실이다.**
+    const orphan = SCREEN_INDEX.filter(s => s.sources.length === 1 && s.sources[0] === 'SWITCH');
+    for (const s of orphan) {
+      assert(!!s.note?.trim(),
+        `${s.id}: 어떤 메뉴에도 없는 화면인데 그 사실이 안 적혀 있다`);
     }
   });
 
@@ -290,9 +353,10 @@ export function runInventoryTests() {
   });
 
   test('지갑 화면이 목록에 있다 — MENU만 읽으면 빠지는 화면이다', () => {
-    const w = SCREENS.find(s => s.id === 'wallet');
+    const w = SCREEN_INDEX.find(s => s.id === 'wallet');
     assert(!!w, '지갑이 Inventory에 없다');
-    assert(/BTABS|MTABS|MENU에 없/.test(w!.notes), '왜 놓치기 쉬운지가 안 적혀 있다');
+    assert(!w!.sources.includes('MENU'), '지갑이 MENU에 있다고 적혀 있다 — 실제로는 없다');
+    assert(/BTABS|MTABS|MENU에 없/.test(w!.note ?? ''), '왜 놓치기 쉬운지가 안 적혀 있다');
   });
 
   // ══ ⑨ 겹쳐 뜨는 층 — 하위 폴더에 있는 것을 놓치지 않는다 ══

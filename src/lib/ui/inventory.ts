@@ -63,12 +63,200 @@ export type SurveyDepth = 'SURVEYED' | 'LISTED_ONLY';
 export type Audience = 'USER' | 'DIAGNOSTICS' | 'ADMIN';
 
 // ══ 화면 ══
+//
+// **존재(identity)와 의미(survey)를 나눈다.**
+//
+// 처음엔 한 목록에 둘을 같이 적었다. 그랬더니 **적은 것만 목록에 있었다** —
+// 실제 앱에는 화면이 66개인데 registry에는 17개만 있었고, 검사는 나머지
+// 49개를 발견하고도 경고만 내고 통과했다. 그 49개는 Inventory의 보호를
+// 전혀 받지 못한다. 이름이 바뀌어도, 사라져도, 아무도 모른다.
+//
+// 그렇다고 66개의 목적·상태·액션을 지어내 채울 수는 없다. **안 본 것을
+// 봤다고 적으면, 그 문서를 보고 내리는 판단이 전부 틀린다.**
+//
+// 그래서 둘로 나눈다:
+//   SCREEN_INDEX   실제로 있는 화면 전부. **하나라도 빠지면 CI가 실패한다**
+//   SCREEN_SURVEY  사람이 실제로 들여다본 것만. 의미는 여기에만 있다
+//
+// 조사 안 된 화면은 목록에 이름만 있고 나머지는 `UNSURVEYED`로 보인다.
+// **비어 있는 것과 조사 안 한 것은 다르다.**
 
-export interface Screen {
+/** 이 화면을 어디서 발견했는가 */
+export type SurfaceSource = 'MENU' | 'BTABS' | 'MTABS' | 'SWITCH' | 'ROUTE';
+export const SURFACE_SOURCES: SurfaceSource[] = ['MENU', 'BTABS', 'MTABS', 'SWITCH', 'ROUTE'];
+
+/** 아직 안 본 것을 문서에 이렇게 적는다 — 빈칸으로 두지 않는다 */
+export const UNSURVEYED = 'UNSURVEYED';
+
+/**
+ * 화면의 **존재**.
+ *
+ * 여기에는 기계가 대조할 수 있는 것만 적는다. 목적·상태·액션 같은
+ * 의미는 `SCREEN_SURVEY`에 있고, 없으면 없는 채로 둔다.
+ */
+export interface ScreenIdentity {
   id: string;
   label: string;
   /** 라우트(`/terminal`)이거나 메인 앱 안의 탭(`tab:auto`) */
   routeOrSurface: string;
+  /** 어디서 갈 수 있는가. **`SWITCH`만 있으면 어떤 메뉴에도 없는 화면이다** */
+  sources: SurfaceSource[];
+  /**
+   * 조사와 무관하게 **이미 아는 사실** — 주로 지켜야 할 제약.
+   *
+   * 화면을 들여다보지 않았어도 "이 화면에서는 키를 노출하지 않는다" 같은
+   * 규칙은 이미 정해져 있다. 그것을 survey가 없다는 이유로 버리지 않는다.
+   */
+  note: string | null;
+}
+
+// ── 실제로 있는 화면 전부 ──
+//
+// `src/app/page.tsx`의 분기(57) + `src/app/**/page.tsx`의 라우트(9).
+// **여기 없는 화면이 코드에서 발견되면 CI가 실패한다.**
+
+export const SCREEN_INDEX: ScreenIdentity[] = [
+  { id: 'home', label: '홈', routeOrSurface: 'tab:home',
+    sources: ['BTABS', 'SWITCH'], note: null },
+  { id: 'market', label: '시장 보기', routeOrSurface: 'tab:market',
+    sources: ['MENU', 'BTABS', 'SWITCH'], note: null },
+  { id: 'trading', label: '매매하기', routeOrSurface: 'tab:trading',
+    sources: ['MENU', 'BTABS', 'SWITCH'], note: '**로컬 원화 연습 장부가 남아 있다** — 정본 PAPER가 아니다 (`trading-local-ledger` 결정)' },
+  { id: 'auto', label: '자동매매', routeOrSurface: 'tab:auto',
+    sources: ['MENU', 'BTABS', 'SWITCH'], note: null },
+  { id: 'wallet', label: '지갑', routeOrSurface: 'tab:wallet',
+    sources: ['BTABS', 'MTABS', 'SWITCH'], note: '**MENU에 없고 BTABS·MTABS에만 있다** — MENU만 읽었을 때 통째로 빠졌던 화면이다' },
+  { id: 'paper', label: '모의매매', routeOrSurface: 'tab:paper',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'portfolio', label: '포트폴리오', routeOrSurface: 'tab:portfolio',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'strategies', label: '전략빌더', routeOrSurface: 'tab:strategies',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: '**`my-original-v1` 원본 전략은 덮어쓰거나 삭제하지 않는다**' },
+  { id: 'history', label: '매매일지', routeOrSurface: 'tab:history',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'backtest', label: '백테스트', routeOrSurface: 'tab:backtest',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: '청산 규칙은 실전과 같은 `exitRules`를 쓴다' },
+  { id: 'alerts', label: '알림', routeOrSurface: 'tab:alerts',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'diagnostics', label: 'API 진단', routeOrSurface: 'tab:diagnostics',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'ops', label: '운영', routeOrSurface: 'tab:ops',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: '사용자가 명령 하나로 부르는 자리 — 최상위 규칙의 "사용자는 명령만 한다"' },
+  { id: 'accounts', label: '거래소연결', routeOrSurface: 'tab:accounts',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: '**키·시크릿 값은 화면에도 로그에도 남기지 않는다.** 지문만 비교한다' },
+  { id: 'settings', label: '설정', routeOrSurface: 'tab:settings',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'academy', label: '아카데미', routeOrSurface: 'tab:academy',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'ai', label: 'AI채팅', routeOrSurface: 'tab:ai',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'ai_portfolio', label: 'AI추천', routeOrSurface: 'tab:ai_portfolio',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'ai_usage', label: 'AI 관리센터', routeOrSurface: 'tab:ai_usage',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'analysis', label: '분석허브', routeOrSurface: 'tab:analysis',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'analytics', label: '분석', routeOrSurface: 'tab:analytics',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'autobot', label: 'AutoBot Lab', routeOrSurface: 'tab:autobot',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'briefing', label: 'AI브리핑', routeOrSurface: 'tab:briefing',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'calendar', label: '경제캘린더', routeOrSurface: 'tab:calendar',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'chart', label: '차트', routeOrSurface: 'tab:chart',
+    sources: ['MTABS', 'SWITCH'], note: '같은 이름의 `/chart` 라우트가 따로 있다 — 다른 화면이다' },
+  { id: 'clock', label: '세계시장', routeOrSurface: 'tab:clock',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'dca', label: '자동적립', routeOrSurface: 'tab:dca',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'dividends', label: '배당캘린더', routeOrSurface: 'tab:dividends',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'fear_dca', label: '공포 DCA', routeOrSurface: 'tab:fear_dca',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'funding', label: '입출금', routeOrSurface: 'tab:funding',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'groups', label: '관심그룹', routeOrSurface: 'tab:groups',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'growth', label: '성장', routeOrSurface: 'tab:growth',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'heatmap', label: '히트맵', routeOrSurface: 'tab:heatmap',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'hedgeos', label: 'Hedge OS', routeOrSurface: 'tab:hedgeos',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'hub', label: '허브', routeOrSurface: 'tab:hub',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'hub_accounts', label: '통합운용', routeOrSurface: 'tab:hub_accounts',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'intelligence', label: '인텔리전스', routeOrSurface: 'tab:intelligence',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'manual_accounts', label: '수동자산등록', routeOrSurface: 'tab:manual_accounts',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'menu_hub', label: '메뉴 허브', routeOrSurface: 'tab:menu_hub',
+    sources: ['SWITCH'], note: '**어떤 메뉴에도 없다.** 코드에서만 갈 수 있는 화면이다 — 사용자가 스스로 찾아갈 방법이 없다' },
+  { id: 'news', label: '뉴스', routeOrSurface: 'tab:news',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'pine_guide', label: 'Pine 가이드', routeOrSurface: 'tab:pine_guide',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'pnl', label: '수익계산', routeOrSurface: 'tab:pnl',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'posters', label: '강의', routeOrSurface: 'tab:posters',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'realtime', label: '실시간', routeOrSurface: 'tab:realtime',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'review', label: 'AI 복기', routeOrSurface: 'tab:review',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'risk_settings', label: '리스크관리', routeOrSurface: 'tab:risk_settings',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'safety', label: '안전제어', routeOrSurface: 'tab:safety',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'scanner', label: '스캐너', routeOrSurface: 'tab:scanner',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'search', label: '검색', routeOrSurface: 'tab:search',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'season', label: '시즌전략', routeOrSurface: 'tab:season',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'seasonality', label: '계절성 분석', routeOrSurface: 'tab:seasonality',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'social', label: '소셜', routeOrSurface: 'tab:social',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'subscription', label: '구독', routeOrSurface: 'tab:subscription',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'tax', label: '손익·세금', routeOrSurface: 'tab:tax',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'tradfi', label: 'TradFi', routeOrSurface: 'tab:tradfi',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'watchlist', label: '왓치리스트', routeOrSurface: 'tab:watchlist',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'wunder', label: 'WUNDER봇', routeOrSurface: 'tab:wunder',
+    sources: ['MTABS', 'SWITCH'], note: null },
+  { id: 'terminal', label: '터미널', routeOrSurface: '/terminal',
+    sources: ['ROUTE'], note: '주문을 직접 내는 화면 (`terminal-order-path` 결정). Inventory 완료 전에는 이관을 시작하지 않는다' },
+  { id: 'admin', label: '관리자', routeOrSurface: '/admin',
+    sources: ['ROUTE'], note: '일반 사용자 화면 목록에 넣지 않는다' },
+  { id: 'route_chart', label: '차트 (전용 라우트)', routeOrSurface: '/chart',
+    sources: ['ROUTE'], note: '탭의 `chart`와 이름이 같지만 다른 화면이다' },
+  { id: 'developer', label: '개발자', routeOrSurface: '/developer',
+    sources: ['ROUTE'], note: null },
+  { id: 'auth', label: '로그인', routeOrSurface: '/auth',
+    sources: ['ROUTE'], note: '**키·시크릿을 화면에 남기지 않는다**' },
+  { id: 'auth_callback', label: '로그인 콜백', routeOrSurface: '/auth/callback',
+    sources: ['ROUTE'], note: '사용자가 머무는 화면이 아니라 거쳐 가는 자리다' },
+  { id: 'privacy', label: '개인정보처리방침', routeOrSurface: '/privacy',
+    sources: ['ROUTE'], note: null },
+  { id: 'terms', label: '이용약관', routeOrSurface: '/terms',
+    sources: ['ROUTE'], note: null },
+  { id: 'unauthorized', label: '권한 없음', routeOrSurface: '/unauthorized',
+    sources: ['ROUTE'], note: null },
+];
+
+// ══ 사람이 들여다본 화면 ══
+//
+// **여기 있는 것만 의미를 안다고 말한다.**
+
+export interface ScreenSurvey {
+  /** SCREEN_INDEX의 id */
+  id: string;
   purpose: string;
   primaryActions: string[];
   environments: Environment[];
@@ -79,194 +267,91 @@ export interface Screen {
   diagnostics: string | null;
   migration: MigrationStatus;
   audience: Audience;
-  depth: SurveyDepth;
   notes: string;
 }
 
-// ── 화면 목록 ──
-//
-// `depth: 'LISTED_ONLY'`는 **존재를 확인했지만 상태·액션까지는 아직
-// 안 본 화면**이다. 지어내지 않는다.
-
-export const SCREENS: Screen[] = [
+export const SCREEN_SURVEY: ScreenSurvey[] = [
   {
-    id: 'home', label: '홈', routeOrSurface: 'tab:home',
+    id: 'home',
     purpose: '오늘 무슨 일이 있었는지 한 화면에서 본다',
     primaryActions: ['자산 열기', '화면 이동'],
     environments: ['LIVE', 'TESTNET', 'PAPER'],
     states: ['LOADING', 'SUCCESS', 'UNKNOWN'],
     primitives: ['Card', 'Badge'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'SURVEYED',
+    diagnostics: null, migration: 'LEGACY', audience: 'USER',
     notes: "'확인 불가'를 직접 적는 자리가 남아 있다",
   },
   {
-    id: 'market', label: '시장 보기', routeOrSurface: 'tab:market',
+    id: 'market',
     purpose: '실시간 코인·주식 시세',
     primaryActions: ['종목 열기', '통화 전환'],
     environments: ['NA'],
     states: ['LOADING', 'SUCCESS', 'UNKNOWN'],
     primitives: ['Card', 'Badge'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'SURVEYED',
+    diagnostics: null, migration: 'LEGACY', audience: 'USER',
     notes: '시세는 환경과 무관하다 — 환경 배지를 붙이지 않는다',
   },
   {
-    id: 'trading', label: '매매하기', routeOrSurface: 'tab:trading',
+    id: 'trading',
     purpose: '차트·호가·주문 통합 화면',
     primaryActions: ['주문', '수동 연습 매매'],
     environments: ['LIVE', 'TESTNET', 'PAPER'],
     states: ['LOADING', 'SUCCESS', 'WARNING', 'ERROR'],
     primitives: ['Card', 'Button', 'Badge'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'SURVEYED',
-    notes: '**로컬 원화 연습 장부가 남아 있다** — canonical PAPER가 아니다. '
-      + 'DECISION 참조. 이번 단계에서 바꾸지 않는다',
+    diagnostics: null, migration: 'LEGACY', audience: 'USER',
+    notes: '**로컬 원화 연습 장부가 남아 있다** — 정본 PAPER가 아니다. '
+      + '`trading-local-ledger` 결정 참조. 이번 단계에서 바꾸지 않는다',
   },
   {
-    id: 'terminal', label: '터미널', routeOrSurface: '/terminal',
-    purpose: '주문·호가·차트를 붙인 전문 화면',
-    primaryActions: ['주문', '호가 보기'],
-    environments: ['LIVE', 'TESTNET'],
-    states: ['LOADING', 'SUCCESS', 'ERROR'],
-    primitives: ['Card', 'Button'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: 'Inventory 완료 전에는 이관을 시작하지 않는다',
-  },
-  {
-    id: 'auto', label: '자동매매', routeOrSurface: 'tab:auto',
+    id: 'auto',
     purpose: 'AI가 대신 자동 거래',
     primaryActions: ['전략 켜기/끄기', '예약 등록', '지금 중지'],
     environments: ['LIVE', 'TESTNET', 'PAPER'],
     states: ['LOADING', 'EMPTY', 'SUCCESS', 'WARNING', 'ERROR', 'UNKNOWN'],
     primitives: ['Card', 'Badge', 'MoneyValue', 'PnlValue'],
-    diagnostics: '진단 탭', migration: 'PARTIAL', audience: 'USER', depth: 'SURVEYED',
+    diagnostics: '진단 탭', migration: 'PARTIAL', audience: 'USER',
     notes: '모의 잔고 카드만 표시 계층으로 옮겼다(구간 잠금 AUTOPAGE-PAPER-CARD). '
       + '나머지는 만원 단위 원화 표기 등 legacy',
   },
   {
-    id: 'paper', label: '모의매매', routeOrSurface: 'tab:paper',
+    id: 'paper',
     purpose: '가짜 돈으로 연습',
     primaryActions: ['모의투자 시작', '초기화'],
     environments: ['PAPER'],
     states: ['LOADING', 'EMPTY', 'SUCCESS', 'UNKNOWN', 'DISABLED'],
     primitives: ['Card', 'ValueRow', 'MoneyValue'],
-    diagnostics: null, migration: 'MIGRATED', audience: 'USER', depth: 'SURVEYED',
+    diagnostics: null, migration: 'MIGRATED', audience: 'USER',
     notes: 'MockAutoTrade가 이 화면의 본체. 표시 계층 전체 이관 완료(파일 잠금)',
   },
   {
-    id: 'strategies', label: '전략빌더', routeOrSurface: 'tab:strategies',
-    purpose: '나만의 매매 규칙 만들기',
-    primaryActions: ['전략 생성', '전략 저장'],
-    environments: ['NA'],
-    states: ['LOADING', 'EMPTY', 'SUCCESS', 'ERROR'],
-    primitives: ['Card', 'Button', 'Input'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '`my-original-v1` 원본 전략은 덮어쓰거나 삭제하지 않는다',
-  },
-  {
-    id: 'portfolio', label: '포트폴리오', routeOrSurface: 'tab:portfolio',
-    purpose: '내 자산 현황',
-    primaryActions: ['자산 열기'],
-    environments: ['LIVE', 'TESTNET'],
-    states: ['LOADING', 'EMPTY', 'SUCCESS', 'UNKNOWN'],
-    primitives: ['Card', 'MoneyValue'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '',
-  },
-  {
-    id: 'wallet', label: '지갑', routeOrSurface: 'tab:wallet',
+    id: 'wallet',
     purpose: '환경별 총자산·오늘 손익·모의계좌',
     primaryActions: ['환경 전환', '통화 전환', '모의투자 시작·충전'],
     environments: ['LIVE', 'TESTNET', 'PAPER'],
     states: ['LOADING', 'EMPTY', 'SUCCESS', 'WARNING', 'ERROR', 'UNKNOWN', 'DISABLED'],
     primitives: ['StatusCard', 'EnvBadge', 'Details', 'SafeNote', 'MoneyValue', 'PnlValue'],
     diagnostics: '각 상태 카드의 접히는 "진단 정보"',
-    migration: 'MIGRATED', audience: 'USER', depth: 'SURVEYED',
-    notes: '#213에서 이관 완료(main). **MENU에 없고 BTABS·MTABS에만 있다** — '
-      + '스캐너가 MENU만 읽었을 때 통째로 빠졌던 화면이다',
-  },
-  {
-    id: 'history', label: '실행기록', routeOrSurface: 'tab:history',
-    purpose: '자동매매 체결 내역',
-    primaryActions: ['기록 보기'],
-    environments: ['LIVE', 'TESTNET', 'PAPER'],
-    states: ['LOADING', 'EMPTY', 'SUCCESS', 'UNKNOWN'],
-    primitives: ['Card', 'ValueRow'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '',
-  },
-  {
-    id: 'backtest', label: '백테스트', routeOrSurface: 'tab:backtest',
-    purpose: '과거 데이터로 전략 검증',
-    primaryActions: ['백테스트 실행'],
-    environments: ['NA'],
-    states: ['LOADING', 'EMPTY', 'SUCCESS', 'ERROR'],
-    primitives: ['Card', 'Button'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '청산 규칙은 실전과 같은 `exitRules`를 쓴다',
-  },
-  {
-    id: 'alerts', label: '알림', routeOrSurface: 'tab:alerts',
-    purpose: '가격·체결 알림 설정',
-    primaryActions: ['알림 추가', '알림 끄기'],
-    environments: ['NA'],
-    states: ['LOADING', 'EMPTY', 'SUCCESS', 'ERROR'],
-    primitives: ['Card', 'Toast'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '',
-  },
-  {
-    id: 'diagnostics', label: 'API 진단', routeOrSurface: 'tab:diagnostics',
-    purpose: '연결 상태 점검',
-    primaryActions: ['점검 실행'],
-    environments: ['LIVE', 'TESTNET'],
-    states: ['LOADING', 'SUCCESS', 'WARNING', 'ERROR', 'UNKNOWN'],
-    primitives: ['Card', 'Badge'],
-    diagnostics: '화면 전체가 진단이다',
-    migration: 'LEGACY', audience: 'DIAGNOSTICS', depth: 'LISTED_ONLY',
-    notes: '',
-  },
-  {
-    id: 'ops', label: '운영', routeOrSurface: 'tab:ops',
-    purpose: '점검·배포·복구를 명령 하나로',
-    primaryActions: ['전체 점검', '배포', '복구'],
-    environments: ['LIVE', 'TESTNET'],
-    states: ['LOADING', 'SUCCESS', 'WARNING', 'ERROR', 'UNKNOWN'],
-    primitives: ['Card', 'Button'],
-    diagnostics: '단계별 결과 로그',
-    migration: 'LEGACY', audience: 'DIAGNOSTICS', depth: 'LISTED_ONLY',
-    notes: '사용자가 명령 하나로 부르는 자리 — 최상위 규칙의 "사용자는 명령만 한다"',
-  },
-  {
-    id: 'accounts', label: 'API 연결', routeOrSurface: 'tab:accounts',
-    purpose: '거래소 API 연결',
-    primaryActions: ['거래소 연결', '연결 해제'],
-    environments: ['LIVE', 'TESTNET'],
-    states: ['LOADING', 'EMPTY', 'SUCCESS', 'ERROR'],
-    primitives: ['Card', 'Button', 'Input', 'Toast'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '**키·시크릿 값은 화면에도 로그에도 남기지 않는다.** 지문만 비교한다',
-  },
-  {
-    id: 'settings', label: '설정', routeOrSurface: 'tab:settings',
-    purpose: '통화·언어·알림',
-    primaryActions: ['설정 변경'],
-    environments: ['NA'],
-    states: ['LOADING', 'SUCCESS'],
-    primitives: ['Card', 'SettingField'],
-    diagnostics: null, migration: 'LEGACY', audience: 'USER', depth: 'LISTED_ONLY',
-    notes: '',
-  },
-  {
-    id: 'admin', label: '관리자', routeOrSurface: '/admin',
-    purpose: '운영자 전용 관리',
-    primaryActions: ['사용자 관리'],
-    environments: ['NA'],
-    states: ['LOADING', 'SUCCESS', 'ERROR'],
-    primitives: ['Card'],
-    diagnostics: '화면 전체가 관리자용이다',
-    migration: 'LEGACY', audience: 'ADMIN', depth: 'LISTED_ONLY',
-    notes: '일반 사용자 화면 목록에 넣지 않는다',
+    migration: 'MIGRATED', audience: 'USER',
+    notes: '#213에서 이관 완료(main)',
   },
 ];
+
+// ── 둘을 붙인 것 ──
+//
+// 문서와 검사는 이 함수를 쓴다. **목록을 두 번 적지 않는다.**
+
+export interface ScreenRow extends ScreenIdentity {
+  survey: ScreenSurvey | null;
+  depth: SurveyDepth;
+}
+
+export function screenRows(): ScreenRow[] {
+  const byId = new Map(SCREEN_SURVEY.map(v => [v.id, v]));
+  return SCREEN_INDEX.map(i => {
+    const survey = byId.get(i.id) ?? null;
+    return { ...i, survey, depth: survey ? 'SURVEYED' : 'LISTED_ONLY' };
+  });
+}
 
 // ══ 네비게이션 ══
 //

@@ -22,9 +22,11 @@ const read = (p) => existsSync(p) ? readFileSync(p, 'utf8') : null;
 
 const inv = await loadInventory();
 const {
-  SCREENS, NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS,
+  NAVIGATION, PRIMITIVES, OVERLAYS, FEEDBACK, CONVERGENCE, SEMANTICS,
   ENVIRONMENTS, UI_STATES, MIGRATION_STATUSES, PRIMITIVE_STATUSES, UI_STATE_INVENTORY,
+  SCREEN_INDEX, SCREEN_SURVEY, SURFACE_SOURCES, screenRows,
 } = inv;
+const SCREENS = typeof screenRows === 'function' ? screenRows() : [];
 
 // ── ⓪ 타입 오류가 있었다면 먼저 말한다 ──
 //
@@ -39,6 +41,7 @@ if (inv.__tscWarnings) {
 //
 // 0개를 "화면이 없다"로 읽으면 이 검사는 영원히 초록이면서 아무것도
 // 안 보는 상태가 된다. **못 읽은 것을 통과로 적지 않는다.**
+if (!SCREEN_INDEX?.length) err('화면 목록(SCREEN_INDEX)이 비어 있습니다');
 if (!SCREENS?.length) err('화면 registry가 비어 있습니다');
 if (!PRIMITIVES?.length) err('primitive registry가 비어 있습니다');
 if (!SEMANTICS?.length) err('의미 구분 registry가 비어 있습니다');
@@ -54,7 +57,8 @@ const dup = (name, ids) => {
   const d = ids.filter((v, i) => ids.indexOf(v) !== i);
   if (d.length) err(`${name} id가 겹칩니다: ${[...new Set(d)].join(', ')}`);
 };
-dup('화면', SCREENS.map(s => s.id));
+dup('화면', SCREEN_INDEX.map(s => s.id));
+dup('화면 조사', SCREEN_SURVEY.map(s => s.id));
 dup('primitive', PRIMITIVES.map(p => p.id));
 dup('오버레이', OVERLAYS.map(o => o.id));
 dup('피드백', FEEDBACK.map(f => f.id));
@@ -63,21 +67,38 @@ dup('수렴', CONVERGENCE.map(c => c.id));
 dup('의미', SEMANTICS.map(s => s.id));
 
 // ── ③ 필수 칸 · 값 ──
-for (const s of SCREENS) {
-  for (const k of ['label', 'routeOrSurface', 'purpose']) {
+// identity에는 기계가 대조할 수 있는 것만 있다. **여기에 의미를 요구하지 않는다** —
+// 조사 안 한 화면에 목적·상태를 채우라고 하면, 사람은 지어내서 채운다.
+for (const s of SCREEN_INDEX) {
+  for (const k of ['label', 'routeOrSurface']) {
     if (!String(s[k] ?? '').trim()) err(`화면 ${s.id}: ${k}가 비어 있습니다`);
   }
-  if (!s.environments?.length) err(`화면 ${s.id}: environments가 비어 있습니다`);
-  if (!s.states?.length) err(`화면 ${s.id}: states가 비어 있습니다`);
-  for (const e of s.environments ?? []) {
-    if (!ENVIRONMENTS.includes(e)) err(`화면 ${s.id}: 모르는 환경 '${e}'`);
+  if (!s.sources?.length) err(`화면 ${s.id}: 어디서 갈 수 있는지(sources)가 비어 있습니다`);
+  for (const x of s.sources ?? []) {
+    if (!SURFACE_SOURCES.includes(x)) err(`화면 ${s.id}: 모르는 발견 위치 '${x}'`);
   }
-  for (const st of s.states ?? []) {
-    if (!UI_STATES.includes(st)) err(`화면 ${s.id}: 모르는 상태 '${st}'`);
+}
+
+// 의미는 **조사한 화면에만** 요구한다.
+{
+  const known = new Set(SCREEN_INDEX.map(s => s.id));
+  for (const v of SCREEN_SURVEY) {
+    if (!known.has(v.id)) {
+      err(`화면 조사 ${v.id}: 그런 화면이 목록(SCREEN_INDEX)에 없습니다`);
+      continue;
+    }
+    if (!String(v.purpose ?? '').trim()) err(`화면 조사 ${v.id}: purpose가 비어 있습니다`);
+    if (!v.environments?.length) err(`화면 조사 ${v.id}: environments가 비어 있습니다`);
+    if (!v.states?.length) err(`화면 조사 ${v.id}: states가 비어 있습니다`);
+    for (const e of v.environments ?? []) {
+      if (!ENVIRONMENTS.includes(e)) err(`화면 조사 ${v.id}: 모르는 환경 '${e}'`);
+    }
+    for (const st of v.states ?? []) {
+      if (!UI_STATES.includes(st)) err(`화면 조사 ${v.id}: 모르는 상태 '${st}'`);
+    }
+    if (!MIGRATION_STATUSES.includes(v.migration)) err(`화면 조사 ${v.id}: 모르는 이관 상태 '${v.migration}'`);
+    if (!['USER', 'DIAGNOSTICS', 'ADMIN'].includes(v.audience)) err(`화면 조사 ${v.id}: 모르는 대상 '${v.audience}'`);
   }
-  if (!MIGRATION_STATUSES.includes(s.migration)) err(`화면 ${s.id}: 모르는 이관 상태 '${s.migration}'`);
-  if (!['SURVEYED', 'LISTED_ONLY'].includes(s.depth)) err(`화면 ${s.id}: 모르는 깊이 '${s.depth}'`);
-  if (!['USER', 'DIAGNOSTICS', 'ADMIN'].includes(s.audience)) err(`화면 ${s.id}: 모르는 대상 '${s.audience}'`);
 }
 for (const p of PRIMITIVES) {
   if (!PRIMITIVE_STATUSES.includes(p.status)) err(`primitive ${p.id}: 모르는 상태 '${p.status}'`);
@@ -119,9 +140,9 @@ for (const p of PRIMITIVES) {
 // ── ④ 화면이 참조하는 primitive가 목록에 있는가 ──
 {
   const known = new Set(PRIMITIVES.map(p => p.id));
-  for (const s of SCREENS) {
-    for (const p of s.primitives ?? []) {
-      if (!known.has(p)) err(`화면 ${s.id}: 목록에 없는 primitive '${p}'`);
+  for (const v of SCREEN_SURVEY) {
+    for (const p of v.primitives ?? []) {
+      if (!known.has(p)) err(`화면 조사 ${v.id}: 목록에 없는 primitive '${p}'`);
     }
   }
 }
@@ -195,29 +216,67 @@ for (const c of CONVERGENCE) {
 
 // ── ⑦ 실제 화면과 대조 ──
 //
-// **의미는 추측하지 않는다.** 실제로 있는 화면을 찾아 registry에
-// 등록됐는지만 본다.
+// **발견하고도 통과시키지 않는다.**
+//
+// 예전에는 registry에 없는 화면을 찾으면 경고만 내고 성공했다. 그래서
+// 실제 66개 중 17개만 적힌 채로 CI가 초록이었고, **나머지 49개는
+// Inventory의 보호를 전혀 받지 못했다** — 이름이 바뀌어도 사라져도
+// 아무도 모른다. "적은 것만 목록에 있다"는 상태는 목록이 없는 것과 같다.
+//
+// 의미는 여전히 추측하지 않는다. **존재만 등록을 요구한다.**
+// 조사 안 한 화면은 이름만 있고 나머지는 `UNSURVEYED`로 남는다.
 {
   const page = read('src/app/page.tsx') ?? '';
+  if (!page) err('src/app/page.tsx를 읽지 못했습니다 — 대조할 것이 없으면 이 검사는 무의미합니다');
   const cases = [...page.matchAll(/case\s+'([^']+)'\s*:\s*return\s*<(\w+)/g)].map(m => m[1]);
-  const known = new Set(SCREENS.map(s => s.id));
-  const missing = [...new Set(cases)].filter(id => !known.has(id));
+  if (!cases.length) err('page.tsx에서 화면 분기를 하나도 못 찾았습니다 — 검사기가 고장 난 것입니다');
 
-  // 아직 등록 안 된 화면이 있는 것 자체는 실패가 아니다 — 57개를 한 번에
-  // 다 적지 않았다. 다만 **몇 개가 남았는지 눈에 보여야 한다.**
-  if (missing.length) {
-    warn(`registry에 아직 없는 화면 ${missing.length}개: ${missing.slice(0, 12).join(', ')}`
-      + (missing.length > 12 ? ` … 외 ${missing.length - 12}개` : ''));
-    warn('  → 의미(목적·상태·액션)는 사람이 inventory.ts에 적습니다. 기계가 지어내지 않습니다.');
+  // 실제 라우트도 화면이다. `src/app/**/page.tsx` 하나가 라우트 하나다.
+  const routes = [];
+  const walkRoutes = (dir, base) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        // 라우트 그룹 `(x)`와 동적 구간 `[x]`는 경로에 그대로 쓰지 않는다
+        if (e.name.startsWith('_')) continue;
+        walkRoutes(join(dir, e.name), `${base}/${e.name}`);
+      } else if (e.name === 'page.tsx' && base !== '') {
+        routes.push(base);
+      }
+    }
+  };
+  walkRoutes('src/app', '');
+
+  const indexed = new Set(SCREEN_INDEX.map(s => s.routeOrSurface));
+  const missingTabs = [...new Set(cases)].filter(id => !indexed.has(`tab:${id}`));
+  const missingRoutes = routes.filter(r => !indexed.has(r));
+
+  for (const id of missingTabs) {
+    err(`실제 화면 \`tab:${id}\`이 SCREEN_INDEX에 없습니다 — 목록 밖 화면은 아무 검사도 받지 못합니다`);
+  }
+  for (const r of missingRoutes) {
+    err(`실제 라우트 \`${r}\`이 SCREEN_INDEX에 없습니다`);
+  }
+  if (missingTabs.length || missingRoutes.length) {
+    console.error('   → id와 라벨만 SCREEN_INDEX에 적으면 됩니다. **의미는 지어내지 마세요** —');
+    console.error('     조사하지 않은 화면은 SCREEN_SURVEY에 넣지 않고 UNSURVEYED로 둡니다.');
   }
 
-  // 반대는 실패다: registry에 있는데 그릴 화면이 없으면 죽은 항목이다.
+  // 반대는 죽은 항목이다: registry에 있는데 그릴 화면이 없다.
   const surfaces = new Set(cases);
-  for (const s of SCREENS) {
-    if (!s.routeOrSurface.startsWith('tab:')) continue;
-    const id = s.routeOrSurface.slice(4);
-    if (!surfaces.has(id)) err(`화면 ${s.id}: \`tab:${id}\`를 그리는 분기가 page.tsx에 없습니다`);
+  const routeSet = new Set(routes);
+  for (const s of SCREEN_INDEX) {
+    if (s.routeOrSurface.startsWith('tab:')) {
+      const id = s.routeOrSurface.slice(4);
+      if (!surfaces.has(id)) err(`화면 ${s.id}: \`tab:${id}\`를 그리는 분기가 page.tsx에 없습니다`);
+    } else if (!routeSet.has(s.routeOrSurface)) {
+      err(`화면 ${s.id}: 라우트 \`${s.routeOrSurface}\`에 page.tsx가 없습니다`);
+    }
   }
+
+  console.log(`· 실제 surface ${cases.length ? new Set(cases).size : 0}개(탭) + ${routes.length}개(라우트)`
+    + ` — 목록에 없는 것 ${missingTabs.length + missingRoutes.length}개`);
 
   // 네비게이션 정의 위치가 실제로 있는가
   for (const n of NAVIGATION) {
@@ -232,7 +291,6 @@ for (const c of CONVERGENCE) {
   for (const p of [...PRIMITIVES, ...OVERLAYS, ...FEEDBACK]) {
     if (p.status === 'MISSING' || p.status === 'PROPOSED' || !p.file) continue;
     if (!read(p.file)) {
-      // #213처럼 아직 main에 없는 것은 실패가 아니다 — 메모에 적혀 있어야 한다.
       if (/#\d+/.test(p.notes ?? '')) {
         warn(`${p.id}: ${p.file}이 아직 없습니다 (메모: ${p.notes.slice(0, 40)}…)`);
       } else {
@@ -310,7 +368,9 @@ for (const c of CONVERGENCE) {
 
 if (bad === 0) {
   const open = CONVERGENCE.filter(c => c.decision === 'OPEN').length;
-  console.log(`✅ UI Inventory 일관 — 화면 ${SCREENS.length} · primitive ${PRIMITIVES.length}`
+  const surveyed = SCREENS.filter(s => s.depth === 'SURVEYED').length;
+  console.log(`✅ UI Inventory 일관 — 화면 ${SCREEN_INDEX.length}(조사 ${surveyed}`
+    + ` · 이름만 ${SCREEN_INDEX.length - surveyed}) · primitive ${PRIMITIVES.length}`
     + ` · 상태 재고 ${UI_STATE_INVENTORY.length} · 겹치는 층 ${OVERLAYS.length}`
     + ` · 의미 구분 ${SEMANTICS.length} · 아직 안 정한 것 ${open}`);
 } else {
