@@ -899,7 +899,16 @@ import { attributionOf, rowsWithResidual, topMoversOf } from '@/lib/portfolio/at
 import { timeWeightedReturn, moneyWeightedReturn, naiveCheck, pnlBreakdown } from '@/lib/portfolio/returns';
 import { getTodayPnL, checkRiskGuard, clearCooldown, resetTodayPnL } from '@/lib/risk/guard';
 import type { ExecutionLog } from '@/lib/autotrade/types';
+// **숫자와 '확인 불가'를 이 화면이 다시 정하지 않는다.** 같은 장부를 보는
+// 지갑 화면과 자릿수·부호·문구가 갈리면 사용자는 둘 다 못 믿는다.
+import { moneyText, pnlText, qtyText, UNKNOWN_LABEL } from '@/lib/ui/display';
 import { Wallet, ListChecks, Trash2, RefreshCw, AlertCircle, CheckCircle2, MinusCircle, Ban, Clock, BarChart3, TrendingUp as TrendingUpIc, TrendingDown as TrendingDownIc } from 'lucide-react';
+
+/** 모의 장부 금액 한 칸. **못 읽은 것은 0이 아니다** */
+const paperMoney = (v: any): string => {
+  const m = moneyText(v, 'USDT');
+  return m.known ? m.text : UNKNOWN_LABEL;
+};
 
 function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a: any, dest?: string) => void; currency?: string } = {}) {
   const [logs, setLogs]    = useState<ExecutionLog[]>([]);
@@ -1267,25 +1276,33 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
           <div style={{background:T.alt,padding:'8px 10px',borderRadius:8,border:`1px solid ${T.border}`}}>
             <div style={{color:T.muted,fontSize:9,marginBottom:2}}>현금</div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {paper.cash==null?'확인 불가':paper.cash.toLocaleString('ko-KR',{maximumFractionDigits:2})}
+              {paperMoney(paper.cash)}
             </div>
           </div>
           <div style={{background:T.alt,padding:'8px 10px',borderRadius:8,border:`1px solid ${T.border}`}}>
             <div style={{color:T.muted,fontSize:9,marginBottom:2}}>보유 {positionCount}개 · 증거금</div>
             <div style={{color:T.txt,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {paper.usedMargin==null?'확인 불가':paper.usedMargin.toLocaleString('ko-KR',{maximumFractionDigits:2})}
+              {paperMoney(paper.usedMargin)}
             </div>
           </div>
-          <div style={{background:(paper.realizedPnl??0)>=0?A(T.grn,'15'):A(T.red,'15'),padding:'8px 10px',borderRadius:8,border:`1px solid ${(paper.realizedPnl??0)>=0?T.grn:T.red}40`}}>
-            <div style={{color:(paper.realizedPnl??0)>=0?T.grn:T.red,fontSize:9,marginBottom:2}}>실현손익</div>
-            <div style={{color:(paper.realizedPnl??0)>=0?T.grn:T.red,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {paper.realizedPnl==null?'확인 불가':`${paper.realizedPnl>=0?'+':''}${paper.realizedPnl.toLocaleString('ko-KR',{maximumFractionDigits:2})}`}
-            </div>
-          </div>
+          {/* **모르는 손익을 초록으로 그리지 않는다.** 예전에는 `?? 0`이라
+              실현손익을 못 읽으면 0으로 읽혀 이익인 것처럼 초록 박스가 떴다. */}
+          {(() => {
+            const r = pnlText(paper.realizedPnl, 'USDT');
+            const c = r.tone === 'good' ? T.grn : r.tone === 'bad' ? T.red : T.muted;
+            return (
+              <div style={{background:A(c,'15'),padding:'8px 10px',borderRadius:8,border:`1px solid ${c}40`}}>
+                <div style={{color:c,fontSize:9,marginBottom:2}}>실현손익</div>
+                <div style={{color:c,fontWeight:800,fontSize:13,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+                  {r.known ? r.text : UNKNOWN_LABEL}
+                </div>
+              </div>
+            );
+          })()}
         </div>
         {positionCount > 0 && (
           <div style={{marginTop:8,fontSize:10,color:T.muted}}>
-            보유: {paper.positions.map(p => `${p.symbol??'?'} ${p.quantity==null?'?':p.quantity.toFixed(6)}`).join(', ')}
+            보유: {paper.positions.map(p => `${p.symbol ?? UNKNOWN_LABEL} ${qtyText(p.quantity).text}`).join(' · ')}
           </div>
         )}
         {/* 이 화면은 실현손익만 보여 준다. 총자산·오늘 손익·자산곡선은

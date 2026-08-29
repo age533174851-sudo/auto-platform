@@ -36,9 +36,9 @@ import { legacyLocalPaper, LEGACY_PAPER_KEYS } from '@/lib/portfolio/legacyPaper
 // **문장을 여기서 새로 짓지 않는다.** '상시 실행인가'의 표현은 한 곳에
 // 있고, 다른 화면도 같은 문장을 쓴다.
 import { DURABILITY_NOTE } from '@/lib/runtime/persistentRuntime';
-
-const num = (v: number | null, digits = 2) =>
-  v == null ? '확인 불가' : v.toLocaleString('ko-KR', { maximumFractionDigits: digits });
+// **숫자를 여기서 다시 포맷하지 않는다.** 자릿수·부호·'확인 불가'를 화면이
+// 각자 정하면 지갑과 자동매매가 같은 값을 다르게 적는다 — 실제로 그랬다.
+import { moneyText, pnlText, qtyText, shownValue, UNKNOWN_LABEL, type Tone } from '@/lib/ui/display';
 
 export default function MockAutoTrade() {
   const [auth, setAuth] = useState<string | null>(null);
@@ -133,7 +133,11 @@ export default function MockAutoTrade() {
       <span style={{ marginLeft: 'auto', color: tone || T.txt, fontSize: 12, fontWeight: 800, ...numFont }}>{value}</span>
     </div>
   );
-  const signed = (v: number | null) => v == null ? T.muted : v > 0 ? T.grn : v < 0 ? T.red : T.txt;
+  // 색은 화면의 몫이고, **어느 색인지의 판단**은 display.ts의 몫이다.
+  const color = (t: Tone) => t === 'good' ? T.grn : t === 'bad' ? T.red : t === 'warn' ? T.ylw : T.muted;
+  /** 손익 한 칸: 값과 색이 같은 곳에서 나온다 */
+  const pnl = (v: any) => { const s = pnlText(v, 'USDT'); return { text: s.known ? s.text : UNKNOWN_LABEL, color: color(s.tone) }; };
+  const money = (v: any) => { const s = moneyText(v, 'USDT'); return s.known ? s.text : UNKNOWN_LABEL; };
 
   return (
     <div>
@@ -187,7 +191,7 @@ export default function MockAutoTrade() {
                       cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.5 : 1,
                       background: 'transparent', color: T.txt, border: `1px solid ${T.border}`,
                       fontSize: 11.5, fontWeight: 800, ...numFont,
-                    }}>{v.toLocaleString('ko-KR')} USDT</button>
+                    }}>{moneyText(v, 'USDT').text}</button>
                   ))}
                 </div>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -214,12 +218,12 @@ export default function MockAutoTrade() {
 
         {view.code === 'READY' && (
           <>
-            <Row label="총자산" value={view.totalEquity == null ? '확인 불가' : `${num(view.totalEquity)} USDT`} />
-            <Row label="현금" value={view.cash == null ? '확인 불가' : `${num(view.cash)} USDT`} />
-            <Row label="포지션 증거금" value={view.usedMargin == null ? '확인 불가' : `${num(view.usedMargin)} USDT`} />
-            <Row label="미실현손익" value={view.unrealizedPnl == null ? '확인 불가' : `${num(view.unrealizedPnl)} USDT`} tone={signed(view.unrealizedPnl)} />
-            <Row label="실현손익" value={view.realizedPnl == null ? '확인 불가' : `${num(view.realizedPnl)} USDT`} tone={signed(view.realizedPnl)} />
-            <Row label="오늘 손익" value={view.todayPnl == null ? '확인 불가' : `${num(view.todayPnl)} USDT`} tone={signed(view.todayPnl)} />
+            <Row label="총자산" value={money(view.totalEquity)} />
+            <Row label="현금" value={money(view.cash)} />
+            <Row label="포지션 증거금" value={money(view.usedMargin)} />
+            <Row label="미실현손익" value={pnl(view.unrealizedPnl).text} tone={pnl(view.unrealizedPnl).color} />
+            <Row label="실현손익" value={pnl(view.realizedPnl).text} tone={pnl(view.realizedPnl).color} />
+            <Row label="오늘 손익" value={pnl(view.todayPnl).text} tone={pnl(view.todayPnl).color} />
             {view.note && <div style={{ ...muted, marginTop: 8, color: T.ylw }}>{view.note}</div>}
           </>
         )}
@@ -241,12 +245,12 @@ export default function MockAutoTrade() {
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                 <span style={{ color: T.txt, fontSize: 11.5, fontWeight: 800 }}>{p.symbol}</span>
                 <span style={{ color: p.side === 'LONG' ? T.grn : T.red, fontSize: 10, fontWeight: 800 }}>{p.side}</span>
-                <span style={{ marginLeft: 'auto', color: signed(p.unrealizedPnl), fontSize: 11.5, fontWeight: 800, ...numFont }}>
-                  {p.unrealizedPnl == null ? '확인 불가' : `${num(p.unrealizedPnl)} USDT`}
+                <span style={{ marginLeft: 'auto', color: pnl(p.unrealizedPnl).color, fontSize: 11.5, fontWeight: 800, ...numFont }}>
+                  {pnl(p.unrealizedPnl).text}
                 </span>
               </div>
               <div style={{ ...muted, marginTop: 2 }}>
-                수량 {num(p.quantity, 8)} · 진입 {num(p.entryPrice)} · 현재 {p.markPrice == null ? '확인 불가' : num(p.markPrice)}
+                수량 {qtyText(p.quantity).text} · 진입 {shownValue(p.entryPrice, 'price').text} · 현재 {shownValue(p.markPrice, 'price').text}
               </div>
             </div>
           ))}
@@ -260,8 +264,8 @@ export default function MockAutoTrade() {
             <div key={h?.id ?? i} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '6px 0', borderBottom: `1px solid ${T.border}` }}>
               <span style={{ color: T.txt, fontSize: 11 }}>{h?.symbol}</span>
               <span style={{ ...muted }}>{h?.closedAt ? new Date(h.closedAt).toLocaleString('ko-KR') : ''}</span>
-              <span style={{ marginLeft: 'auto', color: signed(Number(h?.realizedPnl)), fontSize: 11, fontWeight: 800, ...numFont }}>
-                {h?.realizedPnl == null ? '확인 불가' : `${num(Number(h.realizedPnl))} USDT`}
+              <span style={{ marginLeft: 'auto', color: pnl(h?.realizedPnl).color, fontSize: 11, fontWeight: 800, ...numFont }}>
+                {pnl(h?.realizedPnl).text}
               </span>
             </div>
           ))}

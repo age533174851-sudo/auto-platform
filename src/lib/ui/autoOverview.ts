@@ -69,8 +69,9 @@ export const ENV_LABEL: Record<RunEnv, string> = {
   MOCK: 'MOCK', TESTNET: 'TESTNET', LIVE: 'LIVE',
 };
 
-/** 화면이 색으로 옮길 의미. 이 파일은 색을 모른다 */
-export type Tone = 'good' | 'warn' | 'bad' | 'muted' | 'live';
+/** 화면이 색으로 옮길 의미. 이 파일은 색을 모른다 — **정의는 display.ts 하나뿐이다** */
+export type { Tone } from './display';
+import type { Tone } from './display';
 
 export const ENV_TONE: Record<RunEnv, Tone> = {
   MOCK: 'muted', TESTNET: 'warn', LIVE: 'live',
