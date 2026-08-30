@@ -6,6 +6,7 @@
 // ─────────────────────────────────────────────────────────────
 import { createHmac } from 'crypto';
 import { parseLossless, venueIdOf } from './losslessJson';
+import { qtyGridFor, type SymbolFilters } from './quantize';
 
 const FUTURES_BASE         = 'https://fapi.binance.com';
 const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
@@ -389,8 +390,10 @@ export async function closePositionPercent(
     }
 
     const filters = await getSymbolFilters(sym, testnet);
+    // 청산은 시장가로 나간다 — 시장가 격자를 쓴다. 없으면 격자 없이 간다.
+    const grid = qtyGridFor(filters, 'MARKET');
     const calc = closeQuantityFor(
-      pos.amount, percent, filters?.stepSize ?? 0, filters?.minQty ?? 0);
+      pos.amount, percent, grid?.stepSize ?? 0, grid?.minQty ?? 0);
     if (calc.qty <= 0) {
       return { success: false, closedQty: 0, fullClose: false, message: calc.reason };
     }
@@ -969,9 +972,27 @@ export async function testFuturesConnection(key: string, secret: string, testnet
 
 // ─── LOT_SIZE / 수량 정밀도 처리 ──────────────────────────────
 // 거래소 심볼별 최소 수량/스텝 캐시 (5분)
-const _lotCache: Record<string, { stepSize: number; minQty: number; tickSize: number; at: number }> = {};
+const _lotCache: Record<string, SymbolFilters & { at: number }> = {};
 
-export async function getSymbolFilters(symbol: string, testnet = true): Promise<{ stepSize: number; minQty: number; tickSize: number } | null> {
+/** 시험에서만 쓴다. 규격은 5분 캐시라 앞 시험의 값이 다음 시험에 남는다 */
+export function __clearFiltersCache() {
+  for (const k of Object.keys(_lotCache)) delete _lotCache[k];
+}
+
+/**
+ * 이 심볼의 주문 규격.
+ *
+ * **주문유형마다 수량 규칙이 다르다.** 바이낸스 USDⓈ-M은 지정가에
+ * `LOT_SIZE`, 시장가에 `MARKET_LOT_SIZE`를 따로 준다. 예전에는 `LOT_SIZE`만
+ * 읽어서, 시장가 주문도 지정가 격자로 깎고 있었다.
+ *
+ * `MIN_NOTIONAL`도 읽지 않고 있었다. 그래서 최소 주문 금액 검사는 코드에
+ * 자리만 있고 **한 번도 실행된 적이 없었다** — 그 공백을 화면의 상수
+ * 20 USDT가 메우고 있었는데, 그건 어느 종목의 값도 아니다.
+ *
+ * 없는 필터는 null로 둔다. 다른 필터를 복사해 채우지 않는다.
+ */
+export async function getSymbolFilters(symbol: string, testnet = true): Promise<SymbolFilters | null> {
   const sym = symbol.toUpperCase().replace('/', '');
   // ── 캐시 열쇠에 **호스트**를 넣는다 ──
   //
@@ -988,8 +1009,11 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     const data = parseLossless(await r.text());
     const s = (data.symbols || []).find((x: any) => x.symbol === sym);
     if (!s) return null;
-    const lot = (s.filters || []).find((f: any) => f.filterType === 'LOT_SIZE');
-    const priceF = (s.filters || []).find((f: any) => f.filterType === 'PRICE_FILTER');
+    const fl = (s.filters || []) as any[];
+    const lot = fl.find((f: any) => f.filterType === 'LOT_SIZE');
+    const mktLot = fl.find((f: any) => f.filterType === 'MARKET_LOT_SIZE');
+    const priceF = fl.find((f: any) => f.filterType === 'PRICE_FILTER');
+    const notionalF = fl.find((f: any) => f.filterType === 'MIN_NOTIONAL');
 
     // ── **못 읽으면 만들어내지 않는다** ──
     //
@@ -1001,20 +1025,43 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     // quantize.ts의 원칙이 이미 그렇게 적혀 있다("못 읽으면 그대로
     // 보내고 거래소가 판단하게 둔다"). 여기서 기본값을 채우는 바람에
     // 그 경로가 한 번도 안 돌았다.
-    const step = parseFloat(lot?.stepSize ?? '');
-    const min = parseFloat(lot?.minQty ?? '');
+    //
+    // ── 값을 추론하지 않는다 ──
+    //
+    // 예전에는 `minQty`가 없으면 `stepSize`를 대신 넣었다. "한 칸이 최소"
+    // 라는 추론인데, 바이낸스에서 **둘은 서로 다른 규칙**이다:
+    //
+    //   minQty    허용되는 최소 수량
+    //   stepSize  수량이 움직일 수 있는 단위
+    //
+    // 최소가 0.01인데 단위가 0.001인 종목에서 그 추론은 최소를 열 배
+    // 낮춰 잡는다 — 거래소가 거절할 주문을 우리가 통과시킨다.
+    //
+    // 그리고 **다른 필터를 가져다 채우지도 않는다.** `MARKET_LOT_SIZE`가
+    // 없는데 `LOT_SIZE`를 복사하면 거래소가 두지 않은 규칙을 만드는 것이다.
+    //
+    // 필요한 값이 하나라도 없으면 그 격자는 null이다. 부르는 쪽이
+    // "이 주문유형의 수량 규격을 모른다"로 읽는다.
+    const gridOf = (f: any) => {
+      const st = parseFloat(f?.stepSize ?? '');
+      const mn = parseFloat(f?.minQty ?? '');
+      if (!Number.isFinite(st) || st <= 0) return null;
+      if (!Number.isFinite(mn) || mn <= 0) return null;
+      return { stepSize: st, minQty: mn };
+    };
+    const limitQty = gridOf(lot);
+    const marketQty = gridOf(mktLot);
     const tick = parseFloat(priceF?.tickSize ?? '');
-    if (!Number.isFinite(step) || step <= 0) return null;
+    // 지정가 격자와 호가 단위는 이 심볼이 거래 가능하다는 최소 근거다.
+    // 둘 중 하나라도 없으면 규격을 읽은 것으로 치지 않는다.
+    if (!limitQty) return null;
     if (!Number.isFinite(tick) || tick <= 0) return null;
 
-    const result = {
-      stepSize: step,
-      // minQty만 없으면 stepSize로 대신한다 — 한 칸이 최소라는 뜻이고,
-      // 이건 지어낸 값이 아니라 같은 응답에서 나온 값이다.
-      minQty: Number.isFinite(min) && min > 0 ? min : step,
-      tickSize: tick,
-      at: Date.now(),
-    };
+    // MIN_NOTIONAL은 `notional` 필드다. 없으면 null — 5나 20을 지어내지 않는다.
+    const notionalRaw = parseFloat(notionalF?.notional ?? '');
+    const minNotional = Number.isFinite(notionalRaw) && notionalRaw > 0 ? notionalRaw : null;
+
+    const result = { limitQty, marketQty, tickSize: tick, minNotional, at: Date.now() };
     _lotCache[cacheKey] = result;
     return result;
   } catch { return null; }
@@ -1036,7 +1083,7 @@ export function roundToTick(price: number, tickSize: number): number {
   return parseFloat(rounded.toFixed(decimals));
 }
 
-// LOT_SIZE 적용된 안전 주문 (권장)
+// 주문유형별 수량 격자를 적용한 안전 주문 (권장)
 export async function placeFuturesOrderSafe(
   key: string, secret: string,
   opts: { symbol: string; side: 'BUY' | 'SELL'; type: 'MARKET' | 'LIMIT'; quantity: number; price?: number; reduceOnly?: boolean },
@@ -1045,13 +1092,15 @@ export async function placeFuturesOrderSafe(
   const filters = await getSymbolFilters(opts.symbol, testnet);
   let qty = opts.quantity;
   let price = opts.price;
-  if (filters) {
-    qty = roundToStep(opts.quantity, filters.stepSize);
-    if (qty < filters.minQty) {
-      return { success: false, message: `주문 수량(${qty})이 최소 수량(${filters.minQty}) 미만입니다. 주문 금액을 늘리세요.` };
+  // 시장가와 지정가는 격자가 다르다 — 유형에 맞는 것을 쓴다.
+  const grid = qtyGridFor(filters, opts.type);
+  if (grid?.stepSize) {
+    qty = roundToStep(opts.quantity, grid.stepSize);
+    if (grid.minQty != null && qty < grid.minQty) {
+      return { success: false, message: `주문 수량(${qty})이 최소 수량(${grid.minQty}) 미만입니다. 주문 금액을 늘리세요.` };
     }
-    if (price != null) price = roundToTick(price, filters.tickSize);
   }
+  if (price != null && filters?.tickSize) price = roundToTick(price, filters.tickSize);
   return placeFuturesOrder(key, secret, { ...opts, quantity: qty, price }, testnet);
 }
 

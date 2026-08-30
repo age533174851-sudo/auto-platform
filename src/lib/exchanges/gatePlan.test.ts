@@ -349,10 +349,15 @@ export function runGatePlanTests() {
 
   test('배수가 수량 단위가 되고, 최소 계약 수는 기초자산으로 환산된다', () => {
     const f = gateFiltersOf(BTC);
-    eq(f!.stepSize, 0.0001);
-    eq(f!.minQty, 0.0001);
+    // Gate는 주문유형에 따라 계약 단위가 달라지지 않는다 — 두 격자가 같다.
+    eq(f!.limitQty!.stepSize, 0.0001);
+    eq(f!.limitQty!.minQty, 0.0001);
+    eq(f!.marketQty!.stepSize, 0.0001);
+    eq(f!.marketQty!.minQty, 0.0001);
+    // **Gate 선물에는 고정 최소 명목가가 없다.** 지어내지 않는다.
+    eq(f!.minNotional, null);
     eq(f!.tickSize, 0.1);
-    eq(gateFiltersOf({ ...BTC, orderSizeMin: 10 })!.minQty, 0.001);
+    eq(gateFiltersOf({ ...BTC, orderSizeMin: 10 })!.limitQty!.minQty, 0.001);
   });
 
   test('배수를 모르면 규격도 null이다 — 지어내지 않는다', () => {

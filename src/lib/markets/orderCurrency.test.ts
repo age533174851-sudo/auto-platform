@@ -73,17 +73,14 @@ export function runOrderCurrencyTests() {
     }
   });
 
-  test('최소 명목가 미만이면 막는다 — 뜻은 C4까지 그대로 보존', () => {
-    const p = planExchangeOrder({ amountUsdt: 19, nativePrice: 2500, leverage: 10, minNotionalUsdt: 20 });
-    eq(p.kind, 'BLOCKED');
-    if (p.kind === 'BLOCKED') {
-      eq(p.code, 'BELOW_MIN_NOTIONAL');
-      assert(!/원/.test(p.reason), '원화 환산 문구를 넣지 않는다');
+  test('**화면은 최소 주문 금액으로 막지 않는다** — 정본은 거래소 필터다', () => {
+    // 예전에는 상수 20 USDT로 여기서 막았다. 그 값은 어느 종목의 규칙도
+    // 아니라, 최소가 더 작은 종목에서는 거래소가 받을 주문을 화면이 먼저
+    // 거절했다. 이제 계산만 하고 판정은 서버가 한다.
+    for (const amt of [1, 5, 19, 19.99]) {
+      const p = planExchangeOrder({ amountUsdt: amt, nativePrice: 2500, leverage: 10 });
+      eq(p.kind, 'READY');
     }
-  });
-
-  test('최소값을 안 주면 그 검사는 하지 않는다', () => {
-    eq(planExchangeOrder({ amountUsdt: 1, nativePrice: 2500, leverage: 10 }).kind, 'READY');
   });
 
   // ── 통화가 바뀌면 숫자의 뜻도 바뀐다 ──

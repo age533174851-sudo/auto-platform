@@ -33,10 +33,10 @@
 // 않는다. 응답을 못 받았으면 **재시도하지 않는다** — 다시 보내는 것은
 // 중복 체결이고, 그건 실패보다 나쁘다.
 
-import { quantizeOrder } from './quantize';
+import { quantizeOrder, type QuantizeCode } from './quantize';
 import {
   futuresExchangeOf, futuresExchangeName, futuresPositionRisk,
-  futuresSetLeverage, futuresSymbolFilters, futuresClosePosition,
+  futuresSetLeverage, futuresSymbolFilters, futuresMarkPrice, futuresClosePosition,
   futuresPositionMode,
   type FuturesExchange,
 } from './futuresAdapter';
@@ -372,6 +372,8 @@ export interface SizingResult {
   applied: boolean;
   /** 사람이 읽는 한 줄. 값이 바뀌었으면 반드시 여기 적힌다 */
   note: string;
+  /** 왜 막혔는가. 통과했으면 null */
+  code?: QuantizeCode | null;
 }
 
 /**
@@ -385,12 +387,25 @@ export interface SizingResult {
  */
 export async function futuresSizeOrder(
   t: ExecTarget, symbol: string, quantity: number, price?: number | null,
+  opts?: { orderType?: 'MARKET' | 'LIMIT' | null; reduceOnly?: boolean | null },
 ): Promise<SizingResult> {
   const filters = await futuresSymbolFilters(t.exchange, symbol, t.testnet).catch(() => null);
-  const q = quantizeOrder(quantity, price ?? null, filters);
+  const orderType = opts?.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET';
+  const reduceOnly = !!opts?.reduceOnly;
+  // ── 시장가 최소 명목가는 **서버가 읽은 마크가**로 검사한다 ──
+  //
+  // 화면이 보낸 값을 쓰면 검사가 검사 대상에게 값을 물어보는 꼴이 된다.
+  // 최소 명목가 규칙이 없거나 청산이면 읽을 이유도 없다.
+  let marketReferencePrice: number | null = null;
+  if (!reduceOnly && orderType === 'MARKET' && (Number(filters?.minNotional) > 0)) {
+    marketReferencePrice = await futuresMarkPrice(t.exchange, symbol, t.testnet).catch(() => null);
+  }
+  const q = quantizeOrder(quantity, price ?? null, filters, {
+    orderType, reduceOnly, marketReferencePrice,
+  });
   if (!q.ok || q.quantity == null) {
     return { ok: false, baseQty: null, gateSize: null, price: q.price,
-      applied: q.applied, note: q.reason };
+      applied: q.applied, note: q.reason, code: q.code };
   }
 
   if (t.exchange !== 'gate') {
@@ -514,7 +529,9 @@ export async function futuresPlaceOrder(
   }
 
   // 3) 수량 규격
-  const sized = await futuresSizeOrder(t, input.symbol, qty, input.price);
+  const sized = await futuresSizeOrder(t, input.symbol, qty, input.price, {
+    orderType: input.type, reduceOnly: input.reduceOnly,
+  });
   if (sized.note) notes.push(sized.note);
   if (!sized.ok || sized.baseQty == null) {
     return fail('REJECTED', sized.note || '수량을 거래소 규격에 맞추지 못했습니다', notes, cid);

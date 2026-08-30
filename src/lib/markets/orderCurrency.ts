@@ -97,9 +97,7 @@ export type ExecBlockCode =
   /** 지정가인데 가격이 없다. 시장가로 바꿔 보내지 않는다 */
   | 'LIMIT_PRICE_REQUIRED'
   /** 서버가 받지 않는 유형이다 */
-  | 'UNSUPPORTED_ORDER_TYPE'
-  /** 화면이 아는 최소 명목가 미만 (정본은 서버 필터 — C4에서 옮긴다) */
-  | 'BELOW_MIN_NOTIONAL';
+  | 'UNSUPPORTED_ORDER_TYPE';
 
 export type ExchangeOrderPlan =
   | {
@@ -132,8 +130,6 @@ export function planExchangeOrder(i: {
   /** 거래소 원본 가격 (USDT). 못 읽었으면 null */
   nativePrice: number | null | undefined;
   leverage: number | null | undefined;
-  /** 화면이 아는 최소 명목가. 정본은 서버 필터다 */
-  minNotionalUsdt?: number | null;
   /** 사용자가 고른 주문유형. 안 주면 시장가 */
   orderType?: string | null;
   /** 지정가 주문의 가격 (USDT) */
@@ -157,13 +153,15 @@ export function planExchangeOrder(i: {
     return { kind: 'BLOCKED', code: sized.code, reason: sized.reason };
   }
   const px = sized.price;
-  const min = Number(i.minNotionalUsdt);
-  if (Number.isFinite(min) && min > 0 && amount < min) {
-    return {
-      kind: 'BLOCKED', code: 'BELOW_MIN_NOTIONAL',
-      reason: `현재 클라이언트 기준 최소 주문금액 ${min} USDT 미만입니다 (적은 값 ${amount} USDT)`,
-    };
-  }
+  // ── 최소 주문 금액은 여기서 판단하지 않는다 ──
+  //
+  // 예전에는 화면 상수 20 USDT로 막았다. 그 값은 어느 종목의 규칙도 아니라
+  // 두 방향으로 틀렸다: 최소가 그보다 작은 종목에서는 **거래소가 받을
+  // 주문을 화면이 먼저 거절**했고, 큰 종목에서는 통과시켜 배율만 바뀐 채
+  // 거래소가 거절하게 했다.
+  //
+  // 정본은 거래소 필터이고 서버 `quantizeOrder`가 강제한다. 화면은 계산과
+  // 안내까지만 하고, 거절 사유는 서버가 준 문구를 그대로 보여 준다.
   // 명목가·수량·증거금의 뜻은 `convertQuantity` 한 곳에서 온다.
   const c = convertQuantity({
     mode: 'QUOTE_NOTIONAL', value: amount, price: px, leverage: i.leverage ?? null,

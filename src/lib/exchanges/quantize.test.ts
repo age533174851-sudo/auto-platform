@@ -1,5 +1,24 @@
 import { test, eq, assert } from '../../test/harness';
-import { quantizeOrder, floorToStep, roundToTick, decimalsOf } from './quantize';
+import {
+  quantizeOrder, floorToStep, roundToTick, decimalsOf, qtyGridFor,
+  type SymbolFilters,
+} from './quantize';
+
+/**
+ * 옛 한 벌짜리 규격을 새 모양으로 적는다.
+ *
+ * 두 격자에 같은 값을 넣는 것은 "주문유형과 무관한 규격"이라는 뜻이고,
+ * 아래 주문유형 시험들은 **일부러 두 값을 다르게** 준다.
+ */
+const flat = (f: {
+  stepSize?: number | null; minQty?: number | null;
+  tickSize?: number | null; minNotional?: number | null;
+}): SymbolFilters => ({
+  limitQty: { stepSize: f.stepSize ?? null, minQty: f.minQty ?? null },
+  marketQty: { stepSize: f.stepSize ?? null, minQty: f.minQty ?? null },
+  tickSize: f.tickSize ?? null,
+  minNotional: f.minNotional ?? null,
+});
 
 export function runQuantizeTests() {
   console.log('[수량 단위 — [-1111] Precision is over the maximum]');
@@ -7,7 +26,7 @@ export function runQuantizeTests() {
   // ── 실제로 났던 거부 ────────────────────────────────────
   test('0.09906 BTC는 0.099로 내려간다', () => {
     // 비율 버튼이 만든 값이 그대로 나가서 거래소가 -1111로 거부했다.
-    const r = quantizeOrder(0.09906, null, { stepSize: 0.001, minQty: 0.001 });
+    const r = quantizeOrder(0.09906, null, flat({ stepSize: 0.001, minQty: 0.001 }));
     eq(r.ok, true);
     eq(r.quantity, 0.099);
     eq(r.changed, true);
@@ -16,7 +35,7 @@ export function runQuantizeTests() {
   test('바뀌었으면 반드시 말한다', () => {
     // 말없이 크기를 줄이면 "100%를 눌렀는데 왜 잔고가 남지"가 설명
     // 안 되는 상태로 남는다.
-    const r = quantizeOrder(0.09906, null, { stepSize: 0.001 });
+    const r = quantizeOrder(0.09906, null, flat({ stepSize: 0.001 }));
     assert(r.reason.includes('0.09906'), r.reason);
     assert(r.reason.includes('0.099'), r.reason);
   });
@@ -59,70 +78,169 @@ export function runQuantizeTests() {
   });
 
   test('지정가 주문에서 가격도 맞춘다', () => {
-    const r = quantizeOrder(1, 63093.05, { stepSize: 0.001, tickSize: 0.1 });
+    const r = quantizeOrder(1, 63093.05, flat({ stepSize: 0.001, tickSize: 0.1 }));
     eq(r.price, 63093.1);
     eq(r.changed, true);
   });
 
-  // ── 규격을 못 읽었을 때 ─────────────────────────────────
-  test('규격을 못 읽으면 그대로 보낸다 — 기본값을 지어내지 않는다', () => {
-    // 종목마다 단위가 다르다. 틀린 기본값으로 반올림하면 **맞는 수량을
-    // 틀린 수량으로 바꾼다.** 거부당하는 것보다 나쁘다.
+  // ── 규격을 못 읽었을 때: **신규 진입과 청산이 다르다** ──
+  //
+  // 예전에는 둘 다 그대로 보냈다. 규격을 모르는 채로 새 포지션을 여는 것은
+  // 거부당하는 것보다 나쁘다 — 실제 돈이 나간다. 반대로 청산까지 막으면
+  // 포지션에서 빠져나갈 길이 없어진다.
+  test('규격을 못 읽으면 신규 진입은 막는다', () => {
     const r = quantizeOrder(0.09906, null, null);
-    eq(r.ok, true);
-    eq(r.quantity, 0.09906);
-    eq(r.applied, false);
+    eq(r.ok, false);
+    eq(r.code, 'FILTERS_UNKNOWN');
+    eq(r.quantity, null);
     assert(r.reason.includes('읽지 못'), r.reason);
   });
 
+  test('**규격을 못 읽어도 청산은 보낸다** — 못 닫는 것이 더 위험하다', () => {
+    const r = quantizeOrder(0.09906, null, null, { reduceOnly: true });
+    eq(r.ok, true);
+    eq(r.quantity, 0.09906);     // 기본값으로 반올림하지 않는다
+    eq(r.applied, false);
+    eq(r.code, null);
+    assert(r.reason.includes('청산'), r.reason);
+  });
+
   test('규격을 적용했는지 구분해서 돌려준다', () => {
-    eq(quantizeOrder(1, null, { stepSize: 0.001 }).applied, true);
-    eq(quantizeOrder(1, null, null).applied, false);
+    eq(quantizeOrder(1, null, flat({ stepSize: 0.001 })).applied, true);
+    eq(quantizeOrder(1, null, null, { reduceOnly: true }).applied, false);
   });
 
   // ── 최소값 ──────────────────────────────────────────────
   test('내림했더니 0이면 주문하지 않는다', () => {
-    const r = quantizeOrder(0.0005, null, { stepSize: 0.001 });
+    const r = quantizeOrder(0.0005, null, flat({ stepSize: 0.001 }));
     eq(r.ok, false);
     eq(r.quantity, null);
     assert(r.reason.includes('최소 단위'), r.reason);
   });
 
   test('최소 수량보다 적으면 막는다', () => {
-    const r = quantizeOrder(0.002, null, { stepSize: 0.001, minQty: 0.01 });
+    const r = quantizeOrder(0.002, null, flat({ stepSize: 0.001, minQty: 0.01 }));
     eq(r.ok, false);
     assert(r.reason.includes('0.01'), r.reason);
   });
 
-  test('최소 금액보다 적으면 막는다', () => {
+  test('지정가는 지정가로 최소 금액을 본다', () => {
     // 수량은 되는데 금액이 안 되는 경우가 따로 있다 (MIN_NOTIONAL).
-    const r = quantizeOrder(0.001, 100, { stepSize: 0.001, minNotional: 5 });
+    const r = quantizeOrder(0.001, 100, flat({ stepSize: 0.001, minNotional: 5 }),
+      { orderType: 'LIMIT' });
     eq(r.ok, false);
+    eq(r.code, 'BELOW_MIN_NOTIONAL');
     assert(r.reason.includes('최소 금액'), r.reason);
   });
 
-  test('가격을 모르면 최소 금액은 못 본다 — 통과시킨다', () => {
-    // 시장가 주문은 체결가를 모른다. 추측한 가격으로 막으면 멀쩡한
-    // 주문이 막힌다. 거래소가 최종 판단한다.
-    eq(quantizeOrder(0.001, null, { stepSize: 0.001, minNotional: 5 }).ok, true);
+  test('시장가는 **서버가 읽은 마크가**로 최소 금액을 본다', () => {
+    const f = flat({ stepSize: 0.001, minNotional: 5 });
+    const bad = quantizeOrder(0.001, null, f, { marketReferencePrice: 100 });
+    eq(bad.ok, false);
+    eq(bad.code, 'BELOW_MIN_NOTIONAL');
+    const ok = quantizeOrder(0.001, null, f, { marketReferencePrice: 9000 });
+    eq(ok.ok, true);
+  });
+
+  test('시장가인데 기준가를 못 읽으면 **지어내지 않고 막는다**', () => {
+    const r = quantizeOrder(0.001, null, flat({ stepSize: 0.001, minNotional: 5 }));
+    eq(r.ok, false);
+    eq(r.code, 'REFERENCE_PRICE_UNKNOWN');
+  });
+
+  test('청산에는 최소 금액을 적용하지 않는다', () => {
+    // 남은 포지션이 최소 금액보다 작아졌다고 닫지 못하게 하면 빠져나갈
+    // 길이 없다.
+    const r = quantizeOrder(0.001, 100, flat({ stepSize: 0.001, minNotional: 5 }),
+      { orderType: 'LIMIT', reduceOnly: true });
+    eq(r.ok, true);
+    eq(r.quantity, 0.001);
+  });
+
+  test('최소 금액 규칙이 없으면 그 검사는 하지 않는다 — Gate가 그렇다', () => {
+    eq(quantizeOrder(0.001, null, flat({ stepSize: 0.001 })).ok, true);
+  });
+
+  // ── 주문유형마다 수량 격자가 다르다 (바이낸스 LOT_SIZE / MARKET_LOT_SIZE) ──
+
+  const TWO_GRID: SymbolFilters = {
+    limitQty: { stepSize: 0.001, minQty: 0.001 },
+    marketQty: { stepSize: 0.01, minQty: 0.01 },
+    tickSize: 0.1,
+    minNotional: 5,
+  };
+
+  test('**시장가는 MARKET_LOT_SIZE로, 지정가는 LOT_SIZE로 자른다**', () => {
+    eq(qtyGridFor(TWO_GRID, 'LIMIT')!.stepSize, 0.001);
+    eq(qtyGridFor(TWO_GRID, 'MARKET')!.stepSize, 0.01);
+
+    // 시장가: 0.015 → 0.01 → 4 USDT → 최소 5 미달
+    const m = quantizeOrder(0.015, null, TWO_GRID,
+      { orderType: 'MARKET', marketReferencePrice: 400 });
+    eq(m.ok, false);
+    eq(m.code, 'BELOW_MIN_NOTIONAL');
+
+    // 지정가: 0.015 그대로 → 6 USDT → 통과
+    const l = quantizeOrder(0.015, 400, TWO_GRID, { orderType: 'LIMIT' });
+    eq(l.ok, true);
+    eq(l.quantity, 0.015);
+  });
+
+  test('**시장가 격자를 모르면 신규 진입을 막는다** — 지정가 격자로 대신하지 않는다', () => {
+    // `exchangeInfo`가 200을 주고 LOT_SIZE도 있는데 MARKET_LOT_SIZE만
+    // 없을 수 있다. 그때 시장가 수량을 그대로 흘려보내면 조회에 실패했을
+    // 때와 똑같이 **규격을 모른 채 신규 포지션을 여는 것**이 된다.
+    const onlyLimit: SymbolFilters = {
+      limitQty: { stepSize: 0.001, minQty: 0.001 }, marketQty: null,
+      tickSize: 0.1, minNotional: null,
+    };
+    eq(qtyGridFor(onlyLimit, 'MARKET'), null);
+
+    const entry = quantizeOrder(0.0159, null, onlyLimit, { orderType: 'MARKET' });
+    eq(entry.ok, false);
+    eq(entry.code, 'QTY_FILTER_UNKNOWN');
+    eq(entry.applied, false);
+
+    // 청산은 막지 않는다 — 못 닫는 것이 더 위험하다.
+    const exit = quantizeOrder(0.0159, null, onlyLimit, { orderType: 'MARKET', reduceOnly: true });
+    eq(exit.ok, true);
+    eq(exit.quantity, 0.0159);
+    eq(exit.applied, false);      // 격자를 적용한 것이 아니다
+    eq(exit.code, null);
+
+    // 같은 규격에서 **지정가는** 격자를 알고 있으므로 신규도 나간다.
+    const limit = quantizeOrder(0.0159, 400, onlyLimit, { orderType: 'LIMIT' });
+    eq(limit.ok, true);
+    eq(limit.quantity, 0.015);
+    eq(limit.applied, true);
+  });
+
+  test('**자른 뒤의 수량으로 최소 금액을 본다** — 원본으로 통과시키지 않는다', () => {
+    // 원본 0.0016666… × 60,000 = 100으로 최소를 넘지만,
+    // stepSize 0.001로 내리면 0.001 × 60,000 = 60이 되어 미달이다.
+    const f = flat({ stepSize: 0.001, minNotional: 100 });
+    const r = quantizeOrder(100 / 60_000, null, f, { marketReferencePrice: 60_000 });
+    eq(r.ok, false);
+    eq(r.code, 'BELOW_MIN_NOTIONAL');
+    assert(r.reason.includes('60.00'), r.reason);
   });
 
   // ── 입력 ────────────────────────────────────────────────
   test('수량이 이상하면 막는다', () => {
-    eq(quantizeOrder(0, null, { stepSize: 0.001 }).ok, false);
-    eq(quantizeOrder(-1, null, { stepSize: 0.001 }).ok, false);
-    eq(quantizeOrder(NaN, null, { stepSize: 0.001 }).ok, false);
+    eq(quantizeOrder(0, null, flat({ stepSize: 0.001 })).ok, false);
+    eq(quantizeOrder(-1, null, flat({ stepSize: 0.001 })).ok, false);
+    eq(quantizeOrder(NaN, null, flat({ stepSize: 0.001 })).ok, false);
   });
 
   test('안 바뀌었으면 changed는 false다', () => {
-    const r = quantizeOrder(0.099, null, { stepSize: 0.001 });
+    const r = quantizeOrder(0.099, null, flat({ stepSize: 0.001 }));
     eq(r.changed, false);
     eq(r.quantity, 0.099);
   });
 
   test('큰 단위 종목도 맞춘다', () => {
     // 어떤 종목은 stepSize가 1이다 (계약 수).
-    const r = quantizeOrder(3.7, null, { stepSize: 1, minQty: 1 });
+    const r = quantizeOrder(3.7, null, flat({ stepSize: 1, minQty: 1 }));
     eq(r.quantity, 3);
   });
 
@@ -137,21 +255,21 @@ export function runQuantizeTests() {
   // 이 묶음이 지키는 것은 하나다: **최종 수량 ≤ 의도 수량.**
 
   test('0.0015는 0.001로 내려간다 — 0.002가 되지 않는다', () => {
-    const r = quantizeOrder(0.0015, null, { stepSize: 0.001, minQty: 0.001 });
+    const r = quantizeOrder(0.0015, null, flat({ stepSize: 0.001, minQty: 0.001 }));
     eq(r.ok, true);
     eq(r.quantity, 0.001);
     assert((r.quantity as number) <= 0.0015, '수량이 커졌습니다');
   });
 
   test('한 단위보다 작으면 거절한다 — 올려서 만들지 않는다', () => {
-    const r = quantizeOrder(0.0006, null, { stepSize: 0.001, minQty: 0.001 });
+    const r = quantizeOrder(0.0006, null, flat({ stepSize: 0.001, minQty: 0.001 }));
     eq(r.ok, false);
     eq(r.quantity, null);
     assert(/최소 단위/.test(String(r.reason)), String(r.reason));
   });
 
   test('단위에 딱 맞으면 그대로 둔다', () => {
-    const r = quantizeOrder(0.002, null, { stepSize: 0.001, minQty: 0.001 });
+    const r = quantizeOrder(0.002, null, flat({ stepSize: 0.001, minQty: 0.001 }));
     eq(r.ok, true);
     eq(r.quantity, 0.002);
     eq(r.changed, false);
@@ -160,7 +278,7 @@ export function runQuantizeTests() {
   test('Gate 계약 배수도 정수 계약으로 내림한다', () => {
     // Gate BTC_USDT는 1계약 = 0.0001 BTC. 배수를 stepSize로 놓으면
     // "기초자산 수량을 배수로 내림"이 곧 "정수 계약으로 내림"이 된다.
-    const r = quantizeOrder(0.00035, null, { stepSize: 0.0001, minQty: 0.0001 });
+    const r = quantizeOrder(0.00035, null, flat({ stepSize: 0.0001, minQty: 0.0001 }));
     eq(r.ok, true);
     eq(r.quantity, 0.0003);                    // 3계약 — 3.5계약을 4로 올리지 않는다
     assert((r.quantity as number) <= 0.00035, '계약 수가 올라갔습니다');
@@ -171,7 +289,7 @@ export function runQuantizeTests() {
     const qtys = [0.0015, 0.0006, 0.09906, 1.9999, 3.7, 123.456, 0.5, 49.9];
     for (const step of steps) {
       for (const q of qtys) {
-        const r = quantizeOrder(q, null, { stepSize: step });
+        const r = quantizeOrder(q, null, flat({ stepSize: step }));
         if (!r.ok) continue;                   // 거절은 커지는 것이 아니다
         assert((r.quantity as number) <= q,
           `수량이 커졌습니다: ${q} → ${r.quantity} (step ${step})`);
@@ -179,11 +297,30 @@ export function runQuantizeTests() {
     }
   });
 
-  test('규격을 못 읽으면 지어내지 않는다 — 그대로 보내고 그렇다고 말한다', () => {
-    const r = quantizeOrder(0.0015, null, null);
-    eq(r.ok, true);
-    eq(r.quantity, 0.0015);                    // 3자리로 반올림하지 않는다
-    eq(r.applied, false);
-    assert(/읽지 못했습니다/.test(String(r.reason)), String(r.reason));
+  // ── Gate: 최소 주문 정본은 **계약 수**다 ──
+  test('Gate는 1계약 미만이면 막고, 금액이 작다는 이유로는 막지 않는다', () => {
+    // BTC_USDT는 1계약 = 0.0001 BTC. minNotional은 Gate가 주지 않으므로 null이다.
+    const gate: SymbolFilters = {
+      limitQty: { stepSize: 0.0001, minQty: 0.0001 },
+      marketQty: { stepSize: 0.0001, minQty: 0.0001 },
+      tickSize: 0.1, minNotional: null,
+    };
+    // 1계약 미만
+    const tooSmall = quantizeOrder(0.00005, null, gate, { marketReferencePrice: 60_000 });
+    eq(tooSmall.ok, false);
+    // 1계약 이상이면 통과한다. 명목가 6 USDT는 20 USDT 미만이지만
+    // **그 이유로는 막지 않는다** — Gate에 그런 규칙이 없다.
+    const ok = quantizeOrder(0.0001, null, gate, { marketReferencePrice: 60_000 });
+    eq(ok.ok, true);
+    eq(ok.quantity, 0.0001);
+    eq(ok.code, null);
+  });
+
+  test('규격을 못 읽으면 지어내지 않는다 — 청산은 그대로, 신규는 막는다', () => {
+    const exit = quantizeOrder(0.0015, null, null, { reduceOnly: true });
+    eq(exit.ok, true);
+    eq(exit.quantity, 0.0015);                 // 3자리로 반올림하지 않는다
+    eq(exit.applied, false);
+    eq(quantizeOrder(0.0015, null, null).ok, false);
   });
 }

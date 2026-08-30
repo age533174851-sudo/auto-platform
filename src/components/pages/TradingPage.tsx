@@ -34,11 +34,14 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          LiquidationCalc, PositionSizer, RiskDashboard, InlineTVChart, ChartContainer } from './SharedUI';
 
 
-/**
- * 화면이 아는 최소 명목가. **정본이 아니다** — 거래소별 필터가 정본이고
- * 서버 `quantizeOrder`가 강제한다. C4에서 이 상수를 없앤다.
- */
-const CLIENT_MIN_NOTIONAL_USDT = 20;
+// ── 최소 주문 금액 상수는 여기 없다 ──
+//
+// 예전에는 `CLIENT_MIN_NOTIONAL_USDT = 20`이 있었다. 그 값은 어느 종목의
+// 규칙도 아니라 두 방향으로 틀렸다: 최소가 20보다 작은 종목에서는
+// **거래소가 받을 주문을 화면이 먼저 거절**했고, 20보다 큰 종목에서는
+// 통과시켜 배율만 바뀐 채 거래소가 거절하게 했다.
+//
+// 정본은 거래소 필터이고 서버가 강제한다. 화면은 계산·안내까지만 한다.
 
 function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSimSteps}:{prices:Asset[];currency:string;activeAsset?:any;onOpenPnL?:(a:any)=>void;
   /** 마지막 실데이터 수신 시각 (useLivePrices) */
@@ -681,7 +684,6 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           amountUsdt: amount ? +amount : null,
           nativePrice, leverage,
           // 정본은 서버 필터다. 화면 상수는 C4에서 옮긴다 — 지금은 뜻만 보존.
-          minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
           // **사용자가 고른 유형 그대로.** 시장가로 바꿔 보내지 않는다.
           orderType, limitPrice,
         });
@@ -1190,8 +1192,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               const venuePx = scopedValueFor(venueQuote, connId)?.price ?? null;
               const pv = orderPreviewOf({
                 mode: tradeMode, amount, venuePrice: venuePx, krwPrice: sel.p || null,
-                leverage, minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
-                orderType, limitPrice,
+                leverage, orderType, limitPrice,
               });
               const symbol = (sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
               // 표시는 USDT 기준으로 유지한다. 연습 장부는 참고 환산을 쓴다.
@@ -1205,7 +1206,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                       거래소 모드는 적은 값이 곧 USDT라 환산할 것이 없다. */}
                   {pv.currency==='KRW'&&<div><span style={{color:T.muted}}>≈ </span><span style={{color:T.txt,fontWeight:700}}>{txt(pv.refUsdt?.notional ?? null,(n)=>`${n.toFixed(1)} USDT`)}</span></div>}
                   <div><span style={{color:T.muted}}>수량 </span><span style={{color:T.acl,fontWeight:700}}>{txt(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)}</span></div>
-                  <div><span style={{color:T.muted}}>명목 </span><span style={{color:shownNotional!=null&&shownNotional<CLIENT_MIN_NOTIONAL_USDT?T.red:T.grn,fontWeight:700}}>{txt(shownNotional,(n)=>`${n.toFixed(0)} USDT`)}</span></div>
+                  <div><span style={{color:T.muted}}>명목 </span><span style={{color:T.grn,fontWeight:700}}>{txt(shownNotional,(n)=>`${n.toFixed(0)} USDT`)}</span></div>
                   <div><span style={{color:T.muted}}>증거금 </span><span style={{color:T.txt,fontWeight:700}}>{txt(shownMargin,(m)=>`${m.toFixed(1)} USDT`)}</span></div>
                   {/* 수량을 무엇으로 나눴는지 적는다. 지정가 주문에서
                       마크가 기준 수량을 보여 주면 명목가가 어긋난다. */}
@@ -2024,8 +2025,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               const venuePx = scopedValueFor(venueQuote, connId)?.price ?? null;
               const pv = orderPreviewOf({
                 mode: tradeMode, amount, venuePrice: venuePx, krwPrice: sel.p || null,
-                leverage, minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
-                orderType, limitPrice,
+                leverage, orderType, limitPrice,
               });
               const symbol=(sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
               const isExchange = pv.currency === 'USDT';
