@@ -12,8 +12,21 @@ export type AssetType =
 
 export interface Asset {
   id: string; nameKr: string; name: string; sym: string;
-  p: number; c: number; v: string; t: AssetType; clr: string;
+  /** 화면에 적는 원화 환산가. **고정 환율이 곱해져 있다 — 실행에 쓰지 않는다** */
+  p: number;
+  c: number; v: string; t: AssetType; clr: string;
   cap?: string; sector?: string; isFeatured?: boolean;
+  /**
+   * 거래소가 실제로 부르는 값과 그 통화.
+   *
+   * `p`는 `/api/prices`가 고정 상수를 곱해 만든다. 그 값으로 주문 수량을
+   * 만들면 실제 환율과 벌어진 만큼 체결 크기가 어긋난다 — 실전·테스트넷
+   * 주문은 **이쪽을 읽는다.**
+   *
+   * 못 받았으면 `undefined`다. `p`에서 되돌려 만들지 않는다.
+   */
+  quotePrice?: number | null;
+  quoteCurrency?: string | null;
 }
 
 export const TYPE_LABEL: Record<AssetType, string> = {

@@ -4,7 +4,20 @@ import { QUOTES, isSupportedQuote, isDollarQuote, acceptPair, baseOf } from '@/l
 // ─── Types ───────────────────────────────────────────────────────
 interface PriceResult {
   symbol:    string;
+  /** 화면에 적을 원화 환산가. **고정 환율이 곱해져 있다 — 실행에 쓰지 않는다** */
   price:     number;
+  /**
+   * 거래소가 실제로 부르는 값과 그 통화.
+   *
+   * `price`는 아래 `KRW` 상수를 곱해 만든다. 그 상수는 환율이 아니라
+   * **상수**라서, 이 값으로 주문 수량을 만들면 실제 환율과 벌어진 만큼
+   * 체결 크기가 어긋난다. 그래서 원본을 버리지 않고 같이 보낸다 —
+   * 실행은 이쪽을 읽는다.
+   *
+   * 못 구했으면 `null`이다. **환산해서 만들어 내지 않는다.**
+   */
+  quotePrice?: number | null;
+  quoteCurrency?: string | null;
   change24h: number;
   volume24h: number;
   marketCap?: number;
@@ -91,6 +104,9 @@ async function fetchBinance(): Promise<Map<string, PriceResult>> {
       res.set(sym, {
         symbol: sym,
         price:     parseFloat(item.lastPrice) * KRW,
+        // 원본을 버리지 않는다 — 실행이 읽는 값이다.
+        quotePrice: parseFloat(item.lastPrice),
+        quoteCurrency: 'USDT',
         change24h: parseFloat(item.priceChangePercent),
         volume24h: parseFloat(item.quoteVolume),
         marketCap: MCAP[sym],
@@ -195,6 +211,8 @@ async function fetchTrending(): Promise<any[]> {
       .map((t:any) => ({
         symbol:    t.symbol.replace('USDT',''),
         price:     parseFloat(t.lastPrice) * KRW,
+        quotePrice: parseFloat(t.lastPrice),
+        quoteCurrency: 'USDT',
         change24h: parseFloat(t.priceChangePercent),
         volume24h: parseFloat(t.quoteVolume),
         source:    'binance',
