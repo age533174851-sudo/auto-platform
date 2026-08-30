@@ -78,7 +78,7 @@ const TEST = 'src/lib/ui/quantityIntent.test.ts';
 if (!existsSync(LIB)) fail(`${LIB}이 없습니다`);
 else {
   const lib = stripJs(readFileSync(LIB, 'utf8'));
-  for (const fn of ['makeIntent', 'closePercentOf', 'executionQuantityOf', 'intentStillValid']) {
+  for (const fn of ['makeIntent', 'closePercentOf', 'closePlanOf', 'executionQuantityOf', 'intentStillValid']) {
     if (!new RegExp(`export function ${fn}\\b`).test(lib)) fail(`${LIB}에 ${fn}이 없습니다`);
   }
   // 의도가 살아 있는지는 **입력칸이 그대로인지**로 판정한다.
@@ -99,8 +99,8 @@ else {
   if (!/executionQuantityOf\s*\(/.test(pane)) {
     fail(`${PANE}이 executionQuantityOf를 쓰지 않습니다 — 입력칸 문자열이 다시 실행 수량이 됩니다`);
   }
-  if (!/closePercentOf\s*\(/.test(pane)) {
-    fail(`${PANE}이 closePercentOf를 쓰지 않습니다 — 비율 청산이 개수로 나갑니다`);
+  if (!/closePlanOf\s*\(/.test(pane)) {
+    fail(`${PANE}이 closePlanOf를 쓰지 않습니다 — 비율 청산 판정이 화면에 흩어집니다`);
   }
   if (!/makeIntent\s*\(/.test(pane)) fail(`${PANE}이 makeIntent를 쓰지 않습니다`);
 
@@ -184,6 +184,40 @@ else {
     fail(`${PANE}이 확인창 정책을 여러 번 판단합니다 — shouldConfirm 한 곳만 씁니다`);
   }
   notes.push('비율 청산도 기존 확인창 정책을 그대로 지납니다');
+
+  // ── 7. 주문유형의 의도도 지키는가 ──
+  //
+  // 비율 청산 경로는 언제나 시장가 reduce-only로 나간다. 사용자가
+  // 지정가를 골라 놓았는데 버튼 하나로 시장가가 되면, 수량을 지키려다
+  // **다른 축의 의도를 깨는** 것이다. 자동 변환은 금지 — 막아야 한다.
+  if (!/orderType/.test(pane.slice(pane.indexOf('closePlanOf('), pane.indexOf('closePlanOf(') + 260))) {
+    fail(`${PANE}이 비율 청산 판정에 주문유형을 넘기지 않습니다 — 지정가가 시장가로 바뀝니다`);
+  }
+  // 막혔으면 네트워크 요청 전에 멈춰야 한다.
+  const blockAt = pane.indexOf("closePlan.kind === 'BLOCKED'");
+  if (blockAt < 0) fail(`${PANE}이 BLOCKED를 처리하지 않습니다`);
+  else if (sendAt >= 0 && blockAt > sendAt) {
+    fail(`${PANE}이 청산을 보낸 뒤에 BLOCKED를 봅니다 — 요청 전에 멈춰야 합니다`);
+  }
+  // 자동으로 시장가로 바꾸는 우회를 막는다.
+  if (/setOrderType\s*\(\s*['"`]MARKET/.test(pane.slice(Math.max(0, blockAt - 400), blockAt + 400))) {
+    fail(`${PANE}이 비율 청산 때문에 주문유형을 시장가로 바꿉니다 — 사용자가 고른 유형을 바꾸지 않습니다`);
+  }
+  notes.push('비율 청산은 시장가에서만 — 지정가는 막고 자동 변환하지 않습니다');
+
+  // 주문유형을 바꾸면 예전 비율 의도가 남지 않아야 한다.
+  const typeBtn = pane.indexOf('setOrderType(t)');
+  if (typeBtn < 0) fail(`${PANE}에서 주문유형 전환을 찾지 못했습니다`);
+  else if (!/setQtyIntent\(null\)/.test(pane.slice(typeBtn, typeBtn + 200))) {
+    fail(`${PANE}이 주문유형을 바꿀 때 의도를 비우지 않습니다`
+      + ' — 지정가에서 막힌 뒤 시장가로 바꾸면 예전 비율이 그대로 나갑니다');
+  }
+
+  // 사용자가 직접 적은 지정가 청산 경로는 남아 있어야 한다.
+  if (!/type:\s*orderType/.test(pane)) {
+    fail(`${PANE}에 주문유형을 그대로 보내는 경로가 없습니다 — 지정가 수동 청산이 사라졌습니다`);
+  }
+  notes.push('직접 적은 지정가 청산은 기존 경로 그대로입니다');
 
   // ── 4. 깎은 값을 실행에 되쓰지 않는가 ──
   //

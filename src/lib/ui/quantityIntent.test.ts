@@ -13,7 +13,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  makeIntent, intentStillValid, closePercentOf, executionQuantityOf,
+  makeIntent, intentStillValid, closePercentOf, executionQuantityOf, closePlanOf,
 } from './quantityIntent';
 // 확인창 정책은 복제하지 않는다 — 화면이 쓰는 그 함수를 그대로 시험한다.
 import { shouldConfirm, DEFAULTS } from './preferences';
@@ -207,6 +207,69 @@ export function runQuantityIntentTests() {
     });
     eq(closePercentOf(intent, display), 100);
     eq(intentStillValid(intent, display), true);
+  });
+
+  // ── 주문유형의 의도도 지킨다 ──
+  //
+  // 비율 청산 경로는 언제나 시장가 reduce-only로 나간다. 사용자가
+  // 지정가를 골라 놓았는데 버튼 하나로 시장가가 되면, 수량을 지키려다
+  // **다른 축의 의도를 깨는** 것이다. 자동으로 바꾸지 않고 막는다.
+
+  const closeIntent = (percent: number) => makeIntent({
+    source: 'PERCENT_CLOSE', rawBaseQty: 1, percent,
+    displayNumber: 1, displayDecimals: 6,
+  });
+
+  test('시장가 + 비율 청산은 허용한다', () => {
+    const { intent, display } = closeIntent(100);
+    const plan = closePlanOf({
+      intent, currentInput: display, reduceOnly: true, isPaper: false, orderType: 'MARKET',
+    });
+    eq(plan.kind, 'PERCENT_CLOSE');
+    eq((plan as any).percent, 100);
+  });
+
+  test('**지정가 + 비율 청산은 막는다 — 시장가로 바꿔 주지 않는다**', () => {
+    const { intent, display } = closeIntent(50);
+    const plan = closePlanOf({
+      intent, currentInput: display, reduceOnly: true, isPaper: false, orderType: 'LIMIT',
+    });
+    eq(plan.kind, 'BLOCKED');
+    assert(/시장가/.test((plan as any).reason), (plan as any).reason);
+    // 막힌 것이지 비율이 시장가로 바뀐 것이 아니다.
+    assert(!('percent' in plan), '막으면서 비율을 넘겼습니다');
+  });
+
+  test('지정가 + 직접 적은 수량 청산은 기존 경로다 — 막지 않는다', () => {
+    const { intent, display } = closeIntent(100);
+    // 사용자가 칸을 고쳤다 → 의도 해제 → 비율 청산이 아니다
+    const plan = closePlanOf({
+      intent, currentInput: '0.003', reduceOnly: true, isPaper: false, orderType: 'LIMIT',
+    });
+    eq(plan.kind, 'NOT_PERCENT_CLOSE');
+  });
+
+  test('신규 진입은 주문유형과 무관하다 — 비율 청산 판정에 걸리지 않는다', () => {
+    const { intent, display } = closeIntent(100);
+    eq(closePlanOf({
+      intent, currentInput: display, reduceOnly: false, isPaper: false, orderType: 'LIMIT',
+    }).kind, 'NOT_PERCENT_CLOSE');
+  });
+
+  test('모의 계좌는 이 경로가 없다', () => {
+    const { intent, display } = closeIntent(100);
+    eq(closePlanOf({
+      intent, currentInput: display, reduceOnly: true, isPaper: true, orderType: 'MARKET',
+    }).kind, 'NOT_PERCENT_CLOSE');
+  });
+
+  test('지정가에서 막힌 뒤 의도가 살아 있어도 판정은 매번 다시 한다', () => {
+    // 화면은 주문유형을 바꿀 때 의도를 비우지만, 판정기도 상태에 기대지
+    // 않는다 — 같은 의도라도 유형이 바뀌면 답이 바뀐다.
+    const { intent, display } = closeIntent(100);
+    const args = { intent, currentInput: display, reduceOnly: true, isPaper: false };
+    eq(closePlanOf({ ...args, orderType: 'LIMIT' }).kind, 'BLOCKED');
+    eq(closePlanOf({ ...args, orderType: 'MARKET' }).kind, 'PERCENT_CLOSE');
   });
 
   test('표시는 깎여도 실행은 깎이지 않는다 (자리수를 늘리는 것이 해결이 아니다)', () => {

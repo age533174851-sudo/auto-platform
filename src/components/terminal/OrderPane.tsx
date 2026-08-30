@@ -38,7 +38,7 @@ import {
 // 버튼이 만든 것은 숫자가 아니라 **의도**다. 표시용으로 깎은 문자열을
 // 실행 수량으로 되읽지 않는다 — 판정은 이 파일 한 곳에 있다.
 import {
-  makeIntent, closePercentOf, executionQuantityOf,
+  makeIntent, closePlanOf, executionQuantityOf,
   type QuantityIntent,
 } from '@/lib/ui/quantityIntent';
 import { canDo, intentOf } from '@/lib/auth/tradingCapability';
@@ -1198,7 +1198,20 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     // 처음 배선에서 이 자리에서 곧바로 fetch하고 return해 버려서, 실전
     // 비율 청산이 필수 확인창을 건너뛰었다. 확인은 주문 직전에 한 번,
     // 모든 경로가 같은 자리에서 받는다.
-    const closePct = reduceOnly && !isPaper ? closePercentOf(qtyIntent, qty) : null;
+    //
+    // **주문유형의 의도도 지킨다.** 이 경로는 언제나 시장가 reduce-only로
+    // 나간다. 사용자가 지정가를 골라 놓았는데 버튼 하나로 시장가가 되면,
+    // 수량을 지키려다 다른 축의 의도를 깨는 것이다 — 자동으로 바꾸지 않고
+    // 막는다. 판정은 `closePlanOf` 한 곳에 있다.
+    const closePlan = closePlanOf({
+      intent: qtyIntent, currentInput: qty, reduceOnly, isPaper, orderType,
+    });
+    if (closePlan.kind === 'BLOCKED') {
+      // 네트워크 요청 전에 멈춘다.
+      setMsg({ ok: false, text: closePlan.reason });
+      return;
+    }
+    const closePct = closePlan.kind === 'PERCENT_CLOSE' ? closePlan.percent : null;
     if (closePct != null && !holding) {
       setMsg({ ok: false, text: '열린 포지션을 확인하지 못해 비율 청산을 보낼 수 없습니다' });
       return;
@@ -1846,7 +1859,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           flex: 1, minWidth: 0,
         }}>
           {(['MARKET', 'LIMIT'] as const).map(t => (
-            <button key={t} onClick={() => setOrderType(t)} style={{
+            <button key={t} onClick={() => {
+              // **주문유형을 바꾸면 비율 의도는 끝난다.** 지정가에서 막힌
+              // 뒤 시장가로 바꿨을 때 예전 비율이 그대로 살아 있으면,
+              // 다음 한 번의 클릭이 사용자가 다시 고르지 않은 청산이 된다.
+              setOrderType(t);
+              setQtyIntent(null);
+            }} style={{
               flex: 1, minWidth: 0,
               minHeight: dense ? 28 : 34, border: 'none', borderRadius: 6, cursor: 'pointer',
               background: orderType === t ? C.panel : 'transparent',

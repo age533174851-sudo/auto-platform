@@ -96,6 +96,47 @@ export function closePercentOf(
   return p;
 }
 
+/**
+ * 비율 청산을 지금 보낼 수 있는가.
+ *
+ * **주문유형의 의도도 수량만큼 중요하다.** 비율 청산 경로(서버
+ * `close-position`)는 언제나 시장가 reduce-only로 나간다. 사용자가
+ * 지정가를 골라 놓았는데 버튼 하나로 시장가가 되면, 수량을 지키려다
+ * **다른 축의 의도를 깨는** 것이다.
+ *
+ * 자동으로 시장가로 바꾸지 않는다 — 그것도 같은 종류의 암묵적 변경이다.
+ * 막고, 왜 막았는지 말한다.
+ */
+export type ClosePlan =
+  /** 비율 청산으로 보낸다 */
+  | { kind: 'PERCENT_CLOSE'; percent: number }
+  /** 비율 청산이 아니다 — 기존 수량 경로로 간다 */
+  | { kind: 'NOT_PERCENT_CLOSE' }
+  /** 보내면 안 된다. 네트워크 요청 전에 멈춘다 */
+  | { kind: 'BLOCKED'; reason: string };
+
+export function closePlanOf(i: {
+  intent: QuantityIntent | null | undefined;
+  currentInput: string;
+  reduceOnly: boolean;
+  /** 모의 계좌에는 이 경로가 없다 */
+  isPaper: boolean;
+  orderType: 'MARKET' | 'LIMIT';
+}): ClosePlan {
+  if (!i.reduceOnly || i.isPaper) return { kind: 'NOT_PERCENT_CLOSE' };
+  const percent = closePercentOf(i.intent, i.currentInput);
+  if (percent == null) return { kind: 'NOT_PERCENT_CLOSE' };
+  // 지정가를 고른 사용자의 주문을 시장가로 바꾸지 않는다.
+  if (i.orderType !== 'MARKET') {
+    return {
+      kind: 'BLOCKED',
+      reason: '비율 청산은 현재 시장가에서만 지원합니다. '
+        + '시장가로 바꾸거나, 지정가 청산은 수량을 직접 입력하세요',
+    };
+  }
+  return { kind: 'PERCENT_CLOSE', percent };
+}
+
 export interface ExecutionQuantity {
   /** 거래소로 나갈 개수 */
   qty: number | null;
