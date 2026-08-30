@@ -152,8 +152,16 @@ else {
   ]) {
     const at = pane.indexOf(near);
     if (at < 0) { notes.push(`빠른 액션 '${label}'이 없습니다 (건너뜀)`); continue; }
-    const around = pane.slice(at, at + 260);
-    if (!/setClosePercentIntent\s*\(/.test(around)) {
+    // 길이로 자르면 **옆 버튼의 호출**이 창 안에 들어온다. 이 항목의
+    // 여는 대괄호부터 짝이 맞는 닫는 대괄호까지만 본다.
+    let open = pane.lastIndexOf('[', at);
+    let depth = 0, elem = '';
+    for (let i = open; i >= 0 && i < pane.length; i++) {
+      if (pane[i] === '[') depth++;
+      else if (pane[i] === ']') { depth--; if (depth === 0) { elem = pane.slice(open, i + 1); break; } }
+    }
+    if (!elem) elem = pane.slice(at, at + 120);
+    if (!/setClosePercentIntent\s*\(/.test(elem)) {
       fail(`${PANE}의 빠른 액션 '${label}'이 setClosePercentIntent를 쓰지 않습니다`
         + ' — 절대 수량으로 일반 주문 경로에 떨어집니다');
     }
