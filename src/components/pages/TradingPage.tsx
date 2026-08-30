@@ -503,6 +503,20 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           showToast(`주문 실패 · 최소 주문금액 미달 (약 20 USDT ≈ 27,500원, 현재 ${Math.round(usdtNotional)} USDT)`, false);
           setStatus(null); return;
         }
+        // **의도한 수량을 그대로 보낸다 — 여기서 자리수를 정하지 않는다.**
+        //
+        // 예전에는 `Number(qty.toFixed(3))`으로 보냈다. 소수 3자리 *반올림*이라
+        // 의도한 0.0015가 **0.002로 커져서** 나갔다. 서버가 그 뒤에 stepSize
+        // 0.001로 정상 내림해도 이미 들어온 값이 0.002라 되돌아갈 이유가 없다 —
+        // 사용자가 누른 것보다 큰 주문이 체결된다.
+        //
+        // 게다가 3자리는 어느 거래소의 규칙도 아니다. 화면은 심볼별 stepSize도,
+        // Gate의 계약 배수(quanto_multiplier)도 모른다. **모르는 쪽이 규칙을
+        // 정하면 안 된다.**
+        //
+        // 규격을 아는 곳은 서버다: `futuresSymbolFilters()` → `quantizeOrder()`가
+        // 거래소 stepSize로 **내림**하고, 최소 수량·최소 금액에 미달하면 거절한다.
+        // 그래서 신규 진입에서 `최종 수량 ≤ 의도 수량`이 항상 성립한다.
         const qty = usdtPx > 0 ? usdtNotional / usdtPx : 0;
         const r = await fetch('/api/binance/futures/order', {
           method:'POST',
@@ -512,7 +526,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             symbol: tradeSymbol,
             side: side==='매수'?'BUY':'SELL',
             type:'MARKET',
-            quantity: Number(qty.toFixed(3)),
+            quantity: qty,
             leverage,
             stopLossPct: sl && krwPx ? Math.abs(((+sl-krwPx)/krwPx)*100) : undefined,
             takeProfitPct: tp && krwPx ? Math.abs(((+tp-krwPx)/krwPx)*100) : undefined,

@@ -130,6 +130,18 @@ jobs:
       - name: 주문 경로 안전장치 검사
         run: node scripts/check-order-guards.mjs
 
+      # ── 주문 수량 규격은 거래소가 정한다 ──
+      #
+      # 화면이 `quantity: Number(qty.toFixed(3))`으로 보내고 있었다.
+      # 소수 3자리 **반올림**이라 의도한 0.0015가 0.002로 커져서 나갔다 —
+      # 서버가 그 뒤에 stepSize로 정상 내림해도 이미 들어온 값이 0.002라
+      # 되돌아갈 이유가 없다. 사용자가 누른 것보다 큰 주문이 체결된다.
+      #
+      # 규격을 아는 곳은 서버 하나다(futuresSymbolFilters → quantizeOrder).
+      # 화면이 거래소 규칙을 다시 추측하는 것을 막는다.
+      - name: 주문 수량 규격 출처 (화면이 거래소 규칙을 정하지 않는다)
+        run: node scripts/check-order-quantity-source.mjs
+
       # ── 전략 점검 플래그 검사 ──
       #
       # 레지스트리는 scalp의 점검 플래그를 `checkOnly`로 선언했고 화면은
