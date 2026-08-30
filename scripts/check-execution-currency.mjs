@@ -103,7 +103,8 @@ const PRICES = 'src/app/api/prices/route.ts';
 if (!existsSync(LIB)) fail(`${LIB}이 없습니다`);
 else {
   const lib = stripJs(readFileSync(LIB, 'utf8'));
-  for (const fn of ['orderCurrencyOf', 'amountMustClear', 'planExchangeOrder', 'percentBaseFor']) {
+  for (const fn of ['orderCurrencyOf', 'amountMustClear', 'planExchangeOrder', 'percentBaseFor',
+    'balanceStateOf', 'scopedValueFor']) {
     if (!new RegExp(`export function ${fn}\\b`).test(lib)) fail(`${LIB}에 ${fn}이 없습니다`);
   }
   // **계획 함수가 환율을 입력으로 받으면 안 된다.** 받는 순간 실행이
@@ -158,8 +159,19 @@ else {
     if (!/planExchangeOrder\s*\(/.test(branch)) {
       fail(`${PAGE}의 거래소 주문 분기가 planExchangeOrder를 쓰지 않습니다`);
     }
-    if (!/quotePrice/.test(branch)) {
-      fail(`${PAGE}의 거래소 주문 분기가 거래소 원본 가격을 읽지 않습니다`);
+    if (!/futures\/quote/.test(branch)) {
+      fail(`${PAGE}의 거래소 주문 분기가 venue 선물 시세를 읽지 않습니다`
+        + ' — /api/prices는 바이낸스 **현물** 가격이라 Gate 주문에 쓰면 안 됩니다');
+    }
+    if (!/connectionId=/.test(branch)) {
+      fail(`${PAGE}이 시세를 연결에 묶어 읽지 않습니다 — 거래소·환경이 정해지지 않습니다`);
+    }
+    // 화면 참고가격(`/api/prices`)을 실행 수량에 쓰면 안 된다.
+    for (const m of branch.matchAll(/nativePrice\s*=\s*([^;\n]{0,60})/g)) {
+      if (/sel\.quotePrice|sel\.p\b/.test(m[1])) {
+        fail(`${PAGE}이 화면 참고가격을 실행 수량에 씁니다: ${m[1].trim().slice(0, 50)}`
+          + ' — venue 선물 시세를 읽으세요');
+      }
     }
     // 원화 표시가를 수량 계산에 쓰면 안 된다. 손절 비율(%) 계산은 통화와
     // 무관하므로 예외다 — 나눗셈의 결과가 가격이 아니라 비율이다.
@@ -207,6 +219,50 @@ else {
     }
   }
   notes.push('통화 전환 시 금액을 비우고, 거래소 모드에 기본 금액이 없습니다');
+
+  // ── 잔고·시세는 어느 연결에서 읽은 것인가 ──
+  //
+  // A 계정 잔고를 읽은 뒤 B로 바꾸고 B 조회가 실패하면, 비율 버튼이
+  // **다른 계정의 잔고**로 B 주문 크기를 정할 수 있었다.
+  if (!/scopedValueFor\s*\(/.test(page)) {
+    fail(`${PAGE}이 잔고·시세를 연결에 묶지 않습니다 — 이전 계정의 값이 남습니다`);
+  }
+  if (!/balanceStateOf\s*\(/.test(page)) {
+    fail(`${PAGE}이 잔고 0과 '못 읽음'을 가르지 않습니다`);
+  }
+  // 조회 실패에서 이전 값을 남기면 안 된다.
+  const unknownWrites = (page.match(/setUsdtBalance\(\{[^}]{0,80}kind:\s*'UNKNOWN'/g) || []).length;
+  if (unknownWrites < 2) {
+    fail(`${PAGE}이 조회 실패 때 잔고를 UNKNOWN으로 적는 곳이 ${unknownWrites}곳입니다`
+      + ' — 응답 실패와 예외 둘 다 적어야 이전 계정 값이 남지 않습니다');
+  }
+  notes.push('잔고·시세가 연결에 묶이고, 0과 모름이 갈립니다');
+}
+
+// ── 4. 시세 라우트가 연결이 정한 venue·환경에서 읽는가 ──
+const QUOTE = 'src/app/api/binance/futures/quote/route.ts';
+if (!existsSync(QUOTE)) fail(`${QUOTE}이 없습니다 — venue 선물 시세 경로가 필요합니다`);
+else {
+  const q = stripJs(readFileSync(QUOTE, 'utf8'));
+  if (!/loadFuturesCreds\s*\(/.test(q)) {
+    fail(`${QUOTE}이 연결에서 거래소·환경을 읽지 않습니다`);
+  }
+  for (const [need, why] of [
+    ['getPremiumIndex', '바이낸스 선물 마크가'],
+    ['getTickerGateFutures', 'Gate 선물 시세'],
+  ]) {
+    if (!q.includes(need)) fail(`${QUOTE}이 ${why}(${need})를 읽지 않습니다`);
+  }
+  if (!/creds\.testnet/.test(q)) {
+    fail(`${QUOTE}이 연결의 환경(testnet/live)을 따르지 않습니다`);
+  }
+  // 다른 거래소·현물·환율로 대신 읽으면 안 된다.
+  for (const bad of ['api.binance.com', '/api/prices', '1375', 'coingecko']) {
+    if (q.includes(bad)) fail(`${QUOTE}이 ${bad}로 대신 읽습니다 — venue 시세만 씁니다`);
+  }
+  // 주문을 내면 안 된다. 읽기 전용이다.
+  if (/method:\s*['"`]POST/i.test(q)) fail(`${QUOTE}이 쓰기 요청을 보냅니다 — 읽기 전용입니다`);
+  notes.push(`${QUOTE}이 연결이 정한 거래소·환경의 선물 시세만 읽습니다`);
 }
 
 console.log('실행 통화 확인');

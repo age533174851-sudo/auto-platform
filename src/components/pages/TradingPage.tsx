@@ -12,6 +12,8 @@ import { convertQuantity, notionalAndMargin } from '@/lib/markets/quantityInput'
 // 실행 통화·모드 격리·잔고 출처 판정은 이 파일 한 곳에 있다.
 import {
   orderCurrencyOf, amountMustClear, planExchangeOrder, percentBaseFor,
+  balanceStateOf, scopedValueFor,
+  type BalanceState, type ConnectionScoped,
 } from '@/lib/markets/orderCurrency';
 import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/lib/autotrade/practiceActions';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
@@ -46,9 +48,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
    * 0으로 두면 사용자는 잔고가 없다고 읽는데 실제로는 못 읽은 것이다.
    * 연습 원화 잔고로 대신하지 않는다 — 원화 숫자가 달러 주문이 된다.
    */
-  const [availableUsdt,setAvailableUsdt]=useState<number|null>(null);
+  const [usdtBalance,setUsdtBalance]=useState<ConnectionScoped<BalanceState>|null>(null);
+  /** 이 연결에서 읽은 선물 가격. 다른 연결의 값을 이어 쓰지 않는다 */
+  const [venueQuote,setVenueQuote]=useState<ConnectionScoped<{price:number;exchange:string;source:string|null}>|null>(null);
   /** 이 모드의 주문 금액 통화. 모의는 원화, 거래소는 USDT */
   const orderCurrency = orderCurrencyOf(tradeMode);
+  const [hasExchange,setHasExchange]=useState(false);
+  const [connections,setConnections]=useState<any[]>([]);
+  const [connId,setConnId]=useState('');
+
   /**
    * 비율 버튼이 나눌 잔고. 모의는 연습 원화, 거래소는 가용 USDT다.
    * 못 읽었으면 `base: null` — 버튼이 잠긴다.
@@ -56,11 +64,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
   const percentBase = percentBaseFor({
     mode: tradeMode,
     practiceKrw: (() => { try { return loadPaperBalance().krw; } catch { return null; } })(),
-    availableUsdt,
+    // **지금 연결의 값만 쓴다.** 연결을 바꾸면 이전 계정의 잔고가
+    // 그대로 남아 다른 계좌의 비율로 주문을 만들 수 있었다.
+    balance: scopedValueFor(usdtBalance, connId),
   });
-  const [hasExchange,setHasExchange]=useState(false);
-  const [connections,setConnections]=useState<any[]>([]);
-  const [connId,setConnId]=useState('');
   const [slEditAsset,setSlEditAsset]=useState('');
   const [quickActions,setQuickActions]=useState<string[]>(()=>{
     try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse','tpsl']; }
@@ -223,15 +230,21 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         signal: AbortSignal.timeout(3000),   // 3초 타임아웃
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || d.positionMsg || ('HTTP '+r.status));
+      if (!r.ok || d.error) {
+        // **실패했으면 이전 값을 지운다.** 남겨 두면 다른 계정의 잔고로
+        // 비율 주문이 만들어진다.
+        setUsdtBalance({ connectionId: connId, value: { kind: 'UNKNOWN' } });
+        throw new Error(d.error || d.positionMsg || ('HTTP '+r.status));
+      }
 
       // 비율 버튼이 쓸 가용 USDT. **버리지 않는다** — 예전에는 응답에
       // 있는데도 안 읽어서, 거래소 비율을 연습 원화 잔고로 계산했다.
       {
         const usdt = (Array.isArray(d.balances) ? d.balances : [])
           .find((b:any)=>String(b?.asset||'').toUpperCase()==='USDT');
-        const avail = Number(usdt?.availableBalance);
-        setAvailableUsdt(Number.isFinite(avail) && avail > 0 ? avail : null);
+        // **0과 '못 읽음'을 가른다.** 0은 입금하면 되고, 못 읽음은
+        // 무엇이 잘못됐는지 알아야 한다.
+        setUsdtBalance({ connectionId: connId, value: balanceStateOf(usdt?.availableBalance) });
       }
       const live = (Array.isArray(d.positions) ? d.positions : []).filter((p:any)=>Math.abs(p.amount||0)>0);
 
@@ -270,6 +283,8 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       if (mismatch) tgAlert({ level:'warning', eventType:'ghost_sync', exchange:'Binance', mode: d.testnet?'TESTNET':'LIVE', title:'Ghost Sync 불일치 감지', message:'화면과 거래소 포지션이 불일치합니다. 거래소 우선 적용됨.' });
       if (!silent) setSyncMsg(`동기화 완료 · ${d.testnet?'테스트넷':'라이브'} · 포지션 ${live.length}개${mismatch?' · ⚠️ 불일치 감지':''}`);
     } catch (e:any) {
+      // 예외도 실패다. 이전 연결의 잔고를 이어 쓰지 않는다.
+      setUsdtBalance({ connectionId: connId, value: { kind: 'UNKNOWN' } });
       errCountRef.current += 1;
       const n = errCountRef.current;
       setSyncStatus('error');
@@ -545,7 +560,30 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         //
         // 이제 사용자가 USDT로 적고, 거래소 원본 가격으로 나눈다.
         // 환율을 못 읽어도 주문은 나간다.
-        const nativePrice = sel.quotePrice ?? null;
+        // ── 가격은 **주문이 나갈 그 거래소**에서 읽는다 ──
+        //
+        // 예전에는 `/api/prices`의 값을 썼다. 그건 `api.binance.com`의
+        // **현물** 티커라, Gate 연결로 주문해도 바이낸스 현물 가격으로
+        // 수량을 만들고 있었다 — 환율을 없애고 그 자리에 다른 거래소의
+        // 다른 시장 가격을 넣은 셈이다.
+        //
+        // 현물과 선물은 같은 종목이라도 값이 다르고(베이시스) 거래소끼리도
+        // 다르다. 연결이 정한 곳·정한 환경에서 읽는다. 못 읽으면 막는다 —
+        // 다른 거래소로 대신 읽거나 현물로 내려가지 않는다.
+        let nativePrice: number | null = null;
+        try {
+          const qr = await fetch(
+            `/api/binance/futures/quote?connectionId=${encodeURIComponent(connId)}`
+            + `&symbol=${encodeURIComponent(tradeSymbol)}`,
+            { headers: authHeaderRef.current ? { Authorization: authHeaderRef.current } : {},
+              signal: AbortSignal.timeout(6000) });
+          const qd = await qr.json().catch(() => ({}));
+          if (qr.ok && qd?.ok && Number.isFinite(Number(qd.price)) && Number(qd.price) > 0) {
+            nativePrice = Number(qd.price);
+            setVenueQuote({ connectionId: connId, value: {
+              price: nativePrice, exchange: String(qd.exchange || ''), source: qd.priceSource ?? null } });
+          }
+        } catch { /* nativePrice는 null로 남는다 */ }
         // 손절·익절은 **비율**로 넘어간다. 비율은 통화와 무관하므로
         // 사용자가 보고 적은 화면 표시가 기준으로 계산해도 값이 같다 —
         // 여기서 나온 것은 가격이 아니라 %다.
@@ -702,7 +740,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               // `100000`은 모의에서 ₩100,000이고 거래소에서 100,000 USDT다.
               // 그대로 두면 모드를 바꾼 순간 백 배가 넘는 주문이 된다.
               // 환산해서 넘기지도 않는다 — 사용자가 고른 적 없는 숫자다.
-              if (amountMustClear(tradeMode, m)) { setAmount(''); setAvailableUsdt(null); }
+              if (amountMustClear(tradeMode, m)) { setAmount(''); setUsdtBalance(null); setVenueQuote(null); }
               setTradeMode(m);
             }}
               style={{flex:1,padding:'10px 6px',background:active?c+'20':'transparent',color:active?c:locked?T.muted:T.sub,border:`1px solid ${active?c:T.border}`,borderRadius:12,fontWeight:700,fontSize:11,cursor:'pointer',opacity:locked?0.5:1,position:'relative'}}>
@@ -1010,7 +1048,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               // 원화 모드에서만 표시용 환산을 한다. 거래소 주문은 환율을
               // 지나지 않으므로 여기서도 환산하지 않는다.
               const krwPx = sel.p || 0;
-              const nativePx = sel.quotePrice ?? null;
+              // 미리보기는 참고값이다. 실제 주문 수량은 주문 순간
+              // 그 거래소의 선물 가격으로 다시 계산한다.
+              const nativePx = scopedValueFor(venueQuote, connId)?.price ?? sel.quotePrice ?? null;
               const usdt = orderCurrency === 'USDT' ? +amount : +amount / 1375;
               const qty = orderCurrency === 'USDT'
                 ? (nativePx && nativePx > 0 ? +amount / nativePx : 0)

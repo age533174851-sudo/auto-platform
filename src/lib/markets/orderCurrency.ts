@@ -135,6 +135,54 @@ export function planExchangeOrder(i: {
 }
 
 /**
+ * 거래소 가격·잔고는 **어느 연결에서 읽은 것인가.**
+ *
+ * 연결을 바꾸면 이전 계정의 값이 남을 수 있다. 실제로 A 계정의 잔고
+ * 1,000 USDT를 읽은 뒤 B로 바꾸고 B 조회가 실패하면, 비율 버튼이 **다른
+ * 계정의 잔고**로 B 주문 크기를 정할 수 있었다.
+ *
+ * 값에 출처를 붙여서, 지금 고른 연결의 것이 아니면 쓰지 않는다.
+ */
+export interface ConnectionScoped<T> {
+  connectionId: string | null;
+  value: T;
+}
+
+/**
+ * 이 값이 지금 연결의 것인가.
+ *
+ * 아니면 **모르는 것으로 본다.** 이전 값을 이어 쓰지 않는다.
+ */
+export function scopedValueFor<T>(
+  held: ConnectionScoped<T> | null | undefined, connectionId: string | null | undefined,
+): T | null {
+  if (!held) return null;
+  if (!connectionId || held.connectionId !== connectionId) return null;
+  return held.value;
+}
+
+/**
+ * 가용 잔고의 상태 — **0과 '못 읽음'은 다르다.**
+ *
+ * 예전에는 `availableBalance === 0`을 null로 접었다. 그러면 "잔고가
+ * 없다"와 "확인하지 못했다"가 같은 화면이 되는데, 앞은 입금하면 되고
+ * 뒤는 무엇이 잘못됐는지 알아야 한다.
+ */
+export type BalanceState =
+  | { kind: 'KNOWN'; usdt: number }
+  | { kind: 'UNKNOWN' };
+
+export function balanceStateOf(raw: unknown): BalanceState {
+  // `Number(null)`은 0이고 `Number('')`도 0이다. 먼저 거르지 않으면
+  // **못 읽은 것이 '잔고 0'이 된다** — 이 함수가 가르려던 그 혼동이다.
+  if (raw == null || raw === '' || typeof raw === 'boolean') return { kind: 'UNKNOWN' };
+  const n = Number(raw);
+  // 음수는 정상 값이 아니다 — 못 읽은 것으로 본다.
+  if (!Number.isFinite(n) || n < 0) return { kind: 'UNKNOWN' };
+  return { kind: 'KNOWN', usdt: n };
+}
+
+/**
  * 비율 버튼이 쓸 잔고 — **모드마다 출처가 다르다.**
  *
  * 모의는 원화 연습 장부, 거래소는 그 계정의 가용 USDT다. 연습 잔고를
@@ -146,10 +194,23 @@ export function planExchangeOrder(i: {
 export function percentBaseFor(i: {
   mode: TradeMode | string;
   practiceKrw: number | null | undefined;
-  availableUsdt: number | null | undefined;
-}): { base: number | null; currency: OrderCurrency } {
+  /** 지금 연결에서 읽은 가용 USDT. 못 읽었으면 UNKNOWN */
+  balance: BalanceState | null | undefined;
+}): {
+  base: number | null;
+  currency: OrderCurrency;
+  /** 왜 못 쓰는가 — 화면이 그대로 적는다 */
+  state: 'READY' | 'UNKNOWN' | 'ZERO';
+} {
   const currency = orderCurrencyOf(i.mode);
-  const raw = currency === 'USDT' ? i.availableUsdt : i.practiceKrw;
-  const n = Number(raw);
-  return { base: Number.isFinite(n) && n > 0 ? n : null, currency };
+  if (currency === 'USDT') {
+    const b = i.balance;
+    if (!b || b.kind !== 'KNOWN') return { base: null, currency, state: 'UNKNOWN' };
+    if (!(b.usdt > 0)) return { base: null, currency, state: 'ZERO' };
+    return { base: b.usdt, currency, state: 'READY' };
+  }
+  const n = Number(i.practiceKrw);
+  if (!Number.isFinite(n)) return { base: null, currency, state: 'UNKNOWN' };
+  if (!(n > 0)) return { base: null, currency, state: 'ZERO' };
+  return { base: n, currency, state: 'READY' };
 }
