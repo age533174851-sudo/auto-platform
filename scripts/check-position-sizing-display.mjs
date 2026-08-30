@@ -79,7 +79,7 @@ else {
   // helper가 배율을 모를 때 0을 지어내면 '돈이 안 든다'로 읽힌다.
   const at = lib.indexOf('export function notionalAndMargin');
   const body = at >= 0 ? lib.slice(at, at + 600) : '';
-  if (/margin:\s*0\b/.test(body)) {
+  if (/margin:\s*0\b/.test(body) || /\?[^:;]*:\s*0\s*[,}]/.test(body)) {
     fail(`${LIB}의 helper가 증거금을 0으로 채웁니다 — 모르면 null입니다`);
   }
   if (/margin:\s*n\s*[,}]/.test(body)) {
