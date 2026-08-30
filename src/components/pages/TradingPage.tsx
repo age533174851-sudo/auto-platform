@@ -1101,6 +1101,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               const txt = (v: number | null, f: (n: number) => string) => (v == null ? '확인 전' : f(v));
               return (
                 <div style={{display:'flex',justifyContent:'space-between',gap:8,background:T.bg,borderRadius:7,padding:'8px 11px',marginBottom:6,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+                  {/* 연습 장부는 원화로 적으므로 참고 환산을 남긴다.
+                      거래소 모드는 적은 값이 곧 USDT라 환산할 것이 없다. */}
+                  {pv.currency==='KRW'&&<div><span style={{color:T.muted}}>≈ </span><span style={{color:T.txt,fontWeight:700}}>{txt(pv.refUsdt?.notional ?? null,(n)=>`${n.toFixed(1)} USDT`)}</span></div>}
                   <div><span style={{color:T.muted}}>수량 </span><span style={{color:T.acl,fontWeight:700}}>{txt(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)}</span></div>
                   <div><span style={{color:T.muted}}>명목 </span><span style={{color:shownNotional!=null&&shownNotional<CLIENT_MIN_NOTIONAL_USDT?T.red:T.grn,fontWeight:700}}>{txt(shownNotional,(n)=>`${n.toFixed(0)} USDT`)}</span></div>
                   <div><span style={{color:T.muted}}>증거금 </span><span style={{color:T.txt,fontWeight:700}}>{txt(shownMargin,(m)=>`${m.toFixed(1)} USDT`)}</span></div>
