@@ -2,6 +2,11 @@
 // 주문 파라미터 검증 — 거래소로 나가기 전 마지막 방어선.
 // 음수·NaN·Infinity·비정상 크기·잘못된 심볼이 큐나 거래소에 들어가지 못하게 한다.
 
+// 받는 주문유형 목록은 **화면과 같은 파일에서** 온다. 두 벌로 두면
+// 화면이 서버가 받지 않는 유형을 고르게 하거나, 뒤에서 조용히 다른 유형으로
+// 바꾸는 일이 생긴다 — 실제로 그랬다.
+import { SERVER_ORDER_TYPES, isServerOrderType, type ServerOrderType } from '../markets/orderTypes';
+
 export interface OrderInput {
   symbol?: unknown;
   side?: unknown;
@@ -19,7 +24,7 @@ export interface ValidationResult {
   value?: {
     symbol: string;
     side: 'BUY' | 'SELL';
-    type: 'MARKET' | 'LIMIT';
+    type: ServerOrderType;
     quantity: number;
     price?: number;
     leverage?: number;
@@ -62,10 +67,13 @@ export function validateOrder(input: OrderInput): ValidationResult {
 
   // ── 주문 유형 ──
   const typeRaw = String(input.type || 'MARKET').toUpperCase();
-  if (typeRaw !== 'MARKET' && typeRaw !== 'LIMIT') {
-    return { ok: false, code: 'invalid_type', error: 'type은 MARKET 또는 LIMIT이어야 합니다' };
+  if (!isServerOrderType(typeRaw)) {
+    return {
+      ok: false, code: 'invalid_type',
+      error: `type은 ${SERVER_ORDER_TYPES.join(' 또는 ')}이어야 합니다 (받은 값: ${typeRaw})`,
+    };
   }
-  const type = typeRaw as 'MARKET' | 'LIMIT';
+  const type: ServerOrderType = typeRaw;
 
   // ── 수량 (핵심) ──
   const quantity = finiteNumber(input.quantity);

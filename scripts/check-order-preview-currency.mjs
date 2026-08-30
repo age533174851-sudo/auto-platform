@@ -233,10 +233,14 @@ else {
     else if (openAt < 0) {
       fail(`${PAGE}의 openConfirm이 시세를 읽은 뒤 확인창을 열지 않습니다`);
     }
-    // 실패하면 **열지 않는다.**
-    const guardAt = oc.search(/if\s*\(\s*!\s*q\s*\)/);
+    // ── 시장가는 시세를 못 읽으면 **열지 않는다** ──
+    //
+    // 지정가는 다르다. 체결될 가격을 사용자가 이미 정했으므로 시세 조회
+    // 실패로 막으면 낼 수 있는 주문까지 막힌다. 그래서 가드는 유형을
+    // 구분해야 하고, 유형 없이 통째로 막거나 통째로 여는 것은 둘 다 틀리다.
+    const guardAt = oc.search(/if\s*\(\s*!\s*q\s*&&[^)]*MARKET/);
     if (guardAt < 0) {
-      fail(`${PAGE}의 openConfirm이 시세 실패를 구분하지 않습니다`
+      fail(`${PAGE}의 openConfirm이 시장가에서 시세 실패를 구분하지 않습니다`
         + ' — 가격을 모른 채 승인 화면이 열립니다');
     } else {
       const guard = braceBodyAt(oc, guardAt);

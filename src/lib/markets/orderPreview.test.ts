@@ -6,7 +6,7 @@
 // 쓰고 있었다. 100 USDT·2,500 USDT짜리 종목에서 화면은 `0.000029 ETH`,
 // 실제 주문은 `0.04 ETH` — 약 1,375배 다른 숫자를 보고 승인했다.
 
-import { test, eq, assert } from '../../test/harness';
+import { test, eq, assert, close } from '../../test/harness';
 import { orderPreviewOf, exchangePreviewOf, practicePreviewOf } from './orderPreview';
 
 export function runOrderPreviewTests() {
@@ -129,5 +129,72 @@ export function runOrderPreviewTests() {
   test('거래소 미리보기에는 참고 환산이 없다 — 두 통화를 섞지 않는다', () => {
     const p = exchangePreviewOf({ amountUsdt: 100, venuePrice: 2500, leverage: 10 });
     eq(p.refUsdt, null);
+  });
+
+  // ── 주문유형이 수량 기준가를 정한다 (C3.5) ──
+
+  test('시장가는 거래소 선물가로 나눈다', () => {
+    const p = orderPreviewOf({
+      mode: 'testnet', amount: 100, venuePrice: 2500, krwPrice: null, leverage: 10,
+      orderType: 'MARKET', limitPrice: 2000 });
+    eq(p.state, 'READY');
+    eq(p.price, 2500);
+    eq(p.basis, 'VENUE_MARK');
+    eq(p.qty, 0.04);
+    eq(p.notional, 100);
+    eq(p.margin, 10);
+  });
+
+  test('**지정가는 지정가로 나눈다 — 마크가로 나누면 명목가가 어긋난다**', () => {
+    const p = orderPreviewOf({
+      mode: 'testnet', amount: 100, venuePrice: 2500, krwPrice: null, leverage: 10,
+      orderType: 'LIMIT', limitPrice: 2000 });
+    eq(p.state, 'READY');
+    eq(p.price, 2000);
+    eq(p.basis, 'LIMIT_PRICE');
+    eq(p.qty, 0.05);
+    eq(p.notional, 100);
+    eq(p.margin, 10);
+    // 마크가로 나눴다면 0.04가 나오고, 실제 체결 명목은 0.04 × 2000 = 80이다.
+    close(p.qty! * 2000, 100, 1e-9);
+    assert(p.qty !== 0.04, '마크가 기준 수량이 나왔습니다');
+  });
+
+  test('지정가는 거래소 시세를 못 읽어도 계산된다', () => {
+    const p = orderPreviewOf({
+      mode: 'live', amount: 100, venuePrice: null, krwPrice: null, leverage: 10,
+      orderType: 'LIMIT', limitPrice: 2000 });
+    eq(p.state, 'READY');
+    eq(p.qty, 0.05);
+    eq(p.basis, 'LIMIT_PRICE');
+  });
+
+  test('지정가에 가격이 없으면 시장가로 되돌리지 않는다', () => {
+    for (const lp of [null, undefined, 0, -1, '', 'abc']) {
+      const p = orderPreviewOf({
+        mode: 'testnet', amount: 100, venuePrice: 2500, krwPrice: null, leverage: 10,
+        orderType: 'LIMIT', limitPrice: lp as any });
+      eq(p.state, 'PRICE_UNKNOWN');
+      eq(p.qty, null);
+      // 마크가로 계산된 0.04가 새어 나오면 안 된다.
+      eq(p.price, null);
+    }
+  });
+
+  test('지원하지 않는 유형은 막는다 — 조용히 시장가가 되지 않는다', () => {
+    for (const t of ['CONDITIONAL', 'STOP', 'trigger', '']) {
+      const p = orderPreviewOf({
+        mode: 'testnet', amount: 100, venuePrice: 2500, krwPrice: null, leverage: 10,
+        orderType: t, limitPrice: 2000 });
+      assert(p.state !== 'READY', `${t}가 통과했습니다`);
+      eq(p.qty, null);
+    }
+  });
+
+  test('유형을 안 주면 시장가다 — 기존 호출부가 그대로 동작한다', () => {
+    const p = orderPreviewOf({
+      mode: 'testnet', amount: 100, venuePrice: 2500, krwPrice: null, leverage: 10 });
+    eq(p.qty, 0.04);
+    eq(p.basis, 'VENUE_MARK');
   });
 }
