@@ -167,7 +167,7 @@ else {
       fail(`${PAGE}이 시세를 연결에 묶어 읽지 않습니다 — 거래소·환경이 정해지지 않습니다`);
     }
     // 화면 참고가격(`/api/prices`)을 실행 수량에 쓰면 안 된다.
-    for (const m of branch.matchAll(/nativePrice\s*=\s*([^;\n]{0,60})/g)) {
+    for (const m of branch.matchAll(/nativePrice[^=\n]{0,30}=\s*([^;\n]{0,60})/g)) {
       if (/sel\.quotePrice|sel\.p\b/.test(m[1])) {
         fail(`${PAGE}이 화면 참고가격을 실행 수량에 씁니다: ${m[1].trim().slice(0, 50)}`
           + ' — venue 선물 시세를 읽으세요');
@@ -224,11 +224,20 @@ else {
   //
   // A 계정 잔고를 읽은 뒤 B로 바꾸고 B 조회가 실패하면, 비율 버튼이
   // **다른 계정의 잔고**로 B 주문 크기를 정할 수 있었다.
-  if (!/scopedValueFor\s*\(/.test(page)) {
-    fail(`${PAGE}이 잔고·시세를 연결에 묶지 않습니다 — 이전 계정의 값이 남습니다`);
+  if (!/balance:\s*scopedValueFor\s*\(/.test(page)) {
+    fail(`${PAGE}이 비율 잔고를 연결에 묶지 않습니다 — 이전 계정의 값이 남습니다`);
   }
   if (!/balanceStateOf\s*\(/.test(page)) {
     fail(`${PAGE}이 잔고 0과 '못 읽음'을 가르지 않습니다`);
+  }
+  {
+    // `Number(null)`은 0이다. 먼저 거르지 않으면 **못 읽은 것이 '잔고 0'**이 된다.
+    const lib2 = existsSync(LIB) ? stripJs(readFileSync(LIB, 'utf8')) : '';
+    const body2 = functionBodyAt(lib2, 'balanceStateOf');
+    if (body2 && !/raw\s*==\s*null/.test(body2)) {
+      fail(`${LIB}의 balanceStateOf가 빈 값을 먼저 거르지 않습니다`
+        + " — Number(null)이 0이라 '못 읽음'이 '잔고 0'이 됩니다");
+    }
   }
   // 조회 실패에서 이전 값을 남기면 안 된다.
   const unknownWrites = (page.match(/setUsdtBalance\(\{[^}]{0,80}kind:\s*'UNKNOWN'/g) || []).length;
@@ -251,10 +260,18 @@ else {
     ['getPremiumIndex', '바이낸스 선물 마크가'],
     ['getTickerGateFutures', 'Gate 선물 시세'],
   ]) {
-    if (!q.includes(need)) fail(`${QUOTE}이 ${why}(${need})를 읽지 않습니다`);
+    if (!new RegExp(`${need}\\s*\\(`).test(q)) fail(`${QUOTE}이 ${why}(${need})를 부르지 않습니다`);
   }
-  if (!/creds\.testnet/.test(q)) {
-    fail(`${QUOTE}이 연결의 환경(testnet/live)을 따르지 않습니다`);
+  {
+    // 한 갈래만 고쳐 두면 다른 거래소에서 실전 가격으로 테스트넷 수량을 만든다.
+    const envUses = (q.match(/creds\.testnet/g) || []).length;
+    if (envUses < 2) {
+      fail(`${QUOTE}이 연결의 환경을 ${envUses}곳에서만 따릅니다`
+        + ' — 바이낸스·Gate 두 갈래 모두 따라야 합니다');
+    }
+    if (/(getPremiumIndex|getTickerGateFutures)\s*\([^)]*,\s*(true|false)\s*\)/.test(q)) {
+      fail(`${QUOTE}이 환경을 상수로 박았습니다 — 연결이 정한 값을 쓰세요`);
+    }
   }
   // 다른 거래소·현물·환율로 대신 읽으면 안 된다.
   for (const bad of ['api.binance.com', '/api/prices', '1375', 'coingecko']) {
