@@ -162,4 +162,53 @@ export function runQuantityInputTests() {
     eq(percentLabel('ENTRY'), '가용 증거금 비율');
     eq(percentLabel('EXIT'), '포지션 청산 비율');
   });
+
+  // ── 명목가는 배율과 무관하다 ────────────────────────────
+  //
+  // TradingPage가 명목가를 `amount × leverage`로 그리고 있었다. 그런데
+  // 실제 주문은 `qty = amount / price`라서 거래소에 서는 명목가는
+  // `amount` 그대로다 — **10배에서는 화면이 실제의 열 배**를 말했다.
+  // 증거금은 반대로 `margin = notional`이라 배율이 무시돼 역시 열 배였다.
+  //
+  // 실행은 처음부터 옳았다. 틀린 것은 표시였고, 그 표시를 여기 정의된
+  // 뜻에 맞춘다. 이 묶음이 그 뜻을 붙든다.
+
+  test('명목가 100 · 10배 · 가격 50 → 수량 2 · 명목 100 · 증거금 10', () => {
+    const r = convertQuantity({ mode: 'QUOTE_NOTIONAL', value: 100, price: 50, leverage: 10 });
+    eq(r.ok, true);
+    eq(r.baseQty, 2);
+    eq(r.notionalUsd, 100);
+    eq(r.marginUsd, 10);
+  });
+
+  test('**배율이 바뀌어도 명목가는 그대로다** — 증거금만 달라진다', () => {
+    for (const [lev, margin] of [[1, 100], [10, 10], [100, 1]] as Array<[number, number]>) {
+      const r = convertQuantity({ mode: 'QUOTE_NOTIONAL', value: 100, price: 50, leverage: lev });
+      eq(r.notionalUsd, 100);          // 배율과 무관
+      eq(r.marginUsd, margin);
+      eq(r.baseQty, 2);                // 수량도 배율과 무관
+    }
+  });
+
+  test('수량 × 가격이 곧 명목가다 — 화면이 적는 두 숫자가 서로 맞는다', () => {
+    // 예전 화면은 같은 줄에 '수량 0.002'와 '명목 1,000 USDT'를 함께
+    // 적었다. 0.002 × 50,000 = 100이지 1,000이 아니다.
+    const r = convertQuantity({ mode: 'BASE_ASSET', value: 0.002, price: 50_000, leverage: 10 });
+    eq(r.notionalUsd, 100);
+    eq((r.baseQty as number) * 50_000, r.notionalUsd);
+    eq(r.marginUsd, 10);
+  });
+
+  test('증거금 입력은 반대다 — 적은 돈에 배율을 곱한 만큼이 포지션', () => {
+    const r = convertQuantity({ mode: 'INITIAL_MARGIN', value: 100, price: 50, leverage: 10 });
+    eq(r.notionalUsd, 1000);
+    eq(r.marginUsd, 100);
+    eq(r.baseQty, 20);
+  });
+
+  test('배율을 모르면 증거금을 지어내지 않는다', () => {
+    const r = convertQuantity({ mode: 'QUOTE_NOTIONAL', value: 100, price: 50, leverage: null });
+    eq(r.notionalUsd, 100);
+    eq(r.marginUsd, null);             // 0이 아니라 모름
+  });
 }
