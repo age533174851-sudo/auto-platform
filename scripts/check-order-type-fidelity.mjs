@@ -156,8 +156,21 @@ else {
   // 계획 함수가 기준가를 스스로 다시 정하면 안 된다.
   const plan = fnBodyAt(c, 'export function planExchangeOrder');
   if (!plan) fail(`${CURR}에서 planExchangeOrder 본문을 찾지 못했습니다`);
-  else if (!/sizingPriceOf\s*\(/.test(plan)) {
-    fail(`${CURR}의 planExchangeOrder가 sizingPriceOf를 쓰지 않습니다 — 기준가 판단이 두 벌이 됩니다`);
+  else {
+    // ── 이름이 있는 것과 **그 결과를 쓰는 것**은 다르다 ──
+    //
+    // 되돌림 시험에서 `const sized: any = ({...}) || sizingPriceOf({...})`를
+    // 넣자 그대로 통과했다. 호출은 남아 있지만 값은 화면이 지어낸 것이었다.
+    if (!/const\s+sized\s*=\s*sizingPriceOf\s*\(/.test(plan)) {
+      fail(`${CURR}의 planExchangeOrder가 기준가를 sizingPriceOf에서 받지 않습니다`
+        + ' — 기준가 판단이 두 벌이 됩니다');
+    }
+    if (!/sized\.kind\s*!==\s*'READY'/.test(plan)) {
+      fail(`${CURR}의 planExchangeOrder가 기준가 실패를 구분하지 않습니다`);
+    }
+    if (!/=\s*sized\.price\b/.test(plan)) {
+      fail(`${CURR}의 planExchangeOrder가 sizingPriceOf가 정한 가격을 쓰지 않습니다`);
+    }
   }
 }
 
