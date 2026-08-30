@@ -41,6 +41,28 @@ import type { DispatchSource } from '../autotrade/schedulePoll';
  * **"모른다"에 이름을 준다.** 안 도는 것과 못 본 것은 다른 사실이고,
  * 둘을 같은 칸에 적으면 진짜 고장이 그 안에 묻힌다.
  */
+/**
+ * 예약 폴러가 낼 수 있는 오류의 **전부**.
+ *
+ * 여기 없는 것은 `UNKNOWN`이 된다 — 새 문자열이 공개 경로로 새지 않는다.
+ */
+export const SCHEDULER_ERROR_CODES = [
+  /** 예약 표를 읽지 못했다 */
+  'SCHEDULE_READ_FAILED',
+  /** 읽기는 했는데 한 건의 평가가 실패했다 */
+  'EVALUATION_FAILED',
+  /** 워커가 아는 코드가 아니다. 상세는 Fly 로그에만 있다 */
+  'UNKNOWN',
+] as const;
+export type SchedulerErrorCode = (typeof SCHEDULER_ERROR_CODES)[number];
+
+/** 사람이 읽는 한 줄. **코드에서만 만든다 — 예외 문구를 쓰지 않는다** */
+export const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
+  SCHEDULE_READ_FAILED: '예약 표를 읽지 못했습니다 (상세는 워커 로그)',
+  EVALUATION_FAILED: '예약 평가가 실패했습니다 (상세는 워커 로그)',
+  UNKNOWN: '워커가 분류하지 못한 오류입니다 (상세는 워커 로그)',
+};
+
 export type SchedulerCode =
   /** 설정이 갖춰졌고, main 락을 쥐었고, 최근에 실제로 들여다봤다 */
   | 'WORKER_PRIMARY_ACTIVE'
@@ -81,9 +103,18 @@ export interface SchedulerReport {
    * 얹지 않는다. 판정에 쓰는 것은 시각과 횟수뿐이다.
    */
   lastEvalIso: string | null;
-  /** 마지막 오류. **조용히 지우지 않는다** */
+  /**
+   * 마지막 오류. **조용히 지우지 않되, 문구를 내보내지도 않는다.**
+   *
+   * 예외 메시지를 그대로 담으면 **임의의 내부 문자열이 로그인 없이 열리는
+   * 경로로 나간다** — DB 오류 본문, 연결 이름, 주소가 어떤 모양으로 섞여
+   * 들어올지 미리 알 수 없다. 가리개(정규식)로 막는 것은 방어선이 아니라
+   * 추측이다. 그래서 **미리 정해 둔 코드만** 담는다.
+   *
+   * 상세 예외는 워커의 Fly 로그에만 남는다.
+   */
   lastErrorIso: string | null;
-  lastError: string | null;
+  lastErrorCode: SchedulerErrorCode | null;
   /** 폴링을 시도한 횟수 · 평가를 돌린 횟수 */
   pollCount: number | null;
   evalCount: number | null;
@@ -107,19 +138,18 @@ export const STALE_POLL_FACTOR = 5;
 export const STALE_POLL_FLOOR_MS = 5 * 60_000;
 
 /**
- * 오류 문구에서 **주소와 토큰을 걷어낸다.**
+ * 코드가 아닌 것은 공개 보고에 담지 않는다.
  *
- * 이 값은 로그인 없이 열리는 경로로 나간다. 그런데 평가 실패 문구는
- * `fetch failed: https://<앱 주소>/api/...` 처럼 **APP_URL을 그대로 물고
- * 온다.** 있다/없다만 적기로 해 놓고 오류 문구로 주소가 새면 같은 일이다.
- *
- * 지우는 것이 아니라 가린다 — 무엇이 실패했는지는 남아야 고칠 수 있다.
+ * 예전 줄에 예외 문구만 있으면 **"오류가 있었다"는 사실은 살리고 문구는
+ * 버린다** — 조용히 통과시키지 않되, 임의 문자열도 내보내지 않는다.
  */
-export function scrubEvidence(text: string): string {
-  return String(text ?? '')
-    .replace(/https?:\/\/[^\s"'`)]+/gi, '[주소 가림]')
-    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[가림]')
-    .slice(0, 300);
+function errorCode(code: any, legacyText: any, legacyIso: any): SchedulerErrorCode | null {
+  const c = String(code ?? '').trim();
+  if ((SCHEDULER_ERROR_CODES as readonly string[]).includes(c)) return c as SchedulerErrorCode;
+  if (c) return 'UNKNOWN';
+  // 073 이전 형식: 문구만 있고 코드가 없다.
+  if (legacyText || legacyIso) return 'UNKNOWN';
+  return null;
 }
 
 function iso(v: any): string | null {
@@ -159,9 +189,10 @@ export function parseSchedulerReport(raw: any): SchedulerReport | null {
     lastSkippedCount: num(o.lastSkippedCount),
     lastEvalIso: iso(o.lastEvalIso),
     lastErrorIso: iso(o.lastErrorIso),
-    // 예전 배포가 적어 둔 줄에 종목·결과가 들어 있어도 **여기서 떨어진다.**
-    // 형식이 바뀌었다고 과거 줄을 고치러 가지 않는다 — 읽는 쪽이 버린다.
-    lastError: o.lastError ? scrubEvidence(String(o.lastError)) : null,
+    // **아는 코드가 아니면 UNKNOWN이다.** 예전 배포가 적어 둔 줄에 예외
+    // 문구(`lastError`)가 들어 있어도 여기서 떨어진다 — 형식이 바뀌었다고
+    // 과거 줄을 고치러 가지 않고, 읽는 쪽이 버린다.
+    lastErrorCode: errorCode(o.lastErrorCode, o.lastError, o.lastErrorIso),
     pollCount: num(o.pollCount),
     evalCount: num(o.evalCount),
     source: (o.source === 'GITHUB_FALLBACK' || o.source === 'MANUAL') ? o.source : 'FLY_WORKER',
@@ -172,7 +203,7 @@ export function parseSchedulerReport(raw: any): SchedulerReport | null {
 export const EMPTY_SCHEDULER_REPORT: SchedulerReport = {
   hasAppUrl: null, hasAdminSecret: null, isMain: null, pollIntervalMs: null,
   lastPollIso: null, lastDueCount: null, lastSkippedCount: null,
-  lastEvalIso: null, lastErrorIso: null, lastError: null,
+  lastEvalIso: null, lastErrorIso: null, lastErrorCode: null,
   pollCount: null, evalCount: null, source: 'FLY_WORKER',
 };
 
@@ -198,7 +229,9 @@ export function mergeSchedulerReport(
       if (!(k in patch)) continue;
       const v = (patch as any)[k];
       if (v === undefined) continue;
-      next[k] = k === 'lastError' && typeof v === 'string' ? scrubEvidence(v) : v;
+      // **코드가 아닌 오류는 UNKNOWN으로 접는다.** 워커가 실수로 예외
+      // 문구를 넣어도 공개 보고에는 코드만 남는다.
+      next[k] = k === 'lastErrorCode' ? errorCode(v, null, true) : v;
     }
     next.source = 'FLY_WORKER';
     return next as SchedulerReport;
@@ -262,7 +295,11 @@ export function schedulerVerdict(i: {
   evidence.push(`마지막 폴링 ${report.lastPollIso ?? '없음'}`);
   evidence.push(`due ${report.lastDueCount ?? '모름'}건 · 건너뜀 ${report.lastSkippedCount ?? '모름'}건`);
   evidence.push(report.lastEvalIso ? `마지막 평가 ${report.lastEvalIso}` : '마지막 평가 없음');
-  if (report.lastError) evidence.push(`마지막 오류 ${report.lastErrorIso ?? '시각 모름'} — ${report.lastError}`);
+  // 근거 줄도 **코드에서만 만든다.** 예외 문구는 여기까지 오지 않는다.
+  if (report.lastErrorCode) {
+    evidence.push(`마지막 오류 ${report.lastErrorIso ?? '시각 모름'} — `
+      + `${report.lastErrorCode} (${SCHEDULER_ERROR_TEXT[report.lastErrorCode]})`);
+  }
   evidence.push(`깨운 주체 ${report.source}`);
 
   // 워커가 끊겼으면 예약도 안 돈다. **이건 "모른다"가 아니라 고장이다.**
@@ -309,9 +346,10 @@ export function schedulerVerdict(i: {
 
   // 오류로 끝났고 그 뒤로 성공한 폴링이 없다 → 멈춘 것이다.
   const errMs = ms(report.lastErrorIso);
-  if (report.lastError && errMs != null && errMs >= pollMs) {
+  if (report.lastErrorCode && errMs != null && errMs >= pollMs) {
     return { code: 'WORKER_PRESENT_BUT_RUNTIME_BROKEN', standbyOnly, evidence,
-      reason: `마지막 폴링이 오류로 끝났습니다: ${report.lastError}` };
+      reason: `마지막 폴링이 오류로 끝났습니다: ${report.lastErrorCode} `
+        + `— ${SCHEDULER_ERROR_TEXT[report.lastErrorCode]}` };
   }
 
   const interval = Number.isFinite(report.pollIntervalMs as number) && (report.pollIntervalMs as number) > 0

@@ -118,6 +118,9 @@ if (judgeRaw) {
     'lastEvalSymbol', 'lastEvalOutcome', 'symbol', 'outcome',
     'userId', 'user_id', 'accountId', 'account_id', 'connectionId', 'connection_id',
     'apiKey', 'apiSecret', 'fingerprint', 'appUrl', 'adminSecret', 'token',
+    // **자유 문자열 오류는 담지 않는다.** 예외 문구에 무엇이 섞여 들어올지
+    // 미리 알 수 없고, 정규식으로 가리는 것은 방어가 아니라 추측이다.
+    'lastError', 'error', 'message', 'detail', 'stack', 'reason',
   ];
   const shape = judge.match(/export interface SchedulerReport \{([\s\S]*?)\n\}/);
   if (!shape) fail(`${JUDGE}에서 SchedulerReport 형식을 찾지 못했습니다`);
@@ -134,12 +137,18 @@ if (judgeRaw) {
     }
   }
 
-  // 오류 문구는 주소를 물고 온다(`fetch failed: https://<앱 주소>/…`).
-  // 있다/없다만 적기로 해 놓고 오류로 주소가 새면 같은 일이다.
-  if (!/export function scrubEvidence/.test(judge)) {
-    fail(`${JUDGE}에 scrubEvidence가 없습니다 — 오류 문구로 주소가 샙니다`);
-  } else if (!/lastError.*scrubEvidence|scrubEvidence\(String\(o\.lastError\)\)/.test(judge)) {
-    fail(`${JUDGE}이 lastError에 scrubEvidence를 걸지 않습니다`);
+  // ── 오류는 **미리 정한 코드**로만 나간다 ──
+  //
+  // 가리개(정규식)를 공개 안전성의 주 방어선으로 쓰지 않는다. 통과 목록이
+  // 방어선이다 — 목록에 없는 것은 UNKNOWN으로 접힌다.
+  if (!/lastErrorCode:\s*SchedulerErrorCode \| null/.test(judge)) {
+    fail(`${JUDGE}의 lastErrorCode가 코드 타입이 아닙니다 — 자유 문자열이 공개됩니다`);
+  }
+  if (!/export const SCHEDULER_ERROR_CODES\s*=\s*\[/.test(judge)) {
+    fail(`${JUDGE}에 SCHEDULER_ERROR_CODES 목록이 없습니다`);
+  }
+  if (!/SCHEDULER_ERROR_CODES as readonly string\[\]\)\.includes/.test(judge)) {
+    fail(`${JUDGE}이 오류 코드를 목록으로 거르지 않습니다 — 임의 문자열이 그대로 통과합니다`);
   }
 
   // 관측 장치는 본업보다 약해야 한다. 병합기가 던지면 예약도 같이 멈춘다.
@@ -172,7 +181,15 @@ if (workerRaw) {
   if (!/hasAdminSecret\s*:/.test(w)) fail(`${WORKER}이 ADMIN_SECRET 유무를 적지 않습니다`);
   if (!/isMain\s*[,}]|isMain\s*:/.test(w)) fail(`${WORKER}이 main 락 상태를 적지 않습니다 — 예비 워커를 보고 "안 돈다"고 읽게 됩니다`);
   if (!/lastPollIso\s*:/.test(w)) fail(`${WORKER}이 마지막 폴링 시각을 적지 않습니다 — 그게 "실제로 봤다"의 증거입니다`);
-  if (!/lastError\s*:/.test(w)) fail(`${WORKER}이 폴링 오류를 적지 않습니다 — 조용히 멈추면 초록으로 보입니다`);
+  if (!/lastErrorCode\s*:/.test(w)) fail(`${WORKER}이 폴링 오류를 적지 않습니다 — 조용히 멈추면 초록으로 보입니다`);
+  if (/lastError\s*:/.test(w)) fail(`${WORKER}이 예외 문구를 보고에 담습니다 — 코드(lastErrorCode)만 적으세요`);
+  // 코드 자리에 템플릿 문자열이 들어가면 예외 문구가 그대로 실린다.
+  for (const m of w.matchAll(/lastErrorCode\s*:\s*([^,\n}]+)/g)) {
+    const v = m[1].trim();
+    if (!/^'[A-Z_]+'$/.test(v)) {
+      fail(`${WORKER}의 lastErrorCode에 상수가 아닌 값이 들어갑니다: ${v.slice(0, 60)}`);
+    }
+  }
 
   // ── 값이 새지 않는가 ──
   //
@@ -247,6 +264,30 @@ if (routeRaw) {
       + ` (scheduler 포함 조회 ${withCol ? '있음' : '없음'} · 뺀 조회 ${withoutCol ? '있음' : '없음'})`);
   }
   if (!/pickSchedulerRow\s*\(/.test(r)) fail(`${ROUTE}이 main 락을 쥔 줄을 고르지 않습니다`);
+
+  // ── 한 워커의 사실과 다른 워커의 사실을 섞지 않는가 ──
+  //
+  // 보고는 main 락을 쥔 줄에서 고르면서 생존 여부만 `rows[0]`(가장 최근
+  // heartbeat)에서 계산하면, **죽은 main 워커가 살아 있는 예비 워커의
+  // 생존 신호를 빌려 쓴다.** 폴링 허용치 안에서 가짜 초록이 나온다.
+  const callStart = r.indexOf('schedulerVerdict({');
+  if (callStart < 0) fail(`${ROUTE}에서 schedulerVerdict 호출을 찾지 못했습니다`);
+  else {
+    const call = bodyAt(r, callStart);
+    for (const bad of ['fly.alive', 'fly.ageSec', 'fly.lastSeen', 'fly.workerId']) {
+      if (call.includes(bad)) {
+        fail(`${ROUTE}이 schedulerVerdict에 ${bad}을(를) 넘깁니다`
+          + ' — 판정 값은 전부 pickSchedulerRow가 고른 같은 줄에서 나와야 합니다');
+      }
+    }
+    for (const need of ['workerAlive:', 'heartbeatAgeSec:', 'workerStartedIso:']) {
+      if (!call.includes(need)) fail(`${ROUTE}의 schedulerVerdict 호출에 ${need}이 없습니다`);
+    }
+  }
+  // 고른 줄의 heartbeat로 생존을 계산했는가.
+  if (!/picked\.row/.test(r) || !/workerAlive\(nowMs,\s*Number\.isFinite\(pSeenMs\)/.test(r)) {
+    fail(`${ROUTE}이 고른 줄의 heartbeat로 생존을 계산하지 않습니다`);
+  }
   // 이 경로는 로그인 없이 열린다. 인증을 새로 붙이지 않았는지도 본다.
   if (/auth_required|resolveUserId/.test(r)) {
     fail(`${ROUTE}에 인증이 붙었습니다 — CI가 못 읽게 되면 다시 사람이 확인하게 됩니다`);

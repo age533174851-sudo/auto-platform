@@ -537,10 +537,13 @@ async function pollSchedules(): Promise<void> {
     console.error('[schedules] 예약을 읽지 못했습니다:', e?.message || e);
     // 오류도 값으로 남는다 — 다음 성공한 폴링이 이 시각을 앞지를 때까지
     // 판정은 RUNTIME_BROKEN이다.
+    // **코드만 남긴다.** 상세 예외는 위 console.error(=Fly 로그)에만 있다 —
+    // 이 값은 로그인 없이 열리는 경로로 나가고, 예외 문구에 무엇이 섞여
+    // 들어올지는 미리 알 수 없다.
     noteScheduler({
       pollCount,
       lastErrorIso: new Date(nowMs).toISOString(),
-      lastError: `예약을 읽지 못했습니다: ${String(e?.message || e)}`,
+      lastErrorCode: 'SCHEDULE_READ_FAILED',
     });
     return;
   }
@@ -585,11 +588,10 @@ async function pollSchedules(): Promise<void> {
       if (r.saveError) console.warn(`[schedules] ${row.symbol} 기록 경고: ${r.saveError}`);
     } catch (e: any) {
       console.error(`[schedules] ${row.symbol} 평가 실패:`, e?.message || e);
-      // 오류 문구는 주소를 물고 오기 쉽다(`fetch failed: https://…`).
-      // 가리는 것은 `scrubEvidence`가 하고, 여기서는 종목을 빼서 넘긴다.
+      // 상세는 바로 위 console.error(=Fly 로그)에만 남는다.
       noteScheduler({
         lastErrorIso: new Date().toISOString(),
-        lastError: `예약 평가 실패: ${String(e?.message || e)}`,
+        lastErrorCode: 'EVALUATION_FAILED',
       });
     }
   }

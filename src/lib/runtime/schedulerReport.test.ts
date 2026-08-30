@@ -12,7 +12,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   schedulerVerdict, parseSchedulerReport, pickSchedulerRow,
-  mergeSchedulerReport, scrubEvidence, EMPTY_SCHEDULER_REPORT,
+  mergeSchedulerReport, EMPTY_SCHEDULER_REPORT, SCHEDULER_ERROR_CODES,
   STALE_POLL_FLOOR_MS, type SchedulerReport,
 } from './schedulerReport';
 
@@ -24,7 +24,7 @@ const ok: SchedulerReport = {
   pollIntervalMs: 60_000, lastPollIso: at(20_000),
   lastDueCount: 0, lastSkippedCount: 3,
   lastEvalIso: at(3_600_000),
-  lastErrorIso: null, lastError: null, pollCount: 400, evalCount: 12,
+  lastErrorIso: null, lastErrorCode: null, pollCount: 400, evalCount: 12,
   source: 'FLY_WORKER',
 };
 
@@ -99,20 +99,20 @@ export function runSchedulerReportTests() {
 
   test('마지막 폴링이 오류로 끝났으면 초록으로 넘기지 않는다', () => {
     const v = schedulerVerdict({
-      report: { ...ok, lastErrorIso: at(10_000), lastError: '예약을 읽지 못했습니다: timeout' },
+      report: { ...ok, lastErrorIso: at(10_000), lastErrorCode: 'SCHEDULE_READ_FAILED' },
       workerAlive: true, nowMs: NOW,
     });
     eq(v.code, 'WORKER_PRESENT_BUT_RUNTIME_BROKEN');
-    assert(/timeout/.test(v.reason), v.reason);
+    assert(/SCHEDULE_READ_FAILED/.test(v.reason), v.reason);
   });
 
   test('오래된 오류 뒤에 성공한 폴링이 있으면 돈다고 말한다', () => {
     const v = schedulerVerdict({
-      report: { ...ok, lastErrorIso: at(600_000), lastError: '한때 실패', lastPollIso: at(20_000) },
+      report: { ...ok, lastErrorIso: at(600_000), lastErrorCode: 'EVALUATION_FAILED', lastPollIso: at(20_000) },
       workerAlive: true, nowMs: NOW,
     });
     eq(v.code, 'WORKER_PRIMARY_ACTIVE');
-    assert(v.evidence.some(e => /한때 실패/.test(e)), '오류는 지우지 않고 근거에 남긴다');
+    assert(v.evidence.some(e => /EVALUATION_FAILED/.test(e)), '오류는 지우지 않고 근거에 남긴다');
   });
 
   test('heartbeat가 끊겼으면 예약도 안 도는 것이다', () => {
@@ -128,6 +128,47 @@ export function runSchedulerReportTests() {
     const v = schedulerVerdict({ report: { ...ok, isMain: false }, workerAlive: true, nowMs: NOW });
     eq(v.code, 'INSUFFICIENT_EVIDENCE');
     eq(v.standbyOnly, true);
+  });
+
+  // ── 한 워커의 사실과 다른 워커의 사실을 섞지 않는다 ──
+  //
+  // 보고는 main 락을 쥔 줄에서 고르면서 생존 여부만 가장 최근 줄에서
+  // 계산하면, **죽은 main 워커가 살아 있는 예비 워커의 생존 신호를 빌려
+  // 쓴다.** 폴링 허용치(최대 5분) 안에서 초록이 나온다 — 그동안 아무도
+  // 예약을 보고 있지 않은데도.
+
+  test('**죽은 main + 살아 있는 예비**를 섞어 ACTIVE로 읽지 않는다', () => {
+    const deadMain = { worker_id: 'A', last_seen: at(3_600_000), scheduler: { ...ok, isMain: true, lastPollIso: at(60_000) } };
+    const freshStandby = { worker_id: 'B', last_seen: at(2_000), scheduler: { ...ok, isMain: false } };
+    // 응답 순서는 last_seen 내림차순이라 예비가 먼저 온다.
+    const picked = pickSchedulerRow([freshStandby, deadMain]);
+    eq((picked.row as any).worker_id, 'A');          // 보고는 main 줄에서 고른다
+
+    // 라우트가 하는 것과 같은 계산: **고른 줄의 heartbeat로** 생존을 본다.
+    const seenMs = Date.parse(String((picked.row as any).last_seen));
+    const v = schedulerVerdict({
+      report: parseSchedulerReport((picked.row as any).scheduler),
+      workerAlive: NOW - seenMs < 120_000,           // 한 시간 전 → false
+      heartbeatAgeSec: Math.round((NOW - seenMs) / 1000),
+      standbyOnly: picked.standbyOnly, nowMs: NOW,
+    });
+    assert(v.code !== 'WORKER_PRIMARY_ACTIVE', `죽은 main을 ACTIVE로 읽었습니다: ${v.code}`);
+    eq(v.code, 'WORKER_PRESENT_BUT_RUNTIME_BROKEN');
+  });
+
+  test('고른 main이 살아 있고 폴링도 최근이면 ACTIVE가 유지된다', () => {
+    const staleStandby = { worker_id: 'B', last_seen: at(3_600_000), scheduler: { ...ok, isMain: false } };
+    const liveMain = { worker_id: 'A', last_seen: at(2_000), scheduler: { ...ok, isMain: true, lastPollIso: at(20_000) } };
+    const picked = pickSchedulerRow([liveMain, staleStandby]);
+    eq((picked.row as any).worker_id, 'A');
+    const seenMs = Date.parse(String((picked.row as any).last_seen));
+    const v = schedulerVerdict({
+      report: parseSchedulerReport((picked.row as any).scheduler),
+      workerAlive: NOW - seenMs < 120_000,
+      heartbeatAgeSec: Math.round((NOW - seenMs) / 1000),
+      standbyOnly: picked.standbyOnly, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_PRIMARY_ACTIVE');
   });
 
   test('머신이 둘이면 **main 락을 쥔 줄**을 고른다', () => {
@@ -188,28 +229,51 @@ export function runSchedulerReportTests() {
 
   // ── 공개 경로로 값이 새지 않는다 ──
 
-  test('오류 문구의 주소를 가린다 — APP_URL이 오류로 새지 않는다', () => {
-    const scrubbed = scrubEvidence('fetch failed: https://my-app.vercel.app/api/autotrade/evaluate 502');
-    assert(!/vercel\.app/.test(scrubbed), scrubbed);
-    assert(/주소 가림/.test(scrubbed), scrubbed);
-    assert(/502/.test(scrubbed), '무엇이 실패했는지는 남아야 고칠 수 있다');
+  // **가리개가 아니라 목록이 방어선이다.**
+  //
+  // 예외 문구를 정규식으로 가리는 것은 방어가 아니라 추측이다 — 무엇이
+  // 섞여 들어올지 미리 알 수 없다. 미리 정한 코드만 통과시킨다.
+
+  test('임의 문자열은 공개 보고에 남지 않는다 — UNKNOWN으로 접힌다', () => {
+    const leaky = [
+      'fetch failed: https://my-app.vercel.app/api/autotrade/evaluate 502',
+      'user age533174851@gmail.com not permitted',
+      'duplicate key value violates unique constraint "paper_positions_pkey"',
+      `unauthorized: ${'X'.repeat(28)}`,
+      'connection_id 3f2a-9b user_id 77 account 12345',
+      'ETIMEDOUT 10.0.0.4:5432',
+    ];
+    for (const raw of leaky) {
+      const merged = mergeSchedulerReport(ok, { lastErrorCode: raw as any });
+      eq(merged.lastErrorCode, 'UNKNOWN');
+      const parsed = parseSchedulerReport({ ...ok, lastErrorCode: raw });
+      eq(parsed?.lastErrorCode, 'UNKNOWN');
+      // 근거 줄에도 원문이 실리면 안 된다.
+      const v = schedulerVerdict({ report: parsed, workerAlive: true, nowMs: NOW });
+      const printed = [v.reason, ...v.evidence].join(' | ');
+      assert(!printed.includes(raw), `근거에 원문이 실렸습니다: ${printed}`);
+    }
   });
 
-  test('긴 토큰처럼 생긴 것도 가린다', () => {
-    const fake = 'X'.repeat(28);   // 진짜 키 모양을 시험 데이터로 쓰지 않는다
-    const scrubbed = scrubEvidence(`unauthorized: ${fake}`);
-    assert(!scrubbed.includes(fake), scrubbed);
-    assert(/가림/.test(scrubbed), scrubbed);
+  test('073 이전 형식의 예외 문구는 사실만 남기고 문구는 버린다', () => {
+    const legacy = parseSchedulerReport({
+      ...ok, lastErrorCode: undefined,
+      lastError: '평가 실패: https://app.example.com/x', lastErrorIso: at(1000),
+    });
+    eq(legacy?.lastErrorCode, 'UNKNOWN');            // 오류가 있었다는 사실은 남는다
+    eq((legacy as any)?.lastError, undefined);       // 문구는 형식에 없다
   });
 
-  test('병합을 지나가는 오류도 가려진다', () => {
-    const after = mergeSchedulerReport(ok, { lastError: '평가 실패: https://app.example.com/x' });
-    assert(!/example\.com/.test(String(after.lastError)), String(after.lastError));
+  test('아는 코드는 그대로 통과한다', () => {
+    for (const c of SCHEDULER_ERROR_CODES) {
+      eq(parseSchedulerReport({ ...ok, lastErrorCode: c })?.lastErrorCode, c);
+    }
   });
 
-  test('보고에는 종목·결과·자격 칸이 아예 없다', () => {
+  test('보고에는 종목·결과·자격·예외문구 칸이 아예 없다', () => {
     const denied = ['lastEvalSymbol', 'lastEvalOutcome', 'userId', 'user_id', 'accountId',
-      'connectionId', 'apiKey', 'secret', 'fingerprint', 'appUrl', 'adminSecret'];
+      'connectionId', 'apiKey', 'secret', 'fingerprint', 'appUrl', 'adminSecret',
+      'lastError', 'error', 'message', 'detail', 'stack'];
     const keys = Object.keys(EMPTY_SCHEDULER_REPORT);
     for (const d of denied) assert(!keys.includes(d), `${d}가 공개 보고에 들어 있습니다`);
     eq(keys.includes('hasAppUrl'), true);

@@ -75,7 +75,24 @@ export async function GET(req: NextRequest) {
   // "안 돈다"가 아니다. 073이 아직인 배포에서는 칸 자체가 없다.
   let schedulerReport: SchedulerReport | null | undefined = undefined;
   let schedulerStandbyOnly = false;
+  // ── 판정에 쓰는 값은 **전부 같은 워커 줄에서 나온다** ──
+  //
+  // 예전에는 보고를 main 락을 쥔 줄에서 고르고, 생존 여부는 `rows[0]`
+  // (가장 최근 heartbeat)에서 계산해 **둘을 섞어서** 판정기에 넘겼다.
+  // 그러면 이런 조합이 통과한다:
+  //
+  //   Worker A  main=true · 60초 전 폴링 · **죽었다**
+  //   Worker B  standby   ·  2초 전 heartbeat
+  //
+  //   → 보고는 A, 생존은 B → 폴링 허용치(최대 5분) 안에서
+  //     WORKER_PRIMARY_ACTIVE가 나온다. **아무도 예약을 안 보고 있는데.**
+  //
+  // isMain · lastPoll · startedAt · heartbeat 신선도가 모두 같은
+  // `worker_id`에 귀속돼야 한다.
   let schedulerStartedIso: string | null = null;
+  let schedulerAlive: boolean | null = null;
+  let schedulerAgeSec: number | null = null;
+  let schedulerWorkerId: string | null = null;
 
   if (!sb) {
     fly.error = 'supabase_not_configured';
@@ -99,8 +116,16 @@ export async function GET(req: NextRequest) {
         const picked = pickSchedulerRow(rows);
         schedulerReport = parseSchedulerReport(picked.row?.scheduler);
         schedulerStandbyOnly = picked.standbyOnly;
+        const pr: any = picked.row ?? null;
         // 방금 뜬 워커를 "한 번도 안 봤다"고 적지 않기 위한 기준 시각.
-        schedulerStartedIso = (picked.row as any)?.started_at ?? null;
+        schedulerStartedIso = pr?.started_at ?? null;
+        schedulerWorkerId = pr?.worker_id ?? null;
+        // **고른 줄의 heartbeat로 계산한다.** rows[0]을 쓰면 다른 워커의
+        // 생존 신호로 이 워커가 살아 있다고 적게 된다.
+        const pSeenMs = pr ? Date.parse(String(pr.last_seen)) : NaN;
+        schedulerAgeSec = Number.isFinite(pSeenMs)
+          ? Math.max(0, Math.round((nowMs - pSeenMs) / 1000)) : null;
+        schedulerAlive = workerAlive(nowMs, Number.isFinite(pSeenMs) ? pSeenMs : null);
       }
       const row = rows[0] ?? null;
       if (row) {
@@ -129,8 +154,11 @@ export async function GET(req: NextRequest) {
 
   // 판정은 `schedulerReport.ts` 한 곳에 있다. 여기서 다시 판단하지 않는다.
   const scheduler: SchedulerVerdict = schedulerVerdict({
-    report: schedulerReport, workerAlive: fly.alive,
-    heartbeatAgeSec: fly.ageSec, standbyOnly: schedulerStandbyOnly,
+    // **전부 같은 줄에서 나온 값이다.** `fly.*`(가장 최근 heartbeat)를
+    // 섞지 않는다 — 섞으면 죽은 main 워커가 살아 있는 예비 워커의
+    // 생존 신호를 빌려 쓴다.
+    report: schedulerReport, workerAlive: schedulerAlive,
+    heartbeatAgeSec: schedulerAgeSec, standbyOnly: schedulerStandbyOnly,
     workerStartedIso: schedulerStartedIso, nowMs,
   });
 
@@ -198,6 +226,12 @@ export async function GET(req: NextRequest) {
       reason: scheduler.reason,
       evidence: scheduler.evidence,
       standbyOnly: scheduler.standbyOnly,
+      // **어느 워커의 보고인지 밝힌다.** `fly.workerId`와 다를 수 있다 —
+      // 가장 최근 heartbeat와 예약을 보는 워커가 다른 머신일 수 있고,
+      // 그때 판정은 아래 workerId 쪽 값으로만 이뤄진다.
+      workerId: schedulerWorkerId,
+      heartbeatAgeSec: schedulerAgeSec,
+      alive: schedulerAlive,
       report: schedulerReport ?? null,
       note: schedulerReport === undefined
         ? '워커 heartbeat에 예약 상태 칸이 없습니다 — 마이그레이션 073이 적용되고 워커가 다시 뜨면 채워집니다'
