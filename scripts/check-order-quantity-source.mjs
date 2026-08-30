@@ -106,9 +106,15 @@ if (!existsSync(ROUTE)) fail(`${ROUTE}이 없습니다`);
 else {
   const r = stripJs(readFileSync(ROUTE, 'utf8'));
   for (const need of ['futuresSymbolFilters', 'quantizeOrder']) {
-    if (!r.includes(need)) {
+    // `const { quantizeOrder } = await import(...)` 의 이름만 보면
+    // 호출을 스텁으로 바꿔도 통과한다. **부르는지**를 본다.
+    if (!new RegExp(`${need}\\s*\\(`).test(r)) {
       fail(`${ROUTE}이 ${need}를 부르지 않습니다 — 수량 규격을 정하는 곳이 사라졌습니다`);
     }
+  }
+  // 부르기만 하고 결과를 안 쓰면 규격이 적용되지 않는다.
+  if (!/orderQty\s*=\s*q\.quantity/.test(r)) {
+    fail(`${ROUTE}이 quantizeOrder의 결과를 주문 수량으로 쓰지 않습니다`);
   }
   // 거절을 무시하고 통과시키면 정본이 있으나 마나다.
   if (!/if\s*\(\s*!\s*q\.ok\s*\)/.test(r)) {
