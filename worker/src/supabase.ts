@@ -3,6 +3,10 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { workerIdentityOf } from '../../src/lib/runtime/workerIdentity';
 // **판정은 웹과 같은 파일을 쓴다.** 워커용 사본을 두면 한쪽만 고쳐진다.
 import { heartbeatVerdict, projectRefOf } from '../../src/lib/runtime/heartbeatVerify';
+// 예약 폴러가 스스로 적는 상태. **형식과 판정은 웹과 같은 파일이다.**
+import {
+  mergeSchedulerReport, EMPTY_SCHEDULER_REPORT, type SchedulerReport,
+} from '../../src/lib/runtime/schedulerReport';
 
 let _sb: SupabaseClient | null = null;
 export function sb(): SupabaseClient {
@@ -166,6 +170,25 @@ export function noteStartupResult(ok: boolean, detail: string | null): void {
   startupDetail = detail ? String(detail).slice(0, 300) : null;
 }
 
+// ── 예약 폴러가 스스로 적는 상태 ──────────────────────
+//
+// **"fly logs를 열어 `[schedules]`가 찍히는지 봐 주세요"를 없앤다.**
+//
+// 사실을 아는 것은 워커다 — 환경변수가 있는지, main 락을 쥐었는지,
+// 예약을 마지막으로 언제 봤는지. 그걸 heartbeat에 같이 적으면 인증이
+// 필요 없는 `/api/system/deployment`가 그대로 보여 준다.
+//
+// **값은 들어가지 않는다.** APP_URL도 ADMIN_SECRET도 있다/없다만 적는다.
+let scheduler: SchedulerReport = EMPTY_SCHEDULER_REPORT;
+
+/** 아는 만큼만 덮어쓴다. 판정과 병합 규칙은 schedulerReport.ts에 있다 */
+export function noteScheduler(patch: Partial<SchedulerReport>): void {
+  // **관측 장치는 본업보다 약해야 한다.** 여기서 던지면 예약 평가도,
+  // 주문 실행도, 생존 신호도 같이 멈춘다 — 고장을 보려고 만든 것이
+  // 고장을 만드는 셈이다. 병합기도 던지지 않지만 한 겹 더 둔다.
+  try { scheduler = mergeSchedulerReport(scheduler, patch); } catch { /* 이전 상태 유지 */ }
+}
+
 /** 값을 안 보여 주고 같은지만 말한다 */
 function fp(raw: string): string | null {
   const v = String(raw || '').trim();
@@ -196,6 +219,10 @@ function runtimeColumns(tickCount: number | null): Record<string, any> {
     encryption_fingerprint: fp(process.env.EXCHANGE_ENCRYPTION_KEY || ''),
     startup_ok: startupOk,
     startup_detail: startupDetail,
+    // 073이 아직인 배포에서는 이 칸이 없다. 그때는 위의
+    // `runtimeColumnsMissing` 경로가 이 값을 빼고 다시 적는다 —
+    // **생존 신호를 이것 때문에 잃지 않는다.**
+    scheduler,
   };
 }
 

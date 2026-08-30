@@ -346,6 +346,20 @@ jobs:
       - name: 연습 장부 환경 격리 (실전을 연습 장부에 적지 않는다)
         run: node scripts/check-practice-ledger-env.mjs
 
+      # ── 예약 주 경로 증거 배선 ──
+      #
+      # 예약 평가의 주 실행자는 Fly Worker이고 GitHub autotrade-tick은
+      # 예비다. 그런데 2026-08-29에 "그게 실제로 도는가"에 값으로 답할 수
+      # 없었다 — 근거가 셋 다 사람 손을 탄다: 로그는 `fly logs`를 열어야
+      # 하고, DB는 CI가 못 붙고, runtime-health는 로그인이 필요하다.
+      #
+      # **확인할 방법이 없는 것 자체가 고장이다.** 이제 워커가 heartbeat에
+      # 적고, 인증 없는 `/api/system/deployment`가 보여 주고,
+      # `deployment-check`가 배포마다 찍는다. 이 검사는 그 배선이 다시
+      # 끊기는 것과, 그 길로 **값이 새는 것**을 막는다.
+      - name: 예약 주 경로 증거 배선 (fly logs를 사람이 열지 않는다)
+        run: node scripts/check-scheduler-evidence.mjs
+
       # ── 테스트 등록 검사 ──
       #
       # 재배치 충돌을 기계적으로 해소하다 `run-tests.mjs`의 등록 줄이

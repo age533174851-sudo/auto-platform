@@ -32,6 +32,11 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 // 로그에 남기므로, 둘을 비교하면 같은 DB를 보고 있는지 알 수 있다.
 import { fingerprintOf } from '@/lib/system/fingerprint';
 import { runtimeSkew, deploymentVerdict, workerAlive } from '@/lib/runtime/workerPlan';
+// 예약 주 경로가 도는가. **판정은 여기 없다** — 이 파일은 읽어서 넘긴다.
+import {
+  parseSchedulerReport, pickSchedulerRow, schedulerVerdict,
+  type SchedulerReport, type SchedulerVerdict,
+} from '@/lib/runtime/schedulerReport';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -64,15 +69,65 @@ export async function GET(req: NextRequest) {
     ageSec: number | null; alive: boolean | null; status: string | null; error: string | null;
   } = { sha: null, workerId: null, lastSeen: null, ageSec: null, alive: null, status: null, error: null };
 
+  // ── 예약 주 경로 ──
+  //
+  // **undefined = 못 읽었다, null = 워커가 적은 적이 없다.** 둘 다
+  // "안 돈다"가 아니다. 073이 아직인 배포에서는 칸 자체가 없다.
+  let schedulerReport: SchedulerReport | null | undefined = undefined;
+  let schedulerStandbyOnly = false;
+  // ── 판정에 쓰는 값은 **전부 같은 워커 줄에서 나온다** ──
+  //
+  // 예전에는 보고를 main 락을 쥔 줄에서 고르고, 생존 여부는 `rows[0]`
+  // (가장 최근 heartbeat)에서 계산해 **둘을 섞어서** 판정기에 넘겼다.
+  // 그러면 이런 조합이 통과한다:
+  //
+  //   Worker A  main=true · 60초 전 폴링 · **죽었다**
+  //   Worker B  standby   ·  2초 전 heartbeat
+  //
+  //   → 보고는 A, 생존은 B → 폴링 허용치(최대 5분) 안에서
+  //     WORKER_PRIMARY_ACTIVE가 나온다. **아무도 예약을 안 보고 있는데.**
+  //
+  // isMain · lastPoll · startedAt · heartbeat 신선도가 모두 같은
+  // `worker_id`에 귀속돼야 한다.
+  let schedulerStartedIso: string | null = null;
+  let schedulerAlive: boolean | null = null;
+  let schedulerAgeSec: number | null = null;
+  let schedulerWorkerId: string | null = null;
+
   if (!sb) {
     fly.error = 'supabase_not_configured';
   } else {
     try {
-      const { data, error } = await (sb as any).from('worker_heartbeat')
-        .select('worker_id, last_seen, status, current_task, version')
-        .order('last_seen', { ascending: false }).limit(1);
+      // 머신이 둘이고 **예약은 main 락을 쥔 쪽만 본다.** 한 줄만 읽으면
+      // 예비 워커를 보고 "안 돈다"고 적을 수 있다 — 틀린 빨강이다.
+      const COLS = 'worker_id, last_seen, status, current_task, version, started_at';
+      let { data, error } = await (sb as any).from('worker_heartbeat')
+        .select(`${COLS}, scheduler`)
+        .order('last_seen', { ascending: false }).limit(4);
+      // 073이 아직인 배포. **생존 신호까지 같이 잃지 않는다** — 칸을 빼고
+      // 다시 읽고, 예약 판정만 '모름'으로 둔다.
+      if (error && /column|schema cache/i.test(String(error.message))) {
+        ({ data, error } = await (sb as any).from('worker_heartbeat')
+          .select(COLS).order('last_seen', { ascending: false }).limit(4));
+      }
       if (error) throw new Error(error.message);
-      const row = Array.isArray(data) ? data[0] : null;
+      const rows: any[] = Array.isArray(data) ? data : [];
+      if (rows.some(r => 'scheduler' in (r ?? {}))) {
+        const picked = pickSchedulerRow(rows);
+        schedulerReport = parseSchedulerReport(picked.row?.scheduler);
+        schedulerStandbyOnly = picked.standbyOnly;
+        const pr: any = picked.row ?? null;
+        // 방금 뜬 워커를 "한 번도 안 봤다"고 적지 않기 위한 기준 시각.
+        schedulerStartedIso = pr?.started_at ?? null;
+        schedulerWorkerId = pr?.worker_id ?? null;
+        // **고른 줄의 heartbeat로 계산한다.** rows[0]을 쓰면 다른 워커의
+        // 생존 신호로 이 워커가 살아 있다고 적게 된다.
+        const pSeenMs = pr ? Date.parse(String(pr.last_seen)) : NaN;
+        schedulerAgeSec = Number.isFinite(pSeenMs)
+          ? Math.max(0, Math.round((nowMs - pSeenMs) / 1000)) : null;
+        schedulerAlive = workerAlive(nowMs, Number.isFinite(pSeenMs) ? pSeenMs : null);
+      }
+      const row = rows[0] ?? null;
       if (row) {
         const seenMs = Date.parse(String(row.last_seen));
         fly = {
@@ -96,6 +151,16 @@ export async function GET(req: NextRequest) {
         : msg;
     }
   }
+
+  // 판정은 `schedulerReport.ts` 한 곳에 있다. 여기서 다시 판단하지 않는다.
+  const scheduler: SchedulerVerdict = schedulerVerdict({
+    // **전부 같은 줄에서 나온 값이다.** `fly.*`(가장 최근 heartbeat)를
+    // 섞지 않는다 — 섞으면 죽은 main 워커가 살아 있는 예비 워커의
+    // 생존 신호를 빌려 쓴다.
+    report: schedulerReport, workerAlive: schedulerAlive,
+    heartbeatAgeSec: schedulerAgeSec, standbyOnly: schedulerStandbyOnly,
+    workerStartedIso: schedulerStartedIso, nowMs,
+  });
 
   const skew = runtimeSkew({ vercelSha: web.sha, flySha: fly.sha });
   // ── 코드가 같아도 DB가 따라오지 않았으면 '배포 완료'가 아니다 ──
@@ -147,6 +212,30 @@ export async function GET(req: NextRequest) {
       fingerprint: fingerprintOf(process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL),
       note: '워커 로그의 `[heartbeat] ok ... target=<지문>`과 같아야 같은 DB입니다 — '
         + '다르면 워커가 다른 프로젝트에 쓰고 있습니다',
+    },
+    // ── 예약 평가를 지금 누가 돌리고 있는가 ──
+    //
+    // 주 실행자는 Fly Worker(`pollSchedules`)이고 GitHub `autotrade-tick`은
+    // 예비다. 그런데 그게 실제로 도는지는 `fly logs`에만 있었다 —
+    // **사람이 열어야 읽히는 사실은 없는 사실과 같다.**
+    //
+    // 이제 워커가 heartbeat에 적고 여기가 그대로 보여 준다. 값은 없다:
+    // APP_URL·ADMIN_SECRET은 **있다/없다만** 들어 있다.
+    scheduler: {
+      code: scheduler.code,
+      reason: scheduler.reason,
+      evidence: scheduler.evidence,
+      standbyOnly: scheduler.standbyOnly,
+      // **어느 워커의 보고인지 밝힌다.** `fly.workerId`와 다를 수 있다 —
+      // 가장 최근 heartbeat와 예약을 보는 워커가 다른 머신일 수 있고,
+      // 그때 판정은 아래 workerId 쪽 값으로만 이뤄진다.
+      workerId: schedulerWorkerId,
+      heartbeatAgeSec: schedulerAgeSec,
+      alive: schedulerAlive,
+      report: schedulerReport ?? null,
+      note: schedulerReport === undefined
+        ? '워커 heartbeat에 예약 상태 칸이 없습니다 — 마이그레이션 073이 적용되고 워커가 다시 뜨면 채워집니다'
+        : '값은 들어 있지 않습니다. 환경변수는 있다/없다만 적습니다',
     },
     // 서버가 스스로 답할 수 있는 것.
     skew,
