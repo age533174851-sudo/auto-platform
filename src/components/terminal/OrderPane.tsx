@@ -35,6 +35,12 @@ import {
   effectiveQtyFor, percentLabel, convertQuantity, needsEquity,
   MODE_LABEL, MODE_HINT, type QuantityInputMode,
 } from '@/lib/markets/quantityInput';
+// 버튼이 만든 것은 숫자가 아니라 **의도**다. 표시용으로 깎은 문자열을
+// 실행 수량으로 되읽지 않는다 — 판정은 이 파일 한 곳에 있다.
+import {
+  makeIntent, closePercentOf, executionQuantityOf,
+  type QuantityIntent,
+} from '@/lib/ui/quantityIntent';
 import { canDo, intentOf } from '@/lib/auth/tradingCapability';
 import { progressOf, shouldRefresh, type ProgressView } from '@/lib/engine/orderProgress';
 import {
@@ -378,6 +384,15 @@ export const OrderFormPanel = memo(function OrderFormPanel({
   const [slPct, setSlPct] = useState(2);
   /** 마지막으로 고른 계좌 위험 %. 버튼을 칠해 두기 위한 것 */
   const [riskPick, setRiskPick] = useState<number | null>(null);
+  /**
+   * 버튼이 만든 **의도**. 개수가 아니다.
+   *
+   * 비율·위험 버튼은 계산 결과를 `toFixed`로 깎아 입력칸에 적고, 주문 때
+   * 그 문자열을 다시 읽어 거래소로 보내고 있었다. 표시용으로 깎은 숫자가
+   * 실행 수량이 된 것이다 — USDT 칸에서는 되돌림 오차가 서버 내림보다
+   * 커서 **보유보다 많은 청산 수량**이 나갈 수 있었다.
+   */
+  const [qtyIntent, setQtyIntent] = useState<QuantityIntent | null>(null);
   // 직접 입력 중인 문자열. 숫자 상태와 따로 두는 이유: '1.'이나 '0.'처럼
   // **아직 숫자가 아닌 중간 상태**를 그대로 보여줘야 지우고 다시 쓸 수 있다.
   // 숫자만 들고 있으면 '10'에서 한 글자 지운 '1'이 곧바로 확정돼 버린다.
@@ -563,6 +578,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     if (had(price !== '', 'price')) setPrice('');
     if (had(qty !== '', 'quantity')) setQty('');
     if (had(riskPick != null, 'riskPick')) setRiskPick(null);
+    setQtyIntent(null);
     if (had(reduceOnly, 'reduceOnly')) setReduceOnly(false);
     if (had(slPriceText !== '', 'stopPrice')) setSlPriceText('');
     if (had(msg != null, 'lastResult')) setMsg(null);
@@ -1033,7 +1049,16 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       if (posAmt == null || !(Math.abs(posAmt) > 0)) return;   // 모르면 채우지 않는다
       const base = Math.abs(posAmt) * (pct / 100);
       const v = unit === 'BASE' ? base : base * (unitPx || 0);
-      setQty(v > 0 ? String(Number(v.toFixed(unit === 'BASE' ? 6 : 2))) : '');
+      // **개수를 만들지 않는다.** 화면에는 참고값을 적고, 주문에는 비율을
+      // 보낸다 — 서버가 주문 순간의 실제 포지션을 다시 읽어 계산한다.
+      // 그래야 버튼을 누른 뒤 포지션이 줄어도, USDT 되돌림 오차가 있어도,
+      // 거래소 규격을 못 읽어도 보유량을 넘지 않는다.
+      const made = makeIntent({
+        source: 'PERCENT_CLOSE', rawBaseQty: base, percent: pct,
+        displayNumber: v, displayDecimals: unit === 'BASE' ? 6 : 2,
+      });
+      setQty(made.display);
+      setQtyIntent(made.intent);
       return;
     }
     const px = Number(price) || mid || 0;
@@ -1043,8 +1068,17 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     const notionalUsd = balanceUsd * (pct / 100) * leverage;
     // **고른 단위로 적는다.** 개수 칸에 USDT를, USDT 칸에 개수를 넣으면
     // 사용자가 보는 숫자와 나가는 주문이 어긋난다.
-    const v = unit === 'BASE' ? notionalUsd / px : notionalUsd;
-    setQty(v > 0 ? String(Number(v.toFixed(unit === 'BASE' ? 6 : 2))) : '');
+    // 실행에 쓸 것은 **반올림 없는 개수**다. USDT 칸이어도 개수를 들고
+    // 간다 — 예전에는 버튼 시각 가격으로 곱하고 주문 시각 가격으로 나눠서,
+    // 가격이 내리면 원래 계산값보다 큰 수량이 나갔다.
+    const rawBase = notionalUsd / px;
+    const v = unit === 'BASE' ? rawBase : notionalUsd;
+    const made = makeIntent({
+      source: 'PERCENT_ENTRY', rawBaseQty: rawBase,
+      displayNumber: v, displayDecimals: unit === 'BASE' ? 6 : 2,
+    });
+    setQty(made.display);
+    setQtyIntent(made.intent);
   };
 
   /**
@@ -1072,9 +1106,15 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     // **못 냈으면 채우지 않고 이유를 적는다.** 조용히 아무 일도 안
     // 일어나면 사용자는 버튼이 고장 난 줄 안다.
     if (r.qty == null || !(r.qty > 0)) { setMsg({ ok: false, text: r.reason }); return; }
-    setQty(unit === 'BASE'
-      ? String(Number(r.qty.toFixed(6)))
-      : String(Number((r.qty * px).toFixed(2))));
+    // planSize가 낸 값을 그대로 들고 간다. 표시만 깎는다 — 깎은 값이
+    // 실행 수량이 되면 허용한 위험을 넘을 수 있다.
+    const made = makeIntent({
+      source: 'RISK', rawBaseQty: r.qty,
+      displayNumber: unit === 'BASE' ? r.qty : r.qty * px,
+      displayDecimals: unit === 'BASE' ? 6 : 2,
+    });
+    setQty(made.display);
+    setQtyIntent(made.intent);
     setRiskPick(riskPct);
     setMsg(r.ok ? null : { ok: false, text: r.reason });
   };
@@ -1121,8 +1161,63 @@ export const OrderFormPanel = memo(function OrderFormPanel({
       setMsg({ ok: false, text: '가격을 확인하지 못해 USDT를 수량으로 바꿀 수 없습니다 — 지정가를 입력하거나 단위를 ' + base + '로 바꾸세요' });
       return;
     }
-    const q = Number(baseQty);
+    // ── 버튼이 만든 의도가 살아 있으면 그것을 쓴다 ──
+    //
+    // 입력칸 문자열은 사람이 읽는 값이다. 표시용으로 깎은 숫자를 다시
+    // 파싱해서 거래소로 보내면, 깎으면서 올라간 만큼이 그대로 주문 크기가
+    // 된다. 사용자가 칸을 고쳤으면 의도는 이미 풀려 있고 사용자가 적은
+    // 값이 정답이다 — 그 판정은 `quantityIntent`가 한다.
+    const exec = executionQuantityOf(qtyIntent, qty, baseQty);
+    const q = Number(exec.qty);
     if (!Number.isFinite(q) || q <= 0) { setMsg({ ok: false, text: '수량을 입력하세요' }); return; }
+
+    // ── 비율 청산은 개수가 아니라 비율을 보낸다 ──
+    //
+    // "0.123456 BTC를 닫아라"가 아니라 **"지금 실제 포지션의 100%를
+    // 닫아라"**가 사용자의 의도다. 서버(`close-position`)는 quantity를
+    // 받지 않고 주문 순간의 포지션을 다시 읽어 계산한다 — Binance·Gate
+    // 분기도 거기 이미 있다.
+    //
+    // 그래서 버튼을 누른 뒤 포지션이 줄어도, USDT 되돌림 오차가 있어도,
+    // 거래소 규격을 못 읽어도 **보유량을 넘는 청산이 나가지 않는다.**
+    //
+    // 모의 계좌는 이 경로가 없다. 사용자가 개수를 직접 적은 청산도
+    // 기존 경로 그대로다 — 이번 변경의 대상은 버튼이 만든 의도뿐이다.
+    const closePct = reduceOnly && !isPaper ? closePercentOf(qtyIntent, qty) : null;
+    if (closePct != null) {
+      // 방향은 **실제 포지션**에서 온다. 버튼(BUY/SELL)으로 추측하지
+      // 않는다 — 서버도 열린 포지션과 다르면 거절한다.
+      if (!holding) {
+        setMsg({ ok: false, text: '열린 포지션을 확인하지 못해 비율 청산을 보낼 수 없습니다' });
+        return;
+      }
+      setBusy(true);
+      try {
+        const r = await fetch('/api/binance/futures/close-position', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: auth },
+          body: JSON.stringify({
+            connectionId: modeResolution.connId,
+            symbol: symbol.id, positionSide: holding, percent: closePct,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d?.error) {
+          setMsg({ ok: false, text: d?.message || d?.error || `청산 요청 실패 (HTTP ${r.status})` });
+        } else {
+          setMsg({ ok: true, text: `${holding} ${closePct}% 청산 요청을 보냈습니다` });
+          setQty(''); setQtyIntent(null);
+          // 포지션·잔고를 다시 읽는다 — 방금 닫은 것이 화면에 남아 있으면
+          // 사용자는 청산이 안 된 줄 안다.
+          setRefreshSeq(n => n + 1);
+        }
+      } catch (e: any) {
+        setMsg({ ok: false, text: `청산 요청 오류 — ${String(e?.message || e)}` });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     if (!reduceOnly && !(slPct > 0)) {
       setMsg({ ok: false, text: '손절 폭을 고르세요 — 손절 없는 진입은 받지 않습니다' });
       return;
@@ -1547,6 +1642,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                   // 0.09 USDT로 읽히면 의도한 것의 70만분의 1이 나간다.
                   setQty('');
                   setRiskPick(null);
+                  setQtyIntent(null);
                   setUnitSheet(false);
                 }}
                 style={{
@@ -1695,12 +1791,20 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               // 청산용으로 채워 둔 전량이 신규 진입 수량이 되면 의도의
               // 몇 배가 열린다.
               if (close && posAmt != null && Math.abs(posAmt) > 0) {
+                // 이 칸 채움도 "전량을 닫는다"는 의도다. 개수를 만들어
+                // 보내지 않고 비율로 보낸다 — 아래 submit이 그렇게 읽는다.
                 const base = Math.abs(posAmt);
-                setQty(unit === 'BASE'
+                const shown = unit === 'BASE'
                   ? showQty(base)
-                  : String(Number((base * (unitPx || 0)).toFixed(2))));
+                  : String(Number((base * (unitPx || 0)).toFixed(2)));
+                setQty(shown);
+                setQtyIntent({
+                  source: 'PERCENT_CLOSE', rawBaseQty: base, percent: 100,
+                  displayValue: shown,
+                });
               } else {
                 setQty('');
+                setQtyIntent(null);
               }
             }} style={{
               flex: 1, minWidth: 0,
@@ -1760,7 +1864,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         display: 'flex', alignItems: 'center', background: C.raised,
         border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden',
       }}>
-        <input value={qty} onChange={e => setQty(e.target.value)}
+        <input value={qty} onChange={e => {
+            // **고친 순간 버튼의 의도는 끝난다.** 화면에는 100%가 남아
+            // 있는데 주문은 전량으로 나가면, 그건 요청하지 않은 거래다.
+            setQty(e.target.value);
+            setQtyIntent(null);
+          }}
           placeholder={MODE_LABEL[qtyMode]} inputMode="decimal"
           style={{
             flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
