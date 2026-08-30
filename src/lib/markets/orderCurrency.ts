@@ -38,6 +38,11 @@
 // 그래서 통화가 바뀌는 전환에서는 금액을 비운다 — 환산해서 넘기지 않는다.
 
 import { convertQuantity } from './quantityInput';
+// 주문유형과 수량 기준가의 정본. 화면·서버가 같은 목록을 본다.
+import {
+  SERVER_ORDER_TYPES, sizingPriceOf,
+  type ServerOrderType, type SizingBasis,
+} from './orderTypes';
 
 export type TradeMode = 'mock' | 'testnet' | 'live';
 export type OrderCurrency = 'KRW' | 'USDT';
@@ -63,11 +68,36 @@ export function amountMustClear(from: TradeMode | string, to: TradeMode | string
   return orderCurrencyOf(from) !== orderCurrencyOf(to);
 }
 
+/**
+ * 이 모드에서 **실제로 낼 수 있는** 주문유형.
+ *
+ * 화면의 선택지는 여기서만 나온다. 서버가 받지 않는 유형을 그리고 뒤에서
+ * 시장가로 바꾸는 것이 지금 고치는 고장이다.
+ *
+ * 연습 장부에는 미체결 주문을 들고 있을 엔진이 없다 — 즉시 체결만 한다.
+ * 그래서 **모의는 시장가뿐이다.** 지정가처럼 보이게 해 놓고 바로 체결하면
+ * 연습으로도 틀린 것을 배운다.
+ */
+export function supportedOrderTypes(mode: TradeMode | string): ServerOrderType[] {
+  return orderCurrencyOf(mode) === 'USDT'
+    ? (SERVER_ORDER_TYPES as readonly ServerOrderType[]).slice()
+    : ['MARKET'];
+}
+
+/** 이 모드에서 이 유형을 낼 수 있는가 */
+export function orderTypeAllowed(mode: TradeMode | string, orderType: string): boolean {
+  return supportedOrderTypes(mode).includes(String(orderType).toUpperCase() as ServerOrderType);
+}
+
 export type ExecBlockCode =
   /** 금액을 안 적었다. 기본값을 지어내지 않는다 */
   | 'NO_AMOUNT'
   /** 거래소 원본 가격을 못 읽었다. 환율로 되돌려 만들지 않는다 */
   | 'NATIVE_PRICE_UNKNOWN'
+  /** 지정가인데 가격이 없다. 시장가로 바꿔 보내지 않는다 */
+  | 'LIMIT_PRICE_REQUIRED'
+  /** 서버가 받지 않는 유형이다 */
+  | 'UNSUPPORTED_ORDER_TYPE'
   /** 화면이 아는 최소 명목가 미만 (정본은 서버 필터 — C4에서 옮긴다) */
   | 'BELOW_MIN_NOTIONAL';
 
@@ -80,6 +110,10 @@ export type ExchangeOrderPlan =
       qty: number;
       /** 예상 필요 증거금 (USDT). 배율을 모르면 null */
       marginUsdt: number | null;
+      /** 수량을 나눈 가격 (USDT) */
+      sizingPrice: number;
+      /** 그 가격이 어디서 왔는가 — 화면이 그대로 적는다 */
+      basis: SizingBasis;
     }
   | { kind: 'BLOCKED'; code: ExecBlockCode; reason: string };
 
@@ -100,18 +134,29 @@ export function planExchangeOrder(i: {
   leverage: number | null | undefined;
   /** 화면이 아는 최소 명목가. 정본은 서버 필터다 */
   minNotionalUsdt?: number | null;
+  /** 사용자가 고른 주문유형. 안 주면 시장가 */
+  orderType?: string | null;
+  /** 지정가 주문의 가격 (USDT) */
+  limitPrice?: number | string | null;
 }): ExchangeOrderPlan {
   const amount = Number(i.amountUsdt);
   if (!Number.isFinite(amount) || amount <= 0) {
     return { kind: 'BLOCKED', code: 'NO_AMOUNT', reason: '포지션 명목가(USDT)를 입력하세요' };
   }
-  const px = Number(i.nativePrice);
-  if (!Number.isFinite(px) || px <= 0) {
-    return {
-      kind: 'BLOCKED', code: 'NATIVE_PRICE_UNKNOWN',
-      reason: '거래소 가격을 확인하지 못해 주문할 수 없습니다 — 환율로 대신 계산하지 않습니다',
-    };
+  // ── 수량을 무엇으로 나눌지는 **주문유형이 정한다** ──
+  //
+  // 시장가는 지금 값에 체결되므로 거래소 선물가, 지정가는 그 값에 체결되므로
+  // 지정가다. 마크가로 지정가 수량을 만들면 체결 명목이 사용자가 적은
+  // 금액과 달라진다.
+  const sized = sizingPriceOf({
+    orderType: i.orderType ?? 'MARKET',
+    venuePrice: i.nativePrice ?? null,
+    limitPrice: i.limitPrice ?? null,
+  });
+  if (sized.kind !== 'READY') {
+    return { kind: 'BLOCKED', code: sized.code, reason: sized.reason };
   }
+  const px = sized.price;
   const min = Number(i.minNotionalUsdt);
   if (Number.isFinite(min) && min > 0 && amount < min) {
     return {
@@ -131,6 +176,8 @@ export function planExchangeOrder(i: {
     notionalUsdt: c.notionalUsd ?? amount,
     qty: c.baseQty,
     marginUsdt: c.marginUsd,
+    sizingPrice: px,
+    basis: sized.basis,
   };
 }
 

@@ -12,13 +12,14 @@ import { notionalAndMargin } from '@/lib/markets/quantityInput';
 // 실행 통화·모드 격리·잔고 출처 판정은 이 파일 한 곳에 있다.
 import {
   orderCurrencyOf, amountMustClear, planExchangeOrder, percentBaseFor,
-  balanceStateOf, scopedValueFor,
+  balanceStateOf, scopedValueFor, supportedOrderTypes,
   type BalanceState, type ConnectionScoped,
 } from '@/lib/markets/orderCurrency';
 // 주문 전 숫자와 실제 주문은 같은 곳에서 뜻을 받는다.
 import { orderPreviewOf } from '@/lib/markets/orderPreview';
 // 거래소 선물 시세를 읽는 경로는 하나다 — 확인창 열기 전, 그리고 제출 시점.
 import { fetchVenueQuote, toVenueSymbol } from '@/lib/markets/venueQuote';
+import type { ServerOrderType } from '@/lib/markets/orderTypes';
 import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/lib/autotrade/practiceActions';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -120,7 +121,14 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
   const [leverage,setLeverage]=useState(()=>{ try { const v=+(localStorage.getItem('tg_last_leverage')||'1'); return v>=1&&v<=125?v:1; } catch { return 1; } });
   useEffect(()=>{ try { localStorage.setItem('tg_last_leverage',String(leverage)); } catch {} }, [leverage]);
   const [marginMode,setMarginMode]=useState<'cross'|'isolated'>('isolated');
-  const [orderType,setOrderType]=useState('market');
+  /**
+   * 주문유형. **서버가 받는 이름 그대로 쓴다.**
+   *
+   * 예전에는 화면만의 소문자 이름(`market`/`limit`/`conditional`)이었고,
+   * 요청 본문에는 `'MARKET'`이 박혀 있었다. 이름이 두 벌이면 어느 쪽도
+   * 서로를 강제하지 못한다 — 지정가를 골라도 시장가가 나갔다.
+   */
+  const [orderType,setOrderType]=useState<ServerOrderType>('MARKET');
   const [showOrderbook,setShowOrderbook]=useState(true);
   const [showLevSheet,setShowLevSheet]=useState(false);
   const [limitPrice,setLimitPrice]=useState('');
@@ -130,6 +138,33 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
   /** 확인창을 열기 전 거래소 시세를 읽는 중 */
   const [quoting,setQuoting]=useState(false);
   useEffect(()=>{if(activeAsset){const {_ts,...clean}=activeAsset;setSel(clean as Asset);}},[activeAsset]);
+
+  /**
+   * 이 모드에서 실제로 낼 수 있는 주문유형. **화면이 정하지 않는다.**
+   * 서버 `validateOrder`가 받는 목록에서 온다.
+   */
+  const allowedTypes = supportedOrderTypes(tradeMode);
+
+  /** 지금 고른 연결의 거래소. 모르면 null — 추측하지 않는다 */
+  const selectedVenue: string | null = (() => {
+    const c = connections.find((x:any)=>x?.id===connId);
+    const v = c?.exchange_id ?? c?.exchange ?? null;
+    return v ? String(v).toLowerCase() : null;
+  })();
+
+  // ── 남은 지정가는 위험하다 ──
+  //
+  // 종목이나 연결이 바뀌었는데 이전 종목의 지정가가 남아 있으면, 사용자가
+  // 다시 보지 않고 확인을 누르는 순간 **다른 종목의 가격으로** 주문이
+  // 만들어진다. 자동 환산도 하지 않는다 — 사용자가 고른 적 없는 숫자다.
+  useEffect(()=>{ setLimitPrice(''); }, [sel.id, connId]);
+
+  // 낼 수 없는 유형이 남아 있으면 시장가로 되돌린다. 모의에는 미체결 주문을
+  // 들고 있을 엔진이 없어 지정가가 곧 즉시 체결이 된다 — 연습으로도 틀린
+  // 것을 배우게 된다.
+  useEffect(()=>{
+    if (!allowedTypes.includes(orderType)) { setOrderType('MARKET'); setLimitPrice(''); }
+  }, [tradeMode]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Binance 실시간 스트림 (호가·체결·티커) ──
   // 코인일 때만 붙인다. 호가창 탭이 닫혀 있으면 연결하지 않는다 —
@@ -557,18 +592,30 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
     // 연습 장부는 네트워크를 지나지 않는다 — 기존 그대로 연다.
     if (orderCurrency !== 'USDT') { setSide(nextSide); setTimeout(()=>setShowConfirm(true),0); return; }
     if (!connId) { showToast('거래소 연결을 선택하세요', false); return; }
+    // 낼 수 없는 유형이면 여기서 멈춘다. **시장가로 바꿔 보내지 않는다.**
+    if (!allowedTypes.includes(orderType)) {
+      showToast(`이 모드에서는 ${orderType} 주문을 낼 수 없습니다`, false); return;
+    }
+    // 지정가인데 가격이 없으면 확인창을 열지 않는다 — 승인할 수량 자체가 없다.
+    if (orderType === 'LIMIT' && !(Number(limitPrice) > 0)) {
+      showToast('지정가를 입력하세요 — 시장가로 바꿔 보내지 않습니다', false); return;
+    }
     setQuoting(true);
     const q = await fetchVenueQuote({
       connectionId: connId, symbol: toVenueSymbol(sel.sym || sel.id),
       authHeader: authHeaderRef.current });
     setQuoting(false);
-    if (!q) {
-      setVenueQuote(null);
+    setVenueQuote(q ?? null);
+    // ── 시세가 없어도 지정가는 낼 수 있다 ──
+    //
+    // 지정가의 체결 가격은 사용자가 이미 정했다. 시세 조회 가능 여부에
+    // 지정가 실행을 묶으면, 낼 수 있는 주문까지 막힌다. 시장가는 지금 값에
+    // 체결되므로 그 값을 모르면 승인할 수 없다.
+    if (!q && orderType === 'MARKET') {
       showToast('거래소 가격을 확인하지 못해 주문 확인을 열지 않았습니다'
         + ' — 현물 가격이나 환율로 대신 계산하지 않습니다', false);
       return;
     }
-    setVenueQuote(q);
     setSide(nextSide); setTimeout(()=>setShowConfirm(true),0);
   };
 
@@ -615,8 +662,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         // 확인창을 열 때도 같은 함수로 한 번 읽었다. 그 값은 **판단용
         // 예상값**이고, 여기서 다시 읽은 값이 **체결 크기의 정본**이다 —
         // 그 사이 가격은 움직인다.
-        const quoted = await fetchVenueQuote({
-          connectionId: connId, symbol: tradeSymbol, authHeader: authHeaderRef.current });
+        //
+        // **지정가는 다시 읽지 않는다.** 지정가의 수량 기준은 사용자가 정한
+        // 가격이라 마크가가 움직여도 바뀌지 않는다 — 여기서 다시 계산하면
+        // 승인한 수량과 나가는 수량이 달라진다.
+        const needsRequote = orderType === 'MARKET';
+        const quoted = needsRequote
+          ? await fetchVenueQuote({
+              connectionId: connId, symbol: tradeSymbol, authHeader: authHeaderRef.current })
+          : null;
         let nativePrice: number | null = null;
         if (quoted) { nativePrice = quoted.value.price; setVenueQuote(quoted); }
         // 손절·익절은 **비율**로 넘어간다. 비율은 통화와 무관하므로
@@ -628,12 +682,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           nativePrice, leverage,
           // 정본은 서버 필터다. 화면 상수는 C4에서 옮긴다 — 지금은 뜻만 보존.
           minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
+          // **사용자가 고른 유형 그대로.** 시장가로 바꿔 보내지 않는다.
+          orderType, limitPrice,
         });
         if (plan.kind !== 'READY') {
           showToast(`주문 실패 · ${plan.reason}`, false);
           setStatus(null); return;
         }
-        const usdtPx = nativePrice as number;
+        // 수량을 나눈 그 가격이 장부에도 남는다 — 마크가와 지정가를 섞지 않는다.
+        const usdtPx = plan.sizingPrice;
         const usdtNotional = plan.notionalUsdt;
         // **의도한 수량을 그대로 보낸다 — 여기서 자리수를 정하지 않는다.**
         //
@@ -657,7 +714,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             connectionId: connId,
             symbol: tradeSymbol,
             side: side==='매수'?'BUY':'SELL',
-            type:'MARKET',
+            // ── 고른 유형을 그대로 보낸다 ──
+            //
+            // 예전에는 여기가 `'MARKET'` 리터럴이었다. 화면은 지정가·조건부를
+            // 고르게 하고 가격 입력칸까지 띄우면서, 실제로는 언제나 시장가를
+            // 보냈다 — 사용자가 정한 가격은 한 번도 읽히지 않았다.
+            type: orderType,
+            // 서버 계약: MARKET은 가격이 필요 없고 LIMIT은 0보다 큰 가격이
+            // 필수다. 여기서 시장가로 되돌리지 않는다.
+            price: orderType === 'LIMIT' ? plan.sizingPrice : undefined,
             quantity: qty,
             leverage,
             stopLossPct: sl && krwPx ? Math.abs(((+sl-krwPx)/krwPx)*100) : undefined,
@@ -775,7 +840,9 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               // `100000`은 모의에서 ₩100,000이고 거래소에서 100,000 USDT다.
               // 그대로 두면 모드를 바꾼 순간 백 배가 넘는 주문이 된다.
               // 환산해서 넘기지도 않는다 — 사용자가 고른 적 없는 숫자다.
-              if (amountMustClear(tradeMode, m)) { setAmount(''); setUsdtBalance(null); setVenueQuote(null); }
+              // 통화가 바뀌면 금액도 지정가도 뜻이 달라진다. 환산해서
+              // 넘기지 않는다 — 사용자가 고른 적 없는 숫자다.
+              if (amountMustClear(tradeMode, m)) { setAmount(''); setLimitPrice(''); setUsdtBalance(null); setVenueQuote(null); }
               setTradeMode(m);
             }}
               style={{flex:1,padding:'10px 6px',background:active?c+'20':'transparent',color:active?c:locked?T.muted:T.sub,border:`1px solid ${active?c:T.border}`,borderRadius:12,fontWeight:700,fontSize:11,cursor:'pointer',opacity:locked?0.5:1,position:'relative'}}>
@@ -1057,17 +1124,49 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               </div>
             )}
 
-            {/* 한 줄: 주문타입 + 가격(지정가일때) */}
+            {/* ── 주문유형 ──
+                선택지는 **서버가 받는 목록**에서 온다. 낼 수 없는 유형을
+                그려 놓고 뒤에서 시장가로 바꾸지 않는다 — 그게 옛 고장이다.
+                조건부는 서버·워커·어댑터 어디에도 진입 트리거가 없어
+                고를 수 없게 둔다. */}
             <div style={{display:'flex',gap:6,marginBottom:8}}>
-              {([['market','시장가'],['limit','지정가'],['conditional','조건부']] as [string,string][]).map(([v,l])=>(
-                <button key={v} onClick={()=>setOrderType(v)} style={{flex:1,padding:'8px 4px',background:orderType===v?T.acg:T.alt,color:orderType===v?T.acl:T.muted,border:`1px solid ${orderType===v?T.acl:T.border}`,borderRadius:7,fontSize:11,fontWeight:700,cursor:'pointer'}}>{l}</button>
+              {allowedTypes.map(v=>(
+                <button key={v} onClick={()=>{ setOrderType(v); if(v!=='LIMIT') setLimitPrice(''); }}
+                  style={{flex:1,padding:'8px 4px',background:orderType===v?T.acg:T.alt,color:orderType===v?T.acl:T.muted,border:`1px solid ${orderType===v?T.acl:T.border}`,borderRadius:7,fontSize:11,fontWeight:700,cursor:'pointer'}}>
+                  {v==='LIMIT'?'지정가':'시장가'}
+                </button>
               ))}
+              <button disabled title="조건부 주문은 준비 중입니다"
+                style={{flex:1,padding:'8px 4px',background:T.alt,color:T.muted,border:`1px dashed ${T.border}`,borderRadius:7,fontSize:11,fontWeight:700,cursor:'not-allowed',opacity:.55}}>
+                조건부 (준비 중)
+              </button>
             </div>
-            {(orderType==='limit'||orderType==='conditional')&&(
+            {orderCurrency!=='USDT'&&(
+              <div style={{color:T.muted,fontSize:9,marginBottom:8}}>
+                모의는 즉시 체결만 합니다 — 미체결 주문을 들고 있는 장부가 없어 시장가만 낼 수 있습니다.
+              </div>
+            )}
+            {orderType==='LIMIT'&&(
               <div style={{display:'flex',gap:6,marginBottom:8}}>
-                <input type="number" inputMode="decimal" value={limitPrice} onChange={e=>setLimitPrice(e.target.value)} placeholder={`${orderType==='conditional'?'트리거가':'지정가'}`}
+                <input type="number" inputMode="decimal" value={limitPrice} onChange={e=>setLimitPrice(e.target.value)} placeholder="지정가 (USDT)"
                   style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:7,padding:'9px 11px',color:T.txt,fontSize:13,fontWeight:700,outline:'none'}}/>
-                <button onClick={()=>setLimitPrice(String(Math.round(sel.p)))} style={{padding:'0 14px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:11,fontWeight:800,cursor:'pointer'}}>BBO</button>
+                {/* ── '현재 선물가' — BBO가 아니다 ──
+                    예전 버튼은 `sel.p`, 즉 **원화 표시가**를 넣었다. 지정가가
+                    실제로 전송되기 시작하면 원화 숫자가 거래소 가격이 된다.
+                    그렇다고 마크가를 넣고 BBO라 부를 수도 없다 — BBO는
+                    최우선 매수·매도호가이고 이 값은 마크가(Gate는 없으면
+                    최종가)다. 이름을 값에 맞춘다. */}
+                <button disabled={quoting} onClick={async()=>{
+                  if(!connId){ showToast('거래소 연결을 선택하세요', false); return; }
+                  setQuoting(true);
+                  const q = await fetchVenueQuote({
+                    connectionId: connId, symbol: toVenueSymbol(sel.sym || sel.id),
+                    authHeader: authHeaderRef.current });
+                  setQuoting(false);
+                  // 못 읽으면 **아무것도 바꾸지 않는다.** 현물가·환율로 채우지 않는다.
+                  if(!q){ setVenueQuote(null); showToast('거래소 가격을 확인하지 못했습니다', false); return; }
+                  setVenueQuote(q); setLimitPrice(String(q.value.price));
+                }} style={{padding:'0 12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:11,fontWeight:800,cursor:'pointer'}}>현재 선물가</button>
               </div>
             )}
 
@@ -1092,6 +1191,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               const pv = orderPreviewOf({
                 mode: tradeMode, amount, venuePrice: venuePx, krwPrice: sel.p || null,
                 leverage, minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
+                orderType, limitPrice,
               });
               const symbol = (sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
               // 표시는 USDT 기준으로 유지한다. 연습 장부는 참고 환산을 쓴다.
@@ -1107,7 +1207,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                   <div><span style={{color:T.muted}}>수량 </span><span style={{color:T.acl,fontWeight:700}}>{txt(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)}</span></div>
                   <div><span style={{color:T.muted}}>명목 </span><span style={{color:shownNotional!=null&&shownNotional<CLIENT_MIN_NOTIONAL_USDT?T.red:T.grn,fontWeight:700}}>{txt(shownNotional,(n)=>`${n.toFixed(0)} USDT`)}</span></div>
                   <div><span style={{color:T.muted}}>증거금 </span><span style={{color:T.txt,fontWeight:700}}>{txt(shownMargin,(m)=>`${m.toFixed(1)} USDT`)}</span></div>
-                  {unknown&&<div style={{color:T.ylw,fontWeight:700}}>{pv.state==='PRICE_UNKNOWN'?'거래소 가격 확인 전':'주문 불가'}</div>}
+                  {/* 수량을 무엇으로 나눴는지 적는다. 지정가 주문에서
+                      마크가 기준 수량을 보여 주면 명목가가 어긋난다. */}
+                  {pv.basis&&<div><span style={{color:T.muted}}>기준 </span><span style={{color:T.txt,fontWeight:700}}>{pv.basis==='LIMIT_PRICE'?'지정가':'현재 선물가'}</span></div>}
+                  {unknown&&<div style={{color:T.ylw,fontWeight:700}}>{pv.state!=='PRICE_UNKNOWN'?'주문 불가':(orderType==='LIMIT'?'지정가 입력 전':'거래소 가격 확인 전')}</div>}
                 </div>
               );
             })()}
@@ -1201,7 +1304,22 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                   const pressure = bookImbalance(stream);
 
                   const Row = ({lv,buy}:{lv:{price:number;qty:number};buy:boolean})=>(
-                    <div onClick={()=>{ setOrderType('limit'); setLimitPrice(String(lv.price)); }}
+                    <div onClick={()=>{
+                      // ── 이 호가창은 **바이낸스 선물** 호가다 ──
+                      //
+                      // 지정가가 실제로 전송되기 시작했으므로, 여기서 찍은
+                      // 값이 곧 체결 가격이 된다. Gate 연결에서 이 값을
+                      // 지정가로 넣으면 **다른 거래소의 가격으로 주문**하게
+                      // 된다 — C3에서 없앤 것과 같은 종류의 고장이다.
+                      if (!allowedTypes.includes('LIMIT')) {
+                        showToast('이 모드에서는 지정가 주문을 낼 수 없습니다', false); return;
+                      }
+                      if (selectedVenue !== 'binance') {
+                        showToast('이 호가창은 바이낸스 선물 호가입니다 — 현재 연결의 가격이 아니어서 지정가로 쓰지 않습니다', false);
+                        return;
+                      }
+                      setOrderType('LIMIT'); setLimitPrice(String(lv.price));
+                    }}
                       style={{position:'relative',display:'flex',justifyContent:'space-between',padding:'2px 6px',fontSize:10,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',cursor:'pointer',overflow:'hidden',lineHeight:1.5}}>
                       <div style={{position:'absolute',top:0,bottom:0,right:0,width:`${lv.qty/maxQty*100}%`,background:buy?A(T.grn,'18'):A(T.red,'18')}}/>
                       <span style={{color:buy?T.grn:T.red,zIndex:1}}>{fmt(lv.price)}</span>
@@ -1907,6 +2025,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               const pv = orderPreviewOf({
                 mode: tradeMode, amount, venuePrice: venuePx, krwPrice: sel.p || null,
                 leverage, minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
+                orderType, limitPrice,
               });
               const symbol=(sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
               const isExchange = pv.currency === 'USDT';
@@ -1920,11 +2039,23 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               const marginText = isExchange
                 ? unit(pv.margin,(m)=>`${m.toFixed(2)} USDT`)
                 : unit(pv.refUsdt?.margin ?? null,(m)=>`${m.toFixed(1)} USDT`);
+              // ── 주문유형이 가격 행의 뜻을 정한다 ──
+              //
+              // 지정가에서 '시장가 체결'이라고 적거나 마크가를 수량 기준으로
+              // 보여 주면, 사용자가 정한 가격이 아니라 다른 값으로 계산된
+              // 수량을 승인하게 된다.
+              const isLimit = isExchange && pv.basis === 'LIMIT_PRICE';
+              const priceRow = !isExchange
+                ? { l: '가격', v: '시장가 (Best Price)' }
+                : isLimit
+                  ? { l: '지정 가격', v: unit(pv.price,(x)=>`${x} USDT`) }
+                  : { l: '기준 가격', v: unit(pv.price,(x)=>`예상 선물가 ${x} USDT · 시장가 체결`) };
               return [
-                {l:'가격',v: isExchange
-                  ? unit(pv.price,(x)=>`예상 선물 마크가 ${x} USDT · 시장가 체결`)
-                  : '시장가 (Best Price)'},
-                {l:'예상 수량',v: unit(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)},
+                ...(isExchange?[{l:'주문 유형',v: isLimit?'지정가 (LIMIT)':'시장가 (MARKET)'}]:[]),
+                priceRow,
+                // 지정가의 수량은 사용자가 정한 가격으로 나온 확정값이다 —
+                // 제출 시점에 시세가 움직여도 바뀌지 않는다.
+                {l: isLimit?'수량':'예상 수량',v: unit(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)},
                 {l:'포지션 명목가',v: notionalText},
                 {l:'레버리지',v:`${leverage}x`},
                 // **못 구한 것을 0으로 적지 않는다.** 0은 '돈이 안 든다'로 읽힌다.
@@ -1940,8 +2071,11 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             })()}
             {(tradeMode==='testnet'||tradeMode==='live')&&(
               <div style={{marginTop:10,color:T.muted,fontSize:10,lineHeight:1.5}}>
-                위 수량·증거금은 방금 읽은 거래소 선물가 기준 <b>예상값</b>입니다.
-                실제 체결 수량은 확인을 누른 시점의 거래소 가격으로 다시 계산됩니다.
+                {orderType==='LIMIT'
+                  ? <>수량은 <b>지정가 기준 확정값</b>입니다. 거래소 시세가 움직여도 다시 계산하지 않습니다.
+                      지정가에 도달해야 체결되며 즉시 체결되지 않을 수 있습니다.</>
+                  : <>위 수량·증거금은 방금 읽은 거래소 선물가 기준 <b>예상값</b>입니다.
+                      실제 체결 수량은 확인을 누른 시점의 거래소 가격으로 다시 계산됩니다.</>}
               </div>
             )}
             <div style={{marginTop:12,color:T.muted,fontSize:11,lineHeight:1.5}}>

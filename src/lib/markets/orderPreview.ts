@@ -41,6 +41,7 @@ import {
   orderCurrencyOf, planExchangeOrder,
   type OrderCurrency, type TradeMode,
 } from './orderCurrency';
+import type { SizingBasis } from './orderTypes';
 
 export type PreviewState =
   /** 숫자가 실행과 같은 뜻으로 나왔다 */
@@ -56,8 +57,13 @@ export interface OrderPreview {
   state: PreviewState;
   /** 아래 숫자들의 통화 */
   currency: OrderCurrency;
-  /** 이 통화 기준 가격 */
+  /**
+   * 수량을 나눈 가격 — **표시용 참고가가 아니라 계산에 쓴 값이다.**
+   * 시장가면 거래소 선물가, 지정가면 사용자가 적은 지정가.
+   */
   price: number | null;
+  /** 그 가격이 어디서 왔는가. 연습 장부에는 없다 */
+  basis: SizingBasis | null;
   qty: number | null;
   notional: number | null;
   margin: number | null;
@@ -68,7 +74,8 @@ export interface OrderPreview {
 }
 
 const blank = (state: PreviewState, currency: OrderCurrency, reason: string | null): OrderPreview => ({
-  state, currency, price: null, qty: null, notional: null, margin: null, refUsdt: null, reason,
+  state, currency, price: null, basis: null,
+  qty: null, notional: null, margin: null, refUsdt: null, reason,
 });
 
 /**
@@ -84,29 +91,34 @@ export function exchangePreviewOf(i: {
   venuePrice: number | null | undefined;
   leverage: number | null | undefined;
   minNotionalUsdt?: number | null;
+  /** 사용자가 고른 주문유형. 안 주면 시장가 */
+  orderType?: string | null;
+  /** 지정가 주문의 가격 (USDT) */
+  limitPrice?: number | string | null;
 }): OrderPreview {
   const currency: OrderCurrency = 'USDT';
   const amount = Number(i?.amountUsdt);
   if (!Number.isFinite(amount) || amount <= 0) {
     return blank('NO_AMOUNT', currency, '포지션 명목가(USDT)를 입력하세요');
   }
-  const px = Number(i?.venuePrice);
-  if (!Number.isFinite(px) || px <= 0) {
-    return blank('PRICE_UNKNOWN', currency,
-      '거래소 가격을 확인하지 못했습니다 — 현물 가격이나 환율로 대신 계산하지 않습니다');
-  }
+  // ── 기준가 판단을 여기서 다시 쓰지 않는다 ──
+  //
+  // **실행이 쓰는 그 함수를 그대로 부른다.** 지정가는 거래소 시세를 몰라도
+  // 계산된다 — 체결될 가격을 사용자가 이미 정했기 때문이다. 그래서 시세
+  // 조회 실패로 지정가 미리보기를 막지 않는다.
   const plan = planExchangeOrder({
-    amountUsdt: amount, nativePrice: px, leverage: i?.leverage ?? null,
+    amountUsdt: amount, nativePrice: i?.venuePrice ?? null, leverage: i?.leverage ?? null,
     minNotionalUsdt: i?.minNotionalUsdt ?? null,
+    orderType: i?.orderType ?? 'MARKET', limitPrice: i?.limitPrice ?? null,
   });
   if (plan.kind !== 'READY') {
-    const state: PreviewState = plan.code === 'NATIVE_PRICE_UNKNOWN' ? 'PRICE_UNKNOWN' : 'BLOCKED';
-    const out = blank(state, currency, plan.reason);
-    out.price = px;
-    return out;
+    const state: PreviewState =
+      plan.code === 'NATIVE_PRICE_UNKNOWN' || plan.code === 'LIMIT_PRICE_REQUIRED'
+        ? 'PRICE_UNKNOWN' : 'BLOCKED';
+    return blank(state, currency, plan.reason);
   }
   return {
-    state: 'READY', currency, price: px,
+    state: 'READY', currency, price: plan.sizingPrice, basis: plan.basis,
     qty: plan.qty, notional: plan.notionalUsdt, margin: plan.marginUsdt,
     refUsdt: null, reason: null,
   };
@@ -143,6 +155,7 @@ export function practicePreviewOf(i: {
     state: known ? 'READY' : 'PRICE_UNKNOWN',
     currency,
     price: known ? px : null,
+    basis: null,
     qty,
     notional: km.notional,
     margin: km.margin,
@@ -161,11 +174,16 @@ export function orderPreviewOf(i: {
   krwPrice: number | null | undefined;
   leverage: number | null | undefined;
   minNotionalUsdt?: number | null;
+  /** 사용자가 고른 주문유형 */
+  orderType?: string | null;
+  /** 지정가 주문의 가격 (USDT) */
+  limitPrice?: number | string | null;
 }): OrderPreview {
   return orderCurrencyOf(i?.mode) === 'USDT'
     ? exchangePreviewOf({
         amountUsdt: i?.amount, venuePrice: i?.venuePrice,
         leverage: i?.leverage, minNotionalUsdt: i?.minNotionalUsdt ?? null,
+        orderType: i?.orderType ?? 'MARKET', limitPrice: i?.limitPrice ?? null,
       })
     : practicePreviewOf({ amountKrw: i?.amount, krwPrice: i?.krwPrice, leverage: i?.leverage });
 }
