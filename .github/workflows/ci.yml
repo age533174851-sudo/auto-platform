@@ -224,6 +224,18 @@ jobs:
       - name: 최소 주문 정본 (거래소 규칙으로 막는다)
         run: node scripts/check-min-order-source.mjs
 
+      # ── 모의 진입에 '부분 성공'이 없는가 ──
+      #
+      # 진입은 paper_positions INSERT → paper_apply_entry_fee RPC 두 단계였다.
+      # 서로 다른 트랜잭션이라 뒤쪽만 실패하면 포지션은 있는데 수수료가
+      # 안 빠진 계좌가 영구히 남는다. 수익률은 (balance − initial)/initial로
+      # 나오므로 한 번 어긋나면 그 뒤의 모든 수익률과 다음 주문 크기가
+      # 그 위에서 계산된다.
+      #
+      # 게다가 실패를 알려 주는 feeApplied를 읽는 호출자가 한 곳도 없었다.
+      - name: 모의 진입 원자성 (포지션과 수수료는 함께 남는다)
+        run: node scripts/check-paper-open-atomic.mjs
+
       # ── 전략 점검 플래그 검사 ──
       #
       # 레지스트리는 scalp의 점검 플래그를 `checkOnly`로 선언했고 화면은

@@ -32,68 +32,86 @@ export async function openPaperPosition(
      */
     marginMode?: 'ISOLATED' | 'CROSSED';
   }
-): Promise<{ ok: boolean; positionId?: string; fill?: PaperFill; error?: string; duplicate?: boolean;
-  /** 진입 수수료가 계좌에 반영됐는가. null이면 시도조차 못 했다 */
-  feeApplied?: boolean | null }> {
+): Promise<{
+  ok: boolean;
+  /** OPENED | DUPLICATE | NO_ACCOUNT | ERROR */
+  status: 'OPENED' | 'DUPLICATE' | 'NO_ACCOUNT' | 'ERROR';
+  positionId?: string;
+  fill?: PaperFill;
+  error?: string;
+  duplicate?: boolean;
+}> {
   const fill = simulateFill(args.plan, args.entryPrice, {
     feeRatePct: args.feeRatePct, slippagePct: args.slippagePct,
     stopLoss: args.stopLoss, takeProfit: args.takeProfit,
   });
 
-  const row = {
-    user_id: args.userId,
-    signal_id: args.signalId,
-    strategy_id: args.strategyId,
-    bucket: args.bucket || null,
-    symbol: args.plan.symbol,
-    // 현물과 선물은 화면에 보여야 하는 것이 다르다(배율·청산가). 섞어 두면
-    // 현물에도 '1배 · 청산가 —'가 뜨고, 사용자는 그걸 '못 읽었다'로 읽는다.
-    market: args.market || 'USDM',
-    side: fill.side,
-    status: 'open',
-    entry_price: fill.entryPrice,
-    fill_price: fill.fillPrice,
-    quantity: fill.quantity,
-    notional: fill.notional,
-    leverage: fill.leverage,
-    margin: fill.margin,
-    stop_loss: fill.stopLoss ?? null,
-    take_profit: fill.takeProfit ?? null,
-    liquidation_price: fill.liquidationPrice,
-    entry_fee: fill.entryFee,
-    // 격리인가 교차인가. **청산가가 이미 이 모드로 계산돼 들어온다** —
-    // 여기서 모드를 안 적으면 나중에 그 숫자가 어느 공식으로 나온 값인지
-    // 알 수 없다.
-    margin_mode: args.marginMode === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
-  };
-
-  const { data, error } = await sb.from('paper_positions').insert(row).select('id').single();
-  if (error) {
-    if (String(error.code) === '23505') return { ok: false, duplicate: true, error: '이미 체결된 신호' };
-    return { ok: false, error: error.message };
-  }
-
-  // 진입 수수료 차감 — **읽고 고쳐 쓰지 않는다.**
+  // ── 진입과 수수료는 **한 트랜잭션**이다 ──
   //
-  // 두 포지션이 동시에 열리면 예전 구조는 둘 다 옛 total_fees를 읽고 각자
-  // 덮어써서 한쪽 수수료가 사라졌다. 청산과 같은 고장이라 같은 방식으로
-  // 고친다 — SQL이 증가시킨다(마이그레이션 072).
+  // 예전에는 `paper_positions` INSERT 뒤에 `paper_apply_entry_fee`를 따로
+  // 불렀다. 서로 다른 트랜잭션이라 뒤쪽만 실패할 수 있었고, 그러면
+  // **포지션은 있는데 수수료가 안 빠진** 계좌가 남는다. 되돌릴 방법도,
+  // 알아챌 방법도 없었다 — 실패를 읽는 코드가 한 곳도 없었다.
   //
-  // 아직 남은 것: 이 INSERT와 수수료 반영은 **한 트랜잭션이 아니다.**
-  // 진입은 중복 방지(signal_id 유니크)·규격 검증이 얽혀 있어 통째로 옮기는
-  // 것은 이 변경의 범위를 넘는다. 실패하면 아래에 사유가 남는다.
-  let feeApplied: boolean | null = null;
+  // 수익률은 `(balance − initial) / initial`로 나오므로, 한 번 어긋나면
+  // 그 뒤의 모든 수익률이 그 위에서 계산된다.
+  //
+  // 이제 `paper_open_position`(마이그레이션 074) 하나가 계좌 줄을 잠그고,
+  // 중복을 보고, 포지션을 넣고, 수수료를 뺀다. 중간에 무엇이 실패하든
+  // 통째로 되돌아간다. **부분 성공이라는 상태가 없다.**
+  //
+  // 금액은 여기서 계산해 넘긴다 — SQL은 원자성만 맡는다.
   try {
-    const { data, error: feeErr } = await sb.rpc('paper_apply_entry_fee', {
-      p_user_id: args.userId, p_entry_fee: fill.entryFee,
+    const { data, error } = await sb.rpc('paper_open_position', {
+      p_user_id: args.userId,
+      p_signal_id: args.signalId ?? null,
+      p_strategy_id: args.strategyId ?? null,
+      p_bucket: args.bucket || null,
+      p_symbol: args.plan.symbol,
+      // 현물과 선물은 화면에 보여야 하는 것이 다르다(배율·청산가). 섞어 두면
+      // 현물에도 '1배 · 청산가 —'가 뜨고, 사용자는 그걸 '못 읽었다'로 읽는다.
+      p_market: args.market || 'USDM',
+      p_side: fill.side,
+      p_entry_price: fill.entryPrice,
+      p_fill_price: fill.fillPrice,
+      p_quantity: fill.quantity,
+      p_notional: fill.notional,
+      p_leverage: fill.leverage,
+      p_margin: fill.margin,
+      p_stop_loss: fill.stopLoss ?? null,
+      p_take_profit: fill.takeProfit ?? null,
+      p_liquidation_price: fill.liquidationPrice,
+      p_entry_fee: fill.entryFee,
+      // 격리인가 교차인가. **청산가가 이미 이 모드로 계산돼 들어온다** —
+      // 여기서 모드를 안 적으면 나중에 그 숫자가 어느 공식으로 나온 값인지
+      // 알 수 없다.
+      p_margin_mode: args.marginMode === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
     });
-    if (feeErr) throw new Error(String((feeErr as any).message ?? feeErr));
+    if (error) {
+      // **옛 두 단계 경로로 되돌아가지 않는다.** 되돌아가면 이 변경이
+      // 없애려던 부분 성공이 그대로 살아난다.
+      return { ok: false, status: 'ERROR', error: String((error as any).message ?? error) };
+    }
     const row = Array.isArray(data) ? data[0] : data;
-    feeApplied = row?.applied === true;
-  } catch { feeApplied = false; }
+    const status = String(row?.status ?? '');
 
-  // 수수료가 반영되지 않았으면 **반영됐다고 적지 않는다.**
-  return { ok: true, positionId: data?.id, fill, feeApplied };
+    if (status === 'DUPLICATE') {
+      return { ok: false, status: 'DUPLICATE', duplicate: true, error: '이미 체결된 신호' };
+    }
+    if (status === 'NO_ACCOUNT') {
+      // 계좌를 여기서 만들지 않는다(071). 시작한 적 없는 계좌가 거래로
+      // 생기면 initial_balance의 뜻이 사라진다.
+      return { ok: false, status: 'NO_ACCOUNT',
+        error: '모의 계좌가 없습니다 — 먼저 모의투자를 시작하세요' };
+    }
+    if (status !== 'OPENED') {
+      return { ok: false, status: 'ERROR', error: `알 수 없는 진입 결과 (${status || '없음'})` };
+    }
+    // OPENED는 **포지션 생성과 수수료 차감이 둘 다 사실**이라는 뜻이다.
+    return { ok: true, status: 'OPENED', positionId: row?.position_id ?? undefined, fill };
+  } catch (e: any) {
+    return { ok: false, status: 'ERROR', error: String(e?.message ?? e) };
+  }
 }
 
 // 가상 포지션 청산

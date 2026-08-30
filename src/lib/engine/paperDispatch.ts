@@ -112,7 +112,7 @@ export function ledgerEnvOfMode(mode: any): 'MOCK' | 'TESTNET' | 'LIVE' {
 
 export interface PaperEntryResult {
   ok: boolean;
-  code: PaperDispatchCode | 'FILLED' | 'FAILED' | 'DUPLICATE';
+  code: PaperDispatchCode | 'FILLED' | 'FAILED' | 'DUPLICATE' | 'NO_ACCOUNT';
   positionId: string | null;
   fill: any | null;
   reason: string;
@@ -165,6 +165,12 @@ export async function dispatchPaperEntry(sb: any, i: {
       // 새로 생긴 것처럼 적지 않는다.
       return { ok: true, code: 'DUPLICATE', positionId: null, fill: null,
         reason: '이미 체결된 신호입니다 — 다시 체결하지 않았습니다' };
+    }
+    if (r.status === 'NO_ACCOUNT') {
+      // 계좌가 없으면 **아무것도 넣지 않는다.** 예전에는 포지션만 들어가고
+      // 수수료가 빠지지 않았다 — 그 상태를 074가 없앴다.
+      return { ok: false, code: 'NO_ACCOUNT', positionId: null, fill: null,
+        reason: '모의 계좌가 없어 체결하지 않았습니다 — 먼저 모의투자를 시작하세요' };
     }
     if (!r.ok) {
       return { ok: false, code: 'FAILED', positionId: null, fill: null,

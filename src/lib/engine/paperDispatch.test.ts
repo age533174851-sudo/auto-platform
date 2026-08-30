@@ -90,19 +90,8 @@ export function runPaperDispatchTests() {
   };
 
   test('체결에 실패하면 executed로 적지 않는다', async () => {
-    // openPaperPosition이 실패를 돌려주는 상황을 흉내 낸다.
-    const sb: any = {
-      from() {
-        const b: any = {
-          insert() { return b; },
-          select() { return b; },
-          single() { return Promise.resolve({ data: null, error: { message: 'boom', code: '500' } }); },
-          update() { return b; }, eq() { return b; },
-          maybeSingle() { return Promise.resolve({ data: null }); },
-        };
-        return b;
-      },
-    };
+    // 원자 RPC가 실패를 돌려주는 상황을 흉내 낸다.
+    const sb: any = { rpc: () => Promise.resolve({ data: null, error: { message: 'boom' } }) };
     const r = await dispatchPaperEntry(sb, {
       userId: 'u', mode: 'PAPER', strategyId: 'scalp', signalId: 's1',
       plan: PLAN, entryPrice: 100_000,
@@ -136,20 +125,26 @@ export function runPaperDispatchTests() {
     assert(!touched, '체결할 것이 없으면 쓰지 않는다');
   });
 
+  test('모의 계좌가 없으면 포지션도 만들지 않는다', async () => {
+    // 예전에는 포지션만 들어가고 수수료가 빠지지 않았다. 074가 그 상태를
+    // 없앴다 — 계좌가 없으면 아무것도 넣지 않는다.
+    const sb: any = {
+      rpc: () => Promise.resolve({ data: [{ status: 'NO_ACCOUNT', position_id: null }], error: null }),
+    };
+    const r = await dispatchPaperEntry(sb, {
+      userId: 'u', mode: 'PAPER', strategyId: 'scalp', signalId: 's1',
+      plan: PLAN, entryPrice: 100_000,
+    });
+    eq(r.ok, false);
+    eq(r.code, 'NO_ACCOUNT');
+    eq(r.positionId, null);
+  });
+
   // ══ ⑥ 같은 신호는 두 번 체결되지 않는다 ══
   test('중복 신호는 성공이되 새로 생긴 것처럼 적지 않는다', async () => {
+    // 074의 원자 RPC가 중복을 DUPLICATE로 돌려준다 — 예외로 새지 않는다.
     const sb: any = {
-      from() {
-        const b: any = {
-          insert() { return b; },
-          select() { return b; },
-          // 23505 = UNIQUE 충돌. paperStore가 duplicate로 바꿔 준다.
-          single() { return Promise.resolve({ data: null, error: { message: 'duplicate key', code: '23505' } }); },
-          update() { return b; }, eq() { return b; },
-          maybeSingle() { return Promise.resolve({ data: null }); },
-        };
-        return b;
-      },
+      rpc: () => Promise.resolve({ data: [{ status: 'DUPLICATE', position_id: null }], error: null }),
     };
     const r = await dispatchPaperEntry(sb, {
       userId: 'u', mode: 'PAPER', strategyId: 'scalp', signalId: 's1',
