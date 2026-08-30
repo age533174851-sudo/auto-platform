@@ -70,7 +70,13 @@ export async function POST(req: NextRequest) {
   // 5. 심볼 규칙 (LOT_SIZE) 조회
   await run('주문 규칙 조회 (LOT_SIZE)', async () => {
     const f = await getSymbolFilters('BTCUSDT', testnet);
-    return { ok: !!f, detail: f ? `최소수량 ${f.minQty}, step ${f.stepSize}` : '실패' };
+    return {
+      ok: !!f,
+      detail: f
+        ? `지정가 step ${f.limitQty?.stepSize ?? '없음'} · 시장가 step ${f.marketQty?.stepSize ?? '없음'}`
+          + ` · 최소금액 ${f.minNotional ?? '없음'}`
+        : '실패',
+    };
   });
 
   // ── 6~8. **주문 계열 엔드포인트를 따로 본다** ──

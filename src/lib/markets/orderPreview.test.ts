@@ -82,13 +82,12 @@ export function runOrderPreviewTests() {
     eq(p.qty, null);
   });
 
-  test('최소 명목가 미만은 BLOCKED이고 이유가 남는다', () => {
+  test('작은 금액도 미리보기는 계산한다 — 최소 금액 판정은 서버 몫이다', () => {
     const p = orderPreviewOf({
-      mode: 'testnet', amount: 5, venuePrice: 2500, krwPrice: null, leverage: 10,
-      minNotionalUsdt: 20 });
-    eq(p.state, 'BLOCKED');
-    eq(p.qty, null);
-    assert(!!p.reason && p.reason.includes('20'), `이유에 기준이 없습니다: ${p.reason}`);
+      mode: 'testnet', amount: 5, venuePrice: 2500, krwPrice: null, leverage: 10 });
+    eq(p.state, 'READY');
+    eq(p.qty, 0.002);
+    eq(p.notional, 5);
   });
 
   test('배율을 모르면 증거금은 null이다 — 0이 아니다', () => {

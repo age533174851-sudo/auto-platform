@@ -71,6 +71,8 @@ export async function GET(req: NextRequest) {
       const { toGateContract } = await import('@/lib/exchanges/gatePlan');
       const t = await getTickerGateFutures(toGateContract(symbol), creds.testnet);
       // 마크가를 먼저 본다. 없으면 최종가 — **둘 다 없으면 없는 것이다.**
+      // 값 자체는 `futuresMarkPrice`와 같은 규칙이다. 여기서는 어느 쪽에서
+      // 왔는지(priceSource)까지 화면에 알려 주려고 한 단계 더 본다.
       price = num(t?.mark_price) ?? num(t?.last);
       priceSource = price == null ? null : (num(t?.mark_price) != null ? 'gate_mark' : 'gate_last');
     } else {

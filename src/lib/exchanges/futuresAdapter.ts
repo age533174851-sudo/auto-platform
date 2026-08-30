@@ -113,6 +113,44 @@ export async function futuresSymbolFilters(
 }
 
 /**
+ * 이 거래소·이 환경의 선물 마크가. **키가 필요 없는 공개 조회다.**
+ *
+ * 최소 명목가 검사처럼 **서버가 스스로 가격을 알아야 하는 자리**에서 쓴다.
+ * 화면이 보낸 값을 그대로 믿으면, 화면이 만든 주문을 화면이 준 가격으로
+ * 검사하게 된다 — 검사가 아니다.
+ *
+ * `/api/binance/futures/quote`도 같은 함수를 지난다. 분기를 복제하면
+ * 언젠가 한쪽만 고쳐진다.
+ *
+ * **못 읽으면 null이다.** 다른 거래소로 대신 읽지 않고, 현물로 내려가지
+ * 않고, 환율로 만들지 않는다.
+ */
+export async function futuresMarkPrice(
+  ex: FuturesExchange, symbol: string, testnet: boolean,
+): Promise<number | null> {
+  const num = (v: any): number | null => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const gp = await import('./gatePlan');
+      const contract = gp.toGateContract(symbol);
+      if (!contract) return null;
+      const t = await gf.getTickerGateFutures(contract, testnet);
+      // 마크가를 먼저 본다. 없으면 최종가 — 둘 다 없으면 없는 것이다.
+      return num(t?.mark_price) ?? num(t?.last);
+    }
+    const bf = await import('./binanceFutures');
+    const p = await bf.getPremiumIndex(symbol, testnet);
+    return num(p?.markPrice);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 이 심볼의 마진 모드·배율·청산가·마크가.
  *
  * 실패 이유를 삼키지 않는다. 값만 비우면 화면에는 '확인 못 함'까지만 뜨고
@@ -732,10 +770,12 @@ export async function futuresContractSpec(
   const bf = await import('./binanceFutures');
   const f = await bf.getSymbolFilters(symbol, testnet);
   if (!f) return null;
+  // 계약 명세는 표시용이라 지정가 격자를 적는다 — 시장가 격자가 따로
+  // 있으면 주문 경로가 그것을 쓴다(quantizeOrder).
   return cs.continuousSpec(symbol, {
-    tickSize: (f as any).tickSize ?? null,
-    qtyStep: (f as any).stepSize ?? null,
-    minQty: (f as any).minQty ?? null,
+    tickSize: f.tickSize ?? null,
+    qtyStep: f.limitQty?.stepSize ?? null,
+    minQty: f.limitQty?.minQty ?? null,
   });
 }
 

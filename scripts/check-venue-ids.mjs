@@ -46,8 +46,14 @@ for (const name of readdirSync(DIR)) {
     if (/JSON\.parse\s*\(/.test(code) && !/msg|message|label|error/i.test(line)) {
       problems.push(`${at}  JSON.parse로 응답을 읽습니다 — 주문 번호가 깨집니다`);
     }
-    // 식별자를 숫자로 바꾸는 것.
-    if (/(?:Number|parseInt)\s*\(\s*[A-Za-z_$][\w$]*\.?(?:order_?[Ii]d|id)\b/.test(code)) {
+    // ── 식별자를 숫자로 바꾸는 것 ──
+    //
+    // 예전 정규식은 `[\w$]*\.?(?:…|id)`라 **이름이 id로 끝나기만 하면**
+    // 걸렸다. `Number(grid.stepSize)`의 `grid`가 `gr` + `id`로 쪼개져
+    // 잡혔다 — 주문 번호와 아무 상관이 없는 줄이다.
+    //
+    // 속성 접근(`x.id`)이거나 그 이름 자체(`id`)일 때만 본다.
+    if (/(?:Number|parseInt)\s*\(\s*(?:[A-Za-z_$][\w$]*\s*!?\s*\.\s*(?:order_?[Ii]d|id)|(?:order_?[Ii]d|id))\b/.test(code)) {
       problems.push(`${at}  주문 번호를 숫자로 바꿉니다 — 번호는 계산 대상이 아닙니다`);
     }
   });
@@ -61,7 +67,7 @@ for (const rel of ['src/lib/engine', 'src/lib/smoke']) {
     const src = readFileSync(path, 'utf8');
     src.split('\n').forEach((line, i) => {
       const code = line.replace(/\/\/.*$/, '');
-      if (/(?:Number|parseInt)\s*\(\s*[A-Za-z_$][\w$]*\.?(?:order_?[Ii]d)\b/.test(code)) {
+      if (/(?:Number|parseInt)\s*\(\s*(?:[A-Za-z_$][\w$]*\s*!?\s*\.\s*order_?[Ii]d|order_?[Ii]d)\b/.test(code)) {
         problems.push(`${path}:${i + 1}  주문 번호를 숫자로 바꿉니다`);
       }
     });

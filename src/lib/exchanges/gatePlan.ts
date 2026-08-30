@@ -281,11 +281,27 @@ export function gateFiltersOf(spec: GateSpecLike | null | undefined): SymbolFilt
   if (!Number.isFinite(m) || m <= 0) return null;
   const minC = Number(spec?.orderSizeMin);
   const round = Number(spec?.orderPriceRound);
+  // 최소 계약 수를 기초자산으로 환산한다. 계약 수로 두면 단위가 섞인다.
+  const grid = { stepSize: m, minQty: (Number.isFinite(minC) && minC > 0 ? minC : 1) * m };
   return {
-    stepSize: m,
-    // 최소 계약 수를 기초자산으로 환산한다. 계약 수로 두면 단위가 섞인다.
-    minQty: (Number.isFinite(minC) && minC > 0 ? minC : 1) * m,
+    // ── Gate는 주문유형에 따라 계약 단위가 달라지지 않는다 ──
+    //
+    // 바이낸스처럼 `MARKET_LOT_SIZE`가 따로 있는 게 아니라, **계약이라는
+    // 단위 자체가 하나**다. 그래서 두 칸에 같은 격자를 적는 것은 추측이
+    // 아니라 Gate 규격을 그대로 옮긴 것이다.
+    limitQty: grid,
+    marketQty: grid,
     tickSize: Number.isFinite(round) && round > 0 ? round : null,
+    // ── Gate 선물에는 고정 최소 명목가가 없다 ──
+    //
+    // 계약 명세가 주는 것은 `quanto_multiplier`·`order_size_min`·
+    // `order_price_round`다. 최소 주문 금액이라는 필드는 없다.
+    // **여기에 20이나 5를 적으면 거래소가 정하지 않은 규칙을 우리가
+    // 만드는 것이다.** Gate의 최소 주문 정본은 최소 계약 수다.
+    //
+    // null은 '모름'이 아니라 '그런 규칙이 없음'이다 — 규격 조회 자체가
+    // 실패하면 이 함수가 null을 돌려준다.
+    minNotional: null,
   };
 }
 

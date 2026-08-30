@@ -156,14 +156,33 @@ export async function POST(req: NextRequest) {
   // 그 배수를 stepSize로 놓으면 "기초자산 수량을 배수로 내림"이 곧 "정수
   // 계약으로 내림"이 된다. 판정을 두 벌로 만들지 않는다.
   {
-    const { futuresSymbolFilters } = await import('@/lib/exchanges/futuresAdapter');
+    const { futuresSymbolFilters, futuresMarkPrice } = await import('@/lib/exchanges/futuresAdapter');
     const { quantizeOrder } = await import('@/lib/exchanges/quantize');
+    const testnet = conn.is_testnet !== false;
     // 못 읽으면 null이다. 기본값을 지어내면 맞는 수량을 틀린 수량으로 바꾼다.
-    const filters = await futuresSymbolFilters(ex, symbol, conn.is_testnet !== false);
-    const q = quantizeOrder(orderQty, orderPrice, filters);
+    const filters = await futuresSymbolFilters(ex, symbol, testnet);
+    // ── 최소 명목가의 기준가는 **서버가 읽는다** ──
+    //
+    // 화면이 보낸 가격으로 검사하면, 화면이 만든 주문을 화면이 준 값으로
+    // 검사하게 된다. 지정가는 사용자가 정한 가격이 곧 체결가라 그대로 쓰고,
+    // 시장가만 거래소에서 마크가를 읽는다. 최소 명목가 규칙이 없거나
+    // 청산이면 읽지 않는다 — 필요 없는 호출을 하지 않는다.
+    const needsMark = !reduceOnly && type !== 'LIMIT' && Number(filters?.minNotional) > 0;
+    const marketReferencePrice = needsMark
+      ? await futuresMarkPrice(ex, symbol, testnet).catch(() => null)
+      : null;
+    const q = quantizeOrder(orderQty, orderPrice, filters, {
+      orderType: type === 'LIMIT' ? 'LIMIT' : 'MARKET',
+      // **신규 진입과 청산은 다른 정책이다.** 규격을 못 읽으면 신규는
+      // 막고 청산은 보낸다. 못 여는 것은 불편이고 못 닫는 것은 사고다.
+      reduceOnly: !!reduceOnly,
+      marketReferencePrice,
+    });
     if (!q.ok) {
       return NextResponse.json({
-        ok: false, error: 'invalid_quantity', message: q.reason,
+        // 왜 안 됐는지 사용자가 알아야 한다. 사유 코드를 그대로 전한다 —
+        // 원본 오류나 스택은 싣지 않는다.
+        ok: false, error: 'invalid_quantity', code: q.code, message: q.reason,
       }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
     }
     orderQty = q.quantity!;

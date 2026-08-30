@@ -90,7 +90,6 @@ export function exchangePreviewOf(i: {
   /** 이 연결에서 읽은 거래소 선물가. 못 읽었으면 null */
   venuePrice: number | null | undefined;
   leverage: number | null | undefined;
-  minNotionalUsdt?: number | null;
   /** 사용자가 고른 주문유형. 안 주면 시장가 */
   orderType?: string | null;
   /** 지정가 주문의 가격 (USDT) */
@@ -108,7 +107,6 @@ export function exchangePreviewOf(i: {
   // 조회 실패로 지정가 미리보기를 막지 않는다.
   const plan = planExchangeOrder({
     amountUsdt: amount, nativePrice: i?.venuePrice ?? null, leverage: i?.leverage ?? null,
-    minNotionalUsdt: i?.minNotionalUsdt ?? null,
     orderType: i?.orderType ?? 'MARKET', limitPrice: i?.limitPrice ?? null,
   });
   if (plan.kind !== 'READY') {
@@ -173,7 +171,6 @@ export function orderPreviewOf(i: {
   /** 연습 표시용 원화가 */
   krwPrice: number | null | undefined;
   leverage: number | null | undefined;
-  minNotionalUsdt?: number | null;
   /** 사용자가 고른 주문유형 */
   orderType?: string | null;
   /** 지정가 주문의 가격 (USDT) */
@@ -182,7 +179,7 @@ export function orderPreviewOf(i: {
   return orderCurrencyOf(i?.mode) === 'USDT'
     ? exchangePreviewOf({
         amountUsdt: i?.amount, venuePrice: i?.venuePrice,
-        leverage: i?.leverage, minNotionalUsdt: i?.minNotionalUsdt ?? null,
+        leverage: i?.leverage,
         orderType: i?.orderType ?? 'MARKET', limitPrice: i?.limitPrice ?? null,
       })
     : practicePreviewOf({ amountKrw: i?.amount, krwPrice: i?.krwPrice, leverage: i?.leverage });

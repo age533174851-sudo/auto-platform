@@ -627,7 +627,10 @@ export async function POST(req: NextRequest) {
       // 남의 격자로 자른 분할 수량은 계약 경계에 안 맞을 수 있다.
       const { futuresSymbolFilters } = await import('@/lib/exchanges/futuresAdapter');
       const f = await futuresSymbolFilters(exchange as any, symbol, useTestnet);
-      if (f?.stepSize) { qtyStep = f.stepSize; minQty = f.minQty ?? undefined; }
+      // 분할 익절은 시장가 청산으로 나간다 — 시장가 격자를 쓴다.
+      const { qtyGridFor } = await import('@/lib/exchanges/quantize');
+      const grid = qtyGridFor(f, 'MARKET');
+      if (grid?.stepSize) { qtyStep = grid.stepSize; minQty = grid.minQty ?? undefined; }
     } catch { /* 필터를 못 읽으면 반올림 없이 진행 — 거래소가 거부하면 분할만 빠진다 */ }
 
     const exitPlan = buildExitPlan({
