@@ -1039,28 +1039,38 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     setPrice(String(Number(next.toFixed(8))));
   };
 
+  /**
+   * **"지금 실제 포지션의 N%를 닫는다"는 의도를 세운다.**
+   *
+   * 청산 비율을 만드는 자리가 넷이다(비율 칩 · 빠른 부분청산 · 빠른
+   * 전량청산 · 청산 탭 진입). 각자 개수를 계산해 입력칸에 적으면, 그중
+   * 하나만 고쳐지고 나머지는 옛 경로로 남는다 — 이 저장소가 반복해서 낸
+   * 고장이다. 그래서 한 곳에서만 만든다.
+   *
+   * 개수는 만들지 않는다. 화면에 적는 값은 참고용이고, 주문에는 비율이
+   * 나간다. 서버가 주문 순간의 실제 포지션을 다시 읽는다.
+   */
+  const setClosePercentIntent = (pct: number) => {
+    // 포지션을 모르면 채우지 않는다 — 지어낸 수량으로 청산하지 않는다.
+    if (posAmt == null || !(Math.abs(posAmt) > 0)) return;
+    const base = Math.abs(posAmt) * (pct / 100);
+    const made = makeIntent({
+      source: 'PERCENT_CLOSE', rawBaseQty: base, percent: pct,
+      displayNumber: unit === 'BASE' ? base : base * (unitPx || 0),
+      displayDecimals: unit === 'BASE' ? 6 : 2,
+    });
+    setReduceOnly(true);
+    setQty(made.display);
+    setQtyIntent(made.intent);
+  };
+
   const setPct = (pct: number) => {
     // ── 청산이면 **보유 수량의 비율**이다 ──
     //
     // 신규는 '잔고의 몇 %를 걸까'이고 청산은 '가진 것의 몇 %를 닫을까'다.
     // 같은 버튼이 두 뜻을 갖는데 예전에는 언제나 잔고 기준이라, 청산 탭에서
     // 50%를 누르면 **가진 것과 무관한 수량**이 들어갔다.
-    if (reduceOnly) {
-      if (posAmt == null || !(Math.abs(posAmt) > 0)) return;   // 모르면 채우지 않는다
-      const base = Math.abs(posAmt) * (pct / 100);
-      const v = unit === 'BASE' ? base : base * (unitPx || 0);
-      // **개수를 만들지 않는다.** 화면에는 참고값을 적고, 주문에는 비율을
-      // 보낸다 — 서버가 주문 순간의 실제 포지션을 다시 읽어 계산한다.
-      // 그래야 버튼을 누른 뒤 포지션이 줄어도, USDT 되돌림 오차가 있어도,
-      // 거래소 규격을 못 읽어도 보유량을 넘지 않는다.
-      const made = makeIntent({
-        source: 'PERCENT_CLOSE', rawBaseQty: base, percent: pct,
-        displayNumber: v, displayDecimals: unit === 'BASE' ? 6 : 2,
-      });
-      setQty(made.display);
-      setQtyIntent(made.intent);
-      return;
-    }
+    if (reduceOnly) { setClosePercentIntent(pct); return; }
     const px = Number(price) || mid || 0;
     // 잔고를 모르면 비율 계산이 불가능하다. 임의 값으로 채우지 않는다.
     if (px <= 0 || balanceUsd == null) return;
@@ -1183,43 +1193,14 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     //
     // 모의 계좌는 이 경로가 없다. 사용자가 개수를 직접 적은 청산도
     // 기존 경로 그대로다 — 이번 변경의 대상은 버튼이 만든 의도뿐이다.
+    //
+    // **여기서는 판정만 한다.** 보내는 것은 아래 확인창을 지난 뒤다 —
+    // 처음 배선에서 이 자리에서 곧바로 fetch하고 return해 버려서, 실전
+    // 비율 청산이 필수 확인창을 건너뛰었다. 확인은 주문 직전에 한 번,
+    // 모든 경로가 같은 자리에서 받는다.
     const closePct = reduceOnly && !isPaper ? closePercentOf(qtyIntent, qty) : null;
-    if (closePct != null) {
-      // 방향은 **실제 포지션**에서 온다. 버튼(BUY/SELL)으로 추측하지
-      // 않는다 — 서버도 열린 포지션과 다르면 거절한다.
-      if (!holding) {
-        setMsg({ ok: false, text: '열린 포지션을 확인하지 못해 비율 청산을 보낼 수 없습니다' });
-        return;
-      }
-      setBusy(true);
-      try {
-        const r = await fetch('/api/binance/futures/close-position', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: auth },
-          body: JSON.stringify({
-            connectionId: modeResolution.connId,
-            symbol: symbol.id, positionSide: holding, percent: closePct,
-          }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || d?.error) {
-          setMsg({ ok: false, text: d?.message || d?.error || `청산 요청 실패 (HTTP ${r.status})` });
-        } else {
-          setMsg({ ok: true, text: `${holding} ${closePct}% 청산 요청을 보냈습니다` });
-          setQty(''); setQtyIntent(null);
-          // 포지션·잔고를 다시 읽는다 — 방금 닫은 것이 화면에 남아 있으면
-          // 사용자는 청산이 안 된 줄 안다.
-          setRefreshSeq(n => n + 1);
-        }
-      } catch (e: any) {
-        setMsg({ ok: false, text: `청산 요청 오류 — ${String(e?.message || e)}` });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    if (!reduceOnly && !(slPct > 0)) {
-      setMsg({ ok: false, text: '손절 폭을 고르세요 — 손절 없는 진입은 받지 않습니다' });
+    if (closePct != null && !holding) {
+      setMsg({ ok: false, text: '열린 포지션을 확인하지 못해 비율 청산을 보낼 수 없습니다' });
       return;
     }
 
@@ -1254,7 +1235,25 @@ export const OrderFormPanel = memo(function OrderFormPanel({
           side: orderSide === 'BUY' ? 'LONG' : 'SHORT', pricePct: slPct,
         });
         const acct = connections.find((c: any) => c.id === modeResolution.connId);
-        const okToGo = await confirmDialog([
+        // ── 비율 청산은 **의도**로 적는다 ──
+        //
+        // 화면이 들고 있는 개수는 버튼을 누른 시각의 값이고, 실제로 닫히는
+        // 양은 주문 순간 서버가 다시 읽는다. 그 사이 포지션이 줄었을 수도
+        // 있다. 그런 값을 "청산 수량"이라고 확정해 적으면, 확인창이 **모르는
+        // 것을 아는 것처럼** 말하게 된다.
+        const okToGo = closePct != null
+          ? await confirmDialog([
+              `${real ? '실전' : '테스트넷'} ${holding} 포지션 ${closePct}% 청산`,
+              '',
+              `종목      ${symbol.id}`,
+              `계좌      ${acct?.label || acct?.exchange_id || '연결'} · ${real ? '실전' : '테스트넷'}`,
+              `수량      주문 시 서버가 실제 포지션을 다시 조회해 ${closePct}%를 닫습니다`,
+              // 참고값임을 숨기지 않는다. 이 숫자로 확정하지 않는다.
+              `현재 보유  ${posAmt != null ? showQty(Math.abs(posAmt)) + ' ' + base : '확인 불가'} (참고)`,
+              '',
+              real ? '실제 자금이 사용됩니다. 되돌릴 수 없습니다.' : '가상 자금입니다.',
+            ].join('\n'), { danger: real })
+          : await confirmDialog([
           `${real ? '실전' : tradeMode === 'PAPER' ? '모의' : '테스트넷'} `
             + `${orderSide === 'BUY' ? 'LONG' : 'SHORT'} ${q} ${base} · ${leverage}배`,
           '',
@@ -1273,6 +1272,41 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         ].join('\n'), { danger: real });
         if (!okToGo) return;
       }
+    }
+
+    // ── 확인을 지난 뒤에 보낸다 ──
+    //
+    // 비율 청산은 개수를 만들지 않는다. 서버가 주문 순간의 실제 포지션을
+    // 다시 읽어 그 비율만큼 닫는다 — 이 라우트는 quantity를 받지 않는다.
+    if (closePct != null) {
+      setBusy(true);
+      try {
+        const r = await fetch('/api/binance/futures/close-position', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: auth },
+          body: JSON.stringify({
+            connectionId: modeResolution.connId,
+            // 방향은 **실제 포지션**에서 온다. 버튼(BUY/SELL)으로 추측하지
+            // 않는다 — 서버도 열린 포지션과 다르면 거절한다.
+            symbol: symbol.id, positionSide: holding, percent: closePct,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d?.error) {
+          setMsg({ ok: false, text: d?.message || d?.error || `청산 요청 실패 (HTTP ${r.status})` });
+        } else {
+          setMsg({ ok: true, text: `${holding} ${closePct}% 청산 요청을 보냈습니다` });
+          setQty(''); setQtyIntent(null);
+          // 포지션·잔고를 다시 읽는다 — 방금 닫은 것이 화면에 남아 있으면
+          // 사용자는 청산이 안 된 줄 안다.
+          setRefreshSeq(n => n + 1);
+        }
+      } catch (e: any) {
+        setMsg({ ok: false, text: `청산 요청 오류 — ${String(e?.message || e)}` });
+      } finally {
+        setBusy(false);
+      }
+      return;
     }
 
     setBusy(true);
@@ -1373,7 +1407,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
         // 토스트로도 띄운다 — 4초 뒤 저절로 사라지고, 탭하면 바로 닫히고,
         // 알림 센터에 남아서 나중에 다시 볼 수 있다.
         notifySuccess('주문 접수됨', okText);
-        setQty('');
+        setQty(''); setQtyIntent(null);
         if (isPaper) paper.reload();
       } else {
         // 실패는 잠그지 않는다. 사유를 고치고 다시 시도할 수 있어야 한다.
@@ -1791,17 +1825,8 @@ export const OrderFormPanel = memo(function OrderFormPanel({
               // 청산용으로 채워 둔 전량이 신규 진입 수량이 되면 의도의
               // 몇 배가 열린다.
               if (close && posAmt != null && Math.abs(posAmt) > 0) {
-                // 이 칸 채움도 "전량을 닫는다"는 의도다. 개수를 만들어
-                // 보내지 않고 비율로 보낸다 — 아래 submit이 그렇게 읽는다.
-                const base = Math.abs(posAmt);
-                const shown = unit === 'BASE'
-                  ? showQty(base)
-                  : String(Number((base * (unitPx || 0)).toFixed(2)));
-                setQty(shown);
-                setQtyIntent({
-                  source: 'PERCENT_CLOSE', rawBaseQty: base, percent: 100,
-                  displayValue: shown,
-                });
+                // 이 칸 채움도 "전량을 닫는다"는 의도다 — 같은 경로로 만든다.
+                setClosePercentIntent(100);
               } else {
                 setQty('');
                 setQtyIntent(null);
@@ -1939,7 +1964,7 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                 fontSize: FS.micro, fontWeight: 700, ...NUM,
               }}>계좌 {p}%</button>
           ))}
-          <button onClick={() => { setRiskPick(null); setQty(''); }}
+          <button onClick={() => { setRiskPick(null); setQty(''); setQtyIntent(null); }}
             style={{
               flex: 1, minHeight: 26, borderRadius: 6, cursor: 'pointer',
               background: riskPick == null ? C.accentBg : C.raised,
@@ -1993,22 +2018,12 @@ export const OrderFormPanel = memo(function OrderFormPanel({
             ['추가', () => {
               // 같은 방향으로 더 넣는다. 수량은 비운다 — 청산용으로 채워
               // 둔 전량이 신규 수량이 되면 의도의 몇 배가 열린다.
-              setReduceOnly(false); setQty(''); setRiskPick(null);
+              setReduceOnly(false); setQty(''); setRiskPick(null); setQtyIntent(null);
             }],
-            ['부분청산 50%', () => {
-              setReduceOnly(true);
-              const half = Math.abs(posAmt as number) / 2;
-              setQty(unit === 'BASE'
-                ? showQty(half)
-                : String(Number((half * (unitPx || 0)).toFixed(2))));
-            }],
-            ['전량청산', () => {
-              setReduceOnly(true);
-              const all = Math.abs(posAmt as number);
-              setQty(unit === 'BASE'
-                ? showQty(all)
-                : String(Number((all * (unitPx || 0)).toFixed(2))));
-            }],
+            // 개수를 만들지 않는다. 비율 칩과 **같은 경로**를 쓴다 —
+            // 여기만 옛 방식으로 남으면 같은 고장이 이 버튼에서 재현된다.
+            ['부분청산 50%', () => setClosePercentIntent(50)],
+            ['전량청산', () => setClosePercentIntent(100)],
           ] as const).map(([label, fn]) => (
             <button key={label} onClick={fn} style={{
               flex: 1, minWidth: 0, minHeight: 30, borderRadius: 7, cursor: 'pointer',

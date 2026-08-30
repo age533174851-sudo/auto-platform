@@ -15,6 +15,8 @@ import { test, eq, assert } from '../../test/harness';
 import {
   makeIntent, intentStillValid, closePercentOf, executionQuantityOf,
 } from './quantityIntent';
+// 확인창 정책은 복제하지 않는다 — 화면이 쓰는 그 함수를 그대로 시험한다.
+import { shouldConfirm, DEFAULTS } from './preferences';
 
 export function runQuantityIntentTests() {
   console.log('[수량 의도 — 표시와 실행을 가른다]');
@@ -149,6 +151,62 @@ export function runQuantityIntentTests() {
   test('둘 다 못 쓰면 수량이 없다 — 0으로 지어내지 않는다', () => {
     eq(executionQuantityOf(null, '', null).qty, null);
     eq(executionQuantityOf(null, 'abc', NaN).qty, null);
+  });
+
+  // ── 청산 비율을 만드는 자리가 넷이다 ──
+  //
+  // 비율 칩 · 빠른 부분청산 · 빠른 전량청산 · 청산 탭 진입. 처음 배선에서
+  // 칩만 고치고 빠른 액션은 옛 방식으로 남아 있었다 — 그 버튼은 새 경로를
+  // 타지 않고 절대 수량으로 떨어진다. 넷이 같은 의도를 만들어야 한다.
+
+  test('빠른 부분청산 50%도 percent 50을 만든다', () => {
+    const pos = 1_000_145;
+    const { intent, display } = makeIntent({
+      source: 'PERCENT_CLOSE', rawBaseQty: pos * 0.5, percent: 50,
+      displayNumber: pos * 0.5, displayDecimals: 6,
+    });
+    eq(closePercentOf(intent, display), 50);
+  });
+
+  test('빠른 전량청산도 percent 100을 만든다 — 개수가 아니다', () => {
+    const pos = 1_000_145;
+    const { intent, display } = makeIntent({
+      source: 'PERCENT_CLOSE', rawBaseQty: pos, percent: 100,
+      displayNumber: pos, displayDecimals: 6,
+    });
+    eq(closePercentOf(intent, display), 100);
+    // 개수 경로로 떨어지지 않는다: 비율이 나오면 그것이 정답이다.
+    assert(closePercentOf(intent, display) != null, '절대 수량 경로로 떨어졌습니다');
+  });
+
+  // ── 확인창을 건너뛰지 않는다 ──
+  //
+  // 처음 배선은 판정 직후 곧바로 청산을 보내고 return해서, **실전 비율
+  // 청산이 필수 확인창을 지나지 않았다.** 실전은 설정과 무관하게 항상
+  // 묻는다는 계약을 깨는 회귀였다. 정책은 여기 한 곳에 있다.
+
+  test('실전은 설정을 꺼도 반드시 확인한다 — 비율 청산도 같다', () => {
+    const prefs = { ...DEFAULTS, confirmKinds: [] as any };
+    eq(shouldConfirm(prefs, 'MARKET', true), true);
+    eq(shouldConfirm(prefs, 'LIMIT', true), true);
+  });
+
+  test('테스트넷 정책은 그대로다 — 강화도 약화도 하지 않는다', () => {
+    const on = { ...DEFAULTS, confirmKinds: ['MARKET'] as any };
+    const off = { ...DEFAULTS, confirmKinds: [] as any };
+    eq(shouldConfirm(on, 'MARKET', false), true);
+    eq(shouldConfirm(off, 'MARKET', false), false);
+  });
+
+  test('취소하면 아무것도 보내지 않는다 — 의도는 그대로 남는다', () => {
+    // 확인창을 물리는 것은 화면이지만, 취소가 의도를 지우면 안 된다.
+    // 다시 누를 때 같은 비율이어야 한다.
+    const { intent, display } = makeIntent({
+      source: 'PERCENT_CLOSE', rawBaseQty: 1, percent: 100,
+      displayNumber: 1, displayDecimals: 6,
+    });
+    eq(closePercentOf(intent, display), 100);
+    eq(intentStillValid(intent, display), true);
   });
 
   test('표시는 깎여도 실행은 깎이지 않는다 (자리수를 늘리는 것이 해결이 아니다)', () => {

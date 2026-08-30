@@ -134,6 +134,49 @@ else {
   }
   notes.push('비율 청산은 개수 대신 percent를 정본 라우트로 보냅니다');
 
+  // ── 5. 청산 비율을 만드는 자리가 **한 곳뿐인가** ──
+  //
+  // 처음 배선에서 비율 칩만 고치고 빠른 액션(부분청산 50% · 전량청산)은
+  // 옛 `setQty(...)` 방식으로 남아 있었다. 그 버튼들은 새 경로를 타지
+  // 않고 절대 수량으로 떨어진다 — 고치려던 고장이 그대로 재현된다.
+  //
+  // "경로가 둘인데 한쪽만 고침"은 이 저장소가 반복해서 내는 고장이다.
+  if (!/const setClosePercentIntent\s*=/.test(pane)) {
+    fail(`${PANE}에 청산 비율 의도를 만드는 공용 함수가 없습니다`
+      + ' — 자리마다 따로 만들면 한 곳만 고쳐집니다');
+  }
+  // 청산 수량을 채우는 자리는 전부 그 함수를 지나야 한다.
+  for (const [label, near] of [
+    ['부분청산 50%', '부분청산'],
+    ['전량청산', '전량청산'],
+  ]) {
+    const at = pane.indexOf(near);
+    if (at < 0) { notes.push(`빠른 액션 '${label}'이 없습니다 (건너뜀)`); continue; }
+    const around = pane.slice(at, at + 260);
+    if (!/setClosePercentIntent\s*\(/.test(around)) {
+      fail(`${PANE}의 빠른 액션 '${label}'이 setClosePercentIntent를 쓰지 않습니다`
+        + ' — 절대 수량으로 일반 주문 경로에 떨어집니다');
+    }
+  }
+  notes.push('청산 비율을 만드는 자리가 모두 한 함수를 지납니다');
+
+  // ── 6. 비율 청산이 확인창을 건너뛰지 않는가 ──
+  //
+  // 처음 배선은 판정 직후 곧바로 fetch하고 return해서, **실전 비율
+  // 청산이 필수 확인창을 지나지 않았다.** 실전은 설정과 무관하게 항상
+  // 묻는다는 계약을 깨는 회귀였다.
+  const confirmAt = pane.indexOf('shouldConfirm(');
+  const sendAt = pane.indexOf('close-position');
+  if (confirmAt < 0) fail(`${PANE}에서 확인창 정책(shouldConfirm)을 찾지 못했습니다`);
+  else if (sendAt >= 0 && sendAt < confirmAt) {
+    fail(`${PANE}이 확인창보다 먼저 청산을 보냅니다 — 실전 필수 확인을 건너뜁니다`);
+  }
+  // 정책을 복제하지 않고 재사용해야 한다.
+  if ((pane.match(/shouldConfirm\s*\(/g) || []).length !== 1) {
+    fail(`${PANE}이 확인창 정책을 여러 번 판단합니다 — shouldConfirm 한 곳만 씁니다`);
+  }
+  notes.push('비율 청산도 기존 확인창 정책을 그대로 지납니다');
+
   // ── 4. 깎은 값을 실행에 되쓰지 않는가 ──
   //
   // `toFixed` 자체는 금지하지 않는다 — 표시에는 쓴다. 금지하는 것은
