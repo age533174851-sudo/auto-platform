@@ -11,7 +11,7 @@
 //     라고 적는 것. 실제로 화면에 뜬 문구다
 import { test, assert, eq, close } from '../../test/harness';
 import {
-  convertQuantity, effectiveQtyFor, percentLabel, needsEquity, needsStop,
+  convertQuantity, effectiveQtyFor, percentLabel, needsEquity, needsStop, notionalAndMargin,
 } from './quantityInput';
 
 export function runQuantityInputTests() {
@@ -204,6 +204,41 @@ export function runQuantityInputTests() {
     eq(r.notionalUsd, 1000);
     eq(r.marginUsd, 100);
     eq(r.baseQty, 20);
+  });
+
+  // ── 공식은 통화를 모른다 ────────────────────────────────
+  //
+  // 원화 요약도 같은 나눗셈을 쓴다. 그런데 KRW 값을 `notionalUsd` 같은
+  // 칸에 억지로 넣으면 **이름이 거짓말을 하고** 다음 사람이 그 값을
+  // 달러로 읽는다. 들어온 통화와 나가는 통화가 같다는 계약만 갖는다.
+
+  test('들어온 통화 그대로 나간다 — USDT든 원화든 같은 공식', () => {
+    eq(notionalAndMargin({ notional: 100, leverage: 10 }).margin, 10);
+    eq(notionalAndMargin({ notional: 100_000, leverage: 10 }).margin, 10_000);
+  });
+
+  test('명목가는 그대로 돌려준다 — 배율을 곱하지 않는다', () => {
+    for (const lev of [1, 10, 100]) {
+      eq(notionalAndMargin({ notional: 100, leverage: lev }).notional, 100);
+    }
+    eq(notionalAndMargin({ notional: 100, leverage: 1 }).margin, 100);
+    eq(notionalAndMargin({ notional: 100, leverage: 100 }).margin, 1);
+  });
+
+  test('**배율을 모르면 0이 아니라 null이다** — 0은 돈이 안 든다로 읽힌다', () => {
+    for (const lev of [null, undefined, 0, -5, NaN, 'x' as any]) {
+      eq(notionalAndMargin({ notional: 100, leverage: lev }).margin, null);
+    }
+  });
+
+  test('명목가를 모르면 둘 다 null이다', () => {
+    eq(notionalAndMargin({ notional: null, leverage: 10 }).notional, null);
+    eq(notionalAndMargin({ notional: null, leverage: 10 }).margin, null);
+  });
+
+  test('convertQuantity의 증거금도 같은 공식을 지난다', () => {
+    const r = convertQuantity({ mode: 'QUOTE_NOTIONAL', value: 100, price: 50, leverage: 10 });
+    eq(r.marginUsd, notionalAndMargin({ notional: 100, leverage: 10 }).margin);
   });
 
   test('배율을 모르면 증거금을 지어내지 않는다', () => {

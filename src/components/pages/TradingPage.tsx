@@ -8,7 +8,7 @@ import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, savePaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
 // 명목가·증거금의 뜻은 한 곳에서 온다 — 화면이 공식을 다시 쓰지 않는다.
-import { convertQuantity } from '@/lib/markets/quantityInput';
+import { convertQuantity, notionalAndMargin } from '@/lib/markets/quantityInput';
 import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/lib/autotrade/practiceActions';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -988,7 +988,14 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             {/* 요약 한 줄 (금액 있을때만, 컴팩트) */}
             {amount&&(
               <div style={{display:'flex',justifyContent:'space-between',background:T.alt,borderRadius:7,padding:'7px 11px',marginBottom:8,fontSize:10}}>
-                <span style={{color:T.muted}}>명목 ₩{fmt(+amount)} · 증거금 ₩{fmt(leverage>0?(+amount/leverage):0)} · 수수료 ₩{fmt(fee)}</span>
+                {(() => {
+                  const krw = notionalAndMargin({ notional: +amount, leverage });
+                  return (
+                    <span style={{color:T.muted}}>
+                      명목 ₩{fmt(krw.notional ?? 0)} · 증거금 {krw.margin != null ? `₩${fmt(krw.margin)}` : '확인 불가'} · 수수료 ₩{fmt(fee)}
+                    </span>
+                  );
+                })()}
                 <span style={{color:T.red,fontWeight:700}}>청산 -{(100/leverage*0.9).toFixed(1)}%</span>
               </div>
             )}

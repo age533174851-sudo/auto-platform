@@ -114,6 +114,33 @@ const fail = (status: ConvertStatus, reason: string): QuantityConvertResult =>
  * 부르는 쪽이 `orderSizing.planSize`를 쓴다 — 그쪽에 최소수량·수량단위·
  * 증거금 초과 검사까지 들어 있고, 그 판정을 두 벌로 만들지 않는다.
  */
+/**
+ * 명목가와 증거금 — **통화를 모른다.**
+ *
+ * `margin = notional / leverage` 이 한 줄이 이 저장소에서 유일해야 한다.
+ * 실제로 화면이 같은 나눗셈을 따로 들고 있었고, 그때 preview와 확인창이
+ * 서로 다른 답을 냈다(한쪽은 배율을 곱하고 한쪽은 무시했다).
+ *
+ * 통화 이름을 붙이지 않는 이유: 원화 요약도 같은 공식을 쓴다. KRW 값을
+ * `notionalUsd` 같은 칸에 억지로 넣으면 **이름이 거짓말을 하고**, 다음
+ * 사람이 그 값을 달러로 읽는다. 들어온 통화와 나가는 통화가 같다는
+ * 계약만 갖는다.
+ *
+ *   100 USDT · 10배  →  증거금 10 USDT
+ *   ₩100,000 · 10배  →  증거금 ₩10,000
+ *
+ * **배율을 모르면 0이 아니라 null이다.** 0은 '돈이 안 든다'로 읽힌다.
+ */
+export function notionalAndMargin(i: {
+  notional: number | null | undefined;
+  leverage: number | null | undefined;
+}): { notional: number | null; margin: number | null } {
+  const n = pos(i?.notional);
+  const lev = pos(i?.leverage);
+  if (n == null) return { notional: null, margin: null };
+  return { notional: n, margin: lev != null ? n / lev : null };
+}
+
 export function convertQuantity(
   input: QuantityConvertInput | null | undefined,
 ): QuantityConvertResult {
@@ -148,7 +175,10 @@ export function convertQuantity(
       return {
         status: 'OK', ok: true, baseQty: v,
         notionalUsd: price != null ? v * price : null,
-        marginUsd: price != null && lev != null ? (v * price) / lev : null,
+        // 공식은 `notionalAndMargin` 한 곳에 있다.
+        marginUsd: notionalAndMargin({
+          notional: price != null ? v * price : null, leverage: lev,
+        }).margin,
         reason: '',
       };
 
@@ -193,7 +223,7 @@ export function convertQuantity(
   return {
     status: 'OK', ok: true, baseQty,
     notionalUsd: notional,
-    marginUsd: lev != null ? notional / lev : null,
+    marginUsd: notionalAndMargin({ notional, leverage: lev }).margin,
     reason: '',
   };
 }

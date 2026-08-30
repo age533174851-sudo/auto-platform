@@ -64,8 +64,26 @@ if (!existsSync(LIB)) fail(`${LIB}이 없습니다`);
 else {
   const lib = stripJs(readFileSync(LIB, 'utf8'));
   // 명목가는 배율과 무관하고, 증거금은 나눗셈이다.
-  if (!/notional\s*\/\s*lev/.test(lib)) {
-    fail(`${LIB}이 증거금을 명목가 / 배율로 내지 않습니다`);
+  if (!/export function notionalAndMargin/.test(lib)) {
+    fail(`${LIB}에 통화 중립 helper(notionalAndMargin)가 없습니다`);
+  }
+  // ── 나눗셈 구현은 **하나뿐이어야 한다** ──
+  //
+  // 화면이 같은 나눗셈을 따로 들고 있었고, 그때 preview와 확인창이 서로
+  // 다른 답을 냈다. helper를 만들어 놓고 옆에 공식이 하나 더 있으면
+  // 만든 의미가 없다.
+  const divisions = (lib.match(/\/\s*lev\b/g) || []).length;
+  if (divisions !== 1) {
+    fail(`${LIB}에 '명목가 / 배율' 구현이 ${divisions}개 있습니다 — 하나여야 합니다`);
+  }
+  // helper가 배율을 모를 때 0을 지어내면 '돈이 안 든다'로 읽힌다.
+  const at = lib.indexOf('export function notionalAndMargin');
+  const body = at >= 0 ? lib.slice(at, at + 600) : '';
+  if (/margin:\s*0\b/.test(body)) {
+    fail(`${LIB}의 helper가 증거금을 0으로 채웁니다 — 모르면 null입니다`);
+  }
+  if (/margin:\s*n\s*[,}]/.test(body)) {
+    fail(`${LIB}의 helper가 증거금을 명목가와 같게 둡니다`);
   }
   if (!/case 'QUOTE_NOTIONAL'[\s\S]{0,200}notional = v;/.test(lib)) {
     fail(`${LIB}의 QUOTE_NOTIONAL이 적은 금액을 그대로 명목가로 쓰지 않습니다 — 배율과 무관해야 합니다`);
@@ -101,6 +119,23 @@ for (const file of SCREENS) {
   if (/(const|let)\s+margin\s*=\s*notional\s*[;,]/.test(body)) {
     fail(`${file}이 증거금을 명목가와 같게 둡니다 — 증거금 = 명목가 / 배율입니다`);
   }
+  // ── 화면에 공식이 남아 있지 않은가 ──
+  //
+  // 예전 검사기는 파일 어딘가에 convertQuantity 호출이 하나라도 있으면
+  // 통과시켰다. 그래서 원화 요약 한 경로가 `amount / leverage`를 직접
+  // 계산해도 잡히지 않았다 — **값은 맞았지만 공식이 두 벌이었다.**
+  for (const m of body.matchAll(/[^\n;]{0,30}\b(\+?\s*amount|notional|usdt|krw)\s*\/\s*leverage[^\n;]{0,30}/gi)) {
+    const line = m[0];
+    // helper를 부르는 줄은 나눗셈을 직접 하지 않는다.
+    if (/notionalAndMargin|convertQuantity/.test(line)) continue;
+    fail(`${file}이 증거금을 직접 나눕니다: ${line.trim().slice(0, 70)}`
+      + ' — 공식은 notionalAndMargin 한 곳에만 둡니다');
+  }
+  // 0 fallback은 '돈이 안 든다'로 읽힌다.
+  if (/leverage\s*>\s*0\s*\?[^\n;]{0,60}:\s*0/.test(body)) {
+    fail(`${file}이 배율을 모를 때 증거금을 0으로 적습니다 — '확인 불가'여야 합니다`);
+  }
+
   // 확인창이 둘을 **다른 행**으로 보여 주는가.
   if (/주문 금액['"`]\s*,\s*v:/.test(body)) {
     fail(`${file}의 확인창이 아직 '주문 금액'으로 적습니다 — 명목가인지 증거금인지 읽히지 않습니다`);
