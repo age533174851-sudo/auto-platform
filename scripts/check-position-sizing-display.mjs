@@ -85,6 +85,9 @@ for (const file of SCREENS) {
   if (!/convertQuantity\s*\(/.test(body)) {
     fail(`${file}이 convertQuantity를 쓰지 않습니다 — 명목가·증거금 공식을 화면이 다시 만들고 있습니다`);
   }
+  if (!/import\s*\{[^}]*convertQuantity[^}]*\}\s*from\s*['"][^'"]*quantityInput['"]/.test(body)) {
+    fail(`${file}이 quantityInput에서 convertQuantity를 가져오지 않습니다 — 공용 정의가 출처여야 합니다`);
+  }
 
   // 명목가를 배율로 곱하는 표시가 남아 있으면 안 된다.
   for (const m of body.matchAll(/(notional|명목)[^\n;]{0,60}/g)) {
