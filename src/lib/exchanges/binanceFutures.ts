@@ -974,6 +974,11 @@ export async function testFuturesConnection(key: string, secret: string, testnet
 // 거래소 심볼별 최소 수량/스텝 캐시 (5분)
 const _lotCache: Record<string, SymbolFilters & { at: number }> = {};
 
+/** 시험에서만 쓴다. 규격은 5분 캐시라 앞 시험의 값이 다음 시험에 남는다 */
+export function __clearFiltersCache() {
+  for (const k of Object.keys(_lotCache)) delete _lotCache[k];
+}
+
 /**
  * 이 심볼의 주문 규격.
  *
@@ -1021,16 +1026,28 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     // 보내고 거래소가 판단하게 둔다"). 여기서 기본값을 채우는 바람에
     // 그 경로가 한 번도 안 돌았다.
     //
-    // 한 필터 안에서만 대신한다. `LOT_SIZE`의 minQty가 없으면 같은 필터의
-    // stepSize를 쓰는 것은 "한 칸이 최소"라는 뜻이고 같은 응답에서 나온
-    // 값이다. 반면 **다른 필터를 가져다 채우지는 않는다** —
-    // `MARKET_LOT_SIZE`가 없는데 `LOT_SIZE`를 복사하면 거래소가 두지 않은
-    // 규칙을 우리가 만드는 것이다.
+    // ── 값을 추론하지 않는다 ──
+    //
+    // 예전에는 `minQty`가 없으면 `stepSize`를 대신 넣었다. "한 칸이 최소"
+    // 라는 추론인데, 바이낸스에서 **둘은 서로 다른 규칙**이다:
+    //
+    //   minQty    허용되는 최소 수량
+    //   stepSize  수량이 움직일 수 있는 단위
+    //
+    // 최소가 0.01인데 단위가 0.001인 종목에서 그 추론은 최소를 열 배
+    // 낮춰 잡는다 — 거래소가 거절할 주문을 우리가 통과시킨다.
+    //
+    // 그리고 **다른 필터를 가져다 채우지도 않는다.** `MARKET_LOT_SIZE`가
+    // 없는데 `LOT_SIZE`를 복사하면 거래소가 두지 않은 규칙을 만드는 것이다.
+    //
+    // 필요한 값이 하나라도 없으면 그 격자는 null이다. 부르는 쪽이
+    // "이 주문유형의 수량 규격을 모른다"로 읽는다.
     const gridOf = (f: any) => {
       const st = parseFloat(f?.stepSize ?? '');
-      if (!Number.isFinite(st) || st <= 0) return null;
       const mn = parseFloat(f?.minQty ?? '');
-      return { stepSize: st, minQty: Number.isFinite(mn) && mn > 0 ? mn : st };
+      if (!Number.isFinite(st) || st <= 0) return null;
+      if (!Number.isFinite(mn) || mn <= 0) return null;
+      return { stepSize: st, minQty: mn };
     };
     const limitQty = gridOf(lot);
     const marketQty = gridOf(mktLot);

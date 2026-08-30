@@ -142,21 +142,46 @@ else {
     if (!/qtyGridFor\s*\(\s*filters\s*,\s*orderType\s*\)/.test(body)) {
       fail(`${QZ}의 quantizeOrder가 주문유형으로 격자를 고르지 않습니다`);
     }
-    // 규격 미확인: 신규는 막고 청산은 보낸다.
+    // ── 규격 미확인은 **두 가지**다 ──
+    //
+    //   filters == null            조회 자체가 실패
+    //   filters는 있고 격자만 null  이 주문유형의 수량 규칙을 모름
+    //
+    // 둘 다 신규 진입에서는 "규격을 모른다"이고 막아야 한다. 뒤쪽을
+    // "규칙 없음"으로 읽어 그냥 흘려보내면 조회 실패와 같은 위험이 된다.
     if (!/FILTERS_UNKNOWN/.test(body)) {
       fail(`${QZ}이 규격 미확인을 구분하지 않습니다 — 모르는 규격으로 신규 진입이 나갑니다`);
     }
-    const nullAt = body.search(/if\s*\(\s*!\s*filters\s*\)/);
-    if (nullAt < 0) fail(`${QZ}에 규격 미확인 분기가 없습니다`);
-    else {
-      const blk = braceBodyAt(body, nullAt);
+    if (!/QTY_FILTER_UNKNOWN/.test(body)) {
+      fail(`${QZ}이 '이 주문유형의 수량 격자 미확인'을 구분하지 않습니다`
+        + ' — MARKET_LOT_SIZE가 없을 때 시장가 신규 진입이 그대로 나갑니다');
+    }
+    for (const [pattern, label] of [
+      [/if\s*\(\s*!\s*filters\s*\)/, '규격 조회 실패'],
+      [/if\s*\(\s*!\s*lot\s*\)/, '주문유형 격자 미확인'],
+    ]) {
+      const at = body.search(pattern);
+      if (at < 0) { fail(`${QZ}에 ${label} 분기가 없습니다`); continue; }
+      const blk = braceBodyAt(body, at);
       if (!/reduceOnly/.test(blk)) {
-        fail(`${QZ}이 규격 미확인에서 신규와 청산을 갈라내지 않습니다`
+        fail(`${QZ}이 ${label}에서 신규와 청산을 갈라내지 않습니다`
           + ' — 못 여는 것은 불편이고 못 닫는 것은 사고입니다');
       }
-      if (!/FILTERS_UNKNOWN/.test(blk)) {
-        fail(`${QZ}의 규격 미확인 분기가 신규 진입을 막지 않습니다`);
+      if (!/_UNKNOWN/.test(blk)) {
+        fail(`${QZ}의 ${label} 분기가 신규 진입을 막지 않습니다`);
       }
+      // 격자를 적용하지 않았는데 적용했다고 적으면 안 된다.
+      if (/applied:\s*true/.test(blk)) {
+        fail(`${QZ}의 ${label} 분기가 applied:true를 적습니다`
+          + ' — 규격을 적용하지 않았습니다');
+      }
+    }
+    // 격자가 없는데 아래 계산으로 흘러가면 안 된다. `!lot` 분기가
+    // step/minQty를 읽는 곳보다 **앞**에 있어야 한다.
+    const lotAt = body.search(/if\s*\(\s*!\s*lot\s*\)/);
+    const stepAt = body.search(/const\s+step\s*=/);
+    if (lotAt >= 0 && stepAt >= 0 && lotAt > stepAt) {
+      fail(`${QZ}이 격자 미확인을 확인하기 전에 수량을 자릅니다`);
     }
     // 최소 명목가: 청산 제외 + 자른 뒤 수량 + 시장가는 서버 기준가
     const minAt = body.indexOf('minNotional');
@@ -216,6 +241,23 @@ else {
     // 최소 금액 기본값 금지.
     for (const m of body.matchAll(/minNotional[^;\n]{0,40}(?:\?\?|\|\|)\s*(\d+)/g)) {
       fail(`${BF}이 최소 명목가 기본값 ${m[1]}을 지어냅니다`);
+    }
+    // ── minQty를 stepSize로 추론하지 않는다 ──
+    //
+    // 바이낸스에서 둘은 서로 다른 규칙이다. 최소가 0.01인데 단위가
+    // 0.001인 종목에서 그 추론은 최소를 열 배 낮춰 잡는다 — 거래소가
+    // 거절할 주문을 우리가 통과시킨다.
+    const gridAt = body.search(/const\s+gridOf\s*=/);
+    if (gridAt < 0) fail(`${BF}에 격자 파서(gridOf)가 없습니다`);
+    else {
+      const g = braceBodyAt(body, gridAt);
+      if (/minQty\s*:\s*[^,}\n]*\b(?:st|step|stepSize)\b/.test(g)) {
+        fail(`${BF}이 minQty를 stepSize로 대신 채웁니다 — 둘은 다른 규칙입니다`);
+      }
+      // 두 값 다 있어야 격자가 만들어진다.
+      if (!/minQty[\s\S]{0,80}return null/.test(g) && !/return null[\s\S]{0,120}minQty/.test(g)) {
+        fail(`${BF}의 격자 파서가 minQty가 없을 때 null을 돌려주지 않습니다`);
+      }
     }
   }
   notes.push(`${BF}이 주문유형별 격자와 최소 금액을 거래소에서 읽습니다`);
@@ -310,6 +352,7 @@ else {
     ['규격을 못 읽으면 신규 진입은 막는다', '신규 진입 차단'],
     ['청산에는 최소 금액을 적용하지 않는다', '청산 최소 금액 면제'],
     ['Gate는 1계약 미만이면 막고', 'Gate 계약 규칙'],
+    ['시장가 격자를 모르면 신규 진입을 막는다', '주문유형 격자 미확인'],
   ];
   for (const [needle, label] of need) {
     if (!t.includes(needle)) fail(`${TEST}에 ${label} 시험이 없습니다`);

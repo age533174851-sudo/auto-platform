@@ -79,6 +79,8 @@ export type QuantizeCode =
   | 'INVALID_QUANTITY'
   /** 거래소 규격을 못 읽었다 (조회 실패) */
   | 'FILTERS_UNKNOWN'
+  /** 규격은 읽었지만 **이 주문유형의** 수량 격자를 모른다 */
+  | 'QTY_FILTER_UNKNOWN'
   /** 수량 단위로 내렸더니 한 칸도 안 된다 */
   | 'INVALID_STEP'
   /** 최소 주문 수량 미달 */
@@ -213,12 +215,35 @@ export function quantizeOrder(
   // 바이낸스는 시장가에 `MARKET_LOT_SIZE`를 따로 준다. 지정가 격자로
   // 시장가를 깎으면 거래소가 요구하지 않은 크기로 주문하게 된다.
   const lot = qtyGridFor(filters, orderType);
-  const step = isPos(lot?.stepSize) ? Number(lot!.stepSize) : null;
-  const minQty = isPos(lot?.minQty) ? Number(lot!.minQty) : null;
   const tick = isPos(filters.tickSize) ? Number(filters.tickSize) : null;
+  const p = (p0 != null && tick) ? roundToTick(p0, tick) : p0;
+
+  // ── 규격 응답을 받은 것과 **이 주문유형의 규격을 아는 것**은 다르다 ──
+  //
+  // `exchangeInfo`가 200을 주고 `LOT_SIZE`도 있는데 `MARKET_LOT_SIZE`만
+  // 없을 수 있다. 그때 시장가 수량을 그대로 흘려보내면, 조회에 실패했을
+  // 때와 똑같이 **규격을 모른 채 신규 포지션을 여는 것**이 된다.
+  // 위의 `filters == null`과 같은 정책으로 간다.
+  if (!lot) {
+    if (!reduceOnly) {
+      return {
+        ok: false, quantity: null, price: p, changed: false, applied: false,
+        code: 'QTY_FILTER_UNKNOWN',
+        reason: `${orderType === 'LIMIT' ? '지정가' : '시장가'} 주문의 수량 규격을 확인하지 못해`
+              + ' 신규 주문을 보내지 않습니다 (청산은 계속 가능합니다)',
+      };
+    }
+    return {
+      ok: true, quantity: q0, price: p, changed: p0 != null && p !== p0, applied: false, code: null,
+      reason: `${orderType === 'LIMIT' ? '지정가' : '시장가'} 주문의 수량 규격을 확인하지 못했습니다`
+            + ' — 청산이라 그대로 보냅니다',
+    };
+  }
+
+  const step = isPos(lot.stepSize) ? Number(lot.stepSize) : null;
+  const minQty = isPos(lot.minQty) ? Number(lot.minQty) : null;
 
   const q = step ? floorToStep(q0, step) : q0;
-  const p = (p0 != null && tick) ? roundToTick(p0, tick) : p0;
 
   if (!isPos(q)) {
     // 내림했더니 0이 됐다. 요청한 수량이 한 단위보다 작다는 뜻이다.

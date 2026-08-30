@@ -186,16 +186,33 @@ export function runQuantizeTests() {
     eq(l.quantity, 0.015);
   });
 
-  test('시장가 격자가 없으면 지정가 격자를 대신 쓰지 않는다', () => {
+  test('**시장가 격자를 모르면 신규 진입을 막는다** — 지정가 격자로 대신하지 않는다', () => {
+    // `exchangeInfo`가 200을 주고 LOT_SIZE도 있는데 MARKET_LOT_SIZE만
+    // 없을 수 있다. 그때 시장가 수량을 그대로 흘려보내면 조회에 실패했을
+    // 때와 똑같이 **규격을 모른 채 신규 포지션을 여는 것**이 된다.
     const onlyLimit: SymbolFilters = {
       limitQty: { stepSize: 0.001, minQty: 0.001 }, marketQty: null,
       tickSize: 0.1, minNotional: null,
     };
     eq(qtyGridFor(onlyLimit, 'MARKET'), null);
-    // 거래소가 시장가 격자를 두지 않았으므로 깎지 않는다.
-    const r = quantizeOrder(0.0159, null, onlyLimit, { orderType: 'MARKET' });
-    eq(r.ok, true);
-    eq(r.quantity, 0.0159);
+
+    const entry = quantizeOrder(0.0159, null, onlyLimit, { orderType: 'MARKET' });
+    eq(entry.ok, false);
+    eq(entry.code, 'QTY_FILTER_UNKNOWN');
+    eq(entry.applied, false);
+
+    // 청산은 막지 않는다 — 못 닫는 것이 더 위험하다.
+    const exit = quantizeOrder(0.0159, null, onlyLimit, { orderType: 'MARKET', reduceOnly: true });
+    eq(exit.ok, true);
+    eq(exit.quantity, 0.0159);
+    eq(exit.applied, false);      // 격자를 적용한 것이 아니다
+    eq(exit.code, null);
+
+    // 같은 규격에서 **지정가는** 격자를 알고 있으므로 신규도 나간다.
+    const limit = quantizeOrder(0.0159, 400, onlyLimit, { orderType: 'LIMIT' });
+    eq(limit.ok, true);
+    eq(limit.quantity, 0.015);
+    eq(limit.applied, true);
   });
 
   test('**자른 뒤의 수량으로 최소 금액을 본다** — 원본으로 통과시키지 않는다', () => {

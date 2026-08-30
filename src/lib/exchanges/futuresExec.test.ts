@@ -353,6 +353,71 @@ export function runFuturesExecTests() {
     eq(posted, 0, '규격을 모르는데 주문이 나갔다');
   });
 
+  // ── 규격 파서: **거래소가 준 값만 보존한다** ──
+  //
+  // 예전에는 `minQty`가 없으면 `stepSize`를 대신 넣었다. 바이낸스에서
+  // 둘은 서로 다른 규칙이다 — 최소가 0.01인데 단위가 0.001인 종목에서
+  // 그 추론은 최소를 열 배 낮춰 잡는다.
+  netTest('LOT_SIZE에 minQty가 없으면 그 격자는 null이다 — stepSize로 대신 채우지 않는다', async () => {
+    const { getSymbolFilters, __clearFiltersCache } = await import('./binanceFutures');
+    __clearFiltersCache();
+    await withFetch((url) => {
+      if (!url.includes('/fapi/v1/exchangeInfo')) return null;
+      return { body: { symbols: [{ symbol: 'AAAUSDT', filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001' },                          // minQty 없음
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0.01', minQty: '0.01' },
+        { filterType: 'PRICE_FILTER', tickSize: '0.1' },
+        { filterType: 'MIN_NOTIONAL', notional: '5' },
+      ] }] } };
+    }, async () => {
+      const f = await getSymbolFilters('AAAUSDT', true);
+      // 지정가 격자를 모르므로 규격 전체를 못 읽은 것으로 본다.
+      eq(f, null);
+    });
+  });
+
+  netTest('MARKET_LOT_SIZE에 minQty가 없으면 시장가 격자만 null이다', async () => {
+    const { getSymbolFilters, __clearFiltersCache } = await import('./binanceFutures');
+    __clearFiltersCache();
+    await withFetch((url) => {
+      if (!url.includes('/fapi/v1/exchangeInfo')) return null;
+      return { body: { symbols: [{ symbol: 'BBBUSDT', filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0.01' },                    // minQty 없음
+        { filterType: 'PRICE_FILTER', tickSize: '0.1' },
+        { filterType: 'MIN_NOTIONAL', notional: '5' },
+      ] }] } };
+    }, async () => {
+      const f = await getSymbolFilters('BBBUSDT', true);
+      assert(f != null, '규격을 읽지 못했다');
+      eq(f!.limitQty!.stepSize, 0.001);
+      eq(f!.limitQty!.minQty, 0.001);
+      eq(f!.marketQty, null);          // stepSize만 있다고 만들어 채우지 않는다
+      eq(f!.minNotional, 5);
+    });
+  });
+
+  netTest('필터를 다 읽으면 주문유형별 격자가 따로 남는다', async () => {
+    const { getSymbolFilters, __clearFiltersCache } = await import('./binanceFutures');
+    __clearFiltersCache();
+    await withFetch((url) => {
+      if (!url.includes('/fapi/v1/exchangeInfo')) return null;
+      return { body: { symbols: [{ symbol: 'CCCUSDT', filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0.01', minQty: '0.01' },
+        { filterType: 'PRICE_FILTER', tickSize: '0.1' },
+        { filterType: 'MIN_NOTIONAL', notional: '5' },
+      ] }] } };
+    }, async () => {
+      const f = await getSymbolFilters('CCCUSDT', true);
+      eq(f!.limitQty!.stepSize, 0.001);
+      eq(f!.marketQty!.stepSize, 0.01);
+      eq(f!.marketQty!.minQty, 0.01);
+      eq(f!.tickSize, 0.1);
+      eq(f!.minNotional, 5);
+    });
+  });
+
   netTest('바이낸스 TESTNET 주문은 바이낸스 데모 호스트로 나간다', async () => {
     const t: ExecTarget = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
     const urls = await withFetch((url) => {
@@ -361,6 +426,9 @@ export function runFuturesExecTests() {
       if (url.includes('/fapi/v1/exchangeInfo')) {
         return { body: { symbols: [{ symbol: 'BTCUSDT', filters: [
           { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+          // 시장가 주문이라 MARKET_LOT_SIZE가 있어야 규격을 안다.
+          // 없으면 신규 진입은 막힌다 — 그게 C4 계약이다.
+          { filterType: 'MARKET_LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
           { filterType: 'PRICE_FILTER', tickSize: '0.1' },
         ] }] } };
       }
