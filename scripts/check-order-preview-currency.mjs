@@ -198,9 +198,14 @@ else {
       if (cf.includes('1375')) {
         fail(`${PAGE}의 확인창에 고정 환율이 있습니다 — 실전 금액은 USDT입니다`);
       }
-      // 옛 원화 수량 계산이 남아 있으면 안 된다.
-      for (const m of cf.matchAll(/[^\n;]{0,30}amount\s*\/\s*(krwPx|sel\.p)[^\n;]{0,20}/g)) {
-        fail(`${PAGE}의 확인창이 원화 표시가로 수량을 만듭니다: ${m[0].trim().slice(0, 60)}`);
+      // ── 옛 원화 수량 계산이 남아 있으면 안 된다 ──
+      //
+      // `amount / krwPx`만 찾으면 `+amount/(sel.p||1)`처럼 괄호 하나로
+      // 빠져나간다 — 되돌림 시험에서 실제로 통과했다. **원화 표시가로
+      // 나누는 것 자체**를 본다. 청산 비율(%)은 통화와 무관해서 예외다.
+      for (const m of cf.matchAll(/[^\n;]{0,40}\/\s*\(?\s*(krwPx|sel\.p)\b[^\n;]{0,20}/g)) {
+        if (/Pct|100/.test(m[0])) continue;
+        fail(`${PAGE}의 확인창이 원화 표시가로 나눕니다: ${m[0].trim().slice(0, 60)}`);
       }
       // 통화 표기는 모드가 정한다. 문자열 하나만 보면 안 되고 **분기**를 봐야 한다.
       if (!/const\s+notionalText\s*=\s*isExchange\b/.test(cf)) {
