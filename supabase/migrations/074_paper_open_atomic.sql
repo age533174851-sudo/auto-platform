@@ -87,10 +87,11 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_account  UUID;
-  v_existing UUID;
-  v_id       UUID;
-  v_rows     INT;
+  v_account    UUID;
+  v_existing   UUID;
+  v_id         UUID;
+  v_rows       INT;
+  v_constraint TEXT;
 BEGIN
   IF p_entry_fee IS NULL OR p_entry_fee < 0 THEN
     RAISE EXCEPTION 'paper_open_position: 진입 수수료가 음수이거나 없습니다 (%)', p_entry_fee;
@@ -153,7 +154,15 @@ EXCEPTION
   WHEN unique_violation THEN
     -- **signal_id 충돌만 멱등 중복이다.** 다른 유니크 위반은 삼키지 않는다 —
     -- 삼키면 진짜 고장이 '이미 체결됨'으로 조용히 사라진다.
-    IF p_signal_id IS NOT NULL AND SQLERRM ILIKE '%paper_pos_signal_uniq%' THEN
+    --
+    -- 어느 유니크가 깨졌는지는 **오류 문구를 읽어 판단하지 않는다.**
+    -- `SQLERRM`은 사람이 읽는 문장이라 서버 버전·로케일·문구 변경에 따라
+    -- 달라지고, 다른 인덱스 이름이 그 문장 안에 우연히 들어갈 수도 있다.
+    -- 우리가 알고 싶은 것은 "문구에 그 이름이 있었나"가 아니라 **실제로
+    -- 깨진 제약이 무엇인가**다. PostgreSQL이 그 값을 직접 준다.
+    GET STACKED DIAGNOSTICS v_constraint = CONSTRAINT_NAME;
+
+    IF p_signal_id IS NOT NULL AND v_constraint = 'paper_pos_signal_uniq' THEN
       SELECT id INTO v_existing
         FROM public.paper_positions
        WHERE signal_id = p_signal_id

@@ -64,16 +64,24 @@ function stripJs(src) {
   return out;
 }
 
-/** SQL의 `--` 주석을 뗀다. 문자열 리터럴 안의 `--`는 건드리지 않는다. */
+/**
+ * SQL의 `--` 주석을 뗀다. 작은따옴표 문자열 안의 `--`는 건드리지 않는다.
+ *
+ * **`$$ … $$` 안도 똑같이 뗀다.** 처음에는 달러 인용 구간을 통째로
+ * 넘겼는데, 함수 본문이 바로 그 안에 있어서 본문 주석이 하나도 안 떨어졌다.
+ * 그래서 "SQLERRM을 쓰지 마라"는 검사가 **그렇게 하지 말라고 적어 둔
+ * 주석 자체**를 읽고 실패했다 — 검사기가 자기 산문을 읽는 그 고장이다.
+ */
 function stripSql(src) {
-  let out = '', i = 0, inStr = false, dollar = false;
+  let out = '', i = 0, inStr = false;
   while (i < src.length) {
     const c = src[i];
-    if (dollar) { if (src.startsWith('$$', i)) { dollar = false; out += '$$'; i += 2; continue; } out += c; i++; continue; }
     if (inStr) { if (c === "'") inStr = false; out += c; i++; continue; }
-    if (src.startsWith('$$', i)) { dollar = true; out += '$$'; i += 2; continue; }
     if (c === "'") { inStr = true; out += c; i++; continue; }
-    if (c === '-' && src[i + 1] === '-') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '-' && src[i + 1] === '-') {
+      while (i < src.length && src[i] !== '\n') i++;
+      continue;
+    }
     out += c; i++;
   }
   return out;
@@ -173,9 +181,24 @@ else {
     for (const code of ['NO_ACCOUNT', 'DUPLICATE', 'OPENED']) {
       if (!body.includes(code)) fail(`${sqlFile}이 ${code} 상태를 돌려주지 않습니다`);
     }
-    // 중복은 signal_id 충돌만.
-    if (!/paper_pos_signal_uniq/.test(body)) {
-      fail(`${sqlFile}이 signal_id 유니크만 중복으로 보지 않습니다 — 다른 충돌까지 삼킵니다`);
+    // ── 중복은 signal_id 충돌만이고, **오류 문구로 판단하지 않는다** ──
+    //
+    // `SQLERRM`은 사람이 읽는 문장이라 서버 버전·로케일·문구 변경에 따라
+    // 달라지고, 다른 인덱스 이름이 그 문장 안에 우연히 들어갈 수도 있다.
+    // 우리가 알고 싶은 것은 **실제로 깨진 제약이 무엇인가**이고,
+    // PostgreSQL이 `GET STACKED DIAGNOSTICS ... = CONSTRAINT_NAME`으로
+    // 그 값을 직접 준다.
+    if (!/GET STACKED DIAGNOSTICS[\s\S]{0,80}CONSTRAINT_NAME/.test(body)) {
+      fail(`${sqlFile}이 깨진 제약 이름을 진단값으로 받지 않습니다`
+        + ' — GET STACKED DIAGNOSTICS ... = CONSTRAINT_NAME을 쓰세요');
+    }
+    if (!/=\s*'paper_pos_signal_uniq'/.test(body)) {
+      fail(`${sqlFile}이 실제 제약 이름을 paper_pos_signal_uniq와 비교하지 않습니다`);
+    }
+    // 문자열 매칭으로 중복 종류를 고르면 안 된다.
+    if (/SQLERRM|SQLSTATE\s+ILIKE|position\s*\(\s*'paper_pos_signal_uniq'/.test(body)) {
+      fail(`${sqlFile}이 오류 문구로 중복 종류를 판정합니다`
+        + ' — 문구는 계약이 아닙니다. CONSTRAINT_NAME을 쓰세요');
     }
     if (!/RAISE\s*;/.test(body)) {
       fail(`${sqlFile}이 알 수 없는 유니크 위반을 다시 던지지 않습니다`);
