@@ -149,6 +149,16 @@ else {
     if (lockAt >= 0 && insAt >= 0 && lockAt > insAt) {
       fail(`${sqlFile}이 포지션을 넣은 뒤에 계좌를 잠급니다 — 순서가 뒤집혔습니다`);
     }
+    // ── 중복은 수수료를 건드리지 않고 나간다 ──
+    //
+    // DUPLICATE를 돌려주기 **전에** 계좌를 갱신하면, 재시도 한 번에
+    // 수수료가 두 번 빠진다. 멱등이 아니게 된다.
+    const dupAt = body.search(/'DUPLICATE'/);
+    const feeAt = body.search(/UPDATE public\.paper_accounts/);
+    if (dupAt >= 0 && feeAt >= 0 && dupAt > feeAt) {
+      fail(`${sqlFile}이 수수료를 갱신한 뒤에 중복을 돌려줍니다`
+        + ' — 같은 신호를 재시도하면 수수료가 두 번 빠집니다');
+    }
     // 잔고는 읽고 고쳐 쓰지 않는다.
     if (!/balance\s*=\s*balance\s*-\s*p_entry_fee/.test(body)) {
       fail(`${sqlFile}이 잔고를 차감식(balance = balance - fee)으로 갱신하지 않습니다`);
