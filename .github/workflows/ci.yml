@@ -154,6 +154,17 @@ jobs:
       - name: 수량 의도 보존 (표시용으로 깎은 값이 실행이 되지 않는다)
         run: node scripts/check-quantity-intent.mjs
 
+      # ── 명목가는 배율과 무관하다 ──
+      #
+      # 화면이 명목가를 `amount × leverage`로 그리고 있었다. 실제 주문은
+      # `qty = amount / price`라서 거래소에 서는 명목가는 amount 그대로다 —
+      # 10배에서 화면이 실제의 열 배를 말했다. 확인창은 반대로
+      # `margin = notional`이라 증거금도 열 배였다.
+      #
+      # 사용자는 그 숫자로 "이 정도면 증거금이 충분한가"를 판단한다.
+      - name: 포지션 크기 표시 (명목가·증거금이 실행과 같은 뜻인가)
+        run: node scripts/check-position-sizing-display.mjs
+
       # ── 전략 점검 플래그 검사 ──
       #
       # 레지스트리는 scalp의 점검 플래그를 `checkOnly`로 선언했고 화면은

@@ -7,6 +7,8 @@ import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
 import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, savePaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
+// 명목가·증거금의 뜻은 한 곳에서 온다 — 화면이 공식을 다시 쓰지 않는다.
+import { convertQuantity, notionalAndMargin } from '@/lib/markets/quantityInput';
 import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/lib/autotrade/practiceActions';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -931,20 +933,40 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             )}
 
             {/* 금액 입력 + 빠른선택 (한 줄에) */}
-            <input type="number" inputMode="numeric" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="주문 금액 (₩)"
+            <input type="number" inputMode="numeric" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="포지션 명목가 (₩) · 배율과 무관한 포지션 총액"
               style={{width:'100%',background:T.alt,border:`1px solid ${T.border2}`,borderRadius:8,padding:'11px 12px',color:T.txt,fontSize:15,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontWeight:700,outline:'none',marginBottom:6}}/>
             {/* 실시간 환산: USDT + 수량 + 명목가치 */}
             {amount&&+amount>0&&(()=>{
               const krwPx = sel.p || 0;
               const usdt = +amount / 1375;
               const qty = krwPx>0 ? (+amount/krwPx) : 0;
-              const notional = usdt * leverage;
+              // ── 적은 금액이 곧 명목가다. 배율과 무관하다 ──
+              //
+              // 예전에는 `usdt * leverage`를 명목가로 적었다. 그런데 실제
+              // 주문은 `qty = amount / price`라서 거래소에 서는 명목가는
+              // `amount` 그대로다 — 10배에서는 **화면이 실제의 열 배**를
+              // 말하고 있었다. 같은 줄의 '수량'과도 맞지 않았다
+              // (0.002 × 50,000 = 100인데 명목은 1,000이라고 적혔다).
+              //
+              // 공식을 여기서 다시 쓰지 않는다. `convertQuantity`가
+              // 명목가·증거금의 뜻을 한 곳에서 정의한다.
+              //
+              // 불변식 그대로 읽히게 둔다: **명목가 = 수량 × 가격**,
+              // **증거금 = 명목가 / 배율**. 새 환율 상수를 만들지 않으려고
+              // USDT 가격은 이미 있는 두 값에서 낸다(= krwPx / 1375).
+              const usdtPx = qty > 0 ? usdt / qty : null;
+              const sizing = convertQuantity({
+                mode: 'BASE_ASSET', value: qty, price: usdtPx, leverage,
+              });
+              const notional = sizing.notionalUsd ?? usdt;
+              const marginUsd = sizing.marginUsd;
               const symbol = (sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
               return (
                 <div style={{display:'flex',justifyContent:'space-between',gap:8,background:T.bg,borderRadius:7,padding:'8px 11px',marginBottom:6,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
                   <div><span style={{color:T.muted}}>≈ </span><span style={{color:T.txt,fontWeight:700}}>{usdt.toFixed(1)} USDT</span></div>
                   <div><span style={{color:T.muted}}>수량 </span><span style={{color:T.acl,fontWeight:700}}>{qty.toFixed(qty<1?5:3)} {symbol}</span></div>
                   <div><span style={{color:T.muted}}>명목 </span><span style={{color:notional<20?T.red:T.grn,fontWeight:700}}>{notional.toFixed(0)} USDT</span></div>
+                  <div><span style={{color:T.muted}}>증거금 </span><span style={{color:T.txt,fontWeight:700}}>{marginUsd != null ? `${marginUsd.toFixed(1)} USDT` : '확인 불가'}</span></div>
                 </div>
               );
             })()}
@@ -966,7 +988,14 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             {/* 요약 한 줄 (금액 있을때만, 컴팩트) */}
             {amount&&(
               <div style={{display:'flex',justifyContent:'space-between',background:T.alt,borderRadius:7,padding:'7px 11px',marginBottom:8,fontSize:10}}>
-                <span style={{color:T.muted}}>명목 ₩{fmt(+amount*leverage)} · 수수료 ₩{fmt(fee)}</span>
+                {(() => {
+                  const krw = notionalAndMargin({ notional: +amount, leverage });
+                  return (
+                    <span style={{color:T.muted}}>
+                      명목 ₩{fmt(krw.notional ?? 0)} · 증거금 {krw.margin != null ? `₩${fmt(krw.margin)}` : '확인 불가'} · 수수료 ₩{fmt(fee)}
+                    </span>
+                  );
+                })()}
                 <span style={{color:T.red,fontWeight:700}}>청산 -{(100/leverage*0.9).toFixed(1)}%</span>
               </div>
             )}
@@ -1702,17 +1731,28 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             </div>
             {(()=>{
               const krwPx=sel.p||0; const usdtPx=krwPx/1375;
-              const notional=(+amount/1375); const qty=krwPx>0?(+amount/krwPx):0;
-              const margin=notional; const liqPct=100/leverage*0.9;
+              const qty=krwPx>0?(+amount/krwPx):0;
+              // ── 명목가와 증거금은 다른 값이다 ──
+              //
+              // 예전에는 `margin = notional`이라 배율이 무시됐다. 10배에서
+              // 증거금을 실제의 **열 배**로 적었고, 사용자는 "이 정도면
+              // 증거금이 충분한가"를 그 숫자로 판단한다.
+              //
+              // 공식은 `convertQuantity` 한 곳에 있다: 명목가 = 수량 × 가격,
+              // 증거금 = 명목가 / 배율.
+              const sizing=convertQuantity({ mode:'BASE_ASSET', value:qty, price:usdtPx, leverage });
+              const notional=sizing.notionalUsd ?? (+amount/1375);
+              const margin=sizing.marginUsd; const liqPct=100/leverage*0.9;
               const liqPrice=side==='매수'?krwPx*(1-liqPct/100):krwPx*(1+liqPct/100);
               const symbol=(sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
               return [
                 {l:'가격',v:'시장가 (Best Price)'},
                 {l:'수량',v:`${qty.toFixed(qty<1?5:3)} ${symbol}`},
-                {l:'주문 금액',v:`₩${fmt(+amount)} (${notional.toFixed(0)} USDT)`},
-                {l:'증거금',v:`${margin.toFixed(1)} USDT`},
-                {l:'예상 청산가',v:`₩${fmt(Math.round(liqPrice))}`,c:T.ylw},
+                {l:'포지션 명목가',v:`₩${fmt(+amount)} (${notional.toFixed(0)} USDT)`},
                 {l:'레버리지',v:`${leverage}x`},
+                // **못 구한 것을 0으로 적지 않는다.** 0은 '돈이 안 든다'로 읽힌다.
+                {l:'예상 필요 증거금',v:margin!=null?`${margin.toFixed(1)} USDT`:'확인 불가'},
+                {l:'예상 청산가',v:`₩${fmt(Math.round(liqPrice))}`,c:T.ylw},
               ].map((r:any,i)=>(
                 <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:`1px solid ${T.border}`}}>
                   <span style={{color:T.muted,fontSize:13}}>{r.l}</span>
