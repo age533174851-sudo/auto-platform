@@ -64,7 +64,13 @@ export function useLivePrices(intervalMs = 5000) {
       );
       if (!match) return a;
       got.add(a.id);
-      return { ...a, p: match.price, c: match.change24h, v: String(match.volume) };
+      return {
+        ...a, p: match.price, c: match.change24h, v: String(match.volume),
+        // 거래소 원본 견적가를 그대로 옮긴다. 없으면 없는 채로 둔다 —
+        // `p`에서 환산해 만들면 실행이 다시 고정 환율에 묶인다.
+        quotePrice: (match as any).quotePrice ?? null,
+        quoteCurrency: (match as any).quoteCurrency ?? null,
+      };
     }));
     setLiveIds(prev => {
       // 이번에 못 받은 종목을 지우지 않는다. 한 번 실패했다고 값이

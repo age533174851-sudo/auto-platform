@@ -8,7 +8,17 @@ import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, savePaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
 // 명목가·증거금의 뜻은 한 곳에서 온다 — 화면이 공식을 다시 쓰지 않는다.
-import { convertQuantity, notionalAndMargin } from '@/lib/markets/quantityInput';
+import { notionalAndMargin } from '@/lib/markets/quantityInput';
+// 실행 통화·모드 격리·잔고 출처 판정은 이 파일 한 곳에 있다.
+import {
+  orderCurrencyOf, amountMustClear, planExchangeOrder, percentBaseFor,
+  balanceStateOf, scopedValueFor,
+  type BalanceState, type ConnectionScoped,
+} from '@/lib/markets/orderCurrency';
+// 주문 전 숫자와 실제 주문은 같은 곳에서 뜻을 받는다.
+import { orderPreviewOf } from '@/lib/markets/orderPreview';
+// 거래소 선물 시세를 읽는 경로는 하나다 — 확인창 열기 전, 그리고 제출 시점.
+import { fetchVenueQuote, toVenueSymbol } from '@/lib/markets/venueQuote';
 import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/lib/autotrade/practiceActions';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -23,6 +33,12 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          LiquidationCalc, PositionSizer, RiskDashboard, InlineTVChart, ChartContainer } from './SharedUI';
 
 
+/**
+ * 화면이 아는 최소 명목가. **정본이 아니다** — 거래소별 필터가 정본이고
+ * 서버 `quantizeOrder`가 강제한다. C4에서 이 상수를 없앤다.
+ */
+const CLIENT_MIN_NOTIONAL_USDT = 20;
+
 function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSimSteps}:{prices:Asset[];currency:string;activeAsset?:any;onOpenPnL?:(a:any)=>void;
   /** 마지막 실데이터 수신 시각 (useLivePrices) */
   priceRealAt?:number|null;
@@ -30,9 +46,32 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
   priceSimSteps?:number}) {
   const [isMock,setIsMock]=useState(true);
   const [tradeMode,setTradeMode]=useState<'mock'|'testnet'|'live'>('mock');
+  /**
+   * 이 연결의 가용 USDT. **못 읽었으면 null이다.**
+   *
+   * 0으로 두면 사용자는 잔고가 없다고 읽는데 실제로는 못 읽은 것이다.
+   * 연습 원화 잔고로 대신하지 않는다 — 원화 숫자가 달러 주문이 된다.
+   */
+  const [usdtBalance,setUsdtBalance]=useState<ConnectionScoped<BalanceState>|null>(null);
+  /** 이 연결에서 읽은 선물 가격. 다른 연결의 값을 이어 쓰지 않는다 */
+  const [venueQuote,setVenueQuote]=useState<ConnectionScoped<{price:number;exchange:string;source:string|null}>|null>(null);
+  /** 이 모드의 주문 금액 통화. 모의는 원화, 거래소는 USDT */
+  const orderCurrency = orderCurrencyOf(tradeMode);
   const [hasExchange,setHasExchange]=useState(false);
   const [connections,setConnections]=useState<any[]>([]);
   const [connId,setConnId]=useState('');
+
+  /**
+   * 비율 버튼이 나눌 잔고. 모의는 연습 원화, 거래소는 가용 USDT다.
+   * 못 읽었으면 `base: null` — 버튼이 잠긴다.
+   */
+  const percentBase = percentBaseFor({
+    mode: tradeMode,
+    practiceKrw: (() => { try { return loadPaperBalance().krw; } catch { return null; } })(),
+    // **지금 연결의 값만 쓴다.** 연결을 바꾸면 이전 계정의 잔고가
+    // 그대로 남아 다른 계좌의 비율로 주문을 만들 수 있었다.
+    balance: scopedValueFor(usdtBalance, connId),
+  });
   const [slEditAsset,setSlEditAsset]=useState('');
   const [quickActions,setQuickActions]=useState<string[]>(()=>{
     try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse','tpsl']; }
@@ -88,6 +127,8 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
   const [status,setStatus]=useState<string|null>(null);
   const [search,setSearch]=useState('');
   const [showConfirm,setShowConfirm]=useState(false);
+  /** 확인창을 열기 전 거래소 시세를 읽는 중 */
+  const [quoting,setQuoting]=useState(false);
   useEffect(()=>{if(activeAsset){const {_ts,...clean}=activeAsset;setSel(clean as Asset);}},[activeAsset]);
 
   // ── Binance 실시간 스트림 (호가·체결·티커) ──
@@ -195,8 +236,22 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         signal: AbortSignal.timeout(3000),   // 3초 타임아웃
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || d.positionMsg || ('HTTP '+r.status));
+      if (!r.ok || d.error) {
+        // **실패했으면 이전 값을 지운다.** 남겨 두면 다른 계정의 잔고로
+        // 비율 주문이 만들어진다.
+        setUsdtBalance({ connectionId: connId, value: { kind: 'UNKNOWN' } });
+        throw new Error(d.error || d.positionMsg || ('HTTP '+r.status));
+      }
 
+      // 비율 버튼이 쓸 가용 USDT. **버리지 않는다** — 예전에는 응답에
+      // 있는데도 안 읽어서, 거래소 비율을 연습 원화 잔고로 계산했다.
+      {
+        const usdt = (Array.isArray(d.balances) ? d.balances : [])
+          .find((b:any)=>String(b?.asset||'').toUpperCase()==='USDT');
+        // **0과 '못 읽음'을 가른다.** 0은 입금하면 되고, 못 읽음은
+        // 무엇이 잘못됐는지 알아야 한다.
+        setUsdtBalance({ connectionId: connId, value: balanceStateOf(usdt?.availableBalance) });
+      }
       const live = (Array.isArray(d.positions) ? d.positions : []).filter((p:any)=>Math.abs(p.amount||0)>0);
 
       // ── Ghost Sync diff (직전 스냅샷 vs 신규) ──
@@ -234,6 +289,8 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       if (mismatch) tgAlert({ level:'warning', eventType:'ghost_sync', exchange:'Binance', mode: d.testnet?'TESTNET':'LIVE', title:'Ghost Sync 불일치 감지', message:'화면과 거래소 포지션이 불일치합니다. 거래소 우선 적용됨.' });
       if (!silent) setSyncMsg(`동기화 완료 · ${d.testnet?'테스트넷':'라이브'} · 포지션 ${live.length}개${mismatch?' · ⚠️ 불일치 감지':''}`);
     } catch (e:any) {
+      // 예외도 실패다. 이전 연결의 잔고를 이어 쓰지 않는다.
+      setUsdtBalance({ connectionId: connId, value: { kind: 'UNKNOWN' } });
       errCountRef.current += 1;
       const n = errCountRef.current;
       setSyncStatus('error');
@@ -480,6 +537,41 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
     refreshPositions();
   };
 
+  /**
+   * 확인창을 연다. **거래소 모드에서는 가격을 먼저 읽는다.**
+   *
+   * 예전에는 시세를 확인 버튼을 누른 뒤에야 읽었다. 그래서 확인창이
+   * 보여 줄 올바른 수량이 애초에 없었고, 화면은 옛 원화 계산으로 숫자를
+   * 채웠다 — 사용자는 실제와 다른 숫자를 보고 승인했다.
+   *
+   * 가격을 못 읽으면 **확인창을 열지 않는다.** 현물·환율로 대신 채운 숫자를
+   * 승인 화면에 올리지 않는다.
+   */
+  const openConfirm = async (nextSide: string) => {
+    if (!amount) {
+      // **거래소로 나가는 주문에는 기본 금액을 지어내지 않는다.**
+      // 모의의 10만원은 연습 장부라 그대로 둔다.
+      if (orderCurrency === 'USDT') { showToast('포지션 명목가(USDT)를 입력하세요', false); return; }
+      setAmount('100000');
+    }
+    // 연습 장부는 네트워크를 지나지 않는다 — 기존 그대로 연다.
+    if (orderCurrency !== 'USDT') { setSide(nextSide); setTimeout(()=>setShowConfirm(true),0); return; }
+    if (!connId) { showToast('거래소 연결을 선택하세요', false); return; }
+    setQuoting(true);
+    const q = await fetchVenueQuote({
+      connectionId: connId, symbol: toVenueSymbol(sel.sym || sel.id),
+      authHeader: authHeaderRef.current });
+    setQuoting(false);
+    if (!q) {
+      setVenueQuote(null);
+      showToast('거래소 가격을 확인하지 못해 주문 확인을 열지 않았습니다'
+        + ' — 현물 가격이나 환율로 대신 계산하지 않습니다', false);
+      return;
+    }
+    setVenueQuote(q);
+    setSide(nextSide); setTimeout(()=>setShowConfirm(true),0);
+  };
+
   const confirmOrder = async (sideArg?: string) => {
     const side = sideArg || sideRef.current || '매수';
     setShowConfirm(false);
@@ -490,21 +582,59 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
     }
     setStatus('loading');
     showToast(`${tradeMode==='real'?'실전':tradeMode==='testnet'?'테스트넷':'모의'} ${side} 주문 처리 중...`, 'pending');
+    // 모의는 예전처럼 기본 10만원을 쓴다. **거래소로 나가는 주문에는
+    // 기본 금액을 지어내지 않는다** — 아래에서 막는다.
     const orderAmt = amount ? +amount : 100_000;
 
     // ── 테스트넷/실전: 실제 거래소 선물 주문 ──
     if (tradeMode === 'testnet' || tradeMode === 'live') {
       if (!connId) { setStatus('error' as any); setTimeout(()=>setStatus(null),3000); return; }
       try {
-        const tradeSymbol = (sel.sym || sel.id).toUpperCase().replace(/USDT$/,'') + 'USDT';
-        const krwPx = sel.p || 0;                    // 화면 표시가 (KRW)
-        const usdtPx = krwPx / 1375;                 // USDT 환산 가격
-        let usdtNotional = orderAmt / 1375;          // 주문 명목가치 (USDT)
-        // 바이낸스 최소 명목가치 20 USDT — 미달 시 안내
-        if (usdtNotional < 20) {
-          showToast(`주문 실패 · 최소 주문금액 미달 (약 20 USDT ≈ 27,500원, 현재 ${Math.round(usdtNotional)} USDT)`, false);
+        const tradeSymbol = toVenueSymbol(sel.sym || sel.id);
+        // ── 실행 통화는 USDT다. 환율이 들어가지 않는다 ──
+        //
+        // 예전에는 원화 금액과 원화 표시가를 1375로 나눠 수량을 만들었다.
+        // 두 나눗셈이 소거돼 `qty = krwAmount / krwPx`가 됐지만, 그
+        // `krwPx`가 거래소 원가에 상수 1375를 곱한 값이라 실효 수식은
+        // `krwAmount / (usdPx × 1375)`였다 — **환율이 앞단에 숨어 처음부터
+        // 체결 크기를 정하고 있었다.**
+        //
+        // 이제 사용자가 USDT로 적고, 거래소 원본 가격으로 나눈다.
+        // 환율을 못 읽어도 주문은 나간다.
+        // ── 가격은 **주문이 나갈 그 거래소**에서 읽는다 ──
+        //
+        // 예전에는 `/api/prices`의 값을 썼다. 그건 `api.binance.com`의
+        // **현물** 티커라, Gate 연결로 주문해도 바이낸스 현물 가격으로
+        // 수량을 만들고 있었다 — 환율을 없애고 그 자리에 다른 거래소의
+        // 다른 시장 가격을 넣은 셈이다.
+        //
+        // 현물과 선물은 같은 종목이라도 값이 다르고(베이시스) 거래소끼리도
+        // 다르다. 연결이 정한 곳·정한 환경에서 읽는다. 못 읽으면 막는다 —
+        // 다른 거래소로 대신 읽거나 현물로 내려가지 않는다.
+        //
+        // 확인창을 열 때도 같은 함수로 한 번 읽었다. 그 값은 **판단용
+        // 예상값**이고, 여기서 다시 읽은 값이 **체결 크기의 정본**이다 —
+        // 그 사이 가격은 움직인다.
+        const quoted = await fetchVenueQuote({
+          connectionId: connId, symbol: tradeSymbol, authHeader: authHeaderRef.current });
+        let nativePrice: number | null = null;
+        if (quoted) { nativePrice = quoted.value.price; setVenueQuote(quoted); }
+        // 손절·익절은 **비율**로 넘어간다. 비율은 통화와 무관하므로
+        // 사용자가 보고 적은 화면 표시가 기준으로 계산해도 값이 같다 —
+        // 여기서 나온 것은 가격이 아니라 %다.
+        const krwPx = sel.p || 0;
+        const plan = planExchangeOrder({
+          amountUsdt: amount ? +amount : null,
+          nativePrice, leverage,
+          // 정본은 서버 필터다. 화면 상수는 C4에서 옮긴다 — 지금은 뜻만 보존.
+          minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
+        });
+        if (plan.kind !== 'READY') {
+          showToast(`주문 실패 · ${plan.reason}`, false);
           setStatus(null); return;
         }
+        const usdtPx = nativePrice as number;
+        const usdtNotional = plan.notionalUsdt;
         // **의도한 수량을 그대로 보낸다 — 여기서 자리수를 정하지 않는다.**
         //
         // 예전에는 `Number(qty.toFixed(3))`으로 보냈다. 소수 3자리 *반올림*이라
@@ -519,7 +649,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
         // 규격을 아는 곳은 서버다: `futuresSymbolFilters()` → `quantizeOrder()`가
         // 거래소 stepSize로 **내림**하고, 최소 수량·최소 금액에 미달하면 거절한다.
         // 그래서 신규 진입에서 `최종 수량 ≤ 의도 수량`이 항상 성립한다.
-        const qty = usdtPx > 0 ? usdtNotional / usdtPx : 0;
+        const qty = plan.qty;
         const r = await fetch('/api/binance/futures/order', {
           method:'POST',
           headers:{'Content-Type':'application/json',...(authHeaderRef.current?{Authorization:authHeaderRef.current}:{})},
@@ -638,7 +768,16 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           const active = tradeMode===m;
           const c = m==='mock'?T.acl:m==='testnet'?T.ylw:T.red;
           return (
-            <button key={m} onClick={()=>{ if(locked){ showToast('거래소 연결 후 사용 가능 · 더보기 → 거래소연결', false); return; } setTradeMode(m); }}
+            <button key={m} onClick={()=>{
+              if(locked){ showToast('거래소 연결 후 사용 가능 · 더보기 → 거래소연결', false); return; }
+              // ── 통화가 바뀌면 적어 둔 금액을 비운다 ──
+              //
+              // `100000`은 모의에서 ₩100,000이고 거래소에서 100,000 USDT다.
+              // 그대로 두면 모드를 바꾼 순간 백 배가 넘는 주문이 된다.
+              // 환산해서 넘기지도 않는다 — 사용자가 고른 적 없는 숫자다.
+              if (amountMustClear(tradeMode, m)) { setAmount(''); setUsdtBalance(null); setVenueQuote(null); }
+              setTradeMode(m);
+            }}
               style={{flex:1,padding:'10px 6px',background:active?c+'20':'transparent',color:active?c:locked?T.muted:T.sub,border:`1px solid ${active?c:T.border}`,borderRadius:12,fontWeight:700,fontSize:11,cursor:'pointer',opacity:locked?0.5:1,position:'relative'}}>
               {l}{locked&&' 🔒'}
             </button>
@@ -933,46 +1072,62 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             )}
 
             {/* 금액 입력 + 빠른선택 (한 줄에) */}
-            <input type="number" inputMode="numeric" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="포지션 명목가 (₩) · 배율과 무관한 포지션 총액"
+            <input type="number" inputMode="numeric" value={amount} onChange={e=>setAmount(e.target.value)} placeholder={orderCurrency === 'USDT'
+                ? '포지션 명목가 (USDT) · 배율과 무관한 포지션 총액'
+                : '포지션 명목가 (₩) · 배율과 무관한 포지션 총액'}
               style={{width:'100%',background:T.alt,border:`1px solid ${T.border2}`,borderRadius:8,padding:'11px 12px',color:T.txt,fontSize:15,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontWeight:700,outline:'none',marginBottom:6}}/>
-            {/* 실시간 환산: USDT + 수량 + 명목가치 */}
+            {/* 실시간 환산: 수량 + 명목가치 — **실행과 같은 계산** */}
             {amount&&+amount>0&&(()=>{
-              const krwPx = sel.p || 0;
-              const usdt = +amount / 1375;
-              const qty = krwPx>0 ? (+amount/krwPx) : 0;
-              // ── 적은 금액이 곧 명목가다. 배율과 무관하다 ──
+              // ── 미리보기는 실행이 쓰는 그 함수로 만든다 ──
               //
-              // 예전에는 `usdt * leverage`를 명목가로 적었다. 그런데 실제
-              // 주문은 `qty = amount / price`라서 거래소에 서는 명목가는
-              // `amount` 그대로다 — 10배에서는 **화면이 실제의 열 배**를
-              // 말하고 있었다. 같은 줄의 '수량'과도 맞지 않았다
-              // (0.002 × 50,000 = 100인데 명목은 1,000이라고 적혔다).
+              // 예전에는 화면이 공식을 따로 갖고 있었다. 실행에서 환율을
+              // 없앤 뒤에도 미리보기는 옛 원화 계산 그대로여서, 같은 주문을
+              // 놓고 화면과 체결이 다른 수량을 말했다.
               //
-              // 공식을 여기서 다시 쓰지 않는다. `convertQuantity`가
-              // 명목가·증거금의 뜻을 한 곳에서 정의한다.
-              //
-              // 불변식 그대로 읽히게 둔다: **명목가 = 수량 × 가격**,
-              // **증거금 = 명목가 / 배율**. 새 환율 상수를 만들지 않으려고
-              // USDT 가격은 이미 있는 두 값에서 낸다(= krwPx / 1375).
-              const usdtPx = qty > 0 ? usdt / qty : null;
-              const sizing = convertQuantity({
-                mode: 'BASE_ASSET', value: qty, price: usdtPx, leverage,
+              // 가격도 **주문이 나갈 그 거래소**의 값만 쓴다. `/api/prices`의
+              // 현물 참고가로 되돌아가지 않는다 — Gate 연결에서 바이낸스
+              // 현물 기준 수량을 보여 주게 되기 때문이다. 못 읽었으면
+              // 숫자를 만들지 않고 '확인 전'이라고 적는다.
+              const venuePx = scopedValueFor(venueQuote, connId)?.price ?? null;
+              const pv = orderPreviewOf({
+                mode: tradeMode, amount, venuePrice: venuePx, krwPrice: sel.p || null,
+                leverage, minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
               });
-              const notional = sizing.notionalUsd ?? usdt;
-              const marginUsd = sizing.marginUsd;
               const symbol = (sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
+              // 표시는 USDT 기준으로 유지한다. 연습 장부는 참고 환산을 쓴다.
+              const shownNotional = pv.currency === 'USDT' ? pv.notional : pv.refUsdt?.notional ?? null;
+              const shownMargin   = pv.currency === 'USDT' ? pv.margin   : pv.refUsdt?.margin   ?? null;
+              const unknown = pv.state !== 'READY';
+              const txt = (v: number | null, f: (n: number) => string) => (v == null ? '확인 전' : f(v));
               return (
                 <div style={{display:'flex',justifyContent:'space-between',gap:8,background:T.bg,borderRadius:7,padding:'8px 11px',marginBottom:6,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-                  <div><span style={{color:T.muted}}>≈ </span><span style={{color:T.txt,fontWeight:700}}>{usdt.toFixed(1)} USDT</span></div>
-                  <div><span style={{color:T.muted}}>수량 </span><span style={{color:T.acl,fontWeight:700}}>{qty.toFixed(qty<1?5:3)} {symbol}</span></div>
-                  <div><span style={{color:T.muted}}>명목 </span><span style={{color:notional<20?T.red:T.grn,fontWeight:700}}>{notional.toFixed(0)} USDT</span></div>
-                  <div><span style={{color:T.muted}}>증거금 </span><span style={{color:T.txt,fontWeight:700}}>{marginUsd != null ? `${marginUsd.toFixed(1)} USDT` : '확인 불가'}</span></div>
+                  {/* 연습 장부는 원화로 적으므로 참고 환산을 남긴다.
+                      거래소 모드는 적은 값이 곧 USDT라 환산할 것이 없다. */}
+                  {pv.currency==='KRW'&&<div><span style={{color:T.muted}}>≈ </span><span style={{color:T.txt,fontWeight:700}}>{txt(pv.refUsdt?.notional ?? null,(n)=>`${n.toFixed(1)} USDT`)}</span></div>}
+                  <div><span style={{color:T.muted}}>수량 </span><span style={{color:T.acl,fontWeight:700}}>{txt(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)}</span></div>
+                  <div><span style={{color:T.muted}}>명목 </span><span style={{color:shownNotional!=null&&shownNotional<CLIENT_MIN_NOTIONAL_USDT?T.red:T.grn,fontWeight:700}}>{txt(shownNotional,(n)=>`${n.toFixed(0)} USDT`)}</span></div>
+                  <div><span style={{color:T.muted}}>증거금 </span><span style={{color:T.txt,fontWeight:700}}>{txt(shownMargin,(m)=>`${m.toFixed(1)} USDT`)}</span></div>
+                  {unknown&&<div style={{color:T.ylw,fontWeight:700}}>{pv.state==='PRICE_UNKNOWN'?'거래소 가격 확인 전':'주문 불가'}</div>}
                 </div>
               );
             })()}
             <div style={{display:'flex',gap:4,marginBottom:8}}>
               {[25,50,75,100].map(pct=>(
-                <button key={pct} onClick={()=>{ try { const b=loadPaperBalance(); setAmount(String(Math.round((b.krw||10000000)*pct/100))); } catch {} }}
+                <button key={pct} disabled={percentBase.base == null} onClick={()=>{
+                    // ── 잔고 출처는 모드마다 다르다 ──
+                    //
+                    // 예전에는 모드와 무관하게 연습 원화 잔고를 읽었다.
+                    // 거래소 비율을 그 값으로 계산하면 **원화 숫자가 그대로
+                    // 달러 주문**이 된다. 못 읽었으면 버튼을 잠근다 —
+                    // 0으로 두면 사용자는 잔고가 없다고 읽는다.
+                    if (percentBase.base == null) {
+                      showToast(orderCurrency === 'USDT'
+                        ? '가용 USDT를 확인하지 못했습니다' : '연습 잔고를 확인하지 못했습니다', false);
+                      return;
+                    }
+                    const v = percentBase.base * pct / 100;
+                    setAmount(String(orderCurrency === 'USDT' ? +v.toFixed(2) : Math.round(v)));
+                  }}
                   style={{flex:1,background:T.alt,color:T.acl,border:`1px solid ${T.border}`,borderRadius:6,padding:'5px 2px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{pct}%</button>
               ))}
             </div>
@@ -989,10 +1144,14 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             {amount&&(
               <div style={{display:'flex',justifyContent:'space-between',background:T.alt,borderRadius:7,padding:'7px 11px',marginBottom:8,fontSize:10}}>
                 {(() => {
-                  const krw = notionalAndMargin({ notional: +amount, leverage });
+                  // 단위가 바뀌면 숫자의 뜻도 바뀐다. 거래소 모드의 금액은
+                  // USDT다 — ₩를 붙이면 화면이 다른 통화를 말하게 된다.
+                  const m = notionalAndMargin({ notional: +amount, leverage });
+                  const u = (v: number | null) => v == null ? '확인 불가'
+                    : orderCurrency === 'USDT' ? `${v.toFixed(2)} USDT` : `₩${fmt(v)}`;
                   return (
                     <span style={{color:T.muted}}>
-                      명목 ₩{fmt(krw.notional ?? 0)} · 증거금 {krw.margin != null ? `₩${fmt(krw.margin)}` : '확인 불가'} · 수수료 ₩{fmt(fee)}
+                      명목 {u(m.notional)} · 증거금 {u(m.margin)}{orderCurrency === 'USDT' ? '' : ` · 수수료 ₩${fmt(fee)}`}
                     </span>
                   );
                 })()}
@@ -1003,18 +1162,19 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
 
             {/* 실행 버튼 — Buy(Long) / Sell(Short) 2개 (바이낸스) */}
             <div style={{display:'flex',gap:8}}>
-              <button onClick={()=>{if(!amount)setAmount('100000');setSide('매수');setTimeout(()=>setShowConfirm(true),0);}} disabled={status==='loading'}
+              <button onClick={()=>{ void openConfirm('매수'); }} disabled={status==='loading'||quoting}
                 style={{flex:1,padding:'15px',background:T.grn,color:'#fff',border:'none',borderRadius:10,fontWeight:900,fontSize:15,cursor:'pointer'}}>
                 매수 / 롱
               </button>
-              <button onClick={()=>{if(!amount)setAmount('100000');setSide('매도');setTimeout(()=>setShowConfirm(true),0);}} disabled={status==='loading'}
+              <button onClick={()=>{ void openConfirm('매도'); }} disabled={status==='loading'||quoting}
                 style={{flex:1,padding:'15px',background:T.red,color:'#fff',border:'none',borderRadius:10,fontWeight:900,fontSize:15,cursor:'pointer'}}>
                 매도 / 숏
               </button>
             </div>
+            {quoting&&<div style={{color:T.acl,fontSize:11,textAlign:'center',marginTop:6}}>거래소 가격 확인 중…</div>}
             {status==='loading'&&<div style={{color:T.acl,fontSize:11,textAlign:'center',marginTop:6}}>처리 중…</div>}
             {status==='done'&&<div style={{color:T.grn,fontSize:11,textAlign:'center',marginTop:6}}>✅ 완료!</div>}
-            <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:5}}>{tradeMode==='mock'?'모의':tradeMode==='testnet'?'테스트넷':'실전'} · 금액 미입력 시 기본 10만원</div>
+            <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:5}}>{tradeMode==='mock'?'모의 · 금액 미입력 시 기본 10만원':tradeMode==='testnet'?'테스트넷 · 명목가는 USDT로 입력합니다':'실전 · 명목가는 USDT로 입력합니다'}</div>
               </div>
 
               {/* 오더북 (호가창) — Binance 실시간 스트림 */}
@@ -1730,29 +1890,47 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               {sel.nameKr} · {marginMode==='cross'?'교차':'격리'} · {leverage}x · <span style={{color:side==='매수'?T.grn:T.red}}>{side==='매수'?'매수/롱':'매도/숏'}</span>
             </div>
             {(()=>{
-              const krwPx=sel.p||0; const usdtPx=krwPx/1375;
-              const qty=krwPx>0?(+amount/krwPx):0;
-              // ── 명목가와 증거금은 다른 값이다 ──
+              // ── 확인창의 숫자는 실행과 같은 계산에서 온다 ──
               //
-              // 예전에는 `margin = notional`이라 배율이 무시됐다. 10배에서
-              // 증거금을 실제의 **열 배**로 적었고, 사용자는 "이 정도면
-              // 증거금이 충분한가"를 그 숫자로 판단한다.
+              // 예전에는 여기서 `qty = amount / (원화 표시가)`를 다시 적고
+              // 명목가를 `₩amount`로 보여 줬다. C3 이후 실전·테스트넷의
+              // `amount`는 USDT 명목가라, 100 USDT · 2,500 USDT짜리 종목이
+              // 화면에서는 `0.000029 ETH · 0.073 USDT`로 보였다 — 실제로
+              // 나가는 0.04 ETH와 약 1,375배 다른 숫자다.
               //
-              // 공식은 `convertQuantity` 한 곳에 있다: 명목가 = 수량 × 가격,
-              // 증거금 = 명목가 / 배율.
-              const sizing=convertQuantity({ mode:'BASE_ASSET', value:qty, price:usdtPx, leverage });
-              const notional=sizing.notionalUsd ?? (+amount/1375);
-              const margin=sizing.marginUsd; const liqPct=100/leverage*0.9;
-              const liqPrice=side==='매수'?krwPx*(1-liqPct/100):krwPx*(1+liqPct/100);
+              // **승인 화면이 거짓말을 하면 승인이 승인이 아니다.**
+              //
+              // 가격은 이 연결에서 읽은 선물 시세만 쓴다. 확인창을 열기 전에
+              // 이미 읽었고(못 읽으면 열리지 않는다), 확인 버튼을 누르면
+              // 다시 읽는다 — 그래서 여기 수량은 **예상**이다.
+              const venuePx = scopedValueFor(venueQuote, connId)?.price ?? null;
+              const pv = orderPreviewOf({
+                mode: tradeMode, amount, venuePrice: venuePx, krwPrice: sel.p || null,
+                leverage, minNotionalUsdt: CLIENT_MIN_NOTIONAL_USDT,
+              });
               const symbol=(sel.sym||sel.id).toUpperCase().replace(/USDT$/,'');
+              const isExchange = pv.currency === 'USDT';
+              const unit = (v:number|null, f:(n:number)=>string) => v==null ? '확인 불가' : f(v);
+              // 청산가는 통화와 무관한 **비율**에서 나온다. 원화 참고 표시다.
+              const krwPx=sel.p||0; const liqPct=100/leverage*0.9;
+              const liqPrice=side==='매수'?krwPx*(1-liqPct/100):krwPx*(1+liqPct/100);
+              const notionalText = isExchange
+                ? unit(pv.notional,(n)=>`${n.toFixed(2)} USDT`)
+                : `₩${fmt(+amount)} (${unit(pv.refUsdt?.notional ?? null,(n)=>`${n.toFixed(0)} USDT`)})`;
+              const marginText = isExchange
+                ? unit(pv.margin,(m)=>`${m.toFixed(2)} USDT`)
+                : unit(pv.refUsdt?.margin ?? null,(m)=>`${m.toFixed(1)} USDT`);
               return [
-                {l:'가격',v:'시장가 (Best Price)'},
-                {l:'수량',v:`${qty.toFixed(qty<1?5:3)} ${symbol}`},
-                {l:'포지션 명목가',v:`₩${fmt(+amount)} (${notional.toFixed(0)} USDT)`},
+                {l:'가격',v: isExchange
+                  ? unit(pv.price,(x)=>`예상 선물 마크가 ${x} USDT · 시장가 체결`)
+                  : '시장가 (Best Price)'},
+                {l:'예상 수량',v: unit(pv.qty,(q)=>`${q.toFixed(q<1?5:3)} ${symbol}`)},
+                {l:'포지션 명목가',v: notionalText},
                 {l:'레버리지',v:`${leverage}x`},
                 // **못 구한 것을 0으로 적지 않는다.** 0은 '돈이 안 든다'로 읽힌다.
-                {l:'예상 필요 증거금',v:margin!=null?`${margin.toFixed(1)} USDT`:'확인 불가'},
-                {l:'예상 청산가',v:`₩${fmt(Math.round(liqPrice))}`,c:T.ylw},
+                {l:'예상 필요 증거금',v: marginText},
+                {l:'예상 청산가',v: krwPx>0?`₩${fmt(Math.round(liqPrice))} (참고)`:'확인 불가',c:T.ylw},
+                ...(pv.state!=='READY'&&pv.reason?[{l:'주문 불가',v:pv.reason,c:T.red}]:[]),
               ].map((r:any,i)=>(
                 <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:`1px solid ${T.border}`}}>
                   <span style={{color:T.muted,fontSize:13}}>{r.l}</span>
@@ -1760,6 +1938,12 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                 </div>
               ));
             })()}
+            {(tradeMode==='testnet'||tradeMode==='live')&&(
+              <div style={{marginTop:10,color:T.muted,fontSize:10,lineHeight:1.5}}>
+                위 수량·증거금은 방금 읽은 거래소 선물가 기준 <b>예상값</b>입니다.
+                실제 체결 수량은 확인을 누른 시점의 거래소 가격으로 다시 계산됩니다.
+              </div>
+            )}
             <div style={{marginTop:12,color:T.muted,fontSize:11,lineHeight:1.5}}>
               {tradeMode==='mock'?'모의매매 — 실제 자금이 사용되지 않습니다.':tradeMode==='testnet'?'테스트넷 — 거래소 테스트 서버에 실제 주문이 전송됩니다.':'⚠️ 실전 — 실제 자금으로 주문이 실행됩니다.'}
             </div>
