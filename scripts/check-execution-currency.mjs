@@ -62,6 +62,26 @@ function stripJs(src) {
   return out;
 }
 
+/**
+ * 함수 **본문**을 뗀다.
+ *
+ * `bodyAt`을 그대로 쓰면 `planExchangeOrder(i: { ... })`의 **매개변수 타입**
+ * 블록을 잡는다. 실제로 본문에 환율 상수를 넣어도 통과했다 — 되돌림
+ * 시험에서 잡혔다. 괄호를 세어 서명을 넘긴 뒤의 `{`부터 본다.
+ */
+function functionBodyAt(src, name) {
+  const at = src.indexOf(`export function ${name}`);
+  if (at < 0) return '';
+  const paren = src.indexOf('(', at);
+  if (paren < 0) return '';
+  let depth = 0, i = paren;
+  for (; i < src.length; i++) {
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')') { depth--; if (depth === 0) break; }
+  }
+  return bodyAt(src, i);
+}
+
 /** `from`부터 짝이 맞는 중괄호까지 */
 function bodyAt(src, from) {
   const open = src.indexOf('{', from);
@@ -88,8 +108,8 @@ else {
   }
   // **계획 함수가 환율을 입력으로 받으면 안 된다.** 받는 순간 실행이
   // 다시 환율에 묶인다.
-  const planAt = lib.indexOf('export function planExchangeOrder');
-  const plan = planAt >= 0 ? bodyAt(lib, planAt) : '';
+  const plan = functionBodyAt(lib, 'planExchangeOrder');
+  if (!plan) fail(`${LIB}에서 planExchangeOrder 본문을 찾지 못했습니다`);
   for (const bad of ['1375', 'fx', 'Fx', 'FX', 'krw', 'Krw', 'KRW', 'usdKrw']) {
     if (plan.includes(bad)) {
       fail(`${LIB}의 planExchangeOrder가 ${bad}를 다룹니다 — 실행에 환율이 들어갑니다`);
@@ -107,9 +127,13 @@ else {
 if (!existsSync(PRICES)) fail(`${PRICES}이 없습니다`);
 else {
   const pr = stripJs(readFileSync(PRICES, 'utf8'));
-  if (!/quotePrice/.test(pr)) {
-    fail(`${PRICES}이 거래소 원본 가격(quotePrice)을 내려보내지 않습니다`
-      + ' — 화면이 원화 표시가에서 환산하게 됩니다');
+  // 파일 어딘가에 이름이 있는 것과 **값을 싣는 것**은 다르다. 실제로
+  // 한 생성 지점에서 지워도 타입 선언 때문에 통과했다.
+  const assigned = (pr.match(/quotePrice\s*[:=]\s*parseFloat/g) || []).length;
+  const krwMultiplied = (pr.match(/lastPrice\)\s*\*\s*KRW/g) || []).length;
+  if (assigned < krwMultiplied) {
+    fail(`${PRICES}이 원본 견적가를 ${assigned}곳에서만 싣습니다`
+      + ` — 원화로 곱하는 곳이 ${krwMultiplied}곳입니다. 화면이 표시가에서 환산하게 됩니다`);
   }
   notes.push(`${PRICES}이 원본 견적가를 보존합니다`);
 }
@@ -146,18 +170,41 @@ else {
     notes.push('거래소 주문 분기에 환율·연습 잔고가 없습니다');
   }
 
-  // 통화가 바뀌는 전환에서 금액을 비우는가.
+  // 통화가 바뀌는 전환에서 금액을 비우는가. **꺼 두는 것도 안 된다.**
   if (!/amountMustClear\s*\(/.test(page)) {
     fail(`${PAGE}이 모드 전환에서 금액 통화를 확인하지 않습니다`
       + ' — ₩100,000이 100,000 USDT가 됩니다');
+  } else if (/(false\s*&&|&&\s*false)[^\n]{0,40}amountMustClear|if\s*\(\s*false\s*\)/.test(page)) {
+    fail(`${PAGE}이 금액 비우기를 꺼 뒀습니다`);
   }
   // 거래소 모드에 기본 금액을 지어내지 않는가.
-  if (!/orderCurrency === 'USDT'[\s\S]{0,200}포지션 명목가\(USDT\)를 입력하세요/.test(page)) {
-    fail(`${PAGE}이 거래소 모드에서 금액 없이 주문을 막지 않습니다`);
+  // **매수·매도 두 버튼 다** 막아야 한다 — 한쪽만 고치면 다른 쪽으로 나간다.
+  const guarded = (page.match(/포지션 명목가\(USDT\)를 입력하세요/g) || []).length;
+  const defaulted = (page.match(/setAmount\('100000'\)/g) || []).length;
+  if (guarded < defaulted) {
+    fail(`${PAGE}에 기본 10만원이 ${defaulted}곳인데 거래소 차단은 ${guarded}곳입니다`
+      + ' — 막지 않은 쪽으로 100,000 USDT 주문이 나갑니다');
   }
-  // 비율 버튼이 모드별 잔고를 쓰는가.
+  // 비율 버튼이 연습 잔고를 직접 읽지 않는가.
   if (!/percentBaseFor\s*\(/.test(page)) {
     fail(`${PAGE}의 비율 버튼이 모드별 잔고 출처를 쓰지 않습니다`);
+  }
+  {
+    const pctAt = page.indexOf('percentBase.base == null');
+    if (pctAt < 0) fail(`${PAGE}에서 비율 버튼의 잔고 판정을 찾지 못했습니다`);
+    else {
+      // 비율 버튼 onClick 안에서 연습 잔고를 직접 읽으면 안 된다.
+      // (연습 장부를 고치는 다른 자리는 MOCK 전용이라 정당하다.)
+      const btn = page.slice(Math.max(0, pctAt - 200), pctAt + 900);
+      if (/loadPaperBalance\s*\(/.test(btn)) {
+        fail(`${PAGE}의 비율 버튼이 연습 잔고를 직접 읽습니다`
+          + ' — 거래소 비율이 원화 잔고로 계산됩니다');
+      }
+    }
+    // percentBaseFor의 인자 자리는 있어야 한다.
+    if (!/practiceKrw:[\s\S]{0,120}loadPaperBalance\s*\(/.test(page)) {
+      fail(`${PAGE}이 모의 비율의 잔고 출처를 percentBaseFor에 넘기지 않습니다`);
+    }
   }
   notes.push('통화 전환 시 금액을 비우고, 거래소 모드에 기본 금액이 없습니다');
 }

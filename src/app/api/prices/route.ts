@@ -270,15 +270,18 @@ async function fetchBinanceCoinInfo(symbol: string) {
       fetch(`https://api.binance.com/api/v3/depth?symbol=${base}USDT&limit=5`, { signal: AbortSignal.timeout(2000) }),
     ]);
     let price=0, change=0, vol=0, high=0, low=0;
+    let quotePrice: number | null = null;
     if (tickerR.status==='fulfilled' && tickerR.value.ok) {
       const t = await tickerR.value.json();
       price  = parseFloat(t.lastPrice) * KRW;
+      quotePrice = parseFloat(t.lastPrice);      // 원본을 버리지 않는다
       change = parseFloat(t.priceChangePercent);
       vol    = parseFloat(t.quoteVolume);
       high   = parseFloat(t.highPrice) * KRW;
       low    = parseFloat(t.lowPrice)  * KRW;
     }
-    return { symbol: base, price, change24h:change, volume24h:vol, high24h:high, low24h:low, source:'binance' };
+    return { symbol: base, price, quotePrice, quoteCurrency: quotePrice != null ? 'USDT' : null,
+      change24h:change, volume24h:vol, high24h:high, low24h:low, source:'binance' };
   } catch { return null; }
 }
 
