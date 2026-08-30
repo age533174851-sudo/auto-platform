@@ -110,6 +110,19 @@ else {
   }
   if (!/export function qtyGridFor\b/.test(qz)) fail(`${QZ}에 qtyGridFor가 없습니다`);
   const grid = fnBodyAt(qz, 'export function qtyGridFor');
+  // ── 격자를 **실제로 고르는가** ──
+  //
+  // 되돌림 시험에서 `return filters.limitQty ?? null;`처럼 유형을 무시하고
+  // 한쪽만 돌려줘도 통과했다. 호출부가 유형을 넘겨도 고르는 쪽이 안 보면
+  // 시장가가 지정가 격자로 깎인다.
+  if (grid) {
+    if (!/orderType/.test(grid)) {
+      fail(`${QZ}의 qtyGridFor가 주문유형을 보지 않습니다`);
+    }
+    for (const f of ['limitQty', 'marketQty']) {
+      if (!grid.includes(f)) fail(`${QZ}의 qtyGridFor가 ${f}를 돌려주지 않습니다`);
+    }
+  }
   // 한쪽이 없을 때 **null**이 아닌 다른 값으로 채우면 안 된다.
   // 삼항 양쪽에 두 이름이 함께 나오는 것은 정상이므로, `??`/`||`의
   // 오른쪽이 null인지만 본다.
