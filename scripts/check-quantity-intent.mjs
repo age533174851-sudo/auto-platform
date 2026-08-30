@@ -190,8 +190,16 @@ else {
   // 비율 청산 경로는 언제나 시장가 reduce-only로 나간다. 사용자가
   // 지정가를 골라 놓았는데 버튼 하나로 시장가가 되면, 수량을 지키려다
   // **다른 축의 의도를 깨는** 것이다. 자동 변환은 금지 — 막아야 한다.
-  if (!/orderType/.test(pane.slice(pane.indexOf('closePlanOf('), pane.indexOf('closePlanOf(') + 260))) {
-    fail(`${PANE}이 비율 청산 판정에 주문유형을 넘기지 않습니다 — 지정가가 시장가로 바뀝니다`);
+  const planAt = pane.indexOf('closePlanOf(');
+  const planCall = planAt >= 0 ? pane.slice(planAt, planAt + 260) : '';
+  if (!/orderType\s*[,}]/.test(planCall)) {
+    // `orderType,`(축약) 또는 `orderType: orderType`만 인정한다.
+    if (/orderType\s*:\s*['"`]/.test(planCall)) {
+      fail(`${PANE}이 비율 청산 판정에 주문유형을 상수로 박았습니다`
+        + ' — 사용자가 고른 유형이 판정에 닿지 않습니다');
+    } else {
+      fail(`${PANE}이 비율 청산 판정에 주문유형을 넘기지 않습니다 — 지정가가 시장가로 바뀝니다`);
+    }
   }
   // 막혔으면 네트워크 요청 전에 멈춰야 한다.
   const blockAt = pane.indexOf("closePlan.kind === 'BLOCKED'");
