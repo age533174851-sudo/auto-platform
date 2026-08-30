@@ -94,6 +94,7 @@ function bodyAt(src, from) {
   return src.slice(open);
 }
 
+const QUOTE_LIB = 'src/lib/markets/venueQuote.ts';
 const LIB = 'src/lib/markets/orderCurrency.ts';
 const TEST = 'src/lib/markets/orderCurrency.test.ts';
 const PAGE = 'src/components/pages/TradingPage.tsx';
@@ -122,6 +123,19 @@ if (!existsSync(TEST)) fail(`${TEST}이 없습니다`);
 else {
   const reg = existsSync('scripts/run-tests.mjs') ? readFileSync('scripts/run-tests.mjs', 'utf8') : '';
   if (!reg.includes('runOrderCurrencyTests()')) fail('run-tests.mjs에 runOrderCurrencyTests()가 없습니다');
+}
+
+// ── 1b. 시세 읽기 경로는 하나다 ──
+if (!existsSync(QUOTE_LIB)) fail(`${QUOTE_LIB}이 없습니다`);
+else {
+  const q = stripJs(readFileSync(QUOTE_LIB, 'utf8'));
+  if (!/futures\/quote/.test(q)) fail(`${QUOTE_LIB}이 venue 선물 시세 경로를 읽지 않습니다`);
+  if (!/connectionId=/.test(q)) fail(`${QUOTE_LIB}이 시세를 연결에 묶어 읽지 않습니다`);
+  // 못 읽었을 때 값을 지어내면 안 된다.
+  for (const bad of ['1375', 'api/prices', 'sel.p', 'coingecko']) {
+    if (q.includes(bad)) fail(`${QUOTE_LIB}이 ${bad}로 대신 값을 만듭니다`);
+  }
+  notes.push(`${QUOTE_LIB} 한 곳에서만 venue 시세를 읽습니다`);
 }
 
 // ── 2. 거래소 원본 가격이 손실 없이 내려오는가 ──
@@ -159,11 +173,13 @@ else {
     if (!/planExchangeOrder\s*\(/.test(branch)) {
       fail(`${PAGE}의 거래소 주문 분기가 planExchangeOrder를 쓰지 않습니다`);
     }
-    if (!/futures\/quote/.test(branch)) {
+    // 시세 읽기는 공용 helper 한 곳을 지난다. 화면이 URL을 따로 적으면
+    // 확인창과 실행이 다른 곳에서 값을 받게 된다.
+    if (!/fetchVenueQuote\s*\(/.test(branch)) {
       fail(`${PAGE}의 거래소 주문 분기가 venue 선물 시세를 읽지 않습니다`
         + ' — /api/prices는 바이낸스 **현물** 가격이라 Gate 주문에 쓰면 안 됩니다');
     }
-    if (!/connectionId=/.test(branch)) {
+    if (!/connectionId:\s*connId/.test(branch)) {
       fail(`${PAGE}이 시세를 연결에 묶어 읽지 않습니다 — 거래소·환경이 정해지지 않습니다`);
     }
     // 화면 참고가격(`/api/prices`)을 실행 수량에 쓰면 안 된다.

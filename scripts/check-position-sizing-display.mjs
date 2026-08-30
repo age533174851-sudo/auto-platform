@@ -95,16 +95,36 @@ else {
 //
 // **표시 계산을 화면이 들고 있으면 언젠가 갈린다.** 실제로 preview와
 // 확인창이 서로 다른 공식을 쓰고 있었다.
+//
+// 표시 계산은 이제 `orderPreview.ts` 한 곳을 지난다. 그래서 **그 파일이
+// 공용 정의를 쓰는지**와 **화면이 그 파일에 위임하는지**를 나눠 본다.
+// 화면이 공식을 다시 갖고 있지 않은지는 아래 정규식들이 계속 본다.
+const SOURCE = 'src/lib/markets/orderPreview.ts';
+if (!existsSync(SOURCE)) fail(`${SOURCE}이 없습니다`);
+else {
+  const src = stripJs(readFileSync(SOURCE, 'utf8'));
+  if (!/convertQuantity\s*\(/.test(src)) {
+    fail(`${SOURCE}이 convertQuantity를 쓰지 않습니다 — 명목가·증거금 공식을 다시 만들고 있습니다`);
+  }
+  if (!/notionalAndMargin\s*\(/.test(src)) {
+    fail(`${SOURCE}이 notionalAndMargin을 쓰지 않습니다`);
+  }
+  if (!/import\s*\{[^}]*convertQuantity[^}]*\}\s*from\s*['"][^'"]*quantityInput['"]/.test(src)) {
+    fail(`${SOURCE}이 quantityInput에서 convertQuantity를 가져오지 않습니다 — 공용 정의가 출처여야 합니다`);
+  }
+  notes.push(`표시 계산이 ${SOURCE} 한 곳을 지납니다`);
+}
+
 const SCREENS = ['src/components/pages/TradingPage.tsx'];
 for (const file of SCREENS) {
   if (!existsSync(file)) { fail(`${file}이 없습니다`); continue; }
   const body = stripJs(readFileSync(file, 'utf8'));
 
-  if (!/convertQuantity\s*\(/.test(body)) {
-    fail(`${file}이 convertQuantity를 쓰지 않습니다 — 명목가·증거금 공식을 화면이 다시 만들고 있습니다`);
+  if (!/orderPreviewOf\s*\(/.test(body)) {
+    fail(`${file}이 orderPreviewOf를 쓰지 않습니다 — 명목가·증거금 공식을 화면이 다시 만들고 있습니다`);
   }
-  if (!/import\s*\{[^}]*convertQuantity[^}]*\}\s*from\s*['"][^'"]*quantityInput['"]/.test(body)) {
-    fail(`${file}이 quantityInput에서 convertQuantity를 가져오지 않습니다 — 공용 정의가 출처여야 합니다`);
+  if (!/import\s*\{[^}]*orderPreviewOf[^}]*\}\s*from\s*['"][^'"]*orderPreview['"]/.test(body)) {
+    fail(`${file}이 orderPreview에서 orderPreviewOf를 가져오지 않습니다 — 공용 정의가 출처여야 합니다`);
   }
 
   // 명목가를 배율로 곱하는 표시가 남아 있으면 안 된다.
