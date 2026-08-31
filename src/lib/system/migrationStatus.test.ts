@@ -4,7 +4,8 @@
 // 초록으로 칠하지 않는지**를 본다 — 그게 이 저장소에서 가장 자주 난 거짓말이다.
 
 import { test, eq, assert } from '../../test/harness';
-import { migrationStatusOf } from './migrationStatus';
+import { migrationStatusOf, migrationsAppliedOf } from './migrationStatus';
+import { deploymentVerdict } from '../runtime/workerPlan';
 
 const REQ = ['055_a.sql', '056_b.sql'];
 const row = (filename: string, over: any = {}) =>
@@ -96,5 +97,102 @@ export function runMigrationStatusTests() {
     const s = migrationStatusOf({ required: REQ, rows: [], tracked: true });
     eq(s.code, 'APPLYING');
     eq(s.entryAllowed, false);
+  });
+
+  // ── 상태 코드가 "배포가 끝났는가"에 답하는 방식 ──
+  //
+  // 이 판단이 `/api/system/deployment`에 복사돼 있었고 거기서 `DRIFT`를
+  // false로 읽었다. 050(#226)·016(#228)에서 과거 파일을 의도적으로 고쳤고
+  // 그 drift는 계속 남으므로, 배포 판정기가 **영구히** "DB 스키마가
+  // 따라오지 않았습니다"를 말하게 됐다. 언제나 빨강인 검사는 진짜 어긋난
+  // 날의 빨강과 구별되지 않는다.
+
+  test('DRIFT는 적용 완료다 — 전부 적용됐고 파일만 바뀐 것이다', () => {
+    eq(migrationsAppliedOf('DRIFT'), true);
+    eq(migrationsAppliedOf('UP_TO_DATE'), true);
+  });
+
+  test('진짜 미적용은 그대로 false다', () => {
+    eq(migrationsAppliedOf('APPLYING'), false);
+    eq(migrationsAppliedOf('FAILED'), false);
+    eq(migrationsAppliedOf('NEEDS_APPROVAL'), false);
+    eq(migrationsAppliedOf('NOT_TRACKED'), false);
+  });
+
+  test('못 읽은 것은 null이다 — 모르는 것을 됐다로 읽지 않는다', () => {
+    eq(migrationsAppliedOf('UNKNOWN'), null);
+    eq(migrationsAppliedOf(undefined), null);
+    eq(migrationsAppliedOf(null), null);
+    eq(migrationsAppliedOf('처음 보는 코드'), null);
+  });
+
+  test('DRIFT여도 배포 판정은 MATCHED다 — 세 SHA가 같고 남은 것이 없다', () => {
+    // #228 직후 실제로 겪은 상태를 그대로 만든다.
+    const SHA = '108bd54f556cbd57e288ce556bc838a89c036ce9';
+    const st = migrationStatusOf({
+      required: ['016_a.sql', '050_b.sql'],
+      rows: [
+        { filename: '016_a.sql', checksum: '옛것', status: 'BASELINE', verified: true },
+        { filename: '050_b.sql', checksum: '옛것', status: 'BASELINE', verified: true },
+      ],
+      checksums: { '016_a.sql': '새것', '050_b.sql': '새것' },
+    });
+    eq(st.code, 'DRIFT', '전부 적용됐는데 파일이 바뀌었으면 DRIFT다');
+    eq(st.pending.length, 0, 'DRIFT에 남은 것이 있으면 안 된다');
+    eq(st.failed.length, 0);
+
+    const v = deploymentVerdict({
+      mainSha: SHA, vercelSha: SHA, flySha: SHA,
+      migrationsApplied: migrationsAppliedOf(st.code),
+      pendingMigrations: st.pending,
+    });
+    eq(v.code, 'MATCHED', v.reason);
+    eq(v.matched, true, v.reason);
+  });
+
+  test('진짜로 남은 것이 있으면 배포 판정은 실패한다', () => {
+    const SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const st = migrationStatusOf({ required: ['016_a.sql', '050_b.sql'], rows: [
+      { filename: '016_a.sql', checksum: 'x', status: 'APPLIED', verified: true },
+    ], tracked: true });
+    eq(st.code, 'APPLYING');
+    eq(st.pending.length, 1);
+    const v = deploymentVerdict({
+      mainSha: SHA, vercelSha: SHA, flySha: SHA,
+      migrationsApplied: migrationsAppliedOf(st.code), pendingMigrations: st.pending,
+    });
+    eq(v.matched, false, '남은 마이그레이션이 있으면 배포 완료가 아니다');
+    eq(v.code, 'MISMATCH');
+  });
+
+  test('실패한 마이그레이션이 있으면 배포 판정은 실패한다', () => {
+    const SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const v = deploymentVerdict({
+      mainSha: SHA, vercelSha: SHA, flySha: SHA,
+      migrationsApplied: migrationsAppliedOf('FAILED'), pendingMigrations: [],
+    });
+    eq(v.matched, false);
+    eq(v.code, 'MISMATCH');
+  });
+
+  test('상태를 못 읽으면 통과시키지 않는다', () => {
+    const SHA = 'cccccccccccccccccccccccccccccccccccccccc';
+    const v = deploymentVerdict({
+      mainSha: SHA, vercelSha: SHA, flySha: SHA,
+      migrationsApplied: migrationsAppliedOf('UNKNOWN'), pendingMigrations: [],
+    });
+    eq(v.matched, false, '모르는 것을 배포 완료로 읽지 않는다');
+    eq(v.code, 'UNKNOWN');
+  });
+
+  test('DRIFT여도 SHA가 어긋나면 실패한다 — 스키마 판정이 SHA 판정을 덮지 않는다', () => {
+    const v = deploymentVerdict({
+      mainSha: 'dddddddddddddddddddddddddddddddddddddddd',
+      vercelSha: 'dddddddddddddddddddddddddddddddddddddddd',
+      flySha: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      migrationsApplied: migrationsAppliedOf('DRIFT'), pendingMigrations: [],
+    });
+    eq(v.matched, false);
+    eq(v.code, 'MISMATCH');
   });
 }

@@ -16,9 +16,12 @@ import { migrationPlanOf, migrationEntryGate, migrationDrift, type AppliedRow } 
 
 export type MigrationHealth = 'ok' | 'warn' | 'bad' | 'unknown';
 
+export type MigrationStatusCode =
+  'UP_TO_DATE' | 'APPLYING' | 'NEEDS_APPROVAL' | 'FAILED' | 'DRIFT' | 'UNKNOWN' | 'NOT_TRACKED';
+
 export interface MigrationStatus {
   health: MigrationHealth;
-  code: 'UP_TO_DATE' | 'APPLYING' | 'NEEDS_APPROVAL' | 'FAILED' | 'DRIFT' | 'UNKNOWN' | 'NOT_TRACKED';
+  code: MigrationStatusCode;
   detail: string;
   /** 자동으로 처리하지 못한 이유. 자동으로 되는 것이면 null */
   blockedReason: string | null;
@@ -167,4 +170,56 @@ export function migrationStatusOf(i: {
     required: required.length, applied: okNames.size, pending: [], failed: [],
     entryAllowed: true, entryReason: gate.reason,
   };
+}
+
+/**
+ * 이 상태 코드는 **"이 코드가 요구하는 스키마가 DB에 다 들어갔는가"**에
+ * 어떻게 답하는가.
+ *
+ * 왜 이 함수가 여기 있나
+ * ──────────────────────
+ * 이 판단이 `/api/system/deployment`에 복사돼 있었고, 거기서 이렇게 적혀
+ * 있었다:
+ *
+ *     migrationsApplied = ms.code === 'UP_TO_DATE' ? true
+ *       : ms.code === 'UNKNOWN' ? null : false;
+ *
+ * 그래서 `DRIFT`가 **false**가 됐다. 그런데 위 `migrationStatusOf`를 보면
+ * `DRIFT`는 `pending: []` · `failed: []` · `entryAllowed: true`다 —
+ * **필수 마이그레이션은 전부 적용돼 있고**, 이미 적용된 과거 파일의 내용이
+ * 그 뒤에 바뀌었다는 경고일 뿐이다.
+ *
+ * 050(#226)과 016(#228)에서 과거 파일을 의도적으로 고쳤고, 그 drift는
+ * 앞으로도 계속 남는다. 그 상태에서 배포 판정기는 "DB 스키마가 따라오지
+ * 않았습니다"를 **영구히** 말하게 된다. 이 저장소는 이미 같은 고장을 겪었다
+ * — `deploymentCheck.ts`의 머리말이 그것이다. **언제나 빨강인 검사는 진짜
+ * 어긋난 날의 빨강과 구별되지 않는다.**
+ *
+ * 그래서 코드의 뜻을 코드가 정의된 곳에 둔다. 읽는 쪽이 각자 해석하면
+ * 언젠가 또 갈린다.
+ *
+ * **`DRIFT`를 `UP_TO_DATE`로 바꾸지 않는다.** drift는 사실이고 그대로
+ * 경고로 남아야 한다. 여기서 답하는 것은 "배포가 끝났는가" 하나뿐이다.
+ */
+export function migrationsAppliedOf(code: MigrationStatusCode | string | null | undefined): boolean | null {
+  switch (code) {
+    // 필수 마이그레이션이 전부 적용돼 있다.
+    case 'UP_TO_DATE':
+      return true;
+    // 전부 적용돼 있다 — 적용된 뒤 파일이 바뀌었을 뿐이다(경고는 별도).
+    case 'DRIFT':
+      return true;
+    // 아직 적용되지 않은 것이 있거나, 실패했거나, 승인이 필요하거나,
+    // 기록표가 없어 무엇이 적용됐는지 셀 수 없다.
+    case 'APPLYING':
+    case 'FAILED':
+    case 'NEEDS_APPROVAL':
+    case 'NOT_TRACKED':
+      return false;
+    // 기록을 못 읽었다. **모르는 것을 '됐다'로 읽지 않는다.**
+    case 'UNKNOWN':
+      return null;
+    default:
+      return null;
+  }
 }
