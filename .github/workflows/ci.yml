@@ -287,6 +287,24 @@ jobs:
       - name: 마이그레이션 배선 검사
         run: node scripts/check-migrations.mjs
 
+      # ── 마이그레이션 카탈로그 타입 검사 ──
+      #
+      # 050이 옛 유니크를 찾으려고 `array_agg(att.attname …) = ARRAY['symbol',
+      # 'user_id']`라고 적었다. `pg_attribute.attname`은 `name` 타입이라
+      # 좌변은 name[]이고 우변은 text[]로 굳는다. 배열 등호는
+      # `anyarray = anyarray` 하나뿐이라 양변이 같은 배열 타입이어야 하고,
+      # name→text 암묵 캐스트는 배열 피연산자에 적용되지 않는다:
+      #   ERROR: operator does not exist: name[] = text[]  (SQLSTATE 42883)
+      #
+      # 그래서 이 문장은 **처음부터 한 번도 실행된 적이 없다.** 빈 DB에
+      # 재생하는 모든 곳이 여기서 멈췄고 050 이후 번호는 읽히지도 않았다.
+      #
+      # CI가 SQL을 한 줄도 실행하지 않아서 못 잡았다. 진짜 해법은 빈 DB
+      # 재생 잡이고 그건 별도 작업이다 — 이 검사는 이번 오류의 정확한
+      # 모양을 고정한다.
+      - name: 마이그레이션 카탈로그 타입 (name[] = text[]를 막는다)
+        run: node scripts/check-migration-catalog-types.mjs
+
       # ── DB 칸 이름 검사 ──
       #
       # **테스트 4천 개가 초록이어도 칸 이름 하나가 틀리면 안전하지 않다.**

@@ -64,7 +64,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '045_user_strategies.sql', id: 45, risk: 'ADDITIVE', checksum: '4ee9c50f7310ed95' },
   { name: '046_mock_sessions.sql', id: 46, risk: 'ADDITIVE', checksum: '1888a5530ef8bdf3' },
   { name: '048_account_equity_snapshots.sql', id: 48, risk: 'ADDITIVE', checksum: '94b904caf84fe0a5' },
-  { name: '050_schedule_strategy.sql', id: 50, risk: 'ADDITIVE', checksum: 'd40221e8af02291f' },
+  { name: '050_schedule_strategy.sql', id: 50, risk: 'ADDITIVE', checksum: 'af576f09705c6eeb' },
   { name: '051_strategy_cycles.sql', id: 51, risk: 'ADDITIVE', checksum: '14ea5ebc80da6109' },
   { name: '052_smoke_tests.sql', id: 52, risk: 'ADDITIVE', checksum: 'fbecd22200630fd5' },
   { name: '053_smoke_runs.sql', id: 53, risk: 'ADDITIVE', checksum: '4f3611260e0199e5' },
