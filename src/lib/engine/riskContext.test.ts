@@ -219,4 +219,96 @@ export function runRiskContextTests() {
     assert(ctx.warnings.some(w => w.includes('40배')),
       '실제로 몇 배까지 나가는지 안 알려줬다: ' + ctx.warnings.join(' / '));
   });
+
+  // ══ PAPER: 크기는 모의 계좌에서 나온다 ══
+  //
+  // 예전에는 PAPER 분기가 없어 거래소 잔고나 폴백 $10,000이 크기 기준이
+  // 됐다. 모의 계좌가 3,000으로 줄어도 크기는 10,000 기준이었다 —
+  // 복리가 아예 일어나지 않았고, 수익률과 크기가 다른 세계를 말했다.
+
+  /** paper_accounts / paper_positions만 답하는 가짜 Supabase */
+  const paperSb = (i: {
+    balance?: unknown; account?: boolean; positions?: any[] | null;
+    positionsError?: boolean; onTable?: (t: string) => void;
+  }) => ({
+    from(table: string) {
+      i.onTable?.(table);
+      const b: any = {
+        select() { return b; }, eq() { return b; }, gte() { return b; },
+        order() { return b; }, limit() { return b; },
+        maybeSingle() {
+          if (table !== 'paper_accounts') return Promise.resolve({ data: null, error: null });
+          return Promise.resolve({
+            data: i.account === false ? null : { balance: i.balance }, error: null });
+        },
+        then(res: any) {
+          if (table === 'paper_positions') {
+            if (i.positionsError) return res({ data: null, error: { message: 'boom' } });
+            return res({ data: i.positions ?? [], error: null });
+          }
+          return res({ data: [], error: null });
+        },
+      };
+      return b;
+    },
+  });
+
+  test('PAPER는 모의 잔고와 사용 증거금으로 예산을 잡는다', async () => {
+    const ctx = await buildRiskContext(
+      paperSb({ balance: 3000, positions: [{ margin: 500 }] }) as any,
+      { userId: 'u1', mode: 'PAPER' });
+    eq(ctx.config.accountEquity, 3000);
+    eq(ctx.config.availableMargin, 2500);
+    eq(ctx.config.equityKnown, true);
+    eq(ctx.source, 'paper');
+  });
+
+  test('**PAPER는 폴백 10,000을 쓰지 않는다**', async () => {
+    for (const bal of [3000, 3600, 2000]) {
+      const ctx = await buildRiskContext(
+        paperSb({ balance: bal, positions: [] }) as any, { userId: 'u1', mode: 'PAPER' });
+      eq(ctx.config.accountEquity, bal);
+      assert(ctx.config.accountEquity !== 10000 || bal === 10000, '폴백이 새어 나왔다');
+    }
+  });
+
+  test('PAPER 잔고 0은 확인된 사실이다 — 10,000으로 바뀌지 않는다', async () => {
+    const ctx = await buildRiskContext(
+      paperSb({ balance: 0, positions: [] }) as any, { userId: 'u1', mode: 'PAPER' });
+    eq(ctx.config.accountEquity, 0);
+    eq(ctx.config.equityKnown, true);
+  });
+
+  test('PAPER 계좌가 없으면 자산을 모르는 것이다 — 진입이 막힌다', async () => {
+    const ctx = await buildRiskContext(
+      paperSb({ account: false }) as any, { userId: 'u1', mode: 'PAPER' });
+    eq(ctx.config.equityKnown, false);
+  });
+
+  test('PAPER 포지션 조회 실패도 자산을 모르는 것이다', async () => {
+    const ctx = await buildRiskContext(
+      paperSb({ balance: 3000, positionsError: true }) as any, { userId: 'u1', mode: 'PAPER' });
+    eq(ctx.config.equityKnown, false);
+  });
+
+  test('**PAPER는 연결이 있어도 거래소를 부르지 않는다**', async () => {
+    const seen: string[] = [];
+    const ctx = await buildRiskContext(
+      paperSb({ balance: 3000, positions: [], onTable: (t) => seen.push(t) }) as any,
+      { userId: 'u1', mode: 'PAPER', connectionId: 'conn-1' });
+    eq(ctx.source, 'paper');
+    eq(ctx.config.accountEquity, 3000);
+    // 연결을 읽으려면 exchange_connections를 지나야 한다.
+    assert(!seen.includes('exchange_connections'), '모의인데 거래소 연결을 읽었다');
+  });
+
+  test('PAPER 1회 증거금 상한도 모의 잔고에서 나온다', async () => {
+    const ctx = await buildRiskContext(
+      paperSb({ balance: 3000, positions: [] }) as any,
+      { userId: 'u1', mode: 'PAPER', marginPct: 10 });
+    // 폴백 10,000 기준이면 1,000이 나온다.
+    eq(ctx.config.maxMargin, 300);
+    assert(!ctx.warnings.some(w => w.includes('가정값')),
+      '모의 자산을 정확히 읽었는데 가정값이라고 적었다: ' + ctx.warnings.join(' / '));
+  });
 }

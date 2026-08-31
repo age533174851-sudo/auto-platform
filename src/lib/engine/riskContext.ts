@@ -8,7 +8,7 @@ export interface RiskContext {
   config: RiskConfig;
   currentOpenRisk: number;
   consecutiveLosses: number;   // Veto의 CONSECUTIVE_LOSSES 판정용    // 현재 열린 포지션들의 합산 위험액 ($)
-  source: 'exchange' | 'fallback';
+  source: 'exchange' | 'paper' | 'fallback';
   warnings: string[];
 }
 
@@ -144,8 +144,41 @@ export async function buildRiskContext(
     }
   }
 
-  // ── 2) 실계좌 잔고 (연결이 있을 때만) ──
-  if (sb && opts.connectionId) {
+  // ── 2) 계좌 자산 ──
+  //
+  // **모의는 모의 장부에서 읽는다.** 거래소 분기보다 먼저 갈라낸다 —
+  // 뒤에 두면 연결이 우연히 붙어 있는 순간 모의 크기가 거래소 잔고에서
+  // 나온다. 다른 장부의 사실로 이 장부의 주문을 만드는 것이다.
+  //
+  // 못 읽으면 폴백으로 채우지 않는다. 폴백 $10,000으로 크기를 정하면
+  // 위험 한도가 전부 그 가짜 숫자의 비율이 된다.
+  const isPaper = String(opts.mode || '').toUpperCase() === 'PAPER';
+  /** 모의 자산을 실제로 확인했는가. 모의가 아니면 null */
+  let paperEquityKnown: boolean | null = null;
+
+  if (isPaper) {
+    const { readPaperCapacity } = await import('./paperCapacity');
+    const cap = await readPaperCapacity(sb, opts.userId);
+    if (cap.known === true) {
+      // 잔고 0도 확인된 사실이다 — 폴백으로 바꾸지 않는다.
+      accountEquity = cap.balance;
+      // 열린 포지션이 물고 있는 증거금을 예산에서 뺀다. `planPosition`이
+      // `availableMargin ?? accountEquity`를 예산으로 쓰므로, 여기만 제대로
+      // 넣으면 크기 공식을 새로 만들 필요가 없다.
+      availableMargin = cap.available;
+      source = 'paper';
+      paperEquityKnown = true;
+      warnings.push(
+        `모의 계좌 자산 $${cap.balance.toFixed(2)} · 사용 중 증거금 $${cap.usedMargin.toFixed(2)}`
+        + ` · 가용 $${cap.available.toFixed(2)}`);
+    } else {
+      paperEquityKnown = false;
+      warnings.push(`${cap.reason} — 확인되지 않은 자산으로 포지션 크기를 정하지 않습니다`);
+    }
+  }
+
+  // ── 실계좌 잔고 (연결이 있을 때만) ──
+  if (!isPaper && sb && opts.connectionId) {
     try {
       const testnet = String(opts.mode || 'TESTNET').toUpperCase() !== 'LIVE';
       // 예전에는 여기서 `exchange`·`encrypted_secret` 칸을 골랐다. 둘 다
@@ -309,6 +342,17 @@ export async function buildRiskContext(
     } catch { /* 없으면 0 */ }
   }
 
+  /**
+   * 이 모드의 **정본 자산을 실제로 확인했는가.**
+   *
+   * 모의는 모의 장부, 거래소 연결은 거래소가 정본이다. 연결도 모의도
+   * 아니면(백테스트·시뮬레이터) 자기 자산을 자기가 아는 경우라 참이다 —
+   * **확인할 대상이 없는 것과 확인에 실패한 것은 다르다.**
+   */
+  const equityConfirmed = isPaper
+    ? paperEquityKnown === true
+    : (opts.connectionId ? source === 'exchange' : true);
+
   // ── 1회 증거금 상한 ──
   //
   // 비율을 금액으로 바꾼다. **자산을 읽은 뒤에** 해야 한다 — 폴백
@@ -320,10 +364,15 @@ export async function buildRiskContext(
     if (Number.isFinite(mp) && mp > 0 && mp <= 100) {
       maxMargin = accountEquity * (mp / 100);
       warnings.push(`1회 증거금 ${mp}% ($${maxMargin.toFixed(2)}) 적용 — 배율은 이 예산에서 역산됩니다`);
-      if (source !== 'exchange') {
+      // ── 성공 여부는 '거래소인가'가 아니라 '이 모드의 정본을 읽었는가'다 ──
+      //
+      // 예전에는 `source !== 'exchange'`로 봤다. 모의 자산을 정확히 읽어도
+      // "거래소에서 읽지 못했다"고 적혔다 — 모의 계좌의 정본은 거래소가
+      // 아니다.
+      if (!equityConfirmed) {
         // 자산을 못 읽었으면 이 금액도 가짜다. 조용히 쓰면 실제 계좌와
         // 다른 크기로 주문이 나간다.
-        warnings.push('계좌 자산을 거래소에서 읽지 못해 위 증거금 금액은 가정값입니다');
+        warnings.push('계좌 자산을 확인하지 못해 위 증거금 금액은 가정값입니다');
       }
     } else {
       warnings.push(`예약 설정의 1회 증거금(${mIn})을 쓰지 못했습니다 — 0 초과 100 이하가 아닙니다`);
@@ -391,7 +440,7 @@ export async function buildRiskContext(
       // 곳이 없고 자기 자산을 자기가 안다. 여기서 같이 막으면 실계좌를
       // 지키려다 연습 화면을 죽인다 — 확인할 대상이 없는 것과 확인에
       // 실패한 것은 다르다.
-      equityKnown: opts.connectionId ? source === 'exchange' : true,
+      equityKnown: equityConfirmed,
       feeRatePct: limits.feeRatePct,
       slippagePct: limits.slippagePct,
     },

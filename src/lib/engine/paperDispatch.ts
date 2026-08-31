@@ -112,7 +112,8 @@ export function ledgerEnvOfMode(mode: any): 'MOCK' | 'TESTNET' | 'LIVE' {
 
 export interface PaperEntryResult {
   ok: boolean;
-  code: PaperDispatchCode | 'FILLED' | 'FAILED' | 'DUPLICATE' | 'NO_ACCOUNT';
+  code: PaperDispatchCode | 'FILLED' | 'FAILED' | 'DUPLICATE' | 'NO_ACCOUNT'
+      | 'INSUFFICIENT_MARGIN';
   positionId: string | null;
   fill: any | null;
   reason: string;
@@ -165,6 +166,11 @@ export async function dispatchPaperEntry(sb: any, i: {
       // 새로 생긴 것처럼 적지 않는다.
       return { ok: true, code: 'DUPLICATE', positionId: null, fill: null,
         reason: '이미 체결된 신호입니다 — 다시 체결하지 않았습니다' };
+    }
+    if (r.status === 'INSUFFICIENT_MARGIN') {
+      // 사고가 아니라 한도다. 이유를 그대로 전한다.
+      return { ok: false, code: 'INSUFFICIENT_MARGIN', positionId: null, fill: null,
+        reason: '모의 계좌의 가용 증거금이 부족해 진입하지 않았습니다' };
     }
     if (r.status === 'NO_ACCOUNT') {
       // 계좌가 없으면 **아무것도 넣지 않는다.** 예전에는 포지션만 들어가고
