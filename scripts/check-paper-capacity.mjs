@@ -144,6 +144,25 @@ else {
   if (!/'user_id'\s*,\s*userId/.test(cap)) {
     fail(`${CAP}이 사용자로 좁히지 않습니다 — 남의 포지션이 예산에 들어갑니다`);
   }
+  // ── 가용 예산은 **사용 중 증거금을 뺀 값**이다 ──
+  //
+  // 빼지 않으면 이미 물고 있는 만큼을 한 번 더 쓸 수 있게 된다.
+  const capOf = fnBodyAt(cap, 'export function paperCapacityOf');
+  if (!capOf) fail(`${CAP}에서 paperCapacityOf 본문을 찾지 못했습니다`);
+  else if (!/available:\s*Math\.max\(\s*0\s*,\s*balance\s*-\s*used/.test(capOf)) {
+    fail(`${CAP}이 가용 예산에서 사용 중 증거금을 빼지 않습니다`);
+  }
+  // ── 숫자 기본값을 채우지 않는다 ──
+  //
+  // `Number(balance) || 10000` 같은 한 줄이면 '모름'이 사라진다. 0도
+  // 같이 지워진다 — 잔고 0은 확인된 사실이다.
+  for (const fn of ['export function paperCapacityOf', 'export async function readPaperCapacity']) {
+    const body = fnBodyAt(cap, fn);
+    for (const m of body.matchAll(/(?:\|\||\?\?)\s*(\d+(?:\.\d+)?)/g)) {
+      fail(`${CAP}의 ${fn.split(' ').pop()}가 숫자 기본값 ${m[1]}을 채웁니다`
+        + ' — 모름과 0이 같이 사라집니다');
+    }
+  }
   // 0과 모름.
   if (!/v\s*==\s*null\s*\|\|\s*v\s*===\s*''/.test(cap)) {
     fail(`${CAP}이 빈 값을 0으로 접습니다 — Number(null)도 Number('')도 0입니다`);
@@ -250,12 +269,25 @@ else {
     if (capAt >= 0 && feeAt >= 0 && capAt > feeAt) {
       fail(`${sqlFile}이 수수료를 뺀 뒤에 용량을 봅니다`);
     }
-    // 합산 조건.
-    if (!/status\s*=\s*'open'/.test(body)) {
-      fail(`${sqlFile}이 열린 포지션만 세지 않습니다`);
-    }
-    if (!/user_id\s*=\s*p_user_id/.test(body)) {
-      fail(`${sqlFile}이 사용자로 좁히지 않습니다 — 남의 포지션이 예산에 들어갑니다`);
+    // ── 합산 조건은 **그 질의 안**을 본다 ──
+    //
+    // `user_id = p_user_id`는 잠금·수수료 갱신에도 나온다. 파일 어딘가에
+    // 있는지로 보면 합산에서 조건을 빼도 통과한다 — 되돌림 시험에서
+    // 실제로 통과했다.
+    if (sumAt >= 0) {
+      const semi = body.indexOf(';', sumAt);
+      const q = semi > sumAt ? body.slice(sumAt, semi) : body.slice(sumAt);
+      if (!/status\s*=\s*'open'/.test(q)) {
+        fail(`${sqlFile}의 증거금 합산이 열린 포지션만 세지 않습니다`
+          + ' — 닫힌 포지션까지 물고 있는 것으로 셉니다');
+      }
+      if (!/user_id\s*=\s*p_user_id/.test(q)) {
+        fail(`${sqlFile}의 증거금 합산이 사용자로 좁히지 않습니다`
+          + ' — 남의 포지션이 예산에 들어갑니다');
+      }
+      if (!/FROM\s+public\.paper_positions/.test(q)) {
+        fail(`${sqlFile}의 증거금 합산이 모의 포지션 표를 읽지 않습니다`);
+      }
     }
     // **용량 식에 수수료가 들어간다.**
     if (!/\+\s*p_entry_fee\s*>\s*v_balance/.test(body)
