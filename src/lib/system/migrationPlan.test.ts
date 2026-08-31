@@ -338,6 +338,35 @@ export function runMigrationPlanTests() {
     eq(migrationDrift({ files: [f], rows: [{ name: '056_a.sql', checksum: null, success: true }], checksumOf: csum }).length, 0);
   });
 
+  test('과거 파일을 고쳐도 이미 적용된 DB에서는 다시 실행하지 않는다 — 알리기만 한다', () => {
+    // **050을 고칠 때 실제로 마주친 상황이다.**
+    //
+    // 050의 DO 블록은 `array_agg(att.attname …) = ARRAY['symbol','user_id']`로
+    // `name[]`과 `text[]`를 비교하고 있었다. 실행되는 순간 항상 42883으로
+    // 죽는 문장이라, 빈 DB에 재생하는 곳은 전부 여기서 멈췄다. 고치려면
+    // **과거 파일 자체**를 고쳐야 했고, 그러면 체크섬이 바뀐다.
+    //
+    // 여기서 고정하는 것: 체크섬이 바뀌어도 이미 적용된 것으로 기록된
+    // 파일은 **다시 실행되지 않는다.** 재실행되면 운영 DB에서 이미 지나간
+    // 문장이 한 번 더 도는 것이고, 그건 고치려던 것보다 나쁘다.
+    const before = file('050_schedule_strategy.sql', ADDITIVE_SQL);
+    const after = file('050_schedule_strategy.sql', ADDITIVE_SQL + '\n-- 타입을 맞췄다\n');
+
+    const plan = migrationPlanOf({ files: [after], applied: ['050_schedule_strategy.sql'] });
+    eq(plan.code, 'UP_TO_DATE', '고친 뒤에도 UP_TO_DATE여야 한다');
+    eq(plan.pending.length, 0, '고친 파일이 남음 목록에 들어갔다');
+    eq(plan.autoApply.length, 0, '고친 파일을 다시 실행하려 한다');
+
+    // 그리고 **바뀌었다는 사실은 숨기지 않는다.** 경고로 남는다.
+    const d = migrationDrift({
+      files: [after],
+      rows: [{ name: '050_schedule_strategy.sql', checksum: csum(before), success: true }],
+      checksumOf: csum,
+    });
+    eq(d.length, 1, '파일이 바뀐 것을 알리지 않았다');
+    eq(d[0].code, 'CHECKSUM_CHANGED');
+  });
+
   // ── 11. backfill과 덮어쓰기를 가른다 ──
 
   test('조건 없는 UPDATE는 자동 적용하지 않는다 — 모든 줄을 덮어쓴다', () => {

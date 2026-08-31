@@ -56,6 +56,30 @@ ALTER TABLE autotrade_schedules
 -- 유니크를 통째로 훑어 지우지 않는다. 예전 판은 contype='u'인 것을 전부
 -- 지웠는데, 나중에 누가 다른 유니크를 추가하면 그것까지 조용히 날아간다.
 -- **정확히 (user_id, symbol) 두 칸짜리만** 고른다.
+--
+-- ── attname을 text로 내려서 비교하는 이유 ──
+--
+-- `pg_attribute.attname`은 `name` 타입이다. 그래서 `array_agg(att.attname)`은
+-- **`name[]`**이 되고, `ARRAY['symbol','user_id']`는 원소가 전부 unknown
+-- 리터럴이라 기본값인 **`text[]`**로 굳는다.
+--
+-- 배열 등호는 `anyarray = anyarray` 하나뿐이고 다형 타입이라 **양변이 같은
+-- 배열 타입으로 이미 해석돼 있어야 한다.** `name → text`가 암묵 캐스트라
+-- 스칼라 비교는 되지만(그래서 `string_agg(att.attname, ', ')`는 멀쩡하다),
+-- 배열 피연산자에는 그 원소 캐스트가 적용되지 않는다. 결과는:
+--
+--   ERROR: operator does not exist: name[] = text[]  (SQLSTATE 42883)
+--
+-- 이 블록은 **처음부터 한 번도 실행된 적이 없다.** 특정 PG 버전이나 환경
+-- 문제가 아니다. 아래 EXCEPTION 절도 이걸 못 잡는다 — 그건 42P01
+-- (undefined_table)을 잡고 이 오류는 42883 (undefined_function)이다.
+--
+-- 그래서 카탈로그 값을 우리 어휘(`text`)로 내려서 비교한다. 반대로 우변을
+-- `::name[]`으로 올리는 것도 동작은 같지만, 기준값은 이 파일이 리터럴로
+-- 적어 둔 값이고 `name`은 63바이트 절단 규칙이 있는 식별자 전용 타입이다.
+-- 우변을 나중에 손댈 때마다 캐스트를 따라다니게 만들 이유가 없다.
+-- **ORDER BY도 같이 `::text`로 맞춘다** — 정렬만 `name` collation으로 두면
+-- 칸이 둘 이상일 때 순서가 갈릴 수 있다.
 DO $$
 DECLARE c TEXT;
 BEGIN
@@ -66,7 +90,7 @@ BEGIN
      WHERE rel.relname = 'autotrade_schedules'
        AND con.contype = 'u'
        AND (
-         SELECT array_agg(att.attname ORDER BY att.attname)
+         SELECT array_agg(att.attname::text ORDER BY att.attname::text)
            FROM unnest(con.conkey) AS k(attnum)
            JOIN pg_attribute att
              ON att.attrelid = con.conrelid AND att.attnum = k.attnum
