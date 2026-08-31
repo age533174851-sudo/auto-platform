@@ -55,7 +55,11 @@ function stripComments(src) {
 /** 브라우저 로컬 연습 장부를 바꾸는 함수들 */
 const MUTATORS = [
   'paperBuy', 'paperSell', 'closePaperPosition', 'reversePaperPosition',
-  'checkPaperExits', 'savePaperBalance', 'resetPaperBalance',
+  'savePaperBalance', 'resetPaperBalance',
+  // `checkPaperExits`는 **없다.** 부르는 곳 없이 남아 있던 브라우저 청산
+  // 감시기였고, 그 값을 적는 화면만 남아 사용자에게 "손절이 걸려 있다"고
+  // 말하고 있었다. 지워졌고, 되살아나는 것은 `check-practice-boundary.mjs`가
+  // 막는다 — 여기 목록은 "있어야 하는 것"이라 이름을 남길 수 없다.
   // **실현손익 누계도 장부다.** 잔고·포지션만 막고 여기를 열어 두면
   // 실전 손익이 연습 성과로 남는다 — 화면이 "오늘 얼마 벌었나"로 읽는 값이다.
   'recordDailyPnL',

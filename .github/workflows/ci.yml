@@ -465,6 +465,23 @@ jobs:
       - name: 연습 장부 환경 격리 (실전을 연습 장부에 적지 않는다)
         run: node scripts/check-practice-ledger-env.mjs
 
+      # ── 연습 장부 경계 검사 ──
+      #
+      # 매매 화면의 브라우저 로컬 장부가 "모의 포지션 · MOCK"이라는,
+      # 서버 정본 모의투자(PAPER)와 **같은 이름**으로 떠 있었다. 두 화면이
+      # 다른 숫자를 말하는데 이름이 같으면 사용자는 어느 쪽도 못 믿는다.
+      #
+      # 그리고 그 장부에 손절·익절을 입력하는 자리가 있었다. 값은 저장까지
+      # 됐는데 그것을 보고 청산하는 실행자가 **없었다** — 브라우저 감시기
+      # (checkPaperExits)는 남아 있었지만 부르는 곳이 0이었다. 손절선을
+      # 적어 두고 잠들면 아침에 손절되지 않은 포지션을 본다.
+      #
+      # 이 검사는 그 두 가지가 돌아오지 못하게 한다. 그리고 정리하면서
+      # 사용자의 기존 장부(tg_paper_balance_v1)를 지우거나 옮기지 않는지도
+      # 같이 본다 — 키 rename/migration/delete가 없어야 한다.
+      - name: 연습 장부 경계 (연습 ≠ 서버 모의투자 · 없는 자동 SL/TP를 그리지 않는다)
+        run: node scripts/check-practice-boundary.mjs
+
       # ── 예약 주 경로 증거 배선 ──
       #
       # 예약 평가의 주 실행자는 Fly Worker이고 GitHub autotrade-tick은
