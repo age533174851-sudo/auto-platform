@@ -32,7 +32,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '013_daily_slots.sql', id: 13, risk: 'ADDITIVE', checksum: 'b3db9f25360bc8f0' },
   { name: '014_derivatives_daily.sql', id: 14, risk: 'ADDITIVE', checksum: '23649da90e6c1a19' },
   { name: '015_econ_events.sql', id: 15, risk: 'ADDITIVE', checksum: '6ed5e16c0c071a4b' },
-  { name: '016_profiles_align.sql', id: 16, risk: 'ADDITIVE', checksum: 'b1064f811d853e3b' },
+  { name: '016_profiles_align.sql', id: 16, risk: 'ADDITIVE', checksum: 'cec5f8e23b201bd4' },
   { name: '017_ladder_cycles.sql', id: 17, risk: 'ADDITIVE', checksum: '057230de8f790c92' },
   { name: '018_live_orders_recovery.sql', id: 18, risk: 'ADDITIVE', checksum: '78008ac0042633f1' },
   { name: '019_news_articles.sql', id: 19, risk: 'ADDITIVE', checksum: 'f939be625f2fd4f3' },

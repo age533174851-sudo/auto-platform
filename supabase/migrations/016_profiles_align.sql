@@ -31,10 +31,42 @@ alter table public.profiles add column if not exists invite_code  text;
 
 -- ── 2. 기존 name 값을 display_name으로 이관 ───────────────────────────
 -- name은 남겨 둔다. 두 컬럼이 공존하는 동안 display_name이 정본이다.
-update public.profiles
-   set display_name = name
- where display_name is null
-   and name is not null;
+--
+-- **`name` 칸이 있을 때만 이관한다.** 이 파일이 상대하는 profiles는 두
+-- 종류다:
+--
+--   historical  번호 체계 이전에 손으로 만든 판. `name`·default_currency·
+--               risk_profile이 있고 display_name이 없다. 여기가 이관 대상이다.
+--   fresh       이 저장소가 만드는 판(002·schema.sql·schema_v2.sql 셋 다).
+--               display_name은 있고 **`name`은 없다.**
+--
+-- 예전에는 가드 없이 `set display_name = name`을 적었다. historical에서는
+-- 맞지만 fresh에서는 없는 칸을 읽는다:
+--
+--   ERROR: 42703: column "name" does not exist
+--
+-- 그래서 빈 DB에 처음부터 재생하는 곳은 전부 여기서 멈췄고, 017 이후는
+-- 읽히지도 않았다. 저장소 어느 파일도 `profiles.name`을 만들지 않으므로
+-- 이건 환경 문제가 아니라 이 파일이 fresh install과 맞지 않았던 것이다.
+--
+-- 동적 EXECUTE는 쓰지 않는다. PL/pgSQL은 **실행되지 않는 분기를 계획하지
+-- 않으므로**, 안 타는 IF 안의 정적 UPDATE는 없는 칸을 참조해도 먼저 깨지지
+-- 않는다(PG 16에서 확인). 필요 없는 우회는 읽기만 어렵게 만든다.
+do $$
+begin
+  if exists (
+    select 1
+      from information_schema.columns
+     where table_schema = 'public'
+       and table_name   = 'profiles'
+       and column_name  = 'name'
+  ) then
+    update public.profiles
+       set display_name = name
+     where display_name is null
+       and name is not null;
+  end if;
+end $$;
 
 -- ── 3. 제약 조건 (이미 있으면 건너뜀) ─────────────────────────────────
 do $$
