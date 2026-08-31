@@ -169,14 +169,23 @@ export async function GET(req: NextRequest) {
   // 054가 없던 동안 세 SHA는 완벽히 같았고, 워커는 버전을 못 적었다.
   // 그래서 스키마까지 봐야 배포가 끝났다고 말할 수 있다.
   let migrationsApplied: boolean | null | undefined = undefined;
+  let migrationCode: string | null = null;
   let pendingMigrations: string[] = [];
   try {
     if (!sb) throw new Error('supabase_not_configured');
     const { migrationGate } = await import('@/lib/system/migrationGate');
+    const { migrationsAppliedOf } = await import('@/lib/system/migrationStatus');
     const ms = await migrationGate(sb);
-    // UNKNOWN(기록을 못 읽음)은 null — **모르는 것을 '됐다'로 읽지 않는다**
-    migrationsApplied = ms.code === 'UP_TO_DATE' ? true
-      : ms.code === 'UNKNOWN' ? null : false;
+    // **코드의 뜻은 코드가 정의된 곳에서 받는다.**
+    //
+    // 예전에는 여기서 직접 `code === 'UP_TO_DATE'`만 true로 읽었다.
+    // 그래서 `DRIFT`가 false가 됐는데, DRIFT는 `pending: []` ·
+    // `failed: []` · `entryAllowed: true`다 — 필수 마이그레이션은 전부
+    // 적용돼 있고 과거 파일 내용이 바뀌었다는 경고일 뿐이다.
+    // 050(#226)·016(#228)의 의도된 drift가 "DB 스키마가 따라오지
+    // 않았습니다"라는 **영구 빨강**이 됐다.
+    migrationCode = ms.code;
+    migrationsApplied = migrationsAppliedOf(ms.code);
     pendingMigrations = ms.pending;
   } catch {
     migrationsApplied = null;
@@ -192,6 +201,9 @@ export async function GET(req: NextRequest) {
     // 배포가 끝났다고 말하려면 스키마도 따라와야 한다.
     migrations: {
       applied: migrationsApplied,
+      // **경고를 숨기지 않는다.** applied는 "배포가 끝났는가"에만 답하고,
+      // drift 같은 사실은 이 코드로 그대로 보인다.
+      code: migrationCode,
       pending: pendingMigrations.slice(0, 10),
       pendingCount: pendingMigrations.length,
     },
