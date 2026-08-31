@@ -5,7 +5,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import type { BotRun, ExecMode, RiskEvent, Signal, SignalState, StratStatus, StratType, Strategy } from '@/types/domain';
 import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
 import { notify, type NotifyKind } from '@/lib/notify/center';
-import { paperBuy, getOpenPositions, checkPaperExits, loadPaperBalance, savePaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
+import { paperBuy, getOpenPositions, loadPaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
 // 명목가·증거금의 뜻은 한 곳에서 온다 — 화면이 공식을 다시 쓰지 않는다.
 import { notionalAndMargin } from '@/lib/markets/quantityInput';
@@ -76,18 +76,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
     // 그대로 남아 다른 계좌의 비율로 주문을 만들 수 있었다.
     balance: scopedValueFor(usdtBalance, connId),
   });
-  const [slEditAsset,setSlEditAsset]=useState('');
   const [quickActions,setQuickActions]=useState<string[]>(()=>{
-    try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse','tpsl']; }
-    catch { return ['close_all','close_50','close_25','add','reverse','tpsl']; }
+    try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse']; }
+    catch { return ['close_all','close_50','close_25','add','reverse']; }
   });
-  const [slEditVal,setSlEditVal]=useState('');
-  const [tpEditVal,setTpEditVal]=useState('');
-  const [tpslTab,setTpslTab]=useState<'entire'|'partial'|'trailing'>('entire');
-  const [tpRoi,setTpRoi]=useState('');
-  const [slRoi,setSlRoi]=useState('');
-  const [tpslRatio,setTpslRatio]=useState(100);
-  const [trailPct,setTrailPct]=useState('');
   const authHeaderRef=useRef<string>('');
   // 거래소 연결 여부 확인 (testnet/live 가능 여부)
   useEffect(()=>{
@@ -631,7 +623,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       setStatus(null); return;
     }
     setStatus('loading');
-    showToast(`${tradeMode==='real'?'실전':tradeMode==='testnet'?'테스트넷':'모의'} ${side} 주문 처리 중...`, 'pending');
+    showToast(`${tradeMode==='real'?'실전':tradeMode==='testnet'?'테스트넷':'연습'} ${side} 주문 처리 중...`, 'pending');
     // 모의는 예전처럼 기본 10만원을 쓴다. **거래소로 나가는 주문에는
     // 기본 금액을 지어내지 않는다** — 아래에서 막는다.
     const orderAmt = amount ? +amount : 100_000;
@@ -808,14 +800,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             return;
           }
           const px = r.data?.filledPrice || sel.p || 0;
+          // **손절·익절을 넘기지 않는다.** 연습 장부에는 그 값을 보고
+          // 청산할 실행자가 없다. 넘기면 장부에 적히기만 하고, 화면은
+          // 걸려 있는 것처럼 보인다.
           paperBuy(tradeEnvOf(tradeMode), sel.id, px, orderAmt, {
-            stopLossPct: sl ? Math.abs(((+sl - px) / px) * 100) : undefined,
-            takeProfitPct: tp ? Math.abs(((+tp - px) / px) * 100) : undefined,
             stratId: 'manual',
             side: side === '매수' ? 'long' : 'short',
           });
           refreshPositions();
-          showToast(`모의 ${side} 체결 · ${sel.nameKr} ${leverage}x · ₩${fmt(orderAmt)} · 아래 현재 포지션에서 확인`, true);
+          showToast(`연습 ${side} 체결 · ${sel.nameKr} ${leverage}x · ₩${fmt(orderAmt)} · 아래 연습 포지션에서 확인`, true);
         } catch {}
       }
 
@@ -830,7 +823,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
     <div>
       {/* Mock/Live toggle */}
       <div style={{display:'flex',gap:8,marginBottom:12}}>
-        {([['mock','모의'],['testnet','테스트넷'],['live','실전']] as [typeof tradeMode,string][]).map(([m,l])=>{
+        {([['mock','연습'],['testnet','테스트넷'],['live','실전']] as [typeof tradeMode,string][]).map(([m,l])=>{
           const locked = (m==='testnet'||m==='live') && !hasExchange;
           const active = tradeMode===m;
           const c = m==='mock'?T.acl:m==='testnet'?T.ylw:T.red;
@@ -853,7 +846,10 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
           );
         })}
       </div>
-      {tradeMode==='mock'&&<div style={{background:A(T.prp,'15'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontWeight:700,fontSize:11}}>모의매매 — 앱 내부 가상 포지션 · 실제 돈 사용 안됨</div></div>}
+      {tradeMode==='mock'&&<div style={{background:A(T.prp,'15'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}>
+        <div style={{color:T.prp,fontWeight:700,fontSize:11}}>연습(Practice) — 이 브라우저에만 저장되는 원화 연습 장부</div>
+        <div style={{color:T.sub,fontSize:9,marginTop:3,lineHeight:1.5}}>실제 돈도 거래소 주문도 쓰지 않습니다. 서버 모의투자(PAPER) 계좌와는 다른 장부이며, 자동 손절·익절이 없습니다.</div>
+      </div>}
       {tradeMode==='testnet'&&<div style={{background:A(T.ylw,'15'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontWeight:700,fontSize:11}}>테스트넷 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
       {tradeMode==='live'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'40')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontWeight:800,fontSize:11}}>⚠️ 실전 — 실제 자금으로 주문이 실행됩니다</div></div>}
 
@@ -1145,7 +1141,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             </div>
             {orderCurrency!=='USDT'&&(
               <div style={{color:T.muted,fontSize:9,marginBottom:8}}>
-                모의는 즉시 체결만 합니다 — 미체결 주문을 들고 있는 장부가 없어 시장가만 낼 수 있습니다.
+                연습은 즉시 체결만 합니다 — 미체결 주문을 들고 있는 장부가 없어 시장가만 낼 수 있습니다.
               </div>
             )}
             {orderType==='LIMIT'&&(
@@ -1236,13 +1232,23 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               ))}
             </div>
 
-            {/* TP/SL 한 줄 */}
+            {/* TP/SL 한 줄 — **거래소 모드에서만 보인다.**
+                연습 모드에서 이 칸을 받으면 값은 브라우저 장부에 적히기만 하고
+                아무도 감시하지 않는다. 입력칸이 있다는 것 자체가 "걸어 뒀다"는
+                뜻으로 읽히므로, 칸을 두고 안내를 붙이는 대신 칸을 없앤다. */}
+            {tradeMode==='mock' ? (
+              <div style={{background:T.alt,border:`1px solid ${T.border}`,borderRadius:7,padding:'9px 11px',marginBottom:8}}>
+                <div style={{color:T.sub,fontSize:10,fontWeight:700}}>연습 모드에는 자동 손절·익절(TP/SL)이 없습니다</div>
+                <div style={{color:T.muted,fontSize:9,marginTop:2,lineHeight:1.5}}>연습 포지션은 아래 카드에서 직접 종료하세요. 자동 청산은 테스트넷·실전에서만 거래소가 수행합니다.</div>
+              </div>
+            ) : (
             <div style={{display:'flex',gap:6,marginBottom:8}}>
               <input type="number" value={tp} onChange={e=>setTp(e.target.value)} placeholder="익절가(TP)"
                 style={{flex:1,background:T.alt,border:`1px solid ${A(T.grn,'30')}`,borderRadius:7,padding:'9px',color:T.txt,fontSize:12,outline:'none'}}/>
               <input type="number" value={sl} onChange={e=>setSl(e.target.value)} placeholder="손절가(SL)"
                 style={{flex:1,background:T.alt,border:`1px solid ${A(T.red,'30')}`,borderRadius:7,padding:'9px',color:T.txt,fontSize:12,outline:'none'}}/>
             </div>
+            )}
 
             {/* 요약 한 줄 (금액 있을때만, 컴팩트) */}
             {amount&&(
@@ -1278,7 +1284,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             {quoting&&<div style={{color:T.acl,fontSize:11,textAlign:'center',marginTop:6}}>거래소 가격 확인 중…</div>}
             {status==='loading'&&<div style={{color:T.acl,fontSize:11,textAlign:'center',marginTop:6}}>처리 중…</div>}
             {status==='done'&&<div style={{color:T.grn,fontSize:11,textAlign:'center',marginTop:6}}>✅ 완료!</div>}
-            <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:5}}>{tradeMode==='mock'?'모의 · 금액 미입력 시 기본 10만원':tradeMode==='testnet'?'테스트넷 · 명목가는 USDT로 입력합니다':'실전 · 명목가는 USDT로 입력합니다'}</div>
+            <div style={{color:T.muted,fontSize:9,textAlign:'center',marginTop:5}}>{tradeMode==='mock'?'연습 · 금액 미입력 시 기본 10만원':tradeMode==='testnet'?'테스트넷 · 명목가는 USDT로 입력합니다':'실전 · 명목가는 USDT로 입력합니다'}</div>
               </div>
 
               {/* 오더북 (호가창) — Binance 실시간 스트림 */}
@@ -1784,10 +1790,22 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
             </div>
           )}
 
-          {/* 모의 포지션 (paper store) */}
+          {/* 연습 포지션 — **브라우저 로컬 원화 장부(`tg_paper_balance_v1`)다.**
+              서버 모의투자(PAPER, `paper_accounts`·USDT)와 다른 장부이고,
+              체결도 청산도 이 브라우저 안에서만 일어난다. 두 장부를 같은
+              계좌처럼 부르면 사용자는 어느 숫자가 진짜인지 알 수 없다. */}
           {positions.length>0&&(
             <Card style={{padding:'14px 16px',marginBottom:12,borderLeft:`3px solid ${T.prp}`}}>
-              <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>모의 포지션 ({positions.length})<span style={{background:A(T.prp,'20'),color:T.prp,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>MOCK</span></div>
+              <div style={{color:T.txt,fontWeight:800,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>연습 포지션 ({positions.length})<span style={{background:A(T.prp,'20'),color:T.prp,fontSize:9,fontWeight:800,padding:'1px 7px',borderRadius:5}}>연습 · 이 브라우저</span></div>
+              {/* **항상 보인다.** 읽기 전용 안내는 모드에 따라 붙지만, "여기가
+                  어떤 장부인가"는 모드와 무관한 사실이다. */}
+              <div style={{background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',marginBottom:10}}>
+                <div style={{color:T.sub,fontSize:10,fontWeight:700}}>연습(Practice) 장부 — 이 브라우저에만 원화로 저장됩니다</div>
+                <div style={{color:T.muted,fontSize:9,marginTop:2,lineHeight:1.5}}>
+                  서버 모의투자(PAPER) 계좌와 <b style={{color:T.sub}}>다른 장부</b>입니다 — 잔고·손익을 합치지 않습니다.<br/>
+                  <b style={{color:T.ylw}}>자동 손절·익절이 없습니다.</b> 여기 포지션은 아래 버튼으로 직접 닫아야 하며, 앱을 닫아 두는 동안에는 아무 일도 일어나지 않습니다.
+                </div>
+              </div>
               {/* **연습 장부는 거래소와 연결돼 있지 않다.** 지금 화면이 테스트넷·실전이면
                   이 카드의 동작은 읽기 전용이다 — 여기 수량으로 거래소에 주문을 내면
                   거래소에 없는 포지션을 닫으려 드는 것이 된다. */}
@@ -1812,8 +1830,6 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                       <span>진입 ₩{fmt(Math.round(p.avgPrice))}</span>
                       <span>현재 ₩{fmt(Math.round(cur))}</span>
                       <span>수량 {p.qty.toFixed(4)}</span>
-                      {p.slPrice&&<span style={{color:T.red}}>SL ₩{fmt(Math.round(p.slPrice))}</span>}
-                      {p.tpPrice&&<span style={{color:T.grn}}>TP ₩{fmt(Math.round(p.tpPrice))}</span>}
                     </div>
                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
                       {quickActions.includes('close_all')&&<button onClick={()=>closePosition(p,cur,1)}
@@ -1836,8 +1852,8 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         showToast(`추가 진입 완료 · ${p.asset} ${p.side==='short'?'숏':'롱'} · +₩${fmt(addAmt)}`, true);
                       }} style={{padding:'9px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>추가 진입</button>}
                     </div>
-                    {(quickActions.includes('reverse')||quickActions.includes('tpsl'))&&<div style={{display:'flex',gap:6,marginTop:6}}>
-                      {quickActions.includes('reverse')&&<button onClick={()=>{
+                    {quickActions.includes('reverse')&&<div style={{display:'flex',gap:6,marginTop:6}}>
+                      <button onClick={()=>{
                         // **연습 포지션 리버스는 거래소를 부르지 않는다.**
                         //
                         // 예전에는 여기서 로컬 연습 포지션의 asset·qty로
@@ -1855,117 +1871,8 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         if(res.ok){
                           showToast(`리버스 완료 · 실현손익 ${Math.round(res.pnl).toLocaleString('ko-KR')}원 → ${res.newSide==='long'?'롱':'숏'} 전환`, true);
                         } else { showToast('리버스 실패 · 포지션 없음', false); }
-                      }} style={{flex:1,padding:'9px',background:A(T.prp,'18'),color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>리버스</button>}
-                      {quickActions.includes('tpsl')&&<button onClick={()=>{ setSlEditAsset(p.asset); setSlEditVal(p.slPrice?String(Math.round(p.slPrice)):''); setTpEditVal(p.tpPrice?String(Math.round(p.tpPrice)):''); }}
-                        style={{flex:1,padding:'9px',background:T.alt,color:T.acl,border:`1px solid ${T.border}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>TP/SL 편집</button>}
+                      }} style={{flex:1,padding:'9px',background:A(T.prp,'18'),color:T.prp,border:`1px solid ${A(T.prp,'40')}`,borderRadius:7,fontSize:10,fontWeight:700,cursor:'pointer'}}>리버스</button>
                     </div>}
-                    {slEditAsset===p.asset&&(()=>{
-                      const isShort=p.side==='short';
-                      const lev=leverage||5;
-                      // 가격↔ROI 변환 (ROI = 가격변동% × 레버리지)
-                      const priceToRoi=(price:number)=>{ const chg=((price-p.avgPrice)/p.avgPrice)*100*(isShort?-1:1); return chg*lev; };
-                      const roiToPrice=(roi:number)=>{ const chg=roi/lev; return p.avgPrice*(1+(chg/100)*(isShort?-1:1)); };
-                      const tpPrice=tpEditVal?+tpEditVal:(tpRoi?roiToPrice(+tpRoi):0);
-                      const slPrice=slEditVal?+slEditVal:(slRoi?roiToPrice(-Math.abs(+slRoi)):0);
-                      return (
-                      <div style={{marginTop:8,padding:'14px',background:T.bg,borderRadius:10,border:`1px solid ${T.border}`}}>
-                        {/* 탭 */}
-                        <div style={{display:'flex',gap:14,marginBottom:12,borderBottom:`1px solid ${T.border}`,paddingBottom:8}}>
-                          {([['entire','전체'],['partial','부분'],['trailing','트레일링']] as [any,string][]).map(([v,l])=>(
-                            <button key={v} onClick={()=>setTpslTab(v)} style={{background:'none',border:'none',color:tpslTab===v?T.txt:T.muted,fontSize:12,fontWeight:tpslTab===v?800:600,cursor:'pointer',padding:0,borderBottom:tpslTab===v?`2px solid ${T.acl}`:'none',paddingBottom:4}}>{l}</button>
-                          ))}
-                        </div>
-                        {/* 정보 */}
-                        <div style={{marginBottom:12}}>
-                          {[['현재가',cur],['진입가',p.avgPrice],['청산가', isShort? p.avgPrice*(1+(0.9/lev)) : p.avgPrice*(1-(0.9/lev)) ]].map(([l,v]:any,i)=>(
-                            <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',fontSize:11}}>
-                              <span style={{color:T.muted}}>{l}{l==='청산가'&&<span style={{color:T.ylw,fontSize:8,fontWeight:700,marginLeft:5,background:A(T.ylw,'18'),padding:'1px 5px',borderRadius:4}}>추정</span>}</span>
-                              <span style={{color:l==='청산가'?T.ylw:T.txt,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>₩{fmt(Math.round(v))}</span>
-                            </div>
-                          ))}
-                          <div style={{fontSize:9,color:T.muted,marginTop:4,lineHeight:1.4}}>청산가는 근사식 추정값입니다. 실거래(테스트넷/실전)는 거래소 계단식 유지증거금(MMR)을 적용한 정확값이 사용됩니다.</div>
-                        </div>
-
-                        {tpslTab==='trailing'?(
-                          <div style={{marginBottom:12}}>
-                            <div style={{color:T.acl,fontSize:10,fontWeight:700,marginBottom:4}}>트레일링 스탑 (고점 대비 하락 %)</div>
-                            <input value={trailPct} onChange={e=>setTrailPct(e.target.value.replace(/[^0-9.]/g,''))} placeholder="예: 5 (고점 -5% 도달 시 청산)" inputMode="decimal"
-                              style={{width:'100%',background:T.alt,border:`1px solid ${A(T.prp,'40')}`,borderRadius:8,padding:'11px',color:T.txt,fontSize:13,outline:'none'}}/>
-                            <div style={{color:T.muted,fontSize:9,marginTop:6,lineHeight:1.4}}>가격이 오를수록 청산선도 따라 올라갑니다. 고점에서 설정%만큼 떨어지면 자동 청산.</div>
-                          </div>
-                        ):(
-                          <>
-                            {/* TP */}
-                            <div style={{marginBottom:10}}>
-                              <div style={{color:T.grn,fontSize:10,fontWeight:700,marginBottom:4}}>익절 (TP)</div>
-                              <div style={{display:'flex',gap:6}}>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.grn,'40')}`,borderRadius:7,padding:'0 10px'}}>
-                                  <input value={tpEditVal} onChange={e=>{setTpEditVal(e.target.value.replace(/[^0-9.]/g,''));setTpRoi('');}} placeholder="목표 가격" inputMode="decimal"
-                                    style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
-                                  <span style={{color:T.muted,fontSize:10}}>₩</span>
-                                </div>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.grn,'40')}`,borderRadius:7,padding:'0 10px'}}>
-                                  <input value={tpRoi} onChange={e=>{setTpRoi(e.target.value.replace(/[^0-9.]/g,''));setTpEditVal('');}} placeholder="수익률 ROI" inputMode="decimal"
-                                    style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
-                                  <span style={{color:T.muted,fontSize:10}}>%</span>
-                                </div>
-                              </div>
-                              {(tpPrice>0)&&<div style={{color:T.muted,fontSize:9,marginTop:4,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>→ 익절가 ₩{fmt(Math.round(tpPrice))} (ROI {priceToRoi(tpPrice).toFixed(1)}%)</div>}
-                            </div>
-                            {/* SL */}
-                            <div style={{marginBottom:12}}>
-                              <div style={{color:T.red,fontSize:10,fontWeight:700,marginBottom:4}}>손절 (SL)</div>
-                              <div style={{display:'flex',gap:6}}>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,padding:'0 10px'}}>
-                                  <input value={slEditVal} onChange={e=>{setSlEditVal(e.target.value.replace(/[^0-9.]/g,''));setSlRoi('');}} placeholder="손절 가격" inputMode="decimal"
-                                    style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
-                                  <span style={{color:T.muted,fontSize:10}}>₩</span>
-                                </div>
-                                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',background:T.alt,border:`1px solid ${A(T.red,'40')}`,borderRadius:7,padding:'0 10px'}}>
-                                  <input value={slRoi} onChange={e=>{setSlRoi(e.target.value.replace(/[^0-9.]/g,''));setSlEditVal('');}} placeholder="손실률" inputMode="decimal"
-                                    style={{flex:1,minWidth:0,width:'100%',background:'transparent',border:'none',outline:'none',color:T.txt,fontSize:12,padding:'9px 0'}}/>
-                                  <span style={{color:T.muted,fontSize:10}}>%</span>
-                                </div>
-                              </div>
-                              {(slPrice>0)&&<div style={{color:T.muted,fontSize:9,marginTop:4,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>→ 손절가 ₩{fmt(Math.round(slPrice))} (ROI {priceToRoi(slPrice).toFixed(1)}%)</div>}
-                            </div>
-                            {tpslTab==='partial'&&(
-                              <div style={{marginBottom:12}}>
-                                <div style={{color:T.muted,fontSize:10,marginBottom:6}}>청산 비율: {tpslRatio}%</div>
-                                <div style={{display:'flex',gap:5}}>
-                                  {[25,50,75,100].map(r=>(
-                                    <button key={r} onClick={()=>setTpslRatio(r)} style={{flex:1,padding:'6px',background:tpslRatio===r?T.acg:T.alt,color:tpslRatio===r?T.acl:T.muted,border:`1px solid ${tpslRatio===r?T.acl:T.border}`,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer'}}>{r}%</button>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        )}
-
-                        <div style={{display:'flex',gap:6}}>
-                          <button onClick={()=>{
-                            // **localStorage에 직접 쓰지 않는다.** 예전에는 여기서
-                            // 키를 직접 건드려 장부 판정을 통째로 건너뛰었다 —
-                            // 모드 검사도, 저장 규칙도 지나가지 않았다.
-                            // 이 편집은 연습 포지션의 TP/SL이다. 거래소 포지션의
-                            // TP/SL은 별도 경로(`submitTpsl` → /api/binance/futures/tpsl)다.
-                            const envTpsl = tradeEnvOf(tradeMode);
-                            if(!mayMutatePracticeLedger(envTpsl)){ showToast(practiceBlockReason(envTpsl), false); return; }
-                            try { const b=loadPaperBalance(); if(b.positions[p.asset]){
-                              if(tpslTab==='trailing'){
-                                b.positions[p.asset]={...b.positions[p.asset], slPrice: trailPct? cur*(1-(+trailPct)/100):undefined};
-                              } else {
-                                b.positions[p.asset]={...b.positions[p.asset], tpPrice:tpPrice>0?tpPrice:undefined, slPrice:slPrice>0?slPrice:undefined};
-                              }
-                              savePaperBalance(envTpsl, b); } refreshPositions(); } catch {}
-                            setSlEditAsset('');setTpEditVal('');setSlEditVal('');setTpRoi('');setSlRoi('');setTrailPct('');
-                            showToast('TP/SL 설정 완료', true);
-                          }} style={{flex:1,padding:'12px',background:T.acc,color:'#fff',border:'none',borderRadius:8,fontSize:13,fontWeight:800,cursor:'pointer'}}>확인</button>
-                          <button onClick={()=>{setSlEditAsset('');setTpEditVal('');setSlEditVal('');setTpRoi('');setSlRoi('');setTrailPct('');}} style={{flex:1,padding:'12px',background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,fontSize:13,fontWeight:700,cursor:'pointer'}}>취소</button>
-                        </div>
-                      </div>
-                      );
-                    })()}
                   </div>
                 );
               })}
@@ -2079,7 +1986,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               </div>
             )}
             <div style={{marginTop:12,color:T.muted,fontSize:11,lineHeight:1.5}}>
-              {tradeMode==='mock'?'모의매매 — 실제 자금이 사용되지 않습니다.':tradeMode==='testnet'?'테스트넷 — 거래소 테스트 서버에 실제 주문이 전송됩니다.':'⚠️ 실전 — 실제 자금으로 주문이 실행됩니다.'}
+              {tradeMode==='mock'?'연습 — 이 브라우저의 연습 장부에만 기록됩니다. 실제 자금도 거래소 주문도 사용되지 않습니다.':tradeMode==='testnet'?'테스트넷 — 거래소 테스트 서버에 실제 주문이 전송됩니다.':'⚠️ 실전 — 실제 자금으로 주문이 실행됩니다.'}
             </div>
             {leverage>10&&<div style={{marginTop:8,background:A(T.red,'15'),border:`1px solid ${A(T.red,'30')}`,borderRadius:8,padding:'8px 12px',color:T.red,fontSize:11}}>⚠️ {leverage}배는 원금 손실 위험이 매우 높습니다</div>}
             <div style={{display:'flex',gap:10,marginTop:16}}>

@@ -200,7 +200,11 @@ export const DATA_ITEMS: DataItem[] = [
     id: 'local_krw_practice', label: '로컬 원화 연습 장부 (정본 아님)',
     kind: 'USER_ASSET', location: 'BROWSER_ONLY',
     where: "localStorage 'tg_paper_balance_v1' (src/lib/autotrade/store.ts, KRW) — "
-      + '정본 PAPER와 합산·대체 금지. 과거분은 TESTNET·LIVE가 섞여 오염 가능',
+      + '정본 PAPER와 합산·대체 금지. 과거분은 TESTNET·LIVE가 섞여 오염 가능. '
+      // **자동 청산 실행자가 없다.** 정본 PAPER는 서버가 감시하지만
+      // (`/api/paper/exit-monitor` · Worker) 이 장부에는 그런 것이 없다.
+      // 여기 적어 두지 않으면 "모의 장부인데 왜 손절이 안 됐나"가 된다.
+      + '자동 손절·익절 없음 — 종료는 사용자가 화면에서 직접 한다',
   },
   {
     id: 'exec_logs', label: '자동매매 실행 기록',

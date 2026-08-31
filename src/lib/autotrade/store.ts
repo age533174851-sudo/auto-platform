@@ -14,6 +14,20 @@ import type { TradeEnv } from './practiceEnv';
 // 그리고 **TESTNET·LIVE는 여기에 적지 않는다.** 예전에는 적었고, 그래서
 // 한 장부에 세 환경이 섞였다(`practiceEnv.ts`의 머리말 참조). 이제 잔고를
 // 바꾸는 함수는 전부 환경을 받고, MOCK이 아니면 **아무것도 하지 않는다.**
+//
+// ─── 이 장부에는 자동 손절·익절이 없다 ───────────────────────
+//
+// 예전에는 `checkPaperExits()`가 있었다. 브라우저가 현재가 맵을 받아
+// 연습 포지션의 SL/TP·본절·트레일링을 직접 판정하는 함수였다. **부르는
+// 곳이 없었다.** 그런데 화면에는 SL/TP를 입력하는 자리가 남아 있었고,
+// 그 값은 여기 저장까지 됐다 — 아무도 보지 않는 값이었다. 사용자가
+// 손절선을 적어 두고 잠들면, 아침에 손절되지 않은 포지션을 본다.
+//
+// 그래서 판정기와 그 값을 담던 칸을 **둘 다** 걷어냈다. 연습 포지션은
+// 사용자가 화면에서 직접 닫는다. 자동 청산이 필요한 것은 정본 PAPER이고,
+// 그것은 서버가 한다(`/api/paper/exit-monitor` · Worker).
+//
+// 되살리지 않는다. 되살리려면 "탭을 닫아도 도는 실행자"부터 있어야 한다.
 
 const LOG_KEY      = 'tg_autotrade_logs_v1';
 const PAPER_BAL_KEY = 'tg_paper_balance_v1';
@@ -73,12 +87,9 @@ interface PaperPosition {
   qty: number;
   avgPrice: number;
   side?: 'long' | 'short';  // 방향 (롱/숏)
-  slPrice?: number;
-  tpPrice?: number;
   stratId?: string;
-  tp1Price?: number;      // 1차 익절 목표 (반익반본)
-  tp1Done?: boolean;      // 1차 익절 완료 여부
-  highWater?: number;     // 트레일링 고점
+  // slPrice·tpPrice·tp1Price·tp1Done·highWater는 없다. 그 값을 읽어
+  // 청산할 실행자가 이 장부에는 없기 때문이다. 위 머리말 참조.
 }
 interface PaperBalance {
   krw:       number;
@@ -101,6 +112,14 @@ const DEFAULT_BALANCE: PaperBalance = {
   totalPnL:  0,
 };
 
+/**
+ * 저장된 연습 장부를 읽는다.
+ *
+ * **키도 값도 바꾸지 않는다.** `tg_paper_balance_v1`은 그대로 두고,
+ * 예전 포지션에 붙어 있던 `slPrice`·`tpPrice` 같은 칸도 지우지 않는다 —
+ * `parsed.positions`를 그대로 넘긴다. 지금 코드가 안 읽을 뿐이다.
+ * 읽는 코드가 없어진 것을 사용자의 저장 데이터를 지울 이유로 삼지 않는다.
+ */
 export function loadPaperBalance(): PaperBalance {
   if (typeof window === 'undefined') return { ...DEFAULT_BALANCE };
   try {
@@ -138,12 +157,19 @@ export function resetPaperBalance(env: TradeEnv | 'UNKNOWN'): void {
 }
 
 // 모의 체결 — 진입 (롱/숏 모두)
+/**
+ * 연습 장부 진입.
+ *
+ * **손절·익절 비율은 받지 않는다.** 예전에는 받아서 `slPrice`·`tpPrice`로
+ * 적었는데, 그 값을 보고 청산하는 실행자가 없었다. 받아서 적기만 하면
+ * 화면은 "손절이 걸렸다"고 말하고 장부는 아무것도 하지 않는다.
+ */
 export function paperBuy(
   env: TradeEnv | 'UNKNOWN',
   asset: string,
   price: number,
   amountKRW: number,
-  opts?: { stopLossPct?: number; takeProfitPct?: number; stratId?: string; side?: 'long' | 'short' },
+  opts?: { stratId?: string; side?: 'long' | 'short' },
 ): { ok: boolean; qty?: number; reason?: string; blocked?: true } {
   if (!mayMutatePracticeLedger(env)) return practiceBlocked(env);
   const b = loadPaperBalance();
@@ -160,11 +186,7 @@ export function paperBuy(
   const newAvg = (base.qty * base.avgPrice + qty * price) / newQty;
 
   b.krw -= amountKRW;
-  const slPct = opts?.stopLossPct;
-  const tpPct = opts?.takeProfitPct;
-  const slPrice = slPct && slPct > 0 ? (side === 'short' ? newAvg * (1 + slPct/100) : newAvg * (1 - slPct/100)) : base.slPrice;
-  const tpPrice = tpPct && tpPct > 0 ? (side === 'short' ? newAvg * (1 - tpPct/100) : newAvg * (1 + tpPct/100)) : base.tpPrice;
-  b.positions[asset] = { qty: newQty, avgPrice: newAvg, side, slPrice, tpPrice, stratId: opts?.stratId ?? base.stratId };
+  b.positions[asset] = { qty: newQty, avgPrice: newAvg, side, stratId: opts?.stratId ?? base.stratId };
   savePaperBalance(env, b);
   return { ok: true, qty };
 }
@@ -196,88 +218,7 @@ export function paperSell(
   return { ok: true, qty: qtyToSell, pnl };
 }
 
-// ─── SL/TP 자동청산 감시 ──────────────────────────────────────
-// 현재가 맵을 받아 손절/익절 도달한 포지션을 청산. 청산된 내역 반환.
-export interface ExitEvent {
-  asset: string; reason: 'take_profit' | 'stop_loss' | 'trailing_stop';
-  price: number; pnl: number; qty: number; stratId?: string;
-}
-
-export function checkPaperExits(env: TradeEnv | 'UNKNOWN', priceMap: Record<string, number>): ExitEvent[] {
-  // **연습 장부의 청산 감시다.** 정본 PAPER의 청산은 서버가 한다
-  // (`/api/paper/exit-monitor` · Worker). 여기서 TESTNET·LIVE를 돌리면
-  // 거래소가 이미 처리한 것을 연습 장부가 한 번 더 적는다.
-  if (!mayMutatePracticeLedger(env)) return [];
-  const b = loadPaperBalance();
-  const exits: ExitEvent[] = [];
-  let mutated = false;
-  for (const [asset, pos] of Object.entries(b.positions)) {
-    if (!pos || pos.qty <= 0) continue;
-    const cur = priceMap[asset] ?? priceMap[asset.toUpperCase()];
-    if (!cur || cur <= 0) continue;
-
-    const isShort = pos.side === 'short';
-    // 방향 반영 수익률
-    const gainPct = ((cur - pos.avgPrice) / pos.avgPrice) * 100 * (isShort ? -1 : 1);
-
-    // ── 반익반본: 1차 익절 목표 도달 → 절반 청산 + 본절스탑 ──
-    if (pos.tp1Price && !pos.tp1Done) {
-      const tp1Hit = isShort ? cur <= pos.tp1Price : cur >= pos.tp1Price;
-      if (tp1Hit) {
-        const halfQty = pos.qty / 2;
-        const proceeds = halfQty * cur;
-        const cost = halfQty * pos.avgPrice;
-        const halfPnl = (proceeds - cost) * (isShort ? -1 : 1);
-        b.krw += proceeds; b.totalPnL += halfPnl; recordDailyPnL(env, halfPnl);
-        // 남은 절반 + 손절을 본전으로 (리스크 프리)
-        b.positions[asset] = { ...pos, qty: pos.qty - halfQty, slPrice: pos.avgPrice, tp1Done: true };
-        exits.push({ asset, reason: 'take_profit' as any, price: cur, pnl: halfPnl, qty: halfQty, stratId: pos.stratId });
-        mutated = true;
-        continue;
-      }
-    }
-
-    // ── 고점 추적 + 본절 + 트레일링 ──
-    const hw = pos.highWater || pos.avgPrice;
-    const newHw = isShort ? Math.min(hw, cur) : Math.max(hw, cur);
-    if (newHw !== hw) { b.positions[asset].highWater = newHw; mutated = true; }
-    // +3% → 본절
-    if (gainPct >= 3) {
-      const be = pos.avgPrice;
-      if (isShort ? (!pos.slPrice || pos.slPrice > be) : (!pos.slPrice || pos.slPrice < be)) {
-        b.positions[asset].slPrice = be; mutated = true;
-      }
-    }
-    // +10% → 트레일링 (고점 대비 5%)
-    if (gainPct >= 10) {
-      const curHw = b.positions[asset].highWater || cur;
-      const trailStop = isShort ? curHw * 1.05 : curHw * 0.95;
-      if (isShort ? (!pos.slPrice || pos.slPrice > trailStop) : (!pos.slPrice || pos.slPrice < trailStop)) {
-        b.positions[asset].slPrice = trailStop; mutated = true;
-      }
-    }
-
-    const p2 = b.positions[asset];
-    let hit: 'take_profit' | 'stop_loss' | 'trailing_stop' | null = null;
-    if (p2.tpPrice && (isShort ? cur <= p2.tpPrice : cur >= p2.tpPrice)) hit = 'take_profit';
-    else if (p2.slPrice && (isShort ? cur >= p2.slPrice : cur <= p2.slPrice)) hit = gainPct > 0 ? 'trailing_stop' : 'stop_loss';
-    if (!hit) continue;
-
-    const proceeds = p2.qty * cur;
-    const cost     = p2.qty * p2.avgPrice;
-    const pnl      = (proceeds - cost) * (isShort ? -1 : 1);
-    b.krw += proceeds;
-    b.totalPnL += pnl;
-    recordDailyPnL(env, pnl);
-    exits.push({ asset, reason: hit as any, price: cur, pnl, qty: p2.qty, stratId: p2.stratId });
-    delete b.positions[asset];
-    mutated = true;
-  }
-  if (mutated || exits.length > 0) savePaperBalance(env, b);
-  return exits;
-}
-
-// 현재 보유 포지션 목록 (SL/TP 포함)
+// 현재 보유 포지션 목록
 export function getOpenPositions(): Array<{ asset: string } & PaperPosition> {
   const b = loadPaperBalance();
   return Object.entries(b.positions).map(([asset, pos]) => ({ asset, ...pos }));

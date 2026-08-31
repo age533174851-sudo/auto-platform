@@ -33,7 +33,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
     setNotifPerm(Notification.permission as any);
   }, []);
   const [sec,setSec]=useState(()=>{ try { const r=localStorage.getItem('tg_sec_settings'); return r?{...DEFAULT_SEC,...JSON.parse(r)}:DEFAULT_SEC; } catch { return DEFAULT_SEC; } });
-  const [quickActions,setQuickActions]=useState<string[]>(()=>{ try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse','tpsl']; } catch { return ['close_all','close_50','close_25','add','reverse','tpsl']; } });
+  const [quickActions,setQuickActions]=useState<string[]>(()=>{ try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse']; } catch { return ['close_all','close_50','close_25','add','reverse']; } });
   const [riskLimits,setRiskLimits]=useState(()=>{ try { const r=localStorage.getItem('tg_risk_limits'); return r?JSON.parse(r):{maxDailyLossPct:5,maxPositions:5,maxExposurePct:80}; } catch { return {maxDailyLossPct:5,maxPositions:5,maxExposurePct:80}; } });
   const [apiKeys]=useState([{id:1,name:'API Key #1',created:'2025-01-15',lastUsed:'2025-05-10',active:true}]);
 
@@ -395,10 +395,13 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
           {/* 포지션 빠른 액션 커스터마이징 */}
           <Card style={{padding:16,marginBottom:12}}>
             <div style={{color:T.txt,fontWeight:700,marginBottom:4}}>포지션 빠른 액션</div>
-            <div style={{color:T.muted,fontSize:10,marginBottom:12}}>매매 화면 포지션 카드에 표시할 버튼을 선택하세요</div>
+            <div style={{color:T.muted,fontSize:10,marginBottom:12}}>매매 화면의 연습 포지션 카드에 표시할 버튼을 선택하세요</div>
             {[
               {k:'close_all',l:'전량 종료'},{k:'close_50',l:'50% 종료'},{k:'close_25',l:'25% 종료'},
-              {k:'add',l:'추가 진입'},{k:'reverse',l:'리버스'},{k:'tpsl',l:'TP/SL 편집'},
+              // TP/SL 편집은 없다. 연습 장부에는 그 값을 보고 청산할 실행자가
+              // 없어서 버튼과 함께 걷어냈다 — 켤 수 있는 토글로 남겨 두면
+              // "끄면 되는 기능"으로 읽힌다.
+              {k:'add',l:'추가 진입'},{k:'reverse',l:'리버스'},
             ].map((a,i,arr)=>(
               <div key={a.k} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:i<arr.length-1?`1px solid ${T.border}`:'none'}}>
                 <span style={{color:T.txt,fontSize:12}}>{a.l}</span>
@@ -407,7 +410,7 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
                 }}/>
               </div>
             ))}
-            <button onClick={()=>{ const def=['close_all','close_50','close_25','add','reverse','tpsl']; setQuickActions(def); try{localStorage.setItem('tg_quick_actions',JSON.stringify(def));}catch{} showToast('포지션 액션이 기본값으로 복구되었습니다'); }}
+            <button onClick={()=>{ const def=['close_all','close_50','close_25','add','reverse']; setQuickActions(def); try{localStorage.setItem('tg_quick_actions',JSON.stringify(def));}catch{} showToast('포지션 액션이 기본값으로 복구되었습니다'); }}
               style={{marginTop:10,background:'none',border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 12px',color:T.muted,fontSize:11,fontWeight:700,cursor:'pointer',width:'100%'}}>
               기본값으로 복구
             </button>

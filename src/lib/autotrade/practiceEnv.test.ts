@@ -8,8 +8,11 @@ import { test, eq, assert } from '../../test/harness';
 import { tradeEnvOf, mayMutatePracticeLedger, LEGACY_LEDGER_STATUS } from './practiceEnv';
 import {
   loadPaperBalance, savePaperBalance, resetPaperBalance, recordDailyPnL,
-  paperBuy, paperSell, closePaperPosition, reversePaperPosition, checkPaperExits,
+  paperBuy, paperSell, closePaperPosition, reversePaperPosition,
 } from './store';
+// **모듈 전체를 한 번 더 잡는다.** "없어진 것이 없는가"를 보려면 이름을
+// 지목해 import할 수 없다 — 없는 이름을 import하면 컴파일에서 먼저 깨진다.
+import * as store from './store';
 import {
   planPracticeClose, planPracticeReverse, practiceCardEditable, PRACTICE_ACTION_KINDS,
 } from './practiceActions';
@@ -100,21 +103,34 @@ export function runPracticeEnvTests() {
     assert(withLedger(() => { paperSell('MOCK', 'btc', 110, 500_000); }).changed, '매도');
   });
 
-  test('연습 청산감시는 손절선에 닿으면 로컬 장부를 바꾼다', () => {
-    // **손절선이 없는 포지션에는 청산감시가 할 일이 없다.** 처음에 이 사실을
-    // 빼고 "안 변하면 실패"로 적었더니 멀쩡한 코드가 실패로 나왔다 —
-    // 테스트가 틀렸던 것이다. 닿을 선을 만들어 두고 본다.
+  test('연습 장부에는 자동 청산감시가 없다 — 그리고 예전 SL 값도 지우지 않는다', () => {
+    // 예전에는 `checkPaperExits()`가 있었다. 부르는 곳이 없었는데도 화면에는
+    // SL/TP 입력칸이 있었다 — 적히기만 하고 아무도 안 보는 값이었다.
+    //
+    // 여기서 고정하는 것은 두 가지다:
+    //   ① 그 판정기가 모듈에 없다 (되살아나면 이 테스트가 깨진다)
+    //   ② **이미 저장된 slPrice는 그대로 읽힌다** — 읽는 코드가 없어졌다는
+    //      이유로 사용자의 저장 데이터를 지우지 않는다.
+    const mod: any = store;
+    eq(typeof mod.checkPaperExits, 'undefined', 'checkPaperExits가 되살아났다');
+
     const g: any = globalThis; const had = 'window' in g; const prev = g.window;
     g.window = fakeWindow();
     try {
-      savePaperBalance('MOCK', {
-        krw: 0, totalPnL: 0,
-        positions: { btc: { qty: 1, avgPrice: 100, side: 'long', slPrice: 90 } },
-      } as any);
-      const before = JSON.stringify(loadPaperBalance());
-      const exits = checkPaperExits('MOCK', { btc: 80 });   // 손절선 아래
-      assert(exits.length > 0, 'MOCK인데 손절이 발동하지 않았다');
-      assert(JSON.stringify(loadPaperBalance()) !== before, 'MOCK 청산감시가 장부를 안 바꿨다');
+      // 예전 판(slPrice·tp1Done·highWater가 붙은 포지션)을 그대로 심는다.
+      g.window.localStorage.setItem('tg_paper_balance_v1', JSON.stringify({
+        krw: 1_234_567, totalPnL: 42,
+        positions: { btc: { qty: 1, avgPrice: 100, side: 'long', slPrice: 90, tpPrice: 130, tp1Done: true, highWater: 120 } },
+      }));
+      const b: any = loadPaperBalance();
+      eq(b.krw, 1_234_567, '예전 잔고를 못 읽었다');
+      eq(b.totalPnL, 42, '예전 실현손익을 못 읽었다');
+      eq(b.positions.btc.qty, 1, '예전 포지션을 못 읽었다');
+      eq(b.positions.btc.slPrice, 90, '예전 slPrice가 사라졌다 — 읽기가 값을 지웠다');
+      eq(b.positions.btc.highWater, 120, '예전 highWater가 사라졌다');
+      // 그리고 가격이 손절선 아래로 내려가도 **아무 일도 일어나지 않는다.**
+      const before = g.window.localStorage.getItem('tg_paper_balance_v1');
+      eq(g.window.localStorage.getItem('tg_paper_balance_v1'), before, '읽기만 했는데 장부가 바뀌었다');
     } finally { if (had) g.window = prev; else delete g.window; }
   });
 
@@ -166,13 +182,12 @@ export function runPracticeEnvTests() {
   //
   // **한 군데만 막고 다른 문이 열려 있으면 막은 것이 아니다.**
 
-  test('저장·초기화·청산감시·매도도 MOCK 밖에서는 아무 일도 하지 않는다', () => {
+  test('저장·초기화·매도도 MOCK 밖에서는 아무 일도 하지 않는다', () => {
     for (const env of ['TESTNET', 'LIVE', 'UNKNOWN'] as const) {
       eq(withLedger(() => { savePaperBalance(env, { krw: 1, positions: {}, totalPnL: 0 } as any); }).changed,
         false, `${env}: savePaperBalance가 통과했다`);
       eq(withLedger(() => { resetPaperBalance(env); }).changed, false, `${env}: resetPaperBalance가 통과했다`);
       eq(withLedger(() => { paperSell(env, 'btc', 110, 500_000); }).changed, false, `${env}: paperSell이 통과했다`);
-      eq(withLedger(() => { checkPaperExits(env, { btc: 1 }); }).changed, false, `${env}: checkPaperExits가 통과했다`);
     }
   });
 
@@ -182,18 +197,6 @@ export function runPracticeEnvTests() {
     eq(withLedger(() => { reversePaperPosition('UNKNOWN', 'btc', 110); }).changed, false);
   });
 
-  test('청산감시가 MOCK 밖에서는 청산 사건을 만들지 않는다', () => {
-    // 빈 배열을 돌려주는 것과 "청산할 것이 없었다"는 같은 모양이지만,
-    // 여기서 중요한 것은 **장부가 안 움직였다**는 사실이다.
-    for (const env of ['TESTNET', 'LIVE', 'UNKNOWN'] as const) {
-      const g: any = globalThis; const had = 'window' in g; const prev = g.window;
-      g.window = fakeWindow();
-      try {
-        savePaperBalance('MOCK', { krw: 0, positions: { btc: { qty: 1, avgPrice: 100, side: 'long', slPrice: 999 } }, totalPnL: 0 } as any);
-        eq(checkPaperExits(env, { btc: 1 }).length, 0, `${env}: 청산 사건을 만들었다`);
-      } finally { if (had) g.window = prev; else delete g.window; }
-    }
-  });
 
   // ══ ⑤-2 실현손익 누계도 같은 계약을 받는다 ══
   //
