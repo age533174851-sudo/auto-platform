@@ -1,0 +1,260 @@
+# production `autotrade_schedules`의 정체(UNIQUE·인덱스) 상태를 **읽기만** 한다.
+#
+# 왜 필요한가
+# ───────────
+# #226에서 050의 DO 블록이 `name[] = text[]` 때문에 **한 번도 실행된 적이
+# 없다는 것**이 밝혀졌다. 그 블록이 하려던 일은 옛 `(user_id, symbol)`
+# 유니크를 지우는 것이었다. 즉 운영 DB에 그 유니크가 **아직 남아 있을 수
+# 있다.**
+#
+# 남아 있으면 증상은 "저장 실패"가 아니다. `/api/autotrade/schedule`에
+# 폴백이 있어서, 새 identity upsert가 실패하면 옛 `onConflict:
+# 'user_id,symbol'`로 다시 쓴다 — **같은 종목에 두 번째 전략을 켜면 첫
+# 전략이 조용히 덮인다.**
+#
+# 그런데 지금은 그게 실제로 남아 있는지 **모른다.** 모르는 채로 cleanup
+# 마이그레이션을 만들면, 있지도 않은 제약을 지우거나 있는 것을 놓친다.
+# 그래서 고치기 전에 **보는 것**부터 한다.
+#
+# 왜 이렇게 좁게 트리거하나
+# ─────────────────────────
+#   · `pull_request` 없음      — PR 검토 중에는 운영 DB 접속 0이어야 한다.
+#                                 fork PR은 secret을 못 받지만, 같은
+#                                 저장소 브랜치 PR은 받는다. 아예 안 건다.
+#   · `workflow_dispatch` 없음 — 사람이 아무 때나 운영 DB를 두드리는 문을
+#                                 만들지 않는다.
+#   · `push` + 이 파일 경로    — 이 파일이 main에 들어오는 **그 순간 한 번**만
+#                                 돈다. 이후 main CI마다 반복하지 않는다.
+#
+# 무엇을 읽는가
+# ─────────────
+# 카탈로그(`pg_constraint`·`pg_index`·`pg_attribute`)와 마이그레이션 기록
+# 한 줄뿐이다. **업무 데이터는 한 줄도 읽지 않는다.**
+#
+# 쓰기는 Postgres가 거부한다
+# ──────────────────────────
+# "SELECT만 적었다"는 사람의 보증이다. 그것에 기대지 않는다.
+# `BEGIN TRANSACTION READ ONLY`로 열어서, 실수로 mutation이 섞여도
+# **DB 자신이 거부**하게 한다. 실제로 그런지 로그에 값으로 남긴다.
+#
+# 값은 로그에 남지 않는다
+# ───────────────────────
+# 접속 문자열은 존재 여부만 확인하고, psql이 뱉는 오류에서도 접속 정보를
+# 지우고 출력한다. `set -x`는 쓰지 않는다.
+name: audit-production-schedule-identity
+
+on:
+  push:
+    branches: [main]
+    # **이 파일이 바뀐 push에서만.** 감사는 한 번 보면 되는 것이지
+    # main이 움직일 때마다 운영 DB를 두드릴 일이 아니다.
+    paths:
+      - '.github/workflows/audit-production-schedule-identity.yml'
+
+# 두 실행이 같은 순간에 붙지 않게 한다. 읽기뿐이라 위험하진 않지만
+# 로그가 섞이면 판정을 읽기 어렵다.
+concurrency:
+  group: audit-production-schedule-identity
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 예약 표 정체 상태 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      # ── 접속 정보가 없으면 여기서 멈춘다 ──
+      #
+      # 없이 내려가면 "아무것도 안 나왔다"가 "없다"처럼 보인다.
+      # **확인하지 못한 것은 통과가 아니다.** 값은 출력하지 않는다.
+      - name: DB 접속 정보 확인
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 상태를 확인할 수 없습니다"
+            echo "값은 GitHub Secrets에만 있습니다. 이 로그에는 출력하지 않습니다."
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      - name: 상태 조회 (BEGIN TRANSACTION READ ONLY)
+        run: |
+          set -o pipefail
+
+          cat > /tmp/audit.sql <<'SQL'
+          \set ON_ERROR_STOP on
+
+          -- 쓰기를 Postgres 자신이 거부하게 만든다.
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '15s';
+          SET LOCAL lock_timeout = '3s';
+
+          \echo '=== 0. READ ONLY 증명 ==='
+          -- 값을 찍기만 하면 사람이 봐야 안다. 아래 bash가 이 줄을 확인해서
+          -- `BEGIN TRANSACTION READ ONLY`가 빠지면 **실행이 실패하게** 한다.
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+
+          \echo ''
+          \echo '=== 1. autotrade_schedules UNIQUE 제약 ==='
+          SELECT con.conname                                   AS constraint_name,
+                 (SELECT string_agg(att.attname::text, ', ' ORDER BY u.ord)
+                    FROM unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord)
+                    JOIN pg_attribute att
+                      ON att.attrelid = con.conrelid AND att.attnum = u.attnum) AS columns_in_order,
+                 (SELECT array_agg(att.attname::text ORDER BY att.attname::text)
+                    FROM unnest(con.conkey) AS k(attnum)
+                    JOIN pg_attribute att
+                      ON att.attrelid = con.conrelid AND att.attnum = k.attnum)
+                   = ARRAY['symbol','user_id']                 AS is_legacy_user_symbol
+            FROM pg_constraint con
+            JOIN pg_class     rel ON rel.oid = con.conrelid
+            JOIN pg_namespace ns  ON ns.oid  = rel.relnamespace
+           WHERE ns.nspname = 'public'
+             AND rel.relname = 'autotrade_schedules'
+             AND con.contype = 'u'
+           ORDER BY con.conname;
+
+          \echo ''
+          \echo '=== 2. autotrade_schedules 인덱스 전체 ==='
+          SELECT idx.relname                                   AS index_name,
+                 i.indisunique                                 AS is_unique,
+                 (SELECT string_agg(att.attname::text, ', ' ORDER BY k.ord)
+                    FROM unnest(i.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute att
+                      ON att.attrelid = i.indrelid AND att.attnum = k.attnum) AS columns_in_order,
+                 con.conname                                   AS backing_constraint
+            FROM pg_index     i
+            JOIN pg_class     idx ON idx.oid = i.indexrelid
+            JOIN pg_class     rel ON rel.oid = i.indrelid
+            JOIN pg_namespace ns  ON ns.oid  = rel.relnamespace
+            LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid
+           WHERE ns.nspname = 'public'
+             AND rel.relname = 'autotrade_schedules'
+           ORDER BY idx.relname;
+
+          \echo ''
+          \echo '=== 3. 마이그레이션 050 적용 기록 ==='
+          SELECT filename, checksum, status, verified, applied_by, applied_at, verify_detail
+            FROM public.schema_migrations
+           WHERE filename = '050_schedule_strategy.sql';
+
+          \echo ''
+          \echo '=== 4. 판정 ==='
+          WITH uniq AS (
+            -- **이름에 기대지 않는다.** 031이 만든 이름이 예상과 달라도 잡혀야 한다.
+            -- 그리고 제약 없는 UNIQUE 인덱스도 같은 효과를 내므로 인덱스로 판정한다.
+            SELECT idx.relname::text AS index_name,
+                   con.conname::text AS constraint_name,
+                   (SELECT array_agg(att.attname::text ORDER BY att.attname::text)
+                      FROM unnest(i.indkey::smallint[]) AS k(attnum)
+                      JOIN pg_attribute att
+                        ON att.attrelid = i.indrelid AND att.attnum = k.attnum) AS cols_sorted,
+                   (SELECT string_agg(att.attname::text, ', ' ORDER BY k.ord)
+                      FROM unnest(i.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord)
+                      JOIN pg_attribute att
+                        ON att.attrelid = i.indrelid AND att.attnum = k.attnum) AS cols_in_order,
+                   i.indisunique
+              FROM pg_index     i
+              JOIN pg_class     idx ON idx.oid = i.indexrelid
+              JOIN pg_class     rel ON rel.oid = i.indrelid
+              JOIN pg_namespace ns  ON ns.oid  = rel.relnamespace
+              LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid
+             WHERE ns.nspname = 'public' AND rel.relname = 'autotrade_schedules'
+          )
+          SELECT
+            EXISTS (SELECT 1 FROM uniq
+                     WHERE indisunique AND cols_sorted = ARRAY['symbol','user_id'])
+              AS legacy_user_symbol_unique_exists,
+            (SELECT coalesce(string_agg(coalesce(constraint_name, '(제약 없는 인덱스)'), ' | '), '(없음)')
+               FROM uniq WHERE indisunique AND cols_sorted = ARRAY['symbol','user_id'])
+              AS legacy_constraint_name,
+            (SELECT coalesce(string_agg(index_name, ' | '), '(없음)')
+               FROM uniq WHERE indisunique AND cols_sorted = ARRAY['symbol','user_id'])
+              AS legacy_index_name,
+            (SELECT coalesce(string_agg(cols_in_order, ' | '), '(없음)')
+               FROM uniq WHERE indisunique AND cols_sorted = ARRAY['symbol','user_id'])
+              AS legacy_columns,
+            EXISTS (SELECT 1 FROM uniq WHERE index_name = 'autotrade_schedules_identity_idx')
+              AS identity_index_exists,
+            (SELECT coalesce(bool_and(indisunique)::text, '(없음)')
+               FROM uniq WHERE index_name = 'autotrade_schedules_identity_idx')
+              AS identity_index_is_unique,
+            (SELECT coalesce(string_agg(cols_in_order, ' | '), '(없음)')
+               FROM uniq WHERE index_name = 'autotrade_schedules_identity_idx')
+              AS identity_columns,
+            (SELECT coalesce(string_agg(status || '/' || coalesce(verified::text, 'null'), ' | '), '(기록 없음)')
+               FROM public.schema_migrations WHERE filename = '050_schedule_strategy.sql')
+              AS migration_050_record;
+
+          COMMIT;
+          SQL
+
+          # ── 가려야 할 조각을 접속 문자열에서 뽑는다. 어디에도 출력하지 않는다 ──
+          #
+          # **정규식만으로는 샜다.** 되돌리기 검증에서 접속을 일부러 실패시켰더니
+          # psql이 제 문구로 호스트를 그대로 찍었다:
+          #   psql: error: could not translate host name "..." to address
+          # `postgres://…`나 `host=…` 모양이 아니라서 정규식이 못 걸렀다.
+          # 그래서 실제 값을 **문자 그대로** 지운다 — psql이 어떤 문구를 쓰든 걸린다.
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f /tmp/audit.sql 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          # 모양으로도 한 겹 더 거른다 — 위에서 못 뽑은 형태를 위한 예비다.
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::조회에 실패했습니다 — '확인하지 못함'을 '없음'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+
+          # ── READ ONLY가 실제로 켜져 있었는지 값으로 확인한다 ──
+          #
+          # `BEGIN TRANSACTION READ ONLY`를 누가 지우면 조회는 그대로
+          # 성공한다 — 그리고 아무도 모른다. 그러면 다음 사람이 이 파일에
+          # mutation 한 줄을 얹을 때 막아 줄 것이 없다.
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 — BEGIN TRANSACTION READ ONLY가 빠졌거나 무효화됐습니다"
+            exit 1
+          fi
+          echo "읽기 전용 트랜잭션 확인 (READ_ONLY=on)"
+
+      - name: 다음 단계 안내
+        if: success()
+        run: |
+          # 마크다운에 역따옴표가 있어서 `echo '...'`로 적으면 shellcheck가
+          # SC2016으로 잡는다 — **옳은 지적이다.** 역따옴표는 명령 치환
+          # 문법이라, 누가 홑따옴표를 겹따옴표로 바꾸는 순간 그 안이 실행된다.
+          # 따옴표 히어독(`<<'MD'`)은 그 위험 자체가 없다.
+          cat >> "$GITHUB_STEP_SUMMARY" <<'MD'
+          ## 예약 표 정체 상태 조회 완료
+
+          위 로그의 `=== 4. 판정 ===` 표를 보세요.
+
+          | legacy_user_symbol_unique_exists | 뜻 | 다음 |
+          |---|---|---|
+          | `f` | 옛 유니크가 없다 | production cleanup **불필요**로 닫습니다 |
+          | `t` | 옛 유니크가 남아 있다 | 그 제약 하나만 지우는 cleanup을 **별도 PR**로 설계합니다 |
+
+          이 워크플로는 읽기만 합니다. 스키마를 바꾸지 않았습니다.
+          MD
