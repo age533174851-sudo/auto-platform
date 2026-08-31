@@ -34,8 +34,8 @@ export async function openPaperPosition(
   }
 ): Promise<{
   ok: boolean;
-  /** OPENED | DUPLICATE | NO_ACCOUNT | ERROR */
-  status: 'OPENED' | 'DUPLICATE' | 'NO_ACCOUNT' | 'ERROR';
+  /** OPENED | DUPLICATE | NO_ACCOUNT | INSUFFICIENT_MARGIN | ERROR */
+  status: 'OPENED' | 'DUPLICATE' | 'NO_ACCOUNT' | 'INSUFFICIENT_MARGIN' | 'ERROR';
   positionId?: string;
   fill?: PaperFill;
   error?: string;
@@ -97,6 +97,13 @@ export async function openPaperPosition(
 
     if (status === 'DUPLICATE') {
       return { ok: false, status: 'DUPLICATE', duplicate: true, error: '이미 체결된 신호' };
+    }
+    if (status === 'INSUFFICIENT_MARGIN') {
+      // **정상 상태다.** 오류로 뭉개면 사용자는 왜 안 됐는지 알 수 없다.
+      // 앱의 사전 검사는 안내이고, 판정은 계좌를 잠근 트랜잭션이 한다 —
+      // 동시에 들어온 두 신호는 둘 다 통과한 것처럼 보일 수 있다.
+      return { ok: false, status: 'INSUFFICIENT_MARGIN',
+        error: '모의 계좌의 가용 증거금이 부족해 진입하지 않았습니다' };
     }
     if (status === 'NO_ACCOUNT') {
       // 계좌를 여기서 만들지 않는다(071). 시작한 적 없는 계좌가 거래로

@@ -251,9 +251,14 @@ export function runRiskManagerTests() {
     eq((p as any).rejectCode, 'ACCOUNT_EQUITY_UNKNOWN');
   });
 
-  test('거부 사유에 무엇을 해야 하는지 적는다', () => {
+  test('거부 사유가 모드에 중립적이다 — 모의에도 같은 검사를 쓴다', () => {
+    // 예전 문구는 "거래소에서 계좌 자산을 확인하지 못했습니다"였다.
+    // 모의 계좌의 정본은 거래소가 아니라 모의 장부다 — 한쪽에 묶인 문구는
+    // 다른 쪽에서 틀린 안내가 된다.
     const p = planPosition(signal(), cfg({ equityKnown: false }));
-    assert(/연결|API/.test(p.rejectReason || ''), p.rejectReason || '');
+    const r = p.rejectReason || '';
+    assert(/확인하지 못했습니다/.test(r), r);
+    assert(!/거래소에서/.test(r), `모드에 묶인 문구가 남아 있다: ${r}`);
   });
 
   // 자산이 틀리면 모든 한도가 같이 틀리므로, 다른 한도가 여유롭더라도

@@ -124,12 +124,15 @@ const MIG_DIR = 'supabase/migrations';
 const TEST = 'src/lib/engine/paperOpenAtomic.test.ts';
 
 // ── 1. SQL 함수 ──
+// 같은 함수를 여러 마이그레이션이 다시 정의한다. **마지막 정의가 실제로
+// 도는 것**이므로 파일 이름 순으로 마지막을 본다 — 첫 정의를 보면 나중에
+// 계약을 잃어도 옛 파일이 통과시킨다.
 let sqlFile = null;
 if (existsSync(MIG_DIR)) {
-  for (const name of readdirSync(MIG_DIR)) {
+  for (const name of readdirSync(MIG_DIR).sort()) {
     if (!name.endsWith('.sql')) continue;
     const raw = readFileSync(`${MIG_DIR}/${name}`, 'utf8');
-    if (/CREATE OR REPLACE FUNCTION public\.paper_open_position/.test(raw)) { sqlFile = `${MIG_DIR}/${name}`; break; }
+    if (/CREATE OR REPLACE FUNCTION public\.paper_open_position/.test(raw)) sqlFile = `${MIG_DIR}/${name}`;
   }
 }
 if (!sqlFile) fail('paper_open_position 함수를 정의하는 마이그레이션이 없습니다');

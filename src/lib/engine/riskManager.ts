@@ -150,9 +150,11 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
   //
   // 못 읽었으면 막는다. 못 여는 것은 불편이고, 가짜 자산으로 여는 것은 사고다.
   if (cfg.equityKnown === false) {
+    // 모드에 따라 정본이 다르다 — 모의는 모의 장부, 연결은 거래소다.
+    // 문구를 한쪽에 묶어 두면 다른 쪽에서 틀린 안내가 된다.
     return reject('ACCOUNT_EQUITY_UNKNOWN',
-      '거래소에서 계좌 자산을 확인하지 못했습니다 — 가정한 자산으로 포지션 크기를 '
-      + '정하면 위험 한도가 전부 틀린 값이 됩니다. 연결·API 키를 확인한 뒤 다시 시도하세요',
+      '계좌 자산을 확인하지 못했습니다 — 확인되지 않은 자산으로 포지션 크기를 정하지 '
+      + '않습니다. 가정한 자산으로 정하면 위험 한도가 전부 틀린 값이 됩니다',
       signal.symbol, side, notes);
   }
 
