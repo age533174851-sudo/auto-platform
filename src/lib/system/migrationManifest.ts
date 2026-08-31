@@ -18,6 +18,7 @@ export interface ManifestEntry {
 
 export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '000_schema_migrations.sql', id: 0, risk: 'ADDITIVE', checksum: '4962f719fd32fc97' },
+  { name: '001_kill_switch_bootstrap.sql', id: 1, risk: 'ADDITIVE', checksum: '46b3fa1d3834923b' },
   { name: '002_profiles_admin.sql', id: 2, risk: 'ADDITIVE', checksum: '03ce6d0e31894fa5' },
   { name: '003_login_sessions.sql', id: 3, risk: 'ADDITIVE', checksum: 'd82594762f0e9e5b' },
   { name: '004_exchange_connections.sql', id: 4, risk: 'ADDITIVE', checksum: '20e4438486625b52' },
