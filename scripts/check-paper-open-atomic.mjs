@@ -35,6 +35,7 @@
 // 사용: node scripts/check-paper-open-atomic.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { functionBodyOrFail } from './lib/function-body.mjs';
 
 const fails = [];
 const notes = [];
@@ -87,37 +88,6 @@ function stripSql(src) {
   return out;
 }
 
-function fnBodyAt(src, decl) {
-  const at = src.indexOf(decl);
-  if (at < 0) return '';
-  const paren = src.indexOf('(', at);
-  if (paren < 0) return '';
-  let depth = 0, i = paren;
-  for (; i < src.length; i++) {
-    if (src[i] === '(') depth++;
-    else if (src[i] === ')') { depth--; if (depth === 0) break; }
-  }
-  // ── 반환 타입을 본문으로 읽지 않는다 ──
-  //
-  // `): Promise<{ ... }> {` 처럼 서명 뒤에 중괄호가 하나 더 있다. 그냥
-  // 첫 `{`를 잡으면 **타입 블록**을 함수 본문으로 읽는다 — 이 저장소에서
-  // 이미 두 번 겪은 고장이다. 닫힌 뒤에 `>`가 오면 타입이니 건너뛴다.
-  let from = i;
-  for (;;) {
-    const open = src.indexOf('{', from);
-    if (open < 0) return '';
-    depth = 0;
-    let close = -1;
-    for (let k = open; k < src.length; k++) {
-      if (src[k] === '{') depth++;
-      else if (src[k] === '}') { depth--; if (depth === 0) { close = k; break; } }
-    }
-    if (close < 0) return src.slice(open);
-    const after = src.slice(close + 1).match(/^\s*(.)/)?.[1] ?? '';
-    if (after === '>' || after === ',' || after === '|' || after === '&') { from = close + 1; continue; }
-    return src.slice(open, close + 1);
-  }
-}
 
 const STORE = 'src/lib/engine/paperStore.ts';
 const MIG_DIR = 'supabase/migrations';
@@ -225,9 +195,12 @@ else {
 // ── 2. 정본 진입 경로 ──
 if (!existsSync(STORE)) fail(`${STORE}이 없습니다`);
 else {
-  const store = stripJs(readFileSync(STORE, 'utf8'));
-  const open = fnBodyAt(store, 'export async function openPaperPosition');
-  if (!open) fail(`${STORE}에서 openPaperPosition 본문을 찾지 못했습니다`);
+  // **원문을 그대로 파서에 넣는다.** 주석·문자열을 먼저 지우면 위치가
+  // 어긋난다. 본문을 정확히 뽑은 뒤에 지운다.
+  const storeRaw = readFileSync(STORE, 'utf8');
+  const store = stripJs(storeRaw);
+  const open = stripJs(functionBodyOrFail(storeRaw, 'openPaperPosition', fail, STORE));
+  if (!open) { /* 위에서 이미 사유를 적었다 */ }
   else {
     if (!/rpc\s*\(\s*'paper_open_position'/.test(open)) {
       fail(`${STORE}의 openPaperPosition이 원자 RPC를 쓰지 않습니다`);
