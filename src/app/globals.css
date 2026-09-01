@@ -521,8 +521,13 @@ button.switch, .switch { min-height: 0; }
 /* 오른쪽 레일 접기.
    0으로 만들지 않고 얇은 띠를 남긴다 — 0이면 다시 펴는 버튼이
    본문 **위에** 떠야 하고, 떠 있는 버튼은 이번 작업이 없애려는
-   바로 그 겹침을 만든다. 띠는 칸 안에 있으므로 아무것도 덮지 않는다. */
-.aw[data-right='collapsed'] .rp { padding: 8px 0; align-items: center; }
+   바로 그 겹침을 만든다. 띠는 칸 안에 있으므로 아무것도 덮지 않는다.
+
+   위쪽 여백이 큰 이유: 화면 우상단에 떠 있는 알림 벨(NotifyHost,
+   position:fixed · top:10 · right:10 · 38px · z-index 9998)이 접힌 띠의
+   폭과 겹친다. 그 아래로 내리지 않으면 다시 펴는 버튼이 **보이는데
+   눌리지 않는다.** 실제로 그 상태였다 — 클릭이 벨에 먹혔다. */
+.aw[data-right='collapsed'] .rp { padding: 56px 0 8px; align-items: center; }
 .aw[data-right='collapsed'] .rp-body { display: none !important; }
 .aw[data-right='collapsed'] .rp-resizer { display: none !important; }
 

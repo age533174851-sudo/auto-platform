@@ -1237,7 +1237,12 @@ export default function App() {
           {rightMode==='expanded'&&(
             <RailResizer width={railWNow} sidebarW={sidebarW} onResize={setRailW} onCommit={commitRail}/>
           )}
-          <div style={{display:'flex',alignItems:'center',justifyContent:rightMode==='expanded'?'flex-end':'center',marginBottom:rightMode==='expanded'?6:0}}>
+          {/* 토글을 오른쪽 끝에 두면 안 된다.
+              화면 우상단(top:10 right:10)에는 이미 떠 있는 알림 벨이 있고
+              (NotifyHost · position:fixed · z-index 9998), 그 자리에 놓으면
+              **버튼이 보이기는 하는데 눌리지 않는다.** 실제로 그 상태였다 —
+              클릭이 벨에 먹혔다. 그래서 레일의 왼쪽에 붙인다. */}
+          <div className="rp-toggle-row" style={{display:'flex',alignItems:'center',justifyContent:rightMode==='expanded'?'flex-start':'center',marginBottom:rightMode==='expanded'?6:0}}>
             <PanelToggle side="right" open={rightMode==='expanded'} onToggle={toggleRight}/>
           </div>
           <div className="rp-body">
