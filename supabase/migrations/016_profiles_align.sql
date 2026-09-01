@@ -52,21 +52,10 @@ alter table public.profiles add column if not exists invite_code  text;
 -- 동적 EXECUTE는 쓰지 않는다. PL/pgSQL은 **실행되지 않는 분기를 계획하지
 -- 않으므로**, 안 타는 IF 안의 정적 UPDATE는 없는 칸을 참조해도 먼저 깨지지
 -- 않는다(PG 16에서 확인). 필요 없는 우회는 읽기만 어렵게 만든다.
-do $$
-begin
-  if exists (
-    select 1
-      from information_schema.columns
-     where table_schema = 'public'
-       and table_name   = 'profiles'
-       and column_name  = 'name'
-  ) then
-    update public.profiles
-       set display_name = name
-     where display_name is null
-       and name is not null;
-  end if;
-end $$;
+update public.profiles
+   set display_name = name
+ where display_name is null
+   and name is not null;
 
 -- ── 3. 제약 조건 (이미 있으면 건너뜀) ─────────────────────────────────
 do $$
