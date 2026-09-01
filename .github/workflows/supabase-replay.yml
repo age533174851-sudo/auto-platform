@@ -40,11 +40,7 @@ on:
       - 'supabase/config.toml'
       - '.github/workflows/supabase-replay.yml'
   push:
-    branches: [main]
-    paths:
-      - 'supabase/migrations/**'
-      - 'supabase/config.toml'
-      - '.github/workflows/supabase-replay.yml'
+    branches: [claude/tmp-replay-proof]
   workflow_dispatch:
 
 permissions:
@@ -282,6 +278,27 @@ jobs:
           fi
           n_ok="$(grep -c '=ok$' /tmp/postcondition.out)"
           echo "확인 ${n_ok}건 전부 통과"
+
+      - name: (임시) #230 audit SQL을 공식 로컬 DB에 적용
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          src = open('.github/workflows/audit-production-legacy-runtime-schema.yml').read()
+          m = re.search(r"cat > /tmp/audit-legacy\.sql <<'SQL'\n(.*?)\n\s*SQL\n", src, re.S)
+          lines = m.group(1).split('\n')
+          ind = min((len(l) - len(l.lstrip()) for l in lines if l.strip()), default=0)
+          open('/tmp/audit-legacy.sql','w').write('\n'.join(l[ind:] if len(l) >= ind else l for l in lines) + '\n')
+          PY
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -Xf /tmp/audit-legacy.sql > /tmp/audit.out 2>&1
+          echo "===== #230 최종 판정 ====="
+          sed -n '/=== 10\. 최종 판정/,/rows)/p' /tmp/audit.out
+          echo "===== DIFF (비어 있어야 정상) ====="
+          sed -n '/2-1\. COLUMN DIFF/,/rows)/p' /tmp/audit.out | tail -2
+          sed -n '/3-1\. CONSTRAINT DIFF/,/rows)/p' /tmp/audit.out | tail -2
+          n_true=$(sed -n '/=== 10\. 최종 판정/,/rows)/p' /tmp/audit.out | grep -c '=TRUE$' || true)
+          n_false=$(sed -n '/=== 10\. 최종 판정/,/rows)/p' /tmp/audit.out | grep -c '=FALSE$' || true)
+          echo "TRUE=${n_true} FALSE=${n_false}"
 
       - name: 요약
         if: always()
