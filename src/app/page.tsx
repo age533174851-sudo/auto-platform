@@ -72,6 +72,15 @@ import { useHotkeys } from '@/lib/commands/useHotkeys';
 import { DEFAULT_PROFILE } from '@/lib/commands/keymap';
 import { buildCommands } from '@/lib/commands/registry';
 import { MENU } from '@/lib/menuItems';
+import {
+  loadLeftMode, loadRightMode, loadRailWidth,
+  saveLeftMode, saveRightMode, saveRailWidth,
+  sidebarWidthFor, clampRailWidth, railWidthFor,
+  nextLeftMode, nextRightMode, RAIL_DEFAULT,
+  type LeftMode, type RightMode,
+} from '@/lib/ui/panelPrefs';
+import PanelToggle from '@/components/shell/PanelToggle';
+const RailResizer = dynamic(() => import('@/components/shell/RailResizer'), { ssr: false });
 import { notifyError, notifyInfo } from '@/lib/notify/center';
 // 팔레트는 열릴 때까지 필요 없다. 앱 첫 로드에 끼우면 Ctrl+K를 한 번도
 // 누르지 않는 사용자도 그 무게를 같이 받는다.
@@ -443,6 +452,44 @@ export default function App() {
   // Live prices via API hook (auto-fetches /api/prices, simulates locally)
   const { prices, status: priceStatus, source: priceSource, lastRealAt: priceRealAt, simSteps: priceSimSteps, liveIds: priceLiveIds } = useLivePrices(3000);
   const [showMore,setShowMore]=useState(false);
+
+  /* ── PC 껍데기 (사이드바 · 오른쪽 레일) ─────────────────────
+     상태는 여기 있지만 **판단은 여기 없다.** 조이기·기본값·저장 키는
+     전부 lib/ui/panelPrefs에 있고 테스트가 붙어 있다. 이 자리는
+     "값을 화면에 꽂는 곳"까지만 한다.
+
+     서버 렌더에서는 localStorage가 없다. 기본값으로 그리고 붙은 뒤에
+     읽는다 — 첫 그림과 두 번째 그림이 갈리면 리액트가 경고를 내고,
+     사용자에게는 화면이 한 번 튀는 것으로 보인다. */
+  const [leftMode,setLeftMode]   = useState<LeftMode>('expanded');
+  const [rightMode,setRightMode] = useState<RightMode>('expanded');
+  const [railW,setRailW]         = useState<number>(RAIL_DEFAULT);
+  const [viewportW,setViewportW] = useState<number>(1920);
+
+  useEffect(()=>{
+    setLeftMode(loadLeftMode());
+    setRightMode(loadRightMode());
+    setViewportW(window.innerWidth);
+    setRailW(loadRailWidth());
+  },[]);
+
+  /* 창 크기가 바뀌면 저장된 폭을 **다시 조인다.**
+     넓은 모니터에서 420으로 늘려 둔 사람이 노트북을 열었을 때 그 값을
+     그대로 강제하면 본문이 400px가 된다. 저장값 자체는 건드리지
+     않으므로 넓은 화면으로 돌아가면 원래 폭이 살아난다. */
+  useEffect(()=>{
+    const onResize=()=>setViewportW(window.innerWidth);
+    window.addEventListener('resize',onResize);
+    return()=>window.removeEventListener('resize',onResize);
+  },[]);
+
+  const sidebarW  = sidebarWidthFor(leftMode, viewportW);
+  const railWNow  = clampRailWidth(railW, viewportW, sidebarW);
+  const railCol   = railWidthFor(rightMode, railWNow);
+
+  const toggleLeft  = useCallback(()=>{ setLeftMode(m=>{ const n=nextLeftMode(m);  saveLeftMode(n);  return n; }); },[]);
+  const toggleRight = useCallback(()=>{ setRightMode(m=>{ const n=nextRightMode(m); saveRightMode(n); return n; }); },[]);
+  const commitRail  = useCallback((w:number)=>{ setRailW(w); saveRailWidth(w); },[]);
   const [simpleMode,setSimpleMode]=useState(()=>{ try { return localStorage.getItem('tg_simple_mode')==='true'; } catch { return false; } });
   // SSR-safe: start with defaults, load from localStorage after mount
   const [lang,setLang]           = useState('ko');
@@ -864,19 +911,32 @@ export default function App() {
         onPnL={openPnL}
         onNav={nav}
       />
-      <div suppressHydrationWarning className="aw" style={{background:T.bg,minHeight:'-webkit-fill-available' as any,color:T.txt}}>
+      <div suppressHydrationWarning className="aw"
+        data-left={leftMode} data-right={rightMode}
+        style={{background:T.bg,minHeight:'-webkit-fill-available' as any,color:T.txt,
+          // 칸 폭은 CSS가 아니라 여기서 정한다. CSS에 숫자를 또 적으면
+          // 드래그가 멈추는 자리와 칸이 멈추는 자리가 갈린다.
+          ['--sb-w' as any]:`${sidebarW}px`, ['--rp-w' as any]:`${railCol}px`}}>
 
         {/* PC Sidebar */}
         <div className="sb" style={{display:'none',padding:'12px 0'}}>
-          <div style={{padding:'14px 16px 12px',borderBottom:`1px solid ${T.border}`,marginBottom:6}}>
-            <div style={{display:'flex',alignItems:'center',gap:8}}>
-              <div style={{width:30,height:30,borderRadius:9,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:14,color:'#fff'}}>T</div>
-              <div style={{fontWeight:900,fontSize:15,letterSpacing:-0.5}}>TRAIGO</div>
-              <div style={{marginLeft:'auto'}}><Dot c={T.grn}/></div>
+          <div style={{padding:'14px 12px 12px',borderBottom:`1px solid ${T.border}`,marginBottom:6}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0,justifyContent:leftMode==='compact'?'center':'flex-start'}}>
+              <div style={{width:30,height:30,borderRadius:9,flexShrink:0,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:14,color:'#fff'}}>T</div>
+              <div className="sb-brand-text" style={{fontWeight:900,fontSize:15,letterSpacing:-0.5,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>TRAIGO</div>
+              <div className="sb-brand-text" style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:6}}>
+                <Dot c={T.grn}/>
+              </div>
+            </div>
+            {/* 접기 버튼은 접힌 상태에서도 남아야 한다 — 그러지 않으면
+                한 번 접은 사람은 다시 펼 방법이 없다. */}
+            <div style={{display:'flex',justifyContent:leftMode==='compact'?'center':'flex-end',marginTop:8}}>
+              <PanelToggle side="left" open={leftMode==='expanded'} onToggle={toggleLeft}/>
             </div>
           </div>
-          <button onClick={()=>nav('menu_hub')} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 16px',margin:'2px 0 6px',background:tab==='menu_hub'?T.acg:A(T.acc,'15'),color:tab==='menu_hub'?T.acl:T.acl,border:'none',borderRadius:0,cursor:'pointer',fontSize:13,fontWeight:800,textAlign:'left'}}>
-            <span style={{width:20,display:'inline-flex',alignItems:'center',justifyContent:'center'}}><SearchIc size={16} strokeWidth={2.4}/></span>전체 메뉴 · 검색
+          <button onClick={()=>nav('menu_hub')} className="sb-menu-btn" title="전체 메뉴 · 검색" aria-label="전체 메뉴 · 검색" style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 16px',margin:'2px 0 6px',background:tab==='menu_hub'?T.acg:A(T.acc,'15'),color:tab==='menu_hub'?T.acl:T.acl,border:'none',borderRadius:0,cursor:'pointer',fontSize:13,fontWeight:800,textAlign:'left'}}>
+            <span style={{width:20,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center'}}><SearchIc size={16} strokeWidth={2.4}/></span>
+            <span className="sb-label" style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>전체 메뉴 · 검색</span>
           </button>
           {(()=>{
             const find=(id:string)=>allTabs.find(t=>t.id===id);
@@ -889,19 +949,23 @@ export default function App() {
             ];
             return groups.map((g,gi)=>(
               <div key={gi}>
-                {g.title&&<div style={{padding:'10px 16px 4px',color:T.muted,fontSize:9,fontWeight:800,letterSpacing:1,textTransform:'uppercase'}}>{g.title}</div>}
+                {g.title&&<div className="sb-group-title" style={{padding:'10px 16px 4px',color:T.muted,fontSize:9,fontWeight:800,letterSpacing:1,textTransform:'uppercase'}}>{g.title}</div>}
                 {g.ids.map(id=>{ const t2=find(id); if(!t2)return null; const Ic=t2.Icon;
                   return (
-                    <button key={id} onClick={()=>nav(id)} title={TAB_DESC[id]||''} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'9px 16px',background:tab===id?T.acg:'transparent',color:tab===id?T.acl:T.sub,border:'none',borderLeft:`3px solid ${tab===id?T.acl:'transparent'}`,cursor:'pointer',fontSize:13,fontWeight:tab===id?700:500,textAlign:'left'}}>
-                      <span style={{width:20,display:'inline-flex',alignItems:'center',justifyContent:'center'}}><Ic size={16} strokeWidth={2.2}/></span>{t2.label}
-                      {id==='alerts'&&unreadCount>0&&<span style={{background:T.red,color:'#fff',borderRadius:99,padding:'0 5px',fontSize:9,marginLeft:'auto',fontWeight:700}}>{unreadCount}</span>}
+                    /* 접힌 상태에서는 이름이 사라진다. title과 aria-label을
+                       항상 붙여 두는 이유가 그것이다 — 아이콘만 남았을 때
+                       무엇인지 알 방법이 그것뿐이다. */
+                    <button key={id} onClick={()=>nav(id)} className="sb-item" title={t2.label+(TAB_DESC[id]?` — ${TAB_DESC[id]}`:'')} aria-label={t2.label} aria-current={tab===id?'page':undefined} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'9px 16px',background:tab===id?T.acg:'transparent',color:tab===id?T.acl:T.sub,border:'none',borderLeft:`3px solid ${tab===id?T.acl:'transparent'}`,cursor:'pointer',fontSize:13,fontWeight:tab===id?700:500,textAlign:'left'}}>
+                      <span style={{width:20,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center'}}><Ic size={16} strokeWidth={2.2}/></span>
+                      <span className="sb-label" style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t2.label}</span>
+                      {id==='alerts'&&unreadCount>0&&<span className="sb-badge" style={{background:T.red,color:'#fff',borderRadius:99,padding:'0 5px',fontSize:9,marginLeft:'auto',fontWeight:700,flexShrink:0}}>{unreadCount}</span>}
                     </button>
                   );
                 })}
               </div>
             ));
           })()}
-          <div style={{marginTop:'auto',padding:'12px 14px',borderTop:`1px solid ${T.border}`}}>
+          <div className="sb-foot" style={{marginTop:'auto',padding:'12px 14px',borderTop:`1px solid ${T.border}`}}>
             <div style={{background:A(T.prp,'20'),border:`1px solid ${A(T.prp,'40')}`,borderRadius:10,padding:'8px 12px'}}>
               <div style={{color:T.prp,fontWeight:700,fontSize:11,display:'flex',alignItems:'center',gap:6}}><Bot size={12} strokeWidth={2.2}/> 모의투자 모드</div>
               <div style={{color:T.muted,fontSize:10,marginTop:2}}>실제 돈 사용 안됨 · 수익 보장 없음</div>
@@ -919,10 +983,14 @@ export default function App() {
               정확하게 보여준다 — 같은 것을 두 번 그리느라 주문을 밀어낼
               이유가 없다. */}
           {tab!=='trading'&&(
-          <div style={{position:'sticky',top:0,zIndex:50,background:'color-mix(in srgb, var(--t-bg) 92%, transparent)',backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)',borderBottom:`1px solid ${T.border}`,padding:'11px 16px 9px',display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:`max(env(safe-area-inset-top),11px)`}}>
-            <div style={{display:'flex',alignItems:'center',gap:8}}>
-              <div style={{width:26,height:26,borderRadius:8,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:13,color:'#fff'}}>T</div>
-              <div style={{fontWeight:900,fontSize:14,letterSpacing:-0.5}}>{allTabs.find(t2=>t2.id===tab)?.label||'TRAIGO'}</div>
+          /* 머리줄이 겹치던 이유는 이름 칸과 버튼 칸이 **둘 다 줄어들 수
+             없었기** 때문이다. flex 아이템의 기본 min-width는 auto라
+             내용보다 좁아지지 않는다. 이름에 min-width:0을 주고 버튼
+             줄에는 wrap을 허용한다 — 겹치는 것보다 한 줄 쓰는 것이 낫다. */
+          <div style={{position:'sticky',top:0,zIndex:50,background:'color-mix(in srgb, var(--t-bg) 92%, transparent)',backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)',borderBottom:`1px solid ${T.border}`,padding:'11px 16px 9px',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap',paddingTop:`max(env(safe-area-inset-top),11px)`}}>
+            <div className="hdr-brand">
+              <div style={{width:26,height:26,borderRadius:8,flexShrink:0,background:`linear-gradient(135deg,${T.acc},${T.prp})`,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:13,color:'#fff'}}>T</div>
+              <div className="hdr-title" style={{fontWeight:900,fontSize:14,letterSpacing:-0.5}}>{allTabs.find(t2=>t2.id===tab)?.label||'TRAIGO'}</div>
             </div>
             <div className="hdr-actions" style={{display:'flex',alignItems:'center',gap:4}}>
               <div style={{display:'flex',alignItems:'center',gap:3,background:priceStatus==='live'?'rgba(16,185,129,.12)':priceStatus==='mock'?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)',border:`1px solid ${priceStatus==='live'?'rgba(16,185,129,.3)':priceStatus==='mock'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}`,borderRadius:20,padding:'2px 7px'}}>
@@ -1160,8 +1228,19 @@ export default function App() {
           )}
         </div>
 
-        {/* PC Right Panel */}
+        {/* PC Right Panel
+            접으면 얇은 띠만 남고, 그 폭만큼 가운데가 넓어진다(.aw의 grid).
+            띠는 칸 **안에** 있으므로 본문 위에 뜨지 않는다.
+            데이터 출처는 이번 단계에서 바꾸지 않았다 — 시세는 그대로
+            useLivePrices의 prices다. */}
         <div className="rp" style={{display:'none'}}>
+          {rightMode==='expanded'&&(
+            <RailResizer width={railWNow} sidebarW={sidebarW} onResize={setRailW} onCommit={commitRail}/>
+          )}
+          <div style={{display:'flex',alignItems:'center',justifyContent:rightMode==='expanded'?'flex-end':'center',marginBottom:rightMode==='expanded'?6:0}}>
+            <PanelToggle side="right" open={rightMode==='expanded'} onToggle={toggleRight}/>
+          </div>
+          <div className="rp-body">
           <div style={{fontWeight:800,fontSize:13,color:T.txt,marginBottom:10,display:'flex',alignItems:'center',gap:6}}><Radio size={14} strokeWidth={2.2}/> 실시간 시세</div>
           {prices.slice(0,10).map((a,i)=>(
             <div key={a.id}
@@ -1182,6 +1261,7 @@ export default function App() {
               <div style={{color:T.muted,fontSize:9}}>{n.time} · {n.source}</div>
             </div>
           ))}
+          </div>
         </div>
       </div>
     </>
