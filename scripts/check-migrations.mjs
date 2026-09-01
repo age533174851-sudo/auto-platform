@@ -13,7 +13,7 @@
 //   3. src/lib/system/migrationManifest.ts가 최신인가
 //   4. 자동으로 못 도는 마이그레이션이 몇 개인가 (있으면 사유를 적는다)
 //   5. 화면·응답이 사람에게 운영 숙제를 넘기지 않는가
-//   6. 001의 target 아홉 개가 그대로인가 — 운영 채택 계약
+//   6. canonical 파일(001 · 076)의 target이 그대로인가 — 운영 채택 계약
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR } from './gen-migration-manifest.mjs';
@@ -90,68 +90,103 @@ const CHORE_PHRASES = [
   }
 }
 
-// 6. kill-switch canonical(001)의 target 아홉 개
+// 6. canonical 마이그레이션의 target 계약 (001 · 076)
 //
-// **이 아홉 개는 운영 계약이다.** 운영 DB에는 이미 전부 있고(2026-08-31
-// read-only audit), runner의 채택 판정이 그 아홉을 찾으면 001은 실행 없이
-// BASELINE으로 기록된다. 하나라도 못 찾으면 **001이 실제로 실행되고**, 그
-// 안의 `drop policy if exists`가 운영 정책을 갈아엎는다.
+// **이 target 이름들은 운영 계약이다.** 운영 DB에는 이미 전부 있고
+// (2026-08-31 read-only audit), runner의 채택 판정이 그것들을 전부 찾으면
+// 해당 파일은 실행 없이 BASELINE으로 기록된다. 하나라도 못 찾으면 **파일이
+// 실제로 실행되고**, 그 안의 `drop policy if exists`가 운영 정책을 갈아엎는다.
 //
-// 일회용 PG에서 실증했다. `idx_tg_dedup` 하나만 지워도 채택이 거부되고
-// 001이 APPLIED로 실행되며 `ks_state_owner`의 OID가 바뀐다 — 지워졌다가
-// 다시 만들어졌다는 뜻이다.
+// 일회용 PG에서 실증했다. `idx_tg_dedup` 하나만 지워도, `idx_jobs_conn` 하나만
+// 지워도 채택이 거부되고 파일이 APPLIED로 실행되며 소유자 정책의 OID가
+// 바뀐다 — 지워졌다가 다시 만들어졌다는 뜻이다.
 //
-// 그래서 이 파일의 target 이름은 혼자 바꿀 수 없다. 바꾸려면 운영 카탈로그를
-// 먼저 확인해야 한다. 판정 로직은 복제하지 않고 앱과 같은 파일을 쓴다.
+// 그래서 이 파일들의 target 이름은 혼자 바꿀 수 없다. 바꾸려면 운영
+// 카탈로그를 먼저 확인해야 한다. 판정 로직은 복제하지 않고 앱과 같은 파일을
+// 쓴다. 두 파일에 같은 검사를 두 번 적지 않는다 — 판단은 한 곳에 둔다.
 {
-  const FILE = '001_kill_switch_bootstrap.sql';
-  const EXPECTED = [
-    'table:kill_switch_state:kill_switch_state',
-    'table:kill_switch_log:kill_switch_log',
-    'table:telegram_alert_log:telegram_alert_log',
-    'table:worker_heartbeat:worker_heartbeat',
-    'table:worker_lock:worker_lock',
-    'index:kill_switch_state:idx_kill_switch_conn',
-    'index:telegram_alert_log:idx_tg_dedup',
-    'policy:kill_switch_state:ks_state_owner',
-    'policy:kill_switch_log:ks_log_owner',
-  ].sort();
-  // 022_rls_worker_tables.sql이 만드는 것들 — 001로 끌어오면 같은 판단이 두 곳에 생긴다
-  const BELONGS_TO_022 = ['worker_lock_service', 'worker_heartbeat_service',
-    'telegram_alert_log_service', 'kill_switch_log_service'];
+  const CONTRACTS = [
+    {
+      file: '001_kill_switch_bootstrap.sql',
+      what: 'kill-switch canonical',
+      targets: [
+        'table:kill_switch_state:kill_switch_state',
+        'table:kill_switch_log:kill_switch_log',
+        'table:telegram_alert_log:telegram_alert_log',
+        'table:worker_heartbeat:worker_heartbeat',
+        'table:worker_lock:worker_lock',
+        'index:kill_switch_state:idx_kill_switch_conn',
+        'index:telegram_alert_log:idx_tg_dedup',
+        'policy:kill_switch_state:ks_state_owner',
+        'policy:kill_switch_log:ks_log_owner',
+      ],
+      // 022_rls_worker_tables.sql이 만드는 것들 — 여기로 끌어오면 판단이 두 곳에 생긴다
+      foreignPolicies: [
+        { name: 'worker_lock_service', owner: '022_rls_worker_tables.sql' },
+        { name: 'worker_heartbeat_service', owner: '022_rls_worker_tables.sql' },
+        { name: 'telegram_alert_log_service', owner: '022_rls_worker_tables.sql' },
+        { name: 'kill_switch_log_service', owner: '022_rls_worker_tables.sql' },
+      ],
+      // gen_random_uuid()를 쓰면서 확장을 남에게 맡기지 않는다. 001이 chain의
+      // 첫 자리라 스스로 깔아야 한다.
+      selfBootstrapsPgcrypto: true,
+    },
+    {
+      file: '076_jobs_queue.sql',
+      what: 'jobs queue canonical',
+      targets: [
+        'table:jobs:jobs',
+        'index:jobs:idx_jobs_pending',
+        'index:jobs:idx_jobs_conn',
+        'policy:jobs:jobs_owner',
+      ],
+      // jobs는 SELECT 소유자 정책 하나뿐이다. 적재·실행은 service_role이 RLS를
+      // 우회한다 — 그 모델을 바꾸는 정책을 여기서 새로 만들지 않는다.
+      foreignPolicies: [
+        { name: 'jobs_service', owner: 'service_role 우회 모델 (정책을 만들지 않는다)' },
+        { name: 'jobs_insert', owner: 'service_role 우회 모델 (정책을 만들지 않는다)' },
+        { name: 'jobs_update', owner: 'service_role 우회 모델 (정책을 만들지 않는다)' },
+        { name: 'jobs_delete', owner: 'service_role 우회 모델 (정책을 만들지 않는다)' },
+      ],
+      // 076은 001 뒤에 돈다. pgcrypto는 001이 책임진다.
+      selfBootstrapsPgcrypto: false,
+    },
+  ];
 
-  let sql = null;
-  try { sql = readFileSync(join(MIG_DIR, FILE), 'utf8'); }
-  catch { err(`${FILE}이 없습니다 — kill-switch canonical 마이그레이션은 지우면 안 됩니다`); }
+  const plan = await loadPlan();
 
-  if (sql != null) {
-    const { classifyMigration, migrationTargets } = await loadPlan();
+  for (const c of CONTRACTS) {
+    let sql = null;
+    try { sql = readFileSync(join(MIG_DIR, c.file), 'utf8'); }
+    catch { err(`${c.file}이 없습니다 — ${c.what} 마이그레이션은 지우면 안 됩니다`); continue; }
 
-    const cls = classifyMigration(sql);
+    const cls = plan.classifyMigration(sql);
     if (cls.risk !== 'ADDITIVE' || !cls.autoApply) {
-      err(`${FILE}이 ${cls.risk}로 분류됩니다 (autoApply=${cls.autoApply}) — ${cls.reasons.join(' · ')}`);
+      err(`${c.file}이 ${cls.risk}로 분류됩니다 (autoApply=${cls.autoApply}) — ${cls.reasons.join(' · ')}`);
     }
 
-    const got = migrationTargets(sql).map(t => `${t.kind}:${t.table}:${t.name}`).sort();
-    const missing = EXPECTED.filter(x => !got.includes(x));
-    const extra = got.filter(x => !EXPECTED.includes(x));
+    const want = [...c.targets].sort();
+    const got = plan.migrationTargets(sql).map(t => `${t.kind}:${t.table}:${t.name}`).sort();
+    const missing = want.filter(x => !got.includes(x));
+    const extra = got.filter(x => !want.includes(x));
     if (missing.length) {
-      err(`${FILE}에서 사라진 target: ${missing.join(', ')}`);
+      err(`${c.file}에서 사라진 target: ${missing.join(', ')}`);
       console.error('   → 운영에서 채택이 거부되고 이 파일이 실제로 실행됩니다 (drop policy 포함).');
     }
     if (extra.length) {
-      err(`${FILE}에 늘어난 target: ${extra.join(', ')}`);
+      err(`${c.file}에 늘어난 target: ${extra.join(', ')}`);
       console.error('   → 운영 카탈로그에 없는 이름이면 마찬가지로 채택이 거부됩니다.');
     }
 
-    // 빈 DB에서 혼자 서는가 — gen_random_uuid()를 쓰면서 확장을 남에게 맡기지 않는다
-    if (/gen_random_uuid\s*\(/i.test(sql) && !/\bCREATE\s+EXTENSION\b[\s\S]*?\bpgcrypto\b/i.test(sql)) {
-      err(`${FILE}이 gen_random_uuid()를 쓰면서 pgcrypto를 스스로 깔지 않습니다 — 빈 DB 재생이 실패합니다`);
+    if (c.selfBootstrapsPgcrypto
+        && /gen_random_uuid\s*\(/i.test(sql)
+        && !/\bCREATE\s+EXTENSION\b[\s\S]*?\bpgcrypto\b/i.test(sql)) {
+      err(`${c.file}이 gen_random_uuid()를 쓰면서 pgcrypto를 스스로 깔지 않습니다 — 빈 DB 재생이 실패합니다`);
     }
 
-    for (const p of BELONGS_TO_022) {
-      if (new RegExp(`\\bcreate\\s+policy\\s+${p}\\b`, 'i').test(sql)) {
-        err(`${FILE}이 ${p}를 만듭니다 — 그것은 022_rls_worker_tables.sql의 책임입니다`);
+    for (const p of c.foreignPolicies) {
+      if (new RegExp(`\\bcreate\\s+policy\\s+${p.name}\\b`, 'i').test(sql)) {
+        err(`${c.file}이 ${p.name}를 만듭니다 — 그것은 ${p.owner}의 책임입니다`);
       }
     }
   }
