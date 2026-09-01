@@ -40,11 +40,7 @@ on:
       - 'supabase/config.toml'
       - '.github/workflows/supabase-replay.yml'
   push:
-    branches: [main]
-    paths:
-      - 'supabase/migrations/**'
-      - 'supabase/config.toml'
-      - '.github/workflows/supabase-replay.yml'
+    branches: ['claude/tmp-proof-g3']
   workflow_dispatch:
 
 permissions:
