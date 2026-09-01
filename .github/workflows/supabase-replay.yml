@@ -1,0 +1,317 @@
+# 공식 Supabase 로컬 스택에서 번호 마이그레이션만으로 빈 DB를 세운다.
+#
+# 왜 필요한가
+# ───────────
+# 지금까지의 fresh 검증은 맨 PostgreSQL 위에 `auth.users` · `auth.uid()` ·
+# `auth.role()` · `service_role`/`authenticated`/`anon`을 손으로 흉내낸
+# fixture였다. 그것으로도 42P01·42883·42703은 잡혔지만, **흉내낸 것이 틀리면
+# 그 틀린 것에 맞춰 통과한다.** `auth.uid()`의 반환 타입, 역할의 기본 권한,
+# `search_path`, Supabase가 미리 깔아 두는 확장 — 어느 하나라도 실제와 다르면
+# 우리가 본 초록은 우리 fixture에 대한 초록이지 Supabase에 대한 초록이 아니다.
+#
+# 그래서 여기서는 공식 CLI가 공식 이미지를 띄우고, 저장소의
+# `supabase/migrations`를 **CLI가 직접 읽어** 재생한다. 파일을 임시 디렉터리로
+# 복사하지 않는다 — 복사하는 순간 "저장소가 재생된다"가 아니라 "우리가 고른
+# 것이 재생된다"가 된다.
+#
+# reset이 0으로 끝난 것만으로 통과시키지 않는다
+# ──────────────────────────────────────────────
+# 이 저장소에서 가장 자주 난 사고가 "실행은 성공했는데 생기지 않았다"였다.
+# 022는 표가 없으면 조용히 건너뛰고 0으로 끝난다. 그래서 여기서는
+#   · 공식 마이그레이션 기록(supabase_migrations.schema_migrations)이
+#     파일 목록과 정확히 같은가
+#   · Supabase가 관리하는 auth 스키마·함수·역할이 실제로 있는가
+#   · kill-switch·jobs의 표·인덱스·정책·RLS가 실제로 생겼는가
+#   · 번호 없는 legacy가 끼어들지 않았는가
+# 를 값으로 확인한다.
+#
+# 운영과 연결되지 않는다
+# ──────────────────────
+# secret을 하나도 쓰지 않는다. `supabase link` · `db push` · `--linked` ·
+# `--db-url` · `migration repair`도 쓰지 않는다. Docker 안 로컬 DB뿐이다.
+# 이 계약은 scripts/check-migrations.mjs가 정적으로 지킨다.
+name: supabase-replay
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - 'supabase/config.toml'
+      - '.github/workflows/supabase-replay.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - 'supabase/config.toml'
+      - '.github/workflows/supabase-replay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-replay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    name: 번호 마이그레이션만으로 빈 DB 재생 (공식 Supabase 로컬)
+    runs-on: ubuntu-latest
+    # Docker 이미지를 처음 받아 오는 시간이 있다. 너무 짧게 잡으면 실패가
+    # 아니라 시간 초과가 보고된다.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.2.2
+
+      # 움직이는 태그를 쓰지 않는다. 태그는 다시 가리킬 수 있고, 그러면
+      # "어제 통과한 것과 같은 것을 돌렸다"고 말할 수 없다.
+      - name: 공식 Supabase CLI 설치 (버전 고정)
+        uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520  # v3.0.0
+        with:
+          version: 2.116.0
+
+      - name: CLI·Docker 확인
+        run: |
+          set -euo pipefail
+          got="$(supabase --version)"
+          echo "supabase CLI: ${got}"
+          if [ "${got}" != "2.116.0" ]; then
+            echo "::error::CLI 버전이 고정값과 다릅니다 — 기대 2.116.0 / 실제 ${got}"
+            exit 1
+          fi
+          docker version --format '{{.Server.Version}}'
+
+      # config.toml은 저장소에 두지 않는다. 아직 두어야 할 이유가 증명되지
+      # 않았고, 두는 순간 "로컬 스택 설정"이라는 관리 대상이 하나 더 생긴다.
+      # 없을 때만 만든다. --force는 쓰지 않는다 — 있는 설정을 덮어쓰는 일은
+      # 이 워크플로가 할 일이 아니다.
+      - name: config가 없으면 만든다
+        run: |
+          set -euo pipefail
+          if [ -f supabase/config.toml ]; then
+            echo "supabase/config.toml 있음 — 저장소 설정을 그대로 씁니다"
+          else
+            echo "supabase/config.toml 없음 — 이 실행에서만 쓸 기본 설정을 만듭니다"
+            supabase init
+          fi
+
+      - name: 재생 대상 확인 (번호 있는 것만)
+        id: expected
+        run: |
+          set -euo pipefail
+          # CLI가 마이그레이션으로 인식하는 것과 같은 모양으로만 센다.
+          find supabase/migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' \
+            | grep -E '^[0-9]+_.*\.sql$' \
+            | sed -E 's/^([0-9]+)_.*/\1/' | sort > /tmp/expected-versions.txt
+          find supabase/migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' \
+            | grep -vE '^[0-9]+_.*\.sql$' | sort > /tmp/legacy-files.txt
+          n_expected="$(wc -l < /tmp/expected-versions.txt | tr -d ' ')"
+          n_legacy="$(wc -l < /tmp/legacy-files.txt | tr -d ' ')"
+          echo "번호 있는 마이그레이션 ${n_expected}개 — 이것만 재생돼야 합니다"
+          echo "번호 없는 legacy ${n_legacy}개 — 하나도 재생되면 안 됩니다"
+          sed 's/^/  · /' /tmp/legacy-files.txt
+          if [ "${n_expected}" -eq 0 ]; then
+            echo "::error::번호 있는 마이그레이션을 하나도 찾지 못했습니다 — 0개를 통과로 적지 않습니다"
+            exit 1
+          fi
+          echo "count=${n_expected}" >> "$GITHUB_OUTPUT"
+
+      - name: 공식 로컬 스택 시작
+        run: |
+          set -euo pipefail
+          supabase start
+
+      # 여기가 본 계약이다. 빈 DB를 만들고 저장소의 번호 마이그레이션만으로
+      # 처음부터 다시 세운다. seed는 쓰지 않는다 — 업무 데이터가 섞이면
+      # "스키마가 선다"와 "데이터가 있다"가 뒤엉킨다.
+      - name: 빈 DB에서 다시 세우기 (supabase db reset --no-seed)
+        run: |
+          set -euo pipefail
+          supabase db reset --local --no-seed
+
+      - name: 로컬 DB 주소 확인
+        run: |
+          set -euo pipefail
+          # 포트·비밀번호를 코드에 박지 않는다. CLI가 알려 주는 값을 쓴다.
+          supabase status -o env > /tmp/supabase-status.env
+          # shellcheck disable=SC1091
+          set +u
+          . /tmp/supabase-status.env
+          set -u
+          if [ -z "${DB_URL:-}" ]; then
+            echo "::error::supabase status에서 DB_URL을 얻지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다"
+            exit 1
+          fi
+          # 값은 출력하지 않는다. 로컬 개발용이어도 습관을 깨지 않는다.
+          echo "DB_URL 확보 (값은 출력하지 않습니다)"
+          printf '%s\n' "${DB_URL}" > /tmp/db-url
+
+      - name: 공식 마이그레이션 기록이 파일 목록과 같은가
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -Atc \
+            "SELECT version FROM supabase_migrations.schema_migrations ORDER BY version" \
+            | sort > /tmp/actual-versions.txt
+          n_actual="$(wc -l < /tmp/actual-versions.txt | tr -d ' ')"
+          n_expected="$(wc -l < /tmp/expected-versions.txt | tr -d ' ')"
+          echo "기대 ${n_expected}개 / 실제 ${n_actual}개"
+
+          dup="$(sort /tmp/actual-versions.txt | uniq -d)"
+          if [ -n "${dup}" ]; then
+            echo "::error::마이그레이션 기록에 같은 version이 두 번 있습니다: ${dup}"
+            exit 1
+          fi
+          missing="$(comm -23 /tmp/expected-versions.txt /tmp/actual-versions.txt)"
+          extra="$(comm -13 /tmp/expected-versions.txt /tmp/actual-versions.txt)"
+          rc=0
+          if [ -n "${missing}" ]; then
+            echo "::error::파일에는 있는데 적용 기록에 없는 version: $(echo "${missing}" | tr '\n' ' ')"
+            rc=1
+          fi
+          if [ -n "${extra}" ]; then
+            echo "::error::파일에 없는데 적용 기록에 있는 version: $(echo "${extra}" | tr '\n' ' ')"
+            echo "   → 번호 없는 legacy가 끼어들었을 수 있습니다."
+            rc=1
+          fi
+          exit "${rc}"
+
+      - name: Supabase가 관리하는 것들이 실제로 있는가
+        run: |
+          set -euo pipefail
+          cat > /tmp/managed.sql <<'SQL'
+          \pset tuples_only on
+          \pset format unaligned
+          SELECT 'AUTH_USERS=' || CASE WHEN to_regclass('auth.users') IS NULL THEN 'FAIL' ELSE 'ok' END;
+          SELECT 'AUTH_UID=' || CASE WHEN count(*) = 0 THEN 'FAIL' ELSE 'ok' END
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'auth' AND p.proname = 'uid';
+          SELECT 'AUTH_ROLE=' || CASE WHEN count(*) = 0 THEN 'FAIL' ELSE 'ok' END
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'auth' AND p.proname = 'role';
+          SELECT 'ROLE_' || upper(r.want) || '=' ||
+                 CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.want) THEN 'ok' ELSE 'FAIL' END
+            FROM (VALUES ('anon'),('authenticated'),('service_role')) AS r(want);
+          SQL
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -Xf /tmp/managed.sql | tee /tmp/managed.out
+          if grep -q '=FAIL' /tmp/managed.out; then
+            echo "::error::Supabase가 관리하는 스키마·함수·역할이 없습니다 — 이것은 공식 스택이 아닙니다"
+            exit 1
+          fi
+
+      - name: 재생 결과가 정본과 같은가 (kill-switch · jobs · legacy 미실행)
+        run: |
+          set -euo pipefail
+          cat > /tmp/postcondition.sql <<'SQL'
+          \pset tuples_only on
+          \pset format unaligned
+
+          -- kill-switch: 001이 만드는 표 다섯
+          SELECT 'KS_TABLE_' || t.want || '=' ||
+                 CASE WHEN to_regclass('public.' || t.want) IS NULL THEN 'FAIL' ELSE 'ok' END
+            FROM (VALUES ('kill_switch_state'),('kill_switch_log'),('telegram_alert_log'),
+                         ('worker_heartbeat'),('worker_lock')) AS t(want);
+
+          -- 001이 만드는 인덱스 둘
+          SELECT 'KS_INDEX_' || i.want || '=' ||
+                 CASE WHEN EXISTS (SELECT 1 FROM pg_indexes
+                                    WHERE schemaname='public' AND indexname = i.want)
+                      THEN 'ok' ELSE 'FAIL' END
+            FROM (VALUES ('idx_kill_switch_conn'),('idx_tg_dedup')) AS i(want);
+
+          -- 001의 소유자 정책 둘 + 022의 service 정책 넷
+          SELECT 'POLICY_' || p.want || '=' ||
+                 CASE WHEN EXISTS (SELECT 1 FROM pg_policies
+                                    WHERE schemaname='public' AND policyname = p.want)
+                      THEN 'ok' ELSE 'FAIL' END
+            FROM (VALUES ('ks_state_owner'),('ks_log_owner'),
+                         ('kill_switch_log_service'),('telegram_alert_log_service'),
+                         ('worker_heartbeat_service'),('worker_lock_service')) AS p(want);
+
+          -- 022가 표 없음으로 건너뛰면 여기가 FAIL이 된다.
+          SELECT 'KS_RLS_' || c.relname || '=' ||
+                 CASE WHEN c.relrowsecurity AND NOT c.relforcerowsecurity THEN 'ok' ELSE 'FAIL' END
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public'
+             AND c.relname IN ('kill_switch_state','kill_switch_log','telegram_alert_log',
+                               'worker_heartbeat','worker_lock');
+
+          -- jobs: 076이 만드는 것
+          SELECT 'JOBS_TABLE=' || CASE WHEN to_regclass('public.jobs') IS NULL THEN 'FAIL' ELSE 'ok' END;
+          SELECT 'JOBS_COLUMNS=' || CASE WHEN count(*) = 22 THEN 'ok' ELSE 'FAIL(' || count(*) || ')' END
+            FROM pg_attribute
+           WHERE attrelid = to_regclass('public.jobs') AND attnum > 0 AND NOT attisdropped;
+          SELECT 'JOBS_CONSTRAINT_' || c.want || '=' ||
+                 CASE WHEN EXISTS (SELECT 1 FROM pg_constraint
+                                    WHERE conrelid = to_regclass('public.jobs') AND conname = c.want)
+                      THEN 'ok' ELSE 'FAIL' END
+            FROM (VALUES ('jobs_pkey'),('jobs_status_chk'),('jobs_action_chk')) AS c(want);
+          SELECT 'JOBS_INDEX_' || i.want || '=' ||
+                 CASE WHEN EXISTS (SELECT 1 FROM pg_indexes
+                                    WHERE schemaname='public' AND tablename='jobs' AND indexname = i.want)
+                      THEN 'ok' ELSE 'FAIL' END
+            FROM (VALUES ('idx_jobs_pending'),('idx_jobs_conn')) AS i(want);
+          SELECT 'JOBS_RLS=' ||
+                 CASE WHEN c.relrowsecurity AND NOT c.relforcerowsecurity THEN 'ok' ELSE 'FAIL' END
+            FROM pg_class c WHERE c.oid = to_regclass('public.jobs');
+          -- 이름이 아니라 뜻으로 본다: SELECT 하나, USING은 본인 행, WITH CHECK 없음.
+          SELECT 'JOBS_OWNER_POLICY=' ||
+                 CASE WHEN count(*) = 1 THEN 'ok' ELSE 'FAIL' END
+            FROM pg_policies
+           WHERE schemaname='public' AND tablename='jobs' AND policyname='jobs_owner'
+             AND permissive='PERMISSIVE' AND cmd='SELECT'
+             AND qual = '(auth.uid() = user_id)' AND with_check IS NULL;
+          SELECT 'JOBS_POLICY_COUNT=' || CASE WHEN count(*) = 1 THEN 'ok' ELSE 'FAIL(' || count(*) || ')' END
+            FROM pg_policies WHERE schemaname='public' AND tablename='jobs';
+
+          -- 번호 없는 legacy가 끼어들지 않았다는 카나리.
+          -- strategy_profiles.sql만 이 표를 만들고,
+          -- exchange_connections_rls.sql만 ec_insert 정책을 만든다.
+          SELECT 'CANARY_NO_STRATEGY_PROFILES=' ||
+                 CASE WHEN to_regclass('public.strategy_profiles') IS NULL THEN 'ok' ELSE 'FAIL' END;
+          SELECT 'CANARY_NO_EC_INSERT=' ||
+                 CASE WHEN EXISTS (SELECT 1 FROM pg_policies
+                                    WHERE schemaname='public' AND policyname='ec_insert')
+                      THEN 'FAIL' ELSE 'ok' END;
+          SQL
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -Xf /tmp/postcondition.sql | tee /tmp/postcondition.out
+          if grep -q '=FAIL' /tmp/postcondition.out; then
+            echo "::error::재생은 끝났지만 정본과 다릅니다 — 위에서 FAIL인 줄을 보세요"
+            exit 1
+          fi
+          n_ok="$(grep -c '=ok$' /tmp/postcondition.out)"
+          echo "확인 ${n_ok}건 전부 통과"
+
+      - name: 요약
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## 공식 Supabase 번호-only 재생"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "|---|---|"
+            echo "| CLI | 2.116.0 (고정) |"
+            echo "| 번호 마이그레이션 | ${{ steps.expected.outputs.count }}개 |"
+            echo "| 결과 | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/postcondition.out ]; then
+            {
+              echo ""
+              echo "<details><summary>재생 후 확인</summary>"
+              echo ""
+              echo '```'
+              cat /tmp/postcondition.out
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # 정리가 실패해도 원래 실패를 덮지 않는다. 여기서 exit 1을 내면
+      # "재생이 실패했다"가 "정리가 실패했다"로 바뀌어 보고된다.
+      - name: 로컬 스택 정리
+        if: always()
+        continue-on-error: true
+        run: supabase stop --no-backup
