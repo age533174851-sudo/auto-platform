@@ -110,18 +110,184 @@ function stripNoise(sql: string): string {
     .replace(/\$\$[\s\S]*?\$\$/g, ' $$ ');
 }
 
+// ── SQL을 글자 단위로 읽는다 ──
+//
+// **정규식 하나를 더 붙이는 것으로는 안 된다.** `stripNoise()`는 `$$ … $$`를
+// 통째로 지우는데, 그러면 DO 블록의 몸통이 사라진다. 그 상태에서
+// classifyMigration은 `DO`로 시작한다는 이유로 문장을 건너뛰었다. 즉
+//
+//   DO $$ BEGIN DROP TABLE important; END $$;
+//
+// 가 "표·칸·인덱스·정책을 더하기만 합니다"로 통과했다. DO는 정의가 아니라
+// **마이그레이션이 도는 그 순간 실행되는 코드**다. 안을 봐야 한다.
+//
+// 그래서 여기서는 주석·문자열·따옴표 식별자·달러 인용을 실제로 구분한다.
+// 그래야 두 가지를 동시에 지킬 수 있다:
+//   · 주석이나 문자열 안의 `DROP TABLE`을 위험으로 읽지 않는다
+//   · 달러 인용 안에 있다는 이유로 진짜 `DROP TABLE`을 놓치지 않는다
+//
+// `stripNoise()`는 그대로 둔다 — `migrationTargets()`가 쓰는 시야이고,
+// 거기서 DO 몸통을 열면 지금까지 대상이 아니던 것이 갑자기 대상이 된다.
+// 판정 시야와 대상 시야는 다른 질문에 답한다.
+
+interface SqlPiece {
+  /** 원문 그대로 */
+  raw: string;
+  /** 주석·문자열을 지운 시야. 달러 인용 몸통은 `dollar`에 따로 담는다 */
+  code: string;
+  /** 이 문장이 달러 인용을 열었다면 그 몸통들 (태그 순서대로) */
+  dollars: Array<{ tag: string; body: string }>;
+}
+
+/**
+ * 문장 단위로 자른다. `;`는 **주석·문자열·달러 인용 밖에 있을 때만** 구분자다.
+ * 달러 인용 안의 `;`로 자르면 DO 블록이 조각나 뜻을 잃는다.
+ */
+function splitStatements(sql: string): SqlPiece[] {
+  const src = String(sql ?? '');
+  const out: SqlPiece[] = [];
+  let raw = '', code = '';
+  let dollars: SqlPiece['dollars'] = [];
+  let i = 0;
+
+  const flush = () => {
+    if (raw.trim()) out.push({ raw: raw.trim(), code, dollars });
+    raw = ''; code = ''; dollars = [];
+  };
+
+  while (i < src.length) {
+    const two = src.slice(i, i + 2);
+
+    // 줄 주석 — 여기 적힌 DROP TABLE은 설명이지 명령이 아니다
+    if (two === '--') {
+      const end = src.indexOf('\n', i);
+      const stop = end < 0 ? src.length : end;
+      raw += src.slice(i, stop); code += ' '; i = stop;
+      continue;
+    }
+    // 블록 주석. PostgreSQL은 중첩을 허용한다
+    if (two === '/*') {
+      let depth = 1; let j = i + 2;
+      while (j < src.length && depth > 0) {
+        if (src.slice(j, j + 2) === '/*') { depth += 1; j += 2; continue; }
+        if (src.slice(j, j + 2) === '*/') { depth -= 1; j += 2; continue; }
+        j += 1;
+      }
+      raw += src.slice(i, j); code += ' '; i = j;
+      continue;
+    }
+    // 문자열. '' 는 작은따옴표 한 개를 뜻한다
+    if (src[i] === "'") {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "'") {
+          if (src[j + 1] === "'") { j += 2; continue; }
+          j += 1; break;
+        }
+        j += 1;
+      }
+      raw += src.slice(i, j); code += "''"; i = j;
+      continue;
+    }
+    // 따옴표 식별자. "" 는 큰따옴표 한 개
+    if (src[i] === '"') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '"') {
+          if (src[j + 1] === '"') { j += 2; continue; }
+          j += 1; break;
+        }
+        j += 1;
+      }
+      const lit = src.slice(i, j);
+      raw += lit; code += lit; i = j;
+      continue;
+    }
+    // 달러 인용 — `$$` 와 `$do$` 같은 태그 인용 둘 다
+    const dq = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(src.slice(i));
+    if (dq) {
+      const tag = dq[0];
+      const bodyStart = i + tag.length;
+      const close = src.indexOf(tag, bodyStart);
+      if (close < 0) {
+        // 닫히지 않은 인용. 여기서부터는 뜻을 알 수 없다
+        raw += src.slice(i); code += ' '; i = src.length;
+        continue;
+      }
+      const body = src.slice(bodyStart, close);
+      dollars.push({ tag, body });
+      raw += src.slice(i, close + tag.length);
+      // 판정 시야에는 자리만 남긴다. 몸통은 dollars로 따로 본다
+      code += ' $DOLLAR$ ';
+      i = close + tag.length;
+      continue;
+    }
+    if (src[i] === ';') { raw += ';'; code += ' '; i += 1; flush(); continue; }
+
+    raw += src[i]; code += src[i]; i += 1;
+  }
+  flush();
+  return out;
+}
+
+/** PL/pgSQL 제어 흐름 — 실행 의미가 아니라 뼈대다 */
+const CONTROL_FLOW = new RegExp(
+  '^(?:<<\\w+>>\\s*)?(?:' + [
+    'DECLARE', 'BEGIN', 'END(?:\\s+(?:IF|LOOP|CASE))?', 'IF', 'ELSIF', 'ELSEIF', 'ELSE', 'THEN',
+    'CASE', 'WHEN', 'LOOP', 'FOR', 'FOREACH', 'WHILE', 'EXIT', 'CONTINUE', 'RETURN',
+    'NULL', 'RAISE', 'PERFORM', 'ASSERT', 'EXCEPTION', 'GET\\s+(?:CURRENT\\s+|STACKED\\s+)?DIAGNOSTICS',
+    'COMMENT\\s+ON', 'SET', 'RESET',
+  ].join('|') + ')\\b', 'i');
+
+/** `v := expr` 같은 대입 */
+const ASSIGNMENT = /^[A-Za-z_][\w.]*\s*(?::=|=[^=])/;
+
+/**
+ * DO 블록 안을 본다.
+ *
+ * **`EXECUTE`를 만나면 거기서 멈춘다.** 문자열을 조립해 실행하는 SQL이
+ * 무엇이 될지는 실행해 봐야 안다. `format('%I')`로 감싸 안전해 보여도,
+ * 그것을 일반적으로 안전하다고 증명하는 것은 다른 문제다. 지금 이 파일이
+ * 안전한 것과 앞으로 올 모든 `EXECUTE`가 안전한 것은 같지 않다.
+ */
+function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] } {
+  const danger: string[] = [];
+  const unknown: string[] = [];
+
+  for (const piece of splitStatements(body)) {
+    const st = piece.code.replace(/\s+/g, ' ').trim();
+    if (!st || !/[A-Za-z]/.test(st)) continue;
+
+    // 동적 실행. 무엇이 돌지 정적으로 알 수 없다
+    if (/\bEXECUTE\b/i.test(st)) {
+      unknown.push('DO 블록 안에서 EXECUTE로 SQL을 조립해 실행합니다');
+      continue;
+    }
+
+    const hit = DESTRUCTIVE_PATTERNS.filter(d => d.re.test(st));
+    if (hit.length > 0) { danger.push(...hit.map(h => `DO 블록 안에서 ${h.why}`)); continue; }
+    if (ADDITIVE_PATTERNS.some(re => re.test(st))) continue;
+    if (CONTROL_FLOW.test(st) || ASSIGNMENT.test(st)) continue;
+
+    unknown.push(`DO 블록 안에 알아보지 못한 문장이 있습니다: ${st.slice(0, 60)}`);
+  }
+
+  if (danger.length) return { risk: 'DESTRUCTIVE', reasons: Array.from(new Set(danger)) };
+  if (unknown.length) return { risk: 'UNKNOWN', reasons: Array.from(new Set(unknown)) };
+  return { risk: 'ADDITIVE', reasons: [] };
+}
+
 /**
  * 이 마이그레이션은 자동으로 적용해도 되는가.
  *
  * **판단하지 못한 것은 UNKNOWN이다.** '아마 괜찮겠지'가 데이터를 지운다.
  */
 export function classifyMigration(sql: string): MigrationClass {
-  const body = stripNoise(sql);
+  const pieces = splitStatements(sql);
 
   // 문장이 하나라도 있는가. 빈 파일을 '안전'으로 읽지 않는다.
-  const statements = body.split(';').map(s => s.trim()).filter(Boolean);
-  const hasStatement = statements.length > 0 && /[A-Za-z]/.test(body);
-  if (!hasStatement) {
+  const statements = pieces.filter(p => /[A-Za-z]/.test(p.code) || p.dollars.length > 0);
+  if (statements.length === 0) {
     return { risk: 'UNKNOWN', reasons: ['실행할 문장을 찾지 못했습니다'], autoApply: false };
   }
 
@@ -129,24 +295,40 @@ export function classifyMigration(sql: string): MigrationClass {
   // 앞 문장의 DELETE를 안전해 보이게 만든다.
   const danger: string[] = [];
   const unknown: string[] = [];
-  for (const st of statements) {
-    // DO $$ ... $$ 블록은 CREATE POLICY를 감싸는 이 저장소의 관행이다.
-    if (/^DO\b/i.test(st)) continue;
+  for (const piece of statements) {
+    const st = piece.code.replace(/\s+/g, ' ').trim();
+
+    // **DO는 건너뛰지 않는다.** 정의가 아니라 지금 실행되는 코드다.
+    if (/^DO\b/i.test(st)) {
+      if (piece.dollars.length === 0) {
+        unknown.push('DO 블록의 몸통을 읽지 못했습니다 (달러 인용이 닫히지 않았을 수 있습니다)');
+        continue;
+      }
+      for (const d of piece.dollars) {
+        const inner = classifyDoBody(d.body);
+        if (inner.risk === 'DESTRUCTIVE') danger.push(...inner.reasons);
+        else if (inner.risk === 'UNKNOWN') unknown.push(...inner.reasons);
+      }
+      continue;
+    }
     if (/^(BEGIN|COMMIT|END|SET)\b/i.test(st)) continue;
 
+    // CREATE FUNCTION의 몸통은 여기서 열지 않는다. 정의할 때 도는 것이
+    // 아니라 나중에 불릴 때 도는 것이고, 그 판단은 이 파일의 몫이 아니다.
     const hit = DESTRUCTIVE_PATTERNS.filter(d => d.re.test(st));
     if (hit.length > 0) { danger.push(...hit.map(h => h.why)); continue; }
     if (ADDITIVE_PATTERNS.some(re => re.test(st))) continue;
-    unknown.push(st.slice(0, 60).replace(/\s+/g, ' '));
+    unknown.push(st.slice(0, 60));
   }
 
   if (danger.length > 0) {
     return { risk: 'DESTRUCTIVE', reasons: Array.from(new Set(danger)), autoApply: false };
   }
   if (unknown.length > 0) {
+    const uniq = Array.from(new Set(unknown));
     return {
       risk: 'UNKNOWN', autoApply: false,
-      reasons: [`알아보지 못한 문장이 ${unknown.length}개 있습니다: ${unknown.slice(0, 3).join(' / ')}`],
+      reasons: [`알아보지 못한 문장이 ${uniq.length}개 있습니다: ${uniq.slice(0, 3).join(' / ')}`],
     };
   }
   return { risk: 'ADDITIVE', reasons: ['표·칸·인덱스·정책을 더하기만 합니다'], autoApply: true };

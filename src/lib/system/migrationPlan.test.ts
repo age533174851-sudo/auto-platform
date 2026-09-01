@@ -407,9 +407,15 @@ export function runMigrationPlanTests() {
     eq(c.risk, 'ADDITIVE');
   });
 
-  test('저장소의 모든 번호 마이그레이션이 자동 적용 대상이어야 한다', () => {
-    // 이 시험은 목록이 아니라 **원칙**을 지킨다: 지금까지 쓴 마이그레이션
-    // 중 자동으로 못 도는 것이 있으면, 자동화는 절반만 도는 것이다.
+  test('평범한 더하기 마이그레이션은 자동 적용 대상이다', () => {
+    // 이 시험은 목록이 아니라 **원칙**을 지킨다: 표·칸·인덱스·권한을 더하기만
+    // 하는 파일은 사람 승인 없이 돌 수 있어야 한다.
+    //
+    // 예전 제목은 "저장소의 모든 번호 마이그레이션이 자동 적용 대상"이었다.
+    // 그 말은 더 이상 사실이 아니다 — DO 블록 안을 보게 되면서 022와 050이
+    // 동적 EXECUTE 때문에 UNKNOWN이 됐다. 둘 다 이미 적용돼 있고 공식
+    // Supabase 재생으로 증명되지만, **앞으로 올 임의의 EXECUTE까지 안전하다고
+    // 말할 수는 없다.** 그래서 자동 적용에서 뺀다.
     // (실제 파일 검사는 scripts/check-migrations.mjs가 CI에서 한다)
     const c = classifyMigration(`
       CREATE TABLE IF NOT EXISTS t (id INT);
@@ -420,4 +426,145 @@ export function runMigrationPlanTests() {
     `);
     eq(c.risk, 'ADDITIVE');
   });
+  // ── DO 블록은 정의가 아니라 지금 실행되는 코드다 ──
+  //
+  // 예전에는 `stripNoise()`가 `$$ … $$`를 통째로 지우고 classifyMigration이
+  // `DO`로 시작하는 문장을 건너뛰었다. 그래서 아래 D1이 "더하기만 합니다"로
+  // 통과했다. 실행되는 것을 안 보고 통과시키는 자리를 여기서 닫는다.
+
+  test('DO 블록 안의 DROP TABLE을 잡는다', () => {
+    const c = classifyMigration('DO $$\nBEGIN\n  DROP TABLE x;\nEND\n$$;');
+    eq(c.risk, 'DESTRUCTIVE');
+    eq(c.autoApply, false);
+  });
+
+  test('DO 블록 안의 TRUNCATE를 잡는다', () => {
+    eq(classifyMigration('DO $$\nBEGIN\n  TRUNCATE x;\nEND\n$$;').risk, 'DESTRUCTIVE');
+  });
+
+  test('DO 블록 안의 조건 없는 DELETE를 잡는다', () => {
+    eq(classifyMigration('DO $$\nBEGIN\n  DELETE FROM x;\nEND\n$$;').risk, 'DESTRUCTIVE');
+  });
+
+  test('DO 블록 안의 조건 없는 UPDATE를 잡는다', () => {
+    eq(classifyMigration('DO $$\nBEGIN\n  UPDATE x SET value = 1;\nEND\n$$;').risk, 'DESTRUCTIVE');
+  });
+
+  test('DO 블록의 동적 EXECUTE는 UNKNOWN이다 — 무엇이 돌지 알 수 없다', () => {
+    const c = classifyMigration('DO $$\nBEGIN\n  EXECUTE query_text;\nEND\n$$;');
+    eq(c.risk, 'UNKNOWN');
+    eq(c.autoApply, false);
+  });
+
+  test('문자열을 이어 붙인 EXECUTE도 UNKNOWN이다 — 안전해 보여도 증명은 아니다', () => {
+    const c = classifyMigration(
+      "DO $$\nBEGIN\n  EXECUTE 'DROP TABLE ' || quote_ident(name);\nEND\n$$;");
+    eq(c.risk, 'UNKNOWN');
+    assert(c.risk !== 'ADDITIVE', '동적 조립을 더하기만 하는 것으로 읽으면 안 된다');
+  });
+
+  test('제어 흐름과 더하는 SQL만 있는 DO는 ADDITIVE다', () => {
+    const c = classifyMigration(`
+      DO $$
+      DECLARE n INT;
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'p') THEN
+          CREATE POLICY p ON t FOR SELECT USING (true);
+        END IF;
+        RAISE NOTICE 'done';
+      END
+      $$;
+    `);
+    eq(c.risk, 'ADDITIVE');
+    eq(c.autoApply, true);
+  });
+
+  test('주석 안의 DROP TABLE은 명령이 아니다', () => {
+    const c = classifyMigration(`
+      DO $$
+      BEGIN
+        -- DROP TABLE x;
+        /* TRUNCATE y; */
+        CREATE INDEX IF NOT EXISTS i ON t (c);
+      END
+      $$;
+    `);
+    eq(c.risk, 'ADDITIVE');
+  });
+
+  test('문자열 안의 DROP TABLE은 명령이 아니다', () => {
+    const c = classifyMigration(`
+      DO $$
+      BEGIN
+        RAISE NOTICE 'DROP TABLE x';
+        CREATE INDEX IF NOT EXISTS i ON t (c);
+      END
+      $$;
+    `);
+    eq(c.risk, 'ADDITIVE');
+  });
+
+  test('태그 달린 달러 인용도 같은 뜻으로 읽는다 — 위험', () => {
+    eq(classifyMigration('DO $do$\nBEGIN\n  DROP TABLE x;\nEND\n$do$;').risk, 'DESTRUCTIVE');
+  });
+
+  test('태그 달린 달러 인용도 같은 뜻으로 읽는다 — 안전', () => {
+    const c = classifyMigration(
+      'DO $do$\nBEGIN\n  IF true THEN\n    ALTER TABLE t ADD COLUMN IF NOT EXISTS c text;\n  END IF;\nEND\n$do$;');
+    eq(c.risk, 'ADDITIVE');
+    eq(c.autoApply, true);
+  });
+
+  test('CREATE FUNCTION의 몸통은 열지 않는다 — 정의는 실행이 아니다', () => {
+    // 함수를 만드는 것과 그 함수가 도는 것은 다른 시점이다. 여기서 몸통을
+    // 열면 이 저장소의 원자성 함수들이 전부 자동 적용에서 빠진다.
+    const c = classifyMigration(`
+      CREATE OR REPLACE FUNCTION f() RETURNS void AS $$
+      BEGIN
+        DELETE FROM x;
+      END
+      $$ LANGUAGE plpgsql;
+    `);
+    eq(c.risk, 'ADDITIVE');
+    eq(c.autoApply, true);
+  });
+
+  test('닫히지 않은 달러 인용은 UNKNOWN이다 — 못 읽은 것은 통과가 아니다', () => {
+    eq(classifyMigration('DO $$\nBEGIN\n  CREATE INDEX i ON t (c);\n').risk, 'UNKNOWN');
+  });
+
+  test('DO 안이 위험하면 계획에서 승인 대상이 된다', () => {
+    const plan = migrationPlanOf({
+      files: [file('099_x.sql', 'DO $$\nBEGIN\n  DROP TABLE x;\nEND\n$$;')],
+      applied: [],
+    });
+    eq(plan.code, 'NEEDS_APPROVAL');
+    eq(plan.autoApply.length, 0);
+    eq(plan.blocked[0].risk, 'DESTRUCTIVE');
+  });
+
+  test('DO 안이 동적이면 계획에서 승인 대상이 된다', () => {
+    const plan = migrationPlanOf({
+      files: [file('099_x.sql', 'DO $$\nBEGIN\n  EXECUTE q;\nEND\n$$;')],
+      applied: [],
+    });
+    eq(plan.code, 'NEEDS_APPROVAL');
+    eq(plan.autoApply.length, 0);
+    eq(plan.blocked[0].risk, 'UNKNOWN');
+  });
+
+  test('이미 적용된 것은 재분류돼도 다시 실행 대상이 되지 않는다', () => {
+    // 022·050은 이 강화로 UNKNOWN이 됐다. 운영에는 이미 적용돼 있으므로
+    // **다시 실행 후보가 되면 안 된다.** 계획은 pending만 분류한다.
+    const files = [
+      file('021_ok.sql', 'CREATE TABLE IF NOT EXISTS a (id INT);'),
+      file('022_dyn.sql', 'DO $$\nBEGIN\n  EXECUTE q;\nEND\n$$;'),
+    ];
+    const plan = migrationPlanOf({ files, applied: files.map(f => f.name) });
+    eq(plan.code, 'UP_TO_DATE');
+    eq(plan.pending.length, 0);
+    eq(plan.blocked.length, 0);
+    eq(plan.autoApply.length, 0);
+  });
+
 }
