@@ -529,8 +529,42 @@ export function runMigrationPlanTests() {
     eq(c.autoApply, true);
   });
 
+  // ── 끝까지 읽지 못했으면 거기서 끝이다 ──
+  //
+  // 인용이나 주석이 닫히지 않으면 그 뒤로는 무엇이 코드이고 무엇이 글자인지
+  // 알 수 없다. 앞쪽에서 `CREATE TABLE`을 봤다는 이유로 통과시키면 그것은
+  // "안전하다"가 아니라 **"앞부분만 읽었다"**이다.
+
+  test('닫히지 않은 작은따옴표 문자열은 UNKNOWN이다', () => {
+    const c = classifyMigration("CREATE TABLE x (\n  value text DEFAULT 'unterminated\n);");
+    eq(c.risk, 'UNKNOWN');
+    eq(c.autoApply, false);
+  });
+
+  test('닫히지 않은 큰따옴표 식별자는 UNKNOWN이다', () => {
+    const c = classifyMigration('CREATE TABLE "unterminated (\n  id int\n);');
+    eq(c.risk, 'UNKNOWN');
+    eq(c.autoApply, false);
+  });
+
+  test('닫히지 않은 블록 주석은 UNKNOWN이다 — 앞의 CREATE TABLE로 통과시키지 않는다', () => {
+    const c = classifyMigration('CREATE TABLE x (id int);\n/* comment never closes');
+    eq(c.risk, 'UNKNOWN');
+    eq(c.autoApply, false);
+  });
+
   test('닫히지 않은 달러 인용은 UNKNOWN이다 — 못 읽은 것은 통과가 아니다', () => {
-    eq(classifyMigration('DO $$\nBEGIN\n  CREATE INDEX i ON t (c);\n').risk, 'UNKNOWN');
+    const c = classifyMigration('DO $$\nBEGIN\n  CREATE INDEX i ON t (c);\nEND\n');
+    eq(c.risk, 'UNKNOWN');
+    eq(c.autoApply, false);
+  });
+
+  test('정상적으로 닫힌 인용·주석은 그대로 읽는다', () => {
+    // 위 넷을 잡느라 멀쩡한 SQL을 UNKNOWN으로 만들면 안 된다.
+    eq(classifyMigration("CREATE TABLE x (v text DEFAULT 'ok''ok');").risk, 'ADDITIVE');
+    eq(classifyMigration('CREATE TABLE "my table" (id int);').risk, 'ADDITIVE');
+    eq(classifyMigration('CREATE TABLE x (id int);\n/* a /* b */ c */\nCREATE INDEX i ON x (id);').risk, 'ADDITIVE');
+    eq(classifyMigration('DO $do$\nBEGIN\n  CREATE INDEX IF NOT EXISTS i ON t (c);\nEND\n$do$;').risk, 'ADDITIVE');
   });
 
   test('DO 안이 위험하면 계획에서 승인 대상이 된다', () => {

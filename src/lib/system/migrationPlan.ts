@@ -139,13 +139,27 @@ interface SqlPiece {
   dollars: Array<{ tag: string; body: string }>;
 }
 
+interface SqlScan {
+  pieces: SqlPiece[];
+  /**
+   * 끝까지 읽지 못한 것들.
+   *
+   * **비어 있지 않으면 이 SQL은 판정하지 않는다.** 인용이나 주석이 닫히지
+   * 않으면 그 뒤로는 무엇이 코드이고 무엇이 글자인지 알 수 없다. 그런데도
+   * 앞쪽에서 `CREATE TABLE`을 봤다는 이유로 "더하기만 합니다"라고 적으면,
+   * 못 읽은 것을 통과로 적는 것이다.
+   */
+  errors: string[];
+}
+
 /**
  * 문장 단위로 자른다. `;`는 **주석·문자열·달러 인용 밖에 있을 때만** 구분자다.
  * 달러 인용 안의 `;`로 자르면 DO 블록이 조각나 뜻을 잃는다.
  */
-function splitStatements(sql: string): SqlPiece[] {
+function splitStatements(sql: string): SqlScan {
   const src = String(sql ?? '');
   const out: SqlPiece[] = [];
+  const errors: string[] = [];
   let raw = '', code = '';
   let dollars: SqlPiece['dollars'] = [];
   let i = 0;
@@ -173,32 +187,35 @@ function splitStatements(sql: string): SqlPiece[] {
         if (src.slice(j, j + 2) === '*/') { depth -= 1; j += 2; continue; }
         j += 1;
       }
+      if (depth > 0) errors.push('블록 주석 /* 가 닫히지 않았습니다');
       raw += src.slice(i, j); code += ' '; i = j;
       continue;
     }
     // 문자열. '' 는 작은따옴표 한 개를 뜻한다
     if (src[i] === "'") {
-      let j = i + 1;
+      let j = i + 1; let closed = false;
       while (j < src.length) {
         if (src[j] === "'") {
           if (src[j + 1] === "'") { j += 2; continue; }
-          j += 1; break;
+          j += 1; closed = true; break;
         }
         j += 1;
       }
+      if (!closed) errors.push("작은따옴표 문자열이 닫히지 않았습니다");
       raw += src.slice(i, j); code += "''"; i = j;
       continue;
     }
     // 따옴표 식별자. "" 는 큰따옴표 한 개
     if (src[i] === '"') {
-      let j = i + 1;
+      let j = i + 1; let closed = false;
       while (j < src.length) {
         if (src[j] === '"') {
           if (src[j + 1] === '"') { j += 2; continue; }
-          j += 1; break;
+          j += 1; closed = true; break;
         }
         j += 1;
       }
+      if (!closed) errors.push('큰따옴표 식별자가 닫히지 않았습니다');
       const lit = src.slice(i, j);
       raw += lit; code += lit; i = j;
       continue;
@@ -211,6 +228,7 @@ function splitStatements(sql: string): SqlPiece[] {
       const close = src.indexOf(tag, bodyStart);
       if (close < 0) {
         // 닫히지 않은 인용. 여기서부터는 뜻을 알 수 없다
+        errors.push(`달러 인용 ${tag} 가 닫히지 않았습니다`);
         raw += src.slice(i); code += ' '; i = src.length;
         continue;
       }
@@ -227,7 +245,7 @@ function splitStatements(sql: string): SqlPiece[] {
     raw += src[i]; code += src[i]; i += 1;
   }
   flush();
-  return out;
+  return { pieces: out, errors };
 }
 
 /** PL/pgSQL 제어 흐름 — 실행 의미가 아니라 뼈대다 */
@@ -254,7 +272,12 @@ function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] 
   const danger: string[] = [];
   const unknown: string[] = [];
 
-  for (const piece of splitStatements(body)) {
+  const scan = splitStatements(body);
+  if (scan.errors.length > 0) {
+    return { risk: 'UNKNOWN', reasons: scan.errors.map(e => `DO 블록을 끝까지 읽지 못했습니다 — ${e}`) };
+  }
+
+  for (const piece of scan.pieces) {
     const st = piece.code.replace(/\s+/g, ' ').trim();
     if (!st || !/[A-Za-z]/.test(st)) continue;
 
@@ -283,10 +306,22 @@ function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] 
  * **판단하지 못한 것은 UNKNOWN이다.** '아마 괜찮겠지'가 데이터를 지운다.
  */
 export function classifyMigration(sql: string): MigrationClass {
-  const pieces = splitStatements(sql);
+  const scan = splitStatements(sql);
+
+  // **끝까지 읽지 못했으면 거기서 끝이다.**
+  //
+  // 인용이나 주석이 닫히지 않으면 그 뒤로는 무엇이 코드이고 무엇이 글자인지
+  // 알 수 없다. 앞쪽에서 `CREATE TABLE`을 이미 봤더라도 통과시키지 않는다 —
+  // 그것은 "안전하다"가 아니라 "앞부분만 읽었다"이다.
+  if (scan.errors.length > 0) {
+    return {
+      risk: 'UNKNOWN', autoApply: false,
+      reasons: [`SQL을 끝까지 읽지 못했습니다: ${Array.from(new Set(scan.errors)).join(' / ')}`],
+    };
+  }
 
   // 문장이 하나라도 있는가. 빈 파일을 '안전'으로 읽지 않는다.
-  const statements = pieces.filter(p => /[A-Za-z]/.test(p.code) || p.dollars.length > 0);
+  const statements = scan.pieces.filter(p => /[A-Za-z]/.test(p.code) || p.dollars.length > 0);
   if (statements.length === 0) {
     return { risk: 'UNKNOWN', reasons: ['실행할 문장을 찾지 못했습니다'], autoApply: false };
   }
