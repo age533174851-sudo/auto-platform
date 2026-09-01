@@ -14,6 +14,7 @@
 //   4. 자동으로 못 도는 마이그레이션이 몇 개인가 (있으면 사유를 적는다)
 //   5. 화면·응답이 사람에게 운영 숙제를 넘기지 않는가
 //   6. canonical 파일(001 · 076)의 target이 그대로인가 — 운영 채택 계약
+//   7. 공식 Supabase 재생 워크플로가 운영과 연결되지 않는가
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR } from './gen-migration-manifest.mjs';
@@ -187,6 +188,86 @@ const CHORE_PHRASES = [
     for (const p of c.foreignPolicies) {
       if (new RegExp(`\\bcreate\\s+policy\\s+${p.name}\\b`, 'i').test(sql)) {
         err(`${c.file}이 ${p.name}를 만듭니다 — 그것은 ${p.owner}의 책임입니다`);
+      }
+    }
+  }
+}
+
+// 7. 공식 Supabase 재생 워크플로는 로컬 전용이어야 한다
+//
+// `supabase-replay.yml`은 Docker 안 로컬 DB를 빈 상태에서 세워 보는 것이
+// 전부다. 그런데 이 도구는 **한 글자만 더 쓰면 운영 프로젝트에 붙는다** —
+// `supabase link`, `supabase db push`, `--linked`, `--db-url`,
+// `supabase migration repair`. 그중 하나라도 들어오면 "재생해 본다"가
+// "운영 스키마를 밀어 넣는다"로 바뀐다. 그 문장이 리뷰에서 눈에 안 띄는 날이
+// 언젠가 온다.
+//
+// 그래서 사람 눈 대신 여기서 막는다. secret을 아예 읽지 못하게 하는 것이
+// 가장 확실한 방법이라, `secrets.` 참조 자체를 금지한다 — 자격증명이 없으면
+// 실수로 운영에 붙을 수도 없다.
+//
+// 버전 고정도 여기서 본다. 움직이는 태그로 돌리면 "어제 통과한 것과 같은
+// 것을 돌렸다"고 말할 수 없다.
+{
+  const WF = '.github/workflows/supabase-replay.yml';
+  const SETUP_CLI_SHA = '46f7f98c7f948ad727d22c1e67fab04c223a0520';   // supabase/setup-cli v3.0.0
+  const CLI_VERSION = '2.116.0';
+
+  // 운영에 붙는 문장들. 하나라도 있으면 이 워크플로는 더 이상 로컬 전용이 아니다.
+  const REMOTE_COMMANDS = [
+    { re: /\bsupabase\s+link\b/i, why: '운영 프로젝트에 연결합니다' },
+    { re: /\bsupabase\s+db\s+push\b/i, why: '운영 DB에 마이그레이션을 밀어 넣습니다' },
+    { re: /\bsupabase\s+migration\s+repair\b/i, why: '적용 기록을 손으로 고칩니다' },
+    { re: /--linked\b/, why: '연결된 원격 프로젝트를 대상으로 삼습니다' },
+    { re: /--db-url\b/, why: '임의의 DB 주소를 대상으로 삼습니다' },
+  ];
+  // 운영 자격증명 이름. 이 워크플로는 하나도 읽지 않는다.
+  const FORBIDDEN_ENV = [
+    'SUPABASE_DB_URL', 'DATABASE_URL', 'POSTGRES_URL',
+    'SUPABASE_ACCESS_TOKEN', 'SUPABASE_PROJECT_ID', 'PROJECT_ID',
+  ];
+
+  let wf = null;
+  try { wf = readFileSync(join(process.cwd(), WF), 'utf8'); }
+  catch { err(`${WF}이 없습니다 — 공식 Supabase 재생 계약이 배선되지 않았습니다`); }
+
+  if (wf != null) {
+    // 주석에서 이 이름들을 설명할 수 있어야 하므로 주석은 빼고 본다.
+    const body = wf.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+    // **있어야 하는 것**은 step 이름에서 찾으면 안 된다. 이름에 적힌
+    // `supabase db reset`은 그 명령이 실제로 돈다는 증거가 아니다 — 이름만
+    // 남기고 명령을 바꿔치기해도 통과해 버린다. 그래서 필수 검사는 이름 줄을
+    // 뺀 본문에서만 본다. (금지 검사는 반대다. 이름에라도 있으면 걸리는 편이
+    // 안전하므로 본문 전체를 본다.)
+    const execBody = body.split('\n').filter(l => !/^\s*(?:-\s*)?name:/.test(l)).join('\n');
+
+    if (!execBody.includes(`supabase/setup-cli@${SETUP_CLI_SHA}`)) {
+      err(`${WF}이 supabase/setup-cli를 커밋 SHA로 고정하지 않았습니다 (기대 ${SETUP_CLI_SHA})`);
+      console.error('   → 움직이는 태그는 다시 가리킬 수 있어 같은 것을 돌렸다고 말할 수 없습니다.');
+    }
+    if (!new RegExp(`version:\\s*['"\`]?${CLI_VERSION.replace(/\./g, '\\.')}`).test(execBody)) {
+      err(`${WF}이 Supabase CLI를 ${CLI_VERSION}으로 고정하지 않았습니다`);
+    }
+    if (/version:\s*['"\`]?latest/i.test(body)) {
+      err(`${WF}이 CLI 버전으로 latest를 씁니다 — 어제와 같은 것을 돌렸다고 말할 수 없습니다`);
+    }
+
+    if (!/\bsupabase\s+db\s+reset\b/.test(execBody)) {
+      err(`${WF}에 supabase db reset이 없습니다 — 빈 DB에서 다시 세우는 것이 이 워크플로의 목적입니다`);
+    }
+    if (!/--no-seed\b/.test(execBody)) {
+      err(`${WF}에 --no-seed가 없습니다 — seed가 섞이면 스키마가 선 것과 데이터가 있는 것이 뒤엉킵니다`);
+    }
+
+    for (const c of REMOTE_COMMANDS) {
+      if (c.re.test(body)) err(`${WF}에 원격 명령이 있습니다 (${c.why}) — 이 워크플로는 로컬 전용이어야 합니다`);
+    }
+    if (/\$\{\{\s*secrets\./.test(body)) {
+      err(`${WF}이 secret을 읽습니다 — 자격증명이 없어야 실수로도 운영에 붙지 않습니다`);
+    }
+    for (const name of FORBIDDEN_ENV) {
+      if (new RegExp(`\\b${name}\\b`).test(body)) {
+        err(`${WF}이 ${name}을 참조합니다 — 운영 자격증명 이름은 이 워크플로에 있으면 안 됩니다`);
       }
     }
   }
