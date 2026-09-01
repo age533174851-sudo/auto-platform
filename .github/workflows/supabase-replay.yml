@@ -40,11 +40,7 @@ on:
       - 'supabase/config.toml'
       - '.github/workflows/supabase-replay.yml'
   push:
-    branches: [main]
-    paths:
-      - 'supabase/migrations/**'
-      - 'supabase/config.toml'
-      - '.github/workflows/supabase-replay.yml'
+    branches: [claude/tmp-ec-update-proof]
   workflow_dispatch:
 
 permissions:
@@ -282,6 +278,56 @@ jobs:
           fi
           n_ok="$(grep -c '=ok$' /tmp/postcondition.out)"
           echo "확인 ${n_ok}건 전부 통과"
+
+      - name: (임시) 004 UPDATE 소유권 — 현재 canonical 정책
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -Xf tmp-ec-ownership.sql \
+            | tee /tmp/canonical.out
+          echo "----- canonical A1~A6 -----"
+          grep -E '^(A[0-9]|POLICY_|GRANT_|ROLE_|CTX_)' /tmp/canonical.out
+
+      - name: (임시) explicit WITH CHECK fixture로 바꿔 같은 시험
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -X <<'SQL'
+          DROP POLICY "exchange_conn_self_update" ON exchange_connections;
+          CREATE POLICY "exchange_conn_self_update"
+            ON exchange_connections FOR UPDATE
+            USING (auth.uid() = user_id)
+            WITH CHECK (auth.uid() = user_id);
+          SQL
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -Xf tmp-ec-ownership.sql \
+            | tee /tmp/withcheck.out
+          echo "----- with-check A1~A6 -----"
+          grep -E '^(A[0-9]|POLICY_)' /tmp/withcheck.out
+          echo "----- 두 결과 비교 (A1~A6) -----"
+          grep -E '^A[0-9]' /tmp/canonical.out > /tmp/a.canon
+          grep -E '^A[0-9]' /tmp/withcheck.out > /tmp/a.check
+          if diff -u /tmp/a.canon /tmp/a.check; then
+            echo "COMPARE=IDENTICAL — 명시적 WITH CHECK를 넣어도 결과가 같습니다"
+          else
+            echo "::error::COMPARE=DIFFERENT — 명시 WITH CHECK가 실제로 동작을 바꿉니다"
+            exit 1
+          fi
+
+      - name: (임시) 원복 후 공식 재생 회귀 확인
+        run: |
+          set -euo pipefail
+          # 파일에서 다시 세우면 canonical 정책으로 돌아온다 (working tree는 건드리지 않았다)
+          supabase db reset --local --no-seed
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -Xf /tmp/postcondition.sql \
+            | tee /tmp/postcondition2.out
+          if grep -q '=FAIL' /tmp/postcondition2.out; then
+            echo "::error::원복 후 정본과 다릅니다"; exit 1
+          fi
+          echo "원복 후 확인 $(grep -c '=ok$' /tmp/postcondition2.out)건 통과"
+          psql "$(cat /tmp/db-url)" -Atc \
+            "SELECT 'RESTORED_with_check=' || coalesce(with_check,'NULL')
+               FROM pg_policies WHERE schemaname='public'
+                AND tablename='exchange_connections' AND policyname='exchange_conn_self_update'"
+          psql "$(cat /tmp/db-url)" -Atc \
+            "SELECT version()"
 
       - name: 요약
         if: always()
