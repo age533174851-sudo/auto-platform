@@ -12,8 +12,11 @@
 //   2. 번호가 겹치지 않는가
 //   3. src/lib/system/migrationManifest.ts가 최신인가
 //   4. 자동으로 못 도는 마이그레이션이 몇 개인가 (있으면 사유를 적는다)
+//   5. 화면·응답이 사람에게 운영 숙제를 넘기지 않는가
+//   6. 001의 target 아홉 개가 그대로인가 — 운영 채택 계약
 import { readFileSync, existsSync, globSync } from 'node:fs';
-import { buildManifest, renderManifest, OUT, LEGACY } from './gen-migration-manifest.mjs';
+import { join } from 'node:path';
+import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR } from './gen-migration-manifest.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`::error::${m}`); bad += 1; };
@@ -84,6 +87,73 @@ const CHORE_PHRASES = [
         if (c.re.test(line)) err(`${f}:${i + 1} — ${c.why}\n     ${t.slice(0, 110)}`);
       }
     });
+  }
+}
+
+// 6. kill-switch canonical(001)의 target 아홉 개
+//
+// **이 아홉 개는 운영 계약이다.** 운영 DB에는 이미 전부 있고(2026-08-31
+// read-only audit), runner의 채택 판정이 그 아홉을 찾으면 001은 실행 없이
+// BASELINE으로 기록된다. 하나라도 못 찾으면 **001이 실제로 실행되고**, 그
+// 안의 `drop policy if exists`가 운영 정책을 갈아엎는다.
+//
+// 일회용 PG에서 실증했다. `idx_tg_dedup` 하나만 지워도 채택이 거부되고
+// 001이 APPLIED로 실행되며 `ks_state_owner`의 OID가 바뀐다 — 지워졌다가
+// 다시 만들어졌다는 뜻이다.
+//
+// 그래서 이 파일의 target 이름은 혼자 바꿀 수 없다. 바꾸려면 운영 카탈로그를
+// 먼저 확인해야 한다. 판정 로직은 복제하지 않고 앱과 같은 파일을 쓴다.
+{
+  const FILE = '001_kill_switch_bootstrap.sql';
+  const EXPECTED = [
+    'table:kill_switch_state:kill_switch_state',
+    'table:kill_switch_log:kill_switch_log',
+    'table:telegram_alert_log:telegram_alert_log',
+    'table:worker_heartbeat:worker_heartbeat',
+    'table:worker_lock:worker_lock',
+    'index:kill_switch_state:idx_kill_switch_conn',
+    'index:telegram_alert_log:idx_tg_dedup',
+    'policy:kill_switch_state:ks_state_owner',
+    'policy:kill_switch_log:ks_log_owner',
+  ].sort();
+  // 022_rls_worker_tables.sql이 만드는 것들 — 001로 끌어오면 같은 판단이 두 곳에 생긴다
+  const BELONGS_TO_022 = ['worker_lock_service', 'worker_heartbeat_service',
+    'telegram_alert_log_service', 'kill_switch_log_service'];
+
+  let sql = null;
+  try { sql = readFileSync(join(MIG_DIR, FILE), 'utf8'); }
+  catch { err(`${FILE}이 없습니다 — kill-switch canonical 마이그레이션은 지우면 안 됩니다`); }
+
+  if (sql != null) {
+    const { classifyMigration, migrationTargets } = await loadPlan();
+
+    const cls = classifyMigration(sql);
+    if (cls.risk !== 'ADDITIVE' || !cls.autoApply) {
+      err(`${FILE}이 ${cls.risk}로 분류됩니다 (autoApply=${cls.autoApply}) — ${cls.reasons.join(' · ')}`);
+    }
+
+    const got = migrationTargets(sql).map(t => `${t.kind}:${t.table}:${t.name}`).sort();
+    const missing = EXPECTED.filter(x => !got.includes(x));
+    const extra = got.filter(x => !EXPECTED.includes(x));
+    if (missing.length) {
+      err(`${FILE}에서 사라진 target: ${missing.join(', ')}`);
+      console.error('   → 운영에서 채택이 거부되고 이 파일이 실제로 실행됩니다 (drop policy 포함).');
+    }
+    if (extra.length) {
+      err(`${FILE}에 늘어난 target: ${extra.join(', ')}`);
+      console.error('   → 운영 카탈로그에 없는 이름이면 마찬가지로 채택이 거부됩니다.');
+    }
+
+    // 빈 DB에서 혼자 서는가 — gen_random_uuid()를 쓰면서 확장을 남에게 맡기지 않는다
+    if (/gen_random_uuid\s*\(/i.test(sql) && !/\bCREATE\s+EXTENSION\b[\s\S]*?\bpgcrypto\b/i.test(sql)) {
+      err(`${FILE}이 gen_random_uuid()를 쓰면서 pgcrypto를 스스로 깔지 않습니다 — 빈 DB 재생이 실패합니다`);
+    }
+
+    for (const p of BELONGS_TO_022) {
+      if (new RegExp(`\\bcreate\\s+policy\\s+${p}\\b`, 'i').test(sql)) {
+        err(`${FILE}이 ${p}를 만듭니다 — 그것은 022_rls_worker_tables.sql의 책임입니다`);
+      }
+    }
   }
 }
 

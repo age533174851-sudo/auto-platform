@@ -40,7 +40,9 @@ export const LEGACY = {
   'RUN_PHASE_B_strategy.sql': '050 사본 — 번호 파일이 원본이다',
   'exchange_connections_rls.sql': '번호 체계 이전에 손으로 적용됨',
   'jobs.sql': '번호 체계 이전에 손으로 적용됨',
-  'kill_switch.sql': '번호 체계 이전에 손으로 적용됨',
+  // canonical 책임은 001_kill_switch_bootstrap.sql로 옮겼다. 이 파일은 운영이
+  // 실제로 거쳐 온 경로라 기록으로 남긴다 — 자동 파이프라인은 여전히 돌리지 않는다.
+  'kill_switch.sql': '번호 체계 이전에 손으로 적용됨 — 정본은 001_kill_switch_bootstrap.sql',
   'strategy_profiles.sql': '번호 체계 이전에 손으로 적용됨',
 };
 
