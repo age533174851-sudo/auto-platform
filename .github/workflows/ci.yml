@@ -249,6 +249,18 @@ jobs:
       - name: 모의 계좌 용량 (크기도 한도도 모의 장부에서)
         run: node scripts/check-paper-capacity.mjs
 
+      # ── 검사기가 함수 본문을 정확히 읽는가 ──
+      #
+      # 위 두 모의 검사기는 `paperCapacityOf`·`openPaperPosition`의 **본문**을
+      # 읽어 계약을 확인한다. 그런데 예전에는 중괄호를 세어 찾았고, 반환
+      # 타입이 직접 객체면(`function f(): { ok: boolean } { … }`) 타입 블록을
+      # 본문으로 읽었다. 그러면 검사기는 실제 본문을 보지도 않고 초록을 켠다.
+      #
+      # 지금은 TypeScript AST에게 묻는다. 그 파서가 옳게 읽는지를 여기서
+      # 검사한다 — 검사기를 검사하는 자리다.
+      - name: 함수 본문 파서 (반환 타입을 본문으로 읽지 않는다)
+        run: node scripts/check-function-body-parser.mjs
+
       # ── 전략 점검 플래그 검사 ──
       #
       # 레지스트리는 scalp의 점검 플래그를 `checkOnly`로 선언했고 화면은

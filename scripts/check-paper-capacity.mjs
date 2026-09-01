@@ -29,6 +29,7 @@
 // 사용: node scripts/check-paper-capacity.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { functionBodyOrFail } from './lib/function-body.mjs';
 
 const fails = [];
 const notes = [];
@@ -79,32 +80,6 @@ function stripSql(src) {
  * 이 저장소에서 네 번째로 만난 같은 고장이다. 반환 타입
  * `): Promise<{ … }> {`도 같은 이유로 건너뛴다.
  */
-function fnBodyAt(src, decl) {
-  const at = src.indexOf(decl);
-  if (at < 0) return '';
-  const paren = src.indexOf('(', at);
-  if (paren < 0) return '';
-  let depth = 0, i = paren;
-  for (; i < src.length; i++) {
-    if (src[i] === '(') depth++;
-    else if (src[i] === ')') { depth--; if (depth === 0) break; }
-  }
-  let from = i;
-  for (;;) {
-    const open = src.indexOf('{', from);
-    if (open < 0) return '';
-    depth = 0;
-    let close = -1;
-    for (let k = open; k < src.length; k++) {
-      if (src[k] === '{') depth++;
-      else if (src[k] === '}') { depth--; if (depth === 0) { close = k; break; } }
-    }
-    if (close < 0) return src.slice(open);
-    const after = src.slice(close + 1).match(/^\s*(.)/)?.[1] ?? '';
-    if (after === '>' || after === ',' || after === '|' || after === '&') { from = close + 1; continue; }
-    return src.slice(open, close + 1);
-  }
-}
 
 function braceBodyAt(src, from) {
   const open = src.indexOf('{', from);
@@ -126,7 +101,9 @@ const TEST = 'src/lib/engine/paperCapacity.test.ts';
 // ── 1. 모의 자산 조회 ──
 if (!existsSync(CAP)) fail(`${CAP}이 없습니다`);
 else {
-  const cap = stripJs(readFileSync(CAP, 'utf8'));
+  // 원문은 파서에게, 지운 것은 문자열 검사에게. 순서를 바꾸면 위치가 어긋난다.
+  const capRaw = readFileSync(CAP, 'utf8');
+  const cap = stripJs(capRaw);
   for (const fn of ['paperCapacityOf', 'capacityVerdict', 'readPaperCapacity']) {
     if (!new RegExp(`export (async )?function ${fn}\\b`).test(cap)) fail(`${CAP}에 ${fn}이 없습니다`);
   }
@@ -147,8 +124,8 @@ else {
   // ── 가용 예산은 **사용 중 증거금을 뺀 값**이다 ──
   //
   // 빼지 않으면 이미 물고 있는 만큼을 한 번 더 쓸 수 있게 된다.
-  const capOf = fnBodyAt(cap, 'export function paperCapacityOf');
-  if (!capOf) fail(`${CAP}에서 paperCapacityOf 본문을 찾지 못했습니다`);
+  const capOf = stripJs(functionBodyOrFail(capRaw, 'paperCapacityOf', fail, CAP));
+  if (!capOf) { /* 위에서 이미 사유를 적었다 */ }
   else if (!/available:\s*Math\.max\(\s*0\s*,\s*balance\s*-\s*used/.test(capOf)) {
     fail(`${CAP}이 가용 예산에서 사용 중 증거금을 빼지 않습니다`);
   }
@@ -156,10 +133,10 @@ else {
   //
   // `Number(balance) || 10000` 같은 한 줄이면 '모름'이 사라진다. 0도
   // 같이 지워진다 — 잔고 0은 확인된 사실이다.
-  for (const fn of ['export function paperCapacityOf', 'export async function readPaperCapacity']) {
-    const body = fnBodyAt(cap, fn);
+  for (const fn of ['paperCapacityOf', 'readPaperCapacity']) {
+    const body = stripJs(functionBodyOrFail(capRaw, fn, fail, CAP));
     for (const m of body.matchAll(/(?:\|\||\?\?)\s*(\d+(?:\.\d+)?)/g)) {
-      fail(`${CAP}의 ${fn.split(' ').pop()}가 숫자 기본값 ${m[1]}을 채웁니다`
+      fail(`${CAP}의 ${fn}가 숫자 기본값 ${m[1]}을 채웁니다`
         + ' — 모름과 0이 같이 사라집니다');
     }
   }
@@ -168,8 +145,8 @@ else {
     fail(`${CAP}이 빈 값을 0으로 접습니다 — Number(null)도 Number('')도 0입니다`);
   }
   // 용량 식에 수수료가 들어간다.
-  const verdict = fnBodyAt(cap, 'export function capacityVerdict');
-  if (!verdict) fail(`${CAP}에서 capacityVerdict 본문을 찾지 못했습니다`);
+  const verdict = stripJs(functionBodyOrFail(capRaw, 'capacityVerdict', fail, CAP));
+  if (!verdict) { /* 위에서 이미 사유를 적었다 */ }
   else if (!/usedMargin\s*\+\s*margin\s*\+\s*fee/.test(verdict.replace(/\bcap\./g, ''))) {
     fail(`${CAP}의 용량 식에 진입 수수료가 없습니다`
       + ' — 수수료는 같은 트랜잭션에서 잔고에서 빠집니다');
