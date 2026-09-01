@@ -15,9 +15,10 @@
 import React from 'react';
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { T } from '@/lib/constants';
+import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 
 export default function PanelToggle({
-  side, open, onToggle, size = 26,
+  side, open, onToggle, size = MIN_CONTROL_TARGET,
 }: {
   side: 'left' | 'right';
   open: boolean;
@@ -41,15 +42,23 @@ export default function PanelToggle({
       style={{
         background: 'transparent',
         border: `1px solid ${T.border}`,
-        borderRadius: 8,
+        borderRadius: 10,
+        /* **누르는 자리는 아이콘 크기와 다르다.**
+           예전에는 26×26이었고 "마우스가 있는 PC에서만 보인다"고 적어
+           두었다. 그런데 사이드바는 768px, 레일은 1024px부터 보인다 —
+           834×1194나 1024×768 태블릿은 손으로 누른다. 주석이 주장하는
+           것과 실제 노출 조건이 달랐고, 손가락에 26px은 너무 작다.
+
+           그래서 상자는 MIN_CONTROL_TARGET으로 잡고 아이콘만 작게 둔다.
+           값은 panelPrefs에 있다 — 접힌 레일 폭도 같은 값을 보므로
+           버튼만 커지고 칸은 그대로여서 삐져나오는 일이 없다. */
         width: size, height: size,
-        minHeight: size,          /* 전역 44px 규칙을 여기서만 낮춘다 —
-                                     이 버튼은 마우스가 있는 PC에서만 보인다 */
+        minWidth: size, minHeight: size,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         color: T.sub, cursor: 'pointer', flexShrink: 0, padding: 0,
       }}
     >
-      <Icon size={Math.round(size * 0.55)} strokeWidth={2.2} />
+      <Icon size={17} strokeWidth={2.2} />
     </button>
   );
 }

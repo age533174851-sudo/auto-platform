@@ -13,6 +13,7 @@ import {
   nextLeftMode, nextRightMode, railWidthFromKey, railWidthFromPointer,
   RAIL_MIN, RAIL_MAX, RAIL_DEFAULT, RAIL_COLLAPSED, RAIL_STEP,
   SIDEBAR_EXPANDED, SIDEBAR_WIDE, SIDEBAR_COMPACT, CENTER_MIN,
+  MIN_CONTROL_TARGET,
 } from './panelPrefs';
 
 export function runPanelPrefsTests() {
@@ -79,6 +80,21 @@ export function runPanelPrefsTests() {
     }
   });
 
+  test('1024에서도 접힌 뒤 가운데가 최소폭을 지킨다', () => {
+    // 접힌 폭을 34에서 48로 넓혔다. 가장 좁은 PC(1024)에서 그 14px이
+    // 가운데를 최소폭 아래로 밀지 않는지 확인한다.
+    const vw = 1024;
+    for (const left of ['expanded', 'compact'] as const) {
+      const sb = sidebarWidthFor(left, vw);
+      const shut = vw - sb - railWidthFor('collapsed', RAIL_DEFAULT);
+      assert(shut >= CENTER_MIN,
+        `${left}에서 접었을 때 가운데가 ${shut} — 최소(${CENTER_MIN})보다 좁다`);
+      // 접는 쪽이 항상 이득이어야 한다
+      const open = vw - sb - clampRailWidth(RAIL_DEFAULT, vw, sb);
+      assert(shut > open, `${left}에서 접었는데 가운데가 안 넓어졌다: ${open} → ${shut}`);
+    }
+  });
+
   test('NaN이 들어와도 화면이 그려질 수 있는 값을 돌려준다', () => {
     const got = clampRailWidth(Number.NaN, 1920, SIDEBAR_EXPANDED);
     assert(Number.isFinite(got) && got >= RAIL_MIN, `못 쓰는 값: ${got}`);
@@ -95,6 +111,31 @@ export function runPanelPrefsTests() {
     assert(shut < open, '접었는데 폭이 줄지 않았다');
     // 다만 0은 아니다. 0이면 다시 펴는 버튼이 본문 위에 떠야 한다.
     assert(shut > 0, '완전히 0이면 다시 펼 자리가 없다');
+  });
+
+  test('접힌 칸이 그 안의 버튼보다 좁지 않다', () => {
+    // 이 저장소에서 실제로 났던 고장: 접기 버튼을 26×26으로 만들어 놓고
+    // 주석에 "마우스가 있는 PC에서만 보인다"고 적었다. 사이드바는 768px,
+    // 레일은 1024px부터 보이므로 태블릿에서는 손으로 누른다.
+    //
+    // 그 다음 고장은 그것을 고치는 과정에서 난다 — 버튼만 40px로 키우고
+    // 칸은 34px로 두면 펼치기 버튼이 칸 밖으로 나간다. 그러면 음수 마진이나
+    // transform으로 덮고 싶어지고, 그건 이 작업이 없애려는 겹침이다.
+    //
+    // 그래서 둘의 관계를 값으로 잠근다. 픽셀을 정규식으로 묶는 것이 아니라
+    // **같은 상수를 보고 있다는 사실**을 확인한다.
+    assert(RAIL_COLLAPSED >= MIN_CONTROL_TARGET,
+      `접힌 레일(${RAIL_COLLAPSED})이 조작 최소 크기(${MIN_CONTROL_TARGET})보다 좁다`);
+    assert(SIDEBAR_COMPACT >= MIN_CONTROL_TARGET,
+      `접힌 사이드바(${SIDEBAR_COMPACT})가 조작 최소 크기(${MIN_CONTROL_TARGET})보다 좁다`);
+    // 딱 맞으면 여백이 0이라 버튼이 칸에 꽉 낀다. 좌우로 숨 쉴 자리를 둔다.
+    assert(RAIL_COLLAPSED - MIN_CONTROL_TARGET >= 4,
+      `접힌 레일에 좌우 여백이 없다: ${RAIL_COLLAPSED - MIN_CONTROL_TARGET}px`);
+  });
+
+  test('조작 최소 크기는 손가락이 누를 수 있는 값이다', () => {
+    // 40은 흔히 쓰는 하한이다. 이보다 작아지면 태블릿에서 오조작이 는다.
+    assert(MIN_CONTROL_TARGET >= 40, `조작 최소 크기가 너무 작다: ${MIN_CONTROL_TARGET}`);
   });
 
   test('사이드바 접기도 폭을 실제로 줄인다', () => {

@@ -58,6 +58,36 @@ function stripCssComments(t) {
 }
 const cssCode = stripCssComments(src[CSS]);
 
+/**
+ * JS/TSX에서 주석을 지운다.
+ *
+ * CSS에서 겪은 것과 같은 함정이 여기에도 있다. 토글이 공용 상수를 쓰는지
+ * 확인하려고 이름을 찾았는데, **설명 주석에 그 이름이 적혀 있어서**
+ * 상수를 안 쓰도록 되돌려 놓아도 통과했다. 검사기가 코드가 아니라 코드에
+ * 대한 설명을 보고 초록을 켠 것이다.
+ *
+ * 문자열 안의 `//`를 주석으로 읽지 않도록 인용 상태를 따라간다.
+ */
+function stripJsComments(t) {
+  const s = String(t);
+  let out = '', i = 0, q = null;
+  while (i < s.length) {
+    const c = s[i], d = s[i + 1];
+    if (q) {
+      if (c === '\\') { out += '  '; i += 2; continue; }
+      if (c === q) q = null;
+      out += c; i += 1; continue;
+    }
+    if (c === '/' && d === '/') { while (i < s.length && s[i] !== '\n') i += 1; continue; }
+    if (c === '/' && d === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1; i += 2; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; out += c; i += 1; continue; }
+    out += c; i += 1;
+  }
+  return out;
+}
+const toggleCode = stripJsComments(src[TOGGLE]);
+const prefsCode = stripJsComments(src[PREFS]);
+
 /* ── ① 저장 키는 panelPrefs에만 있다 ────────────────────────
    키를 컴포넌트에도 적으면 이름을 바꾼 날 한쪽만 바뀐다. 그러면
    저장은 새 키로, 읽기는 옛 키로 — 설정이 조용히 사라진다. */
@@ -139,6 +169,35 @@ for (const f of [TOGGLE, RESIZER, VIEW_TOGGLE, TILE]) {
   if (!/aria-label|aria-pressed/.test(src[f])) err(`${f}의 조작에 이름(aria-label)이 없습니다`);
 }
 if (!/aria-expanded/.test(src[TOGGLE])) err(`${TOGGLE}에 aria-expanded가 없습니다 — 지금 열려 있는지 낭독기가 알 수 없습니다`);
+// 누르는 자리 크기를 컴포넌트가 자기 마음대로 고르지 못하게 한다.
+//
+// 실제로 났던 고장: 토글을 26×26으로 만들고 "마우스가 있는 PC에서만
+// 보인다"고 주석을 달았는데, 사이드바는 768px·레일은 1024px부터 보여서
+// 태블릿에서는 손으로 눌러야 했다. 그 다음 고장은 그것을 고치는 쪽에서
+// 난다 — 버튼만 키우고 접힌 칸은 그대로 두면 칸 밖으로 나간다.
+//
+// **픽셀값을 여기서 세지 않는다.** 40을 44로 바꾸는 것은 고장이 아니다.
+// 확인하는 것은 버튼과 칸이 **같은 상수를 보고 있는가**이다.
+if (!/export const MIN_CONTROL_TARGET/.test(prefsCode)) {
+  err(`${PREFS}에 조작 최소 크기(MIN_CONTROL_TARGET)가 없습니다`);
+}
+// 가져오기만 해 놓고 안 쓰면 소용없다 — import와 사용을 둘 다 본다.
+if (!/import\s*\{[^}]*MIN_CONTROL_TARGET[^}]*\}\s*from\s*'[^']*panelPrefs'/.test(toggleCode)) {
+  err(`${TOGGLE}이 조작 최소 크기를 panelPrefs에서 가져오지 않습니다 — 크기가 두 곳에 있으면 한쪽만 커집니다`);
+}
+if (!/size\s*=\s*MIN_CONTROL_TARGET/.test(toggleCode)) {
+  err(`${TOGGLE}의 기본 크기가 MIN_CONTROL_TARGET이 아닙니다 — 누르는 자리가 계약보다 작아질 수 있습니다`);
+}
+if (!/RAIL_COLLAPSED\s*=\s*MIN_CONTROL_TARGET/.test(prefsCode)) {
+  err(`${PREFS}의 접힌 레일 폭이 조작 최소 크기와 이어져 있지 않습니다 — 버튼이 칸 밖으로 나갈 수 있습니다`);
+}
+// 칸 밖으로 나간 것을 덮어서 숨기는 수법을 막는다
+{
+  const collapsedRule = (cssCode.match(/\.aw\[data-right='collapsed'\][^{]*\{[^}]*\}/g) || []).join('\n');
+  if (/margin[^:]*:\s*-/.test(collapsedRule) || /transform\s*:/.test(collapsedRule)) {
+    err(`${CSS}의 접힌 레일이 음수 마진/transform으로 버튼을 밀어내고 있습니다 — 칸 안에 들어가야 합니다`);
+  }
+}
 if (!/role="separator"/.test(src[RESIZER])) err(`${RESIZER}에 role="separator"가 없습니다`);
 if (!/onPointerDown\s*=\s*\{/.test(src[RESIZER])) err(`${RESIZER}에 드래그가 배선돼 있지 않습니다`);
 // 마우스로만 잡을 수 있는 손잡이는 마우스를 쓰는 사람만의 기능이다

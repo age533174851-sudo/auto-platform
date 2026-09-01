@@ -34,12 +34,34 @@ export const RAIL_MIN = 240;
 export const RAIL_MAX = 420;
 export const RAIL_DEFAULT = 300;
 
-/** 접었을 때 남는 세로 띠. 0으로 만들지 않는 이유는 아래 주석 참조. */
-export const RAIL_COLLAPSED = 34;
+/**
+ * 손으로 누를 수 있는 조작의 최소 크기.
+ *
+ * **이 값이 여기 있는 이유**
+ * ──────────────────────────
+ * 처음에 접기 버튼을 26×26으로 만들고 주석에 "마우스가 있는 PC에서만
+ * 보인다"고 적었다. 그런데 CSS 계약은 그렇지 않다 — 사이드바는 768px,
+ * 오른쪽 레일은 1024px부터 보이고, 834×1194나 1024×768 태블릿은 **손으로
+ * 누른다.** 주석이 주장하는 것과 실제 노출 조건이 달랐다.
+ *
+ * 그래서 크기를 컴포넌트가 각자 고르게 두지 않는다. 여기 한 곳에 두고
+ * 버튼도 칸도 이 값을 본다. 그러면 "버튼은 키웠는데 칸은 그대로라
+ * 삐져나오는" 상태가 아예 만들어지지 않는다.
+ */
+export const MIN_CONTROL_TARGET = 40;
+
+/**
+ * 접었을 때 남는 세로 띠. 0으로 만들지 않는 이유는 아래 주석 참조.
+ *
+ * **버튼보다 좁을 수 없다.** 좁으면 펼치기 버튼이 칸 밖으로 나가고,
+ * 그것을 음수 마진이나 transform으로 덮는 것은 이번 작업이 없애려는
+ * 바로 그 겹침이다. 그래서 최소 크기 + 좌우 여백 4px씩으로 잡는다.
+ */
+export const RAIL_COLLAPSED = MIN_CONTROL_TARGET + 8;   // 48
 
 export const SIDEBAR_EXPANDED = 220;
 export const SIDEBAR_WIDE = 240; // 1440px 이상
-export const SIDEBAR_COMPACT = 64;
+export const SIDEBAR_COMPACT = 64;   // MIN_CONTROL_TARGET(40) + 좌우 12px씩
 
 /**
  * 가운데가 이보다 좁아지면 레일을 더 넓히지 않는다.
