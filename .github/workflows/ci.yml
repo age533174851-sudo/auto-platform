@@ -433,6 +433,12 @@ jobs:
       - name: UI Inventory 일관 (registry가 진실 · 문서는 생성물)
         run: node scripts/check-ui-inventory.mjs
 
+      # 버튼은 있는데 아무 일도 안 일어나는 것을 막는다. 접기 상태가
+      # 실제 칸 폭에 닿는가, 폭 판단이 한 곳에 있는가, 메뉴의 두 모양이
+      # 같은 데이터·같은 이동 함수를 쓰는가. 픽셀값은 보지 않는다.
+      - name: UI 껍데기 계약 (접기·폭 조절·보기 전환이 실제로 배선됐는가)
+        run: node scripts/check-ui-shell-contract.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 
