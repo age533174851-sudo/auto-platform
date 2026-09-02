@@ -60,16 +60,21 @@ export const NUM: React.CSSProperties = {
 
 /**
  * 글자 크기 단계.
- * 10px 아래로 내려가지 않는다 — 그 아래는 정보가 아니라 장식이다.
+ *
+ * **여기서 다시 선언하지 않는다.** 예전에는 이 파일에 micro~hero 숫자가
+ * 박혀 있었고, 앱 쪽(`components/ui/tokens.ts`의 F.*)에도 같은 크기가
+ * 따로 적혀 있었다. 같은 개념이 두 곳에 있으면 언젠가 한쪽만 바뀐다 —
+ * 이 저장소가 반복해서 겪은 고장이다.
+ *
+ * 정본은 `src/lib/ui/tokens.ts`이고 값은 그대로다(micro 10 … hero 20).
+ * 터미널이 쓰지 않는 단계가 정본에 더 있어도 화면은 달라지지 않는다.
+ *
+ * 터미널의 "10px 아래로 내려가지 않는다"는 규칙은 여전히 유효하다 —
+ * 정본의 `FS.nano`(9px)는 앱의 기존 사용처를 옮기기 위한 것이므로
+ * 터미널에서는 쓰지 않는다.
  */
-export const FS = {
-  micro: 10,   // 라벨·단위
-  small: 11,   // 표 본문
-  body:  12,   // 기본
-  lead:  13,   // 버튼·강조
-  num:   15,   // 가격
-  hero:  20,   // 대표 가격
-} as const;
+export { FS } from '@/lib/ui/tokens';
+import { FS } from '@/lib/ui/tokens';
 
 /** 패널 제목줄 */
 export const paneHead: React.CSSProperties = {

@@ -446,6 +446,13 @@ jobs:
       - name: UI 사실성 계약 (확인한 것만 말하는가)
         run: node scripts/check-ui-truth-claims.mjs
 
+      # 토큰 파일을 만들어 두고 아무도 안 쓰는 상태를 막는다. 정본이
+      # 하나인가, 테스트가 붙어 있고 실제로 도는가, 가장 많이 렌더되는
+      # primitive가 그 정본을 소비하는가. 인라인 스타일 개수는 세지 않는다 —
+      # 숫자로 잠그면 화면을 고칠 때마다 검사와 싸우게 된다.
+      - name: 디자인 토큰 계약 (정본이 하나이고 실제로 쓰이는가)
+        run: node scripts/check-design-tokens.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 
