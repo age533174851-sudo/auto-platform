@@ -3,7 +3,8 @@ import { A } from '@/lib/theme/colors';
 import React, { useState } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
-import { GraduationCap, Clock, CheckCircle2, PlayCircle } from 'lucide-react';
+import { GraduationCap, Clock, CheckCircle2, PlayCircle, AlertTriangle, Info } from 'lucide-react';
+import { splitParagraphs, parseEmphasis } from '@/lib/ui/richText';
 
 const LESSONS = [
   { id:1, title:'투자 기초: 주식 vs 코인', desc:'두 자산의 핵심 차이점', duration:'15분', level:'입문', done:true, banner:'stocks_vs_coins',
@@ -11,9 +12,40 @@ const LESSONS = [
   { id:2, title:'기술적 분석 기초', desc:'차트 읽는 법, 지지/저항', duration:'25분', level:'초급', done:true, banner:'chart',
     content:'지지선은 가격이 반등하는 구간, 저항선은 가격이 막히는 구간입니다. 캔들 패턴과 거래량을 함께 분석하세요.' },
   { id:3, title:'이동평균선(MA) 완전정복', desc:'SMA, EMA, MACD 활용법', duration:'20분', level:'초급', done:false, banner:'ma',
-    content:'SMA는 단순 이동평균, EMA는 지수 이동평균입니다. 골든크로스(단기MA > 장기MA)는 매수 시그널입니다.' },
+    content:'SMA(단순 이동평균)는 최근 N개 종가를 그냥 평균한 값이고, '
+      + 'EMA(지수 이동평균)는 최근 값에 더 큰 가중치를 줘서 가격 변화에 더 빨리 반응합니다.\n\n'
+      + '골든크로스는 상태가 아니라 사건입니다. '
+      + '단기 이동평균선이 장기 이동평균선을 **아래에서 위로 뚫고 지나가는 그 순간**을 가리킵니다. '
+      + '반대로 위에서 아래로 뚫고 내려가면 데드크로스라고 부릅니다.\n\n'
+      + '단기선이 장기선보다 위에 있는 상태(단기 > 장기)는 교차가 아니라 그 교차가 일어난 뒤의 배열입니다. '
+      + '이미 며칠, 몇 주 전에 교차가 끝났어도 이 부등식은 계속 참입니다.',
+    caveats:[
+      '이동평균은 지나간 가격을 평균한 값이라 항상 가격보다 늦게 움직입니다. 교차가 보일 때는 이미 움직인 뒤인 경우가 많습니다.',
+      '방향 없이 오르내리는 구간에서는 교차가 짧은 간격으로 반복해서 나타납니다.',
+      '교차가 났다는 것과 이후 가격이 오른다는 것은 다른 이야기입니다. 이 강의는 용어를 정의할 뿐, 매매 신호로 쓰라고 말하지 않습니다.',
+    ],
+    scope:'기간 설정(예: 20/60, 50/200)에 따라 교차 시점이 완전히 달라집니다. 어떤 조합이 옳다고 정해진 값은 없습니다.' },
   { id:4, title:'레버리지와 청산 이해', desc:'마진 거래의 위험성', duration:'30분', level:'중급', done:false, banner:'leverage',
-    content:'레버리지는 자본을 증폭시키지만 손실도 그만큼 커집니다. 청산가 = 진입가 ÷ (1 + 레버리지). 반드시 손절가를 설정하세요.' },
+    content:'레버리지는 내 돈을 불려 주는 것이 아닙니다. '
+      + '증거금을 담보로 잡고 **포지션 크기(명목가)**를 키우는 것입니다. '
+      + '100만원으로 10배 포지션을 잡으면 1,000만원어치를 움직이는 것이고, '
+      + '가격이 1% 움직이면 내 증거금은 10% 움직입니다. 이익도 손실도 같은 배율입니다.\n\n'
+      + '청산은 손실이 커져서 담보로 잡아 둔 증거금이 거래소가 요구하는 최소 수준 아래로 내려갈 때 '
+      + '거래소가 포지션을 강제로 닫는 것입니다.\n\n'
+      + '여기서 중요한 직관 하나: **레버리지가 높을수록 청산 가격이 진입 가격에 가까워집니다.** '
+      + '배율이 커질수록 견딜 수 있는 가격 변동 폭이 좁아지기 때문입니다.\n\n'
+      + '다만 청산 가격이 정확히 얼마인지는 이 화면이 계산해 드리지 않습니다. '
+      + '거래소마다, 계약 종류마다, 마진 모드마다 계산식이 다르기 때문입니다. '
+      + '실제 숫자는 거래소가 주문 화면에 표시하는 예상 청산가와 그 거래소의 공식 문서를 보세요.',
+    caveats:[
+      '청산은 손실이 확정되는 것이지 손실이 멈추는 안전장치가 아닙니다.',
+      '청산 가격은 고정된 값이 아닙니다. 증거금을 더 넣거나, 포지션을 줄이거나, 미실현 손익이 바뀌면 같이 움직입니다.',
+      '수수료와 펀딩비가 쌓이면 가격이 그대로여도 증거금이 줄어 청산에 가까워집니다.',
+      '급격한 변동 구간에서는 예상 청산가와 실제 체결 가격이 다를 수 있습니다.',
+    ],
+    scope:'교차 마진은 계좌의 다른 자산까지 담보로 함께 쓰므로 포지션 하나만 놓고 청산가를 구하는 단일 공식이 성립하지 않습니다. '
+      + '격리 마진이라도 유지증거금률, 수수료, 펀딩비, 선형/역 계약 여부에 따라 계산이 달라집니다. '
+      + '어떤 값을 쓰는지는 반드시 사용하는 거래소의 계약 명세에서 확인하세요.' },
   { id:5, title:'포트폴리오 분산 투자', desc:'위험 관리와 자산 배분', duration:'20분', level:'중급', done:false, banner:'portfolio',
     content:'달걀을 한 바구니에 담지 마세요. 코인 50%, 주식 30%, 현금 20% 같은 분산 전략이 리스크를 낮춥니다.' },
   { id:6, title:'스윙 트레이딩 전략', desc:'단기 추세 매매 방법', duration:'35분', level:'고급', done:false, banner:'swing',
@@ -214,6 +246,30 @@ function LessonBanner({ kind, color, h = 120 }: { kind: string; color: string; h
   );
 }
 
+/**
+ * 강의 본문.
+ *
+ * 문단(`\n\n`)과 강조(`**...**`)를 그대로 문자열로 그리면 문단이 한
+ * 덩어리로 붙고 별표가 화면에 남는다. 나누는 판단은 `richText`에 있고
+ * 테스트가 붙어 있다 — 여기서는 그 결과를 그리기만 한다.
+ */
+function LessonBody({ text }: { text: string }) {
+  const paras = splitParagraphs(text);
+  return (
+    <div style={{ color:T.sub, fontSize:14, lineHeight:1.8 }}>
+      {paras.map((p, i) => (
+        <p key={i} style={{ margin: i === 0 ? '0 0 12px' : '0 0 12px' }}>
+          {parseEmphasis(p).map((c, j) =>
+            c.strong
+              ? <strong key={j} style={{ color:T.txt, fontWeight:800 }}>{c.text}</strong>
+              : <span key={j}>{c.text}</span>
+          )}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 const LEVEL_COLOR: Record<string,string> = { '입문':'#10B981','초급':'#3B82F6','중급':'#F59E0B','고급':'#EF4444' };
 const STORE_KEY = 'tg_academy_v1';
 
@@ -278,10 +334,34 @@ export default function AcademyPage({ onHome }: { onHome?: () => void }) {
           {lesson.title}
         </div>
         <Card style={{ padding:'16px', marginBottom:14 }}>
-          <div style={{ color:T.sub, fontSize:14, lineHeight:1.8 }}>
-            {lesson.content}
-          </div>
+          <LessonBody text={lesson.content}/>
         </Card>
+        {/* 가정과 한계는 본문 뒤에 따로 적는다. 본문에 섞어 넣으면
+            읽는 사람이 "이 강의가 답을 준다"고 받아들이고 넘어간다. */}
+        {Array.isArray((lesson as any).caveats) && (lesson as any).caveats.length > 0 && (
+          <Card style={{ padding:'16px', marginBottom:14, borderColor:A(T.ylw,'40') }}>
+            <div style={{ color:T.ylw, fontWeight:800, fontSize:13, marginBottom:10,
+              display:'flex', alignItems:'center', gap:6 }}>
+              <AlertTriangle size={14}/> 함께 알아야 할 것
+            </div>
+            <ul style={{ margin:0, paddingLeft:18, color:T.sub, fontSize:13, lineHeight:1.8 }}>
+              {((lesson as any).caveats as string[]).map((c, i) => (
+                <li key={i} style={{ marginBottom:6 }}>{c}</li>
+              ))}
+            </ul>
+          </Card>
+        )}
+        {(lesson as any).scope && (
+          <Card style={{ padding:'16px', marginBottom:14 }}>
+            <div style={{ color:T.muted, fontWeight:800, fontSize:13, marginBottom:8,
+              display:'flex', alignItems:'center', gap:6 }}>
+              <Info size={14}/> 이 설명이 성립하는 범위
+            </div>
+            <div style={{ color:T.muted, fontSize:13, lineHeight:1.8 }}>
+              {(lesson as any).scope}
+            </div>
+          </Card>
+        )}
         <div style={{ display:'flex', gap:8 }}>
           {idx > 0 && (
             <button type="button" onClick={() => setOpen(LESSONS[idx-1].id)}

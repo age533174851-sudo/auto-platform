@@ -21,6 +21,7 @@
 // 규칙 하나: **못 읽으면 통과시키지 않는다.**
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripCssComments, stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
@@ -45,46 +46,11 @@ for (const f of FILES) {
 }
 if (bad) { console.error('\n검사할 파일을 못 읽었습니다. 여기서 멈춥니다.\n'); process.exit(1); }
 
-/**
- * CSS 주석을 지운다.
- *
- * **주석을 계약으로 읽으면 안 된다.** 이 검사를 처음 돌렸을 때
- * `minmax(0, 1fr)`을 전부 `1fr`로 바꿔 놓았는데도 통과했다. 원인은
- * 설명 주석에 그 문구가 적혀 있었던 것이다 — 검사기가 규칙이 아니라
- * 규칙에 대한 설명을 보고 초록을 켰다. 그건 통과가 아니라 고장이다.
- */
-function stripCssComments(t) {
-  return String(t).replace(/\/\*[\s\S]*?\*\//g, ' ');
-}
+/* 주석 제거는 `scripts/lib/strip-comments.mjs`에 있다.
+   여기에 한 벌 더 두면 언젠가 한쪽만 고쳐지고, 그때부터 그 검사기는
+   조용히 아무것도 막지 않는다. */
 const cssCode = stripCssComments(src[CSS]);
 
-/**
- * JS/TSX에서 주석을 지운다.
- *
- * CSS에서 겪은 것과 같은 함정이 여기에도 있다. 토글이 공용 상수를 쓰는지
- * 확인하려고 이름을 찾았는데, **설명 주석에 그 이름이 적혀 있어서**
- * 상수를 안 쓰도록 되돌려 놓아도 통과했다. 검사기가 코드가 아니라 코드에
- * 대한 설명을 보고 초록을 켠 것이다.
- *
- * 문자열 안의 `//`를 주석으로 읽지 않도록 인용 상태를 따라간다.
- */
-function stripJsComments(t) {
-  const s = String(t);
-  let out = '', i = 0, q = null;
-  while (i < s.length) {
-    const c = s[i], d = s[i + 1];
-    if (q) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === q) q = null;
-      out += c; i += 1; continue;
-    }
-    if (c === '/' && d === '/') { while (i < s.length && s[i] !== '\n') i += 1; continue; }
-    if (c === '/' && d === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1; i += 2; continue; }
-    if (c === '"' || c === "'" || c === '`') { q = c; out += c; i += 1; continue; }
-    out += c; i += 1;
-  }
-  return out;
-}
 const toggleCode = stripJsComments(src[TOGGLE]);
 const prefsCode = stripJsComments(src[PREFS]);
 

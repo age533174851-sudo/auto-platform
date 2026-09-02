@@ -13,7 +13,8 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   kindOf, KIND_FIELDS, showsTpSl, cardRowsOf, unwiredFieldsOf, UNKNOWN_TEXT,
-  activityOf, ACTIVITY_TONE, OPPORTUNITY_RATIO,
+  activityOf, ACTIVITY_TONE, OPPORTUNITY_RATIO, ACTIVITY_LABEL,
+  UNWIRED_ACTIVITY_LABEL, activityLabel, cardPerfLine, cardPerfInput,
   DEFAULT_FILTERS, filterCountsOf, passesFilter, ALL_ACTIVITIES,
   actionsOf, isCompact,
   moneyRowsOf, perfSummaryOf, MIN_TRADES_FOR_PERF,
@@ -22,6 +23,76 @@ import {
 } from './strategyCard';
 
 export function runStrategyCardTests() {
+  // ── 연결되지 않은 목록은 돌고 있다고 말하지 않는다 ──
+  test('예시 카드의 칸 이름에 "실행"이 없다', () => {
+    // 원래 고장: 봇 카드를 토글하면 배지가 '실행중'이 되고 머리줄이
+    // '실행중 1'이 됐는데, 서버에는 아무것도 등록되지 않았다.
+    for (const a of ALL_ACTIVITIES) {
+      const label = UNWIRED_ACTIVITY_LABEL[a];
+      assert(!label.includes('실행'), `${a}에서 실행중이라 말한다: ${label}`);
+    }
+  });
+
+  test('예시 목록임을 배지가 스스로 말한다', () => {
+    assert(UNWIRED_ACTIVITY_LABEL.RUNNING.includes('예시'),
+      `켜 둔 예시 카드가 예시라고 말하지 않는다: ${UNWIRED_ACTIVITY_LABEL.RUNNING}`);
+  });
+
+  // ── 연결되지 않은 목록은 성과 숫자를 내지 않는다 ──
+  test('서버에 안 붙은 카드는 0원이라고 적지 않는다', () => {
+    // 원래 고장: INITIAL_STRATS의 totalPnl=0 / trades=0을 카드가 그대로
+    // 그려서 '0원 · 거래 없음'이 됐다. 둘 다 확인된 사실이 아니다 —
+    // 서버에 물어본 적이 없으므로 손익도 거래 유무도 알 수 없다.
+    const line = cardPerfLine({ totalPnl: 0, winRate: 0, trades: 0 }, false);
+    eq(line.pnl, null);
+    eq(line.known, false);
+    assert(!line.sample.includes('거래 없음'), `거래가 없었다고 단정한다: ${line.sample}`);
+    assert(/확인할 수 없|미연결/.test(line.sample), `왜 없는지 말하지 않는다: ${line.sample}`);
+  });
+
+  test('연결되지 않았으면 성과 표에 값을 넘기지 않는다', () => {
+    eq(cardPerfInput({ winRate: 0, trades: 0 }, false), null);
+    // 0건을 넘기면 '표본 0건'이라고 적힌다 — 그것도 확인된 사실이 아니다
+    const wired = cardPerfInput({ winRate: 61, trades: 24 }, true);
+    eq(wired!.trades, 24);
+    eq(wired!.winRatePct, 61);
+  });
+
+  test('연결된 목록에서는 잰 값을 그대로 적는다', () => {
+    const line = cardPerfLine({ totalPnl: -12000, winRate: 44, trades: 9 }, true);
+    eq(line.pnl, -12000);
+    eq(line.sample, '승률 44% · 9건');
+    eq(line.known, true);
+  });
+
+  test('연결됐는데 거래가 0건이면 그때는 거래 없음이 맞다', () => {
+    eq(cardPerfLine({ totalPnl: 0, winRate: 0, trades: 0 }, true).sample, '거래 없음');
+  });
+
+  test('숫자가 아닌 값을 0으로 읽지 않는다', () => {
+    const a = cardPerfLine({ totalPnl: null, winRate: null, trades: null }, true);
+    eq(a.pnl, null);
+    assert(/확인할 수 없/.test(a.sample), `모르는 거래 수를 0으로 적는다: ${a.sample}`);
+    eq(cardPerfInput({ trades: undefined }, true), null);
+    // 거래는 있는데 승률만 모르는 경우
+    const b = cardPerfLine({ totalPnl: 5, winRate: 'x', trades: 3 }, true);
+    assert(b.sample.includes('3건') && /확인할 수 없/.test(b.sample), b.sample);
+  });
+
+  test('연결 여부를 넘겨야 이름이 정해진다', () => {
+    eq(activityLabel('RUNNING', true), ACTIVITY_LABEL.RUNNING);
+    eq(activityLabel('RUNNING', false), UNWIRED_ACTIVITY_LABEL.RUNNING);
+    // 실제로 도는 목록의 이름은 바뀌지 않았다
+    eq(ACTIVITY_LABEL.RUNNING, '실행중');
+  });
+
+  test('모든 칸에 이름이 있다 — 빈 배지를 그리지 않는다', () => {
+    for (const a of ALL_ACTIVITIES) {
+      assert(activityLabel(a, false).length > 0, `${a}: 이름 없음`);
+      assert(activityLabel(a, true).length > 0, `${a}: 이름 없음`);
+    }
+  });
+
   console.log('[전략 카드 — 전략마다 보는 것이 다르다]');
 
   test('타입을 종류로 옮긴다', () => {

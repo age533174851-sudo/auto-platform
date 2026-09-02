@@ -274,6 +274,34 @@ export const ACTIVITY_LABEL: Record<Activity, string> = {
 export type { Tone } from './display';
 import type { Tone } from './display';
 
+/**
+ * 실행기에 연결되지 않은 목록에서 쓰는 칸 이름.
+ *
+ * **왜 이름이 두 벌인가**
+ * ───────────────────────
+ * 자동매매 화면의 봇 카드 여섯 장은 이 화면의 React 상태일 뿐이다 —
+ * [시작]을 눌러도 주문이 나가지 않고 서버에 아무것도 등록되지 않는다.
+ * 그런데 칸 이름이 `실행중`이라, 토글 한 번에 화면이 "실행중 1"이라고
+ * 적었다. 안내 문구를 위에 붙여도 배지에 적힌 두 글자가 더 세게 읽힌다.
+ *
+ * 그래서 연결되지 않은 목록에서는 **돌고 있다고 말하지 않는 이름**을
+ * 쓴다. 진짜로 도는 것을 그리는 곳은 `ACTIVITY_LABEL`을 그대로 쓴다.
+ */
+export const UNWIRED_ACTIVITY_LABEL: Record<Activity, string> = {
+  RUNNING: '켜 둠(예시)', OPPORTUNITY: '기회 근접', WAITING: '대기',
+  STOPPED: '꺼 둠', ERROR: '오류',
+};
+
+/**
+ * 이 목록이 실행기에 연결돼 있는가에 따라 칸 이름을 고른다.
+ *
+ * 부르는 쪽이 `wired`를 넘겨야 하므로, 새 목록을 만들면서 이 질문을
+ * 건너뛸 수 없다.
+ */
+export function activityLabel(act: Activity, wired: boolean): string {
+  return wired ? ACTIVITY_LABEL[act] : UNWIRED_ACTIVITY_LABEL[act];
+}
+
 export const ACTIVITY_TONE: Record<Activity, Tone> = {
   RUNNING: 'good', OPPORTUNITY: 'warn', WAITING: 'muted',
   STOPPED: 'muted', ERROR: 'bad',
@@ -490,6 +518,88 @@ export function perfSummaryOf(p: StrategyPerf | null | undefined): PerfSummary {
       : enough ? ''
         : `표본 ${trades}건 — ${MIN_TRADES_FOR_PERF}건 미만은 우연일 수 있습니다`,
   };
+}
+
+/**
+ * 카드 머리줄에 적을 성과 한 줄.
+ *
+ * **왜 `wired`를 받는가**
+ * ───────────────────────
+ * 봇 카드 여섯 장의 `totalPnl` / `winRate` / `trades`는 전부 소스에
+ * 0으로 박혀 있는 값이다. 카드는 그것을 그대로 그려서 `0원` · `거래 없음`
+ * 이라고 적었다. 둘 다 **확인된 사실이 아니다** — 서버에 물어본 적이
+ * 없으므로 "손익이 0"도 "거래가 없었다"도 알 수 없다.
+ *
+ * 같은 화면 위쪽에서는 UNKNOWN을 0으로 적지 않으려고 지표를 지웠는데
+ * 카드 안에서는 같은 0이 살아 있었다. 한 화면에 규칙이 두 개면
+ * 언젠가 둘 다 무너진다.
+ *
+ * 그래서 연결 여부를 받는다. 연결되지 않은 목록에서는 숫자를 내지 않고,
+ * 왜 없는지를 적는다.
+ */
+export interface CardPerfLine {
+  /** 큰 자리에 적을 손익. 잰 값이 없으면 null이고 화면은 '—'를 그린다 */
+  pnl: number | null;
+  /** 그 아래 작은 줄 */
+  sample: string;
+  /** 숫자가 잰 값인가 */
+  known: boolean;
+}
+
+/**
+ * 잰 숫자만 숫자로 읽는다.
+ *
+ * `Number(null)`은 0이고 `Number('')`도 0이다. 그대로 쓰면 **값이 없는 것이
+ * 0원이 된다** — 이 파일이 없애려는 바로 그 문제를 읽는 쪽에서 다시
+ * 만든다. 실제로 처음 구현에서 이 실수를 했고 테스트가 잡았다.
+ */
+function measured(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  return null;
+}
+
+export function cardPerfLine(
+  p: { totalPnl?: unknown; winRate?: unknown; trades?: unknown } | null | undefined,
+  wired: boolean,
+): CardPerfLine {
+  // 실행기에 연결되지 않은 목록에는 잴 것이 없다. 0을 적으면 사용자는
+  // "돌았는데 못 벌었다"로 읽는다.
+  if (!wired) return { pnl: null, sample: '성과 확인할 수 없음 · 서버 미연결', known: false };
+
+  const v = p ?? {};
+  const pnl = measured(v.totalPnl);
+  const trades = measured(v.trades);
+
+  if (trades === null) {
+    return { pnl, sample: '거래 기록 확인할 수 없음', known: pnl !== null };
+  }
+  if (trades === 0) return { pnl, sample: '거래 없음', known: pnl !== null };
+
+  const wr = measured(v.winRate);
+  return {
+    pnl,
+    sample: wr === null ? `${trades}건 · 승률 확인할 수 없음` : `승률 ${wr}% · ${trades}건`,
+    known: pnl !== null,
+  };
+}
+
+/**
+ * 펼친 영역의 성과 표에 넘길 값.
+ *
+ * 연결되지 않은 목록에서는 **아무것도 넘기지 않는다.** `perfSummaryOf`는
+ * 값이 없으면 전부 '확인 못함'으로 그리고 그 이유를 적는다 — 0건을
+ * 넘겨서 "표본 0건"이라고 적게 하는 것과 다르다.
+ */
+export function cardPerfInput(
+  p: { winRate?: unknown; trades?: unknown } | null | undefined,
+  wired: boolean,
+): StrategyPerf | null {
+  if (!wired) return null;
+  const v = p ?? {};
+  const trades = measured(v.trades);
+  if (trades === null) return null;
+  const wr = measured(v.winRate);
+  return { winRatePct: trades > 0 ? wr : null, trades };
 }
 
 // ── 실행 환경이 카드에도 보여야 한다 ──────────────────────
