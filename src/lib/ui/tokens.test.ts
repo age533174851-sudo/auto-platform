@@ -7,11 +7,16 @@
 // 두 벌 있었다(앱 F.* / 터미널 FS.*).
 
 import { test, assert, eq } from '../../test/harness';
-import {
-  SP, R, FS, FW, LH, CONTROL, BP, BORDER_W,
-  isTouchSafe, showsSidebar, showsRail, inScale,
-} from './tokens';
+import { SP, R, FS, FW, CONTROL, BORDER_W } from './tokens';
 import { MIN_CONTROL_TARGET, SIDEBAR_COMPACT, RAIL_COLLAPSED } from './panelPrefs';
+
+/**
+ * 스케일에 있는 값인가.
+ *
+ * 정본에 있던 것을 여기로 옮겼다 — 검사에만 쓰였기 때문이다. 화면이
+ * 부르지 않는 함수를 정본에 두면 "쓰이는 것"과 "만들어 둔 것"이 섞인다.
+ */
+const inScale = (scale: Record<string, number>, v: number) => Object.values(scale).includes(v);
 
 const asc = (o: Record<string, number>) => {
   const v = Object.values(o);
@@ -28,8 +33,6 @@ export function runTokensTests() {
     assert(asc(SP), `SP가 오름차순이 아니다: ${JSON.stringify(SP)}`);
     assert(asc(FS), `FS가 오름차순이 아니다: ${JSON.stringify(FS)}`);
     assert(asc(FW), `FW가 오름차순이 아니다: ${JSON.stringify(FW)}`);
-    assert(asc(LH), `LH가 오름차순이 아니다: ${JSON.stringify(LH)}`);
-    assert(asc(BP), `BP가 오름차순이 아니다: ${JSON.stringify(BP)}`);
   });
 
   test('반지름은 pill을 빼고 오름차순이다', () => {
@@ -39,7 +42,7 @@ export function runTokensTests() {
   });
 
   test('값이 전부 유한한 숫자다 — NaN이 하나 섞이면 그 자리는 스타일이 통째로 빠진다', () => {
-    for (const [name, scale] of Object.entries({ SP, R, FS, FW, LH, CONTROL, BP })) {
+    for (const [name, scale] of Object.entries({ SP, R, FS, FW, CONTROL })) {
       for (const [k, v] of Object.entries(scale)) {
         assert(Number.isFinite(v), `${name}.${k}가 숫자가 아니다: ${v}`);
         assert(v > 0, `${name}.${k}가 0 이하다: ${v}`);
@@ -55,14 +58,6 @@ export function runTokensTests() {
     eq(CONTROL.min, MIN_CONTROL_TARGET);
   });
 
-  test('손으로 누를 수 있는지 값으로 판단한다', () => {
-    eq(isTouchSafe(MIN_CONTROL_TARGET), true);
-    eq(isTouchSafe(MIN_CONTROL_TARGET - 1), false);
-    eq(isTouchSafe(26), false);            // UI-1에서 되돌린 크기
-    eq(isTouchSafe(NaN), false);
-    eq(isTouchSafe(undefined as any), false);
-  });
-
   test('접힌 레일과 좁은 사이드바는 최소 타깃을 담을 수 있다', () => {
     // 칸이 버튼보다 좁으면 버튼이 칸 밖으로 나가고, 그것을 음수 마진으로
     // 덮는 것이 UI-1에서 금지된 바로 그 수법이다.
@@ -73,22 +68,6 @@ export function runTokensTests() {
   test('기본·큰 버튼은 최소 타깃을 넘는다', () => {
     assert(CONTROL.md >= CONTROL.min, `기본 버튼(${CONTROL.md})이 최소 타깃보다 작다`);
     assert(CONTROL.lg >= CONTROL.min, `큰 버튼(${CONTROL.lg})이 최소 타깃보다 작다`);
-  });
-
-  // ── 분기점은 CSS와 같은 숫자여야 한다 ─────────────────────
-  test('사이드바·레일 등장 경계가 CSS와 같다', () => {
-    // globals.css: .sb는 768px부터, .rp는 1024px부터.
-    eq(BP.md, 768);
-    eq(BP.lg, 1024);
-    eq(showsSidebar(767), false);
-    eq(showsSidebar(768), true);
-    eq(showsRail(1023), false);
-    eq(showsRail(1024), true);
-  });
-
-  test('폭을 모르면 보인다고 하지 않는다', () => {
-    eq(showsSidebar(NaN), false);
-    eq(showsRail(undefined as any), false);
   });
 
   // ── 실제 화면 값이 스케일 안에 있는가 ─────────────────────

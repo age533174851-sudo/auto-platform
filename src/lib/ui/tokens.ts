@@ -89,14 +89,6 @@ export const FW = {
   black:  900,
 } as const;
 
-/** 줄 간격. 실측 상위 네 개(1.5 · 1.6 · 1.45 · 1.8)를 이름 붙인 것이다. */
-export const LH = {
-  tight:   1.4,
-  normal:  1.5,
-  relaxed: 1.6,
-  loose:   1.8,
-} as const;
-
 /** 테두리 두께. 이 저장소는 전부 1px이다 — 굵기를 늘리는 대신 색을 낮춘다. */
 export const BORDER_W = 1;
 
@@ -118,46 +110,29 @@ export const CONTROL = {
   min: MIN_CONTROL_TARGET,
 } as const;
 
-/**
- * 화면 폭 분기점. globals.css의 미디어쿼리와 **같은 숫자**여야 한다.
- * JS가 이 값을 보고 판단하는데 CSS가 다른 값에서 바뀌면, 두 판단이
- * 어긋나는 구간이 생긴다.
- */
-export const BP = {
-  xs:  480,
-  sm:  640,
-  md:  768,   // 사이드바 등장
-  lg:  1024,  // 오른쪽 레일 등장
-  xl:  1440,  // 사이드바 넓힘
-} as const;
+/* ── 여기에 없는 것 ─────────────────────────────────────────
+   처음에는 화면 폭 분기점(BP)과 판단 함수(isTouchSafe·showsSidebar·
+   showsRail·inScale), 줄 간격(LH)도 여기 있었다. **전부 뺐다.**
 
-/* ── 판단 ─────────────────────────────────────────────────────
-   값만 모아 두면 "정본이 있다"고 말할 수는 있어도 아무도 안 쓴다.
-   실제로 필요한 판단을 같이 둬야 쓰인다. */
+   빼야 했던 이유는 하나다 — 쓰는 곳이 없었다.
 
-/**
- * 이 조작이 손으로 누르기에 충분한가.
- *
- * UI-1에서 26×26 버튼을 만들어 놓고 주석에 "PC 전용"이라고 적었다가
- * 되돌렸다. 노출 조건(768px·1024px)에는 손으로 누르는 태블릿이 들어
- * 있었다. 주석이 아니라 값으로 판단하게 한다.
- */
-export function isTouchSafe(size: number): boolean {
-  return Number.isFinite(size) && size >= CONTROL.min;
-}
+   · BP는 "globals.css의 미디어쿼리와 같은 숫자여야 한다"고 적어 뒀지만,
+     실제 JS 판단은 여전히 `panelPrefs.sidebarWidthFor()` 안의 literal
+     1440이었다. BP를 보는 코드가 하나도 없으니 CSS가 바뀌어도 아무 일도
+     안 일어난다. 게다가 테스트 이름은 "경계가 CSS와 같다"였는데 정작
+     globals.css를 읽지 않고 768·1024를 다시 적어서 비교했다 —
+     **자기가 적은 숫자를 자기가 확인하는 테스트**였다.
+   · showsSidebar·showsRail·isTouchSafe도 부르는 곳이 없었다.
+   · inScale은 테스트에서만 썼다. 테스트용 도구는 테스트 옆에 둔다.
+   · LH는 쓰는 곳이 없었고, 스케일이 실측과도 맞지 않았다. 실측 상위는
+     1.5(261) · 1.6(181) · 1.55(97) · 1.4(54)인데, 3위인 1.55가 스케일에
+     없고 9회뿐인 1.8이 들어 있었다. 1.55·1.7·1.45에 이름을 줄지 말지는
+     화면을 실제로 옮길 때 정할 일이지 지금 정할 일이 아니다.
 
-/**
- * 이 화면 폭에서 사이드바가 보이는가 / 오른쪽 레일이 보이는가.
- * CSS 미디어쿼리와 같은 경계를 JS도 쓰게 한다.
- */
-export function showsSidebar(viewportW: number): boolean {
-  return Number.isFinite(viewportW) && viewportW >= BP.md;
-}
-export function showsRail(viewportW: number): boolean {
-  return Number.isFinite(viewportW) && viewportW >= BP.lg;
-}
+   반응형 판단을 이 정본으로 옮기는 것은 실제 responsive 작업에서 한다.
+   그때는 CSS와 JS가 같은 것을 보게 만들고, 한쪽만 바뀌면 검사가
+   실패하게 만들어야 한다. 그 구조 없이 값만 여기 적어 두면
+   "정본이라고 적어 둔 상수"가 하나 더 생길 뿐이다.
 
-/** 스케일에 있는 값인가. 검사기와 테스트가 쓴다. */
-export function inScale<T extends Record<string, number>>(scale: T, v: number): boolean {
-  return Object.values(scale).includes(v);
-}
+   지금 화면 폭 소유권은 그대로다: CSS는 globals.css, JS 껍데기 치수는
+   panelPrefs. */

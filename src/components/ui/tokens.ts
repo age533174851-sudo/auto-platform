@@ -17,10 +17,9 @@
 // ─────────────────────────────────────────────────────────────
 
 import { T } from '@/lib/constants';
-import { SP, R, FS, FW, LH, CONTROL, BP, BORDER_W } from '@/lib/ui/tokens';
+import { SP, R, FS, FW, CONTROL, BORDER_W } from '@/lib/ui/tokens';
 
-export { SP, R, FS, FW, LH, CONTROL, BP, BORDER_W };
-export { isTouchSafe, showsSidebar, showsRail, inScale } from '@/lib/ui/tokens';
+export { SP, R, FS, FW, CONTROL, BORDER_W };
 
 /**
  * 타이포 위계 — 크기·굵기·색을 묶은 것.

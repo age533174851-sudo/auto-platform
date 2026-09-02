@@ -21,7 +21,8 @@
 // 스케일 값이 두 곳에 중복 선언돼 있지 않은가, 대표 사용처가 실제로
 // 정본을 소비하는가.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = false;
@@ -50,7 +51,7 @@ const need = (f, re, msg) => { if (!has(f, re)) err(`${f}: ${msg}`); };
 /* ── ① 숫자 정본이 존재하고 테스트가 붙어 있다 ────────────────
    테스트 없는 정본은 "정본이라고 적어 둔 파일"이다. 값이 갈라져도
    아무도 모르고, 그게 이 저장소에서 실제로 일어난 일이다. */
-const SCALES = ['SP', 'R', 'FS', 'FW', 'LH', 'CONTROL', 'BP'];
+const SCALES = ['SP', 'R', 'FS', 'FW', 'CONTROL'];
 for (const name of SCALES) {
   need(CORE, new RegExp(`export const ${name}\\s*=`), `${name} 스케일이 정본에 없습니다`);
 }
@@ -145,7 +146,42 @@ for (const [name, vals] of Object.entries(must)) {
   }
 }
 
-/* ── ⑦ 기존 계약을 약화시키지 않았다 ──────────────────────────
+/* ── ⑦ 정본에 쓰이지 않는 것을 두지 않는다 ────────────────────
+   **이 검사가 이번에 실제로 필요했다.** 처음 만들 때 정본에 BP(화면 폭
+   분기점) · LH(줄 간격) · isTouchSafe · showsSidebar · showsRail ·
+   inScale을 넣었는데, 여섯 개 전부 부르는 곳이 없었다. BP는 "CSS와 같은
+   숫자여야 한다"고 적어 뒀지만 실제 JS 판단은 panelPrefs의 literal
+   1440을 보고 있었고, 테스트는 globals.css를 읽지도 않으면서 "CSS와
+   같다"는 이름을 달고 있었다 — 자기가 적은 숫자를 자기가 확인했다.
+
+   쓰이지 않는 토큰은 정본이 아니라 장식이다. 그리고 "언젠가 쓸 것"으로
+   남겨 두면 다음 사람이 그것을 진짜 계약으로 믿는다. */
+{
+  const exported = [...code[CORE].matchAll(/export const ([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1])
+    .concat([...code[CORE].matchAll(/export function ([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1]));
+  const consumers = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir)) {
+      const p = join(dir, e);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.tsx?$/.test(p) && p !== CORE && p !== CORE_TST) consumers.push(p);
+    }
+  };
+  walk('src');
+  const body = consumers.map(f => stripJsComments(readFileSync(f, 'utf8'))).join('\n');
+  for (const name of exported) {
+    // 객체 스케일은 `NAME.` 로, 스칼라/함수는 이름 그대로 쓰인다.
+    // import 줄만 있고 실제 사용이 없는 경우를 세지 않도록 import 문은 뺀다.
+    const used = new RegExp(`(?<!import[^\\n]{0,200})\\b${name}\\b\\s*[.(\`,)}\\]]`).test(
+      body.split('\n').filter(l => !/^\s*import\b/.test(l)).join('\n'));
+    if (!used) {
+      err(`${CORE}: ${name}을 내보내지만 화면에서 쓰는 곳이 없습니다 — `
+        + '쓰이지 않는 토큰은 정본이 아니라 장식입니다. 실제로 배선하거나 빼세요');
+    }
+  }
+}
+
+/* ── ⑧ 기존 계약을 약화시키지 않았다 ──────────────────────────
    디자인 정리를 핑계로 UI-1·UI-3A 검사를 우회하거나 지우면 안 된다. */
 const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
 for (const s of ['check-ui-shell-contract.mjs', 'check-ui-truth-claims.mjs', 'check-design-tokens.mjs']) {
