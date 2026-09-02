@@ -4,7 +4,11 @@ import { MODE_LABEL, type ThemeMode } from '@/lib/theme/themeMode';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { Asset } from '@/types';
-import { T, CURRENCIES, LANGS, I18N, MOCK_NEWS, RTL_LANGS } from '@/lib/constants';
+import { T, CURRENCIES, LANGS, I18N, RTL_LANGS } from '@/lib/constants';
+import {
+  toFeed, errorFeed, feedTitle, feedBadge, itemTime, itemSource,
+  LOADING_FEED, type NewsFeed,
+} from '@/lib/news/feed';
 import { gS, sS, cvt, fmtPct } from '@/lib/utils';
 import { ASSETS } from '@/data/assets';
 import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
@@ -490,6 +494,23 @@ export default function App() {
   const toggleLeft  = useCallback(()=>{ setLeftMode(m=>{ const n=nextLeftMode(m);  saveLeftMode(n);  return n; }); },[]);
   const toggleRight = useCallback(()=>{ setRightMode(m=>{ const n=nextRightMode(m); saveRightMode(n); return n; }); },[]);
   const commitRail  = useCallback((w:number)=>{ setRailW(w); saveRailWidth(w); },[]);
+
+  /* ── 오른쪽 레일 뉴스도 서버에서 읽는다 ──
+     홈과 이 레일이 같은 `MOCK_NEWS` 상수를 그리고 있었다. 한쪽만 고치면
+     같은 거짓이 다른 화면에 남는다. 판정은 lib/news/feed 한 곳이다. */
+  const [railFeed,setRailFeed]=useState<NewsFeed>(LOADING_FEED);
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      try{
+        const r=await fetch('/api/news?action=latest&cat=general',{signal:AbortSignal.timeout(12000)});
+        const j=await r.json().catch(()=>null);
+        if(!alive) return;
+        setRailFeed(r.ok ? toFeed(j) : errorFeed(`뉴스를 읽지 못했습니다 (HTTP ${r.status})`));
+      }catch{ if(alive) setRailFeed(errorFeed()); }
+    })();
+    return()=>{alive=false;};
+  },[]);
   const [simpleMode,setSimpleMode]=useState(()=>{ try { return localStorage.getItem('tg_simple_mode')==='true'; } catch { return false; } });
   // SSR-safe: start with defaults, load from localStorage after mount
   const [lang,setLang]           = useState('ko');
@@ -1257,13 +1278,27 @@ export default function App() {
               <div style={{textAlign:'right'}}><div style={{color:T.txt,fontSize:10,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontWeight:700}}>{cvt(a.p,currency)}</div><div style={{color:a.c>=0?T.grn:T.red,fontSize:10,fontWeight:700}}>{fmtPct(a.c)}</div></div>
             </div>
           ))}
-          <div style={{marginTop:16,fontWeight:800,fontSize:13,color:T.txt,marginBottom:10,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}} onClick={()=>nav('news')}><Newspaper size={14} strokeWidth={2.2}/> 뉴스 <span style={{marginLeft:'auto',color:T.acl,fontSize:10}}>전체 ›</span></div>
-          {MOCK_NEWS.slice(0,3).map(n=>(
+          <div style={{marginTop:16,fontWeight:800,fontSize:13,color:T.txt,marginBottom:6,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}} onClick={()=>nav('news')}>
+            <Newspaper size={14} strokeWidth={2.2}/> {feedTitle(railFeed.provenance)}
+            {feedBadge(railFeed.provenance)&&(
+              <span style={{background:A(T.ylw,'20'),color:T.ylw,border:`1px solid ${A(T.ylw,'40')}`,fontSize:9,fontWeight:800,padding:'1px 5px',borderRadius:99}}>{feedBadge(railFeed.provenance)}</span>
+            )}
+            <span style={{marginLeft:'auto',color:T.acl,fontSize:10}}>전체 ›</span>
+          </div>
+          {railFeed.note&&(
+            <div style={{color:T.muted,fontSize:9,marginBottom:8,lineHeight:1.45,overflowWrap:'anywhere'}}>{railFeed.note}</div>
+          )}
+          {railFeed.items.slice(0,3).map(n=>(
             <div key={n.id} onClick={()=>nav('news')} role="button" tabIndex={0}
               onKeyDown={(e)=>{ if(e.key==='Enter'){nav('news');} }}
               style={{padding:'8px 0',borderBottom:`1px solid ${T.border}`,cursor:'pointer'}}>
               <div style={{color:T.txt,fontSize:11,fontWeight:600,lineHeight:1.4,marginBottom:2}}>{n.title}</div>
-              <div style={{color:T.muted,fontSize:9}}>{n.time} · {n.source}</div>
+              {/* 예시 기사에는 시각·매체를 적지 않는다 */}
+              {(itemTime(railFeed.provenance,n.time)||itemSource(railFeed.provenance,n.source))&&(
+                <div style={{color:T.muted,fontSize:9}}>
+                  {[itemTime(railFeed.provenance,n.time),itemSource(railFeed.provenance,n.source)].filter(Boolean).join(' · ')}
+                </div>
+              )}
             </div>
           ))}
           </div>

@@ -1,7 +1,11 @@
 'use client';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
+import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, ECON_EVENTS } from '@/lib/constants';
+import {
+  toFeed, errorFeed, feedTitle, feedBadge, itemTime, itemSource,
+  LOADING_FEED, type NewsFeed,
+} from '@/lib/news/feed';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 // 지갑 숫자는 **USD 기준**이다. cvt()는 입력이 KRW라고 가정하므로
 // 여기 쓰면 원화 기호만 붙거나 환율로 나눠 버린다 — 둘 다 몇 배 틀린다.
@@ -94,6 +98,31 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
     ? (autoPlan.code==='IDLE' ? '정지' : autoPlan.code==='HEALTHY' ? '실행중' : '확인 필요')
     : (autoErr ? '확인 못 함' : '읽는 중…');
   const autoNote = autoPlan?.headline ?? (autoErr ? '자동매매 상태를 읽지 못했습니다' : '');
+
+  /* ── 뉴스는 서버에서 읽는다 ──
+     예전에는 `MOCK_NEWS` 상수를 그대로 그리면서 제목을 '최신 뉴스'라고
+     적었다. 그 안에는 실제 매체명(CoinDesk·Reuters)과 실제 주소, 구체적인
+     가격, 그리고 언제 열어도 "5분 전"인 시각이 들어 있었다. 예시라는
+     표시는 어디에도 없었다.
+
+     라우트는 이미 출처를 알려 준다 — 공급자에서 못 받으면
+     `source: 'mock'`으로 답한다. 그동안 화면이 그 필드를 안 봤을 뿐이다.
+     판정과 문구는 lib/news/feed에 있고 테스트가 붙어 있다. */
+  const [feed,setFeed]=useState<NewsFeed>(LOADING_FEED);
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      try{
+        const r=await fetch('/api/news?action=latest&cat=general',{signal:AbortSignal.timeout(12000)});
+        const j=await r.json().catch(()=>null);
+        if(!alive) return;
+        setFeed(r.ok ? toFeed(j) : errorFeed(`뉴스를 읽지 못했습니다 (HTTP ${r.status})`));
+      }catch{
+        if(alive) setFeed(errorFeed());
+      }
+    })();
+    return()=>{alive=false;};
+  },[]);
 
   // top5 자산의 로고 batch 로드
   const logoSymbols = useMemo(() => {
@@ -266,20 +295,34 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
         ))}
       </Card>
 
-      {/* ── 최신 뉴스 (가볍게) ── */}
+      {/* ── 뉴스 ──
+          제목이 출처를 따라간다. 실물일 때만 '최신 뉴스'다. */}
       <Card style={{padding:'14px 16px',marginBottom:12}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-          <span style={{color:T.txt,fontWeight:700,fontSize:13}}>최신 뉴스</span>
-          <span onClick={()=>onNav('news')} style={{color:T.acl,fontSize:11,fontWeight:700,cursor:'pointer'}}>더보기 ›</span>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,gap:8}}>
+          <span style={{display:'flex',alignItems:'center',gap:6,minWidth:0}}>
+            <span style={{color:T.txt,fontWeight:700,fontSize:13}}>{feedTitle(feed.provenance)}</span>
+            {feedBadge(feed.provenance)&&(
+              <span style={{background:A(T.ylw,'20'),color:T.ylw,border:`1px solid ${A(T.ylw,'40')}`,fontSize:9,fontWeight:800,padding:'1px 6px',borderRadius:99}}>
+                {feedBadge(feed.provenance)}
+              </span>
+            )}
+          </span>
+          <span onClick={()=>onNav('news')} style={{color:T.acl,fontSize:11,fontWeight:700,cursor:'pointer',flexShrink:0}}>더보기 ›</span>
         </div>
-        {MOCK_NEWS.slice(0,3).map((n,i)=>(
+        {feed.note&&(
+          <div style={{color:T.muted,fontSize:10,marginBottom:8,lineHeight:1.45,overflowWrap:'anywhere'}}>{feed.note}</div>
+        )}
+        {feed.items.slice(0,3).map((n,i)=>(
           <div key={n.id} role="button" tabIndex={0}
-            onClick={()=>setSelectedNews({...n,publishedAt:n.time,summary:(n as any).summary||n.title,content:(n as any).content||(n as any).summary||n.title,tickers:Array.isArray((n as any).tickers)?(n as any).tickers:[]})}
-            style={{padding:'10px 8px',margin:'0 -8px',borderRadius:8,borderBottom:i<2?`1px solid ${T.border}`:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:8}}>
+            onClick={()=>setSelectedNews({...(n as any),publishedAt:n.time,summary:n.summary||n.title,content:n.content||n.summary||n.title,tickers:n.tickers||[]})}
+            style={{padding:'10px 8px',margin:'0 -8px',borderRadius:8,borderBottom:i<Math.min(feed.items.length,3)-1?`1px solid ${T.border}`:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:8}}>
             <div style={{flex:1,minWidth:0}}>
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
                 <Bdg c={n.sentiment==='bullish'?T.grn:T.red} ch={n.category}/>
-                <span style={{color:T.muted,fontSize:10}}>{n.time}</span>
+                {/* 예시 기사에는 시각·매체를 적지 않는다 — 방금 들어온
+                    기사처럼 보이고, 그 매체가 낸 것처럼 읽힌다. */}
+                {itemTime(feed.provenance,n.time)&&<span style={{color:T.muted,fontSize:10}}>{itemTime(feed.provenance,n.time)}</span>}
+                {itemSource(feed.provenance,n.source)&&<span style={{color:T.muted,fontSize:10}}>· {itemSource(feed.provenance,n.source)}</span>}
               </div>
               <div style={{color:T.txt,fontSize:12,fontWeight:600,lineHeight:1.4}}>{n.title}</div>
             </div>

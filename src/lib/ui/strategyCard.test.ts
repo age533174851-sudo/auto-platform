@@ -13,7 +13,8 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   kindOf, KIND_FIELDS, showsTpSl, cardRowsOf, unwiredFieldsOf, UNKNOWN_TEXT,
-  activityOf, ACTIVITY_TONE, OPPORTUNITY_RATIO,
+  activityOf, ACTIVITY_TONE, OPPORTUNITY_RATIO, ACTIVITY_LABEL,
+  UNWIRED_ACTIVITY_LABEL, activityLabel,
   DEFAULT_FILTERS, filterCountsOf, passesFilter, ALL_ACTIVITIES,
   actionsOf, isCompact,
   moneyRowsOf, perfSummaryOf, MIN_TRADES_FOR_PERF,
@@ -22,6 +23,35 @@ import {
 } from './strategyCard';
 
 export function runStrategyCardTests() {
+  // ── 연결되지 않은 목록은 돌고 있다고 말하지 않는다 ──
+  test('예시 카드의 칸 이름에 "실행"이 없다', () => {
+    // 원래 고장: 봇 카드를 토글하면 배지가 '실행중'이 되고 머리줄이
+    // '실행중 1'이 됐는데, 서버에는 아무것도 등록되지 않았다.
+    for (const a of ALL_ACTIVITIES) {
+      const label = UNWIRED_ACTIVITY_LABEL[a];
+      assert(!label.includes('실행'), `${a}에서 실행중이라 말한다: ${label}`);
+    }
+  });
+
+  test('예시 목록임을 배지가 스스로 말한다', () => {
+    assert(UNWIRED_ACTIVITY_LABEL.RUNNING.includes('예시'),
+      `켜 둔 예시 카드가 예시라고 말하지 않는다: ${UNWIRED_ACTIVITY_LABEL.RUNNING}`);
+  });
+
+  test('연결 여부를 넘겨야 이름이 정해진다', () => {
+    eq(activityLabel('RUNNING', true), ACTIVITY_LABEL.RUNNING);
+    eq(activityLabel('RUNNING', false), UNWIRED_ACTIVITY_LABEL.RUNNING);
+    // 실제로 도는 목록의 이름은 바뀌지 않았다
+    eq(ACTIVITY_LABEL.RUNNING, '실행중');
+  });
+
+  test('모든 칸에 이름이 있다 — 빈 배지를 그리지 않는다', () => {
+    for (const a of ALL_ACTIVITIES) {
+      assert(activityLabel(a, false).length > 0, `${a}: 이름 없음`);
+      assert(activityLabel(a, true).length > 0, `${a}: 이름 없음`);
+    }
+  });
+
   console.log('[전략 카드 — 전략마다 보는 것이 다르다]');
 
   test('타입을 종류로 옮긴다', () => {

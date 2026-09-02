@@ -14,6 +14,11 @@ import { loadSettings as loadRiskSettings, MODE_LABEL } from '@/lib/risk/store';
 import { Shield, Edit3, ChevronRight } from 'lucide-react';
 import AutoStatusBoard from '../AutoStatusBoard';
 import AutotradeControl from '../AutotradeControl';
+import {
+  stopTargets, summarize, unknownResult, headline as stopHeadline,
+  boundaryNote as stopBoundary, isAlarming as stopAlarming,
+  IDLE_RESULT, type GlobalStopResult, type StopOutcome,
+} from '@/lib/autotrade/globalStop';
 import StrategyIntelligence from '../StrategyIntelligence';
 import RegimeFilterPanel from '../RegimeFilterPanel';
 import EnginePanel from '../EnginePanel';
@@ -38,7 +43,7 @@ import MetaStrategyPanel from '../MetaStrategyPanel';
 import AuditLogPanel from '../AuditLogPanel';
 import {
   kindOf, KIND_LABEL, showsTpSl, cardRowsOf, unwiredFieldsOf, edgeRowOf,
-  activityOf, ACTIVITY_LABEL, ACTIVITY_TONE, DEFAULT_FILTERS,
+  activityOf, activityLabel, ACTIVITY_TONE, DEFAULT_FILTERS,
   filterCountsOf, passesFilter, ALL_ACTIVITIES,
   actionsOf, isCompact, envLineOf, perfSummaryOf, moneyRowsOf,
   type Activity, type Tone as CardTone,
@@ -58,6 +63,16 @@ const STRAT_INFO:Record<StratType,{label:string;icon:string;color:string;desc:st
   funding_rate:  {label:'펀딩비 전략',     icon:'💸',color:'#F59E0B',desc:'펀딩비 과열 시 롱/숏 비용 구조 활용'},
   ai_strategy:   {label:'AI 전략',         icon:'🤖',color:'#8B5CF6',desc:'시장 국면 AI 신호 기반 자동매매'},
 };
+
+/**
+ * 아래 봇 카드 목록이 실행기에 연결돼 있는가.
+ *
+ * **false다.** [시작]을 눌러도 이 화면의 React 상태만 바뀌고 주문은
+ * 나가지 않는다. 이 값이 배지·필터 칸의 이름을 고른다 — 그래서 나중에
+ * 진짜 서버 목록을 붙이는 사람이 이 한 줄을 바꾸지 않고서는 '실행중'
+ * 이라는 말을 화면에 띄울 수 없다.
+ */
+const STRAT_LIST_WIRED = false;
 
 const INITIAL_STRATS:Strategy[] = [
 // **이것들은 돌고 있는 봇이 아니라 전략 '틀'이다.**
@@ -155,17 +170,48 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
   const [runs]=useState<BotRun[]>(INITIAL_RUNS);
   const [riskEvents]=useState<RiskEvent[]>(INITIAL_RISK_EVENTS);
   const [execMode,setExecMode]=useState<ExecMode>('paper');
-  const [globalStop,setGlobalStop]=useState(false);
+  const [stopResult,setStopResult]=useState<GlobalStopResult>(IDLE_RESULT);
   const [selStrat,setSelStrat]=useState<Strategy|null>(null);
   const [showConfirmReal,setShowConfirmReal]=useState(false);
   const [editStrat,setEditStrat]=useState<Strategy|null>(null);
   const [showCreate,setShowCreate]=useState(false);
   const [newStrat,setNewStrat]=useState({name:'',type:'ema_cross' as StratType,asset:'BTC',timeframe:'4h',leverage:1,tp:5,sl:2.5,maxDailyLoss:500000,maxPositionSize:3000000});
 
-  const running = strats.filter(s=>s.status==='running'&&s.enabled);
-  const totalPnl = strats.reduce((s,x)=>s+x.totalPnl,0);
-  const avgWinRate = strats.length ? Math.round(strats.reduce((s,x)=>s+x.winRate,0)/strats.length) : 0;
-  const totalTrades = strats.reduce((s,x)=>s+x.trades,0);
+  /* ── 지표는 이 화면의 상태에서 만들지 않는다 ──
+     예전에는 실행중·총손익·평균승률·총거래 넷을 `strats`에서 계산했다.
+     `strats`는 INITIAL_STRATS로 시작하는 **전략 틀**이고 서버를 부르지
+     않는다. 그래서 카드를 토글하면 머리줄이 "실행중 1"이 됐는데
+     서버에는 아무것도 등록되지 않았다.
+
+     총손익·평균승률·총거래는 이 화면이 읽을 수 있는 서버 정본이 없다.
+     없는 것을 0으로 그리면 "오늘 한 건도 못 벌었다"로 읽힌다 — 그래서
+     지운다. 실제 성과판은 서버 데이터를 붙일 때 만든다.
+
+     실행중 개수만 서버가 답해 준다(`/api/autotrade/schedule`). */
+  const [schedRows,setSchedRows]=useState<any[]|null>(null);
+  const [schedErr,setSchedErr]=useState('');
+  const loadSchedules = useCallback(async():Promise<{ok:boolean;rows:any[];reason:string}>=>{
+    const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
+    if(!tok) return {ok:false,rows:[],reason:'로그인이 필요합니다'};
+    try{
+      const r = await fetch('/api/autotrade/schedule',{headers:{Authorization:`Bearer ${tok}`},cache:'no-store'});
+      const j = await r.json().catch(()=>null);
+      if(!r.ok||!j?.ok) return {ok:false,rows:[],reason:String(j?.message||j?.error||`HTTP ${r.status}`)};
+      const rows = Array.isArray(j.schedules)?j.schedules:(Array.isArray(j.items)?j.items:[]);
+      return {ok:true,rows,reason:''};
+    }catch(e:any){ return {ok:false,rows:[],reason:String(e?.message||e)}; }
+  },[]);
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const r=await loadSchedules();
+      if(!alive) return;
+      if(r.ok) { setSchedRows(r.rows); setSchedErr(''); } else { setSchedRows(null); setSchedErr(r.reason); }
+    })();
+    return()=>{alive=false;};
+  },[loadSchedules]);
+  // **못 읽었으면 0이라고 적지 않는다.** null은 '모른다'는 뜻이다.
+  const runningCount = schedRows===null ? null : stopTargets(schedRows).length;
 
   // ── 이 목록은 실행기에 연결돼 있지 않다 ──
   //
@@ -193,10 +239,49 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
   const [cardMenu, setCardMenu] = useState('');
   const stopStrat=(id:string)=>setStrats(p=>p.map(s=>s.id===id?{...s,status:'stopped',enabled:false}:s));
 
-  const handleGlobalStop=()=>{
-    setGlobalStop(true);
-    setStrats(p=>p.map(s=>({...s,status:'stopped',enabled:false})));
-  };
+  /* ── 전체정지는 서버를 부른다 ──
+     예전에는 로컬 state만 바꾸고 "모든 봇이 중단되었습니다"라고 적었다.
+     실제로 도는 것은 autotrade_schedules(031)에 등록된 예약이고 크론이
+     그것을 읽는다 — 화면 상태를 바꿔도 크론은 계속 돌았다.
+
+     워커·스케줄러·리스크 엔진은 건드리지 않는다. 이미 있는 경로만 쓴다:
+       GET   /api/autotrade/schedule            → 켜져 있는 예약
+       PATCH /api/autotrade/schedule {id,false} → 하나씩 끈다
+
+     그리고 **끈 개수만 말한다.** 판정과 문장은 lib/autotrade/globalStop에
+     있고 테스트가 붙어 있다. */
+  const handleGlobalStop=useCallback(async()=>{
+    setStopResult({...IDLE_RESULT, code:'STOPPING'});
+    const listed = await loadSchedules();
+    if(!listed.ok){
+      // 무엇이 도는지 모르는 상태다. 0개라고 적지 않는다.
+      setStopResult(unknownResult(listed.reason));
+      return;
+    }
+    setSchedRows(listed.rows);
+    const targets = stopTargets(listed.rows);
+    if(targets.length===0){ setStopResult(summarize([])); return; }
+    const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
+    const outcomes:StopOutcome[]=[];
+    for(const t of targets){
+      const label=t.label||t.id;
+      try{
+        const r=await fetch('/api/autotrade/schedule',{
+          method:'PATCH',
+          headers:{'Content-Type':'application/json',Authorization:`Bearer ${tok}`},
+          body:JSON.stringify({id:t.id,enabled:false}),
+        });
+        const j=await r.json().catch(()=>null);
+        if(r.ok&&j?.ok) outcomes.push({id:t.id,label,ok:true});
+        else outcomes.push({id:t.id,label,ok:false,reason:String(j?.message||j?.error||`HTTP ${r.status}`)});
+      }catch(e:any){
+        outcomes.push({id:t.id,label,ok:false,reason:String(e?.message||e)});
+      }
+    }
+    setStopResult(summarize(outcomes));
+    const after = await loadSchedules();
+    if(after.ok) setSchedRows(after.rows);
+  },[loadSchedules]);
 
   const handleCreateStrat=()=>{
     const s:Strategy={
@@ -250,12 +335,37 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             );
           })}
         </div>
-        <button onClick={()=>globalStop?setGlobalStop(false):handleGlobalStop()} style={{background:globalStop?A(T.grn,'20'):A(T.red,'20'),color:globalStop?T.grn:T.red,border:`1px solid ${globalStop?T.grn:T.red}40`,borderRadius:10,padding:'8px 12px',fontSize:11,fontWeight:700,cursor:'pointer'}}>
-          {globalStop?'▶ 재시작':'⏹ 전체정지'}
+        {/* '재시작'을 없앴다. 이 버튼은 예약을 끄는 일만 하고, 다시 켜는
+            것은 어느 전략을 켤지 고르는 다른 결정이다 — 위쪽 자동매매
+            제어판에서 한다. 한 버튼이 껐다 켰다를 겸하면, 껐다고 믿는
+            사용자가 실수로 다시 켜기 쉽다. */}
+        <button
+          onClick={handleGlobalStop}
+          disabled={stopResult.code==='STOPPING'}
+          aria-label="등록된 자동매매 예약 전체 끄기"
+          style={{background:A(T.red,'20'),color:T.red,border:`1px solid ${T.red}40`,borderRadius:10,padding:'8px 12px',minHeight:40,fontSize:11,fontWeight:700,cursor:stopResult.code==='STOPPING'?'wait':'pointer',opacity:stopResult.code==='STOPPING'?0.6:1}}>
+          {stopResult.code==='STOPPING'?'정지 요청 중…':'⏹ 예약 전체 끄기'}
         </button>
       </div>
 
-      {globalStop&&<div style={{background:A(T.red,'15'),border:`1px solid ${T.red}`,borderRadius:12,padding:'10px 14px',marginBottom:12,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:18}}>🚨</span><div style={{color:T.red,fontWeight:700,fontSize:12}}>전체 긴급 정지 활성화 — 모든 봇이 중단되었습니다</div></div>}
+      {/* 결과 문장은 globalStop 모듈이 만든다. 화면이 스스로 "모두
+          중단됐다"고 적지 않는다 — 서버가 껐다고 답한 개수만 말한다. */}
+      {stopResult.code!=='IDLE'&&(()=>{
+        const alarm=stopAlarming(stopResult);
+        const c=alarm?T.red:stopResult.code==='STOPPING'?T.ylw:T.grn;
+        return (
+          <div role="status" style={{background:A(c,'12'),border:`1px solid ${A(c,'45')}`,borderRadius:12,padding:'10px 14px',marginBottom:12}}>
+            <div style={{color:c,fontWeight:700,fontSize:12}}>{stopHeadline(stopResult)}</div>
+            {stopBoundary(stopResult)&&(
+              <div style={{color:T.sub,fontSize:11,marginTop:4,lineHeight:1.45}}>{stopBoundary(stopResult)}</div>
+            )}
+            {stopResult.outcomes.filter((o):o is Extract<StopOutcome,{ok:false}>=>!o.ok).slice(0,5).map(o=>(
+              <div key={o.id} style={{color:T.red,fontSize:11,marginTop:3}}>· {o.label} — {o.reason}</div>
+            ))}
+            {stopResult.error&&<div style={{color:T.red,fontSize:11,marginTop:3}}>· {stopResult.error}</div>}
+          </div>
+        );
+      })()}
 
       {execMode==='paper'&&<div style={{background:A(T.prp,'12'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontSize:11,fontWeight:700}}>모의 자동매매 모드 — 실제 자금 이동 없음 · 수익 보장 없음</div></div>}
 
@@ -263,15 +373,26 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 
       {execMode==='real'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 실전 자동매매 — 연결된 거래소로 실제 주문 실행 · 원금 손실 위험</div></div>}
 
-      {/* Dashboard metrics */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
-        {[{l:'실행중',v:`${running.length}개`,c:T.grn},{l:'총 손익',v:totalPnl>=0?'+'+cvt(totalPnl,currency):cvt(totalPnl,currency),c:totalPnl>=0?T.grn:T.red},{l:'평균 승률',v:`${avgWinRate}%`,c:T.acl},{l:'총 거래',v:`${totalTrades}건`,c:T.muted}].map(s=>(
-          <Card key={s.l} style={{padding:'9px 8px',textAlign:'center'}}>
-            <div style={{color:s.c,fontSize:13,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',marginBottom:1}}>{s.v}</div>
-            <div style={{color:T.muted,fontSize:9}}>{s.l}</div>
-          </Card>
-        ))}
-      </div>
+      {/* ── 켜져 있는 예약 ──
+          예전에는 여기 넷이 있었다: 실행중 · 총 손익 · 평균 승률 · 총 거래.
+          넷 다 아래 전략 '틀' 목록에서 계산한 값이었고, 그 목록은 서버를
+          부르지 않는다. 카드를 토글하면 머리줄이 "실행중 1"이 됐지만
+          서버에는 아무것도 등록되지 않았다.
+
+          손익·승률·거래수는 이 화면이 읽을 수 있는 서버 정본이 없다.
+          0으로 그리면 "한 건도 못 벌었다"로 읽히므로 지웠다. 남긴 하나는
+          서버가 실제로 답해 주는 값이다. */}
+      <Card style={{padding:'12px 14px',marginBottom:14,display:'flex',alignItems:'center',gap:12}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:2}}>켜져 있는 자동매매 예약</div>
+          <div style={{color:runningCount===null?T.muted:runningCount>0?T.grn:T.sub,fontSize:runningCount===null?12:18,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+            {runningCount===null ? (schedErr||'확인하지 못했습니다') : `${runningCount}개`}
+          </div>
+          <div style={{color:T.muted,fontSize:10,marginTop:3,lineHeight:1.4}}>
+            서버에 등록된 예약 기준입니다 · 아래 전략 목록의 켜짐/꺼짐과는 다릅니다
+          </div>
+        </div>
+      </Card>
 
       {/* ── 1단계: 묶음 ──
           매일 보는 것(개요)과 가끔 보는 것(진단)을 같은 줄에 두지 않는다. */}
@@ -367,7 +488,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                       style={{flexShrink:0,minHeight:32,padding:'5px 10px',borderRadius:8,cursor:'pointer',
                         background:on?A(c,'18'):'transparent',color:on?c:T.muted,
                         border:`1px solid ${on?A(c,'45'):T.border}`,fontSize:10,fontWeight:800}}>
-                      {ACTIVITY_LABEL[a]} {counts[a]}
+                      {activityLabel(a, STRAT_LIST_WIRED)} {counts[a]}
                     </button>
                   );
                 })}
@@ -450,7 +571,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                     <div style={{minWidth:0}}>
                       <div style={{display:'flex',gap:5,alignItems:'center',flexWrap:'wrap'}}>
                         <span style={{color:T.txt,fontWeight:700,fontSize:13,overflowWrap:'anywhere'}}>{s.name}</span>
-                        <span style={{background:A(actColor,'20'),color:actColor,fontSize:9,fontWeight:800,padding:'1px 6px',borderRadius:99}}>{ACTIVITY_LABEL[act]}</span>
+                        <span style={{background:A(actColor,'20'),color:actColor,fontSize:9,fontWeight:800,padding:'1px 6px',borderRadius:99}}>{activityLabel(act, STRAT_LIST_WIRED)}</span>
                       </div>
                       <div style={{color:T.muted,fontSize:10,marginTop:2}}>
                         {s.asset} · {s.timeframe} · {KIND_LABEL[kind]}
@@ -737,7 +858,12 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           <Card style={{padding:'14px 16px',border:`1px solid ${A(T.red,'40')}`}}>
             <div style={{color:T.red,fontWeight:700,marginBottom:6}}>🚨 긴급 정지</div>
             <div style={{color:T.muted,fontSize:11,marginBottom:10}}>모든 자동매매를 즉시 중단합니다. 수동 거래는 계속 가능합니다.</div>
-            <button onClick={handleGlobalStop} style={{width:'100%',padding:'12px',background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:'pointer'}}>🚨 전체 자동매매 긴급 정지</button>
+            <button onClick={handleGlobalStop} disabled={stopResult.code==='STOPPING'} style={{width:'100%',padding:'12px',minHeight:44,background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:stopResult.code==='STOPPING'?'wait':'pointer',opacity:stopResult.code==='STOPPING'?0.6:1}}>
+              {stopResult.code==='STOPPING'?'정지 요청 중…':'등록된 자동매매 예약 전체 끄기'}
+            </button>
+            <div style={{color:T.muted,fontSize:10,marginTop:6,lineHeight:1.45}}>
+              새 진입만 막습니다. 열린 포지션 청산이나 거래소 주문 취소는 하지 않습니다.
+            </div>
           </Card>
         </div>
         );

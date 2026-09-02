@@ -439,6 +439,13 @@ jobs:
       - name: UI 껍데기 계약 (접기·폭 조절·보기 전환이 실제로 배선됐는가)
         run: node scripts/check-ui-shell-contract.mjs
 
+      # 화면이 서버·실행 상태보다 센 말을 하는 것을 막는다.
+      # 실제로 났던 고장들이다: 서버를 안 부르는 "모든 봇이 중단되었습니다",
+      # 실행기에 연결도 안 된 카드의 '실행중' 배지, 만들어 둔 기사를
+      # "최신 뉴스"로 그린 홈, 존재하지 않는 청산가 공식.
+      - name: UI 사실성 계약 (확인한 것만 말하는가)
+        run: node scripts/check-ui-truth-claims.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

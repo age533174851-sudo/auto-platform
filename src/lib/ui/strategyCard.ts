@@ -274,6 +274,34 @@ export const ACTIVITY_LABEL: Record<Activity, string> = {
 export type { Tone } from './display';
 import type { Tone } from './display';
 
+/**
+ * 실행기에 연결되지 않은 목록에서 쓰는 칸 이름.
+ *
+ * **왜 이름이 두 벌인가**
+ * ───────────────────────
+ * 자동매매 화면의 봇 카드 여섯 장은 이 화면의 React 상태일 뿐이다 —
+ * [시작]을 눌러도 주문이 나가지 않고 서버에 아무것도 등록되지 않는다.
+ * 그런데 칸 이름이 `실행중`이라, 토글 한 번에 화면이 "실행중 1"이라고
+ * 적었다. 안내 문구를 위에 붙여도 배지에 적힌 두 글자가 더 세게 읽힌다.
+ *
+ * 그래서 연결되지 않은 목록에서는 **돌고 있다고 말하지 않는 이름**을
+ * 쓴다. 진짜로 도는 것을 그리는 곳은 `ACTIVITY_LABEL`을 그대로 쓴다.
+ */
+export const UNWIRED_ACTIVITY_LABEL: Record<Activity, string> = {
+  RUNNING: '켜 둠(예시)', OPPORTUNITY: '기회 근접', WAITING: '대기',
+  STOPPED: '꺼 둠', ERROR: '오류',
+};
+
+/**
+ * 이 목록이 실행기에 연결돼 있는가에 따라 칸 이름을 고른다.
+ *
+ * 부르는 쪽이 `wired`를 넘겨야 하므로, 새 목록을 만들면서 이 질문을
+ * 건너뛸 수 없다.
+ */
+export function activityLabel(act: Activity, wired: boolean): string {
+  return wired ? ACTIVITY_LABEL[act] : UNWIRED_ACTIVITY_LABEL[act];
+}
+
 export const ACTIVITY_TONE: Record<Activity, Tone> = {
   RUNNING: 'good', OPPORTUNITY: 'warn', WAITING: 'muted',
   STOPPED: 'muted', ERROR: 'bad',

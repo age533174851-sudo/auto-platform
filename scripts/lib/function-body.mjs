@@ -95,3 +95,68 @@ export function functionBodyOrFail(source, name, fail, where) {
   if (!r.ok) { fail(`${where}: ${r.reason}`); return ''; }
   return r.body;
 }
+
+/**
+ * `const 이름 = () => {...}` 형태의 본문을 뽑는다.
+ *
+ * **왜 따로 필요한가**
+ * ────────────────────
+ * 리액트 화면의 처리기는 대부분 `function`이 아니라 변수다:
+ *
+ *   const handleGlobalStop = useCallback(async () => { ... }, [deps]);
+ *
+ * `functionBody`는 `function` 선언만 본다. 검사기가 이 모양을 만날 때마다
+ * 각자 중괄호를 세면, 문자열 속 `}`나 중첩 객체에서 한 번씩 어긋나고
+ * 그때 검사기는 **엉뚱한 범위를 보고 통과시킨다.** 그래서 여기서
+ * 파서에게 묻는다.
+ *
+ * `useCallback` / `useMemo` 처럼 함수를 감싸는 호출은 첫 인자를 본다 —
+ * 감싼 함수를 못 찾으면 검사기가 "본문 없음"으로 읽고 조용히 통과할 수
+ * 있기 때문이다.
+ *
+ * @param {string} source 파일 원문 (주석을 지우지 않은 것)
+ * @param {string} name   변수 이름
+ * @returns {{ ok: true, body: string } | { ok: false, reason: string }}
+ */
+export function variableFunctionBody(source, name) {
+  const T = typescript();
+  const src = String(source ?? '');
+  if (!src.trim()) return { ok: false, reason: '소스가 비어 있습니다' };
+  if (!name) return { ok: false, reason: '변수 이름이 없습니다' };
+
+  const file = T.createSourceFile(
+    'input.tsx', src, T.ScriptTarget.Latest, true, T.ScriptKind.TSX);
+  const diags = file.parseDiagnostics ?? [];
+  if (diags.length > 0) {
+    const first = T.flattenDiagnosticMessageText(diags[0].messageText, ' ');
+    return { ok: false, reason: `TypeScript가 소스를 읽지 못했습니다: ${first}` };
+  }
+
+  /** 함수를 감싼 호출(useCallback 등)은 벗겨 낸다. */
+  const unwrap = (node) => {
+    let n = node;
+    for (let i = 0; i < 4 && n; i += 1) {
+      if (T.isArrowFunction(n) || T.isFunctionExpression(n)) return n;
+      if (T.isCallExpression(n) && n.arguments.length > 0) { n = n.arguments[0]; continue; }
+      if (T.isAsExpression(n) || T.isParenthesizedExpression(n)) { n = n.expression; continue; }
+      return null;
+    }
+    return null;
+  };
+
+  const found = [];
+  const walk = (node) => {
+    if (T.isVariableDeclaration(node) && node.name && node.name.text === name && node.initializer) {
+      const fn = unwrap(node.initializer);
+      if (fn && fn.body) found.push(fn);
+    }
+    T.forEachChild(node, walk);
+  };
+  walk(file);
+
+  if (found.length === 0) return { ok: false, reason: `함수를 담은 const ${name} 선언을 찾지 못했습니다` };
+  if (found.length > 1) return { ok: false, reason: `const ${name}이 ${found.length}개입니다 — 어느 것인지 정할 수 없습니다` };
+
+  const body = found[0].body;
+  return { ok: true, body: src.slice(body.pos, body.end).trimStart() };
+}
