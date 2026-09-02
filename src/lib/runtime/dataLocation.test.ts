@@ -2,7 +2,7 @@
 //
 // 실제로 찾은 것:
 //
-//   AutoTradeEngine이 60초마다 전략을 평가한다
+//   AutoTradeEngine이 브라우저에서 전략을 주기적으로 평가한다
 //   → listStrategies()가 읽는다
 //   → src/lib/strategies/store.ts: window.localStorage.getItem(KEY)
 //

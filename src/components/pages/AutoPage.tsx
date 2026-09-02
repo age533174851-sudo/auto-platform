@@ -466,7 +466,9 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           {/* **이 목록은 실행기에 연결돼 있지 않다.**
               '시작'을 눌러도 이 화면의 상태만 바뀌고, 어떤 주문도 나가지
               않는다. 실제로 도는 것은 전략빌더에 저장된 전략이다
-              (AutoTradeEngine이 60초마다 그것을 평가한다).
+              (AutoTradeEngine이 브라우저에서 주기적으로 그것을 평가한다 —
+              폴링은 60초이지만 앞 tick이 안 끝났으면 건너뛰고, 신호가 난
+              전략은 5분간 재평가를 미룬다. 그래서 "60초마다"는 아니다).
               이 줄이 없으면 '실행중'이라고 적힌 카드를 보고 돌고 있다고
               믿게 된다 — 이 저장소에서 이미 한 번 일어난 일이다. */}
           <div style={{
@@ -478,7 +480,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             [시작]을 눌러도 <b>주문이 나가지 않고</b>, 화면을 나가면 상태가 사라집니다
             (저장하면 돌지 않는 봇이 계속 '실행중'으로 보이기 때문입니다).<br/>
             실제로 도는 것은 <b>더보기 → 전략빌더</b>에서 만든 전략입니다.
-            거기서 만들어 활성화하면 60초마다 평가합니다 (기본 모의).
+            거기서 만들어 활성화하면 <b>앱이 열려 있는 동안</b> 주기적으로 평가합니다 (기본 모의).
           </div>
           {notWiredWarn && (
             <div style={{
@@ -803,8 +805,9 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
             <Card style={{padding:'16px',marginBottom:12}}>
               <div style={{color:T.txt,fontSize:12.5,fontWeight:800,marginBottom:6}}>표시할 신호가 없습니다</div>
               <div style={{color:T.muted,fontSize:11,lineHeight:1.7}}>
-                이 화면은 신호를 만들지 않습니다. 실제 신호는 <b style={{color:T.acl}}>더보기 → 전략빌더</b>에서
-                만든 전략에서 나오고, 그 전략을 켜면 60초마다 평가합니다.<br/>
+                이 신호 탭에는 <b style={{color:T.ylw}}>아직 실제 신호 데이터가 연결되어 있지 않습니다.</b><br/>
+                <b style={{color:T.acl}}>더보기 → 전략빌더</b>에서 켠 전략은 브라우저 AutoTradeEngine이
+                앱이 열려 있는 동안 주기적으로 조건을 평가합니다. 그 결과가 이 탭으로 들어오는 경로는 아직 없습니다.<br/>
                 예전에는 여기에 시각·가격·신뢰도가 붙은 예시 카드가 있었지만, 일어난 적 없는 신호라 지웠습니다.
               </div>
             </Card>
@@ -1542,7 +1545,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
             {logs.length === 0 ? '아직 실행 로그가 없습니다' : '필터 조건에 맞는 로그가 없습니다'}
           </div>
           <div style={{color:T.muted,fontSize:10,lineHeight:1.6}}>
-            {logs.length === 0 ? '더보기 → 전략빌더에서 전략을 만들고 활성화하면\n60초마다 시그널 평가가 시작됩니다 (모의 모드 기본)' : ''}
+            {logs.length === 0 ? '더보기 → 전략빌더에서 전략을 만들고 활성화하면\n앱이 열려 있는 동안 주기적으로 시그널을 평가합니다 (모의 모드 기본)' : ''}
           </div>
         </Card>
       ) : (

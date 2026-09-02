@@ -911,7 +911,8 @@ export default function App() {
 
   return (
     <>
-      {/* 백그라운드 자동매매 엔진 (활성 전략만 60초마다 평가) */}
+      {/* 백그라운드 자동매매 엔진 — 활성 전략만, 이 탭이 열려 있는 동안 주기적으로 평가
+          (폴링 60초이지만 앞 tick이 안 끝나면 건너뛰고, 신호가 난 전략은 5분 쿨다운) */}
       <AutoTradeEngine/>
       <ApiHealthMonitor/>
       {!onboarded&&<Onboarding onDone={(l,c)=>{setLang(l);setCurrency(c);setOnboarded(true);sS('tg_ob','1');sS('tg_lang',l);sS('tg_cur',c);}}/>}
