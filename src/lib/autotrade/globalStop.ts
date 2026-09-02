@@ -44,7 +44,7 @@
 //
 //   마지막 조회 성공 · 켜진 것 0개 → ALL_STOPPED  (전체 비활성 확인)
 //   마지막 조회 성공 · 켜진 것 남음 → REMAINS     (아직 도는 것이 있다)
-//   마지막 조회 실패              → UNVERIFIED  (껐다는 응답만 있다)
+//   마지막 조회 실패              → UNVERIFIED  (끈 것이 없었어도 마찬가지)
 //
 // 이 파일이 하지 않는 것도 분명히 해 둔다
 // ───────────────────────────────────────
@@ -156,22 +156,31 @@ export function verify(outcomes: StopOutcome[], after: AfterCheck): GlobalStopRe
   const failed = outcomes.length - stopped;
   const base = { stopped, failed, attempted: outcomes.length, outcomes };
 
-  // 끌 것이 없었다면 끄기를 하지 않았다. 그래도 마지막 조회에서 무언가
-  // 켜져 있으면 그 사실이 먼저다 — 그 사이에 생겼다는 뜻이다.
+  // **못 읽었으면 어떤 경우에도 확정하지 않는다.**
+  //
+  // 이 검사가 맨 앞에 있는 이유가 있다. 예전에는 "끌 것이 없었다"를 먼저
+  // 보고 그 안에서 조회 실패를 NOTHING_TO_STOP으로 처리했다. 그러면
+  // 이런 순서에서 초록이 켜졌다:
+  //
+  //   ① 첫 조회 — 켜진 예약 0개  ② 그래서 끈 것이 없다(outcomes=[])
+  //   ③ 그 사이 다른 창에서 예약이 켜짐  ④ 마지막 조회 실패
+  //
+  // 지금 무엇이 도는지 **모르는데** 화면은 "켜져 있는 예약이 없습니다"라고
+  // 적고 경고색도 켜지 않았다. 끌 것이 없었다는 것은 ①에 대한 사실이지
+  // 지금에 대한 사실이 아니다. 확인하지 못한 것은 통과가 아니다.
+  if (after.state === 'unread') {
+    return { ...base, code: 'UNVERIFIED', remaining: null, error: after.reason };
+  }
+
+  // 끌 것이 없었더라도 마지막 조회에서 무언가 켜져 있으면 그 사실이
+  // 먼저다 — 그 사이에 생겼다는 뜻이다.
   if (outcomes.length === 0) {
-    if (after.state === 'unread') {
-      return { ...base, code: 'NOTHING_TO_STOP', remaining: null };
-    }
     if (after.remaining > 0) {
       return { ...base, code: 'REMAINS', remaining: after.remaining };
     }
     return { ...base, code: 'NOTHING_TO_STOP', remaining: 0 };
   }
 
-  // **못 읽었으면 껐다고 단정하지 않는다.** 개별 성공 수는 말할 수 있다.
-  if (after.state === 'unread') {
-    return { ...base, code: 'UNVERIFIED', remaining: null, error: after.reason };
-  }
   if (after.remaining > 0) {
     return { ...base, code: 'REMAINS', remaining: after.remaining };
   }
@@ -203,7 +212,11 @@ export function headline(r: GlobalStopResult): string {
     case 'REMAINS':
       return `끄기 요청 ${r.attempted}개 중 ${r.stopped}개가 성공했지만, 다시 확인하니 ${r.remaining}개가 아직 켜져 있습니다`;
     case 'UNVERIFIED':
-      return `예약 ${r.stopped}개를 껐다는 응답은 받았지만, 지금 전체가 꺼졌는지는 확인하지 못했습니다`;
+      // 끈 것이 없을 때도 이리로 온다. 그때 "N개를 껐다"고 적으면 0개를
+      // 껐다는 말이 되므로, 무엇을 확인했고 무엇을 확인 못 했는지 나눈다.
+      return r.attempted === 0
+        ? '처음 확인했을 때 끌 예약은 없었지만, 지금 전체가 꺼져 있는지는 다시 확인하지 못했습니다'
+        : `예약 ${r.stopped}개를 껐다는 응답은 받았지만, 지금 전체가 꺼졌는지는 확인하지 못했습니다`;
     case 'UNKNOWN':
       return `자동매매 예약을 읽지 못했습니다 — 무엇이 돌고 있는지 확인하지 못했습니다`;
   }

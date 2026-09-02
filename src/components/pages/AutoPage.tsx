@@ -96,10 +96,18 @@ const INITIAL_STRATS:Strategy[] = [
   {id:'s6',name:'BTC AI 전략',type:'ai_strategy',status:'stopped',asset:'BTC',assetNameKr:'비트코인',timeframe:'1h',leverage:2,maxLeverage:3,riskLevel:'medium',tp:4,sl:2,enabled:false,winRate:0,totalPnl:0,trades:0,maxDailyLoss:300000,maxPositionSize:2000000,cooldownMin:120,params:{ai_mode:'balanced',confidence_threshold:70,regime_filter:true},description:'시장 국면 AI 신호를 기반으로 자동 진입/청산'},
 ];
 
+// 비어 있다. 예전에는 여기에 신호 세 건이 박혀 있었다 —
+// 2025년 5월 날짜, ₩94,230,000이라는 구체적인 가격, 78%·82% 신뢰도,
+// 그리고 `state:'executed'`. **실행됐다고 적힌 신호다.**
+//
+// 이 화면은 신호를 만들지 않는다. 실제 신호는 전략빌더에 저장된
+// 전략에서 나오고 AutoTradeEngine이 평가한다. 그런데 '신호' 칸을 열면
+// 시각·가격·신뢰도가 붙은 카드 세 장이 나와서, 엔진이 돌면서 판단을
+// 내리고 있는 것처럼 보였다. 하나는 체결까지 됐다고 말한다.
+//
+// INITIAL_RUNS·INITIAL_RISK_EVENTS를 비운 것과 같은 이유다 —
+// **일어난 척하는 것이 아무것도 없는 것보다 나쁘다.**
 const INITIAL_SIGNALS:Signal[] = [
-  {id:'sig1',stratId:'s1',stratName:'BTC EMA 추세 추종',asset:'BTC',type:'buy',price:94230000,state:'confirmed',confidence:78,source:'indicator',createdAt:'2025-05-13T09:32:00',note:'EMA 골든크로스 + RSI 52'},
-  {id:'sig2',stratId:'s2',stratName:'ETH RSI 반전',asset:'ETH',type:'buy',price:5820000,state:'waiting',confidence:62,source:'indicator',createdAt:'2025-05-13T08:15:00',note:'RSI 38 — 과매도 접근'},
-  {id:'sig3',stratId:'s1',stratName:'BTC EMA 추세 추종',asset:'BTC',type:'sell',price:91200000,state:'executed',confidence:82,source:'indicator',createdAt:'2025-05-12T22:00:00',note:'EMA 데드크로스 + RSI 71'},
 ];
 
 // 비어 있다. 예전에는 여기에 2025년 5월 날짜의 '완료된 거래'가 세 건
@@ -788,6 +796,19 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           <div style={{background:A(T.ylw,'12'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}>
             <div style={{color:T.ylw,fontSize:11,fontWeight:700}}>신호 처리 엔진 — 내부 지표 · TradingView · AI (준비중)</div>
           </div>
+          {(Array.isArray(signals)?signals:[]).length===0&&(
+            /* **비어 있다는 것을 비어 있음으로 보여 준다.**
+               카드 세 장을 지우고 아무것도 안 그리면 사용자는 "고장인가"
+               라고 읽는다. 어디서 신호가 나오는지 여기서 말한다. */
+            <Card style={{padding:'16px',marginBottom:12}}>
+              <div style={{color:T.txt,fontSize:12.5,fontWeight:800,marginBottom:6}}>표시할 신호가 없습니다</div>
+              <div style={{color:T.muted,fontSize:11,lineHeight:1.7}}>
+                이 화면은 신호를 만들지 않습니다. 실제 신호는 <b style={{color:T.acl}}>더보기 → 전략빌더</b>에서
+                만든 전략에서 나오고, 그 전략을 켜면 60초마다 평가합니다.<br/>
+                예전에는 여기에 시각·가격·신뢰도가 붙은 예시 카드가 있었지만, 일어난 적 없는 신호라 지웠습니다.
+              </div>
+            </Card>
+          )}
           {(Array.isArray(signals)?signals:[]).map(sig=>(
             <Card key={sig.id} style={{padding:'12px 14px',marginBottom:8,border:`1px solid ${signalColor[sig.state]}20`}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>

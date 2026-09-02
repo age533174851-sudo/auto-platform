@@ -192,6 +192,21 @@ need(STOPLIB, /export\s+function\s+verify\s*\(/,
     if (!/after\.state\s*===\s*'unread'/.test(b)) {
       err(`${STOPLIB}: verify가 "다시 읽지 못한 경우"를 갈라 보지 않습니다`);
     }
+    /* **조회 실패 검사가 outcomes 분기보다 앞에 있어야 한다.**
+       뒤에 두면 "끌 것이 없었다" 갈래 안에서 조회 실패가 따로 처리되고,
+       거기서 NOTHING_TO_STOP으로 새어 나간다 — 실제로 그렇게 뚫렸다.
+       그때 화면은 "켜져 있는 예약이 없습니다"라고 적고 경고색도 껐다. */
+    const unreadAt = b.indexOf("after.state === 'unread'");
+    const outcomesAt = b.indexOf('outcomes.length === 0');
+    if (unreadAt >= 0 && outcomesAt >= 0 && unreadAt > outcomesAt) {
+      err(`${STOPLIB}: 조회 실패를 "끌 것이 없었다" 갈래보다 나중에 봅니다 — 확인 못 한 것이 통과로 새어 나갑니다`);
+    }
+    /* NOTHING_TO_STOP은 다시 읽어서 0개를 확인했을 때만 나온다. */
+    for (const m of b.matchAll(/code:\s*'NOTHING_TO_STOP'[^}]*?remaining:\s*([A-Za-z0-9_.]+)/g)) {
+      if (m[1] !== '0') {
+        err(`${STOPLIB}: 확인하지 못한 상태(remaining: ${m[1]})를 "끌 것이 없었다"로 적습니다`);
+      }
+    }
     if (!/after\.remaining\s*>\s*0/.test(b)) {
       err(`${STOPLIB}: verify가 남아 있는 개수를 보지 않습니다 — PATCH 성공 수만으로 판정하게 됩니다`);
     }
@@ -269,6 +284,25 @@ deny(AUTO, /(?<![A-Za-z0-9_$.])s\.trades\s*[>=<]/,
   '카드가 예시 전략의 로컬 거래수로 분기합니다 — cardPerfLine이 판단하게 하세요');
 deny(AUTO, /['"]거래 없음['"]/,
   '"거래 없음"을 화면이 직접 적습니다 — 서버에 물어본 적이 없으면 거래가 없었는지도 모릅니다');
+
+/* ── 일어난 척하는 목록을 두지 않는다 ────────────────────────
+   자동매매 화면의 세 목록(신호·실행기록·리스크 이벤트)은 이 화면의
+   상수다. 여기에 줄을 채우면 시각·가격·신뢰도가 붙은 카드가 되어
+   엔진이 판단을 내리고 있는 것처럼 보인다. 실제로 `state:'executed'`인
+   신호와 '일일 손실 한도 80% 도달' 같은 줄이 박혀 있었다 —
+   그 안전장치는 한 번도 발동한 적이 없다.
+
+   비어 있는지만 본다. 서버에서 받아 채우게 되면 그때 이 규칙을
+   "서버에서 온 것인가"로 바꾸면 된다. */
+for (const name of ['INITIAL_SIGNALS', 'INITIAL_RUNS', 'INITIAL_RISK_EVENTS']) {
+  const m = new RegExp(`const\\s+${name}\\s*:[^=]*=\\s*\\[([\\s\\S]*?)\\]\\s*;`).exec(code[AUTO]);
+  if (!m) { err(`${AUTO}: ${name} 선언을 찾지 못했습니다`); continue; }
+  if (m[1].trim().length > 0) {
+    err(`${AUTO}: ${name}에 만들어 둔 줄이 있습니다 — 시각·가격이 붙은 채로 그려지면 일어난 일처럼 읽힙니다`);
+  }
+}
+/* 비어 있다는 사실을 화면이 말해야 한다. 아무것도 안 그리면 고장으로 읽힌다. */
+need(AUTO, /표시할 신호가 없습니다/, '신호가 없을 때 그 사실을 말하지 않습니다');
 
 need(AUTO, /const\s+STRAT_LIST_WIRED\s*=\s*false/,
   '봇 카드 목록이 실행기에 연결됐다고 선언했습니다 — 정말 연결했다면 이 검사와 카드 안내 문구를 같이 고치세요');

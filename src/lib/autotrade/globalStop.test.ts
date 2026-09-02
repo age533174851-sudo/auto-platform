@@ -38,7 +38,7 @@ export function runGlobalStopTests() {
   test('이미 꺼진 것을 세면 "몇 개를 껐다"가 부풀어난다', () => {
     const rows = [{ id: 'a', enabled: false }, { id: 'b', enabled: false }];
     eq(stopTargets(rows).length, 0);
-    eq(clean([]).code, 'NOTHING_TO_STOP');
+    eq(clean([]).code, 'NOTHING_TO_STOP');   // clean = verify(o, read(0))
   });
 
   test('enabled를 모르면 끄는 쪽에 넣는다', () => {
@@ -120,8 +120,46 @@ export function runGlobalStopTests() {
     eq(r.remaining, 2);
   });
 
-  test('끌 것이 없었고 다시 읽지도 못했으면 개수를 적지 않는다', () => {
-    eq(verify([], unread()).remaining, null);
+  test('끌 것이 없었어도 다시 읽지 못했으면 확정하지 않는다', () => {
+    // **이 갈래가 한 번 뚫렸다.**
+    //   ① 첫 조회 0개 → ② 끈 것 없음 → ③ 그 사이 예약이 켜짐 → ④ 조회 실패
+    // 지금 무엇이 도는지 모르는데 NOTHING_TO_STOP으로 빠져서
+    // "켜져 있는 예약이 없습니다"라고 적고 경고색도 안 켜졌다.
+    const r = verify([], unread());
+    eq(r.code, 'UNVERIFIED');                        // G1
+    eq(r.remaining, null);                           // G2
+    eq(isAlarming(r), true);                         // G3
+    const h = headline(r);
+    assert(h.includes('확인하지 못'), `모른다고 말하지 않는다: ${h}`);   // G4
+    // G5 — 지금 켜진 것이 없다고 단정하면 안 된다
+    assert(!/켜져 있는 자동매매 예약이 없습니다/.test(h), `현재 상태를 단정한다: ${h}`);
+    assert(!/끌 것이 없었습니다$/.test(h), `확인 못 한 것을 끝난 일로 적는다: ${h}`);
+    // G6
+    assert(boundaryNote(r).includes('킬 스위치'), '확인 못 한 상태에 킬 스위치 안내가 없다');
+  });
+
+  test('끌 것이 없고 다시 읽어 0개면 그때만 NOTHING_TO_STOP이다', () => {
+    const r = verify([], read(0));                   // G7
+    eq(r.code, 'NOTHING_TO_STOP');
+    eq(r.remaining, 0);
+    eq(isAlarming(r), false);
+  });
+
+  test('끌 것이 없었는데 다시 읽으니 켜져 있으면 REMAINS다', () => {
+    const r = verify([], read(1));                   // G8
+    eq(r.code, 'REMAINS');
+    eq(r.remaining, 1);
+    eq(isAlarming(r), true);
+  });
+
+  test('조회 실패는 끈 개수와 무관하게 UNVERIFIED다', () => {
+    // 갈래가 둘로 갈라져 있으면 한쪽만 고쳐지는 날이 온다.
+    for (const o of [[], [ok('a')], [ok('a'), bad('b')], [bad('a')]]) {
+      const r = verify(o, unread());
+      eq(r.code, 'UNVERIFIED');
+      eq(r.remaining, null);
+      assert(isAlarming(r), `${o.length}개 시도에서 경고가 꺼져 있다`);
+    }
   });
 
   test('목록을 못 읽으면 UNKNOWN이다 — 0으로 적지 않는다', () => {
