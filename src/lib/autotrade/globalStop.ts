@@ -33,6 +33,19 @@
 // 그리고 **결과를 값으로 돌려준다.** 몇 개를 껐고 몇 개가 실패했는지
 // 세어서, 화면이 그 수만큼만 말하게 한다.
 //
+// 'N개를 껐다'와 '지금 전부 꺼져 있다'는 다른 말이다
+// ─────────────────────────────────────────────────
+// PATCH N개가 전부 200을 받아도 그것은 **그 N개에 대한 증거**일 뿐이다.
+// 그 사이에 다른 창에서 예약을 켰거나, 새 예약이 생겼거나, 목록을 읽은
+// 뒤에 무언가 바뀌었으면 지금 켜져 있는 것이 남는다. 개별 성공 수를
+// 전체 상태로 읽는 순간 화면은 다시 확인하지 않은 것을 말하게 된다.
+//
+// 그래서 끈 뒤에 **한 번 더 읽고, 그 결과로 판정한다.**
+//
+//   마지막 조회 성공 · 켜진 것 0개 → ALL_STOPPED  (전체 비활성 확인)
+//   마지막 조회 성공 · 켜진 것 남음 → REMAINS     (아직 도는 것이 있다)
+//   마지막 조회 실패              → UNVERIFIED  (껐다는 응답만 있다)
+//
 // 이 파일이 하지 않는 것도 분명히 해 둔다
 // ───────────────────────────────────────
 // 예약을 끄는 것은 **새 진입을 더 내지 않는다**는 뜻이다. 열린 포지션을
@@ -60,12 +73,27 @@ export type GlobalStopCode =
   | 'STOPPING'
   /** 끌 예약이 애초에 없었다 */
   | 'NOTHING_TO_STOP'
-  /** 요청한 것을 전부 껐다 */
+  /** **마지막 조회에서** 켜진 예약이 0개임을 확인했다 */
   | 'ALL_STOPPED'
-  /** 일부만 껐다 — 나머지는 아직 돈다 */
-  | 'PARTIAL'
+  /** 마지막 조회에 아직 켜진 예약이 남아 있다 */
+  | 'REMAINS'
+  /** 껐다는 응답은 받았지만 지금 전체 상태를 확인하지 못했다 */
+  | 'UNVERIFIED'
   /** 목록조차 못 읽었다. 무엇이 도는지 모른다 */
   | 'UNKNOWN';
+
+/**
+ * 끄기를 마친 뒤 다시 읽은 결과.
+ *
+ * 이것이 최종 판정의 근거다. `remaining`은 그 시점에 **아직 켜져 있는**
+ * 예약 수이고, 우리가 방금 끈 것뿐 아니라 그 사이에 새로 생긴 것도
+ * 포함한다 — 그게 사용자가 알아야 하는 수다.
+ */
+export type AfterCheck =
+  /** 다시 읽었다. `remaining`은 그때 켜져 있던 예약 수 */
+  | { state: 'read'; remaining: number }
+  /** 다시 읽지 못했다. 지금 무엇이 켜져 있는지 모른다 */
+  | { state: 'unread'; reason: string };
 
 export interface GlobalStopResult {
   code: GlobalStopCode;
@@ -75,13 +103,18 @@ export interface GlobalStopResult {
   failed: number;
   /** 시도한 총 개수 */
   attempted: number;
+  /**
+   * 끈 뒤 다시 읽었을 때 **아직 켜져 있던** 예약 수.
+   * 확인하지 못했으면 null이다 — 0으로 적지 않는다.
+   */
+  remaining: number | null;
   outcomes: StopOutcome[];
   /** 목록을 못 읽었을 때의 사유 */
   error?: string;
 }
 
 export const IDLE_RESULT: GlobalStopResult = {
-  code: 'IDLE', stopped: 0, failed: 0, attempted: 0, outcomes: [],
+  code: 'IDLE', stopped: 0, failed: 0, attempted: 0, remaining: null, outcomes: [],
 };
 
 /**
@@ -109,23 +142,44 @@ export function stopTargets(rows: unknown): StopTarget[] {
 }
 
 /**
- * 하나씩 끈 결과를 모아 판정한다.
+ * 하나씩 끈 결과 + **끄고 나서 다시 읽은 상태**로 판정한다.
  *
- * **부분 성공을 성공이라고 적지 않는다.** 5개 중 3개만 꺼졌으면 2개는
- * 아직 돈다 — 그때 "모두 중단"이라고 쓰면 처음 문제로 돌아간다.
+ * 개별 PATCH가 전부 성공해도 그것은 그 N개에 대한 증거일 뿐이다.
+ * "지금 전부 꺼져 있다"는 다시 읽어야 알 수 있고, 그 사이에 새 예약이
+ * 생겼거나 다른 창에서 켰으면 남는다. 그래서 **마지막 조회가 판정한다.**
+ *
+ * `after`를 받아야만 결과가 나오므로, 부르는 쪽이 다시 읽는 단계를
+ * 건너뛸 수 없다.
  */
-export function summarize(outcomes: StopOutcome[]): GlobalStopResult {
+export function verify(outcomes: StopOutcome[], after: AfterCheck): GlobalStopResult {
   const stopped = outcomes.filter(o => o.ok).length;
   const failed = outcomes.length - stopped;
-  let code: GlobalStopCode;
-  if (outcomes.length === 0) code = 'NOTHING_TO_STOP';
-  else if (failed === 0) code = 'ALL_STOPPED';
-  else code = 'PARTIAL';
-  return { code, stopped, failed, attempted: outcomes.length, outcomes };
+  const base = { stopped, failed, attempted: outcomes.length, outcomes };
+
+  // 끌 것이 없었다면 끄기를 하지 않았다. 그래도 마지막 조회에서 무언가
+  // 켜져 있으면 그 사실이 먼저다 — 그 사이에 생겼다는 뜻이다.
+  if (outcomes.length === 0) {
+    if (after.state === 'unread') {
+      return { ...base, code: 'NOTHING_TO_STOP', remaining: null };
+    }
+    if (after.remaining > 0) {
+      return { ...base, code: 'REMAINS', remaining: after.remaining };
+    }
+    return { ...base, code: 'NOTHING_TO_STOP', remaining: 0 };
+  }
+
+  // **못 읽었으면 껐다고 단정하지 않는다.** 개별 성공 수는 말할 수 있다.
+  if (after.state === 'unread') {
+    return { ...base, code: 'UNVERIFIED', remaining: null, error: after.reason };
+  }
+  if (after.remaining > 0) {
+    return { ...base, code: 'REMAINS', remaining: after.remaining };
+  }
+  return { ...base, code: 'ALL_STOPPED', remaining: 0 };
 }
 
 export function unknownResult(error: string): GlobalStopResult {
-  return { code: 'UNKNOWN', stopped: 0, failed: 0, attempted: 0, outcomes: [], error };
+  return { code: 'UNKNOWN', stopped: 0, failed: 0, attempted: 0, remaining: null, outcomes: [], error };
 }
 
 /**
@@ -142,9 +196,14 @@ export function headline(r: GlobalStopResult): string {
     case 'NOTHING_TO_STOP':
       return '켜져 있는 자동매매 예약이 없습니다 — 끌 것이 없었습니다';
     case 'ALL_STOPPED':
-      return `자동매매 예약 ${r.stopped}개를 껐습니다 — 새 진입을 더 내지 않습니다`;
-    case 'PARTIAL':
-      return `예약 ${r.attempted}개 중 ${r.stopped}개만 껐습니다 — ${r.failed}개는 아직 돌고 있습니다`;
+      // 다시 읽어서 0개를 확인했을 때만 이 문장이 나온다.
+      return r.failed > 0
+        ? `자동매매 예약 ${r.stopped}개를 껐습니다. 요청 ${r.failed}개는 거절됐지만 다시 확인하니 켜져 있는 예약이 없습니다`
+        : `자동매매 예약 ${r.stopped}개를 껐고, 다시 확인하니 켜져 있는 예약이 없습니다`;
+    case 'REMAINS':
+      return `끄기 요청 ${r.attempted}개 중 ${r.stopped}개가 성공했지만, 다시 확인하니 ${r.remaining}개가 아직 켜져 있습니다`;
+    case 'UNVERIFIED':
+      return `예약 ${r.stopped}개를 껐다는 응답은 받았지만, 지금 전체가 꺼졌는지는 확인하지 못했습니다`;
     case 'UNKNOWN':
       return `자동매매 예약을 읽지 못했습니다 — 무엇이 돌고 있는지 확인하지 못했습니다`;
   }
@@ -160,7 +219,7 @@ export function boundaryNote(r: GlobalStopResult): string {
   if (r.code === 'IDLE' || r.code === 'STOPPING') return '';
   const base = '예약을 끄면 새 진입을 내지 않습니다. '
     + '이미 열린 포지션은 그대로 남고, 거래소에 올라간 주문도 취소되지 않습니다.';
-  if (r.code === 'PARTIAL' || r.code === 'UNKNOWN') {
+  if (r.code === 'REMAINS' || r.code === 'UNVERIFIED' || r.code === 'UNKNOWN') {
     return base + ' 실전 주문을 즉시 막아야 하면 킬 스위치를 쓰세요.';
   }
   return base;
@@ -168,5 +227,5 @@ export function boundaryNote(r: GlobalStopResult): string {
 
 /** 화면이 위험 색(빨강)을 켜야 하는 상태인가 */
 export function isAlarming(r: GlobalStopResult): boolean {
-  return r.code === 'PARTIAL' || r.code === 'UNKNOWN';
+  return r.code === 'REMAINS' || r.code === 'UNVERIFIED' || r.code === 'UNKNOWN';
 }

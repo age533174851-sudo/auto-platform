@@ -15,7 +15,7 @@ import { Shield, Edit3, ChevronRight } from 'lucide-react';
 import AutoStatusBoard from '../AutoStatusBoard';
 import AutotradeControl from '../AutotradeControl';
 import {
-  stopTargets, summarize, unknownResult, headline as stopHeadline,
+  stopTargets, verify, unknownResult, headline as stopHeadline,
   boundaryNote as stopBoundary, isAlarming as stopAlarming,
   IDLE_RESULT, type GlobalStopResult, type StopOutcome,
 } from '@/lib/autotrade/globalStop';
@@ -44,6 +44,7 @@ import AuditLogPanel from '../AuditLogPanel';
 import {
   kindOf, KIND_LABEL, showsTpSl, cardRowsOf, unwiredFieldsOf, edgeRowOf,
   activityOf, activityLabel, ACTIVITY_TONE, DEFAULT_FILTERS,
+  cardPerfLine, cardPerfInput, UNKNOWN_TEXT,
   filterCountsOf, passesFilter, ALL_ACTIVITIES,
   actionsOf, isCompact, envLineOf, perfSummaryOf, moneyRowsOf,
   type Activity, type Tone as CardTone,
@@ -249,7 +250,15 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
        PATCH /api/autotrade/schedule {id,false} → 하나씩 끈다
 
      그리고 **끈 개수만 말한다.** 판정과 문장은 lib/autotrade/globalStop에
-     있고 테스트가 붙어 있다. */
+     있고 테스트가 붙어 있다.
+
+     마지막에 한 번 더 읽는 것이 판정이다
+     ─────────────────────────────────────
+     PATCH가 전부 200을 받아도 그것은 그 N개에 대한 증거일 뿐이다.
+     그 사이에 다른 창에서 예약을 켰거나 새 예약이 생겼으면 켜진 것이
+     남는다. 예전에는 마지막 GET이 `schedRows`만 갱신하고 판정에는
+     반영되지 않아서, 그 경우에도 화면은 계속 "전부 껐다"고 적었다.
+     이제 그 조회 결과가 `verify()`로 들어가고, 못 읽으면 UNVERIFIED다. */
   const handleGlobalStop=useCallback(async()=>{
     setStopResult({...IDLE_RESULT, code:'STOPPING'});
     const listed = await loadSchedules();
@@ -260,7 +269,6 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
     }
     setSchedRows(listed.rows);
     const targets = stopTargets(listed.rows);
-    if(targets.length===0){ setStopResult(summarize([])); return; }
     const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
     const outcomes:StopOutcome[]=[];
     for(const t of targets){
@@ -278,9 +286,16 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
         outcomes.push({id:t.id,label,ok:false,reason:String(e?.message||e)});
       }
     }
-    setStopResult(summarize(outcomes));
+    // **다시 읽어서 판정한다.** 이 조회 없이는 "지금 전부 꺼졌다"를
+    // 말할 근거가 없다.
     const after = await loadSchedules();
-    if(after.ok) setSchedRows(after.rows);
+    if(after.ok){
+      setSchedRows(after.rows); setSchedErr('');
+      setStopResult(verify(outcomes, {state:'read', remaining: stopTargets(after.rows).length}));
+    }else{
+      setSchedRows(null); setSchedErr(after.reason);
+      setStopResult(verify(outcomes, {state:'unread', reason: after.reason}));
+    }
   },[loadSchedules]);
 
   const handleCreateStrat=()=>{
@@ -578,13 +593,21 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                       </div>
                     </div>
                   </div>
-                  {/* 성적은 표본을 같이 말한다 — 3건짜리 승률은 정보가 아니다 */}
-                  <div style={{textAlign:'right',flexShrink:0}}>
-                    <div style={{color:s.totalPnl>=0?T.grn:T.red,fontSize:12,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{s.totalPnl>=0?'+':''}{cvt(Math.abs(s.totalPnl),currency)}</div>
-                    <div style={{color:T.muted,fontSize:9,marginTop:1}}>
-                      {s.trades>0?`승률 ${s.winRate}% · ${s.trades}건`:'거래 없음'}
-                    </div>
-                  </div>
+                  {/* 성적은 표본을 같이 말한다 — 3건짜리 승률은 정보가 아니다.
+                      그리고 **잰 적이 없으면 숫자를 내지 않는다.** 이 목록의
+                      손익·승률·거래수는 소스에 0으로 박혀 있는 값이라
+                      `0원` · `거래 없음`은 확인된 사실이 아니다. */}
+                  {(() => {
+                    const pl = cardPerfLine(s, STRAT_LIST_WIRED);
+                    return (
+                      <div style={{textAlign:'right',flexShrink:0}}>
+                        <div style={{color:pl.pnl===null?T.muted:pl.pnl>=0?T.grn:T.red,fontSize:12,fontWeight:700,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+                          {pl.pnl===null?UNKNOWN_TEXT:`${pl.pnl>=0?'+':''}${cvt(Math.abs(pl.pnl),currency)}`}
+                        </div>
+                        <div style={{color:T.muted,fontSize:9,marginTop:1}}>{pl.sample}</div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* 실행 환경 — 모의/테스트넷/실전이 카드에도 보여야 한다 */}
@@ -673,7 +696,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                         정보가 아니라 우연이고, 그걸 다른 전략의 46%와
                         나란히 놓으면 잘못된 비교가 된다. */}
                     {(() => {
-                      const perf = perfSummaryOf({ winRatePct: s.trades>0?s.winRate:null, trades: s.trades });
+                      const perf = perfSummaryOf(cardPerfInput(s, STRAT_LIST_WIRED));
                       return (
                         <div style={{marginTop:8}}>
                           <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6}}>
@@ -857,7 +880,16 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           {/* Emergency stop */}
           <Card style={{padding:'14px 16px',border:`1px solid ${A(T.red,'40')}`}}>
             <div style={{color:T.red,fontWeight:700,marginBottom:6}}>🚨 긴급 정지</div>
-            <div style={{color:T.muted,fontSize:11,marginBottom:10}}>모든 자동매매를 즉시 중단합니다. 수동 거래는 계속 가능합니다.</div>
+            {/* **이 문장이 버튼보다 세면 안 된다.**
+                예전에는 "모든 자동매매를 즉시 중단합니다"라고 적혀 있었는데,
+                바로 아래 버튼은 등록된 예약을 끌 뿐이고 열린 포지션도
+                거래소 주문도 건드리지 않는다 — 같은 카드 안에서 위와
+                아래가 서로 다른 말을 하고 있었다. 사용자는 큰 글씨를
+                믿는다. */}
+            <div style={{color:T.muted,fontSize:11,marginBottom:10,lineHeight:1.5}}>
+              서버에 등록된 자동매매 예약을 모두 끕니다.
+              새 진입만 막으며 열린 포지션과 기존 거래소 주문은 그대로 남습니다.
+            </div>
             <button onClick={handleGlobalStop} disabled={stopResult.code==='STOPPING'} style={{width:'100%',padding:'12px',minHeight:44,background:T.red,color:'#fff',border:'none',borderRadius:12,fontWeight:800,fontSize:13,cursor:stopResult.code==='STOPPING'?'wait':'pointer',opacity:stopResult.code==='STOPPING'?0.6:1}}>
               {stopResult.code==='STOPPING'?'정지 요청 중…':'등록된 자동매매 예약 전체 끄기'}
             </button>

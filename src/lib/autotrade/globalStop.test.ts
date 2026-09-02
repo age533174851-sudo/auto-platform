@@ -8,12 +8,19 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  stopTargets, summarize, unknownResult, headline, boundaryNote, isAlarming,
-  IDLE_RESULT, type StopOutcome,
+  stopTargets, verify, unknownResult, headline, boundaryNote, isAlarming,
+  IDLE_RESULT, type StopOutcome, type AfterCheck,
 } from './globalStop';
 
 const ok = (id: string): StopOutcome => ({ id, label: id, ok: true });
 const bad = (id: string, reason = '거절'): StopOutcome => ({ id, label: id, ok: false, reason });
+
+/** 끈 뒤 다시 읽었더니 n개가 켜져 있더라 */
+const read = (n: number): AfterCheck => ({ state: 'read', remaining: n });
+/** 끈 뒤 다시 읽지 못했다 */
+const unread = (reason = '네트워크 오류'): AfterCheck => ({ state: 'unread', reason });
+/** 예전 테스트를 옮겨 적기 위한 축약 — 다시 읽어서 0개를 확인한 경우 */
+const clean = (o: StopOutcome[]) => verify(o, read(0));
 
 export function runGlobalStopTests() {
   console.log('[자동매매 전체정지 — 확인한 것만 말한다]');
@@ -31,7 +38,7 @@ export function runGlobalStopTests() {
   test('이미 꺼진 것을 세면 "몇 개를 껐다"가 부풀어난다', () => {
     const rows = [{ id: 'a', enabled: false }, { id: 'b', enabled: false }];
     eq(stopTargets(rows).length, 0);
-    eq(summarize([]).code, 'NOTHING_TO_STOP');
+    eq(clean([]).code, 'NOTHING_TO_STOP');
   });
 
   test('enabled를 모르면 끄는 쪽에 넣는다', () => {
@@ -59,23 +66,62 @@ export function runGlobalStopTests() {
   });
 
   // ── 결과 판정 ─────────────────────────────────────────────
-  test('전부 꺼졌을 때만 ALL_STOPPED다', () => {
-    const r = summarize([ok('a'), ok('b')]);
+  test('다시 읽어서 0개를 확인했을 때만 ALL_STOPPED다', () => {
+    const r = clean([ok('a'), ok('b')]);
     eq(r.code, 'ALL_STOPPED');
-    eq(r.stopped, 2); eq(r.failed, 0); eq(r.attempted, 2);
+    eq(r.stopped, 2); eq(r.failed, 0); eq(r.attempted, 2); eq(r.remaining, 0);
   });
 
-  test('하나라도 실패하면 PARTIAL이다 — 부분 성공을 성공이라 적지 않는다', () => {
-    const r = summarize([ok('a'), bad('b'), ok('c')]);
-    eq(r.code, 'PARTIAL');
-    eq(r.stopped, 2); eq(r.failed, 1);
-    assert(headline(r).includes('아직 돌고'), `남은 것을 말하지 않는다: ${headline(r)}`);
+  test('PATCH가 전부 성공해도 다시 읽어 남아 있으면 REMAINS다', () => {
+    // **이것이 이번에 막는 고장이다.** 끄는 사이에 다른 창에서 켜거나
+    // 새 예약이 생기면, 개별 성공 수는 그대로여도 도는 것이 남는다.
+    const r = verify([ok('a'), ok('b')], read(1));
+    eq(r.code, 'REMAINS');
+    eq(r.stopped, 2); eq(r.remaining, 1);
+    assert(headline(r).includes('1개가 아직 켜져'), `남은 것을 말하지 않는다: ${headline(r)}`);
   });
 
-  test('전부 실패해도 PARTIAL이다 — 0개 껐다고 조용히 넘기지 않는다', () => {
-    const r = summarize([bad('a'), bad('b')]);
-    eq(r.code, 'PARTIAL');
-    eq(r.stopped, 0); eq(r.failed, 2);
+  test('일부 실패 + 남아 있음 → REMAINS', () => {
+    const r = verify([ok('a'), bad('b'), ok('c')], read(1));
+    eq(r.code, 'REMAINS');
+    eq(r.stopped, 2); eq(r.failed, 1); eq(r.remaining, 1);
+  });
+
+  test('일부 실패했어도 다시 읽어 0개면 켜진 것이 없다고 말할 수 있다', () => {
+    // 서버가 지금 0개라고 답했다. 그것이 현재 상태다. 다만 거절이
+    // 있었다는 사실은 숨기지 않는다.
+    const r = clean([ok('a'), bad('b')]);
+    eq(r.code, 'ALL_STOPPED');
+    eq(r.remaining, 0); eq(r.failed, 1);
+    assert(headline(r).includes('거절'), `거절을 숨긴다: ${headline(r)}`);
+  });
+
+  test('전부 실패하고 남아 있으면 REMAINS다 — 0개 껐다고 조용히 넘기지 않는다', () => {
+    const r = verify([bad('a'), bad('b')], read(2));
+    eq(r.code, 'REMAINS');
+    eq(r.stopped, 0); eq(r.failed, 2); eq(r.remaining, 2);
+  });
+
+  // ── 마지막 조회를 못 했을 때 ──────────────────────────────
+  test('다시 읽지 못하면 UNVERIFIED다 — 전부 꺼졌다고 단정하지 않는다', () => {
+    const r = verify([ok('a'), ok('b')], unread());
+    eq(r.code, 'UNVERIFIED');
+    eq(r.stopped, 2);
+    eq(r.remaining, null);   // 모르는 것을 0으로 적지 않는다
+    const h = headline(r);
+    assert(h.includes('2개'), `껐다는 응답 수를 말하지 않는다: ${h}`);
+    assert(h.includes('확인하지 못'), `모른다고 말하지 않는다: ${h}`);
+    assert(!/전부|모두/.test(h), `확인 못 했는데 단정한다: ${h}`);
+  });
+
+  test('끌 것이 없었는데 다시 읽으니 켜져 있으면 그 사실이 먼저다', () => {
+    const r = verify([], read(2));
+    eq(r.code, 'REMAINS');
+    eq(r.remaining, 2);
+  });
+
+  test('끌 것이 없었고 다시 읽지도 못했으면 개수를 적지 않는다', () => {
+    eq(verify([], unread()).remaining, null);
   });
 
   test('목록을 못 읽으면 UNKNOWN이다 — 0으로 적지 않는다', () => {
@@ -91,9 +137,10 @@ export function runGlobalStopTests() {
     const all = [
       IDLE_RESULT,
       { ...IDLE_RESULT, code: 'STOPPING' as const },
-      summarize([]),
-      summarize([ok('a')]),
-      summarize([ok('a'), bad('b')]),
+      clean([]),
+      clean([ok('a')]),
+      verify([ok('a'), bad('b')], read(1)),
+      verify([ok('a')], unread()),
       unknownResult('x'),
     ];
     for (const r of all) {
@@ -110,13 +157,13 @@ export function runGlobalStopTests() {
   });
 
   test('센 개수만 말한다', () => {
-    assert(headline(summarize([ok('a'), ok('b'), ok('c')])).includes('3개'), '개수를 안 적는다');
-    const p = headline(summarize([ok('a'), bad('b')]));
-    assert(p.includes('2개') && p.includes('1개'), `시도·실패 수를 안 적는다: ${p}`);
+    assert(headline(clean([ok('a'), ok('b'), ok('c')])).includes('3개'), '개수를 안 적는다');
+    const p = headline(verify([ok('a'), bad('b')], read(1)));
+    assert(p.includes('2개') && p.includes('1개'), `시도·성공·남은 수를 안 적는다: ${p}`);
   });
 
   test('예약을 끄는 것이 청산이 아니라는 것을 항상 말한다', () => {
-    for (const r of [summarize([ok('a')]), summarize([ok('a'), bad('b')]), summarize([]), unknownResult('x')]) {
+    for (const r of [clean([ok('a')]), verify([ok('a'), bad('b')], read(1)), clean([]), verify([ok('a')], unread()), unknownResult('x')]) {
       const n = boundaryNote(r);
       assert(n.includes('포지션'), `${r.code}: 열린 포지션 이야기가 없다`);
       assert(n.includes('취소되지 않'), `${r.code}: 주문 취소 여부를 말하지 않는다`);
@@ -124,14 +171,16 @@ export function runGlobalStopTests() {
   });
 
   test('덜 멈춘 상태에서는 킬 스위치를 안내한다', () => {
-    assert(boundaryNote(summarize([ok('a'), bad('b')])).includes('킬 스위치'), 'PARTIAL에서 안내 없음');
+    assert(boundaryNote(verify([ok('a'), bad('b')], read(1))).includes('킬 스위치'), 'REMAINS에서 안내 없음');
+    assert(boundaryNote(verify([ok('a')], unread())).includes('킬 스위치'), 'UNVERIFIED에서 안내 없음');
     assert(boundaryNote(unknownResult('x')).includes('킬 스위치'), 'UNKNOWN에서 안내 없음');
   });
 
   test('위험 색은 아직 도는 것이 있을 때만 켠다', () => {
-    eq(isAlarming(summarize([ok('a')])), false);
-    eq(isAlarming(summarize([])), false);
-    eq(isAlarming(summarize([ok('a'), bad('b')])), true);
+    eq(isAlarming(clean([ok('a')])), false);
+    eq(isAlarming(clean([])), false);
+    eq(isAlarming(verify([ok('a'), bad('b')], read(1))), true);
+    eq(isAlarming(verify([ok('a')], unread())), true);   // 확인 못 한 것도 위험이다
     eq(isAlarming(unknownResult('x')), true);
   });
 }
