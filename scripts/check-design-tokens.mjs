@@ -159,24 +159,57 @@ for (const [name, vals] of Object.entries(must)) {
 {
   const exported = [...code[CORE].matchAll(/export const ([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1])
     .concat([...code[CORE].matchAll(/export function ([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1]));
-  const consumers = [];
+
+  /* **재수출은 소비가 아니다.**
+     처음 구현은 import 줄만 지우고 `export { SP, ..., BP };`는 남겨 뒀다.
+     그래서 "정본에 추가 + components에서 재수출 + 실제 사용 0"이라는
+     조합이 통과했다 — 이 규칙이 막으려던 바로 그 모양이다.
+
+     소비로 인정하는 조건 두 가지:
+       ① 그 파일이 토큰 모듈에서 그 이름을 **실제로 import** 했고
+       ② import·export 줄을 지운 나머지 본문에서 그 이름을 **참조**한다
+     ①이 있어서 우연히 같은 이름의 지역 변수를 쓰는 파일은 세지 않고,
+     ②가 있어서 통과만 시키는 재수출은 세지 않는다. */
+  const prod = [];
   const walk = (dir) => {
     for (const e of readdirSync(dir)) {
       const p = join(dir, e);
       if (statSync(p).isDirectory()) walk(p);
-      else if (/\.tsx?$/.test(p) && p !== CORE && p !== CORE_TST) consumers.push(p);
+      else if (/\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p) && p !== CORE) prod.push(p);
     }
   };
   walk('src');
-  const body = consumers.map(f => stripJsComments(readFileSync(f, 'utf8'))).join('\n');
+
+  // 토큰 모듈에서 가져온 이름들 (정본 직접 · components 재수출 둘 다)
+  const TOKEN_IMPORT = /import\s*\{([^}]*)\}\s*from\s*['"][^'"]*(?:lib\/ui\/tokens|components\/ui\/tokens)['"]/g;
+  // import 문 · export 목록 · re-export 를 지운 "실행되는 본문"
+  const executableBody = (t) => t
+    .replace(/import\s+[\s\S]*?from\s*['"][^'"]*['"]\s*;?/g, ' ')
+    .replace(/import\s*['"][^'"]*['"]\s*;?/g, ' ')
+    .replace(/export\s*\{[^}]*\}\s*(?:from\s*['"][^'"]*['"])?\s*;?/g, ' ')
+    .replace(/export\s*\*\s*(?:as\s+\w+\s*)?from\s*['"][^'"]*['"]\s*;?/g, ' ');
+
+  const consumed = new Set();
+  for (const f of prod) {
+    const t = stripJsComments(readFileSync(f, 'utf8'));
+    const imported = new Set();
+    for (const m of t.matchAll(TOKEN_IMPORT)) {
+      for (const n of m[1].split(',')) {
+        const name = n.trim().split(/\s+as\s+/).pop().trim();
+        if (name) imported.add(name);
+      }
+    }
+    if (imported.size === 0) continue;
+    const body = executableBody(t);
+    for (const name of imported) {
+      if (new RegExp(`\\b${name}\\b`).test(body)) consumed.add(name);
+    }
+  }
+
   for (const name of exported) {
-    // 객체 스케일은 `NAME.` 로, 스칼라/함수는 이름 그대로 쓰인다.
-    // import 줄만 있고 실제 사용이 없는 경우를 세지 않도록 import 문은 뺀다.
-    const used = new RegExp(`(?<!import[^\\n]{0,200})\\b${name}\\b\\s*[.(\`,)}\\]]`).test(
-      body.split('\n').filter(l => !/^\s*import\b/.test(l)).join('\n'));
-    if (!used) {
+    if (!consumed.has(name)) {
       err(`${CORE}: ${name}을 내보내지만 화면에서 쓰는 곳이 없습니다 — `
-        + '쓰이지 않는 토큰은 정본이 아니라 장식입니다. 실제로 배선하거나 빼세요');
+        + '쓰이지 않는 토큰은 정본이 아니라 장식입니다. 재수출만으로는 소비가 아닙니다');
     }
   }
 }
