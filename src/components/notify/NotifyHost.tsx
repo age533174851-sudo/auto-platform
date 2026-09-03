@@ -1,10 +1,16 @@
 'use client';
-// NotifyHost — 전역 알림 UI. 하단 토스트 스택 + 우상단 알림센터(최근 50개).
+// NotifyHost — 전역 알림 UI. 하단 토스트 스택 + 우상단 **최근 알림함**(최근 50개).
+//
+// 헤더에도 벨 버튼이 하나 있는데 **다른 것**이다:
+//   여기(수신함) → 이미 일어난 일의 기록. 정본은 lib/notify/center.
+//   헤더 벨      → 가격·신호 알림 화면. 사용자가 거는 조건을 설정한다.
+// 아이콘이 둘 다 종이라 눈으로 구분이 안 됐다. 그래서 이쪽을 수신함
+// 아이콘으로 바꿨다. 기능을 지워서 해결하지 않는다 — 둘 다 필요하다.
 // 이모지 대신 lucide-react 아이콘 사용. layout에 1회 마운트.
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   CheckCircle2, XCircle, Loader2, Info, AlertTriangle,
-  ArrowUpCircle, ArrowDownCircle, Bot, ShieldAlert, Bell, X, Trash2,
+  ArrowUpCircle, ArrowDownCircle, Bot, ShieldAlert, Inbox, X, Trash2,
 } from 'lucide-react';
 import {
   subscribeToasts, subscribeCenter, loadNotifications, clearNotifications,
@@ -96,14 +102,15 @@ export default function NotifyHost() {
           비운다(globals.css). 음수 마진이나 z-index로 밀어 넣지 않는다.
           크기는 `--tap`(40) — 태블릿에서 손으로 누르는 버튼이다. */}
       <button onClick={() => { setOpenCenter(true); setUnread(0); }}
-        aria-label={unread > 0 ? `알림 ${unread}건 열기` : '알림 열기'}
+        aria-label={unread > 0 ? `최근 알림함 열기 — 읽지 않음 ${unread}건` : '최근 알림함 열기'}
+        title="최근 알림함 — 방금 일어난 일의 기록"
         style={{
         position: 'fixed', top: 4, right: 4, zIndex: 9998,
         width: 'var(--tap)', height: 'var(--tap)', borderRadius: 10,
         background: 'rgba(17,24,39,0.7)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.12)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
       }}>
-        <Bell size={18} color="var(--t-txt)" />
+        <Inbox size={18} color="var(--t-txt)" />
         {unread > 0 && <span style={{ position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 99, background: '#EF4444', color: '#fff', fontSize: 9, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{unread > 9 ? '9+' : unread}</span>}
       </button>
 
@@ -118,8 +125,8 @@ export default function NotifyHost() {
           }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Bell size={16} color="var(--t-txt)" />
-                <span style={{ color: '#fff', fontSize: 14, fontWeight: 800 }}>알림</span>
+                <Inbox size={16} color="var(--t-txt)" />
+                <span style={{ color: '#fff', fontSize: 14, fontWeight: 800 }}>최근 알림함</span>
                 <span style={{ color: '#64748b', fontSize: 11 }}>최근 {items.length}</span>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>

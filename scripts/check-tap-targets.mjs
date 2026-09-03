@@ -31,13 +31,14 @@ const err = (m) => { bad = true; console.error(`❌ ${m}`); };
 const PREFS  = 'src/lib/ui/panelPrefs.ts';
 const CSS    = 'src/app/globals.css';
 const NOTIFY = 'src/components/notify/NotifyHost.tsx';
+const APP    = 'src/app/page.tsx';
 const SCREENS = [
   'src/components/pages/AutoPage.tsx',
   'src/components/AutotradeControl.tsx',
   'src/components/MockAutoTrade.tsx',
 ];
 
-for (const f of [PREFS, CSS, NOTIFY, ...SCREENS]) {
+for (const f of [PREFS, CSS, NOTIFY, APP, ...SCREENS]) {
   if (!existsSync(f)) { err(`${f}를 찾지 못했습니다 — 이 검사가 무엇을 보는지 다시 확인하세요`); }
 }
 if (bad) { console.error('\n검사할 파일을 못 읽었습니다. 여기서 멈춥니다.\n'); process.exit(1); }
@@ -52,8 +53,9 @@ const tapTs = Number(/export const MIN_CONTROL_TARGET\s*=\s*(\d+)/.exec(prefs)?.
 if (!tapTs) err(`${PREFS}: MIN_CONTROL_TARGET을 찾지 못했습니다`);
 if (tapTs < 40) err(`${PREFS}: MIN_CONTROL_TARGET이 ${tapTs}px입니다 — 손가락으로 누르기에 좁습니다`);
 
-const bandTs = Number(/export const RAIL_COLLAPSED\s*=\s*MIN_CONTROL_TARGET\s*\+\s*(\d+)/.exec(prefs)?.[1] || NaN);
-if (Number.isNaN(bandTs)) err(`${PREFS}: RAIL_COLLAPSED가 MIN_CONTROL_TARGET에서 나오지 않습니다 — 띠가 버튼보다 좁아질 수 있습니다`);
+const railTs = Number(/export const RAIL_COLLAPSED\s*=\s*MIN_CONTROL_TARGET\s*\+\s*(\d+)/.exec(prefs)?.[1] || NaN);
+if (Number.isNaN(railTs)) err(`${PREFS}: RAIL_COLLAPSED가 MIN_CONTROL_TARGET에서 나오지 않습니다 — 띠가 버튼보다 좁아질 수 있습니다`);
+const railCollapsed = tapTs + railTs;
 
 const tapCss = Number(/--tap:\s*(\d+)px/.exec(css)?.[1] || 0);
 if (!tapCss) err(`${CSS}: --tap 변수가 없습니다`);
@@ -61,9 +63,6 @@ else if (tapCss !== tapTs) err(`${CSS}: --tap이 ${tapCss}px인데 ${PREFS}의 M
 
 const bandCss = Number(/--notify-band:\s*(\d+)px/.exec(css)?.[1] || 0);
 if (!bandCss) err(`${CSS}: --notify-band 변수가 없습니다 — 떠 있는 벨이 비울 자리가 정해져 있지 않습니다`);
-else if (bandCss !== tapTs + bandTs) {
-  err(`${CSS}: --notify-band가 ${bandCss}px인데 RAIL_COLLAPSED는 ${tapTs + bandTs}px입니다 — 벨이 헤더를 덮거나 빈 자리가 생깁니다`);
-}
 
 /* ── ② 레일이 없는 폭에서 헤더가 그 띠를 비운다 ──────────────
    1024px는 오른쪽 레일이 나타나는 폭이다(globals.css). 그 아래에서는
@@ -72,23 +71,79 @@ if (!/@media \(max-width: 1023px\)[\s\S]{0,200}?\.hdr-actions\s*\{[^}]*margin-ri
   err(`${CSS}: 레일이 없는 폭에서 헤더가 알림 벨의 띠를 비우지 않습니다 — 벨이 로그인·프로필 버튼을 덮습니다`);
 }
 
-/* ── ③ 떠 있는 벨이 정본 크기를 쓰고 이름이 있다 ────────────── */
+/* ── ③ 떠 있는 벨이 자기가 예약한 띠 **안에** 들어간다 ────────
+   처음 이 검사는 `--tap`·`--notify-band`·헤더 여백·벨이 var(--tap)을
+   쓰는지만 봤다. 그런데 벨이 띠 안에 들어가는지는 **크기가 아니라
+   크기 + 오른쪽 오프셋**이 정한다. right를 4에서 12로 바꾸면 벨은
+   40 + 12 = 52px를 차지해 48px 띠를 4px 넘어가는데, 그때도 검사는
+   통과했다(직접 재현했다). 지금은 그 관계를 증명한다:
+
+     오른쪽 오프셋 + 버튼 크기 <= 예약한 띠
+
+   그리고 데스크톱에서 겹치지 않는 근거는 접힌 레일이 이 띠보다 좁지
+   않다는 것이다. 레일과 알림 벨은 다른 개념이므로 **같은 값이라고
+   묶지 않고** 필요한 부등식만 본다:
+
+     RAIL_COLLAPSED >= 알림 띠
+*/
 const notify = stripJsComments(readFileSync(NOTIFY, 'utf8'));
 if (/width:\s*\d+\s*,\s*height:\s*\d+/.test(notify)) {
   err(`${NOTIFY}: 벨 크기를 숫자로 직접 적습니다 — var(--tap)을 쓰세요`);
 }
 if (!/var\(--tap\)/.test(notify)) err(`${NOTIFY}: 벨이 조작 대상 최소 크기를 쓰지 않습니다`);
+
+/* 떠 있는 벨의 여는 태그 하나. 아래 두 규칙(이름 · 오프셋)이 **같은
+   조각**을 본다 — 파일 어딘가에 있으면 통과하던 구멍을 두 번 겪었다. */
+const bellTag = (
+  /<button(?:(?!<\/?button)[\s\S])*?position:\s*'fixed'(?:(?!<\/?button)[\s\S])*?>/.exec(notify) || []
+)[0] || '';
+
+if (bandCss && bellTag) {
+  /* **벨 자신의** 오프셋만 본다. 파일 전체에서 찾으면 알림창 패널의
+     `right: 0`이 대신 통과시켜 준다 — 벨의 right를 아예 지워도 검사가
+     통과했다(직접 재현했다). */
+  const gap = /\bright:\s*(\d+)/.exec(bellTag);
+  if (!gap) err(`${NOTIFY}: 떠 있는 벨의 오른쪽 오프셋을 읽지 못했습니다 — 띠 안에 들어가는지 확인할 수 없습니다`);
+  else {
+    const need = Number(gap[1]) + tapTs;
+    if (need > bandCss) {
+      err(`${NOTIFY}: 벨이 오른쪽 ${gap[1]}px + 크기 ${tapTs}px = ${need}px를 차지하는데 비워 둔 띠는 ${bandCss}px입니다 — ${need - bandCss}px가 헤더 위로 넘어갑니다`);
+    }
+  }
+  if (railCollapsed < bandCss) {
+    err(`${PREFS}: 접힌 레일이 ${railCollapsed}px인데 알림 띠는 ${bandCss}px입니다 — 1024px 이상에서 벨이 헤더를 덮습니다`);
+  }
+}
 /* 아이콘만 있는 버튼은 읽어 줄 이름이 없으면 스크린리더에서 "버튼"이다.
    파일 아무 데나 aria-label이 있으면 통과하던 규칙이었다 — 벨의 이름을
    지워도 알림창 닫기 버튼의 이름이 대신 통과시켜 줬다. **그 버튼 자신**을
    본다. */
+if (!bellTag) err(`${NOTIFY}: 떠 있는 알림 벨을 찾지 못했습니다`);
+else if (!/aria-label=/.test(bellTag)) {
+  err(`${NOTIFY}: 떠 있는 알림 벨에 이름이 없습니다 — 아이콘만 있는 버튼은 스크린리더에서 그냥 "버튼"입니다`);
+}
+
+/* ── ③-2 비슷하게 생긴 두 벨이 서로 다른 것임을 말한다 ────────
+   헤더의 벨은 `nav('alerts')` — 사용자가 "무엇을 알려 달라"고 거는
+   조건 화면이다. 떠 있는 벨은 이미 일어난 일의 기록(수신함)이다.
+   둘 다 아이콘만 있고 나란히 붙어 있어서, 이름이 없으면 스크린리더에도
+   눈에도 같은 버튼 두 개다. 기능을 지워서 해결하지 않는다 — 둘 다 쓴다. */
 {
-  const bell = /<button[^>]*?position:\s*'fixed'[\s\S]{0,400}?>/.exec(notify)
-            || /<button(?:(?!<button)[\s\S])*?var\(--tap\)(?:(?!<button)[\s\S])*?>/.exec(notify);
-  if (!bell) err(`${NOTIFY}: 떠 있는 알림 벨을 찾지 못했습니다`);
-  else if (!/aria-label=/.test(bell[0])) {
-    err(`${NOTIFY}: 떠 있는 알림 벨에 이름이 없습니다 — 아이콘만 있는 버튼은 스크린리더에서 그냥 "버튼"입니다`);
+  const app = readFileSync(APP, 'utf8');
+  const m = /<button onClick=\{\(\)=>nav\('alerts'\)\}(?:(?!<\/?button)[\s\S])*?>/.exec(app);
+  if (!m) err(`${APP}: 헤더의 알림 화면 버튼을 찾지 못했습니다`);
+  else if (!/aria-label=/.test(m[0])) {
+    err(`${APP}: 헤더 벨에 이름이 없습니다 — 떠 있는 벨과 아이콘이 같아 구분되지 않습니다`);
   }
+  /* 눈으로도 구분돼야 한다. 떠 있는 쪽이 같은 종 아이콘으로 돌아가면
+     다시 같은 버튼 두 개가 된다. */
+  if (/<Bell\b/.test(notify)) {
+    err(`${NOTIFY}: 수신함이 헤더와 같은 종 아이콘을 씁니다 — 다른 기능인데 눈으로 구분되지 않습니다`);
+  }
+}
+/* 연결 안 된 개수를 그럴듯한 숫자로 채우지 않는다. */
+if (/const unreadCount\s*=\s*[1-9]/.test(readFileSync(APP, 'utf8'))) {
+  err(`${APP}: 읽지 않은 알림 개수를 상수로 지어냅니다 — 확인하지 못한 것을 숫자로 적지 않습니다`);
 }
 
 /* ── ④ 자동매매 화면이 40px 미만을 직접 적지 않는다 ────────── */
