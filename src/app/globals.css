@@ -26,6 +26,16 @@
   --kb:     0px;   /* 모바일 키보드 높이 (visualViewport로 동적 설정) */
   --nav-h:  calc(52px + var(--sab));   /* slightly shorter nav */
   --header-h: 48px;
+  /* 조작 대상의 최소 크기. UI-1의 panelPrefs.MIN_CONTROL_TARGET(40)과
+     같은 값이다 — 태블릿은 이 화면들을 손으로 누른다. 값을 두 벌
+     유지하면 한쪽만 바뀐다. 검사기가 두 값을 대조한다. */
+  --tap: 40px;
+  /* 떠 있는 알림 벨이 차지하는 오른쪽 띠.
+     panelPrefs.RAIL_COLLAPSED(48 = MIN_CONTROL_TARGET + 8)와 같은 값이다.
+     1024 이상에서 벨이 아무것도 안 가리는 이유가 바로 접힌 오른쪽 레일이
+     이미 이만큼을 비워 두기 때문이다. 레일이 없는 폭에서는 헤더가 같은
+     띠를 비운다 — 벨을 음수 마진이나 z-index로 밀어 넣지 않는다. */
+  --notify-band: 48px;
   --sheet-radius: 20px;
   --card-radius:  12px;
   /* 아래 별칭들은 CSS에서만 쓰던 옛 이름이다. 값을 두 벌 유지하면
@@ -341,11 +351,39 @@ button.switch, .switch { min-height: 0; }
 }
 .hdr-actions::-webkit-scrollbar { display: none; }
 
+/* 오른쪽 레일이 없는 폭(<1024)에서는 헤더가 알림 벨의 띠를 비운다.
+   1024 이상에서는 접힌 레일이 이미 같은 띠를 갖고 있어 겹치지 않는다.
+   실측: 이 규칙이 없을 때 430·390·360·834 전부에서 로그인 버튼과
+   1376px² 겹쳤고, 1366·1664·1920에서는 0이었다. */
+@media (max-width: 1023px) {
+  .hdr-actions { margin-right: var(--notify-band); }
+}
+
+/* 자동매매 화면의 조작 대상 최소 크기.
+   실측으로 이 화면의 버튼 높이가 28·32·34·36px이었다. 이 화면은
+   768~1023px 태블릿에서도 손으로 누른다.
+
+   버튼마다 minHeight를 손으로 적지 않는 이유: 스무 곳 중 한 곳이 빠지고,
+   빠진 것을 아무도 모른다. 여기 한 줄로 바닥을 깔고, 더 커야 하는 버튼은
+   자기 값을 그대로 쓴다(min-height는 더 큰 쪽이 이긴다).
+
+   글자 크기는 건드리지 않는다 — 줄여서 맞추는 것이 아니라 누르는 자리를
+   넓히는 것이다. */
+[data-region='autoPage'] button,
+[data-region='autoPage'] [role='button'] {
+  min-height: var(--tap);
+  min-width: var(--tap);
+}
+
 /* Compact header badge */
 .hdr-badge {
   padding: 2px 7px !important;
   font-size: 9px !important;
-  min-height: 26px !important;
+  /* 26px이었다. 이 칩들은 768~1023px 태블릿에서도 손으로 누른다 —
+     주석이 "PC 전용"이라고 주장해도 CSS 계약은 그렇지 않다는 것이
+     UI-1에서 이미 드러났다. */
+  min-height: var(--tap) !important;
+  min-width: var(--tap);
   white-space: nowrap;
   flex-shrink: 0;
 }

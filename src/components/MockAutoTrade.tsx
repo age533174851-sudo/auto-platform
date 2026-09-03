@@ -39,6 +39,7 @@ import { DURABILITY_NOTE } from '@/lib/runtime/persistentRuntime';
 // **숫자를 여기서 다시 포맷하지 않는다.** 자릿수·부호·'확인 불가'를 화면이
 // 각자 정하면 지갑과 자동매매가 같은 값을 다르게 적는다 — 실제로 그랬다.
 import { moneyText, pnlText, qtyText, shownValue, UNKNOWN_LABEL, type Tone } from '@/lib/ui/display';
+import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 
 export default function MockAutoTrade() {
   const [auth, setAuth] = useState<string | null>(null);
@@ -198,13 +199,13 @@ export default function MockAutoTrade() {
                   <input value={seedInput} onChange={e => setSeedInput(e.target.value)}
                     inputMode="decimal" placeholder="직접 입력 (USDT)"
                     style={{
-                      flex: 1, minHeight: 34, borderRadius: 8, padding: '0 10px',
+                      flex: 1, minHeight: MIN_CONTROL_TARGET, borderRadius: 8, padding: '0 10px',
                       background: 'transparent', color: T.txt, border: `1px solid ${T.border}`,
                       fontSize: 11, ...numFont,
                     }} />
                   <button disabled={busy || seedInput.trim() === ''} onClick={() => start(Number(seedInput))}
                     style={{
-                      minHeight: 34, padding: '0 14px', borderRadius: 8,
+                      minHeight: MIN_CONTROL_TARGET, padding: '0 14px', borderRadius: 8,
                       cursor: busy || seedInput.trim() === '' ? 'not-allowed' : 'pointer',
                       opacity: busy || seedInput.trim() === '' ? 0.5 : 1,
                       background: T.acg, color: T.acl, border: `1px solid ${T.acl}`,
@@ -287,7 +288,7 @@ export default function MockAutoTrade() {
             합치면 성적표가 오염됩니다. 위 숫자에는 포함되지 않습니다.
           </div>
           <button onClick={dropLegacy} style={{
-            minHeight: 32, padding: '0 12px', borderRadius: 8, cursor: 'pointer',
+            minHeight: MIN_CONTROL_TARGET, padding: '0 12px', borderRadius: 8, cursor: 'pointer',
             background: 'transparent', color: T.ylw, border: `1px solid ${A(T.ylw, '55')}`,
             fontSize: 10.5, fontWeight: 800,
           }}>이 브라우저에서 지우기</button>

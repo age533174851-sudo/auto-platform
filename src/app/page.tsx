@@ -1066,7 +1066,7 @@ export default function App() {
                   것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.
                   누르면 밝음 → 어두움 → 시간에 맞춰 순으로 돈다. */}
               <button onClick={cycleTheme} title={`테마: ${MODE_LABEL[themeMode]}`} aria-label={`테마 ${MODE_LABEL[themeMode]}`}
-                style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,width:26,height:26,cursor:'pointer',color:T.sub,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,width:'var(--tap)',height:'var(--tap)',cursor:'pointer',color:T.sub,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
                 {themeMode==='light'?<Sun size={13} strokeWidth={2.2}/>:themeMode==='dark'?<Moon size={13} strokeWidth={2.2}/>:<Clock size={13} strokeWidth={2.2}/>}
               </button>
               {pwaInstallable&&(
@@ -1113,7 +1113,7 @@ export default function App() {
                   )}
                 </div>
               ) : (
-                <button onClick={()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}} aria-label="로그인" style={{minHeight:44,background:`linear-gradient(135deg,${T.acc},${T.prp})`,border:'none',borderRadius:22,padding:'0 18px',cursor:'pointer',fontSize:13,color:'#fff',fontWeight:800}}>
+                <button onClick={()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}} aria-label="로그인" style={{minHeight:44,background:`linear-gradient(135deg,${T.acc},${T.prp})`,border:'none',borderRadius:22,padding:'0 18px',cursor:'pointer',fontSize:13,color:'#fff',fontWeight:800,whiteSpace:'nowrap',flexShrink:0}}>
                   로그인
                 </button>
               )}

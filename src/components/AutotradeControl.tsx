@@ -48,6 +48,7 @@ import { A } from '@/lib/theme/colors';
 import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 import SmokeTestPanel from './SmokeTestPanel';
+import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 
 export default function AutotradeControl() {
   // 토큰을 **직접 지켜본다.** 한 번 읽고 마는 화면은 접근 토큰이 만료되면
@@ -955,7 +956,7 @@ export default function AutotradeControl() {
             {living.length > on.length && (
               <button onClick={() => setSchedOpen(v => !v)} style={{
                 background: 'transparent', border: 'none', color: T.muted,
-                fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: '6px 0', minHeight: 32,
+                fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: '6px 0', minHeight: MIN_CONTROL_TARGET,
               }}>
                 {schedOpen ? '꺼진 예약 접기 ▲' : `꺼진 예약 ${living.length - on.length}개 보기 ▼`}
               </button>
@@ -1086,7 +1087,7 @@ export default function AutotradeControl() {
                   정리된 줄 안다. 못 여는 것은 불편이고 못 닫는 것은 사고다. */}
               <div style={{ display: 'grid', gap: 3, justifyItems: 'end', flexShrink: 0 }}>
                 <button onClick={() => toggle(s)} disabled={busy} style={{
-                  minHeight: 30, padding: '0 12px', borderRadius: 8, cursor: busy ? 'default' : 'pointer',
+                  minHeight: MIN_CONTROL_TARGET, padding: '0 12px', borderRadius: 8, cursor: busy ? 'default' : 'pointer',
                   background: s.enabled ? A(T.grn, '18') : 'transparent',
                   color: s.enabled ? T.grn : T.muted,
                   border: `1px solid ${s.enabled ? A(T.grn, '40') : T.border}`,
@@ -1097,7 +1098,7 @@ export default function AutotradeControl() {
                     삭제가 곧 끄기여서 둘이 구분되지 않았다. */}
                 <button onClick={() => cancelSchedule(s)} disabled={busy} aria-label={`${s.symbol} 예약 취소`}
                   style={{
-                    minHeight: 26, padding: '0 8px', borderRadius: 6,
+                    minHeight: MIN_CONTROL_TARGET, padding: '0 8px', borderRadius: 6,
                     cursor: busy ? 'default' : 'pointer',
                     background: 'transparent', color: T.muted,
                     border: `1px solid ${T.border}`, fontSize: 9.5, fontWeight: 700,
@@ -1120,7 +1121,7 @@ export default function AutotradeControl() {
               <button onClick={() => setCancelOpen(v => !v)} style={{
                 background: 'transparent', border: 'none', color: T.muted,
                 fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: '6px 0',
-                minHeight: 32, width: '100%', textAlign: 'left',
+                minHeight: MIN_CONTROL_TARGET, width: '100%', textAlign: 'left',
               }}>
                 {cancelOpen ? '취소한 예약 접기 ▲' : `취소한 예약 ${cancelled.length}개 보기 ▼`}
               </button>
@@ -1387,13 +1388,13 @@ export default function AutotradeControl() {
         )}
 
         <button onClick={() => setShowUtc(v => !v)} style={{
-          minHeight: 28, borderRadius: 8, cursor: 'pointer',
+          minHeight: MIN_CONTROL_TARGET, borderRadius: 8, cursor: 'pointer',
           background: 'transparent', color: T.muted,
           border: `1px solid ${T.border}`, fontSize: 10, fontWeight: 700,
         }}>{showUtc ? 'UTC 원문 숨기기' : '자세히 — UTC 원문 함께 보기'}</button>
 
         <button onClick={() => setTicking(v => !v)} style={{
-          minHeight: 34, borderRadius: 8, cursor: 'pointer',
+          minHeight: MIN_CONTROL_TARGET, borderRadius: 8, cursor: 'pointer',
           background: ticking ? A(T.grn, '18') : 'transparent',
           color: ticking ? T.grn : T.muted,
           border: `1px solid ${ticking ? A(T.grn, '40') : T.border}`,
@@ -1412,7 +1413,7 @@ export default function AutotradeControl() {
         {/* ── 지금 눌러서 내일을 확인한다 ──
             켜 놓고 다음 날 아침에 "안 됐네"를 아는 것은 너무 늦다. */}
         <button onClick={runCheck} disabled={checking || !connId} style={{
-          minHeight: 36, borderRadius: 8, cursor: checking || !connId ? 'default' : 'pointer',
+          minHeight: MIN_CONTROL_TARGET, borderRadius: 8, cursor: checking || !connId ? 'default' : 'pointer',
           background: A(T.ylw, '14'), color: T.ylw, border: `1px solid ${A(T.ylw, '40')}`,
           fontSize: 11.5, fontWeight: 800,
         }}>{checking ? '점검 중…' : '지금 점검하기 (주문은 안 냅니다)'}</button>
@@ -1421,7 +1422,7 @@ export default function AutotradeControl() {
             막힌 자리에서 푸는 방법이 있어야 한다. 예전에는 이 화면이
             "아래 버튼을 눌러"라고 안내하면서 그 버튼을 안 뒀다. */}
         <button onClick={reconcile} disabled={reconciling || !connId} style={{
-          minHeight: 34, borderRadius: 8,
+          minHeight: MIN_CONTROL_TARGET, borderRadius: 8,
           cursor: reconciling || !connId ? 'default' : 'pointer',
           background: 'transparent', color: T.muted,
           border: `1px solid ${T.border}`, fontSize: 11, fontWeight: 700,
@@ -1742,7 +1743,7 @@ export default function AutotradeControl() {
             const tone = v ? T.red : T.acl;
             return (
               <button key={String(v)} onClick={() => setLive(v)} style={{
-                minHeight: 34, borderRadius: 8, cursor: 'pointer',
+                minHeight: MIN_CONTROL_TARGET, borderRadius: 8, cursor: 'pointer',
                 background: on ? A(tone, '20') : 'transparent',
                 color: on ? tone : T.muted,
                 border: `1px solid ${on ? A(tone, '55') : T.border}`,
