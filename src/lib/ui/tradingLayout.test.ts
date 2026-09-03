@@ -8,7 +8,7 @@
 
 import { test, assert, eq } from '../../test/harness';
 import {
-  planTradingLayout, shouldCollapseNewsRail,
+  planTradingLayout, shouldCollapseNewsRail, railPresentationFor,
   ORDER_MIN, MARKET_MIN, SPLITTER, DESKTOP_MIN, TABLET_MIN,
 } from './tradingLayout';
 import { CENTER_MIN, SIDEBAR_COMPACT } from './panelPrefs';
@@ -134,6 +134,40 @@ export function runTradingLayoutTests() {
     eq(shouldCollapseNewsRail(0, 240, 300), false);
     eq(shouldCollapseNewsRail(NaN, 240, 300), false);
     eq(shouldCollapseNewsRail(1366, 240, undefined as any), false);
+  });
+
+  // ── 레일을 여는 방식 ──────────────────────────────────────
+  test('칸으로 열어도 거래 최소폭이 남으면 칸으로 연다', () => {
+    // 1920 - 240 - 300 = 1380 >= 974
+    eq(railPresentationFor(1920, 240, 300), 'column');
+    eq(railPresentationFor(2560, 240, 300), 'column');
+  });
+
+  test('칸으로 열면 거래화면이 무너지는 폭에서는 겹쳐서 연다', () => {
+    // **이것이 실제로 났던 고장이다.** 1440에서 레일을 열면 거래영역이
+    // 900이 되어(974 미만) 데스크톱이 태블릿으로 떨어졌다. 우선순위
+    // 4위를 열었다고 1·2위가 사라지면 안 된다.
+    eq(railPresentationFor(1440, 240, 300), 'overlay');
+    eq(railPresentationFor(1366, 240, 300), 'overlay');
+  });
+
+  test('겹침으로 열면 거래영역 폭이 그대로라 배치가 안 바뀐다', () => {
+    for (const v of [1366, 1440, 1664]) {
+      const pres = railPresentationFor(v, 240, 300);
+      // 겹침이면 칸 폭은 접힌 띠(48)로 유지된다
+      const avail = v - 240 - (pres === 'overlay' ? 48 : 300);
+      const l = planTradingLayout(avail);
+      assert(l.kind === 'desktop', `${v}: 레일을 열었더니 ${l.kind}가 됐다`);
+      assert(l.order.width >= ORDER_MIN, `${v}: 주문 ${l.order.width}`);
+      assert(l.center >= CENTER_MIN, `${v}: 중앙 ${l.center}`);
+    }
+  });
+
+  test('폭을 모르면 덮지 않는다', () => {
+    // 덮어 놓고 못 닫는 것이 더 나쁘다.
+    eq(railPresentationFor(0, 240, 300), 'column');
+    eq(railPresentationFor(NaN, 240, 300), 'column');
+    eq(railPresentationFor(1440, 240, 0), 'column');
   });
 
   test('레일을 접은 뒤의 폭으로 배치를 다시 계산하면 하한을 지킨다', () => {

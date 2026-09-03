@@ -122,6 +122,64 @@ const widthOf = (page, region) => page.evaluate(r => {
   await ctx.close();
 }
 
+/* ── ⑤ 낮은 우선순위 패널을 열었다고 거래화면이 무너지지 않는가 ──
+   1440에서 뉴스 레일을 칸(column)으로 열면 매매 영역이 900px로 줄어
+   desktop 배치가 성립하지 않는다. 그래서 폭이 정말 남는 화면에서만
+   칸으로 열고, 모자라면 겹쳐서(overlay) 연다. 판단은 화면 폭 숫자가
+   아니라 "칸으로 열고도 core trading minimum이 남는가"이다.
+   초기 → 열기 1회 → 닫기 1회, 매 단계의 배치를 본다. */
+{
+  const snap = page => page.evaluate(() => {
+    const w = s => { const e = document.querySelector(s); return e ? Math.round(e.getBoundingClientRect().width) : null; };
+    const sh = document.querySelector('[data-region="tradingShell"]');
+    const aw = document.querySelector('.aw');
+    return {
+      right: aw?.getAttribute('data-right'),
+      overlay: aw?.getAttribute('data-rail-overlay') === '1',
+      // tradingShell 마커는 tablet/mobile 껍데기에만 붙는다. 없으면 desktop.
+      kind: sh ? (sh.getAttribute('data-mode') || 'mobile') : 'desktop',
+      market: document.querySelector('[data-region="market"]')?.getAttribute('data-mode') || null,
+      chart: w('[data-region="chart"]'),
+      order: w('[data-region="order"]'),
+      rail: w('.rp'),
+      railVisible: (() => { const e = document.querySelector('.rp'); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 120 && r.height > 120; })(),
+      ovf: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  });
+  const toggle = async page => {
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('[aria-expanded]')].find(e => /오른쪽/.test(e.getAttribute('aria-label') || ''));
+      if (b) b.click();
+    });
+    await page.waitForTimeout(700);
+  };
+  const core = s => s.kind === 'desktop' && s.order >= 340 && s.chart >= 560 && s.ovf === 0;
+  const fmt = s => `${s.kind}/${s.market} 차트${s.chart} 주문${s.order} 레일${s.rail}${s.overlay ? '(겹침)' : ''} 넘침${s.ovf}`;
+
+  // want='overlay' 는 칸으로 열면 매매 최소폭이 깨지는 화면,
+  // want='column' 은 폭이 정말 남아 칸으로 열어도 되는 화면이다.
+  for (const [w, h, want] of [[1440, 900, 'overlay'], [1366, 768, 'overlay'], [1920, 1080, 'column'], [2560, 1440, 'column']]) {
+    const { ctx, page } = await open(w, h);
+    const a = await snap(page);
+    await toggle(page);
+    const b = await snap(page);
+    await toggle(page);
+    const c = await snap(page);
+    // 1920+ 는 처음부터 레일이 펼쳐져 있다. 그때는 열기/닫기가 뒤집힌다.
+    const [ini, opened, closed] = a.right === 'expanded' ? [a, a, b] : [a, b, c];
+    const ok = core(ini) && core(opened) && core(closed)
+      && opened.right === 'expanded' && opened.railVisible
+      && (opened.overlay ? 'overlay' : 'column') === want
+      && opened.market === ini.market
+      && (a.right === 'expanded'
+        ? closed.right === 'collapsed'
+        : closed.right === 'collapsed' && closed.chart === ini.chart && closed.order === ini.order && closed.market === ini.market);
+    say(ok, `BLOCKER 5 뉴스 열기 ${w}×${h} (${want})`,
+      `초기 ${fmt(a)} → ${fmt(b)} → ${fmt(c)}`);
+    await ctx.close();
+  }
+}
+
 await browser.close();
 console.log(fails === 0 ? '\n조작 전부 동작' : `\n🚨 ${fails}건 동작하지 않음`);
 process.exit(fails === 0 ? 0 : 1);

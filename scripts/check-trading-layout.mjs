@@ -45,6 +45,7 @@ const MOBILE = 'src/components/terminal/MobileShell.tsx';
 const TOPBAR = 'src/components/terminal/TopBar.tsx';
 const SYMS   = 'src/components/terminal/SymbolSearch.tsx';
 const LEFTRAIL = 'src/components/terminal/LeftRail.tsx';
+const CSS    = 'src/app/globals.css';
 const FILES = [PLAN, PLANT, SHELL, APP, MOBILE, TOPBAR, SYMS, LEFTRAIL];
 
 const code = {};
@@ -60,8 +61,8 @@ const need = (f, re, msg) => { if (!re.test(code[f])) err(`${f}: ${msg}`); };
 const deny = (f, re, msg) => { if (re.test(code[f])) err(`${f}: ${msg}`); };
 
 /* ── ① 배치 판단이 한 곳에 있고 실제로 돈다 ────────────────── */
-need(PLAN, /export function planTradingLayout/, '배치 판단 함수가 없습니다');
-need(PLAN, /export function shouldCollapseNewsRail/, '뉴스 레일 판단이 없습니다');
+need(PLAN, /export function planTradingLayout\s*\(/, '배치 판단 함수가 없습니다');
+need(PLAN, /export function shouldCollapseNewsRail\s*\(/, '뉴스 레일 판단이 없습니다');
 need(PLAN, /export const ORDER_MIN\s*=\s*(\d+)/, '주문판 최소폭이 없습니다');
 /* 중앙 최소폭은 UI-1의 panelPrefs가 정본이다. 여기서 다시 선언하면
    한쪽만 바뀌는 날이 온다. */
@@ -159,6 +160,27 @@ need(SHELL, /onKeyDown=\{/, '손잡이를 키보드로 조절할 수 없습니�
    '접힌 레일'이므로 뒤집을 대상도 그 상태여야 한다. */
 need(APP, /nextRightMode\(effRightMode\)/,
   '보이는 상태가 아니라 저장값을 뒤집습니다 — 자동으로 접힌 뒤 한 번 눌러서는 안 열립니다');
+
+/* ── ⑪ 낮은 우선순위 패널을 열었다고 거래화면을 다시 압축하지 않는다 ──
+   1440에서 뉴스 레일을 **칸**으로 열면 매매 영역이 900px가 되어 desktop
+   배치가 성립하지 않는다(실측: 열자마자 tablet으로 떨어졌다). 뉴스는
+   우선순위가 가장 낮은데, 그것을 열었다고 차트와 주문판이 물러나는 것은
+   순서가 거꾸로다. 폭이 정말 남는 화면에서만 칸으로 열고, 모자라면
+   겹쳐서 연다. 기준은 화면 폭 숫자가 아니라 "칸으로 열고도 매매 최소폭이
+   남는가"이다. */
+need(PLAN, /export function railPresentationFor\s*\(/, '레일을 칸으로 열지 겹쳐서 열지 판단하는 곳이 없습니다');
+need(APP, /railPresentationFor\s*\(/, '레일 표현 방식 판단을 배선하지 않았습니다');
+/* 판단만 하고 폭 계산에 반영하지 않으면 칸이 그대로 남아 아무것도 안 바뀐다. */
+need(APP, /railWidthFor\(\s*railOverlay\s*\?/, '겹쳐 여는 동안에도 칸 폭을 그대로 잡습니다 — 거래영역이 다시 줄어듭니다');
+need(APP, /data-rail-overlay=/, '겹쳐 여는 상태를 화면에 표시하지 않습니다 — CSS가 붙을 곳이 없습니다');
+{
+  const css = existsSync(CSS) ? readFileSync(CSS, 'utf8') : '';
+  const m = /\.aw\[data-rail-overlay='1'\]\s+\.rp\s*\{([\s\S]*?)\}/.exec(css);
+  if (!m) err(`${CSS}: 겹쳐 여는 레일 규칙이 없습니다 — 표식만 붙고 화면은 그대로입니다`);
+  else if (!/position:\s*fixed/.test(m[1])) {
+    err(`${CSS}: 겹쳐 여는 레일이 흐름에서 빠지지 않습니다 — 여전히 거래영역의 폭을 가져갑니다`);
+  }
+}
 
 /* ── ⑩ 실행 의미는 건드리지 않았다 ─────────────────────────
    배치 작업이 주문 payload·실행 경로를 바꾸면 안 된다. */

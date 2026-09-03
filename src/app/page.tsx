@@ -81,7 +81,7 @@ import {
   saveLeftMode, saveRightMode, saveRailWidth,
   sidebarWidthFor, clampRailWidth, railWidthFor,
 } from '@/lib/ui/panelPrefs';
-import { shouldCollapseNewsRail } from '@/lib/ui/tradingLayout';
+import { shouldCollapseNewsRail, railPresentationFor } from '@/lib/ui/tradingLayout';
 import {
   nextLeftMode, nextRightMode, RAIL_DEFAULT,
   type LeftMode, type RightMode,
@@ -508,7 +508,22 @@ export default function App() {
     && !railUserOpened
     && shouldCollapseNewsRail(viewportW, sidebarW, railWNow);
   const effRightMode: RightMode = railAutoCollapse ? 'collapsed' : rightMode;
-  const railCol   = railWidthFor(effRightMode, railWNow);
+
+  /* ── 레일을 **어떻게** 여는가 ──
+     예전에는 열면 그대로 300px 격자 칸을 되찾았다. 1440에서 그러면
+     거래영역이 1152 → 900이 되어 데스크톱 하한(974)을 못 넘고
+     **태블릿 배치로 떨어졌다.** 우선순위 4위인 뉴스를 열었다고 1·2위인
+     차트와 상주 주문판이 사라진 것이다.
+
+     칸으로 열어도 거래 최소폭이 남으면 칸으로, 아니면 겹쳐서 연다.
+     겹치면 거래영역 폭이 그대로라 배치가 바뀌지 않는다. 뉴스는 곁다리
+     정보라 잠깐 덮어도 되지만, 차트와 주문판이 사라지는 것은 안 된다. */
+  const railOverlay = tab === 'trading'
+    && effRightMode === 'expanded'
+    && railPresentationFor(viewportW, sidebarW, railWNow) === 'overlay';
+
+  /* 겹쳐서 열 때 격자 칸은 접힌 띠 그대로 둔다 — 그래야 가운데가 안 줄어든다 */
+  const railCol   = railWidthFor(railOverlay ? 'collapsed' : effRightMode, railWNow);
 
   const toggleLeft  = useCallback(()=>{ setLeftMode(m=>{ const n=nextLeftMode(m);  saveLeftMode(n);  return n; }); },[]);
   /* **보이는 상태를 뒤집는다.**
@@ -962,11 +977,12 @@ export default function App() {
         onNav={nav}
       />
       <div suppressHydrationWarning className="aw"
-        data-left={leftMode} data-right={effRightMode}
+        data-left={leftMode} data-right={effRightMode} data-rail-overlay={railOverlay?'1':undefined}
         style={{background:T.bg,minHeight:'-webkit-fill-available' as any,color:T.txt,
           // 칸 폭은 CSS가 아니라 여기서 정한다. CSS에 숫자를 또 적으면
           // 드래그가 멈추는 자리와 칸이 멈추는 자리가 갈린다.
-          ['--sb-w' as any]:`${sidebarW}px`, ['--rp-w' as any]:`${railCol}px`}}>
+          ['--sb-w' as any]:`${sidebarW}px`, ['--rp-w' as any]:`${railCol}px`,
+          ['--rp-overlay-w' as any]:`${railWNow}px`}}>
 
         {/* PC Sidebar */}
         <div className="sb" style={{display:'none',padding:'12px 0'}}>

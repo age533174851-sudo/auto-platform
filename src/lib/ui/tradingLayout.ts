@@ -133,6 +133,34 @@ export function planTradingLayout(availW: unknown): TradingLayout {
 }
 
 /**
+ * 뉴스 레일을 **어떻게** 열 것인가.
+ *
+ * 자동으로 접힌 레일을 사용자가 다시 열면, 예전에는 그대로 300px짜리
+ * 격자 칸을 되찾았다. 1440에서 그러면 거래영역이 1152 → 900이 되고,
+ * 데스크톱 하한(974)을 못 넘어 **태블릿 배치로 떨어졌다.**
+ * 우선순위 4위인 뉴스를 열었다고 1·2위인 차트와 상주 주문판이 사라진
+ * 것이다 — 정해 둔 순서와 정반대다.
+ *
+ * 그래서 여는 방식을 폭으로 정한다:
+ *   칸으로 열어도 거래 최소폭이 남으면 → 칸(column)
+ *   그렇지 않으면                    → 겹침(overlay)
+ *
+ * 겹침으로 열면 거래영역의 폭이 그대로라 배치가 바뀌지 않는다. 뉴스는
+ * 곁다리 정보이므로 잠깐 덮어도 되지만, 차트와 주문판이 사라지는 것은
+ * 안 된다.
+ */
+export type RailPresentation = 'column' | 'overlay';
+
+export function railPresentationFor(
+  viewportW: unknown, sidebarW: unknown, railW: unknown,
+): RailPresentation {
+  const v = finite(viewportW), s = finite(sidebarW), r = finite(railW);
+  // 폭을 모르면 덮지 않는다 — 덮어 놓고 못 닫는 것이 더 나쁘다.
+  if (v <= 0 || r <= 0) return 'column';
+  return v - s - r >= DESKTOP_MIN ? 'column' : 'overlay';
+}
+
+/**
  * 앱 껍데기의 오른쪽 뉴스 레일을 접어야 하는가.
  *
  * 뉴스 레일은 곁다리 정보라 우선순위가 가장 낮다(사용자가 정한 순서:
