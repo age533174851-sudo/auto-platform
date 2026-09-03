@@ -44,7 +44,8 @@ const APP    = 'src/app/page.tsx';
 const MOBILE = 'src/components/terminal/MobileShell.tsx';
 const TOPBAR = 'src/components/terminal/TopBar.tsx';
 const SYMS   = 'src/components/terminal/SymbolSearch.tsx';
-const FILES = [PLAN, PLANT, SHELL, APP, MOBILE, TOPBAR, SYMS];
+const LEFTRAIL = 'src/components/terminal/LeftRail.tsx';
+const FILES = [PLAN, PLANT, SHELL, APP, MOBILE, TOPBAR, SYMS, LEFTRAIL];
 
 const code = {};
 for (const f of FILES) {
@@ -121,7 +122,45 @@ need(TOPBAR, /showBalance\s*=\s*[^;]*roomy/, '선물 잔고가 폭 조건과 연
 need(TOPBAR, /showConnChip\s*=\s*[^;]*roomy/, '거래소 칩이 폭 조건과 연결돼 있지 않습니다');
 need(SYMS, /wordBreak:\s*'keep-all'/, '종목 헤더가 한국어 단어를 줄 중간에서 끊습니다');
 
-/* ── ⑦ 실행 의미는 건드리지 않았다 ─────────────────────────
+/* ── ⑦ 접는다고 기능을 없애지 않는다 ───────────────────────
+   1차 후보에서 실제로 그랬다: 겹침을 없애려고 좁은 종목 레일에서
+   목록을 통째로 지웠다. 안 겹치는 대신 **좁은 화면에서 종목을 고를
+   방법이 사라졌다.** 그건 고친 것이 아니다. */
+need('src/components/terminal/LeftRail.tsx', /data-symbol=/,
+  '좁은 종목 레일에서 종목을 고를 수 없습니다 — 겹침을 없애려고 기능을 지우지 마세요');
+/* 파일 아무 데나 useTerminal이 있으면 통과하던 규칙이었다.
+   **좁은 레일 함수 안**에서 공용 목록을 쓰는지 본다. */
+{
+  const m = /function CompactMarketRail\(\)\s*\{([\s\S]*?)\n\}/.exec(code[LEFTRAIL]);
+  if (!m) err(`${LEFTRAIL}: CompactMarketRail을 찾지 못했습니다`);
+  else if (!/useTerminal\(\)/.test(m[1]) || !/\bsymbols\b/.test(m[1]) || !/setSymbol\(/.test(m[1])) {
+    err(`${LEFTRAIL}: 좁은 레일이 공용 종목 목록(useTerminal)을 쓰지 않습니다 — 목록이 두 벌이면 한쪽에만 즐겨찾기가 반영됩니다`);
+  }
+}
+
+/* ── ⑧ 손잡이가 보이면 실제로 움직여야 한다 ────────────────
+   1차 후보의 왼쪽 손잡이는 `onDrag={() => {}}`였다. 보이는데 끌어도
+   아무 일도 안 일어나면 사용자는 자기 손이 잘못한 줄 안다. */
+deny(SHELL, /onDrag=\{\s*\(\s*\)\s*=>\s*\{\s*\}\s*\}/,
+  '손잡이에 빈 함수를 물렸습니다 — 조절할 수 없으면 손잡이를 그리지 마세요');
+/* 이름만 남기고 배선을 끊는 변형을 막는다 — 선언이 아니라 **쓰임**을 본다. */
+need(SHELL, /onDrag=\{[^}]*\bdragMarket\b/, '종목 레일 폭을 조절하는 경로가 손잡이에 물려 있지 않습니다');
+need(SHELL, /\bconst dragMarket\b/, '종목 레일 폭 조절 함수가 없습니다');
+/* 마우스로만 잡을 수 있으면 그 기능은 마우스를 쓰는 사람만의 것이다
+   (UI-1에서 같은 이유로 오른쪽 레일 손잡이에 키보드를 붙였다). */
+need(SHELL, /role="separator"/, '손잡이에 semantic이 없습니다');
+/* `const onKeyDown = ...`만 남기고 `onKeyDown={...}` 바인딩을 지우는
+   변형이 실제로 빠져나갔다. 선언이 아니라 바인딩을 본다. */
+need(SHELL, /onKeyDown=\{/, '손잡이를 키보드로 조절할 수 없습니다 — 마우스를 쓰는 사람만의 기능이 됩니다');
+
+/* ── ⑨ 자동으로 접힌 레일은 한 번 눌러서 열린다 ─────────────
+   1차 후보는 저장값(rightMode)을 뒤집어서, 자동으로 접힌 동안 한 번
+   눌러도 안 열리고 두 번 눌러야 열렸다. 사용자가 보고 누른 것은
+   '접힌 레일'이므로 뒤집을 대상도 그 상태여야 한다. */
+need(APP, /nextRightMode\(effRightMode\)/,
+  '보이는 상태가 아니라 저장값을 뒤집습니다 — 자동으로 접힌 뒤 한 번 눌러서는 안 열립니다');
+
+/* ── ⑩ 실행 의미는 건드리지 않았다 ─────────────────────────
    배치 작업이 주문 payload·실행 경로를 바꾸면 안 된다. */
 deny(SHELL, /fetch\s*\(|\/api\//, '껍데기가 서버를 부릅니다 — 배치 파일이 할 일이 아닙니다');
 

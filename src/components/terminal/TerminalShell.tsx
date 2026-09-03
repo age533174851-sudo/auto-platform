@@ -39,7 +39,7 @@ import { OrderPane } from './OrderPane';
 import { BottomDock } from './BottomDock';
 import MobileShell from './MobileShell';
 import {
-  planTradingLayout, ORDER_MIN, SPLITTER, type TradingLayout,
+  planTradingLayout, ORDER_MIN, MARKET_MIN, SPLITTER, type TradingLayout,
 } from '@/lib/ui/tradingLayout';
 import { CENTER_MIN } from '@/lib/ui/panelPrefs';
 
@@ -50,11 +50,13 @@ const LAYOUT_KEY = 'tg_terminal_layout_v2';
 interface Layout {
   /** 주문판 폭(px). 사용자가 손잡이로 조절한 값 */
   orderPx: number;
+  /** 종목 레일 폭(px). 펼친 상태에서 손잡이로 조절한 값 */
+  marketPx: number;
   /** 하단 독 높이(%) — 세로는 예전 그대로다 */
   dock: number;
   leftOpen: boolean;
 }
-const DEFAULT_LAYOUT: Layout = { orderPx: ORDER_MIN, dock: 28, leftOpen: true };
+const DEFAULT_LAYOUT: Layout = { orderPx: ORDER_MIN, marketPx: MARKET_MIN, dock: 28, leftOpen: true };
 
 /** 어떤 값이 저장돼 있어도 화면이 깨지지 않는 범위로 가둔다 */
 function clampLayout(l: Partial<Layout>): Layout {
@@ -63,12 +65,36 @@ function clampLayout(l: Partial<Layout>): Layout {
   return {
     // 상한은 폭을 알아야 정해지므로 여기서는 넉넉히 두고, 그릴 때 다시 조인다.
     orderPx: cl(l.orderPx, ORDER_MIN, 900, DEFAULT_LAYOUT.orderPx),
+    marketPx: cl(l.marketPx, MARKET_MIN, 520, DEFAULT_LAYOUT.marketPx),
     dock: cl(l.dock, 12, 55, DEFAULT_LAYOUT.dock),
     leftOpen: l.leftOpen !== false,
   };
 }
 
-function Splitter({ vertical, onDrag }: { vertical?: boolean; onDrag: (deltaPx: number) => void }) {
+/* `onDrag`가 없으면 **손잡이를 아예 그리지 않는다.**
+   끌 수 없는 손잡이를 남겨 두면 사용자가 끌어 보고 자기 손이 잘못한
+   줄 안다. 조절할 수 없는 상태면 경계선만 남긴다. */
+function Splitter({ vertical, onDrag, ...rest }: {
+  vertical?: boolean; onDrag?: (deltaPx: number) => void;
+  label?: string; min?: number; max?: number; now?: number;
+}) {
+  if (!onDrag) {
+    return <div style={{
+      [vertical ? 'height' : 'width']: 1,
+      [vertical ? 'width' : 'height']: '100%',
+      background: C.hair, flexShrink: 0,
+    } as React.CSSProperties}/>;
+  }
+  return <SplitterHandle vertical={vertical} onDrag={onDrag} {...rest}/>;
+}
+
+function SplitterHandle({ vertical, onDrag, label, min, max, now }: {
+  vertical?: boolean;
+  onDrag: (deltaPx: number) => void;
+  /** 손잡이가 무엇을 조절하는지. 없으면 스크린리더에는 빈 칸이다 */
+  label?: string;
+  min?: number; max?: number; now?: number;
+}) {
   const [active, setActive] = useState(false);
   const [hover, setHover] = useState(false);
   const last = useRef(0);
@@ -93,8 +119,33 @@ function Splitter({ vertical, onDrag }: { vertical?: boolean; onDrag: (deltaPx: 
     };
   }, [active, onDrag, vertical]);
 
+  /* ── 키보드로도 조절한다 ──
+     UI-1에서 오른쪽 레일 손잡이에 같은 것을 붙이며 정한 규칙이다:
+     손잡이를 마우스로만 잡을 수 있으면 그 기능은 마우스를 쓰는 사람만의
+     것이 된다. 방향키 한 칸씩, Home/End로 끝까지. */
+  const STEP = 16;
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const k = e.key;
+    let d = 0;
+    if (k === 'ArrowLeft' || k === 'ArrowUp') d = -STEP;
+    else if (k === 'ArrowRight' || k === 'ArrowDown') d = STEP;
+    else if (k === 'Home') d = -10000;
+    else if (k === 'End') d = 10000;
+    else return;
+    e.preventDefault();
+    onDrag(d);
+  };
+
   return (
     <div
+      role="separator"
+      tabIndex={0}
+      aria-label={label}
+      aria-orientation={vertical ? 'horizontal' : 'vertical'}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={now}
+      onKeyDown={onKeyDown}
       onMouseDown={e => { last.current = vertical ? e.clientY : e.clientX; setActive(true); }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -147,6 +198,19 @@ function DesktopShell({ plan, availW, embedded }: { plan: TradingLayout; availW:
   /* 손잡이는 주문판 폭을 px로 움직인다. 퍼센트로 두면 창 크기가
      바뀔 때마다 사용자가 맞춰 둔 폭이 따라 변하고, 좁아지면 하한
      아래로 내려간다 — 그게 이번 고장이었다. */
+  /* 왼쪽 손잡이는 종목 레일 폭을 움직인다.
+     **한동안 이 손잡이가 아무 일도 안 했다.** 폭을 계획에서만 받도록
+     바꾸면서 `onDrag={() => {}}`로 비워 뒀기 때문이다. 손잡이가 보이는데
+     끌어도 안 움직이는 것은 접기가 안 되는 것보다 나쁘다 —
+     사용자는 자기 손이 잘못한 줄 안다. */
+  const dragMarket = useCallback((dpx: number) => {
+    setLayout(prev => {
+      const c = clampLayout({ ...prev, marketPx: prev.marketPx + dpx });
+      persist(c);
+      return c;
+    });
+  }, []);
+
   const dragOrder = useCallback((dpx: number) => {
     setLayout(prev => {
       // 주문판은 오른쪽 끝에 붙어 있으므로 드래그 방향이 반대다
@@ -171,7 +235,14 @@ function DesktopShell({ plan, availW, embedded }: { plan: TradingLayout; availW:
      주문 >= 340). 여기서는 사용자가 넓혀 둔 주문판을 그 위에 얹되,
      중앙이 하한 아래로 내려가지 않는 선까지만 허용한다. */
   const showLeft = plan.market.mode !== 'drawer' && layout.leftOpen;
-  const marketW = showLeft ? plan.market.width : 0;
+  const resizableMarket = showLeft && plan.market.mode === 'expanded';
+  /* 펼친 종목 레일만 손으로 조절한다. 접힌(64px) 레일은 아이콘 한 줄
+     크기라 조절할 것이 없다. 조절해도 중앙·주문 하한은 그대로 지킨다. */
+  const marketMax = Math.max(MARKET_MIN,
+    availW - SPLITTER - SPLITTER - CENTER_MIN - Math.max(ORDER_MIN, layout.orderPx));
+  const marketW = !showLeft ? 0
+    : resizableMarket ? Math.min(marketMax, Math.max(MARKET_MIN, layout.marketPx))
+    : plan.market.width;
   const leftGap = showLeft ? SPLITTER : 0;
   const orderMax = Math.max(ORDER_MIN, availW - marketW - leftGap - SPLITTER - CENTER_MIN);
   const orderW = Math.min(orderMax, Math.max(ORDER_MIN, layout.orderPx));
@@ -199,7 +270,8 @@ function DesktopShell({ plan, availW, embedded }: { plan: TradingLayout; availW:
                   아무것도 안 보게 된다. */}
               <Pane data-region="market" data-mode={plan.market.mode}
                 style={{ width: marketW }}><LeftRail compact={plan.market.mode === 'compact'}/></Pane>
-              <Splitter onDrag={() => {}}/>
+              <Splitter onDrag={resizableMarket ? dragMarket : undefined}
+                label="종목 패널 폭 조절" min={MARKET_MIN} max={marketMax} now={marketW}/>
             </>
           )}
 
@@ -223,12 +295,12 @@ function DesktopShell({ plan, availW, embedded }: { plan: TradingLayout; availW:
             <ChartPane symbol={symbol.id}/>
           </Pane>
 
-          <Splitter onDrag={dragOrder}/>
+          <Splitter onDrag={dragOrder} label="주문 패널 폭 조절" min={ORDER_MIN} max={orderMax} now={orderW}/>
           <Pane data-region="order" data-mode="persistent"
             style={{ width: orderW, flexShrink: 0 }}><OrderPane/></Pane>
         </div>
 
-        <Splitter vertical onDrag={dragV}/>
+        <Splitter vertical onDrag={dragV} label="하단 판 높이 조절"/>
 
         <Pane style={{ height: `${layout.dock}%` }}>
           <BottomDock onBalance={setBalance}/>

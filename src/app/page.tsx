@@ -511,10 +511,16 @@ export default function App() {
   const railCol   = railWidthFor(effRightMode, railWNow);
 
   const toggleLeft  = useCallback(()=>{ setLeftMode(m=>{ const n=nextLeftMode(m);  saveLeftMode(n);  return n; }); },[]);
+  /* **보이는 상태를 뒤집는다.**
+     자동으로 접힌 동안 `rightMode`는 여전히 'expanded'이고 화면만
+     'collapsed'였다. 그래서 저장값을 뒤집으면 expanded→collapsed가 되어
+     **한 번 눌러도 안 열리고 두 번 눌러야 열렸다.** 사용자가 보고 누른
+     것은 '접힌 레일'이므로, 뒤집을 대상도 그 상태여야 한다. */
   const toggleRight = useCallback(()=>{
     setRailUserOpened(true);
-    setRightMode(m=>{ const n=nextRightMode(m); saveRightMode(n); return n; });
-  },[]);
+    const n = nextRightMode(effRightMode);
+    setRightMode(n); saveRightMode(n);
+  },[effRightMode]);
   const commitRail  = useCallback((w:number)=>{ setRailW(w); saveRailWidth(w); },[]);
 
   /* ── 오른쪽 레일 뉴스도 서버에서 읽는다 ──

@@ -208,6 +208,58 @@ function Empty({ t }: { t: string }) {
   );
 }
 
+/**
+ * 좁은 종목 레일 (64px).
+ *
+ * 상단 종목 선택·펼친 레일과 **같은 목록**을 쓴다(useTerminal의 symbols).
+ * 목록이 두 벌이면 한쪽에만 즐겨찾기가 반영되는 식으로 어긋난다.
+ */
+function CompactMarketRail() {
+  const { symbol, setSymbol, symbols, favorites } = useTerminal();
+  // 즐겨찾기를 위로. 없으면 전체 순서 그대로.
+  const list = [...symbols].sort((a, b) => {
+    const fa = favorites.includes(a.id) ? 0 : 1;
+    const fb = favorites.includes(b.id) ? 0 : 1;
+    return fa - fb;
+  });
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
+      <div style={{
+        padding: '6px 0', textAlign: 'center', flexShrink: 0,
+        borderBottom: `1px solid ${C.hair}`,
+        color: C.faint, fontSize: FS.micro, fontWeight: 700,
+      }}>종목</div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {list.map(s => {
+          const on = s.id === symbol.id;
+          return (
+            <button key={s.id} type="button"
+              data-symbol={s.id}
+              onClick={() => setSymbol(s)}
+              title={`${s.display} · ${s.nameKr}`}
+              style={{
+                width: '100%', minHeight: 40, padding: '5px 2px', cursor: 'pointer',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                background: on ? C.active : 'transparent',
+                border: 'none',
+                borderLeft: `2px solid ${on ? C.accent : 'transparent'}`,
+                color: on ? C.text : C.dim,
+                fontSize: FS.micro, fontWeight: on ? 800 : 600,
+              }}>
+              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
+                {s.display.split('/')[0].slice(0, 4)}
+              </span>
+              {favorites.includes(s.id) && (
+                <span style={{ color: C.warn, fontSize: 8, lineHeight: 1 }}>★</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── 껍데기 ────────────────────────────────────────────
 //
 // `compact`는 폭이 부족할 때 배치가 고르는 모양이다(64px). 예전에는
@@ -220,23 +272,16 @@ function LeftRailInner({ compact }: { compact?: boolean }) {
   const [tab, setTab] = useState<Tab>('시장');
 
   if (compact) {
-    return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        height: '100%', minWidth: 0, padding: '8px 0', gap: 6,
-      }}>
-        {TABS.map(t => (
-          <button key={t} onClick={() => setTab(t)} title={t}
-            style={{
-              width: 40, height: 40, borderRadius: 8, cursor: 'pointer',
-              background: tab === t ? C.active : 'transparent',
-              border: `1px solid ${tab === t ? C.hair2 : 'transparent'}`,
-              color: tab === t ? C.text : C.faint,
-              fontSize: FS.micro, fontWeight: 700,
-            }}>{t.slice(0, 2)}</button>
-        ))}
-      </div>
-    );
+    // **접는다고 기능을 없애지 않는다.**
+    //
+    // 처음엔 여기서 탭 버튼 넉 줄만 남겼다. 그러면 안 겹치는 대신
+    // **좁은 화면에서 종목을 고를 방법이 사라진다** — 1366에서 이 레일이
+    // 접히므로, 거래화면의 가장 기본 조작을 못 하게 된다.
+    // 겹침을 없애려고 기능을 지우는 것은 고친 것이 아니다.
+    //
+    // 그래서 좁을 때도 **종목 목록을 남긴다.** 64px에 들어가는 것만
+    // 남기고(티커·등락), 나머지는 펼쳐서 본다.
+    return <CompactMarketRail/>;
   }
 
   return (
