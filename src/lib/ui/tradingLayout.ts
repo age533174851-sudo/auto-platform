@@ -133,6 +133,44 @@ export function planTradingLayout(availW: unknown): TradingLayout {
 }
 
 /**
+ * 거래 탭에서 네 번째 영역(오른쪽 시세·뉴스 레일)을 **칸으로 상주**시켜도
+ * 되는가.
+ *
+ * 하한만으로는 부족하다는 것이 1664에서 드러났다
+ * ────────────────────────────────────────────────
+ * 한동안 이 판단은 "칸으로 두고도 거래 최소폭(DESKTOP_MIN)이 남는가"
+ * 하나였다. 1664에서 계산하면 1664 - 240 - 300 = 1124 >= 974라 통과한다.
+ * 그런데 그렇게 통과한 1664의 실제 배치는 이랬다:
+ *
+ *   종목 200 · 차트 574 · 주문 340 · 뉴스 300
+ *
+ * 네 칸이 전부 하한이다. 차트는 560 하한 바로 위, 주문판은 정확히 340,
+ * 종목은 정확히 200. 어느 것도 여유가 없다. **사용자가 처음 결함을
+ * 발견한 화면이 바로 이 1664였다.** 겹치지만 않을 뿐 다시 빽빽하다.
+ *
+ * 그래서 "최소폭만 넘으면 4열"이 아니라 **폭이 정말 남을 때만 4열**로
+ * 바꿨다. 우선순위 4위인 정보 레일은 앞의 셋이 하한을 겨우 넘는 자리를
+ * 나눠 가질 자격이 없다.
+ *
+ *   1024 ~ 1919 — 상주 금지. 접어 두고, 열면 겹쳐서 연다.
+ *   1920 이상   — 상주 가능. 단 그때도 거래 최소폭을 실제로 확인한다.
+ *
+ * 1920을 넘겼다고 무조건 칸을 주지는 않는다. 사이드바가 넓거나 레일이
+ * 넓어져 거래영역이 하한 아래로 내려가면 그때도 겹쳐서 연다 —
+ * 두 조건을 **모두** 만족해야 상주한다.
+ */
+export const FOUR_REGION_MIN = 1920;
+
+function canHostFourthRegion(viewportW: unknown, sidebarW: unknown, railW: unknown): boolean {
+  const v = finite(viewportW), s = finite(sidebarW), r = finite(railW);
+  // 폭을 모르는 동안에는 화면을 건드리지 않는다. 접거나 덮어 놓고
+  // 되돌리지 못하는 쪽이 더 나쁘다.
+  if (v <= 0 || r <= 0) return true;
+  if (v < FOUR_REGION_MIN) return false;
+  return v - s - r >= DESKTOP_MIN;
+}
+
+/**
  * 뉴스 레일을 **어떻게** 열 것인가.
  *
  * 자동으로 접힌 레일을 사용자가 다시 열면, 예전에는 그대로 300px짜리
@@ -141,35 +179,31 @@ export function planTradingLayout(availW: unknown): TradingLayout {
  * 우선순위 4위인 뉴스를 열었다고 1·2위인 차트와 상주 주문판이 사라진
  * 것이다 — 정해 둔 순서와 정반대다.
  *
- * 그래서 여는 방식을 폭으로 정한다:
- *   칸으로 열어도 거래 최소폭이 남으면 → 칸(column)
- *   그렇지 않으면                    → 겹침(overlay)
- *
  * 겹침으로 열면 거래영역의 폭이 그대로라 배치가 바뀌지 않는다. 뉴스는
  * 곁다리 정보이므로 잠깐 덮어도 되지만, 차트와 주문판이 사라지는 것은
- * 안 된다.
+ * 안 된다. 한 번 더 누르면 걷힌다.
  */
 export type RailPresentation = 'column' | 'overlay';
 
 export function railPresentationFor(
   viewportW: unknown, sidebarW: unknown, railW: unknown,
 ): RailPresentation {
-  const v = finite(viewportW), s = finite(sidebarW), r = finite(railW);
-  // 폭을 모르면 덮지 않는다 — 덮어 놓고 못 닫는 것이 더 나쁘다.
-  if (v <= 0 || r <= 0) return 'column';
-  return v - s - r >= DESKTOP_MIN ? 'column' : 'overlay';
+  return canHostFourthRegion(viewportW, sidebarW, railW) ? 'column' : 'overlay';
 }
 
 /**
- * 앱 껍데기의 오른쪽 뉴스 레일을 접어야 하는가.
+ * 앱 껍데기의 오른쪽 뉴스 레일을 (거래 탭에서) 접어야 하는가.
  *
  * 뉴스 레일은 곁다리 정보라 우선순위가 가장 낮다(사용자가 정한 순서:
- * 중앙 > 주문 > 종목 > 시세·뉴스). 그런데 지금은 레일이 300px를 먼저
- * 가져가고 거래화면이 그 나머지를 나눠 쓴다 — 1664에서 주문판이 301px가
- * 된 직접 원인이다.
+ * 중앙 > 주문 > 종목 > 시세·뉴스). 그런데 레일이 300px를 먼저 가져가고
+ * 거래화면이 그 나머지를 나눠 썼다 — 1664에서 주문판이 301px가 된
+ * 직접 원인이다.
  *
  * **거래 탭일 때만** 판단한다. 다른 화면에서 레일을 접으면 이번 작업이
  * 건드리지 않기로 한 화면들이 같이 바뀐다.
+ *
+ * 접을지와 어떻게 열지는 **같은 판단**이다(`canHostFourthRegion`).
+ * 두 곳에 따로 두면 언젠가 한쪽만 바뀐다.
  *
  * @param viewportW 창 폭
  * @param sidebarW  왼쪽 메뉴가 차지하는 폭
@@ -178,13 +212,5 @@ export function railPresentationFor(
 export function shouldCollapseNewsRail(
   viewportW: unknown, sidebarW: unknown, railW: unknown,
 ): boolean {
-  const v = finite(viewportW), s = finite(sidebarW), r = finite(railW);
-  if (v <= 0 || r <= 0) return false;          // 모르면 접지 않는다
-  const withRail = v - s - r;
-  // 레일을 두고도 데스크톱 3열이 되면 그대로 둔다.
-  if (withRail >= DESKTOP_MIN) return false;
-  // 레일을 접으면 되는가 — 되면 접는다. 접어도 안 되면 접어 봐야
-  // 거래화면은 어차피 태블릿 배치로 가므로, 그때도 중앙을 넓혀 주는
-  // 편이 낫다.
-  return true;
+  return !canHostFourthRegion(viewportW, sidebarW, railW);
 }

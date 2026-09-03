@@ -182,6 +182,39 @@ need(APP, /data-rail-overlay=/, '겹쳐 여는 상태를 화면에 표시하지 
   }
 }
 
+/* ── ⑫ 네 번째 영역은 폭이 정말 남을 때만 상주한다 ──────────
+   "거래 최소폭만 넘으면 4열"이던 시절, 1664는 그 조건을 통과했고
+   통과한 결과가 종목 200 · 차트 574 · 주문 340 · 뉴스 300 —
+   네 칸 전부 하한이었다. 사용자가 처음 결함을 발견한 화면이 그
+   1664다. 하한을 넘는 것과 쓸 만한 것은 다르다. */
+{
+  const m = /export const FOUR_REGION_MIN\s*=\s*(\d+)/.exec(code[PLAN]);
+  if (!m) err(`${PLAN}: 네 번째 영역을 상주시킬 폭 기준이 없습니다 — 하한만 넘으면 4열이 됩니다`);
+  else if (Number(m[1]) < 1920) {
+    err(`${PLAN}: 네 번째 영역 기준이 ${m[1]}px입니다 — 1920 미만에서는 앞의 세 영역이 전부 하한에 붙습니다`);
+  }
+}
+/* 접을지와 어떻게 열지가 서로 다른 식이면 언젠가 한쪽만 바뀐다
+   (CLAUDE.md: "경로가 둘인데 한쪽만 고침"). 같은 함수를 쓰는지 본다. */
+{
+  const one = /function canHostFourthRegion\s*\(/.test(code[PLAN]);
+  if (!one) err(`${PLAN}: 상주 판단이 한 곳에 있지 않습니다`);
+  for (const fn of ['railPresentationFor', 'shouldCollapseNewsRail']) {
+    const b = new RegExp(`export function ${fn}\\([\\s\\S]*?\\n\\}`).exec(code[PLAN]);
+    if (!b) { err(`${PLAN}: ${fn}를 찾지 못했습니다`); continue; }
+    if (!/canHostFourthRegion\s*\(/.test(b[0])) {
+      err(`${PLAN}: ${fn}가 상주 판단을 따로 계산합니다 — 두 곳이 갈라집니다`);
+    }
+  }
+}
+/* 경계를 슬쩍 옮기는 변경을 잡으려면 테스트가 경계를 짚어야 한다.
+   1664는 실제 고장 화면이므로 반드시 검사에 들어간다. */
+for (const v of ['1664', '1919', '1920']) {
+  if (!new RegExp(`\\b${v}\\b`).test(code[PLANT])) {
+    err(`${PLANT}: ${v}를 검사하지 않습니다 — 이 폭에서 정책이 갈립니다`);
+  }
+}
+
 /* ── ⑩ 실행 의미는 건드리지 않았다 ─────────────────────────
    배치 작업이 주문 payload·실행 경로를 바꾸면 안 된다. */
 deny(SHELL, /fetch\s*\(|\/api\//, '껍데기가 서버를 부릅니다 — 배치 파일이 할 일이 아닙니다');

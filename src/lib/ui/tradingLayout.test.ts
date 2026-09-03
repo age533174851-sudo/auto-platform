@@ -115,18 +115,40 @@ export function runTradingLayoutTests() {
     }
   });
 
-  // ── 뉴스 레일 ──────────────────────────────────────────────
-  test('레일을 두고도 3열이 되면 접지 않는다', () => {
-    // 2560 - 240 - 300 = 2020 → 충분
-    eq(shouldCollapseNewsRail(2560, 240, 300), false);
-    eq(shouldCollapseNewsRail(1920, 240, 300), false);
+  // ── 뉴스 레일: 네 번째 영역을 칸으로 상주시켜도 되는 폭인가 ──
+  //
+  // 한동안 이 판단은 "칸으로 두고도 거래 최소폭이 남는가" 하나였다.
+  // 1664는 1664-240-300=1124 >= 974라 그 조건을 통과했고, 통과한 결과가
+  // 종목 200 · 차트 574 · 주문 340 · 뉴스 300 — 네 칸 전부 하한이었다.
+  // **사용자가 처음 결함을 발견한 화면이 바로 1664였다.** 그래서 폭이
+  // 정말 남을 때(1920+)만 상주시킨다.
+  test('1920 미만에서는 오른쪽 정보 레일을 상주시키지 않는다', () => {
+    for (const v of [1024, 1280, 1366, 1440, 1664, 1800, 1919]) {
+      eq(shouldCollapseNewsRail(v, 240, 300), true);
+      eq(railPresentationFor(v, 240, 300), 'overlay');
+    }
   });
 
-  test('레일 때문에 주문·중앙이 눌리면 레일을 접는다', () => {
-    // 실측 고장 지점: 1664 - 240 - 300 = 1124 < DESKTOP_MIN(969+)
-    // 1124는 넉넉하지만 1366·1440에서 무너졌다.
-    eq(shouldCollapseNewsRail(1366, 240, 300), true);
-    eq(shouldCollapseNewsRail(1440, 240, 300), true);
+  test('1920 이상은 폭이 정말 남을 때 칸으로 상주시킨다', () => {
+    eq(shouldCollapseNewsRail(1920, 240, 300), false);
+    eq(shouldCollapseNewsRail(2560, 240, 300), false);
+    eq(railPresentationFor(1920, 240, 300), 'column');
+    eq(railPresentationFor(2560, 240, 300), 'column');
+  });
+
+  test('1919와 1920 사이에서만 바뀐다', () => {
+    // 경계를 슬쩍 옮기는 변경을 잡기 위해 두 값을 직접 못박는다.
+    eq(shouldCollapseNewsRail(1919, 240, 300), true);
+    eq(shouldCollapseNewsRail(1920, 240, 300), false);
+    eq(railPresentationFor(1919, 240, 300), 'overlay');
+    eq(railPresentationFor(1920, 240, 300), 'column');
+  });
+
+  test('1920을 넘겨도 거래 최소폭이 안 남으면 상주시키지 않는다', () => {
+    // 폭 조건 하나만으로 대체하지 않는다 — 둘 다 만족해야 칸이다.
+    // 1920 - 500 - 600 = 820 < DESKTOP_MIN(974)
+    eq(shouldCollapseNewsRail(1920, 500, 600), true);
+    eq(railPresentationFor(1920, 500, 600), 'overlay');
   });
 
   test('레일이 없거나 폭을 모르면 접지 않는다', () => {
@@ -136,26 +158,30 @@ export function runTradingLayoutTests() {
     eq(shouldCollapseNewsRail(1366, 240, undefined as any), false);
   });
 
-  // ── 레일을 여는 방식 ──────────────────────────────────────
-  test('칸으로 열어도 거래 최소폭이 남으면 칸으로 연다', () => {
-    // 1920 - 240 - 300 = 1380 >= 974
-    eq(railPresentationFor(1920, 240, 300), 'column');
-    eq(railPresentationFor(2560, 240, 300), 'column');
+  test('폭을 모르면 덮지 않는다', () => {
+    // 덮어 놓고 못 닫는 것이 더 나쁘다.
+    eq(railPresentationFor(0, 240, 300), 'column');
+    eq(railPresentationFor(NaN, 240, 300), 'column');
+    eq(railPresentationFor(1440, 240, 0), 'column');
   });
 
-  test('칸으로 열면 거래화면이 무너지는 폭에서는 겹쳐서 연다', () => {
-    // **이것이 실제로 났던 고장이다.** 1440에서 레일을 열면 거래영역이
-    // 900이 되어(974 미만) 데스크톱이 태블릿으로 떨어졌다. 우선순위
-    // 4위를 열었다고 1·2위가 사라지면 안 된다.
-    eq(railPresentationFor(1440, 240, 300), 'overlay');
-    eq(railPresentationFor(1366, 240, 300), 'overlay');
+  test('접는 판단과 여는 방식은 같은 판단이다', () => {
+    // 두 곳에 따로 두면 언젠가 한쪽만 바뀐다.
+    for (let v = 900; v <= 2600; v += 13) {
+      const collapse = shouldCollapseNewsRail(v, 240, 300);
+      const pres = railPresentationFor(v, 240, 300);
+      eq(collapse, pres === 'overlay');
+    }
   });
 
   test('겹침으로 열면 거래영역 폭이 그대로라 배치가 안 바뀐다', () => {
-    for (const v of [1366, 1440, 1664]) {
+    // 1664는 사용자가 처음 결함을 발견한 화면이다. 뉴스를 열어도
+    // desktop·중앙·주문이 그대로여야 한다.
+    for (const v of [1366, 1440, 1664, 1919]) {
       const pres = railPresentationFor(v, 240, 300);
+      eq(pres, 'overlay');
       // 겹침이면 칸 폭은 접힌 띠(48)로 유지된다
-      const avail = v - 240 - (pres === 'overlay' ? 48 : 300);
+      const avail = v - 240 - 48;
       const l = planTradingLayout(avail);
       assert(l.kind === 'desktop', `${v}: 레일을 열었더니 ${l.kind}가 됐다`);
       assert(l.order.width >= ORDER_MIN, `${v}: 주문 ${l.order.width}`);
@@ -163,11 +189,12 @@ export function runTradingLayoutTests() {
     }
   });
 
-  test('폭을 모르면 덮지 않는다', () => {
-    // 덮어 놓고 못 닫는 것이 더 나쁘다.
-    eq(railPresentationFor(0, 240, 300), 'column');
-    eq(railPresentationFor(NaN, 240, 300), 'column');
-    eq(railPresentationFor(1440, 240, 0), 'column');
+  test('1664는 뉴스를 접은 폭에서 하한에 붙어 있지 않다', () => {
+    // 4열이던 시절의 1664는 차트 574 — 560 하한 바로 위였다.
+    const l = planTradingLayout(1664 - 240 - 48);
+    eq(l.kind, 'desktop');
+    eq(l.market.mode, 'expanded');
+    assert(l.center > CENTER_MIN + 40, `중앙이 아직 하한에 붙어 있다: ${l.center}`);
   });
 
   test('레일을 접은 뒤의 폭으로 배치를 다시 계산하면 하한을 지킨다', () => {

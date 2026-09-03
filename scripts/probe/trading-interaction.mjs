@@ -122,7 +122,7 @@ const widthOf = (page, region) => page.evaluate(r => {
   await ctx.close();
 }
 
-/* ── ⑤ 낮은 우선순위 패널을 열었다고 거래화면이 무너지지 않는가 ──
+/* ── ⑤·⑥ 낮은 우선순위 패널이 거래화면을 밀어내지 않는가 ──
    1440에서 뉴스 레일을 칸(column)으로 열면 매매 영역이 900px로 줄어
    desktop 배치가 성립하지 않는다. 그래서 폭이 정말 남는 화면에서만
    칸으로 열고, 모자라면 겹쳐서(overlay) 연다. 판단은 화면 폭 숫자가
@@ -156,9 +156,13 @@ const widthOf = (page, region) => page.evaluate(r => {
   const core = s => s.kind === 'desktop' && s.order >= 340 && s.chart >= 560 && s.ovf === 0;
   const fmt = s => `${s.kind}/${s.market} 차트${s.chart} 주문${s.order} 레일${s.rail}${s.overlay ? '(겹침)' : ''} 넘침${s.ovf}`;
 
-  // want='overlay' 는 칸으로 열면 매매 최소폭이 깨지는 화면,
-  // want='column' 은 폭이 정말 남아 칸으로 열어도 되는 화면이다.
-  for (const [w, h, want] of [[1440, 900, 'overlay'], [1366, 768, 'overlay'], [1920, 1080, 'column'], [2560, 1440, 'column']]) {
+  // want='overlay' 는 네 번째 영역을 상주시키지 않는 폭,
+  // want='column' 은 폭이 정말 남아 상주시켜도 되는 폭이다.
+  // 1919/1920은 경계를 브라우저에서 직접 확인하려고 넣었다.
+  // 1664는 사용자가 처음 결함을 발견한 화면이다.
+  for (const [w, h, want] of [[1366, 768, 'overlay'], [1440, 900, 'overlay'],
+                              [1664, 936, 'overlay'], [1919, 1080, 'overlay'],
+                              [1920, 1080, 'column'], [2560, 1440, 'column']]) {
     const { ctx, page } = await open(w, h);
     const a = await snap(page);
     await toggle(page);
@@ -174,7 +178,7 @@ const widthOf = (page, region) => page.evaluate(r => {
       && (a.right === 'expanded'
         ? closed.right === 'collapsed'
         : closed.right === 'collapsed' && closed.chart === ini.chart && closed.order === ini.order && closed.market === ini.market);
-    say(ok, `BLOCKER 5 뉴스 열기 ${w}×${h} (${want})`,
+    say(ok, `BLOCKER 5·6 뉴스 열기 ${w}×${h} (${want})`,
       `초기 ${fmt(a)} → ${fmt(b)} → ${fmt(c)}`);
     await ctx.close();
   }
