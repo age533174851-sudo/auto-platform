@@ -11,6 +11,7 @@
 // 언젠가 한쪽에만 항목이 추가된다.
 
 import React from 'react';
+import { SP, FS, FW, CONTROL } from '@/lib/ui/tokens';
 import { Star } from 'lucide-react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
@@ -41,7 +42,7 @@ export default function MenuTile({
         onClick={() => onOpen(m)}
         style={{
           flex: 1, minWidth: 0,
-          display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8,
+          display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: SP.sm,
           background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left',
           /* 별표 버튼과 겹치지 않게 오른쪽 위를 비워 둔다 */
           padding: '14px 42px 14px 14px',
@@ -49,17 +50,17 @@ export default function MenuTile({
         }}
       >
         <span style={{
-          width: 40, height: 40, borderRadius: 11, background: m.color + '1F',
+          width: CONTROL.min, height: CONTROL.min, borderRadius: 11, background: m.color + '1F',
           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
         }}>
           <Icon size={20} color={m.color} />
         </span>
         <span style={{ minWidth: 0, maxWidth: '100%', display: 'block' }}>
           <span className="menu-tile-label" style={{
-            display: 'block', color: T.txt, fontSize: 13, fontWeight: 700, marginBottom: 3,
+            display: 'block', color: T.txt, fontSize: FS.lead, fontWeight: FW.bold, marginBottom: 3,
           }}>{m.label}</span>
           <span className="menu-tile-desc" style={{
-            color: T.muted, fontSize: 11, lineHeight: 1.35,
+            color: T.muted, fontSize: FS.small, lineHeight: 1.35,
           }}>{m.desc}</span>
         </span>
       </button>
@@ -72,7 +73,7 @@ export default function MenuTile({
         style={{
           position: 'absolute', top: 6, right: 6,
           background: 'transparent', border: 'none', cursor: 'pointer',
-          padding: 8, minHeight: 36, display: 'flex',
+          padding: SP.sm, minHeight: CONTROL.sm, display: 'flex',
         }}
       >
         <Star size={17} color={fav ? T.ylw : T.muted} fill={fav ? T.ylw : 'none'} />

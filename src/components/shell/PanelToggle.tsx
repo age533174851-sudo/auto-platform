@@ -13,6 +13,7 @@
 // "지금 열려 있는지"를 말해야 한다. 낭독기는 그 값을 읽어 준다.
 
 import React from 'react';
+import { BORDER_W } from '@/lib/ui/tokens';
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { T } from '@/lib/constants';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
@@ -41,7 +42,7 @@ export default function PanelToggle({
       title={label}
       style={{
         background: 'transparent',
-        border: `1px solid ${T.border}`,
+        border: `${BORDER_W}px solid ${T.border}`,
         borderRadius: 10,
         /* **누르는 자리는 아이콘 크기와 다르다.**
            예전에는 26×26이었고 "마우스가 있는 PC에서만 보인다"고 적어

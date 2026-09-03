@@ -6,6 +6,7 @@ import { toTradingViewSymbol } from '@/lib/tvSymbol';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR } from '@/data/assets';
 import type { Asset } from '@/types';
+import { R, FS, FW, SP, BORDER_W } from '@/lib/ui/tokens';
 
 // LOGO_DB 항목의 형태. initials/bg는 Logo 컴포넌트가 이미지 로드 실패 시
 // 쓰는 폴백이며 대부분의 항목이 채워 넣는다. url/fallback은 구형 항목용.
@@ -164,8 +165,15 @@ export const getBgColor = (ticker: string): string => {
 
 
 
+/**
+ * 작은 라벨(16개 파일·67곳).
+ *
+ * 크기·굵기·테두리는 정본에서 온다. 반지름은 `R.pill` — 상자 높이의
+ * 절반을 넘는 반지름은 CSS가 절반으로 깎으므로, 예전 값 99와 화면에
+ * 그려지는 결과가 같다(둘 다 완전한 알약 모양).
+ */
 export function Bdg({c,ch,sm}:{c:string;ch:string;sm?:boolean;[key:string]:any}) {
-  return <span style={{background:c+'20',color:c,fontSize:sm?9:10,fontWeight:700,padding:sm?'1px 5px':'2px 8px',borderRadius:99,border:`1px solid ${c}30`,whiteSpace:'nowrap',display:'inline-block'}}>{ch}</span>;
+  return <span style={{background:c+'20',color:c,fontSize:sm?FS.nano:FS.micro,fontWeight:FW.bold,padding:sm?'1px 5px':`2px ${SP.sm}px`,borderRadius:R.pill,border:`${BORDER_W}px solid ${c}30`,whiteSpace:'nowrap',display:'inline-block'}}>{ch}</span>;
 }
 export function Pill({ch,active,color,onClick}:{ch:string;active:boolean;color?:string;onClick:()=>void;[key:string]:any}) {
   const col=color||T.acl;
@@ -174,8 +182,16 @@ export function Pill({ch,active,color,onClick}:{ch:string;active:boolean;color?:
 export function Toggle({on,onChange}:{on:boolean;onChange:(v:boolean)=>void}) {
   return <div onClick={()=>onChange(!on)} style={{width:44,height:24,borderRadius:12,background:on?T.acl:'var(--t-border2)',cursor:'pointer',position:'relative',flexShrink:0,transition:'background .2s'}}><div style={{position:'absolute',top:3,left:on?23:3,width:18,height:18,borderRadius:9,background:'#fff',transition:'left .2s',boxShadow:'0 1px 4px rgba(0,0,0,.4)'}}/></div>;
 }
+/**
+ * 이 앱에서 가장 많이 쓰이는 그릇(46개 파일·337곳).
+ *
+ * 반지름 18은 여기서 정한 값이 아니라 **정본 스케일의 `R.card`**다.
+ * 예전에는 이 파일에 18이 박혀 있고 `components/ui/tokens.ts`의
+ * `cardStyle()`은 16(R.lg)을 썼다 — 같은 "카드"가 두 모양이었다.
+ * 실제로 화면에 서 있는 쪽이 18이므로 스케일이 그것을 담는다.
+ */
 export function Card({children,style,glow}:{children?:React.ReactNode;style?:React.CSSProperties;glow?:boolean;[key:string]:any}) {
-  return <div style={{background:T.card,border:`1px solid ${glow?T.acl:T.border}`,borderRadius:18,boxShadow:glow?`0 0 20px ${T.acg}`:'none',...style}}>{children}</div>;
+  return <div style={{background:T.card,border:`${BORDER_W}px solid ${glow?T.acl:T.border}`,borderRadius:R.card,boxShadow:glow?`0 0 20px ${T.acg}`:'none',...style}}>{children}</div>;
 }
 export function Dot({c}:{c?:string}) {
   return <span style={{display:'inline-block',width:7,height:7,borderRadius:'50%',background:c||T.grn,animation:'pulse 1.5s ease-in-out infinite'}}/>;
