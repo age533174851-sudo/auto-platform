@@ -1,0 +1,994 @@
+{
+ "1366x768": {
+  "viewport": {
+   "w": 1366,
+   "h": 768
+  },
+  "bodyOverflow": 0,
+  "regionsFound": true,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "market": "anchor:종목 검색",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 220,
+    "h": 768,
+    "r": 220,
+    "bt": 768
+   },
+   "newsRail": {
+    "x": 1066,
+    "y": 0,
+    "w": 300,
+    "h": 768,
+    "r": 1366,
+    "bt": 768
+   },
+   "center": {
+    "x": 220,
+    "y": 0,
+    "w": 846,
+    "h": 768,
+    "r": 1066,
+    "bt": 768
+   },
+   "order": {
+    "x": 840,
+    "y": 53,
+    "w": 226,
+    "h": 512,
+    "r": 1066,
+    "bt": 565
+   },
+   "market": {
+    "x": 220,
+    "y": 111,
+    "w": 150,
+    "h": 453,
+    "r": 370,
+    "bt": 564
+   },
+   "chart": {
+    "x": 375,
+    "y": 52,
+    "w": 460,
+    "h": 512,
+    "r": 835,
+    "bt": 564
+   },
+   "topbar": {
+    "x": 220,
+    "y": 0,
+    "w": 846,
+    "h": 52,
+    "r": 1066,
+    "bt": 52
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 13,
+  "orderSamples": [
+   {
+    "a": "약 19.6%",
+    "b": "확인 불가",
+    "area": 58
+   },
+   {
+    "a": "약 19.6%",
+    "b": "＋",
+    "area": 123
+   },
+   {
+    "a": "시장가",
+    "b": "",
+    "area": 193
+   },
+   {
+    "a": "지정가",
+    "b": "",
+    "area": 98
+   },
+   {
+    "a": "",
+    "b": "계좌 0.5%",
+    "area": 200
+   },
+   {
+    "a": "",
+    "b": "계좌 1%",
+    "area": 80
+   },
+   {
+    "a": "",
+    "b": "계좌 2%",
+    "area": 67
+   },
+   {
+    "a": "25%",
+    "b": "롱 진입",
+    "area": 625
+   }
+  ],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 2,
+  "headerSamples": [
+   {
+    "a": "Binance · 수신 없음",
+    "b": "선물 잔고",
+    "area": 153
+   },
+   {
+    "a": "Binance · 수신 없음",
+    "b": "—",
+    "area": 36
+   }
+  ],
+  "wordBreaks": [
+   {
+    "text": "종목 · 거래대금",
+    "word": "거래대금",
+    "wordW": 40,
+    "avail": 10
+   },
+   {
+    "text": "가격",
+    "word": "가격",
+    "wordW": 20,
+    "avail": 10
+   }
+  ],
+  "orderMode": "persistent",
+  "marketMode": "expanded",
+  "infoMode": "expanded",
+  "name": "1366x768"
+ },
+ "1440x900": {
+  "viewport": {
+   "w": 1440,
+   "h": 900
+  },
+  "bodyOverflow": 0,
+  "regionsFound": true,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "market": "anchor:종목 검색",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 240,
+    "h": 900,
+    "r": 240,
+    "bt": 900
+   },
+   "newsRail": {
+    "x": 1140,
+    "y": 0,
+    "w": 300,
+    "h": 900,
+    "r": 1440,
+    "bt": 900
+   },
+   "center": {
+    "x": 240,
+    "y": 0,
+    "w": 900,
+    "h": 900,
+    "r": 1140,
+    "bt": 900
+   },
+   "order": {
+    "x": 900,
+    "y": 53,
+    "w": 240,
+    "h": 607,
+    "r": 1140,
+    "bt": 660
+   },
+   "market": {
+    "x": 240,
+    "y": 111,
+    "w": 160,
+    "h": 548,
+    "r": 400,
+    "bt": 659
+   },
+   "chart": {
+    "x": 405,
+    "y": 52,
+    "w": 490,
+    "h": 607,
+    "r": 895,
+    "bt": 659
+   },
+   "topbar": {
+    "x": 240,
+    "y": 0,
+    "w": 900,
+    "h": 52,
+    "r": 1140,
+    "bt": 52
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 8,
+  "orderSamples": [
+   {
+    "a": "약 19.6%",
+    "b": "확인 불가",
+    "area": 67
+   },
+   {
+    "a": "약 19.6%",
+    "b": "＋",
+    "area": 97
+   },
+   {
+    "a": "시장가",
+    "b": "",
+    "area": 207
+   },
+   {
+    "a": "지정가",
+    "b": "",
+    "area": 112
+   },
+   {
+    "a": "",
+    "b": "계좌 0.5%",
+    "area": 218
+   },
+   {
+    "a": "",
+    "b": "계좌 1%",
+    "area": 87
+   },
+   {
+    "a": "",
+    "b": "계좌 2%",
+    "area": 81
+   },
+   {
+    "a": "명목가",
+    "b": "롱 진입",
+    "area": 189
+   }
+  ],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 1,
+  "headerSamples": [
+   {
+    "a": "Binance · 수신 없음",
+    "b": "—",
+    "area": 186
+   }
+  ],
+  "wordBreaks": [
+   {
+    "text": "종목 · 거래대금",
+    "word": "거래대금",
+    "wordW": 40,
+    "avail": 10
+   },
+   {
+    "text": "가격",
+    "word": "가격",
+    "wordW": 20,
+    "avail": 14
+   }
+  ],
+  "orderMode": "persistent",
+  "marketMode": "expanded",
+  "infoMode": "expanded",
+  "name": "1440x900"
+ },
+ "1664x936": {
+  "viewport": {
+   "w": 1664,
+   "h": 936
+  },
+  "bodyOverflow": 0,
+  "regionsFound": true,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "market": "anchor:종목 검색",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 240,
+    "h": 936,
+    "r": 240,
+    "bt": 936
+   },
+   "newsRail": {
+    "x": 1364,
+    "y": 0,
+    "w": 300,
+    "h": 936,
+    "r": 1664,
+    "bt": 936
+   },
+   "center": {
+    "x": 240,
+    "y": 0,
+    "w": 1124,
+    "h": 936,
+    "r": 1364,
+    "bt": 936
+   },
+   "order": {
+    "x": 1063,
+    "y": 53,
+    "w": 301,
+    "h": 633,
+    "r": 1364,
+    "bt": 686
+   },
+   "market": {
+    "x": 240,
+    "y": 111,
+    "w": 201,
+    "h": 574,
+    "r": 441,
+    "bt": 685
+   },
+   "chart": {
+    "x": 446,
+    "y": 52,
+    "w": 613,
+    "h": 633,
+    "r": 1058,
+    "bt": 685
+   },
+   "topbar": {
+    "x": 240,
+    "y": 0,
+    "w": 1124,
+    "h": 52,
+    "r": 1364,
+    "bt": 52
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 7,
+  "orderSamples": [
+   {
+    "a": "약 19.6%",
+    "b": "확인 불가",
+    "area": 101
+   },
+   {
+    "a": "시장가",
+    "b": "",
+    "area": 268
+   },
+   {
+    "a": "지정가",
+    "b": "",
+    "area": 173
+   },
+   {
+    "a": "",
+    "b": "계좌 0.5%",
+    "area": 294
+   },
+   {
+    "a": "",
+    "b": "계좌 1%",
+    "area": 294
+   },
+   {
+    "a": "",
+    "b": "계좌 2%",
+    "area": 294
+   },
+   {
+    "a": "",
+    "b": "직접",
+    "area": 41
+   }
+  ],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": "expanded",
+  "infoMode": "expanded",
+  "name": "1664x936"
+ },
+ "1920x1080": {
+  "viewport": {
+   "w": 1920,
+   "h": 1080
+  },
+  "bodyOverflow": 0,
+  "regionsFound": true,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "market": "anchor:종목 검색",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 240,
+    "h": 1080,
+    "r": 240,
+    "bt": 1080
+   },
+   "newsRail": {
+    "x": 1620,
+    "y": 0,
+    "w": 300,
+    "h": 1080,
+    "r": 1920,
+    "bt": 1080
+   },
+   "center": {
+    "x": 240,
+    "y": 0,
+    "w": 1380,
+    "h": 1080,
+    "r": 1620,
+    "bt": 1080
+   },
+   "order": {
+    "x": 1250,
+    "y": 53,
+    "w": 370,
+    "h": 737,
+    "r": 1620,
+    "bt": 790
+   },
+   "market": {
+    "x": 240,
+    "y": 111,
+    "w": 247,
+    "h": 678,
+    "r": 487,
+    "bt": 789
+   },
+   "chart": {
+    "x": 492,
+    "y": 52,
+    "w": 754,
+    "h": 737,
+    "r": 1245,
+    "bt": 789
+   },
+   "topbar": {
+    "x": 240,
+    "y": 0,
+    "w": 1380,
+    "h": 52,
+    "r": 1620,
+    "bt": 52
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 0,
+  "orderSamples": [],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": "expanded",
+  "infoMode": "expanded",
+  "name": "1920x1080"
+ },
+ "2560x1440": {
+  "viewport": {
+   "w": 2560,
+   "h": 1440
+  },
+  "bodyOverflow": 0,
+  "regionsFound": true,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "market": "anchor:종목 검색",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 240,
+    "h": 1440,
+    "r": 240,
+    "bt": 1440
+   },
+   "newsRail": {
+    "x": 2260,
+    "y": 0,
+    "w": 300,
+    "h": 1440,
+    "r": 2560,
+    "bt": 1440
+   },
+   "center": {
+    "x": 240,
+    "y": 0,
+    "w": 2020,
+    "h": 1440,
+    "r": 2260,
+    "bt": 1440
+   },
+   "order": {
+    "x": 1717,
+    "y": 53,
+    "w": 543,
+    "h": 996,
+    "r": 2260,
+    "bt": 1049
+   },
+   "market": {
+    "x": 240,
+    "y": 111,
+    "w": 362,
+    "h": 937,
+    "r": 602,
+    "bt": 1048
+   },
+   "chart": {
+    "x": 607,
+    "y": 52,
+    "w": 1106,
+    "h": 996,
+    "r": 1712,
+    "bt": 1048
+   },
+   "topbar": {
+    "x": 240,
+    "y": 0,
+    "w": 2020,
+    "h": 52,
+    "r": 2260,
+    "bt": 52
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 0,
+  "orderSamples": [],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": "expanded",
+  "infoMode": "expanded",
+  "name": "2560x1440"
+ },
+ "1024x768": {
+  "viewport": {
+   "w": 1024,
+   "h": 768
+  },
+  "bodyOverflow": 0,
+  "regionsFound": false,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "못 찾음: market",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 220,
+    "h": 768,
+    "r": 220,
+    "bt": 768
+   },
+   "newsRail": {
+    "x": 780,
+    "y": 0,
+    "w": 244,
+    "h": 768,
+    "r": 1024,
+    "bt": 768
+   },
+   "center": {
+    "x": 220,
+    "y": 0,
+    "w": 560,
+    "h": 768,
+    "r": 780,
+    "bt": 768
+   },
+   "order": {
+    "x": 629,
+    "y": 53,
+    "w": 151,
+    "h": 512,
+    "r": 780,
+    "bt": 565
+   },
+   "chart": {
+    "x": 220,
+    "y": 52,
+    "w": 404,
+    "h": 512,
+    "r": 624,
+    "bt": 564
+   },
+   "topbar": {
+    "x": 220,
+    "y": 0,
+    "w": 560,
+    "h": 52,
+    "r": 780,
+    "bt": 52
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 12,
+  "orderSamples": [
+   {
+    "a": "5×",
+    "b": "확인 불가",
+    "area": 103
+   },
+   {
+    "a": "약 19.6%",
+    "b": "확인 불가",
+    "area": 138
+   },
+   {
+    "a": "약 19.6%",
+    "b": "＋",
+    "area": 476
+   },
+   {
+    "a": "시장가",
+    "b": "",
+    "area": 118
+   },
+   {
+    "a": "",
+    "b": "계좌 0.5%",
+    "area": 106
+   },
+   {
+    "a": "",
+    "b": "계좌 1%",
+    "area": 106
+   },
+   {
+    "a": "계좌 예상 손실",
+    "b": "롱 진입",
+    "area": 456
+   },
+   {
+    "a": "계좌 예상 손실",
+    "b": "Buy · 5×",
+    "area": 140
+   }
+  ],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 6,
+  "headerSamples": [
+   {
+    "a": "현물",
+    "b": "모의",
+    "area": 30
+   },
+   {
+    "a": "USDⓈ-M 선물",
+    "b": "모의",
+    "area": 720
+   },
+   {
+    "a": "COIN-M 선물",
+    "b": "모의",
+    "area": 720
+   },
+   {
+    "a": "주식",
+    "b": "테스트넷",
+    "area": 600
+   },
+   {
+    "a": "Binance · 수신 없음",
+    "b": "선물 잔고",
+    "area": 97
+   },
+   {
+    "a": "Binance · 수신 없음",
+    "b": "모드 확인 불가",
+    "area": 111
+   }
+  ],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": null,
+  "infoMode": "expanded",
+  "name": "1024x768"
+ },
+ "834x1194": {
+  "viewport": {
+   "w": 834,
+   "h": 1194
+  },
+  "bodyOverflow": 0,
+  "regionsFound": false,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "못 찾음: market",
+  "kind": "desktop",
+  "rects": {
+   "menu": {
+    "x": 0,
+    "y": 0,
+    "w": 220,
+    "h": 1194,
+    "r": 220,
+    "bt": 1194
+   },
+   "center": {
+    "x": 220,
+    "y": 0,
+    "w": 614,
+    "h": 1194,
+    "r": 834,
+    "bt": 1194
+   },
+   "order": {
+    "x": 220,
+    "y": 99,
+    "w": 355,
+    "h": 1019,
+    "r": 575,
+    "bt": 1118
+   },
+   "chart": {
+    "x": 576,
+    "y": 99,
+    "w": 258,
+    "h": 1019,
+    "r": 834,
+    "bt": 1118
+   },
+   "topbar": {
+    "x": 223,
+    "y": 0,
+    "w": 611,
+    "h": 54,
+    "r": 834,
+    "bt": 54
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 0,
+  "orderSamples": [],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": null,
+  "infoMode": "expanded",
+  "name": "834x1194"
+ },
+ "430x932": {
+  "viewport": {
+   "w": 430,
+   "h": 932
+  },
+  "bodyOverflow": 0,
+  "regionsFound": false,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "못 찾음: market",
+  "kind": "desktop",
+  "rects": {
+   "center": {
+    "x": 0,
+    "y": 0,
+    "w": 430,
+    "h": 874,
+    "r": 430,
+    "bt": 874
+   },
+   "order": {
+    "x": 0,
+    "y": 99,
+    "w": 248,
+    "h": 699,
+    "r": 248,
+    "bt": 798
+   },
+   "chart": {
+    "x": 249,
+    "y": 99,
+    "w": 181,
+    "h": 699,
+    "r": 430,
+    "bt": 798
+   },
+   "topbar": {
+    "x": 3,
+    "y": 0,
+    "w": 427,
+    "h": 54,
+    "r": 430,
+    "bt": 54
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 0,
+  "orderSamples": [],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": null,
+  "infoMode": "expanded",
+  "name": "430x932"
+ },
+ "390x844": {
+  "viewport": {
+   "w": 390,
+   "h": 844
+  },
+  "bodyOverflow": 0,
+  "regionsFound": false,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "못 찾음: market",
+  "kind": "desktop",
+  "rects": {
+   "center": {
+    "x": 0,
+    "y": 0,
+    "w": 390,
+    "h": 786,
+    "r": 390,
+    "bt": 786
+   },
+   "order": {
+    "x": 0,
+    "y": 99,
+    "w": 225,
+    "h": 611,
+    "r": 225,
+    "bt": 710
+   },
+   "chart": {
+    "x": 226,
+    "y": 99,
+    "w": 164,
+    "h": 611,
+    "r": 390,
+    "bt": 710
+   },
+   "topbar": {
+    "x": 3,
+    "y": 0,
+    "w": 387,
+    "h": 54,
+    "r": 390,
+    "bt": 54
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 0,
+  "orderSamples": [],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": null,
+  "infoMode": "expanded",
+  "name": "390x844"
+ },
+ "360x800": {
+  "viewport": {
+   "w": 360,
+   "h": 800
+  },
+  "bodyOverflow": 0,
+  "regionsFound": false,
+  "regionHow": {
+   "order": "anchor:롱 진입",
+   "chart": "anchor:잔여 최대폭",
+   "topbar": "anchor:상단 52px 줄"
+  },
+  "regionReason": "못 찾음: market",
+  "kind": "desktop",
+  "rects": {
+   "center": {
+    "x": 0,
+    "y": 0,
+    "w": 360,
+    "h": 742,
+    "r": 360,
+    "bt": 742
+   },
+   "order": {
+    "x": 0,
+    "y": 99,
+    "w": 208,
+    "h": 567,
+    "r": 208,
+    "bt": 666
+   },
+   "chart": {
+    "x": 209,
+    "y": 99,
+    "w": 151,
+    "h": 567,
+    "r": 360,
+    "bt": 666
+   },
+   "topbar": {
+    "x": 3,
+    "y": 0,
+    "w": 357,
+    "h": 54,
+    "r": 360,
+    "bt": 54
+   }
+  },
+  "persistentOverlaps": [],
+  "orderOverlaps": 0,
+  "orderSamples": [],
+  "clipping": [],
+  "escapes": 0,
+  "headerOverlaps": 0,
+  "headerSamples": [],
+  "wordBreaks": [],
+  "orderMode": "persistent",
+  "marketMode": null,
+  "infoMode": "expanded",
+  "name": "360x800"
+ }
+}

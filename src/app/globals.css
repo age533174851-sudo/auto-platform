@@ -527,6 +527,28 @@ button.switch, .switch { min-height: 0; }
    position:fixed · top:10 · right:10 · 38px · z-index 9998)이 접힌 띠의
    폭과 겹친다. 그 아래로 내리지 않으면 다시 펴는 버튼이 **보이는데
    눌리지 않는다.** 실제로 그 상태였다 — 클릭이 벨에 먹혔다. */
+/* ── 겹쳐서 여는 뉴스 레일 ────────────────────────────────────
+   1440·1366처럼 칸으로 열면 거래화면이 무너지는 폭에서는, 레일이 격자
+   칸을 늘리지 않고 오른쪽에 겹쳐 뜬다. 격자 칸은 접힌 띠(48px) 그대로라
+   가운데 폭이 변하지 않는다 — 그래서 차트와 상주 주문판이 살아 있다.
+
+   **본문 위에 뜨지만 조작을 가리지 않는다.** 오른쪽 끝에만 붙고, 접는
+   버튼은 레일 안에 그대로 있어서 한 번 눌러 닫을 수 있다. */
+.aw[data-rail-overlay='1'] .rp {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: var(--rp-overlay-w, 300px);
+  max-width: 92vw;
+  height: 100vh;
+  z-index: 40;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, .38);
+  padding: 14px;
+  align-items: stretch;
+}
+.aw[data-rail-overlay='1'] .rp-body { display: block !important; }
+.aw[data-rail-overlay='1'] .rp-resizer { display: none !important; }
+
 .aw[data-right='collapsed'] .rp { padding: 56px 0 8px; align-items: center; }
 .aw[data-right='collapsed'] .rp-body { display: none !important; }
 .aw[data-right='collapsed'] .rp-resizer { display: none !important; }

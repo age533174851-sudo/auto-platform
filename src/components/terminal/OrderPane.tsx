@@ -196,7 +196,13 @@ export const OrderBookPanel = memo(function OrderBookPanel({
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    /* **flexShrink:0이 없으면 이 칸이 0이 된다.**
+       아래 주문폼이 `minHeight:100%`로 열 전체를 요구하면, 세로 flex에서
+       기본 shrink가 1인 이 칸이 0까지 눌린다. 그런데 자식들은 계속 그려져서
+       (overflow를 자르지 않으므로) 주문폼 위로 흘러넘쳤다 —
+       "호가를 받아오는 중"이 배율·청산거리 글자와 겹친 원인이 이것이다.
+       높이를 0으로 만들면서 내용을 지우지 않는 것이 가장 나쁜 조합이다. */
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flexShrink: 0 }}>
       {showFunding && (
         <div style={{
           padding: dense ? '6px 8px' : '8px 12px',
@@ -1476,7 +1482,10 @@ export const OrderFormPanel = memo(function OrderFormPanel({
     // 주문판 안의 어떤 요소도 자기 칸을 넘어 호가창을 침범하지 않는다.
     // 넘치는 것을 고치는 것이 먼저이고 이건 마지막 방어선이다 — 그래도
     // 둔다. 한 줄이 넘치면 그 줄만이 아니라 옆 패널까지 망가진다.
-    <div className="order-pane" style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', minHeight: '100%' }}>
+    /* `minHeight:'100%'`이었다. 세로 flex에서 그 값은 "열 전체를 달라"는
+       뜻이라 위 호가창이 0으로 눌렸다. 남는 자리를 채우되 형제를 굶기지
+       않도록 flex로 바꾼다 — 내용이 짧을 때 아래가 비는 문제는 그대로 해결된다. */
+    <div className="order-pane" style={{ padding: pad, display: 'flex', flexDirection: 'column', gap, position: 'relative', flex: '1 0 auto' }}>
       {/* 이 주문이 **어느 계좌로 나가는가.**
           지금까지 화면에 없던 값이다. 연결을 여러 개 등록해 두면(테스트넷
           하나 + 실전 하나가 정상이다) 모드만 보고는 어느 키로 나가는지 알

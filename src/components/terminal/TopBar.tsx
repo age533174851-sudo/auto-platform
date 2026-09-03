@@ -8,7 +8,7 @@
 //
 // 실전/Testnet은 글자가 아니라 **색과 위치**로 구분한다. 급할 때 글자는
 // 안 읽힌다. 실자금이면 상단 왼쪽에 붉은 띠가 서고 배경이 물든다.
-import React, { memo, useState } from 'react';
+import React, { memo, useState, useRef, useEffect } from 'react';
 import { C, FS, NUM, chip, fmtPrice, pnlColor } from './theme';
 import { DataBadge, DataValue } from '@/components/ui/DataBadge';
 import type { DataSource } from '@/lib/engine/dataQuality';
@@ -123,11 +123,37 @@ function TopBarInner({ balance, compact, right }: {
     origin: compact ? '' : 'Binance', asOf: stream.priceAt, expectedIntervalMs: 100,
   };
 
+  /* ── 좁아질 때 무엇을 먼저 버리는가 ──
+     예전에는 한 줄에 전부 유지하려다 서로 침범했다. 자식 여럿이
+     `whiteSpace:nowrap`이라 flex가 더 줄일 수 없게 되면, 줄어드는 대신
+     겹쳐 그려진다 — 1664 화면에서 "선물 잔고"·"모드 확인 불가"·"미연결"이
+     아래 줄 경고 위로 올라탄 것이 그것이다.
+
+     **글자를 줄여서 맞추지 않는다.** 우선순위가 낮은 것부터 뺀다.
+     뺀 정보는 사라지는 것이 아니라 다른 곳에 이미 있다:
+       · 선물 잔고 → 하단 독의 자산 칸
+       · 거래소 연결 수 → 주문판의 계좌 줄(AccountLine)
+     '진짜 돈인가'를 정하는 모드 표시는 어떤 폭에서도 빼지 않는다. */
+  const barRef = useRef<HTMLDivElement>(null);
+  const [barW, setBarW] = useState(0);
+  useEffect(() => {
+    const el = barRef.current; if (!el) return;
+    const measure = () => setBarW(el.clientWidth);
+    measure();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+  // 0은 "아직 안 쟀다"는 뜻이다. 재기 전에 지워 버리면 한 번 깜빡인다.
+  const roomy = barW === 0 || barW >= 1180;
+  const showBalance = !compact && roomy;
+  const showConnChip = !compact && roomy;
+
   return (
-    <div style={{
+    <div ref={barRef} data-region="topbar" style={{
       height: TOPBAR_H, display: 'flex', alignItems: 'center',
       gap: compact ? 10 : 16, padding: compact ? '0 46px 0 12px' : '0 14px',
-      borderBottom: `1px solid ${C.hair}`, flexShrink: 0,
+      borderBottom: `1px solid ${C.hair}`, flexShrink: 0, minWidth: 0, overflow: 'hidden',
       background: mode.realMoney ? 'linear-gradient(90deg,rgba(246,70,93,.10),transparent 42%)' : C.panel,
       // 실자금이면 왼쪽에 붉은 기둥이 선다. 어느 패널을 보든 시야 끝에 걸린다.
       borderLeft: mode.realMoney ? `3px solid ${C.down}` : '3px solid transparent',
@@ -140,7 +166,7 @@ function TopBarInner({ balance, compact, right }: {
           숏을 연다. 종목 바로 옆에 둔다. */}
       {!compact && <MarketSwitch value={marketType} onChange={setMarketType}/>}
       {/* 모의/테스트넷/실전. 좁을 때도 뺄 수 없다 — 이 값만 '진짜 돈인가'를 정한다 */}
-      <div style={{ minWidth: 190 }}><TradeModeSwitch compact/></div>
+      <div style={{ minWidth: 190, flexShrink: 0 }}><TradeModeSwitch compact/></div>
 
       <div style={{
         display: 'flex', flexDirection: 'column', gap: 1,
@@ -178,8 +204,8 @@ function TopBarInner({ balance, compact, right }: {
 
       {right}
 
-      {!compact && (
-        <div style={{ textAlign: 'right', lineHeight: 1.3 }}>
+      {showBalance && (
+        <div style={{ textAlign: 'right', lineHeight: 1.3, flexShrink: 0 }}>
           <div style={{ color: C.faint, fontSize: FS.micro }}>선물 잔고</div>
           <div style={{ ...NUM, color: C.text, fontSize: FS.body, fontWeight: 600 }}>
             {balance != null ? `${fmtPrice(balance)} USDT` : '—'}
@@ -199,14 +225,14 @@ function TopBarInner({ balance, compact, right }: {
           }}
         />
       ) : (
-        <span style={mode.unknown
+        <span style={{ ...(mode.unknown
           ? chip(C.warn, C.warnBg)
-          : mode.realMoney ? chip(C.down, C.downBg) : chip(C.dim)}>
+          : mode.realMoney ? chip(C.down, C.downBg) : chip(C.dim)), flexShrink: 0 }}>
           {mode.unknown ? '모드 확인 불가' : mode.label.split(' —')[0]}
         </span>
       )}
 
-      {!compact && (
+      {showConnChip && (
         <span style={chip(connections.length ? C.dim : C.faint)}>
           <span style={{
             width: 6, height: 6, borderRadius: '50%',
