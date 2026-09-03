@@ -336,7 +336,10 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
   const signalLabel:Record<SignalState,string>={waiting:'대기',confirmed:'확인됨',rejected:'거부됨',executed:'실행됨',expired:'만료'};
 
   return (
-    <div>
+    /* data-region="autoPage" — 자동매매 화면의 조작 대상 최소 크기를
+       한 곳(globals.css)에서 지킨다. 버튼마다 minHeight를 손으로 적으면
+       스무 곳 중 한 곳이 빠지고, 빠진 것을 아무도 모른다. */
+    <div data-region="autoPage">
       {/* **실제로 도는 자동매매**를 여기서 켜고 끈다.
           지금까지는 Supabase SQL 편집기에서 INSERT를 쳐야 했고, 그동안
           크론은 돌면서 아무 일도 하지 않았다. AutoStatusBoard보다 위에
@@ -510,7 +513,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                   const c = ACTIVITY_TONE[a]==='good'?T.grn:ACTIVITY_TONE[a]==='bad'?T.red:ACTIVITY_TONE[a]==='warn'?T.ylw:T.muted;
                   return (
                     <button key={a} onClick={()=>setStratFilter(p=>p.includes(a)?p.filter(x=>x!==a):[...p,a])}
-                      style={{flexShrink:0,minHeight:32,padding:'5px 10px',borderRadius:8,cursor:'pointer',
+                      style={{flexShrink:0,minHeight:MIN_CONTROL_TARGET,padding:'5px 10px',borderRadius:8,cursor:'pointer',
                         background:on?A(c,'18'):'transparent',color:on?c:T.muted,
                         border:`1px solid ${on?A(c,'45'):T.border}`,fontSize:10,fontWeight:800}}>
                       {activityLabel(a, STRAT_LIST_WIRED)} {counts[a]}
@@ -518,7 +521,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                   );
                 })}
                 <button onClick={()=>setStratFilter([])}
-                  style={{flexShrink:0,minHeight:32,padding:'5px 10px',borderRadius:8,cursor:'pointer',
+                  style={{flexShrink:0,minHeight:MIN_CONTROL_TARGET,padding:'5px 10px',borderRadius:8,cursor:'pointer',
                     background:stratFilter.length===0?T.acg:'transparent',
                     color:stratFilter.length===0?T.acl:T.muted,
                     border:`1px solid ${stratFilter.length===0?T.acl:T.border}`,fontSize:10,fontWeight:800}}>
@@ -579,7 +582,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                       {s.asset} · {s.timeframe} · {KIND_LABEL[kind]}
                     </div>
                   </div>
-                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flexShrink:0,minHeight:32,padding:'0 12px',background:A(T.grn,'15'),color:T.grn,border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,fontSize:10,fontWeight:800,cursor:'pointer'}}>시작</button>
+                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flexShrink:0,minHeight:MIN_CONTROL_TARGET,padding:'0 12px',background:A(T.grn,'15'),color:T.grn,border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,fontSize:10,fontWeight:800,cursor:'pointer'}}>시작</button>
                 </div>
               </Card>
             );
@@ -662,19 +665,19 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 
                 {/* Controls — 버튼 세 개가 늘 자리를 차지할 이유가 없다 */}
                 <div style={{display:'flex',gap:6,alignItems:'center'}}>
-                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,minHeight:36,padding:'7px',background:acts.primary.id==='pause'?A(T.ylw,'15'):A(T.grn,'15'),color:acts.primary.id==='pause'?T.ylw:T.grn,border:`1px solid ${acts.primary.id==='pause'?A(T.ylw,'30'):A(T.grn,'30')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
+                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,minHeight:MIN_CONTROL_TARGET,padding:'7px',background:acts.primary.id==='pause'?A(T.ylw,'15'):A(T.grn,'15'),color:acts.primary.id==='pause'?T.ylw:T.grn,border:`1px solid ${acts.primary.id==='pause'?A(T.ylw,'30'):A(T.grn,'30')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
                     {acts.primary.label}
                   </button>
-                  <button onClick={e=>{e.stopPropagation();setSelStrat(selStrat?.id===s.id?null:s);}} style={{minHeight:36,padding:'7px 12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
+                  <button onClick={e=>{e.stopPropagation();setSelStrat(selStrat?.id===s.id?null:s);}} style={{minHeight:MIN_CONTROL_TARGET,padding:'7px 12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
                     {acts.secondary.label}
                   </button>
-                  <button onClick={e=>{e.stopPropagation();setCardMenu(m=>m===s.id?'':s.id);}} aria-label="더보기" style={{minHeight:36,minWidth:36,background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,fontSize:13,fontWeight:800,cursor:'pointer'}}>⋯</button>
+                  <button onClick={e=>{e.stopPropagation();setCardMenu(m=>m===s.id?'':s.id);}} aria-label="더보기" style={{minHeight:MIN_CONTROL_TARGET,minWidth:MIN_CONTROL_TARGET,background:'transparent',color:T.muted,border:`1px solid ${T.border}`,borderRadius:8,fontSize:13,fontWeight:800,cursor:'pointer'}}>⋯</button>
                 </div>
                 {cardMenu===s.id&&(
                   <div style={{display:'flex',gap:6,marginTop:6}}>
                     {acts.inMenu.map(m=>(
                       <button key={m.id} onClick={e=>{e.stopPropagation();setCardMenu('');if(m.id==='settings')setEditStrat(s);else stopStrat(s.id);}}
-                        style={{flex:1,minHeight:34,padding:'6px',background:m.id==='stop'?A(T.red,'12'):'transparent',color:m.id==='stop'?T.red:T.muted,border:`1px solid ${m.id==='stop'?A(T.red,'25'):T.border}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
+                        style={{flex:1,minHeight:MIN_CONTROL_TARGET,padding:'6px',background:m.id==='stop'?A(T.red,'12'):'transparent',color:m.id==='stop'?T.red:T.muted,border:`1px solid ${m.id==='stop'?A(T.red,'25'):T.border}`,borderRadius:8,fontSize:10,fontWeight:700,cursor:'pointer'}}>
                         {m.label}
                       </button>
                     ))}
@@ -846,7 +849,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
               <input placeholder="https://your-webhook-url.com/signal" style={{flex:1,background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:11,outline:'none'}}/>
               <button type="button"
                 onClick={() => notifyInfo('TradingView Webhook 연동은 곧 출시됩니다. 현재는 더보기 → 전략빌더의 자체 시그널만 동작합니다.')}
-                style={{background:A(T.cyn,'20'),color:T.cyn,border:`1px solid ${A(T.cyn,'40')}`,borderRadius:8,padding:'9px 14px',minHeight:36,fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
+                style={{background:A(T.cyn,'20'),color:T.cyn,border:`1px solid ${A(T.cyn,'40')}`,borderRadius:8,padding:'9px 14px',minHeight:MIN_CONTROL_TARGET,fontSize:11,fontWeight:700,cursor:'pointer'}}>저장</button>
             </div>
           </Card>
         </div>
@@ -869,7 +872,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                 aria-label="리스크 편집"
                 style={{display:'inline-flex',alignItems:'center',gap:4, background:T.acg, color:T.acl,
                   border:`1px solid ${A(T.acl,'40')}`, borderRadius:8, padding:'6px 10px',
-                  fontSize:11, fontWeight:700, cursor:'pointer', minHeight:32}}>
+                  fontSize:11, fontWeight:700, cursor:'pointer', minHeight:MIN_CONTROL_TARGET}}>
                 <Edit3 size={11} strokeWidth={2.4}/>편집
                 <ChevronRight size={12} strokeWidth={2.4}/>
               </button>
@@ -1085,6 +1088,7 @@ import type { ExecutionLog } from '@/lib/autotrade/types';
 // 지갑 화면과 자릿수·부호·문구가 갈리면 사용자는 둘 다 못 믿는다.
 import { moneyText, pnlText, qtyText, UNKNOWN_LABEL } from '@/lib/ui/display';
 import { Wallet, ListChecks, Trash2, RefreshCw, AlertCircle, CheckCircle2, MinusCircle, Ban, Clock, BarChart3, TrendingUp as TrendingUpIc, TrendingDown as TrendingDownIc } from 'lucide-react';
+import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 
 /** 모의 장부 금액 한 칸. **못 읽은 것은 0이 아니다** */
 const paperMoney = (v: any): string => {
@@ -1261,7 +1265,7 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
                 resetTodayPnL(); refresh();
               }
             }}
-            style={{flex:1,minHeight:30,background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:6,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
+            style={{flex:1,minHeight:MIN_CONTROL_TARGET,background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:6,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
             오늘 PnL 리셋
           </button>
         </div>

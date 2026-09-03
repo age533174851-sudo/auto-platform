@@ -460,6 +460,12 @@ jobs:
       - name: 거래화면 배치 계약 (담긴 칸의 폭 · 중앙/주문 최소폭)
         run: node scripts/check-trading-layout.mjs
 
+      # 손으로 누르는 자리가 손가락만 한가. 자동매매 화면의 버튼이
+      # 26~36px이었고, 떠 있는 알림 벨(38×38)이 1024px 미만에서 헤더의
+      # 로그인 버튼을 1376px² 덮었다 — 430·390·360·834 전부.
+      - name: 조작 대상 계약 (최소 크기 · 떠 있는 버튼의 자리)
+        run: node scripts/check-tap-targets.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

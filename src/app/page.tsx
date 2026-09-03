@@ -855,7 +855,10 @@ export default function App() {
     settings:'앱 설정을 바꿔요',
     analysis:'AI 시장 분석을 봐요',
   };
-  const unreadCount=0; // TODO: connect to real alert count
+  /* 아직 실제 알림 개수에 연결돼 있지 않다. **여기에 그럴듯한 숫자를
+     지어 넣지 않는다** — 배지는 0일 때 아예 그리지 않으므로 지금은
+     아무것도 주장하지 않는 상태다. 연결되면 그때 실제 개수가 들어온다. */
+  const unreadCount=0;
 
   const renderPage=useCallback(()=>{
     const p={prices,currency,lang,onNav:nav,authUser,onLogin:()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}};
@@ -1066,7 +1069,7 @@ export default function App() {
                   것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.
                   누르면 밝음 → 어두움 → 시간에 맞춰 순으로 돈다. */}
               <button onClick={cycleTheme} title={`테마: ${MODE_LABEL[themeMode]}`} aria-label={`테마 ${MODE_LABEL[themeMode]}`}
-                style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,width:26,height:26,cursor:'pointer',color:T.sub,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,width:'var(--tap)',height:'var(--tap)',cursor:'pointer',color:T.sub,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
                 {themeMode==='light'?<Sun size={13} strokeWidth={2.2}/>:themeMode==='dark'?<Moon size={13} strokeWidth={2.2}/>:<Clock size={13} strokeWidth={2.2}/>}
               </button>
               {pwaInstallable&&(
@@ -1084,7 +1087,16 @@ export default function App() {
                 <span style={{textTransform:'uppercase'}}>{lang.split('-')[0]}</span>
                 <span>{CURRENCIES[currency]?.symbol||'₩'}</span>
               </button>
-              <button onClick={()=>nav('alerts')} className="hdr-badge" style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,padding:'2px 7px',cursor:'pointer',fontSize:11,color:T.muted,position:'relative'}}>
+              {/* 이 벨과 화면 오른쪽 위에 떠 있는 벨(NotifyHost)은 **다른
+                  것**이다. 아이콘이 같아서 더 헷갈린다.
+                    이 벨   → 가격·신호 알림 화면. 사용자가 "무엇을 알려
+                              달라"고 거는 조건을 설정한다.
+                    떠 있는 벨 → 이미 일어난 일의 기록(수신함).
+                  그래서 이쪽은 이름을 '가격·신호 알림'으로 못박고, 떠 있는
+                  쪽은 아이콘을 수신함으로 바꿔 눈으로도 구분되게 했다. */}
+              <button onClick={()=>nav('alerts')} className="hdr-badge"
+                aria-label="가격·신호 알림" title="가격·신호 알림 — 무엇을 알려 줄지 정합니다"
+                style={{background:'transparent',border:`1px solid ${T.border}`,borderRadius:20,padding:'2px 7px',cursor:'pointer',fontSize:11,color:T.muted,position:'relative'}}>
                 <Bell size={13} strokeWidth={2.2} color={T.muted}/>{unreadCount>0&&<span style={{position:'absolute',top:-3,right:-3,background:T.red,color:'#fff',borderRadius:'50%',width:12,height:12,fontSize:8,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700}}>{unreadCount}</span>}
               </button>
               {authUser ? (
@@ -1113,7 +1125,7 @@ export default function App() {
                   )}
                 </div>
               ) : (
-                <button onClick={()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}} aria-label="로그인" style={{minHeight:44,background:`linear-gradient(135deg,${T.acc},${T.prp})`,border:'none',borderRadius:22,padding:'0 18px',cursor:'pointer',fontSize:13,color:'#fff',fontWeight:800}}>
+                <button onClick={()=>{setLoginReason('');pendingAction.current=null;setLoginOpen(true);}} aria-label="로그인" style={{minHeight:44,background:`linear-gradient(135deg,${T.acc},${T.prp})`,border:'none',borderRadius:22,padding:'0 18px',cursor:'pointer',fontSize:13,color:'#fff',fontWeight:800,whiteSpace:'nowrap',flexShrink:0}}>
                   로그인
                 </button>
               )}
