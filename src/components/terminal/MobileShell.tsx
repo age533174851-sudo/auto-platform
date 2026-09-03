@@ -255,7 +255,14 @@ function ChartDrawer({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
   );
 }
 
-export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
+/**
+ * @param wide 태블릿(560~968px)에서도 이 배치를 쓴다.
+ *
+ * 데스크톱 3열을 태블릿에 눌러 담지 않는다 — 그러면 주문 버튼과
+ * Kill Switch까지 작아진다. 대신 이 단일 열 배치를 쓰되, 폭이 남으면
+ * 본문을 가운데로 모아 한 줄이 지나치게 길어지지 않게 한다.
+ */
+export default function MobileShell({ embedded, wide }: { embedded?: boolean; wide?: boolean } = {}) {
   const { symbol, mode, setSymbol, favorites, toggleFavorite } = useTerminal();
   const landscape = useLandscape();
   const [hdrRef, hdrH] = useMeasuredHeight<HTMLDivElement>();
@@ -295,7 +302,7 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   // ── 가로 ── 차트를 옆에 세울 공간이 생긴다
   if (landscape) {
     return (
-      <div style={{
+      <div data-region="tradingShell" data-mode={wide ? 'tablet' : 'mobile'} style={{
         height: embedded ? '100%' : '100dvh', display: 'flex', flexDirection: 'column',
         background: C.bg, color: C.text, overflow: 'hidden',
       }}>
@@ -352,7 +359,10 @@ export default function MobileShell({ embedded }: { embedded?: boolean } = {}) {
   const firstScreen = Math.max(220, boxH - hdrH - TAB_ROW);
 
   return (
-    <div ref={boxRef} style={{
+    /* data-region은 기하 검사기가 "지금 어떤 배치인가"를 읽는 표식이다.
+       속성이 없으면 검사기가 데스크톱 계약(주문 >= 340px 상주)을 잘못
+       적용해서, 태블릿·모바일에서 통과할 수 없는 조건을 요구하게 된다. */
+    <div ref={boxRef} data-region="tradingShell" data-mode={wide ? 'tablet' : 'mobile'} style={{
       height: embedded ? '100%' : '100dvh',
       background: C.bg, color: C.text,
       // 이 통이 스크롤을 갖는다. 안쪽 칸들은 각자 스크롤하지 않는다 —

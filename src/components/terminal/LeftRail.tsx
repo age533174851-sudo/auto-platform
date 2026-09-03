@@ -209,8 +209,36 @@ function Empty({ t }: { t: string }) {
 }
 
 // ── 껍데기 ────────────────────────────────────────────
-function LeftRailInner() {
+//
+// `compact`는 폭이 부족할 때 배치가 고르는 모양이다(64px). 예전에는
+// 좁아져도 같은 내용을 그대로 그려서, 종목명·가격·등락이 전부 잘렸다 —
+// 화면에 "BTC..." "ETH..."만 남았다. **잘라서 숨기는 것은 축약이 아니다.**
+//
+// 좁을 때는 탭 넉 줄과 목록 대신 아이콘 한 줄만 남기고, 자세한 것은
+// 펼쳐서 보게 한다. 무엇을 못 보고 있는지 사용자가 알 수 있어야 한다.
+function LeftRailInner({ compact }: { compact?: boolean }) {
   const [tab, setTab] = useState<Tab>('시장');
+
+  if (compact) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        height: '100%', minWidth: 0, padding: '8px 0', gap: 6,
+      }}>
+        {TABS.map(t => (
+          <button key={t} onClick={() => setTab(t)} title={t}
+            style={{
+              width: 40, height: 40, borderRadius: 8, cursor: 'pointer',
+              background: tab === t ? C.active : 'transparent',
+              border: `1px solid ${tab === t ? C.hair2 : 'transparent'}`,
+              color: tab === t ? C.text : C.faint,
+              fontSize: FS.micro, fontWeight: 700,
+            }}>{t.slice(0, 2)}</button>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
       <div style={{

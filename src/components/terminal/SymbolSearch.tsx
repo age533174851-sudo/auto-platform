@@ -200,14 +200,23 @@ export function SymbolSearch({
         )}
       </div>
 
+      {/* **한국어는 단어 중간에서 끊지 않는다.**
+          예전에는 `1fr auto auto`에 세 번째 칸이 `minWidth:92`였다.
+          레일이 200px일 때 첫 칸에 남는 폭이 40px 남짓이라
+          "종목 · 거래대금"이 "종목 · 거" / "래대금"으로 쪼개졌다 —
+          화면에서 읽을 수 없는 글자가 됐다.
+
+          라벨을 줄이고(정렬 기준은 아래 "거래대금순"에 이미 적혀 있다),
+          keep-all로 단어를 지키고, 넘치면 말줄임으로 끝낸다. */}
       <div style={{
-        display: 'grid', gridTemplateColumns: '1fr auto auto',
-        gap: 10, padding: '0 12px 6px', flexShrink: 0,
+        display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto auto',
+        gap: 8, padding: '0 12px 6px', flexShrink: 0,
         fontSize: FS.micro, color: C.faint,
+        wordBreak: 'keep-all',
       }}>
-        <span>종목 · 거래대금</span>
-        <span style={{ textAlign: 'right' }}>가격</span>
-        <span style={{ textAlign: 'right', minWidth: 92 }}>24h · 펀딩</span>
+        <span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>종목</span>
+        <span style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>가격</span>
+        <span style={{ textAlign: 'right', minWidth: 78, whiteSpace: 'nowrap' }}>24h · 펀딩</span>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderTop: `1px solid ${C.hair}` }}>

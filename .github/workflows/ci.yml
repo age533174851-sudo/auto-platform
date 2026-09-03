@@ -453,6 +453,13 @@ jobs:
       - name: 디자인 토큰 계약 (정본이 하나이고 실제로 쓰이는가)
         run: node scripts/check-design-tokens.mjs
 
+      # 거래화면이 담긴 칸의 폭을 보고 배치를 정하는가. 예전에는 뷰포트로
+      # 정하고 열 폭이 퍼센트라, 앱 탭 안에서 주문판이 226~301px로 눌려
+      # 라벨과 값이 겹쳤다 — 그때도 CI는 전부 초록이었다.
+      # 실제 픽셀 확인은 scripts/probe/ (수동, Playwright 필요).
+      - name: 거래화면 배치 계약 (담긴 칸의 폭 · 중앙/주문 최소폭)
+        run: node scripts/check-trading-layout.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

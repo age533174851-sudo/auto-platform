@@ -80,6 +80,9 @@ import {
   loadLeftMode, loadRightMode, loadRailWidth,
   saveLeftMode, saveRightMode, saveRailWidth,
   sidebarWidthFor, clampRailWidth, railWidthFor,
+} from '@/lib/ui/panelPrefs';
+import { shouldCollapseNewsRail } from '@/lib/ui/tradingLayout';
+import {
   nextLeftMode, nextRightMode, RAIL_DEFAULT,
   type LeftMode, type RightMode,
 } from '@/lib/ui/panelPrefs';
@@ -467,6 +470,8 @@ export default function App() {
      사용자에게는 화면이 한 번 튀는 것으로 보인다. */
   const [leftMode,setLeftMode]   = useState<LeftMode>('expanded');
   const [rightMode,setRightMode] = useState<RightMode>('expanded');
+  /* 자동 접기를 사용자가 되돌렸는가. 되돌렸으면 자동 판단은 물러난다. */
+  const [railUserOpened,setRailUserOpened] = useState(false);
   const [railW,setRailW]         = useState<number>(RAIL_DEFAULT);
   const [viewportW,setViewportW] = useState<number>(1920);
 
@@ -489,10 +494,27 @@ export default function App() {
 
   const sidebarW  = sidebarWidthFor(leftMode, viewportW);
   const railWNow  = clampRailWidth(railW, viewportW, sidebarW);
-  const railCol   = railWidthFor(rightMode, railWNow);
+
+  /* ── 거래 탭에서는 뉴스 레일이 먼저 물러난다 ──
+     공간 우선순위는 중앙 거래/차트 > 주문 > 종목 > 시세·뉴스다.
+     그런데 레일이 300px를 먼저 가져가고 거래화면이 나머지를 나눠 쓰고
+     있었다 — 1664 창에서 주문판이 301px가 된 직접 원인이다.
+
+     **거래 탭일 때만** 판단한다. 다른 화면에서 접으면 이번 작업이
+     건드리지 않기로 한 화면들이 같이 바뀐다. 사용자가 직접 펼치면
+     그 선택이 이긴다 — 자동 판단이 사용자 조작을 덮으면 안 된다. */
+  const railAutoCollapse = tab === 'trading'
+    && rightMode === 'expanded'
+    && !railUserOpened
+    && shouldCollapseNewsRail(viewportW, sidebarW, railWNow);
+  const effRightMode: RightMode = railAutoCollapse ? 'collapsed' : rightMode;
+  const railCol   = railWidthFor(effRightMode, railWNow);
 
   const toggleLeft  = useCallback(()=>{ setLeftMode(m=>{ const n=nextLeftMode(m);  saveLeftMode(n);  return n; }); },[]);
-  const toggleRight = useCallback(()=>{ setRightMode(m=>{ const n=nextRightMode(m); saveRightMode(n); return n; }); },[]);
+  const toggleRight = useCallback(()=>{
+    setRailUserOpened(true);
+    setRightMode(m=>{ const n=nextRightMode(m); saveRightMode(n); return n; });
+  },[]);
   const commitRail  = useCallback((w:number)=>{ setRailW(w); saveRailWidth(w); },[]);
 
   /* ── 오른쪽 레일 뉴스도 서버에서 읽는다 ──
@@ -934,7 +956,7 @@ export default function App() {
         onNav={nav}
       />
       <div suppressHydrationWarning className="aw"
-        data-left={leftMode} data-right={rightMode}
+        data-left={leftMode} data-right={effRightMode}
         style={{background:T.bg,minHeight:'-webkit-fill-available' as any,color:T.txt,
           // 칸 폭은 CSS가 아니라 여기서 정한다. CSS에 숫자를 또 적으면
           // 드래그가 멈추는 자리와 칸이 멈추는 자리가 갈린다.
@@ -1256,7 +1278,7 @@ export default function App() {
             데이터 출처는 이번 단계에서 바꾸지 않았다 — 시세는 그대로
             useLivePrices의 prices다. */}
         <div className="rp" style={{display:'none'}}>
-          {rightMode==='expanded'&&(
+          {effRightMode==='expanded'&&(
             <RailResizer width={railWNow} sidebarW={sidebarW} onResize={setRailW} onCommit={commitRail}/>
           )}
           {/* 토글을 오른쪽 끝에 두면 안 된다.
@@ -1264,8 +1286,8 @@ export default function App() {
               (NotifyHost · position:fixed · z-index 9998), 그 자리에 놓으면
               **버튼이 보이기는 하는데 눌리지 않는다.** 실제로 그 상태였다 —
               클릭이 벨에 먹혔다. 그래서 레일의 왼쪽에 붙인다. */}
-          <div className="rp-toggle-row" style={{display:'flex',alignItems:'center',justifyContent:rightMode==='expanded'?'flex-start':'center',marginBottom:rightMode==='expanded'?6:0}}>
-            <PanelToggle side="right" open={rightMode==='expanded'} onToggle={toggleRight}/>
+          <div className="rp-toggle-row" style={{display:'flex',alignItems:'center',justifyContent:effRightMode==='expanded'?'flex-start':'center',marginBottom:effRightMode==='expanded'?6:0}}>
+            <PanelToggle side="right" open={effRightMode==='expanded'} onToggle={toggleRight}/>
           </div>
           <div className="rp-body">
           <div style={{fontWeight:800,fontSize:13,color:T.txt,marginBottom:10,display:'flex',alignItems:'center',gap:6}}><Radio size={14} strokeWidth={2.2}/> 실시간 시세</div>
