@@ -731,6 +731,16 @@ export default function AutotradeControl() {
   //
   // 무엇을 접고 무엇을 올릴지는 `lib/ui/autoOverview`가 정한다. 여기서
   // 하면 "정상인데 왜 펼쳐졌나"를 아무도 확인할 수 없다.
+  // ── 못 읽은 것과 빈 목록을 가른다 ──
+  //
+  // `schedules`는 읽기 실패 때도 `[]`가 된다(위 642행). 그 `[]`를
+  // `headerEnvOf`에 넣으면 기본값인 TESTNET이 나오고, 화면은 아무것도
+  // 읽지 못한 채로 "자동매매 (테스트넷) TESTNET"이라고 **단정한다.**
+  // 실제로 실전 예약이 켜져 있어도 그렇게 보인다 — 첫 줄이 LIVE인데
+  // 바로 아래 카드가 TESTNET이라고 말하는 화면이 나왔다(실측 캡처).
+  //
+  // 못 읽었으면 환경을 말하지 않는다.
+  const schedulesRead = Array.isArray(data?.schedules);
   const env = headerEnvOf(schedules);
   const checks = healthSummaryOf(health.items);
   const checksExpanded = checksOpen ?? checks.expandByDefault;
@@ -804,13 +814,25 @@ export default function AutotradeControl() {
   return (
     <div style={box}>
       <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
-        <span style={{ color: T.txt, fontWeight: 900, fontSize: 14 }}>{autoTitle(env)}</span>
-        <span style={{
-          background: A(toneColor(ENV_TONE[env]), '18'),
-          color: toneColor(ENV_TONE[env]),
-          border: `1px solid ${A(toneColor(ENV_TONE[env]), '40')}`,
-          borderRadius: 6, padding: '2px 6px', fontSize: 9, fontWeight: 900,
-        }}>{ENV_LABEL[env]}</span>
+        <span style={{ color: T.txt, fontWeight: 900, fontSize: 14 }}>
+          {schedulesRead ? autoTitle(env) : '자동매매'}
+        </span>
+        {/* 못 읽었으면 환경 배지를 그리지 않는다. 없는 사실을 색과 글자로
+            주장하는 자리가 되기 때문이다. */}
+        {schedulesRead ? (
+          <span style={{
+            background: A(toneColor(ENV_TONE[env]), '18'),
+            color: toneColor(ENV_TONE[env]),
+            border: `1px solid ${A(toneColor(ENV_TONE[env]), '40')}`,
+            borderRadius: 6, padding: '2px 6px', fontSize: 9, fontWeight: 900,
+          }}>{ENV_LABEL[env]}</span>
+        ) : (
+          <span style={{
+            background: A(T.muted, '18'), color: T.muted,
+            border: `1px solid ${A(T.muted, '40')}`,
+            borderRadius: 6, padding: '2px 6px', fontSize: 9, fontWeight: 900,
+          }}>확인 못 함</span>
+        )}
       </div>
 
       {/* ── 문제가 있을 때만 뜨는 경고 ── */}

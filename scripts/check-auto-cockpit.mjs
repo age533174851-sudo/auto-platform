@@ -96,6 +96,28 @@ if (!/미리보기 모드/.test(page)) {
   err(`${PAGE}: 로컬 모드 선택의 범위를 밝히지 않습니다 — 실행 환경으로 읽힙니다`);
 }
 
+/* ── ⑤-2 같은 화면의 다른 카드도 환경을 단정하지 않는다 ──────
+   AutotradeControl은 읽기 실패 때도 schedules를 []로 두고, 그것을
+   headerEnvOf에 넣어 기본값 TESTNET을 얻고 있었다. 그래서 아무것도 읽지
+   못한 채 "자동매매 (테스트넷) TESTNET"이라고 단정했고, 첫 줄이 LIVE인데
+   바로 아래 카드가 TESTNET이라고 말하는 화면이 실제로 찍혔다. */
+{
+  const CTL = 'src/components/AutotradeControl.tsx';
+  if (!existsSync(CTL)) err(`${CTL}를 찾지 못했습니다`);
+  else {
+    const ctl = stripJsComments(readFileSync(CTL, 'utf8'));
+    if (!/schedulesRead\s*=\s*Array\.isArray\(/.test(ctl)) {
+      err(`${CTL}: 못 읽은 것과 빈 목록을 가르지 않습니다 — 읽기 실패가 TESTNET이 됩니다`);
+    }
+    if (!/schedulesRead\s*\?\s*autoTitle\(/.test(ctl)) {
+      err(`${CTL}: 못 읽었는데도 환경이 붙은 제목을 씁니다`);
+    }
+    if (!/schedulesRead\s*\?\s*\(/.test(ctl)) {
+      err(`${CTL}: 못 읽었는데도 환경 배지를 그립니다`);
+    }
+  }
+}
+
 /* ── ⑥ 검사기·프로브가 찾을 표식 ─────────────────────────── */
 for (const attr of ['data-region="executionTruth"', 'data-state=', 'data-env=']) {
   if (!page.includes(attr)) err(`${PAGE}: ${attr} 표식이 없습니다 — 상태 검사가 이 줄을 찾지 못합니다`);

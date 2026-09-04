@@ -139,6 +139,30 @@ const snap = page => page.evaluate(() => {
   await ctx.close();
 }
 
+/* ── ⑦ 한 화면이 두 가지 실행환경을 주장하지 않는다 ──
+   실측 캡처에서 첫 줄은 LIVE인데 바로 아래 카드가 "자동매매 (테스트넷)
+   TESTNET"이라고 말했다. 그 카드가 읽기 실패를 빈 목록으로 눕히고
+   기본값 TESTNET을 얻고 있었기 때문이다. 아무것도 못 읽었는데 환경을
+   단정하면, 첫 줄과 서로 다른 말을 하는 화면이 된다. */
+{
+  const { ctx, page } = await open(390, 844, { status: 200, body: { ok: true, schedules: [row({ mode: 'LIVE' })] } });
+  await page.waitForTimeout(2800);
+  const r = await page.evaluate(() => {
+    const t = document.querySelector('[data-region="autoPage"]')?.innerText || '';
+    const hero = document.querySelector('[data-region="executionTruth"]');
+    return {
+      heroEnv: hero?.getAttribute('data-env') || null,
+      // 첫 줄이 LIVE인데 화면 어딘가가 "(테스트넷)"이라고 제목에 적으면 모순이다.
+      claimsTestnetTitle: /자동매매 \(테스트넷\)/.test(t),
+      claimsMockTitle: /자동매매 \(모의\)/.test(t),
+    };
+  });
+  say(r.heroEnv === 'LIVE' && !r.claimsTestnetTitle && !r.claimsMockTitle,
+    '한 화면이 두 실행환경을 주장하지 않는가',
+    `첫 줄=${r.heroEnv} · "(테스트넷)" 제목=${r.claimsTestnetTitle} · "(모의)" 제목=${r.claimsMockTitle}`);
+  await ctx.close();
+}
+
 await browser.close();
 console.log(fails === 0 ? '\n첫 화면 조작 전부 동작' : `\n🚨 ${fails}건 실패`);
 process.exit(fails === 0 ? 0 : 1);
