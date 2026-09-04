@@ -96,6 +96,11 @@ for (const [name, w, h] of VIEWPORTS) {
         top: r ? Math.round(r.top) : null, h: r ? Math.round(r.height) : null,
         inFirstView, overlaps, small,
         bodyOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      // 조상이 overflow-x:hidden이면 넓은 내용이 잘려서 body 넘침으로는
+      // 안 잡힌다. 사용자가 보는 것은 '잘려서 안 보이는 내용'이므로
+      // 뷰포트 오른쪽 밖으로 나간 요소를 따로 센다.
+      escaped: [...document.querySelectorAll('[data-region="autoPage"] *')].filter(vis)
+        .filter(e => e.getBoundingClientRect().right > innerWidth + 2).length,
         // 첫 줄보다 위에 있는 상주 카드가 있는가 (진단이 진실을 밀어냈는가)
         aboveHero: r ? [...document.querySelectorAll('[data-region="autoPage"] > *')].filter(vis)
           .filter(e => e.getBoundingClientRect().bottom <= r.top + 1).length : null,
@@ -108,12 +113,12 @@ for (const [name, w, h] of VIEWPORTS) {
     const expectEnv = stateName === 'ARMED_LIVE' ? 'LIVE'
       : (stateName === 'ARMED_TESTNET' || stateName === 'BLOCKED') ? 'TESTNET' : null;
     const ok = m.found && m.state === expectState && (m.env || null) === expectEnv
-      && m.inFirstView && m.overlaps === 0 && m.small === 0 && m.bodyOverflow === 0
+      && m.inFirstView && m.overlaps === 0 && m.small === 0 && m.bodyOverflow === 0 && m.escaped === 0
       && m.aboveHero === 0;
     if (!ok) fails++;
     all[name] = all[name] || {};
     all[name][stateName] = { ...m, expectState, expectEnv, pass: ok };
-    console.log(`${ok ? '✓' : '✗'} ${name.padEnd(10)} ${stateName.padEnd(14)} state=${m.state} env=${m.env ?? '-'} top=${m.top} 첫화면=${m.inFirstView} 위에=${m.aboveHero} 겹침=${m.overlaps} 작은버튼=${m.small} 넘침=${m.bodyOverflow}`);
+    console.log(`${ok ? '✓' : '✗'} ${name.padEnd(10)} ${stateName.padEnd(14)} state=${m.state} env=${m.env ?? '-'} top=${m.top} 첫화면=${m.inFirstView} 위에=${m.aboveHero} 겹침=${m.overlaps} 작은버튼=${m.small} 넘침=${m.bodyOverflow} 이탈=${m.escaped}`);
     if (stateName === 'ARMED_LIVE' || stateName === 'UNKNOWN' || stateName === 'BLOCKED') {
       await page.screenshot({ path: `${OUT}/head-${name}-${stateName}.png` });
     }
