@@ -141,6 +141,74 @@ export const STRAT_DEFAULTS = {
   sl: 2.5,
 } as const;
 
+/* ── 첫 화면의 한 줄 ──
+   판정은 `lib/ui/autoCockpit`가 한다. 여기서는 그 결과를 색과 글자로
+   옮기기만 한다 — 이 안에서 다시 `enabled`를 세거나 mode를 읽으면
+   판정 주인이 둘이 된다.
+
+   `rows === null`은 **꺼짐이 아니라 모름**이다. 그래서 개수도, 환경
+   배지도 그리지 않는다. */
+function ExecutionTruthHero({ rows, readError, health }: {
+  rows: any[] | null; readError?: string; health?: any[] | null;
+}) {
+  const v = cockpitVerdict(rows, readError, health);
+  const badge = cockpitEnvBadge(v);
+  const c = v.tone === 'live' ? T.red
+    : v.tone === 'bad' ? T.red
+      : v.tone === 'warn' ? T.ylw
+        : v.tone === 'good' ? T.grn : T.muted;
+  return (
+    <div data-region="executionTruth" data-state={v.state} data-env={v.env ?? ''}
+      role="status"
+      style={{
+        background: A(c, '12'), border: `1px solid ${A(c, '45')}`,
+        borderLeft: `4px solid ${c}`, borderRadius: 12,
+        padding: '12px 14px', marginBottom: 12,
+      }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+        <span data-truth="count" style={{ color: c, fontSize: 13, fontWeight: 800, minWidth: 0, overflowWrap: 'anywhere' }}>
+          {v.headline}
+        </span>
+        {badge && (
+          <span style={{
+            flexShrink: 0, background: A(c, '22'), color: c,
+            fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 6,
+          }} data-truth="env">{badge}</span>
+        )}
+      </div>
+      <div data-truth="executable" style={{ color: T.sub, fontSize: 11, lineHeight: 1.5, overflowWrap: 'anywhere' }}>{v.detail}</div>
+      {/* ── 첫 화면이 답해야 하는 나머지 ──
+          대상 · 마지막 판단 · 안전. **없는 것은 적지 않는다** — 못 읽었거나
+          기록이 없으면 그 자리를 0이나 '없음'으로 채우지 않고 비운다. */}
+      {v.targets.length > 0 && (
+        <div data-truth="targets" style={{ color: T.muted, fontSize: 10.5, marginTop: 4, overflowWrap: 'anywhere' }}>
+          대상 {v.targets.join(' · ')}
+        </div>
+      )}
+      {v.lastDecision && (
+        <div data-truth="lastDecision" style={{ color: T.sub, fontSize: 10.5, marginTop: 3, overflowWrap: 'anywhere' }}>
+          마지막 판단 — {v.lastDecision}
+        </div>
+      )}
+      {/* 막힌 이유는 첫 줄 말고도 전부 보여 준다 — 하나만 고치고 나머지에서 또 막히면
+          사용자는 같은 화면을 두 번 헤맨다. */}
+      {v.blockers.slice(0, 4).map((b, i) => (
+        <div key={`${b.where}-${i}`} data-truth="problem" style={{ color: T.red, fontSize: 10.5, marginTop: 3, overflowWrap: 'anywhere' }}>
+          · {b.where ? `${b.where} — ` : ''}{b.why}
+        </div>
+      ))}
+      {v.blockers.length === 0 && (v.state === 'ARMED' || v.state === 'UNCONFIRMED') && (
+        <div data-truth="problem" style={{ color: v.state === 'ARMED' ? T.grn : T.ylw, fontSize: 10.5, marginTop: 3 }}>
+          {v.state === 'ARMED' ? '안전 점검 통과 — 막는 항목 없음' : '안전 점검을 확인하지 못했습니다'}
+        </div>
+      )}
+      {v.nextAction && (
+        <div style={{ color: T.muted, fontSize: 10, marginTop: 5 }}>→ {v.nextAction}</div>
+      )}
+    </div>
+  );
+}
+
 function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void; requireAuth?: (reason: string, action: () => void) => void } = {}) {
   // ── 3단계 정보 구조 ──
   //
@@ -197,8 +265,31 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
      지운다. 실제 성과판은 서버 데이터를 붙일 때 만든다.
 
      실행중 개수만 서버가 답해 준다(`/api/autotrade/schedule`). */
-  const [schedRows,setSchedRows]=useState<any[]|null>(null);
-  const [schedErr,setSchedErr]=useState('');
+  /* ── 읽는 곳은 하나다 ──
+     예전에는 이 화면과 AutotradeControl이 각자 `/api/autotrade/schedule`을
+     불렀다. 판정 함수는 하나여도 **읽은 시점이 둘**이라, 네트워크 타이밍이
+     갈리면 첫 줄과 아래 카드가 서로 다른 상태를 보여 줄 수 있었다.
+     실제로 "첫 줄 LIVE · 아래 TESTNET"이 찍혔다.
+
+     이제 AutotradeControl 한 곳만 읽고, 그 스냅샷을 여기로 올린다.
+     첫 줄과 아래 카드가 **같은 객체**를 보므로 갈릴 수 없다. */
+  const [snap,setSnap]=useState<{rows:any[]|null;err:string;health:any[]|null}>(
+    {rows:null,err:'',health:null});
+  /* **참조가 아니라 의미로 비교한다.**
+     `autotradeHealth()`는 렌더마다 새로 계산되어 매번 새 배열을 준다.
+     참조로 비교하면 값이 하나도 안 바뀌어도 항상 "달라졌다"가 되고,
+     부모가 다시 그리고 → 자식이 다시 그리고 → 또 새 배열이 나온다.
+     실측으로 폭주하지는 않았지만, 안 도는 이유가 계약이 아니라 우연이다. */
+  const sigRef = useRef('');
+  const onSnapshot = useCallback((v:{rows:any[]|null;err:string;health:any[]|null})=>{
+    const sig = snapshotSignature(v.rows, v.err, v.health);
+    if (sig === sigRef.current) return;
+    sigRef.current = sig;
+    setSnap(v);
+  },[]);
+  /* 전체 정지가 **실제로** 무엇을 껐는지 확인하는 읽기.
+     화면 표시의 소유자가 아니다 — 표시는 위 `snap` 하나만 본다.
+     이 읽기를 없애면 "모두 중단됨"을 서버 확인 없이 적게 되므로 남긴다. */
   const loadSchedules = useCallback(async():Promise<{ok:boolean;rows:any[];reason:string}>=>{
     const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
     if(!tok) return {ok:false,rows:[],reason:'로그인이 필요합니다'};
@@ -210,15 +301,12 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       return {ok:true,rows,reason:''};
     }catch(e:any){ return {ok:false,rows:[],reason:String(e?.message||e)}; }
   },[]);
-  useEffect(()=>{
-    let alive=true;
-    (async()=>{
-      const r=await loadSchedules();
-      if(!alive) return;
-      if(r.ok) { setSchedRows(r.rows); setSchedErr(''); } else { setSchedRows(null); setSchedErr(r.reason); }
-    })();
-    return()=>{alive=false;};
-  },[loadSchedules]);
+  /* 다시 읽는 것도 소유자가 한다. 여기서 rows만 갈아끼우면 health가 옛
+     스냅샷으로 남아 첫 줄과 아래 점검이 다시 갈린다. */
+  const reloadRef = useRef<null | (() => Promise<void>)>(null);
+  const onReload = useCallback((fn: () => Promise<void>) => { reloadRef.current = fn; }, []);
+  const schedRows = snap.rows;
+  const schedErr = snap.err;
   // **못 읽었으면 0이라고 적지 않는다.** null은 '모른다'는 뜻이다.
   const runningCount = schedRows===null ? null : stopTargets(schedRows).length;
 
@@ -275,7 +363,6 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       setStopResult(unknownResult(listed.reason));
       return;
     }
-    setSchedRows(listed.rows);
     const targets = stopTargets(listed.rows);
     const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
     const outcomes:StopOutcome[]=[];
@@ -298,12 +385,12 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
     // 말할 근거가 없다.
     const after = await loadSchedules();
     if(after.ok){
-      setSchedRows(after.rows); setSchedErr('');
       setStopResult(verify(outcomes, {state:'read', remaining: stopTargets(after.rows).length}));
     }else{
-      setSchedRows(null); setSchedErr(after.reason);
       setStopResult(verify(outcomes, {state:'unread', reason: after.reason}));
     }
+    // 화면은 소유자가 다시 읽어서 갱신한다.
+    await reloadRef.current?.();
   },[loadSchedules]);
 
   const handleCreateStrat=()=>{
@@ -340,15 +427,33 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
        한 곳(globals.css)에서 지킨다. 버튼마다 minHeight를 손으로 적으면
        스무 곳 중 한 곳이 빠지고, 빠진 것을 아무도 모른다. */
     <div data-region="autoPage">
+      {/* ── 이 화면이 답해야 하는 한 가지 ──
+          "지금 내 돈이 실제로 자동으로 움직이고 있는가?"
+
+          이 판정의 주인은 `lib/ui/autoCockpit` 하나다. 화면은 서버가 준
+          예약 줄(enabled·mode·connectionState·runtime)을 그대로 넘기고
+          그리기만 한다 — 여기서 다시 판단하면 주인이 둘이 된다. */}
+      <ExecutionTruthHero rows={schedRows} readError={schedErr} health={snap.health} />
+
       {/* **실제로 도는 자동매매**를 여기서 켜고 끈다.
           지금까지는 Supabase SQL 편집기에서 INSERT를 쳐야 했고, 그동안
           크론은 돌면서 아무 일도 하지 않았다. AutoStatusBoard보다 위에
           둔다 — 그쪽은 실행기·모의 판의 상태이고, 여기는 '이 전략을
           지금 켤 것인가'라는 다른 질문이다. */}
-      <AutotradeControl />
+      <AutotradeControl onSnapshot={onSnapshot} onReload={onReload} />
 
       <AutoStatusBoard />
-      {/* Exec mode + global stop */}
+      {/* ── 아래 모드 버튼은 '지금 무엇이 도는가'가 아니다 ──
+          이것은 이 화면 안에서 **아래 예시 전략 카드에 적용해 볼 모드**를
+          고르는 입력이다. 실제 실행 환경은 예약마다 서버에 저장된 mode이고,
+          그것은 위 첫 줄이 말한다.
+
+          예전에는 이 토글의 기본값('paper')만 보고 "모의 자동매매 모드 —
+          실제 자금 이동 없음"이라고 단정했다. 실전 예약이 켜져 있어도
+          그렇게 적혔다. */}
+      <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:4}}>
+        미리보기 모드 — 아래 예시 카드에만 적용됩니다
+      </div>
       <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
         <div style={{display:'flex',gap:4,flex:1}}>
           {(['paper','testnet','real'] as ExecMode[]).map(m=>{
@@ -393,11 +498,11 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
         );
       })()}
 
-      {execMode==='paper'&&<div style={{background:A(T.prp,'12'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontSize:11,fontWeight:700}}>모의 자동매매 모드 — 실제 자금 이동 없음 · 수익 보장 없음</div></div>}
+      {execMode==='paper'&&<div style={{background:A(T.prp,'12'),border:`1px solid ${A(T.prp,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.prp,fontSize:11,fontWeight:700}}>미리보기: 모의 — 아래 예시 카드는 주문을 내지 않습니다</div></div>}
 
-      {execMode==='testnet'&&<div style={{background:A(T.ylw,'15'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontSize:11,fontWeight:700}}>테스트넷 자동매매 — 거래소 테스트 서버에 실제 주문 (가짜 자금)</div></div>}
+      {execMode==='testnet'&&<div style={{background:A(T.ylw,'15'),border:`1px solid ${A(T.ylw,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.ylw,fontSize:11,fontWeight:700}}>미리보기: 테스트넷 — 실제 실행 환경은 맨 위 줄이 말합니다</div></div>}
 
-      {execMode==='real'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>⚠️ 실전 자동매매 — 연결된 거래소로 실제 주문 실행 · 원금 손실 위험</div></div>}
+      {execMode==='real'&&<div style={{background:A(T.red,'15'),border:`1px solid ${A(T.red,'30')}`,borderRadius:10,padding:'8px 12px',marginBottom:12}}><div style={{color:T.red,fontSize:11,fontWeight:700}}>미리보기: 실전 — 실제 실행 환경은 맨 위 줄이 말합니다</div></div>}
 
       {/* ── 켜져 있는 예약 ──
           예전에는 여기 넷이 있었다: 실행중 · 총 손익 · 평균 승률 · 총 거래.
@@ -1089,6 +1194,7 @@ import type { ExecutionLog } from '@/lib/autotrade/types';
 import { moneyText, pnlText, qtyText, UNKNOWN_LABEL } from '@/lib/ui/display';
 import { Wallet, ListChecks, Trash2, RefreshCw, AlertCircle, CheckCircle2, MinusCircle, Ban, Clock, BarChart3, TrendingUp as TrendingUpIc, TrendingDown as TrendingDownIc } from 'lucide-react';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
+import { cockpitVerdict, cockpitEnvBadge, snapshotSignature } from '@/lib/ui/autoCockpit';
 
 /** 모의 장부 금액 한 칸. **못 읽은 것은 0이 아니다** */
 const paperMoney = (v: any): string => {

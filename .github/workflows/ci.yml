@@ -466,6 +466,13 @@ jobs:
       - name: 조작 대상 계약 (최소 크기 · 떠 있는 버튼의 자리)
         run: node scripts/check-tap-targets.mjs
 
+      # 자동매매 첫 화면이 "지금 내 돈이 움직이는가"에 거짓으로 답하지
+      # 않는가. 이 질문의 주인이 둘이었다 — 서버 예약을 읽는 쪽과,
+      # useState('paper') 로컬 토글만 보고 "실제 자금 이동 없음"이라고
+      # 단정하는 쪽. 실전 예약이 켜져 있어도 후자가 그렇게 적었다.
+      - name: 자동매매 첫 화면 계약 (판정 하나 · 못 읽음 ≠ 꺼짐)
+        run: node scripts/check-auto-cockpit.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

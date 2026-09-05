@@ -68,7 +68,7 @@ export default function LoginModal({
 
         <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0 14px', position: 'relative' }}>
           <div style={{ width: 40, height: 4, borderRadius: 2, background: T.border }} />
-          <button onClick={onClose} aria-label="닫기" style={{ position: 'absolute', right: 0, top: 0, background: 'none', border: 'none', cursor: 'pointer', padding: 6 }}><X size={20} color={T.muted} /></button>
+          <button onClick={onClose} aria-label="닫기" style={{ position: 'absolute', right: 0, top: 0, background: 'none', border: 'none', cursor: 'pointer', minWidth: 'var(--tap)', minHeight: 'var(--tap)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><X size={20} color={T.muted} /></button>
         </div>
 
         <div style={{ textAlign: 'center', marginBottom: 6 }}>
