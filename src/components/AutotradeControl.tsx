@@ -71,10 +71,21 @@ import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
  * 카드가 각자 `/api/autotrade/schedule`을 부르던 것을 여기 하나로 모았다.
  *
  * 합치지 않은 것: **전체정지의 인증 경로**다. `AutoPage.loadSchedules`와
- * 전체정지 PATCH는 아직 `localStorage.sb_access_token`을 직접 읽는다. 그런데
- * 저장소 전체에서 그 키에 **쓰는 코드는 한 곳도 없다**(읽는 곳 5, 쓰는 곳 0).
- * 즉 그 경로는 실제로는 빈 Bearer로 나가고 있다. 이것은 화면 정리가 아니라
- * 안전 문제이므로 이 PR에 섞지 않고 별도 안전 blocker로 분리했다.
+ * 전체정지 PATCH는 아직 legacy `localStorage.sb_access_token`에 의존한다.
+ * 저장소 안에서 그 키를 쓰는 **production writer는 찾지 못했다**(읽는 곳 5,
+ * 쓰는 곳 0).
+ *
+ * 정상 흐름에서 그 키가 비어 있으면 `loadSchedules()`가 **첫 GET 전에**
+ * 종료하고(`if (!tok) return { ok:false, … }`), 전체정지도 그 결과에서
+ * 멈춘다(`if (!listed.ok) … return`). 따라서 그 경로에서는 **GET도 PATCH도
+ * 전송되지 않는다.**
+ *
+ * 위험은 이것이다 — 표시용 read가 쓰는 canonical Supabase 세션은 유효해도
+ * **서버 측 전체정지 경로가 시작되지 못할 수 있다.** 화면은 예약을 정확히
+ * 그리는데 정지 버튼이 서버에 닿지 못하는 상태가 가능하다.
+ *
+ * 이는 base에도 존재하는 **pre-existing SAFETY BLOCKER**이며, 화면 정리가
+ * 아니라 안전 문제이므로 이 PR에서는 실행 로직을 수정하지 않는다.
  *
  * 여기에 `sb_access_token` 대체 경로를 남겨 두지 않는 이유도 같다. 그것을
  * 남기면 "프로브가 돌아간다"는 이유로 제품 코드가 검증되지 않은 두 번째
