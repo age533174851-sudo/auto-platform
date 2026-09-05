@@ -177,10 +177,34 @@ base는 `[data-region="executionTruth"]` 자체가 없어 80칸 전부 실패다
 쓴다.
 
 **합치지 않은 것은 전체정지의 인증 경로다.** `AutoPage.loadSchedules`와
-전체정지 PATCH는 아직 `localStorage.sb_access_token`을 직접 읽는다. 그런데
-저장소 전체에서 **그 키에 쓰는 코드는 한 곳도 없다**(읽는 곳 5, 쓰는 곳 0).
-즉 그 경로는 실제로는 빈 Bearer로 나간다. 화면 정리가 아니라 안전 문제이므로
-이 PR에 섞지 않고 **별도 안전 blocker**로 분리한다 —
+전체정지 PATCH는 아직 legacy `localStorage.sb_access_token`에 의존한다.
+저장소 안에서 **이 키를 쓰는 production writer는 찾지 못했다**(읽는 곳 5,
+쓰는 곳 0).
+
+이전 판에는 여기에 "그 경로는 실제로는 빈 Bearer로 나간다"고 적혀 있었다.
+**그건 틀린 설명이었다.** 코드는 요청을 보내기 전에 멈춘다:
+
+```ts
+// AutoPage.loadSchedules
+if (!tok) return { ok: false, rows: [], reason: '로그인이 필요합니다' };  // ← GET 전
+
+// AutoPage.handleGlobalStop
+const listed = await loadSchedules();
+if (!listed.ok) { setStopResult(unknownResult(listed.reason)); return; }   // ← PATCH 전
+```
+
+정상 앱 흐름에서 키가 비어 있으면 `loadSchedules()`가 **첫 GET 전에**
+'로그인이 필요합니다'로 종료하고, 전체정지도 PATCH를 시도하지 않는다.
+그러므로 빈 Bearer 요청이 나가는 일은 없다.
+
+**진짜 위험은 다른 데 있다.** 표시용 read가 쓰는 canonical Supabase 세션이
+유효해도, legacy 키가 없으면 **서버 측 전체정지 경로가 실행되지 못할 수
+있다.** 화면은 예약을 정확히 그리는데 정지 버튼은 서버에 닿지 못하는
+상태가 가능하다는 뜻이다.
+
+이건 base `c7e9365b7c3a605b7cc0524cf0f8af01413f5d37`에도 그대로 있는
+**pre-existing** 문제이고, 화면 정리가 아니라 안전 문제이므로 이 PR에서
+고치지 않는다. 별도로 남긴다 —
 `SAFETY BLOCKER — Global Stop authentication`.
 
 ### 프로브용 우회를 제품에 남기지 않는다
