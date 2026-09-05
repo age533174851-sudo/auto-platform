@@ -1,91 +1,4 @@
 {
- "390x844": {
-  "UNKNOWN": {
-   "found": false,
-   "state": null,
-   "env": null,
-   "text": "",
-   "top": null,
-   "h": null,
-   "inFirstView": false,
-   "overlaps": 0,
-   "small": 0,
-   "bodyOverflow": 0,
-   "escaped": 0,
-   "aboveHero": null,
-   "expectState": "UNKNOWN",
-   "expectEnv": null,
-   "pass": false
-  },
-  "OFF": {
-   "found": false,
-   "state": null,
-   "env": null,
-   "text": "",
-   "top": null,
-   "h": null,
-   "inFirstView": false,
-   "overlaps": 0,
-   "small": 0,
-   "bodyOverflow": 0,
-   "escaped": 0,
-   "aboveHero": null,
-   "expectState": "OFF",
-   "expectEnv": null,
-   "pass": false
-  },
-  "ARMED_TESTNET": {
-   "found": false,
-   "state": null,
-   "env": null,
-   "text": "",
-   "top": null,
-   "h": null,
-   "inFirstView": false,
-   "overlaps": 0,
-   "small": 0,
-   "bodyOverflow": 0,
-   "escaped": 0,
-   "aboveHero": null,
-   "expectState": "ARMED",
-   "expectEnv": "TESTNET",
-   "pass": false
-  },
-  "ARMED_LIVE": {
-   "found": false,
-   "state": null,
-   "env": null,
-   "text": "",
-   "top": null,
-   "h": null,
-   "inFirstView": false,
-   "overlaps": 0,
-   "small": 0,
-   "bodyOverflow": 0,
-   "escaped": 0,
-   "aboveHero": null,
-   "expectState": "ARMED",
-   "expectEnv": "LIVE",
-   "pass": false
-  },
-  "BLOCKED": {
-   "found": false,
-   "state": null,
-   "env": null,
-   "text": "",
-   "top": null,
-   "h": null,
-   "inFirstView": false,
-   "overlaps": 0,
-   "small": 0,
-   "bodyOverflow": 0,
-   "escaped": 0,
-   "aboveHero": null,
-   "expectState": "BLOCKED",
-   "expectEnv": "TESTNET",
-   "pass": false
-  }
- },
  "1366x768": {
   "UNKNOWN": {
    "found": false,
@@ -99,9 +12,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -116,9 +42,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -133,9 +72,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -150,9 +106,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -167,9 +174,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -186,9 +278,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -203,9 +308,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -220,9 +338,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -237,9 +372,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -254,9 +440,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -273,9 +544,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -290,9 +574,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -307,9 +604,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -324,9 +638,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -341,9 +706,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -360,9 +810,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -377,9 +840,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -394,9 +870,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -411,9 +904,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -428,9 +972,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -447,9 +1076,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -464,9 +1106,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -481,9 +1136,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -498,9 +1170,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -515,9 +1238,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -534,9 +1342,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -551,9 +1372,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -568,9 +1402,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -585,9 +1436,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 1,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -602,9 +1504,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -621,9 +1608,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -638,9 +1638,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -655,9 +1668,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -672,9 +1702,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -689,9 +1770,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -708,9 +1874,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -725,9 +1904,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -742,9 +1934,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -759,9 +1968,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -776,9 +2036,360 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  }
+ },
+ "390x844": {
+  "UNKNOWN": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNKNOWN",
+   "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "OFF": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "OFF",
+   "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "ARMED_TESTNET": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "ARMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "ARMED_LIVE": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "ARMED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  },
@@ -795,9 +2406,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "UNKNOWN",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "OFF": {
@@ -812,9 +2436,22 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "OFF",
    "expectEnv": null,
+   "needAnswers": [
+    "count",
+    "executable"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_TESTNET": {
@@ -829,9 +2466,26 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "ARMED_LIVE": {
@@ -846,9 +2500,60 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "ARMED",
    "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "LIVE_WRONG_DEST": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "LIVE",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   },
   "BLOCKED": {
@@ -863,9 +2568,94 @@
    "small": 0,
    "bodyOverflow": 0,
    "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
    "aboveHero": null,
    "expectState": "BLOCKED",
    "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "GATE_BLOCKED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "BLOCKED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
+   "pass": false
+  },
+  "UNCONFIRMED": {
+   "found": false,
+   "state": null,
+   "env": null,
+   "text": "",
+   "top": null,
+   "h": null,
+   "inFirstView": false,
+   "overlaps": 0,
+   "small": 0,
+   "bodyOverflow": 0,
+   "escaped": 0,
+   "answers": {
+    "env": false,
+    "count": false,
+    "executable": false,
+    "targets": false,
+    "lastDecision": false,
+    "problem": false
+   },
+   "aboveHero": null,
+   "expectState": "UNCONFIRMED",
+   "expectEnv": "TESTNET",
+   "needAnswers": [
+    "env",
+    "count",
+    "executable",
+    "targets",
+    "lastDecision",
+    "problem"
+   ],
+   "answersOk": false,
    "pass": false
   }
  }
