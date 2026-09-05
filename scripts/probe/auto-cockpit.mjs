@@ -12,6 +12,9 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 
 const PORT = process.argv[2], OUT = process.argv[3] || '/tmp/cockpit';
 const ONLY = process.argv[4];
+// base 캡처를 손으로 이름 바꾸지 않는다 — 같은 스크립트로 재현된다.
+//   SHOT_PREFIX=base node scripts/probe/auto-cockpit.mjs <port> <out>
+const SHOT = process.env.SHOT_PREFIX || 'head';
 const B = `http://localhost:${PORT}`;
 mkdirSync(OUT, { recursive: true });
 
@@ -172,7 +175,7 @@ for (const [name, w, h] of VIEWPORTS) {
     all[name][stateName] = { ...m, expectState, expectEnv, needAnswers, answersOk, pass: ok };
     console.log(`${ok ? '✓' : '✗'} ${name.padEnd(10)} ${stateName.padEnd(14)} state=${m.state} env=${m.env ?? '-'} top=${m.top} 첫화면=${m.inFirstView} 위에=${m.aboveHero} 겹침=${m.overlaps} 작은버튼=${m.small} 넘침=${m.bodyOverflow} 이탈=${m.escaped} 6답=${needAnswers.filter(k=>m.answers?.[k]).length}/${needAnswers.length}`);
     if (['ARMED_LIVE', 'UNKNOWN', 'BLOCKED', 'GATE_BLOCKED', 'UNCONFIRMED', 'LIVE_WRONG_DEST'].includes(stateName)) {
-      await page.screenshot({ path: `${OUT}/head-${name}-${stateName}.png` });
+      await page.screenshot({ path: `${OUT}/${SHOT}-${name}-${stateName}.png` });
     }
     await ctx.close();
   }
