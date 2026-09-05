@@ -14,6 +14,7 @@ import { loadSettings as loadRiskSettings, MODE_LABEL } from '@/lib/risk/store';
 import { Shield, Edit3, ChevronRight } from 'lucide-react';
 import AutoStatusBoard from '../AutoStatusBoard';
 import AutotradeControl from '../AutotradeControl';
+import { probeAuthToken } from '@/lib/auth/authToken';
 import {
   stopTargets, verify, unknownResult, headline as stopHeadline,
   boundaryNote as stopBoundary, isAlarming as stopAlarming,
@@ -291,10 +292,20 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
      화면 표시의 소유자가 아니다 — 표시는 위 `snap` 하나만 본다.
      이 읽기를 없애면 "모두 중단됨"을 서버 확인 없이 적게 되므로 남긴다. */
   const loadSchedules = useCallback(async():Promise<{ok:boolean;rows:any[];reason:string}>=>{
-    const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
-    if(!tok) return {ok:false,rows:[],reason:'로그인이 필요합니다'};
+    // **정본 경로 하나만 쓴다.** 예전에는 여기서 localStorage.sb_access_token을
+    // 읽었는데, 저장소 역사에 그 키를 쓰는 코드가 한 번도 없었다. 값은 늘
+    // 비어 있었고 이 함수는 첫 GET 전에 종료했다 — 즉 **전체정지가 서버에
+    // 닿은 적이 없다.** 표시용 카드는 Supabase 세션을 쓰므로 화면은 예약을
+    // 정확히 그렸고, 그래서 아무도 눈치채지 못했다.
+    //
+    // probeAuthToken은 셋을 구분한다. 안전 경로에서는 이 구분이 중요하다 —
+    // '로그아웃'과 '확인하지 못함'을 같은 문장으로 적으면, 세션이 멀쩡한데
+    // 잠깐 못 읽은 것을 사용자가 로그인 문제로 오해한다.
+    const auth = await probeAuthToken();
+    if(auth===null) return {ok:false,rows:[],reason:'로그인 상태를 확인하지 못했습니다'};
+    if(!auth) return {ok:false,rows:[],reason:'로그인이 필요합니다'};
     try{
-      const r = await fetch('/api/autotrade/schedule',{headers:{Authorization:`Bearer ${tok}`},cache:'no-store'});
+      const r = await fetch('/api/autotrade/schedule',{headers:{Authorization:auth},cache:'no-store'});
       const j = await r.json().catch(()=>null);
       if(!r.ok||!j?.ok) return {ok:false,rows:[],reason:String(j?.message||j?.error||`HTTP ${r.status}`)};
       const rows = Array.isArray(j.schedules)?j.schedules:(Array.isArray(j.items)?j.items:[]);
@@ -364,14 +375,20 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       return;
     }
     const targets = stopTargets(listed.rows);
-    const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
+    // 목록을 읽어낸 그 경로와 **같은 정본**으로 끈다. 읽기와 쓰기가 다른
+    // 인증을 쓰면 "무엇이 도는지는 아는데 끄지는 못하는" 상태가 생긴다.
+    const auth = await probeAuthToken();
+    if(!auth){
+      setStopResult(unknownResult(auth===null?'로그인 상태를 확인하지 못했습니다':'로그인이 필요합니다'));
+      return;
+    }
     const outcomes:StopOutcome[]=[];
     for(const t of targets){
       const label=t.label||t.id;
       try{
         const r=await fetch('/api/autotrade/schedule',{
           method:'PATCH',
-          headers:{'Content-Type':'application/json',Authorization:`Bearer ${tok}`},
+          headers:{'Content-Type':'application/json',Authorization:auth},
           body:JSON.stringify({id:t.id,enabled:false}),
         });
         const j=await r.json().catch(()=>null);

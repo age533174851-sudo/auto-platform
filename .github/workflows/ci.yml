@@ -473,6 +473,13 @@ jobs:
       - name: 자동매매 첫 화면 계약 (판정 하나 · 못 읽음 ≠ 꺼짐)
         run: node scripts/check-auto-cockpit.mjs
 
+      # 전체정지가 서버에 닿는가. 읽기(GET)와 쓰기(PATCH)가 둘 다 아무도
+      # 쓰지 않는 localStorage.sb_access_token으로 인증하고 있었다 — 값이
+      # 늘 비어 요청 전에 종료했고, 버튼을 눌러도 GET 0회 PATCH 0회였다.
+      # 표시용 카드는 정본 세션을 써서 화면만 멀쩡했다.
+      - name: 전체정지 인증 (읽기와 쓰기가 같은 정본 경로)
+        run: node scripts/check-global-stop-auth.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 
