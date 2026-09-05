@@ -61,6 +61,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 실행 계약 검사기가 **이전 커밋과 비교**한다. 얕게 받으면
+          # base를 못 읽고, 그러면 '값은 바뀌었는데 버전은 그대로'를
+          # 잡지 못한다 — 검사기가 있는데 아무것도 안 막는 상태가 된다.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -487,6 +492,12 @@ jobs:
       # 홈 지갑은 로그인한 사용자에게 로그인하라고 적었다.
       - name: 인증 정본 하나 (legacy 키를 읽지 않는다)
         run: node scripts/check-legacy-auth-key.mjs
+
+      # 화면에서 고른 실행 프로필이 실제 주문 경로에서 같은 의미인가.
+      # 1A에서는 계약만 만들고 실행 의미는 아직 바꾸지 않으므로, 계약을
+      # 가진 예약이 기존 방식으로 실행되지 않는지(dormant)까지 본다.
+      - name: 실행 프로필 계약 (세 축 · fallback 없음 · dormant)
+        run: node scripts/check-execution-profile.mjs
 
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs

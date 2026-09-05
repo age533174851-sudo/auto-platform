@@ -28,6 +28,7 @@
 // 명세에 적어 두고 여기서 읽는다.
 
 import { resolveStrategy, type StrategySpec } from './registry';
+import { resolveExecutionProfile, isExecutionResolveError } from '../execution/profile';
 
 export interface RunRequestInput {
   strategyId: any;
@@ -47,6 +48,16 @@ export interface RunRequestInput {
   idempotencyKey?: any;
   /** 주문을 내지 않고 판정만 한다 */
   checkOnly?: boolean;
+  /**
+   * 실행 프로필 선택 — **세 축이 한 덩어리다.**
+   *
+   * 세 칸이 모두 비면 프로필을 쓰지 않는 기존 예약이고, 그때는 본문에
+   * 이 키들이 **아예 붙지 않는다.** `null`로라도 넣으면 기존 요청의
+   * 바이트가 달라지고, "기존 동작 그대로"를 값으로 증명할 수 없게 된다.
+   */
+  executionProfileId?: any;
+  executionPresetId?: any;
+  executionContractVersion?: any;
 }
 
 export interface RunRequest {
@@ -92,6 +103,22 @@ export function strategyRunRequest(i: RunRequestInput): RunRequest {
     riskPct: num(i.riskPct),
     marginPct: num(i.marginPct),
   };
+  // 실행 프로필. **해석에 성공했을 때만** 본문에 붙인다.
+  //
+  // 반쪽 선택·모르는 값·버전 불일치는 여기서 주소를 만들지 않는다 —
+  // 주소가 없으면 부를 수 없고, 그게 이 함수가 원래 하는 일이다.
+  // 셋 다 비어 있으면 키를 붙이지 않는다: 기존 요청은 바이트까지 그대로다.
+  const ep = resolveExecutionProfile(
+    i.executionProfileId, i.executionPresetId, i.executionContractVersion);
+  if (isExecutionResolveError(ep)) {
+    return { ok: false, code: ep.code, message: ep.message, route: null, body: null, spec };
+  }
+  if (ep.kind === 'contract' && ep.contract) {
+    body.executionProfileId = ep.contract.profileId;
+    body.executionPresetId = ep.contract.presetId;
+    body.executionContractVersion = ep.contract.contractVersion;
+  }
+
   if (i.userId != null && String(i.userId) !== '') body.userId = String(i.userId);
   if (i.idempotencyKey != null) body.idempotencyKey = i.idempotencyKey;
   if (i.checkOnly) body[spec.checkFlag] = true;
