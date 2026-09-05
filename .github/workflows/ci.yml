@@ -480,6 +480,14 @@ jobs:
       - name: 전체정지 인증 (읽기와 쓰기가 같은 정본 경로)
         run: node scripts/check-global-stop-auth.mjs
 
+      # 인증 정본이 하나인가. 화면 네 곳이 아무도 쓰지 않는
+      # localStorage.sb_access_token을 읽어 헤더를 만들고 있었다. 값이
+      # 안 채워지니 요청 전에 종료했고, 자리마다 다르게 나빴다 — 전체정지는
+      # 서버에 못 닿고(#242), 홈 자동매매 카드는 영구히 '읽는 중…',
+      # 홈 지갑은 로그인한 사용자에게 로그인하라고 적었다.
+      - name: 인증 정본 하나 (legacy 키를 읽지 않는다)
+        run: node scripts/check-legacy-auth-key.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 
