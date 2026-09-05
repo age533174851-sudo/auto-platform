@@ -32,7 +32,7 @@ const src = stripJsComments(raw);
 
 /* ── ① 아무도 쓰지 않는 키로 인증하지 않는다 ────────────── */
 if (/sb_access_token/.test(src)) {
-  err(`${PAGE}: 전체정지가 legacy sb_access_token으로 인증합니다 — 그 키를 쓰는 코드가 저장소에 없어 요청이 서버에 닿지 않습니다`);
+  err(`${PAGE}: 전체정지가 legacy sb_access_token으로 인증합니다 — 저장소 역사에서 production writer를 찾지 못한 키라, 정상 흐름에서는 채워지지 않아 요청이 서버에 닿지 못합니다`);
 }
 
 /* ── ② 정본 경로를 쓴다 ─────────────────────────────────── */
@@ -64,6 +64,37 @@ function authVarOf(body) {
  * 검사기를 초록으로 통과했다 — 이번 버그가 바로 "요청이 인증 경로에
  * 닿는가"이므로 그 구멍은 이 검사기를 무의미하게 만든다.
  */
+/**
+ * `{...}`에서 균형 잡힌 중괄호로 한 덩어리를 잘라 온다.
+ * `start`는 여는 중괄호의 위치여야 한다.
+ */
+function braceBlock(src, start) {
+  if (src[start] !== '{') return '';
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+  }
+  return '';
+}
+
+/**
+ * 옵션 객체 안의 **`headers` 객체만** 잘라 온다.
+ *
+ * 옵션 전체에서 `Authorization: auth` 문자열만 찾으면, 실제 헤더 밖에 있어도
+ * 통과한다. 예를 들어 아래는 HTTP Authorization 헤더가 없는데도 초록이었다:
+ *
+ *   fetch(url, { headers: {}, meta: { Authorization: auth } })
+ *
+ * 이 검사기의 목적이 정확히 "토큰이 **실제 요청 헤더에** 결합됐는가"이므로,
+ * headers 안쪽만 본다.
+ */
+function headersOf(options) {
+  const m = /(^|[\s,{])headers\s*:\s*\{/.exec(options);
+  if (!m) return null;
+  return braceBlock(options, options.indexOf('{', m.index + m[0].length - 1));
+}
+
 function scheduleCallOptions(body) {
   const out = [];
   const re = /fetch\(\s*'\/api\/autotrade\/schedule'/g;
@@ -110,12 +141,18 @@ for (const [fn, what, needMethod] of [
       err(`${PAGE}: ${fn}의 ${i + 1}번째 schedule 호출에 옵션이 없습니다 — 인증 헤더가 붙지 않습니다`);
       return;
     }
+    // **headers 안쪽만** 본다. 옵션 어딘가에 있는 것으로는 헤더가 되지 않는다.
+    const h = headersOf(o);
+    if (h === null) {
+      err(`${PAGE}: ${fn}의 ${i + 1}번째 schedule 호출에 headers가 없습니다 — 인증 헤더가 붙지 않습니다`);
+      return;
+    }
     // 얻은 그 변수여야 한다. ''나 다른 변수를 넣으면 서버가 401을 준다.
-    if (!new RegExp(`Authorization\\s*:\\s*${v}\\b`).test(o)) {
-      err(`${PAGE}: ${fn}의 ${i + 1}번째 schedule 호출이 Authorization에 ${v}를 넣지 않습니다 — 토큰을 얻어 놓고 쓰지 않으면 요청은 서버에 닿지 못합니다`);
+    if (!new RegExp(`Authorization\\s*:\\s*${v}\\b`).test(h)) {
+      err(`${PAGE}: ${fn}의 ${i + 1}번째 schedule 호출이 headers 안에서 Authorization에 ${v}를 넣지 않습니다 — 토큰을 얻어 놓고 헤더에 싣지 않으면 요청은 서버에 닿지 못합니다`);
     }
     // `Bearer ${...}`로 다시 감싸면 정본 값이 이미 'Bearer …'라 두 번 붙는다.
-    if (/Authorization\s*:\s*`Bearer \$\{/.test(o)) {
+    if (/Authorization\s*:\s*`Bearer \$\{/.test(h)) {
       err(`${PAGE}: ${fn}이 Bearer를 한 번 더 붙입니다 — 정본 값에 이미 들어 있습니다`);
     }
   });
