@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { probeAuthToken } from '@/lib/auth/authToken';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, ECON_EVENTS } from '@/lib/constants';
 import {
@@ -79,13 +80,22 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   // 다른 말을 하게 된다. **못 읽으면 '확인 못 함'이지 '실행중'이 아니다.**
   const [autoPlan,setAutoPlan]=useState<any>(null);
   const [autoErr,setAutoErr]=useState(false);
+  /** 확실히 로그아웃. '확인 못 함'과 다른 말이므로 따로 둔다 */
+  const [autoOut,setAutoOut]=useState(false);
   useEffect(()=>{
     let alive=true;
     (async()=>{
       try{
-        const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
-        if(!tok) return;
-        const r = await fetch('/api/autotrade/schedule',{headers:{Authorization:`Bearer ${tok}`}});
+        // 예전에는 legacy `localStorage.sb_access_token`을 읽고, 비면
+        // **아무 상태도 세우지 않고 그냥 반환**했다. 그러면 autoPlan도
+        // autoErr도 그대로라 라벨이 영구히 '읽는 중…'에 멈춘다 — 실패를
+        // 실패로 적지 않고 아직 읽는 중인 척한다. 정본 경로로 바꾸면서
+        // 그 조용한 반환도 없앤다.
+        const auth = await probeAuthToken();
+        if(!alive) return;
+        if(auth===null){ setAutoErr(true); return; }   // 확인하지 못했다
+        if(!auth){ setAutoOut(true); return; }         // 확실히 로그아웃
+        const r = await fetch('/api/autotrade/schedule',{headers:{Authorization:auth}});
         const j = await r.json();
         if(!alive) return;
         if(j?.ok && j.plan) setAutoPlan(j.plan); else setAutoErr(true);
@@ -96,8 +106,10 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   const autoOn = autoPlan?.code === 'HEALTHY';
   const autoLabel = autoPlan
     ? (autoPlan.code==='IDLE' ? '정지' : autoPlan.code==='HEALTHY' ? '실행중' : '확인 필요')
-    : (autoErr ? '확인 못 함' : '읽는 중…');
-  const autoNote = autoPlan?.headline ?? (autoErr ? '자동매매 상태를 읽지 못했습니다' : '');
+    : (autoOut ? '로그인 필요' : autoErr ? '확인 못 함' : '읽는 중…');
+  const autoNote = autoPlan?.headline
+    ?? (autoOut ? '로그인하면 자동매매 상태를 읽습니다'
+      : autoErr ? '자동매매 상태를 읽지 못했습니다' : '');
 
   /* ── 뉴스는 서버에서 읽는다 ──
      예전에는 `MOCK_NEWS` 상수를 그대로 그리면서 제목을 '최신 뉴스'라고
@@ -149,9 +161,14 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
     let alive=true;
     (async()=>{
       try{
-        const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
-        if(!tok){ if(alive) setWalletErr('로그인하면 실제 자산을 읽습니다'); return; }
-        const r = await fetch('/api/wallets/overview',{headers:{Authorization:`Bearer ${tok}`}});
+        // 정본 경로 하나만 쓴다. '로그인 안 됨'과 '확인 못 함'을 가른다 —
+        // 세션이 멀쩡한데 잠깐 못 읽은 것을 "로그인하세요"라고 적으면,
+        // 이미 로그인한 사용자가 자기 계정을 의심한다.
+        const auth = await probeAuthToken();
+        if(!alive) return;
+        if(auth===null){ setWalletErr('로그인 상태를 확인하지 못했습니다'); return; }
+        if(!auth){ setWalletErr('로그인하면 실제 자산을 읽습니다'); return; }
+        const r = await fetch('/api/wallets/overview',{headers:{Authorization:auth}});
         const j = await r.json();
         if(!alive) return;
         if(j?.ok) setWallet(j);
