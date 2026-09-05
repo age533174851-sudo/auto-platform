@@ -50,7 +50,43 @@ import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 import SmokeTestPanel from './SmokeTestPanel';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 
-export default function AutotradeControl() {
+/**
+ * @param onSnapshot 이 화면이 읽은 **그 스냅샷**을 위로 올린다.
+ *
+ * 첫 줄(ExecutionTruthHero)과 이 카드가 각자 `/api/autotrade/schedule`을
+ * 부르고 있었다. 판정 함수는 하나여도 **읽은 시점이 둘**이라, 네트워크
+ * 타이밍이 갈리면 첫 줄과 아래 카드가 서로 다른 상태를 보여 줄 수 있었다.
+ * 실제로 "첫 줄 LIVE · 아래 TESTNET"이 찍혔다.
+ *
+ * 이제 읽는 곳은 여기 하나다. 첫 줄은 그 결과를 받아서 그린다 —
+ * 같은 객체를 보므로 두 곳이 갈릴 수 없다.
+ */
+/**
+ * 이 앱에는 인증 토큰을 얻는 길이 둘이다.
+ *
+ *   · `lib/auth/authToken` — Supabase 세션(정본에 가깝다)
+ *   · `localStorage.sb_access_token` — WalletPage·OpsPage·HomePage가 쓰는 관례
+ *
+ * 예약 목록을 **두 곳에서 읽던 시절, 그 둘이 서로 다른 길을 썼다.** 그래서
+ * 한쪽은 권한이 있고 다른 쪽은 없는 상태가 가능했고, 첫 줄과 아래 카드가
+ * 다른 말을 하는 원인 중 하나였다.
+ *
+ * 읽는 곳을 하나로 합쳤으니 인증 경로도 합친다. 세션이 비었을 때만 관례
+ * 키를 본다 — 세션을 덮지 않는다. 서버가 토큰을 검증하므로 낡은 값이면
+ * 401이 오고, 그것은 '확인 못 함'으로 그려진다(꺼짐이 아니다).
+ */
+function localStorageToken(): string {
+  try {
+    const t = typeof window !== 'undefined' ? window.localStorage.getItem('sb_access_token') : '';
+    return t ? `Bearer ${t}` : '';
+  } catch { return ''; }
+}
+
+export default function AutotradeControl({ onSnapshot, onReload }: {
+  onSnapshot?: (s: { rows: any[] | null; err: string; health: any[] | null }) => void;
+  /** 다시 읽는 방법을 위로 준다. 전체 정지 뒤 **읽는 곳 하나**가 갱신되게. */
+  onReload?: (fn: () => Promise<void>) => void;
+} = {}) {
   // 토큰을 **직접 지켜본다.** 한 번 읽고 마는 화면은 접근 토큰이 만료되면
   // (1시간) 그때부터 조용히 401을 받고, 사용자에게는 '자동매매가 꺼진 것'
   // 으로 보인다. watchAuthToken이 갱신을 따라간다.
@@ -59,7 +95,7 @@ export default function AutotradeControl() {
     let stop: (() => void) | null = null;
     (async () => {
       const { watchAuthToken } = await import('@/lib/auth/authToken');
-      stop = watchAuthToken(t => setAuth(t));
+      stop = watchAuthToken(t => setAuth(t || localStorageToken()));
     })();
     return () => { if (stop) stop(); };
   }, []);
@@ -129,6 +165,10 @@ export default function AutotradeControl() {
   const [checksOpen, setChecksOpen] = useState<boolean | null>(null);
   /** 예약 전체 목록은 기본으로 접는다 — 기본 화면에는 요약 한 줄이면 된다 */
   const [schedOpen, setSchedOpen] = useState(false);
+  /** 새 예약 설정 폼. **기본은 접힘** — 첫 화면은 '지금 무엇이 도는가'다 */
+  const [createOpen, setCreateOpen] = useState(false);
+  /** 예약 줄마다 자세히 펼침. **기본은 접힘** — 한 줄이 열 줄이 되면 목록이 아니다 */
+  const [rowOpen, setRowOpen] = useState<string>('');
   /** 취소한 예약은 기본으로 접는다 — 기본 화면에는 살아 있는 것만 */
   const [cancelOpen, setCancelOpen] = useState(false);
   /** [모두 자동 대조]가 지금까지 끝낸 단계들 */
@@ -185,6 +225,7 @@ export default function AutotradeControl() {
   }, [auth, connId, symbol]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { onReload?.(load); }, [onReload, load]);
 
   // ── 앱 타이머 ──
   //
@@ -741,6 +782,16 @@ export default function AutotradeControl() {
   //
   // 못 읽었으면 환경을 말하지 않는다.
   const schedulesRead = Array.isArray(data?.schedules);
+  // 읽은 스냅샷을 위로 올린다. **여기가 유일한 읽기 지점이다.**
+  useEffect(() => {
+    if (!onSnapshot) return;
+    onSnapshot({
+      rows: schedulesRead ? schedules : null,
+      err: schedulesRead ? '' : (err || ''),
+      health: health?.items ?? null,
+    });
+  }, [onSnapshot, schedulesRead, schedules, err, health]);
+
   const env = headerEnvOf(schedules);
   const checks = healthSummaryOf(health.items);
   const checksExpanded = checksOpen ?? checks.expandByDefault;
@@ -998,7 +1049,18 @@ export default function AutotradeControl() {
                     color: String(s.mode).startsWith('LIVE') ? T.red : T.muted,
                   }}>{s.mode}</span>
                 </div>
-                <div style={{ color: T.muted, fontSize: 10, marginTop: 2 }}>
+                {/* ── 2행: 마지막 판단 ──
+                    이 목록에서 사용자가 가장 알고 싶은 한 줄이다. 예전에는
+                    연결·위험%·상한·다음 실행 여러 줄 아래에 묻혀 있었다. */}
+                {s.runtime?.reason && (
+                  <div style={{
+                    color: s.runtime.tone === 'bad' ? T.red : s.runtime.tone === 'warn' ? T.ylw : T.sub,
+                    fontSize: 11, marginTop: 2, lineHeight: 1.4,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }} title={s.runtime.reason}>{s.runtime.reason}</div>
+                )}
+                {/* ── 3행: 나머지는 한 줄로 ── */}
+                <div style={{ color: T.muted, fontSize: 10, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {/* 서버가 판정한 상태를 그대로 쓴다. 화면이 다시 판단하면
                       규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다. */}
                   {s.connectionState === 'OK' ? '연결 있음'
@@ -1026,7 +1088,8 @@ export default function AutotradeControl() {
                       {(runtimeLabels as any)?.[s.runtime.state] || s.runtime.state}
                     </span>
                     <span style={{ color: T.muted, marginLeft: 6, overflowWrap: 'anywhere' }}>
-                      {s.runtime.reason}
+                      {/* 사유는 위 2행에 이미 승격했다. 여기서 또 적으면
+                          같은 문장이 두 번 나온다. */}
                     </span>
                   </div>
                 )}
@@ -1082,6 +1145,7 @@ export default function AutotradeControl() {
                         color: plan.state === 'FIRST_CHECK_RUNNING' ? T.ylw : T.muted,
                         fontSize: 10, fontWeight: 700,
                       }}>{plan.summary}</div>
+                      {rowOpen === s.id && (
                       <div style={{ marginTop: 3, display: 'grid', gap: 1 }}>
                         {nextRunLines(input, plan).map(l => (
                           <div key={l.label} style={{
@@ -1100,6 +1164,7 @@ export default function AutotradeControl() {
                           </div>
                         ))}
                       </div>
+                      )}
                     </div>
                   );
                 })()}
@@ -1118,17 +1183,35 @@ export default function AutotradeControl() {
                 {/* **끄기와 취소는 다르다.** 끄기는 잠깐 멈추는 것이고
                     취소는 이 예약을 목록에서 내리는 것이다. 예전에는
                     삭제가 곧 끄기여서 둘이 구분되지 않았다. */}
-                <button onClick={() => cancelSchedule(s)} disabled={busy} aria-label={`${s.symbol} 예약 취소`}
+                {/* ── 자세히 ──
+                    다음 평가 상세·취소는 여기 안으로 내린다. 목록에서 매 줄이
+                    열 줄이면 목록이 아니다. */}
+                <button onClick={() => setRowOpen(v => v === s.id ? '' : s.id)}
+                  aria-expanded={rowOpen === s.id} aria-label={`${s.symbol} 자세히`}
                   style={{
-                    minHeight: MIN_CONTROL_TARGET, padding: '0 8px', borderRadius: 6,
-                    cursor: busy ? 'default' : 'pointer',
+                    minHeight: MIN_CONTROL_TARGET, minWidth: MIN_CONTROL_TARGET,
+                    padding: '0 8px', borderRadius: 6, cursor: 'pointer',
                     background: 'transparent', color: T.muted,
-                    border: `1px solid ${T.border}`, fontSize: 9.5, fontWeight: 700,
-                  }}>예약 취소</button>
-                {s.enabled && (
-                  <span style={{ color: T.muted, fontSize: 8.5, textAlign: 'right', maxWidth: 150, lineHeight: 1.45 }}>
-                    끄면 {stopNote}
-                  </span>
+                    border: `1px solid ${T.border}`, fontSize: 10, fontWeight: 700,
+                  }}>{rowOpen === s.id ? '접기' : '자세히'}</button>
+                {rowOpen === s.id && (
+                  <>
+                    {/* **끄기와 취소는 다르다.** 끄기는 잠깐 멈추는 것이고
+                        취소는 이 예약을 목록에서 내리는 것이다. 주행동이
+                        아니므로 자세히 안에 둔다. */}
+                    <button onClick={() => cancelSchedule(s)} disabled={busy} aria-label={`${s.symbol} 예약 취소`}
+                      style={{
+                        minHeight: MIN_CONTROL_TARGET, padding: '0 8px', borderRadius: 6,
+                        cursor: busy ? 'default' : 'pointer',
+                        background: 'transparent', color: T.muted,
+                        border: `1px solid ${T.border}`, fontSize: 9.5, fontWeight: 700,
+                      }}>예약 취소</button>
+                    {s.enabled && (
+                      <span style={{ color: T.muted, fontSize: 8.5, textAlign: 'right', maxWidth: 150, lineHeight: 1.45 }}>
+                        끄면 {stopNote}
+                      </span>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -1182,6 +1265,26 @@ export default function AutotradeControl() {
           )}
         </div>
       )}
+
+      {/* ── 새 예약 설정은 접어 둔다 ──
+          이 폼은 650줄이 넘는다. 예약을 새로 만드는 것은 가끔 하는 일인데,
+          매번 첫 화면에서 그 길이를 스크롤해야 했다. 그래서 "지금 무엇이
+          도는가"가 설정 아래로 밀렸다.
+
+          기능은 그대로 두고 **여는 방식만** 바꾼다. 서버로 나가는 값도,
+          저장 의미도 건드리지 않는다. */}
+      <button onClick={() => setCreateOpen(v => !v)}
+        aria-expanded={createOpen}
+        style={{
+          width: '100%', minHeight: MIN_CONTROL_TARGET, marginTop: 4,
+          background: createOpen ? T.alt : A(T.acl, '12'),
+          color: createOpen ? T.muted : T.acl,
+          border: `1px solid ${createOpen ? T.border : A(T.acl, '35')}`,
+          borderRadius: 10, fontSize: 12, fontWeight: 800, cursor: 'pointer',
+        }}>
+        {createOpen ? '설정 접기 ▲' : '+ 새 자동매매 등록'}
+      </button>
+      {createOpen && (<>
 
       {/* 새로 켜기 */}
       <div style={{ display: 'grid', gap: 7 }}>
@@ -1833,6 +1936,8 @@ export default function AutotradeControl() {
           opacity: busy || !connId || ladder.blocked || !tierCheck.ok ? .5 : 1,
         }}>{busy ? '저장 중…' : `자동매매 켜기 (${live ? '실전 · 진짜 돈' : '테스트넷'})`}</button>
       </div>
+      </>)}
+
 
       {/* 실제 실행 기록 — **설정이 아니라 일어난 일**이다 */}
       <div style={{ marginTop: 14, borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>

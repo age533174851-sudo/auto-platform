@@ -49,7 +49,16 @@ export type CockpitState =
   | 'OFF'
   /** 켜진 예약이 있지만 지금은 주문이 나갈 수 없다 */
   | 'BLOCKED'
-  /** 켜진 예약이 있고 막힌 것이 없다 — 조건이 맞으면 주문이 나간다 */
+  /**
+   * 켜져 있는데 **주문이 나갈 수 있는지 확인하지 못했다.**
+   *
+   * 예약 줄만 보면 멀쩡한데 전역 관문(자동 실행 열쇠·크론 열쇠·실전 잠금
+   * 해제·연결 목적지·실행 기록) 중 확인 못 한 것이 있는 상태다. 이것을
+   * ARMED로 올리면 "실행 가능"이라고 적어 놓고 아래 안전 점검에는
+   * "확인 못 함"이 뜨는 화면이 된다 — 한 화면이 서로 다른 말을 한다.
+   */
+  | 'UNCONFIRMED'
+  /** 켜진 예약이 있고, 줄도 전역 관문도 전부 통과했다 */
   | 'ARMED';
 
 export interface CockpitBlocker {
@@ -68,6 +77,10 @@ export interface CockpitVerdict {
   /** 머리말 아래 한 줄. 무엇을 근거로 그렇게 말하는지 */
   detail: string;
   blockers: CockpitBlocker[];
+  /** 어떤 종목에 걸려 있는가. 첫 화면이 대상을 말해야 한다 */
+  targets: string[];
+  /** 마지막 판단 한 줄. 없으면 null — 없는 것을 '거래 없음'으로 적지 않는다 */
+  lastDecision: string | null;
   /** 켜진 예약 수. **모르면 null** */
   activeCount: number | null;
   /** 그중 실전. **모르면 null** */
@@ -103,10 +116,15 @@ function blockerOf(row: any): string | null {
  * @param rows `/api/autotrade/schedule`의 줄들. **못 읽었으면 `null`을 넘긴다.**
  *             빈 배열(`[]`)은 "읽었고 없다"는 **다른 뜻**이다.
  * @param readError 못 읽은 이유(있으면 화면에 그대로 보여 준다)
+ * @param health `autotradeHealth()`가 만든 항목들. **전역 관문**이다 —
+ *        자동 실행 열쇠·크론 열쇠·실전 잠금·연결 목적지·실행 기록 등.
+ *        여기서 다시 판단하지 않고 그 결과를 그대로 쓴다.
+ *        **주지 않으면 확인 못 한 것으로 본다**(ARMED로 올리지 않는다).
  */
 export function cockpitVerdict(
   rows: any[] | null | undefined,
   readError?: string | null,
+  health?: Array<{ id?: string; label?: string; state?: string }> | null,
 ): CockpitVerdict {
   // ── 못 읽었다 ──
   // 여기서 0이나 '꺼짐'으로 눕히면, 실제로 돌고 있는 자동매매를 사용자가
@@ -116,7 +134,8 @@ export function cockpitVerdict(
       state: 'UNKNOWN', env: null, tone: 'muted',
       headline: '자동매매 상태를 확인하지 못했습니다',
       detail: s(readError) || '예약 목록을 읽지 못했습니다 — 꺼져 있다는 뜻이 아닙니다',
-      blockers: [], activeCount: null, liveCount: null,
+      blockers: [], targets: [], lastDecision: null,
+      activeCount: null, liveCount: null,
       nextAction: '새로고침하거나 로그인 상태를 확인하세요',
     };
   }
@@ -131,14 +150,32 @@ export function cockpitVerdict(
       detail: rows.length === 0
         ? '등록된 예약이 없습니다'
         : `등록된 예약 ${rows.length}개가 모두 꺼져 있습니다`,
-      blockers: [], activeCount: 0,
-      liveCount: 0,
+      blockers: [], targets: [], lastDecision: null,
+      activeCount: 0, liveCount: 0,
       nextAction: '아래에서 종목·연결을 고르고 자동매매를 켜세요',
     };
   }
 
   const env = headerEnvOf(rows);
   const liveCount = on.filter(r => envOf(r?.mode) === 'LIVE').length;
+  const targets = Array.from(new Set(on.map(r => s(r?.symbol)).filter(Boolean)));
+
+  // 마지막 판단 — 가장 최근에 평가된 켜진 예약 하나.
+  // **없으면 null이다.** '거래 없음'으로 적지 않는다.
+  const lastDecision = (() => {
+    let best: any = null; let bestAt = -Infinity;
+    for (const r of on) {
+      const at = Number(r?.runtime?.lastEvaluationAtMs);
+      if (Number.isFinite(at) && at > bestAt) { bestAt = at; best = r; }
+    }
+    const src = best ?? on[0];
+    const reason = s(src?.runtime?.reason).trim();
+    const state = s(src?.runtime?.state).trim();
+    if (!reason && !state) return null;
+    const where = s(src?.symbol);
+    const body = reason || state;
+    return where ? `${where} — ${body}` : body;
+  })();
 
   const blockers: CockpitBlocker[] = [];
   for (const r of on) {
@@ -146,39 +183,69 @@ export function cockpitVerdict(
     if (why) blockers.push({ where: s(r?.symbol), why });
   }
 
+  // ── 전역 관문 ──
+  //
+  // 예약 줄이 멀쩡해도 자동 실행 열쇠가 없으면 크론이 진입 엔진을 부르지
+  // 못한다. 그 판정은 이미 `autotradeHealth()`에 있으므로 **여기서 다시
+  // 만들지 않고 결과를 읽는다.** 복제하면 위 첫 줄과 아래 안전 점검이
+  // 언젠가 서로 다른 말을 한다.
+  const gates = Array.isArray(health) ? health : null;
+  const gateBad = (gates ?? []).filter(h => h?.state === 'bad');
+  const gateUnknown = (gates ?? []).filter(h => h?.state === 'unknown');
+  for (const g of gateBad) {
+    blockers.push({ where: '', why: s(g?.label) || s(g?.id) || '안전 점검 항목' });
+  }
+
   const envWord = env === 'LIVE' ? '실전' : env === 'MOCK' ? '모의' : '테스트넷';
+  const base = { env, targets, lastDecision, activeCount: on.length, liveCount };
 
   // ── 켜져 있는데 막혔다 ──
   // **'실행중'이라고 쓰지 않는다.** 켜짐과 나갈 수 있음은 다른 사실이다.
   if (blockers.length > 0) {
-    const allBlocked = blockers.length === on.length;
+    const rowBlocked = blockers.length - gateBad.length;
     return {
-      state: 'BLOCKED',
-      env, tone: 'bad',
-      headline: allBlocked
-        ? `자동매매가 켜져 있지만 지금은 주문이 나가지 않습니다`
-        : `자동매매 ${on.length}개 중 ${blockers.length}개가 막혀 있습니다`,
+      state: 'BLOCKED', tone: 'bad', ...base,
+      headline: gateBad.length > 0 && rowBlocked === 0
+        ? '자동매매가 켜져 있지만 안전 점검이 막고 있습니다'
+        : rowBlocked >= on.length
+          ? '자동매매가 켜져 있지만 지금은 주문이 나가지 않습니다'
+          : `자동매매 ${on.length}개 중 ${rowBlocked}개가 막혀 있습니다`,
       detail: `${envWord} · 막힌 이유: ${blockers[0].why}`,
       blockers,
-      activeCount: on.length, liveCount,
-      nextAction: '아래 막힌 예약의 사유를 확인하세요',
+      nextAction: '아래 안전 점검과 예약 사유를 확인하세요',
     };
   }
 
-  // ── 켜져 있고 막힌 것이 없다 ──
+  // ── 확인하지 못했다 ──
+  //
+  // 전역 관문을 아예 못 읽었거나(gates === null) 그중 '확인 못 함'이 있으면
+  // 주문이 나갈 수 있다고 **말하지 않는다.** 이것을 ARMED로 올리면
+  // 첫 줄은 "실행 가능"인데 아래 점검은 "확인 못 함"인 화면이 된다.
+  if (gates === null || gateUnknown.length > 0) {
+    return {
+      state: 'UNCONFIRMED', tone: 'warn', ...base,
+      headline: `${envWord} 자동매매가 켜져 있지만 실행 가능 여부를 확인하지 못했습니다`,
+      detail: gates === null
+        ? `예약 ${on.length}개 · 안전 점검을 읽지 못했습니다`
+        : `예약 ${on.length}개 · 확인하지 못한 점검 ${gateUnknown.length}개`
+          + (gateUnknown[0]?.label ? ` (${s(gateUnknown[0].label)})` : ''),
+      blockers: [],
+      nextAction: '아래 안전 점검에서 확인하지 못한 항목을 보세요',
+    };
+  }
+
+  // ── 켜져 있고, 줄도 전역 관문도 전부 통과했다 ──
   return {
-    state: 'ARMED',
-    env,
+    state: 'ARMED', ...base,
     // 실전은 색부터 다르다. 연습 화면과 같은 초록이면 안 된다.
-    tone: env === 'LIVE' ? 'live' : env === 'MOCK' ? 'muted' : 'warn',
+    tone: env === 'LIVE' ? 'live' : env === 'MOCK' ? 'muted' : 'good',
     headline: env === 'LIVE'
-      ? `실전 자동매매가 켜져 있습니다 — 실제 돈이 나갈 수 있습니다`
+      ? '실전 자동매매가 켜져 있습니다 — 실제 돈이 나갈 수 있습니다'
       : `${envWord} 자동매매가 켜져 있습니다`,
     detail: liveCount > 0 && on.length > liveCount
       ? `예약 ${on.length}개 (실전 ${liveCount}개 포함) · 조건이 맞으면 주문이 나갑니다`
       : `예약 ${on.length}개 · 조건이 맞으면 주문이 나갑니다`,
     blockers: [],
-    activeCount: on.length, liveCount,
     nextAction: '',
   };
 }

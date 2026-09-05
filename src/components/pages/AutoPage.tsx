@@ -148,8 +148,10 @@ export const STRAT_DEFAULTS = {
 
    `rows === null`은 **꺼짐이 아니라 모름**이다. 그래서 개수도, 환경
    배지도 그리지 않는다. */
-function ExecutionTruthHero({ rows, readError }: { rows: any[] | null; readError?: string }) {
-  const v = cockpitVerdict(rows, readError);
+function ExecutionTruthHero({ rows, readError, health }: {
+  rows: any[] | null; readError?: string; health?: any[] | null;
+}) {
+  const v = cockpitVerdict(rows, readError, health);
   const badge = cockpitEnvBadge(v);
   const c = v.tone === 'live' ? T.red
     : v.tone === 'bad' ? T.red
@@ -164,24 +166,42 @@ function ExecutionTruthHero({ rows, readError }: { rows: any[] | null; readError
         padding: '12px 14px', marginBottom: 12,
       }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-        <span style={{ color: c, fontSize: 13, fontWeight: 800, minWidth: 0, overflowWrap: 'anywhere' }}>
+        <span data-truth="count" style={{ color: c, fontSize: 13, fontWeight: 800, minWidth: 0, overflowWrap: 'anywhere' }}>
           {v.headline}
         </span>
         {badge && (
           <span style={{
             flexShrink: 0, background: A(c, '22'), color: c,
             fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 6,
-          }}>{badge}</span>
+          }} data-truth="env">{badge}</span>
         )}
       </div>
-      <div style={{ color: T.sub, fontSize: 11, lineHeight: 1.5, overflowWrap: 'anywhere' }}>{v.detail}</div>
+      <div data-truth="executable" style={{ color: T.sub, fontSize: 11, lineHeight: 1.5, overflowWrap: 'anywhere' }}>{v.detail}</div>
+      {/* ── 첫 화면이 답해야 하는 나머지 ──
+          대상 · 마지막 판단 · 안전. **없는 것은 적지 않는다** — 못 읽었거나
+          기록이 없으면 그 자리를 0이나 '없음'으로 채우지 않고 비운다. */}
+      {v.targets.length > 0 && (
+        <div data-truth="targets" style={{ color: T.muted, fontSize: 10.5, marginTop: 4, overflowWrap: 'anywhere' }}>
+          대상 {v.targets.join(' · ')}
+        </div>
+      )}
+      {v.lastDecision && (
+        <div data-truth="lastDecision" style={{ color: T.sub, fontSize: 10.5, marginTop: 3, overflowWrap: 'anywhere' }}>
+          마지막 판단 — {v.lastDecision}
+        </div>
+      )}
       {/* 막힌 이유는 첫 줄 말고도 전부 보여 준다 — 하나만 고치고 나머지에서 또 막히면
           사용자는 같은 화면을 두 번 헤맨다. */}
       {v.blockers.slice(0, 4).map((b, i) => (
-        <div key={`${b.where}-${i}`} style={{ color: T.red, fontSize: 10.5, marginTop: 3, overflowWrap: 'anywhere' }}>
+        <div key={`${b.where}-${i}`} data-truth="problem" style={{ color: T.red, fontSize: 10.5, marginTop: 3, overflowWrap: 'anywhere' }}>
           · {b.where ? `${b.where} — ` : ''}{b.why}
         </div>
       ))}
+      {v.blockers.length === 0 && (v.state === 'ARMED' || v.state === 'UNCONFIRMED') && (
+        <div data-truth="problem" style={{ color: v.state === 'ARMED' ? T.grn : T.ylw, fontSize: 10.5, marginTop: 3 }}>
+          {v.state === 'ARMED' ? '안전 점검 통과 — 막는 항목 없음' : '안전 점검을 확인하지 못했습니다'}
+        </div>
+      )}
       {v.nextAction && (
         <div style={{ color: T.muted, fontSize: 10, marginTop: 5 }}>→ {v.nextAction}</div>
       )}
@@ -245,8 +265,22 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
      지운다. 실제 성과판은 서버 데이터를 붙일 때 만든다.
 
      실행중 개수만 서버가 답해 준다(`/api/autotrade/schedule`). */
-  const [schedRows,setSchedRows]=useState<any[]|null>(null);
-  const [schedErr,setSchedErr]=useState('');
+  /* ── 읽는 곳은 하나다 ──
+     예전에는 이 화면과 AutotradeControl이 각자 `/api/autotrade/schedule`을
+     불렀다. 판정 함수는 하나여도 **읽은 시점이 둘**이라, 네트워크 타이밍이
+     갈리면 첫 줄과 아래 카드가 서로 다른 상태를 보여 줄 수 있었다.
+     실제로 "첫 줄 LIVE · 아래 TESTNET"이 찍혔다.
+
+     이제 AutotradeControl 한 곳만 읽고, 그 스냅샷을 여기로 올린다.
+     첫 줄과 아래 카드가 **같은 객체**를 보므로 갈릴 수 없다. */
+  const [snap,setSnap]=useState<{rows:any[]|null;err:string;health:any[]|null}>(
+    {rows:null,err:'',health:null});
+  const onSnapshot = useCallback((v:{rows:any[]|null;err:string;health:any[]|null})=>{
+    setSnap(prev=>(prev.rows===v.rows&&prev.err===v.err&&prev.health===v.health)?prev:v);
+  },[]);
+  /* 전체 정지가 **실제로** 무엇을 껐는지 확인하는 읽기.
+     화면 표시의 소유자가 아니다 — 표시는 위 `snap` 하나만 본다.
+     이 읽기를 없애면 "모두 중단됨"을 서버 확인 없이 적게 되므로 남긴다. */
   const loadSchedules = useCallback(async():Promise<{ok:boolean;rows:any[];reason:string}>=>{
     const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
     if(!tok) return {ok:false,rows:[],reason:'로그인이 필요합니다'};
@@ -258,15 +292,12 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       return {ok:true,rows,reason:''};
     }catch(e:any){ return {ok:false,rows:[],reason:String(e?.message||e)}; }
   },[]);
-  useEffect(()=>{
-    let alive=true;
-    (async()=>{
-      const r=await loadSchedules();
-      if(!alive) return;
-      if(r.ok) { setSchedRows(r.rows); setSchedErr(''); } else { setSchedRows(null); setSchedErr(r.reason); }
-    })();
-    return()=>{alive=false;};
-  },[loadSchedules]);
+  /* 다시 읽는 것도 소유자가 한다. 여기서 rows만 갈아끼우면 health가 옛
+     스냅샷으로 남아 첫 줄과 아래 점검이 다시 갈린다. */
+  const reloadRef = useRef<null | (() => Promise<void>)>(null);
+  const onReload = useCallback((fn: () => Promise<void>) => { reloadRef.current = fn; }, []);
+  const schedRows = snap.rows;
+  const schedErr = snap.err;
   // **못 읽었으면 0이라고 적지 않는다.** null은 '모른다'는 뜻이다.
   const runningCount = schedRows===null ? null : stopTargets(schedRows).length;
 
@@ -323,7 +354,6 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
       setStopResult(unknownResult(listed.reason));
       return;
     }
-    setSchedRows(listed.rows);
     const targets = stopTargets(listed.rows);
     const tok = typeof window!=='undefined' ? (localStorage.getItem('sb_access_token')||'') : '';
     const outcomes:StopOutcome[]=[];
@@ -346,12 +376,12 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
     // 말할 근거가 없다.
     const after = await loadSchedules();
     if(after.ok){
-      setSchedRows(after.rows); setSchedErr('');
       setStopResult(verify(outcomes, {state:'read', remaining: stopTargets(after.rows).length}));
     }else{
-      setSchedRows(null); setSchedErr(after.reason);
       setStopResult(verify(outcomes, {state:'unread', reason: after.reason}));
     }
+    // 화면은 소유자가 다시 읽어서 갱신한다.
+    await reloadRef.current?.();
   },[loadSchedules]);
 
   const handleCreateStrat=()=>{
@@ -394,14 +424,14 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           이 판정의 주인은 `lib/ui/autoCockpit` 하나다. 화면은 서버가 준
           예약 줄(enabled·mode·connectionState·runtime)을 그대로 넘기고
           그리기만 한다 — 여기서 다시 판단하면 주인이 둘이 된다. */}
-      <ExecutionTruthHero rows={schedRows} readError={schedErr} />
+      <ExecutionTruthHero rows={schedRows} readError={schedErr} health={snap.health} />
 
       {/* **실제로 도는 자동매매**를 여기서 켜고 끈다.
           지금까지는 Supabase SQL 편집기에서 INSERT를 쳐야 했고, 그동안
           크론은 돌면서 아무 일도 하지 않았다. AutoStatusBoard보다 위에
           둔다 — 그쪽은 실행기·모의 판의 상태이고, 여기는 '이 전략을
           지금 켤 것인가'라는 다른 질문이다. */}
-      <AutotradeControl />
+      <AutotradeControl onSnapshot={onSnapshot} onReload={onReload} />
 
       <AutoStatusBoard />
       {/* ── 아래 모드 버튼은 '지금 무엇이 도는가'가 아니다 ──

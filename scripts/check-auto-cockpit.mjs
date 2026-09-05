@@ -73,13 +73,28 @@ if (!/activeCount:\s*null/.test(plan)) {
 /* ── ④ 화면이 판정을 쓰고, 안에서 다시 판단하지 않는다 ────── */
 if (!/cockpitVerdict\s*\(/.test(page)) err(`${PAGE}: 첫 화면 판정을 쓰지 않습니다`);
 {
-  const hero = /function ExecutionTruthHero\([\s\S]*?\n\}/.exec(page);
+  /* 함수 조각을 정규식 `[\s\S]*?\n\}` 로 잘랐더니, 시그니처가 여러 줄이
+     되자 **타입 블록의 닫는 괄호**까지만 잡혀서 본문을 못 봤다. 그 상태로
+     "판정을 쓰지 않습니다"가 떴다 — 검사기가 코드가 아니라 줄바꿈을 보고
+     있었던 것이다. 다음 top-level 함수 앞까지 인덱스로 자른다. */
+  const start = page.indexOf('function ExecutionTruthHero(');
+  const hero = start < 0 ? null : (() => {
+    const next = page.indexOf('\nfunction ', start + 1);
+    return page.slice(start, next < 0 ? page.length : next);
+  })();
   if (!hero) err(`${PAGE}: ExecutionTruthHero를 찾지 못했습니다`);
   else {
-    if (!/cockpitVerdict\s*\(/.test(hero[0])) err(`${PAGE}: 첫 줄이 판정을 쓰지 않습니다`);
+    if (!/cockpitVerdict\s*\(/.test(hero)) err(`${PAGE}: 첫 줄이 판정을 쓰지 않습니다`);
     /* 이 안에서 예약을 세거나 mode를 읽으면 판정 주인이 둘이 된다. */
-    if (/\.filter\(|\.enabled|envOf\s*\(|headerEnvOf\s*\(/.test(hero[0])) {
+    if (/\.filter\(|\.enabled|envOf\s*\(|headerEnvOf\s*\(/.test(hero)) {
       err(`${PAGE}: 첫 줄이 예약을 스스로 판단합니다 — 판정은 autoCockpit 한 곳입니다`);
+    }
+    /* 6가지 답이 실제로 그려지는가. 표식만 있고 값이 없으면 첫 Fold가
+       질문에 답하지 않는다. */
+    for (const k of ['env', 'count', 'executable', 'targets', 'lastDecision', 'problem']) {
+      if (!hero.includes(`data-truth="${k}"`)) {
+        err(`${PAGE}: 첫 줄에 ${k} 표식이 없습니다 — 첫 화면이 그 질문에 답하지 않습니다`);
+      }
     }
   }
 }
@@ -116,6 +131,74 @@ if (!/미리보기 모드/.test(page)) {
       err(`${CTL}: 못 읽었는데도 환경 배지를 그립니다`);
     }
   }
+}
+
+/* ── ⑤-3 읽는 곳이 하나다 ────────────────────────────────
+   첫 줄과 아래 카드가 각자 `/api/autotrade/schedule`을 불렀다. 판정 함수는
+   하나여도 **읽은 시점이 둘**이라 네트워크 타이밍이 갈리면 서로 다른 상태를
+   보여 줄 수 있었다. 실제로 "첫 줄 LIVE · 아래 TESTNET"이 찍혔다.
+   (두 소유자는 인증 경로마저 달랐다 — 하나는 Supabase 세션, 하나는
+   localStorage 관례 키. 한쪽만 권한이 있는 상태가 가능했다.) */
+{
+  const CTL = 'src/components/AutotradeControl.tsx';
+  const ctl = existsSync(CTL) ? stripJsComments(readFileSync(CTL, 'utf8')) : '';
+  /* **읽기만 센다.** 처음엔 PATCH(예약 끄기)까지 세어서, 쓰기를 하는 것을
+     "두 번째 소유자"라고 잘못 잡았다. 뒤따르는 옵션에 method가 있으면 쓰기다. */
+  const readsOf = (src) => {
+    let n = 0;
+    for (const m of src.matchAll(/fetch\(\s*'\/api\/autotrade\/schedule/g)) {
+      if (!/method\s*:/.test(src.slice(m.index, m.index + 160))) n++;
+    }
+    return n;
+  };
+  const pageFetches = readsOf(page);
+  const ctlFetches = readsOf(ctl);
+  if (ctlFetches < 1) err(`${CTL}: 예약을 읽는 곳이 없습니다`);
+  /* 화면 표시를 위한 두 번째 읽기를 막는다. AutoPage에 남아 있는 하나는
+     전체 정지가 **실제로 무엇을 껐는지** 확인하는 write 검증이고, 그것을
+     없애면 "모두 중단됨"을 서버 확인 없이 적게 되므로 남긴다. */
+  if (pageFetches > 1) {
+    err(`${PAGE}: 예약을 ${pageFetches}번 읽습니다 — 표시용 읽기는 한 곳이어야 합니다`);
+  }
+  /* 이름 앞부분만 맞아도 통과하던 규칙이었다 — `onSnapshotX`로 바꿔도
+     지나갔다. 이 저장소에서 같은 형태의 구멍이 세 번째다. 실제 **배선**을
+     본다: 화면이 넘기고(prop), 카드가 부른다(호출). */
+  if (!/onSnapshot=\{/.test(page)) {
+    err(`${PAGE}: 아래 카드에 스냅샷 콜백을 넘기지 않습니다 — 읽는 곳이 둘이 됩니다`);
+  }
+  /* 본문에 `onSnapshot(...)` 호출이 남아 있어도, **인자로 받지 않으면**
+     그 이름은 어디서도 오지 않는다. 실제로 시그니처에서만 지운 변형이
+     빠져나갔다. 받는 자리와 부르는 자리를 둘 다 본다. */
+  {
+    const i = ctl.indexOf('export default function AutotradeControl(');
+    const sig = i < 0 ? '' : ctl.slice(i, ctl.indexOf(') {', i) + 3);
+    if (!/\bonSnapshot\b/.test(sig)) {
+      err(`${CTL}: 스냅샷 콜백을 인자로 받지 않습니다 — 위로 올릴 방법이 없습니다`);
+    }
+  }
+  if (!/\bonSnapshot\s*\(/.test(ctl)) {
+    err(`${CTL}: 읽은 스냅샷을 위로 올리지 않습니다`);
+  }
+  /* 첫 줄이 자기 fetch 결과를 쓰면 다시 두 소유자가 된다. */
+  if (/loadSchedules\(\)[\s\S]{0,200}?setSchedRows/.test(page)) {
+    err(`${PAGE}: 검증용 읽기 결과를 화면 표시에 씁니다 — 소유자가 둘이 됩니다`);
+  }
+}
+
+/* ── ⑤-4 전역 관문을 판정에 넣는다 ───────────────────────
+   예약 줄이 멀쩡해도 자동 실행 열쇠가 없으면 크론이 진입 엔진을 부르지
+   못한다. 그 판정은 이미 autotradeHealth에 있다. 첫 줄이 그것을 안 보면
+   "실행 가능"이라고 적어 놓고 아래 안전 점검에는 "막힘"이 뜨는 화면이 된다. */
+if (!/health\?:|health\b/.test(plan) || !/UNCONFIRMED/.test(plan)) {
+  err(`${PLAN}: 전역 관문(autotradeHealth)을 판정에 넣지 않습니다`);
+}
+if (!/gates === null \|\| gateUnknown\.length > 0/.test(plan)) {
+  err(`${PLAN}: 관문을 확인하지 못한 경우를 ARMED로 올리지 않는다는 계약이 없습니다`);
+}
+/* 함수 안에서 health를 받기만 하고 **JSX가 안 넘기면** 언제나 undefined다.
+   그 상태로도 위 규칙은 통과했다 — 받는 쪽이 아니라 주는 쪽을 본다. */
+if (!/<ExecutionTruthHero[^>]*health=\{/.test(page)) {
+  err(`${PAGE}: 첫 줄에 전역 관문(health)을 넘기지 않습니다 — 항상 '확인 못 함'이 됩니다`);
 }
 
 /* ── ⑥ 검사기·프로브가 찾을 표식 ─────────────────────────── */
