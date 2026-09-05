@@ -249,4 +249,100 @@ export function runAutoCockpitTests() {
     assert(a === b && b === c, '같은 입력인데 서명이 흔들린다');
     assert(!/\d{10,}/.test(a), `서명에 타임스탬프가 들어갔다: ${a}`);
   });
+
+  // ── 서명이 "관찰되는 의미"를 전부 대표하는가 ──
+  //
+  // 앞의 서명 테스트들은 enabled·mode·connectionState·runtime처럼 **예전
+  // 구현이 이미 나열하고 있던 필드**만 흔들었다. 그래서 손으로 나열한
+  // 목록에서 빠진 필드가 있어도 전부 통과했다. 아래 여섯 건은 그때
+  // 빠져 있던 자리들이다 — 화면에 보이는 문장이 바뀌는데 서명이 그대로면
+  // 부모는 갱신을 버리고, 사용자는 낡은 첫 줄을 계속 본다.
+
+  test('평가 시각만 바뀌어 최신 판단이 BTC→ETH로 넘어가면 서명이 바뀐다', () => {
+    // 두 줄의 내용은 완전히 같고, 어느 쪽이 더 최근인지만 뒤집는다.
+    const btc = (at: number) => row({ id: 's-btc', symbol: 'BTCUSDT', runtime: { state: 'WATCHING', reason: '진입 조건 대기', lastEvaluationAtMs: at } });
+    const eth = (at: number) => row({ id: 's-eth', symbol: 'ETHUSDT', runtime: { state: 'WATCHING', reason: '진입 조건 대기', lastEvaluationAtMs: at } });
+
+    const btcLatest = [btc(2_000), eth(1_000)];
+    const ethLatest = [btc(1_000), eth(2_000)];
+
+    // 먼저 화면이 실제로 뒤집히는지부터 확인한다 — 안 뒤집히면 이 테스트는
+    // 서명이 아니라 잘못된 전제를 시험하는 것이 된다.
+    assert(/BTCUSDT/.test(String(cockpitVerdict(btcLatest, '', okGates).lastDecision)), '전제가 틀렸다: BTC가 최신이 아니다');
+    assert(/ETHUSDT/.test(String(cockpitVerdict(ethLatest, '', okGates).lastDecision)), '전제가 틀렸다: ETH가 최신이 아니다');
+
+    assert(snapshotSignature(btcLatest, '', okGates) !== snapshotSignature(ethLatest, '', okGates),
+      '최신 판단이 BTC에서 ETH로 넘어갔는데 서명이 같다');
+
+    // 반대쪽도 못박는다. 시각이 흘러도 최신 판단이 그대로면 같은 서명이다.
+    // (시각 자체를 서명에 넣으면 이 줄이 깨진다 — 매 폴링마다 새 서명이 되고
+    //  중복 갱신을 막는다는 목적 자체가 사라진다.)
+    const later = [btc(9_000), eth(1_000)];
+    eq(snapshotSignature(btcLatest, '', okGates), snapshotSignature(later, '', okGates));
+  });
+
+  test('연결 상태는 그대로인데 사유 문구만 바뀌어도 서명이 바뀐다', () => {
+    const mk = (note: string) => [row({ id: 's-1', connectionState: 'MISSING', connectionNote: note })];
+    const a = mk('거래소 키가 만료됐습니다');
+    const b = mk('거래소가 연결을 끊었습니다');
+    eq(cockpitVerdict(a, '', okGates).state, cockpitVerdict(b, '', okGates).state); // 둘 다 BLOCKED
+    assert(/만료/.test(cockpitVerdict(a, '', okGates).blockers[0].why), '전제가 틀렸다: 사유가 안 보인다');
+    assert(snapshotSignature(a, '', okGates) !== snapshotSignature(b, '', okGates),
+      '막힌 사유 문구가 바뀌었는데 서명이 같다');
+  });
+
+  test('실행 불가는 그대로인데 전략 사유만 바뀌어도 서명이 바뀐다', () => {
+    const mk = (note: string) => [row({ id: 's-1', strategyRunnable: false, strategyNote: note })];
+    const a = mk('필수 지표가 비어 있습니다');
+    const b = mk('전략이 보관 처리됐습니다');
+    assert(/비어/.test(cockpitVerdict(a, '', okGates).blockers[0].why), '전제가 틀렸다: 사유가 안 보인다');
+    assert(snapshotSignature(a, '', okGates) !== snapshotSignature(b, '', okGates),
+      '전략 사유 문구가 바뀌었는데 서명이 같다');
+  });
+
+  test('점검 항목의 id·state는 그대로인데 이름만 바뀌어도 서명이 바뀐다', () => {
+    const mk = (label: string) => [{ id: 'cron', label, state: 'bad' }];
+    const a = mk('크론 열쇠');
+    const b = mk('자동 실행 스케줄러');
+    assert(/크론 열쇠/.test(cockpitVerdict([row()], '', a).blockers.map(x => x.why).join('|')),
+      '전제가 틀렸다: 점검 이름이 첫 줄에 안 나온다');
+    assert(snapshotSignature([row()], '', a) !== snapshotSignature([row()], '', b),
+      '첫 줄에 뜨는 막은 항목 이름이 바뀌었는데 서명이 같다');
+  });
+
+  test('같은 예약 id에서 종목만 바뀌어도, 같은 종목에서 id만 바뀌어도 서명이 바뀐다', () => {
+    // ① id 고정 · symbol 변경 — 대상과 정지 라벨이 둘 다 바뀐다
+    const btc = [row({ id: 's-1', symbol: 'BTCUSDT' })];
+    const eth = [row({ id: 's-1', symbol: 'ETHUSDT' })];
+    assert(snapshotSignature(btc, '', okGates) !== snapshotSignature(eth, '', okGates),
+      '같은 id에서 종목이 바뀌었는데 서명이 같다');
+
+    // ② symbol 고정 · id 변경 — 첫 줄의 판정은 글자 하나 안 바뀌지만
+    //    "무엇을 끄는가"는 달라진다. 서명이 판정만 담으면 여기서 새는다.
+    const one = [row({ id: 's-1', symbol: 'BTCUSDT' }), row({ id: 's-2', symbol: 'BTCUSDT' })];
+    const two = [row({ id: 's-1', symbol: 'BTCUSDT' }), row({ id: 's-3', symbol: 'BTCUSDT' })];
+    const va = cockpitVerdict(one, '', okGates); const vb = cockpitVerdict(two, '', okGates);
+    eq(JSON.stringify([va.state, va.targets, va.activeCount, va.lastDecision]),
+       JSON.stringify([vb.state, vb.targets, vb.activeCount, vb.lastDecision])); // 판정은 동일
+    assert(snapshotSignature(one, '', okGates) !== snapshotSignature(two, '', okGates),
+      '정지 대상이 바뀌었는데 서명이 같다');
+  });
+
+  test('의미가 같으면 새 객체·새 배열이어도 여전히 같은 서명이다', () => {
+    // 위 다섯 건을 잡으려고 서명을 넓히다가, 원래 목적(참조가 아니라 의미로
+    // 비교한다)을 잃으면 안 된다. 매 폴링마다 서버가 돌려주는 것은 항상
+    // 새 객체다 — 값이 같으면 갱신을 멈춰야 한다.
+    const mk = () => [
+      { id: 's-1', symbol: 'BTCUSDT', enabled: true, mode: 'TESTNET', connectionState: 'OK',
+        connectionNote: '', strategyRunnable: true, strategyNote: '',
+        runtime: { state: 'WATCHING', reason: '진입 조건 대기', lastEvaluationAtMs: 1_700 } },
+      { id: 's-2', symbol: 'ETHUSDT', enabled: false, mode: 'TESTNET', connectionState: 'OK',
+        runtime: { state: 'IDLE', reason: '', lastEvaluationAtMs: 1_500 } },
+    ];
+    const gates = () => [{ id: 'admin', label: '자동 실행 열쇠', state: 'ok' }, { id: 'cron', label: '크론 열쇠', state: 'ok' }];
+    const a = snapshotSignature(mk(), '', gates());
+    const b = snapshotSignature(mk(), '', gates());
+    assert(mk() !== mk(), '전제가 틀렸다: 같은 배열을 재사용하고 있다');
+    eq(a, b);
+  });
 }

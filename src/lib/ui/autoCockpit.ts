@@ -34,6 +34,7 @@
 
 import type { Tone } from './display';
 import { envOf, headerEnvOf, type RunEnv } from './autoOverview';
+import { stopTargets } from '../autotrade/globalStop';
 
 /**
  * 첫 화면이 말할 수 있는 상태.
@@ -276,32 +277,43 @@ export function cockpitEnvBadge(v: CockpitVerdict): string | null {
  * 다시 그리고, 그러면 자식이 다시 그리고, 또 새 배열이 나온다.
  *
  * 실측으로는 폭주하지 않았다(update depth 경고 0, rAF 17ms, 요청 3회에서
- * 정지). 하지만 **안 도는 이유가 계약이 아니라 우연**이다 — 메모 경계가
- * 하나 바뀌면 도는 구조다. 그리고 폭주하지 않아도 의미가 같은데 계속
- * 다시 그리는 것은 그 자체로 낭비다.
+ * 정지). 하지만 **안 도는 이유가 계약이 아니라 우연**이다.
  *
- * 그래서 참조가 아니라 **의미**를 비교한다. 값이 같으면 같은 서명이 나오고,
- * 실제로 바뀌면(ok → bad, unknown → ok) 서명도 바뀐다.
+ * 왜 원본 필드를 나열하지 않는가
+ * ──────────────────────────────
+ * 처음에는 `enabled`·`mode`·`connectionState`처럼 **입력 필드를 손으로
+ * 나열**해 서명을 만들었다. 그 방식은 조용히 어긋난다 — 화면 결과에
+ * 영향을 주는데 목록에 없는 필드가 생기면, 값이 바뀌어도 서명은 그대로다.
+ * 실제로 다섯 군데가 빠져 있었다:
  *
- * 서명에 시각처럼 매번 변하는 것을 넣지 않는다 — 넣는 순간 이 함수는
- * 아무것도 막지 못한다.
+ *   · `runtime.lastEvaluationAtMs` — 어느 줄이 '마지막 판단'인지 정한다
+ *   · `connectionNote` · `strategyNote` — 막힌 이유 문구
+ *   · health의 `label` — 첫 줄에 뜨는 막은 항목 이름
+ *   · 같은 id에서 `symbol`만 바뀐 경우 — 대상과 정지 라벨
+ *
+ * 그래서 입력이 아니라 **부모가 실제로 관찰하는 결과**로 서명을 만든다.
+ * 이 화면에서 스냅샷의 소비자는 정확히 둘이다:
+ *
+ *   ① `cockpitVerdict(rows, err, health)` — 첫 줄이 그리는 전부
+ *   ② `stopTargets(rows)`               — "켜져 있는 예약 N개"와 정지 대상
+ *
+ * 둘의 결과를 그대로 직렬화한다. 관찰 결과가 같으면 같은 서명이고, 결과가
+ * 바뀌면 반드시 다른 서명이다 — 목록을 갱신하는 것을 잊을 자리가 없다.
+ *
+ * 시각 자체는 서명에 넣지 않는다. `lastEvaluationAtMs`가 바뀌어도 최신
+ * 판단이 그대로면 같은 서명이고, 최신 판단이 바뀌면 그때만 달라진다.
  */
 export function snapshotSignature(
   rows: any[] | null | undefined,
   readError?: string | null,
-  health?: Array<{ id?: string; state?: string }> | null,
+  health?: Array<{ id?: string; label?: string; state?: string }> | null,
 ): string {
-  const rowPart = !Array.isArray(rows) ? 'rows:null' : 'rows:' + rows.map(r => [
-    s(r?.id) || s(r?.symbol),
-    r?.enabled === true ? '1' : '0',
-    s(r?.mode),
-    s(r?.connectionState),
-    r?.needsRebind === true ? 'rebind' : '',
-    r?.strategyRunnable === false ? 'norun' : '',
-    s(r?.runtime?.state),
-    s(r?.runtime?.reason),
-  ].join('|')).join(';');
-  const healthPart = !Array.isArray(health) ? 'health:null'
-    : 'health:' + health.map(h => `${s(h?.id)}=${s(h?.state)}`).join(',');
-  return `${rowPart}//err:${s(readError)}//${healthPart}`;
+  const v = cockpitVerdict(rows, readError, health);
+  const stop = stopTargets(rows).map(t => `${t.id}\u0001${t.label}`).join('\u0002');
+  return JSON.stringify([
+    v.state, v.env, v.tone, v.headline, v.detail,
+    v.blockers.map(b => `${b.where}\u0001${b.why}`),
+    v.targets, v.lastDecision, v.activeCount, v.liveCount, v.nextAction,
+    stop,
+  ]);
 }

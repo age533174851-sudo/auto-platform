@@ -213,6 +213,38 @@ if (/Date\.now\(\)|Math\.random\(\)/.test(
   (/export function snapshotSignature[\s\S]*?\n\}/.exec(plan) || [''])[0])) {
   err(`${PLAN}: 서명에 매번 변하는 값이 들어갑니다 — 그러면 아무것도 막지 못합니다`);
 }
+/* 서명은 **원본 필드를 손으로 나열**해서 만들면 조용히 어긋난다. 화면 결과를
+   바꾸는데 목록에 없는 필드가 생기면 값이 바뀌어도 서명은 그대로다. 실제로
+   `runtime.lastEvaluationAtMs`·`connectionNote`·`strategyNote`·health의 `label`·
+   같은 id에서의 `symbol` 다섯 자리가 빠져 있었다. 그래서 입력이 아니라
+   **부모가 실제로 관찰하는 결과**(판정 + 정지 대상)로만 만들게 못박는다. */
+{
+  const i = plan.indexOf('export function snapshotSignature');
+  const body = i < 0 ? '' : plan.slice(i, (() => {
+    const n = plan.indexOf('\nexport ', i + 1);
+    return n < 0 ? plan.length : n;
+  })());
+  for (const [call, why] of [
+    ['cockpitVerdict(', '첫 줄의 판정'],
+    ['stopTargets(', '정지 대상'],
+  ]) {
+    if (!body.includes(call)) {
+      err(`${PLAN}: 서명이 ${why}(${call})에서 나오지 않습니다 — 원본 필드를 손으로 나열하면 빠뜨린 자리가 조용히 새 나갑니다`);
+    }
+  }
+}
+/* 위 다섯 자리를 못박은 시험이 지워지면 규칙도 같이 사라진다. */
+for (const m of [
+  'lastEvaluationAtMs',            // 어느 줄이 '마지막 판단'인지
+  'connectionNote',                // 막힌 사유 문구
+  'strategyNote',                  // 전략 사유 문구
+  "label, state: 'bad'",           // 점검 항목 이름
+  '정지 대상이 바뀌었는데 서명이 같다', // 같은 종목·다른 id
+]) {
+  if (!planT.includes(m)) {
+    err(`${PLANT}: 서명이 놓쳤던 자리(${m})를 못박은 시험이 없습니다`);
+  }
+}
 if (!/snapshotSignature\(/.test(page)) {
   err(`${PAGE}: 스냅샷을 의미로 비교하지 않습니다 — 매 렌더마다 다시 그립니다`);
 }
