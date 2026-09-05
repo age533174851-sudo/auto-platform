@@ -14,6 +14,8 @@
 //
 // 사용법: node scripts/probe/auto-snapshot-stability.mjs <port>
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
+// 제품 코드에 프로브용 인증 우회를 넣지 않는다 — 환경에서 정본 세션을 재현한다.
+import { seedAuthScript, blockAuthHost, assertProbeSignedIn } from './lib/auth.mjs';
 
 const B = 'http://localhost:' + process.argv[2];
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
@@ -40,8 +42,8 @@ const box = { body: bodyOf() };
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
 await ctx.addInitScript(() => {
   localStorage.setItem('tg_onboarded_v1', '1'); localStorage.setItem('tg_lang', 'ko');
-  localStorage.setItem('sb_access_token', 'probe-token');
 });
+await ctx.addInitScript(seedAuthScript());
 const page = await ctx.newPage();
 const reactErrors = [];
 page.on('console', m => {
@@ -59,8 +61,11 @@ await page.route('**/api/autotrade/schedule**', r => {
   apiHits++;
   r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(box.body) });
 });
+await blockAuthHost(page);   // 이 프로브는 밖으로 아무것도 내보내지 않는다
 await page.route('**/api/news**', r => r.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"news":[]}' }));
 await page.goto(B, { waitUntil: 'networkidle' });
+// 여기서 실패하면 프로브 환경 문제다 — 화면 증거로 읽지 않는다
+await assertProbeSignedIn(page);
 for (let i = 0; i < 4; i++) {
   const s = await page.evaluate(() => { const b = [...document.querySelectorAll('button,div,span')].find(e => (e.innerText || '').trim() === '건너뛰기'); if (b) { b.click(); return true; } return false; });
   await page.waitForTimeout(250); if (!s) break;

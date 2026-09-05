@@ -252,6 +252,38 @@ if (/prev\.health\s*===\s*v\.health/.test(page)) {
   err(`${PAGE}: 점검 결과를 참조로 비교합니다 — 매 렌더마다 새 배열이라 항상 다릅니다`);
 }
 
+/* ── ⑤-6 읽는 주인은 정본 인증 경로 하나만 쓴다 ─────────
+   프로브를 돌리려고 제품 코드에 `localStorage.sb_access_token` 대체 경로를
+   넣었던 적이 있다. 그러면 **검증되지 않은 두 번째 인증 경로**가 제품에
+   영구히 남고, 정본 경로가 고장 나도 프로브는 계속 초록으로 나온다.
+   프로브는 제품이 아니라 환경에서 세션을 재현한다(scripts/probe/lib/auth.mjs).
+
+   AutoPage의 전체정지 경로는 아직 그 키를 읽는다 — 이번 PR 범위가 아니라
+   별도 안전 blocker다. 그래서 규칙은 **읽는 주인**과 프로브에만 건다. */
+{
+  const CTL = 'src/components/AutotradeControl.tsx';
+  const ctlCode = existsSync(CTL) ? stripJsComments(readFileSync(CTL, 'utf8')) : '';
+  if (/sb_access_token/.test(ctlCode)) {
+    err(`${CTL}: 읽는 주인이 정본 세션 말고 다른 인증 경로를 씁니다 — 프로브용 우회를 제품에 남기지 않습니다`);
+  }
+  for (const f of [
+    'scripts/probe/auto-cockpit.mjs', 'scripts/probe/auto-cockpit-mutations.mjs',
+    'scripts/probe/auto-interaction.mjs', 'scripts/probe/auto-snapshot-stability.mjs',
+  ]) {
+    if (!existsSync(f)) { err(`${f}: 프로브가 없습니다`); continue; }
+    const src = readFileSync(f, 'utf8');
+    if (/sb_access_token/.test(src)) {
+      err(`${f}: 프로브가 관례 키를 심습니다 — 정본 세션(seedAuthScript)으로 재현하세요`);
+    }
+    if (!/seedAuthScript\(\)/.test(src)) {
+      err(`${f}: 정본 로그인 경로를 재현하지 않습니다 — 이 프로브 결과는 화면 증거가 아닙니다`);
+    }
+    if (!/blockAuthHost\(/.test(src)) {
+      err(`${f}: 프로브가 바깥으로 나가는 인증 요청을 막지 않습니다`);
+    }
+  }
+}
+
 /* ── ⑥ 검사기·프로브가 찾을 표식 ─────────────────────────── */
 for (const attr of ['data-region="executionTruth"', 'data-state=', 'data-env=']) {
   if (!page.includes(attr)) err(`${PAGE}: ${attr} 표식이 없습니다 — 상태 검사가 이 줄을 찾지 못합니다`);

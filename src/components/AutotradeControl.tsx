@@ -62,26 +62,25 @@ import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
  * 같은 객체를 보므로 두 곳이 갈릴 수 없다.
  */
 /**
- * 이 앱에는 인증 토큰을 얻는 길이 둘이다.
+ * 이 카드는 **정본 인증 경로 하나만** 쓴다 — `lib/auth/authToken`(Supabase
+ * 세션). 세션이 비면 비어 있는 것이고, 그 상태로는 읽지 않는다.
  *
- *   · `lib/auth/authToken` — Supabase 세션(정본에 가깝다)
- *   · `localStorage.sb_access_token` — WalletPage·OpsPage·HomePage가 쓰는 관례
+ * 이 PR이 합친 것과 합치지 않은 것
+ * ────────────────────────────────
+ * 합친 것: **자동매매 화면 표시용 예약 목록을 읽는 주인**이다. 첫 줄과 이
+ * 카드가 각자 `/api/autotrade/schedule`을 부르던 것을 여기 하나로 모았다.
  *
- * 예약 목록을 **두 곳에서 읽던 시절, 그 둘이 서로 다른 길을 썼다.** 그래서
- * 한쪽은 권한이 있고 다른 쪽은 없는 상태가 가능했고, 첫 줄과 아래 카드가
- * 다른 말을 하는 원인 중 하나였다.
+ * 합치지 않은 것: **전체정지의 인증 경로**다. `AutoPage.loadSchedules`와
+ * 전체정지 PATCH는 아직 `localStorage.sb_access_token`을 직접 읽는다. 그런데
+ * 저장소 전체에서 그 키에 **쓰는 코드는 한 곳도 없다**(읽는 곳 5, 쓰는 곳 0).
+ * 즉 그 경로는 실제로는 빈 Bearer로 나가고 있다. 이것은 화면 정리가 아니라
+ * 안전 문제이므로 이 PR에 섞지 않고 별도 안전 blocker로 분리했다.
  *
- * 읽는 곳을 하나로 합쳤으니 인증 경로도 합친다. 세션이 비었을 때만 관례
- * 키를 본다 — 세션을 덮지 않는다. 서버가 토큰을 검증하므로 낡은 값이면
- * 401이 오고, 그것은 '확인 못 함'으로 그려진다(꺼짐이 아니다).
+ * 여기에 `sb_access_token` 대체 경로를 남겨 두지 않는 이유도 같다. 그것을
+ * 남기면 "프로브가 돌아간다"는 이유로 제품 코드가 검증되지 않은 두 번째
+ * 인증 경로를 계속 들고 있게 된다. 프로브는 제품 코드가 아니라 **프로브
+ * 환경**에서 정본 세션을 재현한다(scripts/probe/lib/auth.mjs).
  */
-function localStorageToken(): string {
-  try {
-    const t = typeof window !== 'undefined' ? window.localStorage.getItem('sb_access_token') : '';
-    return t ? `Bearer ${t}` : '';
-  } catch { return ''; }
-}
-
 export default function AutotradeControl({ onSnapshot, onReload }: {
   onSnapshot?: (s: { rows: any[] | null; err: string; health: any[] | null }) => void;
   /** 다시 읽는 방법을 위로 준다. 전체 정지 뒤 **읽는 곳 하나**가 갱신되게. */
@@ -95,7 +94,7 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
     let stop: (() => void) | null = null;
     (async () => {
       const { watchAuthToken } = await import('@/lib/auth/authToken');
-      stop = watchAuthToken(t => setAuth(t || localStorageToken()));
+      stop = watchAuthToken(setAuth);
     })();
     return () => { if (stop) stop(); };
   }, []);
