@@ -22,11 +22,21 @@ PATCH /api/autotrade/schedule        하나씩 끈다
 | # | 사실 | 근거 |
 |---|---|---|
 | 1 | 서버는 **검증된 Supabase JWT만** 받는다 | `resolveUserId` → `getUserIdFromRequest` → `sb.auth.getUser(token)`. production에서 JWT가 없으면 `return null` → 401 |
-| 2 | 클라이언트는 **아무도 쓰지 않는 키**를 읽는다 | `git log -S"setItem('sb_access_token'" --all` → production writer 0건. 걸린 커밋 4개는 전부 프로브용이었고 이미 제거됨 |
+| 2 | 클라이언트는 **저장소에서 writer를 찾지 못한 키**를 읽는다 | `git log -S"setItem('sb_access_token'" --all` → production writer 0건. 걸린 커밋 4개는 전부 프로브용이었고 이미 제거됨 |
 | 3 | 비어 있으면 **요청 전에 멈춘다** | 읽는 4곳 전부 `if(!tok) return` |
 
-그래서 `handleGlobalStop`은 늘 `loadSchedules()`의 `ok:false`에서 끝났다.
-**조건부가 아니다 — 모든 사용자에게, 항상 그랬다.**
+정리하면 — **저장소 역사에서 production writer를 찾지 못했고, 정상
+production app flow에서는 legacy key가 채워지지 않아 base 재현에서 Global
+Stop이 GET/PATCH 전에 종료됐다.**
+
+표현을 여기까지만 쓰는 이유가 있다. 코드 감사로 배제한 것은 **저장소 안의
+writer**까지다. 수동 `localStorage` 주입이나 저장소 밖 경로로 그 키가
+채워지는 경우까지 확인한 것은 아니다. 그런 환경에서는 예전 코드도 서버에
+닿았을 수 있다. **확인하지 못한 것을 확인한 것처럼 적지 않는다.**
+
+브라우저로 잰 사실은 그대로 강하게 적는다 — base `d614dfb`의
+canonical-session fixture에서 버튼을 누른 뒤 **GET 0회 · PATCH 0회**를
+재현했다.
 
 표시용 카드(`AutotradeControl`)는 정본 Supabase 세션을 쓰므로 화면은 예약을
 정확히 그렸다. 그래서 **"화면은 멀쩡한데 정지만 안 되는"** 형태로 숨어

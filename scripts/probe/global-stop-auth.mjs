@@ -13,10 +13,10 @@
 // 왜 이 프로브가 필요한가
 // ───────────────────────
 // 표시용 read는 정본 Supabase 세션을 쓰고, 전체정지는 legacy
-// `localStorage.sb_access_token`을 읽는다. 저장소 역사에 그 키를 쓰는
-// production writer가 없으므로 값이 늘 비어 있고, `loadSchedules()`는
-// 첫 GET 전에 종료한다. 그러면 **화면은 예약을 정확히 그리는데 정지
-// 버튼만 서버에 닿지 못한다.**
+// `localStorage.sb_access_token`을 읽는다. 저장소 역사에서 그 키를 쓰는
+// production writer를 찾지 못했고, **정상 production app flow에서는 그 키가
+// 채워지지 않는다.** 비면 `loadSchedules()`가 첫 GET 전에 종료하므로
+// **화면은 예약을 정확히 그리는데 정지 버튼만 서버에 닿지 못한다.**
 //
 // 코드를 읽어서 그렇게 보이는 것과 실제로 그런 것은 다르다. 그래서 센다.
 //

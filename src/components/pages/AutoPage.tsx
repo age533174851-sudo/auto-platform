@@ -293,10 +293,14 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
      이 읽기를 없애면 "모두 중단됨"을 서버 확인 없이 적게 되므로 남긴다. */
   const loadSchedules = useCallback(async():Promise<{ok:boolean;rows:any[];reason:string}>=>{
     // **정본 경로 하나만 쓴다.** 예전에는 여기서 localStorage.sb_access_token을
-    // 읽었는데, 저장소 역사에 그 키를 쓰는 코드가 한 번도 없었다. 값은 늘
-    // 비어 있었고 이 함수는 첫 GET 전에 종료했다 — 즉 **전체정지가 서버에
-    // 닿은 적이 없다.** 표시용 카드는 Supabase 세션을 쓰므로 화면은 예약을
-    // 정확히 그렸고, 그래서 아무도 눈치채지 못했다.
+    // 읽었다. 저장소 역사에서 그 키를 쓰는 production writer를 찾지 못했고,
+    // **정상 production app flow에서는 그 키가 채워지지 않는다.** 비면 이
+    // 함수는 첫 GET 전에 종료하므로 전체정지가 서버까지 가지 못한다.
+    //
+    // 실측 — base(d614dfb)의 canonical-session fixture에서 버튼을 누른 뒤
+    // GET 0회 · PATCH 0회를 재현했다. 표시용 카드는 같은 순간 정본 세션으로
+    // 정상 동작 중이었다. 그래서 화면은 멀쩡한데 정지만 안 되는 형태였다.
+    // (저장소 밖 경로나 수동 localStorage 주입까지 배제한 것은 아니다.)
     //
     // probeAuthToken은 셋을 구분한다. 안전 경로에서는 이 구분이 중요하다 —
     // '로그아웃'과 '확인하지 못함'을 같은 문장으로 적으면, 세션이 멀쩡한데
