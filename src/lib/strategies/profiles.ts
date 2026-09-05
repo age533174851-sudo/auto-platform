@@ -58,19 +58,22 @@ export interface StrategyProfile {
 
 /** 모의 한 건이 잡아먹는 시간. 무제한 보유 프로필은 '한 건 = 하루'로 가정한다. */
 export function simHoldSecOf(p: StrategyProfile): number {
-  if (p.simHoldSec > 0) return p.simHoldSec;
+  const s = p.simHoldSec ?? 0;
+  if (s > 0) return s;
   if (p.maxHoldSec > 0) return p.maxHoldSec;
   return 86400;
 }
 
 /** 모의 시드. 통화는 simCurrency가 정한다. */
 export function simSeedOf(p: StrategyProfile): number {
-  return p.simSeed > 0 ? p.simSeed : 10_000_000;
+  const s = p.simSeed ?? 0;
+  return s > 0 ? s : 10_000_000;
 }
 
 /** 모의 체결가. */
 export function simPriceOf(p: StrategyProfile): number {
-  if (p.simPrice > 0) return p.simPrice;
+  const s = p.simPrice ?? 0;
+  if (s > 0) return s;
   return p.simCurrency === 'USD' ? 100_000 : 140_000_000;
 }
 

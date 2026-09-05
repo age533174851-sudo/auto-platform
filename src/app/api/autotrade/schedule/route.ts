@@ -66,7 +66,7 @@ export async function GET(req: NextRequest) {
   //
   // 050이 아직인 계정에서는 이 칸이 없어서 조회가 실패한다 —
   // 아래 OPTIONAL 되읽기가 그 이름을 빼고 다시 읽는다.
-  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version, cancelled_at';
+  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version, cancelled_at, execution_profile_id, execution_preset_id, execution_contract_version';
 
   let { data: rows, error } = await (sb as any)
     .from('autotrade_schedules').select(FULL).eq('user_id', uid).order('symbol');
@@ -80,7 +80,10 @@ export async function GET(req: NextRequest) {
   // 것만 이름을 대고 멈춘다. 036과 043이 둘 다 안 돌아간 계정에서
   // margin_pct만 빼고 한 번 재시도하면 last_decision 때문에 또 실패하고,
   // 화면은 여전히 죽는다. 이름이 나올 때마다 빼고, 더 이상 안 나올 때까지 돈다.
-  const OPTIONAL = ['margin_pct', 'last_decision', 'strategy_id', 'strategy_version', 'cancelled_at'];
+  const OPTIONAL = ['margin_pct', 'last_decision', 'strategy_id', 'strategy_version', 'cancelled_at',
+    // 077이 아직인 DB에서는 이 세 칸이 없다. **읽기는 후퇴해도 된다** —
+    // 못 읽는 것과 저장하지 않는 것은 다른 일이다. 저장 쪽은 후퇴하지 않는다.
+    'execution_profile_id', 'execution_preset_id', 'execution_contract_version'];
   const missing: string[] = [];
 
   for (let i = 0; i < OPTIONAL.length && error; i++) {
@@ -339,6 +342,40 @@ export async function POST(req: NextRequest) {
   // '상한'이지 '배율'이 아니다. 여기에 100을 저장하고 그대로 쓰면 손절이
   // 2%인 자리에도 100배가 나가는데, 그건 진입 직후 청산이다. 상한이면
   // 역산 결과가 더 작을 때 작은 쪽이 나간다 — 안전한 쪽으로 틀린다.
+  // ── 실행 프로필 선택 ──
+  //
+  // 세 칸이 한 덩어리다. 그리고 **"안 보냈다"와 "명시적으로 비웠다"는
+  // 다른 말이다.** `body.x == null`로 보면 둘이 같아지고, 그러면 이 세
+  // 칸을 모르는 구버전 화면이 예약을 한 번 저장하는 것만으로 사용자가
+  // 골라 둔 실행 프로필이 조용히 지워진다.
+  const EP_KEYS = ['executionProfileId', 'executionPresetId', 'executionContractVersion'] as const;
+  const epPresent = EP_KEYS.filter(k => Object.prototype.hasOwnProperty.call(body ?? {}, k));
+  const epTouched = epPresent.length > 0;
+  const epAllNull = epTouched && epPresent.length === EP_KEYS.length
+    && EP_KEYS.every(k => body[k] === null);
+
+  if (epTouched) {
+    // 일부만 보낸 것은 선택이 아니다. 나머지를 추측해서 채우지 않는다.
+    if (epPresent.length !== EP_KEYS.length) {
+      return NextResponse.json({
+        ok: false, error: 'incomplete_selection',
+        message: '실행 프로필은 프로필·프리셋·버전을 함께 보내야 합니다',
+      }, { status: 400 });
+    }
+    // **설정을 바꾸는 것과 켜는 것은 다른 행위다.**
+    //
+    // 이 라우트의 `enabled` 기본값은 true다. 그래서 프로필만 바꾸려고
+    // `enabled`를 생략하면 저장이 곧 가동이 된다 — 프로필을 해제하는
+    // 요청이 "기존 ATR로 지금 켜라"가 되어 버린다. 켜는 것은 PATCH의
+    // 몫으로 남긴다.
+    if (body?.enabled !== false) {
+      return NextResponse.json({
+        ok: false, error: 'execution_config_requires_explicit_disabled',
+        message: '실행 프로필을 바꿀 때는 enabled:false로 저장해야 합니다 — 켜는 것은 따로 하세요',
+      }, { status: 400 });
+    }
+  }
+
   const levRaw = body?.leverageCap;
   const riskRaw = body?.riskPct;
   let leverageCap: number | null = null;
@@ -540,11 +577,45 @@ export async function POST(req: NextRequest) {
   const LEGACY_SELECT =
     'id, symbol, mode, enabled, connection_id, leverage_cap, risk_pct, interval_min';
 
+  // ── 선택을 해석한다. 저장하기 전에. ──
+  //
+  // DB의 CHECK는 반쪽 저장만 잡는다. 모르는 프로필·모르는 프리셋·버전
+  // 불일치는 DB가 모른다. 그래서 여기서 정확히 해석하고, 안 되면 저장
+  // 자체를 하지 않는다.
+  let epCols: Record<string, any> = {};
+  if (epTouched && !epAllNull) {
+    const { resolveExecutionProfile, isExecutionResolveError } =
+      await import('@/lib/execution/profile');
+    const r = resolveExecutionProfile(
+      body.executionProfileId, body.executionPresetId, body.executionContractVersion);
+    if (isExecutionResolveError(r)) {
+      return NextResponse.json({
+        ok: false, error: r.code.toLowerCase(), message: r.message,
+      }, { status: 400 });
+    }
+    if (r.kind === 'contract' && r.contract) {
+      epCols = {
+        execution_profile_id: r.contract.profileId,
+        execution_preset_id: r.contract.presetId,
+        execution_contract_version: r.contract.contractVersion,
+      };
+    }
+  } else if (epAllNull) {
+    // 명시적 해제. 세 칸을 함께 비운다.
+    epCols = {
+      execution_profile_id: null,
+      execution_preset_id: null,
+      execution_contract_version: null,
+    };
+  }
+
   const baseRow: Record<string, any> = {
     user_id: uid, symbol, connection_id: connectionId,
     mode: modeRaw, enabled, margin_pct: marginPct,
     leverage_cap: leverageCap, risk_pct: riskPct,
     ...(intervalMin != null ? { interval_min: intervalMin } : {}),
+    // 안 보냈으면 아예 넣지 않는다 — 기존 값이 그대로 남는다.
+    ...epCols,
   };
 
   // ── 되살릴 때 취소 표식을 지운다 ──
@@ -579,6 +650,26 @@ export async function POST(req: NextRequest) {
         { onConflict: 'user_id,strategy_id,symbol,connection_id,mode' })
       .select(FULL_SELECT).single();
     data = again.data; error = again.error;
+  }
+
+  // ── 077이 아직이면 **후퇴하지 않는다** ──
+  //
+  // 이 라우트에는 새 칸이 없는 DB에서 그 칸만 빼고 다시 써서라도 예약을
+  // 살리는 패턴이 있다. 기존 기능에는 맞다 — 예약을 못 만드는 것이 더
+  // 나쁘니까.
+  //
+  // **실행 프로필에는 그 후퇴를 쓰면 안 된다.** 사용자가 연구용을 골라
+  // 저장했는데 칸이 없다고 그 세 필드를 떼고 저장하면, 화면에는 저장된
+  // 것처럼 보이고 실제로는 기존 ATR 예약이 된다. 그게 바로 이 작업이
+  // 없애려는 실행 의미 분리다. 그러니 여기서는 멈춘다.
+  if (error && epTouched && !epAllNull
+      && /execution_profile_id|execution_preset_id|execution_contract_version|execution_profile/i
+        .test(String(error.message))) {
+    return NextResponse.json({
+      ok: false, error: 'EXECUTION_PROFILE_SCHEMA_MISSING',
+      message: '실행 프로필을 저장할 수 없습니다 — 마이그레이션 077이 아직 적용되지 않았습니다.'
+        + ' 프로필 없이 저장하지 않습니다(그러면 화면과 실제 실행이 달라집니다).',
+    }, { status: 503 });
   }
 
   // 050이 아직인가. 칸이 없거나 그 이름의 제약이 없으면 그 신호다.
@@ -620,7 +711,12 @@ export async function POST(req: NextRequest) {
   // 두 번 눌러도 두 번 돌지 않는다: `dueCheck`의 최소 간격(60초)이
   // 막는다. **평가가 두 번 도는 것은 주문이 두 번 나가는 것과 같다.**
   let firstEvaluation: any = null;
-  if (enabled && data?.id) {
+  //
+  // 실행 프로필을 건드린 요청에서는 첫 평가를 돌리지 않는다. 그런 요청은
+  // 위에서 `enabled:false`를 강제하므로 여기 오지 않아야 하지만, 그 규칙이
+  // 나중에 바뀌어도 **저장한 의미와 다른 실행이 한 번 나가는 일**은 없어야
+  // 하므로 조건에 함께 적는다.
+  if (enabled && !epTouched && data?.id) {
     const adminSecret = process.env.ADMIN_SECRET || '';
     if (!adminSecret) {
       // 값이 아니라 없다는 사실만 적는다.
@@ -710,20 +806,43 @@ const ROW_SELECT =
 /** 050·043·036이 아직인 계정에서 없을 수 있는 칸들 */
 const ROW_OPTIONAL = ['margin_pct', 'strategy_id', 'strategy_version'];
 
+/**
+ * 켜짐 한 칸을 바꾼다.
+ *
+ * **켜는 요청에만 조건이 하나 더 붙는다.** 실행 프로필을 가진 예약은 아직
+ * 켤 수 없다 — 실행기가 그 계약을 읽지 않으므로, 켜면 화면에 적힌 것과
+ * 다른 의미로 주문이 나간다.
+ *
+ * 그 판단을 UPDATE **뒤에** 하면 늦는다. 이 함수는 update와 select가 한
+ * 문장이라, 되읽어서 알았을 때는 이미 켜진 뒤다. 그래서 **조건을 UPDATE
+ * 안에 넣는다** — 맞는 줄이 없으면 아무것도 바뀌지 않는다.
+ *
+ * 끄는 요청에는 조건을 걸지 않는다. **끄는 것을 어렵게 만들지 않는다.**
+ *
+ * 077이 아직인 DB에는 그 칸이 없어 필터가 실패한다. 그때는 필터 없이 다시
+ * 쓴다 — 그 환경에는 프로필을 가진 줄이 존재할 수 없다.
+ */
 async function setEnabledById(sb: any, uid: string, id: string, enabled: boolean) {
   const patch = enabledUpdate(enabled);
   let cols = ROW_SELECT;
   const missing: string[] = [];
+  let dormantFilter = enabled;
 
   // 칸 하나가 없어서 되읽기가 실패하면 **UPDATE는 됐는데 500이 나간다.**
   // 그러면 화면은 실패로 적고 사용자는 다시 누른다. 없는 이름만 빼고 다시 읽는다.
-  for (let i = 0; i <= ROW_OPTIONAL.length; i++) {
-    const { data, error } = await sb
-      .from('autotrade_schedules')
-      .update(patch).eq('id', id).eq('user_id', uid)
-      .select(cols).maybeSingle();
+  for (let i = 0; i <= ROW_OPTIONAL.length + 1; i++) {
+    let q = sb.from('autotrade_schedules')
+      .update(patch).eq('id', id).eq('user_id', uid);
+    if (dormantFilter) q = q.is('execution_profile_id', null);
+    const { data, error } = await q.select(cols).maybeSingle();
 
     if (!error) return { ok: true as const, row: data ?? null, error: null };
+
+    // 077 이전 DB — 필터를 걸 칸이 없다. 그 환경에는 프로필 줄도 없다.
+    if (dormantFilter && /execution_profile_id/i.test(String(error.message))) {
+      dormantFilter = false;
+      continue;
+    }
 
     const named = ROW_OPTIONAL.find(c => !missing.includes(c) && new RegExp(c, 'i').test(String(error.message)));
     if (!named) return { ok: false as const, row: null, error };
@@ -764,6 +883,22 @@ export async function PATCH(req: NextRequest) {
   // **없으면 만들지 않는다.** 여기서 upsert로 되돌아가면 정체가 다시
   // 조립되고, 그게 이 라우트를 나눈 이유 그 자체다.
   if (!r.row) {
+    // 켜는 요청이 아무 줄도 못 바꿨다면 둘 중 하나다 — 줄이 없거나,
+    // 실행 프로필을 가진 줄이라 조건에서 걸러졌거나. **읽기만 해서**
+    // 어느 쪽인지 가른다(이 조회는 아무것도 바꾸지 않는다).
+    if (p.enabled === true) {
+      const probe = await (sb as any)
+        .from('autotrade_schedules')
+        .select('id, execution_profile_id')
+        .eq('id', p.id).eq('user_id', uid).maybeSingle();
+      if (probe.data?.execution_profile_id) {
+        return NextResponse.json({
+          ok: false, error: 'EXECUTION_PROFILE_NOT_ACTIVE',
+          message: '이 예약은 실행 프로필이 지정돼 있어 아직 켤 수 없습니다'
+            + ' — 실행기가 그 계약을 아직 읽지 않습니다.',
+        }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
     return NextResponse.json({
       ok: false, error: 'not_found', message: notFoundMessage(p.id),
     }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
