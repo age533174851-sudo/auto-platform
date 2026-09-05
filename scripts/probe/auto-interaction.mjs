@@ -7,17 +7,14 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 // 제품 코드에 프로브용 인증 우회를 넣지 않는다 — 환경에서 정본 세션을 재현한다.
 import { seedAuthScript, blockAuthHost, assertProbeSignedIn } from './lib/auth.mjs';
+// fixture는 한 곳에만 둔다 — 관문을 모르는 fixture가 화면을 고장으로 보이게 한다.
+import { scheduleRow as row, okBody } from './lib/fixtures.mjs';
 
 const B = 'http://localhost:' + process.argv[2];
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
 let fails = 0;
 const say = (ok, name, detail) => { if (!ok) fails++; console.log(`${ok ? '✅' : '❌'} ${name} — ${detail}`); };
 
-const row = (o = {}) => ({
-  id: `s-${o.symbol || 'BTCUSDT'}`, symbol: 'BTCUSDT', enabled: true, mode: 'TESTNET',
-  connectionState: 'OK', strategyRunnable: true,
-  runtime: { state: 'WATCHING', reason: '정상 평가 중' }, state: 'ACTIVE', ...o,
-});
 
 /** 지연 응답/응답 교체가 가능한 창을 연다 */
 async function open(w, h, initial) {
@@ -60,7 +57,7 @@ const snap = page => page.evaluate(() => {
    응답이 늦는 동안 화면이 "켜져 있는 자동매매가 없습니다"라고 적으면
    사용자는 돌고 있는 자동매매를 멈춘 줄 안다. */
 {
-  const { ctx, page } = await open(1440, 900, { status: 200, delayMs: 3500, body: { ok: true, schedules: [row({ mode: 'LIVE' })] } });
+  const { ctx, page } = await open(1440, 900, { status: 200, delayMs: 3500, body: okBody([row({ mode: 'LIVE', connection_id: 'c-live' })]) });
   await page.waitForTimeout(1200);
   const during = await snap(page);
   await page.waitForTimeout(5200);
@@ -73,10 +70,10 @@ const snap = page => page.evaluate(() => {
 
 /* ── ② 실전 예약이 섞이면 첫 줄이 실전으로 바뀐다 ── */
 {
-  const { ctx, page, box } = await open(1440, 900, { status: 200, body: { ok: true, schedules: [row()] } });
+  const { ctx, page, box } = await open(1440, 900, { status: 200, body: okBody([row()]) });
   await page.waitForTimeout(2600);
   const before = await snap(page);
-  box.fixture = { status: 200, body: { ok: true, schedules: [row(), row({ symbol: 'ETHUSDT', mode: 'LIVE_LIMITED' })] } };
+  box.fixture = { status: 200, body: okBody([row(), row({ symbol: 'ETHUSDT', mode: 'LIVE_LIMITED', connection_id: 'c-live' })]) };
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.evaluate(() => { const t = [...document.querySelectorAll('*')].find(e => (e.innerText || '').trim() === '자동' && e.children.length === 0); if (t) (t.closest('button,a,[role="button"]') || t.parentElement).click(); });
   await page.waitForTimeout(2600);
@@ -90,7 +87,7 @@ const snap = page => page.evaluate(() => {
    이 화면의 원래 고장이다. 토글을 '모의'로 두어도 실전 예약이 켜져 있으면
    첫 줄은 실전이어야 한다. */
 {
-  const { ctx, page } = await open(1440, 900, { status: 200, body: { ok: true, schedules: [row({ mode: 'LIVE' })] } });
+  const { ctx, page } = await open(1440, 900, { status: 200, body: okBody([row({ mode: 'LIVE', connection_id: 'c-live' })]) });
   await page.waitForTimeout(2600);
   const before = await snap(page);
   const clicked = await page.evaluate(() => {
@@ -109,7 +106,7 @@ const snap = page => page.evaluate(() => {
 
 /* ── ④ 막힌 이유가 실제로 보인다 ── */
 {
-  const { ctx, page } = await open(390, 844, { status: 200, body: { ok: true, schedules: [row({ runtime: { state: 'STALE', reason: '주 실행기가 12분째 응답이 없습니다' } })] } });
+  const { ctx, page } = await open(390, 844, { status: 200, body: okBody([row({ runtime: { state: 'STALE', reason: '주 실행기가 12분째 응답이 없습니다' } })]) });
   await page.waitForTimeout(2600);
   const s = await snap(page);
   say(s.state === 'BLOCKED' && /12분/.test(s.text) && !/실행중|실행 중/.test(s.text),
@@ -131,7 +128,7 @@ const snap = page => page.evaluate(() => {
 
 /* ── ⑥ 모바일에서 첫 줄이 엄지 영역 위에 스크롤 없이 보인다 ── */
 {
-  const { ctx, page } = await open(390, 844, { status: 200, body: { ok: true, schedules: [row({ mode: 'LIVE' })] } });
+  const { ctx, page } = await open(390, 844, { status: 200, body: okBody([row({ mode: 'LIVE', connection_id: 'c-live' })]) });
   await page.waitForTimeout(2600);
   const g = await page.evaluate(() => {
     const h = document.querySelector('[data-region="executionTruth"]');
@@ -150,7 +147,7 @@ const snap = page => page.evaluate(() => {
    기본값 TESTNET을 얻고 있었기 때문이다. 아무것도 못 읽었는데 환경을
    단정하면, 첫 줄과 서로 다른 말을 하는 화면이 된다. */
 {
-  const { ctx, page } = await open(390, 844, { status: 200, body: { ok: true, schedules: [row({ mode: 'LIVE' })] } });
+  const { ctx, page } = await open(390, 844, { status: 200, body: okBody([row({ mode: 'LIVE', connection_id: 'c-live' })]) });
   await page.waitForTimeout(2800);
   const r = await page.evaluate(() => {
     const t = document.querySelector('[data-region="autoPage"]')?.innerText || '';

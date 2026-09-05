@@ -281,6 +281,18 @@ if (/prev\.health\s*===\s*v\.health/.test(page)) {
     if (!/blockAuthHost\(/.test(src)) {
       err(`${f}: 프로브가 바깥으로 나가는 인증 요청을 막지 않습니다`);
     }
+    /* fixture를 프로브마다 따로 들고 있으면 갈린다. 실제로 cockpit 쪽
+       fixture를 관문에 맞게 고친 뒤에도 interaction 쪽은 옛날 그대로여서,
+       관문 판정을 붙인 순간 2건이 FAIL로 돌아섰다 — 화면은 맞고 fixture가
+       틀렸다. 같은 판단은 한 파일에만 둔다. */
+    if (!/from '\.\/lib\/fixtures\.mjs'/.test(src)) {
+      err(`${f}: fixture를 따로 들고 있습니다 — lib/fixtures.mjs 하나만 씁니다`);
+    }
+    /* `adminSecretSet: false`처럼 **한 항목을 일부러 뒤집는 것**은 그
+       프로브의 시나리오다. 막는 것은 통과 상태 전체를 다시 쓰는 쪽이다. */
+    if (/adminSecretSet\s*:\s*true/.test(src)) {
+      err(`${f}: 관문 통과 fixture를 프로브 안에서 다시 씁니다 — lib/fixtures.mjs가 정본입니다`);
+    }
   }
 }
 

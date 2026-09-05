@@ -8,16 +8,14 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 // 제품 코드에 프로브용 인증 우회를 넣지 않는다 — 환경에서 정본 세션을 재현한다.
 import { seedAuthScript, blockAuthHost, assertProbeSignedIn } from './lib/auth.mjs';
+// fixture는 한 곳에만 둔다 — 관문을 모르는 fixture가 화면을 고장으로 보이게 한다.
+import { scheduleRow, okBody } from './lib/fixtures.mjs';
 
 const B = 'http://localhost:' + process.argv[2];
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
 let fails = 0;
 
-const row = (o = {}) => ({
-  id: 's-1', symbol: 'BTCUSDT', enabled: true, mode: 'LIVE_LIMITED',
-  connectionState: 'OK', strategyRunnable: true,
-  runtime: { state: 'WATCHING', reason: '' }, state: 'ACTIVE', ...o,
-});
+const row = (o = {}) => scheduleRow({ id: 's-1', mode: 'LIVE_LIMITED', connection_id: 'c-live', ...o });
 
 // [이름, 기대, 화면에 가할 변형]
 const MUTATIONS = [
@@ -65,7 +63,7 @@ for (const [name, expect, mutate] of MUTATIONS) {
   });
   await ctx.addInitScript(seedAuthScript());
   const page = await ctx.newPage();
-  await page.route('**/api/autotrade/schedule**', r => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, schedules: [row()] }) }));
+  await page.route('**/api/autotrade/schedule**', r => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(okBody([row()])) }));
   await blockAuthHost(page);   // 이 프로브는 밖으로 아무것도 내보내지 않는다
   await page.route('**/api/news**', r => r.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"news":[]}' }));
   await page.goto(B, { waitUntil: 'networkidle' });

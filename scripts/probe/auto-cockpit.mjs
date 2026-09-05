@@ -8,6 +8,8 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 // 제품 코드에 프로브용 인증 우회를 넣지 않는다 — 환경에서 정본 세션을 재현한다.
 import { seedAuthScript, blockAuthHost, assertProbeSignedIn } from './lib/auth.mjs';
+// fixture는 한 곳에만 둔다 — 관문을 모르는 fixture가 화면을 고장으로 보이게 한다.
+import { scheduleRow as row, healthyEnv as healthyEnvOf } from './lib/fixtures.mjs';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 
 const PORT = process.argv[2], OUT = process.argv[3] || '/tmp/cockpit';
@@ -25,31 +27,7 @@ const VIEWPORTS = [
   ['430x932', 430, 932], ['390x844', 390, 844], ['360x800', 360, 800],
 ].filter(v => !ONLY || v[0] === ONLY);
 
-const row = (o = {}) => ({
-  id: `s-${o.symbol || 'BTCUSDT'}`, symbol: 'BTCUSDT', enabled: true, mode: 'TESTNET',
-  // autotradeHealth는 켜진 예약에 연결이 붙어 있는지도 본다. 없으면 '거래소
-  // 연결'이 bad가 되어 BLOCKED가 맞다 — fixture가 그 사실을 몰랐던 것이다.
-  connection_id: 'c-1', interval_min: 60,
-  last_run_at: new Date(Date.now() - 5 * 60_000).toISOString(),
-  connectionState: 'OK', strategyRunnable: true, strategyName: '계단식',
-  runtime: { state: 'WATCHING', reason: '정상 평가 중' }, state: 'ACTIVE',
-  ...o,
-});
-
-// 재현할 상태들. body 는 /api/autotrade/schedule 이 돌려줄 값.
-// 전역 관문이 전부 통과한 서버 응답. autotradeHealth가 ok를 내도록 채운다.
-// **아무것도 안 주면 '확인 못 함'이라 ARMED가 되지 않는다** — 그것이 계약이다.
-const healthyEnv = {
-  adminSecretSet: true, cronSecretSet: true, liveUnlocked: true,
-  liveGate: { env: 'production', reason: '' },
-  marginColumnPresent: true, openTradeCount: 0, cronUtcHour: 23,
-  runs: [{ status: 'ok', detail: '평가 완료', started_at: new Date().toISOString() }],
-  exitRuns: [{ status: 'ok', detail: '감시 완료', started_at: new Date().toISOString() }],
-  connections: [
-    { id: 'c-1', is_testnet: true, exchange_id: 'binance', label: '테스트넷' },
-    { id: 'c-live', is_testnet: false, exchange_id: 'binance', label: '실전' },
-  ],
-};
+const healthyEnv = healthyEnvOf();
 
 const STATES = {
   UNKNOWN: { status: 401, body: { ok: false, error: 'auth_required', message: '로그인이 필요합니다' } },

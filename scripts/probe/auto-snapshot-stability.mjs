@@ -16,27 +16,15 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 // 제품 코드에 프로브용 인증 우회를 넣지 않는다 — 환경에서 정본 세션을 재현한다.
 import { seedAuthScript, blockAuthHost, assertProbeSignedIn } from './lib/auth.mjs';
+// fixture는 한 곳에만 둔다 — 관문을 모르는 fixture가 화면을 고장으로 보이게 한다.
+import { scheduleRow, okBody } from './lib/fixtures.mjs';
 
 const B = 'http://localhost:' + process.argv[2];
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
 let fails = 0;
 const say = (ok, name, detail) => { if (!ok) fails++; console.log(`${ok ? '✅' : '❌'} ${name} — ${detail}`); };
 
-const bodyOf = (over = {}) => ({
-  ok: true, adminSecretSet: true, cronSecretSet: true, liveUnlocked: true,
-  liveGate: { env: 'production', reason: '' },
-  marginColumnPresent: true, openTradeCount: 0, cronUtcHour: 23,
-  runs: [{ status: 'ok', detail: '평가 완료', started_at: new Date().toISOString() }],
-  exitRuns: [{ status: 'ok', detail: '감시 완료', started_at: new Date().toISOString() }],
-  connections: [{ id: 'c-1', is_testnet: true, exchange_id: 'binance', label: '테스트넷' }],
-  schedules: [{
-    id: 's-1', symbol: 'BTCUSDT', enabled: true, mode: 'TESTNET', connection_id: 'c-1',
-    interval_min: 60, last_run_at: new Date(Date.now() - 300_000).toISOString(),
-    connectionState: 'OK', strategyRunnable: true,
-    runtime: { state: 'WATCHING', reason: '정상 평가 중' }, state: 'ACTIVE',
-  }],
-  ...over,
-});
+const bodyOf = (over = {}) => ({ ...okBody([scheduleRow({ id: 's-1' })]), ...over });
 
 const box = { body: bodyOf() };
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
