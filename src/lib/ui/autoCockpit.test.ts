@@ -3,7 +3,7 @@
 // 아래 케이스들은 전부 "이렇게 표시하면 사용자가 돈을 잃거나, 돌고 있는
 // 자동매매를 멈춘 줄 안다"는 자리들이다. 하나하나 못박는다.
 import { test, assert, eq } from '../../test/harness';
-import { cockpitVerdict, cockpitEnvBadge } from './autoCockpit';
+import { cockpitVerdict, cockpitEnvBadge, snapshotSignature } from './autoCockpit';
 
 /** 전부 통과한 전역 관문. 안 주면 '확인 못 함'이라 ARMED가 되지 않는다 */
 const okGates = [
@@ -212,5 +212,41 @@ export function runAutoCockpitTests() {
       eq(r.targets.length, 0);
       eq(r.lastDecision, null);
     }
+  });
+
+  // ── 스냅샷 서명 ──
+  test('의미가 같으면 서명이 같다 — 새 배열이어도', () => {
+    const a = snapshotSignature([row()], '', [{ id: 'x', state: 'ok' }]);
+    const b = snapshotSignature([row()], '', [{ id: 'x', state: 'ok' }]);
+    eq(a, b);
+  });
+
+  test('점검 상태가 바뀌면 서명이 바뀐다', () => {
+    const ok = snapshotSignature([row()], '', [{ id: 'x', state: 'ok' }]);
+    const bad = snapshotSignature([row()], '', [{ id: 'x', state: 'bad' }]);
+    const unk = snapshotSignature([row()], '', [{ id: 'x', state: 'unknown' }]);
+    assert(ok !== bad && bad !== unk && ok !== unk, '점검 변화가 서명에 안 나온다');
+  });
+
+  test('예약이 바뀌면 서명이 바뀐다', () => {
+    const base = snapshotSignature([row()], '', []);
+    assert(base !== snapshotSignature([row({ enabled: false })], '', []), 'enabled 변화가 안 잡힌다');
+    assert(base !== snapshotSignature([row({ mode: 'LIVE' })], '', []), 'mode 변화가 안 잡힌다');
+    assert(base !== snapshotSignature([row({ connectionState: 'MISSING' })], '', []), '연결 변화가 안 잡힌다');
+    assert(base !== snapshotSignature([row({ runtime: { state: 'STALE', reason: 'x' } })], '', []), 'runtime 변화가 안 잡힌다');
+  });
+
+  test('못 읽음과 빈 목록은 서명도 다르다', () => {
+    assert(snapshotSignature(null, '읽기 실패', null) !== snapshotSignature([], '', []),
+      'null과 []가 같은 서명이다');
+  });
+
+  test('서명은 시각에 흔들리지 않는다', () => {
+    // 시각처럼 매번 변하는 값이 들어가면 이 함수는 아무것도 막지 못한다.
+    const a = snapshotSignature([row()], '', [{ id: 'x', state: 'ok' }]);
+    const b = snapshotSignature([row()], '', [{ id: 'x', state: 'ok' }]);
+    const c = snapshotSignature([row()], '', [{ id: 'x', state: 'ok' }]);
+    assert(a === b && b === c, '같은 입력인데 서명이 흔들린다');
+    assert(!/\d{10,}/.test(a), `서명에 타임스탬프가 들어갔다: ${a}`);
   });
 }

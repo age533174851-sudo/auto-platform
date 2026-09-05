@@ -201,6 +201,25 @@ if (!/<ExecutionTruthHero[^>]*health=\{/.test(page)) {
   err(`${PAGE}: 첫 줄에 전역 관문(health)을 넘기지 않습니다 — 항상 '확인 못 함'이 됩니다`);
 }
 
+/* ── ⑤-5 스냅샷 발행이 의미로 비교된다 ──────────────────
+   `autotradeHealth()`는 렌더마다 새 배열을 준다. 참조로 비교하면 값이 안
+   바뀌어도 늘 "달라졌다"가 되고, 부모 → 자식 → 새 배열 → 부모 … 구조가
+   만들어진다. 실측으로 폭주하지는 않았지만 **안 도는 이유가 계약이 아니라
+   우연**이다. */
+if (!/export function snapshotSignature/.test(plan)) {
+  err(`${PLAN}: 스냅샷을 의미로 비교하는 함수가 없습니다`);
+}
+if (/Date\.now\(\)|Math\.random\(\)/.test(
+  (/export function snapshotSignature[\s\S]*?\n\}/.exec(plan) || [''])[0])) {
+  err(`${PLAN}: 서명에 매번 변하는 값이 들어갑니다 — 그러면 아무것도 막지 못합니다`);
+}
+if (!/snapshotSignature\(/.test(page)) {
+  err(`${PAGE}: 스냅샷을 의미로 비교하지 않습니다 — 매 렌더마다 다시 그립니다`);
+}
+if (/prev\.health\s*===\s*v\.health/.test(page)) {
+  err(`${PAGE}: 점검 결과를 참조로 비교합니다 — 매 렌더마다 새 배열이라 항상 다릅니다`);
+}
+
 /* ── ⑥ 검사기·프로브가 찾을 표식 ─────────────────────────── */
 for (const attr of ['data-region="executionTruth"', 'data-state=', 'data-env=']) {
   if (!page.includes(attr)) err(`${PAGE}: ${attr} 표식이 없습니다 — 상태 검사가 이 줄을 찾지 못합니다`);

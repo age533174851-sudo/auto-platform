@@ -275,8 +275,17 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
      첫 줄과 아래 카드가 **같은 객체**를 보므로 갈릴 수 없다. */
   const [snap,setSnap]=useState<{rows:any[]|null;err:string;health:any[]|null}>(
     {rows:null,err:'',health:null});
+  /* **참조가 아니라 의미로 비교한다.**
+     `autotradeHealth()`는 렌더마다 새로 계산되어 매번 새 배열을 준다.
+     참조로 비교하면 값이 하나도 안 바뀌어도 항상 "달라졌다"가 되고,
+     부모가 다시 그리고 → 자식이 다시 그리고 → 또 새 배열이 나온다.
+     실측으로 폭주하지는 않았지만, 안 도는 이유가 계약이 아니라 우연이다. */
+  const sigRef = useRef('');
   const onSnapshot = useCallback((v:{rows:any[]|null;err:string;health:any[]|null})=>{
-    setSnap(prev=>(prev.rows===v.rows&&prev.err===v.err&&prev.health===v.health)?prev:v);
+    const sig = snapshotSignature(v.rows, v.err, v.health);
+    if (sig === sigRef.current) return;
+    sigRef.current = sig;
+    setSnap(v);
   },[]);
   /* 전체 정지가 **실제로** 무엇을 껐는지 확인하는 읽기.
      화면 표시의 소유자가 아니다 — 표시는 위 `snap` 하나만 본다.
@@ -1185,7 +1194,7 @@ import type { ExecutionLog } from '@/lib/autotrade/types';
 import { moneyText, pnlText, qtyText, UNKNOWN_LABEL } from '@/lib/ui/display';
 import { Wallet, ListChecks, Trash2, RefreshCw, AlertCircle, CheckCircle2, MinusCircle, Ban, Clock, BarChart3, TrendingUp as TrendingUpIc, TrendingDown as TrendingDownIc } from 'lucide-react';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
-import { cockpitVerdict, cockpitEnvBadge } from '@/lib/ui/autoCockpit';
+import { cockpitVerdict, cockpitEnvBadge, snapshotSignature } from '@/lib/ui/autoCockpit';
 
 /** 모의 장부 금액 한 칸. **못 읽은 것은 0이 아니다** */
 const paperMoney = (v: any): string => {
