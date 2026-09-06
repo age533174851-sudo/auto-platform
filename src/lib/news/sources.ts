@@ -83,7 +83,14 @@ export interface ImpactScore {
 interface CalcInput {
   sourceName?:  string;
   prediction?:  'up' | 'down' | 'flat';
-  confidence?:  number;         // 0~100
+  /**
+   * 모델이 스스로 매긴 확신도. **없으면 null이다 — 숫자를 만들지 않는다.**
+   *
+   * 여기 있던 `?? 50`이 그 일을 했다. 모델이 확신도를 답하지 않았는데도
+   * 50%가 관측된 것처럼 영향도에 들어갔고, 그 영향도가 알림 문턱(60점)을
+   * 넘기는 데 쓰였다. 관측되지 않은 값으로 알림을 보내면 안 된다.
+   */
+  confidence?:  number | null;  // 0~100 또는 null
   publishedAt?: number;         // ms timestamp
   numAffectedAssets?: number;
 }
@@ -92,11 +99,19 @@ export function calculateImpact(input: CalcInput): ImpactScore {
   const reasons: string[] = [];
 
   // 1) sentiment 강도 — flat이면 작음
-  const conf = Math.max(0, Math.min(100, input.confidence ?? 50));
+  const conf = typeof input.confidence === 'number' && Number.isFinite(input.confidence)
+    ? Math.max(0, Math.min(100, input.confidence))
+    : null;
+  const directional = input.prediction === 'up' || input.prediction === 'down';
   let sentimentScore = 0;
-  if (input.prediction === 'up' || input.prediction === 'down') {
+  if (directional && conf != null) {
     sentimentScore = (conf / 100) * 50;
-    reasons.push(`예측 ${input.prediction === 'up' ? '상승' : '하락'} (신뢰도 ${conf}%)`);
+    reasons.push(`예측 ${input.prediction === 'up' ? '상승' : '하락'}`);
+  } else if (directional) {
+    // 방향은 있는데 강도를 관측하지 못했다. **꾸며서 채우지 않는다** —
+    // 방향만으로는 보합과 같은 몫만 준다.
+    sentimentScore = 10;
+    reasons.push(`예측 ${input.prediction === 'up' ? '상승' : '하락'} — 확신도가 없어 강도는 반영하지 않음`);
   } else {
     sentimentScore = 10;
     reasons.push('방향성 약함 (보합)');
