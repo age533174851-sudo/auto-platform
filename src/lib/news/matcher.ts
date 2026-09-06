@@ -22,11 +22,19 @@ import { calculateImpact, impactLevel } from './sources';
 export interface MatchAnalysis {
   /** bullish · bearish · neutral · uncertain. 모르면 null */
   direction: string | null;
-  /** 모델이 답하지 않았으면 null. **숫자를 만들지 않는다** */
-  confidence: number | null;
   /** 심볼 목록 */
   affectedAssets?: string[] | null;
 }
+
+// **confidence는 여기 없다 — 일부러 없다.**
+//
+// 모델이 스스로 매긴 확신도는 과거 적중률로 보정된 값이 아니다. 화면에서
+// %를 지운 이유가 그것인데, 화면에서만 지우고 알림 판정에는 그대로 쓰면
+// "표시만 안 할 뿐 여전히 그 숫자가 사람을 깨운다"가 된다.
+//
+// 타입에 두고 "쓰지 말자"고 적는 것으로는 부족하다 — 언젠가 누가 쓴다.
+// 그래서 알림 경로가 그 값을 **볼 수 없게** 했다. 보정된 지표가 생기면
+// 그때 근거와 함께 다시 넣는다. 값 자체는 news_articles에 남아 있다.
 
 /** 저장된 방향을 영향도 계산이 아는 말로. uncertain은 방향이 아니다 */
 const PREDICTION_OF: Record<string, 'up' | 'down' | 'flat'> = {
@@ -119,11 +127,10 @@ export function matchNews(
   // 방향. **모르는 값을 방향으로 바꾸지 않는다** — uncertain은 판단 보류다.
   const prediction = PREDICTION_OF[String(analysis.direction)];
 
-  // 영향도 계산
+  // 영향도 계산 — 관측 가능한 것만 넣는다
   const impact = calculateImpact({
     sourceName,
     prediction,
-    confidence: analysis.confidence,
     publishedAt,
     numAffectedAssets: analysis.affectedAssets?.length || 0,
   });
@@ -131,19 +138,16 @@ export function matchNews(
 
   // 알림 트리거.
   //
-  // 점수만으로 정하지 않는다. 영향도는 출처 신뢰도와 최신성만으로도 60점을
-  // 넘을 수 있어서(로이터 + 방금 나온 기사 + 다수 자산 = 64점), **확신도를
-  // 관측하지 못한 분석도 알림을 낼 수 있었다.** 그래서 관측 조건을 따로 건다:
-  //
-  //   · 방향을 실제로 말했는가 (판단 보류로 사람을 깨우지 않는다)
-  //   · 확신도를 실제로 관측했는가 (없는 값으로 깨우지 않는다)
-  //   · 영향도가 문턱을 넘는가
+  //   · 방향을 실제로 말했는가 — 판단 보류(uncertain)로 사람을 깨우지 않는다
+  //   · 영향도가 문턱을 넘는가 — 출처 신뢰도 · 최신성 · 영향 자산 수
   //   · 아직 안 본 뉴스인가
+  //
+  // 확신도는 조건에 없다. 한 번 넣었다가 뺐다 — 없는 값으로 깨우지 않으려고
+  // "확신도를 관측했는가"를 관문으로 걸었는데, 그러면 **보정되지 않은
+  // 자기평가 숫자가 알림 권한을 쥔다.** 화면에서 그 숫자를 지운 이유와
+  // 정면으로 어긋난다.
   const observedDirection = prediction === 'up' || prediction === 'down';
-  const observedConfidence = typeof analysis.confidence === 'number'
-    && Number.isFinite(analysis.confidence);
   const shouldNotify = observedDirection
-    && observedConfidence
     && impact.total >= 60
     && !hasSeen(newsId);
 

@@ -96,20 +96,40 @@ for (const f of ALL) {
   }
 }
 {
+  // 영향도는 **관측 가능한 것만** 쓴다. 모델 자기평가는 들어오지 않는다.
   const s = code(SOURCES);
-  if (/confidence\s*\?\?\s*\d/.test(s)) {
-    err(`${SOURCES}: confidence가 없을 때 숫자를 가정합니다 — 그 값이 알림 문턱을 넘깁니다`);
+  if (/confidence/.test(s)) {
+    err(`${SOURCES}: 영향도가 confidence를 참조합니다`
+      + ' — 보정되지 않은 자기평가 숫자가 알림 점수에 들어갑니다');
   }
-  if (!/confidence\?:\s*number\s*\|\s*null/.test(s)) {
-    err(`${SOURCES}: 영향도 입력의 confidence가 null을 허용하지 않습니다`);
+  const m = /interface CalcInput \{([\s\S]*?)\}/.exec(s);
+  if (!m) err(`${SOURCES}: 영향도 입력 타입을 찾지 못했습니다`);
+  else if (/confidence/.test(m[1])) {
+    err(`${SOURCES}: 영향도 입력에 confidence 자리가 있습니다 — 타입에서 없애야 합니다`);
   }
 }
 
-/* ── ③ 관측하지 못한 값으로 사람을 깨우지 않는다 ── */
+/* ── ③ 모델 자기평가가 알림 권한을 쥐지 않는다 ── */
+//
+// 한 번 반대로 잠글 뻔했다. "없는 값으로 깨우지 않으려고" 확신도 관측을
+// 알림 관문으로 걸었더니, **보정되지 않은 자기평가 숫자가 알림 권한을
+// 쥐는** 상태를 CI가 강제하게 됐다. 화면에서 그 숫자를 지운 이유와 정면으로
+// 어긋난다. 그래서 지금은 그 반대를 강제한다 — 알림 경로가 confidence를
+// **볼 수 없어야** 한다.
 {
   const s = code(MATCHER);
   if (/from\s+'\.\/types'/.test(s)) {
     err(`${MATCHER}: legacy 분석 타입을 다시 씁니다 — 정본 모양 하나만 받습니다`);
+  }
+  if (/analysis\.confidence|confidence\s*[:,]/.test(s)) {
+    err(`${MATCHER}: 알림 경로가 confidence를 봅니다`
+      + ' — 보정된 지표가 아니므로 알림 권한·점수 어디에도 들어가면 안 됩니다');
+  }
+  const mi = /export interface MatchAnalysis \{([\s\S]*?)\}/.exec(s);
+  if (!mi) err(`${MATCHER}: MatchAnalysis를 찾지 못했습니다`);
+  else if (/confidence/.test(mi[1])) {
+    err(`${MATCHER}: MatchAnalysis에 confidence 자리가 있습니다`
+      + ' — 타입에 두면 언젠가 씁니다. 없애세요');
   }
   const m = /const shouldNotify\s*=([\s\S]{0,400}?);/.exec(s);
   if (!m) err(`${MATCHER}: 알림 조건을 찾지 못했습니다`);
@@ -118,16 +138,12 @@ for (const f of ALL) {
     if (!/observedDirection/.test(cond)) {
       err(`${MATCHER}: 알림이 '방향을 실제로 말했는가'를 보지 않습니다 — 판단 보류로 사람을 깨웁니다`);
     }
-    if (!/observedConfidence/.test(cond)) {
-      err(`${MATCHER}: 알림이 '확신도를 관측했는가'를 보지 않습니다`
-        + ' — 출처 신뢰도와 최신성만으로 60점을 넘길 수 있습니다');
+    if (/confidence/.test(cond)) {
+      err(`${MATCHER}: 알림 조건에 confidence가 들어 있습니다`);
     }
     if (!/hasSeen\(/.test(cond)) err(`${MATCHER}: 이미 본 뉴스를 다시 알립니다`);
   }
-  // 관측 여부가 **실제 값 검사**여야 한다. 상수 true면 조건이 죽은 것이다.
-  if (!/const observedConfidence\s*=\s*typeof analysis\.confidence === 'number'/.test(s)) {
-    err(`${MATCHER}: 확신도 관측 여부가 실제 값 검사가 아닙니다`);
-  }
+  // 방향 관문이 **실제 값 검사**여야 한다. 상수 true면 조건이 죽은 것이다.
   if (!/const observedDirection\s*=\s*prediction === 'up'\s*\|\|\s*prediction === 'down'/.test(s)) {
     err(`${MATCHER}: 방향 관측 여부가 실제 값 검사가 아닙니다`);
   }
@@ -152,6 +168,33 @@ for (const [f, label] of [[VERDICT, 'AI 판정 띠'], [NEWSPG, '뉴스 화면']]
   if (!m) err(`${NEWSPG}: 알림 경로를 찾지 못했습니다`);
   else if (!/provenance !== 'LIVE'/.test(m[1])) {
     err(`${NEWSPG}: 알림이 예시(SAMPLE) 목록에서도 나갑니다`);
+  }
+  // **알림만 막는 것으로는 부족하다.**
+  //
+  // 저장된 분석은 URL로 잇는다. 예시 기사의 주소가 저장된 기사의 주소와
+  // 같으면 예시에 진짜 분석이 달라붙어, 화면에 "예시인데 AI가 상승이라고
+  // 했다"가 남는다. 계약은 분석 0 · 알림 0이다.
+  //
+  // 붙이는 자리가 셋이다(카드 · 상세 · 알림). 자리마다 조건을 적으면
+  // 언젠가 한 곳이 빠지므로, **결합 자체가 한 곳에만** 있어야 한다.
+  const binds = [...s.matchAll(/aiByUrl\s*\[/g)];
+  if (binds.length === 0) {
+    err(`${NEWSPG}: 저장된 분석을 읽는 곳을 찾지 못했습니다`);
+  } else if (binds.length > 1) {
+    err(`${NEWSPG}: 저장된 분석을 ${binds.length}곳에서 직접 붙입니다`
+      + ' — storedFor() 한 곳으로 모으세요. 자리가 늘면 관문이 빠집니다');
+  } else {
+    const from = Math.max(0, binds[0].index - 200);
+    if (!/provenance === 'LIVE'/.test(s.slice(from, binds[0].index))) {
+      err(`${NEWSPG}: 저장된 분석을 출처 확인 없이 붙입니다`
+        + ' — 예시(SAMPLE) 기사에 진짜 분석이 달라붙습니다');
+    }
+  }
+  // 표시·알림이 그 한 곳을 실제로 거치는가
+  const uses = (s.match(/storedFor\(/g) || []).length;
+  if (uses < 3) {
+    err(`${NEWSPG}: storedFor()를 거치지 않고 분석을 붙이는 곳이 있습니다`
+      + ` — 카드 · 상세 · 알림 세 곳을 기대하는데 ${uses}곳입니다`);
   }
 }
 {

@@ -73,63 +73,75 @@ export function runNewsTruthTests() {
     eq(r.value!.confidence, 30);
   });
 
-  // ── ② 영향도가 confidence를 가정하지 않는다 ──
-  test('confidence가 없으면 50으로 가정하지 않는다', () => {
+  // ── ② 영향도에 모델 자기평가가 들어가지 않는다 ──
+  test('영향도 입력에 confidence를 넣을 자리가 없다', () => {
+    // 타입에서 없앴다. 값을 넣어도 점수가 달라지지 않는다.
     const base = {
-      sourceName: 'Reuters',
-      prediction: 'up' as const,
-      publishedAt: Date.now(),
-      numAffectedAssets: 3,
+      sourceName: 'Reuters', prediction: 'up' as const,
+      publishedAt: Date.now(), numAffectedAssets: 3,
     };
-    const withNull = calculateImpact({ ...base, confidence: null });
-    const withFifty = calculateImpact({ ...base, confidence: 50 });
-    assert(withNull.total !== withFifty.total,
-      `confidence 없음이 50과 같은 점수를 냈다 (${withNull.total})`);
-    assert(withNull.total < withFifty.total, '없는 값이 더 높은 점수를 냈다');
+    const a = calculateImpact({ ...base, ...({ confidence: 5 } as any) });
+    const b = calculateImpact({ ...base, ...({ confidence: 95 } as any) });
+    const c = calculateImpact(base);
+    eq(a.total, c.total);
+    eq(b.total, c.total);
   });
 
-  test('확신도가 없으면 방향에 강도 몫을 주지 않는다 — 보합과 같다', () => {
+  test('방향이 있어도 강도를 매기지 않는다 — 보합과 같은 몫', () => {
     const at = Date.now();
-    const noConf = calculateImpact({
-      sourceName: 'Reuters', prediction: 'up', confidence: null,
-      publishedAt: at, numAffectedAssets: 9,
+    const up = calculateImpact({
+      sourceName: 'Reuters', prediction: 'up', publishedAt: at, numAffectedAssets: 9,
     });
     const flat = calculateImpact({
-      sourceName: 'Reuters', prediction: 'flat', confidence: null,
-      publishedAt: at, numAffectedAssets: 9,
+      sourceName: 'Reuters', prediction: 'flat', publishedAt: at, numAffectedAssets: 9,
     });
-    eq(noConf.sentiment, flat.sentiment);
+    eq(up.sentiment, flat.sentiment);
+    eq(up.total, flat.total);
   });
 
-  test('영향도 점수만으로는 알림을 막지 못한다 — 그래서 matchNews가 관측을 요구한다', () => {
-    // 로이터 + 방금 나온 기사 + 다수 자산이면 확신도가 없어도 60점을 넘는다.
-    // 점수 함수를 비틀어 맞추는 대신, 알림 조건에서 관측 여부를 본다.
+  test('영향도 설명에 확신도를 적지 않는다', () => {
     const imp = calculateImpact({
-      sourceName: 'Reuters', prediction: 'up', confidence: null,
-      publishedAt: Date.now(), numAffectedAssets: 9,
-    });
-    assert(imp.total >= 60, `이 시험의 전제가 깨졌다 (${imp.total}점)`);
-  });
-
-  test('영향도 설명에 확신도 %를 적지 않는다', () => {
-    const imp = calculateImpact({
-      sourceName: 'Reuters', prediction: 'up', confidence: 73,
+      sourceName: 'Reuters', prediction: 'up',
       publishedAt: Date.now(), numAffectedAssets: 1,
     });
     const joined = imp.reasoning.join(' ');
     assert(!/신뢰도\s*\d+%/.test(joined), `설명에 확신도 %가 남아 있다: ${joined}`);
+    assert(!/확신도\s*\d/.test(joined), `설명에 확신도 숫자가 남아 있다: ${joined}`);
   });
 
-  // ── ③ 판단 보류로 알리지 않는다 ──
-  const ASSETS = new Set(['BTC']);
-  const strong: MatchAnalysis = {
-    direction: 'bullish', confidence: 95, affectedAssets: ['BTC'],
-  };
+  test('관측 가능한 것은 여전히 점수에 든다 — 출처·최신성', () => {
+    const at = Date.now();
+    const good = calculateImpact({ sourceName: 'Reuters', prediction: 'up', publishedAt: at });
+    const old = calculateImpact({
+      sourceName: 'Reuters', prediction: 'up', publishedAt: at - 1000 * 60 * 60 * 24 * 30,
+    });
+    assert(good.total > old.total, '최신성이 점수에 반영되지 않는다');
+  });
 
-  test('방향과 확신도가 있으면 알림 후보가 된다 — 기준선', () => {
+  // ── ③ 알림 권한이 모델 자기평가에 걸리지 않는다 ──
+  const ASSETS = new Set(['BTC']);
+  const strong: MatchAnalysis = { direction: 'bullish', affectedAssets: ['BTC'] };
+
+  test('방향이 있고 영향도가 문턱을 넘으면 알림 후보다 — 기준선', () => {
     const m = matchNews('n-strong', strong, 'Reuters', Date.now(), ASSETS);
     assert(!!m, '매칭 자체가 안 됐다');
     assert(m!.shouldNotify, `알림 후보가 아니다 (영향도 ${m!.impactScore})`);
+  });
+
+  test('confidence 5와 95의 판정이 같다 — 모델 자기평가는 알림 권한이 아니다', () => {
+    const at = Date.now();
+    const low  = matchNews('n-c', { ...strong, ...({ confidence: 5 } as any) }, 'Reuters', at, ASSETS);
+    const high = matchNews('n-c', { ...strong, ...({ confidence: 95 } as any) }, 'Reuters', at, ASSETS);
+    const none = matchNews('n-c', strong, 'Reuters', at, ASSETS);
+    eq(low!.shouldNotify, none!.shouldNotify);
+    eq(high!.shouldNotify, none!.shouldNotify);
+    eq(low!.impactScore, none!.impactScore);
+    eq(high!.impactScore, none!.impactScore);
+  });
+
+  test('확신도가 없다고 알림을 막지 않는다 — 관측 여부가 권한이 아니다', () => {
+    const m = matchNews('n-noconf', strong, 'Reuters', Date.now(), ASSETS);
+    assert(m!.shouldNotify, '확신도가 없다는 이유로 알림이 막혔다');
   });
 
   test('uncertain은 알리지 않는다', () => {
@@ -145,10 +157,10 @@ export function runNewsTruthTests() {
     assert(!m!.shouldNotify, '방향이 없는데 알림이 나간다');
   });
 
-  test('확신도가 없으면 알리지 않는다', () => {
-    const m = matchNews('n-noconf', { ...strong, confidence: null },
-      'Reuters', Date.now(), ASSETS);
-    assert(!m!.shouldNotify, '확신도가 없는데 알림이 나간다');
+  test('오래된 기사는 알리지 않는다 — 관측 가능한 것이 판정한다', () => {
+    const old = Date.now() - 1000 * 60 * 60 * 24 * 30;
+    const m = matchNews('n-old', strong, 'Reuters', old, ASSETS);
+    assert(!m!.shouldNotify, `오래된 기사가 알림 문턱을 넘었다 (${m!.impactScore})`);
   });
 
   test('내 자산이 아니면 매칭하지 않는다', () => {

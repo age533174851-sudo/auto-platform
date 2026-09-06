@@ -104,25 +104,62 @@ CI가 강제한다.
 `calculateImpact`의 `?? 50`도 없앴다. 방향은 있는데 확신도를 관측하지
 못했으면 강도 몫을 주지 않는다(보합과 같은 10점).
 
-### ③ 관측하지 못한 값으로 깨우지 않는다
+### ③ 모델 자기평가가 알림 권한을 쥐지 않는다
 
-여기서 **내 시험이 구멍을 하나 잡았다.** 확신도를 0으로도 50으로도 만들지
-않게 고쳤는데도, 로이터 + 방금 나온 기사 + 다수 자산이면 출처 신뢰도와
-최신성만으로 **64점**이 나와 알림 문턱(60)을 넘었다. 점수 함수를 비틀어
-맞추는 대신 알림 조건에서 관측 여부를 본다.
+여기를 **두 번 고쳤다.** 첫 번째는 틀린 방향이었다.
+
+처음에는 "없는 값으로 깨우지 않으려고" 확신도 관측을 알림 관문으로 걸었다.
 
 ```ts
-const observedDirection  = prediction === 'up' || prediction === 'down';
-const observedConfidence = typeof analysis.confidence === 'number'
-  && Number.isFinite(analysis.confidence);
-const shouldNotify = observedDirection && observedConfidence
-  && impact.total >= 60 && !hasSeen(newsId);
+// 첫 시도 — 틀렸다
+const observedConfidence = typeof analysis.confidence === 'number' && …;
+const shouldNotify = observedDirection && observedConfidence && impact.total >= 60 && …;
 ```
 
-`uncertain`은 판단 보류다. 방향으로 읽어 사람을 깨우지 않는다.
+그런데 이것은 **보정되지 않은 자기평가 숫자에게 알림 권한을 준다.**
+`calculateImpact`도 그 숫자를 최대 50점으로 환산하고 있었다. 화면에서
+`72%`를 지운 이유가 "모델이 스스로 매긴 값이고 확률이 아니다"인데,
+화면에서만 지우고 알림 판정에는 그대로 쓰면 **표시만 안 할 뿐 여전히
+그 숫자가 사람을 깨운다.**
+
+그래서 confidence를 알림 경로에서 **구조적으로** 없앴다 — 주석으로
+"쓰지 말자"고 적는 것이 아니라, 타입에서 지워 **볼 수 없게** 했다.
+
+```diff
+  export interface MatchAnalysis {
+    direction: string | null;
+-   confidence: number | null;
+    affectedAssets?: string[] | null;
+  }
+
+  interface CalcInput {
+    sourceName?:  string;
+    prediction?:  'up' | 'down' | 'flat';
+-   confidence?:  number | null;
+    publishedAt?: number;
+    numAffectedAssets?: number;
+  }
+```
+
+```ts
+const observedDirection = prediction === 'up' || prediction === 'down';
+const shouldNotify = observedDirection && impact.total >= 60 && !hasSeen(newsId);
+```
+
+영향도는 이제 **관측 가능한 것만** 쓴다 — 출처 신뢰도 · 최신성 · 영향
+자산 수. 방향은 점수 크기에 영향을 주지 않고(`DIRECTION_POINTS = 10`
+고정), 있고 없고만 관문에서 본다. `uncertain`은 판단 보류라 사람을
+깨우지 않는다.
+
+**새 공식을 만들지 않았다.** `DIRECTION_POINTS = 10`은 발명한 숫자가
+아니라 이미 코드에 있던 하한값(확신도를 관측하지 못했을 때 주던 값)을
+그대로 상수로 옮긴 것이다. 올리려면 보정된 적중률이 먼저다.
+
+confidence 값 자체는 `news_articles`에 그대로 남는다 — 저장은 하되
+판단에는 0 영향이다.
 
 `matcher.ts`는 legacy `NewsAnalysis` 대신 정본 모양(`MatchAnalysis` —
-`direction` · `confidence` · `affectedAssets`)만 받는다.
+`direction` · `affectedAssets`)만 받는다.
 
 ### ④ 확신도 %를 화면에서 뺐다
 
@@ -153,6 +190,26 @@ const shouldNotify = observedDirection && observedConfidence
 나간다. `/api/news`의 기본 분기(`route.ts:50`)에는 `source` 필드가 아예
 없었다 — 받는 쪽이 판정할 값 자체가 없었다. 붙였다.
 
+**알림만 막는 것으로는 부족했다.** 저장된 분석은 URL로 잇기 때문에, 예시
+기사의 주소가 저장된 기사의 주소와 같으면 예시에 진짜 분석이 달라붙는다.
+그러면 화면에 "예시인데 AI가 상승이라고 했다"가 남는다 — 계약은 분석 0 ·
+알림 0이다.
+
+붙이는 자리가 셋이라(카드 · 상세 · 알림) 조건을 자리마다 적으면 언젠가
+한 곳이 빠진다. 그래서 결합 자체를 한 곳에만 둔다.
+
+```ts
+const storedFor = useCallback(
+  (url?: string): AiVerdictData | undefined =>
+    (provenance === 'LIVE' && url) ? aiByUrl[String(url)] : undefined,
+  [provenance, aiByUrl],
+);
+```
+
+검사기는 `aiByUrl[…]` 결합이 **한 곳뿐이고 그 한 곳이 LIVE 관문 뒤에
+있는지**를 본다. 예시 기사의 상세에는 "예시로 보여 주는 기사입니다 —
+AI 분석 대상이 아닙니다"라고 적는다.
+
 ## 감사 기록 — `newsImportance()`
 
 **DERIVED_HEURISTIC. 표시 전용이고 권위값이 아니다.**
@@ -180,12 +237,18 @@ const shouldNotify = observedDirection && observedConfidence
 | ② | `schema.ts`가 confidence 없을 때 숫자를 **대입** (문구가 아니라 대입을 본다) |
 | ② | `confidence` 타입이 null을 허용하지 않음 |
 | ② | `sources.ts`에 `confidence ?? <숫자>` |
-| ③ | 알림 조건에 `observedDirection` · `observedConfidence` · `hasSeen` 누락 |
-| ③ | 관측 판정이 **실제 값 검사가 아님** (`= true`로 죽이기) |
+| ③ | 알림 조건에 `observedDirection` · `hasSeen` 누락 |
+| ③ | 방향 관문이 **실제 값 검사가 아님** (`= true`로 죽이기) |
+| ③ | **알림 경로가 `confidence`를 봄** — `MatchAnalysis`·`CalcInput`의 필드 포함 |
 | ③ | `matcher.ts`가 legacy 타입을 다시 import |
 | ④ | 화면이 확신도를 `%`로 그림 |
 | ⑤ | `NewsPage`가 출처를 안 읽음 · 알림에 LIVE 게이트 없음 |
+| ⑤ | 저장 분석 결합이 **2곳 이상**이거나 LIVE 관문 뒤가 아님 |
 | ⑤ | `/api/news`가 뉴스를 주면서 `source`를 안 붙임 |
+
+검사기가 한 번 **잘못된 정책을 잠갔다.** 첫 판에서 `observedConfidence`를
+알림 조건에 **필수**로 요구했는데, 그것은 보정되지 않은 자기평가 숫자가
+알림 권한을 쥐는 상태를 CI가 강제하는 것이었다. 지금은 그 반대를 강제한다.
 
 ## 이 PR이 하지 않는 것
 
@@ -198,3 +261,15 @@ const shouldNotify = observedDirection && observedConfidence
 - `newsapi.ts:62` `id: String(i)` — 번역·분석 캐시 키 충돌의 뿌리
 - 번역 경로 통합 (홈 · 우측 레일이 아직 영어 원문)
 - `/api/translate` public + rate limit (기존 limiter 재사용, 새로 만들지 않음)
+
+## 이 PR과 #244가 겹치는 파일
+
+제품 파일은 겹치지 않지만 **파일이 하나도 안 겹치는 것은 아니다.**
+
+```
+.github/workflows/ci.yml     두 PR 모두 검사기 단계를 추가한다
+scripts/run-tests.mjs        두 PR 모두 시험 스위트를 등록한다
+```
+
+먼저 머지되는 쪽이 base를 바꾸므로, **나중 PR은 새 main 기준으로 재정합하고
+새 exact-head CI를 받아야 한다.**

@@ -203,6 +203,23 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
     });
   }, [news, search]);
 
+  /**
+   * 저장된 AI 분석을 기사에 붙인다. **실물(LIVE) 목록에서만.**
+   *
+   * URL로 잇기 때문에, 예시(SAMPLE) 기사의 주소가 저장된 기사의 주소와
+   * 같으면 예시에 진짜 분석이 달라붙는다. 알림만 막고 표시를 열어 두면
+   * "예시인데 AI가 상승이라고 했다"가 화면에 남는다 — 계약은 분석 0 ·
+   * 알림 0이다.
+   *
+   * 붙이는 자리가 셋이라(카드 · 상세 · 알림) 판단을 여기 한 곳에만 둔다.
+   * 세 곳에 같은 조건을 적으면 언젠가 한 곳이 빠진다.
+   */
+  const storedFor = useCallback(
+    (url?: string): AiVerdictData | undefined =>
+      (provenance === 'LIVE' && url) ? aiByUrl[String(url)] : undefined,
+    [provenance, aiByUrl],
+  );
+
   // 앱 언어 → 보이는 뉴스 번역 (제목/요약), 언어별 캐싱
   useEffect(() => {
     let lang = 'ko';
@@ -270,7 +287,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
 
     const items = filtered
-      .map(n => ({ n, a: n.url ? aiByUrl[String(n.url)] : undefined }))
+      .map(n => ({ n, a: storedFor(n.url) }))
       .filter((x): x is { n: typeof x.n; a: AiVerdictData } => !!x.n.id && !!x.a && x.a.analyzed)
       .map(({ n, a }) => ({
         id: n.id!,
@@ -278,7 +295,6 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         publishedAt: typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined),
         analysis: {
           direction: a.direction,
-          confidence: a.confidence,
           affectedAssets: a.affectedAssets ?? [],
         },
       }));
@@ -289,7 +305,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       const news = filtered.find(n => n.id === m.newsId);
       if (news) triggerNotification(m, news.title || '뉴스 알림');
     }
-  }, [aiByUrl, filtered, provenance]);
+  }, [aiByUrl, filtered, provenance, storedFor]);
 
   // ── 자산 태그 클릭 → 매매 페이지 ──
   const openAssetTag = (symbol: string) => {
@@ -307,7 +323,13 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   // ─────────────────────────────────────────────────
   if (selected) {
     // 저장된 분석 하나만 본다. 화면은 분석을 만들지 않는다.
-    const an: AiVerdictData | undefined = selected.url ? aiByUrl[String(selected.url)] : undefined;
+    //
+    // **예시(SAMPLE) 기사에는 붙이지 않는다.** URL로 잇기 때문에, 예시
+    // 기사의 주소가 저장된 기사의 주소와 우연히 같으면 예시에 진짜 분석이
+    // 달라붙는다. 알림만 막고 표시를 열어 두면 "예시인데 AI가 상승이라고
+    // 했다"가 화면에 남는다 — 계약은 분석 0 · 알림 0이다.
+    const an = storedFor(selected.url);
+    const isSample = provenance === 'SAMPLE';
     return (
       <div style={PAGE_STYLE}>
         <button onClick={() => setSelected(null)}
@@ -357,6 +379,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
               <div style={F.muted}>
                 {an?.analyzed
                   ? `${an.aiProvider || '모델'}${an.aiModel ? ` · ${an.aiModel}` : ''} 분석`
+                  : isSample ? '예시 기사 — 분석 없음'
                   : aiUnavailable ? 'AI 분석 사용 불가' : 'AI 분석 대기'}
               </div>
             </div>
@@ -365,9 +388,11 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
           {/* 없는 분석을 채우지 않는다. 왜 없는지만 적는다. */}
           {!an?.analyzed && (
             <div style={F.muted}>
-              {aiUnavailable
-                ? aiUnavailable
-                : '수집은 됐지만 아직 분석 전입니다 — 분석이 끝나면 여기에 채워집니다.'}
+              {isSample
+                ? '예시로 보여 주는 기사입니다 — AI 분석 대상이 아닙니다.'
+                : aiUnavailable
+                  ? aiUnavailable
+                  : '수집은 됐지만 아직 분석 전입니다 — 분석이 끝나면 여기에 채워집니다.'}
             </div>
           )}
 
@@ -564,7 +589,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
             // 크론이 저장한 분석을 먼저 쓴다. 화면에서 즉석 분석한 것보다
             // 검증을 거친 값이다 — 근거 없는 단정이 걸러졌고 원문 URL도
             // 모델이 지어낸 것이 아니라 수집한 값으로 대조됐다.
-            const stored = n.url ? aiByUrl[String(n.url)] : undefined;
+            const stored = storedFor(n.url);
             const displayTitle = stored?.titleKo || _tc?.title || n.title;
             const displaySummary = stored?.summary || _tc?.summary;
             // 영향도는 **저장된 분석이 있을 때만** 계산한다. 없으면 없는 것이다 —
@@ -575,7 +600,6 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                   prediction: stored.direction === 'bullish' ? 'up'
                     : stored.direction === 'bearish' ? 'down'
                     : stored.direction === 'neutral' ? 'flat' : undefined,
-                  confidence: stored.confidence,
                   publishedAt: typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined),
                   numAffectedAssets: stored.affectedAssets?.length || 0,
                 })
