@@ -488,6 +488,12 @@ jobs:
       - name: 인증 정본 하나 (legacy 키를 읽지 않는다)
         run: node scripts/check-legacy-auth-key.mjs
 
+      # 뉴스 분석이 관측한 것만 말하는가. 분석 경로가 둘이었고, 그중 하나는
+      # 호출이 실패하면 키워드와 id 해시로 confidence를 만들어 채웠다. 그
+      # 값이 영향도 점수에 들어가 브라우저 알림 문턱을 넘겼다.
+      - name: 뉴스 분석 사실성 (정본 하나 · 지어낸 값 없음)
+        run: node scripts/check-news-truth.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

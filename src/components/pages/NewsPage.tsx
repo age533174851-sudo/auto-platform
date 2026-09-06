@@ -13,11 +13,10 @@ import { formatNewsDate } from '@/lib/format';
 import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
-import { analyzeNewsBatch, loadCachedAnalysis } from '@/lib/news/analyzer';
-import type { AnalyzedNews, NewsAnalysis, NewsPrediction, RawNews } from '@/lib/news/types';
-import { PREDICTION_LABEL } from '@/lib/news/types';
+import type { AnalyzedNews, RawNews } from '@/lib/news/types';
 import { calculateImpact, impactLevel, getSourceInfo, TIER_COLOR, TIER_LABEL } from '@/lib/news/sources';
 import { batchMatchNews, triggerNotification, markSeen } from '@/lib/news/matcher';
+import { provenanceOf, type NewsProvenance } from '@/lib/news/feed';
 
 const CATS = ['전체','코인','주식','ETF','매크로','국내','AI/테크','에너지'];
 const CAT_TO_API: Record<string, string> = {
@@ -31,9 +30,11 @@ const CAT_TO_API: Record<string, string> = {
   '에너지': 'energy',
 };
 
-// 예측별 색상 매핑
-const predColor = (p: NewsPrediction): string =>
-  p === 'up' ? T.grn : p === 'down' ? T.red : T.ylw;
+// 저장된 분석의 방향별 색상. **정본과 같은 네 값을 쓴다** —
+// bullish · bearish · neutral · uncertain. 화면에서 uncertain을 빼고 셋으로
+// 그리면 모델이 "모르겠다"고 한 것이 "보합 전망"으로 둔갑한다.
+const dirColor = (d: string | null | undefined): string =>
+  d === 'bullish' ? T.grn : d === 'bearish' ? T.red : d === 'uncertain' ? T.ylw : T.sub;
 
 // ── 중요도 별점 (AI 분석 없이도 출처·최신성·감성·영향종목수로 산출) ──
 function newsImportance(n: any, impactTotal?: number): number {
@@ -61,37 +62,23 @@ function StarRow({ n: count, size = 11 }: { n: number; size?: number }) {
   );
 }
 
-function PredictionBadge({ prediction, confidence, compact }: { prediction: NewsPrediction; confidence: number; compact?: boolean }) {
-  const color = predColor(prediction);
-  const Icon = prediction === 'up' ? TrendingUp : prediction === 'down' ? TrendingDown : Minus;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 4,
-      padding: compact ? '3px 8px' : '5px 10px',
-      background: color + '22',
-      border: `1px solid ${color}55`,
-      borderRadius: R.pill,
-      color, fontWeight: 800,
-      fontSize: compact ? 10 : 11,
-      whiteSpace: 'nowrap',
-    }}>
-      <Icon size={compact ? 11 : 13} strokeWidth={IC_STROKE} />
-      {PREDICTION_LABEL[prediction]} {confidence}%
-    </span>
-  );
-}
+// PredictionBadge와 ConfidenceBar는 없앴다.
+//
+// 둘 다 `confidence`를 "상승 예상 73%" · 채워진 막대로 그렸다. 그 숫자는
+// **모델이 스스로 매긴 값**이고 과거 적중률로 보정된 적이 없다 — 상승 확률이
+// 아니다. 그런데 %와 막대로 그리면 사람은 확률로 읽는다. 방향·근거·위험·
+// 분석 모델만 적는 `AiVerdict`가 그 자리를 대신한다.
 
-function ConfidenceBar({ value, color }: { value: number; color: string }) {
-  return (
-    <div style={{ height: 4, background: T.bg, borderRadius: 2, overflow: 'hidden' }}>
-      <div style={{ width: `${value}%`, height: '100%', background: color, transition: 'width .3s' }} />
-    </div>
-  );
-}
-
-function AssetTag({ symbol, direction, onClick }: { symbol: string; direction: NewsPrediction; onClick?: () => void }) {
-  const color = predColor(direction);
-  const Icon = direction === 'up' ? TrendingUp : direction === 'down' ? TrendingDown : Minus;
+/**
+ * 영향 자산 칩. 탭하면 매매 화면으로 간다.
+ *
+ * 방향은 **저장된 분석이 자산별로 말한 경우에만** 그린다. 예전에는 기사
+ * 전체의 예측을 자산마다 복사해 붙였는데, 그러면 "이 뉴스는 상승"이
+ * "BTC 상승·ETH 상승·SOL 상승"이라는 세 개의 판단으로 불어난다.
+ */
+function AssetTag({ symbol, direction, onClick }: { symbol: string; direction?: string | null; onClick?: () => void }) {
+  const color = direction ? dirColor(direction) : T.border;
+  const Icon = direction === 'bullish' ? TrendingUp : direction === 'bearish' ? TrendingDown : Minus;
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick?.(); }}
@@ -121,15 +108,17 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
   const [selected,   setSelected]   = useState<AnalyzedNews | null>(null);
-  const [analyses,   setAnalyses]   = useState<Record<string, NewsAnalysis>>({});
-  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
   const [transCache, setTransCache] = useState<Record<string, { title?: string; summary?: string }>>({});
+  // 이 목록이 실물인가 예시인가. **예시는 분석·알림에 넣지 않는다.**
+  const [provenance, setProvenance] = useState<NewsProvenance>('LOADING');
   // 크론이 저장해 둔 AI 분석. 화면에서 다시 부르지 않는다 — 열 때마다
   // 분석하면 사람 수만큼 요금이 곱해진다.
   //
   // URL로 맞춘다. 실시간 피드와 저장본은 id 체계가 달라서 id로는 못 잇는다.
   const [aiByUrl, setAiByUrl] = useState<Record<string, AiVerdictData>>({});
   const [aiNote, setAiNote] = useState<string>('');
+  /** 분석을 **할 수 없는** 상태의 사유. '아직 안 함'과 다른 말이다 */
+  const [aiUnavailable, setAiUnavailable] = useState<string>('');
 
   useEffect(() => {
     let alive = true;
@@ -141,9 +130,11 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         if (!r.ok || !j?.ok) {
           // 왜 분석이 안 붙는지 화면에 남긴다. 조용히 비워 두면
           // 사용자는 AI가 판단을 안 한 것으로 오해한다.
-          setAiNote(j?.needsMigration
+          const why = j?.needsMigration
             ? 'AI 분석 저장소가 아직 설정되지 않았습니다 (마이그레이션 019 필요)'
-            : (j?.message || '저장된 AI 분석을 읽지 못했습니다'));
+            : (j?.message || '저장된 AI 분석을 읽지 못했습니다');
+          setAiNote(why);
+          setAiUnavailable(why);
           return;
         }
         const map: Record<string, AiVerdictData> = {};
@@ -154,7 +145,9 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         setAiNote(j.analyzedCount === 0 && j.total > 0
           ? '수집은 됐지만 아직 분석 전입니다 — 분석 크론이 돌면 채워집니다' : '');
       } catch (e: any) {
-        if (alive) setAiNote('저장된 AI 분석을 읽지 못했습니다');
+        if (!alive) return;
+        setAiNote('저장된 AI 분석을 읽지 못했습니다');
+        setAiUnavailable('저장된 AI 분석을 읽지 못했습니다');
       }
     })();
     return () => { alive = false; };
@@ -174,6 +167,8 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       });
       if (seq !== fetchSeqRef.current) return; // stale
       const d = await r.json();
+      // **출처를 읽는다.** 이걸 안 읽어서 예시 기사가 분석·알림으로 흘렀다.
+      setProvenance(provenanceOf(d?.source));
       const raw: RawNews[] = Array.isArray(d.news) ? d.news : (Array.isArray(d) ? d : []);
       // id 보강
       const normalized: AnalyzedNews[] = raw.map((n, i) => ({
@@ -181,19 +176,12 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
         id: n.id || `${n.source || 'src'}_${n.time || i}_${(n.title || '').slice(0, 20)}`,
       }));
       setNews(normalized);
-
-      // 캐시에서 즉시 채울 수 있는 것
-      const fromCache: Record<string, NewsAnalysis> = {};
-      for (const n of normalized) {
-        const c = loadCachedAnalysis(n.id || '');
-        if (c) fromCache[n.id || ''] = c;
-      }
-      if (Object.keys(fromCache).length > 0) setAnalyses(p => ({ ...p, ...fromCache }));
     } catch (e) {
       if (seq !== fetchSeqRef.current) return;
       console.warn('[news] fetch failed', e);
       setError('뉴스를 불러오지 못했습니다.');
       setNews([]);
+      setProvenance('ERROR');
     } finally {
       if (seq === fetchSeqRef.current) setLoading(false);
     }
@@ -214,6 +202,23 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       return tickers.some(t => t.toLowerCase().includes(s));
     });
   }, [news, search]);
+
+  /**
+   * 저장된 AI 분석을 기사에 붙인다. **실물(LIVE) 목록에서만.**
+   *
+   * URL로 잇기 때문에, 예시(SAMPLE) 기사의 주소가 저장된 기사의 주소와
+   * 같으면 예시에 진짜 분석이 달라붙는다. 알림만 막고 표시를 열어 두면
+   * "예시인데 AI가 상승이라고 했다"가 화면에 남는다 — 계약은 분석 0 ·
+   * 알림 0이다.
+   *
+   * 붙이는 자리가 셋이라(카드 · 상세 · 알림) 판단을 여기 한 곳에만 둔다.
+   * 세 곳에 같은 조건을 적으면 언젠가 한 곳이 빠진다.
+   */
+  const storedFor = useCallback(
+    (url?: string): AiVerdictData | undefined =>
+      (provenance === 'LIVE' && url) ? aiByUrl[String(url)] : undefined,
+    [provenance, aiByUrl],
+  );
 
   // 앱 언어 → 보이는 뉴스 번역 (제목/요약), 언어별 캐싱
   useEffect(() => {
@@ -252,58 +257,46 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
     });
   }, [filtered, transCache]);
 
-  // 화면에 보이는 상위 5개 자동 분석
-  useEffect(() => {
-    if (filtered.length === 0) return;
-    const needAnalyze = filtered
-      .slice(0, 5)
-      .filter(n => n.id && !analyses[n.id] && !analyzingIds.has(n.id));
-    if (needAnalyze.length === 0) return;
-
-    const ids = needAnalyze.map(n => n.id!).filter(Boolean);
-    setAnalyzingIds(prev => {
-      const next = new Set(prev);
-      for (const id of ids) next.add(id);
-      return next;
-    });
-
-    (async () => {
-      const results = await analyzeNewsBatch(needAnalyze.map(n => ({
-        id:       n.id!,
-        title:    n.title || '',
-        summary:  n.summary || n.content || '',
-        tickers:  Array.isArray(n.tickers) ? n.tickers : [],
-        category: n.category,
-      })));
-      setAnalyses(prev => ({ ...prev, ...results }));
-      setAnalyzingIds(prev => {
-        const next = new Set(prev);
-        for (const id of ids) next.delete(id);
-        return next;
-      });
-    })().catch(e => {
-      console.warn('[news] analyze batch failed', e);
-      setAnalyzingIds(prev => {
-        const next = new Set(prev);
-        for (const id of ids) next.delete(id);
-        return next;
-      });
-    });
-  }, [filtered, analyses, analyzingIds]);
+  // 화면에서 AI를 부르지 않는다
+  // ───────────────────────────
+  // 여기 있던 두 효과(상위 5개 자동 분석 · 기사 선택 시 즉시 분석)를 없앴다.
+  //
+  // 그 경로는 `/api/news/analyze`를 불렀고, 그 라우트와 브라우저 쪽
+  // `analyzer.ts`는 **둘 다** 호출이 실패하거나 키가 없으면 `mockAnalyze()`로
+  // 값을 채웠다. 그 값은 키워드 개수와 id 해시로 만든 것이라 관측이 아니다:
+  //
+  //     confidence = 50 + diff*8 + min(15, signals*2) + (hash(id) % 11 - 5)
+  //
+  // 그렇게 만든 confidence가 아래 알림 문턱(영향도 60점)을 넘기면 브라우저
+  // 알림이 나갔다. 게다가 그 결과는 sessionStorage에 24시간 저장됐고,
+  // 캐시에서 다시 읽을 때 `source`가 'cache'로 덮여 **지어낸 값이라는
+  // 표시까지 사라졌다.**
+  //
+  // 저장된 분석(`/api/news/stored` ← `analyzeOne` ← `news_articles`)이 이미
+  // 정본이고, 그쪽은 원문만 근거로 쓰고 실패하면 값을 만들지 않는다.
+  // 화면은 그것을 읽기만 한다 — 열 때마다 분석하면 사람 수만큼 요금이
+  // 곱해진다는 것도 같은 이유다.
 
   // 관심종목 매칭 + 영향도 높은 뉴스 자동 알림
+  //
+  // **저장된 분석만 쓴다.** 예시(SAMPLE) 기사로는 알리지 않는다.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (Object.keys(analyses).length === 0) return;
+    if (provenance !== 'LIVE') return;
+    if (Object.keys(aiByUrl).length === 0) return;
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
 
     const items = filtered
-      .filter(n => n.id && analyses[n.id])
-      .map(n => ({
+      .map(n => ({ n, a: storedFor(n.url) }))
+      .filter((x): x is { n: typeof x.n; a: AiVerdictData } => !!x.n.id && !!x.a && x.a.analyzed)
+      .map(({ n, a }) => ({
         id: n.id!,
         sourceName: n.source,
         publishedAt: typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined),
-        analysis: analyses[n.id!],
+        analysis: {
+          direction: a.direction,
+          affectedAssets: a.affectedAssets ?? [],
+        },
       }));
 
     const { notifications } = batchMatchNews(items);
@@ -312,25 +305,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
       const news = filtered.find(n => n.id === m.newsId);
       if (news) triggerNotification(m, news.title || '뉴스 알림');
     }
-  }, [analyses, filtered]);
-
-  // 선택된 뉴스가 아직 분석 안 됐으면 즉시 분석
-  useEffect(() => {
-    if (!selected || !selected.id) return;
-    if (analyses[selected.id] || analyzingIds.has(selected.id)) return;
-    const id = selected.id;
-    setAnalyzingIds(p => { const n = new Set(p); n.add(id); return n; });
-    analyzeNewsBatch([{
-      id, title: selected.title || '',
-      summary: selected.summary || selected.content || '',
-      tickers: Array.isArray(selected.tickers) ? selected.tickers : [],
-      category: selected.category,
-    }]).then(results => {
-      setAnalyses(prev => ({ ...prev, ...results }));
-    }).finally(() => {
-      setAnalyzingIds(p => { const n = new Set(p); n.delete(id); return n; });
-    });
-  }, [selected, analyses, analyzingIds]);
+  }, [aiByUrl, filtered, provenance, storedFor]);
 
   // ── 자산 태그 클릭 → 매매 페이지 ──
   const openAssetTag = (symbol: string) => {
@@ -347,8 +322,14 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
   // 상세 화면
   // ─────────────────────────────────────────────────
   if (selected) {
-    const an = selected.id ? analyses[selected.id] : undefined;
-    const isAnalyzing = selected.id ? analyzingIds.has(selected.id) : false;
+    // 저장된 분석 하나만 본다. 화면은 분석을 만들지 않는다.
+    //
+    // **예시(SAMPLE) 기사에는 붙이지 않는다.** URL로 잇기 때문에, 예시
+    // 기사의 주소가 저장된 기사의 주소와 우연히 같으면 예시에 진짜 분석이
+    // 달라붙는다. 알림만 막고 표시를 열어 두면 "예시인데 AI가 상승이라고
+    // 했다"가 화면에 남는다 — 계약은 분석 0 · 알림 0이다.
+    const an = storedFor(selected.url);
+    const isSample = provenance === 'SAMPLE';
     return (
       <div style={PAGE_STYLE}>
         <button onClick={() => setSelected(null)}
@@ -383,11 +364,11 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
           </div>
         </div>
 
-        {/* AI 분석 카드 */}
+        {/* AI 분석 카드 — 저장된 정본 하나만 그린다 */}
         <div style={{
           ...cardStyle({ marginBottom: SP.md }),
-          background: an ? `linear-gradient(135deg, ${T.card}, ${predColor(an.prediction)}08)` : T.card,
-          border: an ? `1px solid ${predColor(an.prediction)}33` : `1px solid ${T.border}`,
+          background: an?.analyzed ? `linear-gradient(135deg, ${T.card}, ${dirColor(an.direction)}08)` : T.card,
+          border: an?.analyzed ? `1px solid ${dirColor(an.direction)}33` : `1px solid ${T.border}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: SP.md }}>
             <IconBox tone="purple" size="sm">
@@ -396,68 +377,37 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
             <div style={{ flex: 1 }}>
               <div style={F.section}>AI 분석</div>
               <div style={F.muted}>
-                {an?.source === 'openai' ? 'OpenAI 분석' :
-                 an?.source === 'cache'  ? '캐시된 분석' :
-                 an?.source === 'mock'   ? '키워드 기반 분석' : '분석 중...'}
+                {an?.analyzed
+                  ? `${an.aiProvider || '모델'}${an.aiModel ? ` · ${an.aiModel}` : ''} 분석`
+                  : isSample ? '예시 기사 — 분석 없음'
+                  : aiUnavailable ? 'AI 분석 사용 불가' : 'AI 분석 대기'}
               </div>
             </div>
-            {isAnalyzing && <RefreshCw size={14} strokeWidth={IC_STROKE} color={T.acl}
-              style={{ animation: 'spin 1s linear infinite' }} />}
           </div>
 
-          {!an && !isAnalyzing && (
-            <div style={F.muted}>분석을 사용할 수 없습니다.</div>
+          {/* 없는 분석을 채우지 않는다. 왜 없는지만 적는다. */}
+          {!an?.analyzed && (
+            <div style={F.muted}>
+              {isSample
+                ? '예시로 보여 주는 기사입니다 — AI 분석 대상이 아닙니다.'
+                : aiUnavailable
+                  ? aiUnavailable
+                  : '수집은 됐지만 아직 분석 전입니다 — 분석이 끝나면 여기에 채워집니다.'}
+            </div>
           )}
 
-          {isAnalyzing && !an && (
-            <div style={{ ...F.muted, padding: '8px 0' }}>분석 중입니다... (몇 초 걸려요)</div>
-          )}
-
-          {an && (
+          {an?.analyzed && (
             <>
-              {/* 한글 요약 */}
-              {an.summaryKo && an.summaryKo !== an.titleKo && (
-                <div style={{ ...F.body, lineHeight: 1.7, color: T.sub, marginBottom: SP.md }}>
-                  {an.summaryKo}
-                </div>
-              )}
+              <AiVerdict a={an} />
 
-              {/* 예측 + 신뢰도 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: 6 }}>
-                <PredictionBadge prediction={an.prediction} confidence={an.confidence} />
-                <span style={{ ...F.caption, flex: 1 }}>AI 신뢰도</span>
-              </div>
-              <ConfidenceBar value={an.confidence} color={predColor(an.prediction)} />
-
-              {/* 근거 */}
-              {an.reasons.length > 0 && (
-                <div style={{ marginTop: SP.md }}>
-                  <div style={{ ...F.caption, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <Sparkles size={12} strokeWidth={IC_STROKE} color={T.acl} />
-                    예측 근거
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {an.reasons.map((r, i) => (
-                      <div key={i} style={{
-                        display: 'flex', alignItems: 'flex-start', gap: 8,
-                        padding: '8px 12px', background: T.alt, borderRadius: R.md,
-                      }}>
-                        <span style={{ color: predColor(an.prediction), fontWeight: 800, marginTop: 1 }}>•</span>
-                        <span style={{ ...F.body, lineHeight: 1.5 }}>{r}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* 영향받을 자산 */}
-              {an.affectedAssets.length > 0 && (
+              {/* 영향 자산 — 탭하면 매매로 이동.
+                  방향은 자산별로 따로 말한 적이 없으므로 붙이지 않는다. */}
+              {(an.affectedAssets?.length ?? 0) > 0 && (
                 <div style={{ marginTop: SP.md }}>
                   <div style={{ ...F.caption, marginBottom: 6 }}>영향 자산 (탭하면 매매로 이동)</div>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    {an.affectedAssets.map(a => (
-                      <AssetTag key={a.symbol} symbol={a.symbol} direction={a.direction}
-                        onClick={() => openAssetTag(a.symbol)} />
+                    {an.affectedAssets!.map(sym => (
+                      <AssetTag key={sym} symbol={sym} onClick={() => openAssetTag(sym)} />
                     ))}
                   </div>
                 </div>
@@ -634,16 +584,26 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
           )}
           {filtered.map(n => {
             const id = n.id || '';
-            const an = analyses[id];
-            const isAnalyzing = analyzingIds.has(id);
             const _lang = (()=>{ try { return localStorage.getItem('tg_lang')||'ko'; } catch { return 'ko'; } })();
             const _tc = transCache[`${id}_${_lang}`];
             // 크론이 저장한 분석을 먼저 쓴다. 화면에서 즉석 분석한 것보다
             // 검증을 거친 값이다 — 근거 없는 단정이 걸러졌고 원문 URL도
             // 모델이 지어낸 것이 아니라 수집한 값으로 대조됐다.
-            const stored = n.url ? aiByUrl[String(n.url)] : undefined;
-            const displayTitle = stored?.titleKo || an?.titleKo || _tc?.title || n.title;
-            const displaySummary = stored?.summary || an?.summaryKo || _tc?.summary;
+            const stored = storedFor(n.url);
+            const displayTitle = stored?.titleKo || _tc?.title || n.title;
+            const displaySummary = stored?.summary || _tc?.summary;
+            // 영향도는 **저장된 분석이 있을 때만** 계산한다. 없으면 없는 것이다 —
+            // 확신도를 50으로 가정해서 점수를 만들지 않는다.
+            const storedImpact = stored?.analyzed
+              ? calculateImpact({
+                  sourceName: n.source,
+                  prediction: stored.direction === 'bullish' ? 'up'
+                    : stored.direction === 'bearish' ? 'down'
+                    : stored.direction === 'neutral' ? 'flat' : undefined,
+                  publishedAt: typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined),
+                  numAffectedAssets: stored.affectedAssets?.length || 0,
+                })
+              : undefined;
 
             return (
               <div
@@ -658,7 +618,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                     ? (stored.direction === 'bullish' ? T.grn
                       : stored.direction === 'bearish' ? T.red
                       : stored.direction === 'uncertain' ? T.ylw : T.sub)
-                    : an ? predColor(an.prediction) : T.border}`,
+                    : T.border}`,
                   touchAction: 'manipulation',
                 }}
               >
@@ -717,32 +677,24 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                         );
                       })()}
                       {n.time && <span style={F.muted}>· {formatNewsDate(n.time)}</span>}
-                      <span style={{ marginLeft: 'auto' }}><StarRow n={newsImportance(n, an ? calculateImpact({ sourceName: n.source, prediction: an.prediction, confidence: an.confidence, publishedAt: (typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined)), numAffectedAssets: an.affectedAssets?.length || 0 }).total : undefined)} /></span>
+                      <span style={{ marginLeft: 'auto' }}><StarRow n={newsImportance(n, storedImpact?.total)} /></span>
                     </div>
 
-                    {/* 영향도 게이지 (AI 분석 완료 시) */}
-                    {an && (() => {
-                      const t = typeof n.time === 'number' ? n.time : (n.time ? new Date(n.time).getTime() : undefined);
-                      const imp = calculateImpact({
-                        sourceName: n.source,
-                        prediction: an.prediction,
-                        confidence: an.confidence,
-                        publishedAt: t,
-                        numAffectedAssets: an.affectedAssets?.length || 0,
-                      });
-                      const lvl = impactLevel(imp.total);
+                    {/* 영향도 게이지 — 저장된 분석이 있을 때만 */}
+                    {storedImpact && (() => {
+                      const lvl = impactLevel(storedImpact.total);
                       return (
                         <div style={{ marginBottom: 6 }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 2 }}>
                             <span style={{ color: T.muted, fontSize: 9, fontWeight: 700 }}>영향도</span>
                             <span style={{ color: lvl.color, fontSize: 10, fontWeight: 900 }}>
-                              {imp.total} · {lvl.label}
+                              {storedImpact.total} · {lvl.label}
                             </span>
                           </div>
                           <div style={{ height: 4, background: T.alt, borderRadius: 2, overflow: 'hidden' }}>
                             <div style={{
                               height: '100%',
-                              width: `${imp.total}%`,
+                              width: `${storedImpact.total}%`,
                               background: lvl.color,
                               transition: 'width 300ms',
                             }} />
@@ -750,38 +702,6 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
                         </div>
                       );
                     })()}
-
-                    {/* 예측 + 자산 */}
-                    {an ? (
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <PredictionBadge prediction={an.prediction} confidence={an.confidence} compact />
-                        {an.affectedAssets.slice(0, 3).map(a => (
-                          <span key={a.symbol} style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 3,
-                            padding: '3px 7px',
-                            background: T.alt,
-                            border: `1px solid ${predColor(a.direction)}44`,
-                            borderRadius: R.pill,
-                            color: T.sub,
-                            fontSize: 9, fontWeight: 700,
-                          }}>
-                            {a.direction === 'up' ? <TrendingUp size={9} strokeWidth={IC_STROKE} color={T.grn} />
-                              : a.direction === 'down' ? <TrendingDown size={9} strokeWidth={IC_STROKE} color={T.red} />
-                              : <Minus size={9} strokeWidth={IC_STROKE} color={T.ylw} />}
-                            {a.symbol}
-                          </span>
-                        ))}
-                      </div>
-                    ) : isAnalyzing ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: T.acl, fontSize: 10, fontWeight: 700 }}>
-                        <RefreshCw size={11} strokeWidth={IC_STROKE} style={{ animation: 'spin 1s linear infinite' }} />
-                        AI 분석 중...
-                      </div>
-                    ) : (
-                      <div style={{ ...F.muted, fontSize: 10 }}>
-                        탭하면 AI 분석을 시작합니다
-                      </div>
-                    )}
 
                     {/* 영향 종목 (항상 표시, AI 분석 없이도 n.tickers) */}
                     {Array.isArray(n.tickers) && n.tickers.length > 0 && (

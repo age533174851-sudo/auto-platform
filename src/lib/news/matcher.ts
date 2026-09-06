@@ -1,9 +1,45 @@
 // src/lib/news/matcher.ts
 // 분석된 뉴스가 사용자의 관심종목/포트폴리오 자산을 언급하면 매칭
 // 강한 영향도 + 매칭 시 알림 후보로 처리
-
-import type { NewsAnalysis } from './types';
+//
+// 어떤 분석을 받는가 — **정본 하나뿐이다**
+// ────────────────────────────────────────
+// 예전에는 브라우저가 화면을 열 때마다 만든 `NewsAnalysis`를 받았다. 그
+// 경로는 OpenAI 호출이 실패하면 키워드와 id 해시로 prediction·confidence를
+// **지어내서** 채웠고, 그 값이 그대로 여기 들어와 영향도 60점을 넘기면
+// 브라우저 알림이 나갔다. 근거가 없는 숫자로 사람을 깨우는 셈이었다.
+//
+// 이제 저장된 분석(`news_articles` ← `analyzeOne`)만 받는다. 그 경로는
+// 원문만 근거로 쓰고, 실패하면 값을 만들지 않고 실패로 남는다.
 import { calculateImpact, impactLevel } from './sources';
+
+/**
+ * 매칭에 필요한 만큼의 분석. `/api/news/stored`가 돌려주는 모양이다.
+ *
+ * 여기에 legacy `NewsAnalysis`를 다시 붙이지 않는다 — 정본이 둘이 되면
+ * 그중 하나는 언젠가 다시 지어낸 값을 나른다.
+ */
+export interface MatchAnalysis {
+  /** bullish · bearish · neutral · uncertain. 모르면 null */
+  direction: string | null;
+  /** 심볼 목록 */
+  affectedAssets?: string[] | null;
+}
+
+// **confidence는 여기 없다 — 일부러 없다.**
+//
+// 모델이 스스로 매긴 확신도는 과거 적중률로 보정된 값이 아니다. 화면에서
+// %를 지운 이유가 그것인데, 화면에서만 지우고 알림 판정에는 그대로 쓰면
+// "표시만 안 할 뿐 여전히 그 숫자가 사람을 깨운다"가 된다.
+//
+// 타입에 두고 "쓰지 말자"고 적는 것으로는 부족하다 — 언젠가 누가 쓴다.
+// 그래서 알림 경로가 그 값을 **볼 수 없게** 했다. 보정된 지표가 생기면
+// 그때 근거와 함께 다시 넣는다. 값 자체는 news_articles에 남아 있다.
+
+/** 저장된 방향을 영향도 계산이 아는 말로. uncertain은 방향이 아니다 */
+const PREDICTION_OF: Record<string, 'up' | 'down' | 'flat'> = {
+  bullish: 'up', bearish: 'down', neutral: 'flat',
+};
 
 const SEEN_KEY = 'tg_news_seen_v1';     // 이미 본 뉴스 ID (중복 알림 방지)
 
@@ -66,7 +102,7 @@ export interface NewsMatch {
 // 뉴스 + 분석 → 매칭 결과
 export function matchNews(
   newsId: string,
-  analysis: NewsAnalysis | undefined,
+  analysis: MatchAnalysis | undefined,
   sourceName?: string,
   publishedAt?: number,
   userAssets?: Set<string>,
@@ -78,7 +114,7 @@ export function matchNews(
   // 분석에서 추출된 영향 자산 중 사용자 자산과 매칭
   const matched: string[] = [];
   for (const a of (analysis.affectedAssets || [])) {
-    const sym = String(a.symbol || '').toUpperCase();
+    const sym = String(a || '').toUpperCase();
     if (!sym) continue;
     // 정확한 매치
     if (assets.has(sym)) { matched.push(sym); continue; }
@@ -88,18 +124,32 @@ export function matchNews(
   }
   if (matched.length === 0) return null;
 
-  // 영향도 계산
+  // 방향. **모르는 값을 방향으로 바꾸지 않는다** — uncertain은 판단 보류다.
+  const prediction = PREDICTION_OF[String(analysis.direction)];
+
+  // 영향도 계산 — 관측 가능한 것만 넣는다
   const impact = calculateImpact({
     sourceName,
-    prediction: analysis.prediction,
-    confidence: analysis.confidence,
+    prediction,
     publishedAt,
     numAffectedAssets: analysis.affectedAssets?.length || 0,
   });
   const level = impactLevel(impact.total);
 
-  // 알림 트리거: high 이상 + 새 뉴스
-  const shouldNotify = impact.total >= 60 && !hasSeen(newsId);
+  // 알림 트리거.
+  //
+  //   · 방향을 실제로 말했는가 — 판단 보류(uncertain)로 사람을 깨우지 않는다
+  //   · 영향도가 문턱을 넘는가 — 출처 신뢰도 · 최신성 · 영향 자산 수
+  //   · 아직 안 본 뉴스인가
+  //
+  // 확신도는 조건에 없다. 한 번 넣었다가 뺐다 — 없는 값으로 깨우지 않으려고
+  // "확신도를 관측했는가"를 관문으로 걸었는데, 그러면 **보정되지 않은
+  // 자기평가 숫자가 알림 권한을 쥔다.** 화면에서 그 숫자를 지운 이유와
+  // 정면으로 어긋난다.
+  const observedDirection = prediction === 'up' || prediction === 'down';
+  const shouldNotify = observedDirection
+    && impact.total >= 60
+    && !hasSeen(newsId);
 
   return {
     newsId,
@@ -107,7 +157,7 @@ export function matchNews(
     impactScore:   impact.total,
     impactLevel:   level,
     shouldNotify,
-    reason:        `${matched.join(', ')} ${analysis.prediction === 'up' ? '상승' : analysis.prediction === 'down' ? '하락' : '영향'} 가능 (영향도 ${impact.total}점)`,
+    reason:        `${matched.join(', ')} ${prediction === 'up' ? '상승' : prediction === 'down' ? '하락' : '영향'} 가능 (영향도 ${impact.total}점)`,
   };
 }
 
@@ -142,7 +192,7 @@ export interface BatchMatchResult {
 }
 
 export function batchMatchNews(
-  items: Array<{ id: string; sourceName?: string; publishedAt?: number; analysis?: NewsAnalysis }>,
+  items: Array<{ id: string; sourceName?: string; publishedAt?: number; analysis?: MatchAnalysis }>,
 ): BatchMatchResult {
   const userAssets = getUserAssets();
   const matches: NewsMatch[] = [];

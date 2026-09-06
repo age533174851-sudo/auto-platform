@@ -37,7 +37,15 @@ export interface NewsAnalysisV2 {
   affectedAssets: string[];
   direction: NewsDirection;
   directionKo: string;
-  confidence: number;          // 0~100
+  /**
+   * 모델이 스스로 매긴 확신도. **없을 수 있다.**
+   *
+   * 모델이 답하지 않았을 때 0을 만들어 넣던 자리다. 0은 "확신 없음"이라는
+   * 숫자로 읽히지만 실제로는 **아무 값도 관측되지 않았다**는 뜻이었다.
+   * 둘은 다른 말이고, 화면과 영향도 계산은 그 차이를 구분하지 못한다.
+   * 관측되지 않았으면 null로 남긴다.
+   */
+  confidence: number | null;   // 0~100 또는 null(모델이 답하지 않음)
   horizon: NewsHorizon;
   reasons: string[];
   risks: string[];
@@ -138,11 +146,11 @@ export function validateAnalysis(
     repaired.push(`알 수 없는 direction('${raw.direction}') → uncertain`);
   }
 
-  let confidence = parseConfidence(raw.confidence);
-  if (confidence == null) {
-    confidence = 0;
-    repaired.push('confidence 없음 → 0 (판단 보류로 처리)');
-  }
+  // **없는 값을 숫자로 만들지 않는다.**
+  // 여기서 0을 넣으면 "모델이 0%라고 했다"와 "모델이 답하지 않았다"가
+  // 같은 값이 되고, 영향도 계산과 화면은 그 뒤로 둘을 구분할 수 없다.
+  const confidence = parseConfidence(raw.confidence);
+  if (confidence == null) repaired.push('confidence 없음 → null (숫자를 만들지 않는다)');
 
   const horizon = parseHorizon(raw.horizon);
   const reasons = strArray(raw.reasons, 5);
@@ -157,11 +165,12 @@ export function validateAnalysis(
   let finalConfidence = confidence;
   if (finalDirection !== 'uncertain' && reasons.length === 0) {
     finalDirection = 'uncertain';
-    finalConfidence = Math.min(finalConfidence, 30);
+    // null은 그대로 null이다. 내리는 것은 **모델이 준 숫자**에만 한다.
+    if (finalConfidence != null) finalConfidence = Math.min(finalConfidence, 30);
     repaired.push('근거가 없어 방향을 uncertain으로 내림');
   }
   // 보류인데 확신이 높다고 하는 것은 모순이다
-  if (finalDirection === 'uncertain' && finalConfidence > 50) {
+  if (finalDirection === 'uncertain' && finalConfidence != null && finalConfidence > 50) {
     finalConfidence = 50;
     repaired.push('uncertain인데 confidence가 높아 50으로 제한');
   }

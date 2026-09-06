@@ -47,7 +47,10 @@ export async function GET(req: NextRequest) {
   }
 
   // ── Default (backward-compat) ──
-  return NextResponse.json({ news: MOCK_NEWS, events: ECON_EVENTS, timestamp: Date.now() }, {
+  // **출처를 반드시 붙인다.** 이 분기는 예시만 돌려주는데 source가 없어서,
+  // 받는 쪽은 실물인지 예시인지 알 방법이 없었다(feed.provenanceOf는 모르는
+  // 값을 SAMPLE로 읽지만, 키 자체가 없으면 그 판정에 닿지도 못한다).
+  return NextResponse.json({ news: MOCK_NEWS, events: ECON_EVENTS, source: 'mock', timestamp: Date.now() }, {
     headers: { 'Cache-Control': 'public, s-maxage=300' },
   });
 }

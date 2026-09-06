@@ -1,10 +1,43 @@
 // ─────────────────────────────────────────────────────────────
-// TRAIGO — Mock News Analyzer
-// OpenAI 키가 없거나 호출 실패 시 fallback
-// 결정적: 같은 입력 → 같은 출력 (해시 기반)
+// TRAIGO — Mock News Analyzer  **TEST_ONLY**
+//
+// production에서 import하지 않는다. `scripts/check-news-truth.mjs`가
+// CI에서 그것을 강제한다.
+//
+// 왜 production에서 뺐나
+// ──────────────────────
+// 이 파일은 `/api/news/analyze`와 브라우저 `analyzer.ts`의 폴백이었다.
+// OpenAI 키가 없거나 호출이 실패하면 여기 값이 대신 들어갔는데, 그 값은
+// 관측이 아니라 키워드 개수와 id 해시로 만든 것이다:
+//
+//     confidence = 50 + diff*8 + min(15, signals*2) + (hash(id) % 11 - 5)
+//     → 45~88로 clamp, 매크로 키워드면 +8
+//
+// 그렇게 만든 confidence가 영향도 점수에 들어가 브라우저 알림 문턱(60점)을
+// 넘겼고, 결과는 sessionStorage에 24시간 저장됐다. 캐시에서 다시 읽을 때
+// `source`가 'cache'로 덮여서 **지어낸 값이라는 표시까지 사라졌다.**
+//
+// `quickTranslate()`도 마찬가지다. 정규식 32개로 단어를 부분 치환해
+// 영한 혼종 문자열을 만들고 그것을 `titleKo`에 넣었다 — 화면은 그 자리를
+// 한국어 제목으로 그린다. 실제 번역기(`/api/translate`)가 따로 있는데도.
+//
+// 결정적(같은 입력 → 같은 출력)이라 **시험 fixture로는 쓸모가 있다.**
+// 그래서 지우지 않고 여기로 옮겼다. 실행 판단·표시에는 쓰지 않는다.
 // ─────────────────────────────────────────────────────────────
 
-import type { NewsAnalysis, NewsPrediction, NewsSentiment } from './types';
+/** 이 fixture만의 모양. production 타입에 의존하지 않는다 */
+type NewsSentiment = 'bullish' | 'bearish' | 'neutral';
+type NewsPrediction = 'up' | 'down' | 'flat';
+interface NewsAnalysis {
+  titleKo: string;
+  summaryKo: string;
+  prediction: NewsPrediction;
+  confidence: number;
+  reasons: string[];
+  affectedAssets: { symbol: string; direction: NewsPrediction; reason?: string }[];
+  source: 'mock';
+  analyzedAt: number;
+}
 
 // 간단한 결정적 해시 (id에서 confidence 등을 안정적으로 뽑기 위해)
 function hash(s: string): number {

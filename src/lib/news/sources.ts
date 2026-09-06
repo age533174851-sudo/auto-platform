@@ -7,7 +7,8 @@
 //   포럼 / 트위터: 20~50
 //   알 수 없는 출처: 40 (기본)
 //
-// 영향도(impact) = sentiment 강도 × confidence × reliability_factor × time_decay
+// 영향도(impact) = 출처 신뢰도 × 최신성 × 영향 자산 수
+// **모델 자기평가 confidence는 들어가지 않는다** — CalcInput 주석 참고
 
 export type SourceTier = 'tier1' | 'tier2' | 'tier3' | 'unknown';
 
@@ -80,27 +81,55 @@ export interface ImpactScore {
   reasoning:   string[];        // 사람이 읽을 수 있는 이유
 }
 
+/**
+ * 영향도 입력.
+ *
+ * **모델이 스스로 매긴 확신도(confidence)는 여기 들어오지 않는다.**
+ *
+ * 두 번 고쳤다. 처음에는 `confidence ?? 50`이었다 — 모델이 답하지
+ * 않았는데 50%가 관측된 것처럼 점수에 들어갔다. 그 다음에는 관측된
+ * 값만 쓰게 고쳤는데, 그래도 **보정되지 않은 자기평가 숫자가 사람을
+ * 깨우는 판단에 들어간다**는 문제가 그대로 남았다.
+ *
+ * 72%는 과거 적중률로 보정된 값이 아니라 모델이 스스로 적은 숫자다.
+ * 화면에서 %를 지운 이유가 그것인데, 화면에서만 지우고 알림 점수에는
+ * 그대로 쓰면 "표시만 안 할 뿐 여전히 그 숫자가 사람을 깨운다"가 된다.
+ *
+ * 그래서 타입에서 아예 없앴다. 새 공식을 만들지 않는다 — 보정된 지표가
+ * 생기기 전까지 영향도는 **관측 가능한 것만** 쓴다: 출처 신뢰도 ·
+ * 최신성 · 영향 자산 수. 방향이 있는지 없는지는 점수가 아니라
+ * `matcher`의 관문에서 본다.
+ */
 interface CalcInput {
   sourceName?:  string;
   prediction?:  'up' | 'down' | 'flat';
-  confidence?:  number;         // 0~100
   publishedAt?: number;         // ms timestamp
   numAffectedAssets?: number;
 }
 
+/**
+ * 방향 항목의 고정 몫.
+ *
+ * 예전에 `(confidence/100) * 50`이던 자리다. 새 공식을 만들지 않으려고
+ * **이미 코드에 있던 하한값**을 그대로 상수로 둔다 — 확신도를 관측하지
+ * 못했을 때 주던 값이 10이었다. 올리려면 근거(보정된 적중률)가 먼저다.
+ */
+const DIRECTION_POINTS = 10;
+
 export function calculateImpact(input: CalcInput): ImpactScore {
   const reasons: string[] = [];
 
-  // 1) sentiment 강도 — flat이면 작음
-  const conf = Math.max(0, Math.min(100, input.confidence ?? 50));
-  let sentimentScore = 0;
-  if (input.prediction === 'up' || input.prediction === 'down') {
-    sentimentScore = (conf / 100) * 50;
-    reasons.push(`예측 ${input.prediction === 'up' ? '상승' : '하락'} (신뢰도 ${conf}%)`);
-  } else {
-    sentimentScore = 10;
-    reasons.push('방향성 약함 (보합)');
-  }
+  // 1) 방향 — **강도를 매기지 않는다.**
+  //
+  // 여기가 모델 confidence를 최대 50점으로 환산하던 자리다. 방향이 있다는
+  // 사실과 그 방향을 얼마나 믿을 만한지는 다른 문제이고, 후자는 지금
+  // 보정된 값이 없다. 그래서 방향은 점수 크기에 영향을 주지 않는다.
+  // 실제 관문(uncertain은 알리지 않는다)은 matcher에 있다.
+  const directional = input.prediction === 'up' || input.prediction === 'down';
+  const sentimentScore = DIRECTION_POINTS;
+  reasons.push(directional
+    ? `예측 ${input.prediction === 'up' ? '상승' : '하락'} — 강도는 매기지 않음(보정된 지표 없음)`
+    : '방향성 약함 (보합)');
 
   // 2) 출처 신뢰도
   const src = getSourceInfo(input.sourceName);
