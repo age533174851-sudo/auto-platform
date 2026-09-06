@@ -208,6 +208,13 @@ push          →  github.event.before
 마찬가지다. base를 하나도 정하지 못하면 조용히 건너뛰지 않고 실패한다.
 "비교할 커밋이 없어서 통과"는 통과가 아니다.
 
+**배선이 끊긴 것도 실패로 만든다.** `GITHUB_EVENT_NAME`이 `pull_request`나
+`push`인데 `EXECUTION_CONTRACT_BASE`가 비어 있으면 그 자체를 오류로 본다.
+안 그러면 `ci.yml`에서 `env:` 한 줄이 사라져도 검사기는 `origin/main`으로
+조용히 후퇴하고, 우리가 방금 없앤 "자기 자신과 비교"로 되돌아간다.
+**사람이 CI 로그에서 base 줄을 찾아 확인할 일이 없어야 한다** — 배선이
+끊기면 CI가 빨개진다.
+
 ### 무엇을 비교하는가 — 소스 줄이 아니라 지문
 
 여기서도 한 번 샜다. 코드에는 `executionContractFingerprint()`가 있는데

@@ -281,6 +281,18 @@ if (!/incomplete_selection/i.test(sched)) {
    * 그것을 base로 잡으면 지문이 당연히 같아서 이 검사기 전체가 통과한다.
    */
   const headSha = shaOf('HEAD');
+
+  // **배선이 끊긴 것을 사람이 로그에서 찾게 하지 않는다.**
+  // PR·push에서는 이벤트가 base를 알려 준다. 그 값이 안 오면 검사기는
+  // origin/main·HEAD~1로 조용히 후퇴하고, 그러면 이 파일이 막으려던
+  // "자기 자신과 비교" 상태로 되돌아간다. 그래서 그 자체를 실패로 본다.
+  const evt = process.env.GITHUB_EVENT_NAME || '';
+  if ((evt === 'pull_request' || evt === 'push')
+      && !String(process.env.EXECUTION_CONTRACT_BASE || '').trim()) {
+    err(`CI(${evt})인데 EXECUTION_CONTRACT_BASE가 비었습니다`
+      + ' — ci.yml이 이벤트의 base를 넘기지 않습니다. 배선이 끊겼습니다');
+  }
+
   const pickBase = () => {
     const tried = [];
     for (const r of [process.env.EXECUTION_CONTRACT_BASE, 'origin/main', 'HEAD~1']) {
