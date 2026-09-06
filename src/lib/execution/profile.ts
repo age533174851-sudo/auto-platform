@@ -224,7 +224,10 @@ export function resolveExecutionProfile(
  * 한다면 그 버전은 실행을 가리키는 것이 아니게 된다.
  */
 export function executionContractFingerprint(): string {
-  const rows: any[] = [];
+  // 칸 이름도 지문에 넣는다. 값만 넣으면 계약 칸의 **이름을 바꾸는 변경**이
+  // (예: takeProfitPct → tpPct) 같은 지문으로 남는다 — 실제로는 다른 칸을
+  // 투영하는 다른 계약이다.
+  const rows: any[] = [['#fields', CONTRACT_FIELDS.join(',')]];
   for (const pid of Object.keys(PROFILES).sort()) {
     for (const sid of Object.keys(PRESET_TABLE).sort()) {
       const r = resolveExecutionProfile(pid, sid, EXECUTION_CONTRACT_VERSION);

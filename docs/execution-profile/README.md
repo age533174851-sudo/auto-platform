@@ -178,19 +178,69 @@ POST의 `enabled` 기본값은 `body?.enabled !== false` — **생략하면 true
 0.4%로 바뀌어도 같은 버전이 되어 **같은 예약이 다른 의미로 실행된다.**
 
 검사기는 **이전 커밋과 비교**한다. 현재 파일끼리의 자기일치만 보면,
-실행값과 스냅샷을 같이 고치고 버전을 그대로 두는 경우가 통과한다. 그래서
-`ci.yml`의 checkout에 `fetch-depth: 0`이 필요하다.
+실행값과 스냅샷을 같이 고치고 버전을 그대로 두는 경우가 통과한다.
 
 ```
-base 실행 정의 ≠ head 실행 정의  AND  base 버전 == head 버전   → FAIL
+base 지문 ≠ head 지문  AND  base 버전 == head 버전   → FAIL
+base 지문 ≠ head 지문  AND  head 버전  >  base 버전  → PASS
+base 지문 == head 지문                               → PASS (주석·타입 정리)
+head 버전 < base 버전                                → FAIL (저장된 예약이 전부 막힌다)
 ```
 
-주석만 바뀐 경우는 통과시킨다 — 주석은 계약이 아니다.
+### base를 어디서 얻는가
 
-**bootstrap**: 계약이 처음 들어오는 PR에는 비교할 base가 없다. 그때는
+이 자리에서 한 번 샜다. 검사기가 `origin/main`을 먼저 골랐는데, PR에서는
+그것이 base라 맞지만 **머지된 뒤 push main으로 도는 실행에서는
+`origin/main == HEAD`**다. 자기 자신과 비교하니 지문이 당연히 같고,
+정작 우리가 가장 신뢰하는 exact-main 실행에서 버전 검사가 꺼졌다.
+`fetch-depth: 0`을 넣어도 base 선택이 틀리면 소용이 없다.
+
+그래서 base는 **이벤트가 알려 준다.**
+
+```
+pull_request  →  github.event.pull_request.base.sha
+push          →  github.event.before
+그 외         →  origin/main → HEAD~1  (workflow_dispatch 등)
+```
+
+`ci.yml`이 이 값을 `EXECUTION_CONTRACT_BASE`로 넘긴다. 그리고 어떤
+경로로든 **HEAD와 같은 커밋은 base가 되지 못한다** — 환경변수로 넘어와도
+마찬가지다. base를 하나도 정하지 못하면 조용히 건너뛰지 않고 실패한다.
+"비교할 커밋이 없어서 통과"는 통과가 아니다.
+
+### 무엇을 비교하는가 — 소스 줄이 아니라 지문
+
+여기서도 한 번 샜다. 코드에는 `executionContractFingerprint()`가 있는데
+검사기는 그것을 **부르지 않고** `profiles.ts`·`profilePreset.ts`의
+프로퍼티 줄만 regex로 비교했다. 그래서 계약의 **모양**이 바뀌는 변경이
+전부 빠져나갔다.
+
+- `CONTRACT_FIELDS`에서 `maxLeverage`를 뺀다 → 프로퍼티 줄은 그대로다
+- 모의 전용 `takerFeePct`를 `CONTRACT_FIELDS`에 끼워 넣는다 → 마찬가지
+- resolver가 프리셋을 무시하도록 바꾼다 → 프로필 리터럴은 안 건드린다
+
+시험도 기대값을 `CONTRACT_FIELDS`에서 동적으로 만들기 때문에, 목록에서
+칸을 빼면 기대값도 같이 줄어 **초록으로 통과했다.**
+
+이제 검사기는 base와 head 양쪽의 계약 정본을 **실제로 컴파일해서**
+`executionContractFingerprint()`를 부르고 그 값을 비교한다. 이 저장소의
+규칙 그대로다 — 판단 로직을 스크립트에 복제하지 않고 같은 파일을 쓴다
+(`gen-migration-manifest.mjs`의 `loadPlan()`과 같은 방식). 딸린 파일은
+`import`를 따라가서 모으므로, 나중에 정본이 파일 하나를 더 읽어도 지문이
+옛 파일로 계산되지 않는다.
+
+지문에는 **칸 이름도 넣는다.** 값만 넣으면 `takeProfitPct` → `tpPct` 같은
+이름 변경이 같은 지문으로 남는데, 그것은 다른 칸을 투영하는 다른 계약이다.
+
+곁들여 좁힌 것 둘 — 검사기가 요구하는 `CONTRACT_FIELDS` 필수 칸을 5개에서
+실제 12개 전부로 늘렸고, 모의 전용 `takerFeePct`를 검사기·시험의 금지
+목록에 넣었다. 목록에서 칸을 빼도 초록이던 시험 옆에는 **손으로 못박은
+시험**을 붙였다.
+
+**bootstrap**: 계약이 처음 들어오는 PR에는 비교할 base 지문이 없다. 그때는
 조용히 통과시키지 않고 두 가지를 본다 — 버전이 1인가, 그리고 **이 PR에서
 실행 정의(`profiles.ts`·`profilePreset.ts`)가 함께 바뀌지 않았는가.**
-같이 바뀌면 무엇이 v1인지 정할 수 없다.
+같이 바뀌면 무엇이 v1인지 정할 수 없다. 이 PR이 그 bootstrap이다.
 
 ### 운영 영향
 

@@ -96,14 +96,28 @@ export function runExecutionProfileTests() {
     eq(JSON.stringify(keys),
       JSON.stringify(['contractVersion', 'presetId', 'profileId', ...CONTRACT_FIELDS].sort()));
     for (const banned of ['label', 'description', 'simCurrency', 'simSeed',
-      'simTargetEquity', 'simPrice', 'simHoldSec', 'edgePp', 'assumedWinRate']) {
+      'simTargetEquity', 'simPrice', 'simHoldSec', 'takerFeePct',
+      'edgePp', 'assumedWinRate']) {
       assert(!(banned in r.contract), `계약에 ${banned}이 들어갔다`);
+    }
+  });
+
+  // 위 시험은 기대값을 CONTRACT_FIELDS에서 만든다. 목록에서 칸을 빼면
+  // 기대값도 같이 줄어 **초록으로 통과한다.** 그래서 계약이 반드시
+  // 가져야 하는 칸은 여기 손으로 못박는다.
+  test('계약에서 실행 칸을 조용히 뺄 수 없다', () => {
+    const r: any = resolveExecutionProfile('SCALP_HIGH_LEV', 'RESEARCH', V);
+    for (const need of ['leverage', 'maxLeverage', 'marginModes', 'maxPortfolioPct',
+      'riskPercentPerTrade', 'takeProfitPct', 'stopLossPct', 'orderType',
+      'timeoutSec', 'dailyLossLimitPct', 'maxHoldSec', 'maxOpenPositions']) {
+      assert(need in r.contract, `계약에서 ${need}이(가) 빠졌다`);
+      assert((CONTRACT_FIELDS as readonly string[]).includes(need), `CONTRACT_FIELDS에서 ${need}이(가) 빠졌다`);
     }
   });
 
   test('지문에도 모의값·문구가 들어가지 않는다', () => {
     const fp = executionContractFingerprint();
-    for (const banned of ['label', 'description', 'sim', 'edge', '스캘핑', '연구용']) {
+    for (const banned of ['label', 'description', 'sim', 'takerFee', 'edge', '스캘핑', '연구용']) {
       assert(!fp.includes(banned), `지문에 ${banned}이 들어갔다`);
     }
   });
@@ -111,7 +125,10 @@ export function runExecutionProfileTests() {
   test('지문은 모든 조합을 덮는다', () => {
     const combos = Object.keys(PROFILES).length * Object.keys(PRESET_TABLE).length;
     const rows = JSON.parse(executionContractFingerprint());
-    eq(rows.length, combos);
+    // 첫 줄은 칸 이름 목록이다 — 칸 이름이 바뀌는 것도 계약 변경이다.
+    eq(rows[0][0], '#fields');
+    eq(rows[0][1], CONTRACT_FIELDS.join(','));
+    eq(rows.length, combos + 1);
     assert(!JSON.stringify(rows).includes('UNRESOLVED'), '해석하지 못한 조합이 있다');
   });
 

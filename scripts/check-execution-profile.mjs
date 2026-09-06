@@ -15,8 +15,10 @@
 //
 // ②를 놓치면 "저장은 연구용, 실행은 ATR"이 정식 기능이 된다 — 지금
 // 없애려는 고장을 기능으로 만드는 셈이다.
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { stripJsComments } from './lib/strip-comments.mjs';
 
 const PLAN   = 'src/lib/execution/profile.ts';
@@ -84,7 +86,7 @@ for (const lit of ['25', '50', '0.5', '0.6', '0.3', 'post_only_limit', 'isolated
 /* ── ④ 계약은 화이트리스트다 (EP-15·16·17) ── */
 if (!plan.includes('CONTRACT_FIELDS')) err(`${PLAN}: CONTRACT_FIELDS 화이트리스트가 없습니다`);
 for (const banned of ['simSeed', 'simCurrency', 'simTargetEquity', 'simPrice', 'simHoldSec',
-  'edgePp', 'assumedWinRate']) {
+  'takerFeePct', 'edgePp', 'assumedWinRate']) {
   if (plan.includes(banned)) {
     err(`${PLAN}: 계약에 모의 전용 값(${banned})이 들어갑니다 — 실행값만 넣으세요`);
   }
@@ -95,7 +97,13 @@ for (const banned of ['simSeed', 'simCurrency', 'simTargetEquity', 'simPrice', '
   for (const banned of ['label', 'description', 'leverageBand', 'riskBand']) {
     if (list.includes(banned)) err(`${PLAN}: CONTRACT_FIELDS에 표시용 값(${banned})이 있습니다`);
   }
-  for (const need of ['leverage', 'stopLossPct', 'takeProfitPct', 'orderType', 'marginModes']) {
+  // 계약이 실제로 가진 칸 **전부**를 요구한다. 다섯 개만 요구하면
+  // maxLeverage·maxPortfolioPct·dailyLossLimitPct를 목록에서 빼도 통과한다
+  // — 실행 의미가 달라지는데도. 시험도 기대값을 이 목록에서 만들기 때문에
+  // 함께 줄어들어 초록이 된다.
+  for (const need of ['leverage', 'maxLeverage', 'marginModes', 'maxPortfolioPct',
+    'riskPercentPerTrade', 'takeProfitPct', 'stopLossPct', 'orderType',
+    'timeoutSec', 'dailyLossLimitPct', 'maxHoldSec', 'maxOpenPositions']) {
     if (!list.includes(need)) err(`${PLAN}: CONTRACT_FIELDS에 ${need}이(가) 없습니다`);
   }
 }
@@ -233,36 +241,58 @@ if (!/incomplete_selection/i.test(sched)) {
   err(`${SCHED}: 반쪽 선택을 400으로 막지 않습니다`);
 }
 
-/* ── ⑩ 계약 버전 — 값이 바뀌면 버전도 바뀐다 (EP-05·18·19·32) ──
+/* ── ⑩ 계약 버전 — 값이 바뀌면 버전도 바뀐다 (EP-05·18·19·32·36~41) ──
    여기서 "현재 파일끼리 일치하는가"만 보면 새 나간다. 개발자가 실행값과
    스냅샷을 같이 고치고 버전을 그대로 두면 다시 일치하기 때문이다.
-   그래서 **이전 커밋과 비교**한다. */
+   그래서 **이전 커밋과 비교**한다.
+
+   두 번 샌 자리라 방식을 바꿨다.
+
+   ⓐ base를 잘못 고르면 비교 자체가 무의미하다. origin/main을 먼저
+      고르면 **push main CI에서 origin/main == HEAD**가 되어 자기 자신과
+      비교한다 — 정작 우리가 신뢰하는 exact-main 실행에서 버전 검사가
+      꺼진다. 그래서 base는 이벤트가 알려 주고(EXECUTION_CONTRACT_BASE),
+      HEAD와 같은 커밋은 어떤 경로로도 base가 되지 못한다.
+
+   ⓑ 소스 줄을 regex로 비교하면 계약의 **모양** 변화를 못 본다.
+      `CONTRACT_FIELDS`에서 maxLeverage를 빼거나 모의 전용 takerFeePct를
+      끼워 넣어도 profiles.ts의 프로퍼티 줄은 그대로다. 그래서 이제
+      base와 head 양쪽에서 **executionContractFingerprint()를 실제로
+      계산해** 비교한다. 지문은 (프로필 × 프리셋) 전 조합의 해석 결과라,
+      resolver·applyPreset·화이트리스트 어느 쪽이 바뀌어도 달라진다. */
 {
-  const fpOf = src => {
-    try {
-      return execFileSync(process.execPath, ['--input-type=module', '-e', src],
-        { encoding: 'utf8', timeout: 60_000 }).trim();
-    } catch { return null; }
-  };
-  const HEAD_SRC = `
-    import { executionContractFingerprint, EXECUTION_CONTRACT_VERSION }
-      from './src/lib/execution/profile.ts';
-    console.log(JSON.stringify({ v: EXECUTION_CONTRACT_VERSION, fp: executionContractFingerprint() }));
-  `;
-  // 지문은 TS라 직접 실행할 수 없다. 대신 값의 출처인 두 파일과 계약
-  // 파일의 내용을 base와 비교한다 — 값이 바뀌었는지는 그것으로 충분하다.
   const gitShow = (rev, f) => {
     // base에 없는 파일은 정상이다(최초 도입). stderr까지 보여 줄 필요는 없다.
     try { return execFileSync('git', ['show', `${rev}:${f}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
     catch { return null; }
   };
-  const baseRev = process.env.EXECUTION_CONTRACT_BASE || (() => {
-    for (const r of ['origin/main', 'HEAD~1']) {
-      try { execFileSync('git', ['rev-parse', '--verify', r], { stdio: 'ignore' }); return r; }
-      catch { /* 다음 후보 */ }
+  const shaOf = rev => {
+    try {
+      return execFileSync('git', ['rev-parse', '--verify', `${rev}^{commit}`],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch { return null; }
+  };
+
+  /**
+   * 비교할 base 커밋.
+   *
+   * 후보 순서보다 중요한 규칙이 하나 있다 — **HEAD와 같은 커밋은 base가
+   * 될 수 없다.** push main에서 origin/main은 방금 밀어 넣은 그 커밋이다.
+   * 그것을 base로 잡으면 지문이 당연히 같아서 이 검사기 전체가 통과한다.
+   */
+  const headSha = shaOf('HEAD');
+  const pickBase = () => {
+    const tried = [];
+    for (const r of [process.env.EXECUTION_CONTRACT_BASE, 'origin/main', 'HEAD~1']) {
+      if (!r || !String(r).trim()) continue;
+      const sha = shaOf(String(r).trim());
+      if (!sha) { tried.push(`${r}(없음)`); continue; }
+      if (headSha && sha === headSha) { tried.push(`${r}(HEAD와 같음)`); continue; }
+      return { rev: sha, label: String(r).trim(), tried };
     }
-    return null;
-  })();
+    return { rev: null, label: null, tried };
+  };
+  const base = pickBase();
 
   /**
    * 실행값만 뽑는다.
@@ -271,6 +301,8 @@ if (!/incomplete_selection/i.test(sched)) {
    * **실행과 무관한 변경**까지 버전을 올리라고 요구한다. 그러면 개발자가
    * 규칙을 우회하는 습관이 들고, 정작 진짜 값이 바뀔 때 신호가 묻힌다.
    * 그래서 계약에 들어가는 칸과 프리셋 override 칸만 본다.
+   *
+   * bootstrap에서만 쓴다 — base에 계약이 없어 지문을 계산할 수 없는 때다.
    */
   const execValues = src => {
     const KEYS = ['leverage', 'maxLeverage', 'marginModes', 'maxPortfolioPct',
@@ -281,53 +313,120 @@ if (!/incomplete_selection/i.test(sched)) {
       .map(l => l.replace(/\s+/g, ' ').trim()).join('\n');
   };
 
-  const versionOf = src => {
-    const m = src && /EXECUTION_CONTRACT_VERSION\s*=\s*(\d+)/.exec(src);
-    return m ? Number(m[1]) : null;
+  /**
+   * 계약 정본이 딸린 파일까지 모은다.
+   *
+   * 목록을 손으로 적어 두면 언젠가 import가 하나 늘고, 그때부터 지문은
+   * **옛 파일로 계산된 값**이 된다. 그래서 import를 따라간다.
+   */
+  const collect = readOne => {
+    const out = new Map();
+    const walk = f => {
+      if (out.has(f)) return;
+      const src = readOne(f);
+      out.set(f, src);
+      if (src == null) return;
+      for (const m of src.matchAll(/from\s+'(\.[^']+)'/g)) {
+        const parts = f.split('/'); parts.pop();
+        for (const seg of m[1].split('/')) {
+          if (seg === '.') continue;
+          if (seg === '..') parts.pop();
+          else parts.push(seg);
+        }
+        walk(`${parts.join('/')}.ts`);
+      }
+    };
+    walk(PLAN);
+    return out;
   };
-  const headPlan = read(PLAN);
-  const headV = versionOf(headPlan);
-  if (headV == null) err(`${PLAN}: EXECUTION_CONTRACT_VERSION을 읽지 못했습니다`);
 
-  if (!baseRev) {
-    console.log('· 비교할 이전 커밋이 없습니다 — 버전 비교를 건너뜁니다');
-  } else {
-    const basePlan = gitShow(baseRev, PLAN);
-    if (basePlan == null) {
+  /**
+   * 그 트리의 **실제 지문**을 계산한다.
+   *
+   * 소스 줄을 비교하는 대신 계약 정본을 컴파일해서 부른다. 이 저장소의
+   * 규칙 그대로다 — 판단 로직을 스크립트에 복제하지 않고 같은 파일을
+   * 컴파일해서 쓴다(`scripts/gen-migration-manifest.mjs`의 `loadPlan()`).
+   *
+   * @returns `null`이면 그 트리에 계약이 아직 없다(bootstrap).
+   */
+  const contractAt = async (readOne, what) => {
+    const files = collect(readOne);
+    if (files.get(PLAN) == null) return null;
+    const dir = mkdtempSync(join(tmpdir(), 'traigo-exec-'));
+    for (const [f, src] of files) {
+      if (src == null) {
+        err(`${what}: ${f}을(를) 읽지 못했습니다 — 지문을 계산할 수 없습니다`);
+        return undefined;
+      }
+      const dest = join(dir, f);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, src);
+    }
+    const tsc = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+    if (!existsSync(tsc)) {
+      err(`실행 계약 지문을 계산할 수 없습니다 — TypeScript가 없습니다 (${tsc}). 먼저 npm ci`);
+      return undefined;
+    }
+    try {
+      execFileSync(process.execPath, [tsc, PLAN, '--module', 'commonjs',
+        '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe', timeout: 180_000 });
+    } catch (e) {
+      err(`${what}: 계약 정본이 컴파일되지 않습니다 — 지문을 계산할 수 없습니다`
+        + `\n${String(e.stdout || e.message).trim().slice(0, 400)}`);
+      return undefined;
+    }
+    const mod = await import(`file://${join(dir, PLAN.replace(/\.ts$/, '.js'))}`);
+    if (typeof mod.executionContractFingerprint !== 'function') {
+      err(`${what}: executionContractFingerprint()가 없습니다`);
+      return undefined;
+    }
+    return { v: mod.EXECUTION_CONTRACT_VERSION, fp: mod.executionContractFingerprint() };
+  };
+
+  const head = await contractAt(f => read(f) || null, 'HEAD');
+  if (head === null) err(`${PLAN}: 실행 계약 정본이 없습니다`);
+  else if (head && !Number.isInteger(head.v)) {
+    err(`${PLAN}: EXECUTION_CONTRACT_VERSION이 정수가 아닙니다 (${String(head.v)})`);
+  }
+
+  if (!base.rev) {
+    err('비교할 base 커밋을 정하지 못했습니다 — 버전 검사가 꺼진 채 통과할 수 없습니다.'
+      + ` 시도: ${base.tried.join(', ') || '없음'}.`
+      + ' CI는 EXECUTION_CONTRACT_BASE로 이벤트의 base를 넘겨야 합니다');
+  } else if (head) {
+    console.log(`· base = ${base.label} (${base.rev.slice(0, 8)})`);
+    const baseC = await contractAt(f => gitShow(base.rev, f), `base(${base.label})`);
+    if (baseC === null) {
       // ── bootstrap ──
-      // 이 계약이 처음 들어오는 PR이다. 비교할 base 버전이 없다.
+      // 이 계약이 처음 들어오는 PR이다. 비교할 base 지문이 없다.
       // 그래도 조용히 통과시키지 않는다 — **이 PR에서 실행 정의까지 같이
       // 바꾸면** 무엇이 v1인지가 흐려진다. 그래서 그것만 막는다.
-      if (headV !== 1) {
-        err(`${PLAN}: 계약을 처음 들이면서 버전이 1이 아닙니다 (${headV})`);
+      if (head.v !== 1) {
+        err(`${PLAN}: 계약을 처음 들이면서 버전이 1이 아닙니다 (${head.v})`);
       }
       for (const f of ['src/lib/strategies/profiles.ts', 'src/lib/strategies/profilePreset.ts']) {
-        const b = gitShow(baseRev, f);
+        const b = gitShow(base.rev, f);
         if (b != null && execValues(b) !== execValues(read(f))) {
           err(`${f}: 계약을 처음 들이는 PR에서 실행 정의가 함께 바뀌었습니다`
             + ' — v1이 무엇인지 정할 수 없습니다. 정의 변경은 다음 PR로 나누세요');
         }
       }
-      console.log(`· bootstrap — ${baseRev}에 실행 계약이 없습니다. v1로 시작합니다`);
-    } else {
-      const baseV = versionOf(basePlan);
-      let changed = false;
-      for (const f of ['src/lib/strategies/profiles.ts', 'src/lib/strategies/profilePreset.ts', PLAN]) {
-        const b = gitShow(baseRev, f);
-        if (b != null && b !== read(f)) changed = true;
-      }
-      if (changed && baseV === headV) {
-        // 실행값이 안 바뀌었는데 주석만 고친 경우까지 막지는 않는다.
-        // 그래서 지문 자체를 비교한다.
-        let realChange = false;
-        for (const f of ['src/lib/strategies/profiles.ts', 'src/lib/strategies/profilePreset.ts']) {
-          const b = gitShow(baseRev, f);
-          if (b != null && execValues(b) !== execValues(read(f))) realChange = true;
+      console.log(`· bootstrap — ${base.label}에 실행 계약이 없습니다. v1로 시작합니다`);
+    } else if (baseC) {
+      if (baseC.fp === head.fp) {
+        // 지문이 같으면 실행 의미가 그대로다. 주석·타입 정리는 여기서 걸리지 않는다.
+        if (head.v < baseC.v) {
+          err(`EXECUTION_CONTRACT_VERSION이 내려갔습니다 (${baseC.v} → ${head.v})`
+            + ' — 저장된 예약이 모두 VERSION_MISMATCH가 됩니다');
         }
-        if (realChange) {
-          err(`실행 정의가 바뀌었는데 EXECUTION_CONTRACT_VERSION이 그대로입니다 (${headV})`
-            + ` — 같은 예약이 다른 의미로 실행됩니다. base=${baseRev}`);
-        }
+      } else if (head.v === baseC.v) {
+        err('실행 계약 지문이 바뀌었는데 EXECUTION_CONTRACT_VERSION이 그대로입니다'
+          + ` (${head.v}) — 같은 예약이 다른 의미로 실행됩니다. base=${base.label}`
+          + ` (${base.rev.slice(0, 8)})`);
+      } else if (head.v < baseC.v) {
+        err(`실행 계약이 바뀌었는데 버전이 내려갔습니다 (${baseC.v} → ${head.v})`);
+      } else {
+        console.log(`· 실행 계약이 바뀌었고 버전도 올랐습니다 (${baseC.v} → ${head.v})`);
       }
     }
   }
