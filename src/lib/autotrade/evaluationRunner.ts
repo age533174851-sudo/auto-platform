@@ -27,6 +27,7 @@
 import { runStrategy, evaluationKey, type EvaluationOutcome } from '../strategies/runStrategy';
 import { strategyIdOfRow } from '../strategies/registry';
 import { strategyRunRequest } from '../strategies/runRequest';
+import { resolveExecutionProfile, isExecutionResolveError } from '../execution/profile';
 import { decisionRecordOf } from '../ui/autoOverview';
 import { dueCheck, verdictOfOutcome, resultLineOf, type DueVerdict } from './evaluationLoop';
 import { claimVerdict, type ClaimVerdict, type DispatchSource } from './schedulePoll';
@@ -39,6 +40,10 @@ export interface ScheduleRow {
   connection_id: string | null;
   mode: string;
   enabled?: any;
+  /** 실행 프로필 선택 — 세 칸이 한 덩어리다 */
+  execution_profile_id?: any;
+  execution_preset_id?: any;
+  execution_contract_version?: any;
   last_run_at?: any;
   interval_min?: any;
   leverage_cap?: any;
@@ -122,6 +127,9 @@ export async function evaluateSchedule(
         intervalMin: ctx.intervalMin, leverageCap: ctx.leverageCap,
         riskPct: ctx.riskPct, marginPct: ctx.marginPct,
         userId: row.user_id, idempotencyKey: ctx.idempotencyKey,
+        executionProfileId: row.execution_profile_id,
+        executionPresetId: row.execution_preset_id,
+        executionContractVersion: row.execution_contract_version,
       });
       // resolveStrategy는 runStrategy가 앞에서 이미 통과시켰다. 여기서
       // 막히면 그 사이에 규칙이 바뀐 것이므로 그대로 실패로 올린다.
@@ -287,6 +295,33 @@ export async function evaluateIfDue(
   // **건너뛸 때는 `last_run_at`을 건드리지 않는다.** 건너뛴 것을 실행으로
   // 적으면 간격이 매번 갱신돼서 영원히 안 돈다.
   if (!due.due) return { due, record: null, saveError: null };
+
+  // ── 실행 프로필은 아직 잠들어 있다 ──
+  //
+  // 지금 실행기는 이 계약을 읽지 않는다. 그러니 계약을 가진 예약이 여기를
+  // 지나가면 **화면에 적힌 것과 다른 의미로 주문이 나간다** — 프로필은
+  // 연구용인데 실제는 ATR. 그건 이 작업이 없애려는 고장 그 자체다.
+  //
+  // 정상 경로에서는 API와 DB 제약이 이런 행을 만들지 못하게 한다. 여기까지
+  // 왔다는 것은 그 두 층을 지나온 것이므로(수동 변경·구버전 잔재), **주문
+  // 경로를 부르기 전에** 멈춘다. 선점보다 앞이다 — 막을 것을 위해
+  // `last_run_at`을 쓰지 않는다.
+  const ep = resolveExecutionProfile(
+    row.execution_profile_id, row.execution_preset_id, row.execution_contract_version);
+  const epBlocked = isExecutionResolveError(ep)
+    ? ep.message
+    : (ep.kind === 'contract'
+      ? '실행 프로필이 아직 활성화되지 않았습니다 — 이 예약은 켜진 채로 둘 수 없습니다'
+      : '');
+  if (epBlocked) {
+    const save = await recordEvaluation(sb, row.id, {
+      scheduleId: row.id, symbol: row.symbol,
+      strategyId: strategyIdOfRow(row), strategyVersion: String(row.strategy_version ?? ''),
+      outcome: 'BLOCKED', summary: epBlocked, executed: false, raw: null,
+      source: deps.source,
+    } as any);
+    return { due: { ...due, due: false, reason: epBlocked }, record: null, saveError: save.error };
+  }
 
   // ── 선점 ──
   //

@@ -111,6 +111,35 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── 실행 프로필은 아직 이 라우트가 읽지 않는다 ──
+  //
+  // 이 주소는 예약을 거치지 않고도 직접 들어올 수 있다. 그래서
+  // evaluationRunner에서만 막으면 **직접 요청 하나로 우회된다** — 계약을
+  // 실어 보내면 받아 놓고 기존 ATR로 주문이 나간다. 화면은 연구용인데
+  // 실제는 ATR, 정확히 지금 없애려는 그 고장이다.
+  //
+  // 그래서 여기서도 판단한다. 신호를 계산하기 전에, 주문 경로에 닿기 전에.
+  {
+    const { resolveExecutionProfile, isExecutionResolveError } =
+      await import('@/lib/execution/profile');
+    const ep = resolveExecutionProfile(
+      body?.executionProfileId, body?.executionPresetId, body?.executionContractVersion);
+    if (isExecutionResolveError(ep)) {
+      return NextResponse.json({
+        ok: false, error: ep.code.toLowerCase(), message: ep.message,
+      }, { status: 400 });
+    }
+    if (ep.kind === 'contract') {
+      return NextResponse.json({
+        ok: false, error: 'EXECUTION_PROFILE_NOT_ACTIVE',
+        message: '실행 프로필이 아직 활성화되지 않았습니다'
+          + ' — 이 계약을 실은 요청은 실행하지 않습니다(기존 방식으로 대신 실행하지도 않습니다).',
+        profileId: ep.contract.profileId, presetId: ep.contract.presetId,
+        contractVersion: ep.contract.contractVersion,
+      }, { status: 409 });
+    }
+  }
+
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
