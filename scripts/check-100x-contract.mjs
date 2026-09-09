@@ -103,6 +103,7 @@ const loadModule = async (entry, what) => {
 
 const plan = await loadModule(PLAN, '실행 계약 정본');
 const profilesMod = await loadModule(PROFILES_TS, '프로필 정본');
+const presetMod = await loadModule('src/lib/strategies/profilePreset.ts', '프리셋 표');
 
 if (plan) {
   // ── 정체 ──
@@ -194,6 +195,25 @@ if (plan) {
       || plan.sizingPolicyOfContract(undefined) !== 'STOP_RISK') {
     err('계약이 없을 때 기본 사이징이 STOP_RISK가 아닙니다'
       + ' — 기존 전략이 손절 거리 기반 사이징을 잃습니다');
+  }
+
+  // ── 전용 프리셋이 **자기 행**으로 해석되는가 ──
+  //
+  // `presetOf`가 모르는 값을 기본 프리셋으로 눕힌다. `EXACT_100X`가 거기서
+  // 빠지면 `applyPreset`이 **안정화 행**을 얹는다. 지금은 그 행이 비어 있어
+  // 프로필 리터럴(100)이 그대로 남아 결과가 같지만, 그건 우연이다 —
+  // 전용 프리셋 표에 다른 값이 들어오는 순간 계약이 조용히 달라진다.
+  if (presetMod) {
+    const own = presetMod.overrideOf?.(ID, PRESET);
+    const table = presetMod.PRESET_TABLE?.[PRESET]?.[ID];
+    if (!own || !table || own.maxLeverage !== table.maxLeverage || own.leverage !== table.leverage) {
+      err(`${PRESET} 프리셋이 자기 행으로 해석되지 않습니다`
+        + ` (얹힌 값 ${JSON.stringify(own)} / 표의 값 ${JSON.stringify(table)})`
+        + ' — presetOf가 기본 프리셋으로 눕히고 있습니다');
+    }
+    if (presetMod.presetOf?.(PRESET) !== PRESET) {
+      err(`presetOf('${PRESET}')가 ${presetMod.presetOf?.(PRESET)}를 돌려줍니다`);
+    }
   }
 
   // ── 계약 칸 ──
@@ -542,7 +562,15 @@ const scalpSrc = code(SCALP);
 if (!/epSizingPolicy\s*===\s*'MARGIN_ALLOCATION'/.test(scalpSrc)) {
   err(`${SCALP}: 사이징 정책으로 갈라지지 않습니다 — planPosition을 우회하지 않습니다`);
 }
-if (!/stopPolicy:\s*epStopPolicy/.test(scalpSrc)) {
+// **두 자리를 각각 본다.** 파일 전체에서 이름을 찾으면 한쪽이 사라져도
+// 다른 쪽 때문에 통과한다 — 이 저장소에서 반복된 false-green의 형태다.
+const blockAfter = (src, needle, span = 1600) => {
+  const i = src.indexOf(needle);
+  return i < 0 ? '' : src.slice(i, i + span);
+};
+const execCall = blockAfter(scalpSrc, 'executeOrder(sb, {');
+if (!execCall) err(`${SCALP}: executeOrder 호출을 찾지 못했습니다`);
+else if (!/stopPolicy:\s*epStopPolicy/.test(execCall)) {
   err(`${SCALP}: executeOrder에 stopPolicy를 넘기지 않습니다`
     + ' — 계약이 장부(live_orders.stop_policy)까지 닿지 않습니다');
 }
@@ -551,14 +579,17 @@ if (!/epStopPolicy\s*===\s*'NO_FIXED_SL'\s*\n?\s*\?\s*\{\}/.test(scalpSrc)
   err(`${SCALP}: 고정 손절 없는 계약에서도 stopLoss를 함께 보냅니다`
     + ' — executeOrder가 그 조합을 모순으로 보고 거부합니다');
 }
-if (!/stopPolicy:\s*epStopPolicy/.test(scalpSrc.slice(scalpSrc.indexOf('runChecklist')))
-    && !/runChecklist\([\s\S]{0,400}stopPolicy/.test(scalpSrc)) {
+const clCall = blockAfter(scalpSrc, 'runChecklist(checkInput', 500);
+if (!clCall) err(`${SCALP}: runChecklist 호출을 찾지 못했습니다`);
+else if (!/stopPolicy:\s*epStopPolicy/.test(clCall)) {
   err(`${SCALP}: 체크리스트에 stopPolicy를 넘기지 않습니다 — 손절 항목이 N/A로 빠지지 않습니다`);
 }
 
 // 예약의 배정 비율이 라우트까지 실려 가는가
-if (!/marginAllocationPct/.test(code(RUNREQ))) {
-  err(`${RUNREQ}: 예약의 증거금 배정 비율을 요청에 싣지 않습니다`);
+// 인터페이스에 이름만 남아도 통과하면 안 된다. **본문에 싣는 대입**을 본다.
+if (!/body\.marginAllocationPct\s*=/.test(code(RUNREQ))) {
+  err(`${RUNREQ}: 예약의 증거금 배정 비율을 요청 본문에 싣지 않습니다`
+    + ' — 타입에 이름만 있고 값이 라우트까지 가지 않습니다');
 }
 if (!/marginAllocationPct/.test(code(RUNNER))) {
   err(`${RUNNER}: 예약 줄의 margin_allocation_pct를 읽지 않습니다`);
