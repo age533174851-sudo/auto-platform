@@ -27,6 +27,23 @@ export type StrategyType =
  *   NO_FIXED_SL  — 고정 손절을 아예 걸지 않는다. `stopLossPct`는 null이다
  */
 export type StopPolicy = 'FIXED_SL' | 'NO_FIXED_SL';
+
+/**
+ * 주문 크기를 **무엇에서** 만드는가.
+ *
+ *   STOP_RISK          허용손실 ÷ 손절거리 (`riskManager.planPosition`)
+ *   MARGIN_ALLOCATION  가용잔고 × 명시 배정비율 × 배율 ÷ 기준가
+ *
+ * `stopPolicy`와 짝이지만 같은 값이 아니다. 손절이 없으면 손절 거리로
+ * 크기를 만들 수 없으니 `NO_FIXED_SL`은 반드시 `MARGIN_ALLOCATION`이지만,
+ * 반대는 성립하지 않는다 — 손절을 걸면서도 증거금으로 크기를 정하는
+ * 전략이 나중에 있을 수 있다. 그래서 축을 둘로 둔다.
+ *
+ * **배정 비율 자체는 여기 없다.** 그 값은 프로필 상수가 아니라 예약마다
+ * 사용자가 명시하는 값이라, 프로필에 박아 두면 사용자가 나중에 입력해도
+ * 계약은 계속 옛 값을 가리키게 된다.
+ */
+export type SizingPolicy = 'STOP_RISK' | 'MARGIN_ALLOCATION';
 export type MarginMode   = 'isolated' | 'cross';
 export type OrderType    = 'post_only_limit' | 'limit' | 'market';
 
@@ -53,15 +70,8 @@ export interface StrategyProfile {
   stopLossPct:     number | null;
   /** 고정 손절을 쓰는가. `stopLossPct`와 짝이다 (아래 불변식) */
   stopPolicy:      StopPolicy;
-  /**
-   * 1회 주문에 배정할 **증거금 비율(%)** — 가용 잔고 대비.
-   *
-   * 손절 거리에서 수량을 역산할 수 없는 프로필(NO_FIXED_SL)이 쓴다.
-   * **`null`이면 "정하지 않았다"이고, 그 상태에서는 주문하지 않는다.**
-   * 0으로 눕히면 수량 0이 되고, 기본값을 빌려 오면 사용자가 고른 적 없는
-   * 크기로 100배가 나간다.
-   */
-  marginAllocationPct: number | null;
+  /** 크기를 무엇에서 만드는가. 배정 비율 값 자체는 예약이 갖는다 */
+  sizingPolicy:    SizingPolicy;
   // 주문
   orderType:       OrderType;
   timeoutSec:      number;   // 지정가 미체결 시 취소까지 (0 = 무제한)
@@ -133,8 +143,8 @@ export const SCALP_HIGH_LEV: StrategyProfile = {
   stopLossPct: 0.3,                   // 타이트 (필수)
   // 기존 셋은 전부 고정 손절 전략이다. 의미가 바뀌지 않는다.
   stopPolicy: 'FIXED_SL',
-  // 손절 거리에서 수량을 역산하므로 증거금 비율을 따로 배정하지 않는다.
-  marginAllocationPct: null,
+  // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
+  sizingPolicy: 'STOP_RISK',
   orderType: 'post_only_limit',       // Post-only 지정가
   timeoutSec: 20,                     // 20초 미체결 시 취소
   dailyLossLimitPct: 2,               // 하루 -2%면 이 전략 정지
@@ -158,8 +168,8 @@ export const SWING_LOW_LEV: StrategyProfile = {
   stopLossPct: 6,                     // 넓게 (필수)
   // 기존 셋은 전부 고정 손절 전략이다. 의미가 바뀌지 않는다.
   stopPolicy: 'FIXED_SL',
-  // 손절 거리에서 수량을 역산하므로 증거금 비율을 따로 배정하지 않는다.
-  marginAllocationPct: null,
+  // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
+  sizingPolicy: 'STOP_RISK',
   orderType: 'limit',
   timeoutSec: 0,                      // 무제한 (스윙은 급하지 않음)
   dailyLossLimitPct: 8,              // 하루 -8%면 정지
@@ -196,8 +206,8 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   stopLossPct: 0.5,                   // 기본 손절 (신호가 주면 그것 사용)
   // 기존 셋은 전부 고정 손절 전략이다. 의미가 바뀌지 않는다.
   stopPolicy: 'FIXED_SL',
-  // 손절 거리에서 수량을 역산하므로 증거금 비율을 따로 배정하지 않는다.
-  marginAllocationPct: null,
+  // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
+  sizingPolicy: 'STOP_RISK',
   orderType: 'market',
   timeoutSec: 30,
   dailyLossLimitPct: 30,              // 하루 -30%면 전략 정지 (슬롯 3개 소진 수준)
@@ -212,40 +222,49 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   simPrice: 100_000,
 };
 
-// ── 프리셋 D: 전용 100배 (고정 손절 없음) ───────────────────
+// ── 전용 100배 (고정 손절 없음) ─────────────────────────────
 //
 // **레거시 "상한 100배"와 다른 물건이다.**
 //
-// 지금까지 화면의 `levCap=100`은 *상한*이었다. 실제 배율은 손절 거리에서
-// 역산되고 그 상한에서 잘렸다 — 손절 0.5%면 75배, 1%면 50배. 100배가
-// 실제로 나가려면 손절이 0.26% 안쪽이어야 해서 **사실상 선택되지 않았다.**
-// 그런데 화면에는 "100배"라고 적혀 있었다. 적힌 것과 나가는 것이 달랐다.
+// 화면의 `levCap=100`은 *상한*이다. 실제 배율은 손절 거리에서 역산되고
+// 그 상한에서 잘린다. 그래서 화면에 100배라고 적혀 있어도 나가는 것은
+// 다른 값일 수 있었다 — 적힌 것과 나가는 것이 달랐다.
 //
 // 이 프로필은 그 구조를 쓰지 않는다:
 //
 //   · 요청 배율이 **정확히 100**이다. 상한이 아니다
-//   · 거래소에 설정한 뒤 **되읽어서 100인지 확인**하고, 99·75·모름이면
+//   · 거래소에 설정한 뒤 **되읽어서 100인지 확인**하고, 다르거나 모르면
 //     주문하지 않는다 (`futuresApplyLeverage` → `leverageVerdict`)
+//   · 마진 모드도 **되읽어서 isolated인지 확인**한다. cross이거나 모르면
+//     주문하지 않는다
 //   · 고정 손절을 **걸지 않는다**(`NO_FIXED_SL`). 그래서 손절 거리에서
-//     수량을 역산할 수 없고, 증거금 비율로 크기를 정한다
-//   · `marginAllocationPct`는 아직 **정해지지 않았다(null)**. 그 상태에서는
-//     사이징이 막는다 — 기본값을 빌려 오지 않는다
+//     수량을 역산할 수 없고, 증거금 배정에서 크기를 만든다
+//     (`sizingPolicy: 'MARGIN_ALLOCATION'`) — 배정 비율은 예약이 갖는다
 //
-// **이 프로필이 있다고 100배가 안전해지지는 않는다.** 100배의 청산 거리는
-// 대략 0.6~1%다. 이것이 보장하는 것은 하나뿐이다 — 화면에 100배라고
-// 적혀 있으면 거래소에도 100배가 걸려 있고, 아니면 주문이 나가지 않는다.
+// **이 프로필이 있다고 100배가 안전해지지는 않는다.** 이것이 보장하는
+// 것은 하나뿐이다 — 화면에 100배라고 적혀 있으면 거래소에도 100배가
+// 걸려 있고, 아니면 주문이 나가지 않는다.
+//
+// 마진 모드가 isolated 전용인 이유 (사용자 확정 정책)
+// ──────────────────────────────────────────────────
+// cross까지 열면 같은 이름 아래에서 담보 범위·가용 잔고의 뜻·청산과 복구의
+// 의미가 달라져 **사실상 다른 전략 둘**이 된다. 크기를 가용 잔고 × 명시
+// 배정 비율 × 배율로 고정하는 이 계약에서는 격리여야 그 식이 한 가지 뜻을
+// 갖는다. Gate는 교차를 leverage 0으로 표현해서 되읽기가 null이 되는
+// 경계도 있다. Cross 100배가 필요해지면 이 프로필의 뜻을 바꾸지 말고
+// **별도 프로필/계약**으로 만든다.
 export const MAX_LEV_100X: StrategyProfile = {
   id: 'MAX_LEV_100X',
   label: '전용 100배 (고정 손절 없음)',
   description:
     '요청 배율이 정확히 100배다. 거래소에 되읽어 100이 확인될 때만 주문한다(99·75·모름이면 중단). '
     + '고정 손절을 걸지 않으므로 수량은 손절 거리가 아니라 명시적 증거금 배정에서 나온다. '
-    + 'ISOLATED 강제. 증거금 배정이 정해지기 전에는 주문하지 않는다.',
+    + 'ISOLATED 전용. 배정 비율을 예약에 직접 입력하기 전에는 주문하지 않는다.',
   // **상한이 아니라 요청값이다.** 둘을 같게 두어 "100까지 허용"과
   // "정확히 100"이 갈릴 자리를 없앤다.
   leverage: 100,
   maxLeverage: 100,
-  marginModes: ['isolated'],          // Cross 금지 — 100배 손실이 지갑 전체로 번진다
+  marginModes: ['isolated'],          // Cross 금지 (위 주석 · 사용자 확정 정책)
   maxPortfolioPct: 10,
   // 손절 거리 기반 사이징을 타지 않으므로 이 값은 크기를 정하지 않는다.
   // 다른 한도(전체 동시 위험 등)와 같은 단위를 유지하려고 남긴다.
@@ -254,10 +273,9 @@ export const MAX_LEV_100X: StrategyProfile = {
   // **고정 손절 없음.** 숫자를 적지 않는다 — 위 stopLossPct 주석 참조.
   stopLossPct: null,
   stopPolicy: 'NO_FIXED_SL',
-  // **아직 정해지지 않았다.** 숫자를 여기서 지어내지 않는다. null이면
-  // 사이징이 BLOCK하고, 그래서 이 프로필은 구현되어 있어도 주문을 내지
-  // 못한다 — 의도된 상태다.
-  marginAllocationPct: null,
+  // 손절 거리가 없으므로 증거금 배정에서 크기를 만든다.
+  // **비율 값은 여기 없다** — 예약마다 사용자가 명시한다.
+  sizingPolicy: 'MARGIN_ALLOCATION',
   orderType: 'market',
   timeoutSec: 30,
   dailyLossLimitPct: 30,
@@ -300,6 +318,13 @@ export function stopPolicyInvariantErrors(): string[] {
       }
     } else if (!(Number(p.stopLossPct) > 0)) {
       out.push(`${p.id}: FIXED_SL인데 stopLossPct가 ${String(p.stopLossPct)}입니다 — 0보다 커야 합니다`);
+    }
+    // 손절이 없으면 손절 거리로 크기를 만들 수 없다. 이 짝이 어긋나면
+    // `planPosition`이 INVALID_STOP으로 거부하거나, 더 나쁘게는 어딘가에서
+    // 지어낸 손절 거리로 수량이 나온다.
+    if (p.stopPolicy === 'NO_FIXED_SL' && p.sizingPolicy !== 'MARGIN_ALLOCATION') {
+      out.push(`${p.id}: NO_FIXED_SL인데 sizingPolicy가 ${p.sizingPolicy}입니다`
+        + ' — 손절이 없으면 손절 거리로 크기를 만들 수 없습니다');
     }
   }
   return out;

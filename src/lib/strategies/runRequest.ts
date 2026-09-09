@@ -58,6 +58,14 @@ export interface RunRequestInput {
   executionProfileId?: any;
   executionPresetId?: any;
   executionContractVersion?: any;
+  /**
+   * 이 **예약에 사용자가 직접 입력한** 증거금 배정 비율(%).
+   *
+   * 프로필 상수가 아니라 예약 값이라 계약이 아니라 여기로 온다. 계약이
+   * 해석되지 않으면 본문에 붙지 않는다 — 프로필 없는 예약의 요청 바이트를
+   * 바꾸지 않기 위해서다.
+   */
+  marginAllocationPct?: any;
 }
 
 export interface RunRequest {
@@ -117,6 +125,11 @@ export function strategyRunRequest(i: RunRequestInput): RunRequest {
     body.executionProfileId = ep.contract.profileId;
     body.executionPresetId = ep.contract.presetId;
     body.executionContractVersion = ep.contract.contractVersion;
+    // 배정 비율은 **예약이 준 값 그대로** 싣는다. 없으면 키를 붙이지
+    // 않는다 — 라우트가 "미지정"과 "0"을 구분해야 한다.
+    if (i.marginAllocationPct != null && String(i.marginAllocationPct) !== '') {
+      body.marginAllocationPct = Number(i.marginAllocationPct);
+    }
   }
 
   if (i.userId != null && String(i.userId) !== '') body.userId = String(i.userId);

@@ -4,34 +4,57 @@
 // 있으면 거래소에도 100배가 걸려 있고, 아니면 주문이 나가지 않는다.
 // 고정 손절을 안 쓴다고 했으면 lifecycle 어디에서도 손절이 새로 걸리지
 // 않는다. 크기의 근거가 없으면 크기를 만들지 않는다.
-import { test, assert, eq } from '../../test/harness';
+import { test, assert, eq, flushAsync } from '../../test/harness';
 import {
-  resolveExecutionProfile, stopPolicyOfContract, marginAllocationOfContract,
-  EXECUTION_CONTRACT_VERSION, CONTRACT_FIELDS,
+  resolveExecutionProfile, stopPolicyOfContract, sizingPolicyOfContract,
+  pairMismatchReason, EXCLUSIVE_PAIRS,
+  EXECUTION_CONTRACT_VERSION, CONTRACT_FIELDS, isExecutionResolveError,
 } from './profile';
-import { executionGateVerdict, enableFilterSpec, EXECUTABLE_PROFILE_IDS } from './dormantGate';
+import { executionGateVerdict, enableFilterSpec, OPEN_COMBOS } from './dormantGate';
 import { PROFILES, stopPolicyInvariantErrors } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset } from '../strategies/profilePreset';
 import { planSize100x } from '../engine/sizing100x';
+import { planEntry100x, type Entry100xDeps } from '../engine/entry100x';
 import { stopReattachVerdict } from '../engine/stopReattach';
 import { leverageVerdict } from '../exchanges/futuresExec';
 import { appliesTo, FIXED_STOP_ONLY_CHECKS } from '../engine/preTradeChecklist';
 
 const V = EXECUTION_CONTRACT_VERSION;
 const ID = 'MAX_LEV_100X';
+const PRESET = 'EXACT_100X';
+
+const failCode = (r: ReturnType<typeof resolveExecutionProfile>) =>
+  (isExecutionResolveError(r) ? r.code : '');
 
 /** 통과하는 사이징 입력 한 벌. 시험마다 한 칸씩만 바꿔서 쓴다 */
 const goodSizing = {
   requiredLeverage: 100,
   observedLeverage: 100,
   availableUsd: 1_000,
-  // **정본은 null이다.** 시험이 값을 주입해서 성공 경로를 확인한다 —
-  // 정본에 숫자를 넣으면 아직 정하지 않은 값을 정한 것이 된다.
+  // 배정 비율은 **예약이 주는 값**이라 시험이 주입한다. 정본에는 없다.
   marginAllocationPct: 10,
   referencePrice: 50_000,
 };
 
-export function runDedicated100xTests() {
+/** 전부 통과하는 가짜 거래소 어댑터. 시험마다 한 곳씩만 망가뜨린다 */
+const okDeps = (over: Partial<Entry100xDeps> = {}): Entry100xDeps => ({
+  observeMarginMode: async () => 'isolated',
+  applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: `${lev}배 확인` }),
+  availableUsd: async () => 1_000,
+  referencePrice: async () => 50_000,
+  quantize: async (q: number) => ({ qty: q, message: '' }),
+  ...over,
+});
+
+const contract100x = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
+
+/** 열린 조합 한 벌 — 켜기 관련 시험이 쓴다 */
+const openRow = {
+  profileId: ID, presetId: PRESET, contractVersion: V,
+  mode: 'TESTNET', marginAllocationPct: 10,
+};
+
+export async function runDedicated100xTests() {
   // ── ① 정체 ──────────────────────────────────────────────
   test('전용 100배는 별도 id다 — 기존 세 프로필의 의미가 바뀌지 않았다', () => {
     assert(!!(PROFILES as any)[ID], '전용 100배 프로필이 없다');
@@ -40,6 +63,9 @@ export function runDedicated100xTests() {
     eq(PROFILES.DAILY_HIGH_LEV.stopLossPct, 0.5, 'DAILY_HIGH_LEV 손절이 바뀌었다');
     eq(PROFILES.SCALP_HIGH_LEV.leverage, 25, 'SCALP가 바뀌었다');
     eq(PROFILES.SWING_LOW_LEV.leverage, 4, 'SWING이 바뀌었다');
+    // 마진 모드 의미도 그대로다.
+    eq(PROFILES.SWING_LOW_LEV.marginModes.join(','), 'isolated,cross');
+    eq(PROFILES.DAILY_HIGH_LEV.marginModes.join(','), 'isolated');
   });
 
   test('전용 100배는 요청값이 정확히 100이다 — 상한이 아니다', () => {
@@ -47,63 +73,94 @@ export function runDedicated100xTests() {
     eq(PROFILES[ID].maxLeverage, 100, '상한과 요청값이 다르면 "정확히 100"이 아니다');
   });
 
-  // ── ② 프리셋 불변 ───────────────────────────────────────
-  test('어느 프리셋에서도 전용 100배의 배율은 100이다', () => {
-    for (const sid of Object.keys(PRESET_TABLE)) {
-      const merged = applyPreset(PROFILES[ID], sid as any);
-      eq(merged.leverage, 100, `${sid}에서 기본 배율이 100이 아니다`);
-      eq(merged.maxLeverage, 100, `${sid}에서 상한이 100이 아니다`);
+  test('전용 100배는 ISOLATED 전용이다 (사용자 확정 정책)', () => {
+    eq(PROFILES[ID].marginModes.join(','), 'isolated', 'cross가 열리면 다른 전략이 된다');
+  });
+
+  // ── ② 프로필 × 프리셋 조합 ──────────────────────────────
+  test('전용 100배는 EXACT_100X 프리셋에서만 해석된다', () => {
+    const ok = resolveExecutionProfile(ID, PRESET, V);
+    assert(ok.ok && ok.kind === 'contract', `${ID}/${PRESET} 해석 실패`);
+    for (const sid of ['STABILIZE', 'RESEARCH']) {
+      const r = resolveExecutionProfile(ID, sid, V);
+      eq(failCode(r), 'PROFILE_PRESET_MISMATCH', `${ID}/${sid}가 통과했다`);
     }
   });
 
-  test('프리셋 표에 전용 100배 항목이 실제로 적혀 있다 — 키 누락에 기대지 않는다', () => {
-    for (const sid of Object.keys(PRESET_TABLE)) {
-      const row = (PRESET_TABLE as any)[sid][ID];
-      assert(row && row.maxLeverage === 100,
-        `${sid}에 ${ID} 항목이 없다 — 지금은 100이지만 그건 항목이 없어서다`);
+  test('EXACT_100X 프리셋은 다른 프로필에 붙지 않는다', () => {
+    for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
+      const r = resolveExecutionProfile(pid, PRESET, V);
+      eq(failCode(r), 'PROFILE_PRESET_MISMATCH', `${pid}/${PRESET}가 통과했다`);
     }
   });
 
-  // ── ③ 손절 정책 ─────────────────────────────────────────
-  test('stopPolicy와 stopLossPct의 짝이 맞는다', () => {
-    const errs = stopPolicyInvariantErrors();
-    eq(errs.join(' / '), '', '정책과 손절 숫자가 어긋난 프로필이 있다');
+  test('기존 프로필 × 기존 프리셋 조합은 그대로 해석된다', () => {
+    for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
+      for (const sid of ['STABILIZE', 'RESEARCH']) {
+        const r = resolveExecutionProfile(pid, sid, V);
+        assert(r.ok && r.kind === 'contract', `${pid}/${sid}가 막혔다 — 기존 동작이 바뀌었다`);
+      }
+    }
   });
 
-  test('전용 100배에는 synthetic stop이 없다 — stopLossPct는 null이다', () => {
+  test('조합 규칙은 양방향이다 — 한쪽만 막으면 반대가 샌다', () => {
+    eq(EXCLUSIVE_PAIRS.length > 0, true);
+    assert(pairMismatchReason(ID, 'STABILIZE') !== '', '프로필 쪽이 안 막힌다');
+    assert(pairMismatchReason('SCALP_HIGH_LEV', PRESET) !== '', '프리셋 쪽이 안 막힌다');
+    eq(pairMismatchReason(ID, PRESET), '');
+    eq(pairMismatchReason('SCALP_HIGH_LEV', 'STABILIZE'), '');
+  });
+
+  test('전용 프리셋 표에 항목이 실제로 적혀 있다 — 키 누락에 기대지 않는다', () => {
+    const row = (PRESET_TABLE as any)[PRESET]?.[ID];
+    assert(row && row.leverage === 100 && row.maxLeverage === 100,
+      `${PRESET}에 ${ID} 항목이 없다 — 지금 100인 것이 우연이 된다`);
+    const merged = applyPreset(PROFILES[ID], PRESET as any);
+    eq(merged.leverage, 100);
+    eq(merged.maxLeverage, 100);
+  });
+
+  // ── ③ 손절·사이징 정책 ──────────────────────────────────
+  test('stopPolicy·sizingPolicy·stopLossPct의 짝이 맞는다', () => {
+    eq(stopPolicyInvariantErrors().join(' / '), '', '정책과 숫자가 어긋난 프로필이 있다');
+  });
+
+  test('전용 100배에는 synthetic stop이 없다', () => {
     eq(PROFILES[ID].stopPolicy, 'NO_FIXED_SL');
-    eq(PROFILES[ID].stopLossPct, null, '0이나 다른 숫자가 남아 있으면 그것이 손절로 되살아난다');
+    eq(PROFILES[ID].sizingPolicy, 'MARGIN_ALLOCATION');
+    eq(PROFILES[ID].stopLossPct, null, '숫자가 남아 있으면 그것이 손절로 되살아난다');
   });
 
-  test('계약에도 두 축이 실려 나간다', () => {
+  test('계약 칸은 정책 두 개다 — 배정 비율은 계약이 아니다', () => {
     assert(CONTRACT_FIELDS.includes('stopPolicy' as any), 'stopPolicy가 계약 칸이 아니다');
-    assert(CONTRACT_FIELDS.includes('marginAllocationPct' as any),
-      'marginAllocationPct가 계약 칸이 아니다');
-    const r = resolveExecutionProfile(ID, 'STABILIZE', V);
-    assert(r.ok && r.kind === 'contract', '전용 100배 계약이 해석되지 않는다');
+    assert(CONTRACT_FIELDS.includes('sizingPolicy' as any), 'sizingPolicy가 계약 칸이 아니다');
+    assert(!CONTRACT_FIELDS.includes('marginAllocationPct' as any),
+      '배정 비율이 계약에 있다 — 예약이 값을 바꿔도 계약은 옛 값을 가리킨다');
+    const r = resolveExecutionProfile(ID, PRESET, V);
     if (r.ok && r.kind === 'contract') {
       eq(r.contract.stopPolicy, 'NO_FIXED_SL');
+      eq(r.contract.sizingPolicy, 'MARGIN_ALLOCATION');
       eq(r.contract.leverage, 100);
       eq(r.contract.stopLossPct, null);
-      eq(r.contract.marginAllocationPct, null, '증거금 배정은 아직 정해지지 않았다');
+      eq((r.contract as any).marginAllocationPct, undefined);
     }
   });
 
   // ── ④ 누출 방지 ─────────────────────────────────────────
-  test('계약이 없으면 NO_FIXED_SL 의미를 만들 수 없다 — 레거시 levCap 100은 계약이 아니다', () => {
+  test('계약이 없으면 100X 실행 의미를 만들 수 없다 — 레거시 levCap 100은 계약이 아니다', () => {
     eq(stopPolicyOfContract(null), 'FIXED_SL');
     eq(stopPolicyOfContract(undefined), 'FIXED_SL');
-    eq(marginAllocationOfContract(null), null);
+    eq(sizingPolicyOfContract(null), 'STOP_RISK');
+    eq(sizingPolicyOfContract(undefined), 'STOP_RISK');
   });
 
-  test('전용 100배 외의 어떤 프로필도 NO_FIXED_SL이 아니다', () => {
-    for (const pid of Object.keys(PROFILES)) {
-      for (const sid of Object.keys(PRESET_TABLE)) {
+  test('전용 100배 외의 어떤 조합도 NO_FIXED_SL / MARGIN_ALLOCATION이 아니다', () => {
+    for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
+      for (const sid of ['STABILIZE', 'RESEARCH']) {
         const r = resolveExecutionProfile(pid, sid, V);
-        assert(r.ok && r.kind === 'contract', `${pid}/${sid} 해석 실패`);
         if (r.ok && r.kind === 'contract') {
-          const want = pid === ID ? 'NO_FIXED_SL' : 'FIXED_SL';
-          eq(stopPolicyOfContract(r.contract), want, `${pid}/${sid}의 손절 정책이 다르다`);
+          eq(stopPolicyOfContract(r.contract), 'FIXED_SL', `${pid}/${sid}의 손절 정책이 다르다`);
+          eq(sizingPolicyOfContract(r.contract), 'STOP_RISK', `${pid}/${sid}의 사이징이 다르다`);
         }
       }
     }
@@ -113,8 +170,6 @@ export function runDedicated100xTests() {
   test('되읽은 배율이 정확히 100일 때만 크기를 만든다', () => {
     const ok = planSize100x(goodSizing);
     assert(ok.ok, `정상 입력이 막혔다: ${ok.message}`);
-    eq(ok.leverage, 100);
-    // 1000 × 10% = 100 증거금 → ×100배 = 10,000 명목가 ÷ 50,000 = 0.2
     eq(ok.allocatedMargin, 100);
     eq(ok.targetNotional, 10_000);
     eq(ok.quantity, 0.2);
@@ -129,37 +184,27 @@ export function runDedicated100xTests() {
     });
   }
 
-  test('배율 판정은 leverageVerdict와 같은 방향이다 — 두 곳이 갈리지 않는다', () => {
+  test('배율 판정은 leverageVerdict와 같은 방향이다', () => {
     eq(leverageVerdict(100, 100, 100).ok, true);
     eq(leverageVerdict(100, 100, 75).ok, false, '거래소가 낮춘 것을 통과시키면 안 된다');
     eq(leverageVerdict(100, 100, null).ok, false);
     eq(leverageVerdict(100, 100, 101).ok, false);
   });
 
-  // ── ⑥ 크기의 근거가 없으면 크기를 만들지 않는다 ──────────
+  // ── ⑥ 크기의 근거 ───────────────────────────────────────
   test('증거금 배정 미지정이면 막는다 — 화면 기본값을 빌려 오지 않는다', () => {
     const v = planSize100x({ ...goodSizing, marginAllocationPct: null });
     eq(v.ok, false);
     eq(v.code, 'MARGIN_ALLOCATION_UNSET');
-    eq(v.quantity, null);
   });
 
-  test('정본 프로필 그대로면 지금은 반드시 막힌다 — 배정 비율이 아직 없다', () => {
-    const v = planSize100x({ ...goodSizing, marginAllocationPct: PROFILES[ID].marginAllocationPct });
-    eq(v.ok, false, '아직 정하지 않은 값으로 100배 주문이 나갔다');
-    eq(v.code, 'MARGIN_ALLOCATION_UNSET');
-  });
-
-  test('잔고를 못 읽으면 막는다 — 0으로 눕히지 않는다', () => {
-    const v = planSize100x({ ...goodSizing, availableUsd: null });
-    eq(v.ok, false);
-    eq(v.code, 'BALANCE_UNKNOWN');
+  test('잔고를 못 읽으면 BALANCE_UNKNOWN이다 — 0으로 눕히지 않는다', () => {
+    eq(planSize100x({ ...goodSizing, availableUsd: null }).code, 'BALANCE_UNKNOWN');
+    eq(planSize100x({ ...goodSizing, availableUsd: 0 }).code, 'BALANCE_EMPTY');
   });
 
   test('기준가를 못 읽으면 막는다', () => {
-    const v = planSize100x({ ...goodSizing, referencePrice: null });
-    eq(v.ok, false);
-    eq(v.code, 'PRICE_UNKNOWN');
+    eq(planSize100x({ ...goodSizing, referencePrice: null }).code, 'PRICE_UNKNOWN');
   });
 
   test('배정 비율이 범위를 벗어나면 막는다', () => {
@@ -170,7 +215,97 @@ export function runDedicated100xTests() {
     }
   });
 
-  // ── ⑦ 고정 손절 재부착 0건 ──────────────────────────────
+  // ── ⑦ 진입 계획 (가짜 거래소 어댑터) ────────────────────
+  test('가짜 어댑터: 전부 정상이면 수량이 나온다', async () => {
+    const v = await planEntry100x(contract100x, 10, okDeps());
+    assert(v.ok, `정상 입력이 막혔다: ${v.message}`);
+    eq(v.leverage, 100);
+    eq(v.quantity, 0.2);
+    eq(v.marginMode, 'isolated');
+    eq(v.requiredMargin, 100);
+  });
+
+  test('가짜 어댑터: 거래소가 교차 마진이면 진입하지 않는다', async () => {
+    const v = await planEntry100x(contract100x, 10, okDeps({ observeMarginMode: async () => 'cross' }));
+    eq(v.ok, false, '교차인데 100배 주문이 나갔다');
+    eq(v.code, 'MARGIN_MODE_NOT_ISOLATED');
+    eq(v.quantity, null);
+  });
+
+  test('가짜 어댑터: 마진 모드를 모르면 진입하지 않는다', async () => {
+    const v = await planEntry100x(contract100x, 10, okDeps({ observeMarginMode: async () => null }));
+    eq(v.ok, false, '담보 범위를 모르는데 주문이 나갔다');
+    eq(v.code, 'MARGIN_MODE_UNKNOWN');
+  });
+
+  test('가짜 어댑터: 마진 모드 확인이 배율 설정보다 먼저다', async () => {
+    // 교차 계좌에 배율부터 걸면, 막을 주문을 위해 계좌 설정을 먼저 바꾸는
+    // 것이 된다. 순서가 뒤집히면 여기서 applyLeverage가 불린다.
+    let applied = false;
+    const v = await planEntry100x(contract100x, 10, okDeps({
+      observeMarginMode: async () => 'cross',
+      applyLeverage: async (lev: number) => { applied = true; return { ok: true, observed: lev, message: '' }; },
+    }));
+    eq(v.ok, false);
+    eq(applied, false, '교차인 걸 알기 전에 배율을 걸었다');
+  });
+
+  for (const [label, observed] of [['99배', 99], ['75배', 75], ['모름', null]] as const) {
+    test(`가짜 어댑터: 되읽은 배율이 ${label}이면 진입하지 않는다`, async () => {
+      const v = await planEntry100x(contract100x, 10, okDeps({
+        // 되읽기가 요청과 다르거나 못 읽은 경우다. 설정 자체는 성공했다고
+        // 두어, **되읽은 값만으로 막는지**를 본다.
+        applyLeverage: async () => ({ ok: true, observed: observed as any, message: '되읽음' }),
+      }));
+      eq(v.ok, false, `${label}인데 주문이 나갔다`);
+      eq(v.code, 'LEVERAGE_NOT_EXACT');
+    });
+  }
+
+  test('가짜 어댑터: 배정 비율이 없으면 진입하지 않는다', async () => {
+    const v = await planEntry100x(contract100x, null, okDeps());
+    eq(v.ok, false);
+    eq(v.code, 'SIZING_BLOCKED');
+  });
+
+  test('가짜 어댑터: 잔고·기준가를 못 읽으면 진입하지 않는다', async () => {
+    eq((await planEntry100x(contract100x, 10, okDeps({ availableUsd: async () => null }))).code, 'SIZING_BLOCKED');
+    eq((await planEntry100x(contract100x, 10, okDeps({ referencePrice: async () => null }))).code, 'SIZING_BLOCKED');
+  });
+
+  test('가짜 어댑터: 거래소 규격에 못 맞추면 진입하지 않는다', async () => {
+    const v = await planEntry100x(contract100x, 10, okDeps({
+      quantize: async () => ({ qty: null, message: '규격을 읽지 못했습니다' }),
+    }));
+    eq(v.ok, false);
+    eq(v.code, 'QUANTIZE_FAILED');
+  });
+
+  test('가짜 어댑터: 수량을 올림해서 배정을 넘으면 진입하지 않는다', async () => {
+    // 0.2 → 0.3으로 올라가면 필요 증거금이 150이 되어 배정 100을 넘는다.
+    const v = await planEntry100x(contract100x, 10, okDeps({
+      quantize: async () => ({ qty: 0.3, message: '단위 0.1' }),
+    }));
+    eq(v.ok, false, '허락받은 적 없는 증거금으로 주문이 나갔다');
+    eq(v.code, 'MARGIN_EXCEEDED');
+  });
+
+  test('가짜 어댑터: 내림은 통과한다 — 배정을 넘지 않는다', async () => {
+    const v = await planEntry100x(contract100x, 10, okDeps({
+      quantize: async () => ({ qty: 0.1, message: '단위 0.1' }),
+    }));
+    assert(v.ok, `내림이 막혔다: ${v.message}`);
+    eq(v.requiredMargin, 50);
+  });
+
+  test('가짜 어댑터: 손절 거리 사이징 계약은 이 경로를 타지 않는다', async () => {
+    const v = await planEntry100x(
+      { ...contract100x, sizingPolicy: 'STOP_RISK' }, 10, okDeps());
+    eq(v.ok, false);
+    eq(v.code, 'NOT_MARGIN_ALLOCATION');
+  });
+
+  // ── ⑧ 고정 손절 재부착 0건 ──────────────────────────────
   test('NO_FIXED_SL 주문에는 손절을 다시 걸지 않는다 — 손절가가 남아 있어도', () => {
     const v = stopReattachVerdict({ stop_policy: 'NO_FIXED_SL', stop_loss: 49_000 });
     eq(v.attach, false, '고정 손절 없는 프로필에 손절이 다시 걸린다');
@@ -179,9 +314,8 @@ export function runDedicated100xTests() {
   });
 
   test('정책이 값보다 먼저다 — 순서가 뒤집히면 이 시험이 깨진다', () => {
-    // stop_loss가 채워져 있는데도 정책이 이긴다. 값 검사가 앞에 오면
-    // 여기서 ATTACH가 나온다.
     eq(stopReattachVerdict({ stop_policy: 'NO_FIXED_SL', stop_loss: 1 }).code, 'NO_FIXED_SL');
+    eq(stopReattachVerdict({ stop_policy: 'NO_FIXED_SL' }).code, 'NO_FIXED_SL');
   });
 
   test('기존 주문의 복구는 그대로 동작한다', () => {
@@ -194,7 +328,7 @@ export function runDedicated100xTests() {
     eq(stopReattachVerdict({}).code, 'NO_PLANNED_STOP');
   });
 
-  // ── ⑧ 체크리스트 N/A ────────────────────────────────────
+  // ── ⑨ 체크리스트 N/A ────────────────────────────────────
   test('NO_FIXED_SL에서는 손절 항목이 목록에서 빠진다 — pass로 적지 않는다', () => {
     for (const id of FIXED_STOP_ONLY_CHECKS) {
       eq(appliesTo(id as any, 'USDM', 'ENTRY', false, false, false, false, true, 'NO_FIXED_SL'),
@@ -217,44 +351,84 @@ export function runDedicated100xTests() {
     }
   });
 
-  // ── ⑨ dormant 게이트 ────────────────────────────────────
-  test('열린 목록이 비어 있으면 전용 100배는 켜지지 않는다', () => {
-    eq(EXECUTABLE_PROFILE_IDS.length, 0,
-      '자동 종료 권한 증명 전에 목록이 채워졌다 — dormantGate 머리말 참조');
-    const v = executionGateVerdict(ID);
-    eq(v.allowed, false);
-    assert(v.reason !== '', '막았는데 이유가 없다');
+  // ── ⑩ 켜기 게이트 ───────────────────────────────────────
+  test('열린 조합은 TESTNET 하나뿐이다 — LIVE는 아직 아니다', () => {
+    eq(OPEN_COMBOS.length, 1);
+    eq(OPEN_COMBOS[0].profileId, ID);
+    eq(OPEN_COMBOS[0].presetId, PRESET);
+    eq(OPEN_COMBOS[0].contractVersion, V);
+    eq(OPEN_COMBOS[0].modes.join(','), 'TESTNET',
+      '자동 종료 권한 증명 전에 LIVE가 열렸다 — dormantGate 머리말 참조');
+    eq(OPEN_COMBOS[0].requiresMarginAllocation, true);
+  });
+
+  test('검증된 조합은 켤 수 있다', () => {
+    const v = executionGateVerdict(openRow);
+    eq(v.allowed, true, `열린 조합이 막혔다: ${v.reason}`);
+  });
+
+  test('LIVE는 막힌다', () => {
+    const v = executionGateVerdict({ ...openRow, mode: 'LIVE' });
+    eq(v.allowed, false, 'LIVE가 열렸다');
+  });
+
+  test('배정 비율이 없으면 켤 수 없다', () => {
+    for (const pct of [null, undefined, 0, -1, 101]) {
+      const v = executionGateVerdict({ ...openRow, marginAllocationPct: pct });
+      eq(v.allowed, false, `배정 ${String(pct)}로 켜졌다`);
+    }
+  });
+
+  test('프리셋·버전이 다르면 켤 수 없다', () => {
+    eq(executionGateVerdict({ ...openRow, presetId: 'STABILIZE' }).allowed, false);
+    eq(executionGateVerdict({ ...openRow, contractVersion: 1 }).allowed, false);
+  });
+
+  test('기존 세 프로필의 명시적 선택은 켤 수 없다', () => {
+    for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
+      const v = executionGateVerdict({ ...openRow, profileId: pid, presetId: 'STABILIZE' });
+      eq(v.allowed, false, `${pid}가 켜졌다`);
+    }
   });
 
   test('프로필이 없는 기존 예약은 게이트와 무관하다', () => {
     for (const v of [null, undefined, '', '   ']) {
-      eq(executionGateVerdict(v).allowed, true, `기존 예약이 막혔다: ${JSON.stringify(v)}`);
+      eq(executionGateVerdict({ profileId: v }).allowed, true, `기존 예약이 막혔다: ${JSON.stringify(v)}`);
     }
   });
 
   test('모르는 프로필 id는 프로필 없음으로 읽지 않는다', () => {
-    const v = executionGateVerdict('NOPE_100X');
-    eq(v.allowed, false, '오타 하나가 기존 방식으로 도는 예약이 된다');
+    eq(executionGateVerdict({ ...openRow, profileId: 'NOPE_100X' }).allowed, false,
+      '오타 하나가 기존 방식으로 도는 예약이 된다');
   });
 
-  test('목록을 채우면 세 층이 함께 열린다 — 한 곳만 열리지 않는다', () => {
-    const opened = [ID];
-    eq(executionGateVerdict(ID, opened).allowed, true, '실행기(L4)가 안 열린다');
-    const spec = enableFilterSpec(opened);
-    eq(spec.kind, 'or', '켜기(L3) 조건이 목록을 읽지 않는다');
-    assert(spec.kind === 'or' && spec.expr.includes(ID),
-      `켜기 조건에 ${ID}가 없다: ${JSON.stringify(spec)}`);
-    assert(spec.kind === 'or' && spec.expr.includes('is.null'),
-      '기존 예약(프로필 없음)이 켜기에서 빠졌다');
+  // ── ⑪ 켜기 조건(L3)이 표를 실제로 읽는가 ────────────────
+  test('켜기 조건이 열린 조합을 그대로 담는다', () => {
+    const spec = enableFilterSpec();
+    eq(spec.kind, 'or', '켜기(L3) 조건이 표를 읽지 않는다');
+    if (spec.kind === 'or') {
+      assert(spec.expr.includes('execution_profile_id.is.null'), '기존 예약이 켜기에서 빠졌다');
+      assert(spec.expr.includes(`execution_profile_id.eq.${ID}`), `${ID}가 없다`);
+      assert(spec.expr.includes(`execution_preset_id.eq.${PRESET}`), '프리셋 조건이 없다');
+      assert(spec.expr.includes('mode.eq.TESTNET'), '모드 조건이 없다');
+      assert(spec.expr.includes('margin_allocation_pct.not.is.null'), '배정 조건이 없다');
+      assert(!spec.expr.includes('mode.eq.LIVE'), 'LIVE가 켜기 조건에 들어갔다');
+    }
   });
 
-  test('목록이 비면 켜기 조건은 지금까지와 같다', () => {
+  test('표가 비면 켜기 조건은 예전과 같다', () => {
     eq(enableFilterSpec([]).kind, 'isNull');
-    eq(enableFilterSpec().kind, 'isNull');
   });
 
-  test('이상한 id는 켜기 조건 문자열을 만들지 못한다', () => {
-    // 쉼표·괄호가 들어가면 PostgREST 문법이 깨져서 조건이 통째로 무의미해진다.
-    eq(enableFilterSpec(['a,b', 'x)y', '']).kind, 'isNull');
+  test('이상한 값은 켜기 조건 문자열을 만들지 못한다', () => {
+    eq(enableFilterSpec([
+      { profileId: 'a,b', presetId: PRESET, contractVersion: 2, modes: ['TESTNET'], requiresMarginAllocation: true },
+    ]).kind, 'isNull');
+    eq(enableFilterSpec([
+      { profileId: ID, presetId: PRESET, contractVersion: 2, modes: ['TEST)NET'], requiresMarginAllocation: true },
+    ]).kind, 'isNull');
   });
+
+  // async 시험이 실패해도 통과로 집계되지 않게 여기서 기다린다.
+  await flushAsync();
 }

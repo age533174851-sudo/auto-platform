@@ -45,6 +45,8 @@ export interface ScheduleRow {
   execution_profile_id?: any;
   execution_preset_id?: any;
   execution_contract_version?: any;
+  /** 예약별 증거금 배정 비율(%). 사용자가 직접 입력한 값만 있다 */
+  margin_allocation_pct?: any;
   last_run_at?: any;
   interval_min?: any;
   leverage_cap?: any;
@@ -131,6 +133,7 @@ export async function evaluateSchedule(
         executionProfileId: row.execution_profile_id,
         executionPresetId: row.execution_preset_id,
         executionContractVersion: row.execution_contract_version,
+        marginAllocationPct: row.margin_allocation_pct,
       });
       // resolveStrategy는 runStrategy가 앞에서 이미 통과시켰다. 여기서
       // 막히면 그 사이에 규칙이 바뀐 것이므로 그대로 실패로 올린다.
@@ -312,7 +315,13 @@ export async function evaluateIfDue(
   // 무엇을 열 것인가는 **`execution/dormantGate`가 정한다.** 여기서 따로
   // 판단하면 PATCH(L3)와 갈리고, 그러면 "실행기는 통과시키는데 사용자는
   // 켤 수 없는" 상태가 시험만 초록인 채로 남는다.
-  const gate = executionGateVerdict(row.execution_profile_id);
+  const gate = executionGateVerdict({
+    profileId: row.execution_profile_id,
+    presetId: row.execution_preset_id,
+    contractVersion: row.execution_contract_version,
+    mode: row.mode,
+    marginAllocationPct: row.margin_allocation_pct,
+  });
   const epBlocked = isExecutionResolveError(ep)
     ? ep.message
     : (ep.kind === 'contract' && !gate.allowed

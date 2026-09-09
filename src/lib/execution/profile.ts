@@ -47,7 +47,7 @@
 // `applyPreset()`은 안에서 `presetOf()`를 부른다. 그래서 "직접 안 쓴다"
 // 만으로는 부족하다 — **검증을 먼저 끝낸 뒤에만** 부른다. 모르는
 // 프리셋이 `applyPreset()`에 도달하는 것 자체가 불가능해야 한다.
-import { PROFILES, type StrategyProfile, type StrategyType, type StopPolicy } from '../strategies/profiles';
+import { PROFILES, type StrategyProfile, type StrategyType, type StopPolicy, type SizingPolicy } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset, type RiskPresetId } from '../strategies/profilePreset';
 
 /**
@@ -83,11 +83,14 @@ export const CONTRACT_FIELDS = [
   'maxHoldSec', 'maxOpenPositions',
   // v2에서 더한 두 칸. 둘 다 **실행 의미**라 계약이다.
   //
-  //   stopPolicy          고정 손절을 거는가. 숫자가 아니라 정책이라야
-  //                       주문 경로가 그것을 정책으로 다룬다
-  //   marginAllocationPct 손절 거리로 수량을 못 만드는 프로필의 크기 근거.
-  //                       null이면 "정하지 않음"이고 사이징이 막는다
-  'stopPolicy', 'marginAllocationPct',
+  //   stopPolicy    고정 손절을 거는가. 숫자가 아니라 정책이라야 주문
+  //                 경로가 그것을 정책으로 다룬다
+  //   sizingPolicy  크기를 무엇에서 만드는가 (손절 거리 vs 증거금 배정)
+  //
+  // **배정 비율(%) 자체는 계약이 아니다.** 그 값은 프로필 상수가 아니라
+  // 예약마다 사용자가 명시하는 값이다. 계약에 넣으면 사용자가 나중에
+  // 비율을 입력해도 계약은 계속 옛 값을 가리키게 된다.
+  'stopPolicy', 'sizingPolicy',
 ] as const;
 
 export type ContractField = (typeof CONTRACT_FIELDS)[number];
@@ -110,8 +113,7 @@ export interface ExecutionContract {
   maxHoldSec: number;
   maxOpenPositions: number;
   stopPolicy: StopPolicy;
-  /** null = 정하지 않음. 그 상태에서는 100X 사이징이 주문을 막는다 */
-  marginAllocationPct: number | null;
+  sizingPolicy: SizingPolicy;
 }
 
 export type ExecutionResolveCode =
@@ -124,7 +126,9 @@ export type ExecutionResolveCode =
   /** 모르는 프리셋 id. 기본 프리셋으로 대신하지 않는다 */
   | 'UNKNOWN_PRESET'
   /** 저장할 때의 계약과 지금 계약이 다르다. 조용히 올리지 않는다 */
-  | 'VERSION_MISMATCH';
+  | 'VERSION_MISMATCH'
+  /** 이 프로필과 이 프리셋은 짝이 아니다 */
+  | 'PROFILE_PRESET_MISMATCH';
 
 export type ExecutionResolve =
   | { ok: true; kind: 'none'; contract: null }
@@ -145,6 +149,39 @@ export function isExecutionResolveError(
 }
 
 const isBlank = (v: unknown) => v === null || v === undefined || String(v).trim() === '';
+
+/**
+ * **어떤 프로필이 어떤 프리셋하고만 짝이 되는가.**
+ *
+ * 프리셋은 원래 "같은 프로필의 값을 좁히거나 넓히는 축"이었다. 그런데
+ * 전용 100배는 그 축 위에 없다 — 안정화든 연구용이든 100배여야 하는데,
+ * 그러면 프리셋 선택이 아무 뜻이 없으면서 화면에는 "안정화를 골랐다"고
+ * 남는다. 사용자는 배율이 낮아졌다고 읽는다.
+ *
+ * 그래서 **조합 자체를 제한한다.** 전용 100배는 전용 프리셋과만 짝이고,
+ * 그 프리셋은 다른 프로필에 붙지 않는다. 두 방향을 다 막아야 한다 —
+ * 한쪽만 막으면 `SCALP_HIGH_LEV + EXACT_100X` 같은 조합이 통과해서
+ * "전용 100배 프리셋인데 25배"가 저장된다.
+ */
+export const EXCLUSIVE_PAIRS: ReadonlyArray<{ profileId: StrategyType; presetId: RiskPresetId }> = [
+  { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' },
+];
+
+/** 짝이 어긋났으면 그 이유. 맞으면 빈 문자열 */
+export function pairMismatchReason(profileId: string, presetId: string): string {
+  for (const pair of EXCLUSIVE_PAIRS) {
+    if (profileId === pair.profileId && presetId !== pair.presetId) {
+      return `${pair.profileId}는 ${pair.presetId} 프리셋과만 쓸 수 있습니다`
+        + ` (받은 값: ${presetId}) — 다른 프리셋은 이 프로필의 실행 의미를 바꾸지 않으면서`
+        + ' 화면에만 다른 이름으로 남습니다';
+    }
+    if (presetId === pair.presetId && profileId !== pair.profileId) {
+      return `${pair.presetId} 프리셋은 ${pair.profileId}에만 쓸 수 있습니다`
+        + ` (받은 값: ${profileId})`;
+    }
+  }
+  return '';
+}
 
 /**
  * 세 축을 해석한다.
@@ -192,6 +229,12 @@ export function resolveExecutionProfile(
       ok: false, code: 'UNKNOWN_PRESET',
       message: `모르는 위험 프리셋입니다: ${sid}`,
     };
+  }
+
+  // ②-b 조합. 프로필과 프리셋이 각각 존재해도 **짝이 아닐 수 있다.**
+  const mismatch = pairMismatchReason(pid, sid);
+  if (mismatch) {
+    return { ok: false, code: 'PROFILE_PRESET_MISMATCH', message: mismatch };
   }
 
   // ③ 버전. 저장 시점과 지금이 다르면 **조용히 올리지 않는다.**
@@ -270,12 +313,12 @@ export function stopPolicyOfContract(c: ExecutionContract | null | undefined): S
 }
 
 /**
- * 이 계약의 증거금 배정 비율. **계약이 없으면 null이다.**
+ * 이 계약이 크기를 무엇에서 만드는가. **계약이 없으면 `STOP_RISK`다.**
  *
- * 화면의 `marginPct`(현재 기본값 10)를 여기서 끌어오지 않는다 — 그 값은
- * 사용자가 이 프로필을 위해 고른 값이 아니다. null이면 사이징이 막는다.
+ * `stopPolicyOfContract`와 같은 이유로 함수다 — 기본값이 안전한 쪽이라는
+ * 사실이 한 곳에 있어야 한다. 여기가 `MARGIN_ALLOCATION`으로 뒤집히면
+ * 기존 전략이 전부 손절 거리 기반 사이징을 잃는다.
  */
-export function marginAllocationOfContract(c: ExecutionContract | null | undefined): number | null {
-  const v = c?.marginAllocationPct;
-  return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+export function sizingPolicyOfContract(c: ExecutionContract | null | undefined): SizingPolicy {
+  return c?.sizingPolicy === 'MARGIN_ALLOCATION' ? 'MARGIN_ALLOCATION' : 'STOP_RISK';
 }

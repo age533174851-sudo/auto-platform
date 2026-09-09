@@ -6,7 +6,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   resolveExecutionProfile, executionContractFingerprint,
-  EXECUTION_CONTRACT_VERSION, CONTRACT_FIELDS, isExecutionResolveError,
+  EXECUTION_CONTRACT_VERSION, CONTRACT_FIELDS, isExecutionResolveError, pairMismatchReason,
 } from './profile';
 import { PROFILES } from '../strategies/profiles';
 import { PRESET_TABLE } from '../strategies/profilePreset';
@@ -122,14 +122,31 @@ export function runExecutionProfileTests() {
     }
   });
 
-  test('지문은 모든 조합을 덮는다', () => {
+  test('지문은 모든 조합을 덮는다 — 막힌 조합도 그 사실이 지문에 남는다', () => {
     const combos = Object.keys(PROFILES).length * Object.keys(PRESET_TABLE).length;
     const rows = JSON.parse(executionContractFingerprint());
     // 첫 줄은 칸 이름 목록이다 — 칸 이름이 바뀌는 것도 계약 변경이다.
     eq(rows[0][0], '#fields');
     eq(rows[0][1], CONTRACT_FIELDS.join(','));
     eq(rows.length, combos + 1);
-    assert(!JSON.stringify(rows).includes('UNRESOLVED'), '해석하지 못한 조합이 있다');
+
+    // ── 막힌 조합을 빼지 않는다 ──
+    //
+    // 전용 100배가 들어오면서 조합에 제한이 생겼다(`EXCLUSIVE_PAIRS`).
+    // 막힌 조합을 지문에서 **빼면** 나중에 그 조합이 열려도 지문이 그대로라
+    // 버전 상승을 요구하지 못한다 — 허용 범위가 조용히 넓어진다.
+    // 그래서 막혔다는 사실을 `UNRESOLVED`로 지문에 남긴다.
+    const body = rows.slice(1);
+    for (const [pid, sid, v] of body) {
+      const blocked = pairMismatchReason(pid, sid) !== '';
+      if (blocked) {
+        eq(v, 'UNRESOLVED', `${pid}/${sid}는 막힌 조합인데 값이 들어 있다`);
+      } else {
+        assert(v !== 'UNRESOLVED', `${pid}/${sid}가 해석되지 않는다`);
+      }
+    }
+    // 적어도 하나는 해석돼야 한다 — 전부 UNRESOLVED면 지문이 뜻을 잃는다.
+    assert(body.some(([, , v]: any) => v !== 'UNRESOLVED'), '해석되는 조합이 하나도 없다');
   });
 
   test('지문은 흔들리지 않는다', () => {

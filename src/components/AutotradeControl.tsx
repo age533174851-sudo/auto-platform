@@ -183,6 +183,17 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
   const [cancelOpen, setCancelOpen] = useState(false);
   /** [모두 자동 대조]가 지금까지 끝낸 단계들 */
   const [runSteps, setRunSteps] = useState<StepResult[]>([]);
+  /**
+   * 전용 100배의 증거금 배정 비율(%).
+   *
+   * **아래 `marginPct`와 다른 값이다.** 그쪽은 손절 거리 기반 사이징의
+   * 증거금 상한이고 기본값이 '10'이다. 이쪽은 고정 손절이 없는 프로필에서
+   * **크기를 정하는 유일한 근거**라 기본값이 없다 — 사용자가 이 예약을
+   * 위해 직접 넣기 전까지는 비어 있고, 그동안은 켤 수 없다.
+   */
+  const [x100Alloc, setX100Alloc] = useState('');
+  const [x100Busy, setX100Busy] = useState(false);
+  const [x100Msg, setX100Msg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     if (!auth) { setErr('로그인이 필요합니다'); setData(null); return; }
@@ -468,6 +479,66 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
    * 여지를 남겨 두면 그 방어 밖에 세 번째 경로가 다시 생긴다.
    * **선택지를 없애서 막는다.**
    */
+  /**
+   * 전용 100배 예약을 **저장한다. 켜지는 않는다.**
+   *
+   * 서버가 `enabled:false`를 요구한다 — 설정을 바꾸는 것과 켜는 것은 다른
+   * 행위라서다. 이 라우트의 `enabled` 기본값이 true라, 프로필만 바꾸려고
+   * 생략하면 저장이 곧 가동이 된다.
+   *
+   * 그리고 **화면 기본값을 물려주지 않는다.** 아래 `marginPct`가 아니라
+   * 사용자가 이 칸에 직접 넣은 값만 보낸다.
+   */
+  const saveX100 = async () => {
+    if (!auth) { setX100Msg({ ok: false, text: '로그인이 필요합니다' }); return; }
+    const pct = Number(x100Alloc);
+    if (!(pct > 0 && pct <= 100)) {
+      setX100Msg({ ok: false, text: '증거금 배정 비율을 0 초과 100 이하로 입력하세요 — 기본값을 대신 쓰지 않습니다' });
+      return;
+    }
+    setX100Busy(true); setX100Msg(null);
+    try {
+      const r = await fetch('/api/autotrade/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({
+          symbol, connectionId: connId, strategyId,
+          // **TESTNET에서만 열려 있다.** 실계좌는 서버가 막는다.
+          mode: 'TESTNET',
+          enabled: false,
+          intervalMin: intervalMin === '' ? undefined : Number(intervalMin),
+          executionProfileId: 'MAX_LEV_100X',
+          executionPresetId: 'EXACT_100X',
+          executionContractVersion: 2,
+          marginAllocationPct: pct,
+        }),
+      });
+      const j = await r.json().catch(() => null);
+      setX100Msg({ ok: !!j?.ok, text: errorTextOf(j, `저장하지 못했습니다 (${r.status})`) });
+      if (j?.ok) load();
+    } catch (e: any) {
+      setX100Msg({ ok: false, text: `저장하지 못했습니다 (${e?.message || e})` });
+    } finally { setX100Busy(false); }
+  };
+
+  /** 저장된 전용 100배 예약을 켠다. 서버가 조합·모드·배정값을 다시 본다 */
+  const enableX100 = async (id: string) => {
+    if (!auth) { setX100Msg({ ok: false, text: '로그인이 필요합니다' }); return; }
+    setX100Busy(true); setX100Msg(null);
+    try {
+      const r = await fetch('/api/autotrade/schedule', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ id, enabled: true }),
+      });
+      const j = await r.json().catch(() => null);
+      setX100Msg({ ok: !!j?.ok, text: errorTextOf(j, `켜지 못했습니다 (${r.status})`) });
+      if (j?.ok) load();
+    } catch (e: any) {
+      setX100Msg({ ok: false, text: `켜지 못했습니다 (${e?.message || e})` });
+    } finally { setX100Busy(false); }
+  };
+
   const buildCheckRun = () => strategyRunRequest({
     strategyId,
     env: live ? 'LIVE' : 'TESTNET',
@@ -691,6 +762,18 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
   };
 
   const schedules: any[] = Array.isArray(data?.schedules) ? data.schedules : [];
+
+  /**
+   * 지금 고른 심볼·연결의 **전용 100배 예약** — 저장된 것.
+   *
+   * **화면 표시는 여기서만 파생한다.** 입력칸(`x100Alloc`)에서 파생하면
+   * 저장되지 않은 값이 "전용 100배로 도는 중"처럼 보인다 — 장식용 배지가
+   * 생기는 정확한 경로다.
+   */
+  const x100Row = schedules.find((r: any) =>
+    r?.execution_profile_id === 'MAX_LEV_100X'
+    && String(r?.symbol || '').toUpperCase() === String(symbol || '').toUpperCase()
+    && (!connId || r?.connection_id === connId)) || null;
   // 상태 배지 글자는 **서버가 준 것을 그대로 쓴다.** 같은 표를 화면에도
   // 적어 두면 한쪽만 바뀌고, 그때 같은 상태가 두 이름으로 보인다.
   const runtimeLabels = data?.runtimeLabels ?? null;
@@ -1767,6 +1850,83 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                 )}</>
             );
           })()}
+        </div>
+
+        {/* ── 전용 100배 ──
+            **레거시 "배율 상한 100"과 다른 물건이다.** 위 상한은
+            "여기까지 허용"이고 실제 배율은 손절 거리에서 역산된다.
+            이것은 요청이 정확히 100배이고, 거래소에 되읽어 100이
+            확인될 때만 주문한다. 고정 손절을 걸지 않는다.
+
+            표시는 **저장된 예약**에서만 파생한다 — 입력칸에서 파생하면
+            저장하지도 않은 값이 도는 것처럼 보인다. */}
+        <div style={{
+          background: T.alt, borderRadius: 10, padding: '9px 11px',
+          border: `1px solid ${x100Row?.enabled ? A(T.ylw, '55') : T.border}`,
+        }}>
+          <div style={{ color: T.muted, fontSize: 10, fontWeight: 700, marginBottom: 6 }}>
+            전용 100배 (고정 손절 없음 · 테스트넷)
+          </div>
+
+          {x100Row ? (
+            <div style={{ fontSize: 11, color: T.txt, lineHeight: 1.7, marginBottom: 7 }}>
+              {/* 저장된 값 그대로 적는다. 화면이 다시 계산하지 않는다. */}
+              <div>{x100Row.execution_profile_id} · {x100Row.execution_preset_id} · 계약 v{x100Row.execution_contract_version}</div>
+              <div style={{ color: T.muted }}>
+                {x100Row.mode} · 증거금 배정{' '}
+                {x100Row.margin_allocation_pct == null
+                  ? <b style={{ color: T.red }}>미입력 — 이 상태로는 켤 수 없습니다</b>
+                  : `${x100Row.margin_allocation_pct}%`}
+              </div>
+              <div style={{ color: x100Row.enabled ? T.ylw : T.muted }}>
+                {x100Row.enabled ? '켜짐' : '꺼짐'}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.6, marginBottom: 7 }}>
+              이 심볼·연결에 저장된 전용 100배 예약이 없습니다.
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ color: T.muted, fontSize: 10 }}>증거금 배정 %</span>
+            <input value={x100Alloc} inputMode="decimal" placeholder="직접 입력"
+              onChange={e => setX100Alloc(e.target.value.replace(/[^\d.]/g, ''))}
+              style={{
+                width: 74, background: T.bg, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: '6px 8px', color: T.txt, fontSize: 12, outline: 'none',
+              }} />
+            <button type="button" onClick={saveX100} disabled={x100Busy || !connId}
+              style={{
+                minHeight: MIN_CONTROL_TARGET, padding: '0 10px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+                background: T.bg, color: T.txt, border: `1px solid ${T.border}`,
+                opacity: x100Busy || !connId ? 0.5 : 1,
+              }}>
+              저장 (꺼진 채로)
+            </button>
+            {x100Row && !x100Row.enabled && (
+              <button type="button" onClick={() => enableX100(x100Row.id)} disabled={x100Busy}
+                style={{
+                  minHeight: MIN_CONTROL_TARGET, padding: '0 10px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+                  background: T.bg, color: T.ylw, border: `1px solid ${A(T.ylw, '55')}`,
+                  opacity: x100Busy ? 0.5 : 1,
+                }}>
+                켜기
+              </button>
+            )}
+          </div>
+
+          <div style={{ color: T.muted, fontSize: 10, marginTop: 6, lineHeight: 1.6 }}>
+            위의 <b>배율 상한</b>과 다른 값입니다. 저장과 켜기가 나뉘어 있고,
+            배정 비율을 직접 넣기 전에는 켜지지 않습니다 — 고정 손절이 없어
+            크기를 정할 근거가 그 값 하나뿐입니다.
+          </div>
+
+          {x100Msg && (
+            <div style={{ marginTop: 6, fontSize: 11, color: x100Msg.ok ? T.txt : T.red, lineHeight: 1.6 }}>
+              {x100Msg.text}
+            </div>
+          )}
         </div>
 
         {/* ── 배율 사다리 ──

@@ -18,7 +18,7 @@
 // 두고 조건만 `if (false)`로 바꾸면 통과했고, 호출을 stub으로 바꿔도
 // import에 이름이 남아 통과했다. 그래서 여기서는 **정본을 컴파일해서 실제로
 // 부르고**, 배선은 "이름이 있는가"가 아니라 "옛 판단이 사라졌는가"까지 본다.
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -35,9 +35,15 @@ const LIFECYCLE   = 'src/lib/engine/exitLifecycle.ts';
 const SCHED       = 'src/app/api/autotrade/schedule/route.ts';
 const RUNNER      = 'src/lib/autotrade/evaluationRunner.ts';
 const WORKER      = 'worker/src/index.ts';
+const ENTRY       = 'src/lib/engine/entry100x.ts';
+const SCALP       = 'src/app/api/autotrade/scalp/route.ts';
+const RUNREQ      = 'src/lib/strategies/runRequest.ts';
 const MIG         = 'supabase/migrations/078_live_orders_stop_policy.sql';
+const MIG_ALLOC   = 'supabase/migrations/079_schedule_margin_allocation.sql';
+const MIG_OPEN    = 'supabase/migrations/080_execution_profile_selective.sql';
 
 const ID = 'MAX_LEV_100X';
+const PRESET = 'EXACT_100X';
 
 let bad = 0;
 const err = m => { console.error(`❌ ${m}`); bad++; };
@@ -100,9 +106,10 @@ const profilesMod = await loadModule(PROFILES_TS, '프로필 정본');
 
 if (plan) {
   // ── 정체 ──
-  const r = plan.resolveExecutionProfile(ID, 'STABILIZE', plan.EXECUTION_CONTRACT_VERSION);
+  const r = plan.resolveExecutionProfile(ID, PRESET, plan.EXECUTION_CONTRACT_VERSION);
   if (!r?.ok || r.kind !== 'contract') {
-    err(`${ID} 계약이 해석되지 않습니다 — 전용 100배 프로필이 없거나 계약에서 빠졌습니다`);
+    err(`${ID}/${PRESET} 계약이 해석되지 않습니다`
+      + ` (${r?.code || '사유 미상'}) — 전용 100배가 자기 프리셋에서 막혀 있습니다`);
   } else {
     const c = r.contract;
     if (c.leverage !== 100) err(`${ID}의 요청 배율이 ${c.leverage}입니다 — 정확히 100이어야 합니다`);
@@ -110,13 +117,46 @@ if (plan) {
       err(`${ID}의 상한이 ${c.maxLeverage}입니다 — 요청값과 달라지면 "정확히 100"이 아닙니다`);
     }
     if (c.stopPolicy !== 'NO_FIXED_SL') err(`${ID}의 stopPolicy가 ${c.stopPolicy}입니다`);
+    if (c.sizingPolicy !== 'MARGIN_ALLOCATION') {
+      err(`${ID}의 sizingPolicy가 ${c.sizingPolicy}입니다`
+        + ' — 손절이 없으면 손절 거리로 크기를 만들 수 없습니다');
+    }
     if (c.stopLossPct !== null) {
       err(`${ID}에 손절 숫자가 남아 있습니다 (${c.stopLossPct}) — 걸지도 않을 값이 사이징의 분모나`
         + ' 복구 경로의 손절가로 되살아납니다');
     }
+    // 마진 모드는 **사용자가 확정한 정책**이다(ISOLATED 전용). 이 검사기가
+    // 임의로 만든 규칙이 아니라, 확정된 계약을 지키는 것이다.
     if (!Array.isArray(c.marginModes) || c.marginModes.join(',') !== 'isolated') {
-      err(`${ID}의 마진 모드가 isolated 전용이 아닙니다 (${JSON.stringify(c.marginModes)})`
-        + ' — 교차면 100배 손실이 지갑 전체로 번집니다');
+      err(`${ID}의 마진 모드가 isolated 전용이 아닙니다 (${JSON.stringify(c.marginModes)})`);
+    }
+  }
+
+  // ── 조합 제한: 양방향 ──
+  //
+  // 한쪽만 막으면 반대가 샌다. `SCALP + EXACT_100X`가 통과하면 "전용
+  // 100배 프리셋인데 25배"가 저장된다.
+  for (const sid of ['STABILIZE', 'RESEARCH']) {
+    const rr = plan.resolveExecutionProfile(ID, sid, plan.EXECUTION_CONTRACT_VERSION);
+    if (rr?.ok) {
+      err(`${ID}/${sid}가 해석됩니다 — 전용 100배는 ${PRESET}과만 짝이어야 합니다`
+        + ' (안정화를 골랐는데 100배가 나가는 상태입니다)');
+    }
+  }
+  for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
+    const rr = plan.resolveExecutionProfile(pid, PRESET, plan.EXECUTION_CONTRACT_VERSION);
+    if (rr?.ok) err(`${pid}/${PRESET}이 해석됩니다 — 전용 프리셋이 다른 프로필에 붙었습니다`);
+    // 기존 조합은 그대로 살아 있어야 한다.
+    for (const sid of ['STABILIZE', 'RESEARCH']) {
+      const keep = plan.resolveExecutionProfile(pid, sid, plan.EXECUTION_CONTRACT_VERSION);
+      if (!keep?.ok || keep.kind !== 'contract') {
+        err(`${pid}/${sid}가 막혔습니다 — 기존 조합의 동작이 바뀌었습니다`);
+        continue;
+      }
+      if (keep.contract.stopPolicy !== 'FIXED_SL' || keep.contract.sizingPolicy !== 'STOP_RISK') {
+        err(`${pid}/${sid}의 실행 의미가 바뀌었습니다`
+          + ` (${keep.contract.stopPolicy}/${keep.contract.sizingPolicy})`);
+      }
     }
   }
 
@@ -124,8 +164,7 @@ if (plan) {
   //
   // 계약은 `applyPreset`이 얹은 결과라, 프로필 리터럴의 배율을 99로 바꿔도
   // 프리셋 override가 100으로 덮어써서 계약은 그대로다. 그러면 **표에 적힌
-  // 숫자와 실행되는 숫자가 다른 상태**가 조용히 생긴다 — 이 프로필이
-  // 없애려는 고장 그 자체다. 둘이 같은지 여기서 본다.
+  // 숫자와 실행되는 숫자가 다른 상태**가 조용히 생긴다.
   const raw = profilesMod?.PROFILES?.[ID];
   if (!raw) err(`${PROFILES_TS}: ${ID} 프로필 정본이 없습니다`);
   else {
@@ -133,55 +172,39 @@ if (plan) {
       err(`${PROFILES_TS}: ${ID} 리터럴의 배율이 ${raw.leverage}/${raw.maxLeverage}입니다`
         + ' — 프리셋이 덮어써서 계약은 100이지만, 표에 적힌 숫자가 실행과 다릅니다');
     }
-    if (raw.stopLossPct !== null || raw.stopPolicy !== 'NO_FIXED_SL') {
-      err(`${PROFILES_TS}: ${ID} 리터럴의 손절 정책이 계약과 다릅니다`);
+    if (raw.stopLossPct !== null || raw.stopPolicy !== 'NO_FIXED_SL'
+        || raw.sizingPolicy !== 'MARGIN_ALLOCATION') {
+      err(`${PROFILES_TS}: ${ID} 리터럴의 정책이 계약과 다릅니다`);
+    }
+    if (raw.marginAllocationPct !== undefined) {
+      err(`${PROFILES_TS}: 배정 비율이 프로필 상수로 남아 있습니다`
+        + ' — 예약이 값을 바꿔도 계약은 옛 값을 가리키게 됩니다');
     }
   }
 
-  // ── 프리셋 불변 ──
-  //
-  // **모든 프리셋에서 100이어야 한다.** 안정화가 배율을 낮추면 "정확히
-  // 100배"가 프리셋에 따라 달라지고, 그건 다른 계약이다.
-  for (const sid of ['STABILIZE', 'RESEARCH']) {
-    const rr = plan.resolveExecutionProfile(ID, sid, plan.EXECUTION_CONTRACT_VERSION);
-    if (!rr?.ok || rr.kind !== 'contract') { err(`${ID}/${sid} 계약 해석 실패`); continue; }
-    if (rr.contract.leverage !== 100 || rr.contract.maxLeverage !== 100) {
-      err(`${ID}/${sid}의 배율이 100이 아닙니다 (${rr.contract.leverage}/${rr.contract.maxLeverage})`
-        + ' — 프리셋이 전용 100배를 낮추면 안 됩니다');
-    }
-  }
-
-  // ── 누출: 다른 프로필이 NO_FIXED_SL 의미를 갖지 않는다 ──
-  for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
-    for (const sid of ['STABILIZE', 'RESEARCH']) {
-      const rr = plan.resolveExecutionProfile(pid, sid, plan.EXECUTION_CONTRACT_VERSION);
-      if (!rr?.ok || rr.kind !== 'contract') { err(`${pid}/${sid} 계약 해석 실패`); continue; }
-      if (rr.contract.stopPolicy !== 'FIXED_SL') {
-        err(`${pid}/${sid}이 NO_FIXED_SL이 됐습니다 — 기존 전략의 손절이 꺼집니다`);
-      }
-    }
-  }
-
-  // ── 계약이 없으면 NO_FIXED_SL을 만들 수 없다 ──
-  //
-  // 레거시 levCap=100은 계약이 아니다. 여기가 기본값 방향을 지키는 자리다.
-  if (typeof plan.stopPolicyOfContract !== 'function') {
-    err(`${PLAN}: stopPolicyOfContract()가 없습니다 — 기본값이 여러 곳에 흩어집니다`);
-  } else if (plan.stopPolicyOfContract(null) !== 'FIXED_SL'
-          || plan.stopPolicyOfContract(undefined) !== 'FIXED_SL') {
+  // ── 계약이 없으면 100X 실행 의미를 만들 수 없다 ──
+  if (typeof plan.stopPolicyOfContract !== 'function'
+      || plan.stopPolicyOfContract(null) !== 'FIXED_SL'
+      || plan.stopPolicyOfContract(undefined) !== 'FIXED_SL') {
     err('계약이 없을 때 기본 손절 정책이 FIXED_SL이 아닙니다'
       + ' — 이 한 글자가 모든 기존 전략의 손절을 끕니다');
   }
-  if (typeof plan.marginAllocationOfContract !== 'function'
-      || plan.marginAllocationOfContract(null) !== null) {
-    err('계약이 없을 때 증거금 배정이 null이 아닙니다 — 화면 기본값을 빌려 오면 안 됩니다');
+  if (typeof plan.sizingPolicyOfContract !== 'function'
+      || plan.sizingPolicyOfContract(null) !== 'STOP_RISK'
+      || plan.sizingPolicyOfContract(undefined) !== 'STOP_RISK') {
+    err('계약이 없을 때 기본 사이징이 STOP_RISK가 아닙니다'
+      + ' — 기존 전략이 손절 거리 기반 사이징을 잃습니다');
   }
 
   // ── 계약 칸 ──
-  for (const f of ['stopPolicy', 'marginAllocationPct']) {
+  for (const f of ['stopPolicy', 'sizingPolicy']) {
     if (!plan.CONTRACT_FIELDS?.includes(f)) {
       err(`CONTRACT_FIELDS에 ${f}가 없습니다 — 지문이 이 값의 변경을 못 잡습니다`);
     }
+  }
+  if (plan.CONTRACT_FIELDS?.includes('marginAllocationPct')) {
+    err('CONTRACT_FIELDS에 marginAllocationPct가 있습니다'
+      + ' — 배정 비율은 예약 값이라 계약에 넣으면 사용자가 바꿔도 계약이 옛 값을 가리킵니다');
   }
 }
 
@@ -238,30 +261,123 @@ if (reattach) {
   if (!legacy.attach) err('기존 주문의 손절 복구가 막혔습니다 — 보호 없는 포지션이 남습니다');
 }
 
-// ── dormant 게이트 ──
-const gate = await loadModule(GATE, 'dormant 게이트');
+// ── 켜기 게이트 ──
+const gate = await loadModule(GATE, '켜기 게이트');
 if (gate) {
-  if (gate.executionGateVerdict(null).allowed !== true) {
+  const open = gate.OPEN_COMBOS || [];
+  if (open.length !== 1 || open[0].profileId !== ID || open[0].presetId !== PRESET) {
+    err(`열린 조합이 ${JSON.stringify(open.map(c => `${c.profileId}/${c.presetId}`))}입니다`
+      + ` — 지금 검증된 조합은 ${ID}/${PRESET} 하나뿐입니다`);
+  } else {
+    if (open[0].modes.includes('LIVE')) {
+      err('LIVE가 열려 있습니다 — 고정 손절을 대신할 자동 종료 권한이 배선됐다는 증거가'
+        + ' 먼저 있어야 합니다 (dormantGate 머리말). 임의의 exit 문턱을 만들어 통과시키지 마세요');
+    }
+    if (open[0].modes.join(',') !== 'TESTNET') {
+      err(`열린 모드가 ${open[0].modes.join(',')}입니다 — 지금은 TESTNET 하나여야 합니다`);
+    }
+    if (open[0].requiresMarginAllocation !== true) {
+      err('배정 비율 없이도 켤 수 있게 돼 있습니다'
+        + ' — 손절이 없으면 크기를 정할 근거가 그 값 하나뿐입니다');
+    }
+  }
+
+  const okRow = {
+    profileId: ID, presetId: PRESET, contractVersion: 2,
+    mode: 'TESTNET', marginAllocationPct: 10,
+  };
+  const mustBlock = (over, why) => {
+    const v = gate.executionGateVerdict({ ...okRow, ...over });
+    if (v.allowed) err(`켜기 게이트: ${why} — 그런데 켜집니다`);
+  };
+  if (!gate.executionGateVerdict(okRow).allowed) {
+    err(`켜기 게이트: 검증된 조합이 막힙니다 — ${gate.executionGateVerdict(okRow).reason}`);
+  }
+  mustBlock({ mode: 'LIVE' }, 'LIVE는 막아야 합니다');
+  mustBlock({ mode: 'LIVE_LIMITED' }, 'LIVE_LIMITED는 막아야 합니다');
+  mustBlock({ marginAllocationPct: null }, '배정 비율이 없으면 막아야 합니다');
+  mustBlock({ marginAllocationPct: 0 }, '배정 비율 0은 막아야 합니다');
+  mustBlock({ presetId: 'STABILIZE' }, '다른 프리셋은 막아야 합니다');
+  mustBlock({ contractVersion: 1 }, '다른 계약 버전은 막아야 합니다');
+  mustBlock({ profileId: 'DAILY_HIGH_LEV', presetId: 'STABILIZE' }, '기존 프로필은 막아야 합니다');
+  mustBlock({ profileId: 'WHATEVER_UNKNOWN' }, '모르는 프로필은 막아야 합니다');
+  if (gate.executionGateVerdict({ profileId: null }).allowed !== true) {
     err('프로필이 없는 기존 예약이 막힙니다 — 기존 동작이 바뀌었습니다');
   }
-  if (gate.executionGateVerdict('WHATEVER_UNKNOWN').allowed !== false) {
-    err('모르는 프로필 id가 통과합니다 — 오타 하나가 기존 방식으로 도는 예약이 됩니다');
-  }
-  // 목록을 채우면 켜기 조건이 **실제로 달라져야** 한다. 안 달라지면
-  // 나중에 프로필을 열어도 L3가 계속 막는데 아무도 모른다.
-  const opened = gate.enableFilterSpec([ID]);
-  if (opened.kind !== 'or' || !String(opened.expr).includes(ID)) {
-    err('열린 목록을 채워도 켜기(L3) 조건이 바뀌지 않습니다'
-      + ' — 실행기만 열리고 사용자는 켤 수 없는 상태가 됩니다');
+
+  // 켜기 조건이 **표를 실제로 읽는가.** 안 읽으면 나중에 조합을 넓혀도
+  // L3가 계속 막는데 아무도 모른다.
+  const spec = gate.enableFilterSpec();
+  if (spec.kind !== 'or') {
+    err('켜기(L3) 조건이 열린 조합을 읽지 않습니다 — 실행기만 열리고 사용자는 못 켭니다');
+  } else {
+    for (const need of [
+      'execution_profile_id.is.null', `execution_profile_id.eq.${ID}`,
+      `execution_preset_id.eq.${PRESET}`, 'execution_contract_version.eq.2',
+      'mode.eq.TESTNET', 'margin_allocation_pct.not.is.null',
+    ]) {
+      if (!String(spec.expr).includes(need)) err(`켜기 조건에 ${need}가 없습니다`);
+    }
+    if (String(spec.expr).includes('mode.eq.LIVE')) err('켜기 조건에 LIVE가 들어갔습니다');
   }
   if (gate.enableFilterSpec([]).kind !== 'isNull') {
-    err('열린 목록이 비었는데 켜기 조건이 넓어졌습니다');
+    err('열린 조합이 없는데 켜기 조건이 넓어졌습니다');
   }
-  // 지금은 비어 있어야 한다 (자동 종료 권한 미증명 · 증거금 배정 미지정).
-  if ((gate.EXECUTABLE_PROFILE_IDS || []).length > 0) {
-    err('EXECUTABLE_PROFILE_IDS가 비어 있지 않습니다 — 고정 손절을 대신할 자동 종료 권한이'
-      + ' 배선됐다는 증거와 증거금 배정 값이 먼저 있어야 합니다 (dormantGate 머리말)');
-  }
+}
+
+// ── 진입 계획 (가짜 어댑터로 실제 판정시킨다) ──
+const entry = await loadModule(ENTRY, '100X 진입 계획');
+if (entry) {
+  const okDeps = (over = {}) => ({
+    observeMarginMode: async () => 'isolated',
+    applyLeverage: async (lev) => ({ ok: true, observed: lev, message: '' }),
+    availableUsd: async () => 1000,
+    referencePrice: async () => 50_000,
+    quantize: async (q) => ({ qty: q, message: '' }),
+    ...over,
+  });
+  const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
+  const mustBlock = async (over, wantCode, why) => {
+    const v = await entry.planEntry100x(C, 10, okDeps(over));
+    if (v.ok) { err(`100X 진입: ${why} — 그런데 통과했습니다 (수량 ${v.quantity})`); return; }
+    if (v.code !== wantCode) {
+      err(`100X 진입: ${why} — 막긴 했지만 이유가 ${v.code}입니다 (${wantCode}이어야 합니다)`);
+    }
+  };
+  const good = await entry.planEntry100x(C, 10, okDeps());
+  if (!good.ok) err(`100X 진입: 정상 입력이 막혔습니다 — ${good.message}`);
+
+  await mustBlock({ observeMarginMode: async () => 'cross' },
+    'MARGIN_MODE_NOT_ISOLATED', '거래소가 교차 마진이면 막아야 합니다');
+  await mustBlock({ observeMarginMode: async () => null },
+    'MARGIN_MODE_UNKNOWN', '마진 모드를 모르면 막아야 합니다');
+  await mustBlock({ applyLeverage: async () => ({ ok: false, observed: 75, message: '거래소가 낮춤' }) },
+    'LEVERAGE_NOT_EXACT', '되읽은 배율이 75배면 막아야 합니다');
+  await mustBlock({ applyLeverage: async () => ({ ok: true, observed: 99, message: '' }) },
+    'LEVERAGE_NOT_EXACT', '되읽은 배율이 99배면 막아야 합니다');
+  await mustBlock({ applyLeverage: async () => ({ ok: true, observed: null, message: '' }) },
+    'LEVERAGE_NOT_EXACT', '배율을 못 읽으면 막아야 합니다');
+  await mustBlock({ availableUsd: async () => null },
+    'SIZING_BLOCKED', '잔고를 못 읽으면 막아야 합니다');
+  await mustBlock({ referencePrice: async () => null },
+    'SIZING_BLOCKED', '기준가를 못 읽으면 막아야 합니다');
+  await mustBlock({ quantize: async () => ({ qty: null, message: '' }) },
+    'QUANTIZE_FAILED', '거래소 규격에 못 맞추면 막아야 합니다');
+  await mustBlock({ quantize: async () => ({ qty: 0.3, message: '' }) },
+    'MARGIN_EXCEEDED', '올림해서 배정을 넘으면 막아야 합니다');
+
+  // 배정 비율 미지정
+  const noAlloc = await entry.planEntry100x(C, null, okDeps());
+  if (noAlloc.ok) err('100X 진입: 배정 비율이 없는데 통과했습니다');
+
+  // **마진 모드 확인이 배율 설정보다 먼저인가.** 교차 계좌에 배율부터
+  // 걸면, 막을 주문을 위해 계좌 설정을 먼저 바꾸는 것이 된다.
+  let applied = false;
+  await entry.planEntry100x(C, 10, okDeps({
+    observeMarginMode: async () => 'cross',
+    applyLeverage: async (lev) => { applied = true; return { ok: true, observed: lev, message: '' }; },
+  }));
+  if (applied) err('100X 진입: 교차인 걸 알기 전에 배율을 걸었습니다 — 순서가 규칙의 일부입니다');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -374,6 +490,129 @@ else {
 if (!/noFixedSl\s*\?\s*\{\s*stop_policy:\s*'NO_FIXED_SL'\s*\}/.test(exec)) {
   err(`${EXEC}: NO_FIXED_SL 주문에 stop_policy를 적지 않습니다`
     + ' — 복구 경로가 이 주문을 고정 손절 주문으로 읽습니다');
+}
+
+// ─────────────────────────────────────────────────────────────
+// ③ production 체인이 실제로 닫혀 있는가
+// ─────────────────────────────────────────────────────────────
+//
+// **여기가 이 검사기의 핵심이다.** `planSize100x`·`planEntry100x`가
+// 시험과 검사기에서만 불리면, 계약은 초록인데 실제 주문은 그 경로를
+// 타지 않는다 — "만들어 놓고 배선을 안 함"의 정확한 형태다.
+//
+// 그래서 **제품 코드에서 부르는 곳이 있는지**를 센다. 시험·검사기는
+// 세지 않는다.
+const PRODUCTION_GLOBS = ['src/app', 'src/lib', 'src/components', 'worker/src'];
+
+const walk = (dir, out = []) => {
+  let entries = [];
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) walk(full, out);
+    else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) out.push(full);
+  }
+  return out;
+};
+const productionFiles = PRODUCTION_GLOBS.flatMap(d => walk(d));
+const callers = (needle, exclude = []) => productionFiles.filter(f =>
+  !exclude.includes(f) && stripJsComments(readFileSync(f, 'utf8')).includes(needle));
+
+for (const [needle, home, what] of [
+  ['planEntry100x(', ENTRY, '100X 진입 계획'],
+  ['stopPolicyOfContract(', PLAN, '계약 → 손절 정책'],
+  ['sizingPolicyOfContract(', PLAN, '계약 → 사이징 정책'],
+]) {
+  const found = callers(needle, [home]);
+  if (found.length === 0) {
+    err(`${what}(${needle.replace('(', '')})를 제품 코드에서 부르는 곳이 0건입니다`
+      + ' — 시험과 검사기만 부르면 계약은 초록인데 실제 주문은 그 경로를 타지 않습니다');
+  }
+}
+// `planSize100x`는 `entry100x`가 부른다. 그 자체가 제품 배선이므로,
+// 진입 계획이 실제로 호출되는지를 위에서 확인한 것으로 충분하다.
+// 다만 진입 계획이 그것을 정말 쓰는지는 여기서 본다 — 안 쓰면 크기를
+// 어디선가 다시 만들고 있다는 뜻이다.
+if (!code(ENTRY).includes('planSize100x(')) {
+  err(`${ENTRY}: planSize100x를 부르지 않습니다 — 크기 계산이 복제됐습니다`);
+}
+
+// 진입 라우트가 계약대로 갈라지는가
+const scalpSrc = code(SCALP);
+if (!/epSizingPolicy\s*===\s*'MARGIN_ALLOCATION'/.test(scalpSrc)) {
+  err(`${SCALP}: 사이징 정책으로 갈라지지 않습니다 — planPosition을 우회하지 않습니다`);
+}
+if (!/stopPolicy:\s*epStopPolicy/.test(scalpSrc)) {
+  err(`${SCALP}: executeOrder에 stopPolicy를 넘기지 않습니다`
+    + ' — 계약이 장부(live_orders.stop_policy)까지 닿지 않습니다');
+}
+if (!/epStopPolicy\s*===\s*'NO_FIXED_SL'\s*\n?\s*\?\s*\{\}/.test(scalpSrc)
+    && !/epStopPolicy === 'NO_FIXED_SL'[\s\S]{0,80}\?\s*\{\}/.test(scalpSrc)) {
+  err(`${SCALP}: 고정 손절 없는 계약에서도 stopLoss를 함께 보냅니다`
+    + ' — executeOrder가 그 조합을 모순으로 보고 거부합니다');
+}
+if (!/stopPolicy:\s*epStopPolicy/.test(scalpSrc.slice(scalpSrc.indexOf('runChecklist')))
+    && !/runChecklist\([\s\S]{0,400}stopPolicy/.test(scalpSrc)) {
+  err(`${SCALP}: 체크리스트에 stopPolicy를 넘기지 않습니다 — 손절 항목이 N/A로 빠지지 않습니다`);
+}
+
+// 예약의 배정 비율이 라우트까지 실려 가는가
+if (!/marginAllocationPct/.test(code(RUNREQ))) {
+  err(`${RUNREQ}: 예약의 증거금 배정 비율을 요청에 싣지 않습니다`);
+}
+if (!/marginAllocationPct/.test(code(RUNNER))) {
+  err(`${RUNNER}: 예약 줄의 margin_allocation_pct를 읽지 않습니다`);
+}
+
+// 워커 SET_TPSL — **생산자가 아직 없다.**
+//
+// `enqueueJob`을 부르는 제품 코드가 0건이라 SET_TPSL 잡을 만드는 곳이
+// 없다. 그래서 "생산자가 stopPolicy를 싣는지"는 지금 증명할 대상이
+// 아니다. 대신 **생산자가 생기는 날 CI가 요구하도록** 규칙만 걸어 둔다.
+const tpslProducers = productionFiles.filter(f => {
+  if (f === WORKER) return false;
+  const src = stripJsComments(readFileSync(f, 'utf8'));
+  return /action:\s*'SET_TPSL'/.test(src);
+});
+for (const f of tpslProducers) {
+  const src = stripJsComments(readFileSync(f, 'utf8'));
+  if (!/stopPolicy/.test(src)) {
+    err(`${f}: SET_TPSL 잡을 만들면서 stopPolicy를 payload에 싣지 않습니다`
+      + ' — 워커는 live_orders를 읽지 않으므로 잡에 실려 와야 압니다');
+  }
+}
+
+// DB 제약과 코드 표가 갈리지 않는가
+const migOpen = read(MIG_OPEN).replace(/--[^\n]*/g, '');
+if (!migOpen) err(`${MIG_OPEN}이 없습니다 — L1이 전면 금지인 채로 남습니다`);
+else {
+  if (!/DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+autotrade_schedules_execution_profile_dormant/i.test(migOpen)) {
+    err(`${MIG_OPEN}: 옛 전면 금지 제약을 떼지 않습니다`);
+  }
+  if (/DROP\s+CONSTRAINT[^;]*execution_profile_complete/i.test(migOpen)) {
+    err(`${MIG_OPEN}: _complete 제약을 떼고 있습니다 — 반쪽 선택은 지금도 선택이 아닙니다`);
+  }
+  for (const need of [ID, PRESET, "mode = 'TESTNET'", 'margin_allocation_pct IS NOT NULL']) {
+    if (!migOpen.includes(need)) {
+      err(`${MIG_OPEN}: 제약에 ${need}가 없습니다 — DB와 코드 표가 갈립니다`);
+    }
+  }
+  if (/'LIVE'/.test(migOpen)) err(`${MIG_OPEN}: 제약이 LIVE를 허용합니다`);
+}
+const migAlloc = read(MIG_ALLOC).replace(/--[^\n]*/g, '');
+if (!migAlloc) err(`${MIG_ALLOC}이 없습니다 — 배정 비율을 저장할 칸이 없습니다`);
+else if (!/ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+margin_allocation_pct/i.test(migAlloc)) {
+  err(`${MIG_ALLOC}: margin_allocation_pct 칸을 더하지 않습니다`);
+}
+
+// 저장 라우트가 화면 기본값을 물려주지 않는가
+const schedSrc = code(SCHED);
+if (!/marginAllocationPct/.test(schedSrc)) {
+  err(`${SCHED}: 증거금 배정 비율을 받지 않습니다`);
+}
+if (/margin_allocation_pct:\s*(marginPct|body\?\.marginPct|body\.marginPct)/.test(schedSrc)) {
+  err(`${SCHED}: 화면 기본값 marginPct를 배정 비율로 상속합니다`
+    + ' — 사용자가 고른 적 없는 크기로 100배가 나갑니다');
 }
 
 if (bad) {

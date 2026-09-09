@@ -111,34 +111,55 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── 실행 프로필은 아직 이 라우트가 읽지 않는다 ──
+  // ── 실행 프로필 ──
   //
   // 이 주소는 예약을 거치지 않고도 직접 들어올 수 있다. 그래서
   // evaluationRunner에서만 막으면 **직접 요청 하나로 우회된다** — 계약을
   // 실어 보내면 받아 놓고 기존 ATR로 주문이 나간다. 화면은 연구용인데
-  // 실제는 ATR, 정확히 지금 없애려는 그 고장이다.
+  // 실제는 ATR, 정확히 없애려는 그 고장이다.
   //
   // 그래서 여기서도 판단한다. 신호를 계산하기 전에, 주문 경로에 닿기 전에.
-  {
-    const { resolveExecutionProfile, isExecutionResolveError } =
-      await import('@/lib/execution/profile');
-    const ep = resolveExecutionProfile(
-      body?.executionProfileId, body?.executionPresetId, body?.executionContractVersion);
-    if (isExecutionResolveError(ep)) {
-      return NextResponse.json({
-        ok: false, error: ep.code.toLowerCase(), message: ep.message,
-      }, { status: 400 });
-    }
-    if (ep.kind === 'contract') {
+  // 무엇을 열 것인가는 **`execution/dormantGate`가 정한다** — 이 자리에서
+  // 따로 판단하면 켜기(L3)·실행 직전(L4)과 갈린다.
+  const {
+    resolveExecutionProfile, isExecutionResolveError,
+    stopPolicyOfContract, sizingPolicyOfContract,
+  } = await import('@/lib/execution/profile');
+  const { executionGateVerdict } = await import('@/lib/execution/dormantGate');
+  const ep = resolveExecutionProfile(
+    body?.executionProfileId, body?.executionPresetId, body?.executionContractVersion);
+  if (isExecutionResolveError(ep)) {
+    return NextResponse.json({
+      ok: false, error: ep.code.toLowerCase(), message: ep.message,
+    }, { status: 400 });
+  }
+  const epContract = ep.kind === 'contract' ? ep.contract : null;
+  if (epContract) {
+    const gate = executionGateVerdict({
+      profileId: epContract.profileId,
+      presetId: epContract.presetId,
+      contractVersion: epContract.contractVersion,
+      // 이 라우트의 mode가 곧 예약의 mode다 (예약이 그대로 실어 보낸다).
+      mode: opMode,
+      marginAllocationPct: body?.marginAllocationPct ?? null,
+    });
+    if (!gate.allowed) {
       return NextResponse.json({
         ok: false, error: 'EXECUTION_PROFILE_NOT_ACTIVE',
-        message: '실행 프로필이 아직 활성화되지 않았습니다'
-          + ' — 이 계약을 실은 요청은 실행하지 않습니다(기존 방식으로 대신 실행하지도 않습니다).',
-        profileId: ep.contract.profileId, presetId: ep.contract.presetId,
-        contractVersion: ep.contract.contractVersion,
+        message: `${gate.reason} 기존 방식으로 대신 실행하지도 않습니다.`,
+        profileId: epContract.profileId, presetId: epContract.presetId,
+        contractVersion: epContract.contractVersion,
       }, { status: 409 });
     }
   }
+  // 계약이 정하는 실행 의미. **계약이 없으면 지금까지와 같다.**
+  const epStopPolicy = stopPolicyOfContract(epContract);
+  const epSizingPolicy = sizingPolicyOfContract(epContract);
+  // 배정 비율은 **예약이 준 값**이다. 화면 기본값 marginPct를 여기로
+  // 끌어오지 않는다 — 그 값은 이 프로필을 위해 고른 값이 아니다.
+  const epMarginAllocationPct =
+    body?.marginAllocationPct == null || String(body.marginAllocationPct) === ''
+      ? null : Number(body.marginAllocationPct);
 
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
   const sb = getSupabaseAdmin();
@@ -238,8 +259,103 @@ export async function POST(req: NextRequest) {
     riskPct: body.riskPct ?? null,
   });
 
-  const { planPosition } = await import('@/lib/engine/riskManager');
-  const plan = planPosition(std, ctx.config, ctx.currentOpenRisk);
+  // ── 연결 ──
+  //
+  // **계획보다 앞에서 읽는다.** 증거금 배정 사이징은 거래소에 직접 물어본
+  // 값(마진 모드·배율·잔고·기준가)으로 크기를 만들기 때문에, 연결을 모른
+  // 채로는 계획 자체를 세울 수 없다. 읽기 전용이라 순서를 앞으로 옮겨도
+  // 계좌에 아무 일도 일어나지 않는다.
+  const { loadConnection } = await import('@/lib/exchanges/connection');
+  const { conn, error: connErr } = await loadConnection(sb, body.connectionId, userId);
+  if (!conn) {
+    return NextResponse.json({
+      ok: false, symbol, mode: opMode, executed: false,
+      blocked: 'NO_CONNECTION', error: connErr,
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+  }
+  const connIsLive = conn.isTestnet === false;
+
+  // ── 크기를 무엇에서 만드는가 ──
+  //
+  // 계약이 `MARGIN_ALLOCATION`이면 `planPosition`을 **타지 않는다.** 그
+  // 함수는 허용손실 ÷ 손절거리라 손절이 분모인데, 고정 손절을 쓰지 않는
+  // 계약에는 그 분모가 없다. 분모를 지어내는 대신 거래소에 직접 물어본
+  // 값으로 크기를 만든다.
+  //
+  // 물어보는 순서와 판정은 `engine/entry100x`에 있다 — 여기 인라인으로
+  // 쓰면 그 순서가 시험되지 않는 자리에 남고, 다른 라우트가 복제하게 된다.
+  let plan: any;
+  let entryNotes: string[] = [];
+  if (epSizingPolicy === 'MARGIN_ALLOCATION') {
+    const { planEntry100x } = await import('@/lib/engine/entry100x');
+    const { futuresApplyLeverage } = await import('@/lib/exchanges/futuresExec');
+    const { futuresPositionRisk, futuresAvailableUsd, futuresSymbolFilters } =
+      await import('@/lib/exchanges/futuresAdapter');
+    const { quantizeOrder } = await import('@/lib/exchanges/quantize');
+    const ex = conn.exchange as 'binance' | 'gate';
+    const target = { exchange: ex, key: conn.apiKey, secret: conn.apiSecret, testnet: !connIsLive };
+
+    const entry = await planEntry100x(
+      {
+        leverage: epContract!.leverage,
+        sizingPolicy: epSizingPolicy,
+        marginModes: epContract!.marginModes,
+      },
+      epMarginAllocationPct,
+      {
+        // 마진 모드와 기준가는 **같은 되읽기 응답**에서 온다.
+        observeMarginMode: async () => {
+          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
+          const mt = String(rr.risk?.marginType || '').toLowerCase();
+          return mt === 'isolated' ? 'isolated' : mt === 'cross' || mt === 'crossed' ? 'cross' : null;
+        },
+        applyLeverage: async (lev: number) => {
+          const v = await futuresApplyLeverage(target, symbol, lev);
+          return { ok: v.ok, observed: v.observed, message: v.message };
+        },
+        availableUsd: () => futuresAvailableUsd(ex, conn.apiKey, conn.apiSecret, !connIsLive),
+        // **서버가 읽은 값이다.** 신호가 들고 온 진입가를 쓰지 않는다.
+        referencePrice: async () => {
+          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
+          const m = Number(rr.risk?.markPrice);
+          return Number.isFinite(m) && m > 0 ? m : null;
+        },
+        quantize: async (qty: number) => {
+          // 규격을 못 읽으면 `quantizeOrder`가 신규 진입을 막는다 —
+          // 모르는 규격으로 새 포지션을 열지 않는다는 기존 규칙 그대로다.
+          const filters = await futuresSymbolFilters(ex, symbol, !connIsLive).catch(() => null);
+          const q = quantizeOrder(qty, null, filters, { orderType: 'MARKET' });
+          const out = Number(q.quantity);
+          return {
+            qty: q.ok && Number.isFinite(out) && out > 0 ? out : null,
+            message: q.reason || '거래소 규격을 읽지 못했습니다',
+          };
+        },
+      },
+    );
+    entryNotes = entry.notes;
+    plan = entry.ok
+      ? {
+          approved: true, symbol, side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
+          riskAmount: 0, riskAmountWithCosts: 0, stopDistancePct: 0, effectiveStopPct: 0,
+          positionSize: (entry.quantity as number) * (entry.referencePrice as number),
+          quantity: entry.quantity as number,
+          requiredMargin: entry.requiredMargin as number,
+          leverage: entry.leverage as number,
+          liquidationPrice: 0, liquidationDistancePct: 0,
+          notes: entry.notes,
+        }
+      : {
+          approved: false, rejectCode: entry.code, rejectReason: entry.message,
+          symbol, side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
+          riskAmount: 0, riskAmountWithCosts: 0, stopDistancePct: 0, effectiveStopPct: 0,
+          positionSize: 0, quantity: 0, requiredMargin: 0, leverage: 0,
+          liquidationPrice: 0, liquidationDistancePct: 0, notes: entry.notes,
+        };
+  } else {
+    const { planPosition } = await import('@/lib/engine/riskManager');
+    plan = planPosition(std, ctx.config, ctx.currentOpenRisk);
+  }
 
   const base = {
     ok: true, symbol, mode: opMode, dryRun,
@@ -321,14 +437,6 @@ export async function POST(req: NextRequest) {
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
-  // ── 연결 ──
-  const { loadConnection } = await import('@/lib/exchanges/connection');
-  const { conn, error: connErr } = await loadConnection(sb, body.connectionId, userId);
-  if (!conn) {
-    return NextResponse.json({
-      ...base, executed: false, blocked: 'NO_CONNECTION', error: connErr,
-    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
-  }
   // ── 킬 스위치 ──
   //
   // **여기 없었다.** liveTradingGate와 킬스위치는 다른 장치다 —
@@ -421,7 +529,6 @@ export async function POST(req: NextRequest) {
   // 주문이 어느 망으로 나가는지는 **연결**이 정한다. 모드가 아니다.
   // 어긋나면 실계좌 키로 데모 서버를 두드리거나(-2015), 실전인 줄 알고
   // 켠 것이 테스트넷으로 새어 나간다.
-  const connIsLive = conn.isTestnet === false;
   if (connIsLive !== capability(opMode).needsLiveKey) {
     return NextResponse.json({
       ...base, executed: false, blocked: 'MODE_CONN_MISMATCH',
@@ -491,7 +598,9 @@ export async function POST(req: NextRequest) {
     side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
     mode: opMode,
     notionalUsd: plan.positionSize ?? 0,
-    stopPrice: scalp.signal.stop ?? null,
+    // 고정 손절을 쓰지 않는 계약에서는 계획에 손절가가 없다. 여기에
+    // 신호의 손절가를 넣으면 체크리스트가 "손절이 있다"고 읽는다.
+    stopPrice: epStopPolicy === 'NO_FIXED_SL' ? null : (scalp.signal.stop ?? null),
     intendedLeverage: plan.leverage ?? null,
     requiredMargin: plan.requiredMargin ?? null,
     equityUsd: ctx.config.accountEquity ?? null,
@@ -524,6 +633,9 @@ export async function POST(req: NextRequest) {
   const checklist = runChecklist(checkInput, {
     market: 'USDM', intent: 'ENTRY',
     regimeFilter: regimeFacts.enabled,
+    // 손절을 묻는 세 항목은 고정 손절 전략에만 해당한다. 아니면 목록에서
+    // 빠진다 — pass로 적으면 없는 것을 있다고 적는 것이다.
+    stopPolicy: epStopPolicy,
   });
   if (!checklist.allowed) {
     return NextResponse.json({
@@ -633,7 +745,9 @@ export async function POST(req: NextRequest) {
     // 못 읽었다고 숏을 통째로 막으면 조회가 흔들릴 때마다 멈춘다.
     const sg = shortGuard({
       entryPrice: Number(scalp.signal.entry),
-      stopPrice: scalp.signal.stop ?? null,
+      // 고정 손절을 쓰지 않는 계약에서는 계획에 손절가가 없다. 여기에
+    // 신호의 손절가를 넣으면 체크리스트가 "손절이 있다"고 읽는다.
+    stopPrice: epStopPolicy === 'NO_FIXED_SL' ? null : (scalp.signal.stop ?? null),
       liquidationPrice: plan.liquidationPrice ?? null,
       recentHighs: bars?.highs ?? null,
       recentLows: bars?.lows ?? null,
@@ -821,10 +935,18 @@ export async function POST(req: NextRequest) {
     exchange: conn.exchange as 'binance' | 'gate',
     mode: mode as 'TESTNET' | 'LIVE',
     plan,
+    // **계약이 실행 의미를 정한다.**
+    //
+    // 고정 손절을 쓰지 않는 계약이면 `stopLoss`를 함께 보내면 안 된다 —
+    // `executeOrder`가 그 조합을 모순으로 보고 주문을 거부한다. 조용히
+    // 무시하지 않는 것이 맞다: 화면에는 손절이 있고 거래소에는 없는
+    // 상태를 만드느니 멈추는 편이 낫다.
+    stopPolicy: epStopPolicy,
     // **손절은 반드시 함께 낸다.** 단타에서 손절 없는 진입은 배율이
-    // 붙어 있어 청산까지 간다.
-    stopLoss: scalp.signal.stop,
-    takeProfit: scalp.signal.target,
+    // 붙어 있어 청산까지 간다. 고정 손절을 쓰지 않는 계약만 예외다.
+    ...(epStopPolicy === 'NO_FIXED_SL'
+      ? {}
+      : { stopLoss: scalp.signal.stop, takeProfit: scalp.signal.target }),
     apiKey: conn.apiKey,
     apiSecret: conn.apiSecret,
   });

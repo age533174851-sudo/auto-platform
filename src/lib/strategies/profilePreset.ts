@@ -34,7 +34,22 @@
 
 import type { StrategyProfile, StrategyType } from './profiles';
 
-export type RiskPresetId = 'STABILIZE' | 'RESEARCH';
+export type RiskPresetId =
+  | 'STABILIZE'
+  | 'RESEARCH'
+  /**
+   * **전용 100배 하나만을 위한 프리셋.**
+   *
+   * 왜 기존 두 개를 쓰지 않는가: `STABILIZE`는 "배율·위험을 좁힌 값"이라는
+   * 뜻이고 `RESEARCH`는 "극단에서 무슨 일이 나는지 보는 값"이라는 뜻이다.
+   * 전용 100배는 둘 다 아니다 — **정확히 100배로 실행한다**는 실행 계약이다.
+   *
+   * 기존 프리셋에 얹으면 "안정화인데 100배"라는 모순이 생기고, 사용자는
+   * 안정화를 골랐으니 배율이 낮아졌다고 읽는다. 그래서 조합 자체를 막는다:
+   * `MAX_LEV_100X`는 이 프리셋과만 짝이 되고, 다른 프로필은 이 프리셋을
+   * 쓸 수 없다. 그 판정은 `execution/profile.ts`의 resolver가 한다.
+   */
+  | 'EXACT_100X';
 
 /**
  * **기본은 안정화다.**
@@ -52,6 +67,10 @@ export const PRESET_INFO: Record<RiskPresetId, { label: string; desc: string }> 
   RESEARCH: {
     label: '연구용',
     desc: '극단에서 무슨 일이 나는지 보는 값입니다 — 운용 설정이 아닙니다',
+  },
+  EXACT_100X: {
+    label: '전용 100배',
+    desc: '요청 배율이 정확히 100배입니다. 거래소에 되읽어 100이 확인될 때만 주문합니다',
   },
 };
 
@@ -124,25 +143,21 @@ export const PRESET_TABLE: Record<RiskPresetId, Partial<Record<StrategyType, Pre
       mddStopPct: null,
       warnOnNegativeExpectancy: true,
     },
-    // ── 전용 100배는 프리셋으로 낮추지 않는다 ──
-    //
-    // **키를 비워 두면 안 된다.** `overrideOf`가 `{}`를 돌려주니 지금은
-    // 100이 남지만, 그건 *항목이 없어서* 생긴 결과다. 나중에 누가
-    // `MAX_LEV_100X: { maxLeverage: 20 }`을 여기 추가하는 순간 "정확히
-    // 100배"라는 계약이 조용히 깨진다 — 그리고 그 변경은 이 표만 보면
-    // 합리적으로 보인다.
-    //
-    // 그래서 **명시적으로 100을 적는다.** 안정화 프리셋이 이 프로필의
-    // 배율을 낮추지 않는다는 것이 여기 쓰여 있어야 한다. 낮춘 배율이
-    // 필요하면 그것은 이 프로필이 아니라 다른 프로필이다.
-    MAX_LEV_100X: {
-      leverage: 100, maxLeverage: 100, leverageBand: [100, 100],
-      warnOnNegativeExpectancy: true,
-    },
+    // **전용 100배 항목을 여기 두지 않는다.** 안정화는 배율을 좁히는
+    // 프리셋이라, 이 표에 100X가 있으면 "안정화인데 100배" 또는
+    // "안정화라서 20배로 낮춘 100X"가 된다. 둘 다 계약이 아니다.
+    // 조합 자체를 resolver가 막는다.
   },
   RESEARCH: {
-    // 같은 이유로 연구용에도 명시한다. 두 프리셋의 배율이 같아야
-    // "프리셋과 무관하게 정확히 100배"가 성립한다.
+    // 같은 이유로 연구용에도 두지 않는다.
+  },
+  EXACT_100X: {
+    // **이 프리셋에는 전용 100배 하나만 있다.**
+    //
+    // 값을 여기 적는 이유: `applyPreset`이 얹는 것이 최종 실행값이라,
+    // 여기가 비어 있으면 프로필 리터럴이 그대로 통과한다. 지금은 둘 다
+    // 100이라 결과가 같지만 그건 **우연**이고, 한쪽만 바뀌는 순간
+    // 표에 적힌 숫자와 실행되는 숫자가 갈린다. 검사기가 둘을 대조한다.
     MAX_LEV_100X: {
       leverage: 100, maxLeverage: 100, leverageBand: [100, 100],
       warnOnNegativeExpectancy: true,
@@ -152,9 +167,11 @@ export const PRESET_TABLE: Record<RiskPresetId, Partial<Record<StrategyType, Pre
 
 export function presetOf(raw: any): RiskPresetId {
   const s = String(raw ?? '').trim().toUpperCase();
-  // **모르는 값은 기본값이다.** 여기서 연구용으로 떨어지면 오타 하나가
-  // 100배가 된다.
-  return s === 'RESEARCH' ? 'RESEARCH' : DEFAULT_PRESET;
+  // **모르는 값은 기본값이다.** 여기서 연구용이나 전용 100배로 떨어지면
+  // 오타 하나가 100배가 된다.
+  if (s === 'RESEARCH') return 'RESEARCH';
+  if (s === 'EXACT_100X') return 'EXACT_100X';
+  return DEFAULT_PRESET;
 }
 
 export function overrideOf(id: StrategyType, preset: RiskPresetId): PresetOverride {
