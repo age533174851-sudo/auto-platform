@@ -138,7 +138,9 @@ export function runExecutionProfileTests() {
   });
 
   // ── 이 계약은 아직 잠들어 있다 ──
-  test('1A 계약 버전은 1이다 — 올리는 것은 검사기가 강제한다', () => {
-    eq(EXECUTION_CONTRACT_VERSION, 1);
+  // 전용 100배가 계약에 두 축(stopPolicy · marginAllocationPct)을 더하면서
+  // 지문이 바뀌었다. 검사기가 그 변경에 버전 상승을 요구했고, 그래서 2다.
+  test('계약 버전은 2다 — 올리는 것은 검사기가 강제한다', () => {
+    eq(EXECUTION_CONTRACT_VERSION, 2);
   });
 }

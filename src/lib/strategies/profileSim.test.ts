@@ -28,7 +28,7 @@ import {
   noEdgeWinRate, assumedWinRate, breakevenWinRate,
   expectancyPctOfNotional, tradePnlPctOfNotional, roundTripFeePct,
 } from './simModel';
-import { getProfile, listProfiles, simHoldSecOf, simSeedOf, simPriceOf, DAILY_HIGH_LEV, SWING_LOW_LEV, SCALP_HIGH_LEV } from './profiles';
+import { getProfile, simulatableProfiles, simHoldSecOf, simSeedOf, simPriceOf, DAILY_HIGH_LEV, SWING_LOW_LEV, SCALP_HIGH_LEV } from './profiles';
 
 export function runProfileSimTests() {
   console.log('[전략 프로필 모의 — 기간·금액·회차]');
@@ -48,7 +48,7 @@ export function runProfileSimTests() {
   });
 
   test('무우위 기준선에서 수수료를 빼면 기대값은 음수다 — 공짜 우위는 없다', () => {
-    for (const p of listProfiles()) {
+    for (const p of simulatableProfiles()) {
       const exp = expectancyPctOfNotional(p, noEdgeWinRate(p));
       assert(exp < 0, `${p.label}: 우위가 없는데 기대값이 ${exp}다`);
       // 정확히 왕복 수수료만큼 진다.
@@ -57,7 +57,7 @@ export function runProfileSimTests() {
   });
 
   test('본전 승률은 무우위 기준선보다 높다 — 수수료 때문에', () => {
-    for (const p of listProfiles()) {
+    for (const p of simulatableProfiles()) {
       assert(breakevenWinRate(p) > noEdgeWinRate(p), `${p.label}: 본전 승률이 기준선보다 낮다`);
     }
   });
@@ -171,7 +171,7 @@ export function runProfileSimTests() {
   // 무제한 보유 프로필도 모의 시계는 돌아야 한다. 0이면 하루가 영영
   // 안 바뀌어서 한도가 안 풀린다.
   test('세 프로필 모두 모의 한 건의 길이가 있다', () => {
-    for (const p of listProfiles()) {
+    for (const p of simulatableProfiles()) {
       assert(simHoldSecOf(p) > 0, `${p.label}의 모의 보유시간이 0이다`);
       assert(simSeedOf(p) > 0, `${p.label}의 시드가 0이다`);
       assert(simPriceOf(p) > 0, `${p.label}의 체결가가 0이다`);

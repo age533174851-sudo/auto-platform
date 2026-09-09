@@ -47,7 +47,7 @@
 // `applyPreset()`은 안에서 `presetOf()`를 부른다. 그래서 "직접 안 쓴다"
 // 만으로는 부족하다 — **검증을 먼저 끝낸 뒤에만** 부른다. 모르는
 // 프리셋이 `applyPreset()`에 도달하는 것 자체가 불가능해야 한다.
-import { PROFILES, type StrategyProfile, type StrategyType } from '../strategies/profiles';
+import { PROFILES, type StrategyProfile, type StrategyType, type StopPolicy } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset, type RiskPresetId } from '../strategies/profilePreset';
 
 /**
@@ -61,7 +61,7 @@ import { PRESET_TABLE, applyPreset, type RiskPresetId } from '../strategies/prof
  * 올리는 것은 자동이 아니다. 검사기가 이전 커밋과 비교해서, 실행값이
  * 바뀌었는데 이 숫자가 그대로면 실패시킨다.
  */
-export const EXECUTION_CONTRACT_VERSION = 1;
+export const EXECUTION_CONTRACT_VERSION = 2;
 
 /**
  * 계약에 들어가는 칸 — **화이트리스트다.**
@@ -81,6 +81,13 @@ export const CONTRACT_FIELDS = [
   'riskPercentPerTrade', 'takeProfitPct', 'stopLossPct',
   'orderType', 'timeoutSec', 'dailyLossLimitPct',
   'maxHoldSec', 'maxOpenPositions',
+  // v2에서 더한 두 칸. 둘 다 **실행 의미**라 계약이다.
+  //
+  //   stopPolicy          고정 손절을 거는가. 숫자가 아니라 정책이라야
+  //                       주문 경로가 그것을 정책으로 다룬다
+  //   marginAllocationPct 손절 거리로 수량을 못 만드는 프로필의 크기 근거.
+  //                       null이면 "정하지 않음"이고 사이징이 막는다
+  'stopPolicy', 'marginAllocationPct',
 ] as const;
 
 export type ContractField = (typeof CONTRACT_FIELDS)[number];
@@ -95,12 +102,16 @@ export interface ExecutionContract {
   maxPortfolioPct: number;
   riskPercentPerTrade: number;
   takeProfitPct: number;
-  stopLossPct: number;
+  /** NO_FIXED_SL이면 null이다 — 없는 손절에 숫자를 적지 않는다 */
+  stopLossPct: number | null;
   orderType: string;
   timeoutSec: number;
   dailyLossLimitPct: number;
   maxHoldSec: number;
   maxOpenPositions: number;
+  stopPolicy: StopPolicy;
+  /** null = 정하지 않음. 그 상태에서는 100X 사이징이 주문을 막는다 */
+  marginAllocationPct: number | null;
 }
 
 export type ExecutionResolveCode =
@@ -239,4 +250,32 @@ export function executionContractFingerprint(): string {
     }
   }
   return JSON.stringify(rows);
+}
+
+/**
+ * 이 계약의 **고정 손절 정책.** 계약이 없으면 `FIXED_SL`이다.
+ *
+ * 왜 함수인가: 주문 경로가 `contract?.stopPolicy ?? 'FIXED_SL'`을 직접
+ * 쓰면, 그 표현이 여러 곳에 흩어지고 언젠가 한 곳이 `?? 'NO_FIXED_SL'`이
+ * 된다. 그 오타 하나가 **모든 기존 전략의 손절을 끄는 변경**이다.
+ * 기본값이 안전한 쪽이라는 사실을 한 곳에 못박아 둔다.
+ *
+ * 그리고 이것이 **누출 방지의 핵심 지점**이다. 화면의 `levCap=100`
+ * (레거시 상한)은 계약이 아니므로 여기를 통과할 수 없고, 따라서
+ * `NO_FIXED_SL` 실행 의미를 만들 수 없다. 100배 상한과 100배 전용
+ * 프로필이 다른 물건인 이유가 값이 아니라 **경로**에 있다.
+ */
+export function stopPolicyOfContract(c: ExecutionContract | null | undefined): StopPolicy {
+  return c?.stopPolicy === 'NO_FIXED_SL' ? 'NO_FIXED_SL' : 'FIXED_SL';
+}
+
+/**
+ * 이 계약의 증거금 배정 비율. **계약이 없으면 null이다.**
+ *
+ * 화면의 `marginPct`(현재 기본값 10)를 여기서 끌어오지 않는다 — 그 값은
+ * 사용자가 이 프로필을 위해 고른 값이 아니다. null이면 사이징이 막는다.
+ */
+export function marginAllocationOfContract(c: ExecutionContract | null | undefined): number | null {
+  const v = c?.marginAllocationPct;
+  return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
 }

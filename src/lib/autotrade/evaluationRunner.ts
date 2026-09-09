@@ -28,6 +28,7 @@ import { runStrategy, evaluationKey, type EvaluationOutcome } from '../strategie
 import { strategyIdOfRow } from '../strategies/registry';
 import { strategyRunRequest } from '../strategies/runRequest';
 import { resolveExecutionProfile, isExecutionResolveError } from '../execution/profile';
+import { executionGateVerdict } from '../execution/dormantGate';
 import { decisionRecordOf } from '../ui/autoOverview';
 import { dueCheck, verdictOfOutcome, resultLineOf, type DueVerdict } from './evaluationLoop';
 import { claimVerdict, type ClaimVerdict, type DispatchSource } from './schedulePoll';
@@ -308,10 +309,14 @@ export async function evaluateIfDue(
   // `last_run_at`을 쓰지 않는다.
   const ep = resolveExecutionProfile(
     row.execution_profile_id, row.execution_preset_id, row.execution_contract_version);
+  // 무엇을 열 것인가는 **`execution/dormantGate`가 정한다.** 여기서 따로
+  // 판단하면 PATCH(L3)와 갈리고, 그러면 "실행기는 통과시키는데 사용자는
+  // 켤 수 없는" 상태가 시험만 초록인 채로 남는다.
+  const gate = executionGateVerdict(row.execution_profile_id);
   const epBlocked = isExecutionResolveError(ep)
     ? ep.message
-    : (ep.kind === 'contract'
-      ? '실행 프로필이 아직 활성화되지 않았습니다 — 이 예약은 켜진 채로 둘 수 없습니다'
+    : (ep.kind === 'contract' && !gate.allowed
+      ? `${gate.reason} — 이 예약은 켜진 채로 둘 수 없습니다`
       : '');
   if (epBlocked) {
     const save = await recordEvaluation(sb, row.id, {

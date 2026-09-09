@@ -124,8 +124,30 @@ export const PRESET_TABLE: Record<RiskPresetId, Partial<Record<StrategyType, Pre
       mddStopPct: null,
       warnOnNegativeExpectancy: true,
     },
+    // ── 전용 100배는 프리셋으로 낮추지 않는다 ──
+    //
+    // **키를 비워 두면 안 된다.** `overrideOf`가 `{}`를 돌려주니 지금은
+    // 100이 남지만, 그건 *항목이 없어서* 생긴 결과다. 나중에 누가
+    // `MAX_LEV_100X: { maxLeverage: 20 }`을 여기 추가하는 순간 "정확히
+    // 100배"라는 계약이 조용히 깨진다 — 그리고 그 변경은 이 표만 보면
+    // 합리적으로 보인다.
+    //
+    // 그래서 **명시적으로 100을 적는다.** 안정화 프리셋이 이 프로필의
+    // 배율을 낮추지 않는다는 것이 여기 쓰여 있어야 한다. 낮춘 배율이
+    // 필요하면 그것은 이 프로필이 아니라 다른 프로필이다.
+    MAX_LEV_100X: {
+      leverage: 100, maxLeverage: 100, leverageBand: [100, 100],
+      warnOnNegativeExpectancy: true,
+    },
   },
-  RESEARCH: {},
+  RESEARCH: {
+    // 같은 이유로 연구용에도 명시한다. 두 프리셋의 배율이 같아야
+    // "프리셋과 무관하게 정확히 100배"가 성립한다.
+    MAX_LEV_100X: {
+      leverage: 100, maxLeverage: 100, leverageBand: [100, 100],
+      warnOnNegativeExpectancy: true,
+    },
+  },
 };
 
 export function presetOf(raw: any): RiskPresetId {

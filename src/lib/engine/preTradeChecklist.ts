@@ -24,6 +24,8 @@
 // 확인하지 못한 것을 초록으로 그리는 체크리스트는 없는 것보다 나쁘다 —
 // 없으면 사람이 직접 보지만, 있으면 안 본다.
 
+import type { StopPolicy } from '../strategies/profiles';
+
 export type CheckStatus =
   /** 확인했고 문제없다 */
   | 'pass'
@@ -631,6 +633,28 @@ export interface ChecklistOptions {
    * 물어봤다고 선언했으면 답이 있어야 한다.
    */
   exchangeEvidence?: boolean;
+  /**
+   * 이 주문이 **고정 손절을 쓰는 전략인가.** 기본 'FIXED_SL'.
+   *
+   * `NO_FIXED_SL`이면 손절 유무를 묻는 세 항목이 **목록에서 빠진다** —
+   * pass가 아니라 해당 없음(N/A)이다.
+   *
+   *   STOP_ATTACHED · LIQUIDATION_DISTANCE · PROTECTIVE_ORDER
+   *
+   * 왜 pass가 아닌가
+   * ────────────────
+   * "손절이 붙어 있음 ✓"라고 적으면 사용자는 손절이 있다고 읽는다.
+   * 없는데 있다고 적는 것은 이 체크리스트가 존재하는 이유에 정면으로
+   * 반한다. 현물 주문에 "마진 모드 ISOLATED ✓"를 적지 않는 것과 같은
+   * 규칙이고, 그 규칙은 이미 이 파일의 머리말에 적혀 있다.
+   *
+   * 왜 `noStopAcknowledged`를 재사용하지 않는가
+   * ──────────────────────────────────────────
+   * 그것은 **사람이 화면에서 누른 승인**이다. 자동 실행 프로필이 그
+   * 플래그를 빌려 쓰면, 아무도 누르지 않은 승인이 눌린 것처럼 기록된다.
+   * 두 값은 뜻이 다르므로 칸도 다르다.
+   */
+  stopPolicy?: StopPolicy;
   /** 기본 'USDM' — 기존 호출자(daily-ladder)의 동작을 바꾸지 않는다 */
   market?: MarketKind;
   /** 기본 'ENTRY' */
@@ -705,13 +729,23 @@ function resultFor(
 }
 
 /** 이 시장·이 방향에서 의미가 있는 검사인가 */
+/** 고정 손절이 없을 때 뜻을 잃는 항목들 — **여기 한 곳에만 적는다** */
+export const FIXED_STOP_ONLY_CHECKS: readonly CheckId[] = [
+  'STOP_ATTACHED', 'LIQUIDATION_DISTANCE', 'PROTECTIVE_ORDER',
+];
+
 export function appliesTo(
   id: CheckId, market: MarketKind, intent: OrderIntent, dailyLimit: boolean,
   regimeFilter = false, aiVeto = false, overtrading = false,
   exchangeEvidence = false,
+  stopPolicy: StopPolicy = 'FIXED_SL',
 ): boolean {
   const spec = SPEC_BY_ID[id];
   if (!spec) return false;
+  // 고정 손절을 안 쓰는 전략에서는 손절을 묻는 질문 자체가 성립하지 않는다.
+  // **여기서만 뺀다.** 다른 검사(상태 대조·미확정 주문·증거금·마진 모드·
+  // 포지션 모드·계좌 증거)는 손절과 무관하므로 그대로 남는다.
+  if (stopPolicy === 'NO_FIXED_SL' && FIXED_STOP_ONLY_CHECKS.includes(id)) return false;
   if (id === 'TODAY_ENTRY' && !dailyLimit) return false;
   // 거래소에 물어보지 않은 경로에는 이 항목이 아예 안 나온다.
   if (id === 'PROTECTIVE_ORDER' && !exchangeEvidence) return false;
@@ -739,6 +773,7 @@ export function runChecklist(
   const regimeFilter = opts.regimeFilter ?? false;
   const aiVeto = opts.aiVeto ?? false;
   const exchangeEvidence = opts.exchangeEvidence ?? false;
+  const stopPolicy = opts.stopPolicy ?? 'FIXED_SL';
 
   const all: CheckResult[] = [];
   const results = all;   // 아래 push는 그대로 두고, 마지막에 걸러낸다
@@ -1043,7 +1078,7 @@ export function runChecklist(
   // 규칙을 두 곳에 적게 되고, 언젠가 한 곳만 고친다.
   const scoped = all.filter(r =>
     appliesTo(r.id, market, intent, dailyLimit, regimeFilter, aiVeto,
-      input.overtrading != null, exchangeEvidence));
+      input.overtrading != null, exchangeEvidence, stopPolicy));
 
   const blockers = scoped.filter(r => r.blocks);
   const passed = scoped.filter(r => r.status === 'pass').length;

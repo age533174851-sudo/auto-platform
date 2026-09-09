@@ -505,6 +505,9 @@ jobs:
           EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/check-execution-profile.mjs
 
+      - name: 전용 100배 계약 (정확 100 · 고정 손절 없음 · 누출 0)
+        run: node scripts/check-100x-contract.mjs
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 
