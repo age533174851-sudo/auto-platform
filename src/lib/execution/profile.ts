@@ -322,3 +322,21 @@ export function stopPolicyOfContract(c: ExecutionContract | null | undefined): S
 export function sizingPolicyOfContract(c: ExecutionContract | null | undefined): SizingPolicy {
   return c?.sizingPolicy === 'MARGIN_ALLOCATION' ? 'MARGIN_ALLOCATION' : 'STOP_RISK';
 }
+
+/**
+ * 이 요청이 **실행 계약을 싣고 있는가.**
+ *
+ * 계약을 해석하지 않는 라우트가 쓴다. 그런 라우트는 계약이 실려 와도
+ * 자기 방식으로 주문을 낸다 — 저장된 것과 도는 것이 달라진다. 이 저장소가
+ * 계속 막아 온 형태라, 받아 놓고 무시하는 대신 **거절한다.**
+ *
+ * 세 칸 중 하나라도 있으면 참이다. 반쪽 선택도 선택이 아니므로 여기서
+ * 걸러야 한다 — 그래야 "일부만 보냈으니 무시해도 된다"가 생기지 않는다.
+ */
+export function carriesExecutionContract(body: any): boolean {
+  for (const k of ['executionProfileId', 'executionPresetId', 'executionContractVersion']) {
+    const v = body?.[k];
+    if (v != null && String(v).trim() !== '') return true;
+  }
+  return false;
+}

@@ -491,6 +491,19 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
    */
   const saveX100 = async () => {
     if (!auth) { setX100Msg({ ok: false, text: '로그인이 필요합니다' }); return; }
+    // **전략을 몰래 바꾸지 않는다.**
+    //
+    // 100X 계약을 실제로 해석해서 실행하는 라우트는 지금 분봉 돌파(scalp)
+    // 하나다. 다른 전략을 고른 채로 저장하면 서버가 켜기를 막는데, 그때
+    // 사용자는 왜 안 켜지는지 알 수 없다. 그리고 여기서 전략을 scalp로
+    // 바꿔 저장하면 **고른 적 없는 전략이 도는 것**이라 더 나쁘다.
+    // 그래서 저장하지 않고 이유를 말한다.
+    if (strategyId !== 'scalp') {
+      setX100Msg({ ok: false, text:
+        `전용 100배는 현재 분봉 돌파(scalp) 전략에서만 사용할 수 있습니다 — 고른 전략은 ${strategyId}입니다.`
+        + ' 전략을 바꿔서 대신 저장하지 않습니다.' });
+      return;
+    }
     const pct = Number(x100Alloc);
     if (!(pct > 0 && pct <= 100)) {
       setX100Msg({ ok: false, text: '증거금 배정 비율을 0 초과 100 이하로 입력하세요 — 기본값을 대신 쓰지 않습니다' });
@@ -772,6 +785,9 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
    */
   const x100Row = schedules.find((r: any) =>
     r?.execution_profile_id === 'MAX_LEV_100X'
+    // **전략까지 본다.** 다른 전략의 100X 줄을 여기 그리면, 켤 수 없는
+    // 예약을 "전용 100배로 저장됨"으로 읽게 된다.
+    && r?.strategy_id === 'scalp'
     && String(r?.symbol || '').toUpperCase() === String(symbol || '').toUpperCase()
     && (!connId || r?.connection_id === connId)) || null;
   // 상태 배지 글자는 **서버가 준 것을 그대로 쓴다.** 같은 표를 화면에도
@@ -1871,7 +1887,7 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
           {x100Row ? (
             <div style={{ fontSize: 11, color: T.txt, lineHeight: 1.7, marginBottom: 7 }}>
               {/* 저장된 값 그대로 적는다. 화면이 다시 계산하지 않는다. */}
-              <div>{x100Row.execution_profile_id} · {x100Row.execution_preset_id} · 계약 v{x100Row.execution_contract_version}</div>
+              <div>{x100Row.strategy_id} · {x100Row.execution_profile_id} · {x100Row.execution_preset_id} · 계약 v{x100Row.execution_contract_version}</div>
               <div style={{ color: T.muted }}>
                 {x100Row.mode} · 증거금 배정{' '}
                 {x100Row.margin_allocation_pct == null
@@ -1885,6 +1901,13 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
           ) : (
             <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.6, marginBottom: 7 }}>
               이 심볼·연결에 저장된 전용 100배 예약이 없습니다.
+            </div>
+          )}
+
+          {strategyId !== 'scalp' && (
+            <div style={{ fontSize: 11, color: T.ylw, lineHeight: 1.6, marginBottom: 7 }}>
+              전용 100배는 현재 분봉 돌파(scalp) 전략에서만 사용할 수 있습니다.
+              지금 고른 전략은 {strategyId}이라 저장하지 않습니다.
             </div>
           )}
 

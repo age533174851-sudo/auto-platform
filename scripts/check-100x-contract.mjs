@@ -285,7 +285,23 @@ if (reattach) {
 const gate = await loadModule(GATE, '켜기 게이트');
 if (gate) {
   const open = gate.OPEN_COMBOS || [];
-  if (open.length !== 1 || open[0].profileId !== ID || open[0].presetId !== PRESET) {
+  // **전략이 조합에 있어야 한다.** 100X 계약을 실제로 해석하는 라우트는
+  // scalp 하나다. 전략을 빼면 daily-ladder 예약에 100X를 저장하고 켤 수
+  // 있게 되는데, 그 라우트는 계약을 읽지 않고 자기 방식으로 돈다 —
+  // 저장된 것과 도는 것이 달라진다.
+  for (const c of open) {
+    const wired = code(`src/app/api/autotrade/${c.strategyId}/route.ts`);
+    if (!wired) {
+      err(`열린 조합의 전략 ${c.strategyId}에 해당하는 라우트를 찾지 못했습니다`);
+      continue;
+    }
+    if (!/resolveExecutionProfile/.test(wired) || !/planEntry100x/.test(wired)) {
+      err(`${c.strategyId} 라우트가 실행 계약을 해석하지 않는데 조합이 열려 있습니다`
+        + ' — 저장된 것은 100X인데 도는 것은 그 전략입니다');
+    }
+  }
+  if (open.length !== 1 || open[0].strategyId !== 'scalp'
+      || open[0].profileId !== ID || open[0].presetId !== PRESET) {
     err(`열린 조합이 ${JSON.stringify(open.map(c => `${c.profileId}/${c.presetId}`))}입니다`
       + ` — 지금 검증된 조합은 ${ID}/${PRESET} 하나뿐입니다`);
   } else {
@@ -303,7 +319,7 @@ if (gate) {
   }
 
   const okRow = {
-    profileId: ID, presetId: PRESET, contractVersion: 2,
+    strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: 2,
     mode: 'TESTNET', marginAllocationPct: 10,
   };
   const mustBlock = (over, why) => {
@@ -313,6 +329,9 @@ if (gate) {
   if (!gate.executionGateVerdict(okRow).allowed) {
     err(`켜기 게이트: 검증된 조합이 막힙니다 — ${gate.executionGateVerdict(okRow).reason}`);
   }
+  mustBlock({ strategyId: 'daily-ladder' }, '계약을 해석하지 않는 전략은 막아야 합니다');
+  mustBlock({ strategyId: 'my-original-v1' }, '계약을 해석하지 않는 전략은 막아야 합니다');
+  mustBlock({ strategyId: '' }, '전략이 비면 막아야 합니다');
   mustBlock({ mode: 'LIVE' }, 'LIVE는 막아야 합니다');
   mustBlock({ mode: 'LIVE_LIMITED' }, 'LIVE_LIMITED는 막아야 합니다');
   mustBlock({ marginAllocationPct: null }, '배정 비율이 없으면 막아야 합니다');
@@ -332,7 +351,7 @@ if (gate) {
     err('켜기(L3) 조건이 열린 조합을 읽지 않습니다 — 실행기만 열리고 사용자는 못 켭니다');
   } else {
     for (const need of [
-      'execution_profile_id.is.null', `execution_profile_id.eq.${ID}`,
+      'execution_profile_id.is.null', 'strategy_id.eq.scalp', `execution_profile_id.eq.${ID}`,
       `execution_preset_id.eq.${PRESET}`, 'execution_contract_version.eq.2',
       'mode.eq.TESTNET', 'margin_allocation_pct.not.is.null',
     ]) {
@@ -482,6 +501,29 @@ if (/\.is\(\s*'execution_profile_id'\s*,\s*null\s*\)[^;]*;\s*$/m.test(sched)
 if (!/executionGateVerdict\s*\(/.test(runner)) {
   err(`${RUNNER}: 실행 직전 판정이 dormantGate를 읽지 않습니다 — L3와 갈립니다`);
 }
+// **전략을 실제로 넘기는가.** 안 넘기면 게이트가 전략을 봐도 항상 빈 값이
+// 들어와서, 열린 조합이 있어도 아무것도 안 켜지거나(운이 좋으면) 전략
+// 조건이 무의미해진다.
+for (const [src, file] of [[runner, RUNNER], [sched, SCHED], [code(SCALP), SCALP]]) {
+  const call = src.slice(src.indexOf('executionGateVerdict('),
+                         src.indexOf('executionGateVerdict(') + 500);
+  if (!/strategyId:/.test(call)) {
+    err(`${file}: executionGateVerdict에 strategyId를 넘기지 않습니다`
+      + ' — 전략 조건이 항상 빈 값으로 판정됩니다');
+  }
+}
+
+// 계약을 해석하지 않는 라우트는 계약을 **받지도** 않아야 한다
+for (const f of ['src/app/api/autotrade/daily-ladder/route.ts',
+                 'src/app/api/autotrade/my-original-v1/route.ts']) {
+  const src = code(f);
+  if (!src) { err(`${f}을(를) 읽지 못했습니다`); continue; }
+  if (/planEntry100x/.test(src)) continue;   // 배선됐으면 이 규칙 대상이 아니다
+  if (!/carriesExecutionContract\s*\(/.test(src)) {
+    err(`${f}: 실행 계약을 해석하지 않으면서 거절도 하지 않습니다`
+      + ' — 계약을 실은 직접 요청이 자기 방식으로 실행됩니다');
+  }
+}
 
 // 워커 SET_TPSL 경계
 const wk = code(WORKER);
@@ -623,7 +665,8 @@ else {
   if (/DROP\s+CONSTRAINT[^;]*execution_profile_complete/i.test(migOpen)) {
     err(`${MIG_OPEN}: _complete 제약을 떼고 있습니다 — 반쪽 선택은 지금도 선택이 아닙니다`);
   }
-  for (const need of [ID, PRESET, "mode = 'TESTNET'", 'margin_allocation_pct IS NOT NULL']) {
+  for (const need of [ID, PRESET, "strategy_id = 'scalp'", "mode = 'TESTNET'",
+                      'margin_allocation_pct IS NOT NULL']) {
     if (!migOpen.includes(need)) {
       err(`${MIG_OPEN}: 제약에 ${need}가 없습니다 — DB와 코드 표가 갈립니다`);
     }

@@ -11,6 +11,7 @@ import {
   EXECUTION_CONTRACT_VERSION, CONTRACT_FIELDS, isExecutionResolveError,
 } from './profile';
 import { executionGateVerdict, enableFilterSpec, OPEN_COMBOS } from './dormantGate';
+import { carriesExecutionContract } from './profile';
 import { PROFILES, stopPolicyInvariantErrors } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset } from '../strategies/profilePreset';
 import { planSize100x } from '../engine/sizing100x';
@@ -50,6 +51,7 @@ const contract100x = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginM
 
 /** 열린 조합 한 벌 — 켜기 관련 시험이 쓴다 */
 const openRow = {
+  strategyId: 'scalp',
   profileId: ID, presetId: PRESET, contractVersion: V,
   mode: 'TESTNET', marginAllocationPct: 10,
 };
@@ -352,8 +354,10 @@ export async function runDedicated100xTests() {
   });
 
   // ── ⑩ 켜기 게이트 ───────────────────────────────────────
-  test('열린 조합은 TESTNET 하나뿐이다 — LIVE는 아직 아니다', () => {
+  test('열린 조합은 scalp · TESTNET 하나뿐이다 — LIVE는 아직 아니다', () => {
     eq(OPEN_COMBOS.length, 1);
+    eq(OPEN_COMBOS[0].strategyId, 'scalp',
+      '계약을 해석하는 라우트는 scalp 하나다 — 다른 전략을 열면 저장된 의미와 도는 의미가 갈린다');
     eq(OPEN_COMBOS[0].profileId, ID);
     eq(OPEN_COMBOS[0].presetId, PRESET);
     eq(OPEN_COMBOS[0].contractVersion, V);
@@ -384,6 +388,26 @@ export async function runDedicated100xTests() {
     eq(executionGateVerdict({ ...openRow, contractVersion: 1 }).allowed, false);
   });
 
+  test('계약을 해석하지 않는 전략은 켤 수 없다', () => {
+    // daily-ladder·my-original-v1 라우트에는 resolveExecutionProfile이 없다.
+    // 여기서 통과하면 저장된 것은 100X인데 도는 것은 그 전략이 된다.
+    for (const sid of ['daily-ladder', 'my-original-v1', '', 'scalp2']) {
+      const v = executionGateVerdict({ ...openRow, strategyId: sid });
+      eq(v.allowed, false, `${sid || '(없음)'}에서 100X가 켜졌다`);
+      assert(v.reason.includes('전략'), `이유가 전략을 가리키지 않는다: ${v.reason}`);
+    }
+  });
+
+  test('전략이 맞으면 켤 수 있다 — 나머지 조건이 전부 맞을 때', () => {
+    eq(executionGateVerdict({ ...openRow, strategyId: 'scalp' }).allowed, true);
+  });
+
+  test('전략 조건은 다른 조건을 대신하지 않는다', () => {
+    // scalp이어도 LIVE·배정 없음은 여전히 막힌다.
+    eq(executionGateVerdict({ ...openRow, mode: 'LIVE' }).allowed, false);
+    eq(executionGateVerdict({ ...openRow, marginAllocationPct: null }).allowed, false);
+  });
+
   test('기존 세 프로필의 명시적 선택은 켤 수 없다', () => {
     for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV']) {
       const v = executionGateVerdict({ ...openRow, profileId: pid, presetId: 'STABILIZE' });
@@ -402,7 +426,17 @@ export async function runDedicated100xTests() {
       '오타 하나가 기존 방식으로 도는 예약이 된다');
   });
 
-  // ── ⑪ 켜기 조건(L3)이 표를 실제로 읽는가 ────────────────
+  // ── ⑪ 계약을 해석하지 않는 라우트는 계약을 받지 않는다 ──
+  test('계약을 실은 요청을 알아본다 — 반쪽 선택도 계약이다', () => {
+    eq(carriesExecutionContract({ executionProfileId: ID }), true);
+    eq(carriesExecutionContract({ executionPresetId: PRESET }), true);
+    eq(carriesExecutionContract({ executionContractVersion: 2 }), true);
+    eq(carriesExecutionContract({ symbol: 'BTCUSDT' }), false);
+    eq(carriesExecutionContract({ executionProfileId: null, executionPresetId: '' }), false);
+    eq(carriesExecutionContract(null), false);
+  });
+
+  // ── ⑫ 켜기 조건(L3)이 표를 실제로 읽는가 ────────────────
   test('켜기 조건이 열린 조합을 그대로 담는다', () => {
     const spec = enableFilterSpec();
     eq(spec.kind, 'or', '켜기(L3) 조건이 표를 읽지 않는다');
@@ -410,6 +444,7 @@ export async function runDedicated100xTests() {
       assert(spec.expr.includes('execution_profile_id.is.null'), '기존 예약이 켜기에서 빠졌다');
       assert(spec.expr.includes(`execution_profile_id.eq.${ID}`), `${ID}가 없다`);
       assert(spec.expr.includes(`execution_preset_id.eq.${PRESET}`), '프리셋 조건이 없다');
+      assert(spec.expr.includes('strategy_id.eq.scalp'), '전략 조건이 없다');
       assert(spec.expr.includes('mode.eq.TESTNET'), '모드 조건이 없다');
       assert(spec.expr.includes('margin_allocation_pct.not.is.null'), '배정 조건이 없다');
       assert(!spec.expr.includes('mode.eq.LIVE'), 'LIVE가 켜기 조건에 들어갔다');
@@ -422,10 +457,13 @@ export async function runDedicated100xTests() {
 
   test('이상한 값은 켜기 조건 문자열을 만들지 못한다', () => {
     eq(enableFilterSpec([
-      { profileId: 'a,b', presetId: PRESET, contractVersion: 2, modes: ['TESTNET'], requiresMarginAllocation: true },
+      { strategyId: 'scalp', profileId: 'a,b', presetId: PRESET, contractVersion: 2, modes: ['TESTNET'], requiresMarginAllocation: true },
     ]).kind, 'isNull');
     eq(enableFilterSpec([
-      { profileId: ID, presetId: PRESET, contractVersion: 2, modes: ['TEST)NET'], requiresMarginAllocation: true },
+      { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: 2, modes: ['TEST)NET'], requiresMarginAllocation: true },
+    ]).kind, 'isNull');
+    eq(enableFilterSpec([
+      { strategyId: 'sc,alp', profileId: ID, presetId: PRESET, contractVersion: 2, modes: ['TESTNET'], requiresMarginAllocation: true },
     ]).kind, 'isNull');
   });
 

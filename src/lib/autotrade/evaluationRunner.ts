@@ -316,6 +316,9 @@ export async function evaluateIfDue(
   // 판단하면 PATCH(L3)와 갈리고, 그러면 "실행기는 통과시키는데 사용자는
   // 켤 수 없는" 상태가 시험만 초록인 채로 남는다.
   const gate = executionGateVerdict({
+    // **전략도 조합의 일부다.** 계약을 해석하지 않는 라우트로 100X 예약이
+    // 흘러가면 저장된 의미와 도는 의미가 갈린다.
+    strategyId: strategyIdOfRow(row),
     profileId: row.execution_profile_id,
     presetId: row.execution_preset_id,
     contractVersion: row.execution_contract_version,

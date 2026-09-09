@@ -76,6 +76,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 });
   }
 
+  // ── 이 라우트는 실행 계약을 해석하지 않는다 ──
+  //
+  // 계약이 실려 와도 이 코드는 자기 방식으로 주문을 낸다. 그러면 저장된
+  // 것은 100X인데 도는 것은 이 전략이 된다 — 이 저장소가 계속 막아 온
+  // 형태 그대로다. **받아 놓고 무시하는 대신 거절한다.**
+  //
+  // 여는 방법은 이 검사를 지우는 것이 아니라, 이 라우트에 계약을 배선하고
+  // `execution/dormantGate`의 표에 전략을 더하는 것이다.
+  {
+    const { carriesExecutionContract } = await import('@/lib/execution/profile');
+    if (carriesExecutionContract(body)) {
+      return NextResponse.json({
+        ok: false, error: 'EXECUTION_PROFILE_NOT_SUPPORTED',
+        message: '이 전략은 실행 프로필 계약을 해석하지 않습니다'
+          + ' — 계약을 실은 요청은 실행하지 않습니다(기존 방식으로 대신 실행하지도 않습니다).',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // 실행기(evaluationRunner)가 부를 때는 admin 시크릿 + userId를 싣는다.
   // 사람이 화면에서 부를 때는 로그인 토큰으로 자기 것만 부른다.
   let userId: string | null = byAdmin ? String(body?.userId || '') || null : null;

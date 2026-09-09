@@ -12,6 +12,7 @@
 -- 이제 딱 한 조합에서만 실행 의미가 실제로 연결됐다. 그래서 **그
 -- 조합만** 연다. 전면 해제가 아니다.
 --
+--   전략         scalp
 --   실행 프로필  MAX_LEV_100X
 --   프리셋       EXACT_100X
 --   계약 버전    2
@@ -33,6 +34,14 @@
 -- 도는 것은 시간 청산 하나뿐이고, 그 정책조차 전략 id로만 조회되어
 -- 이 실행 프로필과 연결이 없다. 증거가 나오기 전에는 실계좌를 열지 않는다.
 --
+-- 왜 전략까지 조건인가
+-- ────────────────────
+-- 100X 사이징·손절 정책을 실제로 해석하는 라우트는 `scalp` 하나다.
+-- `daily-ladder`·`my-original-v1`에는 실행 계약을 읽는 코드가 아예 없다.
+-- 전략을 빼면 일봉 계단식 예약에 100X를 저장하고 켤 수 있게 되는데,
+-- 그 라우트는 그 계약을 무시하고 자기 방식으로 돈다 — 저장된 것과 도는
+-- 것이 다른 상태다. 다른 전략을 열려면 먼저 그 라우트에 계약을 배선한다.
+--
 -- 왜 증거금 배정이 조건인가
 -- ─────────────────────────
 -- 손절이 없으면 크기를 정할 근거가 그 값 하나뿐이다. 비어 있으면 크기를
@@ -53,7 +62,8 @@ ALTER TABLE public.autotrade_schedules
     execution_profile_id IS NULL
     OR enabled = false
     OR (
-      execution_profile_id = 'MAX_LEV_100X'
+      strategy_id = 'scalp'
+      AND execution_profile_id = 'MAX_LEV_100X'
       AND execution_preset_id = 'EXACT_100X'
       AND execution_contract_version = 2
       AND mode = 'TESTNET'
@@ -63,4 +73,4 @@ ALTER TABLE public.autotrade_schedules
 
 COMMENT ON CONSTRAINT autotrade_schedules_execution_profile_selective
   ON public.autotrade_schedules IS
-  '실행 프로필을 가진 예약은 검증된 조합에서만 켤 수 있다: MAX_LEV_100X + EXACT_100X + 계약 v2 + TESTNET + 증거금 배정 입력. 나머지는 enabled=false여야 한다.';
+  '실행 프로필을 가진 예약은 검증된 조합에서만 켤 수 있다: scalp + MAX_LEV_100X + EXACT_100X + 계약 v2 + TESTNET + 증거금 배정 입력. 나머지는 enabled=false여야 한다. 전략이 조건인 이유: 그 계약을 해석하는 라우트가 scalp 하나뿐이다.';

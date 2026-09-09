@@ -136,6 +136,10 @@ export async function POST(req: NextRequest) {
   const epContract = ep.kind === 'contract' ? ep.contract : null;
   if (epContract) {
     const gate = executionGateVerdict({
+      // 이 주소가 곧 scalp 전략이다. 그래도 **명시해서 넘긴다** — 조합
+      // 검사가 전략을 보고 있다는 사실이 코드에 남아야, 나중에 다른
+      // 라우트가 이 자리를 복사할 때 전략 칸을 지우지 않는다.
+      strategyId: 'scalp',
       profileId: epContract.profileId,
       presetId: epContract.presetId,
       contractVersion: epContract.contractVersion,

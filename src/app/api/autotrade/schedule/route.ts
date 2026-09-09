@@ -924,9 +924,10 @@ export async function PATCH(req: NextRequest) {
     if (p.enabled === true) {
       const probe = await (sb as any)
         .from('autotrade_schedules')
-        .select('id, execution_profile_id, execution_preset_id, execution_contract_version, mode, margin_allocation_pct')
+        .select('id, strategy_id, execution_profile_id, execution_preset_id, execution_contract_version, mode, margin_allocation_pct')
         .eq('id', p.id).eq('user_id', uid).maybeSingle();
       const probeGate = executionGateVerdict({
+        strategyId: probe.data?.strategy_id,
         profileId: probe.data?.execution_profile_id,
         presetId: probe.data?.execution_preset_id,
         contractVersion: probe.data?.execution_contract_version,

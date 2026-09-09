@@ -22,9 +22,28 @@
 // 빌드 시점에 번들하므로, 배포가 엇갈리는 창은 코드 층만으로 못 막는다.
 // 둘이 갈리는 것은 검사기가 잡는다.
 //
+// **전략까지 조합의 일부다**
+// ───────────────────────────
+// 100X 사이징·손절 정책을 실제로 실행하는 라우트는 지금 `scalp` 하나다.
+// `daily-ladder`·`my-original-v1`은 실행 계약을 해석하는 코드가 아예 없다.
+//
+// 그래서 조합에 전략까지 넣지 않으면 이런 상태가 만들어진다:
+//
+//   daily-ladder + MAX_LEV_100X + EXACT_100X + TESTNET + 배정비율
+//     → DB 허용 → 켜기 허용 → 실행 허용
+//     → 그런데 daily-ladder 라우트는 그 계약을 읽지 않는다
+//
+// 저장된 것은 100X인데 도는 것은 일봉 계단식이다. 이 저장소가 계속
+// 막아 온 형태 그대로다 — **화면에는 100X라고 켜져 있는데 실행기는 다른
+// 의미로 돈다.** 그래서 `strategyId`가 조합에 들어간다.
+//
+// 다른 전략에 100X를 붙이고 싶으면 그 라우트에 계약을 배선한 뒤 이 표에
+// 줄을 더한다. 전략을 몰래 `scalp`로 바꾸는 것이 아니다.
+//
 // 지금 열려 있는 것과 열려 있지 않은 것
 // ─────────────────────────────────────
-// 열림: `MAX_LEV_100X` + `EXACT_100X` + 계약 v2 + **TESTNET** + 증거금 배정 입력
+// 열림: `scalp` + `MAX_LEV_100X` + `EXACT_100X` + 계약 v2 + **TESTNET**
+//       + 증거금 배정 입력
 //
 // 닫힘:
 //   · 같은 조합의 **LIVE** — 고정 손절을 대신할 자동 종료 권한이 실제로
@@ -32,6 +51,7 @@
 //     시간 청산 하나뿐이고, 그 정책조차 **전략 id**로만 조회되어 이 실행
 //     프로필과 연결이 없다. **이 조건을 통과시키려고 임의의 exit 문턱을
 //     새로 만들지 않는다.**
+//   · **`scalp` 외의 전략** — 그 라우트들은 실행 계약을 읽지 않는다
 //   · 기존 세 프로필의 명시적 선택 — 그 프로필들은 실행기가 계약대로
 //     실행하지 않는다. 저장은 되지만 켜지지 않는다
 //   · 증거금 배정이 비어 있는 예약 — 손절이 없으면 크기를 정할 근거가
@@ -40,6 +60,13 @@
 import { PROFILES } from '../strategies/profiles';
 
 export interface OpenCombo {
+  /**
+   * 이 계약을 **실제로 해석해서 실행하는** 전략.
+   *
+   * 라우트가 계약을 읽지 않으면 저장된 의미와 도는 의미가 갈린다.
+   * 그래서 배선된 전략만 여기 적는다.
+   */
+  strategyId: string;
   profileId: string;
   presetId: string;
   contractVersion: number;
@@ -57,6 +84,9 @@ export interface OpenCombo {
  */
 export const OPEN_COMBOS: readonly OpenCombo[] = [
   {
+    // `/api/autotrade/scalp`만 `resolveExecutionProfile` → `planEntry100x`
+    // → `executeOrder({ stopPolicy })` 체인을 탄다.
+    strategyId: 'scalp',
     profileId: 'MAX_LEV_100X',
     presetId: 'EXACT_100X',
     contractVersion: 2,
@@ -66,6 +96,8 @@ export const OPEN_COMBOS: readonly OpenCombo[] = [
 ];
 
 export interface ExecutionGateInput {
+  /** 예약 줄의 strategy_id */
+  strategyId?: unknown;
   profileId: unknown;
   presetId?: unknown;
   contractVersion?: unknown;
@@ -114,6 +146,16 @@ export function executionGateVerdict(
     return { allowed: false,
       reason: `실행 프로필 ${pid}은(는) 아직 활성화되지 않았습니다`
         + ' — 실행기가 그 계약을 그대로 실행하지 않습니다.' };
+  }
+
+  // **전략을 프리셋보다 먼저 본다.** 프로필이 맞아도 라우트가 그 계약을
+  // 읽지 않으면 저장된 의미와 도는 의미가 갈린다.
+  const strat = str(i.strategyId);
+  if (strat !== combo.strategyId) {
+    return { allowed: false,
+      reason: `${pid}은(는) ${combo.strategyId} 전략에서만 켤 수 있습니다 (받은 값: ${strat || '없음'})`
+        + ' — 다른 전략의 라우트는 이 계약을 해석하지 않아,'
+        + ' 저장된 의미와 실제로 도는 의미가 달라집니다.' };
   }
 
   const sid = str(i.presetId);
@@ -170,7 +212,8 @@ export function enableFilterSpec(
   // PostgREST 문법이 깨지지 않게 값 모양을 제한한다. 프로필·프리셋 id는
   // 대문자·숫자·밑줄뿐이고, 그 밖의 값이 오면 조건을 만들지 않는다.
   const safe = open.filter(c =>
-    /^[A-Z0-9_]+$/.test(c.profileId)
+    /^[a-z0-9-]+$/.test(c.strategyId)
+    && /^[A-Z0-9_]+$/.test(c.profileId)
     && /^[A-Z0-9_]+$/.test(c.presetId)
     && Number.isInteger(c.contractVersion)
     && c.modes.length > 0
@@ -179,6 +222,7 @@ export function enableFilterSpec(
 
   const groups = safe.flatMap(c => c.modes.map(m => {
     const parts = [
+      `strategy_id.eq.${c.strategyId}`,
       `execution_profile_id.eq.${c.profileId}`,
       `execution_preset_id.eq.${c.presetId}`,
       `execution_contract_version.eq.${c.contractVersion}`,
