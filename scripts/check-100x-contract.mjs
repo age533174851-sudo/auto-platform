@@ -96,6 +96,7 @@ const loadModule = async (entry, what) => {
 };
 
 const plan = await loadModule(PLAN, '실행 계약 정본');
+const profilesMod = await loadModule(PROFILES_TS, '프로필 정본');
 
 if (plan) {
   // ── 정체 ──
@@ -116,6 +117,24 @@ if (plan) {
     if (!Array.isArray(c.marginModes) || c.marginModes.join(',') !== 'isolated') {
       err(`${ID}의 마진 모드가 isolated 전용이 아닙니다 (${JSON.stringify(c.marginModes)})`
         + ' — 교차면 100배 손실이 지갑 전체로 번집니다');
+    }
+  }
+
+  // ── 정본 리터럴과 합쳐진 계약이 갈리지 않는가 ──
+  //
+  // 계약은 `applyPreset`이 얹은 결과라, 프로필 리터럴의 배율을 99로 바꿔도
+  // 프리셋 override가 100으로 덮어써서 계약은 그대로다. 그러면 **표에 적힌
+  // 숫자와 실행되는 숫자가 다른 상태**가 조용히 생긴다 — 이 프로필이
+  // 없애려는 고장 그 자체다. 둘이 같은지 여기서 본다.
+  const raw = profilesMod?.PROFILES?.[ID];
+  if (!raw) err(`${PROFILES_TS}: ${ID} 프로필 정본이 없습니다`);
+  else {
+    if (raw.leverage !== 100 || raw.maxLeverage !== 100) {
+      err(`${PROFILES_TS}: ${ID} 리터럴의 배율이 ${raw.leverage}/${raw.maxLeverage}입니다`
+        + ' — 프리셋이 덮어써서 계약은 100이지만, 표에 적힌 숫자가 실행과 다릅니다');
+    }
+    if (raw.stopLossPct !== null || raw.stopPolicy !== 'NO_FIXED_SL') {
+      err(`${PROFILES_TS}: ${ID} 리터럴의 손절 정책이 계약과 다릅니다`);
     }
   }
 
@@ -173,16 +192,26 @@ if (sizing) {
     requiredLeverage: 100, observedLeverage: 100,
     availableUsd: 1000, marginAllocationPct: 10, referencePrice: 50_000,
   };
-  const must = (input, why) => {
+  // **막았는지만 보면 부족하다.** 검사를 통째로 지워도 뒤쪽 검사가
+  // 우연히 막아 주는 경우가 있고(예: 잔고 null → Number(null)=0 → "잔고
+  // 없음"), 그때 사용자는 "조회 실패"를 "잔고 0"으로 읽는다. 그 둘은
+  // 대응이 완전히 다르다 — 이 저장소가 UNKNOWN을 0으로 적지 않는 이유다.
+  // 그래서 **어떤 이유로 막았는지**까지 고정한다.
+  const must = (input, wantCode, why) => {
     const v = sizing.planSize100x({ ...base, ...input });
-    if (v.ok) err(`100X 사이징: ${why} — 그런데 통과했습니다 (수량 ${v.quantity})`);
+    if (v.ok) { err(`100X 사이징: ${why} — 그런데 통과했습니다 (수량 ${v.quantity})`); return; }
+    if (v.code !== wantCode) {
+      err(`100X 사이징: ${why} — 막긴 했지만 이유가 ${v.code}입니다 (${wantCode}이어야 합니다).`
+        + ' 다른 검사가 우연히 막아 준 것이라, 사용자에게 잘못된 원인이 보입니다');
+    }
   };
-  must({ observedLeverage: 99 }, '되읽은 배율이 99배면 막아야 합니다');
-  must({ observedLeverage: 75 }, '되읽은 배율이 75배면 막아야 합니다');
-  must({ observedLeverage: null }, '배율을 못 읽었으면 막아야 합니다');
-  must({ availableUsd: null }, '잔고를 못 읽었으면 막아야 합니다');
-  must({ marginAllocationPct: null }, '증거금 배정이 미지정이면 막아야 합니다');
-  must({ referencePrice: null }, '기준가를 못 읽었으면 막아야 합니다');
+  must({ observedLeverage: 99 }, 'LEVERAGE_NOT_EXACT', '되읽은 배율이 99배면 막아야 합니다');
+  must({ observedLeverage: 75 }, 'LEVERAGE_NOT_EXACT', '되읽은 배율이 75배면 막아야 합니다');
+  must({ observedLeverage: null }, 'LEVERAGE_NOT_EXACT', '배율을 못 읽었으면 막아야 합니다');
+  must({ availableUsd: null }, 'BALANCE_UNKNOWN', '잔고를 못 읽었으면 막아야 합니다');
+  must({ availableUsd: 0 }, 'BALANCE_EMPTY', '잔고가 0이면 그 사실로 막아야 합니다');
+  must({ marginAllocationPct: null }, 'MARGIN_ALLOCATION_UNSET', '증거금 배정이 미지정이면 막아야 합니다');
+  must({ referencePrice: null }, 'PRICE_UNKNOWN', '기준가를 못 읽었으면 막아야 합니다');
   const ok = sizing.planSize100x(base);
   if (!ok.ok) err(`100X 사이징: 정상 입력이 막혔습니다 — ${ok.message}`);
 }
@@ -194,6 +223,16 @@ if (reattach) {
   const v = reattach.stopReattachVerdict({ stop_policy: 'NO_FIXED_SL', stop_loss: 49_000 });
   if (v.attach) {
     err('NO_FIXED_SL 주문에 손절이 다시 걸립니다 — 사용자가 고른 적 없는 자리에 STOP_MARKET이 나갑니다');
+  }
+  if (v.code !== 'NO_FIXED_SL' || !v.note) {
+    err(`손절 재부착: 정책으로 막았다는 사실이 기록에 안 남습니다 (code=${v.code}, note=${JSON.stringify(v.note)})`);
+  }
+  // **손절가가 비어 있을 때도 이유는 정책이어야 한다.** 값 검사가 정책보다
+  // 앞에 오면 여기서 NO_PLANNED_STOP이 나오고, "일부러 안 걸었다"가
+  // "걸 값이 없었다"로 기록된다 — 100배 포지션에서 그 차이는 크다.
+  const v2 = reattach.stopReattachVerdict({ stop_policy: 'NO_FIXED_SL' });
+  if (v2.code !== 'NO_FIXED_SL') {
+    err(`손절 재부착: 정책 판정이 값 검사보다 뒤입니다 (code=${v2.code}) — 순서가 규칙의 일부입니다`);
   }
   const legacy = reattach.stopReattachVerdict({ stop_loss: 49_000 });
   if (!legacy.attach) err('기존 주문의 손절 복구가 막혔습니다 — 보호 없는 포지션이 남습니다');
@@ -286,8 +325,12 @@ for (const id of ['STOP_ATTACHED', 'LIQUIDATION_DISTANCE', 'PROTECTIVE_ORDER']) 
 }
 
 // 청산 감시: 고정 손절 없는 포지션에 손절을 새로 걸지 않는다
-if (!/NO_FIXED_STOP/.test(code(LIFECYCLE))) {
-  err(`${LIFECYCLE}: 고정 손절이 없는 포지션에 대한 판정이 없습니다`
+// **타입 유니온에 이름만 남아 있어도 통과하면 안 된다.** 이 저장소에서
+// 검사기가 새 나간 형태가 정확히 그것이다 — 조건을 지워도 문자열이 남아서
+// 초록이 됐다. 그래서 "손절이 없으면 그 코드로 멈춘다"는 **조건**을 본다.
+const life = code(LIFECYCLE);
+if (!/if\s*\(\s*!\s*\(\s*Number\(\s*p\.stopLoss\s*\)\s*>\s*0\s*\)\s*\)[\s\S]{0,200}?NO_FIXED_STOP/.test(life)) {
+  err(`${LIFECYCLE}: 고정 손절이 없는 포지션에서 멈추는 조건이 없습니다`
     + ' — planTrail의 1R 계산 실패에 기대고 있습니다');
 }
 
