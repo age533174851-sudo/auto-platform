@@ -38,6 +38,7 @@ const WORKER      = 'worker/src/index.ts';
 const ENTRY       = 'src/lib/engine/entry100x.ts';
 const SCALP       = 'src/app/api/autotrade/scalp/route.ts';
 const RUNREQ      = 'src/lib/strategies/runRequest.ts';
+const UI          = 'src/components/AutotradeControl.tsx';
 const MIG         = 'supabase/migrations/078_live_orders_stop_policy.sql';
 const MIG_ALLOC   = 'supabase/migrations/079_schedule_margin_allocation.sql';
 const MIG_OPEN    = 'supabase/migrations/080_execution_profile_selective.sql';
@@ -510,6 +511,33 @@ for (const [src, file] of [[runner, RUNNER], [sched, SCHED], [code(SCALP), SCALP
   if (!/strategyId:/.test(call)) {
     err(`${file}: executionGateVerdict에 strategyId를 넘기지 않습니다`
       + ' — 전략 조건이 항상 빈 값으로 판정됩니다');
+  }
+}
+
+// ── 화면도 같은 조합을 지키는가 ──
+//
+// 서버가 막아도 화면이 다른 전략으로 저장하게 두면, 사용자는 저장은 됐는데
+// 켜지지 않는 예약을 갖게 되고 이유를 알 수 없다. 그리고 화면이 전략을
+// 몰래 scalp로 바꿔 저장하면 **고른 적 없는 전략이 도는 것**이라 더 나쁘다.
+const ui = code(UI);
+if (!ui) err(`${UI}을(를) 읽지 못했습니다`);
+else {
+  const save = ui.slice(ui.indexOf('const saveX100'), ui.indexOf('const saveX100') + 1400);
+  if (!/strategyId\s*!==\s*'scalp'/.test(save)) {
+    err(`${UI}: saveX100이 전략을 확인하지 않습니다`
+      + ' — 계약을 해석하지 않는 전략으로 100X 예약이 저장됩니다');
+  }
+  if (/strategyId:\s*'scalp'/.test(save)) {
+    err(`${UI}: saveX100이 전략을 scalp로 바꿔 저장합니다`
+      + ' — 사용자가 고른 적 없는 전략이 도는 것이라 더 나쁩니다');
+  }
+  const row = ui.slice(ui.indexOf('const x100Row'), ui.indexOf('const x100Row') + 600);
+  if (!/strategy_id\s*===\s*'scalp'/.test(row)) {
+    err(`${UI}: x100Row가 전략을 보지 않습니다`
+      + ' — 켤 수 없는 예약을 "전용 100배로 저장됨"으로 그립니다');
+  }
+  if (!/execution_profile_id\s*===\s*'MAX_LEV_100X'/.test(row)) {
+    err(`${UI}: x100Row가 저장된 프로필을 보지 않습니다`);
   }
 }
 
