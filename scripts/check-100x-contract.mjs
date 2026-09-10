@@ -807,6 +807,15 @@ const scalpSrc = code(SCALP);
     }
   }
 
+  // 준비 단계가 그 분기 **안**에 있는가.
+  {
+    const iBranch = scalpSrc.indexOf("if (epSizingPolicy === 'MARGIN_ALLOCATION') {");
+    const iPrepCall = scalpSrc.indexOf('prepareEntry100x(');
+    if (iBranch >= 0 && iPrepCall >= 0 && !(iBranch < iPrepCall)) {
+      err(`${SCALP}: 준비 단계가 사이징 정책 분기 밖에 있습니다`);
+    }
+  }
+
   // ── 라우트에서 첫 거래소 쓰기의 자리 ──
   //
   // **쓰기는 늦을수록 좋다.** 준비 단계가 계획을 만들어 두므로 남은
@@ -1102,7 +1111,10 @@ if (!code(ENTRY).includes('planSize100x(')) {
 }
 
 // 진입 라우트가 계약대로 갈라지는가
-if (!/epSizingPolicy\s*===\s*'MARGIN_ALLOCATION'/.test(scalpSrc)) {
+// **분기 여는 줄 그대로** 본다. 문자열이 어딘가 있기만 하면 통과하게
+// 두면, 그 분기를 `if (false)`로 눕혀도 다른 자리의 같은 문자열 때문에
+// 초록이 된다 — 실제로 그렇게 새 나갔다.
+if (!scalpSrc.includes("if (epSizingPolicy === 'MARGIN_ALLOCATION') {")) {
   err(`${SCALP}: 사이징 정책으로 갈라지지 않습니다 — planPosition을 우회하지 않습니다`);
 }
 // **두 자리를 각각 본다.** 파일 전체에서 이름을 찾으면 한쪽이 사라져도
