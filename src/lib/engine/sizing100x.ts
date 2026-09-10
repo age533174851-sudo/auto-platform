@@ -97,6 +97,39 @@ const block = (code: Sizing100xCode, message: string): Sizing100xVerdict => ({
 const finitePos = (v: unknown): boolean => Number.isFinite(Number(v)) && Number(v) > 0;
 
 /**
+ * 배정 비율이 쓸 수 있는 값인가. **문제가 없으면 null**이다.
+ *
+ * 왜 따로 빼는가
+ * ──────────────
+ * 이 검사는 거래소에 아무것도 묻지 않는다 — 사용자가 넣은 숫자 하나만
+ * 본다. 그런데 `planSize100x` 안에만 있으면 **배율을 건 뒤에야** 불린다.
+ * 배정 비율이 비어 있는 요청은 어차피 막힐 요청인데, 그 전에 거래소
+ * 계좌의 배율이 이미 바뀐다.
+ *
+ * 그래서 호출부(`entry100x`)가 쓰기 전에 먼저 물어볼 수 있게 뺀다.
+ * **규칙은 여전히 한 벌이다** — `planSize100x`도 이 함수를 쓴다.
+ */
+export function validateMarginAllocation(
+  pct: number | null | undefined,
+): { code: Sizing100xCode; message: string } | null {
+  if (pct == null) {
+    return {
+      code: 'MARGIN_ALLOCATION_UNSET',
+      message: '이 프로필의 증거금 배정 비율이 아직 정해지지 않았습니다 — '
+        + '화면의 기본값을 대신 쓰지 않습니다. 값을 정해야 주문할 수 있습니다',
+    };
+  }
+  const n = Number(pct);
+  if (!Number.isFinite(n) || n <= 0 || n > 100) {
+    return {
+      code: 'MARGIN_ALLOCATION_INVALID',
+      message: `증거금 배정 비율이 범위를 벗어났습니다 (${String(pct)}) — 0 초과 100 이하여야 합니다`,
+    };
+  }
+  return null;
+}
+
+/**
  * 이 주문의 수량.
  *
  * **fallback이 없다.** 어떤 입력이 없어도 "대신 이 값을 쓴다"는 가지가
@@ -135,16 +168,9 @@ export function planSize100x(i: Sizing100xInput): Sizing100xVerdict {
   }
 
   // ── ③ 증거금 배정 비율 ──
-  if (i.marginAllocationPct == null) {
-    return block('MARGIN_ALLOCATION_UNSET',
-      '이 프로필의 증거금 배정 비율이 아직 정해지지 않았습니다 — '
-      + '화면의 기본값을 대신 쓰지 않습니다. 값을 정해야 주문할 수 있습니다');
-  }
+  const alloc = validateMarginAllocation(i.marginAllocationPct);
+  if (alloc) return block(alloc.code, alloc.message);
   const pct = Number(i.marginAllocationPct);
-  if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
-    return block('MARGIN_ALLOCATION_INVALID',
-      `증거금 배정 비율이 범위를 벗어났습니다 (${String(i.marginAllocationPct)}) — 0 초과 100 이하여야 합니다`);
-  }
 
   // ── ④ 기준가 ──
   if (i.referencePrice == null || !finitePos(i.referencePrice)) {

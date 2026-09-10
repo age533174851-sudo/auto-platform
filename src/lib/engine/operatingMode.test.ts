@@ -5,7 +5,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parseMode, capability, canChangeMode, gateOrder, toLegacyMode, fromLegacyMode,
-  modeForDestination, notionalCapOf,
+  modeForDestination, notionalCapOf, modeNeedsConfirmation,
   LADDER, type OperatingMode, type ModeEvidence,
 } from './operatingMode';
 
@@ -256,5 +256,40 @@ export function runOperatingModeTests() {
     eq(capability('LIVE_SMALL').autoTrade, false, 'LIVE_SMALL이 자동으로 돌면 확인의 의미가 없다');
     eq(capability('LIVE_LIMITED').autoTrade, true, '예약으로 돌 수 있는 실전 모드가 하나도 없다');
     eq(gateOrder('LIVE_LIMITED', 10, { equityUsd: 1000 }).needsConfirmation, false);
+  });
+
+  // ── 확인 요구는 명목가를 몰라도 답이 나온다 ──
+  //
+  // 이 판단이 `gateOrder` 안에만 있으면 **계획이 나온 뒤에만** 물어볼 수
+  // 있다. 100배 경로에서 계획을 만드는 일은 거래소에 배율을 거는 일이라,
+  // confirm 없이 온 실계좌 요청이 409로 막히기 전에 계좌 설정이 먼저
+  // 바뀐다. 그래서 모드만 보는 함수로 빼 두고 쓰기 전에 부른다.
+  //
+  // **두 벌이 되면 안 된다.** 모든 모드에서 두 답이 같아야 한다.
+  test('확인 요구 판정은 gateOrder와 한 벌이다 — 모든 모드에서', () => {
+    for (const m of LADDER) {
+      // 상한에 걸리지 않는 작은 명목가로 물어본다(상한 BLOCK은 다른 규칙이다).
+      const g = gateOrder(m, 1, { equityUsd: 1_000_000 });
+      if (g.disposition === 'SEND') {
+        eq(modeNeedsConfirmation(m), g.needsConfirmation,
+          `${m}: 쓰기 전 판정과 gateOrder의 확인 요구가 다르다 — 규칙이 두 벌이다`);
+      }
+    }
+  });
+
+  test('실제 자금인데 자동이 아닌 모드만 확인을 요구한다', () => {
+    eq(modeNeedsConfirmation('LIVE_SMALL'), true, '실계좌 수동 모드가 확인을 안 받는다');
+    eq(modeNeedsConfirmation('LIVE_LIMITED'), false);
+    eq(modeNeedsConfirmation('TESTNET'), false, '테스트넷에 사람 확인을 요구하면 자동매매가 멈춘다');
+    eq(modeNeedsConfirmation('UI_DEMO'), false);
+    eq(modeNeedsConfirmation('SHADOW_LIVE'), false, '주문을 안 보내는 모드에 확인할 대상이 없다');
+  });
+
+  // 상한 BLOCK은 명목가가 필요하다 — 그래서 쓰기 앞으로 옮길 수 없다.
+  // 그 사실 자체를 시험으로 박아 둔다. 나중에 누가 "상한도 앞으로 옮기자"고
+  // 할 때, 그러려면 명목가가 필요하다는 것이 여기서 드러난다.
+  test('1회 상한 판정은 명목가가 있어야 한다', () => {
+    eq(gateOrder('LIVE_SMALL', 1, { equityUsd: 1_000_000 }).disposition, 'SEND');
+    eq(gateOrder('LIVE_SMALL', 1e9, { equityUsd: 1_000_000 }).disposition, 'BLOCK');
   });
 }

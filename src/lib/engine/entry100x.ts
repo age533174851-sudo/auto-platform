@@ -33,7 +33,7 @@
 // 0.0007이 0.001이 되면 명목가가 배정보다 커지고, 그 차이는 100배에서
 // 그대로 증거금 초과가 된다. 다듬은 **뒤에** 다시 재야 한다.
 
-import { planSize100x, type Sizing100xVerdict } from './sizing100x';
+import { planSize100x, validateMarginAllocation, type Sizing100xVerdict } from './sizing100x';
 
 export type Entry100xCode =
   | 'OK'
@@ -157,6 +157,21 @@ export async function planEntry100x(
       `거래소 마진 모드가 ${mode}인데 이 프로필은 ${allowed.join('/') || '(없음)'}만 허용합니다`
       + ' — 담보 범위가 다르면 같은 이름의 다른 전략이 됩니다',
       notes, { marginMode: mode });
+  }
+
+  // ── ①.5 배정 비율 (거래소에 쓰기 전에) ──
+  //
+  // 이 값은 사용자가 넣은 숫자 하나라 거래소에 물어볼 것이 없다. 그런데
+  // 예전에는 `planSize100x` 안에서만 검사돼서 **배율을 건 뒤에** 불렸다.
+  // 배정 비율이 비어 있는 요청은 어차피 막힐 요청인데, 그 전에 계좌의
+  // 배율이 이미 바뀌어 있었다 — 주문이 안 나갔다는 것으로는 부족하다.
+  //
+  // 검사를 여기로 **복제하지 않는다.** `planSize100x`가 쓰는 것과 같은
+  // 함수를 부른다. 뒤의 ⑤단계도 같은 값을 다시 본다 — 두 곳이 갈릴 수
+  // 없다.
+  const allocBad = validateMarginAllocation(marginAllocationPct);
+  if (allocBad) {
+    return fail('SIZING_BLOCKED', allocBad.message, notes, { marginMode: mode });
   }
 
   // ── ② 배율 ──

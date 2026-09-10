@@ -274,6 +274,30 @@ export function notionalCapOf(mode: OperatingMode, opts?: GateOptions): number |
   return Math.max(...candidates);
 }
 
+/**
+ * **이 모드는 사람 확인을 요구하는가** — 명목가를 몰라도 답할 수 있다.
+ *
+ * 왜 따로 빼는가
+ * ──────────────
+ * 이 판단은 `gateOrder` 안에만 있었다. 그런데 `gateOrder`는 명목가를
+ * 받으므로 **계획이 나온 뒤에만** 부를 수 있고, 100배 경로에서 계획을
+ * 만드는 일은 거래소에 배율을 거는 것이다. 그래서 confirm 없이 온
+ * 실계좌 요청이 409로 막히기 전에 **이미 실계좌의 배율이 바뀌어 있었다.**
+ *
+ * 확인 요구는 명목가와 무관하다 — 모드만 보면 정해진다. 그래서 그 부분만
+ * 여기로 빼서 거래소를 건드리기 전에 물어볼 수 있게 한다.
+ *
+ * **`gateOrder`가 이 함수를 쓴다.** 규칙을 두 벌 두지 않는다 — 두 곳에
+ * 같은 판단이 있으면 언젠가 갈린다.
+ */
+export function modeNeedsConfirmation(mode: OperatingMode): boolean {
+  if (mode === 'UI_DEMO') return false;
+  const cap = CAP[mode];
+  // 주문을 보내지 않는 모드는 확인할 대상이 없다.
+  if (!cap.sendsOrders) return false;
+  return cap.realMoney && !cap.autoTrade;
+}
+
 export function gateOrder(
   mode: OperatingMode,
   notionalUsd: number,
@@ -313,7 +337,7 @@ export function gateOrder(
   return {
     disposition: 'SEND',
     live: cap.realMoney,
-    needsConfirmation: cap.realMoney && !cap.autoTrade,
+    needsConfirmation: modeNeedsConfirmation(mode),
     reason: cap.realMoney ? `${cap.label} — 실제 자금이 사용됩니다` : `${cap.label}`,
   };
 }

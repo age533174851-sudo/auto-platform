@@ -429,6 +429,70 @@ if (entry) {
     applyLeverage: async (lev) => { applied = true; return { ok: true, observed: lev, message: '' }; },
   }));
   if (applied) err('100X 진입: 교차인 걸 알기 전에 배율을 걸었습니다 — 순서가 규칙의 일부입니다');
+
+  // ── 통합 호출 카운터 ──
+  //
+  // **"주문이 안 나갔다"로는 부족하다.** 세는 대상이 주문 하나면, 주문
+  // 앞에서 계좌 설정을 바꾸는 호출은 세어지지 않는다. 그래서 읽기·쓰기·
+  // 주문을 **따로** 센다.
+  //
+  // 배율 설정 하나만 세지 않는 것도 같은 이유다. 나중에 마진 모드 setter
+  // 같은 쓰기가 붙어도, 분류 목록(MUTATING_DEPS)에 올라가는 순간 여기서
+  // 함께 세어진다.
+  {
+    const mutating = new Set(entry.MUTATING_DEPS || []);
+    const readonly = new Set(entry.READONLY_DEPS || []);
+    const countingDeps = (over = {}) => {
+      const c = { exchangeReads: 0, exchangeWrites: 0, orderSubmits: 0 };
+      const base = okDeps(over);
+      const wrapped = {};
+      for (const k of Object.keys(base)) {
+        const fn = base[k];
+        wrapped[k] = async (...a) => {
+          if (mutating.has(k)) c.exchangeWrites++;
+          else if (readonly.has(k)) c.exchangeReads++;
+          else throw new Error(`분류되지 않은 의존 ${k} — 카운터 밖으로 샙니다`);
+          return fn(...a);
+        };
+      }
+      return { deps: wrapped, c };
+    };
+
+    // 교차 마진이면 **쓰기 0**이어야 한다. 읽기는 있어야 한다 —
+    // 읽지도 않고 막았다면 그건 판정이 아니라 우연이다.
+    {
+      const { deps, c } = countingDeps({ observeMarginMode: async () => 'cross' });
+      const v = await entry.planEntry100x(C, 10, deps);
+      if (v.ok) err('100X 카운터: 교차 마진인데 통과했습니다');
+      if (c.exchangeWrites !== 0) {
+        err(`100X 카운터: 교차 마진으로 막힐 요청이 거래소에 ${c.exchangeWrites}번 썼습니다`
+          + ' — 막힌 것으로는 부족합니다. 계좌 설정이 이미 바뀌었습니다');
+      }
+      if (c.exchangeReads === 0) err('100X 카운터: 마진 모드를 읽지도 않고 막았습니다');
+      if (c.orderSubmits !== 0) err('100X 카운터: 막힌 요청이 주문을 냈습니다');
+    }
+
+    // 배정 비율이 없으면 **쓰기 0**이어야 한다.
+    {
+      const { deps, c } = countingDeps();
+      const v = await entry.planEntry100x(C, null, deps);
+      if (v.ok) err('100X 카운터: 배정 비율이 없는데 통과했습니다');
+      if (c.exchangeWrites !== 0) {
+        err(`100X 카운터: 배정 비율 미지정으로 막힐 요청이 거래소에 ${c.exchangeWrites}번 썼습니다`);
+      }
+    }
+
+    // 통과하는 요청은 **정확히 한 번만** 쓴다. 0이면 되읽기 없이 통과한
+    // 것이고, 2 이상이면 같은 설정을 두 번 거는 것이다.
+    {
+      const { deps, c } = countingDeps();
+      const v = await entry.planEntry100x(C, 10, deps);
+      if (!v.ok) err(`100X 카운터: 정상 입력이 막혔습니다 — ${v.message}`);
+      if (c.exchangeWrites !== 1) {
+        err(`100X 카운터: 통과 경로의 거래소 쓰기가 ${c.exchangeWrites}번입니다 (1이어야 합니다)`);
+      }
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -544,6 +608,37 @@ const scalpSrc = code(SCALP);
     err(`${AUTHORITY}: guardedEntry가 없습니다 — 순서를 구조로 강제할 수 없습니다`);
   }
 
+  // 권한이 막으면 **감싼 단계가 아예 실행되지 않는가** — 세어서 확인한다.
+  {
+    const am = await loadModule(AUTHORITY, '진입 권한');
+    if (am) {
+      const ok = {
+        exchangeSupported: true, connIsLive: false, modeNeedsLiveKey: false,
+        killSwitchReason: '', migrationReason: '', liveClosedReason: '',
+      };
+      for (const [over, why] of [
+        [{ exchangeSupported: false }, '지원하지 않는 거래소'],
+        [{ connIsLive: true }, '모드↔연결 불일치'],
+        [{ killSwitchReason: '멈춤' }, '킬 스위치'],
+        [{ migrationReason: '밀림' }, '마이그레이션'],
+        [{ liveClosedReason: '닫힘' }, '실거래 닫힘'],
+      ]) {
+        let ran = 0;
+        const r = await am.guardedEntry({ ...ok, ...over }, async () => { ran++; return 1; });
+        if (r.verdict.allowed) err(`진입 권한: ${why}인데 통과했습니다`);
+        if (ran !== 0) {
+          err(`진입 권한: ${why}로 막힐 요청이 거래소 단계를 ${ran}번 실행했습니다`
+            + ' — 감싸기가 순서를 강제하지 못합니다');
+        }
+      }
+      let ran2 = 0;
+      const good = await am.guardedEntry(ok, async () => { ran2++; return 7; });
+      if (!good.verdict.allowed || good.result !== 7 || ran2 !== 1) {
+        err('진입 권한: 통과해야 할 요청이 감싼 단계를 정확히 한 번 실행하지 않았습니다');
+      }
+    }
+  }
+
   const iAuth = scalpSrc.indexOf('guardedEntry(');
   const iPlan = scalpSrc.indexOf('planEntry100x(');
   const iConn = scalpSrc.indexOf('loadConnection(');
@@ -561,9 +656,18 @@ const scalpSrc = code(SCALP);
   }
 
   // 권한 판정에 쓰이는 사실이 **전부 판정 앞에서** 모이는가.
+  //
+  // 아래 목록은 "거래소 쓰기 없이 결론이 나는 차단"이다. 하나라도 쓰기
+  // 뒤로 내려가면 그 사유로 막힐 요청이 계좌 설정을 먼저 바꾼다.
   for (const [needle, what] of [
     ['killSwitchGate(', '킬 스위치'],
     ['migrationGate(', '마이그레이션 관문'],
+    ['strategyConflictGate(', '전략 충돌'],
+    ['sleeveCapitalGate(', '슬리브 자본'],
+    ['parityGate(', '시크릿 정합'],
+    ['exitMonitorGate(', '청산 감시 신선도'],
+    ['modeNeedsConfirmation(', '사람 확인'],
+    ['suppressGate(', '수동 청산 억제'],
   ]) {
     const i = scalpSrc.indexOf(needle);
     if (i < 0) { err(`${SCALP}: ${what} 검사가 없습니다`); continue; }
@@ -572,6 +676,61 @@ const scalpSrc = code(SCALP);
     }
     if (iPlan >= 0 && !(i < iPlan)) {
       err(`${SCALP}: ${what}가 거래소 쓰기보다 뒤입니다`);
+    }
+  }
+
+  // ── 쓰기 뒤에 남은 차단은 **전부 등록돼 있는가** ──
+  //
+  // 위의 개별 규칙은 "옮긴 것이 도로 내려갔는가"만 본다. 그것으로는
+  // **새로 생긴** 게이트를 못 잡는다 — 누가 내일 쓰기 뒤에 차단을 하나
+  // 더 붙이면, 그 사유로 막힐 요청은 또 계좌 설정을 먼저 바꾼다.
+  //
+  // 그래서 반대로 센다. 쓰기 경계 뒤의 차단 코드를 **전부 뽑아서**, 아래
+  // 목록에 없으면 실패시킨다. 목록에 올리려면 "왜 앞으로 못 옮기는가"를
+  // 적어야 한다. 옮길 수 있는데 뒤에 둔 것은 통과하지 못한다.
+  const POST_WRITE_ALLOWED = new Map([
+    ['CHECKLIST_BLOCKED',
+      '계획(수량·명목가)과 거래소 관측값이 있어야 판정한다 — 그 값을 만드는 일이 곧 쓰기다'],
+    ['RISK_VETO',
+      '거부권 입력에 plan.leverage가 들어간다. STOP_RISK 경로의 배율은 역산이라 쓰기 전에 알 수 없다'],
+    ['VETO_UNAVAILABLE', 'RISK_VETO와 같은 호출의 실패 가지다'],
+    ['SHORT_GUARD',
+      '청산가와 손절의 순서를 보는 판정이라 계획이 있어야 한다'],
+    ['DUPLICATE_SIGNAL',
+      'DB만 보지만 **선점이 봉을 소비한다**. 앞으로 옮기면 뒤에서 다른 사유로 막힌 요청이 그 봉을 써 버려 다음 시도가 중복으로 막힌다 — 사용자 판단이 필요해 그대로 둔다'],
+    ['LEVERAGE_MISMATCH',
+      '이 단계가 곧 쓰기다 — 배율을 맞추고 되읽는 일 자체라 앞에 둘 수 없다'],
+    ['MODE_GATE',
+      '1회 상한이 명목가를 요구한다(gateOrder). 명목가는 계획의 결과다'],
+  ]);
+  {
+    const wb = iAuth;
+    const seen = new Set();
+    // `blocked:` 뒤의 **그 줄 전체**에서 코드를 뽑는다. 삼항으로 적힌
+    // 것(`blocked: x ? null : 'MODE_GATE'`)까지 잡아야 한다 — 모양을
+    // 바꾸는 것만으로 검사를 빠져나갈 수 있으면 검사가 아니다.
+    const re = /blocked:[^\n]*/g;
+    let m;
+    while ((m = re.exec(scalpSrc))) {
+      if (!(wb >= 0 && m.index > wb)) continue;
+      // 비교 대상(`x === 'FILLED'`)은 차단 코드가 아니다 — 값 자리만 본다.
+      const valueSide = m[0].replace(/[=!]==?\s*'[A-Z_]+'/g, '');
+      for (const q of valueSide.matchAll(/'([A-Z][A-Z_]{2,})'/g)) seen.add(q[1]);
+    }
+    for (const codeName of seen) {
+      if (!POST_WRITE_ALLOWED.has(codeName)) {
+        err(`${SCALP}: 거래소 쓰기 뒤에 등록되지 않은 차단 '${codeName}'이 있습니다`
+          + ' — 이 사유로 막힐 요청은 계좌 설정을 먼저 바꿉니다.'
+          + ' 쓰기 앞으로 옮기거나, 옮길 수 없는 이유를 POST_WRITE_ALLOWED에 적으세요');
+      }
+    }
+    // 목록이 낡는 것도 막는다. 앞으로 옮겼는데 목록에 남아 있으면,
+    // 다음 사람이 "이건 못 옮긴다"고 잘못 읽는다.
+    for (const codeName of POST_WRITE_ALLOWED.keys()) {
+      if (!seen.has(codeName)) {
+        err(`${SCALP}: POST_WRITE_ALLOWED의 '${codeName}'이 쓰기 뒤에 없습니다`
+          + ' — 옮겼거나 사라졌으면 목록에서도 지우세요');
+      }
     }
   }
 
