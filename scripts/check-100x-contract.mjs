@@ -618,10 +618,15 @@ const scalpSrc = code(SCALP);
     err(`${EXEC}: 익절 정책이 별도 축으로 들어오지 않습니다`);
   }
   // 두 거래소가 **같은 값**을 본다.
-  const tpGuards = (ex.match(/noFixedTp/g) || []).length;
-  if (tpGuards < 4) {
-    err(`${EXEC}: 익절 정책을 보는 자리가 ${tpGuards}곳입니다`
-      + ' — 진입(바이낸스)·진입(Gate)·모순 차단·정책 유도가 모두 필요합니다');
+  // 개수만 세면 한 자리를 `false`로 바꿔도 다른 자리 덕에 통과한다.
+  // **각 자리를 따로** 본다.
+  //
+  // 바이낸스 익절 가지는 원래 정책을 보지 않았다 — 그래서 Gate와 갈렸다.
+  // 그 가지가 `noFixedTp`를 실제로 보는지 확인한다.
+  const binanceTpBranch = /\} else if \(noFixedTp\) \{/.test(ex);
+  if (!binanceTpBranch) {
+    err(`${EXEC}: 바이낸스 익절 가지가 익절 정책을 보지 않습니다`
+      + ' — 여기가 Gate와 갈렸던 자리입니다');
   }
   if (/if \(!args\.reduceOnly && policy !== 'NONE' && tpSpec\)/.test(ex)) {
     err(`${EXEC}: Gate 익절이 아직 손절 정책(policy)으로 막힙니다`
