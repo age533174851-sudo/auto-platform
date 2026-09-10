@@ -47,7 +47,7 @@ function counted(over: Partial<ReturnType<typeof baseDeps>> = {}) {
 
 /** 두 단계를 이어 부르는 시험용 합성 — 최종 판정 기대는 그대로여야 한다. */
 const planEntry100x = async (c: any, pct: number | null, deps: any) =>
-  commitEntry100x(await prepareEntry100x(c, pct, deps), deps);
+  commitEntry100x(await prepareEntry100x(c, pct, deps), deps, { disposition: 'SEND', reason: '' });
 
 export function runEntry100xTests() {
   test('교차 마진이면 배율을 걸지 않는다 — 쓰기 0', async () => {
@@ -196,7 +196,7 @@ export function runEntry100xTests() {
     eq(log.join(' > '), 'marginMode:read > balance:read > price:read > quantize',
       '준비 단계의 호출 순서가 다르다 — 쓰기가 섞여 있으면 여기서 드러난다');
 
-    const done = await commitEntry100x(prep, d);
+    const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
     assert(done.ok, `확정 단계가 막혔다 — ${done.message}`);
     eq(log.join(' > '),
       'marginMode:read > balance:read > price:read > quantize > leverage:write > leverage:readback',
@@ -225,7 +225,7 @@ export function runEntry100xTests() {
       eq(log.join(' > '), wantLog, '막히기까지의 호출 순서가 다르다');
 
       // 확정 단계를 잘못 불러도 쓰지 않는다 — 호출부가 순서를 어겨도 막는다.
-      await commitEntry100x(prep, d);
+      await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
       assert(!log.includes('leverage:write'),
         '막힌 계획으로 확정 단계를 불렀더니 거래소에 썼다');
     });
@@ -251,7 +251,7 @@ export function runEntry100xTests() {
       });
       const prep = await prepareEntry100x(C as any, 10, d);
       assert(prep.ok);
-      const done = await commitEntry100x(prep, d);
+      const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
       assert(!done.ok, `${label}인데 주문 단계로 갔다`);
       eq(done.code, 'LEVERAGE_NOT_EXACT');
     });
@@ -262,7 +262,7 @@ export function runEntry100xTests() {
       applyLeverage: async () => ({ ok: false, observed: 100, message: '거래소 거절' }),
     });
     const prep = await prepareEntry100x(C as any, 10, d);
-    const done = await commitEntry100x(prep, d);
+    const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
     assert(!done.ok, '설정이 실패했는데 통과했다');
     eq(done.code, 'LEVERAGE_NOT_EXACT');
   });
@@ -285,5 +285,39 @@ export function runEntry100xTests() {
     assert(verifyLeverageExact(100, 75) !== null, '75배를 통과시킨다');
     assert(verifyLeverageExact(100, 99) !== null, '99배를 통과시킨다');
     assert(verifyLeverageExact(100, null) !== null, '못 읽었는데 통과시킨다');
+  });
+
+  // ── 이 시험이 잡았어야 했던 누출 ──
+  //
+  // 1회 상한 판정을 라우트의 `if` 한 줄로 두었더니, 그 조건을 `true`로
+  // 바꾸는 돌연변이가 **아무 데도 안 걸렸다.** 검사기는 "gateOrder를
+  // 부르는가"라는 문자열만 보고 있었다 — 부르기는 부르고 결과를 무시해도
+  // 통과였다.
+  //
+  // 규칙을 시험이 돌릴 수 있는 자리로 옮겼으니, 여기서 직접 센다.
+  for (const [label, decision] of [
+    ['상한 초과(BLOCK)', { disposition: 'BLOCK', reason: '1회 상한을 넘습니다' }],
+    ['기록만 하는 모드(RECORD)', { disposition: 'RECORD', reason: '모의 모드' }],
+    ['판정이 없음', undefined as any],
+  ] as const) {
+    test(`${label}이면 거래소에 쓰지 않는다`, async () => {
+      const { d, log } = logged();
+      const prep = await prepareEntry100x(C as any, 10, d);
+      assert(prep.ok, '준비 단계가 막혔다');
+      const done = await commitEntry100x(prep, d, decision as any);
+      assert(!log.includes('leverage:write'),
+        `${label}인데 계좌 배율을 바꿨다 — ${log.join(' > ')}`);
+      assert(!done.ok || done.notes.some(n => n.includes('쓰기 없이 멈춤')),
+        '쓰지 않았다는 사실이 기록에 남지 않았다');
+    });
+  }
+
+  test('SEND일 때만 거래소에 쓴다', async () => {
+    const { d, log } = logged();
+    const prep = await prepareEntry100x(C as any, 10, d);
+    const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
+    assert(done.ok, `통과해야 하는데 막혔다 — ${done.message}`);
+    eq(log.filter(x => x === 'leverage:write').length, 1,
+      'SEND인데 배율을 걸지 않았거나 두 번 걸었다');
   });
 }

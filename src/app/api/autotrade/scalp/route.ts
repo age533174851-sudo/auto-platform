@@ -582,20 +582,21 @@ export async function POST(req: NextRequest) {
     if (entry.ok) {
       const candidateNotional = (entry.quantity as number) * (entry.referencePrice as number);
       const preGate = gateOrder(opMode, candidateNotional, { overrideMaxNotionalUsd: maxNotionalOverride() });
-      if (preGate.disposition === 'SEND') {
-        // ── 여기서 처음으로 거래소에 쓴다 ──
-        entry = await commitEntry100x(entry, {
-          applyLeverage: async (lev: number) => {
-            const v = await futuresApplyLeverage(target, symbol, lev);
-            return { ok: v.ok, observed: v.observed, message: v.message };
-          },
-        });
-      } else {
-        // 상한에 걸리거나 주문을 보내지 않는 모드다. **쓰지 않는다.**
-        // 계획은 그대로 두고 뒤의 modeGate가 같은 판정으로 처리한다
-        // (모의 체결 경로가 거기 있다).
-        entry = { ...entry, notes: [...entry.notes, `쓰기 없이 멈춤 — ${preGate.reason}`] };
-      }
+
+      // ── 여기서 처음으로 거래소에 쓴다 ──
+      //
+      // 관문 판정은 **넘겨주기만 한다.** 여기서 `if`로 갈라 두면 그 조건을
+      // 뒤집는 변경이 어떤 시험에도 안 걸린다(실제로 그랬다). 쓸지 말지는
+      // `commitEntry100x`가 정하고, 그 규칙은 시험이 직접 돌린다.
+      //
+      // 상한에 걸리면 쓰지 않고 계획만 돌아온다 — 뒤의 modeGate가 같은
+      // 판정으로 모의 체결 경로를 처리한다.
+      entry = await commitEntry100x(entry, {
+        applyLeverage: async (lev: number) => {
+          const v = await futuresApplyLeverage(target, symbol, lev);
+          return { ok: v.ok, observed: v.observed, message: v.message };
+        },
+      }, preGate);
     }
 
     entryNotes = entry.notes;

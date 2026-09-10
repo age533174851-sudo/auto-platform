@@ -400,8 +400,10 @@ if (entry) {
   const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
   // 두 단계를 이어 부르는 검사용 합성. 제품 경로는 그 사이에 쓰기 없는
   // 관문(1회 상한)을 하나 더 넣는다.
+  /** 쓰기 전 관문이 허락한 상태 — 순서 검사에서는 이 조건을 고정한다. */
+  const SEND = { disposition: 'SEND', reason: '' };
   const planEntry100x = async (c, pct, deps) =>
-    entry.commitEntry100x(await entry.prepareEntry100x(c, pct, deps), deps);
+    entry.commitEntry100x(await entry.prepareEntry100x(c, pct, deps), deps, SEND);
 
   const mustBlock = async (over, wantCode, why) => {
     const v = await planEntry100x(C, 10, okDeps(over));
@@ -476,7 +478,7 @@ if (entry) {
       if (afterPrep !== 'marginMode:read > balance:read > price:read > quantize') {
         err(`100X 순서: 준비 단계 호출 순서가 다릅니다 — ${afterPrep}`);
       }
-      await entry.commitEntry100x(prep, d);
+      await entry.commitEntry100x(prep, d, SEND);
       const full = log.join(' > ');
       if (full !== 'marginMode:read > balance:read > price:read > quantize'
                  + ' > leverage:write > leverage:readback') {
@@ -500,7 +502,7 @@ if (entry) {
         err(`100X 순서: ${why}으로 막힐 요청이 거래소에 배율을 걸었습니다 — ${log.join(' > ')}`);
       }
       // 호출부가 순서를 어겨도 막는가.
-      await entry.commitEntry100x(prep, d);
+      await entry.commitEntry100x(prep, d, SEND);
       if (log.includes('leverage:write')) {
         err(`100X 순서: 막힌 계획으로 확정을 불렀더니 거래소에 썼습니다 (${why})`);
       }
@@ -792,6 +794,19 @@ const scalpSrc = code(SCALP);
     }
   }
 
+  // 확정 단계가 관문 판정을 **실제로 강제하는가**. 규칙이 라우트의
+  // `if`에만 있으면 그 조건을 뒤집는 변경이 시험에 안 걸린다.
+  {
+    const es = code(ENTRY);
+    const commitBody = (es.match(/export async function commitEntry100x[\s\S]*?\n\}/) || [''])[0];
+    if (!/preWrite/.test(commitBody)) {
+      err(`${ENTRY}: commitEntry100x가 쓰기 전 관문 판정을 받지 않습니다`);
+    }
+    if (!/disposition\s*!==\s*'SEND'/.test(commitBody)) {
+      err(`${ENTRY}: commitEntry100x가 'SEND'가 아닐 때 멈추지 않습니다`);
+    }
+  }
+
   // ── 라우트에서 첫 거래소 쓰기의 자리 ──
   //
   // 쓰기 없이 판정할 수 있는 것이 **하나도** 남지 않은 뒤에 써야 한다.
@@ -815,6 +830,13 @@ const scalpSrc = code(SCALP);
     if (iPreGate >= 0 && iCommit >= 0 && !(iPreGate < iCommit)) {
       err(`${SCALP}: 확정(쓰기)이 1회 상한보다 앞입니다`
         + ' — 상한에 걸릴 요청이 이미 계좌 설정을 바꿉니다');
+    }
+    // **판정을 실제로 넘기는가.** 부르기만 하고 결과를 버리면 아무 의미가
+    // 없다 — 실제로 라우트의 `if`를 `true`로 바꾼 돌연변이가 그대로
+    // 새 나갔다. 그래서 판정이 확정 단계의 인자로 들어가는지 본다.
+    if (!/commitEntry100x\(entry,[\s\S]{0,400}?\}, preGate\)/.test(scalpSrc)) {
+      err(`${SCALP}: 1회 상한 판정을 확정 단계에 넘기지 않습니다`
+        + ' — 부르고 결과를 버리면 상한이 아무것도 막지 못합니다');
     }
     if (iCommit >= 0 && iWrite >= 0 && !(iCommit <= iWrite)) {
       err(`${SCALP}: 배율 설정이 확정 단계 밖에 있습니다`);

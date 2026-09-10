@@ -261,6 +261,18 @@ export async function prepareEntry100x(
 }
 
 /**
+ * 쓰기 전 마지막 관문의 판정.
+ *
+ * `gateOrder`가 돌려주는 모양의 일부만 받는다 — 이 파일이 운영 모드를
+ * 알 필요는 없고, 알면 규칙이 두 곳이 된다.
+ */
+export interface PreWriteDecision {
+  /** 'SEND'가 아니면 거래소에 쓰지 않는다 */
+  disposition: string;
+  reason?: string;
+}
+
+/**
  * **PHASE B — 여기서 처음으로 거래소에 쓴다.**
  *
  * 배율을 걸고 **독립적으로 되읽어** 정확히 요구값인지 확인한다.
@@ -275,11 +287,26 @@ export async function prepareEntry100x(
 export async function commitEntry100x(
   prepared: Entry100xVerdict,
   deps: Entry100xWriteDeps,
+  preWrite: PreWriteDecision,
 ): Promise<Entry100xVerdict> {
   const notes = [...(prepared.notes || [])];
 
   // 막힌 계획으로는 쓰지 않는다. 호출부가 순서를 어겨도 여기서 멈춘다.
   if (!prepared.ok) return { ...prepared, notes };
+
+  // ── 쓰기 전 마지막 관문 ──
+  //
+  // 이 판정을 라우트의 `if` 한 줄로 두면, 그 조건을 `true`로 바꾸는
+  // 변경이 아무 시험에도 걸리지 않는다. 실제로 돌연변이가 그대로
+  // 새 나갔다 — 검사기가 "`gateOrder`를 부르는가"라는 **문자열**만 보고
+  // 있었기 때문이다.
+  //
+  // 그래서 규칙을 여기로 옮긴다. 이 함수는 시험이 직접 돌릴 수 있고,
+  // "허락되지 않았는데 썼는가"를 셀 수 있다.
+  if (!preWrite || preWrite.disposition !== 'SEND') {
+    notes.push(`쓰기 없이 멈춤 — ${preWrite?.reason || '쓰기 전 관문이 허락하지 않았습니다'}`);
+    return { ...prepared, notes };
+  }
 
   const req = Number(prepared.leverage);
 

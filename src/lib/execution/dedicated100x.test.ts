@@ -34,7 +34,7 @@ const planEntry100x = async (
   c: Parameters<typeof prepareEntry100x>[0],
   pct: number | null,
   deps: Entry100xDeps,
-) => commitEntry100x(await prepareEntry100x(c, pct, deps), deps);
+) => commitEntry100x(await prepareEntry100x(c, pct, deps), deps, { disposition: 'SEND', reason: '' });
 import {
   entryAuthorityVerdict, guardedEntry, type EntryAuthorityFacts,
 } from '../engine/entryAuthority';
