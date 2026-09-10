@@ -19,7 +19,7 @@ import { validateMarginAllocation, planSize100x } from './sizing100x';
 const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'] };
 
 const baseDeps = () => ({
-  observeMarginMode: async () => 'isolated' as const,
+  observeMarginMode: async (): Promise<'isolated' | 'cross' | null> => 'isolated',
   applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
   availableUsd: async () => 1000,
   referencePrice: async () => 50_000,
@@ -45,7 +45,7 @@ function counted(over: Partial<ReturnType<typeof baseDeps>> = {}) {
 
 export function runEntry100xTests() {
   test('교차 마진이면 배율을 걸지 않는다 — 쓰기 0', async () => {
-    const { deps, c } = counted({ observeMarginMode: async () => 'cross' as const });
+    const { deps, c } = counted({ observeMarginMode: async () => 'cross' });
     const v = await planEntry100x(C as any, 10, deps);
     assert(!v.ok, '교차 마진인데 통과했다');
     eq(v.code, 'MARGIN_MODE_NOT_ISOLATED');
