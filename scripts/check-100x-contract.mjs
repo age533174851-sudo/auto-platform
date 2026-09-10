@@ -39,6 +39,7 @@ const ENTRY       = 'src/lib/engine/entry100x.ts';
 const SCALP       = 'src/app/api/autotrade/scalp/route.ts';
 const RUNREQ      = 'src/lib/strategies/runRequest.ts';
 const UI          = 'src/components/AutotradeControl.tsx';
+const AUTHORITY   = 'src/lib/engine/entryAuthority.ts';
 const MIG         = 'supabase/migrations/078_live_orders_stop_policy.sql';
 const MIG_ALLOC   = 'supabase/migrations/079_schedule_margin_allocation.sql';
 const MIG_OPEN    = 'supabase/migrations/080_execution_profile_selective.sql';
@@ -123,6 +124,13 @@ if (plan) {
       err(`${ID}의 sizingPolicy가 ${c.sizingPolicy}입니다`
         + ' — 손절이 없으면 손절 거리로 크기를 만들 수 없습니다');
     }
+    if (c.takeProfitPolicy !== 'NO_FIXED_TP') {
+      err(`${ID}의 takeProfitPolicy가 ${c.takeProfitPolicy}입니다`);
+    }
+    if (c.takeProfitPct !== null) {
+      err(`${ID}에 익절 숫자가 남아 있습니다 (${c.takeProfitPct})`
+        + ' — 이 프로필을 위해 고른 적 없는 값이 실제 익절 주문이 됩니다');
+    }
     if (c.stopLossPct !== null) {
       err(`${ID}에 손절 숫자가 남아 있습니다 (${c.stopLossPct}) — 걸지도 않을 값이 사이징의 분모나`
         + ' 복구 경로의 손절가로 되살아납니다');
@@ -154,6 +162,9 @@ if (plan) {
       if (!keep?.ok || keep.kind !== 'contract') {
         err(`${pid}/${sid}가 막혔습니다 — 기존 조합의 동작이 바뀌었습니다`);
         continue;
+      }
+      if (keep.contract.takeProfitPolicy !== 'FIXED_TP' || !(Number(keep.contract.takeProfitPct) > 0)) {
+        err(`${pid}/${sid}의 익절이 꺼졌습니다 — 기존 전략의 의미가 바뀌었습니다`);
       }
       if (keep.contract.stopPolicy !== 'FIXED_SL' || keep.contract.sizingPolicy !== 'STOP_RISK') {
         err(`${pid}/${sid}의 실행 의미가 바뀌었습니다`
@@ -218,7 +229,7 @@ if (plan) {
   }
 
   // ── 계약 칸 ──
-  for (const f of ['stopPolicy', 'sizingPolicy']) {
+  for (const f of ['stopPolicy', 'sizingPolicy', 'takeProfitPolicy']) {
     if (!plan.CONTRACT_FIELDS?.includes(f)) {
       err(`CONTRACT_FIELDS에 ${f}가 없습니다 — 지문이 이 값의 변경을 못 잡습니다`);
     }
@@ -514,6 +525,123 @@ for (const [src, file] of [[runner, RUNNER], [sched, SCHED], [code(SCALP), SCALP
   }
 }
 
+const scalpSrc = code(SCALP);
+// ─────────────────────────────────────────────────────────────
+// ④ 차단될 요청은 거래소 상태를 바꾸지 않는가 (부작용 순서)
+// ─────────────────────────────────────────────────────────────
+//
+// **"주문이 안 나갔다"로는 부족하다.** 요청이 TESTNET인데 연결이 실계좌면,
+// 주문이 막혀도 그 전에 실계좌의 배율이 바뀔 수 있다. 계좌 설정이 바뀌었고,
+// 그 자리에 포지션이 있었다면 청산가가 함께 움직인다.
+//
+// 그래서 호출 하나를 세지 않는다 — **거래소를 건드리는 단계 전체**가 권한
+// 뒤에 있는지를 본다. 나중에 마진 모드 setter 같은 쓰기가 붙어도 같은
+// 보장이 유지되어야 한다.
+{
+  const at = code(AUTHORITY);
+  if (!at) err(`${AUTHORITY}이(가) 없습니다 — 권한 판정이 라우트 안에 흩어져 있습니다`);
+  else if (!/export async function guardedEntry/.test(at)) {
+    err(`${AUTHORITY}: guardedEntry가 없습니다 — 순서를 구조로 강제할 수 없습니다`);
+  }
+
+  const iAuth = scalpSrc.indexOf('guardedEntry(');
+  const iPlan = scalpSrc.indexOf('planEntry100x(');
+  const iConn = scalpSrc.indexOf('loadConnection(');
+  const iOrder = scalpSrc.indexOf('executeOrder(sb');
+  if (iAuth < 0) {
+    err(`${SCALP}: guardedEntry를 쓰지 않습니다`
+      + ' — 권한과 거래소 쓰기의 순서가 줄 위치로만 지켜집니다');
+  } else {
+    if (!(iConn < iAuth)) err(`${SCALP}: 연결 로드가 권한 판정보다 뒤입니다`);
+    if (!(iAuth < iPlan)) {
+      err(`${SCALP}: 거래소를 건드리는 계획 단계가 권한 판정보다 앞입니다`
+        + ' — 차단될 요청이 계좌 설정을 먼저 바꿉니다');
+    }
+    if (!(iPlan < iOrder)) err(`${SCALP}: 계획이 주문 제출보다 뒤입니다`);
+  }
+
+  // 권한 판정에 쓰이는 사실이 **전부 판정 앞에서** 모이는가.
+  for (const [needle, what] of [
+    ['killSwitchGate(', '킬 스위치'],
+    ['migrationGate(', '마이그레이션 관문'],
+  ]) {
+    const i = scalpSrc.indexOf(needle);
+    if (i < 0) { err(`${SCALP}: ${what} 검사가 없습니다`); continue; }
+    if (iAuth >= 0 && !(i < iAuth)) {
+      err(`${SCALP}: ${what}가 권한 판정보다 뒤입니다 — 멈춰 둔 계좌에 설정이 나갑니다`);
+    }
+    if (iPlan >= 0 && !(i < iPlan)) {
+      err(`${SCALP}: ${what}가 거래소 쓰기보다 뒤입니다`);
+    }
+  }
+
+  // 모드↔연결 판정이 권한 안에 있는가 (라우트에 남아 있으면 순서가 갈린다)
+  if (/blocked:\s*'MODE_CONN_MISMATCH'/.test(scalpSrc)) {
+    err(`${SCALP}: 모드↔연결 판정이 라우트에 따로 남아 있습니다`
+      + ' — 권한 판정과 두 곳으로 갈립니다');
+  }
+}
+
+// ── 거래소를 건드리는 의존이 전부 분류돼 있는가 ──
+//
+// 지금은 배율 설정 하나뿐이지만, 새 쓰기가 붙었는데 분류되지 않으면
+// 통합 카운터 밖으로 샌다.
+{
+  const es = read(ENTRY);
+  const iface = (es.match(/export interface Entry100xDeps \{([\s\S]*?)\n\}/) || [])[1] || '';
+  const keys = Array.from(iface.matchAll(/^\s{2}(\w+)\s*[(:]/gm)).map(m => m[1]);
+  const listed = (es.match(/MUTATING_DEPS\s*=\s*\[([^\]]*)\]/) || [])[1] || '';
+  const listedRo = (es.match(/READONLY_DEPS\s*=\s*\[([\s\S]*?)\]/) || [])[1] || '';
+  const all = `${listed} ${listedRo}`;
+  if (keys.length === 0) err(`${ENTRY}: Entry100xDeps의 칸을 읽지 못했습니다`);
+  for (const k of keys) {
+    if (!all.includes(`'${k}'`)) {
+      err(`${ENTRY}: 의존 ${k}가 읽기/쓰기 어느 목록에도 없습니다`
+        + ' — 새 거래소 쓰기가 통합 카운터 밖으로 샙니다');
+    }
+  }
+  if (!/'applyLeverage'/.test(listed)) {
+    err(`${ENTRY}: MUTATING_DEPS에 applyLeverage가 없습니다`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ⑤ 손절과 익절은 다른 축인가
+// ─────────────────────────────────────────────────────────────
+//
+// 예전에는 `protectionPolicy: 'NONE'` 하나가 둘을 함께 껐고, 그 자리에서
+// 두 거래소가 이미 갈려 있었다 — 바이낸스 익절은 policy를 보지 않아서
+// 그대로 나갔고 Gate는 막혔다. 같은 계약이 거래소마다 다르게 실행됐다.
+{
+  const ex = code(EXEC);
+  if (!/const noFixedTp = args\.takeProfitPolicy === 'NO_FIXED_TP'/.test(ex)) {
+    err(`${EXEC}: 익절 정책이 별도 축으로 들어오지 않습니다`);
+  }
+  // 두 거래소가 **같은 값**을 본다.
+  const tpGuards = (ex.match(/noFixedTp/g) || []).length;
+  if (tpGuards < 4) {
+    err(`${EXEC}: 익절 정책을 보는 자리가 ${tpGuards}곳입니다`
+      + ' — 진입(바이낸스)·진입(Gate)·모순 차단·정책 유도가 모두 필요합니다');
+  }
+  if (/if \(!args\.reduceOnly && policy !== 'NONE' && tpSpec\)/.test(ex)) {
+    err(`${EXEC}: Gate 익절이 아직 손절 정책(policy)으로 막힙니다`
+      + ' — 손절만 없는 전략을 표현할 수 없고 바이낸스와 갈립니다');
+  }
+  if (!/noFixedTp && args\.takeProfit != null/.test(ex)) {
+    err(`${EXEC}: 익절 정책과 익절가가 함께 온 모순을 막지 않습니다`);
+  }
+  // scalp 호출부: 손절과 익절을 **따로** 뺀다
+  if (!/epStopPolicy === 'NO_FIXED_SL' \? \{\} : \{ stopLoss/.test(scalpSrc)) {
+    err(`${SCALP}: 손절만 따로 빼지 않습니다`);
+  }
+  if (!/epTakeProfitPolicy === 'NO_FIXED_TP' \? \{\} : \{ takeProfit/.test(scalpSrc)) {
+    err(`${SCALP}: 익절을 손절 정책으로 함께 빼고 있습니다`);
+  }
+  if (!/takeProfitPolicy:\s*epTakeProfitPolicy/.test(scalpSrc)) {
+    err(`${SCALP}: executeOrder에 익절 정책을 넘기지 않습니다`);
+  }
+}
+
 // ── 화면도 같은 조합을 지키는가 ──
 //
 // 서버가 막아도 화면이 다른 전략으로 저장하게 두면, 사용자는 저장은 됐는데
@@ -536,8 +664,16 @@ else {
     err(`${UI}: x100Row가 전략을 보지 않습니다`
       + ' — 켤 수 없는 예약을 "전용 100배로 저장됨"으로 그립니다');
   }
-  if (!/execution_profile_id\s*===\s*'MAX_LEV_100X'/.test(row)) {
-    err(`${UI}: x100Row가 저장된 프로필을 보지 않습니다`);
+  for (const [re, what] of [
+    [/execution_profile_id\s*===\s*'MAX_LEV_100X'/, '프로필'],
+    [/execution_preset_id\s*===\s*'EXACT_100X'/, '프리셋'],
+    [/execution_contract_version\s*\)?\s*===\s*2/, '계약 버전'],
+    [/mode[^\n]*===\s*'TESTNET'/, '운영 모드'],
+  ]) {
+    if (!re.test(row)) {
+      err(`${UI}: x100Row가 저장된 ${what}을(를) 보지 않습니다`
+        + ' — 켤 수 없는 행을 "정상 저장됨"으로 그립니다');
+    }
   }
 }
 
@@ -628,7 +764,6 @@ if (!code(ENTRY).includes('planSize100x(')) {
 }
 
 // 진입 라우트가 계약대로 갈라지는가
-const scalpSrc = code(SCALP);
 if (!/epSizingPolicy\s*===\s*'MARGIN_ALLOCATION'/.test(scalpSrc)) {
   err(`${SCALP}: 사이징 정책으로 갈라지지 않습니다 — planPosition을 우회하지 않습니다`);
 }

@@ -47,7 +47,7 @@
 // `applyPreset()`은 안에서 `presetOf()`를 부른다. 그래서 "직접 안 쓴다"
 // 만으로는 부족하다 — **검증을 먼저 끝낸 뒤에만** 부른다. 모르는
 // 프리셋이 `applyPreset()`에 도달하는 것 자체가 불가능해야 한다.
-import { PROFILES, type StrategyProfile, type StrategyType, type StopPolicy, type SizingPolicy } from '../strategies/profiles';
+import { PROFILES, type StrategyProfile, type StrategyType, type StopPolicy, type SizingPolicy, type TakeProfitPolicy } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset, type RiskPresetId } from '../strategies/profilePreset';
 
 /**
@@ -86,11 +86,14 @@ export const CONTRACT_FIELDS = [
   //   stopPolicy    고정 손절을 거는가. 숫자가 아니라 정책이라야 주문
   //                 경로가 그것을 정책으로 다룬다
   //   sizingPolicy  크기를 무엇에서 만드는가 (손절 거리 vs 증거금 배정)
+  //   takeProfitPolicy  고정 익절을 거는가. **stopPolicy와 다른 축이다** —
+  //                 이름 하나로 "보호 주문 전부 없음"을 표현하면, 손절만
+  //                 없는 전략과 둘 다 없는 전략을 구분할 수 없다
   //
   // **배정 비율(%) 자체는 계약이 아니다.** 그 값은 프로필 상수가 아니라
   // 예약마다 사용자가 명시하는 값이다. 계약에 넣으면 사용자가 나중에
   // 비율을 입력해도 계약은 계속 옛 값을 가리키게 된다.
-  'stopPolicy', 'sizingPolicy',
+  'stopPolicy', 'sizingPolicy', 'takeProfitPolicy',
 ] as const;
 
 export type ContractField = (typeof CONTRACT_FIELDS)[number];
@@ -104,7 +107,8 @@ export interface ExecutionContract {
   marginModes: string[];
   maxPortfolioPct: number;
   riskPercentPerTrade: number;
-  takeProfitPct: number;
+  /** NO_FIXED_TP이면 null이다 */
+  takeProfitPct: number | null;
   /** NO_FIXED_SL이면 null이다 — 없는 손절에 숫자를 적지 않는다 */
   stopLossPct: number | null;
   orderType: string;
@@ -114,6 +118,7 @@ export interface ExecutionContract {
   maxOpenPositions: number;
   stopPolicy: StopPolicy;
   sizingPolicy: SizingPolicy;
+  takeProfitPolicy: TakeProfitPolicy;
 }
 
 export type ExecutionResolveCode =
@@ -321,6 +326,19 @@ export function stopPolicyOfContract(c: ExecutionContract | null | undefined): S
  */
 export function sizingPolicyOfContract(c: ExecutionContract | null | undefined): SizingPolicy {
   return c?.sizingPolicy === 'MARGIN_ALLOCATION' ? 'MARGIN_ALLOCATION' : 'STOP_RISK';
+}
+
+/**
+ * 이 계약이 고정 익절을 거는가. **계약이 없으면 `FIXED_TP`다.**
+ *
+ * `stopPolicyOfContract`와 **따로** 있는 이유가 요점이다. 손절 정책 하나로
+ * 익절까지 끄면 "손절은 없지만 익절은 쓰는" 전략을 표현할 수 없고, 두 뜻이
+ * 한 이름에 묶여서 고치는 사람이 어느 쪽을 건드리는지 알 수 없게 된다.
+ */
+export function takeProfitPolicyOfContract(
+  c: ExecutionContract | null | undefined,
+): TakeProfitPolicy {
+  return c?.takeProfitPolicy === 'NO_FIXED_TP' ? 'NO_FIXED_TP' : 'FIXED_TP';
 }
 
 /**

@@ -784,10 +784,17 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
    * 생기는 정확한 경로다.
    */
   const x100Row = schedules.find((r: any) =>
-    r?.execution_profile_id === 'MAX_LEV_100X'
-    // **전략까지 본다.** 다른 전략의 100X 줄을 여기 그리면, 켤 수 없는
-    // 예약을 "전용 100배로 저장됨"으로 읽게 된다.
-    && r?.strategy_id === 'scalp'
+    // ── 저장된 identity **전부**를 본다 ──
+    //
+    // 프로필 하나만 보면 다른 프리셋·다른 계약 버전·LIVE 행까지 "정상
+    // 저장됨"으로 그린다. 그 행들은 서버가 켜기를 막는데, 화면은 켤 수
+    // 있는 것처럼 보인다. 배정 비율은 identity가 아니라 **준비 상태**라
+    // 여기 넣지 않고 아래에서 따로 표시한다.
+    r?.strategy_id === 'scalp'
+    && r?.execution_profile_id === 'MAX_LEV_100X'
+    && r?.execution_preset_id === 'EXACT_100X'
+    && Number(r?.execution_contract_version) === 2
+    && String(r?.mode || '').toUpperCase() === 'TESTNET'
     && String(r?.symbol || '').toUpperCase() === String(symbol || '').toUpperCase()
     && (!connId || r?.connection_id === connId)) || null;
   // 상태 배지 글자는 **서버가 준 것을 그대로 쓴다.** 같은 표를 화면에도

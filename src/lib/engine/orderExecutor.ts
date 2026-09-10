@@ -19,7 +19,7 @@ import { readbackProtective, type ProtectiveEvidence } from './protectiveReadbac
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
 import { futuresApplyLeverage } from '../exchanges/futuresExec';
-import type { StopPolicy } from '../strategies/profiles';
+import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
@@ -76,6 +76,18 @@ export interface ExecuteArgs {
    * 안 넘기면 지금까지와 똑같다(= 고정 손절 전략).
    */
   stopPolicy?: StopPolicy;
+  /**
+   * 이 주문의 **고정 익절 정책.** 실행 프로필 계약에서 온다.
+   *
+   * **`stopPolicy`와 별개다.** 예전에는 `protectionPolicy: 'NONE'` 하나가
+   * 손절과 익절을 함께 껐는데, 그 자리에서 두 거래소가 이미 갈려 있었다 —
+   * 바이낸스 경로의 익절은 `policy`를 보지 않아서 그대로 나갔고, Gate는
+   * 막혔다. 같은 계약이 거래소마다 다르게 실행된 것이다.
+   *
+   * 이제 손절은 `stopPolicy`가, 익절은 이 값이 정한다. 안 넘기면
+   * `FIXED_TP`라 기존 호출부의 동작이 바뀌지 않는다.
+   */
+  takeProfitPolicy?: TakeProfitPolicy;
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -293,6 +305,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // 실수로 REQUIRED를 넘겨도 마찬가지다 — 계약이 호출부보다 세다.
   const noFixedSl = args.stopPolicy === 'NO_FIXED_SL';
   const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
+  // **익절은 따로 판단한다.** `policy === 'NONE'`으로 익절까지 끄면
+  // 손절 정책 하나가 두 가지를 뜻하게 되고, 그때 바이낸스와 Gate가
+  // 갈린다(바이낸스 익절은 policy를 보지 않았다). 축을 나눠서 두 거래소가
+  // 같은 계약을 같게 실행하도록 한다.
+  const noFixedTp = args.takeProfitPolicy === 'NO_FIXED_TP';
   const orderType = args.orderType ?? 'MARKET';
   // 청산이면 방향이 뒤집힌다. plan.side는 '무슨 포지션을 다루는가'이고
   // reduceOnly는 그것을 줄이는 주문이므로 반대 방향으로 보내야 한다.
@@ -316,6 +333,12 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     return { ok: false, status: 'REJECTED', clientOrderId,
       message: '고정 손절을 쓰지 않는 프로필인데 손절가가 함께 넘어왔습니다'
         + ` (${args.stopLoss}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
+  // 익절도 같은 규칙이다. 조용히 버리면 화면에는 익절이 있고 거래소에는 없다.
+  if (noFixedTp && args.takeProfit != null) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '고정 익절을 쓰지 않는 프로필인데 익절가가 함께 넘어왔습니다'
+        + ` (${args.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
   }
   if (!isFinite(plan.quantity) || plan.quantity <= 0) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: `주문 수량이 유효하지 않습니다 (${plan.quantity})` };
@@ -609,6 +632,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const tpIds: string[] = [];
       if (args.reduceOnly) {
         // 위와 같은 이유 — 나가는 주문에 익절 사다리를 걸지 않는다
+      } else if (noFixedTp) {
+        // 고정 익절을 쓰지 않는 계약이다. **여기가 예전에 Gate와 갈렸다** —
+        // 이 자리에는 정책 검사가 없어서 익절이 그대로 나갔다.
       } else if (args.exitPlan) {
         for (const o of args.exitPlan.orders) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
@@ -1180,7 +1206,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       args.takeProfit != null ? gp.gateTakeProfitSpec(plan.side, args.takeProfit, null, gspec) : null;
     let exitBasis: ExecuteResult['exitBasis'] = null;
 
-    if (!args.reduceOnly && args.exitPct && policy !== 'NONE') {
+    if (!args.reduceOnly && args.exitPct && policy !== 'NONE' && !noFixedTp) {
       const basis = fillBasis({
         avgPrice: fill.avgPrice, filledQty: verdict.filledQty ?? fill.filledQty,
         settled: verdict.settled,
@@ -1266,7 +1292,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 요구하면(`requireTakeProfit`) 아래 되읽기 판정에서 걸린다.
     let gateTpId: string | undefined;
     let tpNote = '';
-    if (!args.reduceOnly && policy !== 'NONE' && tpSpec) {
+    if (!args.reduceOnly && !noFixedTp && tpSpec) {
       if (!tpSpec.ok) {
         tpNote = ` · ⚠ 익절을 걸지 못했습니다: ${tpSpec.reason}`;
       } else {

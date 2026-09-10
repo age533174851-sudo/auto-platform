@@ -44,6 +44,20 @@ export type StopPolicy = 'FIXED_SL' | 'NO_FIXED_SL';
  * 계약은 계속 옛 값을 가리키게 된다.
  */
 export type SizingPolicy = 'STOP_RISK' | 'MARGIN_ALLOCATION';
+
+/**
+ * 고정 익절을 거는가.
+ *
+ * **`stopPolicy`와 별개의 축이다.** 이름 하나로 "보호 주문이 전부 없음"을
+ * 표현하면 안 된다 — `stopPolicy`는 글자 그대로 손절만 가리키고, 그 이름이
+ * 익절까지 끄면 나중에 "손절은 없지만 익절은 쓰는" 전략을 표현할 수 없다.
+ * 그리고 그런 전략이 생겼을 때 이름이 이미 두 뜻을 갖고 있어서, 고치는
+ * 사람이 어느 쪽을 건드리는지 알 수 없게 된다.
+ *
+ *   FIXED_TP     — 진입과 함께 고정 익절(TAKE_PROFIT_MARKET / 조건부)을 건다
+ *   NO_FIXED_TP  — 고정 익절을 걸지 않는다. `takeProfitPct`는 null이다
+ */
+export type TakeProfitPolicy = 'FIXED_TP' | 'NO_FIXED_TP';
 export type MarginMode   = 'isolated' | 'cross';
 export type OrderType    = 'post_only_limit' | 'limit' | 'market';
 
@@ -59,7 +73,14 @@ export interface StrategyProfile {
   maxPortfolioPct: number;   // 이 전략이 쓸 수 있는 전체 자산 비중 상한 (%)
   riskPercentPerTrade: number; // 1회 트레이드에서 감수할 자산 위험 (%) — 수량 산출 기준
   // 손절/익절 (%)
-  takeProfitPct:   number;
+  /**
+   * 고정 익절 폭(%).
+   *
+   * **`takeProfitPolicy === 'NO_FIXED_TP'`이면 반드시 `null`이다.**
+   * 남겨 두면 그 숫자가 실제 익절 주문이 되어 거래소로 나간다 —
+   * 사용자가 이 프로필을 위해 고른 적 없는 값이 종료 권한이 되는 것이다.
+   */
+  takeProfitPct:   number | null;
   /**
    * 고정 손절 폭(%).
    *
@@ -72,6 +93,8 @@ export interface StrategyProfile {
   stopPolicy:      StopPolicy;
   /** 크기를 무엇에서 만드는가. 배정 비율 값 자체는 예약이 갖는다 */
   sizingPolicy:    SizingPolicy;
+  /** 고정 익절을 거는가. `takeProfitPct`와 짝이다 */
+  takeProfitPolicy: TakeProfitPolicy;
   // 주문
   orderType:       OrderType;
   timeoutSec:      number;   // 지정가 미체결 시 취소까지 (0 = 무제한)
@@ -145,6 +168,7 @@ export const SCALP_HIGH_LEV: StrategyProfile = {
   stopPolicy: 'FIXED_SL',
   // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
   sizingPolicy: 'STOP_RISK',
+  takeProfitPolicy: 'FIXED_TP',
   orderType: 'post_only_limit',       // Post-only 지정가
   timeoutSec: 20,                     // 20초 미체결 시 취소
   dailyLossLimitPct: 2,               // 하루 -2%면 이 전략 정지
@@ -170,6 +194,7 @@ export const SWING_LOW_LEV: StrategyProfile = {
   stopPolicy: 'FIXED_SL',
   // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
   sizingPolicy: 'STOP_RISK',
+  takeProfitPolicy: 'FIXED_TP',
   orderType: 'limit',
   timeoutSec: 0,                      // 무제한 (스윙은 급하지 않음)
   dailyLossLimitPct: 8,              // 하루 -8%면 정지
@@ -208,6 +233,7 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   stopPolicy: 'FIXED_SL',
   // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
   sizingPolicy: 'STOP_RISK',
+  takeProfitPolicy: 'FIXED_TP',
   orderType: 'market',
   timeoutSec: 30,
   dailyLossLimitPct: 30,              // 하루 -30%면 전략 정지 (슬롯 3개 소진 수준)
@@ -269,7 +295,15 @@ export const MAX_LEV_100X: StrategyProfile = {
   // 손절 거리 기반 사이징을 타지 않으므로 이 값은 크기를 정하지 않는다.
   // 다른 한도(전체 동시 위험 등)와 같은 단위를 유지하려고 남긴다.
   riskPercentPerTrade: 10,
-  takeProfitPct: 1.5,
+  // **고정 익절도 걸지 않는다.**
+  //
+  // 처음에는 여기에 1.5가 있었다. 다른 프로필에서 복사해 온 값이고, 이
+  // 프로필을 위해 고른 값이 아니다. 그런데 그 숫자를 남겨 두면 실제
+  // 익절 주문이 되어 거래소로 나간다 — 아무도 고르지 않은 값이 종료
+  // 권한이 되는 것이다. 이 프로필의 자동 종료 권한은 아직 증명되지
+  // 않았고, 숫자를 지어내서 그 자리를 채우지 않는다.
+  takeProfitPct: null,
+  takeProfitPolicy: 'NO_FIXED_TP',
   // **고정 손절 없음.** 숫자를 적지 않는다 — 위 stopLossPct 주석 참조.
   stopLossPct: null,
   stopPolicy: 'NO_FIXED_SL',
@@ -318,6 +352,15 @@ export function stopPolicyInvariantErrors(): string[] {
       }
     } else if (!(Number(p.stopLossPct) > 0)) {
       out.push(`${p.id}: FIXED_SL인데 stopLossPct가 ${String(p.stopLossPct)}입니다 — 0보다 커야 합니다`);
+    }
+    // 익절도 같은 규칙이다. 정책이 '안 건다'인데 숫자가 남아 있으면 그
+    // 숫자가 실제 주문이 된다.
+    if (p.takeProfitPolicy === 'NO_FIXED_TP') {
+      if (p.takeProfitPct !== null) {
+        out.push(`${p.id}: NO_FIXED_TP인데 takeProfitPct가 ${p.takeProfitPct}입니다 — null이어야 합니다`);
+      }
+    } else if (!(Number(p.takeProfitPct) > 0)) {
+      out.push(`${p.id}: FIXED_TP인데 takeProfitPct가 ${String(p.takeProfitPct)}입니다 — 0보다 커야 합니다`);
     }
     // 손절이 없으면 손절 거리로 크기를 만들 수 없다. 이 짝이 어긋나면
     // `planPosition`이 INVALID_STOP으로 거부하거나, 더 나쁘게는 어딘가에서

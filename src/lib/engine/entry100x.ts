@@ -52,6 +52,24 @@ export type Entry100xCode =
   /** 다듬은 수량의 필요 증거금이 배정을 넘었다 */
   | 'MARGIN_EXCEEDED';
 
+/**
+ * **거래소 상태를 바꾸는 의존.**
+ *
+ * 왜 목록으로 두는가: 지금은 배율 설정 하나뿐이지만, 나중에 마진 모드
+ * setter 같은 쓰기가 하나 더 붙으면 "차단될 요청이 거래소를 건드렸다"는
+ * 같은 결함이 조용히 되살아난다. 그때 시험이 옛 이름 하나만 세고 있으면
+ * 아무도 모른다.
+ *
+ * 그래서 **모든 의존을 읽기/쓰기로 분류해 둔다.** 검사기가 인터페이스의
+ * 칸 이름과 이 두 목록을 대조해서, 분류되지 않은 의존이 생기면 실패시킨다.
+ */
+export const MUTATING_DEPS = ['applyLeverage'] as const;
+
+/** 거래소를 읽기만 하는 의존 */
+export const READONLY_DEPS = [
+  'observeMarginMode', 'availableUsd', 'referencePrice', 'quantize',
+] as const;
+
 export interface Entry100xDeps {
   /** 이 심볼의 거래소 마진 모드. **못 읽으면 null** */
   observeMarginMode(): Promise<'isolated' | 'cross' | null>;

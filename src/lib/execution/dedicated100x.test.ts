@@ -7,7 +7,7 @@
 import { test, assert, eq, flushAsync } from '../../test/harness';
 import {
   resolveExecutionProfile, stopPolicyOfContract, sizingPolicyOfContract,
-  pairMismatchReason, EXCLUSIVE_PAIRS,
+  pairMismatchReason, EXCLUSIVE_PAIRS, takeProfitPolicyOfContract,
   EXECUTION_CONTRACT_VERSION, CONTRACT_FIELDS, isExecutionResolveError,
 } from './profile';
 import { executionGateVerdict, enableFilterSpec, OPEN_COMBOS } from './dormantGate';
@@ -15,7 +15,12 @@ import { carriesExecutionContract } from './profile';
 import { PROFILES, stopPolicyInvariantErrors } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset } from '../strategies/profilePreset';
 import { planSize100x } from '../engine/sizing100x';
-import { planEntry100x, type Entry100xDeps } from '../engine/entry100x';
+import {
+  planEntry100x, MUTATING_DEPS, READONLY_DEPS, type Entry100xDeps,
+} from '../engine/entry100x';
+import {
+  entryAuthorityVerdict, guardedEntry, type EntryAuthorityFacts,
+} from '../engine/entryAuthority';
 import { stopReattachVerdict } from '../engine/stopReattach';
 import { leverageVerdict } from '../exchanges/futuresExec';
 import { appliesTo, FIXED_STOP_ONLY_CHECKS } from '../engine/preTradeChecklist';
@@ -424,6 +429,101 @@ export async function runDedicated100xTests() {
   test('모르는 프로필 id는 프로필 없음으로 읽지 않는다', () => {
     eq(executionGateVerdict({ ...openRow, profileId: 'NOPE_100X' }).allowed, false,
       '오타 하나가 기존 방식으로 도는 예약이 된다');
+  });
+
+  // ── ⑩-b 차단될 요청은 거래소를 건드리지 않는다 ──
+  //
+  // "주문이 안 나갔다"로는 부족하다. 요청이 TESTNET인데 연결이 실계좌면,
+  // 주문이 막혀도 그 전에 실계좌의 배율이 바뀔 수 있다. 계좌 설정이
+  // 바뀌었고, 그 자리에 포지션이 있었다면 청산가가 함께 움직인다.
+  const okFacts: EntryAuthorityFacts = {
+    exchangeSupported: true, connIsLive: false, modeNeedsLiveKey: false,
+    killSwitchReason: '', migrationReason: '', liveClosedReason: '',
+  };
+
+  test('권한이 통과하면 거래소 단계가 실행된다', async () => {
+    let calls = 0;
+    const r = await guardedEntry(okFacts, async () => { calls += 1; return 'planned'; });
+    eq(r.verdict.allowed, true, r.verdict.reason);
+    eq(r.result, 'planned');
+    eq(calls, 1);
+  });
+
+  for (const [label, over, code] of [
+    ['TESTNET 요청 + 실계좌 연결', { connIsLive: true }, 'MODE_CONN_MISMATCH'],
+    ['실계좌 모드 + 테스트넷 연결', { modeNeedsLiveKey: true }, 'MODE_CONN_MISMATCH'],
+    ['킬 스위치', { killSwitchReason: '사용자가 멈춤' }, 'KILL_SWITCH'],
+    ['마이그레이션 밀림', { migrationReason: '칸이 없음' }, 'MIGRATION_PENDING'],
+    ['선물 불가 거래소', { exchangeSupported: false }, 'NO_CONNECTION'],
+  ] as const) {
+    test(`${label}이면 거래소 단계가 한 번도 실행되지 않는다`, async () => {
+      let calls = 0;
+      const r = await guardedEntry({ ...okFacts, ...(over as any) },
+        async () => { calls += 1; return 'planned'; });
+      eq(r.verdict.allowed, false, `${label}인데 통과했다`);
+      eq(r.verdict.code, code);
+      eq(calls, 0, '차단될 요청인데 거래소 단계가 실행됐다');
+      eq(r.result, null);
+    });
+  }
+
+  test('목적지 확인이 킬 스위치보다 먼저다 — 어긋난 계좌를 먼저 걸러낸다', () => {
+    const v = entryAuthorityVerdict({
+      ...okFacts, connIsLive: true, killSwitchReason: '멈춤',
+    });
+    eq(v.code, 'MODE_CONN_MISMATCH', '엉뚱한 계좌인지부터 봐야 한다');
+  });
+
+  test('거래소를 건드리는 의존이 전부 분류돼 있다', () => {
+    // 나중에 마진 모드 setter 같은 쓰기가 붙어도 같은 결함이 되살아나지
+    // 않게, **모든 의존**을 읽기/쓰기로 나눠 둔다.
+    const all = [...MUTATING_DEPS, ...READONLY_DEPS].sort();
+    const probe = okDeps();
+    eq(Object.keys(probe).sort().join(','), all.join(','),
+      '분류되지 않은 의존이 있다 — 새 쓰기가 카운터 밖으로 샌다');
+    eq(MUTATING_DEPS.join(','), 'applyLeverage');
+  });
+
+  test('진입 계획의 거래소 쓰기는 배율 하나뿐이다 — 통합 카운터', async () => {
+    let writes = 0;
+    const counted = okDeps({
+      applyLeverage: async (lev: number) => { writes += 1; return { ok: true, observed: lev, message: '' }; },
+    });
+    await planEntry100x(contract100x, 10, counted);
+    eq(writes, 1, '쓰기 횟수가 기대와 다르다');
+    // 교차 마진이면 쓰기 0이어야 한다 — 막을 주문을 위해 계좌를 바꾸지 않는다.
+    writes = 0;
+    await planEntry100x(contract100x, 10,
+      okDeps({
+        observeMarginMode: async () => 'cross',
+        applyLeverage: async (lev: number) => { writes += 1; return { ok: true, observed: lev, message: '' }; },
+      }));
+    eq(writes, 0, '교차인 걸 알기 전에 거래소를 바꿨다');
+  });
+
+  // ── ⑩-c 손절과 익절은 다른 축이다 ──
+  test('전용 100배는 고정 익절도 걸지 않는다 — 숫자를 남기지 않았다', () => {
+    eq(PROFILES[ID].takeProfitPolicy, 'NO_FIXED_TP');
+    eq(PROFILES[ID].takeProfitPct, null,
+      '복사해 온 익절 숫자가 남아 있으면 그것이 실제 익절 주문이 된다');
+  });
+
+  test('기존 프로필의 익절 의미는 그대로다', () => {
+    for (const pid of ['SCALP_HIGH_LEV', 'SWING_LOW_LEV', 'DAILY_HIGH_LEV'] as const) {
+      eq(PROFILES[pid].takeProfitPolicy, 'FIXED_TP', `${pid}의 익절이 꺼졌다`);
+      assert(Number(PROFILES[pid].takeProfitPct) > 0, `${pid}의 익절 숫자가 사라졌다`);
+    }
+  });
+
+  test('익절 정책은 손절 정책과 별개 축이다', () => {
+    assert(CONTRACT_FIELDS.includes('takeProfitPolicy' as any),
+      'takeProfitPolicy가 계약 칸이 아니다 — 지문이 이 변경을 못 잡는다');
+    eq(takeProfitPolicyOfContract(null), 'FIXED_TP', '계약이 없으면 기존대로 익절을 건다');
+    const r = resolveExecutionProfile(ID, PRESET, V);
+    if (r.ok && r.kind === 'contract') {
+      eq(r.contract.takeProfitPolicy, 'NO_FIXED_TP');
+      eq(r.contract.takeProfitPct, null);
+    }
   });
 
   // ── ⑪ 계약을 해석하지 않는 라우트는 계약을 받지 않는다 ──
