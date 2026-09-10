@@ -244,7 +244,7 @@ if (plan) {
 const sizing = await loadModule(SIZING, '100X 사이징');
 if (sizing) {
   const base = {
-    requiredLeverage: 100, observedLeverage: 100,
+    requiredLeverage: 100,
     availableUsd: 1000, marginAllocationPct: 10, referencePrice: 50_000,
   };
   // **막았는지만 보면 부족하다.** 검사를 통째로 지워도 뒤쪽 검사가
@@ -260,9 +260,19 @@ if (sizing) {
         + ' 다른 검사가 우연히 막아 준 것이라, 사용자에게 잘못된 원인이 보입니다');
     }
   };
-  must({ observedLeverage: 99 }, 'LEVERAGE_NOT_EXACT', '되읽은 배율이 99배면 막아야 합니다');
-  must({ observedLeverage: 75 }, 'LEVERAGE_NOT_EXACT', '되읽은 배율이 75배면 막아야 합니다');
-  must({ observedLeverage: null }, 'LEVERAGE_NOT_EXACT', '배율을 못 읽었으면 막아야 합니다');
+  // 정확 배율 판정은 크기 계산에서 떼어냈다 — 후보 수량을 **쓰기 전에**
+  // 계산하려면 되읽은 값에 묶여 있으면 안 되기 때문이다. 막는 힘은
+  // 그대로여야 하므로 옮겨간 자리에서 그대로 확인한다.
+  for (const [label, observed] of [['99배', 99], ['75배', 75], ['모름', null]]) {
+    const bad = sizing.verifyLeverageExact(100, observed);
+    if (!bad) err(`100X 배율 확인: 되읽은 값이 ${label}인데 통과했습니다`);
+    else if (bad.code !== 'LEVERAGE_NOT_EXACT') {
+      err(`100X 배율 확인: ${label}을 막았지만 이유가 ${bad.code}입니다`);
+    }
+  }
+  if (sizing.verifyLeverageExact(100, 100) !== null) {
+    err('100X 배율 확인: 정확히 요구 배율인데 막았습니다');
+  }
   must({ availableUsd: null }, 'BALANCE_UNKNOWN', '잔고를 못 읽었으면 막아야 합니다');
   must({ availableUsd: 0 }, 'BALANCE_EMPTY', '잔고가 0이면 그 사실로 막아야 합니다');
   must({ marginAllocationPct: null }, 'MARGIN_ALLOCATION_UNSET', '증거금 배정이 미지정이면 막아야 합니다');
@@ -307,7 +317,7 @@ if (gate) {
       err(`열린 조합의 전략 ${c.strategyId}에 해당하는 라우트를 찾지 못했습니다`);
       continue;
     }
-    if (!/resolveExecutionProfile/.test(wired) || !/planEntry100x/.test(wired)) {
+    if (!/resolveExecutionProfile/.test(wired) || !/prepareEntry100x/.test(wired)) {
       err(`${c.strategyId} 라우트가 실행 계약을 해석하지 않는데 조합이 열려 있습니다`
         + ' — 저장된 것은 100X인데 도는 것은 그 전략입니다');
     }
@@ -388,14 +398,19 @@ if (entry) {
     ...over,
   });
   const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
+  // 두 단계를 이어 부르는 검사용 합성. 제품 경로는 그 사이에 쓰기 없는
+  // 관문(1회 상한)을 하나 더 넣는다.
+  const planEntry100x = async (c, pct, deps) =>
+    entry.commitEntry100x(await entry.prepareEntry100x(c, pct, deps), deps);
+
   const mustBlock = async (over, wantCode, why) => {
-    const v = await entry.planEntry100x(C, 10, okDeps(over));
+    const v = await planEntry100x(C, 10, okDeps(over));
     if (v.ok) { err(`100X 진입: ${why} — 그런데 통과했습니다 (수량 ${v.quantity})`); return; }
     if (v.code !== wantCode) {
       err(`100X 진입: ${why} — 막긴 했지만 이유가 ${v.code}입니다 (${wantCode}이어야 합니다)`);
     }
   };
-  const good = await entry.planEntry100x(C, 10, okDeps());
+  const good = await planEntry100x(C, 10, okDeps());
   if (!good.ok) err(`100X 진입: 정상 입력이 막혔습니다 — ${good.message}`);
 
   await mustBlock({ observeMarginMode: async () => 'cross' },
@@ -418,17 +433,79 @@ if (entry) {
     'MARGIN_EXCEEDED', '올림해서 배정을 넘으면 막아야 합니다');
 
   // 배정 비율 미지정
-  const noAlloc = await entry.planEntry100x(C, null, okDeps());
+  const noAlloc = await planEntry100x(C, null, okDeps());
   if (noAlloc.ok) err('100X 진입: 배정 비율이 없는데 통과했습니다');
 
   // **마진 모드 확인이 배율 설정보다 먼저인가.** 교차 계좌에 배율부터
   // 걸면, 막을 주문을 위해 계좌 설정을 먼저 바꾸는 것이 된다.
   let applied = false;
-  await entry.planEntry100x(C, 10, okDeps({
+  await planEntry100x(C, 10, okDeps({
     observeMarginMode: async () => 'cross',
     applyLeverage: async (lev) => { applied = true; return { ok: true, observed: lev, message: '' }; },
   }));
   if (applied) err('100X 진입: 교차인 걸 알기 전에 배율을 걸었습니다 — 순서가 규칙의 일부입니다');
+
+  // ── 순서를 이름으로 적어 직접 확인한다 ──
+  //
+  // 횟수만 세면 **자리**를 못 본다. 잔고를 읽기 전에 배율을 걸어도
+  // 쓰기는 여전히 1번이다. 그래서 일어난 순서를 그대로 비교한다.
+  {
+    const loggedDeps = (over = {}) => {
+      const log = [];
+      const base = { ...okDeps(), ...over };
+      const label = {
+        observeMarginMode: ['marginMode:read'],
+        availableUsd: ['balance:read'],
+        referencePrice: ['price:read'],
+        quantize: ['quantize'],
+        applyLeverage: ['leverage:write', 'leverage:readback'],
+      };
+      const d = {};
+      for (const k of Object.keys(base)) {
+        const fn = base[k];
+        d[k] = async (...a) => { for (const t of (label[k] || [k])) log.push(t); return fn(...a); };
+      }
+      return { d, log };
+    };
+
+    {
+      const { d, log } = loggedDeps();
+      const prep = await entry.prepareEntry100x(C, 10, d);
+      if (!prep.ok) err(`100X 순서: 준비 단계가 막혔습니다 — ${prep.message}`);
+      const afterPrep = log.join(' > ');
+      if (afterPrep !== 'marginMode:read > balance:read > price:read > quantize') {
+        err(`100X 순서: 준비 단계 호출 순서가 다릅니다 — ${afterPrep}`);
+      }
+      await entry.commitEntry100x(prep, d);
+      const full = log.join(' > ');
+      if (full !== 'marginMode:read > balance:read > price:read > quantize'
+                 + ' > leverage:write > leverage:readback') {
+        err(`100X 순서: 전체 호출 순서가 계약과 다릅니다 — ${full}`);
+      }
+    }
+
+    // 읽기 실패는 전부 쓰기 0.
+    for (const [why, over] of [
+      ['잔고를 못 읽음', { availableUsd: async () => null }],
+      ['기준가를 못 읽음', { referencePrice: async () => null }],
+      ['규격에 못 맞춤', { quantize: async () => ({ qty: null, message: '' }) }],
+      ['마진 모드가 교차', { observeMarginMode: async () => 'cross' }],
+      ['마진 모드를 못 읽음', { observeMarginMode: async () => null }],
+      ['배정 초과', { quantize: async (q) => ({ qty: q * 2, message: '' }) }],
+    ]) {
+      const { d, log } = loggedDeps(over);
+      const prep = await entry.prepareEntry100x(C, 10, d);
+      if (prep.ok) err(`100X 순서: ${why}인데 준비 단계가 통과했습니다`);
+      if (log.includes('leverage:write')) {
+        err(`100X 순서: ${why}으로 막힐 요청이 거래소에 배율을 걸었습니다 — ${log.join(' > ')}`);
+      }
+      // 호출부가 순서를 어겨도 막는가.
+      await entry.commitEntry100x(prep, d);
+      if (log.includes('leverage:write')) {
+        err(`100X 순서: 막힌 계획으로 확정을 불렀더니 거래소에 썼습니다 (${why})`);
+      }
+    }
+  }
 
   // ── 통합 호출 카운터 ──
   //
@@ -462,7 +539,7 @@ if (entry) {
     // 읽지도 않고 막았다면 그건 판정이 아니라 우연이다.
     {
       const { deps, c } = countingDeps({ observeMarginMode: async () => 'cross' });
-      const v = await entry.planEntry100x(C, 10, deps);
+      const v = await planEntry100x(C, 10, deps);
       if (v.ok) err('100X 카운터: 교차 마진인데 통과했습니다');
       if (c.exchangeWrites !== 0) {
         err(`100X 카운터: 교차 마진으로 막힐 요청이 거래소에 ${c.exchangeWrites}번 썼습니다`
@@ -475,7 +552,7 @@ if (entry) {
     // 배정 비율이 없으면 **쓰기 0**이어야 한다.
     {
       const { deps, c } = countingDeps();
-      const v = await entry.planEntry100x(C, null, deps);
+      const v = await planEntry100x(C, null, deps);
       if (v.ok) err('100X 카운터: 배정 비율이 없는데 통과했습니다');
       if (c.exchangeWrites !== 0) {
         err(`100X 카운터: 배정 비율 미지정으로 막힐 요청이 거래소에 ${c.exchangeWrites}번 썼습니다`);
@@ -486,7 +563,7 @@ if (entry) {
     // 것이고, 2 이상이면 같은 설정을 두 번 거는 것이다.
     {
       const { deps, c } = countingDeps();
-      const v = await entry.planEntry100x(C, 10, deps);
+      const v = await planEntry100x(C, 10, deps);
       if (!v.ok) err(`100X 카운터: 정상 입력이 막혔습니다 — ${v.message}`);
       if (c.exchangeWrites !== 1) {
         err(`100X 카운터: 통과 경로의 거래소 쓰기가 ${c.exchangeWrites}번입니다 (1이어야 합니다)`);
@@ -640,7 +717,7 @@ const scalpSrc = code(SCALP);
   }
 
   const iAuth = scalpSrc.indexOf('guardedEntry(');
-  const iPlan = scalpSrc.indexOf('planEntry100x(');
+  const iPlan = scalpSrc.indexOf('prepareEntry100x(');
   const iConn = scalpSrc.indexOf('loadConnection(');
   const iOrder = scalpSrc.indexOf('executeOrder(sb');
   if (iAuth < 0) {
@@ -679,6 +756,71 @@ const scalpSrc = code(SCALP);
     }
   }
 
+  // ── 2단계 구조가 실제로 두 단계인가 ──
+  //
+  // 순서를 줄 위치로만 지키면 뒤집힌다. 실제로 뒤집혀 있었다 —
+  // 배율 설정이 잔고·기준가·규격 조회보다 **앞**이라, 그 조회에서 막힐
+  // 요청이 계좌 배율을 먼저 바꿨다.
+  //
+  // 그래서 읽기 단계에는 쓰기 함수를 **줄 수 없게** 만들었다. 그것이
+  // 지켜지는지 본다.
+  {
+    const es = code(ENTRY);
+    if (!/export async function prepareEntry100x/.test(es)) {
+      err(`${ENTRY}: prepareEntry100x가 없습니다 — 읽기 단계가 분리되지 않았습니다`);
+    }
+    if (!/export async function commitEntry100x/.test(es)) {
+      err(`${ENTRY}: commitEntry100x가 없습니다 — 쓰기 단계가 분리되지 않았습니다`);
+    }
+    // 준비 단계의 매개변수 타입이 읽기 전용인가.
+    const prepSig = (es.match(/export async function prepareEntry100x\(([\s\S]*?)\): Promise/) || [])[1] || '';
+    if (!/deps:\s*Entry100xReadDeps/.test(prepSig)) {
+      err(`${ENTRY}: prepareEntry100x가 읽기 전용 의존을 받지 않습니다`
+        + ' — 쓰기 함수가 타입에 있으면 순서가 다시 주석으로만 지켜집니다');
+    }
+    // 준비 단계 본문에 쓰기가 없는가.
+    const prepBody = (es.match(/export async function prepareEntry100x[\s\S]*?\n\}/) || [''])[0];
+    if (/applyLeverage/.test(prepBody)) {
+      err(`${ENTRY}: prepareEntry100x 본문이 applyLeverage를 부릅니다 — 읽기 단계가 씁니다`);
+    }
+    // 읽기 전용 의존 타입에 쓰기가 섞이지 않았는가.
+    const roIface = (es.match(/export interface Entry100xReadDeps \{([\s\S]*?)\n\}/) || [])[1] || '';
+    for (const w of ['applyLeverage']) {
+      if (roIface.includes(w)) {
+        err(`${ENTRY}: Entry100xReadDeps에 쓰기 의존 ${w}가 들어 있습니다`);
+      }
+    }
+  }
+
+  // ── 라우트에서 첫 거래소 쓰기의 자리 ──
+  //
+  // 쓰기 없이 판정할 수 있는 것이 **하나도** 남지 않은 뒤에 써야 한다.
+  // 1회 상한(gateOrder)이 대표적이다 — 명목가는 준비 단계가 이미 만들어
+  // 두므로 거래소를 건드리지 않고 판정할 수 있다.
+  {
+    const iPrep = scalpSrc.indexOf('prepareEntry100x(');
+    const iPreGate = scalpSrc.indexOf('const preGate = gateOrder(');
+    const iCommit = scalpSrc.indexOf('commitEntry100x(entry');
+    const iWrite = scalpSrc.indexOf('futuresApplyLeverage(target');
+    if (iPrep < 0) err(`${SCALP}: 준비 단계를 부르지 않습니다`);
+    if (iPreGate < 0) {
+      err(`${SCALP}: 1회 상한을 거래소 쓰기 전에 보지 않습니다`
+        + ' — 상한에 걸릴 요청이 계좌 배율을 먼저 바꿉니다');
+    }
+    if (iCommit < 0) err(`${SCALP}: 확정 단계를 부르지 않습니다`);
+    if (iWrite < 0) err(`${SCALP}: 배율 설정 호출을 찾지 못했습니다`);
+    if (iPrep >= 0 && iPreGate >= 0 && !(iPrep < iPreGate)) {
+      err(`${SCALP}: 1회 상한이 준비 단계보다 앞입니다 — 명목가 없이 판정합니다`);
+    }
+    if (iPreGate >= 0 && iCommit >= 0 && !(iPreGate < iCommit)) {
+      err(`${SCALP}: 확정(쓰기)이 1회 상한보다 앞입니다`
+        + ' — 상한에 걸릴 요청이 이미 계좌 설정을 바꿉니다');
+    }
+    if (iCommit >= 0 && iWrite >= 0 && !(iCommit <= iWrite)) {
+      err(`${SCALP}: 배율 설정이 확정 단계 밖에 있습니다`);
+    }
+  }
+
   // ── 쓰기 뒤에 남은 차단은 **전부 등록돼 있는가** ──
   //
   // 위의 개별 규칙은 "옮긴 것이 도로 내려갔는가"만 본다. 그것으로는
@@ -701,7 +843,8 @@ const scalpSrc = code(SCALP);
     ['LEVERAGE_MISMATCH',
       '이 단계가 곧 쓰기다 — 배율을 맞추고 되읽는 일 자체라 앞에 둘 수 없다'],
     ['MODE_GATE',
-      '1회 상한이 명목가를 요구한다(gateOrder). 명목가는 계획의 결과다'],
+      '모의 체결 경로의 응답이다. 같은 gateOrder 판정을 쓰기 **전에** 먼저'
+      + ' 보고(preGate) 거기서 멈추므로, 여기 도달할 때 거래소 쓰기는 이미 0이다'],
   ]);
   {
     const wb = iAuth;
@@ -747,12 +890,14 @@ const scalpSrc = code(SCALP);
 // 통합 카운터 밖으로 샌다.
 {
   const es = read(ENTRY);
-  const iface = (es.match(/export interface Entry100xDeps \{([\s\S]*?)\n\}/) || [])[1] || '';
+  const ifaceR = (es.match(/export interface Entry100xReadDeps \{([\s\S]*?)\n\}/) || [])[1] || '';
+  const ifaceW = (es.match(/export interface Entry100xWriteDeps \{([\s\S]*?)\n\}/) || [])[1] || '';
+  const iface = `${ifaceR}\n${ifaceW}`;
   const keys = Array.from(iface.matchAll(/^\s{2}(\w+)\s*[(:]/gm)).map(m => m[1]);
   const listed = (es.match(/MUTATING_DEPS\s*=\s*\[([^\]]*)\]/) || [])[1] || '';
   const listedRo = (es.match(/READONLY_DEPS\s*=\s*\[([\s\S]*?)\]/) || [])[1] || '';
   const all = `${listed} ${listedRo}`;
-  if (keys.length === 0) err(`${ENTRY}: Entry100xDeps의 칸을 읽지 못했습니다`);
+  if (keys.length === 0) err(`${ENTRY}: Entry100xReadDeps/WriteDeps의 칸을 읽지 못했습니다`);
   for (const k of keys) {
     if (!all.includes(`'${k}'`)) {
       err(`${ENTRY}: 의존 ${k}가 읽기/쓰기 어느 목록에도 없습니다`
@@ -846,7 +991,7 @@ for (const f of ['src/app/api/autotrade/daily-ladder/route.ts',
                  'src/app/api/autotrade/my-original-v1/route.ts']) {
   const src = code(f);
   if (!src) { err(`${f}을(를) 읽지 못했습니다`); continue; }
-  if (/planEntry100x/.test(src)) continue;   // 배선됐으면 이 규칙 대상이 아니다
+  if (/prepareEntry100x/.test(src)) continue;   // 배선됐으면 이 규칙 대상이 아니다
   if (!/carriesExecutionContract\s*\(/.test(src)) {
     err(`${f}: 실행 계약을 해석하지 않으면서 거절도 하지 않습니다`
       + ' — 계약을 실은 직접 요청이 자기 방식으로 실행됩니다');
@@ -909,7 +1054,8 @@ const callers = (needle, exclude = []) => productionFiles.filter(f =>
   !exclude.includes(f) && stripJsComments(readFileSync(f, 'utf8')).includes(needle));
 
 for (const [needle, home, what] of [
-  ['planEntry100x(', ENTRY, '100X 진입 계획'],
+  ['prepareEntry100x(', ENTRY, '100X 진입 준비'],
+  ['commitEntry100x(', ENTRY, '100X 진입 확정'],
   ['stopPolicyOfContract(', PLAN, '계약 → 손절 정책'],
   ['sizingPolicyOfContract(', PLAN, '계약 → 사이징 정책'],
 ]) {

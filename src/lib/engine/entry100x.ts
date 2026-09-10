@@ -33,7 +33,10 @@
 // 0.0007이 0.001이 되면 명목가가 배정보다 커지고, 그 차이는 100배에서
 // 그대로 증거금 초과가 된다. 다듬은 **뒤에** 다시 재야 한다.
 
-import { planSize100x, validateMarginAllocation, type Sizing100xVerdict } from './sizing100x';
+import {
+  planSize100x, validateMarginAllocation, verifyLeverageExact,
+  type Sizing100xVerdict,
+} from './sizing100x';
 
 export type Entry100xCode =
   | 'OK'
@@ -70,16 +73,17 @@ export const READONLY_DEPS = [
   'observeMarginMode', 'availableUsd', 'referencePrice', 'quantize',
 ] as const;
 
-export interface Entry100xDeps {
+/**
+ * **읽기 단계가 쓸 수 있는 의존.** 쓰기 함수가 아예 들어 있지 않다.
+ *
+ * 이것이 이 파일에서 가장 중요한 줄이다. 순서를 주석이나 줄 위치로
+ * 지키면 언젠가 뒤집힌다 — 실제로 뒤집혀 있었다. `prepareEntry100x`가
+ * 이 타입만 받으면, 그 안에서 배율을 거는 코드는 **타입이 없어서**
+ * 쓸 수 없다. 순서가 규칙이 아니라 구조가 된다.
+ */
+export interface Entry100xReadDeps {
   /** 이 심볼의 거래소 마진 모드. **못 읽으면 null** */
   observeMarginMode(): Promise<'isolated' | 'cross' | null>;
-  /**
-   * 배율을 걸고 **독립적으로 되읽는다.**
-   *
-   * `futuresApplyLeverage`가 그것이다 — 설정 응답이 아니라 되읽은 값을
-   * `observed`로 준다.
-   */
-  applyLeverage(leverage: number): Promise<{ ok: boolean; observed: number | null; message: string }>;
   /** 주문에 쓸 수 있는 잔고(USD). **못 읽으면 null** */
   availableUsd(): Promise<number | null>;
   /** 서버가 읽은 기준가(마크가 우선). **못 읽으면 null** */
@@ -87,6 +91,20 @@ export interface Entry100xDeps {
   /** 거래소 수량 단위·최소 주문에 맞춘 수량. 못 맞추면 null */
   quantize(qty: number): Promise<{ qty: number | null; message: string }>;
 }
+
+/** 확정 단계가 쓰는 의존 — 여기에만 쓰기가 있다. */
+export interface Entry100xWriteDeps {
+  /**
+   * 배율을 걸고 **독립적으로 되읽는다.**
+   *
+   * `futuresApplyLeverage`가 그것이다 — 설정 응답이 아니라 되읽은 값을
+   * `observed`로 준다.
+   */
+  applyLeverage(leverage: number): Promise<{ ok: boolean; observed: number | null; message: string }>;
+}
+
+/** 두 단계를 합친 모양 — 검사기가 칸 분류를 대조할 때 쓴다. */
+export interface Entry100xDeps extends Entry100xReadDeps, Entry100xWriteDeps {}
 
 export interface Entry100xVerdict {
   ok: boolean;
@@ -114,23 +132,35 @@ const fail = (
 });
 
 /**
- * 이 진입의 수량·배율을 만든다.
+ * **PHASE A — 읽고 계산만 한다. 거래소에 쓰지 않는다.**
  *
- * **fallback이 없다.** 어떤 단계에서 값을 못 얻어도 "대신 이걸 쓴다"는
- * 가지가 없고, 그것이 이 함수의 요점이다.
+ * 왜 두 단계인가
+ * ──────────────
+ * 예전에는 한 함수였고 순서가 이랬다:
  *
- * @param contract        해석된 실행 계약 (leverage · sizingPolicy · marginModes)
- * @param marginAllocationPct 이 **예약에 사용자가 직접 입력한** 배정 비율.
- *                        미지정이면 null이고, 그러면 사이징이 막는다.
+ *     마진 모드 READ → 배율 WRITE → 잔고 READ → 기준가 READ
+ *     → 사이징 → 규격 READ → 다듬기 → 증거금 재검증
+ *
+ * 배율 설정이 두 번째다. 그런데 그 뒤의 어느 단계에서든 막힐 수 있다 —
+ * 잔고를 못 읽거나, 기준가를 못 읽거나, 규격에 못 맞추거나, 다듬은
+ * 수량의 증거금이 배정을 넘거나. **그 요청들은 전부 주문 없이 끝나는데,
+ * 계좌의 배율은 이미 100배로 바뀐 뒤다.** 그 자리에 다른 포지션이
+ * 있었다면 청산가가 함께 움직인다.
+ *
+ * 주문이 안 나갔다는 것으로는 부족하다. 그래서 **쓰기 없이 판정할 수
+ * 있는 것을 전부 여기서 끝낸다.**
+ *
+ * 이 함수는 `Entry100xReadDeps`만 받는다. 쓰기 함수가 타입에 없으므로
+ * 여기에 배율 설정을 넣는 것은 주석 위반이 아니라 **컴파일 오류**다.
  */
-export async function planEntry100x(
+export async function prepareEntry100x(
   contract: {
     leverage: number;
     sizingPolicy: string;
     marginModes: string[];
   },
   marginAllocationPct: number | null,
-  deps: Entry100xDeps,
+  deps: Entry100xReadDeps,
 ): Promise<Entry100xVerdict> {
   const notes: string[] = [];
 
@@ -140,10 +170,12 @@ export async function planEntry100x(
       notes);
   }
 
+  const req = Number(contract.leverage);
+
   // ── ① 마진 모드 ──
   //
   // 계약이 허용하는 모드만 통과시킨다. 전용 100배는 격리 전용이라
-  // 교차 계좌에서는 여기서 멈춘다 — 배율을 걸기 **전**이다.
+  // 교차 계좌에서는 여기서 멈춘다.
   let mode: 'isolated' | 'cross' | null = null;
   try { mode = await deps.observeMarginMode(); } catch { mode = null; }
   if (mode == null) {
@@ -159,33 +191,13 @@ export async function planEntry100x(
       notes, { marginMode: mode });
   }
 
-  // ── ①.5 배정 비율 (거래소에 쓰기 전에) ──
+  // ── ② 배정 비율 ──
   //
-  // 이 값은 사용자가 넣은 숫자 하나라 거래소에 물어볼 것이 없다. 그런데
-  // 예전에는 `planSize100x` 안에서만 검사돼서 **배율을 건 뒤에** 불렸다.
-  // 배정 비율이 비어 있는 요청은 어차피 막힐 요청인데, 그 전에 계좌의
-  // 배율이 이미 바뀌어 있었다 — 주문이 안 나갔다는 것으로는 부족하다.
-  //
-  // 검사를 여기로 **복제하지 않는다.** `planSize100x`가 쓰는 것과 같은
-  // 함수를 부른다. 뒤의 ⑤단계도 같은 값을 다시 본다 — 두 곳이 갈릴 수
-  // 없다.
+  // 사용자가 넣은 숫자 하나라 거래소에 물어볼 것이 없다.
   const allocBad = validateMarginAllocation(marginAllocationPct);
   if (allocBad) {
     return fail('SIZING_BLOCKED', allocBad.message, notes, { marginMode: mode });
   }
-
-  // ── ② 배율 ──
-  const req = Number(contract.leverage);
-  let lev: { ok: boolean; observed: number | null; message: string };
-  try { lev = await deps.applyLeverage(req); }
-  catch (e: any) { lev = { ok: false, observed: null, message: String(e?.message || e) }; }
-  if (!lev.ok || lev.observed !== req) {
-    return fail('LEVERAGE_NOT_EXACT',
-      `요청 ${req}배가 확인되지 않았습니다 (되읽음 ${lev.observed == null ? '실패' : `${lev.observed}배`})`
-      + ` — ${lev.message}`,
-      notes, { marginMode: mode });
-  }
-  notes.push(`배율 ${req}배 확인(되읽음)`);
 
   // ── ③④ 잔고 · 기준가 ──
   let avail: number | null = null;
@@ -193,10 +205,13 @@ export async function planEntry100x(
   let price: number | null = null;
   try { price = await deps.referencePrice(); } catch { price = null; }
 
-  // ── ⑤ 크기 ──
+  // ── ⑤ 후보 크기 ──
+  //
+  // **계약이 요구하는 배율**로 계산한다. 되읽은 값이 아니다 — 되읽으려면
+  // 먼저 걸어야 하고, 그러면 이 아래에서 막힐 요청이 계좌를 바꾼 뒤가
+  // 된다. 실제 배율 확인은 확정 단계(`commitEntry100x`)의 일이다.
   const size: Sizing100xVerdict = planSize100x({
     requiredLeverage: req,
-    observedLeverage: lev.observed,
     availableUsd: avail,
     marginAllocationPct,
     referencePrice: price,
@@ -243,4 +258,42 @@ export async function planEntry100x(
     message: `${req}배 · 수량 ${q.qty} · 증거금 $${requiredMargin.toFixed(4)} / 배정 $${allocated.toFixed(4)}`,
     notes,
   };
+}
+
+/**
+ * **PHASE B — 여기서 처음으로 거래소에 쓴다.**
+ *
+ * 배율을 걸고 **독립적으로 되읽어** 정확히 요구값인지 확인한다.
+ *
+ * 이 단계에 도달했다는 것은 쓰기 없이 판정할 수 있는 차단이 하나도
+ * 남지 않았다는 뜻이다. 그래서 여기서 남는 차단은 하나뿐이다 —
+ * **걸어 봐야 아는 것**, 즉 거래소가 요청한 배율을 실제로 주었는가.
+ *
+ * 느슨해진 것은 없다. 되읽기가 실패했거나 75배·99배가 나오면 그대로
+ * 막는다. 판정은 `verifyLeverageExact` 한 곳에 있다.
+ */
+export async function commitEntry100x(
+  prepared: Entry100xVerdict,
+  deps: Entry100xWriteDeps,
+): Promise<Entry100xVerdict> {
+  const notes = [...(prepared.notes || [])];
+
+  // 막힌 계획으로는 쓰지 않는다. 호출부가 순서를 어겨도 여기서 멈춘다.
+  if (!prepared.ok) return { ...prepared, notes };
+
+  const req = Number(prepared.leverage);
+
+  let lev: { ok: boolean; observed: number | null; message: string };
+  try { lev = await deps.applyLeverage(req); }
+  catch (e: any) { lev = { ok: false, observed: null, message: String(e?.message || e) }; }
+
+  const bad = verifyLeverageExact(req, lev.ok ? lev.observed : null);
+  if (bad) {
+    return fail('LEVERAGE_NOT_EXACT', `${bad.message}${lev.message ? ` — ${lev.message}` : ''}`,
+      notes, { marginMode: prepared.marginMode, leverage: req,
+               referencePrice: prepared.referencePrice });
+  }
+  notes.push(`배율 ${req}배 확인(되읽음)`);
+
+  return { ...prepared, notes };
 }

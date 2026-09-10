@@ -14,10 +14,27 @@ import { executionGateVerdict, enableFilterSpec, OPEN_COMBOS } from './dormantGa
 import { carriesExecutionContract } from './profile';
 import { PROFILES, stopPolicyInvariantErrors } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset } from '../strategies/profilePreset';
-import { planSize100x } from '../engine/sizing100x';
+import { planSize100x, verifyLeverageExact } from '../engine/sizing100x';
 import {
-  planEntry100x, MUTATING_DEPS, READONLY_DEPS, type Entry100xDeps,
+  prepareEntry100x, commitEntry100x, MUTATING_DEPS, READONLY_DEPS,
+  type Entry100xDeps,
 } from '../engine/entry100x';
+
+/**
+ * 두 단계를 이어 부르는 **시험용** 합성.
+ *
+ * 아래 시험들은 "이 입력이면 최종적으로 어떤 판정이 나오는가"를 본다 —
+ * 그 기대는 단계를 나눠도 그대로여야 한다. 제품 경로는 두 단계를 따로
+ * 부르고, 그 사이에 쓰기 없이 판정하는 관문(1회 상한)이 들어간다.
+ *
+ * 막힌 계획에서는 `commitEntry100x`가 곧바로 되돌려주므로, 이 합성으로도
+ * "막힐 요청은 쓰기 0"이 그대로 확인된다.
+ */
+const planEntry100x = async (
+  c: Parameters<typeof prepareEntry100x>[0],
+  pct: number | null,
+  deps: Entry100xDeps,
+) => commitEntry100x(await prepareEntry100x(c, pct, deps), deps);
 import {
   entryAuthorityVerdict, guardedEntry, type EntryAuthorityFacts,
 } from '../engine/entryAuthority';
@@ -35,7 +52,6 @@ const failCode = (r: ReturnType<typeof resolveExecutionProfile>) =>
 /** 통과하는 사이징 입력 한 벌. 시험마다 한 칸씩만 바꿔서 쓴다 */
 const goodSizing = {
   requiredLeverage: 100,
-  observedLeverage: 100,
   availableUsd: 1_000,
   // 배정 비율은 **예약이 주는 값**이라 시험이 주입한다. 정본에는 없다.
   marginAllocationPct: 10,
@@ -182,14 +198,20 @@ export async function runDedicated100xTests() {
     eq(ok.quantity, 0.2);
   });
 
+  // 정확 배율 판정은 크기 계산에서 떼어냈다. 후보 수량은 **요구 배율**로
+  // 계산되고(그래야 쓰기 전에 계산할 수 있다), 되읽은 값 확인은 주문
+  // 직전의 별도 권한이다. 막는 힘은 그대로여야 한다.
   for (const [label, observed] of [['99배', 99], ['75배', 75], ['모름', null]] as const) {
-    test(`되읽은 배율이 ${label}이면 크기를 만들지 않는다`, () => {
-      const v = planSize100x({ ...goodSizing, observedLeverage: observed as any });
-      eq(v.ok, false, `${label}인데 통과했다`);
-      eq(v.code, 'LEVERAGE_NOT_EXACT');
-      eq(v.quantity, null, '막았는데 수량이 남아 있다');
+    test(`되읽은 배율이 ${label}이면 주문을 허락하지 않는다`, () => {
+      const bad = verifyLeverageExact(100, observed as any);
+      assert(bad !== null, `${label}인데 통과했다`);
+      eq(bad!.code, 'LEVERAGE_NOT_EXACT');
     });
   }
+
+  test('정확히 요구 배율이면 통과한다', () => {
+    eq(verifyLeverageExact(100, 100), null);
+  });
 
   test('배율 판정은 leverageVerdict와 같은 방향이다', () => {
     eq(leverageVerdict(100, 100, 100).ok, true);

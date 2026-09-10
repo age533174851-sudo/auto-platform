@@ -487,6 +487,13 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // 1회 상한 덮어쓰기는 두 곳에서 읽는다(쓰기 전 · 쓰기 후). 같은 값을
+  // 봐야 하므로 파싱을 한 곳에 둔다.
+  const maxNotionalOverride = () => {
+    const n = Number(process.env.LIVE_MAX_NOTIONAL_USD);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
   const { guardedEntry } = await import('@/lib/engine/entryAuthority');
   const authorityFacts = {
     exchangeSupported: conn.exchange === 'binance' || conn.exchange === 'gate',
@@ -519,7 +526,7 @@ export async function POST(req: NextRequest) {
   const guarded = await guardedEntry(authorityFacts, async (): Promise<any> => {
   let plan: any;
   if (epSizingPolicy === 'MARGIN_ALLOCATION') {
-    const { planEntry100x } = await import('@/lib/engine/entry100x');
+    const { prepareEntry100x, commitEntry100x } = await import('@/lib/engine/entry100x');
     const { futuresApplyLeverage } = await import('@/lib/exchanges/futuresExec');
     const { futuresPositionRisk, futuresAvailableUsd, futuresSymbolFilters } =
       await import('@/lib/exchanges/futuresAdapter');
@@ -527,7 +534,7 @@ export async function POST(req: NextRequest) {
     const ex = conn.exchange as 'binance' | 'gate';
     const target = { exchange: ex, key: conn.apiKey, secret: conn.apiSecret, testnet: !connIsLive };
 
-    const entry = await planEntry100x(
+    let entry = await prepareEntry100x(
       {
         leverage: epContract!.leverage,
         sizingPolicy: epSizingPolicy,
@@ -540,10 +547,6 @@ export async function POST(req: NextRequest) {
           const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
           const mt = String(rr.risk?.marginType || '').toLowerCase();
           return mt === 'isolated' ? 'isolated' : mt === 'cross' || mt === 'crossed' ? 'cross' : null;
-        },
-        applyLeverage: async (lev: number) => {
-          const v = await futuresApplyLeverage(target, symbol, lev);
-          return { ok: v.ok, observed: v.observed, message: v.message };
         },
         availableUsd: () => futuresAvailableUsd(ex, conn.apiKey, conn.apiSecret, !connIsLive),
         // **서버가 읽은 값이다.** 신호가 들고 온 진입가를 쓰지 않는다.
@@ -565,6 +568,36 @@ export async function POST(req: NextRequest) {
         },
       },
     );
+    // ── 쓰기 확정선 ──
+    //
+    // 여기까지 거래소 쓰기는 **0건**이다. 읽기만으로 정해지는 차단은
+    // 전부 위에서 끝났다.
+    //
+    // 1회 상한도 여기서 본다. 명목가는 이제 계획에 있으므로 거래소를
+    // 건드리지 않고 판정할 수 있다 — 예전에는 배율을 건 뒤에야 이 검사에
+    // 도달해서, 상한에 걸릴 요청이 계좌 설정을 먼저 바꿨다.
+    //
+    // 뒤의 `modeGate`와 **같은 함수에 같은 값**을 넣는다. 규칙을 두 벌
+    // 두는 것이 아니라, 같은 판정을 쓰기 전에 한 번 먼저 묻는 것이다.
+    if (entry.ok) {
+      const candidateNotional = (entry.quantity as number) * (entry.referencePrice as number);
+      const preGate = gateOrder(opMode, candidateNotional, { overrideMaxNotionalUsd: maxNotionalOverride() });
+      if (preGate.disposition === 'SEND') {
+        // ── 여기서 처음으로 거래소에 쓴다 ──
+        entry = await commitEntry100x(entry, {
+          applyLeverage: async (lev: number) => {
+            const v = await futuresApplyLeverage(target, symbol, lev);
+            return { ok: v.ok, observed: v.observed, message: v.message };
+          },
+        });
+      } else {
+        // 상한에 걸리거나 주문을 보내지 않는 모드다. **쓰지 않는다.**
+        // 계획은 그대로 두고 뒤의 modeGate가 같은 판정으로 처리한다
+        // (모의 체결 경로가 거기 있다).
+        entry = { ...entry, notes: [...entry.notes, `쓰기 없이 멈춤 — ${preGate.reason}`] };
+      }
+    }
+
     entryNotes = entry.notes;
     plan = entry.ok
       ? {
@@ -622,7 +655,7 @@ export async function POST(req: NextRequest) {
   //
   // 다른 검사를 다 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥
   // 관문이고, SEND가 아니면 **주문을 만들지 않는다.**
-  const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
+  const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: maxNotionalOverride() });
   if (modeGate.disposition !== 'SEND') {
     // ── 모의 모드면 **모의 계좌에 실제로 체결한다** ──
     //

@@ -13,8 +13,10 @@
 // `MUTATING_DEPS` 분류를 따라 센다 — 나중에 쓰기가 하나 더 붙어도 같은
 // 카운터에 들어온다.
 import { test, assert, eq } from '../../test/harness';
-import { planEntry100x, MUTATING_DEPS, READONLY_DEPS } from './entry100x';
-import { validateMarginAllocation, planSize100x } from './sizing100x';
+import {
+  prepareEntry100x, commitEntry100x, MUTATING_DEPS, READONLY_DEPS,
+} from './entry100x';
+import { validateMarginAllocation, planSize100x, verifyLeverageExact } from './sizing100x';
 
 const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'] };
 
@@ -42,6 +44,10 @@ function counted(over: Partial<ReturnType<typeof baseDeps>> = {}) {
   }
   return { deps, c };
 }
+
+/** 두 단계를 이어 부르는 시험용 합성 — 최종 판정 기대는 그대로여야 한다. */
+const planEntry100x = async (c: any, pct: number | null, deps: any) =>
+  commitEntry100x(await prepareEntry100x(c, pct, deps), deps);
 
 export function runEntry100xTests() {
   test('교차 마진이면 배율을 걸지 않는다 — 쓰기 0', async () => {
@@ -117,7 +123,7 @@ export function runEntry100xTests() {
   // 보호받지 못한다.
   test('planSize100x 자체가 배정 비율 미지정을 막는다 — 기본값을 빌리지 않는다', () => {
     const v = planSize100x({
-      requiredLeverage: 100, observedLeverage: 100,
+      requiredLeverage: 100,
       availableUsd: 1000, marginAllocationPct: null, referencePrice: 50_000,
     });
     assert(!v.ok, '배정 비율이 없는데 수량을 냈다 — 화면 기본값을 빌려 쓴 것이다');
@@ -128,11 +134,156 @@ export function runEntry100xTests() {
   test('planSize100x 자체가 범위 밖 배정 비율을 막는다', () => {
     for (const bad of [0, -1, 101]) {
       const v = planSize100x({
-        requiredLeverage: 100, observedLeverage: 100,
+        requiredLeverage: 100,
         availableUsd: 1000, marginAllocationPct: bad, referencePrice: 50_000,
       });
       assert(!v.ok, `배정 비율 ${bad}로 수량을 냈다`);
       eq(v.code, 'MARGIN_ALLOCATION_INVALID');
     }
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // 순서를 이름으로 기록해서 직접 확인한다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 앞의 시험들은 "쓰기가 몇 번인가"를 센다. 그것만으로는 **쓰기가 어느
+  // 자리에 있는가**를 못 본다. 잔고를 읽기 전에 배율을 걸어도 쓰기는
+  // 여전히 1번이다.
+  //
+  // 그래서 호출을 일어난 순서대로 적고, 그 배열을 그대로 비교한다.
+
+  /**
+   * 호출을 순서대로 적는 가짜 어댑터.
+   *
+   * 덮어쓴 구현도 **여전히 기록된다.** 처음엔 `...over`를 뒤에 폈더니
+   * 덮어쓴 칸이 기록을 안 남겨서, 실패 경로의 순서가 빈 배열로 나왔다 —
+   * 기록이 빠지면 "안 불렸다"와 구분되지 않는다.
+   */
+  function logged(over: any = {}) {
+    const log: string[] = [];
+    const base: any = {
+      observeMarginMode: async () => 'isolated',
+      availableUsd: async () => 1000,
+      referencePrice: async () => 50_000,
+      quantize: async (q: number) => ({ qty: q, message: '' }),
+      applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
+      ...over,
+    };
+    const label: Record<string, string[]> = {
+      observeMarginMode: ['marginMode:read'],
+      availableUsd: ['balance:read'],
+      referencePrice: ['price:read'],
+      quantize: ['quantize'],
+      applyLeverage: ['leverage:write', 'leverage:readback'],
+    };
+    const d: any = {};
+    for (const k of Object.keys(base)) {
+      const fn = base[k];
+      d[k] = async (...a: any[]) => {
+        for (const t of label[k] || [k]) log.push(t);
+        return fn(...a);
+      };
+    }
+    return { d, log };
+  }
+
+  test('정상 경로의 호출 순서 — 배율 쓰기는 모든 읽기 뒤에 있다', async () => {
+    const { d, log } = logged();
+    const prep = await prepareEntry100x(C as any, 10, d);
+    assert(prep.ok, `준비 단계가 막혔다 — ${prep.message}`);
+
+    // 준비 단계가 끝난 시점에 쓰기는 하나도 없어야 한다.
+    eq(log.join(' > '), 'marginMode:read > balance:read > price:read > quantize',
+      '준비 단계의 호출 순서가 다르다 — 쓰기가 섞여 있으면 여기서 드러난다');
+
+    const done = await commitEntry100x(prep, d);
+    assert(done.ok, `확정 단계가 막혔다 — ${done.message}`);
+    eq(log.join(' > '),
+      'marginMode:read > balance:read > price:read > quantize > leverage:write > leverage:readback',
+      '전체 호출 순서가 계약과 다르다');
+  });
+
+  // 읽기 실패는 전부 쓰기 0이어야 한다. 하나씩 실패시켜 순서를 확인한다.
+  for (const [label, over, wantLog] of [
+    ['잔고를 못 읽음', { availableUsd: async () => null },
+      'marginMode:read > balance:read > price:read'],
+    ['기준가를 못 읽음', { referencePrice: async () => null },
+      'marginMode:read > balance:read > price:read'],
+    ['규격에 못 맞춤', { quantize: async () => ({ qty: null, message: '규격 없음' }) },
+      'marginMode:read > balance:read > price:read > quantize'],
+    ['마진 모드가 교차', { observeMarginMode: async () => 'cross' },
+      'marginMode:read'],
+    ['마진 모드를 못 읽음', { observeMarginMode: async () => null },
+      'marginMode:read'],
+  ] as const) {
+    test(`${label} → 배율을 걸지 않는다 (순서까지 확인)`, async () => {
+      const { d, log } = logged(over);
+      const prep = await prepareEntry100x(C as any, 10, d);
+      assert(!prep.ok, `${label}인데 통과했다`);
+      assert(!log.includes('leverage:write'),
+        `${label}으로 막힐 요청이 거래소에 배율을 걸었다 — ${log.join(' > ')}`);
+      eq(log.join(' > '), wantLog, '막히기까지의 호출 순서가 다르다');
+
+      // 확정 단계를 잘못 불러도 쓰지 않는다 — 호출부가 순서를 어겨도 막는다.
+      await commitEntry100x(prep, d);
+      assert(!log.includes('leverage:write'),
+        '막힌 계획으로 확정 단계를 불렀더니 거래소에 썼다');
+    });
+  }
+
+  test('다듬은 수량의 증거금이 배정을 넘으면 배율을 걸지 않는다', async () => {
+    // 올림 때문에 필요 증거금이 배정을 넘는 경우.
+    const { d, log } = logged({ quantize: async (q: number) => ({ qty: q * 2, message: '' }) });
+    const prep = await prepareEntry100x(C as any, 10, d);
+    assert(!prep.ok, '배정을 넘는데 통과했다');
+    eq(prep.code, 'MARGIN_EXCEEDED');
+    assert(!log.includes('leverage:write'),
+      '배정 초과로 막힐 요청이 계좌 배율을 먼저 바꿨다');
+  });
+
+  // ── 확정 단계에서만 남는 차단 ──
+  //
+  // 걸어 봐야 아는 것 하나뿐이다. 느슨해진 것이 없는지 확인한다.
+  for (const [label, observed] of [['75배', 75], ['99배', 99], ['못 읽음', null]] as const) {
+    test(`되읽은 배율이 ${label}이면 확정이 실패한다 — 주문으로 가지 않는다`, async () => {
+      const { d } = logged({
+        applyLeverage: async () => ({ ok: true, observed: observed as any, message: '되읽음' }),
+      });
+      const prep = await prepareEntry100x(C as any, 10, d);
+      assert(prep.ok);
+      const done = await commitEntry100x(prep, d);
+      assert(!done.ok, `${label}인데 주문 단계로 갔다`);
+      eq(done.code, 'LEVERAGE_NOT_EXACT');
+    });
+  }
+
+  test('배율 설정 자체가 실패하면 확정이 실패한다', async () => {
+    const { d } = logged({
+      applyLeverage: async () => ({ ok: false, observed: 100, message: '거래소 거절' }),
+    });
+    const prep = await prepareEntry100x(C as any, 10, d);
+    const done = await commitEntry100x(prep, d);
+    assert(!done.ok, '설정이 실패했는데 통과했다');
+    eq(done.code, 'LEVERAGE_NOT_EXACT');
+  });
+
+  // 후보 수량은 요구 배율로 계산된다 — 되읽은 값이 없어도 나와야 한다.
+  // 그것이 쓰기 전에 계산할 수 있게 된 이유다.
+  test('후보 수량은 되읽은 배율 없이도 계산된다', () => {
+    const v = planSize100x({
+      requiredLeverage: 100, availableUsd: 1000,
+      marginAllocationPct: 10, referencePrice: 50_000,
+    });
+    assert(v.ok, `후보 수량이 안 나왔다 — ${v.message}`);
+    eq(v.allocatedMargin, 100);
+    eq(v.targetNotional, 10_000);
+    eq(v.quantity, 0.2);
+  });
+
+  test('정확 배율 확인은 한 곳에 있다', () => {
+    eq(verifyLeverageExact(100, 100), null);
+    assert(verifyLeverageExact(100, 75) !== null, '75배를 통과시킨다');
+    assert(verifyLeverageExact(100, 99) !== null, '99배를 통과시킨다');
+    assert(verifyLeverageExact(100, null) !== null, '못 읽었는데 통과시킨다');
   });
 }

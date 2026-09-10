@@ -62,13 +62,6 @@ export type Sizing100xCode =
 export interface Sizing100xInput {
   /** 이 프로필이 요구하는 정확한 배율 (100X면 100) */
   requiredLeverage: number;
-  /**
-   * **거래소에서 되읽어 확인한** 배율. 못 읽었으면 null.
-   *
-   * 설정 응답이 아니라 되읽은 값이어야 한다 — `futuresApplyLeverage`가
-   * 돌려주는 `observed`가 그것이다.
-   */
-  observedLeverage: number | null;
   /** 주문에 쓸 수 있는 잔고(USD). **못 읽었으면 null** */
   availableUsd: number | null;
   /** 가용 잔고 대비 이 주문에 배정할 증거금 비율(%). **미지정이면 null** */
@@ -95,6 +88,56 @@ const block = (code: Sizing100xCode, message: string): Sizing100xVerdict => ({
 });
 
 const finitePos = (v: unknown): boolean => Number.isFinite(Number(v)) && Number(v) > 0;
+
+/**
+ * **거래소에 실제로 걸린 배율이 요청값과 정확히 같은가.**
+ *
+ * 왜 크기 계산에서 떼어냈는가
+ * ───────────────────────────
+ * 이 검사는 `planSize100x` 안에 있었다. 그래서 **크기를 계산하려면 먼저
+ * 배율을 걸어야** 했다 — 거래소에 쓰기를 한 뒤에야 잔고·기준가·규격을
+ * 물어보는 순서가 됐다. 그 값들 중 하나라도 못 읽으면 주문은 막히는데,
+ * 계좌의 배율은 이미 바뀐 뒤다.
+ *
+ * 그런데 후보 수량은 **계약이 요구하는 배율**만 알면 계산된다:
+ *
+ *     목표 명목가 = 배정 증거금 × 요구 배율
+ *
+ * 되읽은 값이 필요한 것은 "이 크기로 주문해도 되는가"를 정할 때뿐이다.
+ * 그래서 계산은 요구 배율로 하고, **주문 직전에** 실제 배율을 확인한다.
+ *
+ * 느슨해지는 것은 없다
+ * ────────────────────
+ * 되읽기가 실패했거나 값이 다르면 여전히 주문하지 않는다. 달라진 것은
+ * **언제 묻는가**뿐이고, 확인 전에는 주문이 나가지 않는다는 규칙은
+ * 그대로다 — 75배·99배·읽기 실패는 전부 여기서 막힌다.
+ *
+ * 문제가 없으면 null이다.
+ */
+export function verifyLeverageExact(
+  requiredLeverage: number,
+  observedLeverage: number | null | undefined,
+): { code: Sizing100xCode; message: string } | null {
+  const req = Number(requiredLeverage);
+  if (!finitePos(req)) {
+    return { code: 'LEVERAGE_NOT_EXACT', message: '요구 배율이 유효하지 않습니다' };
+  }
+  const obs = observedLeverage == null ? null : Number(observedLeverage);
+  if (obs == null || !Number.isFinite(obs)) {
+    return {
+      code: 'LEVERAGE_NOT_EXACT',
+      message: `배율 ${req}배가 실제로 걸렸는지 되읽어 확인하지 못했습니다 — 주문하지 않습니다`,
+    };
+  }
+  if (obs !== req) {
+    return {
+      code: 'LEVERAGE_NOT_EXACT',
+      message: `요청 ${req}배인데 거래소 실제 배율은 ${obs}배입니다(되읽음) — `
+        + '요청과 다른 배율로는 이 프로필의 크기를 정당화할 수 없어 주문하지 않습니다',
+    };
+  }
+  return null;
+}
 
 /**
  * 배정 비율이 쓸 수 있는 값인가. **문제가 없으면 null**이다.
@@ -141,23 +184,7 @@ export function planSize100x(i: Sizing100xInput): Sizing100xVerdict {
     return block('LEVERAGE_NOT_EXACT', '요구 배율이 유효하지 않습니다');
   }
 
-  // ── ① 배율이 정확히 그 값인가 ──
-  //
-  // 상한이 아니라 **요청값**이다. 거래소가 낮춘 것도 통과가 아니다 —
-  // 75배로 나가면 같은 증거금에 명목가가 4분의 3이고, 그건 사용자가
-  // 검증한 것과 다른 크기다.
-  const obs = i.observedLeverage == null ? null : Number(i.observedLeverage);
-  if (obs == null || !Number.isFinite(obs)) {
-    return block('LEVERAGE_NOT_EXACT',
-      `배율 ${req}배가 실제로 걸렸는지 되읽어 확인하지 못했습니다 — 주문하지 않습니다`);
-  }
-  if (obs !== req) {
-    return block('LEVERAGE_NOT_EXACT',
-      `요청 ${req}배인데 거래소 실제 배율은 ${obs}배입니다(되읽음) — `
-      + '요청과 다른 배율로는 이 프로필의 크기를 정당화할 수 없어 주문하지 않습니다');
-  }
-
-  // ── ② 잔고 ──
+  // ── ① 잔고 ──
   if (i.availableUsd == null || !Number.isFinite(Number(i.availableUsd))) {
     return block('BALANCE_UNKNOWN',
       '가용 잔고를 읽지 못했습니다 — 0으로 두지 않고 주문하지 않습니다');
@@ -167,19 +194,19 @@ export function planSize100x(i: Sizing100xInput): Sizing100xVerdict {
     return block('BALANCE_EMPTY', `가용 잔고가 ${avail}입니다 — 배정할 증거금이 없습니다`);
   }
 
-  // ── ③ 증거금 배정 비율 ──
+  // ── ② 증거금 배정 비율 ──
   const alloc = validateMarginAllocation(i.marginAllocationPct);
   if (alloc) return block(alloc.code, alloc.message);
   const pct = Number(i.marginAllocationPct);
 
-  // ── ④ 기준가 ──
+  // ── ③ 기준가 ──
   if (i.referencePrice == null || !finitePos(i.referencePrice)) {
     return block('PRICE_UNKNOWN',
       '기준가를 읽지 못했습니다 — 명목가와 수량을 계산할 수 없어 주문하지 않습니다');
   }
   const price = Number(i.referencePrice);
 
-  // ── ⑤ 크기 ──
+  // ── ④ 크기 ──
   const allocatedMargin = avail * (pct / 100);
   const targetNotional = allocatedMargin * req;
   const quantity = targetNotional / price;
