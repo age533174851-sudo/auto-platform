@@ -14,7 +14,7 @@
 // 카운터에 들어온다.
 import { test, assert, eq } from '../../test/harness';
 import { planEntry100x, MUTATING_DEPS, READONLY_DEPS } from './entry100x';
-import { validateMarginAllocation } from './sizing100x';
+import { validateMarginAllocation, planSize100x } from './sizing100x';
 
 const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'] };
 
@@ -107,5 +107,32 @@ export function runEntry100xTests() {
     const v = await planEntry100x(C as any, 10, deps);
     assert(!v.ok, '75배로 통과했다 — 사용자가 검증한 것과 다른 크기다');
     eq(v.code, 'LEVERAGE_NOT_EXACT');
+  });
+
+  // ── 규칙은 그 함수 안에서도 살아 있어야 한다 ──
+  //
+  // 위 시험들은 `planEntry100x`를 통해 본다. 그런데 `planSize100x`는
+  // 따로 내보내는 함수라 다른 곳에서 직접 불릴 수 있다. 호출부가 먼저
+  // 막아 준다는 이유로 이 함수 안의 규칙이 느슨해지면, 그 다른 호출부는
+  // 보호받지 못한다.
+  test('planSize100x 자체가 배정 비율 미지정을 막는다 — 기본값을 빌리지 않는다', () => {
+    const v = planSize100x({
+      requiredLeverage: 100, observedLeverage: 100,
+      availableUsd: 1000, marginAllocationPct: null, referencePrice: 50_000,
+    });
+    assert(!v.ok, '배정 비율이 없는데 수량을 냈다 — 화면 기본값을 빌려 쓴 것이다');
+    eq(v.code, 'MARGIN_ALLOCATION_UNSET');
+    eq(v.quantity, null);
+  });
+
+  test('planSize100x 자체가 범위 밖 배정 비율을 막는다', () => {
+    for (const bad of [0, -1, 101]) {
+      const v = planSize100x({
+        requiredLeverage: 100, observedLeverage: 100,
+        availableUsd: 1000, marginAllocationPct: bad, referencePrice: 50_000,
+      });
+      assert(!v.ok, `배정 비율 ${bad}로 수량을 냈다`);
+      eq(v.code, 'MARGIN_ALLOCATION_INVALID');
+    }
   });
 }
