@@ -523,6 +523,9 @@ export async function POST(req: NextRequest) {
   // 그래서 호출 하나를 막는 대신 **그 단계를 통째로 권한 뒤로 묶는다** —
   // 막힌 요청에서는 이 클로저가 아예 실행되지 않는다.
   let entryNotes: string[] = [];
+  // 준비 단계의 결과. 확정(쓰기)은 남은 관문을 전부 지난 뒤에 한다.
+  let prepared100x: any = null;
+  let apply100xLeverage: ((lev: number) => Promise<{ ok: boolean; observed: number | null; message: string }>) | null = null;
   const guarded = await guardedEntry(authorityFacts, async (): Promise<any> => {
   let plan: any;
   if (epSizingPolicy === 'MARGIN_ALLOCATION') {
@@ -533,6 +536,10 @@ export async function POST(req: NextRequest) {
     const { quantizeOrder } = await import('@/lib/exchanges/quantize');
     const ex = conn.exchange as 'binance' | 'gate';
     const target = { exchange: ex, key: conn.apiKey, secret: conn.apiSecret, testnet: !connIsLive };
+    apply100xLeverage = async (lev: number) => {
+      const v = await futuresApplyLeverage(target, symbol, lev);
+      return { ok: v.ok, observed: v.observed, message: v.message };
+    };
 
     let entry = await prepareEntry100x(
       {
@@ -573,31 +580,19 @@ export async function POST(req: NextRequest) {
     // 여기까지 거래소 쓰기는 **0건**이다. 읽기만으로 정해지는 차단은
     // 전부 위에서 끝났다.
     //
-    // 1회 상한도 여기서 본다. 명목가는 이제 계획에 있으므로 거래소를
-    // 건드리지 않고 판정할 수 있다 — 예전에는 배율을 건 뒤에야 이 검사에
-    // 도달해서, 상한에 걸릴 요청이 계좌 설정을 먼저 바꿨다.
+    // 여기까지 거래소 쓰기는 **0건**이다. 배율을 거는 일은 이 클로저가
+    // 아니라, 남은 관문을 전부 지난 **주문 직전**에 한다(아래 확정 단계).
     //
-    // 뒤의 `modeGate`와 **같은 함수에 같은 값**을 넣는다. 규칙을 두 벌
-    // 두는 것이 아니라, 같은 판정을 쓰기 전에 한 번 먼저 묻는 것이다.
-    if (entry.ok) {
-      const candidateNotional = (entry.quantity as number) * (entry.referencePrice as number);
-      const preGate = gateOrder(opMode, candidateNotional, { overrideMaxNotionalUsd: maxNotionalOverride() });
-
-      // ── 여기서 처음으로 거래소에 쓴다 ──
-      //
-      // 관문 판정은 **넘겨주기만 한다.** 여기서 `if`로 갈라 두면 그 조건을
-      // 뒤집는 변경이 어떤 시험에도 안 걸린다(실제로 그랬다). 쓸지 말지는
-      // `commitEntry100x`가 정하고, 그 규칙은 시험이 직접 돌린다.
-      //
-      // 상한에 걸리면 쓰지 않고 계획만 돌아온다 — 뒤의 modeGate가 같은
-      // 판정으로 모의 체결 경로를 처리한다.
-      entry = await commitEntry100x(entry, {
-        applyLeverage: async (lev: number) => {
-          const v = await futuresApplyLeverage(target, symbol, lev);
-          return { ok: v.ok, observed: v.observed, message: v.message };
-        },
-      }, preGate);
-    }
+    // 왜 여기서 쓰지 않는가
+    // ─────────────────────
+    // 준비 단계가 계획(수량·명목가·필요 증거금)을 이미 만들어 두므로,
+    // 뒤에 남은 관문 — 1회 상한 · 점검 목록 · 거부권 · 숏 방어 · 중복
+    // 신호 — 이 **전부 거래소를 건드리지 않고** 판정된다. 그렇다면 그
+    // 관문들에서 막힐 요청이 계좌 배율을 먼저 바꿀 이유가 없다.
+    //
+    // 쓰기는 늦을수록 좋다. 마지막까지 미루면 "막힐 요청은 거래소 상태도
+    // 안 건드린다"가 몇 개의 게이트를 옮겼는가와 무관하게 성립한다.
+    prepared100x = entry;
 
     entryNotes = entry.notes;
     plan = entry.ok
@@ -994,6 +989,31 @@ export async function POST(req: NextRequest) {
   //
   // **규칙은 leverageSync 한 곳에만 둔다** — 일봉 사다리와 단타가 다른
   // 규칙을 쓰면 언젠가 한쪽만 고쳐진다.
+  // ══════════════════ 거래소 쓰기 확정선 ══════════════════
+  //
+  // **여기가 이 요청의 첫 거래소 쓰기다.** 위의 관문은 전부 지났다 —
+  // 권한 · 전략 충돌 · 슬리브 · 정합 · 청산 감시 · 수동 청산 · 사람 확인 ·
+  // 1회 상한 · 점검 목록 · 거부권 · 숏 방어 · 중복 신호.
+  //
+  // 그래서 쓰기 없이 판정할 수 있는 차단은 하나도 남아 있지 않다. 여기서
+  // 남는 차단은 **걸어 봐야 아는 것** 하나뿐이다: 거래소가 요청한 배율을
+  // 실제로 주었는가.
+  if (epSizingPolicy === 'MARGIN_ALLOCATION' && prepared100x?.ok) {
+    const { commitEntry100x } = await import('@/lib/engine/entry100x');
+    const committed = await commitEntry100x(
+      prepared100x,
+      { applyLeverage: apply100xLeverage! },
+      modeGate,
+    );
+    entryNotes = committed.notes;
+    if (!committed.ok) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'LEVERAGE_NOT_EXACT',
+        error: committed.message,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   const { ensureLeverage } = await import('@/lib/engine/leverageSync');
   const levSync = await ensureLeverage(plan.leverage, {
     read: async () => {

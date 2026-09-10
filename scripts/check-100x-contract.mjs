@@ -809,37 +809,52 @@ const scalpSrc = code(SCALP);
 
   // ── 라우트에서 첫 거래소 쓰기의 자리 ──
   //
-  // 쓰기 없이 판정할 수 있는 것이 **하나도** 남지 않은 뒤에 써야 한다.
-  // 1회 상한(gateOrder)이 대표적이다 — 명목가는 준비 단계가 이미 만들어
-  // 두므로 거래소를 건드리지 않고 판정할 수 있다.
+  // **쓰기는 늦을수록 좋다.** 준비 단계가 계획을 만들어 두므로 남은
+  // 관문(1회 상한 · 점검 목록 · 거부권 · 숏 방어 · 중복 신호)이 전부
+  // 거래소를 건드리지 않고 판정된다. 그렇다면 배율은 그 관문들을 다
+  // 지난 **주문 직전**에 걸어야 한다.
+  //
+  // 여기서 세는 자리는 `futuresApplyLeverage`가 적힌 줄이 아니다 — 그건
+  // 클로저 정의일 뿐이고, 실제로 쓰는 시점은 확정 단계를 부르는 자리다.
+  const iCommitCall = scalpSrc.indexOf('commitEntry100x(\n      prepared100x');
   {
     const iPrep = scalpSrc.indexOf('prepareEntry100x(');
-    const iPreGate = scalpSrc.indexOf('const preGate = gateOrder(');
-    const iCommit = scalpSrc.indexOf('commitEntry100x(entry');
-    const iWrite = scalpSrc.indexOf('futuresApplyLeverage(target');
     if (iPrep < 0) err(`${SCALP}: 준비 단계를 부르지 않습니다`);
-    if (iPreGate < 0) {
-      err(`${SCALP}: 1회 상한을 거래소 쓰기 전에 보지 않습니다`
-        + ' — 상한에 걸릴 요청이 계좌 배율을 먼저 바꿉니다');
-    }
-    if (iCommit < 0) err(`${SCALP}: 확정 단계를 부르지 않습니다`);
-    if (iWrite < 0) err(`${SCALP}: 배율 설정 호출을 찾지 못했습니다`);
-    if (iPrep >= 0 && iPreGate >= 0 && !(iPrep < iPreGate)) {
-      err(`${SCALP}: 1회 상한이 준비 단계보다 앞입니다 — 명목가 없이 판정합니다`);
-    }
-    if (iPreGate >= 0 && iCommit >= 0 && !(iPreGate < iCommit)) {
-      err(`${SCALP}: 확정(쓰기)이 1회 상한보다 앞입니다`
-        + ' — 상한에 걸릴 요청이 이미 계좌 설정을 바꿉니다');
-    }
-    // **판정을 실제로 넘기는가.** 부르기만 하고 결과를 버리면 아무 의미가
-    // 없다 — 실제로 라우트의 `if`를 `true`로 바꾼 돌연변이가 그대로
-    // 새 나갔다. 그래서 판정이 확정 단계의 인자로 들어가는지 본다.
-    if (!/commitEntry100x\(entry,[\s\S]{0,400}?\}, preGate\)/.test(scalpSrc)) {
-      err(`${SCALP}: 1회 상한 판정을 확정 단계에 넘기지 않습니다`
-        + ' — 부르고 결과를 버리면 상한이 아무것도 막지 못합니다');
-    }
-    if (iCommit >= 0 && iWrite >= 0 && !(iCommit <= iWrite)) {
-      err(`${SCALP}: 배율 설정이 확정 단계 밖에 있습니다`);
+    if (iCommitCall < 0) {
+      err(`${SCALP}: 확정 단계를 준비 결과로 부르지 않습니다`
+        + ' — 쓰기 시점을 특정할 수 없습니다');
+    } else {
+      if (iPrep >= 0 && !(iPrep < iCommitCall)) {
+        err(`${SCALP}: 확정(쓰기)이 준비 단계보다 앞입니다`);
+      }
+      // 쓰기 없이 판정되는 관문이 전부 쓰기 앞에 있는가.
+      for (const [needle, what] of [
+        ['killSwitchGate(', '킬 스위치'],
+        ['migrationGate(', '마이그레이션 관문'],
+        ['strategyConflictGate(', '전략 충돌'],
+        ['sleeveCapitalGate(', '슬리브 자본'],
+        ['parityGate(', '시크릿 정합'],
+        ['exitMonitorGate(', '청산 감시 신선도'],
+        ['modeNeedsConfirmation(', '사람 확인'],
+        ['suppressGate(', '수동 청산 억제'],
+        ['gateOrder(opMode', '1회 상한'],
+        ['runChecklist(', '점검 목록'],
+        ['applyVetoToSignal(', '경제일정·변동성 거부권'],
+        ['shortGuard(', '숏 방어'],
+        ['claimSignal(', '중복 신호'],
+      ]) {
+        const i = scalpSrc.indexOf(needle);
+        if (i < 0) { err(`${SCALP}: ${what} 검사가 없습니다`); continue; }
+        if (!(i < iCommitCall)) {
+          err(`${SCALP}: ${what}가 거래소 쓰기보다 뒤입니다`
+            + ' — 이 사유로 막힐 요청이 계좌 배율을 먼저 바꿉니다');
+        }
+      }
+      // 1회 상한 판정을 확정 단계에 **실제로 넘기는가.** 부르고 결과를
+      // 버리면 아무것도 막지 못한다 — 실제로 그 변이가 새 나갔었다.
+      if (!/commitEntry100x\(\n\s*prepared100x,[\s\S]{0,200}?modeGate,\n\s*\)/.test(scalpSrc)) {
+        err(`${SCALP}: 1회 상한 판정(modeGate)을 확정 단계에 넘기지 않습니다`);
+      }
     }
   }
 
@@ -852,24 +867,15 @@ const scalpSrc = code(SCALP);
   // 그래서 반대로 센다. 쓰기 경계 뒤의 차단 코드를 **전부 뽑아서**, 아래
   // 목록에 없으면 실패시킨다. 목록에 올리려면 "왜 앞으로 못 옮기는가"를
   // 적어야 한다. 옮길 수 있는데 뒤에 둔 것은 통과하지 못한다.
+  // 쓰기 뒤에 남아도 되는 차단은 **걸어 봐야 아는 것**뿐이다.
   const POST_WRITE_ALLOWED = new Map([
-    ['CHECKLIST_BLOCKED',
-      '계획(수량·명목가)과 거래소 관측값이 있어야 판정한다 — 그 값을 만드는 일이 곧 쓰기다'],
-    ['RISK_VETO',
-      '거부권 입력에 plan.leverage가 들어간다. STOP_RISK 경로의 배율은 역산이라 쓰기 전에 알 수 없다'],
-    ['VETO_UNAVAILABLE', 'RISK_VETO와 같은 호출의 실패 가지다'],
-    ['SHORT_GUARD',
-      '청산가와 손절의 순서를 보는 판정이라 계획이 있어야 한다'],
-    ['DUPLICATE_SIGNAL',
-      'DB만 보지만 **선점이 봉을 소비한다**. 앞으로 옮기면 뒤에서 다른 사유로 막힌 요청이 그 봉을 써 버려 다음 시도가 중복으로 막힌다 — 사용자 판단이 필요해 그대로 둔다'],
+    ['LEVERAGE_NOT_EXACT',
+      '배율을 걸고 되읽어야 알 수 있다 — 쓰기의 결과 그 자체다'],
     ['LEVERAGE_MISMATCH',
-      '이 단계가 곧 쓰기다 — 배율을 맞추고 되읽는 일 자체라 앞에 둘 수 없다'],
-    ['MODE_GATE',
-      '모의 체결 경로의 응답이다. 같은 gateOrder 판정을 쓰기 **전에** 먼저'
-      + ' 보고(preGate) 거기서 멈추므로, 여기 도달할 때 거래소 쓰기는 이미 0이다'],
+      '이 단계가 곧 쓰기다(ensureLeverage) — 맞추고 되읽는 일 자체라 앞에 둘 수 없다'],
   ]);
   {
-    const wb = iAuth;
+    const wb = iCommitCall;
     const seen = new Set();
     // `blocked:` 뒤의 **그 줄 전체**에서 코드를 뽑는다. 삼항으로 적힌
     // 것(`blocked: x ? null : 'MODE_GATE'`)까지 잡아야 한다 — 모양을
