@@ -101,10 +101,14 @@ jobs:
       #
       # `set -o pipefail`이 핵심이다. 없으면 파이프의 마지막 명령(tee)의
       # 종료 코드가 쓰여서 **하네스가 실패해도 초록**이 된다.
+      #
+      # 로그를 **저장소 밖**(`$RUNNER_TEMP`)에 쓴다. 작업 폴더에 쓰면 그
+      # 파일이 추적되지 않는 변경으로 남고, 하네스가 변이마다 하는 "트리가
+      # 깨끗한가" 검사가 그것을 대상 외 변경으로 읽어 **첫 변이에서 중단**된다.
       - name: 돌연변이 전수 실행 (105건)
         run: |
           set -o pipefail
-          node scripts/check-100x-mutations.mjs 2>&1 | tee mutation-result.txt
+          node scripts/check-100x-mutations.mjs 2>&1 | tee "$RUNNER_TEMP/mutation-result.txt"
 
       # 요약을 실행 페이지 상단에 붙인다. 로그를 끝까지 스크롤하지 않아도
       # 숫자가 보이게 한다 — 검토자가 확인하려는 것이 그 한 줄이다.
@@ -120,13 +124,13 @@ jobs:
             echo "커밋: \`${GITHUB_SHA}\`"
             echo
             echo '```'
-            tail -n 3 mutation-result.txt 2>/dev/null || echo '(결과 파일 없음 — 실행이 시작되지 못했습니다)'
+            tail -n 3 "$RUNNER_TEMP/mutation-result.txt" 2>/dev/null || echo '(결과 파일 없음 — 실행이 시작되지 못했습니다)'
             echo '```'
             echo
             echo '### 새 나간 것 · 판정 불가 · 과도 검출'
             echo
             echo '```'
-            grep -E '✗|⚠' mutation-result.txt 2>/dev/null || echo '없음'
+            grep -E '✗|⚠' "$RUNNER_TEMP/mutation-result.txt" 2>/dev/null || echo '없음'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -137,7 +141,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mutation-result
-          path: mutation-result.txt
+          path: ${{ runner.temp }}/mutation-result.txt
           retention-days: 30
 
       # 하네스는 변이마다 원본 바이트를 되쓰고 끝에 트리를 다시 확인한다.
@@ -146,7 +150,8 @@ jobs:
       - name: 끝나고도 트리가 깨끗한지 확인
         if: always()
         run: |
-          if [ -n "$(git status --porcelain | grep -v '^?? mutation-result.txt$')" ]; then
+          leftover="$(git status --porcelain)"
+          if [ -n "$leftover" ]; then
             echo "::error::실행 뒤 트리가 깨끗하지 않습니다 — 복원이 완전하지 않았습니다."
             git status --porcelain
             exit 1
