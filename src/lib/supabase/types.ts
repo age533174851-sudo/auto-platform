@@ -1184,7 +1184,9 @@ export type Database = {
       paper_accounts: {
         Row: {
           balance: number
+          id: string
           initial_balance: number
+          is_default: boolean
           total_fees: number
           total_pnl: number
           trade_count: number
@@ -1194,7 +1196,9 @@ export type Database = {
         }
         Insert: {
           balance?: number
+          id?: string
           initial_balance?: number
+          is_default?: boolean
           total_fees?: number
           total_pnl?: number
           trade_count?: number
@@ -1204,7 +1208,9 @@ export type Database = {
         }
         Update: {
           balance?: number
+          id?: string
           initial_balance?: number
+          is_default?: boolean
           total_fees?: number
           total_pnl?: number
           trade_count?: number
@@ -1216,6 +1222,7 @@ export type Database = {
       }
       paper_positions: {
         Row: {
+          paper_account_id: string | null
           bucket: string | null
           closed_at: string | null
           created_at: string
@@ -1245,6 +1252,7 @@ export type Database = {
           user_id: string | null
         }
         Insert: {
+          paper_account_id?: string | null
           bucket?: string | null
           closed_at?: string | null
           created_at?: string
@@ -1274,6 +1282,7 @@ export type Database = {
           user_id?: string | null
         }
         Update: {
+          paper_account_id?: string | null
           bucket?: string | null
           closed_at?: string | null
           created_at?: string

@@ -192,8 +192,34 @@ export async function POST(req: NextRequest) {
       total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0,
       updated_at: new Date().toISOString(),
     };
-    const save = (row: any, cols: string) => (sb as any).from('paper_accounts')
-      .upsert(row, { onConflict: 'user_id' }).select(cols);
+    // **기본 계좌 한 줄을 확실히 만든다.**
+    //
+    // 예전에는 `upsert(..., { onConflict: 'user_id' })`였다. 그때는
+    // `user_id`가 기본키라 그 충돌 대상이 존재했다. 계좌가 여럿이 될 수
+    // 있게 되면서(081) `user_id` 유니크 제약은 사라졌고, 남은 것은
+    // **부분** 유니크 인덱스(기본 계좌에만 걸린다)다. PostgREST는 부분
+    // 인덱스가 요구하는 술어를 보낼 수 없어 `onConflict`로 지목할 수 없다.
+    //
+    // 그래서 갱신을 먼저 하고, 바뀐 줄이 없을 때만 넣는다. **돌아온 줄을
+    // 보는 성질은 그대로다** — 0줄이면 실패고, 그것이 이 자리의 요점이다.
+    const updateDefault = (row: any, cols: string) => (sb as any).from('paper_accounts')
+      .update(row).eq('user_id', uid).eq('is_default', true).select(cols);
+
+    const save = async (row: any, cols: string) => {
+      const upd = await updateDefault(row, cols);
+      if (upd.error) return upd;
+      if (Array.isArray(upd.data) && upd.data.length > 0) return upd;
+
+      const ins = await (sb as any).from('paper_accounts')
+        .insert({ ...row, is_default: true }).select(cols);
+      if (!ins.error) return ins;
+
+      // 경합. 다른 요청이 먼저 넣었으면 부분 유니크 인덱스가 이쪽을
+      // 막는다 — 그건 실패가 아니라 "이미 있다"이므로 한 번 더 갱신한다.
+      const again = await updateDefault(row, cols);
+      if (!again.error && Array.isArray(again.data) && again.data.length > 0) return again;
+      return ins;
+    };
 
     let { data: upRows, error: upErr } = await save(
       { ...base, started_at: new Date().toISOString() }, 'user_id, balance, started_at');

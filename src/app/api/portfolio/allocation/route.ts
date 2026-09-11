@@ -62,7 +62,9 @@ export async function GET(req: NextRequest) {
   let equityUsd: number | null = null;
   try {
     const { data } = await sb.from('paper_accounts')
-      .select('balance').eq('user_id', uid).maybeSingle();
+      // **기본 계좌만.** 계좌가 여럿이 되면 user_id만으로는 여러 줄이
+      // 나오고 maybeSingle()이 던진다. 챌린지 계좌를 자산에 섞지도 않는다.
+      .select('balance').eq('user_id', uid).eq('is_default', true).maybeSingle();
     const v = Number(data?.balance);
     equityUsd = Number.isFinite(v) ? v : null;
     if (equityUsd == null) warnings.push('모의 계좌 잔고를 확인하지 못했습니다');

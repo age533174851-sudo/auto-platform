@@ -133,7 +133,8 @@ export async function readPaperCapacity(
   let balance: unknown;
   try {
     const { data, error } = await sb.from('paper_accounts')
-      .select('balance').eq('user_id', userId).maybeSingle();
+      // 기본 계좌만. 용량 판정은 그 계좌의 잔고로 한다.
+      .select('balance').eq('user_id', userId).eq('is_default', true).maybeSingle();
     if (error) return { known: false, reason: '모의 계좌 조회에 실패했습니다' };
     if (!data) {
       return { known: false, reason: '모의 계좌가 없습니다 — 먼저 모의투자를 시작하세요' };
