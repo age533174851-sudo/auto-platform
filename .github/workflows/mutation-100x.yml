@@ -35,6 +35,11 @@ on:
   # **자동 실행에 연결하지 않는다.** pull_request나 push에 걸면 모든 PR이
   # 이 시간을 물게 된다.
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: '검증할 exact commit SHA (예: #246의 head)'
+        required: true
+        type: string
 
 # 읽기만 하면 된다. 이 워크플로는 아무것도 쓰지 않는다.
 permissions:
@@ -48,11 +53,56 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      # ── 검증할 커밋을 받아서 그것만 체크아웃한다 ──
+      #
+      # 왜 브랜치가 아니라 SHA인가
+      # ─────────────────────────
+      # GitHub UI의 `Use workflow from`은 **워크플로 정의가 있는 브랜치**를
+      # 고르는 것이지 검증할 코드를 고르는 것이 아니다. 그래서 정의가 없는
+      # 브랜치를 고르면 실행 자체가 막힌다 — 실제로 그렇게 막혔다.
+      #
+      # 그리고 브랜치는 움직인다. "그 브랜치를 검증했다"는 나중에 무엇을
+      # 검증한 것인지 말해 주지 못한다. 증거는 **정확히 이 커밋**이어야
+      # 한다. 그래서 정의는 default branch에서 돌리고, 검증 대상은
+      # 입력으로 받는다.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.target_sha }}
           # 하네스는 시작할 때 `git status --porcelain`이 깨끗하기를 요구한다.
           # 얕은 체크아웃이어도 상태 판정에는 문제가 없다.
           fetch-depth: 1
+
+      # ── 정말 그 커밋인가 ──
+      #
+      # `ref`에 브랜치 이름이나 태그를 넣어도 체크아웃은 성공한다. 그러면
+      # 로그에는 "돌았다"만 남고 **무엇을 검증했는지는 남지 않는다.**
+      # 요청한 값과 실제 HEAD가 같은지 여기서 못박는다.
+      #
+      # 입력값을 `run:`에 직접 펴 넣지 않고 env로 넘긴다 — 사람이 넣는
+      # 값이라 셸에 그대로 펴면 주입 통로가 된다.
+      - name: 검증 대상 커밋 확인
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          case "$TARGET_SHA" in
+            *[!0-9a-fA-F]*|"")
+              echo "::error::target_sha가 커밋 해시 형식이 아닙니다: $TARGET_SHA"
+              exit 1 ;;
+          esac
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$TARGET_SHA" ]; then
+            echo "::error::target SHA mismatch"
+            echo "requested=$TARGET_SHA"
+            echo "actual=$actual"
+            exit 1
+          fi
+          # **둘을 반드시 구분해서 남긴다.**
+          #
+          # `GITHUB_SHA`는 이 워크플로 정의가 있는 커밋(default branch)이지
+          # 검증 대상이 아니다. 그 값을 증거로 적으면 엉뚱한 커밋을 검증했다고
+          # 기록하는 것이 된다. 돌연변이 증거의 정본은 아래쪽이다.
+          echo "workflow definition SHA = $GITHUB_SHA"
+          echo "mutation target SHA     = $actual   ← 증거의 정본"
 
       - uses: actions/setup-node@v4
         with:
@@ -64,22 +114,20 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
-      # ── 이 ref에 하네스가 있는가 ──
+      # ── 그 커밋에 하네스가 있는가 ──
       #
-      # 이 워크플로 파일은 **default branch에 있어야** GitHub가 등록한다.
-      # 그런데 검증 대상 코드(하네스 포함)는 아직 기능 브랜치에 있을 수 있다.
-      # 그래서 이 둘이 서로 다른 ref에 있는 기간이 생긴다.
-      #
-      # 그 상태에서 ref를 잘못 주고 돌리면 node가 "모듈 없음"으로 죽어서,
-      # 무엇이 잘못됐는지 로그만 보고는 알기 어렵다. 여기서 먼저 말한다.
-      - name: 하네스가 이 ref에 있는지 확인
+      # 없으면 node가 "모듈 없음"으로 죽는다. 로그만 보고는 무엇이 잘못됐는지
+      # 알기 어려우니 여기서 먼저 말한다.
+      - name: 하네스가 대상 커밋에 있는지 확인
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           if [ ! -f scripts/check-100x-mutations.mjs ]; then
-            echo "::error::이 ref(${GITHUB_REF_NAME})에는 scripts/check-100x-mutations.mjs가 없습니다."
-            echo "::error::하네스가 있는 브랜치를 'Use workflow from'으로 골라서 실행하세요."
+            echo "::error::대상 커밋($TARGET_SHA)에 scripts/check-100x-mutations.mjs가 없습니다."
+            echo "::error::하네스가 들어 있는 커밋의 SHA를 target_sha로 넣으세요."
             exit 1
           fi
-          echo "하네스 확인됨 — ${GITHUB_REF_NAME}"
+          echo "하네스 확인됨 — $TARGET_SHA"
 
       # 하네스는 더러운 트리에서 돌기를 거부한다(증거는 특정 커밋에 대한
       # 것이어야 하므로). 설치 뒤 정말 깨끗한지 먼저 보고, 아니면 무엇이
@@ -121,7 +169,9 @@ jobs:
           {
             echo '## 전용 100배 돌연변이 전수 실행'
             echo
-            echo "커밋: \`${GITHUB_SHA}\`"
+            echo "검증 대상 커밋: \`$(git rev-parse HEAD)\`"
+            echo
+            echo "(워크플로 정의 커밋: \`${GITHUB_SHA}\` — 증거의 정본은 위쪽이다)"
             echo
             echo '```'
             tail -n 3 "$RUNNER_TEMP/mutation-result.txt" 2>/dev/null || echo '(결과 파일 없음 — 실행이 시작되지 못했습니다)'
