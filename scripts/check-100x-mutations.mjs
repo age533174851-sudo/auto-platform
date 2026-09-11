@@ -58,6 +58,13 @@ if (argv.includes('--help') || argv.includes('-h')) {
   node scripts/check-100x-mutations.mjs --list       돌연변이 목록만 출력
   node scripts/check-100x-mutations.mjs --help       이 도움말
 
+진단
+  --only OK1,OK2   이름이 그것으로 시작하는 변이만 돌린다
+  --verbose        어느 게이트가 빨간불을 켰는지 함께 적는다
+
+  대조군이 빨개졌을 때 쓴다. 게이트 셋 중 무엇이 잡았는지 보이지 않으면
+  원인을 찾을 수 없다.
+
 전제
   · 저장소 루트에서 실행한다
   · 워킹 트리가 깨끗해야 한다 (더러우면 거부한다)
@@ -77,6 +84,14 @@ if (argv.includes('--help') || argv.includes('-h')) {
 
 const SELF_TEST = argv.includes('--self-test');
 const LIST_ONLY = argv.includes('--list');
+const VERBOSE = argv.includes('--verbose');
+// `--only OK1` 또는 `--only OK1,OK2` — 이름 앞부분만 맞으면 된다.
+// 대조군 하나가 빨개졌을 때 그것만 떼어 돌려 보기 위한 것이다.
+const ONLY = (() => {
+  const i = argv.indexOf('--only');
+  if (i < 0 || !argv[i + 1]) return null;
+  return argv[i + 1].split(',').map(x => x.trim()).filter(Boolean);
+})();
 
 const P = {
   prof: 'src/lib/strategies/profiles.ts',
@@ -105,9 +120,15 @@ const P = {
 const CHECK = ['scripts/check-100x-contract.mjs'];
 const CHECK1A = ['scripts/check-execution-profile.mjs'];
 
-const run = (cmd, args) => {
-  try { execFileSync(cmd, args, { stdio: 'pipe', timeout: 600_000 }); return 0; }
-  catch { return 1; }
+/** 게이트 하나를 돌린다. 통과면 null, 실패면 {name, code, output}. */
+const runGate = (name, cmd, args) => {
+  try {
+    execFileSync(cmd, args, { stdio: 'pipe', timeout: 900_000 });
+    return null;
+  } catch (e) {
+    const out = `${e?.stdout?.toString?.() || ''}${e?.stderr?.toString?.() || ''}`;
+    return { name, code: e?.status ?? 1, output: out.trim() };
+  }
 };
 // **CI가 보는 것을 그대로 본다.** 검사기 둘 + 유닛 시험.
 //
@@ -116,14 +137,25 @@ const run = (cmd, args) => {
 // 탐지력 과소보고다. 하네스가 CI보다 좁게 보면 그 차이만큼 거짓 신호가
 // 나온다. 검사기를 먼저 돌려서 빨리 걸리는 것은 빨리 걸리게 하고,
 // 통과하면 시험까지 본다.
-const gateTests = () => {
-  try { execFileSync('npm', ['test'], { stdio: 'pipe', timeout: 900_000 }); return 0; }
-  catch { return 1; }
+const GATES = [
+  ['check-100x-contract', process.execPath, CHECK],
+  ['check-execution-profile', process.execPath, CHECK1A],
+  ['npm test', 'npm', ['test']],
+];
+
+/**
+ * 게이트 전체. 통과면 null, 실패면 **처음 실패한 게이트**를 돌려준다.
+ *
+ * 예전에는 1/0만 돌려줬다. 그래서 "빨간불"이 무엇 때문인지 볼 수 없었고,
+ * 실제로 그 때문에 한 번 크게 틀렸다 — 아래 기준선 검사 주석 참고.
+ */
+const gateChecker = () => {
+  for (const [name, cmd, args] of GATES) {
+    const fail = runGate(name, cmd, args);
+    if (fail) return fail;
+  }
+  return null;
 };
-const gateChecker = () =>
-  (run(process.execPath, CHECK)
-   || run(process.execPath, CHECK1A)
-   || gateTests());
 
 const M = [
   // ── 필수 wiring 돌연변이 ──
@@ -542,13 +574,24 @@ function moveAfterWrite(src, startMarker, alsoFrom, endMarker) {
 // git 상태와 무관하게 정확히 되돌아가고, 무엇을 지울 수도 없다.
 const restoreExact = (file, original) => writeFileSync(file, original);
 
+// `--only`가 있으면 그것만 남긴다. 진단용이므로 **결과 요약에 그대로
+// 반영된다** — 일부만 돌린 결과를 전체 결과로 착각하지 않도록 총계도
+// 줄어든 수로 적힌다.
+const SELECTED = ONLY
+  ? M.filter(([name]) => ONLY.some(p => name.startsWith(p)))
+  : M;
+if (ONLY && SELECTED.length === 0) {
+  console.error(`❌ --only ${ONLY.join(',')} 에 맞는 돌연변이가 없습니다`);
+  process.exit(1);
+}
+
 const gitDirty = () =>
   execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' })
     .split('\n').map(l => l.slice(3).trim()).filter(Boolean);
 
 if (LIST_ONLY) {
-  for (const [name, file, , kind = 'RED'] of M) console.log(`${kind.padEnd(14)} ${name}  →  ${file}`);
-  console.log(`\n총 ${M.length}건`);
+  for (const [name, file, , kind = 'RED'] of SELECTED) console.log(`${kind.padEnd(14)} ${name}  →  ${file}`);
+  console.log(`\n총 ${SELECTED.length}건`);
   process.exit(0);
 }
 
@@ -565,7 +608,7 @@ if (SELF_TEST) {
   // 아니라 "이 점검 때문에 더러워졌는가"를 봐야 한다. 하네스 파일 자체가
   // 아직 커밋되지 않은 상태에서 돌리면 앞의 방식은 거짓 경보를 낸다.
   const dirtyBefore = new Set(gitDirty());
-  for (const [name, file, mutate, kind = 'RED'] of M) {
+  for (const [name, file, mutate, kind = 'RED'] of SELECTED) {
     if (seen.has(name)) { console.error(`❌ 이름이 겹칩니다: ${name}`); bad++; }
     seen.add(name);
     let before;
@@ -589,7 +632,7 @@ if (SELF_TEST) {
     bad++;
   }
   if (bad) { console.error(`\n돌연변이 하네스 자기 점검 실패: ${bad}건`); process.exit(1); }
-  console.log(`✅ 돌연변이 하네스 자기 점검 — ${M.length}건 전부 겨냥 가능`);
+  console.log(`✅ 돌연변이 하네스 자기 점검 — ${SELECTED.length}건 전부 겨냥 가능`);
   process.exit(0);
 }
 
@@ -612,6 +655,45 @@ if (SELF_TEST) {
 // 중간에 죽어도 원본으로 되돌린다. 되돌리지 못한 채 끝나면 다음 실행이
 // 더러운 트리로 거부되므로 조용히 넘어가지는 않는다 — 그래도 여기서
 // 되돌리는 편이 낫다.
+// ══════════════════ 기준선 ══════════════════
+//
+// **변이를 넣기 전에 게이트가 초록인지 먼저 본다.**
+//
+// 이 검사가 없어서 한 번 크게 틀렸다. GitHub Actions에서 얕은 체크아웃
+// (`fetch-depth: 1`)으로 돌렸더니 `check-execution-profile`이 비교할 base
+// 커밋을 찾지 못해 **변이와 무관하게 항상 실패**했다. 그러자 105건이 전부
+// 빨간불이 됐고, 하네스는 그것을 "검출 102 · 누락 0"이라고 적었다.
+//
+// 숫자는 그럴듯했지만 아무것도 측정하지 않았다. 대조군 2건이 함께 빨개진
+// 덕분에 드러났을 뿐, 대조군이 없었다면 "전부 검출"로 보고됐을 것이다.
+//
+// 돌연변이 검사의 전제는 하나다: **지금 초록인 것이 변이 때문에 빨개져야
+// 한다.** 처음부터 빨갛다면 어떤 변이를 넣어도 빨갛고, 그 실행은 판정이
+// 아니라 잡음이다. 그래서 아예 시작하지 않는다.
+{
+  process.stdout.write('기준선 확인 (변이 없이 게이트가 초록인가) … ');
+  const fail = gateChecker();
+  if (fail) {
+    console.log('실패\n');
+    console.error(`❌ 변이를 넣기 전부터 게이트가 실패합니다: ${fail.name} (exit ${fail.code})`);
+    console.error('   이 상태에서는 모든 변이가 빨간불이 되어 판정이 전부 거짓이 됩니다.');
+    if (fail.output) {
+      console.error('\n--- 게이트 출력 ---');
+      console.error(fail.output.split('\n').slice(-25).join('\n'));
+      console.error('-------------------');
+    }
+    // **원인을 단정하지 않는다.** 위의 게이트 출력이 정본이다. 여기서는
+    // 지금까지 실제로 겪은 것만 적는다.
+    console.error('\n   지금까지 실제로 겪은 원인:');
+    console.error('   · 얕은 체크아웃(fetch-depth 1) — 검사기가 비교할 base 커밋을 찾지 못한다');
+    console.error('     → 전체 이력을 받아서(fetch-depth 0) 다시 실행');
+    console.error('   · 의존성 미설치 — 검사기가 TypeScript를 찾지 못한다');
+    console.error('     → npm ci');
+    process.exit(4);
+  }
+  console.log('초록');
+}
+
 let inFlight = null;
 const rescue = () => { if (inFlight) { try { restoreExact(inFlight.file, inFlight.before); } catch {} inFlight = null; } };
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -621,7 +703,7 @@ process.on('uncaughtException', (e) => { rescue(); console.error(e); process.exi
 
 const started = Date.now();
 let detected = 0, missed = 0, noop = 0, greenOk = 0, greenBad = 0, equiv = 0;
-for (const [name, file, mutate, kind = 'RED'] of M) {
+for (const [name, file, mutate, kind = 'RED'] of SELECTED) {
   const before = readFileSync(file, 'utf8');
   const after = mutate(before);
   if (after === before) {
@@ -631,7 +713,8 @@ for (const [name, file, mutate, kind = 'RED'] of M) {
   }
   inFlight = { file, before };
   writeFileSync(file, after);
-  const rc = gateChecker();
+  const fail = gateChecker();
+  const rc = fail ? 1 : 0;
   restoreExact(file, before);
   inFlight = null;
 
@@ -652,11 +735,18 @@ for (const [name, file, mutate, kind = 'RED'] of M) {
 
   if (kind === 'GREEN') {
     if (rc === 0) { console.log(`  ✓  ${name} — PASS (과도 검출 없음)`); greenOk++; }
-    else { console.log(`  ✗  ${name} — 정상 변경인데 실패했다 (과도 검출)`); greenBad++; }
+    else {
+      console.log(`  ✗  ${name} — 정상 변경인데 실패했다 (과도 검출 · ${fail.name})`);
+      if (fail.output) console.log(fail.output.split('\n').slice(-8).map(l => `        ${l}`).join('\n'));
+      greenBad++;
+    }
   } else if (kind === 'EQUIV') {
     if (rc === 0) { console.log(`  ○  ${name} — GREEN (동치 변이 · 뒤 검사가 같은 코드로 막는다)`); equiv++; }
     else { console.log(`  ●  ${name} — RED (동치가 아니었다)`); detected++; }
-  } else if (rc !== 0) { console.log(`  ●  ${name} — RED (검출)`); detected++; }
+  } else if (rc !== 0) {
+    console.log(`  ●  ${name} — RED (검출${VERBOSE ? ` · ${fail.name}` : ''})`);
+    detected++;
+  }
   else { console.log(`  ✗  ${name} — GREEN (새 나감)`); missed++; }
 }
 
@@ -673,5 +763,6 @@ for (const [name, file, mutate, kind = 'RED'] of M) {
 const mins = ((Date.now() - started) / 60_000).toFixed(1);
 console.log(`\n검출 ${detected} / 누락 ${missed} / 동치 ${equiv} / 판정불가 ${noop}`
   + ` / 대조군 PASS ${greenOk} · 과도검출 ${greenBad}`);
-console.log(`총 ${M.length}건 · ${mins}분 · 트리 clean 확인됨`);
+console.log(`총 ${SELECTED.length}건 · ${mins}분 · 트리 clean 확인됨`
+  + (ONLY ? `  (--only ${ONLY.join(',')} — 일부만 돌렸습니다)` : ''));
 process.exit(missed || greenBad || noop ? 1 : 0);
