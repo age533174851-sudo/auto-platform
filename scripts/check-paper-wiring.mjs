@@ -110,7 +110,19 @@ for (const rel of READERS) {
   const src = read(rel);
   if (src) {
     const code = stripComments(src);
-    if (!/\.upsert\s*\([\s\S]*?\.select\s*\(/.test(code)) {
+    // **되읽는가**를 본다 — 특정 쓰기 모양을 요구하지 않는다.
+    //
+    // 예전에는 `.upsert(...).select(...)`만 통과시켰다. 그때는 그것이
+    // 유일한 저장 모양이었기 때문이다. 계좌가 여럿이 될 수 있게 되면서
+    // (081) `user_id` 유니크 제약이 사라졌고, 남은 부분 유니크 인덱스는
+    // 술어가 필요해 PostgREST가 `onConflict`로 지목할 수 없다. 그래서
+    // 저장이 갱신 먼저 · 없을 때만 삽입으로 바뀌었다.
+    //
+    // 규칙의 요점은 upsert가 아니라 **0줄을 성공으로 읽지 않는 것**이다.
+    // 그러니 쓰기가 무엇이든 그 뒤에 `.select(`가 붙어야 한다.
+    const writes = [...code.matchAll(/\.(upsert|insert|update)\s*\(/g)];
+    const readsBack = [...code.matchAll(/\.(upsert|insert|update)\s*\([\s\S]*?\.select\s*\(/g)];
+    if (writes.length === 0 || readsBack.length === 0) {
       err(`${rel} — 시작(reset)이 저장된 줄을 되읽지 않습니다`
         + '\n     PostgREST의 UPDATE는 0줄을 고쳐도 오류가 아닙니다(RLS 포함)'
         + '\n     되읽지 않으면 화면은 시작됐다고 믿고, 이후 숫자가 전부 거짓입니다');

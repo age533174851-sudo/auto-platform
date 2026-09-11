@@ -72,27 +72,32 @@ CREATE OR REPLACE FUNCTION public.paper_open_position(
   p_paper_account_id  UUID DEFAULT NULL
 )
 RETURNS TABLE (
-  status      TEXT,      -- OPENED | DUPLICATE | NO_ACCOUNT
+  status      TEXT,      -- OPENED | DUPLICATE | NO_ACCOUNT | INSUFFICIENT_MARGIN
   position_id UUID
 )
 LANGUAGE plpgsql
 AS $$
 DECLARE
   v_account    UUID;
+  v_balance    NUMERIC;
+  v_used       NUMERIC;
   v_existing   UUID;
   v_id         UUID;
   v_rows       INT;
+  v_constraint TEXT;
 BEGIN
   IF p_entry_fee IS NULL OR p_entry_fee < 0 THEN
     RAISE EXCEPTION 'paper_open_position: 진입 수수료가 음수이거나 없습니다 (%)', p_entry_fee;
   END IF;
+  IF p_margin IS NULL OR p_margin < 0 THEN
+    RAISE EXCEPTION 'paper_open_position: 필요 증거금이 음수이거나 없습니다 (%)', p_margin;
+  END IF;
 
   -- ① 계좌 줄을 잠근다. 없으면 여기서 끝 — 만들지 않는다.
+  --    잔고도 이때 함께 읽는다. 잠금 밖에서 읽으면 검사와 갱신 사이가 벌어진다.
   --
-  -- **소유자까지 함께 본다.** 남의 계좌 id를 넣어도 여기서 안 잡힌다.
-  -- DB 복합 FK가 마지막 방어선이지만, 그 전에 사유가 분명한 자리에서
-  -- 멈추는 편이 낫다.
-  SELECT a.id INTO v_account
+  --    **소유자까지 함께 본다.** 남의 계좌 id를 넣어도 여기서 안 잡힌다.
+  SELECT a.id, a.balance INTO v_account, v_balance
     FROM public.paper_accounts a
    WHERE a.user_id = p_user_id
      AND (CASE WHEN p_paper_account_id IS NULL THEN a.is_default
@@ -105,6 +110,9 @@ BEGIN
   END IF;
 
   -- ② 같은 신호는 한 번만. 잠금을 쥔 채로 보므로 동시 호출도 한쪽만 넣는다.
+  --
+  --    **용량 검사보다 앞이다.** 이미 성공한 신호의 재시도는 그 사이 잔고가
+  --    줄었더라도 DUPLICATE여야 한다 — 그게 멱등이다.
   IF p_signal_id IS NOT NULL THEN
     SELECT id INTO v_existing
       FROM public.paper_positions
@@ -116,7 +124,26 @@ BEGIN
     END IF;
   END IF;
 
-  -- ③ 포지션. **자기 계좌를 들고 태어난다.**
+  -- ③ 가용 증거금 — **잠근 상태에서 보는 이 값이 최종이다**
+  --
+  --    **그 계좌의 포지션만 센다.** 사용자 전체로 세면 챌린지 계좌의
+  --    증거금이 기본 계좌의 용량을 깎는다 — 계좌를 나눈 이유가 사라진다.
+  --    **소유자와 계좌를 둘 다 본다.** 계좌만 보면 "남의 포지션이 예산에
+  --    들어가지 않는다"는 보장이 복합 외래키에만 의존하게 되고, 사용자로만
+  --    보면 챌린지 계좌의 증거금이 기본 계좌 용량을 깎는다.
+  SELECT COALESCE(SUM(margin), 0) INTO v_used
+    FROM public.paper_positions
+   WHERE user_id = p_user_id
+     AND paper_account_id = v_account
+     AND status = 'open';
+
+  IF v_used + p_margin + p_entry_fee > v_balance THEN
+    -- 포지션도 수수료도 건드리지 않고 나간다.
+    RETURN QUERY SELECT 'INSUFFICIENT_MARGIN'::TEXT, NULL::UUID;
+    RETURN;
+  END IF;
+
+  -- ④ 포지션. **자기 계좌를 들고 태어난다.**
   INSERT INTO public.paper_positions (
     user_id, paper_account_id, signal_id, strategy_id, bucket, symbol, market,
     side, status, entry_price, fill_price, quantity, notional, leverage, margin,
@@ -130,7 +157,7 @@ BEGIN
   )
   RETURNING id INTO v_id;
 
-  -- ④ 수수료. **읽고 고쳐 쓰지 않는다** — SQL이 증가시킨다.
+  -- ⑤ 수수료. **읽고 고쳐 쓰지 않는다** — SQL이 증가시킨다.
   UPDATE public.paper_accounts
      SET balance    = balance    - p_entry_fee,
          total_fees = total_fees + p_entry_fee,
@@ -145,7 +172,27 @@ BEGIN
   END IF;
 
   RETURN QUERY SELECT 'OPENED'::TEXT, v_id;
-END $$;
+
+EXCEPTION
+  WHEN unique_violation THEN
+    -- **signal_id 충돌만 멱등 중복이다.** 다른 유니크 위반은 삼키지 않는다 —
+    -- 삼키면 진짜 고장이 '이미 체결됨'으로 조용히 사라진다.
+    --
+    -- 어느 유니크가 깨졌는지는 **오류 문구를 읽어 판단하지 않는다.**
+    -- PostgreSQL이 실제로 깨진 제약 이름을 직접 준다.
+    GET STACKED DIAGNOSTICS v_constraint = CONSTRAINT_NAME;
+
+    IF p_signal_id IS NOT NULL AND v_constraint = 'paper_pos_signal_uniq' THEN
+      SELECT id INTO v_existing
+        FROM public.paper_positions
+       WHERE signal_id = p_signal_id
+       LIMIT 1;
+      RETURN QUERY SELECT 'DUPLICATE'::TEXT, v_existing;
+      RETURN;
+    END IF;
+    RAISE;
+END;
+$$;
 
 -- ══════════════════ 청산 정산 ══════════════════
 --
