@@ -13,7 +13,9 @@ const DEFAULT_BALANCE = 10000;
  * `user_id`만으로 고르면 여러 줄이 나오고 `maybeSingle()`이 던진다 —
  * 기존 화면이 통째로 죽는다.
  *
- * 기본 계좌는 부분 유니크 인덱스로 사용자당 정확히 하나임이 보장된다.
+ * 부분 유니크 인덱스가 막는 것은 **기본 계좌가 두 개가 되는 것뿐이다.**
+ * 0개는 막지 못한다 — 다만 이 함수는 그때 임의 계좌를 고르지 않고
+ * **기본 계좌를 새로 만든다.** 전용 계좌(챌린지 등)를 집어 오지 않는다.
  */
 export async function getPaperAccount(sb: any, userId: string) {
   const { data } = await sb.from('paper_accounts')
