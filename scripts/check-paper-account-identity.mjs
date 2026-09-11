@@ -42,8 +42,8 @@ const MIG_RPC = 'supabase/migrations/082_paper_rpc_account_id.sql';
     // **사용자당 기본 계좌는 정확히 하나.** 코드가 실수해도 두 개가 될 수
     // 없어야 한다. 부분 유니크 인덱스가 그것을 DB에서 보장한다.
     if (!/CREATE UNIQUE INDEX[\s\S]*?paper_accounts[\s\S]*?\(user_id\)[\s\S]*?WHERE is_default/i.test(s)) {
-      fail('사용자당 기본 계좌가 하나임을 DB가 강제하지 않습니다 (부분 유니크 인덱스 없음)');
-    } else notes.push('기본 계좌는 사용자당 하나 — 부분 유니크 인덱스');
+      fail('기본 계좌가 둘이 되는 것을 DB가 막지 않습니다 (부분 유니크 인덱스 없음)');
+    } else notes.push('기본 계좌 2개 이상 — 부분 유니크 인덱스가 막는다 (0개는 못 막는다)');
 
     if (!/PRIMARY KEY \(id\)/i.test(s)) fail('기본키가 id로 옮겨지지 않았습니다');
 
@@ -104,6 +104,82 @@ const MIG_RPC = 'supabase/migrations/082_paper_rpc_account_id.sql';
       fail('계좌를 안 든 옛 포지션의 처리(기본 계좌)가 없습니다');
     }
   }
+}
+
+// ── 2.5 기본 계좌가 0개가 되는 경로가 생기지 않았는가 ──
+//
+// **부분 유니크 인덱스는 "최대 하나"만 보장한다.** 0개는 막지 못한다 —
+// 그 사용자의 모든 계좌가 `is_default = false`인 상태를 DB는 정상으로
+// 받아들인다.
+//
+// 지금 0개가 안 생기는 이유는 DB 제약이 아니라 **그렇게 만드는 경로가
+// 없기 때문**이다: 계좌를 만드는 두 자리가 모두 기본으로 넣고, `is_default`를
+// 낮추거나 계좌를 지우는 제품 코드가 0곳이다.
+//
+// 그 전제가 깨지는 순간을 여기서 잡는다. 이 검사가 없으면 나중에 누가
+// "챌린지 계좌를 기본으로 바꾸는" 기능을 넣으면서 기존 기본을 false로
+// 내리고, 그때부터 userId-only 경로가 전부 "계좌 없음"이 된다.
+{
+  const SRC = ['src/lib/engine/paperStore.ts', 'src/app/api/paper/account/route.ts',
+    'src/lib/portfolio/paperRead.ts', 'src/lib/portfolio/paperAccount.ts',
+    'src/app/api/paper/order/route.ts', 'src/app/api/paper/run/route.ts'];
+  for (const f of SRC) {
+    const code = read(f).split('\n')
+      .filter(l => !l.trim().startsWith('//') && !l.trim().startsWith('*')).join('\n');
+    if (!code) continue;
+    if (/is_default\s*:\s*false/.test(code)) {
+      fail(`${f}: 기본 계좌를 false로 내립니다 — 기본 계좌 0개 상태가 생길 수 있습니다.`
+        + ' 그 기능이 필요하면 "최소 하나"를 DB 트리거로 함께 강제하세요');
+    }
+    if (/from\('paper_accounts'\)[\s\S]{0,120}?\.delete\(/.test(code)) {
+      fail(`${f}: 모의 계좌를 지웁니다 — 마지막 기본 계좌가 사라질 수 있습니다`);
+    }
+  }
+  notes.push('기본 계좌를 낮추거나 지우는 제품 경로 0곳 (0개 상태가 생기지 않는 실제 이유)');
+}
+
+// ── 2.6 계좌를 만드는 자리는 전부 기본으로 만드는가 ──
+//
+// 새 사용자에게 기본 계좌가 안 생기면 그 사용자는 처음부터 0개다.
+{
+  const CREATORS = ['src/lib/engine/paperStore.ts', 'src/app/api/paper/account/route.ts'];
+  for (const f of CREATORS) {
+    const code = read(f);
+    if (!code) { fail(`${f}이 없습니다`); continue; }
+    const inserts = [...code.matchAll(/from\('paper_accounts'\)[\s\S]{0,200}?\.insert\(([\s\S]{0,200}?)\)/g)];
+    if (inserts.length === 0) continue;
+    for (const m of inserts) {
+      if (!/is_default:\s*true/.test(m[1]) && !/is_default: true/.test(code.slice(m.index - 300, m.index + 300))) {
+        fail(`${f}: 계좌를 만들면서 기본으로 표시하지 않습니다 — 새 사용자가 기본 계좌 0개로 시작합니다`);
+      }
+    }
+  }
+  notes.push('계좌를 만드는 자리는 전부 기본으로 만든다');
+}
+
+// ── 2.7 기본 계좌가 0개일 때 fail-closed인가 ──
+//
+// 0개를 완전히 막을 수 없다면, **그때 무엇을 하는가**가 계약이다.
+// 임의 계좌를 고르면 남의 돈이 아니라 자기 돈인데도 **고른 적 없는 장부**로
+// 주문이 나간다.
+{
+  const rpc = read(MIG_RPC);
+  if (!/IF v_account IS NULL THEN[\s\S]{0,200}?NO_ACCOUNT/i.test(rpc)) {
+    fail('진입 RPC가 기본 계좌 없음에서 NO_ACCOUNT로 멈추지 않습니다');
+  }
+  const raises = (rpc.match(/RAISE EXCEPTION '[a-z_]+: 계좌를 찾지 못했습니다'/g) || []).length;
+  if (raises < 2) fail(`수수료·입금 RPC가 계좌 없음에서 멈추지 않습니다 (${raises}곳)`);
+
+  // 읽는 쪽도 임의 계좌로 넘어가지 않아야 한다.
+  for (const [f, needle] of [
+    ['src/lib/engine/paperCapacity.ts', 'known: false'],
+    ['src/lib/portfolio/paperRead.ts', 'account = (data ?? null)'],
+  ]) {
+    if (!read(f).includes(needle)) {
+      fail(`${f}: 기본 계좌가 없을 때 멈추는 자리를 찾지 못했습니다`);
+    }
+  }
+  notes.push('기본 계좌 0개 → 전 경로 fail-closed (임의 계좌 선택 없음)');
 }
 
 // ── 3. 제품 코드가 기본 계좌로 좁혀 읽는가 ──
