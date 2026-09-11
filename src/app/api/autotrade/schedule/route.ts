@@ -37,6 +37,7 @@ import {
 import { runtimeStateOf, RUNTIME_LABEL } from '@/lib/autotrade/evaluationLoop';
 import { parseTogglePatch, enabledUpdate, notFoundMessage } from '@/lib/autotrade/scheduleToggle';
 import { workerPlan } from '@/lib/runtime/workerPlan';
+import { executionGateVerdict, enableFilterSpec } from '@/lib/execution/dormantGate';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -66,7 +67,7 @@ export async function GET(req: NextRequest) {
   //
   // 050이 아직인 계정에서는 이 칸이 없어서 조회가 실패한다 —
   // 아래 OPTIONAL 되읽기가 그 이름을 빼고 다시 읽는다.
-  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version, cancelled_at, execution_profile_id, execution_preset_id, execution_contract_version';
+  const FULL = 'id, symbol, connection_id, mode, enabled, last_run_at, last_result, last_decision, leverage_cap, risk_pct, interval_min, margin_pct, strategy_id, strategy_version, cancelled_at, execution_profile_id, execution_preset_id, execution_contract_version, margin_allocation_pct';
 
   let { data: rows, error } = await (sb as any)
     .from('autotrade_schedules').select(FULL).eq('user_id', uid).order('symbol');
@@ -83,7 +84,8 @@ export async function GET(req: NextRequest) {
   const OPTIONAL = ['margin_pct', 'last_decision', 'strategy_id', 'strategy_version', 'cancelled_at',
     // 077이 아직인 DB에서는 이 세 칸이 없다. **읽기는 후퇴해도 된다** —
     // 못 읽는 것과 저장하지 않는 것은 다른 일이다. 저장 쪽은 후퇴하지 않는다.
-    'execution_profile_id', 'execution_preset_id', 'execution_contract_version'];
+    'execution_profile_id', 'execution_preset_id', 'execution_contract_version',
+    'margin_allocation_pct'];
   const missing: string[] = [];
 
   for (let i = 0; i < OPTIONAL.length && error; i++) {
@@ -582,6 +584,31 @@ export async function POST(req: NextRequest) {
   // DB의 CHECK는 반쪽 저장만 잡는다. 모르는 프로필·모르는 프리셋·버전
   // 불일치는 DB가 모른다. 그래서 여기서 정확히 해석하고, 안 되면 저장
   // 자체를 하지 않는다.
+  // ── 증거금 배정 비율 ──
+  //
+  // **`marginPct`를 상속하지 않는다.** 그 값은 화면 기본값이 '10'이라
+  // 사용자가 고른 적 없어도 들어간다. 손절이 없는 프로필에서 크기를 정하는
+  // 유일한 근거에 그런 값을 넣으면, 아무도 고르지 않은 크기로 100배가 나간다.
+  //
+  // 안 보냈으면 칸을 아예 넣지 않는다(기존 값 유지). 명시적 null이면 지운다.
+  let allocCols: Record<string, any> = {};
+  const allocTouched = Object.prototype.hasOwnProperty.call(body ?? {}, 'marginAllocationPct');
+  if (allocTouched) {
+    const raw = body.marginAllocationPct;
+    if (raw === null) {
+      allocCols = { margin_allocation_pct: null };
+    } else {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0 || n > 100) {
+        return NextResponse.json({
+          ok: false, error: 'bad_margin_allocation',
+          message: `증거금 배정 비율이 올바르지 않습니다 (${String(raw)}) — 0 초과 100 이하여야 합니다`,
+        }, { status: 400 });
+      }
+      allocCols = { margin_allocation_pct: n };
+    }
+  }
+
   let epCols: Record<string, any> = {};
   if (epTouched && !epAllNull) {
     const { resolveExecutionProfile, isExecutionResolveError } =
@@ -616,6 +643,7 @@ export async function POST(req: NextRequest) {
     ...(intervalMin != null ? { interval_min: intervalMin } : {}),
     // 안 보냈으면 아예 넣지 않는다 — 기존 값이 그대로 남는다.
     ...epCols,
+    ...allocCols,
   };
 
   // ── 되살릴 때 취소 표식을 지운다 ──
@@ -826,6 +854,9 @@ async function setEnabledById(sb: any, uid: string, id: string, enabled: boolean
   const patch = enabledUpdate(enabled);
   let cols = ROW_SELECT;
   const missing: string[] = [];
+  // 켤 때만 조건이 붙는다. **무엇을 열 것인가는 dormantGate가 정한다** —
+  // 이 자리에서 직접 판단하면 실행기(L4)와 갈린다.
+  const gateSpec = enableFilterSpec();
   let dormantFilter = enabled;
 
   // 칸 하나가 없어서 되읽기가 실패하면 **UPDATE는 됐는데 500이 나간다.**
@@ -833,7 +864,11 @@ async function setEnabledById(sb: any, uid: string, id: string, enabled: boolean
   for (let i = 0; i <= ROW_OPTIONAL.length + 1; i++) {
     let q = sb.from('autotrade_schedules')
       .update(patch).eq('id', id).eq('user_id', uid);
-    if (dormantFilter) q = q.is('execution_profile_id', null);
+    if (dormantFilter) {
+      q = gateSpec.kind === 'or'
+        ? q.or(gateSpec.expr)
+        : q.is('execution_profile_id', null);
+    }
     const { data, error } = await q.select(cols).maybeSingle();
 
     if (!error) return { ok: true as const, row: data ?? null, error: null };
@@ -889,13 +924,20 @@ export async function PATCH(req: NextRequest) {
     if (p.enabled === true) {
       const probe = await (sb as any)
         .from('autotrade_schedules')
-        .select('id, execution_profile_id')
+        .select('id, strategy_id, execution_profile_id, execution_preset_id, execution_contract_version, mode, margin_allocation_pct')
         .eq('id', p.id).eq('user_id', uid).maybeSingle();
-      if (probe.data?.execution_profile_id) {
+      const probeGate = executionGateVerdict({
+        strategyId: probe.data?.strategy_id,
+        profileId: probe.data?.execution_profile_id,
+        presetId: probe.data?.execution_preset_id,
+        contractVersion: probe.data?.execution_contract_version,
+        mode: probe.data?.mode,
+        marginAllocationPct: probe.data?.margin_allocation_pct,
+      });
+      if (probe.data?.execution_profile_id && !probeGate.allowed) {
         return NextResponse.json({
           ok: false, error: 'EXECUTION_PROFILE_NOT_ACTIVE',
-          message: '이 예약은 실행 프로필이 지정돼 있어 아직 켤 수 없습니다'
-            + ' — 실행기가 그 계약을 아직 읽지 않습니다.',
+          message: probeGate.reason,
         }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
       }
     }

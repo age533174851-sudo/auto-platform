@@ -42,7 +42,9 @@ export type LifecycleCode =
   /** 이 전략에 생명주기 정책이 선언돼 있지 않다 */
   | 'NO_POLICY'
   /** 최고 도달 R을 못 구했다 (봉 조회 실패) */
-  | 'NO_HIGH_WATER';
+  | 'NO_HIGH_WATER'
+  /** 진입 시점 고정 손절이 없는 포지션 — 손절을 새로 걸지 않는다 */
+  | 'NO_FIXED_STOP';
 
 export interface LifecycleVerdict {
   code: LifecycleCode;
@@ -117,6 +119,24 @@ export function lifecycleDecide(i: {
       return { code: 'TIME_EXIT', action: 'CLOSE', mayCleanProtection: false,
         reason: `최대 보유 시간(${hours}시간) 초과 — 시간 청산` };
     }
+  }
+
+  // ── ④-b 고정 손절이 없는 포지션인가 ──
+  //
+  // 아래 `planTrail`은 `initialStop > 0`을 요구하므로 지금도 이런 포지션에
+  // 손절이 새로 걸리지는 않는다. **그런데 그 방어는 "1R을 계산할 수 없다"는
+  // 이유에서 나온 것이지 "손절을 걸면 안 된다"는 이유에서 나온 것이 아니다.**
+  //
+  // 둘은 다르다. 나중에 누가 1R의 기준을 다른 값(예: 청산가 거리)에서
+  // 구하도록 고치면, 그 변경은 `planTrail` 안에서는 합리적으로 보이지만
+  // 고정 손절을 쓰지 않기로 한 프로필에 **손절을 새로 걸어 버린다.**
+  //
+  // 그래서 이유를 여기에 따로 적는다. 시간 청산(④)은 위에서 이미 지나갔다 —
+  // 고정 손절이 없다고 해서 시간 청산까지 막지는 않는다.
+  if (!(Number(p.stopLoss) > 0)) {
+    return no('NO_FIXED_STOP',
+      '이 포지션에는 진입 시점 고정 손절이 없습니다 — 없는 1R을 지어내지 않고, '
+      + '손절을 새로 걸지도 않습니다');
   }
 
   // ── ⑤ 손절을 옮길 것인가 ──

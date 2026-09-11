@@ -505,6 +505,19 @@ jobs:
           EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/check-execution-profile.mjs
 
+      - name: 전용 100배 계약 (정확 100 · 고정 손절 없음 · 누출 0)
+        run: node scripts/check-100x-contract.mjs
+
+      # 전수 실행(105건)은 시험 전체를 여러 번 돌려서 오래 걸린다. 매 PR마다
+      # 돌리면 CI 시간이 폭증하므로, 여기서는 하네스가 **깨지지 않았는지**만
+      # 본다: 목록이 살아 있고, 대상 파일이 있고, 각 돌연변이가 실제로
+      # 적용되는지. 적용되지 않는 돌연변이는 통과가 아니라 "아무것도 안
+      # 겨눔"이고 그것이 탐지력 과대보고의 원인이다.
+      #
+      # 전수 실행: node scripts/check-100x-mutations.mjs (계약이 바뀐 라운드에 사람이 부른다)
+      - name: 돌연변이 하네스 자기 점검 (전수 실행은 수동)
+        run: node scripts/check-100x-mutations.mjs --self-test
+
       - name: 표시 계층 (숫자·상태·이름은 한 곳에서)
         run: node scripts/check-display-layer.mjs
 

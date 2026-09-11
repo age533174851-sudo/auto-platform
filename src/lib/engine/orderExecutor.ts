@@ -18,6 +18,9 @@ import { fillBasis, exitFromFill } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
+import { futuresApplyLeverage } from '../exchanges/futuresExec';
+import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
+import { stopReattachVerdict } from './stopReattach';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -56,6 +59,35 @@ export interface ExecuteArgs {
    * 정책을 새로 만들면서 기존 경로가 조용히 느슨해지면 안 된다.
    */
   protectionPolicy?: 'REQUIRED' | 'OPTIONAL' | 'NONE';
+  /**
+   * 이 주문의 **고정 손절 정책.** 실행 프로필 계약에서 온다.
+   *
+   * `protectionPolicy`와 무엇이 다른가: 그쪽은 "손절을 못 걸었을 때
+   * 어떻게 할 것인가"이고, 이쪽은 "애초에 고정 손절을 쓰는 전략인가"다.
+   * 둘을 한 칸으로 합치면 `NONE`이 "이번엔 실패해도 봐준다"와 "이 전략은
+   * 원래 안 건다" 두 뜻을 갖게 되고, 복구 경로가 그 둘을 구분할 수 없다.
+   *
+   * `NO_FIXED_SL`이면 여기서 세 가지가 함께 일어난다.
+   *   · `protectionPolicy`를 `NONE`으로 **덮는다** (호출부가 뭘 넘겼든)
+   *   · `stopLoss`가 함께 오면 **모순이므로 주문하지 않는다** — 조용히
+   *     무시하면 화면에는 손절이 있는데 거래소에는 없다
+   *   · 장부에 `stop_policy`를 적어 복구 경로가 이유를 알게 한다
+   *
+   * 안 넘기면 지금까지와 똑같다(= 고정 손절 전략).
+   */
+  stopPolicy?: StopPolicy;
+  /**
+   * 이 주문의 **고정 익절 정책.** 실행 프로필 계약에서 온다.
+   *
+   * **`stopPolicy`와 별개다.** 예전에는 `protectionPolicy: 'NONE'` 하나가
+   * 손절과 익절을 함께 껐는데, 그 자리에서 두 거래소가 이미 갈려 있었다 —
+   * 바이낸스 경로의 익절은 `policy`를 보지 않아서 그대로 나갔고, Gate는
+   * 막혔다. 같은 계약이 거래소마다 다르게 실행된 것이다.
+   *
+   * 이제 손절은 `stopPolicy`가, 익절은 이 값이 정한다. 안 넘기면
+   * `FIXED_TP`라 기존 호출부의 동작이 바뀌지 않는다.
+   */
+  takeProfitPolicy?: TakeProfitPolicy;
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -268,7 +300,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   const { clientOrderId, plan, exchange, mode, apiKey, apiSecret } = args;
   const testnet = mode !== 'LIVE';
   // 안 넘기면 REQUIRED — 기존 호출부의 동작이 바뀌지 않는다.
-  const policy = args.protectionPolicy ?? 'REQUIRED';
+  //
+  // **고정 손절을 쓰지 않는 프로필은 여기서 NONE으로 덮는다.** 호출부가
+  // 실수로 REQUIRED를 넘겨도 마찬가지다 — 계약이 호출부보다 세다.
+  const noFixedSl = args.stopPolicy === 'NO_FIXED_SL';
+  const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
+  // **익절은 따로 판단한다.** `policy === 'NONE'`으로 익절까지 끄면
+  // 손절 정책 하나가 두 가지를 뜻하게 되고, 그때 바이낸스와 Gate가
+  // 갈린다(바이낸스 익절은 policy를 보지 않았다). 축을 나눠서 두 거래소가
+  // 같은 계약을 같게 실행하도록 한다.
+  const noFixedTp = args.takeProfitPolicy === 'NO_FIXED_TP';
   const orderType = args.orderType ?? 'MARKET';
   // 청산이면 방향이 뒤집힌다. plan.side는 '무슨 포지션을 다루는가'이고
   // reduceOnly는 그것을 줄이는 주문이므로 반대 방향으로 보내야 한다.
@@ -281,6 +322,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // ── 0) 사전 안전 검사 — 잘못된 값이 거래소로 나가지 않게 ──
   if (!plan.approved) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: '승인되지 않은 계획은 주문할 수 없습니다' };
+  }
+  // **모순은 조용히 정리하지 않는다.**
+  //
+  // 고정 손절을 쓰지 않는 프로필인데 손절가가 함께 왔다면, 둘 중 하나는
+  // 틀린 것이고 어느 쪽인지 여기서는 알 수 없다. 손절을 버리고 진행하면
+  // 화면에는 손절이 있는데 거래소에는 없고, 손절을 살리면 계약이 깨진다.
+  // 어느 쪽도 조용히 고르면 안 된다.
+  if (noFixedSl && args.stopLoss != null) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '고정 손절을 쓰지 않는 프로필인데 손절가가 함께 넘어왔습니다'
+        + ` (${args.stopLoss}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
+  // 익절도 같은 규칙이다. 조용히 버리면 화면에는 익절이 있고 거래소에는 없다.
+  if (noFixedTp && args.takeProfit != null) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '고정 익절을 쓰지 않는 프로필인데 익절가가 함께 넘어왔습니다'
+        + ` (${args.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
   }
   if (!isFinite(plan.quantity) || plan.quantity <= 0) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: `주문 수량이 유효하지 않습니다 (${plan.quantity})` };
@@ -338,6 +396,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     stop_loss: args.stopLoss ?? null,
     take_profit: args.takeProfit ?? null,
     status: 'INTENT' as OrderStatus,
+    // **NO_FIXED_SL일 때만 칸을 붙인다.**
+    //
+    // 항상 붙이면 078이 아직인 DB에서 **모든 주문이 실패한다.** 기존
+    // 경로의 바이트를 바꾸지 않으려면 붙이지 않는 쪽이 맞다.
+    //
+    // 반대로 NO_FIXED_SL에서는 붙이지 못하면 실패하는 것이 **맞다** —
+    // 그 칸이 없는 DB에서는 복구 경로가 이 주문을 고정 손절 주문으로
+    // 읽게 되고, 그건 100배 포지션에 손절을 새로 거는 일이다.
+    // 여기서 칸을 떼고 저장하는 후퇴는 만들지 않는다.
+    ...(noFixedSl ? { stop_policy: 'NO_FIXED_SL' } : {}),
   };
 
   const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();
@@ -459,10 +527,26 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           return { ok: false, status: 'FAILED', clientOrderId, message: reason };
         }
 
-        const lev = await bf.setFuturesLeverage(apiKey, apiSecret, plan.symbol, plan.leverage, testnet);
-        if (!(lev as any)?.success) {
-          await update({ status: 'FAILED', error_message: `레버리지 설정 실패: ${(lev as any)?.message}` });
-          return { ok: false, status: 'FAILED', clientOrderId, message: `레버리지 설정 실패: ${(lev as any)?.message}` };
+        // ── 배율은 **되읽어 확인한 값**으로만 통과시킨다 ──
+        //
+        // 여기는 `setFuturesLeverage`의 `success`만 봤다. 그 함수는 안에서
+        // 되읽기는 하지만, **거래소가 요청보다 낮게 잡은 경우에도
+        // `success: true`를 돌려준다**(binanceFutures.ts의 마지막 return —
+        // "요청 100배 / 실제 75배 — 거래소가 낮췄습니다"). 위험이 줄어드는
+        // 방향이라 일반 전략에는 맞는 판단이었다.
+        //
+        // 정확한 배율이 계약인 프로필에서는 맞지 않는다. 100배로 크기를
+        // 정해 놓고 75배로 나가면 **사용자가 고른 전략이 아닌 다른 전략이
+        // 도는 것**이다. 그 판정은 `leverageVerdict` 한 곳에 이미 있고,
+        // Worker가 쓰는 `futuresPlaceOrder`는 이미 그것을 탄다. 웹만
+        // 안 타고 있었다 — 같은 판단이 두 곳에 있으면 갈린다는 그 형태다.
+        const lev = await futuresApplyLeverage(
+          { exchange: 'binance', key: apiKey, secret: apiSecret, testnet },
+          plan.symbol, plan.leverage);
+        if (!lev.ok) {
+          await update({ status: 'FAILED', error_message: `레버리지 확정 실패(${lev.code}): ${lev.message}` });
+          return { ok: false, status: 'FAILED', clientOrderId,
+            message: `레버리지를 확정하지 못해 주문을 중단합니다 — ${lev.message}` };
         }
       }
 
@@ -548,6 +632,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const tpIds: string[] = [];
       if (args.reduceOnly) {
         // 위와 같은 이유 — 나가는 주문에 익절 사다리를 걸지 않는다
+      } else if (noFixedTp) {
+        // 고정 익절을 쓰지 않는 계약이다. **여기가 예전에 Gate와 갈렸다** —
+        // 이 자리에는 정책 검사가 없어서 익절이 그대로 나갔다.
       } else if (args.exitPlan) {
         for (const o of args.exitPlan.orders) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
@@ -889,11 +976,24 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 종목의 손실이 지갑 전체로 번진다 (바이낸스 경로의 ISOLATED 강제와 같은 이유).
     // 청산 주문은 건너뛴다 — 나가는 주문에 배율을 다시 설정할 이유가 없다.
     if (!args.reduceOnly) {
-      const lev = await gf.setLeverageGateFutures(apiKey, apiSecret, contract, plan.leverage, testnet);
-      if (!lev.success) {
-        await update({ status: 'REJECTED', error_message: lev.message });
+      // 격리 여부는 `setLeverageGateFutures`가 판정한다 (Gate는 교차를
+      // leverage=0으로 표현하므로 그 판정이 여기 있어야 한다).
+      const isoCheck = await gf.setLeverageGateFutures(apiKey, apiSecret, contract, plan.leverage, testnet);
+      if (!isoCheck.success) {
+        await update({ status: 'REJECTED', error_message: isoCheck.message });
         return { ok: false, status: 'REJECTED', clientOrderId,
-          message: `Gate 배율·마진 모드를 확정하지 못해 주문을 중단합니다 — ${lev.message}` };
+          message: `Gate 배율·마진 모드를 확정하지 못해 주문을 중단합니다 — ${isoCheck.message}` };
+      }
+      // **그런데 그 함수도 거래소가 낮춘 경우를 `success: true`로 돌려준다**
+      // ("요청 100배 / 실제 75배 — 거래소가 조정했습니다"). 바이낸스 쪽과
+      // 같은 이유로, 배율이 요청과 같은지는 `leverageVerdict`가 판정한다.
+      const lev = await futuresApplyLeverage(
+        { exchange: 'gate', key: apiKey, secret: apiSecret, testnet },
+        plan.symbol, plan.leverage);
+      if (!lev.ok) {
+        await update({ status: 'REJECTED', error_message: `레버리지 확정 실패(${lev.code}): ${lev.message}` });
+        return { ok: false, status: 'REJECTED', clientOrderId,
+          message: `레버리지를 확정하지 못해 주문을 중단합니다 — ${lev.message}` };
       }
     }
 
@@ -1106,7 +1206,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       args.takeProfit != null ? gp.gateTakeProfitSpec(plan.side, args.takeProfit, null, gspec) : null;
     let exitBasis: ExecuteResult['exitBasis'] = null;
 
-    if (!args.reduceOnly && args.exitPct && policy !== 'NONE') {
+    if (!args.reduceOnly && args.exitPct && policy !== 'NONE' && !noFixedTp) {
       const basis = fillBasis({
         avgPrice: fill.avgPrice, filledQty: verdict.filledQty ?? fill.filledQty,
         settled: verdict.settled,
@@ -1192,7 +1292,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 요구하면(`requireTakeProfit`) 아래 되읽기 판정에서 걸린다.
     let gateTpId: string | undefined;
     let tpNote = '';
-    if (!args.reduceOnly && policy !== 'NONE' && tpSpec) {
+    if (!args.reduceOnly && !noFixedTp && tpSpec) {
       if (!tpSpec.ok) {
         tpNote = ` · ⚠ 익절을 걸지 못했습니다: ${tpSpec.reason}`;
       } else {
@@ -1336,11 +1436,11 @@ async function attachStopIfMissing(
   creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean },
   o: any,
 ): Promise<string | null> {
-  // 청산 주문에는 보호주문을 붙이지 않는다.
-  if (o?.reduce_only) return null;
-  if (o?.sl_order_id) return null;               // 이미 걸려 있다
-  const stop = Number(o?.stop_loss);
-  if (!Number.isFinite(stop) || stop <= 0) return null;   // 계획에 없던 값
+  // **판정은 `stopReattachVerdict` 한 곳에 있다.** 여기서 조건을 다시
+  // 쓰면 시험되는 규칙과 실제로 도는 규칙이 갈린다.
+  const verdict = stopReattachVerdict(o);
+  if (!verdict.attach) return verdict.note || null;
+  const stop = verdict.stopPrice as number;
 
   const symbol = String(o?.symbol || '').toUpperCase();
   if (!symbol) return null;

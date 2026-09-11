@@ -92,6 +92,9 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '075_paper_capacity_atomic.sql', id: 75, risk: 'ADDITIVE', checksum: 'a880f8e4680e2120' },
   { name: '076_jobs_queue.sql', id: 76, risk: 'ADDITIVE', checksum: 'f7ac6d3d9cff3005' },
   { name: '077_execution_profile.sql', id: 77, risk: 'ADDITIVE', checksum: 'a6306a2bfba996fe' },
+  { name: '078_live_orders_stop_policy.sql', id: 78, risk: 'ADDITIVE', checksum: '45e9eaed55b38964' },
+  { name: '079_schedule_margin_allocation.sql', id: 79, risk: 'ADDITIVE', checksum: 'a67f4ce320d24f9d' },
+  { name: '080_execution_profile_selective.sql', id: 80, risk: 'ADDITIVE', checksum: '68d3d09091b77073' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */

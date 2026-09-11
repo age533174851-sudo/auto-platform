@@ -47,7 +47,7 @@
 // `applyPreset()`은 안에서 `presetOf()`를 부른다. 그래서 "직접 안 쓴다"
 // 만으로는 부족하다 — **검증을 먼저 끝낸 뒤에만** 부른다. 모르는
 // 프리셋이 `applyPreset()`에 도달하는 것 자체가 불가능해야 한다.
-import { PROFILES, type StrategyProfile, type StrategyType } from '../strategies/profiles';
+import { PROFILES, type StrategyProfile, type StrategyType, type StopPolicy, type SizingPolicy, type TakeProfitPolicy } from '../strategies/profiles';
 import { PRESET_TABLE, applyPreset, type RiskPresetId } from '../strategies/profilePreset';
 
 /**
@@ -61,7 +61,7 @@ import { PRESET_TABLE, applyPreset, type RiskPresetId } from '../strategies/prof
  * 올리는 것은 자동이 아니다. 검사기가 이전 커밋과 비교해서, 실행값이
  * 바뀌었는데 이 숫자가 그대로면 실패시킨다.
  */
-export const EXECUTION_CONTRACT_VERSION = 1;
+export const EXECUTION_CONTRACT_VERSION = 2;
 
 /**
  * 계약에 들어가는 칸 — **화이트리스트다.**
@@ -81,6 +81,19 @@ export const CONTRACT_FIELDS = [
   'riskPercentPerTrade', 'takeProfitPct', 'stopLossPct',
   'orderType', 'timeoutSec', 'dailyLossLimitPct',
   'maxHoldSec', 'maxOpenPositions',
+  // v2에서 더한 두 칸. 둘 다 **실행 의미**라 계약이다.
+  //
+  //   stopPolicy    고정 손절을 거는가. 숫자가 아니라 정책이라야 주문
+  //                 경로가 그것을 정책으로 다룬다
+  //   sizingPolicy  크기를 무엇에서 만드는가 (손절 거리 vs 증거금 배정)
+  //   takeProfitPolicy  고정 익절을 거는가. **stopPolicy와 다른 축이다** —
+  //                 이름 하나로 "보호 주문 전부 없음"을 표현하면, 손절만
+  //                 없는 전략과 둘 다 없는 전략을 구분할 수 없다
+  //
+  // **배정 비율(%) 자체는 계약이 아니다.** 그 값은 프로필 상수가 아니라
+  // 예약마다 사용자가 명시하는 값이다. 계약에 넣으면 사용자가 나중에
+  // 비율을 입력해도 계약은 계속 옛 값을 가리키게 된다.
+  'stopPolicy', 'sizingPolicy', 'takeProfitPolicy',
 ] as const;
 
 export type ContractField = (typeof CONTRACT_FIELDS)[number];
@@ -94,13 +107,18 @@ export interface ExecutionContract {
   marginModes: string[];
   maxPortfolioPct: number;
   riskPercentPerTrade: number;
-  takeProfitPct: number;
-  stopLossPct: number;
+  /** NO_FIXED_TP이면 null이다 */
+  takeProfitPct: number | null;
+  /** NO_FIXED_SL이면 null이다 — 없는 손절에 숫자를 적지 않는다 */
+  stopLossPct: number | null;
   orderType: string;
   timeoutSec: number;
   dailyLossLimitPct: number;
   maxHoldSec: number;
   maxOpenPositions: number;
+  stopPolicy: StopPolicy;
+  sizingPolicy: SizingPolicy;
+  takeProfitPolicy: TakeProfitPolicy;
 }
 
 export type ExecutionResolveCode =
@@ -113,7 +131,9 @@ export type ExecutionResolveCode =
   /** 모르는 프리셋 id. 기본 프리셋으로 대신하지 않는다 */
   | 'UNKNOWN_PRESET'
   /** 저장할 때의 계약과 지금 계약이 다르다. 조용히 올리지 않는다 */
-  | 'VERSION_MISMATCH';
+  | 'VERSION_MISMATCH'
+  /** 이 프로필과 이 프리셋은 짝이 아니다 */
+  | 'PROFILE_PRESET_MISMATCH';
 
 export type ExecutionResolve =
   | { ok: true; kind: 'none'; contract: null }
@@ -134,6 +154,39 @@ export function isExecutionResolveError(
 }
 
 const isBlank = (v: unknown) => v === null || v === undefined || String(v).trim() === '';
+
+/**
+ * **어떤 프로필이 어떤 프리셋하고만 짝이 되는가.**
+ *
+ * 프리셋은 원래 "같은 프로필의 값을 좁히거나 넓히는 축"이었다. 그런데
+ * 전용 100배는 그 축 위에 없다 — 안정화든 연구용이든 100배여야 하는데,
+ * 그러면 프리셋 선택이 아무 뜻이 없으면서 화면에는 "안정화를 골랐다"고
+ * 남는다. 사용자는 배율이 낮아졌다고 읽는다.
+ *
+ * 그래서 **조합 자체를 제한한다.** 전용 100배는 전용 프리셋과만 짝이고,
+ * 그 프리셋은 다른 프로필에 붙지 않는다. 두 방향을 다 막아야 한다 —
+ * 한쪽만 막으면 `SCALP_HIGH_LEV + EXACT_100X` 같은 조합이 통과해서
+ * "전용 100배 프리셋인데 25배"가 저장된다.
+ */
+export const EXCLUSIVE_PAIRS: ReadonlyArray<{ profileId: StrategyType; presetId: RiskPresetId }> = [
+  { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' },
+];
+
+/** 짝이 어긋났으면 그 이유. 맞으면 빈 문자열 */
+export function pairMismatchReason(profileId: string, presetId: string): string {
+  for (const pair of EXCLUSIVE_PAIRS) {
+    if (profileId === pair.profileId && presetId !== pair.presetId) {
+      return `${pair.profileId}는 ${pair.presetId} 프리셋과만 쓸 수 있습니다`
+        + ` (받은 값: ${presetId}) — 다른 프리셋은 이 프로필의 실행 의미를 바꾸지 않으면서`
+        + ' 화면에만 다른 이름으로 남습니다';
+    }
+    if (presetId === pair.presetId && profileId !== pair.profileId) {
+      return `${pair.presetId} 프리셋은 ${pair.profileId}에만 쓸 수 있습니다`
+        + ` (받은 값: ${profileId})`;
+    }
+  }
+  return '';
+}
 
 /**
  * 세 축을 해석한다.
@@ -181,6 +234,12 @@ export function resolveExecutionProfile(
       ok: false, code: 'UNKNOWN_PRESET',
       message: `모르는 위험 프리셋입니다: ${sid}`,
     };
+  }
+
+  // ②-b 조합. 프로필과 프리셋이 각각 존재해도 **짝이 아닐 수 있다.**
+  const mismatch = pairMismatchReason(pid, sid);
+  if (mismatch) {
+    return { ok: false, code: 'PROFILE_PRESET_MISMATCH', message: mismatch };
   }
 
   // ③ 버전. 저장 시점과 지금이 다르면 **조용히 올리지 않는다.**
@@ -239,4 +298,63 @@ export function executionContractFingerprint(): string {
     }
   }
   return JSON.stringify(rows);
+}
+
+/**
+ * 이 계약의 **고정 손절 정책.** 계약이 없으면 `FIXED_SL`이다.
+ *
+ * 왜 함수인가: 주문 경로가 `contract?.stopPolicy ?? 'FIXED_SL'`을 직접
+ * 쓰면, 그 표현이 여러 곳에 흩어지고 언젠가 한 곳이 `?? 'NO_FIXED_SL'`이
+ * 된다. 그 오타 하나가 **모든 기존 전략의 손절을 끄는 변경**이다.
+ * 기본값이 안전한 쪽이라는 사실을 한 곳에 못박아 둔다.
+ *
+ * 그리고 이것이 **누출 방지의 핵심 지점**이다. 화면의 `levCap=100`
+ * (레거시 상한)은 계약이 아니므로 여기를 통과할 수 없고, 따라서
+ * `NO_FIXED_SL` 실행 의미를 만들 수 없다. 100배 상한과 100배 전용
+ * 프로필이 다른 물건인 이유가 값이 아니라 **경로**에 있다.
+ */
+export function stopPolicyOfContract(c: ExecutionContract | null | undefined): StopPolicy {
+  return c?.stopPolicy === 'NO_FIXED_SL' ? 'NO_FIXED_SL' : 'FIXED_SL';
+}
+
+/**
+ * 이 계약이 크기를 무엇에서 만드는가. **계약이 없으면 `STOP_RISK`다.**
+ *
+ * `stopPolicyOfContract`와 같은 이유로 함수다 — 기본값이 안전한 쪽이라는
+ * 사실이 한 곳에 있어야 한다. 여기가 `MARGIN_ALLOCATION`으로 뒤집히면
+ * 기존 전략이 전부 손절 거리 기반 사이징을 잃는다.
+ */
+export function sizingPolicyOfContract(c: ExecutionContract | null | undefined): SizingPolicy {
+  return c?.sizingPolicy === 'MARGIN_ALLOCATION' ? 'MARGIN_ALLOCATION' : 'STOP_RISK';
+}
+
+/**
+ * 이 계약이 고정 익절을 거는가. **계약이 없으면 `FIXED_TP`다.**
+ *
+ * `stopPolicyOfContract`와 **따로** 있는 이유가 요점이다. 손절 정책 하나로
+ * 익절까지 끄면 "손절은 없지만 익절은 쓰는" 전략을 표현할 수 없고, 두 뜻이
+ * 한 이름에 묶여서 고치는 사람이 어느 쪽을 건드리는지 알 수 없게 된다.
+ */
+export function takeProfitPolicyOfContract(
+  c: ExecutionContract | null | undefined,
+): TakeProfitPolicy {
+  return c?.takeProfitPolicy === 'NO_FIXED_TP' ? 'NO_FIXED_TP' : 'FIXED_TP';
+}
+
+/**
+ * 이 요청이 **실행 계약을 싣고 있는가.**
+ *
+ * 계약을 해석하지 않는 라우트가 쓴다. 그런 라우트는 계약이 실려 와도
+ * 자기 방식으로 주문을 낸다 — 저장된 것과 도는 것이 달라진다. 이 저장소가
+ * 계속 막아 온 형태라, 받아 놓고 무시하는 대신 **거절한다.**
+ *
+ * 세 칸 중 하나라도 있으면 참이다. 반쪽 선택도 선택이 아니므로 여기서
+ * 걸러야 한다 — 그래야 "일부만 보냈으니 무시해도 된다"가 생기지 않는다.
+ */
+export function carriesExecutionContract(body: any): boolean {
+  for (const k of ['executionProfileId', 'executionPresetId', 'executionContractVersion']) {
+    const v = body?.[k];
+    if (v != null && String(v).trim() !== '') return true;
+  }
+  return false;
 }

@@ -3,7 +3,61 @@
 // 각 프로필은 leverage·리스크·주문타입·손절익절·일손실한도를 독립 소유한다.
 // 주문 생성 시 규칙 엔진(ruleEngine)이 이 프로필을 참조해 파라미터를 강제 적용/clamp 한다.
 
-export type StrategyType = 'SCALP_HIGH_LEV' | 'SWING_LOW_LEV' | 'DAILY_HIGH_LEV';
+export type StrategyType =
+  | 'SCALP_HIGH_LEV' | 'SWING_LOW_LEV' | 'DAILY_HIGH_LEV'
+  /**
+   * **전용 100배.** 기존 세 개와 이름 규칙이 다른 이유가 있다.
+   *
+   * 나머지 셋은 `<시간축>_<위험등급>_LEV`다. 이것은 시간축도 위험등급도
+   * 아니라 **정확배율·무고정손절 실행 모드**다. 같은 접미사를 쓰면
+   * "그 가족의 네 번째"로 읽히고, 그 오해가 정확히 이 프로필이 없애려는
+   * 것이다 — 상한 100배(레거시)와 실제 100배 고정(이것)은 다른 물건이다.
+   */
+  | 'MAX_LEV_100X';
+
+/**
+ * 고정 손절을 쓰는가.
+ *
+ * **이것이 축인 이유**: 100배 전용은 고정 손절을 쓰지 않는데, 그것을
+ * `stopLossPct: 0`이나 `0.5` 같은 숫자로 흉내내면 그 숫자가 어딘가에서
+ * 진짜 손절로 읽힌다. 숫자가 아니라 **정책**으로 적어야 주문 경로가
+ * 그것을 정책으로 다룬다.
+ *
+ *   FIXED_SL     — 진입과 함께 고정 손절(STOP_MARKET / 조건부)을 건다
+ *   NO_FIXED_SL  — 고정 손절을 아예 걸지 않는다. `stopLossPct`는 null이다
+ */
+export type StopPolicy = 'FIXED_SL' | 'NO_FIXED_SL';
+
+/**
+ * 주문 크기를 **무엇에서** 만드는가.
+ *
+ *   STOP_RISK          허용손실 ÷ 손절거리 (`riskManager.planPosition`)
+ *   MARGIN_ALLOCATION  가용잔고 × 명시 배정비율 × 배율 ÷ 기준가
+ *
+ * `stopPolicy`와 짝이지만 같은 값이 아니다. 손절이 없으면 손절 거리로
+ * 크기를 만들 수 없으니 `NO_FIXED_SL`은 반드시 `MARGIN_ALLOCATION`이지만,
+ * 반대는 성립하지 않는다 — 손절을 걸면서도 증거금으로 크기를 정하는
+ * 전략이 나중에 있을 수 있다. 그래서 축을 둘로 둔다.
+ *
+ * **배정 비율 자체는 여기 없다.** 그 값은 프로필 상수가 아니라 예약마다
+ * 사용자가 명시하는 값이라, 프로필에 박아 두면 사용자가 나중에 입력해도
+ * 계약은 계속 옛 값을 가리키게 된다.
+ */
+export type SizingPolicy = 'STOP_RISK' | 'MARGIN_ALLOCATION';
+
+/**
+ * 고정 익절을 거는가.
+ *
+ * **`stopPolicy`와 별개의 축이다.** 이름 하나로 "보호 주문이 전부 없음"을
+ * 표현하면 안 된다 — `stopPolicy`는 글자 그대로 손절만 가리키고, 그 이름이
+ * 익절까지 끄면 나중에 "손절은 없지만 익절은 쓰는" 전략을 표현할 수 없다.
+ * 그리고 그런 전략이 생겼을 때 이름이 이미 두 뜻을 갖고 있어서, 고치는
+ * 사람이 어느 쪽을 건드리는지 알 수 없게 된다.
+ *
+ *   FIXED_TP     — 진입과 함께 고정 익절(TAKE_PROFIT_MARKET / 조건부)을 건다
+ *   NO_FIXED_TP  — 고정 익절을 걸지 않는다. `takeProfitPct`는 null이다
+ */
+export type TakeProfitPolicy = 'FIXED_TP' | 'NO_FIXED_TP';
 export type MarginMode   = 'isolated' | 'cross';
 export type OrderType    = 'post_only_limit' | 'limit' | 'market';
 
@@ -19,8 +73,28 @@ export interface StrategyProfile {
   maxPortfolioPct: number;   // 이 전략이 쓸 수 있는 전체 자산 비중 상한 (%)
   riskPercentPerTrade: number; // 1회 트레이드에서 감수할 자산 위험 (%) — 수량 산출 기준
   // 손절/익절 (%)
-  takeProfitPct:   number;
-  stopLossPct:     number;   // 필수 — 0 금지
+  /**
+   * 고정 익절 폭(%).
+   *
+   * **`takeProfitPolicy === 'NO_FIXED_TP'`이면 반드시 `null`이다.**
+   * 남겨 두면 그 숫자가 실제 익절 주문이 되어 거래소로 나간다 —
+   * 사용자가 이 프로필을 위해 고른 적 없는 값이 종료 권한이 되는 것이다.
+   */
+  takeProfitPct:   number | null;
+  /**
+   * 고정 손절 폭(%).
+   *
+   * **`stopPolicy === 'NO_FIXED_SL'`이면 반드시 `null`이다.** 0도 아니고
+   * 0.5도 아니다 — 없는 손절에 숫자를 적어 두면 그 값이 사이징의 분모나
+   * 복구 경로의 손절가로 되살아난다. 없는 것은 없다고 적는다.
+   */
+  stopLossPct:     number | null;
+  /** 고정 손절을 쓰는가. `stopLossPct`와 짝이다 (아래 불변식) */
+  stopPolicy:      StopPolicy;
+  /** 크기를 무엇에서 만드는가. 배정 비율 값 자체는 예약이 갖는다 */
+  sizingPolicy:    SizingPolicy;
+  /** 고정 익절을 거는가. `takeProfitPct`와 짝이다 */
+  takeProfitPolicy: TakeProfitPolicy;
   // 주문
   orderType:       OrderType;
   timeoutSec:      number;   // 지정가 미체결 시 취소까지 (0 = 무제한)
@@ -90,6 +164,11 @@ export const SCALP_HIGH_LEV: StrategyProfile = {
   riskPercentPerTrade: 0.5,           // 1회 위험 0.5%
   takeProfitPct: 0.6,                 // 타이트
   stopLossPct: 0.3,                   // 타이트 (필수)
+  // 기존 셋은 전부 고정 손절 전략이다. 의미가 바뀌지 않는다.
+  stopPolicy: 'FIXED_SL',
+  // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
+  sizingPolicy: 'STOP_RISK',
+  takeProfitPolicy: 'FIXED_TP',
   orderType: 'post_only_limit',       // Post-only 지정가
   timeoutSec: 20,                     // 20초 미체결 시 취소
   dailyLossLimitPct: 2,               // 하루 -2%면 이 전략 정지
@@ -111,6 +190,11 @@ export const SWING_LOW_LEV: StrategyProfile = {
   riskPercentPerTrade: 2,             // 1회 위험 2% (넓은 손절 반영)
   takeProfitPct: 12,                  // 넓게
   stopLossPct: 6,                     // 넓게 (필수)
+  // 기존 셋은 전부 고정 손절 전략이다. 의미가 바뀌지 않는다.
+  stopPolicy: 'FIXED_SL',
+  // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
+  sizingPolicy: 'STOP_RISK',
+  takeProfitPolicy: 'FIXED_TP',
   orderType: 'limit',
   timeoutSec: 0,                      // 무제한 (스윙은 급하지 않음)
   dailyLossLimitPct: 8,              // 하루 -8%면 정지
@@ -145,6 +229,11 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   riskPercentPerTrade: 10,            // 슬롯 1개 = 자산의 10%
   takeProfitPct: 1.5,
   stopLossPct: 0.5,                   // 기본 손절 (신호가 주면 그것 사용)
+  // 기존 셋은 전부 고정 손절 전략이다. 의미가 바뀌지 않는다.
+  stopPolicy: 'FIXED_SL',
+  // 손절 거리에서 수량을 역산한다 — 지금까지와 같다.
+  sizingPolicy: 'STOP_RISK',
+  takeProfitPolicy: 'FIXED_TP',
   orderType: 'market',
   timeoutSec: 30,
   dailyLossLimitPct: 30,              // 하루 -30%면 전략 정지 (슬롯 3개 소진 수준)
@@ -159,16 +248,147 @@ export const DAILY_HIGH_LEV: StrategyProfile = {
   simPrice: 100_000,
 };
 
+// ── 전용 100배 (고정 손절 없음) ─────────────────────────────
+//
+// **레거시 "상한 100배"와 다른 물건이다.**
+//
+// 화면의 `levCap=100`은 *상한*이다. 실제 배율은 손절 거리에서 역산되고
+// 그 상한에서 잘린다. 그래서 화면에 100배라고 적혀 있어도 나가는 것은
+// 다른 값일 수 있었다 — 적힌 것과 나가는 것이 달랐다.
+//
+// 이 프로필은 그 구조를 쓰지 않는다:
+//
+//   · 요청 배율이 **정확히 100**이다. 상한이 아니다
+//   · 거래소에 설정한 뒤 **되읽어서 100인지 확인**하고, 다르거나 모르면
+//     주문하지 않는다 (`futuresApplyLeverage` → `leverageVerdict`)
+//   · 마진 모드도 **되읽어서 isolated인지 확인**한다. cross이거나 모르면
+//     주문하지 않는다
+//   · 고정 손절을 **걸지 않는다**(`NO_FIXED_SL`). 그래서 손절 거리에서
+//     수량을 역산할 수 없고, 증거금 배정에서 크기를 만든다
+//     (`sizingPolicy: 'MARGIN_ALLOCATION'`) — 배정 비율은 예약이 갖는다
+//
+// **이 프로필이 있다고 100배가 안전해지지는 않는다.** 이것이 보장하는
+// 것은 하나뿐이다 — 화면에 100배라고 적혀 있으면 거래소에도 100배가
+// 걸려 있고, 아니면 주문이 나가지 않는다.
+//
+// 마진 모드가 isolated 전용인 이유 (사용자 확정 정책)
+// ──────────────────────────────────────────────────
+// cross까지 열면 같은 이름 아래에서 담보 범위·가용 잔고의 뜻·청산과 복구의
+// 의미가 달라져 **사실상 다른 전략 둘**이 된다. 크기를 가용 잔고 × 명시
+// 배정 비율 × 배율로 고정하는 이 계약에서는 격리여야 그 식이 한 가지 뜻을
+// 갖는다. Gate는 교차를 leverage 0으로 표현해서 되읽기가 null이 되는
+// 경계도 있다. Cross 100배가 필요해지면 이 프로필의 뜻을 바꾸지 말고
+// **별도 프로필/계약**으로 만든다.
+export const MAX_LEV_100X: StrategyProfile = {
+  id: 'MAX_LEV_100X',
+  label: '전용 100배 (고정 손절 없음)',
+  description:
+    '요청 배율이 정확히 100배다. 거래소에 되읽어 100이 확인될 때만 주문한다(99·75·모름이면 중단). '
+    + '고정 손절을 걸지 않으므로 수량은 손절 거리가 아니라 명시적 증거금 배정에서 나온다. '
+    + 'ISOLATED 전용. 배정 비율을 예약에 직접 입력하기 전에는 주문하지 않는다.',
+  // **상한이 아니라 요청값이다.** 둘을 같게 두어 "100까지 허용"과
+  // "정확히 100"이 갈릴 자리를 없앤다.
+  leverage: 100,
+  maxLeverage: 100,
+  marginModes: ['isolated'],          // Cross 금지 (위 주석 · 사용자 확정 정책)
+  maxPortfolioPct: 10,
+  // 손절 거리 기반 사이징을 타지 않으므로 이 값은 크기를 정하지 않는다.
+  // 다른 한도(전체 동시 위험 등)와 같은 단위를 유지하려고 남긴다.
+  riskPercentPerTrade: 10,
+  // **고정 익절도 걸지 않는다.**
+  //
+  // 처음에는 여기에 1.5가 있었다. 다른 프로필에서 복사해 온 값이고, 이
+  // 프로필을 위해 고른 값이 아니다. 그런데 그 숫자를 남겨 두면 실제
+  // 익절 주문이 되어 거래소로 나간다 — 아무도 고르지 않은 값이 종료
+  // 권한이 되는 것이다. 이 프로필의 자동 종료 권한은 아직 증명되지
+  // 않았고, 숫자를 지어내서 그 자리를 채우지 않는다.
+  takeProfitPct: null,
+  takeProfitPolicy: 'NO_FIXED_TP',
+  // **고정 손절 없음.** 숫자를 적지 않는다 — 위 stopLossPct 주석 참조.
+  stopLossPct: null,
+  stopPolicy: 'NO_FIXED_SL',
+  // 손절 거리가 없으므로 증거금 배정에서 크기를 만든다.
+  // **비율 값은 여기 없다** — 예약마다 사용자가 명시한다.
+  sizingPolicy: 'MARGIN_ALLOCATION',
+  orderType: 'market',
+  timeoutSec: 30,
+  dailyLossLimitPct: 30,
+  maxHoldSec: 14400,                  // 4시간
+  maxOpenPositions: 1,
+
+  // 모의 전용 (거래소에 나가지 않는다)
+  simCurrency: 'USD',
+  simSeed: 1_000,
+  simTargetEquity: 100_000,
+  simPrice: 100_000,
+};
+
 export const PROFILES: Record<StrategyType, StrategyProfile> = {
   SCALP_HIGH_LEV: SCALP_HIGH_LEV,
   SWING_LOW_LEV: SWING_LOW_LEV,
   DAILY_HIGH_LEV: DAILY_HIGH_LEV,
+  MAX_LEV_100X: MAX_LEV_100X,
 };
 
 export function getProfile(type: StrategyType): StrategyProfile {
   return PROFILES[type] ?? SWING_LOW_LEV;
 }
 
+/**
+ * `stopPolicy`와 `stopLossPct`의 짝이 맞는가 — **어긋난 프로필의 목록.**
+ *
+ * 왜 함수로 두는가: 이 판단이 필요한 곳이 셋이다(시험 · CI 검사기 ·
+ * 사이징). 세 곳에 따로 적으면 언젠가 한 곳만 고쳐지고, 그때
+ * `NO_FIXED_SL`인데 손절 숫자가 남아 있는 프로필이 통과한다.
+ *
+ * 비어 있으면 정상이다.
+ */
+export function stopPolicyInvariantErrors(): string[] {
+  const out: string[] = [];
+  for (const p of Object.values(PROFILES)) {
+    if (p.stopPolicy === 'NO_FIXED_SL') {
+      if (p.stopLossPct !== null) {
+        out.push(`${p.id}: NO_FIXED_SL인데 stopLossPct가 ${p.stopLossPct}입니다 — null이어야 합니다`);
+      }
+    } else if (!(Number(p.stopLossPct) > 0)) {
+      out.push(`${p.id}: FIXED_SL인데 stopLossPct가 ${String(p.stopLossPct)}입니다 — 0보다 커야 합니다`);
+    }
+    // 익절도 같은 규칙이다. 정책이 '안 건다'인데 숫자가 남아 있으면 그
+    // 숫자가 실제 주문이 된다.
+    if (p.takeProfitPolicy === 'NO_FIXED_TP') {
+      if (p.takeProfitPct !== null) {
+        out.push(`${p.id}: NO_FIXED_TP인데 takeProfitPct가 ${p.takeProfitPct}입니다 — null이어야 합니다`);
+      }
+    } else if (!(Number(p.takeProfitPct) > 0)) {
+      out.push(`${p.id}: FIXED_TP인데 takeProfitPct가 ${String(p.takeProfitPct)}입니다 — 0보다 커야 합니다`);
+    }
+    // 손절이 없으면 손절 거리로 크기를 만들 수 없다. 이 짝이 어긋나면
+    // `planPosition`이 INVALID_STOP으로 거부하거나, 더 나쁘게는 어딘가에서
+    // 지어낸 손절 거리로 수량이 나온다.
+    if (p.stopPolicy === 'NO_FIXED_SL' && p.sizingPolicy !== 'MARGIN_ALLOCATION') {
+      out.push(`${p.id}: NO_FIXED_SL인데 sizingPolicy가 ${p.sizingPolicy}입니다`
+        + ' — 손절이 없으면 손절 거리로 크기를 만들 수 없습니다');
+    }
+  }
+  return out;
+}
+
 export function listProfiles(): StrategyProfile[] {
-  return [SCALP_HIGH_LEV, SWING_LOW_LEV, DAILY_HIGH_LEV];
+  return [SCALP_HIGH_LEV, SWING_LOW_LEV, DAILY_HIGH_LEV, MAX_LEV_100X];
+}
+
+/**
+ * **모의 성적표를 낼 수 있는 프로필만.**
+ *
+ * 모의 모델(`simModel`)은 고정 익절·손절 한 쌍에서 손익비를 구하고 그
+ * 손익비에서 무우위 승률을 낸다. 고정 손절이 없는 프로필에는 그 분모가
+ * 없다 — `noEdgeWinRate`는 그때 0.5를 돌려주는데, 그건 "반반"이라는
+ * **관측이 아니라 자리 채우기**다.
+ *
+ * 그 숫자로 성적표를 그리면 화면에는 근거 없는 기대값이 뜬다. 이 저장소가
+ * 반복해서 없애 온 것이 정확히 그것이라, 모의 목록에서 뺀다. 실행 계약은
+ * 그대로 있다 — **모의를 못 하는 것과 실행을 못 하는 것은 다른 얘기다.**
+ */
+export function simulatableProfiles(): StrategyProfile[] {
+  return listProfiles().filter(p => p.stopPolicy === 'FIXED_SL');
 }

@@ -189,6 +189,19 @@ async function runAction(
       return { ok: r.success, result: r, error: r.success ? undefined : r.message };
     }
     case 'SET_TPSL': {
+      // ── 고정 손절을 쓰지 않기로 한 주문에는 손절을 걸지 않는다 ──
+      //
+      // 이 잡은 손절 이동·본전 이동으로 같은 포지션에 여러 번 온다. 그 중
+      // 하나라도 고정 손절이 없는 프로필의 포지션에 닿으면, 사용자가 고른
+      // 적 없는 자리에 STOP_MARKET이 걸린다. 워커는 `live_orders`를 읽지
+      // 않으므로 그 사실을 스스로 알 수 없다 — **잡에 실려 와야 한다.**
+      //
+      // 익절은 막지 않는다. 이 정책이 말하는 것은 고정 **손절**이다.
+      if (String((p as any)?.stopPolicy || '') === 'NO_FIXED_SL' && p.slPrice != null) {
+        return { ok: false,
+          error: '고정 손절을 쓰지 않는 프로필의 포지션입니다 — 손절을 걸지 않습니다',
+          result: { stopPolicy: 'NO_FIXED_SL' } };
+      }
       const r = await futuresSetTpsl(t, {
         symbol: job.symbol, positionSide: job.side,
         tpPrice: p.tpPrice ?? null, slPrice: p.slPrice ?? null,

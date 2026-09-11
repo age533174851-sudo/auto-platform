@@ -188,7 +188,21 @@ if (!/is\('execution_profile_id',\s*null\)/.test(sched)) {
   err(`${SCHED}: 켜기 UPDATE 조건에 프로필 필터가 없습니다 — 먼저 켜고 나중에 판단하면 늦습니다`);
 }
 // 필터가 **켜는 요청에서 실제로 붙는가.** 조건이 죽어 있으면 문자열만 남는다.
-if (!/if\s*\(\s*dormantFilter\s*\)\s*q\s*=\s*q\.is\(\s*'execution_profile_id'/.test(sched)) {
+//
+// 필터의 모양이 둘이 됐다. 열린 프로필 목록이 비면 예전처럼 `is(...,null)`,
+// 목록이 차면 `or(...)`다(`execution/dormantGate`의 `enableFilterSpec`).
+// **어느 쪽이든 `dormantFilter`가 참일 때 q에 붙어야 한다** — 그 대입이
+// 사라지면 문자열만 남고 조건은 죽는다.
+const dormantBlock = (sched.match(
+  /if\s*\(\s*dormantFilter\s*\)\s*\{([\s\S]{0,400}?)\}/) || [])[1];
+const dormantOneLine =
+  /if\s*\(\s*dormantFilter\s*\)\s*q\s*=\s*q\.is\(\s*'execution_profile_id'/.test(sched);
+const dormantWired = dormantOneLine
+  || (dormantBlock != null
+      && /\bq\s*=/.test(dormantBlock)
+      && /\bq\.(is|or)\(/.test(dormantBlock)
+      && /execution_profile_id/.test(dormantBlock));
+if (!dormantWired) {
   err(`${SCHED}: 프로필 필터가 켜기 요청에 걸리지 않습니다 — 조건이 죽어 있습니다`);
 }
 if (!/let\s+dormantFilter\s*=\s*enabled\b/.test(sched)) {

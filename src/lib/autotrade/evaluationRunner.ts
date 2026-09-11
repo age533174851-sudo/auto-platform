@@ -28,6 +28,7 @@ import { runStrategy, evaluationKey, type EvaluationOutcome } from '../strategie
 import { strategyIdOfRow } from '../strategies/registry';
 import { strategyRunRequest } from '../strategies/runRequest';
 import { resolveExecutionProfile, isExecutionResolveError } from '../execution/profile';
+import { executionGateVerdict } from '../execution/dormantGate';
 import { decisionRecordOf } from '../ui/autoOverview';
 import { dueCheck, verdictOfOutcome, resultLineOf, type DueVerdict } from './evaluationLoop';
 import { claimVerdict, type ClaimVerdict, type DispatchSource } from './schedulePoll';
@@ -44,6 +45,8 @@ export interface ScheduleRow {
   execution_profile_id?: any;
   execution_preset_id?: any;
   execution_contract_version?: any;
+  /** 예약별 증거금 배정 비율(%). 사용자가 직접 입력한 값만 있다 */
+  margin_allocation_pct?: any;
   last_run_at?: any;
   interval_min?: any;
   leverage_cap?: any;
@@ -130,6 +133,7 @@ export async function evaluateSchedule(
         executionProfileId: row.execution_profile_id,
         executionPresetId: row.execution_preset_id,
         executionContractVersion: row.execution_contract_version,
+        marginAllocationPct: row.margin_allocation_pct,
       });
       // resolveStrategy는 runStrategy가 앞에서 이미 통과시켰다. 여기서
       // 막히면 그 사이에 규칙이 바뀐 것이므로 그대로 실패로 올린다.
@@ -308,10 +312,23 @@ export async function evaluateIfDue(
   // `last_run_at`을 쓰지 않는다.
   const ep = resolveExecutionProfile(
     row.execution_profile_id, row.execution_preset_id, row.execution_contract_version);
+  // 무엇을 열 것인가는 **`execution/dormantGate`가 정한다.** 여기서 따로
+  // 판단하면 PATCH(L3)와 갈리고, 그러면 "실행기는 통과시키는데 사용자는
+  // 켤 수 없는" 상태가 시험만 초록인 채로 남는다.
+  const gate = executionGateVerdict({
+    // **전략도 조합의 일부다.** 계약을 해석하지 않는 라우트로 100X 예약이
+    // 흘러가면 저장된 의미와 도는 의미가 갈린다.
+    strategyId: strategyIdOfRow(row),
+    profileId: row.execution_profile_id,
+    presetId: row.execution_preset_id,
+    contractVersion: row.execution_contract_version,
+    mode: row.mode,
+    marginAllocationPct: row.margin_allocation_pct,
+  });
   const epBlocked = isExecutionResolveError(ep)
     ? ep.message
-    : (ep.kind === 'contract'
-      ? '실행 프로필이 아직 활성화되지 않았습니다 — 이 예약은 켜진 채로 둘 수 없습니다'
+    : (ep.kind === 'contract' && !gate.allowed
+      ? `${gate.reason} — 이 예약은 켜진 채로 둘 수 없습니다`
       : '');
   if (epBlocked) {
     const save = await recordEvaluation(sb, row.id, {

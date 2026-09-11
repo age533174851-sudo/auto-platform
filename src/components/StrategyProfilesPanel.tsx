@@ -20,7 +20,7 @@ import React, { useState, useCallback, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { notify } from '@/lib/notify/center';
 import {
-  listProfiles, simHoldSecOf, simPriceOf, simSeedOf,
+  simulatableProfiles, simHoldSecOf, simPriceOf, simSeedOf,
   type StrategyProfile,
 } from '@/lib/strategies/profiles';
 import { buildOrder, type Signal } from '@/lib/strategies/ruleEngine';
@@ -103,7 +103,7 @@ export default function StrategyProfilesPanel() {
   return (
     <div>
       <div style={{ fontSize: 14, fontWeight: 800, color: T.txt, marginBottom: 10 }}>⚙️ 전략 프로필 (포트폴리오 봇)</div>
-      {listProfiles().map(p => <ProfileCard key={p.id} base={p} onToast={showToast} />)}
+      {simulatableProfiles().map(p => <ProfileCard key={p.id} base={p} onToast={showToast} />)}
 
       <div style={{ background: T.alt, border: `1px solid ${T.border}`, borderRadius: 12, padding: 14, marginBottom: 12 }}>
         <div style={{ fontSize: 10, color: T.muted, lineHeight: 1.6 }}>

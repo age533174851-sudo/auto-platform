@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
   const dryRun = check.checkOnly;
   const intervalMin = Number(body.intervalMin ?? 60);
 
-  const { fromLegacyMode, gateOrder, capability, toLegacyMode } =
+  const { fromLegacyMode, gateOrder, capability, toLegacyMode, modeNeedsConfirmation } =
     await import('@/lib/engine/operatingMode');
   const opMode = body.mode ? fromLegacyMode(String(body.mode)) : 'TESTNET';
   const mode = toLegacyMode(opMode);
@@ -111,34 +111,62 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── 실행 프로필은 아직 이 라우트가 읽지 않는다 ──
+  // ── 실행 프로필 ──
   //
   // 이 주소는 예약을 거치지 않고도 직접 들어올 수 있다. 그래서
   // evaluationRunner에서만 막으면 **직접 요청 하나로 우회된다** — 계약을
   // 실어 보내면 받아 놓고 기존 ATR로 주문이 나간다. 화면은 연구용인데
-  // 실제는 ATR, 정확히 지금 없애려는 그 고장이다.
+  // 실제는 ATR, 정확히 없애려는 그 고장이다.
   //
   // 그래서 여기서도 판단한다. 신호를 계산하기 전에, 주문 경로에 닿기 전에.
-  {
-    const { resolveExecutionProfile, isExecutionResolveError } =
-      await import('@/lib/execution/profile');
-    const ep = resolveExecutionProfile(
-      body?.executionProfileId, body?.executionPresetId, body?.executionContractVersion);
-    if (isExecutionResolveError(ep)) {
-      return NextResponse.json({
-        ok: false, error: ep.code.toLowerCase(), message: ep.message,
-      }, { status: 400 });
-    }
-    if (ep.kind === 'contract') {
+  // 무엇을 열 것인가는 **`execution/dormantGate`가 정한다** — 이 자리에서
+  // 따로 판단하면 켜기(L3)·실행 직전(L4)과 갈린다.
+  const {
+    resolveExecutionProfile, isExecutionResolveError,
+    stopPolicyOfContract, sizingPolicyOfContract, takeProfitPolicyOfContract,
+  } = await import('@/lib/execution/profile');
+  const { executionGateVerdict } = await import('@/lib/execution/dormantGate');
+  const ep = resolveExecutionProfile(
+    body?.executionProfileId, body?.executionPresetId, body?.executionContractVersion);
+  if (isExecutionResolveError(ep)) {
+    return NextResponse.json({
+      ok: false, error: ep.code.toLowerCase(), message: ep.message,
+    }, { status: 400 });
+  }
+  const epContract = ep.kind === 'contract' ? ep.contract : null;
+  if (epContract) {
+    const gate = executionGateVerdict({
+      // 이 주소가 곧 scalp 전략이다. 그래도 **명시해서 넘긴다** — 조합
+      // 검사가 전략을 보고 있다는 사실이 코드에 남아야, 나중에 다른
+      // 라우트가 이 자리를 복사할 때 전략 칸을 지우지 않는다.
+      strategyId: 'scalp',
+      profileId: epContract.profileId,
+      presetId: epContract.presetId,
+      contractVersion: epContract.contractVersion,
+      // 이 라우트의 mode가 곧 예약의 mode다 (예약이 그대로 실어 보낸다).
+      mode: opMode,
+      marginAllocationPct: body?.marginAllocationPct ?? null,
+    });
+    if (!gate.allowed) {
       return NextResponse.json({
         ok: false, error: 'EXECUTION_PROFILE_NOT_ACTIVE',
-        message: '실행 프로필이 아직 활성화되지 않았습니다'
-          + ' — 이 계약을 실은 요청은 실행하지 않습니다(기존 방식으로 대신 실행하지도 않습니다).',
-        profileId: ep.contract.profileId, presetId: ep.contract.presetId,
-        contractVersion: ep.contract.contractVersion,
+        message: `${gate.reason} 기존 방식으로 대신 실행하지도 않습니다.`,
+        profileId: epContract.profileId, presetId: epContract.presetId,
+        contractVersion: epContract.contractVersion,
       }, { status: 409 });
     }
   }
+  // 계약이 정하는 실행 의미. **계약이 없으면 지금까지와 같다.**
+  const epStopPolicy = stopPolicyOfContract(epContract);
+  const epSizingPolicy = sizingPolicyOfContract(epContract);
+  // **손절과 익절은 다른 축이다.** 하나로 묶으면 "손절만 없는" 전략을
+  // 표현할 수 없고, 거래소마다 다르게 실행된다(실제로 그랬다).
+  const epTakeProfitPolicy = takeProfitPolicyOfContract(epContract);
+  // 배정 비율은 **예약이 준 값**이다. 화면 기본값 marginPct를 여기로
+  // 끌어오지 않는다 — 그 값은 이 프로필을 위해 고른 값이 아니다.
+  const epMarginAllocationPct =
+    body?.marginAllocationPct == null || String(body.marginAllocationPct) === ''
+      ? null : Number(body.marginAllocationPct);
 
   const { getSupabaseAdmin } = await import('@/lib/supabase/admin');
   const sb = getSupabaseAdmin();
@@ -238,10 +266,11 @@ export async function POST(req: NextRequest) {
     riskPct: body.riskPct ?? null,
   });
 
-  const { planPosition } = await import('@/lib/engine/riskManager');
-  const plan = planPosition(std, ctx.config, ctx.currentOpenRisk);
-
-  const base = {
+  // ── 응답 뼈대 ──
+  //
+  // 계획이 나오기 전에 만들 수 있는 것만 담는다. 권한 단계에서 막히는
+  // 응답도 이 정보를 잃지 않게 하려고 미리 만든다.
+  const preBase = {
     ok: true, symbol, mode: opMode, dryRun,
     // 왜 주문이 안 나갔는지를 **값으로** 준다 — 문장에서 되짚게 하면
     // 문장이 바뀔 때 화면이 조용히 틀린다.
@@ -257,6 +286,353 @@ export async function POST(req: NextRequest) {
     // 계좌를 어디서 읽었는지와 못 읽은 것들. **이게 없으면 폴백 $10,000으로
     // 계산된 결과를 실계좌 결과로 읽게 된다.**
     account: { source: ctx.source, equity: ctx.config.accountEquity, warnings: ctx.warnings },
+  };
+
+  // ── 연결 ──
+  //
+  // **계획보다 앞에서 읽는다.** 증거금 배정 사이징은 거래소에 직접 물어본
+  // 값(마진 모드·배율·잔고·기준가)으로 크기를 만들기 때문에, 연결을 모른
+  // 채로는 계획 자체를 세울 수 없다. 읽기 전용이라 순서를 앞으로 옮겨도
+  // 계좌에 아무 일도 일어나지 않는다.
+  const { loadConnection } = await import('@/lib/exchanges/connection');
+  const { conn, error: connErr } = await loadConnection(sb, body.connectionId, userId);
+  if (!conn) {
+    return NextResponse.json({
+      ...preBase, ok: false, executed: false,
+      blocked: 'NO_CONNECTION', error: connErr,
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+  }
+  const connIsLive = conn.isTestnet === false;
+
+  // ── 신규 진입 권한 ──
+  //
+  // **거래소를 건드리기 전에 전부 판정한다.**
+  //
+  // 아래 계획 단계는 전용 100배에서 거래소에 **쓴다**(배율 설정 + 되읽기).
+  // 이 판정이 그 뒤에 있으면, 막힐 요청이 이미 계좌 설정을 바꾼 뒤가 된다 —
+  // 요청은 TESTNET인데 연결이 실계좌면 실계좌의 배율이 바뀐다. 주문이
+  // 안 나갔다는 것으로는 부족하다.
+  //
+  // 판정 순서는 `engine/entryAuthority`에 있다. 여기서 `if`로 흩으면 그
+  // 순서가 시험되지 않는 자리에 남는다 — 실제로 그래서 뒤집힌 것을
+  // 아무도 못 봤다.
+  const killReason = await (async () => {
+    const { killSwitchGate } = await import('@/lib/risk/killSwitch');
+    const ksg = await killSwitchGate(sb, body.connectionId);
+    return ksg.allowed ? '' : (ksg.message || '킬 스위치가 켜져 있습니다');
+  })();
+  const migrationReason = await (async () => {
+    const { migrationGate } = await import('@/lib/system/migrationGate');
+    const mg = await migrationGate(sb);
+    return mg.entryAllowed ? '' : (mg.entryReason || '마이그레이션이 밀려 있습니다');
+  })();
+
+  // ══════════════════ 쓰기 이전 권한선 ══════════════════
+  //
+  // 여기 아래로는 거래소를 **읽기만** 하다가, 통과한 요청만 쓰기로 간다.
+  //
+  // 아래 네 판정은 전부 DB/서버 값만으로 결론이 난다 — 거래소에 물어볼
+  // 것도, 계획(수량·명목가)도 필요 없다. 그런데 예전에는 배율 설정(쓰기)
+  // 뒤에 있었다. 그래서 "다른 전략이 같은 종목을 잡고 있어서 막힘"인
+  // 요청이 이미 계좌의 배율을 바꾼 뒤에 막혔다.
+  //
+  // 주문이 안 나갔다는 것으로는 부족하다. 계좌 설정이 바뀌었고, 그 자리에
+  // 포지션이 있었다면 청산가가 함께 움직인다.
+  // ── 같은 종목에 다른 전략이 켜져 있는가 ──
+  //
+  // **이 검사가 여기 없었다.** my-original-v1에만 있었다.
+  // ONE_WAY 계좌는 종목당 포지션이 하나라, 두 전략이 같은 종목에 들어가면
+  // 한쪽의 손절이 다른 쪽 진입에 발동한다.
+  {
+    const { strategyConflictGate, sleeveCapitalGate } = await import('@/lib/engine/strategyConflictGate');
+    const cf = await strategyConflictGate(sb, {
+      userId: userId!, myStrategyId: 'scalp', symbol, connectionId: body.connectionId,
+    });
+    if (!cf.ok) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false, blocked: cf.code, error: cf.reason,
+      }, { status: cf.code === 'SCHEDULES_UNKNOWN' ? 503 : 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+    const sl = await sleeveCapitalGate(sb, {
+      userId: userId!, strategyId: 'scalp', connectionId: body.connectionId,
+    });
+    if (!sl.allowed) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false, blocked: sl.code, error: sl.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+  // ── 웹과 워커가 같은 것을 보고 있는가 ──
+  {
+    const { parityGate } = await import('@/lib/ops/parityGate');
+    const pg = await parityGate(sb);
+    if (!pg.entryAllowed) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false, blocked: 'SECRET_MISMATCH', error: pg.entryReason,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+  // ── 닫아 줄 사람이 있는가 ──
+  //
+  // 청산 감시가 죽어 있으면 트레일링·본전이동·시간청산이 안 돈다.
+  // **못 여는 것은 불편이고 못 닫는 것은 사고다.**
+  {
+    // ── 사람 확인 ──
+    //
+    // 실계좌로 나가는 모드는 사람 확인을 요구한다. 자동 스케줄러가 부를
+    // 때는 confirm을 실어 보내야 하고, 그건 사용자가 화면에서 한 번
+    // 켜야만 붙는다 — 켜는 순간을 사람이 지나가게 하는 것이 목적이다.
+    //
+    // **이 검사는 거래소를 건드리기 전에 있어야 한다.** 예전에는 명목가가
+    // 필요한 `gateOrder` 뒤에 있었는데, 100배 경로에서 명목가를 만드는
+    // 일이 곧 거래소에 배율을 거는 일이다. 그래서 confirm 없이 온 실계좌
+    // 요청이 409로 막히기 전에 이미 실계좌 설정이 바뀌어 있었다.
+    //
+    // 확인 요구 여부는 명목가와 무관하다 — `modeNeedsConfirmation`이
+    // `gateOrder`와 **같은 판단을 한 곳에서** 한다.
+    if (modeNeedsConfirmation(opMode) && body.confirm !== true) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false, blocked: 'NEEDS_CONFIRMATION',
+        error: '실제 자금이 사용되는 모드입니다 — confirm: true를 함께 보내야 실행됩니다',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
+    const em = await exitMonitorGate(sb);
+    if (em.blockEntry) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false, blocked: 'EXIT_MONITOR_STALE', error: em.reason,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // ── 사용자가 손으로 닫았는가 (거래소 읽기만 한다) ──
+    //
+    // 이 판정에 필요한 것은 DB의 마지막 주문과 거래소 **조회**뿐이다 —
+    // 계획도, 거래소 쓰기도 필요 없다. 그런데 예전에는 배율 설정 뒤에
+    // 있었다. 사용자가 손으로 닫은 자리에 자동매매가 다시 들어가려다
+    // 409로 막히면서, 그 전에 계좌의 배율은 이미 바꿔 놓았다.
+    // ── 사용자가 손으로 닫았는가 ──
+    //
+    // 자동매매가 롱을 열었는데 사용자가 거래소 앱에서 손으로 닫았다면,
+    // 진입 조건이 아직 참이어도 **다시 열면 안 된다.** 그건 사용자가
+    // "이건 아니다"라고 말한 것이고, 곧바로 다시 여는 것은 그 의사를
+    // 무시하는 것이다. 그리고 사용자는 또 닫는다 — 그 싸움의 수수료는
+    // 사용자가 낸다.
+    //
+    // 지금까지 있던 방어는 reentryCheck(시간 간격)뿐이라, 간격이 지나면
+    // 그대로 반복됐다.
+    //
+    // 무엇으로 닫혔는지는 **우리가 건 보호 주문이 아직 살아 있는가**로
+    // 가른다. 손절로 닫혔다면 그 주문은 체결돼서 없고, 사용자가 닫았다면
+    // 아직 남아 있다.
+    try {
+      const { classifyClose, suppressGate } = await import('@/lib/engine/manualOverride');
+      const { data: lastOrd } = await (sb as any).from('live_orders')
+        .select('id, sl_order_id, tp_order_id, updated_at, created_at')
+        .eq('connection_id', body.connectionId).eq('symbol', symbol)
+        .eq('status', 'FILLED')
+        .order('created_at', { ascending: false }).limit(1).maybeSingle();
+
+      if (lastOrd && (lastOrd.sl_order_id || lastOrd.tp_order_id)) {
+        const { futuresPositionRisk, futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+        const ex = futuresExchangeOf(conn.exchange);
+        if (ex) {
+          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
+          // 미체결 주문. **못 읽으면 null이다** — 빈 배열로 접으면
+          // "보호 주문이 사라졌다"가 되어 손절 체결로 오인하고, 그러면
+          // 곧바로 다시 연다.
+          let openIds: string[] | null = null;
+          try {
+            if (ex === 'binance') {
+              const bf = await import('@/lib/exchanges/binanceFutures');
+              const oo = await bf.getFuturesOpenOrders(conn.apiKey, conn.apiSecret, !connIsLive, symbol);
+              openIds = oo.success ? (oo.orders || []).map((o: any) => String(o.orderId)) : null;
+            } else {
+              const gf = await import('@/lib/exchanges/gateFutures');
+              const gp = await import('@/lib/exchanges/gatePlan');
+              const c = gp.toGateContract(symbol);
+              const po = c ? await gf.getPriceOrdersGateFutures(conn.apiKey, conn.apiSecret, c, !connIsLive) : null;
+              openIds = po == null ? null : po.map((o: any) => String(o?.id));
+            }
+          } catch { openIds = null; }
+
+          const cause = classifyClose({
+            hasPosition: rr.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt) > 0,
+            stopOrderId: lastOrd.sl_order_id, takeProfitOrderId: lastOrd.tp_order_id,
+            openOrderIds: openIds,
+          });
+
+          if (cause.shouldSuppress) {
+            const atMs = Date.parse(String(lastOrd.updated_at || lastOrd.created_at));
+            const gate = suppressGate(
+              { atMs: Number.isFinite(atMs) ? atMs : Date.now(), cause: cause.cause }, Date.now());
+            if (!gate.allowed) {
+              return NextResponse.json({
+                ...preBase, ok: false, executed: false, blocked: 'MANUAL_OVERRIDE',
+                error: `${cause.reason} — ${gate.reason}`,
+                cause: cause.cause,
+              }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+            }
+          }
+        }
+      }
+    } catch {
+      // **조회 실패가 진입을 막지는 않는다.** 여기는 추가 방어선이고,
+      // 뒤에 점검 목록·거부권·숏 방어가 그대로 남아 있다. 이 검사 하나가
+      // 실패했다고 자동매매를 세우면 조회가 흔들릴 때마다 멈춘다.
+      //
+      // (예전에는 이 블록이 점검 목록 **뒤**에 있어서 "앞의 체크리스트가
+      // 이미 통과한 상태"라고 적혀 있었다. 거래소 쓰기 앞으로 옮기면서
+      // 그 문장은 더 이상 사실이 아니라 고쳤다 — 판단 자체는 그대로다.)
+    }
+  }
+
+  // 1회 상한 덮어쓰기는 두 곳에서 읽는다(쓰기 전 · 쓰기 후). 같은 값을
+  // 봐야 하므로 파싱을 한 곳에 둔다.
+  const maxNotionalOverride = () => {
+    const n = Number(process.env.LIVE_MAX_NOTIONAL_USD);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const { guardedEntry } = await import('@/lib/engine/entryAuthority');
+  const authorityFacts = {
+    exchangeSupported: conn.exchange === 'binance' || conn.exchange === 'gate',
+    exchangeName: String(conn.exchange || ''),
+    connIsLive,
+    modeNeedsLiveKey: capability(opMode).needsLiveKey,
+    killSwitchReason: killReason,
+    migrationReason,
+    // 배포 단위의 실거래 관문(liveTradingGate)은 이 라우트 맨 앞에서 이미
+    // 본다. 두 번 보지 않는다 — 같은 판단이 두 곳에 있으면 갈린다.
+    liveClosedReason: '',
+  };
+
+  // ── 크기를 무엇에서 만드는가 ──
+  //
+  // 계약이 `MARGIN_ALLOCATION`이면 `planPosition`을 **타지 않는다.** 그
+  // 함수는 허용손실 ÷ 손절거리라 손절이 분모인데, 고정 손절을 쓰지 않는
+  // 계약에는 그 분모가 없다. 분모를 지어내는 대신 거래소에 직접 물어본
+  // 값으로 크기를 만든다.
+  //
+  // 물어보는 순서와 판정은 `engine/entry100x`에 있다 — 여기 인라인으로
+  // 쓰면 그 순서가 시험되지 않는 자리에 남고, 다른 라우트가 복제하게 된다.
+  // **거래소를 건드리는 단계 전체가 권한 뒤에 있다.**
+  //
+  // 여기서 중요한 것은 "배율 설정 호출을 세는 것"이 아니다. 나중에 마진
+  // 모드 setter 같은 쓰기가 하나 더 붙어도 같은 보장이 유지되어야 한다.
+  // 그래서 호출 하나를 막는 대신 **그 단계를 통째로 권한 뒤로 묶는다** —
+  // 막힌 요청에서는 이 클로저가 아예 실행되지 않는다.
+  let entryNotes: string[] = [];
+  // 준비 단계의 결과. 확정(쓰기)은 남은 관문을 전부 지난 뒤에 한다.
+  let prepared100x: any = null;
+  let apply100xLeverage: ((lev: number) => Promise<{ ok: boolean; observed: number | null; message: string }>) | null = null;
+  const guarded = await guardedEntry(authorityFacts, async (): Promise<any> => {
+  let plan: any;
+  if (epSizingPolicy === 'MARGIN_ALLOCATION') {
+    const { prepareEntry100x, commitEntry100x } = await import('@/lib/engine/entry100x');
+    const { futuresApplyLeverage } = await import('@/lib/exchanges/futuresExec');
+    const { futuresPositionRisk, futuresAvailableUsd, futuresSymbolFilters } =
+      await import('@/lib/exchanges/futuresAdapter');
+    const { quantizeOrder } = await import('@/lib/exchanges/quantize');
+    const ex = conn.exchange as 'binance' | 'gate';
+    const target = { exchange: ex, key: conn.apiKey, secret: conn.apiSecret, testnet: !connIsLive };
+    apply100xLeverage = async (lev: number) => {
+      const v = await futuresApplyLeverage(target, symbol, lev);
+      return { ok: v.ok, observed: v.observed, message: v.message };
+    };
+
+    let entry = await prepareEntry100x(
+      {
+        leverage: epContract!.leverage,
+        sizingPolicy: epSizingPolicy,
+        marginModes: epContract!.marginModes,
+      },
+      epMarginAllocationPct,
+      {
+        // 마진 모드와 기준가는 **같은 되읽기 응답**에서 온다.
+        observeMarginMode: async () => {
+          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
+          const mt = String(rr.risk?.marginType || '').toLowerCase();
+          return mt === 'isolated' ? 'isolated' : mt === 'cross' || mt === 'crossed' ? 'cross' : null;
+        },
+        availableUsd: () => futuresAvailableUsd(ex, conn.apiKey, conn.apiSecret, !connIsLive),
+        // **서버가 읽은 값이다.** 신호가 들고 온 진입가를 쓰지 않는다.
+        referencePrice: async () => {
+          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
+          const m = Number(rr.risk?.markPrice);
+          return Number.isFinite(m) && m > 0 ? m : null;
+        },
+        quantize: async (qty: number) => {
+          // 규격을 못 읽으면 `quantizeOrder`가 신규 진입을 막는다 —
+          // 모르는 규격으로 새 포지션을 열지 않는다는 기존 규칙 그대로다.
+          const filters = await futuresSymbolFilters(ex, symbol, !connIsLive).catch(() => null);
+          const q = quantizeOrder(qty, null, filters, { orderType: 'MARKET' });
+          const out = Number(q.quantity);
+          return {
+            qty: q.ok && Number.isFinite(out) && out > 0 ? out : null,
+            message: q.reason || '거래소 규격을 읽지 못했습니다',
+          };
+        },
+      },
+    );
+    // ── 쓰기 확정선 ──
+    //
+    // 여기까지 거래소 쓰기는 **0건**이다. 읽기만으로 정해지는 차단은
+    // 전부 위에서 끝났다.
+    //
+    // 여기까지 거래소 쓰기는 **0건**이다. 배율을 거는 일은 이 클로저가
+    // 아니라, 남은 관문을 전부 지난 **주문 직전**에 한다(아래 확정 단계).
+    //
+    // 왜 여기서 쓰지 않는가
+    // ─────────────────────
+    // 준비 단계가 계획(수량·명목가·필요 증거금)을 이미 만들어 두므로,
+    // 뒤에 남은 관문 — 1회 상한 · 점검 목록 · 거부권 · 숏 방어 · 중복
+    // 신호 — 이 **전부 거래소를 건드리지 않고** 판정된다. 그렇다면 그
+    // 관문들에서 막힐 요청이 계좌 배율을 먼저 바꿀 이유가 없다.
+    //
+    // 쓰기는 늦을수록 좋다. 마지막까지 미루면 "막힐 요청은 거래소 상태도
+    // 안 건드린다"가 몇 개의 게이트를 옮겼는가와 무관하게 성립한다.
+    prepared100x = entry;
+
+    entryNotes = entry.notes;
+    plan = entry.ok
+      ? {
+          approved: true, symbol, side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
+          riskAmount: 0, riskAmountWithCosts: 0, stopDistancePct: 0, effectiveStopPct: 0,
+          positionSize: (entry.quantity as number) * (entry.referencePrice as number),
+          quantity: entry.quantity as number,
+          requiredMargin: entry.requiredMargin as number,
+          leverage: entry.leverage as number,
+          liquidationPrice: 0, liquidationDistancePct: 0,
+          notes: entry.notes,
+        }
+      : {
+          approved: false, rejectCode: entry.code, rejectReason: entry.message,
+          symbol, side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
+          riskAmount: 0, riskAmountWithCosts: 0, stopDistancePct: 0, effectiveStopPct: 0,
+          positionSize: 0, quantity: 0, requiredMargin: 0, leverage: 0,
+          liquidationPrice: 0, liquidationDistancePct: 0, notes: entry.notes,
+        };
+  } else {
+    const { planPosition } = await import('@/lib/engine/riskManager');
+    plan = planPosition(std, ctx.config, ctx.currentOpenRisk);
+  }
+    return plan;
+  });
+  if (!guarded.verdict.allowed) {
+    return NextResponse.json({
+      ...preBase, ok: false, executed: false,
+      blocked: guarded.verdict.code, error: guarded.verdict.reason,
+    }, {
+      status: guarded.verdict.code === 'KILL_SWITCH' ? 423
+        : guarded.verdict.code === 'MIGRATION_PENDING' ? 503 : 400,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
+  const plan: any = guarded.result;
+
+  const base = {
+    ...preBase,
     plan: plan.approved ? {
       side: plan.side, leverage: plan.leverage, quantity: plan.quantity,
       positionSize: plan.positionSize, requiredMargin: plan.requiredMargin,
@@ -275,7 +651,7 @@ export async function POST(req: NextRequest) {
   //
   // 다른 검사를 다 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥
   // 관문이고, SEND가 아니면 **주문을 만들지 않는다.**
-  const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
+  const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: maxNotionalOverride() });
   if (modeGate.disposition !== 'SEND') {
     // ── 모의 모드면 **모의 계좌에 실제로 체결한다** ──
     //
@@ -311,125 +687,23 @@ export async function POST(req: NextRequest) {
     }, { status: modeGate.disposition === 'BLOCK' ? 403 : 200,
          headers: { 'Cache-Control': 'no-store' } });
   }
-  // 실계좌로 나가는 모드는 사람 확인을 요구한다. 자동 스케줄러가 부를
-  // 때는 confirm을 실어 보내야 하고, 그건 사용자가 화면에서 한 번
-  // 켜야만 붙는다 — 켜는 순간을 사람이 지나가게 하는 것이 목적이다.
-  if (modeGate.needsConfirmation && body.confirm !== true) {
-    return NextResponse.json({
-      ...base, executed: false, blocked: 'NEEDS_CONFIRMATION',
-      error: `${modeGate.reason} — confirm: true를 함께 보내야 실행됩니다`,
-    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
-  }
 
-  // ── 연결 ──
-  const { loadConnection } = await import('@/lib/exchanges/connection');
-  const { conn, error: connErr } = await loadConnection(sb, body.connectionId, userId);
-  if (!conn) {
-    return NextResponse.json({
-      ...base, executed: false, blocked: 'NO_CONNECTION', error: connErr,
-    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
-  }
-  // ── 킬 스위치 ──
-  //
-  // **여기 없었다.** liveTradingGate와 킬스위치는 다른 장치다 —
-  // 앞엣것은 "이 배포에서 실거래를 허용하는가", 뒤엣것은 "이 계좌를
-  // 지금 멈춰라"다. 사용자가 누르는 건 뒤엣것이다.
-  {
-    const { killSwitchGate } = await import('@/lib/risk/killSwitch');
-    const ksg = await killSwitchGate(sb, body.connectionId);
-    if (!ksg.allowed) {
-      return NextResponse.json({
-        ...base, executed: false, blocked: 'KILL_SWITCH', error: ksg.message,
-      }, { status: ksg.status, headers: { 'Cache-Control': 'no-store' } });
-    }
-  }
 
-  // ── 같은 종목에 다른 전략이 켜져 있는가 ──
-  //
-  // **이 검사가 여기 없었다.** my-original-v1에만 있었다.
-  // ONE_WAY 계좌는 종목당 포지션이 하나라, 두 전략이 같은 종목에 들어가면
-  // 한쪽의 손절이 다른 쪽 진입에 발동한다.
-  {
-    const { strategyConflictGate, sleeveCapitalGate } = await import('@/lib/engine/strategyConflictGate');
-    const cf = await strategyConflictGate(sb, {
-      userId: userId!, myStrategyId: 'scalp', symbol, connectionId: body.connectionId,
-    });
-    if (!cf.ok) {
-      return NextResponse.json({
-        ...base, executed: false, blocked: cf.code, error: cf.reason,
-      }, { status: cf.code === 'SCHEDULES_UNKNOWN' ? 503 : 409, headers: { 'Cache-Control': 'no-store' } });
-    }
-    const sl = await sleeveCapitalGate(sb, {
-      userId: userId!, strategyId: 'scalp', connectionId: body.connectionId,
-    });
-    if (!sl.allowed) {
-      return NextResponse.json({
-        ...base, executed: false, blocked: sl.code, error: sl.reason,
-      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
-    }
-  }
 
-  // ── 웹과 워커가 같은 것을 보고 있는가 ──
-  {
-    const { parityGate } = await import('@/lib/ops/parityGate');
-    const pg = await parityGate(sb);
-    if (!pg.entryAllowed) {
-      return NextResponse.json({
-        ...base, executed: false, blocked: 'SECRET_MISMATCH', error: pg.entryReason,
-      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
-    }
-  }
 
-  // ── 닫아 줄 사람이 있는가 ──
-  //
-  // 청산 감시가 죽어 있으면 트레일링·본전이동·시간청산이 안 돈다.
-  // **못 여는 것은 불편이고 못 닫는 것은 사고다.**
-  {
-    const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
-    const em = await exitMonitorGate(sb);
-    if (em.blockEntry) {
-      return NextResponse.json({
-        ...base, executed: false, blocked: 'EXIT_MONITOR_STALE', error: em.reason,
-      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
-    }
-  }
 
   // ── DB가 코드를 따라왔는가 ──
   //
   // 코드가 요구하는 칸이 DB에 없으면 쓰기는 조용히 실패하고 매매는
   // 계속된다(054에서 실제로 일어난 일). 적용은 migrate 워크플로가
   // 자동으로 하고, 여기서는 끝났는지만 본다.
-  {
-    const { migrationGate } = await import('@/lib/system/migrationGate');
-    const mg = await migrationGate(sb);
-    if (!mg.entryAllowed) {
-      return NextResponse.json({
-        ...base, executed: false, blocked: 'MIGRATION_PENDING', error: mg.entryReason,
-      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
-    }
-  }
 
-  if (conn.exchange !== 'binance' && conn.exchange !== 'gate') {
-    return NextResponse.json({
-      ...base, executed: false, blocked: 'NO_CONNECTION',
-      error: `${conn.exchange} 연결로는 선물 단타를 낼 수 없습니다`,
-    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
-  }
 
   // ── 목적지 확인 ──
   //
   // 주문이 어느 망으로 나가는지는 **연결**이 정한다. 모드가 아니다.
   // 어긋나면 실계좌 키로 데모 서버를 두드리거나(-2015), 실전인 줄 알고
   // 켠 것이 테스트넷으로 새어 나간다.
-  const connIsLive = conn.isTestnet === false;
-  if (connIsLive !== capability(opMode).needsLiveKey) {
-    return NextResponse.json({
-      ...base, executed: false, blocked: 'MODE_CONN_MISMATCH',
-      error: connIsLive
-        ? `${opMode} 모드인데 실전 연결입니다 — 실계좌 키로 테스트넷에 주문하게 되어 전부 실패합니다`
-        : `${opMode} 모드인데 테스트넷 연결입니다 — 실전으로 나가야 할 주문이 테스트넷으로 갑니다`,
-    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
-  }
 
   // ── 거래 전 점검 ──
   //
@@ -491,7 +765,9 @@ export async function POST(req: NextRequest) {
     side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
     mode: opMode,
     notionalUsd: plan.positionSize ?? 0,
-    stopPrice: scalp.signal.stop ?? null,
+    // 고정 손절을 쓰지 않는 계약에서는 계획에 손절가가 없다. 여기에
+    // 신호의 손절가를 넣으면 체크리스트가 "손절이 있다"고 읽는다.
+    stopPrice: epStopPolicy === 'NO_FIXED_SL' ? null : (scalp.signal.stop ?? null),
     intendedLeverage: plan.leverage ?? null,
     requiredMargin: plan.requiredMargin ?? null,
     equityUsd: ctx.config.accountEquity ?? null,
@@ -524,6 +800,9 @@ export async function POST(req: NextRequest) {
   const checklist = runChecklist(checkInput, {
     market: 'USDM', intent: 'ENTRY',
     regimeFilter: regimeFacts.enabled,
+    // 손절을 묻는 세 항목은 고정 손절 전략에만 해당한다. 아니면 목록에서
+    // 빠진다 — pass로 적으면 없는 것을 있다고 적는 것이다.
+    stopPolicy: epStopPolicy,
   });
   if (!checklist.allowed) {
     return NextResponse.json({
@@ -633,7 +912,9 @@ export async function POST(req: NextRequest) {
     // 못 읽었다고 숏을 통째로 막으면 조회가 흔들릴 때마다 멈춘다.
     const sg = shortGuard({
       entryPrice: Number(scalp.signal.entry),
-      stopPrice: scalp.signal.stop ?? null,
+      // 고정 손절을 쓰지 않는 계약에서는 계획에 손절가가 없다. 여기에
+    // 신호의 손절가를 넣으면 체크리스트가 "손절이 있다"고 읽는다.
+    stopPrice: epStopPolicy === 'NO_FIXED_SL' ? null : (scalp.signal.stop ?? null),
       liquidationPrice: plan.liquidationPrice ?? null,
       recentHighs: bars?.highs ?? null,
       recentLows: bars?.lows ?? null,
@@ -658,76 +939,6 @@ export async function POST(req: NextRequest) {
     (base as any).shortFindings = sg.findings;
   }
 
-  // ── 사용자가 손으로 닫았는가 ──
-  //
-  // 자동매매가 롱을 열었는데 사용자가 거래소 앱에서 손으로 닫았다면,
-  // 진입 조건이 아직 참이어도 **다시 열면 안 된다.** 그건 사용자가
-  // "이건 아니다"라고 말한 것이고, 곧바로 다시 여는 것은 그 의사를
-  // 무시하는 것이다. 그리고 사용자는 또 닫는다 — 그 싸움의 수수료는
-  // 사용자가 낸다.
-  //
-  // 지금까지 있던 방어는 reentryCheck(시간 간격)뿐이라, 간격이 지나면
-  // 그대로 반복됐다.
-  //
-  // 무엇으로 닫혔는지는 **우리가 건 보호 주문이 아직 살아 있는가**로
-  // 가른다. 손절로 닫혔다면 그 주문은 체결돼서 없고, 사용자가 닫았다면
-  // 아직 남아 있다.
-  try {
-    const { classifyClose, suppressGate } = await import('@/lib/engine/manualOverride');
-    const { data: lastOrd } = await (sb as any).from('live_orders')
-      .select('id, sl_order_id, tp_order_id, updated_at, created_at')
-      .eq('connection_id', body.connectionId).eq('symbol', symbol)
-      .eq('status', 'FILLED')
-      .order('created_at', { ascending: false }).limit(1).maybeSingle();
-
-    if (lastOrd && (lastOrd.sl_order_id || lastOrd.tp_order_id)) {
-      const { futuresPositionRisk, futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
-      const ex = futuresExchangeOf(conn.exchange);
-      if (ex) {
-        const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
-        // 미체결 주문. **못 읽으면 null이다** — 빈 배열로 접으면
-        // "보호 주문이 사라졌다"가 되어 손절 체결로 오인하고, 그러면
-        // 곧바로 다시 연다.
-        let openIds: string[] | null = null;
-        try {
-          if (ex === 'binance') {
-            const bf = await import('@/lib/exchanges/binanceFutures');
-            const oo = await bf.getFuturesOpenOrders(conn.apiKey, conn.apiSecret, !connIsLive, symbol);
-            openIds = oo.success ? (oo.orders || []).map((o: any) => String(o.orderId)) : null;
-          } else {
-            const gf = await import('@/lib/exchanges/gateFutures');
-            const gp = await import('@/lib/exchanges/gatePlan');
-            const c = gp.toGateContract(symbol);
-            const po = c ? await gf.getPriceOrdersGateFutures(conn.apiKey, conn.apiSecret, c, !connIsLive) : null;
-            openIds = po == null ? null : po.map((o: any) => String(o?.id));
-          }
-        } catch { openIds = null; }
-
-        const cause = classifyClose({
-          hasPosition: rr.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt) > 0,
-          stopOrderId: lastOrd.sl_order_id, takeProfitOrderId: lastOrd.tp_order_id,
-          openOrderIds: openIds,
-        });
-
-        if (cause.shouldSuppress) {
-          const atMs = Date.parse(String(lastOrd.updated_at || lastOrd.created_at));
-          const gate = suppressGate(
-            { atMs: Number.isFinite(atMs) ? atMs : Date.now(), cause: cause.cause }, Date.now());
-          if (!gate.allowed) {
-            return NextResponse.json({
-              ...base, executed: false, blocked: 'MANUAL_OVERRIDE',
-              error: `${cause.reason} — ${gate.reason}`,
-              cause: cause.cause,
-            }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
-          }
-        }
-      }
-    }
-  } catch {
-    // **조회 실패가 진입을 막지는 않는다.** 여기는 추가 방어선이고,
-    // 앞의 체크리스트가 이미 통과한 상태다. 이 검사 하나가 실패했다고
-    // 자동매매를 세우면 조회가 흔들릴 때마다 멈춘다.
-  }
 
   // ── 주문 ──
   //
@@ -778,6 +989,31 @@ export async function POST(req: NextRequest) {
   //
   // **규칙은 leverageSync 한 곳에만 둔다** — 일봉 사다리와 단타가 다른
   // 규칙을 쓰면 언젠가 한쪽만 고쳐진다.
+  // ══════════════════ 거래소 쓰기 확정선 ══════════════════
+  //
+  // **여기가 이 요청의 첫 거래소 쓰기다.** 위의 관문은 전부 지났다 —
+  // 권한 · 전략 충돌 · 슬리브 · 정합 · 청산 감시 · 수동 청산 · 사람 확인 ·
+  // 1회 상한 · 점검 목록 · 거부권 · 숏 방어 · 중복 신호.
+  //
+  // 그래서 쓰기 없이 판정할 수 있는 차단은 하나도 남아 있지 않다. 여기서
+  // 남는 차단은 **걸어 봐야 아는 것** 하나뿐이다: 거래소가 요청한 배율을
+  // 실제로 주었는가.
+  if (epSizingPolicy === 'MARGIN_ALLOCATION' && prepared100x?.ok) {
+    const { commitEntry100x } = await import('@/lib/engine/entry100x');
+    const committed = await commitEntry100x(
+      prepared100x,
+      { applyLeverage: apply100xLeverage! },
+      modeGate,
+    );
+    entryNotes = committed.notes;
+    if (!committed.ok) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'LEVERAGE_NOT_EXACT',
+        error: committed.message,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   const { ensureLeverage } = await import('@/lib/engine/leverageSync');
   const levSync = await ensureLeverage(plan.leverage, {
     read: async () => {
@@ -821,10 +1057,21 @@ export async function POST(req: NextRequest) {
     exchange: conn.exchange as 'binance' | 'gate',
     mode: mode as 'TESTNET' | 'LIVE',
     plan,
+    // **계약이 실행 의미를 정한다.**
+    //
+    // 고정 손절을 쓰지 않는 계약이면 `stopLoss`를 함께 보내면 안 된다 —
+    // `executeOrder`가 그 조합을 모순으로 보고 주문을 거부한다. 조용히
+    // 무시하지 않는 것이 맞다: 화면에는 손절이 있고 거래소에는 없는
+    // 상태를 만드느니 멈추는 편이 낫다.
+    stopPolicy: epStopPolicy,
+    takeProfitPolicy: epTakeProfitPolicy,
     // **손절은 반드시 함께 낸다.** 단타에서 손절 없는 진입은 배율이
-    // 붙어 있어 청산까지 간다.
-    stopLoss: scalp.signal.stop,
-    takeProfit: scalp.signal.target,
+    // 붙어 있어 청산까지 간다. 고정 손절을 쓰지 않는 계약만 예외다.
+    //
+    // 익절은 **따로** 판단한다. 예전에는 손절 정책 하나가 둘을 같이 껐는데,
+    // 그러면 "손절만 없는" 전략을 표현할 수 없다.
+    ...(epStopPolicy === 'NO_FIXED_SL' ? {} : { stopLoss: scalp.signal.stop }),
+    ...(epTakeProfitPolicy === 'NO_FIXED_TP' ? {} : { takeProfit: scalp.signal.target }),
     apiKey: conn.apiKey,
     apiSecret: conn.apiSecret,
   });

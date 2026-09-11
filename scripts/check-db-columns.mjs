@@ -52,9 +52,30 @@ for (const f of migFiles) {
       if (name) addCol(table, name);
     }
   }
-  // ALTER TABLE t ADD COLUMN [IF NOT EXISTS] c
-  const at = /alter\s+table\s+(?:if\s+exists\s+)?([\w."]+)\s+add\s+column\s+(?:if\s+not\s+exists\s+)?([\w"]+)/gi;
-  while ((m = at.exec(sql)) !== null) addCol(m[1], m[2]);
+  // ALTER TABLE t ADD COLUMN [IF NOT EXISTS] c [, ADD COLUMN ... ]
+  //
+  // **한 문장에 ADD COLUMN이 여러 개 올 수 있다.**
+  //
+  //   ALTER TABLE autotrade_schedules
+  //     ADD COLUMN IF NOT EXISTS execution_profile_id       text,
+  //     ADD COLUMN IF NOT EXISTS execution_preset_id        text,
+  //     ADD COLUMN IF NOT EXISTS execution_contract_version int;
+  //
+  // 예전 정규식은 표 이름과 **첫 칸 하나**만 잡았다. 그래서 위 세 칸 중
+  // 둘은 이 검사기가 존재를 모른 채로 있었고, 그 칸을 select하는 코드가
+  // "없는 칸"으로 잘못 잡혔다. 검사기가 틀리는 것도 고장이다 —
+  // 없는 칸을 있다고 하는 것보다 **있는 칸을 없다고 하는 쪽**이 더 자주
+  // 사람을 헷갈리게 한다(멀쩡한 코드를 고치게 만든다).
+  //
+  // 이제 문장을 통째로 떼어 그 안의 ADD COLUMN을 전부 훑는다.
+  const stmt = /alter\s+table\s+(?:if\s+exists\s+)?([\w."]+)([\s\S]*?);/gi;
+  while ((m = stmt.exec(sql)) !== null) {
+    const table = m[1];
+    const body = m[2];
+    const addc = /add\s+column\s+(?:if\s+not\s+exists\s+)?([\w"]+)/gi;
+    let c;
+    while ((c = addc.exec(body)) !== null) addCol(table, c[1]);
+  }
 }
 
 let bad = 0;
