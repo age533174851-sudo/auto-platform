@@ -1,0 +1,159 @@
+# 전용 100배 계약 돌연변이 전수 실행 — **손으로만 돈다.**
+#
+# 왜 따로 있는가
+# ──────────────
+# 돌연변이 하네스는 규칙을 하나씩 고의로 망가뜨린 뒤, 검사기와 유닛 시험이
+# 실제로 빨간불을 켜는지 본다. 빨간불이 안 뜨면 그 규칙은 지켜지는 것이
+# 아니라 **아무도 안 보는 것**이다.
+#
+# 그런데 105건을 돌리려면 시험 전체를 여러 번 돌려야 해서 오래 걸린다.
+# 매 PR마다 돌리면 CI 시간이 폭증한다. 그래서 일반 CI(`ci.yml`)는 하네스가
+# 깨지지 않았는지만 보고(`--self-test`, 수 초), 전수 실행은 여기서 사람이
+# 부른다.
+#
+# 왜 GitHub에서 돌려야 하는가
+# ───────────────────────────
+# 이 숫자가 한동안 **한 사람의 로컬 실행 주장**이었다. 하네스를 저장소로
+# 옮겨서 "다시 돌릴 수는 있는" 상태까지는 갔지만, 실제로 제3자가 돌린
+# 기록은 없었다. 재현할 수 있다는 것과 재현됐다는 것은 다르다.
+#
+# 이 워크플로가 도는 순간 그 숫자의 출처가 사람이 아니라 **Actions 로그**가
+# 된다. 실행 환경이 없는 검토자도 로그만으로 확인할 수 있다.
+#
+# 언제 돌리나
+# ───────────
+# 실행 계약·진입 순서·보호 정책이 바뀐 라운드. 그리고 머지 전 최종 증거가
+# 필요할 때.
+#
+#   Actions → "전용 100배 돌연변이 전수 실행" → Run workflow
+#
+# 거래소 키도 비밀값도 실주문도 필요 없다 — 소스를 고쳐 보고 검사기와
+# 유닛 시험을 돌리는 것이 전부다. 그래서 secrets를 하나도 읽지 않는다.
+name: mutation-100x
+
+on:
+  # **자동 실행에 연결하지 않는다.** pull_request나 push에 걸면 모든 PR이
+  # 이 시간을 물게 된다.
+  workflow_dispatch:
+
+# 읽기만 하면 된다. 이 워크플로는 아무것도 쓰지 않는다.
+permissions:
+  contents: read
+
+jobs:
+  mutations:
+    runs-on: ubuntu-latest
+    # 로컬 실측 약 16분. 러너는 더 느리므로 넉넉히 두되, **무한은 아니다** —
+    # 하네스가 걸리면 워크플로가 영원히 도는 것이 가장 나쁘다.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 하네스는 시작할 때 `git status --porcelain`이 깨끗하기를 요구한다.
+          # 얕은 체크아웃이어도 상태 판정에는 문제가 없다.
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm install`이 아니라 `npm ci`다. install은 잠금 파일을 고칠 수 있고,
+      # 그러면 하네스가 **더러운 트리**로 보고 시작을 거부한다.
+      - name: 의존성 설치
+        run: npm ci
+
+      # ── 이 ref에 하네스가 있는가 ──
+      #
+      # 이 워크플로 파일은 **default branch에 있어야** GitHub가 등록한다.
+      # 그런데 검증 대상 코드(하네스 포함)는 아직 기능 브랜치에 있을 수 있다.
+      # 그래서 이 둘이 서로 다른 ref에 있는 기간이 생긴다.
+      #
+      # 그 상태에서 ref를 잘못 주고 돌리면 node가 "모듈 없음"으로 죽어서,
+      # 무엇이 잘못됐는지 로그만 보고는 알기 어렵다. 여기서 먼저 말한다.
+      - name: 하네스가 이 ref에 있는지 확인
+        run: |
+          if [ ! -f scripts/check-100x-mutations.mjs ]; then
+            echo "::error::이 ref(${GITHUB_REF_NAME})에는 scripts/check-100x-mutations.mjs가 없습니다."
+            echo "::error::하네스가 있는 브랜치를 'Use workflow from'으로 골라서 실행하세요."
+            exit 1
+          fi
+          echo "하네스 확인됨 — ${GITHUB_REF_NAME}"
+
+      # 하네스는 더러운 트리에서 돌기를 거부한다(증거는 특정 커밋에 대한
+      # 것이어야 하므로). 설치 뒤 정말 깨끗한지 먼저 보고, 아니면 무엇이
+      # 더러운지 남긴다 — 그래야 거부당했을 때 이유를 안다.
+      - name: 트리가 깨끗한지 확인
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::의존성 설치 뒤 트리가 깨끗하지 않습니다. 하네스가 거부합니다."
+            git status --porcelain
+            exit 1
+          fi
+          echo "트리 clean — 하네스를 시작할 수 있습니다"
+
+      # ── 전수 실행 ──
+      #
+      # **결과를 가공하지 않는다.** grep으로 초록을 만들지 않고, 하네스의
+      # 종료 코드를 그대로 워크플로 결과로 쓴다. 누락·판정불가·과도검출이
+      # 하나라도 있으면 하네스가 1로 끝나고 이 잡도 실패한다.
+      #
+      # `set -o pipefail`이 핵심이다. 없으면 파이프의 마지막 명령(tee)의
+      # 종료 코드가 쓰여서 **하네스가 실패해도 초록**이 된다.
+      #
+      # 로그를 **저장소 밖**(`$RUNNER_TEMP`)에 쓴다. 작업 폴더에 쓰면 그
+      # 파일이 추적되지 않는 변경으로 남고, 하네스가 변이마다 하는 "트리가
+      # 깨끗한가" 검사가 그것을 대상 외 변경으로 읽어 **첫 변이에서 중단**된다.
+      - name: 돌연변이 전수 실행 (105건)
+        run: |
+          set -o pipefail
+          node scripts/check-100x-mutations.mjs 2>&1 | tee "$RUNNER_TEMP/mutation-result.txt"
+
+      # 요약을 실행 페이지 상단에 붙인다. 로그를 끝까지 스크롤하지 않아도
+      # 숫자가 보이게 한다 — 검토자가 확인하려는 것이 그 한 줄이다.
+      #
+      # 이 단계는 **판정에 영향을 주지 않는다.** 앞 단계가 이미 실패했으면
+      # 잡은 실패로 끝나고, 여기서 초록으로 되돌릴 수 없다.
+      - name: 결과 요약
+        if: always()
+        run: |
+          {
+            echo '## 전용 100배 돌연변이 전수 실행'
+            echo
+            echo "커밋: \`${GITHUB_SHA}\`"
+            echo
+            echo '```'
+            tail -n 3 "$RUNNER_TEMP/mutation-result.txt" 2>/dev/null || echo '(결과 파일 없음 — 실행이 시작되지 못했습니다)'
+            echo '```'
+            echo
+            echo '### 새 나간 것 · 판정 불가 · 과도 검출'
+            echo
+            echo '```'
+            grep -E '✗|⚠' "$RUNNER_TEMP/mutation-result.txt" 2>/dev/null || echo '없음'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 전체 로그를 파일로도 남긴다. 로그 창은 잘릴 수 있고, 검토자가
+      # 105줄을 통째로 받아 보고 싶을 수 있다.
+      - name: 전체 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-result
+          path: ${{ runner.temp }}/mutation-result.txt
+          retention-days: 30
+
+      # 하네스는 변이마다 원본 바이트를 되쓰고 끝에 트리를 다시 확인한다.
+      # 그래도 여기서 한 번 더 본다 — 하네스가 스스로 틀린 적이 있고,
+      # 그때 결과는 믿을 수 없는데 숫자는 그럴듯했다.
+      - name: 끝나고도 트리가 깨끗한지 확인
+        if: always()
+        run: |
+          leftover="$(git status --porcelain)"
+          if [ -n "$leftover" ]; then
+            echo "::error::실행 뒤 트리가 깨끗하지 않습니다 — 복원이 완전하지 않았습니다."
+            git status --porcelain
+            exit 1
+          fi
+          echo "실행 뒤에도 트리 clean — 복원이 완전합니다"
