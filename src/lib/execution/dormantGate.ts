@@ -141,44 +141,69 @@ export function executionGateVerdict(
       reason: `모르는 실행 프로필입니다: ${pid} — 모르는 값을 프로필 없음으로 읽지 않습니다.` };
   }
 
-  const combo = open.find(c => c.profileId === pid);
-  if (!combo) {
+  // ── 어느 줄로 판정하는가 ──
+  //
+  // 예전에는 `profileId`만으로 **첫 줄**을 고르고 그 줄 기준으로 나머지를
+  // 비교했다. 표는 전략마다 한 줄씩 갖는 구조인데 판정이 한 줄만 보므로,
+  // 같은 프로필에 두 전략을 열면 뒤에 적힌 전략은 도달할 수 없었다 —
+  // 앞줄과 전략이 다르다는 이유로 막히고, 그 사유도 사실과 달랐다.
+  //
+  // 그래서 **후보를 좁혀 간다.** 조건은 그대로이고 순서도 그대로다
+  // (전략 → 프리셋 → 계약 버전 → 모드). 달라진 것은 "첫 줄 하나"가 아니라
+  // "남은 줄들"을 본다는 것뿐이다. 어느 줄에도 맞지 않으면 여전히 막힌다.
+  const rows = open.filter(c => c.profileId === pid);
+  if (rows.length === 0) {
     return { allowed: false,
       reason: `실행 프로필 ${pid}은(는) 아직 활성화되지 않았습니다`
         + ' — 실행기가 그 계약을 그대로 실행하지 않습니다.' };
   }
 
+  /** 후보가 가진 값들을 사유에 적는다. 무엇이어야 하는지 사람이 알아야 한다. */
+  const listed = (xs: readonly string[]) => Array.from(new Set(xs)).join('/') || '(없음)';
+
   // **전략을 프리셋보다 먼저 본다.** 프로필이 맞아도 라우트가 그 계약을
   // 읽지 않으면 저장된 의미와 도는 의미가 갈린다.
   const strat = str(i.strategyId);
-  if (strat !== combo.strategyId) {
+  const byStrategy = rows.filter(c => c.strategyId === strat);
+  if (byStrategy.length === 0) {
     return { allowed: false,
-      reason: `${pid}은(는) ${combo.strategyId} 전략에서만 켤 수 있습니다 (받은 값: ${strat || '없음'})`
+      reason: `${pid}은(는) ${listed(rows.map(c => c.strategyId))} 전략에서만 켤 수 있습니다`
+        + ` (받은 값: ${strat || '없음'})`
         + ' — 다른 전략의 라우트는 이 계약을 해석하지 않아,'
         + ' 저장된 의미와 실제로 도는 의미가 달라집니다.' };
   }
 
   const sid = str(i.presetId);
-  if (sid !== combo.presetId) {
+  const byPreset = byStrategy.filter(c => c.presetId === sid);
+  if (byPreset.length === 0) {
     return { allowed: false,
-      reason: `${pid}은(는) ${combo.presetId} 프리셋에서만 켤 수 있습니다 (받은 값: ${sid || '없음'}).` };
+      reason: `${pid}은(는) ${listed(byStrategy.map(c => c.presetId))} 프리셋에서만 켤 수 있습니다`
+        + ` (받은 값: ${sid || '없음'}).` };
   }
 
   const ver = Number(i.contractVersion);
-  if (!Number.isInteger(ver) || ver !== combo.contractVersion) {
+  const byVersion = Number.isInteger(ver)
+    ? byPreset.filter(c => c.contractVersion === ver)
+    : [];
+  if (byVersion.length === 0) {
     return { allowed: false,
-      reason: `${pid}은(는) 계약 버전 ${combo.contractVersion}에서만 켤 수 있습니다`
+      reason: `${pid}은(는) 계약 버전 ${listed(byPreset.map(c => String(c.contractVersion)))}에서만 켤 수 있습니다`
         + ` (받은 값: ${str(i.contractVersion) || '없음'}).` };
   }
 
   const mode = str(i.mode).toUpperCase();
-  if (!combo.modes.includes(mode)) {
+  const byMode = byVersion.filter(c => c.modes.includes(mode));
+  if (byMode.length === 0) {
     return { allowed: false,
-      reason: `${pid}은(는) ${combo.modes.join('/')}에서만 켤 수 있습니다 (받은 값: ${mode || '없음'})`
+      reason: `${pid}은(는) ${listed(byVersion.flatMap(c => c.modes))}에서만 켤 수 있습니다`
+        + ` (받은 값: ${mode || '없음'})`
         + ' — 고정 손절을 대신할 자동 종료 권한이 배선됐다는 증거가 나오기 전에는 실계좌를 열지 않습니다.' };
   }
 
-  if (combo.requiresMarginAllocation) {
+  // **남은 줄 중 하나라도 요구하면 요구한다.** 여기서 "하나라도 안 하면
+  // 통과"로 읽으면, 표에 줄을 하나 더 놓는 것만으로 배정 비율 검사가
+  // 사라진다. 넓히는 수정이 조건을 약하게 만들면 안 된다.
+  if (byMode.some(c => c.requiresMarginAllocation)) {
     const pct = Number(i.marginAllocationPct);
     if (i.marginAllocationPct == null || !Number.isFinite(pct) || pct <= 0 || pct > 100) {
       return { allowed: false,

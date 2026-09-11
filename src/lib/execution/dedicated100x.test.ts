@@ -393,6 +393,84 @@ export async function runDedicated100xTests() {
     eq(OPEN_COMBOS[0].requiresMarginAllocation, true);
   });
 
+  // ── 같은 프로필에 전략이 둘일 때 ──────────────────────
+  //
+  // `OPEN_COMBOS`는 전략마다 한 줄씩 갖는 구조다. 그런데 판정이
+  // `profileId`만으로 **첫 줄**을 고르고 그 줄 기준으로 전략을 비교했다.
+  //
+  // 그래서 같은 프로필에 두 전략을 열면 뒤에 적힌 전략은 도달할 수 없다 —
+  // 앞줄(scalp)과 전략이 다르다는 이유로 막힌다. 표에는 열려 있다고
+  // 적혀 있는데 실제로는 못 켜는 상태이고, 그 사유도 사실과 다르다.
+  //
+  // **이 시험은 지금 표(scalp 한 줄)를 바꾸지 않는다.** 판정 함수에
+  // 두 줄짜리 표를 직접 넘겨서 구조만 본다. daily-ladder를 실제로 여는
+  // 것은 그 라우트가 계약을 해석하게 된 뒤의 일이다.
+  {
+    const twoRows = [
+      { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: V,
+        modes: ['TESTNET'], requiresMarginAllocation: true },
+      { strategyId: 'daily-ladder', profileId: ID, presetId: PRESET, contractVersion: V,
+        modes: ['TESTNET'], requiresMarginAllocation: true },
+    ];
+
+    test('같은 프로필의 두 번째 전략도 켤 수 있다 — 첫 줄이 가리지 않는다', () => {
+      const v = executionGateVerdict({ ...openRow, strategyId: 'daily-ladder' }, twoRows);
+      eq(v.allowed, true, `두 번째 줄이 첫 줄 때문에 막혔다: ${v.reason}`);
+    });
+
+    test('첫 줄 전략도 그대로 켤 수 있다', () => {
+      const v = executionGateVerdict({ ...openRow, strategyId: 'scalp' }, twoRows);
+      eq(v.allowed, true, `첫 줄이 막혔다: ${v.reason}`);
+    });
+
+    // 넓히는 수정이 조건을 약하게 만들지 않았는가. 줄이 둘이어도
+    // **어느 줄에도 맞지 않으면** 여전히 막혀야 한다.
+    test('두 줄 어디에도 없는 전략은 막힌다', () => {
+      const v = executionGateVerdict({ ...openRow, strategyId: 'my-original-v1' }, twoRows);
+      eq(v.allowed, false, '표에 없는 전략이 통과했다');
+    });
+
+    test('전략은 맞아도 프리셋이 다르면 막힌다', () => {
+      const v = executionGateVerdict(
+        { ...openRow, strategyId: 'daily-ladder', presetId: 'STABILIZE' }, twoRows);
+      eq(v.allowed, false, '프리셋 검사가 헐거워졌다');
+    });
+
+    test('전략은 맞아도 계약 버전이 다르면 막힌다', () => {
+      const v = executionGateVerdict(
+        { ...openRow, strategyId: 'daily-ladder', contractVersion: 1 }, twoRows);
+      eq(v.allowed, false, '계약 버전 검사가 헐거워졌다');
+    });
+
+    test('전략은 맞아도 LIVE는 막힌다', () => {
+      const v = executionGateVerdict(
+        { ...openRow, strategyId: 'daily-ladder', mode: 'LIVE' }, twoRows);
+      eq(v.allowed, false, '실계좌가 열렸다');
+    });
+
+    test('전략은 맞아도 배정 비율이 없으면 막힌다', () => {
+      const v = executionGateVerdict(
+        { ...openRow, strategyId: 'daily-ladder', marginAllocationPct: null }, twoRows);
+      eq(v.allowed, false, '배정 비율 검사가 헐거워졌다');
+    });
+
+    // **한 줄이 모드만 다른 경우.** 같은 전략·프로필인데 TESTNET 줄과
+    // LIVE 줄이 따로 있으면, 모드가 맞는 줄로 판정해야 한다. 첫 줄만
+    // 보면 "LIVE는 못 켠다"가 되거나 그 반대가 된다.
+    test('전략이 같고 모드만 다른 두 줄에서도 맞는 줄로 판정한다', () => {
+      const byMode = [
+        { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: V,
+          modes: ['TESTNET'], requiresMarginAllocation: true },
+        { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: V,
+          modes: ['SHADOW_LIVE'], requiresMarginAllocation: true },
+      ];
+      eq(executionGateVerdict({ ...openRow, mode: 'TESTNET' }, byMode).allowed, true);
+      eq(executionGateVerdict({ ...openRow, mode: 'SHADOW_LIVE' }, byMode).allowed, true);
+      eq(executionGateVerdict({ ...openRow, mode: 'LIVE' }, byMode).allowed, false,
+        '어느 줄에도 없는 모드가 통과했다');
+    });
+  }
+
   test('검증된 조합은 켤 수 있다', () => {
     const v = executionGateVerdict(openRow);
     eq(v.allowed, true, `열린 조합이 막혔다: ${v.reason}`);
