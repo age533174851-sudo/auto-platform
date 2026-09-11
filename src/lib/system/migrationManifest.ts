@@ -96,7 +96,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '079_schedule_margin_allocation.sql', id: 79, risk: 'ADDITIVE', checksum: 'a67f4ce320d24f9d' },
   { name: '080_execution_profile_selective.sql', id: 80, risk: 'ADDITIVE', checksum: '68d3d09091b77073' },
   { name: '081_paper_account_identity.sql', id: 81, risk: 'UNKNOWN', checksum: 'eb2a59e6899ef191' },
-  { name: '082_paper_rpc_account_id.sql', id: 82, risk: 'DESTRUCTIVE', checksum: '64a87a9ae7b53642' },
+  { name: '082_paper_rpc_account_id.sql', id: 82, risk: 'DESTRUCTIVE', checksum: '8b55a6d45abef3af' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */

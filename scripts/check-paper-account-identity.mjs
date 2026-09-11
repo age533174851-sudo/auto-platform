@@ -39,8 +39,9 @@ const MIG_RPC = 'supabase/migrations/082_paper_rpc_account_id.sql';
     if (!/ADD COLUMN IF NOT EXISTS is_default BOOLEAN/i.test(s)) {
       fail('계좌에 is_default 칸이 없습니다 — 기본 계좌를 "첫 줄"로 고르면 나중에 모호해집니다');
     }
-    // **사용자당 기본 계좌는 정확히 하나.** 코드가 실수해도 두 개가 될 수
-    // 없어야 한다. 부분 유니크 인덱스가 그것을 DB에서 보장한다.
+    // **사용자당 기본 계좌는 최대 하나.** 코드가 실수해도 두 개가 될 수
+    // 없어야 한다 — 부분 유니크 인덱스가 그것만 DB에서 막는다.
+    // **0개는 이 인덱스가 막지 못한다.** 그쪽은 아래 규칙 2.5/2.6/2.7이 본다.
     if (!/CREATE UNIQUE INDEX[\s\S]*?paper_accounts[\s\S]*?\(user_id\)[\s\S]*?WHERE is_default/i.test(s)) {
       fail('기본 계좌가 둘이 되는 것을 DB가 막지 않습니다 (부분 유니크 인덱스 없음)');
     } else notes.push('기본 계좌 2개 이상 — 부분 유니크 인덱스가 막는다 (0개는 못 막는다)');

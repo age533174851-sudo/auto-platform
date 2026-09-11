@@ -42,7 +42,9 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.paper_default_account_id(UUID) IS
-  '계좌를 지정하지 않은 경로가 갈 곳. 부분 유니크 인덱스가 사용자당 하나를 보장한다.';
+  '계좌를 지정하지 않은 경로가 갈 곳. 부분 유니크 인덱스가 막는 것은 '
+  '**두 개가 되는 것뿐이고, 0개는 막지 못한다.** 0개면 이 함수가 NULL을 '
+  '돌려주고, 부르는 쪽은 임의 계좌를 고르지 않고 거기서 멈춘다.';
 
 -- ══════════════════ 진입 ══════════════════
 DROP FUNCTION IF EXISTS public.paper_open_position(
