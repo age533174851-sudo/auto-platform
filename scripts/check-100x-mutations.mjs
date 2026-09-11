@@ -258,8 +258,20 @@ const M = [
     s => s.replace("    && String(r?.mode || '').toUpperCase() === 'TESTNET'\n", '')],
 
   // ── 전략 identity (P0) ──
+  // 판정이 "첫 줄 하나"에서 "남은 줄들"로 바뀌면서 이 변이가 겨누던
+  // 문구가 사라졌다. 정본이 옮겨가면 변이도 따라가야 한다 — 안 따라가면
+  // 통과가 "규칙이 지켜졌다"가 아니라 "아무것도 안 겨눴다"가 된다.
+  // (자기 점검이 이걸 CI에서 잡았다.)
   ['S1  조합에서 전략 조건 제거 (게이트)', P.gate,
-    s => s.replace(/  const strat = str\(i\.strategyId\);\n  if \(strat !== combo\.strategyId\) \{[\s\S]*?\n  \}\n/, '')],
+    s => s.replace(/  const byStrategy = rows\.filter\(c => c\.strategyId === strat\);\n  if \(byStrategy\.length === 0\) \{[\s\S]*?\n  \}\n/,
+                   '  const byStrategy = rows;\n')],
+
+  // 넓히면서 헐거워지는 자리. 남은 줄 중 **하나라도** 요구하면 요구해야
+  // 하는데, `some`을 `every`로 바꾸면 줄을 하나 더 놓는 것만으로 배정
+  // 비율 검사가 사라진다.
+  ['S1b 배정 비율을 every로 약화 (게이트)', P.gate,
+    s => s.replace('if (byMode.some(c => c.requiresMarginAllocation)) {',
+                   'if (byMode.every(c => c.requiresMarginAllocation) && byMode.length > 1) {')],
   ['S2  조합 표의 전략을 daily-ladder로 바꿈', P.gate,
     s => s.replace("strategyId: 'scalp',", "strategyId: 'daily-ladder',")],
   ['S3  켜기(L3) 조건에서 전략이 빠짐', P.gate,
