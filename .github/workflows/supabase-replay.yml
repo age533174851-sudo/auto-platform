@@ -343,7 +343,7 @@ jobs:
           # 0건을 통과로 적지 않는다. 파일이 통째로 건너뛰어도 psql은 0으로 끝난다.
           n_ok="$(grep -c 'ok  ' /tmp/rpc-smoke.out || true)"
           echo "RPC 실행 확인 ${n_ok}건"
-          if [ "${n_ok}" -lt 12 ]; then
+          if [ "${n_ok}" -lt 15 ]; then
             echo "::error::RPC 확인이 ${n_ok}건뿐입니다 — 연기가 실제로 돌지 않았습니다"
             exit 1
           fi
@@ -351,6 +351,84 @@ jobs:
             echo "::error::연기가 끝까지 가지 못했습니다"
             exit 1
           fi
+
+      - name: 챌린지 회계가 실제로 돌아가는가 (085 실행 증명)
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 \
+            -Xf scripts/sql/085_paper_challenge_accounting_proof.sql \
+            > /tmp/ch-proof.out 2>&1 || {
+              echo "::error::챌린지 회계가 계약대로 돌지 않습니다 — 아래 FAIL/ERROR 줄을 보세요"
+              cat /tmp/ch-proof.out
+              exit 1
+            }
+          cat /tmp/ch-proof.out
+          # 0건을 통과로 적지 않는다. 파일이 통째로 건너뛰어도 psql은 0으로 끝난다.
+          n_ok="$(grep -c 'ok  ' /tmp/ch-proof.out || true)"
+          echo "챌린지 회계 확인 ${n_ok}건"
+          if [ "${n_ok}" -lt 50 ]; then
+            echo "::error::회계 확인이 ${n_ok}건뿐입니다 — 증명이 실제로 돌지 않았습니다"
+            exit 1
+          fi
+          if ! grep -q '챌린지 회계 실행 증명 전부 통과' /tmp/ch-proof.out; then
+            echo "::error::증명이 끝까지 가지 못했습니다"
+            exit 1
+          fi
+          {
+            echo "### 챌린지 회계 실행 증명"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (불변식 SUM(원장)=잔고 포함)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 동시에 일어나는 일을 동시에 일으켜서 본다 (085 동시성)
+        run: |
+          set -euo pipefail
+          # 포트·비밀번호를 박지 않는다 — CLI가 알려 준 URL을 그대로 넘긴다.
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          bash scripts/paper-challenge-concurrency.sh > /tmp/ch-conc.out 2>&1 || {
+            echo "::error::동시성 계약이 지켜지지 않습니다 — 아래 FAIL 줄을 보세요"
+            cat /tmp/ch-conc.out
+            exit 1
+          }
+          cat /tmp/ch-conc.out
+          n_ok="$(grep -c '^ok  ' /tmp/ch-conc.out || true)"
+          if [ "${n_ok}" -lt 14 ]; then
+            echo "::error::동시성 확인이 ${n_ok}건뿐입니다"
+            exit 1
+          fi
+          # **출발선에 정말 모였는지**까지 본다. 겹치지 않은 채 통과한 적이 있다.
+          if ! grep -q '출발선에 8명이 동시에 모였다' /tmp/ch-conc.out; then
+            echo "::error::동시 생성이 실제로 겹치지 않았습니다 — 경합을 만들지 못한 통과입니다"
+            exit 1
+          fi
+          {
+            echo "### 챌린지 회계 동시성"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (동시 생성 출발선 · 선점 실패 · 교착 0건)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 검사가 무엇을 지키는지 망가뜨려 본다 (085 뮤테이션)
+        run: |
+          set -euo pipefail
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          node scripts/paper-challenge-mutations.mjs > /tmp/ch-mut.out 2>&1 || {
+            echo "::error::규칙을 깨뜨렸는데 검사가 초록입니다 — 그 규칙은 아무도 지키지 않습니다"
+            cat /tmp/ch-mut.out
+            exit 1
+          }
+          cat /tmp/ch-mut.out
+          n_red="$(grep -c '^      RED' /tmp/ch-mut.out || true)"
+          if [ "${n_red}" -lt 19 ]; then
+            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
+            exit 1
+          fi
+          {
+            echo "### 뮤테이션"
+            echo ""
+            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 요약
         if: always()

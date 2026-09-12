@@ -38,6 +38,14 @@
 -- 칸의 NOT NULL만 믿지 않는다. 그러면 원장 INSERT까지 가서야 실패하고, 그
 -- 사이에 이미 잠금을 잡고 판단을 했다. **함수에 들어오자마자 거부한다** —
 -- 계약은 "명시 시각이 없으면 돈을 건드리지 않는다"다.
+--
+-- 그리고 이 거부에는 **전용 SQLSTATE `22004`**를 쓴다.
+--
+-- 이유는 검사 가능성이다. 진입 검사를 지워 보면 함수는 여전히 실패한다 —
+-- 안쪽 `paper_money_apply`가 막기 때문이다. 둘 다 `P0001`이면 "들어오자마자
+-- 거부했다"와 "원장까지 가서 거부했다"를 **구별할 수 없고**, 실제로 이 검사가
+-- 한 번 그렇게 통과했다. 트랜잭션이 통째로 되돌아가므로 남은 자취로도 구별할
+-- 수 없다. 그래서 계약 위반에 고유한 코드를 붙여 조건으로 검사한다.
 
 -- ══════════════════ ① 이 계좌가 챌린지 것인가 ══════════════════
 --
@@ -131,6 +139,113 @@ COMMENT ON FUNCTION public.paper_money_apply(UUID, UUID, TEXT, NUMERIC, TEXT, TE
   '트랜잭션에서 함께 한다 — 따로 부를 수 있으면 언젠가 한쪽만 불린다. '
   '같은 사건이 다시 오면 원장도 잔고도 다시 쓰지 않는다(FALSE 반환).';
 
+-- ══════════════════ ②-b 달성·실패를 판정하는 단 하나의 자리 ══════════════════
+--
+-- **판정이 두 곳에 있으면 언젠가 갈린다.**
+--
+-- 잔고를 움직이는 자리는 진입(수수료)과 청산(실현손익+수수료) 둘이다. 판정을
+-- 청산에만 두면, 수수료가 실패선을 넘긴 계좌는 **다음 청산까지 실패선 아래에서
+-- 계속 달린다.** 그래서 판정을 여기 하나로 모으고 두 경로가 같은 것을 부른다.
+--
+-- 무엇을 보고 판정하는가
+-- ──────────────────────
+-- **realized balance만 본다.** NAV(미실현 포함)로 판정하지 않는다 — 스쳐
+-- 지나간 호가에 달성이 확정되면 되돌릴 수 없다.
+--
+-- 언제 달성인가
+-- ─────────────
+-- 유효기간 **안에서** 닿아야 달성이다. `ends_at`을 지난 통과는 달성이 아니다.
+-- 실패선은 기간 조건을 걸지 않는다 — 돈이 없어진 것은 시각과 무관하다.
+--
+-- 한 번만 정한다
+-- ──────────────
+-- `close_intent IS NULL`을 CAS 조건으로 건다. 이미 정해졌으면 아무것도 하지
+-- 않는다. 값을 바꾸려 들면 `083`의 freeze 트리거가 거부한다 — 여기서 막고
+-- 거기서 또 막는다.
+--
+-- 부르는 쪽의 의무
+-- ────────────────
+-- 계좌와 챌린지를 **이미 잠근 상태**로 부른다(계좌 → 챌린지). 이 함수는
+-- 잠그지 않는다 — 여기서 잠그면 경로마다 순서가 달라질 수 있다.
+CREATE OR REPLACE FUNCTION public.paper_challenge_judge(
+  p_challenge UUID,
+  p_account   UUID,
+  p_user      UUID,
+  p_event_at  TIMESTAMPTZ
+)
+RETURNS TEXT             -- 이번에 정한 사유. 이미 정해져 있었거나 해당 없으면 NULL
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_balance NUMERIC;
+  v_ch      RECORD;
+  v_intent  TEXT;
+BEGIN
+  IF p_challenge IS NULL THEN
+    RETURN NULL;                      -- 챌린지 계좌가 아니다
+  END IF;
+  IF p_event_at IS NULL THEN
+    RAISE EXCEPTION 'paper_challenge_judge: 사건 시각이 없습니다 — 판정하지 않습니다';
+  END IF;
+
+  -- **실현 잔고.** 원장 합계가 곧 이 값이다.
+  SELECT a.balance INTO v_balance
+    FROM public.paper_accounts a WHERE a.id = p_account;
+
+  IF v_balance IS NULL THEN
+    RAISE EXCEPTION 'paper_challenge_judge: 계좌 잔고를 읽지 못했습니다 (%)', p_account;
+  END IF;
+
+  SELECT c.status, c.close_intent, c.target_equity, c.failure_equity,
+         c.starts_at, c.ends_at
+    INTO v_ch
+    FROM public.paper_challenges c WHERE c.id = p_challenge;
+
+  -- 이미 사유가 정해졌거나 끝난 챌린지는 다시 판단하지 않는다.
+  IF v_ch.close_intent IS NOT NULL OR v_ch.status NOT IN ('READY', 'RUNNING') THEN
+    RETURN NULL;
+  END IF;
+
+  IF v_ch.target_equity IS NOT NULL
+     AND v_balance >= v_ch.target_equity
+     AND p_event_at >= v_ch.starts_at
+     AND p_event_at <= v_ch.ends_at THEN
+    v_intent := 'TARGET_REACHED';
+  ELSIF v_ch.failure_equity IS NOT NULL AND v_balance <= v_ch.failure_equity THEN
+    v_intent := 'FAILED';
+  ELSE
+    RETURN NULL;
+  END IF;
+
+  UPDATE public.paper_challenges c
+     SET status                = 'CLOSING',
+         close_intent          = v_intent,
+         close_intent_at       = NOW(),
+         close_intent_event_at = p_event_at,
+         updated_at            = NOW()
+   WHERE c.id = p_challenge
+     AND c.close_intent IS NULL;      -- CAS. 남이 먼저 정했으면 그대로 둔다
+
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  INSERT INTO public.paper_challenge_transitions
+    (challenge_id, user_id, from_status, to_status, reason,
+     transition_key, event_effective_at)
+  VALUES
+    (p_challenge, p_user, v_ch.status, 'CLOSING', v_intent,
+     'INTENT:' || p_challenge::TEXT, p_event_at)
+  ON CONFLICT ON CONSTRAINT paper_challenge_transitions_idem_key DO NOTHING;
+
+  RETURN v_intent;
+END $$;
+
+COMMENT ON FUNCTION public.paper_challenge_judge(UUID, UUID, UUID, TIMESTAMPTZ) IS
+  '달성·실패를 판정하는 단 하나의 자리. 실현 잔고만 보고(NAV 아님), 달성은 '
+  '유효기간 안에서만 인정한다. 사유는 CAS로 한 번만 정한다. 계좌와 챌린지를 '
+  '이미 잠근 상태로 불러야 한다 — 이 함수는 잠그지 않는다.';
+
 -- ══════════════════ ③ 챌린지 생성 ══════════════════
 --
 -- 전용 계좌를 **0에서 시작**해서 만들고, `INITIAL_DEPOSIT` 한 줄로 시작금을
@@ -172,7 +287,8 @@ DECLARE
   v_ledger    NUMERIC;
 BEGIN
   IF p_event_effective_at IS NULL THEN
-    RAISE EXCEPTION 'paper_challenge_create: 사건 시각이 없습니다 — 계좌도 만들지 않습니다';
+    RAISE EXCEPTION USING ERRCODE = '22004',
+      MESSAGE = 'paper_challenge_create: 사건 시각이 없습니다 — 계좌도 만들지 않습니다';
   END IF;
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'paper_challenge_create: 사용자가 없습니다';
@@ -301,7 +417,8 @@ DECLARE
 BEGIN
   -- **돈에 닿기 전에 거부한다.**
   IF p_event_effective_at IS NULL THEN
-    RAISE EXCEPTION 'paper_open_position: 사건 시각이 없습니다 — 아무것도 만들지 않습니다';
+    RAISE EXCEPTION USING ERRCODE = '22004',
+      MESSAGE = 'paper_open_position: 사건 시각이 없습니다 — 아무것도 만들지 않습니다';
   END IF;
   IF p_entry_fee IS NULL OR p_entry_fee < 0 THEN
     RAISE EXCEPTION 'paper_open_position: 진입 수수료가 음수이거나 없습니다 (%)', p_entry_fee;
@@ -389,6 +506,15 @@ BEGIN
      SET total_fees = total_fees + p_entry_fee
    WHERE id = v_account;
 
+  -- ⑧ 판정. **진입 수수료도 실현 잔고를 움직인다.**
+  --
+  --    청산에만 판정을 두면 수수료가 실패선을 넘긴 계좌는 다음 청산까지
+  --    실패선 아래에서 계속 달린다. 청산과 **같은 함수**를 부른다.
+  --    (진입에서 잔고는 줄기만 하므로 여기서 달성이 나올 일은 없다. 그래도
+  --    경로를 나누지 않는다 — 나누면 언젠가 한쪽만 고친다.)
+  PERFORM public.paper_challenge_judge(
+    v_challenge, v_account, p_user_id, p_event_effective_at);
+
   RETURN QUERY SELECT 'OPENED'::TEXT, v_id;
 
 EXCEPTION
@@ -448,13 +574,11 @@ DECLARE
   v_locked    UUID;
   v_challenge UUID;
   v_hit       UUID;
-  v_balance   NUMERIC;
-  v_ch        RECORD;
-  v_intent    TEXT;
 BEGIN
   -- **돈에 닿기 전에 거부한다.**
   IF p_event_effective_at IS NULL THEN
-    RAISE EXCEPTION 'paper_settle_close: 사건 시각이 없습니다 — 포지션도 닫지 않습니다';
+    RAISE EXCEPTION USING ERRCODE = '22004',
+      MESSAGE = 'paper_settle_close: 사건 시각이 없습니다 — 포지션도 닫지 않습니다';
   END IF;
 
   -- ① 잠그지 않고 읽는다 — 어느 계좌를 잠글지 알기 위해서만.
@@ -535,52 +659,9 @@ BEGIN
          win_count   = win_count   + CASE WHEN p_realized_pnl > 0 THEN 1 ELSE 0 END
    WHERE id = v_account;
 
-  -- ⑧ 판정 — **realized balance만 본다.** NAV(미실현 포함)로 판정하지 않는다.
-  --
-  --    미실현으로 판정하면 스쳐 지나간 호가에 달성이 확정된다. 그리고 사유는
-  --    한 번만 정한다 — 다시 판단하는 것은 `083`의 트리거가 거부한다.
-  IF v_challenge IS NOT NULL THEN
-    SELECT a.balance INTO v_balance FROM public.paper_accounts a WHERE a.id = v_account;
-
-    SELECT c.status, c.close_intent, c.target_equity, c.failure_equity,
-           c.starts_at, c.ends_at
-      INTO v_ch
-      FROM public.paper_challenges c WHERE c.id = v_challenge;
-
-    IF v_ch.close_intent IS NULL AND v_ch.status IN ('READY', 'RUNNING') THEN
-      v_intent := NULL;
-
-      -- **유효기간 안에서 닿아야 달성이다.** 기간 밖의 통과는 달성이 아니다.
-      IF v_balance >= v_ch.target_equity
-         AND p_event_effective_at >= v_ch.starts_at
-         AND p_event_effective_at <= v_ch.ends_at THEN
-        v_intent := 'TARGET_REACHED';
-      ELSIF v_ch.failure_equity IS NOT NULL AND v_balance <= v_ch.failure_equity THEN
-        v_intent := 'FAILED';
-      END IF;
-
-      IF v_intent IS NOT NULL THEN
-        UPDATE public.paper_challenges
-           SET status                = 'CLOSING',
-               close_intent          = v_intent,
-               close_intent_at       = NOW(),
-               close_intent_event_at = p_event_effective_at,
-               updated_at            = NOW()
-         WHERE id = v_challenge
-           AND close_intent IS NULL;      -- CAS. 남이 먼저 정했으면 그대로 둔다
-
-        IF FOUND THEN
-          INSERT INTO public.paper_challenge_transitions
-            (challenge_id, user_id, from_status, to_status, reason,
-             transition_key, event_effective_at)
-          VALUES
-            (v_challenge, v_owner, v_ch.status, 'CLOSING', v_intent,
-             'INTENT:' || v_challenge::TEXT, p_event_effective_at)
-          ON CONFLICT ON CONSTRAINT paper_challenge_transitions_idem_key DO NOTHING;
-        END IF;
-      END IF;
-    END IF;
-  END IF;
+  -- ⑧ 판정. **진입 경로와 같은 함수를 부른다** — 판정이 두 곳에 있으면 갈린다.
+  PERFORM public.paper_challenge_judge(
+    v_challenge, v_account, v_owner, p_event_effective_at);
 
   RETURN QUERY SELECT TRUE, v_owner, p_realized_pnl, p_pnl_pct;
 END $$;
@@ -672,6 +753,7 @@ END $$;
 -- 움직일 통로가 생긴다.
 REVOKE ALL ON FUNCTION public.paper_is_challenge_account(UUID) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.paper_money_apply(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.paper_challenge_judge(UUID, UUID, UUID, TIMESTAMPTZ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.paper_challenge_create(UUID, NUMERIC, NUMERIC, NUMERIC, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.paper_settle_close(
   UUID, NUMERIC, TEXT, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TIMESTAMPTZ) FROM PUBLIC;
@@ -682,6 +764,7 @@ REVOKE ALL ON FUNCTION public.paper_open_position(
 
 GRANT EXECUTE ON FUNCTION public.paper_is_challenge_account(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.paper_money_apply(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.paper_challenge_judge(UUID, UUID, UUID, TIMESTAMPTZ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.paper_challenge_create(UUID, NUMERIC, NUMERIC, NUMERIC, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.paper_settle_close(
   UUID, NUMERIC, TEXT, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TIMESTAMPTZ) TO service_role;

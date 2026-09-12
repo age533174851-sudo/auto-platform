@@ -1,6 +1,7 @@
 // src/lib/engine/paperStore.ts
 // 가상 매매 DB 저장 계층. 포지션 오픈/청산 + 계좌 잔고 갱신.
 import { simulateFill, computeClose, type PaperFill, type ExitReason } from './paperExecution';
+import { paperEventTimeNow } from './paperEventTime';
 import type { PositionPlan } from './riskManager';
 
 const DEFAULT_BALANCE = 10000;
@@ -109,6 +110,13 @@ export async function openPaperPosition(
       // 여기서 모드를 안 적으면 나중에 그 숫자가 어느 공식으로 나온 값인지
       // 알 수 없다.
       p_margin_mode: args.marginMode === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
+      // **사건 시각은 반드시 넘긴다.** `085`의 함수는 이 값이 없으면 포지션도
+      // 만들지 않고 거부한다 — 칸의 NOT NULL을 믿고 원장 INSERT까지 가면
+      // 그 사이에 이미 잠금을 잡고 판단을 한 뒤다.
+      //
+      // 값은 서버가 만든다(`paperEventTimeNow`). 요청 본문에서 오는 길이
+      // 없고, DB의 DEFAULT도 아니다.
+      p_event_effective_at: paperEventTimeNow(),
       // 안 주면 NULL — SQL이 기본 계좌를 고른다(지금까지의 동작).
       p_paper_account_id: args.paperAccountId ?? null,
     });
@@ -201,6 +209,8 @@ export async function closePaperPosition(
       p_gross_pnl: closed.grossPnl,
       p_realized_pnl: closed.realizedPnl,
       p_pnl_pct: closed.pnlPct,
+      // 진입과 같은 자리에서 만든다. 없으면 포지션을 닫지도 않는다.
+      p_event_effective_at: paperEventTimeNow(),
     });
     if (rpcErr) throw new Error(String((rpcErr as any).message ?? rpcErr));
     settled = Array.isArray(data) ? data[0] : data;

@@ -35,6 +35,25 @@
 
 BEGIN;
 
+-- 틀린 이유로 실패한 것을 통과로 적지 않는다 — 기대 SQLSTATE까지 맞아야 한다.
+CREATE FUNCTION pg_temp.must_fail(p_label TEXT, p_sqlstate TEXT, p_sql TEXT)
+RETURNS void AS $fn$
+DECLARE v_state TEXT;
+BEGIN
+  BEGIN
+    EXECUTE p_sql;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+    IF v_state IS DISTINCT FROM p_sqlstate THEN
+      RAISE EXCEPTION 'FAIL % : 기대 SQLSTATE % / 실제 % (%)',
+        p_label, p_sqlstate, v_state, SQLERRM;
+    END IF;
+    RAISE NOTICE 'ok  %  → 거부 %', p_label, v_state;
+    RETURN;
+  END;
+  RAISE EXCEPTION 'FAIL % : 거부돼야 하는데 통과했다', p_label;
+END $fn$ LANGUAGE plpgsql;
+
 CREATE FUNCTION pg_temp.want(p_label TEXT, p_got TEXT, p_expect TEXT)
 RETURNS void AS $fn$
 BEGIN
@@ -62,7 +81,7 @@ SELECT pg_temp.want(
 SELECT pg_temp.want('paper_open_position 정상 진입',
   (SELECT status FROM public.paper_open_position(
      (SELECT u1 FROM smoke), 'smoke-sig-1', NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
-     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', NULL)),
+     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', '2026-09-12T00:00:00Z', NULL)),
   'OPENED');
 
 -- 포지션이 정말 생겼는가. "OPENED라고 답했다"와 "줄이 생겼다"는 다른 사실이다.
@@ -80,33 +99,33 @@ SELECT pg_temp.want('진입 수수료가 잔고에서 빠졌다',
 SELECT pg_temp.want('같은 신호는 DUPLICATE',
   (SELECT status FROM public.paper_open_position(
      (SELECT u1 FROM smoke), 'smoke-sig-1', NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
-     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', NULL)),
+     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', '2026-09-12T00:00:00Z', NULL)),
   'DUPLICATE');
 
 SELECT pg_temp.want('증거금이 모자라면 INSUFFICIENT_MARGIN',
   (SELECT status FROM public.paper_open_position(
      (SELECT u1 FROM smoke), 'smoke-sig-2', NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
-     100, 100, 1, 100000, 1, 100000, NULL, NULL, 50, 0.5, 'ISOLATED', NULL)),
+     100, 100, 1, 100000, 1, 100000, NULL, NULL, 50, 0.5, 'ISOLATED', '2026-09-12T00:00:00Z', NULL)),
   'INSUFFICIENT_MARGIN');
 
 SELECT pg_temp.want('계좌가 없으면 NO_ACCOUNT — 만들지 않는다',
   (SELECT status FROM public.paper_open_position(
      (SELECT u_none FROM smoke), 'smoke-sig-3', NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
-     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', NULL)),
+     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', '2026-09-12T00:00:00Z', NULL)),
   'NO_ACCOUNT');
 
 -- ══════════════ 청산 정산 ══════════════
 SELECT pg_temp.want('paper_settle_close 정산',
   (SELECT settled::TEXT FROM public.paper_settle_close(
      (SELECT id FROM public.paper_positions WHERE signal_id = 'smoke-sig-1'),
-     110, 'TP', 0.6, 10, 9.4, 1.0)),
+     110, 'TP', 0.6, 10, 9.4, 1.0, '2026-09-12T00:00:00Z')),
   'true');
 
 -- 같은 포지션을 다시 닫으면 false. 계좌는 한 번만 움직인다.
 SELECT pg_temp.want('이미 닫힌 포지션은 다시 정산하지 않는다',
   (SELECT settled::TEXT FROM public.paper_settle_close(
      (SELECT id FROM public.paper_positions WHERE signal_id = 'smoke-sig-1'),
-     110, 'TP', 0.6, 10, 9.4, 1.0)),
+     110, 'TP', 0.6, 10, 9.4, 1.0, '2026-09-12T00:00:00Z')),
   'false');
 
 -- 999.5 + 10 − 0.6 = 1008.9  (두 번째 정산이 또 밀었다면 1018.3이 된다)
@@ -124,6 +143,25 @@ SELECT pg_temp.want('paper_deposit이 새 잔고를 돌려준다',
 SELECT public.paper_apply_entry_fee((SELECT u1 FROM smoke), 1);
 
 SELECT pg_temp.want('paper_apply_entry_fee가 실제로 수수료를 뺐다',
+  (SELECT balance::TEXT FROM public.paper_accounts WHERE user_id = (SELECT u1 FROM smoke)),
+  '1107.9');
+
+-- ══════════════ 사건 시각이 없으면 아무것도 하지 않는다 ══════════════
+--
+-- 칸의 NOT NULL만 믿으면 원장 INSERT까지 가서야 실패한다. 그 사이에 이미
+-- 포지션을 만들고 잠금을 잡은 뒤다. **함수 진입에서 거부해야** 한다.
+-- 그래서 '거부했다'로 끝내지 않고 **아무 줄도 안 생겼는지**까지 본다.
+SELECT pg_temp.must_fail('진입: 사건 시각 없으면 거부 (진입 계약 22004)', '22004', $q$
+  SELECT status FROM public.paper_open_position(
+    (SELECT u1 FROM smoke), 'smoke-sig-noev', NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
+    100, 100, 1, 100, 1, 100, NULL, NULL, 50, 0.5, 'ISOLATED', NULL, NULL)
+$q$);
+
+SELECT pg_temp.want('거부된 진입은 줄을 남기지 않았다',
+  (SELECT count(*)::TEXT FROM public.paper_positions WHERE signal_id = 'smoke-sig-noev'),
+  '0');
+
+SELECT pg_temp.want('거부된 진입은 잔고를 건드리지 않았다',
   (SELECT balance::TEXT FROM public.paper_accounts WHERE user_id = (SELECT u1 FROM smoke)),
   '1107.9');
 
