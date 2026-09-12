@@ -150,7 +150,9 @@ export async function collectPaperStreakLimits(args: {
   let weekStartEquityUsd: number | null = null;
   try {
     const { data } = await args.sb.from('paper_accounts')
-      .select('balance').eq('user_id', args.userId).maybeSingle();
+      // 기본 계좌만. 챌린지 계좌의 손익이 기본 계좌 연속손실 판정에
+      // 섞이면 안 된다.
+      .select('balance').eq('user_id', args.userId).eq('is_default', true).maybeSingle();
     const bal = Number(data?.balance);
     weekStartEquityUsd = Number.isFinite(bal) && weekNetUsd != null ? bal - weekNetUsd : null;
   } catch { weekStartEquityUsd = null; }

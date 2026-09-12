@@ -5,11 +5,25 @@ import type { PositionPlan } from './riskManager';
 
 const DEFAULT_BALANCE = 10000;
 
-// 가상 계좌 조회 (없으면 생성)
+/**
+ * 가상 계좌 조회 (없으면 생성).
+ *
+ * **기본 계좌만 본다.** 사용자당 계좌가 하나이던 때는 `user_id`만으로
+ * 충분했지만, 이제 한 사용자가 여러 계좌를 가질 수 있다(`081`). 그때
+ * `user_id`만으로 고르면 여러 줄이 나오고 `maybeSingle()`이 던진다 —
+ * 기존 화면이 통째로 죽는다.
+ *
+ * 부분 유니크 인덱스가 막는 것은 **기본 계좌가 두 개가 되는 것뿐이다.**
+ * 0개는 막지 못한다 — 다만 이 함수는 그때 임의 계좌를 고르지 않고
+ * **기본 계좌를 새로 만든다.** 전용 계좌(챌린지 등)를 집어 오지 않는다.
+ */
 export async function getPaperAccount(sb: any, userId: string) {
-  const { data } = await sb.from('paper_accounts').select('*').eq('user_id', userId).maybeSingle();
+  const { data } = await sb.from('paper_accounts')
+    .select('*').eq('user_id', userId).eq('is_default', true).maybeSingle();
   if (data) return data;
-  const row = { user_id: userId, balance: DEFAULT_BALANCE, initial_balance: DEFAULT_BALANCE, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0 };
+  // 새로 만드는 계좌는 **기본 계좌**다. 이 함수는 기본 계좌를 다루는
+  // 자리이고, 챌린지 같은 전용 계좌는 여기서 만들지 않는다.
+  const row = { user_id: userId, balance: DEFAULT_BALANCE, initial_balance: DEFAULT_BALANCE, total_pnl: 0, total_fees: 0, trade_count: 0, win_count: 0, is_default: true };
   try { await sb.from('paper_accounts').insert(row); } catch {}
   return row;
 }
@@ -23,6 +37,15 @@ export async function openPaperPosition(
     feeRatePct?: number; slippagePct?: number;
     /** 'SPOT' | 'USDM' | 'COINM'. 안 주면 지금까지의 동작대로 USDM */
     market?: string;
+    /**
+     * 어느 모의 계좌로 낼 것인가. **안 주면 그 사용자의 기본 계좌**다.
+     *
+     * 값이 있으면 기본 계좌를 다시 찾지 않고 **그 계좌만** 쓴다. 남의
+     * 계좌 id를 넣으면 SQL이 소유자까지 함께 보므로 계좌를 못 찾고,
+     * 그래도 새어 나가면 `(paper_account_id, user_id)` 복합 외래키가
+     * DB에서 막는다.
+     */
+    paperAccountId?: string;
     /**
      * 격리인가 교차인가. 안 주면 **격리**다.
      *
@@ -86,6 +109,8 @@ export async function openPaperPosition(
       // 여기서 모드를 안 적으면 나중에 그 숫자가 어느 공식으로 나온 값인지
       // 알 수 없다.
       p_margin_mode: args.marginMode === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
+      // 안 주면 NULL — SQL이 기본 계좌를 고른다(지금까지의 동작).
+      p_paper_account_id: args.paperAccountId ?? null,
     });
     if (error) {
       // **옛 두 단계 경로로 되돌아가지 않는다.** 되돌아가면 이 변경이

@@ -54,6 +54,44 @@ export function runPaperOpenAtomicTests() {
     eq(called, 1);
   });
 
+  // ── 계좌 정체 (081/082) ──
+  //
+  // 사용자당 계좌가 하나이던 구조를 풀면서, 지정한 계좌로만 나가는지가
+  // 새 계약이 됐다. 지정하지 않은 기존 호출은 **지금까지와 똑같이** 기본
+  // 계좌로 가야 한다 — 그게 회귀의 기준선이다.
+
+  test('계좌를 지정하지 않으면 NULL로 넘긴다 — SQL이 기본 계좌를 고른다', async () => {
+    let seen: any = null;
+    const sb: any = {
+      rpc: (_fn: string, p: any) => {
+        seen = p;
+        return Promise.resolve({ data: [{ status: 'OPENED', position_id: 'p1' }], error: null });
+      },
+    };
+    await openPaperPosition(sb, {
+      userId: 'u', signalId: 's1', strategyId: 'scalp', plan: PLAN, entryPrice: 100_000,
+    });
+    eq(seen.p_paper_account_id, null,
+      '계좌를 지정하지 않았는데 값이 실렸다 — 기존 경로의 동작이 바뀐다');
+    eq(seen.p_user_id, 'u');
+  });
+
+  test('계좌를 지정하면 그 계좌가 그대로 실린다', async () => {
+    let seen: any = null;
+    const sb: any = {
+      rpc: (_fn: string, p: any) => {
+        seen = p;
+        return Promise.resolve({ data: [{ status: 'OPENED', position_id: 'p1' }], error: null });
+      },
+    };
+    await openPaperPosition(sb, {
+      userId: 'u', signalId: 's1', strategyId: 'scalp', plan: PLAN, entryPrice: 100_000,
+      paperAccountId: 'acct-challenge-1',
+    });
+    eq(seen.p_paper_account_id, 'acct-challenge-1',
+      '지정한 계좌가 안 실렸다 — 기본 계좌로 새어 나간다');
+  });
+
   test('중복 신호는 포지션을 만들지 않는다', async () => {
     const sb: any = {
       rpc: () => Promise.resolve({ data: [{ status: 'DUPLICATE', position_id: 'pos-old' }], error: null }),

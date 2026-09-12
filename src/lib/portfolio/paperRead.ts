@@ -198,7 +198,8 @@ export async function readPaperEquity(
     //
     // `*`로 읽고, 칸이 실제로 왔는지를 값으로 확인한다.
     const { data, error } = await sb.from('paper_accounts')
-      .select('*').eq('user_id', userId).maybeSingle();
+      // 기본 계좌만 (아래 주석의 이유로 오류를 반드시 받아 본다).
+      .select('*').eq('user_id', userId).eq('is_default', true).maybeSingle();
     // **오류를 반드시 받아 본다.** 던지지 않는 실패가 '계좌 없음'이 되면
     // 화면이 "시작하기"를 보여 주고, 누르면 있던 장부가 초기화된다.
     if (error) return fail(String((error as any)?.message ?? error).slice(0, 200));
