@@ -15,14 +15,30 @@
 # 그래서 여기서 `pg_proc.prosrc`를 직접 읽는다. 확인하기 전까지 운영 영향은
 # **UNKNOWN이다 — 0으로도 100%로도 적지 않는다.**
 #
+# 이 사진이 **언제** 찍혔는지가 판정의 절반이다
+# ─────────────────────────────────────────────
+# 이 감사와 `migrate`는 같은 main push에서 **각자** 실행된다. 순서가 보장되지
+# 않는다. 그래서 본문만 읽으면, 깨끗하다는 관측이 두 가지 중 어느 것인지
+# 구분되지 않는다:
+#
+#   · 운영이 원래 깨끗했다
+#   · 방금 084가 적용돼서 깨끗해졌다
+#
+# 전혀 다른 사실이고, 구분하지 못하면 이 감사는 아무것도 증명하지 못한다.
+# 그래서 **같은 READ ONLY 트랜잭션 안에서** 084의 적용 여부를 함께 읽는다.
+# 한 스냅샷이라 본문과 적용 기록이 어긋날 수 없다.
+#
 # 판정
 # ────
-#   AFFECTED    운영 본문에 한정 없는 참조가 있다 → 그 함수는 실행될 때마다 터진다
-#   CLEAN       운영 본문이 이미 한정돼 있다 (누군가 손으로 고쳤거나 다른 판이 떴다)
-#   MISSING     그 시그니처의 함수가 없다
-#   UNKNOWN     읽지 못했다
+#   AFFECTED_PRE_FIX        084 미적용 + 한정 없음 → 운영이 원래 깨져 있었다 (VERIFIED)
+#   CLEAN_PRE_FIX           084 미적용 + 한정 있음 → 운영이 원래 깨끗했다 (VERIFIED)
+#   POST_FIX_CLEAN          084 적용   + 한정 있음 → 지금은 깨끗하다.
+#                           **고치기 전 상태는 이 사진으로 말할 수 없다 (UNKNOWN)**
+#   APPLIED_BUT_UNQUALIFIED 084 적용   + 한정 없음 → 기록과 실제가 어긋났다. 실패
+#   MISSING                 그 시그니처의 함수가 없다. 실패
+#   UNKNOWN                 읽지 못했다. 실패
 #
-# CLEAN이어도 이 PR의 수정은 필요하다. 저장소가 정본이고 다음 배포·재구축은
+# 어느 판정이든 이 PR의 수정은 필요하다. 저장소가 정본이고 다음 배포·재구축은
 # 이 파일로 서기 때문이다.
 #
 # 운영에 쓰지 않는다
@@ -100,6 +116,27 @@ jobs:
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname = 'public' AND p.proname = 'paper_open_position';
 
+          -- ★ **이 감사가 언제 찍힌 사진인지 함께 읽는다.**
+          --
+          --   감사와 `migrate`는 같은 main push에서 **각자** 실행된다. 감사가
+          --   migrate 뒤에 돌면 본문이 깨끗해도 그것이 "원래 깨끗했다"인지
+          --   "방금 084가 고쳤다"인지 구분되지 않는다. 그 둘은 전혀 다른
+          --   사실이고, 구분하지 못하면 이 감사는 아무것도 증명하지 못한다.
+          --
+          --   그래서 같은 READ ONLY 트랜잭션 **안에서** 084의 적용 여부를
+          --   함께 읽는다. 한 스냅샷이라 본문과 적용 기록이 어긋날 수 없다.
+          SELECT 'MIGRATION_084_APPLIED=' ||
+                 CASE WHEN EXISTS (
+                   SELECT 1 FROM public.schema_migrations m
+                    WHERE m.filename = '084_paper_open_position_ambiguity.sql'
+                      AND m.status IN ('APPLIED', 'BASELINE')
+                 ) THEN 'TRUE' ELSE 'FALSE' END;
+
+          -- 기록표 자체를 못 읽었는지와 "없다"를 가른다.
+          SELECT 'MIGRATION_TABLE_READABLE=' ||
+                 CASE WHEN to_regclass('public.schema_migrations') IS NULL
+                      THEN 'FALSE' ELSE 'TRUE' END;
+
           -- 반환 칸에 `status`가 있어야 모호성이 성립한다. 둘 다여야 터진다.
           --
           --   **`\b`가 아니라 `\y`다.** PostgreSQL의 POSIX 정규식에서 `\b`는
@@ -145,19 +182,36 @@ jobs:
           retcol="$(val RETURNS_STATUS_COLUMN)"
           overloads="$(val FN_OVERLOADS)"
           ro="$(val READ_ONLY)"
+          applied="$(val MIGRATION_084_APPLIED)"
+          mtable="$(val MIGRATION_TABLE_READABLE)"
 
           if [ "${ro}" != "on" ]; then
             echo "::error::읽기 전용 트랜잭션이 아니었습니다 (READ_ONLY=${ro}) — 이 감사는 읽기만 해야 합니다"
             exit 1
           fi
+          if [ "${mtable}" != "TRUE" ]; then
+            echo "::error::기록표를 읽지 못했습니다 — 이 사진이 언제 찍힌 것인지 말할 수 없습니다"
+            exit 1
+          fi
 
+          # ── 판정은 **본문과 적용 시점을 함께** 읽는다 ──
+          #
+          #   084 미적용 + 한정 없음  → AFFECTED_PRE_FIX   운영이 원래 깨져 있었다
+          #   084 미적용 + 한정 있음  → CLEAN_PRE_FIX      운영이 원래 깨끗했다
+          #   084 적용   + 한정 있음  → POST_FIX_CLEAN     지금은 깨끗하다.
+          #                                                 **고치기 전 상태는 UNKNOWN**
+          #   084 적용   + 한정 없음  → 예상 불일치. 적용됐는데 본문이 안 바뀌었다
           verdict=UNKNOWN
           if [ "${present}" = "FALSE" ]; then
             verdict=MISSING
-          elif [ "${unqual}" = "TRUE" ] && [ "${retcol}" = "TRUE" ]; then
-            verdict=AFFECTED
-          elif [ "${unqual}" = "FALSE" ]; then
-            verdict=CLEAN
+          elif [ "${applied}" = "FALSE" ] && [ "${unqual}" = "TRUE" ] && [ "${retcol}" = "TRUE" ]; then
+            verdict=AFFECTED_PRE_FIX
+          elif [ "${applied}" = "FALSE" ] && [ "${unqual}" = "FALSE" ]; then
+            verdict=CLEAN_PRE_FIX
+          elif [ "${applied}" = "TRUE" ] && [ "${unqual}" = "FALSE" ]; then
+            verdict=POST_FIX_CLEAN
+          elif [ "${applied}" = "TRUE" ] && [ "${unqual}" = "TRUE" ]; then
+            verdict=APPLIED_BUT_UNQUALIFIED
           fi
 
           {
@@ -169,18 +223,31 @@ jobs:
             echo "| 오버로드 수 | ${overloads:-UNKNOWN} |"
             echo "| 본문에 한정 없는 status 참조 | ${unqual:-UNKNOWN} |"
             echo "| 반환 칸에 status | ${retcol:-UNKNOWN} |"
+            echo "| 084 적용됨 (같은 스냅샷) | ${applied:-UNKNOWN} |"
             echo "| **판정** | **${verdict}** |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "판정: ${verdict}"
 
           case "${verdict}" in
-            CLEAN)
-              echo "운영 본문은 이미 한정돼 있습니다. 저장소 수정은 그대로 필요합니다 —"
-              echo "다음 배포·재구축이 저장소 파일로 서기 때문입니다."
+            CLEAN_PRE_FIX)
+              echo "084가 아직 적용되지 않은 상태에서 본문이 이미 한정돼 있습니다."
+              echo "운영은 원래 깨끗했습니다 — production impact 없음(VERIFIED)."
+              echo "저장소 수정은 그대로 필요합니다: 다음 배포·재구축이 저장소 파일로 섭니다."
               ;;
-            AFFECTED)
-              echo "::warning::운영 본문에 결함이 있습니다 — 이 PR의 084가 적용되면 고쳐집니다"
+            AFFECTED_PRE_FIX)
+              echo "::warning::084 적용 전 운영 본문에 결함이 있었습니다 — production impact VERIFIED"
+              echo "084가 적용되면 고쳐집니다."
+              ;;
+            POST_FIX_CLEAN)
+              echo "::warning::084가 이미 적용된 뒤에 읽었습니다 — 지금은 깨끗합니다."
+              echo "다만 **고치기 전 운영 본문은 이 사진으로 말할 수 없습니다(UNKNOWN).**"
+              echo "감사와 migrate가 같은 push에서 각자 돌기 때문입니다 — 0으로도 100%로도 적지 않습니다."
+              ;;
+            APPLIED_BUT_UNQUALIFIED)
+              echo "::error::084가 적용됐다고 기록돼 있는데 본문은 한정돼 있지 않습니다"
+              echo "기록과 실제가 어긋났습니다 — 예상과 다르므로 통과로 적지 않습니다."
+              exit 1
               ;;
             MISSING)
               echo "::error::그 함수가 운영에 없습니다 — 예상과 다릅니다"
