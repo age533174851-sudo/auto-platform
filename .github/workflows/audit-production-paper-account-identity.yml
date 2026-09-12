@@ -400,7 +400,14 @@ jobs:
 
           # 2단계·판정에서 쓴다. **저장소 안에 쓰지 않는다** — 트리를 더럽히면
           # 이 실행이 남긴 파일이 다음 검사에 섞인다.
-          printf '%s\n' "${out}" | grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' > "${RUNNER_TEMP}/shape.txt" || true
+          # **psql 정렬 출력은 줄 앞뒤에 공백을 넣는다.** 첫 판에서 이 한 줄이
+          # 앵커(^$)로만 찾다가 한 줄도 못 잡았다 — 조회는 다 성공했는데
+          # 판정이 안 돌았다(run 34666561476). 대조군 테스트에서 내가 미리
+          # `sed 's/^ //'`로 지우고 넣는 바람에 실제 모양을 한 번도 안 거쳤다.
+          # 그래서 여기서 **먼저 다듬고** 찾는다.
+          printf '%s\n' "${out}" \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' > "${RUNNER_TEMP}/shape.txt" || true
           if [ ! -s "${RUNNER_TEMP}/shape.txt" ]; then
             echo "::error::판정 줄을 하나도 읽지 못했습니다 — 조회는 성공했는데 결과가 비었습니다"
             exit 1
@@ -492,7 +499,10 @@ jobs:
             exit 1
           fi
 
-          printf '%s\n' "${out}" | grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' >> "${RUNNER_TEMP}/shape.txt" || true
+          # 위와 같은 이유로 다듬고 찾는다.
+          printf '%s\n' "${out}" \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' >> "${RUNNER_TEMP}/shape.txt" || true
 
       # ── 3단계: MATCH / MIXED / MISSING ──
       #
