@@ -235,7 +235,11 @@ export async function readPaperEquity(
   try {
     const { data, error } = await sb.from('paper_positions')
       .select('id, symbol, side, fill_price, quantity, notional, leverage, margin, stop_loss, take_profit, liquidation_price, opened_at')
-      .eq('user_id', userId).eq('status', 'open')
+      // **기본 계좌의 포지션만.** 안 좁히면 전용 계좌(챌린지 등) 포지션이
+      // 총자산에 섞인다 — 사용자가 고른 적 없는 장부의 증거금·평가손익이
+      // 지갑에 더해진다.
+      .eq('user_id', userId).eq('paper_account_id', (account as any)?.id)
+      .eq('status', 'open')
       .order('opened_at', { ascending: false });
     // **실패를 0건으로 읽지 않는다.**
     if (error) return fail(String((error as any)?.message ?? error).slice(0, 200));

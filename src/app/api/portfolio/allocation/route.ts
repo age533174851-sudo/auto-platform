@@ -41,9 +41,14 @@ export async function GET(req: NextRequest) {
   let trades: ClosedTrade[] = [];
   let tradesOk = false;
   try {
+    // **기본 계좌의 거래만.** 아래 자산(잔고)이 이미 기본 계좌로 좁혀져
+    // 있으므로, 거래도 같은 계좌여야 비중이 같은 세계를 말한다.
+    const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
+    const scope = await resolvePaperScope(sb, uid);
+    if (paperScopeFailed(scope)) throw new Error(scope.reason);
     const { data, error } = await sb.from('paper_positions')
       .select('strategy_id, realized_pnl, closed_at')
-      .eq('user_id', uid).eq('status', 'closed')
+      .eq('user_id', uid).eq('paper_account_id', scope.accountId).eq('status', 'closed')
       .gte('closed_at', since)
       .order('closed_at', { ascending: true })
       .limit(5000);

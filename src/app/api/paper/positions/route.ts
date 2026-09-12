@@ -24,13 +24,26 @@ export async function GET(req: NextRequest) {
 
   try {
     const { getPaperAccount } = await import('@/lib/engine/paperStore');
+    const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
     const account = await getPaperAccount(sb, userId);
 
+    // **기본 계좌의 포지션만.** 안 좁히면 전용 계좌(챌린지 등) 포지션이
+    // 이 화면의 승률·누적손익에 섞인다. 계좌를 못 정하면 **0건으로 읽지
+    // 않는다** — 0건은 "포지션이 없다"로 보이고 그건 확인된 사실이 아니다.
+    const scope = await resolvePaperScope(sb, userId);
+    if (paperScopeFailed(scope)) {
+      return NextResponse.json({
+        ok: false, error: 'scope_unresolved', message: scope.reason,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+
     const { data: open } = await sb.from('paper_positions')
-      .select('*').eq('user_id', userId).eq('status', 'open').order('opened_at', { ascending: false });
+      .select('*').eq('user_id', userId).eq('paper_account_id', scope.accountId)
+      .eq('status', 'open').order('opened_at', { ascending: false });
 
     const { data: closed } = await sb.from('paper_positions')
-      .select('*').eq('user_id', userId).eq('status', 'closed').order('closed_at', { ascending: false }).limit(20);
+      .select('*').eq('user_id', userId).eq('paper_account_id', scope.accountId)
+      .eq('status', 'closed').order('closed_at', { ascending: false }).limit(20);
 
     const closedList = Array.isArray(closed) ? closed : [];
     const wins = closedList.filter((p: any) => Number(p.realized_pnl) > 0).length;

@@ -17,6 +17,7 @@ import {
   type LockVerdict, type StreakVerdict, type StreakTrade,
 } from './lossStreak';
 import { sumTodayIncome } from './dailyLoss';
+import { defaultPaperAccountId } from '../engine/paperScope';
 
 export interface StreakFacts {
   weekly: LockVerdict;
@@ -123,9 +124,15 @@ export async function collectPaperStreakLimits(args: {
   try {
     // 연패는 최근 거래를 봐야 하므로 주 경계와 무관하게 넉넉히 읽는다.
     // 주간 손익은 그중 이번 주 것만 더한다.
+    //
+    // **기본 계좌만.** 전용 계좌(챌린지 등)의 연패가 기본 계좌 판정을 막으면
+    // 안 된다. 계좌를 못 정하면 **질의하지 않고 던진다** — 아래 catch가
+    // 모름으로 남긴다. 0건으로 읽으면 "연패 없음"이 되어 통과시킨다.
+    const acct = await defaultPaperAccountId(args.sb, args.userId);
+    if (acct == null) throw new Error('모의 기본 계좌를 정하지 못했습니다');
     const { data, error } = await args.sb.from('paper_positions')
       .select('realized_pnl, closed_at')
-      .eq('user_id', args.userId).eq('status', 'closed')
+      .eq('user_id', args.userId).eq('paper_account_id', acct).eq('status', 'closed')
       .order('closed_at', { ascending: false })
       .limit(200);
     if (error) throw new Error(error.message);

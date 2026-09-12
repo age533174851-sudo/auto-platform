@@ -17,7 +17,7 @@ import { paperCapacityOf, capacityVerdict, readPaperCapacity } from './paperCapa
 
 /** paper_accounts / paper_positions만 답하는 가짜 Supabase */
 const fakeSb = (i: {
-  account?: { balance: unknown } | null;
+  account?: { id?: string; balance: unknown } | null;
   accountError?: boolean;
   positions?: Array<{ margin: unknown }> | null;
   positionsError?: boolean;
@@ -110,7 +110,7 @@ export function runPaperCapacityTests() {
   test('모의 장부만 읽는다 — 다른 표를 건드리지 않는다', async () => {
     const seen: string[] = [];
     const sb = fakeSb({
-      account: { balance: 3000 }, positions: [{ margin: 200 }, { margin: 300 }],
+      account: { id: 'acct-1', balance: 3000 }, positions: [{ margin: 200 }, { margin: 300 }],
       onTable: (t) => seen.push(t),
     });
     const c = await readPaperCapacity(sb, 'u1');
@@ -137,18 +137,18 @@ export function runPaperCapacityTests() {
   test('**포지션 조회가 실패하면 사용 증거금을 0으로 두지 않는다**', async () => {
     // 0은 "아무것도 안 물고 있다"로 읽힌다. 실제로는 모르는 것이고,
     // 그 차이만큼 크게 주문된다.
-    const c = await readPaperCapacity(fakeSb({ account: { balance: 3000 }, positionsError: true }), 'u1');
+    const c = await readPaperCapacity(fakeSb({ account: { id: 'acct-1', balance: 3000 }, positionsError: true }), 'u1');
     eq(c.known, false);
   });
 
   test('포지션 증거금 한 줄을 못 읽어도 모른다', async () => {
     const c = await readPaperCapacity(
-      fakeSb({ account: { balance: 3000 }, positions: [{ margin: 100 }, { margin: 'x' }] }), 'u1');
+      fakeSb({ account: { id: 'acct-1', balance: 3000 }, positions: [{ margin: 100 }, { margin: 'x' }] }), 'u1');
     eq(c.known, false);
   });
 
   test('열린 포지션이 없으면 사용 0이고 전액이 가용이다', async () => {
-    const c = await readPaperCapacity(fakeSb({ account: { balance: 1234.5 }, positions: [] }), 'u1');
+    const c = await readPaperCapacity(fakeSb({ account: { id: 'acct-1', balance: 1234.5 }, positions: [] }), 'u1');
     eq(c.known, true);
     if (c.known !== true) return;
     eq(c.usedMargin, 0);
@@ -160,7 +160,7 @@ export function runPaperCapacityTests() {
   test('잔고가 3,000 → 3,600 → 2,000이면 예산도 따라 움직인다', async () => {
     const budgets: number[] = [];
     for (const bal of [3000, 3600, 2000]) {
-      const c = await readPaperCapacity(fakeSb({ account: { balance: bal }, positions: [] }), 'u1');
+      const c = await readPaperCapacity(fakeSb({ account: { id: 'acct-1', balance: bal }, positions: [] }), 'u1');
       if (c.known === true) budgets.push(c.available);
     }
     eq(budgets.join(','), '3000,3600,2000');

@@ -205,6 +205,13 @@ const MIG_RPC = 'supabase/migrations/082_paper_rpc_account_id.sql';
       const near = lines.slice(i, i + 4).join(' ');
       if (!near.includes("eq('user_id'")) continue;      // 계좌 id로 읽는 것은 대상이 아니다
       if (near.includes('.update(') || near.includes('.insert(')) continue; // 쓰기는 아래에서
+      // **계좌 id로 좁힌 읽기는 더 강하다.**
+      //
+      // 이 규칙의 요점은 "기본 계좌로 좁혀라"가 아니라 **"user_id만으로
+      // 여러 줄을 만나지 마라"**다(계좌가 둘이 되는 날 maybeSingle()이 던진다).
+      // `id + user_id`는 한 줄을 지목하면서 소유자까지 보므로 is_default보다
+      // 좁다 — 그걸 실패로 적으면 규칙이 제 의도를 막는다.
+      if (near.includes("eq('id',")) continue;
       if (!near.includes("eq('is_default', true)")) {
         fail(`${f}:${i + 1} 계좌를 user_id만으로 읽습니다`
           + ' — 계좌가 둘이 되는 날 maybeSingle()이 던집니다');

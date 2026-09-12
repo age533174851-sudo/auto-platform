@@ -80,11 +80,18 @@ export async function POST(req: NextRequest) {
   // 가용 잔고 = 잔고 − 열린 포지션이 물고 있는 증거금.
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있다.
   const { getPaperAccount } = await import('@/lib/engine/paperStore');
+  const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
   const acct = await getPaperAccount(sb, uid);
   let available: number | null = null;
   try {
+    // **SQL과 같은 범위를 본다.** `082`의 `paper_open_position`은
+    // `user_id AND paper_account_id`로 예산을 센다. 여기가 사용자 전체를
+    // 세면 미리보기와 최종 판정이 다른 예산을 본다.
+    const scope = await resolvePaperScope(sb, uid);
+    if (paperScopeFailed(scope)) throw new Error(scope.reason);
     const { data: open } = await sb.from('paper_positions')
-      .select('margin').eq('user_id', uid).eq('status', 'open');
+      .select('margin').eq('user_id', uid)
+      .eq('paper_account_id', scope.accountId).eq('status', 'open');
     const used = (Array.isArray(open) ? open : [])
       .reduce((a: number, p: any) => a + (Number(p.margin) || 0), 0);
     available = (Number(acct.balance) || 0) - used;

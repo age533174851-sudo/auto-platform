@@ -238,8 +238,10 @@ export function runRiskContextTests() {
         order() { return b; }, limit() { return b; },
         maybeSingle() {
           if (table !== 'paper_accounts') return Promise.resolve({ data: null, error: null });
+          // **계좌 행에는 id가 있다.** `081`이 기본키를 `id`로 옮겼고,
+          // 포지션을 읽는 자리가 그 id로 좁히므로 픽스처도 실물과 같아야 한다.
           return Promise.resolve({
-            data: i.account === false ? null : { balance: i.balance }, error: null });
+            data: i.account === false ? null : { id: 'acct-1', balance: i.balance }, error: null });
         },
         then(res: any) {
           if (table === 'paper_positions') {
