@@ -99,7 +99,7 @@ function sqlLit(v) {
 // ── 결과 보고 ──
 const report = {
   mode: MODE, ok: false, code: 'UNKNOWN', reason: '',
-  required: 0, applied: [], adopted: [], pending: [], blocked: [], failed: [], verified: [], drift: [],
+  required: 0, applied: [], adopted: [], adoptable: [], pending: [], blocked: [], failed: [], verified: [], drift: [],
 };
 
 function say(line) { console.log(line); }
@@ -129,7 +129,8 @@ if (!url) {
 }
 say(`DB 접속 정보: ${from} (지문 ${fingerprint(url)}, 값은 출력하지 않습니다)`);
 
-const { classifyMigration, migrationIdOf, migrationPlanOf, migrationTargets, migrationDrift } = await loadPlan();
+const { classifyMigration, migrationIdOf, migrationPlanOf, migrationTargets, migrationDrift,
+        adoptionCandidates } = await loadPlan();
 
 // 번호가 붙은 파일만 자동 파이프라인 대상이다. 나머지는 사본·구파일이고
 // gen-migration-manifest.mjs의 LEGACY에 이유가 적혀 있다(CI가 검사한다).
@@ -211,25 +212,49 @@ async function verifyTargets(f) {
   };
 }
 
-if (rows && MODE === 'apply') {
-  const known = new Set(rows.map(r => r.name));
-  for (const f of files) {
-    if (known.has(f.name)) continue;
+// ── 채택 자격을 **먼저** 묻는다 ──
+//
+// 예전에는 카탈로그부터 물었다. 그래서 위험도 분류가 돌기 전에 채택이
+// 끝났고, UNKNOWN·DESTRUCTIVE가 승인 없이 BASELINE으로 적혔다
+// (081/082, migrate run 34661664896).
+//
+// **거를 자리를 두지 않는다.** 자리마다 `if (!adoptable) continue`로 걸렀더니
+// 돌연변이로 그 한 줄만 무력화해도 뚫렸다. 지금은 `adoptionCandidates`가
+// 돌려준 목록만 돈다 — 막힌 파일은 애초에 목록에 없다. 판정은 계획과 같은
+// `classifyMigration`을 쓰므로 두 곳이 갈릴 수 없다.
+//
+// **두 모드가 같은 목록을 쓴다.** check는 적지 않을 뿐이다.
+{
+  const appliedNames = rows ? rows.map(r => r.name) : null;
+  const { adopt, refused } = adoptionCandidates({ files, applied: appliedNames });
+
+  for (const f of adopt) {
     const v = await verifyTargets(f);
     if (v.verdict !== 'PRESENT') continue;   // 증거가 없으면 채택하지 않는다
+
+    // check 모드는 **읽기만** 한다. 무엇이 채택될지는 알려 주되 적지 않는다.
+    if (MODE !== 'apply') { report.adoptable.push(f.name); continue; }
+
     const ins = psql(url, ['-c',
       `INSERT INTO schema_migrations (filename, checksum, applied_by, runtime_sha, status, verified, verify_detail)
        VALUES (${sqlLit(f.name)}, ${sqlLit(checksumOf(f.sql))}, 'baseline-verified', ${sqlLit(RUNTIME_SHA)}, 'BASELINE', true,
                ${sqlLit(`대상 ${v.checked}개가 이미 존재함 — 실행하지 않고 적용된 것으로 기록`)})
        ON CONFLICT (filename) DO NOTHING`]);
-    if (ins.ok) {
+    if (ins.ok && rows) {
       rows.push({ name: f.name, checksum: checksumOf(f.sql), success: true });
       report.adopted.push(f.name);
     }
   }
+
   if (report.adopted.length) {
     say(`이미 적용돼 있던 ${report.adopted.length}개를 실행 없이 기록했습니다 (카탈로그에서 확인함)`);
   }
+  if (report.adoptable.length) {
+    say(`채택 가능 ${report.adoptable.length}개 (check 모드라 기록하지 않았습니다)`);
+  }
+  // 왜 채택하지 않는지 남긴다. 이유 없이 조용히 넘기면 다음 사람이
+  // "왜 매번 실행되지"를 다시 파야 한다.
+  for (const r of refused) say(`  채택하지 않음: ${r.name} — ${r.code}: ${r.reason}`);
 }
 
 // ── 3. 계획 ──

@@ -273,6 +273,120 @@ const CHORE_PHRASES = [
   }
 }
 
+// 8. 채택이 승인을 우회하지 않는가
+//
+// **무엇이 있었나**
+// `migrate` run 34661664896에서 같은 head인데 판단이 뒤집혔다:
+//
+//   --check   남음 2 / 승인 필요 2 → NEEDS_APPROVAL (081 UNKNOWN · 082 DESTRUCTIVE)
+//   --apply   이미 적용돼 있던 2개를 실행 없이 기록 → UP_TO_DATE
+//
+// 채택 블록이 **위험도 분류보다 먼저** 돌아서, 승인이 필요한 둘이 BASELINE으로
+// 적혔다. 그 뒤로 runner는 영원히 "적용됨"이라고 믿는다.
+//
+// 여기서 보는 것은 두 가지다. 하나는 **성질**(저장소의 실제 파일에 대해
+// 채택이 승인을 넘지 않는가), 하나는 **배선**(runner가 그 판정을 실제로
+// 부르는가). 성질만 보면 "만들어 놓고 배선을 안 함"을 놓치고, 배선만 보면
+// 판정이 느슨해진 것을 놓친다.
+{
+  const { adoptionVerdictOf, adoptionCandidates, migrationTargets } = await loadPlan();
+
+  // ── 8-a. 성질: 막힌 것은 채택될 수 없다 ──
+  //
+  // 저장소의 **진짜 마이그레이션 전부**에 대고 묻는다. 지어낸 예제가 아니라
+  // 실제 파일이라, 나중에 누가 위험한 문장을 새로 넣어도 여기서 걸린다.
+  const allFiles = [];
+  for (const r of built.rows) {
+    const file = join(MIG_DIR, r.name);
+    const sql = existsSync(file) ? readFileSync(file, 'utf8') : '';
+    allFiles.push({ name: r.name, id: r.id, sql, risk: r.risk });
+
+    const v = adoptionVerdictOf({ name: r.name, id: r.id, sql });
+    if (r.risk !== 'ADDITIVE' && v.adoptable) {
+      err(`${r.name}이 ${r.risk}인데 채택 가능합니다 — 승인이 채택으로 우회됩니다`);
+    }
+    // 함수는 이름만으로 시그니처도 본문도 확인할 수 없다.
+    if (migrationTargets(sql).some(t => t.kind === 'function') && v.adoptable) {
+      err(`${r.name}이 함수를 만드는데 채택 가능합니다 — 같은 이름의 옛 함수가 있다는 것은 의미가 같다는 증거가 아닙니다`);
+    }
+  }
+
+  // ── 8-b. 번호 없는 구파일도 채택으로 새어 나가지 않는가 ──
+  //
+  // 8-a는 번호 있는 파일만 본다(manifest의 행). 번호가 없는 것은 자동 적용
+  // 대상이 아닌데, 채택은 자동 적용의 한 형태다 — 여기로 우회되면 안 된다.
+  for (const name of Object.keys(LEGACY)) {
+    const file = join(MIG_DIR, name);
+    if (!existsSync(file)) continue;
+    const sql = readFileSync(file, 'utf8');
+    allFiles.push({ name, id: null, sql, risk: 'UNKNOWN' });
+    if (adoptionVerdictOf({ name, id: null, sql }).adoptable) {
+      err(`${name}은 번호가 없는데 채택 가능합니다 — 자동 적용 대상이 아닌 것이 채택으로 우회됩니다`);
+    }
+  }
+
+  // ── 8-c. 목록 자체가 막힌 것을 한 건도 안 담는가 ──
+  //
+  // runner는 `adoptionCandidates`가 돌려준 목록만 돈다. 그러니 **그 목록에
+  // 무엇이 담기는가**가 곧 계약이다. 아무것도 기록되지 않은 상태(최악)를
+  // 가정하고 전수로 묻는다.
+  {
+    const { adopt } = adoptionCandidates({ files: allFiles, applied: [] });
+    for (const f of adopt) {
+      const meta = allFiles.find(x => x.name === f.name);
+      if (meta && meta.risk !== 'ADDITIVE') {
+        err(`채택 후보에 ${f.name}(${meta.risk})이 들어 있습니다 — 승인이 필요한 파일입니다`);
+      }
+      if (migrationTargets(f.sql || '').some(t => t.kind === 'function')) {
+        err(`채택 후보에 ${f.name}이 들어 있습니다 — 함수를 만드는 파일입니다`);
+      }
+      if (f.id == null) {
+        err(`채택 후보에 ${f.name}이 들어 있습니다 — 번호가 없습니다`);
+      }
+    }
+  }
+
+  // ── 8-d. 배선: runner가 그 목록만 도는가 ──
+  //
+  // **글자를 보지 않는다.** 처음에는 `!a.adoptable`이 있는지 봤는데,
+  // 돌연변이로 `if (false && !a.adoptable)`을 넣으니 글자는 그대로라 통과했다.
+  // 가드 한 줄이 아니라 **무엇을 순회하는가**를 본다 — 막힌 파일은 목록에
+  // 없으므로, 뚫으려면 목록을 갈아치워야 하고 그건 여기서 보인다.
+  const RUNNER = 'scripts/apply-migrations.mjs';
+  const src = existsSync(RUNNER) ? readFileSync(RUNNER, 'utf8') : '';
+  if (!src) {
+    err(`${RUNNER}을 읽지 못했습니다`);
+  } else {
+    const insertAt = src.indexOf("'BASELINE'");
+    if (insertAt < 0) {
+      err(`${RUNNER}에서 BASELINE 기록 자리를 찾지 못했습니다 — 이 검사가 무엇을 지키는지 다시 봐야 합니다`);
+    } else {
+      const before = src.slice(0, insertAt);
+      const callAt = before.lastIndexOf('adoptionCandidates(');
+      if (callAt < 0) {
+        err(`${RUNNER}이 BASELINE을 적기 전에 adoptionCandidates를 부르지 않습니다 — 채택이 위험도 분류를 건너뜁니다`);
+      } else {
+        // 그 호출로 받은 목록을 실제로 순회해야 한다. 부르기만 하고 `files`를
+        // 돌면 아무것도 막지 못한다.
+        const between = src.slice(callAt, insertAt);
+        const loop = between.match(/for\s*\(\s*const\s+\w+\s+of\s+([A-Za-z_$][\w$]*)\s*\)/);
+        if (!loop) {
+          err(`${RUNNER}이 채택 후보를 순회하지 않습니다 — BASELINE에 닿는 반복문을 찾지 못했습니다`);
+        } else {
+          // 구조분해는 호출 **앞**에 있다 (`const { adopt } = adoptionCandidates(...)`).
+          // between은 호출 지점부터라 그 부분이 안 들어온다 — 첫 판에서 이걸
+          // 놓쳐 멀쩡한 배선을 빨갛다고 적었다. 파일 전체에서 찾는다.
+          const destructured = src.match(/const\s*\{([^}]*)\}\s*=\s*adoptionCandidates\(/);
+          const names = destructured ? destructured[1].split(',').map(x => x.split(':').pop().trim()) : [];
+          if (!names.includes(loop[1])) {
+            err(`${RUNNER}이 adoptionCandidates가 돌려준 목록이 아니라 '${loop[1]}'을 순회합니다 — 막힌 파일이 채택될 수 있습니다`);
+          }
+        }
+      }
+    }
+  }
+}
+
 if (bad === 0) {
   console.log(`마이그레이션 배선 확인: 파일 ${built.rows.length}개 · 자동 적용 ${built.rows.length - manual.length}개 · `
     + `자동 대상 아님 ${manual.length}개 · 구파일 ${Object.keys(LEGACY).length}개`);
