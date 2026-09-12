@@ -223,7 +223,7 @@ else {
     const lockAt = body.search(/FOR UPDATE/);
     const dupAt = body.search(/'DUPLICATE'/);
     const capAt = body.search(/'INSUFFICIENT_MARGIN'/);
-    const sumAt = body.search(/SUM\s*\(\s*margin\s*\)/);
+    const sumAt = body.search(/SUM\s*\(\s*(?:[A-Za-z_]\w*\.)?margin\s*\)/);
     const insAt = body.search(/INSERT INTO public\.paper_positions/);
     const feeAt = body.search(/UPDATE public\.paper_accounts/);
 
@@ -254,16 +254,37 @@ else {
     if (sumAt >= 0) {
       const semi = body.indexOf(';', sumAt);
       const q = semi > sumAt ? body.slice(sumAt, semi) : body.slice(sumAt);
-      if (!/status\s*=\s*'open'/.test(q)) {
+      if (!/(?:[A-Za-z_]\w*\.)?status\s*=\s*'open'/.test(q)) {
         fail(`${sqlFile}의 증거금 합산이 열린 포지션만 세지 않습니다`
           + ' — 닫힌 포지션까지 물고 있는 것으로 셉니다');
       }
-      if (!/user_id\s*=\s*p_user_id/.test(q)) {
+      if (!/(?:[A-Za-z_]\w*\.)?user_id\s*=\s*p_user_id/.test(q)) {
         fail(`${sqlFile}의 증거금 합산이 사용자로 좁히지 않습니다`
           + ' — 남의 포지션이 예산에 들어갑니다');
       }
       if (!/FROM\s+public\.paper_positions/.test(q)) {
         fail(`${sqlFile}의 증거금 합산이 모의 포지션 표를 읽지 않습니다`);
+      }
+    }
+    // ── 용량 질의의 `status`는 **반드시 한정한다** ──
+    //
+    // 이 함수의 반환 칸 이름이 `status`다(`RETURNS TABLE (status TEXT, …)`).
+    // 한정하지 않으면 plpgsql이 어느 쪽인지 모른다며 42702로 거부하고,
+    // 그 거부는 **실행 시점에만** 나온다 — `CREATE FUNCTION`은 성공하고
+    // 마이그레이션 재생도 통과한다.
+    //
+    // `075`부터 이 자리가 그랬고, 이 검사기도 한정 없는 형태를 정답으로
+    // 못박고 있었다. 즉 검사기가 고장을 지키고 있었다.
+    //
+    // 실제로 돌아가는지는 supabase-replay의 실행 연기가 본다. 여기서는
+    // **다시 그 형태로 돌아가는 것**을 막는다.
+    if (sumAt >= 0) {
+      const semi2 = body.indexOf(';', sumAt);
+      const q2 = semi2 > sumAt ? body.slice(sumAt, semi2) : body.slice(sumAt);
+      if (/(?:^|[^.\w])status\s*=\s*'open'/.test(q2)) {
+        fail(`${sqlFile}의 용량 질의가 status를 한정하지 않습니다`
+          + ' — 이 함수는 status라는 칸을 반환하므로 실행될 때마다 42702로 터집니다'
+          + ' (표 별칭을 붙여 pp.status처럼 쓰세요)');
       }
     }
     // **용량 식에 수수료가 들어간다.**

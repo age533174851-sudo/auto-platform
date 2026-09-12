@@ -1,0 +1,288 @@
+# 운영에 배포된 `paper_open_position`의 **본문**을 읽는다 (읽기 전용).
+#
+# 왜 필요한가
+# ───────────
+# 저장소의 `075`/`082` 함수는 실행하면 반드시 42702로 터진다. 반환 칸 이름이
+# `status`인데 용량 검사 질의가 `AND status = 'open'`을 한정 없이 쓰기 때문이다.
+# 빈 Postgres에서 실측했다.
+#
+# 그런데 **저장소가 깨져 있다**는 것과 **운영에 배포된 본문이 같다**는 것은
+# 다른 사실이다. B1 감사(`audit-production-paper-account-identity`)는 이 함수의
+# **시그니처**만 확인했고 본문은 보지 않았다. 그리고 `081`/`082`는 한때
+# BASELINE으로 기록만 되고 실행되지 않았던 이력이 있어서, 운영의 본문이 어디서
+# 왔는지 장부만으로는 말할 수 없다.
+#
+# 그래서 여기서 `pg_proc.prosrc`를 직접 읽는다. 확인하기 전까지 운영 영향은
+# **UNKNOWN이다 — 0으로도 100%로도 적지 않는다.**
+#
+# 이 사진이 **언제** 찍혔는지가 판정의 절반이다
+# ─────────────────────────────────────────────
+# 이 감사와 `migrate`는 같은 main push에서 **각자** 실행된다. 순서가 보장되지
+# 않는다. 그래서 본문만 읽으면, 깨끗하다는 관측이 두 가지 중 어느 것인지
+# 구분되지 않는다:
+#
+#   · 운영이 원래 깨끗했다
+#   · 방금 084가 적용돼서 깨끗해졌다
+#
+# 전혀 다른 사실이고, 구분하지 못하면 이 감사는 아무것도 증명하지 못한다.
+# 그래서 **같은 READ ONLY 트랜잭션 안에서** 084의 적용 여부를 함께 읽는다.
+# 한 스냅샷이라 본문과 적용 기록이 어긋날 수 없다.
+#
+# 판정
+# ────
+#   AFFECTED_PRE_FIX        084 미적용 + 한정 없음 → 운영이 원래 깨져 있었다 (VERIFIED)
+#   CLEAN_PRE_FIX           084 미적용 + 한정 있음 → 운영이 원래 깨끗했다 (VERIFIED)
+#   POST_FIX_CLEAN          084 적용   + 한정 있음 → 지금은 깨끗하다.
+#                           **고치기 전 상태는 이 사진으로 말할 수 없다 (UNKNOWN)**
+#   APPLIED_BUT_UNQUALIFIED 084 적용   + 한정 없음 → 기록과 실제가 어긋났다. 실패
+#   MISSING                 그 시그니처의 함수가 없다. 실패
+#   UNKNOWN                 읽지 못했다. 실패
+#
+# 어느 판정이든 이 PR의 수정은 필요하다. 저장소가 정본이고 다음 배포·재구축은
+# 이 파일로 서기 때문이다.
+#
+# 운영에 쓰지 않는다
+# ──────────────────
+# `BEGIN TRANSACTION READ ONLY`로 열고 그 사실을 값으로 확인한다. 읽는 것은
+# 카탈로그(`pg_proc`)뿐이고 업무 데이터는 한 줄도 보지 않는다.
+#
+# 트리거는 이 파일이 main에 들어오는 그때 한 번이다. `workflow_dispatch`를 두지
+# 않는다 — 운영 DB에 붙는 워크플로를 아무 때나 손으로 돌릴 수 있게 두지 않는다.
+name: audit-production-paper-open-position-body
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-paper-open-position-body.yml'
+
+concurrency:
+  group: audit-production-paper-open-position-body
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: paper_open_position 본문 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: DB 접속 정보 확인
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 확인하지 못한 것을 통과로 적지 않습니다"
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      - name: 본문을 읽는다 (쓰기는 Postgres가 거부한다)
+        id: read
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/audit.sql" <<'SQL'
+          \pset tuples_only on
+          \pset format unaligned
+          BEGIN TRANSACTION READ ONLY;
+
+          -- 읽기 전용으로 열렸다는 것을 값으로 남긴다.
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only');
+
+          -- ★ **이름이 아니라 시그니처 하나를 집는다.**
+          --
+          --   `082`가 인자를 하나 늘렸으므로 옛 18인자 판이 남아 있을 수 있다.
+          --   이름으로만 모아서 `bool_or`로 뭉개면, 한쪽 본문의 결함이 다른
+          --   오버로드의 결과와 섞여서 **제품이 실제로 부르는 그 함수**가
+          --   깨끗한지 단독으로 말할 수 없다.
+          --
+          --   `to_regprocedure`는 없는 시그니처에 예외를 던지지 않고 NULL을
+          --   돌려준다(확인함) — 읽기 전용 트랜잭션이 중간에 끊기지 않는다.
+          \set sig 'public.paper_open_position(uuid,text,text,text,text,text,text,numeric,numeric,numeric,numeric,integer,numeric,numeric,numeric,numeric,numeric,text,uuid)'
+
+          SELECT 'FN_EXACT_PRESENT=' ||
+                 CASE WHEN to_regprocedure(:'sig') IS NULL THEN 'FALSE' ELSE 'TRUE' END;
+
+          -- 같은 이름의 다른 판이 남아 있는가. **판정에 섞지 않는다** —
+          -- 관측값으로만 적는다.
+          SELECT 'FN_NAME_OVERLOADS=' || count(*)::text
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public' AND p.proname = 'paper_open_position';
+
+          -- ★ 본문에 **한정 없는** 참조가 있는가.
+          --
+          --   글자를 세는 것이 아니라 "그 모양이 본문에 있는가"를 본다.
+          --   한정된 판(`pp.status`)은 이 패턴에 걸리지 않는다.
+          --   **그 시그니처 한 줄만 본다.** 없으면 줄 자체가 나오지 않고,
+          --   판정 단계가 FN_EXACT_PRESENT=FALSE를 보고 MISSING으로 떨어진다.
+          SELECT 'BODY_UNQUALIFIED_STATUS=' ||
+                 CASE WHEN p.prosrc ~ 'AND[[:space:]]+status[[:space:]]*=[[:space:]]*''open'''
+                      THEN 'TRUE' ELSE 'FALSE' END
+            FROM pg_proc p WHERE p.oid = to_regprocedure(:'sig');
+
+          -- ★ **이 감사가 언제 찍힌 사진인지 함께 읽는다.**
+          --
+          --   감사와 `migrate`는 같은 main push에서 **각자** 실행된다. 감사가
+          --   migrate 뒤에 돌면 본문이 깨끗해도 그것이 "원래 깨끗했다"인지
+          --   "방금 084가 고쳤다"인지 구분되지 않는다. 그 둘은 전혀 다른
+          --   사실이고, 구분하지 못하면 이 감사는 아무것도 증명하지 못한다.
+          --
+          --   그래서 같은 READ ONLY 트랜잭션 **안에서** 084의 적용 여부를
+          --   함께 읽는다. 한 스냅샷이라 본문과 적용 기록이 어긋날 수 없다.
+          --   기록표를 **직접 참조하면 안 된다.** 표가 없는 DB에서는 질의가
+          --   파싱 단계에서 터지고, 그러면 이 감사가 "판정 불가"를 보고하는
+          --   대신 그 자리에서 끊긴다 — 뒤따르는 줄(반환 칸 확인)도 같이
+          --   사라진다. 로컬에서 실제로 그렇게 끊겼다.
+          --
+          --   `query_to_xml`은 실행 시점에 평가하므로 표가 없어도 파싱이
+          --   통과하고, READ ONLY 트랜잭션에서도 동작한다(확인함).
+          SELECT 'MIGRATION_084_APPLIED=' ||
+                 CASE
+                   WHEN to_regclass('public.schema_migrations') IS NULL THEN 'UNKNOWN'
+                   WHEN (xpath('/row/c/text()', query_to_xml(
+                          'SELECT count(*) AS c FROM public.schema_migrations'
+                          || ' WHERE filename = ''084_paper_open_position_ambiguity.sql'''
+                          || ' AND status IN (''APPLIED'', ''BASELINE'')',
+                          false, true, '')))[1]::text::int > 0
+                     THEN 'TRUE'
+                   ELSE 'FALSE'
+                 END;
+
+          -- 기록표 자체를 못 읽었는지와 "없다"를 가른다.
+          SELECT 'MIGRATION_TABLE_READABLE=' ||
+                 CASE WHEN to_regclass('public.schema_migrations') IS NULL
+                      THEN 'FALSE' ELSE 'TRUE' END;
+
+          -- 반환 칸에 `status`가 있어야 모호성이 성립한다. 둘 다여야 터진다.
+          --
+          --   **`\b`가 아니라 `\y`다.** PostgreSQL의 POSIX 정규식에서 `\b`는
+          --   단어 경계가 아니라 backspace다. 로컬 대조군이 이걸 잡았다 —
+          --   `\b`로 물으면 반환 칸에 status가 있는데도 FALSE가 나오고,
+          --   그러면 결함 있는 운영 본문이 UNKNOWN으로 분류된다.
+          SELECT 'RETURNS_STATUS_COLUMN=' ||
+                 CASE WHEN pg_get_function_result(p.oid) ~ '\ystatus\y'
+                      THEN 'TRUE' ELSE 'FALSE' END
+            FROM pg_proc p WHERE p.oid = to_regprocedure(:'sig');
+
+          COMMIT;
+          SQL
+
+          out="$(psql "${SUPABASE_DB_URL}" -v ON_ERROR_STOP=1 -Xf "${RUNNER_TEMP}/audit.sql" 2>&1)" || {
+            echo "::error::조회에 실패했습니다 — 읽지 못한 것을 통과로 적지 않습니다"
+            printf '%s\n' "${out}"
+            exit 1
+          }
+
+          # psql 정렬 출력은 줄 앞뒤에 공백을 넣는다 — 먼저 다듬고 찾는다.
+          # **키에 숫자가 들어간다**(MIGRATION_084_APPLIED). [A-Z_]+로 거르면
+          # 그 줄만 조용히 사라지고 판정이 UNKNOWN으로 떨어진다 — 로컬에서 실제로
+          # 그랬다. 확인하지 못한 것을 통과로 적지는 않지만, 읽을 수 있는 것을
+          # 못 읽는 것도 고장이다.
+          printf '%s\n' "${out}" \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -E '^[A-Z0-9_]+=' > "${RUNNER_TEMP}/shape.txt" || true
+
+          echo "── 관측값 ──"
+          cat "${RUNNER_TEMP}/shape.txt"
+
+          if [ ! -s "${RUNNER_TEMP}/shape.txt" ]; then
+            echo "::error::판정 줄을 하나도 읽지 못했습니다 — 조회는 됐는데 결과가 비었습니다"
+            exit 1
+          fi
+
+      - name: 판정
+        run: |
+          set -euo pipefail
+          f="${RUNNER_TEMP}/shape.txt"
+          val() { grep -E "^$1=" "$f" | head -1 | cut -d= -f2- || true; }
+
+          present="$(val FN_EXACT_PRESENT)"
+          unqual="$(val BODY_UNQUALIFIED_STATUS)"
+          retcol="$(val RETURNS_STATUS_COLUMN)"
+          overloads="$(val FN_NAME_OVERLOADS)"
+          ro="$(val READ_ONLY)"
+          applied="$(val MIGRATION_084_APPLIED)"
+          mtable="$(val MIGRATION_TABLE_READABLE)"
+
+          if [ "${ro}" != "on" ]; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 (READ_ONLY=${ro}) — 이 감사는 읽기만 해야 합니다"
+            exit 1
+          fi
+          if [ "${mtable}" != "TRUE" ]; then
+            echo "::error::기록표를 읽지 못했습니다 — 이 사진이 언제 찍힌 것인지 말할 수 없습니다"
+            exit 1
+          fi
+
+          # ── 판정은 **본문과 적용 시점을 함께** 읽는다 ──
+          #
+          #   084 미적용 + 한정 없음  → AFFECTED_PRE_FIX   운영이 원래 깨져 있었다
+          #   084 미적용 + 한정 있음  → CLEAN_PRE_FIX      운영이 원래 깨끗했다
+          #   084 적용   + 한정 있음  → POST_FIX_CLEAN     지금은 깨끗하다.
+          #                                                 **고치기 전 상태는 UNKNOWN**
+          #   084 적용   + 한정 없음  → 예상 불일치. 적용됐는데 본문이 안 바뀌었다
+          verdict=UNKNOWN
+          if [ "${present}" != "TRUE" ]; then
+            # FALSE이거나 줄 자체가 없으면(읽지 못했으면) 둘 다 여기다.
+            verdict=MISSING
+          elif [ "${applied}" = "FALSE" ] && [ "${unqual}" = "TRUE" ] && [ "${retcol}" = "TRUE" ]; then
+            verdict=AFFECTED_PRE_FIX
+          elif [ "${applied}" = "FALSE" ] && [ "${unqual}" = "FALSE" ]; then
+            verdict=CLEAN_PRE_FIX
+          elif [ "${applied}" = "TRUE" ] && [ "${unqual}" = "FALSE" ]; then
+            verdict=POST_FIX_CLEAN
+          elif [ "${applied}" = "TRUE" ] && [ "${unqual}" = "TRUE" ]; then
+            verdict=APPLIED_BUT_UNQUALIFIED
+          fi
+
+          {
+            echo "## 운영 paper_open_position 본문"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "|---|---|"
+            echo "| 정확한 시그니처 존재 | ${present:-UNKNOWN} |"
+            echo "| 같은 이름의 판 개수 (참고) | ${overloads:-UNKNOWN} |"
+            echo "| 본문에 한정 없는 status 참조 | ${unqual:-UNKNOWN} |"
+            echo "| 반환 칸에 status | ${retcol:-UNKNOWN} |"
+            echo "| 084 적용됨 (같은 스냅샷) | ${applied:-UNKNOWN} |"
+            echo "| **판정** | **${verdict}** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "판정: ${verdict}"
+
+          case "${verdict}" in
+            CLEAN_PRE_FIX)
+              echo "084가 아직 적용되지 않은 상태에서 본문이 이미 한정돼 있습니다."
+              echo "운영은 원래 깨끗했습니다 — production impact 없음(VERIFIED)."
+              echo "저장소 수정은 그대로 필요합니다: 다음 배포·재구축이 저장소 파일로 섭니다."
+              ;;
+            AFFECTED_PRE_FIX)
+              echo "::warning::084 적용 전 운영 본문에 결함이 있었습니다 — production impact VERIFIED"
+              echo "084가 적용되면 고쳐집니다."
+              ;;
+            POST_FIX_CLEAN)
+              echo "::warning::084가 이미 적용된 뒤에 읽었습니다 — 지금은 깨끗합니다."
+              echo "다만 **고치기 전 운영 본문은 이 사진으로 말할 수 없습니다(UNKNOWN).**"
+              echo "감사와 migrate가 같은 push에서 각자 돌기 때문입니다 — 0으로도 100%로도 적지 않습니다."
+              ;;
+            APPLIED_BUT_UNQUALIFIED)
+              echo "::error::084가 적용됐다고 기록돼 있는데 본문은 한정돼 있지 않습니다"
+              echo "기록과 실제가 어긋났습니다 — 예상과 다르므로 통과로 적지 않습니다."
+              exit 1
+              ;;
+            MISSING)
+              echo "::error::084가 교체하는 정확한 19인자 시그니처가 운영에 없습니다 — 예상과 다릅니다"
+              echo "같은 이름의 판은 ${overloads:-UNKNOWN}개 있습니다 (참고값 · 판정에 섞지 않았습니다)"
+              exit 1
+              ;;
+            *)
+              echo "::error::판정하지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다"
+              exit 1
+              ;;
+          esac
