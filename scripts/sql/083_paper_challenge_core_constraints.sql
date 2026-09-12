@@ -141,6 +141,54 @@ SELECT pg_temp.must_fail('달성을 실패로 마감', '23514', format(
        WHERE id = %L $q$,
   (SELECT ch1 FROM ids)));
 
+-- ★ **사유 자체가 바뀌지 않는다.**
+--
+-- 위의 `terminal_status = close_intent` CHECK는 **마감할 때** 결론이 사유와
+-- 같은지만 본다. 아직 terminal_status가 NULL인 CLOSING 중에 사유를 직접
+-- 덮어쓰면 CHECK 넷이 전부 통과하고, 그 뒤 같은 값으로 마감하면 아무 제약도
+-- 울지 않는다 — **달성이 조용히 실패가 된다.**
+--
+-- 행 단위 CHECK는 이전 값을 볼 수 없으므로 BEFORE UPDATE 트리거가 막는다.
+-- 여기서 그 트리거가 실제로 붙어 있는지 본다.
+
+SELECT pg_temp.must_fail('달성을 정리 중에 실패로 바꿔치기', '23514', format(
+  $q$ UPDATE public.paper_challenges SET close_intent = 'FAILED' WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
+SELECT pg_temp.must_fail('달성을 만료로 바꿔치기', '23514', format(
+  $q$ UPDATE public.paper_challenges SET close_intent = 'EXPIRED' WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
+SELECT pg_temp.must_fail('달성을 취소로 바꿔치기', '23514', format(
+  $q$ UPDATE public.paper_challenges SET close_intent = 'CANCELLED' WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
+-- 지우고 다시 쓰는 우회로도 막는다.
+SELECT pg_temp.must_fail('사유를 지워서 되돌리기', '23514', format(
+  $q$ UPDATE public.paper_challenges
+         SET close_intent = NULL, close_intent_event_at = NULL WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
+-- 사유는 그대로 두고 시각만 옮기면 "언제 달성했는가"가 움직이고,
+-- 그것이 곧 만료 판정을 뒤집는다.
+SELECT pg_temp.must_fail('판정 시각만 옮기기', '23514', format(
+  $q$ UPDATE public.paper_challenges
+         SET close_intent_event_at = NOW() + INTERVAL '1 day' WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
+-- 재시도는 변경이 아니다. 같은 값을 다시 써도 통과해야 한다 — 여기서 막으면
+-- 정상 경로의 멱등 재시도가 죽는다.
+SELECT pg_temp.must_pass('같은 사유를 다시 기록', format(
+  $q$ UPDATE public.paper_challenges
+         SET close_intent = 'TARGET_REACHED', close_intent_at = NOW() WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
+-- 사유와 무관한 칸은 평소처럼 갱신된다. 트리거가 UPDATE를 통째로 막으면
+-- 통계도 못 적는다.
+SELECT pg_temp.must_pass('통계는 계속 갱신된다', format(
+  $q$ UPDATE public.paper_challenges SET peak_nav = 2100 WHERE id = %L $q$,
+  (SELECT ch1 FROM ids)));
+
 SELECT pg_temp.must_pass('고정된 사유 그대로 마감', format(
   $q$ UPDATE public.paper_challenges
          SET status = 'CLOSED', terminal_status = 'TARGET_REACHED', closed_at = NOW()
@@ -157,6 +205,19 @@ SELECT pg_temp.must_pass('끝난 챌린지 옆에 새 챌린지', format(
          starts_at, ends_at)
       VALUES (%L, %L, %L, 'READY', 1000, 2000, NOW(), NOW() + INTERVAL '30 days') $q$,
   (SELECT ch2 FROM ids), (SELECT u1 FROM ids), (SELECT acct2 FROM ids)));
+
+-- 처음 정하는 것은 허용된다 — 트리거가 막는 것은 **바꾸는 것**뿐이다.
+SELECT pg_temp.must_pass('사유를 처음 정한다 (NULL → TARGET_REACHED)', format(
+  $q$ UPDATE public.paper_challenges
+         SET close_intent = 'TARGET_REACHED', close_intent_at = NOW(),
+             close_intent_event_at = NOW()
+       WHERE id = %L $q$,
+  (SELECT ch2 FROM ids)));
+
+-- 그리고 그 순간부터 얼어붙는다.
+SELECT pg_temp.must_fail('방금 정한 사유를 바꾸기', '23514', format(
+  $q$ UPDATE public.paper_challenges SET close_intent = 'CANCELLED' WHERE id = %L $q$,
+  (SELECT ch2 FROM ids)));
 
 -- READY와 RUNNING은 **둘 다 활성**이다. 한쪽만 세면 활성이 둘이 된다.
 SELECT pg_temp.must_fail('활성 챌린지 둘', '23505', format(
@@ -191,6 +252,19 @@ SELECT pg_temp.must_fail('남의 챌린지에 돈 사건을 붙임', '23503', fo
          source_event_type, source_event_id, event_effective_at)
       VALUES (%L, %L, %L, 'INITIAL_DEPOSIT', 1000, 'CHALLENGE_CREATE', 'x', NOW()) $q$,
   (SELECT ch2 FROM ids), (SELECT u2 FROM ids), (SELECT acct_other FROM ids)));
+
+-- ★ **같은 사용자의 다른 계좌도 안 된다.**
+--
+-- `(challenge_id, user_id)`와 `(paper_account_id, user_id)` 두 외래키는 각각
+-- "챌린지가 내 것인가"와 "계좌가 내 것인가"만 본다. 둘 다 만족하면서 계좌가
+-- 이 챌린지의 전용 계좌가 **아닐** 수 있다. 그러면 원장은 이 챌린지 것인데
+-- 돈은 다른 계좌에 있게 되고, SUM(amount) = balance가 조용히 깨진다.
+SELECT pg_temp.must_fail('내 다른 계좌를 챌린지 원장에 붙임', '23503', format(
+  $q$ INSERT INTO public.paper_challenge_cashflows
+        (challenge_id, user_id, paper_account_id, cashflow_type, amount,
+         source_event_type, source_event_id, event_effective_at)
+      VALUES (%L, %L, %L, 'REALIZED_PNL', 10, 'POSITION_CLOSE', 'sibling', NOW()) $q$,
+  (SELECT ch2 FROM ids), (SELECT u1 FROM ids), (SELECT acct3 FROM ids)));
 
 -- ══════════════ ⑤ 판정 시각 ══════════════
 --

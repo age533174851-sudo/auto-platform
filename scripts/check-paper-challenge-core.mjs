@@ -150,6 +150,54 @@ compareSet('활성 상태', 'paper_challenges_one_active_per_user', D.ACTIVE_CHA
   }
 }
 
+// ── ②-b 사유 자체가 바뀌지 않는가 (이전 값을 보는 자리) ──
+//
+// 위의 CHECK는 **마감할 때** 결론이 사유와 같은지만 본다. 행 단위 CHECK는
+// 이전 값을 볼 수 없으므로, 아직 terminal_status가 NULL인 CLOSING 중에
+// `UPDATE ... SET close_intent='FAILED'`는 그냥 통과한다. 그 뒤 같은 값으로
+// 마감하면 제약이 아무 말도 하지 않는다 — **달성이 조용히 실패가 된다.**
+//
+// 이전 값을 볼 수 있는 유일한 자리가 BEFORE UPDATE 트리거다.
+const FREEZE_FN = 'public.paper_challenges_freeze_intent';
+const FREEZE_TRG = 'paper_challenges_freeze_intent_trg';
+{
+  const flat = sql.replace(/\s+/g, ' ');
+
+  const trg = new RegExp(
+    `CREATE TRIGGER ${FREEZE_TRG} BEFORE UPDATE ON public\\.paper_challenges FOR EACH ROW `
+    + `EXECUTE FUNCTION ${FREEZE_FN.replace('.', '\\.')}\\(\\)`, 'i');
+  if (!trg.test(flat)) {
+    err(`${SQL_FILE}: 사유를 얼리는 BEFORE UPDATE 트리거(${FREEZE_TRG})가 없습니다 `
+      + `— CHECK만으로는 CLOSING 중 close_intent 덮어쓰기를 막지 못합니다 `
+      + `(TARGET_REACHED가 FAILED로 바뀝니다)`);
+  }
+
+  const at = sql.search(new RegExp(`CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+${FREEZE_FN.replace('.', '\\.')}`, 'i'));
+  if (at < 0) {
+    err(`${SQL_FILE}: ${FREEZE_FN}() 정의가 없습니다`);
+  } else {
+    const body = sql.slice(at, sql.indexOf('$fn$;', at) + 5);
+    // **이전 값과 비교해야** 불변이 된다. NEW만 보면 아무것도 막지 못한다.
+    for (const [what, col] of [['사유', 'close_intent'], ['판정 시각', 'close_intent_event_at']]) {
+      const ok = new RegExp(`OLD\\.${col}\\b[\\s\\S]*?NEW\\.${col}\\b`, 'i').test(body);
+      if (!ok) {
+        err(`${SQL_FILE}: ${FREEZE_FN}()이 ${what}(${col})의 이전 값과 새 값을 비교하지 않습니다 `
+          + `— 비교하지 않으면 트리거가 붙어 있어도 아무것도 얼지 않습니다`);
+      }
+    }
+    // 처음 정하는 것까지 막으면 사유를 아예 정할 수 없다.
+    if (!/OLD\.close_intent\s+IS\s+NOT\s+NULL/i.test(body)) {
+      err(`${SQL_FILE}: ${FREEZE_FN}()이 "이미 정해져 있을 때만" 막는지 확인할 수 없습니다 `
+        + `— NULL에서 처음 정하는 것은 허용돼야 합니다`);
+    }
+    // 이 트리거는 회계를 하지 않는다. 돈을 만지기 시작하면 PR2 범위다.
+    if (/\b(INSERT\s+INTO|UPDATE\s+public\.|DELETE\s+FROM)\b/i.test(body)) {
+      err(`${SQL_FILE}: ${FREEZE_FN}()이 다른 표에 씁니다 — 이 트리거는 거부만 합니다`);
+    }
+  }
+  if (bad === 0) notes.push('사유와 판정 시각을 BEFORE UPDATE 트리거가 얼린다');
+}
+
 // ── ③ 판정 시각에 기본값을 두지 않았는가 ──
 //
 // `event_effective_at`에 DEFAULT가 붙으면 "이 일이 실제로 언제 일어났는가"를
@@ -197,6 +245,26 @@ for (const f of FKS) {
       + `— 남의 계좌·남의 챌린지에 줄을 붙일 수 있습니다`);
   } else {
     notes.push(`${f.label} 복합 외래키 ${hits}개`);
+  }
+}
+
+// ★ **돈 사건은 이 챌린지의 전용 계좌에만 붙는다.**
+//
+// `(challenge_id, user_id)`와 `(paper_account_id, user_id)`는 각각 "챌린지가
+// 내 것인가"와 "계좌가 내 것인가"만 본다. 둘 다 만족하면서 계좌가 이 챌린지의
+// 전용 계좌가 **아닐** 수 있다 — 같은 사용자의 다른 모의 계좌를 이 챌린지
+// 원장에 적을 수 있다는 뜻이다. 그러면 원장은 이 챌린지 것인데 돈은 다른
+// 계좌에 있고, SUM(amount) = balance가 조용히 깨진다.
+{
+  const bind = /FOREIGN\s+KEY\s*\(\s*challenge_id\s*,\s*paper_account_id\s*\)\s*REFERENCES\s+public\.paper_challenges\s*\(\s*id\s*,\s*paper_account_id\s*\)/i;
+  if (!bind.test(sql)) {
+    err(`${SQL_FILE}: 돈 사건의 계좌를 챌린지의 전용 계좌에 묶는 복합 외래키가 없습니다 `
+      + `— 같은 사용자의 다른 모의 계좌를 이 챌린지 원장에 적을 수 있습니다`);
+  } else if (!/UNIQUE\s*\(\s*id\s*,\s*paper_account_id\s*\)/i.test(sql)) {
+    err(`${SQL_FILE}: paper_challenges에 UNIQUE (id, paper_account_id)가 없습니다 `
+      + `— 위 복합 외래키가 가리킬 정본이 없습니다`);
+  } else {
+    notes.push('돈 사건이 챌린지의 전용 계좌에만 붙는다');
   }
 }
 
@@ -296,13 +364,37 @@ for (const t of ['paper_challenges', 'paper_challenge_cashflows', 'paper_challen
 // PR2·PR3이다. 여기에 섞여 들어오면 "스키마만 보는 리뷰"가 돈 경로를 통과시킨다.
 {
   const OUT_OF_SCOPE = [
-    { re: /CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i, why: '함수 정의 — 회계 RPC는 PR2입니다' },
-    { re: /CREATE\s+(OR\s+REPLACE\s+)?TRIGGER/i, why: '트리거 — 자동 회계는 PR2입니다' },
     { re: /UPDATE\s+public\.paper_accounts/i, why: '잔고 변경 — Money Authority는 PR2의 회계 경로가 만집니다' },
     { re: /INSERT\s+INTO\s+public\.paper_challenge_cashflows/i, why: '시작금 적용 — PR2입니다' },
   ];
   for (const o of OUT_OF_SCOPE) {
     if (o.re.test(sql)) err(`${SQL_FILE}: 이 마이그레이션의 범위를 넘습니다 — ${o.why}`);
+  }
+
+  // 함수와 트리거는 **이름을 세어서** 허용한다.
+  //
+  // 처음에는 `CREATE FUNCTION`을 통째로 금지했다. 그런데 사유를 얼리려면
+  // 이전 값을 봐야 하고, 그것은 트리거로만 된다. 그렇다고 금지를 풀면
+  // 회계 RPC가 이 파일로 들어올 길이 열린다 — 그래서 **딱 그 하나만**
+  // 허용하고 나머지는 전부 막는다.
+  const named = (kind, re) => [...sql.matchAll(re)].map(m => m[1]);
+  const fns = named('함수', /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([A-Za-z0-9_.]+)/gi);
+  const trgs = named('트리거', /CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([A-Za-z0-9_]+)/gi);
+  for (const f of fns) {
+    if (f.toLowerCase() !== FREEZE_FN) {
+      err(`${SQL_FILE}: 이 마이그레이션의 범위를 넘습니다 — 함수 ${f}(). `
+        + `여기서 허용되는 함수는 사유를 얼리는 ${FREEZE_FN}() 하나뿐이고, `
+        + `회계 RPC는 PR2입니다`);
+    }
+  }
+  for (const t of trgs) {
+    if (t.toLowerCase() !== FREEZE_TRG) {
+      err(`${SQL_FILE}: 이 마이그레이션의 범위를 넘습니다 — 트리거 ${t}. `
+        + `여기서 허용되는 트리거는 ${FREEZE_TRG} 하나뿐이고, 자동 회계는 PR2입니다`);
+    }
+  }
+  if (fns.length > 1 || trgs.length > 1) {
+    err(`${SQL_FILE}: 함수 ${fns.length}개 · 트리거 ${trgs.length}개 — 각각 하나여야 합니다`);
   }
 }
 

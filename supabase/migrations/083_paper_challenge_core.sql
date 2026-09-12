@@ -118,6 +118,20 @@ BEGIN
   END IF;
 END $$;
 
+-- 하위 표가 **"이 챌린지의 계좌"**를 가리킬 정본.
+--
+-- 돈 사건은 챌린지의 전용 계좌에만 붙어야 한다. 소유자만 맞춰 두면 같은
+-- 사용자의 **다른** 계좌를 챌린지 원장에 적을 수 있고, 그러면
+-- `SUM(cashflows.amount) = paper_accounts.balance` 불변식이 조용히 깨진다 —
+-- 원장은 이 챌린지 것인데 잔고는 다른 계좌에 있게 된다.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'paper_challenges_id_account_key') THEN
+    ALTER TABLE public.paper_challenges
+      ADD CONSTRAINT paper_challenges_id_account_key UNIQUE (id, paper_account_id);
+  END IF;
+END $$;
+
 -- **소유권을 DB가 강제한다.** 남의 계좌를 챌린지에 붙일 수 없다.
 DO $$
 BEGIN
@@ -190,6 +204,82 @@ BEGIN
       CHECK (peak_nav >= 0 AND max_drawdown_pct >= 0 AND max_drawdown_pct <= 100);
   END IF;
 END $$;
+
+-- ══════════ 사유는 정해진 뒤 바뀌지 않는다 (DB 강제) ══════════
+--
+-- 왜 CHECK로는 부족한가
+-- ─────────────────────
+-- 행 단위 CHECK는 **이전 값을 볼 수 없다.** 위의
+-- `terminal_status = close_intent`는 "마감할 때 결론이 사유와 같은가"만
+-- 본다. 그래서 아직 `terminal_status IS NULL`인 CLOSING 중에는 이것이
+-- 그냥 통과한다:
+--
+--   status='CLOSING' · close_intent='TARGET_REACHED' · terminal_status IS NULL
+--   UPDATE ... SET close_intent='FAILED'        ← CHECK 넷 모두 통과한다
+--
+-- 그 뒤 같은 값으로 마감하면 `terminal_status='FAILED'`가 되고, 제약은
+-- 아무 말도 하지 않는다. **달성이 조용히 실패로 바뀐다.** 최종 복사만
+-- 강제했지 사유 자체의 불변은 강제하지 않았던 것이다.
+--
+-- PR2의 `WHERE close_intent IS NULL` CAS는 정상 경로를 지키는 장치지,
+-- DB 보호를 대신하지 않는다. 운영 수리·수동 UPDATE·앞으로 생길 다른
+-- 경로는 그 CAS를 지나가지 않는다.
+--
+-- 그래서 이전 값을 볼 수 있는 유일한 자리인 **BEFORE UPDATE 트리거**로
+-- 막는다. 이것이 이 파일에 있는 유일한 함수·트리거이고, 회계는 하지
+-- 않는다 — 값을 쓰지도, 다른 표를 읽지도 않는다.
+--
+-- 무엇을 허용하고 무엇을 막는가
+-- ─────────────────────────────
+--   NULL → 유효한 사유          허용 (처음 정하는 것)
+--   같은 사유를 다시 기록        허용 (재시도는 변경이 아니다)
+--   사유 → 다른 사유            **거부** (TARGET_REACHED → FAILED 포함)
+--   사유 → NULL                 **거부** (지우고 다시 쓰는 우회로를 막는다)
+--
+-- 판정 시각(`close_intent_event_at`)도 같이 얼린다. 사유는 그대로 두고
+-- 시각만 바꾸면 "언제 달성했는가"가 움직이고, 그것이 곧 만료 판정을
+-- 뒤집는다.
+--
+-- SQLSTATE는 23514(check_violation)를 쓴다. 부르는 쪽에서 보면 위의
+-- CHECK들과 같은 종류의 거부이고, 제약 시험이 **기대 사유까지** 맞춰
+-- 확인할 수 있다.
+CREATE OR REPLACE FUNCTION public.paper_challenges_freeze_intent()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $fn$
+BEGIN
+  IF OLD.close_intent IS NOT NULL
+     AND NEW.close_intent IS DISTINCT FROM OLD.close_intent THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = format(
+        '종료 사유는 이미 %s로 정해졌습니다 — %s로 바꿀 수 없습니다',
+        OLD.close_intent, COALESCE(NEW.close_intent, 'NULL')),
+      HINT = '사유는 처음 정해진 순간 고정됩니다. 최종 상태는 그 값을 그대로 옮기세요';
+  END IF;
+
+  IF OLD.close_intent_event_at IS NOT NULL
+     AND NEW.close_intent_event_at IS DISTINCT FROM OLD.close_intent_event_at THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = '사유가 정해진 시각은 바꿀 수 없습니다',
+      HINT = '이 값이 움직이면 만료·목표 판정의 기준이 함께 움직입니다';
+  END IF;
+
+  RETURN NEW;
+END
+$fn$;
+
+COMMENT ON FUNCTION public.paper_challenges_freeze_intent() IS
+  '종료 사유와 그 판정 시각을 처음 정해진 값으로 고정한다. 행 단위 CHECK는 '
+  '이전 값을 볼 수 없어 CLOSING 중 close_intent 덮어쓰기를 막지 못한다. '
+  '회계를 하지 않는다 — 값을 쓰지도 다른 표를 읽지도 않는다.';
+
+DROP TRIGGER IF EXISTS paper_challenges_freeze_intent_trg ON public.paper_challenges;
+CREATE TRIGGER paper_challenges_freeze_intent_trg
+  BEFORE UPDATE ON public.paper_challenges
+  FOR EACH ROW
+  EXECUTE FUNCTION public.paper_challenges_freeze_intent();
 
 -- **사용자당 활성 챌린지는 최대 하나.**
 --
@@ -282,6 +372,23 @@ BEGIN
       ADD CONSTRAINT paper_challenge_cashflows_account_owner_fk
       FOREIGN KEY (paper_account_id, user_id)
       REFERENCES public.paper_accounts (id, user_id);
+  END IF;
+
+  -- ★ **이 챌린지의 전용 계좌여야 한다.**
+  --
+  -- 위의 두 외래키만으로는 부족하다. `(challenge_id, user_id)`는 챌린지가
+  -- 내 것인지 보고 `(paper_account_id, user_id)`는 계좌가 내 것인지 볼
+  -- 뿐이라, **같은 사용자의 다른 모의 계좌**를 이 챌린지 원장에 적는 것이
+  -- 구조적으로 가능하다. 두 조건을 각각 만족해도 서로 묶이지는 않는다.
+  --
+  -- 그러면 원장은 이 챌린지 것인데 그 돈은 다른 계좌에 있게 되고,
+  -- `SUM(cashflows.amount) = paper_accounts.balance` 불변식이 조용히
+  -- 깨진다 — PR2의 회계가 무엇을 하든 이미 틀린 바닥 위에서 한다.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'paper_challenge_cashflows_challenge_account_fk') THEN
+    ALTER TABLE public.paper_challenge_cashflows
+      ADD CONSTRAINT paper_challenge_cashflows_challenge_account_fk
+      FOREIGN KEY (challenge_id, paper_account_id)
+      REFERENCES public.paper_challenges (id, paper_account_id);
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'paper_challenge_cashflows_type_chk') THEN
