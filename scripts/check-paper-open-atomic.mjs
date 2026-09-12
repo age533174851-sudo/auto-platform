@@ -35,6 +35,7 @@
 // 사용: node scripts/check-paper-open-atomic.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { feeDeductionContract } from './lib/paper-money-path.mjs';
 import { functionBodyOrFail } from './lib/function-body.mjs';
 
 const fails = [];
@@ -140,9 +141,16 @@ else {
       fail(`${sqlFile}이 수수료를 갱신한 뒤에 중복을 돌려줍니다`
         + ' — 같은 신호를 재시도하면 수수료가 두 번 빠집니다');
     }
-    // 잔고는 읽고 고쳐 쓰지 않는다.
-    if (!/balance\s*=\s*balance\s*-\s*p_entry_fee/.test(body)) {
-      fail(`${sqlFile}이 잔고를 차감식(balance = balance - fee)으로 갱신하지 않습니다`);
+    // ── 잔고는 읽고 고쳐 쓰지 않고, 실패하면 되돌린다 ──
+    //
+    // **그 일이 어느 함수 안에서 일어나는지는 계약이 아니다.** 085는 챌린지
+    // 원장 때문에 돈이 움직이는 자리를 하나로 모았고, 글자만 찾던 이 검사는
+    // 그 개선을 회귀로 신고했다. 판정은 공용 모듈 하나에 둔다 —
+    // check-paper-capacity.mjs도 같은 것을 본다.
+    {
+      const r = feeDeductionContract({ sql, fnBody: body, feeParam: 'p_entry_fee' });
+      if (!r.ok) fail(`${sqlFile}: ${r.reason}`);
+      else notes.push(`${sqlFile}: ${r.note}`);
     }
     if (!/total_fees\s*=\s*total_fees\s*\+\s*p_entry_fee/.test(body)) {
       fail(`${sqlFile}이 수수료 누계를 증가식으로 갱신하지 않습니다`);
@@ -176,10 +184,8 @@ else {
     if (!/RAISE\s*;/.test(body)) {
       fail(`${sqlFile}이 알 수 없는 유니크 위반을 다시 던지지 않습니다`);
     }
-    // 수수료 갱신이 0행이면 되돌린다.
-    if (!/GET DIAGNOSTICS/.test(body) || !/RAISE EXCEPTION/.test(body)) {
-      fail(`${sqlFile}이 계좌 갱신 실패에서 진입을 되돌리지 않습니다`);
-    }
+    // 계좌 갱신 실패에서 되돌리는지는 위 feeDeductionContract가 본다 —
+    // 직접 빼면 이 함수 안에서, 넘기면 받는 함수 안에서 확인한다.
     // **금액을 SQL이 다시 계산하지 않는다.** 공식이 두 벌이 되면 갈린다.
     for (const bad of ['fee_rate', 'slippage', '* p_quantity', '* p_notional']) {
       if (body.includes(bad)) fail(`${sqlFile}의 함수가 금액을 계산합니다: ${bad}`);
