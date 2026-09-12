@@ -582,6 +582,156 @@ export function migrationTargets(sql: string): MigrationTarget[] {
   return out;
 }
 
+// ── 채택해도 되는 파일인가 ──
+//
+// **무엇이 잘못됐나**
+// ───────────────────
+// 채택(adopt)은 "카탈로그에 대상이 다 있으니 실행하지 않고 적용된 것으로
+// 적는다"이다. 그 판단이 **위험도 분류보다 먼저** 돌았다. 그래서 채택된
+// 파일은 `blocked`에 들어갈 기회 자체가 없었고, UNKNOWN·DESTRUCTIVE가
+// 승인 없이 BASELINE으로 적혔다:
+//
+//   --check   남음 2 / 승인 필요 2 → NEEDS_APPROVAL (081 UNKNOWN · 082 DESTRUCTIVE)
+//   --apply   이미 적용돼 있던 2개를 실행 없이 기록 → UP_TO_DATE
+//
+// 같은 head인데 위험도 판단이 뒤집혔다. 그 뒤로 runner는 영원히 "적용됨"이라고
+// 믿는다 — 실제 스키마가 어떻든.
+//
+// **이름이 있다는 것은 의미가 같다는 뜻이 아니다**
+// ─────────────────────────────────────────────────
+// 카탈로그 조회는 이름만 답한다. 표·인덱스·칸·정책은 그래도 "그 이름의 것이
+// 있다"가 곧 "그 문장이 만들려던 것이 있다"에 가깝다. **함수는 다르다.**
+//
+//   082가 만드는 함수 5개 중 4개는 072/074/075부터 있던 이름이다.
+//   `paper_open_position`에 `p_paper_account_id`가 붙었는지는 이름으로
+//   알 수 없고, 본문이 바뀌었는지는 더더욱 알 수 없다.
+//
+// 그러므로 **함수를 만드는 마이그레이션은 이름만으로 채택하지 않는다.**
+// 채택하지 않으면 그 파일은 실제로 실행되는데, `CREATE OR REPLACE FUNCTION`은
+// 여러 번 실행해도 같은 결과라 그게 안전한 쪽이다. 함수를 지우는 파일은
+// 어차피 DESTRUCTIVE로 먼저 막힌다.
+//
+// 확인하지 못한 것은 통과가 아니다 — 그 원칙을 채택에도 적용한다.
+
+export type AdoptionCode =
+  /** 채택해도 된다 (카탈로그 확인은 부르는 쪽이 따로 한다) */
+  | 'ADOPTABLE'
+  /** 자동 적용 대상이 아니다 — 승인이 필요한 것을 채택으로 우회하지 않는다 */
+  | 'BLOCKED_RISK'
+  /** 함수를 만든다 — 이름만으로는 시그니처도 본문도 확인할 수 없다 */
+  | 'FUNCTION_TARGET'
+  /** 확인할 대상이 없다 — 무엇이 있는지 물어볼 것이 없으면 증거도 없다 */
+  | 'NO_TARGET';
+
+export interface AdoptionVerdict {
+  adoptable: boolean;
+  code: AdoptionCode;
+  reason: string;
+  /** 참고용. 위험도 분류 결과를 그대로 싣는다 */
+  risk: MigrationRisk;
+}
+
+/**
+ * 이 파일을 **실행하지 않고** 적용된 것으로 적어도 되는가.
+ *
+ * **위험도 분류가 여기서 먼저 돈다.** `migrationPlanOf`와 같은
+ * `classifyMigration`을 쓰므로 두 곳의 판단이 갈릴 수 없다 — 이 저장소의
+ * 단골 고장인 "경로가 둘인데 한쪽만 고침"을 구조로 막는다.
+ *
+ * 카탈로그에 실제로 있는지는 **묻지 않는다.** 그건 DB가 필요한 일이라
+ * 부르는 쪽(`apply-migrations.mjs`)이 한다. 여기서는 "물어볼 자격이
+ * 있는가"만 정한다.
+ */
+export function adoptionVerdictOf(f: { name?: string; id?: number | null; sql?: string }): AdoptionVerdict {
+  const sql = typeof f?.sql === 'string' ? f.sql : '';
+
+  // ① 번호가 없으면 자동 적용 대상이 아니다 — 채택도 자동 적용의 한 형태다.
+  if (f?.id == null) {
+    return {
+      adoptable: false, code: 'BLOCKED_RISK', risk: 'UNKNOWN',
+      reason: '번호가 없어 자동 적용 대상이 아닙니다 — 채택으로 우회하지 않습니다',
+    };
+  }
+
+  // ② **위험도 먼저.** DESTRUCTIVE·UNKNOWN은 어떤 경우에도 채택하지 않는다.
+  const c = classifyMigration(sql);
+  if (!c.autoApply) {
+    return {
+      adoptable: false, code: 'BLOCKED_RISK', risk: c.risk,
+      reason: `${c.risk}라서 승인이 필요합니다 — 대상이 이미 있어도 채택하지 않습니다`
+            + (c.reasons[0] ? ` (${c.reasons[0]})` : ''),
+    };
+  }
+
+  const targets = migrationTargets(sql);
+
+  // ③ 물어볼 것이 없으면 증거도 없다.
+  if (targets.length === 0) {
+    return {
+      adoptable: false, code: 'NO_TARGET', risk: c.risk,
+      reason: '확인할 대상을 찾지 못했습니다 — 무엇이 있는지 물어볼 수 없으면 채택하지 않습니다',
+    };
+  }
+
+  // ④ 함수는 이름만으로 같다고 말할 수 없다.
+  if (targets.some(t => t.kind === 'function')) {
+    return {
+      adoptable: false, code: 'FUNCTION_TARGET', risk: c.risk,
+      reason: '함수를 만듭니다 — 같은 이름의 옛 함수가 있어도 시그니처·본문이 같다는 증거가 아닙니다',
+    };
+  }
+
+  return {
+    adoptable: true, code: 'ADOPTABLE', risk: c.risk,
+    reason: `대상 ${targets.length}개를 카탈로그에서 확인할 수 있습니다`,
+  };
+}
+
+/**
+ * 채택을 시도해도 되는 파일들.
+ *
+ * **왜 목록으로 돌려주나 — 가드는 지워질 수 있다**
+ * ────────────────────────────────────────────────
+ * 처음에는 runner가 `files`를 돌면서 자리마다 `if (!adoptable) continue`로
+ * 걸렀다. 그 모양은 **가드 한 줄만 무력화하면 뚫린다** — 돌연변이로
+ * `if (false && !a.adoptable)`을 넣었더니 시험도 검사기도 초록이었다.
+ * 검사기가 조건이 아니라 `!a.adoptable`이라는 **글자**를 보고 있었다.
+ *
+ * 그래서 거를 자리를 없앴다. runner는 이 함수가 돌려준 목록만 돈다.
+ * 막힌 파일은 애초에 그 목록에 없으므로, 무력화하려면 **목록 자체를
+ * 갈아치워야** 하고 그건 숨길 수 없다.
+ *
+ * 이미 기록된 파일은 후보가 아니다 — 채택은 기록이 없는 파일에만 뜻이 있다.
+ */
+export function adoptionCandidates(i: {
+  files: MigrationFile[];
+  /** DB에 기록된 적용 목록. **null이면 못 읽은 것이다 — 아무것도 채택하지 않는다** */
+  applied: string[] | null;
+}): { adopt: MigrationFile[]; refused: Array<{ name: string; code: AdoptionCode; reason: string }> } {
+  const files = Array.isArray(i?.files) ? i.files.filter(f => f && typeof f.name === 'string') : [];
+
+  // **기록을 못 읽었으면 채택하지 않는다.** 무엇이 이미 있는지 모르는 채로
+  // "실행 안 해도 된다"를 적는 것은 근거 없는 기록이다.
+  if (i?.applied == null) {
+    return { adopt: [], refused: files.map(f => ({
+      name: f.name, code: 'BLOCKED_RISK' as AdoptionCode,
+      reason: '적용 기록을 읽지 못했습니다 — 채택하지 않습니다',
+    })) };
+  }
+
+  const known = new Set(i.applied.map(s => String(s)));
+  const adopt: MigrationFile[] = [];
+  const refused: Array<{ name: string; code: AdoptionCode; reason: string }> = [];
+
+  for (const f of files) {
+    if (known.has(f.name)) continue;          // 이미 기록돼 있다 — 후보가 아니다
+    const v = adoptionVerdictOf(f);
+    if (v.adoptable) adopt.push(f);
+    else refused.push({ name: f.name, code: v.code, reason: v.reason });
+  }
+  return { adopt, refused };
+}
+
 // ── 적용 기록 한 줄 ──
 
 export interface AppliedRow {
