@@ -16,6 +16,7 @@ import {
   sumTodayIncome, judgeDailyLoss, readDailyLossConfig, utcDayStart,
   type DailyLossVerdict, type DailyLossConfig,
 } from './dailyLoss';
+import { defaultPaperAccountId } from '../engine/paperScope';
 
 export interface DailyLossFacts {
   verdict: DailyLossVerdict;
@@ -113,9 +114,17 @@ export async function collectPaperDailyLoss(args: {
   try {
     // 오늘 닫힌 모의 포지션의 실현손익. 진입 수수료는 realized_pnl에
     // 이미 반영돼 있다 (paperExecution.computeClose).
-    const { data } = await args.sb.from('paper_positions')
+    //
+    // **기본 계좌만 센다.** 전용 계좌(챌린지 등) 손익이 섞이면 이 판정이
+    // 사용자가 운용하지 않은 장부의 결과로 막거나 통과시킨다.
+    //
+    // 계좌를 못 정하면 **질의하지 않는다.** 0건으로 읽으면 "오늘 손실이
+    // 없다"가 되어 막아야 할 것을 통과시킨다 — 아래 catch와 같은 취급으로
+    // 모름(null)에 남긴다.
+    const acct = await defaultPaperAccountId(args.sb, args.userId);
+    const { data } = acct == null ? { data: null } : await args.sb.from('paper_positions')
       .select('realized_pnl, closed_at')
-      .eq('user_id', args.userId).eq('status', 'closed')
+      .eq('user_id', args.userId).eq('paper_account_id', acct).eq('status', 'closed')
       .gte('closed_at', new Date(dayStart).toISOString());
     if (Array.isArray(data)) {
       todayNetUsd = data.reduce((a: number, r: any) => a + (Number(r.realized_pnl) || 0), 0);

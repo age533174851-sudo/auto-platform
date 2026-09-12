@@ -32,6 +32,8 @@
 // 가용 증거금을 보고 둘 다 통과할 수 있다. 최종 권한은 진입 트랜잭션
 // 안에서 계좌 줄을 잠근 채 하는 검사다(마이그레이션 075).
 
+import { resolvePaperScope, paperScopeFailed } from './paperScope';
+
 export type PaperCapacity =
   | {
       known: true;
@@ -126,15 +128,28 @@ export function capacityVerdict(i: {
  */
 export async function readPaperCapacity(
   sb: any, userId: string | null | undefined,
+  /**
+   * 어느 계좌의 용량인가. **안 주면 기본 계좌**(지금까지의 동작).
+   *
+   * 이 인자가 필요한 이유는 SQL 쪽에 이미 있기 때문이다 — `082`의
+   * `paper_open_position`은 `user_id AND paper_account_id`로 예산을 센다.
+   * 여기(미리보기)가 사용자 전체를 세면 **두 곳이 다른 예산을 본다.**
+   */
+  paperAccountId?: string | null,
 ): Promise<PaperCapacity> {
   if (!sb || !userId) {
     return { known: false, reason: '모의 계좌를 조회할 수 없습니다 (사용자 미지정)' };
   }
+
+  // **계좌를 먼저 정한다.** 잔고와 증거금이 같은 계좌에서 나와야 한다.
+  const scope = await resolvePaperScope(sb, userId, paperAccountId);
+  if (paperScopeFailed(scope)) return { known: false, reason: scope.reason };
+
   let balance: unknown;
   try {
     const { data, error } = await sb.from('paper_accounts')
-      // 기본 계좌만. 용량 판정은 그 계좌의 잔고로 한다.
-      .select('balance').eq('user_id', userId).eq('is_default', true).maybeSingle();
+      // 정해진 그 계좌. 용량 판정은 그 계좌의 잔고로 한다.
+      .select('balance').eq('id', scope.accountId).eq('user_id', userId).maybeSingle();
     if (error) return { known: false, reason: '모의 계좌 조회에 실패했습니다' };
     if (!data) {
       return { known: false, reason: '모의 계좌가 없습니다 — 먼저 모의투자를 시작하세요' };
@@ -146,8 +161,10 @@ export async function readPaperCapacity(
 
   let usedMargin = 0;
   try {
+    // **소유자와 계좌를 둘 다 본다** — SQL 쪽(`082`)과 같은 범위다.
     const { data, error } = await sb.from('paper_positions')
-      .select('margin').eq('user_id', userId).eq('status', 'open');
+      .select('margin').eq('user_id', userId)
+      .eq('paper_account_id', scope.accountId).eq('status', 'open');
     // 조회가 실패하면 **0으로 두지 않는다.** 0은 '아무것도 안 물고 있다'로
     // 읽히는데, 실제로는 모르는 것이다. 그 차이만큼 크게 주문된다.
     if (error || !Array.isArray(data)) {

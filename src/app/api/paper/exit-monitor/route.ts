@@ -53,8 +53,21 @@ export async function POST(req: NextRequest) {
   // 방치된다.
   let rows: any[] | null = null;
   try {
+    // ── **여기는 계좌로 좁히지 않는다. 일부러 그렇다** ──
+    //
+    // `081`로 사용자당 모의 계좌가 여럿이 될 수 있게 됐고, 포지션을 읽는
+    // 다른 자리는 전부 `paper_account_id`로 좁혔다. 이 감시만 예외다.
+    //
+    // 이유: 여기가 손절·익절·청산가를 **실제로 집행하는 안전망**이다.
+    // 기본 계좌로 좁히면 전용 계좌(챌린지 등) 포지션의 손절을 **아무도 안
+    // 본다.** 좁히는 것이 안전해 보이지만 여기서는 정반대다.
+    //
+    // 섞여도 안전한 이유: 이 경로는 계좌를 합산하지 않는다. 포지션을 한 줄씩
+    // 보고 `closePaperPosition(id)`로 닫으며, `paper_settle_close`가 **그
+    // 포지션이 든 계좌**를 따라간다(082). 남의 예산을 깎거나 남의 자산에
+    // 더해지는 일이 없다.
     let q = (sb as any).from('paper_positions')
-      .select('id, user_id, symbol, side, fill_price, quantity, margin, stop_loss, take_profit, liquidation_price, opened_at')
+      .select('id, user_id, paper_account_id, symbol, side, fill_price, quantity, margin, stop_loss, take_profit, liquidation_price, opened_at')
       .eq('status', 'open');
     if (uid) q = q.eq('user_id', uid);
     const { data, error } = await q;

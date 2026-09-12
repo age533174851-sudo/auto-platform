@@ -268,11 +268,20 @@ export async function POST(req: NextRequest) {
     const userId = raw?.userId || 'paper-default';
     try {
       const { openPaperPosition, closeOpposingPositions } = await import('@/lib/engine/paperStore');
+      const { resolvePaperScope } = await import('@/lib/engine/paperScope');
 
       // 반대 방향 포지션이 있으면 먼저 청산 (REVERSE)
+      //
+      // **어느 계좌인지 먼저 정한다.** 이 경로는 기본 계좌로 들어오는
+      // 신호이므로 기본 계좌만 본다 — 안 좁히면 전용 계좌(챌린지 등)의
+      // 포지션까지 닫는다. 계좌를 못 정하면 **아무것도 닫지 않는다.**
       let reversed = 0;
       try {
-        reversed = await closeOpposingPositions(sb, userId, v.signal!.symbol, plan.side, v.signal!.entryPrice);
+        const scope = await resolvePaperScope(sb, userId);
+        if (scope.ok) {
+          reversed = await closeOpposingPositions(
+            sb, userId, scope.accountId, v.signal!.symbol, plan.side, v.signal!.entryPrice);
+        }
       } catch {}
 
       const r = await openPaperPosition(sb, {

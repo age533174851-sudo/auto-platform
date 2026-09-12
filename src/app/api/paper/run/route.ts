@@ -69,9 +69,24 @@ async function cycle(req: NextRequest, uid: string, sb: any, body: any, dryRun: 
   const steps: any[] = [];
 
   // ── 1. 열린 포지션 점검 ────────────────────────────────────────
+  //
+  // **기본 계좌의 포지션만.** 이 러너는 기본 계좌 장부로 돌고, 새 진입도
+  // 기본 계좌로 들어간다. 전용 계좌(챌린지 등) 포지션을 여기서 함께 보면
+  // 그 계좌의 포지션을 이 러너가 청산하게 된다.
+  //
+  // 전용 계좌 포지션의 손절·청산가 감시는 **exit-monitor가 전 계좌를 보며**
+  // 맡는다 — 안전망을 좁히지 않았다.
+  const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
+  const scope = await resolvePaperScope(sb, uid);
+  if (paperScopeFailed(scope)) {
+    return {
+      ok: false, error: 'positions_unreadable',
+      message: `모의 계좌를 정하지 못했습니다 — ${scope.reason}`,
+    } as any;
+  }
   const { data: rows, error: readErr } = await sb.from('paper_positions')
     .select('id, symbol, side, fill_price, entry_price, quantity, stop_loss, take_profit, liquidation_price, opened_at, margin')
-    .eq('user_id', uid).eq('status', 'open');
+    .eq('user_id', uid).eq('paper_account_id', scope.accountId).eq('status', 'open');
 
   if (readErr) {
     // 무엇이 열려 있는지 모르는 채로 새로 넣지 않는다. 중복 진입이 되고,

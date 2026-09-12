@@ -3,6 +3,7 @@
 // 계좌 자산 / 가용 증거금 / 오늘 손익 / 사용자 한도 / 현재 열린 위험.
 // 조회 실패 시에도 안전한 기본값으로 폴백하되, 그 사실을 notes에 남긴다.
 import type { RiskConfig } from './riskManager';
+import { defaultPaperAccountId } from './paperScope';
 
 export interface RiskContext {
   config: RiskConfig;
@@ -330,8 +331,13 @@ export async function buildRiskContext(
   let consecutiveLosses = 0;
   if (sb && opts.userId) {
     try {
-      const { data } = await sb.from('paper_positions')
-        .select('realized_pnl').eq('user_id', opts.userId).eq('status', 'closed')
+      // **기본 계좌만** — 전용 계좌 손익이 연속손실 판정에 섞이면 안 된다.
+      // 계좌를 못 정하면 질의하지 않는다(아래 `data`가 undefined로 남아
+      // 0으로 세지 않는다).
+      const acct = await defaultPaperAccountId(sb, opts.userId);
+      const { data } = acct == null ? { data: null } : await sb.from('paper_positions')
+        .select('realized_pnl').eq('user_id', opts.userId)
+        .eq('paper_account_id', acct).eq('status', 'closed')
         .order('closed_at', { ascending: false }).limit(20);
       if (Array.isArray(data)) {
         for (const r of data) {

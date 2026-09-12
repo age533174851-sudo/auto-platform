@@ -222,13 +222,32 @@ export async function closePaperPosition(
   return { ok: true, realizedPnl: closed.realizedPnl, pnlPct: closed.pnlPct };
 }
 
-// 반대 신호 시 기존 포지션 청산 (REVERSE)
+/**
+ * 반대 신호 시 기존 포지션 청산 (REVERSE).
+ *
+ * **어느 계좌인지 반드시 받는다.**
+ * ────────────────────────────────
+ * 예전에는 `user_id`와 `symbol`만 보고 닫았다. 계좌가 하나인 동안은 그것이
+ * 곧 "내 포지션"이었지만, 전용 계좌가 생기면 **기본 계좌로 온 신호가 전용
+ * 계좌의 포지션을 닫는다.** 사용자는 그 주문을 낸 적이 없다.
+ *
+ * 이 저장소의 절대 규칙 그대로다 — **symbol만 보고 주문 소유권을 판단하지
+ * 않는다.** 그래서 `paperAccountId`를 선택 인자로 두지 않고 **필수**로 받는다.
+ * 기본값을 주면 부르는 쪽이 안 넘겨도 컴파일이 통과하고, 그 순간 예전 동작으로
+ * 조용히 돌아간다.
+ */
 export async function closeOpposingPositions(
-  sb: any, userId: string, symbol: string, newSide: 'LONG' | 'SHORT', currentPrice: number, feeRatePct = 0.05
+  sb: any, userId: string, paperAccountId: string,
+  symbol: string, newSide: 'LONG' | 'SHORT', currentPrice: number, feeRatePct = 0.05
 ): Promise<number> {
+  // 계좌를 모르면 아무것도 닫지 않는다. **확인하지 못한 것은 통과가 아니다** —
+  // 여기서 기본 계좌로 넘어가면 위에 적은 고장이 그대로 살아난다.
+  if (!paperAccountId) return 0;
   const opposing = newSide === 'LONG' ? 'SHORT' : 'LONG';
   const { data } = await sb.from('paper_positions')
-    .select('id').eq('user_id', userId).eq('symbol', symbol).eq('side', opposing).eq('status', 'open');
+    .select('id').eq('user_id', userId)
+    .eq('paper_account_id', paperAccountId)
+    .eq('symbol', symbol).eq('side', opposing).eq('status', 'open');
   if (!Array.isArray(data) || !data.length) return 0;
   let n = 0;
   for (const p of data) {

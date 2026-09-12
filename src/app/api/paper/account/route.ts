@@ -145,9 +145,25 @@ export async function POST(req: NextRequest) {
   if (action === 'reset') {
     // 열린 포지션이 있으면 초기화하지 않는다. 잔고만 되돌리면 포지션의
     // 증거금이 공중에 뜨고, 그 뒤의 손익은 아무 의미가 없다.
+    //
+    // **초기화는 기본 계좌만 건드린다**(아래 저장이 `is_default`로 좁힌다).
+    // 그러니 세는 것도 기본 계좌의 포지션이어야 한다 — 전용 계좌(챌린지 등)
+    // 포지션 때문에 기본 계좌 초기화가 막히면 안 되고, 반대로 전용 계좌를
+    // 초기화해 주지도 않는다.
+    //
+    // 계좌를 못 정하면 **초기화하지 않는다.** 세지 못한 것을 0건으로 읽으면
+    // 열린 포지션을 둔 채 잔고만 되돌리게 된다.
+    const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
+    const scope = await resolvePaperScope(sb, uid);
+    if (paperScopeFailed(scope)) {
+      return NextResponse.json({
+        ok: false, error: 'scope_unresolved',
+        message: `모의 계좌를 정하지 못해 초기화하지 않았습니다 — ${scope.reason}`,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
     const { count } = await sb.from('paper_positions')
       .select('id', { count: 'exact', head: true })
-      .eq('user_id', uid).eq('status', 'open');
+      .eq('user_id', uid).eq('paper_account_id', scope.accountId).eq('status', 'open');
     if ((count ?? 0) > 0) {
       return NextResponse.json({
         ok: false, error: 'has_open_positions',
