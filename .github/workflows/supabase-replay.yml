@@ -39,6 +39,11 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/config.toml'
       - 'scripts/sql/**'
+      # 챌린지 회계 게이트 자신이 바뀔 때도 돌아야 한다. 여기 없으면 게이트를
+      # 고쳐 놓고 한 번도 돌려 보지 않은 채 머지된다.
+      - 'scripts/paper-challenge-concurrency.sh'
+      - 'scripts/paper-challenge-mutations.mjs'
+      - 'scripts/lib/paper-money-path.mjs'
       - '.github/workflows/supabase-replay.yml'
   push:
     branches: [main]
@@ -46,6 +51,11 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/config.toml'
       - 'scripts/sql/**'
+      # 챌린지 회계 게이트 자신이 바뀔 때도 돌아야 한다. 여기 없으면 게이트를
+      # 고쳐 놓고 한 번도 돌려 보지 않은 채 머지된다.
+      - 'scripts/paper-challenge-concurrency.sh'
+      - 'scripts/paper-challenge-mutations.mjs'
+      - 'scripts/lib/paper-money-path.mjs'
       - '.github/workflows/supabase-replay.yml'
   workflow_dispatch:
 
