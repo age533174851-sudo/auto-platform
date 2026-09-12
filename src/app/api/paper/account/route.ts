@@ -315,27 +315,43 @@ export async function POST(req: NextRequest) {
   //
   // 워커는 60초마다 모의 청산을 돈다. 충전과 청산이 겹치면 둘 다 옛
   // balance를 읽고 각자 쓴다 — 한쪽이 조용히 사라진다. 그래서 증가
-  // 연산으로 민다(마이그레이션 072). 초기자본도 같이 올린다: 안 올리면
+  // 연산으로 민다(마이그레이션 072/082). 초기자본도 같이 올린다: 안 올리면
   // 넣은 돈이 수익으로 잡혀 수익률이 부풀려진다.
-  let balance: number; let initial: number;
-  try {
-    const { data, error } = await (sb as any).rpc('paper_deposit', { p_user_id: uid, p_amount: amount });
-    if (error) throw new Error(String((error as any).message ?? error));
-    const row: any = Array.isArray(data) ? data[0] : data;
-    if (!row || row.applied !== true) {
-      return NextResponse.json({
-        ok: false, error: 'not_started',
-        message: '모의투자를 아직 시작하지 않았습니다 — 시작 금액을 고른 뒤에 충전할 수 있습니다',
-      }, { status: 409 });
-    }
-    balance = Number(row.new_balance);
-    initial = Number(row.new_initial);
-  } catch (e: any) {
+  //
+  // **판단은 여기 두지 않는다.**
+  //
+  // 예전에는 이 자리에서 `row.applied !== true`를 봤다. `082`가 반환을
+  // `TABLE(applied, …)`에서 `NUMERIC` 하나로 바꾼 뒤에도 그대로였고, 스칼라에는
+  // `applied`가 없으니 **성공한 충전이 매번 409로 나갔다.** 그때 돈은 이미
+  // 들어가 있었으므로, 사용자가 다시 누르면 두 번 들어갔다.
+  //
+  // 반환 모양을 읽는 규칙은 `applyPaperDeposit` 한 곳에 있고 시험이 붙어
+  // 있다. 라우트는 결과를 HTTP로 옮기기만 한다.
+  const { applyPaperDeposit } = await import('@/lib/engine/paperDeposit');
+  const dep = await applyPaperDeposit(sb, uid, amount);
+
+  if (dep.code === 'NO_ACCOUNT') {
+    return NextResponse.json({
+      ok: false, error: 'not_started',
+      message: '모의투자를 아직 시작하지 않았습니다 — 시작 금액을 고른 뒤에 충전할 수 있습니다',
+    }, { status: 409 });
+  }
+  if (dep.code === 'REJECTED') {
+    return NextResponse.json({
+      ok: false, error: 'invalid_amount',
+      message: `충전 금액이 유효하지 않습니다 (${dep.reason ?? ''})`,
+    }, { status: 400 });
+  }
+  if (dep.code !== 'APPLIED') {
     return NextResponse.json({
       ok: false, error: 'update_failed',
-      message: `충전을 기록하지 못했습니다 (${String(e?.message ?? e).slice(0, 160)})`,
+      message: `충전을 기록하지 못했습니다 (${String(dep.reason ?? '').slice(0, 160)})`,
     }, { status: 500 });
   }
+
+  const balance = dep.balance as number;
+  // 다시 읽지 못했으면 **모름**이다. 0으로 적지 않는다.
+  const initial = typeof dep.initialBalance === 'number' ? dep.initialBalance : null;
 
   return NextResponse.json({
     ok: true, action: 'deposit', amount, balance, initialBalance: initial,

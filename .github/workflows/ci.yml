@@ -281,6 +281,19 @@ jobs:
       - name: 챌린지 스키마·도메인 (SQL CHECK와 TS 목록이 같은 집합인가)
         run: node scripts/check-paper-challenge-core.mjs
 
+      # ── 충전이 성공했는데 실패라고 답하지 않는가 ──
+      #
+      # `082`가 `paper_deposit`의 반환을 TABLE에서 NUMERIC으로 바꿨는데 부르는
+      # 쪽은 `.applied`를 그대로 봤다. 스칼라에는 그 칸이 없어 **성공한 충전이
+      # 매번 409로 나갔고**, 그때 돈은 이미 들어가 있었다 — 다시 누르면 두 번
+      # 들어간다.
+      #
+      # 시험은 `src`만 복사해서 돌아 마이그레이션을 읽을 수 없다. 그래서 여기서
+      # SQL의 실제 반환 타입을 읽고, 그 타입이 만들어 낼 값을 제품이 쓰는 소비
+      # 함수에 **직접 먹여서** 성공이라고 답하는지 본다.
+      - name: 모의 충전 계약 (SQL 반환 모양을 코드가 성공으로 읽는가)
+        run: node scripts/check-paper-deposit-contract.mjs
+
       # ── 모의 크기가 모의 계좌에서 나오는가 ──
       #
       # buildRiskContext에 PAPER 분기가 없어, 모의 자동매매의 포지션 크기가
