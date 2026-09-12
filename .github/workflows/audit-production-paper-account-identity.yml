@@ -1,0 +1,577 @@
+# production이 081/082의 **의미**를 실제로 갖고 있는지 **읽기만** 해서 확인한다.
+#
+# 왜 필요한가
+# ───────────
+# `migrate` run 34661664896에서 이런 일이 있었다:
+#
+#   --check   적용됨 78 / 남음 2 / 승인 필요 2 → NEEDS_APPROVAL
+#               ⛔ 081 UNKNOWN · ⛔ 082 DESTRUCTIVE
+#   --apply   이미 적용돼 있던 2개를 실행 없이 기록했습니다 (카탈로그에서 확인함)
+#             적용됨 80 / 남음 0 / 승인 필요 0 → UP_TO_DATE
+#
+# 같은 head에서 위험도 판단이 뒤집혔다. `apply-migrations.mjs`의 채택 블록이
+# **위험도 분류보다 먼저** 돌고, 카탈로그에 이름이 다 있으면 UNKNOWN이든
+# DESTRUCTIVE든 BASELINE으로 적기 때문이다.
+#
+# 그리고 함수 채택은 **이름만** 본다. 082가 만드는 함수 5개 중 4개
+# (`paper_open_position`·`paper_settle_close`·`paper_apply_entry_fee`·
+# `paper_deposit`)는 072/074/075부터 있던 이름이다. 시그니처에
+# `p_paper_account_id`가 붙었는지는 보지 않는다.
+#
+# 그래서 지금 운영 장부(`schema_migrations`)에는 081·082가 BASELINE으로
+# 박혀 있고, **스키마가 실제로 그 모양인지는 아무도 확인하지 않았다.**
+# runner는 앞으로 영원히 "적용됨"이라고 믿는다. 그 상태에서 Paper Challenge를
+# 얹으면 RPC 호출이 런타임에 깨진다.
+#
+# 이 감사가 답할 질문은 하나다: **운영 스키마가 081/082의 의미를 갖고 있는가.**
+#
+# 원인 추적은 여기서 하지 않는다
+# ──────────────────────────────
+# 누가 081/082를 운영에 넣었는지(혹은 아무도 안 넣었는지)는 이 감사의 질문이
+# 아니다. 증거 없이 범인을 적는 것보다 **지금 상태를 읽는 것**이 먼저다.
+#
+# 이름만 보는 감사는 감사가 아니다
+# ────────────────────────────────
+# 이 파일이 고발하는 고장이 바로 "이름만 봤다"이므로, 여기서 같은 실수를
+# 하면 안 된다. 그래서:
+#
+#   · 기본키는 이름이 아니라 **conkey가 id 하나인가**로 본다
+#   · 부분 유니크 인덱스는 이름이 아니라 **indisunique + indpred 존재**로 본다
+#   · 복합 외래키는 이름이 아니라 **(conkey, confrelid, confkey)**로 본다
+#   · 함수는 이름이 아니라 **pg_get_function_arguments 문자열**로 본다
+#   · 옛 시그니처가 살아 있는지도 본다 — 오버로드가 둘이면 호출이 모호해진다
+#   · `paper_settle_close`는 인자가 안 늘었다. 그래서 **본문**이 포지션의
+#     계좌를 따라가는지(`prosrc`)를 본다
+#
+# 업무 데이터는 읽지 않는다
+# ─────────────────────────
+# `pg_catalog`·`information_schema`와 `schema_migrations` 두 줄, 그리고
+# backfill 검증을 위한 **개수 세 개**뿐이다. 포지션·계좌의 내용은 한 줄도
+# 출력하지 않는다.
+#
+# 왜 이렇게 좁게 트리거하나
+# ─────────────────────────
+#   · `pull_request` 없음      — PR 검토 중에는 운영 DB 접속이 0이어야 한다
+#   · `workflow_dispatch` 없음 — 아무 때나 운영 DB를 두드리는 문을 만들지 않는다
+#   · `push` + 이 파일 경로    — 이 파일이 main에 들어오는 그때 한 번 돈다
+#
+# 쓰기는 Postgres가 거부한다
+# ──────────────────────────
+# `BEGIN TRANSACTION READ ONLY`로 열고, 실제로 `READ_ONLY=on`이었는지 값으로
+# 확인한다. 확인이 안 되면 실패로 끝난다.
+#
+# 확인하지 못한 것은 통과가 아니다
+# ────────────────────────────────
+# 판정 항목에 UNKNOWN이 하나라도 있으면 MATCH를 적지 않고 **UNKNOWN으로
+# 끝낸다.** "못 읽었다"를 "없다"로도 "있다"로도 적지 않는다.
+name: audit-production-paper-account-identity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-paper-account-identity.yml'
+
+concurrency:
+  group: audit-production-paper-account-identity
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: PAPER 계좌 정체 스키마 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      # 접속 정보가 없으면 여기서 멈춘다. 없이 내려가면 "아무것도 안 나왔다"가
+      # "없다"처럼 보인다. **확인하지 못한 것은 통과가 아니다.**
+      - name: DB 접속 정보 확인
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 상태를 확인할 수 없습니다"
+            echo "값은 GitHub Secrets에만 있습니다. 이 로그에는 출력하지 않습니다."
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      # ── 1단계: 카탈로그만 본다 ──
+      #
+      # 칸이 없을 수 있으므로 업무 표를 참조하는 질의를 여기 섞지 않는다.
+      # `paper_positions.paper_account_id`가 없으면 그 칸을 읽는 질의는
+      # **파싱 단계에서** 실패하고, 감사 전체가 "MISSING 보고" 대신 "크래시"가
+      # 된다. 그래서 개수 세기는 2단계로 뺐다.
+      - name: 스키마 모양 조회 (BEGIN TRANSACTION READ ONLY)
+        run: |
+          set -o pipefail
+
+          cat > "${RUNNER_TEMP}/audit-paper-shape.sql" <<'SQL'
+          \set ON_ERROR_STOP on
+
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '15s';
+          SET LOCAL lock_timeout = '3s';
+
+          \echo '=== 0. READ ONLY 증명 ==='
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+
+          \echo ''
+          \echo '=== 1. 대상 표가 public에 있는가 ==='
+          -- 이름으로 먼저 잡고 나중에 public으로 거르면, public에 없고 다른
+          -- 스키마에 같은 이름이 있을 때 그 줄이 통째로 사라진다.
+          WITH t(tbl) AS (VALUES ('paper_accounts'), ('paper_positions'))
+          SELECT t.tbl,
+                 (c.oid IS NOT NULL AND c.relkind = 'r') AS present_in_public,
+                 coalesce(c.relkind::text, '(없음)')      AS relkind
+            FROM t
+            LEFT JOIN LATERAL (
+                 SELECT c.oid, c.relkind FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'public' AND c.relname = t.tbl
+               ) c ON true
+           ORDER BY t.tbl;
+
+          \echo ''
+          \echo '=== 2. paper_accounts 칸 (081이 더한 것) ==='
+          SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS type,
+                 a.attnotnull AS not_null,
+                 coalesce(pg_get_expr(d.adbin, d.adrelid), '(없음)') AS default_expr
+            FROM pg_attribute a
+            LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+           WHERE a.attrelid = to_regclass('public.paper_accounts')
+             AND a.attnum > 0 AND NOT a.attisdropped
+             AND a.attname IN ('id', 'user_id', 'is_default')
+           ORDER BY a.attnum;
+
+          \echo ''
+          \echo '=== 3. paper_accounts 제약 전부 (정의 그대로) ==='
+          SELECT con.conname, con.contype,
+                 pg_get_constraintdef(con.oid) AS definition
+            FROM pg_constraint con
+           WHERE con.conrelid = to_regclass('public.paper_accounts')
+           ORDER BY con.contype, con.conname;
+
+          \echo ''
+          \echo '=== 4. paper_accounts 인덱스 전부 (정의 그대로) ==='
+          SELECT ic.relname AS index_name, i.indisunique, (i.indpred IS NOT NULL) AS partial,
+                 pg_get_indexdef(i.indexrelid) AS definition
+            FROM pg_index i
+            JOIN pg_class ic ON ic.oid = i.indexrelid
+           WHERE i.indrelid = to_regclass('public.paper_accounts')
+           ORDER BY ic.relname;
+
+          \echo ''
+          \echo '=== 5. paper_positions 칸·제약·인덱스 (081이 더한 것) ==='
+          SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS not_null
+            FROM pg_attribute a
+           WHERE a.attrelid = to_regclass('public.paper_positions')
+             AND a.attnum > 0 AND NOT a.attisdropped
+             AND a.attname IN ('user_id', 'paper_account_id')
+           ORDER BY a.attnum;
+
+          SELECT con.conname, con.contype, pg_get_constraintdef(con.oid) AS definition
+            FROM pg_constraint con
+           WHERE con.conrelid = to_regclass('public.paper_positions')
+             AND con.contype = 'f'
+           ORDER BY con.conname;
+
+          SELECT ic.relname AS index_name, pg_get_indexdef(i.indexrelid) AS definition
+            FROM pg_index i
+            JOIN pg_class ic ON ic.oid = i.indexrelid
+           WHERE i.indrelid = to_regclass('public.paper_positions')
+             AND ic.relname = 'paper_positions_account_idx';
+
+          \echo ''
+          \echo '=== 6. 082가 건드리는 함수 — 이름이 아니라 시그니처 ==='
+          -- 오버로드가 여럿이면 전부 나온다. **둘 이상이면 호출이 모호해진다.**
+          SELECT p.proname,
+                 pg_get_function_arguments(p.oid) AS arguments,
+                 pg_get_function_result(p.oid)    AS returns,
+                 p.pronargdefaults                AS n_defaults
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public'
+             AND p.proname IN ('paper_default_account_id', 'paper_open_position',
+                               'paper_settle_close', 'paper_apply_entry_fee', 'paper_deposit')
+           ORDER BY p.proname, pg_get_function_arguments(p.oid);
+
+          \echo ''
+          \echo '=== 7. 장부(schema_migrations)의 081·082 — 읽기만 ==='
+          SELECT filename, status, applied_by, runtime_sha, verified, verify_detail
+            FROM public.schema_migrations
+           WHERE filename IN ('081_paper_account_identity.sql', '082_paper_rpc_account_id.sql')
+           ORDER BY filename;
+
+          \echo ''
+          \echo '=== 8. 최종 판정 (모양) ==='
+          WITH
+          acct AS (SELECT to_regclass('public.paper_accounts') AS oid),
+          pos  AS (SELECT to_regclass('public.paper_positions') AS oid),
+          att  AS (
+            SELECT
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = (SELECT oid FROM acct) AND a.attname = 'id'
+                  AND NOT a.attisdropped)                                     AS acct_id,
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = (SELECT oid FROM acct) AND a.attname = 'user_id'
+                  AND NOT a.attisdropped)                                     AS acct_user,
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = (SELECT oid FROM pos) AND a.attname = 'paper_account_id'
+                  AND NOT a.attisdropped)                                     AS pos_acct,
+              (SELECT a.attnum FROM pg_attribute a
+                WHERE a.attrelid = (SELECT oid FROM pos) AND a.attname = 'user_id'
+                  AND NOT a.attisdropped)                                     AS pos_user
+          ),
+          fns AS (
+            SELECT p.proname AS nm,
+                   pg_get_function_arguments(p.oid) AS args,
+                   pg_get_function_result(p.oid)    AS res,
+                   p.prosrc                         AS src
+              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'public'
+          ),
+          v AS (SELECT
+            -- 표 자체 (없으면 아래 판정이 전부 거짓이 되므로 따로 본다)
+            ((SELECT oid FROM acct) IS NOT NULL)                              AS acct_table,
+            ((SELECT oid FROM pos)  IS NOT NULL)                              AS pos_table,
+
+            -- ① id 칸이 UUID로 있는가
+            EXISTS (SELECT 1 FROM pg_attribute a
+                     WHERE a.attrelid = (SELECT oid FROM acct) AND a.attname = 'id'
+                       AND NOT a.attisdropped AND a.atttypid = 'uuid'::regtype) AS acct_id_column,
+
+            -- ② 기본키가 **id 하나**인가 (이름이 아니라 conkey로 본다)
+            EXISTS (SELECT 1 FROM pg_constraint con
+                     WHERE con.conrelid = (SELECT oid FROM acct) AND con.contype = 'p'
+                       AND con.conkey = ARRAY[(SELECT acct_id FROM att)]::smallint[]) AS acct_pk_is_id,
+
+            -- ③ user_id가 더 이상 단독 기본키가 아닌가
+            NOT EXISTS (SELECT 1 FROM pg_constraint con
+                         WHERE con.conrelid = (SELECT oid FROM acct) AND con.contype = 'p'
+                           AND con.conkey = ARRAY[(SELECT acct_user FROM att)]::smallint[]) AS acct_user_not_sole_pk,
+
+            -- ④ is_default 칸이 boolean으로 있는가
+            EXISTS (SELECT 1 FROM pg_attribute a
+                     WHERE a.attrelid = (SELECT oid FROM acct) AND a.attname = 'is_default'
+                       AND NOT a.attisdropped AND a.atttypid = 'bool'::regtype) AS acct_is_default_column,
+
+            -- ⑤ 기본 계좌 부분 유니크 인덱스 — 이름이 아니라 정의로 본다
+            EXISTS (SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
+                     WHERE i.indrelid = (SELECT oid FROM acct)
+                       AND ic.relname = 'paper_accounts_one_default_per_user'
+                       AND i.indisunique
+                       AND i.indpred IS NOT NULL
+                       AND i.indnatts = 1
+                       AND i.indkey[0] = (SELECT acct_user FROM att)) AS acct_one_default_index,
+
+            -- ⑥ (id, user_id) UNIQUE — 복합 외래키가 가리킬 정본
+            EXISTS (SELECT 1 FROM pg_constraint con
+                     WHERE con.conrelid = (SELECT oid FROM acct) AND con.contype = 'u'
+                       AND con.conkey = ARRAY[(SELECT acct_id FROM att),
+                                              (SELECT acct_user FROM att)]::smallint[]) AS acct_id_owner_unique,
+
+            -- ⑦ paper_positions.paper_account_id
+            EXISTS (SELECT 1 FROM pg_attribute a
+                     WHERE a.attrelid = (SELECT oid FROM pos) AND a.attname = 'paper_account_id'
+                       AND NOT a.attisdropped AND a.atttypid = 'uuid'::regtype) AS pos_account_column,
+
+            -- ⑧ 복합 외래키 — (paper_account_id, user_id) → paper_accounts (id, user_id)
+            EXISTS (SELECT 1 FROM pg_constraint con
+                     WHERE con.conrelid = (SELECT oid FROM pos) AND con.contype = 'f'
+                       AND con.confrelid = (SELECT oid FROM acct)
+                       AND con.conkey  = ARRAY[(SELECT pos_acct FROM att),
+                                               (SELECT pos_user FROM att)]::smallint[]
+                       AND con.confkey = ARRAY[(SELECT acct_id FROM att),
+                                               (SELECT acct_user FROM att)]::smallint[]) AS pos_account_owner_fk,
+
+            -- ⑨ paper_default_account_id(uuid) → uuid
+            EXISTS (SELECT 1 FROM fns
+                     WHERE nm = 'paper_default_account_id'
+                       AND args = 'p_user_id uuid' AND res = 'uuid') AS fn_default_account_id,
+
+            -- ⑩ paper_open_position에 계좌 인자가 붙었는가
+            EXISTS (SELECT 1 FROM fns
+                     WHERE nm = 'paper_open_position'
+                       AND args LIKE '%p_paper_account_id uuid DEFAULT NULL%') AS fn_open_position_account_arg,
+
+            -- ⑪ 옛 시그니처가 남아 있지 않은가 (오버로드 둘이면 호출이 모호하다)
+            --
+            -- **"하나뿐인가"만 물으면 안 된다.** 082가 하나도 안 돌아서 옛 함수만
+            -- 남아 있어도 개수는 1이다. 음성 대조군에서 이 항목만 TRUE가 나와
+            -- 완전 MISSING인 DB가 MIXED로 잘못 분류됐다. 그래서 **"하나뿐이고
+            -- 그 하나가 새 시그니처인가"**를 묻는다.
+            ((SELECT count(*) FROM fns WHERE nm = 'paper_open_position') = 1
+             AND EXISTS (SELECT 1 FROM fns WHERE nm = 'paper_open_position'
+                          AND args LIKE '%p_paper_account_id uuid DEFAULT NULL%'))  AS fn_open_position_single,
+
+            -- ⑫ paper_settle_close는 인자가 안 는다 — **본문**이 포지션의 계좌를 따라가는가
+            EXISTS (SELECT 1 FROM fns
+                     WHERE nm = 'paper_settle_close'
+                       AND src LIKE '%paper_account_id%'
+                       AND src LIKE '%paper_default_account_id%')               AS fn_settle_follows_position,
+
+            -- ⑬⑭ 수수료·입금에도 계좌 인자
+            EXISTS (SELECT 1 FROM fns
+                     WHERE nm = 'paper_apply_entry_fee'
+                       AND args LIKE '%p_paper_account_id uuid DEFAULT NULL%')  AS fn_entry_fee_account_arg,
+            EXISTS (SELECT 1 FROM fns
+                     WHERE nm = 'paper_deposit'
+                       AND args LIKE '%p_paper_account_id uuid DEFAULT NULL%')  AS fn_deposit_account_arg,
+            -- 같은 이유로 개수만 묻지 않는다 (위 ⑪ 참고)
+            ((SELECT count(*) FROM fns WHERE nm = 'paper_apply_entry_fee') = 1
+             AND EXISTS (SELECT 1 FROM fns WHERE nm = 'paper_apply_entry_fee'
+                          AND args LIKE '%p_paper_account_id uuid DEFAULT NULL%')) AS fn_entry_fee_single,
+            ((SELECT count(*) FROM fns WHERE nm = 'paper_deposit') = 1
+             AND EXISTS (SELECT 1 FROM fns WHERE nm = 'paper_deposit'
+                          AND args LIKE '%p_paper_account_id uuid DEFAULT NULL%')) AS fn_deposit_single,
+
+            -- 장부는 판정이 아니라 사실 기록이다 (있음/없음만)
+            EXISTS (SELECT 1 FROM public.schema_migrations
+                     WHERE filename = '081_paper_account_identity.sql')          AS ledger_081,
+            EXISTS (SELECT 1 FROM public.schema_migrations
+                     WHERE filename = '082_paper_rpc_account_id.sql')            AS ledger_082
+          )
+          SELECT unnest(ARRAY[
+            'ACCT_TABLE_PRESENT='             || upper(coalesce(acct_table::text, 'UNKNOWN')),
+            'POS_TABLE_PRESENT='              || upper(coalesce(pos_table::text, 'UNKNOWN')),
+            'ACCT_ID_COLUMN='                 || upper(coalesce(acct_id_column::text, 'UNKNOWN')),
+            'ACCT_PK_IS_ID='                  || upper(coalesce(acct_pk_is_id::text, 'UNKNOWN')),
+            'ACCT_USER_ID_NOT_SOLE_PK='       || upper(coalesce(acct_user_not_sole_pk::text, 'UNKNOWN')),
+            'ACCT_IS_DEFAULT_COLUMN='         || upper(coalesce(acct_is_default_column::text, 'UNKNOWN')),
+            'ACCT_ONE_DEFAULT_INDEX='         || upper(coalesce(acct_one_default_index::text, 'UNKNOWN')),
+            'ACCT_ID_OWNER_UNIQUE='           || upper(coalesce(acct_id_owner_unique::text, 'UNKNOWN')),
+            'POS_ACCOUNT_COLUMN='             || upper(coalesce(pos_account_column::text, 'UNKNOWN')),
+            'POS_ACCOUNT_OWNER_FK='           || upper(coalesce(pos_account_owner_fk::text, 'UNKNOWN')),
+            'FN_DEFAULT_ACCOUNT_ID='          || upper(coalesce(fn_default_account_id::text, 'UNKNOWN')),
+            'FN_OPEN_POSITION_ACCOUNT_ARG='   || upper(coalesce(fn_open_position_account_arg::text, 'UNKNOWN')),
+            'FN_OPEN_POSITION_SINGLE='        || upper(coalesce(fn_open_position_single::text, 'UNKNOWN')),
+            'FN_SETTLE_FOLLOWS_POSITION='     || upper(coalesce(fn_settle_follows_position::text, 'UNKNOWN')),
+            'FN_ENTRY_FEE_ACCOUNT_ARG='       || upper(coalesce(fn_entry_fee_account_arg::text, 'UNKNOWN')),
+            'FN_DEPOSIT_ACCOUNT_ARG='         || upper(coalesce(fn_deposit_account_arg::text, 'UNKNOWN')),
+            'FN_ENTRY_FEE_SINGLE='            || upper(coalesce(fn_entry_fee_single::text, 'UNKNOWN')),
+            'FN_DEPOSIT_SINGLE='              || upper(coalesce(fn_deposit_single::text, 'UNKNOWN')),
+            'LEDGER_081_ROW='                 || upper(coalesce(ledger_081::text, 'UNKNOWN')),
+            'LEDGER_082_ROW='                 || upper(coalesce(ledger_082::text, 'UNKNOWN'))
+          ]) AS verdict FROM v;
+
+          COMMIT;
+          SQL
+
+          # ── 가려야 할 조각을 접속 문자열에서 뽑는다. 어디에도 출력하지 않는다 ──
+          #
+          # 정규식만으로는 샌다. psql은 접속에 실패하면 제 문구로 호스트를 그대로
+          # 찍는다(could not translate host name "..."). 그래서 실제 값을 문자
+          # 그대로 지운다.
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f "${RUNNER_TEMP}/audit-paper-shape.sql" 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::조회에 실패했습니다 — '확인하지 못함'을 '없음'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+
+          # ── READ ONLY가 실제로 켜져 있었는지 값으로 확인한다 ──
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 — BEGIN TRANSACTION READ ONLY가 빠졌거나 무효화됐습니다"
+            exit 1
+          fi
+          echo "읽기 전용 트랜잭션 확인 (READ_ONLY=on)"
+
+          # 2단계·판정에서 쓴다. **저장소 안에 쓰지 않는다** — 트리를 더럽히면
+          # 이 실행이 남긴 파일이 다음 검사에 섞인다.
+          printf '%s\n' "${out}" | grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' > "${RUNNER_TEMP}/shape.txt" || true
+          if [ ! -s "${RUNNER_TEMP}/shape.txt" ]; then
+            echo "::error::판정 줄을 하나도 읽지 못했습니다 — 조회는 성공했는데 결과가 비었습니다"
+            exit 1
+          fi
+
+      # ── 2단계: backfill이 실제로 채워졌는가 ──
+      #
+      # **칸이 있을 때만 돈다.** 없으면 이 질의는 파싱 단계에서 실패하고,
+      # 감사가 "MISSING 보고" 대신 "크래시"가 된다. 칸이 없다는 사실은
+      # 1단계가 이미 `POS_ACCOUNT_COLUMN=FALSE`로 적었다.
+      #
+      # 개수만 읽는다. 포지션 내용은 한 줄도 출력하지 않는다.
+      - name: backfill 개수 조회 (칸이 있을 때만 · READ ONLY)
+        run: |
+          set -o pipefail
+
+          if ! grep -q '^POS_ACCOUNT_COLUMN=TRUE$' "${RUNNER_TEMP}/shape.txt"; then
+            echo "paper_positions.paper_account_id가 없습니다 — backfill 검증을 건너뜁니다"
+            {
+              echo 'POS_BACKFILL_NO_NULL=UNKNOWN'
+              echo 'POS_BACKFILL_NO_OWNER_MISMATCH=UNKNOWN'
+              echo 'POS_BACKFILL_NO_ORPHAN=UNKNOWN'
+            } >> "${RUNNER_TEMP}/shape.txt"
+            exit 0
+          fi
+
+          cat > "${RUNNER_TEMP}/audit-paper-backfill.sql" <<'SQL'
+          \set ON_ERROR_STOP on
+
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '30s';
+          SET LOCAL lock_timeout = '3s';
+
+          \echo '=== 0. READ ONLY 증명 ==='
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+
+          \echo ''
+          \echo '=== 9. backfill 개수 (내용은 읽지 않는다) ==='
+          WITH c AS (
+            SELECT
+              (SELECT count(*) FROM public.paper_positions
+                WHERE paper_account_id IS NULL)                        AS null_rows,
+              (SELECT count(*) FROM public.paper_positions p
+                 JOIN public.paper_accounts a ON a.id = p.paper_account_id
+                WHERE a.user_id IS DISTINCT FROM p.user_id)            AS mismatch_rows,
+              (SELECT count(*) FROM public.paper_positions p
+                WHERE p.paper_account_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM public.paper_accounts a
+                                   WHERE a.id = p.paper_account_id))   AS orphan_rows
+          )
+          SELECT unnest(ARRAY[
+            'POS_BACKFILL_NULL_ROWS='          || null_rows::text,
+            'POS_BACKFILL_MISMATCH_ROWS='      || mismatch_rows::text,
+            'POS_BACKFILL_ORPHAN_ROWS='        || orphan_rows::text,
+            'POS_BACKFILL_NO_NULL='            || upper((null_rows = 0)::text),
+            'POS_BACKFILL_NO_OWNER_MISMATCH='  || upper((mismatch_rows = 0)::text),
+            'POS_BACKFILL_NO_ORPHAN='          || upper((orphan_rows = 0)::text)
+          ]) AS verdict FROM c;
+
+          COMMIT;
+          SQL
+
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f "${RUNNER_TEMP}/audit-paper-backfill.sql" 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::backfill 조회에 실패했습니다 — '확인하지 못함'을 '0건'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다"
+            exit 1
+          fi
+
+          printf '%s\n' "${out}" | grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' >> "${RUNNER_TEMP}/shape.txt" || true
+
+      # ── 3단계: MATCH / MIXED / MISSING ──
+      #
+      # 판정을 **사람이 로그를 눈으로 세어 내리지 않게** 한다. 이 저장소에서
+      # 반복된 고장이 "증거는 있는데 아무도 안 본다"이다.
+      - name: 최종 판정 (MATCH / MIXED / MISSING)
+        run: |
+          set -o pipefail
+
+          # 표가 없으면 판정 자체가 성립하지 않는다.
+          for key in ACCT_TABLE_PRESENT POS_TABLE_PRESENT; do
+            if ! grep -q "^${key}=TRUE$" "${RUNNER_TEMP}/shape.txt"; then
+              echo "::error::${key}가 TRUE가 아닙니다 — 모의 계좌 표 자체가 public에 없습니다. 판정을 내리지 않습니다"
+              exit 1
+            fi
+          done
+
+          # 081/082의 **의미** 항목. 장부 행(LEDGER_*)과 개수(*_ROWS)는 판정에
+          # 넣지 않는다 — 그건 사실 기록이지 스키마가 맞다는 증거가 아니다.
+          KEYS="ACCT_ID_COLUMN ACCT_PK_IS_ID ACCT_USER_ID_NOT_SOLE_PK ACCT_IS_DEFAULT_COLUMN
+                ACCT_ONE_DEFAULT_INDEX ACCT_ID_OWNER_UNIQUE POS_ACCOUNT_COLUMN POS_ACCOUNT_OWNER_FK
+                FN_DEFAULT_ACCOUNT_ID FN_OPEN_POSITION_ACCOUNT_ARG FN_OPEN_POSITION_SINGLE
+                FN_SETTLE_FOLLOWS_POSITION FN_ENTRY_FEE_ACCOUNT_ARG FN_DEPOSIT_ACCOUNT_ARG
+                FN_ENTRY_FEE_SINGLE FN_DEPOSIT_SINGLE
+                POS_BACKFILL_NO_NULL POS_BACKFILL_NO_OWNER_MISMATCH POS_BACKFILL_NO_ORPHAN"
+
+          t=0; f=0; u=0; missing_key=0
+          true_list=''; false_list=''; unknown_list=''
+          for k in ${KEYS}; do
+            v=$(grep -m1 "^${k}=" "${RUNNER_TEMP}/shape.txt" | cut -d= -f2 || true)
+            case "${v}" in
+              TRUE)    t=$((t+1)); true_list="${true_list} ${k}" ;;
+              FALSE)   f=$((f+1)); false_list="${false_list} ${k}" ;;
+              UNKNOWN) u=$((u+1)); unknown_list="${unknown_list} ${k}" ;;
+              *)       missing_key=$((missing_key+1)); unknown_list="${unknown_list} ${k}(줄없음)"; u=$((u+1)) ;;
+            esac
+          done
+
+          echo "=== 항목 집계 ==="
+          echo "  TRUE ${t} / FALSE ${f} / UNKNOWN ${u}  (판정 항목 $((t+f+u))개)"
+          [ -n "${false_list}" ]   && echo "  FALSE:  ${false_list}"
+          [ -n "${unknown_list}" ] && echo "  UNKNOWN:${unknown_list}"
+
+          # **확인하지 못한 것은 통과가 아니다.** UNKNOWN이 하나라도 있으면
+          # MATCH도 MISSING도 적지 않는다.
+          if [ "${u}" -gt 0 ]; then
+            verdict='UNKNOWN'
+          elif [ "${f}" -eq 0 ]; then
+            verdict='MATCH'
+          elif [ "${t}" -eq 0 ]; then
+            verdict='MISSING'
+          else
+            verdict='MIXED'
+          fi
+
+          echo ""
+          echo "=== B1 판정 ==="
+          echo "PAPER_ACCOUNT_IDENTITY_VERDICT=${verdict}"
+
+          {
+            echo "## PAPER 계좌 정체 — 운영 스키마 감사"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **판정** | \`${verdict}\` |"
+            echo "| 항목 | TRUE ${t} · FALSE ${f} · UNKNOWN ${u} |"
+            echo ""
+            echo "| 판정 | 뜻 | 다음 |"
+            echo "|---|---|---|"
+            echo "| \`MATCH\` | 081/082의 의미가 운영에 실제로 있다 | 운영 스키마 보존 · adoption 수정만 완결 |"
+            echo "| \`MIXED\` | 일부만 있다 | **임의 복구 금지** — 실제 상태 기준 remediation 계획 먼저 |"
+            echo "| \`MISSING\` | 장부엔 적용됐는데 스키마가 없다 | **임의 복구 금지** — runner만 고쳐선 안 됨 |"
+            echo "| \`UNKNOWN\` | 확인하지 못했다 | FALSE로도 TRUE로도 취급하지 않는다 |"
+            echo ""
+            echo "이 워크플로는 읽기만 합니다. 스키마·장부를 바꾸지 않았습니다."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${verdict}" != 'MATCH' ]; then
+            echo "::error::판정 ${verdict} — 운영 스키마가 081/082의 의미를 온전히 갖고 있지 않습니다. Paper Challenge 착수 전 결정이 필요합니다"
+            exit 1
+          fi
+          echo "판정 MATCH — 081/082의 의미가 운영에 실제로 존재합니다"
