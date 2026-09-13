@@ -82,26 +82,9 @@ const ALLOW = new Map([
     + 'score가 null이면 막으므로 지금 배선하면 모든 주문이 멎는다. '
     + '진입 신호에 점수를 매기는 스코어러가 먼저 필요하다 '
     + '(tradesToday·recentEntryMs는 risk/tradingHistory가 이미 만든다)'],
-  // **이 면제는 챌린지 도메인 모듈 하나뿐이다.** 083이 만든 표를 쓰는 다른
-  // 파일이 나중에 생겨도 여기에 덧붙이지 않는다 — 그건 배선해야 할 것이다.
-  ['src/lib/engine/paperChallenge.ts',
-    'Paper Challenge PR1 schema/domain-only prerequisite. Product consumers are '
-    + 'intentionally forbidden in PR1. Remove this allowance when PR2 introduces '
-    + 'the accounting/create RPC consumer path. '
-    + '— 즉 회계 RPC·시작금 적용·finalizer·만료 스위퍼·API·화면이 전부 PR2 '
-    + '이후라서, 그 전에 억지로 배선하면 돈 경로가 검토 없이 들어온다. '
-    + '다만 **완전히 끊겨 있지는 않다**: scripts/check-paper-challenge-core.mjs가 '
-    + '이 파일을 프로젝트 tsc로 컴파일해서 목록을 읽고, 083의 CHECK 제약과 '
-    + '같은 집합인지 확인한다. 한쪽만 고치면 CI가 멈춘다. '
-    + '지울 시점을 바로잡는다: PR2(085)가 들어왔지만 이 항목은 남는다. '
-    + 'PR2의 회계 경로는 plpgsql이고, plpgsql은 freezeCloseIntent·'
-    + 'cashflowSignOk·cashflowIdempotencyKey를 **부를 수 없다** — 원래 적어 둔 '
-    + '"PR2가 부르기 시작할 때"라는 조건은 영원히 오지 않는다. 사용자가 PR2에서 '
-    + 'API·화면을 금지했으므로 TS 소비자는 PR4에 생긴다. '
-    + '그래서 부르는 관계 대신 **대조되는 관계**를 먼저 묶었다: '
-    + 'check-paper-challenge-core.mjs가 이 세 함수를 컴파일해서 085가 실제로 '
-    + '쓰는 낱말·부호·멱등 키·CAS 조건과 맞는지 확인한다. 한쪽만 고치면 CI가 '
-    + '멈춘다. 지울 시점: PR4의 챌린지 API가 이 모듈을 직접 부를 때'],
+  // 챌린지 도메인 모듈의 면제는 **지웠다.** PR3의 스윕(paperChallengeSweep.ts)이
+  // transitionAllowed·terminalStatusFor를 실제로 부르면서 배선됐다 —
+  // 면제 목록이 낡으면 다음에 진짜로 끊긴 것을 덮는다.
   ['src/lib/markets/proxyAsset.ts',
     '막는 것: 해외주식 주문 경로(stock/order)가 이 판정을 받을 자리가 없다. '
     + '금·원유 ETF처럼 24시간 거래되지만 기초자산 시장은 닫혀 있는 종목의 '

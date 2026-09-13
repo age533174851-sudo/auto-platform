@@ -24,7 +24,7 @@
 //
 // 무엇을 쓰는가
 // ─────────────
-// 픽스처를 새로 만들지 않는다. 이 저장소의 **실제 마이그레이션 83개**를 그대로
+// 픽스처를 새로 만들지 않는다. 이 저장소의 **실제 마이그레이션 전부**를 그대로
 // 쓴다 — 빈 DB에서 막히는 것이 마침 다섯 개고, UNKNOWN 셋과 DESTRUCTIVE 둘이
 // 순서까지 섞여 있어서 필요한 경우가 전부 나온다:
 //
@@ -252,7 +252,7 @@ const files = readMigrationFiles();
 const rowCount = () => psql(`SELECT count(*) FROM schema_migrations`);
 const statusOf = n => psql(`SELECT status FROM schema_migrations WHERE filename = '${n}'`);
 
-console.log('\n── 1단계: 빈 전용 DB · 실제 마이그레이션 83개 ──');
+console.log(`\n── 1단계: 빈 전용 DB · 실제 마이그레이션 ${files.length}개 ──`);
 {
   const r = runner(['--apply']);
   want('승인 없이 적용하면 NEEDS_APPROVAL', 'NEEDS_APPROVAL', r.verdict);
@@ -382,10 +382,36 @@ console.log('\n── 4단계: 085만 남은 상태 (운영의 지금 모양) �
     psql(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
           WHERE n.nspname='public' AND p.proname='paper_challenge_judge'`));
 }
+// **승인은 그 하나만 통과시킨다 — 그 뒤는 평소대로다.**
+//
+// 085를 승인해 적용하고 나면 뒤에 남은 ADDITIVE(지금은 086)는 승인 없이
+// 평소 경로로 들어간다. 예전에는 085가 마지막이라 바로 UP_TO_DATE가 나왔고,
+// 이 증명은 그것을 가정하고 있었다 — 086이 생기자 APPLIED가 나와서 빨개졌다.
+// **계약이 아니라 픽스처가 낡은 것이다.** 남은 것이 있으면 적용하고, 그다음
+// 실행에서 UP_TO_DATE가 된다.
 {
   const r = runner(['--apply']);
-  want('다 끝난 뒤 승인 없이 돌리면 UP_TO_DATE', 'UP_TO_DATE', r.verdict);
-  want('  종료코드 0', '0', String(r.code));
+  if (r.verdict === 'APPLIED') {
+    ok('승인 뒤 남은 ADDITIVE는 승인 없이 적용된다', 'APPLIED');
+    want('  종료코드 0', '0', String(r.code));
+  } else {
+    want('승인 뒤 남은 것이 없으면 바로 UP_TO_DATE', 'UP_TO_DATE', r.verdict);
+  }
+  const again = runner(['--apply']);
+  want('★ 다 끝난 뒤 승인 없이 돌리면 UP_TO_DATE', 'UP_TO_DATE', again.verdict);
+  want('  종료코드 0', '0', String(again.code));
+  // **승인은 뒤엣것에 번지지 않는다.**
+  //
+  // 085를 승인해 통과시킨 뒤 따라 들어간 ADDITIVE는 평소 경로로 들어간 것이지
+  // 승인된 것이 아니다. 그 구분이 흐려지면 "무엇을 사람이 허락했는가"가
+  // 기록에서 사라진다. (이 증명은 3단계에서 082도 승인하므로 승인 흔적 자체는
+  // 둘이다 — 그래서 개수가 아니라 **어느 파일에 붙었는지**를 본다.)
+  want('  085에는 승인 흔적이 있다', '1',
+    psql(`SELECT count(*) FROM schema_migrations
+           WHERE filename LIKE '085%' AND applied_by LIKE 'approved:%'`));
+  want('★ 승인 뒤 따라 들어간 것에는 승인 흔적이 없다', '0',
+    psql(`SELECT count(*) FROM schema_migrations
+           WHERE filename > '085_zzz' AND applied_by LIKE 'approved:%'`));
 }
 
 // ══════════════ 5단계: 본 DB는 건드려지지 않았다 ══════════════
