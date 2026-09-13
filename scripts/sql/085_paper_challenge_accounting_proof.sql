@@ -199,6 +199,7 @@ SELECT 'pos1', position_id FROM t, public.paper_open_position(
   100, 100, 1, 100, 1, 100, NULL, NULL, 50, 2, 'ISOLATED',
   t.t_mid, (SELECT v FROM h WHERE k='acc'));
 
+
 SELECT pg_temp.want('진입: 포지션이 생겼다',
   (SELECT (v IS NOT NULL)::TEXT FROM h WHERE k='pos1'), 'true');
 
@@ -213,6 +214,19 @@ SELECT pg_temp.want('진입: 잔고 1000 − 2',
   '998');
 
 SELECT pg_temp.invariant('진입 뒤 불변식', (SELECT v FROM h WHERE k='ch'));
+
+-- ⑩에서 쓸 포지션도 **지금** 연다.
+--
+-- `086`부터 챌린지 계좌는 **RUNNING에서만** 주문을 받는다. 달성해서 CLOSING이
+-- 된 뒤에 여는 옛 픽스처는 이제 CHALLENGE_NOT_RUNNING으로 거부된다 — 계약이
+-- 옳고 픽스처가 낡은 것이다. 실제 운영에서도 정리 중에 새 포지션이 생기면
+-- 마감이 끝나지 않으므로, 달성 전에 열어 둔 포지션을 나중에 강제청산하는
+-- 지금 모양이 실제 경로와 같다.
+INSERT INTO h
+SELECT 'pos2', position_id FROM t, public.paper_open_position(
+  t.u1, 'ch-sig-2', NULL, NULL, 'ETHUSDT', 'USDM', 'LONG',
+  100, 100, 1, 100, 1, 100, NULL, NULL, 50, 1, 'ISOLATED',
+  t.t_mid, (SELECT v FROM h WHERE k='acc'));
 
 -- ══════════════════ ⑥ 청산 — 한 체결에 두 줄 ══════════════════
 --
@@ -241,10 +255,11 @@ SELECT pg_temp.want('청산: 그 체결의 원장 줄은 정확히 2개',
       AND f.source_event_type = 'POSITION_CLOSE'),
   '2');
 
--- 998 + 250 − 3 = 1245  → 목표 1200을 넘었다
+-- 997 + 250 − 3 = 1244  → 목표 1200을 넘었다
+-- (998에서 1이 더 빠진 것은 pos2 진입 수수료다 — 위로 옮겼다)
 SELECT pg_temp.want('청산: 잔고 1245',
   (SELECT a.balance::TEXT FROM public.paper_accounts a WHERE a.id = (SELECT v FROM h WHERE k='acc')),
-  '1245');
+  '1244');
 
 SELECT pg_temp.invariant('청산 뒤 불변식', (SELECT v FROM h WHERE k='ch'));
 
@@ -283,7 +298,7 @@ SELECT pg_temp.want('재시도: 그 체결의 원장 줄은 여전히 2개',
 
 SELECT pg_temp.want('재시도: 잔고도 여전히 1245',
   (SELECT a.balance::TEXT FROM public.paper_accounts a WHERE a.id = (SELECT v FROM h WHERE k='acc')),
-  '1245');
+  '1244');
 
 SELECT pg_temp.invariant('재시도 뒤 불변식', (SELECT v FROM h WHERE k='ch'));
 
@@ -300,7 +315,7 @@ SELECT pg_temp.want('원장 멱등: 같은 사건은 FALSE를 돌려준다',
 
 SELECT pg_temp.want('원장 멱등: 잔고를 다시 밀지 않았다',
   (SELECT a.balance::TEXT FROM public.paper_accounts a WHERE a.id = (SELECT v FROM h WHERE k='acc')),
-  '1245');
+  '1244');
 
 SELECT pg_temp.invariant('원장 멱등 뒤 불변식', (SELECT v FROM h WHERE k='ch'));
 
@@ -309,13 +324,9 @@ SELECT pg_temp.invariant('원장 멱등 뒤 불변식', (SELECT v FROM h WHERE k
 -- 달성한 챌린지가 그 뒤 큰 손실로 실패선 아래로 내려가도 **FAILED로 바뀌지
 -- 않는다.** 판정 함수가 `close_intent IS NOT NULL`에서 멈추고, 그래도 새어
 -- 나가면 `083`의 freeze 트리거가 거부한다.
-INSERT INTO h
-SELECT 'pos2', position_id FROM t, public.paper_open_position(
-  t.u1, 'ch-sig-2', NULL, NULL, 'ETHUSDT', 'USDM', 'LONG',
-  100, 100, 1, 100, 1, 100, NULL, NULL, 50, 1, 'ISOLATED',
-  t.t_mid, (SELECT v FROM h WHERE k='acc'));
+-- pos2는 위에서 **RUNNING일 때** 미리 열어 두었다 (086의 진입 상태 계약).
 
--- 실현손익 −500 → 1245 − 1 − 500 − 1 = 743  → 실패선 900 아래
+-- 실현손익 −500 → 1244 − 500 − 1 = 743  → 실패선 900 아래
 SELECT pg_temp.want('달성 뒤 강제청산: settled=true',
   (SELECT settled::TEXT FROM t, public.paper_settle_close(
      (SELECT v FROM h WHERE k='pos2'), 10, 'SL', 1, -500, -501, -50.0, t.t_mid)),

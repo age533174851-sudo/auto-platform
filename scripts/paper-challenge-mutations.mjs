@@ -34,11 +34,14 @@
 //
 // 빈 로컬 DB에서만 돈다. 마이그레이션이 이미 적용된 상태를 전제한다.
 import { execFileSync } from 'node:child_process';
+import { reapplyAfter } from './lib/reapply-migrations.mjs';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const MIG = 'supabase/migrations/085_paper_challenge_accounting.sql';
+const MIG_DIR = 'supabase/migrations';
+const MIG_NAME = '085_paper_challenge_accounting.sql';
+const MIG = `${MIG_DIR}/${MIG_NAME}`;
 const GATES = [
   'scripts/sql/paper_rpc_runtime_smoke.sql',
   'scripts/sql/085_paper_challenge_accounting_proof.sql',
@@ -101,6 +104,18 @@ function install(sql) {
   const p = join(work, 'install.sql');
   writeFileSync(p, sql);
   return psqlFile(p, { strict: true }).ok;
+}
+
+/**
+ * 정본으로 되돌린다 — **뒤 번호까지 함께.**
+ *
+ * 085를 다시 세우면 086이 대체해 둔 `paper_open_position`이 085의 것으로
+ * 돌아간다. 그 상태로 뒤에 도는 086 검사는 다른 함수를 보게 된다. 그래서
+ * 되돌릴 때마다 그 뒤 마이그레이션을 순서대로 다시 세운다.
+ */
+function restoreCanonical() {
+  if (!install(canonical)) return false;
+  return reapplyAfter(MIG_DIR, MIG_NAME, install);
 }
 
 /**
@@ -222,7 +237,7 @@ const MUTATIONS = [
 let anchorFails = 0, survivors = 0;
 
 console.log('── 정본 기준선 ──');
-if (!install(canonical)) { console.error('정본을 세우지 못했습니다'); process.exit(1); }
+if (!restoreCanonical()) { console.error('정본을 세우지 못했습니다'); process.exit(1); }
 const baseline = gatesPass();
 console.log(baseline ? '  ✓ 정본 GREEN' : '  ✗ 정본이 빨갛다 — 아래 결과는 의미가 없다');
 if (!baseline) process.exit(1);
@@ -244,13 +259,13 @@ for (const m of MUTATIONS) {
   if (!install(sql)) {
     // 함수가 아예 안 세워지는 것도 RED다 — 깨뜨린 것이 드러났다.
     console.log(`  ✓ ${m.name}\n      RED (뮤테이션이 세워지지도 않았다)`);
-    install(canonical);
+    restoreCanonical();
     continue;
   }
   const stillGreen = gatesPass();
   if (stillGreen) { console.log(`  ✗ ${m.name}\n      초록이다 — 이 규칙을 지키는 검사가 없다`); survivors++; }
   else console.log(`  ✓ ${m.name}\n      RED`);
-  install(canonical);
+  restoreCanonical();
 }
 
 console.log('\n── 주석만 바꾼 대조군 ──');
@@ -263,10 +278,10 @@ else {
     ? '  ✓ 주석만 바꾼 판은 GREEN — 검사가 글자에 반응하지 않는다'
     : '  ✗ 주석만 바꿨는데 빨갛다 — 검사가 조건이 아니라 글자를 보고 있다');
   if (!ctrlGreen) survivors++;
-  install(canonical);
+  restoreCanonical();
 }
 
-install(canonical);
+restoreCanonical();
 console.log('');
 if (anchorFails || survivors) {
   console.log(`뮤테이션 검사 실패 — 살아남은 뮤테이션 ${survivors}건 · 낡은 앵커 ${anchorFails}건`);

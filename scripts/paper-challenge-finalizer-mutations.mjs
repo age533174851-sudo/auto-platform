@@ -17,9 +17,12 @@
 // 쓰는 법
 //   PAPER_DB_URL=postgresql://... node scripts/paper-challenge-finalizer-mutations.mjs
 import { execFileSync, spawnSync } from 'node:child_process';
+import { reapplyAfter } from './lib/reapply-migrations.mjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const MIG   = 'supabase/migrations/086_paper_challenge_finalizer.sql';
+const MIG_DIR  = 'supabase/migrations';
+const MIG_NAME = '086_paper_challenge_finalizer.sql';
+const MIG   = `${MIG_DIR}/${MIG_NAME}`;
 const PROOF = 'scripts/sql/086_paper_challenge_finalizer_proof.sql';
 const CHECK = 'scripts/check-paper-challenge-finalizer.mjs';
 
@@ -41,12 +44,27 @@ if (!(HOST.startsWith('/') || ['localhost', '127.0.0.1', '::1', 'db', 'postgres'
 const canonical = readFileSync(MIG, 'utf8');
 const restore = () => writeFileSync(MIG, canonical);
 
-function applyMigration() {
+function applyFile(path) {
   try {
-    execFileSync('psql', [DB, '-v', 'ON_ERROR_STOP=1', '-q', '--single-transaction', '-f', MIG],
+    execFileSync('psql', [DB, '-v', 'ON_ERROR_STOP=1', '-q', '--single-transaction', '-f', path],
       { stdio: 'pipe' });
     return true;
   } catch { return false; }
+}
+
+/**
+ * 이 파일을 세우고 **뒤 번호까지 다시 세운다.**
+ *
+ * 지금은 086이 마지막이라 뒤엣것이 없지만, 087이 생기는 순간 이 한 줄이
+ * 없으면 086 정본이 087의 대체를 덮는다 — 085에서 실제로 그렇게 깨졌다.
+ */
+function applyMigration() {
+  if (!applyFile(MIG)) return false;
+  return reapplyAfter(MIG_DIR, MIG_NAME, (sql) => {
+    const tmp = `${process.env.TMPDIR || '/tmp'}/pcfm-reapply.sql`;
+    writeFileSync(tmp, sql);
+    return applyFile(tmp);
+  });
 }
 function proofGreen() {
   // **NOTICE는 stderr로 나온다.** stdout만 보면 정본도 빨갛게 읽힌다 —

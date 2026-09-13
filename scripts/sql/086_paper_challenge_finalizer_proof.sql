@@ -68,7 +68,8 @@ INSERT INTO auth.users (id, email) VALUES
   ('a0000000-0000-0000-0000-000000000001', 'ready@proof'),
   ('a0000000-0000-0000-0000-000000000002', 'expire@proof'),
   ('a0000000-0000-0000-0000-000000000003', 'live@proof'),
-  ('a0000000-0000-0000-0000-000000000004', 'plain@proof')
+  ('a0000000-0000-0000-0000-000000000004', 'plain@proof'),
+  ('a0000000-0000-0000-0000-000000000005', 'idem@proof')
 ON CONFLICT DO NOTHING;
 
 -- ══════════════════ ① 중재 부등식 ══════════════════
@@ -361,6 +362,102 @@ BEGIN
       WHERE t.challenge_id = v_ch AND t.to_status = 'RUNNING'), 'true');
   PERFORM pg_temp.want('  다시 훑어도 더 밀 것이 없다',
     (SELECT COUNT(*)::TEXT FROM public.paper_challenge_sweep_due() s WHERE s.challenge = v_ch), '0');
+END $$;
+
+-- ══════════════════ ⑥ 같은 사건, 다른 시각 ══════════════════
+--
+-- **같은 사건에 나중 시각을 적을 수 없다.**
+--
+-- 신선도에 걸려 거부된 정산은 한 줄도 쓰지 않으므로, 다음 회차의 청산은 새
+-- 서버 동작이고 자기 시각을 갖는다. 그런데 **이미 적힌 사건**에 대해 같은
+-- 식별자로 다른 시각이 들어오면 어떻게 되는가 — 그것이 이 절이다.
+--
+-- 세 층이 함께 막는다:
+--   ① 원장 멱등 키 (083) — 같은 (챌린지·종류·출처·식별자)는 한 줄이다
+--   ② paper_money_apply (085) — 원장이 안 생기면 **잔고도 밀지 않는다**
+--   ③ 사건 시각 동결 트리거 (086) — 적힌 시각은 UPDATE로도 못 바꾼다
+DO $$
+DECLARE
+  v_ch UUID; v_acct UUID; v_pos UUID;
+  v_bal0 NUMERIC; v_bal1 NUMERIC;
+  v_rows0 INT; v_rows1 INT;
+  v_at0 TIMESTAMPTZ; v_at1 TIMESTAMPTZ;
+  v_applied BOOLEAN;
+  v_settled BOOLEAN;
+BEGIN
+  SELECT challenge_id, paper_account_id INTO v_ch, v_acct
+    FROM public.paper_challenge_create(
+      'a0000000-0000-0000-0000-000000000005', 1000, 1200, 800,
+      clock_timestamp() - INTERVAL '1 hour', clock_timestamp() + INTERVAL '1 hour',
+      clock_timestamp());
+
+  SELECT position_id INTO v_pos FROM public.paper_open_position(
+    p_user_id => 'a0000000-0000-0000-0000-000000000005', p_signal_id => 'idem-1',
+    p_strategy_id => 's', p_bucket => NULL, p_symbol => 'BTCUSDT', p_market => 'USDM',
+    p_side => 'LONG', p_entry_price => 100, p_fill_price => 100, p_quantity => 1,
+    p_notional => 100, p_leverage => 1, p_margin => 100, p_stop_loss => NULL,
+    p_take_profit => NULL, p_liquidation_price => 50, p_entry_fee => 1,
+    p_margin_mode => 'ISOLATED', p_event_effective_at => clock_timestamp(),
+    p_paper_account_id => v_acct);
+
+  PERFORM public.paper_settle_close(v_pos, 110, 'TP', 1, 10, 8, 8, clock_timestamp());
+
+  -- 정산 뒤 상태를 기록한다. **아래 재호출들은 이 값을 하나도 바꾸면 안 된다.**
+  SELECT a.balance INTO v_bal0 FROM public.paper_accounts a WHERE a.id = v_acct;
+  SELECT COUNT(*)::INT INTO v_rows0
+    FROM public.paper_challenge_cashflows f WHERE f.challenge_id = v_ch;
+  SELECT f.event_effective_at INTO v_at0
+    FROM public.paper_challenge_cashflows f
+   WHERE f.challenge_id = v_ch AND f.cashflow_type = 'REALIZED_PNL'
+     AND f.source_event_id = v_pos::TEXT;
+  PERFORM pg_temp.want('정산이 원장에 남았다', (v_at0 IS NOT NULL)::TEXT, 'true');
+
+  -- ── ① 같은 식별자 · **다른 시각**으로 돈을 다시 넣어 본다 ──
+  --
+  --    금액도 일부러 다르게 준다. 두 번째가 통과하면 잔고가 그만큼 튄다.
+  v_applied := public.paper_money_apply(
+    v_acct, 'a0000000-0000-0000-0000-000000000005', 'REALIZED_PNL', 999,
+    'POSITION_CLOSE', v_pos::TEXT, clock_timestamp());
+  PERFORM pg_temp.want('★ 같은 사건을 다른 시각으로 다시 넣으면 적용되지 않는다',
+    v_applied::TEXT, 'false');
+
+  SELECT a.balance INTO v_bal1 FROM public.paper_accounts a WHERE a.id = v_acct;
+  SELECT COUNT(*)::INT INTO v_rows1
+    FROM public.paper_challenge_cashflows f WHERE f.challenge_id = v_ch;
+  SELECT f.event_effective_at INTO v_at1
+    FROM public.paper_challenge_cashflows f
+   WHERE f.challenge_id = v_ch AND f.cashflow_type = 'REALIZED_PNL'
+     AND f.source_event_id = v_pos::TEXT;
+
+  PERFORM pg_temp.want('  잔고 변화 0', (v_bal1 - v_bal0)::TEXT, '0');
+  PERFORM pg_temp.want('  원장 줄 수 변화 0', (v_rows1 - v_rows0)::TEXT, '0');
+  PERFORM pg_temp.want('★ 적힌 사건 시각이 그대로다', (v_at1 = v_at0)::TEXT, 'true');
+
+  -- ── ② 포지션을 다시 정산해 본다 ──
+  SELECT settled INTO v_settled
+    FROM public.paper_settle_close(v_pos, 500, 'TP', 1, 400, 398, 398, clock_timestamp());
+  PERFORM pg_temp.want('★ 이미 닫힌 포지션은 다시 정산되지 않는다', v_settled::TEXT, 'false');
+
+  SELECT a.balance INTO v_bal1 FROM public.paper_accounts a WHERE a.id = v_acct;
+  SELECT COUNT(*)::INT INTO v_rows1
+    FROM public.paper_challenge_cashflows f WHERE f.challenge_id = v_ch;
+  SELECT f.event_effective_at INTO v_at1
+    FROM public.paper_challenge_cashflows f
+   WHERE f.challenge_id = v_ch AND f.cashflow_type = 'REALIZED_PNL'
+     AND f.source_event_id = v_pos::TEXT;
+
+  PERFORM pg_temp.want('  잔고 변화 0', (v_bal1 - v_bal0)::TEXT, '0');
+  PERFORM pg_temp.want('  원장 줄 수 변화 0', (v_rows1 - v_rows0)::TEXT, '0');
+  PERFORM pg_temp.want('  사건 시각도 그대로다', (v_at1 = v_at0)::TEXT, 'true');
+  PERFORM pg_temp.want('  불변식 SUM(원장) = 잔고',
+    (SELECT (COALESCE(SUM(f.amount),0) = v_bal1)::TEXT
+       FROM public.paper_challenge_cashflows f WHERE f.challenge_id = v_ch), 'true');
+
+  -- ── ③ 적힌 시각을 직접 고치려 들면 DB가 거부한다 ──
+  PERFORM pg_temp.must_fail('★ 적힌 사건 시각은 UPDATE로도 못 바꾼다', '23514',
+    format('UPDATE public.paper_challenge_cashflows SET event_effective_at = %L
+             WHERE challenge_id = %L AND source_event_id = %L',
+           clock_timestamp(), v_ch, v_pos::TEXT));
 END $$;
 
 DO $$ BEGIN RAISE NOTICE '챌린지 생명주기 실행 증명 전부 통과'; END $$;
