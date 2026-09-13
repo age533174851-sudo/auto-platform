@@ -461,7 +461,7 @@ jobs:
           }
           cat /tmp/ap-proof.out
           n_ok="$(grep -c '^ok  ' /tmp/ap-proof.out || true)"
-          if [ "${n_ok}" -lt 30 ]; then
+          if [ "${n_ok}" -lt 40 ]; then
             echo "::error::승인 경로 확인이 ${n_ok}건뿐입니다"
             exit 1
           fi
@@ -474,10 +474,18 @@ jobs:
             echo "::error::승인 범위가 하나로 묶이는지 확인하지 못했습니다"
             exit 1
           fi
+          # **본 DB를 건드리지 않았다는 것까지 확인한다.** 이 증명은 DB를 만들고
+          # 지우므로, 격리가 깨지면 재생 검사 결과가 조용히 오염된다.
+          for need in '전용 DB 생성' '본 DB 지문이 증명 전과 같다' '전용 DB 정리 완료'; do
+            if ! grep -q "${need}" /tmp/ap-proof.out; then
+              echo "::error::격리 증거가 없습니다: ${need}"
+              exit 1
+            fi
+          done
           {
             echo "### 위험 마이그레이션 승인 경로"
             echo ""
-            echo "확인 ${n_ok}건 통과 (거부 12종 · 순서 건너뛰기 차단 · 승인 1건만 통과)"
+            echo "확인 ${n_ok}건 통과 (전용 DB 격리 · 거부 12종 · 순서 건너뛰기 차단 · 승인 1건만 통과 · 본 DB 비간섭)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 승인 검사를 하나씩 빼 본다 (승인 경로 뮤테이션)
