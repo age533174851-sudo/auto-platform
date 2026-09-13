@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SQL_FILE = 'supabase/migrations/083_paper_challenge_core.sql';
+const ACC_FILE = 'supabase/migrations/085_paper_challenge_accounting.sql';
 const TS_FILE = 'src/lib/engine/paperChallenge.ts';
 
 let bad = 0;
@@ -411,6 +412,142 @@ for (const [name, list] of [
   if (!Array.isArray(list) || list.length === 0) {
     err(`${TS_FILE}: ${name}이 비어 있습니다 — 빈 목록은 어떤 SQL과도 "같은 집합"이 됩니다`);
   }
+}
+
+// ── ⑩ 회계 경로(085)와 도메인 모듈이 같은 것을 말하는가 ──
+//
+// **판정이 두 곳에 있으면 언젠가 갈린다.**
+//
+// `085`는 회계를 plpgsql로 구현한다. plpgsql은 `cashflowSignOk`나
+// `cashflowIdempotencyKey`를 부를 수 없으므로, 이 도메인 모듈은 PR2에서
+// "부르는 관계"가 될 수 없다 — 같은 규칙을 **두 언어로 두 번** 적은 상태다.
+// 화면·API(PR4)가 이 모듈을 쓰기 시작할 때, 둘이 이미 갈려 있으면 사용자는
+// DB가 거부하는 값을 보내거나 그 반대가 된다.
+//
+// 그래서 부르는 관계 대신 **대조되는 관계**로 묶는다. 아래 검사는 085가 실제로
+// 쓰는 값과 이 모듈이 말하는 값이 어긋나면 멈춘다.
+if (existsSync(join(root, ACC_FILE))) {
+  const accRaw = readFileSync(join(root, ACC_FILE), 'utf8');
+  const acc = stripSqlComments(accRaw);
+
+  // (1) 085가 원장에 적는 현금흐름 종류가 모듈 목록 안에 있는가.
+  //
+  //     085는 `paper_money_apply(..., 'TRADING_FEE', ...)`처럼 종류를 문자열로
+  //     넘긴다. 목록에 없는 종류를 쓰면 083의 CHECK가 실행 시점에 거부한다.
+  const used = new Set();
+  for (const m of acc.matchAll(/paper_money_apply\s*\(([^;]*?)\)/gs)) {
+    for (const lit of m[1].matchAll(/'([A-Z_]+)'/g)) {
+      if (D.CASHFLOW_TYPES.indexOf(lit[1]) >= 0
+          || D.SOURCE_EVENT_TYPES.indexOf(lit[1]) >= 0) continue;
+      used.add(lit[1]);
+    }
+  }
+  if (used.size > 0) {
+    err(`${ACC_FILE}이 ${TS_FILE}의 목록에 없는 낱말을 원장에 적습니다 `
+      + `[${[...used].join(', ')}] — 083의 CHECK가 실행 시점에 거부합니다`);
+  } else {
+    notes.push('085가 원장에 적는 낱말이 전부 도메인 목록 안에 있다');
+  }
+
+  // (2) 085가 넘기는 **부호**가 cashflowSignOk와 같은가.
+  //
+  //     수수료를 양수로 적으면 원장 합계가 잔고와 갈린다. 모듈은 TRADING_FEE가
+  //     0 이하라고 말한다 — 085가 실제로 음수를 넘기는지 본다.
+  const feeCalls = [...acc.matchAll(/'TRADING_FEE'\s*,\s*(-?)\s*p_(\w+)/g)];
+  if (feeCalls.length === 0) {
+    err(`${ACC_FILE}: TRADING_FEE를 적는 자리를 찾지 못했습니다 `
+      + `— 부호 계약을 확인할 수 없으면 통과로 적지 않습니다`);
+  } else {
+    // 모듈이 말하는 부호 계약을 **컴파일된 함수에 물어본다.** 글자로 베끼지 않는다.
+    const wantsNegative = D.cashflowSignOk('TRADING_FEE', -1) && !D.cashflowSignOk('TRADING_FEE', 1);
+    const allNegative = feeCalls.every(([, sign]) => sign === '-');
+    if (wantsNegative && !allNegative) {
+      err(`${ACC_FILE}이 TRADING_FEE를 양수로 적는 자리가 있습니다 `
+        + `— ${TS_FILE}의 cashflowSignOk는 0 이하만 허용합니다. `
+        + `양수로 적으면 SUM(원장)이 잔고와 갈립니다`);
+    } else if (!wantsNegative) {
+      err(`${TS_FILE}: cashflowSignOk가 TRADING_FEE의 음수 계약을 말하지 않습니다 `
+        + `— 085는 음수로 적고 있습니다`);
+    } else {
+      notes.push(`085의 TRADING_FEE ${feeCalls.length}곳이 전부 음수다 (모듈 계약과 같다)`);
+    }
+  }
+
+  // (3) 시작금은 양수인가. 모듈은 INITIAL_DEPOSIT이 0보다 크다고 말한다.
+  {
+    const initCalls = [...acc.matchAll(/'INITIAL_DEPOSIT'\s*,\s*(-?)\s*p_(\w+)/g)];
+    if (initCalls.length === 0) {
+      err(`${ACC_FILE}: INITIAL_DEPOSIT을 적는 자리를 찾지 못했습니다`);
+    } else if (initCalls.some(([, sign]) => sign === '-')) {
+      err(`${ACC_FILE}이 INITIAL_DEPOSIT을 음수로 적습니다 `
+        + `— ${TS_FILE}의 cashflowSignOk는 0보다 큰 값만 허용합니다`);
+    } else if (!D.cashflowSignOk('INITIAL_DEPOSIT', 1) || D.cashflowSignOk('INITIAL_DEPOSIT', -1)) {
+      err(`${TS_FILE}: cashflowSignOk가 INITIAL_DEPOSIT의 양수 계약을 말하지 않습니다`);
+    } else {
+      notes.push('085의 시작금이 양수다 (모듈 계약과 같다)');
+    }
+  }
+
+  // (4) 멱등 키가 **같은 네 칸**인가.
+  //
+  //     085는 `ON CONFLICT ON CONSTRAINT <이름>`으로 083의 제약을 이름으로
+  //     가리킨다. 제약 이름이 바뀌면 085는 실행 시점에 터진다 — 그리고
+  //     `cashflowIdempotencyKey`가 세는 칸도 그 제약과 같아야 한다.
+  const CONSTRAINT = 'paper_challenge_cashflows_idem_key';
+  if (!new RegExp(`ON\\s+CONFLICT\\s+ON\\s+CONSTRAINT\\s+${CONSTRAINT}\\b`, 'i').test(acc)) {
+    err(`${ACC_FILE}이 ${CONSTRAINT}를 ON CONFLICT로 가리키지 않습니다 `
+      + `— 이름이 어긋나면 원장 멱등이 실행 시점에 사라집니다`);
+  } else if (!new RegExp(`CONSTRAINT\\s+${CONSTRAINT}\\s*\\n?\\s*UNIQUE`, 'i').test(sql)) {
+    err(`${SQL_FILE}에 ${CONSTRAINT} 유니크가 없습니다 — 085가 없는 제약을 가리킵니다`);
+  } else {
+    // 제약의 칸 목록과 모듈의 키 구성이 같은가. 키를 글자로 베끼지 않고,
+    // **컴파일된 함수가 만든 키에 각 값이 들어 있는지**로 확인한다.
+    //
+    // `inSetAfter`는 `CHECK (x IN (...))`의 낱말 목록을 읽는 도구다. 여기서
+    // 쓰면 뒤에 나오는 엉뚱한 IN 목록을 잡는다 — 실제로 현금흐름 종류 목록을
+    // 칸 목록으로 읽었다. 그래서 UNIQUE의 괄호를 직접 읽는다.
+    const uq = new RegExp(
+      `ADD\\s+CONSTRAINT\\s+${CONSTRAINT}\\s+UNIQUE\\s*\\(([^)]*)\\)`, 'i').exec(sql);
+    const cols = uq ? uq[1].split(',').map((c) => c.trim()).filter(Boolean) : null;
+    const want = ['challenge_id', 'cashflow_type', 'source_event_type', 'source_event_id'];
+    if (!sameSet(cols, want)) {
+      err(`${SQL_FILE}: ${CONSTRAINT}의 칸이 [${(cols || []).join(', ')}]입니다 `
+        + `— 멱등 키는 [${want.join(', ')}] 네 칸이어야 합니다`);
+    } else {
+      const key = D.cashflowIdempotencyKey({
+        challengeId: 'CH', cashflowType: 'TRADING_FEE',
+        sourceEventType: 'POSITION_OPEN', sourceEventId: 'EV',
+      });
+      const missing = ['CH', 'TRADING_FEE', 'POSITION_OPEN', 'EV'].filter((v) => !key.includes(v));
+      if (missing.length > 0) {
+        err(`${TS_FILE}: cashflowIdempotencyKey가 [${missing.join(', ')}]를 키에 넣지 않습니다 `
+          + `— ${CONSTRAINT}는 그 칸들로 중복을 막습니다. 키가 더 느슨하면 `
+          + `서로 다른 사건이 같은 키가 되고, 한 체결의 두 줄 중 하나가 사라집니다`);
+      } else {
+        notes.push('멱등 키가 083 제약·085 ON CONFLICT·도메인 함수에서 같은 네 칸이다');
+      }
+    }
+  }
+
+  // (5) 달성 사유를 되돌리지 않는다는 계약이 모듈과 085에서 같은가.
+  //
+  //     모듈의 freezeCloseIntent는 "이미 정해진 사유는 바뀌지 않는다"를 말한다.
+  //     085의 판정 함수도 같은 것을 해야 한다 — CAS로 한 번만 정한다.
+  {
+    const frozen = D.freezeCloseIntent('TARGET_REACHED', 'FAILED');
+    if (!frozen || frozen.intent !== 'TARGET_REACHED' || frozen.frozen !== true) {
+      err(`${TS_FILE}: freezeCloseIntent가 TARGET_REACHED를 지키지 않습니다`);
+    } else if (!/AND\s+c\.close_intent\s+IS\s+NULL/i.test(acc)) {
+      err(`${ACC_FILE}: 판정이 close_intent IS NULL을 CAS 조건으로 걸지 않습니다 `
+        + `— ${TS_FILE}은 사유가 한 번만 정해진다고 말합니다. `
+        + `조건이 없으면 뒤늦은 판정이 달성을 실패로 덮어씁니다`);
+    } else {
+      notes.push('사유를 한 번만 정한다는 계약이 모듈·085에서 같다');
+    }
+  }
+} else {
+  // **없는 것을 통과로 적지 않는다.** 085가 사라졌으면 회계 경로가 없어진 것이다.
+  err(`${ACC_FILE}을 찾지 못했습니다 — 챌린지 회계 경로의 정본입니다`);
 }
 
 if (bad === 0) {

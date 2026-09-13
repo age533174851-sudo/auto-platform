@@ -29,6 +29,7 @@
 // 사용: node scripts/check-paper-capacity.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { feeDeductionContract } from './lib/paper-money-path.mjs';
 import { functionBodyOrFail } from './lib/function-body.mjs';
 
 const fails = [];
@@ -296,14 +297,24 @@ else {
     if (!/v_used\s*\+\s*p_margin/.test(body)) {
       fail(`${sqlFile}이 사용 중 증거금과 새 증거금을 함께 보지 않습니다`);
     }
+    // ── 수수료 차감식과 되돌림 ──
+    //
+    // **어느 함수 안에서 빼는지는 계약이 아니다.** 예전에는 이 자리에서
+    // `balance = balance - p_entry_fee` 글자와 `GET DIAGNOSTICS`를 찾았다.
+    // 085가 돈이 움직이는 자리를 하나로 모으자 두 글자가 사라졌고, 이 검사는
+    // 그 개선을 "P1 계약을 잃었다"고 신고했다. 판정은 공용 모듈 하나에 있다 —
+    // check-paper-open-atomic.mjs도 같은 것을 본다.
+    {
+      const r = feeDeductionContract({ sql, fnBody: body, feeParam: 'p_entry_fee' });
+      if (!r.ok) fail(`${sqlFile}: ${r.reason}`);
+      else notes.push(`${sqlFile}: ${r.note}`);
+    }
     // P1 계약이 남아 있는가.
     for (const [re, what] of [
       [/NO_ACCOUNT/, '계좌 없음'],
       [/GET STACKED DIAGNOSTICS[\s\S]{0,80}CONSTRAINT_NAME/, '제약 이름 진단'],
       [/=\s*'paper_pos_signal_uniq'/, 'signal_id 유니크 비교'],
       [/RAISE\s*;/, '알 수 없는 위반 재던지기'],
-      [/balance\s*=\s*balance\s*-\s*p_entry_fee/, '수수료 차감식'],
-      [/GET DIAGNOSTICS/, '계좌 갱신 행수 확인'],
     ]) {
       if (!re.test(body)) fail(`${sqlFile}이 P1 계약을 잃었습니다: ${what}`);
     }
