@@ -44,6 +44,10 @@ on:
       - 'scripts/paper-challenge-concurrency.sh'
       - 'scripts/paper-challenge-mutations.mjs'
       - 'scripts/lib/paper-money-path.mjs'
+      # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
+      - 'scripts/apply-migrations.mjs'
+      - 'scripts/approval-path-proof.mjs'
+      - 'scripts/approval-path-mutations.mjs'
       - '.github/workflows/supabase-replay.yml'
   push:
     branches: [main]
@@ -56,6 +60,10 @@ on:
       - 'scripts/paper-challenge-concurrency.sh'
       - 'scripts/paper-challenge-mutations.mjs'
       - 'scripts/lib/paper-money-path.mjs'
+      # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
+      - 'scripts/apply-migrations.mjs'
+      - 'scripts/approval-path-proof.mjs'
+      - 'scripts/approval-path-mutations.mjs'
       - '.github/workflows/supabase-replay.yml'
   workflow_dispatch:
 
@@ -76,6 +84,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.2.2
+
+      # 재생 자체는 CLI와 psql만으로 돌지만, 승인 경로 증명(18·19단계)은
+      # `scripts/apply-migrations.mjs`를 **실제로 실행한다.** 그 러너는
+      # 분류 로직을 복제하지 않고 `loadPlan()`으로 `migrationPlan.ts`를
+      # 저장소의 tsc로 컴파일해서 쓴다 — 그래서 node_modules가 필요하다.
+      # 없으면 증명이 계약에 닿기도 전에 죽는다.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm install`은 잠금 파일을 고친다. 그러면 이 워크플로가 ci.yml과
+      # 다른 의존성으로 통과할 수 있다.
+      - name: 의존성 설치
+        run: npm ci
 
       # 움직이는 태그를 쓰지 않는다. 태그는 다시 가리킬 수 있고, 그러면
       # "어제 통과한 것과 같은 것을 돌렸다"고 말할 수 없다.
@@ -436,6 +459,70 @@ jobs:
           fi
           {
             echo "### 뮤테이션"
+            echo ""
+            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 위험 마이그레이션 승인 경로가 무엇을 막는가 (실행 증명)
+        run: |
+          set -euo pipefail
+          # 이 증명은 같은 서버 안에 **전용 DB를 만들어** 그 안에서만 돈다.
+          # 아래 URL은 본 DB를 가리키지만, 러너는 서버 주소만 쓰고 DB 이름은
+          # 갈아 끼운다. 본 DB는 지문을 읽는 것 말고는 건드리지 않는다.
+          PROOF_DB_URL="$(cat /tmp/db-url)"
+          export PROOF_DB_URL
+          node scripts/approval-path-proof.mjs > /tmp/ap-proof.out 2>&1 || {
+            echo "::error::승인 경로가 계약대로 막거나 통과시키지 않습니다 — 아래 FAIL 줄을 보세요"
+            cat /tmp/ap-proof.out
+            exit 1
+          }
+          cat /tmp/ap-proof.out
+          n_ok="$(grep -c '^ok  ' /tmp/ap-proof.out || true)"
+          if [ "${n_ok}" -lt 40 ]; then
+            echo "::error::승인 경로 확인이 ${n_ok}건뿐입니다"
+            exit 1
+          fi
+          # **거부만 확인하는 증명은 만점을 준다.** 실제로 통과한 자리도 있었는지 본다.
+          if ! grep -q '★ 정확한 승인이면 085가 적용된다' /tmp/ap-proof.out; then
+            echo "::error::승인이 실제로 통과하는 경우를 확인하지 못했습니다"
+            exit 1
+          fi
+          if ! grep -q '★ 승인하지 않은 085는 그대로 막혀 있다' /tmp/ap-proof.out; then
+            echo "::error::승인 범위가 하나로 묶이는지 확인하지 못했습니다"
+            exit 1
+          fi
+          # **본 DB를 건드리지 않았다는 것까지 확인한다.** 이 증명은 DB를 만들고
+          # 지우므로, 격리가 깨지면 재생 검사 결과가 조용히 오염된다.
+          for need in '전용 DB 생성' '본 DB 지문이 증명 전과 같다' '전용 DB 정리 완료'; do
+            if ! grep -q "${need}" /tmp/ap-proof.out; then
+              echo "::error::격리 증거가 없습니다: ${need}"
+              exit 1
+            fi
+          done
+          {
+            echo "### 위험 마이그레이션 승인 경로"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (전용 DB 격리 · 거부 12종 · 순서 건너뛰기 차단 · 승인 1건만 통과 · 본 DB 비간섭)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 승인 검사를 하나씩 빼 본다 (승인 경로 뮤테이션)
+        run: |
+          set -euo pipefail
+          PROOF_DB_URL="$(cat /tmp/db-url)"
+          export PROOF_DB_URL
+          node scripts/approval-path-mutations.mjs > /tmp/ap-mut.out 2>&1 || {
+            echo "::error::승인 검사를 뺐는데 증명이 초록입니다 — 그 검사는 아무 일도 하지 않습니다"
+            cat /tmp/ap-mut.out
+            exit 1
+          }
+          cat /tmp/ap-mut.out
+          n_red="$(grep -c '^      RED' /tmp/ap-mut.out || true)"
+          if [ "${n_red}" -lt 10 ]; then
+            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
+            exit 1
+          fi
+          {
+            echo "### 승인 경로 뮤테이션"
             echo ""
             echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -7,6 +7,35 @@
 //   node scripts/apply-migrations.mjs --check    적용 계획만 본다 (DB를 바꾸지 않는다)
 //   node scripts/apply-migrations.mjs --apply    안전한 것만 적용하고 확인까지 한다
 //
+//   node scripts/apply-migrations.mjs --apply \\
+//     --approve-destructive=085_paper_challenge_accounting.sql \\
+//     --approve-sha=<이 실행이 체크아웃한 40자 커밋>
+//                                                사람이 명시한 **그 한 파일만** 적용한다
+//
+// 승인 경로는 왜 있는가
+// ─────────────────────
+// 위험한 것을 자동으로 실행하지 않는 것까지는 만들어 뒀는데, **승인해서
+// 실행하는 문**이 없었다. 그러면 남는 길은 사람이 Supabase 편집기를 열거나
+// psql을 직접 치는 것뿐이고, 그건 이 파일이 없애려던 바로 그 상태다.
+// 판정을 느슨하게 만드는 대신 **판정은 그대로 두고 통과 절차를 만든다.**
+//
+//   분류(classifier)  "이건 위험하다"           — 이 승인 경로가 건드리지 않는다
+//   승인(사람)        "이 파일·이 내용만 허용"  — 아래 검증 여덟 가지
+//   적용(runner)      "승인된 그 하나만 실행"   — autoApply에 섞지 않는다
+//
+// 승인은 무엇에 묶이는가
+// ──────────────────────
+// **파일 이름 + 그 시점의 내용 + 정확한 커밋.** `--approve-sha`가 이 실행이
+// 체크아웃한 커밋과 다르면 시작도 하지 않는다. 커밋이 같으면 파일 내용도 같으므로
+// 승인은 곧 그 체크섬에 묶인다 — 내용이 바뀌면 커밋이 바뀌고, 옛 승인은 무효가 된다.
+// 체크섬은 승인 기록에 그대로 남긴다.
+//
+// 승인해도 넘어가지 않는 것
+// ─────────────────────────
+// 승인한 이름이 목록에 없거나 · 지금 계획에서 막혀 있지 않거나 · 위험도가
+// DESTRUCTIVE가 아니거나 · 이미 적용됐거나 · 승인 대상이 하나가 아니면
+// **아무것도 적용하지 않고 실패한다.** 승인하지 않은 다른 blocked는 그대로 막힌다.
+//
 // 접속
 // ────
 // `SUPABASE_DB_URL`(없으면 DATABASE_URL·POSTGRES_URL)에서 읽는다.
@@ -33,6 +62,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { loadPlan, readMigrationFiles, checksumOf, LEGACY, MIG_DIR } from './gen-migration-manifest.mjs';
 
 const MODE = process.argv.includes('--apply') ? 'apply' : 'check';
+
+/** `--이름=값`을 읽는다. 같은 이름이 두 번 오면 **고르지 않고 멈춘다.** */
+function argOf(name) {
+  const hits = process.argv.filter(a => a.startsWith(`--${name}=`));
+  if (hits.length > 1) return { many: true, value: null };
+  if (hits.length === 0) return { many: false, value: null };
+  return { many: false, value: hits[0].slice(name.length + 3) };
+}
+const APPROVE_ARG = argOf('approve-destructive');
+const APPROVE_SHA_ARG = argOf('approve-sha');
+const APPROVE_CHECKSUM_ARG = argOf('approve-checksum');
 const RUNTIME_SHA = String(process.env.GITHUB_SHA || process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 40) || null;
 const APPLIED_BY = String(process.env.GITHUB_ACTIONS ? 'github-actions' : 'local');
 const HOLDER = `${APPLIED_BY}:${String(process.env.GITHUB_RUN_ID || randomUUID()).slice(0, 24)}`;
@@ -100,6 +140,14 @@ function sqlLit(v) {
 const report = {
   mode: MODE, ok: false, code: 'UNKNOWN', reason: '',
   required: 0, applied: [], adopted: [], adoptable: [], pending: [], blocked: [], failed: [], verified: [], drift: [],
+  /**
+   * 사람이 승인해서 실행한 위험 마이그레이션. 없으면 null.
+   *
+   * **schema_migrations에 칸을 새로 만들지 않는다.** 승인 기능을 쓰려고 또
+   * 마이그레이션이 필요해지면 순환이다. 흔적은 여기(리포트 아티팩트)와
+   * Actions 실행 기록, 그리고 기존 applied_by/runtime_sha/checksum/status로 남긴다.
+   */
+  approval: null,
 };
 
 function say(line) { console.log(line); }
@@ -118,6 +166,66 @@ function finish(code, reason, exitCode) {
   say(`결과: ${code} — ${reason}`);
   process.exit(exitCode);
 }
+
+// ══════════════ 승인 입력 검사 — **DB에 닿기 전에 끝낸다** ══════════════
+//
+// 접속·잠금·적용 어느 것도 하기 전에 여기서 거른다. 커밋이 어긋난 승인으로
+// 잠금을 잡고 들어가면, 실패해도 그 사이 다른 배포가 막힌다.
+const APPROVAL = (() => {
+  for (const [label, a] of [
+    ['--approve-destructive', APPROVE_ARG],
+    ['--approve-sha', APPROVE_SHA_ARG],
+    ['--approve-checksum', APPROVE_CHECKSUM_ARG],
+  ]) {
+    if (a.many) {
+      say(`::error::${label}가 여러 번 왔습니다 — 어느 것을 승인한 것인지 정할 수 없습니다`);
+      finish('APPROVAL_INVALID', `${label}가 중복됐습니다`, 1);
+    }
+  }
+  const name = APPROVE_ARG.value;
+  if (name == null) {
+    // 승인 인자가 없다. **지금까지와 완전히 같은 실행이다.**
+    if (APPROVE_SHA_ARG.value != null || APPROVE_CHECKSUM_ARG.value != null) {
+      say('::error::--approve-sha/--approve-checksum만 왔습니다 — 무엇을 승인하는지가 없습니다');
+      finish('APPROVAL_INVALID', '승인 대상 파일명이 없습니다', 1);
+    }
+    return null;
+  }
+
+  if (!name.trim()) {
+    say('::error::승인 대상 파일명이 비어 있습니다');
+    finish('APPROVAL_INVALID', '승인 대상 파일명이 비어 있습니다', 1);
+  }
+  // 경로를 받지 않는다. 목록에 있는 **이름 그대로**여야 한다.
+  if (/[\\/]/.test(name) || name.includes('..')) {
+    say(`::error::승인 대상에 경로가 들어 있습니다: ${name}`);
+    finish('APPROVAL_INVALID', '승인 대상은 마이그레이션 파일 이름 하나여야 합니다', 1);
+  }
+
+  const sha = APPROVE_SHA_ARG.value;
+  if (!sha) {
+    say('::error::--approve-sha가 없습니다 — 승인은 특정 커밋에 묶여야 합니다');
+    say('커밋에 묶지 않으면, 승인한 뒤 파일이 바뀌어도 그 승인이 계속 유효해집니다.');
+    finish('APPROVAL_INVALID', '승인에 커밋이 묶이지 않았습니다', 1);
+  }
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    say('::error::--approve-sha가 40자 커밋 해시가 아닙니다');
+    finish('APPROVAL_INVALID', '승인 커밋 형식이 올바르지 않습니다', 1);
+  }
+  if (!RUNTIME_SHA) {
+    say('::error::지금 실행이 어느 커밋인지 알 수 없습니다 (GITHUB_SHA 없음) — 승인을 확인할 수 없습니다');
+    finish('APPROVAL_INVALID', '실행 커밋을 확인하지 못했습니다', 1);
+  }
+  if (RUNTIME_SHA !== sha) {
+    // **승인한 커밋과 지금 도는 커밋이 다르다.** 그 사이 파일이 바뀌었을 수 있다.
+    say(`::error::승인한 커밋과 이 실행의 커밋이 다릅니다 — 승인: ${sha} / 실행: ${RUNTIME_SHA}`);
+    say('그 사이 파일이 바뀌었을 수 있습니다. 지금 커밋을 다시 확인하고 승인하세요.');
+    finish('APPROVAL_SHA_MISMATCH', '승인 커밋이 이 실행의 커밋과 다릅니다', 1);
+  }
+
+  say(`승인 입력 확인: ${name} @ ${sha}`);
+  return { name, sha, checksum: APPROVE_CHECKSUM_ARG.value };
+})();
 
 // ── 시작 ──
 const { url, from } = dbUrl();
@@ -274,6 +382,88 @@ say(`적용됨 ${plan.applied.length} / 남음 ${plan.pending.length} / 승인 �
 for (const b of plan.blocked) say(`  ⛔ ${b.name} — ${b.risk}: ${b.reasons.join(' · ')}`);
 for (const n of plan.autoApply) say(`  ▶ ${n}`);
 
+// ══════════════ 승인이 실제로 그 파일에 유효한가 ══════════════
+//
+// **여기서 통과하지 못하면 아무것도 적용하지 않는다.** 승인은 "이 이름"이 아니라
+// "지금 계획에서 실제로 막혀 있는, 위험도가 DESTRUCTIVE인, 아직 적용되지 않은,
+// 정확히 그 한 파일"에만 유효하다.
+const approved = (() => {
+  if (!APPROVAL) return null;
+
+  const f = files.find(x => x.name === APPROVAL.name);
+  if (!f) {
+    say(`::error::승인한 이름이 마이그레이션 목록에 없습니다: ${APPROVAL.name}`);
+    finish('APPROVAL_UNKNOWN_FILE', `${APPROVAL.name}은 마이그레이션 파일이 아닙니다`, 1);
+  }
+
+  // 이미 적용된 것을 다시 승인하는 것은 통과가 아니다 — 무엇을 하려는지가 불분명하다.
+  if (plan.applied.includes(APPROVAL.name)) {
+    say(`::error::${APPROVAL.name}은 이미 적용돼 있습니다 — 승인할 것이 없습니다`);
+    finish('APPROVAL_ALREADY_APPLIED', `${APPROVAL.name}은 이미 적용된 파일입니다`, 1);
+  }
+
+  const entry = plan.blocked.find(b => b.name === APPROVAL.name);
+  if (!entry) {
+    // 안전한 것(ADDITIVE)은 승인 경로로 넣지 않는다. 그건 그냥 자동으로 간다.
+    say(`::error::${APPROVAL.name}은 지금 계획에서 승인 대기 상태가 아닙니다`);
+    say('이 경로는 위험해서 막힌 파일 하나를 통과시키는 자리입니다 — 안전한 것은 그냥 자동 적용됩니다.');
+    finish('APPROVAL_NOT_BLOCKED', `${APPROVAL.name}은 승인이 필요한 파일이 아닙니다`, 1);
+  }
+
+  // **DESTRUCTIVE만이다.** UNKNOWN은 "모르는 문장"이라 사람이 이름만 보고
+  // 승인할 수 있는 종류가 아니다 — 그건 먼저 분류를 정해야 한다.
+  if (entry.risk !== 'DESTRUCTIVE') {
+    say(`::error::${APPROVAL.name}의 위험도가 ${entry.risk}입니다 — 이 경로는 DESTRUCTIVE만 통과시킵니다`);
+    say('UNKNOWN은 무슨 일이 일어나는지 아직 아무도 모르는 상태라, 이름만 보고 승인할 수 없습니다.');
+    finish('APPROVAL_RISK_MISMATCH', `${APPROVAL.name}은 DESTRUCTIVE가 아닙니다 (${entry.risk})`, 1);
+  }
+
+  // **순서를 건너뛰지 않는다.**
+  //
+  // 계획은 "막힌 것이 하나라도 있으면 그 앞까지만" 적용한다. 승인이 그 규칙을
+  // 넘어서면, 앞에 막혀 있는 번호를 건너뛰고 뒤엣것이 먼저 들어간다 — 스키마가
+  // 뒤엉키고, 그 뒤로는 어느 순서로 적용된 DB인지 아무도 말할 수 없다.
+  // 앞에 막힌 것이 있으면 **그것부터** 승인해야 한다.
+  const beforeApproved = plan.pending.slice(0, plan.pending.indexOf(APPROVAL.name));
+  const blockedBefore = beforeApproved.filter(n => plan.blocked.some(b => b.name === n));
+  if (blockedBefore.length > 0) {
+    say(`::error::${APPROVAL.name} 앞에 아직 막혀 있는 것이 있습니다: ${blockedBefore.join(', ')}`);
+    say('순서를 건너뛰고 뒤엣것을 먼저 적용하면 스키마가 뒤엉킵니다 — 앞의 것부터 승인하세요.');
+    finish('APPROVAL_OUT_OF_ORDER',
+      `${APPROVAL.name} 앞의 ${blockedBefore.length}개가 아직 승인되지 않았습니다`, 1);
+  }
+
+  const sum = checksumOf(f.sql);
+  if (APPROVAL.checksum != null && APPROVAL.checksum !== sum) {
+    say(`::error::${APPROVAL.name}의 내용이 승인한 것과 다릅니다`);
+    finish('APPROVAL_CHECKSUM_MISMATCH', `${APPROVAL.name}의 체크섬이 승인 값과 다릅니다`, 1);
+  }
+
+  say('');
+  say(`★ 승인됨: ${APPROVAL.name} (${entry.risk}: ${entry.reasons.join(' · ')})`);
+  say(`  체크섬 ${sum} · 커밋 ${APPROVAL.sha}`);
+  const stillBlocked = plan.blocked.filter(b => b.name !== APPROVAL.name);
+  if (stillBlocked.length) {
+    // **승인은 하나에만 유효하다.** 나머지는 그대로 막힌 채로 둔다.
+    say(`  나머지 ${stillBlocked.length}개는 승인되지 않았으므로 그대로 막힙니다: ${stillBlocked.map(b => b.name).join(', ')}`);
+  }
+  return { name: APPROVAL.name, file: f, checksum: sum, risk: entry.risk, sha: APPROVAL.sha, stillBlocked };
+})();
+
+if (approved) {
+  report.approval = {
+    filename: approved.name,
+    checksum: approved.checksum,
+    risk: approved.risk,
+    approvedSha: approved.sha,
+    runId: String(process.env.GITHUB_RUN_ID || '') || null,
+    runtimeSha: RUNTIME_SHA,
+    actor: String(process.env.GITHUB_ACTOR || '') || null,
+    via: String(process.env.GITHUB_EVENT_NAME || '') || 'local',
+    stillBlocked: approved.stillBlocked.map(b => b.name),
+  };
+}
+
 if (plan.code === 'UNKNOWN') finish('UNKNOWN', plan.reason, 1);
 if (plan.code === 'UP_TO_DATE') finish('UP_TO_DATE', plan.reason, 0);
 
@@ -302,11 +492,19 @@ const release = () => psql(url, ['-c',
   `DELETE FROM schema_migration_lock WHERE id = 1 AND holder = ${sqlLit(HOLDER)}`]);
 
 // ── 5~7. 적용 · 확인 · 기록 ──
+//
+// **한 파일을 적용하는 절차는 한 곳에만 둔다.** 자동 적용과 승인 적용이 각자
+// 자기 절차를 가지면, 언젠가 한쪽만 고쳐지고 그쪽만 확인·기록을 빠뜨린다.
 let failed = null;
-for (const name of plan.autoApply) {
-  const f = files.find(x => x.name === name);
+
+/**
+ * 파일 하나를 적용하고, 실제로 생겼는지 확인하고, 결과를 기록한다.
+ * @returns 성공했으면 true. 실패하면 기록까지 남기고 false.
+ */
+async function applyOne(f, { approvedBy = null } = {}) {
+  const name = f.name;
   const started = Date.now();
-  say(`적용: ${name}`);
+  say(approvedBy ? `적용(승인됨): ${name}` : `적용: ${name}`);
   const r = psql(url, ['--single-transaction', '-f', join(MIG_DIR, name)], { timeoutMs: 300_000 });
   const ms = Date.now() - started;
 
@@ -314,12 +512,11 @@ for (const name of plan.autoApply) {
     // **실패도 기록한다.** 다음 실행이 "아무 일도 없었다"고 읽으면 안 된다.
     psql(url, ['-c',
       `INSERT INTO schema_migrations (filename, checksum, applied_by, runtime_sha, status, duration_ms, error, verified)
-       VALUES (${sqlLit(name)}, ${sqlLit(checksumOf(f.sql))}, ${sqlLit(APPLIED_BY)}, ${sqlLit(RUNTIME_SHA)}, 'FAILED', ${ms}, ${sqlLit(String(r.error).slice(0, 1500))}, false)
+       VALUES (${sqlLit(name)}, ${sqlLit(checksumOf(f.sql))}, ${sqlLit(approvedBy || APPLIED_BY)}, ${sqlLit(RUNTIME_SHA)}, 'FAILED', ${ms}, ${sqlLit(String(r.error).slice(0, 1500))}, false)
        ON CONFLICT (filename) DO UPDATE SET status='FAILED', error=EXCLUDED.error, applied_at=now(), duration_ms=EXCLUDED.duration_ms, verified=false`]);
     report.failed.push({ name, error: String(r.error).slice(0, 500) });
     say(`::error::${name} 적용 실패 — ${r.error}`);
-    failed = name;
-    break;                     // **뒤엣것을 이어서 적용하지 않는다**
+    return false;
   }
 
   // psql이 0으로 끝난 것과 표가 생긴 것은 다른 사실이다.
@@ -330,28 +527,55 @@ for (const name of plan.autoApply) {
     : v.verdict === 'MISSING' ? `없음: ${v.missing.join(', ')}`
     : `${v.unknown}개를 확인하지 못함`;
 
+  // 승인해서 실행한 것은 `applied_by`에 그 사실을 남긴다. 새 칸을 만들지 않고
+  // 기존 칸으로 "누가 어떻게 넣었는가"를 말한다.
   psql(url, ['-c',
     `INSERT INTO schema_migrations (filename, checksum, applied_by, runtime_sha, status, duration_ms, verified, verify_detail)
-     VALUES (${sqlLit(name)}, ${sqlLit(checksumOf(f.sql))}, ${sqlLit(APPLIED_BY)}, ${sqlLit(RUNTIME_SHA)}, 'APPLIED', ${ms}, ${verified}, ${sqlLit(detail)})
+     VALUES (${sqlLit(name)}, ${sqlLit(checksumOf(f.sql))}, ${sqlLit(approvedBy || APPLIED_BY)}, ${sqlLit(RUNTIME_SHA)}, 'APPLIED', ${ms}, ${verified}, ${sqlLit(detail)})
      ON CONFLICT (filename) DO UPDATE SET status='APPLIED', checksum=EXCLUDED.checksum, applied_at=now(),
-       runtime_sha=EXCLUDED.runtime_sha, duration_ms=EXCLUDED.duration_ms, verified=EXCLUDED.verified,
-       verify_detail=EXCLUDED.verify_detail, error=NULL`]);
+       applied_by=EXCLUDED.applied_by, runtime_sha=EXCLUDED.runtime_sha, duration_ms=EXCLUDED.duration_ms,
+       verified=EXCLUDED.verified, verify_detail=EXCLUDED.verify_detail, error=NULL`]);
 
   if (!verified) {
     say(`::error::${name} — 실행은 끝났지만 확인에 실패했습니다: ${detail}`);
     report.failed.push({ name, error: detail });
-    failed = name;
-    break;
+    return false;
   }
-  report.verified.push({ name, detail, ms });
+  report.verified.push({ name, detail, ms, approved: Boolean(approvedBy) });
   say(`  ✓ ${detail} (${ms}ms)`);
+  return true;
+}
+
+for (const name of plan.autoApply) {
+  const f = files.find(x => x.name === name);
+  if (!(await applyOne(f))) { failed = name; break; }   // **뒤엣것을 이어서 적용하지 않는다**
+}
+
+// ── 승인된 그 하나 ──
+//
+// `plan.autoApply`에 섞지 않는다. 섞는 순간 "자동으로 갈 수 있는 것"의 정의가
+// 흐려지고, 다음에 destructive가 하나 더 생기면 같이 딸려 갈 길이 열린다.
+// 앞의 자동 적용이 하나라도 실패했으면 여기까지 오지 않는다.
+let approvalApplied = false;
+if (!failed && approved) {
+  const by = `approved:${String(process.env.GITHUB_ACTOR || APPLIED_BY).slice(0, 40)}`;
+  approvalApplied = await applyOne(approved.file, { approvedBy: by });
+  if (!approvalApplied) failed = approved.name;
+  if (report.approval) report.approval.applied = approvalApplied;
 }
 
 release();
 
 if (failed) finish('APPLY_FAILED', `${failed} 적용/확인 실패 — 뒤의 마이그레이션은 실행하지 않았습니다`, 1);
-if (plan.blocked.length > 0) {
+
+// 승인되지 않고 남은 위험한 것들. **승인한 하나만 빠진다.**
+const stillBlocked = approved ? plan.blocked.filter(b => b.name !== approved.name) : plan.blocked;
+if (stillBlocked.length > 0) {
   finish('NEEDS_APPROVAL',
-    `안전한 ${report.verified.length}개는 적용했습니다. ${plan.blocked.length}개는 되돌릴 수 없는 변경이라 승인이 필요합니다`, 1);
+    `안전한 ${report.verified.length}개는 적용했습니다. ${stillBlocked.length}개는 되돌릴 수 없는 변경이라 승인이 필요합니다`, 1);
+}
+if (approvalApplied) {
+  finish('APPLIED',
+    `${report.verified.length}개를 적용하고 확인했습니다 (승인된 ${approved.name} 포함)`, 0);
 }
 finish('APPLIED', `${report.verified.length}개를 적용하고 확인했습니다`, 0);
