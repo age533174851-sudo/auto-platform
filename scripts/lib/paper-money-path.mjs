@@ -45,8 +45,14 @@
 export function plpgsqlBody(sql, name) {
   const src = String(sql ?? '');
   const decl = new RegExp(
-    `CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+${name.replace('.', '\\.')}\\s*\\(`, 'i');
-  const m = decl.exec(src);
+    `CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+${name.replace('.', '\\.')}\\s*\\(`, 'gi');
+  // **마지막 정의가 실제로 도는 것이다.**
+  //
+  // 여러 마이그레이션을 이어 붙여 넘기면 같은 함수가 여러 번 나온다. 첫
+  // 정의를 읽으면 이미 대체된 옛 본문을 보게 된다 — 그 상태로는 지금 운영에서
+  // 도는 함수가 계약을 지키는지 말할 수 없다.
+  const all = [...src.matchAll(decl)];
+  const m = all.length ? all[all.length - 1] : null;
   if (!m) return { ok: false, reason: `${name} 정의를 찾지 못했습니다` };
 
   // 선언 뒤 첫 달러 인용 표식이 본문의 시작이다.
@@ -149,4 +155,27 @@ export function feeDeductionContract({ sql, fnBody, feeParam = 'p_entry_fee' }) 
     where: 'delegated',
     note: `수수료가 ${MONEY} 하나를 지나고, 그 함수가 증감식·실패 되돌림을 지킨다`,
   };
+}
+
+/**
+ * 번호 마이그레이션 전부를 번호 순으로 이어 붙인다.
+ *
+ * 왜 필요한가
+ * ───────────
+ * 수수료를 넘겨받는 `paper_money_apply`와 넘기는 `paper_open_position`이
+ * **다른 파일**에 있을 수 있다. `086`이 진입 함수만 대체하면서 실제로
+ * 그렇게 됐다. 한 파일만 읽으면 받는 쪽을 못 찾고, 못 읽은 것을 통과로
+ * 적지 않는 규칙에 따라 검사기가 멈춘다 — 계약은 멀쩡한데.
+ *
+ * 그래서 **적용되는 전체**를 본다. 같은 함수가 여러 번 나오면 `plpgsqlBody`가
+ * 마지막 것을 고른다(= 실제로 도는 정의).
+ *
+ * @param {{ readdirSync: Function, readFileSync: Function }} fs
+ * @param {string} dir `supabase/migrations`
+ */
+export function migrationCorpus(fs, dir) {
+  const names = fs.readdirSync(dir)
+    .filter(n => /^\d{3}_.*\.sql$/.test(n))
+    .sort();
+  return names.map(n => fs.readFileSync(`${dir}/${n}`, 'utf8')).join('\n');
 }

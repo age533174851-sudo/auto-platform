@@ -35,7 +35,7 @@
 // 사용: node scripts/check-paper-open-atomic.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { feeDeductionContract } from './lib/paper-money-path.mjs';
+import { feeDeductionContract, migrationCorpus } from './lib/paper-money-path.mjs';
 import { functionBodyOrFail } from './lib/function-body.mjs';
 
 const fails = [];
@@ -108,8 +108,14 @@ if (existsSync(MIG_DIR)) {
 }
 if (!sqlFile) fail('paper_open_position 함수를 정의하는 마이그레이션이 없습니다');
 else {
-  const sql = stripSql(readFileSync(sqlFile, 'utf8'));
-  const at = sql.indexOf('CREATE OR REPLACE FUNCTION public.paper_open_position');
+  // **수수료를 받는 함수가 다른 파일에 있을 수 있다.** 086이 진입 함수만
+  // 대체하면서 실제로 그렇게 됐다. 한 파일만 읽으면 받는 쪽을 못 찾고,
+  // 못 읽은 것을 통과로 적지 않는 규칙 때문에 멀쩡한 계약이 빨개진다.
+  // 그래서 적용되는 전체를 보고, 같은 함수는 마지막 정의를 쓴다.
+  const sql = stripSql(migrationCorpus({ readdirSync, readFileSync }, MIG_DIR));
+  // **마지막 정의가 실제로 도는 것이다.** 첫 정의를 읽으면 이미 대체된
+  // 옛 본문을 보게 되고, 그 판은 초록이어도 아무것도 증명하지 못한다.
+  const at = sql.lastIndexOf('CREATE OR REPLACE FUNCTION public.paper_open_position');
   const end = sql.indexOf('$$;', at);
   const body = end > at ? sql.slice(at, end) : '';
   if (!body) fail(`${sqlFile}에서 함수 본문을 뜯지 못했습니다`);

@@ -920,6 +920,69 @@ async function pollPaperExit(isMain: boolean): Promise<void> {
   }
 }
 
+// ── 챌린지 생명주기 스윕 ──────────────────────────────────
+//
+// **챌린지가 시작되지도, 끝나지도 않고 있었다.**
+//
+// `083`이 표를, `085`가 돈 경로를 만들었는데 `READY → RUNNING → CLOSING →
+// CLOSED`를 미는 주기 실행자가 하나도 없었다. `083`이 만들어 둔
+// `paper_challenges_due_idx`·`paper_challenges_closing_idx`를 아무도 읽지
+// 않았다 — 만들어 놓고 배선을 안 한 것이다.
+//
+// 모의 청산 감시와 **같은 구조**로 여기서 깨운다. 새 비밀이 필요 없고,
+// 판정 함수(`exitMonitorPlan`)도 같은 것을 쓴다 — 규칙을 복제하지 않는다.
+// main 락을 쥔 워커만 부른다: 마감은 CAS로 한 번만 닫히지만, 여럿이 동시에
+// 붙으면 선점 경쟁만 늘어난다.
+const CHALLENGE_SWEEP_MS = Number(process.env.CHALLENGE_SWEEP_INTERVAL_MS || 60_000);
+let lastChallengeSweepMs: number | null = null;
+let challengeSweepWarned = false;
+
+async function pollChallengeSweep(isMain: boolean): Promise<void> {
+  const plan = exitMonitorPlan({
+    lastRunMs: lastChallengeSweepMs, nowMs: Date.now(),
+    intervalMs: CHALLENGE_SWEEP_MS, isMain,
+    hasCredential: !!(APP_URL && APP_ADMIN_SECRET),
+  });
+  if (!plan.run) {
+    if (plan.skip === 'NO_CREDENTIAL' && !challengeSweepWarned) {
+      challengeSweepWarned = true;
+      console.error(`[challenge-sweep] ⚠ ${plan.reason} — 챌린지가 시작되지도 끝나지도 않습니다`);
+    }
+    return;
+  }
+  lastChallengeSweepMs = Date.now();
+
+  try {
+    const r = await fetch(`${APP_URL}/api/paper/challenge-sweep`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-secret': APP_ADMIN_SECRET,
+        'x-traigo-source': 'worker',
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) {
+      // **실패를 조용히 넘기지 않는다.** 안 닫힌 챌린지는 사용자에게 보인다.
+      console.error(`[challenge-sweep] ✗ HTTP ${r.status} — ${String(j?.error || j?.message || '').slice(0, 200)}`);
+      if (Array.isArray(j?.contractBreaks) && j.contractBreaks.length) {
+        for (const b of j.contractBreaks.slice(0, 3)) console.error(`[challenge-sweep] ‼ ${String(b).slice(0, 200)}`);
+      }
+      return;
+    }
+    // 한 것이 있을 때만 남긴다 — 매 분 찍으면 로그가 덮인다.
+    const moved = Number(j?.started ?? 0) + Number(j?.expired ?? 0) + Number(j?.closed ?? 0);
+    const stuck = Number(j?.waiting ?? 0) + Number(j?.unknownMarks ?? 0);
+    if (moved > 0 || stuck > 0) {
+      console.log(`[challenge-sweep] ${String(j?.reason ?? '')}`);
+    }
+  } catch (e: any) {
+    console.error(`[challenge-sweep] ✗ ${String(e?.message || e).slice(0, 200)}`);
+  }
+}
+
 // ── 예약청산(시간예약) ────────────────────────────────────
 //
 // **"이 시각에 팔겠다"를 지킬 실행기가 사실상 없었다.**
@@ -1141,6 +1204,8 @@ async function tick() {
   // **모의 포지션의 손절·익절.** 브라우저가 보던 것을 서버가 본다.
   await pollPaperExit(isMain);
   await pollScheduledExit(isMain);
+  // **챌린지 생명주기.** 시작·만료·마감을 미는 유일한 실행자다.
+  await pollChallengeSweep(isMain);
   await pollLedgerSync(isMain);
   // **자산 곡선은 사람이 앱을 열 때가 아니라 15분마다 남는다.**
   // 예전에는 GET이 찍어서, 밤사이 자산 변화가 통째로 비어 있었다.

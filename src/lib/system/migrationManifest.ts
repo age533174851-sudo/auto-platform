@@ -100,6 +100,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '083_paper_challenge_core.sql', id: 83, risk: 'ADDITIVE', checksum: '6d84d8e573cb6ead' },
   { name: '084_paper_open_position_ambiguity.sql', id: 84, risk: 'ADDITIVE', checksum: 'cb4d6ca0ee03bb4e' },
   { name: '085_paper_challenge_accounting.sql', id: 85, risk: 'DESTRUCTIVE', checksum: '43c92ef1bad313ee' },
+  { name: '086_paper_challenge_finalizer.sql', id: 86, risk: 'ADDITIVE', checksum: '1b994d7cb7668771' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */

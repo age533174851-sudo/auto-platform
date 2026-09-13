@@ -164,4 +164,36 @@ export function runPaperOpenAtomicTests() {
     eq('feeApplied' in r, false);
   });
 
+
+  // ── 챌린지는 RUNNING에서만 주문을 받는다 (086) ──
+  //
+  // CLOSING/CLOSED만 막으면 **READY에서 시작 시각 전에 주문이 열린다.**
+  // 그래서 SQL은 RUNNING이 아니면 전부 거부하고, 여기서는 그 거절이
+  // **오류가 아니라 상태로** 전달되는지 본다 — 오류로 뭉개면 사용자는
+  // 왜 안 됐는지 모르고, 화면은 "체결 실패"라고 적는다.
+
+  test('★ CHALLENGE_NOT_RUNNING은 상태로 전달된다 — ERROR로 뭉개지 않는다', async () => {
+    const sb: any = {
+      rpc: () => Promise.resolve({
+        data: [{ status: 'CHALLENGE_NOT_RUNNING', position_id: null }], error: null }),
+    };
+    const r = await openPaperPosition(sb, {
+      userId: 'u', signalId: 's-not-running', strategyId: 'scalp', plan: PLAN, entryPrice: 100,
+    });
+    eq(r.ok, false);
+    eq(r.status, 'CHALLENGE_NOT_RUNNING');
+    assert(!/알 수 없는/.test(String(r.error)),
+      `모르는 결과로 떨어졌다: ${String(r.error)}`);
+  });
+
+  test('모르는 결과는 여전히 ERROR다 — 새 상태를 조용히 받아들이지 않는다', async () => {
+    const sb: any = {
+      rpc: () => Promise.resolve({ data: [{ status: 'SOMETHING_NEW', position_id: null }], error: null }),
+    };
+    const r = await openPaperPosition(sb, {
+      userId: 'u', signalId: 's-unknown', strategyId: 'scalp', plan: PLAN, entryPrice: 100,
+    });
+    eq(r.status, 'ERROR');
+  });
+
 }

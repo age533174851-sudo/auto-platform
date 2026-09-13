@@ -43,6 +43,9 @@ on:
       # 고쳐 놓고 한 번도 돌려 보지 않은 채 머지된다.
       - 'scripts/paper-challenge-concurrency.sh'
       - 'scripts/paper-challenge-mutations.mjs'
+      - 'scripts/paper-challenge-finalizer-concurrency.sh'
+      - 'scripts/paper-challenge-finalizer-mutations.mjs'
+      - 'scripts/check-paper-challenge-finalizer.mjs'
       - 'scripts/lib/paper-money-path.mjs'
       # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
       - 'scripts/apply-migrations.mjs'
@@ -59,6 +62,9 @@ on:
       # 고쳐 놓고 한 번도 돌려 보지 않은 채 머지된다.
       - 'scripts/paper-challenge-concurrency.sh'
       - 'scripts/paper-challenge-mutations.mjs'
+      - 'scripts/paper-challenge-finalizer-concurrency.sh'
+      - 'scripts/paper-challenge-finalizer-mutations.mjs'
+      - 'scripts/check-paper-challenge-finalizer.mjs'
       - 'scripts/lib/paper-money-path.mjs'
       # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
       - 'scripts/apply-migrations.mjs'
@@ -459,6 +465,91 @@ jobs:
           fi
           {
             echo "### 뮤테이션"
+            echo ""
+            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 생명주기가 실제로 끝까지 닫히는가 (086 실행 증명)
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 \
+            -Xf scripts/sql/086_paper_challenge_finalizer_proof.sql \
+            > /tmp/fin-proof.out 2>&1 || {
+              echo "::error::생명주기가 계약대로 닫히지 않습니다 — 아래 FAIL/ERROR 줄을 보세요"
+              cat /tmp/fin-proof.out
+              exit 1
+            }
+          cat /tmp/fin-proof.out
+          # 0건을 통과로 적지 않는다. 파일이 통째로 건너뛰어도 psql은 0으로 끝난다.
+          n_ok="$(grep -c 'ok  ' /tmp/fin-proof.out || true)"
+          if [ "${n_ok}" -lt 45 ]; then
+            echo "::error::생명주기 확인이 ${n_ok}건뿐입니다 — 증명이 실제로 돌지 않았습니다"
+            exit 1
+          fi
+          # **거부만 확인하는 증명은 만점을 받는다.** 중재 부등식과 진입 계약이
+          # 실제로 확인됐는지 문구로 붙든다.
+          for need in '어느 순간에도 둘 다 참이 아니다' \
+                      'READY에서는 진입이 막힌다' \
+                      'RUNNING에서는 진입이 열린다' \
+                      '일반 계좌는 신선도에 걸리지 않는다' \
+                      '포지션 0 + 원장 일치' \
+                      '챌린지 생명주기 실행 증명 전부 통과'; do
+            if ! grep -q "${need}" /tmp/fin-proof.out; then
+              echo "::error::증명에 이 확인이 없습니다: ${need}"
+              exit 1
+            fi
+          done
+          {
+            echo "### 챌린지 생명주기 실행 증명"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (중재 부등식 · RUNNING only 진입 · 마감 계약)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 마감을 동시에 두 번 해 본다 (086 동시성)
+        run: |
+          set -euo pipefail
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          bash scripts/paper-challenge-finalizer-concurrency.sh > /tmp/fin-conc.out 2>&1 || {
+            echo "::error::마감 동시성 계약이 지켜지지 않습니다 — 아래 FAIL 줄을 보세요"
+            cat /tmp/fin-conc.out
+            exit 1
+          }
+          cat /tmp/fin-conc.out
+          n_ok="$(grep -c '^ok  ' /tmp/fin-conc.out || true)"
+          if [ "${n_ok}" -lt 18 ]; then
+            echo "::error::마감 동시성 확인이 ${n_ok}건뿐입니다"
+            exit 1
+          fi
+          # **출발선에 정말 모였는지**까지 본다. 겹치지 않은 채 통과한 적이 있다.
+          if [ "$(grep -c '둘이 출발선에 모였다' /tmp/fin-conc.out || true)" -lt 3 ]; then
+            echo "::error::세 판이 실제로 겹치지 않았습니다 — 경합을 만들지 못한 통과입니다"
+            exit 1
+          fi
+          {
+            echo "### 챌린지 마감 동시성"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (이중 마감 0 · 부분 마감 0 · 교착 0)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 마감 규칙을 하나씩 빼 본다 (086 뮤테이션)
+        run: |
+          set -euo pipefail
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          node scripts/paper-challenge-finalizer-mutations.mjs > /tmp/fin-mut.out 2>&1 || {
+            echo "::error::규칙을 깼는데 검사가 초록입니다 — 그 규칙은 아무도 지키지 않습니다"
+            cat /tmp/fin-mut.out
+            exit 1
+          }
+          cat /tmp/fin-mut.out
+          n_red="$(grep -c '      RED' /tmp/fin-mut.out || true)"
+          if [ "${n_red}" -lt 15 ]; then
+            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
+            exit 1
+          fi
+          {
+            echo "### 챌린지 마감 뮤테이션"
             echo ""
             echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
           } >> "$GITHUB_STEP_SUMMARY"

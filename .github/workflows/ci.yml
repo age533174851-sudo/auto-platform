@@ -281,6 +281,14 @@ jobs:
       - name: 챌린지 스키마·도메인 (SQL CHECK와 TS 목록이 같은 집합인가)
         run: node scripts/check-paper-challenge-core.mjs
 
+      # ── 생명주기를 미는 경로가 계약대로 생겼는가 ──
+      #
+      # 잠금 순서·신선도 위치·now() 금지는 **실행해서는 구별되지 않는** 것이
+      # 있다. 실제 시계로는 `>`와 `>=`가 나노초 안에서만 다르고, now()는
+      # 잠금을 오래 기다린 트랜잭션에서만 드러난다. 조건을 읽는 검사가 필요하다.
+      - name: 챌린지 마감·만료 계약 (잠금 순서 · 신선도 위치 · now() 금지)
+        run: node scripts/check-paper-challenge-finalizer.mjs
+
       # ── 충전이 성공했는데 실패라고 답하지 않는가 ──
       #
       # `082`가 `paper_deposit`의 반환을 TABLE에서 NUMERIC으로 바꿨는데 부르는

@@ -74,13 +74,27 @@ BEGIN
   RAISE NOTICE 'ok  %  → SUM(원장)=잔고=%', p_label, v_bal;
 END $fn$ LANGUAGE plpgsql;
 
+-- ── 시각은 **지금을 기준으로** 만든다 ──
+--
+-- 예전에는 2026-03-01 같은 고정 날짜를 박았다. `086`이 사건 시각 신선도
+-- 계약(`clock_timestamp() <= event + L`)을 넣으면서 그 픽스처가 전부
+-- "너무 오래된 사건"이 됐다 — 계약이 옳고 픽스처가 낡은 것이다.
+--
+-- 그래서 창 전체를 지금 근처로 옮긴다. **상대 관계는 그대로다**:
+--
+--   t_before < t_start < t_mid < t_end < t_after
+--
+-- 전부 신선도 안(±L)에 들어오므로, 이 파일이 보던 경계(기간 전 달성·기간 밖
+-- 달성·기간 끝 정확히)는 의미가 바뀌지 않는다.
 CREATE TEMP TABLE t AS SELECT
   'ca000000-0000-0000-0000-00000000000a'::uuid AS u1,
   'ca000000-0000-0000-0000-00000000000b'::uuid AS u2,
-  '2026-03-01T00:00:00Z'::timestamptz AS t_start,
-  '2026-03-31T00:00:00Z'::timestamptz AS t_end,
-  '2026-03-10T00:00:00Z'::timestamptz AS t_mid,
-  '2026-04-05T00:00:00Z'::timestamptz AS t_after;
+  clock_timestamp() - INTERVAL '40 seconds' AS t_start,
+  clock_timestamp() - INTERVAL '10 seconds' AS t_end,
+  clock_timestamp() - INTERVAL '20 seconds' AS t_mid,
+  clock_timestamp()                         AS t_after,
+  clock_timestamp() - INTERVAL '45 seconds' AS t_before,
+  clock_timestamp() - INTERVAL  '9 seconds' AS t_end_plus1;
 
 CREATE TEMP TABLE h (k TEXT PRIMARY KEY, v UUID);
 
@@ -144,7 +158,7 @@ SELECT pg_temp.invariant('재생성 뒤 불변식', (SELECT v FROM h WHERE k='ch
 SELECT pg_temp.must_fail('생성: 사건 시각 없으면 거부 (진입 계약 22004)', '22004', $q$
   SELECT challenge_id FROM public.paper_challenge_create(
     'ca000000-0000-0000-0000-00000000000b'::uuid, 1000, 1200, 900,
-    '2026-03-01T00:00:00Z'::timestamptz, '2026-03-31T00:00:00Z'::timestamptz, NULL)
+    (SELECT t_start FROM t)::timestamptz, (SELECT t_end FROM t)::timestamptz, NULL)
 $q$);
 
 SELECT pg_temp.want('거부된 생성은 계좌를 만들지 않았다',
@@ -345,13 +359,13 @@ BEGIN
   SELECT challenge_id, paper_account_id INTO v_ch, v_acc
     FROM public.paper_challenge_create(
       p_user, 1000, 1200, 900,
-      '2026-03-01T00:00:00Z'::timestamptz, '2026-03-31T00:00:00Z'::timestamptz,
-      '2026-03-02T00:00:00Z'::timestamptz);
+      (SELECT t_start FROM t)::timestamptz, (SELECT t_end FROM t)::timestamptz,
+      (SELECT t_mid FROM t)::timestamptz);
 
   SELECT position_id INTO v_pos FROM public.paper_open_position(
     p_user, p_sig, NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 1, 'ISOLATED',
-    '2026-03-02T00:00:00Z'::timestamptz, v_acc);
+    (SELECT t_mid FROM t)::timestamptz, v_acc);
 
   -- **아직 실현된 것이 없다.** 열린 포지션이 얼마짜리든 판정은 움직이지 않는다.
   IF (SELECT c.close_intent FROM public.paper_challenges c WHERE c.id = v_ch) IS NOT NULL THEN
@@ -375,19 +389,19 @@ END $fn$ LANGUAGE plpgsql;
 -- 1000 − 1 + 300 − 1 = 1298 ≥ 1200. 사건 시각이 **ends_at과 같은 순간**이다.
 SELECT pg_temp.want('경계: ends_at과 같은 순간의 달성은 인정한다',
   pg_temp.run_case('ca000000-0000-0000-0000-00000000000c'::uuid, 'edge-eq', 300,
-                   '2026-03-31T00:00:00Z'::timestamptz),
+                   (SELECT t_end FROM t)::timestamptz),
   'TARGET_REACHED');
 
 -- 같은 금액인데 1초 늦었다. **달성이 아니다.**
 SELECT pg_temp.want('경계: ends_at을 1초 지난 통과는 달성이 아니다',
   pg_temp.run_case('ca000000-0000-0000-0000-00000000000d'::uuid, 'edge-1s', 300,
-                   '2026-03-31T00:00:01Z'::timestamptz),
+                   (SELECT t_end_plus1 FROM t)::timestamptz),
   'NULL');
 
 -- starts_at보다 이른 사건도 달성이 아니다.
 SELECT pg_temp.want('경계: starts_at 이전의 통과도 달성이 아니다',
   pg_temp.run_case('ca000000-0000-0000-0000-00000000000e'::uuid, 'edge-pre', 300,
-                   '2026-02-28T23:59:59Z'::timestamptz),
+                   (SELECT t_before FROM t)::timestamptz),
   'NULL');
 
 -- ══════════════════ ⑫ 실패는 실현 잔고로만 판정한다 ══════════════════
@@ -395,25 +409,25 @@ SELECT pg_temp.want('경계: starts_at 이전의 통과도 달성이 아니다',
 -- 1000 − 1 − 160 − 1 = 838 ≤ 900.
 SELECT pg_temp.want('실패: 실현 잔고가 실패선 아래로 내려가면 FAILED',
   pg_temp.run_case('ca000000-0000-0000-0000-00000000000f'::uuid, 'fail-1', -160,
-                   '2026-03-10T00:00:00Z'::timestamptz),
+                   (SELECT t_mid FROM t)::timestamptz),
   'FAILED');
 
 -- 실패선은 기간 밖에서도 판정한다 — 돈이 없어진 것은 시각과 무관하다.
 SELECT pg_temp.want('실패: 기간을 지난 뒤에도 실패는 실패다',
   pg_temp.run_case('ca000000-0000-0000-0000-000000000010'::uuid, 'fail-late', -160,
-                   '2026-04-05T00:00:00Z'::timestamptz),
+                   (SELECT t_after FROM t)::timestamptz),
   'FAILED');
 
 -- 아슬아슬하게 안 내려갔으면 아무 사유도 없다.
 -- 1000 − 1 − 98 − 1 = 900 ≤ 900 이므로 실패다. 1 더 벌면 901로 살아난다.
 SELECT pg_temp.want('실패: 실패선과 같은 값은 실패다 (<=)',
   pg_temp.run_case('ca000000-0000-0000-0000-000000000011'::uuid, 'fail-eq', -98,
-                   '2026-03-10T00:00:00Z'::timestamptz),
+                   (SELECT t_mid FROM t)::timestamptz),
   'FAILED');
 
 SELECT pg_temp.want('실패: 실패선보다 1 위면 아무 사유도 정하지 않는다',
   pg_temp.run_case('ca000000-0000-0000-0000-000000000012'::uuid, 'fail-above', -97,
-                   '2026-03-10T00:00:00Z'::timestamptz),
+                   (SELECT t_mid FROM t)::timestamptz),
   'NULL');
 
 -- ══════════════════ ⑬ 진입 수수료만으로 실패선을 넘길 수 있다 ══════════════════
@@ -429,13 +443,13 @@ BEGIN
   SELECT challenge_id, paper_account_id INTO v_ch, v_acc
     FROM public.paper_challenge_create(
       p_user, 1000, 1200, 900,
-      '2026-03-01T00:00:00Z'::timestamptz, '2026-03-31T00:00:00Z'::timestamptz,
-      '2026-03-02T00:00:00Z'::timestamptz);
+      (SELECT t_start FROM t)::timestamptz, (SELECT t_end FROM t)::timestamptz,
+      (SELECT t_mid FROM t)::timestamptz);
 
   PERFORM public.paper_open_position(
     p_user, p_sig, NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
     100, 100, 1, 100, 1, 100, NULL, NULL, 50, p_fee, 'ISOLATED',
-    '2026-03-02T00:00:00Z'::timestamptz, v_acc);
+    (SELECT t_mid FROM t)::timestamptz, v_acc);
 
   IF (SELECT a.balance FROM public.paper_accounts a WHERE a.id = v_acc)
      IS DISTINCT FROM
@@ -466,12 +480,12 @@ DECLARE v_acc UUID; v_pos UUID; v_state TEXT;
 BEGIN
   SELECT paper_account_id INTO v_acc FROM public.paper_challenge_create(
     p_user, 1000, 1200, 900,
-    '2026-03-01T00:00:00Z'::timestamptz, '2026-03-31T00:00:00Z'::timestamptz,
-    '2026-03-02T00:00:00Z'::timestamptz);
+    (SELECT t_start FROM t)::timestamptz, (SELECT t_end FROM t)::timestamptz,
+    (SELECT t_mid FROM t)::timestamptz);
   SELECT position_id INTO v_pos FROM public.paper_open_position(
     p_user, p_sig, NULL, NULL, 'BTCUSDT', 'USDM', 'LONG',
     100, 100, 1, 100, 1, 100, NULL, NULL, 50, 1, 'ISOLATED',
-    '2026-03-02T00:00:00Z'::timestamptz, v_acc);
+    (SELECT t_mid FROM t)::timestamptz, v_acc);
 
   BEGIN
     PERFORM public.paper_settle_close(v_pos, 350, 'TP', 1, 250, 249, 25, NULL);

@@ -58,8 +58,9 @@ export async function openPaperPosition(
   }
 ): Promise<{
   ok: boolean;
-  /** OPENED | DUPLICATE | NO_ACCOUNT | INSUFFICIENT_MARGIN | ERROR */
-  status: 'OPENED' | 'DUPLICATE' | 'NO_ACCOUNT' | 'INSUFFICIENT_MARGIN' | 'ERROR';
+  /** OPENED | DUPLICATE | NO_ACCOUNT | INSUFFICIENT_MARGIN | CHALLENGE_NOT_RUNNING | ERROR */
+  status: 'OPENED' | 'DUPLICATE' | 'NO_ACCOUNT' | 'INSUFFICIENT_MARGIN'
+        | 'CHALLENGE_NOT_RUNNING' | 'ERROR';
   positionId?: string;
   fill?: PaperFill;
   error?: string;
@@ -137,6 +138,14 @@ export async function openPaperPosition(
       // 동시에 들어온 두 신호는 둘 다 통과한 것처럼 보일 수 있다.
       return { ok: false, status: 'INSUFFICIENT_MARGIN',
         error: '모의 계좌의 가용 증거금이 부족해 진입하지 않았습니다' };
+    }
+    if (status === 'CHALLENGE_NOT_RUNNING') {
+      // **정상 상태다.** 챌린지 계좌는 RUNNING에서만 주문을 받는다(086).
+      // READY는 아직 시작 전이고, CLOSING/CLOSED는 정리 중이거나 끝났다.
+      // 오류로 뭉개면 사용자는 "왜 안 되지"에 답을 못 받고, 마감은
+      // 새로 들어온 포지션 때문에 영영 끝나지 않는다.
+      return { ok: false, status: 'CHALLENGE_NOT_RUNNING',
+        error: '이 챌린지는 지금 주문을 받지 않습니다 (진행 중일 때만 가능합니다)' };
     }
     if (status === 'NO_ACCOUNT') {
       // 계좌를 여기서 만들지 않는다(071). 시작한 적 없는 계좌가 거래로
