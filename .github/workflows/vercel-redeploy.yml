@@ -64,10 +64,19 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # ── **여기서 도는 코드는 언제나 기본 브랜치의 것이다** ──
+      #
+      # `workflow_run`은 특권 경로다. 이 job은 secret(Deploy Hook)을 쥐고
+      # 있고, 만약 깨운 쪽의 head를 checkout해서 돌리면 **그 커밋에 담긴
+      # 아무 스크립트나 secret을 쥔 채 실행된다.** 복구 대상 커밋은 코드가
+      # 아니라 **비교할 값(MAIN)으로만** 쓴다.
+      #
+      # 그래서 ref를 이벤트에서 받지 않고 기본 브랜치로 고정한다. 손으로
+      # 돌릴 때도 마찬가지다 — 이 워크플로가 어느 ref에서 호출됐든 실행되는
+      # 스크립트는 하나뿐이어야 한다.
       - uses: actions/checkout@v4
         with:
-          # 복구 대상이 된 그 커밋의 스크립트로 돈다.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.repository.default_branch }}
 
       - uses: actions/setup-node@v4
         with:
