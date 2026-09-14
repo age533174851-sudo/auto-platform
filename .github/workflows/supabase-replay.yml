@@ -79,10 +79,38 @@ permissions:
 concurrency:
   group: supabase-replay-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  replay:
-    name: 번호 마이그레이션만으로 빈 DB 재생 (공식 Supabase 로컬)
+  # ══════════════════════════════════════════════════════════════════
+  #  왜 job이 둘인가
+  # ══════════════════════════════════════════════════════════════════
+  #
+  # **하나였을 때 25분에서 잘렸다.**
+  #
+  # main c61271eb의 #54는 계약이 깨져서 실패한 것이 아니다. 086 증명·동시성·
+  # 뮤테이션과 승인 경로 증명까지 전부 통과한 뒤, 마지막 승인 경로 뮤테이션이
+  # 18분52초 지점에서 job timeout에 잘렸다. 같은 트리가 34분 전 #53에서는
+  # 23분35초로 통과했다 — 러너 편차 2분이 곧 실패가 되는 자리였다.
+  #
+  # **timeout을 40분으로 늘리지 않는다.** 그건 절벽을 뒤로 미루는 것이지
+  # 없애는 것이 아니고, 다음 증명이 하나 붙는 날 같은 일이 또 난다.
+  #
+  # 승인 경로 뮤테이션(혼자 17분)은 재생 DB에 의존하지 않는다 —
+  # `approval-path-proof.mjs`가 같은 서버에 **전용 DB를 만들어** 그 안에서만
+  # 돌고 끝나면 지운다. 그래서 다른 러너로 떼어 내도 검사하는 대상이 달라지지
+  # 않는다. 러너가 다르면 Docker도 Postgres도 작업공간도 따로다 — 두 job이
+  # 서로의 DB를 볼 수 있는 자리가 구조적으로 없다.
+  #
+  # 검사는 하나도 줄이지 않았다. 단계의 내용·임계값·요구 문구가 전부 그대로다.
+  #
+  # 이름에 대하여
+  # ─────────────
+  # 최종 판정 job이 **원래 이름을 그대로 쓴다**. 이 이름이 브랜치 보호의
+  # required check으로 물려 있을 수 있고, 이름이 바뀌면 검사가 사라진 채로
+  # 초록이 된다 — **검사가 대상을 잃으면 조용히 통과한다.** 실제 작업은
+  # `replay-core` · `approval-mutations`라는 내부 이름으로 나뉜다.
+
+  replay-core:
+    name: 재생 본체 (스키마 · 제약 · RPC · 085 · 086 · 승인 증명)
     runs-on: ubuntu-latest
     # Docker 이미지를 처음 받아 오는 시간이 있다. 너무 짧게 잡으면 실패가
     # 아니라 시간 초과가 보고된다.
@@ -91,52 +119,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.2.2
 
-      # 재생 자체는 CLI와 psql만으로 돌지만, 승인 경로 증명(18·19단계)은
-      # `scripts/apply-migrations.mjs`를 **실제로 실행한다.** 그 러너는
-      # 분류 로직을 복제하지 않고 `loadPlan()`으로 `migrationPlan.ts`를
-      # 저장소의 tsc로 컴파일해서 쓴다 — 그래서 node_modules가 필요하다.
-      # 없으면 증명이 계약에 닿기도 전에 죽는다.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-
-      # `npm install`은 잠금 파일을 고친다. 그러면 이 워크플로가 ci.yml과
-      # 다른 의존성으로 통과할 수 있다.
-      - name: 의존성 설치
-        run: npm ci
-
-      # 움직이는 태그를 쓰지 않는다. 태그는 다시 가리킬 수 있고, 그러면
-      # "어제 통과한 것과 같은 것을 돌렸다"고 말할 수 없다.
-      - name: 공식 Supabase CLI 설치 (버전 고정)
-        uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520  # v3.0.0
-        with:
-          version: 2.116.0
-
-      - name: CLI·Docker 확인
-        run: |
-          set -euo pipefail
-          got="$(supabase --version)"
-          echo "supabase CLI: ${got}"
-          if [ "${got}" != "2.116.0" ]; then
-            echo "::error::CLI 버전이 고정값과 다릅니다 — 기대 2.116.0 / 실제 ${got}"
-            exit 1
-          fi
-          docker version --format '{{.Server.Version}}'
-
-      # config.toml은 저장소에 두지 않는다. 아직 두어야 할 이유가 증명되지
-      # 않았고, 두는 순간 "로컬 스택 설정"이라는 관리 대상이 하나 더 생긴다.
-      # 없을 때만 만든다. --force는 쓰지 않는다 — 있는 설정을 덮어쓰는 일은
-      # 이 워크플로가 할 일이 아니다.
-      - name: config가 없으면 만든다
-        run: |
-          set -euo pipefail
-          if [ -f supabase/config.toml ]; then
-            echo "supabase/config.toml 있음 — 저장소 설정을 그대로 씁니다"
-          else
-            echo "supabase/config.toml 없음 — 이 실행에서만 쓸 기본 설정을 만듭니다"
-            supabase init
-          fi
+      - name: 공식 Supabase 로컬 스택 (준비는 한 곳에만 있다)
+        uses: ./.github/actions/supabase-local
 
       - name: 재생 대상 확인 (번호 있는 것만)
         id: expected
@@ -158,36 +142,6 @@ jobs:
             exit 1
           fi
           echo "count=${n_expected}" >> "$GITHUB_OUTPUT"
-
-      - name: 공식 로컬 스택 시작
-        run: |
-          set -euo pipefail
-          supabase start
-
-      # 여기가 본 계약이다. 빈 DB를 만들고 저장소의 번호 마이그레이션만으로
-      # 처음부터 다시 세운다. seed는 쓰지 않는다 — 업무 데이터가 섞이면
-      # "스키마가 선다"와 "데이터가 있다"가 뒤엉킨다.
-      - name: 빈 DB에서 다시 세우기 (supabase db reset --no-seed)
-        run: |
-          set -euo pipefail
-          supabase db reset --local --no-seed
-
-      - name: 로컬 DB 주소 확인
-        run: |
-          set -euo pipefail
-          # 포트·비밀번호를 코드에 박지 않는다. CLI가 알려 주는 값을 쓴다.
-          supabase status -o env > /tmp/supabase-status.env
-          # shellcheck disable=SC1091
-          set +u
-          . /tmp/supabase-status.env
-          set -u
-          if [ -z "${DB_URL:-}" ]; then
-            echo "::error::supabase status에서 DB_URL을 얻지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다"
-            exit 1
-          fi
-          # 값은 출력하지 않는다. 로컬 개발용이어도 습관을 깨지 않는다.
-          echo "DB_URL 확보 (값은 출력하지 않습니다)"
-          printf '%s\n' "${DB_URL}" > /tmp/db-url
 
       - name: 공식 마이그레이션 기록이 파일 목록과 같은가
         run: |
@@ -596,28 +550,6 @@ jobs:
             echo "확인 ${n_ok}건 통과 (전용 DB 격리 · 거부 12종 · 순서 건너뛰기 차단 · 승인 1건만 통과 · 본 DB 비간섭)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 승인 검사를 하나씩 빼 본다 (승인 경로 뮤테이션)
-        run: |
-          set -euo pipefail
-          PROOF_DB_URL="$(cat /tmp/db-url)"
-          export PROOF_DB_URL
-          node scripts/approval-path-mutations.mjs > /tmp/ap-mut.out 2>&1 || {
-            echo "::error::승인 검사를 뺐는데 증명이 초록입니다 — 그 검사는 아무 일도 하지 않습니다"
-            cat /tmp/ap-mut.out
-            exit 1
-          }
-          cat /tmp/ap-mut.out
-          n_red="$(grep -c '^      RED' /tmp/ap-mut.out || true)"
-          if [ "${n_red}" -lt 10 ]; then
-            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
-            exit 1
-          fi
-          {
-            echo "### 승인 경로 뮤테이션"
-            echo ""
-            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: 요약
         if: always()
         run: |
@@ -674,3 +606,103 @@ jobs:
         if: always()
         continue-on-error: true
         run: supabase stop --no-backup
+
+  # 17분짜리 스윕 하나만 있는 job. 재생 본체와 **동시에** 돈다.
+  approval-mutations:
+    name: 승인 검사를 하나씩 빼 본다 (승인 경로 뮤테이션)
+    runs-on: ubuntu-latest
+    # 스윕이 17분, 준비가 2분 30초다. 재생 본체와 같은 25분을 주면 여유가
+    # 5분뿐이라 나누는 의미가 없다. 이 job에는 이 스윕 하나뿐이므로
+    # 넉넉히 두어도 다른 검사의 시간을 뺏지 않는다.
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.2.2
+
+      - name: 공식 Supabase 로컬 스택 (준비는 한 곳에만 있다)
+        uses: ./.github/actions/supabase-local
+
+      - name: 승인 검사를 하나씩 빼 본다 (승인 경로 뮤테이션)
+        run: |
+          set -euo pipefail
+          PROOF_DB_URL="$(cat /tmp/db-url)"
+          export PROOF_DB_URL
+          node scripts/approval-path-mutations.mjs > /tmp/ap-mut.out 2>&1 || {
+            echo "::error::승인 검사를 뺐는데 증명이 초록입니다 — 그 검사는 아무 일도 하지 않습니다"
+            cat /tmp/ap-mut.out
+            exit 1
+          }
+          cat /tmp/ap-mut.out
+          n_red="$(grep -c '^      RED' /tmp/ap-mut.out || true)"
+          if [ "${n_red}" -lt 10 ]; then
+            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
+            exit 1
+          fi
+          {
+            echo "### 승인 경로 뮤테이션"
+            echo ""
+            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 요약
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## 승인 경로 뮤테이션 (별도 job)"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "|---|---|"
+            echo "| CLI | 2.116.0 (고정) |"
+            echo "| 전용 DB | 이 job 안에서만 생성·정리 |"
+            echo "| 결과 | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 정리가 실패해도 원래 실패를 덮지 않는다. 여기서 exit 1을 내면
+      # "재생이 실패했다"가 "정리가 실패했다"로 바뀌어 보고된다.
+      - name: 로컬 스택 정리
+        if: always()
+        continue-on-error: true
+        run: supabase stop --no-backup
+
+  # ══════════════════════════════════════════════════════════════════
+  #  최종 판정 — **이름이 예전 그대로다**
+  # ══════════════════════════════════════════════════════════════════
+  #
+  # 브랜치 보호가 물고 있을 수 있는 이름을 여기서 그대로 이어받는다.
+  # 둘 다 success일 때만 0으로 끝난다. **cancelled·skipped를 통과로 읽지
+  # 않는다** — 시간 초과로 잘린 것이 바로 cancelled였고, 그것을 초록으로
+  # 적었다면 이 PR의 출발점인 그 실패가 보이지 않았다.
+  gate:
+    name: 번호 마이그레이션만으로 빈 DB 재생 (공식 Supabase 로컬)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [replay-core, approval-mutations]
+    if: always()
+
+    steps:
+      - name: 두 job이 모두 통과했는가
+        env:
+          CORE: ${{ needs.replay-core.result }}
+          MUT: ${{ needs.approval-mutations.result }}
+        run: |
+          set -euo pipefail
+          echo "재생 본체: ${CORE}"
+          echo "승인 경로 뮤테이션: ${MUT}"
+          rc=0
+          for pair in "재생 본체:${CORE}" "승인 경로 뮤테이션:${MUT}"; do
+            name="${pair%%:*}"; result="${pair##*:}"
+            if [ "${result}" != "success" ]; then
+              echo "::error::${name}가 success가 아닙니다 (${result}) — 통과로 적지 않습니다"
+              rc=1
+            fi
+          done
+          {
+            echo "## 재생 최종 판정"
+            echo ""
+            echo "| job | 결과 |"
+            echo "|---|---|"
+            echo "| 재생 본체 | ${CORE} |"
+            echo "| 승인 경로 뮤테이션 | ${MUT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${rc}"
