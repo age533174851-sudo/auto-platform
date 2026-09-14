@@ -1,0 +1,452 @@
+# 회원가입과 일반 모의투자가 운영에서 실제로 어떤 상태인지 **읽기만 해서** 본다.
+#
+# 왜 필요한가
+# ───────────
+# 사용자 제보 두 건이 들어왔다 — "이메일 회원가입이 안 된다", "기존 모의투자도
+# 안 되는 것 같다". 저장소만 읽어서는 둘 다 **UNKNOWN이다.**
+#
+#   · `002`의 `handle_new_user` 트리거가 `profiles`에 넣지 못하면 `auth.users`
+#     INSERT까지 롤백된다 → 가입이 통째로 500으로 실패한다. 그런데 운영
+#     `profiles`의 실제 모양을 저장소가 알지 못한다. `016_profiles_align.sql`은
+#     체크섬 드리프트 경고 목록에 있는 파일이다 — 적용된 뒤 파일이 바뀌었다.
+#   · 일반 모의투자는 `is_default = true`인 계좌 **한 줄**을 요구한다. `081`은
+#     백필했지만, 그 주석이 스스로 적어 둔 대로 **0개가 되는 상태를 DB가 막지
+#     못한다.** 0개면 `resolvePaperScope`가 NO_ACCOUNT를 돌려주고 주문이 전부
+#     막힌다.
+#
+# **추측으로 고치지 않기 위해 먼저 본다.** 확인하지 못한 것은 통과가 아니다.
+#
+# 업무 데이터는 읽지 않는다
+# ─────────────────────────
+# `pg_catalog`·`information_schema`와 **집계 숫자**뿐이다. 이메일·user_id·
+# 계좌 잔고·포지션은 한 줄도 출력하지 않는다. 개수만 센다.
+#
+# 왜 이렇게 좁게 트리거하나
+# ─────────────────────────
+#   · `pull_request` 없음      — PR 검토 중에는 운영 DB 접속이 0이어야 한다
+#   · `workflow_dispatch` 없음 — 아무 때나 운영 DB를 두드리는 문을 만들지 않는다
+#   · `push` + 이 파일 경로    — 이 파일이 main에 들어오는 그때 한 번 돈다
+#
+# 쓰기는 Postgres가 거부한다
+# ──────────────────────────
+# `BEGIN TRANSACTION READ ONLY`로 열고, 실제로 `READ_ONLY=on`이었는지 값으로
+# 확인한다. 확인이 안 되면 실패로 끝난다. 스키마도 `schema_migrations`도
+# 건드리지 않는다 — `016`의 체크섬 드리프트는 **여기서 고치지 않는다.**
+#
+# 표가 없어도 크래시하지 않는다
+# ─────────────────────────────
+# 없는 표를 직접 참조하면 psql이 **파싱 단계에서** 끊기고, 그러면 "없다"를
+# 보고하는 대신 감사 전체가 죽는다. 업무 표를 세는 질의는 전부
+# `query_to_xml`로 **실행 시점에** 평가한다 — 표가 없으면 그 항목만 UNKNOWN이
+# 된다.
+name: audit-production-signup-and-paper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-signup-and-paper.yml'
+
+concurrency:
+  group: audit-production-signup-and-paper
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 회원가입·일반 모의투자 운영 상태 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      # 접속 정보가 없으면 여기서 멈춘다. 없이 내려가면 "아무것도 안 나왔다"가
+      # "없다"처럼 보인다. **확인하지 못한 것은 통과가 아니다.**
+      - name: DB 접속 정보 확인
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 상태를 확인할 수 없습니다"
+            echo "값은 GitHub Secrets에만 있습니다. 이 로그에는 출력하지 않습니다."
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      # ── 조회: 카탈로그 + 집계 숫자만 ──
+      #
+      # 업무 표는 `query_to_xml`로 **실행 시점에** 평가한다. 표가 없으면 그
+      # 항목만 UNKNOWN이 되고 감사는 계속된다 — 없는 표를 직접 참조하면
+      # psql이 파싱에서 끊겨 "없다"를 보고하지도 못한다.
+      - name: 운영 상태 조회 (BEGIN TRANSACTION READ ONLY)
+        id: audit
+        run: |
+          set -o pipefail
+
+          cat > "${RUNNER_TEMP}/audit.sql" <<'SQL'
+          \set ON_ERROR_STOP on
+          
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '20s';
+          SET LOCAL lock_timeout = '3s';
+          
+          \echo '=== 0. READ ONLY 증명 ==='
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+          
+          \echo ''
+          \echo '=== 1. 가입 트리거 — auth.users 위에 실제로 붙어 있는가 ==='
+          -- 이름으로 찾지 않는다. **auth.users에 달린 트리거 전부**를 보고, 그중
+          -- 무엇이 어느 함수를 부르는지 적는다. 이름만 맞고 다른 표에 붙어 있으면
+          -- 가입은 여전히 프로필을 만들지 않는다.
+          SELECT t.tgname,
+                 NOT t.tgisinternal                         AS user_trigger,
+                 t.tgenabled                                AS enabled_flag,
+                 p.proname                                  AS calls_function,
+                 n.nspname                                  AS function_schema,
+                 pg_get_function_identity_arguments(p.oid)  AS function_args,
+                 p.prosecdef                                AS security_definer,
+                 coalesce(array_to_string(p.proconfig, ','), '(없음)') AS proconfig
+            FROM pg_trigger t
+            JOIN pg_proc p      ON p.oid = t.tgfoid
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE t.tgrelid = to_regclass('auth.users')
+             AND NOT t.tgisinternal
+           ORDER BY t.tgname;
+          
+          \echo ''
+          \echo '=== 2. 트리거가 부르는 함수 자체가 있는가 (이름·시그니처) ==='
+          SELECT p.proname,
+                 pg_get_function_identity_arguments(p.oid) AS arguments,
+                 pg_get_function_result(p.oid)             AS returns,
+                 p.prosecdef                               AS security_definer
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public' AND p.proname = 'handle_new_user'
+           ORDER BY arguments;
+          
+          \echo ''
+          \echo '=== 3. profiles — 트리거가 채우지 않는 NOT NULL 칸 ==='
+          -- `handle_new_user`는 (id, email, display_name) 셋만 넣는다. 기본값 없는
+          -- NOT NULL 칸이 그 밖에 하나라도 있으면 INSERT가 터지고, 트리거가 터지면
+          -- **auth.users INSERT까지 롤백된다** — 가입이 통째로 실패한다.
+          SELECT a.attname,
+                 format_type(a.atttypid, a.atttypmod) AS type,
+                 a.attnotnull                         AS not_null,
+                 coalesce(pg_get_expr(d.adbin, d.adrelid), '(없음)') AS default_expr,
+                 a.attidentity                        AS identity_kind,
+                 a.attgenerated                       AS generated_kind
+            FROM pg_attribute a
+            LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+           WHERE a.attrelid = to_regclass('public.profiles')
+             AND a.attnum > 0 AND NOT a.attisdropped
+             AND a.attnotnull
+             AND d.adbin IS NULL
+             AND a.attidentity = ''
+             AND a.attgenerated = ''
+             AND a.attname NOT IN ('id', 'email', 'display_name')
+           ORDER BY a.attnum;
+          
+          \echo ''
+          \echo '=== 4. profiles 제약 전부 (정의 그대로) ==='
+          SELECT con.conname, con.contype, pg_get_constraintdef(con.oid) AS definition
+            FROM pg_constraint con
+           WHERE con.conrelid = to_regclass('public.profiles')
+           ORDER BY con.contype, con.conname;
+          
+          \echo ''
+          \echo '=== 5. paper_open_position 오버로드 — 이름이 아니라 시그니처 ==='
+          -- 오버로드가 둘 이상이면 PostgREST 호출이 모호해질 수 있다.
+          SELECT p.proname,
+                 p.pronargs                                AS n_args,
+                 pg_get_function_identity_arguments(p.oid) AS arguments,
+                 pg_get_function_result(p.oid)             AS returns
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public'
+             AND p.proname IN ('paper_open_position', 'paper_settle_close',
+                               'paper_challenge_sweep_due', 'paper_challenge_finalize')
+           ORDER BY p.proname, p.pronargs;
+          
+          \echo ''
+          \echo '=== 6. 기본 계좌 · 챌린지 계좌 — 개수만 센다 (식별정보 0) ==='
+          -- **표가 없을 수 있다.** 직접 참조하면 파싱 단계에서 끊기므로 실행 시점에
+          -- 평가한다. 여기서 나오는 것은 전부 **집계 숫자**다 — user_id·이메일·잔고를
+          -- 출력하지 않는다.
+          SELECT k AS metric, coalesce(v, 'UNKNOWN') AS value FROM (
+            SELECT 'USERS_TOTAL_WITH_PAPER_ACCOUNT' AS k,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(DISTINCT user_id) AS c FROM public.paper_accounts $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'USERS_WITH_ZERO_DEFAULT' AS k,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM (SELECT user_id, count(*) FILTER (WHERE is_default) AS n FROM public.paper_accounts GROUP BY user_id) s WHERE s.n = 0 $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'USERS_WITH_ONE_DEFAULT' AS k,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM (SELECT user_id, count(*) FILTER (WHERE is_default) AS n FROM public.paper_accounts GROUP BY user_id) s WHERE s.n = 1 $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'USERS_WITH_TWO_OR_MORE_DEFAULT' AS k,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM (SELECT user_id, count(*) FILTER (WHERE is_default) AS n FROM public.paper_accounts GROUP BY user_id) s WHERE s.n >= 2 $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'CHALLENGE_ACCOUNTS_MARKED_DEFAULT' AS k,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_accounts a WHERE a.is_default AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = a.id) $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'CHALLENGES_TOTAL' AS k,
+                   CASE WHEN to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_challenges $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'PROFILES_TOTAL' AS k,
+                   CASE WHEN to_regclass('public.profiles') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.profiles $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'AUTH_USERS_TOTAL' AS k,
+                   CASE WHEN to_regclass('auth.users') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users $q$, false, true, '') x) END AS v
+            UNION ALL
+            SELECT 'AUTH_USERS_WITHOUT_PROFILE' AS k,
+                   CASE WHEN to_regclass('auth.users') IS NULL OR to_regclass('public.profiles') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users u WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = u.id) $q$, false, true, '') x) END AS v
+          ) s ORDER BY 1;
+          
+          \echo ''
+          \echo '=== 7. 계좌 정체 인덱스 (081) — 정의 그대로 ==='
+          SELECT ic.relname AS index_name, i.indisunique, (i.indpred IS NOT NULL) AS partial,
+                 pg_get_indexdef(i.indexrelid) AS definition
+            FROM pg_index i
+            JOIN pg_class ic ON ic.oid = i.indexrelid
+           WHERE i.indrelid = to_regclass('public.paper_accounts')
+           ORDER BY ic.relname;
+          
+          \echo ''
+          \echo '=== 8. 장부 — 관련 마이그레이션 (읽기만) ==='
+          -- 장부도 없을 수 있다. 없는 표를 직접 참조하면 파싱에서 끊긴다.
+          SELECT migration, coalesce(status, 'UNKNOWN') AS status FROM (
+            SELECT '002_profiles_admin.sql' AS migration,
+                   CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT coalesce(max(status), '(줄 없음)') AS c FROM public.schema_migrations WHERE filename = '002_profiles_admin.sql' $q$, false, true, '') x) END AS status
+            UNION ALL
+            SELECT '016_profiles_align.sql' AS migration,
+                   CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT coalesce(max(status), '(줄 없음)') AS c FROM public.schema_migrations WHERE filename = '016_profiles_align.sql' $q$, false, true, '') x) END AS status
+            UNION ALL
+            SELECT '081_paper_account_identity.sql' AS migration,
+                   CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT coalesce(max(status), '(줄 없음)') AS c FROM public.schema_migrations WHERE filename = '081_paper_account_identity.sql' $q$, false, true, '') x) END AS status
+            UNION ALL
+            SELECT '083_paper_challenge_core.sql' AS migration,
+                   CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT coalesce(max(status), '(줄 없음)') AS c FROM public.schema_migrations WHERE filename = '083_paper_challenge_core.sql' $q$, false, true, '') x) END AS status
+            UNION ALL
+            SELECT '085_paper_challenge_accounting.sql' AS migration,
+                   CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT coalesce(max(status), '(줄 없음)') AS c FROM public.schema_migrations WHERE filename = '085_paper_challenge_accounting.sql' $q$, false, true, '') x) END AS status
+            UNION ALL
+            SELECT '086_paper_challenge_finalizer.sql' AS migration,
+                   CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT coalesce(max(status), '(줄 없음)') AS c FROM public.schema_migrations WHERE filename = '086_paper_challenge_finalizer.sql' $q$, false, true, '') x) END AS status
+          ) s ORDER BY 1;
+          
+          \echo ''
+          \echo '=== 9. 최종 판정 ==='
+          WITH fns AS (
+            SELECT p.proname AS nm, p.pronargs AS nargs,
+                   pg_get_function_identity_arguments(p.oid) AS args
+              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'public'
+          ),
+          num AS (
+            SELECT
+              CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM (SELECT user_id, count(*) FILTER (WHERE is_default) AS n FROM public.paper_accounts GROUP BY user_id) s WHERE s.n = 0 $q$, false, true, '') x) END AS zero_default,
+              CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM (SELECT user_id, count(*) FILTER (WHERE is_default) AS n FROM public.paper_accounts GROUP BY user_id) s WHERE s.n >= 2 $q$, false, true, '') x) END AS multi_default,
+              CASE WHEN to_regclass('public.paper_accounts') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_accounts a WHERE a.is_default AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = a.id) $q$, false, true, '') x) END AS challenge_default,
+              CASE WHEN to_regclass('auth.users') IS NULL OR to_regclass('public.profiles') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users u WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = u.id) $q$, false, true, '') x) END AS orphan_users
+          ),
+          v AS (SELECT
+            -- ── 회원가입 ──
+            -- ① auth.users에 가입 트리거가 붙어 있는가
+            (to_regclass('auth.users') IS NOT NULL) AS auth_users_table_present,
+            EXISTS (SELECT 1 FROM pg_trigger t
+                     WHERE t.tgrelid = to_regclass('auth.users') AND NOT t.tgisinternal
+                       AND t.tgenabled <> 'D')                                  AS signup_trigger_present,
+            -- ② 그 트리거가 부르는 함수가 실제로 존재하는가 (tgfoid로 이어 본다)
+            EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                     WHERE t.tgrelid = to_regclass('auth.users') AND NOT t.tgisinternal
+                       AND p.proname = 'handle_new_user')                       AS signup_trigger_calls_handler,
+            -- ③ 그 함수가 SECURITY DEFINER인가 — 아니면 RLS에 막혀 조용히 실패한다
+            EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                     WHERE n.nspname = 'public' AND p.proname = 'handle_new_user' AND p.prosecdef) AS handler_security_definer,
+            -- ④ 트리거가 공급하지 않는, 기본값 없는 NOT NULL 칸이 profiles에 있는가
+            NOT EXISTS (SELECT 1 FROM pg_attribute a
+                         LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                         WHERE a.attrelid = to_regclass('public.profiles')
+                           AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull
+                           AND d.adbin IS NULL AND a.attidentity = '' AND a.attgenerated = ''
+                           AND a.attname NOT IN ('id', 'email', 'display_name'))  AS profiles_insertable_by_trigger,
+            -- ⑤ 가입은 됐는데 프로필이 없는 사람이 0인가
+            (num.orphan_users = '0')                                            AS no_orphan_auth_users,
+          
+            -- ── 일반 모의투자 ──
+            -- ⑥ 진입 함수가 딱 하나인가 (오버로드가 여럿이면 호출이 모호해진다)
+            ((SELECT count(*) FROM fns WHERE nm = 'paper_open_position') = 1)    AS open_position_single,
+            -- ⑦ 그 하나가 20인자 판인가 (앱이 보내는 것과 같은 모양)
+            EXISTS (SELECT 1 FROM fns WHERE nm = 'paper_open_position' AND nargs = 20
+                      AND args LIKE '%p_event_effective_at%' AND args LIKE '%p_paper_account_id%') AS open_position_20_args,
+            ((SELECT count(*) FROM fns WHERE nm = 'paper_settle_close') = 1)     AS settle_close_single,
+            EXISTS (SELECT 1 FROM fns WHERE nm = 'paper_settle_close' AND nargs = 8) AS settle_close_8_args,
+            -- ⑧ 기본 계좌가 "최대 하나"로 지켜지는가 (부분 유니크 인덱스)
+            EXISTS (SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
+                     WHERE i.indrelid = to_regclass('public.paper_accounts')
+                       AND i.indisunique AND i.indpred IS NOT NULL)             AS one_default_index,
+            -- ⑨ 기본 계좌가 0개인 사용자가 없는가  ← 있으면 그 사용자는 모의주문이 전부 막힌다
+            (num.zero_default = '0')                                            AS no_user_without_default,
+            -- ⑩ 기본 계좌가 둘 이상인 사용자가 없는가
+            (num.multi_default = '0')                                           AS no_user_with_multi_default,
+            -- ⑪ 챌린지 전용 계좌가 기본으로 표시돼 있지 않은가
+            (num.challenge_default = '0')                                       AS no_challenge_account_as_default
+           FROM num)
+          SELECT unnest(ARRAY[
+            'AUTH_USERS_TABLE_PRESENT='          || upper(coalesce(auth_users_table_present::text, 'UNKNOWN')),
+            'SIGNUP_TRIGGER_PRESENT='            || upper(coalesce(signup_trigger_present::text, 'UNKNOWN')),
+            'SIGNUP_TRIGGER_CALLS_HANDLER='      || upper(coalesce(signup_trigger_calls_handler::text, 'UNKNOWN')),
+            'HANDLER_SECURITY_DEFINER='          || upper(coalesce(handler_security_definer::text, 'UNKNOWN')),
+            'PROFILES_INSERTABLE_BY_TRIGGER='    || upper(coalesce(profiles_insertable_by_trigger::text, 'UNKNOWN')),
+            'NO_ORPHAN_AUTH_USERS='              || upper(coalesce(no_orphan_auth_users::text, 'UNKNOWN')),
+            'OPEN_POSITION_SINGLE='              || upper(coalesce(open_position_single::text, 'UNKNOWN')),
+            'OPEN_POSITION_20_ARGS='             || upper(coalesce(open_position_20_args::text, 'UNKNOWN')),
+            'SETTLE_CLOSE_SINGLE='               || upper(coalesce(settle_close_single::text, 'UNKNOWN')),
+            'SETTLE_CLOSE_8_ARGS='               || upper(coalesce(settle_close_8_args::text, 'UNKNOWN')),
+            'ONE_DEFAULT_INDEX='                 || upper(coalesce(one_default_index::text, 'UNKNOWN')),
+            'NO_USER_WITHOUT_DEFAULT='           || upper(coalesce(no_user_without_default::text, 'UNKNOWN')),
+            'NO_USER_WITH_MULTI_DEFAULT='        || upper(coalesce(no_user_with_multi_default::text, 'UNKNOWN')),
+            'NO_CHALLENGE_ACCOUNT_AS_DEFAULT='   || upper(coalesce(no_challenge_account_as_default::text, 'UNKNOWN'))
+          ]) AS verdict FROM v;
+          
+          COMMIT;
+          SQL
+
+          # ── 가려야 할 조각을 접속 문자열에서 뽑는다. 어디에도 출력하지 않는다 ──
+          #
+          # 정규식만으로는 샌다. psql은 접속에 실패하면 제 문구로 호스트를 그대로
+          # 찍는다(could not translate host name "..."). 그래서 실제 값을 문자
+          # 그대로 지운다.
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f "${RUNNER_TEMP}/audit.sql" 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::조회에 실패했습니다 — '확인하지 못함'을 '없음'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+
+          # ── READ ONLY가 실제로 켜져 있었는지 값으로 확인한다 ──
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 — BEGIN TRANSACTION READ ONLY가 빠졌거나 무효화됐습니다"
+            exit 1
+          fi
+          echo ""
+          echo "읽기 전용 트랜잭션 확인 (READ_ONLY=on) — 쓰기 0 · 스키마 변경 0 · 장부 수정 0"
+
+          printf '%s\n' "${out}" > "${RUNNER_TEMP}/audit.out"
+
+      - name: 판정 집계
+        run: |
+          set -euo pipefail
+          out="$(cat "${RUNNER_TEMP}/audit.out")"
+
+          # **줄이 아예 없는 것과 UNKNOWN을 같이 센다.** 기대한 열쇠가 사라졌는데
+          # 조용히 통과하면, 이 감사는 다음에 진짜로 없어진 것을 덮는다.
+          keys='AUTH_USERS_TABLE_PRESENT SIGNUP_TRIGGER_PRESENT SIGNUP_TRIGGER_CALLS_HANDLER
+                HANDLER_SECURITY_DEFINER PROFILES_INSERTABLE_BY_TRIGGER NO_ORPHAN_AUTH_USERS
+                OPEN_POSITION_SINGLE OPEN_POSITION_20_ARGS SETTLE_CLOSE_SINGLE SETTLE_CLOSE_8_ARGS
+                ONE_DEFAULT_INDEX NO_USER_WITHOUT_DEFAULT NO_USER_WITH_MULTI_DEFAULT
+                NO_CHALLENGE_ACCOUNT_AS_DEFAULT'
+          t=0; f=0; u=0; false_list=''; unknown_list=''
+          for k in ${keys}; do
+            v="$(printf '%s\n' "${out}" | grep -oE "^[[:space:]]*${k}=[A-Z]+" | head -1 | sed -E 's/.*=//')"
+            case "${v}" in
+              TRUE)    t=$((t+1)) ;;
+              FALSE)   f=$((f+1)); false_list="${false_list} ${k}" ;;
+              UNKNOWN) u=$((u+1)); unknown_list="${unknown_list} ${k}" ;;
+              *)       u=$((u+1)); unknown_list="${unknown_list} ${k}(줄없음)" ;;
+            esac
+          done
+
+          echo "=== 항목 집계 ==="
+          echo "  TRUE ${t} / FALSE ${f} / UNKNOWN ${u}  (판정 항목 $((t+f+u))개)"
+          [ -n "${false_list}" ]   && echo "  FALSE:  ${false_list}"
+          [ -n "${unknown_list}" ] && echo "  UNKNOWN:${unknown_list}"
+
+          if [ "${u}" -gt 0 ]; then
+            verdict='UNKNOWN'
+          elif [ "${f}" -eq 0 ]; then
+            verdict='HEALTHY'
+          elif [ "${t}" -eq 0 ]; then
+            verdict='BROKEN'
+          else
+            verdict='MIXED'
+          fi
+
+          echo ""
+          echo "=== 판정 ==="
+          echo "SIGNUP_AND_PAPER_VERDICT=${verdict}"
+
+          {
+            echo "## 회원가입·일반 모의투자 — 운영 상태 감사 (읽기 전용)"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **판정** | \`${verdict}\` |"
+            echo "| 항목 | TRUE ${t} · FALSE ${f} · UNKNOWN ${u} |"
+            if [ -n "${false_list}" ]; then echo "| FALSE |\`${false_list}\` |"; fi
+            if [ -n "${unknown_list}" ]; then echo "| UNKNOWN |\`${unknown_list}\` |"; fi
+            echo ""
+            echo "집계 숫자와 카탈로그만 읽었습니다. 이메일·user_id·잔고·포지션 내용은"
+            echo "한 줄도 출력하지 않았습니다. 스키마·\`schema_migrations\`를 바꾸지 않았습니다."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${verdict}" != 'HEALTHY' ]; then
+            echo "::error::판정 ${verdict} — 회원가입 또는 일반 모의투자 경로에 확인이 필요한 항목이 있습니다. **임의 복구 금지**"
+            exit 1
+          fi
+          echo "판정 HEALTHY — 두 경로의 운영 전제가 전부 확인됐습니다"
