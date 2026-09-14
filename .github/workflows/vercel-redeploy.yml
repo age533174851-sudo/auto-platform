@@ -1,0 +1,102 @@
+# **배포가 어긋난 것을 사람이 대시보드에서 고치지 않는다.**
+#
+# 무엇을 보고 만들었나
+# ────────────────────
+# 2026-09-13. main c61271eb가 머지되고 6시간 36분 뒤의 실측이다:
+#
+#     main   c61271e · fly c61271e(heartbeat 3초 전) · vercel ae06912
+#     남은 마이그레이션 0
+#
+# 전파 지연이 아니었다. Vercel 배포가 일어나지 않았고, 그동안 워커는 새
+# 코드로 돌면서 웹에는 아직 없는 경로를 1분마다 두드리고 있었다.
+# `deployment-check`는 이것을 세 번 정확히 잡았지만 — **고치는 일은 사람
+# 몫으로 남아 있었다.**
+#
+# 최상위 규칙 그대로다: 자동화할 수 있는 절차를 사람에게 넘기지 않는다.
+#
+# 왜 deployment-check를 고치지 않고 새 워크플로인가
+# ─────────────────────────────────────────────────
+# **secret이 없을 때 기존 동작이 한 톨도 달라지면 안 되기 때문이다.**
+# `deployment-check.yml`은 이 변경에서 한 줄도 바뀌지 않았다. hook이
+# 설정되지 않은 저장소에서는 여기가 `SKIP_NO_HOOK`을 적고 끝난다.
+#
+# 무한 반복이 없는 이유
+# ─────────────────────
+# 이 워크플로의 완료는 `deployment-check`를 깨우지 않는다(그쪽은
+# `fly-deploy`에만 반응한다). 게다가 같은 SHA로는 최대 3번, 시도 사이
+# 10분을 둔다 — 그 횟수는 **이 워크플로의 실행 기록 자체**에서 센다.
+# 새 표도, 새 저장소도 만들지 않는다.
+name: vercel-redeploy
+
+on:
+  # 배포 확인이 실패했을 때만 깨어난다. 성공한 날에는 돌지 않는다.
+  workflow_run:
+    workflows: [deployment-check]
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      main:
+        description: '복구 기준 main SHA (비우면 이 브랜치의 현재 커밋)'
+        required: false
+
+permissions:
+  contents: read
+  # 같은 SHA로 지금까지 몇 번 깨웠는지 이 워크플로의 실행 기록에서 센다.
+  actions: read
+
+concurrency:
+  # 같은 커밋에 대해 둘이 동시에 누르지 않게 한다. 앞의 것을 취소하지는
+  # 않는다 — 누르는 중에 끊기면 "눌렀는지 모름"이 된다.
+  group: vercel-redeploy-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Vercel만 뒤처졌으면 다시 배포시킨다
+    # **실패한 확인에 대해서만** 본다. 성공했거나 다른 브랜치면 할 일이 없다.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    # 다시 읽기 8분 + 준비. 여기서 오래 붙잡고 있을 이유가 없다.
+    timeout-minutes: 15
+
+    steps:
+      # ── **여기서 도는 코드는 언제나 기본 브랜치의 것이다** ──
+      #
+      # `workflow_run`은 특권 경로다. 이 job은 secret(Deploy Hook)을 쥐고
+      # 있고, 만약 깨운 쪽의 head를 checkout해서 돌리면 **그 커밋에 담긴
+      # 아무 스크립트나 secret을 쥔 채 실행된다.** 복구 대상 커밋은 코드가
+      # 아니라 **비교할 값(MAIN)으로만** 쓴다.
+      #
+      # 그래서 ref를 이벤트에서 받지 않고 기본 브랜치로 고정한다. 손으로
+      # 돌릴 때도 마찬가지다 — 이 워크플로가 어느 ref에서 호출됐든 실행되는
+      # 스크립트는 하나뿐이어야 한다.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      # 판정은 src/lib/ops/vercelRedeploy.ts에 있고 테스트가 붙어 있다.
+      # 배선은 scripts/vercel-redeploy-proof.mjs가 흉내 서버로 확인한다.
+      # **여기 YAML에는 판정이 없다** — 예전에 한 줄짜리 python이 판정을
+      # 문자열로 잘못 읽어 8번 연속 거짓 실패를 냈다.
+      - name: Vercel-only skew면 재배포를 깨우고 실제로 바뀌었는지 확인한다
+        env:
+          # 배포 상태를 읽는 주소. `deployment-check`가 쓰는 그 시크릿이다.
+          # **값은 안 찍는다.**
+          BASE: ${{ secrets.EXIT_MONITOR_URL }}
+          MAIN: ${{ github.event.workflow_run.head_sha || github.event.inputs.main || github.sha }}
+          # **없으면 아무것도 하지 않는다.** 저장소에 주소를 두지 않는다.
+          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/vercel-redeploy.mjs

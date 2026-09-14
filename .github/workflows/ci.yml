@@ -672,6 +672,48 @@ jobs:
       - name: 예약 주 경로 증거 배선 (fly logs를 사람이 열지 않는다)
         run: node scripts/check-scheduler-evidence.mjs
 
+      # ── Vercel 재배포 복구 ──
+      #
+      # 2026-09-13, main이 머지되고 6시간 반이 지나도록 Vercel은 옛 커밋이었다.
+      # Fly는 새 코드였고 마이그레이션도 다 적용돼 있었다. `deployment-check`가
+      # 세 번 잡았지만 고치는 일은 사람이 대시보드에서 해야 했다.
+      #
+      # 그 복구 경로에는 **운영 secret이 필요하다** — 여기서는 쓸 수 없다.
+      # 그래서 흉내 서버를 띄우고 **진짜 스크립트를 그대로 돌린다.** hook이
+      # 몇 번 눌렸는지는 스크립트의 로그가 아니라 서버가 받은 횟수로 센다.
+      #
+      # **판정 테스트만으로는 부족하다.** 이 저장소가 두 번 당한 고장이
+      # "만들어 놓고 배선을 안 함"이고, 그건 단위 테스트가 초록인 채로 난다.
+      - name: Vercel 재배포 복구 (누르지 말아야 할 자리에서 안 누르는가)
+        run: |
+          set -euo pipefail
+          node scripts/vercel-redeploy-proof.mjs > /tmp/redeploy-proof.out 2>&1 || {
+            echo "::error::재배포 복구가 계약대로 동작하지 않습니다 — 아래 FAIL 줄을 보세요"
+            cat /tmp/redeploy-proof.out
+            exit 1
+          }
+          cat /tmp/redeploy-proof.out
+          n_ok="$(grep -c '^ok  ' /tmp/redeploy-proof.out || true)"
+          if [ "${n_ok}" -lt 45 ]; then
+            echo "::error::재배포 복구 확인이 ${n_ok}건뿐입니다"
+            exit 1
+          fi
+          # **거절만 확인하는 증명은 만점을 준다.** 실제로 누른 자리와,
+          # 누른 뒤 실측으로 확인한 자리가 있었는지 본다.
+          for need in 'Vercel만 뒤처짐 → 눌렀고 실제로 바뀜 · 결말  → VERIFIED' \
+                      'Vercel만 뒤처짐 → 눌렀는데 안 바뀜 · 결말  → FIRED_NOT_VERIFIED' \
+                      '다시 읽는 동안 hook을 또 누르지 않는다'; do
+            if ! grep -qF "${need}" /tmp/redeploy-proof.out; then
+              echo "::error::확인하지 못했습니다: ${need}"
+              exit 1
+            fi
+          done
+          {
+            echo "### Vercel 재배포 복구"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (안 누르는 자리 8종 · 누른 뒤 실측 확인 · hook 주소 비노출)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ── 테스트 등록 검사 ──
       #
       # 재배치 충돌을 기계적으로 해소하다 `run-tests.mjs`의 등록 줄이

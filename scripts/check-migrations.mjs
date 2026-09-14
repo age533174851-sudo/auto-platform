@@ -231,9 +231,32 @@ const CHORE_PHRASES = [
   try { wf = readFileSync(join(process.cwd(), WF), 'utf8'); }
   catch { err(`${WF}이 없습니다 — 공식 Supabase 재생 계약이 배선되지 않았습니다`); }
 
+  // ── 워크플로가 부르는 **로컬 합성 액션까지 같이 본다** ──
+  //
+  // 재생이 job 둘로 나뉘면서 준비 단계(CLI 고정 · db reset --no-seed)가
+  // `.github/actions/supabase-local`로 옮겨 갔다. 여기서 워크플로 파일만
+  // 읽으면 **고정이 사라진 것처럼 보이고**, 반대로 금지 검사(운영 명령 ·
+  // secret · 자격증명 이름)는 액션 안에 숨기면 통과한다 — 둘 다 이 검사를
+  // 없느니만 못하게 만든다. 실제로 도는 경로 전부를 이어 붙여서 본다.
+  //
+  // 부르는데 파일이 없으면 **통과시키지 않는다.** 못 읽은 것은 깨끗한 것이
+  // 아니다.
+  let usesText = '';
+  if (wf != null) {
+    for (const m of wf.matchAll(/uses:\s*(\.\/[^\s'"]+)/g)) {
+      const dir = m[1].replace(/^\.\//, '');
+      let found = false;
+      for (const f of ['action.yml', 'action.yaml']) {
+        try { usesText += '\n' + readFileSync(join(process.cwd(), dir, f), 'utf8'); found = true; break; }
+        catch { /* 다음 확장자 */ }
+      }
+      if (!found) err(`${WF}이 ${dir}을 부르는데 그 액션 파일을 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`);
+    }
+  }
+
   if (wf != null) {
     // 주석에서 이 이름들을 설명할 수 있어야 하므로 주석은 빼고 본다.
-    const body = wf.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+    const body = (wf + usesText).split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
     // **있어야 하는 것**은 step 이름에서 찾으면 안 된다. 이름에 적힌
     // `supabase db reset`은 그 명령이 실제로 돈다는 증거가 아니다 — 이름만
     // 남기고 명령을 바꿔치기해도 통과해 버린다. 그래서 필수 검사는 이름 줄을
