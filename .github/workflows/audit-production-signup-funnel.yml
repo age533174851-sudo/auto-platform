@@ -1,0 +1,490 @@
+# 가입 요청이 어디까지 갔는지, 일반 모의투자가 실제로 돌고 있는지 — **읽기만 한다.**
+#
+# 1차 감사(#263)가 무엇을 지웠나
+# ──────────────────────────────
+# 운영 스키마는 HEALTHY였다(14/14 TRUE). 트리거·핸들러·NOT NULL·FK 정상,
+# 고아 사용자 0, `paper_open_position` 20인자 하나뿐, 기본계좌 0개 사용자 0명,
+# 챌린지 0개. 그래서 다음 후보는 **원인에서 빠졌다**:
+#
+#   NO_ACCOUNT · RPC 서명 불일치 · 오버로드 모호성 · CHALLENGE_NOT_RUNNING
+#
+# 남은 질문은 "요청이 어디까지 갔는가"다. 그건 스키마가 아니라 **시간축과
+# 설정**에 있다.
+#
+# **"24h에 user가 0명"을 "GoTrue에 안 닿았다"로 적지 않는다**
+# ──────────────────────────────────────────────────────────
+# 요청이 도착했어도 검증·provider·rate-limit·설정 단계에서 user 줄이
+# 만들어지기 전에 거절될 수 있다. 그래서 도달 여부는 **audit log가 있을 때만**
+# 말하고, 없으면 UNKNOWN이다. 판정은 세 상태다:
+#
+#   EVIDENCE_PRESENT  가입/확인 계열 action이 있다 → 닿았다
+#   NO_EVIDENCE       로그는 읽었는데 그 action이 없다 (≠ 안 닿았다)
+#   UNKNOWN           표가 없거나 읽지 못했다
+#
+# 개인정보는 읽지 않는다
+# ──────────────────────
+# 카탈로그와 **집계 숫자**, 그리고 action/provider **문자열**뿐이다.
+# 이메일·user_id·IP·token·payload 원문·raw JSON은 한 줄도 출력하지 않는다.
+# action 값도 바깥에서 온 문자열이라 안전한 글자만 남기고 40자로 자른다.
+# 일부러 이메일과 IP를 심은 픽스처로 **새지 않는 것을 확인했다.**
+#
+# 왜 이렇게 좁게 트리거하나
+# ─────────────────────────
+#   · `pull_request` 없음      — PR 검토 중에는 운영 접속이 0이어야 한다
+#   · `workflow_dispatch` 없음 — 아무 때나 운영을 두드리는 문을 만들지 않는다
+#   · `push` + 이 파일 경로    — 이 파일이 main에 들어오는 그때 한 번 돈다
+#
+# 런타임 로그는 probe까지만
+# ─────────────────────────
+# 조회가 되더라도 본문에는 경로·쿼리·헤더가 섞인다. 안전한 집계 형태를 이번에
+# 만들지 않으므로 **내용을 읽지 않고** 가용성만 적는다. `PAPER_RUNTIME_LOGS`는
+# UNKNOWN으로 끝난다 — 제품 instrumentation은 이 PR에 넣지 않는다.
+name: audit-production-signup-funnel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-signup-funnel.yml'
+
+concurrency:
+  group: audit-production-signup-funnel
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 가입 퍼널·모의투자 활동 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      - name: DB 접속 정보 확인
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 상태를 확인할 수 없습니다"
+            echo "값은 GitHub Secrets에만 있습니다. 이 로그에는 출력하지 않습니다."
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      - name: 가입 퍼널·모의 활동 조회 (BEGIN TRANSACTION READ ONLY)
+        run: |
+          set -o pipefail
+
+          cat > "${RUNNER_TEMP}/funnel.sql" <<'SQL'
+          \set ON_ERROR_STOP on
+          
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '25s';
+          SET LOCAL lock_timeout = '3s';
+          
+          \echo '=== 0. READ ONLY 증명 ==='
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+          
+          \echo ''
+          \echo '=== A-1. auth 스키마에 무엇이 있는가 (카탈로그만) ==='
+          -- **먼저 무엇이 있는지 본다.** GoTrue 판마다 표가 다르다. 없는 표를 가정하고
+          -- 질의를 짜면 감사가 "없다"를 보고하지 못하고 그냥 죽는다.
+          SELECT c.relname AS table_name, c.relkind
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'auth' AND c.relkind IN ('r','v','m','p')
+           ORDER BY c.relname;
+          
+          \echo ''
+          \echo '=== A-1b. auth.users 칸 (이름·타입만 — 값은 읽지 않는다) ==='
+          SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS type
+            FROM pg_attribute a
+           WHERE a.attrelid = to_regclass('auth.users')
+             AND a.attnum > 0 AND NOT a.attisdropped
+           ORDER BY a.attnum;
+          
+          \echo ''
+          \echo '=== A~B. 집계 숫자 (식별정보 0) ==='
+          SELECT metric, coalesce(value, 'UNKNOWN') AS value FROM (
+            SELECT 'AUTH_USERS_CREATED_24H' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE created_at >= now() - interval '24 hours' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUTH_USERS_CREATED_7D' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE created_at >= now() - interval '7 days' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUTH_USERS_CREATED_30D' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE created_at >= now() - interval '30 days' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUTH_USERS_UNCONFIRMED_24H' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('auth.users') AND a.attname = 'email_confirmed_at' AND NOT a.attisdropped) THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE email_confirmed_at IS NULL AND created_at >= now() - interval '24 hours' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUTH_USERS_UNCONFIRMED_7D' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('auth.users') AND a.attname = 'email_confirmed_at' AND NOT a.attisdropped) THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE email_confirmed_at IS NULL AND created_at >= now() - interval '7 days' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUTH_USERS_UNCONFIRMED_30D' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('auth.users') AND a.attname = 'email_confirmed_at' AND NOT a.attisdropped) THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE email_confirmed_at IS NULL AND created_at >= now() - interval '30 days' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUTH_USERS_UNCONFIRMED_TOTAL' AS metric,
+                   CASE WHEN to_regclass('auth.users') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('auth.users') AND a.attname = 'email_confirmed_at' AND NOT a.attisdropped) THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.users WHERE email_confirmed_at IS NULL $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUDIT_LOG_ROWS_24H' AS metric,
+                   CASE WHEN to_regclass('auth.audit_log_entries') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.audit_log_entries WHERE created_at >= now() - interval '24 hours' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUDIT_LOG_ROWS_7D' AS metric,
+                   CASE WHEN to_regclass('auth.audit_log_entries') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.audit_log_entries WHERE created_at >= now() - interval '7 days' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUDIT_SIGNUP_LIKE_24H' AS metric,
+                   CASE WHEN to_regclass('auth.audit_log_entries') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.audit_log_entries WHERE created_at >= now() - interval '24 hours' AND (payload->>'action') ~* '(signup|signedup|signed_up|sign_up|confirmation|invite|recover|magiclink|otp)' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'AUDIT_SIGNUP_LIKE_7D' AS metric,
+                   CASE WHEN to_regclass('auth.audit_log_entries') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.audit_log_entries WHERE created_at >= now() - interval '7 days' AND (payload->>'action') ~* '(signup|signedup|signed_up|sign_up|confirmation|invite|recover|magiclink|otp)' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'SESSIONS_CREATED_24H' AS metric,
+                   CASE WHEN to_regclass('auth.sessions') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.sessions WHERE created_at >= now() - interval '24 hours' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'SESSIONS_CREATED_7D' AS metric,
+                   CASE WHEN to_regclass('auth.sessions') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.sessions WHERE created_at >= now() - interval '7 days' $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_ACCOUNTS_DEFAULT_TOTAL' AS metric,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_accounts WHERE is_default $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_ACCOUNTS_NONDEFAULT_TOTAL' AS metric,
+                   CASE WHEN to_regclass('public.paper_accounts') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_accounts WHERE NOT is_default $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'CHALLENGES_TOTAL_RECHECK' AS metric,
+                   CASE WHEN to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_challenges $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_OPEN_ORDINARY_24H' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.opened_at >= now() - interval '24 hours' AND NOT EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_OPEN_CHALLENGE_24H' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.opened_at >= now() - interval '24 hours' AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_CLOSE_ORDINARY_24H' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.closed_at >= now() - interval '24 hours' AND NOT EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_CLOSE_CHALLENGE_24H' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.closed_at >= now() - interval '24 hours' AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_OPEN_ORDINARY_7D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.opened_at >= now() - interval '7 days' AND NOT EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_OPEN_CHALLENGE_7D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.opened_at >= now() - interval '7 days' AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_CLOSE_ORDINARY_7D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.closed_at >= now() - interval '7 days' AND NOT EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_CLOSE_CHALLENGE_7D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.closed_at >= now() - interval '7 days' AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_OPEN_ORDINARY_30D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.opened_at >= now() - interval '30 days' AND NOT EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_OPEN_CHALLENGE_30D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.opened_at >= now() - interval '30 days' AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_CLOSE_ORDINARY_30D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.closed_at >= now() - interval '30 days' AND NOT EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+            UNION ALL
+            SELECT 'PAPER_CLOSE_CHALLENGE_30D' AS metric,
+                   CASE WHEN to_regclass('public.paper_positions') IS NULL OR to_regclass('public.paper_challenges') IS NULL THEN NULL ELSE
+                (SELECT (xpath('/row/c/text()', x))[1]::text
+                   FROM query_to_xml($q$ SELECT count(*) AS c FROM public.paper_positions p WHERE p.closed_at >= now() - interval '30 days' AND EXISTS (SELECT 1 FROM public.paper_challenges c WHERE c.paper_account_id = p.paper_account_id) $q$, false, true, '') x) END AS value
+          ) s ORDER BY 1;
+          
+          \echo ''
+          \echo '=== A-4b. audit log의 action 분포 (action 문자열과 개수만) ==='
+          -- **payload 원문·actor_username(이메일)·ip_address·token은 출력하지 않는다.**
+          -- action 값도 바깥에서 온 문자열이므로 안전한 글자만 남기고 40자로 자른다.
+          SELECT metric, coalesce(value, 'UNKNOWN') AS value FROM (
+            SELECT 'AUDIT_LOG_ACTIONS_24H' AS metric,
+                   CASE WHEN to_regclass('auth.audit_log_entries') IS NULL THEN NULL ELSE
+              (SELECT string_agg(
+                  left(regexp_replace((xpath('/row/action/text()', r))[1]::text, '[^a-zA-Z0-9_]', '', 'g'), 40)
+                  || '=' || (xpath('/row/n/text()', r))[1]::text, ' · ')
+                 FROM unnest(xpath('/table/row', query_to_xml(
+                   $q$ SELECT payload->>'action' AS action, count(*) AS n
+                         FROM auth.audit_log_entries
+                        WHERE created_at >= now() - interval '24 hours'
+                        GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 25 $q$, false, false, ''))) AS r) END AS value
+            UNION ALL
+            SELECT 'AUDIT_LOG_ACTIONS_7D',
+                   CASE WHEN to_regclass('auth.audit_log_entries') IS NULL THEN NULL ELSE
+              (SELECT string_agg(
+                  left(regexp_replace((xpath('/row/action/text()', r))[1]::text, '[^a-zA-Z0-9_]', '', 'g'), 40)
+                  || '=' || (xpath('/row/n/text()', r))[1]::text, ' · ')
+                 FROM unnest(xpath('/table/row', query_to_xml(
+                   $q$ SELECT payload->>'action' AS action, count(*) AS n
+                         FROM auth.audit_log_entries
+                        WHERE created_at >= now() - interval '7 days'
+                        GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 25 $q$, false, false, ''))) AS r) END
+            UNION ALL
+            SELECT 'IDENTITY_PROVIDERS',
+                   CASE WHEN to_regclass('auth.identities') IS NULL THEN NULL ELSE
+              (SELECT string_agg(
+                  left(regexp_replace((xpath('/row/provider/text()', r))[1]::text, '[^a-zA-Z0-9_]', '', 'g'), 40)
+                  || '=' || (xpath('/row/n/text()', r))[1]::text, ' · ')
+                 FROM unnest(xpath('/table/row', query_to_xml(
+                   $q$ SELECT provider, count(*) AS n FROM auth.identities
+                        GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 25 $q$, false, false, ''))) AS r) END
+          ) t ORDER BY 1;
+          
+          \echo ''
+          \echo '=== A-9. 가입 요청이 GoTrue에 닿았는가 — **3-상태** ==='
+          -- **"24h에 user가 0명"만으로 "GoTrue에 안 닿았다"고 적지 않는다.**
+          -- 요청이 도착했어도 검증·provider·rate-limit·설정 단계에서 user 줄이
+          -- 만들어지기 전에 거절될 수 있다. 그래서 도달 여부는 **audit log가 있을
+          -- 때만** 말하고, 없으면 UNKNOWN이다.
+          --
+          --   EVIDENCE_PRESENT   audit log에 가입/확인 계열 action이 있다 → 닿았다
+          --   NO_EVIDENCE        audit log는 읽었는데 그 action이 없다
+          --                      (→ "안 닿았다"가 아니라 "그 증거가 없다"이다)
+          --   UNKNOWN            audit log 표가 없거나 읽지 못했다
+          SELECT 'GOTRUE_SIGNUP_ARRIVAL_7D=' ||
+            CASE
+              WHEN to_regclass('auth.audit_log_entries') IS NULL THEN 'UNKNOWN'
+              WHEN (SELECT (xpath('/row/c/text()', x))[1]::text
+                      FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.audit_log_entries
+                                             WHERE created_at >= now() - interval '7 days'
+                                               AND (payload->>'action') ~* '(signup|signedup|signed_up|sign_up|confirmation|invite|recover|magiclink|otp)' $q$,
+                                        false, true, '') x) IS NULL THEN 'UNKNOWN'
+              WHEN (SELECT (xpath('/row/c/text()', x))[1]::text
+                      FROM query_to_xml($q$ SELECT count(*) AS c FROM auth.audit_log_entries
+                                             WHERE created_at >= now() - interval '7 days'
+                                               AND (payload->>'action') ~* '(signup|signedup|signed_up|sign_up|confirmation|invite|recover|magiclink|otp)' $q$,
+                                        false, true, '') x) <> '0' THEN 'EVIDENCE_PRESENT'
+              ELSE 'NO_EVIDENCE'
+            END AS verdict;
+          
+          COMMIT;
+          SQL
+
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f "${RUNNER_TEMP}/funnel.sql" 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::조회에 실패했습니다 — '확인하지 못함'을 '없음'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 — BEGIN TRANSACTION READ ONLY가 빠졌거나 무효화됐습니다"
+            exit 1
+          fi
+          echo ""
+          echo "읽기 전용 트랜잭션 확인 (READ_ONLY=on) — 쓰기 0 · 스키마 변경 0 · 장부 수정 0"
+
+      # ── 설정·배포 관측 ──
+      #
+      # `disable_signup` 하나가 참이면 나머지 관측이 통째로 불필요해진다.
+      # 가장 싼 한 방이 여기 있다. **원문은 찍지 않는다** — allow-list로 꺼낸 값만.
+      - name: 가입 설정·배포 상태 관측 (HTTP · 읽기 전용)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          set -o pipefail
+          cat > "${RUNNER_TEMP}/probe.mjs" <<'PROBE'
+          // 운영 설정·배포 상태를 **읽기만** 한다. 출력은 KEY=VALUE 줄뿐이다.
+          //
+          // **원문(raw JSON)을 찍지 않는다.** 필요한 칸만 allow-list로 꺼낸다. 응답에는
+          // 프로젝트 식별자·URL·토큰이 섞여 들어올 수 있고, 그것들은 이 로그보다 오래
+          // 남는다. 없는 칸을 false로 추정하지 않는다 — 없으면 UNKNOWN이다.
+          const SUPA = String(process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+          const SUPA_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+          const V_API = String(process.env.VERCEL_API_BASE || 'https://api.vercel.com').replace(/\/+$/, '');
+          const V_TOKEN = String(process.env.VERCEL_TOKEN || '');
+          const V_PROJECT = String(process.env.VERCEL_PROJECT_ID || '');
+          const V_TEAM = String(process.env.VERCEL_TEAM_ID || '');
+          
+          const out = [];
+          const say = (k, v) => out.push(`${k}=${v}`);
+          /** 값이 로그에 새지 않게 한다. 토큰·키는 어디에도 남기지 않는다 */
+          const scrub = (s) => {
+            let t = String(s ?? '');
+            for (const secret of [SUPA_KEY, V_TOKEN]) if (secret) t = t.split(secret).join('<가림>');
+            return t.replace(/https?:\/\/[^\s"']+/g, '<url 가림>').slice(0, 160);
+          };
+          /** 불린만 받는다. 없거나 불린이 아니면 UNKNOWN — false로 추정하지 않는다 */
+          const boolOf = (v) => (v === true ? 'TRUE' : v === false ? 'FALSE' : 'UNKNOWN');
+          
+          async function getJson(url, headers) {
+            try {
+              const r = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
+              let body = null;
+              try { body = await r.json(); } catch { body = null; }
+              return { status: r.status, body };
+            } catch (e) {
+              return { status: null, body: null, err: scrub(e?.message || e) };
+            }
+          }
+          
+          // ── C-1. GoTrue 공개 설정 — 가장 싼 한 방 ──
+          //
+          // `disable_signup`·`external.email`이 가입 가능 여부를 그대로 말해 준다.
+          // 앱도 이미 이 경로를 쓴다(src/lib/auth/oauthProviders.ts).
+          async function authSettings() {
+            if (!SUPA) { say('AUTH_SETTINGS_HTTP', 'NO_URL'); return; }
+            let r = await getJson(`${SUPA}/auth/v1/settings`, {});
+            // 키를 요구하면 한 번만 다시 묻는다. **키 값은 출력하지 않는다.**
+            if ((r.status === 401 || r.status === 403) && SUPA_KEY) {
+              r = await getJson(`${SUPA}/auth/v1/settings`, { apikey: SUPA_KEY });
+            }
+            say('AUTH_SETTINGS_HTTP', r.status ?? 'NO_RESPONSE');
+            if (r.err) say('AUTH_SETTINGS_ERROR', r.err);
+            const parsed = r.body && typeof r.body === 'object';
+            say('AUTH_SETTINGS_PARSED', parsed ? 'TRUE' : 'FALSE');
+            if (!parsed) {
+              for (const k of ['EXTERNAL_EMAIL', 'DISABLE_SIGNUP', 'MAILER_AUTOCONFIRM']) {
+                say(`AUTH_SETTINGS_${k}`, 'UNKNOWN');
+              }
+              return;
+            }
+            const ext = r.body.external;
+            say('AUTH_SETTINGS_EXTERNAL_EMAIL',
+              ext && typeof ext === 'object' ? boolOf(ext.email) : 'UNKNOWN');
+            say('AUTH_SETTINGS_DISABLE_SIGNUP', boolOf(r.body.disable_signup));
+            say('AUTH_SETTINGS_MAILER_AUTOCONFIRM', boolOf(r.body.mailer_autoconfirm));
+          }
+          
+          // ── C-2. Vercel 배포 상태 ──
+          //
+          // **과거 ERROR는 과거의 사실이다.** 지금 장애의 원인으로 자동 연결하지 않는다.
+          async function vercelDeployments() {
+            if (!V_TOKEN || !V_PROJECT) { say('VERCEL_API_HTTP', 'NO_TOKEN'); return null; }
+            const q = new URLSearchParams({ projectId: V_PROJECT, target: 'production', limit: '20' });
+            if (V_TEAM) q.set('teamId', V_TEAM);
+            const r = await getJson(`${V_API}/v6/deployments?${q}`, { authorization: `Bearer ${V_TOKEN}` });
+            say('VERCEL_API_HTTP', r.status ?? 'NO_RESPONSE');
+            if (r.err) say('VERCEL_API_ERROR', r.err);
+            const list = Array.isArray(r.body?.deployments) ? r.body.deployments : null;
+            if (!list) { say('VERCEL_PROD_STATES', 'UNKNOWN'); say('VERCEL_PROD_READY_SHA', 'UNKNOWN'); return null; }
+            const counts = {};
+            for (const d of list) {
+              const st = String(d?.readyState || d?.state || 'UNKNOWN').replace(/[^A-Z_]/gi, '').slice(0, 20);
+              counts[st] = (counts[st] || 0) + 1;
+            }
+            say('VERCEL_PROD_STATES', Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' · ') || '(없음)');
+            const ready = list.find(d => String(d?.readyState || '').toUpperCase() === 'READY');
+            const sha = String(ready?.meta?.githubCommitSha || '').replace(/[^0-9a-f]/gi, '').slice(0, 40);
+            say('VERCEL_PROD_READY_SHA', sha || 'UNKNOWN');
+            return ready?.uid || ready?.id || null;
+          }
+          
+          // ── C-3. 런타임 로그는 **probe까지만** ──
+          //
+          // 조회가 되더라도 본문에는 경로·쿼리·헤더가 섞여 들어온다. 안전한 집계
+          // 형태를 이번 PR에서 만들지 않으므로 **내용은 읽지 않는다.** 가용성만 적고
+          // PAPER_RUNTIME_LOGS는 UNKNOWN으로 끝낸다. instrumentation은 넣지 않는다.
+          async function runtimeLogsProbe(deploymentId) {
+            if (!V_TOKEN || !deploymentId) { say('VERCEL_LOGS_PROBE_HTTP', 'SKIPPED'); say('PAPER_RUNTIME_LOGS', 'UNKNOWN'); return; }
+            const q = new URLSearchParams({ limit: '1' });
+            if (V_TEAM) q.set('teamId', V_TEAM);
+            const r = await getJson(`${V_API}/v3/deployments/${encodeURIComponent(deploymentId)}/events?${q}`,
+              { authorization: `Bearer ${V_TOKEN}` });
+            say('VERCEL_LOGS_PROBE_HTTP', r.status ?? 'NO_RESPONSE');
+            // **내용을 세지 않는다.** 여기서 status별 집계를 만들려면 경로·본문을 봐야 하고,
+            // 그건 이번 감사의 약속(개인정보 0)을 넘는다.
+            say('PAPER_RUNTIME_LOGS', 'UNKNOWN');
+          }
+          
+          const ready = await vercelDeployments();
+          await authSettings();
+          await runtimeLogsProbe(ready);
+          console.log(out.join('\n'));
+          PROBE
+          node "${RUNNER_TEMP}/probe.mjs" | tee "${RUNNER_TEMP}/probe.out"
+
+      - name: 요약
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## 가입 퍼널·모의투자 활동 — 운영 관측 (읽기 전용)"
+            echo ""
+            echo "집계 숫자·카탈로그·action 문자열만 읽었습니다. 이메일·user_id·IP·token·"
+            echo "payload 원문·raw JSON은 출력하지 않았습니다. 스키마·\`schema_migrations\`를"
+            echo "바꾸지 않았습니다."
+            echo ""
+            if [ -f "${RUNNER_TEMP}/probe.out" ]; then
+              echo '```'
+              cat "${RUNNER_TEMP}/probe.out"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
