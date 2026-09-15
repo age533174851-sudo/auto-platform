@@ -14,37 +14,87 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { buildPaperPlan } from '@/lib/engine/paperPlan';
+import { recordAudit, recordAuditAsync } from '@/lib/safety/auditStore';
+import {
+  paperOrderTelemetry, paperOrderAuditEvent, openFailureCode, planRejectionCode,
+  type PaperOrderCode,
+} from '@/lib/engine/paperOrderTelemetry';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+/**
+ * **어디서 막혔는지 셀 수 있게 한다 — 응답은 한 글자도 바꾸지 않는다.**
+ *
+ * 모의 체결이 30일간 0건이었는데, 어느 관문에서 멈췄는지 말해 주는 기록이
+ * 한 줄도 없었다. 그래서 같은 제보가 와도 같은 자리에서 멈춘다.
+ *
+ * 지키는 것 셋
+ * ────────────
+ *  · **기록이 주문을 바꾸지 않는다.** 던지지 않고, 응답 본문·status도 그대로다
+ *  · 적는 것은 거친 코드·HTTP status·경로 이름뿐이다. 주문 내용은 안 적는다
+ *  · 안전장치의 판단은 건드리지 않는다. 여기서는 **세기만** 한다
+ *
+ * 왜 실패 경로만 기다리나
+ * ───────────────────────
+ * 서버리스는 응답을 돌려주면 그 요청의 실행을 곧 정리한다. 불 지르고 잊은
+ * insert는 **완료 전에 잘릴 수 있고**, 그러면 "기록은 남는다"고 믿는데 표는
+ * 비어 있다 — 관측을 만들어 놓고 관측이 안 되는 것이다.
+ *
+ * 이미 실패해서 돌아가는 응답은 조금 기다려도 잃을 것이 없다. 반대로 체결에
+ * 성공한 응답은 빨라야 하므로 기다리지 않는다. 기다리든 아니든 **던지지
+ * 않는다** — 그래서 기록 실패가 체결 결과를 바꿀 수 없다.
+ */
+async function counted(
+  sb: any, code: PaperOrderCode, res: NextResponse,
+): Promise<NextResponse> {
+  const ev = paperOrderAuditEvent(paperOrderTelemetry(code, res.status));
+  try {
+    if (code === 'OPENED') recordAudit(sb, ev);       // 체결 경로는 기다리지 않는다
+    else await recordAuditAsync(sb, ev);              // 실패 경로는 끝까지 남긴다
+  } catch {
+    // 기록이 터져도 주문 응답은 그대로 나간다. 이 catch가 그 약속이다.
+  }
+  return res;
+}
+
 export async function POST(req: NextRequest) {
   let body: any;
   try { body = await req.json(); }
-  catch { return NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 }); }
+  catch {
+    return await counted(getSupabaseAdmin(), 'INVALID_JSON',
+      NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 }));
+  }
 
   const uid = await resolveUserId(
     req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
-  if (!uid) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  if (!uid) {
+    return await counted(getSupabaseAdmin(), 'AUTH_REQUIRED',
+      NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 }));
+  }
   const sb = getSupabaseAdmin();
-  if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
+  if (!sb) {
+    return await counted(null, 'SUPABASE_NOT_CONFIGURED',
+      NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 }));
+  }
 
   const symbol = String(body?.symbol || '').toUpperCase().replace('/', '');
   const side = String(body?.side || '').toUpperCase();
   if (!symbol || (side !== 'LONG' && side !== 'SHORT')) {
-    return NextResponse.json({ ok: false, error: 'missing_params' }, { status: 400 });
+    return await counted(sb, 'MISSING_PARAMS',
+      NextResponse.json({ ok: false, error: 'missing_params' }, { status: 400 }));
   }
 
   // 어느 시장인가. 모르는 값은 **거부한다** — USDM으로 흘려보내면 현물
   // 주문이 선물 규칙(배율·청산·손절 필수)으로 계산된다.
   const market = String(body?.market || 'USDM').toUpperCase();
   if (market !== 'SPOT' && market !== 'USDM') {
-    return NextResponse.json({
+    return await counted(sb, 'UNSUPPORTED_MARKET', NextResponse.json({
       ok: false, error: 'unsupported_market',
       message: market === 'COINM'
         ? '모의 COIN-M은 아직 지원하지 않습니다'
         : `모르는 시장입니다 (${market})`,
-    }, { status: 400 });
+    }, { status: 400 }));
   }
   const spot = market === 'SPOT';
 
@@ -106,22 +156,22 @@ export async function POST(req: NextRequest) {
     const { collectPaperDailyLoss } = await import('@/lib/risk/dailyLossCheck');
     const dl = await collectPaperDailyLoss({ sb, userId: uid });
     if (dl.verdict.blockEntries) {
-      return NextResponse.json({
+      return await counted(sb, 'DAILY_LIMIT', NextResponse.json({
         ok: false, error: 'daily_limit', paper: true,
         status: dl.verdict.status,
         message: dl.verdict.status === 'locked'
           ? `[모의] ${dl.verdict.reason}`
           : `[모의] ${dl.verdict.reason} — 확인하지 못해 진입하지 않습니다`,
         todayNetUsd: dl.todayNetUsd,
-      }, { status: 429, headers: { 'Cache-Control': 'no-store' } });
+      }, { status: 429, headers: { 'Cache-Control': 'no-store' } }));
     }
   } catch {
     // 판정 자체가 터지면 막는다. 한도를 확인하지 못한 채 넣는 것은
     // 한도를 안 건 것과 같다.
-    return NextResponse.json({
+    return await counted(sb, 'DAILY_LIMIT_UNKNOWN', NextResponse.json({
       ok: false, error: 'daily_limit_unknown', paper: true,
       message: '[모의] 오늘 손실 한도를 확인하지 못해 진입하지 않았습니다',
-    }, { status: 429, headers: { 'Cache-Control': 'no-store' } });
+    }, { status: 429, headers: { 'Cache-Control': 'no-store' } }));
   }
 
   const built = buildPaperPlan({
@@ -139,13 +189,13 @@ export async function POST(req: NextRequest) {
   });
 
   if (!built.ok || !built.plan) {
-    return NextResponse.json({
+    return await counted(sb, planRejectionCode({ markPrice, available }), NextResponse.json({
       ok: false, error: 'plan_rejected', message: built.reason,
       // 거부해도 계산값은 돌려준다 — 화면이 이유와 숫자를 같이 보여줄 수 있게
       notional: built.notional, requiredMargin: built.requiredMargin,
       liquidationPrice: built.liquidationPrice,
       available,
-    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } }));
   }
 
   // 같은 신호를 두 번 넣지 않게 한다. paper_positions에 signal_id UNIQUE가
@@ -168,16 +218,16 @@ export async function POST(req: NextRequest) {
   });
 
   if (!r.ok) {
-    return NextResponse.json({
+    return await counted(sb, openFailureCode((r as any).status), NextResponse.json({
       ok: false, error: r.duplicate ? 'duplicate' : 'open_failed',
       duplicate: !!r.duplicate,
       message: r.duplicate
         ? '같은 주문이 방금 들어갔습니다 (1분 안의 중복). 1분 뒤에 다시 넣을 수 있습니다.'
         : (r.error || '가상 포지션을 열지 못했습니다'),
-    }, { status: r.duplicate ? 409 : 500, headers: { 'Cache-Control': 'no-store' } });
+    }, { status: r.duplicate ? 409 : 500, headers: { 'Cache-Control': 'no-store' } }));
   }
 
-  return NextResponse.json({
+  return await counted(sb, 'OPENED', NextResponse.json({
     ok: true, paper: true, positionId: r.positionId,
     symbol, side,
     fillPrice: r.fill?.fillPrice, quantity: r.fill?.quantity,
@@ -186,5 +236,5 @@ export async function POST(req: NextRequest) {
     stopLoss: stopPrice, liquidationPrice: built.liquidationPrice,
     message: `모의 ${side} 체결 — ${r.fill?.quantity?.toFixed(6)} @ ${r.fill?.fillPrice?.toFixed(2)}`
            + ' (거래소로 나가지 않았습니다)',
-  }, { headers: { 'Cache-Control': 'no-store' } });
+  }, { headers: { 'Cache-Control': 'no-store' } }));
 }

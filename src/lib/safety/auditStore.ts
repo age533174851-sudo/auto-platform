@@ -38,6 +38,22 @@ export interface AuditWrite {
  * 실패해도 조용히 삼킨다.
  */
 export function recordAudit(sb: any, ev: AuditWrite): void {
+  void recordAuditAsync(sb, ev);
+}
+
+/**
+ * 같은 기록을 **끝까지 기다릴 수 있는** 판.
+ *
+ * 왜 필요한가: 서버리스에서 응답을 돌려주면 그 요청의 실행이 곧 정리된다.
+ * 불 지르고 잊은 insert는 **완료 전에 잘릴 수 있고**, 그러면 기록은 있다고
+ * 믿는데 표는 비어 있다 — 이 저장소가 제일 싫어하는 모양이다.
+ *
+ * 그래서 **기다려도 되는 자리**(이미 실패해서 돌아가는 응답)는 이걸 쓴다.
+ * 성공 경로는 그대로 `recordAudit`을 써서 체결을 늦추지 않는다.
+ *
+ * **절대 던지지 않는다.** 기록이 안 됐다고 주문 결과가 달라지면 안 된다.
+ */
+export async function recordAuditAsync(sb: any, ev: AuditWrite): Promise<void> {
   // 메모리 쪽도 그대로 남긴다. 같은 인스턴스 안에서는 즉시 읽히므로
   // 화면이 방금 한 일을 바로 보여 줄 수 있다.
   try {
@@ -57,7 +73,7 @@ export function recordAudit(sb: any, ev: AuditWrite): void {
 
   if (!sb) return;
   try {
-    void (sb as any).from('audit_events').insert({
+    await (sb as any).from('audit_events').insert({
       user_id: ev.userId ?? null,
       action: String(ev.action || 'UNKNOWN'),
       resource: String(ev.resource ?? ''),
