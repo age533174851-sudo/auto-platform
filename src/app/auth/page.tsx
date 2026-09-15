@@ -17,6 +17,7 @@ import {
 // 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
 // 이 화면만 옛 색으로 남고, 그 차이를 아무도 눈치채지 못한다.
 import { T } from '@/lib/constants';
+import { signupOutcome, loginOutcomeMessage } from '@/lib/auth/signupOutcome';
 
 type AuthMode = 'login' | 'signup' | 'reset' | 'profile' | 'redeem' | 'security';
 
@@ -203,16 +204,21 @@ export default function AuthPage() {
     setLoading(true);
     try {
       if (SUPABASE_CONFIGURED) {
-        const { profile, error } = await sbSignIn(email, password);
+        const { user, profile, error } = await sbSignIn(email, password);
         if (error) { showToast(getKoreanError(error), 'error'); return; }
-        if (profile) {
-          setSession(profile); setMode('profile');
-          showToast(`${profile.displayName}님, 반갑습니다!`, 'success');
-          setTimeout(() => {
-            if (canAccessAdmin(profile.role)) window.location.href = '/admin';
-            else window.location.href = '/';
-          }, 800);
+        // **인증은 됐는데 프로필이 없으면 화면이 침묵했다.** 토스트도 이동도
+        // 없어서 버튼이 안 눌린 것처럼 보였다. 무슨 일인지 말해 준다.
+        if (!profile) {
+          const m = loginOutcomeMessage({ hasUser: !!user, hasProfile: false });
+          showToast(m.message, 'error');
+          return;
         }
+        setSession(profile); setMode('profile');
+        showToast(`${profile.displayName}님, 반갑습니다!`, 'success');
+        setTimeout(() => {
+          if (canAccessAdmin(profile.role)) window.location.href = '/admin';
+          else window.location.href = '/';
+        }, 800);
       } else {
         const { user, error } = await mockSignIn(email, password);
         if (error) { showToast(error, 'error'); return; }
@@ -234,10 +240,21 @@ export default function AuthPage() {
     setLoading(true);
     try {
       if (SUPABASE_CONFIGURED) {
-        const { error } = await sbSignUp(email, password, displayName);
-        if (error) { showToast(getKoreanError(error), 'error'); return; }
-        showToast('가입 완료! 이메일을 확인하여 계정을 인증하세요.', 'success');
-        setMode('login');
+        // **`error`만 보고 성공을 적지 않는다.** `signUp`은 오류 없이도
+        // 계정이 만들어지지 않은 응답을 돌려줄 수 있다. 무엇을 뜻하는지는
+        // signupOutcome이 정하고, 여기서는 그 판정을 그대로 보여 준다.
+        const r = await sbSignUp(email, password, displayName);
+        const o = signupOutcome({
+          user: r.user, session: r.session,
+          errorMessage: r.error ? getKoreanError(r.error) : null,
+        });
+        showToast(o.message, o.ok ? 'success' : 'error');
+        // 확인 메일을 기다려야 하면 로그인 화면으로 보낸다. 모호하거나
+        // 실패한 경우에는 **화면을 옮기지 않는다** — 옮기면 방금 읽은 안내가
+        // 사라지고, 사용자는 무엇을 해야 하는지 모른 채 남는다.
+        if (o.code === 'CONFIRM_EMAIL_SENT') setMode('login');
+        else if (o.code === 'SIGNED_IN') setTimeout(() => { window.location.href = '/'; }, 800);
+        return;
       } else {
         const { user, error } = await mockSignUp(email, password, displayName, inviteCode || undefined);
         if (error) { showToast(error, 'error'); return; }

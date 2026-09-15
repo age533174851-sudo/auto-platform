@@ -88,9 +88,17 @@ export function getEmailRedirectUrl(): string | undefined {
 // AUTH FUNCTIONS
 // ══════════════════════════════════════════════════════════════
 
+/**
+ * 가입 요청을 보내고 **응답을 그대로 올려 준다.**
+ *
+ * 예전에는 `{ user, error }`만 돌려줬다. 그래서 부르는 쪽은 `error`가 없으면
+ * 성공으로 읽을 수밖에 없었고, 화면은 계정이 안 만들어진 응답에도
+ * "가입 완료!"를 적었다. 판정에 필요한 것은 셋이다 — `user`·`session`·
+ * `identities`. 무엇을 뜻하는지는 `signupOutcome`이 정한다(테스트가 붙어 있다).
+ */
 export async function sbSignUp(email: string, password: string, displayName: string) {
   const sb = await getClient();
-  if (!sb) return { user: null, error: 'Supabase not configured' };
+  if (!sb) return { user: null, session: null, error: 'Supabase not configured' };
   const emailRedirectTo = getEmailRedirectUrl();
   const { data, error } = await sb.auth.signUp({
     email,
@@ -100,8 +108,9 @@ export async function sbSignUp(email: string, password: string, displayName: str
       ...(emailRedirectTo ? { emailRedirectTo } : {}),
     },
   });
-  if (error) return { user: null, error: error.message };
-  return { user: data.user, error: null };
+  // **오류일 때도 모양을 같게 유지한다.** 부르는 쪽이 분기를 두 번 하지 않게.
+  if (error) return { user: null, session: null, error: error.message };
+  return { user: data?.user ?? null, session: data?.session ?? null, error: null };
 }
 
 export async function sbSignIn(email: string, password: string) {
