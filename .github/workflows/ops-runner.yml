@@ -49,6 +49,11 @@ jobs:
 
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # **배포가 끝났는지 값으로 확인하려면 실제로 떠 있는 것을 읽어야 한다.**
+      # 인증 없는 `/api/system/deployment`를 읽는 주소다 — `deployment-check`가
+      # 쓰는 그 시크릿과 같다. 없으면 Vercel SHA는 모름이 되고, 모름은 성공이
+      # 아니다. **값은 로그에 넣지 않는다.**
+      DEPLOY_STATUS_URL: ${{ secrets.EXIT_MONITOR_URL }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

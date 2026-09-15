@@ -98,7 +98,37 @@ async function loadLib() {
 
 const {
   claimDecision, runOutcomeOf, healPlan, healVerdict, deployVerification, runtimeHealthOf,
+  observedVercelSha,
 } = await loadLib();
+
+// ── 실제로 떠 있는 Vercel 커밋을 **관측한다** ──
+//
+// 예전에는 관측하지 않고 `vercelSha: mainSha`를 넘겼다. 그러면 Vercel 검사는
+// 언제나 통과하고, 배포가 어긋난 날에도 VERIFIED가 찍힌다. 실제로 2026-09-13에
+// Vercel만 6시간 넘게 옛 커밋이었다.
+//
+// 인증 없는 `/api/system/deployment`가 그 답을 갖고 있다. **주소는 로그에
+// 넣지 않는다.** 못 읽으면 null이고, null은 UNKNOWN이 된다 — 모르는 것을
+// 성공으로 적지 않는다.
+async function readVercelSha() {
+  const base = String(process.env.DEPLOY_STATUS_URL || '').replace(/\/+$/, '');
+  if (!base) { console.log('배포 상태 주소가 없습니다 — Vercel SHA는 모름으로 둡니다'); return null; }
+  try {
+    const r = await fetch(`${base}/api/system/deployment`, { signal: AbortSignal.timeout(20_000) });
+    if (r.status !== 200) {
+      console.log(`배포 상태를 읽지 못했습니다 (HTTP ${r.status}) — Vercel SHA는 모름으로 둡니다`);
+      return null;
+    }
+    const body = await r.json().catch(() => null);
+    const sha = observedVercelSha(body);
+    if (!sha) console.log('응답에서 Vercel SHA를 읽지 못했습니다 — 모름으로 둡니다');
+    return sha;
+  } catch {
+    // **주소도 오류 원문도 찍지 않는다.** 주소에 토큰이 섞여 있을 수 있다.
+    console.log('배포 상태 조회에 실패했습니다 — Vercel SHA는 모름으로 둡니다');
+    return null;
+  }
+}
 
 // ── 워커 상태를 DB에서 직접 읽는다 ──
 //
@@ -401,8 +431,11 @@ if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
     }
   }
 
+  // **관측하지 않은 값을 넘기지 않는다.** 못 읽었으면 null이고, null은 UNKNOWN이다.
+  const vercelSha = await readVercelSha();
+
   const dv = deployVerification({
-    mainSha, vercelSha: mainSha, flySha: w?.version ?? null, workerFresh, migrationsApplied,
+    mainSha, vercelSha, flySha: w?.version ?? null, workerFresh, migrationsApplied,
   });
   console.log(`배포 검증: ${dv.code} — ${dv.reason}`);
 
@@ -410,7 +443,7 @@ if (cmd === 'DEPLOY' || cmd === 'APPROVE_LIVE_SMALL') {
   if (hasTable.ok && hasTable.rows[0]?.[0] === 't') {
     q(`INSERT INTO deployment_verifications
        (main_sha, vercel_sha, fly_sha, worker_fresh, migrations_applied, verdict, reason)
-       VALUES (${lit(mainSha)}, ${lit(mainSha)}, ${lit(w?.version ?? null)},
+       VALUES (${lit(mainSha)}, ${lit(vercelSha)}, ${lit(w?.version ?? null)},
                ${workerFresh == null ? 'NULL' : workerFresh},
                ${migrationsApplied == null ? 'NULL' : migrationsApplied},
                ${lit(dv.code)}, ${lit(dv.reason)})`);
