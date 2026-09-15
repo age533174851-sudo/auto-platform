@@ -40,6 +40,12 @@ export type PaperOrderCode =
   | 'SUPABASE_NOT_CONFIGURED'   // 503
   | 'MISSING_PARAMS'            // 400
   | 'UNSUPPORTED_MARKET'        // 400
+  // ── 챌린지 장부를 지정한 주문이 그 장부에 닿기 전에 멈춘 자리 ──
+  //    **기본 계좌로 대신 처리하지 않는다.** 그래서 이 셋은 거부이고,
+  //    "챌린지가 아닌 주문"으로 조용히 바뀌는 길이 없다.
+  | 'CHALLENGE_NOT_FOUND'       // 404  없거나 남의 것이다 (같은 답을 준다)
+  | 'CHALLENGE_UNREADABLE'      // 503  조회를 못 했다. '없다'와 다르다
+  | 'CHALLENGE_NOT_RUNNING'     // 409  RUNNING이 아니다 (잠그기 전의 관문)
   | 'DAILY_LIMIT'               // 429  실제로 한도에 걸렸다
   | 'DAILY_LIMIT_UNKNOWN'       // 429  확인하지 못해 막았다 (fail-closed)
   // ── plan_rejected를 경로가 아는 사실로만 가른다 ──
@@ -70,6 +76,9 @@ export function resultOf(code: PaperOrderCode): PaperOrderResult {
   switch (code) {
     case 'OPEN_RPC_ERROR':
     case 'SUPABASE_NOT_CONFIGURED':
+    // 조회 자체를 못 했다. **막은 것이 아니라 못 본 것이다** — 같은 칸에
+    // 넣으면 나중에 "안전장치가 일했다"와 "관측이 죽었다"를 못 가른다.
+    case 'CHALLENGE_UNREADABLE':
       return 'failed';
     default:
       return 'blocked';

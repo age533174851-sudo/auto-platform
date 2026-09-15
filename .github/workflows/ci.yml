@@ -499,6 +499,15 @@ jobs:
       - name: 모의 주문 관측 배선 (열 곳 전부 계수 · 내용 비기록)
         run: node scripts/check-paper-order-telemetry.mjs
 
+      # ── 챌린지 배선 ──
+      #
+      # 이제 사용자의 모의 장부가 둘 이상이다. 어느 한 자리가 챌린지를 못
+      # 찾았을 때 **기본 계좌로 내려가면** 사용자가 고른 적 없는 장부로
+      # 주문이 나간다. 폴백 한 줄이 이 변경의 전체 위험이라, 시험만이 아니라
+      # 코드의 모양으로도 막는다.
+      - name: 챌린지 배선 (기본 계좌 폴백 금지 · 취소는 돈을 만들지 않는다)
+        run: node scripts/check-paper-challenge-wiring.mjs
+
       # ── 배포 증거 ──
       #
       # 관측하지 않은 Vercel SHA를 main으로 채워 넘기면 그 검사는 **언제나

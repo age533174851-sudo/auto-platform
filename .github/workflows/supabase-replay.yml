@@ -46,6 +46,9 @@ on:
       - 'scripts/paper-challenge-finalizer-concurrency.sh'
       - 'scripts/paper-challenge-finalizer-mutations.mjs'
       - 'scripts/check-paper-challenge-finalizer.mjs'
+      # 취소 경로 — 087과 그 증명·뮤테이션·배선 검사기
+      - 'scripts/paper-challenge-cancel-mutations.mjs'
+      - 'scripts/check-paper-challenge-wiring.mjs'
       - 'scripts/lib/paper-money-path.mjs'
       # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
       - 'scripts/apply-migrations.mjs'
@@ -65,6 +68,9 @@ on:
       - 'scripts/paper-challenge-finalizer-concurrency.sh'
       - 'scripts/paper-challenge-finalizer-mutations.mjs'
       - 'scripts/check-paper-challenge-finalizer.mjs'
+      # 취소 경로 — 087과 그 증명·뮤테이션·배선 검사기
+      - 'scripts/paper-challenge-cancel-mutations.mjs'
+      - 'scripts/check-paper-challenge-wiring.mjs'
       - 'scripts/lib/paper-money-path.mjs'
       # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
       - 'scripts/apply-migrations.mjs'
@@ -110,7 +116,7 @@ jobs:
   # `replay-core` · `approval-mutations`라는 내부 이름으로 나뉜다.
 
   replay-core:
-    name: 재생 본체 (스키마 · 제약 · RPC · 085 · 086 · 승인 증명)
+    name: 재생 본체 (스키마 · 제약 · RPC · 085 · 086 · 087 · 승인 증명)
     runs-on: ubuntu-latest
     # Docker 이미지를 처음 받아 오는 시간이 있다. 너무 짧게 잡으면 실패가
     # 아니라 시간 초과가 보고된다.
@@ -504,6 +510,72 @@ jobs:
           fi
           {
             echo "### 챌린지 마감 뮤테이션"
+            echo ""
+            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 취소 (087) ──
+      #
+      # 취소는 겉보기에 상태 한 칸이라 "시험까지는" 하고 넘어가기 쉽다. 그런데
+      # 이 한 칸이 틀리면 **달성한 챌린지가 취소로 기록되고**, 남의 챌린지가
+      # 닫히고, 취소가 직접 정산해서 회계 권위가 둘이 된다. 그래서 글자로
+      # 읽지 않고 불러 본다.
+      - name: 취소가 돈을 만들지 않는가 (087 실행 증명)
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 \
+            -Xf scripts/sql/087_paper_challenge_cancel_proof.sql \
+            > /tmp/cancel-proof.out 2>&1 || {
+              echo "::error::취소가 계약대로 동작하지 않습니다 — 아래 FAIL/ERROR 줄을 보세요"
+              cat /tmp/cancel-proof.out
+              exit 1
+            }
+          cat /tmp/cancel-proof.out
+          # 0건을 통과로 적지 않는다. 파일이 통째로 건너뛰어도 psql은 0으로 끝난다.
+          n_ok="$(grep -c 'ok  ' /tmp/cancel-proof.out || true)"
+          if [ "${n_ok}" -lt 38 ]; then
+            echo "::error::취소 확인이 ${n_ok}건뿐입니다 — 증명이 실제로 돌지 않았습니다"
+            exit 1
+          fi
+          # **거부만 확인하는 증명은 만점을 받는다.** 핵심 계약을 문구로 붙든다.
+          for need in '잔고 변화 0 — 취소는 돈을 만들지 않는다' \
+                      '열린 포지션 그대로 — 취소가 청산하지 않는다' \
+                      '달성이 먼저면 취소가 진다' \
+                      '남의 챌린지는 NOT_FOUND다' \
+                      '없는 챌린지도 같은 NOT_FOUND다' \
+                      '전이 로그가 두 줄이 되지 않는다' \
+                      '최종 상태는 동결된 CANCELLED의 복사다' \
+                      '일반 모의 주문은 지금까지처럼 열린다' \
+                      '챌린지 취소 실행 증명 전부 통과'; do
+            if ! grep -q "${need}" /tmp/cancel-proof.out; then
+              echo "::error::증명에 이 확인이 없습니다: ${need}"
+              exit 1
+            fi
+          done
+          {
+            echo "### 챌린지 취소 실행 증명"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (돈 불변 · 사유 동결 · 소유권 · 멱등)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 취소 규칙을 하나씩 빼 본다 (087 뮤테이션)
+        run: |
+          set -euo pipefail
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          node scripts/paper-challenge-cancel-mutations.mjs > /tmp/cancel-mut.out 2>&1 || {
+            echo "::error::규칙을 깼는데 검사가 초록입니다 — 그 규칙은 아무도 지키지 않습니다"
+            cat /tmp/cancel-mut.out
+            exit 1
+          }
+          cat /tmp/cancel-mut.out
+          n_red="$(grep -c '      RED' /tmp/cancel-mut.out || true)"
+          if [ "${n_red}" -lt 13 ]; then
+            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
+            exit 1
+          fi
+          {
+            echo "### 챌린지 취소 뮤테이션"
             echo ""
             echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
           } >> "$GITHUB_STEP_SUMMARY"
