@@ -5,7 +5,7 @@
 // 이 시험은 그 둘을 막는다.
 
 import { test, eq, assert } from '../../test/harness';
-import { healPlan, healVerdict, deployVerification, MAX_ATTEMPTS, ATTEMPT_WINDOW_MS } from './selfHeal';
+import { healPlan, healVerdict, deployVerification, observedVercelSha, MAX_ATTEMPTS, ATTEMPT_WINDOW_MS } from './selfHeal';
 import type { RuntimeHealth } from '../runtime/runtimeHealth';
 
 const NOW = 1_800_000_000_000;
@@ -167,5 +167,80 @@ export function runSelfHealTests() {
     });
     eq(v.code, 'MISMATCH');
     assert(/Fly SHA/.test(v.reason), v.reason);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  //  관측하지 않은 Vercel SHA를 main으로 채우던 자리 (P0)
+  // ══════════════════════════════════════════════════════════════
+  //
+  // `ops-runner`가 `vercelSha: mainSha`를 넘기고 있었다. 관측한 적 없는 값을
+  // main과 같게 만들어 넘긴 것이라 **Vercel 검사는 언제나 통과**했고, 같은
+  // 값이 장부(`deployment_verifications.vercel_sha`)에도 적혔다.
+  //
+  // 2026-09-13에 Vercel만 6시간 넘게 옛 커밋이었다 — 그때 DEPLOY가 돌았다면
+  // 이 자리는 초록으로 기록됐을 것이다.
+
+  const MAIN = 'c61271eb58472a11d684799ea959765fe4618831';
+  const OLD = 'ae069124ec3330dde7b0b7073d966b6b5c66c4e6';
+  const okRest = { workerFresh: true, migrationsApplied: true };
+
+  test('관측값이 main과 같으면 VERIFIED다', () => {
+    const v = deployVerification({ mainSha: MAIN, vercelSha: MAIN, flySha: MAIN, ...okRest });
+    eq(v.code, 'VERIFIED');
+  });
+
+  test('관측값이 다르면 MISMATCH다 — 그날의 값으로 확인한다', () => {
+    const v = deployVerification({ mainSha: MAIN, vercelSha: OLD, flySha: MAIN, ...okRest });
+    eq(v.code, 'MISMATCH');
+    assert(/Vercel SHA/.test(v.reason), v.reason);
+  });
+
+  test('★ 관측하지 못하면 UNKNOWN이다 — 성공이 아니다', () => {
+    const v = deployVerification({ mainSha: MAIN, vercelSha: null, flySha: MAIN, ...okRest });
+    eq(v.code, 'UNKNOWN');
+    assert(/확인하지 못했습니다/.test(v.reason), v.reason);
+  });
+
+  test('★ 빈 문자열도 관측이 아니다', () => {
+    eq(deployVerification({ mainSha: MAIN, vercelSha: '', flySha: MAIN, ...okRest }).code, 'UNKNOWN');
+    eq(deployVerification({ mainSha: MAIN, vercelSha: '   ', flySha: MAIN, ...okRest }).code, 'UNKNOWN');
+  });
+
+  // ── 응답에서 SHA를 읽는 쪽 ──
+  test('정상 응답에서 Vercel SHA를 읽는다', () => {
+    eq(observedVercelSha({ vercel: { sha: MAIN } }), MAIN);
+  });
+
+  test('대문자는 소문자로 맞춘다 — 비교가 대소문자로 갈리지 않게', () => {
+    eq(observedVercelSha({ vercel: { sha: MAIN.toUpperCase() } }), MAIN);
+  });
+
+  test('★ API가 죽었거나 본문이 없으면 null이다', () => {
+    for (const body of [null, undefined, {}, { vercel: null }, { vercel: {} }, '', 0, []] as any[]) {
+      eq(observedVercelSha(body), null, JSON.stringify(body ?? null));
+    }
+  });
+
+  test('★ 파싱은 됐는데 SHA 모양이 아니면 null이다 — 소음을 관측으로 적지 않는다', () => {
+    for (const sha of ['unknown', 'null', 'undefined', 'error', 'main', '123', 'zzzzzzz',
+      'not-a-sha-value', '<html>', MAIN + 'ff']) {
+      eq(observedVercelSha({ vercel: { sha } }), null, sha);
+    }
+  });
+
+  test('★ 문자열이 아니면 null이다', () => {
+    for (const sha of [123, true, {}, [], { sha: MAIN }] as any[]) {
+      eq(observedVercelSha({ vercel: { sha } }), null, JSON.stringify(sha));
+    }
+  });
+
+  test('짧은 커밋 표기(7자)도 관측으로 받는다', () => {
+    eq(observedVercelSha({ vercel: { sha: 'c61271e' } }), 'c61271e');
+  });
+
+  test('★ 읽지 못한 것을 넘기면 판정이 UNKNOWN으로 이어진다 — 관측 실패가 초록이 되지 않는다', () => {
+    const sha = observedVercelSha({ vercel: { sha: 'unknown' } });   // 소음
+    eq(sha, null);
+    eq(deployVerification({ mainSha: MAIN, vercelSha: sha, flySha: MAIN, ...okRest }).code, 'UNKNOWN');
   });
 }

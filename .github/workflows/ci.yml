@@ -499,6 +499,15 @@ jobs:
       - name: 모의 주문 관측 배선 (열 곳 전부 계수 · 내용 비기록)
         run: node scripts/check-paper-order-telemetry.mjs
 
+      # ── 배포 증거 ──
+      #
+      # 관측하지 않은 Vercel SHA를 main으로 채워 넘기면 그 검사는 **언제나
+      # 통과한다.** 그 상태로 VERIFIED가 찍히고 장부에도 같은 거짓이 남는다.
+      # 2026-09-13에 Vercel만 6시간 넘게 옛 커밋이었다 — 그때 DEPLOY가 돌았다면
+      # 초록으로 기록됐을 자리다.
+      - name: 배포 증거 (관측 없는 SHA를 관측으로 적지 않는다)
+        run: node scripts/check-deploy-evidence.mjs
+
       # ── 모의계좌 단일화 ──
       #
       # 모의계좌가 둘이었다: 서버 PAPER(USDT·실제 전략)와 브라우저

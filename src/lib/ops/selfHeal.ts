@@ -216,6 +216,36 @@ export interface DeployVerification {
  * 여섯 가지가 전부 확인돼야 VERIFIED다. **하나라도 모르면 UNKNOWN이고,
  * UNKNOWN은 성공이 아니다.**
  */
+/**
+ * 배포 상태 응답에서 **실제로 떠 있는 Vercel 커밋**을 읽는다.
+ *
+ * 왜 이 함수가 생겼나
+ * ───────────────────
+ * `ops-runner`가 `deployVerification`에 `vercelSha: mainSha`를 넘기고 있었다.
+ * 관측한 적 없는 값을 main과 같게 만들어 넘긴 것이라, **Vercel 검사는 언제나
+ * 통과한다.** 그 상태로 다섯 칸이 다 차면 VERIFIED가 되고, 같은 값이
+ * `deployment_verifications.vercel_sha`에도 그대로 적혔다 — 장부까지 거짓이 된다.
+ *
+ * 실제로 2026-09-13에 Vercel만 6시간 넘게 옛 커밋이었다. 그때 DEPLOY 명령이
+ * 돌았다면 이 자리는 **초록으로 기록됐을 것이다.**
+ *
+ * 무엇을 받아들이나
+ * ─────────────────
+ * `/api/system/deployment`의 `vercel.sha`만 본다. 그리고 **모양을 검사한다** —
+ * 16진수 7~40자가 아니면 받지 않는다. 오류 문구·빈 문자열·객체·`"unknown"`
+ * 같은 것이 그대로 흘러들어 `same()` 비교에 쓰이면, 그건 관측이 아니라 소음이다.
+ *
+ * **못 읽으면 null이다.** null은 `deployVerification`에서 UNKNOWN이 되고,
+ * UNKNOWN은 성공이 아니다.
+ */
+export function observedVercelSha(body: any): string | null {
+  const raw = body?.vercel?.sha;
+  if (typeof raw !== 'string') return null;
+  const sha = raw.trim().toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return null;
+  return sha;
+}
+
 export function deployVerification(i: {
   mainSha: string | null | undefined;
   vercelSha: string | null | undefined;
