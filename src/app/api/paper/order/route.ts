@@ -98,6 +98,38 @@ export async function POST(req: NextRequest) {
   }
   const spot = market === 'SPOT';
 
+  // ── 어느 장부에 적을 것인가 — **여기서 한 번 정한다** ──
+  //
+  // 밖에서 들어오는 것은 `challengeId` 하나다. 계좌 id를 받지 않는다 —
+  // 받으면 "이 계좌가 무엇인지" 아는 곳이 화면이 된다.
+  //
+  // **못 정하면 기본 계좌로 내려가지 않는다.** 내려가면 사용자가 고른 적
+  // 없는 장부로 주문이 나간다. 세 가지 실패가 전부 거부다.
+  const { resolveChallengeScope, challengeScopeFailed, challengeOrderGate } =
+    await import('@/lib/engine/paperChallengeScope');
+  const rawChallengeId = typeof body?.challengeId === 'string' ? body.challengeId.trim() : '';
+  let challengeAccountId: string | null = null;
+  if (rawChallengeId) {
+    const cs = await resolveChallengeScope(sb, uid, rawChallengeId);
+    if (challengeScopeFailed(cs)) {
+      const unreadable = cs.code === 'UNREADABLE';
+      return await counted(sb, unreadable ? 'CHALLENGE_UNREADABLE' : 'CHALLENGE_NOT_FOUND',
+        NextResponse.json({
+          ok: false, error: unreadable ? 'challenge_unreadable' : 'challenge_not_found',
+          message: cs.reason,
+        }, { status: unreadable ? 503 : 404, headers: { 'Cache-Control': 'no-store' } }));
+    }
+    // **RUNNING만 받는다.** 잠그기 전의 관문이고, 최종 판정은 `086`의
+    // `paper_open_position`이 계좌를 잠근 뒤 다시 한다 — 권위는 거기 하나다.
+    const gate = challengeOrderGate(cs.status);
+    if (!gate.allowed) {
+      return await counted(sb, 'CHALLENGE_NOT_RUNNING', NextResponse.json({
+        ok: false, error: 'challenge_not_running', message: gate.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } }));
+    }
+    challengeAccountId = cs.accountId;
+  }
+
   // 체결 기준가는 **서버가 받는다.** 화면이 보낸 가격을 그대로 쓰면
   // 유리한 값을 넣어 장부를 만들 수 있고, 그러면 성적표가 의미를 잃는다.
   //
@@ -131,20 +163,40 @@ export async function POST(req: NextRequest) {
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있다.
   const { getPaperAccount } = await import('@/lib/engine/paperStore');
   const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
-  const acct = await getPaperAccount(sb, uid);
+  // **챌린지 주문은 `getPaperAccount`를 부르지 않는다.** 그 함수는 기본
+  // 계좌를 찾고 **없으면 만든다** — 챌린지 경로에서 부르면 사용자가 고른
+  // 적 없는 계좌가 조용히 생긴다.
+  const acct = challengeAccountId ? null : await getPaperAccount(sb, uid);
   let available: number | null = null;
   try {
     // **SQL과 같은 범위를 본다.** `082`의 `paper_open_position`은
     // `user_id AND paper_account_id`로 예산을 센다. 여기가 사용자 전체를
     // 세면 미리보기와 최종 판정이 다른 예산을 본다.
-    const scope = await resolvePaperScope(sb, uid);
-    if (paperScopeFailed(scope)) throw new Error(scope.reason);
+    let accountId: string;
+    let balance: number;
+    if (challengeAccountId) {
+      // 소유권은 위에서 이미 확인했다. 그래도 `user_id`로 함께 좁힌다 —
+      // 한 곳만 보면 언젠가 그 한 곳이 빠진다.
+      const { data: ca } = await sb.from('paper_accounts')
+        .select('balance').eq('id', challengeAccountId).eq('user_id', uid).maybeSingle();
+      const b = Number(ca?.balance);
+      // **못 읽은 것을 0으로 적지 않는다.** 0이면 "잔고가 없다"가 되어
+      // 사유가 뒤바뀐다 — 모름으로 두고 계획 단계에서 막는다.
+      if (!Number.isFinite(b)) throw new Error('챌린지 계좌 잔고를 읽지 못했습니다');
+      accountId = challengeAccountId;
+      balance = b;
+    } else {
+      const scope = await resolvePaperScope(sb, uid);
+      if (paperScopeFailed(scope)) throw new Error(scope.reason);
+      accountId = scope.accountId;
+      balance = Number(acct.balance) || 0;
+    }
     const { data: open } = await sb.from('paper_positions')
       .select('margin').eq('user_id', uid)
-      .eq('paper_account_id', scope.accountId).eq('status', 'open');
+      .eq('paper_account_id', accountId).eq('status', 'open');
     const used = (Array.isArray(open) ? open : [])
       .reduce((a: number, p: any) => a + (Number(p.margin) || 0), 0);
-    available = (Number(acct.balance) || 0) - used;
+    available = balance - used;
   } catch {
     available = null;   // 모르면 buildPaperPlan이 막는다
   }
@@ -154,7 +206,9 @@ export async function POST(req: NextRequest) {
   // 실계좌에서 그대로 나온다).
   try {
     const { collectPaperDailyLoss } = await import('@/lib/risk/dailyLossCheck');
-    const dl = await collectPaperDailyLoss({ sb, userId: uid });
+    // **같은 장부의 오늘을 본다.** 기본 계좌의 손익으로 챌린지 주문을
+    // 막거나 통과시키면 계좌를 나눈 이유가 사라진다.
+    const dl = await collectPaperDailyLoss({ sb, userId: uid, paperAccountId: challengeAccountId });
     if (dl.verdict.blockEntries) {
       return await counted(sb, 'DAILY_LIMIT', NextResponse.json({
         ok: false, error: 'daily_limit', paper: true,
@@ -201,7 +255,11 @@ export async function POST(req: NextRequest) {
   // 같은 신호를 두 번 넣지 않게 한다. paper_positions에 signal_id UNIQUE가
   // 걸려 있어(010 마이그레이션) 같은 분(minute)의 같은 주문은 한 번만 들어간다.
   const minute = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
-  const signalId = `paper-${uid.slice(0, 8)}-${minute}-${market}-${symbol}-${side}-${built.plan.quantity}`;
+  // **장부가 다르면 다른 신호다.** 계좌를 안 넣으면 같은 분에 기본 계좌와
+  // 챌린지에 같은 주문을 낼 때 뒤엣것이 DUPLICATE로 막힌다 — 사용자는
+  // 내지도 않은 중복으로 거부당한다.
+  const ledgerKey = challengeAccountId ? `c${challengeAccountId.slice(0, 8)}` : 'default';
+  const signalId = `paper-${uid.slice(0, 8)}-${minute}-${ledgerKey}-${market}-${symbol}-${side}-${built.plan.quantity}`;
 
   const { openPaperPosition } = await import('@/lib/engine/paperStore');
   const r = await openPaperPosition(sb, {
@@ -215,6 +273,9 @@ export async function POST(req: NextRequest) {
     entryPrice: markPrice as number,
     stopLoss: stopPrice ?? undefined,
     takeProfit: body?.takeProfit != null ? Number(body.takeProfit) : undefined,
+    // **미리보기와 같은 계좌를 넘긴다.** 안 넘기면 SQL이 기본 계좌를 고르고,
+    // 위에서 챌린지 예산으로 통과시킨 주문이 기본 장부에 체결된다.
+    paperAccountId: challengeAccountId ?? undefined,
   });
 
   if (!r.ok) {
@@ -229,6 +290,9 @@ export async function POST(req: NextRequest) {
 
   return await counted(sb, 'OPENED', NextResponse.json({
     ok: true, paper: true, positionId: r.positionId,
+    // 어느 장부에 적혔는지 화면이 알 수 있게. **계좌 id는 내보내지 않는다** —
+    // 나가면 다음 요청이 그 값을 되보내게 되고 `challengeId` 계약이 깨진다.
+    challengeId: rawChallengeId || null,
     symbol, side,
     fillPrice: r.fill?.fillPrice, quantity: r.fill?.quantity,
     notional: r.fill?.notional, leverage: r.fill?.leverage,
