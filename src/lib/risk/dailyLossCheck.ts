@@ -100,6 +100,17 @@ export async function collectDailyLoss(args: {
 export async function collectPaperDailyLoss(args: {
   sb: any; userId: string; nowMs?: number;
   env?: (k: string) => string | undefined;
+  /**
+   * 어느 장부의 오늘인가. **안 주면 지금까지처럼 기본 계좌다.**
+   *
+   * 챌린지 주문은 전용 계좌로 나간다. 그때 이 판정이 기본 계좌를 보면,
+   * 사용자가 운용하지 않은 장부의 오늘 손익으로 챌린지 주문을 막거나
+   * 통과시킨다 — 계좌를 나눈 이유가 사라진다.
+   *
+   * 값을 주면 **기본 계좌를 다시 찾지 않는다.** 소유권 확인은 부르는 쪽이
+   * 이미 했고(`resolveChallengeScope`), 질의도 `user_id`로 함께 좁힌다.
+   */
+  paperAccountId?: string | null;
 }): Promise<DailyLossFacts> {
   const now = args.nowMs ?? Date.now();
   // 모의도 연습이다. 실전 한도로 잠그면 연습을 못 한다.
@@ -121,7 +132,8 @@ export async function collectPaperDailyLoss(args: {
     // 계좌를 못 정하면 **질의하지 않는다.** 0건으로 읽으면 "오늘 손실이
     // 없다"가 되어 막아야 할 것을 통과시킨다 — 아래 catch와 같은 취급으로
     // 모름(null)에 남긴다.
-    const acct = await defaultPaperAccountId(args.sb, args.userId);
+    const explicit = typeof args.paperAccountId === 'string' ? args.paperAccountId.trim() : '';
+    const acct = explicit ? explicit : await defaultPaperAccountId(args.sb, args.userId);
     const { data } = acct == null ? { data: null } : await args.sb.from('paper_positions')
       .select('realized_pnl, closed_at')
       .eq('user_id', args.userId).eq('paper_account_id', acct).eq('status', 'closed')
@@ -133,9 +145,20 @@ export async function collectPaperDailyLoss(args: {
   } catch { /* null → unknown → 막힌다 */ }
 
   try {
-    const { getPaperAccount } = await import('@/lib/engine/paperStore');
-    const acct = await getPaperAccount(args.sb, args.userId);
-    const bal = Number(acct?.balance);
+    // **전용 계좌를 지정했으면 그 계좌의 잔고다.** `getPaperAccount`는 기본
+    // 계좌를 찾고 **없으면 만든다** — 챌린지 경로에서 부르면 아무도 고르지
+    // 않은 계좌가 생긴다.
+    const explicit = typeof args.paperAccountId === 'string' ? args.paperAccountId.trim() : '';
+    let bal = NaN;
+    if (explicit) {
+      const { data } = await args.sb.from('paper_accounts')
+        .select('balance').eq('id', explicit).eq('user_id', args.userId).maybeSingle();
+      bal = Number(data?.balance);
+    } else {
+      const { getPaperAccount } = await import('@/lib/engine/paperStore');
+      const acct = await getPaperAccount(args.sb, args.userId);
+      bal = Number(acct?.balance);
+    }
     if (Number.isFinite(bal) && todayNetUsd != null) dayStartEquityUsd = bal - todayNetUsd;
   } catch { /* null */ }
 
