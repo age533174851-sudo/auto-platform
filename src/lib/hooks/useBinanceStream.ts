@@ -19,6 +19,12 @@
 // 마지막 구독자가 떠나도 곧바로 끊지 않는다 — 탭을 옮기거나 시트를
 // 여닫을 때마다 붙었다 떨어지면 그게 더 비싸다.
 import { useEffect, useState, useSyncExternalStore } from 'react';
+import {
+  type StreamMarket, hubKey, wsStreamUrl, ticker24hUrl, markPriceUrl,
+  parseTicker24h, parseMarkPrice, depthRowsOf,
+} from '../trading/streamEndpoints';
+
+export type { StreamMarket } from '../trading/streamEndpoints';
 
 export interface DepthLevel { price: number; qty: number }
 
@@ -32,6 +38,16 @@ export interface StreamState {
   lastPrice: number | null;
   markPrice: number | null;
   changePct: number | null;
+  // ── 24시간 통계 (REST) ──
+  // 못 받은 칸은 null이다. 0으로 적으면 고가 0 · 거래량 0이 화면에 뜬다.
+  high24h: number | null;
+  low24h: number | null;
+  /** 기준통화 거래량 (예: BTC 수량) */
+  volume24h: number | null;
+  /** 상대통화 거래량 (예: USDT 금액) */
+  quoteVolume24h: number | null;
+  /** 이 상태가 어느 시장의 값인지. 현물 화면에 선물 값이 섞이지 않게 한다. */
+  market: StreamMarket | null;
   status: 'connecting' | 'live' | 'reconnecting' | 'error' | 'idle';
   /** 마지막으로 데이터가 도착한 시각 (ms). 없으면 한 번도 못 받았다 */
   lastMessageAt: number | null;
@@ -59,6 +75,8 @@ export interface StreamState {
 export const EMPTY_STREAM: StreamState = {
   asks: [], bids: [], trades: [],
   lastPrice: null, markPrice: null, changePct: null,
+  high24h: null, low24h: null, volume24h: null, quoteVolume24h: null,
+  market: null,
   status: 'idle', lastMessageAt: null, stale: false,
   depthAt: null, priceAt: null, changeAt: null,
 };
@@ -82,7 +100,8 @@ const LINGER_MS = 10_000;
  */
 class SymbolHub {
   readonly symbol: string;
-  private state: StreamState = { ...EMPTY_STREAM, status: 'connecting' };
+  readonly market: StreamMarket;
+  private state: StreamState;
   private listeners = new Set<() => void>();
   private ws: WebSocket | null = null;
   private retry = 0;
@@ -93,8 +112,10 @@ class SymbolHub {
   private lastMsgAt: number | null = null;
   private closed = false;
 
-  constructor(symbol: string) {
+  constructor(market: StreamMarket, symbol: string) {
+    this.market = market;
     this.symbol = symbol;
+    this.state = { ...EMPTY_STREAM, market, status: 'connecting' };
   }
 
   getState = (): StreamState => this.state;
@@ -130,7 +151,7 @@ class SymbolHub {
       this.lingerTimer = null;
       if (this.listeners.size > 0) return;   // 그 사이 다시 붙었다
       this.destroy();
-      HUBS.delete(this.symbol);
+      HUBS.delete(hubKey(this.market, this.symbol));
     }, LINGER_MS);
   }
 
@@ -161,8 +182,14 @@ class SymbolHub {
     // 체결·시세 계열은 오지 않고 호가·북 계열만 온다. 현물 aggTrade는 오지만
     // 선물 호가에 현물 체결을 섞으면 서로 다른 시장의 값이 한 화면에 놓인다.
     // 그래서 오는 것만 쓴다: depth(호가) + bookTicker(최우선 호가 → 현재가).
-    const s = this.symbol.toLowerCase();
-    const url = `wss://fstream.binance.com/stream?streams=${s}@depth20@100ms/${s}@bookTicker`;
+    //
+    // 주소는 시장이 정한다. 예전에는 심볼만 보고 무조건 선물에 붙어서
+    // 현물 화면도 선물 호가를 보고 있었다.
+    const url = wsStreamUrl(this.market, this.symbol);
+    if (!url) {
+      this.emit({ status: 'error', error: '스트림 주소를 만들 수 없는 심볼입니다' });
+      return;
+    }
 
     this.emit({ status: this.retry ? 'reconnecting' : 'connecting' });
 
@@ -193,11 +220,15 @@ class SymbolHub {
       if (!d) return;
 
       if (stream.includes('@depth')) {
-        const toLevels = (rows: any): DepthLevel[] =>
-          (Array.isArray(rows) ? rows : [])
+        // 선물은 {a, b}, 현물은 {asks, bids}로 온다. 스트림 이름은 같다.
+        // 한쪽만 읽으면 현물 호가창이 오류 없이 조용히 빈 채로 뜬다.
+        const rows = depthRowsOf(d);
+        if (!rows) return;
+        const toLevels = (raw: any[]): DepthLevel[] =>
+          raw
             .map((r: any) => ({ price: parseFloat(r[0]), qty: parseFloat(r[1]) }))
             .filter(l => Number.isFinite(l.price) && Number.isFinite(l.qty) && l.qty > 0);
-        this.emit({ asks: toLevels(d.a), bids: toLevels(d.b), depthAt: Date.now() });
+        this.emit({ asks: toLevels(rows.asks), bids: toLevels(rows.bids), depthAt: Date.now() });
         return;
       }
 
@@ -259,12 +290,37 @@ class SymbolHub {
   // 24시간 변동률은 초 단위로 의미가 바뀌는 값이 아니다.
   private poll = async () => {
     if (this.closed) return;
+    await Promise.all([this.pollTicker(), this.pollMark()]);
+  };
+
+  private pollTicker = async () => {
+    const url = ticker24hUrl(this.market, this.symbol);
+    if (!url) return;
     try {
-      const r = await fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${this.symbol}`);
+      const r = await fetch(url);
       if (!r.ok || this.closed) return;
-      const d = await r.json();
-      const chg = parseFloat(d?.priceChangePercent);
-      if (Number.isFinite(chg)) this.emit({ changePct: chg, changeAt: Date.now() });
+      const t = parseTicker24h(await r.json());
+      if (!t) return;
+      // 칸마다 따로 담는다. 하나를 못 읽었다고 나머지를 버리지 않고,
+      // 못 읽은 칸을 0으로 적지도 않는다 — null 그대로 화면까지 간다.
+      this.emit({
+        changePct: t.changePct, high24h: t.high, low24h: t.low,
+        volume24h: t.volume, quoteVolume24h: t.quoteVolume,
+        changeAt: Date.now(),
+      });
+    } catch { /* 실패하면 다음 주기에 다시 시도 */ }
+  };
+
+  // 마크가격은 선물에만 있다. 현물이면 markPriceUrl이 null이라 아무것도
+  // 하지 않는다 — 없는 값을 현재가로 대신 채우지 않는다.
+  private pollMark = async () => {
+    const url = markPriceUrl(this.market, this.symbol);
+    if (!url) return;
+    try {
+      const r = await fetch(url);
+      if (!r.ok || this.closed) return;
+      const mark = parseMarkPrice(await r.json());
+      if (mark !== null) this.emit({ markPrice: mark });
     } catch { /* 실패하면 다음 주기에 다시 시도 */ }
   };
 
@@ -282,9 +338,10 @@ class SymbolHub {
 
 const HUBS = new Map<string, SymbolHub>();
 
-function getHub(symbol: string): SymbolHub {
-  let h = HUBS.get(symbol);
-  if (!h) { h = new SymbolHub(symbol); HUBS.set(symbol, h); }
+function getHub(market: StreamMarket, symbol: string): SymbolHub {
+  const key = hubKey(market, symbol);
+  let h = HUBS.get(key);
+  if (!h) { h = new SymbolHub(market, symbol); HUBS.set(key, h); }
   return h;
 }
 
@@ -296,15 +353,22 @@ export function activeStreamCount(): number {
 /**
  * @param symbol   'BTCUSDT' 형식. 빈 값이면 연결하지 않는다.
  * @param enabled  false면 구독하지 않는다 (패널이 닫혀 있을 때 등)
+ * @param market   기본값 'USDM'. 기존 호출부는 전부 선물 화면이었으므로
+ *                 기본값을 바꾸면 조용히 동작이 달라진다. 현물 값을 보려면
+ *                 호출부가 'SPOT'이라고 **말해야** 한다.
  */
-export function useBinanceStream(symbol: string, enabled = true): StreamState {
+export function useBinanceStream(
+  symbol: string,
+  enabled = true,
+  market: StreamMarket = 'USDM',
+): StreamState {
   const on = enabled && !!symbol;
-  // 훅을 여러 곳에서 불러도 같은 심볼이면 소켓은 하나다.
-  const [hub, setHub] = useState<SymbolHub | null>(() => (on ? getHub(symbol) : null));
+  // 훅을 여러 곳에서 불러도 같은 시장·심볼이면 소켓은 하나다.
+  const [hub, setHub] = useState<SymbolHub | null>(() => (on ? getHub(market, symbol) : null));
 
   useEffect(() => {
-    setHub(on ? getHub(symbol) : null);
-  }, [symbol, on]);
+    setHub(on ? getHub(market, symbol) : null);
+  }, [symbol, on, market]);
 
   return useSyncExternalStore(
     hub ? hub.subscribe : noopSubscribe,

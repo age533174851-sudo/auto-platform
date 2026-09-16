@@ -157,6 +157,15 @@ for (const f of FILES) {
   if (/'SERVER_READY_UI_PENDING', canOrder: true/.test(cap)) {
     err('capability가 화면 없는 시장을 주문 가능으로 적었습니다');
   }
+  // 배선 판정을 손으로 적지 않았는가 —
+  // PR5에서 선물을 "화면 없음"이라고 손으로 적었다가 틀렸다. 문자열 검색으로
+  // 배선을 판단했기 때문이다. 이제 라우팅 정본에게 물어봐야 한다.
+  if (!/orderEndpointFor\('PAPER', market\)/.test(cap)) {
+    err('capability가 배선 여부를 라우팅 정본(orderEndpointFor)에 묻지 않습니다');
+  }
+  if (!/endpoint !== PAPER_ORDER_ENDPOINT/.test(cap)) {
+    err('capability가 라우트 불일치를 주문 불가로 닫지 않습니다');
+  }
   // 대기 주문 탭에 가짜 백엔드를 붙이지 않았는가
   if (!/case 'ORDERS':[\s\S]{0,300}?return no\(/.test(cap)) {
     err('capability가 주문 탭에 정본 백엔드가 있다고 적었습니다 — 대기 주문 표가 없습니다');

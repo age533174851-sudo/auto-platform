@@ -81,7 +81,10 @@ export function PriceChart({
   /** 주기 갱신 트리거. 값이 바뀌면 아래 fetch가 다시 돈다 */
   const [refreshTick, setRefreshTick] = useState(0);
 
-  const stream = useBinanceStream(symbol, market === 'USDM');
+  // 시장을 넘긴다. 예전에는 훅이 무조건 선물에 붙어서 현물 차트에는
+  // 실시간 현재가를 아예 연결하지 못했다 (선물 값을 현물 봉에 얹을 수는
+  // 없으니 끄는 수밖에 없었다). 이제 현물은 현물 값을 받는다.
+  const stream = useBinanceStream(symbol, !fixtureBars, market);
 
   // ── 봉 받기 ──
   useEffect(() => {
