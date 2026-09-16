@@ -145,6 +145,20 @@ export async function fetchVenueBars(opts: {
    */
   startTimeMs?: number | null;
   endTimeMs?: number | null;
+  /**
+   * 진행 중인 봉을 남길 것인가. **기본은 남기지 않는다 — 기존 계약 그대로다.**
+   *
+   * 판정·백테스트는 완성된 봉만 봐야 한다. 미완성 봉의 고가·저가·종가는
+   * 아직 움직이는 값이라, 그걸로 손절 도달을 판정하면 실제로는 닿지 않은
+   * 손절이 닿은 것으로 적힌다.
+   *
+   * 반면 **실시간 차트는 그 봉이 있어야 한다.** 지금 만들어지고 있는 봉을
+   * 안 그리면 차트가 늘 한 칸 뒤처져 보이고, 그 빈자리를 화면이 스스로
+   * 채우기 시작하면 그때부터 우리가 봉을 지어내는 것이다.
+   *
+   * 그래서 **부르는 쪽이 고르게 한다.** 값을 안 주면 지금까지와 같다.
+   */
+  keepIncomplete?: boolean;
 }): Promise<VenueBarsResult> {
   const now = opts.nowMs ?? Date.now();
   // 미완성 봉을 하나 버리므로 하나 더 받는다. 안 그러면 지표 길이가 모자란다.
@@ -188,7 +202,10 @@ export async function fetchVenueBars(opts: {
         close: parseFloat(k?.c), volume: parseFloat(k?.v),
       })).sort((a, b) => a.openTime - b.openTime);
 
-      const cut = dropIncompleteBar(parsed, opts.interval, now);
+      // **부르는 쪽이 고른다.** 기본은 지금까지처럼 잘라 낸다.
+      const cut = opts.keepIncomplete
+        ? { rows: parsed, dropped: false }
+        : dropIncompleteBar(parsed, opts.interval, now);
       return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
     }
 
@@ -225,7 +242,9 @@ export async function fetchVenueBars(opts: {
         close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
 
-    const cut = dropIncompleteBar(parsed, opts.interval, now);
+    const cut = opts.keepIncomplete
+      ? { rows: parsed, dropped: false }
+      : dropIncompleteBar(parsed, opts.interval, now);
     return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
   } catch (e: any) {
     return { bars: null, source: opts.exchange, error: String(e?.message || e), droppedIncomplete: false };
