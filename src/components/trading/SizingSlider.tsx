@@ -10,13 +10,19 @@
 // 차이가 난다. 그래서 계산은 `positionSizing.planSizing` 하나에 두고, 이
 // 컴포넌트는 그 결과를 **말로 적어서** 보여 준다.
 //
+// 빠른 버튼이 없는 이유
+// ─────────────────────
+// 한동안 슬라이더 아래에 25/50/75/100% 버튼을 같이 뒀다. 그런데 비율을
+// 정하는 방법이 둘이면 "지금 몇 %인가"를 말하는 곳도 둘이 된다. 끌어서
+// 정하고 숫자로 읽는다 — 그 한 벌이면 충분하다.
+//
 // 잔고를 못 읽으면 잠근다
 // ───────────────────────
 // 0%로 두지 않는다. 0은 "돈이 없다"로 읽히고, 사용자는 있는 돈을 못 쓴다고
 // 생각한다. 잠그고 사유를 적는다.
 import React from 'react';
 import { C, FS, NUM } from '@/components/terminal/theme';
-import { planSizing, QUICK_PERCENTS, type SizingResult } from '@/lib/trading/positionSizing';
+import { planSizing, type SizingResult } from '@/lib/trading/positionSizing';
 import { formatMoneyForScope, type MoneyScope } from '@/lib/trading/gameMoney';
 
 export interface SizingSliderProps {
@@ -71,24 +77,6 @@ export function SizingSlider({
         <span style={{ ...NUM, width: 44, textAlign: 'right', fontSize: FS.body, fontWeight: 800, color: locked ? C.faint : C.text }}>
           {locked ? '—' : `${percent}%`}
         </span>
-      </div>
-
-      <div style={{ display: 'flex', gap: 4 }}>
-        {QUICK_PERCENTS.map(p => (
-          <button
-            key={p} type="button" disabled={locked}
-            onClick={() => onPercent(p)}
-            data-testid={`sizing-quick-${p}`}
-            style={{
-              flex: 1, padding: '4px 0', borderRadius: 6,
-              border: `1px solid ${percent === p && !locked ? C.accent : C.hair}`,
-              background: percent === p && !locked ? C.accentBg : C.raised,
-              color: locked ? C.faint : percent === p ? C.accent : C.dim,
-              fontSize: FS.micro, fontWeight: 700,
-              cursor: locked ? 'not-allowed' : 'pointer',
-            }}
-          >{p}%</button>
-        ))}
       </div>
 
       {/* ── 이 비율이 만든 값 ── */}

@@ -101,11 +101,26 @@ export interface OrderBookViewProps {
    * 현물 화면이 이 값을 안 주면 **선물 호가를 현물 가격 옆에 놓게 된다.**
    */
   market?: StreamMarket;
+  /**
+   * 모바일 주문 시트용 압축 배치.
+   *
+   * 줄 수를 줄이는 것만으로는 부족하다. 실기에서 시트를 열면 호가가
+   * 높이를 다 먹어서 **주문 버튼이 첫 화면 밖으로** 밀렸다. 그래서 줄
+   * 높이를 줄이고 잔량 막대(파생값)를 뺀다.
+   *
+   * **데이터 배지는 남긴다** — 실시간인지 몇 ms 전 값인지는 주문 직전에
+   * 가장 필요한 정보다. 좁다고 지울 것이 아니다.
+   *
+   * 데스크톱 호가의 정보량은 건드리지 않는다.
+   */
+  variant?: 'full' | 'compact';
 }
 
 export const OrderBookView = memo(function OrderBookView({
   symbolId, rows = 9, onPickPrice, showFunding, dense, enabled = true, market = 'USDM',
+  variant = 'full',
 }: OrderBookViewProps) {
+  const compact = variant === 'compact';
   const stream = useBinanceStream(symbolId, enabled !== false, market);
   const live = orderBookLive(stream);
   const funding = useFunding(showFunding ? symbolId : '');
@@ -129,7 +144,7 @@ export const OrderBookView = memo(function OrderBookView({
   // 44px 규칙을 여기서 깨는 이유: 이건 낱개 버튼이 아니라 **사다리**다.
   // 줄 하나를 크게 만드는 대신 줄이 여러 개 보이는 것이 이 판의 목적이고,
   // 실제 거래소 앱들도 20px 안팎을 쓴다. 숫자 크기는 그대로 둔다.
-  const rowH = dense ? 21 : 24;
+  const rowH = compact ? 18 : dense ? 21 : 24;
   const Row = ({ p, q, buy }: { p: number; q: number; buy: boolean }) => (
     <button
       // 스크린샷 증거가 "호가가 **몇 줄** 실제로 그려졌는가"를 셀 수 있게
@@ -185,7 +200,8 @@ export const OrderBookView = memo(function OrderBookView({
       )}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        padding: dense ? '6px 8px 4px' : '7px 12px 5px', fontSize: FS.micro, color: C.faint,
+        padding: compact ? '4px 8px 3px' : dense ? '6px 8px 4px' : '7px 12px 5px',
+        fontSize: FS.micro, color: C.faint,
       }}>
         <span>가격</span>
         <DataBadge compact source={{
@@ -238,7 +254,10 @@ export const OrderBookView = memo(function OrderBookView({
         </>
       )}
 
-      {imbalance != null && (
+      {/* 잔량 막대는 호가에서 **계산한 값**이다. 좁은 시트에서는 원본(호가
+          줄)을 남기고 파생값을 뺀다 — 주문 버튼이 화면 밖으로 밀리는 것보다
+          낫다. 데스크톱에서는 그대로 보인다. */}
+      {imbalance != null && !compact && (
         <div style={{ padding: dense ? '8px 8px 10px' : '10px 12px 12px' }}>
           <div style={{
             display: 'flex', justifyContent: 'space-between',

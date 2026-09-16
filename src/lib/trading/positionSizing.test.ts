@@ -6,7 +6,7 @@
 // 값이다. 그래서 개발 중에는 차이가 안 보인다. 100배에서 100배 차이가 난다.
 import { test, eq, assert } from '../../test/harness';
 import {
-  planSizing, percentFromQuantity, isValidPercent, QUICK_PERCENTS,
+  planSizing, percentFromQuantity, isValidPercent,
 } from './positionSizing';
 
 export function runPositionSizingTests() {
@@ -124,8 +124,21 @@ export function runPositionSizingTests() {
     eq(percentFromQuantity({ quantity: 99999, availableBalance: 100, price: 10, leverage: 1 }), 100);
   });
 
-  test('빠른 표시는 25/50/75/100뿐이다', () => {
-    eq(QUICK_PERCENTS.join(','), '25,50,75,100');
-    for (const p of QUICK_PERCENTS) assert(isValidPercent(p), `${p}가 유효하지 않습니다`);
+  test('★ 빠른 퍼센트 상수를 내보내지 않는다 — 비율을 정하는 곳은 슬라이더 하나다', async () => {
+    // 한동안 25/50/75/100% 버튼을 슬라이더 아래에 같이 뒀다. 비율을 정하는
+    // 방법이 둘이면 "지금 몇 %인가"를 말하는 곳도 둘이 된다. 상수를 남겨
+    // 두면 언젠가 다시 화면에 붙으므로 아예 없앤다.
+    const mod: any = await import('./positionSizing');
+    const bad = Object.keys(mod).filter(k => /QUICK|PRESET/i.test(k));
+    eq(bad.join(','), '');
+  });
+
+  test('슬라이더가 받는 값의 범위는 그대로다 — 버튼을 없앤 것이 계산을 바꾸지 않는다', () => {
+    for (const p of [0, 25, 50, 75, 100]) assert(isValidPercent(p), `${p}가 유효하지 않습니다`);
+    for (const p of [-1, 101, null, '', NaN]) assert(!isValidPercent(p), `${String(p)}가 통과했습니다`);
+    // 대표값 셋이 예전과 같은 증거금을 낸다
+    const budgets = [25, 50, 100].map(p =>
+      planSizing({ availableBalance: 1000, percent: p, price: 100, leverage: 10 }).marginBudget);
+    eq(budgets.join(','), '250,500,1000');
   });
 }

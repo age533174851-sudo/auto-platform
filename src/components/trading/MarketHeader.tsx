@@ -64,8 +64,8 @@ export function MarketHeader({
       data-testid="market-header"
       data-market={market}
       style={{
-        display: 'flex', flexDirection: 'column', gap: compact ? 4 : 6,
-        padding: compact ? '8px 12px' : '10px 14px',
+        display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6,
+        padding: compact ? '10px 12px 8px' : '10px 14px',
         borderBottom: `1px solid ${C.hair}`,
         background: C.panel,
       }}
@@ -79,8 +79,10 @@ export function MarketHeader({
           data-testid="market-header-symbol"
           style={{
             background: 'none', border: 'none', padding: 0,
-            color: C.text, fontSize: compact ? FS.title : FS.head, fontWeight: 800,
-            cursor: onSymbolClick ? 'pointer' : 'default', letterSpacing: '-0.01em',
+            // 실기에서 화면 위쪽이 메뉴·AI뉴스·STOP으로 차 있어 **무엇을 보는
+            // 중인지가 묻혔다.** 차트 바로 위에서 종목이 가장 크게 읽혀야 한다.
+            color: C.text, fontSize: compact ? 19 : FS.head, fontWeight: 800,
+            cursor: onSymbolClick ? 'pointer' : 'default', letterSpacing: '-0.02em',
           }}
         >
           {symbol}
@@ -137,7 +139,7 @@ export function MarketHeader({
           data-testid="market-header-price"
           style={{
             ...NUM,
-            fontSize: compact ? FS.hero : 24, fontWeight: 800,
+            fontSize: compact ? 26 : 24, fontWeight: 800,
             color: price == null ? C.faint : TONE_COLOR[tone] || C.text,
           }}
         >
@@ -145,7 +147,7 @@ export function MarketHeader({
         </span>
         <span
           data-testid="market-header-change"
-          style={{ ...NUM, fontSize: FS.lead, fontWeight: 700, color: TONE_COLOR[tone] }}
+          style={{ ...NUM, fontSize: compact ? FS.sub : FS.lead, fontWeight: 800, color: TONE_COLOR[tone] }}
         >
           {fmtChangePct(stream.changePct)}
         </span>

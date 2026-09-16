@@ -31,6 +31,7 @@ const FILES = [
   'src/components/trading/PriceChart.tsx',
   'src/components/trading/TradingWorkspace.tsx',
   'src/components/trading/TradeSheet.tsx',
+  'src/components/trading/SizingSlider.tsx',
   'src/lib/trading/candleSeries.ts',
   'src/lib/trading/gameMoney.ts',
   'src/lib/trading/paperTarget.ts',
@@ -89,6 +90,23 @@ const MUTATIONS = [
   { name: '현재가로 다음 봉을 새로 만든다',
     file: 'src/lib/trading/candleSeries.ts',
     cut: ['export function withLivePrice', 'export function synthesizeNextBar'] },
+
+  // ══ 비로그인인데 열려 있다 ══
+  { name: '잔고를 못 읽어도 슬라이더를 열어 둔다',
+    file: 'src/components/trading/SizingSlider.tsx',
+    cut: ['  const locked = !!disabled || balanceUnknown;', '  const locked = !!disabled;'] },
+  { name: '못 읽은 잔고를 0으로 접는다 — "돈이 없다"로 읽힌다',
+    file: 'src/components/trading/SizingSlider.tsx',
+    cut: ['  const balanceUnknown = availableBalance == null;',
+          '  const balanceUnknown = false; const _b = availableBalance || 0;'] },
+  { name: '주문 버튼을 계획 없이 연다',
+    file: 'src/components/trading/TradeSheet.tsx',
+    cut: ['  const ready = canOrder && quantity != null && quantity > 0 && preview.ok;',
+          '  const ready = quantity != null && quantity > 0;'] },
+  { name: '빠른 퍼센트 상수를 되살린다 — 비율을 정하는 곳이 둘이 된다',
+    file: 'src/lib/trading/positionSizing.ts',
+    cut: ['export interface SizingInput {',
+          'export const QUICK_PERCENTS: number[] = [25, 50, 75, 100];\nexport interface SizingInput {'] },
 
   // ══ 사람이 다니는 길에서 떨어진다 (실측에서 잡힌 결함) ══
   { name: '정본 거래 화면을 매매 탭에서 떼어낸다',

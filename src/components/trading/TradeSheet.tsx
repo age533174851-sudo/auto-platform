@@ -183,8 +183,10 @@ export function TradeSheet({
         data-testid="trade-sheet-book"
         style={{ border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden', background: C.bg }}
       >
-        <OrderBookView symbolId={symbol} market={market} rows={compact ? 5 : 7} dense
-          onPickPrice={undefined}/>
+        {/* 5 매도 + 중간값 + 5 매수. 모바일에서는 압축 배치를 쓴다 —
+            실기에서 호가가 높이를 다 먹어 주문 버튼이 화면 밖으로 밀렸다. */}
+        <OrderBookView symbolId={symbol} market={market} rows={5} dense
+          variant={compact ? 'compact' : 'full'} onPickPrice={undefined}/>
       </div>
 
       {/* ── 방향 ── */}
@@ -318,11 +320,16 @@ export function TradeSheet({
         </div>
       ) : null}
 
+      {/* ── 최종 버튼은 시트 바닥에 붙인다 ──
+          실기에서 시트가 길어 이 버튼이 첫 화면 밖에 있었다. 주문 화면에서
+          제일 중요한 버튼을 찾으려고 스크롤하게 두지 않는다. */}
       <button
         type="button" onClick={submit} disabled={!ready || busy}
         data-testid="trade-sheet-submit"
         style={{
+          position: 'sticky', bottom: 0, zIndex: 2,
           padding: '13px 0', borderRadius: 10, border: 'none',
+          boxShadow: `0 -10px 16px -6px ${C.panel}`,
           background: !ready || busy ? C.raised : side === 'LONG' ? C.up : C.down,
           color: !ready || busy ? C.faint : '#fff',
           fontSize: FS.sub, fontWeight: 800,

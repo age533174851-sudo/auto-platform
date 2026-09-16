@@ -163,5 +163,10 @@ export function percentFromQuantity(i: {
   return Math.max(0, Math.min(100, pct));
 }
 
-/** 슬라이더 아래 빠른 표시. **여기 없는 값은 화면이 따로 만들지 않는다.** */
-export const QUICK_PERCENTS: number[] = [25, 50, 75, 100];
+// ── 빠른 버튼은 없다 ──
+//
+// 한동안 `QUICK_PERCENTS = [25, 50, 75, 100]`을 여기서 내보냈고 슬라이더
+// 아래에 버튼으로 그렸다. 비율을 정하는 방법이 둘이면 "지금 몇 %인가"를
+// 말하는 곳도 둘이 된다. 끌어서 정하고 숫자로 읽는 한 벌만 남긴다.
+//
+// 상수를 지운 이유: 아무도 안 쓰는 export는 언젠가 다시 화면에 붙는다.

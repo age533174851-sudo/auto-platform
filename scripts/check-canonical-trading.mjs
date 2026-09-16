@@ -129,7 +129,36 @@ for (const route of ['/api/binance/futures/order', '/api/binance/spot/order', '/
   if (sheet.includes(route)) err(`${SHEET}가 실거래 라우트를 직접 부릅니다 (${route})`);
 }
 
-// ── ⑦ 도달할 수 없는 화면을 되살리지 않는다 ──
+// ── ⑦ 비로그인에서 닫혀 있는가 ──
+//
+// 로그인 전에는 가용 잔고를 **물어볼 수조차 없다**. 그 상태에서 슬라이더가
+// 움직이거나 주문 버튼이 열려 있으면, 사용자는 "되는 줄 알고" 누르고
+// 서버가 401로 막는다 — 화면이 거짓말을 한 것이다.
+{
+  const slider = code(read('src/components/trading/SizingSlider.tsx'));
+  if (!/const balanceUnknown = availableBalance == null;/.test(slider)) {
+    err('SizingSlider가 잔고 못 읽음을 판정하지 않습니다');
+  }
+  if (!/const locked = !!disabled \|\| balanceUnknown;/.test(slider)) {
+    err('SizingSlider가 잔고를 못 읽어도 잠기지 않습니다');
+  }
+  if (!/disabled=\{locked\}/.test(slider)) {
+    err('SizingSlider의 입력이 잠금 상태를 반영하지 않습니다');
+  }
+  // 못 읽은 잔고를 0으로 접지 않는다 — 0은 "돈이 없다"로 읽힌다
+  if (/availableBalance \|\| 0|Number\(availableBalance\) \|\| 0/.test(slider)) {
+    err('SizingSlider가 못 읽은 잔고를 0으로 접습니다');
+  }
+  // 주문 버튼은 세 가지가 모두 참일 때만 열린다
+  if (!/const ready = canOrder && quantity != null && quantity > 0 && preview\.ok;/.test(sheet)) {
+    err(`${SHEET}의 주문 가능 판정이 약해졌습니다 — 권한·수량·계획이 모두 필요합니다`);
+  }
+  if (!/disabled=\{!ready \|\| busy\}/.test(sheet)) {
+    err(`${SHEET}의 주문 버튼이 판정과 무관하게 열려 있습니다`);
+  }
+}
+
+// ── ⑧ 도달할 수 없는 화면을 되살리지 않는다 ──
 //
 // `TradingPage.tsx`는 `renderPage()`의 case로만 닿는데, `renderPage()`는
 // `tab !== 'trading'`일 때만 불린다. 즉 그 case는 실행되지 않는다.
@@ -151,4 +180,5 @@ if (bad > 0) {
   process.exit(1);
 }
 console.log('✅ 정본 거래 화면 — 매매 탭에 붙음 · 세로/가로 한 벌 · 렌더 1곳 ·'
-  + ' 사이징 슬라이더 1개 · 손절 거리 보존 · 실거래 비가로채기');
+  + ' 사이징 슬라이더 1개 · 손절 거리 보존 · 실거래 비가로채기 ·'
+  + ' 비로그인 fail-closed');
