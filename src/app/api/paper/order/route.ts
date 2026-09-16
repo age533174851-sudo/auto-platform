@@ -187,9 +187,18 @@ export async function POST(req: NextRequest) {
     const { data: open } = await sb.from('paper_positions')
       .select('margin').eq('user_id', uid)
       .eq('paper_account_id', accountId).eq('status', 'open');
-    const used = (Array.isArray(open) ? open : [])
-      .reduce((a: number, p: any) => a + (Number(p.margin) || 0), 0);
-    available = balance - used;
+    // 증거금 합산은 `paperAvailable` 한 곳에 있다 — 읽기 라우트
+    // (`/api/paper/account` · `/api/paper/positions`)와 같은 답을 봐야
+    // 화면이 보여 준 가용 잔고와 여기서 막는 기준이 갈리지 않는다.
+    //
+    // 예전 한 줄은 `Number(p.margin) || 0`이었다. 못 읽은 증거금을 0으로
+    // 세어 **가용 잔고가 실제보다 커졌고**, 그 상태로 진입이 통과했다.
+    const { usedMarginOf } = await import('@/lib/engine/paperAvailable');
+    const used = usedMarginOf(open);
+    if (used.unreadable > 0) {
+      throw new Error(`열린 포지션 ${used.unreadable}건의 증거금을 읽지 못했습니다`);
+    }
+    available = balance - used.used;
   } catch {
     available = null;   // 모르면 buildPaperPlan이 막는다
   }

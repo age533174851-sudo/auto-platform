@@ -93,11 +93,20 @@ export async function GET(req: NextRequest) {
     const winRate = closedList.length ? (wins / closedList.length) * 100 : 0;
     const totalPnl = closedList.reduce((a: number, p: any) => a + (Number(p.realized_pnl) || 0), 0);
 
+    // 새 주문에 배정할 수 있는 잔고. 판단은 `/api/paper/account`와 **같은
+    // 함수**다 — 사이징 슬라이더가 어느 라우트를 읽든 같은 답을 봐야 한다.
+    const { availableView } = await import('@/lib/engine/paperAvailable');
+    const av = availableView(account.balance, open);
+
     return NextResponse.json({
       ok: true,
       challengeId: rawChallengeId || null,
       account: {
         balance: Number(account.balance),
+        // **못 읽었으면 null이다.** 0은 "돈이 없다"로 읽힌다.
+        available: av.available,
+        availableUnknownReason: av.unknownReason,
+        usedMargin: av.usedMargin,
         initialBalance: Number(account.initial_balance),
         totalPnl: Number(account.total_pnl),
         totalFees: Number(account.total_fees),

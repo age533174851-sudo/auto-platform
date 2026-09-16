@@ -67,7 +67,16 @@ export async function GET(req: NextRequest) {
   const initial = started ? (Number(acct.initial_balance) || 0) : null;
   // 증거금은 열린 포지션이 물고 있다. 가용은 그만큼 뺀 값이다 —
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있게 된다.
-  const usedMargin = positions.reduce((a, p) => a + (Number(p.margin) || 0), 0);
+  //
+  // 계산은 `paperAvailable` 한 곳에 있다. 사이징 슬라이더가 쓰는 값이
+  // 이것이고, `/api/paper/positions`도 같은 함수를 쓴다 — 두 라우트가
+  // 다른 답을 주면 화면마다 다른 수량이 나온다.
+  //
+  // 예전 한 줄은 `Number(p.margin) || 0`이었다. 증거금을 못 읽으면 0으로
+  // 세어 **가용 잔고가 실제보다 커졌다.**
+  const { availableView } = await import('@/lib/engine/paperAvailable');
+  const av = availableView(started ? acct.balance : null, positions);
+  const usedMargin = av.usedMargin ?? 0;
 
   // ── 오늘 손익 ──
   //
@@ -97,8 +106,10 @@ export async function GET(req: NextRequest) {
     started,
     account: {
       balance,
-      available: balance == null ? null : Math.max(0, balance - usedMargin),
-      usedMargin: started ? usedMargin : null,
+      available: started ? av.available : null,
+      /** 가용을 못 읽었으면 왜인지 적는다 — 0으로 오해되지 않게 */
+      availableUnknownReason: started ? av.unknownReason : null,
+      usedMargin: started ? av.usedMargin : null,
       initialBalance: initial,
       totalPnl: started ? (Number(acct.total_pnl) || 0) : null,
       totalFees: started ? (Number(acct.total_fees) || 0) : null,

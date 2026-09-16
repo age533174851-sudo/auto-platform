@@ -904,8 +904,9 @@ export default function App() {
         case 'review':       return <JournalReviewPage currency={currency}/>;
         case 'autobot':      return <AutoBotLabPage/>;
         case 'groups':       return <WatchGroupsPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
+        // `case 'paper'`가 두 줄이었다. 뒤쪽은 **절대 실행되지 않는 죽은
+        // 줄**이라 `currency`를 넘기도록 고쳐 놓아도 화면에는 닿지 않았다.
         case 'paper':        return <PaperTradingPage prices={prices} onOpenAsset={openAsset}/>;
-        case 'paper':        return <PaperTradingPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         case 'diagnostics':  return <DiagnosticsPage/>;
         case 'ops':          return <OpsPage/>;
         case 'settings':     return <SettingsPage lang={lang} setLang={setLang} currency={currency} setCurrency={setCurrency}/>;

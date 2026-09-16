@@ -30,7 +30,7 @@
 import React, { memo, useMemo } from 'react';
 import { C, FS, NUM, fmtPrice, pnlColor } from '@/components/terminal/theme';
 import { DataBadge } from '@/components/ui/DataBadge';
-import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
+import { useBinanceStream, bookImbalance, type StreamMarket } from '@/lib/hooks/useBinanceStream';
 import { orderBookLadder, orderBookLive } from '@/lib/trading/orderBook';
 
 export function useFunding(symbol: string) {
@@ -96,12 +96,17 @@ export interface OrderBookViewProps {
    * 오지 않는 상태를 만들지 않기 위해서다(`useBinanceStream` 머리말 참고).
    */
   enabled?: boolean;
+  /**
+   * 어느 시장의 호가인가. 기본은 선물 — 기존 호출부가 전부 선물 화면이다.
+   * 현물 화면이 이 값을 안 주면 **선물 호가를 현물 가격 옆에 놓게 된다.**
+   */
+  market?: StreamMarket;
 }
 
 export const OrderBookView = memo(function OrderBookView({
-  symbolId, rows = 9, onPickPrice, showFunding, dense, enabled = true,
+  symbolId, rows = 9, onPickPrice, showFunding, dense, enabled = true, market = 'USDM',
 }: OrderBookViewProps) {
-  const stream = useBinanceStream(symbolId, enabled !== false);
+  const stream = useBinanceStream(symbolId, enabled !== false, market);
   const live = orderBookLive(stream);
   const funding = useFunding(showFunding ? symbolId : '');
   const countdown = useCountdown(funding.nextAt);

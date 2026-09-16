@@ -525,6 +525,23 @@ jobs:
       - name: 모의 가격 출처 (진입·청산이 같은 시장)
         run: node scripts/check-paper-price-source.mjs
 
+      # ── 차트 권위 ──
+      #
+      # 렌더링 엔진을 들이면 가장 쉬운 유혹이 빈 자리를 채우는 것이다.
+      # 보간한 봉·미리 그린 미래 봉·낡은 응답은 전부 축이 그럴듯해서
+      # 화면만 봐서는 구별되지 않는다. 호가창이 Math.random()으로 수량을
+      # 만들어 보여 준 전례가 이미 있다.
+      - name: 차트 권위 (봉을 만들지 않는다)
+        run: node scripts/check-chart-authority.mjs
+
+      # ── 게임머니 ──
+      #
+      # 표시 단위에 배수가 하나라도 들어가면 gameMoney가 두 번째 화폐
+      # 권위가 되고, 잔고·현금흐름·실현손익·챌린지 목표가 전부 "어느
+      # 단위인가"를 다시 물어야 한다. LIVE에 P가 붙는 것이 제일 위험하다.
+      - name: 게임머니 (표시 단위가 회계 단위가 되지 않는다)
+        run: node scripts/check-game-money.mjs
+
       # ── 배포 증거 ──
       #
       # 관측하지 않은 Vercel SHA를 main으로 채워 넘기면 그 검사는 **언제나

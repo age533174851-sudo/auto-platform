@@ -30,8 +30,6 @@ export interface MarketHeaderProps {
   stream: StreamState;
   /** 모의 장부. 없으면 배지를 그리지 않는다 (실거래 화면 등) */
   target?: PaperTarget | null;
-  /** 챌린지 이름 — 있으면 배지에 같이 적는다 */
-  challengeName?: string | null;
   quoteAsset?: string;
   onSymbolClick?: () => void;
   compact?: boolean;
@@ -42,7 +40,7 @@ const TONE_COLOR: Record<string, string> = {
 };
 
 export function MarketHeader({
-  symbol, market, stream, target, challengeName, quoteAsset,
+  symbol, market, stream, target, quoteAsset,
   onSymbolClick, compact,
 }: MarketHeaderProps) {
   const price = stream.lastPrice;
@@ -116,9 +114,9 @@ export function MarketHeader({
               borderRadius: 4, padding: '2px 6px', letterSpacing: '0.04em',
             }}
           >
-            {target.kind === 'CHALLENGE'
-              ? `CHALLENGE${challengeName ? ` · ${challengeName}` : ''}`
-              : 'PAPER'}
+            {/* 챌린지에는 이름 칸이 없다(`paper_challenges`). 없는 값을
+                채워 넣지 않는다 — 배지는 어느 장부인지만 말한다. */}
+            {target.kind === 'CHALLENGE' ? 'CHALLENGE' : 'PAPER'}
           </span>
         ) : null}
 

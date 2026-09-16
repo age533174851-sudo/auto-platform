@@ -21,6 +21,7 @@ import {
 // 없애는 것이 이 PR의 목적이다.
 import { LegacyLedgerBanner } from '@/components/trading/LegacyLedgerBanner';
 import { PaperChallengePanel } from '@/components/trading/PaperChallengePanel';
+import { TradingWorkspace } from '@/components/trading/TradingWorkspace';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
 import { isTradableLedger, legacyLedgerNotice } from '@/lib/trading/legacyLedger';
 
@@ -189,9 +190,17 @@ export default function PaperTradingPage({
       <LegacyLedgerBanner id={LEDGER}/>
 
       {/* 정본 모의투자 — 챌린지를 만들고 · 보고 · 그만둔다.
-          고른 장부는 터미널 현물 주문폼이 그대로 읽는다. */}
+          고른 장부는 아래 거래 화면과 터미널 현물 주문폼이 그대로 읽는다. */}
       <div style={{ marginBottom: 12 }}>
         <PaperChallengePanel selected={paperTarget} onSelect={setPaperTarget}/>
+      </div>
+
+      {/* ── 거래 화면 ──
+          차트 · 호가 · 주문이 한 판이다. 장부는 위에서 고른 것 하나를 쓰고,
+          봉과 호가는 거래소에서 받은 값만 그린다. 이 아래의 옛 원화 연습
+          장부와 **숫자를 섞지 않는다.** */}
+      <div style={{ marginBottom: 16 }}>
+        <TradingWorkspace/>
       </div>
 
       {/* MOCK 자동매매 패널 — 서버 모의 계좌를 읽는다(정본) */}

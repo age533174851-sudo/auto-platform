@@ -17,7 +17,7 @@
 | 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
-| 겹쳐 뜨는 층 | 8 |
+| 겹쳐 뜨는 층 | 9 |
 | 피드백 | 3 |
 | 상태 종류 | 7 |
 | 상태별 재고 (공통 물건 있음 / 여러 벌 / 없음 / 미정) | 1 / 2 / 2 / 2 |
@@ -250,6 +250,7 @@
 | `BottomSheet` | `src/components/terminal/BottomSheet.tsx` | DUPLICATED | 모바일 시트 | **하위 폴더에 있어서 처음 등록할 때 위치를 틀리게 적었다.** `src/lib/ui/mobileSheet.ts`(높이·키보드 판정)를 컴포넌트로 착각했다 — 재귀 탐색을 붙이고 나서야 드러났다. 판정은 lib에, 그리기는 여기에 있고, 터미널 밖 화면들은 이것을 쓰지 않고 각자 시트를 그린다 |
 | `ConfirmDialog` | `src/lib/confirm/dialog.ts` | EXISTS | `confirm()` 대체 — Promise로 답을 기다리는 전역 확인 | ConfirmHost가 이것을 그린다. 판정과 그리기가 나뉜 형태 |
 | `OverlayStack` | `src/lib/nav/overlayStack.ts` | EXISTS | 겹침 순서와 뒤로가기 | 판정만 있다. 그리는 컴포넌트는 없다 |
+| `TradeSheet` | `src/components/trading/TradeSheet.tsx` | EXISTS | 모의 주문 한 판 — 호가·배율·수량 슬라이더·TP/SL·최종 버튼 | **모바일에서만 겹쳐 뜬다.** 데스크톱에서는 같은 컴포넌트가 오른쪽 열에 그대로 선다 — 판이 하나라서 두 화면의 주문 규칙이 갈릴 수 없다. `BottomSheet`를 쓰지 않는다(터미널 전용 문맥을 읽는다) |
 
 ## 6. 피드백 (Toast / Notice / Details)
 

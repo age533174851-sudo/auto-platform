@@ -1,0 +1,357 @@
+'use client';
+// src/components/trading/TradeSheet.tsx
+//
+// **주문을 만드는 한 판.** 호가 · 장부 · 마진모드 · 배율 · 수량 · TP/SL ·
+// 예상 증거금/수수료 · 최종 버튼이 한 화면 안에 있다.
+//
+// 왜 시트인가
+// ───────────
+// 모바일에서는 차트가 주인공이고 주문은 필요할 때 올라와야 한다. 데스크톱
+// 에서는 같은 내용이 오른쪽 열에 그대로 선다 — **판이 하나**라서 두 화면의
+// 주문 규칙이 갈릴 일이 없다.
+//
+// 계산을 여기서 하지 않는다
+// ─────────────────────────
+// 수량·증거금·수수료·청산가는 서버가 쓰는 것과 **같은 함수**로 만든다
+// (`buildPaperPlan`). 미리보기용으로 비슷한 식을 새로 적으면 화면과 체결이
+// 달라지고, 그 차이는 체결된 뒤에야 보인다.
+//
+// 보내는 것
+// ─────────
+// `challengeId` 하나다. 계좌 id도, 체결가도, 사건 시각도 보내지 않는다 —
+// 그것들은 서버가 정한다.
+import React, { useMemo, useState } from 'react';
+import { C, FS, NUM } from '@/components/terminal/theme';
+import { OrderBookView } from './OrderBookView';
+import { SizingSlider } from './SizingSlider';
+import { buildPaperPlan, PAPER_MAX_LEVERAGE, type MarginMode } from '@/lib/engine/paperPlan';
+import { planSizing } from '@/lib/trading/positionSizing';
+import { formatMoneyForScope, type MoneyScope } from '@/lib/trading/gameMoney';
+import { orderCapability, unsupported } from '@/lib/trading/capability';
+import { targetRequestFields, type PaperTarget } from '@/lib/trading/paperTarget';
+
+export type TradeSide = 'LONG' | 'SHORT';
+
+export interface TradeSheetProps {
+  symbol: string;
+  market: 'SPOT' | 'USDM';
+  price: number | null;
+  target: PaperTarget;
+  scope: MoneyScope;
+  availableBalance: number | null;
+  availableUnknownReason?: string | null;
+  /** 주문을 낼 수 있는가 — 챌린지가 RUNNING이 아니면 false */
+  canOrder: boolean;
+  /** 못 내는 이유. 화면이 그대로 적는다 */
+  blockedReason?: string | null;
+  onSubmitted?: () => void;
+  onClose?: () => void;
+  compact?: boolean;
+}
+
+const LEVERAGES = [1, 3, 5, 10, 20, 50, 100];
+
+export function TradeSheet({
+  symbol, market, price, target, scope, availableBalance, availableUnknownReason,
+  canOrder, blockedReason, onSubmitted, onClose, compact,
+}: TradeSheetProps) {
+  const spot = market === 'SPOT';
+  const [side, setSide] = useState<TradeSide>('LONG');
+  const [marginMode, setMarginMode] = useState<MarginMode>('ISOLATED');
+  const [leverage, setLeverage] = useState(spot ? 1 : 10);
+  const [percent, setPercent] = useState(0);
+  const [tp, setTp] = useState('');
+  const [sl, setSl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const lev = spot ? 1 : leverage;
+
+  // 능력 표는 화면이 만들지 않는다. 서버가 못 하는 칸은 여기서도 안 연다.
+  const capShort = orderCapability(market, 'SIDE_SHORT');
+  const capLev = orderCapability(market, 'LEVERAGE');
+  const capMargin = orderCapability(market, 'MARGIN_MODE');
+  const capSl = orderCapability(market, 'STOP_LOSS');
+  const capTp = orderCapability(market, 'TAKE_PROFIT');
+
+  const sizing = planSizing({ availableBalance, percent, price, leverage: lev });
+  const quantity = sizing.quantity;
+
+  // 서버가 쓰는 계산 그대로. 미리보기 식을 새로 적지 않는다.
+  const preview = useMemo(() => buildPaperPlan({
+    symbol, side, market,
+    quantity: quantity ?? 0,
+    leverage: lev,
+    markPrice: price,
+    stopPrice: sl ? Number(sl) : null,
+    takeProfit: tp ? Number(tp) : null,
+    availableBalance,
+    marginMode: spot ? 'ISOLATED' : marginMode,
+  }), [symbol, side, market, quantity, lev, price, sl, tp, availableBalance, marginMode, spot]);
+
+  const money = (v: number | null) => formatMoneyForScope(v, scope);
+  const ready = canOrder && quantity != null && quantity > 0 && preview.ok;
+
+  const submit = async () => {
+    if (!ready || busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      let auth: Record<string, string> = {};
+      try {
+        const { getSupabaseClient } = await import('@/lib/supabase/client');
+        const sb = getSupabaseClient();
+        if (sb) {
+          const { data } = await sb.auth.getSession();
+          const t = data?.session?.access_token;
+          if (t) auth = { Authorization: `Bearer ${t}` };
+        }
+      } catch { /* 익명이면 서버가 401로 막는다 */ }
+
+      const body: any = {
+        symbol, side, market,
+        quantity,
+        // 현물에는 배율이 없다. 보내지 않는다.
+        ...(spot ? {} : { leverage: lev, marginMode }),
+        ...(sl && !spot ? { stopPrice: Number(sl) } : {}),
+        ...(tp ? { takeProfit: Number(tp) } : {}),
+        // **장부 식별자는 이것 하나다.** 계좌 id를 보내지 않는다.
+        ...targetRequestFields(target),
+      };
+
+      const r = await fetch('/api/paper/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => null);
+      if (!r.ok || !d?.ok) {
+        setMsg({ ok: false, text: String(d?.message || d?.error || `주문 실패 (HTTP ${r.status})`) });
+      } else {
+        setMsg({ ok: true, text: '모의 주문이 체결됐습니다' });
+        setPercent(0);
+        onSubmitted?.();
+      }
+    } catch (e: any) {
+      setMsg({ ok: false, text: String(e?.message || '주문을 보내지 못했습니다') });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const longLabel = spot ? 'BUY' : 'LONG';
+  const shortLabel = spot ? 'SELL' : 'SHORT';
+
+  return (
+    <div
+      data-testid="trade-sheet"
+      data-market={market}
+      style={{
+        display: 'flex', flexDirection: 'column', gap: 10,
+        padding: compact ? 12 : 14, background: C.panel,
+        borderTop: `1px solid ${C.hair}`,
+      }}
+    >
+      {onClose ? (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: FS.sub, fontWeight: 800, color: C.text }}>{symbol} 주문</span>
+          <button type="button" onClick={onClose} className="switch"
+            style={{ background: 'none', border: 'none', color: C.dim, fontSize: FS.title, cursor: 'pointer' }}>✕</button>
+        </div>
+      ) : null}
+
+      {/* ── ★ 호가창은 접히지 않는다 ── */}
+      {/* 주문을 넣는 순간 사용자가 봐야 하는 값이다. 시트 안에서 늘 보이게
+          고정 높이를 준다 — 예전에는 아래로 밀려 스크롤 밖으로 나갔다. */}
+      <div
+        data-testid="trade-sheet-book"
+        style={{ border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden', background: C.bg }}
+      >
+        <OrderBookView symbolId={symbol} market={market} rows={compact ? 5 : 7} dense
+          onPickPrice={undefined}/>
+      </div>
+
+      {/* ── 방향 ── */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <SideBtn on={side === 'LONG'} tone="up" label={longLabel} onClick={() => setSide('LONG')}/>
+        <SideBtn
+          on={side === 'SHORT'} tone="down" label={shortLabel}
+          disabled={unsupported(capShort)}
+          title={unsupported(capShort) ? (capShort as any).reason : undefined}
+          onClick={() => setSide('SHORT')}
+        />
+      </div>
+      {unsupported(capShort) ? (
+        <div data-testid="trade-sheet-no-short" style={{ fontSize: FS.nano, color: C.faint }}>
+          {(capShort as any).reason}
+        </div>
+      ) : null}
+
+      {/* ── 마진 모드 · 배율 ── */}
+      {!unsupported(capMargin) ? (
+        <div style={{ display: 'flex', gap: 6 }}>
+          {(['ISOLATED', 'CROSSED'] as MarginMode[]).map(m => (
+            <button key={m} type="button" onClick={() => setMarginMode(m)}
+              data-testid={`margin-mode-${m}`}
+              style={{
+                flex: 1, padding: '6px 0', borderRadius: 6, cursor: 'pointer',
+                border: `1px solid ${marginMode === m ? C.accent : C.hair}`,
+                background: marginMode === m ? C.accentBg : C.raised,
+                color: marginMode === m ? C.accent : C.dim,
+                fontSize: FS.micro, fontWeight: 700,
+              }}>{m === 'ISOLATED' ? '격리' : '교차'}</button>
+          ))}
+        </div>
+      ) : null}
+
+      {!unsupported(capLev) ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: FS.micro, color: C.dim, fontWeight: 700 }}>
+            배율 <span style={{ ...NUM, color: C.accent }}>{lev}x</span>
+            <span style={{ color: C.faint, fontWeight: 500 }}> (최대 {PAPER_MAX_LEVERAGE}x)</span>
+          </span>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {LEVERAGES.map(l => (
+              <button key={l} type="button" onClick={() => setLeverage(l)}
+                data-testid={`leverage-${l}`}
+                style={{
+                  flex: '1 1 40px', padding: '4px 0', borderRadius: 6, cursor: 'pointer',
+                  border: `1px solid ${lev === l ? C.accent : C.hair}`,
+                  background: lev === l ? C.accentBg : C.raised,
+                  color: lev === l ? C.accent : C.dim,
+                  fontSize: FS.micro, fontWeight: 700, ...NUM,
+                }}>{l}x</button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: FS.nano, color: C.faint }}>{(capLev as any).reason}</div>
+      )}
+
+      {/* ── 0~100% 슬라이더 ── */}
+      <SizingSlider
+        availableBalance={availableBalance}
+        unknownReason={availableUnknownReason}
+        percent={percent} onPercent={setPercent}
+        price={price} leverage={lev} scope={scope}
+        symbol={symbol.replace(/USDT$/, '')}
+        disabled={!canOrder}
+      />
+
+      {/* ── TP / SL ── */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <Field
+          label="익절 (TP)" value={tp} onChange={setTp}
+          disabled={unsupported(capTp)} reason={(capTp as any).reason}
+          testid="trade-sheet-tp"
+        />
+        <Field
+          label="손절 (SL)" value={sl} onChange={setSl}
+          disabled={unsupported(capSl)} reason={(capSl as any).reason}
+          testid="trade-sheet-sl"
+        />
+      </div>
+
+      {/* ── 예상치 — 서버와 같은 함수가 낸 값 ── */}
+      <div data-testid="trade-sheet-estimate"
+        style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: FS.micro,
+          background: C.raised, borderRadius: 8, padding: '8px 10px' }}>
+        <Est label="예상 증거금" value={preview.ok ? money(preview.requiredMargin) : '—'}/>
+        <Est label="예상 수수료" value={preview.ok ? money(preview.entryFee) : '—'}/>
+        {!spot ? (
+          <Est label="예상 청산가" value={preview.liquidationPrice == null ? '—' : preview.liquidationPrice.toFixed(2)}/>
+        ) : null}
+        {!preview.ok && quantity != null && quantity > 0 ? (
+          <div style={{ color: C.warn, lineHeight: 1.5, marginTop: 2 }}>{preview.reason}</div>
+        ) : null}
+      </div>
+
+      {/* ── 최종 버튼 ── */}
+      {!canOrder && blockedReason ? (
+        <div data-testid="trade-sheet-blocked" style={{ fontSize: FS.micro, color: C.warn, lineHeight: 1.5 }}>
+          {blockedReason}
+        </div>
+      ) : null}
+
+      <button
+        type="button" onClick={submit} disabled={!ready || busy}
+        data-testid="trade-sheet-submit"
+        style={{
+          padding: '13px 0', borderRadius: 10, border: 'none',
+          background: !ready || busy ? C.raised : side === 'LONG' ? C.up : C.down,
+          color: !ready || busy ? C.faint : '#fff',
+          fontSize: FS.sub, fontWeight: 800,
+          cursor: !ready || busy ? 'not-allowed' : 'pointer',
+        }}
+      >
+        {busy ? '보내는 중…' : `${side === 'LONG' ? longLabel : shortLabel} ${symbol}`}
+      </button>
+
+      {msg ? (
+        <div data-testid="trade-sheet-msg"
+          style={{ fontSize: FS.micro, color: msg.ok ? C.up : C.down, lineHeight: 1.5 }}>
+          {msg.text}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SideBtn({ on, tone, label, onClick, disabled, title }: {
+  on: boolean; tone: 'up' | 'down'; label: string;
+  onClick: () => void; disabled?: boolean; title?: string;
+}) {
+  const col = tone === 'up' ? C.up : C.down;
+  const bg = tone === 'up' ? C.upBg : C.downBg;
+  return (
+    <button
+      type="button" onClick={onClick} disabled={disabled} title={title}
+      data-testid={`trade-side-${label}`}
+      style={{
+        flex: 1, padding: '9px 0', borderRadius: 8,
+        border: `1px solid ${disabled ? C.hair : on ? col : C.hair}`,
+        background: disabled ? C.raised : on ? bg : C.raised,
+        color: disabled ? C.faint : on ? col : C.dim,
+        fontSize: FS.lead, fontWeight: 800,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+      }}
+    >{label}</button>
+  );
+}
+
+function Field({ label, value, onChange, disabled, reason, testid }: {
+  label: string; value: string; onChange: (v: string) => void;
+  disabled?: boolean; reason?: string; testid: string;
+}) {
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <span style={{ fontSize: FS.nano, color: C.faint }}>{label}</span>
+      <input
+        type="number" inputMode="decimal" value={disabled ? '' : value}
+        onChange={e => onChange(e.target.value)}
+        disabled={disabled} placeholder={disabled ? '지원 안 함' : '가격'}
+        data-testid={testid}
+        title={disabled ? reason : undefined}
+        style={{
+          width: '100%', boxSizing: 'border-box',
+          background: disabled ? C.panel : C.raised,
+          color: disabled ? C.faint : C.text,
+          border: `1px solid ${C.hair}`, borderRadius: 7,
+          padding: '8px 9px', fontSize: FS.body, outline: 'none', ...NUM,
+        }}
+      />
+      {/* 비활성 칸은 **왜** 비활성인지 말한다. "준비 중"이라고 적지 않는다. */}
+      {disabled && reason ? (
+        <span style={{ fontSize: FS.nano, color: C.faint, lineHeight: 1.4 }}>{reason}</span>
+      ) : null}
+    </div>
+  );
+}
+
+function Est({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+      <span style={{ color: C.faint }}>{label}</span>
+      <span style={{ ...NUM, color: C.dim, fontWeight: 700 }}>{value}</span>
+    </div>
+  );
+}

@@ -18,8 +18,11 @@ const PRESETS = [1000, 5000, 10000, 50000];
 
 export interface PaperAccount {
   balance: number;
-  available: number;
-  usedMargin: number;
+  /** 못 읽었으면 null이다 — 0이 아니다 (`paperAvailable`) */
+  available: number | null;
+  /** 가용을 못 읽은 사유. 읽었으면 null */
+  availableUnknownReason?: string | null;
+  usedMargin: number | null;
   initialBalance: number;
   totalPnl: number;
   tradeCount: number;
@@ -121,6 +124,7 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
             ...NUM, color: acct ? C.text : C.warn,
             fontSize: dense ? FS.small : FS.body, fontWeight: 700,
           }}>
+            {/* `fmtPrice(null)`은 `—`다. 가용을 못 읽은 상태를 0으로 적지 않는다. */}
             {acct ? `${fmtPrice(acct.available)} USDT` : '확인 불가'}
           </span>
           {/* `className="switch"`로 전역 `button { min-height: 44px }`에서 뺀다.

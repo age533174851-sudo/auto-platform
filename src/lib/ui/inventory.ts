@@ -703,6 +703,11 @@ export const OVERLAYS: Overlay[] = [
   { id: 'OverlayStack', file: 'src/lib/nav/overlayStack.ts', status: 'EXISTS',
     purpose: '겹침 순서와 뒤로가기',
     notes: '판정만 있다. 그리는 컴포넌트는 없다' },
+  { id: 'TradeSheet', file: 'src/components/trading/TradeSheet.tsx', status: 'EXISTS',
+    purpose: '모의 주문 한 판 — 호가·배율·수량 슬라이더·TP/SL·최종 버튼',
+    notes: '**모바일에서만 겹쳐 뜬다.** 데스크톱에서는 같은 컴포넌트가 '
+      + '오른쪽 열에 그대로 선다 — 판이 하나라서 두 화면의 주문 규칙이 갈릴 수 없다. '
+      + '`BottomSheet`를 쓰지 않는다(터미널 전용 문맥을 읽는다)' },
 ];
 
 // ══ 피드백 ══
