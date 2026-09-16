@@ -69,6 +69,17 @@ const MUTATIONS = [
     file: 'src/app/api/market/candles/route.ts',
     cut: ['fetchVenueBars', 'fetchRawKlines'], replaceAll: true },
 
+  // ══ 만들어 놓고 배선을 안 한다 (실측에서 잡힌 결함) ══
+  { name: '차트 준비를 상태로 안 알린다 — 봉이 먼저 오면 영영 안 그려진다',
+    file: 'src/components/trading/PriceChart.tsx',
+    cut: ['      if (!disposed) setChartEpoch(n => n + 1);', '      void disposed;'] },
+  { name: '데이터 이펙트가 차트 준비를 안 본다',
+    file: 'src/components/trading/PriceChart.tsx',
+    cut: ['  }, [candles, volumes, chartEpoch]);', '  }, [candles, volumes]);'] },
+  { name: '캔들 0개인 빈 차트를 정상으로 적는다',
+    file: 'src/components/trading/PriceChart.tsx',
+    cut: ["    if (candles.length > 0) return;", "    if (candles.length >= 0) return;"] },
+
   // ══ 진행 중 봉이 미래로 자란다 ══
   { name: '현재가로 다음 봉을 새로 만든다',
     file: 'src/lib/trading/candleSeries.ts',

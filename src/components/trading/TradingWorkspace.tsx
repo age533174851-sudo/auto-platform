@@ -142,7 +142,7 @@ export function TradingWorkspace({ mobile, initialSymbol, initialMarket }: Tradi
       indicators={indicators}
       onToggleIndicator={(id) => setIndicators(prev =>
         prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
-      height={narrow ? 300 : 420}
+      height={narrow ? 260 : 420}
     />
   );
 
@@ -167,7 +167,7 @@ export function TradingWorkspace({ mobile, initialSymbol, initialMarket }: Tradi
       <div data-testid="trading-workspace" data-layout="mobile"
         style={{ display: 'flex', flexDirection: 'column', background: C.bg,
           // 하단 고정 CTA가 마지막 줄을 가리지 않게 자리를 비운다
-          paddingBottom: 76, position: 'relative' }}>
+          paddingBottom: 'calc(var(--nav-h, 0px) + 76px)', position: 'relative' }}>
         {header}
         {controls}
         {/* 차트가 주인공이다 */}
@@ -175,14 +175,17 @@ export function TradingWorkspace({ mobile, initialSymbol, initialMarket }: Tradi
         {/* 호가는 접지 않는다 — 시장을 안 보고 누르는 상태를 만들지 않는다 */}
         <div data-testid="workspace-book"
           style={{ borderTop: `1px solid ${C.hair}`, background: C.panel }}>
-          <OrderBookView symbolId={symbol} market={market} rows={6} dense/>
+          <OrderBookView symbolId={symbol} market={market} rows={5} dense/>
         </div>
 
         {/* 하단 고정 LONG / SHORT */}
         <div
           data-testid="workspace-cta"
           style={{
-            position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 40,
+            // **앱의 하단 탭바 위에 앉는다.** `bottom: 0`으로 두면 탭바에
+            // 가려져서 실측 스크린샷에서 초록·빨강 띠만 삐져나와 있었다 —
+            // 버튼이 있는데 누를 수 없는 상태다. 높이는 전역 `--nav-h`가 안다.
+            position: 'fixed', left: 0, right: 0, bottom: 'var(--nav-h, 0px)', zIndex: 40,
             display: 'flex', gap: 8, padding: '10px 12px',
             background: C.panel, borderTop: `1px solid ${C.hair}`,
           }}
@@ -202,6 +205,7 @@ export function TradingWorkspace({ mobile, initialSymbol, initialMarket }: Tradi
           >
             <div onClick={e => e.stopPropagation()}
               style={{ width: '100%', maxHeight: '88vh', overflowY: 'auto',
+                paddingBottom: 'var(--nav-h, 0px)',
                 borderTopLeftRadius: 14, borderTopRightRadius: 14, background: C.panel }}>
               {sheet}
             </div>

@@ -47,6 +47,26 @@ export interface PaperLedger {
   reload: () => void;
 }
 
+/**
+ * 사람이 읽을 한 줄.
+ *
+ * 서버 응답의 `message`가 있으면 그것이 이미 사람 말이다. 없을 때
+ * `error` 코드(`auth_required` 같은)를 그대로 적으면 화면이 로그가 된다.
+ */
+function humanError(status: number, d: any): string {
+  if (typeof d?.message === 'string' && d.message) return d.message;
+  const code = String(d?.error || '');
+  if (status === 401 || code === 'auth_required') {
+    return '로그인하면 모의 잔고를 읽어 옵니다';
+  }
+  if (code === 'challenge_not_found') return '고른 챌린지를 찾지 못했습니다';
+  if (code === 'challenge_unreadable' || code === 'account_unreadable' || code === 'scope_unresolved') {
+    return '모의 계좌를 읽지 못했습니다 — 잔고가 0이라는 뜻이 아닙니다';
+  }
+  if (status === 503) return '모의 장부를 잠시 읽을 수 없습니다 — 잔고가 0이라는 뜻이 아닙니다';
+  return `모의 장부를 읽지 못했습니다 (HTTP ${status})`;
+}
+
 async function authHeader(): Promise<Record<string, string>> {
   try {
     const { getSupabaseClient } = await import('@/lib/supabase/client');
@@ -88,7 +108,10 @@ export function usePaperLedger(target: PaperTarget, enabled = true): PaperLedger
         if (cancelled) return;
         if (!r.ok || !d?.ok) {
           setState('ERROR');
-          setError(String(d?.message || d?.error || `장부를 읽지 못했습니다 (HTTP ${r.status})`));
+          // **오류 코드를 그대로 화면에 적지 않는다.** 실측에서 슬라이더
+          // 아래에 `auth_required`가 그대로 떠 있었다 — 사용자는 그걸 읽고
+          // 무엇을 해야 하는지 알 수 없다.
+          setError(humanError(r.status, d));
           return;
         }
         const acct = d.account || {};

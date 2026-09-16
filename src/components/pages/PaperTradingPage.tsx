@@ -186,22 +186,23 @@ export default function PaperTradingPage({
         </div>
       )}
 
-      {/* **이 아래 장부는 정본이 아니다.** 큰 숫자보다 먼저 읽히도록 위에 둔다 */}
-      <LegacyLedgerBanner id={LEDGER}/>
+      {/* ── 거래 화면이 맨 위다 ──
+          실측(390×844)에서 배너와 챌린지 목록이 위에 있을 때 거래 화면은
+          y=325에서 시작했고 **호가는 y=853 — 첫 화면 밖이었다.** 모의매매를
+          열면 보이는 것이 배너였다는 뜻이다. 주인공을 위로 올린다. */}
+      <div style={{ marginBottom: 14 }}>
+        <TradingWorkspace/>
+      </div>
 
-      {/* 정본 모의투자 — 챌린지를 만들고 · 보고 · 그만둔다.
-          고른 장부는 아래 거래 화면과 터미널 현물 주문폼이 그대로 읽는다. */}
+      {/* 장부 고르기 — 거래 화면 바로 아래. 위 배지가 지금 어느 장부인지
+          말하고, 여기서 바꾼다. */}
       <div style={{ marginBottom: 12 }}>
         <PaperChallengePanel selected={paperTarget} onSelect={setPaperTarget}/>
       </div>
 
-      {/* ── 거래 화면 ──
-          차트 · 호가 · 주문이 한 판이다. 장부는 위에서 고른 것 하나를 쓰고,
-          봉과 호가는 거래소에서 받은 값만 그린다. 이 아래의 옛 원화 연습
-          장부와 **숫자를 섞지 않는다.** */}
-      <div style={{ marginBottom: 16 }}>
-        <TradingWorkspace/>
-      </div>
+      {/* **이 아래 장부는 정본이 아니다.** 설명하는 대상 바로 앞에 둔다 */}
+      <LegacyLedgerBanner id={LEDGER}/>
+
 
       {/* MOCK 자동매매 패널 — 서버 모의 계좌를 읽는다(정본) */}
       <MockAutoTrade />

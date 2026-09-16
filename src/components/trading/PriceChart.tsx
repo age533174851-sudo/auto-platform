@@ -70,6 +70,17 @@ export function PriceChart({
   const seriesRef = useRef<any>(null);
   const volRef = useRef<any>(null);
   const lineRefs = useRef<Map<string, any>>(new Map());
+  /**
+   * 차트가 붙은 순간을 **상태로** 알린다.
+   *
+   * 여기가 고장이었다. 차트 생성은 `await import('lightweight-charts')`라
+   * 비동기인데, 데이터 밀어넣기 이펙트는 `if (!seriesRef.current) return`으로
+   * 시작했다. ref는 바뀌어도 이펙트를 다시 돌리지 않으므로, 봉이 차트보다
+   * 먼저 도착하면 그 이펙트는 **한 번 빠져나간 뒤 다시 실행되지 않았다.**
+   * 결과는 캔들이 0개도 아닌데 **하얗고 빈 차트**다 — 만들어 놓고 배선을
+   * 안 한 상태다. 실측 스크린샷에서 잡았다.
+   */
+  const [chartEpoch, setChartEpoch] = useState(0);
 
   const [bars, setBars] = useState<any>(null);
   const [state, setState] = useState<LoadState>('LOADING');
@@ -109,6 +120,10 @@ export function PriceChart({
           setBars(j.bars);
           setExpectedMs(Number.isFinite(Number(j.intervalMs)) ? Number(j.intervalMs) : null);
           setState('READY');
+          // 여기서 READY라고 적어도, 그 봉으로 **캔들이 한 개도 안 나오면**
+          // 화면은 빈 차트가 된다. 그 판정은 candles를 실제로 만들어 본 뒤에
+          // 아래 useEffect가 다시 한다 — `ok: true`는 "응답을 받았다"이지
+          // "그릴 것이 있다"가 아니다.
         } else {
           setBars(null);
           setErr(String(j?.message ?? '봉을 받지 못했습니다'));
@@ -144,6 +159,19 @@ export function PriceChart({
   }, [bars, stream.lastPrice]);
 
   const volumes = useMemo(() => barsToVolumes(bars), [bars]);
+
+  // ── ★ 빈 차트를 READY라고 적지 않는다 ──
+  //
+  // 실측에서 잡았다: 응답이 `ok: true`인데 봉의 모양이 우리가 아는 모양이
+  // 아니면 캔들이 0개가 되고, 그대로 **하얗고 빈 차트**가 READY로 떴다.
+  // 빈 차트는 "거래가 없었다"로 읽힌다 — 이 파일이 이미 오류 상태에서
+  // 막으려던 그 오해다.
+  useEffect(() => {
+    if (state !== 'READY') return;
+    if (candles.length > 0) return;
+    setState('ERROR');
+    setErr('봉을 받았지만 그릴 수 있는 캔들이 없습니다 — 거래가 없었다는 뜻이 아닙니다');
+  }, [state, candles.length]);
 
   /** 받은 봉이 고른 간격의 것인가. 판단할 수 없으면 null — 경고하지 않는다. */
   const intervalOk = useMemo(
@@ -187,6 +215,9 @@ export function PriceChart({
 
       ro = () => chart.timeScale().fitContent();
       window.addEventListener('resize', ro);
+
+      // **여기서 알린다.** 이 줄이 없으면 이미 도착한 봉이 영영 안 그려진다.
+      if (!disposed) setChartEpoch(n => n + 1);
     })();
 
     return () => {
@@ -206,7 +237,7 @@ export function PriceChart({
       volRef.current?.setData(volumes as any);
       if (candles.length) apiRef.current?.timeScale?.().fitContent();
     } catch { /* 차트가 정리되는 중이면 무시한다 */ }
-  }, [candles, volumes]);
+  }, [candles, volumes, chartEpoch]);
 
   // ── 지표 ──
   useEffect(() => {
@@ -237,7 +268,7 @@ export function PriceChart({
         try { s.setData(computeIndicator(spec.id, candles) as any); } catch { /* 정리 중 */ }
       }
     })();
-  }, [indicators, candles]);
+  }, [indicators, candles, chartEpoch]);   // 지표도 같은 이유로 chartEpoch를 본다
 
   const tab = (on: boolean): React.CSSProperties => ({
     padding: '4px 10px', borderRadius: 6, minHeight: 0, cursor: 'pointer',
@@ -277,10 +308,11 @@ export function PriceChart({
 
       {/* 차트 */}
       <div style={{ position: 'relative', height, minHeight: 0 }}>
-        <div ref={boxRef} data-testid="chart-canvas" style={{ position: 'absolute', inset: 0 }}/>
+        <div ref={boxRef} data-testid="chart-canvas" data-chart-state={state}
+          style={{ position: 'absolute', inset: 0 }}/>
         {/* **못 받은 것을 빈 차트로 두지 않는다.** 빈 차트는 "거래가 없었다"로 읽힌다 */}
         {state !== 'READY' && (
-          <div style={{
+          <div data-testid={state === 'ERROR' ? 'price-chart-error' : 'price-chart-loading'} style={{
             position: 'absolute', inset: 0, display: 'flex',
             alignItems: 'center', justifyContent: 'center',
             color: state === 'ERROR' ? C.down : C.faint,

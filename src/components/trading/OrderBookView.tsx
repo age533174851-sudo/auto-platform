@@ -132,6 +132,9 @@ export const OrderBookView = memo(function OrderBookView({
   const rowH = dense ? 21 : 24;
   const Row = ({ p, q, buy }: { p: number; q: number; buy: boolean }) => (
     <button
+      // 스크린샷 증거가 "호가가 **몇 줄** 실제로 그려졌는가"를 셀 수 있게
+      // 한다. 판이 보인다는 것과 값이 들어왔다는 것은 다른 사실이다.
+      data-book-row={buy ? 'bid' : 'ask'}
       onClick={() => onPickPrice?.(p)}
       style={{
         position: 'relative', display: 'flex', justifyContent: 'space-between',
