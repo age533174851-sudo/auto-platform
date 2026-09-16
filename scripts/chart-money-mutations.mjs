@@ -22,14 +22,19 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const CHECKS = [
   ['차트 권위 검사기', 'scripts/check-chart-authority.mjs'],
   ['게임머니 검사기', 'scripts/check-game-money.mjs'],
+  ['정본 거래 화면 배선 검사기', 'scripts/check-canonical-trading.mjs'],
 ];
 
 const FILES = [
+  'src/components/terminal/MobileShell.tsx',
+  'src/app/page.tsx',
   'src/components/trading/PriceChart.tsx',
   'src/components/trading/TradingWorkspace.tsx',
   'src/components/trading/TradeSheet.tsx',
   'src/lib/trading/candleSeries.ts',
   'src/lib/trading/gameMoney.ts',
+  'src/lib/trading/paperTarget.ts',
+  'src/lib/trading/stopPresets.ts',
   'src/lib/trading/marketStats.ts',
   'src/lib/trading/positionSizing.ts',
   'src/lib/trading/streamEndpoints.ts',
@@ -84,6 +89,24 @@ const MUTATIONS = [
   { name: '현재가로 다음 봉을 새로 만든다',
     file: 'src/lib/trading/candleSeries.ts',
     cut: ['export function withLivePrice', 'export function synthesizeNextBar'] },
+
+  // ══ 사람이 다니는 길에서 떨어진다 (실측에서 잡힌 결함) ══
+  { name: '정본 거래 화면을 매매 탭에서 떼어낸다',
+    file: 'src/components/terminal/MobileShell.tsx',
+    cut: ['<TradingWorkspace', '<LegacyWorkspace'], replaceAll: true },
+  { name: '세로에만 붙이고 가로는 옛 주문판으로 남긴다',
+    file: 'src/components/terminal/MobileShell.tsx',
+    cut: ["          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>\n            <TradingWorkspace",
+          "          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>\n            <LegacyLandscapePane"] },
+  { name: '정본 화면 위에 TradingView 차트를 하나 더 둔다',
+    file: 'src/components/terminal/MobileShell.tsx',
+    cut: ['{canonMarket ? null : <ChartDrawer/>}', '<ChartDrawer/>'] },
+  { name: '실거래 모드에서도 모의 시트가 주문을 맡는다',
+    file: 'src/lib/trading/paperTarget.ts',
+    cut: ['  return tradeMode === PAPER_TRADE_MODE;', "  return tradeMode !== 'LIVE';"] },
+  { name: '손절 거리 프리셋을 사이징이라 보고 지운다',
+    file: 'src/components/trading/TradeSheet.tsx',
+    cut: ['STOP_PCTS.map', '[].map'] },
 
   // ══ 거래 화면이 남의 차트로 돌아간다 ══
   { name: '거래 화면 기본 차트를 iframe으로 되돌린다',

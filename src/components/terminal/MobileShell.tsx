@@ -65,6 +65,8 @@ import { BottomSheet } from './BottomSheet';
 import { SymbolSearch } from './SymbolSearch';
 import { AppLauncher } from './AppLauncher';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
+import { TradingWorkspace } from '@/components/trading/TradingWorkspace';
+import { canonicalMarketOf } from '@/lib/trading/paperTarget';
 
 /**
  * 헤더 높이를 **재서** 쓴다.
@@ -118,6 +120,21 @@ function useLandscape(): boolean {
   return land;
 }
 
+/**
+ * 옛 헤더의 등락률.
+ *
+ * 컴포넌트로 뗀 이유: 훅은 조건부로 부를 수 없다. 정본 화면을 쓰는 시장에서
+ * 이 줄이 필요 없는데 훅만 남으면 **아무도 안 보는 소켓**이 하나 더 열린다.
+ */
+function LegacyChangePct({ symbolId }: { symbolId: string }) {
+  const chg = useBinanceStream(symbolId, true).changePct;
+  return (
+    <span style={{ ...NUM, color: pnlColor(chg), fontSize: FS.body, fontWeight: 700 }}>
+      {chg != null ? `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%` : '—'}
+    </span>
+  );
+}
+
 // ── 상단 ────────────────────────────────────────────────
 function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }: {
   onOpenSearch: () => void; onOpenInfo: () => void; onOpenMenu: () => void;
@@ -126,8 +143,10 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
   sticky?: boolean;
 }) {
   const { symbol, mode, marketType, setMarketType } = useTerminal();
-  const stream = useBinanceStream(symbol.id, true);
-  const chg = stream.changePct;
+  // 정본 화면이 종목·현재가·등락률을 제대로 말한다(`MarketHeader`).
+  // 여기서도 말하면 **같은 사실을 두 곳에서** 말하게 되고, 실측 스크린샷에서
+  // BTCUSDT가 두 번 떴다. 정본 화면을 쓰는 시장에서는 이 줄을 접는다.
+  const canonical = canonicalMarketOf(marketType) !== null;
 
   return (
     <div ref={innerRef} style={{
@@ -144,24 +163,22 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
       padding: '6px 46px 4px 12px',
       display: 'flex', alignItems: 'center', gap: 8,
     }}>
-      <button onClick={onOpenSearch} style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        background: 'none', border: 'none', padding: 0, cursor: 'pointer', minWidth: 0,
-      }}>
-        <span style={{
-          color: C.text, fontSize: 15, fontWeight: 800,
-          letterSpacing: '-0.02em', whiteSpace: 'nowrap',
-        }}>{symbol.id}</span>
-        <span style={{
-          color: C.faint, fontSize: 9, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
-          background: C.raised, borderRadius: 4, padding: '2px 5px',
-        }}>무기한</span>
-        <span style={{ color: C.dim, fontSize: 10, flexShrink: 0 }}>▾</span>
-      </button>
-
-      <span style={{ ...NUM, color: pnlColor(chg), fontSize: FS.body, fontWeight: 700 }}>
-        {chg != null ? `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%` : '—'}
-      </span>
+      {/* 정본 화면이 없는 시장(COIN-M·주식)에서는 여기가 유일한 종목 표시다 */}
+      {canonical ? null : (
+        <>
+          <button onClick={onOpenSearch} style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: 'none', border: 'none', padding: 0, cursor: 'pointer', minWidth: 0,
+          }}>
+            <span style={{
+              color: C.text, fontSize: 15, fontWeight: 800,
+              letterSpacing: '-0.02em', whiteSpace: 'nowrap',
+            }}>{symbol.id}</span>
+            <span style={{ color: C.dim, fontSize: 10, flexShrink: 0 }}>▾</span>
+          </button>
+          <LegacyChangePct symbolId={symbol.id}/>
+        </>
+      )}
 
       <div style={{ flex: 1 }}/>
       {/* 터미널이 섬이 되지 않게. 앱의 나머지 기능으로 가는 유일한 길이다. */}
@@ -263,7 +280,7 @@ function ChartDrawer({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
  * 본문을 가운데로 모아 한 줄이 지나치게 길어지지 않게 한다.
  */
 export default function MobileShell({ embedded, wide }: { embedded?: boolean; wide?: boolean } = {}) {
-  const { symbol, mode, setSymbol, favorites, toggleFavorite } = useTerminal();
+  const { symbol, mode, setSymbol, favorites, toggleFavorite, marketType, tradeMode, auth } = useTerminal();
   const landscape = useLandscape();
   const [hdrRef, hdrH] = useMeasuredHeight<HTMLDivElement>();
   // 스크롤 통의 실제 높이. `100dvh`를 그대로 쓰지 않는 이유: 이 화면은
@@ -299,6 +316,14 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
   }, [bookOpen]);
   const [menu, setMenu] = useState(false);
 
+  // ── 정본 거래 화면을 쓸 수 있는가 ──
+  //
+  // 모의 장부가 아는 시장은 현물과 USDT 선물 둘뿐이다. COIN-M·주식은
+  // **예전 배치 그대로** 둔다 — 아는 척하고 USDM 규칙으로 계산하면
+  // 코인마진 주문이 틀린 수량으로 나간다.
+  const canonMarket = canonicalMarketOf(marketType);
+
+
   // ── 가로 ── 차트를 옆에 세울 공간이 생긴다
   if (landscape) {
     return (
@@ -307,6 +332,23 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
         background: C.bg, color: C.text, overflow: 'hidden',
       }}>
         <MobileHeader onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
+        {/* 가로도 같은 판을 쓴다. 눕혔다고 주문 규칙이 달라지면 안 된다 —
+            세로에서 없앤 사이징 버튼이 가로에만 남아 있으면, 폰을 돌리는
+            것만으로 다른 규칙의 주문판이 나온다. */}
+        {canonMarket ? (
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            <TradingWorkspace
+              symbol={symbol.id} market={canonMarket} tradeMode={tradeMode} auth={auth}
+              onSymbolClick={() => setSearch(true)} chartHeight={220} ctaBottom={0}
+              exchangeOrderPane={
+                <>
+                  <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
+                  <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
+                </>
+              }
+            />
+          </div>
+        ) : (
         <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
           <div style={{ flex: 1, minWidth: 0, borderRight: `1px solid ${C.hair}` }}>
             <ChartPane symbol={symbol.id} compact/>
@@ -318,6 +360,7 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
             <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
           </div>
         </div>
+        )}
         <SearchSheet open={search} onClose={() => setSearch(false)}
           current={symbol.id} favorites={favorites}
           onToggleFav={toggleFavorite} onPick={s => { setSymbol(s); setSearch(false); }}/>
@@ -358,6 +401,10 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
   const TAB_ROW = 76;          // 탭 줄(48) + 그 아래 내용이 살짝 비치는 만큼
   const firstScreen = Math.max(220, boxH - hdrH - TAB_ROW);
 
+  // 차트가 첫 화면을 차지하되 거래 버튼이 잘리지 않을 만큼만 쓴다.
+  // 헤더·시장정보 줄·시간대 줄·버튼을 빼고 남는 만큼이다.
+  const chartH = Math.max(200, firstScreen - 210);
+
   return (
     /* data-region은 기하 검사기가 "지금 어떤 배치인가"를 읽는 표식이다.
        속성이 없으면 검사기가 데스크톱 계약(주문 >= 340px 상주)을 잘못
@@ -374,10 +421,31 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
       <MobileHeader innerRef={hdrRef} sticky
         onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
 
-      {/* 주문 + 호가 — 첫 화면의 나머지를 정확히 채운다.
-          두 열을 한 통에 넣지 않는 이유: 주문폼이 호가보다 길어서 한 통이면
-          호가가 폼 길이에 끌려 올라간다 — 호가는 늘 같은 자리에 있어야
-          눈이 찾는다. */}
+      {/* ── 첫 화면: 시장 정보 → 차트 → 거래 버튼 ──
+
+          예전에는 여기가 `[58% 주문폼 │ 42% 호가]`였고 차트는 맨 아래에
+          접혀 있었다. 폰에서 이 탭을 열면 **차트가 한 픽셀도 안 보였다.**
+          차트를 보고 들어가는 화면이 아니라 주문폼을 채우는 화면이었다.
+
+          호가와 상세 주문은 없어지지 않았다 — 거래 버튼을 누르면 시트에서
+          나온다(`TradingWorkspace`). 실거래 모드에서는 그 시트 안에 **기존
+          주문폼이 그대로** 들어간다. */}
+      {canonMarket ? (
+        <TradingWorkspace
+          symbol={symbol.id}
+          market={canonMarket}
+          tradeMode={tradeMode}
+          auth={auth}
+          onSymbolClick={() => setSearch(true)}
+          chartHeight={chartH}
+          exchangeOrderPane={
+            <>
+              <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
+              <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
+            </>
+          }
+        />
+      ) : (
       <div style={{ height: firstScreen, display: 'flex', overflow: 'hidden' }}>
         {/* ── 주문 칸은 **자기 스크롤을 갖는다** ──
 
@@ -431,6 +499,7 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
             }}>‹ 호가</button>
         )}
       </div>
+      )}
 
       {/* 포지션 — 탭 줄은 첫 화면 안에 있고, 카드는 내리면 나온다.
           `flow`는 이 독이 **자기 스크롤을 갖지 않는다**는 뜻이다. 탭 줄은
@@ -439,7 +508,12 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
         <BottomDock flow stickyTop={hdrH}/>
       </div>
 
-      <ChartDrawer/>
+      {/* ── 아래 차트는 정본 화면이 없을 때만 ──
+          정본 화면은 이미 위에 우리 캔들 차트를 그린다. 여기에 TradingView
+          iframe을 하나 더 두면 **같은 종목의 봉을 말하는 곳이 둘**이 되고,
+          둘은 출처도 간격도 다르다. COIN-M·주식처럼 정본 화면을 못 쓰는
+          시장에서는 이 차트가 유일한 차트이므로 그대로 둔다. */}
+      {canonMarket ? null : <ChartDrawer/>}
 
       <SearchSheet open={search} onClose={() => setSearch(false)}
         current={symbol.id} favorites={favorites}

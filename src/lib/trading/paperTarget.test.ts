@@ -11,7 +11,9 @@ import {
   DEFAULT_TARGET, selectDefault, selectChallenge, isChallengeId, isValidTarget,
   restoreTarget, targetRequestFields, targetQuery, sameTarget, targetLabel,
   targetOrderGate, type PaperTarget,
+  canonicalMarketOf, paperSheetHandlesOrders, PAPER_TRADE_MODE,
 } from './paperTarget';
+import { TRADE_MODES } from '../markets/tradeMode';
 
 const CID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
@@ -122,5 +124,38 @@ export function runPaperTargetTests() {
     for (const s of [null, undefined, '', 'running', 'WAT']) {
       eq(targetOrderGate(t, s as any).allowed, false);
     }
+  });
+
+  // ── ★ 터미널 시장·모드 → 정본 화면 ──
+  test('★ COIN-M·주식은 모의 장부가 다루지 않는다 — USDM으로 흘려보내지 않는다', () => {
+    eq(canonicalMarketOf('COIN_FUTURES'), null);
+    eq(canonicalMarketOf('STOCK'), null);
+    eq(canonicalMarketOf(''), null);
+    eq(canonicalMarketOf(null), null);
+    eq(canonicalMarketOf(undefined), null);
+    eq(canonicalMarketOf('USDM'), null);          // 터미널 어휘가 아니다
+  });
+
+  test('아는 시장 둘만 넘어간다', () => {
+    eq(canonicalMarketOf('SPOT'), 'SPOT');
+    eq(canonicalMarketOf('USDT_FUTURES'), 'USDM');
+  });
+
+  test('★ 정본 주문폼은 모의에서만 주문을 맡는다 — 실거래 경로를 가로채지 않는다', () => {
+    eq(paperSheetHandlesOrders('PAPER'), true);
+    for (const m of ['TESTNET', 'LIVE', '', null, undefined, 'paper', 'mock']) {
+      eq(paperSheetHandlesOrders(m), false, `${String(m)}이 모의로 읽혔습니다`);
+    }
+  });
+
+  test('★ 모의 모드 이름이 터미널 정본 어휘와 같다 — 문자열을 손으로 적지 않는다', () => {
+    // 처음에 여기를 'mock'이라 적었다. 도달할 수 없는 옛 화면의 어휘였고,
+    // 검사기·시험·빌드가 전부 통과한 채 실제 기기에서 실거래 주문폼이 열렸다.
+    assert(TRADE_MODES.indexOf(PAPER_TRADE_MODE) >= 0,
+      '모의 모드 이름이 TradeMode 목록에 없습니다');
+    eq(PAPER_TRADE_MODE, 'PAPER');
+    // 그리고 정확히 그 값 하나만 참이어야 한다
+    const truthy = TRADE_MODES.filter(m => paperSheetHandlesOrders(m));
+    eq(truthy.join(','), 'PAPER');
   });
 }

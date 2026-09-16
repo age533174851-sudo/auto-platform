@@ -21,7 +21,6 @@ import {
 // 없애는 것이 이 PR의 목적이다.
 import { LegacyLedgerBanner } from '@/components/trading/LegacyLedgerBanner';
 import { PaperChallengePanel } from '@/components/trading/PaperChallengePanel';
-import { TradingWorkspace } from '@/components/trading/TradingWorkspace';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
 import { isTradableLedger, legacyLedgerNotice } from '@/lib/trading/legacyLedger';
 
@@ -186,16 +185,13 @@ export default function PaperTradingPage({
         </div>
       )}
 
-      {/* ── 거래 화면이 맨 위다 ──
-          실측(390×844)에서 배너와 챌린지 목록이 위에 있을 때 거래 화면은
-          y=325에서 시작했고 **호가는 y=853 — 첫 화면 밖이었다.** 모의매매를
-          열면 보이는 것이 배너였다는 뜻이다. 주인공을 위로 올린다. */}
-      <div style={{ marginBottom: 14 }}>
-        <TradingWorkspace/>
-      </div>
+      {/* ── 거래 화면은 여기 없다 ──
+          한동안 여기에 거래 화면을 붙였다. 그런데 사용자가 실제로 여는 길은
+          `/ → 매매`이고 그건 터미널이다. 여기에도 붙여 두면 **거래 화면이
+          둘**이 되고, 둘은 언젠가 갈린다. 이 화면은 장부를 고르고 성적을
+          보는 곳이고, 거래는 매매 탭 하나에서 한다. */}
 
-      {/* 장부 고르기 — 거래 화면 바로 아래. 위 배지가 지금 어느 장부인지
-          말하고, 여기서 바꾼다. */}
+      {/* 장부 고르기 — 매매 탭의 주문이 여기서 고른 장부로 나간다. */}
       <div style={{ marginBottom: 12 }}>
         <PaperChallengePanel selected={paperTarget} onSelect={setPaperTarget}/>
       </div>

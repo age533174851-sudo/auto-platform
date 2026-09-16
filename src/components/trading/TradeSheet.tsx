@@ -29,6 +29,9 @@ import { planSizing } from '@/lib/trading/positionSizing';
 import { formatMoneyForScope, type MoneyScope } from '@/lib/trading/gameMoney';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
 import { targetRequestFields, type PaperTarget } from '@/lib/trading/paperTarget';
+import {
+  STOP_PCTS, previewStopPrice, stopChoiceOf, stopRequestFields,
+} from '@/lib/trading/stopPresets';
 
 export type TradeSide = 'LONG' | 'SHORT';
 
@@ -61,7 +64,10 @@ export function TradeSheet({
   const [leverage, setLeverage] = useState(spot ? 1 : 10);
   const [percent, setPercent] = useState(0);
   const [tp, setTp] = useState('');
+  /** 직접 입력한 손절**가**. 비어 있으면 아래 프리셋을 쓴다 */
   const [sl, setSl] = useState('');
+  /** 고른 손절 **거리**(%). 주문에는 이 값이 실린다 — 가격은 서버가 만든다 */
+  const [slPct, setSlPct] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -77,17 +83,25 @@ export function TradeSheet({
   const sizing = planSizing({ availableBalance, percent, price, leverage: lev });
   const quantity = sizing.quantity;
 
+  // 손절은 프리셋(%)과 직접입력(가격) 중 **하나만** 나간다.
+  const stop = stopChoiceOf(slPct, sl);
+  // 미리보기용 손절가. 주문 본문에는 들어가지 않는다 (`stopPresets` 머리말).
+  const previewSl = spot ? null
+    : stop.kind === 'PRICE' ? stop.price
+    : stop.kind === 'PCT' ? previewStopPrice(price, side, stop.pct)
+    : null;
+
   // 서버가 쓰는 계산 그대로. 미리보기 식을 새로 적지 않는다.
   const preview = useMemo(() => buildPaperPlan({
     symbol, side, market,
     quantity: quantity ?? 0,
     leverage: lev,
     markPrice: price,
-    stopPrice: sl ? Number(sl) : null,
+    stopPrice: previewSl,
     takeProfit: tp ? Number(tp) : null,
     availableBalance,
     marginMode: spot ? 'ISOLATED' : marginMode,
-  }), [symbol, side, market, quantity, lev, price, sl, tp, availableBalance, marginMode, spot]);
+  }), [symbol, side, market, quantity, lev, price, previewSl, tp, availableBalance, marginMode, spot]);
 
   const money = (v: number | null) => formatMoneyForScope(v, scope);
   const ready = canOrder && quantity != null && quantity > 0 && preview.ok;
@@ -112,7 +126,10 @@ export function TradeSheet({
         quantity,
         // 현물에는 배율이 없다. 보내지 않는다.
         ...(spot ? {} : { leverage: lev, marginMode }),
-        ...(sl && !spot ? { stopPrice: Number(sl) } : {}),
+        // 손절: 프리셋이면 **퍼센트**가, 직접 입력이면 가격이 실린다.
+        // 프리셋 가격은 서버가 자기 마크가로 만든다 — 화면이 체결 기준을
+        // 정하지 않는다.
+        ...(spot ? {} : stopRequestFields(stop)),
         ...(tp ? { takeProfit: Number(tp) } : {}),
         // **장부 식별자는 이것 하나다.** 계좌 id를 보내지 않는다.
         ...targetRequestFields(target),
@@ -238,6 +255,35 @@ export function TradeSheet({
       />
 
       {/* ── TP / SL ── */}
+      {/* 손절 거리 프리셋은 기존 주문폼(1·2·3·5·10%)에서 그대로 가져왔다.
+          **사이징이 아니다** — 위 슬라이더는 "얼마나 크게 들어갈까"이고
+          이 줄은 "어디서 나올까"다. 같은 퍼센트처럼 보인다고 묶으면 서로
+          다른 결정을 한 칸에서 하게 된다. */}
+      {!unsupported(capSl) ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: FS.micro, color: C.dim, fontWeight: 700 }}>손절 거리</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {STOP_PCTS.map(p => (
+              <button key={p} type="button"
+                onClick={() => { setSlPct(slPct === p ? null : p); setSl(''); }}
+                data-testid={`trade-sheet-sl-${p}`}
+                style={{
+                  flex: 1, padding: '5px 0', borderRadius: 6, cursor: 'pointer',
+                  border: `1px solid ${slPct === p && !sl ? C.accent : C.hair}`,
+                  background: slPct === p && !sl ? C.accentBg : C.raised,
+                  color: slPct === p && !sl ? C.accent : C.dim,
+                  fontSize: FS.micro, fontWeight: 700, ...NUM,
+                }}>{p}%</button>
+            ))}
+          </div>
+          {previewSl != null ? (
+            <span data-testid="trade-sheet-sl-preview" style={{ fontSize: FS.nano, color: C.faint }}>
+              예상 손절가 {previewSl.toFixed(2)} — 실제 값은 주문할 때 서버 마크가로 정해집니다
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
       <div style={{ display: 'flex', gap: 6 }}>
         <Field
           label="익절 (TP)" value={tp} onChange={setTp}
@@ -245,7 +291,7 @@ export function TradeSheet({
           testid="trade-sheet-tp"
         />
         <Field
-          label="손절 (SL)" value={sl} onChange={setSl}
+          label="손절가 직접 입력" value={sl} onChange={setSl}
           disabled={unsupported(capSl)} reason={(capSl as any).reason}
           testid="trade-sheet-sl"
         />

@@ -25,6 +25,8 @@
 // 챌린지 선택은 **그대로 쓴다.** 다시 쓰지 않도록 경계를 여기 그었다.
 
 /** 기본 계좌인가, 챌린지 전용 계좌인가. **셋째는 없다.** */
+import type { TradeMode } from '../markets/tradeMode';
+
 export type PaperTargetKind = 'DEFAULT' | 'CHALLENGE';
 
 export interface PaperTarget {
@@ -157,3 +159,45 @@ export function targetOrderGate(
     reason: `챌린지 상태를 확인하지 못해 주문하지 않았습니다 (${challengeStatus || '모름'})`,
   };
 }
+
+// ══════════════ 터미널의 시장·모드 → 정본 거래 화면 ══════════════
+//
+// 터미널은 시장을 넷(`SPOT` · `USDT_FUTURES` · `COIN_FUTURES` · `STOCK`)으로,
+// 모드를 셋(`mock` · `testnet` · `live`)으로 말한다. 모의 장부가 아는 시장은
+// 둘뿐이다. 그 사이의 변환을 화면마다 적으면 언젠가 한쪽만 고쳐진다.
+
+/** 모의 장부가 아는 시장으로 바꾼다. 모르는 시장은 `null`이다. */
+export function canonicalMarketOf(marketType: any): 'SPOT' | 'USDM' | null {
+  if (marketType === 'SPOT') return 'SPOT';
+  if (marketType === 'USDT_FUTURES') return 'USDM';
+  // COIN-M·주식은 모의 장부가 다루지 않는다. USDM으로 흘려보내면
+  // 코인마진 주문이 USDT 선물 규칙으로 계산된다.
+  return null;
+}
+
+/**
+ * 이 모드에서 정본 주문폼(TradeSheet)이 주문을 맡는가.
+ *
+ * **모의만이다.** 테스트넷·실전은 기존 주문폼이 그대로 맡는다 —
+ * 실거래 payload·검증·라우팅을 이번에 건드리지 않기 위해서다.
+ * 모르는 값도 false다: 확인하지 못한 것을 모의로 읽으면 실제 주문이
+ * 모의 라우트로 간다.
+ *
+ * 어휘를 조심한다
+ * ───────────────
+ * 처음에 여기를 `=== 'mock'`이라고 적었다. **틀렸다.** 그건 도달할 수 없는
+ * 옛 화면(`TradingPage`)의 어휘였고, 터미널의 정본 어휘는 `TradeMode`
+ * (`'PAPER' | 'TESTNET' | 'LIVE'`)다. 검사기도 시험도 빌드도 전부
+ * 통과했고, 실제 기기에서 **모의인데 실거래 주문폼이 열렸다.**
+ *
+ * 그래서 문자열을 손으로 적지 않고 `PAPER_TRADE_MODE`에 묶는다.
+ */
+export function paperSheetHandlesOrders(tradeMode: any): boolean {
+  return tradeMode === PAPER_TRADE_MODE;
+}
+
+/**
+ * 모의 모드의 정본 이름. `TradeMode`에서 가져온다 —
+ * 여기에 없는 문자열은 이 파일 어디에도 적지 않는다.
+ */
+export const PAPER_TRADE_MODE: TradeMode = 'PAPER';
