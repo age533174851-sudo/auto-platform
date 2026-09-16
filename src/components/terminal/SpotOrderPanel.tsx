@@ -25,6 +25,11 @@ import { AccountLine } from './AccountLine';
 import { marketSupportsExchange } from '@/lib/markets/tradeMode';
 import { usePaperAccount } from './PaperWallet';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
+// **어느 모의 장부로 나가는가.** 기본 계좌인지 챌린지 전용 계좌인지는
+// 화면 전체가 같은 값을 본다 — 잔고는 챌린지를 보는데 주문은 기본으로
+// 나가는 것이 이 구조에서 제일 쉽게 나는 고장이다.
+import { usePaperTarget } from '@/lib/trading/usePaperTarget';
+import { targetRequestFields } from '@/lib/trading/paperTarget';
 import { capability, checkIntent } from '@/lib/markets/marketType';
 
 interface SpotHolding {
@@ -39,6 +44,7 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
 }: { presetPrice?: number | null; presetSeq?: number; dense?: boolean }) {
   const { symbol, auth, connections, mode, tradeMode, modeResolution } = useTerminal();
   const stream = useBinanceStream(symbol.id, true);
+  const [paperTarget] = usePaperTarget();
   const cap = capability('SPOT');
 
   // **모드가 정한 계좌를 쓴다.** 예전에는 컨텍스트의 connId를 그대로 썼는데,
@@ -181,6 +187,10 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
               // 보여준 수량과 다른 수량이 장부에 남는다.
               market: 'SPOT', symbol: symbol.id, side: 'LONG',
               quantity: qtyToSend, leverage: 1,
+              // **challengeId 하나만 싣는다.** 계좌 id를 싣지 않으므로 남의
+              // 계좌 id를 넣어 볼 통로가 없다 — 계좌는 서버가 찾는다.
+              // 기본 계좌면 아무것도 싣지 않는다.
+              ...targetRequestFields(paperTarget),
             }),
           })
         : await fetch(cap.orderEndpoint, {
@@ -224,6 +234,18 @@ export const SpotOrderPanel = memo(function SpotOrderPanel({
           color: C.accent, fontSize: FS.micro, lineHeight: 1.5,
         }}>
           모의 현물 — 가상 잔고로 삽니다. 매도는 포지션 탭에서 청산으로 처리합니다.
+        </div>
+      )}
+      {/* **어느 모의 장부로 나가는지 주문 전에 말한다.** 기본 계좌와 챌린지
+          계좌는 잔고도 성적표도 다르다. 이 줄이 없으면 사용자는 자기가 고른
+          장부가 아닌 곳에 체결된 뒤에야 알게 된다. */}
+      {paper && paperTarget.kind === 'CHALLENGE' && (
+        <div style={{
+          padding: '6px 8px', borderRadius: 7,
+          border: `1px solid ${C.hair}`, color: C.dim, fontSize: FS.micro, lineHeight: 1.5,
+        }}>
+          이 주문은 <b style={{ color: C.accent }}>챌린지 계좌</b>로 나갑니다 — 기본 모의 계좌와
+          장부가 분리됩니다. 챌린지가 진행 중이 아니면 서버가 거부합니다.
         </div>
       )}
 

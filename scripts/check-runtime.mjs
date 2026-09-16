@@ -56,6 +56,9 @@ const CLASSIFIED = new Map([
   ['src/components/ApiHealthMonitor.tsx', 'POLL — API 상태 확인'],
   ['src/components/terminal/PaperWallet.tsx', 'POLL — 모의 지갑 잔고 새로고침'],
   ['src/components/terminal/OrderPane.tsx', 'POLL — 호가·포지션 새로고침'],
+  // OrderPane에 있던 펀딩 폴링·정산 카운트다운이 그대로 옮겨 온 것이다
+  // (판단은 한 글자도 바뀌지 않았다). 공용 호가판이라 두 화면이 함께 쓴다.
+  ['src/components/trading/OrderBookView.tsx', 'POLL — 펀딩 새로고침 · UI — 정산 카운트다운'],
   ['src/components/terminal/SpotOrderPanel.tsx', 'POLL — 현물 잔고 새로고침'],
   ['src/components/terminal/BottomDock.tsx', 'POLL — 포지션·미체결 새로고침'],
   ['src/components/terminal/LedgerPanel.tsx', 'POLL — 장부 새로고침'],

@@ -15,6 +15,16 @@ import {
   loadAccount, placeOrder, resetAccount, calcMetrics,
   type PaperAccount, type PaperOrder,
 } from '@/lib/paper/engine';
+// **이 화면의 장부는 정본이 아니다.** 브라우저에만 있고 통화도 체결 판정
+// 주체도 서버와 다르다. 값은 그대로 두고 읽기만 하며, 새 거래는 받지
+// 않는다 — 어느 화면에 들어갔는지에 따라 다른 잔고로 연습하는 상태를
+// 없애는 것이 이 PR의 목적이다.
+import { LegacyLedgerBanner } from '@/components/trading/LegacyLedgerBanner';
+import { PaperChallengePanel } from '@/components/trading/PaperChallengePanel';
+import { usePaperTarget } from '@/lib/trading/usePaperTarget';
+import { isTradableLedger, legacyLedgerNotice } from '@/lib/trading/legacyLedger';
+
+const LEDGER = 'LOCAL_KRW_PAPER' as const;
 
 export default function PaperTradingPage({
   prices,
@@ -29,6 +39,8 @@ export default function PaperTradingPage({
   const [side,    setSide]    = useState<'buy'|'sell'>('buy');
   const [qty,     setQty]     = useState('');
   const [toast,   setToast]   = useState('');
+  // 고른 장부는 화면 전체가 같은 값을 본다 — 터미널 현물 주문폼도 이 값을 읽는다
+  const [paperTarget, setPaperTarget] = usePaperTarget();
 
   useEffect(() => { setAccount(loadAccount()); }, []);
 
@@ -76,6 +88,12 @@ export default function PaperTradingPage({
   /* 보유 종목 원탭 청산 — 실현손익/보유시간/이유 담은 풍부한 알림 */
   const closeHolding = useCallback((p: any) => {
     if (!account) return;
+    // **읽기 전용이다.** 여기서 청산하면 서버 장부와 다른 두 번째 성적표가
+    // 계속 쌓인다. 던지지 않고 이유를 말한다.
+    if (!isTradableLedger(LEDGER)) {
+      notify('error', '이 장부에서는 청산할 수 없습니다', legacyLedgerNotice(LEDGER));
+      return;
+    }
     const cur = priceLookup(p.symbol) ?? p.avgPrice;
     if (cur <= 0) { notify('error', '청산 실패', '현재가를 알 수 없습니다'); return; }
     const result = placeOrder(account, { symbol: p.symbol, name: p.name, side: 'sell', price: cur, qty: p.qty });
@@ -102,6 +120,10 @@ export default function PaperTradingPage({
   /* Order submit */
   const submitOrder = useCallback(() => {
     if (!account || !selected) return;
+    if (!isTradableLedger(LEDGER)) {
+      notify('error', '이 장부에서는 주문할 수 없습니다', legacyLedgerNotice(LEDGER));
+      return;
+    }
     const curPrice = priceLookup(selected.id) || safeNumber(selected.p, 0);
     if (curPrice <= 0) { notify('error', '주문 실패', '현재가를 알 수 없습니다'); return; }
     const q = safeNumber(qty, 0);
@@ -163,7 +185,16 @@ export default function PaperTradingPage({
         </div>
       )}
 
-      {/* MOCK 자동매매 패널 — 앱 내부 완결형 (거래소/Worker 무관) */}
+      {/* **이 아래 장부는 정본이 아니다.** 큰 숫자보다 먼저 읽히도록 위에 둔다 */}
+      <LegacyLedgerBanner id={LEDGER}/>
+
+      {/* 정본 모의투자 — 챌린지를 만들고 · 보고 · 그만둔다.
+          고른 장부는 터미널 현물 주문폼이 그대로 읽는다. */}
+      <div style={{ marginBottom: 12 }}>
+        <PaperChallengePanel selected={paperTarget} onSelect={setPaperTarget}/>
+      </div>
+
+      {/* MOCK 자동매매 패널 — 서버 모의 계좌를 읽는다(정본) */}
       <MockAutoTrade />
 
       {/* 전략 프로필 (고위험 단타 / 저위험 스윙 분리 운용) */}

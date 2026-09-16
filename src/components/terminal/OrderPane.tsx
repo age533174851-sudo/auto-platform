@@ -19,6 +19,7 @@ import { lossPreview } from '@/lib/engine/orderSizing';
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { C, FS, NUM, fmtPrice, pnlColor, input, primaryBtn, ghostBtn, chip } from './theme';
 import { DataBadge } from '@/components/ui/DataBadge';
+import { OrderBookView, type OrderBookViewProps } from '@/components/trading/OrderBookView';
 import { useBinanceStream, bookImbalance, type StreamState } from '@/lib/hooks/useBinanceStream';
 import { useTerminal } from './TerminalContext';
 import { notifyError, notifySuccess } from '@/lib/notify/center';
@@ -60,51 +61,10 @@ const MAX_LEVERAGE = 100;
  * 이 값을 못 보면 수수료를 모르고 들어가는 것과 같다.
  * 30초 주기면 충분하다 — 8시간마다 바뀌는 값이다.
  */
-export function useFunding(symbol: string) {
-  const [d, setD] = React.useState<{ rate: number | null; nextAt: number | null }>({
-    rate: null, nextAt: null,
-  });
-  React.useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`);
-        if (!r.ok || !alive) return;
-        const j = await r.json();
-        const rate = parseFloat(j?.lastFundingRate);
-        const nextAt = Number(j?.nextFundingTime);
-        setD({
-          rate: Number.isFinite(rate) ? rate * 100 : null,
-          nextAt: Number.isFinite(nextAt) && nextAt > 0 ? nextAt : null,
-        });
-      } catch { /* 다음 주기에 다시 */ }
-    };
-    load();
-    const t = setInterval(load, 30_000);
-    return () => { alive = false; clearInterval(t); };
-  }, [symbol]);
-  return d;
-}
-
-/** 다음 정산까지 남은 시간을 1초마다 다시 센다 */
-export function useCountdown(nextAt: number | null): string {
-  const [txt, setTxt] = React.useState('—');
-  React.useEffect(() => {
-    if (!nextAt) { setTxt('—'); return; }
-    const tick = () => {
-      const ms = nextAt - Date.now();
-      if (ms <= 0) { setTxt('00:00:00'); return; }
-      const h = Math.floor(ms / 3_600_000);
-      const m = Math.floor((ms % 3_600_000) / 60_000);
-      const sec = Math.floor((ms % 60_000) / 1000);
-      setTxt(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`);
-    };
-    tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
-  }, [nextAt]);
-  return txt;
-}
+// 펀딩·카운트다운 훅과 호가판 본체는 **거래 화면 둘이 함께 쓰는 정본**으로
+// 옮겼다(`@/components/trading/OrderBookView`). 여기서는 이어서 쓸 수 있게
+// 그대로 다시 내보낸다 — 옮기면서 부르는 쪽을 고치지 않기 위해서다.
+export { useFunding, useCountdown } from '@/components/trading/OrderBookView';
 const LEV_KEY = 'tg_terminal_leverage';
 /** 수량 단위(코인 개수 / USDT 금액) 기억용 */
 const UNIT_KEY = 'tg_terminal_unit';
@@ -138,169 +98,19 @@ export function roughLiqDistancePct(leverage: number): number {
 }
 
 // ══ 호가판 ══════════════════════════════════════════════
-export const OrderBookPanel = memo(function OrderBookPanel({
-  rows = 9, onPickPrice, showFunding, dense,
-}: {
-  rows?: number;
-  onPickPrice?: (p: number) => void;
-  /** 펀딩비·다음 정산 카운트다운을 위에 붙인다 */
-  showFunding?: boolean;
-  /** 좁은 열에 들어갈 때 — 글자와 여백을 줄인다 */
-  dense?: boolean;
-}) {
+/**
+ * 터미널의 호가판.
+ *
+ * **판은 `OrderBookView`에 있다.** 여기가 하는 일은 문맥에서 종목을 읽어
+ * 넘기는 것뿐이다 — 그렇게 나눠 두면 터미널 밖(`/`의 매매 탭)에서도 같은
+ * 판을 쓸 수 있다. 예전에는 이 컴포넌트가 `useTerminal()`을 직접 불러서
+ * 터미널 안에서만 살 수 있었고, 그래서 밖에는 두 번째 호가창이 생겼다.
+ */
+export const OrderBookPanel = memo(function OrderBookPanel(
+  props: Omit<OrderBookViewProps, 'symbolId'>,
+) {
   const { symbol } = useTerminal();
-  const stream = useBinanceStream(symbol.id, true);
-  const live = stream.status === 'live' && !stream.stale;
-  const funding = useFunding(showFunding ? symbol.id : '');
-  const countdown = useCountdown(funding.nextAt);
-
-  const asks = useMemo(() => stream.asks.slice(0, rows).reverse(), [stream.asks, rows]);
-  const bids = useMemo(() => stream.bids.slice(0, rows), [stream.bids, rows]);
-  const maxQty = Math.max(1e-9, ...asks.map(l => l.qty), ...bids.map(l => l.qty));
-  const mid = stream.lastPrice ?? bids[0]?.price ?? null;
-  const imbalance = bookImbalance(stream);
-
-  // 호가 한 줄.
-  //
-  // 높이를 **명시한다.** globals.css에 `button { min-height: 44px }`가 있어서
-  // (터치 목표 최소 크기) 호가 줄도 44px이 됐다. 위아래 7줄이면 616px —
-  // 세로 화면 하나가 호가판 하나로 다 찬다. 그러면 호가·주문폼·포지션을 한
-  // 화면에서 같이 보는 것이 불가능해지고, 깊이를 보려고 또 스크롤해야 한다.
-  //
-  // 44px 규칙을 여기서 깨는 이유: 이건 낱개 버튼이 아니라 **사다리**다.
-  // 줄 하나를 크게 만드는 대신 줄이 여러 개 보이는 것이 이 판의 목적이고,
-  // 실제 거래소 앱들도 20px 안팎을 쓴다. 숫자 크기는 그대로 둔다.
-  const rowH = dense ? 21 : 24;
-  const Row = ({ p, q, buy }: { p: number; q: number; buy: boolean }) => (
-    <button
-      onClick={() => onPickPrice?.(p)}
-      style={{
-        position: 'relative', display: 'flex', justifyContent: 'space-between',
-        alignItems: 'center',
-        width: '100%', background: 'none', border: 'none',
-        minHeight: 0, height: rowH, flexShrink: 0,
-        padding: dense ? '0 8px' : '0 12px', cursor: onPickPrice ? 'pointer' : 'default',
-        overflow: 'hidden', ...NUM, fontSize: dense ? FS.micro : FS.small,
-        lineHeight: 1,
-      }}
-    >
-      {/* 깊이 막대는 배경으로만. 숫자를 가리면 읽는 속도가 떨어진다 */}
-      <span style={{
-        position: 'absolute', top: 1, bottom: 1, right: 0,
-        width: `${(q / maxQty) * 100}%`, borderRadius: '2px 0 0 2px',
-        background: buy ? C.upBg : C.downBg,
-      }}/>
-      <span style={{ color: buy ? C.up : C.down, zIndex: 1, fontWeight: 500 }}>{fmtPrice(p)}</span>
-      <span style={{ color: C.dim, zIndex: 1 }}>{q.toFixed(3)}</span>
-    </button>
-  );
-
-  return (
-    /* **flexShrink:0이 없으면 이 칸이 0이 된다.**
-       아래 주문폼이 `minHeight:100%`로 열 전체를 요구하면, 세로 flex에서
-       기본 shrink가 1인 이 칸이 0까지 눌린다. 그런데 자식들은 계속 그려져서
-       (overflow를 자르지 않으므로) 주문폼 위로 흘러넘쳤다 —
-       "호가를 받아오는 중"이 배율·청산거리 글자와 겹친 원인이 이것이다.
-       높이를 0으로 만들면서 내용을 지우지 않는 것이 가장 나쁜 조합이다. */
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flexShrink: 0 }}>
-      {showFunding && (
-        <div style={{
-          padding: dense ? '6px 8px' : '8px 12px',
-          borderBottom: `1px solid ${C.hair}`,
-        }}>
-          <div style={{ color: C.faint, fontSize: FS.micro, marginBottom: 2 }}>
-            펀딩 (8h) · 다음 정산
-          </div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-            {/* 펀딩은 못 받으면 '—'다. 0%로 적으면 "무료"로 읽힌다. */}
-            <span style={{
-              ...NUM, fontSize: FS.small, fontWeight: 700,
-              color: funding.rate == null ? C.faint : funding.rate >= 0 ? C.down : C.up,
-            }}>{funding.rate == null ? '—' : `${funding.rate.toFixed(4)}%`}</span>
-            <span style={{ ...NUM, color: C.dim, fontSize: FS.micro }}>{countdown}</span>
-          </div>
-        </div>
-      )}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        padding: dense ? '6px 8px 4px' : '7px 12px 5px', fontSize: FS.micro, color: C.faint,
-      }}>
-        <span>가격</span>
-        <DataBadge compact source={{
-          kind: live ? 'REALTIME' : 'UNAVAILABLE',
-          origin: dense ? '' : 'Binance', asOf: stream.depthAt, expectedIntervalMs: 100,
-        }}/>
-        <span>수량</span>
-      </div>
-
-      {asks.length === 0 && bids.length === 0 ? (
-        <div style={{ padding: '28px 12px', textAlign: 'center', color: C.faint, fontSize: FS.small }}>
-          {stream.status === 'live' ? '호가 수신 대기 중' : '호가를 받아오는 중'}
-        </div>
-      ) : (
-        <>
-          {asks.map((l, i) => <Row key={'a' + i} p={l.price} q={l.qty} buy={false}/>)}
-
-          {/* 가운데 현재가도 누르면 그 가격이 주문폼에 들어간다.
-              호가 줄만 눌리던 때는 **가장 크게 떠 있는 숫자가 유일하게 안
-              눌리는 것**이었다. 지정가를 넣을 때 제일 자주 쓰는 값이 현재가라
-              그게 제일 이상했다. 버튼으로 바꾸고, 눌린다는 것을 밑줄로 알린다. */}
-          <button
-            onClick={() => { if (mid != null) onPickPrice?.(mid); }}
-            disabled={mid == null || !onPickPrice}
-            title={onPickPrice ? '이 가격으로 지정가 주문' : undefined}
-            style={{
-              display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 8,
-              width: '100%', background: 'none',
-              padding: dense ? '6px 8px' : '7px 12px', margin: '2px 0',
-              border: 'none', minHeight: 0,
-              borderTop: `1px solid ${C.hair}`, borderBottom: `1px solid ${C.hair}`,
-              cursor: mid != null && onPickPrice ? 'pointer' : 'default',
-            }}>
-            <span style={{
-              ...NUM, color: pnlColor(stream.changePct),
-              fontSize: dense ? 15 : 19, fontWeight: 700,
-              textDecoration: mid != null && onPickPrice ? 'underline' : 'none',
-              textDecorationColor: C.hair3,
-              textDecorationThickness: 1,
-              textUnderlineOffset: 3,
-            }}>{fmtPrice(mid)}</span>
-            {stream.changePct != null && (
-              <span style={{ ...NUM, color: pnlColor(stream.changePct), fontSize: FS.small, fontWeight: 600 }}>
-                {stream.changePct >= 0 ? '+' : ''}{stream.changePct.toFixed(2)}%
-              </span>
-            )}
-          </button>
-
-          {bids.map((l, i) => <Row key={'b' + i} p={l.price} q={l.qty} buy={true}/>)}
-        </>
-      )}
-
-      {imbalance != null && (
-        <div style={{ padding: dense ? '8px 8px 10px' : '10px 12px 12px' }}>
-          <div style={{
-            display: 'flex', justifyContent: 'space-between',
-            fontSize: FS.micro, marginBottom: 5, ...NUM,
-          }}>
-            <span style={{ color: C.up }}>{imbalance.toFixed(1)}%</span>
-            <span style={{ color: C.faint, fontFamily: 'inherit' }}>호가 잔량</span>
-            <span style={{ color: C.down }}>{(100 - imbalance).toFixed(1)}%</span>
-          </div>
-          <div style={{ display: 'flex', height: 3, borderRadius: 2, overflow: 'hidden', background: C.hair }}>
-            <div style={{ width: `${imbalance}%`, background: C.up }}/>
-            <div style={{ width: `${100 - imbalance}%`, background: C.down }}/>
-          </div>
-          {/* 체결 강도가 아니라 호가 잔량이다. 같은 것으로 읽히면 안 된다. */}
-          <div style={{ marginTop: 6 }}>
-            <DataBadge compact source={{
-              kind: live ? 'DERIVED' : 'UNAVAILABLE',
-              origin: '호가 잔량 계산', asOf: stream.depthAt, expectedIntervalMs: 100,
-            }}/>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return <OrderBookView symbolId={symbol.id} {...props}/>;
 });
 
 /**

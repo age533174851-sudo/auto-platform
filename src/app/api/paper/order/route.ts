@@ -133,22 +133,15 @@ export async function POST(req: NextRequest) {
   // 체결 기준가는 **서버가 받는다.** 화면이 보낸 가격을 그대로 쓰면
   // 유리한 값을 넣어 장부를 만들 수 있고, 그러면 성적표가 의미를 잃는다.
   //
-  // 현물은 **현물 시세**를 쓴다. 선물 마크가로 현물을 채우면 펀딩·베이시스
-  // 만큼 다른 가격에 산 장부가 되고, 그 차이가 성적표에 그대로 남는다.
-  let markPrice: number | null = null;
-  try {
-    if (spot) {
-      const { fetchSpotPriceMap } = await import('@/lib/markets/pricing');
-      const map = await fetchSpotPriceMap();
-      const v = Number(map.get(symbol));
-      markPrice = Number.isFinite(v) && v > 0 ? v : null;
-    } else {
-      const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
-      const px = await getPremiumIndex(symbol, false);
-      const v = Number(px?.markPrice);
-      markPrice = Number.isFinite(v) && v > 0 ? v : null;
-    }
-  } catch { markPrice = null; }
+  // **어느 시장의 가격인가는 `paperPriceSource`가 정한다.** 예전에는 이
+  // 자리에 `if (spot) 현물 else 선물`이 직접 적혀 있었고, 청산 라우트에는
+  // 그 분기가 아예 없어서 현물 포지션이 선물 마크가로 닫혔다. 규칙을 두
+  // 곳에 적고 같기를 바라는 대신, 적는 곳을 하나로 만든다 —
+  // **진입과 청산이 같은 함수를 부른다.**
+  const { readPaperMarkPrice, paperPriceFailed } =
+    await import('@/lib/engine/paperPriceSource');
+  const px = await readPaperMarkPrice(market, symbol);
+  const markPrice: number | null = paperPriceFailed(px) ? null : px.price;
 
   // 손절: 가격으로 왔으면 그대로, %면 마크가에서 만든다.
   // 현물에는 손절이 없다 — 실전 현물 라우트도 stopLossPct를 거부한다.

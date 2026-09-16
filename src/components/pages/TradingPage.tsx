@@ -7,6 +7,12 @@ import { placeOrder, toTVSymbol, type OrderRequest } from '@/lib/api/client';
 import { notify, type NotifyKind } from '@/lib/notify/center';
 import { paperBuy, getOpenPositions, loadPaperBalance, closePaperPosition, reversePaperPosition, canOpenNewPosition } from '@/lib/autotrade/store';
 import { tradeEnvOf, mayMutatePracticeLedger, practiceBlockReason } from '@/lib/autotrade/practiceEnv';
+// **이 화면의 원화 연습 장부는 정본이 아니다.** 브라우저에만 있고, 과거에
+// TESTNET·LIVE 체결이 섞여 들어가 사후에 가려낼 수 없다. 값은 그대로 두고
+// 읽기만 하며, 새 거래는 서버 모의 장부(정본)로만 나간다.
+import { isTradableLedger, legacyLedgerNotice } from '@/lib/trading/legacyLedger';
+
+const PRACTICE_LEDGER = 'LOCAL_KRW_PRACTICE' as const;
 // 명목가·증거금의 뜻은 한 곳에서 온다 — 화면이 공식을 다시 쓰지 않는다.
 import { notionalAndMargin } from '@/lib/markets/quantityInput';
 // 실행 통화·모드 격리·잔고 출처 판정은 이 파일 한 곳에 있다.
@@ -24,6 +30,7 @@ import { planPracticeClose, planPracticeReverse, practiceCardEditable } from '@/
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { useBinanceStream, bookImbalance } from '@/lib/hooks/useBinanceStream';
+import { orderBookLadder } from '@/lib/trading/orderBook';
 import { DataBadge, DataValue, DataHealth } from '@/components/ui/DataBadge';
 import type { DataSource } from '@/lib/engine/dataQuality';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR, simulatePriceUpdate } from '@/data/assets';
@@ -563,6 +570,13 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       showToast(plan.kind === 'BLOCKED' ? plan.reason : '연습 청산을 수행하지 않았습니다', false);
       return;
     }
+    // **읽기 전용 장부다.** 여기서 청산하면 서버 모의 장부와 다른 두 번째
+    // 성적표가 계속 쌓인다 — 어느 화면에 들어갔는지에 따라 다른 잔고로
+    // 연습하는 상태를 없애는 것이 이 변경의 목적이다.
+    if (!isTradableLedger(PRACTICE_LEDGER)) {
+      showToast(legacyLedgerNotice(PRACTICE_LEDGER), false);
+      return;
+    }
     closePaperPosition(tradeEnvOf(tradeMode), plan.asset, cur, plan.ratio);
     refreshPositions();
   };
@@ -792,6 +806,15 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
       // 실제 포지션 생성 (mock 모드 — 매수/매도 모두)
       if (tradeMode === 'mock' && r.status !== 'error') {
         try {
+          if (!isTradableLedger(PRACTICE_LEDGER)) {
+            // `Order.status`에 'failed'는 없다 — 옆 블록이 그 값을 쓰지만
+            // 그건 기준선에 남아 있는 타입 오류다. 새로 더하지 않는다.
+            setOrders(prev => prev.map((o, i) => i === 0
+              ? { ...o, note: '연습 장부는 읽기 전용입니다', status: 'cancelled' as const } : o));
+            showToast(legacyLedgerNotice(PRACTICE_LEDGER), false);
+            setStatus(null);
+            return;
+          }
           const riskCheck = canOpenNewPosition();
           if (!riskCheck.allowed) {
             setOrders(prev => prev.map((o, i) => i === 0 ? { ...o, note: `진입 차단: ${riskCheck.reason}`, status: 'failed' } : o));
@@ -1296,17 +1319,20 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
               */}
               <div style={{marginTop:12}}>
                 {(()=>{
-                  const showAsks = stream.asks.slice(0, 7).reverse();   // 높은 가격이 위로
-                  const showBids = stream.bids.slice(0, 7);
-                  const maxQty = Math.max(
-                    1e-9,
-                    ...showAsks.map(l=>l.qty), ...showBids.map(l=>l.qty),
-                  );
+                  // **판단은 `lib/trading/orderBook`에 있다** — 터미널 호가판과
+                  // 같은 함수다. 예전에는 두 화면이 각자 계산했고 가운데 값의
+                  // 폴백이 서로 달랐다.
+                  //
                   // 호가는 USDT 단위다. lastPrice가 아직 없다고 원화 가격(sel.p)으로
                   // 폴백하면 호가는 63,654인데 중앙만 94,061,179가 되어 단위가 섞인다.
-                  // 스트림 값이 올 때까지는 최우선 호가로 중앙값을 채운다.
-                  const midFromBook = showBids[0]?.price ?? showAsks[showAsks.length-1]?.price ?? null;
-                  const px = stream.lastPrice ?? midFromBook;
+                  // 그래서 폴백은 **호가 안에서만** 한다.
+                  const ladder = orderBookLadder({
+                    asks: stream.asks, bids: stream.bids, rows: 7, lastPrice: stream.lastPrice,
+                  });
+                  const showAsks = ladder.asks;   // 높은 가격이 위로
+                  const showBids = ladder.bids;
+                  const maxQty = ladder.maxQty;
+                  const px = ladder.mid;
                   const chg = stream.changePct;
                   const pressure = bookImbalance(stream);
 
@@ -1394,7 +1420,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         <span>수량</span>
                       </div>
 
-                      {showAsks.length === 0 && showBids.length === 0 ? (
+                      {ladder.empty ? (
                         <div style={{padding:'18px 6px',textAlign:'center',color:T.muted,fontSize:10}}>
                           {stream.status === 'live' ? '호가 수신 대기 중…' : '호가를 받아오는 중…'}
                         </div>
@@ -1843,6 +1869,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         // 않는다. TESTNET·LIVE에서 누르면 거래소에 없는 포지션이
                         // 장부에만 생긴다. 그래서 그 환경에서는 막는다.
                         const env = tradeEnvOf(tradeMode);
+                        if(!isTradableLedger(PRACTICE_LEDGER)){ showToast(legacyLedgerNotice(PRACTICE_LEDGER), false); return; }
                         if(!mayMutatePracticeLedger(env)){ showToast(practiceBlockReason(env), false); return; }
                         const addAmt = amount ? +amount : 100000;
                         const rc = canOpenNewPosition();
@@ -1860,6 +1887,7 @@ function TradingPage({prices,currency,activeAsset,onOpenPnL,priceRealAt,priceSim
                         // 거래소 청산 + 반대방향 신규 주문을 보냈다. 거래소에
                         // 그 포지션이 있는지 확인하지도 않았다. 실포지션의
                         // 리버스는 실포지션 카드의 경로가 따로 한다.
+                        if(!isTradableLedger(PRACTICE_LEDGER)){ showToast(legacyLedgerNotice(PRACTICE_LEDGER), false); return; }
                         const envRev = tradeEnvOf(tradeMode);
                         const plan = planPracticeReverse(envRev, p);
                         if(plan.kind !== 'PRACTICE_REVERSE'){

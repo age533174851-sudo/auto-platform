@@ -9,7 +9,14 @@
 //
 // 그래서 여기서는 **있는지만 본다.** 옮기는 함수는 만들지 않는다.
 
-/** 예전 브라우저 장부가 쓰던 키들 */
+/**
+ * 예전 브라우저 장부가 쓰던 키들.
+ *
+ * **지금 살아 있는 두 장부는 여기 없다.** `tg_paper_account_v1`과
+ * `tg_paper_balance_v1`은 `lib/trading/legacyLedger.ts`가 다룬다 — 그쪽은
+ * "거래에 쓸 수 있는가"를 답하고, 이쪽은 "더 옛날 흔적이 남아 있는가"만
+ * 본다. 두 목록이 겹치지 않는다는 것을 검사기가 확인한다.
+ */
 export const LEGACY_PAPER_KEYS = [
   'tg_paper_balance',
   'tg_exec_logs',
