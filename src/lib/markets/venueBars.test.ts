@@ -15,7 +15,7 @@
 // 하나 잃고, 그건 지표를 한 칸씩 밀어 놓는다 — 조용히 틀리는 쪽이다.
 
 import { test, eq, assert } from '../../test/harness';
-import { intervalMs, dropIncompleteBar } from './venueBars';
+import { intervalMs, dropIncompleteBar, binanceKlinesUrl } from './venueBars';
 
 const H = 3_600_000;
 const D = 86_400_000;
@@ -95,5 +95,86 @@ export function runVenueBarsTests() {
     const r = dropIncompleteBar([bar(0)], '1h', 1800_000);
     eq(r.dropped, true);
     eq(r.rows.length, 0);
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // 어느 시장의 봉인가
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // `/api/market/candles`는 `market=SPOT`을 받아 검증하고 응답에
+  // `market: 'SPOT'`이라고 **적기까지 했지만** 아래로는 넘기지 않았다.
+  // 그리고 봉을 받아 오는 경로는 fapi 전용이었다.
+  //
+  // 그래서 현물 화면에서 이렇게 갈렸다:
+  //
+  //   차트      = 선물 봉  (fapi klines)
+  //   헤더·호가  = 현물     (streamEndpoints)
+  //   PAPER 체결 = 현물     (paperPriceSource)
+  //
+  // 셋 다 오류를 내지 않는다. 베이시스만큼 조용히 다를 뿐이다.
+  //
+  // 이 판단이 `fetchVenueBars` 안에 묻혀 있는 동안 **아무도 시험하지
+  // 못했다** — 그 함수는 `@/lib/exchanges/*`를 동적으로 부르는데 하네스에
+  // 그 별칭이 없다. 판단만 꺼내 놓으니 시험이 붙는다.
+  console.log('[봉 시장 권위]');
+
+  const HOST = 'https://fapi.binance.com';
+  const base = {
+    futuresHost: HOST, testnet: false,
+    symbol: 'BTCUSDT', interval: '1h', limit: 6,
+  };
+
+  test('★ SPOT은 현물 봉을 받는다 — 선물 봉이 아니다', () => {
+    const r = binanceKlinesUrl({ ...base, market: 'SPOT' });
+    assert(r.url.startsWith('https://api.binance.com/api/v3/klines'),
+      `현물이 이 주소에서 봉을 받습니다: ${r.url}`);
+    assert(r.url.indexOf('/fapi/') < 0,
+      `현물 차트가 선물 봉을 그립니다: ${r.url}`);
+  });
+
+  test('★ USDM은 선물 봉 그대로다', () => {
+    const r = binanceKlinesUrl({ ...base, market: 'USDM' });
+    assert(r.url.startsWith(`${HOST}/fapi/v1/klines`), `선물이 아닌 주소입니다: ${r.url}`);
+  });
+
+  test('★ 시장을 안 주면 선물이다 — 자동매매·백테스트 계약을 바꾸지 않는다', () => {
+    // `/api/backtest` · `/api/signals/ledger` · `/api/autotrade/*`는 이
+    // 인자를 주지 않는다. 그쪽 주문은 선물로 나가므로 시세도 선물이어야 한다.
+    const r = binanceKlinesUrl({ ...base });
+    assert(r.url.indexOf('/fapi/v1/klines') >= 0,
+      `시장을 안 줬는데 선물이 아닙니다 — 기존 호출부 계약이 깨졌습니다: ${r.url}`);
+    eq(r.source, 'binance:live:futures:BTCUSDT:1h');
+  });
+
+  test('★ 출처만 보고도 어느 시장인지 안다', () => {
+    const spot = binanceKlinesUrl({ ...base, market: 'SPOT' });
+    const usdm = binanceKlinesUrl({ ...base, market: 'USDM' });
+    assert(spot.source.indexOf('spot') >= 0, `현물 출처가 아닙니다: ${spot.source}`);
+    assert(usdm.source.indexOf('futures') >= 0, `선물 출처가 아닙니다: ${usdm.source}`);
+    assert(spot.source !== usdm.source,
+      '두 시장의 출처가 같습니다 — 응답만 보고 구별할 수 없습니다');
+  });
+
+  test('데모 선물은 호스트를 binanceFutures에서 받는다 — 주소를 두 번 적지 않는다', () => {
+    const demo = binanceKlinesUrl({ ...base, futuresHost: 'https://demo-fapi.binance.com', testnet: true });
+    assert(demo.url.startsWith('https://demo-fapi.binance.com/fapi/v1/klines'), demo.url);
+    eq(demo.source, 'binance:demo:futures:BTCUSDT:1h');
+    // 현물에는 데모 서버가 없다. testnet이라고 주소를 지어내지 않는다.
+    const spot = binanceKlinesUrl({ ...base, market: 'SPOT', testnet: true });
+    assert(spot.url.startsWith('https://api.binance.com/'), spot.url);
+  });
+
+  test('★ 구간을 안 주면 붙이지 않는다 — Number(null)은 0이다', () => {
+    // 이걸 안 거르면 "구간 없음"이 `startTime=0`이 되어 1970년부터 달라는
+    // 뜻이 된다. 조회는 성공하고 응답만 엉뚱해서 아무도 못 본다.
+    // (이 시험을 쓰기 전에 실제로 한 번 이렇게 만들었다.)
+    for (const bad of [null, undefined, '', NaN, false]) {
+      const r = binanceKlinesUrl({ ...base, startTimeMs: bad as any, endTimeMs: bad as any });
+      assert(r.url.indexOf('startTime') < 0, `${String(bad)}에 startTime이 붙었습니다: ${r.url}`);
+      assert(r.url.indexOf('endTime') < 0, `${String(bad)}에 endTime이 붙었습니다: ${r.url}`);
+    }
+    const ok = binanceKlinesUrl({ ...base, startTimeMs: 1700000000000, endTimeMs: 1700003600000 });
+    assert(ok.url.indexOf('startTime=1700000000000') >= 0, ok.url);
+    assert(ok.url.indexOf('endTime=1700003600000') >= 0, ok.url);
   });
 }

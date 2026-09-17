@@ -202,9 +202,85 @@ for (const f of FILES) {
   if (dup.length) err(`두 legacy 모듈이 같은 키를 다룹니다 (${dup.join(', ')}) — 판단이 둘이 됩니다`);
 }
 
+// ── ★ 조회 실패를 "없음"으로 적지 않는다 ──
+//
+// 세 라우트가 전부 이렇게 쓰고 있었다:
+//
+//   const { data: open } = await sb.from('paper_positions')...
+//
+// `error`를 버리면 **SELECT 실패와 "열린 포지션 0건"이 같은 값**이 된다.
+// 그러면 사용 증거금이 0으로 세어져 가용 잔고가 부풀고(주문 라우트),
+// 화면에는 "열린 포지션 없음 · 거래 0건"이 뜨고(조회 라우트), 장부
+// 초기화의 안전장치가 열린다(RESET). 셋 다 오류도 빈 칸도 없이 **정상으로
+// 보이는 가짜 상태**다.
+//
+// 기존 검사기는 이걸 못 봤다 — `{ data }`도 `{ data, error }`도 똑같이
+// 통과했다. `paperScope`는 이미 조회 오류를 UNREADABLE로 분리하고 있었고,
+// 이 라우트들만 그 규칙 밖에 있었다.
+{
+  const ROUTES = [
+    ['주문', 'src/app/api/paper/order/route.ts'],
+    ['포지션 조회', 'src/app/api/paper/positions/route.ts'],
+    ['계좌', 'src/app/api/paper/account/route.ts'],
+  ];
+  for (const [name, path] of ROUTES) {
+    const body = code(read(path));
+    // `paper_positions`를 읽는 구문마다 그 구조분해에 error가 있는가.
+    // **낱말이 아니라 구조분해의 모양을 본다.**
+    const reads = [...body.matchAll(
+      /const\s*\{([^}]*)\}\s*=\s*await\s*(?:\(sb as any\)|sb)\s*\.from\('paper_positions'\)/g,
+    )];
+    if (!reads.length) {
+      err(`${name} 라우트에서 paper_positions 조회를 찾지 못했습니다 — 검사가 헛돌고 있습니다`);
+      continue;
+    }
+    for (const m of reads) {
+      const bound = m[1];
+      if (!/\berror\b/.test(bound)) {
+        err(`${name} 라우트가 paper_positions 조회 오류를 받지 않습니다 (${bound.trim().slice(0, 48)})`
+          + ' — 조회 실패가 "포지션 0건"이 됩니다');
+      }
+    }
+  }
+
+  // 2차 방어: 목록을 못 받았으면 합계를 믿지 않는다.
+  const avail = code(read('src/lib/engine/paperAvailable.ts'));
+  if (!/if \(!Array\.isArray\(positions\)\) return \{ used: 0, unreadable: 1 \};/.test(avail)) {
+    err('usedMarginOf가 목록 아닌 입력을 "0건"으로 셉니다 — 호출부가 한 곳만 빠뜨려도 없는 돈이 생깁니다');
+  }
+
+  // RESET은 파괴적이다. 세지 못했으면 실행하지 않는다.
+  const acct = code(read('src/app/api/paper/account/route.ts'));
+  if (!/typeof count !== 'number'/.test(acct)) {
+    err('RESET이 열린 포지션 수를 못 읽은 경우를 0건과 구별하지 않습니다');
+  }
+}
+
+// ── ★ 마진 모드는 아는 값만 받는다 ──
+//
+// 예전에는 사실상 "정확히 CROSSED면 교차, 그 외 전부 격리"였다. 오타
+// 하나가 400이 아니라 조용히 격리로 바뀌었고, 사용자는 교차를 골랐다고
+// 믿은 채 다른 청산 규칙으로 들어갔다.
+{
+  const body = code(read('src/app/api/paper/order/route.ts'));
+  // **문구가 아니라 조건의 모양을 본다.** 처음에는 `unsupported_margin_mode`
+  // 라는 글자만 찾았는데, 조건을 `if (false)`로 바꿔도 그 글자는 남아 있어서
+  // 뮤테이션이 초록으로 살아남았다.
+  if (!/marginModeGiven\s*&&\s*marginMode !== 'ISOLATED'\s*&&\s*marginMode !== 'CROSSED'/.test(body)) {
+    err('주문 라우트가 모르는 마진 모드를 거부하지 않습니다 — 조용히 격리가 됩니다');
+  }
+  if (!/unsupported_margin_mode/.test(body)) {
+    err('마진 모드 거부에 코드가 없습니다');
+  }
+  if (/String\(body\?\.marginMode \|\| ''\)\.toUpperCase\(\) === 'CROSSED' \? 'CROSSED' : 'ISOLATED'/.test(body)) {
+    err('주문 라우트가 마진 모드를 다시 조용히 변환합니다');
+  }
+}
+
 if (bad > 0) {
   console.error(`\n모의 장부 권위 검사 실패 (${bad}건)`);
   process.exit(1);
 }
 console.log('✅ 모의 장부 권위 — 옛 장부 쓰기 차단 · 이전·병합 함수 없음 ·'
-  + ' 계좌 id 비노출 · 챌린지 폴백 없음 · 미지원 기능 비활성 · 호가 판단 1벌');
+  + ' 계좌 id 비노출 · 챌린지 폴백 없음 · 미지원 기능 비활성 · 호가 판단 1벌 ·'
+  + ' 조회오류 비은폐 · RESET 세지못하면 중단 · 마진모드 화이트리스트');

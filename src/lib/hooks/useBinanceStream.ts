@@ -36,6 +36,15 @@ export interface StreamState {
   /** 최근 체결 (최신이 앞). 선물 체결 스트림이 오지 않아 현재는 비어 있다 */
   trades: { price: number; qty: number; time: number; buyerMaker: boolean }[];
   lastPrice: number | null;
+  /**
+   * `lastPrice`가 무엇인가. **체결가가 아니다.**
+   *
+   * 지금은 항상 `'QUOTE_MID'` — 최우선 매수/매도 호가의 중간값이다.
+   * 표시에는 쓰되 봉의 OHLC로는 쓰지 않는다. 언젠가 실제 체결 스트림
+   * (`@aggTrade`)을 붙이면 그때 `'TRADE'`가 생기고, 그 값만 봉에 얹을
+   * 수 있다. 값과 출처를 같이 들고 다녀야 나중에 구별할 수 있다.
+   */
+  lastPriceKind: 'QUOTE_MID';
   markPrice: number | null;
   changePct: number | null;
   // ── 24시간 통계 (REST) ──
@@ -74,7 +83,7 @@ export interface StreamState {
 
 export const EMPTY_STREAM: StreamState = {
   asks: [], bids: [], trades: [],
-  lastPrice: null, markPrice: null, changePct: null,
+  lastPrice: null, lastPriceKind: 'QUOTE_MID', markPrice: null, changePct: null,
   high24h: null, low24h: null, volume24h: null, quoteVolume24h: null,
   market: null,
   status: 'idle', lastMessageAt: null, stale: false,
@@ -235,6 +244,12 @@ class SymbolHub {
       if (stream.includes('@bookTicker')) {
         // b/a = 최우선 매수/매도 호가. 체결가 스트림이 오지 않으므로
         // 이 둘의 중간값을 현재가로 쓴다.
+        //
+        // **이건 체결가가 아니다.** venue가 이 값에 거래가 일어났다고 말한
+        // 적이 없다 — 스프레드 한가운데라 실제로는 아무도 그 가격에 사고
+        // 팔지 않았을 수 있다. 표시(현재가·호가 중간)에는 충분하지만
+        // **봉의 시가·고가·저가·종가로 적으면 안 된다**
+        // (`lastPriceKind`가 그 사실을 들고 다닌다).
         const bid = parseFloat(d.b), ask = parseFloat(d.a);
         if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
         this.emit({ lastPrice: (bid + ask) / 2, priceAt: Date.now() });

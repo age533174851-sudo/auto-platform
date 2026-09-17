@@ -23,7 +23,17 @@
 export interface UsedMargin {
   /** 읽어낸 증거금 합계 */
   used: number;
-  /** 못 읽은 줄 수. 0이 아니면 합계를 믿으면 안 된다 */
+  /**
+   * 못 읽은 줄 수. 0이 아니면 합계를 믿으면 안 된다.
+   *
+   * **목록 자체를 못 받은 경우도 여기 들어온다.** 예전에는 배열이 아니면
+   * `{used: 0, unreadable: 0}`을 돌려줬다 — 즉 "조회 실패"가 "포지션 0건,
+   * 사용 증거금 0"과 같은 답이 됐다. 호출부가 Supabase `error`를 빠뜨리면
+   * 그대로 가용 잔고가 부풀었고, 실제로 세 라우트가 전부 빠뜨리고 있었다.
+   *
+   * 호출부에서 `error`를 확인하는 것이 1차 방어이고, 이건 **한 곳이라도
+   * 빠뜨렸을 때 돈이 늘지 않게 하는** 2차 방어다.
+   */
   unreadable: number;
 }
 
@@ -35,7 +45,8 @@ function readNum(v: any): number | null {
 
 /** 열린 포지션들이 물고 있는 증거금. 못 읽은 줄을 0으로 세지 않는다. */
 export function usedMarginOf(positions: any): UsedMargin {
-  if (!Array.isArray(positions)) return { used: 0, unreadable: 0 };
+  // 목록을 못 받았다. **0건이 아니라 모름이다.**
+  if (!Array.isArray(positions)) return { used: 0, unreadable: 1 };
   let used = 0;
   let unreadable = 0;
   for (const p of positions) {

@@ -298,7 +298,10 @@ function Cta({ form, side, disabled, unavailable }: {
   form: ReturnType<typeof useTradeForm>;
   side: 'LONG' | 'SHORT'; disabled: boolean; unavailable?: boolean;
 }) {
-  const on = form.side === side;
+  // **초기값을 "골랐다"로 읽지 않는다.** `form.side`는 미리보기 계산용
+  // 기본값(LONG)을 갖고 있어서, 그것만 보면 LONG은 한 번만 눌러도 주문이
+  // 나가고 SHORT는 두 번 눌러야 하는 비대칭이 생긴다.
+  const on = form.sideChosen && form.side === side;
   const col = side === 'LONG' ? C.up : C.down;
   const label = form.sideLabel(side);
   const off = disabled || !!unavailable;
@@ -311,7 +314,7 @@ function Cta({ form, side, disabled, unavailable }: {
       onClick={() => {
         if (unavailable) return;
         // 방향을 먼저 맞추고, 이미 그 방향이면 보낸다.
-        if (!on) { form.setSide(side); return; }
+        if (!on) { form.chooseSide(side); return; }
         void form.submit();
       }}
       style={{

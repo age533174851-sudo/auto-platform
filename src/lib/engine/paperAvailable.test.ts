@@ -10,9 +10,28 @@ export function runPaperAvailableTests() {
     eq(v.unknownReason, null);
   });
 
-  test('포지션이 없으면 잔고 전부가 가용이다', () => {
+  test('포지션이 없으면 잔고 전부가 가용이다 — **빈 목록일 때만**', () => {
     eq(availableView(1000, []).available, 1000);
-    eq(availableView(1000, null).available, 1000);
+  });
+
+  // ── ★ 목록을 못 받은 것과 0건은 다르다 ──
+  //
+  // 이 시험은 원래 `availableView(1000, null).available === 1000`이었다.
+  // 즉 **버그를 기대값으로 적어 두고 있었다.** 세 라우트가 전부 Supabase
+  // `error`를 버리고 `data`만 썼기 때문에, 조회가 실패하면 여기 `null`이
+  // 들어오고 화면에는 "열린 포지션 없음 · 가용 1000"이 떴다. 오류도 없고
+  // 빈 칸도 없는, 정상으로 보이는 가짜 상태다.
+  //
+  // 호출부에서 `error`를 보는 것이 1차 방어이고, 이건 한 곳이라도
+  // 빠뜨렸을 때 **없는 돈이 생기지 않게** 하는 2차 방어다.
+  test('★ 포지션 목록을 못 받으면 0건이 아니라 모름이다', () => {
+    for (const bad of [null, undefined, 'x', 0, false, {}]) {
+      const v = availableView(1000, bad as any);
+      eq(v.available, null, `${String(bad)}에서 가용이 숫자로 나왔습니다`);
+      assert(!!v.unknownReason, `${String(bad)}에서 사유가 없습니다`);
+    }
+    eq(usedMarginOf(null).unreadable, 1);
+    eq(usedMarginOf(undefined).unreadable, 1);
   });
 
   // ── ★ 못 읽은 증거금 ──

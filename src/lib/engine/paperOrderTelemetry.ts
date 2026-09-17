@@ -40,6 +40,8 @@ export type PaperOrderCode =
   | 'SUPABASE_NOT_CONFIGURED'   // 503
   | 'MISSING_PARAMS'            // 400
   | 'UNSUPPORTED_MARKET'        // 400
+  | 'UNSUPPORTED_MARGIN_MODE'   // 400  명시됐는데 모르는 값이다.
+  //                                    없는 것(예전 클라이언트)은 여기 안 온다
   // ── 챌린지 장부를 지정한 주문이 그 장부에 닿기 전에 멈춘 자리 ──
   //    **기본 계좌로 대신 처리하지 않는다.** 그래서 이 셋은 거부이고,
   //    "챌린지가 아닌 주문"으로 조용히 바뀌는 길이 없다.

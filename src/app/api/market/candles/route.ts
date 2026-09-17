@@ -65,6 +65,11 @@ export async function GET(req: NextRequest) {
       symbol,
       interval,
       limit,
+      // ★ **시장을 끝까지 들고 간다.**
+      // 예전에는 위에서 `market`을 검사하고 응답에 적기까지 했으면서
+      // 여기로는 넘기지 않았다. `fetchVenueBars`의 바이낸스 경로는 fapi
+      // 전용이라, 현물 화면이 **선물 봉을 현물이라고 적어서** 받았다.
+      market: market as 'SPOT' | 'USDM',
       // 실전 시세를 본다. 모의 주문도 실제 시장을 보고 연습해야 뜻이 있다.
       testnet: false,
       // ★ 차트는 진행 중인 봉이 필요하다 (머리말 참고)

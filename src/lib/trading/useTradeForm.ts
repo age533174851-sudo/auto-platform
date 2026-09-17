@@ -50,6 +50,10 @@ export interface TradeFormInput {
 
 export interface TradeForm {
   side: TradeSide; setSide: (s: TradeSide) => void;
+  /** 사용자가 방향을 실제로 눌렀는가. 안 눌렀으면 `submit()`이 나가지 않는다 */
+  sideChosen: boolean;
+  /** 방향을 고른다 — 이것을 거쳐야 `sideChosen`이 선다 */
+  chooseSide: (s: TradeSide) => void;
   marginMode: MarginMode; setMarginMode: (m: MarginMode) => void;
   leverage: number; setLeverage: (n: number) => void;
   /** 유효 배율 — 현물은 언제나 1이다 */
@@ -86,6 +90,17 @@ export interface TradeForm {
 export function useTradeForm(i: TradeFormInput): TradeForm {
   const spot = i.market === 'SPOT';
   const [side, setSide] = useState<TradeSide>('LONG');
+  // ── 사용자가 방향을 **실제로 눌렀는가** ──
+  //
+  // 이 깃발이 없던 동안 방향 초기값 `'LONG'`이 곧 "LONG을 골랐다"로 읽혔다.
+  // 그래서 LONG은 한 번 눌러도 주문이 나가고 SHORT는 두 번 눌러야 하는
+  // 비대칭이 생겼다. (그 전 시트 구조에서는 더 나빴다 — 첫 화면에서
+  // SHORT를 눌러도 열린 주문판의 방향은 항상 LONG이었다.)
+  //
+  // 미리보기 계산에는 방향이 하나 필요하므로 `side`는 그대로 두되,
+  // **주문은 누른 적이 있어야만** 나간다.
+  const [sideChosen, setSideChosen] = useState(false);
+  const chooseSide = (s: TradeSide) => { setSide(s); setSideChosen(true); };
   const [marginMode, setMarginMode] = useState<MarginMode>('ISOLATED');
   const [leverage, setLeverage] = useState(spot ? 1 : 10);
   const [percent, setPercent] = useState(0);
@@ -147,6 +162,9 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
 
   const submit = async () => {
     if (!gate.ready || busy) return;
+    // **누르지 않은 방향으로 내보내지 않는다.** 화면이 어떻게 배치되든
+    // 주문 방향은 사용자가 고른 것이어야 한다.
+    if (!sideChosen) return;
     setBusy(true); setMessage(null);
     try {
       let auth: Record<string, string> = {};
@@ -193,7 +211,7 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
   };
 
   return {
-    side, setSide, marginMode, setMarginMode, leverage, setLeverage, lev,
+    side, setSide, sideChosen, chooseSide, marginMode, setMarginMode, leverage, setLeverage, lev,
     percent, setPercent, tp, setTp, sl, setSl, slPct, setSlPct,
     spot, caps, shortDisabled: unsupported(caps.short),
     sizing, quantity, previewStop, plan, gate, submitText, sideLabel,

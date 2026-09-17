@@ -29,7 +29,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { C, FS } from '@/components/terminal/theme';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import {
-  barsToCandles, barsToVolumes, withLivePrice, isFreshResponse,
+  barsToCandles, barsToVolumes, isFreshResponse,
   candlesMatchInterval, UP_COLOR, DOWN_COLOR, type Candle,
 } from '@/lib/trading/candleSeries';
 import {
@@ -195,11 +195,18 @@ export function PriceChart({
     return () => clearInterval(t);
   }, [fixtureBars]);
 
-  const candles = useMemo<Candle[]>(() => {
-    const base = barsToCandles(bars);
-    // 진행 중 봉에만 현재가를 얹는다 (다음 봉은 만들지 않는다)
-    return withLivePrice(base, stream.lastPrice);
-  }, [bars, stream.lastPrice]);
+  // ── ★ 봉은 venue가 준 것만 그린다 ──
+  //
+  // 예전에는 진행 중인 봉의 종가·고가·저가에 `stream.lastPrice`를 얹었다.
+  // 그런데 그 값은 **체결가가 아니라 최우선 호가의 중간값**이다
+  // (`useBinanceStream`의 `lastPriceKind: 'QUOTE_MID'`). venue가 거래됐다고
+  // 말한 적 없는 가격으로 고가·저가를 넓히고 있었던 것이고, 그건 우리가
+  // 봉을 고쳐 적는 것이다 — 실제 체결이 없었던 자리에 꼬리가 생긴다.
+  //
+  // 실제 체결 스트림(`@aggTrade`)을 붙이기 전까지는 **30초 venue 갱신만**
+  // 쓴다. 덜 부드럽지만 화면의 모든 봉이 venue가 말한 값이다.
+  // (`withLivePrice`는 그대로 둔다 — 진짜 체결가가 생기면 그때 쓴다.)
+  const candles = useMemo<Candle[]>(() => barsToCandles(bars), [bars]);
 
   const volumes = useMemo(() => barsToVolumes(bars), [bars]);
 

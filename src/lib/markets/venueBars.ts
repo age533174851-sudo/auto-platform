@@ -128,6 +128,65 @@ function gateInterval(interval: string): string | null {
  * 실패는 null이다. 빈 배열로 돌려주면 위쪽에서 '봉이 모자랍니다'가 되어,
  * 시세를 못 가져온 것과 시장이 조용한 것이 같은 문구가 된다.
  */
+/**
+ * 바이낸스 봉을 **어디서** 받아 올 것인가.
+ *
+ * 왜 따로 떼어 냈나
+ * ─────────────────
+ * 이 판단이 `fetchVenueBars` 안에 묻혀 있는 동안 아무도 시험하지 못했다.
+ * 그 함수는 `@/lib/exchanges/*`를 동적으로 부르는데 시험 하네스에는 그
+ * 별칭이 없어서 아예 실행되지 않기 때문이다. **그래서 시장이 뒤바뀐
+ * 채로 통과했다** — `/api/market/candles`가 `market=SPOT`을 검사하고
+ * 응답에 적기까지 하면서 정작 아래로는 넘기지 않았고, 이 함수의 바이낸스
+ * 경로는 fapi 전용이었다.
+ *
+ * 판단만 순수 함수로 꺼내 놓으면 시험이 붙는다. 호스트는 인자로 받는다 —
+ * 선물 주소는 `binanceFutures` 한 곳이 정하고 여기에 다시 적지 않는다.
+ *
+ * 현물에는 데모 서버가 없다. `testnet`은 현물 주소를 바꾸지 않고, 그
+ * 사실이 `source`에 그대로 남는다.
+ */
+export function binanceKlinesUrl(i: {
+  market?: 'SPOT' | 'USDM';
+  /** `binanceFutures.futuresBase(testnet)`가 준 값 */
+  futuresHost: string;
+  testnet: boolean;
+  symbol: string;
+  interval: string;
+  limit: number;
+  startTimeMs?: number | null;
+  endTimeMs?: number | null;
+}): { url: string; source: string } {
+  // **`Number(null)`은 0이다.** 먼저 걸러 내지 않으면 "구간 없음"이
+  // `startTime=0`이 되어 1970년부터 달라는 뜻이 된다 — 조회는 성공하고
+  // 응답만 엉뚱해서, 자동매매·백테스트가 조용히 다른 구간을 본다.
+  // 이 저장소가 반복해서 밟은 함정이고 여기서도 한 번 밟았다.
+  const num = (v: any): number | null => {
+    if (v == null || v === '' || typeof v === 'boolean') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const st = num(i.startTimeMs);
+  const et = num(i.endTimeMs);
+  const range = (st != null ? `&startTime=${Math.floor(st)}` : '')
+    + (et != null ? `&endTime=${Math.floor(et)}` : '');
+  const q = `symbol=${encodeURIComponent(i.symbol)}`
+    + `&interval=${encodeURIComponent(i.interval)}&limit=${i.limit}${range}`;
+
+  // 현물이라고 **말했을 때만** 현물이다. 기본은 선물 — 자동매매·백테스트·
+  // 신호 장부가 이 인자 없이 부르고, 그쪽 주문은 선물로 나간다.
+  if (i.market === 'SPOT') {
+    return {
+      url: `https://api.binance.com/api/v3/klines?${q}`,
+      source: `binance:live:spot:${i.symbol}:${i.interval}`,
+    };
+  }
+  return {
+    url: `${i.futuresHost}/fapi/v1/klines?${q}`,
+    source: `binance:${i.testnet ? 'demo' : 'live'}:futures:${i.symbol}:${i.interval}`,
+  };
+}
+
 export async function fetchVenueBars(opts: {
   exchange: 'binance' | 'gate';
   symbol: string;
@@ -159,6 +218,26 @@ export async function fetchVenueBars(opts: {
    * 그래서 **부르는 쪽이 고르게 한다.** 값을 안 주면 지금까지와 같다.
    */
   keepIncomplete?: boolean;
+  /**
+   * 어느 시장의 봉인가. **기본은 선물(`USDM`)이다 — 기존 계약 그대로다.**
+   *
+   * 이 인자가 없던 동안 `/api/market/candles`는 `market=SPOT`을 받아
+   * 검증하고 응답에 `market: 'SPOT'`이라고 **적기까지 했지만**, 여기로는
+   * 넘기지 않았다. 이 함수의 바이낸스 경로는 fapi 전용이라 현물 화면이
+   * 선물 봉을 그렸다.
+   *
+   * 그래서 한 화면에서 가격 시장이 갈렸다:
+   *
+   *   차트   = 선물 봉        (fapi klines)
+   *   헤더·호가 = 현물         (`streamEndpoints`)
+   *   PAPER 체결 = 현물        (`paperPriceSource`)
+   *
+   * 셋 다 오류를 내지 않는다. 베이시스만큼 조용히 다를 뿐이다.
+   *
+   * 자동매매·백테스트·신호 장부는 이 인자를 주지 않는다 — 그쪽 주문은
+   * 선물로 나가므로 시세도 선물이어야 하고, 기본값이 그 계약을 지킨다.
+   */
+  market?: 'SPOT' | 'USDM';
 }): Promise<VenueBarsResult> {
   const now = opts.nowMs ?? Date.now();
   // 미완성 봉을 하나 버리므로 하나 더 받는다. 안 그러면 지표 길이가 모자란다.
@@ -209,24 +288,23 @@ export async function fetchVenueBars(opts: {
       return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
     }
 
-    // ── 바이낸스 **선물**(fapi) ──
-    // 현물(api.binance.com/api/v3)이 아니다. 주문이 선물로 나가므로 시세도
-    // 선물이어야 한다 — 두 시장의 가격은 베이시스만큼 다르다.
+    // ── 바이낸스 ──
+    // 어느 시장인지는 `binanceKlinesUrl`이 정한다. **판단은 그 한 곳에만
+    // 있고 시험이 붙어 있다** — 여기 묻어 두면 또 아무도 안 본다.
     const bf = await import('@/lib/exchanges/binanceFutures');
     // 호스트는 binanceFutures 한 곳에서 가져온다. 여기에 주소를 또 적으면
     // 데모 주소를 한쪽만 고치는 순간 시세와 주문이 다른 서버를 보게 된다.
-    const host = bf.futuresBase(opts.testnet);
-    const src = `binance:${opts.testnet ? 'demo' : 'live'}:futures:${opts.symbol}:${opts.interval}`;
-    const r = await fetch(
-      `${host}/fapi/v1/klines?symbol=${encodeURIComponent(opts.symbol)}`
-      + `&interval=${encodeURIComponent(opts.interval)}&limit=${want}`
-      // 바이낸스는 ms다. Gate와 단위가 다르다 — 한쪽 규칙을 다른 쪽에
-      // 쓰면 조회 구간이 통째로 어긋나고, 그때 응답은 비어 있을 뿐
-      // 오류가 아니라서 '시장이 조용했다'로 읽힌다.
-      + (st != null ? `&startTime=${Math.floor(st)}` : '')
-      + (et != null ? `&endTime=${Math.floor(et)}` : ''),
-      { signal: AbortSignal.timeout(10_000), cache: 'no-store' },
-    );
+    // 바이낸스는 ms다. Gate와 단위가 다르다 — 한쪽 규칙을 다른 쪽에 쓰면
+    // 조회 구간이 통째로 어긋나고, 그때 응답은 비어 있을 뿐 오류가 아니라서
+    // '시장이 조용했다'로 읽힌다.
+    const { url, source: src } = binanceKlinesUrl({
+      market: opts.market,
+      futuresHost: bf.futuresBase(opts.testnet),
+      testnet: opts.testnet,
+      symbol: opts.symbol, interval: opts.interval, limit: want,
+      startTimeMs: st, endTimeMs: et,
+    });
+    const r = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' });
     if (!r.ok) {
       return { bars: null, source: src, error: `봉 조회 실패 (HTTP ${r.status})`, droppedIncomplete: false };
     }

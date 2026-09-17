@@ -98,6 +98,26 @@ export async function POST(req: NextRequest) {
   }
   const spot = market === 'SPOT';
 
+  // ── 마진 모드도 같은 규칙으로 닫는다 ──
+  //
+  // 예전에는 사실상 "정확히 CROSSED면 교차, 그 외 전부 격리"였다. 그래서
+  // `CROSSSED`처럼 **오타 하나**가 400이 아니라 조용히 격리로 바뀌었고,
+  // 사용자는 교차를 골랐다고 믿은 채 다른 청산 규칙으로 들어갔다.
+  // `paperPlan`의 `MarginMode`는 두 값뿐이다 — API 경계도 같아야 한다.
+  //
+  // 값이 **없는** 것은 예전 클라이언트다. 그건 지금까지처럼 격리로 본다.
+  const rawMarginMode = body?.marginMode;
+  const marginModeGiven = rawMarginMode != null && String(rawMarginMode) !== '';
+  const marginMode: 'ISOLATED' | 'CROSSED' = marginModeGiven
+    ? (String(rawMarginMode).toUpperCase() as 'ISOLATED' | 'CROSSED')
+    : 'ISOLATED';
+  if (marginModeGiven && marginMode !== 'ISOLATED' && marginMode !== 'CROSSED') {
+    return await counted(sb, 'UNSUPPORTED_MARGIN_MODE', NextResponse.json({
+      ok: false, error: 'unsupported_margin_mode',
+      message: `모르는 마진 모드입니다 (${String(rawMarginMode).slice(0, 32)})`,
+    }, { status: 400 }));
+  }
+
   // ── 어느 장부에 적을 것인가 — **여기서 한 번 정한다** ──
   //
   // 밖에서 들어오는 것은 `challengeId` 하나다. 계좌 id를 받지 않는다 —
@@ -184,9 +204,22 @@ export async function POST(req: NextRequest) {
       accountId = scope.accountId;
       balance = Number(acct.balance) || 0;
     }
-    const { data: open } = await sb.from('paper_positions')
+    // **조회 실패는 "열린 포지션 0건"이 아니다.**
+    // 예전에는 `error`를 버리고 `data`만 썼다. SELECT가 실패하면 `open`이
+    // `null`이 되고 `usedMarginOf(null)`은 `{used: 0}`을 돌려준다 — 실제로는
+    // 증거금이 잠겨 있는데 **가용 잔고가 그만큼 부풀어** 진입이 통과했다.
+    // (최종 RPC가 계좌를 잠그고 다시 세지만, 그 전에 화면과 계획이 이미
+    // 틀린 예산을 보고 있었다.)
+    const { data: open, error: openErr } = await sb.from('paper_positions')
       .select('margin').eq('user_id', uid)
       .eq('paper_account_id', accountId).eq('status', 'open');
+    if (openErr) {
+      throw new Error(`열린 포지션을 읽지 못했습니다 (${String(openErr.message ?? '').slice(0, 120)})`
+        + ' — 포지션이 없다는 뜻이 아닙니다');
+    }
+    if (!Array.isArray(open)) {
+      throw new Error('열린 포지션 응답이 목록이 아닙니다 — 포지션이 없다는 뜻이 아닙니다');
+    }
     // 증거금 합산은 `paperAvailable` 한 곳에 있다 — 읽기 라우트
     // (`/api/paper/account` · `/api/paper/positions`)와 같은 답을 봐야
     // 화면이 보여 준 가용 잔고와 여기서 막는 기준이 갈리지 않는다.
@@ -240,8 +273,7 @@ export async function POST(req: NextRequest) {
     availableBalance: available,
     // 현물에는 마진 모드가 없다. 선물만 받는다.
     // **아는 값만 받는다** — 오타 하나가 '교차인데 격리로 계산'을 만든다.
-    marginMode: spot ? 'ISOLATED'
-      : String(body?.marginMode || '').toUpperCase() === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
+    marginMode: spot ? 'ISOLATED' : marginMode,
   });
 
   if (!built.ok || !built.plan) {
@@ -269,8 +301,7 @@ export async function POST(req: NextRequest) {
     signalId,
     strategyId: String(body?.strategyId || 'manual'),
     plan: built.plan,
-    marginMode: spot ? 'ISOLATED'
-      : String(body?.marginMode || '').toUpperCase() === 'CROSSED' ? 'CROSSED' : 'ISOLATED',
+    marginMode: spot ? 'ISOLATED' : marginMode,
     market,
     entryPrice: markPrice as number,
     stopLoss: stopPrice ?? undefined,

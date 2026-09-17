@@ -77,10 +77,15 @@ if (!/interval.*(거절|reject|400)/s.test(read(ROUTE))) {
 }
 
 // ── ③ 진행 중 봉은 관측된 값으로만 움직인다 ──
-// import 줄에 이름만 남아 있어도 `includes`는 통과한다. **호출**을 본다.
-if (!/withLivePrice\s*\(/.test(chart)) {
-  err(`${CHART}가 candleSeries.withLivePrice를 호출하지 않습니다 — 진행 중 봉 갱신 규칙이 두 벌이 됩니다`);
-}
+//
+// 이 자리에는 원래 "`withLivePrice`를 **부르고 있는가**"를 보는 규칙이
+// 있었다. 규칙 자체는 맞았지만 전제가 틀렸다 — 그 함수에 먹이던 값이
+// 체결가가 아니라 **최우선 호가의 중간값**이었다. 즉 "관측된 값으로만
+// 움직인다"를 지키라고 하면서 관측된 적 없는 가격을 넣고 있었다.
+//
+// 그래서 규칙을 뒤집었다. 지금 계약은 **봉에 호가를 얹지 않는다**이고,
+// 아래 ⑫가 그것을 지킨다. 진짜 체결 스트림(`@aggTrade`)이 생기면 그때
+// `withLivePrice`를 다시 쓰되, 넣는 값이 체결가라는 것부터 증명한다.
 if (!/never|늘리지|push\(/.test(series) && !series.includes('slice')) {
   err(`${SERIES}가 배열 길이를 지키는지 확인할 수 없습니다`);
 }
@@ -225,6 +230,63 @@ for (const dir of TRADING_DIRS) {
   }
 }
 
+// ── ★ 현물 화면이 선물 봉을 그리지 않는다 ──
+//
+// `/api/market/candles`는 `market=SPOT`을 받아 검증하고 응답에
+// `market: 'SPOT'`이라고 **적기까지 했으면서** `fetchVenueBars`로는
+// 넘기지 않았다. 그 함수의 바이낸스 경로는 fapi 전용이었다. 그래서
+// 현물 화면에서 차트(선물)·헤더/호가(현물)·PAPER 체결(현물)이 갈렸다.
+//
+// 오류는 안 난다. 베이시스만큼 조용히 다를 뿐이다.
+{
+  const route = code(read('src/app/api/market/candles/route.ts'));
+  // 시장을 **아래로 넘기는가**. 응답에 적는 것만으로는 아무것도 보장하지 않는다.
+  const call = route.slice(route.indexOf('fetchVenueBars({'));
+  const args = call.slice(0, call.indexOf('});'));
+  if (!/\bmarket:/.test(args)) {
+    err('candles 라우트가 fetchVenueBars에 market을 넘기지 않습니다'
+      + ' — 현물 화면이 선물 봉을 현물이라고 적어서 받습니다');
+  }
+
+  const vb = code(read('src/lib/markets/venueBars.ts'));
+  if (!/export function binanceKlinesUrl\(/.test(vb)) {
+    err('봉 주소 판단이 순수 함수로 나와 있지 않습니다 — 시험을 붙일 수 없습니다');
+  }
+  // 현물과 선물 주소가 **둘 다** 있고, 현물은 SPOT일 때만 간다.
+  if (!/i\.market === 'SPOT'/.test(vb)) {
+    err('봉 주소가 시장을 보지 않습니다');
+  }
+  if (!/api\.binance\.com\/api\/v3\/klines/.test(vb)) {
+    err('현물 봉 주소가 없습니다 — SPOT이 선물로 갑니다');
+  }
+  // 기본값이 선물이어야 한다. 자동매매·백테스트·신호 장부가 market 없이 부른다.
+  if (/i\.market === 'USDM'/.test(vb) && !/i\.market === 'SPOT'/.test(vb)) {
+    err('기본값이 선물이 아닙니다 — 기존 호출부 계약이 깨집니다');
+  }
+}
+
+// ── ★ 호가 중간값을 체결가로 적지 않는다 ──
+//
+// `useBinanceStream.lastPrice`는 최우선 매수/매도 호가의 **중간값**이다
+// (선물 체결 스트림을 받지 않는다). 그 값을 `withLivePrice`로 진행 중인
+// 봉의 종가·고가·저가에 얹고 있었다 — venue가 거래됐다고 말한 적 없는
+// 가격으로 꼬리를 넓히는 것이고, 그건 우리가 봉을 고쳐 적는 것이다.
+{
+  const hook = code(read('src/lib/hooks/useBinanceStream.ts'));
+  if (!/lastPriceKind/.test(hook)) {
+    err('현재가의 출처(체결가인가 호가 중간값인가)를 값으로 들고 다니지 않습니다');
+  }
+  if (!/lastPrice: \(bid \+ ask\) \/ 2/.test(hook)) {
+    err('lastPrice가 호가 중간값이 아닙니다 — 이 검사의 전제가 낡았습니다');
+  }
+
+  const chart = code(read('src/components/trading/PriceChart.tsx'));
+  if (/withLivePrice\(/.test(chart)) {
+    err('차트가 호가 중간값을 봉의 OHLC에 얹습니다'
+      + ' — 실제 체결 스트림이 생기기 전까지는 venue 봉만 그립니다');
+  }
+}
+
 if (bad > 0) {
   console.error(`\n차트 권위 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -232,4 +294,5 @@ if (bad > 0) {
 console.log('✅ 차트 권위 — 값 생성 없음 · 봉 출처 1곳 · 진행 중 봉 규칙 공유 ·'
   + ' 낡은 응답 폐기 · 빈 차트 비정상 표기 · 데이터 배선 확인 ·'
   + ' 갱신 실패에 봉 보존 · 갱신 중 비차단 · 지표 동반 제거 ·'
-  + ' fixture 비폴백 · 거래 화면 기본 차트는 우리 것');
+  + ' fixture 비폴백 · 거래 화면 기본 차트는 우리 것 ·'
+  + ' 시장별 봉 출처 · 호가중간값 비체결가');

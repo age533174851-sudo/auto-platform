@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 
 const CHECKS = [
   ['차트 권위 검사기', 'scripts/check-chart-authority.mjs'],
+  ['모의 장부 권위 검사기', 'scripts/check-paper-authority.mjs'],
   ['게임머니 검사기', 'scripts/check-game-money.mjs'],
   ['정본 거래 화면 배선 검사기', 'scripts/check-canonical-trading.mjs'],
 ];
@@ -44,6 +45,12 @@ const FILES = [
   'src/lib/trading/positionSizing.ts',
   'src/lib/trading/streamEndpoints.ts',
   'src/app/api/market/candles/route.ts',
+  'src/lib/markets/venueBars.ts',
+  'src/lib/hooks/useBinanceStream.ts',
+  'src/lib/engine/paperAvailable.ts',
+  'src/app/api/paper/order/route.ts',
+  'src/app/api/paper/positions/route.ts',
+  'src/app/api/paper/account/route.ts',
 ];
 const canonical = new Map(FILES.map(f => [f, readFileSync(f, 'utf8')]));
 const restore = () => { for (const [f, s] of canonical) writeFileSync(f, s); };
@@ -66,10 +73,7 @@ const MUTATIONS = [
     file: 'src/components/trading/PriceChart.tsx',
     cut: ['const stream = useBinanceStream(symbol, !fixtureBars, market);',
           'const stream = useBinanceStream(symbol, !fixtureBars, market); const _n = Math.random();'] },
-  { name: '진행 중 봉 갱신 규칙을 화면이 다시 적는다',
-    file: 'src/components/trading/PriceChart.tsx',
-    cut: ['withLivePrice(', 'localLivePrice('] },
-  { name: '거래소를 직접 두드려 봉을 받는다',
+    { name: '거래소를 직접 두드려 봉을 받는다',
     file: 'src/components/trading/PriceChart.tsx',
     cut: ['/api/market/candles', 'https://fapi.binance.com/fapi/v1/klines'], replaceAll: true },
   { name: 'timeframe을 바꾼 뒤 낡은 응답을 그대로 그린다',
@@ -225,6 +229,39 @@ const MUTATIONS = [
   { name: '차트 바닥을 격자선만 남는 높이로 내린다',
     file: 'src/lib/trading/oneScreen.ts',
     cut: ["export const CHART_MIN_H = 96;", "export const CHART_MIN_H = 52;"] },
+
+  // ══ 권위가 조용히 갈라진다 ══
+  //
+  // 이 여섯은 전부 기존 검사기가 **못 보던** 곳이다.
+  // 시험 5,8xx건과 검사기 64종이 전부 초록인 채 돌고 있었다.
+  { name: '현물 차트가 다시 선물 봉을 그린다 — market을 안 넘긴다',
+    file: 'src/app/api/market/candles/route.ts',
+    cut: ["      market: market as 'SPOT' | 'USDM',", ""] },
+  { name: '봉 주소 판단이 시장을 무시한다 — 전부 선물로 간다',
+    file: 'src/lib/markets/venueBars.ts',
+    cut: ["  if (i.market === 'SPOT') {", "  if (false) {"] },
+  { name: '차트가 호가 중간값을 다시 봉의 OHLC에 얇는다',
+    file: 'src/components/trading/PriceChart.tsx',
+    cut: ["  const candles = useMemo<Candle[]>(() => barsToCandles(bars), [bars]);",
+          "  const candles = useMemo<Candle[]>(() => withLivePrice(barsToCandles(bars), stream.lastPrice), [bars, stream.lastPrice]);"] },
+  { name: '주문 라우트가 포지션 조회 오류를 다시 버린다 — 가용 잔고가 부풀든다',
+    file: 'src/app/api/paper/order/route.ts',
+    cut: ["    const { data: open, error: openErr } = await sb.from('paper_positions')",
+          "    const { data: open } = await sb.from('paper_positions')"] },
+  { name: '조회 라우트가 DB 오류를 "포지션 0건"으로 적는다',
+    file: 'src/app/api/paper/positions/route.ts',
+    cut: ["    const { data: open, error: openErr } = await sb.from('paper_positions')",
+          "    const { data: open } = await sb.from('paper_positions')"] },
+  { name: 'RESET이 열린 포지션을 세지 못했을 때도 장부를 초기화한다',
+    file: 'src/app/api/paper/account/route.ts',
+    cut: ["    if (countErr || typeof count !== 'number') {", "    if (false) {"] },
+  { name: '목록을 못 받은 것을 다시 0건으로 센다',
+    file: 'src/lib/engine/paperAvailable.ts',
+    cut: ["  if (!Array.isArray(positions)) return { used: 0, unreadable: 1 };",
+          "  if (!Array.isArray(positions)) return { used: 0, unreadable: 0 };"] },
+  { name: '마진 모드 오타를 조용히 격리로 바꿈니다',
+    file: 'src/app/api/paper/order/route.ts',
+    cut: ["  if (marginModeGiven && marginMode !== 'ISOLATED' && marginMode !== 'CROSSED') {", "  if (false) {"] },
 
   // ══ 게임머니가 화폐가 된다 ══
   { name: '표시 단위에 배수를 붙인다',

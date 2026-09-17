@@ -172,10 +172,24 @@ export async function POST(req: NextRequest) {
         message: `모의 계좌를 정하지 못해 초기화하지 않았습니다 — ${scope.reason}`,
       }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
-    const { count } = await sb.from('paper_positions')
+    // ── 세지 못했으면 **초기화하지 않는다** ──
+    //
+    // 예전에는 `error`를 버리고 `(count ?? 0) > 0`으로 판단했다. count
+    // 조회 자체가 실패하면 `count`가 `null`이고 그 식은 **0으로 읽어
+    // 통과**시킨다. 즉 열린 포지션이 있는지 모르는 상태에서 장부를
+    // 초기화할 수 있었다. 이 안전장치는 파괴적 동작 앞에 서 있으므로
+    // 다른 조회보다 더 엄하게 닫는다.
+    const { count, error: countErr } = await sb.from('paper_positions')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', uid).eq('paper_account_id', scope.accountId).eq('status', 'open');
-    if ((count ?? 0) > 0) {
+    if (countErr || typeof count !== 'number') {
+      return NextResponse.json({
+        ok: false, error: 'open_positions_unreadable',
+        message: '열린 모의 포지션 수를 확인하지 못해 초기화하지 않았습니다'
+          + ` (${String(countErr?.message ?? '').slice(0, 120)}) — 0건이라는 뜻이 아닙니다`,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (count > 0) {
       return NextResponse.json({
         ok: false, error: 'has_open_positions',
         message: `열린 모의 포지션이 ${count}건 있습니다. 먼저 정리한 뒤 초기화하세요.`,
