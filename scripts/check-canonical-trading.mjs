@@ -28,7 +28,7 @@ const PAGE      = 'src/app/page.tsx';
 const SHELL     = 'src/components/terminal/TerminalShell.tsx';
 const MOBILE    = 'src/components/terminal/MobileShell.tsx';
 const WORKSPACE = 'src/components/trading/TradingWorkspace.tsx';
-const SHEET     = 'src/components/trading/TradeSheet.tsx';
+const SHEET     = 'src/components/trading/OrderControls.tsx';
 const TARGET    = 'src/lib/trading/paperTarget.ts';
 
 let bad = 0;
@@ -108,8 +108,10 @@ if (!/STOP_PCTS\.map\s*\(/.test(sheet)) {
   err(`${SHEET}가 손절 거리 프리셋을 그리지 않습니다 — 사이징과 뜻이 달라 지우면 안 됩니다`);
 }
 // 손절 프리셋은 퍼센트로 나간다. 화면이 손절가를 정하면 체결 기준이 화면에 생긴다.
-if (!/stopRequestFields\s*\(/.test(sheet)) {
-  err(`${SHEET}가 손절 값을 stopPresets를 거치지 않고 직접 만듭니다`);
+// 손절 값은 컨트롤러가 만든다 — 화면이 손절가를 직접 적으면 체결 기준이
+// 화면에 생긴다.
+if (!/stopRequestFields\s*\(/.test(code(read('src/lib/trading/useTradeForm.ts')))) {
+  err('useTradeForm이 손절 값을 stopPresets를 거치지 않고 만듭니다');
 }
 
 // ── ⑥ 실거래를 가로채지 않는다 ──
@@ -150,49 +152,171 @@ for (const route of ['/api/binance/futures/order', '/api/binance/spot/order', '/
     err('SizingSlider가 못 읽은 잔고를 0으로 접습니다');
   }
   // 주문 버튼은 세 가지가 모두 참일 때만 열린다
-  if (!/const ready = canOrder && quantity != null && quantity > 0 && preview\.ok;/.test(sheet)) {
-    err(`${SHEET}의 주문 가능 판정이 약해졌습니다 — 권한·수량·계획이 모두 필요합니다`);
+  const form = code(read('src/lib/trading/useTradeForm.ts'));
+  if (!/const gate = submitGate\(\{/.test(form)) {
+    err('useTradeForm이 submitGate로 판정하지 않습니다 — 권한·수량·계획이 모두 필요합니다');
   }
-  if (!/disabled=\{!ready \|\| busy\}/.test(sheet)) {
-    err(`${SHEET}의 주문 버튼이 판정과 무관하게 열려 있습니다`);
+  if (!/disabled=\{!form\.gate\.ready \|\| form\.busy\}/.test(workspace)) {
+    err(`${WORKSPACE}의 주문 버튼이 판정과 무관하게 열려 있습니다`);
   }
 }
 
-// ── ★ 주문 시트가 차트를 다 가리지 않는다 ──
+// ── ★ 한 화면에서 끝난다 ──
 //
-// 실측(360×800): 시트를 열면 차트가 **100% 가려졌다.** 차트를 보면서
-// 진입하라고 만든 화면인데 주문하려는 순간 차트가 사라진다.
+// 시트를 여닫는 구조를 버렸다. 실기(360×660)에서 시트를 열면 캔들이 52px만
+// 남았고 그 띠는 배경과 격자선뿐이었다. 여닫는 층이 없으면 52vh·88vh·
+// visual viewport·겹침 문제가 통째로 사라진다.
 {
-  const snapMod = code(read('src/lib/trading/sheetSnap.ts'));
-  if (!/snap === 'EXPANDED' \? 88 : 52/.test(snapMod)) {
-    err('sheetSnap의 자리 높이가 바뀌었습니다 — HALF에서 차트가 남는지 다시 확인하세요');
-  }
-  if (!/export const DEFAULT_SNAP: SheetSnap = 'HALF';/.test(snapMod)) {
-    err('시트가 기본으로 화면을 다 덮는 자리에서 열립니다');
-  }
-  // 어느 자리에서도 주문을 끝낼 수 있어야 한다
-  if (!/const IN_HALF: SheetSection\[\] = \[[^\]]*'SUBMIT'/.test(snapMod)) {
-    err('HALF에서 주문 버튼이 빠졌습니다 — 주문하려면 먼저 펴야 하는 단계가 생깁니다');
-  }
-  for (const must of ['BOOK', 'SIDE', 'SIZING']) {
-    if (!new RegExp(`const IN_HALF: SheetSection\\[\\] = \\[[^\\]]*'${must}'`).test(snapMod)) {
-      err(`HALF에 ${must}가 없습니다 — 호가·방향·수량 없이 주문할 수 없습니다`);
+  // 시트로 돌아가지 않는다
+  for (const gone of ['sheetSnap', 'SheetSnap', 'workspace-sheet', 'TradeSheet']) {
+    if (workspace.includes(gone)) {
+      err(`${WORKSPACE}가 시트 구조로 돌아갔습니다 (${gone})`);
     }
   }
-  // 워크스페이스가 그 높이를 실제로 쓰는가
-  if (!/sheetHeightVh\(snap\)/.test(workspace)) {
-    err(`${WORKSPACE}가 시트 높이를 sheetSnap에 묻지 않습니다`);
+  // 주문 조작과 호가가 **상주한다**
+  if (!/<OrderControls/.test(workspace)) {
+    err(`${WORKSPACE}에 상주 주문 조작부가 없습니다`);
   }
-  if (/maxHeight: '88vh'/.test(workspace)) {
-    err(`${WORKSPACE}가 시트 높이를 손으로 적습니다 — 자리 계약과 갈립니다`);
+  if (!/data-testid="workspace-split"/.test(workspace)) {
+    err(`${WORKSPACE}에 주문│호가 분할 줄이 없습니다`);
   }
-  // 반만 올린 시트 위에 딤을 씌우면 차트를 가린 것과 같다
-  if (/background: 'rgba\(0,0,0,0\.\d+\)', display: 'flex', alignItems: 'flex-end'/.test(workspace)) {
-    err(`${WORKSPACE}가 시트 위쪽을 어둡게 덮습니다 — 차트를 보려고 반만 올린 것입니다`);
+  if (!/<OrderBookView/.test(workspace)) {
+    err(`${WORKSPACE}에 상주 호가가 없습니다`);
   }
-  // 시트가 자리 판정을 스스로 다시 적지 않는가
-  if (!/sectionVisible\(sec, snap\)/.test(sheet)) {
-    err(`${SHEET}가 칸 표시 판정을 sheetSnap에 묻지 않습니다`);
+  // 폭은 실측 최소치가 정한다 — 50:50을 박지 않는다
+  if (!/splitColumns\(width\)/.test(workspace)) {
+    err(`${WORKSPACE}가 열 비율을 oneScreen에 묻지 않습니다`);
+  }
+  if (!/minWidth: BOOK_MIN_PX/.test(workspace)) {
+    err(`${WORKSPACE}가 호가 열에 최소 폭을 주지 않습니다 — 가격이 잘립니다`);
+  }
+  const one = code(read('src/lib/trading/oneScreen.ts'));
+  if (!/export const BOOK_MIN_PX = 110;/.test(one)) {
+    err('호가 최소 폭이 바뀌었습니다 — 실측(가격 53 + 수량 30 + 패딩 16)을 다시 확인하세요');
+  }
+}
+
+// ── ★ 첫 화면이 통 안에서 끝난다 — 붙인 버튼이 슬라이더를 덮지 않는다 ──
+//
+// 320×600 실측: LONG/SHORT 줄이 `position: sticky; bottom: var(--nav-h)`로
+// 흐름 위치(787)에서 붙는 위치(490)로 끌어올려지며 **슬라이더(447~452)를
+// 덮었다.** `elementFromPoint`로 슬라이더 한가운데를 찍으면 그 버튼이
+// 나왔다 — 보이는데 눌리지 않았다. 손절 2% 버튼은 앱 하단 탭 밑이었다.
+//
+// 이건 sticky의 성질이지 버그가 아니다. 그래서 z-index나 패딩이 아니라
+// **덮을 일이 없는 배치**로 고쳤다. 다시 붙이지 않는다.
+{
+  const cta = workspace.slice(workspace.indexOf('data-testid="workspace-cta"'));
+  const ctaBlock = cta.slice(0, cta.indexOf('</div>'));
+  if (!ctaBlock) {
+    err(`${WORKSPACE}에 LONG/SHORT 줄이 없습니다`);
+  }
+  if (/position: 'sticky'|position: 'fixed'/.test(ctaBlock)) {
+    err(`${WORKSPACE}의 LONG/SHORT 줄이 다시 붙었습니다 — 320×600에서 이 줄이 슬라이더를 덮었습니다`);
+  }
+
+  // 통 높이를 받으면 그 안에서 끝난다
+  if (!/coreBudget\(coreHeight, headH\)/.test(workspace)) {
+    err(`${WORKSPACE}가 세로 예산을 oneScreen에 묻지 않습니다`);
+  }
+  if (!/height: coreHeight/.test(workspace)) {
+    err(`${WORKSPACE}가 통 높이 안에서 끝나지 않습니다 — 아래 칸이 화면 밖으로 밀립니다`);
+  }
+  // 시장정보 높이는 **재서** 넣는다. 320px에서 105px, 360px에서 78px이다.
+  if (!/useMeasuredHeight<HTMLDivElement>\(\)/.test(workspace)) {
+    err(`${WORKSPACE}가 시장정보 줄 높이를 재지 않습니다 — 접히면 CTA가 잘립니다`);
+  }
+
+  // 넘치면 **말없이 자르지 않고** 그 칸이 스크롤한다
+  const scrollers = (workspace.match(/overflowY: 'auto'/g) || []).length;
+  if (scrollers < 2) {
+    err(`${WORKSPACE}에서 넘치는 칸이 스크롤하지 않습니다 (${scrollers}곳) — 넘친 줄이 말없이 사라집니다`);
+  }
+
+  // 예상값은 **주문 칸 밖**에 있다. 주문 칸은 좁으면 안에서 스크롤하는데,
+  // 증거금·청산가가 거기 딸려 올라가면 누르기 직전에 안 보인다.
+  if (!/<OrderEstimate/.test(workspace)) {
+    err(`${WORKSPACE}가 예상값 줄을 따로 그리지 않습니다`);
+  }
+  const splitStart = workspace.indexOf('data-testid="workspace-split"');
+  const estAt = workspace.indexOf('<OrderEstimate');
+  const ctaAt = workspace.indexOf('data-testid="workspace-cta"');
+  if (!(splitStart >= 0 && estAt > splitStart && ctaAt > estAt)) {
+    err(`${WORKSPACE}의 예상값 줄이 [주문│호가]와 CTA 사이에 있지 않습니다`);
+  }
+
+  const one = code(read('src/lib/trading/oneScreen.ts'));
+  // 호가 3+1+3이 통째로 들어갈 높이를 바닥으로 준다
+  if (!/export const SPLIT_MIN_H = BOOK_H \+ SPLIT_PAD_H;/.test(one)) {
+    err('[주문│호가] 바닥이 미니 호가 실측 높이에서 나오지 않습니다 — 매수 줄이 잘립니다');
+  }
+  // 차트가 격자선만 남는 높이로 내려가지 않는다 (실기 실패: 52px · 색 2종)
+  const m = one.match(/export const CHART_MIN_H = (\d+);/);
+  if (!m || Number(m[1]) < 90) {
+    err(`차트 바닥이 ${m ? m[1] : '?'}px입니다 — 실기에서 52px은 격자선뿐이었습니다`);
+  }
+}
+
+// ── ★ 잠긴 주문 버튼에는 이유가 있다 ──
+//
+// 실기에서 로그인·잔고·수량이 다 있는데 버튼만 회색이었고, 사유가 화면
+// 어디에도 없었다. 판정은 맞았고 **말을 안 한 것이 고장**이었다.
+{
+  const gateMod = code(read('src/lib/trading/submitGate.ts'));
+  if (!/reason: string \| null;/.test(gateMod)) {
+    err('submitGate가 사유를 함께 돌려주지 않습니다');
+  }
+  // 막힌 분기마다 사유가 붙어 있는가
+  const blocked = (gateMod.match(/ready: false/g) || []).length;
+  const reasons = (gateMod.match(/reason: i\.[a-zA-Z]+ \|\|/g) || []).length;
+  if (blocked > reasons) {
+    err(`submitGate에 사유 없는 잠금이 있습니다 (잠금 ${blocked} · 사유 ${reasons})`);
+  }
+  const controls = code(read(SHEET));
+  if (!/data-testid="order-blocked-reason"/.test(controls)) {
+    err('주문 조작부가 잠금 사유를 그리지 않습니다');
+  }
+  // 손절은 선물에서 필수다 — 그 칸이 숨으면 주문 자체가 불가능해진다
+  if (!/STOP_PCTS\.map/.test(controls)) {
+    err('주문 조작부에 손절 거리 프리셋이 없습니다 — 선물은 손절이 필수라 주문이 막힙니다');
+  }
+}
+
+// ── ★ 숫자를 잘라서 통과시키지 않는다 ──
+{
+  const controls = code(read(SHEET));
+  const slider = code(read('src/components/trading/SizingSlider.tsx'));
+  for (const [name, body] of [['OrderControls', controls], ['SizingSlider', slider]]) {
+    if (/textOverflow: 'ellipsis'/.test(body)) {
+      err(`${name}이 값을 …로 잘라 통과시킵니다 — 잘린 숫자는 자릿수를 잘못 세게 만듭니다`);
+    }
+    if (!/overflowWrap: 'anywhere'/.test(body)) {
+      err(`${name}이 좁을 때 줄을 나누지 않습니다 — 값이 잘립니다`);
+    }
+  }
+  // 사이징 계산이 두 곳에 있으면 같은 입력에 다른 수량이 나온다
+  if (/planSizing\(/.test(slider)) {
+    err('SizingSlider가 수량을 다시 계산합니다 — 계산은 useTradeForm 한 곳입니다');
+  }
+}
+
+// ── ★ 주문 판정이 한 벌이다 ──
+{
+  const form = code(read('src/lib/trading/useTradeForm.ts'));
+  if (!/buildPaperPlan\(/.test(form)) {
+    err('useTradeForm이 서버와 같은 계획 함수를 쓰지 않습니다');
+  }
+  if (/buildPaperPlan\(/.test(code(read('src/components/trading/OrderControls.tsx')))) {
+    err('주문 조작부가 계획을 직접 계산합니다 — 판정은 useTradeForm 한 곳입니다');
+  }
+  // 대기 주문 백엔드가 없으므로 지정가 UI를 만들지 않는다
+  // **낱말이 아니라 UI를 본다.** 주석에 '지정가'를 못 쓰게 하면 곧
+  // 우회 표현을 쓰게 되고, 검사가 뜻이 아니라 글자를 보게 된다.
+  const ctl = code(read('src/components/trading/OrderControls.tsx'));
+  for (const banned of [/>\s*지정가\s*</, /['"]LIMIT['"]/, /\bBBO\b/, /orderType/]) {
+    if (banned.test(ctl)) {
+      err(`주문 조작부에 대기 주문 UI가 있습니다 (${banned}) — 모의 백엔드에 그 개념이 없습니다`);
+    }
   }
 }
 
@@ -219,4 +343,5 @@ if (bad > 0) {
 }
 console.log('✅ 정본 거래 화면 — 매매 탭에 붙음 · 세로/가로 한 벌 · 렌더 1곳 ·'
   + ' 사이징 슬라이더 1개 · 손절 거리 보존 · 실거래 비가로채기 ·'
-  + ' 비로그인 fail-closed · 시트 2단 자리(차트 보존)');
+  + ' 비로그인 fail-closed · 한 화면 상주 · 통 안에서 종료 · CTA 비부착 · 예상값 상시노출 · 넘침 비은폐 · 잠금 사유 노출 ·'
+  + ' 값 비절단 · 판정 1벌');

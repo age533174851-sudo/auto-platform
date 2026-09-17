@@ -339,7 +339,7 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             <TradingWorkspace
               symbol={symbol.id} market={canonMarket} tradeMode={tradeMode} auth={auth}
-              onSymbolClick={() => setSearch(true)} chartHeight={220} ctaBottom={0}
+              onSymbolClick={() => setSearch(true)} chartHeight={200}
               exchangeOrderPane={
                 <>
                   <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
@@ -401,9 +401,19 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
   const TAB_ROW = 76;          // 탭 줄(48) + 그 아래 내용이 살짝 비치는 만큼
   const firstScreen = Math.max(220, boxH - hdrH - TAB_ROW);
 
-  // 차트가 첫 화면을 차지하되 거래 버튼이 잘리지 않을 만큼만 쓴다.
-  // 헤더·시장정보 줄·시간대 줄·버튼을 빼고 남는 만큼이다.
-  const chartH = Math.max(200, firstScreen - 210);
+  // ── 첫 화면 통의 높이 ──
+  //
+  // 여기서는 **높이 하나만 넘긴다.** 띠를 어떻게 나눌지는 화면이 제 안에서
+  // 정한다(`coreBudget`) — 시장정보 줄 높이는 폭과 종목 이름에 따라 접히고,
+  // 그 값은 여기서 알 수 없기 때문이다.
+  //
+  // 전에는 여기서 `RESERVED = 58 + 36 + 170 + 56`으로 빼서 차트 높이를
+  // 넘겼다. **실측에서 시장정보는 106px이었고 [주문│호가]는 371px이었다.**
+  // 예산이 200px 틀렸고, 그만큼 아래 칸이 화면 밖으로 밀렸다. 붙여 둔
+  // LONG/SHORT가 그 사이에서 슬라이더를 덮었다.
+  //
+  // 포지션 독은 내리면 나온다 — "스크롤 0"을 절대조건으로 두지 않는다.
+  const coreH = Math.max(360, boxH - hdrH);
 
   return (
     /* data-region은 기하 검사기가 "지금 어떤 배치인가"를 읽는 표식이다.
@@ -437,7 +447,7 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
           tradeMode={tradeMode}
           auth={auth}
           onSymbolClick={() => setSearch(true)}
-          chartHeight={chartH}
+          coreHeight={coreH}
           exchangeOrderPane={
             <>
               <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>

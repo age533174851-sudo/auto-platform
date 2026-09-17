@@ -33,6 +33,14 @@ export interface MarketHeaderProps {
   quoteAsset?: string;
   onSymbolClick?: () => void;
   compact?: boolean;
+  /**
+   * 한 화면 배치용 — **줄을 합친다.**
+   *
+   * 실측에서 이 헤더가 127px을 먹었고, 그 위 터미널 헤더 85px과 합쳐
+   * 차트가 시작하기 전에 212px이 사라졌다. 360×660에서는 화면의 3분의 1이다.
+   * 종목·현재가·등락률을 한 줄로, 24시간 통계를 그 아래 한 줄로 줄인다.
+   */
+  dense?: boolean;
 }
 
 const TONE_COLOR: Record<string, string> = {
@@ -41,7 +49,7 @@ const TONE_COLOR: Record<string, string> = {
 
 export function MarketHeader({
   symbol, market, stream, target, quoteAsset,
-  onSymbolClick, compact,
+  onSymbolClick, compact, dense,
 }: MarketHeaderProps) {
   const price = stream.lastPrice;
   const tone = changeTone(stream.changePct);
@@ -64,14 +72,14 @@ export function MarketHeader({
       data-testid="market-header"
       data-market={market}
       style={{
-        display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6,
-        padding: compact ? '10px 12px 8px' : '10px 14px',
+        display: 'flex', flexDirection: 'column', gap: dense ? 3 : compact ? 5 : 6,
+        padding: dense ? '6px 10px 5px' : compact ? '10px 12px 8px' : '10px 14px',
         borderBottom: `1px solid ${C.hair}`,
         background: C.panel,
       }}
     >
-      {/* ── 1줄: 종목 · 시장 · 장부 ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      {/* ── 1줄: 종목 · 시장 · 장부 (dense면 가격까지 같은 줄) ── */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: dense ? 6 : 8, flexWrap: 'wrap', minWidth: 0 }}>
         <button
           type="button"
           onClick={onSymbolClick}
@@ -81,7 +89,7 @@ export function MarketHeader({
             background: 'none', border: 'none', padding: 0,
             // 실기에서 화면 위쪽이 메뉴·AI뉴스·STOP으로 차 있어 **무엇을 보는
             // 중인지가 묻혔다.** 차트 바로 위에서 종목이 가장 크게 읽혀야 한다.
-            color: C.text, fontSize: compact ? 19 : FS.head, fontWeight: 800,
+            color: C.text, fontSize: dense ? 17 : compact ? 19 : FS.head, fontWeight: 800,
             cursor: onSymbolClick ? 'pointer' : 'default', letterSpacing: '-0.02em',
           }}
         >
@@ -89,16 +97,11 @@ export function MarketHeader({
           {onSymbolClick ? <span style={{ color: C.dim, fontSize: FS.small, marginLeft: 4 }}>▾</span> : null}
         </button>
 
-        <span
-          data-testid="market-header-kind"
-          style={{
-            fontSize: FS.micro, fontWeight: 700, color: C.dim,
-            border: `1px solid ${C.hair}`, borderRadius: 4, padding: '2px 6px',
-            letterSpacing: '0.04em',
-          }}
-        >
-          {market === 'USDM' ? 'Perpetual' : 'Spot'}
-        </span>
+        {/* dense에서는 이 배지가 아래 줄로 내려간다.
+            320px 실측에서 이 줄이 두 줄로 접혀 **헤더가 106px**이 됐고,
+            통이 고정 높이라 그 32px만큼 아래 칸이 잘렸다. 종목·현재가·
+            등락률이 한 줄에 남는 것이 시장 종류 배지보다 먼저다. */}
+        {dense ? null : <KindBadge market={market}/>}
 
         {target ? (
           <span
@@ -122,6 +125,19 @@ export function MarketHeader({
           </span>
         ) : null}
 
+        {dense ? (
+          <>
+            <div style={{ flex: 1, minWidth: 4 }}/>
+            <span data-testid="market-header-price" style={{
+              ...NUM, fontSize: 17, fontWeight: 800,
+              color: price == null ? C.faint : TONE_COLOR[tone] || C.text,
+            }}>{fmtStatPrice(price)}</span>
+            <span data-testid="market-header-change" style={{
+              ...NUM, fontSize: FS.micro, fontWeight: 800, color: TONE_COLOR[tone],
+            }}>{fmtChangePct(stream.changePct)}</span>
+          </>
+        ) : null}
+
         {stalled ? (
           <span
             data-testid="market-header-stalled"
@@ -133,7 +149,8 @@ export function MarketHeader({
         ) : null}
       </div>
 
-      {/* ── 2줄: 현재가 · 변동률 ── */}
+      {/* ── 2줄: 현재가 · 변동률 (dense면 위 줄로 올라갔다) ── */}
+      {dense ? null : (
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
         <span
           data-testid="market-header-price"
@@ -152,6 +169,7 @@ export function MarketHeader({
           {fmtChangePct(stream.changePct)}
         </span>
       </div>
+      )}
 
       {/* ── 3줄: Mark · 24h ── */}
       <div
@@ -161,6 +179,7 @@ export function MarketHeader({
           fontSize: FS.micro,
         }}
       >
+        {dense ? <KindBadge market={market} dense/> : null}
         {cells.map(c => (
           <span key={c.label} style={{ display: 'flex', gap: 4, alignItems: 'baseline' }}>
             <span style={{ color: C.faint }}>{c.label}</span>
@@ -174,6 +193,28 @@ export function MarketHeader({
         ))}
       </div>
     </div>
+  );
+}
+
+/** 선물인가 현물인가. dense에서는 24시간 통계 줄로 내려간다. */
+function KindBadge({ market, dense }: { market: 'SPOT' | 'USDM'; dense?: boolean }) {
+  // dense에서는 테두리를 벗고 짧게 쓴다. 320px 실측에서 `Perpetual` 배지가
+  // 61px이었고, 그 61px 때문에 24시간 통계 줄이 두 줄로 접혀 **헤더가
+  // 105px**이 됐다. 통이 고정 높이라 그 31px은 아래 칸에서 빠진다.
+  return (
+    <span
+      data-testid="market-header-kind"
+      title={market === 'USDM' ? 'Perpetual (무기한 선물)' : 'Spot (현물)'}
+      style={{
+        fontSize: FS.micro, fontWeight: 700, color: C.dim, flexShrink: 0,
+        letterSpacing: '0.04em', whiteSpace: 'nowrap',
+        ...(dense ? null : {
+          border: `1px solid ${C.hair}`, borderRadius: 4, padding: '1px 5px',
+        }),
+      }}
+    >
+      {dense ? (market === 'USDM' ? 'PERP' : 'SPOT') : (market === 'USDM' ? 'Perpetual' : 'Spot')}
+    </span>
   );
 }
 

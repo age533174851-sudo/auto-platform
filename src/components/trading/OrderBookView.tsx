@@ -144,7 +144,7 @@ export const OrderBookView = memo(function OrderBookView({
   // 44px 규칙을 여기서 깨는 이유: 이건 낱개 버튼이 아니라 **사다리**다.
   // 줄 하나를 크게 만드는 대신 줄이 여러 개 보이는 것이 이 판의 목적이고,
   // 실제 거래소 앱들도 20px 안팎을 쓴다. 숫자 크기는 그대로 둔다.
-  const rowH = compact ? 18 : dense ? 21 : 24;
+  const rowH = compact ? 15 : dense ? 21 : 24;
   const Row = ({ p, q, buy }: { p: number; q: number; buy: boolean }) => (
     <button
       // 스크린샷 증거가 "호가가 **몇 줄** 실제로 그려졌는가"를 셀 수 있게
@@ -200,15 +200,28 @@ export const OrderBookView = memo(function OrderBookView({
       )}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        padding: compact ? '4px 8px 3px' : dense ? '6px 8px 4px' : '7px 12px 5px',
+        padding: compact ? '2px 6px 2px' : dense ? '6px 8px 4px' : '7px 12px 5px',
         fontSize: FS.micro, color: C.faint,
+        // 한 화면 배치의 호가 칸은 122px이다. 이 줄이 접히면 그만큼
+        // 매도 3줄이 아래로 밀려 나간다 — 접지 말고 한 줄로 둔다.
+        ...(compact ? { whiteSpace: 'nowrap' as const, gap: 4, minWidth: 0 } : null),
       }}>
-        <span>가격</span>
-        <DataBadge compact source={{
-          kind: live ? 'REALTIME' : 'UNAVAILABLE',
-          origin: dense ? '' : 'Binance', asOf: stream.depthAt, expectedIntervalMs: 100,
-        }}/>
-        <span>수량</span>
+        <span style={{ flexShrink: 0 }}>가격</span>
+        {/* 한 화면 배치의 호가 칸은 122px이다. 그대로 두면 이 배지가
+            `수량` 글자와 겹쳐 찍혔다(320px 실기 스샷). **줄이는 것은 배지
+            쪽이다** — 칸 이름이 무엇인지는 겹쳐서는 안 되고, 배지는 앞이
+            신호(● 실시간/멈춤)라 꼬리가 잘려도 뜻이 남는다. 전체 문구는
+            `title`에 그대로 있다. */}
+        <span style={{
+          flex: 1, minWidth: 0, overflow: 'hidden',
+          display: 'flex', justifyContent: 'center',
+        }}>
+          <DataBadge compact source={{
+            kind: live ? 'REALTIME' : 'UNAVAILABLE',
+            origin: dense ? '' : 'Binance', asOf: stream.depthAt, expectedIntervalMs: 100,
+          }}/>
+        </span>
+        <span style={{ flexShrink: 0 }}>수량</span>
       </div>
 
       {ladder.empty ? (
@@ -230,14 +243,15 @@ export const OrderBookView = memo(function OrderBookView({
             style={{
               display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 8,
               width: '100%', background: 'none',
-              padding: dense ? '6px 8px' : '7px 12px', margin: '2px 0',
+              padding: compact ? '2px 6px' : dense ? '6px 8px' : '7px 12px',
+              margin: compact ? '1px 0' : '2px 0',
               border: 'none', minHeight: 0,
               borderTop: `1px solid ${C.hair}`, borderBottom: `1px solid ${C.hair}`,
               cursor: mid != null && onPickPrice ? 'pointer' : 'default',
             }}>
             <span style={{
               ...NUM, color: pnlColor(stream.changePct),
-              fontSize: dense ? 15 : 19, fontWeight: 700,
+              fontSize: compact ? 13 : dense ? 15 : 19, fontWeight: 700,
               textDecoration: mid != null && onPickPrice ? 'underline' : 'none',
               textDecorationColor: C.hair3,
               textDecorationThickness: 1,

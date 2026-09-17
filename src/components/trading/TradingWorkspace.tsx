@@ -1,37 +1,40 @@
 'use client';
 // src/components/trading/TradingWorkspace.tsx
 //
-// **매매 탭의 정본 거래 화면.**
+// **매매 탭의 정본 거래 화면 — 한 화면에서 끝난다.**
 //
-// 왜 다시 쓰는가
-// ──────────────
-// 처음에 이 컴포넌트를 `모의매매` 탭(`PaperTradingPage`)에 붙였다. 그런데
-// 사용자가 실제로 여는 길은 `/ → 매매`이고, 그건
-// `TerminalTab → TerminalShell → MobileShell`이다. 즉 **만들어 놓고 사람이
-// 다니는 길에 안 붙였다.** 실제 기기 스크린샷에서 드러났다.
+//   시장 정보
+//   시간대 · 지표
+//   ───── 캔들 차트 (항상 보인다) ─────
+//   주문 조작 (60%)  │  호가 (40%)
+//   LONG            │  SHORT
+//   포지션 · 주문 · 자산
 //
-// 그래서 이 컴포넌트는 이제 **받은 값으로만** 그린다. 종목·시장·모드를
-// 스스로 고르지 않고 터미널이 이미 아는 값을 받는다 — 화면이 두 개의
-// "지금 무엇을 보는가"를 갖는 순간 둘은 갈린다.
+// 왜 시트를 버렸나
+// ────────────────
+// LONG을 누르면 시트가 올라오는 구조였다. 실기(360×660)에서 시트를 열면
+// **캔들이 52px만 남았고 그 띠는 배경과 격자선뿐이었다.** 차트를 보고
+// 들어가라고 만든 화면인데 주문하려는 순간 차트가 사라졌다.
 //
-// 첫 화면의 순서
-// ──────────────
-//   시장 정보 → 차트 → 거래 버튼
+// 시트를 없애면 52vh·88vh·visual viewport·오버레이 겹침·z-index 문제가
+// **통째로** 없어진다. 여닫는 층이 아예 없기 때문이다.
 //
-// 예전 모바일 첫 화면은 `[58% 주문폼 │ 42% 호가]`였다. 차트는 맨 아래에
-// 접혀 있었다. 차트를 보고 들어가는 화면이 아니라 주문폼을 채우는 화면이다.
-// 호가와 상세 주문은 **버튼을 누른 뒤** 시트에서 본다.
+// 스크롤 0을 절대조건으로 두지 않는다
+// ───────────────────────────────────
+// 320px 기기에서 전부를 한 화면에 욱여넣으면 글자와 버튼이 작아진다.
+// **핵심 거래 영역(시장정보·차트·주문·호가·LONG/SHORT)은 첫 화면에 고정**
+// 하고, 포지션 같은 부가 정보는 내리면 나온다.
 //
-// 실거래는 건드리지 않는다
-// ────────────────────────
-// 모의(`mock`)만 `TradeSheet`가 주문을 맡는다. 테스트넷·실전은 기존
-// 주문폼(`exchangeOrderPane`)이 같은 시트 안에서 그대로 열린다 —
-// 껍데기만 수렴시키고 실거래 payload·검증·라우팅은 0으로 둔다.
-import React, { useState } from 'react';
+// 권위는 하나다
+// ─────────────
+// 주문 판정은 `useTradeForm`에 있고 데스크톱이 다른 배치를 써도 그것을
+// 쓴다. 증거금·수수료·청산가는 서버가 부르는 `buildPaperPlan` 그대로다.
+import React, { useEffect, useState } from 'react';
 import { C, FS } from '@/components/terminal/theme';
 import { MarketHeader } from './MarketHeader';
 import { PriceChart, type ChartInterval } from './PriceChart';
-import { TradeSheet } from './TradeSheet';
+import { OrderBookView } from './OrderBookView';
+import { OrderControls, OrderEstimate } from './OrderControls';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { usePaperLedger } from '@/lib/trading/usePaperLedger';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
@@ -39,162 +42,212 @@ import {
   targetOrderGate, paperSheetHandlesOrders, type PaperTarget,
 } from '@/lib/trading/paperTarget';
 import { paperOrderUiWiring } from '@/lib/trading/capability';
+import { useTradeForm } from '@/lib/trading/useTradeForm';
+import { splitColumns, coreBudget, BOOK_MIN_PX } from '@/lib/trading/oneScreen';
 import type { IndicatorId } from '@/lib/trading/indicators';
 import type { MoneyScope } from '@/lib/trading/gameMoney';
-import {
-  DEFAULT_SNAP, sheetHeightVh, type SheetSnap,
-} from '@/lib/trading/sheetSnap';
 
 export interface TradingWorkspaceProps {
   symbol: string;
-  /** 모의 장부가 아는 시장. 터미널 어휘는 `canonicalMarketOf`가 옮긴다 */
   market: 'SPOT' | 'USDM';
-  /** 'mock' | 'testnet' | 'live' — 주문을 누가 맡을지 정한다 */
   tradeMode: string;
-  /** 로그인 토큰. 빈 값이면 로그인 전이다 */
   auth?: string;
-  /** 종목을 바꾸는 길. 없으면 종목 이름이 버튼이 아니다 */
   onSymbolClick?: () => void;
-  /**
-   * 테스트넷·실전에서 시트에 들어갈 **기존** 주문폼.
-   * 여기서 실거래 주문을 새로 만들지 않는다.
-   */
+  /** 테스트넷·실전에서 쓸 **기존** 주문폼. 실거래 경로를 새로 만들지 않는다 */
   exchangeOrderPane?: React.ReactNode;
+  /** 차트에 줄 높이. 바깥이 남는 공간을 재서 넘긴다 */
   chartHeight?: number;
-  /** 하단 고정 버튼이 앱 탭바 위에 앉도록 띄울 높이 */
-  ctaBottom?: string | number;
+  /**
+   * 첫 화면 통의 높이(px).
+   *
+   * 주면 이 화면이 **그 높이 안에서 끝난다** — 시장정보·차트·주문·호가·
+   * 예상값·LONG/SHORT가 통 안의 칸이 되고, 모자란 칸만 제 안에서 스크롤한다.
+   * 주지 않으면(데스크톱·가로) 예전처럼 내용 높이대로 흐른다.
+   */
+  coreHeight?: number;
 }
 
 export function TradingWorkspace({
   symbol, market, tradeMode, auth, onSymbolClick,
-  exchangeOrderPane, chartHeight = 300, ctaBottom = 'var(--nav-h, 0px)',
+  exchangeOrderPane, chartHeight = 220, coreHeight,
 }: TradingWorkspaceProps) {
   const [interval, setInterval] = useState<ChartInterval>('15m');
   const [indicators, setIndicators] = useState<IndicatorId[]>(['MA7', 'MA25']);
-  const [sheetOpen, setSheetOpen] = useState(false);
-  /**
-   * 시트 자리. **기본은 HALF** — 위에 차트가 남는다.
-   *
-   * 실측(360×800)에서 시트가 차트를 100% 가렸다. 차트를 보면서 진입하라고
-   * 만든 화면인데 주문하려는 순간 차트가 사라졌다.
-   */
-  const [snap, setSnap] = useState<SheetSnap>(DEFAULT_SNAP);
+  const [width, setWidth] = useState(360);
+  // 시장정보 줄은 종목 이름 길이와 폭에 따라 접힌다(320px에서 실측 106px,
+  // 360px에서 74px). 상수로 박으면 접히는 순간 CTA가 화면 밖으로 나간다.
+  const [headRef, headH] = useMeasuredHeight<HTMLDivElement>();
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const read = () => setWidth(window.innerWidth);
+    read();
+    window.addEventListener('resize', read);
+    window.addEventListener('orientationchange', read);
+    return () => {
+      window.removeEventListener('resize', read);
+      window.removeEventListener('orientationchange', read);
+    };
+  }, []);
 
   const stream = useBinanceStream(symbol, true, market);
   const [target] = usePaperTarget();
 
-  // 모의일 때만 장부를 읽는다. 실전 화면에서 모의 잔고를 읽어 봐야
-  // 그 숫자는 이 화면의 주문과 아무 상관이 없다.
   const paperOrders = paperSheetHandlesOrders(tradeMode);
   const ledger = usePaperLedger(target, paperOrders);
+  const challengeStatus = useChallengeStatus(target, auth);
 
-  const gate = targetOrderGate(target, useChallengeStatus(target, auth));
+  const gate = targetOrderGate(target, challengeStatus);
   const wiring = paperOrderUiWiring(market);
-  const canOrder = paperOrders && gate.allowed && wiring.canOrder;
+  const canOrder = paperOrders && !!auth && gate.allowed && wiring.canOrder;
 
-  // **원인을 숨기지 않는다.** 예전에는 `확인 불가` 한 마디였고, 그걸 보고
-  // 무엇을 해야 하는지 알 수 없었다. 값을 지어내지는 않되 사유는 말한다.
-  const blockedReason = !paperOrders ? null
+  // **원인을 숨기지 않는다.** 값을 지어내지 않되 사유는 말한다.
+  const blockedReason = !paperOrders ? '이 모드의 주문은 아래 주문폼이 처리합니다'
     : !auth ? '로그인이 필요합니다 — 로그인 후 모의 잔고를 확인할 수 있습니다'
     : !wiring.canOrder ? wiring.reason
     : !gate.allowed ? gate.reason
     : null;
 
   const scope: MoneyScope = target.kind === 'CHALLENGE' ? 'CHALLENGE' : 'PAPER';
-  const longLabel = market === 'SPOT' ? 'BUY' : 'LONG';
-  const shortLabel = market === 'SPOT' ? 'SELL' : 'SHORT';
+  const availableUnknownReason = !auth
+    ? '로그인이 필요합니다 — 로그인 후 모의 잔고를 확인할 수 있습니다'
+    : (ledger.availableUnknownReason || ledger.error);
 
-  const sheetBody = paperOrders ? (
-    <TradeSheet
-      symbol={symbol} market={market}
-      price={stream.lastPrice}
-      target={target} scope={scope}
-      availableBalance={auth ? ledger.available : null}
-      availableUnknownReason={
-        !auth
-          ? '로그인이 필요합니다 — 로그인 후 모의 잔고를 확인할 수 있습니다'
-          : (ledger.availableUnknownReason || ledger.error)
-      }
-      canOrder={canOrder}
-      blockedReason={blockedReason}
-      onSubmitted={ledger.reload}
-      onClose={() => setSheetOpen(false)}
-      snap={snap}
-      onSnapChange={setSnap}
-      compact
-    />
-  ) : (
-    // 테스트넷·실전 — **기존 주문폼 그대로.** 껍데기만 같은 시트다.
-    <div data-testid="exchange-order-sheet" style={{ padding: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <span style={{ fontSize: FS.sub, fontWeight: 800, color: C.text }}>{symbol} 주문</span>
-        <button type="button" onClick={() => setSheetOpen(false)} className="switch"
-          style={{ background: 'none', border: 'none', color: C.dim, fontSize: FS.title, cursor: 'pointer' }}>✕</button>
-      </div>
-      {exchangeOrderPane}
-    </div>
-  );
+  const form = useTradeForm({
+    symbol, market, price: stream.lastPrice, target,
+    availableBalance: auth ? ledger.available : null,
+    availableUnknownReason,
+    canOrder, blockedReason,
+    onSubmitted: ledger.reload,
+  });
+
+  // 폭은 실측한 최소치가 정한다. 50:50을 박지 않는다 —
+  // 호가 한 줄의 글자 폭(가격 53px + 수량 30px)이 바닥을 정한다.
+  const cols = splitColumns(width);
+
+  // 세로도 같다. **남는 높이를 나눈다** — 상수로 박은 예산은 320×600에서
+  // 틀렸고, 그때 LONG/SHORT가 슬라이더를 덮었다(`coreBudget` 주석).
+  const bounded = typeof coreHeight === 'number' && coreHeight > 0;
+  const budget = coreBudget(coreHeight, headH);
+  const chartPx = bounded ? budget.chartHeight : chartHeight;
 
   return (
     <div
-      data-testid="trading-workspace" data-layout="mobile" data-trade-mode={tradeMode}
-      style={{ display: 'flex', flexDirection: 'column', background: C.bg }}
+      data-testid="trading-workspace" data-layout="one-screen" data-trade-mode={tradeMode}
+      data-bounded={bounded ? '1' : '0'}
+      style={{
+        display: 'flex', flexDirection: 'column', background: C.bg, minWidth: 0,
+        // 통 높이를 받으면 **그 안에서 끝난다.** 넘치면 아래 칸이 밀려
+        // 나가는 게 아니라, 모자란 칸이 제 안에서 스크롤한다.
+        ...(bounded ? { height: coreHeight, minHeight: 0, overflow: 'hidden' } : null),
+      }}
     >
-      {/* ① 시장 정보 */}
-      <MarketHeader
-        symbol={symbol} market={market} stream={stream}
-        target={paperOrders ? target : null}
-        onSymbolClick={onSymbolClick}
-        compact
-      />
-
-      {/* ② 차트가 주인공이다 — 시간대·캔들·거래량·이동평균 */}
-      <PriceChart
-        symbol={symbol} market={market}
-        interval={interval} onIntervalChange={setInterval}
-        indicators={indicators}
-        onToggleIndicator={(id) => setIndicators(prev =>
-          prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
-        height={chartHeight}
-      />
-
-      {/* ③ 거래 버튼 — 화면에 붙어 있다 */}
-      <div
-        data-testid="workspace-cta"
-        style={{
-          position: 'sticky', bottom: ctaBottom as any, zIndex: 30,
-          display: 'flex', gap: 8, padding: '10px 12px',
-          background: C.panel, borderTop: `1px solid ${C.hair}`,
-        }}
-      >
-        {/* 열 때는 늘 HALF다. 지난번 확장 상태를 기억하면 차트가 가려진 채로
-            시작하고, 그러면 이 자리를 만든 이유가 없어진다. */}
-        <CtaBtn label={longLabel} tone="up" onClick={() => { setSnap(DEFAULT_SNAP); setSheetOpen(true); }}/>
-        <CtaBtn label={shortLabel} tone="down" onClick={() => { setSnap(DEFAULT_SNAP); setSheetOpen(true); }}/>
+      {/* ① 시장 정보 — 높이를 잰다. 접히면 차트가 그만큼 양보한다 */}
+      <div ref={headRef} style={{ flexShrink: 0 }}>
+        <MarketHeader
+          symbol={symbol} market={market} stream={stream}
+          target={paperOrders ? target : null}
+          onSymbolClick={onSymbolClick}
+          compact dense
+        />
       </div>
 
-      {sheetOpen ? (
-        <div
-          data-testid="workspace-sheet"
-          style={{
-            position: 'fixed', inset: 0, zIndex: 60,
-            // **위쪽을 어둡게 덮지 않는다.** 시트를 반만 올린 이유가 차트를
-            // 보려는 것인데, 그 위에 딤을 씌우면 안 보이는 것과 같다.
-            background: 'transparent', display: 'flex', alignItems: 'flex-end',
-          }}
-          onClick={() => setSheetOpen(false)}
-        >
-          <div onClick={e => e.stopPropagation()}
-            data-snap={snap}
+      {/* ② 차트 — **언제나 보인다.** 주문을 만지는 동안에도 덮이지 않는다 */}
+      <div style={{ flexShrink: 0 }}>
+        <PriceChart
+          symbol={symbol} market={market}
+          interval={interval} onIntervalChange={setInterval}
+          indicators={indicators}
+          onToggleIndicator={(id) => setIndicators(prev =>
+            prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
+          height={chartPx}
+          denseToolbar
+        />
+      </div>
+
+      {/* ③ 주문 │ 호가 — 같은 줄에 상주한다 */}
+      {paperOrders ? (
+        <div data-testid="workspace-split" style={{
+          display: 'flex', alignItems: 'stretch', gap: 6,
+          // 세로 여백 4px. 6px이면 320px에서 매수 3번째 줄이 3px 잘렸다 —
+          // 스크롤은 됐지만 "매수 3줄이 보인다"는 조건을 못 지킨다.
+          padding: '4px 8px', borderTop: `1px solid ${C.hair}`,
+          background: C.panel, minWidth: 0,
+          // 남는 높이를 다 가져가되 **넘치지 않는다**. `minHeight: 0`이
+          // 없으면 flex 칸이 내용 높이만큼 부풀어 CTA를 밀어낸다.
+          ...(bounded ? { flex: 1, minHeight: 0 } : null),
+        }}>
+          {/* ── 주문 칸만 제 스크롤을 갖는다 ──
+              이 저장소는 칸마다 스크롤 주는 것을 꺼려 왔다(손가락이 어디
+              닿았느냐에 따라 다르게 움직인다). 하지만 `MobileShell`이 이미
+              같은 이유로 예외를 뒀다 — 넘친 주문 버튼이 **말없이 사라지는**
+              쪽이 훨씬 나쁘다. 320×600에서 실제로 그랬다. */}
+          <div
+            data-testid="workspace-order-col"
+            data-scrolls={bounded && budget.orderScrolls ? '1' : '0'}
             style={{
-              // 높이는 `sheetSnap`이 정한다. 여기서 숫자를 다시 적지 않는다.
-              width: '100%', height: `${sheetHeightVh(snap)}vh`, overflowY: 'auto',
-              paddingBottom: 'var(--nav-h, 0px)',
-              borderTopLeftRadius: 14, borderTopRightRadius: 14, background: C.panel,
-              transition: 'height 160ms ease',
-            }}>
-            {sheetBody}
+              width: `${cols.orderPct}%`, minWidth: 0,
+              ...(bounded ? {
+                minHeight: 0, overflowY: 'auto' as const,
+                overscrollBehavior: 'contain' as const,
+                WebkitOverflowScrolling: 'touch' as any,
+              } : null),
+            }}
+          >
+            <OrderControls
+              form={form} symbol={symbol} scope={scope}
+              availableBalance={auth ? ledger.available : null}
+              availableUnknownReason={availableUnknownReason}
+              canOrder={canOrder}
+            />
           </div>
+          <div data-testid="workspace-book" style={{
+            width: `${cols.bookPct}%`, minWidth: BOOK_MIN_PX, flexShrink: 0,
+            border: `1px solid ${C.hair}`, borderRadius: 8, background: C.bg,
+            // 예산은 이 칸의 실측 높이(`BOOK_H`)를 바닥으로 잡는다. 그래도
+            // 모자라는 기기가 나오면 **잘리는 대신 스크롤한다** — 매도 3줄이
+            // 말없이 사라지면 화면만 보고는 알 수가 없다.
+            minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain',
+            WebkitOverflowScrolling: 'touch' as any,
+          }}>
+            {/* 3 매도 + 현재가 + 3 매수. 이 셋은 **잘리면 안 된다** */}
+            <OrderBookView symbolId={symbol} market={market} rows={3} dense variant="compact"/>
+          </div>
+        </div>
+      ) : (
+        // 테스트넷·실전 — 기존 주문폼 그대로. 실거래 경로 변경 0.
+        <div data-testid="exchange-order-pane" style={{ borderTop: `1px solid ${C.hair}` }}>
+          {exchangeOrderPane}
+        </div>
+      )}
+
+      {/* ④ 증거금 · 수수료 · 청산가 · 막힌 사유 — **주문 칸 밖**
+          위 칸이 스크롤해도 이 줄은 안 움직인다. 얼마가 잠기고 어디서
+          청산되는지 모른 채 누르는 화면을 만들지 않는다. */}
+      {paperOrders ? (
+        <div style={{ flexShrink: 0 }}>
+          <OrderEstimate form={form} scope={scope}/>
+        </div>
+      ) : null}
+
+      {/* ⑤ LONG · SHORT — 통의 마지막 칸에 **그냥 놓인다**
+
+          예전에는 `position: sticky; bottom: var(--nav-h)`였다. 320×600
+          실측에서 이 줄이 흐름 위치(787)에서 붙는 위치(490)로 끌어올려지며
+          **슬라이더(447~452)를 덮었다.** `elementFromPoint`로 슬라이더
+          한가운데를 찍으면 이 버튼이 나왔다 — 보이는데 눌리지 않았다.
+
+          붙이지 않으면 덮을 일이 없다. 통이 하단 탭 위에서 끝나므로 탭
+          밑으로 들어가지도 않는다. */}
+      {paperOrders ? (
+        <div data-testid="workspace-cta" style={{
+          flexShrink: 0,
+          display: 'flex', gap: 6, padding: '4px 8px',
+          background: C.panel, borderTop: `1px solid ${C.hair}`,
+        }}>
+          <Cta form={form} side="LONG" disabled={!form.gate.ready || form.busy}/>
+          <Cta form={form} side="SHORT" disabled={!form.gate.ready || form.busy}
+            unavailable={form.shortDisabled}/>
         </div>
       ) : null}
     </div>
@@ -202,16 +255,86 @@ export function TradingWorkspace({
 }
 
 /**
- * 고른 챌린지가 지금 주문을 받는가.
+ * 높이를 잰다.
  *
- * **못 읽으면 `null`이다.** `targetOrderGate`가 그걸 "확인하지 못함"으로
- * 읽어 주문을 막는다 — 모르는 것을 통과로 적지 않는다.
+ * 시장정보 줄은 폭과 종목 이름에 따라 접힌다 — 320px에서 106px, 360px에서
+ * 74px이었다. 상수로 박으면 접히는 순간 아래 칸이 32px씩 밀리고, 통이
+ * 고정 높이이므로 **밀린 만큼 CTA가 잘린다.** 그래서 재는 편이 싸다.
+ * (`MobileShell`이 헤더에서 같은 이유로 이미 재고 있다.)
  */
+function useMeasuredHeight<T extends HTMLElement>(): [React.MutableRefObject<T | null>, number] {
+  const ref = React.useRef<T | null>(null);
+  const [h, setH] = useState(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const read = () => setH(el.getBoundingClientRect().height);
+    read();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(read);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', read);
+    window.addEventListener('orientationchange', read);
+    return () => {
+      window.removeEventListener('resize', read);
+      window.removeEventListener('orientationchange', read);
+    };
+  }, []);
+
+  return [ref, h];
+}
+
+/**
+ * 방향 버튼이 곧 주문 버튼이다.
+ *
+ * 누르면 그 방향으로 주문이 나간다. 막혀 있으면 **버튼 글자가 무엇이
+ * 필요한지 말한다**(`submitGate.submitLabel`) — 회색 버튼만 두고 이유를
+ * 안 적는 상태를 만들지 않는다.
+ */
+function Cta({ form, side, disabled, unavailable }: {
+  form: ReturnType<typeof useTradeForm>;
+  side: 'LONG' | 'SHORT'; disabled: boolean; unavailable?: boolean;
+}) {
+  const on = form.side === side;
+  const col = side === 'LONG' ? C.up : C.down;
+  const label = form.sideLabel(side);
+  const off = disabled || !!unavailable;
+  return (
+    <button
+      type="button"
+      data-testid={`workspace-cta-${label}`}
+      disabled={!!unavailable}
+      title={unavailable ? '이 시장에는 숏이 없습니다' : (form.gate.reason || undefined)}
+      onClick={() => {
+        if (unavailable) return;
+        // 방향을 먼저 맞추고, 이미 그 방향이면 보낸다.
+        if (!on) { form.setSide(side); return; }
+        void form.submit();
+      }}
+      style={{
+        flex: 1, minWidth: 0, padding: '12px 0', borderRadius: 9, border: 'none',
+        background: off ? C.raised : col,
+        color: off ? C.faint : '#fff',
+        fontSize: FS.lead, fontWeight: 800,
+        cursor: unavailable ? 'not-allowed' : 'pointer',
+        opacity: on ? 1 : 0.82,
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'clip',
+      }}
+    >
+      {on && !off ? form.submitText : label}
+    </button>
+  );
+}
+
+/** 고른 챌린지가 지금 주문을 받는가. **못 읽으면 null** — 게이트가 막는다. */
 function useChallengeStatus(target: PaperTarget, auth?: string): string | null {
   const [status, setStatus] = useState<string | null>(null);
   const id = target?.kind === 'CHALLENGE' ? target.challengeId : null;
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!id) { setStatus(null); return; }
     let cancelled = false;
     setStatus(null);
@@ -229,18 +352,4 @@ function useChallengeStatus(target: PaperTarget, auth?: string): string | null {
   }, [id, auth]);
 
   return status;
-}
-
-function CtaBtn({ label, tone, onClick }: { label: string; tone: 'up' | 'down'; onClick: () => void }) {
-  return (
-    <button
-      type="button" onClick={onClick}
-      data-testid={`workspace-cta-${label}`}
-      style={{
-        flex: 1, padding: '14px 0', borderRadius: 10, border: 'none',
-        background: tone === 'up' ? C.up : C.down, color: '#fff',
-        fontSize: FS.sub, fontWeight: 800, cursor: 'pointer',
-      }}
-    >{label}</button>
-  );
 }

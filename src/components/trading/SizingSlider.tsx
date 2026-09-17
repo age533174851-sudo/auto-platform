@@ -22,7 +22,7 @@
 // 생각한다. 잠그고 사유를 적는다.
 import React from 'react';
 import { C, FS, NUM } from '@/components/terminal/theme';
-import { planSizing, type SizingResult } from '@/lib/trading/positionSizing';
+import { type SizingResult } from '@/lib/trading/positionSizing';
 import { formatMoneyForScope, type MoneyScope } from '@/lib/trading/gameMoney';
 
 export interface SizingSliderProps {
@@ -31,7 +31,11 @@ export interface SizingSliderProps {
   unknownReason?: string | null;
   percent: number;
   onPercent: (p: number) => void;
-  price: number | null;
+  /**
+   * 이미 계산된 결과. **여기서 다시 계산하지 않는다** —
+   * `planSizing`을 두 곳에서 부르면 같은 입력에 다른 수량이 나올 수 있다.
+   */
+  sizing: SizingResult;
   leverage: number;
   /** 게임머니로 적을 장부인가 */
   scope: MoneyScope;
@@ -41,11 +45,9 @@ export interface SizingSliderProps {
 
 export function SizingSlider({
   availableBalance, unknownReason, percent, onPercent,
-  price, leverage, scope, symbol, disabled,
+  sizing, leverage, scope, symbol, disabled,
 }: SizingSliderProps) {
-  const plan: SizingResult = planSizing({
-    availableBalance, percent, price, leverage,
-  });
+  const plan = sizing;
 
   const balanceUnknown = availableBalance == null;
   const locked = !!disabled || balanceUnknown;
@@ -58,9 +60,9 @@ export function SizingSlider({
         <span style={{ fontSize: FS.micro, color: C.dim, fontWeight: 700 }}>
           증거금 배정 비율
         </span>
-        <span style={{ fontSize: FS.micro, color: C.faint }}>
-          가용 {money(availableBalance)}
-        </span>
+        <span data-testid="sizing-available" style={{
+          fontSize: FS.micro, color: C.faint, minWidth: 0, overflowWrap: 'anywhere',
+        }}>가용 {money(availableBalance)}</span>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -101,19 +103,32 @@ export function SizingSlider({
         </div>
       )}
 
-      {/* 최종 판정은 서버다. 화면 숫자를 약속으로 읽지 않게 적어 둔다. */}
-      <div style={{ fontSize: FS.nano, color: C.faint, lineHeight: 1.5 }}>
-        최종 허용 수량은 주문할 때 서버가 다시 계산합니다.
-      </div>
+      {/* 「최종 허용 수량은 서버가 다시 계산한다」는 단서는 **주문 칸 밖**
+          예상값 줄에 있다(`OrderEstimate`). 좁은 기기에서 이 칸은 안에서
+          스크롤하는데, 그 단서가 같이 스크롤해서 사라지면 화면 숫자를
+          약속으로 읽게 된다. */}
     </div>
   );
 }
 
+/**
+ * 값 한 줄.
+ *
+ * **자르지 않는다.** 실기에서 `명목가 (×10) 330,22…`처럼 우측이 잘렸다.
+ * 잘린 숫자는 읽는 사람이 자릿수를 잘못 세게 만든다 — 좁으면 글자를
+ * 줄이지 말고 아래로 내린다(`flexWrap` + `overflowWrap`).
+ */
 function Row({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-      <span style={{ color: C.faint }}>{label}</span>
-      <span style={{ ...NUM, color: strong ? C.text : C.dim, fontWeight: strong ? 800 : 600 }}>{value}</span>
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', gap: 4,
+      minWidth: 0, flexWrap: 'wrap',
+    }}>
+      <span style={{ color: C.faint, flexShrink: 0 }}>{label}</span>
+      <span style={{
+        ...NUM, color: strong ? C.text : C.dim, fontWeight: strong ? 800 : 600,
+        minWidth: 0, overflowWrap: 'anywhere', textAlign: 'right',
+      }}>{value}</span>
     </div>
   );
 }

@@ -28,7 +28,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const MONEY = 'src/lib/trading/gameMoney.ts';
-const SHEET = 'src/components/trading/TradeSheet.tsx';
+const SHEET = 'src/components/trading/OrderControls.tsx';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -83,7 +83,13 @@ const walk = (dir) => {
 
 // 주문 본문을 만드는 곳에서 표시 함수가 값으로 쓰이면 안 된다
 const sheet = code(read(SHEET));
-const bodyBlock = (sheet.match(/const body: any = \{[\s\S]*?\};/) || [''])[0];
+// 주문 본문은 이제 컨트롤러가 만든다. 여기를 안 옮기면 규칙이 **빈 문자열을
+// 검사하며 조용히 통과**한다 — 살아 있는 척하는 검사가 제일 나쁘다.
+const formSrc = code(read('src/lib/trading/useTradeForm.ts'));
+const bodyBlock = (formSrc.match(/const body: any = \{[\s\S]*?\};/) || [''])[0];
+if (!bodyBlock) {
+  err('주문 본문 블록을 찾지 못했습니다 — 이 검사가 아무것도 안 보고 있습니다');
+}
 if (/format(GameMoney|MoneyForScope)/.test(bodyBlock)) {
   err(`${SHEET}의 주문 본문이 표시 함수를 거칩니다 — 글자가 주문 값이 됩니다`);
 }

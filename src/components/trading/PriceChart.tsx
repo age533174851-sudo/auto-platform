@@ -62,6 +62,13 @@ export interface PriceChartProps {
   height?: number;
   /** 시험·스토리에서 봉을 주입한다. **제품 경로에서는 쓰지 않는다** */
   fixtureBars?: any;
+  /**
+   * 한 화면 배치용 — 지표 버튼을 한 줄로 줄인다.
+   *
+   * 실측에서 이 줄이 53px이었다. 지표 이름이 두 줄("MA" / "7")로 접히기
+   * 때문이다. 차트에 줄 높이를 한 픽셀이라도 더 주려고 한 줄로 만든다.
+   */
+  denseToolbar?: boolean;
 }
 
 // 상태 판정은 `chartLoadState`에 있다. 여기서 다시 적지 않는다 —
@@ -69,7 +76,7 @@ export interface PriceChartProps {
 
 export function PriceChart({
   symbol, market = 'USDM', interval, onIntervalChange,
-  indicators = [], onToggleIndicator, height = 320, fixtureBars,
+  indicators = [], onToggleIndicator, height = 320, fixtureBars, denseToolbar,
 }: PriceChartProps) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<any>(null);
@@ -326,13 +333,14 @@ export function PriceChart({
     <div data-region="price-chart" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       {/* 간격 */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px',
+        display: 'flex', alignItems: 'center', gap: denseToolbar ? 3 : 4,
+        padding: denseToolbar ? '3px 6px' : '6px 8px',
         borderBottom: `1px solid ${C.hair}`, overflowX: 'auto', scrollbarWidth: 'none',
       }}>
         {CHART_INTERVALS.map(iv => (
           <button key={iv.id} data-interval={iv.id}
             onClick={() => onIntervalChange?.(iv.id)}
-            style={tab(interval === iv.id)}>{iv.label}</button>
+            style={denseToolbar ? { ...tab(interval === iv.id), padding: '2px 7px' } : tab(interval === iv.id)}>{iv.label}</button>
         ))}
         <div style={{ flex: 1, minWidth: 6 }}/>
         {INDICATORS.map(s => {
@@ -344,8 +352,11 @@ export function PriceChart({
               disabled={!can}
               // 못 그리는 이유를 말한다. 그냥 비활성이면 고장으로 읽힌다.
               title={can ? s.label : `봉이 ${s.period}개 이상이어야 그릴 수 있습니다`}
-              style={{ ...tab(on), opacity: can ? 1 : 0.4, color: on ? s.color : C.faint }}>
-              {s.label}
+              style={{
+                ...tab(on), opacity: can ? 1 : 0.4, color: on ? s.color : C.faint,
+                ...(denseToolbar ? { padding: '2px 5px', whiteSpace: 'nowrap' as const } : null),
+              }}>
+              {denseToolbar ? s.label.replace(/\s+/g, '') : s.label}
             </button>
           );
         })}
