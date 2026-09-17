@@ -109,7 +109,7 @@ if (consumers > 0 && guards < 2) {
 if (!/candles\.length > 0\)\s*return;/.test(chart)) {
   err(`${CHART}가 캔들 0개일 때만 빠져나가는 가드를 갖고 있지 않습니다`);
 }
-if (!/setState\('ERROR'\);[\s\S]{0,200}그릴 수 있는 캔들이 없습니다/.test(read(CHART))) {
+if (!/setPhase\('ERROR'\);[\s\S]{0,200}그릴 수 있는 캔들이 없습니다/.test(read(CHART))) {
   err(`${CHART}가 빈 차트를 오류로 적지 않습니다 — 빈 차트는 "거래가 없었다"로 읽힙니다`);
 }
 
@@ -129,6 +129,52 @@ if (!/setChartEpoch\s*\(/.test(chart)) {
   if (!/chartEpoch/.test(dataEffect)) {
     err(`${CHART}의 데이터 이펙트가 chartEpoch를 보지 않습니다 — 봉이 먼저 오면 영영 안 그려집니다`);
   }
+}
+
+// ── ★ 갱신 실패가 그려 둔 봉을 지우지 않는다 ──
+//
+// 실측: venue가 한 번 딸꾹하니 정상 캔들이 사라지고 오류 문구만 남았다.
+// 갱신은 "새 값을 못 받았다"이고 이미 받은 값은 여전히 그 시각의 사실이다.
+// 전환은 다르다 — 남은 봉이 다른 간격의 것이므로 지워야 한다.
+if (!/shouldClearBarsOnFailure\s*\(/.test(chart)) {
+  err(`${CHART}가 실패 시 봉을 지울지 판정하지 않습니다 — 갱신 실패가 차트를 비웁니다`);
+}
+if (!/const isSwitch = key !== barsKeyRef\.current;/.test(chart)) {
+  err(`${CHART}가 갱신과 전환을 구별하지 않습니다`);
+}
+// 조건 없는 `setBars(null)`이 남아 있으면 그 자리가 곧 증발 지점이다
+{
+  const unguarded = (chart.match(/setBars\(null\)/g) || []).length;
+  const guarded = (chart.match(/shouldClearBarsOnFailure\([^)]*\)\)\s*\{[\s\S]{0,120}?setBars\(null\)/g) || []).length;
+  const onSwitch = (chart.match(/if \(isSwitch\) \{[\s\S]{0,160}?setBars\(null\)/g) || []).length;
+  if (unguarded > guarded + onSwitch) {
+    err(`${CHART}에 조건 없는 setBars(null)이 있습니다 (${unguarded}곳 중 보호된 것 ${guarded + onSwitch}곳)`);
+  }
+}
+
+// ── ★ 보여줄 것이 있으면 덮지 않는다 ──
+//
+// 예전에는 이펙트에 들어가자마자 `setState('LOADING')`이라 30초마다
+// 오버레이가 캔들을 가렸다.
+if (!/showsBlockingOverlay\s*\(/.test(chart)) {
+  err(`${CHART}가 오버레이 판정을 chartLoadState에 묻지 않습니다`);
+}
+if (/setPhase\('FIRST_LOAD'\)/.test(chart)) {
+  err(`${CHART}가 최초 로딩 상태를 손으로 적습니다 — 갱신인지 전환인지 판정을 건너뜁니다`);
+}
+if (!/staleNotice\s*\(/.test(chart)) {
+  err(`${CHART}가 낡은 값을 낡았다고 말하지 않습니다`);
+}
+
+// ── ★ 캔들이 없으면 지표선도 없다 ──
+//
+// 실측: 캔들이 0개가 됐는데 옛 데이터로 그린 MA선만 남았다. 근거를 볼 수
+// 없는 이동평균선이고, 사용자는 그게 낡았다는 걸 알 방법이 없다.
+if (!/const undrawable = !indicatorAvailable\(id as IndicatorId, candles\.length\);/.test(chart)) {
+  err(`${CHART}가 그릴 수 없게 된 지표를 지우지 않습니다 — 캔들 없는 MA선이 남습니다`);
+}
+if (!/if \(off \|\| undrawable\)/.test(chart)) {
+  err(`${CHART}의 지표 제거 조건이 "꺼짐"만 봅니다`);
 }
 
 // ── ⑤ 주입 데이터가 제품 경로의 대체재가 아니다 ──
@@ -185,4 +231,5 @@ if (bad > 0) {
 }
 console.log('✅ 차트 권위 — 값 생성 없음 · 봉 출처 1곳 · 진행 중 봉 규칙 공유 ·'
   + ' 낡은 응답 폐기 · 빈 차트 비정상 표기 · 데이터 배선 확인 ·'
+  + ' 갱신 실패에 봉 보존 · 갱신 중 비차단 · 지표 동반 제거 ·'
   + ' fixture 비폴백 · 거래 화면 기본 차트는 우리 것');

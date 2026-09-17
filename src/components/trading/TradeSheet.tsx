@@ -32,6 +32,9 @@ import { targetRequestFields, type PaperTarget } from '@/lib/trading/paperTarget
 import {
   STOP_PCTS, previewStopPrice, stopChoiceOf, stopRequestFields,
 } from '@/lib/trading/stopPresets';
+import {
+  sectionVisible, toggleSnap, bookRowsFor, type SheetSnap,
+} from '@/lib/trading/sheetSnap';
 
 export type TradeSide = 'LONG' | 'SHORT';
 
@@ -50,6 +53,12 @@ export interface TradeSheetProps {
   onSubmitted?: () => void;
   onClose?: () => void;
   compact?: boolean;
+  /**
+   * 시트 자리. **HALF에서는 차트가 위에 남아 있다.**
+   * 어느 자리든 주문 버튼은 있다 (`sheetSnap`).
+   */
+  snap?: SheetSnap;
+  onSnapChange?: (s: SheetSnap) => void;
 }
 
 const LEVERAGES = [1, 3, 5, 10, 20, 50, 100];
@@ -57,7 +66,10 @@ const LEVERAGES = [1, 3, 5, 10, 20, 50, 100];
 export function TradeSheet({
   symbol, market, price, target, scope, availableBalance, availableUnknownReason,
   canOrder, blockedReason, onSubmitted, onClose, compact,
+  snap = 'EXPANDED', onSnapChange,
 }: TradeSheetProps) {
+  /** 이 칸을 지금 자리에서 그리는가 — 판정은 `sheetSnap` 하나에 있다 */
+  const show = (sec: string) => sectionVisible(sec, snap);
   const spot = market === 'SPOT';
   const [side, setSide] = useState<TradeSide>('LONG');
   const [marginMode, setMarginMode] = useState<MarginMode>('ISOLATED');
@@ -169,8 +181,29 @@ export function TradeSheet({
       }}
     >
       {onClose ? (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: FS.sub, fontWeight: 800, color: C.text }}>{symbol} 주문</span>
+          {/* ── 자리 전환 ──
+              **감춘 것을 말한다.** HALF에서 배율·손절 칸이 안 보이는데
+              아무 말이 없으면 사용자는 그 기능이 없다고 읽는다. 지금 값을
+              적어 두고, 누르면 펴진다. */}
+          {onSnapChange ? (
+            <button
+              type="button" onClick={() => onSnapChange(toggleSnap(snap))}
+              data-testid="trade-sheet-snap"
+              data-snap={snap}
+              style={{
+                flex: 1, minWidth: 0, padding: '5px 8px', borderRadius: 7,
+                background: C.raised, border: `1px solid ${C.hair}`, color: C.dim,
+                fontSize: FS.micro, fontWeight: 700, cursor: 'pointer',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}
+            >
+              {snap === 'HALF'
+                ? `${spot ? '현물' : `${marginMode === 'CROSSED' ? '교차' : '격리'} · ${lev}x`} · 설정 더보기 ▲`
+                : '접기 ▼'}
+            </button>
+          ) : null}
           <button type="button" onClick={onClose} className="switch"
             style={{ background: 'none', border: 'none', color: C.dim, fontSize: FS.title, cursor: 'pointer' }}>✕</button>
         </div>
@@ -183,14 +216,14 @@ export function TradeSheet({
         data-testid="trade-sheet-book"
         style={{ border: `1px solid ${C.hair}`, borderRadius: 8, overflow: 'hidden', background: C.bg }}
       >
-        {/* 5 매도 + 중간값 + 5 매수. 모바일에서는 압축 배치를 쓴다 —
-            실기에서 호가가 높이를 다 먹어 주문 버튼이 화면 밖으로 밀렸다. */}
-        <OrderBookView symbolId={symbol} market={market} rows={5} dense
+        {/* 줄 수는 자리가 정한다(`sheetSnap.bookRowsFor`). HALF에서 5줄씩
+            쓰면 호가만 245px이라 방향·수량 버튼이 스크롤 밖으로 밀린다. */}
+        <OrderBookView symbolId={symbol} market={market} rows={bookRowsFor(snap)} dense
           variant={compact ? 'compact' : 'full'} onPickPrice={undefined}/>
       </div>
 
       {/* ── 방향 ── */}
-      <div style={{ display: 'flex', gap: 6 }}>
+      {show('SIDE') && <div style={{ display: 'flex', gap: 6 }}>
         <SideBtn on={side === 'LONG'} tone="up" label={longLabel} onClick={() => setSide('LONG')}/>
         <SideBtn
           on={side === 'SHORT'} tone="down" label={shortLabel}
@@ -198,15 +231,15 @@ export function TradeSheet({
           title={unsupported(capShort) ? (capShort as any).reason : undefined}
           onClick={() => setSide('SHORT')}
         />
-      </div>
-      {unsupported(capShort) ? (
+      </div>}
+      {show('SIDE') && unsupported(capShort) ? (
         <div data-testid="trade-sheet-no-short" style={{ fontSize: FS.nano, color: C.faint }}>
           {(capShort as any).reason}
         </div>
       ) : null}
 
       {/* ── 마진 모드 · 배율 ── */}
-      {!unsupported(capMargin) ? (
+      {show('MARGIN_MODE') && !unsupported(capMargin) ? (
         <div style={{ display: 'flex', gap: 6 }}>
           {(['ISOLATED', 'CROSSED'] as MarginMode[]).map(m => (
             <button key={m} type="button" onClick={() => setMarginMode(m)}
@@ -222,7 +255,7 @@ export function TradeSheet({
         </div>
       ) : null}
 
-      {!unsupported(capLev) ? (
+      {show('LEVERAGE') && !unsupported(capLev) ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: FS.micro, color: C.dim, fontWeight: 700 }}>
             배율 <span style={{ ...NUM, color: C.accent }}>{lev}x</span>
@@ -242,26 +275,26 @@ export function TradeSheet({
             ))}
           </div>
         </div>
-      ) : (
+      ) : show('LEVERAGE') ? (
         <div style={{ fontSize: FS.nano, color: C.faint }}>{(capLev as any).reason}</div>
-      )}
+      ) : null}
 
       {/* ── 0~100% 슬라이더 ── */}
-      <SizingSlider
+      {show('SIZING') && <SizingSlider
         availableBalance={availableBalance}
         unknownReason={availableUnknownReason}
         percent={percent} onPercent={setPercent}
         price={price} leverage={lev} scope={scope}
         symbol={symbol.replace(/USDT$/, '')}
         disabled={!canOrder}
-      />
+      />}
 
       {/* ── TP / SL ── */}
       {/* 손절 거리 프리셋은 기존 주문폼(1·2·3·5·10%)에서 그대로 가져왔다.
           **사이징이 아니다** — 위 슬라이더는 "얼마나 크게 들어갈까"이고
           이 줄은 "어디서 나올까"다. 같은 퍼센트처럼 보인다고 묶으면 서로
           다른 결정을 한 칸에서 하게 된다. */}
-      {!unsupported(capSl) ? (
+      {show('STOP_PRESETS') && !unsupported(capSl) ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: FS.micro, color: C.dim, fontWeight: 700 }}>손절 거리</span>
           <div style={{ display: 'flex', gap: 4 }}>
@@ -286,7 +319,7 @@ export function TradeSheet({
         </div>
       ) : null}
 
-      <div style={{ display: 'flex', gap: 6 }}>
+      {show('TP_SL') && <div style={{ display: 'flex', gap: 6 }}>
         <Field
           label="익절 (TP)" value={tp} onChange={setTp}
           disabled={unsupported(capTp)} reason={(capTp as any).reason}
@@ -297,10 +330,10 @@ export function TradeSheet({
           disabled={unsupported(capSl)} reason={(capSl as any).reason}
           testid="trade-sheet-sl"
         />
-      </div>
+      </div>}
 
       {/* ── 예상치 — 서버와 같은 함수가 낸 값 ── */}
-      <div data-testid="trade-sheet-estimate"
+      {show('ESTIMATE') && <div data-testid="trade-sheet-estimate"
         style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: FS.micro,
           background: C.raised, borderRadius: 8, padding: '8px 10px' }}>
         <Est label="예상 증거금" value={preview.ok ? money(preview.requiredMargin) : '—'}/>
@@ -311,7 +344,7 @@ export function TradeSheet({
         {!preview.ok && quantity != null && quantity > 0 ? (
           <div style={{ color: C.warn, lineHeight: 1.5, marginTop: 2 }}>{preview.reason}</div>
         ) : null}
-      </div>
+      </div>}
 
       {/* ── 최종 버튼 ── */}
       {!canOrder && blockedReason ? (

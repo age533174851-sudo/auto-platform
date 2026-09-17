@@ -41,6 +41,9 @@ import {
 import { paperOrderUiWiring } from '@/lib/trading/capability';
 import type { IndicatorId } from '@/lib/trading/indicators';
 import type { MoneyScope } from '@/lib/trading/gameMoney';
+import {
+  DEFAULT_SNAP, sheetHeightVh, type SheetSnap,
+} from '@/lib/trading/sheetSnap';
 
 export interface TradingWorkspaceProps {
   symbol: string;
@@ -69,6 +72,13 @@ export function TradingWorkspace({
   const [interval, setInterval] = useState<ChartInterval>('15m');
   const [indicators, setIndicators] = useState<IndicatorId[]>(['MA7', 'MA25']);
   const [sheetOpen, setSheetOpen] = useState(false);
+  /**
+   * 시트 자리. **기본은 HALF** — 위에 차트가 남는다.
+   *
+   * 실측(360×800)에서 시트가 차트를 100% 가렸다. 차트를 보면서 진입하라고
+   * 만든 화면인데 주문하려는 순간 차트가 사라졌다.
+   */
+  const [snap, setSnap] = useState<SheetSnap>(DEFAULT_SNAP);
 
   const stream = useBinanceStream(symbol, true, market);
   const [target] = usePaperTarget();
@@ -109,6 +119,8 @@ export function TradingWorkspace({
       blockedReason={blockedReason}
       onSubmitted={ledger.reload}
       onClose={() => setSheetOpen(false)}
+      snap={snap}
+      onSnapChange={setSnap}
       compact
     />
   ) : (
@@ -155,8 +167,10 @@ export function TradingWorkspace({
           background: C.panel, borderTop: `1px solid ${C.hair}`,
         }}
       >
-        <CtaBtn label={longLabel} tone="up" onClick={() => setSheetOpen(true)}/>
-        <CtaBtn label={shortLabel} tone="down" onClick={() => setSheetOpen(true)}/>
+        {/* 열 때는 늘 HALF다. 지난번 확장 상태를 기억하면 차트가 가려진 채로
+            시작하고, 그러면 이 자리를 만든 이유가 없어진다. */}
+        <CtaBtn label={longLabel} tone="up" onClick={() => { setSnap(DEFAULT_SNAP); setSheetOpen(true); }}/>
+        <CtaBtn label={shortLabel} tone="down" onClick={() => { setSnap(DEFAULT_SNAP); setSheetOpen(true); }}/>
       </div>
 
       {sheetOpen ? (
@@ -164,15 +178,20 @@ export function TradingWorkspace({
           data-testid="workspace-sheet"
           style={{
             position: 'fixed', inset: 0, zIndex: 60,
-            background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-end',
+            // **위쪽을 어둡게 덮지 않는다.** 시트를 반만 올린 이유가 차트를
+            // 보려는 것인데, 그 위에 딤을 씌우면 안 보이는 것과 같다.
+            background: 'transparent', display: 'flex', alignItems: 'flex-end',
           }}
           onClick={() => setSheetOpen(false)}
         >
           <div onClick={e => e.stopPropagation()}
+            data-snap={snap}
             style={{
-              width: '100%', maxHeight: '88vh', overflowY: 'auto',
+              // 높이는 `sheetSnap`이 정한다. 여기서 숫자를 다시 적지 않는다.
+              width: '100%', height: `${sheetHeightVh(snap)}vh`, overflowY: 'auto',
               paddingBottom: 'var(--nav-h, 0px)',
               borderTopLeftRadius: 14, borderTopRightRadius: 14, background: C.panel,
+              transition: 'height 160ms ease',
             }}>
             {sheetBody}
           </div>

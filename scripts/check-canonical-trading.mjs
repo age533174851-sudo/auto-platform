@@ -158,6 +158,44 @@ for (const route of ['/api/binance/futures/order', '/api/binance/spot/order', '/
   }
 }
 
+// ── ★ 주문 시트가 차트를 다 가리지 않는다 ──
+//
+// 실측(360×800): 시트를 열면 차트가 **100% 가려졌다.** 차트를 보면서
+// 진입하라고 만든 화면인데 주문하려는 순간 차트가 사라진다.
+{
+  const snapMod = code(read('src/lib/trading/sheetSnap.ts'));
+  if (!/snap === 'EXPANDED' \? 88 : 52/.test(snapMod)) {
+    err('sheetSnap의 자리 높이가 바뀌었습니다 — HALF에서 차트가 남는지 다시 확인하세요');
+  }
+  if (!/export const DEFAULT_SNAP: SheetSnap = 'HALF';/.test(snapMod)) {
+    err('시트가 기본으로 화면을 다 덮는 자리에서 열립니다');
+  }
+  // 어느 자리에서도 주문을 끝낼 수 있어야 한다
+  if (!/const IN_HALF: SheetSection\[\] = \[[^\]]*'SUBMIT'/.test(snapMod)) {
+    err('HALF에서 주문 버튼이 빠졌습니다 — 주문하려면 먼저 펴야 하는 단계가 생깁니다');
+  }
+  for (const must of ['BOOK', 'SIDE', 'SIZING']) {
+    if (!new RegExp(`const IN_HALF: SheetSection\\[\\] = \\[[^\\]]*'${must}'`).test(snapMod)) {
+      err(`HALF에 ${must}가 없습니다 — 호가·방향·수량 없이 주문할 수 없습니다`);
+    }
+  }
+  // 워크스페이스가 그 높이를 실제로 쓰는가
+  if (!/sheetHeightVh\(snap\)/.test(workspace)) {
+    err(`${WORKSPACE}가 시트 높이를 sheetSnap에 묻지 않습니다`);
+  }
+  if (/maxHeight: '88vh'/.test(workspace)) {
+    err(`${WORKSPACE}가 시트 높이를 손으로 적습니다 — 자리 계약과 갈립니다`);
+  }
+  // 반만 올린 시트 위에 딤을 씌우면 차트를 가린 것과 같다
+  if (/background: 'rgba\(0,0,0,0\.\d+\)', display: 'flex', alignItems: 'flex-end'/.test(workspace)) {
+    err(`${WORKSPACE}가 시트 위쪽을 어둡게 덮습니다 — 차트를 보려고 반만 올린 것입니다`);
+  }
+  // 시트가 자리 판정을 스스로 다시 적지 않는가
+  if (!/sectionVisible\(sec, snap\)/.test(sheet)) {
+    err(`${SHEET}가 칸 표시 판정을 sheetSnap에 묻지 않습니다`);
+  }
+}
+
 // ── ⑧ 도달할 수 없는 화면을 되살리지 않는다 ──
 //
 // `TradingPage.tsx`는 `renderPage()`의 case로만 닿는데, `renderPage()`는
@@ -181,4 +219,4 @@ if (bad > 0) {
 }
 console.log('✅ 정본 거래 화면 — 매매 탭에 붙음 · 세로/가로 한 벌 · 렌더 1곳 ·'
   + ' 사이징 슬라이더 1개 · 손절 거리 보존 · 실거래 비가로채기 ·'
-  + ' 비로그인 fail-closed');
+  + ' 비로그인 fail-closed · 시트 2단 자리(차트 보존)');

@@ -35,6 +35,11 @@ import {
 import {
   INDICATORS, computeIndicator, indicatorAvailable, type IndicatorId,
 } from '@/lib/trading/indicators';
+import {
+  phaseOnStart, phaseOnSuccess, phaseOnFailure, shouldClearBarsOnFailure,
+  showsBlockingOverlay, staleNotice, requestKeyOf, barsMatchRequest,
+  type ChartPhase,
+} from '@/lib/trading/chartLoadState';
 
 export const CHART_INTERVALS = [
   { id: '1m', label: '1m' },
@@ -59,7 +64,8 @@ export interface PriceChartProps {
   fixtureBars?: any;
 }
 
-type LoadState = 'LOADING' | 'READY' | 'ERROR';
+// 상태 판정은 `chartLoadState`에 있다. 여기서 다시 적지 않는다 —
+// 갱신과 전환을 구별하는 규칙이 두 곳에 있으면 언젠가 갈린다.
 
 export function PriceChart({
   symbol, market = 'USDM', interval, onIntervalChange,
@@ -83,7 +89,11 @@ export function PriceChart({
   const [chartEpoch, setChartEpoch] = useState(0);
 
   const [bars, setBars] = useState<any>(null);
-  const [state, setState] = useState<LoadState>('LOADING');
+  /** 이 봉이 **어느 요청의 결과인가.** 간격을 바꾸면 이전 봉은 이 화면 값이 아니다 */
+  const [barsKey, setBarsKey] = useState<string | null>(null);
+  /** 이펙트 안에서 읽는 사본. 상태를 의존성에 넣으면 재요청이 무한해진다 */
+  const barsKeyRef = useRef<string | null>(null);
+  const [phase, setPhase] = useState<ChartPhase>('FIRST_LOAD');
   const [err, setErr] = useState<string | null>(null);
   const [expectedMs, setExpectedMs] = useState<number | null>(null);
 
@@ -101,12 +111,29 @@ export function PriceChart({
   useEffect(() => {
     if (fixtureBars) {
       // **주입은 시험·스토리 전용이다.** 제품 경로는 아래 fetch만 탄다.
-      setBars(fixtureBars); setState('READY'); setErr(null);
+      const k = requestKeyOf(symbol, interval, market);
+      setBars(fixtureBars); setBarsKey(k); barsKeyRef.current = k;
+      setPhase(phaseOnSuccess()); setErr(null);
       return;
     }
     let alive = true;
     const gen = ++genRef.current;
-    setState('LOADING'); setErr(null);
+
+    // ── 갱신인가 전환인가 ──
+    //
+    // 주기 갱신은 "같은 화면의 새 값"이고, 간격·종목·시장 전환은 "다른
+    // 화면"이다. 실패했을 때 할 일이 정반대다 — 전자는 마지막 값을 두고,
+    // 후자는 지운다(남겨 두면 다른 간격을 현재로 읽는다).
+    const key = requestKeyOf(symbol, interval, market);
+    const isSwitch = key !== barsKeyRef.current;
+    const hasBars = barsKeyRef.current !== null;
+
+    if (isSwitch) {
+      // 이전 간격의 봉은 이 화면의 값이 아니다.
+      setBars(null); setBarsKey(null); barsKeyRef.current = null;
+    }
+    setPhase(phaseOnStart({ isSwitch, hasBars: hasBars && !isSwitch }));
+    setErr(null);
 
     (async () => {
       try {
@@ -118,26 +145,35 @@ export function PriceChart({
         if (!alive || !isFreshResponse(gen, genRef.current)) return;
         if (j?.ok && j.bars) {
           setBars(j.bars);
+          setBarsKey(key); barsKeyRef.current = key;
           setExpectedMs(Number.isFinite(Number(j.intervalMs)) ? Number(j.intervalMs) : null);
-          setState('READY');
+          setPhase(phaseOnSuccess());
           // 여기서 READY라고 적어도, 그 봉으로 **캔들이 한 개도 안 나오면**
           // 화면은 빈 차트가 된다. 그 판정은 candles를 실제로 만들어 본 뒤에
           // 아래 useEffect가 다시 한다 — `ok: true`는 "응답을 받았다"이지
           // "그릴 것이 있다"가 아니다.
         } else {
-          setBars(null);
+          // **갱신 실패는 그려 둔 봉을 지우지 않는다.** 이것이 "차트 증발"이었다.
+          if (shouldClearBarsOnFailure({ isSwitch })) {
+            setBars(null); setBarsKey(null); barsKeyRef.current = null;
+          }
           setErr(String(j?.message ?? '봉을 받지 못했습니다'));
-          setState('ERROR');
+          setPhase(phaseOnFailure({ isSwitch, hasBars: barsKeyRef.current !== null }));
         }
       } catch (e: any) {
         if (!alive || !isFreshResponse(gen, genRef.current)) return;
-        setBars(null);
+        if (shouldClearBarsOnFailure({ isSwitch })) {
+          setBars(null); setBarsKey(null); barsKeyRef.current = null;
+        }
         setErr(`봉을 받지 못했습니다 — ${String(e?.message || e).slice(0, 120)}`);
-        setState('ERROR');
+        setPhase(phaseOnFailure({ isSwitch, hasBars: barsKeyRef.current !== null }));
       }
     })();
 
     return () => { alive = false; };
+    // `barsKey`는 **읽기만** 한다(ref로 본다). 의존성에 넣으면 성공할 때마다
+    // 이펙트가 다시 돌아 무한 재요청이 된다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, interval, market, fixtureBars, refreshTick]);
 
   // 주기 갱신 — 진행 중 봉과 새로 닫힌 봉을 **venue에서 다시 받는다.**
@@ -167,11 +203,11 @@ export function PriceChart({
   // 빈 차트는 "거래가 없었다"로 읽힌다 — 이 파일이 이미 오류 상태에서
   // 막으려던 그 오해다.
   useEffect(() => {
-    if (state !== 'READY') return;
+    if (phase !== 'READY') return;
     if (candles.length > 0) return;
-    setState('ERROR');
+    setPhase('ERROR');
     setErr('봉을 받았지만 그릴 수 있는 캔들이 없습니다 — 거래가 없었다는 뜻이 아닙니다');
-  }, [state, candles.length]);
+  }, [phase, candles.length]);
 
   /** 받은 봉이 고른 간격의 것인가. 판단할 수 없으면 null — 경고하지 않는다. */
   const intervalOk = useMemo(
@@ -245,9 +281,18 @@ export function PriceChart({
     if (!chart) return;
     (async () => {
       const lw: any = await import('lightweight-charts');
-      // 꺼진 것은 지운다
+      // ── 지울 것을 먼저 지운다 ──
+      //
+      // 사용자가 끈 지표뿐 아니라 **더 이상 그릴 수 없게 된 지표**도 지운다.
+      //
+      // 실측에서 잡힌 결함이 이것이었다: 갱신이 실패해 캔들이 0개가 됐는데,
+      // 아래 루프가 `indicatorAvailable`에서 `continue`로 빠져나가는 바람에
+      // **옛 데이터로 그린 MA선만 화면에 남았다.** 캔들 없는 이동평균선은
+      // 근거를 볼 수 없는 선이고, 사용자는 그게 낡았다는 걸 알 방법이 없다.
       for (const [id, s] of lineRefs.current) {
-        if (indicators.indexOf(id as IndicatorId) < 0) {
+        const off = indicators.indexOf(id as IndicatorId) < 0;
+        const undrawable = !indicatorAvailable(id as IndicatorId, candles.length);
+        if (off || undrawable) {
           try { chart.removeSeries(s); } catch { /* 이미 없다 */ }
           lineRefs.current.delete(id);
         }
@@ -308,21 +353,32 @@ export function PriceChart({
 
       {/* 차트 */}
       <div style={{ position: 'relative', height, minHeight: 0 }}>
-        <div ref={boxRef} data-testid="chart-canvas" data-chart-state={state}
+        <div ref={boxRef} data-testid="chart-canvas" data-chart-state={phase}
           style={{ position: 'absolute', inset: 0 }}/>
-        {/* **못 받은 것을 빈 차트로 두지 않는다.** 빈 차트는 "거래가 없었다"로 읽힌다 */}
-        {state !== 'READY' && (
-          <div data-testid={state === 'ERROR' ? 'price-chart-error' : 'price-chart-loading'} style={{
+        {/* **보여줄 것이 있으면 덮지 않는다.**
+            예전에는 30초마다 갱신이 돌 때마다 이 층이 캔들을 가렸고,
+            갱신 한 번 실패하면 봉까지 지워 화면이 비었다. 이제 덮는 경우는
+            최초 로딩과 "보여줄 것이 없음" 둘뿐이다(`chartLoadState`). */}
+        {showsBlockingOverlay(phase) && (
+          <div data-testid={phase === 'ERROR' ? 'price-chart-error' : 'price-chart-loading'} style={{
             position: 'absolute', inset: 0, display: 'flex',
             alignItems: 'center', justifyContent: 'center',
-            color: state === 'ERROR' ? C.down : C.faint,
+            color: phase === 'ERROR' ? C.down : C.faint,
             fontSize: FS.small, textAlign: 'center', padding: 16,
           }}>
-            {state === 'LOADING' ? '봉을 받는 중…' : (err ?? '봉을 받지 못했습니다')}
+            {phase === 'FIRST_LOAD' ? '봉을 받는 중…' : (err ?? '봉을 받지 못했습니다')}
           </div>
         )}
+        {/* 낡은 값을 보고 있다는 사실은 숨기지 않는다 — 덮지도 않는다 */}
+        {staleNotice(phase) && (
+          <div data-testid="price-chart-stale" style={{
+            position: 'absolute', top: 6, right: 8, zIndex: 3,
+            background: C.raised, border: `1px solid ${C.warn}`, color: C.warn,
+            borderRadius: 6, padding: '3px 7px', fontSize: FS.micro, fontWeight: 700,
+          }}>{staleNotice(phase)}</div>
+        )}
         {/* venue가 엉뚱한 간격을 줬을 때. 세대 번호는 우리 실수만 막는다 */}
-        {state === 'READY' && intervalOk === false && (
+        {phase === 'READY' && intervalOk === false && (
           <div style={{
             position: 'absolute', top: 6, left: 8, zIndex: 3,
             background: C.raised, border: `1px solid ${C.down}`, color: C.down,
