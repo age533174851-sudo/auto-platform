@@ -119,9 +119,106 @@ const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).joi
   }
 }
 
+// ── ⑥ 종목 상세가 정본만 읽는가 ──
+//
+// 새 화면이 지어낸 값을 물려받는 것이 가장 쉬운 사고다. 상세 화면이
+// 만들어지는 순간 `MOCK_NEWS`·`MCAP`·`AutoBotLabPage`의 손으로 적은
+// 펀더멘털이 전부 "그럴듯한 칸"을 채울 후보가 된다.
+{
+  const d = code(read('src/components/instrument/InstrumentDetail.tsx'));
+  if (!d) err('종목 상세 화면을 찾지 못했습니다');
+
+  // 지어낸 기사 경로를 부르지 않는다. 정본은 stored 하나다.
+  if (/\/api\/market\/news/.test(d)) {
+    err('상세 화면이 지어낸 기사 경로를 읽습니다 — 정본은 /api/news/stored입니다');
+  }
+  if (!/\/api\/news\/stored/.test(d)) {
+    err('상세 화면이 정본 뉴스를 읽지 않습니다');
+  }
+  if (!/affectedAssets/.test(d)) {
+    err('상세 화면이 이 종목과 매핑된 기사만 거르지 않습니다');
+  }
+  // 손으로 적은 펀더멘털/시총을 끌어오지 않는다.
+  for (const banned of [/AutoBotLab/, /MCAP/, /roe/i, /opMargin/, /debtRatio/]) {
+    if (banned.test(d)) {
+      err(`상세 화면이 손으로 적은 펀더멘털을 씁니다 (${banned})`);
+    }
+  }
+  // 칸을 그려도 되는지 먼저 묻는다.
+  if (!/instrumentFieldPlan\(/.test(d)) {
+    err('상세 화면이 칸 권위를 묻지 않습니다 — 출처 없는 칸이 생깁니다');
+  }
+  // 변동률 기준을 스스로 정하지 않는다.
+  if (!/changeView\(/.test(d)) {
+    err('상세 화면이 변동률 기준을 정본에 묻지 않습니다');
+  }
+  // 보유는 주문과 같은 장부에서 온다.
+  if (/\/api\/paper\/account/.test(d)) {
+    err('상세 화면이 기본 계좌 라우트를 읽습니다 — 챌린지에서 장부가 갈립니다');
+  }
+  if (!/usePaperLedger\(/.test(d) || !/usePaperTarget\(/.test(d)) {
+    err('상세 화면의 보유가 정본 장부에서 오지 않습니다');
+  }
+  // 미실현 손익 정본이 없으므로 여기서 만들지 않는다.
+  for (const banned of [/unrealized/i, /roe[A-Z]/, /pnlPct/]) {
+    if (banned.test(d)) err(`상세 화면이 손익을 스스로 계산합니다 (${banned})`);
+  }
+}
+
+// ── ⑦ 상세 화면이 사람이 다니는 길에 붙어 있는가 ──
+//
+// 만들어 놓고 안 거는 것이 이 저장소의 1번 고장이다. 그리고 예전 모달과
+// 새 상세가 **동시에** 정본이 되면 둘이 갈린다.
+{
+  const page = code(read('src/app/page.tsx'));
+  if (!/<InstrumentDetail/.test(page)) {
+    err('page.tsx가 종목 상세를 그리지 않습니다 — 만들어 놓고 안 걸었습니다');
+  }
+  if (!/detailTargetOf\(/.test(page)) {
+    err('page.tsx가 상세 대상 판단을 정본에 묻지 않습니다');
+  }
+  // 하나만 뜬다 — 삼항으로 갈려 있어야 한다.
+  if (!/detailTarget \? \(/.test(page)) {
+    err('새 상세와 옛 모달이 동시에 뜰 수 있습니다 — 정본이 둘이 됩니다');
+  }
+  // 도달 불가였던 옛 거래 화면을 되살리지 않는다.
+  const tp = code(read('src/components/pages/TradingPage.tsx'));
+  if (/<InstrumentDetail/.test(tp)) {
+    err('도달 불가 화면(TradingPage)에 상세를 붙였습니다');
+  }
+}
+
+// ── ⑧ 목록 순위가 통화를 섞지 않는가 ──
+{
+  const rank = code(read('src/lib/markets/ranking.ts'));
+  const market = code(read('src/components/pages/MarketPage.tsx'));
+  if (!/export const MARKET_CAP_RANKING_AVAILABLE = false;/.test(rank)) {
+    err('시총순이 고를 수 있게 열려 있습니다 — 정본 공급자가 없습니다');
+  }
+  // 통화별로 나눠 비교하는가. **묶는 코드가 실제로 있어야 한다.**
+  // **이름이 아니라 묶는 키를 본다.** 처음에는 `byCurrency`라는 낱말만
+  // 찾았는데, 그러면 키를 상수로 바꿔 통화를 다 합쳐도 통과한다 —
+  // 실제로 뮤테이션이 그 틈으로 살아남았다.
+  if (!/byCurrency\.get\(tv\.currency\)/.test(rank)
+    || !/byCurrency\.set\(tv\.currency,/.test(rank)) {
+    err('거래대금 순위가 통화별로 나누지 않습니다 — 환율을 1로 쓰는 셈입니다');
+  }
+  if (!/useState\('tradingValue'\)/.test(market)) {
+    err('목록 기본 정렬이 거래대금이 아닙니다');
+  }
+  if (/sort === 'price'/.test(market)) {
+    err('주당 가격순이 목록 정렬에 남아 있습니다');
+  }
+  // 표시용 환산가로 줄 세우지 않는다.
+  if (/quotePrice: a\.p\b/.test(market)) {
+    err('표시용 환산가로 순위를 냅니다 — 상수가 순위를 정하게 됩니다');
+  }
+}
+
 if (bad > 0) {
   console.error(`\n시장 데이터 정직성 검사 실패 (${bad}건)`);
   process.exit(1);
 }
 console.log('✅ 시장 데이터 정직성 — 지어낸 기사 비노출 · 시총 표 격리 ·'
-  + ' 주기 능력표 1곳 · 변동률 기준 구분 · 칩 비수축');
+  + ' 주기 능력표 1곳 · 변동률 기준 구분 · 칩 비수축 ·'
+  + ' 상세 정본 전용 · 상세 배선 1곳 · 순위 통화 분리');

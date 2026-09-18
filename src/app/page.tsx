@@ -37,6 +37,8 @@ type IconComp = LucideIcon;
 // ── Static imports (small/critical for first paint) ──────────
 import PosterLibrary from '@/components/PosterLibrary';
 import AssetDetailModal from '@/components/AssetDetailModal';
+import { InstrumentDetail, type OrderIntent } from '@/components/instrument/InstrumentDetail';
+import { detailTargetOf } from '@/lib/markets/instrumentRoute';
 import ConfirmHost from '@/components/ConfirmHost';
 import LoginModal from '@/components/LoginModal';
 import SafetyDashboard from '@/components/SafetyDashboard';
@@ -598,6 +600,22 @@ export default function App() {
   const [activeAsset,setActiveAsset]=useState<any>(null);
   const [detailAsset,setDetailAsset]=useState<any>(null);
   const openDetail=useCallback((asset:any)=>{ if(asset) setDetailAsset(asset); },[]);
+  // 인증 헤더는 터미널과 **같은 정본**에서 온다(`watchAuthToken`).
+  // 여기서 토큰을 따로 읽으면 두 화면이 다른 로그인 상태를 본다.
+  const [authHeader,setAuthHeader]=useState('');
+  useEffect(()=>{
+    let stop:any;
+    (async()=>{
+      try{
+        const { watchAuthToken }=await import('@/lib/auth/authToken');
+        stop=watchAuthToken((t:string)=>setAuthHeader(t));
+      }catch{}
+    })();
+    return ()=>{ try{ stop&&stop(); }catch{} };
+  },[]);
+  // 이 자산의 시세를 어디서 읽을지 정해지는가. 못 정하면 전체 화면 상세를
+  // 열지 않는다 — 빈 차트를 띄우느니 예전 창이 낫다.
+  const detailTarget=useMemo(()=>detailTargetOf(detailAsset),[detailAsset]);
   const [pnlPrefill,setPnlPrefill]=useState<any>(null);
 
   // ── 뒤로가기로 모달 닫기 ──
@@ -971,6 +989,45 @@ export default function App() {
         onSuccess={()=>{ const a=pendingAction.current; pendingAction.current=null; if(a) setTimeout(a,100); }}
         onGoEmail={()=>{ if(typeof window!=='undefined') window.location.href='/auth'; }}
       />
+      {/* ── 종목 상세 — **전체 화면이다** ──
+
+          예전에는 `AssetDetailModal`이 작은 창으로 떴고, 거기서 주문으로
+          가는 길이 없었다. 목록에서 종목을 눌러도 **보는 것으로 끝났다.**
+
+          이제 시세 출처를 아는 종목(`detailTargetOf`)은 전체 화면 상세로
+          간다. 아직 출처를 못 정하는 자산(지수·원자재 등)은 예전 창을
+          그대로 쓴다 — 없는 시세를 지어내느니 예전 화면이 낫다.
+
+          둘이 동시에 정본이 되면 안 된다. 그래서 **하나만 뜬다.** */}
+      {detailTarget ? (
+        <div data-testid="instrument-detail-host" style={{
+          // ★ z는 **지어낸 값이 아니라** 이 화면이 대신하는 것에서 온다.
+          //
+          // 처음에 60으로 뒀더니 전역 하단 탭(`.bottom-nav`, fixed,
+          // z-index 100)이 위에 얹혀 **매수/매도 줄을 덮었다.** 화면에는
+          // 버튼이 보이는데 `elementFromPoint`로 찍으면 탭바가 나왔다 —
+          // 8개 폭 전부에서 그랬다.
+          //
+          // 이 화면은 `AssetDetailModal`의 후임이고 그 모달이 10050이다.
+          // 같은 층을 쓴다. 전체화면 상세가 열려 있는 동안 탭 전환은
+          // 뒤로 버튼으로 나간 뒤에 한다.
+          position:'fixed', inset:0, zIndex:10050, background:T.bg,
+        }}>
+          <InstrumentDetail
+            symbol={detailTarget.symbol}
+            market={detailTarget.market}
+            name={detailTarget.name}
+            auth={authHeader||undefined}
+            onBack={()=>setDetailAsset(null)}
+            onOrder={(i:OrderIntent)=>{
+              // Phase 3에서 주문 화면이 붙는 자리. 지금은 기존 거래 경로로
+              // 보낸다 — 가짜 주문창을 만들지 않는다.
+              setDetailAsset(null);
+              openAsset({ ...detailAsset, _side:i.side }, 'trading');
+            }}
+          />
+        </div>
+      ) : (
       <AssetDetailModal
         asset={detailAsset}
         currency={currency}
@@ -980,6 +1037,7 @@ export default function App() {
         onPnL={openPnL}
         onNav={nav}
       />
+      )}
       <div suppressHydrationWarning className="aw"
         data-left={leftMode} data-right={effRightMode} data-rail-overlay={railOverlay?'1':undefined}
         style={{background:T.bg,minHeight:'-webkit-fill-available' as any,color:T.txt,
