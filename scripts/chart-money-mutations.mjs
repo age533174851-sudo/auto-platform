@@ -51,6 +51,7 @@ const FILES = [
   'src/app/api/paper/order/route.ts',
   'src/app/api/paper/positions/route.ts',
   'src/app/api/paper/account/route.ts',
+  'src/components/trading/PositionRow.tsx',
 ];
 const canonical = new Map(FILES.map(f => [f, readFileSync(f, 'utf8')]));
 const restore = () => { for (const [f, s] of canonical) writeFileSync(f, s); };
@@ -229,6 +230,32 @@ const MUTATIONS = [
   { name: '차트 바닥을 격자선만 남는 높이로 내린다',
     file: 'src/lib/trading/oneScreen.ts',
     cut: ["export const CHART_MIN_H = 96;", "export const CHART_MIN_H = 52;"] },
+
+  // ══ 포지션을 다른 계좌에서 읽는다 ══
+  //
+  // 챌린지 장부로 주문하고 기본 계좌 포지션을 보는 고장은 화면에
+  // 오류를 남기지 않는다 — 그냥 "포지션이 없네"로 읽힌다.
+  { name: '포지션 줄이 기본 계좌 라우트를 읽는다 — 챌린지에서 장부가 갈라진다',
+    file: 'src/components/trading/PositionRow.tsx',
+    cut: ["'/api/paper/close'", "'/api/paper/account'"] },
+  { name: '포지션 줄이 스스로 장부를 다시 읽는다',
+    file: 'src/components/trading/PositionRow.tsx',
+    cut: ["  const [busyId, setBusyId] = useState<string | null>(null);",
+          "  const [busyId, setBusyId] = useState<string | null>(null);\n  usePaperAccount(true);"] },
+  { name: '화면이 주문 장부 대신 빈 목록을 넘긴다 — 포지션이 안 보인다',
+    file: 'src/components/trading/TradingWorkspace.tsx',
+    cut: ["  const openPositions = paperOrders && auth ? ledger.openPositions : [];",
+          "  const openPositions: any[] = [];"] },
+  { name: '청산 뒤에 장부를 다시 읽지 않는다',
+    file: 'src/components/trading/TradingWorkspace.tsx',
+    cut: ["          onClosed={ledger.reload}", "          onClosed={() => {}}"] },
+  { name: '같은 사유를 슬라이더 안에도 다시 적는다',
+    file: 'src/components/trading/SizingSlider.tsx',
+    cut: ["      {locked ? null : plan.code === 'OK' ? (",
+          "      {locked ? (<div data-testid=\"sizing-locked\">{'모름'}</div>) : plan.code === 'OK' ? ("] },
+  { name: '손절거리 라벨을 다시 두 줄로 쪼개다',
+    file: 'src/components/trading/OrderControls.tsx',
+    cut: ["          }}>손절거리</span>", "          }}>손절<br/>거리</span>"] },
 
   // ══ 권위가 조용히 갈라진다 ══
   //

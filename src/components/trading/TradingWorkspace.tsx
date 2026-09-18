@@ -35,6 +35,7 @@ import { MarketHeader } from './MarketHeader';
 import { PriceChart, type ChartInterval } from './PriceChart';
 import { OrderBookView } from './OrderBookView';
 import { OrderControls, OrderEstimate } from './OrderControls';
+import { PositionRow } from './PositionRow';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { usePaperLedger } from '@/lib/trading/usePaperLedger';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
@@ -127,11 +128,17 @@ export function TradingWorkspace({
 
   // 세로도 같다. **남는 높이를 나눈다** — 상수로 박은 예산은 320×600에서
   // 틀렸고, 그때 LONG/SHORT가 슬라이더를 덮었다(`coreBudget` 주석).
+  // 열린 포지션이 있으면 그 줄도 통 안에 들어간다. **있을 때만** 예산을
+  // 쓴다 — 없을 때까지 자리를 비워 두면 평소에 차트가 작아진다.
+  const openPositions = paperOrders && auth ? ledger.openPositions : [];
   const bounded = typeof coreHeight === 'number' && coreHeight > 0;
-  const budget = coreBudget(coreHeight, headH);
+  const budget = coreBudget(coreHeight, headH, openPositions.length > 0);
+  // 통이 짧으면 포지션 줄을 통 **밖**에 둔다. 안에 욱여넣으면 그 34px이
+  // 호가에서 나가고, 매수 3줄 중 하나가 말없이 밀려 나간다(320×600).
+  const rowInside = !bounded || budget.positionInCore;
   const chartPx = bounded ? budget.chartHeight : chartHeight;
 
-  return (
+  const core = (
     <div
       data-testid="trading-workspace" data-layout="one-screen" data-trade-mode={tradeMode}
       data-bounded={bounded ? '1' : '0'}
@@ -197,7 +204,6 @@ export function TradingWorkspace({
             <OrderControls
               form={form} symbol={symbol} scope={scope}
               availableBalance={auth ? ledger.available : null}
-              availableUnknownReason={availableUnknownReason}
               canOrder={canOrder}
             />
           </div>
@@ -250,8 +256,34 @@ export function TradingWorkspace({
             unavailable={form.shortDisabled}/>
         </div>
       ) : null}
+
+      {/* ⑥ 열린 포지션 — **주문에 쓰는 바로 그 장부에서 온다**
+
+          `usePaperLedger(target, …)` 결과를 그대로 받는다. 다시 읽지
+          않으므로 챌린지 장부로 주문하고 기본 계좌 포지션을 보는 일이
+          생길 수 없다(`BottomDock`은 `/api/paper/account`를 읽어서 늘
+          `is_default` 계좌를 본다). */}
+      {paperOrders && rowInside ? (
+        <PositionRow
+          positions={openPositions}
+          auth={auth}
+          onClosed={ledger.reload}
+        />
+      ) : null}
     </div>
   );
+
+  // 통 안에 자리가 없으면 **통 밖**에 붙인다. 조금 내리면 보이고, 대신
+  // 차트와 호가는 바닥을 지킨다 — 잘리는 것보다 낫다.
+  if (paperOrders && !rowInside) {
+    return (
+      <>
+        {core}
+        <PositionRow positions={openPositions} auth={auth} onClosed={ledger.reload}/>
+      </>
+    );
+  }
+  return core;
 }
 
 /**

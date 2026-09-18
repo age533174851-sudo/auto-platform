@@ -153,6 +153,13 @@ export const CHART_PREF_H = 220;
  * 3줄 중 일부가 밀려 나가는데, **화면만 보고는 밀렸는지 알 수 없다.**
  */
 export const BOOK_H = 146;
+/**
+ * 열린 포지션 한 줄이 쓰는 높이.
+ *
+ * **포지션이 있을 때만** 예산에서 뺀다. 없을 때까지 자리를 비워 두면
+ * 대부분의 시간에 차트가 그만큼 작아진다.
+ */
+export const POSITION_ROW_H = 34;
 /** [주문│호가] 칸의 세로 여백 + 호가 테두리 */
 export const SPLIT_PAD_H = 10;
 /** [주문│호가] 칸의 바닥 — 호가가 통째로 들어가는 높이 */
@@ -164,6 +171,17 @@ export interface CoreBudget {
   splitHeight: number;
   /** 주문 칸이 제 높이를 다 못 받았다 — 그 칸만 안에서 스크롤한다 */
   orderScrolls: boolean;
+  /**
+   * 열린 포지션 줄을 **첫 화면 통 안에** 넣어도 되는가.
+   *
+   * 통이 짧으면 이 줄 34px이 호가에서 나온다. 그러면 매수 3줄 중 하나가
+   * 밀려 나가는데, **화면만 보고는 밀렸는지 알 수 없다** — 호가는 원래
+   * 위아래로 이어지는 것처럼 보이기 때문이다.
+   *
+   * 그래서 자리가 없으면 통 안에 넣지 않고 통 **밖**(바깥 스크롤)에 둔다.
+   * 조금 내려야 보이지만 잘리지는 않는다. 320×600이 여기 해당한다.
+   */
+  positionInCore: boolean;
 }
 
 /**
@@ -173,17 +191,30 @@ export interface CoreBudget {
  * 접힐 때 차트가 그만큼 아래로 밀려 CTA가 화면 밖으로 나간다 —
  * `MobileShell`이 헤더에서 이미 같은 이유로 재고 있다.
  */
-export function coreBudget(coreHeight: any, headerHeight: any): CoreBudget {
+export function coreBudget(
+  coreHeight: any, headerHeight: any, hasPosition = false,
+): CoreBudget {
   const core = finitePx(coreHeight, 380);
   const header = finitePx(headerHeight, 0);
 
-  const avail = core - header - TOOLBAR_H - CTA_H - ESTIMATE_H;
+  const bands = core - header - TOOLBAR_H - CTA_H - ESTIMATE_H;
+
+  // 포지션 줄을 통 안에 넣고도 **차트 바닥과 호가 바닥이 둘 다** 남는가.
+  // 하나라도 못 지키면 넣지 않는다 — 넣어서 호가를 자르는 쪽이 나쁘다.
+  const positionInCore = hasPosition
+    && (bands - POSITION_ROW_H - CHART_MIN_H) >= SPLIT_MIN_H;
+
+  const avail = bands - (positionInCore ? POSITION_ROW_H : 0);
   const want = avail - SPLIT_MIN_H;
   const chartHeight = Math.round(
     Math.min(CHART_PREF_H, Math.max(CHART_MIN_H, want)),
   );
   const splitHeight = Math.max(0, Math.round(avail - chartHeight));
-  return { chartHeight, splitHeight, orderScrolls: splitHeight < SPLIT_MIN_H };
+  return {
+    chartHeight, splitHeight,
+    orderScrolls: splitHeight < SPLIT_MIN_H,
+    positionInCore,
+  };
 }
 
 /** `Number(null)`은 0이다. 못 읽은 값이 0이 되면 차트가 사라진다. */

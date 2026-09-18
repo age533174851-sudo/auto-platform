@@ -216,7 +216,7 @@ for (const route of ['/api/binance/futures/order', '/api/binance/spot/order', '/
   }
 
   // 통 높이를 받으면 그 안에서 끝난다
-  if (!/coreBudget\(coreHeight, headH\)/.test(workspace)) {
+  if (!/coreBudget\(coreHeight, headH[,)]/.test(workspace)) {
     err(`${WORKSPACE}가 세로 예산을 oneScreen에 묻지 않습니다`);
   }
   if (!/height: coreHeight/.test(workspace)) {
@@ -254,6 +254,94 @@ for (const route of ['/api/binance/futures/order', '/api/binance/spot/order', '/
   const m = one.match(/export const CHART_MIN_H = (\d+);/);
   if (!m || Number(m[1]) < 90) {
     err(`차트 바닥이 ${m ? m[1] : '?'}px입니다 — 실기에서 52px은 격자선뿐이었습니다`);
+  }
+}
+
+// ── ★ 포지션은 주문이 간 장부에서 읽는다 ──
+//
+// 정본 화면에 포지션 줄이 없던 동안 `BottomDock`이 대신 그렸고, 그 둘은
+// 다른 계좌를 보고 있었다.
+//
+//   주문      usePaperTarget(challengeId) → /api/paper/order   → 챌린지 계좌
+//   포지션 표시 usePaperAccount            → /api/paper/account → is_default
+//
+// 챌린지로 주문하면 방금 연 포지션이 안 보이고 기본 계좌 포지션이 보인다.
+// 오류는 없다 — "포지션이 없네"로 읽힌다. 계좌가 어긋나는 것은 배치 문제가
+// 아니라 **장부 문제**다.
+{
+  const row = code(read('src/components/trading/PositionRow.tsx'));
+  if (!row) {
+    err('한 화면에 포지션 줄이 없습니다 — 주문한 포지션을 확인할 곳이 없습니다');
+  }
+
+  // ① 이 줄은 **다시 읽지 않는다.** 새 조회가 생기면 계좌가 갈릴 자리가 생긴다.
+  if (/\/api\/paper\/account/.test(row)) {
+    err('포지션 줄이 /api/paper/account를 읽습니다 — 그 라우트는 늘 기본 계좌입니다');
+  }
+  if (/\/api\/paper\/positions/.test(row)) {
+    err('포지션 줄이 포지션을 다시 조회합니다 — 화면이 이미 가진 장부를 써야 합니다');
+  }
+  // **이름이 아니라 호출을 본다.** 타입을 `usePaperLedger`에서 가져오는
+  // 것은 정상이다 — 그 장부가 주는 모양을 그대로 받는다는 뜻이니까.
+  // 처음에 이름만 찾게 썼더니 그 import 줄에 걸려 빨개졌다.
+  for (const hook of ['usePaperAccount', 'useBinanceStream', 'usePaperLedger', 'usePaperTarget']) {
+    if (new RegExp(`${hook}\\s*\\(`).test(row)) {
+      err(`포지션 줄이 스스로 장부를 읽습니다 (${hook}) — props로 받은 정본만 씁니다`);
+    }
+  }
+  // ② 청산은 기존 정본 경로 하나다. 새 정산 권위를 만들지 않는다.
+  if (!/'\/api\/paper\/close'/.test(row)) {
+    err('포지션 줄이 기존 청산 경로를 쓰지 않습니다');
+  }
+  for (const banned of [/paper_account_id/, /accountId/, /fillPrice:/, /realizedPnl/, /unrealized/]) {
+    if (banned.test(row)) {
+      err(`포지션 줄이 계좌·손익을 스스로 다룹니다 (${banned}) — 정본에 없는 값을 만들지 않습니다`);
+    }
+  }
+
+  // ③ 화면이 **주문에 쓰는 바로 그 장부**를 넘기는가.
+  if (!/<PositionRow/.test(workspace)) {
+    err(`${WORKSPACE}가 포지션 줄을 그리지 않습니다`);
+  }
+  if (!/positions=\{openPositions\}/.test(workspace)) {
+    err(`${WORKSPACE}가 포지션 줄에 자기 장부를 넘기지 않습니다`);
+  }
+  if (!/const openPositions = paperOrders && auth \? ledger\.openPositions : \[\]/.test(workspace)) {
+    err(`${WORKSPACE}의 포지션 출처가 usePaperLedger가 아닙니다 — 계좌가 갈립니다`);
+  }
+  if (!/onClosed=\{ledger\.reload\}/.test(workspace)) {
+    err(`${WORKSPACE}가 청산 뒤 같은 장부를 다시 읽지 않습니다`);
+  }
+}
+
+// ── ★ 같은 사유를 두 번 적지 않는다 ──
+//
+// 실기에서 `비율이 0입니다`가 화면에 두 번 찍혔다. 판정은 하나
+// (`planSizing` → `submitGate`)인데 그리는 곳만 둘이었다 — 슬라이더 안과
+// 주문 버튼 위. 남기는 쪽은 **버튼에 가장 가까운 것**이다.
+{
+  const slider = code(read('src/components/trading/SizingSlider.tsx'));
+  for (const dup of ['sizing-locked', 'sizing-reason']) {
+    if (slider.includes(dup)) {
+      err(`SizingSlider가 사유를 다시 그립니다 (${dup}) — order-blocked-reason과 같은 문장이 두 번 보입니다`);
+    }
+  }
+  // 사유를 그리는 곳은 한 곳뿐이어야 한다.
+  const controls = code(read(SHEET));
+  const spots = (controls.match(/data-testid="order-blocked-reason"/g) || []).length;
+  if (spots !== 1) {
+    err(`잠금 사유를 그리는 곳이 ${spots}곳입니다 — 정확히 한 곳이어야 합니다`);
+  }
+}
+
+// ── ★ 칸 이름을 글자 단위로 쪼개지 않는다 ──
+//
+// `손절<br/>거리`라고 직접 넣어 둔 탓에 실기에서 `손절` / `거리`가 서로
+// 다른 칸 이름처럼 보였다. 좁아서 접힌 게 아니라 늘 갈라져 있었다.
+{
+  const controls = code(read(SHEET));
+  if (/손절<br\s*\/?>거리/.test(controls)) {
+    err('손절거리 라벨에 강제 줄바꿈이 있습니다 — 두 칸 이름으로 읽힙니다');
   }
 }
 
@@ -343,5 +431,5 @@ if (bad > 0) {
 }
 console.log('✅ 정본 거래 화면 — 매매 탭에 붙음 · 세로/가로 한 벌 · 렌더 1곳 ·'
   + ' 사이징 슬라이더 1개 · 손절 거리 보존 · 실거래 비가로채기 ·'
-  + ' 비로그인 fail-closed · 한 화면 상주 · 통 안에서 종료 · CTA 비부착 · 예상값 상시노출 · 넘침 비은폐 · 잠금 사유 노출 ·'
+  + ' 비로그인 fail-closed · 한 화면 상주 · 통 안에서 종료 · 포지션 장부 일치 · 사유 1곳 · CTA 비부착 · 예상값 상시노출 · 넘침 비은폐 · 잠금 사유 노출 ·'
   + ' 값 비절단 · 판정 1벌');

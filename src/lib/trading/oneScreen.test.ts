@@ -4,6 +4,7 @@ import {
   splitColumns, BOOK_MIN_PX, GUTTER_PX, mustBeOnFirstScreen,
   FIRST_SCREEN_MUST, MAY_SCROLL,
   coreBudget, CHART_MIN_H, CHART_PREF_H, SPLIT_MIN_H, TOOLBAR_H, CTA_H, ESTIMATE_H,
+  POSITION_ROW_H, BOOK_H,
 } from './oneScreen';
 
 export function runOneScreenTests() {
@@ -136,5 +137,56 @@ export function runOneScreenTests() {
     const tall = coreBudget(517, 120);
     assert(tall.chartHeight <= short.chartHeight,
       '헤더가 46px 늘었는데 차트가 줄지 않았습니다 — CTA가 밀려납니다');
+  });
+
+  // ── ★ 열린 포지션 줄이 호가를 밀어내지 않는다 ──
+  //
+  // 이 줄 34px은 어디선가 나와야 한다. 차트는 이미 바닥(96px)에 있는
+  // 기기가 있으므로 남는 곳은 [주문│호가]뿐이고, 거기서 빼면 **매수
+  // 3줄 중 하나가 밀려 나간다.** 호가는 원래 위아래로 이어지는 것처럼
+  // 보여서 화면만으로는 밀렸는지 알 수 없다 — 가장 나쁜 종류다.
+  //
+  // 그래서 자리가 없으면 통 안에 넣지 않는다(`positionInCore: false`).
+  // 바깥 스크롤로 내려가지만 잘리지는 않는다.
+  const TALL: Array<[string, number, number]> = [
+    ['360x660', 660 - 58 - 85, 78],
+    ['360x800', 800 - 58 - 85, 78],
+    ['412x915', 915 - 58 - 85, 78],
+  ];
+
+  test('★ 포지션 줄을 통 안에 넣어도 차트·호가 바닥이 남는 기기에서만 넣는다', () => {
+    for (const [name, core, hdr] of TALL) {
+      const b = coreBudget(core, hdr, true);
+      eq(b.positionInCore, true, `${name}: 자리가 있는데 포지션 줄을 밖으로 뺐습니다`);
+      assert(b.chartHeight >= CHART_MIN_H, `${name}: 차트가 ${b.chartHeight}px로 줄었습니다`);
+      assert(b.splitHeight >= SPLIT_MIN_H,
+        `${name}: [주문│호가]가 ${b.splitHeight}px입니다 (호가 실측 ${BOOK_H})`);
+    }
+  });
+
+  test('★ 자리가 없으면 통 밖으로 뺀다 — 호가를 자르지 않는다', () => {
+    const [, core, hdr] = CORES[0];          // 320×600
+    const b = coreBudget(core, hdr, true);
+    eq(b.positionInCore, false, '320×600에서 포지션 줄이 통 안으로 들어왔습니다');
+    // 그리고 포지션이 있든 없든 **나머지 배치가 똑같아야** 한다.
+    const without = coreBudget(core, hdr, false);
+    eq(b.chartHeight, without.chartHeight, '포지션 때문에 차트가 줄었습니다');
+    eq(b.splitHeight, without.splitHeight, '포지션 때문에 호가 칸이 줄었습니다');
+  });
+
+  test('★ 포지션이 없으면 그 줄 자리를 비워 두지 않는다', () => {
+    for (const [name, core, hdr] of CORES) {
+      const a = coreBudget(core, hdr, false);
+      eq(a.positionInCore, false, `${name}: 포지션이 없는데 자리를 잡았습니다`);
+      // 포지션 없을 때의 차트가 있을 때보다 작아지면 평소에 손해다.
+      const b = coreBudget(core, hdr, true);
+      assert(a.chartHeight >= b.chartHeight,
+        `${name}: 포지션이 없는데 차트가 더 작습니다`);
+    }
+  });
+
+  test('포지션 줄 높이는 실측에서 나왔다', () => {
+    assert(POSITION_ROW_H > 0 && POSITION_ROW_H < 60,
+      `포지션 줄 ${POSITION_ROW_H}px는 한 줄 높이가 아닙니다`);
   });
 }

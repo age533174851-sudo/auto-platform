@@ -27,8 +27,6 @@ import { formatMoneyForScope, type MoneyScope } from '@/lib/trading/gameMoney';
 
 export interface SizingSliderProps {
   availableBalance: number | null;
-  /** 잔고를 못 읽은 사유 — 있으면 그대로 적는다 */
-  unknownReason?: string | null;
   percent: number;
   onPercent: (p: number) => void;
   /**
@@ -44,7 +42,7 @@ export interface SizingSliderProps {
 }
 
 export function SizingSlider({
-  availableBalance, unknownReason, percent, onPercent,
+  availableBalance, percent, onPercent,
   sizing, leverage, scope, symbol, disabled,
 }: SizingSliderProps) {
   const plan = sizing;
@@ -81,13 +79,18 @@ export function SizingSlider({
         </span>
       </div>
 
-      {/* ── 이 비율이 만든 값 ── */}
-      {locked ? (
-        <div data-testid="sizing-locked" style={{ fontSize: FS.micro, color: C.warn, lineHeight: 1.5 }}>
-          {unknownReason
-            || (balanceUnknown ? '가용 잔고를 확인하지 못했습니다 — 잔고가 0이라는 뜻이 아닙니다' : '지금은 수량을 정할 수 없습니다')}
-        </div>
-      ) : plan.code === 'OK' ? (
+      {/* ── 이 비율이 만든 값 ──
+
+          **사유는 여기서 적지 않는다.** 실기에서 같은 문장이 화면에 두 번
+          찍혔다 — 여기 한 번, 주문 버튼 바로 위 `order-blocked-reason`에
+          한 번. 판정은 하나(`planSizing` → `submitGate`)인데 그리는 곳만
+          둘이었다.
+
+          남기는 쪽은 **주문 버튼에 가장 가까운 것**이다. 누르기 직전에
+          읽는 자리이고, `submitGate`가 사이징 사유까지 이미 물고 온다
+          (`useTradeForm`의 `sizingReason`). 그래서 여기서 지워도 사이징
+          사유가 화면에서 사라지지 않는다. */}
+      {locked ? null : plan.code === 'OK' ? (
         <div data-testid="sizing-preview" style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: FS.micro }}>
           {/* 순서가 곧 의미다: 증거금 → (×배율) → 명목가 → (÷가격) → 수량 */}
           <Row label="증거금" value={money(plan.marginBudget)} strong/>
@@ -97,11 +100,7 @@ export function SizingSlider({
             value={plan.quantity == null ? '—' : `${plan.quantity.toFixed(plan.quantity < 1 ? 6 : 4)}${symbol ? ` ${symbol}` : ''}`}
           />
         </div>
-      ) : (
-        <div data-testid="sizing-reason" style={{ fontSize: FS.micro, color: C.warn, lineHeight: 1.5 }}>
-          {plan.reason}
-        </div>
-      )}
+      ) : null}
 
       {/* 「최종 허용 수량은 서버가 다시 계산한다」는 단서는 **주문 칸 밖**
           예상값 줄에 있다(`OrderEstimate`). 좁은 기기에서 이 칸은 안에서

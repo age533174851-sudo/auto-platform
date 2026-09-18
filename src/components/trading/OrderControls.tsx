@@ -37,12 +37,11 @@ export interface OrderControlsProps {
   symbol: string;
   scope: MoneyScope;
   availableBalance: number | null;
-  availableUnknownReason?: string | null;
   canOrder: boolean;
 }
 
 export function OrderControls({
-  form, symbol, scope, availableBalance, availableUnknownReason, canOrder,
+  form, symbol, scope, availableBalance, canOrder,
 }: OrderControlsProps) {
   return (
     <div data-testid="order-controls" style={{
@@ -87,7 +86,6 @@ export function OrderControls({
       {/* ── 0~100% 비중 ── */}
       <SizingSlider
         availableBalance={availableBalance}
-        unknownReason={availableUnknownReason}
         percent={form.percent} onPercent={form.setPercent}
         sizing={form.sizing}
         leverage={form.lev} scope={scope}
@@ -101,10 +99,15 @@ export function OrderControls({
           주문 자체가 불가능해진다. 실기에서 그렇게 막혔다. */}
       {!unsupported(form.caps.stopLoss) ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+          {/* 한 덩어리로 읽혀야 한다. 실기에서 `손절` / `거리`가 두 줄로
+              갈라져 서로 다른 칸 이름처럼 보였다 — 좁아서 접힌 게 아니라
+              내가 세로 20px을 아끼려고 `<br/>`을 직접 넣어 둔 것이었다.
+              넓은 화면에서도 늘 갈라졌다. 줄이려면 글자를 쪼갤 게 아니라
+              줄바꿈을 막는다. */}
           <span style={{
             flexShrink: 0, fontSize: FS.nano, color: C.faint, fontWeight: 700,
-            lineHeight: 1.15,
-          }}>손절<br/>거리</span>
+            whiteSpace: 'nowrap',
+          }}>손절거리</span>
           <div style={{ display: 'flex', gap: 3, flex: 1, minWidth: 0 }}>
             {STOP_PCTS.map(p => (
               <button key={p} type="button"
