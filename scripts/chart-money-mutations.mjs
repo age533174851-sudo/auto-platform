@@ -24,6 +24,7 @@ const CHECKS = [
   ['모의 장부 권위 검사기', 'scripts/check-paper-authority.mjs'],
   ['게임머니 검사기', 'scripts/check-game-money.mjs'],
   ['정본 거래 화면 배선 검사기', 'scripts/check-canonical-trading.mjs'],
+  ['시장 데이터 정직성 검사기', 'scripts/check-market-data-honesty.mjs'],
 ];
 
 const FILES = [
@@ -52,6 +53,11 @@ const FILES = [
   'src/app/api/paper/positions/route.ts',
   'src/app/api/paper/account/route.ts',
   'src/components/trading/PositionRow.tsx',
+  'src/components/pages/SharedUI.tsx',
+  'src/app/api/market/news/route.ts',
+  'src/app/api/prices/route.ts',
+  'src/lib/markets/intervalCapability.ts',
+  'src/lib/markets/changeBasis.ts',
 ];
 const canonical = new Map(FILES.map(f => [f, readFileSync(f, 'utf8')]));
 const restore = () => { for (const [f, s] of canonical) writeFileSync(f, s); };
@@ -289,6 +295,31 @@ const MUTATIONS = [
   { name: '마진 모드 오타를 조용히 격리로 바꿈니다',
     file: 'src/app/api/paper/order/route.ts',
     cut: ["  if (marginModeGiven && marginMode !== 'ISOLATED' && marginMode !== 'CROSSED') {", "  if (false) {"] },
+
+  // ══ 없는 데이터를 있는 것처럼 내보낸다 ══
+  { name: 'Pill에서 flexShrink:0을 부자인다 — 칩이 눌려 글자가 쪼개진다',
+    file: 'src/components/pages/SharedUI.tsx',
+    cut: ["style={{flexShrink:0,background:active?col+'20':'transparent'",
+          "style={{background:active?col+'20':'transparent'"] },
+  { name: '지어낸 기사를 다시 진짜처럼 내보낸다',
+    file: 'src/app/api/market/news/route.ts',
+    cut: ["  if (items.length === 0 && !allowMock) {", "  if (false) {"] },
+  { name: '손으로 적은 시총을 목록 순서의 근거로 되돌린다',
+    file: 'src/app/api/prices/route.ts',
+    cut: ["  const data   = Array.from(merged.values())\n    .sort((a,b)=>String(a.symbol).localeCompare(String(b.symbol)));",
+          "  const data   = Array.from(merged.values()).sort((a,b)=>(b.marketCap||0)-(a.marketCap||0));"] },
+  { name: '지원하지 않는 주기를 사용 가능으로 올린다',
+    file: 'src/lib/markets/intervalCapability.ts',
+    cut: ["  { id: '1s', label: '1초', support: 'UNSUPPORTED',",
+          "  { id: '1s', label: '1초', support: 'SUPPORTED',"] },
+  { name: '코인 24시간 변동률을 전일대비라고 적는다',
+    file: 'src/lib/markets/changeBasis.ts',
+    cut: ["  ROLLING_24H: { basis: 'ROLLING_24H', label: '24시간', full: '24시간 전 대비' },",
+          "  ROLLING_24H: { basis: 'ROLLING_24H', label: '전일대비', full: '24시간 전 대비' },"] },
+  { name: '차트가 주기 목록을 다시 스스로 적는다',
+    file: 'src/components/trading/PriceChart.tsx',
+    cut: ["export const CHART_INTERVALS = supportedIntervals().map(c => ({ id: c.id, label: c.label }));",
+          "export const CHART_INTERVALS = [{ id: '1m', label: '1m' }, { id: '1s', label: '1s' }];"] },
 
   // ══ 게임머니가 화폐가 된다 ══
   { name: '표시 단위에 배수를 붙인다',

@@ -27,7 +27,20 @@ interface PriceResult {
 const KRW = 1375;
 
 // ─── Static market cap estimates (KRW) — no API needed ──────────
-const MCAP: Record<string, number> = {
+/**
+ * ⚠ **지어낸 시가총액이다. 실제 값이 아니다.**
+ *
+ * 손으로 적은 표이고 갱신되지 않는다. 그런데 이 값이 응답의 `marketCap`에
+ * 그대로 실려 나갔고, 목록의 **기본 정렬 기준**이기까지 했다 — 즉 화면의
+ * 종목 순서가 이 표에서 나왔다.
+ *
+ * 순위는 "무엇이 큰 자산인가"를 말하는 셈이라 값보다 더 세게 읽힌다.
+ * 그래서 실제 공급자가 생기기 전까지 **권위로 쓰지 않는다**(`QUARANTINED`).
+ *
+ * 지우지는 않는다 — 지우면 어떤 값이 가짜였는지 기록이 사라진다. 대신
+ * 응답과 정렬에서 뺀다. 표시할 값이 없으면 `marketCap`은 없는 채로 간다.
+ */
+const MCAP_QUARANTINED_NOT_REAL: Record<string, number> = {
   BTC:1_840_000_000_000_000, ETH:700_000_000_000_000,  SOL:85_000_000_000_000,
   BNB:130_000_000_000_000,   XRP:40_000_000_000_000,   DOGE:28_000_000_000_000,
   ADA:22_000_000_000_000,    AVAX:21_000_000_000_000,  TON:19_000_000_000_000,
@@ -81,7 +94,7 @@ function getMock(): Map<string, PriceResult> {
   for (const [sym, d] of Object.entries(MOCK_BASE)) {
     const isStock = US_STOCKS.has(sym);
     m.set(sym, { symbol:sym, price: isStock ? d.p * KRW : d.p,
-      change24h:d.c, volume24h:d.v, marketCap:MCAP[sym], source:'mock' });
+      change24h:d.c, volume24h:d.v, source:'mock' });
   }
   return m;
 }
@@ -109,7 +122,6 @@ async function fetchBinance(): Promise<Map<string, PriceResult>> {
         quoteCurrency: 'USDT',
         change24h: parseFloat(item.priceChangePercent),
         volume24h: parseFloat(item.quoteVolume),
-        marketCap: MCAP[sym],
         source:    'binance',
       });
     }
@@ -143,7 +155,6 @@ async function fetchCoinGecko(krw: number): Promise<Map<string, PriceResult>> {
         price:     row.usd * krw,
         change24h: row.usd_24h_change ?? 0,
         volume24h: row.usd_24h_vol ?? 0,
-        marketCap: MCAP[sym],
         source:    'coingecko' as any,
       });
     }
@@ -420,7 +431,16 @@ export async function GET(req: NextRequest) {
   for (const [k,v] of cryptoM) merged.set(k, v);
   for (const [k,v] of stockM)  merged.set(k, v);
 
-  const data   = Array.from(merged.values()).sort((a,b)=>(b.marketCap||0)-(a.marketCap||0));
+  // ── 정렬도 권위다 ──
+  //
+  // 예전에는 `marketCap` 내림차순이었는데 그 값이 위의 손으로 적은 표였다.
+  // 실제 시총 공급자가 붙기 전까지 시총순을 기본으로 켜지 않는다 —
+  // 지어낸 순위는 "이게 큰 자산이다"라고 말하는 것과 같다.
+  //
+  // 대신 **심볼 오름차순**으로 둔다. 아무 신호도 주지 않는 순서이고,
+  // 같은 입력에 늘 같은 결과가 나온다.
+  const data   = Array.from(merged.values())
+    .sort((a,b)=>String(a.symbol).localeCompare(String(b.symbol)));
   const prices: Record<string,number> = {};
   for (const item of data) prices[item.symbol] = item.price;
 

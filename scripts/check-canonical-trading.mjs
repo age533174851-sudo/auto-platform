@@ -300,17 +300,23 @@ for (const route of ['/api/binance/futures/order', '/api/binance/spot/order', '/
   }
 
   // ③ 화면이 **주문에 쓰는 바로 그 장부**를 넘기는가.
-  if (!/<PositionRow/.test(workspace)) {
+  // **한 곳만 보면 안 된다.** 포지션 줄은 두 자리에 있다(통 안 / 통 밖).
+  // 한쪽만 지켜도 통과하게 두면, 나머지 한쪽으로 다른 장부가 들어온다 —
+  // 실제로 뮤테이션이 그 틈으로 살아남았다.
+  const rows = (workspace.match(/<PositionRow/g) || []).length;
+  const fed = (workspace.match(/positions=\{openPositions\}/g) || []).length;
+  const reloads = (workspace.match(/onClosed=\{ledger\.reload\}/g) || []).length;
+  if (rows === 0) {
     err(`${WORKSPACE}가 포지션 줄을 그리지 않습니다`);
   }
-  if (!/positions=\{openPositions\}/.test(workspace)) {
-    err(`${WORKSPACE}가 포지션 줄에 자기 장부를 넘기지 않습니다`);
+  if (fed !== rows) {
+    err(`${WORKSPACE}의 포지션 줄 ${rows}곳 중 ${fed}곳만 자기 장부를 받습니다`);
+  }
+  if (reloads !== rows) {
+    err(`${WORKSPACE}의 포지션 줄 ${rows}곳 중 ${reloads}곳만 청산 뒤 장부를 다시 읽습니다`);
   }
   if (!/const openPositions = paperOrders && auth \? ledger\.openPositions : \[\]/.test(workspace)) {
     err(`${WORKSPACE}의 포지션 출처가 usePaperLedger가 아닙니다 — 계좌가 갈립니다`);
-  }
-  if (!/onClosed=\{ledger\.reload\}/.test(workspace)) {
-    err(`${WORKSPACE}가 청산 뒤 같은 장부를 다시 읽지 않습니다`);
   }
 }
 

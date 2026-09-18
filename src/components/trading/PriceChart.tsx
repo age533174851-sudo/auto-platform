@@ -28,6 +28,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { C, FS } from '@/components/terminal/theme';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
+import { supportedIntervals } from '@/lib/markets/intervalCapability';
 import {
   barsToCandles, barsToVolumes, isFreshResponse,
   candlesMatchInterval, UP_COLOR, DOWN_COLOR, type Candle,
@@ -41,15 +42,19 @@ import {
   type ChartPhase,
 } from '@/lib/trading/chartLoadState';
 
-export const CHART_INTERVALS = [
-  { id: '1m', label: '1m' },
-  { id: '15m', label: '15m' },
-  { id: '1h', label: '1h' },
-  { id: '4h', label: '4h' },
-  { id: '1d', label: '1D' },
-] as const;
+/**
+ * 화면에 그릴 주기 버튼.
+ *
+ * **목록을 여기서 적지 않는다.** `intervalCapability`가 "지금 실제로 봉이
+ * 오는가"를 알고 있고, 이 줄은 그 답을 그린다. 여기에 따로 적어 두면
+ * 언젠가 한쪽만 늘어나고, 그때 화면은 **400을 받는 버튼**을 그린다.
+ *
+ * 못 주는 주기(1초·틱·월·년·5분·주)를 회색 버튼으로라도 두지 않는다 —
+ * 눌러 보고 빈 차트를 보면 "이 종목은 거래가 없었나 보다"로 읽힌다.
+ */
+export const CHART_INTERVALS = supportedIntervals().map(c => ({ id: c.id, label: c.label }));
 
-export type ChartInterval = typeof CHART_INTERVALS[number]['id'];
+export type ChartInterval = string;
 
 export interface PriceChartProps {
   symbol: string;
