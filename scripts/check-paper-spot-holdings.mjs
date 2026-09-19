@@ -21,6 +21,8 @@ const MARKS = 'src/lib/engine/paperExitMarks.ts';
 const SELLR = 'src/app/api/paper/sell/route.ts';
 const HOLDR = 'src/app/api/paper/holdings/route.ts';
 const SCOPE = 'src/lib/engine/paperHoldingScope.ts';
+const AUDIT = '.github/workflows/audit-production-paper-spot-holdings.yml';
+const REPLAY = '.github/workflows/supabase-replay.yml';
 
 let bad = 0;
 const fail = (msg) => { console.error(`  ✗ ${msg}`); bad += 1; };
@@ -46,6 +48,8 @@ const marks = stripTs(read(MARKS));
 const sellr = stripTs(read(SELLR));
 const holdr = stripTs(read(HOLDR));
 const scope = stripTs(read(SCOPE));
+const audit = read(AUDIT);      // YAML은 주석을 지우지 않는다 — 트리거가 주석일 수 있다
+const replay = read(REPLAY);
 
 // 함수 본문 한 덩어리를 뽑는다.
 //
@@ -477,7 +481,117 @@ function body(name) {
   }
 }
 
-// ══════════════ ⑫ 증명이 존재하고 배선돼 있다 ══════════════
+// ══════════════ ⑫ 운영 감사가 migrate **뒤에** 돈다 ══════════════
+//
+// 뮤테이션: 트리거를 `push: main`으로 되돌린다 → migrate와 동시에 떠서
+// **088이 적용되기 전** 스키마를 읽고 FALSE/UNKNOWN을 적는다. 없는 고장을
+// 보고하는 감사가 되고, 그걸 한 번 믿으면 다음부터 아무도 안 본다.
+{
+  if (!audit) fail(`${AUDIT}가 없습니다 — 활성화 뒤 검증 장치가 없습니다`);
+
+  // 트리거가 workflow_run이고, push가 아니어야 한다.
+  const on = audit.match(/\non:\n([\s\S]*?)\nconcurrency:/)?.[1] ?? '';
+  if (!/workflow_run:/.test(on) || !/workflows:\s*\[migrate\]/.test(on)) {
+    fail(`${AUDIT}: migrate 완료에 걸리지 않았습니다 — 적용 전 스키마를 읽게 됩니다`);
+  }
+  if (/^\s*push:/m.test(on)) {
+    fail(`${AUDIT}: push 트리거가 있습니다 — migrate와 경합합니다`);
+  }
+  // 성공·main 두 조건을 모두 본다.
+  if (!/workflow_run\.conclusion\s*==\s*'success'/.test(audit)) {
+    fail(`${AUDIT}: 깨운 실행의 성공 여부를 보지 않습니다`);
+  }
+  if (!/workflow_run\.head_branch\s*==\s*'main'/.test(audit)) {
+    fail(`${AUDIT}: 깨운 실행이 main인지 보지 않습니다`);
+  }
+  // 특권 경로는 기본 브랜치 코드만 돈다.
+  if (!/uses:\s*actions\/checkout@v4[\s\S]{0,120}ref:\s*main/.test(audit)) {
+    fail(`${AUDIT}: 체크아웃이 main으로 고정돼 있지 않습니다 — 깨운 커밋의 코드가 secret을 쥡니다`);
+  }
+  // 감사 대상 커밋 == 활성화 커밋.
+  if (!/ACTIVATION_SHA/.test(audit) || !/here.*!=.*ACTIVATION_SHA|ACTIVATION_SHA.*!=.*here/.test(audit)) {
+    fail(`${AUDIT}: 활성화 커밋과 감사 커밋이 같은지 확인하지 않습니다`);
+  }
+
+  // 읽기 전용 — 선언만이 아니라 **값으로** 확인해야 한다.
+  if ((audit.match(/BEGIN TRANSACTION READ ONLY/g) || []).length < 2) {
+    fail(`${AUDIT}: 읽기 전용 트랜잭션으로 열지 않는 질의가 있습니다`);
+  }
+  if ((audit.match(/READ_ONLY=on/g) || []).length < 2) {
+    fail(`${AUDIT}: 읽기 전용이었다는 증거를 값으로 확인하지 않습니다`);
+  }
+  // **돈을 움직이는 RPC를 부르지 않는다.** 카탈로그에서 이름을 문자열로
+  // 보는 것은 호출이 아니다 — 호출 모양만 잡는다.
+  for (const fn of ['paper_sell_holding', 'paper_settle_close', 'paper_open_position',
+                    'paper_money_apply', 'paper_challenge_create']) {
+    if (new RegExp(`public\\.${fn}\\s*\\(`).test(audit)) {
+      fail(`${AUDIT}: ${fn}을 호출합니다 — 감사는 읽기만 해야 합니다`);
+    }
+  }
+  // 쓰기 문장이 없어야 한다 (SQL 본문 기준).
+  if (/\b(INSERT\s+INTO|UPDATE\s+public\.|DELETE\s+FROM|DROP\s+|ALTER\s+TABLE|TRUNCATE)\b/.test(audit)) {
+    fail(`${AUDIT}: 쓰기 문장이 있습니다`);
+  }
+
+  // ★ 대조는 **챌린지 전용 계좌만**. 일반 계좌에는 챌린지 원장이 없다.
+  if (!/FROM public\.paper_challenges c\s*\n\s*JOIN public\.paper_accounts a ON a\.id = c\.paper_account_id/.test(audit)) {
+    fail(`${AUDIT}: 잔고-원장 대조가 챌린지 전용 계좌로 한정돼 있지 않습니다 — `
+       + '일반 PAPER 계좌가 전부 FALSE로 잡힙니다');
+  }
+  if (!/acct_shared_by_challenges/.test(audit)) {
+    fail(`${AUDIT}: 챌린지 ↔ 전용 계좌 1:1을 확인하지 않습니다`);
+  }
+
+  // ★ backfill 등식은 **아직 처분되지 않은 열린 줄에만** 건다.
+  //   거래가 일어나면 정상적으로 달라진다 — 불변식으로 만들면 다음 감사가
+  //   멀쩡한 운영을 FALSE로 적는다.
+  if (!/NOT EXISTS \(SELECT 1 FROM public\.paper_sell_event_lots l[\s\S]{0,120}WHERE l\.position_id = pp\.id\)/.test(audit)) {
+    fail(`${AUDIT}: backfill 등식이 처분 이력이 없는 줄로 한정돼 있지 않습니다`);
+  }
+  if (!/pp\.status = 'open'/.test(audit)) {
+    fail(`${AUDIT}: backfill 등식이 열린 줄로 한정돼 있지 않습니다`);
+  }
+
+  // UNKNOWN을 통과로 바꾸지 않는다.
+  if (!/if \[ "\$\{u\}" -gt 0 \]; then\s*\n\s*verdict='UNKNOWN'/.test(audit)) {
+    fail(`${AUDIT}: UNKNOWN이 있어도 판정을 내립니다`);
+  }
+  if (!/verdict.*!=.*'MATCH'[\s\S]{0,200}exit 1/.test(audit)) {
+    fail(`${AUDIT}: MATCH가 아닌데 성공으로 끝납니다`);
+  }
+  // 접속 정보를 로그에 흘리지 않는다.
+  if (!/sed -E 's#postgres/.test(audit)) {
+    fail(`${AUDIT}: psql 출력에서 접속 정보를 가리지 않습니다`);
+  }
+}
+
+// ══════════════ ⑬ 재생 게이트에 088이 걸려 있다 ══════════════
+//
+// 만들어 놓고 안 거는 것이 이 저장소의 1번 고장이다. 실제로 088의 증명이
+// 재생에 안 걸려 있어서, freeze 결함이 086 단계를 대신 죽였다.
+{
+  for (const need of ['scripts/sql/088_paper_spot_holdings_proof.sql',
+                      'scripts/paper-spot-holdings-concurrency.sh',
+                      'scripts/paper-spot-holdings-mutations.mjs']) {
+    if (!replay.includes(need)) {
+      fail(`${REPLAY}: ${need}이 걸려 있지 않습니다 — 재생이 088을 검사하지 않습니다`);
+    }
+  }
+  // 경로 목록에도 있어야 파일이 바뀔 때 재생이 깨어난다.
+  if ((replay.match(/scripts\/paper-spot-holdings-concurrency\.sh/g) || []).length < 3) {
+    fail(`${REPLAY}: 088 스크립트가 pull_request·push 경로 목록에 없습니다 — `
+       + '그 파일만 고치면 재생이 안 돕니다');
+  }
+  // 0건을 통과로 적지 않는다.
+  if (!/n_ok.*-lt 90/.test(replay)) {
+    fail(`${REPLAY}: 088 증명의 확인 건수 하한이 없습니다`);
+  }
+  if (!/n_red.*-lt 30/.test(replay)) {
+    fail(`${REPLAY}: 088 뮤테이션의 RED 하한이 없습니다`);
+  }
+}
+
+// ══════════════ ⑭ 증명이 존재하고 배선돼 있다 ══════════════
 {
   for (const p of ['scripts/sql/088_paper_spot_holdings_proof.sql',
                    'scripts/paper-spot-holdings-concurrency.sh']) {

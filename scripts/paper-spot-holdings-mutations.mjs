@@ -29,6 +29,8 @@ const MARKS = 'src/lib/engine/paperExitMarks.ts';
 const SELLR = 'src/app/api/paper/sell/route.ts';
 const SCOPE = 'src/lib/engine/paperHoldingScope.ts';
 const CHECK = 'scripts/check-paper-spot-holdings.mjs';
+const AUDIT = '.github/workflows/audit-production-paper-spot-holdings.yml';
+const REPLAY = '.github/workflows/supabase-replay.yml';
 const PROOF = 'scripts/sql/088_paper_spot_holdings_proof.sql';
 
 const ONLY = process.argv.slice(2).filter(a => !a.startsWith('-'));
@@ -235,11 +237,49 @@ const CASES = [
    [['CREATE OR REPLACE FUNCTION public.paper_alloc_scale()',
      'DROP FUNCTION IF EXISTS public.paper_alloc_scale();\nCREATE OR REPLACE FUNCTION public.paper_alloc_scale()']]],
 
+  // ── 운영 감사가 migrate와 경합한다 ──
+  //
+  //   이것들이 되돌아가면 감사가 **088 적용 전** 스키마를 읽고 없는 고장을
+  //   보고한다. 한 번 그러면 다음부터 아무도 그 감사를 안 본다.
+  ['MUT-30 감사를 push: main으로 되돌린다 (migrate와 경합)', AUDIT, 'RED',
+   [['  workflow_run:\n    workflows: [migrate]\n    types: [completed]',
+     '  push:\n    branches: [main]']]],
+
+  ['MUT-31 감사가 깨운 실행의 성공 여부를 안 본다', AUDIT, 'RED',
+   [["      github.event.workflow_run.conclusion == 'success' &&\n", '']]],
+
+  ['MUT-32 감사가 main인지 안 본다', AUDIT, 'RED',
+   [["      github.event.workflow_run.head_branch == 'main'",
+     "      true"]]],
+
+  ['MUT-33 감사 체크아웃을 깨운 커밋으로 바꾼다 (특권 경로)', AUDIT, 'RED',
+   [['        with:\n          ref: main', '        with:\n          ref: ${{ github.event.workflow_run.head_sha }}']]],
+
+  ['MUT-34 잔고-원장 대조를 모든 계좌로 넓힌다', AUDIT, 'RED',
+   [['(SELECT count(*) FROM public.paper_challenges c\n                 JOIN public.paper_accounts a ON a.id = c.paper_account_id\n                WHERE a.balance IS DISTINCT FROM',
+     '(SELECT count(*) FROM public.paper_accounts a\n                WHERE a.balance IS DISTINCT FROM']]],
+
+  ['MUT-35 backfill 등식을 처분된 줄에까지 건다 (거래하면 FALSE가 된다)', AUDIT, 'RED',
+   [['                  AND NOT EXISTS (SELECT 1 FROM public.paper_sell_event_lots l\n                                   WHERE l.position_id = pp.id)\n', '']]],
+
+  ['MUT-36 감사가 UNKNOWN을 통과로 읽는다', AUDIT, 'RED',
+   [['          if [ "${u}" -gt 0 ]; then\n            verdict=\'UNKNOWN\'', '          if [ "${u}" -gt 99999 ]; then\n            verdict=\'UNKNOWN\'']]],
+
+  ['MUT-37 재생에서 088 증명 단계를 뺀다', REPLAY, 'RED',
+   [['            -Xf scripts/sql/088_paper_spot_holdings_proof.sql \\',
+     '            -Xf /dev/null \\']]],
+
+  ['MUT-38 재생 088 증명의 건수 하한을 없앤다', REPLAY, 'RED',
+   [['          if [ "${n_ok}" -lt 90 ]; then', '          if [ "${n_ok}" -lt 0 ]; then']]],
+
   // ── 대조군 (GREEN이어야 한다) ──
   ['OK1 마이그레이션에 주석 한 줄 추가', MIG, 'GREEN',
    [['-- 088_paper_spot_holdings.sql', '-- 088_paper_spot_holdings.sql\n-- 대조군']]],
   ['OK2 순수 모듈에 주석 한 줄 추가', MARKS, 'GREEN',
    [['export type MarkMarket', '// 대조군\nexport type MarkMarket']]],
+  ['OK3 감사 워크플로에 주석 한 줄 추가', AUDIT, 'GREEN',
+   [['name: audit-production-paper-spot-holdings',
+     '# 대조군\nname: audit-production-paper-spot-holdings']]],
 ];
 
 const selected = ONLY.length
