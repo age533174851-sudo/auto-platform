@@ -163,6 +163,27 @@ export async function openPaperPosition(
   }
 }
 
+/**
+ * 이 청산 조각에 귀속될 진입 수수료.
+ *
+ * **`entry_fee`가 아니다.** 그 칸은 진입 때 잔고에서 빠진 **과거 금액**이라
+ * 부분매도로 줄지 않는다(088의 불변 계약). 손익 계산에 필요한 것은 아직
+ * 귀속되지 않고 남은 몫이고, 부분매도를 거친 줄에서 둘은 다르다 — 원래
+ * 수수료를 그대로 쓰면 이미 귀속된 몫을 한 번 더 뺀다.
+ *
+ * **칸이 아예 없으면 `entry_fee`로 내려간다.**
+ * ────────────────────────────────────────
+ * 코드는 마이그레이션보다 먼저 배포될 수 있다. 088이 아직 안 돌았다면
+ * 이 칸은 존재하지 않고, 그 세계에는 부분매도도 없으므로 **남은 귀속분은
+ * 정확히 `entry_fee`다.** 그래서 이 대체는 추측이 아니라 그 시점의 사실이다.
+ * 값이 `0`인 것은 다르다 — 그건 "전부 귀속됐다"는 확인된 값이므로 쓴다.
+ */
+function remainingEntryFeeBasis(pos: any): number {
+  const basis = pos?.remaining_entry_fee_basis;
+  if (basis == null) return Number(pos?.entry_fee);
+  return Number(basis);
+}
+
 // 가상 포지션 청산
 export async function closePaperPosition(
   sb: any,
@@ -178,11 +199,32 @@ export async function closePaperPosition(
   const fill: PaperFill = {
     side: pos.side, entryPrice: Number(pos.entry_price), fillPrice: Number(pos.fill_price),
     quantity: Number(pos.quantity), notional: Number(pos.notional), leverage: Number(pos.leverage),
-    margin: Number(pos.margin), entryFee: Number(pos.entry_fee),
+    margin: Number(pos.margin),
+    // ★ **남은 귀속분이다. 실제로 낸 진입 수수료(`entry_fee`)가 아니다.**
+    //
+    //   `entry_fee`는 진입 때 잔고에서 빠진 **과거 금액**이라 부분매도로
+    //   줄지 않는다. 그런데 손익 계산에 필요한 것은 **이 조각에 귀속될 몫**
+    //   이다. 부분매도를 거친 줄에서 둘은 다르다 — 원래 수수료를 그대로
+    //   쓰면 이미 귀속된 몫을 한 번 더 뺀다(실측 0.13125 차이).
+    //
+    //   부분매도된 적 없는 줄은 088의 backfill로 두 값이 같으므로
+    //   **기존 결과와 완전히 동일하다.**
+    //
+    //   못 읽으면 0으로 읽지 않고 멈춘다 — 0이면 수수료가 귀속되지 않은 채
+    //   손익이 부풀어 장부에 남는다.
+    entryFee: remainingEntryFeeBasis(pos),
     stopLoss: pos.stop_loss != null ? Number(pos.stop_loss) : undefined,
     takeProfit: pos.take_profit != null ? Number(pos.take_profit) : undefined,
     liquidationPrice: Number(pos.liquidation_price),
   };
+
+  // **모르는 값으로 돈을 계산하지 않는다.** 둘 다 못 읽으면 닫지 않는다 —
+  // 0으로 계산하면 수수료가 사라진 손익이 장부에 남고, 그 위에 모든 수치가
+  // 쌓인다.
+  if (!Number.isFinite(fill.entryFee)) {
+    return { ok: false,
+      error: '진입 수수료 귀속분을 읽지 못해 청산하지 않았습니다 — 0으로 계산하지 않습니다' };
+  }
 
   const closed = computeClose(fill, exitPrice, exitReason, {
     feeRatePct,

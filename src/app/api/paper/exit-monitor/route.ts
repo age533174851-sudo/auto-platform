@@ -66,8 +66,11 @@ export async function POST(req: NextRequest) {
     // 보고 `closePaperPosition(id)`로 닫으며, `paper_settle_close`가 **그
     // 포지션이 든 계좌**를 따라간다(082). 남의 예산을 깎거나 남의 자산에
     // 더해지는 일이 없다.
+    // **`market`을 함께 읽는다.** 이 칸을 안 읽었기 때문에 현물 포지션이
+    // 선물 마크가로 판정되고 있었다 — `/api/paper/close`가 이미 고친 고장이
+    // 이 라우트에만 남아 있었다.
     let q = (sb as any).from('paper_positions')
-      .select('id, user_id, paper_account_id, symbol, side, fill_price, quantity, margin, stop_loss, take_profit, liquidation_price, opened_at')
+      .select('id, user_id, paper_account_id, symbol, market, side, fill_price, quantity, margin, stop_loss, take_profit, liquidation_price, opened_at')
       .eq('status', 'open');
     if (uid) q = q.eq('user_id', uid);
     const { data, error } = await q;
@@ -90,24 +93,49 @@ export async function POST(req: NextRequest) {
   //
   // 심볼당 한 번만 받는다. **못 받은 심볼은 지도에 넣지 않는다** —
   // 넣지 않으면 판정기가 그 포지션을 건드리지 않는다.
-  const symbols = Array.from(new Set(rows.map(r => String(r?.symbol ?? '')).filter(Boolean)));
+  // ── **시장마다 가격 출처가 다르다** ──
+  //
+  // 예전에는 심볼만 보고 전부 `getPremiumIndex`(선물 마크가)를 불렀다.
+  // 현물 포지션도 선물 가격으로 판정됐다는 뜻이고, 익절이 걸린 현물은
+  // 펀딩·베이시스만큼 다른 가격에 닫혔다.
+  //
+  // 진입(`/api/paper/order`)과 청산(`/api/paper/close`)은 이미
+  // `readPaperMarkPrice` 하나를 쓴다. **이 감시기도 같은 함수를 부른다** —
+  // 규칙을 세 곳에 적고 같기를 바라지 않는다.
+  //
+  // 그래서 지도의 키도 심볼이 아니라 `시장:심볼`이다. 같은 심볼이 현물과
+  // 선물에 동시에 있으면 심볼만으로는 두 가격이 한 칸을 덮어쓴다.
+  // 시장 판단·지도 키·청산가 읽기는 `paperExitMarks` 한 곳에 있다.
+  // 여기에 다시 적으면 시험이 보는 것과 라우트가 쓰는 것이 갈린다.
+  const { exitMarkKey, exitMarkPairs, exitLiquidationOf } =
+    await import('@/lib/engine/paperExitMarks');
+  const keyOf = exitMarkKey;
+  const pairs = exitMarkPairs(rows);
   const marks = new Map<string, number>();
-  await Promise.all(symbols.map(async (sym) => {
+  await Promise.all(pairs.map(async (p) => {
     try {
-      const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
-      const px = await getPremiumIndex(sym, false);
-      const v = Number(px?.markPrice);
-      if (Number.isFinite(v) && v > 0) marks.set(sym, v);
+      const { readPaperMarkPrice, paperPriceFailed } =
+        await import('@/lib/engine/paperPriceSource');
+      const px = await readPaperMarkPrice(p.market, p.symbol);
+      if (paperPriceFailed(px)) return;
+      const v = Number(px.price);
+      if (Number.isFinite(v) && v > 0) marks.set(p.key, v);
     } catch { /* 못 받으면 이번 회차에 그 포지션은 건드리지 않는다 */ }
   }));
 
   const plan = paperExitPlan({
+    // 판정기는 심볼로 가격을 찾으므로, 여기서 `시장:심볼`을 심볼 자리에 넣는다.
+    // 원래 심볼은 아래에서 `rows`로 되찾는다.
     positions: rows.map(r => ({
-      id: String(r.id), symbol: String(r.symbol ?? ''), side: r.side,
+      id: String(r.id), symbol: keyOf(r), side: r.side,
       fillPrice: Number(r.fill_price), quantity: Number(r.quantity),
       stopLoss: r.stop_loss == null ? undefined : Number(r.stop_loss),
       takeProfit: r.take_profit == null ? undefined : Number(r.take_profit),
-      liquidationPrice: Number(r.liquidation_price),
+      // **`Number(null)`은 0이다.** 현물에는 청산가가 없어서 이 칸이 비는데,
+      // 0을 넣으면 "청산가 0"이라는 없는 값이 판정 입력으로 들어간다.
+      // (지금은 LONG 판정이 `low <= 0`이라 발동하지 않지만, 부등호가 한 번만
+      //  바뀌면 전 현물 포지션이 청산된다.) 없는 것은 없다고 넘긴다.
+      liquidationPrice: exitLiquidationOf(r),
       openedAt: new Date(r.opened_at).getTime(),
     })) as any,
     marks, nowMs,
@@ -122,8 +150,8 @@ export async function POST(req: NextRequest) {
   const results: any[] = [];
   let closed = 0, already = 0, failed = 0;
   for (const a of plan.actions) {
-    const sym = rows.find(r => String(r.id) === String(a.positionId))?.symbol;
-    const mark = sym ? marks.get(String(sym)) : undefined;
+    const row = rows.find(r => String(r.id) === String(a.positionId));
+    const mark = row ? marks.get(keyOf(row)) : undefined;
     if (mark == null) { continue; }   // 여기 올 수 없지만, 지어낸 가격으로 닫지 않는다
     const r = await closePaperPosition(sb, a.positionId as string, mark, (a.exitReason ?? 'MANUAL') as any);
     if (r.ok) closed += 1;
