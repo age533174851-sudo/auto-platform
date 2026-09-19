@@ -272,6 +272,28 @@ const CASES = [
   ['MUT-38 재생 088 증명의 건수 하한을 없앤다', REPLAY, 'RED',
    [['          if [ "${n_ok}" -lt 90 ]; then', '          if [ "${n_ok}" -lt 0 ]; then']]],
 
+  // ── A/B가 되돌아가는 회귀 ──
+  //
+  //   감사가 실제로 이 두 가지로 죽었다(run 35435289383 · 35435370746).
+  //   조회는 전부 성공했는데 판정을 한 줄도 못 읽었다.
+  ['MUT-39 판정 줄 다듬기를 뺀다 (psql 앞 공백에 막힌다)', AUDIT, 'RED',
+   [["          sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \"${RUNNER_TEMP}/shape-raw.txt\" \\\n            | grep",
+     "          cat \"${RUNNER_TEMP}/shape-raw.txt\" \\\n            | grep"]]],
+
+  ['MUT-40 2단계의 다듬기만 뺀다 (한 곳만 고친 상태)', AUDIT, 'RED',
+   [["          sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \"${RUNNER_TEMP}/counts-raw.txt\" \\\n            | grep",
+     "          cat \"${RUNNER_TEMP}/counts-raw.txt\" \\\n            | grep"]]],
+
+  ['MUT-41 판정 키 찾기에서 숫자를 뺀다 (_088 줄이 사라진다)', AUDIT, 'RED',
+   [["grep -E '^[A-Z0-9_]+=(TRUE|FALSE|UNKNOWN)$'", "grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$'"]]],
+
+  ['MUT-42 장부를 Supabase CLI 표로 되돌린다 (항상 FALSE)', AUDIT, 'RED',
+   [["              (SELECT count(*) > 0 FROM public.schema_migrations m\n                WHERE m.filename = '088_paper_spot_holdings.sql'\n                  AND m.status = 'APPLIED')",
+     "              (SELECT count(*) > 0 FROM supabase_migrations.schema_migrations m\n                WHERE m.version LIKE '088%')"]]],
+
+  ['MUT-43 장부에서 status 확인을 뺀다 (FAILED도 통과)', AUDIT, 'RED',
+   [["                  AND m.status = 'APPLIED')", "                  )"]]],
+
   // ── 대조군 (GREEN이어야 한다) ──
   ['OK1 마이그레이션에 주석 한 줄 추가', MIG, 'GREEN',
    [['-- 088_paper_spot_holdings.sql', '-- 088_paper_spot_holdings.sql\n-- 대조군']]],
@@ -297,7 +319,15 @@ for (const [name, file, kind, cuts] of selected) {
   let after = before;
   for (const [from, to] of cuts) {
     if (!after.includes(from)) { after = before; break; }
-    after = after.replace(from, to);
+    // ★ **치환 문자열을 그대로 넣는다.**
+    //
+    //   `String.replace(문자열, 문자열)`은 치환 쪽의 `$'`·`$&`·`` $` ``를
+    //   특수 패턴으로 해석한다. 여기 치환에는 `...UNKNOWN)$'`처럼 `$'`가
+    //   들어가는 것이 있고, 그러면 **매치 뒤 파일 전체**가 끼어들어 의도와
+    //   전혀 다른 변이가 만들어진다. 실제로 MUT-41이 그렇게 되어 검사기가
+    //   통과했고, 하마터면 "이 규칙은 아무도 안 지킨다"로 적을 뻔했다.
+    //   함수로 넘기면 해석하지 않는다.
+    after = after.replace(from, () => to);
   }
   if (after === before) {
     console.log(`  ⚠  ${name} — NOOP · 적용되지 않음 → 판정 불가`);

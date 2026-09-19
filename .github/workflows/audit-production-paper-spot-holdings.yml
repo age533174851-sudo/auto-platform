@@ -148,10 +148,17 @@ jobs:
 
           \echo ''
           \echo '=== 1. 마이그레이션 장부에 088이 있는가 (사실 기록) ==='
-          SELECT version, name
-            FROM supabase_migrations.schema_migrations
-           WHERE version LIKE '088%' OR name LIKE '088%'
-           ORDER BY version;
+          -- ★ **이 저장소의 러너가 쓰는 표를 본다.**
+          --
+          --   처음에는 `supabase_migrations.schema_migrations`(Supabase CLI가
+          --   재생에 쓰는 표)를 `version`/`name`으로 조회했다. 운영에는 그 표가
+          --   있지만 **이 저장소의 기록은 거기 없다** — `apply-migrations.mjs`가
+          --   `000_schema_migrations.sql`로 만든 `public.schema_migrations`에
+          --   `filename`을 키로 적는다. 그래서 항상 0행이었고 판정이 언제나
+          --   FALSE였다. 아무것도 증명하지 못하는 항목이었다.
+          SELECT filename, status, verified, applied_by
+            FROM public.schema_migrations
+           WHERE filename = '088_paper_spot_holdings.sql';
 
           \echo ''
           \echo '=== 2. 새 표 ==='
@@ -329,8 +336,13 @@ jobs:
                                                                           AS freeze_allows_first_fill,
 
               -- 088 장부 행 (판정이 아니라 사실 기록)
-              (SELECT count(*) > 0 FROM supabase_migrations.schema_migrations m
-                WHERE m.version LIKE '088%' OR m.name LIKE '088%')        AS ledger_088
+              --
+              -- **적혀 있다는 것만으로는 부족하다.** `status`가 APPLIED여야
+              -- 실제로 실행된 것이다(FAILED·BASELINE도 행은 남는다).
+              -- 없는 것을 TRUE로 만들지 않는다 — 없으면 그대로 FALSE다.
+              (SELECT count(*) > 0 FROM public.schema_migrations m
+                WHERE m.filename = '088_paper_spot_holdings.sql'
+                  AND m.status = 'APPLIED')                               AS ledger_088
           )
           SELECT unnest(ARRAY[
             'TBL_SELL_EVENTS='          || upper(coalesce(tbl_sell_events::text,'UNKNOWN')),
@@ -361,7 +373,24 @@ jobs:
             | tee "${RUNNER_TEMP}/shape-raw.txt"
 
           # **접속 정보를 로그에 흘리지 않는다.** psql 오류 문구에도 들어 있다.
-          grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' "${RUNNER_TEMP}/shape-raw.txt" \
+          #
+          # ★ **psql 정렬 출력은 줄 앞뒤에 공백을 넣는다.**
+          #
+          #   ` TBL_SELL_EVENTS=TRUE` — 맨 앞에 칸이 하나 있다. 그래서 `^`로
+          #   시작하는 앵커만으로는 **한 줄도 안 잡힌다.** 조회는 전부 성공하고
+          #   판정 17줄이 그대로 찍혔는데 "결과가 비었습니다"로 죽었다
+          #   (run 35435289383 · 35435370746).
+          #
+          #   `audit-production-paper-account-identity`가 같은 고장을 먼저 겪고
+          #   주석까지 남겨 뒀는데(run 34666561476), 나는 `grep` 줄만 가져오고
+          #   **앞의 다듬기를 빠뜨렸다.** 같은 방식으로 맞춘다.
+          #   그리고 **키에 숫자가 들어간다.** `FN_OPEN_POSITION_IS_088` ·
+          #   `FN_SETTLE_CLOSE_IS_088` · `LEDGER_088_ROW` 셋이 그렇다.
+          #   `[A-Z_]+`로 찾으면 그 세 줄만 조용히 빠지고, 판정에서는
+          #   "줄없음 → UNKNOWN"이 되어 **감사가 멀쩡한 운영을 UNKNOWN으로
+          #   적는다.** 공백만 고치고 여기를 안 고치면 절반만 고친 것이다.
+          sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' "${RUNNER_TEMP}/shape-raw.txt" \
+            | grep -E '^[A-Z0-9_]+=(TRUE|FALSE|UNKNOWN)$' \
             > "${RUNNER_TEMP}/spot.txt" || true
           if [ ! -s "${RUNNER_TEMP}/spot.txt" ]; then
             echo "::error::판정 줄을 하나도 읽지 못했습니다 — 조회는 끝났는데 결과가 비었습니다"
@@ -482,7 +511,9 @@ jobs:
             | sed -E 's#postgres(ql)?://[^ ]*#<접속정보-가림>#g' \
             | tee "${RUNNER_TEMP}/counts-raw.txt"
 
-          grep -E '^[A-Z_]+=(TRUE|FALSE|UNKNOWN)$' "${RUNNER_TEMP}/counts-raw.txt" \
+          # 1단계와 **같은 다듬기**를 한다. 한 곳만 고치면 그 한 곳만 돈다.
+          sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' "${RUNNER_TEMP}/counts-raw.txt" \
+            | grep -E '^[A-Z0-9_]+=(TRUE|FALSE|UNKNOWN)$' \
             >> "${RUNNER_TEMP}/spot.txt" || true
           if ! grep -q 'READ_ONLY=on' "${RUNNER_TEMP}/counts-raw.txt"; then
             echo "::error::읽기 전용 트랜잭션이었다는 증거가 없습니다"

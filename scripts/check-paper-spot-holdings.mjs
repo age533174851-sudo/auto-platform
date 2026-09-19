@@ -49,6 +49,11 @@ const sellr = stripTs(read(SELLR));
 const holdr = stripTs(read(HOLDR));
 const scope = stripTs(read(SCOPE));
 const audit = read(AUDIT);      // YAML은 주석을 지우지 않는다 — 트리거가 주석일 수 있다
+// SQL 본문만 볼 때 쓴다. **규칙이 주석에 반응하면 안 된다** — 실제로
+// "이 표를 보지 말라"고 적어 둔 설명 주석이 그 규칙을 깨뜨렸다.
+const auditCode = audit.split('\n')
+  .filter(l => !/^\s*(--|#)/.test(l))
+  .join('\n');
 const replay = read(REPLAY);
 
 // 함수 본문 한 덩어리를 뽑는다.
@@ -562,6 +567,51 @@ function body(name) {
   // 접속 정보를 로그에 흘리지 않는다.
   if (!/sed -E 's#postgres/.test(audit)) {
     fail(`${AUDIT}: psql 출력에서 접속 정보를 가리지 않습니다`);
+  }
+
+  // ★ **판정 줄을 실제로 읽어 낼 수 있는가.**
+  //
+  //   감사가 한 번 여기서 죽었다(run 35435289383 · 35435370746). 조회는 전부
+  //   성공하고 판정 17줄이 찍혔는데 한 줄도 못 잡아 "결과가 비었습니다"로
+  //   끝났다. 두 가지가 겹쳤다.
+  //
+  //     ① psql 정렬 출력은 줄 앞에 공백을 넣는다 → 다듬지 않으면 `^`가 안 맞는다
+  //     ② 키에 숫자가 있다(`..._IS_088` · `LEDGER_088_ROW`)
+  //        → `[A-Z_]+`로 찾으면 그 줄만 빠지고 "줄없음 → UNKNOWN"이 된다
+  //
+  //   **두 추출 지점 모두** 본다. 한 곳만 고치면 그 한 곳만 돈다.
+  const trims = audit.match(/sed -E 's\/\^\[\[:space:\]\]\+\/\/; s\/\[\[:space:\]\]\+\$\/\/'/g) || [];
+  if (trims.length < 2) {
+    fail(`${AUDIT}: 판정 줄을 다듬지 않고 찾습니다 (${trims.length}/2) — `
+       + 'psql 정렬 출력의 앞 공백 때문에 한 줄도 안 잡힙니다');
+  }
+  const greps = audit.match(/grep -E '\^\[[^\]]*\]\+=\(TRUE\|FALSE\|UNKNOWN\)\$'/g) || [];
+  if (greps.length < 2) {
+    fail(`${AUDIT}: 판정 줄 추출이 두 곳에 있지 않습니다 (${greps.length}/2)`);
+  }
+  for (const g of greps) {
+    if (!/\[A-Z0-9_\]/.test(g)) {
+      fail(`${AUDIT}: 판정 키 찾기에 숫자가 빠졌습니다 — `
+         + 'FN_OPEN_POSITION_IS_088 · LEDGER_088_ROW 같은 줄이 조용히 사라집니다');
+      break;
+    }
+  }
+
+  // ★ **장부는 이 저장소의 러너가 쓰는 표에서 읽는다.**
+  //
+  //   처음에는 `supabase_migrations.schema_migrations`(Supabase CLI가 재생에
+  //   쓰는 표)를 `version`/`name`으로 봤다. 운영에 그 표는 있지만 이 저장소의
+  //   기록은 거기 없어서 **언제나 FALSE**였다 — 아무것도 증명하지 못했다.
+  if (/supabase_migrations\.schema_migrations/.test(auditCode)) {
+    fail(`${AUDIT}: Supabase CLI의 장부 표를 봅니다 — 이 저장소의 기록은 거기 없습니다`);
+  }
+  if (!/FROM public\.schema_migrations[\s\S]{0,160}filename = '088_paper_spot_holdings\.sql'/.test(auditCode)) {
+    fail(`${AUDIT}: 장부를 public.schema_migrations의 filename으로 조회하지 않습니다`);
+  }
+  // 적혀 있다는 것과 실행됐다는 것은 다른 사실이다.
+  if (!/m\.status = 'APPLIED'/.test(auditCode)) {
+    fail(`${AUDIT}: 장부 행의 status가 APPLIED인지 보지 않습니다 — `
+       + 'FAILED·BASELINE도 행은 남습니다');
   }
 }
 
