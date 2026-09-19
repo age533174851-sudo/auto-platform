@@ -6,6 +6,7 @@ import { cvt, fmtPct } from '@/lib/utils';
 import { formatMoney } from '@/lib/currency';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR } from '@/data/assets';
 import type { Asset } from '@/types';
+import { rankByTradingValue } from '@/lib/markets/ranking';
 import {
   Card, Logo, Spark, Pill, Bdg,
   GlobalSearch, getKrName, resolveTVSym, InlineTVChart,
@@ -39,7 +40,7 @@ function MarketPage({
   /* ── state ── */
   const [filter,     setFilter]     = useState('전체');
   const [search,     setSearch]     = useState('');
-  const [sort,       setSort]       = useState('change');
+  const [sort,       setSort]       = useState('tradingValue');
   const [mktTab,     setMktTab]     = useState<'list'|'gainers'|'losers'|'trending'>('list');
   const [gainers,    setGainers]    = useState<any[]>([]);
   const [losers,     setLosers]     = useState<any[]>([]);
@@ -128,6 +129,12 @@ function MarketPage({
           clr:    '#F7931A',
           quote,
           krw:    c.krw !== false,
+          // 순위용 원본. **표시가(`p`)로 줄 세우지 않는다** — 그 값에는
+          // 표시용 상수가 곱해져 있어서 통화를 섞는 순간 상수가 순위를
+          // 정한다. 거래소가 실제로 부른 값과 통화를 그대로 들고 온다.
+          qp:     c.quotePrice ?? null,
+          qc:     c.quoteCurrency ?? quote,
+          vol:    c.volume24h ?? null,
         } as any));
         setAllCoins(mapped);
         setCoinCache(m => ({ ...m, [quote]: mapped }));
@@ -162,8 +169,27 @@ function MarketPage({
       (a.sym || '').toLowerCase().includes(q)
     );
   }
+  // ── 순위도 권위다 ──
+  //
+  // 기본은 **거래대금**이다. 예전 기본은 손으로 적은 시총 표였고(격리함),
+  // 그다음 후보였던 '한 주당 가격순'은 자산의 크기도 활동성도 말하지
+  // 않는다 — 액면분할 한 번에 뒤집히는 숫자다.
+  //
+  // 거래량(개수)으로도 줄 세우지 않는다: 도지 1억 개와 비트코인 100개를
+  // 같은 자로 잴 수 없다. 거래대금은 **같은 통화 안에서만** 비교한다.
   if (sort === 'change') list = [...list].sort((a, b) => b.c - a.c);
-  if (sort === 'price')  list = [...list].sort((a, b) => b.p - a.p);
+  if (sort === 'losers') list = [...list].sort((a, b) => a.c - b.c);
+  if (sort === 'tradingValue') {
+    const r = rankByTradingValue(list, (a: any) => ({
+      quotePrice: a.qp, quoteCurrency: a.qc, volume: a.vol,
+    }));
+    // 통화 묶음끼리는 비교하지 않는다. 비교할 수 없는 것은 **맨 아래로
+    // 보내는 대신** 뒤에 그대로 둔다 — 아래로 몰면 그것도 순위가 된다.
+    list = [
+      ...r.universes.flatMap(u => u.items.map(x => x.item)),
+      ...r.unavailable.map(x => x.item),
+    ] as any;
+  }
 
   // 화면에 나오는 모든 심볼을 모아서 batch로 logo URL 가져오기
   const symbolsForLogo = useMemo(() => {
@@ -366,8 +392,12 @@ function MarketPage({
 
           {/* Sort pills */}
           <div style={{ display:'flex', gap:6, marginBottom:8 }}>
-            <Pill ch="등락률순" active={sort === 'change'} onClick={() => setSort('change')} color={T.grn} />
-            <Pill ch="가격순"   active={sort === 'price'}  onClick={() => setSort('price')}  color={T.ylw} />
+            {/* `가격순`은 뺐다 — 주당 가격은 자산의 크기도 활동성도 말하지
+                않는다. `시가총액순`은 정본 공급자가 생기기 전까지 고를 수
+                있게 두지 않는다(`MARKET_CAP_RANKING_AVAILABLE`). */}
+            <Pill ch="거래대금" active={sort === 'tradingValue'} onClick={() => setSort('tradingValue')} color={T.acl} />
+            <Pill ch="상승률"   active={sort === 'change'}       onClick={() => setSort('change')}       color={T.grn} />
+            <Pill ch="하락률"   active={sort === 'losers'}       onClick={() => setSort('losers')}       color={T.red} />
           </div>
 
           {/* 종목 수 + 데이터 소스 배지 */}

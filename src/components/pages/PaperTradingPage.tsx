@@ -185,14 +185,20 @@ export default function PaperTradingPage({
         </div>
       )}
 
-      {/* **이 아래 장부는 정본이 아니다.** 큰 숫자보다 먼저 읽히도록 위에 둔다 */}
-      <LegacyLedgerBanner id={LEDGER}/>
+      {/* ── 거래 화면은 여기 없다 ──
+          한동안 여기에 거래 화면을 붙였다. 그런데 사용자가 실제로 여는 길은
+          `/ → 매매`이고 그건 터미널이다. 여기에도 붙여 두면 **거래 화면이
+          둘**이 되고, 둘은 언젠가 갈린다. 이 화면은 장부를 고르고 성적을
+          보는 곳이고, 거래는 매매 탭 하나에서 한다. */}
 
-      {/* 정본 모의투자 — 챌린지를 만들고 · 보고 · 그만둔다.
-          고른 장부는 터미널 현물 주문폼이 그대로 읽는다. */}
+      {/* 장부 고르기 — 매매 탭의 주문이 여기서 고른 장부로 나간다. */}
       <div style={{ marginBottom: 12 }}>
         <PaperChallengePanel selected={paperTarget} onSelect={setPaperTarget}/>
       </div>
+
+      {/* **이 아래 장부는 정본이 아니다.** 설명하는 대상 바로 앞에 둔다 */}
+      <LegacyLedgerBanner id={LEDGER}/>
+
 
       {/* MOCK 자동매매 패널 — 서버 모의 계좌를 읽는다(정본) */}
       <MockAutoTrade />

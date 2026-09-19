@@ -59,6 +59,9 @@ const CLASSIFIED = new Map([
   // OrderPane에 있던 펀딩 폴링·정산 카운트다운이 그대로 옮겨 온 것이다
   // (판단은 한 글자도 바뀌지 않았다). 공용 호가판이라 두 화면이 함께 쓴다.
   ['src/components/trading/OrderBookView.tsx', 'POLL — 펀딩 새로고침 · UI — 정산 카운트다운'],
+  // 30초마다 서버에서 봉을 **다시 받는다.** 화면이 봉을 만들지 않으므로
+  // 진행 중 봉과 새로 닫힌 봉은 venue가 줄 때만 갱신된다.
+  ['src/components/trading/PriceChart.tsx', 'POLL — 봉 재조회 (판단·체결 없음)'],
   ['src/components/terminal/SpotOrderPanel.tsx', 'POLL — 현물 잔고 새로고침'],
   ['src/components/terminal/BottomDock.tsx', 'POLL — 포지션·미체결 새로고침'],
   ['src/components/terminal/LedgerPanel.tsx', 'POLL — 장부 새로고침'],

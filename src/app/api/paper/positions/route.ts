@@ -80,24 +80,58 @@ export async function GET(req: NextRequest) {
       account = await getPaperAccount(sb, userId);
     }
 
-    const { data: open } = await sb.from('paper_positions')
+    // ── **조회 실패를 "없음"으로 적지 않는다** ──
+    //
+    // 예전에는 `error`를 버리고 `data`만 썼다. SELECT가 실패하면 `open`이
+    // `null`이 되고 화면에는 이렇게 나온다:
+    //
+    //   열린 포지션 없음 · 사용 증거금 0 · 거래 0건 · 승률 0%
+    //
+    // 전부 **정상으로 보이는 가짜 상태**다. 사용자는 포지션이 정리된 줄
+    // 알고, 사이징 슬라이더는 있지도 않은 여유 증거금을 배정한다.
+    // `paperScope`는 이미 조회 오류를 UNREADABLE로 분리하고 있었다 —
+    // 이 라우트만 그 규칙 밖에 있었다.
+    const { data: open, error: openErr } = await sb.from('paper_positions')
       .select('*').eq('user_id', userId).eq('paper_account_id', accountId)
       .eq('status', 'open').order('opened_at', { ascending: false });
+    if (openErr || !Array.isArray(open)) {
+      return NextResponse.json({
+        ok: false, error: 'positions_unreadable',
+        message: `열린 모의 포지션을 읽지 못했습니다 (${String(openErr?.message ?? '').slice(0, 120)})`
+          + ' — 포지션이 없다는 뜻이 아닙니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
-    const { data: closed } = await sb.from('paper_positions')
+    const { data: closed, error: closedErr } = await sb.from('paper_positions')
       .select('*').eq('user_id', userId).eq('paper_account_id', accountId)
       .eq('status', 'closed').order('closed_at', { ascending: false }).limit(20);
+    if (closedErr || !Array.isArray(closed)) {
+      return NextResponse.json({
+        ok: false, error: 'positions_unreadable',
+        message: `청산된 모의 포지션을 읽지 못했습니다 (${String(closedErr?.message ?? '').slice(0, 120)})`
+          + ' — 거래가 없었다는 뜻이 아닙니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
-    const closedList = Array.isArray(closed) ? closed : [];
+    const closedList = closed;
     const wins = closedList.filter((p: any) => Number(p.realized_pnl) > 0).length;
     const winRate = closedList.length ? (wins / closedList.length) * 100 : 0;
     const totalPnl = closedList.reduce((a: number, p: any) => a + (Number(p.realized_pnl) || 0), 0);
+
+    // 새 주문에 배정할 수 있는 잔고. 판단은 `/api/paper/account`와 **같은
+    // 함수**다 — 사이징 슬라이더가 어느 라우트를 읽든 같은 답을 봐야 한다.
+    const { availableView } = await import('@/lib/engine/paperAvailable');
+    const av = availableView(account.balance, open);
 
     return NextResponse.json({
       ok: true,
       challengeId: rawChallengeId || null,
       account: {
         balance: Number(account.balance),
+        // **못 읽었으면 null이다.** 0은 "돈이 없다"로 읽힌다.
+        available: av.available,
+        availableUnknownReason: av.unknownReason,
+        usedMargin: av.usedMargin,
         initialBalance: Number(account.initial_balance),
         totalPnl: Number(account.total_pnl),
         totalFees: Number(account.total_fees),

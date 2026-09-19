@@ -134,13 +134,33 @@ export async function collectPaperDailyLoss(args: {
     // 모름(null)에 남긴다.
     const explicit = typeof args.paperAccountId === 'string' ? args.paperAccountId.trim() : '';
     const acct = explicit ? explicit : await defaultPaperAccountId(args.sb, args.userId);
-    const { data } = acct == null ? { data: null } : await args.sb.from('paper_positions')
-      .select('realized_pnl, closed_at')
-      .eq('user_id', args.userId).eq('paper_account_id', acct).eq('status', 'closed')
-      .gte('closed_at', new Date(dayStart).toISOString());
-    if (Array.isArray(data)) {
-      todayNetUsd = data.reduce((a: number, r: any) => a + (Number(r.realized_pnl) || 0), 0);
-      incomeCount = data.length;
+    // ★ **처분을 사건 시각으로 센다.**
+    //
+    //   예전에는 여기서 `closed_at >= dayStart`인 줄의 `realized_pnl`을 직접
+    //   더했다. 현물 분할매도가 생기면 그 방식이 두 가지로 틀린다.
+    //
+    //     · 부분매도는 줄을 **닫지 않는다** → 하루 종일 손절해도 한도에
+    //       한 푼도 안 잡힌다
+    //     · 어제 부분매도한 줄이 오늘 닫히면 → **어제 손실이 오늘로
+    //       옮겨 온다**
+    //
+    //   합산 규칙은 `paper_realized_between`(088) 한 곳에 있다. 여기서
+    //   다시 적으면 SQL과 갈린다 — 이 저장소가 반복해서 밟은 고장이다.
+    const { data, error } = acct == null
+      ? { data: null, error: null }
+      : await args.sb.rpc('paper_realized_between', {
+          p_user: args.userId,
+          p_paper_account_id: acct,
+          p_from: new Date(dayStart).toISOString(),
+          p_to: new Date(dayStart + 86_400_000).toISOString(),
+        });
+    // **조회 실패를 "오늘 손실 0"으로 적지 않는다.** 0이면 한도가 통과다.
+    if (error) throw new Error(String((error as any).message ?? error));
+    const row: any = Array.isArray(data) ? data[0] : data;
+    const net = Number(row?.r_realized);
+    if (row != null && Number.isFinite(net)) {
+      todayNetUsd = net;
+      incomeCount = Number(row?.r_events) || 0;
     }
   } catch { /* null → unknown → 막힌다 */ }
 

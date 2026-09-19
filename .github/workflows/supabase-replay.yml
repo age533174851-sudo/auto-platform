@@ -50,6 +50,10 @@ on:
       - 'scripts/paper-challenge-cancel-mutations.mjs'
       - 'scripts/check-paper-challenge-wiring.mjs'
       - 'scripts/lib/paper-money-path.mjs'
+      # 현물 분할매도 — 088과 그 증명·동시성·뮤테이션·계약 검사기
+      - 'scripts/paper-spot-holdings-concurrency.sh'
+      - 'scripts/paper-spot-holdings-mutations.mjs'
+      - 'scripts/check-paper-spot-holdings.mjs'
       # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
       - 'scripts/apply-migrations.mjs'
       - 'scripts/approval-path-proof.mjs'
@@ -72,6 +76,10 @@ on:
       - 'scripts/paper-challenge-cancel-mutations.mjs'
       - 'scripts/check-paper-challenge-wiring.mjs'
       - 'scripts/lib/paper-money-path.mjs'
+      # 현물 분할매도 — 088과 그 증명·동시성·뮤테이션·계약 검사기
+      - 'scripts/paper-spot-holdings-concurrency.sh'
+      - 'scripts/paper-spot-holdings-mutations.mjs'
+      - 'scripts/check-paper-spot-holdings.mjs'
       # 위험 마이그레이션 승인 경로 — 러너와 그 증명이 바뀌면 반드시 돌아야 한다
       - 'scripts/apply-migrations.mjs'
       - 'scripts/approval-path-proof.mjs'
@@ -576,6 +584,105 @@ jobs:
           fi
           {
             echo "### 챌린지 취소 뮤테이션"
+            echo ""
+            echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 현물 분할매도 (088) ──
+      #
+      # 이 계약이 깨지는 방식은 전부 **조용하다.** 두 번째 부분매도가 원장
+      # 멱등키에 걸려 사라져도 오류가 안 나고, 과거 진입 수수료를 남은 값처럼
+      # 깎아도 화면에는 아무것도 안 뜬다. 글자로는 안 보이므로 불러 본다.
+      #
+      # 여기 배선이 없어서 088을 한 번 놓쳤다: freeze 트리거가 자기 backfill을
+      # 막는 결함이 **재생에서만** 드러났는데, 그때 이 단계가 없어 다른 단계가
+      # 대신 빨개졌다. 만들어 놓고 안 거는 것이 이 저장소의 단골 고장이다.
+      - name: 분할매도와 전량매도가 같은 장부를 만드는가 (088 실행 증명)
+        run: |
+          set -euo pipefail
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 \
+            -Xf scripts/sql/088_paper_spot_holdings_proof.sql \
+            > /tmp/spot-proof.out 2>&1 || {
+              echo "::error::현물 분할매도 회계가 계약대로 돌지 않습니다 — 아래 FAIL/ERROR 줄을 보세요"
+              cat /tmp/spot-proof.out
+              exit 1
+            }
+          cat /tmp/spot-proof.out
+          # 0건을 통과로 적지 않는다. 파일이 통째로 건너뛰어도 psql은 0으로 끝난다.
+          n_ok="$(grep -c 'ok  ' /tmp/spot-proof.out || true)"
+          if [ "${n_ok}" -lt 90 ]; then
+            echo "::error::분할매도 확인이 ${n_ok}건뿐입니다 — 증명이 실제로 돌지 않았습니다"
+            exit 1
+          fi
+          # **거부만 확인하는 증명은 만점을 받는다.** 핵심 계약을 문구로 붙든다.
+          for need in 'E1 잔고가 정확히 같다' \
+                      'D1 trade_count: 분할 3회도 1건이다' \
+                      'C1 entry_fee는 끝까지 원래 값 그대로' \
+                      'C2 A: POSITION_CLOSE 원장은 0줄' \
+                      'E3 남은 수량 정확히 0 — dust 없음' \
+                      '멱등: 같은 식별자 재시도는 REPLAYED' \
+                      '충돌: 아무것도 안 움직였다' \
+                      'oversell: 가진 것보다 많이 팔 수 없다' \
+                      'DL 오늘 창: legacy 몫만 잡힌다' \
+                      'freeze: 비어 있던 증거를 처음 채우는 것은 막지 않는다' \
+                      'freeze: 한 번 적힌 증거를 고치는 것은 거부' \
+                      '현물 분할매도 회계 실행 증명 전부 통과'; do
+            if ! grep -q "${need}" /tmp/spot-proof.out; then
+              echo "::error::증명에 이 확인이 없습니다: ${need}"
+              exit 1
+            fi
+          done
+          {
+            echo "### 현물 분할매도 실행 증명"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (분할=전량 등가 · 멱등 · oversell · 증거 불변)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 같은 매도를 동시에 여러 번 넣어 본다 (088 동시성)
+        run: |
+          set -euo pipefail
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          bash scripts/paper-spot-holdings-concurrency.sh > /tmp/spot-conc.out 2>&1 || {
+            echo "::error::분할매도 동시성 계약이 지켜지지 않습니다 — 아래 FAIL 줄을 보세요"
+            cat /tmp/spot-conc.out
+            exit 1
+          }
+          cat /tmp/spot-conc.out
+          n_ok="$(grep -c '^ok  ' /tmp/spot-conc.out || true)"
+          if [ "${n_ok}" -lt 16 ]; then
+            echo "::error::분할매도 동시성 확인이 ${n_ok}건뿐입니다"
+            exit 1
+          fi
+          # **겹치지 않은 채 통과한 적이 있다.** 재시도가 정말 하나만 팔았는지 본다.
+          if ! grep -q '① SOLD는 정확히 1개' /tmp/spot-conc.out; then
+            echo "::error::같은 식별자 동시 요청 확인이 없습니다 — 경합을 만들지 못한 통과입니다"
+            exit 1
+          fi
+          {
+            echo "### 현물 분할매도 동시성"
+            echo ""
+            echo "확인 ${n_ok}건 통과 (이중 매도 0 · oversell 0 · 교착 0)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 분할매도 규칙을 하나씩 빼 본다 (088 뮤테이션)
+        run: |
+          set -euo pipefail
+          PAPER_DB_URL="$(cat /tmp/db-url)"
+          export PAPER_DB_URL
+          node scripts/paper-spot-holdings-mutations.mjs > /tmp/spot-mut.out 2>&1 || {
+            echo "::error::규칙을 깼는데 검사가 초록입니다 — 그 규칙은 아무도 지키지 않습니다"
+            cat /tmp/spot-mut.out
+            exit 1
+          }
+          cat /tmp/spot-mut.out
+          n_red="$(grep -c 'RED (검출)' /tmp/spot-mut.out || true)"
+          if [ "${n_red}" -lt 30 ]; then
+            echo "::error::RED로 확인된 뮤테이션이 ${n_red}건뿐입니다"
+            exit 1
+          fi
+          {
+            echo "### 현물 분할매도 뮤테이션"
             echo ""
             echo "${n_red}건 전부 RED · 주석만 바꾼 대조군 GREEN"
           } >> "$GITHUB_STEP_SUMMARY"

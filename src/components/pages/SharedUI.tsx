@@ -175,9 +175,27 @@ export const getBgColor = (ticker: string): string => {
 export function Bdg({c,ch,sm}:{c:string;ch:string;sm?:boolean;[key:string]:any}) {
   return <span style={{background:c+'20',color:c,fontSize:sm?FS.nano:FS.micro,fontWeight:FW.bold,padding:sm?'1px 5px':`2px ${SP.sm}px`,borderRadius:R.pill,border:`${BORDER_W}px solid ${c}30`,whiteSpace:'nowrap',display:'inline-block'}}>{ch}</span>;
 }
+/**
+ * 가로로 늘어서는 칩 하나.
+ *
+ * **`flexShrink: 0`이 이 컴포넌트의 계약이다.**
+ *
+ * 부모는 `display:flex; overflowX:auto`인 가로 스크롤러다. flex 기본값은
+ * `flex-shrink: 1`이라, 이걸 빼 두면 칩들이 스크롤되는 대신 **전부 눌려서**
+ * 들어간다. 11개짜리 줄에서 `미국주식`이 28px 칸에 갇혀 글자가 세로로
+ * 쪼개졌다(실측: 폭 28 · 내용 61).
+ *
+ * 화면이 좁아서 생긴 일이 아니다 — 430×932에서도 똑같이 깨졌다. 그래서
+ * 폰트를 줄이거나 글자를 자르는 것으로는 고쳐지지 않는다. 같은 화면의
+ * 형제 칩 줄은 인라인으로 `flexShrink:0`을 갖고 있었고 멀쩡했다 —
+ * 같은 것을 두 번 구현했고 한쪽만 고쳐져 있었던 것이다.
+ *
+ * `whiteSpace: nowrap`만으로는 못 막는다. 상자가 이미 작으면 줄바꿈을
+ * 막아도 내용이 상자 밖으로 나갈 뿐이다.
+ */
 export function Pill({ch,active,color,onClick}:{ch:string;active:boolean;color?:string;onClick:()=>void;[key:string]:any}) {
   const col=color||T.acl;
-  return <button onClick={onClick} style={{background:active?col+'20':'transparent',color:active?col:T.muted,border:`1px solid ${active?col:T.border}`,borderRadius:20,padding:'5px 13px',fontSize:12,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>{ch}</button>;
+  return <button onClick={onClick} style={{flexShrink:0,background:active?col+'20':'transparent',color:active?col:T.muted,border:`1px solid ${active?col:T.border}`,borderRadius:20,padding:'5px 13px',fontSize:12,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>{ch}</button>;
 }
 export function Toggle({on,onChange}:{on:boolean;onChange:(v:boolean)=>void}) {
   return <div onClick={()=>onChange(!on)} style={{width:44,height:24,borderRadius:12,background:on?T.acl:'var(--t-border2)',cursor:'pointer',position:'relative',flexShrink:0,transition:'background .2s'}}><div style={{position:'absolute',top:3,left:on?23:3,width:18,height:18,borderRadius:9,background:'#fff',transition:'left .2s',boxShadow:'0 1px 4px rgba(0,0,0,.4)'}}/></div>;

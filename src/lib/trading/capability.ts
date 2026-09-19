@@ -29,6 +29,7 @@
 // 열어 둔 것이다. 그래서 **따로 적는다.**
 import type { PaperMarket } from '../engine/paperPriceSource';
 import { PAPER_MAX_LEVERAGE } from '../engine/paperPlan';
+import { orderEndpointFor } from '../markets/tradeMode';
 
 export type { PaperMarket };
 
@@ -187,23 +188,39 @@ export interface WiringState {
  * 합치면 닿을 수 없는 버튼이 활성화된다.
  */
 export function paperOrderUiWiring(market: any): WiringState {
-  if (market === 'SPOT') {
-    return { state: 'WIRED', canOrder: true, reason: '현물 모의 주문을 낼 수 있습니다' };
+  if (market !== 'SPOT' && market !== 'USDM') {
+    return {
+      state: 'UNSUPPORTED', canOrder: false,
+      reason: `모의 장부가 다루지 않는 시장입니다 (${String(market ?? '없음')})`,
+    };
   }
-  if (market === 'USDM') {
-    // 서버는 이미 할 수 있다(`paperPlan` · `paper_open_position`). 화면만
-    // 없다. 후속 PR에서 **여기 한 줄만** 바뀌면 된다 — 장부·챌린지 선택·
-    // 주문 권위를 다시 쓰지 않도록 경계를 이렇게 잡았다.
+
+  // ── 배선 여부를 손으로 적지 않는다 ──
+  //
+  // PR5에서 선물을 `SERVER_READY_UI_PENDING`(화면 없음)이라고 손으로
+  // 적었는데 **틀렸다.** `/api/paper/order`를 문자열로 찾아 SpotOrderPanel
+  // 하나만 걸렸지만, 선물 주문폼은 `orderEndpointFor(mode, market)`를 거쳐
+  // 같은 라우트로 이미 나가고 있었다 — 함수를 통하는 경로는 문자열 검색에
+  // 걸리지 않는다.
+  //
+  // 그래서 **문자열로 다시 적지 않고 라우팅 정본에게 물어본다.** 같은
+  // 판단을 두 곳에 두면 언젠가 갈린다. 라우팅이 모의 라우트를 안 주는 날이
+  // 오면 이 값도 같이 바뀐다.
+  const endpoint = orderEndpointFor('PAPER', market);
+  if (endpoint !== PAPER_ORDER_ENDPOINT) {
     return {
       state: 'SERVER_READY_UI_PENDING', canOrder: false,
-      reason: '선물 모의 주문은 서버가 이미 지원하지만 주문 화면이 아직 연결되지 않았습니다',
+      reason: `모의 주문 라우트가 연결되지 않았습니다 (${endpoint})`,
     };
   }
   return {
-    state: 'UNSUPPORTED', canOrder: false,
-    reason: `모의 장부가 다루지 않는 시장입니다 (${String(market ?? '없음')})`,
+    state: 'WIRED', canOrder: true,
+    reason: market === 'SPOT' ? '현물 모의 주문을 낼 수 있습니다' : '선물 모의 주문을 낼 수 있습니다',
   };
 }
+
+/** 모의 주문 라우트 — 배선 판정의 기준값 */
+export const PAPER_ORDER_ENDPOINT = '/api/paper/order';
 
 // ══════════════ 하단 독이 보여 줄 수 있는 것 ══════════════
 

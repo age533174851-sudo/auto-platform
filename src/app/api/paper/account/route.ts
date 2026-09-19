@@ -67,7 +67,16 @@ export async function GET(req: NextRequest) {
   const initial = started ? (Number(acct.initial_balance) || 0) : null;
   // 증거금은 열린 포지션이 물고 있다. 가용은 그만큼 뺀 값이다 —
   // 이걸 빼먹으면 같은 돈으로 몇 번이고 진입할 수 있게 된다.
-  const usedMargin = positions.reduce((a, p) => a + (Number(p.margin) || 0), 0);
+  //
+  // 계산은 `paperAvailable` 한 곳에 있다. 사이징 슬라이더가 쓰는 값이
+  // 이것이고, `/api/paper/positions`도 같은 함수를 쓴다 — 두 라우트가
+  // 다른 답을 주면 화면마다 다른 수량이 나온다.
+  //
+  // 예전 한 줄은 `Number(p.margin) || 0`이었다. 증거금을 못 읽으면 0으로
+  // 세어 **가용 잔고가 실제보다 커졌다.**
+  const { availableView } = await import('@/lib/engine/paperAvailable');
+  const av = availableView(started ? acct.balance : null, positions);
+  const usedMargin = av.usedMargin ?? 0;
 
   // ── 오늘 손익 ──
   //
@@ -97,8 +106,10 @@ export async function GET(req: NextRequest) {
     started,
     account: {
       balance,
-      available: balance == null ? null : Math.max(0, balance - usedMargin),
-      usedMargin: started ? usedMargin : null,
+      available: started ? av.available : null,
+      /** 가용을 못 읽었으면 왜인지 적는다 — 0으로 오해되지 않게 */
+      availableUnknownReason: started ? av.unknownReason : null,
+      usedMargin: started ? av.usedMargin : null,
       initialBalance: initial,
       totalPnl: started ? (Number(acct.total_pnl) || 0) : null,
       totalFees: started ? (Number(acct.total_fees) || 0) : null,
@@ -161,10 +172,24 @@ export async function POST(req: NextRequest) {
         message: `모의 계좌를 정하지 못해 초기화하지 않았습니다 — ${scope.reason}`,
       }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
-    const { count } = await sb.from('paper_positions')
+    // ── 세지 못했으면 **초기화하지 않는다** ──
+    //
+    // 예전에는 `error`를 버리고 `(count ?? 0) > 0`으로 판단했다. count
+    // 조회 자체가 실패하면 `count`가 `null`이고 그 식은 **0으로 읽어
+    // 통과**시킨다. 즉 열린 포지션이 있는지 모르는 상태에서 장부를
+    // 초기화할 수 있었다. 이 안전장치는 파괴적 동작 앞에 서 있으므로
+    // 다른 조회보다 더 엄하게 닫는다.
+    const { count, error: countErr } = await sb.from('paper_positions')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', uid).eq('paper_account_id', scope.accountId).eq('status', 'open');
-    if ((count ?? 0) > 0) {
+    if (countErr || typeof count !== 'number') {
+      return NextResponse.json({
+        ok: false, error: 'open_positions_unreadable',
+        message: '열린 모의 포지션 수를 확인하지 못해 초기화하지 않았습니다'
+          + ` (${String(countErr?.message ?? '').slice(0, 120)}) — 0건이라는 뜻이 아닙니다`,
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (count > 0) {
       return NextResponse.json({
         ok: false, error: 'has_open_positions',
         message: `열린 모의 포지션이 ${count}건 있습니다. 먼저 정리한 뒤 초기화하세요.`,

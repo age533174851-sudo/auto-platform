@@ -140,8 +140,31 @@ export async function GET(req: NextRequest) {
     } catch (e) { console.error('[market/news] Finnhub:', e); }
   }
 
-  // Mock fallback
+  // ── ★ 지어낸 기사를 진짜 기사처럼 내보내지 않는다 ──
+  //
+  // 예전에는 공급자가 하나도 없으면 `MOCK_NEWS`로 조용히 내려갔고, 응답은
+  // `ok: true`였다. 그 배열은 `source: 'TRAIGO'` · `url: '#'`짜리 **우리가
+  // 쓴 글**인데 화면에서는 실제 기사와 구별되지 않는다. `/api/news/[id]`와
+  // 일간 브리핑이 그것을 그대로 받아 갔다.
+  //
+  // 이제 공급자가 없으면 **실패라고 말한다.** 화면이 "뉴스를 불러오지
+  // 못했습니다"를 그리는 편이, 있지도 않은 기사를 읽게 두는 것보다 낫다.
+  //
+  // 정본 뉴스는 `/api/news/stored`다(수집·번역·`affected_assets` 매핑).
+  // 이 라우트는 그 앞단의 집계용이고, 여기서 새 공급자를 만들지 않는다.
+  //
+  // `MOCK_NEWS`는 지우지 않고 **명시적으로 켜야만** 나온다 — 로컬에서
+  // 화면을 그려 볼 때 쓰라고 남긴다. 기본값은 꺼짐이다.
+  const allowMock = String(process.env.ALLOW_MOCK_NEWS || '') === '1';
+  if (items.length === 0 && !allowMock) {
+    return NextResponse.json({
+      ok: false, error: 'news_provider_unconfigured',
+      message: '뉴스 공급자가 연결되어 있지 않습니다 — 기사가 없다는 뜻이 아닙니다',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
   let data = items.length > 0 ? items : MOCK_NEWS;
+  // 지어낸 것이 나가는 경우에는 응답에 그렇게 적는다.
+  if (items.length === 0) source = 'MOCK_NOT_REAL_NEWS';
   if (category !== 'all') data = data.filter(n => n.category === category);
   if (query) {
     const q = query.toLowerCase();

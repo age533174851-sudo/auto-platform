@@ -703,6 +703,14 @@ export const OVERLAYS: Overlay[] = [
   { id: 'OverlayStack', file: 'src/lib/nav/overlayStack.ts', status: 'EXISTS',
     purpose: '겹침 순서와 뒤로가기',
     notes: '판정만 있다. 그리는 컴포넌트는 없다' },
+  // `TradeSheet`은 **없앴다.** 겹쳐 뜨는 주문 시트였는데, 실기(360×660)에서
+  // 열면 캔들이 52px만 남았고 그 띠는 배경과 격자선뿐이었다. 차트를 보고
+  // 들어가라고 만든 화면인데 주문하려는 순간 차트가 사라졌다.
+  //
+  // 대신 주문 조작부가 화면에 **상주한다**(`OrderControls` · `OrderEstimate`).
+  // 겹치는 층이 없으므로 여기 목록에 들어갈 것도 없다 — 52vh·88vh·visual
+  // viewport·z-index 문제가 통째로 사라졌다. 다시 시트로 만들지 않는다
+  // (`scripts/check-canonical-trading.mjs`가 막는다).
 ];
 
 // ══ 피드백 ══
