@@ -125,6 +125,30 @@ function body(name) {
     if (!re.test(frz)) fail(`freeze 트리거가 ${col}의 변경을 비교하지 않습니다`);
   }
   if (!/RAISE EXCEPTION/.test(frz)) fail('freeze 트리거가 거부하지 않습니다');
+
+  // ★ **처음 채우기는 막지 않는다.**
+  //
+  //   옛 값이 있을 때만 잠가야 한다. `IS DISTINCT FROM`만 보면 이 파일의
+  //   backfill이 **자기 트리거에 막혀** 두 번째 적용이 실패한다 — CI 재생이
+  //   실제로 그렇게 빨개졌다.
+  for (const col of ['entry_fee', 'open_quantity', 'open_notional', 'open_margin']) {
+    const re = new RegExp(`OLD\\.${col}\\s+IS NOT NULL\\s+AND\\s+NEW\\.${col}`);
+    if (!re.test(frz)) {
+      fail(`freeze 트리거가 ${col}의 "처음 채우기"를 허용하지 않습니다 — `
+         + 'backfill이 자기 트리거에 막힙니다');
+    }
+  }
+
+  // ★ **트리거가 backfill보다 먼저 세워져야 한다.**
+  //
+  //   순서가 반대면 두 번째 적용 때 **옛 트리거 함수**가 살아 있는 채로
+  //   backfill이 돌고, 고친 규칙이 적용되지 않는다.
+  const iTrg = sql.indexOf('CREATE TRIGGER paper_positions_freeze_open_trg');
+  const iBf  = sql.search(/UPDATE public\.paper_positions\s+SET open_quantity\s*=\s*quantity/);
+  if (iTrg < 0 || iBf < 0 || iTrg > iBf) {
+    fail('freeze 트리거가 backfill보다 뒤에 있습니다 — '
+       + '두 번째 적용에서 옛 트리거 함수가 backfill을 막습니다');
+  }
   if (!/CREATE TRIGGER paper_positions_freeze_open_trg[\s\S]{0,200}BEFORE UPDATE/.test(sql)) {
     fail('freeze 트리거가 BEFORE UPDATE로 걸려 있지 않습니다 — 만들어 놓고 안 건 것입니다');
   }

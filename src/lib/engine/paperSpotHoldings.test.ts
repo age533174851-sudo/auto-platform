@@ -21,37 +21,43 @@ export function runPaperSpotHoldingsTests() {
   // ── 현물 분할매도 — 매도 요청 읽기 ──
   test('비율 하나면 통과', () => {
     const a = sellAmountOf({ percent: 25 });
-    assert(!sellAmountFailed(a));
-    if (a.ok) { eq(a.percent, 25); eq(a.quantity, null); }
+    assert(!sellAmountFailed(a), '통과했어야 합니다');
+    if (!sellAmountFailed(a)) { eq(a.percent, 25); eq(a.quantity, null); }
   });
 
   test('수량 하나면 통과', () => {
     const a = sellAmountOf({ quantity: 0.5 });
-    assert(!sellAmountFailed(a));
-    if (a.ok) { eq(a.quantity, 0.5); eq(a.percent, null); }
+    assert(!sellAmountFailed(a), '통과했어야 합니다');
+    if (!sellAmountFailed(a)) { eq(a.quantity, 0.5); eq(a.percent, null); }
   });
 
   test('★ 둘 다 오면 거부 — 하나를 골라 주지 않는다', () => {
     const a = sellAmountOf({ percent: 25, quantity: 0.5 });
-    assert(sellAmountFailed(a));
-    if (!a.ok) eq(a.code, 'AMBIGUOUS');
+    // `if (!a.ok)`로 좁히지 않는다 — 이 저장소의 web tsconfig는
+    // `strictNullChecks`가 꺼져 있어 boolean 리터럴 판별이 좁혀지지 않는다.
+    // 타입 술어는 그와 무관하게 좁힌다.
+    if (sellAmountFailed(a)) eq(a.code, 'AMBIGUOUS');
+    else assert(false, '거부됐어야 합니다');
   });
 
   test('★ 둘 다 없으면 거부 — 전량으로 읽지 않는다', () => {
     const a = sellAmountOf({});
-    assert(sellAmountFailed(a));
-    if (!a.ok) eq(a.code, 'AMBIGUOUS');
+    // `if (!a.ok)`로 좁히지 않는다 — 이 저장소의 web tsconfig는
+    // `strictNullChecks`가 꺼져 있어 boolean 리터럴 판별이 좁혀지지 않는다.
+    // 타입 술어는 그와 무관하게 좁힌다.
+    if (sellAmountFailed(a)) eq(a.code, 'AMBIGUOUS');
+    else assert(false, '거부됐어야 합니다');
   });
 
   test('100%는 받는다 (전량매도가 이 경로다)', () => {
     const a = sellAmountOf({ percent: 100 });
-    assert(a.ok);
+    assert(!sellAmountFailed(a), '전량매도는 받아야 합니다');
   });
 
   test('101%는 거부', () => {
     const a = sellAmountOf({ percent: 101 });
-    assert(sellAmountFailed(a));
-    if (!a.ok) eq(a.code, 'BAD_PERCENT');
+    if (sellAmountFailed(a)) eq(a.code, 'BAD_PERCENT');
+    else assert(false, '거부됐어야 합니다');
   });
 
   test('0%·음수·숫자 아님은 거부', () => {
@@ -70,15 +76,15 @@ export function runPaperSpotHoldingsTests() {
     // `Number('') === 0`이다. 빈 값을 값으로 세면 "둘 다 왔다"가 되어
     // 멀쩡한 요청이 거부된다.
     const a = sellAmountOf({ percent: 25, quantity: '' });
-    assert(a.ok);
-    if (a.ok) eq(a.percent, 25);
+    if (sellAmountFailed(a)) assert(false, '빈 문자열은 안 보낸 것입니다');
+    else eq(a.percent, 25);
   });
 
   test('★ boolean은 값이 아니다', () => {
     // `Number(true) === 1`이다. 참을 수량 1로 읽으면 누른 적 없는 매도가 나간다.
     const a = sellAmountOf({ quantity: true, percent: 50 });
-    assert(a.ok);
-    if (a.ok) eq(a.percent, 50);
+    if (sellAmountFailed(a)) assert(false, 'boolean은 값이 아닙니다');
+    else eq(a.percent, 50);
   });
 
   // ── 현물 분할매도 — 감시기 가격 권위 ──

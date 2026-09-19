@@ -85,8 +85,19 @@ const CASES = [
      '             remaining_entry_fee_basis = pp.remaining_entry_fee_basis - v_es,\n             entry_fee = pp.entry_fee - v_es']]],
 
   ['MUT-03 freeze 트리거에서 entry_fee 보호를 뺀다', MIG, 'RED',
-   [['  IF NEW.entry_fee     IS DISTINCT FROM OLD.entry_fee\n  OR NEW.open_quantity IS DISTINCT FROM OLD.open_quantity',
-     '  IF NEW.open_quantity IS DISTINCT FROM OLD.open_quantity']]],
+   [['  IF (OLD.entry_fee     IS NOT NULL AND NEW.entry_fee     IS DISTINCT FROM OLD.entry_fee)\n  OR (OLD.open_quantity IS NOT NULL AND NEW.open_quantity IS DISTINCT FROM OLD.open_quantity)',
+     '  IF (OLD.open_quantity IS NOT NULL AND NEW.open_quantity IS DISTINCT FROM OLD.open_quantity)']]],
+
+  // ── freeze가 자기 backfill을 막는 회귀 ──
+  //
+  //   이 두 가지가 CI 재생을 실제로 빨갛게 만들었다. 되돌리면 다시 RED여야 한다.
+  ['MUT-03b freeze가 "처음 채우기"까지 막는다 (backfill이 자기 트리거에 막힌다)', MIG, 'RED',
+   [['  IF (OLD.entry_fee     IS NOT NULL AND NEW.entry_fee     IS DISTINCT FROM OLD.entry_fee)',
+     '  IF (NEW.entry_fee IS DISTINCT FROM OLD.entry_fee)']]],
+
+  ['MUT-03c freeze 트리거를 backfill 뒤로 되돌린다', MIG, 'RED',
+   [['CREATE TRIGGER paper_positions_freeze_open_trg\n  BEFORE UPDATE ON public.paper_positions\n  FOR EACH ROW\n  EXECUTE FUNCTION public.paper_positions_freeze_open_cols();',
+     '-- (트리거 생성을 뒤로 옮겼다)']]],
 
   // ── ③ legacy 청산이 과거 수수료를 쓴다 (A1 되돌림) ──
   ['MUT-04 legacy 청산이 historical entry_fee를 쓴다', STORE, 'RED',

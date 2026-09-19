@@ -136,22 +136,9 @@ COMMENT ON COLUMN public.paper_positions.remaining_entry_fee_basis IS
   '남은 원가에 귀속될 진입 수수료. entry_fee는 실제로 낸 과거 금액이라 '
   '안 줄고, 이 칸이 줄어든다. 둘을 한 칸에 담으면 수수료가 두 번 빠진다.';
 
--- 기존 줄 backfill. **트리거를 만들기 전에** 한다 — 뒤에 만들면 여기서 막힌다.
--- 부분매도된 적 없는 줄이므로 원본과 남은 값이 같다.
-UPDATE public.paper_positions
-   SET open_quantity = quantity
- WHERE open_quantity IS NULL;
-UPDATE public.paper_positions
-   SET open_notional = notional
- WHERE open_notional IS NULL;
-UPDATE public.paper_positions
-   SET open_margin = margin
- WHERE open_margin IS NULL;
-UPDATE public.paper_positions
-   SET remaining_entry_fee_basis = entry_fee
- WHERE remaining_entry_fee_basis IS NULL;
-
 -- ══════════════════ ③ 불변 칸은 DB가 지킨다 ══════════════════
+--
+-- **backfill보다 먼저 세운다.** 아래 채우기가 이 트리거를 지나가기 때문이다.
 --
 -- `086`의 원장 시각 동결과 같은 장치다. 행 단위 CHECK는 이전 값을 볼 수
 -- 없으므로, 이전 값을 볼 수 있는 유일한 자리인 BEFORE UPDATE로 막는다.
@@ -160,14 +147,26 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $fn$
 BEGIN
-  IF NEW.entry_fee     IS DISTINCT FROM OLD.entry_fee
-  OR NEW.open_quantity IS DISTINCT FROM OLD.open_quantity
-  OR NEW.open_notional IS DISTINCT FROM OLD.open_notional
-  OR NEW.open_margin   IS DISTINCT FROM OLD.open_margin
-  OR NEW.fill_price    IS DISTINCT FROM OLD.fill_price
-  OR NEW.leverage      IS DISTINCT FROM OLD.leverage
-  OR NEW.market        IS DISTINCT FROM OLD.market
-  OR NEW.side          IS DISTINCT FROM OLD.side
+  -- ★ **한 번 적힌 뒤로 안 바뀐다** — 아직 안 적힌 것을 적는 것은 막지 않는다.
+  --
+  --   `IS DISTINCT FROM`만 보면 **backfill이 자기 트리거에 막힌다.**
+  --   이 파일을 두 번째로 세울 때가 그렇다: 그 사이에 옛 버전
+  --   `paper_open_position`(086 이하)이 만든 줄은 `open_*`가 NULL이고,
+  --   위쪽 backfill이 그것을 채우려는 순간 `NULL → 값`이 "증거 변경"으로
+  --   읽혀 거부된다. 재생·뮤테이션 하네스가 정확히 그 상태를 만든다.
+  --
+  --   비어 있던 칸을 처음 채우는 것은 증거를 **고치는** 것이 아니다.
+  --   그래서 옛 값이 있을 때만 잠근다. (`entry_fee`·`fill_price`·`leverage`·
+  --   `market`·`side`는 스키마가 NOT NULL이라 이 분기를 타지 않는다 — 그래도
+  --   같은 규칙으로 적는다. 규칙이 칸마다 다르면 언젠가 갈린다.)
+  IF (OLD.entry_fee     IS NOT NULL AND NEW.entry_fee     IS DISTINCT FROM OLD.entry_fee)
+  OR (OLD.open_quantity IS NOT NULL AND NEW.open_quantity IS DISTINCT FROM OLD.open_quantity)
+  OR (OLD.open_notional IS NOT NULL AND NEW.open_notional IS DISTINCT FROM OLD.open_notional)
+  OR (OLD.open_margin   IS NOT NULL AND NEW.open_margin   IS DISTINCT FROM OLD.open_margin)
+  OR (OLD.fill_price    IS NOT NULL AND NEW.fill_price    IS DISTINCT FROM OLD.fill_price)
+  OR (OLD.leverage      IS NOT NULL AND NEW.leverage      IS DISTINCT FROM OLD.leverage)
+  OR (OLD.market        IS NOT NULL AND NEW.market        IS DISTINCT FROM OLD.market)
+  OR (OLD.side          IS NOT NULL AND NEW.side          IS DISTINCT FROM OLD.side)
   THEN
     RAISE EXCEPTION USING
       ERRCODE = '23514',
@@ -187,6 +186,26 @@ CREATE TRIGGER paper_positions_freeze_open_trg
   BEFORE UPDATE ON public.paper_positions
   FOR EACH ROW
   EXECUTE FUNCTION public.paper_positions_freeze_open_cols();
+
+-- 기존 줄 backfill.
+--
+-- **트리거를 먼저 세우고 여기서 채운다.** 순서를 반대로 두면 이 파일을 두 번째
+-- 세울 때 **옛 트리거 함수가 살아 있는 채로** backfill이 돌고, `NULL → 값`이
+-- 증거 변경으로 읽혀 거부된다. 위의 고친 함수가 먼저 깔려 있어야 한다.
+--
+-- 부분매도된 적 없는 줄이므로 원본과 남은 값이 같다 — 값을 지어내지 않는다.
+UPDATE public.paper_positions
+   SET open_quantity = quantity
+ WHERE open_quantity IS NULL;
+UPDATE public.paper_positions
+   SET open_notional = notional
+ WHERE open_notional IS NULL;
+UPDATE public.paper_positions
+   SET open_margin = margin
+ WHERE open_margin IS NULL;
+UPDATE public.paper_positions
+   SET remaining_entry_fee_basis = entry_fee
+ WHERE remaining_entry_fee_basis IS NULL;
 
 -- ══════════════════ ④ 매도 사건 ══════════════════
 CREATE TABLE IF NOT EXISTS public.paper_sell_events (

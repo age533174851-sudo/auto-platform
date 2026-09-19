@@ -582,6 +582,49 @@ SELECT pg_temp.want('A2 legacy 청산 뒤 realized_pnl은 이 lot의 일생이�
                 (SELECT t_now FROM t) + INTERVAL '1 day')))::TEXT
      FROM public.paper_positions pp WHERE pp.id=(SELECT v FROM h WHERE k='pD1')), 'true');
 
+
+-- ══════════════════ 불변 칸: 처음 채우기 ≠ 고치기 ══════════════════
+--
+-- 이 계약이 빠져서 CI 재생이 빨갛게 됐었다. 이 파일을 두 번째 세울 때,
+-- 그 사이에 옛 버전 `paper_open_position`이 만든 줄은 `open_*`가 비어 있다.
+-- backfill이 그것을 채우는데 트리거가 `NULL → 값`을 증거 변경으로 읽으면
+-- **마이그레이션 자신이 자기 트리거에 막힌다.**
+--
+-- 비어 있던 칸을 처음 채우는 것은 고치는 것이 아니다. 한 번 적힌 뒤로만 잠근다.
+INSERT INTO public.paper_positions
+  (id, user_id, paper_account_id, symbol, market, side, status,
+   entry_price, fill_price, quantity, notional, leverage, margin, entry_fee)
+VALUES
+  ('cbf1ee00-0000-0000-0000-0000000000f1'::uuid,
+   'cb000000-0000-0000-0000-00000000000d'::uuid,
+   (SELECT v FROM h WHERE k='accD'), 'BTCUSDT', 'SPOT', 'LONG', 'open',
+   100, 100, 1, 100, 1, 100, 0.05);
+
+SELECT pg_temp.want('freeze: 옛 경로로 만든 줄은 증거 칸이 비어 있다',
+  (SELECT (pp.open_quantity IS NULL)::TEXT FROM public.paper_positions pp
+    WHERE pp.id='cbf1ee00-0000-0000-0000-0000000000f1'::uuid), 'true');
+
+-- 처음 채우기는 통과해야 한다 (= backfill이 하는 일).
+UPDATE public.paper_positions
+   SET open_quantity = quantity, open_notional = notional,
+       open_margin = margin, remaining_entry_fee_basis = entry_fee
+ WHERE id='cbf1ee00-0000-0000-0000-0000000000f1'::uuid;
+
+SELECT pg_temp.want('★ freeze: 비어 있던 증거를 처음 채우는 것은 막지 않는다',
+  (SELECT (pp.open_quantity = pp.quantity AND pp.open_margin = pp.margin)::TEXT
+     FROM public.paper_positions pp
+    WHERE pp.id='cbf1ee00-0000-0000-0000-0000000000f1'::uuid), 'true');
+
+-- 한 번 적힌 뒤에는 막아야 한다.
+SELECT pg_temp.must_fail('★ freeze: 한 번 적힌 증거를 고치는 것은 거부', '23514', $q$
+  UPDATE public.paper_positions SET open_quantity = open_quantity + 1
+   WHERE id='cbf1ee00-0000-0000-0000-0000000000f1'::uuid
+$q$);
+SELECT pg_temp.must_fail('★ freeze: 채워진 증거를 NULL로 지우는 것도 거부', '23514', $q$
+  UPDATE public.paper_positions SET open_margin = NULL
+   WHERE id='cbf1ee00-0000-0000-0000-0000000000f1'::uuid
+$q$);
+
 \echo '현물 분할매도 회계 실행 증명 전부 통과'
 
 ROLLBACK;
