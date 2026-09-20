@@ -570,6 +570,16 @@ jobs:
       - name: 현물 분할매도 회계 계약 (분할과 전량이 같은 장부를 만드는가)
         run: node scripts/check-paper-spot-holdings.mjs
 
+      # ── 제품 능력 정본 ──
+      #
+      # 제품을 늘릴 때 가장 쉬운 사고는 탭부터 만드는 것이다. 없는 제품에
+      # 탭을 그려 두면 사용자는 **누를 수 있는 것을 되는 것으로 읽는다.**
+      #
+      # 이 검사기는 표가 가리키는 근거 파일이 실제로 있는지, 온체인 mock이
+      # 시세 권위로 올라가지 않았는지, 모르는 제품이 fail-closed인지를 본다.
+      - name: 제품 능력 정본 (없는 제품이 화면에 열리지 않는가)
+        run: node scripts/check-product-registry.mjs
+
       # ── 배포 증거 ──
       #
       # 관측하지 않은 Vercel SHA를 main으로 채워 넘기면 그 검사는 **언제나
