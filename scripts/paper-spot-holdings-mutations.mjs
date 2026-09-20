@@ -32,6 +32,18 @@ const CHECK = 'scripts/check-paper-spot-holdings.mjs';
 const AUDIT = '.github/workflows/audit-production-paper-spot-holdings.yml';
 const REPLAY = '.github/workflows/supabase-replay.yml';
 const PROOF = 'scripts/sql/088_paper_spot_holdings_proof.sql';
+// Phase 3 — 초보/프로 두 표현, 하나의 권위
+const CTXF  = 'src/lib/trading/tradeContext.ts';
+const USELL = 'src/lib/trading/useSellForm.ts';
+const HOST  = 'src/components/trading/PaperOrderScreen.tsx';
+const BBUY  = 'src/components/trading/BeginnerBuyScreen.tsx';
+const BSELL = 'src/components/trading/BeginnerSellScreen.tsx';
+const PSELL = 'src/components/trading/ProSellPanel.tsx';
+const PAGE  = 'src/app/page.tsx';
+const PREFS = 'src/lib/ui/preferences.ts';
+const CAPA  = 'src/lib/trading/capability.ts';
+const ULEV  = 'src/lib/ui/useUiLevel.ts';
+const WSPC  = 'src/components/trading/TradingWorkspace.tsx';
 
 const ONLY = process.argv.slice(2).filter(a => !a.startsWith('-'));
 
@@ -294,6 +306,100 @@ const CASES = [
   ['MUT-43 장부에서 status 확인을 뺀다 (FAILED도 통과)', AUDIT, 'RED',
    [["                  AND m.status = 'APPLIED')", "                  )"]]],
 
+  // ══════ Phase 3 — 표현은 둘, 권위는 하나 ══════
+
+  ['MUT-44 매수 훅에 화면 밀도를 넣는다 (돈 계산이 설정에 의존)', HOST, 'RED',
+   [['  const form = useTradeForm({\n    symbol: ctx.symbol,',
+     '  const form = useTradeForm({\n    uiLevel: level,\n    symbol: ctx.symbol,']]],
+
+  ['MUT-45 매도 훅에 화면 밀도를 넣는다', HOST, 'RED',
+   [['  const sell = useSellForm({\n    symbol: ctx.symbol,',
+     '  const sell = useSellForm({\n    uiLevel: level,\n    symbol: ctx.symbol,']]],
+
+  ['MUT-46 초보 화면이 자기 주문을 보낸다 (주문 경로가 둘)', BBUY, 'RED',
+   [['  const money = (v: number | null | undefined) =>',
+     '  const send = () => fetch(\'/api/paper/order\', { method: \'POST\' });\n  const money = (v: number | null | undefined) =>']]],
+
+  ['MUT-47 프로 패널이 자기 훅을 부른다 (판단이 두 벌)', PSELL, 'RED',
+   [["import type { SellForm } from '@/lib/trading/useSellForm';",
+     "import { useSellForm, type SellForm } from '@/lib/trading/useSellForm';"],
+    ['  const held = sell.holding;',
+     '  const mine = useSellForm({ symbol, market: \'SPOT\', target: null as any });\n  const held = mine.holding;']]],
+
+  ['MUT-48 프로 매도 패널이 정본 화면에서 떨어진다 (매도가 도달 불가)', WSPC, 'RED',
+   [['          <ProSellPanel symbol={symbol} scope={scope} sell={sell}/>', '          ']]],
+
+  ['MUT-48b 세 번째 매도 host를 만든다 (같은 매도가 세 모양)', BSELL, 'RED',
+   [["import type { SellForm } from '@/lib/trading/useSellForm';",
+     "import { useSellForm, type SellForm } from '@/lib/trading/useSellForm';"],
+    ['  const [confirming, setConfirming] = useState(false);',
+     '  const extra = useSellForm({ symbol, market, target: null as any });\n  const [confirming, setConfirming] = useState(false);']]],
+
+  ['MUT-49 프로 화면이 평가손익을 만든다 (정본 없는 값)', PSELL, 'RED',
+   [['  const held = sell.holding;',
+     '  const held = sell.holding;\n  const unrealized = held ? held.quantity * 1 : null;']]],
+
+  ['MUT-50 현물 매도를 진입 경로로 보낸다 (공매도가 된다)', CTXF, 'RED',
+   [["  if (ctx.market === 'SPOT' && ctx.direction === 'SELL') return 'SELL_HOLDING';",
+     "  if (false) return 'SELL_HOLDING';"]]],
+
+  ['MUT-51 매도 경로에서도 진입 방향을 만든다', CTXF, 'RED',
+   [["  if (routeFor(ctx) !== 'OPEN_POSITION') return null;", '  ']]],
+
+  ['MUT-52 문맥에 challengeId를 넣는다 (정본이 둘)', CTXF, 'RED',
+   [['export interface TradeContext {\n  symbol: string;',
+     'export interface TradeContext {\n  challengeId: string | null;\n  symbol: string;']]],
+
+  ['MUT-53 매도 요청에 비율·수량을 항상 함께 싣는다 (서버가 거부)', USELL, 'RED',
+   [['        ...(request.percent != null ? { percent: request.percent } : {}),\n        ...(request.quantity != null ? { quantity: request.quantity } : {}),',
+     '        percent: request.percent,\n        quantity: request.quantity,']]],
+
+  ['MUT-54 매도에 계좌 id를 싣는다', USELL, 'RED',
+   [['        ...targetRequestFields(i.target),',
+     '        paperAccountId: (i.target as any).accountId,\n        ...targetRequestFields(i.target),']]],
+
+  ['MUT-55 실패해도 매도 식별자를 버린다 (재시도가 두 번 판다)', USELL, 'RED',
+   [['        setMessage({ ok: false, text: String(d?.message || d?.error || `매도 실패 (HTTP ${r.status})`) });\n        return;',
+     '        setMessage({ ok: false, text: String(d?.message || d?.error || `매도 실패 (HTTP ${r.status})`) });\n        sellId.current = \'\';\n        return;']]],
+
+  ['MUT-56 보유를 포지션 목록에서 유도한다 (평단 정본이 둘)', USELL, 'RED',
+   [['        const r = await fetch(`/api/paper/holdings${query}`, {',
+     '        const r = await fetch(`/api/paper/positions${query}`, {']]],
+
+  ['MUT-57 부분청산을 두 시장 모두 연다 (선물은 못 한다)', CAPA, 'RED',
+   [["      return spot\n        ? yes('보유분을 나눠 팔 수 있습니다 (비율 또는 수량)')\n        : no('선물 모의 청산은 전량만 지원합니다');",
+     "      return yes('보유분을 나눠 팔 수 있습니다 (비율 또는 수량)');"]]],
+
+  ['MUT-58 설정 정규화에서 uiLevel을 뺀다 (옛 값이 화면을 깬다)', PREFS, 'RED',
+   [["    uiLevel: oneOf(r.uiLevel, ['BEGINNER', 'PRO'] as const, DEFAULTS.uiLevel),", '    uiLevel: r.uiLevel,']]],
+
+  ['MUT-59 기본값을 프로로 바꾼다', PREFS, 'RED',
+   [["  uiLevel: 'BEGINNER',", "  uiLevel: 'PRO',"]]],
+
+  ['MUT-60 설정 변경 통지를 없앤다 (토글해도 안 바뀐다)', PREFS, 'RED',
+   [['export function subscribePrefs(cb: () => void): () => void {', 'function subscribePrefs(cb: () => void): () => void {']]],
+
+  ['MUT-61 밀도를 두 번째 저장소에 둔다', ULEV, 'RED',
+   [['    return subscribePrefs(read);', "    try { window.localStorage.getItem('x'); } catch {}\n    return () => {};"]]],
+
+  ['MUT-62 주문 화면을 뒤로가기 계약에서 뺀다 (탭까지 바뀐다)', PAGE, 'RED',
+   [["    { id:'order',   open:!!orderCtx,      close:()=>setOrderCtx(null) },", '    ']]],
+
+  ['MUT-63 문맥을 읽지 않고 주문 화면을 연다', PAGE, 'RED',
+   [['              const ctx = readTradeContext({\n                symbol:i.symbol, market:i.market, direction:i.side,\n              });',
+     '              const ctx = { symbol:i.symbol, market:i.market, direction:i.side } as any;']]],
+
+  ['MUT-65 프로그램이 부른 back을 세지 않는다 (뒤로 한 번에 겹 둘)', PAGE, 'RED',
+   [['for(let i=0;i<d.count;i++){ selfBack.current+=1; window.history.back(); }',
+     'for(let i=0;i<d.count;i++) window.history.back();']]],
+
+  ['MUT-66 popstate가 자기 back을 안 거른다', PAGE, 'RED',
+   [['        if(selfBack.current>0){ selfBack.current-=1; return; }', '        ']]],
+
+  ['MUT-64 주문 겹을 상세보다 아래로 내린다 (CTA가 안 눌린다)', PAGE, 'RED',
+   [['          position:\'fixed\', inset:0, zIndex:10060, background:T.bg,',
+     '          position:\'fixed\', inset:0, zIndex:10040, background:T.bg,']]],
+
   // ── 대조군 (GREEN이어야 한다) ──
   ['OK1 마이그레이션에 주석 한 줄 추가', MIG, 'GREEN',
    [['-- 088_paper_spot_holdings.sql', '-- 088_paper_spot_holdings.sql\n-- 대조군']]],
@@ -302,6 +408,10 @@ const CASES = [
   ['OK3 감사 워크플로에 주석 한 줄 추가', AUDIT, 'GREEN',
    [['name: audit-production-paper-spot-holdings',
      '# 대조군\nname: audit-production-paper-spot-holdings']]],
+  ['OK4 초보 매수 화면에 주석 한 줄 추가', BBUY, 'GREEN',
+   [['export type BuyUnit', '// 대조군\nexport type BuyUnit']]],
+  ['OK5 문맥 모듈에 주석 한 줄 추가', CTXF, 'GREEN',
+   [['export type TradeDirection', '// 대조군\nexport type TradeDirection']]],
 ];
 
 const selected = ONLY.length

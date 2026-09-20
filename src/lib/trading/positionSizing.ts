@@ -170,3 +170,53 @@ export function percentFromQuantity(i: {
 // 말하는 곳도 둘이 된다. 끌어서 정하고 숫자로 읽는 한 벌만 남긴다.
 //
 // 상수를 지운 이유: 아무도 안 쓰는 export는 언젠가 다시 화면에 붙는다.
+
+/**
+ * **금액(명목가) → 비율.** 초보 화면의 "얼마어치 살까요?"가 이 함수를 쓴다.
+ *
+ * `percentFromQuantity`와 같은 기준을 쓴다 — 명목가를 레버리지로 나눠
+ * 증거금을 얻고, 그것을 잔고로 나눈다. 두 역함수가 다른 기준을 쓰면
+ * 수량 칸과 금액 칸이 같은 주문을 다르게 적는다.
+ *
+ * **가격을 받지 않는다.** 명목가는 이미 돈이라 가격을 거칠 필요가 없고,
+ * 여기서 또 나누면 `planSizing`이 다시 곱할 때 값이 어긋난다.
+ *
+ * 읽을 수 없으면 null — 0으로 접지 않는다. 0은 "사용자가 0을 골랐다"이고
+ * 그건 확인된 사실이 아니다.
+ */
+export function percentFromNotional(i: {
+  notional: number | null | undefined;
+  availableBalance: number | null | undefined;
+  leverage: number | null | undefined;
+}): number | null {
+  const notional = num(i?.notional);
+  const bal = num(i?.availableBalance);
+  const lev = num(i?.leverage);
+  if (!Number.isFinite(notional) || notional < 0) return null;
+  if (!Number.isFinite(bal) || !(bal > 0)) return null;
+  if (!Number.isFinite(lev) || lev < 1) return null;
+
+  const margin = notional / lev;
+  const pct = (margin / bal) * 100;
+  if (!Number.isFinite(pct)) return null;
+  // `percentFromQuantity`와 **같은 자르기**다. 두 칸이 다른 상한을 쓰면
+  // 같은 주문이 칸에 따라 다른 비율로 보인다.
+  return Math.max(0, Math.min(100, pct));
+}
+
+// ── 빠른 비율 버튼 ──
+//
+// 위에서 `QUICK_PERCENTS`를 지웠던 이유는 **"지금 몇 %인가"를 말하는 곳이
+// 둘이 되는 것**이었지, 버튼 자체가 아니었다. 아래 상수는 값을 읽지 않는다 —
+// 누르면 `useTradeForm`의 `setPercent` 하나로 들어가고, 현재 비율을 말하는
+// 곳은 여전히 `percent` 한 곳뿐이다.
+//
+// 초보 화면에는 슬라이더가 없다. 그래서 이 버튼이 **유일한** 비율 입력이다.
+export const BUY_PERCENTS = [10, 25, 50, 100] as const;
+
+/**
+ * 매도 비율. **전량이 100으로 들어간다** — `paper_sell_holding`이
+ * `percent = 100`일 때만 나눗셈을 건너뛰고 남은 전부를 가져간다(088).
+ * 여기서 99.99 같은 근사를 쓰면 영원히 안 풀리는 잔량이 생긴다.
+ */
+export const SELL_PERCENTS = [25, 50, 75, 100] as const;

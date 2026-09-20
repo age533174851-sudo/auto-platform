@@ -8,7 +8,8 @@ import { test, eq, assert } from '../../test/harness';
 import {
   DEFAULTS, normalizePrefs, shouldConfirm, moveButton, toggleButton,
   POSITION_BUTTONS, CONFIRM_KINDS, BUTTON_LABEL, CONFIRM_LABEL,
-  type Preferences, type PositionButton,
+  otherUiLevel, UI_LEVEL_LABEL,
+  type Preferences, type PositionButton, type TradeUiLevel,
 } from './preferences';
 
 export function runPreferencesTests() {
@@ -141,4 +142,55 @@ export function runPreferencesTests() {
     const r2 = toggleButton(full.slice(0, 4), 'LEVERAGE');
     eq(r2.list.length <= 4, true);
   });
+
+  // ══════════ 거래 화면 밀도 (간편 / 프로) ══════════
+
+  test('★ 기본은 간편이다 — 아무도 고르지 않은 복잡도가 켜져 있지 않다', () => {
+    eq(DEFAULTS.uiLevel, 'BEGINNER');
+  });
+
+  test('★ 모르는 값은 기본으로 되돌린다 (옛 판·손으로 고친 값)', () => {
+    eq(normalizePrefs({ uiLevel: 'EXPERT' }).uiLevel, 'BEGINNER');
+    eq(normalizePrefs({ uiLevel: '' }).uiLevel, 'BEGINNER');
+    eq(normalizePrefs({ uiLevel: 1 }).uiLevel, 'BEGINNER');
+    eq(normalizePrefs({}).uiLevel, 'BEGINNER');
+  });
+
+  test('저장된 값이 제대로면 그대로 읽는다', () => {
+    eq(normalizePrefs({ uiLevel: 'PRO' }).uiLevel, 'PRO');
+    eq(normalizePrefs({ uiLevel: 'BEGINNER' }).uiLevel, 'BEGINNER');
+  });
+
+  test('★ 한 항목이 틀려도 나머지를 날리지 않는다', () => {
+    const r = normalizePrefs({ uiLevel: '무엇인가', trigger: 'LAST', leverage: 7 });
+    eq(r.uiLevel, 'BEGINNER');
+    eq(r.trigger, 'LAST');
+    eq(r.leverage, 7);
+  });
+
+  test('반대쪽은 정확히 하나다 — 화면이 두 값뿐이라는 사실을 다시 적지 않는다', () => {
+    eq(otherUiLevel('BEGINNER'), 'PRO');
+    eq(otherUiLevel('PRO'), 'BEGINNER');
+    // 두 번 뒤집으면 제자리
+    for (const l of ['BEGINNER', 'PRO'] as TradeUiLevel[]) {
+      eq(otherUiLevel(otherUiLevel(l)), l);
+    }
+  });
+
+  test('두 값 모두 사람이 읽을 라벨이 있다', () => {
+    for (const l of ['BEGINNER', 'PRO'] as TradeUiLevel[]) {
+      assert(typeof UI_LEVEL_LABEL[l] === 'string' && UI_LEVEL_LABEL[l].length > 0,
+        `${l}에 라벨이 없습니다`);
+    }
+    assert(UI_LEVEL_LABEL.BEGINNER !== UI_LEVEL_LABEL.PRO, '두 라벨이 같습니다');
+  });
+
+  test('★ 밀도는 안전장치를 건드리지 않는다 — 실전은 어느 밀도에서도 묻는다', () => {
+    for (const uiLevel of ['BEGINNER', 'PRO'] as TradeUiLevel[]) {
+      const p: Preferences = { ...DEFAULTS, uiLevel, confirmKinds: [] };
+      assert(shouldConfirm(p, 'MARKET', true),
+        `${uiLevel}에서 실전 확인창이 꺼졌습니다`);
+    }
+  });
+
 }

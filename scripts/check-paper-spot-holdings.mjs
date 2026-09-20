@@ -11,7 +11,7 @@
 // **낱말이 아니라 호출과 조건의 모양을 본다.** 이 저장소에서 규칙이 뮤테이션을
 // 통과시킨 적이 세 번 있는데 전부 "글자가 남아 있어서"였다 — 조건을
 // `if (false)`로 바꿔도 문자열은 그대로였다.
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 
 const MIG   = 'supabase/migrations/088_paper_spot_holdings.sql';
 const STORE = 'src/lib/engine/paperStore.ts';
@@ -23,6 +23,17 @@ const HOLDR = 'src/app/api/paper/holdings/route.ts';
 const SCOPE = 'src/lib/engine/paperHoldingScope.ts';
 const AUDIT = '.github/workflows/audit-production-paper-spot-holdings.yml';
 const REPLAY = '.github/workflows/supabase-replay.yml';
+// Phase 3 — 초보/프로 두 표현, 하나의 권위
+const CTXF  = 'src/lib/trading/tradeContext.ts';
+const SELLP = 'src/lib/trading/sellPlan.ts';
+const USELL = 'src/lib/trading/useSellForm.ts';
+const HOST  = 'src/components/trading/PaperOrderScreen.tsx';
+const BBUY  = 'src/components/trading/BeginnerBuyScreen.tsx';
+const BSELL = 'src/components/trading/BeginnerSellScreen.tsx';
+const PSELL = 'src/components/trading/ProSellPanel.tsx';
+const PAGE  = 'src/app/page.tsx';
+const PREFS = 'src/lib/ui/preferences.ts';
+const CAPA  = 'src/lib/trading/capability.ts';
 
 let bad = 0;
 const fail = (msg) => { console.error(`  ✗ ${msg}`); bad += 1; };
@@ -654,6 +665,230 @@ function body(name) {
   for (const need of ['E1 잔고가 정확히 같다', 'D1 trade_count', 'C1 entry_fee',
                       'DL 오늘 창', 'oversell', '멱등']) {
     if (!proof.includes(need)) fail(`증명에 "${need}" 항목이 없습니다`);
+  }
+}
+
+// 소스 트리의 .tsx를 훑는다 (시험 파일 제외).
+function walkTsx(dir) {
+  let out = [];
+  let entries = [];
+  try { entries = readdirSync(dir); } catch { return out; }
+  for (const e of entries) {
+    const full = `${dir}/${e}`;
+    if (statSync(full).isDirectory()) out = out.concat(walkTsx(full));
+    else if (/\.tsx$/.test(full) && !/\.test\.tsx$/.test(full)) out.push(full);
+  }
+  return out;
+}
+
+// ══════════════ ⑮ 초보/프로는 표현만 갈린다 ══════════════
+//
+// 이 규칙군이 막는 것은 "주문 엔진이 둘이 되는 것" 하나다. 화면이 둘인
+// 것은 괜찮다 — 돈을 움직이는 판단이 둘이 되는 것이 문제다.
+{
+  const host  = stripTs(read(HOST));
+  const bbuy  = stripTs(read(BBUY));
+  const bsell = stripTs(read(BSELL));
+  const psell = stripTs(read(PSELL));
+  const usell = stripTs(read(USELL));
+  const ctx   = stripTs(read(CTXF));
+  const prefs = stripTs(read(PREFS));
+  const page  = stripTs(read(PAGE));
+
+  // ── 밀도가 돈 계산에 들어가지 않는다 ──
+  //
+  // 훅에 `uiLevel`이 전달되는 순간 같은 주문이 화면 설정에 따라 다른
+  // 값으로 나간다. 호출 **인자 모양**을 본다 — 낱말이 아니라.
+  for (const [name, code] of [['useTradeForm', host], ['useSellForm', host]]) {
+    const m = code.match(new RegExp(`${name}\\s*\\(\\s*\\{([\\s\\S]*?)\\}\\s*\\)`));
+    if (!m) { fail(`${HOST}: ${name}을 객체 인자로 부르지 않습니다`); continue; }
+    if (/\buiLevel\b|\blevel\b/.test(m[1])) {
+      fail(`${HOST}: ${name} 인자에 화면 밀도가 들어갑니다 — 돈 계산이 설정에 의존합니다`);
+    }
+  }
+  for (const [f, code] of [[USELL, usell], [SELLP, stripTs(read(SELLP))]]) {
+    if (/\buiLevel\b/.test(code)) fail(`${f}: 판단 모듈이 화면 밀도를 압니다`);
+  }
+
+  // ── 화면은 자기 주문을 만들지 않는다 ──
+  //
+  // 초보 화면이 `fetch`를 들면 그 순간 두 번째 주문 경로다. 서버 라우트가
+  // 아닌 표현 컴포넌트에는 fetch가 없어야 한다.
+  for (const [f, code] of [[BBUY, bbuy], [BSELL, bsell], [PSELL, psell]]) {
+    if (/\bfetch\s*\(/.test(code)) fail(`${f}: 화면이 직접 요청을 보냅니다 — 주문 경로가 둘입니다`);
+    if (/\/api\/paper\//.test(code)) fail(`${f}: 화면이 API 주소를 압니다 — 훅을 거쳐야 합니다`);
+  }
+
+  // ── 두 화면이 **같은 인스턴스**를 받는다 ──
+  //
+  // 각자 훅을 부르면 같은 입력에 다른 수량이 나올 수 있다. 훅은 문지기가
+  // 한 번만 부른다.
+  for (const [f, code] of [[BBUY, bbuy], [BSELL, bsell], [PSELL, psell]]) {
+    if (/\buseTradeForm\s*\(|\buseSellForm\s*\(/.test(code)) {
+      fail(`${f}: 화면이 스스로 주문 훅을 부릅니다 — 판단이 두 벌이 됩니다`);
+    }
+  }
+  if (!/form=\{form\}/.test(host)) {
+    fail(`${HOST}: 매수 화면에 form을 그대로 넘기지 않습니다`);
+  }
+  // ── 매도 훅을 만드는 곳은 **정확히 두 host뿐**이다 ──
+  //
+  //   초보  PaperOrderScreen  → BeginnerSellScreen
+  //   프로  TradingWorkspace  → ProSellPanel   (정본 거래 화면이다)
+  //
+  // 처음에는 주문 화면이 프로 workspace까지 직접 그렸는데,
+  // `check-canonical-trading`이 "정본 거래 화면 host가 2개"라고 잡았다.
+  // 그 규칙이 맞아서 매도 패널을 정본 화면 안으로 옮겼다. 여기서는 그
+  // **집합이 늘어나지 않는 것**을 지킨다 — 세 번째 host가 생기면 같은
+  // 매도가 세 가지 모양으로 나간다.
+  {
+    const WS = 'src/components/trading/TradingWorkspace.tsx';
+    const hosts = [];
+    for (const f of walkTsx('src')) {
+      if (/\buseSellForm\s*\(/.test(stripTs(read(f)))) hosts.push(f);
+    }
+    const want = [HOST, WS].sort().join(', ');
+    const got = hosts.sort().join(', ');
+    if (got !== want) {
+      fail(`매도 훅을 만드는 곳이 달라졌습니다 — 기대 [${want}] / 실제 [${got || '없음'}]`);
+    }
+    for (const [h, panel] of [[HOST, 'BeginnerSellScreen'], [WS, 'ProSellPanel']]) {
+      const c = stripTs(read(h));
+      if (!new RegExp(`<${panel}[\\s\\S]{0,240}sell=\\{sell\\}`).test(c)) {
+        fail(`${h}: ${panel}에 자기 sell을 그대로 넘기지 않습니다`);
+      }
+    }
+  }
+
+  // ── 화면이 돈을 계산하지 않는다 ──
+  //
+  // 평단·미실현·실현손익을 화면에서 만들면 장부와 갈린다. `paper_holdings`가
+  // 스스로 "평가손익 정본이 없다"고 적어 둔 값이다.
+  for (const [f, code] of [[BBUY, bbuy], [BSELL, bsell], [PSELL, psell]]) {
+    if (/\bunrealized|미실현|평가손익|평가 ?수익률/.test(code)) {
+      fail(`${f}: 화면이 평가손익을 만듭니다 — 정본이 없는 값입니다`);
+    }
+  }
+
+  // ── 현물 매도가 진입 경로로 가지 않는다 ──
+  if (!/market\s*===\s*'SPOT'[\s\S]{0,60}direction\s*===\s*'SELL'[\s\S]{0,40}SELL_HOLDING/.test(ctx)) {
+    fail(`${CTXF}: 현물 매도를 보유분 매도로 보내는 조건이 없습니다`);
+  }
+  if (!/routeFor\([^)]*\)\s*!==\s*'OPEN_POSITION'[\s\S]{0,40}return null/.test(ctx)) {
+    fail(`${CTXF}: 매도 경로에서 진입 방향이 null이 되는 보호가 없습니다`);
+  }
+  // 문맥에 계좌가 섞이면 challengeId 정본이 둘이 된다.
+  if (/challengeId|paperAccountId/.test(ctx.replace(/export[\s\S]*?readTradeContext/, ''))) {
+    // 읽기 함수가 버리는 것은 괜찮지만, 타입/반환에 남으면 안 된다.
+  }
+  const iface = (ctx.match(/interface TradeContext\s*\{([\s\S]*?)\}/) || [])[1] || '';
+  if (!iface) fail(`${CTXF}: TradeContext 타입을 찾지 못했습니다`);
+  if (/challengeId|paperAccountId|accountId/.test(iface)) {
+    fail(`${CTXF}: 문맥에 계좌·챌린지가 들어 있습니다 — usePaperTarget과 두 번째 권위가 됩니다`);
+  }
+
+  // ── 매도 요청에 비율과 수량이 **동시에** 실리지 않는다 ──
+  if (!/request\.percent\s*!=\s*null\s*\?/.test(usell)
+   || !/request\.quantity\s*!=\s*null\s*\?/.test(usell)) {
+    fail(`${USELL}: 금액 칸을 조건부로 싣지 않습니다 — 둘 다 실리면 서버가 거부합니다`);
+  }
+  if (/paperAccountId/.test(usell)) fail(`${USELL}: 계좌 id를 요청에 싣습니다`);
+  if (!/targetRequestFields\(/.test(usell)) {
+    fail(`${USELL}: 장부 식별자를 정본(targetRequestFields)으로 싣지 않습니다`);
+  }
+  // 재시도 계약은 아래에서 **submit 안을 앵커해서** 본다.
+  {
+    // ★ **submit 안의** 실패 경로를 봐야 한다.
+    //
+    //   처음에는 파일 전체에서 `if (!r.ok …)`를 찾았는데, 그 정규식이
+    //   먼저 걸린 것은 **holdings 조회**의 실패 블록이었다. 그래서 매도
+    //   식별자를 버리는 뮤테이션(MUT-55)이 그대로 통과했다 — 규칙이
+    //   엉뚱한 곳을 보고 있었다.
+    const sub = usell.match(/const submit = async \(\) => \{([\s\S]*?)\n  \};/);
+    if (!sub) fail(`${USELL}: submit 함수를 찾지 못했습니다`);
+    else {
+      const fails = sub[1].match(/if\s*\(!r\.ok[\s\S]*?\breturn;/);
+      if (!fails) fail(`${USELL}: submit의 실패 경로를 찾지 못했습니다`);
+      else if (/sellId\.current\s*=/.test(fails[0])) {
+        fail(`${USELL}: 실패했을 때 매도 식별자를 건드립니다 — 재시도가 두 번 팔 수 있습니다`);
+      }
+      // 성공 경로에서는 반드시 버린다 — 안 버리면 다음 매도가 REPLAYED된다.
+      const okPath = sub[1].slice(sub[1].indexOf('setMessage({ ok: true'));
+      if (!/sellId\.current\s*=\s*''/.test(okPath)) {
+        fail(`${USELL}: 성공 후 매도 식별자를 비우지 않습니다 — 다음 매도가 재생으로 처리됩니다`);
+      }
+    }
+  }
+
+  // ── 보유·평단은 holdings에서만 온다 ──
+  if (!/\/api\/paper\/holdings/.test(usell)) fail(`${USELL}: holdings를 읽지 않습니다`);
+  if (/\/api\/paper\/positions/.test(usell)) {
+    fail(`${USELL}: 포지션 목록에서 보유를 유도합니다 — 평단 정본이 둘이 됩니다`);
+  }
+
+  // ── 설정 정본은 하나다 ──
+  if (!/uiLevel:\s*oneOf\(/.test(prefs)) {
+    fail(`${PREFS}: uiLevel을 정규화하지 않습니다 — 옛 값이 화면을 망가뜨립니다`);
+  }
+  if (!/uiLevel:\s*'BEGINNER'/.test(prefs)) fail(`${PREFS}: 기본값이 간편이 아닙니다`);
+  // `export`까지 본다. 빼면 `useUiLevel`이 import하지 못해 토글이 죽는데,
+  // `function subscribePrefs`만 찾으면 그 변경이 통과한다(MUT-60이 그랬다).
+  if (!/export\s+function\s+subscribePrefs/.test(prefs)) {
+    fail(`${PREFS}: subscribePrefs를 내보내지 않습니다 — 토글해도 다른 화면이 안 바뀝니다`);
+  }
+  // 저장하면 알려야 한다. 통지 호출이 없으면 구독자는 영원히 옛 값을 본다.
+  {
+    const save = prefs.match(/export function savePrefs\([\s\S]*?\n\}/);
+    if (!save) fail(`${PREFS}: savePrefs를 찾지 못했습니다`);
+    else if (!/emitPrefs\(\)/.test(save[0])) {
+      fail(`${PREFS}: savePrefs가 변경을 알리지 않습니다`);
+    }
+  }
+  for (const f of ['src/lib/ui/useUiLevel.ts']) {
+    const c = stripTs(read(f));
+    if (!/subscribePrefs\(/.test(c)) fail(`${f}: 구독하지 않습니다`);
+    if (/localStorage/.test(c)) fail(`${f}: 두 번째 설정 저장소를 만듭니다`);
+  }
+
+  // ── 능력표가 서버와 맞는다 ──
+  {
+    const cap = stripTs(read(CAPA));
+    const m = cap.match(/case 'PARTIAL_CLOSE':([\s\S]*?)(?=case '|default:)/);
+    if (!m) fail(`${CAPA}: PARTIAL_CLOSE 분기를 찾지 못했습니다`);
+    else if (!/spot\s*\?/.test(m[1])) {
+      fail(`${CAPA}: 부분청산이 시장을 보지 않습니다 — 088 이후 현물만 참입니다`);
+    }
+  }
+
+  // ── 주문 화면이 뒤로가기 계약에 들어 있다 ──
+  if (!/\{\s*id:'order'[\s\S]{0,80}close:/.test(page)) {
+    fail(`${PAGE}: 주문 화면이 overlays에 등록되지 않았습니다 — 뒤로가기가 탭까지 바꿉니다`);
+  }
+  if (!/readTradeContext\(/.test(page)) {
+    fail(`${PAGE}: 문맥을 읽지 않고 주문 화면을 엽니다`);
+  }
+  // ── 버튼으로 닫을 때 겹이 둘 닫히지 않는다 ──
+  //
+  //   겹을 버튼으로 닫으면 `history.back()`으로 만들어 둔 자리를 치운다.
+  //   그 back도 `popstate`를 일으키고, 핸들러가 그것을 **사람이 눌렀다**로
+  //   읽으면 맨 위 겹을 하나 더 닫는다. 겹이 하나일 때는 스택이 이미
+  //   비어 티가 안 났는데, 상세 위에 주문 화면이 쌓이면서 드러났다 —
+  //   실기 390×844에서 주문에서 뒤로 한 번에 상세까지 닫혔다.
+  if (!/selfBack\.current\s*\+=\s*1[\s\S]{0,40}history\.back\(\)/.test(page)) {
+    fail(`${PAGE}: 프로그램이 부른 back을 세지 않습니다 — 겹이 둘 닫힙니다`);
+  }
+  if (!/selfBack\.current\s*>\s*0[\s\S]{0,60}return;/.test(page)) {
+    fail(`${PAGE}: popstate가 자기 back을 걸러내지 않습니다`);
+  }
+
+  {
+    // 주문 겹은 상세(10050)보다 **위**여야 CTA가 실제로 눌린다.
+    const z = (page.match(/paper-order-host[\s\S]{0,200}?zIndex:\s*(\d+)/) || [])[1];
+    const zd = (page.match(/instrument-detail-host[\s\S]{0,400}?zIndex:\s*(\d+)/) || [])[1];
+    if (!z) fail(`${PAGE}: 주문 겹의 z를 찾지 못했습니다`);
+    else if (zd && Number(z) <= Number(zd)) {
+      fail(`${PAGE}: 주문 겹(${z})이 상세 겹(${zd})보다 위가 아닙니다`);
+    }
   }
 }
 

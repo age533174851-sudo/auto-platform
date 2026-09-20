@@ -20,6 +20,20 @@
 
 export type TriggerPref = 'MARK' | 'LAST';
 export type UnitPref = 'BASE' | 'QUOTE';
+
+/**
+ * 거래 화면을 어느 밀도로 보여 주는가.
+ *
+ * **`Mode`라고 부르지 않는다.** 이 저장소에는 이미 `MoneyMode`(LIVE/TESTNET/
+ * PAPER) · `TradeMode` · `ThemeMode` · `LeftMode`/`RightMode` ·
+ * `MarketMode`/`OrderMode`가 있다. 여덟 번째 "모드"를 만들면 어느 모드
+ * 이야기인지 코드에서 구분되지 않는다.
+ *
+ * **이 값은 표현만 바꾼다.** 수량·수수료·증거금·보유·계좌 선택은 두 값에서
+ * 완전히 같다. `useTradeForm`·`useSellForm`은 이 값을 입력으로 받지 않는다 —
+ * 받는 순간 돈 계산이 화면 설정에 의존하게 된다.
+ */
+export type TradeUiLevel = 'BEGINNER' | 'PRO';
 export type MarginPref = 'ISOLATED' | 'CROSSED';
 export type PositionDensity = 'DETAILED' | 'BRIEF';
 
@@ -68,6 +82,10 @@ export interface Preferences {
    * 것을 설정 하나로 끌 수 있으면 그건 설정이 아니라 안전장치 제거다.
    */
   confirmKinds: ConfirmKind[];
+  /**
+   * 거래 화면 밀도. **표현만 바꾼다** — 주문·장부 계산은 두 값에서 같다.
+   */
+  uiLevel: TradeUiLevel;
 }
 
 export const DEFAULTS: Preferences = {
@@ -82,6 +100,9 @@ export const DEFAULTS: Preferences = {
   positionButtons: ['LEVERAGE', 'TPSL', 'CLOSE'],
   // 시장가와 청산은 되돌릴 수 없다. 기본으로 묻는다.
   confirmKinds: ['MARKET', 'CLOSE', 'REVERSE'],
+  // 처음 온 사람이 기본값이다. 이 파일의 다른 기본값들과 같은 방향이다 —
+  // 격리 마진, 확인창 켜짐. 아무도 고르지 않은 복잡도가 켜져 있으면 안 된다.
+  uiLevel: 'BEGINNER',
 };
 
 const KEY = 'tg_prefs_v1';
@@ -119,6 +140,7 @@ export function normalizePrefs(raw: any): Preferences {
       ? dedupe(buttons) : DEFAULTS.positionButtons,
     // 확인창은 전부 꺼도 된다. 다만 실전은 아래 shouldConfirm이 무시한다.
     confirmKinds: kinds ? dedupe(kinds) : DEFAULTS.confirmKinds,
+    uiLevel: oneOf(r.uiLevel, ['BEGINNER', 'PRO'] as const, DEFAULTS.uiLevel),
   };
 }
 
@@ -141,7 +163,64 @@ export function loadPrefs(): Preferences {
 export function savePrefs(p: Preferences): void {
   if (typeof window === 'undefined') return;
   try { window.localStorage.setItem(KEY, JSON.stringify(normalizePrefs(p))); } catch {}
+  // **저장했으면 알린다.** 아래 구독자들이 다시 읽는다.
+  emitPrefs();
 }
+
+// ── 바뀌었다는 것을 알리는 길 ──
+//
+// 이 파일에는 원래 통지가 없었다. 소비자들이 마운트 때 한 번만 읽기
+// 때문이다 — `BottomDock.tsx`의 `useState(() => loadPrefs())`,
+// `OrderPane.tsx`의 `loadPrefs().leverage`. 기본값이라 그걸로 충분했다.
+//
+// `uiLevel`은 다르다. 사용자가 토글하면 **지금 보고 있는 화면이 바뀌어야**
+// 한다. 통지가 없으면 토글해도 아무 일이 안 일어나고, 그건 이 파일 맨 위가
+// 금지한 "눌러도 아무 일도 안 하는 스위치"다.
+//
+// 병렬 저장소를 만들지 않는다. `usePaperTarget`이 쓰는 것과 같은 방식
+// (`emit` → `subs`)을 **이 정본 안에** 넣는다. 설정이 두 곳에 있으면
+// 언젠가 갈린다.
+const subs = new Set<() => void>();
+
+function emitPrefs(): void {
+  for (const cb of Array.from(subs)) {
+    // 한 구독자가 던져도 나머지는 받는다.
+    try { cb(); } catch { /* 화면 하나의 사고가 전파를 끊지 않는다 */ }
+  }
+}
+
+export function subscribePrefs(cb: () => void): () => void {
+  subs.add(cb);
+  return () => { subs.delete(cb); };
+}
+
+/**
+ * 거래 화면 밀도를 바꾼다.
+ *
+ * **다른 설정을 건드리지 않는다.** 통째로 덮어쓰면 다른 탭에서 방금 바꾼
+ * 값이 지워진다 — 그래서 지금 저장된 것을 읽어 한 칸만 바꾼다.
+ */
+export function setUiLevel(next: TradeUiLevel): void {
+  if (next !== 'BEGINNER' && next !== 'PRO') return;   // 모르는 값으로 갈아치우지 않는다
+  const cur = loadPrefs();
+  if (cur.uiLevel === next) return;                    // 같으면 다시 그리지 않는다
+  savePrefs({ ...cur, uiLevel: next });
+}
+
+/** 지금 어느 밀도인가. */
+export function getUiLevel(): TradeUiLevel {
+  return loadPrefs().uiLevel;
+}
+
+/** 반대쪽. 토글 버튼이 쓴다 — 두 값뿐이라는 사실을 화면이 다시 적지 않는다. */
+export function otherUiLevel(l: TradeUiLevel): TradeUiLevel {
+  return l === 'PRO' ? 'BEGINNER' : 'PRO';
+}
+
+export const UI_LEVEL_LABEL: Record<TradeUiLevel, string> = {
+  BEGINNER: '간편',
+  PRO: '프로',
+};
 
 /**
  * 이 주문에 확인창을 띄우는가.

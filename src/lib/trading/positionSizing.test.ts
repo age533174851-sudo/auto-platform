@@ -4,9 +4,10 @@
 //
 // 1배에서는 "잔고의 50%를 증거금으로"와 "잔고의 50%를 명목가로"가 같은
 // 값이다. 그래서 개발 중에는 차이가 안 보인다. 100배에서 100배 차이가 난다.
-import { test, eq, assert } from '../../test/harness';
+import { test, eq, assert, close } from '../../test/harness';
 import {
-  planSizing, percentFromQuantity, isValidPercent,
+  planSizing, percentFromQuantity, percentFromNotional, isValidPercent,
+  BUY_PERCENTS, SELL_PERCENTS,
 } from './positionSizing';
 
 export function runPositionSizingTests() {
@@ -141,4 +142,62 @@ export function runPositionSizingTests() {
       planSizing({ availableBalance: 1000, percent: p, price: 100, leverage: 10 }).marginBudget);
     eq(budgets.join(','), '250,500,1000');
   });
+
+  // ══════════ 금액 → 비율 (초보 화면의 "얼마어치") ══════════
+
+  test('★ 금액과 수량이 같은 주문을 같은 비율로 읽는다', () => {
+    // 잔고 1000, 가격 100, 20배. 수량 5 → 명목가 500 → 증거금 25 → 2.5%
+    const byQty = percentFromQuantity({ quantity: 5, availableBalance: 1000, price: 100, leverage: 20 });
+    const byNotional = percentFromNotional({ notional: 500, availableBalance: 1000, leverage: 20 });
+    eq(byQty, byNotional);
+    eq(byNotional, 2.5);
+  });
+
+  test('★ planSizing과 왕복한다 — 비율 → 명목가 → 같은 비율', () => {
+    for (const pct of [3, 17, 50, 99]) {
+      const f = planSizing({ availableBalance: 1000, percent: pct, price: 37, leverage: 20 });
+      eq(f.code, 'OK');
+      const back = percentFromNotional({
+        notional: f.notional, availableBalance: 1000, leverage: 20,
+      });
+      close(back as number, pct, 1e-9, `${pct}%가 왕복에서 달라졌습니다`);
+    }
+  });
+
+  test('★ 가격을 받지 않는다 — 명목가는 이미 돈이다', () => {
+    // 가격이 달라져도 같은 명목가면 같은 비율이다.
+    eq(percentFromNotional({ notional: 250, availableBalance: 1000, leverage: 1 }), 25);
+  });
+
+  test('현물(1배)에서는 명목가가 곧 증거금이다', () => {
+    eq(percentFromNotional({ notional: 400, availableBalance: 1000, leverage: 1 }), 40);
+  });
+
+  test('★ 못 읽으면 null — 0으로 접지 않는다', () => {
+    eq(percentFromNotional({ notional: 100, availableBalance: null, leverage: 1 }), null);
+    eq(percentFromNotional({ notional: 100, availableBalance: 0, leverage: 1 }), null);
+    eq(percentFromNotional({ notional: null, availableBalance: 100, leverage: 1 }), null);
+    eq(percentFromNotional({ notional: -1, availableBalance: 100, leverage: 1 }), null);
+    eq(percentFromNotional({ notional: 100, availableBalance: 100, leverage: 0 }), null);
+  });
+
+  test('★ 수량 역함수와 같은 상한에서 잘린다 (칸마다 다른 상한 금지)', () => {
+    const q = percentFromQuantity({ quantity: 99999, availableBalance: 100, price: 10, leverage: 1 });
+    const n = percentFromNotional({ notional: 999990, availableBalance: 100, leverage: 1 });
+    eq(q, 100);
+    eq(n, 100);
+  });
+
+  // ══════════ 빠른 비율 버튼 ══════════
+
+  test('★ 전량은 정확히 100이다 — 근사를 쓰면 잔량이 남는다', () => {
+    eq(SELL_PERCENTS[SELL_PERCENTS.length - 1], 100);
+    eq(BUY_PERCENTS[BUY_PERCENTS.length - 1], 100);
+  });
+
+  test('빠른 비율은 전부 유효한 비율이다', () => {
+    for (const p of BUY_PERCENTS) assert(isValidPercent(p), `매수 ${p}%가 유효하지 않습니다`);
+    for (const p of SELL_PERCENTS) assert(isValidPercent(p), `매도 ${p}%가 유효하지 않습니다`);
+  });
+
 }
