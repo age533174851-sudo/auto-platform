@@ -14,6 +14,10 @@ import {
   type OrderFeature,
 } from './capability';
 import { PAPER_MARKETS } from '../engine/paperPriceSource';
+import {
+  PRODUCT_IDS, CAPABILITY_DIMENSIONS, productCapability,
+  canExposeProduct, capabilityGaps,
+} from '../products/productCapability';
 
 export function runPaperCapabilityTests() {
   // ── ① 사유가 있다 ──
@@ -178,3 +182,46 @@ export function runPaperCapabilityTests() {
     eq(DOCK_TABS.length, 4);
   });
 }
+
+  // ── Phase 4A: 제품 능력표 ──
+  test('★ Phase4 제품은 8종이며 모든 차원의 근거가 비어 있지 않다', () => {
+    eq(PRODUCT_IDS.length, 8);
+    for (const id of PRODUCT_IDS) {
+      const p = productCapability(id);
+      eq(p.id, id);
+      for (const d of CAPABILITY_DIMENSIONS) {
+        const f = p.dimensions[d];
+        assert(!!f, `${id}/${d}가 없습니다`);
+        assert(/^(SUPPORTED|BACKEND_GAP|DATA_GAP|VENUE_GAP)$/.test(f.state),
+          `${id}/${d} 판정이 잘못됐습니다`);
+        assert(f.evidence.trim().length >= 8, `${id}/${d} 근거가 없습니다`);
+      }
+    }
+  });
+
+  test('★ 없는 제품은 탭부터 열지 않는다', () => {
+    for (const id of ['STOCK_PERPS','COMMODITY_PERPS','OPTIONS','ONCHAIN','CONVERT'] as const) {
+      eq(canExposeProduct(id), false, `${id}가 제품으로 노출됐습니다`);
+      assert(capabilityGaps(id).length > 0, `${id}가 근거 없이 완전지원입니다`);
+    }
+  });
+
+  test('★ Onchain 분석 mock은 거래 데이터 지원으로 승격하지 않는다', () => {
+    const p = productCapability('ONCHAIN');
+    eq(p.dimensions.marketData.state, 'DATA_GAP');
+    eq(p.dimensions.execution.state, 'BACKEND_GAP');
+    eq(p.exposure, 'LOCKED');
+  });
+
+  test('★ Spot Stocks의 LIVE와 PAPER를 한 칸으로 뭉개지 않는다', () => {
+    const p = productCapability('SPOT_STOCKS');
+    eq(p.dimensions.live.state, 'SUPPORTED');
+    eq(p.dimensions.paper.state, 'BACKEND_GAP');
+  });
+
+  test('★ 기존 제품도 미감사 precision을 지원이라고 꾸미지 않는다', () => {
+    for (const id of ['SPOT_CRYPTO','FUTURES_PERPS','SPOT_STOCKS'] as const) {
+      eq(productCapability(id).dimensions.precision.state, 'VENUE_GAP');
+    }
+  });
+
