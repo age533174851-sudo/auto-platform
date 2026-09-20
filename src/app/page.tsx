@@ -38,6 +38,9 @@ type IconComp = LucideIcon;
 import PosterLibrary from '@/components/PosterLibrary';
 import AssetDetailModal from '@/components/AssetDetailModal';
 import { InstrumentDetail, type OrderIntent } from '@/components/instrument/InstrumentDetail';
+import { PaperOrderScreen } from '@/components/trading/PaperOrderScreen';
+import type { BuyUnit } from '@/components/trading/BeginnerBuyScreen';
+import { readTradeContext, type TradeContext } from '@/lib/trading/tradeContext';
 import { detailTargetOf } from '@/lib/markets/instrumentRoute';
 import ConfirmHost from '@/components/ConfirmHost';
 import LoginModal from '@/components/LoginModal';
@@ -600,6 +603,16 @@ export default function App() {
   const [activeAsset,setActiveAsset]=useState<any>(null);
   const [detailAsset,setDetailAsset]=useState<any>(null);
   const openDetail=useCallback((asset:any)=>{ if(asset) setDetailAsset(asset); },[]);
+  // ── 주문 화면 (Phase 3) ──
+  //
+  // 종목·시장·방향만 들고 있다. **challengeId는 여기 없다** — 그 정본은
+  // `usePaperTarget` 싱글턴이고, 모드를 바꿔도 같은 인스턴스를 본다.
+  // 여기 한 벌 더 들면 두 값이 갈리는 날 화면과 장부가 어긋난다.
+  const [orderCtx,setOrderCtx]=useState<TradeContext|null>(null);
+  const [orderName,setOrderName]=useState<string|undefined>(undefined);
+  // "얼마어치/몇 개"는 화면을 닫았다 열어도 유지된다 — 매번 다시 고르게
+  // 하지 않는다.
+  const [buyUnit,setBuyUnit]=useState<BuyUnit>('QUOTE');
   // 인증 헤더는 터미널과 **같은 정본**에서 온다(`watchAuthToken`).
   // 여기서 토큰을 따로 읽으면 두 화면이 다른 로그인 상태를 본다.
   const [authHeader,setAuthHeader]=useState('');
@@ -630,14 +643,28 @@ export default function App() {
     { id:'login',   open:loginOpen,       close:()=>{ setLoginOpen(false); pendingAction.current=null; } },
     { id:'profile', open:profileOpen,     close:()=>setProfileOpen(false) },
     { id:'detail',  open:!!detailAsset,   close:()=>setDetailAsset(null) },
+    // 주문 화면도 겹이다. 뒤로가기가 주문 화면만 닫고 탭은 그대로 둔다.
+    { id:'order',   open:!!orderCtx,      close:()=>setOrderCtx(null) },
     { id:'more',    open:showMore,        close:()=>setShowMore(false) },
     // 팔레트도 겹이다 — 뒤로가기가 팔레트만 닫고 화면은 그대로 둔다.
     { id:'palette', open:paletteOpen,     close:()=>setPaletteOpen(false) },
     { id:'help',    open:helpOpen,        close:()=>setHelpOpen(false) },
-  ],[loginOpen,profileOpen,detailAsset,showMore,paletteOpen,helpOpen]);
+  ],[loginOpen,profileOpen,detailAsset,orderCtx,showMore,paletteOpen,helpOpen]);
 
   const stackRef=useRef<string[]>([]);
   const closedByPop=useRef(false);
+  // ── 우리가 부른 back을 사람이 누른 back으로 읽지 않는다 ──
+  //
+  // 겹을 버튼으로 닫으면 아래 효과가 `history.back()`으로 만들어 둔 자리를
+  // 치운다. 그런데 그 back도 `popstate`를 일으키고, `onPop`은 그것을
+  // **사용자가 뒤로를 눌렀다**로 읽어 맨 위 겹을 하나 더 닫는다.
+  //
+  // 겹이 하나일 때는 스택이 이미 비어 있어 티가 안 났다. 겹이 둘 쌓이면
+  // (종목 상세 위에 주문 화면) 주문에서 뒤로 한 번에 **상세까지 닫힌다** —
+  // 실기 390×844에서 확인했다: 뒤로 누른 뒤 detail=false.
+  //
+  // 그래서 우리가 부른 횟수를 세고, 그만큼의 popstate는 소비만 한다.
+  const selfBack=useRef(0);
   // 핸들러가 항상 최신 상태를 보게 한다. popstate 리스너는 한 번만 붙으므로
   // 값을 그대로 담으면 첫 렌더의 값에 갇힌다.
   const overlaysRef=useRef(overlays);
@@ -662,7 +689,7 @@ export default function App() {
         // 닫힌 경우에는 위 훅이 표식을 이미 덮어썼으므로, 여기서 back()을
         // 부르면 방금 이동한 화면이 취소된다.
         if((window.history.state as any)?.overlay===true){
-          for(let i=0;i<d.count;i++) window.history.back();
+          for(let i=0;i<d.count;i++){ selfBack.current+=1; window.history.back(); }
         }
       }
     }catch{}
@@ -675,6 +702,8 @@ export default function App() {
   useEffect(()=>{
     const onPop=()=>{
       try{
+        // 우리가 자리를 치우려고 부른 back이다. 겹을 또 닫지 않는다.
+        if(selfBack.current>0){ selfBack.current-=1; return; }
         const top=topmost(stackRef.current);
         if(top){
           closedByPop.current=true;
@@ -989,6 +1018,34 @@ export default function App() {
         onSuccess={()=>{ const a=pendingAction.current; pendingAction.current=null; if(a) setTimeout(a,100); }}
         onGoEmail={()=>{ if(typeof window!=='undefined') window.location.href='/auth'; }}
       />
+      {/* ── 주문 화면 — 상세 **위에** 뜬다 ──
+
+          상세(10050)보다 한 겹 위다. 같은 값으로 두면 어느 쪽이 위인지
+          DOM 순서에 달리고, 그건 화면이 바뀔 때마다 흔들린다.
+
+          전역 하단 탭은 `fixed; z-index:100`이다. 상세에서 이미 겪었다 —
+          화면에는 버튼이 보이는데 `elementFromPoint`로 찍으면 탭바가
+          나왔다. 그래서 주문 CTA도 이 겹 안에 있어야 실제로 눌린다.
+
+          뒤로가기는 위 `overlays`의 `order` 항목이 맡는다. 주문 화면만
+          닫히고 탭은 그대로다. */}
+      {orderCtx && (
+        <div data-testid="paper-order-host" style={{
+          position:'fixed', inset:0, zIndex:10060, background:T.bg,
+        }}>
+          <PaperOrderScreen
+            ctx={orderCtx}
+            name={orderName}
+            auth={authHeader||undefined}
+            unit={buyUnit}
+            onUnit={setBuyUnit}
+            onBack={()=>setOrderCtx(null)}
+            // 체결되면 바깥 장부가 다시 읽는다. 화면이 자기 숫자를
+            // 고쳐 적지 않는다 — 정본은 서버다.
+            onDone={()=>{ try{ window.dispatchEvent(new Event('paper-ledger-changed')); }catch{} }}
+          />
+        </div>
+      )}
       {/* ── 종목 상세 — **전체 화면이다** ──
 
           예전에는 `AssetDetailModal`이 작은 창으로 떴고, 거기서 주문으로
@@ -1020,10 +1077,33 @@ export default function App() {
             auth={authHeader||undefined}
             onBack={()=>setDetailAsset(null)}
             onOrder={(i:OrderIntent)=>{
-              // Phase 3에서 주문 화면이 붙는 자리. 지금은 기존 거래 경로로
-              // 보낸다 — 가짜 주문창을 만들지 않는다.
-              setDetailAsset(null);
-              openAsset({ ...detailAsset, _side:i.side }, 'trading');
+              // ── 전용 주문 화면으로 간다 (Phase 3) ──
+              //
+              // 문맥을 **읽어서** 넘긴다. 못 읽으면 열지 않는다 —
+              // 종목을 모르는 채 주문 화면을 열면 사용자는 자기가 무엇을
+              // 사는지 모르는 채 버튼을 누르게 된다.
+              const ctx = readTradeContext({
+                symbol:i.symbol, market:i.market, direction:i.side,
+              });
+              if(!ctx){
+                // 읽지 못한 것을 조용히 기본값으로 채우지 않는다.
+                // 예전 경로로 보내면 적어도 사용자가 어디 있는지는 안다.
+                setDetailAsset(null);
+                openAsset({ ...detailAsset, _side:i.side }, 'trading');
+                return;
+              }
+              setOrderName(detailAsset?.name || detailTarget.name);
+              // ★ **상세를 지우지 않는다.**
+              //
+              //   처음에는 여기서 `setDetailAsset(null)`을 했다. 그랬더니
+              //   주문 화면에서 뒤로 누르면 상세가 아니라 탭 화면으로
+              //   떨어졌다 — 실기 7개 폭 전부에서 매도 화면까지 갈 수
+              //   없었다(구매 → 뒤로 → 매도 경로가 끊겼다).
+              //
+              //   주문 겹(10060)이 상세 겹(10050) **위에** 뜨므로 상세를
+              //   살려 둬도 가려진다. 뒤로가기가 주문만 닫으면 상세가
+              //   그대로 다시 보인다.
+              setOrderCtx(ctx);
             }}
           />
         </div>

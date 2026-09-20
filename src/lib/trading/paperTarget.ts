@@ -26,6 +26,7 @@
 
 /** 기본 계좌인가, 챌린지 전용 계좌인가. **셋째는 없다.** */
 import type { TradeMode } from '../markets/tradeMode';
+import type { MoneyScope } from './gameMoney';
 
 export type PaperTargetKind = 'DEFAULT' | 'CHALLENGE';
 
@@ -201,3 +202,18 @@ export function paperSheetHandlesOrders(tradeMode: any): boolean {
  * 여기에 없는 문자열은 이 파일 어디에도 적지 않는다.
  */
 export const PAPER_TRADE_MODE: TradeMode = 'PAPER';
+
+/**
+ * 이 장부의 돈을 **무엇이라고 부를 것인가.**
+ *
+ * `TradingWorkspace`가 이 판단을 인라인으로 들고 있었다
+ * (`target.kind === 'CHALLENGE' ? 'CHALLENGE' : 'PAPER'`). 주문 화면이
+ * 하나 더 생기면서 같은 줄을 두 번째로 적게 됐고, 그러면 챌린지 표기가
+ * 한쪽에서만 바뀌는 날이 온다. 정본을 여기 둔다.
+ *
+ * **LIVE는 여기서 나오지 않는다.** 이 함수가 받는 것은 모의 장부의
+ * 선택이고, 실계좌는 이 타입에 들어오지 않는다.
+ */
+export function scopeForTarget(t: PaperTarget | null | undefined): MoneyScope {
+  return t?.kind === 'CHALLENGE' ? 'CHALLENGE' : 'PAPER';
+}

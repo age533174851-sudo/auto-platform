@@ -20,7 +20,7 @@
 // `usePaperLedger` 결과를 그대로 받는다. 읽는 곳과 쓰는 곳이 같은 객체이면
 // 어긋날 자리가 없다.
 import { test, eq, assert } from '../../test/harness';
-import { targetQuery, type PaperTarget } from './paperTarget';
+import { targetQuery, targetRequestFields, type PaperTarget } from './paperTarget';
 
 export function runPositionScopeTests() {
   console.log('[포지션 계좌 범위]');
@@ -67,5 +67,52 @@ export function runPositionScopeTests() {
     const other: PaperTarget = { kind: 'CHALLENGE', challengeId: 'ch_zzz' } as any;
     assert(targetQuery(CHALLENGE_T) !== targetQuery(other),
       '두 챌린지가 같은 포지션 목록을 봅니다');
+  });
+
+  // ══════════ 매도 경로도 같은 장부다 (Phase 3) ══════════
+  //
+  // 088이 보유 조회·매도를 만들었고 Phase 3이 화면을 붙였다. 화면이 하나
+  // 늘면 **장부가 갈릴 자리도 하나 는다** — 이 저장소가 이미 겪은 고장이
+  // 정확히 그것이었다(주문은 챌린지, 표시는 기본 계좌).
+  //
+  // 아래는 `useSellForm`이 실제로 하는 것과 같은 모양이다:
+  //   보유 조회  `/api/paper/holdings` + targetQuery(target)
+  //   매도 실행  body에 targetRequestFields(target)
+  const holdingsScope = (t: PaperTarget) => targetQuery(t);
+  const sellBody = (t: PaperTarget) => targetRequestFields(t);
+
+  test('★ 보유를 읽는 장부와 주문을 내는 장부가 같다', () => {
+    eq(holdingsScope(CHALLENGE_T), orderScope(CHALLENGE_T));
+    eq(holdingsScope(DEFAULT_T), orderScope(DEFAULT_T));
+  });
+
+  test('★ 매도 본문이 챌린지를 싣는다 (기본 장부에서는 안 싣는다)', () => {
+    eq(sellBody(CHALLENGE_T).challengeId, 'ch_abc');
+    eq(sellBody(DEFAULT_T).challengeId, undefined);
+  });
+
+  test('★ 매도 본문에 계좌 id가 없다 — 계좌는 서버가 정한다', () => {
+    for (const t of [CHALLENGE_T, DEFAULT_T]) {
+      const keys = Object.keys(sellBody(t));
+      assert(!keys.some(k => /account/i.test(k)),
+        `매도 본문에 계좌 칸이 있습니다: ${keys.join(',')}`);
+    }
+  });
+
+  test('★ 보유를 읽은 장부로 그대로 판다 — 두 챌린지가 안 섞인다', () => {
+    const other: PaperTarget = { kind: 'CHALLENGE', challengeId: 'ch_zzz' } as any;
+    // 읽은 곳과 파는 곳이 같은 target에서 나오므로, 다른 챌린지의 보유를
+    // 이 챌린지 장부로 파는 조합이 만들어지지 않는다.
+    assert(holdingsScope(CHALLENGE_T) !== holdingsScope(other),
+      '두 챌린지가 같은 보유 목록을 봅니다');
+    assert(sellBody(CHALLENGE_T).challengeId !== sellBody(other).challengeId,
+      '두 챌린지의 매도가 같은 장부로 나갑니다');
+  });
+
+  test('★ 기본 PAPER와 챌린지가 섞이지 않는다 (조회·매도 양쪽)', () => {
+    assert(holdingsScope(DEFAULT_T) !== holdingsScope(CHALLENGE_T),
+      '기본 계좌와 챌린지가 같은 보유를 봅니다');
+    assert(sellBody(DEFAULT_T).challengeId !== sellBody(CHALLENGE_T).challengeId,
+      '기본 계좌 매도와 챌린지 매도가 같은 장부로 나갑니다');
   });
 }

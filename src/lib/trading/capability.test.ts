@@ -39,12 +39,31 @@ export function runPaperCapabilityTests() {
   });
 
   // ── 실제 계약과 맞는가 ──
-  test('★ 지정가·감축전용·부분청산은 두 시장 모두 미지원이다', () => {
+  test('★ 지정가·감축전용은 두 시장 모두 미지원이다', () => {
     for (const m of PAPER_MARKETS) {
-      for (const f of ['TYPE_LIMIT', 'REDUCE_ONLY', 'PARTIAL_CLOSE'] as OrderFeature[]) {
+      for (const f of ['TYPE_LIMIT', 'REDUCE_ONLY'] as OrderFeature[]) {
         assert(unsupported(orderCapability(m, f)), `${m}/${f}가 지원으로 적혀 있습니다`);
       }
     }
+  });
+
+  // ── 부분청산: 088이 이 답을 갈랐다 ──
+  //
+  // 전에는 두 시장 모두 "전량만"이었고 이 파일도 그렇게 적혀 있었다.
+  // `paper_sell_holding`(088)과 `/api/paper/sell`이 현물을 lot 단위로
+  // 나눠 팔기 시작하면서 **현물만** 참이 됐다.
+  //
+  // 이 시험이 하는 일은 두 가지다: 현물이 다시 닫히지 않게 하는 것과,
+  // **선물이 같이 열리지 않게** 하는 것. 후자가 더 중요하다 —
+  // `paper_settle_close`는 포지션을 통째로 닫고 부분 청산을 받을 칸이 없다.
+  test('★ 현물은 나눠 팔 수 있다 (088 · /api/paper/sell)', () => {
+    const s = orderCapability('SPOT', 'PARTIAL_CLOSE');
+    assert(!unsupported(s), '현물 부분매도가 미지원으로 적혀 있습니다');
+  });
+
+  test('★ 선물 부분청산은 여전히 미지원이다 — 서버에 그 칸이 없다', () => {
+    assert(unsupported(orderCapability('USDM', 'PARTIAL_CLOSE')),
+      '선물 부분청산이 열렸습니다 — paper_settle_close는 전량만 닫습니다');
   });
 
   test('★ 체결가는 화면이 정하지 않는다', () => {

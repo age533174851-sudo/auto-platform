@@ -39,6 +39,9 @@ import { PositionRow } from './PositionRow';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 import { usePaperLedger } from '@/lib/trading/usePaperLedger';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
+import { scopeForTarget } from '@/lib/trading/paperTarget';
+import { useSellForm } from '@/lib/trading/useSellForm';
+import { ProSellPanel } from './ProSellPanel';
 import {
   targetOrderGate, paperSheetHandlesOrders, type PaperTarget,
 } from '@/lib/trading/paperTarget';
@@ -100,6 +103,20 @@ export function TradingWorkspace({
 
   const gate = targetOrderGate(target, challengeStatus);
   const wiring = paperOrderUiWiring(market);
+
+  // ── 보유·매도 (088 / Phase 3) ──
+  //
+  // **정본 거래 화면이 매도까지 맡는다.** 프로 사용자는 여기서 차트를 보며
+  // 나눠 팔 수 있다. 초보 화면(`BeginnerSellScreen`)과 **같은 `useSellForm`**
+  // 을 쓴다 — 표현만 다르고 판단·요청은 한 벌이다.
+  //
+  // 선물에서는 훅을 깨우지 않는다. 능력표가 이미 "전량만"이라고 답하고
+  // (`paper_settle_close`에 부분 청산 칸이 없다), 그때 `ProSellPanel`은
+  // 사유만 적는다.
+  const sell = useSellForm({
+    symbol, market, target,
+    enabled: paperOrders && market === 'SPOT' && !!auth,
+  });
   const canOrder = paperOrders && !!auth && gate.allowed && wiring.canOrder;
 
   // **원인을 숨기지 않는다.** 값을 지어내지 않되 사유는 말한다.
@@ -109,7 +126,9 @@ export function TradingWorkspace({
     : !gate.allowed ? gate.reason
     : null;
 
-  const scope: MoneyScope = target.kind === 'CHALLENGE' ? 'CHALLENGE' : 'PAPER';
+  // 이 판단의 정본은 `paperTarget.scopeForTarget`이다. 주문 화면도 같은
+  // 함수를 쓴다 — 여기 인라인으로 두면 챌린지 표기가 한쪽만 바뀐다.
+  const scope: MoneyScope = scopeForTarget(target);
   const availableUnknownReason = !auth
     ? '로그인이 필요합니다 — 로그인 후 모의 잔고를 확인할 수 있습니다'
     : (ledger.availableUnknownReason || ledger.error);
@@ -233,6 +252,17 @@ export function TradingWorkspace({
       {paperOrders ? (
         <div style={{ flexShrink: 0 }}>
           <OrderEstimate form={form} scope={scope}/>
+        </div>
+      ) : null}
+
+      {/* ⑤ 보유 · 매도 — **현물에만 있다**
+
+          사는 화면은 있는데 파는 화면이 없던 자리다(088이 서버를 만들고
+          화면이 없었다). 초보 화면과 같은 훅을 받으므로 두 화면이 서로
+          다른 수량을 보낼 수 없다. */}
+      {paperOrders && market === 'SPOT' ? (
+        <div data-testid="workspace-sell" style={{ flexShrink: 0, padding: '6px 0' }}>
+          <ProSellPanel symbol={symbol} scope={scope} sell={sell}/>
         </div>
       ) : null}
 

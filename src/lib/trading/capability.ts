@@ -147,7 +147,19 @@ export function orderCapability(market: PaperMarket, feature: OrderFeature): Sup
       return no('모의 주문에 감축 전용이 없습니다 — 보낼 칸이 없습니다');
 
     case 'PARTIAL_CLOSE':
-      return no('모의 청산은 전량만 지원합니다');
+      // 088이 이 답을 바꿨다.
+      //
+      // 전에는 두 시장 모두 "전량만"이었다. 그때는 파는 방법이 포지션 한 줄을
+      // 통째로 닫는 것뿐이었기 때문이다. 지금 현물은 `paper_sell_holding`이
+      // lot 단위로 나눠 팔고(`/api/paper/sell`), 원장도 매도 사건 단위로
+      // 적힌다.
+      //
+      // **선물은 아직 아니다.** `paper_settle_close`는 포지션을 통째로 닫고,
+      // 부분 청산을 받을 칸이 없다. 여기서 같이 열면 서버가 못 하는 것을
+      // 화면이 할 수 있다고 적는 것이 된다.
+      return spot
+        ? yes('보유분을 나눠 팔 수 있습니다 (비율 또는 수량)')
+        : no('선물 모의 청산은 전량만 지원합니다');
 
     default:
       // **모르는 기능을 지원한다고 적지 않는다.**
