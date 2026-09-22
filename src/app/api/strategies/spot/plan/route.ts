@@ -22,18 +22,25 @@ import { computeCostBasis } from '@/lib/markets/costBasis';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-/** 현물 최소 주문 금액(NOTIONAL). 모르면 null — 그 검사만 빠진다 */
-async function fetchMinNotional(symbol: string): Promise<number | null> {
+/**
+ * 현물 최소 주문 금액(NOTIONAL). 모르면 null — 그 검사만 빠진다.
+ *
+ * 여기에 조회를 새로 쓰지 않는다
+ * ─────────────────────────────
+ * 예전에는 이 파일이 `https://api.binance.com/api/v3/exchangeInfo`를 직접
+ * 불렀다. `getSpotSymbolFilters`와 **같은 응답을 두 번째로 해석하는 코드**
+ * 였고, 그래서 한쪽만 고쳐지는 전형적인 모양이었다.
+ *
+ * 실제로 갈려 있었다: 그 호출에는 **testnet 인자가 없었다.** 테스트넷
+ * 연결로 분할 계획을 만들면 실전 최소 금액으로 판정했다 — 확인한 적 없는
+ * 것을 확인했다고 적는 셈이다.
+ */
+async function fetchMinNotional(symbol: string, testnet: boolean): Promise<number | null> {
   try {
-    const r = await fetch(`https://api.binance.com/api/v3/exchangeInfo?symbol=${symbol}`,
-      { signal: AbortSignal.timeout(8000) });
-    if (!r.ok) return null;
-    const d = await r.json();
-    const s = (d.symbols || [])[0];
-    const f = (s?.filters || []).find((x: any) =>
-      x.filterType === 'NOTIONAL' || x.filterType === 'MIN_NOTIONAL');
-    const v = parseFloat(f?.minNotional);
-    return Number.isFinite(v) ? v : null;
+    const { getSpotSymbolFilters } = await import('@/lib/exchanges/binance');
+    const f = await getSpotSymbolFilters(symbol, testnet);
+    // 못 읽은 칸은 null이다. 여기서 값을 지어내지 않는다.
+    return f?.minNotional ?? null;
   } catch { return null; }
 }
 
@@ -60,12 +67,16 @@ export async function POST(req: NextRequest) {
   // "팔 수 있다"고 계획했다가 거래소에서 거부된다.
   let heldQty: number | null = null;
   let avgPrice: number | null = null;
+  // **어느 거래소의 규격을 읽을지 정한다.** 연결이 없으면 실전이다 —
+  // 테스트넷 연결이 있을 때만 테스트넷 규격으로 판정한다.
+  let specTestnet = false;
 
   if (connectionId) {
     try {
       const { data: conn } = await (sb.from('exchange_connections') as any)
         .select('api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
         .eq('id', connectionId).eq('user_id', uid).maybeSingle();
+      specTestnet = conn?.is_testnet === true;
       if (conn && !conn.has_withdrawal) {
         const { decryptSecret } = await import('@/lib/exchanges/crypto');
         const bn = await import('@/lib/exchanges/binance');
@@ -93,7 +104,7 @@ export async function POST(req: NextRequest) {
     } catch { /* 못 읽으면 null로 남는다 — 아래 계획 함수가 거부한다 */ }
   }
 
-  const minNotional = await fetchMinNotional(symbol);
+  const minNotional = await fetchMinNotional(symbol, specTestnet);
 
   let plan: PlanResult;
   let extra: Record<string, any> = {};

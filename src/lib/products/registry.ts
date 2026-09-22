@@ -129,9 +129,9 @@ const TABLE: Record<ProductId, Record<CapabilityAxis, Capability>> = {
     HOLDINGS: cap('SUPPORTED', 'src/app/api/paper/holdings/route.ts:40',
       'paper_holdings가 lot 단위로 집계합니다 (088)'),
     // ★ 여기가 "지원"이라고 적으면 거짓이 되는 자리다.
-    PRECISION: cap('VENUE_GAP', 'src/app/api/binance/spot/order/route.ts',
-      '현물 주문 경로가 stepSize·minQty·minNotional을 읽지 않습니다 — '
-      + '모의도 수량을 그대로 받습니다'),
+    PRECISION: cap('VENUE_GAP', 'src/lib/exchanges/gateSpotPlan.ts:168',
+      '바이낸스 현물은 닫혔지만(4B-2A) Gate 현물은 지정가를 호가 단위에 '
+      + '맞추지 않고 그대로 보냅니다 — 제품 칸은 가장 약한 venue를 따릅니다'),
     PAPER: cap('SUPPORTED', 'src/app/api/paper/sell/route.ts:99',
       '매수·부분매도·전량매도가 모두 모의 장부에 적힙니다'),
     LIVE: cap('SUPPORTED', 'src/app/api/binance/spot/order/route.ts',
@@ -432,10 +432,27 @@ export interface VenuePrecision {
 const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
   SPOT_CRYPTO: [
     {
-      venue: 'BINANCE_SPOT', verdict: 'VENUE_GAP',
-      evidence: 'src/app/api/binance/spot/order/route.ts',
-      note: '규격 조회는 갖췄지만(LOT_SIZE·PRICE_FILTER·NOTIONAL·MARKET_LOT_SIZE) '
-        + '실계좌 현물 주문 라우트에 아직 배선되지 않았습니다 (4B-2)',
+      venue: 'BINANCE_SPOT', verdict: 'SUPPORTED',
+      evidence: 'src/lib/exchanges/spotOrderExecutor.ts:188',
+      // ★ **경계를 적는다.** "네 필터를 맞춥니다"로 끝내면 금액 기반
+      //   시장가 매수에서 거짓이 된다 — 그 주문에는 맞출 수량이 없고,
+      //   최소 주문 금액도 우리가 앞질러 막지 않기로 정했다.
+      note: '수량으로 내는 주문은 주문유형별 격자·호가단위·최소명목가까지 '
+        + '맞춥니다(못 읽으면 지어내지 않습니다). 금액으로 내는 시장가 매수'
+        + '(quoteOrderQty)는 맞출 수량이 없어 수량 격자 대상이 아니고, '
+        + '최소 주문 금액도 미리 막지 않고 거래소 판정에 맡깁니다',
+    },
+    {
+      // ★ **이 줄이 없으면 제품 칸이 거짓이 된다.**
+      //
+      //   Gate 현물도 `placeSpotOrder`를 지나 실계좌로 나간다
+      //   (`spotOrderExecutor.ts`의 `exchange === 'gate'` 갈래). 바이낸스
+      //   하나만 적어 두고 그것을 SUPPORTED로 올리면 `allVenuesPrecise`가
+      //   참이 되어, **감사한 적 없는 venue가 증명된 것으로 읽힌다.**
+      venue: 'GATE_SPOT', verdict: 'VENUE_GAP',
+      evidence: 'src/lib/exchanges/gateSpotPlan.ts:149',
+      note: '수량 소수자리(amount_precision)와 최소 주문은 어댑터가 적용하지만, '
+        + '가격 정밀도 출처가 없고 4B-2A 범위에서 감사하지 않았습니다',
     },
   ],
   PERP_CRYPTO: [
@@ -451,9 +468,21 @@ const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
       note: '계약배수만 권위가 있고 수량·가격 격자가 없습니다',
     },
     {
+      // **"가격 단위가 없다"고 적혀 있었다. 사실이 아니다.**
+      //
+      //   Gate 공식 규격에서 `order_price_round`는 최소 주문 가격 증분이고,
+      //   이 저장소는 그것을 읽어(`gateFutures.ts:655`) tickSize로 옮기고
+      //   (`gatePlan.ts:294`) `quantizeOrder`가 적용한 뒤(`quantize.ts:219`)
+      //   그 값을 보낸다(`futuresExec.ts:554`). 네 단계가 이어져 있다.
+      //   계약 수·최소·최대도 `gateSizeFromBase`가 막는다(`gatePlan.ts:342-355`).
+      //
+      //   그래도 SUPPORTED로 올리지 않는다. 남은 축이 하나 있고, 그것은
+      //   **모른다는 사실 자체가 미확인**이다 — 아래 note가 그것만 적는다.
       venue: 'GATE_USDM', verdict: 'VENUE_GAP',
-      evidence: 'src/lib/exchanges/gatePlan.ts:279',
-      note: '계약 수 격자는 있지만 가격 단위가 없습니다',
+      evidence: 'src/lib/exchanges/gatePlan.ts:294',
+      note: '계약 수·최소·최대 계약·가격 증분(order_price_round)까지 적용합니다. '
+        + '남은 축은 최소 명목가뿐이고, 그것이 Gate에 없는 규칙인지 우리가 '
+        + '안 읽는 것인지 아직 확인하지 못했습니다',
     },
   ],
   SPOT_STOCK: [

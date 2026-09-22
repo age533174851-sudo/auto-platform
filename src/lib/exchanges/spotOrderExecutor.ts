@@ -16,6 +16,10 @@
 //   - 감시 루프: 서버가 부른다 (사용자 확인은 루프가 한다)
 // 두 입구가 같은 함수를 쓴다.
 import { checkIntent, tagSignalId } from '@/lib/markets/marketType';
+import type { SpecSource } from '@/lib/markets/venueSpec';
+import {
+  precisionSkipOf, PRECISION_SKIP_TEXT, type PrecisionSkip,
+} from './spotPrecisionState';
 
 export interface SpotOrderArgs {
   userId: string;
@@ -35,6 +39,32 @@ export interface SpotOrderArgs {
   strategyId?: string | null;
 }
 
+/**
+ * **거래소 격자를 실제로 적용했는가 — 값으로 들고 나간다.**
+ *
+ * 왜 불린 하나로 끝내지 않는가
+ * ────────────────────────────
+ * "안 맞췄다"에는 서로 다른 네 가지가 있다. 사유는
+ * `spotPrecisionState.ts`가 한 곳에서 판정한다 — 처음에는 여기서
+ * `applied ? null : 'SPEC_UNKNOWN'`으로 뭉갰고, 그 바람에 **`source:
+ * 'EXCHANGE'`인데 사유는 "규격 미상"**인 모순된 응답이 나갔다.
+ */
+export interface SpotVenuePrecision {
+  venue: 'BINANCE_SPOT';
+  /** 수량 격자를 실제로 적용했는가 */
+  applied: boolean;
+  /** 적용하지 않았다면 왜. 적용했으면 null */
+  skipped: PrecisionSkip | null;
+  /** 어디서 온 격자인가. 안 읽었으면 null */
+  source: SpecSource | null;
+  /** 수량·가격이 바뀌었는가 */
+  changed: boolean;
+  /** 사용자가 요청한 수량. 금액 기반 매수면 null */
+  requestedQuantity: number | null;
+  /** 실제로 보낸 수량. 금액 기반 매수면 null */
+  quantity: number | null;
+}
+
 export interface SpotOrderResult {
   ok: boolean;
   status: 'FILLED' | 'REJECTED' | 'UNKNOWN' | 'BLOCKED';
@@ -45,6 +75,8 @@ export interface SpotOrderResult {
   message: string;
   /** 사용자에게 보여줄 오류 코드 */
   code?: string;
+  /** 거래소 격자 적용 결과. 주문을 만들기 전에 막힌 경우에는 없다 */
+  venuePrecision?: SpotVenuePrecision;
 }
 
 const bad = (code: string, message: string): SpotOrderResult =>
@@ -68,6 +100,10 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   const quantity = args.quantity != null ? Number(args.quantity) : null;
   const quoteOrderQty = args.quoteOrderQty != null ? Number(args.quoteOrderQty) : null;
   const price = args.price != null ? Number(args.price) : null;
+
+  // 현물 매도는 **보유분 청산**이다. 이 값이 격자 정책의 방향을 정한다 —
+  // 아래 정규화에서 `reduceOnly`로 쓴다.
+  const isSellSide = side === 'SELL';
 
   const byQuote = type === 'MARKET' && side === 'BUY' && quoteOrderQty != null;
   if (!byQuote && (!Number.isFinite(quantity as number) || (quantity as number) <= 0)) {
@@ -145,19 +181,116 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   });
   if (!intent.ok) return bad('intent_rejected', intent.reason!);
 
-  // 수량 정밀도 — 내림한다. 올리면 보유량을 넘긴다.
+  // ── 거래소 격자 (Phase 4B-2A) ───────────────────────────────
+  //
+  // 예전에는 여기서 `roundSpotQty(qty, f.stepSize)` 한 줄이었다. 그것이
+  // 놓치고 있던 것이 셋이다:
+  //
+  //   ① **주문유형을 안 봤다.** 바이낸스 현물은 시장가에 `MARKET_LOT_SIZE`를
+  //      따로 고시한다. 지정가 격자로 시장가를 깎으면 거래소가 요구하지
+  //      않은 크기로 주문하게 된다
+  //   ② **가격을 안 맞췄다.** 지정가는 `PRICE_FILTER.tickSize` 위에 있어야
+  //      하고, 아니면 주문 자체가 거부된다. 화면이 만드는 분할 지정가는
+  //      가격 구간을 균등 보간한 생 실수라 격자 위에 있을 이유가 없다
+  //   ③ **최소 명목가를 안 봤다.** 수량과 최소수량을 다 통과해도 금액이
+  //      모자라면 거래소가 거부한다
+  //
+  // 계산을 여기서 새로 쓰지 않는다 — `normalizeForVenue`가 정본이고
+  // 그 안에서 `quantizeOrder`를 부른다. 정규화가 두 벌이 되면 같은 주문이
+  // 경로에 따라 다른 수량으로 나간다.
+  //
+  // ★ **매도는 EXIT다.** 이 저장소가 이미 그렇게 판정한다
+  //   (`/api/binance/spot/order`의 `intent: isSell ? 'EXIT' : 'ENTRY'`).
+  //   그래서 `reduceOnly`로 넘긴다 — 규격을 못 읽었다고 **팔지 못하게**
+  //   만들지 않고, 최소 명목가로 먼지 잔량을 가두지 않는다. 못 사는 것은
+  //   불편이고 못 파는 것은 사고다.
   let qty = quantity;
-  if (!byQuote && qty != null) {
-    try {
-      const f = await bn.getSpotSymbolFilters(symbol, testnet);
-      if (f) {
-        qty = bn.roundSpotQty(qty, f.stepSize);
-        if (qty < f.minQty) {
-          return bad('below_min_qty', `최소 주문 수량(${f.minQty})보다 적습니다`);
-        }
-      }
-    } catch { /* 필터를 못 읽으면 거래소 판단에 맡긴다 */ }
+  let orderPrice = price;
+  let precision: SpotVenuePrecision;
+
+  if (byQuote) {
+    // ── ★ 금액 기반 시장가 매수에는 수량 격자를 적용하지 않는다 ──
+    //
+    //   이 주문은 `quoteOrderQty`(결제통화 금액)로 나간다. 수량이라는 값이
+    //   아예 없다. 여기에 수량 정규화를 억지로 끼우면 `Number(null) === 0`이
+    //   되어 **지금 정상 동작하는 매수가 전부 막힌다.**
+    //
+    //   최소 주문 금액은 거래소가 판정한다. 우리가 앞질러 막으면 지금까지
+    //   나가던 주문을 새로 막는 것이고, 그건 다른 종류의 사고다.
+    precision = {
+      venue: 'BINANCE_SPOT', applied: false,
+      skipped: precisionSkipOf({ byQuote: true, applied: false, source: null, code: null }),
+      source: null, changed: false, requestedQuantity: null, quantity: null,
+    };
+  } else {
+    const { normalizeForVenue } = await import('@/lib/markets/venueSpec');
+    const { fetchVenueSpec } = await import('@/lib/markets/venueSpecSource');
+
+    const spec = await fetchVenueSpec('BINANCE_SPOT', symbol, testnet);
+
+    // 시장가의 최소 명목가는 **서버가 읽은 가격**으로 검사한다. 화면이 보낸
+    // 값을 쓰면 검사가 검사 대상에게 값을 물어보는 꼴이 된다. 지정가는
+    // 사용자가 정한 가격이 곧 체결가라 그대로 쓰므로 읽지 않는다.
+    // 매도(EXIT)에는 최소 명목가를 적용하지 않으므로 역시 읽지 않는다 —
+    // 필요 없는 호출을 하지 않는다.
+    const needsRef = !isSellSide && type !== 'LIMIT' && Number(spec.minNotional) > 0;
+    const referencePrice = needsRef ? await bn.getSpotPrice(symbol, testnet) : null;
+
+    const norm = normalizeForVenue({
+      spec,
+      quantity: qty as number,
+      price: type === 'LIMIT' ? price : null,
+      orderType: type,
+      reduceOnly: isSellSide,
+      referencePrice,
+    });
+
+    if (!norm.ok) {
+      return { ...bad(norm.code || 'invalid_quantity', norm.reason), venuePrecision: {
+        venue: 'BINANCE_SPOT', applied: norm.applied,
+        skipped: precisionSkipOf({
+          byQuote: false, applied: norm.applied, source: norm.source, code: norm.code,
+        }),
+        source: norm.source, changed: norm.changed,
+        requestedQuantity: qty, quantity: null,
+      } };
+    }
+
+    qty = norm.quantity;
+    if (type === 'LIMIT' && norm.price != null) orderPrice = norm.price;
+    precision = {
+      venue: 'BINANCE_SPOT', applied: norm.applied,
+      skipped: precisionSkipOf({
+        byQuote: false, applied: norm.applied, source: norm.source, code: norm.code,
+      }),
+      source: norm.source, changed: norm.changed,
+      requestedQuantity: quantity, quantity: qty,
+    };
   }
+
+  /**
+   * 격자에 대해 사용자에게 덧붙일 한 줄. 할 말이 없으면 빈 문자열.
+   *
+   * **말없이 크기를 줄이지 않는다.** 100%를 눌렀는데 잔고가 남는 이유가
+   * 화면 어디에도 없으면, 사용자는 그것을 고장으로 읽는다.
+   */
+  const precisionNote = (() => {
+    // 사유 문장은 `spotPrecisionState`가 갖는다. 여기서 다시 쓰면 사유가
+    // 늘 때마다 두 곳을 고쳐야 하고, 언젠가 한쪽만 고쳐진다.
+    //
+    // **금액 주문은 말하지 않는다.** 그건 고장이 아니라 그 주문의 성질이고,
+    // 매번 경고처럼 띄우면 사용자는 곧 전부 무시한다.
+    if (precision.skipped != null && precision.skipped !== 'QUOTE_ORDER') {
+      return ` · ${PRECISION_SKIP_TEXT[precision.skipped]}`;
+    }
+    if (!precision.changed) return '';
+    const parts: string[] = [];
+    if (precision.quantity !== precision.requestedQuantity) {
+      parts.push(`수량 ${precision.requestedQuantity} → ${precision.quantity}`);
+    }
+    if (orderPrice !== price) parts.push(`가격 ${price} → ${orderPrice}`);
+    return parts.length ? ` · 거래소 단위에 맞춰 조정했습니다 (${parts.join(' · ')})` : '';
+  })();
 
   // ── 의도를 먼저 기록 ──
   const clientOrderId = `SP${Date.now().toString(36).toUpperCase()}${symbol}`.slice(0, 36);
@@ -176,8 +309,10 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
     // 테스트넷 주문을 LIVE로 적으면 성과 집계·손실 한도가 가짜 체결을 실전으로 센다.
     mode: testnet ? 'TESTNET' : 'LIVE',
     symbol, side, order_type: type,
+    // **실제로 보낼 값을 적는다.** 격자에 맞추기 전 값을 적으면 장부와
+    // 거래소가 다른 주문을 기록하게 되고, 나중에 대조가 안 맞는다.
     quantity: byQuote ? 0 : (qty as number),
-    price: type === 'LIMIT' ? price : null,
+    price: type === 'LIMIT' ? orderPrice : null,
     status: 'INTENT',
     market_type: 'SPOT',
   };
@@ -213,7 +348,9 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
       symbol, side, type,
       quantity: byQuote ? undefined : (qty as number),
       quoteOrderQty: byQuote ? (quoteOrderQty as number) : undefined,
-      price: type === 'LIMIT' ? (price as number) : undefined,
+      // 격자에 맞춘 가격을 보낸다. 원값을 보내면 PRICE_FILTER에 걸려
+      // 거래소가 통째로 거부한다.
+      price: type === 'LIMIT' ? (orderPrice as number) : undefined,
       // 이 값을 거래소에 보내지 않으면 UNKNOWN 복구가 주문을 찾을 수 없다.
       // 지금까지 DB에만 적고 거래소에는 안 보내고 있었다.
       clientOrderId,
@@ -223,14 +360,15 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
     // 응답을 못 받았다. 나갔는지 안 나갔는지 모른다 — 재시도하지 않는다.
     await patch({ status: 'UNKNOWN', error_message: `응답 없음: ${e?.message || e}` });
     return {
-      ok: false, status: 'UNKNOWN', clientOrderId,
+      ok: false, status: 'UNKNOWN', clientOrderId, venuePrecision: precision,
       message: '주문 전송 후 응답을 받지 못했습니다. 재시도하지 말고 현물 내역을 확인하세요.',
     };
   }
 
   if (!r?.success) {
     await patch({ status: 'REJECTED', error_message: r?.message });
-    return { ok: false, status: 'REJECTED', clientOrderId, code: 'order_rejected', message: r?.message || '거래소가 거부했습니다' };
+    return { ok: false, status: 'REJECTED', clientOrderId, code: 'order_rejected',
+      venuePrecision: precision, message: r?.message || '거래소가 거부했습니다' };
   }
 
   await patch({
@@ -244,7 +382,8 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   return {
     ok: true, status: 'FILLED', clientOrderId,
     orderId: r.orderId, filledQty: r.qty, avgPrice: r.price,
-    message: `현물 ${side === 'BUY' ? '매수' : '매도'} 체결`,
+    venuePrecision: precision,
+    message: `현물 ${side === 'BUY' ? '매수' : '매도'} 체결` + precisionNote,
   };
 }
 

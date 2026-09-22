@@ -219,6 +219,12 @@ export async function POST(req: NextRequest) {
     orderId: r.orderId,
     filledQty: r.filledQty,
     avgPrice: r.avgPrice,
+    // ★ **맞췄는지를 값으로 내보낸다.**
+    //
+    //   `applied: false`만으로는 부족하다 — 규격을 못 읽어서 못 맞춘 것과
+    //   금액 기반 매수라 맞출 수량이 없는 것은 다른 사실이고, `skipped`이
+    //   그 둘을 가른다. 응답에서 빼면 둘이 화면에서 똑같이 보인다.
+    venuePrecision: r.venuePrecision,
     error: r.ok ? undefined : (r.code || 'order_failed'),
     message: r.message,
     checklist: { allowed: true, overridden: overrideNote != null, overrideNote },

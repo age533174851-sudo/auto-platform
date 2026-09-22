@@ -13,6 +13,7 @@ import {
   PRODUCTS, AXES, productCapability, productCapabilities, readProductId,
   productTradability, precisionProven, tradableProducts, lockedProducts,
   lacking, PRODUCT_LABEL, AXIS_LABEL, VERDICT_LABEL,
+  venuePrecisions, allVenuesPrecise, precisionGaps,
   type ProductId, type CapabilityAxis, type Verdict,
 } from './registry';
 
@@ -195,5 +196,46 @@ export function runProductRegistryTests() {
   test('코인 현물은 모의·실계좌 둘 다 된다', () => {
     const t = productTradability('SPOT_CRYPTO');
     assert(t.paper && t.live, '코인 현물의 장부가 하나뿐입니다');
+  });
+
+  // ══════════ ★ 제품 칸과 venue 층이 갈리지 않는다 (4B-2A) ══════════
+  //
+  // 같은 판단이 두 곳에 있다: 손으로 적은 `PRECISION` 칸과, venue 목록에서
+  // 계산되는 `allVenuesPrecise()`. 둘이 갈리면 어느 쪽이 정본인지 알 수
+  // 없고, 갈린 채로 오래 있으면 **화면은 한쪽을 읽고 사람은 다른 쪽을
+  // 읽는다.** 그래서 갈리는 것 자체를 시험이 막는다.
+
+  test('★ 제품 PRECISION 칸은 venue 층과 정확히 같은 말을 한다', () => {
+    for (const p of PRODUCTS) {
+      const cell = productCapability(p, 'PRECISION').verdict === 'SUPPORTED';
+      eq(cell, allVenuesPrecise(p),
+        `${p}: 제품 칸(${cell ? 'SUPPORTED' : '미지원'})과 venue 층`
+        + `(${allVenuesPrecise(p) ? '전부 SUPPORTED' : '미증명 venue 있음'})이 다릅니다`);
+    }
+  });
+
+  test('★ precisionProven()도 venue 층과 갈리지 않는다', () => {
+    for (const p of PRODUCTS) eq(precisionProven(p), allVenuesPrecise(p), `${p}`);
+  });
+
+  test('★ 실계좌로 주문이 나가는 venue가 목록에서 빠지지 않는다', () => {
+    // 코인 현물은 바이낸스와 Gate **둘 다** `placeSpotOrder`를 지나 실계좌로
+    // 나간다. 하나만 적어 두고 그것을 SUPPORTED로 올리면 감사한 적 없는
+    // venue가 증명된 것으로 읽힌다.
+    const vs = venuePrecisions('SPOT_CRYPTO').map(v => v.venue);
+    assert(vs.includes('BINANCE_SPOT'), '바이낸스 현물이 venue 목록에 없습니다');
+    assert(vs.includes('GATE_SPOT'), '★ Gate 현물이 실계좌로 나가는데 목록에 없습니다');
+  });
+
+  test('바이낸스 현물은 4B-2A로 닫혔고, 남은 구멍은 이름이 있다', () => {
+    const bn = venuePrecisions('SPOT_CRYPTO').find(v => v.venue === 'BINANCE_SPOT');
+    eq(bn?.verdict, 'SUPPORTED', '바이낸스 현물 격자가 닫히지 않았습니다');
+    const gaps = precisionGaps('SPOT_CRYPTO').map(v => v.venue);
+    assert(gaps.length > 0, '남은 구멍이 없다면 제품 칸이 SUPPORTED여야 합니다');
+    for (const g of gaps) {
+      const row = venuePrecisions('SPOT_CRYPTO').find(v => v.venue === g)!;
+      assert(row.note.trim().length > 0 && row.evidence.trim().length > 0,
+        `${g}: 구멍에 근거나 사유가 없습니다`);
+    }
   });
 }

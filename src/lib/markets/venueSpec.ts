@@ -44,6 +44,11 @@ import {
  */
 export type VenueId =
   | 'BINANCE_SPOT'
+  // Gate 현물은 바이낸스 현물과 **다른 venue다.** 수량 단위가 stepSize가
+  // 아니라 소수 자리수(`amount_precision`)이고, 최소 주문도 계약이 아니라
+  // 최소 기초자산/결제통화 금액이다. 같은 칸으로 적으면 한쪽 격자로
+  // 다른 쪽 주문을 맞추게 된다.
+  | 'GATE_SPOT'
   | 'BINANCE_USDM'
   | 'BINANCE_COINM'
   | 'GATE_USDM'
@@ -51,7 +56,8 @@ export type VenueId =
   | 'KIS_US';
 
 export const VENUES: readonly VenueId[] = [
-  'BINANCE_SPOT', 'BINANCE_USDM', 'BINANCE_COINM', 'GATE_USDM', 'KIS_KR', 'KIS_US',
+  'BINANCE_SPOT', 'GATE_SPOT', 'BINANCE_USDM', 'BINANCE_COINM', 'GATE_USDM',
+  'KIS_KR', 'KIS_US',
 ] as const;
 
 /**
@@ -256,6 +262,7 @@ export function venueForPaperMarket(market: any): VenueId | null {
 
 export const VENUE_LABEL: Record<VenueId, string> = {
   BINANCE_SPOT: '바이낸스 현물',
+  GATE_SPOT: 'Gate 현물',
   BINANCE_USDM: '바이낸스 USDT 무기한',
   BINANCE_COINM: '바이낸스 코인 마진',
   GATE_USDM: 'Gate 무기한',
