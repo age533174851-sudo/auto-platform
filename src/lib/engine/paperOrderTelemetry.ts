@@ -50,6 +50,13 @@ export type PaperOrderCode =
   | 'CHALLENGE_NOT_RUNNING'     // 409  RUNNING이 아니다 (잠그기 전의 관문)
   | 'DAILY_LIMIT'               // 429  실제로 한도에 걸렸다
   | 'DAILY_LIMIT_UNKNOWN'       // 429  확인하지 못해 막았다 (fail-closed)
+  // ── 거래소 격자에 못 맞춘 주문 (Phase 4B-1) ──
+  //
+  // **"못 읽어서 안 맞췄다"는 여기 오지 않는다.** 그건 절충 정책에 따라
+  // 그대로 통과하고 응답의 `venuePrecision.applied: false`로 남는다.
+  // 이 코드는 격자를 **읽었는데** 그 격자에서 낼 수 없는 주문이었다는
+  // 뜻이다 — 최소 수량 미달, 최소 명목가 미달, 한 칸도 안 되는 수량.
+  | 'VENUE_PRECISION'           // 400
   // ── plan_rejected를 경로가 아는 사실로만 가른다 ──
   | 'PLAN_NO_MARK_PRICE'        // 400  시세를 못 읽었다
   | 'PLAN_BALANCE_UNKNOWN'      // 400  가용 잔고를 못 읽었다

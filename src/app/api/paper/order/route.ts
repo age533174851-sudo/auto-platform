@@ -263,10 +263,45 @@ export async function POST(req: NextRequest) {
     }, { status: 429, headers: { 'Cache-Control': 'no-store' } }));
   }
 
+  // ── 거래소 격자에 맞춘다 (Phase 4B-1) ──
+  //
+  // 모의는 venue-neutral이 아니다. `paperPriceSource`가 머리말에 이미
+  // 선언해 두었다 — SPOT은 바이낸스 현물 ticker, USDM은 바이낸스 선물
+  // markPrice다. 가격 권위가 바이낸스인 장부에 바이낸스 격자를 쓰는 것은
+  // 임의 선택이 아니라 **기존 권위와의 일치**다.
+  //
+  // 격자를 못 읽으면 **맞추지 않고 그대로 간다**(절충 정책). 조회가 몇 분
+  // 막히는 동안 모의 주문이 전부 멈추는 것이 더 나쁘다. 대신 맞춘 척을
+  // 하지 않는다 — 아래 응답의 `venuePrecision`이 그 사실을 들고 나간다.
+  //
+  // ★ **매도(`/api/paper/sell`)에는 걸지 않는다.** 088의 등가성 증명은
+  //   "25%+25%+전량 == 100% 1회"가 정확히 같은 장부를 만든다는 것인데,
+  //   매도 수량을 격자로 내리면 그 등가가 깨진다. 진입에서 격자에 맞춘
+  //   수량이 들어오므로 보유는 이미 격자 위에 있다.
+  const { venueForPaperMarket, normalizeForVenue } =
+    await import('@/lib/markets/venueSpec');
+  const { fetchVenueSpec } = await import('@/lib/markets/venueSpecSource');
+
+  const venue = venueForPaperMarket(market);
+  const venueSpec = venue ? await fetchVenueSpec(venue, symbol, false) : null;
+  const norm = normalizeForVenue({
+    spec: venueSpec,
+    quantity: Number(body?.quantity),
+    orderType: 'MARKET',
+    referencePrice: markPrice,
+  });
+
+  if (!norm.ok) {
+    return await counted(sb, 'VENUE_PRECISION', NextResponse.json({
+      ok: false, error: 'venue_precision', message: norm.reason,
+      venuePrecision: { applied: norm.applied, source: norm.source, venue: norm.venue, code: norm.code },
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } }));
+  }
+
   const built = buildPaperPlan({
     symbol, side: side as 'LONG' | 'SHORT',
     market: market as 'SPOT' | 'USDM',
-    quantity: Number(body?.quantity),
+    quantity: Number(norm.quantity),
     leverage: spot ? 1 : Number(body?.leverage ?? 1),
     markPrice, stopPrice,
     takeProfit: body?.takeProfit != null ? Number(body.takeProfit) : null,
@@ -331,7 +366,18 @@ export async function POST(req: NextRequest) {
     notional: r.fill?.notional, leverage: r.fill?.leverage,
     margin: r.fill?.margin, entryFee: r.fill?.entryFee,
     stopLoss: stopPrice, liquidationPrice: built.liquidationPrice,
+    // ★ **맞췄는지를 값으로 내보낸다.**
+    //
+    //   `applied: false`는 "격자를 못 읽어서 맞추지 않고 보냈다"는 뜻이다.
+    //   이걸 응답에서 빼면 맞춘 것과 못 맞춘 것이 화면에서 똑같이 보이고,
+    //   그게 이 Phase가 없애려는 상태다.
+    venuePrecision: {
+      applied: norm.applied, source: norm.source, venue: norm.venue,
+      changed: norm.changed,
+      requestedQuantity: Number(body?.quantity),
+    },
     message: `모의 ${side} 체결 — ${r.fill?.quantity?.toFixed(6)} @ ${r.fill?.fillPrice?.toFixed(2)}`
-           + ' (거래소로 나가지 않았습니다)',
+           + ' (거래소로 나가지 않았습니다)'
+           + (norm.applied ? '' : ' · 거래소 규격을 읽지 못해 수량을 맞추지 않았습니다'),
   }, { headers: { 'Cache-Control': 'no-store' } }));
 }

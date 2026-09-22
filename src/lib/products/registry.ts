@@ -55,6 +55,8 @@ export const PRODUCTS: readonly ProductId[] = [
  *
  * 한 축이 참이어도 나머지가 거짓일 수 있다 — 주식이 정확히 그렇다.
  */
+import type { VenueId } from '../markets/venueSpec';
+
 export type CapabilityAxis =
   /** 이 제품의 시세·봉·호가를 **실제 출처**에서 읽는가 */
   | 'MARKET_DATA'
@@ -401,6 +403,98 @@ export function productTradability(product: any): TradabilityState {
  */
 export function precisionProven(product: any): boolean {
   return productCapability(product, 'PRECISION').verdict === 'SUPPORTED';
+}
+
+// ══════════════ 규격은 venue마다 다르다 (Phase 4B-1) ══════════════
+//
+// 8×8 표의 한계가 여기서 드러났다. "코인 무기한의 규격"은 한 칸으로
+// 답할 수 없다 — 바이낸스 USDT-M은 LOT_SIZE·MARKET_LOT_SIZE·PRICE_FILTER·
+// MIN_NOTIONAL을 전부 읽고, 같은 제품의 COIN-M은 계약배수만 있고 격자가
+// 없다. 한 칸으로 적으면 둘 중 하나가 거짓이 된다.
+//
+// 그래서 **제품 아래에 venue 층을 둔다.** 그리고 제품 칸은 그 venue들 중
+// **가장 약한 것**을 따른다 — 일부만 증명하고 제품 전체를 올리는 일이
+// 구조적으로 불가능해진다.
+
+export interface VenuePrecision {
+  venue: VenueId;
+  verdict: Verdict;
+  evidence: string;
+  note: string;
+}
+
+/**
+ * 제품별 venue 규격 판정.
+ *
+ * **여기 없는 venue는 그 제품에서 다루지 않는다는 뜻이 아니라, 규격을
+ * 아직 감사하지 않았다는 뜻이다.** 그 구별이 필요해지면 그때 축을 늘린다.
+ */
+const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
+  SPOT_CRYPTO: [
+    {
+      venue: 'BINANCE_SPOT', verdict: 'VENUE_GAP',
+      evidence: 'src/app/api/binance/spot/order/route.ts',
+      note: '규격 조회는 갖췄지만(LOT_SIZE·PRICE_FILTER·NOTIONAL·MARKET_LOT_SIZE) '
+        + '실계좌 현물 주문 라우트에 아직 배선되지 않았습니다 (4B-2)',
+    },
+  ],
+  PERP_CRYPTO: [
+    {
+      // ★ 이 저장소에서 유일하게 끝까지 닫힌 경로다.
+      venue: 'BINANCE_USDM', verdict: 'SUPPORTED',
+      evidence: 'src/app/api/binance/futures/order/route.ts:160',
+      note: '네 필터를 각각 읽고 quantizeOrder로 맞춥니다 — 못 읽으면 지어내지 않습니다',
+    },
+    {
+      venue: 'BINANCE_COINM', verdict: 'VENUE_GAP',
+      evidence: 'src/lib/markets/coinM.ts:62',
+      note: '계약배수만 권위가 있고 수량·가격 격자가 없습니다',
+    },
+    {
+      venue: 'GATE_USDM', verdict: 'VENUE_GAP',
+      evidence: 'src/lib/exchanges/gatePlan.ts:279',
+      note: '계약 수 격자는 있지만 가격 단위가 없습니다',
+    },
+  ],
+  SPOT_STOCK: [
+    {
+      venue: 'KIS_KR', verdict: 'VENUE_GAP',
+      evidence: 'src/lib/exchanges/kisCore.ts:220',
+      note: '수량 1주 단위는 실행 직전에 강제되지만 호가단위 출처가 없습니다',
+    },
+    {
+      venue: 'KIS_US', verdict: 'VENUE_GAP',
+      evidence: 'src/app/api/stock/order/route.ts',
+      note: '국내/해외 주문 경로가 분리되어 있지 않아 따로 증명할 수 없습니다',
+    },
+  ],
+};
+
+/** 이 제품이 다루는 venue별 규격 판정. 감사하지 않은 제품은 빈 목록이다. */
+export function venuePrecisions(product: any): VenuePrecision[] {
+  const p = readProductId(product);
+  if (!p) return [];
+  return VENUE_PRECISION[p] ?? [];
+}
+
+/**
+ * **제품 규격은 가장 약한 venue를 따른다.**
+ *
+ * 바이낸스 USDT-M 하나가 닫혔다고 "코인 무기한은 규격까지 지원"이라고
+ * 적으면, COIN-M으로 주문하는 사용자에게 거짓말이 된다.
+ *
+ * venue를 하나도 감사하지 않았으면 `false`다 — 모르는 것을 통과로 읽지
+ * 않는다.
+ */
+export function allVenuesPrecise(product: any): boolean {
+  const vs = venuePrecisions(product);
+  if (vs.length === 0) return false;
+  return vs.every(v => v.verdict === 'SUPPORTED');
+}
+
+/** 아직 규격이 닫히지 않은 venue와 그 이유 — 다음에 무엇을 할지 정한다. */
+export function precisionGaps(product: any): VenuePrecision[] {
+  return venuePrecisions(product).filter(v => v.verdict !== 'SUPPORTED');
 }
 
 /** 지금 거래 가능한 제품만. 화면 목록이 손으로 다시 적지 않게 한다. */

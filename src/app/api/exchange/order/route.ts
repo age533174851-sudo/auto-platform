@@ -135,9 +135,19 @@ export async function POST(req: NextRequest) {
         try {
           const { getSpotSymbolFilters, roundSpotQty } = await import('@/lib/exchanges/binance');
           const f = await getSpotSymbolFilters(symbol, testnet);
-          if (f) {
+          // ── 격자를 못 읽으면 **맞추지 않고 보낸다** ──
+          //
+          //   예전에는 `getSpotSymbolFilters`가 LOT_SIZE가 없을 때
+          //   `0.00001`을 지어내서 돌려줬다. 그래서 여기는 언제나 반올림을
+          //   했고, 그 값이 틀렸을 때 **맞춘 줄 알고** 주문이 나갔다.
+          //
+          //   이제 못 읽은 칸은 null이다. null이면 반올림하지 않고 거래소가
+          //   판단하게 둔다 — 지금까지도 조회가 실패하면 그렇게 했다
+          //   (`if (f)`). 동작이 달라지는 것은 "LOT_SIZE가 없는 종목"뿐이고,
+          //   그 경우 예전에는 지어낸 격자로 잘못 반올림했다.
+          if (f && f.stepSize != null) {
             qty = roundSpotQty(quantity, f.stepSize);
-            if (qty < f.minQty) {
+            if (f.minQty != null && qty < f.minQty) {
               return NextResponse.json({ error: 'qty_too_small', message: `주문 수량(${qty})이 최소(${f.minQty}) 미만` }, { status: 400 });
             }
           }
