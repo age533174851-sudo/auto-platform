@@ -18,6 +18,7 @@ const BN    = 'src/lib/exchanges/binance.ts';
 const PLAN  = 'src/app/api/strategies/spot/plan/route.ts';
 const FORM  = 'src/lib/trading/useTradeForm.ts';
 const REG   = 'src/lib/products/registry.ts';
+const STATE = 'src/lib/exchanges/spotPrecisionState.ts';
 const CHECK = 'scripts/check-spot-precision.mjs';
 
 const ONLY = process.argv.slice(2);
@@ -45,11 +46,58 @@ const CASES = [
     _nv({ spec: null, quantity: qty as number });`]]],
 
   ['MUT-S2 금액 매수의 사유를 "규격 미상"으로 적는다 (해당 없음과 장애를 합친다)', EXEC, 'RED',
-   [[`skipped: 'QUOTE_ORDER'`, `skipped: 'SPEC_UNKNOWN'`]]],
+   [[`skipped: precisionSkipOf({ byQuote: true, applied: false, source: null, code: null }),`,
+     `skipped: 'SPEC_UNKNOWN' as any,`]]],
+
+  // ── ★ 사유 분류 (audit follow-up) ──
+  //
+  //   4B-2A는 `applied ? null : 'SPEC_UNKNOWN'` 한 줄이었다. 아래가 그
+  //   되돌림과, 분류를 무너뜨리는 변경들이다.
+
+  ['MUT-S2a 사유를 다시 삼항 하나로 뭉갠다 (2A의 그 모순을 되살린다)', EXEC, 'RED',
+   [[`      skipped: precisionSkipOf({
+        byQuote: false, applied: norm.applied, source: norm.source, code: norm.code,
+      }),
+      source: norm.source, changed: norm.changed,
+      requestedQuantity: quantity, quantity: qty,`,
+     `      skipped: (norm.applied ? null : 'SPEC_UNKNOWN') as any,
+      source: norm.source, changed: norm.changed,
+      requestedQuantity: quantity, quantity: qty,`]]],
+
+  ['MUT-S2b 읽은 격자를 "못 읽음"으로 떨어뜨린다 (EXCHANGE인데 SPEC_UNKNOWN)', STATE, 'RED',
+   [[`  return 'ORDER_TYPE_GRID_UNKNOWN';`, `  return 'SPEC_UNKNOWN';`]]],
+
+  ['MUT-S2c 입력 오류를 규격 장애로 적는다 (source를 code보다 먼저 본다)', STATE, 'RED',
+   [[`  if (i?.code === 'INVALID_QUANTITY' || i?.code === 'VENUE_UNKNOWN') return 'INVALID_INPUT';
+  if (i?.source === 'UNKNOWN' || i?.source == null) return 'SPEC_UNKNOWN';`,
+     `  if (i?.source === 'UNKNOWN' || i?.source == null) return 'SPEC_UNKNOWN';
+  if (i?.code === 'INVALID_QUANTITY' || i?.code === 'VENUE_UNKNOWN') return 'INVALID_INPUT';`]]],
+
+  ['MUT-S2d 금액 주문 상태를 없애 다른 사유로 흡수시킨다', STATE, 'RED',
+   [[`  if (i?.byQuote) return 'QUOTE_ORDER';`, `  if (false) return 'QUOTE_ORDER';`]]],
+
+  ['MUT-S2e 맞췄는데도 사유를 붙인다', STATE, 'RED',
+   [[`  if (i?.applied) return null;`, `  if (false) return null;`]]],
+
+  ['MUT-S2f 사유 문장 둘을 같게 만든다 (화면에서 구별 불가)', STATE, 'RED',
+   [[`  ORDER_TYPE_GRID_UNKNOWN:
+    '이 주문 유형의 수량 규격을 거래소가 고시하지 않아 수량을 맞추지 않았습니다',`,
+     `  ORDER_TYPE_GRID_UNKNOWN:
+    '거래소 규격을 읽지 못해 수량을 맞추지 않았습니다 — 거래소가 거부할 수 있습니다',`]]],
+
+  ['MUT-S2g 모순 판정을 무력화한다 (시험이 모순을 못 잡게 된다)', STATE, 'RED',
+   [[`  if (i.skipped === 'SPEC_UNKNOWN' && i.source != null && i.source !== 'UNKNOWN') {`,
+     `  if (false) {`]]],
+
+  ['MUT-S2h 사유 문장을 실행부가 다시 쓴다 (정본이 둘)', EXEC, 'RED',
+   [[`      return \` · \${PRECISION_SKIP_TEXT[precision.skipped]}\`;`,
+     `      return ' · 거래소 규격을 읽지 못했습니다';`]]],
 
   ['MUT-S3 금액 매수를 "맞췄다"고 적는다', EXEC, 'RED',
-   [[`venue: 'BINANCE_SPOT', applied: false, skipped: 'QUOTE_ORDER',`,
-     `venue: 'BINANCE_SPOT', applied: true, skipped: 'QUOTE_ORDER',`]]],
+   [[`      venue: 'BINANCE_SPOT', applied: false,
+      skipped: precisionSkipOf({ byQuote: true`,
+     `      venue: 'BINANCE_SPOT', applied: true,
+      skipped: precisionSkipOf({ byQuote: true`]]],
 
   // ── 정본을 거치는가 ──
 
@@ -175,6 +223,8 @@ const CASES = [
      `// 대조군\nconst EXEC  = 'src/lib/exchanges/spotOrderExecutor.ts';`]]],
   ['OK-S3 현물 모듈에 주석 한 줄 추가', BN, 'GREEN',
    [[`export function roundSpotQty(`, `// 대조군\nexport function roundSpotQty(`]]],
+  ['OK-S4 사유 분류 파일에 주석 한 줄 추가', STATE, 'GREEN',
+   [[`export type PrecisionSkip =`, `// 대조군\nexport type PrecisionSkip =`]]],
 ];
 
 const selected = ONLY.length ? CASES.filter(c => ONLY.some(o => c[0].includes(o))) : CASES;

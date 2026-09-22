@@ -26,6 +26,7 @@ const BN    = 'src/lib/exchanges/binance.ts';
 const PLAN  = 'src/app/api/strategies/spot/plan/route.ts';
 const FORM  = 'src/lib/trading/useTradeForm.ts';
 const REG   = 'src/lib/products/registry.ts';
+const STATE = 'src/lib/exchanges/spotPrecisionState.ts';
 
 let bad = 0;
 const fail = (m) => { console.error(`  ✗ ${m}`); bad += 1; };
@@ -57,6 +58,7 @@ const bn    = stripTs(read(BN));
 const plan  = stripTs(read(PLAN));
 const form  = stripTs(read(FORM));
 const reg   = stripTs(read(REG));
+const state = stripTs(read(STATE));
 
 /**
  * `marker` 뒤의 첫 블록을 짝이 맞는 `}`까지 잘라 준다.
@@ -124,14 +126,70 @@ function blockAfter(src, marker, after) {
       fail(`${EXEC}: ★ 금액 기반 시장가 매수에 수량 정규화를 걸었습니다 — `
          + `quoteOrderQty에는 수량이 없어 Number(null)===0으로 전부 막힙니다`);
     }
-    // 그 사실이 값으로 남는가. "못 읽었다"와 "해당 없다"를 합치면
-    // 장애를 정상으로, 정상을 장애로 읽게 된다.
-    if (!/skipped:\s*'QUOTE_ORDER'/.test(quote)) {
-      fail(`${EXEC}: 금액 기반 매수가 왜 격자를 안 탔는지 구별되지 않습니다`);
+    // 그 사실이 값으로 남는가. 사유는 정본(`spotPrecisionState`)이 정한다 —
+    // 여기서 직접 적으면 판정이 두 곳이 된다.
+    if (!/precisionSkipOf\(\{\s*byQuote:\s*true/.test(quote)) {
+      fail(`${EXEC}: 금액 기반 매수가 왜 격자를 안 탔는지 정본으로 판정하지 않습니다`);
     }
-    if (!/applied:\s*false/.test(quote)) {
+    // ★ **기록의 칸을 본다, 인자가 아니라.**
+    //
+    //   처음에는 갈래 안에서 `applied: false`를 찾았다. 그런데 그 문구가
+    //   `precisionSkipOf({ byQuote: true, applied: false, ... })` **인자에도**
+    //   있어서, 기록을 `applied: true`로 뒤집는 변경이 그대로 통과했다
+    //   (MUT-S3). venue 칸에 붙여 기록만 겨냥한다.
+    if (!/venue:\s*'BINANCE_SPOT',\s*applied:\s*false/.test(quote)) {
       fail(`${EXEC}: 금액 기반 매수가 맞췄다고 적혀 있습니다`);
     }
+  }
+}
+
+// ══════════════ ②-b ★ "왜 안 맞췄는가"를 하나로 뭉개지 않는다 ══════════════
+//
+// 4B-2A가 실제로 내보내던 모순이 여기에 있었다:
+//
+//     skipped: applied ? null : 'SPEC_UNKNOWN'
+//
+// `applied: false`가 되는 길은 하나가 아니다. 규격을 **못 읽은 것**과,
+// 규격은 읽었는데 **이 주문유형의 격자만 없는 것**은 다른 사실이다. 뒤엣것을
+// 앞엣것으로 적으면 `source: 'EXCHANGE'`인데 사유는 "규격 미상"인 응답이
+// 나간다 — 구별하려고 만든 필드가 구별을 없앤다.
+{
+  // 실행부가 사유를 직접 적으면 판정이 두 곳이 된다
+  if (/skipped:\s*[^,\n]*\?[^,\n]*:\s*'SPEC_UNKNOWN'/.test(exec)) {
+    fail(`${EXEC}: ★ 격자 미적용 사유를 삼항 하나로 뭉갰습니다 — `
+       + `못 읽은 것과 이 유형의 격자가 없는 것이 같은 값이 됩니다`);
+  }
+  if (/skipped:\s*'/.test(exec)) {
+    fail(`${EXEC}: 사유를 실행부가 직접 적습니다 — precisionSkipOf가 정본입니다`);
+  }
+  if (!/precisionSkipOf\(/.test(exec)) {
+    fail(`${EXEC}: 격자 미적용 사유를 정본으로 판정하지 않습니다`);
+  }
+
+  // 정본이 네 상태를 실제로 구별하는가
+  for (const k of ['QUOTE_ORDER', 'SPEC_UNKNOWN', 'ORDER_TYPE_GRID_UNKNOWN', 'INVALID_INPUT']) {
+    if (!state.includes(`'${k}'`)) fail(`${STATE}: ${k} 상태가 없습니다`);
+  }
+  const fn = blockAfter(state, 'export function precisionSkipOf');
+  if (!fn) fail(`${STATE}: precisionSkipOf를 찾지 못했습니다`);
+  else {
+    // ★ **순서가 의미를 만든다.** `code`를 `source`보다 먼저 봐야, 입력이
+    //   틀린 것이 규격 조회 장애로 적히지 않는다.
+    const iCode = fn.search(/code\s*===/);
+    const iSrc  = fn.search(/source\s*===/);
+    if (iCode < 0 || iSrc < 0) {
+      fail(`${STATE}: 사유 판정이 code와 source를 모두 보지 않습니다`);
+    } else if (iCode > iSrc) {
+      fail(`${STATE}: ★ source를 code보다 먼저 봅니다 — 입력 오류가 규격 장애로 적힙니다`);
+    }
+    // 읽은 격자를 '못 읽음'으로 떨어뜨리지 않는가 (마지막 반환이 분리 상태여야 한다)
+    if (!/return 'ORDER_TYPE_GRID_UNKNOWN'/.test(fn)) {
+      fail(`${STATE}: 규격은 읽었는데 유형 격자만 없는 경우가 따로 나오지 않습니다`);
+    }
+  }
+  // 모순 판정이 있어야 시험이 모순을 고정할 수 있다
+  if (!/export function precisionStateConsistent/.test(state)) {
+    fail(`${STATE}: 값들이 서로 모순되는지 판정하는 함수가 없습니다`);
   }
 }
 
@@ -237,6 +295,10 @@ function blockAfter(src, marker, after) {
   }
   else if (!/message:[^\n]*precisionNote/.test(exec)) {
     fail(`${EXEC}: 사유를 만들어 놓고 문장에 붙이지 않습니다`);
+  }
+  // 문장도 정본에서 가져온다. 실행부가 다시 쓰면 사유가 늘 때 한쪽만 고쳐진다.
+  if (!/PRECISION_SKIP_TEXT\[/.test(exec)) {
+    fail(`${EXEC}: 사유 문장을 정본에서 가져오지 않습니다`);
   }
 }
 

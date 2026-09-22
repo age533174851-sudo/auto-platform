@@ -18,6 +18,10 @@
 import { test, eq, assert } from '../../test/harness';
 import { normalizeForVenue, type VenueSpec } from '../markets/venueSpec';
 import { roundSpotQty } from './binance';
+import {
+  precisionSkipOf, precisionStateConsistent, PRECISION_SKIP_TEXT,
+  type PrecisionSkip,
+} from './spotPrecisionState';
 
 /** 바이낸스 현물이 실제로 주는 모양. 네 필터가 각각 따로 있다 */
 const spot = (o: Partial<VenueSpec> = {}): VenueSpec => ({
@@ -174,4 +178,124 @@ export function runSpotPrecisionTests() {
     eq(roundSpotQty(0.0019, 0.001), 0.001);
     eq(roundSpotQty(0.12345, 0), 0.12345);
   });
+
+  // ══════════ ★ 왜 안 맞췄는가 — 네 가지를 뭉개지 않는다 ══════════
+  //
+  // 처음 구현은 `applied ? null : 'SPEC_UNKNOWN'` 한 줄이었다. 그래서
+  // **`source: 'EXCHANGE'`인데 사유는 "규격 미상"**인 모순된 응답이
+  // 나갔다. 아래 시험은 네 상태가 각각 **다른 값**으로 나오는지 본다 —
+  // 하나라도 다른 것과 같아지면 깨진다.
+
+  test('★ 규격 조회 실패는 SPEC_UNKNOWN이다', () => {
+    const r = precisionSkipOf({ byQuote: false, applied: false, source: 'UNKNOWN', code: null });
+    eq(r, 'SPEC_UNKNOWN');
+  });
+
+  test('★ 규격은 읽었는데 이 주문유형 격자만 없으면 SPEC_UNKNOWN이 아니다', () => {
+    for (const src of ['EXCHANGE', 'CACHED', 'KNOWN'] as const) {
+      const r = precisionSkipOf({
+        byQuote: false, applied: false, source: src, code: 'QTY_FILTER_UNKNOWN',
+      });
+      eq(r, 'ORDER_TYPE_GRID_UNKNOWN', `${src}에서 사유가 틀렸습니다`);
+      assert(r !== 'SPEC_UNKNOWN', '★ 읽은 것과 못 읽은 것이 같은 값이 됐습니다');
+    }
+  });
+
+  test('★ 금액 기반 매수는 독립 상태다 — 다른 셋 중 어느 것도 아니다', () => {
+    const r = precisionSkipOf({ byQuote: true, applied: false, source: null, code: null });
+    eq(r, 'QUOTE_ORDER');
+    for (const other of ['SPEC_UNKNOWN', 'ORDER_TYPE_GRID_UNKNOWN', 'INVALID_INPUT'] as const) {
+      assert(r !== other, `금액 주문이 ${other}로 뭉개졌습니다`);
+    }
+  });
+
+  test('★ 입력이 틀린 것을 규격 장애로 적지 않는다', () => {
+    // 규격은 멀쩡한데 수량이 틀린 경우다. `SPEC_UNKNOWN`으로 적으면
+    // 거래소 조회 장애로 오인된다.
+    eq(precisionSkipOf({
+      byQuote: false, applied: false, source: 'EXCHANGE', code: 'INVALID_QUANTITY',
+    }), 'INVALID_INPUT');
+    eq(precisionSkipOf({
+      byQuote: false, applied: false, source: 'UNKNOWN', code: 'VENUE_UNKNOWN',
+    }), 'INVALID_INPUT');
+  });
+
+  test('맞췄으면 사유가 없다', () => {
+    for (const src of ['EXCHANGE', 'CACHED', 'KNOWN'] as const) {
+      eq(precisionSkipOf({ byQuote: false, applied: true, source: src, code: null }), null);
+    }
+  });
+
+  test('★ 네 상태가 서로 다른 값이다', () => {
+    const seen = new Set<string>();
+    const cases: Array<[string, PrecisionSkip | null]> = [
+      ['금액매수', precisionSkipOf({ byQuote: true, applied: false, source: null, code: null })],
+      ['조회실패', precisionSkipOf({ byQuote: false, applied: false, source: 'UNKNOWN', code: null })],
+      ['유형격자없음', precisionSkipOf({ byQuote: false, applied: false, source: 'EXCHANGE', code: 'QTY_FILTER_UNKNOWN' })],
+      ['입력오류', precisionSkipOf({ byQuote: false, applied: false, source: 'EXCHANGE', code: 'INVALID_QUANTITY' })],
+    ];
+    for (const [label, v] of cases) {
+      assert(v != null, `${label}에 사유가 없습니다`);
+      assert(!seen.has(String(v)), `★ ${label}이 다른 상태와 같은 값입니다: ${v}`);
+      seen.add(String(v));
+    }
+    eq(seen.size, 4);
+  });
+
+  test('사유마다 사람이 읽을 문장이 있다', () => {
+    for (const k of ['QUOTE_ORDER', 'SPEC_UNKNOWN', 'ORDER_TYPE_GRID_UNKNOWN',
+                     'INVALID_INPUT'] as PrecisionSkip[]) {
+      assert(PRECISION_SKIP_TEXT[k]?.length > 0, `${k} 문장 없음`);
+    }
+    // 문장도 서로 달라야 한다 — 같으면 화면에서 구별이 안 된다
+    const texts = Object.values(PRECISION_SKIP_TEXT);
+    eq(new Set(texts).size, texts.length, '사유 문장이 겹칩니다');
+  });
+
+  // ══════════ 값들이 서로 모순되지 않는가 ══════════
+
+  test('★ source=EXCHANGE인데 "규격 미상"은 모순이다', () => {
+    const r = precisionStateConsistent({
+      byQuote: false, applied: false, source: 'EXCHANGE', code: 'QTY_FILTER_UNKNOWN',
+      skipped: 'SPEC_UNKNOWN',
+    });
+    assert(!r.ok, '★ 모순된 조합이 통과했습니다 — 4B-2A가 실제로 내보내던 값입니다');
+  });
+
+  test('실행부가 만드는 조합은 전부 모순이 없다', () => {
+    const inputs: PrecisionSkipInputLike[] = [
+      { byQuote: true,  applied: false, source: null,       code: null },
+      { byQuote: false, applied: false, source: 'UNKNOWN',  code: null },
+      { byQuote: false, applied: false, source: 'EXCHANGE', code: 'QTY_FILTER_UNKNOWN' },
+      { byQuote: false, applied: false, source: 'EXCHANGE', code: 'INVALID_QUANTITY' },
+      { byQuote: false, applied: true,  source: 'EXCHANGE', code: null },
+      { byQuote: false, applied: true,  source: 'CACHED',   code: 'BELOW_MIN_QTY' },
+    ];
+    for (const i of inputs) {
+      const skipped = precisionSkipOf(i);
+      const c = precisionStateConsistent({ ...i, skipped });
+      assert(c.ok, `${JSON.stringify(i)} → ${skipped}: ${c.reason}`);
+    }
+  });
+
+  test('적용했는데 사유가 붙으면 모순으로 잡는다', () => {
+    const r = precisionStateConsistent({
+      byQuote: false, applied: true, source: 'EXCHANGE', code: null, skipped: 'SPEC_UNKNOWN',
+    });
+    assert(!r.ok, '맞췄는데 안 맞춘 사유가 통과했습니다');
+  });
+
+  test('안 맞췄는데 사유가 없으면 모순으로 잡는다', () => {
+    const r = precisionStateConsistent({
+      byQuote: false, applied: false, source: 'EXCHANGE', code: null, skipped: null,
+    });
+    assert(!r.ok, '사유 없는 미적용이 통과했습니다');
+  });
 }
+
+type PrecisionSkipInputLike = {
+  byQuote: boolean;
+  applied: boolean;
+  source: 'EXCHANGE' | 'KNOWN' | 'CACHED' | 'UNKNOWN' | null;
+  code: any;
+};

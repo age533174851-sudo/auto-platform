@@ -434,8 +434,13 @@ const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
     {
       venue: 'BINANCE_SPOT', verdict: 'SUPPORTED',
       evidence: 'src/lib/exchanges/spotOrderExecutor.ts:188',
-      note: '네 필터를 읽어 normalizeForVenue로 맞춥니다 — 주문유형별 격자·'
-        + '호가단위·최소명목가까지. 못 읽으면 지어내지 않고 안 맞췄다고 적습니다',
+      // ★ **경계를 적는다.** "네 필터를 맞춥니다"로 끝내면 금액 기반
+      //   시장가 매수에서 거짓이 된다 — 그 주문에는 맞출 수량이 없고,
+      //   최소 주문 금액도 우리가 앞질러 막지 않기로 정했다.
+      note: '수량으로 내는 주문은 주문유형별 격자·호가단위·최소명목가까지 '
+        + '맞춥니다(못 읽으면 지어내지 않습니다). 금액으로 내는 시장가 매수'
+        + '(quoteOrderQty)는 맞출 수량이 없어 수량 격자 대상이 아니고, '
+        + '최소 주문 금액도 미리 막지 않고 거래소 판정에 맡깁니다',
     },
     {
       // ★ **이 줄이 없으면 제품 칸이 거짓이 된다.**
@@ -463,9 +468,21 @@ const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
       note: '계약배수만 권위가 있고 수량·가격 격자가 없습니다',
     },
     {
+      // **"가격 단위가 없다"고 적혀 있었다. 사실이 아니다.**
+      //
+      //   Gate 공식 규격에서 `order_price_round`는 최소 주문 가격 증분이고,
+      //   이 저장소는 그것을 읽어(`gateFutures.ts:655`) tickSize로 옮기고
+      //   (`gatePlan.ts:294`) `quantizeOrder`가 적용한 뒤(`quantize.ts:219`)
+      //   그 값을 보낸다(`futuresExec.ts:554`). 네 단계가 이어져 있다.
+      //   계약 수·최소·최대도 `gateSizeFromBase`가 막는다(`gatePlan.ts:342-355`).
+      //
+      //   그래도 SUPPORTED로 올리지 않는다. 남은 축이 하나 있고, 그것은
+      //   **모른다는 사실 자체가 미확인**이다 — 아래 note가 그것만 적는다.
       venue: 'GATE_USDM', verdict: 'VENUE_GAP',
-      evidence: 'src/lib/exchanges/gatePlan.ts:279',
-      note: '계약 수 격자는 있지만 가격 단위가 없습니다',
+      evidence: 'src/lib/exchanges/gatePlan.ts:294',
+      note: '계약 수·최소·최대 계약·가격 증분(order_price_round)까지 적용합니다. '
+        + '남은 축은 최소 명목가뿐이고, 그것이 Gate에 없는 규칙인지 우리가 '
+        + '안 읽는 것인지 아직 확인하지 못했습니다',
     },
   ],
   SPOT_STOCK: [

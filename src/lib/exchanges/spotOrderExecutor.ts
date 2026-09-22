@@ -17,6 +17,9 @@
 // 두 입구가 같은 함수를 쓴다.
 import { checkIntent, tagSignalId } from '@/lib/markets/marketType';
 import type { SpecSource } from '@/lib/markets/venueSpec';
+import {
+  precisionSkipOf, PRECISION_SKIP_TEXT, type PrecisionSkip,
+} from './spotPrecisionState';
 
 export interface SpotOrderArgs {
   userId: string;
@@ -41,24 +44,17 @@ export interface SpotOrderArgs {
  *
  * 왜 불린 하나로 끝내지 않는가
  * ────────────────────────────
- * "안 맞췄다"에는 서로 다른 두 가지가 있고, 그 둘을 합치면 사후에
- * 구별할 방법이 없다:
- *
- *   SPEC_UNKNOWN   규격을 **못 읽었다.** 맞춰야 하는데 못 맞췄다 —
- *                  거래소가 거부할 수 있고, 그 사실을 사용자가 알아야 한다
- *   QUOTE_ORDER    맞출 **수량 자체가 없다.** 금액 기반 시장가 매수는
- *                  `quoteOrderQty`(결제통화 금액)로 나가므로 수량 격자가
- *                  적용될 대상이 아니다. 결손이 아니라 해당 없음이다
- *
- * 앞의 것을 뒤의 것으로 적으면 장애를 정상으로 읽게 되고, 뒤의 것을 앞의
- * 것으로 적으면 정상 경로가 고장으로 보인다.
+ * "안 맞췄다"에는 서로 다른 네 가지가 있다. 사유는
+ * `spotPrecisionState.ts`가 한 곳에서 판정한다 — 처음에는 여기서
+ * `applied ? null : 'SPEC_UNKNOWN'`으로 뭉갰고, 그 바람에 **`source:
+ * 'EXCHANGE'`인데 사유는 "규격 미상"**인 모순된 응답이 나갔다.
  */
 export interface SpotVenuePrecision {
   venue: 'BINANCE_SPOT';
   /** 수량 격자를 실제로 적용했는가 */
   applied: boolean;
   /** 적용하지 않았다면 왜. 적용했으면 null */
-  skipped: 'SPEC_UNKNOWN' | 'QUOTE_ORDER' | null;
+  skipped: PrecisionSkip | null;
   /** 어디서 온 격자인가. 안 읽었으면 null */
   source: SpecSource | null;
   /** 수량·가격이 바뀌었는가 */
@@ -222,7 +218,8 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
     //   최소 주문 금액은 거래소가 판정한다. 우리가 앞질러 막으면 지금까지
     //   나가던 주문을 새로 막는 것이고, 그건 다른 종류의 사고다.
     precision = {
-      venue: 'BINANCE_SPOT', applied: false, skipped: 'QUOTE_ORDER',
+      venue: 'BINANCE_SPOT', applied: false,
+      skipped: precisionSkipOf({ byQuote: true, applied: false, source: null, code: null }),
       source: null, changed: false, requestedQuantity: null, quantity: null,
     };
   } else {
@@ -251,7 +248,9 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
     if (!norm.ok) {
       return { ...bad(norm.code || 'invalid_quantity', norm.reason), venuePrecision: {
         venue: 'BINANCE_SPOT', applied: norm.applied,
-        skipped: norm.applied ? null : 'SPEC_UNKNOWN',
+        skipped: precisionSkipOf({
+          byQuote: false, applied: norm.applied, source: norm.source, code: norm.code,
+        }),
         source: norm.source, changed: norm.changed,
         requestedQuantity: qty, quantity: null,
       } };
@@ -261,7 +260,9 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
     if (type === 'LIMIT' && norm.price != null) orderPrice = norm.price;
     precision = {
       venue: 'BINANCE_SPOT', applied: norm.applied,
-      skipped: norm.applied ? null : 'SPEC_UNKNOWN',
+      skipped: precisionSkipOf({
+        byQuote: false, applied: norm.applied, source: norm.source, code: norm.code,
+      }),
       source: norm.source, changed: norm.changed,
       requestedQuantity: quantity, quantity: qty,
     };
@@ -274,8 +275,13 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
    * 화면 어디에도 없으면, 사용자는 그것을 고장으로 읽는다.
    */
   const precisionNote = (() => {
-    if (precision.skipped === 'SPEC_UNKNOWN') {
-      return ' · 거래소 규격을 읽지 못해 수량을 맞추지 않았습니다 — 거래소가 거부할 수 있습니다';
+    // 사유 문장은 `spotPrecisionState`가 갖는다. 여기서 다시 쓰면 사유가
+    // 늘 때마다 두 곳을 고쳐야 하고, 언젠가 한쪽만 고쳐진다.
+    //
+    // **금액 주문은 말하지 않는다.** 그건 고장이 아니라 그 주문의 성질이고,
+    // 매번 경고처럼 띄우면 사용자는 곧 전부 무시한다.
+    if (precision.skipped != null && precision.skipped !== 'QUOTE_ORDER') {
+      return ` · ${PRECISION_SKIP_TEXT[precision.skipped]}`;
     }
     if (!precision.changed) return '';
     const parts: string[] = [];
