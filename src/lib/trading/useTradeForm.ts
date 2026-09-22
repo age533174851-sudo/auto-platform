@@ -199,7 +199,22 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
       if (!r.ok || !d?.ok) {
         setMessage({ ok: false, text: String(d?.message || d?.error || `주문 실패 (HTTP ${r.status})`) });
       } else {
-        setMessage({ ok: true, text: '모의 주문이 체결됐습니다' });
+        // ── ★ 서버가 쓴 문장을 버리지 않는다 ──
+        //
+        //   여기는 `'모의 주문이 체결됐습니다'` 고정 문구였다. 그래서
+        //   서버가 응답에 실어 보낸 두 가지가 화면에 닿은 적이 없다:
+        //
+        //     · 격자를 못 읽어 수량을 **안 맞추고** 보냈다는 사실
+        //     · 요청한 수량이 격자에 맞춰 **줄어들었다**는 사실
+        //
+        //   둘 다 사용자가 누른 것과 실제 체결이 다르다는 뜻인데, 화면은
+        //   성공만 알려 주었다. 만들어 놓고 배선을 안 한 경우다.
+        //
+        //   서버 문장이 비어 있을 때만 기본 문구를 쓴다.
+        const text = typeof d?.message === 'string' && d.message.trim()
+          ? d.message.trim()
+          : '모의 주문이 체결됐습니다';
+        setMessage({ ok: true, text });
         setPercent(0);
         i.onSubmitted?.();
       }

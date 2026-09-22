@@ -129,9 +129,9 @@ const TABLE: Record<ProductId, Record<CapabilityAxis, Capability>> = {
     HOLDINGS: cap('SUPPORTED', 'src/app/api/paper/holdings/route.ts:40',
       'paper_holdings가 lot 단위로 집계합니다 (088)'),
     // ★ 여기가 "지원"이라고 적으면 거짓이 되는 자리다.
-    PRECISION: cap('VENUE_GAP', 'src/app/api/binance/spot/order/route.ts',
-      '현물 주문 경로가 stepSize·minQty·minNotional을 읽지 않습니다 — '
-      + '모의도 수량을 그대로 받습니다'),
+    PRECISION: cap('VENUE_GAP', 'src/lib/exchanges/gateSpotPlan.ts:168',
+      '바이낸스 현물은 닫혔지만(4B-2A) Gate 현물은 지정가를 호가 단위에 '
+      + '맞추지 않고 그대로 보냅니다 — 제품 칸은 가장 약한 venue를 따릅니다'),
     PAPER: cap('SUPPORTED', 'src/app/api/paper/sell/route.ts:99',
       '매수·부분매도·전량매도가 모두 모의 장부에 적힙니다'),
     LIVE: cap('SUPPORTED', 'src/app/api/binance/spot/order/route.ts',
@@ -432,10 +432,22 @@ export interface VenuePrecision {
 const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
   SPOT_CRYPTO: [
     {
-      venue: 'BINANCE_SPOT', verdict: 'VENUE_GAP',
-      evidence: 'src/app/api/binance/spot/order/route.ts',
-      note: '규격 조회는 갖췄지만(LOT_SIZE·PRICE_FILTER·NOTIONAL·MARKET_LOT_SIZE) '
-        + '실계좌 현물 주문 라우트에 아직 배선되지 않았습니다 (4B-2)',
+      venue: 'BINANCE_SPOT', verdict: 'SUPPORTED',
+      evidence: 'src/lib/exchanges/spotOrderExecutor.ts:188',
+      note: '네 필터를 읽어 normalizeForVenue로 맞춥니다 — 주문유형별 격자·'
+        + '호가단위·최소명목가까지. 못 읽으면 지어내지 않고 안 맞췄다고 적습니다',
+    },
+    {
+      // ★ **이 줄이 없으면 제품 칸이 거짓이 된다.**
+      //
+      //   Gate 현물도 `placeSpotOrder`를 지나 실계좌로 나간다
+      //   (`spotOrderExecutor.ts`의 `exchange === 'gate'` 갈래). 바이낸스
+      //   하나만 적어 두고 그것을 SUPPORTED로 올리면 `allVenuesPrecise`가
+      //   참이 되어, **감사한 적 없는 venue가 증명된 것으로 읽힌다.**
+      venue: 'GATE_SPOT', verdict: 'VENUE_GAP',
+      evidence: 'src/lib/exchanges/gateSpotPlan.ts:149',
+      note: '수량 소수자리(amount_precision)와 최소 주문은 어댑터가 적용하지만, '
+        + '가격 정밀도 출처가 없고 4B-2A 범위에서 감사하지 않았습니다',
     },
   ],
   PERP_CRYPTO: [

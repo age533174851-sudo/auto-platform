@@ -51,6 +51,36 @@ export async function getSpotServerTime(testnet?: boolean): Promise<number | nul
   } catch { return null; }
 }
 
+/**
+ * 현물 현재가. 못 읽으면 **null이다 — 0이 아니다.**
+ *
+ * 왜 이것이 필요한가
+ * ──────────────────
+ * 시장가 주문의 최소 명목가는 "수량 × 가격"으로만 판정할 수 있는데,
+ * 시장가에는 가격이 없다. **화면이 보낸 값으로 검사하면 화면이 만든
+ * 주문을 화면이 준 값으로 검사하는 것**이 되므로, 선물 경로가 이미
+ * 하는 대로(`futures/order/route.ts`의 `futuresMarkPrice`) 서버가
+ * 직접 읽는다.
+ *
+ * 서명이 필요 없는 공개 엔드포인트고, 호스트는 `spotBase()`가 정한다 —
+ * 테스트넷 주문을 실전 시세로 검사하지 않기 위해서다.
+ */
+export async function getSpotPrice(
+  symbol: string, testnet?: boolean,
+): Promise<number | null> {
+  const sym = String(symbol || '').toUpperCase().replace('/', '');
+  if (!sym) return null;
+  try {
+    const r = await fetch(
+      `${spotBase(testnet)}/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`,
+      { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    const d = parseLossless(await r.text());
+    const p = Number(d?.price);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  } catch { return null; }
+}
+
 async function bnFetch(
   path: string, key: string, secret: string,
   params: Record<string,string> = {}, testnet?: boolean,
@@ -450,8 +480,20 @@ export async function getSpotSymbolFilters(
   } catch { return null; }
 }
 
-export function roundSpotQty(qty: number, stepSize: number): number {
-  if (stepSize <= 0) return qty;
-  const decimals = Math.max(0, Math.round(-Math.log10(stepSize)));
-  return parseFloat((Math.floor(qty / stepSize) * stepSize).toFixed(decimals));
+/**
+ * 수량을 단위에 맞춰 내림한다.
+ *
+ * `stepSize`가 `number | null`인 이유: `getSpotSymbolFilters`가 못 읽은 칸을
+ * null로 돌려주기 때문이다. 예전 서명은 `number`였는데 실제로는 null이
+ * 들어왔고, `null <= 0`이 참이라 **우연히** 동작했다. 우연히 맞는 코드는
+ * 다음 사람이 `Number.isFinite`를 넣는 순간 갈린다.
+ *
+ * NaN도 여기서 막는다. `NaN <= 0`은 거짓이라 옛 판정은 NaN을 통과시켰고,
+ * 그러면 **수량이 NaN인 주문**이 만들어진다.
+ */
+export function roundSpotQty(qty: number, stepSize: number | null | undefined): number {
+  const step = Number(stepSize);
+  if (!Number.isFinite(step) || step <= 0) return qty;
+  const decimals = Math.max(0, Math.round(-Math.log10(step)));
+  return parseFloat((Math.floor(qty / step) * step).toFixed(decimals));
 }

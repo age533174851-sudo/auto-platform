@@ -103,7 +103,19 @@ const MANUAL_ORDER_ROUTES = {
   'src/app/api/binance/futures/order/route.ts': '거래 화면의 매수·청산이 부른다 (사용자 확인 후)',
   'src/app/api/binance/spot/order/route.ts': '거래 화면의 현물 주문이 부른다',
   'src/app/api/binance/coinm/order/route.ts': '거래 화면의 코인마진 주문이 부른다',
-  'src/app/api/exchange/order/route.ts': '거래 화면의 주문이 부른다',
+  // **이 줄은 "거래 화면의 주문이 부른다"였다. 사실이 아니다.**
+  //
+  //   `src/` 전체에 이 경로를 부르는 코드가 없고(주석과 검사기에만 나온다),
+  //   불러도 모든 주문을 거부한다 — 라우트가 `conn.exchange`를 읽는데
+  //   `exchange_connections`에는 그 컬럼이 없다(`004`는 `exchange_id`다).
+  //   `String(undefined).toLowerCase()`는 `'undefined'`라 binance도 gate도
+  //   아니고, `unsupported_exchange`로 400이 난다.
+  //
+  //   검사기 안의 거짓 주장은 감사자가 죽은 경로를 살아 있는 것으로 읽게
+  //   만든다. 목록에는 남긴다 — 빠지면 아래 "목록 밖 주문 라우트" 검사가
+  //   다시 걸린다.
+  'src/app/api/exchange/order/route.ts':
+    '도달 불가 — 호출부가 없고, conn.exchange 컬럼이 없어 모든 주문을 거부한다',
   'src/app/api/stock/order/route.ts': '주식 주문 화면이 부른다',
   'src/app/api/orders/preflight/route.ts': '주문 전 확인만 한다 — 주문을 내지 않는다',
 };
