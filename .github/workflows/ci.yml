@@ -580,6 +580,14 @@ jobs:
       - name: 제품 능력 정본 (없는 제품이 화면에 열리지 않는가)
         run: node scripts/check-product-registry.mjs
 
+      # ── 거래소 격자 ──
+      #
+      # 선물 쪽은 `parseFloat(lot?.stepSize || '0.001')`처럼 기본값을
+      # 지어내다가 고쳤는데, 현물에는 그 수정이 오지 않아 같은 버그가
+      # 남아 있었다. 규율이 주석에만 있으면 옆 파일로 가지 않는다.
+      - name: 거래소 격자 규율 (없는 격자를 만들어내지 않는가)
+        run: node scripts/check-venue-precision.mjs
+
       # ── 배포 증거 ──
       #
       # 관측하지 않은 Vercel SHA를 main으로 채워 넘기면 그 검사는 **언제나

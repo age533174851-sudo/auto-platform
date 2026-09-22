@@ -377,13 +377,27 @@ export async function cancelSpotOrder(
 }
 
 // ─── 현물 LOT_SIZE 처리 ──────────────────────────────────────
-const _spotLotCache: Record<string, { stepSize: number; minQty: number; at: number }> = {};
+export interface SpotSymbolFilters {
+  /** 지정가 수량 단위. **못 읽으면 null** */
+  stepSize: number | null;
+  minQty: number | null;
+  /** 가격 단위 */
+  tickSize: number | null;
+  /** 최소 명목가 (NOTIONAL의 minNotional) */
+  minNotional: number | null;
+  /** 시장가 전용 격자. 없으면 null — 지정가 격자를 복사하지 않는다 */
+  marketStepSize: number | null;
+  marketMinQty: number | null;
+  at: number;
+}
+
+const _spotLotCache: Record<string, SpotSymbolFilters> = {};
 
 // 캐시 키에 testnet을 넣는다. 두 거래소는 상장 종목도 필터도 다르다 —
 // 키를 심볼만으로 두면 실전에서 캐시된 stepSize로 테스트넷 주문을 반올림하게 된다.
 export async function getSpotSymbolFilters(
   symbol: string, testnet?: boolean,
-): Promise<{ stepSize: number; minQty: number } | null> {
+): Promise<SpotSymbolFilters | null> {
   const sym = symbol.toUpperCase().replace('/', '');
   const cacheKey = `${testnet ? 'T' : 'L'}:${sym}`;
   const cached = _spotLotCache[cacheKey];
@@ -394,10 +408,41 @@ export async function getSpotSymbolFilters(
     const data = parseLossless(await r.text());
     const s = (data.symbols || [])[0];
     if (!s) return null;
-    const lot = (s.filters || []).find((f: any) => f.filterType === 'LOT_SIZE');
-    const result = {
-      stepSize: parseFloat(lot?.stepSize || '0.00001'),
-      minQty:   parseFloat(lot?.minQty || '0.00001'),
+    const fl = (s.filters || []) as any[];
+    const lot = fl.find((f: any) => f.filterType === 'LOT_SIZE');
+    const mktLot = fl.find((f: any) => f.filterType === 'MARKET_LOT_SIZE');
+    const priceF = fl.find((f: any) => f.filterType === 'PRICE_FILTER');
+    // 바이낸스 현물은 `NOTIONAL`, 선물은 `MIN_NOTIONAL`이다. 둘 다 본다.
+    const notionalF = fl.find((f: any) =>
+      f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+
+    // ── **못 읽으면 만들어내지 않는다** ──
+    //
+    // 예전에는 `parseFloat(lot?.stepSize || '0.00001')`이었다. 선물 쪽은
+    // 이미 같은 버그를 겪고 고쳤는데(`binanceFutures.getSymbolFilters`의
+    // 주석), 현물에는 그 수정이 오지 않았다.
+    //
+    // 기본값을 채우면 규격을 못 읽은 순간 **틀린 격자로 반올림한 주문**이
+    // 나간다. 그건 규격을 안 맞춘 것보다 나쁘다 — 맞춘 줄 알고 보내니까.
+    // 그리고 그 바람에 "규격을 모른다"는 경로가 한 번도 돌지 않았다.
+    //
+    // `minQty`가 없다고 `stepSize`를 넣지도 않는다. 바이낸스에서 둘은
+    // 서로 다른 규칙이고, 그 추론은 최소를 낮춰 잡아 거래소가 거절할
+    // 주문을 우리가 통과시킨다.
+    const num = (v: any): number | null => {
+      if (v == null || v === '') return null;
+      const n = parseFloat(String(v));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const result: SpotSymbolFilters = {
+      stepSize: num(lot?.stepSize),
+      minQty:   num(lot?.minQty),
+      tickSize: num(priceF?.tickSize),
+      minNotional: num(notionalF?.minNotional),
+      // **MARKET_LOT_SIZE가 없으면 null이다.** LOT_SIZE를 복사하면
+      // 거래소가 두지 않은 규칙을 만드는 것이다.
+      marketStepSize: num(mktLot?.stepSize),
+      marketMinQty:   num(mktLot?.minQty),
       at: Date.now(),
     };
     _spotLotCache[cacheKey] = result;
