@@ -20,6 +20,10 @@
 // 그리고 체결 판정: `left`가 없으면 **얼마나 체결됐는지 모르는 것**이지
 // 0이 아니다. 0으로 적으면 '미체결'로 보이고, 사용자가 다시 넣는다.
 
+import {
+  roundGatePrice, type GateSpotPrecision, type GatePrecisionSkip,
+} from './gateSpotPrecision';
+
 export type GateSpotSide = 'BUY' | 'SELL';
 export type GateSpotType = 'MARKET' | 'LIMIT';
 
@@ -75,12 +79,26 @@ export interface GateSpotPlanInput {
   price?: number | null;
   /** 거래소에 남길 표식 (t- 접두사가 붙은 값) */
   text?: string;
-  /** 수량 소수 자릿수. 모르면 반올림하지 않는다 */
+  /** **수량**의 소수 자릿수. 모르면 반올림하지 않는다 */
   amountPrecision?: number | null;
-  /** 최소 주문 수량 (base) */
+  /**
+   * **지정가 가격**의 소수 자릿수. 수량 자릿수와 **다른 축이다.**
+   *
+   * 모르면 신규 진입(매수)은 보내지 않는다 — 아래 참조.
+   */
+  pricePrecision?: number | null;
+  /** 최소 주문 **수량** (base) */
   minBaseAmount?: number | null;
-  /** 최소 주문 금액 (quote) */
+  /** 최소 주문 **금액** (quote) */
   minQuoteAmount?: number | null;
+  /**
+   * 이 주문이 청산인가(현물 매도).
+   *
+   * 규격을 못 읽었을 때 정책이 갈린다 — **못 사는 것은 불편이고 못 파는
+   * 것은 사고다.** 이 저장소가 이미 같은 판단을 하고 있다
+   * (`/api/binance/spot/order`의 `intent: isSell ? 'EXIT' : 'ENTRY'`).
+   */
+  isExit?: boolean | null;
 }
 
 export interface GateSpotPlan {
@@ -93,6 +111,11 @@ export interface GateSpotPlan {
   quantity?: number | null;
   /** 정밀도 때문에 깎였으면 그 사실 */
   note?: string;
+  /**
+   * **축마다 무엇을 했는가.** 수량과 가격을 한 칸으로 합치지 않는다 —
+   * Gate에서 그 둘은 서로 다른 필드에서 오고, 한쪽만 읽히는 경우가 있다.
+   */
+  precision?: GateSpotPrecision;
 }
 
 const bad = (reason: string): GateSpotPlan => ({ ok: false, reason });
@@ -139,7 +162,18 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
     }
     body.time_in_force = 'ioc';
     body.amount = String(amt);
-    return { ok: true, pair: p.pair, body, quantity: null };
+    // ★ **금액에는 수량 자릿수를 대지 않는다.** 이 주문에는 수량이라는 값이
+    //   없고, 가격도 없다. 둘 다 '이 주문에 없음'이지 '못 읽음'이 아니다.
+    return {
+      ok: true, pair: p.pair, body, quantity: null,
+      precision: {
+        venue: 'GATE_SPOT',
+        quantityApplied: false, quantitySkipped: 'NOT_IN_ORDER',
+        priceApplied: false, priceSkipped: 'NOT_IN_ORDER',
+        requestedQuantity: null, quantity: null,
+        requestedPrice: null, price: null,
+      },
+    };
   }
 
   // ── 나머지는 전부 코인 수량 ──
@@ -160,16 +194,77 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
 
   body.amount = String(qty);
 
+  // 수량 축은 **여기서 끝난다.** 아래 가격 축은 다른 필드(`precision`)를 쓴다.
+  const quantityApplied = i.amountPrecision != null;
+  const quantitySkipped: GatePrecisionSkip | null =
+    quantityApplied ? null : 'METADATA_UNKNOWN';
+
+  let priceApplied = false;
+  let priceSkipped: GatePrecisionSkip | null = 'NOT_IN_ORDER';
+  let rawPrice: number | null = null;
+  let sentPrice: number | null = null;
+  let priceNote: string | undefined;
+
   if (i.type === 'MARKET') {
     body.time_in_force = 'ioc';
   } else {
     const price = Number(i.price);
     if (!Number.isFinite(price) || price <= 0) return bad('지정가가 올바르지 않습니다');
-    body.price = String(price);
+    rawPrice = price;
+
+    // ── ★ 지정가를 Gate의 **가격** 자릿수에 맞춘다 ──
+    //
+    //   지금까지 이 줄은 `body.price = String(price)`였다. 화면이 만드는
+    //   지정가는 보간이나 나눗셈에서 나온 생 실수라 Gate의 자릿수 위에 있을
+    //   이유가 없고, 벗어나면 주문이 통째로 거부된다.
+    const r = roundGatePrice(price, i.pricePrecision);
+
+    if (!r.applied) {
+      // ── 규격을 못 읽었다 ──
+      //
+      //   **신규 진입은 보내지 않는다.** 맞춰야 하는 값을 못 맞춘 채로 새
+      //   포지션을 여는 것은 거부당하는 것보다 나쁘다 — 왜 거부됐는지가
+      //   사용자에게 남지 않는다.
+      //
+      //   **청산(매도)은 보낸다.** 규격을 못 읽어서 보유한 것을 못 파는
+      //   상태를 만들지 않는다. 대신 맞췄다고 적지 않는다.
+      if (!i.isExit) {
+        return bad(
+          `${p.pair}의 가격 자릿수를 읽지 못해 지정가 매수를 보내지 않았습니다 `
+          + '— 잠시 후 다시 시도하세요 (매도는 계속 가능합니다)');
+      }
+      priceApplied = false;
+      priceSkipped = r.skipped;
+      priceNote = '가격 자릿수를 읽지 못해 가격을 맞추지 않았습니다 — 거래소가 거부할 수 있습니다';
+    } else {
+      priceApplied = true;
+      priceSkipped = null;
+      if (r.changed) priceNote = `가격을 ${price} → ${r.price}로 맞췄습니다 (호가 자릿수)`;
+    }
+
+    sentPrice = r.price;
+    // 자릿수에 맞추니 0이 된 경우. `String(null)`은 `'null'`이고 그 문자열이
+    // 그대로 거래소로 나간다 — 값이 없으면 본문을 만들지 않는다.
+    if (!(Number(sentPrice) > 0)) {
+      return bad(`지정가 ${price}를 이 종목의 가격 자릿수에 맞추면 0이 됩니다`);
+    }
+    body.price = String(sentPrice);
     body.time_in_force = 'gtc';
   }
 
-  return { ok: true, pair: p.pair, body, quantity: qty, note };
+  const notes = [note, priceNote].filter(Boolean) as string[];
+
+  return {
+    ok: true, pair: p.pair, body, quantity: qty,
+    note: notes.length ? notes.join(' · ') : undefined,
+    precision: {
+      venue: 'GATE_SPOT',
+      quantityApplied, quantitySkipped,
+      priceApplied, priceSkipped,
+      requestedQuantity: rawQty, quantity: qty,
+      requestedPrice: rawPrice, price: sentPrice,
+    },
+  };
 }
 
 export interface GateSpotFill {

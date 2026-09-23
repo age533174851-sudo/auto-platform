@@ -449,10 +449,20 @@ const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
       //   (`spotOrderExecutor.ts`의 `exchange === 'gate'` 갈래). 바이낸스
       //   하나만 적어 두고 그것을 SUPPORTED로 올리면 `allVenuesPrecise`가
       //   참이 되어, **감사한 적 없는 venue가 증명된 것으로 읽힌다.**
+      // 4B-2B-1에서 가격 축이 닫혔다. 수량 자릿수(`gateSpotPlan.ts:172`)와
+      // 최소 수량·최소 금액은 그대로 어댑터가 적용하고, 가격 자릿수는
+      // `precision`을 읽어(`gateSpot.ts:71`) 맞춘 뒤
+      // `POST /api/v4/spot/orders` 본문에 그 값이 들어간다.
+      //
+      // **그래도 SUPPORTED로 올리지 않는다.** Gate는 최대 주문 수량·금액
+      // (`max_base_amount` / `max_quote_amount`)도 고시하는데 우리는 그
+      // 둘을 읽지 않는다. 축 하나가 비어 있으면 "이 주문이 venue 규칙
+      // 안에 있다"고 말할 수 없다.
       venue: 'GATE_SPOT', verdict: 'VENUE_GAP',
-      evidence: 'src/lib/exchanges/gateSpotPlan.ts:149',
-      note: '수량 소수자리(amount_precision)와 최소 주문은 어댑터가 적용하지만, '
-        + '가격 정밀도 출처가 없고 4B-2A 범위에서 감사하지 않았습니다',
+      evidence: 'src/lib/exchanges/gateSpotPlan.ts:220',
+      note: '수량 자릿수·최소 수량·최소 금액에 더해 지정가 가격 자릿수까지 '
+        + '적용합니다(4B-2B-1). 남은 축은 최대 주문 수량·금액'
+        + '(max_base_amount / max_quote_amount)이고 아직 읽지 않습니다',
     },
   ],
   PERP_CRYPTO: [

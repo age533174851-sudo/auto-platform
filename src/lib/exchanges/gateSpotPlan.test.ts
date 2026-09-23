@@ -12,9 +12,14 @@ import { test, eq, assert, close } from '../../test/harness';
 import {
   toGatePair, planGateSpotOrder, gateSpotFillOf, floorTo, GATE_QUOTES,
 } from './gateSpotPlan';
+import { gatePriceDecimals, roundGatePrice } from './gateSpotPrecision';
 
+// 규격을 **읽은** 상태가 기본이다 — 실제 경로가 그렇다(`placeGateSpotOrder`가
+// 먼저 `getGateSpotPair`를 부른다). 못 읽은 경우는 아래에 따로 시험이 있고,
+// 그때 신규 매수는 보내지 않는다.
 const buyLimit = (o: any = {}) => planGateSpotOrder({
-  symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.5, price: 60000, ...o,
+  symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.5, price: 60000,
+  pricePrecision: 2, ...o,
 });
 
 export function runGateSpotPlanTests() {
@@ -209,5 +214,124 @@ export function runGateSpotPlanTests() {
     eq(f.filledQty, null);
     eq(f.status, null);
     eq(f.unfilled, false);
+  });
+
+  // ══════════ ★ Gate의 네 축은 서로 다른 것이다 (4B-2B-1) ══════════
+  //
+  // Gate가 종목마다 주는 규격은 넷이고 의미가 전부 다르다:
+  //
+  //   amount_precision   수량 자릿수      min_base_amount   최소 주문 수량
+  //   precision          가격 자릿수      min_quote_amount  최소 주문 금액
+  //
+  // 하나의 stepSize/minNotional 개념으로 뭉치면 한쪽 종목에서 조용히 틀린
+  // 값이 나간다. 아래 시험은 넷이 **각각 다른 축**임을 값으로 고정한다.
+
+  test('★ 가격 자릿수를 수량 자릿수로 대신하지 않는다', () => {
+    // 수량은 2자리, 가격은 4자리인 종목. 한쪽으로 다른 쪽을 채우면 값이 갈린다.
+    const r = buyLimit({
+      quantity: 0.123456, price: 60000.123456,
+      amountPrecision: 2, pricePrecision: 4,
+    });
+    assert(r.ok, `막혔습니다: ${r.reason}`);
+    eq(r.body!.amount, '0.12', '수량이 가격 자릿수로 깎였습니다');
+    eq(r.body!.price, '60000.1235', '★ 가격이 수량 자릿수로 깎였습니다');
+  });
+
+  test('★ 지정가가 실제 POST 본문에 정규화된 값으로 들어간다', () => {
+    const r = buyLimit({ price: 60000.987654, pricePrecision: 2, amountPrecision: 3 });
+    assert(r.ok, `막혔습니다: ${r.reason}`);
+    eq(r.body!.price, '60000.99', '본문에 원값이 들어갔습니다');
+    eq(r.precision!.requestedPrice, 60000.987654);
+    eq(r.precision!.price, 60000.99);
+    assert(r.precision!.priceApplied, '맞췄는데 안 맞췄다고 적혔습니다');
+  });
+
+  test('★ 가격 자릿수를 못 읽으면 지정가 매수를 보내지 않는다', () => {
+    const r = buyLimit({ pricePrecision: null, amountPrecision: 3 });
+    assert(!r.ok, '★ 모르는 자릿수로 신규 매수가 나갔습니다');
+    assert(/자릿수/.test(r.reason || ''), `사유가 그 사실을 말하지 않습니다: ${r.reason}`);
+  });
+
+  test('★ 같은 상황에서 매도는 나간다 — 못 파는 것은 사고다', () => {
+    const r = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'LIMIT', quantity: 0.5, price: 60000.987,
+      amountPrecision: 3, pricePrecision: null, isExit: true,
+    });
+    assert(r.ok, `매도가 막혔습니다: ${r.reason}`);
+    eq(r.body!.price, '60000.987', '안 맞췄는데 값이 바뀌었습니다');
+    assert(!r.precision!.priceApplied, '★ 안 맞췄는데 맞췄다고 적혔습니다');
+    eq(r.precision!.priceSkipped, 'METADATA_UNKNOWN');
+  });
+
+  test('★ 시장가 매수(금액)에는 수량도 가격도 없다 — "못 읽음"이 아니다', () => {
+    const r = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quoteAmount: 100,
+      minQuoteAmount: 1, amountPrecision: 3, pricePrecision: 2,
+    });
+    assert(r.ok, `막혔습니다: ${r.reason}`);
+    eq(r.body!.amount, '100', '금액이 수량 자릿수로 깎였습니다');
+    assert(r.body!.price === undefined, '시장가에 가격이 실렸습니다');
+    eq(r.precision!.quantitySkipped, 'NOT_IN_ORDER');
+    eq(r.precision!.priceSkipped, 'NOT_IN_ORDER');
+    assert(r.precision!.quantitySkipped !== 'METADATA_UNKNOWN',
+      '★ 해당 없음이 규격 미상으로 뭉개졌습니다');
+  });
+
+  test('★ 최소 금액과 최소 수량은 다른 축이다', () => {
+    // 금액 하한만 걸리는 경우
+    const byQuote = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quoteAmount: 0.5,
+      minQuoteAmount: 1, minBaseAmount: 0.0001,
+    });
+    assert(!byQuote.ok, '최소 금액 미달이 통과했습니다');
+    assert(/금액/.test(byQuote.reason || ''), `수량 사유로 막혔습니다: ${byQuote.reason}`);
+
+    // 수량 하한만 걸리는 경우 — 같은 값이라도 축이 다르면 사유가 다르다
+    const byBase = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.00005,
+      amountPrecision: 8, minBaseAmount: 0.001, minQuoteAmount: 1,
+    });
+    assert(!byBase.ok, '최소 수량 미달이 통과했습니다');
+    assert(/수량/.test(byBase.reason || ''), `금액 사유로 막혔습니다: ${byBase.reason}`);
+  });
+
+  test('수량은 내림, 가격은 반올림이다 — 정책이 다르다', () => {
+    // 올림된 수량은 보유를 넘겨 거부되지만, 지정가는 한 칸 위여도 유효하다.
+    eq(floorTo(0.129, 2), 0.12);
+    eq(roundGatePrice(100.129, 2).price, 100.13);
+  });
+
+  // ══════════ 자릿수 → 증분 변환 ══════════
+
+  test('가격 자릿수를 확정하는 곳은 한 곳뿐이다', () => {
+    eq(gatePriceDecimals(0), 0, '정수 호가는 뜻이 있는 값이다');
+    eq(gatePriceDecimals(2), 2);
+    eq(gatePriceDecimals('8'), 8);
+  });
+
+  test('★ 모르는 자릿수는 null이다 — 0이 아니다 (Number(null)===0 함정)', () => {
+    for (const bad of [null, undefined, '', -1, 1.5, NaN, 'x', 101]) {
+      eq(gatePriceDecimals(bad as any), null,
+        `${JSON.stringify(bad)}가 자릿수로 읽혔습니다`);
+    }
+    // 0으로 읽히면 모든 지정가가 정수로 반올림된다
+    const r = roundGatePrice(60000.987, null);
+    eq(r.price, 60000.987, '★ 규격을 못 읽었는데 가격이 바뀌었습니다');
+    assert(!r.applied);
+  });
+
+  test('★ 자릿수에 맞추니 0이 되는 지정가는 보내지 않는다', () => {
+    // `String(null)`은 `'null'`이고, 그 문자열이 그대로 거래소로 나간다.
+    // 값이 없으면 본문을 만들지 않는다.
+    const r = buyLimit({ price: 0.004, pricePrecision: 2 });
+    assert(!r.ok, '★ 0이 된 가격이 통과했습니다');
+    assert(r.body == null, "본문이 만들어졌습니다 — 'null' 문자열이 나갈 수 있습니다");
+    assert(/0이 됩니다/.test(r.reason || ''), `사유가 그 사실을 말하지 않습니다: ${r.reason}`);
+  });
+
+  test('가격이 없으면 "이 주문에 없음"이지 "못 읽음"이 아니다', () => {
+    const r = roundGatePrice(null, 2);
+    eq(r.skipped, 'NOT_IN_ORDER');
+    assert(!r.applied, '없는 가격을 맞췄다고 적었습니다');
   });
 }

@@ -20,6 +20,7 @@ import type { SpecSource } from '@/lib/markets/venueSpec';
 import {
   precisionSkipOf, PRECISION_SKIP_TEXT, type PrecisionSkip,
 } from './spotPrecisionState';
+import type { GateSpotPrecision } from './gateSpotPrecision';
 
 export interface SpotOrderArgs {
   userId: string;
@@ -75,8 +76,15 @@ export interface SpotOrderResult {
   message: string;
   /** 사용자에게 보여줄 오류 코드 */
   code?: string;
-  /** 거래소 격자 적용 결과. 주문을 만들기 전에 막힌 경우에는 없다 */
-  venuePrecision?: SpotVenuePrecision;
+  /**
+   * 거래소 규격 적용 결과. 주문을 만들기 전에 막힌 경우에는 없다.
+   *
+   * **거래소마다 모양이 다르다.** 바이낸스는 base 수량 격자 하나를
+   * 판정하고, Gate는 수량 자릿수와 가격 자릿수를 **따로** 판정한다.
+   * 하나의 모양으로 뭉치면 Gate에서 한쪽 축의 실패가 사라진다.
+   * `venue`가 어느 모양인지 알려준다.
+   */
+  venuePrecision?: SpotVenuePrecision | GateSpotPrecision;
 }
 
 const bad = (code: string, message: string): SpotOrderResult =>
@@ -512,6 +520,10 @@ async function placeGateSpot(
       quantity: ctx.byQuote ? null : ctx.quantity,
       quoteAmount: ctx.byQuote ? ctx.quoteOrderQty : null,
       price: ctx.type === 'LIMIT' ? ctx.price : null,
+      // **현물 매도는 청산이다.** 규격을 못 읽었을 때 진입은 막고 매도는
+      // 보낸다 — 이 라우트가 이미 `intent: isSell ? 'EXIT' : 'ENTRY'`로
+      // 같은 판단을 한다. 못 사는 것은 불편이고 못 파는 것은 사고다.
+      isExit: ctx.side === 'SELL',
       clientOrderId,
     }, ctx.testnet);
   } catch (e: any) {
@@ -542,6 +554,7 @@ async function placeGateSpot(
     ok: true,
     // IOC가 하나도 안 붙고 취소됐으면 그건 체결이 아니다.
     status: r.unfilled ? 'REJECTED' : 'FILLED',
+    venuePrecision: r.precision,
     clientOrderId,
     orderId: r.orderId,
     filledQty: r.filledQty ?? undefined,

@@ -14,6 +14,7 @@
 // 있다. 그걸 쓴다 — 서명 코드를 두 벌 두면 한쪽만 고쳐지는 날이 온다.
 import { gateReq, toGateText } from './gateFutures';
 import { planGateSpotOrder, gateSpotFillOf, toGatePair, type GateSpotPlanInput } from './gateSpotPlan';
+import type { GateSpotPrecision } from './gateSpotPrecision';
 
 export interface GateSpotBalance {
   currency: string;
@@ -35,8 +36,18 @@ export async function getGateSpotBalances(
 
 export interface GateSpotPairInfo {
   pair: string;
+  /** **수량**의 소수 자릿수 (`amount_precision`) */
   amountPrecision: number | null;
+  /**
+   * **지정가 가격**의 소수 자릿수 (`precision`).
+   *
+   * `amountPrecision`과 **다른 필드이고 다른 축이다.** 한쪽으로 다른 쪽을
+   * 대신하면 가격을 수량 자릿수로 깎게 되고, 그 주문은 거래소가 거부한다.
+   */
+  pricePrecision: number | null;
+  /** 최소 주문 **수량**(base) */
   minBaseAmount: number | null;
+  /** 최소 주문 **금액**(quote) */
   minQuoteAmount: number | null;
   /** 거래 가능한 상태인가. 'tradable'이 아니면 주문이 거절된다 */
   tradeStatus: string | null;
@@ -56,6 +67,9 @@ export async function getGateSpotPair(
     return {
       pair: String(d.id ?? pair),
       amountPrecision: n(d.amount_precision),
+      // Gate는 수량 자릿수를 `amount_precision`, 가격 자릿수를 `precision`으로
+      // 준다. **둘 중 하나로 다른 하나를 채우지 않는다** — 없으면 null이다.
+      pricePrecision: n(d.precision),
       minBaseAmount: n(d.min_base_amount),
       minQuoteAmount: n(d.min_quote_amount),
       tradeStatus: d.trade_status != null ? String(d.trade_status) : null,
@@ -73,6 +87,8 @@ export interface GateSpotOrderResult {
   status?: string | null;
   unfilled?: boolean;
   raw?: any;
+  /** 축마다 규격을 적용했는가. 계획 단계에서 막히면 없다 */
+  precision?: GateSpotPrecision;
 }
 
 export async function placeGateSpotOrder(
@@ -92,7 +108,9 @@ export async function placeGateSpotOrder(
   const plan = planGateSpotOrder({
     ...input,
     text: toGateText(input.clientOrderId),
+    // 네 축을 **각각** 넘긴다. 하나로 뭉쳐 넘기면 판정도 하나가 된다.
     amountPrecision: input.amountPrecision ?? info?.amountPrecision ?? null,
+    pricePrecision: input.pricePrecision ?? info?.pricePrecision ?? null,
     minBaseAmount: input.minBaseAmount ?? info?.minBaseAmount ?? null,
     minQuoteAmount: input.minQuoteAmount ?? info?.minQuoteAmount ?? null,
   });
@@ -109,6 +127,9 @@ export async function placeGateSpotOrder(
       status: fill.status,
       unfilled: fill.unfilled,
       raw: d,
+      // **맞췄는지를 값으로 내보낸다.** 응답에서 빼면 맞춘 것과 못 맞춘 것이
+      // 화면에서 똑같이 보인다.
+      precision: plan.precision,
       message: fill.unfilled
         ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
         : plan.note
