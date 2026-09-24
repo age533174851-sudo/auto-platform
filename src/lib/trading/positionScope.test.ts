@@ -7,7 +7,7 @@
 // 정본 화면에는 포지션을 그리는 곳이 없었고 아래 `BottomDock`이 대신
 // 그렸다. 그런데 둘은 **다른 계좌**를 보고 있었다.
 //
-//   주문      TradingWorkspace → usePaperTarget(challengeId)
+//   주문      PaperOrderScreen → usePaperTarget(challengeId)
 //               → /api/paper/order          → 챌린지 계좌
 //   포지션 표시 BottomDock      → usePaperAccount
 //               → /api/paper/account        → readPaperEquity

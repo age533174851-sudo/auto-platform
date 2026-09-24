@@ -29,7 +29,9 @@ import { join } from 'node:path';
 const CHART   = 'src/components/trading/PriceChart.tsx';
 const SERIES  = 'src/lib/trading/candleSeries.ts';
 const ROUTE   = 'src/app/api/market/candles/route.ts';
-const WORKSPACE = 'src/components/trading/TradingWorkspace.tsx';
+// 봉을 그리는 거래 화면은 Phase UI-IA에서 **종목 상세**가 됐다. 주문 화면은
+// 차트를 들지 않는다(`check-canonical-trading` ⑤가 그것을 막는다).
+const WORKSPACE = 'src/components/instrument/InstrumentDetail.tsx';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -193,7 +195,7 @@ if (!/fixtureBars[\s\S]{0,400}(시험|스토리|test|story)/i.test(read(CHART)))
   err(`${CHART}의 fixtureBars가 시험 전용이라고 적혀 있지 않습니다`);
 }
 
-// ── ⑥⑦ 거래 화면의 기본 차트 ──
+// ── ⑥⑦ 봉을 그리는 화면의 기본 차트 ──
 if (workspace) {
   if (!workspace.includes('PriceChart')) {
     err(`${WORKSPACE}의 기본 차트가 PriceChart가 아닙니다`);

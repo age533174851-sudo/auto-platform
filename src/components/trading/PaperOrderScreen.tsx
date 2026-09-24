@@ -10,17 +10,23 @@
 // 둘을 한 조건문에 섞지 않는다. 섞으면 "프로 모드에서만 현물 매도가
 // 공매도로 나간다" 같은 조합이 생긴다.
 //
-// ★ 거래 화면을 여기서 다시 그리지 않는다
-// ──────────────────────────────────────
-// 프로 모드는 **원래 있던 정본 거래 화면**(`TradingWorkspace`)으로 넘긴다.
-// 처음에는 이 파일이 그것을 직접 렌더했는데 `check-canonical-trading`이
-// "정본 거래 화면을 렌더하는 파일이 2개"라고 빨개졌다. 그 규칙이 맞다 —
-// host가 둘이면 두 판이 다른 props로 갈라진다.
+// ★ 이 파일이 **유일한** 주문 화면 host다 (Phase UI-IA)
+// ──────────────────────────────────────────────────────
+// 예전에는 프로를 누르면 원스크린 거래 화면(`TradingWorkspace`)으로 차 냈다.
+// 차트·호가·주문·포지션이 한 화면에 들어간 그 배치는 이제 없다 — 모바일에서
+// 차트가 96px까지 밀리고 주문 버튼이 슬라이더를 덮던 배치다.
 //
-// 그래서 **판단 코드는 한 벌, host는 화면마다 하나**다:
-//   초보 매도  이 파일이 `useSellForm`을 만들어 `BeginnerSellScreen`에 준다
-//   프로 매도  `TradingWorkspace`가 같은 훅으로 `ProSellPanel`에 준다
-// 둘은 동시에 뜨지 않으므로 같은 매도가 두 요청이 될 수 없다.
+// 지금은 밀도만 갈린다:
+//   간편  BeginnerBuyScreen / BeginnerSellScreen
+//   프로  ProOrderPanel
+//
+// ★★ **두 밀도가 같은 훅 인스턴스를 받는다.**
+//
+//   `form`과 `sell`은 밀도 분기보다 **위에서** 한 번 만들어지고, 아래 두
+//   갈래는 그것을 그대로 넘겨받는다. 밀도가 판단을 바꾸지 않는다는 것을
+//   주석으로 적는 대신 **구조로 만든 것**이다 — 훅을 갈래마다 만들면
+//   언젠가 한쪽 인자만 바뀌고, 그때 "프로에서만 수량이 다르게 나가는"
+//   고장이 난다.
 //
 // `uiLevel`은 두 훅에 **들어가지 않는다.** 아래를 보면 `form`/`sell`을 만드는
 // 인자에 밀도가 한 번도 등장하지 않는다 — 그게 이 파일의 계약이다.
@@ -38,6 +44,7 @@ import { scopeForTarget } from '@/lib/trading/paperTarget';
 import { paperOrderUiWiring } from '@/lib/trading/capability';
 import { routeFor, openSideFor, type TradeContext } from '@/lib/trading/tradeContext';
 import { BeginnerBuyScreen, Head, LevelSwitch, type BuyUnit } from './BeginnerBuyScreen';
+import { ProOrderPanel } from './ProOrderPanel';
 import { BeginnerSellScreen } from './BeginnerSellScreen';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
@@ -50,12 +57,10 @@ export interface PaperOrderScreenProps {
   onDone?: () => void;
   unit: BuyUnit;
   onUnit: (u: BuyUnit) => void;
-  /** 프로 모드에서 정본 거래 화면으로 넘긴다. 문맥을 들려 보낸다 */
-  onOpenWorkspace?: (ctx: TradeContext) => void;
 }
 
 export function PaperOrderScreen({
-  ctx, name, auth, onBack, onDone, unit, onUnit, onOpenWorkspace,
+  ctx, name, auth, onBack, onDone, unit, onUnit,
 }: PaperOrderScreenProps) {
   const [level, , toggleLevel] = useUiLevel();
 
@@ -87,9 +92,8 @@ export function PaperOrderScreen({
 
   // ── 매도 경로의 판단 ──
   //
-  // 초보 매도 화면이 받는 것이 이것이다. 프로 쪽은 정본 거래 화면
-  // (`TradingWorkspace`)이 **같은 훅**으로 자기 것을 만든다 — 두 화면이
-  // 동시에 떠 있지 않으므로 인스턴스가 겹치지 않고, 판단 코드는 한 벌이다.
+  // 간편·프로 **둘 다** 이것을 받는다. 밀도 분기보다 위에서 만들어지므로
+  // 두 표현이 다른 매도를 보낼 방법이 없다.
   const sell = useSellForm({
     symbol: ctx.symbol,
     market: ctx.market,
@@ -112,18 +116,13 @@ export function PaperOrderScreen({
 
   // ══════════ 프로 ══════════
   //
-  // ★ **여기서 거래 화면을 다시 그리지 않는다.**
+  // ★ **여기서 훅을 다시 만들지 않는다.** 위에서 만든 `form`/`sell`을
+  //   그대로 넘긴다. 간편 갈래가 받는 것과 **같은 인스턴스**다.
   //
-  //   처음에는 이 파일이 `TradingWorkspace`를 직접 렌더했다. 그랬더니
-  //   `check-canonical-trading`이 빨개졌다 — "정본 거래 화면을 렌더하는
-  //   파일이 2개입니다". 그 규칙이 맞다. 거래 화면 host가 둘이면 두 판이
-  //   서로 다른 props로 갈라지고, 그게 이 저장소가 이름 붙인 2번 고장이다.
-  //
-  //   그래서 프로는 **원래 있던 정본 화면으로 넘긴다.** 매도 패널도 그
-  //   화면 안으로 옮겼으므로(`TradingWorkspace`의 `workspace-sell`),
-  //   프로 사용자는 차트·호가·매수·매도를 한 곳에서 다룬다.
-  //
-  //   넘길 때 문맥을 들려 보낸다 — 종목·시장·방향이 그대로 간다.
+  //   예전에는 이 자리에서 원스크린 거래 화면으로 차 냈다. 그 화면은
+  //   차트·호가·주문·포지션을 한 번에 들고 있었고, 모바일에서 차트가
+  //   96px까지 밀렸다. 이제 프로는 주문 화면 안에 머문다 — 차트를 보려면
+  //   뒤로 나가면 종목 상세가 그대로 살아 있다.
   if (level === 'PRO') {
     return (
       <div data-testid="paper-order-screen" data-level="PRO" data-route={route || 'NONE'}
@@ -131,25 +130,12 @@ export function PaperOrderScreen({
         style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: C.bg }}>
         <Head title={title} sub={`${ctx.symbol} · ${ctx.market === 'USDM' ? 'Perpetual' : 'Spot'}`}
           onBack={onBack} right={<LevelSwitch to="간편" onClick={toggleLevel}/>}/>
-        <div style={{ flex: 1, minHeight: 0, display: 'grid', placeItems: 'center', padding: 24 }}>
-          <div style={{ display: 'grid', gap: 12, justifyItems: 'center', textAlign: 'center' }}>
-            <div style={{ fontSize: FS.body, color: C.dim, lineHeight: 1.6 }}>
-              프로 모드는 차트·호가·주문·보유를 한 화면에서 다룹니다.
-            </div>
-            <button type="button" data-testid="pro-open-workspace"
-              onClick={() => { onOpenWorkspace?.(ctx); }}
-              style={{
-                padding: '12px 20px', borderRadius: 10, border: 'none',
-                background: C.accent, color: '#fff', fontSize: FS.lead, fontWeight: 800,
-                cursor: 'pointer',
-              }}>{ctx.symbol} 거래 화면 열기</button>
-            <button type="button" data-testid="pro-to-beginner" onClick={toggleLevel}
-              style={{
-                padding: '8px 14px', borderRadius: 8, border: `1px solid ${C.hair}`,
-                background: C.raised, color: C.dim, fontSize: FS.body, cursor: 'pointer',
-              }}>간편 모드로 주문하기</button>
-          </div>
-        </div>
+        <ProOrderPanel
+          symbol={ctx.symbol} market={ctx.market} scope={scope}
+          form={form} sell={sell}
+          availableBalance={ledger.available}
+          canOrder={wiring.canOrder}
+        />
       </div>
     );
   }

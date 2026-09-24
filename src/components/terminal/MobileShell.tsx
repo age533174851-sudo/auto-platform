@@ -65,8 +65,7 @@ import { BottomSheet } from './BottomSheet';
 import { SymbolSearch } from './SymbolSearch';
 import { AppLauncher } from './AppLauncher';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
-import { TradingWorkspace } from '@/components/trading/TradingWorkspace';
-import { canonicalMarketOf } from '@/lib/trading/paperTarget';
+
 
 /**
  * 헤더 높이를 **재서** 쓴다.
@@ -143,10 +142,9 @@ function MobileHeader({ onOpenSearch, onOpenInfo, onOpenMenu, innerRef, sticky }
   sticky?: boolean;
 }) {
   const { symbol, mode, marketType, setMarketType } = useTerminal();
-  // 정본 화면이 종목·현재가·등락률을 제대로 말한다(`MarketHeader`).
-  // 여기서도 말하면 **같은 사실을 두 곳에서** 말하게 되고, 실측 스크린샷에서
-  // BTCUSDT가 두 번 떴다. 정본 화면을 쓰는 시장에서는 이 줄을 접는다.
-  const canonical = canonicalMarketOf(marketType) !== null;
+  // 이 셸 안에는 더 이상 종목·현재가를 따로 말하는 화면이 없으므로 헤더가
+  // 그 역할을 맡는다(예전에는 정본 화면과 겹쳐 BTCUSDT가 두 번 떴다).
+  const canonical = false;
 
   return (
     <div ref={innerRef} style={{
@@ -316,12 +314,11 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
   }, [bookOpen]);
   const [menu, setMenu] = useState(false);
 
-  // ── 정본 거래 화면을 쓸 수 있는가 ──
+  // ── 이 셸은 **거래소 주문 터미널**이다 (Phase UI-IA) ──
   //
-  // 모의 장부가 아는 시장은 현물과 USDT 선물 둘뿐이다. COIN-M·주식은
-  // **예전 배치 그대로** 둔다 — 아는 척하고 USDM 규칙으로 계산하면
-  // 코인마진 주문이 틀린 수량으로 나간다.
-  const canonMarket = canonicalMarketOf(marketType);
+  // 예전에는 모의 장부의 정본 거래 화면(원스크린)을 여기서 그렸다. 그
+  // 배치는 없어졌고, 모의 주문은 종목 상세 → 전용 주문 화면으로 간다.
+  // 여기 남은 것은 테스트넷·실전 주문판과 호가다.
 
 
   // ── 가로 ── 차트를 옆에 세울 공간이 생긴다
@@ -335,20 +332,6 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
         {/* 가로도 같은 판을 쓴다. 눕혔다고 주문 규칙이 달라지면 안 된다 —
             세로에서 없앤 사이징 버튼이 가로에만 남아 있으면, 폰을 돌리는
             것만으로 다른 규칙의 주문판이 나온다. */}
-        {canonMarket ? (
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-            <TradingWorkspace
-              symbol={symbol.id} market={canonMarket} tradeMode={tradeMode} auth={auth}
-              onSymbolClick={() => setSearch(true)} chartHeight={200}
-              exchangeOrderPane={
-                <>
-                  <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
-                  <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
-                </>
-              }
-            />
-          </div>
-        ) : (
         <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
           <div style={{ flex: 1, minWidth: 0, borderRight: `1px solid ${C.hair}` }}>
             <ChartPane symbol={symbol.id} compact/>
@@ -360,7 +343,6 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
             <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
           </div>
         </div>
-        )}
         <SearchSheet open={search} onClose={() => setSearch(false)}
           current={symbol.id} favorites={favorites}
           onToggleFav={toggleFavorite} onPick={s => { setSymbol(s); setSearch(false); }}/>
@@ -431,31 +413,11 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
       <MobileHeader innerRef={hdrRef} sticky
         onOpenSearch={() => setSearch(true)} onOpenInfo={() => setInfo(true)} onOpenMenu={() => setMenu(true)}/>
 
-      {/* ── 첫 화면: 시장 정보 → 차트 → 거래 버튼 ──
+      {/* ── 거래소 주문판 + 호가 ──
 
-          예전에는 여기가 `[58% 주문폼 │ 42% 호가]`였고 차트는 맨 아래에
-          접혀 있었다. 폰에서 이 탭을 열면 **차트가 한 픽셀도 안 보였다.**
-          차트를 보고 들어가는 화면이 아니라 주문폼을 채우는 화면이었다.
-
-          호가와 상세 주문은 없어지지 않았다 — 거래 버튼을 누르면 시트에서
-          나온다(`TradingWorkspace`). 실거래 모드에서는 그 시트 안에 **기존
-          주문폼이 그대로** 들어간다. */}
-      {canonMarket ? (
-        <TradingWorkspace
-          symbol={symbol.id}
-          market={canonMarket}
-          tradeMode={tradeMode}
-          auth={auth}
-          onSymbolClick={() => setSearch(true)}
-          coreHeight={coreH}
-          exchangeOrderPane={
-            <>
-              <OrderBookPanel rows={7} dense showFunding onPickPrice={pick}/>
-              <MarketOrderPanel dense presetPrice={presetPrice} presetSeq={presetSeq}/>
-            </>
-          }
-        />
-      ) : (
+          모의 장부의 정본 흐름은 여기 없다. 종목 상세에서 [매수]/[매도]를
+          누르면 전용 주문 화면이 열린다 — 차트·호가·주문·포지션을 한
+          화면에 쌓던 배치(원스크린)는 Phase UI-IA에서 없앴다. */}
       <div style={{ height: firstScreen, display: 'flex', overflow: 'hidden' }}>
         {/* ── 주문 칸은 **자기 스크롤을 갖는다** ──
 
@@ -509,7 +471,6 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
             }}>‹ 호가</button>
         )}
       </div>
-      )}
 
       {/* 포지션 — 탭 줄은 첫 화면 안에 있고, 카드는 내리면 나온다.
           `flow`는 이 독이 **자기 스크롤을 갖지 않는다**는 뜻이다. 탭 줄은
@@ -518,12 +479,9 @@ export default function MobileShell({ embedded, wide }: { embedded?: boolean; wi
         <BottomDock flow stickyTop={hdrH}/>
       </div>
 
-      {/* ── 아래 차트는 정본 화면이 없을 때만 ──
-          정본 화면은 이미 위에 우리 캔들 차트를 그린다. 여기에 TradingView
-          iframe을 하나 더 두면 **같은 종목의 봉을 말하는 곳이 둘**이 되고,
-          둘은 출처도 간격도 다르다. COIN-M·주식처럼 정본 화면을 못 쓰는
-          시장에서는 이 차트가 유일한 차트이므로 그대로 둔다. */}
-      {canonMarket ? null : <ChartDrawer/>}
+      {/* 이 터미널의 유일한 차트다. 모의 장부의 정본 흐름은 이제
+          종목 상세(우리 캔들)를 쓰므로 여기서 겹치지 않는다. */}
+      <ChartDrawer/>
 
       <SearchSheet open={search} onClose={() => setSearch(false)}
         current={symbol.id} favorites={favorites}

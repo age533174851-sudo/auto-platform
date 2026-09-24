@@ -39,6 +39,7 @@ import PosterLibrary from '@/components/PosterLibrary';
 import AssetDetailModal from '@/components/AssetDetailModal';
 import { InstrumentDetail, type OrderIntent } from '@/components/instrument/InstrumentDetail';
 import { PaperOrderScreen } from '@/components/trading/PaperOrderScreen';
+import { PositionsOrdersScreen } from '@/components/trading/PositionsOrdersScreen';
 import type { BuyUnit } from '@/components/trading/BeginnerBuyScreen';
 import { readTradeContext, type TradeContext } from '@/lib/trading/tradeContext';
 import { detailTargetOf } from '@/lib/markets/instrumentRoute';
@@ -99,7 +100,6 @@ import { notifyError, notifyInfo } from '@/lib/notify/center';
 const CommandPalette = dynamic(() => import('@/components/CommandPalette'),{ ssr: false });
 const ShortcutHelp = dynamic(() => import('@/components/ShortcutHelp'),{ ssr: false });
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
-const TerminalTab = dynamic(() => import('@/components/terminal/TerminalTab'),{ ssr: false });
 const AiUsagePage = dynamic(() => import('@/components/pages/AiUsagePage'),{ ssr: false });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
@@ -233,7 +233,9 @@ function Onboarding({onDone}:{onDone:(l:string,c:string)=>void}) {
 const BTABS: { id: string; label: string; Icon: IconComp }[] = [
   {id:'home',     label:'홈',   Icon: HomeIc},
   {id:'market',   label:'시장', Icon: BarChart3},
-  {id:'trading',  label:'매매', Icon: Zap},
+  // 새 주문을 여는 곳이 아니라 **들고 있는 것을 다루는 곳**이다.
+  // 종목 탐색은 '시장'이 하고, 주문은 종목 상세에서 시작한다.
+  {id:'trading',  label:'포지션', Icon: Zap},
   {id:'auto',     label:'자동', Icon: Bot},
   {id:'wallet',   label:'지갑', Icon: Wallet2},
   // '더보기'는 여기 없다. 하단바 마지막 칸은 BTABS.map 뒤에 따로 그려지는
@@ -1304,12 +1306,23 @@ export default function App() {
             </div>
           )}
           {/* Page Content */}
-          {/* 매매 탭은 터미널이다. page-content의 패딩 안에 넣으면 좌우가
-              잘리고 아래로 스크롤이 생기므로, 컨테이너 자체를 바꿔 끼운다. */}
+          {/* ── 거래 탭은 **포지션·주문**이다 (Phase UI-IA) ──
+
+              예전에는 이 자리가 터미널이었다 — 차트·호가·주문폼·포지션을
+              한 화면에 쌓은 원스크린 배치다. 모바일에서 그 화면은 차트가
+              96px까지 밀렸고, 주문 버튼이 슬라이더를 덮은 적도 있다.
+
+              새 주문은 **종목에서 시작한다**: 시장/왓치리스트/검색 →
+              종목 상세 → 전용 주문 화면. 이 탭은 그 다음을 맡는다.
+
+              시장 탐색을 여기로 보내지 않는다 — '시장' 탭이 이미 그것을
+              하고, 같은 목적지가 둘이면 사용자가 둘을 배워야 한다. */}
           {tab==='trading' ? (
-            <ErrorBoundary onHome={() => nav('home')}>
-              <TerminalTab onNav={nav}/>
-            </ErrorBoundary>
+            <div className="page-content" style={{padding:'12px 12px calc(var(--nav-h) + 20px)'}}>
+              <ErrorBoundary onHome={() => nav('home')}>
+                <PositionsOrdersScreen auth={authHeader||undefined}/>
+              </ErrorBoundary>
+            </div>
           ) : (
             <div className="page-content" style={{padding:'12px 12px calc(var(--nav-h) + 20px)'}}>
               <ErrorBoundary onHome={() => nav('home')}>
