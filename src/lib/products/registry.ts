@@ -157,8 +157,10 @@ const TABLE: Record<ProductId, Record<CapabilityAxis, Capability>> = {
       'USDM 모의 주문이 배선돼 있습니다'),
     LIVE: cap('SUPPORTED', 'src/app/api/binance/futures/order/route.ts',
       '레버리지·마진모드·TP/SL까지 실계좌 경로가 있습니다'),
-    UI_WIRING: cap('SUPPORTED', 'src/components/trading/TradingWorkspace.tsx',
-      '정본 거래 화면에서 주문할 수 있습니다'),
+    // Phase UI-IA에서 화면이 나뉘었다. 주문은 원스크린 거래 화면이 아니라
+    // 종목 상세 → 전용 주문 화면에서 나간다.
+    UI_WIRING: cap('SUPPORTED', 'src/components/trading/PaperOrderScreen.tsx',
+      '종목 상세에서 연 전용 주문 화면으로 주문할 수 있습니다'),
   },
 
   // ── 현물 주식 — 축마다 답이 다른 대표 사례 ──

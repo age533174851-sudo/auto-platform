@@ -206,7 +206,7 @@ export const PAPER_TRADE_MODE: TradeMode = 'PAPER';
 /**
  * 이 장부의 돈을 **무엇이라고 부를 것인가.**
  *
- * `TradingWorkspace`가 이 판단을 인라인으로 들고 있었다
+ * 옛 원스크린 거래 화면이 이 판단을 인라인으로 들고 있었다
  * (`target.kind === 'CHALLENGE' ? 'CHALLENGE' : 'PAPER'`). 주문 화면이
  * 하나 더 생기면서 같은 줄을 두 번째로 적게 됐고, 그러면 챌린지 표기가
  * 한쪽에서만 바뀌는 날이 온다. 정본을 여기 둔다.

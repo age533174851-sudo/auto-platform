@@ -731,32 +731,36 @@ function walkTsx(dir) {
   if (!/form=\{form\}/.test(host)) {
     fail(`${HOST}: 매수 화면에 form을 그대로 넘기지 않습니다`);
   }
-  // ── 매도 훅을 만드는 곳은 **정확히 두 host뿐**이다 ──
+  // ── 매도 훅을 만드는 곳은 **정확히 한 host다** ──
   //
-  //   초보  PaperOrderScreen  → BeginnerSellScreen
-  //   프로  TradingWorkspace  → ProSellPanel   (정본 거래 화면이다)
+  //   PaperOrderScreen ─┬─ 간편 → BeginnerSellScreen
+  //                     └─ 프로 → ProOrderPanel → ProSellPanel
   //
-  // 처음에는 주문 화면이 프로 workspace까지 직접 그렸는데,
-  // `check-canonical-trading`이 "정본 거래 화면 host가 2개"라고 잡았다.
-  // 그 규칙이 맞아서 매도 패널을 정본 화면 안으로 옮겼다. 여기서는 그
-  // **집합이 늘어나지 않는 것**을 지킨다 — 세 번째 host가 생기면 같은
-  // 매도가 세 가지 모양으로 나간다.
+  // 예전에는 둘이었다(주문 화면 + 원스크린 거래 화면). Phase UI-IA에서
+  // 원스크린이 없어지면서 프로 표현이 주문 화면 안으로 들어왔고, 그래서
+  // 훅을 만드는 곳이 하나로 줄었다 — **더 강해진 것이지 느슨해진 것이
+  // 아니다.** 두 밀도가 같은 인스턴스를 받으므로 같은 매도가 두 모양으로
+  // 나갈 방법 자체가 없다.
   {
-    const WS = 'src/components/trading/TradingWorkspace.tsx';
+    const PROPANEL = 'src/components/trading/ProOrderPanel.tsx';
     const hosts = [];
     for (const f of walkTsx('src')) {
-      if (/\buseSellForm\s*\(/.test(stripTs(read(f)))) hosts.push(f);
+      if (/\buseSellForm\s*\(\{/.test(stripTs(read(f)))) hosts.push(f);
     }
-    const want = [HOST, WS].sort().join(', ');
     const got = hosts.sort().join(', ');
-    if (got !== want) {
-      fail(`매도 훅을 만드는 곳이 달라졌습니다 — 기대 [${want}] / 실제 [${got || '없음'}]`);
+    if (got !== HOST) {
+      fail(`매도 훅을 만드는 곳이 달라졌습니다 — 기대 [${HOST}] / 실제 [${got || '없음'}]`);
     }
-    for (const [h, panel] of [[HOST, 'BeginnerSellScreen'], [WS, 'ProSellPanel']]) {
+    // 간편은 host가 직접, 프로는 패널이 넘겨받아서 — 둘 다 **자기 sell**을 준다
+    for (const [h, panel] of [[HOST, 'BeginnerSellScreen'], [PROPANEL, 'ProSellPanel']]) {
       const c = stripTs(read(h));
       if (!new RegExp(`<${panel}[\\s\\S]{0,240}sell=\\{sell\\}`).test(c)) {
         fail(`${h}: ${panel}에 자기 sell을 그대로 넘기지 않습니다`);
       }
+    }
+    // 프로 패널은 sell을 **만들지 않고 받는다**
+    if (/\buseSellForm\s*\(\{/.test(stripTs(read(PROPANEL)))) {
+      fail(`${PROPANEL}이 매도 판정을 직접 만듭니다 — 밀도별 엔진이 생깁니다`);
     }
   }
 

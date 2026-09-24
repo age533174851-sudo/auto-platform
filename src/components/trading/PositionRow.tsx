@@ -9,7 +9,7 @@
 // 그런데 정본 화면에는 포지션을 그리는 곳이 아예 없었고, 아래 `BottomDock`이
 // 대신 그리고 있었다. 그 둘이 **다른 계좌를 보고 있었다.**
 //
-//   주문      TradingWorkspace → usePaperTarget(challengeId) → /api/paper/order
+//   주문      PaperOrderScreen → usePaperTarget(challengeId) → /api/paper/order
 //   포지션 표시 BottomDock      → usePaperAccount            → /api/paper/account
 //                                → readPaperEquity → is_default = true
 //

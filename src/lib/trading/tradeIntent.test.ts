@@ -25,7 +25,7 @@ import { test, eq, assert } from '../../test/harness';
 /**
  * 화면이 하는 판단을 그대로 적은 것.
  *
- * `TradingWorkspace`의 CTA가 이 규칙이다: 고른 방향이 아니면 **고르고
+ * `ProOrderPanel`의 CTA가 이 규칙이다: 고른 방향이 아니면 **고르고
  * 멈춘다**, 이미 그 방향이면 보낸다.
  */
 function pressCta(

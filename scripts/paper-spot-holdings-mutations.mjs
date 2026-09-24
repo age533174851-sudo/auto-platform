@@ -43,7 +43,9 @@ const PAGE  = 'src/app/page.tsx';
 const PREFS = 'src/lib/ui/preferences.ts';
 const CAPA  = 'src/lib/trading/capability.ts';
 const ULEV  = 'src/lib/ui/useUiLevel.ts';
-const WSPC  = 'src/components/trading/TradingWorkspace.tsx';
+// 프로 매도 패널의 집은 Phase UI-IA에서 원스크린 거래 화면 → 전용 주문
+// 화면의 프로 갈래로 옮겨졌다.
+const WSPC  = 'src/components/trading/ProOrderPanel.tsx';
 
 const ONLY = process.argv.slice(2).filter(a => !a.startsWith('-'));
 
@@ -326,8 +328,8 @@ const CASES = [
     ['  const held = sell.holding;',
      '  const mine = useSellForm({ symbol, market: \'SPOT\', target: null as any });\n  const held = mine.holding;']]],
 
-  ['MUT-48 프로 매도 패널이 정본 화면에서 떨어진다 (매도가 도달 불가)', WSPC, 'RED',
-   [['          <ProSellPanel symbol={symbol} scope={scope} sell={sell}/>', '          ']]],
+  ['MUT-48 프로 매도 패널이 주문 화면에서 떨어진다 (매도가 도달 불가)', WSPC, 'RED',
+   [['            <ProSellPanel symbol={symbol} scope={scope} sell={sell}/>', '            ']]],
 
   ['MUT-48b 세 번째 매도 host를 만든다 (같은 매도가 세 모양)', BSELL, 'RED',
    [["import type { SellForm } from '@/lib/trading/useSellForm';",
