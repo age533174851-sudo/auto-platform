@@ -26,6 +26,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 
 const CAND  = 'src/lib/engine/managedPosition.ts';
+const OPS   = 'src/lib/engine/venuePositionOps.ts';
 const SWEEP = 'src/app/api/autotrade/exit-monitor/route.ts';
 const DECIDE = 'src/lib/engine/exitLifecycle.ts';
 const POLICY = 'src/lib/strategies/lifecyclePolicy.ts';
@@ -41,6 +42,7 @@ const read = (p) => {
 const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
 const cand = code(read(CAND));
+const ops  = code(read(OPS));
 const sweep = code(read(SWEEP));
 const decide = code(read(DECIDE));
 const policy = code(read(POLICY));
@@ -164,9 +166,60 @@ const policy = code(read(POLICY));
   }
 }
 
+// ══════════ ⑥ 종료 요청으로 반대 포지션이 생기지 않는다 ══════════
+//
+// 이 불변식은 거래소 문서와 무관하게 언제나 참이어야 한다. 종료는 줄이는
+// 일이고, 늘리는 일이 되면 그건 종료가 아니다.
+//
+// 지키는 법은 하나다: **계좌가 어느 모드인지 알고 나서 보낸다.** 단방향과
+// 양방향은 허용 파라미터가 다르고, 틀린 조합은 거부가 아니라 반대 방향
+// 신규 진입이 될 수 있다.
+{
+  const fn = ops.indexOf('export async function closeSymbolPosition');
+  if (fn < 0) err(`${OPS}에서 closeSymbolPosition을 찾지 못했습니다`);
+  else {
+    const body = ops.slice(fn, fn + 3200);
+
+    // ① 모드를 **읽는가**
+    if (!/futuresPositionMode\s*\(/.test(body)) {
+      err(`${OPS}의 종료 경로가 계좌 포지션 모드를 읽지 않습니다`
+        + ' — 단방향 전용 파라미터를 양방향 계좌에 보내면 반대 포지션이 열릴 수 있습니다');
+    }
+    // ② 못 읽으면 **안 보내는가** (fail-closed)
+    if (!/mode == null[\s\S]{0,260}?attempted: false/.test(body)) {
+      err(`${OPS}가 포지션 모드를 못 읽어도 청산을 보냅니다 — 모르는 모드로 추측해 보내면 안 됩니다`);
+    }
+    // ②-b 양방향 계좌를 **어떻게든 다루는가**
+    //
+    //   아래 전송은 단방향 전용 조합(`reduceOnly` 무조건 · `positionSide`
+    //   없음)이다. 양방향 계좌에 그대로 보내면 반대 포지션이 열릴 수 있다.
+    //   그래서 이 가지는 **막든지 분기하든지** 해야 하고, 그냥 통과시키면
+    //   안 된다. (정확한 양방향 규격은 아직 공식 문서로 확인하지 못했다.)
+    if (!/mode === 'HEDGE'/.test(body)) {
+      err(`${OPS}가 양방향(헤지) 계좌를 구분하지 않습니다`
+        + ' — 단방향 전용 파라미터가 그대로 나갑니다');
+    } else if (!/mode === 'HEDGE'[\s\S]{0,420}?attempted: false/.test(body)) {
+      err(`${OPS}의 양방향 가지가 전송을 막지도 분기하지도 않습니다`
+        + ' — 확인되지 않은 규격으로 주문이 나갑니다');
+    }
+    // ③ 모드 판정이 **거래소 호출보다 앞**에 있는가
+    const iMode = body.indexOf('futuresPositionMode');
+    const iSend = Math.min(
+      ...['closePositionGateFutures', 'closePositionPercent']
+        .map(n => { const i = body.indexOf(n); return i < 0 ? Number.MAX_SAFE_INTEGER : i; }));
+    if (iMode >= 0 && iSend !== Number.MAX_SAFE_INTEGER && iMode > iSend) {
+      err(`${OPS}가 청산을 보낸 뒤에 포지션 모드를 읽습니다 — 확인이 먼저입니다`);
+    }
+    // ④ 방향을 모르면 안 보내는가 (기존 규율 유지)
+    if (!/positionSide !== 'LONG'[\s\S]{0,200}?attempted: false/.test(body)) {
+      err(`${OPS}가 방향을 모르는 채 청산을 보냅니다 — 짐작하면 반대 진입이 됩니다`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\n무손절 포지션 감시 배선 검사 실패 (${bad}건)`);
   process.exit(1);
 }
 console.log('✅ 무손절 포지션 감시 — 정책 조회 · 후보 포함 · 추정 금지 ·'
-  + ' 시간청산 우선 · 출처 표시 · 청산 후 재확인');
+  + ' 시간청산 우선 · 출처 표시 · 청산 후 재확인 · 종료 시 모드 확인');

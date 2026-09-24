@@ -74,6 +74,37 @@ export async function closeSymbolPosition(
   positionSide?: 'LONG' | 'SHORT' | null,
 ): Promise<{ attempted: boolean; ok: boolean; error: string | null }> {
   try {
+    // ── ★ 계좌의 포지션 모드를 **먼저 읽는다** ──
+    //
+    // 아래 종료 경로는 `reduceOnly: true`를 무조건 보내고 `positionSide`는
+    // 안 보낸다. 그 조합이 맞는 것은 **단방향 계좌뿐**이다. 양방향(헤지)
+    // 계좌에서는 허용 파라미터가 다르고, 틀린 조합은 거부가 아니라
+    // **반대 방향 신규 진입**이 될 수 있다 — 거부는 불편이고 반대 포지션은
+    // 사고다.
+    //
+    // 이 저장소에는 모드를 읽는 함수가 이미 있었다(`futuresPositionMode`,
+    // 못 읽으면 null). 그런데 **종료 경로가 그것을 부르지 않았다.**
+    // 만들어 놓고 안 이은 상태였고, 그게 이 수정이 막는 고장이다.
+    //
+    // 불변식: **종료 요청으로 신규·반대 포지션이 생기지 않는다.**
+    // 모드를 모르면 그 불변식을 보장할 수 없으므로 보내지 않는다.
+    const fa = await import('../exchanges/futuresAdapter');
+    const pm = await fa.futuresPositionMode(
+      c.exchange as any, c.apiKey, c.apiSecret, c.testnet);
+    if (pm.mode == null) {
+      return { attempted: false, ok: false,
+        error: '계좌의 포지션 모드(단방향/양방향)를 읽지 못해 청산 주문을 보내지 않았습니다'
+          + (pm.error ? ` — ${pm.error}` : '') };
+    }
+    if (pm.mode === 'HEDGE') {
+      // **추측해서 보내지 않는다.** 양방향 계좌의 정확한 종료 파라미터
+      // 조합(positionSide 필수 여부·reduceOnly 허용 여부·전량/부분)은 아직
+      // 공식 문서로 확인하지 못했다(NOT_VERIFIED). 확인 전까지는 막는다 —
+      // 틀린 조합으로 보내면 반대 포지션이 열릴 수 있다.
+      return { attempted: false, ok: false,
+        error: '양방향(헤지) 계좌의 청산 규격을 아직 확정하지 못해 보내지 않았습니다 '
+          + '— 단방향 계좌에서만 자동 청산이 동작합니다' };
+    }
     if (c.exchange === 'gate') {
       const gf = await import('../exchanges/gateFutures');
       const gp = await import('../exchanges/gatePlan');

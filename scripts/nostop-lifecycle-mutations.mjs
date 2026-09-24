@@ -18,6 +18,7 @@ const CAND   = 'src/lib/engine/managedPosition.ts';
 const SWEEP  = 'src/app/api/autotrade/exit-monitor/route.ts';
 const DECIDE = 'src/lib/engine/exitLifecycle.ts';
 const POLICY = 'src/lib/strategies/lifecyclePolicy.ts';
+const OPS    = 'src/lib/engine/venuePositionOps.ts';
 const CHECK  = 'scripts/check-nostop-lifecycle.mjs';
 
 const ONLY = process.argv.slice(2);
@@ -86,11 +87,32 @@ const CASES = [
    [[`    const openedAt = r?.acked_at ? Date.parse(String(r.acked_at)) : NaN;`,
      `    const openedAt = Date.parse(String(r?.acked_at || r?.created_at));`]]],
 
+  // ── ⑩ 종료 요청으로 반대 포지션이 생기지 않는다 ──
+  //
+  //   단방향 전용 파라미터(`reduceOnly` 무조건 · `positionSide` 없음)를
+  //   양방향 계좌에 보내면 거부가 아니라 **반대 방향 신규 진입**이 될 수
+  //   있다. 그래서 모드를 먼저 읽고, 모르면 안 보낸다.
+
+  ['MUT-NS11 종료 경로가 포지션 모드를 읽지 않는다 (원래 결함)', OPS, 'RED',
+   [[`    const pm = await fa.futuresPositionMode(`, `    const pm: any = { mode: 'ONE_WAY', error: null }; void (`]]],
+
+  ['MUT-NS12 모드를 못 읽어도 청산을 보낸다 (추측 전송)', OPS, 'RED',
+   [[`    if (pm.mode == null) {`, `    if (false) {`]]],
+
+  ['MUT-NS13 양방향 계좌에 단방향 규격을 그대로 보낸다', OPS, 'RED',
+   [[`    if (pm.mode === 'HEDGE') {`, `    if (false) {`]]],
+
+  ['MUT-NS14 방향을 모르는 채 청산을 보낸다 (반대 진입)', OPS, 'RED',
+   [[`    if (positionSide !== 'LONG' && positionSide !== 'SHORT') {`, `    if (false) {`]]],
+
   // ── 대조군 ──
   ['OK-NS1 후보 파일에 주석 한 줄 추가', CAND, 'GREEN',
    [[`export interface OrderRowLike {`, `// 대조군\nexport interface OrderRowLike {`]]],
   ['OK-NS2 판단 파일에 주석 한 줄 추가', DECIDE, 'GREEN',
    [[`export type LifecycleAction`, `// 대조군\nexport type LifecycleAction`]]],
+  ['OK-NS3 종료 경로 파일에 주석 한 줄 추가', OPS, 'GREEN',
+   [[`export async function closeSymbolPosition(`,
+     `// 대조군\nexport async function closeSymbolPosition(`]]],
 ];
 
 const selected = ONLY.length ? CASES.filter(c => ONLY.some(o => c[0].includes(o))) : CASES;
