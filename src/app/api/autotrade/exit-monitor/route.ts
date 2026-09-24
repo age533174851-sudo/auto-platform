@@ -742,7 +742,13 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
   let rows: any[] = [];
   try {
     const { data, error } = await (sb as any).from('live_orders')
+      // ★ `stop_policy`(`078`)를 **반드시 함께 읽는다.**
+      //
+      //   이 칸이 빠져 있어서 `managedCandidates`가 정책을 볼 수 없었고,
+      //   고정 손절을 쓰지 않는 포지션이 후보에서 통째로 빠졌다. 감시 대상에
+      //   들어오지 못하면 시간 청산까지 닿지 못한다.
       .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
+        + 'stop_policy, '
         + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id, strategy_id')
       .order('acked_at', { ascending: false })
       .limit(200);
@@ -825,8 +831,12 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
       const live = await ops.readOpenPosition(venue, p.symbol);
       // 봉·현재가는 **그 거래소에서** 가져온다.
       let hw: { highWaterR: number; lastPrice: number } | null = null;
-      if (live.ok && live.found && mayActOn(p)) {
-        hw = await highWaterSince(p.symbol, p.openedAt, p.entryPrice, p.stopLoss,
+      // 최고 도달 R은 **1R이 정의될 때만** 뜻이 있다. 손절이 없는 계약에서
+      // 이 값을 구하면 분모 없는 비율을 만드는 것이고, 그 숫자는 아래
+      // 트레일링 판단에 쓰이지도 않는다(정책이 먼저 막는다).
+      const hasStop = p.stopPolicy !== 'NO_FIXED_SL' && Number(p.stopLoss) > 0;
+      if (live.ok && live.found && hasStop && mayActOn(p)) {
+        hw = await highWaterSince(p.symbol, p.openedAt, p.entryPrice, p.stopLoss as number,
           p.side === 'LONG', venue.testnet, p.exchange);
       }
       // 지금 거래소에 걸려 있는 손절. **못 읽으면 진입 손절을 그대로 쓴다** —
@@ -835,15 +845,24 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
       try { liveStop = await ops.liveStopPrice(venue, p.symbol, p.side); }
       catch { liveStop = null; }
 
+      const policy = lifecyclePolicyOf(p.strategyId);
       const v = lifecycleDecide({
-        position: p, policy: lifecyclePolicyOf(p.strategyId),
+        position: p, policy,
         live, highWaterR: hw?.highWaterR ?? null, lastPrice: hw?.lastPrice ?? null,
         liveStop, nowMs: Date.now(),
       });
+      // ★ **이 값이 어디서 왔는지 같이 내보낸다.**
+      //
+      //   `scalp`의 6시간은 `LIFECYCLE_TESTNET_V1` — 원본 진입 규칙과 무관하게
+      //   검증용으로 정한 값이다(`lifecyclePolicy.ts`의 note). 출처를 안 적으면
+      //   시간 청산이 일어났을 때 그것이 사용자가 정한 실전 종료 규칙처럼
+      //   읽힌다. 특히 이 값 하나가 무손절 계약의 **유일한** 자동 종료다.
+      const policySource = policy?.source ?? null;
 
       if (v.action === 'NONE') {
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
-          ok: true, reason: v.reason, mayCleanProtection: v.mayCleanProtection });
+          ok: true, reason: v.reason, mayCleanProtection: v.mayCleanProtection,
+          stopPolicy: p.stopPolicy, policySource });
         continue;
       }
       if (dryRun) {
@@ -860,6 +879,7 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
         const flat = after.ok === true && after.found === false;
         out.acted += 1;
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
+          stopPolicy: p.stopPolicy, policySource,
           ok: !!r?.ok && flat, closed: !!r?.ok,
           flatVerified: after.ok === true ? flat : null,
           reason: v.reason + (after.ok === true

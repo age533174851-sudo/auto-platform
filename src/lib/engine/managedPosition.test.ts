@@ -150,4 +150,53 @@ export function runManagedPositionTests() {
     eq(managedCandidates(null).positions.length, 0, 'null');
     eq(managedCandidates([]).positions.length, 0, '빈 목록');
   });
+
+  // ══════════ ★ 무손절 계약이 감시 후보에 오른다 (100X) ══════════
+  //
+  // 예전에는 손절가가 없다는 이유로 이 줄이 `NO_STOP`으로 빠졌다. 그래서
+  // 고정 손절을 쓰지 않기로 한 포지션이 **감시되지 않았고**, 시간 청산까지
+  // 닿지 못했다. 열려 있는데 아무도 안 보는 포지션이 되는 것이다.
+
+  test('★ NO_FIXED_SL이라고 적힌 줄은 손절가가 없어도 후보에 오른다', () => {
+    const { positions, skipped } = managedCandidates([
+      row({ stop_loss: null, stop_policy: 'NO_FIXED_SL', sl_order_id: null }),
+    ]);
+    eq(positions.length, 1, '무손절 포지션이 후보에서 빠졌습니다');
+    eq(positions[0].stopPolicy, 'NO_FIXED_SL');
+    eq(positions[0].stopLoss, null, '없는 손절을 숫자로 채웠습니다');
+    eq(skipped.find(s => s.code === 'NO_STOP'), undefined, 'NO_STOP으로 빠졌습니다');
+  });
+
+  test('★ 손절가가 없다는 사실만으로는 무손절 계약으로 보지 않는다', () => {
+    // 손절을 걸다 실패한 주문도 이 모양이다. 둘은 다루는 법이 정반대라
+    // **적혀 있을 때만** 무손절로 읽는다.
+    const { positions, skipped } = managedCandidates([
+      row({ stop_loss: null, stop_policy: null, sl_order_id: null }),
+    ]);
+    eq(positions.length, 0, '정책 없는 무손절 줄이 후보에 올랐습니다');
+    assert(skipped.some(s => s.code === 'NO_STOP'), 'NO_STOP으로 빠지지 않았습니다');
+  });
+
+  test('FIXED_SL이라고 적혀 있으면 예전 규칙 그대로다', () => {
+    eq(managedCandidates([row({ stop_policy: 'FIXED_SL' })]).positions.length, 1);
+    eq(managedCandidates([row({ stop_loss: null, stop_policy: 'FIXED_SL' })]).positions.length, 0);
+  });
+
+  test('무손절 계약에 손절가가 같이 적혀 있으면 정책을 따르고 사실을 남긴다', () => {
+    const { positions, skipped } = managedCandidates([
+      row({ stop_loss: 90, stop_policy: 'NO_FIXED_SL' }),
+    ]);
+    eq(positions.length, 1);
+    eq(positions[0].stopLoss, null, '정책보다 값을 믿었습니다');
+    assert(skipped.some(s => s.code === 'POLICY_STOP_CONFLICT'), '모순을 기록하지 않았습니다');
+  });
+
+  test('정책 칸이 없던 예전 줄은 동작이 바뀌지 않는다', () => {
+    // `078` 이전에 쓰인 줄에는 이 칸이 아예 없다.
+    const r: any = row(); delete r.stop_policy;
+    const { positions } = managedCandidates([r]);
+    eq(positions.length, 1);
+    eq(positions[0].stopPolicy, null);
+    eq(positions[0].stopLoss, 90);
+  });
 }

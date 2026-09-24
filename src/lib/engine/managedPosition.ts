@@ -51,6 +51,16 @@ export interface OrderRowLike {
   avg_price: number | string | null;
   price?: number | string | null;
   stop_loss: number | string | null;
+  /**
+   * 이 주문이 **고정 손절을 쓰는 계약이었는가** (`078`의 `live_orders.stop_policy`).
+   *
+   * `'NO_FIXED_SL'` · `'FIXED_SL'` · 안 적혀 있으면 null.
+   *
+   * ★ **없는 손절을 정책으로 추정하지 않는다.** 손절가가 비어 있다는 사실만
+   *   보고 "무손절 계약이겠지"라고 읽으면, 손절을 걸다 실패한 주문까지
+   *   무손절 전략으로 감시하게 된다. 그 둘은 다루는 법이 정반대다.
+   */
+  stop_policy?: string | null;
   sl_order_id?: string | null;
   tp_order_id?: string | null;
   status: string | null;
@@ -62,6 +72,9 @@ export interface OrderRowLike {
   strategy_id?: string | null;
 }
 
+/** 장부에 적힌 손절 정책. **못 읽었으면 null이고, null은 무손절이 아니다** */
+export type StopPolicyRead = 'FIXED_SL' | 'NO_FIXED_SL' | null;
+
 export interface ManagedPosition {
   connectionId: string;
   exchange: 'binance' | 'gate';
@@ -69,7 +82,16 @@ export interface ManagedPosition {
   strategyId: string | null;
   side: 'LONG' | 'SHORT';
   entryPrice: number;
-  stopLoss: number;
+  /**
+   * 진입 손절. **무손절 계약(`NO_FIXED_SL`)에서는 null이다.**
+   *
+   * 예전에는 `number`였고, 값이 없는 줄은 후보에서 통째로 빠졌다. 그래서
+   * 고정 손절을 쓰지 않기로 한 포지션이 **감시 대상에 들어오지 못했고**,
+   * 시간 청산까지 닿지 못했다.
+   */
+  stopLoss: number | null;
+  /** 장부에 적힌 손절 정책. 판단은 이 값으로 한다 — 손절가 유무로 추정하지 않는다 */
+  stopPolicy: StopPolicyRead;
   /** 진입(체결) 시각 ms */
   openedAt: number;
   ownedProtectionIds: string[];
@@ -151,7 +173,24 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     const symbol = String(r?.symbol || '').trim().toUpperCase();
     const side = sideOf(r?.side);
     const entryPrice = num(r?.avg_price) ?? num(r?.price);
-    const stopLoss = num(r?.stop_loss);
+    const rawStop = num(r?.stop_loss);
+    // ★ **정책은 읽는 것이지 추정하는 것이 아니다.**
+    //
+    //   `NO_FIXED_SL`이라고 **적혀 있을 때만** 무손절로 본다. 손절가가
+    //   비어 있다는 사실은 근거가 아니다 — 손절을 걸다 실패한 주문도
+    //   똑같이 비어 있고, 그 둘은 다루는 법이 정반대다.
+    const pol = String(r?.stop_policy || '').toUpperCase();
+    const stopPolicy: StopPolicyRead =
+      pol === 'NO_FIXED_SL' ? 'NO_FIXED_SL' : pol === 'FIXED_SL' ? 'FIXED_SL' : null;
+    const noFixedSl = stopPolicy === 'NO_FIXED_SL';
+    // 무손절 계약에 손절가가 같이 적혀 있으면 **정책을 따른다.** 값 쪽을
+    // 믿으면 그 포지션에 R 기반 손절 이동이 붙는데, 그건 이 계약이
+    // 하지 않기로 한 일이다. 대신 그런 줄이 있었다는 사실은 남긴다.
+    if (noFixedSl && rawStop != null && rawStop > 0) {
+      note('POLICY_STOP_CONFLICT',
+        '무손절 계약인데 손절가가 함께 적혀 있습니다 — 정책을 따르고 손절가는 쓰지 않습니다');
+    }
+    const stopLoss = noFixedSl ? null : rawStop;
     // **진입 시각은 acked_at이다.** created_at은 보내기 전에 적는 INTENT
     // 시점이라 체결 시각이 아니다 — 시간청산의 기준으로 쓰면 안 된다.
     const openedAt = r?.acked_at ? Date.parse(String(r.acked_at)) : NaN;
@@ -160,9 +199,18 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
       note('INCOMPLETE', '종목·방향·체결가 중 빠진 것이 있어 판단하지 않습니다');
       continue;
     }
-    if (stopLoss == null || stopLoss <= 0) {
-      // 1R을 정의할 수 없으면 트레일링·본전이동을 계산할 수 없다.
-      note('NO_STOP', '진입 손절이 없어 R을 정의할 수 없습니다');
+    // ★ **무손절 계약은 여기서 빠지지 않는다.**
+    //
+    //   예전에는 손절가가 없다는 이유로 이 줄에서 `continue`했다. 그래서
+    //   `NO_FIXED_SL` 포지션이 후보 목록에 **아예 들어오지 못했고**,
+    //   `lifecycleDecide`의 시간 청산 판단에 닿지 못했다. 감시되지 않는
+    //   포지션이 되는 것이고, 그게 이 수정이 막는 고장이다.
+    //
+    //   R을 정의할 수 없다는 것은 여전히 사실이다 — 그래서 트레일링과
+    //   본전이동은 `lifecycleDecide`가 막는다. 여기서 막을 일이 아니다.
+    if (!noFixedSl && (stopLoss == null || stopLoss <= 0)) {
+      // 1R을 정의할 수 없고, 무손절이라고 **적혀 있지도 않다.**
+      note('NO_STOP', '진입 손절이 없고 무손절 계약이라고 적혀 있지도 않아 판단하지 않습니다');
       continue;
     }
     if (!Number.isFinite(openedAt)) {
@@ -182,7 +230,7 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
 
     keep.push({ row: r, pos: {
       connectionId, exchange, symbol, strategyId, side,
-      entryPrice, stopLoss, openedAt,
+      entryPrice, stopLoss, stopPolicy, openedAt,
       ownedProtectionIds: ids,
       orderId: r?.id ? String(r.id) : null,
     } });

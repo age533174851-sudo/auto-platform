@@ -547,6 +547,17 @@ jobs:
       # 거래 화면을 만들어 놓고 `모의매매` 탭에만 붙인 적이 있다. 사람이 여는
       # 길은 `/ → 매매`(터미널)였고, 실제 기기 스크린샷에서야 드러났다.
       # 시험도 빌드도 전부 통과했다 — 잡히는 곳은 "누가 렌더하는가"뿐이다.
+      # ── 무손절 계약 포지션이 감시에서 빠지지 않는가 (100X-V2-1) ──
+      #
+      # `managedCandidates`가 손절 없는 줄을 제외하고, sweep이 `stop_policy`를
+      # 조회하지 않아, 고정 손절을 쓰지 않기로 한 포지션이 **감시 대상에
+      # 들어오지 못했다.** 열려 있는데 아무도 안 보는 포지션이 된다.
+      - name: 무손절 포지션 감시 배선
+        run: node scripts/check-nostop-lifecycle.mjs
+
+      - name: 무손절 감시 뮤테이션 (고친 구멍을 되돌리면 빨개지는가)
+        run: node scripts/nostop-lifecycle-mutations.mjs
+
       - name: 정본 거래 화면 (사람이 다니는 길에 붙어 있는가)
         run: node scripts/check-canonical-trading.mjs
 

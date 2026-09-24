@@ -190,4 +190,76 @@ export function runExitLifecycleTests() {
     eq(v.code, 'MOVE_STOP', '옮긴다');
     eq(v.newStop, 100, '본전 — 진입가다. 청산선보다 0.6% 위');
   });
+
+  // ══════════ ★ 무손절 계약(100X)의 청산 (Phase 100X-V2-1) ══════════
+  //
+  // 이 계약에서 자동으로 도는 것은 **시간 청산 하나뿐**이다. 트레일링과
+  // 본전이동은 1R이 정의되지 않아 돌 수 없고, 돌면 안 된다 — 고정 손절을
+  // 쓰지 않기로 한 포지션에 손절을 새로 거는 것이기 때문이다.
+
+  const noSl = (o: any = {}) => pos({ stopLoss: null, stopPolicy: 'NO_FIXED_SL', ...o });
+
+  test('★ 무손절 계약은 시간 전에는 아무것도 하지 않는다 (손절·익절·R 이동 없음)', () => {
+    const v = lifecycleDecide({
+      position: noSl(), policy: SCALP, live: OPEN_OK,
+      // 많이 올랐어도 — R을 지어내지 않는다
+      highWaterR: 5, lastPrice: 140, liveStop: null, nowMs: NOW,
+    });
+    eq(v.action, 'NONE', '무손절 포지션에 조치가 나갔습니다');
+    eq(v.code, 'NO_FIXED_STOP');
+    assert(v.action !== 'MOVE_STOP', '★ 손절을 새로 걸었습니다');
+  });
+
+  test('★ 시간이 다 되면 무손절 계약도 청산된다', () => {
+    const v = lifecycleDecide({
+      position: noSl({ openedAt: NOW - (SCALP!.maxHoldMs as number) - 1000 }),
+      policy: SCALP, live: OPEN_OK,
+      highWaterR: null, lastPrice: 100, liveStop: null, nowMs: NOW,
+    });
+    eq(v.code, 'TIME_EXIT', '시간 청산에 닿지 못했습니다');
+    eq(v.action, 'CLOSE');
+  });
+
+  test('★ 정책이 NO_FIXED_SL이면 손절가가 있어도 R 이동을 하지 않는다', () => {
+    // 장부가 모순된 값을 들고 있어도 **정책이 이긴다.**
+    const v = lifecycleDecide({
+      position: pos({ stopLoss: 90, stopPolicy: 'NO_FIXED_SL' }),
+      policy: SCALP, live: OPEN_OK,
+      highWaterR: 5, lastPrice: 140, liveStop: 90, nowMs: NOW,
+    });
+    eq(v.action, 'NONE');
+    eq(v.code, 'NO_FIXED_STOP');
+  });
+
+  test('정책이 없거나 FIXED_SL인 포지션의 동작은 그대로다', () => {
+    const a = lifecycleDecide({
+      position: pos(), policy: SCALP, live: OPEN_OK,
+      highWaterR: 5, lastPrice: 140, liveStop: 90, nowMs: NOW,
+    });
+    const b = lifecycleDecide({
+      position: pos({ stopPolicy: 'FIXED_SL' }), policy: SCALP, live: OPEN_OK,
+      highWaterR: 5, lastPrice: 140, liveStop: 90, nowMs: NOW,
+    });
+    eq(a.code, b.code, '정책 칸이 기존 동작을 바꿨습니다');
+    eq(a.action, b.action);
+  });
+
+  test('★ 열려 있는지 모르면 무손절 계약도 청산하지 않는다', () => {
+    const v = lifecycleDecide({
+      position: noSl({ openedAt: NOW - (SCALP!.maxHoldMs as number) - 1000 }),
+      policy: SCALP, live: { ok: false, found: false } as any,
+      highWaterR: null, lastPrice: 100, liveStop: null, nowMs: NOW,
+    });
+    assert(v.action !== 'CLOSE', '★ 조회 실패를 flat으로 읽고 청산했습니다');
+  });
+
+  test('★ 정책이 선언되지 않은 전략은 무손절이어도 시간 청산이 없다', () => {
+    const v = lifecycleDecide({
+      position: noSl({ strategyId: 'no-such-strategy', openedAt: NOW - 99 * 3_600_000 }),
+      policy: lifecyclePolicyOf('no-such-strategy'), live: OPEN_OK,
+      highWaterR: null, lastPrice: 100, liveStop: null, nowMs: NOW,
+    });
+    eq(v.code, 'NO_POLICY', '다른 전략의 값을 빌려 썼습니다');
+    eq(v.action, 'NONE');
+  });
 }
