@@ -743,7 +743,10 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
   try {
     const { data, error } = await (sb as any).from('live_orders')
       .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
-        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id, strategy_id')
+        // live_orders에는 strategy_id 컬럼이 없다. 전략 소유권은 strategyOf()가
+        // signal_id의 [s:...] 표식에서 읽는다. 없는 칼럼을 projection하면
+        // PostgREST가 조회 전체를 실패시키므로 signal_id만 읽는다.
+        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id')
       .order('acked_at', { ascending: false })
       .limit(200);
     // **조회 실패를 '없음'으로 적지 않는다.**
@@ -934,9 +937,40 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
     .filter(g => g.verdict.action === 'ALERT')
     .map(g => ({ symbol: g.symbol, reason: g.verdict.reason, faults: g.verdict.faults.map(f => f.code) }));
 
+  // generic lifecycle 실패를 ladder 결과와 별개로 보존한다.
+  // projection 오류처럼 lifecycle 자체가 실패했는데 actionable이 0이면
+  // 예전에는 ok:true로 조기 반환되어 운영에서 조용히 숨었다.
+  const lifecycleFailed = [
+    ...(lifecycle.error
+      ? [{ symbol: 'lifecycle', error: String(lifecycle.error) }]
+      : []),
+    ...(Array.isArray(lifecycle.results)
+      ? lifecycle.results
+          .filter((r: any) => r && r.ok === false)
+          .map((r: any) => ({
+            symbol: String(r.symbol || 'lifecycle'),
+            error: String(r.error || r.reason || r.code || 'lifecycle_failed'),
+          }))
+      : []),
+  ];
+
   if (dryRun || actionable.length === 0) {
+    if (!dryRun && lifecycleFailed.length > 0) {
+      await closeRun({
+        status: 'FAILED',
+        positions_scanned: decisions.length,
+        actions: 0,
+        orphan_cleanups: (Array.isArray(orphanCleanups) ? orphanCleanups.length : 0) + sweep.cleaned,
+        cleanup_detail: (orphanCleanups.length || sweep.details.length)
+          ? { ladder: orphanCleanups, sweep: sweep.details, sweepSummary: sweep.summary }
+          : null,
+        errors: lifecycleFailed
+          .map(r => `${r.symbol}: ${r.error.slice(0, 120)}`)
+          .join(' · ').slice(0, 1000),
+      });
+    }
     return NextResponse.json({
-      ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
+      ok: lifecycleFailed.length === 0, dryRun, checked: decisions.length, actionable: actionable.length,
       alerts, recovery, orphanCleanups, sweep, coverage, lifecycle,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
@@ -1104,7 +1138,10 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
 
   // 회차를 닫는다. **#142 증거(정확한 번호로 취소한 남은 보호주문)를
   // 그대로 담는다** — 사용자가 Gate 앱을 열어 확인하지 않아도 되게.
-  const failed = results.filter(r => r && r.ok === false);
+  const failed = [
+    ...results.filter(r => r && r.ok === false),
+    ...lifecycleFailed,
+  ];
   await closeRun({
     status: failed.length > 0 ? 'FAILED' : 'OK',
     positions_scanned: decisions.length,

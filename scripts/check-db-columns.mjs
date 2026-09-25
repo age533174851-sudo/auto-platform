@@ -97,21 +97,56 @@ const codeFiles = [
 // 별칭·집계·와일드카드는 이름 대조 대상이 아니다.
 const skipExpr = (e) => !e || e === '*' || e.includes('(') || e.includes(':') || e.includes('!');
 
+/**
+ * `.from('table').select(...)`에서 정적 projection을 읽는다.
+ *
+ * select 인자는 한 문자열일 수도 있고:
+ *   .select('id, signal_id')
+ *
+ * 문자열을 이어 붙인 식일 수도 있다:
+ *   .select('id, ' + 'signal_id')
+ *
+ * 예전 검사는 첫 문자열만 읽어서 두 번째 조각의 없는 칼럼을 영원히
+ * 보지 못했다. 동적 변수/함수 호출은 이 이름 대조 검사에서 추측하지 않는다.
+ */
+function selectCallsOf(src) {
+  const out = [];
+  const re = /\.from\(\s*['"]([\w]+)['"]\s*\)([\s\S]{0,400}?)\.select\(([\s\S]{0,600}?)\)/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const parts = [];
+    const lit = /(['"])([\s\S]*?)\1/g;
+    let p;
+    while ((p = lit.exec(m[3])) !== null) parts.push(p[2]);
+    if (parts.length === 0) continue;
+    out.push({ table: m[1], projection: parts.join(''), index: m.index });
+  }
+  return out;
+}
+
+// 검사기 자체 회귀: 이어 붙인 두 번째 조각을 못 읽으면 즉시 RED.
+// 이 형태가 바로 live_orders.strategy_id 운영 장애를 25일 놓친 모양이다.
+{
+  const probe = selectCallsOf(
+    "sb.from('live_orders').select('id, signal_id, ' + 'strategy_id')",
+  );
+  if (probe.length !== 1 || probe[0].projection !== 'id, signal_id, strategy_id') {
+    err('DB 칼럼 검사기가 이어 붙인 select projection을 끝까지 읽지 못합니다');
+  }
+}
+
 let checked = 0;
 for (const f of codeFiles) {
   let src = '';
   try { src = readFileSync(f, 'utf8'); } catch { continue; }
   if (!src.includes('.from(')) continue;
 
-  // `.from('table')` 뒤 400자 안의 첫 `.select('...')`를 짝지어 본다.
-  const re = /\.from\(\s*['"]([\w]+)['"]\s*\)([\s\S]{0,400}?)\.select\(\s*['"]([^'"]*)['"]/g;
-  let m;
-  while ((m = re.exec(src)) !== null) {
-    const table = m[1].toLowerCase();
+  for (const q of selectCallsOf(src)) {
+    const table = q.table.toLowerCase();
     const known = columns.get(table);
     if (!known) continue;                 // 워커가 만드는 표 등 — 여기서 판단하지 않는다
-    const line = src.slice(0, m.index).split('\n').length;
-    for (const raw of m[3].split(',')) {
+    const line = src.slice(0, q.index).split('\n').length;
+    for (const raw of q.projection.split(',')) {
       const col = raw.trim().toLowerCase();
       if (skipExpr(col)) continue;
       checked += 1;
