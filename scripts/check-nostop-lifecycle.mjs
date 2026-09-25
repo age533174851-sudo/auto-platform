@@ -27,7 +27,14 @@ import { readFileSync, existsSync } from 'node:fs';
 
 const CAND  = 'src/lib/engine/managedPosition.ts';
 const OPS   = 'src/lib/engine/venuePositionOps.ts';
-const SWEEP = 'src/app/api/autotrade/exit-monitor/route.ts';
+const ACT   = 'src/lib/engine/lifecycleAction.ts';
+const SCALP = 'src/app/api/autotrade/scalp/route.ts';
+/** 진입·종료의 포지션 모드 판정 정본이 나란히 있는 곳 */
+const EXEC  = 'src/lib/exchanges/futuresExec.ts';
+const SWEEP = 'src/lib/engine/lifecycleSweep.ts';
+/** 라우트는 실제 구현을 끼우는 배선이다. 판단은 SWEEP에 있다 */
+const ROUTE = 'src/app/api/autotrade/exit-monitor/route.ts';
+const LEASE = 'src/lib/engine/exitMonitorLease.ts';
 const DECIDE = 'src/lib/engine/exitLifecycle.ts';
 const POLICY = 'src/lib/strategies/lifecyclePolicy.ts';
 const MIG = 'supabase/migrations/078_live_orders_stop_policy.sql';
@@ -43,14 +50,19 @@ const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).joi
 
 const cand = code(read(CAND));
 const ops  = code(read(OPS));
+const act  = code(read(ACT));
+const scalp = code(read(SCALP));
+const exec  = code(read(EXEC));
 const sweep = code(read(SWEEP));
+const route = code(read(ROUTE));
+const lease = code(read(LEASE));
 const decide = code(read(DECIDE));
 const policy = code(read(POLICY));
 
 // ══════════ ① 장부에서 정책을 읽어 온다 ══════════
 {
-  if (!/stop_policy/.test(sweep)) {
-    err(`${SWEEP}가 stop_policy를 조회하지 않습니다 — 정책을 모르면 무손절 포지션이 후보에서 빠집니다`);
+  if (!/stop_policy/.test(route)) {
+    err(`${ROUTE}가 stop_policy를 조회하지 않습니다 — 정책을 모르면 무손절 포지션이 후보에서 빠집니다`);
   }
   // **수명주기 sweep의 select 안에** 있어야 한다.
   //
@@ -58,14 +70,14 @@ const policy = code(read(POLICY));
   //   자격증명 쿼리였고, 다음에는 첫 `from('live_orders')`를 잡았는데 그건
   //   고아 보호주문 sweep이었다. 같은 표를 읽는 쿼리가 여럿이라, **함수
   //   이름**으로 앵커해야 이 sweep의 select를 본다.
-  const fn = sweep.indexOf('runLifecycleSweep');
-  if (fn < 0) err(`${SWEEP}에서 runLifecycleSweep을 찾지 못했습니다`);
+  const fn = route.indexOf('runLifecycleSweep');
+  if (fn < 0) err(`${ROUTE}에서 runLifecycleSweep을 찾지 못했습니다`);
   else {
-    const body = sweep.slice(fn);
+    const body = route.slice(fn);
     const m = body.match(/from\('live_orders'\)[\s\S]{0,900}?\.order\(/);
-    if (!m) err(`${SWEEP}의 runLifecycleSweep에서 주문 장부 select를 찾지 못했습니다`);
+    if (!m) err(`${ROUTE}의 runLifecycleSweep에서 주문 장부 select를 찾지 못했습니다`);
     else if (!/stop_policy/.test(m[0])) {
-      err(`${SWEEP}의 수명주기 select에 stop_policy가 없습니다`
+      err(`${ROUTE}의 수명주기 select에 stop_policy가 없습니다`
         + ' — 칸을 안 읽으면 값은 언제나 undefined이고, 무손절 포지션이 후보에서 빠집니다');
     }
   }
@@ -149,9 +161,19 @@ const policy = code(read(POLICY));
 // ══════════ ⑤ 청산은 확인하고 적는다 (기존 규율 유지) ══════════
 {
   if (!/closeSymbolPosition\(/.test(sweep)) err(`${SWEEP}에 실제 청산 호출이 없습니다`);
-  // 닫았다고 적기 전에 다시 읽는가
-  if (!/readOpenPosition\([\s\S]{0,200}?flat/.test(sweep)) {
-    err(`${SWEEP}가 청산 뒤 포지션을 다시 읽지 않습니다 — 접수는 체결이 아닙니다`);
+  // 닫았다고 적기 전에 다시 읽는가.
+  //
+  // ★ 이 판단은 `lifecycleAction`으로 옮겼다(순서를 시험하려고). 그래서
+  //   sweep이 아니라 그 모듈을 본다 — 옛 위치를 계속 보면 옮긴 것을
+  //   "사라졌다"로 읽는다.
+  if (!/readAfter\s*:/.test(sweep)) {
+    err(`${SWEEP}가 청산 실행에 재조회를 넘기지 않습니다`);
+  }
+  if (!/deps\.readAfter\(\)/.test(act)) {
+    err(`${ACT}가 청산 뒤 포지션을 다시 읽지 않습니다 — 접수는 체결이 아닙니다`);
+  }
+  if (!/applyLifecycleClose\(/.test(sweep)) {
+    err(`${SWEEP}가 청산 실행 정본을 쓰지 않습니다 — 순서가 시험되지 않는 자리로 돌아갑니다`);
   }
   if (!/flatVerified/.test(sweep)) {
     err(`${SWEEP}가 재조회 결과를 구분해 적지 않습니다 — 조회 실패가 flat으로 읽힙니다`);
@@ -185,22 +207,16 @@ const policy = code(read(POLICY));
       err(`${OPS}의 종료 경로가 계좌 포지션 모드를 읽지 않습니다`
         + ' — 단방향 전용 파라미터를 양방향 계좌에 보내면 반대 포지션이 열릴 수 있습니다');
     }
-    // ② 못 읽으면 **안 보내는가** (fail-closed)
-    if (!/mode == null[\s\S]{0,260}?attempted: false/.test(body)) {
-      err(`${OPS}가 포지션 모드를 못 읽어도 청산을 보냅니다 — 모르는 모드로 추측해 보내면 안 됩니다`);
-    }
-    // ②-b 양방향 계좌를 **어떻게든 다루는가**
+    // ② 판정 **정본**을 쓰고, 통과하지 못하면 안 보내는가 (fail-closed)
     //
-    //   아래 전송은 단방향 전용 조합(`reduceOnly` 무조건 · `positionSide`
-    //   없음)이다. 양방향 계좌에 그대로 보내면 반대 포지션이 열릴 수 있다.
-    //   그래서 이 가지는 **막든지 분기하든지** 해야 하고, 그냥 통과시키면
-    //   안 된다. (정확한 양방향 규격은 아직 공식 문서로 확인하지 못했다.)
-    if (!/mode === 'HEDGE'/.test(body)) {
-      err(`${OPS}가 양방향(헤지) 계좌를 구분하지 않습니다`
-        + ' — 단방향 전용 파라미터가 그대로 나갑니다');
-    } else if (!/mode === 'HEDGE'[\s\S]{0,420}?attempted: false/.test(body)) {
-      err(`${OPS}의 양방향 가지가 전송을 막지도 분기하지도 않습니다`
-        + ' — 확인되지 않은 규격으로 주문이 나갑니다');
+    //   ★ 판정을 `futuresExec`으로 옮겼다. 진입 판정과 같은 파일에 있어야
+    //     한쪽만 고쳐지지 않는다. 여기서는 **그것을 쓰는지**를 본다.
+    if (!/closeModeVerdict\(/.test(body)) {
+      err(`${OPS}가 종료 모드 판정 정본을 쓰지 않습니다`
+        + ' — 판정이 두 곳이면 진입과 종료가 서로 다른 답을 냅니다');
+    }
+    if (!/if \(!cm\.ok\) return \{ attempted: false/.test(body)) {
+      err(`${OPS}가 판정에 걸려도 청산을 보냅니다 — 모르는 모드로 추측해 보내면 안 됩니다`);
     }
     // ③ 모드 판정이 **거래소 호출보다 앞**에 있는가
     const iMode = body.indexOf('futuresPositionMode');
@@ -217,9 +233,217 @@ const policy = code(read(POLICY));
   }
 }
 
+// ══════════ ⑥-b 진입과 종료가 같은 관측을 같은 파일에서 판정한다 ══════════
+//
+// 진입은 `positionModeVerdict`, 종료는 `closeModeVerdict`. 결론은 다를 수
+// 있어도 **판정이 흩어지면** 한쪽만 고쳐진다 — 그때 "열 수는 있고 닫을
+// 수는 없는" 상태가 소리 없이 생긴다.
+{
+  for (const f of ['positionModeVerdict', 'closeModeVerdict']) {
+    if (!new RegExp(`export function ${f}\\(`).test(exec)) {
+      err(`${EXEC}에 ${f}가 없습니다 — 진입·종료 판정이 한 곳에 없습니다`);
+    }
+  }
+  const i = exec.indexOf('export function closeModeVerdict');
+  if (i >= 0) {
+    const body = exec.slice(i, i + 2600);
+    // 못 읽으면 막는가
+    if (!/code: 'UNKNOWN'[\s\S]{0,120}?ok: false|ok: false[\s\S]{0,120}?code: 'UNKNOWN'/.test(body)) {
+      err(`${EXEC}의 종료 판정이 모드를 못 읽어도 통과시킵니다`);
+    }
+    // 양방향을 막는가
+    if (!/mode === 'HEDGE'/.test(body) || !/HEDGE_UNVERIFIED/.test(body)) {
+      err(`${EXEC}의 종료 판정이 양방향(헤지) 계좌를 구분하지 않습니다`);
+    }
+    // ★ **두 실패를 섞지 않는다.** 아직 안 연 것과 이미 열려 있는데 못 닫는
+    //   것은 운영자가 해야 할 일이 다르다.
+    if (!/strandsOpenPosition/.test(body)) {
+      err(`${EXEC}의 종료 판정이 "이미 열린 포지션이 갇힌다"를 구분해 적지 않습니다`
+        + ' — 신규 진입 차단과 종료 차단이 같은 말로 보입니다');
+    }
+  }
+  // 옛 거짓말이 돌아오지 않는가: 진입 판정이 "청산은 언제나 된다"고 적었다
+  if (/열린 포지션은 언제나 닫을 수 있습니다/.test(exec)) {
+    err(`${EXEC}가 "열린 포지션은 언제나 닫을 수 있다"고 적습니다`
+      + ' — 종료 경로는 모드를 못 읽으면 보내지 않습니다. 사실이 아닙니다');
+  }
+}
+
+// ══════════ ⑦ 청산 전에 실행 권한을 확인한다 ══════════
+//
+// 임차(fence)는 있었지만 `stillMine()` 확인이 **sweep이 끝난 뒤**에 있었다.
+// 그래서 청산 경로만 잠금 밖이었고, 임차가 넘어간 뒤에도 청산이 나갔다.
+{
+  if (!/stillMine/.test(sweep)) err(`${SWEEP}에 실행 권한 확인이 없습니다`);
+  // sweep에 권한 확인이 **주입되는가**
+  if (!/runLifecycleSweep\(sb, dryRun, stillMine\)/.test(route)) {
+    err(`${ROUTE}가 수명주기 sweep에 실행 권한을 넘기지 않습니다`
+      + ' — 그 경로의 청산이 잠금 밖에 남습니다');
+  }
+  if (!/stillMine:\s*deps\.stillMine/.test(sweep)) {
+    err(`${SWEEP}가 청산 실행에 실행 권한을 넘기지 않습니다`
+      + ' — 주입은 받았는데 쓰지 않으면 잠금이 없는 것과 같습니다');
+  }
+  // 획득이 원자적인가 (읽고-판정하고-쓰는 사이에 끼어들 수 있으면 둘 다 주인이 된다)
+  //
+  // ★ 획득 순서는 `exitMonitorLease`로 옮겼다 — 두 실행을 동시에 돌려
+  //   경합을 재현하는 시험을 붙일 수 있는 자리다. 라우트는 조건부 UPDATE를
+  //   실제로 거는 배선이고, 둘 다 필요하다.
+  if (!/compareAndSet\(row, prevFence\)/.test(lease)) {
+    err(`${LEASE}의 임차 획득이 본 값을 조건으로 걸지 않습니다`
+      + ' — 동시 요청이 같은 fence를 얻어 둘 다 주인이 될 수 있습니다');
+  }
+  if (!/Number\(r\?\.updated\) === 1/.test(lease)) {
+    err(`${LEASE}가 갱신된 줄 수를 확인하지 않습니다 — 0줄 갱신이 성공으로 읽힙니다`);
+  }
+  if (!/\.eq\('fence', prevFence\)/.test(route)) {
+    err(`${ROUTE}의 조건부 갱신에 본 fence 조건이 없습니다`
+      + ' — 판정은 원자적인데 실제 쿼리가 조건 없이 덮어씁니다');
+  }
+  // 실행 단계가 권한을 전송보다 먼저 보는가
+  const iMine = act.indexOf('stillMine');
+  const iClose = act.indexOf('deps.close()');
+  if (iMine < 0 || iClose < 0) err(`${ACT}에서 권한 확인 또는 전송을 찾지 못했습니다`);
+  else if (iMine > iClose) {
+    err(`${ACT}가 청산을 보낸 뒤에 권한을 확인합니다 — 확인이 먼저입니다`);
+  }
+  // 권한 확인이 던지면 보내지 않는가 (fail-closed)
+  if (!/catch \{ mine = false; \}/.test(act)) {
+    err(`${ACT}가 권한 확인 실패를 통과로 읽습니다`);
+  }
+}
+
+// ══════════ ⑧ attempted · accepted · flatVerified를 섞지 않는다 ══════════
+{
+  for (const f of ['attempted', 'accepted', 'flatVerified']) {
+    if (!new RegExp(`${f}:`).test(act)) err(`${ACT}에 ${f}가 없습니다`);
+  }
+  // 재조회 실패는 null이어야 한다 — boolean으로 적으면 "닫혔다"로 읽힌다
+  if (!/CLOSE_UNVERIFIED[\s\S]{0,200}?flatVerified: null/.test(act)) {
+    err(`${ACT}가 재조회 실패를 null로 적지 않습니다 — 0이라는 뜻이 아닙니다`);
+  }
+  // 부분 종료를 ok로 적지 않는가
+  if (!/CLOSE_INCOMPLETE[\s\S]{0,160}?ok: false/.test(act)) {
+    err(`${ACT}가 포지션이 남은 경우를 성공으로 적습니다 — 부분 종료도 체결로 잡힙니다`);
+  }
+  // 최종 실행 상태가 수명주기 실패를 포함하는가
+  if (!/lifecycleFailed/.test(route)) {
+    err(`${ROUTE}의 실행 상태 집계가 수명주기 청산 실패를 포함하지 않습니다`
+      + ' — 청산이 실패한 회차가 OK로 남습니다');
+  }
+  if (!/failed = \[\.\.\.results\.filter[\s\S]{0,80}?lifecycleFailed\]/.test(route)) {
+    err(`${ROUTE}가 수명주기 실패를 실패 목록에 합치지 않습니다`);
+  }
+}
+
+// ══════════ ⑨ 과거 줄이 새 포지션을 판단하지 않는다 ══════════
+{
+  if (!/STALE_DUPLICATE/.test(cand)) {
+    err(`${CAND}가 같은 자리의 오래된 줄을 걸러내지 않습니다`
+      + ' — 과거 주문의 보유 시간으로 새 포지션이 청산됩니다');
+  }
+  // 걸러내기가 **판단 전**이어야 한다
+  const iDedupe = cand.indexOf('STALE_DUPLICATE');
+  const iMap = cand.indexOf('const positions: ManagedPosition[]');
+  if (iDedupe >= 0 && iMap >= 0 && iDedupe > iMap) {
+    err(`${CAND}가 후보를 만든 뒤에 중복을 제거합니다 — 판단 전이어야 합니다`);
+  }
+  // 전략을 키에 넣어야 충돌 감지가 살아 있다
+  if (!/strategyId \?\? ''/.test(cand)) {
+    err(`${CAND}의 중복 키에 전략이 없습니다 — 다른 전략의 주장이 합쳐져 충돌을 못 봅니다`);
+  }
+}
+
+// ══════════ ⑩ 닫을 수 없는 계좌에는 진입하지 않는다 ══════════
+//
+// 종료는 양방향(헤지)을 막는데 진입은 막지 않으면, **열 수는 있고 닫을
+// 수는 없는** 상태가 된다. 그건 둘 다 막는 것보다 나쁘다.
+{
+  if (!/futuresPositionMode/.test(scalp)) {
+    err(`${SCALP}가 진입 전에 계좌 포지션 모드를 보지 않습니다`
+      + ' — 종료가 불가능한 계좌에서 100배 포지션이 열립니다');
+  }
+  if (!/pm\.mode !== 'ONE_WAY'[\s\S]{0,120}?return null/.test(scalp)) {
+    err(`${SCALP}가 종료 불가 모드에서 진입을 막지 않습니다`);
+  }
+  // 진입과 종료가 **같은 정본**을 쓰는가 (판정이 두 벌이면 갈린다)
+  if (!/futuresPositionMode/.test(ops)) {
+    err(`${OPS}와 ${SCALP}가 같은 포지션 모드 정본을 쓰지 않습니다`);
+  }
+}
+
+// ══════════ ⑪ 판단이 한 곳에만 있다 ══════════
+//
+// 이 저장소가 이름 붙인 2번 고장: **경로가 둘인데 한쪽만 고침.** sweep 루프가
+// 라우트로 되돌아오면 정규식 검사기밖에 못 보는 자리로 돌아가는 것이고, 청산
+// 횟수·순서를 세는 시험(`lifecycleSweep.test.ts`)이 무력해진다.
+{
+  if (!/runLifecycleSweepCore\(/.test(route)) {
+    err(`${ROUTE}가 sweep 정본을 쓰지 않습니다`
+      + ' — 루프가 라우트로 돌아가면 청산 횟수·순서를 돌려서 셀 수 없습니다');
+  }
+  // 라우트가 판단을 **다시 갖지 않는가.** 이 낱말들은 sweep 정본의 것이다.
+  for (const [pat, what] of [
+    [/lifecycleDecide\(/, '종료 판단'],
+    [/applyLifecycleClose\(/, '청산 실행'],
+    [/managedCandidates\(/, '후보 만들기'],
+    [/moveStopSafely\(/, '손절 이동'],
+  ]) {
+    if (pat.test(route)) {
+      err(`${ROUTE}가 ${what}을 직접 합니다 — 판단이 두 곳이면 언젠가 갈립니다`);
+    }
+  }
+  // 회차 안 중복 방지(2중 방어)가 살아 있는가.
+  //
+  // ★ 이것은 **시험이 못 잡는다.** `managedCandidates`가 같은 전략의 중복
+  //   줄을 이미 걸러내고, 전략이 다르면 소유권 충돌로 판단이 멈춘다. 그래서
+  //   지금은 도달할 수 없는 방어이고 — 워커가 둘 떠서 후보가 밖에서 겹쳐
+  //   들어올 때를 위한 것이다. 도달 못 하는 것을 "돌려서 확인했다"고 적지
+  //   않는다. 여기서는 줄이 있는지만 본다.
+  if (!/done\.has\(key\)/.test(sweep) || !/done\.add\(key\)/.test(sweep)) {
+    err(`${SWEEP}에 회차 안 중복 방지가 없습니다`
+      + ' — 워커가 둘 떠서 같은 후보가 겹쳐 들어오면 같은 자리에 두 번 나갑니다');
+  }
+  // 반대로 정본이 거래소를 **직접** 부르지 않는가 (가짜로 바꿔 끼울 수 있어야 한다)
+  if (/from '.*venuePositionOps'|import\('@\/lib\/engine\/venuePositionOps'\)/.test(sweep)) {
+    err(`${SWEEP}가 거래소 어댑터를 직접 불러옵니다`
+      + ' — 가짜로 바꿔 끼울 수 없으면 청산 횟수를 셀 수 없습니다');
+  }
+  // 회차를 실제로 돌려 세는 시험이 있는가 (정규식 검사와 구분되는 증거)
+  const T = 'src/lib/engine/lifecycleSweep.test.ts';
+  if (!existsSync(T)) err(`${T}가 없습니다 — 소스 연결만 보고 실행 횟수를 안 셉니다`);
+  else {
+    const t = readFileSync(T, 'utf8');
+    for (const [pat, what] of [
+      [/closes/, '청산 호출 횟수'],
+      [/stillMine→close→readAfter/, '호출 순서'],
+      [/LEASE_LOST/, '임차 상실'],
+      [/readErr/, '장부 조회 실패'],
+    ]) {
+      if (!pat.test(t)) err(`${T}가 ${what}을 세지 않습니다`);
+    }
+  }
+  // 경합을 재현하는 시험이 있는가
+  const L = 'src/lib/engine/exitMonitorLease.test.ts';
+  if (!existsSync(L)) err(`${L}가 없습니다`);
+  else {
+    const t = readFileSync(L, 'utf8');
+    if (!/acquireExitLease/.test(t)) err(`${L}가 임차 획득을 돌려 보지 않습니다`);
+    if (!/cas:\s*false/.test(t)) {
+      err(`${L}가 조건 없이 쓰는 예전 구현을 재현하지 않습니다`
+        + ' — 경합이 실제로 일어나는지 보이지 않습니다');
+    }
+    if (!/Promise\.all\(\[[\s\S]{0,200}?acquireExitLease/.test(t)) {
+      err(`${L}가 두 실행을 겹쳐서 돌리지 않습니다`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\n무손절 포지션 감시 배선 검사 실패 (${bad}건)`);
   process.exit(1);
 }
 console.log('✅ 무손절 포지션 감시 — 정책 조회 · 후보 포함 · 추정 금지 ·'
-  + ' 시간청산 우선 · 출처 표시 · 청산 후 재확인 · 종료 시 모드 확인');
+  + ' 시간청산 우선 · 출처 표시 · 청산 후 재확인 · 종료 시 모드 확인 ·'
+  + ' 청산 전 권한 확인 · 결과 의미 분리 · 과거 줄 배제 · 진입/종료 대칭 ·'
+  + ' 판단 한 곳 · 실행 횟수/순서 실측 · 임차 경합 재현');

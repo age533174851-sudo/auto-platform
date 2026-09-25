@@ -15,7 +15,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict, futuresCountOpen,
   reconcileDecision, futuresPlaceOrder, futuresFindOrderByClientId,
-  positionModeVerdict, __clearPositionModeCache,
+  positionModeVerdict, closeModeVerdict, __clearPositionModeCache,
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
 } from './futuresExec';
 import { __clearGateSpecCache } from './gateFutures';
@@ -157,8 +157,60 @@ export function runFuturesExecTests() {
     eq(r.ok, false, '못 읽었는데 진입을 허용했다');
     eq(r.code, 'UNKNOWN'); eq(r.mode, null);
     assert(r.message.includes('타임아웃'), '왜 못 읽었는지 남아야 한다');
-    assert(r.message.includes('청산은 이 검사를 받지 않습니다'),
-      '닫는 길이 막히지 않는다는 것을 명시해야 한다');
+  });
+
+  test('★ "청산은 언제나 된다"고 적지 않는다 — 종료도 모드를 본다', () => {
+    // 이 문장이 실제로 들어 있었다. 그런데 closeSymbolPosition은 모드를
+    // 못 읽으면 청산을 보내지 않는다 — 화면과 감시가 다른 말을 했다.
+    for (const m of [null, 'HEDGE', 'ONE_WAY'] as const) {
+      assert(!positionModeVerdict(m as any).message.includes('언제나 닫을 수 있습니다'),
+        `사실이 아닌 문장이 남아 있습니다 (${m})`);
+    }
+  });
+
+  console.log('[실행기 — 진입/종료 대칭]');
+
+  // ★ 사용자 지적: 종료가 막힌 모드에서 진입이 열려 있으면 **열 수는 있고
+  //   닫을 수는 없는** 상태가 된다. 그건 둘 다 막는 것보다 나쁘다.
+  test('★ 종료가 막히는 모드에서는 신규 진입도 막힌다', () => {
+    for (const m of [null, 'HEDGE'] as const) {
+      const close = closeModeVerdict(m as any);
+      const entry = positionModeVerdict(m as any);
+      eq(close.ok, false, `종료가 열려 있습니다 (${m})`);
+      eq(entry.ok, false,
+        `★ 종료가 막힌 모드(${m})에서 신규 진입이 허용됩니다 — 닫을 수 없는 자리를 엽니다`);
+    }
+  });
+
+  test('단방향에서는 둘 다 열린다 — 필요 이상으로 막지 않는다', () => {
+    eq(closeModeVerdict('ONE_WAY').ok, true);
+    eq(positionModeVerdict('ONE_WAY').ok, true);
+  });
+
+  test('★ 진입 차단과 종료 차단을 **다른 실패로** 적는다', () => {
+    // 아직 안 연 것은 불편이고, 이미 열려 있는데 못 닫는 것은 사고다.
+    // 운영자가 해야 할 일이 다르므로 같은 말로 적으면 안 된다.
+    const close = closeModeVerdict('HEDGE');
+    const entry = positionModeVerdict('HEDGE');
+    eq(close.code, 'HEDGE_UNVERIFIED');
+    eq(entry.code, 'HEDGE_BLOCKED');
+    assert(close.code !== entry.code, '두 실패가 같은 코드입니다');
+    eq(close.strandsOpenPosition, true, '이미 열린 포지션이 갇힌다는 사실을 적어야 한다');
+    assert(close.message.includes('거래소에서 직접'),
+      '사람이 무엇을 해야 하는지 적어야 한다');
+  });
+
+  test('★ 모드를 못 읽어도 이미 열린 포지션이 갇힌다는 것을 적는다', () => {
+    const r = closeModeVerdict(null, '타임아웃');
+    eq(r.ok, false); eq(r.code, 'UNKNOWN');
+    eq(r.strandsOpenPosition, true);
+    assert(r.message.includes('타임아웃'), '왜 못 읽었는지 남아야 한다');
+    assert(r.message.includes('자동으로 닫히지 않습니다'),
+      '확인 못 한 것을 "닫힌다"로 읽히게 두지 않는다');
+  });
+
+  test('단방향이면 갇히는 포지션이 없다', () => {
+    eq(closeModeVerdict('ONE_WAY').strandsOpenPosition, false);
   });
 
   console.log('[실행기 — UNKNOWN 판정]');

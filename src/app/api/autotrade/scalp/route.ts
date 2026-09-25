@@ -531,7 +531,7 @@ export async function POST(req: NextRequest) {
   if (epSizingPolicy === 'MARGIN_ALLOCATION') {
     const { prepareEntry100x, commitEntry100x } = await import('@/lib/engine/entry100x');
     const { futuresApplyLeverage } = await import('@/lib/exchanges/futuresExec');
-    const { futuresPositionRisk, futuresAvailableUsd, futuresSymbolFilters } =
+    const { futuresPositionRisk, futuresAvailableUsd, futuresSymbolFilters, futuresPositionMode } =
       await import('@/lib/exchanges/futuresAdapter');
     const { quantizeOrder } = await import('@/lib/exchanges/quantize');
     const ex = conn.exchange as 'binance' | 'gate';
@@ -550,7 +550,23 @@ export async function POST(req: NextRequest) {
       epMarginAllocationPct,
       {
         // 마진 모드와 기준가는 **같은 되읽기 응답**에서 온다.
+        //
+        // ★ **포지션 모드도 같이 본다 — 마진 모드와 다른 축이다.**
+        //
+        //   전에는 여기서 격리/교차(`marginType`)만 봤다. 그런데 종료 경로는
+        //   양방향(헤지) 계좌를 막는다(`closeSymbolPosition`). 그래서 격리인
+        //   헤지 계좌에서는 **열 수는 있고 닫을 수는 없는** 상태가 됐다.
+        //   그건 막는 것보다 나쁘다 — 자동 종료가 없는 100배 포지션이 남는다.
+        //
+        //   그래서 닫을 수 없는 계좌에서는 **열지 않는다.** 판정을 새로
+        //   만들지 않고, 종료 경로가 쓰는 같은 정본(`futuresPositionMode`)을
+        //   쓴다. 못 읽으면 진입도 막는다.
         observeMarginMode: async () => {
+          const pm = await futuresPositionMode(ex, conn.apiKey, conn.apiSecret, !connIsLive);
+          // 종료가 불가능한 모드는 진입 단계에서 막는다. `null`을 돌려주면
+          // `prepareEntry100x`가 `MARGIN_MODE_UNKNOWN`으로 세운다 — 담보
+          // 범위를 모르는 것과 같은 급으로 다룬다.
+          if (pm.mode !== 'ONE_WAY') return null;
           const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
           const mt = String(rr.risk?.marginType || '').toLowerCase();
           return mt === 'isolated' ? 'isolated' : mt === 'cross' || mt === 'crossed' ? 'cross' : null;

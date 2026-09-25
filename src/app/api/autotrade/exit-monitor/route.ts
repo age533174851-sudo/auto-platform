@@ -468,52 +468,60 @@ export async function GET(req: NextRequest) {
   //
   // 한 줄짜리 임차로 막고, 울타리 번호로 "느린 실행이 뒤늦게 깨어나
   // 자기가 아직 주인인 줄 아는 것"까지 막는다.
-  // 판정은 exitMonitorLease.ts에 있고 테스트가 붙어 있다.
-  const { leaseDecision, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
+  // 판정·획득 순서·울타리 확인은 모두 exitMonitorLease.ts에 있고, 두 실행을
+  // 동시에 돌려 "둘 다 주인이 되는" 경합을 재현하는 시험이 붙어 있다.
+  const { acquireExitLease, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
   const runner = String(req.headers.get('x-traigo-source') || '').trim() || 'manual';
   const holder = `${runner}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
 
-  let myFence: number | null = null;
-  let leaseTracked = true;
-  {
-    let current: any = undefined;
-    try {
-      const { data, error } = await (sb as any)
-        .from('exit_monitor_lease').select('holder, fence, expires_at').eq('id', 1).maybeSingle();
-      if (!error) current = data ?? null;
-      else if (/does not exist|schema cache|relation/i.test(String(error.message))) {
-        // 058이 아직인 배포. **여기서 막으면 청산 감시가 통째로 멈춘다** —
-        // 그건 이 안전장치가 막으려던 것보다 나쁘다. 예전처럼 돈다.
-        leaseTracked = false;
-      }
-    } catch { /* undefined로 남는다 → 실행하지 않는다 */ }
-
-    if (leaseTracked) {
-      const d = leaseDecision({
-        current: current == null ? current : {
-          holder: String(current.holder), fence: Number(current.fence) || 0,
-          expiresAtMs: Date.parse(String(current.expires_at)),
-        },
-        me: holder, nowMs: cronStartedAt,
-      });
-      if (!d.granted) {
-        // **기다리지 않는다.** 그쪽이 하면 되는 일이다.
-        return NextResponse.json({ ok: true, skipped: true, code: d.code, message: d.reason },
-          { headers: { 'Cache-Control': 'no-store' } });
-      }
-      myFence = d.nextFence;
-      const { error: upErr } = await (sb as any).from('exit_monitor_lease').upsert({
-        id: 1, holder, fence: myFence,
-        acquired_at: new Date(cronStartedAt).toISOString(),
-        expires_at: new Date(cronStartedAt + LEASE_TTL_MS).toISOString(),
-      }, { onConflict: 'id' });
-      if (upErr) {
-        return NextResponse.json({ ok: true, skipped: true, code: 'LEASE_WRITE_FAILED',
-          message: `임차를 적지 못해 이번은 건너뜁니다: ${String(upErr.message).slice(0, 200)}` },
-          { headers: { 'Cache-Control': 'no-store' } });
-      }
-    }
+  const lease = await acquireExitLease({
+    me: holder, nowMs: cronStartedAt, ttlMs: LEASE_TTL_MS,
+    store: {
+      read: async () => {
+        try {
+          const { data, error } = await (sb as any)
+            .from('exit_monitor_lease').select('holder, fence, expires_at').eq('id', 1).maybeSingle();
+          if (error) {
+            if (/does not exist|schema cache|relation/i.test(String(error.message))) {
+              return { missingTable: true };
+            }
+            return {}; // row: undefined → **못 읽었다.** 비어 있는 것이 아니다
+          }
+          return { row: data == null ? null : {
+            holder: String((data as any).holder), fence: Number((data as any).fence) || 0,
+            expiresAtMs: Date.parse(String((data as any).expires_at)),
+          } };
+        } catch { return {}; }
+      },
+      insert: async (row) => {
+        const { error } = await (sb as any).from('exit_monitor_lease').insert({
+          id: 1, holder: row.holder, fence: row.fence,
+          acquired_at: new Date(row.acquiredAtMs).toISOString(),
+          expires_at: new Date(row.expiresAtMs).toISOString(),
+        });
+        return { ok: !error, error: error ? String(error.message) : null };
+      },
+      // ★ **본 값을 조건으로 걸어** 쓴다(compare-and-set).
+      compareAndSet: async (row, prevFence) => {
+        const { data, error } = await (sb as any).from('exit_monitor_lease')
+          .update({
+            holder: row.holder, fence: row.fence,
+            acquired_at: new Date(row.acquiredAtMs).toISOString(),
+            expires_at: new Date(row.expiresAtMs).toISOString(),
+          })
+          .eq('id', 1).eq('fence', prevFence).select('fence');
+        return { updated: Array.isArray(data) ? data.length : 0,
+          error: error ? String(error.message) : null };
+      },
+    },
+  });
+  if (!lease.granted) {
+    // **기다리지 않는다.** 그쪽이 하면 되는 일이다.
+    return NextResponse.json({ ok: true, skipped: true, code: lease.code, message: lease.reason },
+      { headers: { 'Cache-Control': 'no-store' } });
   }
+  const myFence = lease.myFence;
+  const leaseTracked = lease.tracked;
 
   /** 주문을 내기 직전에 다시 묻는다 — 내 울타리가 아직 최신인가 */
   const stillMine = async (): Promise<boolean> => {
@@ -726,58 +734,31 @@ export async function GET(req: NextRequest) {
  *   lifecycleDecide    무엇을 할 것인가
  *   moveStopSafely     걸고 → 적고 → 치운다
  */
-async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
+async function runLifecycleSweep(
+  sb: any, dryRun: boolean,
+  /**
+   * ★ **거래소를 바꾸기 직전에 물어보는 실행 권한.**
+   *
+   *   이 sweep은 안에서 `closeSymbolPosition`으로 **실제 청산을 낸다.** 그런데
+   *   임차(fence) 확인은 이 함수가 **끝난 뒤**에 있었다(`stillMine`). 그래서
+   *   이 경로만 잠금 밖에 있었다 — 임차가 넘어간 뒤에도 청산이 나갔고, 같은
+   *   포지션을 둘이 닫을 수 있었다.
+   *
+   *   못 주면(undefined) 확인하지 않는다.
+   */
+  stillMine?: () => Promise<boolean>,
+): Promise<{
   candidates: number; acted: number; skipped: any[];
   results: any[]; summary: string; error: string | null;
 }> {
-  const out = {
-    candidates: 0, acted: 0, skipped: [] as any[],
-    results: [] as any[], summary: '', error: null as string | null,
-  };
-
-  const { managedCandidates, mayActOn, mutationKeyOf } = await import('@/lib/engine/managedPosition');
-  const { lifecycleDecide } = await import('@/lib/engine/exitLifecycle');
-  const { lifecyclePolicyOf } = await import('@/lib/strategies/lifecyclePolicy');
-
-  let rows: any[] = [];
-  try {
-    const { data, error } = await (sb as any).from('live_orders')
-      // ★ `stop_policy`(`078`)를 **반드시 함께 읽는다.**
-      //
-      //   이 칸이 빠져 있어서 `managedCandidates`가 정책을 볼 수 없었고,
-      //   고정 손절을 쓰지 않는 포지션이 후보에서 통째로 빠졌다. 감시 대상에
-      //   들어오지 못하면 시간 청산까지 닿지 못한다.
-      .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
-        + 'stop_policy, '
-        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id, strategy_id')
-      .order('acked_at', { ascending: false })
-      .limit(200);
-    // **조회 실패를 '없음'으로 적지 않는다.**
-    if (error) {
-      out.error = String(error.message).slice(0, 200);
-      out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
-      return out;
-    }
-    rows = Array.isArray(data) ? data : [];
-  } catch (e: any) {
-    out.error = String(e?.message || e).slice(0, 200);
-    out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
-    return out;
-  }
-
-  const { positions, skipped } = managedCandidates(rows);
-  out.candidates = positions.length;
-  out.skipped = skipped;
-  if (positions.length === 0) {
-    out.summary = '감시할 후보가 없습니다';
-    return out;
-  }
-
+  // ★ **판단과 순서는 여기 없다.** `engine/lifecycleSweep`에 있고, 가짜
+  //   거래소·가짜 장부로 돌려 청산 횟수·순서·중복·임차 상실을 센다
+  //   (`lifecycleSweep.test.ts`). 이 함수는 실제 구현을 끼우는 배선이다.
+  const { runLifecycleSweepCore } = await import('@/lib/engine/lifecycleSweep');
   const ops = await import('@/lib/engine/venuePositionOps');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
   const { resolveExecExchange } = await import('@/lib/exchanges/futuresExec');
   const { highWaterSince } = await import('@/lib/engine/exitMonitor');
-  const { moveStopSafely } = await import('@/lib/engine/stopMove');
 
   /** 연결 하나당 한 번만 읽는다. **연결이 망을 정한다** */
   const credCache = new Map<string, any>();
@@ -802,124 +783,40 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
     return credCache.get(connectionId);
   };
 
-  // **같은 자리에 두 번 주문하지 않는다.** 워커가 둘 떠 있거나 한 회차에
-  // 같은 포지션을 두 줄이 가리켜도 여기서 한 번만 실행한다.
-  const done = new Set<string>();
-
-  for (const p of positions) {
-    const key = mutationKeyOf(p);
-    if (done.has(key)) {
-      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
-        ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
-      continue;
-    }
-
-    try {
-      const venue = await credsOf(p.connectionId);
-      if (!venue) {
-        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'NO_VENUE', ok: false,
-          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
-        continue;
-      }
-      // **줄에 적힌 거래소와 연결의 거래소가 다르면 손대지 않는다.**
-      if (venue.exchange !== p.exchange) {
-        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'VENUE_MISMATCH', ok: false,
-          reason: `주문은 ${p.exchange}로 적혀 있는데 연결은 ${venue.exchange}입니다` });
-        continue;
-      }
-
-      const live = await ops.readOpenPosition(venue, p.symbol);
-      // 봉·현재가는 **그 거래소에서** 가져온다.
-      let hw: { highWaterR: number; lastPrice: number } | null = null;
-      // 최고 도달 R은 **1R이 정의될 때만** 뜻이 있다. 손절이 없는 계약에서
-      // 이 값을 구하면 분모 없는 비율을 만드는 것이고, 그 숫자는 아래
-      // 트레일링 판단에 쓰이지도 않는다(정책이 먼저 막는다).
-      const hasStop = p.stopPolicy !== 'NO_FIXED_SL' && Number(p.stopLoss) > 0;
-      if (live.ok && live.found && hasStop && mayActOn(p)) {
-        hw = await highWaterSince(p.symbol, p.openedAt, p.entryPrice, p.stopLoss as number,
-          p.side === 'LONG', venue.testnet, p.exchange);
-      }
-      // 지금 거래소에 걸려 있는 손절. **못 읽으면 진입 손절을 그대로 쓴다** —
-      // 방향을 같이 넘겨야 남의 조건부 주문을 이 포지션의 손절로 읽지 않는다.
-      let liveStop: number | null = null;
-      try { liveStop = await ops.liveStopPrice(venue, p.symbol, p.side); }
-      catch { liveStop = null; }
-
-      const policy = lifecyclePolicyOf(p.strategyId);
-      const v = lifecycleDecide({
-        position: p, policy,
-        live, highWaterR: hw?.highWaterR ?? null, lastPrice: hw?.lastPrice ?? null,
-        liveStop, nowMs: Date.now(),
-      });
-      // ★ **이 값이 어디서 왔는지 같이 내보낸다.**
-      //
-      //   `scalp`의 6시간은 `LIFECYCLE_TESTNET_V1` — 원본 진입 규칙과 무관하게
-      //   검증용으로 정한 값이다(`lifecyclePolicy.ts`의 note). 출처를 안 적으면
-      //   시간 청산이 일어났을 때 그것이 사용자가 정한 실전 종료 규칙처럼
-      //   읽힌다. 특히 이 값 하나가 무손절 계약의 **유일한** 자동 종료다.
-      const policySource = policy?.source ?? null;
-
-      if (v.action === 'NONE') {
-        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
-          ok: true, reason: v.reason, mayCleanProtection: v.mayCleanProtection,
-          stopPolicy: p.stopPolicy, policySource });
-        continue;
-      }
-      if (dryRun) {
-        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
-          ok: true, dryRun: true, reason: `점검 모드 — ${v.reason}` });
-        continue;
-      }
-
-      done.add(key);
-      if (v.action === 'CLOSE') {
-        const r = await ops.closeSymbolPosition(venue, p.symbol, p.side);
-        // **닫았다고 적기 전에 다시 읽는다.** 접수는 체결이 아니다.
-        const after = await ops.readOpenPosition(venue, p.symbol);
-        const flat = after.ok === true && after.found === false;
-        out.acted += 1;
-        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
-          stopPolicy: p.stopPolicy, policySource,
-          ok: !!r?.ok && flat, closed: !!r?.ok,
-          flatVerified: after.ok === true ? flat : null,
-          reason: v.reason + (after.ok === true
-            ? (flat ? ' — 포지션 0 확인' : ' — 아직 남아 있습니다')
-            : ' — 종료 후 재조회 실패(0이라는 뜻이 아닙니다)') });
-        continue;
-      }
-
-      // MOVE_STOP — 걸고 → 적고 → 치운다
-      const mv = await moveStopSafely({
-        symbol: p.symbol, side: p.side, newStop: v.newStop!,
-        place: async (stopPrice) => {
-          const r = await ops.placeStop(venue, { symbol: p.symbol, positionSide: p.side, stopPrice });
-          return { ok: !!r?.ok, orderId: r?.orderId ?? null, message: r?.message };
-        },
-        record: async (orderId) => {
-          // **stop_loss는 덮어쓰지 않는다.** 그 칸은 진입 시점 값이고 1R을 정의한다.
-          if (!p.orderId) return { ok: false, message: '주문 줄 id가 없어 적을 곳이 없습니다' };
-          const { error } = await (sb as any).from('live_orders')
-            .update({ sl_order_id: orderId }).eq('id', p.orderId);
-          return error ? { ok: false, message: String(error.message).slice(0, 120) } : { ok: true };
-        },
-        cancelOthers: async (keep) => ops.cancelOtherStops(venue, p.symbol, p.side, keep),
-      });
-      out.acted += mv.ok ? 1 : 0;
-      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: mv.code,
-        ok: mv.ok, newStop: v.newStop, newOrderId: mv.newOrderId,
-        cancelledOld: mv.cancelledOld, oldStopKept: mv.oldStopKept,
-        reason: `${v.reason} — ${mv.reason}` });
-    } catch (e: any) {
-      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'FAILED', ok: false,
-        reason: String(e?.message || e).slice(0, 160) });
-    }
-  }
-
-  const unknown = out.results.filter(r => r.code === 'POSITION_UNKNOWN').length;
-  out.summary = `후보 ${out.candidates}건 · 실행 ${out.acted}건`
-    + (unknown > 0 ? ` · 확인 못 함 ${unknown}건` : '')
-    + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
-  return out;
+  return runLifecycleSweepCore({
+    dryRun, stillMine,
+    readRows: async () => {
+      const { data, error } = await (sb as any).from('live_orders')
+        // ★ `stop_policy`(`078`)를 **반드시 함께 읽는다.**
+        //
+        //   이 칸이 빠져 있어서 `managedCandidates`가 정책을 볼 수 없었고,
+        //   고정 손절을 쓰지 않는 포지션이 후보에서 통째로 빠졌다. 감시 대상에
+        //   들어오지 못하면 시간 청산까지 닿지 못한다.
+        .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
+          + 'stop_policy, '
+          + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id, strategy_id')
+        .order('acked_at', { ascending: false })
+        .limit(200);
+      // **조회 실패를 '없음'으로 적지 않는다.**
+      if (error) return { rows: [], error: String(error.message) };
+      return { rows: Array.isArray(data) ? data : [], error: null };
+    },
+    venueOf: credsOf,
+    ops: {
+      readOpenPosition: (venue, symbol) => ops.readOpenPosition(venue, symbol) as any,
+      closeSymbolPosition: (venue, symbol, side) => ops.closeSymbolPosition(venue, symbol, side) as any,
+      liveStopPrice: (venue, symbol, side) => ops.liveStopPrice(venue, symbol, side) as any,
+      placeStop: (venue, i) => ops.placeStop(venue, i) as any,
+      cancelOtherStops: (venue, symbol, side, keep) => ops.cancelOtherStops(venue, symbol, side, keep) as any,
+    },
+    highWater: (p, venue) => highWaterSince(p.symbol, p.openedAt, p.entryPrice,
+      p.stopLoss as number, p.side === 'LONG', venue.testnet, p.exchange) as any,
+    recordStopOrderId: async (orderRowId, orderId) => {
+      const { error } = await (sb as any).from('live_orders')
+        .update({ sl_order_id: orderId }).eq('id', orderRowId);
+      return error ? { ok: false, message: String(error.message).slice(0, 120) } : { ok: true };
+    },
+  });
 }
 
   const sweep = dryRun
@@ -932,7 +829,7 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
   // 위 `decideExits`는 계단식 표만 본다. 이 경로가 scalp·my-original-v1의
   // 트레일링·본전이동·시간청산을 담당한다. 점검 모드에서는 판단만 하고
   // 주문을 내지 않는다.
-  const lifecycle = await runLifecycleSweep(sb, dryRun);
+  const lifecycle = await runLifecycleSweep(sb, dryRun, stillMine);
 
   // ── 무엇을 안 보고 있는가 ──
   //
@@ -1124,7 +1021,16 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
 
   // 회차를 닫는다. **#142 증거(정확한 번호로 취소한 남은 보호주문)를
   // 그대로 담는다** — 사용자가 Gate 앱을 열어 확인하지 않아도 되게.
-  const failed = results.filter(r => r && r.ok === false);
+  // ★ **청산 실패가 실행 상태에 반영되지 않고 있었다.**
+  //
+  //   `results`는 손절 이동(actionable) 경로의 결과다. 수명주기 sweep의
+  //   청산 실패 — 헤지 차단 · 모드 조회 실패 · 청산 거부 · 종료 후 재조회
+  //   실패 · 임차 상실 — 은 `lifecycle.results`에 있었고, 여기 집계에
+  //   들어오지 않았다. 그래서 청산이 실패한 회차가 `status: 'OK'`로 남았다.
+  const lifecycleFailed = Array.isArray((lifecycle as any)?.results)
+    ? (lifecycle as any).results.filter((r: any) => r && r.ok === false)
+    : [];
+  const failed = [...results.filter(r => r && r.ok === false), ...lifecycleFailed];
   await closeRun({
     status: failed.length > 0 ? 'FAILED' : 'OK',
     positions_scanned: decisions.length,

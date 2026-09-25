@@ -169,3 +169,123 @@ export function exitMonitorOverdue(i: {
       : `청산 감시가 ${Math.round(since / 60_000)}분째 밀렸습니다 (${Math.round(blockAfter / 60_000)}분을 넘기면 진입을 막습니다)`,
   };
 }
+
+// ── 임차를 실제로 잡는 순서 ──
+//
+// `leaseDecision`은 **판정**만 한다. 그 판정을 표에 쓰는 순서가 따로 있고,
+// 거기에 실제로 경합 구멍이 있었다:
+//
+//   A: SELECT fence=7 → "다음은 8" → UPSERT fence=8  ✅
+//   B: SELECT fence=7 → "다음은 8" → UPSERT fence=8  ✅  ← 둘 다 주인
+//
+// 뒤의 `stillMine()`도 둘 다 8을 보므로 통과한다. 그래서 **본 값을 조건으로
+// 걸어** 쓴다(compare-and-set). 그 사이 누가 끼어들었으면 갱신되는 줄이
+// 0개이고, 그때는 물러난다.
+//
+// 이 함수가 라우트 밖에 있는 이유는 하나다: **경합을 시험으로 재현할 수
+// 있어야 한다.** 라우트 안에서는 두 요청을 동시에 돌려 볼 수 없다.
+
+export type LeaseAcquireCode =
+  | 'ACQUIRED'
+  /** 남이 쥐고 있거나 상태를 못 읽었다 — 이번은 건너뛴다 */
+  | 'SKIP'
+  /** 판정까지는 통과했지만 쓰는 순간 남이 먼저 가져갔다 */
+  | 'RACE_LOST'
+  /** 임차 표가 아직 없는 배포 — 예전처럼 돈다 */
+  | 'UNTRACKED';
+
+export interface LeaseWriteRow {
+  holder: string;
+  fence: number;
+  acquiredAtMs: number;
+  expiresAtMs: number;
+}
+
+export interface LeaseStore {
+  /**
+   * 지금 줄을 읽는다.
+   *
+   * `row: null` 빈 표 · `row: undefined` **못 읽었다** ·
+   * `missingTable: true` 표 자체가 없다(마이그레이션 전)
+   */
+  read: () => Promise<{ row?: LeaseRow | null; missingTable?: boolean }>;
+  /** 줄이 없을 때 만들면서 잡는다. 동시에 둘이 만들면 하나만 성공한다 */
+  insert: (row: LeaseWriteRow) => Promise<{ ok: boolean; error?: string | null }>;
+  /**
+   * **본 값을 조건으로 걸어** 쓴다. 갱신된 줄 수를 돌려준다 —
+   * 0이면 그 사이 남이 가져간 것이다.
+   */
+  compareAndSet: (row: LeaseWriteRow, prevFence: number)
+    => Promise<{ updated: number; error?: string | null }>;
+}
+
+export interface LeaseAcquireResult {
+  code: LeaseAcquireCode;
+  granted: boolean;
+  /** 잡았으면 내 울타리 번호. `UNTRACKED`면 null이고 확인하지 않는다 */
+  myFence: number | null;
+  /** 임차 표로 추적되는 배포인가 */
+  tracked: boolean;
+  reason: string;
+}
+
+/**
+ * 한 회차의 실행 권한을 잡는다.
+ *
+ * **읽고 → 판정하고 → 본 값을 조건으로 쓴다.** 마지막 단계가 조건 없이
+ * 쓰면 두 실행이 같은 울타리 번호로 둘 다 주인이 된다.
+ */
+export async function acquireExitLease(i: {
+  store: LeaseStore;
+  me: string;
+  nowMs: number;
+  ttlMs?: number;
+}): Promise<LeaseAcquireResult> {
+  const ttl = Number.isFinite(i?.ttlMs as number) && (i.ttlMs as number) > 0
+    ? (i.ttlMs as number) : LEASE_TTL_MS;
+
+  let current: LeaseRow | null | undefined = undefined;
+  try {
+    const got = await i.store.read();
+    if (got?.missingTable) {
+      // 058이 아직인 배포. **여기서 막으면 청산 감시가 통째로 멈춘다** —
+      // 그건 이 안전장치가 막으려던 것보다 나쁘다. 예전처럼 돈다.
+      return { code: 'UNTRACKED', granted: true, myFence: null, tracked: false,
+        reason: '임차 표가 아직 없는 배포입니다 — 임차 없이 돕니다' };
+    }
+    current = got?.row;
+  } catch { /* undefined로 남는다 → 실행하지 않는다 */ }
+
+  const d = leaseDecision({ current, me: i.me, nowMs: i.nowMs, ttlMs: ttl });
+  if (!d.granted) {
+    // **기다리지 않는다.** 그쪽이 하면 되는 일이다.
+    return { code: 'SKIP', granted: false, myFence: null, tracked: true, reason: d.reason };
+  }
+
+  const myFence = d.nextFence as number;
+  const row: LeaseWriteRow = {
+    holder: i.me, fence: myFence,
+    acquiredAtMs: i.nowMs, expiresAtMs: i.nowMs + ttl,
+  };
+  const prevFence = current == null ? null : Number(current.fence) || 0;
+
+  let ok = false;
+  let err: string | null = null;
+  try {
+    if (prevFence == null) {
+      const r = await i.store.insert(row);
+      ok = r?.ok === true;
+      err = r?.error ? String(r.error) : (ok ? null : '다른 실행이 먼저 임차를 만들었습니다');
+    } else {
+      const r = await i.store.compareAndSet(row, prevFence);
+      ok = !r?.error && Number(r?.updated) === 1;
+      err = r?.error ? String(r.error) : (ok ? null : '다른 실행이 먼저 임차를 가져갔습니다');
+    }
+  } catch (e: any) { ok = false; err = String(e?.message || e); }
+
+  if (!ok) {
+    return { code: 'RACE_LOST', granted: false, myFence: null, tracked: true,
+      reason: `임차를 잡지 못해 이번은 건너뜁니다: ${String(err || '').slice(0, 200)}` };
+  }
+  return { code: 'ACQUIRED', granted: true, myFence, tracked: true, reason: d.reason };
+}

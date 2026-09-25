@@ -88,23 +88,16 @@ export async function closeSymbolPosition(
     //
     // 불변식: **종료 요청으로 신규·반대 포지션이 생기지 않는다.**
     // 모드를 모르면 그 불변식을 보장할 수 없으므로 보내지 않는다.
+    //
+    // ★ 판정은 **여기 있지 않다.** `futuresExec.closeModeVerdict`가 갖는다 —
+    //   진입 판정(`positionModeVerdict`)과 같은 파일에 나란히 두어야, 한쪽만
+    //   고쳐져서 "열 수는 있는데 닫을 수는 없는" 상태가 생기지 않는다.
     const fa = await import('../exchanges/futuresAdapter');
+    const fx = await import('../exchanges/futuresExec');
     const pm = await fa.futuresPositionMode(
       c.exchange as any, c.apiKey, c.apiSecret, c.testnet);
-    if (pm.mode == null) {
-      return { attempted: false, ok: false,
-        error: '계좌의 포지션 모드(단방향/양방향)를 읽지 못해 청산 주문을 보내지 않았습니다'
-          + (pm.error ? ` — ${pm.error}` : '') };
-    }
-    if (pm.mode === 'HEDGE') {
-      // **추측해서 보내지 않는다.** 양방향 계좌의 정확한 종료 파라미터
-      // 조합(positionSide 필수 여부·reduceOnly 허용 여부·전량/부분)은 아직
-      // 공식 문서로 확인하지 못했다(NOT_VERIFIED). 확인 전까지는 막는다 —
-      // 틀린 조합으로 보내면 반대 포지션이 열릴 수 있다.
-      return { attempted: false, ok: false,
-        error: '양방향(헤지) 계좌의 청산 규격을 아직 확정하지 못해 보내지 않았습니다 '
-          + '— 단방향 계좌에서만 자동 청산이 동작합니다' };
-    }
+    const cm = fx.closeModeVerdict(pm.mode as any, pm.error);
+    if (!cm.ok) return { attempted: false, ok: false, error: cm.message };
     if (c.exchange === 'gate') {
       const gf = await import('../exchanges/gateFutures');
       const gp = await import('../exchanges/gatePlan');

@@ -199,4 +199,57 @@ export function runManagedPositionTests() {
     eq(positions[0].stopPolicy, null);
     eq(positions[0].stopLoss, 90);
   });
+
+  // ══════════ ★ 과거 주문이 새 포지션을 닫지 못한다 ══════════
+  //
+  // 무엇이 고장이었나
+  // ─────────────────
+  // 중복 제거가 **판단 뒤**에 있었고(`done`), 그 등록은 "조치가 있을 때"만
+  // 일어났다. 그래서:
+  //
+  //   1시간 전 새 진입   → 아직 6시간 안 됨 → NONE → done에 안 들어감
+  //   7시간 전 과거 주문 → 같은 계좌·종목·방향·전략 → 시간 초과 → **청산**
+  //
+  // 각 줄의 `acked_at`은 정확했다. 문제는 **어느 줄이 현재 포지션을
+  // 대표하는가**였고, `acked_at`을 쓴다는 것만으로는 막히지 않았다.
+
+  test('★ 같은 전략의 오래된 줄은 후보에서 빠진다 (조기 청산 방지)', () => {
+    const NEW = '2026-08-27T11:00:00.000Z';   // 1시간 전
+    const OLD = '2026-08-27T05:00:00.000Z';   // 7시간 전
+    const { positions, skipped } = managedCandidates([
+      row({ id: 'new', acked_at: NEW }),
+      row({ id: 'old', acked_at: OLD }),
+    ]);
+    eq(positions.length, 1, '같은 자리를 두 줄이 대표했습니다');
+    eq(positions[0].orderId, 'new', '★ 오래된 줄이 선택됐습니다 — 조기 청산이 납니다');
+    assert(skipped.some(s => s.code === 'STALE_DUPLICATE'),
+      '밀려난 줄이 기록되지 않았습니다');
+  });
+
+  test('★ 순서를 뒤집어 넣어도 최신이 선택된다 (정렬에 기대지 않는다)', () => {
+    const NEW = '2026-08-27T11:00:00.000Z';
+    const OLD = '2026-08-27T05:00:00.000Z';
+    const a = managedCandidates([row({ id: 'old', acked_at: OLD }), row({ id: 'new', acked_at: NEW })]);
+    eq(a.positions.length, 1);
+    eq(a.positions[0].orderId, 'new', '★ 입력 순서가 결과를 바꿨습니다');
+  });
+
+  test('전략이 다르면 합치지 않는다 — 충돌로 드러내야 한다', () => {
+    const { positions } = managedCandidates([
+      row({ id: 'a', signal_id: '[s:scalp]s1', strategy_id: 'scalp' }),
+      row({ id: 'b', signal_id: '[s:daily-ladder]s2', strategy_id: 'daily-ladder' }),
+    ]);
+    eq(positions.length, 2, '다른 전략의 주장이 합쳐졌습니다 — 충돌을 못 봅니다');
+  });
+
+  test('★ 무손절 계약에서도 과거 줄이 새 포지션을 닫지 못한다', () => {
+    const NEW = '2026-08-27T11:00:00.000Z';
+    const OLD = '2026-08-27T03:00:00.000Z';
+    const { positions } = managedCandidates([
+      row({ id: 'new', acked_at: NEW, stop_loss: null, stop_policy: 'NO_FIXED_SL', sl_order_id: null }),
+      row({ id: 'old', acked_at: OLD, stop_loss: null, stop_policy: 'NO_FIXED_SL', sl_order_id: null }),
+    ]);
+    eq(positions.length, 1);
+    eq(positions[0].orderId, 'new');
+  });
 }

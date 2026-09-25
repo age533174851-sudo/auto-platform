@@ -127,10 +127,31 @@ function stripComments(src) {
       // **정의가 있는 것과 부르는 것은 다르다.** 이 검사의 첫 판이
       // `async function runLifecycleSweep(`을 호출로 세어 속았다.
       [/await\s+runLifecycleSweep\s*\(/, '생명주기 경로를 부르지 않습니다 — scalp·my-original-v1이 다시 감시 밖으로 나갑니다'],
-      [/managedCandidates/, 'live_orders에서 후보를 만들지 않습니다'],
-      [/lifecycleDecide/, '생명주기 판정을 쓰지 않습니다'],
-      [/moveStopSafely/, '손절 이동을 안전한 순서로 하지 않습니다 (걸고 → 적고 → 치운다)'],
-      [/mutationKeyOf/, '같은 자리 중복 실행을 막지 않습니다'],
+      // ★ 루프 자체는 `engine/lifecycleSweep`으로 옮겼다 — 가짜 거래소로
+      //   돌려 청산 횟수·순서를 세려면 라우트 밖에 있어야 한다. 그래서
+      //   라우트에서는 **정본을 부르는지**만 보고, 재료는 아래에서 본다.
+      [/runLifecycleSweepCore\s*\(/, '생명주기 정본을 부르지 않습니다 — 루프가 라우트로 돌아가면 실행 횟수를 셀 수 없습니다'],
+    ]) {
+      if (!re.test(code)) err(`${rel} — ${why}`);
+    }
+  }
+}
+
+// ── ⑤-b 생명주기 정본이 재료를 다 쓰는가 ──
+//
+// 위 ⑤가 보던 네 가지는 이제 이 파일에 있다. **옮긴 것을 "없어졌다"로
+// 두지도 않고, 옮겼다는 이유로 검사를 놓지도 않는다.**
+{
+  const rel = 'src/lib/engine/lifecycleSweep.ts';
+  const src = read(rel);
+  if (src) {
+    const code = stripComments(src);
+    for (const [re, why] of [
+      [/managedCandidates\s*\(/, 'live_orders에서 후보를 만들지 않습니다'],
+      [/lifecycleDecide\s*\(/, '생명주기 판정을 쓰지 않습니다'],
+      [/moveStopSafely\s*\(/, '손절 이동을 안전한 순서로 하지 않습니다 (걸고 → 적고 → 치운다)'],
+      [/mutationKeyOf\s*\(/, '같은 자리 중복 실행을 막지 않습니다'],
+      [/applyLifecycleClose\s*\(/, '청산 실행 정본을 쓰지 않습니다 (권한 → 전송 → 재조회)'],
     ]) {
       if (!re.test(code)) err(`${rel} — ${why}`);
     }

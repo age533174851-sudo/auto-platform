@@ -236,7 +236,50 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     } });
   }
 
-  const positions: ManagedPosition[] = keep.map(({ pos }) => {
+  // ══════════ ★ 같은 자리를 가리키는 줄이 여럿이면 **최신 하나만** ══════════
+  //
+  // 무엇이 고장이었나
+  // ─────────────────
+  // 후보를 만들 때는 줄마다 하나씩 다 올렸고, 중복 제거는 **판단 뒤**에
+  // 있었다(`done`). 그런데 그 등록이 "조치가 있을 때"만 일어나서:
+  //
+  //   1시간 전 새 진입  → 아직 6시간 안 됨 → NONE → done에 안 들어감
+  //   7시간 전 과거 주문 → 같은 계좌·종목·방향 → 시간 초과 → **청산**
+  //
+  // 즉 **과거 행의 보유 시간이 현재 포지션을 닫는다.** `acked_at`을 쓰는
+  // 것만으로는 이 고장이 막히지 않는다 — 각 줄의 시각은 정확했고, 문제는
+  // 어느 줄이 현재 포지션을 대표하는지였다.
+  //
+  // 그래서 **판단 전에** 자리마다 가장 최신 줄만 남긴다. 호출부가 넘기는
+  // 순서에 기대지 않고 `openedAt`으로 직접 고른다 — 정렬이 바뀌어도 같은
+  // 답이 나와야 한다.
+  //
+  // ★ **이것으로 소유권이 증명되지는 않는다.** 최신 줄이 현재 열려 있는
+  //   포지션과 같은 진입이라는 보장은 거래소가 주지 않는다(우리는 venue가
+  //   인정하는 포지션 개시 시각을 읽지 못한다). 그래서 밀려난 줄을
+  //   `STALE_DUPLICATE`로 남겨, 그런 자리가 있었다는 사실이 보이게 한다.
+  const newest = new Map<string, { row: OrderRowLike; pos: Omit<ManagedPosition, 'ownership'> }>();
+  for (const k of keep) {
+    // ★ **전략을 키에 넣는다.**
+    //
+    //   빼면 같은 종목을 주장하는 **다른 전략의 줄**까지 하나로 합쳐지고,
+    //   그러면 전략 충돌(`CONTESTED`)을 감지할 수 없다 — 그 판정은 두 줄이
+    //   다 올라와야 성립한다. 실제로 그 시험이 깨져서 알았다.
+    //
+    //   막으려는 것은 **같은 전략의 오래된 줄**이다. 전략이 다르면 서로
+    //   다른 주장이고, 그건 합칠 것이 아니라 충돌로 드러내야 한다.
+    const key = `${k.pos.connectionId}|${k.pos.symbol}|${k.pos.side}|${k.pos.strategyId ?? ''}`;
+    const cur = newest.get(key);
+    if (!cur || k.pos.openedAt > cur.pos.openedAt) {
+      if (cur) note('STALE_DUPLICATE', '같은 자리를 가리키는 더 오래된 줄은 판단하지 않습니다');
+      newest.set(key, k);
+    } else {
+      note('STALE_DUPLICATE', '같은 자리를 가리키는 더 오래된 줄은 판단하지 않습니다');
+    }
+  }
+  const kept = Array.from(newest.values());
+
+  const positions: ManagedPosition[] = kept.map(({ pos }) => {
     const claimants = Array.from(claims.get(`${pos.connectionId}|${pos.symbol}`) ?? []);
     let ownership: ManagedPosition['ownership'];
     if (claimants.length > 1) {
