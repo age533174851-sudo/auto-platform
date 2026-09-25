@@ -11,9 +11,9 @@
 
 | | 수 |
 |---|--:|
-| **실제 화면 (SCREEN_INDEX)** | 66 |
+| **실제 화면 (SCREEN_INDEX)** | 67 |
 | 들여다본 화면 (SURVEYED) | 6 |
-| 존재만 확인 (LISTED_ONLY) | 60 |
+| 존재만 확인 (LISTED_ONLY) | 61 |
 | 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
@@ -99,6 +99,7 @@
 | **개발자** `developer` | `/developer` | ROUTE | 목록만 | `UNSURVEYED` |
 | **로그인** `auth` | `/auth` | ROUTE | 목록만 | `UNSURVEYED` |
 | **로그인 콜백** `auth_callback` | `/auth/callback` | ROUTE | 목록만 | `UNSURVEYED` |
+| **비밀번호 재설정** `auth_reset` | `/auth/reset` | ROUTE | 목록만 | `UNSURVEYED` |
 | **개인정보처리방침** `privacy` | `/privacy` | ROUTE | 목록만 | `UNSURVEYED` |
 | **이용약관** `terms` | `/terms` | ROUTE | 목록만 | `UNSURVEYED` |
 | **권한 없음** `unauthorized` | `/unauthorized` | ROUTE | 목록만 | `UNSURVEYED` |
@@ -120,6 +121,7 @@
 - **`route_chart`** — 탭의 `chart`와 이름이 같지만 다른 화면이다
 - **`auth`** — **키·시크릿을 화면에 남기지 않는다**
 - **`auth_callback`** — 사용자가 머무는 화면이 아니라 거쳐 가는 자리다
+- **`auth_reset`** — 재설정 메일이 착지하는 자리. 이 라우트가 없어서 사용자가 메일 링크에서 404를 봤다
 
 ### 1-2. 들여다본 화면만 — 액션 · 상태 · primitive
 
