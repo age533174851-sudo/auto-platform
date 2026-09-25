@@ -22,6 +22,7 @@ export default function AuthResetPage() {
 
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe = () => {};
 
     (async () => {
       try {
@@ -45,6 +46,8 @@ export default function AuthResetPage() {
           }
         });
 
+        unsubscribe = () => listener.subscription.unsubscribe();
+
         // INITIAL_SESSION이 먼저 끝난 경우도 허용한다. 이 페이지는
         // password-reset 메일의 redirectTo 전용 착지점이다.
         const { data: { session } } = await sb.auth.getSession();
@@ -66,7 +69,6 @@ export default function AuthResetPage() {
           }
         }
 
-        return () => listener.subscription.unsubscribe();
       } catch (error) {
         console.error('[auth/reset] session check failed', error);
         if (!cancelled) {
@@ -76,7 +78,7 @@ export default function AuthResetPage() {
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
 
   async function submit() {
