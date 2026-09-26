@@ -290,6 +290,13 @@ const CASES = [
    [[`      {p.estimate ? <div style={{ flexShrink: 0 }}>{p.estimate}</div> : null}`, `      {null}`],
     [`        }}>{p.orderForm}</div>`, `        }}>{p.orderForm}{p.estimate}</div>`]]],
 
+  // ★ 실기 프로브가 잡은 결함을 뮤테이션으로 고정한다.
+  //   360×660에서 실행 버튼이 638~697px에 놓였다 — 화면 밖 37px.
+  //   아래 블록 높이를 안 빼면 그 상태로 돌아간다.
+  ['MUT-N58b 아래 블록(예상값+버튼) 높이를 안 뺀다 (실행 버튼이 화면 밖으로 밀린다)', SHELL, 'RED',
+   [[`  const bodyH = Math.max(140, boxH - topH - botH - TAB_PEEK);`,
+     `  const bodyH = Math.max(140, boxH - topH - TAB_PEEK);`]]],
+
   ['MUT-N58 실행 버튼 줄을 다시 붙인다 (슬라이더를 덮는다)', SHELL, 'RED',
    [[`        flexShrink: 0, padding: '6px 10px',`,
      `        position: 'sticky', bottom: 0, padding: '6px 10px',`]]],
@@ -298,7 +305,7 @@ const CASES = [
   //   그대로라 이름 검사가 통과하고, 그러면 "검사기가 못 잡는다"가 아니라
   //   "깨지 않았다"가 된다. 실제 방어점(잰 값에서 나오는 높이)을 끈다.
   ['MUT-N59 첫 화면 높이를 상수로 박는다 (경고 한 줄이 늘면 버튼이 밀린다)', SHELL, 'RED',
-   [[`  const bodyH = Math.max(180, boxH - topH - TAB_PEEK);`,
+   [[`  const bodyH = Math.max(140, boxH - topH - botH - TAB_PEEK);`,
      `  const bodyH = 420;`]]],
 
   // ── ⑭ 포지션은 주문이 간 장부에서 ──
