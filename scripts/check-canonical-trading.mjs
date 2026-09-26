@@ -649,11 +649,14 @@ const drawer = code(read(DRAWER));
   {
     const m = shell.match(/const bodyH = [^;]+;/);
     if (!m) err(`${SHELL}에서 첫 화면 본문 높이 계산을 찾지 못했습니다`);
-    else if (!/boxH/.test(m[0]) || !/topH/.test(m[0])) {
-      err(`${SHELL}의 첫 화면 높이가 잰 값에서 나오지 않습니다 (${m[0].trim()})`
-        + ' — 상수로 박으면 주문 버튼이 밀립니다');
+    // ★ `botH`(예상값+실행버튼)를 안 빼면 실행 버튼이 첫 화면 **밖으로**
+    //   밀린다. 360×660 실측에서 638~697px에 놓였다 — 요소는 DOM에 있고
+    //   크기도 0이 아니라, 있는지만 보는 검사로는 전부 통과했다.
+    else if (!/boxH/.test(m[0]) || !/topH/.test(m[0]) || !/botH/.test(m[0])) {
+      err(`${SHELL}의 첫 화면 높이가 잰 값 셋(boxH·topH·botH)에서 나오지 않습니다`
+        + ` (${m[0].trim()}) — 하나라도 빼먹으면 실행 버튼이 화면 밖으로 밀립니다`);
     }
-    for (const v of ['boxH', 'topH']) {
+    for (const v of ['boxH', 'topH', 'botH']) {
       if (!new RegExp(`\\[\\w+Ref, ${v}\\] = useMeasuredHeight`).test(shell)) {
         err(`${SHELL}의 ${v}가 useMeasuredHeight에서 나오지 않습니다`);
       }

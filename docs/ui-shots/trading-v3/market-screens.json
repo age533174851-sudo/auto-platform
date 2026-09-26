@@ -1,0 +1,188 @@
+{
+  "360x660": {
+    "entered": {
+      "open": true,
+      "level": "PRO",
+      "screen": "SPOT_SCREEN"
+    },
+    "collapsed": {
+      "chartBar": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 104,
+        "bottom": 144,
+        "h": 40
+      },
+      "overlay": false,
+      "canvas": false,
+      "book": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 144,
+        "bottom": 479,
+        "h": 336
+      },
+      "controls": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 218,
+        "bottom": 289,
+        "h": 72
+      },
+      "cta": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 530,
+        "bottom": 588,
+        "h": 59
+      },
+      "barOpen": "0"
+    },
+    "hitTest": {
+      "ok": true,
+      "hit": "button[mkt-chart-bar]",
+      "bar": "button[mkt-chart-bar]",
+      "top": 104
+    },
+    "expanded": {
+      "overlay": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 0,
+        "bottom": 660,
+        "h": 660
+      },
+      "canvas": true,
+      "unavailable": false
+    },
+    "stateKept": {
+      "before": "0",
+      "after": "0"
+    },
+    "forbidden": []
+  },
+  "390x844": {
+    "entered": {
+      "open": true,
+      "level": "PRO",
+      "screen": "SPOT_SCREEN"
+    },
+    "collapsed": {
+      "chartBar": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 104,
+        "bottom": 144,
+        "h": 40
+      },
+      "overlay": false,
+      "canvas": false,
+      "book": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 144,
+        "bottom": 663,
+        "h": 520
+      },
+      "controls": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 218,
+        "bottom": 289,
+        "h": 72
+      },
+      "cta": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 714,
+        "bottom": 772,
+        "h": 59
+      },
+      "barOpen": "0"
+    },
+    "hitTest": {
+      "ok": true,
+      "hit": "button[mkt-chart-bar]",
+      "bar": "button[mkt-chart-bar]",
+      "top": 104
+    },
+    "expanded": {
+      "overlay": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 0,
+        "bottom": 844,
+        "h": 844
+      },
+      "canvas": true,
+      "unavailable": false
+    },
+    "stateKept": {
+      "before": "0",
+      "after": "0"
+    },
+    "forbidden": []
+  },
+  "430x932": {
+    "entered": {
+      "open": true,
+      "level": "PRO",
+      "screen": "SPOT_SCREEN"
+    },
+    "collapsed": {
+      "chartBar": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 104,
+        "bottom": 144,
+        "h": 40
+      },
+      "overlay": false,
+      "canvas": false,
+      "book": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 144,
+        "bottom": 751,
+        "h": 608
+      },
+      "controls": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 218,
+        "bottom": 289,
+        "h": 72
+      },
+      "cta": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 802,
+        "bottom": 860,
+        "h": 59
+      },
+      "barOpen": "0"
+    },
+    "hitTest": {
+      "ok": true,
+      "hit": "button[mkt-chart-bar]",
+      "bar": "button[mkt-chart-bar]",
+      "top": 104
+    },
+    "expanded": {
+      "overlay": {
+        "present": true,
+        "inFirstScreen": true,
+        "top": 0,
+        "bottom": 932,
+        "h": 932
+      },
+      "canvas": true,
+      "unavailable": false
+    },
+    "stateKept": {
+      "before": "0",
+      "after": "0"
+    },
+    "forbidden": []
+  }
+}

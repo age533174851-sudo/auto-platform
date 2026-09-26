@@ -83,13 +83,23 @@ function fmt(v: number | null): string {
 export function TradingScreenShell(p: TradingScreenShellProps) {
   const [boxRef, boxH] = useMeasuredHeight<HTMLDivElement>();
   const [topRef, topH] = useMeasuredHeight<HTMLDivElement>();
+  // ★ 아래 블록(예상값 + 실행 버튼)도 **재서** 뺀다.
+  //
+  //   처음에는 위쪽만 빼고 아래는 안 뺐다. 360×660 실측에서 실행 버튼이
+  //   638~697px에 놓였다 — **화면 아래로 37px 밀려 나갔다.** 요소는 DOM에
+  //   있고 크기도 0이 아니라, 있는지만 보는 검사로는 전부 통과한다.
+  //   밀린 것이 실행 버튼이라 사용자는 주문을 못 낸다.
+  const [botRef, botH] = useMeasuredHeight<HTMLDivElement>();
   const [bookOpen, setBookOpen] = React.useState(true);
   const [tab, setTab] = React.useState(p.tabs[0]?.id || '');
 
-  // 첫 화면의 본문 높이 = 통 − (헤더+정보+차트막대) − 탭 줄이 비치는 만큼.
-  // 아래 예상값·버튼 줄은 본문 밖에 있으므로 여기서 빼지 않는다 — 그 둘은
-  // `flexShrink: 0`이라 절대 눌리지 않는다.
-  const bodyH = Math.max(180, boxH - topH - TAB_PEEK);
+  // 첫 화면의 본문 높이
+  //   = 통 − (헤더+정보+차트막대) − (예상값+실행버튼) − 탭 줄이 비치는 만큼
+  //
+  // 넷을 다 빼야 실행 버튼이 첫 화면 안에 남는다. `flexShrink: 0`은 그
+  // 줄이 **눌리지 않는다**는 뜻이지 **보인다**는 뜻이 아니다 — 본문이
+  // 너무 크면 그냥 아래로 밀려 나간다.
+  const bodyH = Math.max(140, boxH - topH - botH - TAB_PEEK);
   const active = p.tabs.find(t => t.id === tab) || p.tabs[0];
 
   return (
@@ -188,16 +198,19 @@ export function TradingScreenShell(p: TradingScreenShellProps) {
         )}
       </div>
 
-      {/* ── 예상값 · 사유 — 본문 밖. 스크롤에 딸려 사라지지 않는다 ── */}
-      {p.estimate ? <div style={{ flexShrink: 0 }}>{p.estimate}</div> : null}
+      {/* ── 아래 블록: 예상값 · 실행 버튼 ──
+          본문 밖이라 스크롤에 딸려 사라지지 않고, 높이를 재서 본문에서
+          빼므로 첫 화면 밖으로 밀려 나가지도 않는다. */}
+      <div ref={botRef}>
+        {p.estimate ? <div style={{ flexShrink: 0 }}>{p.estimate}</div> : null}
 
-      {/* ── 실행 버튼 ──
-          `position: sticky`로 붙이지 않는다. 360×660 실측에서 붙인 줄이
-          슬라이더를 덮어 **보이는데 눌리지 않는** 상태가 된 적이 있다. */}
-      <div data-testid="trading-cta" style={{
-        flexShrink: 0, padding: '6px 10px',
-        background: C.panel, borderTop: `1px solid ${C.hair}`,
-      }}>{p.cta}</div>
+        {/* `position: sticky`로 붙이지 않는다. 실측에서 붙인 줄이
+            슬라이더를 덮어 **보이는데 눌리지 않는** 상태가 된 적이 있다. */}
+        <div data-testid="trading-cta" style={{
+          flexShrink: 0, padding: '6px 10px',
+          background: C.panel, borderTop: `1px solid ${C.hair}`,
+        }}>{p.cta}</div>
+      </div>
 
       {/* ── 아래: 포지션 · 미체결 · 체결 ── */}
       <div style={{ borderTop: `1px solid ${C.hair2}`, background: C.panel }}>
