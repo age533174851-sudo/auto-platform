@@ -14,6 +14,9 @@
 //   ② 첫 화면(viewport 안)에 **호가 · 주문 입력 · 실행 버튼**이 같이 보인다
 //   ③ 차트 막대를 누르면 펼쳐지고, 닫으면 **주문 입력이 그대로 살아 있다**
 //   ④ 시장마다 금지된 칸이 **렌더되지 않는다** (계약 정본에서 읽는다)
+//   ⑤ 시장 탭 넷을 눌러 **네 화면에 실제로 들어가진다**
+//   ⑥ 종목 출처가 없는 시장은 **주문이 잠기고 사유가 보인다**
+//      (REACHABLE != TRADABLE — 가짜 심볼로 채우지 않는다)
 //
 // CI에는 넣지 않는다 — Playwright는 이 저장소의 의존성이 아니다.
 // (`scripts/probe/README.md`의 규약을 그대로 따른다.)
@@ -212,6 +215,66 @@ for (const [name, w, h] of VIEWPORTS) {
   if (forbidden == null) console.log(`  · ${name}: 현물 화면이 아니라 금지 칸 검사를 건너뜁니다`);
   else if (forbidden.length) bad(`${name}: 현물 화면에 선물 칸이 렌더됐습니다 [${forbidden.join(', ')}]`);
   else ok(`${name}: 현물 화면에 선물 칸 없음`);
+
+  // ══ ⑤ 시장 탭 넷이 실제 화면까지 간다 ══
+  //
+  // 탭만 만들고 화면을 안 붙이면 사용자는 누를 수 있는데 아무 일도 안
+  // 일어난다. 눌러 보고 **화면이 바뀌었는지**로 확인한다.
+  r.tabs = {};
+  for (const [tab, root] of [
+    ['SPOT', 'spot-trading-screen'],
+    ['USDM', 'usdm-trading-screen'],
+    ['COINM', 'coinm-trading-screen'],
+    ['STOCK', 'stock-trading-screen'],
+  ]) {
+    await page.click(`[data-testid="market-tab-${tab}"]`, { timeout: 5000 }).catch(async () => {
+      await page.evaluate((t) =>
+        (document.querySelector(`[data-testid="market-tab-${t}"]`))?.click(), tab);
+    });
+    await page.waitForTimeout(900);
+    const got = await page.evaluate((rootId) => {
+      const host = document.querySelector('[data-testid="paper-order-screen"]');
+      const el = document.querySelector(`[data-testid="${rootId}"]`);
+      const cta = document.querySelector('[data-testid="trading-cta"] button');
+      return {
+        screen: host?.getAttribute('data-screen') ?? null,
+        market: host?.getAttribute('data-market') ?? null,
+        tradable: host?.getAttribute('data-tradable') ?? null,
+        rendered: !!el,
+        active: document.querySelector('[data-testid="market-tabs"] [data-active="1"]')
+          ?.getAttribute('data-testid') ?? null,
+        ctaDisabled: cta ? cta.disabled : null,
+        reason: document.querySelector('[data-testid="instrument-unavailable"]')?.textContent?.trim() ?? null,
+        // ★ 다른 시장 데이터를 빌려 오지 않았는가
+        borrowedBook: !!document.querySelector('[data-region="tradingScreen"] [data-testid="mkt-order-book"] table'),
+      };
+    }, root);
+    r.tabs[tab] = got;
+
+    if (!got.rendered) { bad(`${name}: ${tab} 탭이 화면까지 가지 않습니다 (screen=${got.screen})`); continue; }
+    if (got.active !== `market-tab-${tab}`) bad(`${name}: ${tab} 탭이 active 표시가 안 됩니다`);
+    ok(`${name}: ${tab} 탭 → ${got.screen} 도달 (tradable=${got.tradable})`);
+
+    await page.screenshot({ path: `${OUT}/${name}-${tab}-collapsed.png` });
+
+    // ⑥ 종목이 없으면 **주문이 잠기고 사유가 보인다**
+    if (got.tradable === '0') {
+      if (got.ctaDisabled !== true) {
+        bad(`${name}: ${tab}에 종목이 없는데 실행 버튼이 열려 있습니다`);
+      } else if (!got.reason) {
+        bad(`${name}: ${tab}에 종목이 없는데 이유가 화면에 없습니다`);
+      } else {
+        ok(`${name}: ${tab} 도달했지만 거래 불가 — 사유 표시 + 주문 잠금`);
+      }
+    } else if (got.ctaDisabled === true && tab !== 'STOCK') {
+      console.log(`  · ${name}: ${tab} 거래 가능인데 버튼이 잠겼다 (로그아웃 상태일 수 있음)`);
+    }
+  }
+
+  // 원래 탭으로 돌려놓는다
+  await page.evaluate(() =>
+    (document.querySelector('[data-testid="market-tab-SPOT"]'))?.click());
+  await page.waitForTimeout(500);
 
   await ctx.close();
 }

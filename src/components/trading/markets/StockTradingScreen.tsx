@@ -33,18 +33,13 @@
 import React from 'react';
 import { C, FS } from '@/components/terminal/theme';
 
-import { TradingScreenShell, InfoStat, LockedField, type ShellTab } from './TradingScreenShell';
+import { TradingScreenShell, InfoStat, LockedField,
+  type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { capability } from '@/lib/markets/marketType';
 import { marketPhase, marketOfSymbol } from '@/lib/markets/marketHours';
 
-export interface StockScreenProps {
-  /** `005930`(KRX) 또는 `AAPL`(US) */
-  symbol: string;
-  name?: string;
-  price: number | null;
-  changePct: number | null;
-  changeLabel: string;
+export interface StockScreenProps extends MarketScreenCommonProps {
   /** 주문가능금액. **못 읽었으면 null** — 0으로 접지 않는다 */
   orderableCash: number | null;
   orderableCashUnknownReason?: string | null;
@@ -54,8 +49,6 @@ export interface StockScreenProps {
   brokerReason?: string | null;
   /** 공휴일 목록. **없으면 null** — 그러면 화면이 "휴장일은 못 거릅니다"라고 적는다 */
   holidays?: string[] | null;
-  onBack: () => void;
-  headerRight?: React.ReactNode;
 }
 
 const CONTRACT = screenContract('STOCK');
@@ -65,16 +58,23 @@ export function StockTradingScreen(p: StockScreenProps) {
   const [side, setSide] = React.useState<'BUY' | 'SELL'>('BUY');
   const [qtyText, setQtyText] = React.useState('');
 
-  const venue = marketOfSymbol(p.symbol);
+  // ★ 종목이 없으면 거래소도 세션도 정하지 않는다. 코인 티커를 주식으로
+  //   읽어 미국장 시간표를 적용하면 조용히 틀린 판정이 나온다.
+  const sym = p.instrument?.symbol ?? null;
+  const venue = sym == null ? null : marketOfSymbol(sym);
   const session = venue ? marketPhase(venue, Date.now(), { holidays: p.holidays ?? null }) : null;
-  const blocked = p.brokerReason || NO_BROKER;
+  const blocked = p.instrumentReason || p.brokerReason || NO_BROKER;
+  // 종목이 없거나 증권사 연결이 없거나 장이 닫혀 있으면 **누를 수 없다.**
+  // 세 사유를 한 값으로 접어야 버튼마다 빠뜨리지 않는다.
+  const locked = sym == null || !!blocked || !session?.canOrder;
 
   const qty = Number(qtyText);
   // 총 주문금액은 **수량 × 현재가**다. 가격을 못 읽으면 계산하지 않는다 —
   // 0원으로 적으면 "공짜"로 읽힌다.
-  const totalAmount = p.price != null && Number.isFinite(qty) && qty > 0 ? p.price * qty : null;
+  const totalAmount = !locked && p.price != null && Number.isFinite(qty) && qty > 0
+    ? p.price * qty : null;
   // 평가손익 = (현재가 − 평균단가) × 보유수량. 셋 중 하나라도 없으면 null.
-  const evalPnl = p.price != null && p.avgCost != null && p.heldQty != null
+  const evalPnl = !locked && p.price != null && p.avgCost != null && p.heldQty != null
     ? (p.price - p.avgCost) * p.heldQty : null;
 
   const info = (
@@ -82,7 +82,8 @@ export function StockTradingScreen(p: StockScreenProps) {
       <InfoStat testid={fieldTestId('SESSION_INFO')} label="장"
         value={session == null ? '확인 불가' : session.phase}
         sub={session == null
-          ? '이 심볼의 거래소를 정하지 못했습니다'
+          ? (locked ? '종목이 없어 거래소를 정하지 않았습니다'
+                    : '이 심볼의 거래소를 정하지 못했습니다')
           : `${session.reason}${session.holidaysKnown ? '' : ' · 휴장일 목록 없음'}`}
         tone={session?.canOrder ? 'up' : 'warn'}/>
       <InfoStat testid={fieldTestId('ORDERABLE_CASH')} label="주문가능금액"
@@ -157,14 +158,18 @@ export function StockTradingScreen(p: StockScreenProps) {
   return (
     <TradingScreenShell
       testid={CONTRACT.root}
-      symbol={p.symbol} name={p.name}
+      market={p.market} onMarket={p.onMarket}
+      instrumentReason={p.instrumentReason}
+      symbol={sym ?? '종목 없음'} name={p.name}
       marketLabel={capability('STOCK').label}
-      price={p.price} changePct={p.changePct} changeLabel={p.changeLabel}
+      price={locked ? null : p.price} changePct={locked ? null : p.changePct}
+      changeLabel={p.changeLabel}
       onBack={p.onBack} headerRight={p.headerRight}
       // 주식 봉 출처가 아직 이어지지 않았다(`instrumentRoute` 머리말).
       // 코인 봉을 대신 그리지 않는다.
       chartSource={null}
-      chartUnavailableReason="주식 봉 출처가 아직 이어지지 않았습니다 — 코인 봉을 대신 그리지 않습니다"
+      chartUnavailableReason={p.instrumentReason
+        || '주식 봉 출처가 아직 이어지지 않았습니다 — 코인 봉을 대신 그리지 않습니다'}
       info={info}
       orderForm={orderForm}
       orderBook={
@@ -188,13 +193,14 @@ export function StockTradingScreen(p: StockScreenProps) {
         </div>
       }
       cta={
-        <button type="button" data-testid="stock-cta" disabled title={blocked}
+        <button type="button" data-testid="stock-cta" disabled={locked} title={blocked}
           style={{
             width: '100%', padding: '13px 0', borderRadius: 9, border: 'none',
             background: C.raised, color: C.faint,
-            fontSize: FS.lead, fontWeight: 800, cursor: 'not-allowed',
-          }}>{side === 'BUY' ? capability('STOCK').buyLabel(p.name || p.symbol)
-            : capability('STOCK').sellLabel(p.name || p.symbol)}</button>
+            fontSize: FS.lead, fontWeight: 800,
+            cursor: locked ? 'not-allowed' : 'pointer',
+          }}>{side === 'BUY' ? capability('STOCK').buyLabel(p.name || sym || '종목')
+            : capability('STOCK').sellLabel(p.name || sym || '종목')}</button>
       }
       tabs={tabs}
     />

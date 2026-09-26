@@ -35,6 +35,9 @@ const COINM  = 'src/components/trading/markets/CoinMFuturesTradingScreen.tsx';
 const STOCK  = 'src/components/trading/markets/StockTradingScreen.tsx';
 const SHEET  = 'src/components/trading/OrderControls.tsx';
 const ROUTE  = 'src/lib/trading/tradingScreenRoute.ts';
+const TABS   = 'src/lib/trading/marketTabs.ts';
+const TABSUI = 'src/components/trading/markets/MarketTabs.tsx';
+const INSTR  = 'src/lib/trading/marketInstrument.ts';
 const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
 const ROW    = 'src/components/trading/PositionRow.tsx';
@@ -142,8 +145,8 @@ const CASES = [
   // ── ⑦ ★ 호가·포지션·미체결은 거래 화면에 있어야 한다 (사용자 규칙 3·4·6) ──
 
   ['MUT-N23 ★ 선물 화면에서 호가를 뺀다 (호가를 보며 주문하는 화면이 아니게 된다)', USDM, 'RED',
-   [[`          <OrderBookView symbolId={p.symbol} market="USDM" rows={7} dense`,
-     `          <NoBook symbolId={p.symbol} rows={7} dense`]]],
+   [[`<OrderBookView symbolId={sym} market="USDM" rows={7} dense`,
+     `<NoBook symbolId={sym} rows={7} dense`]]],
 
   ['MUT-N24 ★ 선물 화면에서 펀딩 칸을 없앤다 (선물 필수 정보 누락)', USDM, 'RED',
    [[`      <InfoStat testid={fieldTestId('FUNDING')} label="펀딩"`,
@@ -216,7 +219,7 @@ const CASES = [
      `const _mix = () => useTradeForm({} as any);\nexport function CoinMFuturesTradingScreen(p: CoinMScreenProps) {`]]],
 
   ['MUT-N40 ★ COIN-M이 계약 크기를 "대개 10 USD"로 추측한다 (BTC에서 10배 틀린다)', COINM, 'RED',
-   [[`  const spec = resolveContractSize(p.symbol, p.contractUsdFromExchange ?? null);`,
+   [[`  const spec = sym == null ? null : resolveContractSize(sym, p.contractUsdFromExchange ?? null);`,
      `  const spec = { contractUsd: TYPICAL_ALT_CONTRACT_USD, source: 'known' as const };`]]],
 
   // ── ⑨ 정본 판정 비우회 ──
@@ -246,11 +249,12 @@ const CASES = [
      `  const wiring = { canOrder: true, reason: null } as any;`]]],
 
   ['MUT-N47 ★ COIN-M 실행 버튼을 열어 둔다 (눌러도 아무 일도 안 일어난다)', COINM, 'RED',
-   [[`              disabled title={wiring.reason}`, `              title={wiring.reason}`]]],
+   [[`              disabled={locked} title={p.instrumentReason || wiring.reason}`,
+     `              title={p.instrumentReason || wiring.reason}`]]],
 
   ['MUT-N48 ★ 주식 실행 버튼을 열어 둔다', STOCK, 'RED',
-   [[`        <button type="button" data-testid="stock-cta" disabled title={blocked}`,
-     `        <button type="button" data-testid="stock-cta" title={blocked}`]]],
+   [[`<button type="button" data-testid="stock-cta" disabled={locked} title={blocked}`,
+     `<button type="button" data-testid="stock-cta" title={blocked}`]]],
 
   // ── ⑫ ★ 간편과 프로가 같은 판정을 쓴다 (사용자 규칙 9) ──
 
@@ -346,12 +350,107 @@ const CASES = [
   //   v2 계약에서는 이것이 실패였다. 지금은 통과여야 하고, 그 사실을
   //   대조군으로 못 박는다 — 옛 규칙이 실수로 되살아나면 여기서 잡힌다.
   ['OK-N5 ★ 현물 화면에 호가를 한 벌 더 붙인다 (허용이어야 한다)', SPOT, 'GREEN',
-   [[`          <OrderBookView symbolId={p.symbol} market="SPOT" rows={7} dense/>`,
-     `          <OrderBookView symbolId={p.symbol} market="SPOT" rows={7} dense/>\n          <OrderBookView symbolId={p.symbol} market="SPOT" rows={3} dense/>`]]],
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>\n            <OrderBookView symbolId={sym} market="SPOT" rows={3} dense/>`]]],
   ['OK-N6 ★ 선물 화면 포지션 칸에 설명 한 줄 추가 (허용이어야 한다)', USDM, 'GREEN',
    [[`          {positions.length === 0 ? (`,
      `          <span>내 포지션</span>\n          {positions.length === 0 ? (`]]],
+
+  // ══ ⑰~⑳ 시장 탭 계약 (사용자 확정 10규칙) ══
+
+  ['MUT-T1 ★ 시장 탭에서 COIN-M을 뺀다 (그 시장이 없는 것으로 읽힌다)', TABS, 'RED',
+   [[`  { id: 'COINM', label: 'COIN-M' },\n`, ``]]],
+
+  ['MUT-T2 ★ 시장 탭 순서를 바꾼다 (정본 순서가 아니다)', TABS, 'RED',
+   [[`  { id: 'SPOT',  label: '현물' },\n  { id: 'USDM',  label: 'USDT-M' },`,
+     `  { id: 'USDM',  label: 'USDT-M' },\n  { id: 'SPOT',  label: '현물' },`]]],
+
+  ['MUT-T3 ★ 탭 줄이 목록 대신 손으로 적는다 (탭과 화면이 갈린다)', TABSUI, 'RED',
+   [[`      {MARKET_TABS.map(t => {`, `      {[{ id: 'SPOT', label: '현물' }].map(t => {`]]],
+
+  ['MUT-T4 ★ 탭을 두 줄로 접는다 (접으면 그 시장이 없는 것으로 읽힌다)', TABSUI, 'RED',
+   [[`        overflowX: 'auto', flexWrap: 'nowrap',`,
+     `        flexWrap: 'wrap',`]]],
+
+  ['MUT-T5 ★ 시장을 드롭다운에 숨긴다', TABSUI, 'RED',
+   [[`export function MarketTabs({ market, onMarket }: MarketTabsProps) {`,
+     `const Hidden = () => <select/>;\nexport function MarketTabs({ market, onMarket }: MarketTabsProps) {`]]],
+
+  ['MUT-T6 ★ 탭→화면 경로를 없앤다 (탭은 있는데 도달 불가)', ROUTE, 'RED',
+   [[`export function tradingScreenForTab(`, `function unusedScreenForTab(`]]],
+
+  ['MUT-T7 ★ 껍데기가 시장 탭을 안 붙인다 (만들어 놓고 배선 안 함)', SHELL, 'RED',
+   [[`        <MarketTabs market={p.market} onMarket={p.onMarket}/>`, ``]]],
+
+  ['MUT-T8 ★ 탭 선택을 위로 올리지 않는다 (눌러도 화면이 안 바뀐다)', SHELL, 'RED',
+   [[`<MarketTabs market={p.market} onMarket={p.onMarket}/>`,
+     `<MarketTabs market={p.market} onMarket={() => {}}/>`]]],
+
+  ['MUT-T9 ★ host가 주식 화면을 렌더하지 않는다 (탭만 있고 화면이 없다)', ORDER, 'RED',
+   [[`          <StockTradingScreen {...common}`, `          <MissingStockScreen {...common}`]]],
+
+  ['MUT-T10 ★ 시장 탭 상태를 밀도 분기 뒤로 옮긴다 (밀도마다 다른 탭)', ORDER, 'RED',
+   [[`  const [marketTab, setMarketTab] = React.useState<TradingMarketId>(entryTab ?? 'SPOT');`,
+     `  const marketTab = 'SPOT' as TradingMarketId; const setMarketTab = (_m: TradingMarketId) => {};`]]],
+
+  ['MUT-T11 ★ 모르는 시장에 현물을 기본으로 준다 (선물 주문이 현물로 나간다)', TABS, 'RED',
+   [[`  const t = TO_MARKET_TYPE[id];\n  if (!t) throw new Error(`,
+     `  const t = TO_MARKET_TYPE[id];\n  if (!t) return 'SPOT';\n  if (false) throw new Error(`]]],
+
+  ['MUT-T12 ★ COIN-M을 시장 정체성 단계에서 버린다 (탭 진입 자체가 막힌다)', INSTR, 'RED',
+   [[`  const label = marketTabLabel(market);`,
+     `  if (market === 'COINM') return null as any;\n  const label = marketTabLabel(market);`]]],
+
+  ['MUT-T13 ★ 시장 전환 때 COIN-M 심볼을 조립한다 (BTCUSDT → BTCUSD_PERP)', INSTR, 'RED',
+   [[`  // ── 아니면 종목이 없다. 사유는 시장마다 다르다 ──`,
+     `  if (market === 'COINM' && entry) {\n`
+     + `    return { market, instrument: { symbol: 'BTCUSD_PERP', source: 'ENTRY' },\n`
+     + `      tradable: true, reason: null };\n  }\n`
+     + `  // ── 아니면 종목이 없다. 사유는 시장마다 다르다 ──`]]],
+
+  ['MUT-T14 ★ 다른 시장 종목을 이 시장 것으로 옮겨 적는다 (이름이 같다고 같은 상품 취급)', INSTR, 'RED',
+   [[`  if (entry && entry.market === market && entry.symbol) {`,
+     `  if (entry && entry.symbol) {`]]],
+
+  ['MUT-T15 ★ 종목이 없는데 현물 실행 버튼을 연다', SPOT, 'RED',
+   [[`            disabled={locked || !p.form.gate.ready || p.form.busy}`,
+     `            disabled={!p.form.gate.ready || p.form.busy}`]]],
+
+  ['MUT-T16 ★ "종목 없음"을 잠금으로 바꾸지 않는다', USDM, 'RED',
+   [[`  const locked = sym == null;`, `  const locked = false;`]]],
+
+  ['MUT-T17 ★ COIN-M 화면이 USDⓈ-M 호가를 빌려 온다 (다른 계약의 호가다)', COINM, 'RED',
+   [[`          <div data-testid="book-no-instrument" style={{`,
+     `          <OrderBookView symbolId={sym ?? ''} market="USDM" rows={7} dense/>\n`
+     + `          <div data-testid="book-no-instrument" style={{`]]],
+
+  ['MUT-T18 ★ 현물 화면이 선물 호가를 그린다 (현물 가격 옆에 선물 호가)', SPOT, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`]]],
+
+  ['MUT-T19 ★ 껍데기가 "종목 없음" 사유를 안 그린다 (빈 칸이 0으로 읽힌다)', SHELL, 'RED',
+   [[`            <div data-testid="instrument-unavailable" style={{`,
+     `            <div data-testid="legacy-blank" style={{`]]],
+
+  ['MUT-T20 ★ 화면이 종목을 props로 직접 들고 다닌다 (빈 심볼로 조회가 나간다)', STOCK, 'RED',
+   [[`  const sym = p.instrument?.symbol ?? null;`,
+     `  const sym = (p as any).symbol ?? null;`]]],
+
+  ['MUT-T21 ★ COIN-M이 봉 출처 없음을 감춘다 (빈 차트가 "거래 없는 종목"으로 읽힌다)', COINM, 'RED',
+   [[`      chartSource={null}`, `      chartSource={{ symbol: sym ?? '', market: 'USDM' }}`]]],
+
+  ['MUT-T22 ★ 선물 버튼 글자를 진입 시장 훅에서 가져온다 (USDⓈ-M에 BUY/SELL이 찍힌다)', USDM, 'RED',
+   [[`  const label = side === 'LONG' ? cap.buyLabel('') : cap.sellLabel('');`,
+     `  const label = form.sideLabel(side);`]]],
+
+  ['OK-T1 시장 탭 정본에 주석 한 줄 추가', TABS, 'GREEN',
+   [[`export interface MarketTab {`, `// 대조군\nexport interface MarketTab {`]]],
+  ['OK-T2 종목 가용성 정본에 주석 한 줄 추가', INSTR, 'GREEN',
+   [[`export interface MarketInstrument {`, `// 대조군\nexport interface MarketInstrument {`]]],
+  ['OK-T3 탭 줄에 주석 한 줄 추가', TABSUI, 'GREEN',
+   [[`export interface MarketTabsProps {`, `// 대조군\nexport interface MarketTabsProps {`]]],
 ];
+
 
 const selected = ONLY.length ? CASES.filter(c => ONLY.some(o => c[0].includes(o))) : CASES;
 console.log(`게이트: 분리 화면 계약 검사기\n총 ${selected.length}건\n`);

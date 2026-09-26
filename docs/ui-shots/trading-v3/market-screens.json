@@ -9,8 +9,8 @@
       "chartBar": {
         "present": true,
         "inFirstScreen": true,
-        "top": 104,
-        "bottom": 144,
+        "top": 149,
+        "bottom": 189,
         "h": 40
       },
       "overlay": false,
@@ -18,15 +18,15 @@
       "book": {
         "present": true,
         "inFirstScreen": true,
-        "top": 144,
+        "top": 189,
         "bottom": 479,
-        "h": 336
+        "h": 291
       },
       "controls": {
         "present": true,
         "inFirstScreen": true,
-        "top": 218,
-        "bottom": 289,
+        "top": 263,
+        "bottom": 334,
         "h": 72
       },
       "cta": {
@@ -42,7 +42,7 @@
       "ok": true,
       "hit": "button[mkt-chart-bar]",
       "bar": "button[mkt-chart-bar]",
-      "top": 104
+      "top": 149
     },
     "expanded": {
       "overlay": {
@@ -59,7 +59,49 @@
       "before": "0",
       "after": "0"
     },
-    "forbidden": []
+    "forbidden": [],
+    "tabs": {
+      "SPOT": {
+        "screen": "SPOT_SCREEN",
+        "market": "SPOT",
+        "tradable": "1",
+        "rendered": true,
+        "active": "market-tab-SPOT",
+        "ctaDisabled": true,
+        "reason": null,
+        "borrowedBook": false
+      },
+      "USDM": {
+        "screen": "USDM_SCREEN",
+        "market": "USDM",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-USDM",
+        "ctaDisabled": true,
+        "reason": "BTC이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
+        "borrowedBook": false
+      },
+      "COINM": {
+        "screen": "COINM_SCREEN",
+        "market": "COINM",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-COINM",
+        "ctaDisabled": true,
+        "reason": "BTC은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
+        "borrowedBook": false
+      },
+      "STOCK": {
+        "screen": "STOCK_SCREEN",
+        "market": "STOCK",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-STOCK",
+        "ctaDisabled": true,
+        "reason": "BTC은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
+        "borrowedBook": false
+      }
+    }
   },
   "390x844": {
     "entered": {
@@ -71,8 +113,8 @@
       "chartBar": {
         "present": true,
         "inFirstScreen": true,
-        "top": 104,
-        "bottom": 144,
+        "top": 149,
+        "bottom": 189,
         "h": 40
       },
       "overlay": false,
@@ -80,15 +122,15 @@
       "book": {
         "present": true,
         "inFirstScreen": true,
-        "top": 144,
+        "top": 189,
         "bottom": 663,
-        "h": 520
+        "h": 475
       },
       "controls": {
         "present": true,
         "inFirstScreen": true,
-        "top": 218,
-        "bottom": 289,
+        "top": 263,
+        "bottom": 334,
         "h": 72
       },
       "cta": {
@@ -104,7 +146,7 @@
       "ok": true,
       "hit": "button[mkt-chart-bar]",
       "bar": "button[mkt-chart-bar]",
-      "top": 104
+      "top": 149
     },
     "expanded": {
       "overlay": {
@@ -121,7 +163,49 @@
       "before": "0",
       "after": "0"
     },
-    "forbidden": []
+    "forbidden": [],
+    "tabs": {
+      "SPOT": {
+        "screen": "SPOT_SCREEN",
+        "market": "SPOT",
+        "tradable": "1",
+        "rendered": true,
+        "active": "market-tab-SPOT",
+        "ctaDisabled": true,
+        "reason": null,
+        "borrowedBook": false
+      },
+      "USDM": {
+        "screen": "USDM_SCREEN",
+        "market": "USDM",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-USDM",
+        "ctaDisabled": true,
+        "reason": "BTC이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
+        "borrowedBook": false
+      },
+      "COINM": {
+        "screen": "COINM_SCREEN",
+        "market": "COINM",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-COINM",
+        "ctaDisabled": true,
+        "reason": "BTC은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
+        "borrowedBook": false
+      },
+      "STOCK": {
+        "screen": "STOCK_SCREEN",
+        "market": "STOCK",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-STOCK",
+        "ctaDisabled": true,
+        "reason": "BTC은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
+        "borrowedBook": false
+      }
+    }
   },
   "430x932": {
     "entered": {
@@ -133,8 +217,8 @@
       "chartBar": {
         "present": true,
         "inFirstScreen": true,
-        "top": 104,
-        "bottom": 144,
+        "top": 149,
+        "bottom": 189,
         "h": 40
       },
       "overlay": false,
@@ -142,15 +226,15 @@
       "book": {
         "present": true,
         "inFirstScreen": true,
-        "top": 144,
+        "top": 189,
         "bottom": 751,
-        "h": 608
+        "h": 563
       },
       "controls": {
         "present": true,
         "inFirstScreen": true,
-        "top": 218,
-        "bottom": 289,
+        "top": 263,
+        "bottom": 334,
         "h": 72
       },
       "cta": {
@@ -166,7 +250,7 @@
       "ok": true,
       "hit": "button[mkt-chart-bar]",
       "bar": "button[mkt-chart-bar]",
-      "top": 104
+      "top": 149
     },
     "expanded": {
       "overlay": {
@@ -183,6 +267,48 @@
       "before": "0",
       "after": "0"
     },
-    "forbidden": []
+    "forbidden": [],
+    "tabs": {
+      "SPOT": {
+        "screen": "SPOT_SCREEN",
+        "market": "SPOT",
+        "tradable": "1",
+        "rendered": true,
+        "active": "market-tab-SPOT",
+        "ctaDisabled": true,
+        "reason": null,
+        "borrowedBook": false
+      },
+      "USDM": {
+        "screen": "USDM_SCREEN",
+        "market": "USDM",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-USDM",
+        "ctaDisabled": true,
+        "reason": "BTC이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
+        "borrowedBook": false
+      },
+      "COINM": {
+        "screen": "COINM_SCREEN",
+        "market": "COINM",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-COINM",
+        "ctaDisabled": true,
+        "reason": "BTC은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
+        "borrowedBook": false
+      },
+      "STOCK": {
+        "screen": "STOCK_SCREEN",
+        "market": "STOCK",
+        "tradable": "0",
+        "rendered": true,
+        "active": "market-tab-STOCK",
+        "ctaDisabled": true,
+        "reason": "BTC은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
+        "borrowedBook": false
+      }
+    }
   }
 }

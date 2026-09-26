@@ -329,7 +329,7 @@ const CASES = [
      '  const mine = useSellForm({ symbol, market: \'SPOT\', target: null as any });\n  const held = mine.holding;']]],
 
   ['MUT-48 프로 매도 패널이 주문 화면에서 떨어진다 (매도가 도달 불가)', WSPC, 'RED',
-   [['<ProSellPanel symbol={p.symbol} scope={p.scope} sell={sell}/>', '']]],
+   [['<ProSellPanel symbol={sym ?? ""} scope={p.scope} sell={sell}/>', '']]],
 
   ['MUT-48b 세 번째 매도 host를 만든다 (같은 매도가 세 모양)', BSELL, 'RED',
    [["import type { SellForm } from '@/lib/trading/useSellForm';",

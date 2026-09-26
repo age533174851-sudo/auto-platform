@@ -9,6 +9,7 @@
 // 그래서 **분기를 값으로 만든다.** 화면 선택은 이 파일의 표뿐이고,
 // 모르는 시장에는 기본 화면을 주지 않는다.
 import { parseMarketType, type MarketType } from '../markets/marketType';
+import { marketTypeOfTab, type TradingMarketId } from './marketTabs';
 import type { PaperMarket } from './useTradeForm';
 
 /** 모의 장부의 말(`SPOT`·`USDM`)을 시장 유형 정본으로 옮긴다 */
@@ -18,6 +19,14 @@ export function marketTypeOfPaper(m: PaperMarket): MarketType {
   // 기본값을 주지 않는다 — 현물로 떨어뜨리면 선물 주문이 현물로 나간다.
   if (!t) throw new Error(`시장 유형을 읽지 못했습니다: ${String(m)}`);
   return t;
+}
+
+/**
+ * 시장 탭 → 화면. **탭 목록과 화면 목록이 갈리지 않게** 탭 식별자를
+ * 시장 유형 정본으로 옮긴 뒤 아래 표 하나만 본다.
+ */
+export function tradingScreenForTab(id: TradingMarketId): TradingScreenId {
+  return tradingScreenFor(marketTypeOfTab(id));
 }
 
 export type TradingScreenId =

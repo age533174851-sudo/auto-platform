@@ -49,7 +49,9 @@ import { SpotTradingScreen } from './markets/SpotTradingScreen';
 import { UsdtFuturesTradingScreen } from './markets/UsdtFuturesTradingScreen';
 import { CoinMFuturesTradingScreen } from './markets/CoinMFuturesTradingScreen';
 import { StockTradingScreen } from './markets/StockTradingScreen';
-import { marketTypeOfPaper, tradingScreenFor } from '@/lib/trading/tradingScreenRoute';
+import { tradingScreenForTab } from '@/lib/trading/tradingScreenRoute';
+import { readMarketTab, type TradingMarketId } from '@/lib/trading/marketTabs';
+import { instrumentForMarket } from '@/lib/trading/marketInstrument';
 import { changeView } from '@/lib/markets/changeBasis';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
@@ -68,6 +70,16 @@ export function PaperOrderScreen({
   ctx, name, auth, onBack, onDone, unit, onUnit,
 }: PaperOrderScreenProps) {
   const [level, , toggleLevel] = useUiLevel();
+
+  // ── 들고 온 종목이 **어느 시장의 것인가** ──
+  //
+  // 이 값이 종목 가용성의 출처다. 여기서 다른 시장으로 옮겨 적지 않는다 —
+  // 옮기는 순간 그게 추측이다(`marketInstrument` 머리말).
+  const entryTab = readMarketTab(ctx.market);
+  // 탭 상태. **분기보다 위에서** 만든다 — 아래에서 만들면 밀도마다 다른
+  // 탭 상태가 생긴다.
+  const [marketTab, setMarketTab] = React.useState<TradingMarketId>(entryTab ?? 'SPOT');
+  React.useEffect(() => { if (entryTab) setMarketTab(entryTab); }, [entryTab]);
 
   // ── 장부는 하나다 ──
   //
@@ -129,22 +141,34 @@ export function PaperOrderScreen({
   //   96px까지 밀렸다. 이제 프로는 주문 화면 안에 머문다 — 차트를 보려면
   //   뒤로 나가면 종목 상세가 그대로 살아 있다.
   if (level === 'PRO') {
-    // ★ 시장이 화면을 정한다. **분기는 정본 한 곳뿐이다**
+    // ★ 시장 탭이 화면을 정한다. **분기는 정본 한 곳뿐이다**
     //   (`tradingScreenRoute`). 여기서 `if (market === 'SPOT')`을 또 쓰면
     //   같은 판단이 두 곳에 생기고, 언젠가 COIN-M이 USDⓈ-M 화면을 받는다.
-    const screen = tradingScreenFor(marketTypeOfPaper(ctx.market));
+    const screen = tradingScreenForTab(marketTab);
+
+    // ★ 시장 정체성과 종목 가용성은 **다른 것**이다.
+    //
+    //   탭은 넷 다 언제나 들어갈 수 있다. 그런데 그 시장의 종목이 있는지는
+    //   별개이고, 없으면 **지어내지 않는다** — 이름이 같아 보여도 같은
+    //   상품이라고 단정하지 않는다(`marketInstrument`).
+    //
+    //       REACHABLE != TRADABLE
+    const avail = instrumentForMarket(marketTab, { symbol: ctx.symbol, market: entryTab });
     const change = changeView({
       market: ctx.market, price: stream.lastPrice, changePct: stream.changePct,
     });
     const common = {
-      symbol: ctx.symbol, name, scope,
+      market: marketTab, onMarket: setMarketTab,
+      instrument: avail.instrument, instrumentReason: avail.reason,
+      name: avail.instrument ? name : undefined, scope,
       price: stream.lastPrice,
       changePct: change.pct, changeLabel: change.label,
       onBack, headerRight: <LevelSwitch to="간편" onClick={toggleLevel}/>,
     };
     return (
       <div data-testid="paper-order-screen" data-level="PRO" data-route={route || 'NONE'}
-        data-market={ctx.market} data-screen={screen}
+        data-market={marketTab} data-screen={screen}
+        data-tradable={avail.tradable ? '1' : '0'}
         style={{ height: '100%', minHeight: 0, background: C.bg }}>
         {screen === 'SPOT_SCREEN' ? (
           <SpotTradingScreen {...common}

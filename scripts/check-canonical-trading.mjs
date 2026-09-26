@@ -57,6 +57,9 @@ const SHELL   = 'src/components/trading/markets/TradingScreenShell.tsx';
 const DRAWER  = 'src/components/trading/markets/ChartDrawer.tsx';
 const ROUTE   = 'src/lib/trading/tradingScreenRoute.ts';
 const CONTRACT_SRC = 'src/lib/trading/marketScreenContract.ts';
+const TABS_SRC = 'src/lib/trading/marketTabs.ts';
+const TABS_UI  = 'src/components/trading/markets/MarketTabs.tsx';
+const INSTR    = 'src/lib/trading/marketInstrument.ts';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -104,6 +107,18 @@ try {
   err(`거래 화면 계약 정본을 부르지 못했습니다 (${CONTRACT_SRC}): ${e?.message || e}`
     + ' — 계약을 읽지 못하면 아무것도 통과시키지 않습니다');
 }
+
+/**
+ * 우리 시세·호가 출처가 **아는** 시장.
+ *
+ * `null`은 "출처가 없다"는 뜻이고, 그 시장 화면은 호가·봉을 **빌려 오지
+ * 않고 없다고 적는다.** 규칙 ⑦(있어야 한다)과 ⑳(빌려 오면 안 된다)이
+ * 같은 표를 본다 — 두 벌로 두면 한쪽만 고쳐진다.
+ */
+const OWN_FEED = {
+  SPOT: 'SPOT', USDT_FUTURES: 'USDM',
+  COIN_FUTURES: null, STOCK: null,
+};
 
 const page   = code(read(PAGE));
 const detail = code(read(DETAIL));
@@ -169,7 +184,8 @@ const drawer = code(read(DRAWER));
   }
   // ★ 시장 → 화면 분기도 **한 곳뿐이다.** 두 곳에 있으면 언젠가 COIN-M이
   //   USDⓈ-M 화면을 받고, 그 화면은 계약 수를 코인 개수로 읽는다.
-  const routers = files.filter(f => f !== ROUTE && /\btradingScreenFor\s*\(/.test(code(read(f))));
+  const routers = files.filter(f =>
+    f !== ROUTE && /\btradingScreenFor(Tab)?\s*\(/.test(code(read(f))));
   if (routers.length !== 1 || routers[0] !== ORDER) {
     err(`시장→화면 분기를 쓰는 곳이 [${routers.join(', ') || '없음'}]입니다`
       + ` — ${ORDER} 한 곳이어야 합니다`);
@@ -297,8 +313,17 @@ const drawer = code(read(DRAWER));
   else for (const s of CONTRACT.MARKET_SCREENS) {
     const c = code(read(s.file));
     const need = CONTRACT.mustFields(s);
-    if (need.includes('ORDER_BOOK') && !/<OrderBookView|stock-book-unavailable/.test(c)) {
-      err(`${s.file}에 호가 칸이 없습니다 — 호가를 보며 주문하는 화면이 아닙니다`);
+    // ★ "호가 자리가 있는가"로는 부족하다. 출처가 있는 시장은 **진짜
+    //   호가**를 그려야 한다 — 없음 안내만 남겨 두면 그 자리는 있고
+    //   호가는 없다. 뮤테이션이 그 틈으로 살아남았다.
+    if (need.includes('ORDER_BOOK')) {
+      const own = OWN_FEED[s.market];
+      if (own != null && !/<OrderBookView/.test(c)) {
+        err(`${s.file}가 호가를 그리지 않습니다 — ${own} 호가 출처가 있는 시장입니다`);
+      }
+      if (own == null && !/book-no-instrument|stock-book-unavailable/.test(c)) {
+        err(`${s.file}가 호가 출처 없음을 적지 않습니다 — 빈 칸은 "호가가 없는 종목"으로 읽힙니다`);
+      }
     }
     for (const f of s.own) {
       const id = CONTRACT.fieldTestId(f);
@@ -763,6 +788,271 @@ const drawer = code(read(DRAWER));
   }
 }
 
+
+// ══════════════ ⑰ ★ 시장 탭 — 넷이 있고, 넷 다 실제로 들어가진다 ══════════════
+//
+// 탭만 만들고 화면을 안 붙이면 사용자는 누를 수 있는데 아무 일도 안 일어난다.
+// 이 저장소의 1번 고장이고, 화면을 봐서는 "준비 중인가 보다"로 읽힌다.
+{
+  const tabs = code(read(TABS_SRC));
+  const tabsUi = code(read(TABS_UI));
+
+  // ⑴ 넷이 정본 순서로 있다
+  const m = tabs.match(/export const MARKET_TABS[\s\S]{0,600}?\n\];/);
+  if (!m) err(`${TABS_SRC}에서 시장 탭 목록을 찾지 못했습니다`);
+  else {
+    const ids = [...m[0].matchAll(/id:\s*'([A-Z]+)'/g)].map(x => x[1]);
+    const want = ['SPOT', 'USDM', 'COINM', 'STOCK'];
+    if (ids.join(',') !== want.join(',')) {
+      err(`시장 탭이 [${ids.join(', ') || '없음'}]입니다 — [${want.join(', ')}] 순서여야 합니다`);
+    }
+  }
+
+  // ⑵ 탭 줄이 **목록을 그린다**. 손으로 적으면 목록과 화면이 갈린다.
+  if (!/MARKET_TABS\.map\s*\(/.test(tabsUi)) {
+    err(`${TABS_UI}가 시장 탭 정본 목록을 그리지 않습니다 — 손으로 적으면 탭과 화면이 갈립니다`);
+  }
+  // 좁아도 숨기지 않는다 — 가로 스크롤이고 줄바꿈·드롭다운이 아니다
+  if (!/overflowX: 'auto'/.test(tabsUi)) {
+    err(`${TABS_UI}가 좁을 때 가로로 스크롤하지 않습니다`);
+  }
+  if (/flexWrap: 'wrap'/.test(tabsUi)) {
+    err(`${TABS_UI}가 탭을 두 줄로 접습니다 — 접으면 그 시장이 없는 것으로 읽힙니다`);
+  }
+  for (const banned of ['<select', 'Dropdown', 'BottomSheet']) {
+    if (tabsUi.includes(banned)) {
+      err(`${TABS_UI}가 시장을 ${banned}에 숨깁니다 — 네 시장은 늘 보여야 합니다`);
+    }
+  }
+  // 고른 시장이 보인다
+  if (!/data-active=/.test(tabsUi) || !/aria-selected=/.test(tabsUi)) {
+    err(`${TABS_UI}가 지금 고른 시장을 표시하지 않습니다`);
+  }
+
+  // ⑶ 탭이 **실제 화면까지 간다** (UI만 있고 도달 불가 → 실패)
+  const route = code(read(ROUTE));
+  if (!/export function tradingScreenForTab/.test(route)) {
+    err(`${ROUTE}에 탭→화면 경로가 없습니다`);
+  }
+  if (!/<MarketTabs/.test(shell)) {
+    err(`${SHELL}이 시장 탭을 붙이지 않습니다 — 만들어 놓고 배선하지 않은 상태입니다`);
+  }
+  if (!/onMarket=\{p\.onMarket\}/.test(shell)) {
+    err(`${SHELL}이 탭 선택을 위로 올리지 않습니다 — 눌러도 화면이 안 바뀝니다`);
+  }
+  // host가 네 화면을 **전부** 렌더하는가
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    const comp = sc.file.split('/').pop().replace('.tsx', '');
+    if (!new RegExp(`<${comp}\\b`).test(order)) {
+      err(`${ORDER}가 ${comp}을 렌더하지 않습니다 — 그 탭은 눌러도 도달할 수 없습니다`);
+    }
+  }
+  // 탭 상태가 밀도 분기보다 **위**에 있는가 (아래면 밀도마다 다른 탭이 생긴다)
+  {
+    const iTab = order.search(/useState<TradingMarketId>/);
+    const iLevel = order.search(/level === 'PRO'/);
+    if (iTab < 0) err(`${ORDER}에 시장 탭 상태가 없습니다`);
+    else if (iTab > iLevel) {
+      err(`${ORDER}가 밀도 분기 뒤에서 시장 탭 상태를 만듭니다`);
+    }
+  }
+
+  // ⑷ 모르는 시장에 **기본값을 주지 않는다**
+  //
+  // ★ `throw`가 파일에 있는지만 보면 안 된다. 그 앞에 이른 return 한 줄을
+  //   끼우면 던지는 줄은 그대로 남고 동작만 바뀐다 — `tradingScreenFor`에서
+  //   똑같은 뮤테이션이 그 틈으로 살아남았고, 여기서도 살아남았다.
+  {
+    const body = tabs.match(/export function marketTypeOfTab\([\s\S]*?\n\}/);
+    if (!body) err(`${TABS_SRC}에서 탭→시장유형 함수를 찾지 못했습니다`);
+    else {
+      const returns = body[0].match(/return\s+[^;]+;/g) || [];
+      if (returns.length !== 1 || !/^return\s+t;$/.test(returns[0].trim())) {
+        err(`${TABS_SRC}의 탭→시장유형 함수가 ${returns.length}가지로 빠져나갑니다`
+          + ` [${returns.join(' ')}] — 모르는 시장에 기본 시장을 주면`
+          + ' 선물 주문이 현물로 나갈 수 있습니다');
+      }
+      if (!/throw new Error/.test(body[0])) {
+        err(`${TABS_SRC}가 모르는 탭에 대해 던지지 않습니다`);
+      }
+    }
+  }
+  // 이름도 지어 주지 않는다. 모르는 시장이 '현물'로 보이면 그게 더 나쁘다.
+  {
+    const body = tabs.match(/export function marketTabLabel\([\s\S]*?\n\}/);
+    if (!body) err(`${TABS_SRC}에서 탭 이름 함수를 찾지 못했습니다`);
+    else {
+      const returns = body[0].match(/return\s+[^;]+;/g) || [];
+      if (returns.length !== 1 || !/^return\s+t\.label;$/.test(returns[0].trim())) {
+        err(`${TABS_SRC}의 탭 이름 함수가 ${returns.length}가지로 빠져나갑니다`
+          + ` [${returns.join(' ')}] — 모르는 시장에 이름을 지어 주면 배선 누락이 숨습니다`);
+      }
+    }
+  }
+  // 밖에서 온 값도 모르면 null이다 (기본 시장으로 떨어뜨리지 않는다)
+  if (!/export function readMarketTab[\s\S]{0,700}?\n  return null;\n\}/.test(tabs)) {
+    err(`${TABS_SRC}의 탭 읽기가 모르는 값을 null로 돌려주지 않습니다`);
+  }
+
+  // ⑸ COINM·STOCK을 **정체성 단계에서 버리지 않는다**
+  //
+  //   예전에는 `readTradeContext`가 두 시장을 통째로 null로 버려서 탭에
+  //   들어가는 것 자체가 불가능했다. 정체성(어느 시장인가)과 가용성(종목이
+  //   있는가)은 다른 사실이다.
+  const instr = code(read(INSTR));
+  for (const mk of ['COINM', 'STOCK']) {
+    if (new RegExp(`market === '${mk}'[\\s\\S]{0,80}return null`).test(instr)) {
+      err(`${INSTR}가 ${mk}를 시장 정체성 단계에서 버립니다 — 탭 진입 자체가 막힙니다`);
+    }
+  }
+  if (!/export function instrumentForMarket/.test(instr)) {
+    err(`${INSTR}에 종목 가용성 판정이 없습니다`);
+  }
+  // 가용성은 **세 값**을 따로 들고 다닌다 (없는 것을 0으로 적지 않기 위해)
+  for (const field of ['instrument:', 'tradable:', 'reason:']) {
+    if (!instr.includes(field)) err(`${INSTR}에 ${field} 칸이 없습니다`);
+  }
+}
+
+// ══════════════ ⑱ ★ 시장을 바꿀 때 심볼을 지어내지 않는다 ══════════════
+//
+// 탭을 누르면 가장 하고 싶어지는 일이 "들고 있던 심볼을 그 시장 것으로
+// 바꾸기"다. 전부 금지다 — 특히 `BTCUSDT(현물) → BTCUSDT(USDⓈ-M)`가
+// 위험하다. **그럴듯해서 아무도 의심하지 않는다.**
+{
+  const instr = code(read(INSTR));
+
+  // ⑴ 종목이 생기는 자리는 **한 곳**이고, 거기서 들고 온 값을 그대로 쓴다
+  const makes = (instr.match(/symbol:\s*[^,\n]+/g) || [])
+    .filter(x => !/symbol:\s*string/.test(x));
+  if (makes.length !== 1 || !/symbol:\s*entry\.symbol/.test(makes[0])) {
+    err(`${INSTR}에서 종목이 ${makes.length}곳에서 만들어집니다 [${makes.join(' / ')}]`
+      + ' — 들고 온 값을 그대로 쓰는 한 곳이어야 합니다');
+  }
+  // ★ **그 한 곳이 시장 일치를 확인하는가.** 값을 그대로 쓰는 것만으로는
+  //   부족하다 — 조건에서 `entry.market === market`을 빼면 현물 종목이
+  //   선물 화면의 종목이 된다. 그게 "이름이 같다고 같은 상품 취급"이다.
+  //   뮤테이션이 정확히 그 틈으로 살아남았다.
+  if (!/entry\.market === market/.test(instr)) {
+    err(`${INSTR}가 종목을 쓰기 전에 시장 일치를 확인하지 않습니다`
+      + ' — 현물 종목이 선물 화면의 종목이 됩니다');
+  }
+
+  // ⑵ 계약 심볼을 **조립하지 않는다**
+  const forge = [/USD_PERP['"`]/, /\+\s*['"`]USDT['"`]/, /\$\{[^}]*\}USDT/,
+                 /\$\{[^}]*\}USD_/, /replace\([^)]*\)\s*\+\s*['"`]/];
+  const screens = CONTRACT ? CONTRACT.MARKET_SCREENS.map(x => x.file) : [];
+  for (const f of [INSTR, ORDER, ...screens]) {
+    const c = code(read(f));
+    for (const re of forge) {
+      if (re.test(c)) {
+        err(`${f}가 시장 전환용 심볼을 조립합니다 (${re}) — 이름이 같다고 같은 상품이 아닙니다`);
+      }
+    }
+  }
+
+  // ⑶ 화면은 종목을 **받기만** 한다. 없으면 null이다.
+  for (const f of screens) {
+    const c = code(read(f));
+    if (!/const sym = p\.instrument\?\.symbol \?\? null;/.test(c)) {
+      err(`${f}가 종목을 가용성 판정에서 받지 않습니다`);
+    }
+    if (/\bp\.symbol\b/.test(c)) {
+      err(`${f}가 종목을 props로 직접 들고 있습니다 — 없을 수 있는 값을 문자열로 다루면`
+        + ' 빈 심볼로 조회를 보내게 됩니다');
+    }
+  }
+}
+
+// ══════════════ ⑲ ★ 종목이 없으면 주문이 잠긴다 (REACHABLE != TRADABLE) ══════════════
+{
+  const screens = CONTRACT ? CONTRACT.MARKET_SCREENS.map(x => x.file) : [];
+  for (const f of screens) {
+    const c = code(read(f));
+    // 시장마다 못 누르는 사유가 더 있을 수 있다(모의 경로 없음 · 증권사
+    // 미연결 · 휴장). 그것들을 **한 값으로 접는 것**은 옳다 — 접어야
+    // 버튼마다 빠뜨리지 않는다. 다만 그 값이 "종목 없음"을 반드시 포함해야 한다.
+    const lock = c.match(/const locked = [^;]+;/);
+    if (!lock) err(`${f}가 "종목 없음"을 잠금으로 바꾸지 않습니다`);
+    else if (!/sym == null/.test(lock[0])) {
+      err(`${f}의 잠금 판정에 "종목 없음"이 빠졌습니다 (${lock[0].trim()})`);
+    }
+    // 실행 버튼마다 그 잠금을 본다. **하나라도 빠지면 그 버튼이 열린다.**
+    const ctas = [...c.matchAll(/data-testid=(?:\{`|")[^"`]*cta[^"`]*(?:`\}|")([\s\S]{0,420}?)>/g)];
+    if (ctas.length === 0) err(`${f}에 실행 버튼이 없습니다`);
+    // ★ `disabled`가 있는지만 보면 안 된다. `locked ||`만 떼면 버튼은
+    //   여전히 `disabled`를 갖고 있고 검사는 통과한다 — 뮤테이션이 그
+    //   틈으로 살아남았다. **`locked`라는 판정 자체**를 본다.
+    for (const [i, cta] of ctas.entries()) {
+      // ★ 버튼 어딘가에 `locked`가 있는지만 보면 안 된다. `title`에 사유를
+      //   적어 두면 `disabled`에서 빼도 통과한다 — 뮤테이션이 그 틈으로
+      //   살아남았다. **누를 수 있는가를 정하는 식**만 본다.
+      const gate = /(?:disabled|locked)=\{([^}]*)\}/.exec(cta[1]);
+      if (!gate) {
+        err(`${f}의 실행 버튼 ${i + 1}번에 잠금 식이 없습니다`);
+      } else if (!/\blocked\b/.test(gate[1])) {
+        err(`${f}의 실행 버튼 ${i + 1}번이 "종목 없음"(locked)을 보지 않습니다`
+          + ` (${gate[0]}) — 종목이 없는데 눌리면 아무 일도 안 일어나거나`
+          + ' 엉뚱한 종목으로 나갑니다');
+      }
+    }
+    // 왜 못 하는지 적는다 — 회색 버튼만 두지 않는다
+    if (!/instrumentReason/.test(c)) {
+      err(`${f}가 종목이 없는 이유를 화면에 적지 않습니다`);
+    }
+  }
+  // ★ 버튼 글자가 **이 화면의 시장**에서 나오는가.
+  //
+  //   `form.sideLabel`은 사용자가 들어올 때의 시장에 묶여 있다. 현물로
+  //   들어와 USDⓈ-M 탭을 누르면 선물 화면에 `BUY`/`SELL`이 찍힌다 —
+  //   실기 스크린샷에서 실제로 그렇게 나왔다. 시장 의미가 탭 전환으로
+  //   새는 경로이고, 칸 검사로는 안 잡힌다(글자이지 칸이 아니라서).
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    const c = code(read(sc.file));
+    if (/form\.sideLabel\s*\(/.test(c)) {
+      err(`${sc.file}가 버튼 글자를 진입 시장 훅에서 가져옵니다 (form.sideLabel)`
+        + ' — 탭을 바꾸면 그 시장의 말이 아닌 글자가 찍힙니다');
+    }
+  }
+
+  // 껍데기가 그 사유를 실제로 그리는가
+  if (!/data-testid="instrument-unavailable"/.test(shell)) {
+    err(`${SHELL}이 "종목 없음" 사유를 그리지 않습니다 — 빈 칸은 0으로 읽힙니다`);
+  }
+}
+
+// ══════════════ ⑳ ★ 다른 시장의 시세·봉·호가를 빌려 쓰지 않는다 ══════════════
+//
+// COIN-M 화면에 USDⓈ-M 호가를 놓으면 사용자는 그것을 이 계약의 호가로 읽고
+// 그 값으로 주문을 정한다. 실제로 그렇게 짜여 있었고 여기서 걷어냈다.
+{
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    const c = code(read(sc.file));
+    const own = OWN_FEED[sc.market];
+
+    for (const call of (c.match(/<OrderBookView[\s\S]{0,200}?\/>/g) || [])) {
+      const mk = /market="([A-Z]+)"/.exec(call);
+      if (own == null) {
+        err(`${sc.file}가 다른 시장의 호가를 빌려 씁니다 — 이 시장의 호가 출처가 없습니다`);
+      } else if (!mk || mk[1] !== own) {
+        err(`${sc.file}의 호가가 ${mk ? mk[1] : '기본값'} 시장입니다 — ${own}이어야 합니다`);
+      }
+    }
+    for (const src of (c.match(/chartSource=\{[\s\S]{0,160}?\}\}/g) || [])) {
+      const mk = /market: '([A-Z]+)'/.exec(src);
+      if (own == null && mk) {
+        err(`${sc.file}가 다른 시장의 봉을 빌려 그립니다 (${mk[1]})`);
+      } else if (own != null && mk && mk[1] !== own) {
+        err(`${sc.file}의 봉이 ${mk[1]} 시장입니다 — ${own}이어야 합니다`);
+      }
+    }
+    // 출처가 없는 시장은 **없다고 적는다** (빈 칸으로 두지 않는다)
+    if (own == null && !/chartSource=\{null\}/.test(c)) {
+      err(`${sc.file}가 봉 출처 없음을 명시하지 않습니다`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -771,4 +1061,5 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' 상세에 주문폼 없음 · ★차트 비상주 · ★서랍 기본 접힘 · 호가/포지션 상주 ·'
   + ' ★시장 의미 비혼합(현물·USDⓈ-M·COIN-M·주식) · 정본 판정 비우회 · 칸 출처 ·'
   + ' 능력 게이트 · ★간편/프로 동일 판정 · 주문수단 보존 · 포지션 장부 일치 ·'
-  + ' 사유 1곳 · 원스크린 비복귀');
+  + ' 사유 1곳 · 원스크린 비복귀 ·'
+  + ' ★시장 탭 4개 도달 · ★심볼 비조립 · ★종목없음=주문잠금 · ★타시장 데이터 비차용');

@@ -31,7 +31,8 @@ import { C, FS } from '@/components/terminal/theme';
 import { OrderControls, OrderEstimate } from '../OrderControls';
 import { OrderBookView } from '../OrderBookView';
 import { ProSellPanel } from '../ProSellPanel';
-import { TradingScreenShell, InfoStat, LockedField, type ShellTab } from './TradingScreenShell';
+import { TradingScreenShell, InfoStat, LockedField,
+  type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
 import { capability } from '@/lib/markets/marketType';
@@ -44,20 +45,13 @@ import type { PaperLedger } from '@/lib/trading/usePaperLedger';
 type TradeForm = ReturnType<typeof useTradeForm>;
 type SellForm = ReturnType<typeof useSellForm>;
 
-export interface SpotScreenProps {
-  symbol: string;
-  name?: string;
+export interface SpotScreenProps extends MarketScreenCommonProps {
   scope: MoneyScope;
   /** **받는다. 만들지 않는다.** 간편 화면과 같은 인스턴스다 */
   form: TradeForm;
   sell: SellForm;
   ledger: PaperLedger;
-  price: number | null;
-  changePct: number | null;
-  changeLabel: string;
   canOrder: boolean;
-  onBack: () => void;
-  headerRight?: React.ReactNode;
 }
 
 const CONTRACT = screenContract('SPOT');
@@ -69,7 +63,11 @@ export function SpotTradingScreen(p: SpotScreenProps) {
   const [tab, setTab] = React.useState<'BUY' | 'SELL'>('BUY');
   // **받은 그대로 넘긴다.** 복사본을 만들면 간편 화면과 다른 매도가 나간다.
   const sell = p.sell;
-  const base = p.symbol.replace(/USDT$|USDC$|BUSD$/, '');
+  // ★ 종목이 없으면 조회도 주문도 하지 않는다.
+  const sym = p.instrument?.symbol ?? null;
+  const locked = sym == null;
+  // 표시용 기초자산 이름이다. **다른 시장 심볼을 만드는 데 쓰지 않는다.**
+  const base = (sym ?? '').replace(/USDT$|USDC$|BUSD$/, '');
   const held = p.sell.holding;
 
   // ── 시장별 핵심 정보 — 보유 Base · 가용 Quote ──
@@ -127,10 +125,10 @@ export function SpotTradingScreen(p: SpotScreenProps) {
       {tab === 'BUY' ? (
         // 25·50·75·MAX 비중은 `SizingSlider`가 그린다. 여기서 다시
         // 계산하지 않는다 — 수량 정본은 `useTradeForm.sizing` 하나다.
-        <OrderControls form={p.form} symbol={p.symbol} scope={p.scope}
-          availableBalance={p.ledger.available} canOrder={p.canOrder}/>
+        <OrderControls form={p.form} symbol={sym ?? ''} scope={p.scope}
+          availableBalance={p.ledger.available} canOrder={p.canOrder && !locked}/>
       ) : (
-        <ProSellPanel symbol={p.symbol} scope={p.scope} sell={sell}/>
+        <ProSellPanel symbol={sym ?? ""} scope={p.scope} sell={sell}/>
       )}
     </div>
   );
@@ -176,48 +174,58 @@ export function SpotTradingScreen(p: SpotScreenProps) {
   return (
     <TradingScreenShell
       testid={CONTRACT.root}
-      symbol={p.symbol} name={p.name}
+      market={p.market} onMarket={p.onMarket}
+      instrumentReason={p.instrumentReason}
+      symbol={sym ?? '종목 없음'} name={p.name}
       marketLabel={capability('SPOT').label}
-      price={p.price} changePct={p.changePct} changeLabel={p.changeLabel}
+      price={locked ? null : p.price} changePct={locked ? null : p.changePct}
+      changeLabel={p.changeLabel}
       onBack={p.onBack} headerRight={p.headerRight}
-      chartSource={{ symbol: p.symbol, market: 'SPOT' }}
+      chartSource={sym == null ? null : { symbol: sym, market: 'SPOT' }}
+      chartUnavailableReason={p.instrumentReason ?? undefined}
       info={info}
       orderForm={orderForm}
       orderBook={
         <div data-testid={fieldTestId('ORDER_BOOK')} style={{ height: '100%' }}>
           {/* ★ `market`을 반드시 넘긴다. 안 넘기면 기본이 선물이라
               **현물 가격 옆에 선물 호가**가 놓인다. */}
-          <OrderBookView symbolId={p.symbol} market="SPOT" rows={7} dense/>
+          {sym == null ? (
+            <div data-testid="book-no-instrument" style={{
+              padding: 10, fontSize: FS.nano, color: C.faint, lineHeight: 1.6,
+            }}>{p.instrumentReason}</div>
+          ) : (
+            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>
+          )}
         </div>
       }
-      estimate={tab === 'BUY' ? <OrderEstimate form={p.form} scope={p.scope}/> : null}
+      estimate={tab === 'BUY' && !locked ? <OrderEstimate form={p.form} scope={p.scope}/> : null}
       cta={
         tab === 'BUY' ? (
           <button type="button" data-testid="spot-buy-cta"
-            disabled={!p.form.gate.ready || p.form.busy}
-            title={p.form.gate.reason || undefined}
+            disabled={locked || !p.form.gate.ready || p.form.busy}
+            title={locked ? (p.instrumentReason || undefined) : (p.form.gate.reason || undefined)}
             onClick={() => {
               if (!p.form.sideChosen || p.form.side !== 'LONG') { p.form.chooseSide('LONG'); return; }
               void p.form.submit();
             }}
             style={{
               width: '100%', padding: '13px 0', borderRadius: 9, border: 'none',
-              background: !p.form.gate.ready || p.form.busy ? C.raised : C.up,
-              color: !p.form.gate.ready || p.form.busy ? C.faint : '#fff',
+              background: locked || !p.form.gate.ready || p.form.busy ? C.raised : C.up,
+              color: locked || !p.form.gate.ready || p.form.busy ? C.faint : '#fff',
               fontSize: FS.lead, fontWeight: 800, cursor: 'pointer',
             }}>
-            {p.form.sideChosen && p.form.side === 'LONG' && p.form.gate.ready
-              ? p.form.submitText : capability('SPOT').buyLabel(base)}
+            {!locked && p.form.sideChosen && p.form.side === 'LONG' && p.form.gate.ready
+              ? p.form.submitText : capability('SPOT').buyLabel(base || '종목')}
           </button>
         ) : (
           <button type="button" data-testid="spot-sell-cta"
-            disabled={!p.sell.gate.ready || p.sell.busy}
-            title={p.sell.gate.reason || undefined}
+            disabled={locked || !p.sell.gate.ready || p.sell.busy}
+            title={locked ? (p.instrumentReason || undefined) : (p.sell.gate.reason || undefined)}
             onClick={() => { void p.sell.submit(); }}
             style={{
               width: '100%', padding: '13px 0', borderRadius: 9, border: 'none',
-              background: !p.sell.gate.ready || p.sell.busy ? C.raised : C.down,
-              color: !p.sell.gate.ready || p.sell.busy ? C.faint : '#fff',
+              background: locked || !p.sell.gate.ready || p.sell.busy ? C.raised : C.down,
+              color: locked || !p.sell.gate.ready || p.sell.busy ? C.faint : '#fff',
               fontSize: FS.lead, fontWeight: 800, cursor: 'pointer',
             }}>{p.sell.submitText}</button>
         )

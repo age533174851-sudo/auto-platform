@@ -38,6 +38,9 @@ export function useFunding(symbol: string) {
     rate: null, nextAt: null,
   });
   React.useEffect(() => {
+    // 종목이 없으면 **조회하지 않는다.** 빈 심볼로 보내면 거래소가 거절하고,
+    // 그 실패가 "펀딩이 없다"로 보인다.
+    if (!symbol) { setD({ rate: null, nextAt: null }); return; }
     let alive = true;
     const load = async () => {
       try {

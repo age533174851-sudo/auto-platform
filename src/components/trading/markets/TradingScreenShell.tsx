@@ -35,6 +35,30 @@ import React from 'react';
 import { C, FS, NUM } from '@/components/terminal/theme';
 import { useMeasuredHeight } from '@/lib/ui/useMeasuredHeight';
 import { ChartDrawer, type ChartSource } from './ChartDrawer';
+import { MarketTabs } from './MarketTabs';
+import type { TradingMarketId } from '@/lib/trading/marketTabs';
+import type { MarketInstrument } from '@/lib/trading/marketInstrument';
+
+/**
+ * 네 시장 화면이 공통으로 받는 것.
+ *
+ * ★ `symbol`이 없다. **종목은 `instrument`에서만 나온다** — 없을 수 있는
+ *   값을 문자열로 들고 다니면 어딘가에서 빈 문자열로 조회를 보내게 된다.
+ */
+export interface MarketScreenCommonProps {
+  market: TradingMarketId;
+  onMarket: (m: TradingMarketId) => void;
+  /** 확인된 종목. **없으면 null** — 지어내지 않는다 */
+  instrument: MarketInstrument | null;
+  /** 종목이 없는 이유. 있으면 null */
+  instrumentReason: string | null;
+  name?: string;
+  price: number | null;
+  changePct: number | null;
+  changeLabel: string;
+  onBack: () => void;
+  headerRight?: React.ReactNode;
+}
 
 export interface ShellTab {
   id: string;
@@ -45,6 +69,16 @@ export interface ShellTab {
 export interface TradingScreenShellProps {
   /** 화면 뿌리 표식. **시장 계약이 정한다**(`MARKET_SCREENS[].root`) */
   testid: string;
+  /** 지금 고른 시장. 탭 줄이 이것을 칠한다 */
+  market: TradingMarketId;
+  onMarket: (m: TradingMarketId) => void;
+  /**
+   * 종목이 없으면 여기에 사유가 온다.
+   *
+   * **탭에는 들어왔지만 거래할 종목이 없는 상태**다. 화면을 비우거나
+   * 0으로 채우지 않고, 왜 없는지 적고 주문을 잠근다 (REACHABLE != TRADABLE).
+   */
+  instrumentReason?: string | null;
   symbol: string;
   name?: string;
   /** 시장 이름 한 줄. 예: `USDⓈ-M 선물` */
@@ -116,6 +150,11 @@ export function TradingScreenShell(p: TradingScreenShellProps) {
       }}
     >
       <div ref={topRef}>
+        {/* ── ★ 시장 탭 — 언제나 맨 위에 있다 ──
+            종목이 없어도 탭은 살아 있다. 시장에 들어가는 것과 그 시장에서
+            주문할 수 있는 것은 다른 사실이다. */}
+        <MarketTabs market={p.market} onMarket={p.onMarket}/>
+
         {/* ── 헤더 ── */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 8,
@@ -149,10 +188,18 @@ export function TradingScreenShell(p: TradingScreenShellProps) {
           {p.headerRight}
         </div>
 
-        {/* ── 시장별 핵심 정보 — 시장이 채운다 ── */}
+        {/* ── 시장별 핵심 정보 — 시장이 채운다 ──
+            종목이 없으면 시장 칸 대신 **왜 없는지**를 적는다. 빈 칸을
+            남기면 "값이 0"으로 읽히고, 다른 시장 값을 채우면 거짓이다. */}
         <div data-testid="trading-info-strip" style={{
           borderBottom: `1px solid ${C.hair}`, background: C.panel,
-        }}>{p.info}</div>
+        }}>
+          {p.instrumentReason ? (
+            <div data-testid="instrument-unavailable" style={{
+              padding: '9px 12px', fontSize: FS.nano, color: C.warn, lineHeight: 1.55,
+            }}>{p.instrumentReason}</div>
+          ) : p.info}
+        </div>
 
         {/* ── 차트: 접힌 막대 하나 ── */}
         <ChartDrawer

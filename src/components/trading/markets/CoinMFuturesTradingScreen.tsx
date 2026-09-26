@@ -32,8 +32,9 @@
 // 10 USD인 것은 알지만, 그 '대개'로 주문을 내면 BTC에서 10배 틀린다.
 import React from 'react';
 import { C, FS } from '@/components/terminal/theme';
-import { OrderBookView, useFunding, useCountdown } from '../OrderBookView';
-import { TradingScreenShell, InfoStat, LockedField, type ShellTab } from './TradingScreenShell';
+import { useFunding, useCountdown } from '../OrderBookView';
+import { TradingScreenShell, InfoStat, LockedField,
+  type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { paperOrderUiWiring } from '@/lib/trading/capability';
 import { capability } from '@/lib/markets/marketType';
@@ -42,18 +43,10 @@ import {
   baseAssetOf, resolveContractSize, contractsToCoin, inverseLiquidationPrice,
 } from '@/lib/markets/coinM';
 
-export interface CoinMScreenProps {
-  /** `BTCUSD_PERP` 형식 */
-  symbol: string;
-  name?: string;
-  price: number | null;
+export interface CoinMScreenProps extends MarketScreenCommonProps {
   markPrice: number | null;
-  changePct: number | null;
-  changeLabel: string;
   /** exchangeInfo에서 온 계약 크기. **없으면 null** — 기본값을 넣지 않는다 */
   contractUsdFromExchange?: number | null;
-  onBack: () => void;
-  headerRight?: React.ReactNode;
 }
 
 const CONTRACT = screenContract('COIN_FUTURES');
@@ -64,17 +57,22 @@ export function CoinMFuturesTradingScreen(p: CoinMScreenProps) {
   const [leverage, setLeverage] = React.useState(10);
   const [marginMode, setMarginMode] = React.useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
   const [contractsText, setContractsText] = React.useState('');
-  const funding = useFunding(p.symbol);
+  // ★ 종목이 없으면 아무것도 조회하지 않는다.
+  const sym = p.instrument?.symbol ?? null;
+  const funding = useFunding(sym ?? '');
   const nextIn = useCountdown(funding.nextAt);
 
   // 이 시장은 모의 장부가 다루지 않는다. 사유는 능력표에서 온다 —
   // 화면이 자기 말로 다시 적으면 두 문장이 갈린다.
   const wiring = paperOrderUiWiring('COINM');
+  // 종목이 없거나(출처 미연결) 모의 경로가 없으면 **누를 수 없다.**
+  // 두 사유를 한 값으로 접어야 버튼마다 빠뜨리지 않는다.
+  const locked = sym == null || !wiring.canOrder;
 
-  const base = baseAssetOf(p.symbol);
-  const spec = resolveContractSize(p.symbol, p.contractUsdFromExchange ?? null);
+  const base = sym == null ? null : baseAssetOf(sym);
+  const spec = sym == null ? null : resolveContractSize(sym, p.contractUsdFromExchange ?? null);
   const contracts = Number(contractsText);
-  const price = p.markPrice ?? p.price;
+  const price = locked ? null : (p.markPrice ?? p.price);
 
   // ★ 계약 → 코인. **추측하지 않는다** — 계약 크기나 가격이 없으면 null이다.
   const coinQty = spec && Number.isFinite(contracts) && contracts > 0 && price != null
@@ -89,8 +87,8 @@ export function CoinMFuturesTradingScreen(p: CoinMScreenProps) {
   const info = (
     <div style={{ display: 'flex', gap: 14, padding: '6px 10px', overflowX: 'auto' }}>
       <InfoStat testid={fieldTestId('MARK_PRICE')} label="마크가"
-        value={p.markPrice == null ? '—' : p.markPrice.toFixed(2)}
-        sub={p.markPrice == null ? '스트림 미수신' : null}/>
+        value={locked || p.markPrice == null ? '—' : p.markPrice.toFixed(2)}
+        sub={locked ? '종목 없음' : (p.markPrice == null ? '스트림 미수신' : null)}/>
       <InfoStat testid={fieldTestId('FUNDING')} label="펀딩"
         value={funding.rate == null ? '—' : `${funding.rate.toFixed(4)}%`}
         sub={funding.nextAt == null ? '다음 정산 미확인' : `다음 ${nextIn}`}/>
@@ -185,43 +183,57 @@ export function CoinMFuturesTradingScreen(p: CoinMScreenProps) {
     {
       id: 'positions', label: '포지션',
       body: <LockedField testid={fieldTestId('POSITIONS')} title="포지션"
-        reason={wiring.reason}/>,
+        reason={p.instrumentReason || wiring.reason}/>,
     },
     {
       id: 'open-orders', label: '미체결',
       body: <LockedField testid={fieldTestId('OPEN_ORDERS')} title="미체결"
-        reason={wiring.reason}/>,
+        reason={p.instrumentReason || wiring.reason}/>,
     },
   ];
 
   return (
     <TradingScreenShell
       testid={CONTRACT.root}
-      symbol={p.symbol} name={p.name}
+      market={p.market} onMarket={p.onMarket}
+      instrumentReason={p.instrumentReason}
+      symbol={sym ?? '종목 없음'} name={p.name}
       marketLabel={capability('COIN_FUTURES').label}
-      price={p.price} changePct={p.changePct} changeLabel={p.changeLabel}
+      price={locked ? null : p.price} changePct={locked ? null : p.changePct}
+      changeLabel={p.changeLabel}
       onBack={p.onBack} headerRight={p.headerRight}
       // ★ 우리 봉 출처는 SPOT·USDM만 안다. COIN-M 봉을 USDⓈ-M 봉으로
       //   대신 그리면 사용자는 그것을 이 계약의 차트로 읽는다.
       chartSource={null}
-      chartUnavailableReason={
-        'COIN-M 봉 출처가 아직 없습니다 — 다른 시장의 봉을 대신 그리지 않습니다'}
+      chartUnavailableReason={p.instrumentReason
+        || 'COIN-M 봉 출처가 아직 없습니다 — 다른 시장의 봉을 대신 그리지 않습니다'}
       info={info}
       orderForm={orderForm}
       orderBook={
         <div data-testid={fieldTestId('ORDER_BOOK')} style={{ height: '100%' }}>
-          <OrderBookView symbolId={p.symbol} market="USDM" rows={7} dense/>
+          {/* ★ 예전에는 여기서 `market="USDM"` 호가를 빌려 그렸다.
+              **다른 시장의 호가다.** COIN-M 계약의 호가가 아닌 것을 이
+              화면에 놓으면 사용자는 그것을 이 계약의 호가로 읽고 그 값으로
+              주문을 정한다. 빌리지 않고 없다고 적는다. */}
+          <div data-testid="book-no-instrument" style={{
+            padding: 10, fontSize: FS.nano, color: C.faint, lineHeight: 1.6,
+          }}>
+            {p.instrumentReason
+              || 'COIN-M 호가 출처가 아직 이어지지 않았습니다 — 다른 시장 호가를 대신 보여주지 않습니다'}
+          </div>
         </div>
       }
       cta={
         <div data-testid={fieldTestId('LONG_SHORT')} style={{ display: 'flex', gap: 6 }}>
           {(['LONG', 'SHORT'] as const).map(side => (
             <button key={side} type="button" data-testid={`coinm-cta-${side}`}
-              disabled title={wiring.reason}
+              disabled={locked} title={p.instrumentReason || wiring.reason}
               style={{
                 flex: 1, minWidth: 0, padding: '13px 0', borderRadius: 9,
-                border: 'none', background: C.raised, color: C.faint,
-                fontSize: FS.lead, fontWeight: 800, cursor: 'not-allowed',
+                border: 'none', background: locked ? C.raised : C.raised,
+                color: C.faint,
+                fontSize: FS.lead, fontWeight: 800,
+                cursor: locked ? 'not-allowed' : 'pointer',
               }}>{side}</button>
           ))}
         </div>
@@ -230,7 +242,7 @@ export function CoinMFuturesTradingScreen(p: CoinMScreenProps) {
         <div data-testid="coinm-blocked-reason" style={{
           padding: '5px 9px', borderTop: `1px solid ${C.hair}`, background: C.panel,
           fontSize: FS.nano, color: C.warn, lineHeight: 1.45,
-        }}>{wiring.reason}</div>
+        }}>{p.instrumentReason || wiring.reason}</div>
       }
       tabs={tabs}
     />

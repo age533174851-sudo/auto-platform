@@ -32,7 +32,8 @@ import { C, FS } from '@/components/terminal/theme';
 import { OrderControls, OrderEstimate } from '../OrderControls';
 import { OrderBookView, useFunding, useCountdown } from '../OrderBookView';
 import { PositionRow } from '../PositionRow';
-import { TradingScreenShell, InfoStat, LockedField, type ShellTab } from './TradingScreenShell';
+import { TradingScreenShell, InfoStat, LockedField,
+  type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
@@ -45,22 +46,15 @@ import type { PaperLedger } from '@/lib/trading/usePaperLedger';
 type TradeForm = ReturnType<typeof useTradeForm>;
 type SellForm = ReturnType<typeof useSellForm>;
 
-export interface FuturesScreenProps {
-  symbol: string;
-  name?: string;
+export interface FuturesScreenProps extends MarketScreenCommonProps {
   scope: MoneyScope;
   /** **받는다. 만들지 않는다.** 간편 화면과 같은 인스턴스다 */
   form: TradeForm;
   sell: SellForm;
   ledger: PaperLedger;
   auth?: string;
-  price: number | null;
   markPrice: number | null;
-  changePct: number | null;
-  changeLabel: string;
   canOrder: boolean;
-  onBack: () => void;
-  headerRight?: React.ReactNode;
   /** 청산으로 장부가 바뀌면 바깥이 다시 읽는다 */
   onLedgerChanged?: () => void;
 }
@@ -69,7 +63,11 @@ const CONTRACT = screenContract('USDT_FUTURES');
 
 export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
   const [intent, setIntent] = React.useState<'OPEN' | 'CLOSE'>('OPEN');
-  const funding = useFunding(p.symbol);
+  // ★ 종목이 없으면 **아무것도 조회하지 않고** 주문도 잠근다.
+  //   다른 시장의 호가·봉·펀딩을 대신 보여주지 않는다.
+  const sym = p.instrument?.symbol ?? null;
+  const locked = sym == null;
+  const funding = useFunding(sym ?? '');
   const nextIn = useCountdown(funding.nextAt);
   const reduceOnly = orderCapability('USDM', 'REDUCE_ONLY');
   const PARTIAL = orderCapability('USDM', 'PARTIAL_CLOSE');
@@ -78,7 +76,7 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
   // 청산까지 거리는 **배율에서 나온다.** 여기서 공식을 다시 쓰지 않는다 —
   // `leverageMath`가 정본이고, 위험 계산도 같은 함수를 쓴다.
   const liqDist = liquidationDistancePct(p.form.lev);
-  const positions = p.ledger.openPositions;
+  const positions = locked ? [] : p.ledger.openPositions;
 
   // ── 시장별 핵심 정보 ──
   const info = (
@@ -122,8 +120,8 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
       {intent === 'OPEN' ? (
         <>
           {/* 배율 · 마진모드 · 비중 · 손절익절 — 능력표가 가리는 공용 부품 */}
-          <OrderControls form={p.form} symbol={p.symbol} scope={p.scope}
-            availableBalance={p.ledger.available} canOrder={p.canOrder}/>
+          <OrderControls form={p.form} symbol={sym ?? ''} scope={p.scope}
+            availableBalance={p.ledger.available} canOrder={p.canOrder && !locked}/>
 
           {/* 감축전용 — 개념은 있고 우리가 못 한다. 잠그고 사유를 적는다. */}
           <LockedField testid={fieldTestId('REDUCE_ONLY')} title="감축전용 (Reduce Only)"
@@ -168,25 +166,41 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
   return (
     <TradingScreenShell
       testid={CONTRACT.root}
-      symbol={p.symbol} name={p.name}
+      market={p.market} onMarket={p.onMarket}
+      instrumentReason={p.instrumentReason}
+      symbol={sym ?? '종목 없음'} name={p.name}
       marketLabel={capability('USDT_FUTURES').label}
-      price={p.price} changePct={p.changePct} changeLabel={p.changeLabel}
+      price={locked ? null : p.price} changePct={locked ? null : p.changePct}
+      changeLabel={p.changeLabel}
       onBack={p.onBack} headerRight={p.headerRight}
-      chartSource={{ symbol: p.symbol, market: 'USDM' }}
+      // 종목이 없으면 차트도 없다. 다른 종목 봉을 대신 그리지 않는다.
+      chartSource={sym == null ? null : { symbol: sym, market: 'USDM' }}
+      chartUnavailableReason={p.instrumentReason ?? undefined}
       info={info}
       orderForm={orderForm}
       orderBook={
         <div data-testid={fieldTestId('ORDER_BOOK')} style={{ height: '100%' }}>
-          <OrderBookView symbolId={p.symbol} market="USDM" rows={7} dense
-            onPickPrice={() => { /* 모의 장부는 지정가를 받지 않는다 */ }}/>
+          {sym == null ? (
+            <div data-testid="book-no-instrument" style={{
+              padding: 10, fontSize: FS.nano, color: C.faint, lineHeight: 1.6,
+            }}>{p.instrumentReason}</div>
+          ) : (
+            <OrderBookView symbolId={sym} market="USDM" rows={7} dense
+              onPickPrice={() => { /* 모의 장부는 지정가를 받지 않는다 */ }}/>
+          )}
         </div>
       }
       estimate={<OrderEstimate form={p.form} scope={p.scope}/>}
       cta={
         <div data-testid={fieldTestId('LONG_SHORT')} style={{ display: 'flex', gap: 6 }}>
-          <Cta form={p.form} side="LONG" disabled={!p.form.gate.ready || p.form.busy || intent !== 'OPEN'}/>
-          <Cta form={p.form} side="SHORT" disabled={!p.form.gate.ready || p.form.busy || intent !== 'OPEN'}
-            unavailable={p.form.shortDisabled}/>
+          {/* 종목이 없으면 **누를 수 없다.** 열어 두면 눌러서 아무 일도
+              안 일어나거나 다른 종목으로 나간다. */}
+          <Cta form={p.form} side="LONG" locked={locked}
+            disabled={!p.form.gate.ready || p.form.busy || intent !== 'OPEN'}
+            lockedReason={p.instrumentReason}/>
+          <Cta form={p.form} side="SHORT" locked={locked}
+            disabled={!p.form.gate.ready || p.form.busy || intent !== 'OPEN'}
+            unavailable={p.form.shortDisabled} lockedReason={p.instrumentReason}/>
         </div>
       }
       tabs={tabs}
@@ -198,22 +212,33 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
  * 막혔으면 **왜 막혔는지 버튼 글자가 말한다**(`submitGate.submitLabel`).
  * 회색 버튼만 두고 이유를 안 적는 상태를 만들지 않는다.
  */
-export function Cta({ form, side, disabled, unavailable }: {
-  form: TradeForm; side: 'LONG' | 'SHORT'; disabled: boolean; unavailable?: boolean;
+export function Cta({ form, side, disabled, unavailable, locked, lockedReason }: {
+  form: TradeForm; side: 'LONG' | 'SHORT'; disabled: boolean;
+  unavailable?: boolean;
+  /** 종목이 없다. **누를 수 없어야 한다** */
+  locked: boolean;
+  lockedReason?: string | null;
 }) {
   // **초기값을 "골랐다"로 읽지 않는다.** `form.side`는 미리보기 계산용
   // 기본값(LONG)을 갖고 있어서, 그것만 보면 LONG은 한 번에 나가고 SHORT는
   // 두 번 눌러야 하는 비대칭이 생긴다.
   const on = form.sideChosen && form.side === side;
   const col = side === 'LONG' ? C.up : C.down;
-  const label = form.sideLabel(side);
-  const off = disabled || !!unavailable;
+  // ★ 버튼 글자는 **이 화면의 시장**에서 온다. `form.sideLabel`을 쓰면
+  //   안 된다 — 그 훅은 사용자가 들어올 때의 시장(현물일 수 있다)에
+  //   묶여 있어서, USDⓈ-M 화면에 `BUY`/`SELL`이 찍힌다. 실기에서 실제로
+  //   그렇게 나왔다. 선물 화면은 LONG/SHORT다.
+  const cap = capability('USDT_FUTURES');
+  const label = side === 'LONG' ? cap.buyLabel('') : cap.sellLabel('');
+  const off = disabled || !!unavailable || locked;
   return (
-    <button type="button" data-testid={`pro-order-cta-${label}`}
-      disabled={!!unavailable}
-      title={unavailable ? '이 시장에는 숏이 없습니다' : (form.gate.reason || undefined)}
+    <button type="button" data-testid={`pro-order-cta-${side}`}
+      disabled={!!unavailable || locked}
+      title={unavailable
+        ? (lockedReason || '이 시장에는 숏이 없습니다')
+        : (form.gate.reason || undefined)}
       onClick={() => {
-        if (unavailable) return;
+        if (unavailable || locked) return;
         if (!on) { form.chooseSide(side); return; }
         void form.submit();
       }}
@@ -225,6 +250,8 @@ export function Cta({ form, side, disabled, unavailable }: {
         opacity: on ? 1 : 0.82,
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'clip',
       }}>
+      {/* 막혔거나 아직 안 고른 상태면 **시장의 말**을 보여준다. 보낼 수
+          있을 때만 정본 판정이 만든 문구를 쓴다. */}
       {on && !off ? form.submitText : label}
     </button>
   );
