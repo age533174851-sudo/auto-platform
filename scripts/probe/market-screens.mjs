@@ -17,6 +17,8 @@
 //   ⑤ 시장 탭 넷을 눌러 **네 화면에 실제로 들어가진다**
 //   ⑥ 종목 출처가 없는 시장은 **주문이 잠기고 사유가 보인다**
 //      (REACHABLE != TRADABLE — 가짜 심볼로 채우지 않는다)
+//   ⑦ 목록의 `BTC`가 **`BTCUSDT`로 정규화되어** 차트·호가·봉 조회까지
+//      그 심볼로 흘러가는가 (예전에는 `BTC`가 그대로 흘렀다)
 //
 // CI에는 넣지 않는다 — Playwright는 이 저장소의 의존성이 아니다.
 // (`scripts/probe/README.md`의 규약을 그대로 따른다.)
@@ -111,6 +113,17 @@ for (const [name, w, h] of VIEWPORTS) {
     status: 200, contentType: 'application/json',
     body: JSON.stringify({ ok: true, source: 'mock', news: [] }),
   }));
+
+  // ★ 화면에 찍힌 글자가 아니라 **나가는 요청**을 본다. 심볼이 잘못돼도
+  //   화면은 멀쩡해 보이고, 틀린 것은 조회로만 드러난다.
+  const asked = { candles: [], ws: [] };
+  page.on('request', (req) => {
+    const u = req.url();
+    if (u.includes('/api/market/candles')) {
+      try { asked.candles.push(new URL(u).searchParams.get('symbol')); } catch {}
+    }
+  });
+  page.on('websocket', (w) => { asked.ws.push(w.url()); });
 
   const r = all[name] = {};
   const entered = await openTrading(page, { market: 'SPOT' });
@@ -215,6 +228,34 @@ for (const [name, w, h] of VIEWPORTS) {
   if (forbidden == null) console.log(`  · ${name}: 현물 화면이 아니라 금지 칸 검사를 건너뜁니다`);
   else if (forbidden.length) bad(`${name}: 현물 화면에 선물 칸이 렌더됐습니다 [${forbidden.join(', ')}]`);
   else ok(`${name}: 현물 화면에 선물 칸 없음`);
+
+  // ══ ⑦ 목록 종목이 거래소 심볼로 정규화되어 조회까지 흘러가는가 ══
+  //
+  // 예전에는 `BTC`가 "이미 완성된 쌍"으로 읽혀 그대로 나갔다. 예외는
+  // 안 나고, 그 심볼로 간 조회가 빈 결과를 줘서 "거래가 없는 종목"처럼
+  // 보였다. 그래서 **나간 요청의 심볼**을 직접 본다.
+  r.symbolFlow = {
+    header: await page.evaluate(() =>
+      document.querySelector('[data-testid="trading-market-label"]')?.textContent?.trim() ?? null),
+    candles: [...new Set(asked.candles.filter(Boolean))],
+    ws: [...new Set(asked.ws)].slice(0, 4),
+  };
+  {
+    const bad2 = [];
+    if (!/BTCUSDT/.test(r.symbolFlow.header || '')) {
+      bad2.push(`헤더 심볼이 BTCUSDT가 아닙니다 (${r.symbolFlow.header})`);
+    }
+    for (const c of r.symbolFlow.candles) {
+      if (c !== 'BTCUSDT') bad2.push(`봉 조회 심볼이 ${c}입니다`);
+    }
+    for (const u of r.symbolFlow.ws) {
+      if (/btc(?!usdt)/i.test(u.replace(/btcusdt/gi, 'X'))) bad2.push(`스트림 심볼이 이상합니다 (${u})`);
+    }
+    if (bad2.length) bad2.forEach(m => bad(`${name}: ${m}`));
+    else {
+      ok(`${name}: 목록 BTC → BTCUSDT 정규화 (헤더 · 봉 ${r.symbolFlow.candles.length}건 · 스트림 ${r.symbolFlow.ws.length}건)`);
+    }
+  }
 
   // ══ ⑤ 시장 탭 넷이 실제 화면까지 간다 ══
   //

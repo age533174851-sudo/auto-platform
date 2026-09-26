@@ -60,6 +60,13 @@
       "after": "0"
     },
     "forbidden": [],
+    "symbolFlow": {
+      "header": "BTCUSDT · 현물",
+      "candles": [
+        "BTCUSDT"
+      ],
+      "ws": []
+    },
     "tabs": {
       "SPOT": {
         "screen": "SPOT_SCREEN",
@@ -78,7 +85,7 @@
         "rendered": true,
         "active": "market-tab-USDM",
         "ctaDisabled": true,
-        "reason": "BTC이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
+        "reason": "BTCUSDT이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
         "borrowedBook": false
       },
       "COINM": {
@@ -88,7 +95,7 @@
         "rendered": true,
         "active": "market-tab-COINM",
         "ctaDisabled": true,
-        "reason": "BTC은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
+        "reason": "BTCUSDT은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
         "borrowedBook": false
       },
       "STOCK": {
@@ -98,7 +105,7 @@
         "rendered": true,
         "active": "market-tab-STOCK",
         "ctaDisabled": true,
-        "reason": "BTC은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
+        "reason": "BTCUSDT은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
         "borrowedBook": false
       }
     }
@@ -164,6 +171,13 @@
       "after": "0"
     },
     "forbidden": [],
+    "symbolFlow": {
+      "header": "BTCUSDT · 현물",
+      "candles": [
+        "BTCUSDT"
+      ],
+      "ws": []
+    },
     "tabs": {
       "SPOT": {
         "screen": "SPOT_SCREEN",
@@ -182,7 +196,7 @@
         "rendered": true,
         "active": "market-tab-USDM",
         "ctaDisabled": true,
-        "reason": "BTC이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
+        "reason": "BTCUSDT이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
         "borrowedBook": false
       },
       "COINM": {
@@ -192,7 +206,7 @@
         "rendered": true,
         "active": "market-tab-COINM",
         "ctaDisabled": true,
-        "reason": "BTC은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
+        "reason": "BTCUSDT은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
         "borrowedBook": false
       },
       "STOCK": {
@@ -202,7 +216,7 @@
         "rendered": true,
         "active": "market-tab-STOCK",
         "ctaDisabled": true,
-        "reason": "BTC은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
+        "reason": "BTCUSDT은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
         "borrowedBook": false
       }
     }
@@ -268,6 +282,13 @@
       "after": "0"
     },
     "forbidden": [],
+    "symbolFlow": {
+      "header": "BTCUSDT · 현물",
+      "candles": [
+        "BTCUSDT"
+      ],
+      "ws": []
+    },
     "tabs": {
       "SPOT": {
         "screen": "SPOT_SCREEN",
@@ -286,7 +307,7 @@
         "rendered": true,
         "active": "market-tab-USDM",
         "ctaDisabled": true,
-        "reason": "BTC이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
+        "reason": "BTCUSDT이 USDT-M에도 상장돼 있는지 확인할 출처가 없습니다. 이름이 같다고 같은 상품으로 보지 않습니다 — USDT-M 종목을 직접 고르면 주문할 수 있습니다",
         "borrowedBook": false
       },
       "COINM": {
@@ -296,7 +317,7 @@
         "rendered": true,
         "active": "market-tab-COINM",
         "ctaDisabled": true,
-        "reason": "BTC은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
+        "reason": "BTCUSDT은 COIN-M 계약 형식이 아닙니다 (BTCUSD_PERP 같은 모양). COIN-M 종목 출처가 아직 연결되지 않아 여기서 만들어 쓰지 않습니다",
         "borrowedBook": false
       },
       "STOCK": {
@@ -306,7 +327,7 @@
         "rendered": true,
         "active": "market-tab-STOCK",
         "ctaDisabled": true,
-        "reason": "BTC은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
+        "reason": "BTCUSDT은 주식 종목이 아닙니다. 주식 종목 출처(증권사 연결)가 아직 이어지지 않았습니다",
         "borrowedBook": false
       }
     }
