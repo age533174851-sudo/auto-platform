@@ -48,6 +48,15 @@ export function runManagedPositionTests() {
     eq(positions[0].strategyId, 'daily-ladder', '칼럼 우선');
   });
 
+  test('운영 live_orders처럼 strategy_id 칸이 없어도 signal_id에서 소유권을 읽는다', () => {
+    const r: any = row({ signal_id: '[s:scalp]prod-shape' });
+    delete r.strategy_id;
+    const { positions } = managedCandidates([r]);
+    eq(positions.length, 1, '후보를 잃지 않는다');
+    eq(positions[0].strategyId, 'scalp', 'signal_id 표식 fallback');
+  });
+
+
   // ══ 줄이 있다고 열린 것이 아니다 ══
   test('UNKNOWN 주문은 후보가 아니다 — 진입도 미진입도 아니다', () => {
     const { positions, skipped } = managedCandidates([row({ status: 'UNKNOWN' })]);

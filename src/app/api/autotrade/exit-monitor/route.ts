@@ -743,7 +743,10 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
   try {
     const { data, error } = await (sb as any).from('live_orders')
       .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
-        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id, strategy_id')
+        // live_orders에는 strategy_id 컬럼이 없다. 전략 소유권은 strategyOf()가
+        // signal_id의 [s:...] 표식에서 읽는다. 없는 칼럼을 projection하면
+        // PostgREST가 조회 전체를 실패시키므로 signal_id만 읽는다.
+        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id')
       .order('acked_at', { ascending: false })
       .limit(200);
     // **조회 실패를 '없음'으로 적지 않는다.**
@@ -934,9 +937,30 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
     .filter(g => g.verdict.action === 'ALERT')
     .map(g => ({ symbol: g.symbol, reason: g.verdict.reason, faults: g.verdict.faults.map(f => f.code) }));
 
+  // generic lifecycle 실패를 ladder 결과와 별개로 보존한다.
+  // projection 오류처럼 lifecycle 자체가 실패했는데 actionable이 0이면
+  // 예전에는 ok:true로 조기 반환되어 운영에서 조용히 숨었다.
+  const { collectLifecycleFailures, exitRunOutcome } = await import('@/lib/engine/exitRunOutcome');
+  const lifecycleFailed = collectLifecycleFailures(lifecycle);
+
+  // ★ 조기 반환도 **같은 판정**을 쓴다. 여기서는 아직 처리 결과가 없으므로
+  //   실패는 생명주기 쪽뿐이다.
+  const earlyOutcome = exitRunOutcome({ results: [], lifecycleFailed });
   if (dryRun || actionable.length === 0) {
+    if (!dryRun && !earlyOutcome.ok) {
+      await closeRun({
+        status: 'FAILED',
+        positions_scanned: decisions.length,
+        actions: 0,
+        orphan_cleanups: (Array.isArray(orphanCleanups) ? orphanCleanups.length : 0) + sweep.cleaned,
+        cleanup_detail: (orphanCleanups.length || sweep.details.length)
+          ? { ladder: orphanCleanups, sweep: sweep.details, sweepSummary: sweep.summary }
+          : null,
+        errors: earlyOutcome.errors,
+      });
+    }
     return NextResponse.json({
-      ok: true, dryRun, checked: decisions.length, actionable: actionable.length,
+      ok: earlyOutcome.ok, dryRun, checked: decisions.length, actionable: actionable.length,
       alerts, recovery, orphanCleanups, sweep, coverage, lifecycle,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
@@ -1104,9 +1128,14 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
 
   // 회차를 닫는다. **#142 증거(정확한 번호로 취소한 남은 보호주문)를
   // 그대로 담는다** — 사용자가 Gate 앱을 열어 확인하지 않아도 되게.
-  const failed = results.filter(r => r && r.ok === false);
+  // ★ **기록과 응답이 같은 값을 쓴다.**
+  //
+  //   예전에는 여기서 `failed`로 exit_monitor_runs를 FAILED로 적으면서
+  //   아래 응답은 `ok: true`가 박혀 있었다. 같은 실행에서 표는 실패,
+  //   응답은 성공이 나왔고 — 부르는 쪽은 초록만 보고 넘어갔다.
+  const outcome = exitRunOutcome({ results, lifecycleFailed });
   await closeRun({
-    status: failed.length > 0 ? 'FAILED' : 'OK',
+    status: outcome.status,
     positions_scanned: decisions.length,
     actions: results.filter(r => r && r.ok === true).length,
     // 계단식 경로에서 치운 것 + 전략 무관 정리에서 치운 것을 함께 센다.
@@ -1114,13 +1143,11 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
     cleanup_detail: (orphanCleanups.length || sweep.details.length)
       ? { ladder: orphanCleanups, sweep: sweep.details, sweepSummary: sweep.summary }
       : null,
-    errors: failed.length > 0
-      ? failed.map(r => `${r.symbol}: ${String(r.error || '').slice(0, 120)}`).join(' · ').slice(0, 1000)
-      : null,
+    errors: outcome.errors,
   });
 
   return NextResponse.json({
-    ok: true, checked: decisions.length, actionable: actionable.length, alerts, recovery,
+    ok: outcome.ok, checked: decisions.length, actionable: actionable.length, alerts, recovery,
     orphanCleanups, sweep, coverage, lifecycle, results,
     runId, cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });

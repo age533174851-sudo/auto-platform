@@ -231,6 +231,13 @@ export function runLedgerTests() {
     eq(strategyOf({ strategy_id: 'A', signal_id: '[s:B]x' }), 'A');
   });
 
+  test('strategy_id 칸이 아예 없어도 signal_id 표식에서 복원한다', () => {
+    const r: any = { signal_id: '[s:scalp]sig-1' };
+    assert(!Object.prototype.hasOwnProperty.call(r, 'strategy_id'), '운영 live_orders 모양이어야 한다');
+    eq(strategyOf(r), 'scalp');
+  });
+
+
   test('주인을 모르면 null — 아무 전략에나 붙이지 않는다', () => {
     eq(strategyOf({ signal_id: 'plain' }), null);
     eq(strategyOf({}), null);
