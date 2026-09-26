@@ -37,14 +37,35 @@ export type LifecycleActionCode =
   | 'CLOSE_INCOMPLETE'
   /** 보냈지만 종료 후 재조회를 못 했다. **0이라는 뜻이 아니다** */
   | 'CLOSE_UNVERIFIED'
-  /** 거래소가 거부했거나 보내지 못했다 */
+  /**
+   * **거래소가 명시적으로 거부했다.**
+   *
+   * 타임아웃·연결 끊김처럼 접수 여부를 모르는 경우는 여기 넣지 않는다 —
+   * 그건 `CLOSE_AMBIGUOUS`다.
+   */
   | 'CLOSE_REJECTED'
+  /**
+   * **보냈는지 접수됐는지 모른다** (타임아웃·연결 끊김).
+   *
+   * 거부로 단정하면 "안 나갔다"로 읽혀 같은 자리에 또 보내게 된다.
+   * 실제로는 나갔을 수 있다. 재조회로 결과만 확인하고, 확정되지 않으면
+   * 대조(reconcile) 대상으로 남긴다.
+   */
+  | 'CLOSE_AMBIGUOUS'
   /** 보내기 전에 실행 권한(임차)이 넘어갔다 */
   | 'LEASE_LOST';
 
 export interface LifecycleActionDeps {
-  /** 전량 청산을 보낸다. `attempted`는 "보냈는가"다 */
-  close: () => Promise<{ attempted: boolean; ok: boolean; error: string | null }>;
+  /**
+   * 전량 청산을 보낸다. `attempted`는 "보냈는가"다.
+   *
+   * `ambiguous: true`는 **접수 여부를 모른다**는 뜻이다(타임아웃·연결
+   * 끊김). 거래소가 명시적으로 거부한 것과 구분해야 한다 — 거부로 적으면
+   * "안 나갔다"로 읽혀 같은 자리에 또 보낸다.
+   */
+  close: () => Promise<{
+    attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean;
+  }>;
   /** 보낸 뒤 잔여를 다시 읽는다. `ok:false`는 "못 읽었다"다 */
   readAfter: () => Promise<{ ok: boolean; found: boolean }>;
   /**
@@ -62,10 +83,12 @@ export interface LifecycleActionResult {
   ok: boolean;
   /** 거래소에 요청을 보냈는가 */
   attempted: boolean;
-  /** 거래소가 받았는가 */
-  accepted: boolean;
+  /** 거래소가 받았는가. **모르면 null** (타임아웃·연결 끊김) */
+  accepted: boolean | null;
   /** 포지션 0을 확인했는가. **못 읽었으면 null** */
   flatVerified: boolean | null;
+  /** 사람이 거래소와 대조해야 하는가 */
+  needsReconcile: boolean;
   reason: string;
 }
 
@@ -88,44 +111,67 @@ export async function applyLifecycleClose(
     try { mine = await deps.stillMine(); } catch { mine = false; }
     if (!mine) {
       return { code: 'LEASE_LOST', ok: false, attempted: false, accepted: false,
-        flatVerified: null,
+        flatVerified: null, needsReconcile: false,
         reason: '실행 권한(임차)이 넘어가 청산을 보내지 않았습니다' };
     }
   }
 
   // ── ② 전송 ──
-  let r: { attempted: boolean; ok: boolean; error: string | null };
+  let r: { attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean };
   try { r = await deps.close(); }
   catch (e: any) {
-    // **예외를 '안 보냈다'로 적지 않는다.** 보내고 응답을 못 받았을 수도
-    // 있다 — 그 구분은 아래 재조회가 한다.
-    r = { attempted: true, ok: false, error: String(e?.message || e) };
+    // **예외를 '안 보냈다'로도 '거부됐다'로도 적지 않는다.** 보내고
+    // 응답을 못 받았을 수도 있다 — 그 구분은 아래 재조회가 한다.
+    r = { attempted: true, ok: false, error: String(e?.message || e), ambiguous: true };
   }
 
-  if (!r.ok) {
-    // 접수되지 않았다. 그래도 보냈을 수는 있으므로 `attempted`를 보존한다.
+  const ambiguous = r.ambiguous === true;
+
+  if (!r.ok && !ambiguous) {
+    // 거래소가 **명시적으로** 거부했다. 그래도 보냈을 수는 있으므로
+    // `attempted`를 보존한다.
     return { code: 'CLOSE_REJECTED', ok: false,
       attempted: r.attempted !== false, accepted: false, flatVerified: null,
+      needsReconcile: false,
       reason: r.error || '청산 주문이 접수되지 않았습니다' };
   }
 
   // ── ③ 재조회 ──
   //
   // **접수는 체결이 아니다.** 부분 종료도 체결로 잡히므로 잔여를 본다.
+  // 접수 여부를 모르는 경우(ambiguous)에도 반드시 읽는다 — 결과는
+  // 거래소에만 있다.
   let after: { ok: boolean; found: boolean };
   try { after = await deps.readAfter(); }
   catch { after = { ok: false, found: false }; }
 
   if (after.ok !== true) {
-    return { code: 'CLOSE_UNVERIFIED', ok: false, attempted: true, accepted: true,
-      flatVerified: null,
-      reason: '청산은 접수됐지만 종료 후 재조회에 실패했습니다 — 포지션이 0이라는 뜻이 아닙니다' };
+    return { code: 'CLOSE_UNVERIFIED', ok: false, attempted: true,
+      accepted: ambiguous ? null : true, flatVerified: null,
+      needsReconcile: true,
+      reason: ambiguous
+        ? '청산 전송 결과를 모르는 채 재조회도 실패했습니다 — 거래소와 대조가 필요합니다'
+        : '청산은 접수됐지만 종료 후 재조회에 실패했습니다 — 포지션이 0이라는 뜻이 아닙니다' };
   }
+
   if (after.found === true) {
+    if (ambiguous) {
+      // 보냈는지도 모르고 포지션도 남아 있다. **거부로 단정하지 않는다** —
+      // 주문이 살아 있을 수 있고, 그 상태에서 또 보내면 두 번 나간다.
+      return { code: 'CLOSE_AMBIGUOUS', ok: false, attempted: true,
+        accepted: null, flatVerified: false, needsReconcile: true,
+        reason: (r.error ? `${r.error} — ` : '')
+          + '전송 결과를 모르고 포지션이 남아 있습니다 — 거래소와 대조가 필요합니다' };
+    }
     return { code: 'CLOSE_INCOMPLETE', ok: false, attempted: true, accepted: true,
-      flatVerified: false,
+      flatVerified: false, needsReconcile: true,
       reason: '청산이 접수됐지만 포지션이 아직 남아 있습니다 (부분 종료일 수 있습니다)' };
   }
-  return { code: 'CLOSED_VERIFIED', ok: true, attempted: true, accepted: true,
-    flatVerified: true, reason: '청산 후 포지션 0을 확인했습니다' };
+
+  // 잔여 0을 **확인**했다. 전송 결과를 몰랐더라도 결과는 확인됐다.
+  return { code: 'CLOSED_VERIFIED', ok: true, attempted: true,
+    accepted: ambiguous ? null : true, flatVerified: true, needsReconcile: false,
+    reason: ambiguous
+      ? '전송 결과는 몰랐지만 재조회로 포지션 0을 확인했습니다'
+      : '청산 후 포지션 0을 확인했습니다' };
 }

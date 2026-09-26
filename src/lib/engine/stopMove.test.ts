@@ -120,4 +120,43 @@ export function runStopMoveTests() {
     eq(seen[0], null, '번호가 없다는 사실 그대로');
     eq(r.code, 'MOVED', '진행한다');
   });
+
+  // ══ 건너뛴 정리를 완전 성공으로 숨기지 않는다 ══
+  //
+  // 임차를 잃으면 옛 손절 취소를 건너뛴다. 새 손절은 걸려 있으니 실패는
+  // 아니지만, **옛 것도 남아 있다.** 그 사실이 결과에 없으면 다음 주인이
+  // 다음 회차에 정리할 근거가 사라진다.
+
+  test('★ 취소를 건너뛰면 MOVED가 아니라 OLD_STOP_REMAINS다', async () => {
+    const r = await moveStopSafely({
+      symbol: 'BTCUSDT', side: 'LONG', newStop: 100,
+      place: async () => ({ ok: true, orderId: 'new-1' }),
+      record: async () => ({ ok: true }),
+      cancelOthers: async () => ({ cancelled: 0, note: '임차 상실', skipped: true }),
+    });
+    eq(r.code, 'OLD_STOP_REMAINS', '★ 건너뛴 것을 옮겼다고 적었습니다');
+    eq(r.oldStopKept, true, '★ 옛 손절이 남은 사실이 사라졌습니다');
+    eq(r.ok, true, '새 손절은 걸렸으므로 실패는 아니다');
+    eq(r.newOrderId, 'new-1');
+    assert(/건너뛰었습니다/.test(r.reason), r.reason);
+    assert(/임차 상실/.test(r.reason), '왜 건너뛰었는지 남아야 한다');
+  });
+
+  test('0건 취소와 건너뜀은 다르다', () => {
+    // 0건은 "지울 것이 없었다", 건너뜀은 "지울 것이 있는데 손대지 않았다".
+    return Promise.all([
+      moveStopSafely({
+        symbol: 'BTCUSDT', side: 'LONG', newStop: 100,
+        place: async () => ({ ok: true, orderId: 'n' }),
+        record: async () => ({ ok: true }),
+        cancelOthers: async () => ({ cancelled: 0 }),
+      }).then(r => { eq(r.code, 'MOVED'); eq(r.oldStopKept, false); }),
+      moveStopSafely({
+        symbol: 'BTCUSDT', side: 'LONG', newStop: 100,
+        place: async () => ({ ok: true, orderId: 'n' }),
+        record: async () => ({ ok: true }),
+        cancelOthers: async () => ({ cancelled: 0, skipped: true }),
+      }).then(r => { eq(r.code, 'OLD_STOP_REMAINS'); eq(r.oldStopKept, true); }),
+    ]).then(() => undefined);
+  });
 }

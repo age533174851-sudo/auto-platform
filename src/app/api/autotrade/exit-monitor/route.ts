@@ -26,6 +26,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
 
+/** 임차를 잃어 거래소를 바꾸지 않았을 때 남기는 말 (한 곳에서만 적는다) */
+const LEASE_LOST_MSG = '실행 권한(임차)이 넘어가 거래소 주문을 보내지 않았습니다';
+
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -66,6 +69,8 @@ async function runPositionGuards(
    * 청산 판단을 바꾸면 안 된다.
    */
   orphanCleanups?: any[],
+  /** ★ 보호주문 **취소**도 거래소 쓰기다 */
+  stillMine?: () => Promise<boolean>,
 ): Promise<{ tradeId: string; symbol: string; verdict: GuardVerdict }[]> {
   if (decisions.length === 0) return [];
 
@@ -132,7 +137,10 @@ async function runPositionGuards(
             const { cleanupOwnedProtectionWhenFlat, loadOwnedProtectionIds } =
               await import('@/lib/engine/protectionCleanup');
             const owned = await loadOwnedProtectionIds(sb, { userId: d.userId, symbol: d.symbol, limit: 5 });
-            if (owned.ids.length > 0) {
+            if (owned.ids.length > 0 && stillMine && !(await stillMine().catch(() => false))) {
+              orphanCleanups.push({ symbol: d.symbol, tradeId: d.tradeId, code: 'LEASE_LOST',
+                ok: false, reason: LEASE_LOST_MSG });
+            } else if (owned.ids.length > 0) {
               const r = await cleanupOwnedProtectionWhenFlat(venue, d.symbol, {
                 position: { ok: snap.ok, found: snap.found, qty: null },
                 myStrategyId: '', ownedIds: owned.ids, ownedOnly: true,
@@ -198,7 +206,11 @@ async function runPositionGuards(
  * 그 사실을 응답에 남긴다 — 사용자의 활성 연결 중 아무거나 고르면
  * 실계좌 포지션을 테스트넷에 물어보게 된다.
  */
-async function sweepOrphanProtection(sb: any): Promise<{
+async function sweepOrphanProtection(
+  sb: any,
+  /** ★ 보호주문 **취소**도 거래소 쓰기다. 전송 직전에 권한을 묻는다 */
+  stillMine?: () => Promise<boolean>,
+): Promise<{
   targets: number; cleaned: number; stillPresent: number; unreadable: number;
   skipped: Array<{ code: string; count: number; reason: string }>;
   details: any[]; summary: string; error: string | null;
@@ -301,6 +313,12 @@ async function sweepOrphanProtection(sb: any): Promise<{
         continue;
       }
 
+      if (stillMine && !(await stillMine().catch(() => false))) {
+        out.unreadable += 1;
+        out.details.push({ symbol: t.symbol, code: 'LEASE_LOST', ok: false,
+          reason: LEASE_LOST_MSG });
+        continue;
+      }
       const r = await cleanupOwnedProtectionWhenFlat(venue, t.symbol, {
         position: { ok: pos.ok, found: pos.found, qty: pos.qty },
         // 전략 id는 들고 있지 않다. **적어 둔 번호와 일치하는 것만** 지운다.
@@ -711,7 +729,7 @@ export async function GET(req: NextRequest) {
   // 포지션이 이미 0이 된 종목에서 치운 보호주문. **판단에 쓰지 않고
   // 응답에만 싣는다** — 정리 여부가 청산 판단을 바꾸면 안 된다.
   const orphanCleanups: any[] = [];
-  const guardFindings = await runPositionGuards(sb, decisions, testnet, connFor, orphanCleanups);
+  const guardFindings = await runPositionGuards(sb, decisions, testnet, connFor, orphanCleanups, stillMine);
 
   // ── 전략을 가리지 않는 고아 보호주문 정리 ──
   //
@@ -837,13 +855,25 @@ async function runLifecycleSweep(
   const { mutationGuardFor } = await import('@/lib/engine/mutationGuard');
   const guard = mutationGuardFor(fence ?? null);
 
+  /**
+   * ★ **거래소를 바꾸기 직전마다** 묻는다.
+   *
+   *   한 번 묻고 여러 번 쓰면, 그 사이에 임차가 넘어간 쓰기는 잠금 밖이다.
+   *   못 읽으면 바꾸지 않는다(fail-closed).
+   */
+  const mayMutate = async (): Promise<boolean> => {
+    if (!stillMine) return true;
+    try { return await stillMine(); } catch { return false; }
+  };
+
   for (const p of positions) {
+    // ★ **선점은 여기서 하지 않는다.**
+    //
+    //   예전에는 판단하기 전에 표식을 남겼다. 그러면 읽기만 하고 아무것도
+    //   바꾸지 않은 줄(action === 'NONE', 점검 모드, 연결 못 읽음)이
+    //   자리를 먹어서, 같은 자리를 가리키는 **실제로 조치해야 할** 줄이
+    //   DUPLICATE로 밀렸다. 선점은 거래소를 바꾸기 직전에 한다.
     const key = mutationKeyOf(p);
-    if (!guard.claim(key)) {
-      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
-        ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
-      continue;
-    }
 
     try {
       const venue = await credsOf(p.connectionId);
@@ -892,7 +922,13 @@ async function runLifecycleSweep(
       // ★ **같은 회차에 같은 자리를 두 번 건드리지 않는다.**
       //   이것은 회차 **안**의 중복만 막는다. 다른 워커·임차 탈취로 인한
       //   중복은 아래 `stillMine` 확인이 막는 **다른 문제**다.
-      //   표식은 위 `guard.claim(key)`가 이미 남겼다.
+      //
+      //   ★ 거래소를 바꾸는 것이 확정된 **바로 이 자리**에서 선점한다.
+      if (!guard.claim(key)) {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
+          ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
+        continue;
+      }
       if (v.action === 'CLOSE') {
         // ★ **순서(권한 → 전송 → 재조회)는 `lifecycleAction`이 갖는다.**
         //   라우트 안에 두면 그 순서가 시험되지 않는 자리에 남는다.
@@ -910,10 +946,13 @@ async function runLifecycleSweep(
         }
         out.acted += 1;
         // ★ ORDER ACCEPTED != CLOSED. 셋을 섞지 않는다.
+        // ★ **`closed`는 접수가 아니라 확인이다.**
+        //   `accepted`로 적으면 부분 종료·미체결이 장부에 CLOSED로 남는다.
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
           attempted: act.attempted, accepted: act.accepted,
-          ok: act.ok, closed: act.accepted,
-          flatVerified: act.flatVerified,
+          ok: act.ok, closed: act.flatVerified === true,
+          flatVerified: act.flatVerified, needsReconcile: act.needsReconcile,
+          error: act.ok ? null : act.reason,
           reason: `${v.reason} — ${act.reason}` });
         continue;
       }
@@ -922,7 +961,7 @@ async function runLifecycleSweep(
       //
       // ★ 손절 이동도 거래소를 **바꾼다.** 임차가 넘어간 뒤에 옮기면 남이
       //   옮긴 손절 위에 덮어쓴다. 그래서 전송 전에 권한을 묻는다.
-      if (stillMine && !(await stillMine().catch(() => false))) {
+      if (!(await mayMutate())) {
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'LEASE_LOST',
           ok: false, error: '실행 권한(임차)이 넘어가 손절을 옮기지 않았습니다',
           reason: '실행 권한(임차)이 넘어가 손절을 옮기지 않았습니다' });
@@ -931,6 +970,11 @@ async function runLifecycleSweep(
       const mv = await moveStopSafely({
         symbol: p.symbol, side: p.side, newStop: v.newStop!,
         place: async (stopPrice) => {
+          // ★ 콜백 안도 거래소 쓰기다. 바깥에서 한 번 물었다고 넘어가지
+          //   않는다 — 그 사이 임차가 넘어갈 수 있다.
+          if (!(await mayMutate())) {
+            return { ok: false, orderId: null, message: LEASE_LOST_MSG };
+          }
           const r = await ops.placeStop(venue, { symbol: p.symbol, positionSide: p.side, stopPrice });
           return { ok: !!r?.ok, orderId: r?.orderId ?? null, message: r?.message };
         },
@@ -941,7 +985,15 @@ async function runLifecycleSweep(
             .update({ sl_order_id: orderId }).eq('id', p.orderId);
           return error ? { ok: false, message: String(error.message).slice(0, 120) } : { ok: true };
         },
-        cancelOthers: async (keep) => ops.cancelOtherStops(venue, p.symbol, p.side, keep),
+        cancelOthers: async (keep) => {
+          // 취소도 거래소 쓰기다. 임차를 잃었으면 남의 손절을 지우게 된다.
+          // ★ `skipped: true`가 없으면 `moveStopSafely`가 이것을 "0건
+          //   취소하고 옮겼다"로 읽어 **완전 성공(MOVED)으로 숨긴다.**
+          if (!(await mayMutate())) {
+            return { cancelled: 0, note: LEASE_LOST_MSG, skipped: true };
+          }
+          return ops.cancelOtherStops(venue, p.symbol, p.side, keep);
+        },
       });
       out.acted += mv.ok ? 1 : 0;
       out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: mv.code,
@@ -964,7 +1016,7 @@ async function runLifecycleSweep(
   const sweep = dryRun
     ? { targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0, skipped: [],
         details: [], summary: '점검 모드라 고아 정리를 돌리지 않았습니다', error: null }
-    : await sweepOrphanProtection(sb);
+    : await sweepOrphanProtection(sb, stillMine);
 
   // ── 전략을 가리지 않는 포지션 생명주기 ──
   //
@@ -1094,14 +1146,33 @@ async function runLifecycleSweep(
           if (before.amount == null) {
             order = { attempted: false, ok: false, error: '보유 수량을 읽지 못했습니다' };
           } else {
-            const r: any = await futuresPlaceOrder(t as any, {
-              symbol: d.symbol, side: exitSide, type: 'MARKET' as const,
-              quantity: before.amount, reduceOnly: true,
-              clientOrderId: `xm${String(d.tradeId).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20)}`,
-            });
-            order = { attempted: true, ok: r?.ok === true, error: r?.error ?? r?.message ?? null };
-            // **접수는 체결이 아니다.** 보낸 뒤 다시 읽어 확인한다.
-            if (order.ok) after = readPositions(await futuresListPositions(t as any), d.symbol);
+            // ★ **reduceOnly라고 안전한 것이 아니다.**
+            //
+            //   이 경로는 `positionSide` 없이 `reduceOnly`만 보낸다 —
+            //   단방향 전용 조합이다. 양방향 계좌에 그대로 보내면 거부가
+            //   아니라 **반대 포지션**이 될 수 있다. 생명주기 경로는
+            //   `closeSymbolPosition`이 이 관문을 지나는데, 계단식 경로는
+            //   직접 주문을 내며 **건너뛰고 있었다.** 같은 관문을 쓴다.
+            const opsGate = await import('@/lib/engine/venuePositionOps');
+            const gate = await opsGate.closeModeGate(
+              { exchange: cr.exchange, apiKey: key, apiSecret: secret, testnet } as any,
+              d.side);
+            if (!gate.ok) {
+              order = { attempted: false, ok: false, error: gate.message };
+            } else if (!(await stillMine())) {
+              // 전송 직전에 다시 묻는다. 여기까지 오는 데 거래소 조회로
+              // 수십 초가 걸릴 수 있다.
+              order = { attempted: false, ok: false, error: LEASE_LOST_MSG };
+            } else {
+              const r: any = await futuresPlaceOrder(t as any, {
+                symbol: d.symbol, side: exitSide, type: 'MARKET' as const,
+                quantity: before.amount, reduceOnly: true,
+                clientOrderId: `xm${String(d.tradeId).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20)}`,
+              });
+              order = { attempted: true, ok: r?.ok === true, error: r?.error ?? r?.message ?? null };
+              // **접수는 체결이 아니다.** 보낸 뒤 다시 읽어 확인한다.
+              if (order.ok) after = readPositions(await futuresListPositions(t as any), d.symbol);
+            }
           }
         }
 
@@ -1135,6 +1206,11 @@ async function runLifecycleSweep(
       // "청산 감시 정상"이 떠 있었다.
       const opsMv = await import('@/lib/engine/venuePositionOps');
       const venueMv = { exchange: cr.exchange, apiKey: key, apiSecret: secret, testnet };
+      // ★ 손절을 거는 것도 거래소 쓰기다. 전송 직전에 권한을 묻는다.
+      if (!(await stillMine())) {
+        results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: LEASE_LOST_MSG });
+        continue;
+      }
       const placed = await opsMv.placeStop(venueMv, {
         symbol: d.symbol, positionSide: d.side, stopPrice: d.newStop!,
       });
@@ -1147,8 +1223,13 @@ async function runLifecycleSweep(
       // 기존 손절 중 방금 건 것 외에는 취소한다.
       // **남길 것을 모르면 아무것도 지우지 않는다** — 지우면 손절 없는
       // 포지션이 남는다. 익절과 분할 사다리는 건드리지 않는다.
-      const { cancelled, note: cancelNote } =
-        await opsMv.cancelOtherStops(venueMv, d.symbol, d.side, placed.orderId);
+      // ★ 취소도 거래소 쓰기다. 임차를 잃었으면 남의 손절을 지우게 된다.
+      //   **새 손절은 이미 걸렸으므로 보호가 없어지지는 않는다** — 옛 것이
+      //   같이 남을 뿐이고, 겹치는 편이 비는 것보다 안전하다.
+      const cleanupOwned = await stillMine();
+      const { cancelled, note: cancelNote } = cleanupOwned
+        ? await opsMv.cancelOtherStops(venueMv, d.symbol, d.side, placed.orderId)
+        : { cancelled: 0, note: `${LEASE_LOST_MSG} — 옛 손절 정리를 건너뛰었습니다` };
 
       if (!dryRun) {
         // **stop_loss를 덮어쓰지 않는다.** 그 칸은 진입 시점 값이고 1R을
@@ -1158,8 +1239,16 @@ async function runLifecycleSweep(
           exit_reason: d.reason,
         }).eq('id', d.tradeId);
       }
-      results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: true, exchange: cr.exchange,
-        newStop: d.newStop, cancelledOld: cancelled, cancelNote, reason: d.reason });
+      // ★ **건너뛴 것을 완전 성공처럼 숨기지 않는다.**
+      //
+      //   새 손절은 걸렸으므로 실패는 아니다. 하지만 옛 손절도 남아 있다 —
+      //   그 사실이 결과에 없으면 다음 주인이 정리할 근거가 사라진다.
+      results.push({ symbol: d.symbol,
+        action: 'MOVE_STOP', code: cleanupOwned ? 'MOVED' : 'OLD_STOP_REMAINS',
+        ok: true, exchange: cr.exchange,
+        newStop: d.newStop, cancelledOld: cancelled,
+        oldStopKept: !cleanupOwned, cleanupSkipped: !cleanupOwned,
+        cancelNote, reason: d.reason });
     } catch (e: any) {
       results.push({ symbol: d.symbol, action: d.action, ok: false, error: e?.message || '실행 실패' });
     }

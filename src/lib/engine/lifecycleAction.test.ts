@@ -21,6 +21,7 @@ function fake(o: {
   closeOk?: boolean;
   closeAttempted?: boolean;
   closeThrows?: boolean;
+  closeAmbiguous?: boolean;
   afterOk?: boolean;
   afterFound?: boolean;
   afterThrows?: boolean;
@@ -37,7 +38,8 @@ function fake(o: {
       close: async () => {
         calls.push('close'); closes += 1;
         if (o.closeThrows) throw new Error('네트워크 끊김');
-        return { attempted: o.closeAttempted !== false, ok: o.closeOk !== false, error: null };
+        return { attempted: o.closeAttempted !== false, ok: o.closeOk !== false,
+          error: o.closeOk === false ? '거절' : null, ambiguous: o.closeAmbiguous === true };
       },
       readAfter: async () => {
         calls.push('readAfter'); reads += 1;
@@ -117,22 +119,70 @@ export function runLifecycleActionTests() {
   });
 
   // ══ ⑤ 거부 ══
-  test('★ ⑤ 거래소가 거부하면 CLOSED가 아니고 재조회도 하지 않는다', async () => {
+  test('★ ⑤ 거래소가 거부하면 CLOSED가 아니다', async () => {
     const f = fake({ mine: true, closeOk: false });
     const r = await applyLifecycleClose(f.deps as any);
     eq(r.code, 'CLOSE_REJECTED');
-    eq(r.accepted, false);
     eq(r.ok, false);
-    eq(f.counts().reads, 0, '거부된 주문에 재조회는 뜻이 없습니다');
   });
 
-  test('★ 전송 중 예외는 "안 보냈다"가 아니다', async () => {
-    // 보내고 응답을 못 받았을 수도 있다. `attempted`를 false로 적으면
-    // 나중에 "보낸 적 없다"로 읽혀 같은 자리에 또 보낸다.
+  // ══ 모호한 전송을 거부로 단정하지 않는다 ══
+  //
+  // 타임아웃·연결 끊김은 "거부됐다"가 아니다. 거부로 적으면 안 나간 것으로
+  // 읽혀 같은 자리에 또 보낸다 — 실제로는 나갔을 수 있다.
+
+  test('★ 전송 중 예외는 "안 보냈다"도 "거부됐다"도 아니다', async () => {
     const f = fake({ mine: true, closeThrows: true });
     const r = await applyLifecycleClose(f.deps as any);
-    eq(r.code, 'CLOSE_REJECTED');
+    assert(r.code !== 'CLOSE_REJECTED', '★ 모호한 전송을 거부로 단정했습니다');
     eq(r.attempted, true, '★ 보냈을 수 있는 것을 안 보냈다고 적었습니다');
+    eq(r.accepted, null, '★ 접수 여부를 모르는데 boolean으로 적었습니다');
+    eq(f.counts().reads, 1, '★ 결과를 확인하러 다시 읽지 않았습니다');
+  });
+
+  test('★ 전송이 모호해도 재조회로 0을 보면 종료다', async () => {
+    // 결과는 거래소에만 있다. 전송 응답을 못 받았다고 안 닫힌 것이 아니다.
+    const f = fake({ mine: true, closeThrows: true });
+    const r = await applyLifecycleClose(f.deps as any);
+    eq(r.code, 'CLOSED_VERIFIED');
+    eq(r.ok, true);
+    eq(r.flatVerified, true);
+    eq(r.needsReconcile, false);
+  });
+
+  test('★ 전송이 모호하고 포지션도 남아 있으면 대조 대상이다', async () => {
+    const f = fake({ mine: true, closeThrows: true, afterFound: true });
+    const r = await applyLifecycleClose(f.deps as any);
+    eq(r.code, 'CLOSE_AMBIGUOUS');
+    eq(r.ok, false);
+    eq(r.accepted, null);
+    eq(r.needsReconcile, true, '★ 사람이 대조해야 하는데 표시가 없습니다');
+    eq(f.counts().closes, 1, '★ 모호한 상태에서 또 보냈습니다');
+  });
+
+  test('★ 전송이 모호하고 재조회도 실패하면 확정하지 않는다', async () => {
+    const f = fake({ mine: true, closeThrows: true, afterOk: false });
+    const r = await applyLifecycleClose(f.deps as any);
+    eq(r.code, 'CLOSE_UNVERIFIED');
+    eq(r.accepted, null);
+    eq(r.flatVerified, null);
+    eq(r.needsReconcile, true);
+  });
+
+  test('★ 거래소가 ambiguous로 표시한 실패도 거부가 아니다', async () => {
+    // closeSymbolPosition이 타임아웃을 unknownResultVerdict로 분류해 넘긴다.
+    const f = fake({ mine: true, closeOk: false, closeAmbiguous: true, afterFound: true });
+    const r = await applyLifecycleClose(f.deps as any);
+    eq(r.code, 'CLOSE_AMBIGUOUS');
+    assert(r.code !== 'CLOSE_REJECTED', '★ 모호한 실패를 거부로 적었습니다');
+  });
+
+  test('명시적 거부는 그대로 거부다 — 모호함과 섞지 않는다', async () => {
+    const f = fake({ mine: true, closeOk: false });
+    const r = await applyLifecycleClose(f.deps as any);
+    eq(r.code, 'CLOSE_REJECTED');
+    eq(r.accepted, false, '거부는 "받지 않았다"가 확정이다');
+    eq(f.counts().reads, 0, '거부된 주문에 재조회는 뜻이 없습니다');
   });
 
   test('권한 확인을 안 주면 확인하지 않는다 (임차 표 없는 배포)', async () => {
@@ -158,8 +208,8 @@ export function runLifecycleActionTests() {
                      { mine: true, afterOk: false }, { mine: true, closeOk: false },
                      { mine: false }]) {
       const r = await applyLifecycleClose(fake(o).deps as any);
-      eq(r.ok, r.attempted && r.accepted && r.flatVerified === true,
-        `★ ok(${r.ok})가 셋과 어긋납니다: ${r.code}`);
+      eq(r.ok, r.attempted && r.flatVerified === true,
+        `★ ok(${r.ok})가 확인 사실과 어긋납니다: ${r.code}`);
     }
   });
 }

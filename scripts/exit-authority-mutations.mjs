@@ -60,9 +60,25 @@ const CASES = [
      `        const act = await applyLifecycleClose({
           stillMine: undefined,`]]],
 
-  ['MUT-S8 손절 이동이 권한을 묻지 않는다', ROUTE, 'RED',
-   [[`      if (stillMine && !(await stillMine().catch(() => false))) {`,
-     `      if (false) {`]]],
+  // ★ 옛 문구를 지우는 무해 변이로 두지 않는다. sweep의 **모든** 거래소
+  //   쓰기가 이 헬퍼 하나에 걸려 있으므로, 이것을 무력화하는 것이
+  //   실제 방어선을 시험하는 변이다.
+  ['MUT-S8 sweep의 권한 확인 헬퍼를 통과로 만든다 (모든 쓰기 무방비)', ROUTE, 'RED',
+   [[`    if (!stillMine) return true;
+    try { return await stillMine(); } catch { return false; }`,
+     `    void stillMine;
+    return true;`]]],
+
+  ['MUT-S8b 취소 건너뜀을 완전 성공으로 숨긴다 (부분 성공 은폐)', ROUTE, 'RED',
+   [[`            return { cancelled: 0, note: LEASE_LOST_MSG, skipped: true };`,
+     `            return { cancelled: 0, note: LEASE_LOST_MSG };`]]],
+
+  ['MUT-S8c 계단식 MOVE_STOP이 옛 손절 잔존을 숨긴다', ROUTE, 'RED',
+   [[`        oldStopKept: !cleanupOwned, cleanupSkipped: !cleanupOwned,`,
+     `        oldStopKept: false, cleanupSkipped: false,`]]],
+
+  ['MUT-S8d 정본이 건너뜀을 MOVED로 적는다', 'src/lib/engine/stopMove.ts', 'RED',
+   [[`    if (c?.skipped === true) {`, `    if (false) {`]]],
 
   // ── C. 청산 순서 ──
   ['MUT-S9 권한 확인이 전송 뒤로 간다', ACT, 'RED',
@@ -78,10 +94,10 @@ const CASES = [
 
   // ── D. 접수 != 종료 ──
   ['MUT-S12 재조회 실패를 "닫혔다"로 적는다', ACT, 'RED',
-   [[`    return { code: 'CLOSE_UNVERIFIED', ok: false, attempted: true, accepted: true,
-      flatVerified: null,`,
-     `    return { code: 'CLOSE_UNVERIFIED', ok: true, attempted: true, accepted: true,
-      flatVerified: true,`]]],
+   [[`    return { code: 'CLOSE_UNVERIFIED', ok: false, attempted: true,
+      accepted: ambiguous ? null : true, flatVerified: null,`,
+     `    return { code: 'CLOSE_UNVERIFIED', ok: true, attempted: true,
+      accepted: true, flatVerified: true,`]]],
 
   ['MUT-S13 부분 종료를 성공으로 적는다', ACT, 'RED',
    [[`    return { code: 'CLOSE_INCOMPLETE', ok: false, attempted: true, accepted: true,`,
@@ -131,6 +147,75 @@ export function mutationGuardFor(fence: number | null | undefined): MutationGuar
   ['MUT-S23 손절 없는 줄을 일반 생명주기에 들여보낸다 (PR1 침범)',
    'src/lib/engine/managedPosition.ts', 'RED',
    [[`    if (stopLoss == null || stopLoss <= 0) {`, `    if (false) {`]]],
+
+  // ── 머지 차단 5건 회귀 (실물 감사에서 잡힌 것들) ──
+
+  ['MUT-S24 계단식 reduceOnly 청산이 종료 모드 관문을 우회한다 (blocker 1)', ROUTE, 'RED',
+   [[`            const gate = await opsGate.closeModeGate(`,
+     `            const gate = { ok: true, message: '', code: 'ONE_WAY', strandsOpenPosition: false };
+            void opsGate; void (async () => await (0 as any)(`]]],
+
+  ['MUT-S25 종료 관문이 모드를 읽지 않는다 (blocker 1)', OPS, 'RED',
+   [[`  const pm = await fa.futuresPositionMode(`,
+     `  const pm = { mode: 'ONE_WAY' as const, error: null }; void fa; void (async () => await (0 as any)(`]]],
+
+  ['MUT-S26 접수를 종료로 적는다 (blocker 2)', ROUTE, 'RED',
+   [[`          ok: act.ok, closed: act.flatVerified === true,`,
+     `          ok: act.ok, closed: act.accepted === true,`]]],
+
+  ['MUT-S27 모호한 전송을 거부로 단정한다 (blocker 3)', ACT, 'RED',
+   [[`  if (!r.ok && !ambiguous) {`, `  if (!r.ok) {`]]],
+
+  ['MUT-S28 전송 예외를 모호가 아니라 거부로 적는다 (blocker 3)', ACT, 'RED',
+   [[`    r = { attempted: true, ok: false, error: String(e?.message || e), ambiguous: true };`,
+     `    r = { attempted: true, ok: false, error: String(e?.message || e), ambiguous: false };`]]],
+
+  ['MUT-S29 타임아웃을 모호로 분류하지 않는다 (blocker 3)', OPS, 'RED',
+   [[`    return fx.unknownResultVerdict(String(msg)).unknown === true;`, `    return false;`]]],
+
+  ['MUT-S30 손절 걸기 직전 권한 확인을 없앤다 (blocker 4)', ROUTE, 'RED',
+   [[`          if (!(await mayMutate())) {
+            return { ok: false, orderId: null, message: LEASE_LOST_MSG };
+          }`, ``]]],
+
+  ['MUT-S31 손절 취소 직전 권한 확인을 없앤다 (blocker 4)', ROUTE, 'RED',
+   [[`          if (!(await mayMutate())) {
+            return { cancelled: 0, note: LEASE_LOST_MSG, skipped: true };
+          }`, ``]]],
+
+  ['MUT-S32 계단식 청산 전송 직전 권한 확인을 없앤다 (blocker 4)', ROUTE, 'RED',
+   [[`            } else if (!(await stillMine())) {`, `            } else if (false) {`]]],
+
+  ['MUT-S33 계단식 손절 걸기 직전 권한 확인을 없앤다 (blocker 4)', ROUTE, 'RED',
+   [[`      if (!(await stillMine())) {
+        results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: LEASE_LOST_MSG });
+        continue;
+      }`, ``]]],
+
+  ['MUT-S34 계단식 손절 취소가 권한을 묻지 않는다 (blocker 4)', ROUTE, 'RED',
+   [[`      const cleanupOwned = await stillMine();`, `      const cleanupOwned = true;`]]],
+
+  ['MUT-S35 고아 보호주문 취소에 권한을 넘기지 않는다 (blocker 4)', ROUTE, 'RED',
+   [[`    : await sweepOrphanProtection(sb, stillMine);`, `    : await sweepOrphanProtection(sb);`]]],
+
+  ['MUT-S36 포지션 가드 정리에 권한을 넘기지 않는다 (blocker 4)', ROUTE, 'RED',
+   [[`connFor, orphanCleanups, stillMine);`, `connFor, orphanCleanups);`]]],
+
+  ['MUT-S37 선점이 판단 전으로 돌아간다 (blocker 5)', ROUTE, 'RED',
+   [[`      if (!guard.claim(key)) {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
+          ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
+        continue;
+      }
+      if (v.action === 'CLOSE') {`,
+     `      if (v.action === 'CLOSE') {`],
+    [`    const key = mutationKeyOf(p);`,
+     `    const key = mutationKeyOf(p);
+    if (!guard.claim(key)) {
+      out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
+        ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
+      continue;
+    }`]]],
 
   // ── 대조군 ──
   ['OK-S1 임차 파일에 주석 한 줄 추가', LEASE, 'GREEN',

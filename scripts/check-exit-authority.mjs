@@ -105,11 +105,16 @@ const cand  = code(read(CAND));
     if (/applyLifecycleClose\([\s\S]{0,120}?stillMine:\s*undefined/.test(body)) {
       err(`${ROUTE}의 청산이 권한 확인을 비활성화했습니다`);
     }
+    // 손절 이동은 **콜백 안에서** 전송 직전에 묻는다. 바깥에서 한 번
+    // 물어 두는 것으로는 부족하다 — 그 사이 임차가 넘어갈 수 있다.
     const iMove = body.indexOf('moveStopSafely({');
-    const iGuard = body.indexOf('await stillMine().catch(() => false)');
+    const iGuard = body.indexOf('if (!(await mayMutate())) {');
     if (iMove < 0) err(`${ROUTE}에서 손절 이동을 찾지 못했습니다`);
     else if (iGuard < 0 || iGuard > iMove) {
       err(`${ROUTE}가 손절을 옮긴 뒤에 권한을 확인합니다 — 확인이 먼저입니다`);
+    }
+    if (!/place: async \(stopPrice\) => \{\s*\n(?:[^\n]*\n){0,4}?\s*if \(!\(await mayMutate\(\)\)\)/.test(body)) {
+      err(`${ROUTE}의 손절 걸기 콜백이 전송 직전에 권한을 묻지 않습니다`);
     }
   }
 }
@@ -202,27 +207,161 @@ const cand  = code(read(CAND));
     }
   }
   // 종료 경로가 그 판정을 실제로 쓰는가
+  // ★ 모드 읽기 + 판정은 `closeModeGate`로 옮겼다 — 계단식 경로도 같은
+  //   관문을 써야 하기 때문이다. 옮긴 것을 "없어졌다"로 두지 않는다.
+  const gfn = ops.indexOf('export async function closeModeGate');
+  if (gfn < 0) err(`${OPS}에 종료 모드 관문이 없습니다`);
+  else {
+    const gbody = ops.slice(gfn, gfn + 1600);
+    if (!/futuresPositionMode\s*\(/.test(gbody)) {
+      err(`${OPS}의 종료 관문이 계좌 포지션 모드를 읽지 않습니다`);
+    }
+    if (!/closeModeVerdict\(/.test(gbody)) {
+      err(`${OPS}의 종료 관문이 판정 정본을 쓰지 않습니다 — 판정이 두 곳이면 갈립니다`);
+    }
+  }
   const fn = ops.indexOf('export async function closeSymbolPosition');
   if (fn < 0) err(`${OPS}에서 closeSymbolPosition을 찾지 못했습니다`);
   else {
     const body = ops.slice(fn, fn + 3200);
-    if (!/futuresPositionMode\s*\(/.test(body)) {
-      err(`${OPS}의 종료 경로가 계좌 포지션 모드를 읽지 않습니다`);
-    }
-    if (!/closeModeVerdict\(/.test(body)) {
-      err(`${OPS}가 종료 모드 판정 정본을 쓰지 않습니다 — 판정이 두 곳이면 갈립니다`);
+    if (!/closeModeGate\(/.test(body)) {
+      err(`${OPS}의 종료 경로가 관문을 지나지 않습니다`);
     }
     if (!/if \(!cm\.ok\) return \{ attempted: false/.test(body)) {
       err(`${OPS}가 판정에 걸려도 청산을 보냅니다`);
     }
-    // 모드 판정이 **전송보다 앞**인가
-    const iMode = body.indexOf('futuresPositionMode');
+    // 관문이 **전송보다 앞**인가
+    const iGate = body.indexOf('closeModeGate(');
     const iSend = Math.min(
       ...['closePositionGateFutures', 'closePositionPercent']
         .map(n => { const k = body.indexOf(n); return k < 0 ? Number.MAX_SAFE_INTEGER : k; }));
-    if (iMode >= 0 && iSend !== Number.MAX_SAFE_INTEGER && iMode > iSend) {
-      err(`${OPS}가 청산을 보낸 뒤에 포지션 모드를 읽습니다 — 확인이 먼저입니다`);
+    if (iGate >= 0 && iSend !== Number.MAX_SAFE_INTEGER && iGate > iSend) {
+      err(`${OPS}가 청산을 보낸 뒤에 관문을 지납니다 — 확인이 먼저입니다`);
     }
+  }
+}
+
+// ══════════ ⑤-b 머지 차단 5건 — 회귀 방지 ══════════
+//
+// 실물 감사에서 잡힌 다섯 가지다. 각각 되돌리면 RED다.
+{
+  // ① reduceOnly CLOSE가 종료 모드 관문을 우회하지 못한다
+  //
+  //    reduceOnly라고 안전한 것이 아니다. 단방향 전용 조합을 양방향
+  //    계좌에 보내면 거부가 아니라 반대 포지션이 된다. 계단식 경로가
+  //    관문을 건너뛰고 직접 주문을 내고 있었다.
+  if (!/export async function closeModeGate/.test(ops)) {
+    err(`${OPS}에 종료 모드 관문 정본이 없습니다`);
+  }
+  const iRo = route.indexOf('reduceOnly: true');
+  if (iRo >= 0) {
+    const around = route.slice(Math.max(0, iRo - 2000), iRo);
+    if (!/closeModeGate\(/.test(around)) {
+      err(`${ROUTE}의 reduceOnly 청산이 종료 모드 관문을 지나지 않습니다`
+        + ' — 양방향 계좌에서 반대 포지션이 열릴 수 있습니다');
+    }
+  }
+
+  // ② closed는 접수가 아니라 **확인**이다
+  if (/closed:\s*act\.accepted/.test(route)) {
+    err(`${ROUTE}가 접수를 종료로 적습니다 — 부분 종료·미체결이 CLOSED로 남습니다`);
+  }
+  if (!/closed:\s*act\.flatVerified === true/.test(route)) {
+    err(`${ROUTE}의 closed가 잔여 0 확인에서 나오지 않습니다`);
+  }
+
+  // ③ 모호한 전송을 거부로 단정하지 않는다
+  if (!/CLOSE_AMBIGUOUS/.test(act)) {
+    err(`${ACT}에 모호한 전송 판정이 없습니다`
+      + ' — 타임아웃을 거부로 적으면 안 나간 것으로 읽혀 또 보냅니다');
+  }
+  if (!/const ambiguous = r\.ambiguous === true;/.test(act)) {
+    err(`${ACT}가 전송 모호성을 읽지 않습니다`);
+  }
+  if (!/if \(!r\.ok && !ambiguous\) \{/.test(act)) {
+    err(`${ACT}가 모호한 실패까지 거부로 단정합니다`);
+  }
+  if (!/needsReconcile/.test(act)) {
+    err(`${ACT}가 대조 필요 여부를 적지 않습니다`);
+  }
+  // 모호할 때도 반드시 다시 읽는가 (재조회가 거부 분기 뒤에 있어야 한다)
+  const iRej = act.indexOf("code: 'CLOSE_REJECTED'");
+  const iRead = act.indexOf('deps.readAfter()');
+  if (iRej >= 0 && iRead >= 0 && iRej > iRead) {
+    err(`${ACT}가 재조회보다 뒤에서 거부를 판정합니다 — 순서가 뒤집혔습니다`);
+  }
+  if (!/unknownResultVerdict/.test(ops)) {
+    err(`${OPS}가 모호한 오류를 기존 분류기로 가리지 않습니다 — 규칙이 두 벌이 됩니다`);
+  }
+
+  // ④ 모든 거래소 변경 직전에 권한을 묻는다
+  for (const [re, what] of [
+    // ★ 이름만 보면 본문을 `return true;`로 바꿔도 통과한다(MUT-S8이
+    //   그렇게 새 나갔다). 칸이 있는 것과 묻는 것은 다르다 — **본문을 본다.**
+    [/const mayMutate = async \(\): Promise<boolean> => \{\s*\n\s*if \(!stillMine\) return true;\s*\n\s*try \{ return await stillMine\(\); \} catch \{ return false; \}/,
+      'sweep의 공용 권한 확인(본문)'],
+    [/if \(!\(await mayMutate\(\)\)\) \{\s*\n\s*return \{ ok: false, orderId: null/, '손절 걸기 직전'],
+    [/if \(!\(await mayMutate\(\)\)\) \{\s*\n\s*return \{ cancelled: 0/, '손절 취소 직전'],
+    [/results\.push\(\{ symbol: d\.symbol, action: 'MOVE_STOP', ok: false, error: LEASE_LOST_MSG \}\)/, '계단식 손절 걸기 직전'],
+    [/const cleanupOwned = await stillMine\(\);\s*\n\s*const \{ cancelled[\s\S]{0,80}?cleanupOwned\s*\n?\s*\? await opsMv\.cancelOtherStops/, '계단식 손절 취소 직전'],
+    // ★ 메시지만 보면 조건을 `false`로 바꿔도 통과한다(MUT-S32가 그렇게
+    //   새 나갔다). **조건을 본다.**
+    [/\} else if \(!\(await stillMine\(\)\)\) \{\s*\n(?:[^\n]*\n){0,4}?\s*order = \{ attempted: false, ok: false, error: LEASE_LOST_MSG \}/, '계단식 청산 전송 직전'],
+    [/code: 'LEASE_LOST', ok: false,\s*\n\s*reason: LEASE_LOST_MSG/, '고아 보호주문 취소 직전'],
+  ]) {
+    if (!re.test(route)) err(`${ROUTE}에 ${what} 권한 확인이 없습니다`);
+  }
+  if (!/sweepOrphanProtection\(sb, stillMine\)/.test(route)) {
+    err(`${ROUTE}가 고아 정리에 권한을 넘기지 않습니다`);
+  }
+  if (!/runPositionGuards\(sb, decisions, testnet, connFor, orphanCleanups, stillMine\)/.test(route)) {
+    err(`${ROUTE}가 포지션 가드 정리에 권한을 넘기지 않습니다`);
+  }
+
+  // ⑤ 선점은 판단 전이 아니라 **거래소를 바꾸기 직전**에
+  //
+  //    판단 전에 선점하면 읽기만 한 줄이 자리를 먹어서, 같은 자리를
+  //    가리키는 실제 조치 대상이 DUPLICATE로 밀린다.
+  const iClaim = route.indexOf('guard.claim(key)');
+  const iDecide = route.indexOf('const v = lifecycleDecide(');
+  if (iClaim < 0 || iDecide < 0) err(`${ROUTE}에서 선점 또는 판단을 찾지 못했습니다`);
+  else if (iClaim < iDecide) {
+    err(`${ROUTE}가 판단 전에 자리를 선점합니다`
+      + ' — 읽기만 한 줄이 실제 조치 대상을 DUPLICATE로 밀어냅니다');
+  }
+}
+
+// ══════════ ⑤-c 부분 성공을 완전 성공으로 숨기지 않는다 ══════════
+//
+// 임차를 잃어 옛 손절 취소를 건너뛰면, 새 손절은 걸려 있고 옛 것도 남는다.
+// 실패는 아니지만 **MOVED(완전 성공)도 아니다.** 그 사실이 결과에 없으면
+// 다음 주인이 다음 회차에 정리할 근거가 사라진다.
+{
+  const MV = 'src/lib/engine/stopMove.ts';
+  if (!existsSync(MV)) err(`${MV}가 없습니다`);
+  else {
+    const mv = code(readFileSync(MV, 'utf8'));
+    if (!/skipped\?: boolean/.test(mv)) {
+      err(`${MV}의 취소 결과가 "건너뜀"을 0건 취소와 구분하지 않습니다`);
+    }
+    if (!/if \(c\?\.skipped === true\) \{/.test(mv)) {
+      err(`${MV}가 건너뛴 정리를 MOVED로 적습니다 — 옛 손절이 남은 사실이 사라집니다`);
+    }
+    if (!/skipped === true\) \{[\s\S]{0,260}?oldStopKept: true/.test(mv)) {
+      err(`${MV}가 건너뛴 경우에 oldStopKept를 남기지 않습니다`);
+    }
+  }
+  // sweep 콜백이 건너뜀을 알리는가
+  if (!/return \{ cancelled: 0, note: LEASE_LOST_MSG, skipped: true \};/.test(route)) {
+    err(`${ROUTE}의 손절 취소 건너뜀이 skipped로 표시되지 않습니다`
+      + ' — 정본이 "0건 취소하고 옮겼다"로 읽어 완전 성공으로 숨깁니다');
+  }
+  // 계단식 경로도 사실을 남기는가
+  if (!/oldStopKept: !cleanupOwned, cleanupSkipped: !cleanupOwned,/.test(route)) {
+    err(`${ROUTE}의 계단식 손절 이동이 옛 손절 잔존을 숨깁니다`);
+  }
+  if (!/code: cleanupOwned \? 'MOVED' : 'OLD_STOP_REMAINS',/.test(route)) {
+    err(`${ROUTE}의 계단식 손절 이동이 건너뜀을 MOVED로 적습니다`);
   }
 }
 
