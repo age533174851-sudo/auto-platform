@@ -469,51 +469,61 @@ export async function GET(req: NextRequest) {
   // 한 줄짜리 임차로 막고, 울타리 번호로 "느린 실행이 뒤늦게 깨어나
   // 자기가 아직 주인인 줄 아는 것"까지 막는다.
   // 판정은 exitMonitorLease.ts에 있고 테스트가 붙어 있다.
-  const { leaseDecision, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
+  // 판정·획득 순서·울타리 확인은 모두 exitMonitorLease.ts에 있고, 두 실행을
+  // 동시에 돌려 "둘 다 주인이 되는" 경합을 재현하는 시험이 붙어 있다.
+  const { acquireExitLease, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
   const runner = String(req.headers.get('x-traigo-source') || '').trim() || 'manual';
   const holder = `${runner}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
 
-  let myFence: number | null = null;
-  let leaseTracked = true;
-  {
-    let current: any = undefined;
-    try {
-      const { data, error } = await (sb as any)
-        .from('exit_monitor_lease').select('holder, fence, expires_at').eq('id', 1).maybeSingle();
-      if (!error) current = data ?? null;
-      else if (/does not exist|schema cache|relation/i.test(String(error.message))) {
-        // 058이 아직인 배포. **여기서 막으면 청산 감시가 통째로 멈춘다** —
-        // 그건 이 안전장치가 막으려던 것보다 나쁘다. 예전처럼 돈다.
-        leaseTracked = false;
-      }
-    } catch { /* undefined로 남는다 → 실행하지 않는다 */ }
-
-    if (leaseTracked) {
-      const d = leaseDecision({
-        current: current == null ? current : {
-          holder: String(current.holder), fence: Number(current.fence) || 0,
-          expiresAtMs: Date.parse(String(current.expires_at)),
-        },
-        me: holder, nowMs: cronStartedAt,
-      });
-      if (!d.granted) {
-        // **기다리지 않는다.** 그쪽이 하면 되는 일이다.
-        return NextResponse.json({ ok: true, skipped: true, code: d.code, message: d.reason },
-          { headers: { 'Cache-Control': 'no-store' } });
-      }
-      myFence = d.nextFence;
-      const { error: upErr } = await (sb as any).from('exit_monitor_lease').upsert({
-        id: 1, holder, fence: myFence,
-        acquired_at: new Date(cronStartedAt).toISOString(),
-        expires_at: new Date(cronStartedAt + LEASE_TTL_MS).toISOString(),
-      }, { onConflict: 'id' });
-      if (upErr) {
-        return NextResponse.json({ ok: true, skipped: true, code: 'LEASE_WRITE_FAILED',
-          message: `임차를 적지 못해 이번은 건너뜁니다: ${String(upErr.message).slice(0, 200)}` },
-          { headers: { 'Cache-Control': 'no-store' } });
-      }
-    }
+  const lease = await acquireExitLease({
+    me: holder, nowMs: cronStartedAt, ttlMs: LEASE_TTL_MS,
+    store: {
+      read: async () => {
+        try {
+          const { data, error } = await (sb as any)
+            .from('exit_monitor_lease').select('holder, fence, expires_at').eq('id', 1).maybeSingle();
+          if (error) {
+            if (/does not exist|schema cache|relation/i.test(String(error.message))) {
+              return { missingTable: true };
+            }
+            return {}; // row: undefined → **못 읽었다.** 비어 있는 것이 아니다
+          }
+          return { row: data == null ? null : {
+            holder: String((data as any).holder), fence: Number((data as any).fence) || 0,
+            expiresAtMs: Date.parse(String((data as any).expires_at)),
+          } };
+        } catch { return {}; }
+      },
+      insert: async (row) => {
+        const { error } = await (sb as any).from('exit_monitor_lease').insert({
+          id: 1, holder: row.holder, fence: row.fence,
+          acquired_at: new Date(row.acquiredAtMs).toISOString(),
+          expires_at: new Date(row.expiresAtMs).toISOString(),
+        });
+        return { ok: !error, error: error ? String(error.message) : null };
+      },
+      // ★ **본 값을 조건으로 걸어** 쓴다(compare-and-set).
+      //   예전에는 조건 없는 upsert라 두 실행이 같은 fence로 둘 다 주인이 됐다.
+      compareAndSet: async (row, prevFence) => {
+        const { data, error } = await (sb as any).from('exit_monitor_lease')
+          .update({
+            holder: row.holder, fence: row.fence,
+            acquired_at: new Date(row.acquiredAtMs).toISOString(),
+            expires_at: new Date(row.expiresAtMs).toISOString(),
+          })
+          .eq('id', 1).eq('fence', prevFence).select('fence');
+        return { updated: Array.isArray(data) ? data.length : 0,
+          error: error ? String(error.message) : null };
+      },
+    },
+  });
+  if (!lease.granted) {
+    // **기다리지 않는다.** 그쪽이 하면 되는 일이다. 거래소 쓰기는 0이다.
+    return NextResponse.json({ ok: true, skipped: true, code: lease.code, message: lease.reason },
+      { headers: { 'Cache-Control': 'no-store' } });
   }
+  const myFence = lease.myFence;
+  const leaseTracked = lease.tracked;
 
   /** 주문을 내기 직전에 다시 묻는다 — 내 울타리가 아직 최신인가 */
   const stillMine = async (): Promise<boolean> => {
@@ -726,7 +736,24 @@ export async function GET(req: NextRequest) {
  *   lifecycleDecide    무엇을 할 것인가
  *   moveStopSafely     걸고 → 적고 → 치운다
  */
-async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
+async function runLifecycleSweep(
+  sb: any, dryRun: boolean,
+  /**
+   * ★ **거래소를 바꾸기 직전에 물어보는 실행 권한.**
+   *
+   *   이 sweep은 안에서 `closeSymbolPosition`·`placeStop`·`cancelOtherStops`로
+   *   **실제로 거래소를 바꾼다.** 그런데 임차(fence) 확인은 이 함수가
+   *   **끝난 뒤**에 있었다. 그래서 이 경로만 잠금 밖이었고, 임차가 넘어간
+   *   뒤에도 주문이 나갔다 — 같은 포지션을 둘이 닫을 수 있었다.
+   *
+   *   불변식: AUTHORITY CHECK → EXCHANGE WRITE → VENUE REREAD → RESULT
+   *
+   *   못 주면(undefined) 확인하지 않는다 — 임차 표가 없는 배포다.
+   */
+  stillMine?: () => Promise<boolean>,
+  /** 지금 회차의 임차 번호. 표식이 어느 권한 아래의 것인지 적는다 */
+  fence?: number | null,
+): Promise<{
   candidates: number; acted: number; skipped: any[];
   results: any[]; summary: string; error: string | null;
 }> {
@@ -736,6 +763,7 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
   };
 
   const { managedCandidates, mayActOn, mutationKeyOf } = await import('@/lib/engine/managedPosition');
+  const { applyLifecycleClose } = await import('@/lib/engine/lifecycleAction');
   const { lifecycleDecide } = await import('@/lib/engine/exitLifecycle');
   const { lifecyclePolicyOf } = await import('@/lib/strategies/lifecyclePolicy');
 
@@ -799,13 +827,19 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
     return credCache.get(connectionId);
   };
 
-  // **같은 자리에 두 번 주문하지 않는다.** 워커가 둘 떠 있거나 한 회차에
-  // 같은 포지션을 두 줄이 가리켜도 여기서 한 번만 실행한다.
-  const done = new Set<string>();
+  // ★ **두 가지 중복을 구분한다.**
+  //
+  //   회차 **안**의 중복 (같은 자리를 두 줄이 가리킴) → 이 표식이 막는다
+  //   실행 **사이**의 중복 (다른 워커·임차 탈취)      → 아래 stillMine이 막는다
+  //
+  //   한 장치로 둘 다 막으려 하면 둘 다 못 막는다. 표식이 임차 번호를
+  //   같이 들고 있어서, 임차가 바뀌면 옛 표식이 새 회차를 막지 않는다.
+  const { mutationGuardFor } = await import('@/lib/engine/mutationGuard');
+  const guard = mutationGuardFor(fence ?? null);
 
   for (const p of positions) {
     const key = mutationKeyOf(p);
-    if (done.has(key)) {
+    if (!guard.claim(key)) {
       out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'DUPLICATE',
         ok: true, reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
       continue;
@@ -855,23 +889,45 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
         continue;
       }
 
-      done.add(key);
+      // ★ **같은 회차에 같은 자리를 두 번 건드리지 않는다.**
+      //   이것은 회차 **안**의 중복만 막는다. 다른 워커·임차 탈취로 인한
+      //   중복은 아래 `stillMine` 확인이 막는 **다른 문제**다.
+      //   표식은 위 `guard.claim(key)`가 이미 남겼다.
       if (v.action === 'CLOSE') {
-        const r = await ops.closeSymbolPosition(venue, p.symbol, p.side);
-        // **닫았다고 적기 전에 다시 읽는다.** 접수는 체결이 아니다.
-        const after = await ops.readOpenPosition(venue, p.symbol);
-        const flat = after.ok === true && after.found === false;
+        // ★ **순서(권한 → 전송 → 재조회)는 `lifecycleAction`이 갖는다.**
+        //   라우트 안에 두면 그 순서가 시험되지 않는 자리에 남는다.
+        const act = await applyLifecycleClose({
+          stillMine,
+          close: () => ops.closeSymbolPosition(venue, p.symbol, p.side),
+          readAfter: () => ops.readOpenPosition(venue, p.symbol)
+            .then((x: any) => ({ ok: x.ok === true, found: x.found === true })),
+        });
+        if (act.code === 'LEASE_LOST') {
+          // **회차를 끊는다.** 임차가 넘어갔으면 다음 후보도 내 것이 아니다.
+          out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'LEASE_LOST',
+            ok: false, error: act.reason, reason: act.reason });
+          break;
+        }
         out.acted += 1;
+        // ★ ORDER ACCEPTED != CLOSED. 셋을 섞지 않는다.
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: v.code,
-          ok: !!r?.ok && flat, closed: !!r?.ok,
-          flatVerified: after.ok === true ? flat : null,
-          reason: v.reason + (after.ok === true
-            ? (flat ? ' — 포지션 0 확인' : ' — 아직 남아 있습니다')
-            : ' — 종료 후 재조회 실패(0이라는 뜻이 아닙니다)') });
+          attempted: act.attempted, accepted: act.accepted,
+          ok: act.ok, closed: act.accepted,
+          flatVerified: act.flatVerified,
+          reason: `${v.reason} — ${act.reason}` });
         continue;
       }
 
       // MOVE_STOP — 걸고 → 적고 → 치운다
+      //
+      // ★ 손절 이동도 거래소를 **바꾼다.** 임차가 넘어간 뒤에 옮기면 남이
+      //   옮긴 손절 위에 덮어쓴다. 그래서 전송 전에 권한을 묻는다.
+      if (stillMine && !(await stillMine().catch(() => false))) {
+        out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'LEASE_LOST',
+          ok: false, error: '실행 권한(임차)이 넘어가 손절을 옮기지 않았습니다',
+          reason: '실행 권한(임차)이 넘어가 손절을 옮기지 않았습니다' });
+        break;
+      }
       const mv = await moveStopSafely({
         symbol: p.symbol, side: p.side, newStop: v.newStop!,
         place: async (stopPrice) => {
@@ -915,7 +971,7 @@ async function runLifecycleSweep(sb: any, dryRun: boolean): Promise<{
   // 위 `decideExits`는 계단식 표만 본다. 이 경로가 scalp·my-original-v1의
   // 트레일링·본전이동·시간청산을 담당한다. 점검 모드에서는 판단만 하고
   // 주문을 내지 않는다.
-  const lifecycle = await runLifecycleSweep(sb, dryRun);
+  const lifecycle = await runLifecycleSweep(sb, dryRun, stillMine, myFence);
 
   // ── 무엇을 안 보고 있는가 ──
   //

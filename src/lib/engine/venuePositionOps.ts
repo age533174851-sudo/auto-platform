@@ -74,6 +74,33 @@ export async function closeSymbolPosition(
   positionSide?: 'LONG' | 'SHORT' | null,
 ): Promise<{ attempted: boolean; ok: boolean; error: string | null }> {
   try {
+    // ── ★ 계좌의 포지션 모드를 **먼저 읽는다** ──
+    //
+    // 아래 전송은 단방향 전용 조합이다:
+    //   Binance  reduceOnly: true, positionSide 없음
+    //   Gate     size: 0, auto_size: close_long|close_short
+    //
+    // 양방향(헤지) 계좌에서 이 모양이 어떻게 처리되는지는 공식 문서로
+    // 확인하지 못했다. 틀린 조합은 거부가 아니라 **반대 방향 신규 진입**이
+    // 될 수 있다 — 거부는 불편이고 반대 포지션은 사고다.
+    //
+    // 이 저장소에는 모드를 읽는 함수가 이미 있었다(`futuresPositionMode`,
+    // 못 읽으면 null). 그런데 **종료 경로가 그것을 부르지 않았다.**
+    // 만들어 놓고 안 이은 상태였고, 그게 이 수정이 막는 고장이다.
+    //
+    // 판정은 여기 없다 — `futuresExec.closeModeVerdict`가 진입 판정
+    // (`positionModeVerdict`) **옆에** 있다. 두 판정이 흩어지면 한쪽만
+    // 고쳐지고, 그때 "열 수는 있는데 닫을 수는 없는" 상태가 생긴다.
+    const fa = await import('../exchanges/futuresAdapter');
+    const fx = await import('../exchanges/futuresExec');
+    const pm = await fa.futuresPositionMode(
+      c.exchange as any, c.apiKey, c.apiSecret, c.testnet);
+    const cm = fx.closeModeVerdict({
+      exchange: c.exchange, mode: pm.mode as any,
+      positionSide: positionSide ?? null, error: pm.error,
+    });
+    if (!cm.ok) return { attempted: false, ok: false, error: cm.message };
+
     if (c.exchange === 'gate') {
       const gf = await import('../exchanges/gateFutures');
       const gp = await import('../exchanges/gatePlan');
@@ -81,12 +108,6 @@ export async function closeSymbolPosition(
       if (!contract) return { attempted: false, ok: false, error: `계약 이름을 만들 수 없습니다 (${symbol})` };
       const r = await gf.closePositionGateFutures(c.apiKey, c.apiSecret, contract, c.testnet);
       return { attempted: true, ok: r.success === true, error: r.success ? null : r.message };
-    }
-    // **방향을 모르면 보내지 않는다.** 바이낸스는 어느 쪽을 닫는지
-    // 지정해야 하고, 여기서 짐작하면 반대 방향으로 신규 진입이 된다.
-    if (positionSide !== 'LONG' && positionSide !== 'SHORT') {
-      return { attempted: false, ok: false,
-        error: '닫을 포지션의 방향을 읽지 못해 청산 주문을 보내지 않았습니다' };
     }
     const bf = await import('../exchanges/binanceFutures');
     const r: any = await bf.closePositionPercent(c.apiKey, c.apiSecret, symbol, positionSide, 100, c.testnet);
