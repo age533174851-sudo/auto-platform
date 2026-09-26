@@ -53,6 +53,7 @@
 // 그려둔 추세선과 확대 구간이 날아간다 — PC에서 지킨 것과 같은 이유다.
 import React, { useEffect, useState } from 'react';
 import { errorTextOf } from '@/lib/http/errorText';
+import { useMeasuredHeight } from '@/lib/ui/useMeasuredHeight';
 import { C, FS, NUM, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 import { ChartPane } from './ChartPane';
@@ -67,42 +68,8 @@ import { AppLauncher } from './AppLauncher';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
 
-/**
- * 헤더 높이를 **재서** 쓴다.
- *
- * 세로 배치에서 헤더는 화면에 고정(sticky)되고, 그 아래 탭 줄도 고정된다.
- * 탭 줄이 붙을 위치가 헤더 높이인데, 그 높이는 고정이 아니다 — 종목 이름이
- * 길거나 시장 전환 줄이 접히면 한 줄이 늘어난다. 상수로 박아 두면 그때
- * 탭 줄이 헤더 밑에 겹쳐 글자가 뭉개진다.
- *
- * 첫 화면의 높이 계산에도 같은 값을 쓴다. 그래서 재는 편이 싸다.
- */
-function useMeasuredHeight<T extends HTMLElement>() {
-  const ref = React.useRef<T | null>(null);
-  const [h, setH] = useState(0);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const read = () => setH(el.getBoundingClientRect().height);
-    read();
-
-    // ResizeObserver가 없는 환경(구형 웹뷰)에서도 최소한 회전에는 반응해야 한다.
-    if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(read);
-      ro.observe(el);
-      return () => ro.disconnect();
-    }
-    window.addEventListener('resize', read);
-    window.addEventListener('orientationchange', read);
-    return () => {
-      window.removeEventListener('resize', read);
-      window.removeEventListener('orientationchange', read);
-    };
-  }, []);
-
-  return [ref, h] as const;
-}
+// 높이 재기는 공용 정본을 쓴다. 새 거래 화면도 같은 계산이 필요해서
+// `@/lib/ui/useMeasuredHeight`로 옮겼다 — 두 벌로 두면 언젠가 갈린다.
 
 function useLandscape(): boolean {
   const [land, setLand] = useState(false);

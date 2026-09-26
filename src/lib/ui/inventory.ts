@@ -700,6 +700,13 @@ export const OVERLAYS: Overlay[] = [
   { id: 'ConfirmDialog', file: 'src/lib/confirm/dialog.ts', status: 'EXISTS',
     purpose: '`confirm()` 대체 — Promise로 답을 기다리는 전역 확인',
     notes: 'ConfirmHost가 이것을 그린다. 판정과 그리기가 나뉜 형태' },
+  { id: 'ChartDrawer', file: 'src/components/trading/markets/ChartDrawer.tsx', status: 'EXISTS',
+    purpose: '거래 화면의 차트 — **기본은 접힌 막대 하나**, 누르면 주문 화면 위를 덮는다',
+    notes: '겹치는 층이지만 전역 z-index 경쟁이 없다. 거래 화면 통 안에서 '
+      + '`position: absolute; inset: 0`으로 덮으므로 하단 탭·모달과 다투지 않는다. '
+      + '**기본이 접힘인 것이 계약이다** — 펴짐이 기본이면 260px 차트가 주문 버튼을 '
+      + '화면 밖으로 밀어내던 배치가 이름만 바꿔 돌아온다 '
+      + '(`scripts/check-canonical-trading.mjs`가 막는다)' },
   { id: 'OverlayStack', file: 'src/lib/nav/overlayStack.ts', status: 'EXISTS',
     purpose: '겹침 순서와 뒤로가기',
     notes: '판정만 있다. 그리는 컴포넌트는 없다' },
