@@ -734,7 +734,10 @@ function walkTsx(dir) {
   // ── 매도 훅을 만드는 곳은 **정확히 한 host다** ──
   //
   //   PaperOrderScreen ─┬─ 간편 → BeginnerSellScreen
-  //                     └─ 프로 → ProOrderPanel → ProSellPanel
+  //                     └─ 프로 → SpotTradingScreen → ProSellPanel
+  //
+  // 프로 표현이 시장별 화면으로 갈렸다. 현물 매도는 **현물 화면만** 다룬다 —
+  // 선물 화면에는 보유 분할매도라는 개념이 없다.
   //
   // 예전에는 둘이었다(주문 화면 + 원스크린 거래 화면). Phase UI-IA에서
   // 원스크린이 없어지면서 프로 표현이 주문 화면 안으로 들어왔고, 그래서
@@ -742,7 +745,7 @@ function walkTsx(dir) {
   // 아니다.** 두 밀도가 같은 인스턴스를 받으므로 같은 매도가 두 모양으로
   // 나갈 방법 자체가 없다.
   {
-    const PROPANEL = 'src/components/trading/ProOrderPanel.tsx';
+    const PROPANEL = 'src/components/trading/markets/SpotTradingScreen.tsx';
     const hosts = [];
     for (const f of walkTsx('src')) {
       if (/\buseSellForm\s*\(\{/.test(stripTs(read(f)))) hosts.push(f);

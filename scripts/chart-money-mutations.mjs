@@ -31,7 +31,8 @@ const FILES = [
   'src/components/terminal/MobileShell.tsx',
   'src/app/page.tsx',
   'src/components/trading/PriceChart.tsx',
-  'src/components/trading/ProOrderPanel.tsx',
+  'src/components/trading/markets/TradingScreenShell.tsx',
+  'src/components/trading/markets/UsdtFuturesTradingScreen.tsx',
   'src/components/trading/PositionsOrdersScreen.tsx',
   'src/components/instrument/InstrumentDetail.tsx',
   'src/components/trading/SizingSlider.tsx',
@@ -128,7 +129,7 @@ const MUTATIONS = [
 
   // ══ 한 화면이 다시 시트로 돌아간다 ══
   { name: '주문 조작부를 주문 화면에서 떼어낸다 — 프로가 주문할 수단을 잃는다',
-    file: 'src/components/trading/ProOrderPanel.tsx',
+    file: 'src/components/trading/markets/UsdtFuturesTradingScreen.tsx',
     cut: ['<OrderControls', '<HiddenOrderControls'] },
   // ══ 잠긴 버튼이 이유를 안 말한다 ══
   { name: '주문이 막혔는데 사유를 안 돌려준다',
@@ -196,15 +197,17 @@ const MUTATIONS = [
   // 아래 일곱은 전부 **화면이 멀줦해 보이는** 고장이다. 320×600에서만
   // 드러났고, 요소가 보인다는 검사로는 전부 통과했다.
   { name: 'LONG/SHORT 줄을 다시 화면 아래에 붙인다 — 슬라이더를 덮는다',
-    file: 'src/components/trading/ProOrderPanel.tsx',
-    cut: ["        flexShrink: 0, display: 'flex', gap: 6, padding: '6px 10px',",
-          "        position: 'sticky', bottom: 'var(--nav-h, 0px)', zIndex: 30, display: 'flex', gap: 6, padding: '6px 10px',"] },
+    file: 'src/components/trading/markets/TradingScreenShell.tsx',
+    cut: ["        flexShrink: 0, padding: '6px 10px',",
+          "        position: 'sticky', bottom: 'var(--nav-h, 0px)', zIndex: 30, padding: '6px 10px',"] },
   { name: '예상값을 다시 주문 칸 안으로 넣는다 — 스크롤에 딸려 사라진다',
-    file: 'src/components/trading/ProOrderPanel.tsx',
-    cut: ["        <OrderEstimate form={form} scope={scope}/>", "        {null}"] },
+    file: 'src/components/trading/markets/TradingScreenShell.tsx',
+    cut: ["      {p.estimate ? <div style={{ flexShrink: 0 }}>{p.estimate}</div> : null}",
+          "      {null}"] },
   { name: '넘치는 칸을 스크롤 대신 자른다 — 넘친 줄이 말없이 사라진다',
-    file: 'src/components/trading/ProOrderPanel.tsx',
-    cut: ["overflowY: 'auto',\n        overscrollBehavior: 'contain'", "overflow: 'hidden'"] },
+    file: 'src/components/trading/markets/TradingScreenShell.tsx',
+    cut: ["          overflowY: 'auto', overscrollBehavior: 'contain',\n          WebkitOverflowScrolling: 'touch' as any,\n          borderRight:",
+          "          overflow: 'hidden',\n          borderRight:"] },
   // ══ 포지션을 다른 계좌에서 읽는다 ══
   //
   // 챌린지 장부로 주문하고 기본 계좌 포지션을 보는 고장은 화면에

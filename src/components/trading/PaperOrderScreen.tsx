@@ -43,9 +43,14 @@ import { useUiLevel } from '@/lib/ui/useUiLevel';
 import { scopeForTarget } from '@/lib/trading/paperTarget';
 import { paperOrderUiWiring } from '@/lib/trading/capability';
 import { routeFor, openSideFor, type TradeContext } from '@/lib/trading/tradeContext';
-import { BeginnerBuyScreen, Head, LevelSwitch, type BuyUnit } from './BeginnerBuyScreen';
-import { ProOrderPanel } from './ProOrderPanel';
+import { BeginnerBuyScreen, LevelSwitch, type BuyUnit } from './BeginnerBuyScreen';
 import { BeginnerSellScreen } from './BeginnerSellScreen';
+import { SpotTradingScreen } from './markets/SpotTradingScreen';
+import { UsdtFuturesTradingScreen } from './markets/UsdtFuturesTradingScreen';
+import { CoinMFuturesTradingScreen } from './markets/CoinMFuturesTradingScreen';
+import { StockTradingScreen } from './markets/StockTradingScreen';
+import { marketTypeOfPaper, tradingScreenFor } from '@/lib/trading/tradingScreenRoute';
+import { changeView } from '@/lib/markets/changeBasis';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
 export interface PaperOrderScreenProps {
@@ -124,18 +129,36 @@ export function PaperOrderScreen({
   //   96px까지 밀렸다. 이제 프로는 주문 화면 안에 머문다 — 차트를 보려면
   //   뒤로 나가면 종목 상세가 그대로 살아 있다.
   if (level === 'PRO') {
+    // ★ 시장이 화면을 정한다. **분기는 정본 한 곳뿐이다**
+    //   (`tradingScreenRoute`). 여기서 `if (market === 'SPOT')`을 또 쓰면
+    //   같은 판단이 두 곳에 생기고, 언젠가 COIN-M이 USDⓈ-M 화면을 받는다.
+    const screen = tradingScreenFor(marketTypeOfPaper(ctx.market));
+    const change = changeView({
+      market: ctx.market, price: stream.lastPrice, changePct: stream.changePct,
+    });
+    const common = {
+      symbol: ctx.symbol, name, scope,
+      price: stream.lastPrice,
+      changePct: change.pct, changeLabel: change.label,
+      onBack, headerRight: <LevelSwitch to="간편" onClick={toggleLevel}/>,
+    };
     return (
       <div data-testid="paper-order-screen" data-level="PRO" data-route={route || 'NONE'}
-        data-market={ctx.market}
-        style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: C.bg }}>
-        <Head title={title} sub={`${ctx.symbol} · ${ctx.market === 'USDM' ? 'Perpetual' : 'Spot'}`}
-          onBack={onBack} right={<LevelSwitch to="간편" onClick={toggleLevel}/>}/>
-        <ProOrderPanel
-          symbol={ctx.symbol} market={ctx.market} scope={scope}
-          form={form} sell={sell}
-          availableBalance={ledger.available}
-          canOrder={wiring.canOrder}
-        />
+        data-market={ctx.market} data-screen={screen}
+        style={{ height: '100%', minHeight: 0, background: C.bg }}>
+        {screen === 'SPOT_SCREEN' ? (
+          <SpotTradingScreen {...common}
+            form={form} sell={sell} ledger={ledger} canOrder={wiring.canOrder}/>
+        ) : screen === 'USDM_SCREEN' ? (
+          <UsdtFuturesTradingScreen {...common}
+            form={form} sell={sell} ledger={ledger} auth={auth}
+            markPrice={stream.markPrice} canOrder={wiring.canOrder}/>
+        ) : screen === 'COINM_SCREEN' ? (
+          <CoinMFuturesTradingScreen {...common} markPrice={stream.markPrice}/>
+        ) : (
+          <StockTradingScreen {...common}
+            orderableCash={null} heldQty={null} avgCost={null}/>
+        )}
       </div>
     );
   }

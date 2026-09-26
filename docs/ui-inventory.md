@@ -17,7 +17,7 @@
 | 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
-| 겹쳐 뜨는 층 | 8 |
+| 겹쳐 뜨는 층 | 9 |
 | 피드백 | 3 |
 | 상태 종류 | 7 |
 | 상태별 재고 (공통 물건 있음 / 여러 벌 / 없음 / 미정) | 1 / 2 / 2 / 2 |
@@ -249,6 +249,7 @@
 | `ConfirmHost` | `src/components/ConfirmHost.tsx` | EXISTS | 확인 대화상자 | **실전 주문 전 재확인이 여기를 지난다.** 환경별 문구가 다른지 확인 필요 |
 | `BottomSheet` | `src/components/terminal/BottomSheet.tsx` | DUPLICATED | 모바일 시트 | **하위 폴더에 있어서 처음 등록할 때 위치를 틀리게 적었다.** `src/lib/ui/mobileSheet.ts`(높이·키보드 판정)를 컴포넌트로 착각했다 — 재귀 탐색을 붙이고 나서야 드러났다. 판정은 lib에, 그리기는 여기에 있고, 터미널 밖 화면들은 이것을 쓰지 않고 각자 시트를 그린다 |
 | `ConfirmDialog` | `src/lib/confirm/dialog.ts` | EXISTS | `confirm()` 대체 — Promise로 답을 기다리는 전역 확인 | ConfirmHost가 이것을 그린다. 판정과 그리기가 나뉜 형태 |
+| `ChartDrawer` | `src/components/trading/markets/ChartDrawer.tsx` | EXISTS | 거래 화면의 차트 — **기본은 접힌 막대 하나**, 누르면 주문 화면 위를 덮는다 | 겹치는 층이지만 전역 z-index 경쟁이 없다. 거래 화면 통 안에서 `position: absolute; inset: 0`으로 덮으므로 하단 탭·모달과 다투지 않는다. **기본이 접힘인 것이 계약이다** — 펴짐이 기본이면 260px 차트가 주문 버튼을 화면 밖으로 밀어내던 배치가 이름만 바꿔 돌아온다 (`scripts/check-canonical-trading.mjs`가 막는다) |
 | `OverlayStack` | `src/lib/nav/overlayStack.ts` | EXISTS | 겹침 순서와 뒤로가기 | 판정만 있다. 그리는 컴포넌트는 없다 |
 
 ## 6. 피드백 (Toast / Notice / Details)
