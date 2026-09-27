@@ -57,6 +57,9 @@ const all = {};
 let fails = 0;
 const bad = (m) => { console.error(`  ✗ ${m}`); fails += 1; };
 const ok = (m) => console.log(`  ✓ ${m}`);
+/** 확인하지 못한 것 — **통과가 아니다.** 0으로 적지 않고 그대로 남긴다 */
+let unknowns = 0;
+const note = (m) => { console.log(`  · ${m}`); unknowns += 1; };
 
 async function openTrading(page, { market }) {
   await page.goto(`${B}/?tab=market`, { waitUntil: 'networkidle' });
@@ -386,6 +389,118 @@ for (const [name, w, h] of VIEWPORTS) {
       bad(`${name}: 헤더가 고른 종목을 따라오지 않습니다 (${a.header})`);
     }
 
+    // ══ ⑦-c ★ 눌리는데 아무 일도 안 하는 칸이 없는가 (호가) ══
+    //
+    //   `PRICE_INPUT`·`TYPE_LIMIT`은 아직 없다. 그런데 호가판은 가격 선택
+    //   callback이 **있기만 하면** 눌림 표시(커서·밑줄·title·중앙가 버튼)를
+    //   켠다. 실기에서 `onPickPrice={() => {}}`가 그 표시를 켜 놓았고,
+    //   사용자는 자기가 정한 가격에 걸리는 줄 알았다.
+    //
+    //   ★ 소스에 그 prop이 없다가 아니라 **계산된 커서·title·버튼 활성**을
+    //     본다. 줄이 하나도 그려지지 않았으면 통과로 적지 않는다 —
+    //     이 컨테이너는 거래소 스트림이 막혀 있다.
+    {
+      const b = await page.evaluate(() => {
+        const box = document.querySelector('[data-testid="mkt-order-book"]');
+        if (!box) return null;
+        // ★ **사다리 줄 자체**를 센다. 판이 그려졌다와 값이 들어왔다는
+        //   다른 사실이고, 줄이 없으면 커서를 세어도 0이 나온다 —
+        //   그 0은 "눌림 표시가 없다"가 아니라 "확인 못 했다"이다.
+        const rows = [...box.querySelectorAll('[data-book-row]')];
+        const btns = [...box.querySelectorAll('button')];
+        return {
+          rows: rows.length,
+          pointer: [...box.querySelectorAll('*')]
+            .filter(e => getComputedStyle(e).cursor === 'pointer').length,
+          underline: [...box.querySelectorAll('*')]
+            .filter(e => getComputedStyle(e).textDecorationLine === 'underline').length,
+          limitTitle: [...box.querySelectorAll('[title]')]
+            .filter(e => (e.getAttribute('title') || '').includes('지정가')).length,
+          liveButtons: btns.filter(x => !x.disabled).length,
+        };
+      });
+      r.pick.book = b;
+      if (!b) bad(`${name}: 호가판을 찾지 못했습니다`);
+      else if (b.rows === 0) {
+        note(`${name}: 호가 사다리가 그려지지 않아 눌림 표시를 확인하지 못했습니다`
+          + ' (이 컨테이너는 거래소 스트림이 막혀 있습니다 — 통과로 적지 않습니다.'
+          + ' 이 방어는 계약 검사 ㉕와 MUT-C1~C5가 지킵니다)');
+      } else if (b.pointer || b.underline || b.limitTitle || b.liveButtons) {
+        bad(`${name}: 호가에 눌림 표시가 켜져 있습니다`
+          + ` (줄 ${b.rows} · 커서 ${b.pointer} · 밑줄 ${b.underline}`
+          + ` · 지정가 title ${b.limitTitle} · 살아 있는 버튼 ${b.liveButtons})`
+          + ' — 지정가는 아직 없습니다');
+      } else {
+        ok(`${name}: 호가 ${b.rows}줄에 눌림 표시 없음 (지정가 미지원과 일치)`);
+      }
+    }
+
+    // ══ ⑦-d ★ 청산 탭에서 진입 버튼이 **DOM으로** 꺼지는가 ══
+    //
+    //   실기 고장: `Cta`가 판정을 세 벌 갖고 있어서 호출부가 넘긴 꺼짐이
+    //   **색에만** 반영됐다. 회색으로 보이는 버튼이 실제로 눌렸고,
+    //   `form.submit()`은 화면의 intent를 모르므로 **청산 탭에서 진입
+    //   주문이 나갈 수 있었다.**
+    //
+    //   ★ "회색이다"를 보지 않는다. `disabled` 속성 · 판정이 정한 할 일 ·
+    //     실제 클릭이 주문을 내보내는가를 본다.
+    {
+      const sent = [];
+      const catcher = (req) => {
+        if (/\/api\/(paper|orders)\//.test(req.url())) sent.push(req.url());
+      };
+      page.on('request', catcher);
+
+      await page.evaluate(() =>
+        (document.querySelector('[data-testid="intent-CLOSE"]'))?.click());
+      await page.waitForTimeout(500);
+
+      const readCta = () => page.evaluate(() => ['LONG', 'SHORT'].map((side) => {
+        const b = document.querySelector(`[data-testid="pro-order-cta-${side}"]`);
+        if (!b) return { side, missing: true };
+        return {
+          side,
+          disabled: b.disabled === true,
+          action: b.getAttribute('data-cta-action'),
+          title: b.getAttribute('title') || '',
+        };
+      }));
+
+      const onClose = await readCta();
+      // 진짜로 눌러 본다. 꺼진 버튼은 click 이벤트를 만들지 않는다.
+      await page.evaluate(() => {
+        for (const side of ['LONG', 'SHORT']) {
+          document.querySelector(`[data-testid="pro-order-cta-${side}"]`)?.click();
+        }
+      });
+      await page.waitForTimeout(700);
+      page.off('request', catcher);
+      await page.screenshot({ path: `${OUT}/${name}-USDM-close-cta.png` });
+
+      r.pick.closeCta = { cta: onClose, sent };
+      const missing = onClose.filter(c => c.missing);
+      if (missing.length) {
+        bad(`${name}: 청산 탭에서 진입 버튼을 찾지 못했습니다`);
+      } else if (onClose.some(c => !c.disabled)) {
+        bad(`${name}: 청산 탭인데 진입 버튼이 DOM에서 꺼지지 않았습니다`
+          + ` (${onClose.map(c => `${c.side}:disabled=${c.disabled}`).join(' ')})`);
+      } else if (onClose.some(c => c.action !== 'NONE')) {
+        bad(`${name}: 청산 탭 진입 버튼이 아직 할 일을 갖고 있습니다`
+          + ` (${onClose.map(c => `${c.side}:${c.action}`).join(' ')})`);
+      } else if (sent.length) {
+        bad(`${name}: 청산 탭에서 진입 버튼을 눌렀는데 요청이 나갔습니다 (${sent.join(', ')})`);
+      } else if (!onClose.every(c => c.title.includes('청산'))) {
+        bad(`${name}: 청산 탭 진입 버튼이 왜 꺼졌는지 적지 않습니다`
+          + ` (${onClose.map(c => c.title).join(' / ')})`);
+      } else {
+        ok(`${name}: 청산 탭 → 진입 버튼 DOM 꺼짐 · 할 일 NONE · 클릭해도 요청 0건 · 사유 표기`);
+      }
+
+      await page.evaluate(() =>
+        (document.querySelector('[data-testid="intent-OPEN"]'))?.click());
+      await page.waitForTimeout(400);
+    }
+
     // ★ 현물로 돌아오면 **원래 종목**이 복원되고, 선물 심볼이 따라오지 않는다
     await page.evaluate(() =>
       (document.querySelector('[data-testid="market-tab-SPOT"]'))?.click());
@@ -517,4 +632,7 @@ await browser.close();
 writeFileSync(`${OUT}/market-screens.json`, JSON.stringify(all, null, 2));
 console.log(`\n스크린샷·측정값: ${OUT}`);
 if (fails) { console.error(`\n실패 ${fails}건`); process.exit(1); }
-console.log('\n✅ 시장별 거래 화면 — 차트 접힘 · 첫 화면에 호가/주문/버튼 · 상태 보존 · 의미 비혼합');
+// 확인하지 못한 것은 **통과 문장 안에 넣지 않는다.** 따로 센다.
+if (unknowns) console.log(`\n확인 못 한 항목 ${unknowns}건 (위 · 표시 — 통과가 아닙니다)`);
+console.log('\n✅ 시장별 거래 화면 — 차트 접힘 · 첫 화면에 호가/주문/버튼 · 상태 보존 · 의미 비혼합'
+  + ' · 청산 탭에서 진입 버튼 DOM 꺼짐');
