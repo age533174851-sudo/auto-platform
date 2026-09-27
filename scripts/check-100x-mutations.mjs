@@ -115,6 +115,8 @@ const P = {
   ladder: 'src/app/api/autotrade/daily-ladder/route.ts',
   orig: 'src/app/api/autotrade/my-original-v1/route.ts',
   auth: 'src/lib/engine/entryAuthority.ts',
+  safety: 'src/lib/engine/entryExitSafety.ts',
+  vpo: 'src/lib/engine/venuePositionOps.ts',
 };
 
 const CHECK = ['scripts/check-100x-contract.mjs'];
@@ -525,6 +527,92 @@ const M = [
   // 막힌 계획으로 확정을 불러도 쓰지 않는다는 방어를 없앤다.
   ['MUT-COMMIT-ON-BLOCKED     막힌 계획으로도 배율을 걺', P.entry,
     s => s.replace('  if (!prepared.ok) return { ...prepared, notes };', ''), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR-E — 안전하게 나갈 수 없는 계좌에는 들어가지 않는다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 이 관문이 새는 방식은 전부 조용하다. 관문을 지워도, 조건을 뒤집어도,
+  // 쓰기 뒤로 옮겨도 화면에는 아무 일도 안 일어난다 — 다음 헤지 계좌
+  // 사용자가 못 닫는 포지션을 들고 있을 때에야 드러난다.
+
+  // ── 정책 자체 (동작) ──
+  ['MUT-E1  관문 조건을 항상 통과로 바꿈', P.safety,
+    s => s.replace('  if (canSend && !strands) {', '  if (true) {'), 'RED'],
+
+  // ★ 가장 조용한 회귀. 오늘 정본에서는 ok=true와 strands=true가 함께
+  //   나오지 않아 **동작이 하나도 안 바뀐다.** 종료 규격이 늘어나는 날
+  //   갇히는 포지션이 열린다. 시험이 없으면 이게 그냥 통과한다.
+  ['MUT-E2  ok만 보고 갇힘 여부를 무시', P.safety,
+    s => s.replace('  if (canSend && !strands) {', '  if (canSend) {'), 'RED'],
+
+  ['MUT-E3  증거 없음을 통과로 읽음', P.safety,
+    s => s.replace("  const canSend = evidence?.ok === true;", '  const canSend = evidence?.ok !== false;'), 'RED'],
+
+  ['MUT-E4  undefined 갇힘을 안 갇힘으로 읽음', P.safety,
+    s => s.replace('  const strands = evidence?.strandsOpenPosition !== false;',
+                   '  const strands = evidence?.strandsOpenPosition === true;'), 'RED'],
+
+  // 정본을 다시 해석하는 두 번째 판정이 생기는 경우.
+  ['MUT-E5  정책이 모드를 직접 해석 (두 번째 정본)', P.safety,
+    s => s.replace("  if (canSend && !strands) {",
+                   "  if (code === 'HEDGE' || code === 'HEDGE_UNVERIFIED') {\n"
+                   + "    return { allowed: true, code: 'AUTO_EXIT_SAFE', reason: '', evidence: ev };\n"
+                   + "  }\n  if (canSend && !strands) {"), 'RED'],
+
+  ['MUT-E6  사유를 버리고 코드만 남김', P.safety,
+    s => s.replace('    reason: \'이 계좌에서는 연 포지션을 자동으로 닫지 못해 신규 진입을 하지 않습니다\'\n      + ` — ${why}`,',
+                   "    reason: '진입하지 않습니다',"), 'RED'],
+
+  // ── 라우트 배선 ──
+  ['MUT-E7  라우트에서 관문을 통째로 뺌', P.scalp,
+    s => s.replace('    if (!exitSafety.allowed) {', '    if (false) {'), 'RED'],
+
+  ['MUT-E8  관문 호출 자체를 제거', P.scalp,
+    s => s.replace('  if (epContract) {\n    const { closeModeGate }', '  if (false) {\n    const { closeModeGate }'), 'RED'],
+
+  // 방향을 좁혀 넘기면 NO_DIRECTION이 영원히 안 나온다.
+  ['MUT-E9  종료 방향을 LONG으로 짐작', P.scalp,
+    s => s.replace("    const sideForClose = plan.side === 'LONG' || plan.side === 'SHORT' ? plan.side : null;",
+                   "    const sideForClose = plan.side === 'SHORT' ? 'SHORT' : 'LONG';"), 'RED'],
+
+  ['MUT-E10 종료 방향을 글자로 박음', P.scalp,
+    s => s.replace('    }, sideForClose);', "    }, 'LONG');"), 'RED'],
+
+  // 쓰기 뒤로 옮기면 "막혔는데 배율은 이미 바뀐" 상태가 된다.
+  ['MUT-E11 관문을 배율 확정 뒤로 옮김', P.scalp, s => {
+    const i = s.indexOf('  // ── ★ 안전하게 나갈 수 없는 계좌에는 들어가지 않는다 ──');
+    const j = s.indexOf('  // ── 주문 ──');
+    const block = s.slice(i, j);
+    const rest = s.slice(0, i) + s.slice(j);
+    const k = rest.indexOf('  const { ensureLeverage } = await import');
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // 멱등 표식을 태우고 막으면 그 봉의 정당한 재시도까지 잠긴다.
+  ['MUT-E12 관문을 중복 신호 claim 뒤로 옮김', P.scalp, s => {
+    const i = s.indexOf('  // ── ★ 안전하게 나갈 수 없는 계좌에는 들어가지 않는다 ──');
+    const j = s.indexOf('  // ── 주문 ──');
+    const block = s.slice(i, j);
+    const rest = s.slice(0, i) + s.slice(j);
+    const k = rest.indexOf('  // ── 주문 직전에 배율을 맞추고 되읽어 확인한다 ──');
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // 계약이 없던 예전 경로까지 막으면 이 PR의 범위를 넘는다.
+  ['MUT-E13 legacy 경로까지 강제로 막음', P.scalp,
+    s => s.replace('  if (epContract) {\n    const { closeModeGate }', '  if (true) {\n    const { closeModeGate }'), 'RED'],
+
+  // 진입 판정을 종료 판정 대신 쓰면 "열리는데 안 닫히는" 그 고장이다.
+  ['MUT-E14 종료 판정 대신 진입용 positionModeVerdict 사용', P.scalp,
+    s => s.replace('    const closeGate = await closeModeGate({',
+                   '    const { positionModeVerdict } = await import("@/lib/exchanges/futuresExec");\n'
+                   + '    void positionModeVerdict;\n    const closeGate = await closeModeGate({'), 'RED'],
+
+  // ── 정본(#281) 회귀 ──
+  ['MUT-E15 closeModeGate가 갇힘 여부를 안 돌려줌', P.vpo,
+    s => s.replace('  return { ok: v.ok, message: v.message, code: v.code,\n    strandsOpenPosition: v.strandsOpenPosition };',
+                   '  return { ok: v.ok, message: v.message, code: v.code,\n    strandsOpenPosition: false };'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
