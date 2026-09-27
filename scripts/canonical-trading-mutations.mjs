@@ -43,6 +43,10 @@ const IDENT   = 'src/lib/trading/tradeIdentity.ts';
 const PICKER  = 'src/components/trading/markets/InstrumentPicker.tsx';
 const CATAPI  = 'src/app/api/market/instruments/route.ts';
 const FORMHK  = 'src/lib/trading/useTradeForm.ts';
+const SIZING  = 'src/lib/trading/positionSizing.ts';
+const SIZEUI  = 'src/components/trading/markets/SpotSizeInput.tsx';
+const PLAN    = 'src/lib/engine/paperPlan.ts';
+const PEXEC   = 'src/lib/engine/paperExecution.ts';
 const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
 const ROW    = 'src/components/trading/PositionRow.tsx';
@@ -544,6 +548,65 @@ const CASES = [
    [[`export interface CatalogInstrument {`, `// 대조군\nexport interface CatalogInstrument {`]]],
   ['OK-A2 정체성 정본에 주석 한 줄 추가', IDENT, 'GREEN',
    [[`export interface TradeIdentity {`, `// 대조군\nexport interface TradeIdentity {`]]],
+
+
+  // ══ ㉖~㉗ Phase 2B — 수량/총액 · MAX 수수료 ══
+
+  ['MUT-B1 ★ 직접 입력을 조용히 100%로 자른다 (적은 것과 나가는 것이 달라진다)', SIZING, 'RED',
+   [[`  if (pct > 100) {
+    return bad('OVER_BUDGET',
+      \`가용 잔고로는 이 총액을 주문할 수 없습니다 (필요 \${pct.toFixed(1)}%)\`, pct);
+  }
+  return { code: 'OK', percent: pct, rawPercent: pct, reason: null };`,
+     `  return { code: 'OK', percent: Math.min(100, pct), rawPercent: pct, reason: null };`]]],
+
+  ['MUT-B2 ★ 수량 초과도 조용히 자른다', SIZING, 'RED',
+   [[`  if (pct > 100) {
+    return bad('OVER_BUDGET',
+      \`가용 잔고로는 이 수량을 주문할 수 없습니다 (필요 \${pct.toFixed(1)}%)\`, pct);
+  }
+  return { code: 'OK', percent: pct, rawPercent: pct, reason: null };`,
+     `  return { code: 'OK', percent: Math.min(100, pct), rawPercent: pct, reason: null };`]]],
+
+  ['MUT-B3 ★ 화면이 초과 입력을 그대로 반영한다', SIZEUI, 'RED',
+   [[`    if (r.code === 'OK' && r.percent != null) p.onPercent(r.percent);`,
+     `    if (r.rawPercent != null) p.onPercent(Math.min(100, r.rawPercent));`]]],
+
+  ['MUT-B4 ★ 화면이 초과 사유를 감춘다', SIZEUI, 'RED',
+   [[`        <div data-testid="size-input-reason"`, `        <div data-testid="hidden-reason"`]]],
+
+  ['MUT-B5 ★ 입력 부품이 수량을 스스로 계산한다 (모드마다 다른 주문)', SIZEUI, 'RED',
+   [[`  const quick = (pct: number) => {`,
+     `  const ownQty = (n: number) => (n * (p.price || 0)) / p.leverage;\n  const quick = (pct: number) => {`]]],
+
+  ['MUT-B6 ★ 두 번째 출구를 만든다 (비율 말고 수량으로도 나간다)', SIZEUI, 'RED',
+   [[`export interface SpotSizeInputProps {`,
+     `export interface SpotSizeInputPropsExtra { onQuantity: (q: number) => void }\nexport interface SpotSizeInputProps {`]]],
+
+  ['MUT-B7 ★ MAX가 수수료를 안 센다 (100%가 되어 주문이 막힌다)', SIZING, 'RED',
+   [[`  const denom = 1 + lev * fee;`, `  const denom = 1;`]]],
+
+  ['MUT-B8 ★ MAX가 임의 여유분을 쓴다', SIZING, 'RED',
+   [[`  const pct = 100 / denom;`, `  const pct = 100 * 0.999;`]]],
+
+  ['MUT-B9 ★ 화면이 수수료율을 직접 적는다 (정본과 어긋나는 날 막힌다)', SIZEUI, 'RED',
+   [[`  const feeRate = paperFeeRate(null);`, `  const feeRate = 0.0004;`]]],
+
+  ['MUT-B10 ★ 계획이 수수료 기본값을 다시 적는다', PLAN, 'RED',
+   [[`  const feeRate = paperFeeRate(i.feeRatePct);`,
+     `  const feeRate = (Number.isFinite(Number(i.feeRatePct)) ? Number(i.feeRatePct) : 0.05) / 100;`]]],
+
+  ['MUT-B11 ★ 체결이 계획과 다른 수수료를 쓴다', PEXEC, 'RED',
+   [[`  const feeRate = paperFeeRate(opts.feeRatePct);   // 편도 수수료 — 정본은 paperPlan`,
+     `  const feeRate = (opts.feeRatePct ?? 0.04) / 100;`]]],
+
+  ['MUT-B12 ★ 수수료를 안 준 것을 0%로 읽는다 (수수료가 사라진다)', PLAN, 'RED',
+   [[`  if (feeRatePct == null) return PAPER_FEE_RATE_PCT / 100;`, ``]]],
+
+  ['OK-B1 사이징 정본에 주석 한 줄 추가', SIZING, 'GREEN',
+   [[`export interface MaxAllocation {`, `// 대조군\nexport interface MaxAllocation {`]]],
+  ['OK-B2 입력 부품에 주석 한 줄 추가', SIZEUI, 'GREEN',
+   [[`export type SizeInputMode`, `// 대조군\nexport type SizeInputMode`]]],
 
   ['OK-T1 시장 탭 정본에 주석 한 줄 추가', TABS, 'GREEN',
    [[`export interface MarketTab {`, `// 대조군\nexport interface MarketTab {`]]],

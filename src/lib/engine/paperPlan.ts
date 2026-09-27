@@ -164,6 +164,31 @@ export interface PaperOrderInput {
   feeRatePct?: number;
 }
 
+/**
+ * **모의 장부의 편도 수수료(%).**
+ *
+ * 왜 상수로 올렸나
+ * ────────────────
+ * 이 값이 `paperPlan`과 `paperExecution` 두 곳에 `0.05`로 **따로 적혀**
+ * 있었다. 한쪽만 바꾸면 계획이 말한 수수료와 체결이 뗀 수수료가 달라지고,
+ * 그 차이는 잔고에서만 보인다.
+ *
+ * 화면도 이 값을 본다 — 'MAX'가 수수료를 감안해 최대 비율을 내려면 같은
+ * 값이어야 한다. 화면이 제 나름의 여유분(0.1% 같은 것)을 두면, 그 여유가
+ * 실제 수수료와 어긋나는 날 주문이 잔고 부족으로 막힌다.
+ */
+export const PAPER_FEE_RATE_PCT = 0.05;
+
+/** 퍼센트를 비율로. **못 읽으면 기본값** — 0으로 접지 않는다(수수료가 없어진다) */
+export function paperFeeRate(feeRatePct?: number | null): number {
+  // ★ `Number(null)`은 0이다. 먼저 걸러 내지 않으면 "안 줬다"가 "수수료
+  //   0%"가 되고, 화면의 MAX가 수수료 자리를 안 남겨 주문이 막힌다.
+  //   이 저장소가 반복해서 밟은 함정이다(`venueBars`의 startTime 주석 참고).
+  if (feeRatePct == null) return PAPER_FEE_RATE_PCT / 100;
+  const v = Number(feeRatePct);
+  return (Number.isFinite(v) ? v : PAPER_FEE_RATE_PCT) / 100;
+}
+
 export interface PaperPlanResult {
   ok: boolean;
   reason: string;
@@ -239,7 +264,7 @@ export function buildPaperPlan(i: PaperOrderInput): PaperPlanResult {
 
   const notional = qty * price;
   const requiredMargin = notional / lev;
-  const feeRate = (Number.isFinite(Number(i.feeRatePct)) ? Number(i.feeRatePct) : 0.05) / 100;
+  const feeRate = paperFeeRate(i.feeRatePct);
   const entryFee = notional * feeRate;
   // 현물에는 청산이 없다. 0이 아니라 **null**이다 — 0으로 두면 화면이
   // "청산가 0"을 그리고, 그건 "곧 청산된다"로 읽힌다.

@@ -65,6 +65,10 @@ const IDENT    = 'src/lib/trading/tradeIdentity.ts';
 const PICKER   = 'src/components/trading/markets/InstrumentPicker.tsx';
 const CAT_API  = 'src/app/api/market/instruments/route.ts';
 const FORMHOOK = 'src/lib/trading/useTradeForm.ts';
+const SIZING   = 'src/lib/trading/positionSizing.ts';
+const SIZEUI   = 'src/components/trading/markets/SpotSizeInput.tsx';
+const PLAN     = 'src/lib/engine/paperPlan.ts';
+const PEXEC    = 'src/lib/engine/paperExecution.ts';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -85,6 +89,27 @@ const read = (p) => {
 const code = (s) => s
   .split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
   .replace(/\/\*[\s\S]*?\*\//g, ' ');
+
+/**
+ * 함수 본문을 자른다.
+ *
+ * ★ `/export function NAME\([\s\S]*?\n\}/` 로 자르면 **여러 줄 파라미터
+ *   객체**의 닫는 괄호에서 끊긴다:
+ *
+ *       export function f(i: {
+ *         a: number;
+ *       }): R {            ← 여기 `\n}`에서 잘렸다
+ *
+ *   그러면 본문의 방어를 하나도 못 보고 "없다"고 적는다. 실제로 세 규칙이
+ *   그렇게 틀렸다. 그래서 **다음 최상위 선언까지**를 본문으로 본다.
+ */
+function fnBody(src, name) {
+  const at = src.search(new RegExp(`export function ${name}\\b`));
+  if (at < 0) return null;
+  const rest = src.slice(at + 1);
+  const next = rest.search(/\nexport (function|const|interface|type) /);
+  return next < 0 ? src.slice(at) : src.slice(at, at + 1 + next);
+}
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -1348,6 +1373,127 @@ const drawer = code(read(DRAWER));
   }
 }
 
+// ══════════════ ㉖ ★ 수량이든 총액이든 주문 계산은 하나다 ══════════════
+//
+// 입력 모드는 **표현**이다. 모드마다 수량을 따로 계산하면 같은 주문이
+// 칸에 따라 다른 수량으로 나가고, 그 차이는 체결된 뒤에야 보인다.
+{
+  const ui = code(read(SIZEUI));
+  const sizing = code(read(SIZING));
+
+  // ⑴ 입력 부품이 **수량을 스스로 만들지 않는다**
+  //
+  // ★ 연산 기호를 나열해 막으면 안 된다. `/ price`를 막으면 `* price`로,
+  //   `* leverage`를 막으면 `/ leverage`로 돌아온다 — 뮤테이션이 정확히
+  //   그 틈으로 살아남았다. 그래서 **가격·배율이 쓰이는 자리 자체**를 본다:
+  //   정본 판정에 인자로 넘기는 것 말고는 손대지 않는다.
+  if (/planSizing\s*\(/.test(ui)) {
+    err(`${SIZEUI}가 계획을 직접 계산합니다 — 계산 정본은 useTradeForm 하나입니다`);
+  }
+  for (const [name, prop] of [['price', 'price'], ['leverage', 'leverage']]) {
+    const uses = (ui.match(new RegExp(`p\\.${name}\\b`, 'g')) || []).length;
+    const asArg = (ui.match(new RegExp(`${prop}:\\s*p\\.${name}\\b`, 'g')) || []).length;
+    if (uses !== asArg) {
+      err(`${SIZEUI}가 ${name}을 판정에 넘기는 것 말고 ${uses - asArg}곳에서 직접 씁니다`
+        + ' — 수량 계산이 두 벌이 되면 모드마다 다른 주문이 나갑니다');
+    }
+  }
+  // ⑵ 나가는 길이 **하나**다 — 어느 모드든 같은 출구로 간다
+  {
+    const outs = (ui.match(/p\.onPercent\(/g) || []).length;
+    if (outs === 0) err(`${SIZEUI}가 비율을 위로 올리지 않습니다`);
+    for (const banned of ['onQuantity', 'onNotional', 'setQuantity']) {
+      if (ui.includes(banned)) {
+        err(`${SIZEUI}에 두 번째 출구가 있습니다 (${banned}) — 모드마다 다른 주문이 나갑니다`);
+      }
+    }
+  }
+  // ⑶ 직접 입력은 정본 판정을 쓴다
+  for (const fn of ['quantityInputToPercent', 'notionalInputToPercent', 'maxAllocationPercent']) {
+    if (!new RegExp(`\\b${fn}\\s*\\(`).test(ui)) {
+      err(`${SIZEUI}가 ${fn}을 쓰지 않습니다 — 판정을 화면에서 다시 만듭니다`);
+    }
+  }
+  // ⑷ ★ 직접 입력은 **조용히 자르지 않는다**
+  for (const fn of ['quantityInputToPercent', 'notionalInputToPercent']) {
+    const body = fnBody(sizing, fn);
+    if (!body) { err(`${SIZING}에서 ${fn}을 찾지 못했습니다`); continue; }
+    if (/Math\.min\(\s*100/.test(body)) {
+      err(`${SIZING}의 ${fn}이 100%로 잘라서 통과시킵니다`
+        + ' — 사용자가 적은 것과 나가는 것이 달라집니다');
+    }
+    if (!/OVER_BUDGET/.test(body)) {
+      err(`${SIZING}의 ${fn}이 초과를 사실로 돌려주지 않습니다`);
+    }
+  }
+  // 넘쳤을 때 화면이 **반영하지 않고 적는다**
+  if (!/if \(r\.code === 'OK' && r\.percent != null\) p\.onPercent\(r\.percent\);/.test(ui)) {
+    err(`${SIZEUI}가 초과 입력을 그대로 반영합니다`);
+  }
+  if (!/data-testid="size-input-reason"/.test(ui)) {
+    err(`${SIZEUI}가 초과 사유를 화면에 적지 않습니다`);
+  }
+}
+
+// ══════════════ ㉗ ★ MAX는 수수료 정본을 본다 (여유분을 지어내지 않는다) ══════════════
+//
+// `MAX = 100%`로 두면 `buildPaperPlan`이 증거금 **위에** 수수료를 더 요구해
+// 주문이 막힌다. 임의 여유분(0.1% 같은 것)을 두면 그 숫자가 실제 수수료와
+// 어긋나는 날 다시 막히고, 왜 막히는지 아무도 모른다.
+{
+  const ui = code(read(SIZEUI));
+  const sizing = code(read(SIZING));
+  const plan = code(read(PLAN));
+  const pexec = code(read(PEXEC));
+
+  // ⑴ 화면이 수수료 숫자를 **베껴 적지 않는다**
+  if (!/paperFeeRate\s*\(/.test(ui)) {
+    err(`${SIZEUI}가 수수료 정본을 부르지 않습니다`);
+  }
+  // ★ 숫자를 통째로 금지하면 안 된다 — `0.001 BTC` 같은 **입력 예시**까지
+  //   걸린다(실제로 걸렸다). 수수료율이 **어디서 오는가**를 본다.
+  {
+    const assigns = ui.match(/const\s+feeRate\s*=\s*[^;]+;/g) || [];
+    if (assigns.length !== 1 || !/paperFeeRate\(/.test(assigns[0])) {
+      err(`${SIZEUI}의 수수료율이 정본에서 오지 않습니다 [${assigns.join(' / ') || '없음'}]`);
+    }
+    if (/buffer|여유분/i.test(ui)) {
+      err(`${SIZEUI}가 임의 여유분을 둡니다 — 정본과 어긋나는 날 주문이 막힙니다`);
+    }
+  }
+  // ⑵ 계획과 체결이 **같은 수수료**를 본다
+  // ★ `slippagePct ?? 0.05`는 수수료가 아니다. **수수료 기본값만** 본다.
+  for (const [f, c] of [[PLAN, plan], [PEXEC, pexec]]) {
+    if (/feeRatePct\s*\?\?\s*0?\.\d/.test(c)
+      || /Number\(i\.feeRatePct\)\s*:\s*0?\.\d/.test(c)) {
+      err(`${f}가 수수료 기본값을 직접 적습니다 — 정본은 PAPER_FEE_RATE_PCT 하나입니다`);
+    }
+    if (!/paperFeeRate\(/.test(c)) {
+      err(`${f}가 수수료 정본을 쓰지 않습니다`);
+    }
+  }
+  if (!/export const PAPER_FEE_RATE_PCT/.test(plan)) {
+    err(`${PLAN}에 수수료 정본 상수가 없습니다`);
+  }
+  // 안 준 값을 **0으로 접지 않는다** (수수료가 사라진다)
+  if (!/if \(feeRatePct == null\) return PAPER_FEE_RATE_PCT \/ 100;/.test(plan)) {
+    err(`${PLAN}의 수수료 판정이 "안 줬다"를 0%로 읽습니다`);
+  }
+  // ⑶ MAX 계산이 배율과 수수료를 **함께** 센다
+  {
+    const body = fnBody(sizing, 'maxAllocationPercent');
+    if (!body) err(`${SIZING}에서 MAX 계산을 찾지 못했습니다`);
+    else {
+      if (!/1 \+ lev \* fee/.test(body)) {
+        err(`${SIZING}의 MAX가 배율×수수료를 세지 않습니다 — 100%가 되어 주문이 막힙니다`);
+      }
+      if (/0\.999|0\.99\b/.test(body)) {
+        err(`${SIZING}의 MAX가 임의 여유분을 씁니다`);
+      }
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -1359,4 +1505,5 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' 사유 1곳 · 원스크린 비복귀 ·'
   + ' ★시장 탭 4개 도달 · ★심볼 비조립 · ★종목없음=주문잠금 · ★타시장 데이터 비차용 ·'
   + ' ★화면=주문 정체성 일치 · ★상장목록 거래소 출처 · ★주문중 전환차단 ·'
-  + ' ★정체성 변경시 입력 초기화 · ★시장가 전용인데 지정가 UI 없음');
+  + ' ★정체성 변경시 입력 초기화 · ★시장가 전용인데 지정가 UI 없음 ·'
+  + ' ★수량/총액 단일 계산 · ★직접입력 비클램프 · ★MAX 수수료 정본');
