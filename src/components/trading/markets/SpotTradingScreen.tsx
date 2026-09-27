@@ -31,6 +31,7 @@ import { C, FS } from '@/components/terminal/theme';
 import { OrderControls, OrderEstimate } from '../OrderControls';
 import { OrderBookView } from '../OrderBookView';
 import { ProSellPanel } from '../ProSellPanel';
+import { SpotSizeInput } from './SpotSizeInput';
 import { TradingScreenShell, InfoStat, LockedField,
   type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
@@ -105,21 +106,19 @@ export function SpotTradingScreen(p: SpotScreenProps) {
         ))}
       </div>
 
-      {/* 수량 / 총액 — **총액 입력은 아직 없다.** 서버가 받는 것은 수량뿐이고,
-          총액 칸을 그려 두면 눌러서 아무 일도 안 일어난다. 잠그고 적는다. */}
-      <div data-testid={fieldTestId('QTY_TOTAL_TOGGLE')} style={{ display: 'flex', gap: 3 }}>
-        <span style={{
-          flex: 1, minHeight: 26, display: 'flex', alignItems: 'center',
-          justifyContent: 'center', borderRadius: 5,
-          border: `1px solid ${C.accent}`, background: C.accentBg,
-          color: C.accent, fontSize: FS.nano, fontWeight: 800,
-        }}>수량</span>
-        <span title={unsupported(QUOTE_INPUT) ? QUOTE_INPUT.reason : QUOTE_INPUT.note} style={{
-          flex: 1, minHeight: 26, display: 'flex', alignItems: 'center',
-          justifyContent: 'center', borderRadius: 5,
-          border: `1px solid ${C.hair}`, background: C.raised,
-          color: C.faint, fontSize: FS.nano, fontWeight: 700,
-        }}>총액 (준비 안 됨)</span>
+      {/* ★ 수량 / 총액 — 두 칸 다 실제로 쓴다.
+          어느 칸에 적든 `positionSizing`의 같은 역함수를 지나
+          `form.setPercent` 하나로 들어간다. 모드별 주문 계산은 없다. */}
+      <div data-testid={fieldTestId('QTY_TOTAL_TOGGLE')}>
+        <SpotSizeInput
+          base={base || 'BASE'}
+          quote={p.instrument?.quoteAsset || 'USDT'}
+          availableBalance={p.ledger.available}
+          price={locked ? null : p.price}
+          leverage={p.form.lev}
+          quantity={p.form.quantity}
+          onPercent={p.form.setPercent}
+          disabled={locked || !p.canOrder}/>
       </div>
 
       {tab === 'BUY' ? (
@@ -175,6 +174,8 @@ export function SpotTradingScreen(p: SpotScreenProps) {
     <TradingScreenShell
       testid={CONTRACT.root}
       market={p.market} onMarket={p.onMarket}
+      onPickInstrument={p.onPickInstrument}
+      switchBlockedReason={p.switchBlockedReason}
       instrumentReason={p.instrumentReason}
       symbol={sym ?? '종목 없음'} name={p.name}
       marketLabel={capability('SPOT').label}

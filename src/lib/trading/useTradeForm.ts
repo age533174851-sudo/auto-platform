@@ -18,13 +18,14 @@
 //  · 수량 — `planSizing`이 낸다
 //  · 손절가 — 퍼센트만 보내고 **서버가 자기 마크가로** 만든다
 //  · 잠금 사유 — `submitGate`가 정한다
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { buildPaperPlan, type MarginMode, type PaperPlanResult } from '../engine/paperPlan';
 import { planSizing, type SizingResult } from './positionSizing';
 import { previewStopPrice, stopChoiceOf, stopRequestFields } from './stopPresets';
 import { targetRequestFields, type PaperTarget } from './paperTarget';
 import { orderCapability, unsupported, type Support } from './capability';
 import { submitGate, submitLabel, type SubmitGate } from './submitGate';
+import { identityKey, identityResetState } from './tradeIdentity';
 
 export type TradeSide = 'LONG' | 'SHORT';
 export type PaperMarket = 'SPOT' | 'USDM';
@@ -49,6 +50,10 @@ export interface TradeFormInput {
 }
 
 export interface TradeForm {
+  /** 이 폼이 쓰는 종목. **화면 헤더와 같아야 한다** */
+  symbol: string;
+  /** 이 폼이 쓰는 시장 */
+  market: PaperMarket;
   side: TradeSide; setSide: (s: TradeSide) => void;
   /** 사용자가 방향을 실제로 눌렀는가. 안 눌렀으면 `submit()`이 나가지 않는다 */
   sideChosen: boolean;
@@ -109,6 +114,33 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
   const [slPct, setSlPct] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // ── ★ 정체성이 바뀌면 주문 입력을 물려주지 않는다 ──
+  //
+  // 시장 탭과 종목 선택이 생기면서 **같은 폼이 다른 종목을 이어서 다루게**
+  // 됐다. 현물 BTC에서 50%와 손절을 골라 둔 채 USDⓈ-M ETH로 넘어가면,
+  // 사용자가 의도한 적 없는 주문이 한 번의 실수로 나간다. 배율이 특히
+  // 위험하다 — 현물에는 없는 개념이라 1이어야 하는데 100이 남아 있을 수 있다.
+  //
+  // 초기화 규칙은 `tradeIdentity`가 정본이고 여기서 부르기만 한다.
+  // 화면마다 복제하면 한쪽만 고쳐지는 날이 온다.
+  const idKey = identityKey(
+    i.symbol ? { market: i.market as any, symbol: i.symbol } : null);
+  const lastIdKey = useRef(idKey);
+  useEffect(() => {
+    if (lastIdKey.current === idKey) return;
+    lastIdKey.current = idKey;
+    const r = identityResetState(i.market as any);
+    setSideChosen(r.sideChosen);
+    setPercent(0);
+    setTp(r.tp);
+    setSl(r.sl);
+    setSlPct(r.slPct);
+    setMessage(r.message);
+    setLeverage(r.leverage);
+    setMarginMode(r.marginMode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idKey]);
 
   const lev = spot ? 1 : leverage;
 
@@ -226,6 +258,10 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
   };
 
   return {
+    // ★ **이 폼이 실제로 쓰는 정체성.** 화면이 보여주는 것과 같아야 한다.
+    //   값으로 내보내는 이유는 화면·프로브·검사기가 "같은가"를 눈으로
+    //   비교할 수 있어야 하기 때문이다 — 주석으로는 확인할 수 없다.
+    symbol: i.symbol, market: i.market,
     side, setSide, sideChosen, chooseSide, marginMode, setMarginMode, leverage, setLeverage, lev,
     percent, setPercent, tp, setTp, sl, setSl, slPct, setSlPct,
     spot, caps, shortDisabled: unsupported(caps.short),

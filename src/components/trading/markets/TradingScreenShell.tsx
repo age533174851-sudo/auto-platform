@@ -38,6 +38,7 @@ import { ChartDrawer, type ChartSource } from './ChartDrawer';
 import { MarketTabs } from './MarketTabs';
 import type { TradingMarketId } from '@/lib/trading/marketTabs';
 import type { MarketInstrument } from '@/lib/trading/marketInstrument';
+import { catalogOpenFor } from '@/lib/trading/instrumentCatalog';
 
 /**
  * 네 시장 화면이 공통으로 받는 것.
@@ -58,6 +59,14 @@ export interface MarketScreenCommonProps {
   changeLabel: string;
   onBack: () => void;
   headerRight?: React.ReactNode;
+  /** 종목 고르기를 연다. 목록 권위가 있는 시장에서만 뜻이 있다 */
+  onPickInstrument?: () => void;
+  /**
+   * 지금 시장·종목을 바꿀 수 없는 이유. **주문이 날아가는 중**이면 찬다.
+   *
+   * 바꿀 수 있는 것처럼 두면 BTC 주문의 결과가 ETH 화면에 뜬다.
+   */
+  switchBlockedReason?: string | null;
 }
 
 export interface ShellTab {
@@ -83,6 +92,8 @@ export interface TradingScreenShellProps {
   name?: string;
   /** 시장 이름 한 줄. 예: `USDⓈ-M 선물` */
   marketLabel: string;
+  onPickInstrument?: () => void;
+  switchBlockedReason?: string | null;
   price: number | null;
   changePct: number | null;
   changeLabel: string;
@@ -153,7 +164,8 @@ export function TradingScreenShell(p: TradingScreenShellProps) {
         {/* ── ★ 시장 탭 — 언제나 맨 위에 있다 ──
             종목이 없어도 탭은 살아 있다. 시장에 들어가는 것과 그 시장에서
             주문할 수 있는 것은 다른 사실이다. */}
-        <MarketTabs market={p.market} onMarket={p.onMarket}/>
+        <MarketTabs market={p.market} onMarket={p.onMarket}
+          blockedReason={p.switchBlockedReason ?? null}/>
 
         {/* ── 헤더 ── */}
         <div style={{
@@ -174,6 +186,24 @@ export function TradingScreenShell(p: TradingScreenShellProps) {
               {p.symbol} · {p.marketLabel}
             </span>
           </div>
+          {/* ★ 종목 선택 — 목록 권위가 있는 시장에서만 뜬다.
+              없는 시장에 버튼만 두면 눌러서 빈 목록을 보게 되고, 그건
+              "종목이 없다"로 읽힌다. 그 시장은 사유 문장이 대신 말한다. */}
+          {p.onPickInstrument && catalogOpenFor(p.market).open ? (
+            <button type="button" data-testid="pick-instrument"
+              onClick={p.onPickInstrument}
+              disabled={!!p.switchBlockedReason}
+              title={p.switchBlockedReason || undefined}
+              style={{
+                flexShrink: 0, marginLeft: 6, minHeight: 30, padding: '0 10px',
+                borderRadius: 7, border: `1px solid ${C.hair}`,
+                background: p.switchBlockedReason ? C.panel : C.raised,
+                color: p.switchBlockedReason ? C.faint : C.text,
+                fontSize: FS.nano, fontWeight: 800,
+                cursor: p.switchBlockedReason ? 'not-allowed' : 'pointer',
+                whiteSpace: 'nowrap',
+              }}>종목 선택</button>
+          ) : null}
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
             <span data-testid="trading-price" style={{
               ...NUM, fontSize: FS.lead, fontWeight: 800,
