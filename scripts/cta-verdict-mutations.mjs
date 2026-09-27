@@ -24,6 +24,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 const CTAV = 'src/lib/trading/ctaVerdict.ts';
 const REVIEW = 'src/lib/trading/paperOrderReview.ts';
+const CLOSERV = 'src/lib/trading/paperCloseReview.ts';
 const ONLY = process.argv.slice(2);
 
 function gate() {
@@ -146,6 +147,77 @@ const CASES = [
 
   ['OK-V2 확인 판정 정본에 주석 한 줄 추가', REVIEW, 'GREEN',
    [[`export function reviewReduce(`, `// 대조군\nexport function reviewReduce(`]]],
+
+  // ── 전량청산의 **순서** (Phase 2D) ──
+  //
+  //   "첫 클릭에는 안 나간다" · "취소하면 안 나간다" · "연타해도 한 번" ·
+  //   "사라진 포지션은 못 닫는다"는 배선 검사로 알 수 없다.
+
+  ['MUT-W1 ★ 창을 여는 것만으로 청산이 나간다', CLOSERV, 'RED',
+   [[`      return stay({ opened: { positionId: id }, sent: false });`,
+     `      return { state: { opened: { positionId: id }, sent: false }, effects: ['CLOSE'] };`]]],
+
+  ['MUT-W2 ★ 취소했는데 창이 남는다', CLOSERV, 'RED',
+   [[`      if (phase === 'SUBMITTING') return stay(s);
+      return stay(CLOSE_REVIEW_CLOSED);
+
+    case 'CONFIRM': {`,
+     `      return stay(s);
+
+    case 'CONFIRM': {`]]],
+
+  ['MUT-W3 ★ 연타를 막지 않는다 (같은 포지션이 두 번 닫힌다)', CLOSERV, 'RED',
+   [[`      return { state: { opened: s.opened, sent: true }, effects: ['CLOSE'] };`,
+     `      return { state: { opened: s.opened, sent: false }, effects: ['CLOSE'] };`]]],
+
+  ['MUT-W4 ★ 이미 닫힌 포지션을 다시 닫는다', CLOSERV, 'RED',
+   [[`    : !i.openIds.includes(id) ? '포지션이 더 이상 열려 있지 않습니다'\n`, ``]]],
+
+  ['MUT-W5 ★ 사라진 창을 다른 포지션으로 재사용한다', CLOSERV, 'RED',
+   [[`      if (env.openIds.includes(s.opened.positionId)) return stay(s);
+      return stay(CLOSE_REVIEW_CLOSED);`,
+     `      return stay(s);`]]],
+
+  ['MUT-W6 ★ 실패했는데 창을 닫는다 (재시도 불가)', CLOSERV, 'RED',
+   [[`      return stay({ opened: e.ok ? null : s.opened, sent: false });`,
+     `      return stay({ opened: null, sent: false });`]]],
+
+  ['MUT-W7 ★ 성공했는데 창이 남는다', CLOSERV, 'RED',
+   [[`      return stay({ opened: e.ok ? null : s.opened, sent: false });`,
+     `      return stay({ opened: s.opened, sent: false });`]]],
+
+  ['MUT-W8 ★ 로그인 없이도 청산을 통과시킨다', CLOSERV, 'RED',
+   [[`    : !i.hasAuth ? '로그인해야 청산할 수 있습니다'\n`, ``]]],
+
+  ['MUT-W9 ★ 보내는 중에도 확인을 통과시킨다', CLOSERV, 'RED',
+   [[`    i.phase === 'SUBMITTING' || i.busy ? '청산 요청을 보내는 중입니다'\n`, ``]]],
+
+  ['MUT-W10 ★ 보내는 중인데 창을 닫는다 (결과가 갈 곳이 없다)', CLOSERV, 'RED',
+   [[`    case 'CANCEL':
+      // 보내는 중에는 못 닫는다 — 결과 메시지가 갈 곳이 없어진다.
+      if (phase === 'SUBMITTING') return stay(s);`,
+     `    case 'CANCEL':
+      if (false) return stay(s);`]]],
+
+  ['MUT-W11 ★ 본문에 체결가를 끼워 넣는다', CLOSERV, 'RED',
+   [[`  return { positionId: String(positionId) };`,
+     `  return { positionId: String(positionId), exitPrice: 0 } as any;`]]],
+
+  ['MUT-W12 ★ 없는 손절가를 0으로 적는다', CLOSERV, 'RED',
+   [[`  if (v == null || v === '' || typeof v === 'boolean') return unknown(reason);`,
+     `  if (v == null) return { kind, amount: 0 };`]]],
+
+  ['MUT-W13 ★ 표시 줄 하나가 조용히 사라진다', CLOSERV, 'RED',
+   [[`    {
+      key: 'MARGIN', label: '증거금',
+      value: numberOr(p.margin, 'MONEY', '증거금을 읽지 못했습니다'),
+    },\n`, ``]]],
+
+  ['MUT-W14 ★ 장부에 없는 포지션의 창을 연다', CLOSERV, 'RED',
+   [[`      if (!id || !env.openIds.includes(id)) return stay(s);`, `      if (!id) return stay(s);`]]],
+
+  ['OK-W1 청산 판정 정본에 주석 한 줄 추가', CLOSERV, 'GREEN',
+   [[`export function closeReviewReduce(`, `// 대조군\nexport function closeReviewReduce(`]]],
 
   ['OK-V1 판정 정본에 주석 한 줄 추가', CTAV, 'GREEN',
    [[`export function ctaVerdict(`, `// 대조군\nexport function ctaVerdict(`]]],

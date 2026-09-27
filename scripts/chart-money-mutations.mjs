@@ -54,7 +54,8 @@ const FILES = [
   'src/app/api/paper/order/route.ts',
   'src/app/api/paper/positions/route.ts',
   'src/app/api/paper/account/route.ts',
-  'src/components/trading/PositionRow.tsx',
+  'src/components/trading/PositionList.tsx',
+  'src/lib/trading/usePaperCloseReview.ts',
   'src/components/pages/SharedUI.tsx',
   'src/app/api/market/news/route.ts',
   'src/app/api/prices/route.ts',
@@ -212,20 +213,25 @@ const MUTATIONS = [
   //
   // 챌린지 장부로 주문하고 기본 계좌 포지션을 보는 고장은 화면에
   // 오류를 남기지 않는다 — 그냥 "포지션이 없네"로 읽힌다.
-  { name: '포지션 줄이 기본 계좌 라우트를 읽는다 — 챌린지에서 장부가 갈라진다',
-    file: 'src/components/trading/PositionRow.tsx',
-    cut: ["'/api/paper/close'", "'/api/paper/account'"] },
+  { name: '청산 요청이 기본 계좌 라우트로 간다 — 챌린지에서 장부가 갈라진다',
+    // Phase 2D에서 요청이 줄에서 훅으로 옮겨갔다. **보는 규칙은 그대로다** —
+    // 앵커를 지우지 않고 요청이 실제로 나가는 자리로 옮긴다.
+    file: 'src/lib/trading/usePaperCloseReview.ts',
+    // ★ 앵커에 `await fetch(`를 포함시킨다. 파일 첫머리 주석에도 같은 경로가
+    //   적혀 있어서, 짧은 앵커는 **주석만 고치고 끝난다** — 아무것도 안 바꾼
+    //   판을 "아무도 안 본다"로 잘못 읽게 된다.
+    cut: ["await fetch('/api/paper/close', {", "await fetch('/api/paper/account', {"] },
   { name: '포지션 줄이 스스로 장부를 다시 읽는다',
-    file: 'src/components/trading/PositionRow.tsx',
-    cut: ["  const [busyId, setBusyId] = useState<string | null>(null);",
-          "  const [busyId, setBusyId] = useState<string | null>(null);\n  usePaperAccount(true);"] },
+    file: 'src/components/trading/PositionList.tsx',
+    cut: ["  const mine = closeReview.ticket?.positionId === position.id;",
+          "  const mine = closeReview.ticket?.positionId === position.id;\n  usePaperAccount(true);"] },
   { name: '화면이 주문 장부 대신 빈 목록을 넘긴다 — 포지션이 안 보인다',
     file: 'src/components/trading/PositionsOrdersScreen.tsx',
     cut: ["  const positions = auth ? ledger.openPositions : [];",
           "  const positions: any[] = [];"] },
   { name: '청산 뒤에 장부를 다시 읽지 않는다',
     file: 'src/components/trading/PositionsOrdersScreen.tsx',
-    cut: ["onClosed={ledger.reload}", "onClosed={() => {}}"] },
+    cut: ["onClosed: ledger.reload,", "onClosed: () => {},"] },
   { name: '같은 사유를 슬라이더 안에도 다시 적는다',
     file: 'src/components/trading/SizingSlider.tsx',
     cut: ["      {locked ? null : plan.code === 'OK' ? (",

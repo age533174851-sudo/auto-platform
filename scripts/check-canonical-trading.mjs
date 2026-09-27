@@ -73,6 +73,12 @@ const REVHOOK  = 'src/lib/trading/usePaperOrderReview.ts';
 const REVSHEET = 'src/components/trading/markets/PaperOrderReviewSheet.tsx';
 const BOOKVIEW = 'src/components/trading/OrderBookView.tsx';
 const SHELLF   = 'src/components/trading/markets/TradingScreenShell.tsx';
+const PLIST    = 'src/components/trading/PositionList.tsx';
+const CLOSEREV = 'src/lib/trading/paperCloseReview.ts';
+const CLOSEHK  = 'src/lib/trading/usePaperCloseReview.ts';
+const CLOSESH  = 'src/components/trading/markets/PaperCloseReviewSheet.tsx';
+const SHEETSH  = 'src/components/trading/markets/ReviewSheetShell.tsx';
+const INERT    = 'src/lib/ui/useInert.ts';
 const PLAN     = 'src/lib/engine/paperPlan.ts';
 const PEXEC    = 'src/lib/engine/paperExecution.ts';
 
@@ -867,9 +873,9 @@ const drawer = code(read(DRAWER));
 
 // ══════════════ ⑭ 포지션은 주문이 간 장부에서 읽는다 ══════════════
 {
-  const row = code(read('src/components/trading/PositionRow.tsx'));
+  const row = code(read(PLIST));
   const pos = code(read(POS));
-  if (!row) err('포지션 줄이 없습니다 — 주문한 포지션을 확인할 곳이 없습니다');
+  if (!row) err('포지션 목록이 없습니다 — 주문한 포지션을 확인할 곳이 없습니다');
 
   if (/\/api\/paper\/account/.test(row)) {
     err('포지션 줄이 /api/paper/account를 읽습니다 — 그 라우트는 늘 기본 계좌입니다');
@@ -882,8 +888,10 @@ const drawer = code(read(DRAWER));
       err(`포지션 줄이 스스로 장부를 읽습니다 (${hook}) — props로 받은 정본만 씁니다`);
     }
   }
-  if (!/'\/api\/paper\/close'/.test(row)) {
-    err('포지션 줄이 기존 청산 경로를 쓰지 않습니다');
+  // ★ 청산 요청은 **여기서 나가지 않는다**(㉛). 예전에는 이 줄이 직접
+  //   `fetch('/api/paper/close')`를 불렀고 그것이 한 번의 클릭이었다.
+  if (/fetch\s*\(/.test(row)) {
+    err(`${PLIST}가 직접 조회합니다 — 청산 요청은 확인 창 한 곳에서만 나갑니다`);
   }
   for (const banned of [/paper_account_id/, /accountId/, /fillPrice:/, /realizedPnl/, /unrealized/]) {
     if (banned.test(row)) {
@@ -896,13 +904,15 @@ const drawer = code(read(DRAWER));
     ...(CONTRACT ? CONTRACT.MARKET_SCREENS
       .filter(s => s.own.includes('POSITIONS') && s.market === 'USDT_FUTURES')
       .map(s => [s.file, code(read(s.file))]) : [])]) {
-    const rows = (src.match(/<PositionRow/g) || []).length;
+    const rows = (src.match(/<PositionList/g) || []).length;
     const fed = (src.match(/positions=\{positions\}/g) || []).length;
-    const reloads = (src.match(/onClosed=\{(ledger|p\.ledger)\.reload\}/g) || []).length;
-    if (rows === 0) { err(`${file}가 포지션 줄을 그리지 않습니다`); continue; }
-    if (fed !== rows) err(`${file}의 포지션 줄 ${rows}곳 중 ${fed}곳만 자기 장부를 받습니다`);
-    if (reloads !== rows) {
-      err(`${file}의 포지션 줄 ${rows}곳 중 ${reloads}곳만 청산 뒤 장부를 다시 읽습니다`);
+    // 청산 뒤 장부 다시 읽기는 이제 확인 창이 한다 — 화면은 그 훅에
+    // `ledger.reload`를 넘긴다(㉛⑸).
+    const reloads = (src.match(/onClosed:\s*(ledger|p\.ledger)\.reload/g) || []).length;
+    if (rows === 0) { err(`${file}가 포지션 목록을 그리지 않습니다`); continue; }
+    if (fed !== rows) err(`${file}의 포지션 목록 ${rows}곳 중 ${fed}곳만 자기 장부를 받습니다`);
+    if (file === POS && reloads !== 1) {
+      err(`${file}가 청산 뒤 장부를 다시 읽지 않습니다 (${reloads}곳)`);
     }
   }
   if (!/const positions = auth \? ledger\.openPositions : \[\]/.test(pos)) {
@@ -1977,8 +1987,7 @@ const drawer = code(read(DRAWER));
         + ' — 화면과 주문이 다른 종목을 보게 됩니다');
     }
   }
-  if (!/data-review-symbol=\{review\.ticket\.symbol\}/.test(sheet)
-      || !/data-review-market=\{review\.ticket\.market\}/.test(sheet)) {
+  if (!/'data-review-symbol':/.test(sheet) || !/'data-review-market':/.test(sheet)) {
     err(`${REVSHEET}가 어떤 주문을 보여 주는지 드러내지 않습니다`
       + ' — 실기에서 화면과 주문이 같은지 확인할 수 없습니다');
   }
@@ -2233,18 +2242,34 @@ const drawer = code(read(DRAWER));
     err(`${SHELLF}가 배경을 실제로 inert로 만들지 않습니다`
       + ' — 시각적으로만 가리면 키보드는 그대로 들어갑니다');
   }
-  if (usdm && !/backgroundInert=\{p\.review\.phase !== 'NONE'\}/.test(usdmSrc)) {
+  if (usdm && !/backgroundInert=\{p\.review\.phase !== 'NONE'/.test(usdmSrc)) {
     err(`${usdm}가 확인 창이 떠 있는 동안 뒤 화면을 비활성화하지 않습니다`);
   }
-  for (const [what, re] of [
-    ['dialog 역할', /role="dialog"/],
-    ['modal 표시', /aria-modal="true"/],
-    ['이름', /aria-label=/],
-    ['포커스 되돌리기', /returnTo\.current/],
-    ['Tab 가둠', /e\.key !== 'Tab'/],
-  ]) {
-    if (!re.test(sheet)) {
-      err(`${REVSHEET}에 ${what}이(가) 없습니다 — 키보드 사용자가 창 밖으로 나갑니다`);
+  // ★ dialog 의미 · 포커스는 **공용 껍데기 한 곳**에 있다.
+  //   두 확인 창(주문 · 청산)이 각자 구현하면 한쪽만 고쳐지고, 눈으로는
+  //   똑같은데 한 창에서만 포커스가 샌다.
+  {
+    const shellSrc = code(read(SHEETSH));
+    for (const [what, re] of [
+      ['dialog 역할', /role="dialog"/],
+      ['modal 표시', /aria-modal="true"/],
+      ['이름', /aria-label=\{p\.label\}/],
+      ['포커스 되돌리기', /returnTo\.current/],
+      ['Tab 가둠', /e\.key !== 'Tab'/],
+      // ★ 열자마자 확인에 포커스가 가면 Enter 한 번에 나간다
+      ['취소에 포커스', /querySelector<HTMLElement>\('button:not\(\[disabled\]\)'\)/],
+    ]) {
+      if (!re.test(shellSrc)) {
+        err(`${SHEETSH}에 ${what}이(가) 없습니다 — 키보드 사용자가 창 밖으로 나갑니다`);
+      }
+    }
+    for (const [f, src] of [[REVSHEET, sheet], [CLOSESH, code(read(CLOSESH))]]) {
+      if (!/<ReviewSheetShell/.test(src)) {
+        err(`${f}가 공용 확인 창 껍데기를 쓰지 않습니다 — 포커스 규칙이 두 벌이 됩니다`);
+      }
+      if (/role="dialog"/.test(src) || /e\.key !== 'Tab'/.test(src)) {
+        err(`${f}가 포커스 규칙을 따로 갖습니다 — 정본은 ${SHEETSH} 하나입니다`);
+      }
     }
   }
 
@@ -2279,6 +2304,245 @@ const drawer = code(read(DRAWER));
   }
 }
 
+// ══════════════ ㉛ ★ 전량청산도 확인 창을 거친다 ══════════════
+//
+// 무엇이 있었나
+// ─────────────
+// `[전량청산]`이 **한 번의 클릭으로** `/api/paper/close`에 POST했다.
+// 되돌릴 수 없는 동작이고, 좁은 화면에서 옆 칸을 누르려다 닿는 자리에
+// 있었다. 진입은 Phase 2C에서 확인 창을 거치게 했는데 청산은 그대로였다 —
+// **더 위험한 쪽이 더 쉬웠다.**
+//
+// 그리고 포지션 줄은 `positions[0]`만 그리고 나머지를 `외 N건`으로 접었다.
+// 하단 내비의 **포지션 탭**인데 두 번째 포지션을 닫을 방법이 없었다.
+{
+  const list = code(read(PLIST));
+  const rev = code(read(CLOSEREV));
+  const hook = code(read(CLOSEHK));
+  const sheet = code(read(CLOSESH));
+  const pos = code(read(POS));
+  const usdm = CONTRACT
+    ? (CONTRACT.MARKET_SCREENS.find(x => x.market === 'USDT_FUTURES') || {}).file
+    : null;
+  const usdmSrc = usdm ? code(read(usdm)) : '';
+
+  // ⑴ 목록이 **전부** 그린다
+  if (/positions\[0\]/.test(list) || /const head = /.test(list)) {
+    err(`${PLIST}가 첫 포지션만 그립니다 — 나머지는 닫을 방법이 없습니다`);
+  }
+  if (/외 \{?\w*rest/.test(list) || /position-more/.test(list)) {
+    err(`${PLIST}가 나머지 포지션을 "외 N건"으로 접습니다`);
+  }
+  if (!/positions\.map\(/.test(list)) {
+    err(`${PLIST}가 포지션 전부를 그리지 않습니다`);
+  }
+  if (!/key=\{p\.id\}/.test(list)) {
+    err(`${PLIST}가 포지션을 id로 구별하지 않습니다 — 같은 종목 두 개가 섞입니다`);
+  }
+
+  // ⑵ 첫 클릭은 **창을 열 뿐이다**
+  {
+    const btns = jsxTagsWith(list, 'button', /position-close/);
+    if (btns.length !== 1) err(`${PLIST}의 청산 버튼을 찾지 못했습니다 (${btns.length}개)`);
+    else {
+      const click = attrValue(btns[0], 'onClick') || '';
+      // 닫은 뒤 포커스를 돌려놓으려면 열 때 트리거가 포커스를 갖고 있어야 한다
+      if (!/e\.currentTarget\.focus\(\)/.test(click)) {
+        err(`${PLIST}의 청산 버튼이 포커스를 잡지 않습니다`
+          + ' — 창을 닫은 뒤 포커스가 문서 처음으로 떨어집니다');
+      }
+      if (!/closeReview\.open\(position\.id\)/.test(click)) {
+        err(`${PLIST}의 청산 버튼이 확인 창을 열지 않습니다 (${click.slice(0, 60)})`);
+      }
+      for (const re of [/fetch\s*\(/, /paper\/close/, /await/]) {
+        if (re.test(click)) {
+          err(`${PLIST}의 청산 버튼이 곧바로 요청을 보냅니다 (${re})`
+            + ' — 되돌릴 수 없는 동작이 한 번의 클릭입니다');
+        }
+      }
+    }
+  }
+
+  // ⑶ 청산 요청이 나가는 자리는 **거래 화면 쪽에 한 곳**이다
+  //
+  //   ★ 저장소 전체로 "한 곳"이라고 적을 수 없다. 터미널
+  //     (`components/terminal/BottomDock.tsx`)에도 청산 경로가 있고, 그쪽은
+  //     **이미 `confirmDialog`로 한 번 묻는다.** 그 사실을 감추고 "한 곳"
+  //     이라고 쓰면 검사가 거짓말을 한다. 그래서 여기서는 거래 화면 쪽을
+  //     한 곳으로 묶고, 터미널 쪽은 **1클릭으로 퇴화하지 않는지**를 따로
+  //     본다. 두 화면을 합치는 것은 이 단계의 일이 아니다.
+  {
+    const senders = walk('src')
+      .map(f => f.replace(/\\/g, '/'))
+      .filter(f => !f.includes('src/app/api/'))
+      .filter(f => /'\/api\/paper\/close'/.test(code(read(f))));
+    const trading = senders.filter(f => !f.startsWith('src/components/terminal/'));
+    if (trading.length !== 1 || trading[0] !== CLOSEHK) {
+      err(`거래 화면의 청산 요청이 ${trading.length}곳에서 나갑니다 (${trading.join(', ')})`
+        + ` — 정본은 ${CLOSEHK} 하나입니다`);
+    }
+    // 터미널 쪽 — 알려진 두 번째 화면. 묻지 않고 닫게 되면 RED.
+    const DOCK = 'src/components/terminal/BottomDock.tsx';
+    const dock = code(read(DOCK));
+    if (/'\/api\/paper\/close'/.test(dock)) {
+      const at = dock.indexOf("'/api/paper/close'");
+      const before = dock.slice(Math.max(0, at - 1200), at);
+      if (!/confirmDialog\(/.test(before) || !/if \(!okToGo\) return;/.test(before)) {
+        err(`${DOCK}가 묻지 않고 청산합니다 — 되돌릴 수 없는 동작이 한 번의 클릭입니다`);
+      }
+    }
+    const others = senders.filter(f => f !== CLOSEHK && f !== DOCK);
+    if (others.length) {
+      err(`청산 경로가 또 생겼습니다 (${others.join(', ')})`
+        + ' — 확인 없이 닫는 화면이 늘어납니다');
+    }
+    const sends = (hook.match(/fetch\s*\(/g) || []).length;
+    if (sends !== 1) err(`${CLOSEHK}가 ${sends}번 조회합니다 — 정확히 한 번이어야 합니다`);
+    if (!/step\.effects\.includes\('CLOSE'\)/.test(hook)) {
+      err(`${CLOSEHK}가 전이가 돌려준 부수효과를 그대로 쓰지 않습니다`);
+    }
+  }
+
+  // ⑷ 본문은 `positionId` **하나뿐**이다
+  {
+    const body = fnBody(rev, 'closeRequestBody');
+    if (!body) err(`${CLOSEREV}에 청산 본문 정본이 없습니다`);
+    else {
+      if (!/return \{ positionId: String\(positionId\) \};/.test(body)) {
+        err(`${CLOSEREV}의 청산 본문이 positionId 하나가 아닙니다`);
+      }
+    }
+    if (!/JSON\.stringify\(closeRequestBody\(id\)\)/.test(hook)) {
+      err(`${CLOSEHK}가 청산 본문 정본을 쓰지 않습니다`);
+    }
+    for (const banned of [/exitPrice/, /markPrice/, /accountId/, /paper_account_id/,
+                          /realizedPnl/, /pnlPct/, /challengeId/]) {
+      for (const [f, src] of [[CLOSEREV, rev], [CLOSEHK, hook], [CLOSESH, sheet], [PLIST, list]]) {
+        if (banned.test(src)) {
+          err(`${f}가 청산 경로에 ${banned}를 끌어옵니다`
+            + ' — 가격과 소유권은 서버가 포지션에서 스스로 찾습니다');
+        }
+      }
+    }
+  }
+
+  // ⑸ 사라진 포지션은 못 닫는다 · 다른 포지션으로 재사용하지 않는다
+  {
+    const v = fnBody(rev, 'closeConfirmVerdict');
+    if (!v) err(`${CLOSEREV}에 확인 판정이 없습니다`);
+    else if (!/!i\.openIds\.includes\(id\)/.test(v)) {
+      err(`${CLOSEREV}의 확인 판정이 "이미 닫힌 포지션"을 막지 않습니다`);
+    }
+    const r = fnBody(rev, 'closeReviewReduce');
+    if (!r) err(`${CLOSEREV}에 전이가 없습니다`);
+    else {
+      if (!/if \(!id \|\| !env\.openIds\.includes\(id\)\) return stay\(s\);/.test(r)) {
+        err(`${CLOSEREV}가 장부에 없는 포지션의 창을 엽니다`);
+      }
+      if (!/effects: \['CLOSE'\]/.test(r)) {
+        err(`${CLOSEREV}의 전이가 청산 부수효과를 내지 않습니다`);
+      }
+      // ★ 부수효과를 낼 때 **`sent`를 같이 세운다.** 안 세우면 두 번째
+      //   클릭이 같은 판정을 통과해 같은 포지션이 두 번 닫힌다.
+      if (!/\{ opened: s\.opened, sent: true \}, effects: \['CLOSE'\]/.test(r)) {
+        err(`${CLOSEREV}가 청산을 보내면서 "보냈다"를 세우지 않습니다 — 연타가 막히지 않습니다`);
+      }
+      if (!/opened: e\.ok \? null : s\.opened/.test(r)) {
+        err(`${CLOSEREV}가 실패한 청산에서 창을 닫습니다 — 사유와 재시도를 잃습니다`);
+      }
+    }
+    // 청산 뒤 장부를 다시 읽는다 — 훅이 부르고, **화면이 진짜 reload를 넘긴다**
+    if (!/onClosedRef\.current\(\)/.test(hook)) {
+      err(`${CLOSEHK}가 청산 뒤 장부를 다시 읽지 않습니다`);
+    }
+    // ★ 훅이 부르는 것만 보면 안 된다. 화면이 빈 함수를 넘기면 훅은
+    //   성실히 그 빈 함수를 부르고, 닫힌 포지션이 목록에 남는다.
+    for (const [f, src] of [[ORDER, order], [POS, pos]]) {
+      const at = src.indexOf('usePaperCloseReview({');
+      if (at < 0) { err(`${f}가 청산 확인 창을 만들지 않습니다`); continue; }
+      const block = src.slice(at, at + 400);
+      if (!/onClosed:\s*\w*\.?ledger\.reload|onClosed:\s*ledger\.reload/.test(block)) {
+        err(`${f}가 청산 뒤 장부를 다시 읽지 않습니다`
+          + ' — 닫힌 포지션이 목록에 그대로 남습니다');
+      }
+    }
+    for (const [f, src] of [[POS, pos], ...(usdm ? [[usdm, usdmSrc]] : [])]) {
+      if (!/closeReview=\{(closeReview|p\.closeReview)\}/.test(src)) {
+        err(`${f}가 포지션 목록에 확인 창을 넘기지 않습니다`);
+      }
+      if (!/<PaperCloseReviewSheet/.test(src)) {
+        err(`${f}가 청산 확인 창을 그리지 않습니다 — 만들어 놓고 배선을 안 한 상태입니다`);
+      }
+    }
+  }
+
+  // ⑹ 창이 떠 있으면 **뒤가 키보드에서도 사라진다**
+  {
+    const inert = code(read(INERT));
+    if (!/el\.inert = !!on;/.test(inert)) {
+      err(`${INERT}가 배경을 실제로 inert로 만들지 않습니다`);
+    }
+    if (!/useInert\(bodyRef, closeReview\.phase !== 'NONE'\)/.test(pos)) {
+      err(`${POS}가 청산 확인 중에 뒤 본문을 비활성화하지 않습니다`);
+    }
+    if (usdm && !/p\.closeReview\.phase !== 'NONE'/.test(usdmSrc)) {
+      err(`${usdm}가 청산 확인 중에 뒤 화면을 비활성화하지 않습니다`);
+    }
+    // 확인 버튼도 색 · DOM · 클릭이 판정 하나를 본다
+    const btns = jsxTagsWith(sheet, 'button', /close-review-confirm/);
+    if (btns.length !== 1) err(`${CLOSESH}의 확인 버튼을 찾지 못했습니다`);
+    else {
+      const attrs = btns[0];
+      const norm = (t) => t.replace(/\s+/g, ' ').trim();
+      const d = attrValue(attrs, 'disabled');
+      if (norm(d || '') !== 'v.off') {
+        err(`${CLOSESH}의 확인 버튼 DOM 꺼짐이 판정의 .off가 아닙니다 (${d})`);
+      }
+      const st = styleEntries(attrs);
+      for (const prop of ['background', 'color', 'cursor']) {
+        const c = st[prop] == null ? null : ternaryCond(st[prop]);
+        if (c == null) { err(`${CLOSESH}의 확인 버튼 ${prop}이 꺼짐을 보지 않습니다`); continue; }
+        if (norm(c) !== 'v.off') {
+          err(`${CLOSESH}의 확인 버튼은 색과 DOM이 다른 식을 봅니다 (${prop}: ${norm(c)})`);
+        }
+      }
+      const click = attrValue(attrs, 'onClick') || '';
+      for (const re of [/fetch/, /openIds/, /hasAuth/, /\bbusy\b/]) {
+        if (re.test(click)) err(`${CLOSESH}의 확인 버튼 클릭이 판정을 다시 계산합니다 (${re})`);
+      }
+    }
+  }
+
+  // ⑺ 손익을 지어내지 않는다 (열린 포지션의 미실현 손익 정본이 없다)
+  for (const [f, src] of [[CLOSEREV, rev], [CLOSESH, sheet], [PLIST, list]]) {
+    for (const re of [/unrealized/i, /\broe\b/i, /예상\s*실현/, /예상\s*체결/, /exitPrice/]) {
+      // 주석은 `code()`가 이미 떼어 냈다 — 실제 코드에만 걸린다
+      if (re.test(src)) {
+        err(`${f}가 열린 포지션의 손익을 만듭니다 (${re})`
+          + ' — 미실현 손익 정본이 없습니다. 세 번째 손익 권위가 생깁니다');
+      }
+    }
+  }
+  // ★ 상수 이름이 파일 어딘가에 있는지가 아니라 **그 자리에 들어가는지**를
+  //   본다. import 줄만 남기고 값은 글자로 적으면 이름 검사는 통과한다.
+  if (!/note=\{CLOSE_SERVER_REPRICE_NOTE\}/.test(sheet)) {
+    err(`${CLOSESH}가 서버 재조회 문구를 적지 않습니다`);
+  }
+  for (const re of [/확정\s*청산가/, /예상\s*청산가/]) {
+    if (re.test(sheet) || re.test(rev)) {
+      err(`청산 확인 창이 서버가 다시 읽을 가격을 확정으로 적습니다 (${re})`);
+    }
+  }
+
+  // ⑻ 상태 기계를 주문 쪽과 **합치지 않는다**
+  for (const re of [/paperOrderReview/, /reviewReduce\b/, /confirmVerdict\b/]) {
+    if (re.test(rev) || re.test(hook)) {
+      err(`청산 확인이 주문 확인의 판정을 끌어옵니다 (${re})`
+        + ' — 정체성도 업무도 다릅니다. 하나로 합치면 한쪽 안전조건이 가려집니다');
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -2294,4 +2558,5 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' ★수량/총액 단일 계산 · ★직접입력 비클램프 · ★MAX 수수료 정본 ·'
   + ' ★호가판 prop 허용목록(누름 동작 없음) · ★실행버튼 색=DOM=클릭 단일 판정 ·'
   + ' ★진입은 확인 창을 거침(제출 1곳 · 부수효과 없음 · 읽기전용 · preflight 비연결) ·'
-  + ' ★확인 창이 실제 진입/청산을 받음 · 배경 inert · 청산거리 정본 1개');
+  + ' ★확인 창이 실제 진입/청산을 받음 · 배경 inert · 청산거리 정본 1개 ·'
+  + ' ★포지션 전부 표시 · 전량청산도 확인 창(요청 1곳 · 본문 positionId만 · 손익 비생성)');

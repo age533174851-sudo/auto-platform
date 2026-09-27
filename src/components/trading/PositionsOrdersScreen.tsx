@@ -28,7 +28,11 @@
 // 그래서 **출처가 있는 것만 그리고, 없는 것은 잠그고 이유를 적는다.**
 import React from 'react';
 import { C, FS } from '@/components/terminal/theme';
-import { PositionRow } from './PositionRow';
+import { PositionList } from './PositionList';
+import { PaperCloseReviewSheet } from './markets/PaperCloseReviewSheet';
+import { usePaperCloseReview } from '@/lib/trading/usePaperCloseReview';
+import { scopeForTarget } from '@/lib/trading/paperTarget';
+import { useInert } from '@/lib/ui/useInert';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
 import { usePaperLedger } from '@/lib/trading/usePaperLedger';
 
@@ -56,8 +60,22 @@ export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {
   const ledger = usePaperLedger(target, !!auth);
   const positions = auth ? ledger.openPositions : [];
 
+  // ── ★ 전량청산은 확인 창을 거친다 ──
+  //
+  //   되돌릴 수 없는 동작이 한 번의 클릭이었다. 요청이 나가는 자리는
+  //   `usePaperCloseReview` 한 곳이고, 아래 목록은 창을 열 뿐이다.
+  const closeReview = usePaperCloseReview({
+    positions, auth, onClosed: ledger.reload,
+  });
+  // 창이 떠 있으면 뒤 본문은 **키보드에서도 없다.** 덮개는 포인터만 막는다.
+  const bodyRef = React.useRef<HTMLDivElement | null>(null);
+  useInert(bodyRef, closeReview.phase !== 'NONE');
+
   return (
-    <div data-testid="positions-orders-screen" style={{
+    <div data-testid="positions-orders-host"
+      data-close-phase={closeReview.phase}
+      style={{ position: 'relative', minHeight: '100%' }}>
+    <div ref={bodyRef} data-testid="positions-orders-screen" style={{
       display: 'flex', flexDirection: 'column', gap: 12, padding: '12px 12px 24px',
       minHeight: 0,
     }}>
@@ -79,7 +97,7 @@ export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {
           // **못 읽은 것을 '없음'으로 적지 않는다.**
           <Locked title="읽지 못했습니다" reason={ledger.error}/>
         ) : positions.length ? (
-          <PositionRow positions={positions} auth={auth} onClosed={ledger.reload}/>
+          <PositionList positions={positions} closeReview={closeReview} auth={auth}/>
         ) : (
           <div style={{
             border: `1px dashed ${C.hair}`, borderRadius: 10, padding: 16,
@@ -99,6 +117,8 @@ export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {
         reason={'내역을 돌려주는 경로가 아직 없습니다. 만들어지면 여기에 붙습니다 — '
           + '그때까지 화면에서 지어내지 않습니다.'}
       />
+    </div>
+    <PaperCloseReviewSheet review={closeReview} scope={scopeForTarget(target)}/>
     </div>
   );
 }

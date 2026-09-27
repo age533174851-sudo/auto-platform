@@ -57,6 +57,7 @@ import {
 } from '@/lib/trading/marketInstrument';
 import { activeIdentity, switchBlockedReason, switchLockState } from '@/lib/trading/tradeIdentity';
 import { usePaperOrderReview } from '@/lib/trading/usePaperOrderReview';
+import { usePaperCloseReview } from '@/lib/trading/usePaperCloseReview';
 import { PAPER_ORDER_TYPE_LABEL } from '@/lib/trading/paperOrderReview';
 import { capability } from '@/lib/markets/marketType';
 import { useInstrumentCatalog } from '@/lib/trading/useInstrumentCatalog';
@@ -201,6 +202,15 @@ export function PaperOrderScreen({
     intentOpen: usdmIntentOpen,
   });
 
+  // ── ★ 전량청산 확인 창 ──
+  //
+  //   주문 확인과 **같은 자리**에서 만들고 같은 규칙으로 내려보낸다.
+  //   상태 기계는 따로다 — 진입은 `{market,symbol,side}`, 청산은
+  //   `positionId`가 정체성이고 업무가 다르다.
+  const closeReview = usePaperCloseReview({
+    positions: ledger.openPositions, auth, onClosed: ledger.reload,
+  });
+
   // 확인 중과 보내는 중은 **다른 상태**다. 사유를 돌려쓰면 확인 중인데
   // "보내는 중입니다"가 뜨고, 사용자는 주문이 이미 나간 줄 안다.
   const lockState = switchLockState({
@@ -282,13 +292,15 @@ export function PaperOrderScreen({
         data-switch-lock={lockState}
         data-review-phase={review.phase}
         data-usdm-intent={usdmIntent}
+        data-close-phase={closeReview.phase}
         style={{ position: 'relative', height: '100%', minHeight: 0, background: C.bg }}>
         {screen === 'SPOT_SCREEN' ? (
           <SpotTradingScreen {...common}
             form={form} sell={sell} ledger={ledger} canOrder={wiring.canOrder}/>
         ) : screen === 'USDM_SCREEN' ? (
           <UsdtFuturesTradingScreen {...common}
-            form={form} sell={sell} review={review} ledger={ledger} auth={auth}
+            form={form} sell={sell} review={review} closeReview={closeReview}
+            ledger={ledger} auth={auth}
             intent={usdmIntent} onIntent={setUsdmIntent}
             markPrice={stream.markPrice} canOrder={wiring.canOrder}/>
         ) : screen === 'COINM_SCREEN' ? (
