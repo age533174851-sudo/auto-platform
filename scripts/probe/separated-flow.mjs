@@ -12,7 +12,18 @@
 // ─────────────────
 //   ① 시장 → 종목 상세 → 주문 → 뒤로 = 다시 종목 상세
 //   ② 하단 거래 탭 → 포지션·주문 (시장 탐색이 아니다)
-//   ③ 도달 가능한 기본 화면 어디에도 차트+주문폼+호가+포지션이 동시에 없다
+//   ③ 도달 가능한 기본 화면 어디에도 **차트가 상주하지 않는다**
+//
+// ★ ③이 바뀌었다 (v3 계약)
+// ────────────────────────
+// 예전에는 "차트+주문폼+호가+포지션 중 셋 이상이면 실패"였다. 지금은
+// 호가·주문폼·포지션이 **한 거래 화면에 있는 것이 정본**이다(바이낸스
+// 골격). 화면을 밀어내던 것은 호가가 아니라 260px 차트였다.
+//
+// 그래서 세는 방식을 바꾼다: 셋이 같이 있는 것은 통과, **차트가 접히지
+// 않고 상주하면 실패.** 느슨해진 것이 아니라 겨누는 곳이 바뀐 것이다 —
+// 실제 고장(주문 버튼이 화면 밖으로 밀림)은 `market-screens.mjs`가
+// 첫 화면 좌표로 직접 잰다.
 //
 // CI에는 넣지 않는다 — Playwright는 이 저장소의 의존성이 아니다.
 // (`scripts/probe/README.md`의 규약을 그대로 따른다.)
@@ -33,10 +44,14 @@ window.__density = () => {
   const has = (sel) => !!document.querySelector(sel);
   const chart = has('[data-testid="price-chart"], canvas');
   const orderForm = has('[data-testid="order-controls"]');
-  const book = has('[data-testid="order-book"], [data-testid="orderbook"]');
-  const positions = has('[data-testid="position-row"]');
+  const book = has('[data-testid="mkt-order-book"], [data-testid="orderbook"]');
+  const positions = has('[data-testid="mkt-positions"], [data-testid="position-row"]');
+  // 거래 화면 안에 **상주하는** 차트만 센다. 접힌 막대는 차트가 아니고,
+  // 펼친 덮개는 사용자가 연 것이다.
+  const residentChart = has('[data-region="tradingScreen"] canvas')
+    && !has('[data-testid="chart-drawer-overlay"]');
   const n = [chart, orderForm, book, positions].filter(Boolean).length;
-  return { chart, orderForm, book, positions, n };
+  return { chart, residentChart, orderForm, book, positions, n };
 };
 `;
 
@@ -143,7 +158,11 @@ for (const [name, w, h] of VIEWPORTS) {
       ok(`${name}: 상세 → 주문 화면 (${r.order.level})`);
       if (r.order.hasChart) bad(`${name}: 주문 화면에 분석용 차트가 있습니다`);
       else ok(`${name}: 주문 화면에 차트 없음`);
-      if (r.order.density.n >= 3) bad(`${name}: 주문 화면이 원스크린입니다`);
+      // 호가·주문폼·포지션이 같이 있는 것은 **정본이다.** 차트가
+      // 상주하는지만 본다.
+      if (r.order.density.residentChart) {
+        bad(`${name}: 거래 화면에 차트가 상주합니다 — 접혀 있어야 합니다`);
+      } else ok(`${name}: 거래 화면에 차트 비상주`);
 
       // 주문 → 뒤로 = 다시 상세
       await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
@@ -183,8 +202,9 @@ for (const [name, w, h] of VIEWPORTS) {
       r.pro = await page.evaluate(() => ({
         screen: !!document.querySelector('[data-testid="paper-order-screen"]'),
         level: document.querySelector('[data-testid="paper-order-screen"]')?.getAttribute('data-level'),
-        panel: !!document.querySelector('[data-testid="pro-order-panel"]'),
-        cta: !!document.querySelector('[data-testid="pro-order-cta"]'),
+        // v3에서 프로 표현은 **시장별 화면**으로 갈렸다
+        panel: !!document.querySelector('[data-region="tradingScreen"]'),
+        cta: !!document.querySelector('[data-testid="trading-cta"]'),
         kicked: !!document.querySelector('[data-testid="pro-open-workspace"]'),
         hasChart: !!document.querySelector('[data-testid="paper-order-screen"] canvas'),
         density: window.__density(),
@@ -198,7 +218,9 @@ for (const [name, w, h] of VIEWPORTS) {
       }
       if (r.pro.kicked) bad(`${name}: 프로가 아직 원스크린으로 차 냅니다`);
       if (r.pro.hasChart) bad(`${name}: 프로 주문 화면에 차트가 있습니다`);
-      if (r.pro.density.n >= 3) bad(`${name}: 프로 주문 화면이 원스크린입니다`);
+      if (r.pro.density.residentChart) {
+        bad(`${name}: 시장별 거래 화면에 차트가 상주합니다`);
+      }
       else ok(`${name}: 프로 동시 표시 ${r.pro.density.n}가지`);
     }
   }
@@ -210,4 +232,4 @@ await browser.close();
 writeFileSync(`${OUT}/separated-flow.json`, JSON.stringify(all, null, 2));
 console.log(`\n결과: ${OUT}/separated-flow.json`);
 if (fails > 0) { console.error(`\n실측 실패 ${fails}건`); process.exit(1); }
-console.log('✅ 분리 흐름 실측 통과 — 탐색→상세→주문→뒤로 · 거래탭=포지션 · 원스크린 없음');
+console.log('✅ 분리 흐름 실측 통과 — 탐색→상세→거래→뒤로 · 거래탭=포지션 · 차트 비상주');

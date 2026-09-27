@@ -220,3 +220,169 @@ export const BUY_PERCENTS = [10, 25, 50, 100] as const;
  * 여기서 99.99 같은 근사를 쓰면 영원히 안 풀리는 잔량이 생긴다.
  */
 export const SELL_PERCENTS = [25, 50, 75, 100] as const;
+
+// ══════════════ 직접 입력 — **조용히 고치지 않는다** ══════════════
+//
+// 위의 `percentFromQuantity` · `percentFromNotional`은 **슬라이더를 맞추기
+// 위한** 역함수라 0~100으로 자른다. 슬라이더는 그 범위밖에 표현하지 못하니
+// 맞는 처리다.
+//
+// 그런데 사용자가 숫자를 **직접 적을 때** 같은 자르기를 하면 다른 뜻이 된다:
+//
+//     잔고 100인데 총액 500을 입력 → 조용히 100%로 고쳐짐
+//
+// 사용자는 500을 주문한 줄 알고, 화면은 100을 보여주고, 아무도 틀렸다고
+// 말하지 않는다. **자르는 것과 거절하는 것은 다르다.**
+//
+// 그래서 직접 입력에는 결과 타입을 따로 둔다. 넘치면 넘쳤다고 말하고,
+// 실제 비율(`rawPercent`)도 같이 준다 — 얼마나 넘쳤는지 보여야 사용자가
+// 고칠 수 있다.
+
+export type DirectInputCode =
+  /** 그대로 쓸 수 있다 */
+  | 'OK'
+  /** 잔고를 못 읽었다. **0이 아니다** */
+  | 'BALANCE_UNKNOWN'
+  /** 시세를 못 읽었다 */
+  | 'PRICE_UNKNOWN'
+  /** 숫자가 아니거나 음수다 */
+  | 'INVALID'
+  /** 가용 잔고를 넘는다. **잘라서 통과시키지 않는다** */
+  | 'OVER_BUDGET';
+
+export interface DirectInputResult {
+  code: DirectInputCode;
+  /** 그대로 쓸 수 있을 때의 비율(0~100). 아니면 null */
+  percent: number | null;
+  /** 자르기 **전**의 실제 비율. 넘쳤을 때 얼마나 넘쳤는지 보여준다 */
+  rawPercent: number | null;
+  reason: string | null;
+}
+
+const bad = (code: DirectInputCode, reason: string, rawPercent: number | null = null)
+  : DirectInputResult => ({ code, percent: null, rawPercent, reason });
+
+/** 증거금 비율을 구한다 — 위 두 역함수와 **같은 기준**이다 */
+function marginPercent(margin: number, bal: number): number {
+  return (margin / bal) * 100;
+}
+
+/**
+ * 사용자가 **수량을 직접 적었다.** 넘치면 넘쳤다고 말한다.
+ */
+export function quantityInputToPercent(i: {
+  quantity: number | null | undefined;
+  availableBalance: number | null | undefined;
+  price: number | null | undefined;
+  leverage: number | null | undefined;
+}): DirectInputResult {
+  const qty = num(i?.quantity);
+  const bal = num(i?.availableBalance);
+  const price = num(i?.price);
+  const lev = num(i?.leverage);
+
+  if (!Number.isFinite(qty) || qty < 0) return bad('INVALID', '수량이 유효하지 않습니다');
+  if (!Number.isFinite(bal)) {
+    return bad('BALANCE_UNKNOWN', '가용 잔고를 확인하지 못했습니다 — 0으로 읽지 않습니다');
+  }
+  if (!(bal > 0)) return bad('BALANCE_UNKNOWN', '가용 잔고가 없습니다');
+  if (!Number.isFinite(price) || !(price > 0)) {
+    return bad('PRICE_UNKNOWN', '시세를 확인하지 못해 비율을 계산하지 않았습니다');
+  }
+  if (!Number.isFinite(lev) || lev < 1) return bad('INVALID', '배율이 유효하지 않습니다');
+
+  const pct = marginPercent((qty * price) / lev, bal);
+  if (!Number.isFinite(pct)) return bad('INVALID', '비율을 계산하지 못했습니다');
+  if (pct > 100) {
+    return bad('OVER_BUDGET',
+      `가용 잔고로는 이 수량을 주문할 수 없습니다 (필요 ${pct.toFixed(1)}%)`, pct);
+  }
+  return { code: 'OK', percent: pct, rawPercent: pct, reason: null };
+}
+
+/**
+ * 사용자가 **총액(명목가)을 직접 적었다.** 넘치면 넘쳤다고 말한다.
+ *
+ * 가격을 받지 않는다 — 명목가는 이미 돈이다(`percentFromNotional`과 같은 이유).
+ */
+export function notionalInputToPercent(i: {
+  notional: number | null | undefined;
+  availableBalance: number | null | undefined;
+  leverage: number | null | undefined;
+}): DirectInputResult {
+  const notional = num(i?.notional);
+  const bal = num(i?.availableBalance);
+  const lev = num(i?.leverage);
+
+  if (!Number.isFinite(notional) || notional < 0) return bad('INVALID', '총액이 유효하지 않습니다');
+  if (!Number.isFinite(bal)) {
+    return bad('BALANCE_UNKNOWN', '가용 잔고를 확인하지 못했습니다 — 0으로 읽지 않습니다');
+  }
+  if (!(bal > 0)) return bad('BALANCE_UNKNOWN', '가용 잔고가 없습니다');
+  if (!Number.isFinite(lev) || lev < 1) return bad('INVALID', '배율이 유효하지 않습니다');
+
+  const pct = marginPercent(notional / lev, bal);
+  if (!Number.isFinite(pct)) return bad('INVALID', '비율을 계산하지 못했습니다');
+  if (pct > 100) {
+    return bad('OVER_BUDGET',
+      `가용 잔고로는 이 총액을 주문할 수 없습니다 (필요 ${pct.toFixed(1)}%)`, pct);
+  }
+  return { code: 'OK', percent: pct, rawPercent: pct, reason: null };
+}
+
+// ══════════════ MAX — **수수료까지 들어가야 한다** ══════════════
+//
+// `MAX = 잔고 100%`로 두면 주문이 막힌다. `buildPaperPlan`이 증거금 **위에**
+// 진입 수수료를 따로 요구하기 때문이다:
+//
+//     증거금 + 수수료 <= 가용 잔고
+//
+// 임의의 여유분(0.1% 같은 것)을 두지 않는다. 그 숫자가 실제 수수료와
+// 어긋나는 날 주문은 다시 막히고, 왜 막히는지 아무도 모른다.
+//
+// 식
+// ──
+//     증거금 = 잔고 × p
+//     명목가 = 증거금 × 배율
+//     수수료 = 명목가 × 수수료율 = 잔고 × p × 배율 × 수수료율
+//
+//     잔고 × p × (1 + 배율 × 수수료율) <= 잔고
+//     ⇒ p <= 1 / (1 + 배율 × 수수료율)
+//
+// 수수료율은 **`paperPlan`의 정본**을 그대로 받는다. 화면이 숫자를 베껴
+// 적지 않는다.
+
+export interface MaxAllocation {
+  /** 이 비율까지 주문할 수 있다 (0~100). 못 구하면 null */
+  percent: number | null;
+  reason: string | null;
+}
+
+/**
+ * 수수료까지 감안한 최대 비율.
+ *
+ * @param feeRate `paperPlan.paperFeeRate()`가 준 **비율**(0.0005 같은 값).
+ *                퍼센트가 아니다 — 단위를 섞으면 100배 틀린다.
+ */
+export function maxAllocationPercent(i: {
+  leverage: number | null | undefined;
+  feeRate: number | null | undefined;
+}): MaxAllocation {
+  const lev = num(i?.leverage);
+  const fee = num(i?.feeRate);
+  if (!Number.isFinite(lev) || lev < 1) {
+    return { percent: null, reason: '배율을 확인하지 못했습니다' };
+  }
+  if (!Number.isFinite(fee) || fee < 0) {
+    return { percent: null, reason: '수수료율을 확인하지 못했습니다' };
+  }
+  const denom = 1 + lev * fee;
+  if (!(denom > 0)) return { percent: null, reason: '최대 비율을 계산하지 못했습니다' };
+  const pct = 100 / denom;
+  if (!Number.isFinite(pct)) return { percent: null, reason: '최대 비율을 계산하지 못했습니다' };
+  // 100을 넘을 수 없다(수수료가 0이면 정확히 100이다)
+  return { percent: Math.min(100, pct), reason: null };
+}
+
+/** 프로 화면의 빠른 비율. 초보 화면(`BUY_PERCENTS`)과 **표시만** 다르다 */
+export const PRO_PERCENTS = [25, 50, 75] as const;

@@ -43,9 +43,22 @@ import { useUiLevel } from '@/lib/ui/useUiLevel';
 import { scopeForTarget } from '@/lib/trading/paperTarget';
 import { paperOrderUiWiring } from '@/lib/trading/capability';
 import { routeFor, openSideFor, type TradeContext } from '@/lib/trading/tradeContext';
-import { BeginnerBuyScreen, Head, LevelSwitch, type BuyUnit } from './BeginnerBuyScreen';
-import { ProOrderPanel } from './ProOrderPanel';
+import { BeginnerBuyScreen, LevelSwitch, type BuyUnit } from './BeginnerBuyScreen';
 import { BeginnerSellScreen } from './BeginnerSellScreen';
+import { SpotTradingScreen } from './markets/SpotTradingScreen';
+import { UsdtFuturesTradingScreen } from './markets/UsdtFuturesTradingScreen';
+import { CoinMFuturesTradingScreen } from './markets/CoinMFuturesTradingScreen';
+import { StockTradingScreen } from './markets/StockTradingScreen';
+import { tradingScreenForTab } from '@/lib/trading/tradingScreenRoute';
+import { readMarketTab, type TradingMarketId } from '@/lib/trading/marketTabs';
+import {
+  instrumentForMarket, instrumentFromCatalog, selectInstrument,
+  EMPTY_SELECTION, type SelectedByMarket,
+} from '@/lib/trading/marketInstrument';
+import { activeIdentity, switchBlockedReason } from '@/lib/trading/tradeIdentity';
+import { useInstrumentCatalog } from '@/lib/trading/useInstrumentCatalog';
+import { InstrumentPicker } from './markets/InstrumentPicker';
+import { changeView } from '@/lib/markets/changeBasis';
 import { useBinanceStream } from '@/lib/hooks/useBinanceStream';
 
 export interface PaperOrderScreenProps {
@@ -64,6 +77,42 @@ export function PaperOrderScreen({
 }: PaperOrderScreenProps) {
   const [level, , toggleLevel] = useUiLevel();
 
+  // ── 들고 온 종목이 **어느 시장의 것인가** ──
+  //
+  // 이 값이 종목 가용성의 출처다. 여기서 다른 시장으로 옮겨 적지 않는다 —
+  // 옮기는 순간 그게 추측이다(`marketInstrument` 머리말).
+  const entryTab = readMarketTab(ctx.market);
+  // 탭 상태. **분기보다 위에서** 만든다 — 아래에서 만들면 밀도마다 다른
+  // 탭 상태가 생긴다.
+  const [marketTab, setMarketTabRaw] = React.useState<TradingMarketId>(entryTab ?? 'SPOT');
+  React.useEffect(() => { if (entryTab) setMarketTabRaw(entryTab); }, [entryTab]);
+
+  // ── 시장마다 고른 종목을 **따로** 기억한다 ──
+  //
+  // 현물에서 보던 종목과 선물에서 보던 종목은 다른 것이다. 한 칸에 담으면
+  // 탭을 옮길 때마다 심볼이 따라다니고, 그게 곧 "이름이 같으니 같은 상품"
+  // 이라는 추측이 된다. `selectInstrument`가 다른 시장 종목의 저장을 막는다.
+  const [selected, setSelected] = React.useState<SelectedByMarket>(EMPTY_SELECTION);
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+
+  // ★ **활성 정체성** — 화면·시세·판정·능력표가 전부 이것 하나를 본다.
+  //
+  //   예전에는 이 자리에 `ctx.symbol`/`ctx.market`이 들어가 있었다. 시장
+  //   탭이 잠겨 있던 동안에는 드러나지 않았지만, 종목 선택을 열면 화면은
+  //   USDⓈ-M ETHUSDT를 보여주면서 주문은 현물 BTCUSDT로 나가게 된다.
+  const entry = React.useMemo(
+    () => (entryTab && ctx.symbol ? { symbol: ctx.symbol, market: entryTab } : null),
+    [entryTab, ctx.symbol]);
+  const avail = instrumentForMarket(marketTab, entry, selected);
+  const active = activeIdentity(marketTab, avail.instrument);
+
+  // 활성 시장/종목. **없으면 조회도 판정도 하지 않는다** — 빈 심볼로
+  // 스트림을 열면 연결만 받아 두고 값이 오지 않는 상태가 된다.
+  const activeSymbol = active?.symbol ?? '';
+  const activeMarket: TradingMarketId = marketTab;
+  // 모의 장부가 아는 시장 말인가. COIN-M·주식은 여기서 걸러진다.
+  const paperMarket = activeMarket === 'SPOT' ? 'SPOT' : 'USDM';
+
   // ── 장부는 하나다 ──
   //
   // `challengeId`의 정본은 이 싱글턴이고, 모드를 바꿔도 같은 인스턴스를
@@ -72,15 +121,19 @@ export function PaperOrderScreen({
   const [target] = usePaperTarget();
   const ledger = usePaperLedger(target, !!auth);
   const scope = scopeForTarget(target);
-  const stream = useBinanceStream(ctx.symbol, true, ctx.market);
+  // ★ 시세도 활성 정체성에서 온다. 종목이 없으면 **연결하지 않는다**.
+  const stream = useBinanceStream(activeSymbol, !!activeSymbol, paperMarket);
 
   const route = routeFor(ctx);
-  const wiring = paperOrderUiWiring(ctx.market);
+  // 능력표도 활성 시장이다. COIN-M·주식은 `UNSUPPORTED`가 돌아온다.
+  const wiring = paperOrderUiWiring(
+    activeMarket === 'SPOT' ? 'SPOT' : activeMarket === 'USDM' ? 'USDM' : activeMarket);
 
   // ── 매수 경로의 판단 (한 번만 만든다) ──
   const form = useTradeForm({
-    symbol: ctx.symbol,
-    market: ctx.market,
+    // ★ 활성 정체성. 화면 헤더와 **같은 값**이어야 한다.
+    symbol: activeSymbol,
+    market: paperMarket,
     price: stream.lastPrice,
     target,
     availableBalance: ledger.available,
@@ -95,12 +148,43 @@ export function PaperOrderScreen({
   // 간편·프로 **둘 다** 이것을 받는다. 밀도 분기보다 위에서 만들어지므로
   // 두 표현이 다른 매도를 보낼 방법이 없다.
   const sell = useSellForm({
-    symbol: ctx.symbol,
-    market: ctx.market,
+    symbol: activeSymbol,
+    market: paperMarket,
     target,
-    enabled: route === 'SELL_HOLDING',
+    // 현물 매도는 현물 화면에서만 뜻이 있다
+    enabled: route === 'SELL_HOLDING' && activeMarket === 'SPOT' && !!activeSymbol,
     onSold: onDone,
   });
+
+  // 이 시장의 상장 목록. 목록 권위가 없는 시장은 `CLOSED`로 돌아온다.
+  // 열려 있을 때만 받아 온다 — 닫힌 시장에 조회를 보내지 않는다.
+  const catalog = useInstrumentCatalog(marketTab, level === 'PRO');
+
+  // ── ★ 주문이 날아가는 중에는 시장·종목을 바꾸지 않는다 ──
+  //
+  //   BTC 주문을 보낸 뒤 응답이 오기 전에 ETH로 바꾸면, BTC의 결과
+  //   메시지가 ETH 화면에 뜬다. 사용자는 ETH가 체결된 줄 안다.
+  const orderInFlight = form.busy || sell.busy;
+  const switchBlocked = switchBlockedReason(orderInFlight);
+
+  const setMarketTab = React.useCallback((m: TradingMarketId) => {
+    if (orderInFlight) return;
+    setPickerOpen(false);
+    setMarketTabRaw(m);
+  }, [orderInFlight]);
+
+  const openPicker = React.useCallback(() => {
+    if (orderInFlight) return;
+    setPickerOpen(true);
+  }, [orderInFlight]);
+
+  const pickInstrument = React.useCallback((row: any) => {
+    if (orderInFlight) return;
+    // 고른 줄을 **그대로** 담는다. 다듬거나 만들지 않는다.
+    // 다른 시장의 줄이면 `selectInstrument`가 거부한다.
+    setSelected(prev => selectInstrument(prev, marketTab, instrumentFromCatalog(row)));
+    setPickerOpen(false);
+  }, [marketTab, orderInFlight]);
 
   // 진입 경로로 들어왔으면 방향을 문맥에서 가져온다. **현물 매도는 여기
   // 오지 않는다** — `routeFor`가 이미 다른 길로 보냈다.
@@ -124,18 +208,53 @@ export function PaperOrderScreen({
   //   96px까지 밀렸다. 이제 프로는 주문 화면 안에 머문다 — 차트를 보려면
   //   뒤로 나가면 종목 상세가 그대로 살아 있다.
   if (level === 'PRO') {
+    // ★ 시장 탭이 화면을 정한다. **분기는 정본 한 곳뿐이다**
+    //   (`tradingScreenRoute`). 여기서 `if (market === 'SPOT')`을 또 쓰면
+    //   같은 판단이 두 곳에 생기고, 언젠가 COIN-M이 USDⓈ-M 화면을 받는다.
+    const screen = tradingScreenForTab(marketTab);
+
+    // 가용성(`avail`)과 활성 정체성(`active`)은 훅보다 **위에서** 이미
+    // 계산됐다. 여기서 다시 만들면 화면이 훅과 다른 종목을 볼 수 있다.
+    const change = changeView({
+      market: paperMarket, price: stream.lastPrice, changePct: stream.changePct,
+    });
+    const common = {
+      market: marketTab, onMarket: setMarketTab,
+      instrument: avail.instrument, instrumentReason: avail.reason,
+      name: avail.instrument?.source === 'ENTRY' ? name : undefined, scope,
+      price: stream.lastPrice,
+      changePct: change.pct, changeLabel: change.label,
+      onBack, headerRight: <LevelSwitch to="간편" onClick={toggleLevel}/>,
+      // 종목 선택 — 목록 권위가 열린 시장에서만 뜻이 있다
+      onPickInstrument: openPicker,
+      switchBlockedReason: switchBlocked,
+    };
     return (
       <div data-testid="paper-order-screen" data-level="PRO" data-route={route || 'NONE'}
-        data-market={ctx.market}
-        style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: C.bg }}>
-        <Head title={title} sub={`${ctx.symbol} · ${ctx.market === 'USDM' ? 'Perpetual' : 'Spot'}`}
-          onBack={onBack} right={<LevelSwitch to="간편" onClick={toggleLevel}/>}/>
-        <ProOrderPanel
-          symbol={ctx.symbol} market={ctx.market} scope={scope}
-          form={form} sell={sell}
-          availableBalance={ledger.available}
-          canOrder={wiring.canOrder}
-        />
+        data-market={marketTab} data-screen={screen}
+        data-tradable={avail.tradable ? '1' : '0'}
+        data-active-symbol={active?.symbol ?? ''}
+        data-form-symbol={form.symbol}
+        data-form-market={form.market}
+        data-in-flight={orderInFlight ? '1' : '0'}
+        style={{ position: 'relative', height: '100%', minHeight: 0, background: C.bg }}>
+        {screen === 'SPOT_SCREEN' ? (
+          <SpotTradingScreen {...common}
+            form={form} sell={sell} ledger={ledger} canOrder={wiring.canOrder}/>
+        ) : screen === 'USDM_SCREEN' ? (
+          <UsdtFuturesTradingScreen {...common}
+            form={form} sell={sell} ledger={ledger} auth={auth}
+            markPrice={stream.markPrice} canOrder={wiring.canOrder}/>
+        ) : screen === 'COINM_SCREEN' ? (
+          <CoinMFuturesTradingScreen {...common} markPrice={stream.markPrice}/>
+        ) : (
+          <StockTradingScreen {...common}
+            orderableCash={null} heldQty={null} avgCost={null}/>
+        )}
+        <InstrumentPicker
+          open={pickerOpen} market={marketTab} catalog={catalog}
+          currentSymbol={active?.symbol ?? null}
+          onPick={pickInstrument} onClose={() => setPickerOpen(false)}/>
       </div>
     );
   }

@@ -1,6 +1,7 @@
 // src/lib/engine/paperExecution.ts
 // 가상 체결(Paper) 엔진 — 실주문 없이 체결·손익을 계산한다.
 // 손익 계산은 순수 함수로 분리해 검증 가능하게 유지한다.
+import { paperFeeRate } from './paperPlan';
 import type { PositionPlan } from './riskManager';
 
 export type ExitReason = 'TP' | 'SL' | 'LIQUIDATION' | 'MANUAL' | 'REVERSE';
@@ -41,7 +42,7 @@ export function simulateFill(
   signalEntryPrice: number,
   opts: { feeRatePct?: number; slippagePct?: number; stopLoss?: number; takeProfit?: number } = {}
 ): PaperFill {
-  const feeRate = (opts.feeRatePct ?? 0.05) / 100;   // 편도 수수료
+  const feeRate = paperFeeRate(opts.feeRatePct);   // 편도 수수료 — 정본은 paperPlan
   const slippagePct = opts.slippagePct ?? 0.05;
 
   const fillPrice = applySlippage(signalEntryPrice, plan.side, slippagePct);
@@ -72,7 +73,7 @@ export function computeClose(
   exitReason: ExitReason,
   opts: { feeRatePct?: number; openedAt?: number; closedAt?: number } = {}
 ): PaperClose {
-  const feeRate = (opts.feeRatePct ?? 0.05) / 100;
+  const feeRate = paperFeeRate(opts.feeRatePct);
 
   // 방향별 손익: 롱은 오르면 이익, 숏은 내리면 이익
   const priceDiff = fill.side === 'LONG'

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/canonical-trading-mutations.mjs
 //
-// **분리 화면 계약을 하나씩 무너뜨리고, 그때 검사기가 빨개지는지 본다.**
+// **TRAIGO 거래 화면 계약을 하나씩 무너뜨리고, 그때 검사기가 빨개지는지 본다.**
 //
 // 왜 필요한가
 // ───────────
@@ -12,9 +12,12 @@
 // 이 저장소에서 실제로 그런 일이 있었다. 그래서 새 계약은 반드시
 // **깨 보고** 확인한다.
 //
-// 아래 케이스는 계약 ①~⑪에 하나씩 대응한다. 특히 ⑨(간편/프로 동일 판정)는
-// 무너뜨리는 길이 여럿이라 여러 각도에서 넣는다 — 그게 이번 PR에서
-// 새로 박은 규칙이기 때문이다.
+// 아래 케이스는 새 계약 ①~⑯에 대응한다. 특히 이번에 바뀐 세 가지를
+// 여러 각도에서 깬다 — 새로 박은 규칙일수록 헐겁기 쉽다:
+//
+//   ★ 차트는 접혀 있다 (기본값 · 비상주 · 덮개)
+//   ★ 시장 의미가 섞이지 않는다 (현물에 레버리지 / 주식에 선물 / 선물에서 누락)
+//   ★ 공용 부품은 능력표에 물어보고 그린다
 //
 // 대조군은 반드시 GREEN이어야 한다. "무엇을 해도 빨개지는" 검사기가
 // 만점을 받는 일을 막는다.
@@ -24,7 +27,26 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 const PAGE   = 'src/app/page.tsx';
 const DETAIL = 'src/components/instrument/InstrumentDetail.tsx';
 const ORDER  = 'src/components/trading/PaperOrderScreen.tsx';
-const PRO    = 'src/components/trading/ProOrderPanel.tsx';
+const SHELL  = 'src/components/trading/markets/TradingScreenShell.tsx';
+const DRAWER = 'src/components/trading/markets/ChartDrawer.tsx';
+const SPOT   = 'src/components/trading/markets/SpotTradingScreen.tsx';
+const USDM   = 'src/components/trading/markets/UsdtFuturesTradingScreen.tsx';
+const COINM  = 'src/components/trading/markets/CoinMFuturesTradingScreen.tsx';
+const STOCK  = 'src/components/trading/markets/StockTradingScreen.tsx';
+const SHEET  = 'src/components/trading/OrderControls.tsx';
+const ROUTE  = 'src/lib/trading/tradingScreenRoute.ts';
+const TABS   = 'src/lib/trading/marketTabs.ts';
+const TABSUI = 'src/components/trading/markets/MarketTabs.tsx';
+const INSTR  = 'src/lib/trading/marketInstrument.ts';
+const CATALOG = 'src/lib/trading/instrumentCatalog.ts';
+const IDENT   = 'src/lib/trading/tradeIdentity.ts';
+const PICKER  = 'src/components/trading/markets/InstrumentPicker.tsx';
+const CATAPI  = 'src/app/api/market/instruments/route.ts';
+const FORMHK  = 'src/lib/trading/useTradeForm.ts';
+const SIZING  = 'src/lib/trading/positionSizing.ts';
+const SIZEUI  = 'src/components/trading/markets/SpotSizeInput.tsx';
+const PLAN    = 'src/lib/engine/paperPlan.ts';
+const PEXEC   = 'src/lib/engine/paperExecution.ts';
 const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
 const ROW    = 'src/components/trading/PositionRow.tsx';
@@ -39,7 +61,7 @@ function gate() {
 }
 
 const CASES = [
-  // ── ① 탐색 → 상세 → 주문 사슬 ──
+  // ── ① 탐색 → 상세 → 거래 사슬 ──
 
   ['MUT-N1 목록에서 상세로 가는 판정을 끊는다 (종목을 눌러도 안 열린다)', PAGE, 'RED',
    [[`const detailTarget=useMemo(()=>detailTargetOf(detailAsset),[detailAsset]);`,
@@ -48,22 +70,22 @@ const CASES = [
   ['MUT-N2 상세의 주문 요청을 문맥 없이 흘린다 (무엇을 사는지 모르고 연다)', PAGE, 'RED',
    [[`              const ctx = readTradeContext({`, `              const ctx = ({`]]],
 
-  ['MUT-N3 전용 주문 화면을 떼어낸다 (주문할 길이 사라진다)', PAGE, 'RED',
+  ['MUT-N3 거래 화면 host를 떼어낸다 (주문할 길이 사라진다)', PAGE, 'RED',
    [[`          <PaperOrderScreen`, `          <LegacyOrderScreen`]]],
 
-  // ── ② 상세는 상주 목적지가 아니다 ──
+  // ── ② 상세·거래는 상주 목적지가 아니다 ──
 
   ['MUT-N4 종목 상세를 하단 탭으로 올린다 (고른 것 없이 열면 답이 없다)', PAGE, 'RED',
    [[`  {id:'market',   label:'시장', Icon: BarChart3},`,
      `  {id:'market',   label:'시장', Icon: BarChart3},\n  {id:'detail',   label:'종목', Icon: BarChart3},`]]],
 
-  ['MUT-N5 주문을 겹 목록에서 빼낸다 (뒤로가기가 못 닫는다)', PAGE, 'RED',
+  ['MUT-N5 거래 화면을 겹 목록에서 빼낸다 (뒤로가기가 못 닫는다)', PAGE, 'RED',
    [[`    { id:'order',   open:!!orderCtx,      close:()=>setOrderCtx(null) },`,
      `    { id:'legacy',  open:false,           close:()=>{} },`]]],
 
-  // ── ③ host는 하나다 ──
+  // ── ③ host 하나 · 시장→화면 분기 한 곳 ──
 
-  ['MUT-N6 두 번째 주문 화면 host를 만든다 (두 판이 다른 props로 갈린다)', DETAIL, 'RED',
+  ['MUT-N6 두 번째 거래 화면 host를 만든다 (두 판이 다른 props로 갈린다)', DETAIL, 'RED',
    [[`export interface OrderIntent {`,
      `export function SecondOrderHost(){ return <PaperOrderScreen/>; }\nexport interface OrderIntent {`]]],
 
@@ -71,128 +93,529 @@ const CASES = [
    [[`  const ledger = usePaperLedger(target, !!auth);`,
      `  const ledger = usePaperLedger(target, !!auth);\n  const _f = useTradeForm({ symbol: 'BTCUSDT' } as any);`]]],
 
-  // ── ④ 상세에 주문폼을 넣지 않는다 (원스크린 복귀 ①) ──
+  ['MUT-N8 ★ 시장→화면 분기를 두 번째 자리에 복제한다 (COIN-M이 USDⓈ-M 화면을 받는다)', POS, 'RED',
+   [[`export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {`,
+     `const _r = () => tradingScreenFor('SPOT' as any);\nexport function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {`]]],
 
-  ['MUT-N8 상세에 주문 조작부를 상주시킨다 (차트와 주문이 화면을 나눈다)', DETAIL, 'RED',
+  ['MUT-N9 ★ 모르는 시장에 기본 화면을 준다 (선물 주문이 현물로 나간다)', ROUTE, 'RED',
+   [["  if (!id) throw new Error(", "  if (!id) return 'SPOT_SCREEN';\n  if (false) throw new Error("]]],
+
+  // ── ④ 상세에 주문폼을 넣지 않는다 ──
+
+  ['MUT-N10 상세에 주문 조작부를 상주시킨다 (거래 화면이 둘이 된다)', DETAIL, 'RED',
    [[`  return (`, `  const _oc = <OrderControls/>;\n  return (`]]],
 
-  ['MUT-N9 상세가 주문 판정을 직접 만든다 (상세가 곧 주문 화면이 된다)', DETAIL, 'RED',
+  ['MUT-N11 상세가 주문 판정을 직접 만든다', DETAIL, 'RED',
    [[`export interface OrderIntent {`,
      `const _x = useTradeForm({} as any);\nexport interface OrderIntent {`]]],
 
-  ['MUT-N10 상세가 주문을 직접 제출한다 (보는 화면이 체결한다)', DETAIL, 'RED',
+  ['MUT-N12 상세가 주문을 직접 제출한다 (보는 화면이 체결한다)', DETAIL, 'RED',
    [[`export interface OrderIntent {`,
      `const _s = () => (window as any).form.submit();\nexport interface OrderIntent {`]]],
 
-  ['MUT-N11 옛 원스크린 치수를 되살린다', PRO, 'RED',
-   [[`export interface ProOrderPanelProps {`,
-     `const BOOK_MIN_PX = 120;\nexport interface ProOrderPanelProps {`]]],
+  ['MUT-N13 옛 원스크린 치수를 되살린다', SHELL, 'RED',
+   [[`export interface ShellTab {`, `const BOOK_MIN_PX = 120;\nexport interface ShellTab {`]]],
 
-  // ── ⑤ 주문 화면에 차트·호가를 넣지 않는다 (원스크린 복귀 ②) ──
+  ['MUT-N14 옛 통합 거래 화면을 이름만 바꿔 되살린다', POS, 'RED',
+   [[`      <header style={{ display: 'grid', gap: 3 }}>`,
+     `      <TradingWorkspace/>\n      <header style={{ display: 'grid', gap: 3 }}>`]]],
 
-  ['MUT-N12 주문 화면에 분석용 차트를 얹는다 (주문 화면이 터미널이 된다)', PRO, 'RED',
-   [[`        <OrderControls`, `        <PriceChart symbol={symbol}/>\n        <OrderControls`]]],
+  // ── ⑤ ★ 거래 화면 본문에 차트를 상주시키지 않는다 (사용자 규칙 1·2) ──
 
-  ['MUT-N13 주문 화면에 호가를 상주시킨다 (주문│호가 분할이 되살아난다)', PRO, 'RED',
-   [[`        <OrderControls`, `        <OrderBookView symbolId={symbol}/>\n        <OrderControls`]]],
+  ['MUT-N15 ★ 선물 화면 본문에 차트를 상주시킨다 (260px가 주문 버튼을 밀어낸다)', USDM, 'RED',
+   [[`          <OrderControls form={p.form}`,
+     `          <PriceChart symbol={p.symbol} interval="15m" height={260}/>\n          <OrderControls form={p.form}`]]],
 
-  // ── ⑥ 정본 판정 비우회 ──
+  ['MUT-N16 ★ 현물 화면 본문에 차트를 상주시킨다', SPOT, 'RED',
+   [[`        <OrderControls form={p.form}`,
+     `        <PriceChart symbol={p.symbol} interval="15m" height={260}/>\n        <OrderControls form={p.form}`]]],
 
-  ['MUT-N14 주문 화면이 경로 판정을 직접 한다', ORDER, 'RED',
+  ['MUT-N17 ★ 공용 껍데기가 차트를 직접 그린다 (네 화면 모두 상주가 된다)', SHELL, 'RED',
+   [[`        <ChartDrawer`, `        <PriceChart symbol={p.symbol} interval="15m"/>\n        <ChartDrawer`]]],
+
+  ['MUT-N18 ★ 차트 서랍을 화면에 안 붙인다 (만들어 놓고 배선 안 함)', SHELL, 'RED',
+   [[`        <ChartDrawer`, `        <UnwiredChartDrawer`]]],
+
+  ['MUT-N19 TradingView iframe을 새로 들인다 (차트 정본이 둘이 된다)', USDM, 'RED',
+   [[`export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {`,
+     `const TV = 'https://s3.tradingview.com/tv.js';\nexport function UsdtFuturesTradingScreen(p: FuturesScreenProps) {`]]],
+
+  // ── ⑥ ★ 차트 서랍의 기본은 접힘 (사용자 규칙 8) ──
+
+  ['MUT-N20 ★ 차트 서랍의 기본을 펴짐으로 바꾼다 (옛 배치가 이름만 바꿔 돌아온다)', DRAWER, 'RED',
+   [[`  const [open, setOpen] = useState(false);`, `  const [open, setOpen] = useState(true);`]]],
+
+  ['MUT-N21 ★ 차트를 여닫는 수단을 없앤다 (막대만 있고 안 열린다)', DRAWER, 'RED',
+   [[`onClick={() => setOpen(v => !v)}`, `onClick={() => {}}`]]],
+
+  ['MUT-N22 ★ 펼친 차트를 덮개가 아니라 본문에 끼운다 (그게 상주 차트다)', DRAWER, 'RED',
+   [[`            position: 'absolute', inset: 0, zIndex: 20,`, `            zIndex: 20,`]]],
+
+  // ── ⑦ ★ 호가·포지션·미체결은 거래 화면에 있어야 한다 (사용자 규칙 3·4·6) ──
+
+  ['MUT-N23 ★ 선물 화면에서 호가를 뺀다 (호가를 보며 주문하는 화면이 아니게 된다)', USDM, 'RED',
+   [[`<OrderBookView symbolId={sym} market="USDM" rows={7} dense`,
+     `<NoBook symbolId={sym} rows={7} dense`]]],
+
+  ['MUT-N24 ★ 선물 화면에서 펀딩 칸을 없앤다 (선물 필수 정보 누락)', USDM, 'RED',
+   [[`      <InfoStat testid={fieldTestId('FUNDING')} label="펀딩"`,
+     `      <InfoStat testid={'legacy-funding'} label="펀딩"`]]],
+
+  ['MUT-N25 ★ 선물 화면에서 청산까지 거리를 없앤다', USDM, 'RED',
+   [[`      <InfoStat testid={fieldTestId('LIQUIDATION_DISTANCE')} label="청산까지"`,
+     `      <InfoStat testid={'legacy-liq-dist'} label="청산까지"`]]],
+
+  ['MUT-N26 ★ 현물 화면에서 보유 Base 칸을 없앤다', SPOT, 'RED',
+   [[`      <InfoStat testid={fieldTestId('BASE_HOLDING')}`,
+     `      <InfoStat testid={'legacy-base'}`]]],
+
+  ['MUT-N27 ★ 주식 화면에서 주문가능금액을 없앤다', STOCK, 'RED',
+   [[`      <InfoStat testid={fieldTestId('ORDERABLE_CASH')} label="주문가능금액"`,
+     `      <InfoStat testid={'legacy-cash'} label="주문가능금액"`]]],
+
+  ['MUT-N28 ★ 아래 탭을 껍데기에 안 넘긴다 (포지션·미체결이 사라진다)', USDM, 'RED',
+   [[`      tabs={tabs}`, `      tabs={[]}`]]],
+
+  ['MUT-N29 미체결을 "0건"으로 채운다 (없는 개념을 비어 있는 것으로 읽게 한다)', USDM, 'RED',
+   [[`        <LockedField testid={fieldTestId('OPEN_ORDERS')} title="미체결"`,
+     `        <div data-testid={fieldTestId('OPEN_ORDERS')}>0건</div>;const _u = (
+        <LockedField testid={'x'} title="미체결"`]]],
+
+  // ── ⑧ ★ 시장 의미가 섞이지 않는다 (사용자 규칙 5·7·10) ──
+
+  ['MUT-N30 ★ 현물 화면에 레버리지를 넣는다 (현물에 1배 레버리지가 있는 것처럼 읽힌다)', SPOT, 'RED',
+   [[`      <InfoStat testid={fieldTestId('QUOTE_AVAILABLE')} label="가용"`,
+     `      <InfoStat testid={fieldTestId('LEVERAGE')} label="배율" value="10x"/>\n      <InfoStat testid={fieldTestId('QUOTE_AVAILABLE')} label="가용"`]]],
+
+  ['MUT-N31 ★ 현물 화면에 청산가를 넣는다', SPOT, 'RED',
+   [[`      <InfoStat testid={fieldTestId('QUOTE_AVAILABLE')} label="가용"`,
+     `      <InfoStat testid={fieldTestId('LIQUIDATION_PRICE')} label="청산가" value="0"/>\n      <InfoStat testid={fieldTestId('QUOTE_AVAILABLE')} label="가용"`]]],
+
+  ['MUT-N32 ★ 주식 화면에 레버리지를 넣는다 (주식에 레버리지가 있는 줄 안다)', STOCK, 'RED',
+   [[`      <InfoStat testid={fieldTestId('HELD_QTY')} label="보유수량"`,
+     `      <InfoStat testid={fieldTestId('LEVERAGE')} label="배율" value="3x"/>\n      <InfoStat testid={fieldTestId('HELD_QTY')} label="보유수량"`]]],
+
+  ['MUT-N33 ★ 주식 화면에 펀딩을 넣는다', STOCK, 'RED',
+   [[`      <InfoStat testid={fieldTestId('HELD_QTY')} label="보유수량"`,
+     `      <InfoStat testid={fieldTestId('FUNDING')} label="펀딩" value="0%"/>\n      <InfoStat testid={fieldTestId('HELD_QTY')} label="보유수량"`]]],
+
+  ['MUT-N34 ★ USDⓈ-M 화면에 계약 수를 넣는다 (COIN-M의 말이 섞인다)', USDM, 'RED',
+   [[`      <InfoStat testid={fieldTestId('MARK_PRICE')} label="마크가"`,
+     `      <InfoStat testid={fieldTestId('CONTRACT_COUNT')} label="계약 수" value="1"/>\n      <InfoStat testid={fieldTestId('MARK_PRICE')} label="마크가"`]]],
+
+  ['MUT-N35 ★ 공용 껍데기가 시장 전용 칸을 든다 (네 화면 의미가 한 파일에서 섞인다)', SHELL, 'RED',
+   [[`export function TradingScreenShell(p: TradingScreenShellProps) {`,
+     `const _leak = () => fieldTestId('LEVERAGE');\nexport function TradingScreenShell(p: TradingScreenShellProps) {`]]],
+
+  ['MUT-N36 ★ 차트 서랍이 시장 전용 칸을 든다', DRAWER, 'RED',
+   [[`export function ChartDrawer({ label, source, unavailableReason }: ChartDrawerProps) {`,
+     `const _leak = () => fieldTestId('FUNDING');\nexport function ChartDrawer({ label, source, unavailableReason }: ChartDrawerProps) {`]]],
+
+  ['MUT-N37 ★ 공용 부품이 능력표 없이 레버리지를 그린다 (현물에 선물 칸이 샌다)', SHEET, 'RED',
+   [[`          {!unsupported(form.caps.leverage) ? (
+            <span data-testid={fieldTestId('LEVERAGE')} style={{ display: 'contents' }}>`,
+     `          {true ? (
+            <span data-testid={fieldTestId('LEVERAGE')} style={{ display: 'contents' }}>`]]],
+
+  ['MUT-N38 ★ 공용 부품이 능력표 없이 청산가를 그린다', SHEET, 'RED',
+   [[`        {!form.spot ? (
+          <span data-testid={fieldTestId('LIQUIDATION_PRICE')} style={{ display: 'contents' }}>`,
+     `        {true ? (
+          <span data-testid={fieldTestId('LIQUIDATION_PRICE')} style={{ display: 'contents' }}>`]]],
+
+  ['MUT-N39 ★ COIN-M이 코인 개수 기준 수량 판정을 물려받는다 (1계약=100USD를 1개로 읽는다)', COINM, 'RED',
+   [[`export function CoinMFuturesTradingScreen(p: CoinMScreenProps) {`,
+     `const _mix = () => useTradeForm({} as any);\nexport function CoinMFuturesTradingScreen(p: CoinMScreenProps) {`]]],
+
+  ['MUT-N40 ★ COIN-M이 계약 크기를 "대개 10 USD"로 추측한다 (BTC에서 10배 틀린다)', COINM, 'RED',
+   [[`  const spec = sym == null ? null : resolveContractSize(sym, p.contractUsdFromExchange ?? null);`,
+     `  const spec = { contractUsd: TYPICAL_ALT_CONTRACT_USD, source: 'known' as const };`]]],
+
+  // ── ⑨ 정본 판정 비우회 ──
+
+  ['MUT-N41 거래 화면이 경로 판정을 직접 한다', ORDER, 'RED',
    [[`  const route = routeFor(ctx);`, `  const route = ctx.direction === 'SELL' ? 'SELL_HOLDING' : null;`]]],
 
-  ['MUT-N15 장부 범위를 손으로 적는다 (챌린지 표기가 한쪽만 바뀐다)', ORDER, 'RED',
+  ['MUT-N42 장부 범위를 손으로 적는다 (챌린지 표기가 한쪽만 바뀐다)', ORDER, 'RED',
    [[`  const scope = scopeForTarget(target);`, `  const scope = 'GAME' as any;`]]],
 
-  // ── ⑦ 칸은 출처가 정한다 ──
+  ['MUT-N43 시장 화면이 주문 라우트를 직접 부른다 (정본 훅을 건너뛴다)', SPOT, 'RED',
+   [[`export function SpotTradingScreen(p: SpotScreenProps) {`,
+     `const POST = '/api/paper/order';\nexport function SpotTradingScreen(p: SpotScreenProps) {`]]],
 
-  ['MUT-N16 상세가 그려도 되는 칸을 정본에 묻지 않는다', DETAIL, 'RED',
+  // ── ⑩ 칸은 출처가 정한다 ──
+
+  ['MUT-N44 상세가 그려도 되는 칸을 정본에 묻지 않는다', DETAIL, 'RED',
    [[`instrumentFieldPlan(`, `legacyFieldPlan(`]]],
 
-  ['MUT-N17 출처 없는 칸을 "0건"으로 채운다', POS, 'RED',
+  ['MUT-N45 출처 없는 칸을 "0건"으로 채운다', POS, 'RED',
    [[`function Locked({ title, reason }`, `function Unused({ title, reason }`]]],
 
-  // ── ⑧ 능력 없는 제품에 버튼을 열지 않는다 ──
+  // ── ⑪ 능력 없는 제품에 버튼을 열지 않는다 ──
 
-  ['MUT-N18 제품 능력표를 안 본다 (안 되는 제품에 주문 버튼이 열린다)', ORDER, 'RED',
-   [[`  const wiring = paperOrderUiWiring(ctx.market);`,
+  ['MUT-N46 제품 능력표를 안 본다 (안 되는 제품에 주문 버튼이 열린다)', ORDER, 'RED',
+   [[`  const wiring = paperOrderUiWiring(\n    activeMarket === 'SPOT' ? 'SPOT' : activeMarket === 'USDM' ? 'USDM' : activeMarket);`,
      `  const wiring = { canOrder: true, reason: null } as any;`]]],
 
-  ['MUT-N19 프로 CTA를 판정과 무관하게 연다', PRO, 'RED',
-   [[`        <Cta form={form} side="LONG" disabled={!form.gate.ready || form.busy}/>`,
-     `        <Cta form={form} side="LONG" disabled={false}/>`]]],
+  ['MUT-N47 ★ COIN-M 실행 버튼을 열어 둔다 (눌러도 아무 일도 안 일어난다)', COINM, 'RED',
+   [[`              disabled={locked} title={p.instrumentReason || wiring.reason}`,
+     `              title={p.instrumentReason || wiring.reason}`]]],
 
-  // ── ⑨ ★ 간편과 프로가 같은 판정을 쓴다 ──
+  ['MUT-N48 ★ 주식 실행 버튼을 열어 둔다', STOCK, 'RED',
+   [[`<button type="button" data-testid="stock-cta" disabled={locked} title={blocked}`,
+     `<button type="button" data-testid="stock-cta" title={blocked}`]]],
 
-  ['MUT-N20 ★ 밀도 분기 뒤에서 판정을 만든다 (밀도마다 엔진이 생긴다)', ORDER, 'RED',
+  // ── ⑫ ★ 간편과 프로가 같은 판정을 쓴다 (사용자 규칙 9) ──
+
+  ['MUT-N49 ★ 밀도 분기 뒤에서 판정을 만든다 (밀도마다 엔진이 생긴다)', ORDER, 'RED',
    [[`  const sell = useSellForm({`,
      `  if (level === 'PRO') { /* 분기를 위로 끌어올린다 */ }\n  const sell = useSellForm({`]]],
 
-  ['MUT-N21 ★ 주문 판정에 밀도를 넣는다 (표현이 판정을 바꾼다)', ORDER, 'RED',
+  ['MUT-N50 ★ 주문 판정에 밀도를 넣는다 (표현이 판정을 바꾼다)', ORDER, 'RED',
    [[`    canOrder: wiring.canOrder,`, `    canOrder: wiring.canOrder && level === 'PRO',`]]],
 
-  ['MUT-N22 ★ 프로 패널이 자기 판정을 만든다', PRO, 'RED',
-   [[`export function ProOrderPanel({`,
-     `const _own = () => submitGate({} as any);\nexport function ProOrderPanel({`]]],
+  ['MUT-N51 ★ 시장 화면이 자기 판정을 만든다', USDM, 'RED',
+   [[`export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {`,
+     `const _own = () => submitGate({} as any);\nexport function UsdtFuturesTradingScreen(p: FuturesScreenProps) {`]]],
 
-  ['MUT-N23 ★ 간편 화면이 자기 장부를 읽는다', BBUY, 'RED',
+  ['MUT-N52 ★ 간편 화면이 자기 장부를 읽는다', BBUY, 'RED',
    [[`export function BeginnerBuyScreen(`,
      `const _led = () => usePaperLedger(null as any, true);\nexport function BeginnerBuyScreen(`]]],
 
-  ['MUT-N24 ★ 프로에만 다른 판정 인스턴스를 넘긴다', ORDER, 'RED',
-   [[`          form={form} sell={sell}`, `          form={{ ...form } as any} sell={sell}`]]],
+  ['MUT-N53 ★ 한 갈래에만 다른 판정 인스턴스를 넘긴다', ORDER, 'RED',
+   [[`            form={form} sell={sell} ledger={ledger} auth={auth}`,
+     `            form={{ ...form } as any} sell={sell} ledger={ledger} auth={auth}`]]],
 
-  ['MUT-N25 ★ 화면이 거래소 격자를 다시 맞춘다 (격자 정본이 둘이 된다)', PRO, 'RED',
-   [[`export function ProOrderPanel({`,
-     `const _q = () => normalizeForVenue({} as any);\nexport function ProOrderPanel({`]]],
+  ['MUT-N54 ★ 시장 화면이 거래소 격자를 다시 맞춘다 (격자 정본이 둘이 된다)', SPOT, 'RED',
+   [[`export function SpotTradingScreen(p: SpotScreenProps) {`,
+     `const _q = () => normalizeForVenue({} as any);\nexport function SpotTradingScreen(p: SpotScreenProps) {`]]],
 
-  // ── ⑩ 프로가 주문할 수단을 잃지 않는다 ──
+  // ── ⑬ 주문할 수단을 잃지 않는다 ──
 
-  ['MUT-N26 프로 패널에서 주문 조작부를 떼어낸다', PRO, 'RED',
-   [[`        <OrderControls`, `        <HiddenControls`]]],
+  ['MUT-N55 현물 화면에서 주문 조작부를 떼어낸다', SPOT, 'RED',
+   [[`        <OrderControls form={p.form}`, `        <HiddenControls form={p.form}`]]],
 
-  // 주석만 바꾸는 것은 결함이 아니다. **정말로 옮긴다** — 처음에 표식만
-  // 건드리는 뮤테이션을 썼다가, 결함을 안 만들어 놓고 "검사기가 못 잡는다"고
-  // 읽을 뻔했다.
-  ['MUT-N27 예상값을 스크롤 칸 안으로 넣는다 (스크롤에 딸려 사라진다)', PRO, 'RED',
-   [[`      <div style={{ flexShrink: 0 }}>
-        <OrderEstimate form={form} scope={scope}/>
-      </div>`, `      {null}`],
-    [`        <OrderControls`, `        <OrderEstimate form={form} scope={scope}/>\n        <OrderControls`]]],
+  ['MUT-N56 선물 화면에서 예상값을 떼어낸다 (얼마 잠기는지 모르고 누른다)', USDM, 'RED',
+   [[`      estimate={<OrderEstimate form={p.form} scope={p.scope}/>}`, `      estimate={null}`]]],
 
-  ['MUT-N28 LONG/SHORT 줄을 다시 붙인다 (슬라이더를 덮는다)', PRO, 'RED',
-   [[`        flexShrink: 0, display: 'flex', gap: 6, padding: '6px 10px',`,
-     `        position: 'sticky', bottom: 0, display: 'flex', gap: 6, padding: '6px 10px',`]]],
+  // 주석만 바꾸는 것은 결함이 아니다. **정말로 옮긴다.**
+  ['MUT-N57 예상값을 스크롤 칸 안으로 넣는다 (스크롤에 딸려 사라진다)', SHELL, 'RED',
+   [[`      {p.estimate ? <div style={{ flexShrink: 0 }}>{p.estimate}</div> : null}`, `      {null}`],
+    [`        }}>{p.orderForm}</div>`, `        }}>{p.orderForm}{p.estimate}</div>`]]],
 
-  // ── ⑪ 포지션은 주문이 간 장부에서 ──
+  // ★ 실기 프로브가 잡은 결함을 뮤테이션으로 고정한다.
+  //   360×660에서 실행 버튼이 638~697px에 놓였다 — 화면 밖 37px.
+  //   아래 블록 높이를 안 빼면 그 상태로 돌아간다.
+  ['MUT-N58b 아래 블록(예상값+버튼) 높이를 안 뺀다 (실행 버튼이 화면 밖으로 밀린다)', SHELL, 'RED',
+   [[`  const bodyH = Math.max(140, boxH - topH - botH - TAB_PEEK);`,
+     `  const bodyH = Math.max(140, boxH - topH - TAB_PEEK);`]]],
 
-  ['MUT-N29 포지션 줄이 스스로 장부를 읽는다 (계좌가 갈린다)', ROW, 'RED',
+  ['MUT-N58 실행 버튼 줄을 다시 붙인다 (슬라이더를 덮는다)', SHELL, 'RED',
+   [[`        flexShrink: 0, padding: '6px 10px',`,
+     `        position: 'sticky', bottom: 0, padding: '6px 10px',`]]],
+
+  // ★ import 한 줄을 지우는 뮤테이션은 **결함을 안 만든다** — 본문은
+  //   그대로라 이름 검사가 통과하고, 그러면 "검사기가 못 잡는다"가 아니라
+  //   "깨지 않았다"가 된다. 실제 방어점(잰 값에서 나오는 높이)을 끈다.
+  ['MUT-N59 첫 화면 높이를 상수로 박는다 (경고 한 줄이 늘면 버튼이 밀린다)', SHELL, 'RED',
+   [[`  const bodyH = Math.max(140, boxH - topH - botH - TAB_PEEK);`,
+     `  const bodyH = 420;`]]],
+
+  // ── ⑭ 포지션은 주문이 간 장부에서 ──
+
+  ['MUT-N60 포지션 줄이 스스로 장부를 읽는다 (계좌가 갈린다)', ROW, 'RED',
    [[`export function PositionRow({ positions, auth, onClosed }: PositionRowProps) {`,
      `export function PositionRow({ positions, auth, onClosed }: PositionRowProps) {\n  usePaperTarget();`]]],
 
-  ['MUT-N30 화면이 주문 장부 대신 빈 목록을 넘긴다', POS, 'RED',
-   [[`  const positions = auth ? ledger.openPositions : [];`, `  const positions: any[] = [];`]]],
+  ['MUT-N61 거래 화면이 주문 장부 대신 빈 목록을 넘긴다', USDM, 'RED',
+   [[`          <PositionRow positions={positions} auth={p.auth} onClosed={p.ledger.reload}/>`,
+     `          <PositionRow positions={[]} auth={p.auth} onClosed={p.ledger.reload}/>`]]],
 
-  ['MUT-N31 청산 뒤에 장부를 다시 읽지 않는다', POS, 'RED',
+  ['MUT-N62 청산 뒤에 장부를 다시 읽지 않는다', USDM, 'RED',
+   [[`onClosed={p.ledger.reload}`, `onClosed={() => {}}`]]],
+
+  ['MUT-N63 거래 탭이 청산 뒤에 장부를 다시 읽지 않는다', POS, 'RED',
    [[`onClosed={ledger.reload}`, `onClosed={() => {}}`]]],
 
-  // ── ⑫ 원스크린 자체가 되살아나지 않는다 ──
+  // ── ⑮ 계약 정본을 못 읽으면 통과시키지 않는다 ──
+  //
+  // 검사기가 계약을 못 읽고도 초록이면, 목록을 늘려도 검사가 안 는다.
 
-  ['MUT-N32 한 화면에 차트·주문폼·호가를 다시 모은다', POS, 'RED',
-   [[`      <header style={{ display: 'grid', gap: 3 }}>`,
-     `      <PriceChart/><OrderControls/><OrderBookView/>\n      <header style={{ display: 'grid', gap: 3 }}>`]]],
+  ['MUT-N64 ★ 계약 정본을 깨뜨린다 (검사기가 조용히 통과하면 안 된다)',
+   'src/lib/trading/marketScreenContract.ts', 'RED',
+   [[`export function screenContract(m: MarketType): MarketScreenContract {`,
+     `syntax error here\nexport function screenContract(m: MarketType): MarketScreenContract {`]]],
 
   // ── 대조군 (GREEN이어야 한다) ──
-  ['OK-N1 주문 화면에 주석 한 줄 추가', ORDER, 'GREEN',
+  ['OK-N1 거래 화면 host에 주석 한 줄 추가', ORDER, 'GREEN',
    [[`export interface PaperOrderScreenProps {`, `// 대조군\nexport interface PaperOrderScreenProps {`]]],
-  ['OK-N2 프로 패널에 주석 한 줄 추가', PRO, 'GREEN',
-   [[`export interface ProOrderPanelProps {`, `// 대조군\nexport interface ProOrderPanelProps {`]]],
+  ['OK-N2 공용 껍데기에 주석 한 줄 추가', SHELL, 'GREEN',
+   [[`export interface ShellTab {`, `// 대조군\nexport interface ShellTab {`]]],
   ['OK-N3 상세에 주석 한 줄 추가', DETAIL, 'GREEN',
    [[`export interface OrderIntent {`, `// 대조군\nexport interface OrderIntent {`]]],
-  ['OK-N4 포지션 화면에 주석 한 줄 추가', POS, 'GREEN',
-   [[`export interface PositionsOrdersScreenProps {`,
-     `// 대조군\nexport interface PositionsOrdersScreenProps {`]]],
+  ['OK-N4 차트 서랍에 주석 한 줄 추가', DRAWER, 'GREEN',
+   [[`export interface ChartDrawerProps {`, `// 대조군\nexport interface ChartDrawerProps {`]]],
+  // ★ 사용자 규칙 3·4 — **호가와 포지션은 거래 화면에 있어도 된다.**
+  //   v2 계약에서는 이것이 실패였다. 지금은 통과여야 하고, 그 사실을
+  //   대조군으로 못 박는다 — 옛 규칙이 실수로 되살아나면 여기서 잡힌다.
+  ['OK-N5 ★ 현물 화면에 호가를 한 벌 더 붙인다 (허용이어야 한다)', SPOT, 'GREEN',
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>\n            <OrderBookView symbolId={sym} market="SPOT" rows={3} dense/>`]]],
+  ['OK-N6 ★ 선물 화면 포지션 칸에 설명 한 줄 추가 (허용이어야 한다)', USDM, 'GREEN',
+   [[`          {positions.length === 0 ? (`,
+     `          <span>내 포지션</span>\n          {positions.length === 0 ? (`]]],
+
+  // ══ ⑰~⑳ 시장 탭 계약 (사용자 확정 10규칙) ══
+
+  ['MUT-T1 ★ 시장 탭에서 COIN-M을 뺀다 (그 시장이 없는 것으로 읽힌다)', TABS, 'RED',
+   [[`  { id: 'COINM', label: 'COIN-M' },\n`, ``]]],
+
+  ['MUT-T2 ★ 시장 탭 순서를 바꾼다 (정본 순서가 아니다)', TABS, 'RED',
+   [[`  { id: 'SPOT',  label: '현물' },\n  { id: 'USDM',  label: 'USDT-M' },`,
+     `  { id: 'USDM',  label: 'USDT-M' },\n  { id: 'SPOT',  label: '현물' },`]]],
+
+  ['MUT-T3 ★ 탭 줄이 목록 대신 손으로 적는다 (탭과 화면이 갈린다)', TABSUI, 'RED',
+   [[`      {MARKET_TABS.map(t => {`, `      {[{ id: 'SPOT', label: '현물' }].map(t => {`]]],
+
+  ['MUT-T4 ★ 탭을 두 줄로 접는다 (접으면 그 시장이 없는 것으로 읽힌다)', TABSUI, 'RED',
+   [[`        overflowX: 'auto', flexWrap: 'nowrap',`,
+     `        flexWrap: 'wrap',`]]],
+
+  ['MUT-T5 ★ 시장을 드롭다운에 숨긴다', TABSUI, 'RED',
+   [[`export function MarketTabs({ market, onMarket, blockedReason }: MarketTabsProps) {`,
+     `const Hidden = () => <select/>;\nexport function MarketTabs({ market, onMarket, blockedReason }: MarketTabsProps) {`]]],
+
+  ['MUT-T6 ★ 탭→화면 경로를 없앤다 (탭은 있는데 도달 불가)', ROUTE, 'RED',
+   [[`export function tradingScreenForTab(`, `function unusedScreenForTab(`]]],
+
+  ['MUT-T7 ★ 껍데기가 시장 탭을 안 붙인다 (만들어 놓고 배선 안 함)', SHELL, 'RED',
+   [[`        <MarketTabs market={p.market} onMarket={p.onMarket}\n          blockedReason={p.switchBlockedReason ?? null}/>`, ``]]],
+
+  ['MUT-T8 ★ 탭 선택을 위로 올리지 않는다 (눌러도 화면이 안 바뀐다)', SHELL, 'RED',
+   [[`<MarketTabs market={p.market} onMarket={p.onMarket}\n          blockedReason={p.switchBlockedReason ?? null}/>`,
+     `<MarketTabs market={p.market} onMarket={() => {}}\n          blockedReason={p.switchBlockedReason ?? null}/>`]]],
+
+  ['MUT-T9 ★ host가 주식 화면을 렌더하지 않는다 (탭만 있고 화면이 없다)', ORDER, 'RED',
+   [[`          <StockTradingScreen {...common}`, `          <MissingStockScreen {...common}`]]],
+
+  ['MUT-T10 ★ 시장 탭 상태를 밀도 분기 뒤로 옮긴다 (밀도마다 다른 탭)', ORDER, 'RED',
+   [[`  const [marketTab, setMarketTabRaw] = React.useState<TradingMarketId>(entryTab ?? 'SPOT');`,
+     `  const marketTab = 'SPOT' as TradingMarketId; const setMarketTabRaw = (_m: TradingMarketId) => {};`]]],
+
+  ['MUT-T11 ★ 모르는 시장에 현물을 기본으로 준다 (선물 주문이 현물로 나간다)', TABS, 'RED',
+   [[`  const t = TO_MARKET_TYPE[id];\n  if (!t) throw new Error(`,
+     `  const t = TO_MARKET_TYPE[id];\n  if (!t) return 'SPOT';\n  if (false) throw new Error(`]]],
+
+  ['MUT-T12 ★ COIN-M을 시장 정체성 단계에서 버린다 (탭 진입 자체가 막힌다)', INSTR, 'RED',
+   [[`  const label = marketTabLabel(market);`,
+     `  if (market === 'COINM') return null as any;\n  const label = marketTabLabel(market);`]]],
+
+  ['MUT-T13 ★ 시장 전환 때 COIN-M 심볼을 조립한다 (BTCUSDT → BTCUSD_PERP)', INSTR, 'RED',
+   [[`  // ── ③ 없다. 사유는 시장마다 다르다 ──`,
+     `  if (market === 'COINM' && entry) {\n`
+     + `    return { market, instrument: { market, symbol: 'BTCUSD_PERP', baseAsset: null,\n`
+     + `      quoteAsset: null, source: 'ENTRY' as const, catalogSource: null, asOf: null },\n`
+     + `      tradable: true, reason: null };\n  }\n`
+     + `  // ── ③ 없다. 사유는 시장마다 다르다 ──`]]],
+
+  ['MUT-T14 ★ 다른 시장 종목을 이 시장 것으로 옮겨 적는다 (이름이 같다고 같은 상품 취급)', INSTR, 'RED',
+   [[`  if (entry && entry.market === market && entry.symbol) {`,
+     `  if (entry && entry.symbol) {`]]],
+
+  ['MUT-T15 ★ 종목이 없는데 현물 실행 버튼을 연다', SPOT, 'RED',
+   [[`            disabled={locked || !p.form.gate.ready || p.form.busy}`,
+     `            disabled={!p.form.gate.ready || p.form.busy}`]]],
+
+  ['MUT-T16 ★ "종목 없음"을 잠금으로 바꾸지 않는다', USDM, 'RED',
+   [[`  const locked = sym == null;`, `  const locked = false;`]]],
+
+  ['MUT-T17 ★ COIN-M 화면이 USDⓈ-M 호가를 빌려 온다 (다른 계약의 호가다)', COINM, 'RED',
+   [[`          <div data-testid="book-no-instrument" style={{`,
+     `          <OrderBookView symbolId={sym ?? ''} market="USDM" rows={7} dense/>\n`
+     + `          <div data-testid="book-no-instrument" style={{`]]],
+
+  ['MUT-T18 ★ 현물 화면이 선물 호가를 그린다 (현물 가격 옆에 선물 호가)', SPOT, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`]]],
+
+  ['MUT-T19 ★ 껍데기가 "종목 없음" 사유를 안 그린다 (빈 칸이 0으로 읽힌다)', SHELL, 'RED',
+   [[`            <div data-testid="instrument-unavailable" style={{`,
+     `            <div data-testid="legacy-blank" style={{`]]],
+
+  ['MUT-T20 ★ 화면이 종목을 props로 직접 들고 다닌다 (빈 심볼로 조회가 나간다)', STOCK, 'RED',
+   [[`  const sym = p.instrument?.symbol ?? null;`,
+     `  const sym = (p as any).symbol ?? null;`]]],
+
+  ['MUT-T21 ★ COIN-M이 봉 출처 없음을 감춘다 (빈 차트가 "거래 없는 종목"으로 읽힌다)', COINM, 'RED',
+   [[`      chartSource={null}`, `      chartSource={{ symbol: sym ?? '', market: 'USDM' }}`]]],
+
+  ['MUT-T22 ★ 선물 버튼 글자를 진입 시장 훅에서 가져온다 (USDⓈ-M에 BUY/SELL이 찍힌다)', USDM, 'RED',
+   [[`  const label = side === 'LONG' ? cap.buyLabel('') : cap.sellLabel('');`,
+     `  const label = form.sideLabel(side);`]]],
+
+
+  // ══ ㉑~㉕ Phase 2A — 활성 정체성 · 상장 목록 · 전환 차단 ══
+
+  ['MUT-A1 ★ 시세를 최초 문맥에 다시 묶는다 (화면은 ETH, 시세는 BTC)', ORDER, 'RED',
+   [[`const stream = useBinanceStream(activeSymbol, !!activeSymbol, paperMarket);`,
+     `const stream = useBinanceStream(ctx.symbol, true, ctx.market);`]]],
+
+  ['MUT-A2 ★ 매수 판정을 최초 문맥에 다시 묶는다 (화면은 ETH, 주문은 BTC)', ORDER, 'RED',
+   [[`    symbol: activeSymbol,\n    market: paperMarket,`,
+     `    symbol: ctx.symbol,\n    market: ctx.market,`]]],
+
+  ['MUT-A3 ★ 능력표를 최초 문맥에 다시 묶는다', ORDER, 'RED',
+   [[`  const wiring = paperOrderUiWiring(\n    activeMarket === 'SPOT' ? 'SPOT' : activeMarket === 'USDM' ? 'USDM' : activeMarket);`,
+     `  const wiring = paperOrderUiWiring(ctx.market);`]]],
+
+  ['MUT-A4 ★ 폼이 자기 정체성을 숨긴다 (화면과 같은지 볼 수 없다)', FORMHK, 'RED',
+   [[`    symbol: i.symbol, market: i.market,\n    side, setSide,`, `    side, setSide,`]]],
+
+  ['MUT-A5 ★ 주문 본문이 폼과 다른 종목을 싣는다', FORMHK, 'RED',
+   [[`        symbol: i.symbol, side, market: i.market,`,
+     `        symbol: String(i.symbol || '').replace(/USDT$/, 'USDC'), side, market: i.market,`]]],
+
+  ['MUT-A6 ★ 시장이 어긋난 종목도 활성으로 만든다', IDENT, 'RED',
+   [[`  if (instrument.market !== market) return null;`, `  if (false) return null;`]]],
+
+  ['MUT-A7 ★ 다른 시장 종목을 그 시장 칸에 저장한다 (탭 옮기면 심볼이 따라온다)', INSTR, 'RED',
+   [[`  if (next && next.market !== market) {`, `  if (false) {`]]],
+
+  ['MUT-A8 ★ 저장된 종목의 시장을 확인하지 않고 쓴다', INSTR, 'RED',
+   [[`    if (picked.market !== market) {`, `    if (false) {`]]],
+
+  ['MUT-A9 ★ 목록 파서가 심볼을 만들어낸다', CATALOG, 'RED',
+   [[`    const symbol = str(r?.symbol);\n    const baseAsset = str(r?.baseAsset);\n    const quoteAsset = str(r?.quoteAsset);\n    if (!symbol || !baseAsset || !quoteAsset) continue;\n    if (quoteAsset !== CATALOG_QUOTE) continue;\n    out.push({\n      market: 'USDM', symbol, baseAsset, quoteAsset,`,
+     `    const symbol = str(r?.baseAsset) + 'USDT';\n    const baseAsset = str(r?.baseAsset);\n    const quoteAsset = 'USDT';\n    if (!symbol || !baseAsset) continue;\n    out.push({\n      market: 'USDM', symbol, baseAsset, quoteAsset,`]]],
+
+  ['MUT-A10 ★ 분기물도 무기한으로 통과시킨다 (만기가 있는 계약이다)', CATALOG, 'RED',
+   [[`    if (str(r?.contractType) !== 'PERPETUAL') continue;`, ``]]],
+
+  ['MUT-A11 ★ 거래 정지된 종목도 목록에 넣는다', CATALOG, 'RED',
+   [[`    if (str(r?.status) !== 'TRADING') continue;\n    if (str(r?.contractType) !== 'PERPETUAL') continue;`,
+     `    if (str(r?.contractType) !== 'PERPETUAL') continue;`]]],
+
+  ['MUT-A12 ★ COIN-M 목록 권위를 연다 (출처가 없는데)', CATALOG, 'RED',
+   [[`export const CATALOG_MARKETS: TradingMarketId[] = ['SPOT', 'USDM'];`,
+     `export const CATALOG_MARKETS: TradingMarketId[] = ['SPOT', 'USDM', 'COINM'];`]]],
+
+  ['MUT-A13 ★ 주식 목록을 mock 근거로 연다', CATALOG, 'RED',
+   [[`  if (market === 'SPOT' || market === 'USDM') return { open: true, reason: null };`,
+     `  if (market !== 'COINM') return { open: true, reason: null };`]]],
+
+  ['MUT-A14 ★ 서버가 주식 조회 주소를 갖는다', CATAPI, 'RED',
+   [[`  USDM: 'https://fapi.binance.com/fapi/v1/exchangeInfo',`,
+     `  USDM: 'https://fapi.binance.com/fapi/v1/exchangeInfo',\n  STOCK: 'https://example.invalid/stocks',`]]],
+
+  ['MUT-A15 ★ 조회 실패를 빈 목록으로 성공 처리한다 ("종목이 없다"로 읽힌다)', CATAPI, 'RED',
+   [[`        ok: false, error: 'empty_catalog', market, asOf,`,
+     `        ok: true, error: 'ignored', market, asOf, instruments: [],`]]],
+
+  ['MUT-A16 ★ 고르는 화면이 타이핑마다 거래소를 부른다', PICKER, 'RED',
+   [[`  const hits = p.catalog.state === 'READY' ? searchCatalog(p.catalog.rows, q) : [];`,
+     `  const hits = p.catalog.state === 'READY' ? searchCatalog(p.catalog.rows, q) : [];\n  void fetch('/api/market/instruments?market=' + p.market);`]]],
+
+  ['MUT-A17 ★ 못 읽음을 "검색 결과 없음"과 같은 문장으로 적는다', PICKER, 'RED',
+   [[`          <div data-testid="catalog-unavailable"`, `          <div data-testid="catalog-no-match-dup"`]]],
+
+  ['MUT-A18 ★ 주문 진행 중에도 시장을 바꿀 수 있게 둔다', ORDER, 'RED',
+   [[`  const setMarketTab = React.useCallback((m: TradingMarketId) => {\n    if (orderInFlight) return;`,
+     `  const setMarketTab = React.useCallback((m: TradingMarketId) => {`]]],
+
+  ['MUT-A19 ★ 주문 진행 중에도 종목을 바꿀 수 있게 둔다', ORDER, 'RED',
+   [[`  const pickInstrument = React.useCallback((row: any) => {\n    if (orderInFlight) return;`,
+     `  const pickInstrument = React.useCallback((row: any) => {`]]],
+
+  ['MUT-A20 ★ 탭 줄이 차단 사유를 무시하고 계속 눌린다', TABSUI, 'RED',
+   [[`            disabled={blocked && !on}`, ``]]],
+
+  ['MUT-A21 ★ 정체성이 바뀌어도 주문 입력을 물려준다 (현물 50%가 선물로 따라간다)', FORMHK, 'RED',
+   [[`    const r = identityResetState(i.market as any);`,
+     `    if (true) return;\n    const r = identityResetState(i.market as any);`]]],
+
+  ['MUT-A22 ★ 정체성 변경을 감지하지 않는다', FORMHK, 'RED',
+   [[`    if (lastIdKey.current === idKey) return;`, `    if (true) return;`]]],
+
+  ['MUT-A23 ★ 시장가 전용인데 호가 선택을 주문 가격에 연결한다', SPOT, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense onPickPrice={setLimitPrice}/>`]]],
+
+  ['MUT-A24 ★ 지정가 입력칸을 만든다 (실제로는 시장가로 나간다)', USDM, 'RED',
+   [[`      <div data-testid={fieldTestId('OPEN_CLOSE')}`,
+     `      <input data-testid="limitPrice" placeholder="지정가"/>\n      <div data-testid={fieldTestId('OPEN_CLOSE')}`]]],
+
+  ['OK-A1 목록 정본에 주석 한 줄 추가', CATALOG, 'GREEN',
+   [[`export interface CatalogInstrument {`, `// 대조군\nexport interface CatalogInstrument {`]]],
+  ['OK-A2 정체성 정본에 주석 한 줄 추가', IDENT, 'GREEN',
+   [[`export interface TradeIdentity {`, `// 대조군\nexport interface TradeIdentity {`]]],
+
+
+  // ══ ㉖~㉗ Phase 2B — 수량/총액 · MAX 수수료 ══
+
+  ['MUT-B1 ★ 직접 입력을 조용히 100%로 자른다 (적은 것과 나가는 것이 달라진다)', SIZING, 'RED',
+   [[`  if (pct > 100) {
+    return bad('OVER_BUDGET',
+      \`가용 잔고로는 이 총액을 주문할 수 없습니다 (필요 \${pct.toFixed(1)}%)\`, pct);
+  }
+  return { code: 'OK', percent: pct, rawPercent: pct, reason: null };`,
+     `  return { code: 'OK', percent: Math.min(100, pct), rawPercent: pct, reason: null };`]]],
+
+  ['MUT-B2 ★ 수량 초과도 조용히 자른다', SIZING, 'RED',
+   [[`  if (pct > 100) {
+    return bad('OVER_BUDGET',
+      \`가용 잔고로는 이 수량을 주문할 수 없습니다 (필요 \${pct.toFixed(1)}%)\`, pct);
+  }
+  return { code: 'OK', percent: pct, rawPercent: pct, reason: null };`,
+     `  return { code: 'OK', percent: Math.min(100, pct), rawPercent: pct, reason: null };`]]],
+
+  ['MUT-B3 ★ 화면이 초과 입력을 그대로 반영한다', SIZEUI, 'RED',
+   [[`    if (r.code === 'OK' && r.percent != null) p.onPercent(r.percent);`,
+     `    if (r.rawPercent != null) p.onPercent(Math.min(100, r.rawPercent));`]]],
+
+  ['MUT-B4 ★ 화면이 초과 사유를 감춘다', SIZEUI, 'RED',
+   [[`        <div data-testid="size-input-reason"`, `        <div data-testid="hidden-reason"`]]],
+
+  ['MUT-B5 ★ 입력 부품이 수량을 스스로 계산한다 (모드마다 다른 주문)', SIZEUI, 'RED',
+   [[`  const quick = (pct: number) => {`,
+     `  const ownQty = (n: number) => (n * (p.price || 0)) / p.leverage;\n  const quick = (pct: number) => {`]]],
+
+  ['MUT-B6 ★ 두 번째 출구를 만든다 (비율 말고 수량으로도 나간다)', SIZEUI, 'RED',
+   [[`export interface SpotSizeInputProps {`,
+     `export interface SpotSizeInputPropsExtra { onQuantity: (q: number) => void }\nexport interface SpotSizeInputProps {`]]],
+
+  ['MUT-B7 ★ MAX가 수수료를 안 센다 (100%가 되어 주문이 막힌다)', SIZING, 'RED',
+   [[`  const denom = 1 + lev * fee;`, `  const denom = 1;`]]],
+
+  ['MUT-B8 ★ MAX가 임의 여유분을 쓴다', SIZING, 'RED',
+   [[`  const pct = 100 / denom;`, `  const pct = 100 * 0.999;`]]],
+
+  ['MUT-B9 ★ 화면이 수수료율을 직접 적는다 (정본과 어긋나는 날 막힌다)', SIZEUI, 'RED',
+   [[`  const feeRate = paperFeeRate(null);`, `  const feeRate = 0.0004;`]]],
+
+  ['MUT-B10 ★ 계획이 수수료 기본값을 다시 적는다', PLAN, 'RED',
+   [[`  const feeRate = paperFeeRate(i.feeRatePct);`,
+     `  const feeRate = (Number.isFinite(Number(i.feeRatePct)) ? Number(i.feeRatePct) : 0.05) / 100;`]]],
+
+  ['MUT-B11 ★ 체결이 계획과 다른 수수료를 쓴다', PEXEC, 'RED',
+   [[`  const feeRate = paperFeeRate(opts.feeRatePct);   // 편도 수수료 — 정본은 paperPlan`,
+     `  const feeRate = (opts.feeRatePct ?? 0.04) / 100;`]]],
+
+  ['MUT-B12 ★ 수수료를 안 준 것을 0%로 읽는다 (수수료가 사라진다)', PLAN, 'RED',
+   [[`  if (feeRatePct == null) return PAPER_FEE_RATE_PCT / 100;`, ``]]],
+
+  ['OK-B1 사이징 정본에 주석 한 줄 추가', SIZING, 'GREEN',
+   [[`export interface MaxAllocation {`, `// 대조군\nexport interface MaxAllocation {`]]],
+  ['OK-B2 입력 부품에 주석 한 줄 추가', SIZEUI, 'GREEN',
+   [[`export type SizeInputMode`, `// 대조군\nexport type SizeInputMode`]]],
+
+  ['OK-T1 시장 탭 정본에 주석 한 줄 추가', TABS, 'GREEN',
+   [[`export interface MarketTab {`, `// 대조군\nexport interface MarketTab {`]]],
+  ['OK-T2 종목 가용성 정본에 주석 한 줄 추가', INSTR, 'GREEN',
+   [[`export interface MarketInstrument {`, `// 대조군\nexport interface MarketInstrument {`]]],
+  ['OK-T3 탭 줄에 주석 한 줄 추가', TABSUI, 'GREEN',
+   [[`export interface MarketTabsProps {`, `// 대조군\nexport interface MarketTabsProps {`]]],
 ];
+
 
 const selected = ONLY.length ? CASES.filter(c => ONLY.some(o => c[0].includes(o))) : CASES;
 console.log(`게이트: 분리 화면 계약 검사기\n총 ${selected.length}건\n`);

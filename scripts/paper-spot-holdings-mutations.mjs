@@ -45,7 +45,7 @@ const CAPA  = 'src/lib/trading/capability.ts';
 const ULEV  = 'src/lib/ui/useUiLevel.ts';
 // 프로 매도 패널의 집은 Phase UI-IA에서 원스크린 거래 화면 → 전용 주문
 // 화면의 프로 갈래로 옮겨졌다.
-const WSPC  = 'src/components/trading/ProOrderPanel.tsx';
+const WSPC  = 'src/components/trading/markets/SpotTradingScreen.tsx';
 
 const ONLY = process.argv.slice(2).filter(a => !a.startsWith('-'));
 
@@ -311,12 +311,12 @@ const CASES = [
   // ══════ Phase 3 — 표현은 둘, 권위는 하나 ══════
 
   ['MUT-44 매수 훅에 화면 밀도를 넣는다 (돈 계산이 설정에 의존)', HOST, 'RED',
-   [['  const form = useTradeForm({\n    symbol: ctx.symbol,',
-     '  const form = useTradeForm({\n    uiLevel: level,\n    symbol: ctx.symbol,']]],
+   [['  const form = useTradeForm({\n    // \u2605 \ud65c\uc131 \uc815\uccb4\uc131. \ud654\uba74 \ud5e4\ub354\uc640 **\uac19\uc740 \uac12**\uc774\uc5b4\uc57c \ud55c\ub2e4.\n    symbol: activeSymbol,',
+     '  const form = useTradeForm({\n    uiLevel: level,\n    symbol: activeSymbol,']]],
 
   ['MUT-45 매도 훅에 화면 밀도를 넣는다', HOST, 'RED',
-   [['  const sell = useSellForm({\n    symbol: ctx.symbol,',
-     '  const sell = useSellForm({\n    uiLevel: level,\n    symbol: ctx.symbol,']]],
+   [['  const sell = useSellForm({\n    symbol: activeSymbol,',
+     '  const sell = useSellForm({\n    uiLevel: level,\n    symbol: activeSymbol,']]],
 
   ['MUT-46 초보 화면이 자기 주문을 보낸다 (주문 경로가 둘)', BBUY, 'RED',
    [['  const money = (v: number | null | undefined) =>',
@@ -329,7 +329,7 @@ const CASES = [
      '  const mine = useSellForm({ symbol, market: \'SPOT\', target: null as any });\n  const held = mine.holding;']]],
 
   ['MUT-48 프로 매도 패널이 주문 화면에서 떨어진다 (매도가 도달 불가)', WSPC, 'RED',
-   [['            <ProSellPanel symbol={symbol} scope={scope} sell={sell}/>', '            ']]],
+   [['<ProSellPanel symbol={sym ?? ""} scope={p.scope} sell={sell}/>', '']]],
 
   ['MUT-48b 세 번째 매도 host를 만든다 (같은 매도가 세 모양)', BSELL, 'RED',
    [["import type { SellForm } from '@/lib/trading/useSellForm';",

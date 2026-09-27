@@ -26,6 +26,7 @@
 import React from 'react';
 import { C, FS, NUM } from '@/components/terminal/theme';
 import { SizingSlider } from './SizingSlider';
+import { fieldTestId } from '@/lib/trading/marketScreenContract';
 import { PAPER_MAX_LEVERAGE, type MarginMode } from '@/lib/engine/paperPlan';
 import { STOP_PCTS } from '@/lib/trading/stopPresets';
 import { unsupported } from '@/lib/trading/capability';
@@ -59,7 +60,12 @@ export function OrderControls({
           flexShrink: 0, fontSize: FS.nano, color: C.faint, fontWeight: 700,
           letterSpacing: '0.02em', lineHeight: 1.15,
         }}>시장가<br/>MARKET</span>
+          {/* ★ 시장 전용 칸이다. **능력표가 가린다** — 현물에서는 렌더
+              자체가 없다(`marketScreenContract`의 SPOT `never` 목록).
+              바깥 표식(`mkt-*`)은 계약 정본이 정한다. 손으로 적으면
+              검사기가 찾는 이름과 갈린다. */}
           {!unsupported(form.caps.marginMode) ? (
+            <span data-testid={fieldTestId('MARGIN_MODE')} style={{ display: 'contents' }}>
             <select
               value={form.marginMode}
               onChange={e => form.setMarginMode(e.target.value as MarginMode)}
@@ -69,8 +75,10 @@ export function OrderControls({
               <option value="ISOLATED">격리</option>
               <option value="CROSSED">교차</option>
             </select>
+            </span>
           ) : null}
           {!unsupported(form.caps.leverage) ? (
+            <span data-testid={fieldTestId('LEVERAGE')} style={{ display: 'contents' }}>
             <select
               value={form.leverage}
               onChange={e => form.setLeverage(Number(e.target.value))}
@@ -80,6 +88,7 @@ export function OrderControls({
             >
               {LEVERAGES.map(l => <option key={l} value={l}>{l}x</option>)}
             </select>
+            </span>
           ) : null}
       </div>
 
@@ -98,7 +107,8 @@ export function OrderControls({
           **선물은 손절이 필수다**(`buildPaperPlan`) — 그래서 이 줄이 숨으면
           주문 자체가 불가능해진다. 실기에서 그렇게 막혔다. */}
       {!unsupported(form.caps.stopLoss) ? (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+        <div data-testid={fieldTestId('TP_SL')}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
           {/* 한 덩어리로 읽혀야 한다. 실기에서 `손절` / `거리`가 두 줄로
               갈라져 서로 다른 칸 이름처럼 보였다 — 좁아서 접힌 게 아니라
               내가 세로 20px을 아끼려고 `<br/>`을 직접 넣어 둔 것이었다.
@@ -213,10 +223,14 @@ export function OrderEstimate({ form, scope }: { form: TradeForm; scope: MoneySc
           testid="est-qty"/>
         <Est label="증거금" value={plan.ok ? money(plan.requiredMargin) : '—'} testid="est-margin"/>
         <Est label="수수료" value={plan.ok ? money(plan.entryFee) : '—'} testid="est-fee"/>
+        {/* 청산가는 **선물에만 있는 개념**이다. 현물에서 0으로 적으면
+            "0원에 청산"으로 읽힌다 — 칸 자체를 그리지 않는다. */}
         {!form.spot ? (
-          <Est label="청산가"
-            value={plan.liquidationPrice == null ? '—' : plan.liquidationPrice.toFixed(2)}
-            testid="est-liq"/>
+          <span data-testid={fieldTestId('LIQUIDATION_PRICE')} style={{ display: 'contents' }}>
+            <Est label="청산가"
+              value={plan.liquidationPrice == null ? '—' : plan.liquidationPrice.toFixed(2)}
+              testid="est-liq"/>
+          </span>
         ) : null}
       </div>
 
