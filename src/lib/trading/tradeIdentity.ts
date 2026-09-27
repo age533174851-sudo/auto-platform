@@ -113,14 +113,40 @@ export function identityResetState(market: TradingMarketId): IdentityResetState 
 }
 
 /**
- * 지금 주문이 **날아가는 중인가.**
+ * 시장·종목 전환을 막는 이유. **상태마다 다른 사유다.**
  *
- * 날아가는 중에 시장이나 종목을 바꾸면, BTC 주문의 응답이 ETH 화면에
- * 도착한다. 성공 메시지가 엉뚱한 종목 위에 뜨고, 사용자는 그 종목이
- * 체결된 줄 안다.
+ * ★ bool 하나로는 부족하다.
+ *
+ *   날아가는 중에 시장이나 종목을 바꾸면, BTC 주문의 응답이 ETH 화면에
+ *   도착한다. 성공 메시지가 엉뚱한 종목 위에 뜨고, 사용자는 그 종목이
+ *   체결된 줄 안다.
+ *
+ *   **주문 확인 시트가 열려 있을 때도 같은 문제가 생긴다.** 시트에는
+ *   ETHUSDT가 적혀 있는데 뒤에서 종목을 BTCUSDT로 바꾸면, 읽은 주문과
+ *   보내는 주문이 달라진다. 그래서 이것도 막는다.
+ *
+ *   다만 **사유를 돌려쓰지 않는다.** 확인 중인데 "보내는 중입니다"라고
+ *   적으면 사용자는 이미 주문이 나간 줄 안다 — 그것이 이 저장소가 반복해서
+ *   고쳐 온 종류의 거짓말이다.
  */
-export function switchBlockedReason(inFlight: boolean): string | null {
-  return inFlight
-    ? '주문을 보내는 중입니다 — 결과가 올 때까지 시장·종목을 바꿀 수 없습니다'
-    : null;
+export type SwitchLockState = 'NONE' | 'ORDER_REVIEW' | 'ORDER_IN_FLIGHT';
+
+/**
+ * 어느 잠금인가. **보내는 중이 확인 중보다 강하다** — 둘 다면 보내는
+ * 중이라고 적는다(그때는 시트도 닫을 수 없다).
+ */
+export function switchLockState(i: { inFlight: boolean; reviewing: boolean }): SwitchLockState {
+  if (i.inFlight) return 'ORDER_IN_FLIGHT';
+  if (i.reviewing) return 'ORDER_REVIEW';
+  return 'NONE';
+}
+
+export function switchBlockedReason(s: SwitchLockState): string | null {
+  if (s === 'ORDER_IN_FLIGHT') {
+    return '주문을 보내는 중입니다 — 결과가 올 때까지 시장·종목을 바꿀 수 없습니다';
+  }
+  if (s === 'ORDER_REVIEW') {
+    return '주문을 확인하는 중입니다 — 확인 창을 닫기 전에는 시장·종목을 바꿀 수 없습니다';
+  }
+  return null;
 }

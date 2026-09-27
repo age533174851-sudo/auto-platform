@@ -20,7 +20,7 @@ import {
   instrumentForMarket, instrumentFromCatalog, selectInstrument,
   EMPTY_SELECTION, type SelectedByMarket,
 } from './marketInstrument';
-import { activeIdentity, identityKey, identityResetState, switchBlockedReason } from './tradeIdentity';
+import { activeIdentity, identityKey, identityResetState, switchBlockedReason, switchLockState } from './tradeIdentity';
 import {
   parseSpotCatalog, parseUsdmCatalog, catalogOpenFor, searchCatalog,
 } from './instrumentCatalog';
@@ -112,8 +112,18 @@ export function runMarketInstrumentTests() {
 
   // ── 9 ──
   test('⑨ 주문이 날아가는 중에는 전환을 막는 사유가 나온다', () => {
-    eq(switchBlockedReason(false), null);
-    assert(!!switchBlockedReason(true), '진행 중인데 막는 사유가 없다');
+    eq(switchBlockedReason('NONE'), null);
+    assert(!!switchBlockedReason('ORDER_IN_FLIGHT'), '진행 중인데 막는 사유가 없다');
+    // ★ 확인 중과 보내는 중은 **다른 사유**다. 돌려쓰면 확인 중인데
+    //   "보내는 중입니다"가 뜨고, 사용자는 주문이 이미 나간 줄 안다.
+    const inFlight = switchBlockedReason('ORDER_IN_FLIGHT');
+    const reviewing = switchBlockedReason('ORDER_REVIEW');
+    assert(!!reviewing, '확인 중인데 막는 사유가 없다');
+    assert(inFlight !== reviewing, '확인 중과 보내는 중의 사유가 같다');
+    // 보내는 중이 더 강하다 — 둘 다면 보내는 중이라고 적는다
+    eq(switchLockState({ inFlight: true, reviewing: true }), 'ORDER_IN_FLIGHT');
+    eq(switchLockState({ inFlight: false, reviewing: true }), 'ORDER_REVIEW');
+    eq(switchLockState({ inFlight: false, reviewing: false }), 'NONE');
   });
 
   // ── 10 ──

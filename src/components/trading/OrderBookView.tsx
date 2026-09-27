@@ -153,6 +153,15 @@ export const OrderBookView = memo(function OrderBookView({
       // 스크린샷 증거가 "호가가 **몇 줄** 실제로 그려졌는가"를 셀 수 있게
       // 한다. 판이 보인다는 것과 값이 들어왔다는 것은 다른 사실이다.
       data-book-row={buy ? 'bid' : 'ask'}
+      // ★ 가격 선택을 받지 않으면 **눌리지 않는 줄**이어야 한다.
+      //
+      //   `#284`가 `onPickPrice`를 떼면서 커서·밑줄·title은 같이 꺼졌지만
+      //   줄 자체는 여전히 살아 있는 `<button>`이었다. 보기에는 안 눌릴
+      //   것 같은데 실제로는 포커스가 가고 눌린다 — 눌러도 아무 일도
+      //   없다. 가운데 현재가 버튼은 이미 이렇게 막고 있었고
+      //   (`disabled={mid == null || !onPickPrice}`) **사다리만 빠져
+      //   있었다.** 실기 프로브가 줄 14개를 "살아 있는 버튼"으로 셌다.
+      disabled={!onPickPrice}
       onClick={() => onPickPrice?.(p)}
       style={{
         position: 'relative', display: 'flex', justifyContent: 'space-between',

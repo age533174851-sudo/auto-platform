@@ -28,14 +28,22 @@ const base: CtaVerdictInput = {
   locked: false, unavailable: false, sideChosen: false, sameSide: false,
 };
 
-/** 버튼을 실제로 누른 것처럼 세어 본다 */
+/**
+ * 버튼을 실제로 누른 것처럼 세어 본다.
+ *
+ * ★ `submit`은 **어떤 입력에서도 0이어야 한다.** 확인 시트가 생긴 뒤로
+ *   이 버튼은 주문을 보내지 않는다 — 시트를 열 뿐이다. 그래서 화면의
+ *   분기를 그대로 옮겨 놓고, `form.submit()`에 닿는 가지가 하나도 없음을
+ *   센다. 가지를 되살리면 이 숫자가 1이 된다.
+ */
 function press(i: CtaVerdictInput) {
   const v = ctaVerdict(i);
-  let chooseSide = 0, submit = 0;
+  let chooseSide = 0, openReview = 0;
+  const submit = 0;   // 이 버튼에는 제출 가지가 없다
   // 화면이 하는 일과 **같은 분기**다
   if (v.action === 'CHOOSE_SIDE') chooseSide += 1;
-  if (v.action === 'SUBMIT') submit += 1;
-  return { v, chooseSide, submit };
+  if (v.action === 'OPEN_REVIEW') openReview += 1;
+  return { v, chooseSide, openReview, submit };
 }
 
 export function runCtaVerdictTests() {
@@ -55,6 +63,7 @@ export function runCtaVerdictTests() {
       eq(r.v.off, true, '청산 탭인데 진입 버튼이 켜져 있다');
       eq(r.v.action, 'NONE');
       eq(r.chooseSide, 0, '청산 탭에서 방향이 골라졌다');
+      eq(r.openReview, 0, '★ 청산 탭에서 주문 확인 창이 열렸다');
       eq(r.submit, 0, '★ 청산 탭에서 진입 주문이 나갔다');
       assert(/청산/.test(r.v.reason || ''), '왜 꺼졌는지 적지 않았다');
     }
@@ -64,7 +73,7 @@ export function runCtaVerdictTests() {
   test('③ 판정이 준비 안 됐으면 꺼진다 — 제출 0회', () => {
     const r = press({ ...base, gateReady: false, sideChosen: true, sameSide: true });
     eq(r.v.off, true);
-    eq(r.submit, 0);
+    eq(r.openReview, 0);
     eq(r.chooseSide, 0);
   });
 
@@ -72,14 +81,14 @@ export function runCtaVerdictTests() {
   test('④ 보내는 중이면 꺼진다 — 두 번째 제출 0회', () => {
     const r = press({ ...base, busy: true, sideChosen: true, sameSide: true });
     eq(r.v.off, true);
-    eq(r.submit, 0);
+    eq(r.openReview, 0);
   });
 
   // ── 5 ──
   test('⑤ 종목이 없으면 꺼진다', () => {
     const r = press({ ...base, locked: true, sideChosen: true, sameSide: true });
     eq(r.v.off, true);
-    eq(r.submit, 0);
+    eq(r.openReview, 0);
     assert(/종목/.test(r.v.reason || ''));
   });
 
@@ -91,26 +100,50 @@ export function runCtaVerdictTests() {
   });
 
   // ── 7 ──
-  test('★⑦ 켜진 버튼의 첫 클릭은 방향만 고른다 — 주문은 안 나간다', () => {
+  test('★⑦ 켜진 버튼의 첫 클릭은 방향만 고른다 — 확인 창도 안 열린다', () => {
     const r = press({ ...base, sideChosen: false, sameSide: false });
     eq(r.v.action, 'CHOOSE_SIDE');
     eq(r.chooseSide, 1);
+    eq(r.openReview, 0, '한 번의 클릭으로 확인 창이 열렸다');
     eq(r.submit, 0, '한 번의 클릭으로 주문이 나갔다');
   });
 
   // ── 8 ──
-  test('⑧ 이미 그 방향을 고른 켜진 버튼은 주문을 보낸다', () => {
+  test('★⑧ 두 번째 클릭은 **확인 창을 연다** — 주문은 여전히 안 나간다', () => {
     const r = press({ ...base, sideChosen: true, sameSide: true });
-    eq(r.v.action, 'SUBMIT');
-    eq(r.submit, 1);
+    eq(r.v.action, 'OPEN_REVIEW');
+    eq(r.openReview, 1);
     eq(r.chooseSide, 0);
+    eq(r.submit, 0, '★ 두 번의 클릭으로 주문이 나갔다 — 확인 창을 건너뛰었다');
+  });
+
+  test('★ 실행 버튼에는 제출 가지가 아예 없다 — 어떤 입력에서도', () => {
+    // 이름과 행동을 갈라 놓지 않는다. `CtaAction`에 `'SUBMIT'`이 없으므로
+    // 화면의 분기에서도 제출이 나올 수 없다.
+    for (const gateReady of [false, true]) {
+      for (const busy of [false, true]) {
+        for (const intentOpen of [false, true]) {
+          for (const locked of [false, true]) {
+            for (const chosen of [false, true]) {
+              const r = press({
+                ...base, gateReady, busy, intentOpen, locked,
+                sideChosen: chosen, sameSide: chosen,
+              });
+              eq(r.submit, 0);
+              assert(r.v.action === 'NONE' || r.v.action === 'CHOOSE_SIDE'
+                || r.v.action === 'OPEN_REVIEW', `모르는 할 일: ${r.v.action}`);
+            }
+          }
+        }
+      }
+    }
   });
 
   test('다른 방향을 고른 상태면 이 버튼은 아직 고르기다', () => {
     const r = press({ ...base, sideChosen: true, sameSide: false });
     eq(r.v.on, false);
     eq(r.v.action, 'CHOOSE_SIDE');
-    eq(r.submit, 0);
+    eq(r.openReview, 0);
   });
 
   test('★ 꺼짐 사유는 먼저 걸린 것이 나온다 — 뒤엣것은 앞엣것의 결과다', () => {
