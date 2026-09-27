@@ -60,6 +60,11 @@ const CONTRACT_SRC = 'src/lib/trading/marketScreenContract.ts';
 const TABS_SRC = 'src/lib/trading/marketTabs.ts';
 const TABS_UI  = 'src/components/trading/markets/MarketTabs.tsx';
 const INSTR    = 'src/lib/trading/marketInstrument.ts';
+const CATALOG  = 'src/lib/trading/instrumentCatalog.ts';
+const IDENT    = 'src/lib/trading/tradeIdentity.ts';
+const PICKER   = 'src/components/trading/markets/InstrumentPicker.tsx';
+const CAT_API  = 'src/app/api/market/instruments/route.ts';
+const FORMHOOK = 'src/lib/trading/useTradeForm.ts';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -67,8 +72,19 @@ const read = (p) => {
   try { return readFileSync(p, 'utf8'); }
   catch { err(`${p}를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`); return ''; }
 };
-/** 주석은 규율이 아니다. 주석에 적힌 낱말로 검사가 통과하면 안 된다 */
-const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+/**
+ * 주석은 규율이 아니다. 주석에 적힌 낱말로 검사가 **통과**해서도 안 되고,
+ * 주석 때문에 **실패**해서도 안 된다.
+ *
+ * 줄 주석은 줄째로 버리고, 줄 안에 끼인 `/* … *\/`도 뗀다 — 실제로
+ * `onPickPrice={() => { /* 지정가를 받지 않는다 *\/ }}`가 "지정가 UI가 있다"로
+ * 잡힌 적이 있다. 코드는 계약을 지키고 있었고 주석만 걸린 것이다.
+ *
+ * `//`는 줄 안에서 떼지 않는다 — `https://`가 같이 잘린다.
+ */
+const code = (s) => s
+  .split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
+  .replace(/\/\*[\s\S]*?\*\//g, ' ');
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -922,12 +938,30 @@ const drawer = code(read(DRAWER));
 {
   const instr = code(read(INSTR));
 
-  // ⑴ 종목이 생기는 자리는 **한 곳**이고, 거기서 들고 온 값을 그대로 쓴다
+  // ⑴ 종목이 생기는 **모든** 자리가 확인된 출처를 그대로 복사한다
+  //
+  // ★ 예전 규칙은 "자리가 정확히 한 곳"이었다. 출처가 ENTRY 하나뿐일 때는
+  //   맞았지만, 목록(CATALOG)이 생기면서 자리가 둘이 됐다. 개수를 세는
+  //   규칙은 **출처가 늘면 못 쓰게 되고**, 늘릴 때 규칙을 지우고 싶어진다.
+  //
+  //   그래서 개수가 아니라 **무엇을 넣는지**를 본다. 확인된 출처의 값을
+  //   그대로 복사하는 것만 통과하고, 문자열·템플릿·이어붙이기는 전부
+  //   실패한다. 출처가 늘어도 규칙은 그대로 강하다.
+  const ALLOWED_SYMBOL_SRC = [
+    /^entry\.symbol$/,   // 사용자가 들고 온 종목
+    /^row\.symbol$/,     // 거래소 상장 목록의 한 줄
+  ];
   const makes = (instr.match(/symbol:\s*[^,\n]+/g) || [])
-    .filter(x => !/symbol:\s*string/.test(x));
-  if (makes.length !== 1 || !/symbol:\s*entry\.symbol/.test(makes[0])) {
-    err(`${INSTR}에서 종목이 ${makes.length}곳에서 만들어집니다 [${makes.join(' / ')}]`
-      + ' — 들고 온 값을 그대로 쓰는 한 곳이어야 합니다');
+    .filter(x => !/symbol:\s*string/.test(x))
+    .map(x => x.replace(/^symbol:\s*/, '').trim().replace(/,$/, ''));
+  if (makes.length === 0) {
+    err(`${INSTR}에서 종목을 만드는 자리를 찾지 못했습니다 — 구조를 확인할 수 없습니다`);
+  }
+  for (const m of makes) {
+    if (!ALLOWED_SYMBOL_SRC.some(re => re.test(m))) {
+      err(`${INSTR}가 확인되지 않은 값으로 종목을 만듭니다 (symbol: ${m})`
+        + ' — 확인된 출처(들고 온 종목 · 거래소 목록)를 그대로 복사해야 합니다');
+    }
   }
   // ★ **그 한 곳이 시장 일치를 확인하는가.** 값을 그대로 쓰는 것만으로는
   //   부족하다 — 조건에서 `entry.market === market`을 빼면 현물 종목이
@@ -936,6 +970,16 @@ const drawer = code(read(DRAWER));
   if (!/entry\.market === market/.test(instr)) {
     err(`${INSTR}가 종목을 쓰기 전에 시장 일치를 확인하지 않습니다`
       + ' — 현물 종목이 선물 화면의 종목이 됩니다');
+  }
+  // ★ 저장할 때와 꺼내 쓸 때 **둘 다** 시장을 확인한다.
+  //   한쪽만 보면 다른 쪽으로 새고, 조건문을 `if (false)`로 바꾸는 것만으로
+  //   방어가 사라진다 — 조건식 자체를 본다.
+  if (!/if \(next && next\.market !== market\)/.test(instr)) {
+    err(`${INSTR}가 다른 시장의 종목을 그 시장 칸에 저장하는 것을 막지 않습니다`
+      + ' — 탭을 옮기면 심볼이 따라옵니다');
+  }
+  if (!/if \(picked\.market !== market\)/.test(instr)) {
+    err(`${INSTR}가 저장된 종목의 시장을 확인하지 않고 씁니다`);
   }
 
   // ⑵ 계약 심볼을 **조립하지 않는다**
@@ -1053,6 +1097,257 @@ const drawer = code(read(DRAWER));
   }
 }
 
+// ══════════════ ㉑ ★ 화면과 주문이 **같은 종목**을 본다 ══════════════
+//
+// Phase 1에 남아 있던 구멍이다. `stream`·`form`·`sell`·`wiring`이 전부
+// **들어올 때의 문맥**(`ctx`)에 묶여 있었고, 시장 탭이 잠겨 있어서 드러나지
+// 않았다. 종목 선택을 여는 순간 이렇게 된다:
+//
+//     화면 헤더    USDⓈ-M · ETHUSDT
+//     실제 주문    SPOT · BTCUSDT      ← 사용자는 알 수 없다
+//
+// 오류도 경고도 없다. 이 저장소에서 가장 비싼 종류의 고장이다.
+{
+  const hook = code(read(FORMHOOK));
+  const ident = code(read(IDENT));
+
+  // ⑴ 시세·판정·능력표가 **활성 정체성**에서 온다 — `ctx`에서 오지 않는다
+  for (const [what, re] of [
+    ['시세', /useBinanceStream\(\s*activeSymbol/],
+    ['매수 판정', /useTradeForm\(\{[\s\S]{0,200}?symbol:\s*activeSymbol/],
+    ['매도 판정', /useSellForm\(\{[\s\S]{0,200}?symbol:\s*activeSymbol/],
+    ['능력표', /paperOrderUiWiring\(\s*\n?\s*activeMarket/],
+  ]) {
+    if (!re.test(order)) {
+      err(`${ORDER}의 ${what}이 활성 정체성에서 오지 않습니다`
+        + ' — 화면과 주문이 다른 종목을 보게 됩니다');
+    }
+  }
+  // ⑵ 들어올 때의 문맥을 **시세·판정에 다시 쓰지 않는다**
+  for (const re of [
+    /useBinanceStream\([^)]*ctx\.symbol/,
+    /useTradeForm\(\{[\s\S]{0,300}?symbol:\s*ctx\.symbol/,
+    /useSellForm\(\{[\s\S]{0,300}?symbol:\s*ctx\.symbol/,
+    /paperOrderUiWiring\(\s*ctx\.market\s*\)/,
+  ]) {
+    if (re.test(order)) {
+      err(`${ORDER}가 시장 전환 뒤에도 최초 문맥을 씁니다 (${re})`
+        + ' — 탭을 바꿔도 예전 종목으로 주문이 나갑니다');
+    }
+  }
+  // ⑶ 폼이 **자기 정체성을 값으로 내보낸다** (화면이 비교할 수 있어야 한다)
+  if (!/symbol:\s*i\.symbol,\s*market:\s*i\.market,/.test(hook)) {
+    err(`${FORMHOOK}이 자기 정체성을 값으로 내보내지 않습니다`
+      + ' — 화면과 같은 종목인지 확인할 방법이 없습니다');
+  }
+  // 주문 본문도 같은 정체성이어야 한다.
+  //
+  // ★ 파일 전체에서 찾으면 안 된다. 같은 모양이 미리보기 계산에도 있어서,
+  //   **전송 본문만 바꿔도** 다른 쪽이 조건을 대신 만족시킨다 — 뮤테이션이
+  //   그 틈으로 살아남았다. 실제로 나가는 본문 구간만 잘라서 본다.
+  {
+    const from = hook.indexOf('const body: any = {');
+    const to = hook.indexOf("fetch('/api/paper/order'");
+    if (from < 0 || to < 0 || to < from) {
+      err(`${FORMHOOK}에서 주문 전송 본문을 찾지 못했습니다 — 구조를 확인할 수 없습니다`);
+    } else {
+      const body = hook.slice(from, to);
+      if (!/symbol:\s*i\.symbol\b/.test(body) || !/market:\s*i\.market\b/.test(body)) {
+        err(`${FORMHOOK}의 주문 전송 본문이 폼 정체성과 다른 값을 씁니다`
+          + ' — 화면이 보여준 종목과 다른 종목이 나갑니다');
+      }
+    }
+  }
+  // ⑷ 화면이 그 값을 실제로 드러낸다 (프로브가 눈으로 비교한다)
+  for (const attr of ['data-active-symbol', 'data-form-symbol', 'data-form-market']) {
+    if (!order.includes(attr)) {
+      err(`${ORDER}가 ${attr}를 드러내지 않습니다 — 정체성 일치를 확인할 수 없습니다`);
+    }
+  }
+  // ⑸ 정체성이 어긋나면 **활성으로 만들지 않는다**
+  if (!/if \(instrument\.market !== market\) return null;/.test(ident)) {
+    err(`${IDENT}가 시장이 어긋난 종목을 활성으로 만듭니다`);
+  }
+}
+
+// ══════════════ ㉒ ★ 상장 목록은 거래소가 말한 것만 ══════════════
+{
+  const cat = code(read(CATALOG));
+  const api = code(read(CAT_API));
+
+  // ⑴ 목록 파서가 **심볼을 만들지 않는다**
+  for (const re of [/\+\s*['"`]USDT['"`]/, /\$\{[^}]*\}USDT/, /USD_PERP/,
+                    /baseAsset:\s*['"`]/, /symbol:\s*['"`][A-Z]/]) {
+    if (re.test(cat)) {
+      err(`${CATALOG}가 종목을 만들어냅니다 (${re}) — 응답에 있는 줄만 종목입니다`);
+    }
+  }
+  // ⑵ 거래 가능 조건을 **파서마다** 본다
+  //
+  // ★ 파일 전체에서 찾으면 한쪽 파서에서 조건을 떼어도 다른 파서가 대신
+  //   만족시킨다 — 뮤테이션이 그 틈으로 살아남았다.
+  for (const [fn, needs] of [
+    ['parseSpotCatalog', [
+      ['거래중', /str\(r\?\.status\) !== 'TRADING'/],
+      ['결제통화', /quoteAsset !== CATALOG_QUOTE/],
+    ]],
+    ['parseUsdmCatalog', [
+      ['거래중', /str\(r\?\.status\) !== 'TRADING'/],
+      ['무기한 계약', /str\(r\?\.contractType\) !== 'PERPETUAL'/],
+      ['결제통화', /quoteAsset !== CATALOG_QUOTE/],
+    ]],
+  ]) {
+    const m = cat.match(new RegExp(`export function ${fn}\\([\\s\\S]*?\\n\\}`));
+    if (!m) { err(`${CATALOG}에서 ${fn}을 찾지 못했습니다`); continue; }
+    for (const [what, re] of needs) {
+      if (!re.test(m[0])) err(`${CATALOG}의 ${fn}이 ${what} 조건을 확인하지 않습니다`);
+    }
+  }
+  // ⑶ COIN-M·주식 목록 권위를 열지 않는다
+  {
+    // ★ `TradingMarketId[]`의 `]` 때문에 배열에 닿기 전에 끊기던 정규식을
+    //   고쳤다. **대입식 뒤의 배열 리터럴만** 잘라서 본다.
+    const lit = cat.match(/CATALOG_MARKETS[^=]*=\s*\[([^\]]*)\]/);
+    if (!lit) err(`${CATALOG}에서 목록 권위 시장 배열을 찾지 못했습니다`);
+    else for (const m of ['COINM', 'STOCK']) {
+      if (lit[1].includes(`'${m}'`)) {
+        err(`${CATALOG}가 ${m} 목록 권위를 엽니다 (${lit[1].trim()}) — 아직 출처가 없습니다`);
+      }
+    }
+  }
+  // ★ 열림 판정도 **두 시장만** 명시해야 한다. `!== 'COINM'` 같은 부정으로
+  //   쓰면 주식이 조용히 열린다.
+  {
+    const fn = cat.match(/export function catalogOpenFor\([\s\S]*?\n\}/);
+    if (!fn) err(`${CATALOG}에서 목록 열림 판정을 찾지 못했습니다`);
+    else if (!/market === 'SPOT' \|\| market === 'USDM'/.test(fn[0])) {
+      err(`${CATALOG}의 목록 열림 판정이 두 시장을 명시하지 않습니다`
+        + ' — 출처 없는 시장이 조용히 열립니다');
+    }
+  }
+  // ★ 주식 mock을 근거로 쓰지 않는다는 사실을 값에 적어 둔다
+  if (!/mock/.test(read(CATALOG))) {
+    err(`${CATALOG}가 주식 시세의 mock fallback을 사유에 적지 않습니다`
+      + ' — 목록이 보이는 것과 거래할 수 있는 것은 다른 사실입니다');
+  }
+  // ⑷ 서버가 COIN-M·주식 조회 주소를 갖지 않는다
+  for (const m of ['COINM', 'STOCK']) {
+    if (new RegExp(`${m}:\\s*['"\`]https`).test(api)) {
+      err(`${CAT_API}가 ${m} 조회 주소를 갖고 있습니다 — 목록 권위가 없는 시장입니다`);
+    }
+  }
+  // ⑸ 실패를 **빈 목록으로** 돌려주지 않는다
+  if (!/error: 'empty_catalog'/.test(api)) {
+    err(`${CAT_API}가 "0건"과 "못 읽음"을 구별하지 않습니다`
+      + ' — 0건은 화면에 "이 시장에 종목이 없다"로 그려집니다');
+  }
+  if (/ok:\s*true[\s\S]{0,80}instruments:\s*\[\]/.test(api)) {
+    err(`${CAT_API}가 실패를 빈 목록으로 성공 처리합니다`);
+  }
+  // ⑹ 화면도 못 읽음과 0건을 다른 문장으로 적는다
+  const pick = code(read(PICKER));
+  for (const t of ['catalog-unavailable', 'catalog-no-match', 'catalog-retry']) {
+    if (!pick.includes(t)) err(`${PICKER}에 ${t} 상태가 없습니다`);
+  }
+  // 타이핑마다 조회하지 않는다
+  if (/fetch\(/.test(pick)) {
+    err(`${PICKER}가 직접 조회합니다 — 검색은 받아 둔 목록 안에서 합니다`);
+  }
+}
+
+// ══════════════ ㉓ ★ 주문이 날아가는 중에는 바꾸지 않는다 ══════════════
+{
+  const tabs = code(read(TABS_UI));
+  if (!/const orderInFlight = form\.busy \|\| sell\.busy;/.test(order)) {
+    err(`${ORDER}가 주문 진행 상태를 판정하지 않습니다`);
+  }
+  for (const [what, re] of [
+    ['시장 전환', /setMarketTab = React\.useCallback\(\(m: TradingMarketId\) => \{\s*\n\s*if \(orderInFlight\) return;/],
+    ['종목 고르기', /openPicker = React\.useCallback\(\(\) => \{\s*\n\s*if \(orderInFlight\) return;/],
+    ['종목 선택', /pickInstrument = React\.useCallback\(\([\s\S]{0,40}?\) => \{\s*\n\s*if \(orderInFlight\) return;/],
+  ]) {
+    if (!re.test(order)) {
+      err(`${ORDER}가 주문 진행 중에 ${what}을 막지 않습니다`
+        + ' — 보낸 주문의 결과가 다른 종목 화면에 뜹니다');
+    }
+  }
+  // 탭 줄이 그 사유를 실제로 받는가 (숨기지 않고 끈다)
+  if (!/blockedReason=\{p\.switchBlockedReason \?\? null\}/.test(shell)) {
+    err(`${SHELL}이 전환 차단 사유를 탭 줄에 넘기지 않습니다`);
+  }
+  if (!/disabled=\{blocked && !on\}/.test(tabs)) {
+    err(`${TABS_UI}가 주문 진행 중에도 다른 시장 탭을 누를 수 있게 둡니다`);
+  }
+}
+
+// ══════════════ ㉔ ★ 정체성이 바뀌면 주문 입력을 물려주지 않는다 ══════════════
+{
+  const hook = code(read(FORMHOOK));
+  // ★ 이름이 있는지만 보면 안 된다. 효과 안에 `if (true) return;` 한 줄을
+  //   끼우면 이름은 그대로 남고 초기화만 사라진다 — 뮤테이션 둘이 그 틈으로
+  //   살아남았다. **효과 본문을 잘라서 나가는 길을 센다.**
+  {
+    const eff = hook.match(/useEffect\(\(\) => \{\s*\n\s*if \(lastIdKey[\s\S]*?\n  \}, \[idKey\]\);/);
+    if (!eff) {
+      err(`${FORMHOOK}이 정체성 변경을 감지하지 않습니다`
+        + ' — 현물 50%·손절이 선물 화면으로 따라갑니다');
+    } else {
+      const body = eff[0];
+      const returns = body.match(/return\s*;/g) || [];
+      if (returns.length !== 1) {
+        err(`${FORMHOOK}의 초기화가 ${returns.length}가지로 빠져나갑니다`
+          + ' — 정체성이 같을 때 한 번만 빠져나가야 합니다');
+      }
+      if (!/if \(lastIdKey\.current === idKey\) return;/.test(body)) {
+        err(`${FORMHOOK}의 초기화 조건이 정체성 비교가 아닙니다`);
+      }
+      if (!/identityResetState\(/.test(body)) {
+        err(`${FORMHOOK}의 초기화가 정본 규칙을 쓰지 않습니다`);
+      }
+      for (const setter of ['setSideChosen', 'setPercent', 'setTp', 'setSl',
+                            'setSlPct', 'setLeverage', 'setMarginMode']) {
+        if (!new RegExp(`${setter}\\(`).test(body)) {
+          err(`${FORMHOOK}의 초기화가 ${setter}를 되돌리지 않습니다`);
+        }
+      }
+    }
+  }
+  // 초기화 규칙을 화면이 따로 갖지 않는다 (두 벌이면 한쪽만 고쳐진다)
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    if (/identityResetState\(/.test(code(read(sc.file)))) {
+      err(`${sc.file}가 초기화 규칙을 따로 갖습니다 — 정본은 ${IDENT} 한 곳입니다`);
+    }
+  }
+}
+
+// ══════════════ ㉕ ★ 시장가 전용인데 지정가 UI를 만들지 않는다 ══════════════
+//
+// `OrderBookView`에 `onPickPrice`가 **이미 있다.** 그래서 호가 줄을 눌러
+// 주문 가격에 넣고 싶어진다. 그런데 지금 모의 장부는:
+//
+//     TYPE_LIMIT   미지원
+//     PRICE_INPUT  미지원   (`/api/paper/order`가 서버 시세로 즉시 체결한다)
+//
+// 이 상태에서 가격 칸을 만들면 **눌리는데 시장가로 나가는** 화면이 된다.
+// 사용자는 자기가 정한 가격에 걸린 줄 안다. 지정가 장부가 실제로 생긴 뒤에
+// 붙인다.
+{
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    // 모의 경로가 있는 시장만 해당한다 (COIN-M·주식은 애초에 잠겨 있다)
+    if (sc.market !== 'SPOT' && sc.market !== 'USDT_FUTURES') continue;
+    const c = code(read(sc.file));
+    if (/onPickPrice=\{(?!\(\) => \{)/.test(c)) {
+      err(`${sc.file}가 호가 선택을 주문에 연결합니다`
+        + ' — 지금은 지정가가 없어 시장가로 나갑니다 (PRICE_INPUT 미지원)');
+    }
+    for (const re of [/setLimitPrice/, /limitPrice/, /['"]LIMIT['"]/, /지정가/]) {
+      if (re.test(c)) {
+        err(`${sc.file}에 지정가 UI가 있습니다 (${re}) — 모의 장부에 대기 주문이 없습니다`);
+      }
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -1062,4 +1357,6 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' ★시장 의미 비혼합(현물·USDⓈ-M·COIN-M·주식) · 정본 판정 비우회 · 칸 출처 ·'
   + ' 능력 게이트 · ★간편/프로 동일 판정 · 주문수단 보존 · 포지션 장부 일치 ·'
   + ' 사유 1곳 · 원스크린 비복귀 ·'
-  + ' ★시장 탭 4개 도달 · ★심볼 비조립 · ★종목없음=주문잠금 · ★타시장 데이터 비차용');
+  + ' ★시장 탭 4개 도달 · ★심볼 비조립 · ★종목없음=주문잠금 · ★타시장 데이터 비차용 ·'
+  + ' ★화면=주문 정체성 일치 · ★상장목록 거래소 출처 · ★주문중 전환차단 ·'
+  + ' ★정체성 변경시 입력 초기화 · ★시장가 전용인데 지정가 UI 없음');

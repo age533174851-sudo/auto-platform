@@ -38,6 +38,11 @@ const ROUTE  = 'src/lib/trading/tradingScreenRoute.ts';
 const TABS   = 'src/lib/trading/marketTabs.ts';
 const TABSUI = 'src/components/trading/markets/MarketTabs.tsx';
 const INSTR  = 'src/lib/trading/marketInstrument.ts';
+const CATALOG = 'src/lib/trading/instrumentCatalog.ts';
+const IDENT   = 'src/lib/trading/tradeIdentity.ts';
+const PICKER  = 'src/components/trading/markets/InstrumentPicker.tsx';
+const CATAPI  = 'src/app/api/market/instruments/route.ts';
+const FORMHK  = 'src/lib/trading/useTradeForm.ts';
 const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
 const ROW    = 'src/components/trading/PositionRow.tsx';
@@ -245,7 +250,7 @@ const CASES = [
   // ── ⑪ 능력 없는 제품에 버튼을 열지 않는다 ──
 
   ['MUT-N46 제품 능력표를 안 본다 (안 되는 제품에 주문 버튼이 열린다)', ORDER, 'RED',
-   [[`  const wiring = paperOrderUiWiring(ctx.market);`,
+   [[`  const wiring = paperOrderUiWiring(\n    activeMarket === 'SPOT' ? 'SPOT' : activeMarket === 'USDM' ? 'USDM' : activeMarket);`,
      `  const wiring = { canOrder: true, reason: null } as any;`]]],
 
   ['MUT-N47 ★ COIN-M 실행 버튼을 열어 둔다 (눌러도 아무 일도 안 일어난다)', COINM, 'RED',
@@ -373,25 +378,25 @@ const CASES = [
      `        flexWrap: 'wrap',`]]],
 
   ['MUT-T5 ★ 시장을 드롭다운에 숨긴다', TABSUI, 'RED',
-   [[`export function MarketTabs({ market, onMarket }: MarketTabsProps) {`,
-     `const Hidden = () => <select/>;\nexport function MarketTabs({ market, onMarket }: MarketTabsProps) {`]]],
+   [[`export function MarketTabs({ market, onMarket, blockedReason }: MarketTabsProps) {`,
+     `const Hidden = () => <select/>;\nexport function MarketTabs({ market, onMarket, blockedReason }: MarketTabsProps) {`]]],
 
   ['MUT-T6 ★ 탭→화면 경로를 없앤다 (탭은 있는데 도달 불가)', ROUTE, 'RED',
    [[`export function tradingScreenForTab(`, `function unusedScreenForTab(`]]],
 
   ['MUT-T7 ★ 껍데기가 시장 탭을 안 붙인다 (만들어 놓고 배선 안 함)', SHELL, 'RED',
-   [[`        <MarketTabs market={p.market} onMarket={p.onMarket}/>`, ``]]],
+   [[`        <MarketTabs market={p.market} onMarket={p.onMarket}\n          blockedReason={p.switchBlockedReason ?? null}/>`, ``]]],
 
   ['MUT-T8 ★ 탭 선택을 위로 올리지 않는다 (눌러도 화면이 안 바뀐다)', SHELL, 'RED',
-   [[`<MarketTabs market={p.market} onMarket={p.onMarket}/>`,
-     `<MarketTabs market={p.market} onMarket={() => {}}/>`]]],
+   [[`<MarketTabs market={p.market} onMarket={p.onMarket}\n          blockedReason={p.switchBlockedReason ?? null}/>`,
+     `<MarketTabs market={p.market} onMarket={() => {}}\n          blockedReason={p.switchBlockedReason ?? null}/>`]]],
 
   ['MUT-T9 ★ host가 주식 화면을 렌더하지 않는다 (탭만 있고 화면이 없다)', ORDER, 'RED',
    [[`          <StockTradingScreen {...common}`, `          <MissingStockScreen {...common}`]]],
 
   ['MUT-T10 ★ 시장 탭 상태를 밀도 분기 뒤로 옮긴다 (밀도마다 다른 탭)', ORDER, 'RED',
-   [[`  const [marketTab, setMarketTab] = React.useState<TradingMarketId>(entryTab ?? 'SPOT');`,
-     `  const marketTab = 'SPOT' as TradingMarketId; const setMarketTab = (_m: TradingMarketId) => {};`]]],
+   [[`  const [marketTab, setMarketTabRaw] = React.useState<TradingMarketId>(entryTab ?? 'SPOT');`,
+     `  const marketTab = 'SPOT' as TradingMarketId; const setMarketTabRaw = (_m: TradingMarketId) => {};`]]],
 
   ['MUT-T11 ★ 모르는 시장에 현물을 기본으로 준다 (선물 주문이 현물로 나간다)', TABS, 'RED',
    [[`  const t = TO_MARKET_TYPE[id];\n  if (!t) throw new Error(`,
@@ -402,11 +407,12 @@ const CASES = [
      `  if (market === 'COINM') return null as any;\n  const label = marketTabLabel(market);`]]],
 
   ['MUT-T13 ★ 시장 전환 때 COIN-M 심볼을 조립한다 (BTCUSDT → BTCUSD_PERP)', INSTR, 'RED',
-   [[`  // ── 아니면 종목이 없다. 사유는 시장마다 다르다 ──`,
+   [[`  // ── ③ 없다. 사유는 시장마다 다르다 ──`,
      `  if (market === 'COINM' && entry) {\n`
-     + `    return { market, instrument: { symbol: 'BTCUSD_PERP', source: 'ENTRY' },\n`
+     + `    return { market, instrument: { market, symbol: 'BTCUSD_PERP', baseAsset: null,\n`
+     + `      quoteAsset: null, source: 'ENTRY' as const, catalogSource: null, asOf: null },\n`
      + `      tradable: true, reason: null };\n  }\n`
-     + `  // ── 아니면 종목이 없다. 사유는 시장마다 다르다 ──`]]],
+     + `  // ── ③ 없다. 사유는 시장마다 다르다 ──`]]],
 
   ['MUT-T14 ★ 다른 시장 종목을 이 시장 것으로 옮겨 적는다 (이름이 같다고 같은 상품 취급)', INSTR, 'RED',
    [[`  if (entry && entry.market === market && entry.symbol) {`,
@@ -442,6 +448,102 @@ const CASES = [
   ['MUT-T22 ★ 선물 버튼 글자를 진입 시장 훅에서 가져온다 (USDⓈ-M에 BUY/SELL이 찍힌다)', USDM, 'RED',
    [[`  const label = side === 'LONG' ? cap.buyLabel('') : cap.sellLabel('');`,
      `  const label = form.sideLabel(side);`]]],
+
+
+  // ══ ㉑~㉕ Phase 2A — 활성 정체성 · 상장 목록 · 전환 차단 ══
+
+  ['MUT-A1 ★ 시세를 최초 문맥에 다시 묶는다 (화면은 ETH, 시세는 BTC)', ORDER, 'RED',
+   [[`const stream = useBinanceStream(activeSymbol, !!activeSymbol, paperMarket);`,
+     `const stream = useBinanceStream(ctx.symbol, true, ctx.market);`]]],
+
+  ['MUT-A2 ★ 매수 판정을 최초 문맥에 다시 묶는다 (화면은 ETH, 주문은 BTC)', ORDER, 'RED',
+   [[`    symbol: activeSymbol,\n    market: paperMarket,`,
+     `    symbol: ctx.symbol,\n    market: ctx.market,`]]],
+
+  ['MUT-A3 ★ 능력표를 최초 문맥에 다시 묶는다', ORDER, 'RED',
+   [[`  const wiring = paperOrderUiWiring(\n    activeMarket === 'SPOT' ? 'SPOT' : activeMarket === 'USDM' ? 'USDM' : activeMarket);`,
+     `  const wiring = paperOrderUiWiring(ctx.market);`]]],
+
+  ['MUT-A4 ★ 폼이 자기 정체성을 숨긴다 (화면과 같은지 볼 수 없다)', FORMHK, 'RED',
+   [[`    symbol: i.symbol, market: i.market,\n    side, setSide,`, `    side, setSide,`]]],
+
+  ['MUT-A5 ★ 주문 본문이 폼과 다른 종목을 싣는다', FORMHK, 'RED',
+   [[`        symbol: i.symbol, side, market: i.market,`,
+     `        symbol: String(i.symbol || '').replace(/USDT$/, 'USDC'), side, market: i.market,`]]],
+
+  ['MUT-A6 ★ 시장이 어긋난 종목도 활성으로 만든다', IDENT, 'RED',
+   [[`  if (instrument.market !== market) return null;`, `  if (false) return null;`]]],
+
+  ['MUT-A7 ★ 다른 시장 종목을 그 시장 칸에 저장한다 (탭 옮기면 심볼이 따라온다)', INSTR, 'RED',
+   [[`  if (next && next.market !== market) {`, `  if (false) {`]]],
+
+  ['MUT-A8 ★ 저장된 종목의 시장을 확인하지 않고 쓴다', INSTR, 'RED',
+   [[`    if (picked.market !== market) {`, `    if (false) {`]]],
+
+  ['MUT-A9 ★ 목록 파서가 심볼을 만들어낸다', CATALOG, 'RED',
+   [[`    const symbol = str(r?.symbol);\n    const baseAsset = str(r?.baseAsset);\n    const quoteAsset = str(r?.quoteAsset);\n    if (!symbol || !baseAsset || !quoteAsset) continue;\n    if (quoteAsset !== CATALOG_QUOTE) continue;\n    out.push({\n      market: 'USDM', symbol, baseAsset, quoteAsset,`,
+     `    const symbol = str(r?.baseAsset) + 'USDT';\n    const baseAsset = str(r?.baseAsset);\n    const quoteAsset = 'USDT';\n    if (!symbol || !baseAsset) continue;\n    out.push({\n      market: 'USDM', symbol, baseAsset, quoteAsset,`]]],
+
+  ['MUT-A10 ★ 분기물도 무기한으로 통과시킨다 (만기가 있는 계약이다)', CATALOG, 'RED',
+   [[`    if (str(r?.contractType) !== 'PERPETUAL') continue;`, ``]]],
+
+  ['MUT-A11 ★ 거래 정지된 종목도 목록에 넣는다', CATALOG, 'RED',
+   [[`    if (str(r?.status) !== 'TRADING') continue;\n    if (str(r?.contractType) !== 'PERPETUAL') continue;`,
+     `    if (str(r?.contractType) !== 'PERPETUAL') continue;`]]],
+
+  ['MUT-A12 ★ COIN-M 목록 권위를 연다 (출처가 없는데)', CATALOG, 'RED',
+   [[`export const CATALOG_MARKETS: TradingMarketId[] = ['SPOT', 'USDM'];`,
+     `export const CATALOG_MARKETS: TradingMarketId[] = ['SPOT', 'USDM', 'COINM'];`]]],
+
+  ['MUT-A13 ★ 주식 목록을 mock 근거로 연다', CATALOG, 'RED',
+   [[`  if (market === 'SPOT' || market === 'USDM') return { open: true, reason: null };`,
+     `  if (market !== 'COINM') return { open: true, reason: null };`]]],
+
+  ['MUT-A14 ★ 서버가 주식 조회 주소를 갖는다', CATAPI, 'RED',
+   [[`  USDM: 'https://fapi.binance.com/fapi/v1/exchangeInfo',`,
+     `  USDM: 'https://fapi.binance.com/fapi/v1/exchangeInfo',\n  STOCK: 'https://example.invalid/stocks',`]]],
+
+  ['MUT-A15 ★ 조회 실패를 빈 목록으로 성공 처리한다 ("종목이 없다"로 읽힌다)', CATAPI, 'RED',
+   [[`        ok: false, error: 'empty_catalog', market, asOf,`,
+     `        ok: true, error: 'ignored', market, asOf, instruments: [],`]]],
+
+  ['MUT-A16 ★ 고르는 화면이 타이핑마다 거래소를 부른다', PICKER, 'RED',
+   [[`  const hits = p.catalog.state === 'READY' ? searchCatalog(p.catalog.rows, q) : [];`,
+     `  const hits = p.catalog.state === 'READY' ? searchCatalog(p.catalog.rows, q) : [];\n  void fetch('/api/market/instruments?market=' + p.market);`]]],
+
+  ['MUT-A17 ★ 못 읽음을 "검색 결과 없음"과 같은 문장으로 적는다', PICKER, 'RED',
+   [[`          <div data-testid="catalog-unavailable"`, `          <div data-testid="catalog-no-match-dup"`]]],
+
+  ['MUT-A18 ★ 주문 진행 중에도 시장을 바꿀 수 있게 둔다', ORDER, 'RED',
+   [[`  const setMarketTab = React.useCallback((m: TradingMarketId) => {\n    if (orderInFlight) return;`,
+     `  const setMarketTab = React.useCallback((m: TradingMarketId) => {`]]],
+
+  ['MUT-A19 ★ 주문 진행 중에도 종목을 바꿀 수 있게 둔다', ORDER, 'RED',
+   [[`  const pickInstrument = React.useCallback((row: any) => {\n    if (orderInFlight) return;`,
+     `  const pickInstrument = React.useCallback((row: any) => {`]]],
+
+  ['MUT-A20 ★ 탭 줄이 차단 사유를 무시하고 계속 눌린다', TABSUI, 'RED',
+   [[`            disabled={blocked && !on}`, ``]]],
+
+  ['MUT-A21 ★ 정체성이 바뀌어도 주문 입력을 물려준다 (현물 50%가 선물로 따라간다)', FORMHK, 'RED',
+   [[`    const r = identityResetState(i.market as any);`,
+     `    if (true) return;\n    const r = identityResetState(i.market as any);`]]],
+
+  ['MUT-A22 ★ 정체성 변경을 감지하지 않는다', FORMHK, 'RED',
+   [[`    if (lastIdKey.current === idKey) return;`, `    if (true) return;`]]],
+
+  ['MUT-A23 ★ 시장가 전용인데 호가 선택을 주문 가격에 연결한다', SPOT, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense onPickPrice={setLimitPrice}/>`]]],
+
+  ['MUT-A24 ★ 지정가 입력칸을 만든다 (실제로는 시장가로 나간다)', USDM, 'RED',
+   [[`      <div data-testid={fieldTestId('OPEN_CLOSE')}`,
+     `      <input data-testid="limitPrice" placeholder="지정가"/>\n      <div data-testid={fieldTestId('OPEN_CLOSE')}`]]],
+
+  ['OK-A1 목록 정본에 주석 한 줄 추가', CATALOG, 'GREEN',
+   [[`export interface CatalogInstrument {`, `// 대조군\nexport interface CatalogInstrument {`]]],
+  ['OK-A2 정체성 정본에 주석 한 줄 추가', IDENT, 'GREEN',
+   [[`export interface TradeIdentity {`, `// 대조군\nexport interface TradeIdentity {`]]],
 
   ['OK-T1 시장 탭 정본에 주석 한 줄 추가', TABS, 'GREEN',
    [[`export interface MarketTab {`, `// 대조군\nexport interface MarketTab {`]]],

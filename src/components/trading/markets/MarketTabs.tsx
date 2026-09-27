@@ -26,9 +26,17 @@ import { MARKET_TABS, type TradingMarketId } from '@/lib/trading/marketTabs';
 export interface MarketTabsProps {
   market: TradingMarketId;
   onMarket: (m: TradingMarketId) => void;
+  /**
+   * 지금 시장을 바꿀 수 없는 이유. **주문이 날아가는 중**이면 찬다.
+   *
+   * 숨기지 않고 **끄고 이유를 붙인다** — 탭이 사라지면 그 시장이 없는
+   * 것으로 읽히고, 열어 두면 BTC 주문 결과가 ETH 화면에 뜬다.
+   */
+  blockedReason?: string | null;
 }
 
-export function MarketTabs({ market, onMarket }: MarketTabsProps) {
+export function MarketTabs({ market, onMarket, blockedReason }: MarketTabsProps) {
+  const blocked = !!blockedReason;
   return (
     <div
       data-testid="market-tabs"
@@ -52,13 +60,17 @@ export function MarketTabs({ market, onMarket }: MarketTabsProps) {
             aria-selected={on}
             data-testid={`market-tab-${t.id}`}
             data-active={on ? '1' : '0'}
-            onClick={() => onMarket(t.id)}
+            onClick={() => { if (!blocked) onMarket(t.id); }}
+            disabled={blocked && !on}
+            title={blocked && !on ? (blockedReason || undefined) : undefined}
             style={{
               flexShrink: 0, minHeight: 32, padding: '0 12px', borderRadius: 7,
               border: `1px solid ${on ? C.accent : 'transparent'}`,
               background: on ? C.accentBg : 'transparent',
               color: on ? C.accent : C.faint,
-              fontSize: FS.small, fontWeight: 800, cursor: 'pointer',
+              fontSize: FS.small, fontWeight: 800,
+              cursor: blocked && !on ? 'not-allowed' : 'pointer',
+              opacity: blocked && !on ? 0.5 : 1,
               whiteSpace: 'nowrap',
             }}
           >

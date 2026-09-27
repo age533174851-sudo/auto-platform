@@ -175,6 +175,8 @@ export function SpotTradingScreen(p: SpotScreenProps) {
     <TradingScreenShell
       testid={CONTRACT.root}
       market={p.market} onMarket={p.onMarket}
+      onPickInstrument={p.onPickInstrument}
+      switchBlockedReason={p.switchBlockedReason}
       instrumentReason={p.instrumentReason}
       symbol={sym ?? '종목 없음'} name={p.name}
       marketLabel={capability('SPOT').label}
