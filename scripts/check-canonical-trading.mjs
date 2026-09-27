@@ -68,6 +68,10 @@ const FORMHOOK = 'src/lib/trading/useTradeForm.ts';
 const SIZING   = 'src/lib/trading/positionSizing.ts';
 const SIZEUI   = 'src/components/trading/markets/SpotSizeInput.tsx';
 const CTAV     = 'src/lib/trading/ctaVerdict.ts';
+const REVIEW   = 'src/lib/trading/paperOrderReview.ts';
+const REVHOOK  = 'src/lib/trading/usePaperOrderReview.ts';
+const REVSHEET = 'src/components/trading/markets/PaperOrderReviewSheet.tsx';
+const BOOKVIEW = 'src/components/trading/OrderBookView.tsx';
 const PLAN     = 'src/lib/engine/paperPlan.ts';
 const PEXEC    = 'src/lib/engine/paperExecution.ts';
 
@@ -1416,10 +1420,21 @@ const drawer = code(read(DRAWER));
   if (!/const orderInFlight = form\.busy \|\| sell\.busy;/.test(order)) {
     err(`${ORDER}가 주문 진행 상태를 판정하지 않습니다`);
   }
+  // ★ 잠금 깃발이 **주문 진행을 실제로 포함하는가**를 본다.
+  //
+  //   확인 창(㉙)이 생기면서 세 콜백의 가드가 `switchLocked` 하나로 합쳐졌다.
+  //   깃발 이름만 보면 그 안에서 `inFlight`가 빠져도 통과한다 — 그러면
+  //   보낸 주문의 결과가 다른 종목 화면에 뜨는 옛 고장이 그대로 돌아온다.
+  if (!/inFlight:\s*orderInFlight\b/.test(order)) {
+    err(`${ORDER}의 전환 잠금이 주문 진행 상태를 포함하지 않습니다`);
+  }
+  if (!/const switchLocked = lockState !== 'NONE';/.test(order)) {
+    err(`${ORDER}가 전환 잠금 깃발을 정본 상태에서 만들지 않습니다`);
+  }
   for (const [what, re] of [
-    ['시장 전환', /setMarketTab = React\.useCallback\(\(m: TradingMarketId\) => \{\s*\n\s*if \(orderInFlight\) return;/],
-    ['종목 고르기', /openPicker = React\.useCallback\(\(\) => \{\s*\n\s*if \(orderInFlight\) return;/],
-    ['종목 선택', /pickInstrument = React\.useCallback\(\([\s\S]{0,40}?\) => \{\s*\n\s*if \(orderInFlight\) return;/],
+    ['시장 전환', /setMarketTab = React\.useCallback\(\(m: TradingMarketId\) => \{\s*\n\s*if \(switchLocked\) return;/],
+    ['종목 고르기', /openPicker = React\.useCallback\(\(\) => \{\s*\n\s*if \(switchLocked\) return;/],
+    ['종목 선택', /pickInstrument = React\.useCallback\(\([\s\S]{0,40}?\) => \{\s*\n\s*if \(switchLocked\) return;/],
   ]) {
     if (!re.test(order)) {
       err(`${ORDER}가 주문 진행 중에 ${what}을 막지 않습니다`
@@ -1525,6 +1540,39 @@ const drawer = code(read(DRAWER));
       if (re.test(c)) {
         err(`${sc.file}에 지정가 UI가 있습니다 (${re}) — 모의 장부에 대기 주문이 없습니다`);
       }
+    }
+  }
+}
+
+// ══════════════ ㉕-b ★ 가격을 안 받으면 호가 줄도 **눌리지 않는다** ══════════════
+//
+// `#284`가 `onPickPrice`를 뗐을 때 커서 · 밑줄 · title은 같이 꺼졌지만
+// **줄 자체는 살아 있는 `<button>`이었다.** 보기에는 안 눌릴 것 같은데
+// 포커스가 가고 실제로 눌린다 — 누르면 아무 일도 없다. 가운데 현재가
+// 버튼은 이미 `disabled={mid == null || !onPickPrice}`로 막고 있었고
+// **사다리만 빠져 있었다.** 실기 프로브가 줄 14개를 살아 있는 버튼으로
+// 셌다(`scripts/probe/order-review.mjs`).
+//
+// ★ 색·커서가 아니라 **DOM `disabled`**를 본다.
+{
+  const src = code(read(BOOKVIEW));
+  const rows = jsxTagsWith(src, 'button', /data-book-row/);
+  if (rows.length !== 1) {
+    err(`${BOOKVIEW}의 호가 줄 버튼을 찾지 못했습니다 (${rows.length}개)`);
+  } else {
+    const d = attrValue(rows[0], 'disabled');
+    if (d == null || !/!\s*onPickPrice/.test(d)) {
+      err(`${BOOKVIEW}의 호가 줄이 가격 선택을 안 받는데도 눌립니다 (disabled=${d})`
+        + ' — 눌러도 아무 일도 없는 칸입니다');
+    }
+  }
+  // 가운데 현재가도 같은 규칙이다 (이미 지키고 있다 — 갈라지지 않게 본다)
+  const mids = jsxTagsWith(src, 'button', /onPickPrice\?\.\(mid\)/);
+  if (mids.length !== 1) err(`${BOOKVIEW}의 현재가 버튼을 찾지 못했습니다`);
+  else {
+    const d = attrValue(mids[0], 'disabled');
+    if (d == null || !/!\s*onPickPrice/.test(d)) {
+      err(`${BOOKVIEW}의 현재가 버튼이 가격 선택을 안 받는데도 눌립니다 (disabled=${d})`);
     }
   }
 }
@@ -1785,11 +1833,15 @@ const drawer = code(read(DRAWER));
         if (!/\.action === 'CHOOSE_SIDE'/.test(click)) {
           err(`${usdm}의 실행 버튼 클릭이 방향 고르기를 판정에서 받지 않습니다`);
         }
-        if (/form\.submit\s*\(/.test(click)
-            && !/\.action === 'SUBMIT'\)[^;]*form\.submit\s*\(/.test(click)) {
-          err(`${usdm}의 실행 버튼이 판정 없이 주문을 보냅니다`
-            + " — `action === 'SUBMIT'`일 때만 보내야 합니다"
-            + ' (청산 탭에서 진입 주문이 나갑니다)');
+        // 제출은 아예 없어야 하고(㉙), 확인 창 열기도 **판정이 정할 때만**이다.
+        if (/form\.submit\s*\(/.test(click)) {
+          err(`${usdm}의 실행 버튼이 주문을 직접 보냅니다`
+            + ' — 제출은 확인 창 하나입니다 (청산 탭에서 진입 주문이 나갑니다)');
+        }
+        if (/review\.open\s*\(/.test(click)
+            && !/\.action === 'OPEN_REVIEW'\)[^;]*review\.open\s*\(/.test(click)) {
+          err(`${usdm}의 실행 버튼이 판정 없이 확인 창을 엽니다`
+            + " — `action === 'OPEN_REVIEW'`일 때만 열어야 합니다");
         }
         for (const re of [/\blocked\b/, /\bunavailable\b/, /\bbusy\b/, /\bgate\b/, /\bintentOpen\b/]) {
           if (re.test(click)) {
@@ -1809,6 +1861,289 @@ const drawer = code(read(DRAWER));
   }
 }
 
+// ══════════════ ㉙ ★ 진입 주문은 확인 창을 거친다 (USDⓈ-M) ══════════════
+//
+// 무엇을 바꿨나
+// ─────────────
+// 같은 방향을 두 번 누르면 곧바로 `form.submit()`이 나갔다. 이제 두 번째
+// 클릭은 **확인 창을 열 뿐**이고, 주문은 그 창의 확인 버튼이 보낸다.
+//
+// 이 층이 생기면 새로 생길 수 있는 고장이 넷이다. 넷 다 여기서 막는다:
+//
+//   ⑴ 이름과 행동이 갈린다 — `action`은 `OPEN_REVIEW`인데 제출도 한다
+//   ⑵ 창을 여는 것만으로 서버에 흔적이 남는다 (조회·예약)
+//   ⑶ 창이 두 번째 주문폼이 된다 — 폼 상태가 두 벌
+//   ⑷ 창에 적힌 주문과 나가는 주문이 다르다
+//
+// ★ 그리고 운영 경로(`/api/orders/preflight` · `PreTradeChecklist`)를
+//   여기에 끌어오지 않는다. 그쪽은 운영 모드 · 거래소 상태 · position mode ·
+//   재대조 · 손실 제한을 본다. 모의 확인 창에 붙이면 모의 화면이 운영
+//   판정을 받아 "안전하다"는 착각을 주고, 반대로 운영 검사가 모의 경로의
+//   요구로 끌려다닌다.
+{
+  const cta = code(read(CTAV));
+  const rev = code(read(REVIEW));
+  const hook = code(read(REVHOOK));
+  const sheet = code(read(REVSHEET));
+  const usdm = CONTRACT
+    ? (CONTRACT.MARKET_SCREENS.find(x => x.market === 'USDT_FUTURES') || {}).file
+    : null;
+  const usdmSrc = usdm ? code(read(usdm)) : '';
+
+  // ⑴ 이름과 행동을 갈라 놓지 않는다
+  {
+    const body = fnBody(cta, 'ctaVerdict') || cta;
+    if (/['"]SUBMIT['"]/.test(cta)) {
+      err(`${CTAV}에 아직 'SUBMIT' 할 일이 있습니다`
+        + ' — 실행 버튼은 확인 창을 열 뿐 주문을 보내지 않습니다');
+    }
+    if (!/['"]OPEN_REVIEW['"]/.test(body)) {
+      err(`${CTAV}가 확인 창을 여는 할 일을 내지 않습니다`);
+    }
+  }
+
+  // ⑵ 실행 버튼은 제출하지 않는다 — 화면 어디에서도
+  if (!usdm) err('계약에서 USDⓈ-M 화면을 찾지 못했습니다');
+  else {
+    if (/form\.submit\s*\(/.test(usdmSrc)) {
+      err(`${usdm}가 직접 주문을 보냅니다 — 제출은 확인 창 하나입니다`);
+    }
+    if (!/<PaperOrderReviewSheet\b/.test(usdmSrc)) {
+      err(`${usdm}가 확인 창을 그리지 않습니다`
+        + ' — 만들어 놓고 배선을 안 한 상태입니다');
+    }
+    if (!/review\.open\(\)/.test(usdmSrc)) {
+      err(`${usdm}의 실행 버튼이 확인 창을 열지 않습니다`);
+    }
+  }
+
+  // ⑶ 운영 경로를 끌어오지 않는다
+  for (const [f, src] of [[REVIEW, rev], [REVHOOK, hook], [REVSHEET, sheet]]) {
+    if (!src) { err(`${f}를 읽지 못했습니다`); continue; }
+    for (const re of [/preflight/i, /PreTradeChecklist/, /preTradeChecklist/]) {
+      if (re.test(src)) {
+        err(`${f}가 운영 점검 경로를 씁니다 (${re})`
+          + ' — 모의 확인 창은 이미 계산된 값을 읽는 층입니다');
+      }
+    }
+  }
+
+  // ⑷ 여는 것에 부수효과가 없다
+  for (const [f, src] of [[REVIEW, rev], [REVSHEET, sheet]]) {
+    if (/fetch\s*\(/.test(src)) {
+      err(`${f}가 직접 조회합니다 — 확인 창은 이미 계산된 값을 읽습니다`);
+    }
+  }
+  if ((hook.match(/fetch\s*\(/g) || []).length > 0) {
+    err(`${REVHOOK}가 직접 조회합니다 — 주문은 정본 form.submit() 하나입니다`);
+  }
+
+  // ⑸ 제출이 나오는 자리가 **한 곳**이다
+  {
+    const subs = (hook.match(/form\.submit\s*\(/g) || []).length;
+    if (subs !== 1) {
+      err(`${REVHOOK}가 주문을 ${subs}곳에서 보냅니다 — 정확히 한 곳이어야 합니다`);
+    }
+    const body = fnBody(rev, 'reviewReduce');
+    if (!body) err(`${REVIEW}에서 전이 함수를 찾지 못했습니다`);
+    else if (!/effects:\s*\['SUBMIT'\]/.test(body)) {
+      err(`${REVIEW}의 전이가 제출 부수효과를 내지 않습니다`);
+    }
+    // 훅이 판정을 다시 쓰지 않는다 — `reviewReduce`가 정한 것만 실행한다
+    if (!/step\.effects\.includes\('SUBMIT'\)/.test(hook)) {
+      err(`${REVHOOK}가 전이가 돌려준 부수효과를 그대로 쓰지 않습니다`);
+    }
+    if (/if\s*\(\s*!?\w+\.gate\.ready/.test(hook) || /\bbusy\b\s*\)\s*return/.test(hook)) {
+      err(`${REVHOOK}가 제출 조건을 다시 계산합니다 — 판정은 confirmVerdict 하나입니다`);
+    }
+  }
+
+  // ⑹ 창이 두 번째 주문폼이 되지 않는다
+  for (const re of [/<input\b/, /<select\b/, /<textarea\b/,
+                    /setLeverage\s*\(/, /setPercent\s*\(/, /setMarginMode\s*\(/,
+                    /setTp\s*\(/, /setSl\s*\(/, /setSlPct\s*\(/, /setSide\s*\(/,
+                    /chooseSide\s*\(/]) {
+    if (re.test(sheet)) {
+      err(`${REVSHEET}에 주문 입력이 있습니다 (${re})`
+        + ' — 확인 창은 읽기 전용입니다. 폼 상태가 두 벌이 됩니다');
+    }
+  }
+
+  // ⑺ 창이 보는 정체성은 **붙잡은 표**에서 온다
+  for (const re of [/\bctx\.symbol\b/, /\bctx\.market\b/]) {
+    if (re.test(sheet) || re.test(rev) || re.test(hook)) {
+      err(`확인 창이 들어올 때의 문맥을 봅니다 (${re})`
+        + ' — 화면과 주문이 다른 종목을 보게 됩니다');
+    }
+  }
+  if (!/data-review-symbol=\{review\.ticket\.symbol\}/.test(sheet)
+      || !/data-review-market=\{review\.ticket\.market\}/.test(sheet)) {
+    err(`${REVSHEET}가 어떤 주문을 보여 주는지 드러내지 않습니다`
+      + ' — 실기에서 화면과 주문이 같은지 확인할 수 없습니다');
+  }
+
+  // ⑻ 청산 거리를 배율로 다시 계산하지 않는다
+  //
+  //   ★ 연산 모양을 나열해 막으면 안 된다. `100 / lev`를 막으면
+  //     `100 / Number(i.leverage)`로 돌아온다 — 뮤테이션이 정확히 그 틈으로
+  //     살아남았다. 그래서 **그 칸이 무엇을 읽는가**를 본다.
+  {
+    const rowsBody = fnBody(rev, 'reviewRows');
+    if (!rowsBody) err(`${REVIEW}에서 표시 줄 정본을 찾지 못했습니다`);
+    else {
+      // `LIQUIDATION_DISTANCE` 줄만 잘라 본다 (다음 줄 키까지)
+      const at = rowsBody.indexOf("key: 'LIQUIDATION_DISTANCE'");
+      const block = at < 0 ? '' : rowsBody.slice(at);
+      if (!block) err(`${REVIEW}에 청산 거리 칸이 없습니다`);
+      else {
+        if (!/i\.plan\.plan\.liquidationDistancePct/.test(block)) {
+          err(`${REVIEW}의 청산 거리가 정본 계획에서 오지 않습니다`
+            + ' — 격리/교차·잔고가 빠진 숫자가 됩니다');
+        }
+        if (/\bleverage\b/.test(block) || /\blev\b/.test(block)) {
+          err(`${REVIEW}의 청산 거리가 배율을 직접 읽습니다`
+            + ' — 배율만으로 낸 값은 정본과 다릅니다');
+        }
+      }
+    }
+    for (const [f, src] of [[REVSHEET, sheet], [REVHOOK, hook]]) {
+      if (/liquidationDistancePct\s*[=(]/.test(src)) {
+        err(`${f}가 청산 거리를 스스로 만듭니다 — 정본은 buildPaperPlan입니다`);
+      }
+    }
+  }
+
+  // ⑼ 없는 값을 0으로 적지 않는다
+  for (const re of [/\?\?\s*0\b/, /\|\|\s*0\b/, /liquidationPrice\s*\?\?/]) {
+    if (re.test(rev)) {
+      err(`${REVIEW}가 없는 값을 0으로 채웁니다 (${re})`
+        + ' — 수수료 0원짜리 주문으로 보입니다');
+    }
+  }
+  if (!/kind:\s*'UNKNOWN'/.test(rev)) {
+    err(`${REVIEW}에 "확인하지 못했다"를 적을 자리가 없습니다`);
+  }
+
+  // ⑽ 기준가를 역산하지 않는다
+  for (const [f, src] of [[REVIEW, rev], [REVSHEET, sheet], [REVHOOK, hook]]) {
+    for (const re of [/notional\s*\//, /\/\s*quantity\b/, /\/\s*qty\b/]) {
+      if (re.test(src)) {
+        err(`${f}가 기준가를 되만듭니다 (${re})`
+          + ' — 수량이 격자에 맞춰 잘린 뒤에는 그 값이 기준가가 아닙니다');
+      }
+    }
+  }
+  if (!/referencePrice/.test(rev) || !/referencePrice/.test(hook)) {
+    err('확인 창이 폼의 미리보기 기준가를 받지 않습니다');
+  }
+  if (!/referencePrice:\s*i\.price/.test(code(read(FORMHOOK)))) {
+    err(`${FORMHOOK}가 미리보기 기준가를 값으로 내보내지 않습니다`);
+  }
+
+  // ⑾ 확인 중에도 시장·종목을 못 바꾼다 — 그리고 사유가 다르다
+  {
+    const ident = code(read(IDENT));
+    const fn = fnBody(ident, 'switchBlockedReason');
+    if (!fn) err(`${IDENT}에서 전환 차단 사유를 찾지 못했습니다`);
+    else {
+      const msgs = (fn.match(/'[^']{10,}'/g) || []);
+      const uniq = new Set(msgs);
+      if (msgs.length < 2 || uniq.size !== msgs.length) {
+        err(`${IDENT}가 확인 중과 보내는 중에 같은 사유를 씁니다`
+          + ' — 확인 중인데 "보내는 중"이라고 적으면 이미 나간 줄 압니다');
+      }
+      if (!/ORDER_REVIEW/.test(fn) || !/ORDER_IN_FLIGHT/.test(fn)) {
+        err(`${IDENT}의 전환 잠금이 두 상태를 구별하지 않습니다`);
+      }
+    }
+    if (!/switchLockState\(\{/.test(order)) {
+      err(`${ORDER}가 전환 잠금 상태를 정본으로 정하지 않습니다`);
+    }
+    if (!/reviewing:\s*review\.phase !== 'NONE'/.test(order)) {
+      err(`${ORDER}의 전환 잠금이 확인 창을 보지 않습니다`
+        + ' — 창에는 ETHUSDT가 적혀 있는데 뒤에서 종목이 바뀝니다');
+    }
+    for (const [what, re] of [
+      ['시장 전환', /setMarketTab = React\.useCallback\(\(m: TradingMarketId\) => \{\s*\n\s*if \(switchLocked\) return;/],
+      ['종목 고르기', /openPicker = React\.useCallback\(\(\) => \{\s*\n\s*if \(switchLocked\) return;/],
+      ['종목 선택', /pickInstrument = React\.useCallback\(\([\s\S]{0,40}?\) => \{\s*\n\s*if \(switchLocked\) return;/],
+    ]) {
+      if (!re.test(order)) {
+        err(`${ORDER}가 확인 창이 열린 동안 ${what}을 막지 않습니다`);
+      }
+    }
+  }
+
+  // ⑿ 확인 버튼도 색 · DOM · 클릭이 판정 하나를 본다
+  {
+    const btns = jsxTagsWith(sheet, 'button', /review-confirm/);
+    if (btns.length !== 1) err(`${REVSHEET}의 확인 버튼을 찾지 못했습니다`);
+    else {
+      const attrs = btns[0];
+      const norm = (t) => t.replace(/\s+/g, ' ').trim();
+      const d = attrValue(attrs, 'disabled');
+      if (norm(d || '') !== 'v.off') {
+        err(`${REVSHEET}의 확인 버튼 DOM 꺼짐이 판정의 .off가 아닙니다 (${d})`);
+      }
+      const st = styleEntries(attrs);
+      for (const prop of ['background', 'color', 'cursor']) {
+        const c = st[prop] == null ? null : ternaryCond(st[prop]);
+        if (c == null) { err(`${REVSHEET}의 확인 버튼 ${prop}이 꺼짐을 보지 않습니다`); continue; }
+        if (norm(c) !== 'v.off') {
+          err(`${REVSHEET}의 확인 버튼은 색과 DOM이 다른 식을 봅니다 (${prop}: ${norm(c)})`);
+        }
+      }
+      if (!/data-confirm-action=\{v\.action\}/.test(attrs)) {
+        err(`${REVSHEET}의 확인 버튼이 판정의 할 일을 드러내지 않습니다`);
+      }
+      const click = attrValue(attrs, 'onClick') || '';
+      for (const re of [/gate/, /\bbusy\b/, /form\.submit/, /ticket/]) {
+        if (re.test(click)) {
+          err(`${REVSHEET}의 확인 버튼 클릭이 판정을 다시 계산합니다 (${re})`);
+        }
+      }
+    }
+  }
+
+  // ⒀ 확인 창은 USDⓈ-M만 쓴다 (현물 흐름을 바꾸지 않는다)
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    if (sc.market === 'USDT_FUTURES') continue;
+    const c = code(read(sc.file));
+    if (/PaperOrderReviewSheet|usePaperOrderReview|\breview\b/.test(c)) {
+      err(`${sc.file}가 확인 창을 끌어옵니다 — 이번 범위는 USDⓈ-M 진입뿐입니다`);
+    }
+  }
+
+  // ⒁ 화면이 주문 방식 글자를 지어내지 않는다 — 그리고 그 글자가 사실이다
+  {
+    // ★ 상수 이름이 파일 어딘가에 있는지가 아니라 **그 칸에 들어가는지**를
+    //   본다. import 줄만 남겨 두고 값은 글자로 적으면 이름 검사는 통과한다.
+    if (!/orderTypeLabel:\s*PAPER_ORDER_TYPE_LABEL\b/.test(order)) {
+      err(`${ORDER}가 주문 방식 글자를 정본 상수에서 가져오지 않습니다`);
+    }
+    const cap = code(read('src/lib/trading/capability.ts'));
+    const limit = /case 'TYPE_LIMIT':[\s\S]{0,400}?return no\(/.test(cap);
+    if (!limit) {
+      err('능력표에서 지정가가 더 이상 미지원이 아닙니다'
+        + ' — 확인 창의 "시장가" 글자를 다시 봐야 합니다');
+    }
+  }
+
+  // ⒂ 서버가 다시 계산한다는 사실을 적는다 (화면 숫자를 약속으로 읽지 않게)
+  if (!/REVIEW_SERVER_RECALC_NOTE/.test(sheet)) {
+    err(`${REVSHEET}가 서버 재계산 문구를 적지 않습니다`
+      + ' — 미리보기 가격이 확정 체결가로 읽힙니다');
+  }
+  if (!/서버가 다시 계산/.test(rev)) {
+    err(`${REVIEW}에 서버 재계산 문구가 없습니다`);
+  }
+  for (const re of [/확정\s*체결가/, /체결\s*예정가/]) {
+    if (re.test(rev) || re.test(sheet)) {
+      err(`확인 창이 미리보기 가격을 확정으로 적습니다 (${re})`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -1822,4 +2157,5 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' ★화면=주문 정체성 일치 · ★상장목록 거래소 출처 · ★주문중 전환차단 ·'
   + ' ★정체성 변경시 입력 초기화 · ★시장가 전용인데 지정가 UI 없음 ·'
   + ' ★수량/총액 단일 계산 · ★직접입력 비클램프 · ★MAX 수수료 정본 ·'
-  + ' ★호가판 prop 허용목록(누름 동작 없음) · ★실행버튼 색=DOM=클릭 단일 판정');
+  + ' ★호가판 prop 허용목록(누름 동작 없음) · ★실행버튼 색=DOM=클릭 단일 판정 ·'
+  + ' ★진입은 확인 창을 거침(제출 1곳 · 부수효과 없음 · 읽기전용 · preflight 비연결)');

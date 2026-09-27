@@ -55,7 +55,11 @@ import {
   instrumentForMarket, instrumentFromCatalog, selectInstrument,
   EMPTY_SELECTION, type SelectedByMarket,
 } from '@/lib/trading/marketInstrument';
-import { activeIdentity, switchBlockedReason } from '@/lib/trading/tradeIdentity';
+import { activeIdentity, switchBlockedReason, switchLockState } from '@/lib/trading/tradeIdentity';
+import { usePaperOrderReview } from '@/lib/trading/usePaperOrderReview';
+import { PAPER_ORDER_TYPE_LABEL } from '@/lib/trading/paperOrderReview';
+import { ctaVerdict } from '@/lib/trading/ctaVerdict';
+import { capability } from '@/lib/markets/marketType';
 import { useInstrumentCatalog } from '@/lib/trading/useInstrumentCatalog';
 import { InstrumentPicker } from './markets/InstrumentPicker';
 import { changeView } from '@/lib/markets/changeBasis';
@@ -165,26 +169,57 @@ export function PaperOrderScreen({
   //   BTC 주문을 보낸 뒤 응답이 오기 전에 ETH로 바꾸면, BTC의 결과
   //   메시지가 ETH 화면에 뜬다. 사용자는 ETH가 체결된 줄 안다.
   const orderInFlight = form.busy || sell.busy;
-  const switchBlocked = switchBlockedReason(orderInFlight);
+
+  // ── ★ 주문 확인 시트 ──
+  //
+  //   `form`과 **같은 자리**에서 한 번 만든다. 화면 안에서 만들면 전환
+  //   잠금이 그 상태를 볼 수 없고, 잠금 쪽에 사본을 두면 같은 판단이 두
+  //   곳이 된다.
+  //
+  //   CTA 판정을 여기서도 한 번 부르는 이유: 시트를 **열어도 되는지**는
+  //   CTA가 정한 할 일과 같아야 한다. 두 벌로 만들면 버튼은 꺼져 있는데
+  //   다른 경로로 시트가 열리는 상태가 생긴다.
+  const usdmCta = ctaVerdict({
+    gateReady: !!form.gate.ready, busy: !!form.busy, intentOpen: true,
+    locked: !activeSymbol, unavailable: false,
+    sideChosen: !!form.sideChosen, sameSide: true,
+  });
+  const review = usePaperOrderReview({
+    form,
+    marketLabel: capability('USDT_FUTURES').label,
+    sideLabel: form.side,
+    // 주문 방식 글자를 화면이 지어내지 않는다 — 정본 상수다.
+    orderTypeLabel: PAPER_ORDER_TYPE_LABEL,
+    intentOpen: true,
+    ctaAction: usdmCta.action,
+  });
+
+  // 확인 중과 보내는 중은 **다른 상태**다. 사유를 돌려쓰면 확인 중인데
+  // "보내는 중입니다"가 뜨고, 사용자는 주문이 이미 나간 줄 안다.
+  const lockState = switchLockState({
+    inFlight: orderInFlight, reviewing: review.phase !== 'NONE',
+  });
+  const switchBlocked = switchBlockedReason(lockState);
+  const switchLocked = lockState !== 'NONE';
 
   const setMarketTab = React.useCallback((m: TradingMarketId) => {
-    if (orderInFlight) return;
+    if (switchLocked) return;
     setPickerOpen(false);
     setMarketTabRaw(m);
-  }, [orderInFlight]);
+  }, [switchLocked]);
 
   const openPicker = React.useCallback(() => {
-    if (orderInFlight) return;
+    if (switchLocked) return;
     setPickerOpen(true);
-  }, [orderInFlight]);
+  }, [switchLocked]);
 
   const pickInstrument = React.useCallback((row: any) => {
-    if (orderInFlight) return;
+    if (switchLocked) return;
     // 고른 줄을 **그대로** 담는다. 다듬거나 만들지 않는다.
     // 다른 시장의 줄이면 `selectInstrument`가 거부한다.
     setSelected(prev => selectInstrument(prev, marketTab, instrumentFromCatalog(row)));
     setPickerOpen(false);
-  }, [marketTab, orderInFlight]);
+  }, [marketTab, switchLocked]);
 
   // 진입 경로로 들어왔으면 방향을 문맥에서 가져온다. **현물 매도는 여기
   // 오지 않는다** — `routeFor`가 이미 다른 길로 보냈다.
@@ -237,13 +272,15 @@ export function PaperOrderScreen({
         data-form-symbol={form.symbol}
         data-form-market={form.market}
         data-in-flight={orderInFlight ? '1' : '0'}
+        data-switch-lock={lockState}
+        data-review-phase={review.phase}
         style={{ position: 'relative', height: '100%', minHeight: 0, background: C.bg }}>
         {screen === 'SPOT_SCREEN' ? (
           <SpotTradingScreen {...common}
             form={form} sell={sell} ledger={ledger} canOrder={wiring.canOrder}/>
         ) : screen === 'USDM_SCREEN' ? (
           <UsdtFuturesTradingScreen {...common}
-            form={form} sell={sell} ledger={ledger} auth={auth}
+            form={form} sell={sell} review={review} ledger={ledger} auth={auth}
             markPrice={stream.markPrice} canOrder={wiring.canOrder}/>
         ) : screen === 'COINM_SCREEN' ? (
           <CoinMFuturesTradingScreen {...common} markPrice={stream.markPrice}/>

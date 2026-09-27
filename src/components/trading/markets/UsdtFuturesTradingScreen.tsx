@@ -36,6 +36,7 @@ import { TradingScreenShell, InfoStat, LockedField,
   type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { ctaVerdict } from '@/lib/trading/ctaVerdict';
+import { PaperOrderReviewSheet } from './PaperOrderReviewSheet';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { capability } from '@/lib/markets/marketType';
@@ -43,6 +44,7 @@ import type { useTradeForm } from '@/lib/trading/useTradeForm';
 import type { useSellForm } from '@/lib/trading/useSellForm';
 import type { MoneyScope } from '@/lib/trading/gameMoney';
 import type { PaperLedger } from '@/lib/trading/usePaperLedger';
+import type { PaperOrderReview } from '@/lib/trading/usePaperOrderReview';
 
 type TradeForm = ReturnType<typeof useTradeForm>;
 type SellForm = ReturnType<typeof useSellForm>;
@@ -52,6 +54,11 @@ export interface FuturesScreenProps extends MarketScreenCommonProps {
   /** **받는다. 만들지 않는다.** 간편 화면과 같은 인스턴스다 */
   form: TradeForm;
   sell: SellForm;
+  /**
+   * 주문 확인 시트의 상태. **여기서 만들지 않는다** — 전환 잠금이 같은
+   * 값을 봐야 해서 `form`과 같은 자리에서 한 번 만들어 내려온다.
+   */
+  review: PaperOrderReview;
   ledger: PaperLedger;
   auth?: string;
   markPrice: number | null;
@@ -165,6 +172,7 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
   ];
 
   return (
+    <>
     <TradingScreenShell
       testid={CONTRACT.root}
       market={p.market} onMarket={p.onMarket}
@@ -205,15 +213,20 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
           {/* `gate.ready` · `busy`는 `ctaVerdict`가 폼에서 직접 읽는다.
               화면이 넘기는 것은 **화면만 아는 것**(진입/청산)뿐이다. */}
           <Cta form={p.form} side="LONG" locked={locked}
-            intentOpen={intent === 'OPEN'}
+            intentOpen={intent === 'OPEN'} review={p.review}
             lockedReason={p.instrumentReason}/>
           <Cta form={p.form} side="SHORT" locked={locked}
-            intentOpen={intent === 'OPEN'}
+            intentOpen={intent === 'OPEN'} review={p.review}
             unavailable={p.form.shortDisabled} lockedReason={p.instrumentReason}/>
         </div>
       }
       tabs={tabs}
     />
+    {/* ★ 확인 시트. 화면 안에 둔다 — 껍데기 밖에 두면 헤더·탭 위에 못 덮는다.
+        열려 있을 때만 그려지고, 열려 있는 동안 시장·종목 전환은
+        `switchLockState`가 막는다(`PaperOrderScreen`). */}
+    <PaperOrderReviewSheet review={p.review} scope={p.scope}/>
+    </>
   );
 }
 
@@ -221,10 +234,12 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
  * 막혔으면 **왜 막혔는지 버튼 글자가 말한다**(`submitGate.submitLabel`).
  * 회색 버튼만 두고 이유를 안 적는 상태를 만들지 않는다.
  */
-export function Cta({ form, side, intentOpen, unavailable, locked, lockedReason }: {
+export function Cta({ form, side, intentOpen, review, unavailable, locked, lockedReason }: {
   form: TradeForm; side: 'LONG' | 'SHORT';
   /** 지금 화면이 **진입**인가. 청산 탭에서는 진입 버튼이 꺼진다 */
   intentOpen: boolean;
+  /** 확인 시트. **이 버튼은 주문을 보내지 않는다 — 시트를 열 뿐이다** */
+  review: PaperOrderReview;
   unavailable?: boolean;
   /** 종목이 없다. **누를 수 없어야 한다** */
   locked: boolean;
@@ -263,8 +278,13 @@ export function Cta({ form, side, intentOpen, unavailable, locked, lockedReason 
       title={lockedReason || v.reason || form.gate.reason || undefined}
       onClick={() => {
         // 판정을 다시 쓰지 않는다. **위에서 정한 것을 그대로 따른다.**
+        //
+        // ★ 여기서 `form.submit()`을 부르지 않는다. 두 번째 클릭은
+        //   **확인 시트를 열 뿐**이고, 주문은 시트의 확인 버튼이 보낸다.
+        //   `data-cta-action`이 `OPEN_REVIEW`인데 실제로 제출하면 이름과
+        //   행동이 갈린다 — 검사기가 그것을 막는다.
         if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }
-        if (v.action === 'SUBMIT') void form.submit();
+        if (v.action === 'OPEN_REVIEW') review.open();
       }}
       style={{
         flex: 1, minWidth: 0, padding: '13px 0', borderRadius: 9, border: 'none',
@@ -276,7 +296,9 @@ export function Cta({ form, side, intentOpen, unavailable, locked, lockedReason 
       }}>
       {/* 막혔거나 아직 안 고른 상태면 **시장의 말**을 보여준다. 보낼 수
           있을 때만 정본 판정이 만든 문구를 쓴다. */}
-      {on && !off ? form.submitText : label}
+      {/* ★ 켜졌을 때 `form.submitText`("… 주문")를 쓰지 않는다. 이 버튼은
+          보내지 않는다 — 누르면 확인 창이 뜬다. 말과 행동을 맞춘다. */}
+      {on && !off ? `${label} 주문 확인` : label}
     </button>
   );
 }

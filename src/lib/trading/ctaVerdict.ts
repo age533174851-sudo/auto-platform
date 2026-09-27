@@ -30,8 +30,15 @@ export type CtaAction =
   | 'NONE'
   /** 방향만 고른다. **주문은 나가지 않는다** */
   | 'CHOOSE_SIDE'
-  /** 주문을 보낸다 */
-  | 'SUBMIT';
+  /**
+   * 주문 확인 시트를 연다. **여기서 주문이 나가지 않는다.**
+   *
+   * ★ 예전 이름은 `'SUBMIT'`이었고 실제로 `form.submit()`을 불렀다.
+   *   확인 시트가 생긴 뒤에도 이름을 그대로 두면 "SUBMIT인데 보내지 않는"
+   *   상태가 되고, 다음 사람이 이름을 믿고 배선을 고친다. 이름과 행동을
+   *   갈라 두지 않는다 — 보내는 것은 `confirmVerdict`의 `'SUBMIT'` 하나다.
+   */
+  | 'OPEN_REVIEW';
 
 export interface CtaVerdictInput {
   /** 정본 판정이 보낼 준비가 됐다고 하는가 */
@@ -81,6 +88,7 @@ export function ctaVerdict(i: CtaVerdictInput): CtaVerdict {
   if (offReason) return { off: true, on, action: 'NONE', reason: offReason };
 
   // 켜져 있다. 아직 방향을 안 골랐으면 **고르기만** 한다 —
-  // 한 번의 클릭으로 주문이 나가지 않는다.
-  return { off: false, on, action: on ? 'SUBMIT' : 'CHOOSE_SIDE', reason: null };
+  // 한 번의 클릭으로 주문이 나가지 않는다. 골랐으면 **확인 시트를 연다** —
+  // 두 번의 클릭으로도 나가지 않는다. 보내는 것은 시트의 확인 버튼이다.
+  return { off: false, on, action: on ? 'OPEN_REVIEW' : 'CHOOSE_SIDE', reason: null };
 }

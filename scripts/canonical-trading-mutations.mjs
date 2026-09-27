@@ -51,6 +51,11 @@ const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
 const ROW    = 'src/components/trading/PositionRow.tsx';
 const CTAV   = 'src/lib/trading/ctaVerdict.ts';
+const REVIEW = 'src/lib/trading/paperOrderReview.ts';
+const REVHK  = 'src/lib/trading/usePaperOrderReview.ts';
+const REVSH  = 'src/components/trading/markets/PaperOrderReviewSheet.tsx';
+const IDENTF = 'src/lib/trading/tradeIdentity.ts';
+const BOOKV  = 'src/components/trading/OrderBookView.tsx';
 const CHECK  = 'scripts/check-canonical-trading.mjs';
 
 const ONLY = process.argv.slice(2);
@@ -284,8 +289,8 @@ const CASES = [
      `const _led = () => usePaperLedger(null as any, true);\nexport function BeginnerBuyScreen(`]]],
 
   ['MUT-N53 ★ 한 갈래에만 다른 판정 인스턴스를 넘긴다', ORDER, 'RED',
-   [[`            form={form} sell={sell} ledger={ledger} auth={auth}`,
-     `            form={{ ...form } as any} sell={sell} ledger={ledger} auth={auth}`]]],
+   [[`            form={form} sell={sell} review={review} ledger={ledger} auth={auth}`,
+     `            form={{ ...form } as any} sell={sell} review={review} ledger={ledger} auth={auth}`]]],
 
   ['MUT-N54 ★ 시장 화면이 거래소 격자를 다시 맞춘다 (격자 정본이 둘이 된다)', SPOT, 'RED',
    [[`export function SpotTradingScreen(p: SpotScreenProps) {`,
@@ -520,11 +525,11 @@ const CASES = [
    [[`          <div data-testid="catalog-unavailable"`, `          <div data-testid="catalog-no-match-dup"`]]],
 
   ['MUT-A18 ★ 주문 진행 중에도 시장을 바꿀 수 있게 둔다', ORDER, 'RED',
-   [[`  const setMarketTab = React.useCallback((m: TradingMarketId) => {\n    if (orderInFlight) return;`,
+   [[`  const setMarketTab = React.useCallback((m: TradingMarketId) => {\n    if (switchLocked) return;`,
      `  const setMarketTab = React.useCallback((m: TradingMarketId) => {`]]],
 
   ['MUT-A19 ★ 주문 진행 중에도 종목을 바꿀 수 있게 둔다', ORDER, 'RED',
-   [[`  const pickInstrument = React.useCallback((row: any) => {\n    if (orderInFlight) return;`,
+   [[`  const pickInstrument = React.useCallback((row: any) => {\n    if (switchLocked) return;`,
      `  const pickInstrument = React.useCallback((row: any) => {`]]],
 
   ['MUT-A20 ★ 탭 줄이 차단 사유를 무시하고 계속 눌린다', TABSUI, 'RED',
@@ -642,18 +647,18 @@ const CASES = [
   ['MUT-C8 ★ disabled를 판정이 아닌 상수에 묶는다', USDM, 'RED',
    [[`  const off = v.off;`, `  const off = false;`]]],
 
-  ['MUT-C9 ★ DOM은 그대로 두고 클릭이 판정을 무시하고 보낸다', USDM, 'RED',
+  ['MUT-C9 ★ DOM은 그대로 두고 클릭이 판정을 무시하고 연다', USDM, 'RED',
    [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        if (v.action === 'SUBMIT') void form.submit();`,
+     + `        if (v.action === 'OPEN_REVIEW') review.open();`,
      `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        void form.submit();`]]],
+     + `        review.open();`]]],
 
   ['MUT-C10 ★ 클릭이 판정을 다시 계산한다 (청산 탭에서 진입이 나간다)', USDM, 'RED',
    [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        if (v.action === 'SUBMIT') void form.submit();`,
+     + `        if (v.action === 'OPEN_REVIEW') review.open();`,
      `        if (locked || unavailable) return;\n`
      + `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        if (v.action === 'SUBMIT') void form.submit();`]]],
+     + `        if (v.action === 'OPEN_REVIEW') review.open();`]]],
 
   ['MUT-C11 ★ 화면이 판정 밖에서 intent를 다시 읽는다 (판정이 두 벌이 된다)', USDM, 'RED',
    [[`  const off = v.off;`, `  const off = v.off || !intentOpen;`]]],
@@ -692,6 +697,107 @@ const CASES = [
   ['OK-C2 호가판 태그에 줄바꿈만 넣는다', USDM, 'GREEN',
    [[`            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`,
      `            <OrderBookView symbolId={sym} market="USDM"\n              rows={7} dense/>`]]],
+
+  // ── ㉙ 확인 창 ──
+  //
+  // 이 층이 생기면서 새로 생길 수 있는 고장을 하나씩 심는다.
+
+  ['MUT-R1 ★ 실행 버튼이 확인 창을 건너뛰고 바로 보낸다', USDM, 'RED',
+   [[`        if (v.action === 'OPEN_REVIEW') review.open();`,
+     `        if (v.action === 'OPEN_REVIEW') void form.submit();`]]],
+
+  ['MUT-R2 ★ 확인 창을 만들어 놓고 그리지 않는다 (배선 누락)', USDM, 'RED',
+   [[`    <PaperOrderReviewSheet review={p.review} scope={p.scope}/>\n`, ``]]],
+
+  ['MUT-R3 ★ 이름만 OPEN_REVIEW이고 제출도 한다', CTAV, 'RED',
+   [[`  | 'OPEN_REVIEW';`, `  | 'OPEN_REVIEW'\n  | 'SUBMIT';`]]],
+
+  ['MUT-R4 ★ 확인 창을 여는데 조회가 나간다', REVIEW, 'RED',
+   [[`      if (!env.intentOpen) return stay(s);`,
+     `      if (!env.intentOpen) return stay(s);\n      void fetch('/api/paper/order');`]]],
+
+  ['MUT-R5 ★ 확인 창이 운영 점검 경로를 부른다', REVHK, 'RED',
+   [[`import type { TradeForm } from './useTradeForm';`,
+     `import type { TradeForm } from './useTradeForm';\n`
+     + `import { preTradeChecklist } from '../engine/preTradeChecklist';`]]],
+
+  ['MUT-R5b ★ 확인 창이 운영 점검 API를 부른다', REVHK, 'RED',
+   [[`    void form.submit().then(r => {`,
+     `    void fetch('/api/orders/preflight');\n    void form.submit().then(r => {`]]],
+
+  ['MUT-R6 ★ 확인 창에 배율 입력이 생긴다 (폼 상태가 두 벌)', REVSH, 'RED',
+   [[`        <div style={{\n          padding: '10px 14px 6px', fontSize: FS.lead, fontWeight: 800, color: C.text,\n        }}>주문 확인</div>`,
+     `        <div style={{\n          padding: '10px 14px 6px', fontSize: FS.lead, fontWeight: 800, color: C.text,\n        }}>주문 확인<input/></div>`]]],
+
+  ['MUT-R7 ★ 훅이 제출 조건을 다시 계산한다', REVHK, 'RED',
+   [[`    if (!step.effects.includes('SUBMIT')) return;`,
+     `    if (e.type !== 'CONFIRM') return;`]]],
+
+  ['MUT-R8 ★ 전이가 제출 부수효과를 내지 않는다 (확인해도 안 나간다)', REVIEW, 'RED',
+   [[`      return { state: { opened: s.opened, sent: true }, effects: ['SUBMIT'] };`,
+     `      return { state: { opened: s.opened, sent: true }, effects: [] };`]]],
+
+  ['MUT-R9 ★ 청산 거리를 배율만으로 다시 계산한다', REVIEW, 'RED',
+   [[`        : { kind: 'PERCENT', amount: Number(i.plan.plan.liquidationDistancePct) },`,
+     `        : { kind: 'PERCENT', amount: 100 / Number(i.leverage) },`]]],
+
+  ['MUT-R10 ★ 없는 청산가를 0으로 적는다', REVIEW, 'RED',
+   [[`      value: i.plan.liquidationPrice == null\n        ? unknown('청산가를 계산하지 못했습니다')\n        : { kind: 'PRICE', amount: Number(i.plan.liquidationPrice) },`,
+     `      value: { kind: 'PRICE', amount: Number(i.plan.liquidationPrice) ?? 0 },`]]],
+
+  ['MUT-R11 ★ 기준가를 명목가/수량으로 되만든다', REVIEW, 'RED',
+   [[`        : { kind: 'PRICE', amount: Number(i.referencePrice) },`,
+     `        : { kind: 'PRICE', amount: i.plan.notional / Number(i.quantity) },`]]],
+
+  ['MUT-R12 ★ 확인 중에는 전환을 막지 않는다', ORDER, 'RED',
+   [[`    inFlight: orderInFlight, reviewing: review.phase !== 'NONE',`,
+     `    inFlight: orderInFlight, reviewing: false,`]]],
+
+  ['MUT-R13 ★ 잠금 깃발에서 주문 진행이 빠진다 (옛 고장 복귀)', ORDER, 'RED',
+   [[`    inFlight: orderInFlight, reviewing: review.phase !== 'NONE',`,
+     `    inFlight: false, reviewing: review.phase !== 'NONE',`]]],
+
+  ['MUT-R14 ★ 확인 중과 보내는 중에 같은 사유를 쓴다', IDENTF, 'RED',
+   [[`    return '주문을 확인하는 중입니다 — 확인 창을 닫기 전에는 시장·종목을 바꿀 수 없습니다';`,
+     `    return '주문을 보내는 중입니다 — 결과가 올 때까지 시장·종목을 바꿀 수 없습니다';`]]],
+
+  ['MUT-R15 ★ 확인 버튼의 DOM 꺼짐을 판정에서 뗀다', REVSH, 'RED',
+   [[`            disabled={v.off}\n            data-confirm-action={v.action}`,
+     `            disabled={sending}\n            data-confirm-action={v.action}`]]],
+
+  ['MUT-R16 ★ 확인 버튼 클릭이 판정을 무시하고 보낸다', REVSH, 'RED',
+   [[`              review.confirm();`, `              void (review as any).form.submit();`]]],
+
+  ['MUT-R17 ★ 서버 재계산 문구를 지운다 (미리보기가 확정으로 읽힌다)', REVSH, 'RED',
+   [[`        }}>{REVIEW_SERVER_RECALC_NOTE}</div>`, `        }}>확정 체결가</div>`]]],
+
+  ['MUT-R18 ★ 현물 화면이 확인 창을 끌어온다 (범위 이탈)', SPOT, 'RED',
+   [[`import { OrderBookView } from '../OrderBookView';`,
+     `import { OrderBookView } from '../OrderBookView';\nimport { PaperOrderReviewSheet } from './PaperOrderReviewSheet';`]]],
+
+  ['MUT-R19 ★ 화면이 주문 방식 글자를 지어낸다', ORDER, 'RED',
+   [[`    orderTypeLabel: PAPER_ORDER_TYPE_LABEL,`, `    orderTypeLabel: '시장가',`]]],
+
+  ['MUT-R20 ★ 폼이 미리보기 기준가를 안 내보낸다', FORMHK, 'RED',
+   [[`    referencePrice: i.price,\n`, ``]]],
+
+  ['MUT-R21 ★ 어떤 주문을 보여 주는지 화면에서 지운다', REVSH, 'RED',
+   [[`        data-review-symbol={review.ticket.symbol}\n`, ``]]],
+
+  ['MUT-R22 ★ 호가 줄이 가격을 안 받는데도 눌린다 (실기 프로브가 잡은 것)', BOOKV, 'RED',
+   [[`      disabled={!onPickPrice}\n      onClick={() => onPickPrice?.(p)}`,
+     `      onClick={() => onPickPrice?.(p)}`]]],
+
+  ['MUT-R23 ★ 호가 줄을 늘 눌리게 한다', BOOKV, 'RED',
+   [[`      disabled={!onPickPrice}`, `      disabled={false}`]]],
+
+  ['MUT-R24 ★ 현재가 버튼도 늘 눌리게 한다', BOOKV, 'RED',
+   [[`            disabled={mid == null || !onPickPrice}`, `            disabled={mid == null}`]]],
+
+  ['OK-R1 확인 판정 정본에 주석 한 줄 추가', REVIEW, 'GREEN',
+   [[`export function confirmVerdict(`, `// 대조군\nexport function confirmVerdict(`]]],
+  ['OK-R2 확인 창에 주석 한 줄 추가', REVSH, 'GREEN',
+   [[`export function PaperOrderReviewSheet(`, `// 대조군\nexport function PaperOrderReviewSheet(`]]],
 
   ['OK-B1 사이징 정본에 주석 한 줄 추가', SIZING, 'GREEN',
    [[`export interface MaxAllocation {`, `// 대조군\nexport interface MaxAllocation {`]]],

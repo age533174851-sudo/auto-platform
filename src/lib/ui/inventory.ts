@@ -707,6 +707,17 @@ export const OVERLAYS: Overlay[] = [
       + '**기본이 접힘인 것이 계약이다** — 펴짐이 기본이면 260px 차트가 주문 버튼을 '
       + '화면 밖으로 밀어내던 배치가 이름만 바꿔 돌아온다 '
       + '(`scripts/check-canonical-trading.mjs`가 막는다)' },
+  { id: 'PaperOrderReviewSheet',
+    file: 'src/components/trading/markets/PaperOrderReviewSheet.tsx', status: 'EXISTS',
+    purpose: 'USDⓈ-M 모의 진입 — 보내기 전에 읽는 창 (읽기 전용)',
+    notes: '**두 번째 주문폼이 아니다.** 값을 고칠 칸이 하나도 없다 — 있으면 폼 '
+      + '상태가 두 벌이 되고 무엇이 나가는지 코드를 읽어야만 알게 된다. '
+      + '`ChartDrawer`처럼 거래 화면 통 안에서 `position: absolute; inset: 0`으로 '
+      + '덮으므로 전역 z-index 경쟁이 없다. 열려 있는 동안 시장·종목 전환이 '
+      + '잠긴다(`switchLockState`의 `ORDER_REVIEW`) — 창에는 ETHUSDT가 적혀 '
+      + '있는데 뒤에서 종목이 바뀌면 읽은 주문과 나가는 주문이 달라진다. '
+      + '판정은 `lib/trading/paperOrderReview.ts` 한 곳이고 '
+      + '`scripts/check-canonical-trading.mjs` ㉙가 배선을 지킨다' },
   { id: 'OverlayStack', file: 'src/lib/nav/overlayStack.ts', status: 'EXISTS',
     purpose: '겹침 순서와 뒤로가기',
     notes: '판정만 있다. 그리는 컴포넌트는 없다' },
