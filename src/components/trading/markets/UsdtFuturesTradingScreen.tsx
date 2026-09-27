@@ -35,6 +35,7 @@ import { PositionRow } from '../PositionRow';
 import { TradingScreenShell, InfoStat, LockedField,
   type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
+import { ctaVerdict } from '@/lib/trading/ctaVerdict';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
 import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { capability } from '@/lib/markets/marketType';
@@ -182,13 +183,17 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
       orderForm={orderForm}
       orderBook={
         <div data-testid={fieldTestId('ORDER_BOOK')} style={{ height: '100%' }}>
+          {/* ★ 아래 호가에 `onPickPrice`를 **넘기지 않는다.**
+              `OrderBookView`는 그 callback이 있으면 호가·중앙가에 눌림
+              표시(cursor·밑줄·title)를 켠다. 지금 `PRICE_INPUT`·`TYPE_LIMIT`은
+              미지원이라, 넘기면 눌리는 것처럼 보이는데 아무 일도 안 하는
+              칸이 된다. **아무것도 안 하는 함수를 넘기는 것도 같은 결과다.** */}
           {sym == null ? (
             <div data-testid="book-no-instrument" style={{
               padding: 10, fontSize: FS.nano, color: C.faint, lineHeight: 1.6,
             }}>{p.instrumentReason}</div>
           ) : (
-            <OrderBookView symbolId={sym} market="USDM" rows={7} dense
-              onPickPrice={() => { /* 모의 장부는 지정가를 받지 않는다 */ }}/>
+            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>
           )}
         </div>
       }
@@ -197,11 +202,13 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
         <div data-testid={fieldTestId('LONG_SHORT')} style={{ display: 'flex', gap: 6 }}>
           {/* 종목이 없으면 **누를 수 없다.** 열어 두면 눌러서 아무 일도
               안 일어나거나 다른 종목으로 나간다. */}
+          {/* `gate.ready` · `busy`는 `ctaVerdict`가 폼에서 직접 읽는다.
+              화면이 넘기는 것은 **화면만 아는 것**(진입/청산)뿐이다. */}
           <Cta form={p.form} side="LONG" locked={locked}
-            disabled={!p.form.gate.ready || p.form.busy || intent !== 'OPEN'}
+            intentOpen={intent === 'OPEN'}
             lockedReason={p.instrumentReason}/>
           <Cta form={p.form} side="SHORT" locked={locked}
-            disabled={!p.form.gate.ready || p.form.busy || intent !== 'OPEN'}
+            intentOpen={intent === 'OPEN'}
             unavailable={p.form.shortDisabled} lockedReason={p.instrumentReason}/>
         </div>
       }
@@ -214,8 +221,10 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
  * 막혔으면 **왜 막혔는지 버튼 글자가 말한다**(`submitGate.submitLabel`).
  * 회색 버튼만 두고 이유를 안 적는 상태를 만들지 않는다.
  */
-export function Cta({ form, side, disabled, unavailable, locked, lockedReason }: {
-  form: TradeForm; side: 'LONG' | 'SHORT'; disabled: boolean;
+export function Cta({ form, side, intentOpen, unavailable, locked, lockedReason }: {
+  form: TradeForm; side: 'LONG' | 'SHORT';
+  /** 지금 화면이 **진입**인가. 청산 탭에서는 진입 버튼이 꺼진다 */
+  intentOpen: boolean;
   unavailable?: boolean;
   /** 종목이 없다. **누를 수 없어야 한다** */
   locked: boolean;
@@ -224,7 +233,21 @@ export function Cta({ form, side, disabled, unavailable, locked, lockedReason }:
   // **초기값을 "골랐다"로 읽지 않는다.** `form.side`는 미리보기 계산용
   // 기본값(LONG)을 갖고 있어서, 그것만 보면 LONG은 한 번에 나가고 SHORT는
   // 두 번 눌러야 하는 비대칭이 생긴다.
-  const on = form.sideChosen && form.side === side;
+  // ★ **판정은 한 번이다.** 색 · DOM · 클릭이 같은 값을 본다.
+  //
+  //   예전에는 셋을 따로 계산했고, 호출부가 넘긴 `disabled`가 색에만
+  //   반영됐다. 회색으로 보이는 버튼이 실제로는 눌렸고, 청산 탭에서
+  //   진입 주문이 나갈 수 있었다(`form.submit()`은 화면의 intent를 모른다).
+  const v = ctaVerdict({
+    gateReady: !!form.gate.ready,
+    busy: !!form.busy,
+    intentOpen: !!intentOpen,
+    locked: !!locked,
+    unavailable: !!unavailable,
+    sideChosen: !!form.sideChosen,
+    sameSide: form.side === side,
+  });
+  const on = v.on;
   const col = side === 'LONG' ? C.up : C.down;
   // ★ 버튼 글자는 **이 화면의 시장**에서 온다. `form.sideLabel`을 쓰면
   //   안 된다 — 그 훅은 사용자가 들어올 때의 시장(현물일 수 있다)에
@@ -232,23 +255,22 @@ export function Cta({ form, side, disabled, unavailable, locked, lockedReason }:
   //   그렇게 나왔다. 선물 화면은 LONG/SHORT다.
   const cap = capability('USDT_FUTURES');
   const label = side === 'LONG' ? cap.buyLabel('') : cap.sellLabel('');
-  const off = disabled || !!unavailable || locked;
+  const off = v.off;
   return (
     <button type="button" data-testid={`pro-order-cta-${side}`}
-      disabled={!!unavailable || locked}
-      title={unavailable
-        ? (lockedReason || '이 시장에는 숏이 없습니다')
-        : (form.gate.reason || undefined)}
+      disabled={off}
+      data-cta-action={v.action}
+      title={lockedReason || v.reason || form.gate.reason || undefined}
       onClick={() => {
-        if (unavailable || locked) return;
-        if (!on) { form.chooseSide(side); return; }
-        void form.submit();
+        // 판정을 다시 쓰지 않는다. **위에서 정한 것을 그대로 따른다.**
+        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }
+        if (v.action === 'SUBMIT') void form.submit();
       }}
       style={{
         flex: 1, minWidth: 0, padding: '13px 0', borderRadius: 9, border: 'none',
         background: off ? C.raised : col, color: off ? C.faint : '#fff',
         fontSize: FS.lead, fontWeight: 800,
-        cursor: unavailable ? 'not-allowed' : 'pointer',
+        cursor: off ? 'not-allowed' : 'pointer',
         opacity: on ? 1 : 0.82,
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'clip',
       }}>
