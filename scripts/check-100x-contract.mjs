@@ -1234,6 +1234,13 @@ const VPO    = 'src/lib/engine/venuePositionOps.ts';
       [null, '증거 없음'],
       [undefined, '증거 undefined'],
       [{}, '빈 증거'],
+      // ★ `ok === true`를 `ok !== false`로 무르게 바꾸는 회귀는 **여기서만**
+      //   잡힌다. 증거가 통째로 없는 판(`{}`·null)은 `strandsOpenPosition`
+      //   쪽에서 어차피 막혀 동치가 되기 때문이다. 갇히지 않는다고 적혀
+      //   있는데 `ok`만 빠진 판이 그 둘을 가른다.
+      [{ code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 없음'],
+      [{ ok: null, code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 null'],
+      [{ ok: 'yes', code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 참 같은 글자'],
       // ★ `ok`만 보는 회귀를 잡는 자리. 오늘 정본에서는 나오지 않는
       //   조합이라 시험이 없으면 조용히 샌다.
       [{ ok: true, code: 'ONE_WAY', strandsOpenPosition: true, message: 'x' }, '통과인데 갇힘'],
@@ -1295,9 +1302,45 @@ const VPO    = 'src/lib/engine/venuePositionOps.ts';
     err(`${SCALP}: entryExitSafetyVerdict를 부르지 않습니다 — 관문이 배선되지 않았습니다`);
   }
   // 종료 가능 판정을 **독자적으로** 다시 하지 않는가.
-  if (/positionModeVerdict\s*\(/.test(sc)) {
-    err(`${SCALP}: positionModeVerdict로 종료 가능 여부를 따로 판정합니다`
-      + ' — 진입은 되는데 종료는 안 되는 두 번째 판정입니다');
+  //
+  //   ★ 호출 모양(`(`)만 보면 샌다 — `void positionModeVerdict;`처럼
+  //     들여놓기만 해도 다음 사람이 그걸 쓴다. 이 라우트는 진입용
+  //     모드 판정을 **아예 쓰지 않으므로** 이름 자체를 들이지 않는다.
+  if (/\bpositionModeVerdict\b/.test(sc)) {
+    err(`${SCALP}이 진입용 positionModeVerdict를 들입니다`
+      + ' — 종료 가능 여부의 정본은 closeModeGate 하나입니다'
+      + ' (진입은 되는데 종료는 안 되는 두 번째 판정이 됩니다)');
+  }
+
+  // ── ⑫-b2 판정을 실제로 쓰는가 ──
+  //
+  //   `entryExitSafetyVerdict`를 부르고 결과를 버리면 관문은 **있는데
+  //   없는 것**이 된다. 호출이 있는지가 아니라 **차단 가지가 판정에
+  //   달려 있는지**를 본다.
+  if (iSafety >= 0) {
+    const tail = sc.slice(iSafety, iSafety + 900);
+    const branch = /if\s*\(\s*!\s*(\w+)\.allowed\s*\)\s*\{/.exec(tail);
+    if (!branch) {
+      err(`${SCALP}: 종료 안전 판정으로 분기하지 않습니다`
+        + ' — 판정을 부르고 결과를 버리면 관문이 없는 것과 같습니다');
+    } else {
+      // 그 가지가 정말 **막는가** — 409로 돌아가야 한다.
+      const body = tail.slice(branch.index, branch.index + 500);
+      if (!/return\s+NextResponse\.json\(/.test(body)) {
+        err(`${SCALP}: 종료 안전 차단 가지가 응답을 돌려주지 않습니다 — 그대로 진행됩니다`);
+      }
+      if (!/blocked:\s*'AUTO_EXIT_UNSAFE'/.test(body)) {
+        err(`${SCALP}: 차단 사유를 AUTO_EXIT_UNSAFE로 적지 않습니다`
+          + ' — 화면이 왜 막혔는지 말할 수 없습니다');
+      }
+      if (!/executed:\s*false/.test(body)) {
+        err(`${SCALP}: 종료 안전 차단 응답이 executed:false를 적지 않습니다`);
+      }
+    }
+    // 조건을 상수로 바꿔 끄는 회귀.
+    if (/if\s*\(\s*(false|true)\s*\)\s*\{[\s\S]{0,300}?AUTO_EXIT_UNSAFE/.test(sc)) {
+      err(`${SCALP}: 종료 안전 차단이 상수 조건에 묶여 있습니다`);
+    }
   }
 
   // ── ⑫-c 차단이 거래소 쓰기보다 앞인가 ──
@@ -1389,9 +1432,22 @@ const VPO    = 'src/lib/engine/venuePositionOps.ts';
     if (!/closeModeVerdict\s*\(/.test(vp)) {
       err(`${VPO}: closeModeGate가 closeModeVerdict를 쓰지 않습니다`);
     }
-    if (!/strandsOpenPosition/.test(vp)) {
-      err(`${VPO}: closeModeGate가 strandsOpenPosition을 돌려주지 않습니다`
-        + ' — 갇히는 포지션을 진입 관문이 볼 수 없습니다');
+    // ★ 이름이 있는지가 아니라 **어디서 온 값인지**를 본다.
+    //   `strandsOpenPosition: false`로 박아 두면 이름은 그대로 남고
+    //   진입 관문은 영원히 "안 갇힌다"만 본다 — 가장 조용한 회귀다.
+    const gate = vp.slice(vp.indexOf('export async function closeModeGate'),
+      vp.indexOf('export async function closeModeGate') + 900);
+    if (!/strandsOpenPosition:\s*v\.strandsOpenPosition/.test(gate)) {
+      err(`${VPO}: closeModeGate가 갇힘 여부를 판정(v)에서 가져오지 않습니다`
+        + ' — 값을 박아 두면 진입 관문이 영원히 "안 갇힌다"만 봅니다');
+    }
+    if (/strandsOpenPosition:\s*(true|false)\b/.test(gate)) {
+      err(`${VPO}: closeModeGate가 갇힘 여부를 상수로 적습니다`);
+    }
+    for (const f of ['ok: v.ok', 'code: v.code', 'message: v.message']) {
+      if (!gate.includes(f)) {
+        err(`${VPO}: closeModeGate가 ${f}를 판정에서 그대로 전달하지 않습니다`);
+      }
     }
   }
 }
