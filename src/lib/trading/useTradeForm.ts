@@ -28,6 +28,22 @@ import { submitGate, submitLabel, type SubmitGate } from './submitGate';
 import { identityKey, identityResetState } from './tradeIdentity';
 
 export type TradeSide = 'LONG' | 'SHORT';
+
+/**
+ * 주문을 **실제로 보냈는가, 그리고 결과가 무엇인가.**
+ *
+ * ★ 왜 값으로 돌려주는가
+ *   `submit()`은 결과를 `message` 상태에만 적었다. 그래서 부르는 쪽은
+ *   "끝났다"까지만 알고 **성공인지 실패인지는 다음 렌더의 상태를 엿봐야**
+ *   알 수 있었다. 확인 시트는 성공이면 닫고 실패면 열어 둬야 하므로 그
+ *   엿보기가 곧 타이밍 추측이 된다 — 추측은 언젠가 틀린다.
+ *
+ *   `sent: false`는 **아예 안 보냈다**는 뜻이다. 실패(`sent: true, ok: false`)와
+ *   다른 사실이라 섞지 않는다.
+ */
+export type SubmitOutcome =
+  | { sent: false; reason: 'GATE' | 'BUSY' | 'NO_SIDE' }
+  | { sent: true; ok: boolean; text: string };
 export type PaperMarket = 'SPOT' | 'USDM';
 
 /** 화면에 그대로 적을 수 있는 배율 목록. 서버 상한은 `PAPER_MAX_LEVERAGE`다 */
@@ -77,6 +93,18 @@ export interface TradeForm {
   };
   shortDisabled: boolean;
 
+  /**
+   * ★ 미리보기 기준가 — **화면이 역산하지 않게 값으로 내보낸다.**
+   *
+   *   확인 시트가 `notional / quantity`로 가격을 되만들면, 수량이 격자에
+   *   맞춰 잘린 뒤에는 그 값이 기준가가 아니라 평균가가 된다. 둘은 다른
+   *   값이고 차이는 화면에서 안 보인다.
+   *
+   *   그리고 이것은 **확정 체결가가 아니다.** 서버가 제출 시점에
+   *   `readPaperMarkPrice()`로 다시 읽는다.
+   */
+  referencePrice: number | null;
+
   sizing: SizingResult;
   quantity: number | null;
   /** 미리보기 손절가. **주문 본문에 들어가지 않는다** */
@@ -89,7 +117,7 @@ export interface TradeForm {
 
   busy: boolean;
   message: { ok: boolean; text: string } | null;
-  submit: () => Promise<void>;
+  submit: () => Promise<SubmitOutcome>;
 }
 
 export function useTradeForm(i: TradeFormInput): TradeForm {
@@ -192,11 +220,12 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
     spot ? (s === 'LONG' ? 'BUY' : 'SELL') : s;
   const submitText = submitLabel(gate, sideLabel(side), i.symbol);
 
-  const submit = async () => {
-    if (!gate.ready || busy) return;
+  const submit = async (): Promise<SubmitOutcome> => {
+    if (!gate.ready) return { sent: false, reason: 'GATE' };
+    if (busy) return { sent: false, reason: 'BUSY' };
     // **누르지 않은 방향으로 내보내지 않는다.** 화면이 어떻게 배치되든
     // 주문 방향은 사용자가 고른 것이어야 한다.
-    if (!sideChosen) return;
+    if (!sideChosen) return { sent: false, reason: 'NO_SIDE' };
     setBusy(true); setMessage(null);
     try {
       let auth: Record<string, string> = {};
@@ -229,7 +258,9 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
       });
       const d = await r.json().catch(() => null);
       if (!r.ok || !d?.ok) {
-        setMessage({ ok: false, text: String(d?.message || d?.error || `주문 실패 (HTTP ${r.status})`) });
+        const text = String(d?.message || d?.error || `주문 실패 (HTTP ${r.status})`);
+        setMessage({ ok: false, text });
+        return { sent: true, ok: false, text };
       } else {
         // ── ★ 서버가 쓴 문장을 버리지 않는다 ──
         //
@@ -249,9 +280,12 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
         setMessage({ ok: true, text });
         setPercent(0);
         i.onSubmitted?.();
+        return { sent: true, ok: true, text };
       }
     } catch (e: any) {
-      setMessage({ ok: false, text: String(e?.message || '주문을 보내지 못했습니다') });
+      const text = String(e?.message || '주문을 보내지 못했습니다');
+      setMessage({ ok: false, text });
+      return { sent: true, ok: false, text };
     } finally {
       setBusy(false);
     }
@@ -265,6 +299,7 @@ export function useTradeForm(i: TradeFormInput): TradeForm {
     side, setSide, sideChosen, chooseSide, marginMode, setMarginMode, leverage, setLeverage, lev,
     percent, setPercent, tp, setTp, sl, setSl, slPct, setSlPct,
     spot, caps, shortDisabled: unsupported(caps.short),
+    referencePrice: i.price,
     sizing, quantity, previewStop, plan, gate, submitText, sideLabel,
     busy, message, submit,
   };

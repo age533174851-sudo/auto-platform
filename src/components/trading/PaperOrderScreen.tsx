@@ -55,7 +55,10 @@ import {
   instrumentForMarket, instrumentFromCatalog, selectInstrument,
   EMPTY_SELECTION, type SelectedByMarket,
 } from '@/lib/trading/marketInstrument';
-import { activeIdentity, switchBlockedReason } from '@/lib/trading/tradeIdentity';
+import { activeIdentity, switchBlockedReason, switchLockState } from '@/lib/trading/tradeIdentity';
+import { usePaperOrderReview } from '@/lib/trading/usePaperOrderReview';
+import { PAPER_ORDER_TYPE_LABEL } from '@/lib/trading/paperOrderReview';
+import { capability } from '@/lib/markets/marketType';
 import { useInstrumentCatalog } from '@/lib/trading/useInstrumentCatalog';
 import { InstrumentPicker } from './markets/InstrumentPicker';
 import { changeView } from '@/lib/markets/changeBasis';
@@ -165,26 +168,65 @@ export function PaperOrderScreen({
   //   BTC 주문을 보낸 뒤 응답이 오기 전에 ETH로 바꾸면, BTC의 결과
   //   메시지가 ETH 화면에 뜬다. 사용자는 ETH가 체결된 줄 안다.
   const orderInFlight = form.busy || sell.busy;
-  const switchBlocked = switchBlockedReason(orderInFlight);
+
+  // ── ★ USDⓈ-M 진입/청산 — **정본은 여기 하나다** ──
+  //
+  //   예전에는 이 상태가 `UsdtFuturesTradingScreen` 안의 지역 상태였고,
+  //   확인 창을 만드는 이 자리에서는 값을 받을 수 없어 `intentOpen: true`를
+  //   박아 두었다. 그래서 단위시험은 청산 탭을 막는데 **제품의 전이는 그
+  //   조건을 한 번도 받지 못했다** — 시험은 안전한데 배선이 안전조건을 못
+  //   받는 구멍이다. 화면 쪽 버튼이 우연히 막고 있었을 뿐이다.
+  //
+  //   그래서 상태를 올린다. 화면은 `intent` · `onIntent`를 받아 그리기만
+  //   하고, 판정(CTA · 확인 창)은 전부 이 하나를 본다.
+  const [usdmIntent, setUsdmIntent] = React.useState<'OPEN' | 'CLOSE'>('OPEN');
+  const usdmIntentOpen = usdmIntent === 'OPEN';
+
+  // ── ★ 주문 확인 시트 ──
+  //
+  //   `form`과 **같은 자리**에서 한 번 만든다. 화면 안에서 만들면 전환
+  //   잠금이 그 상태를 볼 수 없고, 잠금 쪽에 사본을 두면 같은 판단이 두
+  //   곳이 된다.
+  //
+  //   ★ 여기서 `ctaVerdict`를 다시 부르지 않는다. 예전에는 불렀고 입력이
+  //     달랐다(`intentOpen: true` · `sameSide: true`) — 버튼은 꺼져 있는데
+  //     창은 열릴 수 있는 두 번째 판정이었다. 이제 **실행 버튼이 받은
+  //     판정을 `review.open(v.action)`으로 그대로 들고 온다.**
+  const review = usePaperOrderReview({
+    form,
+    marketLabel: capability('USDT_FUTURES').label,
+    sideLabel: form.side,
+    // 주문 방식 글자를 화면이 지어내지 않는다 — 정본 상수다.
+    orderTypeLabel: PAPER_ORDER_TYPE_LABEL,
+    intentOpen: usdmIntentOpen,
+  });
+
+  // 확인 중과 보내는 중은 **다른 상태**다. 사유를 돌려쓰면 확인 중인데
+  // "보내는 중입니다"가 뜨고, 사용자는 주문이 이미 나간 줄 안다.
+  const lockState = switchLockState({
+    inFlight: orderInFlight, reviewing: review.phase !== 'NONE',
+  });
+  const switchBlocked = switchBlockedReason(lockState);
+  const switchLocked = lockState !== 'NONE';
 
   const setMarketTab = React.useCallback((m: TradingMarketId) => {
-    if (orderInFlight) return;
+    if (switchLocked) return;
     setPickerOpen(false);
     setMarketTabRaw(m);
-  }, [orderInFlight]);
+  }, [switchLocked]);
 
   const openPicker = React.useCallback(() => {
-    if (orderInFlight) return;
+    if (switchLocked) return;
     setPickerOpen(true);
-  }, [orderInFlight]);
+  }, [switchLocked]);
 
   const pickInstrument = React.useCallback((row: any) => {
-    if (orderInFlight) return;
+    if (switchLocked) return;
     // 고른 줄을 **그대로** 담는다. 다듬거나 만들지 않는다.
     // 다른 시장의 줄이면 `selectInstrument`가 거부한다.
     setSelected(prev => selectInstrument(prev, marketTab, instrumentFromCatalog(row)));
     setPickerOpen(false);
-  }, [marketTab, orderInFlight]);
+  }, [marketTab, switchLocked]);
 
   // 진입 경로로 들어왔으면 방향을 문맥에서 가져온다. **현물 매도는 여기
   // 오지 않는다** — `routeFor`가 이미 다른 길로 보냈다.
@@ -237,13 +279,17 @@ export function PaperOrderScreen({
         data-form-symbol={form.symbol}
         data-form-market={form.market}
         data-in-flight={orderInFlight ? '1' : '0'}
+        data-switch-lock={lockState}
+        data-review-phase={review.phase}
+        data-usdm-intent={usdmIntent}
         style={{ position: 'relative', height: '100%', minHeight: 0, background: C.bg }}>
         {screen === 'SPOT_SCREEN' ? (
           <SpotTradingScreen {...common}
             form={form} sell={sell} ledger={ledger} canOrder={wiring.canOrder}/>
         ) : screen === 'USDM_SCREEN' ? (
           <UsdtFuturesTradingScreen {...common}
-            form={form} sell={sell} ledger={ledger} auth={auth}
+            form={form} sell={sell} review={review} ledger={ledger} auth={auth}
+            intent={usdmIntent} onIntent={setUsdmIntent}
             markPrice={stream.markPrice} canOrder={wiring.canOrder}/>
         ) : screen === 'COINM_SCREEN' ? (
           <CoinMFuturesTradingScreen {...common} markPrice={stream.markPrice}/>

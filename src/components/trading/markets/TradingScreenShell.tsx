@@ -76,6 +76,18 @@ export interface ShellTab {
 }
 
 export interface TradingScreenShellProps {
+  /**
+   * ★ 이 화면 전체를 **키보드에서도 없는 것으로** 만든다.
+   *
+   *   확인 창 같은 덮개는 `position: absolute`로 화면을 가리지만 그건
+   *   포인터만 막는다. 뒤의 버튼·입력은 여전히 Tab으로 갈 수 있고, 거기서
+   *   진입/청산을 바꾸거나 배율을 만질 수 있다. `pointer-events: none`도
+   *   키보드를 막지 못한다.
+   *
+   *   `inert`는 그 하위 전체를 포커스·클릭·접근성 트리에서 빼낸다.
+   *   React 18에는 `inert` prop이 없어서 ref로 직접 세운다.
+   */
+  backgroundInert?: boolean;
   /** 화면 뿌리 표식. **시장 계약이 정한다**(`MARKET_SCREENS[].root`) */
   testid: string;
   /** 지금 고른 시장. 탭 줄이 이것을 칠한다 */
@@ -145,12 +157,22 @@ export function TradingScreenShell(p: TradingScreenShellProps) {
   // 줄이 **눌리지 않는다**는 뜻이지 **보인다**는 뜻이 아니다 — 본문이
   // 너무 크면 그냥 아래로 밀려 나간다.
   const bodyH = Math.max(140, boxH - topH - botH - TAB_PEEK);
+
+  // ★ 덮개가 떠 있는 동안 이 화면은 **포커스 대상이 아니다.**
+  //   시각적으로 가리는 것과 키보드에서 사라지는 것은 다른 일이다.
+  React.useEffect(() => {
+    const el = boxRef.current as any;
+    if (!el) return;
+    el.inert = !!p.backgroundInert;
+    return () => { if (el) el.inert = false; };
+  }, [p.backgroundInert]);
   const active = p.tabs.find(t => t.id === tab) || p.tabs[0];
 
   return (
     <div
       data-testid={p.testid}
       data-region="tradingScreen"
+      data-inert={p.backgroundInert ? '1' : '0'}
       ref={boxRef}
       style={{
         // 차트 덮개가 이 통 안에서 절대 위치를 잡는다
@@ -325,7 +347,11 @@ export function InfoStat({ testid, label, value, sub, tone }: {
   return (
     <div data-testid={testid} style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
       <span style={{ fontSize: FS.nano, color: C.faint, whiteSpace: 'nowrap' }}>{label}</span>
-      <span style={{ ...NUM, fontSize: FS.micro, fontWeight: 700, color: col, overflowWrap: 'anywhere' }}>
+      {/* 값 칸만 따로 집을 수 있게 표를 붙인다 — 프로브가 통째로 긁으면
+          아래 보조 설명의 숫자까지 섞여 엉뚱한 값을 비교하게 된다
+          (실제로 "9.50%" + "10배 · 격리 기준"이 9.501로 읽혔다). */}
+      <span data-testid={`${testid}-value`}
+        style={{ ...NUM, fontSize: FS.micro, fontWeight: 700, color: col, overflowWrap: 'anywhere' }}>
         {value}
       </span>
       {sub ? <span style={{ fontSize: FS.nano, color: C.faint, lineHeight: 1.3 }}>{sub}</span> : null}
