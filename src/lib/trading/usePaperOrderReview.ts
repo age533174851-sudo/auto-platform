@@ -37,7 +37,12 @@ export interface PaperOrderReview {
   rows: ReviewRow[];
   /** 확인 버튼 판정 — **색 · DOM · 클릭이 이것 하나를 본다** */
   verdict: ConfirmVerdict;
-  open: () => void;
+  /**
+   * 확인 창을 연다. **실행 버튼이 받은 판정을 그대로 넘긴다** —
+   * 훅이 `ctaVerdict`를 다시 부르면 입력이 다른 두 번째 판정이 생기고,
+   * 버튼은 꺼져 있는데 창은 열리는 상태가 만들어진다.
+   */
+  open: (ctaAction: string) => void;
   cancel: () => void;
   confirm: () => void;
   /** 주문 결과. 실패해도 시트를 닫지 않고 이것을 보여 준다 */
@@ -52,10 +57,14 @@ export interface PaperOrderReviewInput {
   sideLabel: string;
   /** 주문 방식 이름. 모의 장부는 시장가뿐이다 */
   orderTypeLabel: string;
-  /** 지금 진입 화면인가. 청산 탭에서는 열리지 않는다 */
+  /**
+   * 지금 진입 화면인가.
+   *
+   * ★ **실제 화면 상태여야 한다.** 상수 `true`를 박아 두면 단위시험은
+   *   청산 탭을 막는데 제품의 전이는 그 조건을 한 번도 받지 못한다 —
+   *   "시험은 안전한데 배선이 안전조건을 못 받는" 구멍이다.
+   */
   intentOpen: boolean;
-  /** `ctaVerdict`가 정한 할 일. `'OPEN_REVIEW'`가 아니면 열지 않는다 */
-  ctaAction: string;
 }
 
 export function usePaperOrderReview(i: PaperOrderReviewInput): PaperOrderReview {
@@ -73,7 +82,6 @@ export function usePaperOrderReview(i: PaperOrderReviewInput): PaperOrderReview 
     gateReady: !!form.gate.ready,
     busy: !!form.busy,
     intentOpen: !!i.intentOpen,
-    ctaAction: i.ctaAction,
   };
 
   const phase = reviewPhaseOf(state, env.busy);
@@ -100,20 +108,26 @@ export function usePaperOrderReview(i: PaperOrderReviewInput): PaperOrderReview 
     });
   }, [form]);
 
-  // ── 붙잡은 주문이 바뀌었는가 ──
-  const lastKey = useRef(ticketKey(null));
-  const curKey = ticketKey(current);
+  // ── 둘러싼 문맥이 바뀌었는가 (종목·방향 또는 진입/청산) ──
+  //
+  //   창에는 ETHUSDT 진입이 적혀 있는데 뒤에서 청산 탭으로 바뀌면, 읽은
+  //   주문과 이 화면이 하려는 일이 달라진다. 키보드로도 그렇게 될 수
+  //   있으므로 **정체성과 같은 급으로** 다룬다.
+  const lastCtx = useRef('');
+  const ctxKey = `${ticketKey(current)}|${i.intentOpen ? 'OPEN' : 'CLOSE'}`;
   useEffect(() => {
-    if (lastKey.current === curKey) return;
-    lastKey.current = curKey;
-    dispatch({ type: 'IDENTITY' });
-  }, [curKey, dispatch]);
+    if (lastCtx.current === ctxKey) { return; }
+    lastCtx.current = ctxKey;
+    dispatch({ type: 'CONTEXT' });
+  }, [ctxKey, dispatch]);
 
   const verdict = confirmVerdict({
-    phase, opened: state.opened, current, gateReady: env.gateReady, busy: env.busy,
+    phase, opened: state.opened, current,
+    intentOpen: env.intentOpen, gateReady: env.gateReady, busy: env.busy,
   });
 
-  const open = useCallback(() => dispatch({ type: 'OPEN' }), [dispatch]);
+  const open = useCallback(
+    (ctaAction: string) => dispatch({ type: 'OPEN', ctaAction }), [dispatch]);
   const cancel = useCallback(() => dispatch({ type: 'CANCEL' }), [dispatch]);
   const confirm = useCallback(() => dispatch({ type: 'CONFIRM' }), [dispatch]);
 

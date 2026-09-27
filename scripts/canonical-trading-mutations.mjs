@@ -56,6 +56,7 @@ const REVHK  = 'src/lib/trading/usePaperOrderReview.ts';
 const REVSH  = 'src/components/trading/markets/PaperOrderReviewSheet.tsx';
 const IDENTF = 'src/lib/trading/tradeIdentity.ts';
 const BOOKV  = 'src/components/trading/OrderBookView.tsx';
+const SHELLF = 'src/components/trading/markets/TradingScreenShell.tsx';
 const CHECK  = 'scripts/check-canonical-trading.mjs';
 
 const ONLY = process.argv.slice(2);
@@ -648,17 +649,13 @@ const CASES = [
    [[`  const off = v.off;`, `  const off = false;`]]],
 
   ['MUT-C9 ★ DOM은 그대로 두고 클릭이 판정을 무시하고 연다', USDM, 'RED',
-   [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        if (v.action === 'OPEN_REVIEW') review.open();`,
-     `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        review.open();`]]],
+   [[`        if (v.action === 'OPEN_REVIEW') review.open(v.action);`,
+     `        review.open(v.action);`]]],
 
   ['MUT-C10 ★ 클릭이 판정을 다시 계산한다 (청산 탭에서 진입이 나간다)', USDM, 'RED',
-   [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        if (v.action === 'OPEN_REVIEW') review.open();`,
+   [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }`,
      `        if (locked || unavailable) return;\n`
-     + `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
-     + `        if (v.action === 'OPEN_REVIEW') review.open();`]]],
+     + `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }`]]],
 
   ['MUT-C11 ★ 화면이 판정 밖에서 intent를 다시 읽는다 (판정이 두 벌이 된다)', USDM, 'RED',
    [[`  const off = v.off;`, `  const off = v.off || !intentOpen;`]]],
@@ -703,7 +700,7 @@ const CASES = [
   // 이 층이 생기면서 새로 생길 수 있는 고장을 하나씩 심는다.
 
   ['MUT-R1 ★ 실행 버튼이 확인 창을 건너뛰고 바로 보낸다', USDM, 'RED',
-   [[`        if (v.action === 'OPEN_REVIEW') review.open();`,
+   [[`        if (v.action === 'OPEN_REVIEW') review.open(v.action);`,
      `        if (v.action === 'OPEN_REVIEW') void form.submit();`]]],
 
   ['MUT-R2 ★ 확인 창을 만들어 놓고 그리지 않는다 (배선 누락)', USDM, 'RED',
@@ -738,8 +735,8 @@ const CASES = [
      `      return { state: { opened: s.opened, sent: true }, effects: [] };`]]],
 
   ['MUT-R9 ★ 청산 거리를 배율만으로 다시 계산한다', REVIEW, 'RED',
-   [[`        : { kind: 'PERCENT', amount: Number(i.plan.plan.liquidationDistancePct) },`,
-     `        : { kind: 'PERCENT', amount: 100 / Number(i.leverage) },`]]],
+   [[`        const d = planLiquidationDistancePct(i.plan);`,
+     `        const d = 100 / Number(i.leverage);`]]],
 
   ['MUT-R10 ★ 없는 청산가를 0으로 적는다', REVIEW, 'RED',
    [[`      value: i.plan.liquidationPrice == null\n        ? unknown('청산가를 계산하지 못했습니다')\n        : { kind: 'PRICE', amount: Number(i.plan.liquidationPrice) },`,
@@ -793,6 +790,46 @@ const CASES = [
 
   ['MUT-R24 ★ 현재가 버튼도 늘 눌리게 한다', BOOKV, 'RED',
    [[`            disabled={mid == null || !onPickPrice}`, `            disabled={mid == null}`]]],
+
+  // ── ㉚ 독립 감사가 잡은 세 구멍 ──
+
+  ['MUT-R25 ★ 확인 창에 진입/청산을 상수로 넘긴다 (전이가 청산을 못 본다)', ORDER, 'RED',
+   [[`    intentOpen: usdmIntentOpen,`, `    intentOpen: true,`]]],
+
+  ['MUT-R26 ★ 진입/청산 정본을 화면 지역 상태로 되돌린다', USDM, 'RED',
+   [[`  const intent = p.intent;\n  const setIntent = p.onIntent;`,
+     `  const [intent, setIntent] = React.useState<'OPEN' | 'CLOSE'>('OPEN');`]]],
+
+  ['MUT-R27 ★ 확인 창이 두 번째 CTA 판정을 만든다', ORDER, 'RED',
+   [[`  const review = usePaperOrderReview({`,
+     `  const dup = ctaVerdict({ gateReady: true, busy: false, intentOpen: true,\n`
+     + `    locked: false, unavailable: false, sideChosen: true, sameSide: true });\n`
+     + `  void dup;\n  const review = usePaperOrderReview({`]]],
+
+  ['MUT-R28 ★ 확인 판정에서 청산 화면 차단을 뺀다', REVIEW, 'RED',
+   [[`    : !i.intentOpen ? '청산 화면입니다 — 진입 주문은 여기서 보내지 않습니다'\n`, ``]]],
+
+  ['MUT-R29 ★ 청산 전환에도 창을 닫지 않는다', REVIEW, 'RED',
+   [[`      if (!env.intentOpen) return stay(REVIEW_CLOSED);\n`, ``]]],
+
+  ['MUT-R30 ★ 확인 창이 떠도 뒤 화면을 비활성화하지 않는다 (키보드로 샌다)', USDM, 'RED',
+   [[`      backgroundInert={p.review.phase !== 'NONE'}\n`, ``]]],
+
+  ['MUT-R31 ★ 배경을 시각적으로만 가린다 (inert를 안 세운다)', SHELLF, 'RED',
+   [[`    el.inert = !!p.backgroundInert;`, `    el.style.pointerEvents = p.backgroundInert ? 'none' : '';`]]],
+
+  ['MUT-R32 ★ 확인 창에서 modal 의미를 뺀다', REVSH, 'RED',
+   [[`        aria-modal="true"\n`, ``]]],
+
+  ['MUT-R33 ★ 확인 창에서 Tab 가둠을 뺀다', REVSH, 'RED',
+   [[`    if (e.key !== 'Tab') return;`, `    return;`]]],
+
+  ['MUT-R34 ★ 정보줄이 배율만으로 청산거리를 낸다 (화면에 두 숫자)', USDM, 'RED',
+   [[`  const liqDist = planLiquidationDistancePct(p.form.plan);`,
+     `  const liqDist = liquidationDistancePct(p.form.lev);`]]],
+
+  ['MUT-R35 ★ 청산가가 없어도 거리를 내놓는다', REVIEW, 'RED',
+   [[`  if (plan.liquidationPrice == null) return null;\n`, ``]]],
 
   ['OK-R1 확인 판정 정본에 주석 한 줄 추가', REVIEW, 'GREEN',
    [[`export function confirmVerdict(`, `// 대조군\nexport function confirmVerdict(`]]],

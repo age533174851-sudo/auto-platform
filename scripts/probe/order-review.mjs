@@ -294,6 +294,17 @@ for (const [name, w, h] of VIEWPORTS) {
       sheetMarket: sheet?.getAttribute('data-review-market') ?? null,
       sheetSymbol: sheet?.getAttribute('data-review-symbol') ?? null,
       sheetSide: sheet?.getAttribute('data-review-side') ?? null,
+      usdmIntent: host?.getAttribute('data-usdm-intent') ?? null,
+      shellInert: (() => {
+        const sh = document.querySelector('[data-region="tradingScreen"]');
+        return sh ? (sh.inert === true || sh.getAttribute('data-inert') === '1') : null;
+      })(),
+      dialog: sheet ? {
+        role: sheet.getAttribute('role'),
+        modal: sheet.getAttribute('aria-modal'),
+        label: sheet.getAttribute('aria-label'),
+      } : null,
+      stripLiq: txt('mkt-liquidation-distance-value'),
       tabDisabled: document.querySelector('[data-testid="market-tab-SPOT"]')?.disabled ?? null,
       pickDisabled: document.querySelector('[data-testid="pick-instrument"]')?.disabled ?? null,
       confirmDisabled: document.querySelector('[data-testid="review-confirm"]')?.disabled ?? null,
@@ -429,6 +440,84 @@ for (const [name, w, h] of VIEWPORTS) {
   } else if (open.tabDisabled !== true || open.pickDisabled !== true) {
     bad(`${name}: 확인 중인데 시장 탭(${open.tabDisabled}) · 종목 고르기(${open.pickDisabled})가 열려 있습니다`);
   } else ok(`${name}: 확인 중 — 시장 탭 · 종목 고르기 모두 DOM에서 꺼짐`);
+
+  // ── ⓔ-2 ★ 상단 "청산까지"와 창의 청산거리가 **같은 숫자**인가 ──
+  //
+  //   예전에는 상단이 `leverageMath.liquidationDistancePct(lev)`(MMR 0.4% ·
+  //   배율만)였고 창은 정본 계획(MMR 0.5% · 교차는 잔고까지)이었다. 같은
+  //   주문인데 창을 열기 전과 연 뒤의 숫자가 달랐다.
+  {
+    const a = num(open.stripLiq), b = num(open.sheetVals.LIQUIDATION_DISTANCE);
+    if (a == null || b == null) {
+      note(`${name}: 청산거리를 비교하지 못했습니다 (상단 ${open.stripLiq} / 창 ${open.sheetVals.LIQUIDATION_DISTANCE})`);
+    } else if (Math.abs(a - b) > 1e-6) {
+      bad(`${name}: ★ 상단과 창의 청산거리가 다릅니다 (${a}% vs ${b}%)`);
+    } else ok(`${name}: 청산거리 일치 (상단 == 창 == ${b}%)`);
+  }
+
+  // ── ⓔ-3 ★ 창이 떠 있는 동안 **키보드로 뒤로 나갈 수 없다** ──
+  //
+  //   덮개는 포인터만 막는다. 뒤의 진입/청산·배율·비중에 Tab으로 닿으면
+  //   거기서 청산 탭으로 바꾼 채 확인을 누를 수 있다.
+  if (!open.dialog || open.dialog.role !== 'dialog' || open.dialog.modal !== 'true'
+      || !open.dialog.label) {
+    bad(`${name}: 확인 창에 modal 의미가 없습니다 (${JSON.stringify(open.dialog)})`);
+  } else ok(`${name}: 확인 창이 dialog/aria-modal + 이름을 갖는다`);
+
+  if (open.shellInert !== true) {
+    bad(`${name}: 창이 떠 있는데 뒤 화면이 키보드에 살아 있습니다 (inert=${open.shellInert})`);
+  } else ok(`${name}: 창이 떠 있는 동안 뒤 화면이 inert`);
+
+  {
+    // 실제로 Tab을 눌러 본다. 어느 한 번이라도 포커스가 창 밖으로 나가면 FAIL.
+    const escaped = [];
+    for (const shift of [false, true]) {
+      for (let i = 0; i < 14; i += 1) {
+        await page.keyboard.press(shift ? 'Shift+Tab' : 'Tab');
+        const where = await page.evaluate(() => {
+          const a = document.activeElement;
+          const sheet = document.querySelector('[data-testid="paper-order-review-sheet"]');
+          if (!a || a === document.body) return 'BODY';
+          return sheet && sheet.contains(a) ? 'IN'
+            : (a.closest('[data-testid]')?.getAttribute('data-testid') || a.tagName);
+        });
+        if (where !== 'IN') escaped.push(`${shift ? 'S' : ''}Tab#${i}:${where}`);
+      }
+    }
+    r.tabEscapes = escaped;
+    if (escaped.length) {
+      bad(`${name}: ★ Tab으로 확인 창 밖에 포커스가 갔습니다 (${escaped.slice(0, 4).join(' ')})`);
+    } else ok(`${name}: Tab / Shift+Tab 28회 — 포커스가 창 안에 갇힌다`);
+  }
+
+  // ── ⓔ-4 ★ 창이 열린 채 **뒤의 청산 탭을 강제로 눌러도** 진입이 안 나간다 ──
+  {
+    const beforeForce = orders.length;
+    // 덮개·inert를 무시하고 프로그램으로 직접 누른다 — 가장 나쁜 경우다.
+    await page.evaluate(() =>
+      document.querySelector('[data-testid="intent-CLOSE"]')?.click());
+    await page.waitForTimeout(600);
+    const forced = await read();
+    // 창이 닫히거나(전이) 확인이 막혀야(판정) 한다 — 둘 중 하나로 충분하다
+    const stillSendable = forced.sheet && forced.confirmDisabled === false;
+    if (stillSendable) {
+      bad(`${name}: ★ 청산으로 바뀌었는데 확인 버튼이 살아 있습니다`);
+    }
+    await page.evaluate(() =>
+      document.querySelector('[data-testid="review-confirm"]')?.click());
+    await page.waitForTimeout(800);
+    if (orders.length !== beforeForce) {
+      bad(`${name}: ★ 청산 화면인데 진입 주문이 나갔습니다`);
+    } else {
+      ok(`${name}: 창 열린 채 청산 강제 전환 → 확인 불가 · 주문 0건`
+        + ` (창=${forced.sheet ? '유지' : '닫힘'} · intent=${forced.usdmIntent})`);
+    }
+    // 원래대로
+    await page.evaluate(() =>
+      document.querySelector('[data-testid="intent-OPEN"]')?.click());
+    await page.waitForTimeout(400);
+    if (!(await read()).sheet) { await clickCta(); await page.waitForTimeout(400); }
+  }
 
   // ── ⓕ 취소하면 주문 0건 ──
   await page.evaluate(() =>

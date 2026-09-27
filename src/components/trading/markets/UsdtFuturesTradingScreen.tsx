@@ -37,8 +37,8 @@ import { TradingScreenShell, InfoStat, LockedField,
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { ctaVerdict } from '@/lib/trading/ctaVerdict';
 import { PaperOrderReviewSheet } from './PaperOrderReviewSheet';
+import { planLiquidationDistancePct } from '@/lib/trading/paperOrderReview';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
-import { liquidationDistancePct } from '@/lib/engine/leverageMath';
 import { capability } from '@/lib/markets/marketType';
 import type { useTradeForm } from '@/lib/trading/useTradeForm';
 import type { useSellForm } from '@/lib/trading/useSellForm';
@@ -59,6 +59,12 @@ export interface FuturesScreenProps extends MarketScreenCommonProps {
    * 값을 봐야 해서 `form`과 같은 자리에서 한 번 만들어 내려온다.
    */
   review: PaperOrderReview;
+  /**
+   * 진입인가 청산인가. **여기서 만들지 않는다** — 확인 창 판정과 전환
+   * 잠금이 같은 값을 봐야 해서 `PaperOrderScreen`이 들고 있다.
+   */
+  intent: 'OPEN' | 'CLOSE';
+  onIntent: (v: 'OPEN' | 'CLOSE') => void;
   ledger: PaperLedger;
   auth?: string;
   markPrice: number | null;
@@ -70,7 +76,10 @@ export interface FuturesScreenProps extends MarketScreenCommonProps {
 const CONTRACT = screenContract('USDT_FUTURES');
 
 export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
-  const [intent, setIntent] = React.useState<'OPEN' | 'CLOSE'>('OPEN');
+  // ★ 지역 상태가 아니다. 확인 창 전이와 전환 잠금이 **같은 값**을 봐야
+  //   하는데, 지역 상태면 그쪽에서 읽을 수 없어 상수가 박힌다.
+  const intent = p.intent;
+  const setIntent = p.onIntent;
   // ★ 종목이 없으면 **아무것도 조회하지 않고** 주문도 잠근다.
   //   다른 시장의 호가·봉·펀딩을 대신 보여주지 않는다.
   const sym = p.instrument?.symbol ?? null;
@@ -81,9 +90,17 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
   const PARTIAL = orderCapability('USDM', 'PARTIAL_CLOSE');
   const LIMIT = orderCapability('USDM', 'TYPE_LIMIT');
 
-  // 청산까지 거리는 **배율에서 나온다.** 여기서 공식을 다시 쓰지 않는다 —
-  // `leverageMath`가 정본이고, 위험 계산도 같은 함수를 쓴다.
-  const liqDist = liquidationDistancePct(p.form.lev);
+  // ── ★ 청산까지 거리는 **정본 계획 하나**에서 온다 ──
+  //
+  //   예전에는 `leverageMath.liquidationDistancePct(form.lev)`였다. 그건
+  //   배율만 보고 기본 MMR이 0.4%인데, 주문이 실제로 쓰는
+  //   `buildPaperPlan`의 청산 계산은 기본 MMR 0.5%이고 교차(CROSS)에서는
+  //   수량·지갑잔고까지 본다. 격리 10배만 해도 9.6% 대 9.5%로 갈리고,
+  //   교차에서는 정본이 "청산가 없음"인데 배율식은 유한한 숫자를 내놓는다.
+  //
+  //   그래서 **같은 화면에 두 개의 청산거리**가 있었다 — 확인 창을 열기
+  //   전과 연 뒤의 숫자가 달라질 수 있었다.
+  const liqDist = planLiquidationDistancePct(p.form.plan);
   const positions = locked ? [] : p.ledger.openPositions;
 
   // ── 시장별 핵심 정보 ──
@@ -101,7 +118,9 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
         tone={funding.rate == null ? undefined : funding.rate >= 0 ? 'up' : 'down'}/>
       <InfoStat testid={fieldTestId('LIQUIDATION_DISTANCE')} label="청산까지"
         value={liqDist == null ? '—' : `${liqDist.toFixed(2)}%`}
-        sub={liqDist == null ? '배율을 읽지 못했습니다' : `${p.form.lev}배 기준`}
+        sub={liqDist == null
+          ? '청산가를 계산하지 못했습니다'
+          : `${p.form.lev}배 · ${p.form.marginMode === 'ISOLATED' ? '격리' : '교차'} 기준`}
         tone={liqDist != null && liqDist < 2 ? 'warn' : undefined}/>
     </div>
   );
@@ -175,6 +194,10 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
     <>
     <TradingScreenShell
       testid={CONTRACT.root}
+      // ★ 확인 창이 떠 있으면 **이 화면 전체가 키보드에서도 사라진다.**
+      //   덮개만으로는 포인터만 막힌다 — Tab으로 뒤의 진입/청산·배율·비중에
+      //   갈 수 있고, 거기서 청산 탭으로 바꾼 채 확인을 누를 수 있었다.
+      backgroundInert={p.review.phase !== 'NONE'}
       market={p.market} onMarket={p.onMarket}
       onPickInstrument={p.onPickInstrument}
       switchBlockedReason={p.switchBlockedReason}
@@ -284,7 +307,9 @@ export function Cta({ form, side, intentOpen, review, unavailable, locked, locke
         //   `data-cta-action`이 `OPEN_REVIEW`인데 실제로 제출하면 이름과
         //   행동이 갈린다 — 검사기가 그것을 막는다.
         if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }
-        if (v.action === 'OPEN_REVIEW') review.open();
+        // ★ 판정을 넘긴다. 확인 창이 자기 몫의 판정을 다시 만들면
+        //   버튼은 꺼져 있는데 창은 열리는 상태가 생긴다.
+        if (v.action === 'OPEN_REVIEW') review.open(v.action);
       }}
       style={{
         flex: 1, minWidth: 0, padding: '13px 0', borderRadius: 9, border: 'none',

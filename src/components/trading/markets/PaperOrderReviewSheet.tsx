@@ -69,7 +69,48 @@ function Row({ row, scope }: { row: ReviewRow; scope: MoneyScope }) {
 }
 
 export function PaperOrderReviewSheet({ review, scope }: PaperOrderReviewSheetProps) {
-  if (review.phase === 'NONE' || review.ticket == null) return null;
+  const open = review.phase !== 'NONE' && review.ticket != null;
+  const sheetRef = React.useRef<HTMLDivElement | null>(null);
+  const returnTo = React.useRef<HTMLElement | null>(null);
+
+  // ── ★ 포커스를 안으로 들이고, 닫으면 제자리로 돌려놓는다 ──
+  //
+  //   뒤 화면은 `inert`라 Tab이 그쪽으로 넘어가지 않는다(`TradingScreenShell`).
+  //   그런데 **열리는 순간의 포커스**는 아직 뒤 버튼에 있다 — 그대로 두면
+  //   포커스가 inert 안에 갇혀 사라지고, 키보드 사용자는 창을 조작할 수
+  //   없다. 그래서 열 때 안으로 옮기고 닫을 때 원래 버튼으로 되돌린다.
+  React.useEffect(() => {
+    if (!open) return;
+    returnTo.current = (document.activeElement as HTMLElement) || null;
+    const first = sheetRef.current?.querySelector<HTMLElement>(
+      '[data-testid="review-confirm"], button:not([disabled])');
+    (first || sheetRef.current)?.focus();
+    return () => {
+      const back = returnTo.current;
+      returnTo.current = null;
+      // 되돌릴 때 뒤 화면은 이미 inert가 풀린 뒤여야 한다 — 다음 프레임에.
+      if (back && document.contains(back)) {
+        requestAnimationFrame(() => { try { back.focus(); } catch { /* 사라졌다 */ } });
+      }
+    };
+  }, [open]);
+
+  // Tab이 끝에서 넘어가지 않게 감싼다. `inert`가 이미 막지만, 이 창이
+  // 다른 곳에 놓이더라도 포커스가 새 나가지 않게 여기서도 잠근다.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Tab') return;
+    const box = sheetRef.current;
+    if (!box) return;
+    const f = [...box.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    if (f.length === 0) { e.preventDefault(); return; }
+    const first = f[0], last = f[f.length - 1];
+    const cur = document.activeElement as HTMLElement | null;
+    if (e.shiftKey && (cur === first || !box.contains(cur))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (cur === last || !box.contains(cur))) { e.preventDefault(); first.focus(); }
+  };
+
+  if (!open || review.ticket == null) return null;
   const v = review.verdict;
   const sending = review.phase === 'SUBMITTING';
 
@@ -81,6 +122,12 @@ export function PaperOrderReviewSheet({ review, scope }: PaperOrderReviewSheetPr
         background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-end',
       }}>
       <div data-testid="paper-order-review-sheet"
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`주문 확인 — ${review.ticket.market} ${review.ticket.symbol} ${review.ticket.side}`}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
         data-review-market={review.ticket.market}
         data-review-symbol={review.ticket.symbol}
         data-review-side={review.ticket.side}

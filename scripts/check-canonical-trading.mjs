@@ -72,6 +72,7 @@ const REVIEW   = 'src/lib/trading/paperOrderReview.ts';
 const REVHOOK  = 'src/lib/trading/usePaperOrderReview.ts';
 const REVSHEET = 'src/components/trading/markets/PaperOrderReviewSheet.tsx';
 const BOOKVIEW = 'src/components/trading/OrderBookView.tsx';
+const SHELLF   = 'src/components/trading/markets/TradingScreenShell.tsx';
 const PLAN     = 'src/lib/engine/paperPlan.ts';
 const PEXEC    = 'src/lib/engine/paperExecution.ts';
 
@@ -1912,7 +1913,7 @@ const drawer = code(read(DRAWER));
       err(`${usdm}가 확인 창을 그리지 않습니다`
         + ' — 만들어 놓고 배선을 안 한 상태입니다');
     }
-    if (!/review\.open\(\)/.test(usdmSrc)) {
+    if (!/review\.open\(/.test(usdmSrc)) {
       err(`${usdm}의 실행 버튼이 확인 창을 열지 않습니다`);
     }
   }
@@ -1996,7 +1997,8 @@ const drawer = code(read(DRAWER));
       const block = at < 0 ? '' : rowsBody.slice(at);
       if (!block) err(`${REVIEW}에 청산 거리 칸이 없습니다`);
       else {
-        if (!/i\.plan\.plan\.liquidationDistancePct/.test(block)) {
+        // 정본 함수 하나를 거친다 (정보줄도 같은 함수를 쓴다 — ㉚⑹)
+        if (!/planLiquidationDistancePct\(i\.plan\)/.test(block)) {
           err(`${REVIEW}의 청산 거리가 정본 계획에서 오지 않습니다`
             + ' — 격리/교차·잔고가 빠진 숫자가 됩니다');
         }
@@ -2144,6 +2146,139 @@ const drawer = code(read(DRAWER));
   }
 }
 
+// ══════════════ ㉚ ★ 확인 창이 **실제** 화면 상태를 받는가 ══════════════
+//
+// 독립 감사에서 나온 구멍
+// ───────────────────────
+// 단위시험은 `intentOpen:false`로 청산 탭을 막고 있었는데, 제품 배선은
+// `intentOpen: true`를 박아 두었다. 진입/청산이 USDⓈ-M 화면의 **지역
+// 상태**라 확인 창을 만드는 자리에서 읽을 수 없었기 때문이다.
+//
+//     시험   청산 탭이면 안 나간다        ✅
+//     제품   전이가 청산을 한 번도 못 봤다 ❌
+//
+// 화면 쪽 버튼이 우연히 막고 있었을 뿐이고, 키보드로 뒤 버튼에 닿을 수
+// 있으면 그 우연도 깨진다. **시험은 안전한데 배선이 안전조건을 못 받는**
+// 형태이고, 이 저장소가 이름 붙인 1번 고장의 가장 나쁜 판이다.
+//
+// 그래서 여기서 보는 것은 "값이 상수인가"다.
+{
+  const usdm = CONTRACT
+    ? (CONTRACT.MARKET_SCREENS.find(x => x.market === 'USDT_FUTURES') || {}).file
+    : null;
+  const usdmSrc = usdm ? code(read(usdm)) : '';
+  const hook = code(read(REVHOOK));
+  const rev = code(read(REVIEW));
+  const sheet = code(read(REVSHEET));
+  const shell = code(read(SHELLF));
+
+  // ⑴ 확인 창 배선에 상수를 박지 않는다
+  for (const re of [/intentOpen:\s*true\b/, /intentOpen:\s*false\b/]) {
+    if (re.test(order)) {
+      err(`${ORDER}가 확인 창에 진입/청산을 상수로 넘깁니다 (${re})`
+        + ' — 전이가 실제 화면 상태를 한 번도 받지 못합니다');
+    }
+  }
+  if (!/intentOpen:\s*usdmIntentOpen\b/.test(order)) {
+    err(`${ORDER}가 확인 창에 실제 진입/청산 상태를 넘기지 않습니다`);
+  }
+
+  // ⑵ 진입/청산 정본이 한 곳이다 — 화면이 자기 상태로 들고 있지 않는다
+  if (!/const \[usdmIntent, setUsdmIntent\] = React\.useState/.test(order)) {
+    err(`${ORDER}가 USDⓈ-M 진입/청산 정본을 갖고 있지 않습니다`);
+  }
+  if (usdm && /useState<'OPEN' \| 'CLOSE'>/.test(usdmSrc)) {
+    err(`${usdm}가 진입/청산을 따로 들고 있습니다`
+      + ' — 확인 창과 다른 값을 보게 됩니다');
+  }
+  if (usdm && (!/intent = p\.intent/.test(usdmSrc) || !/setIntent = p\.onIntent/.test(usdmSrc))) {
+    err(`${usdm}가 진입/청산을 위에서 받지 않습니다`);
+  }
+
+  // ⑶ 확인 창이 **두 번째 CTA 판정**을 만들지 않는다
+  if (/ctaVerdict\s*\(/.test(order)) {
+    err(`${ORDER}가 실행 버튼 판정을 다시 계산합니다`
+      + ' — 버튼은 꺼져 있는데 창은 열리는 상태가 생깁니다');
+  }
+  if (/ctaVerdict\s*\(/.test(hook) || /ctaVerdict\s*\(/.test(rev)) {
+    err('확인 창이 실행 버튼 판정을 스스로 만듭니다 — 받아서 그대로 씁니다');
+  }
+  if (usdm && !/review\.open\(v\.action\)/.test(usdmSrc)) {
+    err(`${usdm}가 실행 버튼 판정을 확인 창에 넘기지 않습니다`);
+  }
+
+  // ⑷ 확인 판정이 진입/청산을 본다
+  {
+    const body = fnBody(rev, 'confirmVerdict');
+    if (!body) err(`${REVIEW}에서 확인 판정을 찾지 못했습니다`);
+    else if (!/!i\.intentOpen\s*\?/.test(body)) {
+      err(`${REVIEW}의 확인 판정이 청산 화면을 막지 않습니다`
+        + ' — 창을 열어 둔 채 뒤에서 청산으로 바꾸면 진입 주문이 나갑니다');
+    }
+    const ctx = fnBody(rev, 'reviewReduce');
+    if (ctx && !/if \(!env\.intentOpen\) return stay\(REVIEW_CLOSED\);/.test(ctx)) {
+      err(`${REVIEW}의 전이가 청산 전환에 창을 닫지 않습니다`);
+    }
+  }
+
+  // ⑸ ★ 창이 떠 있으면 **뒤 화면이 키보드에서도 사라진다**
+  //
+  //   덮개는 포인터만 막는다. `pointer-events: none`도 키보드를 막지
+  //   못한다. 뒤의 진입/청산 · 배율 · 비중에 Tab으로 닿을 수 있으면
+  //   ⑷의 방어가 의미를 잃는다.
+  if (!/backgroundInert/.test(shell)) {
+    err(`${SHELLF}에 배경 비활성(inert) 경로가 없습니다`);
+  }
+  if (!/\.inert = !!p\.backgroundInert/.test(shell)) {
+    err(`${SHELLF}가 배경을 실제로 inert로 만들지 않습니다`
+      + ' — 시각적으로만 가리면 키보드는 그대로 들어갑니다');
+  }
+  if (usdm && !/backgroundInert=\{p\.review\.phase !== 'NONE'\}/.test(usdmSrc)) {
+    err(`${usdm}가 확인 창이 떠 있는 동안 뒤 화면을 비활성화하지 않습니다`);
+  }
+  for (const [what, re] of [
+    ['dialog 역할', /role="dialog"/],
+    ['modal 표시', /aria-modal="true"/],
+    ['이름', /aria-label=/],
+    ['포커스 되돌리기', /returnTo\.current/],
+    ['Tab 가둠', /e\.key !== 'Tab'/],
+  ]) {
+    if (!re.test(sheet)) {
+      err(`${REVSHEET}에 ${what}이(가) 없습니다 — 키보드 사용자가 창 밖으로 나갑니다`);
+    }
+  }
+
+  // ⑹ ★ 청산까지 거리는 화면에 **하나**다
+  {
+    if (usdm && /liquidationDistancePct\s*\(\s*p?\.?form\.lev/.test(usdmSrc)) {
+      err(`${usdm}가 청산 거리를 배율만으로 계산합니다`
+        + ' — leverageMath는 MMR 0.4%이고 정본 계획은 0.5%에 교차는 잔고까지 봅니다.'
+        + ' 확인 창을 열기 전과 연 뒤의 숫자가 달라집니다');
+    }
+    if (usdm && /from '@\/lib\/engine\/leverageMath'/.test(usdmSrc)) {
+      err(`${usdm}가 아직 leverageMath를 들고 있습니다 — 청산 거리 정본은 하나입니다`);
+    }
+    if (usdm && !/planLiquidationDistancePct\(p\.form\.plan\)/.test(usdmSrc)) {
+      err(`${usdm}의 정보줄이 정본 계획의 청산 거리를 쓰지 않습니다`);
+    }
+    const fn = fnBody(rev, 'planLiquidationDistancePct');
+    if (!fn) err(`${REVIEW}에 청산 거리 정본이 없습니다`);
+    else {
+      if (!/plan\.liquidationPrice == null\) return null;/.test(fn)) {
+        err(`${REVIEW}의 청산 거리가 청산가 없음을 통과시킵니다 — 0%는 "이미 청산됐다"로 읽힙니다`);
+      }
+      if (/\blev\b|\bleverage\b|100\s*\//.test(fn)) {
+        err(`${REVIEW}의 청산 거리가 배율을 직접 씁니다`);
+      }
+    }
+    // 표시 줄도 그 함수를 쓴다 (두 벌 금지)
+    const rowsBody = fnBody(rev, 'reviewRows');
+    if (rowsBody && !/planLiquidationDistancePct\(i\.plan\)/.test(rowsBody)) {
+      err(`${REVIEW}의 표시 줄이 청산 거리 정본을 쓰지 않습니다`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -2158,4 +2293,5 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' ★정체성 변경시 입력 초기화 · ★시장가 전용인데 지정가 UI 없음 ·'
   + ' ★수량/총액 단일 계산 · ★직접입력 비클램프 · ★MAX 수수료 정본 ·'
   + ' ★호가판 prop 허용목록(누름 동작 없음) · ★실행버튼 색=DOM=클릭 단일 판정 ·'
-  + ' ★진입은 확인 창을 거침(제출 1곳 · 부수효과 없음 · 읽기전용 · preflight 비연결)');
+  + ' ★진입은 확인 창을 거침(제출 1곳 · 부수효과 없음 · 읽기전용 · preflight 비연결) ·'
+  + ' ★확인 창이 실제 진입/청산을 받음 · 배경 inert · 청산거리 정본 1개');

@@ -130,10 +130,16 @@ const CASES = [
    [[`  if (!plan.ok) return unknown(plan.reason || '주문 계획을 만들지 못했습니다');`, ``]]],
 
   ['MUT-V23 ★ 청산가가 없는데 거리를 적는다', REVIEW, 'RED',
-   [[`      value: i.plan.liquidationPrice == null || i.plan.plan == null
-        ? unknown('청산가가 없어 거리를 낼 수 없습니다')
-        : { kind: 'PERCENT', amount: Number(i.plan.plan.liquidationDistancePct) },`,
-     `      value: { kind: 'PERCENT', amount: Number(i.plan.plan?.liquidationDistancePct) },`]]],
+   [[`  if (plan.liquidationPrice == null) return null;`, ``]]],
+
+  ['MUT-V25 ★ 청산 탭에서도 확인을 통과시킨다 (실제 배선이 못 받던 조건)', REVIEW, 'RED',
+   [[`    : !i.intentOpen ? '청산 화면입니다 — 진입 주문은 여기서 보내지 않습니다'\n`, ``]]],
+
+  ['MUT-V26 ★ 청산으로 바뀌어도 창을 닫지 않는다', REVIEW, 'RED',
+   [[`      if (!env.intentOpen) return stay(REVIEW_CLOSED);\n`, ``]]],
+
+  ['MUT-V27 ★ 실행 버튼 판정을 무시하고 아무 때나 연다', REVIEW, 'RED',
+   [[`  if (i.ctaAction !== 'OPEN_REVIEW') return false;\n`, ``]]],
 
   ['MUT-V24 ★ 표시 줄 하나가 조용히 사라진다', REVIEW, 'RED',
    [[`    { key: 'ENTRY_FEE', label: '예상 진입 수수료', value: planned(i.plan, i.plan.entryFee) },\n`, ``]]],

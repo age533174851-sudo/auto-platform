@@ -132,6 +132,30 @@ export interface ReviewInput {
   plan: ReviewPlan;
 }
 
+/**
+ * 청산까지 거리 — **정본 계획이 낸 값 하나.**
+ *
+ * ★ `leverageMath.liquidationDistancePct(lev)`를 쓰면 안 된다. 같은 화면에
+ *   두 숫자가 생긴다:
+ *
+ *     leverageMath   기본 MMR 0.4% · **배율만** 본다
+ *     buildPaperPlan 기본 MMR 0.5% · 교차(CROSS)에서는 수량·지갑잔고까지 본다
+ *
+ *   격리 10배만 해도 9.6% 대 9.5%로 갈리고, 교차에서는 정본이
+ *   `liquidationPrice=null`인데 배율식은 유한한 숫자를 내놓는다. 확인 창을
+ *   열기 전과 연 뒤의 "청산까지"가 달라지면 사용자는 어느 쪽을 믿어야 할지
+ *   알 수 없다.
+ *
+ *   청산가가 없으면 거리도 없다. **0%는 "이미 청산됐다"로 읽힌다.**
+ */
+export function planLiquidationDistancePct(
+  plan: Pick<ReviewPlan, 'liquidationPrice' | 'plan'>,
+): number | null {
+  if (plan.liquidationPrice == null) return null;
+  const d = plan.plan?.liquidationDistancePct;
+  return typeof d === 'number' && Number.isFinite(d) ? d : null;
+}
+
 const unknown = (reason: string): ReviewValue => ({ kind: 'UNKNOWN', reason });
 
 /** 계산하지 못한 계획의 0을 값으로 읽지 않는다 */
@@ -191,12 +215,14 @@ export function reviewRows(i: ReviewInput): ReviewRow[] {
     },
     {
       key: 'LIQUIDATION_DISTANCE', label: '청산까지',
-      // ★ 배율만으로 다시 계산하지 않는다(`100 / leverage`). 격리/교차 ·
-      //   보유 잔고 · 정본 `liquidationFor()`가 이미 들어간 값이 있다.
-      //   청산가가 없으면 거리도 없다 — 0%는 "이미 청산됐다"로 읽힌다.
-      value: i.plan.liquidationPrice == null || i.plan.plan == null
-        ? unknown('청산가가 없어 거리를 낼 수 없습니다')
-        : { kind: 'PERCENT', amount: Number(i.plan.plan.liquidationDistancePct) },
+      // ★ 정보줄과 **같은 함수**를 쓴다. 두 곳이 각자 계산하면 확인 창을
+      //   열기 전과 연 뒤의 숫자가 달라진다.
+      value: (() => {
+        const d = planLiquidationDistancePct(i.plan);
+        return d == null
+          ? unknown('청산가가 없어 거리를 낼 수 없습니다')
+          : { kind: 'PERCENT' as const, amount: d };
+      })(),
     },
   ];
   return rows;
@@ -231,6 +257,12 @@ export interface ConfirmVerdictInput {
   opened: ReviewTicket | null;
   /** 지금 폼이 다루는 주문 */
   current: ReviewTicket | null;
+  /**
+   * ★ **지금 화면이 진입인가.** 창을 열어 둔 채 뒤에서 청산 탭으로
+   *   바꿀 수 있다(키보드·프로그램). 그때도 확인 버튼이 살아 있으면
+   *   청산 화면에서 진입 주문이 나간다 — `#284`가 막은 고장의 다음 판이다.
+   */
+  intentOpen: boolean;
   gateReady: boolean;
   busy: boolean;
 }
@@ -255,6 +287,7 @@ export function confirmVerdict(i: ConfirmVerdictInput): ConfirmVerdict {
   const offReason =
     i.phase === 'SUBMITTING' || i.busy ? '주문을 보내는 중입니다'
     : i.phase !== 'REVIEW' ? '주문 확인 중이 아닙니다'
+    : !i.intentOpen ? '청산 화면입니다 — 진입 주문은 여기서 보내지 않습니다'
     : !sameTicket(i.opened, i.current)
       ? '확인하던 주문과 지금 주문이 다릅니다 — 닫고 다시 확인하세요'
     : !i.gateReady ? '아직 주문을 보낼 수 없습니다'
@@ -305,20 +338,26 @@ export interface ReviewEnv {
   current: ReviewTicket | null;
   gateReady: boolean;
   busy: boolean;
-  /** 지금 진입 화면인가 */
+  /**
+   * 지금 진입 화면인가. **실제 화면 상태에서 와야 한다** — 상수 `true`를
+   * 박아 두면 시험은 초록인데 제품은 이 조건을 한 번도 받지 못한다.
+   */
   intentOpen: boolean;
-  /** `ctaVerdict`가 정한 할 일 */
-  ctaAction: string;
 }
 
 export type ReviewEvent =
-  | { type: 'OPEN' }
+  /**
+   * 확인 창을 연다. **실행 버튼이 받은 판정을 그대로 들고 온다** —
+   * 여기서 `ctaVerdict`를 한 번 더 부르면 입력이 다른 두 번째 판정이
+   * 생기고, 버튼은 꺼져 있는데 창은 열리는 상태가 만들어진다.
+   */
+  | { type: 'OPEN'; ctaAction: string }
   | { type: 'CANCEL' }
   | { type: 'CONFIRM' }
   /** 주문 결과가 왔다 */
   | { type: 'RESULT'; ok: boolean }
-  /** 폼의 정체성이 바뀌었다 */
-  | { type: 'IDENTITY' };
+  /** 둘러싼 문맥이 바뀌었다 — 종목·방향 또는 진입/청산 */
+  | { type: 'CONTEXT' };
 
 /**
  * 이 전이가 **실제로 일으키는 일.**
@@ -346,7 +385,7 @@ export function reviewReduce(s: ReviewState, env: ReviewEnv, e: ReviewEvent): Re
   switch (e.type) {
     case 'OPEN':
       // ★ 여는 것에는 부수효과가 없다.
-      if (!canOpenReview({ phase, ctaAction: env.ctaAction, ticket: env.current })) return stay(s);
+      if (!canOpenReview({ phase, ctaAction: e.ctaAction, ticket: env.current })) return stay(s);
       if (!env.intentOpen) return stay(s);
       return stay({ opened: env.current, sent: false });
 
@@ -359,7 +398,7 @@ export function reviewReduce(s: ReviewState, env: ReviewEnv, e: ReviewEvent): Re
       // 판정을 여기서 다시 쓰지 않는다. `confirmVerdict` 하나가 정한다.
       const v = confirmVerdict({
         phase, opened: s.opened, current: env.current,
-        gateReady: env.gateReady, busy: env.busy,
+        intentOpen: env.intentOpen, gateReady: env.gateReady, busy: env.busy,
       });
       if (v.action !== 'SUBMIT') return stay(s);
       // `sent`를 **먼저** 세운다. 연타의 두 번째는 위 판정에서 막힌다.
@@ -370,9 +409,13 @@ export function reviewReduce(s: ReviewState, env: ReviewEnv, e: ReviewEvent): Re
       // 실패면 **열어 둔다.** 닫으면 왜 실패했는지가 사라진다.
       return stay({ opened: e.ok ? null : s.opened, sent: false });
 
-    case 'IDENTITY':
+    case 'CONTEXT':
       if (phase === 'SUBMITTING') return stay(s);
       if (s.opened == null) return stay(s);
+      // ★ 청산 탭으로 바뀌었으면 **읽던 진입 주문은 더 이상 이 화면의
+      //   주문이 아니다.** 창을 그대로 두면 청산 화면 위에 진입 주문이
+      //   떠 있는 상태가 된다.
+      if (!env.intentOpen) return stay(REVIEW_CLOSED);
       // 읽던 주문과 지금 주문이 다르면 **그대로 두는 것 자체가 거짓말**이다
       if (sameTicket(s.opened, env.current)) return stay(s);
       return stay(REVIEW_CLOSED);
