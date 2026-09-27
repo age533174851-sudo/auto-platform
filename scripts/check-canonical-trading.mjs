@@ -67,6 +67,7 @@ const CAT_API  = 'src/app/api/market/instruments/route.ts';
 const FORMHOOK = 'src/lib/trading/useTradeForm.ts';
 const SIZING   = 'src/lib/trading/positionSizing.ts';
 const SIZEUI   = 'src/components/trading/markets/SpotSizeInput.tsx';
+const CTAV     = 'src/lib/trading/ctaVerdict.ts';
 const PLAN     = 'src/lib/engine/paperPlan.ts';
 const PEXEC    = 'src/lib/engine/paperExecution.ts';
 
@@ -110,6 +111,135 @@ function fnBody(src, name) {
   const next = rest.search(/\nexport (function|const|interface|type) /);
   return next < 0 ? src.slice(at) : src.slice(at, at + 1 + next);
 }
+
+/**
+ * JSX 여는 태그의 **속성 구간**만 잘라 온다.
+ *
+ * `{}` 안의 `>`(화살표 함수 `=>`, 비교식)에서 끊기면 안 되므로 중괄호
+ * 깊이를 세면서 최상위 `>`까지 간다.
+ */
+function jsxTags(src, name) {
+  const out = [];
+  const re = new RegExp(`<${name}\\b`, 'g');
+  let m;
+  while ((m = re.exec(src))) {
+    let depth = 0, i = m.index + m[0].length;
+    for (; i < src.length; i += 1) {
+      const ch = src[i];
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+      else if (ch === '>' && depth === 0) break;
+    }
+    if (i >= src.length) continue;   // 닫히지 않았다 — 위에서 개수로 잡는다
+    out.push(src.slice(m.index + m[0].length, i));
+  }
+  return out;
+}
+
+/** 속성 구간에서 **prop 이름만** 뽑는다 (값은 통째로 버린다) */
+function jsxPropNames(attrs) {
+  let s = attrs;
+  for (let i = 0; i < 40; i += 1) {
+    const n = s.replace(/\{[^{}]*\}/g, ' ');
+    if (n === s) break;
+    s = n;
+  }
+  s = s.replace(/"[^"]*"|'[^']*'/g, ' ').replace(/\/\s*$/, ' ');
+  return (s.match(/[A-Za-z_$][\w$]*/g) || []);
+}
+
+/** 괄호·따옴표 깊이를 세며 최상위 `sep`로 자른다 */
+function splitTop(src, sep) {
+  const out = [];
+  let depth = 0, q = null, start = 0;
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (q) { if (ch === q && src[i - 1] !== '\\') q = null; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+    if ('([{'.includes(ch)) depth += 1;
+    else if (')]}'.includes(ch)) depth -= 1;
+    else if (ch === sep && depth === 0) { out.push(src.slice(start, i)); start = i + 1; }
+  }
+  out.push(src.slice(start));
+  return out;
+}
+
+/** 여는 태그의 `name={…}` 값을 **중괄호 짝을 맞춰** 꺼낸다 */
+function attrValue(attrs, name) {
+  const m = new RegExp(`\\b${name}=\\{`).exec(attrs);
+  if (!m) return null;
+  let depth = 1, i = m.index + m[0].length;
+  const from = i;
+  for (; i < attrs.length && depth > 0; i += 1) {
+    if (attrs[i] === '{') depth += 1;
+    else if (attrs[i] === '}') depth -= 1;
+  }
+  return depth === 0 ? attrs.slice(from, i - 1) : null;
+}
+
+/** `style={{ … }}` 안의 `prop: 값` 표 */
+function styleEntries(attrs) {
+  const inner = attrValue(attrs, 'style');
+  if (inner == null) return {};
+  const obj = inner.trim();
+  if (!obj.startsWith('{') || !obj.endsWith('}')) return {};
+  const out = {};
+  for (const part of splitTop(obj.slice(1, -1), ',')) {
+    const at = splitTop(part, ':');
+    if (at.length < 2) continue;
+    out[at[0].trim()] = at.slice(1).join(':').trim();
+  }
+  return out;
+}
+
+/** 최상위 삼항이면 **조건부**를 돌려준다 (`?.`·`??`는 삼항이 아니다) */
+function ternaryCond(value) {
+  let depth = 0, q = null;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (q) { if (ch === q && value[i - 1] !== '\\') q = null; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+    if ('([{'.includes(ch)) depth += 1;
+    else if (')]}'.includes(ch)) depth -= 1;
+    else if (ch === '?' && depth === 0) {
+      if (value[i + 1] === '?' || value[i + 1] === '.') { i += 1; continue; }
+      return value.slice(0, i);
+    }
+  }
+  return null;
+}
+
+/**
+ * 잠금 식이 **결국** "종목 없음"을 보는가.
+ *
+ * 이름 하나(`off`)로 적혀 있으면 한 단계 따라간다: 정본 판정의 `.off`여야
+ * 하고, 그 판정이 `locked`를 인자로 받아야 한다. 이름만 보고 통과시키면
+ * `const off = false`로 바꿔도 검사가 웃는다.
+ */
+function gateSeesLocked(src, expr) {
+  const e = expr.trim();
+  if (/\blocked\b/.test(e)) return true;
+  if (!/^[A-Za-z_$][\w$]*$/.test(e)) return false;
+  const bind = new RegExp(`const\\s+${e}\\s*=\\s*([A-Za-z_$][\\w$]*)\\.off\\b`).exec(src);
+  if (!bind) return false;
+  const vm = new RegExp(`const\\s+${bind[1]}\\s*=\\s*ctaVerdict\\s*\\(`).exec(src);
+  if (!vm) return false;
+  let depth = 0, i = src.indexOf('(', vm.index + vm[0].length - 1);
+  const from = i;
+  for (; i < src.length; i += 1) {
+    if (src[i] === '(') depth += 1;
+    else if (src[i] === ')') { depth -= 1; if (depth === 0) break; }
+  }
+  return /\blocked:\s*!*\s*locked\b/.test(src.slice(from, i + 1));
+}
+
+/** 여는 태그들 중 속성에 `pat`이 들어 있는 것만 */
+function jsxTagsWith(src, name, pat) {
+  return jsxTags(src, name).filter(a => pat.test(a));
+}
+
+/** 시장 화면이 호가판에 넘길 수 있는 prop — **여기 없는 것은 전부 RED** */
+const BOOK_PROPS_ALLOWED = ['symbolId', 'market', 'rows', 'dense', 'showFunding', 'enabled'];
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -1059,7 +1189,7 @@ const drawer = code(read(DRAWER));
       const gate = /(?:disabled|locked)=\{([^}]*)\}/.exec(cta[1]);
       if (!gate) {
         err(`${f}의 실행 버튼 ${i + 1}번에 잠금 식이 없습니다`);
-      } else if (!/\blocked\b/.test(gate[1])) {
+      } else if (!gateSeesLocked(c, gate[1])) {
         err(`${f}의 실행 버튼 ${i + 1}번이 "종목 없음"(locked)을 보지 않습니다`
           + ` (${gate[0]}) — 종목이 없는데 눌리면 아무 일도 안 일어나거나`
           + ' 엉뚱한 종목으로 나갑니다');
@@ -1361,9 +1491,35 @@ const drawer = code(read(DRAWER));
     // 모의 경로가 있는 시장만 해당한다 (COIN-M·주식은 애초에 잠겨 있다)
     if (sc.market !== 'SPOT' && sc.market !== 'USDT_FUTURES') continue;
     const c = code(read(sc.file));
-    if (/onPickPrice=\{(?!\(\) => \{)/.test(c)) {
-      err(`${sc.file}가 호가 선택을 주문에 연결합니다`
-        + ' — 지금은 지정가가 없어 시장가로 나갑니다 (PRICE_INPUT 미지원)');
+    // ★ **이름을 막지 않는다. 넘길 수 있는 것을 적는다.**
+    //
+    //   `onPickPrice`라는 낱말만 막으면 세 가지로 되돌아온다:
+    //     ⑴ `onPickPrice={() => {}}`  — 아무것도 안 하는 함수를 넘긴다.
+    //        `OrderBookView`는 **callback이 있는지**만 보고 눌림
+    //        표시(cursor·밑줄·title·중앙가 버튼 활성)를 켠다. 눌리는데
+    //        아무 일도 없는 칸이 된다 — 실기에서 실제로 그랬다.
+    //     ⑵ 이름만 바꾼다 (`onRowPrice`, `onRowClick` …).
+    //     ⑶ `{...props}`로 통째로 넘긴다 — 화면에서 무엇이 가는지 안 보인다.
+    //
+    //   그래서 허용 목록을 고정한다: 시장 화면이 호가판에 넘기는 것은
+    //   **무엇을 그릴지**뿐이고, **누르면 무엇을 한다**는 하나도 없다.
+    const bookTags = jsxTags(c, 'OrderBookView');
+    if (/<OrderBookView\b/.test(c) && bookTags.length === 0) {
+      err(`${sc.file}의 호가판 태그를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`);
+    }
+    for (const attrs of bookTags) {
+      if (/\{\s*\.\.\./.test(attrs)) {
+        err(`${sc.file}가 호가판에 prop을 통째로(스프레드) 넘깁니다`
+          + ' — 무엇이 가는지 화면에서 안 보입니다');
+        continue;
+      }
+      for (const name of jsxPropNames(attrs)) {
+        if (!BOOK_PROPS_ALLOWED.includes(name)) {
+          err(`${sc.file}가 호가판에 \`${name}\`을 넘깁니다`
+            + ` — 허용은 ${BOOK_PROPS_ALLOWED.join('·')}뿐입니다.`
+            + ' 호가를 누르는 동작은 지정가 장부가 생긴 뒤에 붙입니다 (PRICE_INPUT 미지원)');
+        }
+      }
     }
     for (const re of [/setLimitPrice/, /limitPrice/, /['"]LIMIT['"]/, /지정가/]) {
       if (re.test(c)) {
@@ -1494,6 +1650,165 @@ const drawer = code(read(DRAWER));
   }
 }
 
+// ══════════════ ㉘ ★ 실행 버튼 — 색 · DOM · 클릭이 **같은 판정 하나**를 본다 ══════════════
+//
+// 무엇이 있었나
+// ─────────────
+// USDⓈ-M 화면의 `Cta`가 판정을 **세 벌** 갖고 있었다:
+//
+//     const off = disabled || !!unavailable || locked;   ← 색만 이걸 봤다
+//     <button disabled={!!unavailable || locked}          ← DOM은 이걸 봤다
+//       onClick={() => { if (unavailable || locked) return; … }}  ← 클릭은 이걸
+//
+// 그래서 호출부가 넘긴 `disabled`(= `form.busy` · `!form.gate.ready` ·
+// `intent !== 'OPEN'`)는 **색에만** 반영됐다. 회색으로 보이는 버튼이 실제로
+// 눌렸고, `form.submit()`은 화면의 intent를 모르므로 **청산 탭에서 진입
+// 주문이 나갈 수 있었다.**
+//
+// 무엇을 검사하나
+// ───────────────
+// ⑴ (모든 시장 화면) 실행 버튼의 `disabled` 식과 **눈에 보이는 꺼짐**
+//    (`background` · `color`의 조건)이 **글자 그대로 같은 식**이어야 한다.
+//    위 고장의 모양이 바로 "둘이 다르다"였다.
+// ⑵ (USDⓈ-M `Cta`) 판정 입력(`form.busy` · `form.gate.ready` ·
+//    `intentOpen` · `locked` · `unavailable` · `form.sideChosen`)을
+//    **정본 판정에 넘기는 자리 밖에서 읽지 않는다.**
+// ⑶ `disabled`에 쓰인 이름이 그 판정의 `.off`에서 와야 한다.
+// ⑷ 클릭은 판정이 정한 `action`으로만 갈린다 — `form.submit()`은
+//    `action === 'SUBMIT'`일 때만 불린다.
+//
+// ★ "색이 회색이다"를 검사하지 않는다. 실제 `disabled` 속성과 클릭
+//   처리기가 **같은 값**을 보는지를 본다.
+{
+  // ⑴ 모든 시장 화면: DOM 꺼짐 == 보이는 꺼짐
+  if (CONTRACT) for (const sc of CONTRACT.MARKET_SCREENS) {
+    const c = code(read(sc.file));
+    const btns = jsxTagsWith(c, 'button', /cta/i);
+    if (/data-testid=[^\n]*cta/i.test(c) && btns.length === 0) {
+      err(`${sc.file}의 실행 버튼 태그를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`);
+    }
+    for (const [i, attrs] of btns.entries()) {
+      const norm = (t) => t.replace(/\s+/g, ' ').trim();
+      const dexpr = attrValue(attrs, 'disabled');
+      if (dexpr == null) {
+        err(`${sc.file}의 실행 버튼 ${i + 1}번에 DOM \`disabled\`가 없습니다`
+          + ' — 회색으로만 보이고 실제로는 눌립니다');
+        continue;
+      }
+      const st = styleEntries(attrs);
+      let conds = 0;
+      for (const prop of ['background', 'color', 'cursor']) {
+        if (st[prop] == null) continue;
+        const cond = ternaryCond(st[prop]);
+        if (cond == null) continue;   // 늘 같은 값이면 어긋날 수가 없다
+        conds += 1;
+        if (norm(cond) !== norm(dexpr)) {
+          err(`${sc.file}의 실행 버튼 ${i + 1}번은 색과 DOM이 다른 식을 봅니다`
+            + ` — \`${prop}\`은 \`${norm(cond)}\`, DOM은 \`${norm(dexpr)}\`.`
+            + ' 회색인데 눌리는 버튼이 됩니다');
+        }
+      }
+      if (conds === 0) {
+        err(`${sc.file}의 실행 버튼 ${i + 1}번은 꺼짐을 눈으로 보여주지 않습니다`
+          + ' — 색·커서 어느 것도 잠금 식을 보지 않습니다');
+      }
+    }
+  }
+
+  // ⑵⑶⑷ USDⓈ-M `Cta` — 판정 하나
+  const usdm = CONTRACT
+    ? (CONTRACT.MARKET_SCREENS.find(s => s.market === 'USDT_FUTURES') || {}).file
+    : null;
+  if (!usdm) err('계약에서 USDⓈ-M 화면을 찾지 못했습니다');
+  else {
+    const c = code(read(usdm));
+    if (!/from '@\/lib\/trading\/ctaVerdict'/.test(c)) {
+      err(`${usdm}가 실행 버튼 판정 정본을 쓰지 않습니다 (${CTAV})`);
+    }
+    const whole = fnBody(c, 'Cta');
+    if (!whole) err(`${usdm}에서 실행 버튼(Cta)을 찾지 못했습니다`);
+    else {
+      // 시그니처(파라미터 구조분해·타입)는 본문이 아니다 — 떼고 본다
+      const at = whole.indexOf('}) {');
+      const body = at < 0 ? whole : whole.slice(at + 4);
+
+      const calls = (body.match(/ctaVerdict\s*\(/g) || []).length;
+      if (calls !== 1) {
+        err(`${usdm}의 실행 버튼이 판정을 ${calls}번 부릅니다 — 정확히 한 번이어야 합니다`);
+      }
+      // 판정에 넘기는 인자 구간
+      const ci = body.indexOf('ctaVerdict');
+      let arg = '';
+      if (ci >= 0) {
+        let depth = 0, i = body.indexOf('(', ci);
+        const from = i;
+        for (; i < body.length; i += 1) {
+          if (body[i] === '(') depth += 1;
+          else if (body[i] === ')') { depth -= 1; if (depth === 0) break; }
+        }
+        arg = body.slice(from, i + 1);
+      }
+      // ⑵ 입력은 판정에 넘기는 자리에서만 읽는다
+      for (const [label, re] of [
+        ['form.busy', /\bform\.busy\b/g],
+        ['form.gate.ready', /\bform\.gate\.ready\b/g],
+        ['intentOpen', /\bintentOpen\b/g],
+        ['locked', /\blocked\b/g],
+        ['unavailable', /\bunavailable\b/g],
+        ['form.sideChosen', /\bform\.sideChosen\b/g],
+      ]) {
+        const all = (body.match(re) || []).length;
+        const inArg = (arg.match(re) || []).length;
+        if (all !== inArg) {
+          err(`${usdm}의 실행 버튼이 \`${label}\`을 판정 밖 ${all - inArg}곳에서 직접 읽습니다`
+            + ' — 판정이 두 벌이 되면 색과 동작이 갈립니다');
+        }
+      }
+      // ⑶ DOM 꺼짐이 판정의 `.off`에서 온다
+      const dm = body.match(/\bdisabled=\{([A-Za-z_$][\w$.]*)\}/);
+      if (!dm) {
+        err(`${usdm}의 실행 버튼 DOM \`disabled\`가 이름 하나가 아닙니다`
+          + ' — 식을 다시 쓰면 판정이 두 벌이 됩니다');
+      } else {
+        const n = dm[1];
+        const bound = n.endsWith('.off')
+          || new RegExp(`const\\s+${n.replace(/\$/g, '\\$')}\\s*=\\s*[A-Za-z_$][\\w$]*\\.off\\b`).test(body);
+        if (!bound) {
+          err(`${usdm}의 실행 버튼 DOM \`disabled={${n}}\`가 판정의 .off가 아닙니다`);
+        }
+      }
+      // ⑷ 클릭은 판정이 정한 action으로만 갈린다
+      const om = body.match(/onClick=\{\(\) => \{([\s\S]*?)\n      \}\}/);
+      if (!om) err(`${usdm}의 실행 버튼 클릭 처리기를 읽지 못했습니다`);
+      else {
+        const click = om[1];
+        if (!/\.action === 'CHOOSE_SIDE'/.test(click)) {
+          err(`${usdm}의 실행 버튼 클릭이 방향 고르기를 판정에서 받지 않습니다`);
+        }
+        if (/form\.submit\s*\(/.test(click)
+            && !/\.action === 'SUBMIT'\)[^;]*form\.submit\s*\(/.test(click)) {
+          err(`${usdm}의 실행 버튼이 판정 없이 주문을 보냅니다`
+            + " — `action === 'SUBMIT'`일 때만 보내야 합니다"
+            + ' (청산 탭에서 진입 주문이 나갑니다)');
+        }
+        for (const re of [/\blocked\b/, /\bunavailable\b/, /\bbusy\b/, /\bgate\b/, /\bintentOpen\b/]) {
+          if (re.test(click)) {
+            err(`${usdm}의 실행 버튼 클릭이 판정을 다시 계산합니다 (${re})`);
+          }
+        }
+      }
+    }
+  }
+
+  // ⑸ 판정은 한 곳에만 산다
+  {
+    const defs = walk('src').filter(f => /export function ctaVerdict\b/.test(read(f)));
+    if (defs.length !== 1 || defs[0].replace(/\\/g, '/') !== CTAV) {
+      err(`실행 버튼 판정이 ${defs.length}곳에 있습니다 (${defs.join(', ')}) — 정본은 ${CTAV} 하나입니다`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\nTRAIGO 거래 화면 계약 검사 실패 (${bad}건)`);
   process.exit(1);
@@ -1506,4 +1821,5 @@ console.log('✅ TRAIGO 거래 화면 계약 — 탐색→상세→거래 사슬
   + ' ★시장 탭 4개 도달 · ★심볼 비조립 · ★종목없음=주문잠금 · ★타시장 데이터 비차용 ·'
   + ' ★화면=주문 정체성 일치 · ★상장목록 거래소 출처 · ★주문중 전환차단 ·'
   + ' ★정체성 변경시 입력 초기화 · ★시장가 전용인데 지정가 UI 없음 ·'
-  + ' ★수량/총액 단일 계산 · ★직접입력 비클램프 · ★MAX 수수료 정본');
+  + ' ★수량/총액 단일 계산 · ★직접입력 비클램프 · ★MAX 수수료 정본 ·'
+  + ' ★호가판 prop 허용목록(누름 동작 없음) · ★실행버튼 색=DOM=클릭 단일 판정');

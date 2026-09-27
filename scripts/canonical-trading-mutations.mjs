@@ -50,6 +50,7 @@ const PEXEC   = 'src/lib/engine/paperExecution.ts';
 const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
 const ROW    = 'src/components/trading/PositionRow.tsx';
+const CTAV   = 'src/lib/trading/ctaVerdict.ts';
 const CHECK  = 'scripts/check-canonical-trading.mjs';
 
 const ONLY = process.argv.slice(2);
@@ -602,6 +603,95 @@ const CASES = [
 
   ['MUT-B12 ★ 수수료를 안 준 것을 0%로 읽는다 (수수료가 사라진다)', PLAN, 'RED',
    [[`  if (feeRatePct == null) return PAPER_FEE_RATE_PCT / 100;`, ``]]],
+
+  // ── ㉕㉘ 호가판 눌림 표시 · 실행 버튼 단일 판정 ──
+  //
+  // 실기에서 나온 두 건이다:
+  //   ⑴ `onPickPrice={() => {}}` — 눌림 표시(cursor·밑줄·title)만 켜지고
+  //      아무 일도 안 하는 칸. `PRICE_INPUT`·`TYPE_LIMIT`은 미지원이다.
+  //   ⑵ `Cta`가 판정을 세 벌 갖고 있어서, 회색으로 보이는 버튼이 실제로
+  //      눌렸다 — 청산 탭에서 진입 주문이 나갈 수 있었다.
+
+  ['MUT-C1 ★ 호가 줄을 눌러 주문 가격에 넣는다 (시장가로 나간다)', USDM, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM" rows={7} dense\n`
+     + `              onPickPrice={(px) => { void px; }}/>`]]],
+
+  ['MUT-C2 ★ 아무것도 안 하는 callback으로 우회한다 (눌림 표시만 켜진다)', USDM, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM" rows={7} dense onPickPrice={() => {}}/>`]]],
+
+  ['MUT-C3 ★ callback 이름만 바꾼다', USDM, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM" rows={7} dense onRowPrice={(px) => { void px; }}/>`]]],
+
+  ['MUT-C4 ★ 호가판에 prop을 통째로(스프레드) 넘긴다', USDM, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM" rows={7} dense {...({} as any)}/>`]]],
+
+  ['MUT-C5 ★ 현물 실행 버튼도 같은 우회를 막는다', SPOT, 'RED',
+   [[`            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="SPOT" rows={7} dense onPickPrice={() => {}}/>`]]],
+
+  ['MUT-C6 ★ DOM disabled를 판정에서 뗀다 (회색인데 눌린다 — 실기 고장 원형)', USDM, 'RED',
+   [[`      disabled={off}`, `      disabled={locked}`]]],
+
+  ['MUT-C7 ★ DOM disabled를 아예 없앤다', USDM, 'RED',
+   [[`      disabled={off}\n`, ``]]],
+
+  ['MUT-C8 ★ disabled를 판정이 아닌 상수에 묶는다', USDM, 'RED',
+   [[`  const off = v.off;`, `  const off = false;`]]],
+
+  ['MUT-C9 ★ DOM은 그대로 두고 클릭이 판정을 무시하고 보낸다', USDM, 'RED',
+   [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
+     + `        if (v.action === 'SUBMIT') void form.submit();`,
+     `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
+     + `        void form.submit();`]]],
+
+  ['MUT-C10 ★ 클릭이 판정을 다시 계산한다 (청산 탭에서 진입이 나간다)', USDM, 'RED',
+   [[`        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
+     + `        if (v.action === 'SUBMIT') void form.submit();`,
+     `        if (locked || unavailable) return;\n`
+     + `        if (v.action === 'CHOOSE_SIDE') { form.chooseSide(side); return; }\n`
+     + `        if (v.action === 'SUBMIT') void form.submit();`]]],
+
+  ['MUT-C11 ★ 화면이 판정 밖에서 intent를 다시 읽는다 (판정이 두 벌이 된다)', USDM, 'RED',
+   [[`  const off = v.off;`, `  const off = v.off || !intentOpen;`]]],
+
+  ['MUT-C12 ★ 화면이 판정 밖에서 busy를 다시 읽는다', USDM, 'RED',
+   [[`  const on = v.on;`, `  const on = v.on && !form.busy;`]]],
+
+  ['MUT-C13 ★ 색만 꺼지고 DOM은 다른 식을 본다 (blocker 1의 모양 그대로)', USDM, 'RED',
+   [[`        background: off ? C.raised : col, color: off ? C.faint : '#fff',`,
+     `        background: (off || locked) ? C.raised : col, color: off ? C.faint : '#fff',`]]],
+
+  ['MUT-C14 ★ 꺼짐을 눈으로 보여주지 않는다', USDM, 'RED',
+   [[`        background: off ? C.raised : col, color: off ? C.faint : '#fff',\n`
+     + `        fontSize: FS.lead, fontWeight: 800,\n`
+     + `        cursor: off ? 'not-allowed' : 'pointer',`,
+     `        background: col, color: '#fff',\n`
+     + `        fontSize: FS.lead, fontWeight: 800,\n`
+     + `        cursor: 'pointer',`]]],
+
+  // ★ `ctaVerdict`가 **무엇을 막는가**는 이 스위트가 잡지 못한다 — 여기 게이트는
+  //   검사기 하나이고, 검사기는 배선을 본다. 판정의 동작은 시험을 게이트로 쓰는
+  //   `scripts/cta-verdict-mutations.mjs`가 깬다. 잡히지 않는 것을 이 목록에
+  //   적어 두면 "16건 검출"이 실제보다 넓어 보인다.
+
+  ['MUT-C16 ★ 판정 정본이 종목 없음을 통과시킨다 (⑲가 한 단계 따라간다)', USDM, 'RED',
+   [[`    locked: !!locked,`, `    locked: false,`]]],
+
+  ['MUT-C17 ★ 판정을 화면이 따로 한 벌 더 만든다', USDM, 'RED',
+   [[`  const on = v.on;`, `  const on = ctaVerdict({\n`
+     + `    gateReady: true, busy: false, intentOpen: true, locked: false,\n`
+     + `    unavailable: false, sideChosen: true, sameSide: true,\n`
+     + `  }).on;`]]],
+
+  ['OK-C1 실행 버튼 판정 정본에 주석 한 줄 추가', CTAV, 'GREEN',
+   [[`export function ctaVerdict(`, `// 대조군\nexport function ctaVerdict(`]]],
+  ['OK-C2 호가판 태그에 줄바꿈만 넣는다', USDM, 'GREEN',
+   [[`            <OrderBookView symbolId={sym} market="USDM" rows={7} dense/>`,
+     `            <OrderBookView symbolId={sym} market="USDM"\n              rows={7} dense/>`]]],
 
   ['OK-B1 사이징 정본에 주석 한 줄 추가', SIZING, 'GREEN',
    [[`export interface MaxAllocation {`, `// 대조군\nexport interface MaxAllocation {`]]],
