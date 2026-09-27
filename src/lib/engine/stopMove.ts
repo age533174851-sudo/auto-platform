@@ -57,8 +57,16 @@ export async function moveStopSafely(i: {
   place: (stopPrice: number) => Promise<{ ok: boolean; orderId: string | null; message?: string }>;
   /** 새 주문 번호를 장부에 적는다. **실패하면 취소하지 않는다** */
   record: (orderId: string | null) => Promise<{ ok: boolean; message?: string }>;
-  /** 방금 건 것 외의 손절을 취소한다 */
-  cancelOthers: (keepOrderId: string | null) => Promise<{ cancelled: number; note?: string }>;
+  /**
+   * 방금 건 것 외의 손절을 취소한다.
+   *
+   * `skipped: true`는 **부르지 않았다**는 뜻이다(실행 권한 상실 등).
+   * 0건 취소와 구분해야 한다 — 0건은 "지울 것이 없었다"이고, 건너뜀은
+   * "지울 것이 있는데 손대지 않았다"다. 뒤를 성공으로 적으면 옛 손절이
+   * 남은 사실이 사라진다.
+   */
+  cancelOthers: (keepOrderId: string | null)
+    => Promise<{ cancelled: number; note?: string; skipped?: boolean }>;
 }): Promise<StopMoveResult> {
   // ── ① 새 손절 ──
   let placed: { ok: boolean; orderId: string | null; message?: string };
@@ -91,6 +99,17 @@ export async function moveStopSafely(i: {
   // ── ③ 옛 손절 정리 ──
   try {
     const c = await i.cancelOthers(placed.orderId ?? null);
+    // ★ **건너뛴 것을 "옮겼다"로 적지 않는다.**
+    //
+    //   새 손절은 걸려 있으므로 실패는 아니다. 하지만 옛 손절도 남아
+    //   있으므로 `MOVED`(완전 성공)도 아니다. 그 사실이 결과에 남아야
+    //   다음 주인이 다음 회차에 정리할 수 있다.
+    if (c?.skipped === true) {
+      return { code: 'OLD_STOP_REMAINS', ok: true, newOrderId: placed.orderId ?? null,
+        cancelledOld: 0, oldStopKept: true,
+        reason: `새 손절은 걸고 적었지만 옛 손절 정리를 건너뛰었습니다`
+          + `${c?.note ? ` (${c.note})` : ''} — 다음 회차에 정리합니다` };
+    }
     const n = Number(c?.cancelled ?? 0);
     return { code: 'MOVED', ok: true, newOrderId: placed.orderId ?? null,
       cancelledOld: Number.isFinite(n) ? n : 0, oldStopKept: false,

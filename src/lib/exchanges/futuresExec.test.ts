@@ -15,7 +15,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict, futuresCountOpen,
   reconcileDecision, futuresPlaceOrder, futuresFindOrderByClientId,
-  positionModeVerdict, __clearPositionModeCache,
+  positionModeVerdict, closeModeVerdict, __clearPositionModeCache,
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
 } from './futuresExec';
 import { __clearGateSpecCache } from './gateFutures';
@@ -157,8 +157,89 @@ export function runFuturesExecTests() {
     eq(r.ok, false, '못 읽었는데 진입을 허용했다');
     eq(r.code, 'UNKNOWN'); eq(r.mode, null);
     assert(r.message.includes('타임아웃'), '왜 못 읽었는지 남아야 한다');
-    assert(r.message.includes('청산은 이 검사를 받지 않습니다'),
-      '닫는 길이 막히지 않는다는 것을 명시해야 한다');
+  });
+
+  test('★ "청산은 언제나 된다"고 적지 않는다 — 종료도 모드를 본다', () => {
+    // 이 문장이 실제로 들어 있었다. 그런데 closeSymbolPosition은 모드를
+    // 못 읽으면 청산을 보내지 않는다 — 화면과 감시가 다른 말을 했다.
+    for (const m of [null, 'HEDGE', 'ONE_WAY'] as const) {
+      const msg = positionModeVerdict(m as any).message;
+      assert(!msg.includes('언제나 닫을 수 있습니다'), `사실이 아닌 문장이 남아 있습니다 (${m})`);
+      assert(!msg.includes('청산은 이 검사를 받지 않습니다'), `사실이 아닌 문장이 남아 있습니다 (${m})`);
+    }
+  });
+
+  console.log('[실행기 — 종료 모드 판정]');
+
+  // ★ 종료 요청으로 **반대 포지션이 생기지 않는다**가 이 판정의 불변식이다.
+  //   Binance는 positionSide 없는 reduceOnly를, Gate는 auto_size를 보낸다.
+  //   둘 다 양방향 계좌에서의 처리를 공식 문서로 확인하지 못했다.
+
+  test('단방향 + LONG 청산은 통과한다 (binance)', () => {
+    const v = closeModeVerdict({ exchange: 'binance', mode: 'ONE_WAY', positionSide: 'LONG' });
+    eq(v.ok, true); eq(v.code, 'ONE_WAY'); eq(v.strandsOpenPosition, false);
+  });
+
+  test('단방향 + SHORT 청산은 통과한다 (binance)', () => {
+    eq(closeModeVerdict({ exchange: 'binance', mode: 'ONE_WAY', positionSide: 'SHORT' }).ok, true);
+  });
+
+  test('Gate 단방향은 방향 인자 없이도 통과한다 — auto_size가 정한다', () => {
+    const v = closeModeVerdict({ exchange: 'gate', mode: 'ONE_WAY', positionSide: null });
+    eq(v.ok, true); eq(v.code, 'ONE_WAY');
+  });
+
+  test('★ 양방향 LONG 청산은 막는다 — 규격 미확인', () => {
+    const v = closeModeVerdict({ exchange: 'binance', mode: 'HEDGE', positionSide: 'LONG' });
+    eq(v.ok, false); eq(v.code, 'HEDGE_UNVERIFIED');
+    eq(v.strandsOpenPosition, true, '이미 열린 포지션이 갇힌다는 사실을 적어야 한다');
+    assert(v.message.includes('거래소에서 직접'), '사람이 무엇을 해야 하는지 적어야 한다');
+  });
+
+  test('★ 양방향 SHORT 청산도 막는다 (거래소 무관)', () => {
+    for (const ex of ['binance', 'gate'] as const) {
+      const v = closeModeVerdict({ exchange: ex, mode: 'HEDGE', positionSide: 'SHORT' });
+      eq(v.ok, false, `★ ${ex} 양방향에 단방향 규격이 나갔습니다`);
+      eq(v.code, 'HEDGE_UNVERIFIED');
+    }
+  });
+
+  test('★ 모드를 모르면 보내지 않는다 (fail closed)', () => {
+    for (const ex of ['binance', 'gate'] as const) {
+      const v = closeModeVerdict({ exchange: ex, mode: null, positionSide: 'LONG', error: '타임아웃' });
+      eq(v.ok, false); eq(v.code, 'UNKNOWN');
+      eq(v.strandsOpenPosition, true);
+      assert(v.message.includes('타임아웃'), '왜 못 읽었는지 남아야 한다');
+      assert(v.message.includes('자동으로 닫히지 않습니다'), '확인 못 한 것을 "닫힘"으로 읽히게 두지 않는다');
+    }
+  });
+
+  test('★ 방향을 모르면 binance 청산을 보내지 않는다 — 짐작하면 반대 진입이다', () => {
+    for (const side of [null, undefined] as const) {
+      const v = closeModeVerdict({ exchange: 'binance', mode: 'ONE_WAY', positionSide: side });
+      eq(v.ok, false, '★ 방향 없이 청산을 보냈습니다');
+      eq(v.code, 'NO_DIRECTION');
+      eq(v.strandsOpenPosition, true);
+    }
+  });
+
+  test('★ 종료가 막히는 모드에서는 신규 진입도 막힌다 (대칭)', () => {
+    // 종료가 막힌 계좌에 진입만 열려 있으면 "열 수는 있고 닫을 수는 없는"
+    // 상태가 된다. 두 판정이 같은 관측에서 나온다는 것을 여기서 고정한다.
+    for (const m of [null, 'HEDGE'] as const) {
+      eq(closeModeVerdict({ exchange: 'binance', mode: m as any, positionSide: 'LONG' }).ok, false);
+      eq(positionModeVerdict(m as any).ok, false,
+        `★ 종료가 막힌 모드(${m})에서 신규 진입이 허용됩니다`);
+    }
+  });
+
+  test('★ 진입 차단과 종료 차단을 다른 실패로 적는다', () => {
+    // 아직 안 연 것은 불편이고, 이미 열려 있는데 못 닫는 것은 사고다.
+    const close = closeModeVerdict({ exchange: 'binance', mode: 'HEDGE', positionSide: 'LONG' });
+    const entry = positionModeVerdict('HEDGE');
+    eq(close.code, 'HEDGE_UNVERIFIED');
+    eq(entry.code, 'HEDGE_BLOCKED');
+    assert(close.code !== entry.code, '두 실패가 같은 코드입니다');
   });
 
   console.log('[실행기 — UNKNOWN 판정]');

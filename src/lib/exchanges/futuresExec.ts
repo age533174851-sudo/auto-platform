@@ -321,8 +321,108 @@ export function positionModeVerdict(
     message: `포지션 모드를 읽지 못했습니다${error ? ` (${error})` : ''}. `
            + '헤지 모드였다면 이 단방향 주문이 의도와 다른 쪽 포지션을 열 수 있어 '
            + '신규 진입을 하지 않습니다 — 확인하지 못한 것은 통과가 아닙니다. '
-           + '(청산은 이 검사를 받지 않습니다. 열린 포지션은 언제나 닫을 수 있습니다.)',
+           + '(종료 경로는 별도로 판정합니다 — closeModeVerdict를 보세요.)',
   };
+}
+
+// ── 종료 경로의 같은 질문, 다른 답 ──────────────────────
+//
+// ★ **위 문단은 한 번 거짓말을 했다.** UNKNOWN 메시지에 "청산은 이 검사를
+//   받지 않습니다. 열린 포지션은 언제나 닫을 수 있습니다"라고 적혀 있었다.
+//   그건 사실이 아니다:
+//
+//     · 주문 요청 성공  ≠ 체결
+//     · 체결            ≠ 잔여 0 (재조회로 확인해야 한다)
+//     · reduceOnly의 의미는 **거래소와 포지션 모드에 따라 다르다**
+//     · 못 읽음         ≠ 없음
+//
+// 왜 진입 판정과 같은 파일에 두는가
+// ─────────────────────────────────
+// 진입과 종료가 **같은 관측**(계좌 포지션 모드)을 보고 **다른 결론**을
+// 낸다. 판정이 두 파일에 흩어지면 한쪽만 고쳐지고, 그때 "열 수는 있는데
+// 닫을 수는 없는" 상태가 소리 없이 생긴다.
+//
+// 지금 각 거래소의 종료 요청이 실제로 무엇을 보내는가 (코드 기준)
+// ──────────────────────────────────────────────────────────────
+//   Binance  closePositionPercent
+//            { symbol, side, type: MARKET, quantity, reduceOnly: true }
+//            **positionSide를 보내지 않는다.** 이 조합은 단방향 전용이다.
+//            양방향(dual-side) 계좌에서 이 모양이 어떻게 처리되는지는
+//            공식 문서로 확인하지 못했다(NOT_VERIFIED).
+//
+//   Gate     closePositionGateFutures
+//            { contract, size: 0, price: '0', tif: 'ioc',
+//              reduce_only: true, auto_size: close_long | close_short }
+//            `auto_size`가 모드별로 어떻게 해석되는지 역시 확인하지 못했다.
+//
+// 그래서 **확인된 조합만 통과시킨다.** 틀린 조합은 거부가 아니라 반대
+// 방향 신규 진입이 될 수 있다 — 거부는 불편이고 반대 포지션은 사고다.
+//
+// 두 실패를 섞지 않는다
+// ─────────────────────
+//   진입 차단  아직 열지 않았다 — 불편이다
+//   종료 차단  이미 열려 있는데 못 닫는다 — **사고다**
+//
+// 같은 원인이라도 운영자가 해야 할 일이 다르다. 앞은 기다리면 되고,
+// 뒤는 사람이 거래소에서 직접 닫아야 한다.
+
+export interface CloseModeVerdict {
+  /** 청산 주문을 보내도 되는가 */
+  ok: boolean;
+  mode: 'ONE_WAY' | 'HEDGE' | null;
+  code: 'ONE_WAY' | 'HEDGE_UNVERIFIED' | 'UNKNOWN' | 'NO_DIRECTION';
+  /** 이미 열린 포지션이 있다면 그것을 자동으로 닫지 못한다는 뜻인가 */
+  strandsOpenPosition: boolean;
+  message: string;
+}
+
+/**
+ * 종료 요청을 보내도 되는가.
+ *
+ * 불변식: **종료 요청으로 신규·반대 포지션이 생기지 않는다.** 모드를
+ * 모르면 그 불변식을 보장할 수 없으므로 보내지 않는다.
+ *
+ * @param positionSide 닫을 방향. Binance는 어느 쪽을 줄이는지 알아야 하고,
+ *                     모르면 짐작하지 않는다 — 짐작하면 반대 진입이 된다.
+ */
+export function closeModeVerdict(i: {
+  exchange: 'binance' | 'gate';
+  mode: 'ONE_WAY' | 'HEDGE' | null | undefined;
+  positionSide?: 'LONG' | 'SHORT' | null;
+  error?: string | null;
+}): CloseModeVerdict {
+  // ── ① 모드를 모르면 보내지 않는다 ──
+  if (i?.mode !== 'ONE_WAY' && i?.mode !== 'HEDGE') {
+    return { ok: false, mode: null, code: 'UNKNOWN', strandsOpenPosition: true,
+      message: '계좌의 포지션 모드(단방향/양방향)를 읽지 못해 청산 주문을 보내지 않았습니다'
+        + (i?.error ? ` — ${i.error}` : '')
+        + '. 확인하지 못한 것은 통과가 아닙니다 — 이미 열린 포지션이 있다면 '
+        + '자동으로 닫히지 않습니다.' };
+  }
+
+  // ── ② 양방향은 규격을 확인하지 못했다 ──
+  //
+  //   Binance는 positionSide 없는 reduceOnly를, Gate는 auto_size를 보낸다.
+  //   둘 다 dual-side 계좌에서의 처리를 공식 문서로 확인하지 못했다.
+  //   **추측해서 보내지 않는다.**
+  if (i.mode === 'HEDGE') {
+    return { ok: false, mode: 'HEDGE', code: 'HEDGE_UNVERIFIED', strandsOpenPosition: true,
+      message: '양방향(헤지) 계좌의 청산 규격을 아직 확정하지 못해 보내지 않았습니다 '
+        + '— 단방향 계좌에서만 자동 청산이 동작합니다. '
+        + '이미 열린 포지션이 있다면 거래소에서 직접 닫아야 합니다.' };
+  }
+
+  // ── ③ 단방향: Binance는 방향을 알아야 한다 ──
+  //
+  //   Gate는 `auto_size`를 잔여 부호에서 정하므로 방향 인자가 없어도 된다.
+  if (i.exchange === 'binance' && i.positionSide !== 'LONG' && i.positionSide !== 'SHORT') {
+    return { ok: false, mode: 'ONE_WAY', code: 'NO_DIRECTION', strandsOpenPosition: true,
+      message: '닫을 포지션의 방향을 읽지 못해 청산 주문을 보내지 않았습니다 '
+        + '— 짐작하면 반대 방향으로 신규 진입이 됩니다.' };
+  }
+
+  return { ok: true, mode: 'ONE_WAY', code: 'ONE_WAY', strandsOpenPosition: false,
+    message: '포지션 모드 단방향 확인' };
 }
 
 /**
