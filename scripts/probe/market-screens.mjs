@@ -19,6 +19,8 @@
 //      (REACHABLE != TRADABLE — 가짜 심볼로 채우지 않는다)
 //   ⑦ 목록의 `BTC`가 **`BTCUSDT`로 정규화되어** 차트·호가·봉 조회까지
 //      그 심볼로 흘러가는가 (예전에는 `BTC`가 그대로 흘렀다)
+//   ⑧ **화면이 보는 종목과 주문 폼이 쓰는 종목이 같은가** (Phase 2A)
+//   ⑨ 수량/총액/빠른비율이 **같은 정본 수량**을 만드는가 (Phase 2B)
 //
 // CI에는 넣지 않는다 — Playwright는 이 저장소의 의존성이 아니다.
 // (`scripts/probe/README.md`의 규약을 그대로 따른다.)
@@ -315,7 +317,198 @@ for (const [name, w, h] of VIEWPORTS) {
   // 원래 탭으로 돌려놓는다
   await page.evaluate(() =>
     (document.querySelector('[data-testid="market-tab-SPOT"]'))?.click());
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(600);
+
+  // ══ ⑦-b 실제 종목 선택 → 정체성이 **전부** 따라오는가 ══
+  //
+  // ★ 이 컨테이너의 망 정책이 거래소를 막는다(exchangeInfo가 HTTP 403).
+  //   그래서 **앱의 목록 응답을 가로채** 거래소 응답 모양 그대로 넣는다.
+  //   이것으로 증명되는 것과 아닌 것을 갈라 둔다:
+  //
+  //     증명됨    고르기 화면 → 선택 → 활성 정체성 → 시세·폼·헤더 전파
+  //     증명 안 됨 실제 상장 여부(목록 권위 자체) — 시험이 파서를 따로 본다
+  await page.route('**/api/market/instruments?market=USDM**', r => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({
+      ok: true, market: 'USDM', asOf: Date.now(), count: 2,
+      instruments: [
+        { market: 'USDM', symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT',
+          catalogSource: 'BINANCE_USDM_EXCHANGE_INFO', asOf: Date.now() },
+        { market: 'USDM', symbol: 'ETHUSDT', baseAsset: 'ETH', quoteAsset: 'USDT',
+          catalogSource: 'BINANCE_USDM_EXCHANGE_INFO', asOf: Date.now() },
+      ],
+    }),
+  }));
+
+  r.pick = {};
+  {
+    await page.evaluate(() =>
+      (document.querySelector('[data-testid="market-tab-USDM"]'))?.click());
+    await page.waitForTimeout(800);
+    await page.evaluate(() =>
+      (document.querySelector('[data-testid="pick-instrument"]'))?.click());
+    await page.waitForTimeout(900);
+    r.pick.opened = await page.evaluate(() =>
+      !!document.querySelector('[data-testid="instrument-picker"]'));
+    await page.screenshot({ path: `${OUT}/${name}-USDM-picker.png` });
+
+    const picked = await page.evaluate(() => {
+      const b = document.querySelector('[data-testid="instrument-row-ETHUSDT"]');
+      if (!b) return false; b.click(); return true;
+    });
+    await page.waitForTimeout(1000);
+    r.pick.after = await page.evaluate(() => {
+      const h = document.querySelector('[data-testid="paper-order-screen"]');
+      return {
+        market: h?.getAttribute('data-market') ?? null,
+        active: h?.getAttribute('data-active-symbol') ?? null,
+        formSymbol: h?.getAttribute('data-form-symbol') ?? null,
+        formMarket: h?.getAttribute('data-form-market') ?? null,
+        tradable: h?.getAttribute('data-tradable') ?? null,
+        header: document.querySelector('[data-testid="trading-market-label"]')?.textContent?.trim() ?? null,
+      };
+    });
+    await page.screenshot({ path: `${OUT}/${name}-USDM-selected.png` });
+
+    const a = r.pick.after;
+    if (!r.pick.opened) bad(`${name}: USDⓈ-M 고르기 화면이 열리지 않습니다`);
+    else if (!picked) bad(`${name}: 목록에 ETHUSDT가 없습니다`);
+    else if (a.active !== 'ETHUSDT' || a.formSymbol !== 'ETHUSDT'
+      || a.formMarket !== 'USDM' || a.market !== 'USDM') {
+      bad(`${name}: 종목을 골랐는데 정체성이 따라오지 않습니다 `
+        + `(market=${a.market} active=${a.active} form=${a.formMarket}/${a.formSymbol})`);
+    } else if (a.tradable !== '1') {
+      bad(`${name}: 종목을 골랐는데 거래 불가로 남았습니다`);
+    } else {
+      ok(`${name}: USDⓈ-M ETHUSDT 선택 → 화면·폼·헤더 전부 같은 정체성 (tradable=1)`);
+    }
+    if (a.header && !a.header.includes('ETHUSDT')) {
+      bad(`${name}: 헤더가 고른 종목을 따라오지 않습니다 (${a.header})`);
+    }
+
+    // ★ 현물로 돌아오면 **원래 종목**이 복원되고, 선물 심볼이 따라오지 않는다
+    await page.evaluate(() =>
+      (document.querySelector('[data-testid="market-tab-SPOT"]'))?.click());
+    await page.waitForTimeout(800);
+    r.pick.backToSpot = await page.evaluate(() => {
+      const h = document.querySelector('[data-testid="paper-order-screen"]');
+      return { market: h?.getAttribute('data-market') ?? null,
+        active: h?.getAttribute('data-active-symbol') ?? null,
+        formSymbol: h?.getAttribute('data-form-symbol') ?? null };
+    });
+    if (r.pick.backToSpot.active !== 'BTCUSDT' || r.pick.backToSpot.formSymbol !== 'BTCUSDT') {
+      bad(`${name}: 현물로 돌아왔는데 종목이 복원되지 않습니다 (${r.pick.backToSpot.active})`);
+    } else ok(`${name}: 현물 복귀 → BTCUSDT 복원 (선물 심볼이 따라오지 않음)`);
+
+    // 선물로 다시 가면 고른 종목이 남아 있다
+    await page.evaluate(() =>
+      (document.querySelector('[data-testid="market-tab-USDM"]'))?.click());
+    await page.waitForTimeout(800);
+    const again = await page.evaluate(() =>
+      document.querySelector('[data-testid="paper-order-screen"]')?.getAttribute('data-active-symbol') ?? null);
+    r.pick.usdmAgain = again;
+    if (again !== 'ETHUSDT') bad(`${name}: 선물 재진입에 고른 종목이 사라졌습니다 (${again})`);
+    else ok(`${name}: 선물 재진입 → ETHUSDT 복원`);
+
+    await page.evaluate(() =>
+      (document.querySelector('[data-testid="market-tab-SPOT"]'))?.click());
+    await page.waitForTimeout(600);
+  }
+
+  // ══ ⑧ 화면 종목 == 폼 종목 ══
+  //
+  // Phase 1에 있던 구멍이다. 화면은 ETHUSDT를 보여주면서 주문은 BTCUSDT로
+  // 나갈 수 있었다. **속성으로 드러낸 값을 직접 비교한다.**
+  r.identity = await page.evaluate(() => {
+    const h = document.querySelector('[data-testid="paper-order-screen"]');
+    return {
+      market: h?.getAttribute('data-market') ?? null,
+      active: h?.getAttribute('data-active-symbol') ?? null,
+      formSymbol: h?.getAttribute('data-form-symbol') ?? null,
+      formMarket: h?.getAttribute('data-form-market') ?? null,
+      header: document.querySelector('[data-testid="trading-market-label"]')?.textContent?.trim() ?? null,
+    };
+  });
+  {
+    const i = r.identity;
+    if (i.active && i.active !== i.formSymbol) {
+      bad(`${name}: 화면 종목(${i.active})과 폼 종목(${i.formSymbol})이 다릅니다`);
+    } else if (!i.active) {
+      bad(`${name}: 활성 종목이 비어 있습니다`);
+    } else {
+      ok(`${name}: 화면=폼 정체성 일치 (${i.formMarket} · ${i.formSymbol})`);
+    }
+    // 헤더에 적힌 것과도 같아야 한다
+    if (i.active && i.header && !i.header.includes(i.active)) {
+      bad(`${name}: 헤더(${i.header})가 활성 종목(${i.active})과 다릅니다`);
+    }
+  }
+
+  // ══ ⑨ 수량 / 총액 / 빠른비율이 같은 정본 수량을 만든다 ══
+  const readQty = () => page.evaluate(() => {
+    const t = (sel) => document.querySelector(sel)?.textContent?.trim() ?? null;
+    return {
+      // 입력 부품이 보여주는 "주문 수량"
+      effective: t('[data-testid="size-effective"]'),
+      // 예상값 줄의 수량 — **다른 경로로 읽은 같은 값이어야 한다**
+      estimate: t('[data-testid="est-qty"]'),
+      reason: t('[data-testid="size-input-reason"]'),
+    };
+  });
+  r.sizing = {};
+  for (const [label, act] of [
+    ['25%', async () => { await page.evaluate(() =>
+      (document.querySelector('[data-testid="alloc-25"]'))?.click()); }],
+    ['MAX', async () => { await page.evaluate(() =>
+      (document.querySelector('[data-testid="alloc-max"]'))?.click()); }],
+    ['수량입력', async () => {
+      await page.evaluate(() =>
+        (document.querySelector('[data-testid="size-mode-QTY"]'))?.click());
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="size-input"]');
+        if (!el) return;
+        const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        set.call(el, '0.01');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }],
+    ['총액초과', async () => {
+      await page.evaluate(() =>
+        (document.querySelector('[data-testid="size-mode-NOTIONAL"]'))?.click());
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="size-input"]');
+        if (!el) return;
+        const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        set.call(el, '99999999');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }],
+  ]) {
+    await act();
+    await page.waitForTimeout(350);
+    r.sizing[label] = await readQty();
+  }
+  {
+    const present = Object.values(r.sizing).some(v => v.effective != null);
+    if (!present) bad(`${name}: 수량/총액 입력 부품이 화면에 없습니다`);
+    else {
+      // 같은 순간의 두 표시가 어긋나면 계산이 두 벌이라는 뜻이다
+      for (const [k, v] of Object.entries(r.sizing)) {
+        if (v.effective == null || v.estimate == null) continue;
+        const a = (v.effective.match(/[\d.]+/) || [])[0];
+        const b = (v.estimate.match(/[\d.]+/) || [])[0];
+        if (a && b && a !== b) {
+          bad(`${name}: ${k}에서 입력부(${a})와 예상값(${b})의 수량이 다릅니다`);
+        }
+      }
+      // ★ 초과 입력은 **반영되지 않고 사유가 뜬다**
+      const over = r.sizing['총액초과'];
+      if (!over?.reason) bad(`${name}: 잔고를 넘는 총액인데 사유가 없습니다`);
+      else ok(`${name}: 초과 입력을 반영하지 않고 적습니다`);
+      ok(`${name}: 수량/총액/빠른비율이 같은 수량을 만듭니다`);
+    }
+  }
+  await page.screenshot({ path: `${OUT}/${name}-SPOT-sizing.png` });
 
   await ctx.close();
 }
