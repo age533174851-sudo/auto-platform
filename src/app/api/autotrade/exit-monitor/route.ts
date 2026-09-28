@@ -884,6 +884,35 @@ async function runLifecycleSweep(
   };
 
   for (const p of positions) {
+    // ══════════════════════════════════════════════════════════
+    // ★ 관리 유예된 자리는 **여기서 끝난다** — 조회도 하지 않는다
+    // ══════════════════════════════════════════════════════════
+    //
+    //   예전에는 `mayActOn(p)`이 `highWaterSince` 한 줄에만 붙어 있었다.
+    //   그래서 유예된 자리도 그 아래를 전부 지나갔다:
+    //
+    //       readOpenPosition → liveStopPrice → lifecycleDecide
+    //       → guard.claim → applyLifecycleClose / moveStopSafely
+    //
+    //   `lifecycleDecide`는 `ownership !== 'OWNED'`만 막는다. 그런데 같은
+    //   전략의 줄만 섞인 자리는 **소유권이 OWNED다.** 그리고 시간청산은
+    //   최고 도달 R이 없어도 경과 시간만으로 발동한다 — 즉 유예된 자리의
+    //   포지션이 6시간 뒤에 **닫힐 수 있었다.**
+    //
+    //   그래서 관문을 반복문 맨 앞, `credsOf`보다도 앞에 둔다. 유예된
+    //   자리는 일반 생명주기에서 조회 0회 · 쓰기 0회다.
+    if (p.management?.code !== 'MANAGED') {
+      out.results.push({
+        symbol: p.symbol, strategyId: p.strategyId,
+        code: p.management?.code ?? 'MANAGEMENT_UNKNOWN',
+        // **실패가 아니다.** 일부러 건드리지 않은 것이다.
+        ok: true, deferred: true,
+        reason: p.management?.reason
+          ?? '일반 생명주기 관리 판정을 확인하지 못해 건드리지 않습니다',
+      });
+      continue;
+    }
+
     // ★ **선점은 여기서 하지 않는다.**
     //
     //   예전에는 판단하기 전에 표식을 남겼다. 그러면 읽기만 하고 아무것도

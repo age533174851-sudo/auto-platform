@@ -1622,18 +1622,75 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
         err('감시 후보: 자리가 막힌 진짜 이유가 사유에 없습니다');
       }
     }
-    //   ④ 범위를 넘기지 않는다 — legacy NO_STOP과 모르는 정책은 자리를 막지 않는다
-    for (const [over, what] of [
-      [{ stop_loss: null }, '정책 없는 옛 줄(NO_STOP)'],
-      [{ stop_policy: 'WAT', stop_loss: 90 }, '모르는 정책'],
-    ]) {
+    //   ④ ★ 자리를 막는 사유는 **다섯**이다
+    //
+    //      원칙: 일반 생명주기가 관리할 수 없는 줄이 같은 net-position
+    //      자리에 하나라도 있으면 그 자리를 건드리지 않는다. 막는 이유와
+    //      줄의 관측 의미는 제각각이지만 **결과는 같다.**
+    const SEAT_BLOCKERS = [
+      [{ stop_policy: 'NO_FIXED_SL', stop_loss: null }, 'NO_FIXED_SL_EXIT_UNWIRED'],
+      [{ stop_policy: 'NO_FIXED_SL', stop_loss: 95 }, 'NO_FIXED_SL_STOP_CONFLICT'],
+      [{ stop_policy: 'FIXED_SL', stop_loss: null }, 'FIXED_SL_MISSING_STOP'],
+      [{ stop_policy: 'WAT', stop_loss: 90 }, 'STOP_POLICY_UNKNOWN'],
+      [{ stop_loss: null }, 'NO_STOP'],
+    ];
+    for (const [bad, blocker] of SEAT_BLOCKERS) {
+      for (const same of [true, false]) {
+        const r = run([
+          row({ id: 'a', signal_id: '[s:scalp]a', ...bad }),
+          row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90,
+                signal_id: same ? '[s:scalp]b' : '[s:my-original-v1]b' }),
+        ]);
+        const p = r.positions.find(x => x.orderId === 'b');
+        if (!p) { err(`감시 후보: ${blocker} 혼재 자리에서 정상 줄이 사라졌습니다`); continue; }
+        if (cm.mayActOn(p)) {
+          err(`감시 후보: ${blocker}가 있는 자리를 관리합니다`
+            + ` (${same ? '같은' : '다른'} 전략 혼재)`
+            + ' — 관리할 수 없는 노출까지 닫거나 손절을 옮깁니다');
+        }
+        if (same && !String(p.management?.reason || '').includes(blocker)) {
+          err(`감시 후보: 자리가 막힌 이유(${blocker})가 사유에 없습니다`);
+        }
+      }
+      // 과잉 차단 방지 — 자리가 다르면 영향이 없어야 한다
+      for (const [over, what] of [
+        [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
+        [{ symbol: 'ETHUSDT' }, '다른 종목'],
+      ]) {
+        const r = run([
+          row({ id: 'a', ...bad }),
+          row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...over }),
+        ]);
+        const p = r.positions.find(x => x.orderId === 'b');
+        if (!p || !cm.mayActOn(p)) {
+          err(`감시 후보: ${blocker}가 ${what}까지 막았습니다 — 과잉 차단입니다`);
+        }
+      }
+    }
+    // ★ 자리를 막아도 **줄의 관측 의미는 그대로다.**
+    {
+      const r = run([row({ stop_loss: null })]);
+      if (!(r.skipped || []).some(x => x.code === 'NO_STOP')) {
+        err('감시 후보: NO_STOP이 대상 아님 목록에서 사라졌습니다');
+      }
+      if ((r.deferred || []).length !== 0) {
+        err('감시 후보: 옛 줄(NO_STOP)을 유예로 옮겼습니다'
+          + ' — 운영자가 새로 생긴 문제로 읽습니다');
+      }
+      const u = run([row({ stop_policy: 'WAT', stop_loss: 90 })]);
+      if (!codes(u).includes('STOP_POLICY_UNKNOWN')) {
+        err('감시 후보: 모르는 정책이 유예 목록에서 사라졌습니다');
+      }
+    }
+    // 범위 고정 — 체결 시각 없음까지 넓히지 않았다
+    {
       const r = run([
-        row({ id: 'a', ...over }),
+        row({ id: 'a', acked_at: null }),
         row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
       ]);
       const p = r.positions.find(x => x.orderId === 'b');
       if (!p || !cm.mayActOn(p)) {
-        err(`감시 후보: ${what}까지 자리 차단으로 승격시켰습니다 — 범위를 넘었습니다`);
+        err('감시 후보: NO_ENTRY_TIME까지 자리 차단으로 넓혔습니다 — 별도 판단이 필요합니다');
       }
     }
 
@@ -1687,12 +1744,42 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
       err(`${MONITOR}: 생명주기 반복문을 찾지 못했습니다 — 검사가 헛돕니다`);
     } else {
       const body = mon.slice(iLoop, iEnd);
-      if (/\bdeferred\b/.test(body)) {
+      // ★ **목록을 쓰는가**를 본다. `deferred: true` 같은 결과 표시는
+      //   막을 이유가 없다 — 낱말을 금지하면 정직한 표기까지 막힌다.
+      if (/\bdeferred\s*\.|of\s+deferred\b|deferred\s*\[/.test(body)) {
         err(`${MONITOR}: 유예 목록이 실행 반복문 안에서 쓰입니다`
           + ' — 거래소를 읽은 뒤에 거르게 됩니다');
       }
       // 거래소를 건드리는 단계가 전부 이 반복문 **안**에 있는가.
       // 밖으로 새면 유예와 무관하게 불린다.
+      // ★★ 관리 유예 관문이 **반복문 맨 앞**에 있는가.
+      //
+      //   예전에는 `mayActOn(p)`이 `highWaterSince` 한 줄에만 붙어 있어서,
+      //   유예된 자리도 `readOpenPosition` → `lifecycleDecide` →
+      //   `applyLifecycleClose`를 전부 지나갔다. `lifecycleDecide`는
+      //   소유권만 보는데 같은 전략끼리 섞인 자리는 소유권이 OWNED라,
+      //   시간청산이 그 포지션을 닫을 수 있었다.
+      {
+        const iGate = body.search(/if\s*\(\s*p\.management\?\.code\s*!==\s*'MANAGED'\s*\)/);
+        if (iGate < 0) {
+          err(`${MONITOR}: 관리 유예 관문이 실행 반복문 앞에 없습니다`
+            + ' — 유예된 자리가 조회·판단·쓰기를 모두 지나갑니다');
+        } else {
+          if (!/continue;/.test(body.slice(iGate, iGate + 600))) {
+            err(`${MONITOR}: 관리 유예 관문이 회차를 끊지 않습니다`);
+          }
+          for (const needle of ['credsOf(', 'readOpenPosition(', 'highWaterSince(',
+            'liveStopPrice(', 'lifecycleDecide(', 'guard.claim(', 'applyLifecycleClose(',
+            'moveStopSafely(']) {
+            const at = body.indexOf(needle);
+            if (at >= 0 && !(iGate < at)) {
+              err(`${MONITOR}: 관리 유예 관문이 ${needle}보다 뒤입니다`
+                + ' — 유예된 자리를 조회하거나 건드립니다');
+            }
+          }
+        }
+      }
+
       // ★ **정의가 아니라 호출이 반복문 안에 있는가.** `credsOf`처럼
       //   위에서 선언되고 안에서 불리는 것이 있어서, 첫 출현 위치로
       //   판단하면 멀쩡한 배선을 밖에 있다고 잘못 읽는다.

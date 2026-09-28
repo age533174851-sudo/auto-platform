@@ -380,25 +380,95 @@ export function runManagedPositionTests() {
     eq(mayActOn(r.positions[0]), true, '★ 다른 종목까지 유예시켰습니다');
   });
 
-  // ── 범위를 넘기지 않는다 ──
+  // ══════════════════════════════════════════════════════════
+  // 자리를 막는 사유는 **다섯**이다
+  // ══════════════════════════════════════════════════════════
   //
-  //   자리를 막는 것은 **관리 계약이 깨진** 세 가지뿐이다. 옛 줄이나
-  //   모르는 정책까지 막으면 멀쩡한 전략이 통째로 멈춘다.
-  test('정책 없는 옛 줄(NO_STOP)은 자리를 막지 않는다', () => {
-    const r = managedCandidates([
-      row({ id: 'a', stop_loss: null }),                    // legacy NO_STOP
-      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
-    ]);
-    eq(mayActOn(r.positions[0]), true,
-      '★ legacy NO_STOP까지 자리 차단으로 승격시켰습니다 — 범위를 넘었습니다');
+  //   원칙 하나로 정리된다: **일반 생명주기가 관리할 수 없는 줄이 같은
+  //   net-position 자리에 하나라도 있으면, 그 자리를 건드리지 않는다.**
+  //
+  //   막는 이유는 제각각이고(일부러 안 건다 / 값이 없다 / 정책을 모른다 /
+  //   옛 줄이다) 줄 자체의 관측 의미도 제각각이지만(`deferred` vs
+  //   `skipped`), **자리를 못 건드린다는 결과는 같다.**
+  //
+  //   ★ 줄의 뜻은 바꾸지 않는다 — `NO_STOP`은 계속 `skipped`이고
+  //     `STOP_POLICY_UNKNOWN`은 계속 `deferred`다. 자리 차단은
+  //     **세 번째 사실**이지 그 둘의 재분류가 아니다.
+
+  /** 자리를 막는 다섯 가지를 한 표로 */
+  const SEAT_BLOCKERS: Array<[any, string]> = [
+    [{ stop_policy: 'NO_FIXED_SL', stop_loss: null }, 'NO_FIXED_SL_EXIT_UNWIRED'],
+    [{ stop_policy: 'NO_FIXED_SL', stop_loss: 95 }, 'NO_FIXED_SL_STOP_CONFLICT'],
+    [{ stop_policy: 'FIXED_SL', stop_loss: null }, 'FIXED_SL_MISSING_STOP'],
+    [{ stop_policy: 'WAT', stop_loss: 90 }, 'STOP_POLICY_UNKNOWN'],
+    [{ stop_loss: null }, 'NO_STOP'],
+  ];
+
+  for (const [bad, code] of SEAT_BLOCKERS) {
+    // 같은 전략 — 소유권이 OWNED라 **소유권만으로는 못 막는다**
+    test(`★ ${code} + 같은 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다`, () => {
+      const r = managedCandidates([
+        row({ id: 'a', signal_id: '[s:scalp]a', ...bad }),
+        row({ id: 'b', signal_id: '[s:scalp]b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      const p = r.positions[0];
+      assert(!!p, '정상 줄은 후보로 남는다');
+      eq(p.ownership.code, 'OWNED', '전략이 하나면 소유권은 분명하다');
+      eq(p.management.code, 'UNMANAGED_SEAT_DEFERRED');
+      eq(mayActOn(p), false,
+        `★ ${code} 줄을 버린 덕에 옆 줄이 관리 가능해졌습니다`
+        + ' — 같은 net position이라 그쪽 노출까지 움직입니다');
+      eq(p.management.reason.includes(code), true,
+        `★ 자리가 막힌 이유(${code})가 사유에 없습니다`);
+    });
+
+    test(`★ ${code} + 다른 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다`, () => {
+      const r = managedCandidates([
+        row({ id: 'a', signal_id: '[s:scalp]a', ...bad }),
+        row({ id: 'b', signal_id: '[s:my-original-v1]b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      eq(mayActOn(r.positions[0]), false, `★ ${code} 혼재 자리를 관리했습니다`);
+    });
+
+    // 과잉 차단 방지 — 자리가 다르면 영향이 없어야 한다
+    test(`${code} — 다른 계좌·다른 종목이면 영향이 없다`, () => {
+      for (const [over, what] of [
+        [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
+        [{ symbol: 'ETHUSDT' }, '다른 종목'],
+      ] as Array<[any, string]>) {
+        const r = managedCandidates([
+          row({ id: 'a', ...bad }),
+          row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...over }),
+        ]);
+        const p = r.positions.find((x: any) => x.orderId === 'b');
+        assert(!!p, `${what}: 정상 줄이 사라졌습니다`);
+        eq(mayActOn(p!), true, `★ ${code}가 ${what}까지 막았습니다 — 과잉 차단입니다`);
+      }
+    });
+  }
+
+  // ★ 줄의 관측 의미는 **바뀌지 않는다**
+  test('★ NO_STOP은 자리를 막아도 여전히 skipped다 (deferred로 옮기지 않는다)', () => {
+    const r = managedCandidates([row({ stop_loss: null })]);
+    assert(!!r.skipped.find((x: any) => x.code === 'NO_STOP'), 'NO_STOP은 대상 아님으로 남는다');
+    eq(r.deferred.length, 0,
+      '★ 옛 줄을 유예로 옮겼습니다 — 운영자가 새로 생긴 문제로 읽습니다');
   });
 
-  test('모르는 정책은 이번 범위에서 자리를 막지 않는다', () => {
+  test('★ STOP_POLICY_UNKNOWN은 자리를 막아도 여전히 deferred다', () => {
+    const r = managedCandidates([row({ stop_policy: 'WAT', stop_loss: 90 })]);
+    assert(!!defOf(r, 'STOP_POLICY_UNKNOWN'), '모르는 정책은 유예로 남는다');
+  });
+
+  // 범위 고정 — 체결 시각 없음(NO_ENTRY_TIME)까지 넓히지 않았다
+  test('체결 시각이 없는 줄은 이번 범위에서 자리를 막지 않는다', () => {
     const r = managedCandidates([
-      row({ id: 'a', stop_policy: 'WAT', stop_loss: 90 }),
+      row({ id: 'a', acked_at: null }),
       row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
     ]);
-    eq(mayActOn(r.positions[0]), true, '★ STOP_POLICY_UNKNOWN까지 범위를 넓혔습니다');
+    const p = r.positions.find((x: any) => x.orderId === 'b');
+    assert(!!p, '정상 줄이 사라졌습니다');
+    eq(mayActOn(p!), true, '★ NO_ENTRY_TIME까지 범위를 넓혔습니다 — 별도 판단이 필요합니다');
   });
 
   test('유예는 "대상 아님"과 섞이지 않는다', () => {

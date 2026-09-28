@@ -711,6 +711,54 @@ const M = [
   ['MUT-P18 자리 유예 코드를 NO_FIXED_SL 전용 이름으로 되돌림', P.cand,
     s => s.replace("'UNMANAGED_SEAT_DEFERRED'", "'NO_FIXED_SL_SEAT_DEFERRED'"), 'RED'],
 
+  // ── 자리 차단 다섯 사유 (확대분) ──
+
+  ['MUT-P19 옛 줄(NO_STOP)이 자리를 막지 않음', P.cand,
+    s => s.replace("      blockSeat(key, 'NO_STOP');\n", ''), 'RED'],
+
+  ['MUT-P20 모르는 정책이 자리를 막지 않음', P.cand,
+    s => s.replace("      blockSeat(key, 'STOP_POLICY_UNKNOWN');\n", ''), 'RED'],
+
+  // ★ 같은 전략 혼재 자리를 다시 승격시킨다. 소유권이 OWNED라 소유권만
+  //   보는 검사로는 절대 안 잡힌다.
+  ['MUT-P21 NO_STOP 혼재 자리를 같은 전략일 때 MANAGED로 승격', P.cand,
+    s => s.replace('    const why = unmanagedSeats.get(seat);',
+                   "    const raw = unmanagedSeats.get(seat);\n"
+                   + "    const why = raw && !(raw.size === 1 && raw.has('NO_STOP')) ? raw : undefined;"), 'RED'],
+
+  ['MUT-P22 STOP_POLICY_UNKNOWN 혼재 자리를 MANAGED로 승격', P.cand,
+    s => s.replace('    const why = unmanagedSeats.get(seat);',
+                   "    const raw = unmanagedSeats.get(seat);\n"
+                   + "    const why = raw && !(raw.size === 1 && raw.has('STOP_POLICY_UNKNOWN')) ? raw : undefined;"), 'RED'],
+
+  // ── ★★ 라우트 admission 관문 ──
+  //
+  //   이 셋이 이번 감사에서 실제로 열려 있던 구멍이다. 유예된 자리가
+  //   조회·판단·쓰기를 전부 지나갔다.
+  // 관문이 기록만 남기고 **그대로 진행**한다 — 가장 조용한 회귀다.
+  // 응답에는 유예라고 적히는데 거래소는 건드려진다.
+  ['MUT-P23 관리 유예 관문이 회차를 끊지 않음 (기록만 남기고 진행)', P.monitor,
+    s => s.replace('      });\n      continue;\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**',
+                   '      });\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**'), 'RED'],
+
+  ['MUT-P24 관리 유예 관문을 포지션 조회 뒤로 옮김', P.monitor, s => {
+    const i = s.indexOf("    if (p.management?.code !== 'MANAGED') {");
+    if (i < 0) return s;
+    const end = s.indexOf('      continue;\n    }\n', i);
+    if (end < 0) return s;
+    const block = s.slice(i, end + '      continue;\n    }\n'.length);
+    const rest = s.slice(0, i) + s.slice(i + block.length);
+    const k = rest.indexOf('      const live = await ops.readOpenPosition(venue, p.symbol);');
+    if (k < 0) return s;
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // 유예된 자리에서도 시간청산이 닫게 한다 — 관문을 관리 판정 대신
+  // 소유권만 보게 되돌리는 회귀다(옛 고장 그대로).
+  ['MUT-P25 유예 자리에서 시간청산 close 허용 (관문을 소유권만 보게)', P.monitor,
+    s => s.replace("    if (p.management?.code !== 'MANAGED') {",
+                   "    if (p.ownership?.code !== 'OWNED') {"), 'RED'],
+
   // ── 레거시 안전망 ──
   ['MUT-P14 손절 재부착의 NO_FIXED_SL 방어 제거', P.reatt,
     s => s.replace(/stop_policy/g, 'stop_policy_removed'), 'RED'],

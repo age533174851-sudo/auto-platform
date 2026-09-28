@@ -124,6 +124,25 @@ export interface DeferredRow {
   reason: string;
 }
 
+/**
+ * 자리(seat)를 막는 사유. **`DeferralCode`보다 넓다.**
+ *
+ * 왜 따로 두는가
+ * ──────────────
+ * 자리를 막는 질문과 줄을 유예하는 질문은 다르다:
+ *
+ *   "이 줄이 왜 목록에서 빠졌나"     → `DeferralCode` (유예) · `NO_STOP` (대상 아님)
+ *   "왜 이 자리를 건드리면 안 되나"  → `SeatBlockerCode`
+ *
+ * `NO_STOP`은 **유예가 아니다** — 옛날부터 관리 대상이 아니던 줄이고
+ * `skipped`에 남는다. 그런데 거래소에는 그 줄의 노출이 있고, 일반
+ * 생명주기가 그것을 다룰 방법이 없다. 그래서 **자리는 막는다.**
+ *
+ * `DeferralCode`에 `NO_STOP`을 억지로 넣으면 그 줄이 유예로 보이고,
+ * 운영자는 새로 생긴 문제로 읽는다 — 타입이 관측의 뜻을 바꾼다.
+ */
+export type SeatBlockerCode = DeferralCode | 'NO_STOP';
+
 /** `live_orders`에서 여기서 쓰는 칸만 */
 export interface OrderRowLike {
   id?: string;
@@ -251,8 +270,8 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
    *   "이 줄 자체는 왜 유예인가"   → `deferred[].code`
    *   "이 자리를 왜 못 건드리는가" → 여기 모인 코드들
    */
-  const unmanagedSeats = new Map<string, Set<DeferralCode>>();
-  const blockSeat = (key: string, code: DeferralCode) => {
+  const unmanagedSeats = new Map<string, Set<SeatBlockerCode>>();
+  const blockSeat = (key: string, code: SeatBlockerCode) => {
     if (!unmanagedSeats.has(key)) unmanagedSeats.set(key, new Set());
     unmanagedSeats.get(key)!.add(code);
   };
@@ -345,6 +364,11 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     if (policy === 'UNKNOWN') {
       // **모르는 정책을 고정 손절로 읽지 않는다.** DB CHECK가 막더라도
       // 코드는 스스로 닫혀 있어야 한다.
+      //
+      // ★ 자리도 막는다 — 무엇을 쓰는 주문인지 모르면 **관리할 수 없는
+      //   노출**이고, 같은 net position의 다른 줄만 골라 관리하면 이쪽까지
+      //   움직인다.
+      blockSeat(key, 'STOP_POLICY_UNKNOWN');
       defer('STOP_POLICY_UNKNOWN',
         `손절 정책 이름을 모릅니다 (${String(r?.stop_policy).slice(0, 40)})`
         + ' — 추측하지 않고 관리하지 않습니다');
@@ -367,7 +391,20 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     }
 
     if (!hasStop) {
-      // 정책이 안 적힌 옛 줄 + 손절 없음. **기존 의미 그대로 둔다.**
+      // 정책이 안 적힌 옛 줄 + 손절 없음.
+      //
+      // ★ **줄의 뜻은 그대로 `skipped`다.** 이것은 "고쳐야 할 상태"가
+      //   아니라 "옛날부터 관리 대상이 아니던 줄"이고, `deferred`로 옮기면
+      //   관측의 뜻이 바뀐다 — 운영자가 새로 생긴 문제로 읽는다.
+      //
+      //   그런데 **자리는 막는다.** 관리 대상이 아닌 것과 거래소에 노출이
+      //   없는 것은 다르다. 이 줄도 net position에 몫이 있고, 그 몫을
+      //   일반 생명주기가 다룰 방법이 없다. 같은 자리의 다른 줄만 골라
+      //   관리하면 이 노출까지 함께 움직인다.
+      //
+      //   "이 줄이 왜 목록에서 빠졌나"와 "왜 이 자리를 건드리면 안 되나"는
+      //   다른 질문이다. 앞은 `skipped`가, 뒤는 자리 차단이 답한다.
+      blockSeat(key, 'NO_STOP');
       note('NO_STOP', '진입 손절이 없어 R을 정의할 수 없습니다');
       continue;
     }
