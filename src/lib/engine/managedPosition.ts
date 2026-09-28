@@ -87,8 +87,16 @@ export type OwnershipCode =
 export type ManagementCode =
   /** 일반 생명주기가 평소처럼 관리한다 */
   | 'MANAGED'
-  /** 이 자리에 고정 손절을 쓰지 않는 노출이 섞여 있다. **손대지 않는다** */
-  | 'NO_FIXED_SL_SEAT_DEFERRED';
+  /**
+   * 이 자리에 **관리 계약이 깨진 노출**이 섞여 있다. 손대지 않는다.
+   *
+   * ★ 이름이 `NO_FIXED_SL_...`이면 안 된다. 막는 이유는 하나가 아니다 —
+   *   고정 손절을 안 쓰기로 한 줄도, 쓰기로 해 놓고 값이 없는 줄도 똑같이
+   *   "관리할 수 없는 노출"이다. 앞 이름으로 뒤 경우까지 막으면 **동작은
+   *   맞는데 이름이 거짓말을 한다.** 왜 막혔는지는 `deferred`의 원래
+   *   코드가 말한다.
+   */
+  | 'UNMANAGED_SEAT_DEFERRED';
 
 /**
  * 인식은 했지만 관리하지 않는 줄. **버린 것이 아니라 유예한 것이다.**
@@ -236,8 +244,18 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
   const list = Array.isArray(rows) ? rows : [];
   // (연결 · 종목)마다 어느 전략들이 주장하는가
   const claims = new Map<string, Set<string>>();
-  /** 이 자리에 고정 손절을 안 쓰는 노출이 있는가 (net position 보호) */
-  const unwiredSeats = new Set<string>();
+  /**
+   * 이 자리에 **관리할 수 없는 노출**이 있는가 (net position 보호).
+   *
+   * 자리마다 사유 코드를 모아 둔다 — 두 질문을 분리해서 답한다:
+   *   "이 줄 자체는 왜 유예인가"   → `deferred[].code`
+   *   "이 자리를 왜 못 건드리는가" → 여기 모인 코드들
+   */
+  const unmanagedSeats = new Map<string, Set<DeferralCode>>();
+  const blockSeat = (key: string, code: DeferralCode) => {
+    if (!unmanagedSeats.has(key)) unmanagedSeats.set(key, new Set());
+    unmanagedSeats.get(key)!.add(code);
+  };
   const deferred: DeferredRow[] = [];
   const keep: Array<{ row: OrderRowLike; pos: Omit<ManagedPosition, 'ownership' | 'management'> }> = [];
 
@@ -308,7 +326,7 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     if (policy === 'NO_FIXED_SL') {
       // ★ **이 자리 전체를 유예한다.** 이 줄만 빼면 같은 net position의
       //   다른 줄이 그 노출까지 대신 건드린다.
-      unwiredSeats.add(key);
+      blockSeat(key, hasStop ? 'NO_FIXED_SL_STOP_CONFLICT' : 'NO_FIXED_SL_EXIT_UNWIRED');
       if (hasStop) {
         // 계약은 "고정 손절 없음"인데 장부에 값이 있다. 어느 쪽이 참인지
         // 알 수 없으므로 **일반 손절로 읽지 않는다** — 읽으면 그 값으로
@@ -336,6 +354,12 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     if (policy === 'FIXED_SL' && !hasStop) {
       // 고정 손절을 쓰기로 해 놓고 값이 없다. 예전에는 `NO_STOP`으로
       // 뭉개져 "칸이 빈 줄"과 구별되지 않았다 — 그건 고쳐야 할 상태다.
+      // ★ **이 자리도 막는다.** 고정 손절을 쓴다고 적혀 있는데 값이 없으면
+      //   그 줄 역시 **관리 계약이 깨진 노출**이다. 이 줄만 버리고 같은
+      //   자리의 멀쩡한 고정 손절 줄을 관리하면, net position에서 어느
+      //   수량이 어느 줄 것인지 나눌 수 없어 깨진 노출까지 닫거나 손절을
+      //   옮기게 된다. 막는 **이유**는 NO_FIXED_SL과 다르지만 결과는 같다.
+      blockSeat(key, 'FIXED_SL_MISSING_STOP');
       defer('FIXED_SL_MISSING_STOP',
         '고정 손절을 쓰는 주문인데 손절 값이 없습니다 — 1R을 정의할 수 없어'
         + ' 관리하지 않습니다 (확인이 필요합니다)');
@@ -383,12 +407,16 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
       ownership = { code: 'OWNED', claimants, reason: '이 계좌·종목을 주장하는 전략이 하나뿐입니다' };
     }
 
-    // ★ 자리에 고정 손절 없는 노출이 섞여 있으면, **주인이 분명해도**
+    // ★ 자리에 **관리할 수 없는 노출**이 섞여 있으면, 주인이 분명해도
+    //   막힌 **이유**를 사유에 적는다 — "왜 이 자리를 못 건드리나"는
+    //   "왜 저 줄이 유예인가"와 다른 질문이고, 둘 다 답할 수 있어야 한다.
     //   일반 생명주기는 손대지 않는다. 거래소가 주는 것은 합쳐진 포지션
     //   하나뿐이라 어느 수량이 누구 몫인지 증명할 수 없다.
-    const management: ManagedPosition['management'] = unwiredSeats.has(seat)
-      ? { code: 'NO_FIXED_SL_SEAT_DEFERRED',
-          reason: '같은 계좌·종목에 고정 손절을 쓰지 않는 주문이 함께 있습니다'
+    const why = unmanagedSeats.get(seat);
+    const management: ManagedPosition['management'] = why
+      ? { code: 'UNMANAGED_SEAT_DEFERRED',
+          reason: '같은 계좌·종목에 일반 생명주기가 관리할 수 없는 주문이 함께 있습니다'
+            + ` (${Array.from(why).join(' · ')})`
             + ' — 거래소 포지션은 합쳐져 있어 이 줄만 따로 관리하면 그쪽 노출까지'
             + ' 건드리게 되므로 일반 생명주기를 유예합니다' }
       : { code: 'MANAGED', reason: '일반 생명주기가 관리합니다' };

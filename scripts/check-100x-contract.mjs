@@ -1585,7 +1585,59 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
           + ' — 정책이 다른 노출을 분리할 수 없는데 net position을 건드립니다');
       }
     }
-    //   ③ 과잉 차단 방지 — 다른 계좌·다른 종목은 영향이 없어야 한다
+    //   ③ ★ 고정 손절을 쓴다면서 값이 없는 줄도 같은 자리를 막는다.
+    //      막는 **이유**는 다르지만(일부러 안 건다 vs 걸기로 해 놓고 없다)
+    //      결과는 같다 — 둘 다 관리할 수 없는 노출이고, net position에서
+    //      수량을 나눌 수 없다.
+    for (const same of [true, false]) {
+      const r = run([
+        row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90,
+              signal_id: same ? '[s:scalp]b' : '[s:my-original-v1]b' }),
+      ]);
+      const p = r.positions[0];
+      if (!p) { err('감시 후보: 손절 누락 혼재 자리에서 정상 줄이 사라졌습니다'); continue; }
+      if (cm.mayActOn(p)) {
+        err(`감시 후보: 손절 누락 줄과 ${same ? '같은' : '다른'} 전략이 섞인 자리를 관리합니다`
+          + ' — 계약이 깨진 노출까지 닫거나 손절을 옮깁니다');
+      }
+      if (same && p.management?.code === 'MANAGED') {
+        err('감시 후보: 같은 전략 혼재 자리가 MANAGED로 승격했습니다');
+      }
+    }
+    // 자리 유예 코드가 **상위 개념 이름**인가. `NO_FIXED_SL_...`이라는
+    // 이름으로 손절 누락까지 막으면 동작은 맞는데 이름이 거짓말을 한다.
+    {
+      const r = run([
+        row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      const mg = r.positions[0]?.management || {};
+      if (mg.code !== 'UNMANAGED_SEAT_DEFERRED') {
+        err(`감시 후보: 자리 유예 코드가 ${mg.code}입니다`
+          + ' — 손절 누락까지 막는 상태에 NO_FIXED_SL 전용 이름을 쓰면 이름이 거짓말합니다');
+      }
+      // 왜 막혔는지(root cause)가 남아 있는가 — 줄 유예와 자리 유예는 다른 질문이다.
+      if (!String(mg.reason || '').includes('FIXED_SL_MISSING_STOP')) {
+        err('감시 후보: 자리가 막힌 진짜 이유가 사유에 없습니다');
+      }
+    }
+    //   ④ 범위를 넘기지 않는다 — legacy NO_STOP과 모르는 정책은 자리를 막지 않는다
+    for (const [over, what] of [
+      [{ stop_loss: null }, '정책 없는 옛 줄(NO_STOP)'],
+      [{ stop_policy: 'WAT', stop_loss: 90 }, '모르는 정책'],
+    ]) {
+      const r = run([
+        row({ id: 'a', ...over }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      const p = r.positions.find(x => x.orderId === 'b');
+      if (!p || !cm.mayActOn(p)) {
+        err(`감시 후보: ${what}까지 자리 차단으로 승격시켰습니다 — 범위를 넘었습니다`);
+      }
+    }
+
+    //   ⑤ 과잉 차단 방지 — 다른 계좌·다른 종목은 영향이 없어야 한다
     for (const [over, what] of [
       [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
       [{ symbol: 'ETHUSDT' }, '다른 종목'],

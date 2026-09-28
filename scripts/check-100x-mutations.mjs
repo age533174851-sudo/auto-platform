@@ -685,15 +685,31 @@ const M = [
 
   // 자리 유예를 없애면 같은 전략 혼재 자리가 OWNED로 통과한다.
   ['MUT-P11 혼재 자리 유예 제거 (같은 전략 섞임이 새 나감)', P.cand,
-    s => s.replace('    const management: ManagedPosition[\'management\'] = unwiredSeats.has(seat)',
-                   '    const management: ManagedPosition[\'management\'] = false'), 'RED'],
+    s => s.replace("    const management: ManagedPosition['management'] = why",
+                   "    const management: ManagedPosition['management'] = false"), 'RED'],
 
   ['MUT-P12 정책 충돌 줄은 자리를 유예시키지 않음', P.cand,
-    s => s.replace('      unwiredSeats.add(key);\n      if (hasStop) {',
-                   '      if (hasStop) {'), 'RED'],
+    s => s.replace("      blockSeat(key, hasStop ? 'NO_FIXED_SL_STOP_CONFLICT' : 'NO_FIXED_SL_EXIT_UNWIRED');",
+                   "      if (!hasStop) blockSeat(key, 'NO_FIXED_SL_EXIT_UNWIRED');"), 'RED'],
 
   ['MUT-P13 실행 관문이 관리 판정을 안 봄 (소유권만)', P.cand,
     s => s.replace("  return p?.management?.code === 'MANAGED';", '  return true;'), 'RED'],
+
+  // ★ 손절 누락 줄을 자리 차단 집합에서 뺀다. 그 줄만 버려지고 같은
+  //   net position의 정상 줄이 관리 대상이 된다 — 깨진 노출까지 움직인다.
+  ['MUT-P16 FIXED_SL 손절 누락을 자리 차단에서 제외', P.cand,
+    s => s.replace("      blockSeat(key, 'FIXED_SL_MISSING_STOP');\n", ''), 'RED'],
+
+  // ★ 같은 전략 혼재 자리를 다시 MANAGED로 승격시킨다. 소유권은 OWNED라
+  //   소유권만 보는 검사로는 절대 안 잡힌다.
+  ['MUT-P17 같은 전략 혼재 자리를 MANAGED로 승격', P.cand,
+    s => s.replace('    const why = unmanagedSeats.get(seat);',
+                   '    const why = claimants.length > 1 ? unmanagedSeats.get(seat) : undefined;'), 'RED'],
+
+  // 자리 유예 이름이 다시 NO_FIXED_SL 전용으로 좁아지면, 손절 누락까지
+  // 막는 상태에서 **이름이 거짓말을 한다.**
+  ['MUT-P18 자리 유예 코드를 NO_FIXED_SL 전용 이름으로 되돌림', P.cand,
+    s => s.replace("'UNMANAGED_SEAT_DEFERRED'", "'NO_FIXED_SL_SEAT_DEFERRED'"), 'RED'],
 
   // ── 레거시 안전망 ──
   ['MUT-P14 손절 재부착의 NO_FIXED_SL 방어 제거', P.reatt,

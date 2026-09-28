@@ -285,7 +285,10 @@ export function runManagedPositionTests() {
     // 주장자가 하나뿐이라 **소유권은 OWNED다.** 소유권만 보면 통과한다 —
     // 그래서 관리 판정이 따로 필요하다.
     eq(p.ownership.code, 'OWNED', '전략이 하나면 소유권은 분명하다');
-    eq(p.management.code, 'NO_FIXED_SL_SEAT_DEFERRED');
+    eq(p.management.code, 'UNMANAGED_SEAT_DEFERRED');
+    // 막힌 **이유**가 사유에 남는다 — 자리 유예와 줄 유예는 다른 질문이다.
+    eq(/NO_FIXED_SL_EXIT_UNWIRED/.test(p.management.reason), true,
+      '★ 왜 이 자리를 못 건드리는지가 사유에 없습니다');
     eq(mayActOn(p), false,
       '★ 소유권만 보고 통과시켰습니다 — 같은 자리의 고정 손절 없는 노출까지 움직입니다');
   });
@@ -322,6 +325,80 @@ export function runManagedPositionTests() {
   test('★ 관리 판정이 없는 옛 모양 객체는 통과시키지 않는다', () => {
     // 유예를 우회하는 길을 열어 두지 않는다.
     eq(mayActOn({ ownership: { code: 'OWNED', reason: '', claimants: [] } } as any), false);
+  });
+
+  // ── ★ 고정 손절을 쓴다면서 값이 없는 줄도 같은 자리를 막는다 ──
+  //
+  //   막는 **이유**는 NO_FIXED_SL과 다르다 — 저쪽은 "일부러 안 건다",
+  //   이쪽은 "걸기로 해 놓고 없다"다. 그런데 **결과는 같다**: 둘 다 일반
+  //   생명주기가 관리할 수 없는 노출이고, net position에서 어느 수량이
+  //   어느 줄 것인지 나눌 수 없다.
+
+  // M
+  test('★ FIXED_SL 손절 누락 + 다른 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:my-original-v1]b' }),
+    ]);
+    const p = r.positions[0];
+    assert(!!p, '정상 줄은 후보로 남는다');
+    eq(mayActOn(p), false,
+      '★ 계약이 깨진 노출을 버린 덕에 옆 줄이 관리 가능해졌습니다'
+      + ' — 같은 net position이라 깨진 쪽까지 닫거나 손절을 옮깁니다');
+  });
+
+  // N — 소유권만으로는 못 막는 경우
+  test('★ FIXED_SL 손절 누락 + 같은 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:scalp]b' }),
+    ]);
+    const p = r.positions[0];
+    eq(p.ownership.code, 'OWNED', '전략이 하나면 소유권은 분명하다');
+    eq(p.management.code, 'UNMANAGED_SEAT_DEFERRED');
+    eq(mayActOn(p), false, '★ 소유권만 보고 통과시켰습니다');
+    eq(/FIXED_SL_MISSING_STOP/.test(p.management.reason), true,
+      '★ 자리가 막힌 진짜 이유가 사유에 없습니다');
+  });
+
+  // O
+  test('FIXED_SL 손절 누락 — 다른 계좌면 영향이 없다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', connection_id: 'conn-A', stop_policy: 'FIXED_SL', stop_loss: null }),
+      row({ id: 'b', connection_id: 'conn-B', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(mayActOn(r.positions[0]), true, '★ 다른 계좌까지 유예시켰습니다 — 과잉 차단입니다');
+  });
+
+  // P
+  test('FIXED_SL 손절 누락 — 다른 종목이면 영향이 없다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', symbol: 'BTCUSDT', stop_policy: 'FIXED_SL', stop_loss: null }),
+      row({ id: 'b', symbol: 'ETHUSDT', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(r.positions[0].symbol, 'ETHUSDT');
+    eq(mayActOn(r.positions[0]), true, '★ 다른 종목까지 유예시켰습니다');
+  });
+
+  // ── 범위를 넘기지 않는다 ──
+  //
+  //   자리를 막는 것은 **관리 계약이 깨진** 세 가지뿐이다. 옛 줄이나
+  //   모르는 정책까지 막으면 멀쩡한 전략이 통째로 멈춘다.
+  test('정책 없는 옛 줄(NO_STOP)은 자리를 막지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_loss: null }),                    // legacy NO_STOP
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(mayActOn(r.positions[0]), true,
+      '★ legacy NO_STOP까지 자리 차단으로 승격시켰습니다 — 범위를 넘었습니다');
+  });
+
+  test('모르는 정책은 이번 범위에서 자리를 막지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'WAT', stop_loss: 90 }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(mayActOn(r.positions[0]), true, '★ STOP_POLICY_UNKNOWN까지 범위를 넓혔습니다');
   });
 
   test('유예는 "대상 아님"과 섞이지 않는다', () => {
