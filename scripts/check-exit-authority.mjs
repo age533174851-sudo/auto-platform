@@ -380,18 +380,44 @@ const cand  = code(read(CAND));
 
 // ══════════ ⑦ recognized != managed 계약을 깨지 않는다 ══════════
 //
-// PR-S는 안전성 작업이다. 손절 없는 줄(무손절 100X)을 일반 생명주기에
-// **들여보내는 변경은 이 PR의 것이 아니다.** 실수로 섞이면 여기서 막는다.
+// ★ 이 규칙은 원래 **PR-S의 범위 울타리**였다 — "손절 없는 줄을 일반
+//   생명주기에 들여보내는 변경은 이 PR의 것이 아니다"라며 `stop_policy`를
+//   읽는 것 자체를 막았다.
+//
+//   PR1이 바로 그 배선을 하는 작업이다. 그래서 울타리를 **계약으로
+//   바꾼다** — "건드리지 마라"가 아니라 "이 불변식을 지켜라"로.
+//   울타리를 그냥 지우면 지키던 것까지 같이 사라진다.
+//
+//   동작 증명은 `check-100x-contract`가 정본을 실제로 돌려서 한다
+//   (MUT-P2 · P3 · P11 · P13이 그것을 지킨다). 여기서는 **구조**만 본다:
+//   일반 생명주기로 들어가는 문이 하나뿐이고, 그 앞에 두 관문이 있는가.
 {
-  if (!/if \(stopLoss == null \|\| stopLoss <= 0\) \{/.test(cand)) {
-    err(`${CAND}가 손절 없는 줄을 후보에서 제외하지 않습니다`
-      + ' — recognized != managed 계약이 깨졌습니다 (PR-S 범위 밖)');
+  const body = cand.slice(cand.indexOf('export function managedCandidates'),
+    cand.indexOf('const positions: ManagedPosition[]'));
+  const iPush = body.indexOf('keep.push(');
+  if (iPush < 0) {
+    err(`${CAND}: 후보로 들여보내는 자리를 찾지 못했습니다 — 검사가 헛돕니다`);
+  } else {
+    const before = body.slice(0, iPush);
+    // ① 쓸 수 있는 손절이 없으면 들어가지 못한다 (기존 계약)
+    if (!/hasStop/.test(before) || !/if \(!hasStop\)/.test(before)) {
+      err(`${CAND}가 손절 없는 줄을 후보에서 제외하지 않습니다`
+        + ' — recognized != managed 계약이 깨졌습니다');
+    }
+    // ② 고정 손절을 쓰지 않는 주문은 손절 값이 있어도 들어가지 못한다 (PR1)
+    if (!/policy === 'NO_FIXED_SL'/.test(before)) {
+      err(`${CAND}가 NO_FIXED_SL 주문을 일반 생명주기 앞에서 막지 않습니다`
+        + ' — 참고용 손절 값이 채워지는 순간 그 포지션이 관리 대상이 됩니다');
+    }
   }
-  if (/stop_policy/.test(cand)) {
-    err(`${CAND}가 stop_policy를 읽습니다 — NO_FIXED_SL 배선은 PR-S 범위 밖입니다`);
+  // ③ 실행 관문이 관리 유예를 본다 (소유권만 보면 혼재 자리가 샌다)
+  if (!/management\?\.code === 'MANAGED'/.test(cand)) {
+    err(`${CAND}: mayActOn이 관리 유예를 보지 않습니다`
+      + ' — 같은 net position에 섞인 고정 손절 없는 노출까지 건드립니다');
   }
+  // ④ 분류 정본은 여전히 수명주기 정책을 해석하지 않는다
   if (/lifecyclePolicyOf/.test(cand)) {
-    err(`${CAND}가 수명주기 정책을 부릅니다 — PR-S 범위 밖입니다`);
+    err(`${CAND}가 수명주기 정책을 부릅니다 — 분류와 정책 해석은 다른 일입니다`);
   }
 }
 

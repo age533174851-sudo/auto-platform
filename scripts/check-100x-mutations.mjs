@@ -116,6 +116,10 @@ const P = {
   orig: 'src/app/api/autotrade/my-original-v1/route.ts',
   auth: 'src/lib/engine/entryAuthority.ts',
   safety: 'src/lib/engine/entryExitSafety.ts',
+  cand: 'src/lib/engine/managedPosition.ts',
+  monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
+  reatt: 'src/lib/engine/stopReattach.ts',
+  life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
 
@@ -613,6 +617,92 @@ const M = [
   ['MUT-E15 closeModeGate가 갇힘 여부를 안 돌려줌', P.vpo,
     s => s.replace('  return { ok: v.ok, message: v.message, code: v.code,\n    strandsOpenPosition: v.strandsOpenPosition };',
                    '  return { ok: v.ok, message: v.message, code: v.code,\n    strandsOpenPosition: false };'), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR1 — 고정 손절 없는 주문: 인식은 하되 관리하지 않는다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 이 관문이 새면 조용하다. `NO_FIXED_SL` 포지션이 일반 생명주기로
+  // 들어가 6시간 시간청산·트레일링·본전이동을 받는데, 화면에는 평범한
+  // 생명주기 실행으로만 보인다.
+
+  // ── 정책 칸을 아예 안 읽는다 ──
+  ['MUT-P1  감시 라우트가 stop_policy를 안 읽음', P.monitor,
+    s => s.replace("        + 'stop_policy, '\n", ''), 'RED'],
+
+  // ── 분류 (동작) ──
+  ['MUT-P2  NO_FIXED_SL + 손절 없음을 일반 후보로 넣음', P.cand,
+    s => s.replace("    if (policy === 'NO_FIXED_SL') {", '    if (false) {'), 'RED'],
+
+  // ★ 우연 의존으로 되돌리는 변이. 손절 값이 채워지는 순간 관리가 시작된다.
+  ['MUT-P3  NO_FIXED_SL인데 손절 값이 있으면 보통 손절로 처리', P.cand,
+    s => s.replace("    if (policy === 'NO_FIXED_SL') {", "    if (policy === 'NO_FIXED_SL' && !hasStop) {"), 'RED'],
+
+  ['MUT-P4  FIXED_SL인데 손절 없음을 legacy NO_STOP으로 숨김', P.cand,
+    s => s.replace("    if (policy === 'FIXED_SL' && !hasStop) {", '    if (false) {'), 'RED'],
+
+  ['MUT-P5  정책이 안 적힌 legacy 줄을 전부 차단', P.cand,
+    s => s.replace("    if (policy === 'UNKNOWN') {", '    if (policy !== \'FIXED_SL\') {'), 'RED'],
+
+  ['MUT-P6  모르는 정책을 고정 손절로 읽음', P.cand,
+    s => s.replace("  return 'UNKNOWN';\n}", "  return 'FIXED_SL';\n}"), 'RED'],
+
+  // ── 관찰 가능성 ──
+  ['MUT-P7  유예 기록을 남기지 않음 (조용히 사라진 줄)', P.cand,
+    s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + "        orderId: r?.id ? String(r.id) : null, reason });",
+                   '      void code; void reason;'), 'RED'],
+
+  ['MUT-P8  유예를 응답에서 지움', P.monitor,
+    s => s.replace('  out.deferred = deferred;\n  out.deferredCount = deferred.length;', ''), 'RED'],
+
+  ['MUT-P9  유예에서 정체성을 빼고 코드만 남김', P.cand,
+    s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + "        orderId: r?.id ? String(r.id) : null, reason });",
+                   '      deferred.push({ code, connectionId: \'\', symbol: \'\', side,\n'
+                   + '        strategyId: null, orderId: null, reason });'), 'RED'],
+
+  // ── ★★ net position 자리 — 이 PR의 핵심 ──
+
+  // 자리 주장보다 손절 분류를 앞세우면, 걸러진 줄이 자리에서도 사라져
+  // 같은 net position의 다른 줄이 조용히 OWNED로 승격한다.
+  ['MUT-P10 자리 주장 등록 전에 NO_FIXED_SL 줄을 버림', P.cand, s => {
+    const claim = `    const strategyId = strategyOf(r);
+    const key = \`\${connectionId}|\${symbol}\`;
+    if (!claims.has(key)) claims.set(key, new Set());
+    claims.get(key)!.add(strategyId ?? '(주인 모름)');
+`;
+    if (!s.includes(claim)) return s;
+    // 주장 등록을 손절 분류 **뒤**로 미룬다 (옛 순서로 되돌리기)
+    const withoutClaim = s.replace(claim, '    const strategyId = strategyOf(r);\n');
+    return withoutClaim.replace('    if (!Number.isFinite(openedAt)) {',
+      `    const key = \`\${connectionId}|\${symbol}\`;
+    if (!claims.has(key)) claims.set(key, new Set());
+    claims.get(key)!.add(strategyId ?? '(주인 모름)');
+
+    if (!Number.isFinite(openedAt)) {`);
+  }, 'RED'],
+
+  // 자리 유예를 없애면 같은 전략 혼재 자리가 OWNED로 통과한다.
+  ['MUT-P11 혼재 자리 유예 제거 (같은 전략 섞임이 새 나감)', P.cand,
+    s => s.replace('    const management: ManagedPosition[\'management\'] = unwiredSeats.has(seat)',
+                   '    const management: ManagedPosition[\'management\'] = false'), 'RED'],
+
+  ['MUT-P12 정책 충돌 줄은 자리를 유예시키지 않음', P.cand,
+    s => s.replace('      unwiredSeats.add(key);\n      if (hasStop) {',
+                   '      if (hasStop) {'), 'RED'],
+
+  ['MUT-P13 실행 관문이 관리 판정을 안 봄 (소유권만)', P.cand,
+    s => s.replace("  return p?.management?.code === 'MANAGED';", '  return true;'), 'RED'],
+
+  // ── 레거시 안전망 ──
+  ['MUT-P14 손절 재부착의 NO_FIXED_SL 방어 제거', P.reatt,
+    s => s.replace(/stop_policy/g, 'stop_policy_removed'), 'RED'],
+
+  ['MUT-P15 exitLifecycle에서 뒤늦게 막는 구조로 우회', P.life,
+    s => s.replace('export function lifecycleDecide(',
+                   "const _lateBlock = (p: any) => p?.stop_policy === 'NO_FIXED_SL';\n"
+                   + 'export function lifecycleDecide('), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

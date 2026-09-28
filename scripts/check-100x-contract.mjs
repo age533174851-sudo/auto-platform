@@ -59,7 +59,12 @@ const code = f => stripJsComments(read(f));
 // 프로필 리터럴을 regex로 읽으면 `applyPreset`이 그 위에 얹는 override를
 // 보지 못한다. 화면에 100배로 뜨는지는 **합쳐진 결과**가 정한다.
 
-const REL = /^\s*(?:import|export)\s+(?:type\s+)?(?:[\w*{}\s,]+from\s+)?['"](\.[^'"]+)['"]/gm;
+// 상대 경로와 `@/` 별칭을 **둘 다** 따라간다.
+//
+// ★ 예전에는 상대 경로만 봤다. 그래서 정본이 `@/lib/...`를 하나라도
+//   쓰면 컴파일이 깨지고, 그 파일은 **동작으로 검사할 수 없었다** —
+//   글자만 보는 규칙으로 물러나게 되는 조용한 이유였다.
+const REL = /^\s*(?:import|export)\s+(?:type\s+)?(?:[\w*{}\s,]+from\s+)?['"]((?:\.|@\/)[^'"]+)['"]/gm;
 
 const collect = (entry) => {
   const files = new Map();
@@ -73,7 +78,8 @@ const collect = (entry) => {
     let m;
     REL.lastIndex = 0;
     while ((m = REL.exec(src))) {
-      const p = join(dirname(f), m[1]);
+      const spec = m[1];
+      const p = spec.startsWith('@/') ? join('src', spec.slice(2)) : join(dirname(f), spec);
       for (const cand of [`${p}.ts`, `${p}.tsx`, join(p, 'index.ts')]) {
         if (existsSync(cand)) { queue.push(cand); break; }
       }
@@ -94,8 +100,16 @@ const loadModule = async (entry, what) => {
   const tsc = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) { err(`TypeScript가 없습니다 (${tsc}). 먼저 npm ci`); return null; }
   try {
-    execFileSync(process.execPath, [tsc, entry, '--module', 'commonjs',
-      '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe', timeout: 180_000 });
+    // `@/`를 `src/`로 풀어 준다 — 위 수집기가 그 파일들을 이미 복사해 뒀다.
+    writeFileSync(join(dir, 'tsconfig.probe.json'), JSON.stringify({
+      compilerOptions: {
+        module: 'commonjs', target: 'es2019', skipLibCheck: true,
+        baseUrl: '.', paths: { '@/*': ['src/*'] },
+      },
+      files: [entry],
+    }));
+    execFileSync(process.execPath, [tsc, '-p', 'tsconfig.probe.json'],
+      { cwd: dir, stdio: 'pipe', timeout: 180_000 });
   } catch (e) {
     err(`${what}: 컴파일되지 않습니다\n${String(e.stdout || e.message).trim().slice(0, 400)}`);
     return null;
@@ -1448,6 +1462,245 @@ const VPO    = 'src/lib/engine/venuePositionOps.ts';
       if (!gate.includes(f)) {
         err(`${VPO}: closeModeGate가 ${f}를 판정에서 그대로 전달하지 않습니다`);
       }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ⑬ PR1 — 고정 손절 없는 주문: 인식은 하되 관리하지 않는다
+// ─────────────────────────────────────────────────────────────
+//
+// 지금까지 `NO_FIXED_SL` 주문이 일반 생명주기에 안 들어간 것은 정책
+// 때문이 아니라 **우연**이었다 — 손절 값이 없어 `NO_STOP`으로 걸러졌을
+// 뿐이다. 참고용 값이 한 번 채워지면 그 우연은 끝나고, 그 포지션은
+// highWater·6시간 시간청산·본전이동·트레일링·MOVE_STOP·CLOSE를 받는다.
+//
+// 그리고 줄 하나를 빼는 것만으로는 부족하다 — 거래소 선물은 net position
+// 이라, 같은 자리의 다른 줄을 관리하면 그 노출까지 같이 움직인다.
+const CAND    = 'src/lib/engine/managedPosition.ts';
+const MONITOR = 'src/app/api/autotrade/exit-monitor/route.ts';
+const REATT   = 'src/lib/engine/stopReattach.ts';
+{
+  // ── ⑬-a 분류 정본을 컴파일해서 실제로 돌린다 ──
+  const cm = await loadModule(CAND, '감시 후보 정본');
+  if (!cm || typeof cm.managedCandidates !== 'function' || typeof cm.mayActOn !== 'function') {
+    err(`${CAND}: managedCandidates / mayActOn이 없습니다`);
+  } else {
+    const T = '2026-08-27T09:00:00.000Z';
+    const row = (o = {}) => ({
+      id: 'ord-1', connection_id: 'conn-bn', exchange: 'binance',
+      symbol: 'BTCUSDT', side: 'BUY', avg_price: 100, stop_loss: 90,
+      status: 'FILLED', reduce_only: false, acked_at: T,
+      signal_id: '[s:scalp]sig-1', ...o,
+    });
+    const run = rows => cm.managedCandidates(rows);
+    const codes = r => r.deferred.map(d => d.code);
+
+    // 고정 손절 주문은 평소대로 관리된다 (과잉 차단 방지)
+    {
+      const r = run([row({ stop_policy: 'FIXED_SL' })]);
+      if (r.positions.length !== 1 || !cm.mayActOn(r.positions[0])) {
+        err('감시 후보: 고정 손절 주문이 관리에서 빠졌습니다 — 과잉 차단입니다');
+      }
+    }
+    // 정책이 안 적힌 옛 줄은 기존대로 관리된다
+    {
+      const r = run([row({})]);
+      if (r.positions.length !== 1 || !cm.mayActOn(r.positions[0])) {
+        err('감시 후보: stop_policy가 없는 legacy 줄을 막았습니다'
+          + ' — 기존 고정 손절 전략이 통째로 관리에서 빠집니다');
+      }
+    }
+    // ★ 고정 손절 없는 주문은 손절 값이 있든 없든 관리하지 않는다
+    for (const [sl, want] of [[null, 'NO_FIXED_SL_EXIT_UNWIRED'],
+                              [90, 'NO_FIXED_SL_STOP_CONFLICT']]) {
+      const r = run([row({ stop_policy: 'NO_FIXED_SL', stop_loss: sl })]);
+      if (r.positions.length !== 0) {
+        err(`감시 후보: NO_FIXED_SL(손절 ${sl === null ? '없음' : '있음'}) 주문이`
+          + ' 일반 생명주기에 들어갔습니다');
+      }
+      if (!codes(r).includes(want)) {
+        err(`감시 후보: ${want} 유예 기록이 없습니다 — 인식했다는 증거가 사라집니다`);
+      }
+    }
+    // 유예를 "손절 없음"으로 뭉개지 않는다
+    {
+      const r = run([row({ stop_policy: 'NO_FIXED_SL', stop_loss: null })]);
+      if ((r.skipped || []).some(x => x.code === 'NO_STOP')) {
+        err('감시 후보: 정책상 유예를 NO_STOP으로 적었습니다 — 고칠 것이 없는데 고치려 듭니다');
+      }
+      const d = r.deferred[0] || {};
+      for (const f of ['connectionId', 'symbol', 'side', 'strategyId', 'orderId']) {
+        if (d[f] === undefined) err(`감시 후보: 유예 기록에 ${f}가 없습니다 — 추적이 끊깁니다`);
+      }
+    }
+    // 고정 손절인데 값이 없으면 legacy NO_STOP으로 숨기지 않는다
+    {
+      const r = run([row({ stop_policy: 'FIXED_SL', stop_loss: null })]);
+      if (!codes(r).includes('FIXED_SL_MISSING_STOP')) {
+        err('감시 후보: FIXED_SL인데 손절이 없는 상태를 NO_STOP으로 숨깁니다');
+      }
+    }
+    // 모르는 정책을 고정 손절로 읽지 않는다
+    {
+      const r = run([row({ stop_policy: 'WAT', stop_loss: 90 })]);
+      if (r.positions.length !== 0 || !codes(r).includes('STOP_POLICY_UNKNOWN')) {
+        err('감시 후보: 모르는 손절 정책을 추측해서 관리합니다');
+      }
+    }
+
+    // ── ★★ net position 자리 — 이 PR의 핵심 ──
+    //
+    //   ① 다른 전략이 섞인 자리: 걸러진 줄이 **자리 주장에도 남아야**
+    //      소유권이 모호해진다. 분류가 주장보다 앞서면 조용히 OWNED가 된다.
+    {
+      const r = run([
+        row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:my-original-v1]b' }),
+      ]);
+      const p = r.positions[0];
+      if (!p) err('감시 후보: 혼재 자리에서 고정 손절 줄이 통째로 사라졌습니다');
+      else {
+        if (cm.mayActOn(p)) {
+          err('감시 후보: 고정 손절 없는 줄을 버린 덕에 다른 전략 줄이 관리 가능해졌습니다'
+            + ' — 같은 net position이라 그쪽 노출까지 건드립니다');
+        }
+        if (p.ownership?.code !== 'OWNERSHIP_AMBIGUOUS') {
+          err('감시 후보: 걸러진 줄이 자리 주장에서도 사라졌습니다'
+            + ' — 관리 가능 여부가 소유권을 조용히 바꿉니다');
+        }
+      }
+    }
+    //   ② ★ 같은 전략이 섞인 자리: 주장자가 하나뿐이라 **소유권은 OWNED다.**
+    //      소유권만으로는 못 막는다 — 관리 판정이 따로 있어야 한다.
+    {
+      const r = run([
+        row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:scalp]b' }),
+      ]);
+      const p = r.positions[0];
+      if (!p) err('감시 후보: 같은 전략 혼재 자리에서 고정 손절 줄이 사라졌습니다');
+      else if (cm.mayActOn(p)) {
+        err('감시 후보: 같은 전략의 혼재 자리를 관리합니다'
+          + ' — 정책이 다른 노출을 분리할 수 없는데 net position을 건드립니다');
+      }
+    }
+    //   ③ 과잉 차단 방지 — 다른 계좌·다른 종목은 영향이 없어야 한다
+    for (const [over, what] of [
+      [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
+      [{ symbol: 'ETHUSDT' }, '다른 종목'],
+    ]) {
+      const r = run([
+        row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...over }),
+      ]);
+      const p = r.positions[0];
+      if (!p || !cm.mayActOn(p)) err(`감시 후보: ${what}까지 유예시켰습니다 — 과잉 차단입니다`);
+    }
+    // 관리 판정이 빠진 옛 모양 객체가 유예를 우회하지 않는가
+    if (cm.mayActOn({ ownership: { code: 'OWNED', reason: '', claimants: [] } })) {
+      err(`${CAND}: 관리 판정이 없는 객체를 통과시킵니다 — 유예를 우회하는 길이 열립니다`);
+    }
+  }
+
+  // ── ⑬-b 감시 라우트가 정책 칸을 읽는가 ──
+  const mon = code(MONITOR);
+  {
+    // ★ 이 라우트에는 `live_orders` 조회가 여럿이다(보호주문 정리 등).
+    //   생명주기 조회는 체결가를 읽는 그 하나다 — 이름이 아니라 내용으로 찾는다.
+    const iSel = mon.indexOf("'id, connection_id, exchange, symbol, side, avg_price");
+    if (iSel < 0) err(`${MONITOR}: 생명주기 주문 조회를 찾지 못했습니다 — 검사가 헛돕니다`);
+    const sel = iSel < 0 ? '' : mon.slice(iSel, iSel + 700);
+    if (!/stop_policy/.test(sel)) {
+      err(`${MONITOR}: live_orders에서 stop_policy를 읽지 않습니다`
+        + ' — 고정 손절 없는 주문과 "값이 아직 안 적힌 주문"이 구별되지 않습니다');
+    }
+    // 없는 칼럼을 읽으면 조회 전체가 실패한다 (PostgREST)
+    if (/select\([^)]*strategy_id/.test(sel)) {
+      err(`${MONITOR}: live_orders에 없는 strategy_id를 projection합니다 — 조회가 통째로 실패합니다`);
+    }
+  }
+
+  // ── ⑬-c 유예가 실행 반복문에 **도달할 수 없는가** ──
+  //
+  //   반복문 안에서 뒤늦게 거르면 그때는 이미 거래소를 읽은 뒤다.
+  //   구조로 막혔는지를 본다 — `deferred`가 반복문 안에 없어야 한다.
+  {
+    if (!/const \{ positions, deferred, skipped \} = managedCandidates\(/.test(mon)) {
+      err(`${MONITOR}: managedCandidates의 유예 목록을 받지 않습니다`);
+    }
+    const iLoop = mon.indexOf('for (const p of positions) {');
+    const iEnd = mon.indexOf('const unknown = out.results.filter');
+    if (iLoop < 0 || iEnd < 0 || !(iLoop < iEnd)) {
+      err(`${MONITOR}: 생명주기 반복문을 찾지 못했습니다 — 검사가 헛돕니다`);
+    } else {
+      const body = mon.slice(iLoop, iEnd);
+      if (/\bdeferred\b/.test(body)) {
+        err(`${MONITOR}: 유예 목록이 실행 반복문 안에서 쓰입니다`
+          + ' — 거래소를 읽은 뒤에 거르게 됩니다');
+      }
+      // 거래소를 건드리는 단계가 전부 이 반복문 **안**에 있는가.
+      // 밖으로 새면 유예와 무관하게 불린다.
+      // ★ **정의가 아니라 호출이 반복문 안에 있는가.** `credsOf`처럼
+      //   위에서 선언되고 안에서 불리는 것이 있어서, 첫 출현 위치로
+      //   판단하면 멀쩡한 배선을 밖에 있다고 잘못 읽는다.
+      for (const needle of ['credsOf(', 'readOpenPosition(', 'highWaterSince(',
+        'liveStopPrice(', 'lifecycleDecide(', 'guard.claim(', 'applyLifecycleClose(',
+        'moveStopSafely(']) {
+        if (!body.includes(needle)) {
+          err(`${MONITOR}: ${needle} 호출이 후보 반복문 안에 없습니다`
+            + ' — 유예와 무관하게 불리거나 배선이 끊겼습니다');
+        }
+      }
+    }
+    // 유예를 telemetry로 내보내는가 (숫자만 줄이고 사실을 감추지 않는가)
+    if (!/out\.deferred\s*=\s*deferred/.test(mon) || !/deferredCount/.test(mon)) {
+      err(`${MONITOR}: 유예를 응답에 내보내지 않습니다 — 관찰할 수 없는 상태가 됩니다`);
+    }
+    if (!/관리 유예/.test(read(MONITOR))) {
+      err(`${MONITOR}: 요약에 관리 유예 건수를 적지 않습니다`);
+    }
+  }
+
+  // ── ⑬-d 유예를 시스템 실패로 세지 않는가 ──
+  //
+  //   "일부러 관리하지 않음"과 "실행이 실패함"은 다른 상태다.
+  {
+    const om = await loadModule('src/lib/engine/exitRunOutcome.ts', '회차 결과 정본');
+    if (om && typeof om.collectLifecycleFailures === 'function') {
+      const f = om.collectLifecycleFailures({
+        error: null, results: [],
+        deferred: [{ code: 'NO_FIXED_SL_EXIT_UNWIRED', symbol: 'BTCUSDT', reason: 'x' }],
+        deferredCount: 1,
+      });
+      if ((f || []).length !== 0) {
+        err('회차 결과: 의도된 관리 유예를 시스템 실패로 셉니다'
+          + ' — 정상 회차가 빨간불이 됩니다');
+      }
+    }
+  }
+
+  // ── ⑬-e 뒤늦게 막는 구조로 바뀌지 않았는가 ──
+  //
+  //   `exitLifecycle`에서 걸러도 그때는 venue read가 끝난 뒤다. 기존
+  //   레거시 안전망(NO_FIXED_STOP)은 **그대로 두고**, 그것이 유일한
+  //   방어가 되지 않았는지만 본다.
+  {
+    const life = code('src/lib/engine/exitLifecycle.ts');
+    if (!/NO_FIXED_STOP/.test(life)) {
+      err('exitLifecycle: 레거시 NO_FIXED_STOP 안전망이 사라졌습니다 — 삭제 금지입니다');
+    }
+    if (/stop_policy|NO_FIXED_SL/.test(life)) {
+      err('exitLifecycle이 stop_policy를 직접 봅니다'
+        + ' — 진입 자체를 막지 않고 뒤늦게 거르는 구조입니다 (venue read가 이미 일어납니다)');
+    }
+  }
+
+  // ── ⑬-f 손절 재부착 정본이 그대로인가 ──
+  {
+    const ra = code(REATT);
+    if (!/NO_FIXED_SL/.test(ra)) {
+      err(`${REATT}: NO_FIXED_SL 불변식이 사라졌습니다`);
     }
   }
 }
