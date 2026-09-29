@@ -67,21 +67,33 @@ function rowToProfile(row: any): UserProfile {
 }
 
 // ── 사이트 URL 헬퍼 (이메일 인증 리다이렉트용) ────────────────
-// 우선순위: NEXT_PUBLIC_SITE_URL > window.location.origin > 빈 문자열
-// 빈 문자열이면 Supabase는 자기 dashboard의 Site URL을 사용함
+//
+// 판정은 `lib/auth/siteOrigin.ts`에 있고 시험이 붙어 있다. 여기서는
+// 환경변수와 브라우저 주소를 **읽어 넘기는 일만** 한다.
+//
+// ★ 돌아올 경로는 `AUTH_RETURN_PATHS`가 정본이다. 문자열을 여기서 다시
+//   적지 않는다 — 실제로 그렇게 적힌 `/auth/reset`을 만드는 것을 잊어서
+//   사용자가 메일 링크에서 404를 봤다.
+import {
+  resolveSiteOrigin, authReturnUrl, AUTH_RETURN_PATHS, type SiteOrigin,
+} from './auth/siteOrigin';
+
+export { AUTH_RETURN_PATHS };
+
+/** 값과 **출처**를 함께. 출처를 버리면 "정본"과 "지금 주소"가 구분되지 않는다 */
+export function getSiteOrigin(): SiteOrigin {
+  return resolveSiteOrigin({
+    configured: process.env.NEXT_PUBLIC_SITE_URL ?? null,
+    browserOrigin: typeof window !== 'undefined' ? (window.location?.origin ?? null) : null,
+  });
+}
+
 export function getSiteUrl(): string {
-  const fromEnv = (process.env.NEXT_PUBLIC_SITE_URL || '').trim();
-  if (fromEnv) return fromEnv.replace(/\/$/, '');
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    return window.location.origin.replace(/\/$/, '');
-  }
-  return '';
+  return getSiteOrigin().origin;
 }
 
 export function getEmailRedirectUrl(): string | undefined {
-  const base = getSiteUrl();
-  if (!base) return undefined;
-  return `${base}/auth/callback`;
+  return authReturnUrl(getSiteOrigin(), AUTH_RETURN_PATHS.callback);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -159,7 +171,7 @@ export async function sbSignInWithOAuth(provider: 'google' | 'kakao') {
 
     const { error } = await sb.auth.signInWithOAuth({
       provider,
-      options: { redirectTo: getSiteUrl() + '/auth/callback' },
+      options: { redirectTo: authReturnUrl(getSiteOrigin(), AUTH_RETURN_PATHS.callback) },
     });
     return { error: error?.message };
   } catch (e: any) {
@@ -183,8 +195,9 @@ export async function sbGetSession() {
 export async function sbResetPassword(email: string) {
   const sb = await getClient();
   if (!sb) return { error: 'Supabase not configured' };
-  const base = getSiteUrl();
-  const redirectTo = base ? `${base}/auth/reset` : undefined;
+  // ★ 경로를 여기서 적지 않는다. `AUTH_RETURN_PATHS.reset`이 정본이고,
+  //   그 경로에 라우트가 실제로 있는지는 `check-auth-recovery.mjs`가 본다.
+  const redirectTo = authReturnUrl(getSiteOrigin(), AUTH_RETURN_PATHS.reset);
   const { error } = await sb.auth.resetPasswordForEmail(email, redirectTo ? { redirectTo } : {});
   return { error: error?.message || null };
 }
