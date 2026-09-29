@@ -1202,6 +1202,256 @@ if (/margin_allocation_pct:\s*(marginPct|body\?\.marginPct|body\.marginPct)/.tes
     + ' — 사용자가 고른 적 없는 크기로 100배가 나갑니다');
 }
 
+// ─────────────────────────────────────────────────────────────
+// ⑫ PR-E — 안전하게 나갈 수 없는 계좌에는 들어가지 않는다
+// ─────────────────────────────────────────────────────────────
+//
+// 불변식: CAN_AUTO_ENTER requires CAN_AUTO_EXIT_SAFELY
+//
+// #281이 종료를 fail-closed로 만들면서 "열 수는 있는데 자동으로 닫을 수는
+// 없는" 비대칭이 생겼다. 이 관문이 그걸 막는다. 새는 방식은 전부 조용하다 —
+// 관문을 지워도, 조건을 뒤집어도, 쓰기 뒤로 옮겨도 화면에는 아무 일도 안
+// 일어난다. 그래서 **정책을 실제로 부르고**(동작) **순서를 함께 본다**(배선).
+const SAFETY = 'src/lib/engine/entryExitSafety.ts';
+const VPO    = 'src/lib/engine/venuePositionOps.ts';
+{
+  // ── ⑫-a 정책을 컴파일해서 실제로 부른다 ──
+  //
+  //   글자가 아니라 답을 본다. `if (false)`로 바꾸거나 `ok`만 보게
+  //   고치면 여기서 잡힌다.
+  const sm = await loadModule(SAFETY, '진입 전 종료 안전 정책');
+  if (!sm || typeof sm.entryExitSafetyVerdict !== 'function') {
+    err(`${SAFETY}: entryExitSafetyVerdict가 없습니다 — 진입 전 종료 안전 판정이 없습니다`);
+  } else {
+    const V = sm.entryExitSafetyVerdict;
+    const safe = { ok: true, code: 'ONE_WAY', strandsOpenPosition: false, message: '단방향' };
+    if (V(safe)?.allowed !== true) err('진입 전 종료 안전: 단방향 계좌인데 진입이 막혔습니다');
+
+    for (const [ev, why] of [
+      [{ ok: false, code: 'HEDGE_UNVERIFIED', strandsOpenPosition: true, message: 'h' }, '양방향'],
+      [{ ok: false, code: 'UNKNOWN', strandsOpenPosition: true, message: 'u' }, '모드 못 읽음'],
+      [{ ok: false, code: 'NO_DIRECTION', strandsOpenPosition: true, message: 'n' }, '방향 모름'],
+      [null, '증거 없음'],
+      [undefined, '증거 undefined'],
+      [{}, '빈 증거'],
+      // ★ `ok === true`를 `ok !== false`로 무르게 바꾸는 회귀는 **여기서만**
+      //   잡힌다. 증거가 통째로 없는 판(`{}`·null)은 `strandsOpenPosition`
+      //   쪽에서 어차피 막혀 동치가 되기 때문이다. 갇히지 않는다고 적혀
+      //   있는데 `ok`만 빠진 판이 그 둘을 가른다.
+      [{ code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 없음'],
+      [{ ok: null, code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 null'],
+      [{ ok: 'yes', code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 참 같은 글자'],
+      // ★ `ok`만 보는 회귀를 잡는 자리. 오늘 정본에서는 나오지 않는
+      //   조합이라 시험이 없으면 조용히 샌다.
+      [{ ok: true, code: 'ONE_WAY', strandsOpenPosition: true, message: 'x' }, '통과인데 갇힘'],
+    ]) {
+      const r = V(ev);
+      if (r?.allowed !== false) {
+        err(`진입 전 종료 안전: ${why}인데 진입이 허용됩니다`
+          + ' — 자동으로 닫지 못하는 계좌에 새 포지션이 열립니다');
+      }
+      if (r && r.code !== 'AUTO_EXIT_UNSAFE') {
+        err(`진입 전 종료 안전: ${why}의 코드가 ${r.code}입니다 — AUTO_EXIT_UNSAFE여야 합니다`);
+      }
+    }
+
+    // 사유가 응답까지 살아 가는가. 코드만 남고 문구가 사라지면 운영자는
+    // 무엇을 고쳐야 하는지 모른다.
+    const kept = V({ ok: false, code: 'HEDGE_UNVERIFIED', strandsOpenPosition: true,
+      message: '양방향 규격 미확정' });
+    if (kept?.evidence?.code !== 'HEDGE_UNVERIFIED'
+      || !String(kept?.reason || '').includes('양방향 규격 미확정')) {
+      err('진입 전 종료 안전: 정본의 코드·사유가 응답까지 전달되지 않습니다');
+    }
+
+    // ★ 이 정책이 모드를 **다시 해석하지 않는가.** 정본이 통과시키면
+    //   코드 이름과 무관하게 통과해야 한다 — 여기에 HEDGE 분기가 생기면
+    //   진입과 종료가 서로 다른 답을 내는 두 번째 정본이 된다.
+    const future = V({ ok: true, code: 'HEDGE_VERIFIED', strandsOpenPosition: false, message: 'v' });
+    if (future?.allowed !== true) {
+      err(`${SAFETY}: 정본이 통과시킨 판을 코드 이름으로 다시 막습니다`
+        + ' — 종료 판정이 두 곳이 됩니다');
+    }
+  }
+
+  // 정책 파일이 모드를 직접 해석하지 않는가 (글자로도 한 번 더)
+  {
+    const src = code(SAFETY);
+    for (const needle of ['positionModeVerdict', 'futuresPositionMode', "'HEDGE'", '"HEDGE"']) {
+      if (src.includes(needle)) {
+        err(`${SAFETY}가 ${needle}를 직접 봅니다`
+          + ' — 종료 가능 판정의 정본은 closeModeVerdict 하나입니다');
+      }
+    }
+  }
+
+  // ── ⑫-b 라우트가 정본을 부르는가 ──
+  const sc = code(SCALP);
+  const iSafety = sc.indexOf('entryExitSafetyVerdict(');
+  const iGate   = sc.indexOf('closeModeGate(');
+  const iCommit = sc.indexOf('commitEntry100x(\n');
+  const iLev    = sc.indexOf('ensureLeverage(');
+  const iExec   = sc.indexOf('executeOrder(sb');
+  const iClaim  = sc.indexOf('claimSignal(');
+
+  if (iGate < 0) {
+    err(`${SCALP}: closeModeGate를 부르지 않습니다`
+      + ' — 자동으로 닫지 못하는 계좌에 새 포지션이 열립니다');
+  }
+  if (iSafety < 0) {
+    err(`${SCALP}: entryExitSafetyVerdict를 부르지 않습니다 — 관문이 배선되지 않았습니다`);
+  }
+  // 종료 가능 판정을 **독자적으로** 다시 하지 않는가.
+  //
+  //   ★ 호출 모양(`(`)만 보면 샌다 — `void positionModeVerdict;`처럼
+  //     들여놓기만 해도 다음 사람이 그걸 쓴다. 이 라우트는 진입용
+  //     모드 판정을 **아예 쓰지 않으므로** 이름 자체를 들이지 않는다.
+  if (/\bpositionModeVerdict\b/.test(sc)) {
+    err(`${SCALP}이 진입용 positionModeVerdict를 들입니다`
+      + ' — 종료 가능 여부의 정본은 closeModeGate 하나입니다'
+      + ' (진입은 되는데 종료는 안 되는 두 번째 판정이 됩니다)');
+  }
+
+  // ── ⑫-b2 판정을 실제로 쓰는가 ──
+  //
+  //   `entryExitSafetyVerdict`를 부르고 결과를 버리면 관문은 **있는데
+  //   없는 것**이 된다. 호출이 있는지가 아니라 **차단 가지가 판정에
+  //   달려 있는지**를 본다.
+  if (iSafety >= 0) {
+    const tail = sc.slice(iSafety, iSafety + 900);
+    const branch = /if\s*\(\s*!\s*(\w+)\.allowed\s*\)\s*\{/.exec(tail);
+    if (!branch) {
+      err(`${SCALP}: 종료 안전 판정으로 분기하지 않습니다`
+        + ' — 판정을 부르고 결과를 버리면 관문이 없는 것과 같습니다');
+    } else {
+      // 그 가지가 정말 **막는가** — 409로 돌아가야 한다.
+      const body = tail.slice(branch.index, branch.index + 500);
+      if (!/return\s+NextResponse\.json\(/.test(body)) {
+        err(`${SCALP}: 종료 안전 차단 가지가 응답을 돌려주지 않습니다 — 그대로 진행됩니다`);
+      }
+      if (!/blocked:\s*'AUTO_EXIT_UNSAFE'/.test(body)) {
+        err(`${SCALP}: 차단 사유를 AUTO_EXIT_UNSAFE로 적지 않습니다`
+          + ' — 화면이 왜 막혔는지 말할 수 없습니다');
+      }
+      if (!/executed:\s*false/.test(body)) {
+        err(`${SCALP}: 종료 안전 차단 응답이 executed:false를 적지 않습니다`);
+      }
+    }
+    // 조건을 상수로 바꿔 끄는 회귀.
+    if (/if\s*\(\s*(false|true)\s*\)\s*\{[\s\S]{0,300}?AUTO_EXIT_UNSAFE/.test(sc)) {
+      err(`${SCALP}: 종료 안전 차단이 상수 조건에 묶여 있습니다`);
+    }
+  }
+
+  // ── ⑫-c 차단이 거래소 쓰기보다 앞인가 ──
+  //
+  //   막힐 요청이 배율·마진을 먼저 바꾸면 "주문은 안 나갔다"가 위로가
+  //   되지 않는다 — 계좌 설정이 이미 바뀌었고 그 자리에 포지션이 있으면
+  //   청산가가 함께 움직인다.
+  if (iSafety >= 0) {
+    for (const [i, what] of [
+      [iCommit, '배율 확정(commitEntry100x)'],
+      [iLev, '배율 동기화 쓰기(ensureLeverage)'],
+      [iExec, '주문 제출(executeOrder)'],
+    ]) {
+      if (i >= 0 && !(iSafety < i)) {
+        err(`${SCALP}: 종료 안전 관문이 ${what}보다 뒤입니다`
+          + ' — 자동으로 닫지 못할 계좌에 설정이 나가거나 주문이 나갑니다');
+      }
+    }
+    if (iGate >= 0 && !(iGate < iCommit || iCommit < 0)) {
+      err(`${SCALP}: closeModeGate 조회가 배율 확정보다 뒤입니다`);
+    }
+    // 멱등 표식을 태우지 않는가 — 진입도 안 했는데 그 봉이 잠기면
+    // 같은 봉의 정당한 재시도가 막힌다.
+    if (iClaim >= 0 && !(iSafety < iClaim)) {
+      err(`${SCALP}: 종료 안전 관문이 중복 신호 claim보다 뒤입니다`
+        + ' — 막힌 회차가 그 봉의 멱등 표식을 태웁니다');
+    }
+  }
+
+  // ── ⑫-d 방향을 짐작하지 않는가 ──
+  //
+  //   `plan.side`를 `'SHORT' ? 'SHORT' : 'LONG'`으로 좁히면 방향을 못
+  //   읽은 경우가 조용히 LONG이 되고 정본의 NO_DIRECTION이 영원히 안
+  //   나온다. 짐작해서 닫으면 반대 방향 신규 진입이다.
+  if (iGate >= 0) {
+    const call = sc.slice(iGate, iGate + 400);
+    if (/closeModeGate\([^)]*,\s*['"](LONG|SHORT)['"]\s*\)/.test(call)
+      || /sideForClose\s*=\s*['"](LONG|SHORT)['"]/.test(sc)) {
+      err(`${SCALP}: closeModeGate에 방향을 글자로 박아 넘깁니다`
+        + ' — 반대 방향으로 신규 진입이 될 수 있습니다');
+    }
+    if (!/plan\.side/.test(sc.slice(Math.max(0, iGate - 700), iGate + 400))) {
+      err(`${SCALP}: closeModeGate에 plan.side를 넘기지 않습니다`);
+    }
+    if (/plan\.side\s*===\s*'SHORT'\s*\?\s*'SHORT'\s*:\s*'LONG'/.test(
+      sc.slice(Math.max(0, iGate - 700), iGate + 400))) {
+      err(`${SCALP}: 종료 방향을 LONG으로 좁혀 넘깁니다`
+        + ' — 방향을 못 읽은 경우(NO_DIRECTION)가 조용히 통과합니다');
+    }
+  }
+
+  // ── ⑫-e 계약이 없는 legacy 경로까지 막지 않는가 ──
+  //
+  //   이 PR은 열려 있는 execution-contract 경로에만 건다. epContract가
+  //   없던 예전 scalp의 행동은 바꾸지 않는다.
+  if (iSafety >= 0) {
+    const before = sc.slice(Math.max(0, iSafety - 1400), iSafety);
+    if (!/if\s*\(\s*epContract\s*\)/.test(before)) {
+      err(`${SCALP}: 종료 안전 관문이 epContract 조건 안에 있지 않습니다`
+        + ' — 계약이 없던 예전 경로의 행동까지 바뀝니다');
+    }
+  }
+
+  // ── ⑫-f 관문이 거래소 상태를 바꾸지 않는가 ──
+  //
+  //   확인하려고 모드를 바꾸거나 시험 주문을 보내면, 안전을 확인하는
+  //   행위 자체가 계좌를 건드린다.
+  if (iSafety >= 0) {
+    const win = sc.slice(Math.max(0, iSafety - 1600), iSafety + 600);
+    for (const [re, what] of [
+      [/futuresSetPositionMode|setPositionMode\s*\(/, '포지션 모드 변경'],
+      [/closeSymbolPosition\s*\(/, '포지션 강제 청산'],
+      [/reduceOnly\s*:\s*true/, 'reduceOnly 시험 주문'],
+      [/futuresSetLeverage\s*\(/, '배율 쓰기'],
+    ]) {
+      if (re.test(win)) {
+        err(`${SCALP}: 종료 안전 관문 주변에서 ${what}을(를) 합니다`
+          + ' — 확인하는 행위가 계좌를 바꿉니다');
+      }
+    }
+  }
+
+  // ── ⑫-g 정본 closeModeGate가 그대로인가 (#281 의미 회귀) ──
+  {
+    const vp = code(VPO);
+    if (!/export async function closeModeGate/.test(vp)) {
+      err(`${VPO}: closeModeGate가 없습니다 — 종료 가능 판정의 정본이 사라졌습니다`);
+    }
+    if (!/closeModeVerdict\s*\(/.test(vp)) {
+      err(`${VPO}: closeModeGate가 closeModeVerdict를 쓰지 않습니다`);
+    }
+    // ★ 이름이 있는지가 아니라 **어디서 온 값인지**를 본다.
+    //   `strandsOpenPosition: false`로 박아 두면 이름은 그대로 남고
+    //   진입 관문은 영원히 "안 갇힌다"만 본다 — 가장 조용한 회귀다.
+    const gate = vp.slice(vp.indexOf('export async function closeModeGate'),
+      vp.indexOf('export async function closeModeGate') + 900);
+    if (!/strandsOpenPosition:\s*v\.strandsOpenPosition/.test(gate)) {
+      err(`${VPO}: closeModeGate가 갇힘 여부를 판정(v)에서 가져오지 않습니다`
+        + ' — 값을 박아 두면 진입 관문이 영원히 "안 갇힌다"만 봅니다');
+    }
+    if (/strandsOpenPosition:\s*(true|false)\b/.test(gate)) {
+      err(`${VPO}: closeModeGate가 갇힘 여부를 상수로 적습니다`);
+    }
+    for (const f of ['ok: v.ok', 'code: v.code', 'message: v.message']) {
+      if (!gate.includes(f)) {
+        err(`${VPO}: closeModeGate가 ${f}를 판정에서 그대로 전달하지 않습니다`);
+      }
+    }
+  }
+}
+
 if (bad) {
   console.error(`\n전용 100배 계약 검사 실패: ${bad}건`);
   process.exit(1);

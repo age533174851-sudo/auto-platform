@@ -939,6 +939,55 @@ export async function POST(req: NextRequest) {
     (base as any).shortFindings = sg.findings;
   }
 
+  // ── ★ 안전하게 나갈 수 없는 계좌에는 들어가지 않는다 ──
+  //
+  //   불변식: CAN_AUTO_ENTER requires CAN_AUTO_EXIT_SAFELY
+  //
+  //   #281이 종료 경로를 fail-closed로 만들었다 — 양방향(헤지) 계좌이거나
+  //   포지션 모드를 못 읽으면 청산 주문을 **보내지 않는다.** 그런데 진입
+  //   쪽은 그대로여서 "열 수는 있는데 자동으로 닫을 수는 없는" 포지션이
+  //   생길 수 있었다. 100배 자리에서 그건 사람이 거래소에 직접 들어가
+  //   닫아야 한다는 뜻이다.
+  //
+  //   **판정을 여기서 새로 만들지 않는다.** 종료 가능 여부의 정본은
+  //   `closeModeGate`(→ `futuresExec.closeModeVerdict`) 하나이고, 이
+  //   관문은 그 결론만 읽는다. 여기서 모드를 다시 해석하면 진입과 종료가
+  //   서로 다른 답을 내는 두 번째 안전 판정이 생긴다.
+  //
+  //   ★ 자리: 여기는 **거래소 쓰기가 하나도 없는 마지막 지점**이다.
+  //     · `dryRun`/`checkOnly`는 위에서 이미 돌아갔다 — 점검에는 요구하지 않는다
+  //     · `modeGate !== SEND`(모의)도 위에서 돌아갔다 — 모의에는 요구하지 않는다
+  //     · 중복 신호 claim **앞**이다 — 여기서 막으면 그 봉의 멱등 표식을
+  //       태우지 않는다. 뒤에 두면 진입도 안 했는데 그 봉이 잠긴다.
+  //     · `commitEntry100x` · `ensureLeverage` 쓰기 · `executeOrder`
+  //       **모두 앞**이다 — 막힐 요청은 배율도 마진도 건드리지 않는다.
+  //
+  //   조회(읽기)만 한다. 모드를 바꾸거나 시험 주문을 보내지 않는다.
+  if (epContract) {
+    const { closeModeGate } = await import('@/lib/engine/venuePositionOps');
+    const { entryExitSafetyVerdict } = await import('@/lib/engine/entryExitSafety');
+
+    // **방향을 짐작하지 않는다.** 이 라우트의 다른 자리처럼
+    // `=== 'SHORT' ? 'SHORT' : 'LONG'`으로 좁히면 방향을 못 읽은 경우가
+    // 조용히 LONG이 되고, 정본의 `NO_DIRECTION` 판정이 영원히 안 나온다 —
+    // 짐작해서 닫으면 반대 방향 신규 진입이 된다.
+    const sideForClose = plan.side === 'LONG' || plan.side === 'SHORT' ? plan.side : null;
+
+    const closeGate = await closeModeGate({
+      exchange: conn.exchange as 'binance' | 'gate',
+      apiKey: conn.apiKey, apiSecret: conn.apiSecret, testnet: !connIsLive,
+    }, sideForClose);
+
+    const exitSafety = entryExitSafetyVerdict(closeGate);
+    (base as any).exitSafety = exitSafety.evidence;
+
+    if (!exitSafety.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'AUTO_EXIT_UNSAFE',
+        error: exitSafety.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
 
   // ── 주문 ──
   //
