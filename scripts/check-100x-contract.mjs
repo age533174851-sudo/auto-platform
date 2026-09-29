@@ -59,7 +59,12 @@ const code = f => stripJsComments(read(f));
 // 프로필 리터럴을 regex로 읽으면 `applyPreset`이 그 위에 얹는 override를
 // 보지 못한다. 화면에 100배로 뜨는지는 **합쳐진 결과**가 정한다.
 
-const REL = /^\s*(?:import|export)\s+(?:type\s+)?(?:[\w*{}\s,]+from\s+)?['"](\.[^'"]+)['"]/gm;
+// 상대 경로와 `@/` 별칭을 **둘 다** 따라간다.
+//
+// ★ 예전에는 상대 경로만 봤다. 그래서 정본이 `@/lib/...`를 하나라도
+//   쓰면 컴파일이 깨지고, 그 파일은 **동작으로 검사할 수 없었다** —
+//   글자만 보는 규칙으로 물러나게 되는 조용한 이유였다.
+const REL = /^\s*(?:import|export)\s+(?:type\s+)?(?:[\w*{}\s,]+from\s+)?['"]((?:\.|@\/)[^'"]+)['"]/gm;
 
 const collect = (entry) => {
   const files = new Map();
@@ -73,7 +78,8 @@ const collect = (entry) => {
     let m;
     REL.lastIndex = 0;
     while ((m = REL.exec(src))) {
-      const p = join(dirname(f), m[1]);
+      const spec = m[1];
+      const p = spec.startsWith('@/') ? join('src', spec.slice(2)) : join(dirname(f), spec);
       for (const cand of [`${p}.ts`, `${p}.tsx`, join(p, 'index.ts')]) {
         if (existsSync(cand)) { queue.push(cand); break; }
       }
@@ -94,8 +100,16 @@ const loadModule = async (entry, what) => {
   const tsc = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) { err(`TypeScript가 없습니다 (${tsc}). 먼저 npm ci`); return null; }
   try {
-    execFileSync(process.execPath, [tsc, entry, '--module', 'commonjs',
-      '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe', timeout: 180_000 });
+    // `@/`를 `src/`로 풀어 준다 — 위 수집기가 그 파일들을 이미 복사해 뒀다.
+    writeFileSync(join(dir, 'tsconfig.probe.json'), JSON.stringify({
+      compilerOptions: {
+        module: 'commonjs', target: 'es2019', skipLibCheck: true,
+        baseUrl: '.', paths: { '@/*': ['src/*'] },
+      },
+      files: [entry],
+    }));
+    execFileSync(process.execPath, [tsc, '-p', 'tsconfig.probe.json'],
+      { cwd: dir, stdio: 'pipe', timeout: 180_000 });
   } catch (e) {
     err(`${what}: 컴파일되지 않습니다\n${String(e.stdout || e.message).trim().slice(0, 400)}`);
     return null;
@@ -1200,6 +1214,634 @@ if (!/marginAllocationPct/.test(schedSrc)) {
 if (/margin_allocation_pct:\s*(marginPct|body\?\.marginPct|body\.marginPct)/.test(schedSrc)) {
   err(`${SCHED}: 화면 기본값 marginPct를 배정 비율로 상속합니다`
     + ' — 사용자가 고른 적 없는 크기로 100배가 나갑니다');
+}
+
+// ─────────────────────────────────────────────────────────────
+// ⑫ PR-E — 안전하게 나갈 수 없는 계좌에는 들어가지 않는다
+// ─────────────────────────────────────────────────────────────
+//
+// 불변식: CAN_AUTO_ENTER requires CAN_AUTO_EXIT_SAFELY
+//
+// #281이 종료를 fail-closed로 만들면서 "열 수는 있는데 자동으로 닫을 수는
+// 없는" 비대칭이 생겼다. 이 관문이 그걸 막는다. 새는 방식은 전부 조용하다 —
+// 관문을 지워도, 조건을 뒤집어도, 쓰기 뒤로 옮겨도 화면에는 아무 일도 안
+// 일어난다. 그래서 **정책을 실제로 부르고**(동작) **순서를 함께 본다**(배선).
+const SAFETY = 'src/lib/engine/entryExitSafety.ts';
+const VPO    = 'src/lib/engine/venuePositionOps.ts';
+{
+  // ── ⑫-a 정책을 컴파일해서 실제로 부른다 ──
+  //
+  //   글자가 아니라 답을 본다. `if (false)`로 바꾸거나 `ok`만 보게
+  //   고치면 여기서 잡힌다.
+  const sm = await loadModule(SAFETY, '진입 전 종료 안전 정책');
+  if (!sm || typeof sm.entryExitSafetyVerdict !== 'function') {
+    err(`${SAFETY}: entryExitSafetyVerdict가 없습니다 — 진입 전 종료 안전 판정이 없습니다`);
+  } else {
+    const V = sm.entryExitSafetyVerdict;
+    const safe = { ok: true, code: 'ONE_WAY', strandsOpenPosition: false, message: '단방향' };
+    if (V(safe)?.allowed !== true) err('진입 전 종료 안전: 단방향 계좌인데 진입이 막혔습니다');
+
+    for (const [ev, why] of [
+      [{ ok: false, code: 'HEDGE_UNVERIFIED', strandsOpenPosition: true, message: 'h' }, '양방향'],
+      [{ ok: false, code: 'UNKNOWN', strandsOpenPosition: true, message: 'u' }, '모드 못 읽음'],
+      [{ ok: false, code: 'NO_DIRECTION', strandsOpenPosition: true, message: 'n' }, '방향 모름'],
+      [null, '증거 없음'],
+      [undefined, '증거 undefined'],
+      [{}, '빈 증거'],
+      // ★ `ok === true`를 `ok !== false`로 무르게 바꾸는 회귀는 **여기서만**
+      //   잡힌다. 증거가 통째로 없는 판(`{}`·null)은 `strandsOpenPosition`
+      //   쪽에서 어차피 막혀 동치가 되기 때문이다. 갇히지 않는다고 적혀
+      //   있는데 `ok`만 빠진 판이 그 둘을 가른다.
+      [{ code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 없음'],
+      [{ ok: null, code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 null'],
+      [{ ok: 'yes', code: 'X', strandsOpenPosition: false, message: 'm' }, 'ok가 참 같은 글자'],
+      // ★ `ok`만 보는 회귀를 잡는 자리. 오늘 정본에서는 나오지 않는
+      //   조합이라 시험이 없으면 조용히 샌다.
+      [{ ok: true, code: 'ONE_WAY', strandsOpenPosition: true, message: 'x' }, '통과인데 갇힘'],
+    ]) {
+      const r = V(ev);
+      if (r?.allowed !== false) {
+        err(`진입 전 종료 안전: ${why}인데 진입이 허용됩니다`
+          + ' — 자동으로 닫지 못하는 계좌에 새 포지션이 열립니다');
+      }
+      if (r && r.code !== 'AUTO_EXIT_UNSAFE') {
+        err(`진입 전 종료 안전: ${why}의 코드가 ${r.code}입니다 — AUTO_EXIT_UNSAFE여야 합니다`);
+      }
+    }
+
+    // 사유가 응답까지 살아 가는가. 코드만 남고 문구가 사라지면 운영자는
+    // 무엇을 고쳐야 하는지 모른다.
+    const kept = V({ ok: false, code: 'HEDGE_UNVERIFIED', strandsOpenPosition: true,
+      message: '양방향 규격 미확정' });
+    if (kept?.evidence?.code !== 'HEDGE_UNVERIFIED'
+      || !String(kept?.reason || '').includes('양방향 규격 미확정')) {
+      err('진입 전 종료 안전: 정본의 코드·사유가 응답까지 전달되지 않습니다');
+    }
+
+    // ★ 이 정책이 모드를 **다시 해석하지 않는가.** 정본이 통과시키면
+    //   코드 이름과 무관하게 통과해야 한다 — 여기에 HEDGE 분기가 생기면
+    //   진입과 종료가 서로 다른 답을 내는 두 번째 정본이 된다.
+    const future = V({ ok: true, code: 'HEDGE_VERIFIED', strandsOpenPosition: false, message: 'v' });
+    if (future?.allowed !== true) {
+      err(`${SAFETY}: 정본이 통과시킨 판을 코드 이름으로 다시 막습니다`
+        + ' — 종료 판정이 두 곳이 됩니다');
+    }
+  }
+
+  // 정책 파일이 모드를 직접 해석하지 않는가 (글자로도 한 번 더)
+  {
+    const src = code(SAFETY);
+    for (const needle of ['positionModeVerdict', 'futuresPositionMode', "'HEDGE'", '"HEDGE"']) {
+      if (src.includes(needle)) {
+        err(`${SAFETY}가 ${needle}를 직접 봅니다`
+          + ' — 종료 가능 판정의 정본은 closeModeVerdict 하나입니다');
+      }
+    }
+  }
+
+  // ── ⑫-b 라우트가 정본을 부르는가 ──
+  const sc = code(SCALP);
+  const iSafety = sc.indexOf('entryExitSafetyVerdict(');
+  const iGate   = sc.indexOf('closeModeGate(');
+  const iCommit = sc.indexOf('commitEntry100x(\n');
+  const iLev    = sc.indexOf('ensureLeverage(');
+  const iExec   = sc.indexOf('executeOrder(sb');
+  const iClaim  = sc.indexOf('claimSignal(');
+
+  if (iGate < 0) {
+    err(`${SCALP}: closeModeGate를 부르지 않습니다`
+      + ' — 자동으로 닫지 못하는 계좌에 새 포지션이 열립니다');
+  }
+  if (iSafety < 0) {
+    err(`${SCALP}: entryExitSafetyVerdict를 부르지 않습니다 — 관문이 배선되지 않았습니다`);
+  }
+  // 종료 가능 판정을 **독자적으로** 다시 하지 않는가.
+  //
+  //   ★ 호출 모양(`(`)만 보면 샌다 — `void positionModeVerdict;`처럼
+  //     들여놓기만 해도 다음 사람이 그걸 쓴다. 이 라우트는 진입용
+  //     모드 판정을 **아예 쓰지 않으므로** 이름 자체를 들이지 않는다.
+  if (/\bpositionModeVerdict\b/.test(sc)) {
+    err(`${SCALP}이 진입용 positionModeVerdict를 들입니다`
+      + ' — 종료 가능 여부의 정본은 closeModeGate 하나입니다'
+      + ' (진입은 되는데 종료는 안 되는 두 번째 판정이 됩니다)');
+  }
+
+  // ── ⑫-b2 판정을 실제로 쓰는가 ──
+  //
+  //   `entryExitSafetyVerdict`를 부르고 결과를 버리면 관문은 **있는데
+  //   없는 것**이 된다. 호출이 있는지가 아니라 **차단 가지가 판정에
+  //   달려 있는지**를 본다.
+  if (iSafety >= 0) {
+    const tail = sc.slice(iSafety, iSafety + 900);
+    const branch = /if\s*\(\s*!\s*(\w+)\.allowed\s*\)\s*\{/.exec(tail);
+    if (!branch) {
+      err(`${SCALP}: 종료 안전 판정으로 분기하지 않습니다`
+        + ' — 판정을 부르고 결과를 버리면 관문이 없는 것과 같습니다');
+    } else {
+      // 그 가지가 정말 **막는가** — 409로 돌아가야 한다.
+      const body = tail.slice(branch.index, branch.index + 500);
+      if (!/return\s+NextResponse\.json\(/.test(body)) {
+        err(`${SCALP}: 종료 안전 차단 가지가 응답을 돌려주지 않습니다 — 그대로 진행됩니다`);
+      }
+      if (!/blocked:\s*'AUTO_EXIT_UNSAFE'/.test(body)) {
+        err(`${SCALP}: 차단 사유를 AUTO_EXIT_UNSAFE로 적지 않습니다`
+          + ' — 화면이 왜 막혔는지 말할 수 없습니다');
+      }
+      if (!/executed:\s*false/.test(body)) {
+        err(`${SCALP}: 종료 안전 차단 응답이 executed:false를 적지 않습니다`);
+      }
+    }
+    // 조건을 상수로 바꿔 끄는 회귀.
+    if (/if\s*\(\s*(false|true)\s*\)\s*\{[\s\S]{0,300}?AUTO_EXIT_UNSAFE/.test(sc)) {
+      err(`${SCALP}: 종료 안전 차단이 상수 조건에 묶여 있습니다`);
+    }
+  }
+
+  // ── ⑫-c 차단이 거래소 쓰기보다 앞인가 ──
+  //
+  //   막힐 요청이 배율·마진을 먼저 바꾸면 "주문은 안 나갔다"가 위로가
+  //   되지 않는다 — 계좌 설정이 이미 바뀌었고 그 자리에 포지션이 있으면
+  //   청산가가 함께 움직인다.
+  if (iSafety >= 0) {
+    for (const [i, what] of [
+      [iCommit, '배율 확정(commitEntry100x)'],
+      [iLev, '배율 동기화 쓰기(ensureLeverage)'],
+      [iExec, '주문 제출(executeOrder)'],
+    ]) {
+      if (i >= 0 && !(iSafety < i)) {
+        err(`${SCALP}: 종료 안전 관문이 ${what}보다 뒤입니다`
+          + ' — 자동으로 닫지 못할 계좌에 설정이 나가거나 주문이 나갑니다');
+      }
+    }
+    if (iGate >= 0 && !(iGate < iCommit || iCommit < 0)) {
+      err(`${SCALP}: closeModeGate 조회가 배율 확정보다 뒤입니다`);
+    }
+    // 멱등 표식을 태우지 않는가 — 진입도 안 했는데 그 봉이 잠기면
+    // 같은 봉의 정당한 재시도가 막힌다.
+    if (iClaim >= 0 && !(iSafety < iClaim)) {
+      err(`${SCALP}: 종료 안전 관문이 중복 신호 claim보다 뒤입니다`
+        + ' — 막힌 회차가 그 봉의 멱등 표식을 태웁니다');
+    }
+  }
+
+  // ── ⑫-d 방향을 짐작하지 않는가 ──
+  //
+  //   `plan.side`를 `'SHORT' ? 'SHORT' : 'LONG'`으로 좁히면 방향을 못
+  //   읽은 경우가 조용히 LONG이 되고 정본의 NO_DIRECTION이 영원히 안
+  //   나온다. 짐작해서 닫으면 반대 방향 신규 진입이다.
+  if (iGate >= 0) {
+    const call = sc.slice(iGate, iGate + 400);
+    if (/closeModeGate\([^)]*,\s*['"](LONG|SHORT)['"]\s*\)/.test(call)
+      || /sideForClose\s*=\s*['"](LONG|SHORT)['"]/.test(sc)) {
+      err(`${SCALP}: closeModeGate에 방향을 글자로 박아 넘깁니다`
+        + ' — 반대 방향으로 신규 진입이 될 수 있습니다');
+    }
+    if (!/plan\.side/.test(sc.slice(Math.max(0, iGate - 700), iGate + 400))) {
+      err(`${SCALP}: closeModeGate에 plan.side를 넘기지 않습니다`);
+    }
+    if (/plan\.side\s*===\s*'SHORT'\s*\?\s*'SHORT'\s*:\s*'LONG'/.test(
+      sc.slice(Math.max(0, iGate - 700), iGate + 400))) {
+      err(`${SCALP}: 종료 방향을 LONG으로 좁혀 넘깁니다`
+        + ' — 방향을 못 읽은 경우(NO_DIRECTION)가 조용히 통과합니다');
+    }
+  }
+
+  // ── ⑫-e 계약이 없는 legacy 경로까지 막지 않는가 ──
+  //
+  //   이 PR은 열려 있는 execution-contract 경로에만 건다. epContract가
+  //   없던 예전 scalp의 행동은 바꾸지 않는다.
+  if (iSafety >= 0) {
+    const before = sc.slice(Math.max(0, iSafety - 1400), iSafety);
+    if (!/if\s*\(\s*epContract\s*\)/.test(before)) {
+      err(`${SCALP}: 종료 안전 관문이 epContract 조건 안에 있지 않습니다`
+        + ' — 계약이 없던 예전 경로의 행동까지 바뀝니다');
+    }
+  }
+
+  // ── ⑫-f 관문이 거래소 상태를 바꾸지 않는가 ──
+  //
+  //   확인하려고 모드를 바꾸거나 시험 주문을 보내면, 안전을 확인하는
+  //   행위 자체가 계좌를 건드린다.
+  if (iSafety >= 0) {
+    const win = sc.slice(Math.max(0, iSafety - 1600), iSafety + 600);
+    for (const [re, what] of [
+      [/futuresSetPositionMode|setPositionMode\s*\(/, '포지션 모드 변경'],
+      [/closeSymbolPosition\s*\(/, '포지션 강제 청산'],
+      [/reduceOnly\s*:\s*true/, 'reduceOnly 시험 주문'],
+      [/futuresSetLeverage\s*\(/, '배율 쓰기'],
+    ]) {
+      if (re.test(win)) {
+        err(`${SCALP}: 종료 안전 관문 주변에서 ${what}을(를) 합니다`
+          + ' — 확인하는 행위가 계좌를 바꿉니다');
+      }
+    }
+  }
+
+  // ── ⑫-g 정본 closeModeGate가 그대로인가 (#281 의미 회귀) ──
+  {
+    const vp = code(VPO);
+    if (!/export async function closeModeGate/.test(vp)) {
+      err(`${VPO}: closeModeGate가 없습니다 — 종료 가능 판정의 정본이 사라졌습니다`);
+    }
+    if (!/closeModeVerdict\s*\(/.test(vp)) {
+      err(`${VPO}: closeModeGate가 closeModeVerdict를 쓰지 않습니다`);
+    }
+    // ★ 이름이 있는지가 아니라 **어디서 온 값인지**를 본다.
+    //   `strandsOpenPosition: false`로 박아 두면 이름은 그대로 남고
+    //   진입 관문은 영원히 "안 갇힌다"만 본다 — 가장 조용한 회귀다.
+    const gate = vp.slice(vp.indexOf('export async function closeModeGate'),
+      vp.indexOf('export async function closeModeGate') + 900);
+    if (!/strandsOpenPosition:\s*v\.strandsOpenPosition/.test(gate)) {
+      err(`${VPO}: closeModeGate가 갇힘 여부를 판정(v)에서 가져오지 않습니다`
+        + ' — 값을 박아 두면 진입 관문이 영원히 "안 갇힌다"만 봅니다');
+    }
+    if (/strandsOpenPosition:\s*(true|false)\b/.test(gate)) {
+      err(`${VPO}: closeModeGate가 갇힘 여부를 상수로 적습니다`);
+    }
+    for (const f of ['ok: v.ok', 'code: v.code', 'message: v.message']) {
+      if (!gate.includes(f)) {
+        err(`${VPO}: closeModeGate가 ${f}를 판정에서 그대로 전달하지 않습니다`);
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ⑬ PR1 — 고정 손절 없는 주문: 인식은 하되 관리하지 않는다
+// ─────────────────────────────────────────────────────────────
+//
+// 지금까지 `NO_FIXED_SL` 주문이 일반 생명주기에 안 들어간 것은 정책
+// 때문이 아니라 **우연**이었다 — 손절 값이 없어 `NO_STOP`으로 걸러졌을
+// 뿐이다. 참고용 값이 한 번 채워지면 그 우연은 끝나고, 그 포지션은
+// highWater·6시간 시간청산·본전이동·트레일링·MOVE_STOP·CLOSE를 받는다.
+//
+// 그리고 줄 하나를 빼는 것만으로는 부족하다 — 거래소 선물은 net position
+// 이라, 같은 자리의 다른 줄을 관리하면 그 노출까지 같이 움직인다.
+const CAND    = 'src/lib/engine/managedPosition.ts';
+const MONITOR = 'src/app/api/autotrade/exit-monitor/route.ts';
+const REATT   = 'src/lib/engine/stopReattach.ts';
+{
+  // ── ⑬-a 분류 정본을 컴파일해서 실제로 돌린다 ──
+  const cm = await loadModule(CAND, '감시 후보 정본');
+  if (!cm || typeof cm.managedCandidates !== 'function' || typeof cm.mayActOn !== 'function') {
+    err(`${CAND}: managedCandidates / mayActOn이 없습니다`);
+  } else {
+    const T = '2026-08-27T09:00:00.000Z';
+    const row = (o = {}) => ({
+      id: 'ord-1', connection_id: 'conn-bn', exchange: 'binance',
+      symbol: 'BTCUSDT', side: 'BUY', avg_price: 100, stop_loss: 90,
+      status: 'FILLED', reduce_only: false, acked_at: T,
+      signal_id: '[s:scalp]sig-1', ...o,
+    });
+    const run = rows => cm.managedCandidates(rows);
+    const codes = r => r.deferred.map(d => d.code);
+
+    // 고정 손절 주문은 평소대로 관리된다 (과잉 차단 방지)
+    {
+      const r = run([row({ stop_policy: 'FIXED_SL' })]);
+      if (r.positions.length !== 1 || !cm.mayActOn(r.positions[0])) {
+        err('감시 후보: 고정 손절 주문이 관리에서 빠졌습니다 — 과잉 차단입니다');
+      }
+    }
+    // 정책이 안 적힌 옛 줄은 기존대로 관리된다
+    {
+      const r = run([row({})]);
+      if (r.positions.length !== 1 || !cm.mayActOn(r.positions[0])) {
+        err('감시 후보: stop_policy가 없는 legacy 줄을 막았습니다'
+          + ' — 기존 고정 손절 전략이 통째로 관리에서 빠집니다');
+      }
+    }
+    // ★ 고정 손절 없는 주문은 손절 값이 있든 없든 관리하지 않는다
+    for (const [sl, want] of [[null, 'NO_FIXED_SL_EXIT_UNWIRED'],
+                              [90, 'NO_FIXED_SL_STOP_CONFLICT']]) {
+      const r = run([row({ stop_policy: 'NO_FIXED_SL', stop_loss: sl })]);
+      if (r.positions.length !== 0) {
+        err(`감시 후보: NO_FIXED_SL(손절 ${sl === null ? '없음' : '있음'}) 주문이`
+          + ' 일반 생명주기에 들어갔습니다');
+      }
+      if (!codes(r).includes(want)) {
+        err(`감시 후보: ${want} 유예 기록이 없습니다 — 인식했다는 증거가 사라집니다`);
+      }
+    }
+    // 유예를 "손절 없음"으로 뭉개지 않는다
+    {
+      const r = run([row({ stop_policy: 'NO_FIXED_SL', stop_loss: null })]);
+      if ((r.skipped || []).some(x => x.code === 'NO_STOP')) {
+        err('감시 후보: 정책상 유예를 NO_STOP으로 적었습니다 — 고칠 것이 없는데 고치려 듭니다');
+      }
+      const d = r.deferred[0] || {};
+      for (const f of ['connectionId', 'symbol', 'side', 'strategyId', 'orderId']) {
+        if (d[f] === undefined) err(`감시 후보: 유예 기록에 ${f}가 없습니다 — 추적이 끊깁니다`);
+      }
+    }
+    // 고정 손절인데 값이 없으면 legacy NO_STOP으로 숨기지 않는다
+    {
+      const r = run([row({ stop_policy: 'FIXED_SL', stop_loss: null })]);
+      if (!codes(r).includes('FIXED_SL_MISSING_STOP')) {
+        err('감시 후보: FIXED_SL인데 손절이 없는 상태를 NO_STOP으로 숨깁니다');
+      }
+    }
+    // 모르는 정책을 고정 손절로 읽지 않는다
+    {
+      const r = run([row({ stop_policy: 'WAT', stop_loss: 90 })]);
+      if (r.positions.length !== 0 || !codes(r).includes('STOP_POLICY_UNKNOWN')) {
+        err('감시 후보: 모르는 손절 정책을 추측해서 관리합니다');
+      }
+    }
+
+    // ── ★★ net position 자리 — 이 PR의 핵심 ──
+    //
+    //   ① 다른 전략이 섞인 자리: 걸러진 줄이 **자리 주장에도 남아야**
+    //      소유권이 모호해진다. 분류가 주장보다 앞서면 조용히 OWNED가 된다.
+    {
+      const r = run([
+        row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:my-original-v1]b' }),
+      ]);
+      const p = r.positions[0];
+      if (!p) err('감시 후보: 혼재 자리에서 고정 손절 줄이 통째로 사라졌습니다');
+      else {
+        if (cm.mayActOn(p)) {
+          err('감시 후보: 고정 손절 없는 줄을 버린 덕에 다른 전략 줄이 관리 가능해졌습니다'
+            + ' — 같은 net position이라 그쪽 노출까지 건드립니다');
+        }
+        if (p.ownership?.code !== 'OWNERSHIP_AMBIGUOUS') {
+          err('감시 후보: 걸러진 줄이 자리 주장에서도 사라졌습니다'
+            + ' — 관리 가능 여부가 소유권을 조용히 바꿉니다');
+        }
+      }
+    }
+    //   ② ★ 같은 전략이 섞인 자리: 주장자가 하나뿐이라 **소유권은 OWNED다.**
+    //      소유권만으로는 못 막는다 — 관리 판정이 따로 있어야 한다.
+    {
+      const r = run([
+        row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:scalp]b' }),
+      ]);
+      const p = r.positions[0];
+      if (!p) err('감시 후보: 같은 전략 혼재 자리에서 고정 손절 줄이 사라졌습니다');
+      else if (cm.mayActOn(p)) {
+        err('감시 후보: 같은 전략의 혼재 자리를 관리합니다'
+          + ' — 정책이 다른 노출을 분리할 수 없는데 net position을 건드립니다');
+      }
+    }
+    //   ③ ★ 고정 손절을 쓴다면서 값이 없는 줄도 같은 자리를 막는다.
+    //      막는 **이유**는 다르지만(일부러 안 건다 vs 걸기로 해 놓고 없다)
+    //      결과는 같다 — 둘 다 관리할 수 없는 노출이고, net position에서
+    //      수량을 나눌 수 없다.
+    for (const same of [true, false]) {
+      const r = run([
+        row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90,
+              signal_id: same ? '[s:scalp]b' : '[s:my-original-v1]b' }),
+      ]);
+      const p = r.positions[0];
+      if (!p) { err('감시 후보: 손절 누락 혼재 자리에서 정상 줄이 사라졌습니다'); continue; }
+      if (cm.mayActOn(p)) {
+        err(`감시 후보: 손절 누락 줄과 ${same ? '같은' : '다른'} 전략이 섞인 자리를 관리합니다`
+          + ' — 계약이 깨진 노출까지 닫거나 손절을 옮깁니다');
+      }
+      if (same && p.management?.code === 'MANAGED') {
+        err('감시 후보: 같은 전략 혼재 자리가 MANAGED로 승격했습니다');
+      }
+    }
+    // 자리 유예 코드가 **상위 개념 이름**인가. `NO_FIXED_SL_...`이라는
+    // 이름으로 손절 누락까지 막으면 동작은 맞는데 이름이 거짓말을 한다.
+    {
+      const r = run([
+        row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      const mg = r.positions[0]?.management || {};
+      if (mg.code !== 'UNMANAGED_SEAT_DEFERRED') {
+        err(`감시 후보: 자리 유예 코드가 ${mg.code}입니다`
+          + ' — 손절 누락까지 막는 상태에 NO_FIXED_SL 전용 이름을 쓰면 이름이 거짓말합니다');
+      }
+      // 왜 막혔는지(root cause)가 남아 있는가 — 줄 유예와 자리 유예는 다른 질문이다.
+      if (!String(mg.reason || '').includes('FIXED_SL_MISSING_STOP')) {
+        err('감시 후보: 자리가 막힌 진짜 이유가 사유에 없습니다');
+      }
+    }
+    //   ④ ★ 자리를 막는 사유는 **다섯**이다
+    //
+    //      원칙: 일반 생명주기가 관리할 수 없는 줄이 같은 net-position
+    //      자리에 하나라도 있으면 그 자리를 건드리지 않는다. 막는 이유와
+    //      줄의 관측 의미는 제각각이지만 **결과는 같다.**
+    const SEAT_BLOCKERS = [
+      [{ stop_policy: 'NO_FIXED_SL', stop_loss: null }, 'NO_FIXED_SL_EXIT_UNWIRED'],
+      [{ stop_policy: 'NO_FIXED_SL', stop_loss: 95 }, 'NO_FIXED_SL_STOP_CONFLICT'],
+      [{ stop_policy: 'FIXED_SL', stop_loss: null }, 'FIXED_SL_MISSING_STOP'],
+      [{ stop_policy: 'WAT', stop_loss: 90 }, 'STOP_POLICY_UNKNOWN'],
+      [{ stop_loss: null }, 'NO_STOP'],
+    ];
+    for (const [bad, blocker] of SEAT_BLOCKERS) {
+      for (const same of [true, false]) {
+        const r = run([
+          row({ id: 'a', signal_id: '[s:scalp]a', ...bad }),
+          row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90,
+                signal_id: same ? '[s:scalp]b' : '[s:my-original-v1]b' }),
+        ]);
+        const p = r.positions.find(x => x.orderId === 'b');
+        if (!p) { err(`감시 후보: ${blocker} 혼재 자리에서 정상 줄이 사라졌습니다`); continue; }
+        if (cm.mayActOn(p)) {
+          err(`감시 후보: ${blocker}가 있는 자리를 관리합니다`
+            + ` (${same ? '같은' : '다른'} 전략 혼재)`
+            + ' — 관리할 수 없는 노출까지 닫거나 손절을 옮깁니다');
+        }
+        if (same && !String(p.management?.reason || '').includes(blocker)) {
+          err(`감시 후보: 자리가 막힌 이유(${blocker})가 사유에 없습니다`);
+        }
+      }
+      // 과잉 차단 방지 — 자리가 다르면 영향이 없어야 한다
+      for (const [over, what] of [
+        [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
+        [{ symbol: 'ETHUSDT' }, '다른 종목'],
+      ]) {
+        const r = run([
+          row({ id: 'a', ...bad }),
+          row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...over }),
+        ]);
+        const p = r.positions.find(x => x.orderId === 'b');
+        if (!p || !cm.mayActOn(p)) {
+          err(`감시 후보: ${blocker}가 ${what}까지 막았습니다 — 과잉 차단입니다`);
+        }
+      }
+    }
+    // ★ 자리를 막아도 **줄의 관측 의미는 그대로다.**
+    {
+      const r = run([row({ stop_loss: null })]);
+      if (!(r.skipped || []).some(x => x.code === 'NO_STOP')) {
+        err('감시 후보: NO_STOP이 대상 아님 목록에서 사라졌습니다');
+      }
+      if ((r.deferred || []).length !== 0) {
+        err('감시 후보: 옛 줄(NO_STOP)을 유예로 옮겼습니다'
+          + ' — 운영자가 새로 생긴 문제로 읽습니다');
+      }
+      const u = run([row({ stop_policy: 'WAT', stop_loss: 90 })]);
+      if (!codes(u).includes('STOP_POLICY_UNKNOWN')) {
+        err('감시 후보: 모르는 정책이 유예 목록에서 사라졌습니다');
+      }
+    }
+    // 범위 고정 — 체결 시각 없음까지 넓히지 않았다
+    {
+      const r = run([
+        row({ id: 'a', acked_at: null }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      const p = r.positions.find(x => x.orderId === 'b');
+      if (!p || !cm.mayActOn(p)) {
+        err('감시 후보: NO_ENTRY_TIME까지 자리 차단으로 넓혔습니다 — 별도 판단이 필요합니다');
+      }
+    }
+
+    //   ⑤ 과잉 차단 방지 — 다른 계좌·다른 종목은 영향이 없어야 한다
+    for (const [over, what] of [
+      [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
+      [{ symbol: 'ETHUSDT' }, '다른 종목'],
+    ]) {
+      const r = run([
+        row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null }),
+        row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...over }),
+      ]);
+      const p = r.positions[0];
+      if (!p || !cm.mayActOn(p)) err(`감시 후보: ${what}까지 유예시켰습니다 — 과잉 차단입니다`);
+    }
+    // 관리 판정이 빠진 옛 모양 객체가 유예를 우회하지 않는가
+    if (cm.mayActOn({ ownership: { code: 'OWNED', reason: '', claimants: [] } })) {
+      err(`${CAND}: 관리 판정이 없는 객체를 통과시킵니다 — 유예를 우회하는 길이 열립니다`);
+    }
+  }
+
+  // ── ⑬-b 감시 라우트가 정책 칸을 읽는가 ──
+  const mon = code(MONITOR);
+  {
+    // ★ 이 라우트에는 `live_orders` 조회가 여럿이다(보호주문 정리 등).
+    //   생명주기 조회는 체결가를 읽는 그 하나다 — 이름이 아니라 내용으로 찾는다.
+    const iSel = mon.indexOf("'id, connection_id, exchange, symbol, side, avg_price");
+    if (iSel < 0) err(`${MONITOR}: 생명주기 주문 조회를 찾지 못했습니다 — 검사가 헛돕니다`);
+    const sel = iSel < 0 ? '' : mon.slice(iSel, iSel + 700);
+    if (!/stop_policy/.test(sel)) {
+      err(`${MONITOR}: live_orders에서 stop_policy를 읽지 않습니다`
+        + ' — 고정 손절 없는 주문과 "값이 아직 안 적힌 주문"이 구별되지 않습니다');
+    }
+    // 없는 칼럼을 읽으면 조회 전체가 실패한다 (PostgREST)
+    if (/select\([^)]*strategy_id/.test(sel)) {
+      err(`${MONITOR}: live_orders에 없는 strategy_id를 projection합니다 — 조회가 통째로 실패합니다`);
+    }
+  }
+
+  // ── ⑬-c 유예가 실행 반복문에 **도달할 수 없는가** ──
+  //
+  //   반복문 안에서 뒤늦게 거르면 그때는 이미 거래소를 읽은 뒤다.
+  //   구조로 막혔는지를 본다 — `deferred`가 반복문 안에 없어야 한다.
+  {
+    if (!/const \{ positions, deferred, skipped \} = managedCandidates\(/.test(mon)) {
+      err(`${MONITOR}: managedCandidates의 유예 목록을 받지 않습니다`);
+    }
+    const iLoop = mon.indexOf('for (const p of positions) {');
+    const iEnd = mon.indexOf('const unknown = out.results.filter');
+    if (iLoop < 0 || iEnd < 0 || !(iLoop < iEnd)) {
+      err(`${MONITOR}: 생명주기 반복문을 찾지 못했습니다 — 검사가 헛돕니다`);
+    } else {
+      const body = mon.slice(iLoop, iEnd);
+      // ★ **목록을 쓰는가**를 본다. `deferred: true` 같은 결과 표시는
+      //   막을 이유가 없다 — 낱말을 금지하면 정직한 표기까지 막힌다.
+      if (/\bdeferred\s*\.|of\s+deferred\b|deferred\s*\[/.test(body)) {
+        err(`${MONITOR}: 유예 목록이 실행 반복문 안에서 쓰입니다`
+          + ' — 거래소를 읽은 뒤에 거르게 됩니다');
+      }
+      // 거래소를 건드리는 단계가 전부 이 반복문 **안**에 있는가.
+      // 밖으로 새면 유예와 무관하게 불린다.
+      // ★★ 관리 유예 관문이 **반복문 맨 앞**에 있는가.
+      //
+      //   예전에는 `mayActOn(p)`이 `highWaterSince` 한 줄에만 붙어 있어서,
+      //   유예된 자리도 `readOpenPosition` → `lifecycleDecide` →
+      //   `applyLifecycleClose`를 전부 지나갔다. `lifecycleDecide`는
+      //   소유권만 보는데 같은 전략끼리 섞인 자리는 소유권이 OWNED라,
+      //   시간청산이 그 포지션을 닫을 수 있었다.
+      {
+        const iGate = body.search(/if\s*\(\s*p\.management\?\.code\s*!==\s*'MANAGED'\s*\)/);
+        if (iGate < 0) {
+          err(`${MONITOR}: 관리 유예 관문이 실행 반복문 앞에 없습니다`
+            + ' — 유예된 자리가 조회·판단·쓰기를 모두 지나갑니다');
+        } else {
+          if (!/continue;/.test(body.slice(iGate, iGate + 600))) {
+            err(`${MONITOR}: 관리 유예 관문이 회차를 끊지 않습니다`);
+          }
+          for (const needle of ['credsOf(', 'readOpenPosition(', 'highWaterSince(',
+            'liveStopPrice(', 'lifecycleDecide(', 'guard.claim(', 'applyLifecycleClose(',
+            'moveStopSafely(']) {
+            const at = body.indexOf(needle);
+            if (at >= 0 && !(iGate < at)) {
+              err(`${MONITOR}: 관리 유예 관문이 ${needle}보다 뒤입니다`
+                + ' — 유예된 자리를 조회하거나 건드립니다');
+            }
+          }
+        }
+      }
+
+      // ★ **정의가 아니라 호출이 반복문 안에 있는가.** `credsOf`처럼
+      //   위에서 선언되고 안에서 불리는 것이 있어서, 첫 출현 위치로
+      //   판단하면 멀쩡한 배선을 밖에 있다고 잘못 읽는다.
+      for (const needle of ['credsOf(', 'readOpenPosition(', 'highWaterSince(',
+        'liveStopPrice(', 'lifecycleDecide(', 'guard.claim(', 'applyLifecycleClose(',
+        'moveStopSafely(']) {
+        if (!body.includes(needle)) {
+          err(`${MONITOR}: ${needle} 호출이 후보 반복문 안에 없습니다`
+            + ' — 유예와 무관하게 불리거나 배선이 끊겼습니다');
+        }
+      }
+    }
+    // 유예를 telemetry로 내보내는가 (숫자만 줄이고 사실을 감추지 않는가)
+    if (!/out\.deferred\s*=\s*deferred/.test(mon) || !/deferredCount/.test(mon)) {
+      err(`${MONITOR}: 유예를 응답에 내보내지 않습니다 — 관찰할 수 없는 상태가 됩니다`);
+    }
+    if (!/관리 유예/.test(read(MONITOR))) {
+      err(`${MONITOR}: 요약에 관리 유예 건수를 적지 않습니다`);
+    }
+  }
+
+  // ── ⑬-d 유예를 시스템 실패로 세지 않는가 ──
+  //
+  //   "일부러 관리하지 않음"과 "실행이 실패함"은 다른 상태다.
+  {
+    const om = await loadModule('src/lib/engine/exitRunOutcome.ts', '회차 결과 정본');
+    if (om && typeof om.collectLifecycleFailures === 'function') {
+      const f = om.collectLifecycleFailures({
+        error: null, results: [],
+        deferred: [{ code: 'NO_FIXED_SL_EXIT_UNWIRED', symbol: 'BTCUSDT', reason: 'x' }],
+        deferredCount: 1,
+      });
+      if ((f || []).length !== 0) {
+        err('회차 결과: 의도된 관리 유예를 시스템 실패로 셉니다'
+          + ' — 정상 회차가 빨간불이 됩니다');
+      }
+    }
+  }
+
+  // ── ⑬-e 뒤늦게 막는 구조로 바뀌지 않았는가 ──
+  //
+  //   `exitLifecycle`에서 걸러도 그때는 venue read가 끝난 뒤다. 기존
+  //   레거시 안전망(NO_FIXED_STOP)은 **그대로 두고**, 그것이 유일한
+  //   방어가 되지 않았는지만 본다.
+  {
+    const life = code('src/lib/engine/exitLifecycle.ts');
+    if (!/NO_FIXED_STOP/.test(life)) {
+      err('exitLifecycle: 레거시 NO_FIXED_STOP 안전망이 사라졌습니다 — 삭제 금지입니다');
+    }
+    if (/stop_policy|NO_FIXED_SL/.test(life)) {
+      err('exitLifecycle이 stop_policy를 직접 봅니다'
+        + ' — 진입 자체를 막지 않고 뒤늦게 거르는 구조입니다 (venue read가 이미 일어납니다)');
+    }
+  }
+
+  // ── ⑬-f 손절 재부착 정본이 그대로인가 ──
+  {
+    const ra = code(REATT);
+    if (!/NO_FIXED_SL/.test(ra)) {
+      err(`${REATT}: NO_FIXED_SL 불변식이 사라졌습니다`);
+    }
+  }
 }
 
 if (bad) {

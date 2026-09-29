@@ -159,4 +159,324 @@ export function runManagedPositionTests() {
     eq(managedCandidates(null).positions.length, 0, 'null');
     eq(managedCandidates([]).positions.length, 0, '빈 목록');
   });
+
+  // ══════════════════════════════════════════════════════════
+  // 고정 손절을 쓰지 않는 주문 — 인식은 하되 관리하지 않는다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 지금까지 이 주문들이 일반 생명주기에 안 들어간 것은 정책 때문이
+  // 아니라 **우연**이었다 — 손절 값이 없어서 걸러졌을 뿐이다. 참고용
+  // 값이 한 번 채워지면 그 우연은 끝난다. 아래 시험이 그 우연을 계약으로
+  // 못박는다.
+  console.log('\n🚫 고정 손절 없는 주문 — recognized != managed');
+
+  /** deferred 목록에서 코드 하나 찾기 */
+  const defOf = (r: any, code: string) => r.deferred.find((d: any) => d.code === code);
+
+  // A
+  test('FIXED_SL + 손절 값 → 평소처럼 관리한다', () => {
+    const r = managedCandidates([row({ stop_policy: 'FIXED_SL', stop_loss: 90 })]);
+    eq(r.positions.length, 1, '★ 고정 손절 주문이 관리에서 빠졌습니다');
+    eq(r.positions[0].management.code, 'MANAGED');
+    eq(mayActOn(r.positions[0]), true);
+    eq(r.deferred.length, 0);
+  });
+
+  // B
+  test('★ FIXED_SL + 손절 없음 → 관리하지 않고 유예로 적는다', () => {
+    const r = managedCandidates([row({ stop_policy: 'FIXED_SL', stop_loss: null })]);
+    eq(r.positions.length, 0, '★ 1R을 정의할 수 없는데 관리에 들어갔습니다');
+    assert(!!defOf(r, 'FIXED_SL_MISSING_STOP'), '★ 고칠 것이 있는 상태가 조용히 사라졌습니다');
+  });
+
+  // C — 이 PR의 SSOT 코드
+  test('★ NO_FIXED_SL + 손절 없음 → NO_FIXED_SL_EXIT_UNWIRED', () => {
+    const r = managedCandidates([row({ stop_policy: 'NO_FIXED_SL', stop_loss: null })]);
+    eq(r.positions.length, 0, '★ 고정 손절 없는 주문이 일반 생명주기에 들어갔습니다');
+    const d = defOf(r, 'NO_FIXED_SL_EXIT_UNWIRED');
+    assert(!!d, '★ 인식했다는 기록이 없습니다 — 그냥 사라진 줄이 됩니다');
+    // **NO_STOP으로 뭉개지 않는다.** 둘은 다른 상태다.
+    eq(r.skipped.find((x: any) => x.code === 'NO_STOP'), undefined,
+      '★ 정책상 유예를 "손절 없음"으로 적었습니다');
+  });
+
+  // D — ★ 우연이 끝나는 자리
+  test('★ NO_FIXED_SL + 손절 값이 있어도 관리하지 않는다 (우연 의존 제거)', () => {
+    const r = managedCandidates([row({ stop_policy: 'NO_FIXED_SL', stop_loss: 90 })]);
+    eq(r.positions.length, 0,
+      '★ 참고용 손절 값이 채워지자 일반 생명주기가 이 포지션을 가져갔습니다');
+    assert(!!defOf(r, 'NO_FIXED_SL_STOP_CONFLICT'), '계약과 장부가 어긋난 사실을 적어야 합니다');
+  });
+
+  // E · G
+  test('stop_policy가 없는 옛 줄 + 손절 값 → 기존대로 관리한다', () => {
+    const r = managedCandidates([row({ stop_loss: 90 })]);   // stop_policy 없음
+    eq(r.positions.length, 1, '★ 정책이 안 적힌 legacy 줄을 통째로 막았습니다');
+    eq(r.positions[0].management.code, 'MANAGED');
+  });
+
+  test('빈 문자열 정책도 "안 적힘"으로 본다', () => {
+    const r = managedCandidates([row({ stop_policy: '', stop_loss: 90 })]);
+    eq(r.positions.length, 1, '★ 빈 값을 모르는 정책으로 읽어 legacy 줄을 막았습니다');
+  });
+
+  // F
+  test('정책 없음 + 손절 없음 → 기존 NO_STOP 의미 그대로', () => {
+    const r = managedCandidates([row({ stop_loss: null })]);
+    eq(r.positions.length, 0);
+    assert(!!r.skipped.find((x: any) => x.code === 'NO_STOP'), 'NO_STOP은 그대로 남는다');
+    eq(r.deferred.length, 0, '옛 줄을 새 유예 계층으로 옮기지 않는다');
+  });
+
+  // 7번 — 모르는 정책
+  test('★ 모르는 정책 이름을 고정 손절로 읽지 않는다', () => {
+    const r = managedCandidates([row({ stop_policy: 'SOMETHING_NEW', stop_loss: 90 })]);
+    eq(r.positions.length, 0, '★ 모르는 정책을 추측해서 관리했습니다');
+    assert(!!defOf(r, 'STOP_POLICY_UNKNOWN'), '모른다는 사실을 적어야 합니다');
+  });
+
+  // H
+  test('★ 유예된 줄도 어느 계좌·종목·전략인지 남는다', () => {
+    const r = managedCandidates([row({
+      stop_policy: 'NO_FIXED_SL', stop_loss: null, id: 'ord-77',
+      symbol: 'ETHUSDT', side: 'SELL', signal_id: '[s:scalp]sig-9',
+    })]);
+    const d = defOf(r, 'NO_FIXED_SL_EXIT_UNWIRED');
+    eq(d.connectionId, 'conn-bn');
+    eq(d.symbol, 'ETHUSDT');
+    eq(d.side, 'SHORT');
+    eq(d.strategyId, 'scalp', '★ 어느 전략의 노출인지 알 수 없으면 추적이 끊깁니다');
+    eq(d.orderId, 'ord-77');
+    assert(d.reason.length > 10, '사람이 읽을 사유가 있어야 합니다');
+  });
+
+  // ── ★★ net position 자리(seat) — 이 PR의 핵심 ──
+  //
+  //   거래소가 주는 것은 합쳐진 포지션 하나뿐이다. 고정 손절 없는 줄을
+  //   목록에서 빼는 것만으로는, 같은 자리의 다른 줄이 그 노출까지 대신
+  //   건드리는 것을 막지 못한다.
+
+  // I — 다른 전략이 섞인 자리
+  test('★ 같은 계좌·종목에 다른 전략의 FIXED_SL이 있어도 그 줄을 관리하지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:my-original-v1]b' }),
+    ]);
+    // 고정 손절 줄은 후보로는 남는다 — 인식은 한다.
+    eq(r.positions.length, 1);
+    const p = r.positions[0];
+    eq(mayActOn(p), false,
+      '★ 고정 손절 없는 줄을 버린 덕에 다른 전략 줄이 OWNED로 승격했습니다'
+      + ' — 같은 net position이라 그쪽 노출까지 건드립니다');
+    // 자리 주장이 손절 분류보다 먼저 등록돼야 두 전략이 다 보인다.
+    eq(p.ownership.code, 'OWNERSHIP_AMBIGUOUS',
+      '★ 걸러진 줄이 자리 주장에서도 사라졌습니다');
+    eq(p.ownership.claimants.length, 2);
+  });
+
+  // J — ★ 같은 전략이 섞인 자리 (소유권만으로는 못 막는 경우)
+  test('★ 같은 전략의 FIXED_SL과 섞여 있어도 그 자리를 관리하지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:scalp]b' }),
+    ]);
+    eq(r.positions.length, 1);
+    const p = r.positions[0];
+    // 주장자가 하나뿐이라 **소유권은 OWNED다.** 소유권만 보면 통과한다 —
+    // 그래서 관리 판정이 따로 필요하다.
+    eq(p.ownership.code, 'OWNED', '전략이 하나면 소유권은 분명하다');
+    eq(p.management.code, 'UNMANAGED_SEAT_DEFERRED');
+    // 막힌 **이유**가 사유에 남는다 — 자리 유예와 줄 유예는 다른 질문이다.
+    eq(/NO_FIXED_SL_EXIT_UNWIRED/.test(p.management.reason), true,
+      '★ 왜 이 자리를 못 건드리는지가 사유에 없습니다');
+    eq(mayActOn(p), false,
+      '★ 소유권만 보고 통과시켰습니다 — 같은 자리의 고정 손절 없는 노출까지 움직입니다');
+  });
+
+  test('★ 정책 충돌(NO_FIXED_SL + 손절 값)도 자리를 유예시킨다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: 95, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:scalp]b' }),
+    ]);
+    eq(mayActOn(r.positions[0]), false, '★ 충돌한 줄은 자리를 유예시키지 않았습니다');
+  });
+
+  // K
+  test('다른 계좌면 영향이 없다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', connection_id: 'conn-A', stop_policy: 'NO_FIXED_SL', stop_loss: null }),
+      row({ id: 'b', connection_id: 'conn-B', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(r.positions.length, 1);
+    eq(mayActOn(r.positions[0]), true, '★ 다른 계좌까지 유예시켰습니다 — 과잉 차단입니다');
+  });
+
+  // L
+  test('다른 종목이면 영향이 없다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', symbol: 'BTCUSDT', stop_policy: 'NO_FIXED_SL', stop_loss: null }),
+      row({ id: 'b', symbol: 'ETHUSDT', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(r.positions.length, 1);
+    eq(r.positions[0].symbol, 'ETHUSDT');
+    eq(mayActOn(r.positions[0]), true, '★ 다른 종목까지 유예시켰습니다');
+  });
+
+  test('★ 관리 판정이 없는 옛 모양 객체는 통과시키지 않는다', () => {
+    // 유예를 우회하는 길을 열어 두지 않는다.
+    eq(mayActOn({ ownership: { code: 'OWNED', reason: '', claimants: [] } } as any), false);
+  });
+
+  // ── ★ 고정 손절을 쓴다면서 값이 없는 줄도 같은 자리를 막는다 ──
+  //
+  //   막는 **이유**는 NO_FIXED_SL과 다르다 — 저쪽은 "일부러 안 건다",
+  //   이쪽은 "걸기로 해 놓고 없다"다. 그런데 **결과는 같다**: 둘 다 일반
+  //   생명주기가 관리할 수 없는 노출이고, net position에서 어느 수량이
+  //   어느 줄 것인지 나눌 수 없다.
+
+  // M
+  test('★ FIXED_SL 손절 누락 + 다른 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:my-original-v1]b' }),
+    ]);
+    const p = r.positions[0];
+    assert(!!p, '정상 줄은 후보로 남는다');
+    eq(mayActOn(p), false,
+      '★ 계약이 깨진 노출을 버린 덕에 옆 줄이 관리 가능해졌습니다'
+      + ' — 같은 net position이라 깨진 쪽까지 닫거나 손절을 옮깁니다');
+  });
+
+  // N — 소유권만으로는 못 막는 경우
+  test('★ FIXED_SL 손절 누락 + 같은 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'FIXED_SL', stop_loss: null, signal_id: '[s:scalp]a' }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, signal_id: '[s:scalp]b' }),
+    ]);
+    const p = r.positions[0];
+    eq(p.ownership.code, 'OWNED', '전략이 하나면 소유권은 분명하다');
+    eq(p.management.code, 'UNMANAGED_SEAT_DEFERRED');
+    eq(mayActOn(p), false, '★ 소유권만 보고 통과시켰습니다');
+    eq(/FIXED_SL_MISSING_STOP/.test(p.management.reason), true,
+      '★ 자리가 막힌 진짜 이유가 사유에 없습니다');
+  });
+
+  // O
+  test('FIXED_SL 손절 누락 — 다른 계좌면 영향이 없다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', connection_id: 'conn-A', stop_policy: 'FIXED_SL', stop_loss: null }),
+      row({ id: 'b', connection_id: 'conn-B', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(mayActOn(r.positions[0]), true, '★ 다른 계좌까지 유예시켰습니다 — 과잉 차단입니다');
+  });
+
+  // P
+  test('FIXED_SL 손절 누락 — 다른 종목이면 영향이 없다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', symbol: 'BTCUSDT', stop_policy: 'FIXED_SL', stop_loss: null }),
+      row({ id: 'b', symbol: 'ETHUSDT', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    eq(r.positions[0].symbol, 'ETHUSDT');
+    eq(mayActOn(r.positions[0]), true, '★ 다른 종목까지 유예시켰습니다');
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // 자리를 막는 사유는 **다섯**이다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   원칙 하나로 정리된다: **일반 생명주기가 관리할 수 없는 줄이 같은
+  //   net-position 자리에 하나라도 있으면, 그 자리를 건드리지 않는다.**
+  //
+  //   막는 이유는 제각각이고(일부러 안 건다 / 값이 없다 / 정책을 모른다 /
+  //   옛 줄이다) 줄 자체의 관측 의미도 제각각이지만(`deferred` vs
+  //   `skipped`), **자리를 못 건드린다는 결과는 같다.**
+  //
+  //   ★ 줄의 뜻은 바꾸지 않는다 — `NO_STOP`은 계속 `skipped`이고
+  //     `STOP_POLICY_UNKNOWN`은 계속 `deferred`다. 자리 차단은
+  //     **세 번째 사실**이지 그 둘의 재분류가 아니다.
+
+  /** 자리를 막는 다섯 가지를 한 표로 */
+  const SEAT_BLOCKERS: Array<[any, string]> = [
+    [{ stop_policy: 'NO_FIXED_SL', stop_loss: null }, 'NO_FIXED_SL_EXIT_UNWIRED'],
+    [{ stop_policy: 'NO_FIXED_SL', stop_loss: 95 }, 'NO_FIXED_SL_STOP_CONFLICT'],
+    [{ stop_policy: 'FIXED_SL', stop_loss: null }, 'FIXED_SL_MISSING_STOP'],
+    [{ stop_policy: 'WAT', stop_loss: 90 }, 'STOP_POLICY_UNKNOWN'],
+    [{ stop_loss: null }, 'NO_STOP'],
+  ];
+
+  for (const [bad, code] of SEAT_BLOCKERS) {
+    // 같은 전략 — 소유권이 OWNED라 **소유권만으로는 못 막는다**
+    test(`★ ${code} + 같은 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다`, () => {
+      const r = managedCandidates([
+        row({ id: 'a', signal_id: '[s:scalp]a', ...bad }),
+        row({ id: 'b', signal_id: '[s:scalp]b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      const p = r.positions[0];
+      assert(!!p, '정상 줄은 후보로 남는다');
+      eq(p.ownership.code, 'OWNED', '전략이 하나면 소유권은 분명하다');
+      eq(p.management.code, 'UNMANAGED_SEAT_DEFERRED');
+      eq(mayActOn(p), false,
+        `★ ${code} 줄을 버린 덕에 옆 줄이 관리 가능해졌습니다`
+        + ' — 같은 net position이라 그쪽 노출까지 움직입니다');
+      eq(p.management.reason.includes(code), true,
+        `★ 자리가 막힌 이유(${code})가 사유에 없습니다`);
+    });
+
+    test(`★ ${code} + 다른 전략 정상 FIXED_SL → 그 자리를 관리하지 않는다`, () => {
+      const r = managedCandidates([
+        row({ id: 'a', signal_id: '[s:scalp]a', ...bad }),
+        row({ id: 'b', signal_id: '[s:my-original-v1]b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+      ]);
+      eq(mayActOn(r.positions[0]), false, `★ ${code} 혼재 자리를 관리했습니다`);
+    });
+
+    // 과잉 차단 방지 — 자리가 다르면 영향이 없어야 한다
+    test(`${code} — 다른 계좌·다른 종목이면 영향이 없다`, () => {
+      for (const [over, what] of [
+        [{ connection_id: 'conn-OTHER' }, '다른 계좌'],
+        [{ symbol: 'ETHUSDT' }, '다른 종목'],
+      ] as Array<[any, string]>) {
+        const r = managedCandidates([
+          row({ id: 'a', ...bad }),
+          row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...over }),
+        ]);
+        const p = r.positions.find((x: any) => x.orderId === 'b');
+        assert(!!p, `${what}: 정상 줄이 사라졌습니다`);
+        eq(mayActOn(p!), true, `★ ${code}가 ${what}까지 막았습니다 — 과잉 차단입니다`);
+      }
+    });
+  }
+
+  // ★ 줄의 관측 의미는 **바뀌지 않는다**
+  test('★ NO_STOP은 자리를 막아도 여전히 skipped다 (deferred로 옮기지 않는다)', () => {
+    const r = managedCandidates([row({ stop_loss: null })]);
+    assert(!!r.skipped.find((x: any) => x.code === 'NO_STOP'), 'NO_STOP은 대상 아님으로 남는다');
+    eq(r.deferred.length, 0,
+      '★ 옛 줄을 유예로 옮겼습니다 — 운영자가 새로 생긴 문제로 읽습니다');
+  });
+
+  test('★ STOP_POLICY_UNKNOWN은 자리를 막아도 여전히 deferred다', () => {
+    const r = managedCandidates([row({ stop_policy: 'WAT', stop_loss: 90 })]);
+    assert(!!defOf(r, 'STOP_POLICY_UNKNOWN'), '모르는 정책은 유예로 남는다');
+  });
+
+  // 범위 고정 — 체결 시각 없음(NO_ENTRY_TIME)까지 넓히지 않았다
+  test('체결 시각이 없는 줄은 이번 범위에서 자리를 막지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', acked_at: null }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90 }),
+    ]);
+    const p = r.positions.find((x: any) => x.orderId === 'b');
+    assert(!!p, '정상 줄이 사라졌습니다');
+    eq(mayActOn(p!), true, '★ NO_ENTRY_TIME까지 범위를 넓혔습니다 — 별도 판단이 필요합니다');
+  });
+
+  test('유예는 "대상 아님"과 섞이지 않는다', () => {
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null }),
+      row({ id: 'b', symbol: 'ETHUSDT', reduce_only: true }),
+    ]);
+    eq(r.deferred.length, 1, '유예는 유예로');
+    assert(!!r.skipped.find((x: any) => x.code === 'REDUCE_ONLY'), '대상 아님은 대상 아님으로');
+  });
 }

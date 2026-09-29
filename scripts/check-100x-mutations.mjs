@@ -115,6 +115,12 @@ const P = {
   ladder: 'src/app/api/autotrade/daily-ladder/route.ts',
   orig: 'src/app/api/autotrade/my-original-v1/route.ts',
   auth: 'src/lib/engine/entryAuthority.ts',
+  safety: 'src/lib/engine/entryExitSafety.ts',
+  cand: 'src/lib/engine/managedPosition.ts',
+  monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
+  reatt: 'src/lib/engine/stopReattach.ts',
+  life: 'src/lib/engine/exitLifecycle.ts',
+  vpo: 'src/lib/engine/venuePositionOps.ts',
 };
 
 const CHECK = ['scripts/check-100x-contract.mjs'];
@@ -525,6 +531,242 @@ const M = [
   // 막힌 계획으로 확정을 불러도 쓰지 않는다는 방어를 없앤다.
   ['MUT-COMMIT-ON-BLOCKED     막힌 계획으로도 배율을 걺', P.entry,
     s => s.replace('  if (!prepared.ok) return { ...prepared, notes };', ''), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR-E — 안전하게 나갈 수 없는 계좌에는 들어가지 않는다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 이 관문이 새는 방식은 전부 조용하다. 관문을 지워도, 조건을 뒤집어도,
+  // 쓰기 뒤로 옮겨도 화면에는 아무 일도 안 일어난다 — 다음 헤지 계좌
+  // 사용자가 못 닫는 포지션을 들고 있을 때에야 드러난다.
+
+  // ── 정책 자체 (동작) ──
+  ['MUT-E1  관문 조건을 항상 통과로 바꿈', P.safety,
+    s => s.replace('  if (canSend && !strands) {', '  if (true) {'), 'RED'],
+
+  // ★ 가장 조용한 회귀. 오늘 정본에서는 ok=true와 strands=true가 함께
+  //   나오지 않아 **동작이 하나도 안 바뀐다.** 종료 규격이 늘어나는 날
+  //   갇히는 포지션이 열린다. 시험이 없으면 이게 그냥 통과한다.
+  ['MUT-E2  ok만 보고 갇힘 여부를 무시', P.safety,
+    s => s.replace('  if (canSend && !strands) {', '  if (canSend) {'), 'RED'],
+
+  ['MUT-E3  증거 없음을 통과로 읽음', P.safety,
+    s => s.replace("  const canSend = evidence?.ok === true;", '  const canSend = evidence?.ok !== false;'), 'RED'],
+
+  ['MUT-E4  undefined 갇힘을 안 갇힘으로 읽음', P.safety,
+    s => s.replace('  const strands = evidence?.strandsOpenPosition !== false;',
+                   '  const strands = evidence?.strandsOpenPosition === true;'), 'RED'],
+
+  // 정본을 다시 해석하는 두 번째 판정이 생기는 경우.
+  ['MUT-E5  정책이 모드를 직접 해석 (두 번째 정본)', P.safety,
+    s => s.replace("  if (canSend && !strands) {",
+                   "  if (code === 'HEDGE' || code === 'HEDGE_UNVERIFIED') {\n"
+                   + "    return { allowed: true, code: 'AUTO_EXIT_SAFE', reason: '', evidence: ev };\n"
+                   + "  }\n  if (canSend && !strands) {"), 'RED'],
+
+  ['MUT-E6  사유를 버리고 코드만 남김', P.safety,
+    s => s.replace('    reason: \'이 계좌에서는 연 포지션을 자동으로 닫지 못해 신규 진입을 하지 않습니다\'\n      + ` — ${why}`,',
+                   "    reason: '진입하지 않습니다',"), 'RED'],
+
+  // ── 라우트 배선 ──
+  ['MUT-E7  라우트에서 관문을 통째로 뺌', P.scalp,
+    s => s.replace('    if (!exitSafety.allowed) {', '    if (false) {'), 'RED'],
+
+  ['MUT-E8  관문 호출 자체를 제거', P.scalp,
+    s => s.replace('  if (epContract) {\n    const { closeModeGate }', '  if (false) {\n    const { closeModeGate }'), 'RED'],
+
+  // 방향을 좁혀 넘기면 NO_DIRECTION이 영원히 안 나온다.
+  ['MUT-E9  종료 방향을 LONG으로 짐작', P.scalp,
+    s => s.replace("    const sideForClose = plan.side === 'LONG' || plan.side === 'SHORT' ? plan.side : null;",
+                   "    const sideForClose = plan.side === 'SHORT' ? 'SHORT' : 'LONG';"), 'RED'],
+
+  ['MUT-E10 종료 방향을 글자로 박음', P.scalp,
+    s => s.replace('    }, sideForClose);', "    }, 'LONG');"), 'RED'],
+
+  // 쓰기 뒤로 옮기면 "막혔는데 배율은 이미 바뀐" 상태가 된다.
+  ['MUT-E11 관문을 배율 확정 뒤로 옮김', P.scalp, s => {
+    const i = s.indexOf('  // ── ★ 안전하게 나갈 수 없는 계좌에는 들어가지 않는다 ──');
+    const j = s.indexOf('  // ── 주문 ──');
+    const block = s.slice(i, j);
+    const rest = s.slice(0, i) + s.slice(j);
+    const k = rest.indexOf('  const { ensureLeverage } = await import');
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // 멱등 표식을 태우고 막으면 그 봉의 정당한 재시도까지 잠긴다.
+  ['MUT-E12 관문을 중복 신호 claim 뒤로 옮김', P.scalp, s => {
+    const i = s.indexOf('  // ── ★ 안전하게 나갈 수 없는 계좌에는 들어가지 않는다 ──');
+    const j = s.indexOf('  // ── 주문 ──');
+    const block = s.slice(i, j);
+    const rest = s.slice(0, i) + s.slice(j);
+    const k = rest.indexOf('  // ── 주문 직전에 배율을 맞추고 되읽어 확인한다 ──');
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // 계약이 없던 예전 경로까지 막으면 이 PR의 범위를 넘는다.
+  ['MUT-E13 legacy 경로까지 강제로 막음', P.scalp,
+    s => s.replace('  if (epContract) {\n    const { closeModeGate }', '  if (true) {\n    const { closeModeGate }'), 'RED'],
+
+  // 진입 판정을 종료 판정 대신 쓰면 "열리는데 안 닫히는" 그 고장이다.
+  ['MUT-E14 종료 판정 대신 진입용 positionModeVerdict 사용', P.scalp,
+    s => s.replace('    const closeGate = await closeModeGate({',
+                   '    const { positionModeVerdict } = await import("@/lib/exchanges/futuresExec");\n'
+                   + '    void positionModeVerdict;\n    const closeGate = await closeModeGate({'), 'RED'],
+
+  // ── 정본(#281) 회귀 ──
+  ['MUT-E15 closeModeGate가 갇힘 여부를 안 돌려줌', P.vpo,
+    s => s.replace('  return { ok: v.ok, message: v.message, code: v.code,\n    strandsOpenPosition: v.strandsOpenPosition };',
+                   '  return { ok: v.ok, message: v.message, code: v.code,\n    strandsOpenPosition: false };'), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR1 — 고정 손절 없는 주문: 인식은 하되 관리하지 않는다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 이 관문이 새면 조용하다. `NO_FIXED_SL` 포지션이 일반 생명주기로
+  // 들어가 6시간 시간청산·트레일링·본전이동을 받는데, 화면에는 평범한
+  // 생명주기 실행으로만 보인다.
+
+  // ── 정책 칸을 아예 안 읽는다 ──
+  ['MUT-P1  감시 라우트가 stop_policy를 안 읽음', P.monitor,
+    s => s.replace("        + 'stop_policy, '\n", ''), 'RED'],
+
+  // ── 분류 (동작) ──
+  ['MUT-P2  NO_FIXED_SL + 손절 없음을 일반 후보로 넣음', P.cand,
+    s => s.replace("    if (policy === 'NO_FIXED_SL') {", '    if (false) {'), 'RED'],
+
+  // ★ 우연 의존으로 되돌리는 변이. 손절 값이 채워지는 순간 관리가 시작된다.
+  ['MUT-P3  NO_FIXED_SL인데 손절 값이 있으면 보통 손절로 처리', P.cand,
+    s => s.replace("    if (policy === 'NO_FIXED_SL') {", "    if (policy === 'NO_FIXED_SL' && !hasStop) {"), 'RED'],
+
+  ['MUT-P4  FIXED_SL인데 손절 없음을 legacy NO_STOP으로 숨김', P.cand,
+    s => s.replace("    if (policy === 'FIXED_SL' && !hasStop) {", '    if (false) {'), 'RED'],
+
+  ['MUT-P5  정책이 안 적힌 legacy 줄을 전부 차단', P.cand,
+    s => s.replace("    if (policy === 'UNKNOWN') {", '    if (policy !== \'FIXED_SL\') {'), 'RED'],
+
+  ['MUT-P6  모르는 정책을 고정 손절로 읽음', P.cand,
+    s => s.replace("  return 'UNKNOWN';\n}", "  return 'FIXED_SL';\n}"), 'RED'],
+
+  // ── 관찰 가능성 ──
+  ['MUT-P7  유예 기록을 남기지 않음 (조용히 사라진 줄)', P.cand,
+    s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + "        orderId: r?.id ? String(r.id) : null, reason });",
+                   '      void code; void reason;'), 'RED'],
+
+  ['MUT-P8  유예를 응답에서 지움', P.monitor,
+    s => s.replace('  out.deferred = deferred;\n  out.deferredCount = deferred.length;', ''), 'RED'],
+
+  ['MUT-P9  유예에서 정체성을 빼고 코드만 남김', P.cand,
+    s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + "        orderId: r?.id ? String(r.id) : null, reason });",
+                   '      deferred.push({ code, connectionId: \'\', symbol: \'\', side,\n'
+                   + '        strategyId: null, orderId: null, reason });'), 'RED'],
+
+  // ── ★★ net position 자리 — 이 PR의 핵심 ──
+
+  // 자리 주장보다 손절 분류를 앞세우면, 걸러진 줄이 자리에서도 사라져
+  // 같은 net position의 다른 줄이 조용히 OWNED로 승격한다.
+  ['MUT-P10 자리 주장 등록 전에 NO_FIXED_SL 줄을 버림', P.cand, s => {
+    const claim = `    const strategyId = strategyOf(r);
+    const key = \`\${connectionId}|\${symbol}\`;
+    if (!claims.has(key)) claims.set(key, new Set());
+    claims.get(key)!.add(strategyId ?? '(주인 모름)');
+`;
+    if (!s.includes(claim)) return s;
+    // 주장 등록을 손절 분류 **뒤**로 미룬다 (옛 순서로 되돌리기)
+    const withoutClaim = s.replace(claim, '    const strategyId = strategyOf(r);\n');
+    return withoutClaim.replace('    if (!Number.isFinite(openedAt)) {',
+      `    const key = \`\${connectionId}|\${symbol}\`;
+    if (!claims.has(key)) claims.set(key, new Set());
+    claims.get(key)!.add(strategyId ?? '(주인 모름)');
+
+    if (!Number.isFinite(openedAt)) {`);
+  }, 'RED'],
+
+  // 자리 유예를 없애면 같은 전략 혼재 자리가 OWNED로 통과한다.
+  ['MUT-P11 혼재 자리 유예 제거 (같은 전략 섞임이 새 나감)', P.cand,
+    s => s.replace("    const management: ManagedPosition['management'] = why",
+                   "    const management: ManagedPosition['management'] = false"), 'RED'],
+
+  ['MUT-P12 정책 충돌 줄은 자리를 유예시키지 않음', P.cand,
+    s => s.replace("      blockSeat(key, hasStop ? 'NO_FIXED_SL_STOP_CONFLICT' : 'NO_FIXED_SL_EXIT_UNWIRED');",
+                   "      if (!hasStop) blockSeat(key, 'NO_FIXED_SL_EXIT_UNWIRED');"), 'RED'],
+
+  ['MUT-P13 실행 관문이 관리 판정을 안 봄 (소유권만)', P.cand,
+    s => s.replace("  return p?.management?.code === 'MANAGED';", '  return true;'), 'RED'],
+
+  // ★ 손절 누락 줄을 자리 차단 집합에서 뺀다. 그 줄만 버려지고 같은
+  //   net position의 정상 줄이 관리 대상이 된다 — 깨진 노출까지 움직인다.
+  ['MUT-P16 FIXED_SL 손절 누락을 자리 차단에서 제외', P.cand,
+    s => s.replace("      blockSeat(key, 'FIXED_SL_MISSING_STOP');\n", ''), 'RED'],
+
+  // ★ 같은 전략 혼재 자리를 다시 MANAGED로 승격시킨다. 소유권은 OWNED라
+  //   소유권만 보는 검사로는 절대 안 잡힌다.
+  ['MUT-P17 같은 전략 혼재 자리를 MANAGED로 승격', P.cand,
+    s => s.replace('    const why = unmanagedSeats.get(seat);',
+                   '    const why = claimants.length > 1 ? unmanagedSeats.get(seat) : undefined;'), 'RED'],
+
+  // 자리 유예 이름이 다시 NO_FIXED_SL 전용으로 좁아지면, 손절 누락까지
+  // 막는 상태에서 **이름이 거짓말을 한다.**
+  ['MUT-P18 자리 유예 코드를 NO_FIXED_SL 전용 이름으로 되돌림', P.cand,
+    s => s.replace("'UNMANAGED_SEAT_DEFERRED'", "'NO_FIXED_SL_SEAT_DEFERRED'"), 'RED'],
+
+  // ── 자리 차단 다섯 사유 (확대분) ──
+
+  ['MUT-P19 옛 줄(NO_STOP)이 자리를 막지 않음', P.cand,
+    s => s.replace("      blockSeat(key, 'NO_STOP');\n", ''), 'RED'],
+
+  ['MUT-P20 모르는 정책이 자리를 막지 않음', P.cand,
+    s => s.replace("      blockSeat(key, 'STOP_POLICY_UNKNOWN');\n", ''), 'RED'],
+
+  // ★ 같은 전략 혼재 자리를 다시 승격시킨다. 소유권이 OWNED라 소유권만
+  //   보는 검사로는 절대 안 잡힌다.
+  ['MUT-P21 NO_STOP 혼재 자리를 같은 전략일 때 MANAGED로 승격', P.cand,
+    s => s.replace('    const why = unmanagedSeats.get(seat);',
+                   "    const raw = unmanagedSeats.get(seat);\n"
+                   + "    const why = raw && !(raw.size === 1 && raw.has('NO_STOP')) ? raw : undefined;"), 'RED'],
+
+  ['MUT-P22 STOP_POLICY_UNKNOWN 혼재 자리를 MANAGED로 승격', P.cand,
+    s => s.replace('    const why = unmanagedSeats.get(seat);',
+                   "    const raw = unmanagedSeats.get(seat);\n"
+                   + "    const why = raw && !(raw.size === 1 && raw.has('STOP_POLICY_UNKNOWN')) ? raw : undefined;"), 'RED'],
+
+  // ── ★★ 라우트 admission 관문 ──
+  //
+  //   이 셋이 이번 감사에서 실제로 열려 있던 구멍이다. 유예된 자리가
+  //   조회·판단·쓰기를 전부 지나갔다.
+  // 관문이 기록만 남기고 **그대로 진행**한다 — 가장 조용한 회귀다.
+  // 응답에는 유예라고 적히는데 거래소는 건드려진다.
+  ['MUT-P23 관리 유예 관문이 회차를 끊지 않음 (기록만 남기고 진행)', P.monitor,
+    s => s.replace('      });\n      continue;\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**',
+                   '      });\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**'), 'RED'],
+
+  ['MUT-P24 관리 유예 관문을 포지션 조회 뒤로 옮김', P.monitor, s => {
+    const i = s.indexOf("    if (p.management?.code !== 'MANAGED') {");
+    if (i < 0) return s;
+    const end = s.indexOf('      continue;\n    }\n', i);
+    if (end < 0) return s;
+    const block = s.slice(i, end + '      continue;\n    }\n'.length);
+    const rest = s.slice(0, i) + s.slice(i + block.length);
+    const k = rest.indexOf('      const live = await ops.readOpenPosition(venue, p.symbol);');
+    if (k < 0) return s;
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // 유예된 자리에서도 시간청산이 닫게 한다 — 관문을 관리 판정 대신
+  // 소유권만 보게 되돌리는 회귀다(옛 고장 그대로).
+  ['MUT-P25 유예 자리에서 시간청산 close 허용 (관문을 소유권만 보게)', P.monitor,
+    s => s.replace("    if (p.management?.code !== 'MANAGED') {",
+                   "    if (p.ownership?.code !== 'OWNED') {"), 'RED'],
+
+  // ── 레거시 안전망 ──
+  ['MUT-P14 손절 재부착의 NO_FIXED_SL 방어 제거', P.reatt,
+    s => s.replace(/stop_policy/g, 'stop_policy_removed'), 'RED'],
+
+  ['MUT-P15 exitLifecycle에서 뒤늦게 막는 구조로 우회', P.life,
+    s => s.replace('export function lifecycleDecide(',
+                   "const _lateBlock = (p: any) => p?.stop_policy === 'NO_FIXED_SL';\n"
+                   + 'export function lifecycleDecide('), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
