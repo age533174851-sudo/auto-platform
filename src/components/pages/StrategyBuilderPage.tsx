@@ -220,7 +220,18 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
           const active = tab === t.id;
           const Ic = t.icon;
           return (
-            <button key={t.id} onClick={() => { setTab(t.id); if (t.id !== 'manual' && t.id !== 'ai') setEditing(null); }}
+            <button key={t.id} onClick={() => {
+              if (t.id === 'manual') {
+                // 직접 생성의 초안은 탭 진입 시 한 번만 만든다.
+                // render 중 blankStrategy()를 다시 만들면 새 id가 생기고,
+                // ManualBuilder의 initial.id effect가 step을 1로 되돌린다.
+                setEditing(prev => prev ?? blankStrategy());
+                setTab('manual');
+                return;
+              }
+              setTab(t.id);
+              if (t.id !== 'ai') setEditing(null);
+            }}
               style={{
                 flex: 1, padding: '10px', minHeight: 42,
                 background: active ? T.acg : T.alt,
@@ -273,9 +284,9 @@ function StrategyBuilderInner({ onNav }: { onNav?: (tab: string) => void }) {
         />
       )}
 
-      {tab === 'manual' && (
+      {tab === 'manual' && editing && (
         <ManualBuilder
-          initial={editing || blankStrategy()}
+          initial={editing}
           onSave={onSave}
           onCancel={() => { setEditing(null); setTab('list'); }}
         />
