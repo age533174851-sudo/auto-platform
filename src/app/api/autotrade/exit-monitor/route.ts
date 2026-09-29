@@ -773,10 +773,14 @@ async function runLifecycleSweep(
   fence?: number | null,
 ): Promise<{
   candidates: number; acted: number; skipped: any[];
+  deferred: any[]; deferredCount: number;
   results: any[]; summary: string; error: string | null;
 }> {
   const out = {
     candidates: 0, acted: 0, skipped: [] as any[],
+    // ★ **유예는 실패가 아니다.** 일부러 관리하지 않은 줄을 `skipped`나
+    //   실패 목록에 섞으면 운영자가 고칠 것이 없는데 고치려 든다.
+    deferred: [] as any[], deferredCount: 0,
     results: [] as any[], summary: '', error: null as string | null,
   };
 
@@ -788,7 +792,11 @@ async function runLifecycleSweep(
   let rows: any[] = [];
   try {
     const { data, error } = await (sb as any).from('live_orders')
+      // ★ `stop_policy`(migration 078)를 읽는다. 이 칸이 없으면 고정 손절을
+      //   쓰지 않는 주문과 "손절 값이 아직 안 적힌 주문"이 화면에서 같아
+      //   보이고, 값이 채워지는 순간 일반 생명주기가 그 포지션을 가져간다.
       .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
+        + 'stop_policy, '
         // live_orders에는 strategy_id 컬럼이 없다. 전략 소유권은 strategyOf()가
         // signal_id의 [s:...] 표식에서 읽는다. 없는 칼럼을 projection하면
         // PostgREST가 조회 전체를 실패시키므로 signal_id만 읽는다.
@@ -808,11 +816,20 @@ async function runLifecycleSweep(
     return out;
   }
 
-  const { positions, skipped } = managedCandidates(rows);
+  // ★ 셋은 다른 뜻이다 — `positions`만 아래 반복문에 들어간다.
+  //
+  //   `deferred`가 이 반복문에 **도달할 수 없는 것**이 이 PR의 핵심이다.
+  //   반복문 안에서 뒤늦게 거르면 그때는 이미 `credsOf`·`readOpenPosition`·
+  //   `highWaterSince`·`liveStopPrice`가 불린 뒤다.
+  const { positions, deferred, skipped } = managedCandidates(rows);
   out.candidates = positions.length;
   out.skipped = skipped;
+  out.deferred = deferred;
+  out.deferredCount = deferred.length;
   if (positions.length === 0) {
-    out.summary = '감시할 후보가 없습니다';
+    out.summary = deferred.length
+      ? `감시할 후보가 없습니다 · 관리 유예 ${deferred.length}건`
+      : '감시할 후보가 없습니다';
     return out;
   }
 
@@ -867,6 +884,35 @@ async function runLifecycleSweep(
   };
 
   for (const p of positions) {
+    // ══════════════════════════════════════════════════════════
+    // ★ 관리 유예된 자리는 **여기서 끝난다** — 조회도 하지 않는다
+    // ══════════════════════════════════════════════════════════
+    //
+    //   예전에는 `mayActOn(p)`이 `highWaterSince` 한 줄에만 붙어 있었다.
+    //   그래서 유예된 자리도 그 아래를 전부 지나갔다:
+    //
+    //       readOpenPosition → liveStopPrice → lifecycleDecide
+    //       → guard.claim → applyLifecycleClose / moveStopSafely
+    //
+    //   `lifecycleDecide`는 `ownership !== 'OWNED'`만 막는다. 그런데 같은
+    //   전략의 줄만 섞인 자리는 **소유권이 OWNED다.** 그리고 시간청산은
+    //   최고 도달 R이 없어도 경과 시간만으로 발동한다 — 즉 유예된 자리의
+    //   포지션이 6시간 뒤에 **닫힐 수 있었다.**
+    //
+    //   그래서 관문을 반복문 맨 앞, `credsOf`보다도 앞에 둔다. 유예된
+    //   자리는 일반 생명주기에서 조회 0회 · 쓰기 0회다.
+    if (p.management?.code !== 'MANAGED') {
+      out.results.push({
+        symbol: p.symbol, strategyId: p.strategyId,
+        code: p.management?.code ?? 'MANAGEMENT_UNKNOWN',
+        // **실패가 아니다.** 일부러 건드리지 않은 것이다.
+        ok: true, deferred: true,
+        reason: p.management?.reason
+          ?? '일반 생명주기 관리 판정을 확인하지 못해 건드리지 않습니다',
+      });
+      continue;
+    }
+
     // ★ **선점은 여기서 하지 않는다.**
     //
     //   예전에는 판단하기 전에 표식을 남겼다. 그러면 읽기만 하고 아무것도
@@ -1009,6 +1055,10 @@ async function runLifecycleSweep(
   const unknown = out.results.filter(r => r.code === 'POSITION_UNKNOWN').length;
   out.summary = `후보 ${out.candidates}건 · 실행 ${out.acted}건`
     + (unknown > 0 ? ` · 확인 못 함 ${unknown}건` : '')
+    // ★ 유예를 따로 적는다. "대상 아님"에 합치면 **일부러 관리하지 않은 줄**과
+    //   칸이 모자라 판단 못 한 줄이 한 숫자가 되고, 그러면 화면만 보고는
+    //   고정 손절 없는 노출이 몇 건 열려 있는지 알 수 없다.
+    + (out.deferredCount ? ` · 관리 유예 ${out.deferredCount}건` : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
   return out;
 }

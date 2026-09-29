@@ -144,9 +144,11 @@ export function mutationGuardFor(fence: number | null | undefined): MutationGuar
      `           + '(청산은 이 검사를 받지 않습니다. 열린 포지션은 언제나 닫을 수 있습니다.)',`]]],
 
   // ── H. PR-S 범위를 벗어나는 변경 ──
-  ['MUT-S23 손절 없는 줄을 일반 생명주기에 들여보낸다 (PR1 침범)',
+  // PR1이 이 관문을 `hasStop`으로 옮겼다. **막는 규칙은 그대로다** —
+  // 앵커를 지우지 않고 방어가 실제로 사는 자리로 옮긴다.
+  ['MUT-S23 손절 없는 줄을 일반 생명주기에 들여보낸다',
    'src/lib/engine/managedPosition.ts', 'RED',
-   [[`    if (stopLoss == null || stopLoss <= 0) {`, `    if (false) {`]]],
+   [[`    if (!hasStop) {`, `    if (false) {`]]],
 
   // ── 머지 차단 5건 회귀 (실물 감사에서 잡힌 것들) ──
 
