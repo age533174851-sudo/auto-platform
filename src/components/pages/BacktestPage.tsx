@@ -545,7 +545,7 @@ export default function BacktestPage() {
             </Card>
           )}
 
-          {/* 실전 적합도 판정 */}
+          {/* 백테스트 품질 판정 — 단일 백테스트만으로 LIVE를 허용하지 않는다 */}
           {(() => {
             const v = validateBacktest({
               totalTrades:  result.summary.totalTrades,
@@ -558,7 +558,7 @@ export default function BacktestPage() {
             return (
               <Card style={{ marginBottom: 10, borderLeft: `3px solid ${v.gradeColor}` }}>
                 <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 10 }}>
-                  <span style={{ color: T.txt, fontWeight: 800, fontSize: 13 }}>실전 적합도</span>
+                  <span style={{ color: T.txt, fontWeight: 800, fontSize: 13 }}>백테스트 품질</span>
                   <span style={{ padding:'3px 10px', borderRadius: 6, background: v.gradeColor + '22', color: v.gradeColor, fontSize: 12, fontWeight: 900 }}>
                     {v.gradeLabel} · {v.score}점
                   </span>
@@ -592,7 +592,7 @@ export default function BacktestPage() {
                 )}
 
                 <div style={{ padding:'8px 11px', background: v.gradeColor + '10', border:`1px solid ${v.gradeColor}30`, borderRadius: 7, color: T.sub, fontSize: 11, lineHeight: 1.5 }}>
-                  {v.canGoLive ? '✅' : '⛔'} {v.recommendation}
+                  🔒 {v.recommendation}
                 </div>
               </Card>
             );
