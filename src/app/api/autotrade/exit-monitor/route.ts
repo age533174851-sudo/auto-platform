@@ -774,10 +774,13 @@ async function runLifecycleSweep(
 ): Promise<{
   candidates: number; acted: number; skipped: any[];
   deferred: any[]; deferredCount: number;
+  /** 주문 장부를 어떤 모양으로 읽었는가. 못 읽었으면 null */
+  projection: 'IDENTITY' | 'LEGACY' | null;
   results: any[]; summary: string; error: string | null;
 }> {
   const out = {
     candidates: 0, acted: 0, skipped: [] as any[],
+    projection: null as 'IDENTITY' | 'LEGACY' | null,
     // ★ **유예는 실패가 아니다.** 일부러 관리하지 않은 줄을 `skipped`나
     //   실패 목록에 섞으면 운영자가 고칠 것이 없는데 고치려 든다.
     deferred: [] as any[], deferredCount: 0,
@@ -789,36 +792,37 @@ async function runLifecycleSweep(
   const { lifecycleDecide } = await import('@/lib/engine/exitLifecycle');
   const { lifecyclePolicyOf } = await import('@/lib/strategies/lifecyclePolicy');
 
-  let rows: any[] = [];
-  try {
-    const { data, error } = await (sb as any).from('live_orders')
-      // ★ `stop_policy`(migration 078)를 읽는다. 이 칸이 없으면 고정 손절을
-      //   쓰지 않는 주문과 "손절 값이 아직 안 적힌 주문"이 화면에서 같아
-      //   보이고, 값이 채워지는 순간 일반 생명주기가 그 포지션을 가져간다.
-      .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
-        + 'stop_policy, '
-        // ★ 진입 당시의 실행 계약(089). 읽지 않으면 identity가 언제나
-        //   null이고, 화면은 "기록이 없다"와 "안 읽었다"를 구별할 수 없다.
-        //   **표시·telemetry 전용이다** — 아래 판단은 이 값을 보지 않는다.
-        + 'execution_profile_id, execution_preset_id, execution_contract_version, '
-        // live_orders에는 strategy_id 컬럼이 없다. 전략 소유권은 strategyOf()가
-        // signal_id의 [s:...] 표식에서 읽는다. 없는 칼럼을 projection하면
-        // PostgREST가 조회 전체를 실패시키므로 signal_id만 읽는다.
-        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id')
+  // ── 주문 장부를 읽는다 — DB가 코드보다 뒤처져도 멈추지 않는다 ──
+  //
+  //   진입 당시의 실행 계약(089)까지 읽어 보고, **그 칸이 없어서** 실패한
+  //   경우에만 옛 모양으로 한 번 더 읽는다. 089가 아직인 DB에서 조회가
+  //   통째로 죽으면 이미 열린 포지션의 청산·보호·복구가 함께 멈추는데,
+  //   그건 `migrationStatus`의 불변식("막는 것은 새로 여는 것뿐이다")과
+  //   정면으로 충돌한다.
+  //
+  //   후퇴 판정과 두 조회 모양은 `lifecycleRows`에 있다 — 여기에 두면
+  //   시험이 Supabase 체인을 흉내 내야 한다.
+  //
+  //   ★ 다른 실패(권한·연결·다른 칼럼)는 후퇴하지 않는다. 그걸 후퇴로
+  //     덮으면 진짜 고장이 정상 회차로 보인다.
+  const { loadLifecycleRows } = await import('@/lib/engine/lifecycleRows');
+  const loaded = await loadLifecycleRows(async (select) => {
+    const r = await (sb as any).from('live_orders')
+      .select(select)
       .order('acked_at', { ascending: false })
       .limit(200);
-    // **조회 실패를 '없음'으로 적지 않는다.**
-    if (error) {
-      out.error = String(error.message).slice(0, 200);
-      out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
-      return out;
-    }
-    rows = Array.isArray(data) ? data : [];
-  } catch (e: any) {
-    out.error = String(e?.message || e).slice(0, 200);
+    return { data: r?.data, error: r?.error };
+  });
+  // **조회 실패를 '없음'으로 적지 않는다.**
+  if (loaded.error || loaded.projection == null) {
+    out.error = loaded.error || '주문 장부를 읽지 못했습니다';
     out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
     return out;
   }
+  const rows: any[] = loaded.rows;
+  // 어떤 모양으로 읽었는지 남긴다. 이게 없으면 "계약 기록이 없는 주문"과
+  // "계약 칸을 못 읽은 회차"가 화면에서 같아 보인다.
+  out.projection = loaded.projection;
 
   // ★ 셋은 다른 뜻이다 — `positions`만 아래 반복문에 들어간다.
   //
@@ -1063,6 +1067,9 @@ async function runLifecycleSweep(
     //   칸이 모자라 판단 못 한 줄이 한 숫자가 되고, 그러면 화면만 보고는
     //   고정 손절 없는 노출이 몇 건 열려 있는지 알 수 없다.
     + (out.deferredCount ? ` · 관리 유예 ${out.deferredCount}건` : '')
+    // 후퇴로 읽은 회차는 그 사실을 적는다 — identity가 전부 비어 있는
+    // 이유가 "기록이 없어서"가 아니라 "칸을 못 읽어서"임을 구별하게 한다.
+    + (out.projection === 'LEGACY' ? ' · 실행 계약 칸 없음(089 미적용)' : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
   return out;
 }

@@ -118,6 +118,7 @@ const P = {
   safety: 'src/lib/engine/entryExitSafety.ts',
   cand: 'src/lib/engine/managedPosition.ts',
   migIdent: 'supabase/migrations/089_live_orders_execution_identity.sql',
+  rows: 'src/lib/engine/lifecycleRows.ts',
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
@@ -628,8 +629,12 @@ const M = [
   // 생명주기 실행으로만 보인다.
 
   // ── 정책 칸을 아예 안 읽는다 ──
-  ['MUT-P1  감시 라우트가 stop_policy를 안 읽음', P.monitor,
-    s => s.replace("        + 'stop_policy, '\n", ''), 'RED'],
+  // 조회 모양이 `lifecycleRows`로 옮겨졌다(089 미적용 후퇴 때문에 두 벌이
+  // 됐다). **막는 규칙은 그대로** — identity 모양이 손절 정책을 버리는 회귀를
+  // 본다. 옛 모양 쪽은 MUT-R4x가 따로 지킨다.
+  ['MUT-P1  주문 조회가 stop_policy를 안 읽음', P.rows,
+    s => s.replace("  + 'stop_policy, '\n  + 'execution_profile_id",
+                   "  + 'execution_profile_id"), 'RED'],
 
   // ── 분류 (동작) ──
   ['MUT-P2  NO_FIXED_SL + 손절 없음을 일반 후보로 넣음', P.cand,
@@ -783,8 +788,9 @@ const M = [
     s => s.replace('    ...(epContract ? {\n      executionIdentity: {',
                    '    ...(false ? {\n      executionIdentity: {'), 'RED'],
 
-  // 반쪽을 그대로 저장하면 DB가 거절하는데, 그 거절은 **거래소에 주문을
-  // 보낸 뒤**에 온다 — 장부와 거래소가 갈린다.
+  // 반쪽은 **호출부의 계약 조립 오류**다. 경계에서 거절하지 않으면
+  // 제약이 없는 배포(089 미적용)에서 그대로 저장되고, 제약이 있는
+  // 배포에서도 호출부 실수가 "DB 오류"로 보여 원인을 가린다.
   ['MUT-Q3  반쪽 식별자를 보내기 전에 막지 않음', P.exec,
     s => s.replace('  if (ident && !identOk) {', '  if (false) {'), 'RED'],
 
@@ -796,8 +802,8 @@ const M = [
     s => s.replace("  if (!executionIdentityComplete({ profileId, presetId, contractVersion })) return null;",
                    '  if (!profileId && !presetId) return null;'), 'RED'],
 
-  ['MUT-Q6  감시 라우트가 계약 칸을 안 읽음', P.monitor,
-    s => s.replace("        + 'execution_profile_id, execution_preset_id, execution_contract_version, '\n", ''), 'RED'],
+  ['MUT-Q6  주문 조회가 계약 칸을 안 읽음', P.rows,
+    s => s.replace("  + 'execution_profile_id, execution_preset_id, execution_contract_version, '\n", ''), 'RED'],
 
   ['MUT-Q7  유예 기록에서 identity를 뺌', P.cand,
     s => s.replace('        executionIdentity: identity,\n        orderId:', '        orderId:'), 'RED'],
@@ -837,6 +843,61 @@ const M = [
     s => s.replace("    if (p.management?.code !== 'MANAGED') {",
                    "    if (p.executionIdentity?.profileId === 'MAX_LEV_100X') { /* 전용 처리 */ }\n"
                    + "    if (p.management?.code !== 'MANAGED') {"), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR2 후속 — DB가 코드보다 뒤처져도 회차가 죽지 않는다
+  // ══════════════════════════════════════════════════════════
+
+  // ★ 후퇴를 없애면 089 미적용 DB에서 조회가 통째로 죽고, 이미 열린
+  //   포지션의 청산·보호·복구가 함께 멈춘다.
+  ['MUT-R1x 089 미적용 후퇴 제거 (회차가 죽는다)', P.rows,
+    s => s.replace('  if (!isMissingIdentityColumn(first.error)) {', '  if (true) {'), 'RED'],
+
+  // ★ 아무 실패에나 후퇴하면 권한·연결 오류가 "마이그레이션이 아직"으로
+  //   덮이고, 진짜 고장이 정상 회차로 보인다.
+  ['MUT-R2x 아무 오류에나 후퇴 (진짜 고장을 덮는다)', P.rows,
+    s => s.replace('export function isMissingIdentityColumn(err: any): boolean {\n  if (!err) return false;',
+                   'export function isMissingIdentityColumn(err: any): boolean {\n  if (!err) return false;\n  return true;'), 'RED'],
+
+  // ★ 다른 칼럼이 없다는 오류까지 우리 것으로 읽는다.
+  ['MUT-R3x 칼럼 이름을 확인하지 않고 후퇴', P.rows,
+    s => s.replace('  return IDENTITY_COLUMNS.some(c => text.includes(c));', '  return true;'), 'RED'],
+
+  // ★ 후퇴 모양이 stop_policy까지 버리면 NO_FIXED_SL 주문이 일반
+  //   생명주기로 들어간다 — PR1이 막은 고장이 후퇴 경로로 되살아난다.
+  ['MUT-R4x 후퇴 모양이 stop_policy를 버림', P.rows,
+    s => s.replace("export const LIFECYCLE_SELECT_LEGACY =\n  'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '\n  + 'stop_policy, '",
+                   "export const LIFECYCLE_SELECT_LEGACY =\n  'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '"), 'RED'],
+
+  // ★ 후퇴 모양에 세 칸이 남아 있으면 재시도도 같은 이유로 실패한다.
+  ['MUT-R5x 후퇴 모양에 계약 칸이 남음 (재시도도 실패)', P.rows,
+    s => s.replace('export const LIFECYCLE_SELECT_LEGACY =\n', 'export const LIFECYCLE_SELECT_LEGACY = LIFECYCLE_SELECT_IDENTITY;\nconst _unusedLegacy =\n'), 'RED'],
+
+  // ★ 라우트가 정본을 버리고 직접 조회하면 후퇴 경로가 사라진다.
+  ['MUT-R6x 라우트가 정본 없이 직접 조회', P.monitor,
+    s => s.replace('  const { loadLifecycleRows } = await import(\'@/lib/engine/lifecycleRows\');',
+                   '  const loadLifecycleRows = async (q: any) => { const r = await q(\'id\'); return { rows: r.data || [], projection: \'IDENTITY\' as const, error: null }; };'), 'RED'],
+
+  // ★ 어떤 모양으로 읽었는지 안 남기면 "기록이 없는 주문"과 "칸을 못 읽은
+  //   회차"가 화면에서 같아 보인다.
+  ['MUT-R7x 읽은 모양을 telemetry에서 지움', P.monitor,
+    s => s.replace('  out.projection = loaded.projection;', ''), 'RED'],
+
+  // ── 반쪽 식별자가 거래소보다 앞에서 막히는가 ──
+  //
+  //   ★ guard를 거래소 쓰기 뒤로 옮긴다. insert보다는 여전히 앞이라
+  //     "insert보다 앞인가"만 보는 검사로는 절대 안 잡힌다.
+  ['MUT-R8x 반쪽 관문을 거래소 쓰기 뒤로 옮김', P.exec, s => {
+    const g = s.indexOf('  if (ident && !identOk) {');
+    if (g < 0) return s;
+    const end = s.indexOf('  }\n', s.indexOf('주문하지 않습니다.` };', g));
+    if (end < 0) return s;
+    const block = s.slice(g, end + 4);
+    const rest = s.slice(0, g) + s.slice(g + block.length);
+    const k = rest.indexOf('        res = await bf.placeFuturesOrder(apiKey, apiSecret, {');
+    if (k < 0) return s;
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

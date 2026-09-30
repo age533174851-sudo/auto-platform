@@ -1715,14 +1715,31 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
   // ── ⑬-b 감시 라우트가 정책 칸을 읽는가 ──
   const mon = code(MONITOR);
   {
-    // ★ 이 라우트에는 `live_orders` 조회가 여럿이다(보호주문 정리 등).
-    //   생명주기 조회는 체결가를 읽는 그 하나다 — 이름이 아니라 내용으로 찾는다.
-    const iSel = mon.indexOf("'id, connection_id, exchange, symbol, side, avg_price");
-    if (iSel < 0) err(`${MONITOR}: 생명주기 주문 조회를 찾지 못했습니다 — 검사가 헛돕니다`);
-    const sel = iSel < 0 ? '' : mon.slice(iSel, iSel + 700);
-    if (!/stop_policy/.test(sel)) {
-      err(`${MONITOR}: live_orders에서 stop_policy를 읽지 않습니다`
-        + ' — 고정 손절 없는 주문과 "값이 아직 안 적힌 주문"이 구별되지 않습니다');
+    // ★ 조회 모양은 이제 `lifecycleRows`에 있다(089 미적용 후퇴 때문에
+    //   두 벌이 필요해졌다). 라우트가 아니라 그 정본을 본다.
+    //
+    //   **두 모양 다** 손절 정책을 읽어야 한다 — 후퇴가 `stop_policy`를
+    //   버리면 NO_FIXED_SL 주문이 일반 생명주기로 들어간다(PR1이 막은 고장).
+    const rowsSrc = code('src/lib/engine/lifecycleRows.ts');
+    const sel = rowsSrc;
+    if (!/LIFECYCLE_SELECT_IDENTITY/.test(rowsSrc) || !/LIFECYCLE_SELECT_LEGACY/.test(rowsSrc)) {
+      err('src/lib/engine/lifecycleRows.ts: 조회 모양 정본을 찾지 못했습니다 — 검사가 헛돕니다');
+    }
+    // ★ **선언 하나만** 본다. 넉넉히 잘라 두면 다음 선언까지 창에 들어와,
+    //   앞 선언에서 지운 낱말이 뒤 선언에 남아 있어 검사가 통과한다.
+    const declOf = (name) => {
+      const at = rowsSrc.indexOf(`export const ${name}`);
+      if (at < 0) return '';
+      const end = rowsSrc.indexOf(';', at);
+      return end < 0 ? rowsSrc.slice(at) : rowsSrc.slice(at, end);
+    };
+    for (const name of ['LIFECYCLE_SELECT_IDENTITY', 'LIFECYCLE_SELECT_LEGACY']) {
+      const body = declOf(name);
+      if (!body) { err(`${name} 선언을 찾지 못했습니다 — 검사가 헛돕니다`); continue; }
+      if (!/stop_policy/.test(body)) {
+        err(`${name}이 stop_policy를 읽지 않습니다`
+          + ' — 고정 손절 없는 주문과 "값이 아직 안 적힌 주문"이 구별되지 않습니다');
+      }
     }
     // 없는 칼럼을 읽으면 조회 전체가 실패한다 (PostgREST)
     if (/select\([^)]*strategy_id/.test(sel)) {
@@ -1941,12 +1958,36 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     // 반쪽이면 **보내기 전에** 멈추는가
     if (!/if\s*\(ident\s*&&\s*!identOk\)/.test(ex)) {
       err(`${EXECUTOR}: 반쪽 식별자를 그대로 저장합니다`
-        + ' — DB 제약이 거절하는 시점은 거래소에 주문을 보낸 뒤입니다');
+        + ' — 호출부의 계약 조립 오류는 경계에서 거절해야 합니다.'
+        + ' DB 제약은 마지막 방어선이지 응용 검증의 대체물이 아닙니다'
+        + ' (제약이 없는 배포에서는 반쪽이 그대로 저장됩니다)');
     }
+    // ★ 지키려는 것은 "insert보다 앞"이 **아니다.**
+    //
+    //   반쪽 식별자가 있으면 **어떤 거래소 부수효과도 일어나기 전에**
+    //   거절해야 한다. insert만 기준으로 삼으면, guard를 거래소 쓰기
+    //   뒤로 옮겨도 insert보다는 앞이라 통과한다.
+    //
+    //   동작 증명은 `orderExecutorIdentity.test.ts`가 호출 횟수 0으로
+    //   한다. 여기서는 **순서**를 함께 못박는다.
     const iGuard = ex.search(/if\s*\(ident\s*&&\s*!identOk\)/);
-    const iInsert = ex.indexOf("from('live_orders').insert(");
-    if (iGuard >= 0 && iInsert >= 0 && !(iGuard < iInsert)) {
-      err(`${EXECUTOR}: 반쪽 검사가 장부 기록보다 뒤입니다`);
+    if (iGuard < 0) {
+      err(`${EXECUTOR}: 반쪽 식별자 관문을 찾지 못했습니다 — 검사가 헛돕니다`);
+    } else {
+      for (const [needle, what] of [
+        ["from('live_orders').insert(", '장부 기록'],
+        ['futuresApplyLeverage(', '배율 설정(거래소 쓰기)'],
+        ['setLeverageGateFutures(', 'Gate 배율·마진 설정(거래소 쓰기)'],
+        ['placeFuturesOrder(', 'Binance 주문 전송'],
+        ['createOrderGateFutures(', 'Gate 주문 전송'],
+      ]) {
+        const at = ex.indexOf(needle);
+        if (at < 0) continue;   // 그 경로가 없는 배포도 있다
+        if (!(iGuard < at)) {
+          err(`${EXECUTOR}: 반쪽 식별자 관문이 ${what}보다 뒤입니다`
+            + ' — 계약 조립 오류가 계좌를 먼저 건드립니다');
+        }
+      }
     }
     // 호출부: 계약이 있을 때만 넘긴다
     const sc = code(SCALP);
@@ -1960,14 +2001,110 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       if (!sc.includes(f)) err(`${SCALP}: ${f}를 넘기지 않습니다`);
     }
     // 읽는 쪽: 감시 라우트가 세 칸을 projection하는가
-    const mon2 = code(MONITOR);
-    const iSel2 = mon2.indexOf("'id, connection_id, exchange, symbol, side, avg_price");
-    const sel2 = iSel2 < 0 ? '' : mon2.slice(iSel2, iSel2 + 800);
+    // identity 모양이 세 칸을 읽는가 (후퇴 모양은 읽지 **않아야** 한다)
+    const rowsSrc2 = code('src/lib/engine/lifecycleRows.ts');
+    const atId = rowsSrc2.indexOf('export const LIFECYCLE_SELECT_IDENTITY');
+    const endId = atId < 0 ? -1 : rowsSrc2.indexOf(';', atId);
+    const idSel = atId < 0 ? '' : rowsSrc2.slice(atId, endId < 0 ? undefined : endId);
     for (const col of ['execution_profile_id', 'execution_preset_id',
       'execution_contract_version']) {
-      if (!sel2.includes(col)) {
-        err(`${MONITOR}: ${col}을 읽지 않습니다 — identity가 언제나 null이 됩니다`);
+      if (!idSel.includes(col)) {
+        err(`LIFECYCLE_SELECT_IDENTITY가 ${col}을 읽지 않습니다`
+          + ' — identity가 언제나 null이 됩니다');
       }
+    }
+  }
+
+  // ── ⑭-c2 DB가 코드보다 뒤처져도 회차가 죽지 않는가 ──
+  //
+  //   089가 아직인 DB에 코드가 먼저 닿으면, 새 칸을 넣은 조회를 PostgREST가
+  //   통째로 거절한다. 그때 회차가 끝나면 **이미 열린 포지션의 청산·보호·
+  //   복구가 함께 멈춘다** — `migrationStatus`의 불변식과 정면으로 충돌한다.
+  {
+    const ROWS = 'src/lib/engine/lifecycleRows.ts';
+    const lr = await loadModule(ROWS, '주문 장부 읽기 정본');
+    if (!lr || typeof lr.loadLifecycleRows !== 'function') {
+      err(`${ROWS}: loadLifecycleRows가 없습니다 — 089 미적용에서 회차가 죽습니다`);
+    } else {
+      const miss = c => ({ code: '42703', message: `column live_orders.${c} does not exist` });
+      // ① 칸이 있으면 한 번에 읽는다 (멀쩡한데 두 번 읽지 않는다)
+      {
+        const calls = [];
+        const r = await lr.loadLifecycleRows(async sel => { calls.push(sel); return { data: [{ id: 'a' }], error: null }; });
+        if (r.projection !== 'IDENTITY' || calls.length !== 1) {
+          err('주문 장부 읽기: 칸이 있는데 identity로 한 번에 읽지 않습니다');
+        }
+      }
+      // ② 칸이 없으면 옛 모양으로 살린다
+      {
+        const calls = [];
+        const r = await lr.loadLifecycleRows(async sel => {
+          calls.push(sel);
+          return calls.length === 1
+            ? { data: null, error: miss('execution_profile_id') }
+            : { data: [{ id: 'a' }], error: null };
+        });
+        if (r.error || r.projection !== 'LEGACY' || r.rows.length !== 1) {
+          err('주문 장부 읽기: 089가 아직이라고 회차를 죽입니다'
+            + ' — 이미 열린 포지션의 청산·보호·복구가 멈춥니다');
+        }
+        if (calls.length !== 2) err('주문 장부 읽기: 후퇴가 정확히 한 번이 아닙니다');
+        for (const c of (lr.IDENTITY_COLUMNS || [])) {
+          if (String(calls[1] || '').includes(c)) {
+            err(`주문 장부 읽기: 후퇴 모양에 ${c}가 남아 있습니다 — 또 실패합니다`);
+          }
+        }
+        // 후퇴가 조용한 기능 축소가 되지 않는가
+        if (!String(calls[1] || '').includes('stop_policy')) {
+          err('주문 장부 읽기: 후퇴가 stop_policy까지 버립니다'
+            + ' — NO_FIXED_SL 주문이 일반 생명주기로 들어갑니다');
+        }
+      }
+      // ③ ★ 다른 오류는 후퇴하지 않는다
+      for (const [e, why] of [
+        [{ code: '42501', message: 'permission denied' }, '권한'],
+        [{ message: 'fetch failed' }, '연결'],
+        [{ code: '42703', message: 'column live_orders.strategy_id does not exist' }, '다른 칼럼'],
+      ]) {
+        const calls = [];
+        const r = await lr.loadLifecycleRows(async sel => { calls.push(sel); return { data: null, error: e }; });
+        if (r.projection !== null || !r.error || calls.length !== 1) {
+          err(`주문 장부 읽기: ${why} 오류를 "089 미적용"으로 읽고 후퇴합니다`
+            + ' — 진짜 고장이 정상 회차로 덮입니다');
+        }
+      }
+      // ④ 후퇴로 읽은 줄에 identity를 지어내지 않는가
+      {
+        const cm3 = await loadModule(CAND, '감시 후보 정본');
+        const legacyRow = {
+          id: 'a', connection_id: 'c', exchange: 'binance', symbol: 'BTCUSDT',
+          side: 'BUY', avg_price: 100, stop_loss: 90, status: 'FILLED',
+          reduce_only: false, acked_at: '2026-08-27T09:00:00.000Z',
+          signal_id: '[s:scalp]s', stop_policy: 'FIXED_SL',
+        };
+        const got = cm3?.managedCandidates?.([legacyRow]);
+        if (got && got.positions[0]?.executionIdentity !== null) {
+          err('감시 후보: 계약 칸이 없는 줄에 identity를 만들어 냅니다');
+        }
+        if (got && !cm3.mayActOn(got.positions[0])) {
+          err('감시 후보: 후퇴 상태에서 기존 고정 손절 포지션을 관리하지 않습니다');
+        }
+      }
+    }
+    // 라우트가 그 정본을 실제로 쓰는가 (직접 select를 다시 짜지 않는가)
+    const mon3 = code(MONITOR);
+    // ★ 이름이 있는지가 아니라 **정본에서 가져오는지**를 본다. 같은 이름의
+    //   지역 함수를 만들어 두면 이름만 보는 검사는 그대로 통과한다.
+    if (!/(import|require)\([^)]*lifecycleRows[^)]*\)/.test(mon3)
+      || !/\{\s*loadLifecycleRows\s*\}/.test(mon3)) {
+      err(`${MONITOR}: 주문 장부를 정본(lifecycleRows)에서 읽지 않습니다`
+        + ' — 후퇴 경로가 사라집니다');
+    }
+    // ★ **대입**을 본다. `out.projection === 'LEGACY'` 같은 비교는
+    //   `=`로 시작해서 느슨한 정규식에 걸린다 — 지워도 통과해 버린다.
+    if (!/out\.projection\s*=\s*loaded\.projection/.test(mon3)) {
+      err(`${MONITOR}: 어떤 모양으로 읽었는지 남기지 않습니다`
+        + ' — "기록이 없는 주문"과 "칸을 못 읽은 회차"가 같아 보입니다');
     }
   }
 

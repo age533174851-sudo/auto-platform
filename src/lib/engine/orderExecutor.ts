@@ -19,6 +19,7 @@ import { readbackProtective, type ProtectiveEvidence } from './protectiveReadbac
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
 import { futuresApplyLeverage } from '../exchanges/futuresExec';
+import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 
@@ -330,13 +331,22 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
   // ── 실행 계약 identity — 적을 것인가, 적는다면 온전한가 ──
   //
-  //   **반쪽은 받지 않는다.** 셋 중 일부만 오면 호출부가 계약을 잘못
-  //   조립한 것이고, 그 상태로 저장하면 DB 제약(`_complete`)이 주문을
-  //   거절한다 — 거래소에 주문을 보낸 **뒤에** 거절당하면 장부와 거래소가
-  //   갈린다. 그러니 보내기 전에 여기서 멈춘다.
+  //   **반쪽은 받지 않는다.** 셋 중 일부만 오면 **호출부가 계약을 잘못
+  //   조립한 것**이다. 그건 이 함수가 고쳐 줄 일이 아니라 거절할 일이다.
+  //
+  //   DB의 `_complete` 제약이 어차피 막지 않느냐고 할 수 있다. 막는다 —
+  //   그리고 그 실패는 거래소 전송보다 먼저 난다(INTENT insert가 앞이다).
+  //   그래도 여기서 따로 막는 이유는 **DB 제약은 마지막 방어선이지
+  //   응용 검증의 대체물이 아니기 때문**이다:
+  //
+  //     · 제약이 없는 배포(089 미적용)에서는 반쪽이 그대로 저장된다
+  //     · 제약 위반은 PostgREST 오류 문자열로 와서 호출부의 실수를
+  //       "DB 오류"처럼 보이게 한다 — 무엇을 고쳐야 하는지 가린다
+  //
+  //   그래서 경계에서 명시적으로 fail-closed한다.
   // 온전한지는 **계약 정본이 판단한다.** 여기서 다시 세면 적는 쪽과
-  // 읽는 쪽의 기준이 갈린다.
-  const { executionIdentityComplete } = await import('@/lib/execution/profile');
+  // 읽는 쪽의 기준이 갈린다. (정적 import — 순수 함수 하나에 동적 로딩을
+  // 쓸 이유가 없고, 별칭 동적 import는 시험 하네스에서 풀리지 않는다.)
   const ident = args.executionIdentity;
   const identOk = executionIdentityComplete(ident);
   const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
@@ -377,10 +387,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   }
   // 실행 계약 식별자도 같은 규칙이다. **반쪽은 받지 않는다.**
   //
-  //   셋 중 일부만 오면 호출부가 계약을 잘못 조립한 것이다. 그대로
-  //   저장하면 DB 제약(`_complete`)이 거절하는데, 그 거절은 **거래소에
-  //   주문을 보낸 뒤**에 온다 — 그러면 장부와 거래소가 갈린다.
-  //   보내기 전에 여기서 멈춘다.
+  //   호출부가 계약을 잘못 조립한 것이므로 **경계에서 거절한다.** 거래소
+  //   쓰기(배율 설정·주문 전송)는 전부 이 뒤에 있으므로, 여기서 멈추면
+  //   계좌에 아무 일도 일어나지 않는다 — 시험이 호출 횟수 0으로 확인한다.
+  //
+  //   DB 제약에 기대지 않는 이유는 위 주석에 적었다.
   if (ident && !identOk) {
     return { ok: false, status: 'REJECTED', clientOrderId,
       message: '실행 계약 식별자가 반쪽입니다 — 프로필·프리셋·버전은 함께 와야 합니다'
