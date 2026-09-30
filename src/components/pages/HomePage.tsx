@@ -147,6 +147,22 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   }, [top5]);
   const logoMap = useLogoMap(logoSymbols);
 
+  // ── 홈 환율 ──
+  // 지갑 화면과 같은 정본(/api/fx/usd)을 쓴다. 예전 홈은 KRW를 선택해도
+  // moneyView에 fx를 넘기지 않아 환율 API가 정상이어도 항상 "환율 확인 불가"였다.
+  const [fx, setFx] = useState<any>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/fx/usd', { cache: 'no-store' });
+        const j = await r.json().catch(() => null);
+        if (alive) setFx(j?.fx ?? null);
+      } catch { if (alive) setFx(null); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   // ── 총자산 ──
   //
   // **예전에는 여기에 4,850만 원이 적혀 있었다.** 하드코딩이다.
@@ -235,13 +251,13 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
         <div style={{color:totalCell?.value==null?T.muted:T.txt,fontSize:totalCell?.value==null?15:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:totalCell?.value==null?0:-1.5,overflowWrap:'anywhere'}}>
           {totalCell?.value==null
             ? (walletErr || totalCell?.text || '확인하지 못했습니다')
-            : moneyView(totalCell.value,currency as any).text}
+            : moneyView(totalCell.value,currency as any,fx).text}
         </div>
         {shownEnv?.unrealizedPnl?.value!=null && (
           <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
             <span style={{color:T.muted,fontSize:12}}>미실현 손익</span>
             <span style={{color:shownEnv.unrealizedPnl.value>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>
-              {shownEnv.unrealizedPnl.value>=0?'+':''}{moneyView(Math.abs(shownEnv.unrealizedPnl.value),currency as any).text}
+              {shownEnv.unrealizedPnl.value>=0?'+':''}{moneyView(Math.abs(shownEnv.unrealizedPnl.value),currency as any,fx).text}
             </span>
           </div>
         )}
