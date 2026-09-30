@@ -5,6 +5,7 @@ import {
   Beaker, Bot, Blocks, LineChart, PieChart, Settings,
   ChevronRight, Sparkles, LayoutGrid,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { T } from '@/lib/constants';
 import { A } from '@/lib/theme/colors';
 
@@ -15,7 +16,7 @@ type EasyAction = {
   title: string;
   desc: string;
   color: string;
-  Icon: React.ComponentType<{ size?: number; color?: string; strokeWidth?: number }>;
+  Icon: LucideIcon;
 };
 
 const ACTIONS: EasyAction[] = [
