@@ -6,7 +6,7 @@ import {
   Bot, Cpu, ScrollText, ShieldAlert, LineChart, Newspaper, Sparkles,
   Snowflake, FileText, CalendarDays, Radar, PieChart, Sprout, Coins,
   Scale, GraduationCap, BookOpen, ClipboardCheck, Users, Link2, Settings,
-  Stethoscope, Bell, ShieldCheck, Terminal,
+  Stethoscope, Bell, ShieldCheck, Terminal, LayoutGrid,
 } from 'lucide-react';
 
 export interface MenuItem {
@@ -20,6 +20,7 @@ export interface MenuItem {
 }
 
 export const MENU: MenuItem[] = [
+  { id:'easy',      label:'쉬운 화면',  desc:'자주 쓰는 기능만 크게 보기', cat:'시작', kw:'간단 쉬운 초보 시작', Icon:LayoutGrid, color:'#2563EB' },
   // 별도 페이지(/terminal). 앱에서 여기로 가는 유일한 입구다 —
   // 없으면 사용자가 터미널의 존재를 모른다.
   { id:'trading',   label:'매매하기',  desc:'차트·호가·주문 통합 화면', cat:'거래', kw:'롱숏 매수매도 주문', Icon:TrendingUp,  color:'#3B82F6' },
@@ -60,7 +61,7 @@ export const MENU: MenuItem[] = [
   { id:'safety',    label:'보안',      desc:'계정 보안·안전장치',       cat:'설정', kw:'보안 안전',      Icon:ShieldCheck, color:'#22C55E' },
 ];
 
-export const MENU_CATS = ['거래', '자동화', '투자정보', '자산관리', '학습', '설정'];
+export const MENU_CATS = ['시작', '거래', '자동화', '투자정보', '자산관리', '학습', '설정'];
 
 export function menuById(id: string): MenuItem | undefined {
   return MENU.find(m => m.id === id);
