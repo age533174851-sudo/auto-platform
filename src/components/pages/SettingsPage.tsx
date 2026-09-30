@@ -1,6 +1,7 @@
 'use client';
 import ThemeToggle from '@/components/ThemeToggle';
 import DisplayScaleControl from '@/components/settings/DisplayScaleControl';
+import AccountManagementCard from '@/components/settings/AccountManagementCard';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
@@ -21,9 +22,8 @@ import {
 
 
 function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(l:string)=>void;currency:string;setCurrency:(c:string)=>void}) {
-  const [tab,setTab]=useState<'general'|'security'|'backup'|'pro'|'legal'>('general');
+  const [tab,setTab]=useState<'general'|'account'|'security'|'backup'|'pro'|'legal'>('general');
   const DEFAULT_NOTIF = {trade:true,profit:true,news:false,alert:true,leverage:true};
-  const DEFAULT_SEC = {twoFa:true,bio:true,lock:false,sessionAlert:true};
   const [notif,setNotif]=useState(()=>{ try { const r=localStorage.getItem('tg_notif_settings'); return r?{...DEFAULT_NOTIF,...JSON.parse(r)}:DEFAULT_NOTIF; } catch { return DEFAULT_NOTIF; } });
   const [notifPerm,setNotifPerm]=useState<'default'|'granted'|'denied'|'unsupported'>('default');
 
@@ -32,10 +32,8 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
     if (!('Notification' in window)) { setNotifPerm('unsupported'); return; }
     setNotifPerm(Notification.permission as any);
   }, []);
-  const [sec,setSec]=useState(()=>{ try { const r=localStorage.getItem('tg_sec_settings'); return r?{...DEFAULT_SEC,...JSON.parse(r)}:DEFAULT_SEC; } catch { return DEFAULT_SEC; } });
   const [quickActions,setQuickActions]=useState<string[]>(()=>{ try { const r=localStorage.getItem('tg_quick_actions'); return r?JSON.parse(r):['close_all','close_50','close_25','add','reverse']; } catch { return ['close_all','close_50','close_25','add','reverse']; } });
   const [riskLimits,setRiskLimits]=useState(()=>{ try { const r=localStorage.getItem('tg_risk_limits'); return r?JSON.parse(r):{maxDailyLossPct:5,maxPositions:5,maxExposurePct:80}; } catch { return {maxDailyLossPct:5,maxPositions:5,maxExposurePct:80}; } });
-  const [apiKeys]=useState([{id:1,name:'API Key #1',created:'2025-01-15',lastUsed:'2025-05-10',active:true}]);
 
   // 실제 로그인 상태 + 프로필 (useProfile 훅: /api/auth/me 호출, role 자동 승급 포함)
   const { user, profile, isAdmin, isAuthenticated, loading: profileLoading } = useProfile();
@@ -49,7 +47,6 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
 
   // 설정 변경 시 자동 저장
   useEffect(()=>{ try { localStorage.setItem('tg_notif_settings', JSON.stringify(notif)); } catch {} }, [notif]);
-  useEffect(()=>{ try { localStorage.setItem('tg_sec_settings', JSON.stringify(sec)); } catch {} }, [sec]);
   const fileInputRef=useRef<HTMLInputElement|null>(null);
 
   const showToast=useCallback((m:string)=>{
@@ -180,10 +177,10 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
         </div>
       )}
       <div style={{display:'flex',gap:6,marginBottom:14,overflowX:'auto'}}>
-        {(['general','security','backup','pro','legal'] as const).map(t=>{
+        {(['general','account','security','backup','pro','legal'] as const).map(t=>{
           const active = tab===t;
-          const Icon = t==='general'?SettingsIcon:t==='security'?Lock:t==='backup'?Save:t==='pro'?Flame:Scale;
-          const label = t==='general'?'일반':t==='security'?'보안':t==='backup'?'백업':t==='pro'?'Pro':'법적';
+          const Icon = t==='general'?SettingsIcon:t==='account'?Target:t==='security'?Lock:t==='backup'?Save:t==='pro'?Flame:Scale;
+          const label = t==='general'?'일반':t==='account'?'계정':t==='security'?'보안':t==='backup'?'백업':t==='pro'?'Pro':'법적';
           return (
             <button key={t} onClick={()=>setTab(t)} style={{flexShrink:0,padding:'7px 12px',background:active?T.acg:'transparent',color:active?T.acl:T.muted,border:`1px solid ${active?T.acl:T.border}`,borderRadius:10,fontSize:11,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:5,minHeight:36}}>
               <Icon size={12} strokeWidth={2.4}/>
@@ -466,48 +463,43 @@ function SettingsPage({lang,setLang,currency,setCurrency}:{lang:string;setLang:(
         </div>
       )}
 
+      {tab==='account'&&(
+        <div>
+          <AccountManagementCard/>
+        </div>
+      )}
+
       {tab==='security'&&(
         <div>
           <Card style={{padding:16,marginBottom:12}}>
-            <div style={{color:T.txt,fontWeight:700,marginBottom:12,display:'flex',alignItems:'center',gap:6}}>
+            <div style={{color:T.txt,fontWeight:700,marginBottom:10,display:'flex',alignItems:'center',gap:6}}>
               <Lock size={14} strokeWidth={2.2} color={T.acl}/>
-              <span>보안 설정</span>
+              <span>보안 기능 상태</span>
             </div>
-            {[{k:'twoFa',l:'2단계 인증 (2FA)',d:'Google Authenticator 사용'},{k:'bio',l:'생체인식 로그인',d:'Face ID / Touch ID'},{k:'lock',l:'자동 잠금 5분',d:'비활동 시 자동 잠금'},{k:'sessionAlert',l:'새 로그인 알림',d:'새 기기 로그인 시 알림'}].map((s,i,arr)=>(
-              <div key={s.k} style={{padding:'10px 0',borderBottom:i<arr.length-1?`1px solid ${T.border}`:'none'}}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                  <div><div style={{color:T.txt,fontSize:12,fontWeight:600}}>{s.l}</div><div style={{color:T.muted,fontSize:10}}>{s.d}</div></div>
-                  <Toggle on={sec[s.k as keyof typeof sec]} onChange={v=>setSec(p=>({...p,[s.k]:v}))}/>
-                </div>
+            <div style={{color:T.muted,fontSize:10,lineHeight:1.65,marginBottom:10}}>
+              켜져 있지 않은 보안 기능을 스위치만 ON으로 보이게 하지 않습니다. 실제 인증 서버에 연결된 기능만 활성 상태로 표시합니다.
+            </div>
+            {[
+              ['2단계 인증 (TOTP)','미구현 · 활성 아님'],
+              ['생체인식 / 패스키','미구현 · 활성 아님'],
+              ['자동 잠금','미구현 · 활성 아님'],
+              ['새 로그인 알림','세션 기록은 아래에서 확인 가능'],
+            ].map(([l,d],i,arr)=>(
+              <div key={l} style={{display:'flex',justifyContent:'space-between',gap:12,padding:'10px 0',borderBottom:i<arr.length-1?`1px solid ${T.border}`:'none'}}>
+                <span style={{color:T.txt,fontSize:11,fontWeight:650}}>{l}</span>
+                <span style={{color:T.muted,fontSize:9.5,textAlign:'right'}}>{d}</span>
               </div>
             ))}
           </Card>
 
-          {/* API Keys */}
           <Card style={{padding:16,marginBottom:12}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-              <div style={{color:T.txt,fontWeight:700}}>API 키 관리</div>
-              <button type="button"
-                onClick={() => showToast('API 키 생성 기능은 곧 출시됩니다 (거래소 연결 페이지에서 등록)')}
-                style={{background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,padding:'6px 12px',minHeight:32,fontSize:11,fontWeight:700,cursor:'pointer'}}>+ 생성</button>
+            <div style={{color:T.txt,fontWeight:700,marginBottom:6}}>거래소 API 키</div>
+            <div style={{color:T.muted,fontSize:10,lineHeight:1.6,marginBottom:10}}>
+              이 설정 화면에는 가짜 API 키 목록을 표시하지 않습니다. 실제 등록·삭제·테스트는 거래소 연결 화면 한 곳에서 관리합니다.
             </div>
-            {(Array.isArray(apiKeys)?apiKeys:[]).map(k=>(
-              <div key={k.id} style={{background:T.alt,borderRadius:10,padding:'10px 12px',marginBottom:8}}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                  <div><div style={{color:T.txt,fontSize:12,fontWeight:600}}>{k.name}</div><div style={{color:T.muted,fontSize:10}}>생성: {k.created} · 최근: {k.lastUsed}</div></div>
-                  <div style={{display:'flex',gap:6,alignItems:'center'}}><Bdg c={T.grn} ch="활성"/>
-                    <button type="button"
-                      onClick={async () => {
-                        if (typeof window !== 'undefined' && (await confirmDialog(`API 키 "${k.name}"을(를) 삭제하시겠습니까?`, { danger: true }))) {
-                          showToast('API 키 관리는 거래소 연결 페이지에서 가능합니다');
-                        }
-                      }}
-                      style={{background:A(T.red,'15'),color:T.red,border:'none',borderRadius:6,padding:'5px 10px',minHeight:30,fontSize:10,cursor:'pointer'}}>삭제</button>
-                  </div>
-                </div>
-              </div>
-            ))}
-            <div style={{color:T.muted,fontSize:10,marginTop:6}}>⚠️ API 키는 절대 타인과 공유하지 마세요</div>
+            <a href="/?tab=accounts" style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:40,borderRadius:9,background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'35')}`,fontSize:10.5,fontWeight:800,textDecoration:'none'}}>
+              거래소 연결 관리
+            </a>
           </Card>
 
           {/* Login history (real) */}
