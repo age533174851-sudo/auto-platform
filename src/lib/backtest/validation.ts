@@ -1,6 +1,9 @@
 // src/lib/backtest/validation.ts
-// 백테스트 결과 → 실전 투입 적합도 판정
+// 백테스트 결과 → 백테스트 자체의 품질 판정
 // 과최적화 경고 + 종합 등급
+//
+// 중요: 이 파일 하나로 실전 승격을 허용하지 않는다.
+// 단일 in-sample 백테스트는 walk-forward/OOS/PAPER 증거를 포함하지 않기 때문이다.
 
 import type { BacktestResult } from './index';
 
@@ -25,9 +28,10 @@ export function validateBacktest(r: BacktestResult): ValidationResult {
   let score = 0;
 
   // 1. 거래 횟수 (표본 크기) — 과최적화 핵심 판별
-  if (r.totalTrades >= 30) { passed.push(`충분한 표본 (${r.totalTrades}건)`); score += 20; }
-  else if (r.totalTrades >= 10) { warnings.push(`표본 부족 (${r.totalTrades}건) — 30건 이상 권장`); score += 8; }
-  else { fatal.push(`표본 너무 적음 (${r.totalTrades}건) — 신뢰 불가, 과최적화 위험`); }
+  // 30회는 "아무 말도 못 하는 구간을 벗어나는 최소선"일 뿐 충분한 검증이 아니다.
+  if (r.totalTrades >= 200) { passed.push(`검증 표본 ${r.totalTrades}건`); score += 20; }
+  else if (r.totalTrades >= 30) { warnings.push(`표본 제한 (${r.totalTrades}건) — 방향만 볼 수 있으며 200건 이상 권장`); score += 8; }
+  else { fatal.push(`표본 너무 적음 (${r.totalTrades}건) — 통계 판단 불가`); }
 
   // 2. 승률
   if (r.winRate >= 45) { passed.push(`승률 ${r.winRate}%`); score += 15; }
@@ -86,20 +90,24 @@ export function validateBacktest(r: BacktestResult): ValidationResult {
 
   // ── 종합 등급 ──
   let grade: Grade, gradeLabel: string, gradeColor: string, recommendation: string;
-  const canGoLive = fatal.length === 0 && score >= 55;
+
+  // 이 함수는 단일 백테스트만 본다. 따라서 점수가 아무리 높아도 여기서
+  // LIVE 권한을 주지 않는다. 실전 승격은 OOS/walk-forward + 비용 스트레스
+  // + PAPER/TESTNET 실체결 증거를 별도 게이트에서 확인해야 한다.
+  const canGoLive = false;
 
   if (fatal.length > 0) {
-    grade = 'unfit'; gradeLabel = '실전 부적합'; gradeColor = '#EF4444';
-    recommendation = '치명적 문제가 있어 실전 투입을 권장하지 않습니다. 전략을 수정하세요.';
+    grade = 'unfit'; gradeLabel = '백테스트 부적합'; gradeColor = '#EF4444';
+    recommendation = '치명적 문제가 있습니다. 전략 또는 계산 로직을 먼저 수정하세요.';
   } else if (score >= 80) {
-    grade = 'excellent'; gradeLabel = '우수'; gradeColor = '#10B981';
-    recommendation = '실전 적합. 그래도 소액 + 모의매매 7일 검증 후 투입을 권장합니다.';
+    grade = 'excellent'; gradeLabel = '백테스트 우수'; gradeColor = '#10B981';
+    recommendation = '단일 백테스트는 통과했습니다. Walk-forward/OOS → 비용 스트레스 → PAPER/TESTNET 검증 전에는 실전 승격하지 않습니다.';
   } else if (score >= 60) {
-    grade = 'good'; gradeLabel = '양호'; gradeColor = '#60A5FA';
-    recommendation = '실전 가능하나 모의매매로 추가 검증 후 소액부터 시작하세요.';
+    grade = 'good'; gradeLabel = '백테스트 양호'; gradeColor = '#60A5FA';
+    recommendation = '방향성은 확인됐지만 실전 근거는 아닙니다. OOS와 실제 체결 검증을 이어가세요.';
   } else {
-    grade = 'caution'; gradeLabel = '주의'; gradeColor = '#F59E0B';
-    recommendation = '개선 여지가 있습니다. 모의매매로 충분히 검증한 뒤 결정하세요.';
+    grade = 'caution'; gradeLabel = '백테스트 주의'; gradeColor = '#F59E0B';
+    recommendation = '검증 강도가 부족합니다. 데이터 기간·표본·비용 반영을 보강하세요.';
   }
 
   return {
