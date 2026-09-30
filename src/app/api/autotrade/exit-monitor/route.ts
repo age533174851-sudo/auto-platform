@@ -797,6 +797,10 @@ async function runLifecycleSweep(
       //   보이고, 값이 채워지는 순간 일반 생명주기가 그 포지션을 가져간다.
       .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
         + 'stop_policy, '
+        // ★ 진입 당시의 실행 계약(089). 읽지 않으면 identity가 언제나
+        //   null이고, 화면은 "기록이 없다"와 "안 읽었다"를 구별할 수 없다.
+        //   **표시·telemetry 전용이다** — 아래 판단은 이 값을 보지 않는다.
+        + 'execution_profile_id, execution_preset_id, execution_contract_version, '
         // live_orders에는 strategy_id 컬럼이 없다. 전략 소유권은 strategyOf()가
         // signal_id의 [s:...] 표식에서 읽는다. 없는 칼럼을 projection하면
         // PostgREST가 조회 전체를 실패시키므로 signal_id만 읽는다.

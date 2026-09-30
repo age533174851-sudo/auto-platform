@@ -67,6 +67,7 @@
 // `NO_STOP`이 주장 등록보다 앞에 있어서, 걸러진 줄이 자리에서도 사라졌다.
 
 import { strategyOf } from '../strategies/ledger';
+import { executionIdentityComplete } from '../execution/profile';
 
 export type OwnershipCode =
   /** 이 연결·종목에 이 전략의 줄만 있다 */
@@ -120,6 +121,14 @@ export interface DeferredRow {
   symbol: string;
   side: 'LONG' | 'SHORT';
   strategyId: string | null;
+  /**
+   * 어느 실행 계약의 노출인가. 기록이 없으면 `null`.
+   *
+   * PR1은 이 칸이 없어서 유예 사유를 **정책 이름**으로만 적었다
+   * (`NO_FIXED_SL_EXIT_UNWIRED`). 이제 "어느 프로필의 노출이 관리되지
+   * 않고 있는가"를 함께 말할 수 있다 — 사유는 그대로 두고 사실만 덧붙인다.
+   */
+  executionIdentity: ExecutionIdentity | null;
   orderId: string | null;
   reason: string;
 }
@@ -143,6 +152,47 @@ export interface DeferredRow {
  */
 export type SeatBlockerCode = DeferralCode | 'NO_STOP';
 
+/**
+ * 이 주문이 **어느 실행 계약으로 나갔는가.** 장부에 적힌 사실 그대로다.
+ *
+ * ★ 이것으로 판단하지 않는다
+ * ──────────────────────────
+ * 지금 이 값을 쓰는 곳은 **표시와 telemetry뿐이다.** 진입 차단도 종료
+ * 권한도 관리 유예도 이 값을 보지 않는다 — 그것들은 정책(`stop_policy`)과
+ * 자리 상태로 판단하고, 그 판단은 이 PR에서 한 줄도 바뀌지 않았다.
+ *
+ * 왜 굳이 못을 박는가: identity가 생기면 "Exact100X면 이렇게 하자"가
+ * 자연스러워 보이기 시작한다. 그 순간 전용 종료 권한이 설계되기 전에
+ * 반쪽짜리 분기가 먼저 생긴다. 무엇을 할지는 다음 단계에서 정한다.
+ */
+export interface ExecutionIdentity {
+  profileId: string;
+  presetId: string;
+  contractVersion: number;
+}
+
+/**
+ * 장부의 세 칸 → identity. **반쪽이면 `null`이다.**
+ *
+ * DB 제약(`_complete`)이 반쪽을 막지만, 그 제약이 없는 배포와 옛 행이
+ * 있다. 하나라도 비면 나머지를 추측하지 않는다 — 추측한 identity는
+ * 없는 것보다 나쁘다.
+ */
+export function executionIdentityOf(
+  r: Pick<OrderRowLike,
+    'execution_profile_id' | 'execution_preset_id' | 'execution_contract_version'>
+    | null | undefined,
+): ExecutionIdentity | null {
+  const profileId = String(r?.execution_profile_id ?? '').trim();
+  const presetId = String(r?.execution_preset_id ?? '').trim();
+  const raw = r?.execution_contract_version;
+  const contractVersion = raw == null || raw === '' ? NaN : Number(raw);
+  // **온전함의 기준은 계약 정본 하나다.** 적는 쪽(`orderExecutor`)과 같은
+  // 함수를 쓴다 — 여기서 따로 세면 반쪽이 저장되고 반쪽이 읽힌다.
+  if (!executionIdentityComplete({ profileId, presetId, contractVersion })) return null;
+  return { profileId, presetId, contractVersion };
+}
+
 /** `live_orders`에서 여기서 쓰는 칸만 */
 export interface OrderRowLike {
   id?: string;
@@ -162,6 +212,16 @@ export interface OrderRowLike {
    * 전부 막으면 기존 고정 손절 전략이 통째로 관리에서 빠진다.
    */
   stop_policy?: string | null;
+  /**
+   * 진입 당시의 실행 계약 (migration 089). **셋은 함께 온다.**
+   *
+   * 이 값이 없던 시절에는 "배율 100 · 격리 · 손절 없음"으로 Exact100X를
+   * 추론할 수밖에 없었고, 그 추론은 금지돼 있었다. 이제 장부가 직접
+   * 말한다 — 다만 **말할 뿐 판단하지는 않는다**(아래 `ExecutionIdentity`).
+   */
+  execution_profile_id?: string | null;
+  execution_preset_id?: string | null;
+  execution_contract_version?: number | string | null;
   sl_order_id?: string | null;
   tp_order_id?: string | null;
   status: string | null;
@@ -184,6 +244,8 @@ export interface ManagedPosition {
   /** 진입(체결) 시각 ms */
   openedAt: number;
   ownedProtectionIds: string[];
+  /** 어느 실행 계약으로 연 포지션인가. 기록이 없으면 `null`. **판단에 쓰지 않는다** */
+  executionIdentity: ExecutionIdentity | null;
   ownership: { code: OwnershipCode; reason: string; claimants: string[] };
   /**
    * 일반 생명주기가 건드려도 되는가. 소유권과 **따로** 본다.
@@ -337,8 +399,10 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     // ── 손절 정책 × 손절 값 ──
     const policy = stopPolicyOf(r?.stop_policy);
     const hasStop = stopLoss != null && stopLoss > 0;
+    const identity = executionIdentityOf(r);
     const defer = (code: DeferralCode, reason: string) => {
       deferred.push({ code, connectionId, symbol, side, strategyId,
+        executionIdentity: identity,
         orderId: r?.id ? String(r.id) : null, reason });
     };
 
@@ -421,6 +485,7 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
 
     keep.push({ row: r, pos: {
       connectionId, exchange, symbol, strategyId, side,
+      executionIdentity: identity,
       entryPrice, stopLoss: stopLoss as number, openedAt,
       ownedProtectionIds: ids,
       orderId: r?.id ? String(r.id) : null,

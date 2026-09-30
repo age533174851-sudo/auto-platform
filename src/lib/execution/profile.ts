@@ -172,6 +172,38 @@ export const EXCLUSIVE_PAIRS: ReadonlyArray<{ profileId: StrategyType; presetId:
   { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' },
 ];
 
+/**
+ * 실행 계약을 가리키는 **세 칸**. 장부에 적히는 것도 이 모양이다
+ * (`live_orders.execution_*`, migration 089).
+ */
+export interface ExecutionIdentityLike {
+  profileId?: unknown;
+  presetId?: unknown;
+  contractVersion?: unknown;
+}
+
+/**
+ * 이 식별자가 **온전한가.** 셋이 전부 있어야 참이다.
+ *
+ * 왜 정본이 하나여야 하는가
+ * ─────────────────────────
+ * 같은 질문을 두 곳(주문을 적는 쪽 · 주문을 읽는 쪽)에서 하는데, 한쪽만
+ * 느슨해지면 **반쪽이 저장되고 반쪽이 읽힌다.** 그러면 읽는 쪽이 빈 칸을
+ * 추측하게 되고, 추측한 identity는 없는 것보다 나쁘다 — 다른 전략의
+ * 포지션이 Exact100X로 읽힐 수 있다.
+ *
+ * `resolveExecutionProfile`의 `INCOMPLETE_SELECTION`, DB의
+ * `live_orders_execution_identity_complete` 제약, 그리고 이 함수가 **같은
+ * 규칙**이다.
+ */
+export function executionIdentityComplete(x: ExecutionIdentityLike | null | undefined): boolean {
+  if (!x) return false;
+  const text = (v: unknown) => typeof v === 'string' ? v.trim() : v == null ? '' : String(v).trim();
+  const ver = x.contractVersion;
+  const n = ver == null || ver === '' ? NaN : Number(ver);
+  return !!text(x.profileId) && !!text(x.presetId) && Number.isFinite(n);
+}
+
 /** 짝이 어긋났으면 그 이유. 맞으면 빈 문자열 */
 export function pairMismatchReason(profileId: string, presetId: string): string {
   for (const pair of EXCLUSIVE_PAIRS) {

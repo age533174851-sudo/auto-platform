@@ -88,6 +88,29 @@ export interface ExecuteArgs {
    * `FIXED_TP`라 기존 호출부의 동작이 바뀌지 않는다.
    */
   takeProfitPolicy?: TakeProfitPolicy;
+  /**
+   * **어느 실행 계약으로 여는 주문인가.** 장부에 그대로 적는다.
+   *
+   * 왜 정책이 아니라 identity를 따로 받는가
+   * ──────────────────────────────────────
+   * `stopPolicy`·`takeProfitPolicy`는 **계약이 정한 행동**이고, 이 값은
+   * **계약 자체의 이름**이다. 행동만 적어 두면 나중에 그 포지션을 보는
+   * 코드가 "손절이 없고 배율이 100이니 Exact100X겠지"로 되돌아간다 —
+   * 이 저장소가 반복해서 금지해 온 추론이다.
+   *
+   * 셋은 조합 키라 **함께** 온다. 하나만으로는 계약이 정해지지 않고
+   * (`MAX_LEV_100X`는 `EXACT_100X`와만 짝이다), 반쪽만 적으면 나머지를
+   * 추측하게 된다 — DB의 `_complete` 제약도 같은 규칙이다.
+   *
+   * 안 넘기면 세 칸 모두 적지 않는다(= 계약 없이 나가던 기존 경로).
+   *
+   * ★ **이 값으로 판단하지 않는다.** 여기서도, 읽는 쪽에서도. 적기만 한다.
+   */
+  executionIdentity?: {
+    profileId: string;
+    presetId: string;
+    contractVersion: number;
+  };
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -304,6 +327,18 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // **고정 손절을 쓰지 않는 프로필은 여기서 NONE으로 덮는다.** 호출부가
   // 실수로 REQUIRED를 넘겨도 마찬가지다 — 계약이 호출부보다 세다.
   const noFixedSl = args.stopPolicy === 'NO_FIXED_SL';
+
+  // ── 실행 계약 identity — 적을 것인가, 적는다면 온전한가 ──
+  //
+  //   **반쪽은 받지 않는다.** 셋 중 일부만 오면 호출부가 계약을 잘못
+  //   조립한 것이고, 그 상태로 저장하면 DB 제약(`_complete`)이 주문을
+  //   거절한다 — 거래소에 주문을 보낸 **뒤에** 거절당하면 장부와 거래소가
+  //   갈린다. 그러니 보내기 전에 여기서 멈춘다.
+  // 온전한지는 **계약 정본이 판단한다.** 여기서 다시 세면 적는 쪽과
+  // 읽는 쪽의 기준이 갈린다.
+  const { executionIdentityComplete } = await import('@/lib/execution/profile');
+  const ident = args.executionIdentity;
+  const identOk = executionIdentityComplete(ident);
   const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
   // **익절은 따로 판단한다.** `policy === 'NONE'`으로 익절까지 끄면
   // 손절 정책 하나가 두 가지를 뜻하게 되고, 그때 바이낸스와 Gate가
@@ -339,6 +374,18 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     return { ok: false, status: 'REJECTED', clientOrderId,
       message: '고정 익절을 쓰지 않는 프로필인데 익절가가 함께 넘어왔습니다'
         + ` (${args.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
+  // 실행 계약 식별자도 같은 규칙이다. **반쪽은 받지 않는다.**
+  //
+  //   셋 중 일부만 오면 호출부가 계약을 잘못 조립한 것이다. 그대로
+  //   저장하면 DB 제약(`_complete`)이 거절하는데, 그 거절은 **거래소에
+  //   주문을 보낸 뒤**에 온다 — 그러면 장부와 거래소가 갈린다.
+  //   보내기 전에 여기서 멈춘다.
+  if (ident && !identOk) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '실행 계약 식별자가 반쪽입니다 — 프로필·프리셋·버전은 함께 와야 합니다'
+        + ` (프로필 ${ident.profileId || '없음'} · 프리셋 ${ident.presetId || '없음'}`
+        + ` · 버전 ${ident.contractVersion ?? '없음'}). 나머지를 추측하지 않고 주문하지 않습니다.` };
   }
   if (!isFinite(plan.quantity) || plan.quantity <= 0) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: `주문 수량이 유효하지 않습니다 (${plan.quantity})` };
@@ -406,6 +453,18 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 읽게 되고, 그건 100배 포지션에 손절을 새로 거는 일이다.
     // 여기서 칸을 떼고 저장하는 후퇴는 만들지 않는다.
     ...(noFixedSl ? { stop_policy: 'NO_FIXED_SL' } : {}),
+    // **계약이 있을 때만 붙인다.** `stop_policy`와 같은 이유다 — 항상
+    // 붙이면 089가 아직인 DB에서 모든 주문이 실패한다. 계약 없이 나가던
+    // 기존 경로의 바이트는 그대로 둔다.
+    //
+    // 반대로 계약이 있는데 못 붙이면 실패하는 것이 **맞다** — 그 칸이 없는
+    // DB에서는 이 포지션이 나중에 "어느 계약의 것인지 모르는 주문"이 되고,
+    // 그러면 다시 배율·손절 조합으로 추론하는 자리로 되돌아간다.
+    ...(ident ? {
+      execution_profile_id: ident.profileId,
+      execution_preset_id: ident.presetId,
+      execution_contract_version: ident.contractVersion,
+    } : {}),
   };
 
   const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();

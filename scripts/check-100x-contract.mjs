@@ -1844,6 +1844,205 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// ⑭ PR2 — 어느 계약으로 연 주문인지 장부에 적는다 (적기만 한다)
+// ─────────────────────────────────────────────────────────────
+//
+// 이 칸이 없던 동안 PR-E와 PR1은 둘 다 "identity가 없으니 정책만 보고
+// 판단한다"로 우회했다. 이제 장부가 직접 말한다.
+//
+// ★ 그런데 **말할 뿐 판단하지 않는다.** identity가 생기면 "Exact100X면
+//   이렇게 하자"가 자연스러워 보이기 시작하고, 그 분기가 전용 종료 권한
+//   설계보다 먼저 생긴다. 아래 ⑭-d가 그것을 막는다.
+const MIG_IDENT = 'supabase/migrations/089_live_orders_execution_identity.sql';
+const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
+{
+  // ── ⑭-a 마이그레이션이 세 칸과 완전성 제약을 둔다 ──
+  const mi = read(MIG_IDENT).replace(/--[^\n]*/g, '');
+  if (!mi) err(`${MIG_IDENT}이 없습니다 — 실행 계약을 적을 칸이 없습니다`);
+  else {
+    for (const col of ['execution_profile_id', 'execution_preset_id',
+      'execution_contract_version']) {
+      if (!new RegExp(`ADD\\s+COLUMN\\s+IF\\s+NOT\\s+EXISTS\\s+${col}`, 'i').test(mi)) {
+        err(`${MIG_IDENT}: ${col} 칸을 더하지 않습니다`);
+      }
+    }
+    // 반쪽 기록을 DB에서도 막는가 (077의 `_complete`와 같은 규칙)
+    if (!/live_orders_execution_identity_complete/.test(mi)
+      || !/CHECK\s*\(/i.test(mi)) {
+      err(`${MIG_IDENT}: 세 칸 완전성 제약이 없습니다`
+        + ' — 반쪽이 저장되면 읽는 쪽이 나머지를 추측하게 됩니다');
+    }
+    // **백필하지 않는다** — 이미 쌓인 행에 "그때 이 계약이었다"는 거짓 기록
+    if (/UPDATE\s+public\.live_orders/i.test(mi) || /\bSET\s+execution_/i.test(mi)
+      || /DEFAULT\s+'/i.test(mi)) {
+      err(`${MIG_IDENT}: 기존 행에 계약을 채웁니다 — 없던 기록을 지어냅니다`);
+    }
+    // ★ `IS NOT NULL`은 완전성 제약의 정상적인 일부다. 낱말이 아니라
+    //   **칼럼을 NOT NULL로 만드는 모양**만 막는다.
+    if (/ADD\s+COLUMN[^;]*?\bNOT\s+NULL/i.test(mi) || /SET\s+NOT\s+NULL/i.test(mi)) {
+      err(`${MIG_IDENT}: 칸을 NOT NULL로 만듭니다 — 기록이 없는 옛 행이 전부 막힙니다`);
+    }
+  }
+
+  // ── ⑭-b 온전함의 기준이 **하나**인가 ──
+  //
+  //   적는 쪽과 읽는 쪽이 따로 세면 반쪽이 저장되고 반쪽이 읽힌다.
+  const pm = await loadModule(PLAN, '실행 계약 정본');
+  if (!pm || typeof pm.executionIdentityComplete !== 'function') {
+    err(`${PLAN}: executionIdentityComplete 정본이 없습니다`);
+  } else {
+    const C = pm.executionIdentityComplete;
+    if (C({ profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 }) !== true) {
+      err('실행 계약 식별자: 온전한 세 칸을 반쪽으로 판정합니다');
+    }
+    for (const [x, why] of [
+      [null, '없음'], [undefined, 'undefined'], [{}, '빈 값'],
+      [{ presetId: 'EXACT_100X', contractVersion: 2 }, '프로필 없음'],
+      [{ profileId: 'MAX_LEV_100X', contractVersion: 2 }, '프리셋 없음'],
+      [{ profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' }, '버전 없음'],
+      [{ profileId: '  ', presetId: 'EXACT_100X', contractVersion: 2 }, '프로필 공백'],
+      [{ profileId: 'A', presetId: 'B', contractVersion: 'x' }, '버전이 숫자가 아님'],
+    ]) {
+      if (C(x) !== false) err(`실행 계약 식별자: ${why}인데 온전하다고 합니다`);
+    }
+    // 글자로 온 버전은 받아들인다 (DB 드라이버가 문자열을 줄 수 있다)
+    if (C({ profileId: 'A', presetId: 'B', contractVersion: '2' }) !== true) {
+      err('실행 계약 식별자: 글자로 온 버전을 거부합니다 — DB 드라이버 차이로 기록이 끊깁니다');
+    }
+  }
+  // 읽는 쪽이 자기만의 완전성 판정을 다시 만들지 않는가
+  {
+    const cd = code(CAND);
+    if (!/executionIdentityComplete/.test(cd)) {
+      err(`${CAND}: 온전함을 계약 정본에 묻지 않고 따로 판정합니다`
+        + ' — 적는 쪽과 기준이 갈립니다');
+    }
+  }
+
+  // ── ⑭-c 적는 쪽 배선 ──
+  {
+    const ex = code(EXECUTOR);
+    for (const col of ['execution_profile_id', 'execution_preset_id',
+      'execution_contract_version']) {
+      if (!ex.includes(col)) err(`${EXECUTOR}: ${col}을 장부에 적지 않습니다`);
+    }
+    // **조건부여야 한다** — 항상 붙이면 089 이전 DB에서 모든 주문이 실패한다
+    if (!/\.\.\.\(ident\s*\?\s*\{/.test(ex)) {
+      err(`${EXECUTOR}: 실행 계약 칸을 조건 없이 붙입니다`
+        + ' — 089가 아직인 DB에서 기존 경로의 주문까지 전부 실패합니다');
+    }
+    // ★ 온전함을 **정본에 묻는가.** `!!ident`처럼 자기가 세면 적는 쪽과
+    //   읽는 쪽의 기준이 갈리고, 반쪽이 저장된다.
+    if (!/identOk\s*=\s*executionIdentityComplete\(/.test(ex)) {
+      err(`${EXECUTOR}: 식별자의 온전함을 계약 정본에 묻지 않습니다`
+        + ' — 적는 쪽과 읽는 쪽의 기준이 갈립니다');
+    }
+    // 반쪽이면 **보내기 전에** 멈추는가
+    if (!/if\s*\(ident\s*&&\s*!identOk\)/.test(ex)) {
+      err(`${EXECUTOR}: 반쪽 식별자를 그대로 저장합니다`
+        + ' — DB 제약이 거절하는 시점은 거래소에 주문을 보낸 뒤입니다');
+    }
+    const iGuard = ex.search(/if\s*\(ident\s*&&\s*!identOk\)/);
+    const iInsert = ex.indexOf("from('live_orders').insert(");
+    if (iGuard >= 0 && iInsert >= 0 && !(iGuard < iInsert)) {
+      err(`${EXECUTOR}: 반쪽 검사가 장부 기록보다 뒤입니다`);
+    }
+    // 호출부: 계약이 있을 때만 넘긴다
+    const sc = code(SCALP);
+    if (!/executionIdentity:\s*\{/.test(sc)) {
+      err(`${SCALP}: 실행 계약 식별자를 주문에 넘기지 않습니다`);
+    }
+    if (!/\.\.\.\(epContract\s*\?\s*\{\s*executionIdentity/.test(sc)) {
+      err(`${SCALP}: 계약이 없는 경로에도 식별자를 넘깁니다 — 옛 경로의 동작이 바뀝니다`);
+    }
+    for (const f of ['epContract.profileId', 'epContract.presetId', 'epContract.contractVersion']) {
+      if (!sc.includes(f)) err(`${SCALP}: ${f}를 넘기지 않습니다`);
+    }
+    // 읽는 쪽: 감시 라우트가 세 칸을 projection하는가
+    const mon2 = code(MONITOR);
+    const iSel2 = mon2.indexOf("'id, connection_id, exchange, symbol, side, avg_price");
+    const sel2 = iSel2 < 0 ? '' : mon2.slice(iSel2, iSel2 + 800);
+    for (const col of ['execution_profile_id', 'execution_preset_id',
+      'execution_contract_version']) {
+      if (!sel2.includes(col)) {
+        err(`${MONITOR}: ${col}을 읽지 않습니다 — identity가 언제나 null이 됩니다`);
+      }
+    }
+  }
+
+  // ── ⑭-d ★★ identity로 **판단하지 않는다** ──
+  //
+  //   이 PR은 적고 보여 줄 뿐이다. 무엇을 할지는 전용 종료 권한을
+  //   설계하는 다음 단계의 일이다. 지금 분기가 생기면 반쪽짜리 규칙이
+  //   먼저 자리를 잡는다.
+  {
+    for (const [f, src] of [[CAND, code(CAND)], [MONITOR, code(MONITOR)]]) {
+      // identity 값을 조건으로 쓰는 모양
+      for (const re of [
+        /executionIdentity\??\.\w+\s*===/,
+        /executionIdentity\??\.\w+\s*!==/,
+        /if\s*\([^)]*executionIdentity[^)]*\)\s*\{[\s\S]{0,200}?(return|continue|throw)/,
+      ]) {
+        if (re.test(src)) {
+          err(`${f}: 실행 계약 identity로 분기합니다 (${re})`
+            + ' — 이 단계는 적고 보여 줄 뿐입니다. 무엇을 할지는 전용 종료 권한의 일입니다');
+        }
+      }
+      // 프로필·프리셋 이름을 값으로 비교하는 모양
+      for (const lit of [`'${ID}'`, `'${PRESET}'`]) {
+        if (src.includes(lit)) {
+          err(`${f}가 ${lit}을 직접 비교합니다`
+            + ' — identity는 사실로 들고 다닐 뿐 판단 기준이 아닙니다');
+        }
+      }
+    }
+    // 동작으로도 확인한다 — identity가 무엇이든 분류가 같은가
+    const cm2 = await loadModule(CAND, '감시 후보 정본');
+    if (cm2 && typeof cm2.managedCandidates === 'function') {
+      const T = '2026-08-27T09:00:00.000Z';
+      const base = o => ({
+        id: 'ord-1', connection_id: 'conn-bn', exchange: 'binance',
+        symbol: 'BTCUSDT', side: 'BUY', avg_price: 100, status: 'FILLED',
+        reduce_only: false, acked_at: T, signal_id: '[s:scalp]s', ...o,
+      });
+      const IDENT = {
+        execution_profile_id: ID, execution_preset_id: PRESET,
+        execution_contract_version: 2,
+      };
+      for (const c of [
+        { stop_policy: 'FIXED_SL', stop_loss: 90 },
+        { stop_policy: 'NO_FIXED_SL', stop_loss: null },
+        { stop_policy: 'FIXED_SL', stop_loss: null },
+        { stop_loss: null },
+      ]) {
+        const a = cm2.managedCandidates([base(c)]);
+        const b = cm2.managedCandidates([base({ ...c, ...IDENT })]);
+        const shape = r => [
+          r.positions.length,
+          r.positions.map(p => `${p.ownership?.code}/${p.management?.code}`).join('|'),
+          r.deferred.map(d => d.code).join('|'),
+          r.skipped.map(x => x.code).join('|'),
+        ].join(' · ');
+        if (shape(a) !== shape(b)) {
+          err(`감시 후보: identity가 분류를 바꿉니다 (${JSON.stringify(c)})`
+            + `\n      없을 때: ${shape(a)}\n      있을 때: ${shape(b)}`);
+        }
+      }
+      // 그러면서도 사실은 실려 있어야 한다 (적기만 한다 ≠ 안 적는다)
+      const withId = cm2.managedCandidates([base({ stop_policy: 'FIXED_SL', stop_loss: 90, ...IDENT })]);
+      if (withId.positions[0]?.executionIdentity?.presetId !== PRESET) {
+        err('감시 후보: identity를 읽고도 포지션에 싣지 않습니다');
+      }
+      const defId = cm2.managedCandidates([base({ stop_policy: 'NO_FIXED_SL', stop_loss: null, ...IDENT })]);
+      if (defId.deferred[0]?.executionIdentity?.profileId !== ID) {
+        err('감시 후보: 유예 기록에 identity를 싣지 않습니다'
+          + ' — 어느 계약의 노출이 관리되지 않는지 알 수 없습니다');
+      }
+    }
+  }
+}
+
 if (bad) {
   console.error(`\n전용 100배 계약 검사 실패: ${bad}건`);
   process.exit(1);

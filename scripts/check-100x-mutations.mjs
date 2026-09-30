@@ -117,6 +117,7 @@ const P = {
   auth: 'src/lib/engine/entryAuthority.ts',
   safety: 'src/lib/engine/entryExitSafety.ts',
   cand: 'src/lib/engine/managedPosition.ts',
+  migIdent: 'supabase/migrations/089_live_orders_execution_identity.sql',
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
@@ -650,6 +651,7 @@ const M = [
   // ── 관찰 가능성 ──
   ['MUT-P7  유예 기록을 남기지 않음 (조용히 사라진 줄)', P.cand,
     s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + '        executionIdentity: identity,\n'
                    + "        orderId: r?.id ? String(r.id) : null, reason });",
                    '      void code; void reason;'), 'RED'],
 
@@ -658,9 +660,10 @@ const M = [
 
   ['MUT-P9  유예에서 정체성을 빼고 코드만 남김', P.cand,
     s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + '        executionIdentity: identity,\n'
                    + "        orderId: r?.id ? String(r.id) : null, reason });",
                    '      deferred.push({ code, connectionId: \'\', symbol: \'\', side,\n'
-                   + '        strategyId: null, orderId: null, reason });'), 'RED'],
+                   + '        strategyId: null, executionIdentity: null, orderId: null, reason });'), 'RED'],
 
   // ── ★★ net position 자리 — 이 PR의 핵심 ──
 
@@ -767,6 +770,73 @@ const M = [
     s => s.replace('export function lifecycleDecide(',
                    "const _lateBlock = (p: any) => p?.stop_policy === 'NO_FIXED_SL';\n"
                    + 'export function lifecycleDecide('), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR2 — 실행 계약 identity: 적는다 · 보여 준다 · 판단하지 않는다
+  // ══════════════════════════════════════════════════════════
+
+  // ── 적는 쪽 ──
+  ['MUT-Q1  주문에 계약 식별자를 적지 않음', P.exec,
+    s => s.replace('    ...(ident ? {', '    ...(false ? {'), 'RED'],
+
+  ['MUT-Q2  호출부가 식별자를 안 넘김', P.scalp,
+    s => s.replace('    ...(epContract ? {\n      executionIdentity: {',
+                   '    ...(false ? {\n      executionIdentity: {'), 'RED'],
+
+  // 반쪽을 그대로 저장하면 DB가 거절하는데, 그 거절은 **거래소에 주문을
+  // 보낸 뒤**에 온다 — 장부와 거래소가 갈린다.
+  ['MUT-Q3  반쪽 식별자를 보내기 전에 막지 않음', P.exec,
+    s => s.replace('  if (ident && !identOk) {', '  if (false) {'), 'RED'],
+
+  ['MUT-Q4  온전함 기준을 정본 대신 따로 셈', P.exec,
+    s => s.replace('  const identOk = executionIdentityComplete(ident);',
+                   '  const identOk = !!ident;'), 'RED'],
+
+  ['MUT-Q5  읽는 쪽이 반쪽을 추측으로 메움', P.cand,
+    s => s.replace("  if (!executionIdentityComplete({ profileId, presetId, contractVersion })) return null;",
+                   '  if (!profileId && !presetId) return null;'), 'RED'],
+
+  ['MUT-Q6  감시 라우트가 계약 칸을 안 읽음', P.monitor,
+    s => s.replace("        + 'execution_profile_id, execution_preset_id, execution_contract_version, '\n", ''), 'RED'],
+
+  ['MUT-Q7  유예 기록에서 identity를 뺌', P.cand,
+    s => s.replace('        executionIdentity: identity,\n        orderId:', '        orderId:'), 'RED'],
+
+  ['MUT-Q8  포지션에서 identity를 뺌', P.cand,
+    s => s.replace('      executionIdentity: identity,\n', ''), 'RED'],
+
+  // ── 마이그레이션 ──
+  // ★ 이름만 바꾸면 `DROP CONSTRAINT` 줄 하나만 바뀌고 제약은 그대로
+  //   남는다(String.replace는 첫 자리만 바꾼다). **제약문 자체를 지운다.**
+  ['MUT-Q9  세 칸 완전성 제약 제거', P.migIdent,
+    s => s.replace(/ALTER TABLE public\.live_orders\s*\n\s*ADD CONSTRAINT live_orders_execution_identity_complete[\s\S]*?\);\n/,
+                   ''), 'RED'],
+
+  ['MUT-Q10 옛 행에 계약을 백필', P.migIdent,
+    s => s + "\nUPDATE public.live_orders SET execution_profile_id = 'MAX_LEV_100X'"
+           + " WHERE execution_profile_id IS NULL;\n", 'RED'],
+
+  ['MUT-Q11 칸을 NOT NULL로 만듦', P.migIdent,
+    s => s.replace('  ADD COLUMN IF NOT EXISTS execution_profile_id text;',
+                   '  ADD COLUMN IF NOT EXISTS execution_profile_id text NOT NULL;'), 'RED'],
+
+  // ── ★★ 판단하지 않는다 ──
+  //
+  //   identity가 생기면 "Exact100X면 이렇게 하자"가 자연스러워 보인다.
+  //   그 분기가 전용 종료 권한 설계보다 먼저 생기는 것을 막는다.
+  ['MUT-Q12 identity로 관리 여부를 분기 (이름 비교)', P.cand,
+    s => s.replace("    const why = unmanagedSeats.get(seat);",
+                   "    const why = pos.executionIdentity?.presetId === 'EXACT_100X'\n"
+                   + "      ? undefined : unmanagedSeats.get(seat);"), 'RED'],
+
+  ['MUT-Q13 identity가 있으면 유예를 건너뜀', P.cand,
+    s => s.replace("    if (policy === 'NO_FIXED_SL') {",
+                   "    if (policy === 'NO_FIXED_SL' && !identity) {"), 'RED'],
+
+  ['MUT-Q14 감시 라우트가 identity로 분기', P.monitor,
+    s => s.replace("    if (p.management?.code !== 'MANAGED') {",
+                   "    if (p.executionIdentity?.profileId === 'MAX_LEV_100X') { /* 전용 처리 */ }\n"
+                   + "    if (p.management?.code !== 'MANAGED') {"), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

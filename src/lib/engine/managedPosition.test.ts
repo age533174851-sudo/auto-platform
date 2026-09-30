@@ -9,7 +9,8 @@
 // 그리고 거래소 선물은 net position이라, 같은 계좌·종목을 두 전략이
 // 주장하면 그 포지션이 누구 것인지 증명할 수 없다.
 import { test, assert, eq } from '../../test/harness';
-import { managedCandidates, mayActOn, mutationKeyOf } from './managedPosition';
+import { managedCandidates, mayActOn, mutationKeyOf, executionIdentityOf }
+  from './managedPosition';
 
 const T = '2026-08-27T09:00:00.000Z';
 
@@ -469,6 +470,119 @@ export function runManagedPositionTests() {
     const p = r.positions.find((x: any) => x.orderId === 'b');
     assert(!!p, '정상 줄이 사라졌습니다');
     eq(mayActOn(p!), true, '★ NO_ENTRY_TIME까지 범위를 넓혔습니다 — 별도 판단이 필요합니다');
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // 실행 계약 identity — **적힌 사실을 그대로 들고 다닌다**
+  // ══════════════════════════════════════════════════════════
+  //
+  //   이 값이 없던 시절에는 "배율 100 · 격리 · 손절 없음"으로 Exact100X를
+  //   추론할 수밖에 없었고, PR-E와 PR1이 그 추론을 금지했다. 이제 장부가
+  //   직접 말한다.
+  //
+  //   ★ 그런데 **말할 뿐 판단하지는 않는다.** 아래 마지막 두 시험이 그것을
+  //     동작으로 못박는다 — identity가 무엇이든 관리·유예 판정은 같다.
+  console.log('\n🪪 실행 계약 identity (적기만 한다)');
+
+  const IDENT = {
+    execution_profile_id: 'MAX_LEV_100X',
+    execution_preset_id: 'EXACT_100X',
+    execution_contract_version: 2,
+  };
+
+  test('세 칸이 다 있으면 identity를 읽는다', () => {
+    const id = executionIdentityOf(IDENT as any);
+    eq(id?.profileId, 'MAX_LEV_100X');
+    eq(id?.presetId, 'EXACT_100X');
+    eq(id?.contractVersion, 2);
+  });
+
+  test('★ 반쪽이면 추측하지 않고 null이다', () => {
+    for (const [over, what] of [
+      [{ execution_profile_id: null }, '프로필 없음'],
+      [{ execution_preset_id: null }, '프리셋 없음'],
+      [{ execution_contract_version: null }, '버전 없음'],
+      [{ execution_profile_id: '   ' }, '프로필 공백'],
+      [{ execution_contract_version: 'x' }, '버전이 숫자가 아님'],
+    ] as Array<[any, string]>) {
+      eq(executionIdentityOf({ ...IDENT, ...over } as any), null,
+        `★ ${what}인데 identity를 만들어 냈습니다 — 추측한 identity는 없는 것보다 나쁩니다`);
+    }
+  });
+
+  test('세 칸이 모두 없으면 null (기록이 없는 옛 주문)', () => {
+    eq(executionIdentityOf({} as any), null);
+    eq(executionIdentityOf(null), null);
+  });
+
+  test('버전이 글자로 와도 숫자로 읽는다 (DB 드라이버 차이)', () => {
+    const id = executionIdentityOf({ ...IDENT, execution_contract_version: '2' } as any);
+    eq(id?.contractVersion, 2);
+  });
+
+  test('관리되는 포지션이 identity를 들고 간다', () => {
+    const r = managedCandidates([row({ stop_policy: 'FIXED_SL', stop_loss: 90, ...IDENT })]);
+    eq(r.positions[0].executionIdentity?.profileId, 'MAX_LEV_100X');
+    eq(r.positions[0].executionIdentity?.contractVersion, 2);
+  });
+
+  test('★ 유예된 줄도 identity를 들고 간다', () => {
+    // PR1은 이 칸이 없어서 유예 사유를 정책 이름으로만 적었다.
+    // 이제 "어느 프로필의 노출이 관리되지 않는가"를 함께 말할 수 있다.
+    const r = managedCandidates([
+      row({ stop_policy: 'NO_FIXED_SL', stop_loss: null, ...IDENT }),
+    ]);
+    const d = r.deferred.find((x: any) => x.code === 'NO_FIXED_SL_EXIT_UNWIRED');
+    assert(!!d, '유예 기록이 있어야 합니다');
+    eq(d.executionIdentity?.presetId, 'EXACT_100X',
+      '★ 어느 계약의 노출인지 알 수 없으면 추적이 다시 끊깁니다');
+    // 사유 문구는 **정책 이름 그대로다** — identity가 생겼다고 바꾸지 않는다.
+    eq(d.code, 'NO_FIXED_SL_EXIT_UNWIRED');
+  });
+
+  test('기록이 없는 주문은 identity가 null이지 추측값이 아니다', () => {
+    const r = managedCandidates([row({ stop_policy: 'FIXED_SL', stop_loss: 90 })]);
+    eq(r.positions[0].executionIdentity, null);
+  });
+
+  // ── ★★ identity는 판단을 바꾸지 않는다 ──
+  //
+  //   identity가 생기면 "Exact100X면 이렇게 하자"가 자연스러워 보이기
+  //   시작한다. 그 분기가 전용 종료 권한 설계보다 먼저 생기는 것을 막는다.
+
+  test('★ identity가 관리/유예 판정을 바꾸지 않는다', () => {
+    const cases = [
+      { stop_policy: 'FIXED_SL', stop_loss: 90 },          // managed
+      { stop_policy: 'NO_FIXED_SL', stop_loss: null },     // deferred
+      { stop_policy: 'FIXED_SL', stop_loss: null },        // deferred
+      { stop_loss: null },                                  // skipped NO_STOP
+    ];
+    for (const c of cases) {
+      const without = managedCandidates([row({ ...c })]);
+      const withId = managedCandidates([row({ ...c, ...IDENT })]);
+      eq(withId.positions.length, without.positions.length,
+        `★ identity가 관리 여부를 바꿨습니다 (${JSON.stringify(c)})`);
+      eq(withId.deferred.map((d: any) => d.code).join(','),
+         without.deferred.map((d: any) => d.code).join(','),
+        `★ identity가 유예 사유를 바꿨습니다 (${JSON.stringify(c)})`);
+      eq(withId.skipped.map((x: any) => x.code).join(','),
+         without.skipped.map((x: any) => x.code).join(','),
+        `★ identity가 대상 아님 분류를 바꿨습니다 (${JSON.stringify(c)})`);
+      if (withId.positions[0]) {
+        eq(mayActOn(withId.positions[0]), mayActOn(without.positions[0]),
+          `★ identity가 실행 관문을 바꿨습니다 (${JSON.stringify(c)})`);
+      }
+    }
+  });
+
+  test('★ Exact100X identity가 붙어도 자리 유예 규칙이 그대로다', () => {
+    // 같은 자리에 관리 불능 노출이 있으면, identity와 무관하게 막힌다.
+    const r = managedCandidates([
+      row({ id: 'a', stop_policy: 'NO_FIXED_SL', stop_loss: null, ...IDENT }),
+      row({ id: 'b', stop_policy: 'FIXED_SL', stop_loss: 90, ...IDENT }),
+    ]);
+    eq(mayActOn(r.positions[0]), false,
+      '★ identity가 같다는 이유로 자리 유예를 풀었습니다');
   });
 
   test('유예는 "대상 아님"과 섞이지 않는다', () => {
