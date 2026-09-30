@@ -28,7 +28,7 @@ export interface MetaResult {
 }
 
 // 임계값: OFF = 점수<40 또는 최근승률<42 (신뢰도 충분 시), ON = 점수≥65 & 최근승률≥55
-const OFF_SCORE = 40, OFF_RECENT_WR = 42, ON_SCORE = 65, ON_RECENT_WR = 55, MIN_CONF = 60;
+const OFF_SCORE = 40, OFF_RECENT_WR = 42, ON_SCORE = 65, ON_RECENT_WR = 55, MIN_CONF = 100;
 
 export function evaluateMeta(strats: MetaInput[]): MetaResult {
   const decisions: MetaDecision[] = strats.map(s => {
