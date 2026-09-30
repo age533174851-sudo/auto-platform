@@ -208,6 +208,22 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
           <ChevronRight size={20} color="#fff" style={{flexShrink:0}}/>
         </button>
       )}
+      {/* ── 쉬운 화면 — 기능이 많아도 첫 화면에서 바로 찾을 수 있어야 한다 ── */}
+      <button onClick={()=>onNav('easy')} aria-label="쉬운 화면 열기" style={{
+        width:'100%',minHeight:72,textAlign:'left',display:'flex',alignItems:'center',gap:13,
+        background:`linear-gradient(135deg,${A(T.acc,'18')},${A(T.prp,'16')})`,
+        border:`1px solid ${A(T.acl,'45')}`,borderRadius:18,padding:'14px 16px',marginBottom:14,cursor:'pointer'
+      }}>
+        <div style={{width:44,height:44,borderRadius:13,background:T.acg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+          <Sparkles size={22} color={T.acl}/>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:T.txt,fontWeight:900,fontSize:15}}>쉬운 화면</div>
+          <div style={{color:T.muted,fontSize:11,marginTop:2}}>모의매매 · 자동매매 · 내 전략 · 자산 · 설정만 크게 보기</div>
+        </div>
+        <ChevronRight size={20} color={T.acl} style={{flexShrink:0}}/>
+      </button>
+
       {/* ── 총자산 히어로 ── */}
       <div style={{background:'linear-gradient(145deg,var(--t-card),var(--t-bg))',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>
