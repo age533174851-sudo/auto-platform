@@ -155,7 +155,7 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
   const [selected,     setSelected]     = useState<typeof MOCK_EVENTS[number] | null>(null);
   const [events,       setEvents]       = useState<typeof MOCK_EVENTS>([]);
   const [loading,      setLoading]      = useState(true);
-  // 예시 데이터를 보고 있다는 경고. null이면 실제 일정이다.
+  // 실제 일정을 확인하지 못했을 때의 경고. null이면 실제 일정이다.
   const [sampleWarning, setSampleWarning] = useState<string | null>(null);
   // 실제 일정을 지금 받아오기. 크론은 하루 한 번만 돌아서(Vercel Hobby는
   // 일 단위 크론만 허용) 처음 켠 사람은 최대 하루를 빈 달력으로 기다린다.
@@ -185,15 +185,16 @@ function EconCalendarInner({ lang = 'ko' }: { lang?: string }) {
         // 지어낸 숫자라(FOMC 5.25% 같은), 표시가 없으면 사용자는 그걸
         // 실제 전망으로 읽고 그 시각에 맞춰 포지션을 정리한다.
         setSampleWarning(d?.sampleWarning ?? null);
-        if (evts.length > 0) setEvents(evts);
-        else {
-          setEvents(MOCK_EVENTS);
-          setSampleWarning('표시된 일정과 예상치는 예시입니다. 실제 발표 일정이 아니므로 매매 판단에 쓰지 마세요.');
+        // 실제 일정이 없으면 비어 있는 것이 진실이다.
+        // FOMC/CPI 날짜를 임의로 만들어 채우지 않는다.
+        setEvents(evts);
+        if (evts.length === 0 && !d?.sampleWarning) {
+          setSampleWarning('실제 경제 일정을 확인하지 못했습니다. 가짜 일정은 표시하지 않습니다.');
         }
       })
       .catch(() => {
-        setEvents(MOCK_EVENTS);
-        setSampleWarning('경제 일정을 불러오지 못해 예시를 표시하고 있습니다. 실제 발표 일정이 아닙니다.');
+        setEvents([]);
+        setSampleWarning('경제 일정을 불러오지 못했습니다. 가짜 일정은 표시하지 않습니다.');
       })
       .finally(() => setLoading(false));
   }, [lang]);
