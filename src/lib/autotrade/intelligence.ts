@@ -1,5 +1,8 @@
 // src/lib/autotrade/intelligence.ts
-// 전략 지능 — ① 건강도 점수(자동 off 판단) ② 우선순위 충돌 해결.
+// 전략 상태 — ① 요약 건강도 ② 신호 충돌 감지.
+//
+// 단순 전략 종류(추세/RSI 등)에 임의 우선순위를 붙여 충돌 주문을 자동 채택하지 않는다.
+// 실제 성과·시장상태·사용자 정책 없이 "이 전략 종류가 더 낫다"고 정하는 것은 근거가 없다.
 
 export interface StrategyLike {
   id: string; name: string; type: string; asset: string;
@@ -35,8 +38,8 @@ export function strategyHealth(s: StrategyLike): StrategyHealth {
   const winScore = Math.max(0, Math.min(100, s.winRate));
   const pnlScore = s.totalPnl > 0 ? 75 : s.totalPnl < 0 ? 25 : 50;
   let score = winScore * 0.6 + pnlScore * 0.4;
-  // 표본 신뢰도: 거래 10회 미만이면 50(중립)으로 수렴
-  const conf = Math.min(1, s.trades / 10);
+  // 표본 신뢰도: 200회에 수렴. 5~10회로 자동 정지 결론을 내리지 않는다.
+  const conf = Math.min(1, s.trades / 200);
   score = 50 + (score - 50) * conf;
   score = Math.round(Math.max(0, Math.min(100, score)));
 
@@ -44,12 +47,13 @@ export function strategyHealth(s: StrategyLike): StrategyHealth {
   else if (s.winRate < 45) reasons.push(`승률 ${s.winRate}% (저조)`);
   if (s.totalPnl < 0) reasons.push('누적 손실 상태');
   else if (s.totalPnl > 0) reasons.push('누적 수익 상태');
-  if (s.trades < 10) reasons.push(`표본 부족 (${s.trades}회) — 신뢰도 낮음`);
+  if (s.trades < 200) reasons.push(`표본 제한 (${s.trades}회) — 자동 조치 근거로 부족`);
 
   const tier: HealthTier = score >= 80 ? 'excellent' : score >= 60 ? 'good' : score >= 40 ? 'caution' : 'danger';
-  // 자동 off 권고: 위험 등급 + 충분한 표본
-  const shouldDisable = tier === 'danger' && s.trades >= 5;
-  if (shouldDisable) reasons.push('건강도 40 미만 — 자동 정지 권고');
+  // 요약 승률/누적손익만으로는 자동 OFF를 남발하지 않는다.
+  // 최소 200건에서도 이것은 "권고"일 뿐 실제 종료 권한은 별도 정책이 가져야 한다.
+  const shouldDisable = tier === 'danger' && s.trades >= 200;
+  if (shouldDisable) reasons.push('요약 건강도 40 미만 · 표본 200건 이상 — 정지 검토 대상');
 
   return { score, tier, ...TIER_META[tier], shouldDisable, reasons };
 }
@@ -75,7 +79,7 @@ export interface Signal { stratId: string; stratName: string; type: string; asse
 export interface ConflictResult {
   asset: string;
   signals: Signal[];
-  winner: Signal;
+  winner: Signal | null;
   overridden: Signal[];
   explanation: string;
 }
@@ -92,12 +96,12 @@ export function resolveConflicts(signals: Signal[]): ConflictResult[] {
     const hasBuy = sigs.some(s => s.side === 'buy');
     const hasSell = sigs.some(s => s.side === 'sell');
     if (!(hasBuy && hasSell)) continue;   // 충돌 아님
-    const sorted = [...sigs].sort((a, b) => (TYPE_PRIORITY[b.type] || 0) - (TYPE_PRIORITY[a.type] || 0));
-    const winner = sorted[0];
-    const overridden = sorted.slice(1).filter(s => s.side !== winner.side);
+    // 충돌 자체가 정보다. 전략 종류에 붙인 임의 숫자로 한쪽을 승자로 만들지 않는다.
+    // 실제 실행 경로에서는 이 상태를 HOLD/BLOCKED로 보내고, 명시적 충돌 정책이
+    // 따로 있을 때만 해소해야 한다.
     results.push({
-      asset, signals: sigs, winner, overridden,
-      explanation: `${TYPE_LABEL[winner.type] || winner.type}(우선순위 ${TYPE_PRIORITY[winner.type] || 0}) 전략의 ${winner.side === 'buy' ? '매수' : '매도'} 신호 채택 — ${overridden.map(o => TYPE_LABEL[o.type] || o.type).join(', ')} 신호 보류`,
+      asset, signals: sigs, winner: null, overridden: [],
+      explanation: '매수·매도 신호가 충돌합니다 — 근거 없는 자동 우선순위를 적용하지 않고 진입을 보류합니다.',
     });
   }
   return results;
