@@ -2,12 +2,12 @@
 // AI Meta Strategy — 전략 점수 기반 자동 교체 + 자금 배분(전략 포트폴리오).
 // "최근 승률 41%로 떨어진 전략 자동 OFF → 68%인 전략 자동 ON"
 // 기관 방식: 전략 하나를 믿지 않고, 성과에 따라 자금을 재배분.
-import { scoreStrategy, tradesFromSummary, computeMetrics, type StrategyScore } from './strategyScore';
+import { scoreStrategy, computeMetrics, type StrategyScore } from './strategyScore';
 
 export interface MetaInput {
   id: string; name: string; enabled: boolean;
   winRate: number; totalPnl: number; trades: number;
-  pnls?: number[];   // 실거래 손익열 (있으면 우선)
+  pnls?: number[];   // 실제 PAPER/TESTNET/LIVE 체결 손익열. 없으면 자동 판정하지 않는다.
 }
 
 export type MetaAction = 'auto_off' | 'auto_on' | 'keep';
@@ -28,17 +28,29 @@ export interface MetaResult {
 }
 
 // 임계값: OFF = 점수<40 또는 최근승률<42 (신뢰도 충분 시), ON = 점수≥65 & 최근승률≥55
-const OFF_SCORE = 40, OFF_RECENT_WR = 42, ON_SCORE = 65, ON_RECENT_WR = 55, MIN_CONF = 40;
+const OFF_SCORE = 40, OFF_RECENT_WR = 42, ON_SCORE = 65, ON_RECENT_WR = 55, MIN_CONF = 60;
 
 export function evaluateMeta(strats: MetaInput[]): MetaResult {
   const decisions: MetaDecision[] = strats.map(s => {
-    const pnls = s.pnls && s.pnls.length ? s.pnls : tradesFromSummary(s);
+    // 승률·총손익·거래수만으로 거래 순서를 합성해 MDD/Sharpe/최근승률을
+    // 만들지 않는다. 실제 체결 손익열이 없으면 자동 ON/OFF와 자금배분 모두 보류한다.
+    const pnls = Array.isArray(s.pnls)
+      ? s.pnls.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+      : [];
     const score = scoreStrategy(pnls);
     const m = computeMetrics(pnls);
     const recentWR = m.recentWR;
 
     let action: MetaAction = 'keep';
     let reason = '현재 상태 유지';
+
+    if (pnls.length === 0) {
+      return {
+        id: s.id, name: s.name, action,
+        score, recentWR: 0,
+        reason: '실제 체결 손익열 없음 — 자동 ON/OFF·자금배분 보류',
+      };
+    }
 
     if (score.confidence < MIN_CONF) {
       reason = `표본 부족(신뢰도 ${score.confidence}%) — 자동 전환 보류`;
@@ -60,9 +72,12 @@ export function evaluateMeta(strats: MetaInput[]): MetaResult {
 
   const offCount = decisions.filter(d => d.action === 'auto_off').length;
   const onCount = decisions.filter(d => d.action === 'auto_on').length;
+  const unverifiedCount = decisions.filter(d => d.score.confidence === 0).length;
   const summary = offCount || onCount
     ? `교체 제안: ${offCount}개 OFF · ${onCount}개 ON`
-    : '모든 전략이 적정 상태입니다';
+    : unverifiedCount > 0
+      ? `실제 거래 기록 부족 ${unverifiedCount}개 — 자동 교체 보류`
+      : '검증 기준상 현재 상태 유지';
   return { decisions, offCount, onCount, summary };
 }
 
