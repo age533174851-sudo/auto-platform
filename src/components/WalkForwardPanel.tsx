@@ -60,12 +60,12 @@ export default function WalkForwardPanel() {
           <FlaskConical size={18} color="#22D3EE" />
         </div>
         <div style={{ flex: 1 }}>
-          <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>워크포워드 검증</div>
-          <div style={{ color: T.muted, fontSize: 11 }}>진짜 엣지 vs 과최적화 구분</div>
+          <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>워크포워드 알고리즘 데모</div>
+          <div style={{ color: T.muted, fontSize: 11 }}>합성 데이터에서 검증 절차 동작 확인</div>
         </div>
       </div>
       <div style={{ color: T.muted, fontSize: 10, marginBottom: 14, lineHeight: 1.45 }}>
-        데이터를 학습·검증 구간으로 나눠, 학습에서 찾은 최적값이 검증에서도 유지되는지 확인합니다. 두 구간의 차이가 곡선맞추기의 크기입니다.
+        코드가 생성한 합성 데이터를 학습·검증 구간으로 나눠 워크포워드 절차 자체를 시험합니다. 이 결과는 실제 시장의 엣지 증거가 아니며, 실제 캔들 데이터로 다시 검증해야 합니다.
       </div>
 
       <div style={{ background: T.card, borderRadius: 10, padding: '12px', marginBottom: 12 }}>
@@ -82,7 +82,7 @@ export default function WalkForwardPanel() {
         ))}
         <button onClick={run} disabled={computing}
           style={{ width: '100%', minHeight: 42, marginTop: 4, background: computing ? T.alt : 'linear-gradient(135deg,#06B6D4,#0891B2)', color: computing ? T.muted : '#fff', border: 'none', borderRadius: 10, fontWeight: 800, fontSize: 13, cursor: computing ? 'wait' : 'pointer' }}>
-          {computing ? '검증 중… (45개 조합 × 폴드)' : '검증 실행'}
+          {computing ? '검증 중… (45개 조합 × 폴드)' : '합성 데이터로 절차 시험'}
         </button>
       </div>
 
