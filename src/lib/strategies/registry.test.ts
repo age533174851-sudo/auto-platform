@@ -56,13 +56,12 @@ export function runStrategyRegistryTests() {
 
   console.log('[전략 목록 — 환경별로 고를 수 있는 것]');
 
-  test('테스트넷 목록과 실전 목록이 다르다', () => {
+  test('검증 증거가 연결되지 않은 내장 전략은 TESTNET까지만 연다', () => {
     const t = runnableStrategies('TESTNET').map(s => s.id);
     const l = runnableStrategies('LIVE').map(s => s.id);
-    assert(t.includes('daily-ladder'), '지금 도는 전략이 테스트넷 목록에 없다');
-    assert(l.includes('daily-ladder'), '지금 도는 전략이 실전 목록에 없다');
-    // 분봉 돌파는 스케줄된 적이 없어 실전을 닫아 뒀다.
+    assert(t.includes('daily-ladder'), '계단식 전략이 테스트넷 목록에 없다');
     assert(t.includes('scalp'), '분봉 돌파가 테스트넷 목록에 없다');
+    assert(!l.includes('daily-ladder'), 'OOS/PAPER 증거가 없는 계단식 전략이 실전 목록에 있다');
     assert(!l.includes('scalp'), '실행 이력이 없는 전략이 실전 목록에 있다');
   });
 
@@ -77,10 +76,12 @@ export function runStrategyRegistryTests() {
     }
   });
 
-  test('실전에서 안 여는 전략은 실전에서 막는다', () => {
-    const r = resolveStrategy({ id: 'scalp', env: 'LIVE' });
-    eq(r.ok, false); eq(r.code, 'ENV_NOT_READY');
-    assert(r.spec != null, '막아도 어떤 전략이었는지는 알려 줘야 한다');
+  test('실전 검증이 끝나지 않은 내장 전략은 LIVE에서 막는다', () => {
+    for (const id of ['daily-ladder', 'scalp']) {
+      const r = resolveStrategy({ id, env: 'LIVE' });
+      eq(r.ok, false, id); eq(r.code, 'ENV_NOT_READY', id);
+      assert(r.spec != null, '막아도 어떤 전략이었는지는 알려 줘야 한다');
+    }
   });
 
   test('테스트넷에서는 통과한다', () => {
