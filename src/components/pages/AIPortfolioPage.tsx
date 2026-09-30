@@ -116,8 +116,8 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
       <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: SP.md }}>
         <IconBox tone="purple" size="md"><Brain size={IC_SIZE.md} strokeWidth={IC_STROKE} /></IconBox>
         <div>
-          <div style={F.title}>AI 추천 포트폴리오</div>
-          <div style={F.caption}>목표 · 성향 · 월투자금 입력 → 분산 자산 배분</div>
+          <div style={F.title}>포트폴리오 설계</div>
+          <div style={F.caption}>룰 기반 계획 도구 · 실시간 AI 예측 아님</div>
         </div>
       </div>
 
@@ -172,18 +172,23 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
         </Field>
 
         <button onClick={onGenerate} style={{ ...buttonStyle('primary', 'lg'), width: '100%', gap: 8, fontSize: 14, marginTop: 4 }}>
-          <Rocket size={16} strokeWidth={IC_STROKE} /> 추천 받기
+          <Rocket size={16} strokeWidth={IC_STROKE} /> 설계안 만들기
         </button>
       </div>
 
       {/* 결과 */}
+      {result && (
+        <div style={{ marginBottom: SP.md, padding: SP.sm + 2, background: A(T.ylw,'12'), border: `1px solid ${A(T.ylw,'45')}`, borderRadius: R.md, color: T.ylw, fontSize: 11, lineHeight: 1.55 }}>
+          이 화면은 실시간 AI가 종목을 예측하는 기능이 아닙니다. 현재는 정적 수익률·변동성 가정을 이용한 계획 도구이며, 실제 투자·자동매매 승격 근거로 사용하지 않습니다.
+        </div>
+      )}
       {result && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: SP.md }}>
           <div style={cardStyle()}>
             <div style={{ display: 'flex', gap: SP.lg, alignItems: 'center' }}>
               <Donut items={donutData} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={F.caption}>예상 연수익률</div>
+                <div style={F.caption}>계획 가정 연수익률</div>
                 <div style={{ ...F.numXL, color: T.grn }}>+{result.expectedAnnualReturn.toFixed(1)}%</div>
                 <div style={{ ...F.caption, marginTop: 8 }}>변동성</div>
                 <div style={{ ...F.numM, color: T.ylw }}>{result.expectedVolatility.toFixed(0)}%</div>
@@ -197,7 +202,7 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
           <div style={cardStyle()}>
             <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: SP.sm }}>
               <IconBox tone="blue" size="sm"><ChartLine size={IC_SIZE.sm} strokeWidth={IC_STROKE} /></IconBox>
-              <div style={F.section}>{HORIZON_LABEL[horizon]} 시뮬레이션</div>
+              <div style={F.section}>{HORIZON_LABEL[horizon]} 가정 시뮬레이션</div>
             </div>
             <ProjChart data={result.projection} goal={goal} />
             <div style={{ display: 'flex', gap: 10, marginTop: 6, ...F.muted }}>
@@ -211,7 +216,7 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
               return (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6, marginTop: SP.sm + 2 }}>
                   <MiniStat label="원금"          value={formatKRW(last.principal)} />
-                  <MiniStat label="기대 자산"     value={formatKRW(last.expected)}     color={T.acl} />
+                  <MiniStat label="가정 자산"     value={formatKRW(last.expected)}     color={T.acl} />
                   <MiniStat label="보수 시나리오" value={formatKRW(last.conservative)} color={T.ylw} />
                   <MiniStat label="낙관 시나리오" value={formatKRW(last.optimistic)}   color={T.grn} />
                 </div>
@@ -220,7 +225,7 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
             {result.monthsToGoal !== null && (
               <div style={{ marginTop: SP.sm + 2, padding: SP.sm + 2, background: T.acg, borderRadius: R.md, color: T.acl, fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Target size={14} strokeWidth={IC_STROKE} />
-                목표 달성 예상: {Math.floor(result.monthsToGoal/12)}년 {result.monthsToGoal % 12}개월
+                가정상 목표 도달: {Math.floor(result.monthsToGoal/12)}년 {result.monthsToGoal % 12}개월
               </div>
             )}
           </div>
@@ -229,7 +234,7 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
           <div style={cardStyle()}>
             <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, marginBottom: SP.sm }}>
               <IconBox tone="blue" size="sm"><ChartPie size={IC_SIZE.sm} strokeWidth={IC_STROKE} /></IconBox>
-              <div style={F.section}>추천 종목별 비중</div>
+              <div style={F.section}>설계 종목별 비중</div>
             </div>
             {(Array.isArray(result.allocations) ? result.allocations : []).map(a => (
               <div key={a.symbol} style={{ padding: '12px 14px', background: T.alt, borderRadius: R.md, marginBottom: 6 }}>
