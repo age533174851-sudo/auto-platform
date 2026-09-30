@@ -31,12 +31,13 @@ import React from 'react';
 import { C, FS } from '@/components/terminal/theme';
 import { OrderControls, OrderEstimate } from '../OrderControls';
 import { OrderBookView, useFunding, useCountdown } from '../OrderBookView';
-import { PositionRow } from '../PositionRow';
+import { PositionList } from '../PositionList';
 import { TradingScreenShell, InfoStat, LockedField,
   type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
 import { ctaVerdict } from '@/lib/trading/ctaVerdict';
 import { PaperOrderReviewSheet } from './PaperOrderReviewSheet';
+import { PaperCloseReviewSheet } from './PaperCloseReviewSheet';
 import { planLiquidationDistancePct } from '@/lib/trading/paperOrderReview';
 import { orderCapability, unsupported } from '@/lib/trading/capability';
 import { capability } from '@/lib/markets/marketType';
@@ -45,6 +46,7 @@ import type { useSellForm } from '@/lib/trading/useSellForm';
 import type { MoneyScope } from '@/lib/trading/gameMoney';
 import type { PaperLedger } from '@/lib/trading/usePaperLedger';
 import type { PaperOrderReview } from '@/lib/trading/usePaperOrderReview';
+import type { PaperCloseReview } from '@/lib/trading/usePaperCloseReview';
 
 type TradeForm = ReturnType<typeof useTradeForm>;
 type SellForm = ReturnType<typeof useSellForm>;
@@ -59,6 +61,11 @@ export interface FuturesScreenProps extends MarketScreenCommonProps {
    * 값을 봐야 해서 `form`과 같은 자리에서 한 번 만들어 내려온다.
    */
   review: PaperOrderReview;
+  /**
+   * 전량청산 확인 창. **여기서 만들지 않는다** — 배경 `inert`와 같은
+   * 상태를 봐야 한다.
+   */
+  closeReview: PaperCloseReview;
   /**
    * 진입인가 청산인가. **여기서 만들지 않는다** — 확인 창 판정과 전환
    * 잠금이 같은 값을 봐야 해서 `PaperOrderScreen`이 들고 있다.
@@ -175,7 +182,7 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
           ) : null}
           {/* **주문에 쓰는 바로 그 장부**를 넘긴다. 여기서 다시 조회하면
               같은 포지션이 두 화면에서 다르게 보인다(계좌가 갈린다). */}
-          <PositionRow positions={positions} auth={p.auth} onClosed={p.ledger.reload}/>
+          <PositionList positions={positions} closeReview={p.closeReview} auth={p.auth}/>
         </div>
       ),
     },
@@ -197,7 +204,7 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
       // ★ 확인 창이 떠 있으면 **이 화면 전체가 키보드에서도 사라진다.**
       //   덮개만으로는 포인터만 막힌다 — Tab으로 뒤의 진입/청산·배율·비중에
       //   갈 수 있고, 거기서 청산 탭으로 바꾼 채 확인을 누를 수 있었다.
-      backgroundInert={p.review.phase !== 'NONE'}
+      backgroundInert={p.review.phase !== 'NONE' || p.closeReview.phase !== 'NONE'}
       market={p.market} onMarket={p.onMarket}
       onPickInstrument={p.onPickInstrument}
       switchBlockedReason={p.switchBlockedReason}
@@ -249,6 +256,8 @@ export function UsdtFuturesTradingScreen(p: FuturesScreenProps) {
         열려 있을 때만 그려지고, 열려 있는 동안 시장·종목 전환은
         `switchLockState`가 막는다(`PaperOrderScreen`). */}
     <PaperOrderReviewSheet review={p.review} scope={p.scope}/>
+    {/* 청산 확인 창도 같은 통 안에서 덮는다 — 전역 z-index 경쟁이 없다 */}
+    <PaperCloseReviewSheet review={p.closeReview} scope={p.scope}/>
     </>
   );
 }

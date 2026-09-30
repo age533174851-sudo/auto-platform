@@ -12,12 +12,16 @@
 // ★ 여기에 계산이 없다
 // ────────────────────
 // 줄도 값도 `paperOrderReview.reviewRows()`가 만든다. 이 파일은 `—`를
-// 어디에 적을지와 `sticky` footer만 안다.
+// 어디에 적을지만 안다.
 //
-// 360×660
-// ───────
-// 본문이 길어져도 확인 버튼이 화면 밖으로 나가면 안 된다. 본문만 스크롤하고
-// 바닥 줄은 붙여 둔다 — 실기에서 버튼이 밀려 안 보인 적이 있다.
+// ★ 모양 · 포커스 · 바닥 줄은 `ReviewSheetShell`이 한다
+// ─────────────────────────────────────────────────────
+// 청산 확인 창(Phase 2D)과 키보드 규칙이 같다. 두 벌로 짜면 한쪽만
+// 고쳐지고, 눈으로는 똑같은데 한 창에서만 포커스가 새는 상태가 된다.
+// 본문 스크롤 + 바닥 줄 고정도 거기 있다 — 실기에서 확인 버튼이 밀려
+// 안 보인 적이 있다.
+//
+// **판정과 부수효과는 공유하지 않는다** — 진입과 청산은 다른 업무다.
 import React from 'react';
 import { C, FS, NUM } from '@/components/terminal/theme';
 import { formatMoneyForScope } from '@/lib/trading/gameMoney';
@@ -25,6 +29,7 @@ import { REVIEW_SERVER_RECALC_NOTE, type ReviewRow, type ReviewValue }
   from '@/lib/trading/paperOrderReview';
 import type { PaperOrderReview } from '@/lib/trading/usePaperOrderReview';
 import type { MoneyScope } from '@/lib/trading/gameMoney';
+import { ReviewSheetShell } from './ReviewSheetShell';
 
 export interface PaperOrderReviewSheetProps {
   review: PaperOrderReview;
@@ -70,108 +75,33 @@ function Row({ row, scope }: { row: ReviewRow; scope: MoneyScope }) {
 
 export function PaperOrderReviewSheet({ review, scope }: PaperOrderReviewSheetProps) {
   const open = review.phase !== 'NONE' && review.ticket != null;
-  const sheetRef = React.useRef<HTMLDivElement | null>(null);
-  const returnTo = React.useRef<HTMLElement | null>(null);
-
-  // ── ★ 포커스를 안으로 들이고, 닫으면 제자리로 돌려놓는다 ──
-  //
-  //   뒤 화면은 `inert`라 Tab이 그쪽으로 넘어가지 않는다(`TradingScreenShell`).
-  //   그런데 **열리는 순간의 포커스**는 아직 뒤 버튼에 있다 — 그대로 두면
-  //   포커스가 inert 안에 갇혀 사라지고, 키보드 사용자는 창을 조작할 수
-  //   없다. 그래서 열 때 안으로 옮기고 닫을 때 원래 버튼으로 되돌린다.
-  React.useEffect(() => {
-    if (!open) return;
-    returnTo.current = (document.activeElement as HTMLElement) || null;
-    const first = sheetRef.current?.querySelector<HTMLElement>(
-      '[data-testid="review-confirm"], button:not([disabled])');
-    (first || sheetRef.current)?.focus();
-    return () => {
-      const back = returnTo.current;
-      returnTo.current = null;
-      // 되돌릴 때 뒤 화면은 이미 inert가 풀린 뒤여야 한다 — 다음 프레임에.
-      if (back && document.contains(back)) {
-        requestAnimationFrame(() => { try { back.focus(); } catch { /* 사라졌다 */ } });
-      }
-    };
-  }, [open]);
-
-  // Tab이 끝에서 넘어가지 않게 감싼다. `inert`가 이미 막지만, 이 창이
-  // 다른 곳에 놓이더라도 포커스가 새 나가지 않게 여기서도 잠근다.
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key !== 'Tab') return;
-    const box = sheetRef.current;
-    if (!box) return;
-    const f = [...box.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])')];
-    if (f.length === 0) { e.preventDefault(); return; }
-    const first = f[0], last = f[f.length - 1];
-    const cur = document.activeElement as HTMLElement | null;
-    if (e.shiftKey && (cur === first || !box.contains(cur))) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && (cur === last || !box.contains(cur))) { e.preventDefault(); first.focus(); }
-  };
-
-  if (!open || review.ticket == null) return null;
   const v = review.verdict;
   const sending = review.phase === 'SUBMITTING';
+  const t = review.ticket;
 
   return (
-    <div data-testid="paper-order-review-backdrop"
-      // 뒤를 눌러서 닫지 않는다 — 보내는 중에 잘못 닫히면 결과를 잃는다.
-      style={{
-        position: 'absolute', inset: 0, zIndex: 40,
-        background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-end',
-      }}>
-      <div data-testid="paper-order-review-sheet"
-        ref={sheetRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={`주문 확인 — ${review.ticket.market} ${review.ticket.symbol} ${review.ticket.side}`}
-        tabIndex={-1}
-        onKeyDown={onKeyDown}
-        data-review-market={review.ticket.market}
-        data-review-symbol={review.ticket.symbol}
-        data-review-side={review.ticket.side}
-        data-review-phase={review.phase}
-        style={{
-          width: '100%', maxHeight: '86%', minHeight: 0,
-          display: 'flex', flexDirection: 'column',
-          background: C.panel, borderTop: `1px solid ${C.hair}`,
-          borderRadius: '12px 12px 0 0',
-        }}>
-        <div style={{
-          padding: '10px 14px 6px', fontSize: FS.lead, fontWeight: 800, color: C.text,
-        }}>주문 확인</div>
-
-        {/* 본문만 스크롤한다 */}
-        <div data-testid="review-body" style={{
-          flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain',
-          padding: '0 14px',
-        }}>
-          {review.rows.map(r => <Row key={r.key} row={r} scope={scope}/>)}
-
-          {review.message ? (
-            <div data-testid="review-message" style={{
-              paddingBottom: 8, fontSize: FS.nano, lineHeight: 1.4,
-              color: review.message.ok ? C.up : C.down,
-            }}>{review.message.text}</div>
-          ) : null}
-        </div>
-
-        {/* ★ 서버 재계산 문구는 **스크롤 밖**이다.
-            본문 안에 두면 360×660에서 접혀 보이지 않았다 — 그러면 화면
-            숫자가 확정 체결가로 읽힌다. 확인 버튼 바로 위, 늘 보이는
-            자리에 둔다. */}
-        <div data-testid="review-recalc-note" style={{
-          flexShrink: 0, padding: '6px 14px 0', background: C.panel,
-          fontSize: FS.micro, color: C.faint, lineHeight: 1.45,
-        }}>{REVIEW_SERVER_RECALC_NOTE}</div>
-
-        {/* 바닥 줄은 붙어 있다 — 내용이 길어도 확인 버튼이 사라지지 않는다 */}
-        <div data-testid="review-footer" style={{
-          position: 'sticky', bottom: 0, flexShrink: 0,
-          display: 'flex', gap: 8, padding: '8px 14px 14px',
-          background: C.panel, borderTop: `1px solid ${C.hair}`,
-        }}>
+    <ReviewSheetShell
+      open={open}
+      testid="paper-order-review-sheet"
+      title="주문 확인"
+      label={`주문 확인 — ${t?.market ?? ''} ${t?.symbol ?? ''} ${t?.side ?? ''}`}
+      dataAttrs={{
+        'data-review-market': t?.market ?? '',
+        'data-review-symbol': t?.symbol ?? '',
+        'data-review-side': t?.side ?? '',
+        'data-review-phase': review.phase,
+      }}
+      // 이미 실기·검사기가 보고 있는 이름을 그대로 쓴다 — 공용 껍데기로
+      // 옮겼다는 이유로 증거의 이름이 바뀌면 그 증거가 끊긴다.
+      ids={{
+        backdrop: 'paper-order-review-backdrop', body: 'review-body',
+        note: 'review-recalc-note', footer: 'review-footer',
+        blocked: 'review-blocked-reason',
+      }}
+      note={REVIEW_SERVER_RECALC_NOTE}
+      blockedReason={v.reason}
+      footer={
+        <>
           <button type="button" data-testid="review-cancel"
             disabled={sending}
             title={sending ? '주문을 보내는 중입니다' : undefined}
@@ -200,15 +130,16 @@ export function PaperOrderReviewSheet({ review, scope }: PaperOrderReviewSheetPr
               fontSize: FS.small, fontWeight: 800,
               cursor: v.off ? 'not-allowed' : 'pointer',
             }}>{sending ? '보내는 중…' : '확인 및 주문'}</button>
-        </div>
+        </>
+      }>
+      {review.rows.map(r => <Row key={r.key} row={r} scope={scope}/>)}
 
-        {/* 왜 못 누르는지 적는다 — 회색 버튼만 두지 않는다 */}
-        {v.reason ? (
-          <div data-testid="review-blocked-reason" style={{
-            padding: '0 14px 12px', fontSize: FS.micro, color: C.warn, lineHeight: 1.4,
-          }}>{v.reason}</div>
-        ) : null}
-      </div>
-    </div>
+      {review.message ? (
+        <div data-testid="review-message" style={{
+          paddingBottom: 8, fontSize: FS.nano, lineHeight: 1.4,
+          color: review.message.ok ? C.up : C.down,
+        }}>{review.message.text}</div>
+      ) : null}
+    </ReviewSheetShell>
   );
 }

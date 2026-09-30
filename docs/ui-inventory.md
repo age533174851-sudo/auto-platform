@@ -17,7 +17,7 @@
 | 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
-| 겹쳐 뜨는 층 | 10 |
+| 겹쳐 뜨는 층 | 12 |
 | 피드백 | 3 |
 | 상태 종류 | 7 |
 | 상태별 재고 (공통 물건 있음 / 여러 벌 / 없음 / 미정) | 1 / 2 / 2 / 2 |
@@ -250,6 +250,8 @@
 | `BottomSheet` | `src/components/terminal/BottomSheet.tsx` | DUPLICATED | 모바일 시트 | **하위 폴더에 있어서 처음 등록할 때 위치를 틀리게 적었다.** `src/lib/ui/mobileSheet.ts`(높이·키보드 판정)를 컴포넌트로 착각했다 — 재귀 탐색을 붙이고 나서야 드러났다. 판정은 lib에, 그리기는 여기에 있고, 터미널 밖 화면들은 이것을 쓰지 않고 각자 시트를 그린다 |
 | `ConfirmDialog` | `src/lib/confirm/dialog.ts` | EXISTS | `confirm()` 대체 — Promise로 답을 기다리는 전역 확인 | ConfirmHost가 이것을 그린다. 판정과 그리기가 나뉜 형태 |
 | `ChartDrawer` | `src/components/trading/markets/ChartDrawer.tsx` | EXISTS | 거래 화면의 차트 — **기본은 접힌 막대 하나**, 누르면 주문 화면 위를 덮는다 | 겹치는 층이지만 전역 z-index 경쟁이 없다. 거래 화면 통 안에서 `position: absolute; inset: 0`으로 덮으므로 하단 탭·모달과 다투지 않는다. **기본이 접힘인 것이 계약이다** — 펴짐이 기본이면 260px 차트가 주문 버튼을 화면 밖으로 밀어내던 배치가 이름만 바꿔 돌아온다 (`scripts/check-canonical-trading.mjs`가 막는다) |
+| `ReviewSheetShell` | `src/components/trading/markets/ReviewSheetShell.tsx` | EXISTS | 확인 창의 공용 껍데기 — dialog 의미 · 포커스 · 바닥 줄 고정 | **표현과 키보드 규칙만 공유한다.** 주문 확인(Phase 2C)과 전량청산 확인(Phase 2D)이 각자 포커스를 짜면 한쪽만 고쳐지고, 눈으로는 똑같은데 한 창에서만 포커스가 샌다. 상태 기계·확인 판정·부수효과는 **공유하지 않는다** — 진입은 `{market,symbol,side}`, 청산은 `positionId`가 정체성이고 업무가 다르다. 배경 `inert`도 여기가 아니다(무엇을 덮는지가 화면마다 다르다) — `lib/ui/useInert`를 각 화면이 부른다 |
+| `PaperCloseReviewSheet` | `src/components/trading/markets/PaperCloseReviewSheet.tsx` | EXISTS | 전량청산 — 되돌릴 수 없는 동작 앞에서 읽는 창 (읽기 전용) | 예전에는 `[전량청산]`이 **한 번의 클릭으로** `/api/paper/close`에 POST했다. 이제 그 버튼은 이 창을 열 뿐이고 요청은 `usePaperCloseReview` 한 곳에서 나간다. 본문은 `{ positionId }` 하나뿐 — 가격도 계좌도 보내지 않는다(서버가 포지션에서 찾는다). **예상 실현손익·ROE를 적지 않는다** — 열린 포지션의 미실현 손익 정본이 없어서 화면에서 만들면 세 번째 손익 권위가 된다. `scripts/check-canonical-trading.mjs` ㉛이 배선을 지킨다 |
 | `PaperOrderReviewSheet` | `src/components/trading/markets/PaperOrderReviewSheet.tsx` | EXISTS | USDⓈ-M 모의 진입 — 보내기 전에 읽는 창 (읽기 전용) | **두 번째 주문폼이 아니다.** 값을 고칠 칸이 하나도 없다 — 있으면 폼 상태가 두 벌이 되고 무엇이 나가는지 코드를 읽어야만 알게 된다. `ChartDrawer`처럼 거래 화면 통 안에서 `position: absolute; inset: 0`으로 덮으므로 전역 z-index 경쟁이 없다. 열려 있는 동안 시장·종목 전환이 잠긴다(`switchLockState`의 `ORDER_REVIEW`) — 창에는 ETHUSDT가 적혀 있는데 뒤에서 종목이 바뀌면 읽은 주문과 나가는 주문이 달라진다. 판정은 `lib/trading/paperOrderReview.ts` 한 곳이고 `scripts/check-canonical-trading.mjs` ㉙가 배선을 지킨다 |
 | `OverlayStack` | `src/lib/nav/overlayStack.ts` | EXISTS | 겹침 순서와 뒤로가기 | 판정만 있다. 그리는 컴포넌트는 없다 |
 

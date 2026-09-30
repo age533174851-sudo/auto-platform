@@ -47,7 +47,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     env:
       # 빌드에 실제 키가 필요하지는 않다(없으면 각 기능이 503으로 그 사실을

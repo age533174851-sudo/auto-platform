@@ -49,7 +49,12 @@ const PLAN    = 'src/lib/engine/paperPlan.ts';
 const PEXEC   = 'src/lib/engine/paperExecution.ts';
 const BBUY   = 'src/components/trading/BeginnerBuyScreen.tsx';
 const POS    = 'src/components/trading/PositionsOrdersScreen.tsx';
-const ROW    = 'src/components/trading/PositionRow.tsx';
+const ROW    = 'src/components/trading/PositionList.tsx';
+const CLOSERV = 'src/lib/trading/paperCloseReview.ts';
+const CLOSEHK = 'src/lib/trading/usePaperCloseReview.ts';
+const CLOSESH = 'src/components/trading/markets/PaperCloseReviewSheet.tsx';
+const SHEETSH = 'src/components/trading/markets/ReviewSheetShell.tsx';
+const INERTF  = 'src/lib/ui/useInert.ts';
 const CTAV   = 'src/lib/trading/ctaVerdict.ts';
 const REVIEW = 'src/lib/trading/paperOrderReview.ts';
 const REVHK  = 'src/lib/trading/usePaperOrderReview.ts';
@@ -290,8 +295,8 @@ const CASES = [
      `const _led = () => usePaperLedger(null as any, true);\nexport function BeginnerBuyScreen(`]]],
 
   ['MUT-N53 ★ 한 갈래에만 다른 판정 인스턴스를 넘긴다', ORDER, 'RED',
-   [[`            form={form} sell={sell} review={review} ledger={ledger} auth={auth}`,
-     `            form={{ ...form } as any} sell={sell} review={review} ledger={ledger} auth={auth}`]]],
+   [[`            form={form} sell={sell} review={review} closeReview={closeReview}`,
+     `            form={{ ...form } as any} sell={sell} review={review} closeReview={closeReview}`]]],
 
   ['MUT-N54 ★ 시장 화면이 거래소 격자를 다시 맞춘다 (격자 정본이 둘이 된다)', SPOT, 'RED',
    [[`export function SpotTradingScreen(p: SpotScreenProps) {`,
@@ -331,18 +336,21 @@ const CASES = [
   // ── ⑭ 포지션은 주문이 간 장부에서 ──
 
   ['MUT-N60 포지션 줄이 스스로 장부를 읽는다 (계좌가 갈린다)', ROW, 'RED',
-   [[`export function PositionRow({ positions, auth, onClosed }: PositionRowProps) {`,
-     `export function PositionRow({ positions, auth, onClosed }: PositionRowProps) {\n  usePaperTarget();`]]],
+   [[`export function PositionList({ positions, closeReview, auth }: PositionListProps) {`,
+     `export function PositionList({ positions, closeReview, auth }: PositionListProps) {\n  usePaperTarget();`]]],
 
   ['MUT-N61 거래 화면이 주문 장부 대신 빈 목록을 넘긴다', USDM, 'RED',
-   [[`          <PositionRow positions={positions} auth={p.auth} onClosed={p.ledger.reload}/>`,
-     `          <PositionRow positions={[]} auth={p.auth} onClosed={p.ledger.reload}/>`]]],
+   [[`          <PositionList positions={positions} closeReview={p.closeReview} auth={p.auth}/>`,
+     `          <PositionList positions={[]} closeReview={p.closeReview} auth={p.auth}/>`]]],
 
-  ['MUT-N62 청산 뒤에 장부를 다시 읽지 않는다', USDM, 'RED',
-   [[`onClosed={p.ledger.reload}`, `onClosed={() => {}}`]]],
+  // 청산 뒤 장부 재조회는 이제 확인 창이 한다 — 화면은 그 훅에 넘긴다
+  ['MUT-N62 청산 뒤에 장부를 다시 읽지 않는다', ORDER, 'RED',
+   [[`    positions: ledger.openPositions, auth, onClosed: ledger.reload,`,
+     `    positions: ledger.openPositions, auth, onClosed: () => {},`]]],
 
   ['MUT-N63 거래 탭이 청산 뒤에 장부를 다시 읽지 않는다', POS, 'RED',
-   [[`onClosed={ledger.reload}`, `onClosed={() => {}}`]]],
+   [[`    positions, auth, onClosed: ledger.reload,`,
+     `    positions, auth, onClosed: () => {},`]]],
 
   // ── ⑮ 계약 정본을 못 읽으면 통과시키지 않는다 ──
   //
@@ -723,8 +731,8 @@ const CASES = [
      `    void fetch('/api/orders/preflight');\n    void form.submit().then(r => {`]]],
 
   ['MUT-R6 ★ 확인 창에 배율 입력이 생긴다 (폼 상태가 두 벌)', REVSH, 'RED',
-   [[`        <div style={{\n          padding: '10px 14px 6px', fontSize: FS.lead, fontWeight: 800, color: C.text,\n        }}>주문 확인</div>`,
-     `        <div style={{\n          padding: '10px 14px 6px', fontSize: FS.lead, fontWeight: 800, color: C.text,\n        }}>주문 확인<input/></div>`]]],
+   [[`      {review.rows.map(r => <Row key={r.key} row={r} scope={scope}/>)}`,
+     `      {review.rows.map(r => <Row key={r.key} row={r} scope={scope}/>)}\n      <input/>`]]],
 
   ['MUT-R7 ★ 훅이 제출 조건을 다시 계산한다', REVHK, 'RED',
    [[`    if (!step.effects.includes('SUBMIT')) return;`,
@@ -766,7 +774,7 @@ const CASES = [
    [[`              review.confirm();`, `              void (review as any).form.submit();`]]],
 
   ['MUT-R17 ★ 서버 재계산 문구를 지운다 (미리보기가 확정으로 읽힌다)', REVSH, 'RED',
-   [[`        }}>{REVIEW_SERVER_RECALC_NOTE}</div>`, `        }}>확정 체결가</div>`]]],
+   [[`      note={REVIEW_SERVER_RECALC_NOTE}`, `      note={'확정 체결가'}`]]],
 
   ['MUT-R18 ★ 현물 화면이 확인 창을 끌어온다 (범위 이탈)', SPOT, 'RED',
    [[`import { OrderBookView } from '../OrderBookView';`,
@@ -779,7 +787,7 @@ const CASES = [
    [[`    referencePrice: i.price,\n`, ``]]],
 
   ['MUT-R21 ★ 어떤 주문을 보여 주는지 화면에서 지운다', REVSH, 'RED',
-   [[`        data-review-symbol={review.ticket.symbol}\n`, ``]]],
+   [[`        'data-review-symbol': t?.symbol ?? '',\n`, ``]]],
 
   ['MUT-R22 ★ 호가 줄이 가격을 안 받는데도 눌린다 (실기 프로브가 잡은 것)', BOOKV, 'RED',
    [[`      disabled={!onPickPrice}\n      onClick={() => onPickPrice?.(p)}`,
@@ -813,15 +821,15 @@ const CASES = [
    [[`      if (!env.intentOpen) return stay(REVIEW_CLOSED);\n`, ``]]],
 
   ['MUT-R30 ★ 확인 창이 떠도 뒤 화면을 비활성화하지 않는다 (키보드로 샌다)', USDM, 'RED',
-   [[`      backgroundInert={p.review.phase !== 'NONE'}\n`, ``]]],
+   [[`      backgroundInert={p.review.phase !== 'NONE' || p.closeReview.phase !== 'NONE'}\n`, ``]]],
 
   ['MUT-R31 ★ 배경을 시각적으로만 가린다 (inert를 안 세운다)', SHELLF, 'RED',
    [[`    el.inert = !!p.backgroundInert;`, `    el.style.pointerEvents = p.backgroundInert ? 'none' : '';`]]],
 
-  ['MUT-R32 ★ 확인 창에서 modal 의미를 뺀다', REVSH, 'RED',
+  ['MUT-R32 ★ 확인 창에서 modal 의미를 뺀다', SHEETSH, 'RED',
    [[`        aria-modal="true"\n`, ``]]],
 
-  ['MUT-R33 ★ 확인 창에서 Tab 가둠을 뺀다', REVSH, 'RED',
+  ['MUT-R33 ★ 확인 창에서 Tab 가둠을 뺀다', SHEETSH, 'RED',
    [[`    if (e.key !== 'Tab') return;`, `    return;`]]],
 
   ['MUT-R34 ★ 정보줄이 배율만으로 청산거리를 낸다 (화면에 두 숫자)', USDM, 'RED',
@@ -830,6 +838,107 @@ const CASES = [
 
   ['MUT-R35 ★ 청산가가 없어도 거리를 내놓는다', REVIEW, 'RED',
    [[`  if (plan.liquidationPrice == null) return null;\n`, ``]]],
+
+  // ── ㉛ 전량청산도 확인 창을 거친다 (Phase 2D) ──
+
+  ['MUT-D1 ★ 청산 버튼이 곧바로 요청을 보낸다 (옛 고장 그대로)', ROW, 'RED',
+   [[`          closeReview.open(position.id);`,
+     `          void fetch('/api/paper/close', { method: 'POST' });`]]],
+
+  ['MUT-D2 ★ 첫 포지션만 그린다 (나머지는 닫을 방법이 없다)', ROW, 'RED',
+   [[`      {positions.map(p => (
+        <PositionItem key={p.id} position={p} closeReview={closeReview} auth={auth}/>
+      ))}`,
+     `      {[positions[0]].map(p => (
+        <PositionItem key={p.id} position={p} closeReview={closeReview} auth={auth}/>
+      ))}`]]],
+
+  ['MUT-D3 ★ 포지션을 id로 구별하지 않는다', ROW, 'RED',
+   [[`        <PositionItem key={p.id} position={p}`, `        <PositionItem key={p.symbol} position={p}`]]],
+
+  ['MUT-D4 ★ 청산 본문에 체결가를 끼워 넣는다', CLOSERV, 'RED',
+   [[`  return { positionId: String(positionId) };`,
+     `  return { positionId: String(positionId), exitPrice: 0 } as any;`]]],
+
+  ['MUT-D5 ★ 청산 본문에 계좌를 끼워 넣는다', CLOSEHK, 'RED',
+   [[`          body: JSON.stringify(closeRequestBody(id)),`,
+     `          body: JSON.stringify({ ...closeRequestBody(id), accountId: 'x' }),`]]],
+
+  ['MUT-D6 ★ 이미 닫힌 포지션도 확인을 통과시킨다', CLOSERV, 'RED',
+   [[`    : !i.openIds.includes(id) ? '포지션이 더 이상 열려 있지 않습니다'\n`, ``]]],
+
+  ['MUT-D7 ★ 장부에 없는 포지션의 창을 연다', CLOSERV, 'RED',
+   [[`      if (!id || !env.openIds.includes(id)) return stay(s);`, `      if (!id) return stay(s);`]]],
+
+  ['MUT-D8 ★ 전이가 청산 부수효과를 내지 않는다 (확인해도 안 닫힌다)', CLOSERV, 'RED',
+   [[`      return { state: { opened: s.opened, sent: true }, effects: ['CLOSE'] };`,
+     `      return { state: { opened: s.opened, sent: true }, effects: [] };`]]],
+
+  ['MUT-D9 ★ 연타를 막지 않는다 (같은 포지션이 두 번 닫힌다)', CLOSERV, 'RED',
+   [[`      return { state: { opened: s.opened, sent: true }, effects: ['CLOSE'] };`,
+     `      return { state: { opened: s.opened, sent: false }, effects: ['CLOSE'] };`]]],
+
+  ['MUT-D10 ★ 실패했는데 창을 닫는다 (사유와 재시도를 잃는다)', CLOSERV, 'RED',
+   [[`      return stay({ opened: e.ok ? null : s.opened, sent: false });`,
+     `      return stay({ opened: null, sent: false });`]]],
+
+  ['MUT-D11 ★ 훅이 제출 조건을 다시 계산한다', CLOSEHK, 'RED',
+   [[`    if (!step.effects.includes('CLOSE')) return;`, `    if (e.type !== 'CONFIRM') return;`]]],
+
+  ['MUT-D12 ★ 청산 뒤 장부를 다시 읽지 않는다', CLOSEHK, 'RED',
+   [[`          onClosedRef.current();`, ``]]],
+
+  ['MUT-D13 ★ 확인 창을 만들어 놓고 그리지 않는다 (배선 누락)', POS, 'RED',
+   [[`    <PaperCloseReviewSheet review={closeReview} scope={scopeForTarget(target)}/>\n`, ``]]],
+
+  ['MUT-D14 ★ 거래 화면이 청산 확인 창을 그리지 않는다', USDM, 'RED',
+   [[`    <PaperCloseReviewSheet review={p.closeReview} scope={p.scope}/>\n`, ``]]],
+
+  ['MUT-D15 ★ 청산 확인 중에 뒤 본문이 키보드에 살아 있다', POS, 'RED',
+   [[`  useInert(bodyRef, closeReview.phase !== 'NONE');`, ``]]],
+
+  ['MUT-D16 ★ 거래 화면이 청산 확인 중에 뒤를 비활성화하지 않는다', USDM, 'RED',
+   [[`      backgroundInert={p.review.phase !== 'NONE' || p.closeReview.phase !== 'NONE'}`,
+     `      backgroundInert={p.review.phase !== 'NONE'}`]]],
+
+  ['MUT-D17 ★ inert 대신 포인터만 막는다', INERTF, 'RED',
+   [[`    el.inert = !!on;`, `    el.style.pointerEvents = on ? 'none' : '';`]]],
+
+  ['MUT-D18 ★ 공용 껍데기에서 modal 의미를 뺀다', SHEETSH, 'RED',
+   [[`        aria-modal="true"\n`, ``]]],
+
+  ['MUT-D19 ★ 공용 껍데기에서 Tab 가둠을 뺀다', SHEETSH, 'RED',
+   [[`    if (e.key !== 'Tab') return;`, `    return;`]]],
+
+  ['MUT-D20 ★ 청산 확인 버튼의 DOM 꺼짐을 판정에서 뗀다', CLOSESH, 'RED',
+   [[`            disabled={v.off}\n            data-close-action={v.action}`,
+     `            disabled={sending}\n            data-close-action={v.action}`]]],
+
+  ['MUT-D21 ★ 청산 창이 열린 포지션의 손익을 지어낸다', CLOSESH, 'RED',
+   [[`      {review.rows.map(r => <Row key={r.key} row={r} scope={scope}/>)}`,
+     `      {review.rows.map(r => <Row key={r.key} row={r} scope={scope}/>)}\n      <div>{'unrealized'}</div>`]]],
+
+  ['MUT-D22 ★ 청산 확인이 주문 확인의 판정을 끌어온다 (업무를 합친다)', CLOSEHK, 'RED',
+   [[`import {
+  CLOSE_REVIEW_CLOSED,`,
+     `import { confirmVerdict } from './paperOrderReview';
+import {
+  CLOSE_REVIEW_CLOSED,`]]],
+
+  ['MUT-D9b ★ 연타 방지를 전이에서 뺀다 (배선 검사도 잡는다)', CLOSERV, 'RED',
+   [[`      return { state: { opened: s.opened, sent: true }, effects: ['CLOSE'] };`,
+     `      return { state: { opened: s.opened, sent: !!s.opened }, effects: ['CLOSE'] };`]]],
+
+  ['MUT-D23 ★ 서버 재조회 문구를 지운다', CLOSESH, 'RED',
+   [[`      note={CLOSE_SERVER_REPRICE_NOTE}`, `      note={'확정 청산가'}`]]],
+
+  ['MUT-D24 ★ 주문 확인 창이 공용 껍데기를 버리고 따로 짠다', REVSH, 'RED',
+   [[`    <ReviewSheetShell`, `    <div role="dialog"`]]],
+
+  ['OK-D1 청산 판정 정본에 주석 한 줄 추가', CLOSERV, 'GREEN',
+   [[`export function closeConfirmVerdict(`, `// 대조군\nexport function closeConfirmVerdict(`]]],
+  ['OK-D2 공용 껍데기에 주석 한 줄 추가', SHEETSH, 'GREEN',
+   [[`export function ReviewSheetShell(`, `// 대조군\nexport function ReviewSheetShell(`]]],
 
   ['OK-R1 확인 판정 정본에 주석 한 줄 추가', REVIEW, 'GREEN',
    [[`export function confirmVerdict(`, `// 대조군\nexport function confirmVerdict(`]]],

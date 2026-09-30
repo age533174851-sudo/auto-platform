@@ -707,6 +707,25 @@ export const OVERLAYS: Overlay[] = [
       + '**기본이 접힘인 것이 계약이다** — 펴짐이 기본이면 260px 차트가 주문 버튼을 '
       + '화면 밖으로 밀어내던 배치가 이름만 바꿔 돌아온다 '
       + '(`scripts/check-canonical-trading.mjs`가 막는다)' },
+  { id: 'ReviewSheetShell',
+    file: 'src/components/trading/markets/ReviewSheetShell.tsx', status: 'EXISTS',
+    purpose: '확인 창의 공용 껍데기 — dialog 의미 · 포커스 · 바닥 줄 고정',
+    notes: '**표현과 키보드 규칙만 공유한다.** 주문 확인(Phase 2C)과 전량청산 '
+      + '확인(Phase 2D)이 각자 포커스를 짜면 한쪽만 고쳐지고, 눈으로는 똑같은데 '
+      + '한 창에서만 포커스가 샌다. 상태 기계·확인 판정·부수효과는 **공유하지 '
+      + '않는다** — 진입은 `{market,symbol,side}`, 청산은 `positionId`가 '
+      + '정체성이고 업무가 다르다. 배경 `inert`도 여기가 아니다(무엇을 덮는지가 '
+      + '화면마다 다르다) — `lib/ui/useInert`를 각 화면이 부른다' },
+  { id: 'PaperCloseReviewSheet',
+    file: 'src/components/trading/markets/PaperCloseReviewSheet.tsx', status: 'EXISTS',
+    purpose: '전량청산 — 되돌릴 수 없는 동작 앞에서 읽는 창 (읽기 전용)',
+    notes: '예전에는 `[전량청산]`이 **한 번의 클릭으로** `/api/paper/close`에 '
+      + 'POST했다. 이제 그 버튼은 이 창을 열 뿐이고 요청은 '
+      + '`usePaperCloseReview` 한 곳에서 나간다. 본문은 `{ positionId }` '
+      + '하나뿐 — 가격도 계좌도 보내지 않는다(서버가 포지션에서 찾는다). '
+      + '**예상 실현손익·ROE를 적지 않는다** — 열린 포지션의 미실현 손익 정본이 '
+      + '없어서 화면에서 만들면 세 번째 손익 권위가 된다. '
+      + '`scripts/check-canonical-trading.mjs` ㉛이 배선을 지킨다' },
   { id: 'PaperOrderReviewSheet',
     file: 'src/components/trading/markets/PaperOrderReviewSheet.tsx', status: 'EXISTS',
     purpose: 'USDⓈ-M 모의 진입 — 보내기 전에 읽는 창 (읽기 전용)',
