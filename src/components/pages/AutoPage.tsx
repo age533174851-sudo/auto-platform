@@ -708,7 +708,7 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
                       {s.asset} · {s.timeframe} · {KIND_LABEL[kind]}
                     </div>
                   </div>
-                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flexShrink:0,minHeight:MIN_CONTROL_TARGET,padding:'0 12px',background:A(T.grn,'15'),color:T.grn,border:`1px solid ${A(T.grn,'30')}`,borderRadius:8,fontSize:10,fontWeight:800,cursor:'pointer'}}>시작</button>
+                  <button onClick={e=>{e.stopPropagation();onNav?.('strategies');}} style={{flexShrink:0,minHeight:MIN_CONTROL_TARGET,padding:'0 12px',background:A(T.acl,'15'),color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:8,fontSize:10,fontWeight:800,cursor:'pointer'}}>전략빌더에서 만들기</button>
                 </div>
               </Card>
             );
@@ -791,8 +791,8 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
 
                 {/* Controls — 버튼 세 개가 늘 자리를 차지할 이유가 없다 */}
                 <div style={{display:'flex',gap:6,alignItems:'center'}}>
-                  <button onClick={e=>{e.stopPropagation();toggleStrat(s.id);}} style={{flex:1,minHeight:MIN_CONTROL_TARGET,padding:'7px',background:acts.primary.id==='pause'?A(T.ylw,'15'):A(T.grn,'15'),color:acts.primary.id==='pause'?T.ylw:T.grn,border:`1px solid ${acts.primary.id==='pause'?A(T.ylw,'30'):A(T.grn,'30')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
-                    {acts.primary.label}
+                  <button onClick={e=>{e.stopPropagation();onNav?.('strategies');}} style={{flex:1,minHeight:MIN_CONTROL_TARGET,padding:'7px',background:A(T.acl,'15'),color:T.acl,border:`1px solid ${A(T.acl,'30')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
+                    전략빌더에서 만들기
                   </button>
                   <button onClick={e=>{e.stopPropagation();setSelStrat(selStrat?.id===s.id?null:s);}} style={{minHeight:MIN_CONTROL_TARGET,padding:'7px 12px',background:T.acg,color:T.acl,border:`1px solid ${A(T.acl,'40')}`,borderRadius:8,fontSize:10.5,fontWeight:800,cursor:'pointer'}}>
                     {acts.secondary.label}
