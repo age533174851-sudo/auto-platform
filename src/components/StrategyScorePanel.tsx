@@ -3,7 +3,7 @@
 import React, { useState, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { Star, Award, ChevronDown, ChevronUp } from 'lucide-react';
-import { scoreStrategy, tradesFromSummary, recommendStrategy, type StrategyScore } from '@/lib/autotrade/strategyScore';
+import { scoreStrategy, recommendStrategy, type StrategyScore } from '@/lib/autotrade/strategyScore';
 
 function Stars({ v, color }: { v: number; color: string }) {
   return (
@@ -25,13 +25,15 @@ function Stars({ v, color }: { v: number; color: string }) {
   );
 }
 
-export default function StrategyScorePanel({ strategies = [] }: { strategies?: { id: string; name: string; winRate: number; totalPnl: number; trades: number }[] }) {
+export default function StrategyScorePanel({ strategies = [] }: { strategies?: { id: string; name: string; winRate: number; totalPnl: number; trades: number; pnls?: number[] }[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const scored = useMemo(() => strategies.map(s => ({
     id: s.id, name: s.name,
-    score: scoreStrategy(tradesFromSummary(s)),
-  })).sort((a, b) => b.score.score - a.score.score), [strategies]);
+    // MDD·Sharpe·최근 성과는 거래 순서가 필요하다.
+    // 요약 승률/총손익에서 가짜 거래열을 만들지 않고 실제 체결 손익열만 쓴다.
+    score: scoreStrategy(Array.isArray(s.pnls) ? s.pnls : []),
+  })).sort((a, b) => b.score.confidence - a.score.confidence || b.score.score - a.score.score), [strategies]);
 
   const reco = useMemo(() => recommendStrategy(scored), [scored]);
 
@@ -42,22 +44,29 @@ export default function StrategyScorePanel({ strategies = [] }: { strategies?: {
           <Award size={18} color="#F59E0B" />
         </div>
         <div>
-          <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>AI 전략 점수</div>
-          <div style={{ color: T.muted, fontSize: 11 }}>승률 · Profit Factor · MDD · Sharpe · 최근 성과</div>
+          <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>전략 검증 점수</div>
+          <div style={{ color: T.muted, fontSize: 11 }}>실제 체결 손익열 기반 · MDD · Sharpe · 최근 성과</div>
         </div>
       </div>
 
-      {/* AI 추천 */}
-      {reco && (
+      {/* 실제 거래 표본이 충분할 때만 추천한다. */}
+      {reco ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: reco.score.gradeColor + '14', border: `1px solid ${reco.score.gradeColor}40`, borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
           <Award size={17} color={reco.score.gradeColor} />
           <div style={{ flex: 1 }}>
-            <div style={{ color: T.muted, fontSize: 10 }}>AI 현재 추천 전략</div>
+            <div style={{ color: T.muted, fontSize: 10 }}>검증 표본 기준 추천</div>
             <div style={{ color: T.txt, fontSize: 13.5, fontWeight: 800 }}>{reco.name}</div>
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ color: reco.score.gradeColor, fontSize: 20, fontWeight: 900 }}>{reco.score.score}점</div>
             <Stars v={reco.score.stars} color={reco.score.gradeColor} />
+          </div>
+        </div>
+      ) : (
+        <div style={{ background: T.alt, border: `1px solid ${T.border}`, borderRadius: 12, padding: '11px 13px', marginBottom: 14 }}>
+          <div style={{ color: T.txt, fontSize: 12, fontWeight: 800 }}>추천 보류</div>
+          <div style={{ color: T.muted, fontSize: 10.5, lineHeight: 1.5, marginTop: 3 }}>
+            실제 PAPER/TESTNET/LIVE 체결 손익열이 충분히 쌓이기 전에는 전략을 추천하지 않습니다.
           </div>
         </div>
       )}
@@ -75,7 +84,7 @@ export default function StrategyScorePanel({ strategies = [] }: { strategies?: {
                 <Stars v={score.stars} color={score.gradeColor} />
               </div>
               <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                <div style={{ color: score.gradeColor, fontSize: 16, fontWeight: 900 }}>{score.score}</div>
+                <div style={{ color: score.gradeColor, fontSize: 16, fontWeight: 900 }}>{score.confidence > 0 ? score.score : '—'}</div>
                 <div style={{ color: T.muted, fontSize: 9 }}>신뢰도 {score.confidence}%</div>
               </div>
               {open ? <ChevronUp size={15} color={T.muted} /> : <ChevronDown size={15} color={T.muted} />}
@@ -100,7 +109,7 @@ export default function StrategyScorePanel({ strategies = [] }: { strategies?: {
       })}
 
       <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginTop: 8 }}>
-        5개 지표를 가중 합산합니다 (PF 25% · 승률/MDD/최근 20% · Sharpe 15%). 표본 20회 미만은 신뢰도만큼 중립(50점)으로 수렴해 과신을 방지합니다.
+        실제 체결 손익열만 평가합니다. 요약 승률·총손익에서 거래 순서를 합성하지 않습니다. 200회에서 신뢰도 100%에 도달하고, 추천은 충분한 표본이 있을 때만 표시합니다.
       </div>
     </div>
   );
