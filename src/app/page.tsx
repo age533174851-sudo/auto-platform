@@ -263,7 +263,7 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
   {id:'alerts',       label:'알림',       Icon: Bell, core: true},
   {id:'social',       label:'소셜',       Icon: Users},
   {id:'hub_accounts', label:'통합운용',   Icon: Landmark},
-  {id:'ai_portfolio', label:'AI추천',     Icon: Brain},
+  {id:'ai_portfolio', label:'포트폴리오 설계', Icon: Brain},
   {id:'dca',          label:'자동적립',   Icon: CalendarClock},
   {id:'fear_dca',     label:'공포 DCA',    Icon: TrendingDown, core: true},
   {id:'dividends',    label:'배당캘린더', Icon: BadgeDollarSign},
