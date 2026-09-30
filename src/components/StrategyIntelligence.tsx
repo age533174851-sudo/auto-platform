@@ -25,7 +25,7 @@ export default function StrategyIntelligence({
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>전략 지능</div>
-          <div style={{ color: T.muted, fontSize: 11 }}>건강도 모니터링 · 신호 충돌 자동 해결</div>
+          <div style={{ color: T.muted, fontSize: 11 }}>요약 건강도 · 신호 충돌 감지</div>
         </div>
         {dangerCount > 0 && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: A(T.red,'20'), color: T.red, fontSize: 10, fontWeight: 800, padding: '4px 8px', borderRadius: 6 }}>
@@ -48,17 +48,14 @@ export default function StrategyIntelligence({
               </div>
               {/* 신호들 */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
-                {[...c.signals].sort((a, b) => (TYPE_PRIORITY[b.type] || 0) - (TYPE_PRIORITY[a.type] || 0)).map((s, i) => {
-                  const isWinner = s.stratId === c.winner.stratId;
-                  return (
-                    <div key={s.stratId + i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: isWinner ? '#10B98115' : 'transparent', borderRadius: 8, border: isWinner ? `1px solid #10B98140` : `1px solid ${T.border}`, opacity: isWinner ? 1 : 0.55 }}>
-                      <span style={{ background: (TYPE_PRIORITY[s.type] || 0) >= 4 ? '#8B5CF6' : T.muted, color: '#fff', fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>P{TYPE_PRIORITY[s.type] || 0}</span>
-                      <span style={{ color: T.txt, fontSize: 11, fontWeight: 600, flex: 1 }}>{TYPE_LABEL[s.type] || s.type}</span>
-                      <span style={{ color: s.side === 'buy' ? T.grn : T.red, fontSize: 11, fontWeight: 800 }}>{s.side === 'buy' ? '매수' : '매도'}</span>
-                      {isWinner && <span style={{ color: '#10B981', fontSize: 10, fontWeight: 800 }}>✓ 채택</span>}
-                    </div>
-                  );
-                })}
+                {c.signals.map((s, i) => (
+                  <div key={s.stratId + i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'transparent', borderRadius: 8, border: `1px solid ${T.border}` }}>
+                    <span style={{ background: T.muted + '22', color: T.muted, fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>충돌</span>
+                    <span style={{ color: T.txt, fontSize: 11, fontWeight: 600, flex: 1 }}>{TYPE_LABEL[s.type] || s.type}</span>
+                    <span style={{ color: s.side === 'buy' ? T.grn : T.red, fontSize: 11, fontWeight: 800 }}>{s.side === 'buy' ? '매수' : '매도'}</span>
+                    <span style={{ color: T.ylw, fontSize: 9.5, fontWeight: 800 }}>보류</span>
+                  </div>
+                ))}
               </div>
               <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5 }}>{c.explanation}</div>
             </div>
@@ -94,7 +91,7 @@ export default function StrategyIntelligence({
       ))}
 
       <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginTop: 8 }}>
-        건강도는 승률·누적손익·표본수로 산출됩니다. 우선순위: 추세추종 &gt; 브레이크아웃/AI &gt; 모멘텀 &gt; 역추세 &gt; 정기적립.
+        건강도는 승률·누적손익·표본수의 요약 지표입니다. 200건 미만은 자동 조치 근거로 쓰지 않으며, 매수·매도 충돌은 전략 종류만 보고 임의로 한쪽을 채택하지 않습니다.
       </div>
     </div>
   );
