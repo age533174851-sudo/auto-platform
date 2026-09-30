@@ -41,6 +41,7 @@ import {
 import { stopReattachVerdict } from '../engine/stopReattach';
 import { leverageVerdict } from '../exchanges/futuresExec';
 import { appliesTo, FIXED_STOP_ONLY_CHECKS } from '../engine/preTradeChecklist';
+import { executionIdentityColumns, executionIdentityFromRow } from './entryIdentity';
 
 const V = EXECUTION_CONTRACT_VERSION;
 const ID = 'MAX_LEV_100X';
@@ -98,6 +99,57 @@ export async function runDedicated100xTests() {
 
   test('전용 100배는 ISOLATED 전용이다 (사용자 확정 정책)', () => {
     eq(PROFILES[ID].marginModes.join(','), 'isolated', 'cross가 열리면 다른 전략이 된다');
+  });
+
+  test('진입 실행 정체는 세 축을 그대로 live_orders 칸으로 투영한다', () => {
+    const cols = executionIdentityColumns({
+      profileId: ID, presetId: PRESET, contractVersion: V,
+    });
+    eq(cols.execution_profile_id, ID);
+    eq(cols.execution_preset_id, PRESET);
+    eq(cols.execution_contract_version, V);
+  });
+
+  test('실행 계약이 없는 기존 주문은 정체 칸을 만들지 않는다', () => {
+    eq(Object.keys(executionIdentityColumns(null)).length, 0);
+    const r = executionIdentityFromRow({ leverage: 100, stop_policy: 'NO_FIXED_SL' });
+    eq(r.kind, 'none',
+      '★ leverage=100 / NO_FIXED_SL만 보고 Exact100X 정체를 추정했습니다');
+  });
+
+  test('진입 장부의 실행 정체는 all-null 또는 all-set만 읽는다', () => {
+    const ok = executionIdentityFromRow({
+      execution_profile_id: ID,
+      execution_preset_id: PRESET,
+      execution_contract_version: V,
+    });
+    eq(ok.kind, 'identity');
+    if (ok.kind === 'identity') {
+      eq(ok.identity.profileId, ID);
+      eq(ok.identity.presetId, PRESET);
+      eq(ok.identity.contractVersion, V);
+    }
+
+    const partial = executionIdentityFromRow({
+      execution_profile_id: ID,
+      execution_preset_id: null,
+      execution_contract_version: V,
+    });
+    eq(partial.kind, 'invalid', '반쪽 실행 정체를 나머지 값으로 추측했습니다');
+  });
+
+  test('잘못된 실행 정체는 주문 장부 칸으로 만들 수 없다', () => {
+    let threw = false;
+    try {
+      executionIdentityColumns({ profileId: ID, presetId: '', contractVersion: V });
+    } catch { threw = true; }
+    eq(threw, true, '빈 프리셋이 저장됐습니다');
+
+    threw = false;
+    try {
+      executionIdentityColumns({ profileId: ID, presetId: PRESET, contractVersion: 1.5 });
+    } catch { threw = true; }
+    eq(threw, true, '정수가 아닌 계약 버전이 저장됐습니다');
   });
 
   // ── ② 프로필 × 프리셋 조합 ──────────────────────────────

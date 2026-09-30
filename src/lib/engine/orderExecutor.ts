@@ -21,6 +21,7 @@ import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from '.
 import { futuresApplyLeverage } from '../exchanges/futuresExec';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
+import { executionIdentityColumns, type EntryExecutionIdentity } from '../execution/entryIdentity';
 
 export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
 
@@ -88,6 +89,14 @@ export interface ExecuteArgs {
    * `FIXED_TP`라 기존 호출부의 동작이 바뀌지 않는다.
    */
   takeProfitPolicy?: TakeProfitPolicy;
+  /**
+   * 진입을 승인한 실행 계약의 **정체**.
+   *
+   * leverage=100 / isolated / NO_FIXED_SL 같은 결과값으로 역추정하지 않는다.
+   * 이 값은 resolveExecutionProfile을 통과한 계약에서만 넘기고, 있으면
+   * live_orders의 세 칸에 한 덩어리로 저장한다.
+   */
+  executionIdentity?: EntryExecutionIdentity | null;
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -353,6 +362,17 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   if (!clientOrderId || clientOrderId.length < 4) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: 'clientOrderId가 없으면 중복 주문을 막을 수 없어 중단합니다' };
   }
+  // 실행 정체는 세 축을 모두 검증한 뒤에만 장부에 적는다. 일부만 있는
+  // 값을 저장하거나 숫자 결과에서 보충하지 않는다.
+  let executionIdentityCols: Record<string, string | number> = {};
+  try {
+    executionIdentityCols = executionIdentityColumns(args.executionIdentity);
+  } catch (e: any) {
+    return {
+      ok: false, status: 'REJECTED', clientOrderId,
+      message: `실행 정체를 기록할 수 없습니다 — ${e?.message || e}`,
+    };
+  }
   // 지정가인데 가격이 없으면 보내지 않는다. 여기서 시장가로 바꿔 보내면
   // 사용자가 지정한 가격이 무시된 채 체결된다 — 지정가를 쓴 이유가 사라진다.
   if (orderType === 'LIMIT' && (args.limitPrice == null || !isFinite(args.limitPrice) || args.limitPrice <= 0)) {
@@ -396,6 +416,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     stop_loss: args.stopLoss ?? null,
     take_profit: args.takeProfit ?? null,
     status: 'INTENT' as OrderStatus,
+    // 계약이 있는 진입에서만 붙인다. 기존/비계약 주문은 세 칸 모두 NULL
+    // 상태로 남고, 과거 주문에 100X 정체를 소급 추정하지 않는다.
+    ...executionIdentityCols,
     // **NO_FIXED_SL일 때만 칸을 붙인다.**
     //
     // 항상 붙이면 078이 아직인 DB에서 **모든 주문이 실패한다.** 기존

@@ -1114,6 +1114,16 @@ export async function POST(req: NextRequest) {
     // 상태를 만드느니 멈추는 편이 낫다.
     stopPolicy: epStopPolicy,
     takeProfitPolicy: epTakeProfitPolicy,
+    // 예약에서 받은 raw 문자열이 아니라 resolveExecutionProfile을 통과한
+    // 계약 정체를 진입 장부에 박는다. leverage=100 같은 결과값으로 나중에
+    // Exact100X를 역추정하지 않는다.
+    ...(epContract ? {
+      executionIdentity: {
+        profileId: epContract.profileId,
+        presetId: epContract.presetId,
+        contractVersion: epContract.contractVersion,
+      },
+    } : {}),
     // **손절은 반드시 함께 낸다.** 단타에서 손절 없는 진입은 배율이
     // 붙어 있어 청산까지 간다. 고정 손절을 쓰지 않는 계약만 예외다.
     //

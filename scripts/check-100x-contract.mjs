@@ -43,6 +43,7 @@ const AUTHORITY   = 'src/lib/engine/entryAuthority.ts';
 const MIG         = 'supabase/migrations/078_live_orders_stop_policy.sql';
 const MIG_ALLOC   = 'supabase/migrations/079_schedule_margin_allocation.sql';
 const MIG_OPEN    = 'supabase/migrations/080_execution_profile_selective.sql';
+const MIG_IDENTITY= 'supabase/migrations/089_live_orders_execution_identity.sql';
 
 const ID = 'MAX_LEV_100X';
 const PRESET = 'EXACT_100X';
@@ -1078,6 +1079,29 @@ if (!/noFixedSl\s*\?\s*\{\s*stop_policy:\s*'NO_FIXED_SL'\s*\}/.test(exec)) {
     + ' — 복구 경로가 이 주문을 고정 손절 주문으로 읽습니다');
 }
 
+// 진입 실행 정체는 숫자 결과가 아니라 세 축 자체를 저장해야 한다.
+const migIdentityRaw = read(MIG_IDENTITY);
+const migIdentity = migIdentityRaw.replace(/--[^\n]*/g, '');
+if (!migIdentityRaw) {
+  err(`${MIG_IDENTITY}이 없습니다 — 진입 뒤 Exact100X 정체를 증명할 수 없습니다`);
+} else {
+  for (const col of ['execution_profile_id', 'execution_preset_id', 'execution_contract_version']) {
+    if (!new RegExp(`ADD\\s+COLUMN\\s+IF\\s+NOT\\s+EXISTS\\s+${col}`, 'i').test(migIdentity)) {
+      err(`${MIG_IDENTITY}: ${col} 칸을 더하지 않습니다`);
+    }
+  }
+  if (!/live_orders_execution_identity_complete/.test(migIdentity)) {
+    err(`${MIG_IDENTITY}: 세 칸 all-null/all-set 제약이 없습니다`);
+  }
+}
+
+if (!/executionIdentityColumns\(args\.executionIdentity\)/.test(exec)) {
+  err(`${EXEC}: 실행 정체를 live_orders 칸으로 투영하지 않습니다`);
+}
+if (!/\.\.\.executionIdentityCols/.test(exec)) {
+  err(`${EXEC}: 주문 의도에 실행 정체 칸을 저장하지 않습니다`);
+}
+
 // ─────────────────────────────────────────────────────────────
 // ③ production 체인이 실제로 닫혀 있는가
 // ─────────────────────────────────────────────────────────────
@@ -1142,6 +1166,10 @@ if (!execCall) err(`${SCALP}: executeOrder 호출을 찾지 못했습니다`);
 else if (!/stopPolicy:\s*epStopPolicy/.test(execCall)) {
   err(`${SCALP}: executeOrder에 stopPolicy를 넘기지 않습니다`
     + ' — 계약이 장부(live_orders.stop_policy)까지 닿지 않습니다');
+}
+if (execCall && !/executionIdentity:\s*\{[\s\S]{0,220}profileId:\s*epContract\.profileId[\s\S]{0,220}presetId:\s*epContract\.presetId[\s\S]{0,220}contractVersion:\s*epContract\.contractVersion/.test(execCall)) {
+  err(`${SCALP}: resolveExecutionProfile을 통과한 세 축을 executeOrder에 넘기지 않습니다`
+    + ' — leverage=100 같은 결과값으로 나중에 역추정하게 됩니다');
 }
 if (!/epStopPolicy\s*===\s*'NO_FIXED_SL'\s*\n?\s*\?\s*\{\}/.test(scalpSrc)
     && !/epStopPolicy === 'NO_FIXED_SL'[\s\S]{0,80}\?\s*\{\}/.test(scalpSrc)) {
