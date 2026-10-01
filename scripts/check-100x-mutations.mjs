@@ -531,9 +531,11 @@ const M = [
     s => s.replace('  if (obs !== req) {', '  if (obs > req) {'), 'RED'],
 
   // 읽기 단계에 쓰기 의존을 다시 끼워 넣는다 — 구조적 보장이 무너진다.
+  // ★ ③이 시그니처에 `nowMs` 인자를 더해서 옛 앵커(`deps` 바로 뒤가
+  //   반환 타입이라는 가정)가 낡았다. 타입 이름만 바꾸도록 좁힌다 —
+  //   그 뒤에 인자가 더 붙어도 따라간다.
   ['MUT-PHASE-TYPE-MERGE      준비 단계가 쓰기 의존을 받게 함', P.entry,
-    s => s.replace('  deps: Entry100xReadDeps,\n): Promise<Entry100xVerdict> {',
-                   '  deps: Entry100xDeps,\n): Promise<Entry100xVerdict> {'), 'RED'],
+    s => s.replace('  deps: Entry100xReadDeps,', '  deps: Entry100xDeps,'), 'RED'],
 
   // 막힌 계획으로 확정을 불러도 쓰지 않는다는 방어를 없앤다.
   ['MUT-COMMIT-ON-BLOCKED     막힌 계획으로도 배율을 걺', P.entry,
