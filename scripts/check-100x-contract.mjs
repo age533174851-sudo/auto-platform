@@ -895,6 +895,22 @@ if (entry) {
           + ` (${L2.liquidationDistancePct}%) — 낙관적인 방향으로 틀렸습니다`);
       }
     }
+    // 자기일관 해가 **없는** 경우. 두 구간이 서로를 가리키게 만든다.
+    //   1구간(상한 99 · cum 0) → 청산가 99.398 → 2구간
+    //   2구간(상한 ∞  · cum 1) → 청산가 98.394 → 1구간
+    // 진입 구간(2구간)의 답은 양수이고 방향도 맞으므로, 지어내면 통과해
+    // 버린다 — 퇴화하지 않는 케이스여야 그 변이를 잡는다.
+    {
+      const noSol = liq.assessLiquidationDistance(okIn({
+        referencePrice: 100, quantity: 1, brackets: [[99, 0.004, 0], [Infinity, 0.004, 1]],
+      }));
+      if (noSol.ok) err(`${LIQ}: 자기일관 해가 없는데 통과합니다 — 진입 구간으로 답을 지어냅니다`);
+      else if (noSol.code !== 'TIER_NOT_SELF_CONSISTENT') {
+        err(`${LIQ}: 해가 없는 경우의 사유가 ${noSol.code}입니다`
+          + ' (TIER_NOT_SELF_CONSISTENT여야 합니다 — 계산 불가와 구별돼야 합니다)');
+      }
+    }
+
     // 넘지 않는 자리는 그대로여야 한다 (과도 수정이 아니다).
     const mid = liq.assessLiquidationDistance(okIn({ quantity: 0.2 }));
     if (mid.tier?.index !== 0 || mid.entryTierIndex !== 0) {

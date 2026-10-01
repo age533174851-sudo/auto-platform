@@ -180,14 +180,25 @@ export function runLiquidationDistanceTests() {
     eq(v.tier!.index, 0, '★ 넘지 않아야 하는데 구간이 바뀌었다');
   });
 
-  test('자기일관 해가 없으면 거부한다', () => {
-    // 공제액이 구간 상한보다 훨씬 커서 어느 구간으로 풀어도 그 구간에
-    // 들어가지 않게 만든다.
-    const broken: BracketTier[] = [[1, 0.004, 0], [2, 0.5, 900_000]];
-    const v = assessLiquidationDistance(ok({ brackets: broken }));
+  test('자기일관 해가 없으면 거부한다 — 진입 구간으로 답을 지어내지 않는다', () => {
+    // **두 구간이 서로를 가리킨다.** 1구간으로 풀면 청산가가 2구간에,
+    // 2구간으로 풀면 1구간에 떨어진다.
+    //
+    //   1구간(상한 99 · cum 0)   → 청산가 99.398 → 명목가 99.398 → 2구간
+    //   2구간(상한 ∞  · cum 1)   → 청산가 98.394 → 명목가 98.394 → 1구간
+    //
+    // ★ 퇴화한 표(청산가가 0 이하가 되는)로 시험하면 안 된다. 그러면
+    //   "해가 없다"가 아니라 "계산 불가"로 잡히고, 진입 구간으로 답을
+    //   지어내는 변이가 그 catch-all 뒤에 숨는다 — 실제로 그렇게 샜다.
+    //   여기서는 진입 구간(2구간)의 답이 **양수이고 방향도 맞다**(98.394).
+    //   그래서 지어내면 그대로 통과해 버린다.
+    const broken: BracketTier[] = [[99, 0.004, 0], [Infinity, 0.004, 1]];
+    const v = assessLiquidationDistance(ok({
+      referencePrice: 100, quantity: 1, brackets: broken,
+    }));
     eq(v.ok, false, '★ 자기일관 해가 없는데 통과했다');
-    assert(v.code === 'TIER_NOT_SELF_CONSISTENT' || v.code === 'LIQUIDATION_PRICE_UNCOMPUTABLE',
-      `사유가 ${v.code}다`);
+    eq(v.code, 'TIER_NOT_SELF_CONSISTENT',
+      '★ 사유가 "해가 없다"가 아니다 — 계산 불가와 구별되지 않는다');
   });
 
   test('solver는 경계 해석을 한 곳에서만 한다 — 판정과 같은 답을 낸다', () => {
