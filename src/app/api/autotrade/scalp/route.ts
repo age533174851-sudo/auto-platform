@@ -546,6 +546,8 @@ export async function POST(req: NextRequest) {
         leverage: epContract!.leverage,
         sizingPolicy: epSizingPolicy,
         marginModes: epContract!.marginModes,
+        // 청산은 방향이 있어야 거리를 잴 수 있다. 신호가 정한 방향 그대로.
+        side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
       },
       epMarginAllocationPct,
       {
@@ -561,6 +563,21 @@ export async function POST(req: NextRequest) {
           const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
           const m = Number(rr.risk?.markPrice);
           return Number.isFinite(m) && m > 0 ? m : null;
+        },
+        // 구간별 유지증거금은 **거래소에서 읽는다.** 추정 표로 100배
+        // 청산가를 정하지 않는다 — 못 읽으면 `prepareEntry100x`가 막는다.
+        maintenanceTiers: async () => {
+          if (ex !== 'binance') return null;   // Gate는 브래킷 경로가 없다
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          return bf.getCachedBracket(symbol, conn.apiKey, conn.apiSecret, !connIsLive)
+            .catch(() => null);
+        },
+        // **손절 주문이 아니다.** 신호가 ATR로 잰 참고 위험 거리이고,
+        // `NO_FIXED_SL`에서는 거래소로 나가지 않는다(아래 주문 조립에서
+        // stopLoss를 빼는 자리 참조). 청산거리와 비교할 기준으로만 쓴다.
+        adverseDistancePct: async () => {
+          const p = Number(scalp.signal.stopPct);
+          return Number.isFinite(p) && p > 0 ? p : null;
         },
         quantize: async (qty: number) => {
           // 규격을 못 읽으면 `quantizeOrder`가 신규 진입을 막는다 —
@@ -603,7 +620,12 @@ export async function POST(req: NextRequest) {
           quantity: entry.quantity as number,
           requiredMargin: entry.requiredMargin as number,
           leverage: entry.leverage as number,
-          liquidationPrice: 0, liquidationDistancePct: 0,
+          // **0을 적지 않는다.** 예전에는 둘 다 0이었는데, 0은 "0달러에
+          // 청산"으로 읽혀 청산거리가 100%가 된다 — 가장 위험한 주문이
+          // 가장 안전해 보인다. 모르면 null이고, 통과한 계획에는 실제로
+          // 계산한 값이 들어 있다.
+          liquidationPrice: entry.liquidation?.estimatedLiquidationPrice ?? null,
+          liquidationDistancePct: entry.liquidation?.liquidationDistancePct ?? null,
           notes: entry.notes,
         }
       : {
@@ -611,7 +633,11 @@ export async function POST(req: NextRequest) {
           symbol, side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
           riskAmount: 0, riskAmountWithCosts: 0, stopDistancePct: 0, effectiveStopPct: 0,
           positionSize: 0, quantity: 0, requiredMargin: 0, leverage: 0,
-          liquidationPrice: 0, liquidationDistancePct: 0, notes: entry.notes,
+          // 막힌 계획도 **계산한 데까지는 말한다.** 청산거리가 모자라서
+          // 막힌 경우와 아예 계산을 못 한 경우를 운영자가 구별해야 한다.
+          liquidationPrice: entry.liquidation?.estimatedLiquidationPrice ?? null,
+          liquidationDistancePct: entry.liquidation?.liquidationDistancePct ?? null,
+          notes: entry.notes,
         };
   } else {
     const { planPosition } = await import('@/lib/engine/riskManager');

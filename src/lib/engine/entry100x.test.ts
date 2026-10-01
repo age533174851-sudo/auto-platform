@@ -18,7 +18,10 @@ import {
 } from './entry100x';
 import { validateMarginAllocation, planSize100x, verifyLeverageExact } from './sizing100x';
 
-const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'] };
+const C = {
+  leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'],
+  side: 'LONG' as const,
+};
 
 const baseDeps = () => ({
   observeMarginMode: async (): Promise<'isolated' | 'cross' | null> => 'isolated',
@@ -26,6 +29,11 @@ const baseDeps = () => ({
   availableUsd: async () => 1000,
   referencePrice: async () => 50_000,
   quantize: async (q: number) => ({ qty: q, message: '' }),
+  // 거래소 브래킷 첫 구간: MMR 0.4% · 공제액 0.
+  maintenanceTiers: async (): Promise<Array<[number, number, number]> | null> =>
+    [[50_000_000, 0.004, 0]],
+  // **손절이 아니라** 변동성 기준 참고 위험 거리(%)다.
+  adverseDistancePct: async (): Promise<number | null> => 0.3,
 });
 
 /** 의존을 감싸서 읽기/쓰기를 나눠 센다. 분류에 없는 의존은 즉시 실패다. */
@@ -166,6 +174,8 @@ export function runEntry100xTests() {
       availableUsd: async () => 1000,
       referencePrice: async () => 50_000,
       quantize: async (q: number) => ({ qty: q, message: '' }),
+      maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
+      adverseDistancePct: async () => 0.3,
       applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
       ...over,
     };
@@ -174,6 +184,8 @@ export function runEntry100xTests() {
       availableUsd: ['balance:read'],
       referencePrice: ['price:read'],
       quantize: ['quantize'],
+      maintenanceTiers: ['bracket:read'],
+      adverseDistancePct: ['adverse:read'],
       applyLeverage: ['leverage:write', 'leverage:readback'],
     };
     const d: any = {};
@@ -193,14 +205,20 @@ export function runEntry100xTests() {
     assert(prep.ok, `준비 단계가 막혔다 — ${prep.message}`);
 
     // 준비 단계가 끝난 시점에 쓰기는 하나도 없어야 한다.
-    eq(log.join(' > '), 'marginMode:read > balance:read > price:read > quantize',
+    // ★ 청산거리 입력(브래킷·변동성 거리)을 **준비 단계 안에서** 읽는다.
+    //   이 두 칸이 `leverage:write` 앞에 있다는 것이 이번 보호의 핵심이다 —
+    //   첫 거래소 쓰기보다 뒤에서 재면 "청산당할 자리를 알고도 들어간"
+    //   요청이 이미 계좌 배율을 바꾼 뒤가 된다.
+    eq(log.join(' > '),
+      'marginMode:read > balance:read > price:read > quantize > bracket:read > adverse:read',
       '준비 단계의 호출 순서가 다르다 — 쓰기가 섞여 있으면 여기서 드러난다');
 
     const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
     assert(done.ok, `확정 단계가 막혔다 — ${done.message}`);
     eq(log.join(' > '),
-      'marginMode:read > balance:read > price:read > quantize > leverage:write > leverage:readback',
-      '전체 호출 순서가 계약과 다르다');
+      'marginMode:read > balance:read > price:read > quantize > bracket:read > adverse:read'
+      + ' > leverage:write > leverage:readback',
+      '전체 호출 순서가 계약과 다르다 — 청산거리 판정이 배율 쓰기보다 뒤면 실패다');
   });
 
   // 읽기 실패는 전부 쓰기 0이어야 한다. 하나씩 실패시켜 순서를 확인한다.

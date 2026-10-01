@@ -122,6 +122,7 @@ const P = {
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
   cov: 'src/lib/engine/exitCoverage.ts',
+  liq: 'src/lib/engine/liquidationDistance.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -955,6 +956,69 @@ const M = [
 
   ['MUT-N10 빈 칸인데 이유를 지움', P.cov,
     s => s.replace(/      gap: adm\.admitted\n[\s\S]*?\$\{adm\.reason\}\)`,\n/, '      gap: null,\n'), 'RED'],
+
+  // ── ② 진입 전 청산거리 보호 ──
+  //
+  // **"청산당할 자리를 알고도 들어가는 것"을 막는 보호다.** 열린 포지션을
+  // 닫는 권한이 아니다 — 그것은 아직 없다.
+
+  ['MUT-L1 청산거리 관문 제거 (판정은 하는데 막지 않음)', P.entry,
+    s => s.replace(/  if \(!liquidation\.ok\) \{[\s\S]*?\n  \}\n/, ''), 'RED'],
+
+  // 판정도 하고 막기도 하는데 **배율 쓰기 뒤**에서 막는다. 주문은 안
+  // 나가지만 계좌 배율은 이미 바뀌었고, 그 자리에 포지션이 있으면
+  // 청산가가 함께 움직인다.
+  ['MUT-L2 청산거리 차단을 첫 거래소 쓰기 뒤로 이동', P.entry,
+    s => {
+      // 판정은 그대로 두고 **차단만** 배율 쓰기(PHASE B) 뒤로 옮긴다.
+      // 주문은 안 나가지만 계좌 배율은 이미 바뀐 뒤다.
+      const block = s.match(/  if \(!liquidation\.ok\) \{[\s\S]*?\n  \}\n/);
+      const afterWrite = "  notes.push(`배율 ${req}배 확인(되읽음)`);\n";
+      if (!block || !s.includes(afterWrite)) return s;
+      return s.replace(block[0], '').replace(afterWrite,
+        afterWrite
+        + '  if (prepared.liquidation && !prepared.liquidation.ok) {\n'
+        + "    return fail('LIQUIDATION_UNSAFE', prepared.liquidation.reason, notes,\n"
+        + '      { marginMode: prepared.marginMode, leverage: req,\n'
+        + '        referencePrice: prepared.referencePrice,\n'
+        + '        liquidation: prepared.liquidation });\n'
+        + '  }\n');
+    }, 'RED'],
+
+  ['MUT-L3 브래킷이 없어도 통과 (fail-closed → fail-open)', P.liq,
+    s => s.replace("  if (tier == null || tier.source !== 'EXCHANGE_BRACKET'",
+                   '  if (false && (tier == null || tier.source !== \'EXCHANGE_BRACKET\''), 'RED'],
+
+  ['MUT-L4 거리 계산의 LONG/SHORT를 뒤집음', P.liq,
+    s => s.replace("  const distance = side === 'LONG' ? price - liq : liq - price;",
+                   "  const distance = side === 'LONG' ? liq - price : price - liq;"), 'RED'],
+
+  ['MUT-L5 청산가 방향 검사를 뒤집음', P.liq,
+    s => s.replace("  const onCorrectSide = side === 'LONG' ? liq < price : liq > price;",
+                   "  const onCorrectSide = side === 'LONG' ? liq > price : liq < price;"), 'RED'],
+
+  ['MUT-L6 브래킷이 없으면 추정 구간을 지어냄', P.liq,
+    s => s.replace('  if (!Array.isArray(tiers) || tiers.length === 0) return null;',
+      "  if (!Array.isArray(tiers) || tiers.length === 0) {\n"
+      + "    return { mmr: 0.004, maintAmount: 0, source: 'EXCHANGE_BRACKET', notional: n };\n"
+      + '  }'), 'RED'],
+
+  ['MUT-L7 Exact100X에서 청산거리 관문을 건너뜀', P.entry,
+    s => s.replace('  if (!liquidation.ok) {',
+                   "  if (!liquidation.ok && contract.sizingPolicy !== 'MARGIN_ALLOCATION') {"), 'RED'],
+
+  ['MUT-L8 경계를 > 에서 >= 로 (딱 닿는 것을 여유로 침)', P.liq,
+    s => s.replace('  if (!(distancePct > adverse)) {',
+                   '  if (!(distancePct >= adverse)) {'), 'RED'],
+
+  ['MUT-L9 청산가 산출에 오염된 유지증거금률을 넘김', P.liq,
+    s => s.replace('  const brackets: BracketTier[] = [[Infinity, mmr, maintAmount]];',
+                   '  const brackets: BracketTier[] = [[Infinity, 0.5, maintAmount]];'), 'RED'],
+
+  // 과도 거부도 결함이다. 정상 100배 진입이 막히면 그 전략은 못 돈다.
+  ['MUT-L10 정상 케이스를 과도하게 거부 (여유 요구를 10배로)', P.liq,
+    s => s.replace('  if (!(distancePct > adverse)) {',
+                   '  if (!(distancePct > adverse * 10)) {'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

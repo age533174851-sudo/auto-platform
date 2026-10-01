@@ -37,9 +37,20 @@ import {
   planSize100x, validateMarginAllocation, verifyLeverageExact,
   type Sizing100xVerdict,
 } from './sizing100x';
+import {
+  assessLiquidationDistance, tierFromBrackets,
+  type LiquidationDistanceAssessment,
+} from './liquidationDistance';
+import type { BracketTier } from '../safety/liquidationPrice';
 
 export type Entry100xCode =
   | 'OK'
+  /**
+   * 청산거리를 신뢰할 수 없거나 계약이 요구하는 여유가 없다.
+   *
+   * **진입 전 보호다.** 이미 열린 포지션을 닫는 권한이 아니다.
+   */
+  | 'LIQUIDATION_UNSAFE'
   /** 이 계약은 증거금 배정 사이징이 아니다 — 호출부가 잘못 불렀다 */
   | 'NOT_MARGIN_ALLOCATION'
   /** 마진 모드를 읽지 못했다 */
@@ -71,6 +82,7 @@ export const MUTATING_DEPS = ['applyLeverage'] as const;
 /** 거래소를 읽기만 하는 의존 */
 export const READONLY_DEPS = [
   'observeMarginMode', 'availableUsd', 'referencePrice', 'quantize',
+  'maintenanceTiers', 'adverseDistancePct',
 ] as const;
 
 /**
@@ -90,6 +102,23 @@ export interface Entry100xReadDeps {
   referencePrice(): Promise<number | null>;
   /** 거래소 수량 단위·최소 주문에 맞춘 수량. 못 맞추면 null */
   quantize(qty: number): Promise<{ qty: number | null; message: string }>;
+  /**
+   * 이 명목가 구간의 **거래소 유지증거금 브래킷**. 못 읽으면 null.
+   *
+   * 청산가는 구간별 유지증거금률·공제액이 정한다. 추정 표로 때우면
+   * 100배에서 구간을 한 칸 잘못 짚는 것만으로 청산가가 통째로 달라진다.
+   * **못 읽으면 진입을 막는다** — 이 의존이 null을 돌려주는 것은 통과가
+   * 아니다.
+   */
+  maintenanceTiers(notional: number): Promise<BracketTier[] | null>;
+  /**
+   * **예상 adverse/변동성 위험 거리 (%).** 못 구하면 null.
+   *
+   * ★ 손절 주문이 아니다. `NO_FIXED_SL`에서는 거래소에 손절이 나가지
+   *   않는다. 신호가 ATR로 잰 "이 종목이 이 정도는 불리하게 움직인다"는
+   *   참고 거리이고, 청산거리가 그보다 먼지 비교하는 데만 쓴다.
+   */
+  adverseDistancePct(): Promise<number | null>;
 }
 
 /** 확정 단계가 쓰는 의존 — 여기에만 쓰기가 있다. */
@@ -117,6 +146,11 @@ export interface Entry100xVerdict {
   requiredMargin: number | null;
   referencePrice: number | null;
   marginMode: 'isolated' | 'cross' | null;
+  /**
+   * 청산거리 판정. **계산했으면 막혔든 통과했든 여기 담긴다** —
+   * 화면과 기록이 "얼마로 계산했는데 모자랐다"를 말할 수 있어야 한다.
+   */
+  liquidation: LiquidationDistanceAssessment | null;
   message: string;
   /** 무엇을 물어보고 무엇을 얻었는지. 화면과 기록이 같은 말을 하게 한다 */
   notes: string[];
@@ -128,6 +162,7 @@ const fail = (
 ): Entry100xVerdict => ({
   ok: false, code, quantity: null, leverage: null, allocatedMargin: null,
   requiredMargin: null, referencePrice: null, marginMode: null,
+  liquidation: null,
   message, notes, ...partial,
 });
 
@@ -158,6 +193,14 @@ export async function prepareEntry100x(
     leverage: number;
     sizingPolicy: string;
     marginModes: string[];
+    /**
+     * 이번 진입의 방향. **저장된 계약이 아니라 신호가 정한다.**
+     *
+     * 청산은 LONG이면 아래로, SHORT이면 위로 간다. 방향을 모르면 어느
+     * 쪽이 불리한 방향인지 알 수 없어 청산거리를 정의할 수 없다 —
+     * 그래서 선택값이 아니라 **필수**다. 빠뜨리면 컴파일이 멈춘다.
+     */
+    side: 'LONG' | 'SHORT' | null;
   },
   marginAllocationPct: number | null,
   deps: Entry100xReadDeps,
@@ -247,6 +290,48 @@ export async function prepareEntry100x(
                allocatedMargin: allocated, requiredMargin });
   }
 
+  // ── ⑧ 청산거리 ──
+  //
+  // **마지막에 둔다.** 구간별 유지증거금은 명목가로 정해지므로 다듬은
+  // 수량이 확정된 뒤여야 맞는 구간을 짚는다.
+  //
+  // ★ 이 단계가 PHASE A 안에 있다는 것이 요점이다. 라우트의 `if` 한 줄로
+  //   두면 그 줄을 아래로 옮기는 변경이 조용히 통과할 수 있다. 여기서는
+  //   `Entry100xReadDeps`에 쓰기 함수가 없으므로, 이 판정보다 먼저 거래소에
+  //   쓰는 코드는 **타입이 없어서 쓸 수 없다.** 순서가 규칙이 아니라 구조다.
+  const notional = q.qty * (price as number);
+  let tiers: BracketTier[] | null = null;
+  try { tiers = await deps.maintenanceTiers(notional); } catch { tiers = null; }
+  let adverse: number | null = null;
+  try { adverse = await deps.adverseDistancePct(); } catch { adverse = null; }
+
+  const liquidation = assessLiquidationDistance({
+    side: contract.side,
+    referencePrice: price,
+    quantity: q.qty,
+    leverage: req,
+    marginMode: mode,
+    tier: tierFromBrackets(notional, tiers),
+    adverseDistancePct: adverse,
+  });
+  notes.push(
+    liquidation.liquidationDistancePct == null
+      ? `청산거리 계산 실패 (${liquidation.code})`
+      : `청산거리 ${liquidation.liquidationDistancePct.toFixed(4)}%`
+        + ` (청산가 ${liquidation.estimatedLiquidationPrice}`
+        + `${liquidation.adverseDistancePct == null ? ''
+            : ` · 변동성 위험거리 ${liquidation.adverseDistancePct.toFixed(4)}%`})`,
+  );
+  if (!liquidation.ok) {
+    // **모르는 것은 통과가 아니다.** 100배에서 "확인하지 못함"을 통과로
+    // 읽으면 그 한 번이 증거금 전액이다.
+    return fail('LIQUIDATION_UNSAFE', liquidation.reason, notes, {
+      marginMode: mode, leverage: req, referencePrice: price,
+      allocatedMargin: allocated, requiredMargin, quantity: q.qty,
+      liquidation,
+    });
+  }
+
   return {
     ok: true, code: 'OK',
     quantity: q.qty,
@@ -255,7 +340,9 @@ export async function prepareEntry100x(
     requiredMargin,
     referencePrice: price,
     marginMode: mode,
-    message: `${req}배 · 수량 ${q.qty} · 증거금 $${requiredMargin.toFixed(4)} / 배정 $${allocated.toFixed(4)}`,
+    liquidation,
+    message: `${req}배 · 수량 ${q.qty} · 증거금 $${requiredMargin.toFixed(4)} / 배정 $${allocated.toFixed(4)}`
+      + ` · 청산거리 ${liquidation.liquidationDistancePct!.toFixed(4)}%`,
     notes,
   };
 }

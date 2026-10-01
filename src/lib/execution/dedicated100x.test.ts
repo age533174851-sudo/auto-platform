@@ -65,10 +65,18 @@ const okDeps = (over: Partial<Entry100xDeps> = {}): Entry100xDeps => ({
   availableUsd: async () => 1_000,
   referencePrice: async () => 50_000,
   quantize: async (q: number) => ({ qty: q, message: '' }),
+  // 거래소 브래킷 첫 구간(BTCUSDT 소액): MMR 0.4% · 공제액 0.
+  // 이 값이면 50,000 · 100배에서 청산거리가 약 0.6%로 나온다.
+  maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
+  // **손절 주문이 아니다** — 신호가 ATR로 잰 참고 위험 거리다.
+  adverseDistancePct: async () => 0.3,
   ...over,
 });
 
-const contract100x = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
+const contract100x = {
+  leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
+  side: 'LONG' as const,
+};
 
 /** 열린 조합 한 벌 — 켜기 관련 시험이 쓴다 */
 const openRow = {

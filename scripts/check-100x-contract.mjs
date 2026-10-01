@@ -28,6 +28,7 @@ const PROFILES_TS = 'src/lib/strategies/profiles.ts';
 const PLAN        = 'src/lib/execution/profile.ts';
 const GATE        = 'src/lib/execution/dormantGate.ts';
 const COVERAGE    = 'src/lib/engine/exitCoverage.ts';
+const LIQ         = 'src/lib/engine/liquidationDistance.ts';
 const EXEC        = 'src/lib/engine/orderExecutor.ts';
 const REATTACH    = 'src/lib/engine/stopReattach.ts';
 const SIZING      = 'src/lib/engine/sizing100x.ts';
@@ -564,9 +565,16 @@ if (entry) {
     availableUsd: async () => 1000,
     referencePrice: async () => 50_000,
     quantize: async (q) => ({ qty: q, message: '' }),
+    // 거래소 브래킷 첫 구간(소액): MMR 0.4% · 공제액 0.
+    maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
+    // **손절이 아니다** — 신호가 ATR로 잰 변동성 위험 거리(%)다.
+    adverseDistancePct: async () => 0.3,
     ...over,
   });
-  const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
+  const C = {
+    leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
+    side: 'LONG',
+  };
   // 두 단계를 이어 부르는 검사용 합성. 제품 경로는 그 사이에 쓰기 없는
   // 관문(1회 상한)을 하나 더 넣는다.
   /** 쓰기 전 관문이 허락한 상태 — 순서 검사에서는 이 조건을 고정한다. */
@@ -629,6 +637,8 @@ if (entry) {
         availableUsd: ['balance:read'],
         referencePrice: ['price:read'],
         quantize: ['quantize'],
+        maintenanceTiers: ['bracket:read'],
+        adverseDistancePct: ['adverse:read'],
         applyLeverage: ['leverage:write', 'leverage:readback'],
       };
       const d = {};
@@ -644,12 +654,16 @@ if (entry) {
       const prep = await entry.prepareEntry100x(C, 10, d);
       if (!prep.ok) err(`100X 순서: 준비 단계가 막혔습니다 — ${prep.message}`);
       const afterPrep = log.join(' > ');
-      if (afterPrep !== 'marginMode:read > balance:read > price:read > quantize') {
+      // ★ 청산거리 입력을 **준비 단계 안에서** 읽는다. 이 두 칸이
+      //   `leverage:write` 앞에 있다는 것이 진입 전 보호의 전부다.
+      if (afterPrep !== 'marginMode:read > balance:read > price:read > quantize'
+                      + ' > bracket:read > adverse:read') {
         err(`100X 순서: 준비 단계 호출 순서가 다릅니다 — ${afterPrep}`);
       }
       await entry.commitEntry100x(prep, d, SEND);
       const full = log.join(' > ');
       if (full !== 'marginMode:read > balance:read > price:read > quantize'
+                 + ' > bracket:read > adverse:read'
                  + ' > leverage:write > leverage:readback') {
         err(`100X 순서: 전체 호출 순서가 계약과 다릅니다 — ${full}`);
       }
@@ -742,6 +756,195 @@ if (entry) {
     }
   }
 }
+
+// ── 진입 전 청산거리 보호 (②) ──
+//
+//   `NO_FIXED_SL`에는 손절이 없다. 그래서 저장소의 청산 판정 넷이 전부
+//   성립하지 않고(모두 "손절이 청산보다 먼저인가"를 묻는다), 체크리스트는
+//   `LIQUIDATION_DISTANCE`를 Exact100X에서 **항목째로 뺀다.** 그 결과
+//   진입 경로에 청산 판정이 하나도 없었고, 계획은 `liquidationPrice: 0`을
+//   적고 있었다 — 0은 "0달러에 청산"이라 거리가 100%가 된다.
+//
+//   ★ 이것은 **진입 전 보호**다. 열린 포지션을 닫는 권한이 아니다.
+{
+  const liq = await loadModule(LIQ, '청산거리 판정');
+  const TIER = { mmr: 0.004, maintAmount: 0, source: 'EXCHANGE_BRACKET', notional: 10_000 };
+  const okIn = (over = {}) => ({
+    side: 'LONG', referencePrice: 50_000, quantity: 0.2, leverage: 100,
+    marginMode: 'isolated', tier: TIER, adverseDistancePct: 0.3, ...over,
+  });
+  if (liq) {
+    const good = liq.assessLiquidationDistance(okIn());
+    if (!good.ok) err(`${LIQ}: 정상 100배 입력이 막힙니다 — ${good.reason}`);
+    if (!(good.liquidationDistancePct > 0)) {
+      err(`${LIQ}: 통과했는데 청산거리가 ${good.liquidationDistancePct}입니다`);
+    }
+    if (good.headroomKind !== 'RAW') {
+      err(`${LIQ}: 비용 반영 전 값이라는 표시(headroomKind: 'RAW')가 없습니다`
+        + ' — ③의 실질 여유와 같은 숫자로 섞입니다');
+    }
+
+    // 방향. **거울상이 아니다** — 거래소 식은 (1−mmr)과 (1+mmr)로 갈린다.
+    const L = liq.assessLiquidationDistance(okIn({ side: 'LONG' }));
+    const S = liq.assessLiquidationDistance(okIn({ side: 'SHORT' }));
+    if (!(L.estimatedLiquidationPrice < 50_000)) {
+      err(`${LIQ}: LONG 청산가가 기준가 아래가 아닙니다 (${L.estimatedLiquidationPrice})`);
+    }
+    if (!(S.estimatedLiquidationPrice > 50_000)) {
+      err(`${LIQ}: SHORT 청산가가 기준가 위가 아닙니다 (${S.estimatedLiquidationPrice})`);
+    }
+    if (!(L.liquidationDistance > 0) || !(S.liquidationDistance > 0)) {
+      err(`${LIQ}: 거리를 부호로 표현합니다 — 둘 다 "불리한 방향으로 남은 거리"여야 합니다`);
+    }
+    if (Math.abs(L.liquidationDistancePct - S.liquidationDistancePct) < 1e-6) {
+      err(`${LIQ}: LONG과 SHORT의 청산거리가 같습니다 — 한쪽 식을 다른 쪽에 복사했습니다`);
+    }
+
+    // **모르면 막는다.** 하나라도 통과하면 100배가 눈을 감고 들어간다.
+    for (const [why, over, code] of [
+      ['방향 없음', { side: null }, 'SIDE_UNKNOWN'],
+      ['기준가 0', { referencePrice: 0 }, 'REFERENCE_PRICE_UNUSABLE'],
+      ['기준가 NaN', { referencePrice: NaN }, 'REFERENCE_PRICE_UNUSABLE'],
+      ['기준가 Infinity', { referencePrice: Infinity }, 'REFERENCE_PRICE_UNUSABLE'],
+      ['수량 없음', { quantity: null }, 'QUANTITY_UNUSABLE'],
+      ['배율 없음', { leverage: null }, 'LEVERAGE_UNUSABLE'],
+      ['마진 모드 없음', { marginMode: null }, 'MARGIN_MODE_UNKNOWN'],
+      ['교차 마진', { marginMode: 'cross' }, 'MARGIN_MODE_UNSUPPORTED'],
+      ['브래킷 없음', { tier: null }, 'MAINTENANCE_TIER_MISSING'],
+      ['추정 출처 구간', { tier: { ...TIER, source: 'GUESS' } }, 'MAINTENANCE_TIER_MISSING'],
+      ['청산가 계산 불가', { tier: { ...TIER, maintAmount: 1_000_000 } },
+        'LIQUIDATION_PRICE_UNCOMPUTABLE'],
+      ['변동성 거리 모름', { adverseDistancePct: null }, 'ADVERSE_DISTANCE_UNKNOWN'],
+      ['변동성이 청산을 넘음', { adverseDistancePct: 1.0 }, 'ADVERSE_REACHES_LIQUIDATION'],
+    ]) {
+      const v = liq.assessLiquidationDistance(okIn(over));
+      if (v.ok) err(`${LIQ}: ${why}인데 통과합니다 — 확인하지 못한 것은 안전이 아닙니다`);
+      else if (v.code !== code) {
+        err(`${LIQ}: ${why}의 사유가 ${v.code}입니다 (${code}이어야 합니다)`);
+      }
+    }
+    // 계산 못 한 경우 **0을 청산가로 적지 않는가.**
+    const uncomputable = liq.assessLiquidationDistance(
+      okIn({ tier: { ...TIER, maintAmount: 1_000_000 } }));
+    if (uncomputable.estimatedLiquidationPrice != null) {
+      err(`${LIQ}: 계산 못 한 청산가를 ${uncomputable.estimatedLiquidationPrice}로 적습니다`
+        + ' — 0을 적으면 청산거리가 100%가 되어 가장 위험한 주문이 가장 안전해 보입니다');
+    }
+    // 경계는 **>** 다. 예상 움직임이 정확히 청산에 닿는 것은 여유가 아니다.
+    const d = good.liquidationDistancePct;
+    if (liq.assessLiquidationDistance(okIn({ adverseDistancePct: d })).ok) {
+      err(`${LIQ}: 변동성 거리가 청산거리와 **같은데** 통과합니다 — 경계가 >= 입니다`);
+    }
+    if (!liq.assessLiquidationDistance(okIn({ adverseDistancePct: d - 1e-6 })).ok) {
+      err(`${LIQ}: 경계 바로 안쪽이 막힙니다 — 조건이 그 자리에 있지 않습니다`);
+    }
+  }
+
+  // 식을 **복제하지 않는가.** 청산가 산출은 safety/liquidationPrice 하나다.
+  {
+    const src = code(LIQ);
+    if (!/from '\.\.\/safety\/liquidationPrice'/.test(src)
+        || !/calcLiquidationPrice/.test(src)) {
+      err(`${LIQ}: 청산가 산출식 정본(safety/liquidationPrice)을 쓰지 않습니다`);
+    }
+    // 식을 여기서 다시 쓰면 두 벌이 된다. 그 모양을 직접 막는다.
+    if (/1\s*\/\s*leverage|1\s*\/\s*lev\b/.test(src)) {
+      err(`${LIQ}: 청산가 식을 이 파일에서 다시 씁니다 — 정본과 갈립니다`);
+    }
+    // 추정 표로 떨어지지 않는가.
+    if (/MMR_BRACKETS/.test(src)) {
+      err(`${LIQ}: 추정 유지증거금 표를 씁니다 — 100배에서 구간을 잘못 짚으면 청산가가 통째로 달라집니다`);
+    }
+  }
+
+  // 진입 계획이 **그 판정으로 막는가** (이름이 아니라 동작).
+  if (entry) {
+    const base = {
+      observeMarginMode: async () => 'isolated',
+      applyLeverage: async (lev) => ({ ok: true, observed: lev, message: '' }),
+      availableUsd: async () => 1000,
+      referencePrice: async () => 50_000,
+      quantize: async (q) => ({ qty: q, message: '' }),
+      maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
+      adverseDistancePct: async () => 0.3,
+    };
+    const CC = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
+                 side: 'LONG' };
+    for (const [why, over] of [
+      ['브래킷을 못 읽으면', { maintenanceTiers: async () => null }],
+      ['브래킷 조회가 터지면', { maintenanceTiers: async () => { throw new Error('boom'); } }],
+      ['변동성 거리를 모르면', { adverseDistancePct: async () => null }],
+      ['변동성이 청산을 넘으면', { adverseDistancePct: async () => 5 }],
+      ['방향을 모르면', {}],
+    ]) {
+      const c = why === '방향을 모르면' ? { ...CC, side: null } : CC;
+      const prep = await entry.prepareEntry100x(c, 10, { ...base, ...over });
+      if (prep.ok) err(`100X 진입: ${why} 막아야 하는데 통과했습니다`);
+      else if (prep.code !== 'LIQUIDATION_UNSAFE') {
+        err(`100X 진입: ${why} 막긴 했는데 사유가 ${prep.code}입니다 (LIQUIDATION_UNSAFE여야 합니다)`);
+      }
+    }
+    // 막힌 계획도 **계산한 데까지는 말한다.**
+    const blocked = await entry.prepareEntry100x(
+      CC, 10, { ...base, adverseDistancePct: async () => 5 });
+    if (blocked.liquidation == null || blocked.liquidation.liquidationDistancePct == null) {
+      err('100X 진입: 여유가 모자라 막혔는데 계산한 청산거리를 버립니다'
+        + ' — 운영자가 계산 실패와 구별할 수 없습니다');
+    }
+    // 통과한 계획은 판정을 들고 간다.
+    const passed = await entry.prepareEntry100x(CC, 10, base);
+    if (!passed.ok || passed.liquidation?.ok !== true) {
+      err('100X 진입: 통과한 계획이 청산거리 판정을 들고 있지 않습니다');
+    }
+  }
+
+  // 의존 분류 — 새 읽기가 통합 카운터 밖으로 새지 않는가.
+  if (entry) {
+    for (const nm of ['maintenanceTiers', 'adverseDistancePct']) {
+      if (!(entry.READONLY_DEPS || []).includes(nm)) {
+        err(`100X 진입: ${nm}이 READONLY_DEPS에 없습니다 — 분류 밖 의존은 카운터에서 샙니다`);
+      }
+      if ((entry.MUTATING_DEPS || []).includes(nm)) {
+        err(`100X 진입: ${nm}이 쓰기로 분류돼 있습니다 — 읽기입니다`);
+      }
+    }
+    const es = code(ENTRY);
+    // 읽기 전용 타입에 들어 있어야 **구조상** 쓰기보다 앞이 된다.
+    const iRead = es.indexOf('export interface Entry100xReadDeps');
+    const iWrite = es.indexOf('export interface Entry100xWriteDeps');
+    const readBlock = iRead >= 0 && iWrite > iRead ? es.slice(iRead, iWrite) : '';
+    for (const nm of ['maintenanceTiers', 'adverseDistancePct']) {
+      if (!readBlock.includes(nm)) {
+        err(`${ENTRY}: ${nm}이 읽기 전용 의존 타입 안에 없습니다`
+          + ' — 쓰기 단계에서 읽게 되면 보호가 첫 거래소 쓰기 뒤로 갑니다');
+      }
+    }
+  }
+
+  // 라우트가 **0을 다시 적지 않는가.**
+  {
+    const sc = code(SCALP);
+    if (/liquidationPrice:\s*0\s*,\s*liquidationDistancePct:\s*0/.test(sc)) {
+      err(`${SCALP}: 청산가·청산거리를 0으로 적습니다`
+        + ' — 0은 "0달러에 청산"이라 거리가 100%가 됩니다 (UNKNOWN을 0으로 적지 않는다)');
+    }
+    // 변동성 거리로 **손절가**를 넘기지 않는가. `NO_FIXED_SL`을 되살리는 길이다.
+    const iAdv = sc.indexOf('adverseDistancePct:');
+    if (iAdv < 0) {
+      err(`${SCALP}: 변동성 위험 거리를 진입 계획에 넘기지 않습니다`);
+    } else {
+      const seg = sc.slice(iAdv, iAdv + 300);
+      if (!/signal\.stopPct/.test(seg)) {
+        err(`${SCALP}: 변동성 위험 거리에 신호의 stopPct를 넘기지 않습니다`);
+      }
+      if (/stopLoss|stopPrice/.test(seg)) {
+        err(`${SCALP}: 변동성 위험 거리 자리에서 손절 주문 값을 씁니다`
+          + ' — NO_FIXED_SL에서 그 값은 거래소로 나가지 않습니다');
+      }
+    }
+  }
+}
+
 
 // ─────────────────────────────────────────────────────────────
 // ② 배선 — 이름이 아니라 "옛 판단이 사라졌는가"를 본다
