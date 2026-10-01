@@ -768,6 +768,46 @@ const M = [
                    "const _lateBlock = (p: any) => p?.stop_policy === 'NO_FIXED_SL';\n"
                    + 'export function lifecycleDecide('), 'RED'],
 
+  // ── 사전 검사 ↔ 첫 거래소 쓰기 순서 ──
+  //
+  // **자리만 있으면 통과하던 빈틈이다.** 아래 두 변이는 검사를 지우지
+  // 않는다 — 그대로 둔 채 첫 거래소 쓰기(`setFuturesMarginType(`) **뒤로
+  // 옮긴다.** 결과는 "거절은 되는데 마진 타입은 이미 바뀌었다"다. 규칙을
+  // 넣기 전에는 검사기 둘 + `npm test`를 전부 통과했다.
+  ['MUT-X1 모순 검사(NO_FIXED_SL+손절가)를 마진 타입 설정 뒤로 이동', P.exec,
+    s => {
+      const guard = "  if (noFixedSl && args.stopLoss != null) {\n"
+        + "    return { ok: false, status: 'REJECTED', clientOrderId,\n"
+        + "      message: '고정 손절을 쓰지 않는 프로필인데 손절가가 함께 넘어왔습니다'\n"
+        + "        + ` (${args.stopLoss}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };\n"
+        + "  }\n";
+      const write = "          await update({ status: 'FAILED', error_message: reason });\n"
+        + "          return { ok: false, status: 'FAILED', clientOrderId, message: reason };\n"
+        + "        }\n";
+      if (!s.includes(guard) || !s.includes(write)) return s;
+      return s.replace(guard, '').replace(write, write + guard);
+    }, 'RED'],
+
+  ['MUT-X2 승인 검사(plan.approved)를 마진 타입 설정 뒤로 이동', P.exec,
+    s => {
+      const guard = "  if (!plan.approved) {\n"
+        + "    return { ok: false, status: 'REJECTED', clientOrderId, "
+        + "message: '승인되지 않은 계획은 주문할 수 없습니다' };\n"
+        + "  }\n";
+      const write = "          await update({ status: 'FAILED', error_message: reason });\n"
+        + "          return { ok: false, status: 'FAILED', clientOrderId, message: reason };\n"
+        + "        }\n";
+      if (!s.includes(guard) || !s.includes(write)) return s;
+      return s.replace(guard, '').replace(write, write + guard);
+    }, 'RED'],
+
+  // 쓰기 자리를 못 찾으면 순서 규칙은 **아무것도 보지 않는 규칙**이 된다.
+  // 그 상태가 조용히 통과하면 안 된다.
+  ['MUT-X3 첫 거래소 쓰기 이름을 가려 순서 규칙을 눈멀게 함', P.exec,
+    s => s.replace('const mt = await bf.setFuturesMarginType(',
+                   'const setMargin = bf.setFuturesMarginType; const mt = await setMargin('),
+    'RED'],
+
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**

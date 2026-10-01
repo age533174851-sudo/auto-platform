@@ -629,6 +629,57 @@ if (!/noFixedSl\s*&&\s*args\.stopLoss\s*!=\s*null/.test(exec)) {
     + ' — 조용히 무시하면 화면에는 손절이 있고 거래소에는 없습니다');
 }
 
+// ── 사전 안전 검사가 **첫 거래소 쓰기보다 앞인가** ──
+//
+// 위의 규칙들은 전부 "그 자리가 있는가"만 본다. 있는데 **늦으면** 막힐
+// 요청이 계좌 설정을 먼저 바꾼다. 그리고 Binance 진입 경로에서 가장
+// 먼저 나가는 쓰기는 주문이 아니다 — `setFuturesMarginType(`(ISOLATED
+// 설정)이 배율보다, 배율이 주문보다 앞이다. 모순으로 거절될 요청이 그
+// 뒤에서 판정되면 "주문은 안 나갔다"가 위로가 되지 않는다. 마진 타입은
+// 이미 바뀌었고, 같은 심볼에 포지션이 있으면 **청산가가 함께 움직인다.**
+//
+// 이 규칙이 없을 때 "모순 검사를 마진 타입 설정 뒤로 옮기는" 변이는
+// 검사기 둘과 유닛 시험 전체를 **그대로 통과했다.** 자리만 보는 규칙의
+// 빈틈이고, 라우트(⑫-c)가 호출 순서를 잡아도 실행기 **안쪽** 순서는
+// 아무도 보지 않고 있었다.
+{
+  const writes = [
+    [/\bbf\.setFuturesMarginType\s*\(/, '마진 타입 설정(setFuturesMarginType)'],
+    [/\bawait\s+futuresApplyLeverage\s*\(/, '배율 설정(futuresApplyLeverage)'],
+    [/\bbf\.placeFuturesOrder\s*\(/, '주문 제출(placeFuturesOrder)'],
+  ].map(([re, what]) => [exec.search(re), what]);
+  // **쓰기 자리를 못 찾으면 그 자체가 실패다.** 하나라도 이름이 바뀌거나
+  // 변수에 담겨 호출되면, 순서 규칙은 남은 뒤쪽 쓰기만 보게 되고 그
+  // 사이에 검사를 끼워 넣어도 조용히 통과한다 — 규칙이 눈먼다.
+  for (const [i, what] of writes) {
+    if (i < 0) {
+      err(`${EXEC}: ${what} 자리를 찾지 못했습니다`
+        + ' — 순서 규칙이 그 쓰기를 더 이상 보지 않습니다');
+    }
+  }
+  const found = writes.filter(([i]) => i >= 0);
+  if (found.length) {
+    const iFirstWrite = Math.min(...found.map(([i]) => i));
+    for (const [re, what] of [
+      [/if\s*\(\s*!\s*plan\.approved\s*\)/, '승인되지 않은 계획 차단'],
+      [/if\s*\(\s*noFixedSl\s*&&\s*args\.stopLoss\s*!=\s*null\s*\)/,
+        'NO_FIXED_SL ↔ 손절가 모순 차단'],
+      [/if\s*\(\s*noFixedTp\s*&&\s*args\.takeProfit\s*!=\s*null\s*\)/,
+        'NO_FIXED_TP ↔ 익절가 모순 차단'],
+      [/if\s*\(\s*!isFinite\(plan\.quantity\)/, '수량 유효성 차단'],
+      [/if\s*\(\s*!args\.reduceOnly\s*&&\s*\(!isFinite\(plan\.leverage\)/,
+        '배율 유효성 차단'],
+    ]) {
+      const i = exec.search(re);
+      if (i < 0) { err(`${EXEC}: ${what} 자리가 없습니다`); continue; }
+      if (!(i < iFirstWrite)) {
+        err(`${EXEC}: ${what}가 첫 거래소 쓰기보다 뒤입니다`
+          + ' — 막힐 요청이 계좌의 마진 타입·배율을 먼저 바꿉니다');
+      }
+    }
+  }
+}
+
 // 체크리스트 N/A 축
 const cl = code(CHECKLIST);
 if (!/FIXED_STOP_ONLY_CHECKS/.test(cl) || !/stopPolicy\s*===\s*'NO_FIXED_SL'/.test(cl)) {
