@@ -768,10 +768,11 @@ if (entry) {
 //   ★ 이것은 **진입 전 보호**다. 열린 포지션을 닫는 권한이 아니다.
 {
   const liq = await loadModule(LIQ, '청산거리 판정');
-  const TIER = { mmr: 0.004, maintAmount: 0, source: 'EXCHANGE_BRACKET', notional: 10_000 };
+  // 바이낸스 BTCUSDT 대표 구간
+  const BR = [[50_000, 0.004, 0], [500_000, 0.005, 50], [1_000_000, 0.010, 2_550]];
   const okIn = (over = {}) => ({
     side: 'LONG', referencePrice: 50_000, quantity: 0.2, leverage: 100,
-    marginMode: 'isolated', tier: TIER, adverseDistancePct: 0.3, ...over,
+    marginMode: 'isolated', brackets: BR, adverseDistancePct: 0.3, ...over,
   });
   if (liq) {
     const good = liq.assessLiquidationDistance(okIn());
@@ -810,10 +811,11 @@ if (entry) {
       ['배율 없음', { leverage: null }, 'LEVERAGE_UNUSABLE'],
       ['마진 모드 없음', { marginMode: null }, 'MARGIN_MODE_UNKNOWN'],
       ['교차 마진', { marginMode: 'cross' }, 'MARGIN_MODE_UNSUPPORTED'],
-      ['브래킷 없음', { tier: null }, 'MAINTENANCE_TIER_MISSING'],
-      ['추정 출처 구간', { tier: { ...TIER, source: 'GUESS' } }, 'MAINTENANCE_TIER_MISSING'],
-      ['청산가 계산 불가', { tier: { ...TIER, maintAmount: 1_000_000 } },
-        'LIQUIDATION_PRICE_UNCOMPUTABLE'],
+      ['브래킷 없음', { brackets: null }, 'MAINTENANCE_TIER_MISSING'],
+      ['빈 브래킷 표', { brackets: [] }, 'MAINTENANCE_TIER_MISSING'],
+      ['MMR이 비율이 아님', { brackets: [[Infinity, 1, 0]] }, 'MAINTENANCE_TIER_MISSING'],
+      ['계정별 브래킷 조정 배수', { brackets: [[Infinity, 0.004, 0, 1.5]] },
+        'BRACKET_COEF_UNSUPPORTED'],
       ['변동성 거리 모름', { adverseDistancePct: null }, 'ADVERSE_DISTANCE_UNKNOWN'],
       ['변동성이 청산을 넘음', { adverseDistancePct: 1.0 }, 'ADVERSE_REACHES_LIQUIDATION'],
     ]) {
@@ -825,7 +827,10 @@ if (entry) {
     }
     // 계산 못 한 경우 **0을 청산가로 적지 않는가.**
     const uncomputable = liq.assessLiquidationDistance(
-      okIn({ tier: { ...TIER, maintAmount: 1_000_000 } }));
+      okIn({ brackets: [[Infinity, 0.004, 1_000_000]] }));
+    if (uncomputable.ok) {
+      err(`${LIQ}: 청산가를 못 구했는데 통과합니다`);
+    }
     if (uncomputable.estimatedLiquidationPrice != null) {
       err(`${LIQ}: 계산 못 한 청산가를 ${uncomputable.estimatedLiquidationPrice}로 적습니다`
         + ' — 0을 적으면 청산거리가 100%가 되어 가장 위험한 주문이 가장 안전해 보입니다');
@@ -840,12 +845,97 @@ if (entry) {
     }
   }
 
+  // ── 구간 자기일관성 (②A) ──
+  //
+  //   **한 번 고른 구간으로 끝내면 틀린다.** 100배는 청산까지 0.x%만
+  //   움직이므로, 진입 명목가가 구간 경계 근처면 그 사이에 경계를 넘는다.
+  //   넘었는데 처음 구간으로 계산하면 청산거리가 실제보다 **멀게** 나온다 —
+  //   틀리는 방향이 낙관적이다.
+  if (liq) {
+    // LONG: 청산가가 내려가며 **아래** 구간으로.
+    const L2 = liq.assessLiquidationDistance(okIn({ side: 'LONG', quantity: 1.002 }));
+    if (!L2.ok) err(`${LIQ}: 경계를 넘는 정상 LONG이 막힙니다 — ${L2.reason}`);
+    else {
+      if (L2.entryTierIndex !== 1) err(`${LIQ}: LONG 진입 구간이 ${L2.entryTierIndex}입니다 (1이어야 합니다)`);
+      if (L2.tier?.index !== 0) {
+        err(`${LIQ}: LONG 청산가에서 아래 구간으로 넘어가는데 최종 구간이 ${L2.tier?.index}입니다`
+          + ' — 진입 구간을 그대로 씁니다');
+      }
+      if (L2.tier?.mmr !== 0.004 || L2.tier?.maintAmount !== 0) {
+        err(`${LIQ}: LONG 최종 구간의 MMR/공제액이 최초 구간 값입니다`
+          + ` (mmr ${L2.tier?.mmr} · cum ${L2.tier?.maintAmount})`);
+      }
+      if (!(L2.tier?.notional <= 50_000)) {
+        err(`${LIQ}: LONG 자기일관이 깨졌습니다 — 청산 명목가 ${L2.tier?.notional}가 고른 구간 밖입니다`);
+      }
+    }
+    // SHORT: 청산가가 올라가며 **위** 구간으로.
+    const S2 = liq.assessLiquidationDistance(okIn({ side: 'SHORT', quantity: 9.99 }));
+    if (!S2.ok) err(`${LIQ}: 경계를 넘는 정상 SHORT이 막힙니다 — ${S2.reason}`);
+    else {
+      if (S2.entryTierIndex !== 1) err(`${LIQ}: SHORT 진입 구간이 ${S2.entryTierIndex}입니다 (1이어야 합니다)`);
+      if (S2.tier?.index !== 2) {
+        err(`${LIQ}: SHORT 청산가에서 위 구간으로 넘어가는데 최종 구간이 ${S2.tier?.index}입니다`);
+      }
+      if (S2.tier?.mmr !== 0.010 || S2.tier?.maintAmount !== 2_550) {
+        err(`${LIQ}: SHORT 최종 구간의 MMR/공제액이 최초 구간 값입니다`
+          + ` (mmr ${S2.tier?.mmr} · cum ${S2.tier?.maintAmount})`);
+      }
+      if (!(S2.tier?.notional > 500_000)) {
+        err(`${LIQ}: SHORT 자기일관이 깨졌습니다 — 청산 명목가 ${S2.tier?.notional}가 고른 구간 밖입니다`);
+      }
+    }
+    // 고친 값은 옛 값보다 **짧아야** 한다. 옛 계산이 낙관적이었다.
+    if (L2.ok) {
+      const q = 1.002;
+      const oldLp = (50_000 * (1 - 1 / 100) - 50 / q) / (1 - 0.005);
+      const oldPct = (50_000 - oldLp) / 50_000 * 100;
+      if (!(L2.liquidationDistancePct < oldPct)) {
+        err(`${LIQ}: 경계를 넘는데 청산거리가 옛 값(${oldPct.toFixed(5)}%)보다 짧지 않습니다`
+          + ` (${L2.liquidationDistancePct}%) — 낙관적인 방향으로 틀렸습니다`);
+      }
+    }
+    // 넘지 않는 자리는 그대로여야 한다 (과도 수정이 아니다).
+    const mid = liq.assessLiquidationDistance(okIn({ quantity: 0.2 }));
+    if (mid.tier?.index !== 0 || mid.entryTierIndex !== 0) {
+      err(`${LIQ}: 구간 한가운데인데 구간이 바뀝니다`);
+    }
+  }
+
+  // 경계 해석(`<=`)이 **한 곳**에만 있는가. 두 파일이 각자 고르면 경계
+  // 바로 위아래에서 답이 갈린다.
+  {
+    const src = code(LIQ);
+    if (/<=\s*cap|cap\s*>=|notionalCap/.test(src)) {
+      err(`${LIQ}: 구간 경계 해석을 이 파일에서 다시 합니다`
+        + ' — tierIndexFor 하나에만 있어야 합니다');
+    }
+    if (!/solveLiquidationPrice/.test(src)) {
+      err(`${LIQ}: 자기일관 solver를 쓰지 않습니다 — 진입 명목가 구간으로 끝내면 틀립니다`);
+    }
+    // **계정별 브래킷 조정 배수를 버리지 않는가.**
+    //
+    //   버린다는 것은 "그런 조정이 없다"고 가정하는 것과 같다. 확인한 적이
+    //   없으므로 보존하고, 1이 아니면 위 판정이 막는다.
+    const bf = code('src/lib/exchanges/binanceFutures.ts');
+    if (!/notionalCoef/.test(bf)) {
+      err('src/lib/exchanges/binanceFutures.ts: leverageBracket 응답의 notionalCoef를 버립니다'
+        + ' — 계정별 브래킷 조정이 걸려 있어도 알 수 없습니다');
+    }
+    const ps = code('src/lib/safety/liquidationPrice.ts');
+    const caps = (ps.match(/notional\s*<=\s*table\[i\]\[0\]|notional\s*<=\s*cap/g) || []).length;
+    if (caps !== 1) {
+      err(`src/lib/safety/liquidationPrice.ts: 경계 비교가 ${caps}곳입니다 — 한 곳이어야 합니다`);
+    }
+  }
+
   // 식을 **복제하지 않는가.** 청산가 산출은 safety/liquidationPrice 하나다.
   {
     const src = code(LIQ);
     if (!/from '\.\.\/safety\/liquidationPrice'/.test(src)
-        || !/calcLiquidationPrice/.test(src)) {
-      err(`${LIQ}: 청산가 산출식 정본(safety/liquidationPrice)을 쓰지 않습니다`);
+        || !/solveLiquidationPrice/.test(src)) {
+      err(`${LIQ}: 청산가 산출식 정본(safety/liquidationPrice의 solveLiquidationPrice)을`
+        + ' 쓰지 않습니다');
     }
     // 식을 여기서 다시 쓰면 두 벌이 된다. 그 모양을 직접 막는다.
     if (/1\s*\/\s*leverage|1\s*\/\s*lev\b/.test(src)) {

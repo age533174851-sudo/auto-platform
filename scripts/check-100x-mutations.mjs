@@ -123,6 +123,8 @@ const P = {
   reatt: 'src/lib/engine/stopReattach.ts',
   cov: 'src/lib/engine/exitCoverage.ts',
   liq: 'src/lib/engine/liquidationDistance.ts',
+  liqmath: 'src/lib/safety/liquidationPrice.ts',
+  bfut: 'src/lib/exchanges/binanceFutures.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -1019,6 +1021,49 @@ const M = [
   ['MUT-L10 정상 케이스를 과도하게 거부 (여유 요구를 10배로)', P.liq,
     s => s.replace('  if (!(distancePct > adverse)) {',
                    '  if (!(distancePct > adverse * 10)) {'), 'RED'],
+
+  // ── ②A 유지증거금 구간 자기일관성 ──
+  //
+  // 진입 명목가로 구간을 한 번 고르고 끝내면, 청산가에서 경계를 넘은
+  // 경우를 놓친다. 놓치면 청산거리가 실제보다 **멀게** 나온다 — 틀리는
+  // 방향이 낙관적이다.
+
+  ['MUT-L11 진입 구간으로 끝냄 (청산 명목가 재검증 제거)', P.liqmath,
+    s => s.replace('    if (tierIndexFor(n, table) === i) hits.push({ i, lp, n });',
+                   '    if (i === entryTierIndex) hits.push({ i, lp, n });'), 'RED'],
+
+  ['MUT-L12 LONG이 아래 구간으로 넘어가도 진입 구간 유지', P.liqmath,
+    s => s.replace('    if (tierIndexFor(n, table) === i) hits.push({ i, lp, n });',
+      "    const _c = side === 'buy' ? entryTierIndex : tierIndexFor(n, table);\n"
+      + '    if (_c === i) hits.push({ i, lp, n });'), 'RED'],
+
+  ['MUT-L13 SHORT이 위 구간으로 넘어가도 진입 구간 유지', P.liqmath,
+    s => s.replace('    if (tierIndexFor(n, table) === i) hits.push({ i, lp, n });',
+      "    const _c = side === 'sell' ? entryTierIndex : tierIndexFor(n, table);\n"
+      + '    if (_c === i) hits.push({ i, lp, n });'), 'RED'],
+
+  ['MUT-L14 구간 경계 의미를 <= 에서 < 로', P.liqmath,
+    s => s.replace('    if (notional <= table[i][0]) return i;',
+                   '    if (notional < table[i][0]) return i;'), 'RED'],
+
+  ['MUT-L15 자기일관 실패를 통과로 (fail-open)', P.liq,
+    s => s.replace("  if (sol.code === 'NO_SELF_CONSISTENT_TIER') {",
+                   '  if (false) {'), 'RED'],
+
+  ['MUT-L16 최종 구간 대신 최초 구간의 MMR을 적음', P.liqmath,
+    s => s.replace('    mmr: table[h.i][1],', '    mmr: table[entryTierIndex][1],'), 'RED'],
+
+  ['MUT-L17 최종 구간 대신 최초 구간의 공제액을 적음', P.liqmath,
+    s => s.replace('    maintAmount: table[h.i][2],',
+                   '    maintAmount: table[entryTierIndex][2],'), 'RED'],
+
+  ['MUT-L18 계정별 브래킷 조정 배수를 다시 버림', P.bfut,
+    s => s.replace('      b?.notionalCoef == null ? undefined : Number(b.notionalCoef),',
+                   '      undefined,'), 'RED'],
+
+  ['MUT-L18b 조정 배수가 걸려 있어도 통과시킴', P.liq,
+    s => s.replace('    if (coef != null && !(Number(coef) === 1)) {',
+                   '    if (false) {'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

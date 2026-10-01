@@ -38,8 +38,7 @@ import {
   type Sizing100xVerdict,
 } from './sizing100x';
 import {
-  assessLiquidationDistance, tierFromBrackets,
-  type LiquidationDistanceAssessment,
+  assessLiquidationDistance, type LiquidationDistanceAssessment,
 } from './liquidationDistance';
 import type { BracketTier } from '../safety/liquidationPrice';
 
@@ -311,7 +310,9 @@ export async function prepareEntry100x(
     quantity: q.qty,
     leverage: req,
     marginMode: mode,
-    tier: tierFromBrackets(notional, tiers),
+    // 구간은 **판정이 푼다.** 진입 명목가로 미리 고르면 청산가에서
+    // 경계를 넘은 경우를 잡지 못한다 — 표를 통째로 넘긴다.
+    brackets: tiers,
     adverseDistancePct: adverse,
   });
   notes.push(

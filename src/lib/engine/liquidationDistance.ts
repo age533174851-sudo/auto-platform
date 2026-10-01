@@ -43,9 +43,16 @@
 // 종료 권한(exit authority)이고 아직 없다. 이 판정이 통과했다고 해서
 // `NO_FIXED_SL`에 종료 수단이 생긴 것이 아니다.
 
-import { calcLiquidationPrice, type BracketTier } from '../safety/liquidationPrice';
+import { solveLiquidationPrice, type BracketTier } from '../safety/liquidationPrice';
 
-/** 유지증거금 구간. **거래소에서 읽은 값만 받는다** */
+/**
+ * 최종으로 쓴 유지증거금 구간. **결과에만 나온다** — 입력으로 받지 않는다.
+ *
+ * 예전에는 부르는 쪽이 구간을 골라서 넘겼다. 그러면 구간 선택이 두 곳
+ * (부르는 쪽 · 청산가 식)에 생기고, 더 나쁘게는 **진입 명목가로 한 번
+ * 고른 구간**이 그대로 답이 됐다. 청산가에서의 명목가는 다른 구간일 수
+ * 있다(아래 `solveLiquidationPrice` 머리말). 이제 구간은 판정이 푼다.
+ */
 export interface MaintenanceTier {
   /** 유지증거금률 (0~1 비율. 0.004 = 0.4%) */
   mmr: number;
@@ -59,8 +66,10 @@ export interface MaintenanceTier {
    * 한 칸 잘못 짚으면 청산가가 통째로 달라진다.
    */
   source: 'EXCHANGE_BRACKET';
-  /** 이 구간을 고를 때 쓴 명목가 */
+  /** **청산가에서의** 명목가 — 이 구간을 고른 근거다 */
   notional: number;
+  /** 표에서 몇 번째 구간인가 */
+  index: number;
 }
 
 export type LiquidationAssessmentCode =
@@ -74,8 +83,14 @@ export type LiquidationAssessmentCode =
   | 'MARGIN_MODE_UNKNOWN'
   | 'MARGIN_MODE_UNSUPPORTED'
   | 'MAINTENANCE_TIER_MISSING'
+  /** 계정별 브래킷 조정 배수가 걸려 있다 — 적용법을 확인하지 못했다 */
+  | 'BRACKET_COEF_UNSUPPORTED'
   // ── 계산 결과를 믿을 수 없다 ──
   | 'LIQUIDATION_PRICE_UNCOMPUTABLE'
+  /** 어느 구간으로 계산해도 그 구간에 들어가지 않는다 */
+  | 'TIER_NOT_SELF_CONSISTENT'
+  /** 두 구간 이상이 자기일관이다 */
+  | 'TIER_AMBIGUOUS'
   | 'LIQUIDATION_PRICE_WRONG_SIDE'
   | 'DISTANCE_NOT_POSITIVE'
   // ── 계산은 됐는데 여유가 모자란다 ──
@@ -89,7 +104,13 @@ export interface LiquidationDistanceInput {
   quantity: number | null | undefined;
   leverage: number | null | undefined;
   marginMode: 'isolated' | 'cross' | null | undefined;
-  tier: MaintenanceTier | null | undefined;
+  /**
+   * **거래소 유지증거금 브래킷 전체.** 고른 구간 하나가 아니다.
+   *
+   * 구간은 청산가와 **함께** 정해진다 — 진입 명목가로 미리 고르면 청산가
+   * 에서 경계를 넘은 경우를 잡지 못한다. 그래서 표를 통째로 받는다.
+   */
+  brackets: BracketTier[] | null | undefined;
   /**
    * **예상 adverse/변동성 위험 거리 (%).**
    *
@@ -137,7 +158,14 @@ export interface LiquidationDistanceAssessment {
 
   leverage: number | null;
   marginMode: 'isolated' | 'cross' | null;
+  /** 최종으로 쓴 구간 (청산가에서의 명목가가 고른 것) */
   tier: MaintenanceTier | null;
+  /**
+   * 진입 명목가로 골랐을 구간 번호. `tier.index`와 다르면 **경계를 넘은
+   * 것**이고, 예전 계산은 그 경우를 틀렸다. 관측에 남긴다.
+   */
+  entryTierIndex: number | null;
+  entryNotional: number | null;
   adverseDistancePct: number | null;
 }
 
@@ -154,7 +182,8 @@ const fail = (
   ok: false, code, reason, trustworthy: false,
   side: null, referencePrice: null, estimatedLiquidationPrice: null,
   liquidationDistance: null, liquidationDistancePct: null, headroomKind: 'RAW',
-  leverage: null, marginMode: null, tier: null, adverseDistancePct: null,
+  leverage: null, marginMode: null, tier: null,
+  entryTierIndex: null, entryNotional: null, adverseDistancePct: null,
   ...partial,
 });
 
@@ -227,40 +256,91 @@ export function assessLiquidationDistance(
   }
   const marginMode: 'isolated' = 'isolated';
 
-  // ── ⑥ 유지증거금 구간 ──
+  // ── ⑥ 유지증거금 브래킷 ──
   //
   // **추정 테이블로 때우지 않는다.** 거래소 브래킷을 못 읽었으면 거부다.
-  const tier = inp.tier ?? null;
-  const mmr = tier == null ? null : num(tier.mmr);
-  const maintAmount = tier == null ? null : num(tier.maintAmount);
-  if (tier == null || tier.source !== 'EXCHANGE_BRACKET'
-      || mmr == null || !(mmr >= 0 && mmr < 1)
-      || maintAmount == null || maintAmount < 0) {
+  const brackets = Array.isArray(inp.brackets) ? inp.brackets : null;
+  if (!brackets || brackets.length === 0) {
     return fail('MAINTENANCE_TIER_MISSING',
       '거래소에서 유지증거금 구간(leverageBracket)을 읽지 못했습니다'
       + ' — 추정 표로 100배 청산가를 정하지 않습니다',
       { side, referencePrice: price, leverage: lev, marginMode });
   }
-
-  // ── ⑦ 청산가 ──
-  //
-  // 식은 `safety/calcLiquidationPrice` 하나다. 브래킷을 직접 넘기므로
-  // 그쪽의 하드코딩 추정 표로 떨어지지 않는다.
-  const brackets: BracketTier[] = [[Infinity, mmr, maintAmount]];
-  const raw = calcLiquidationPrice(price, lev, side === 'LONG' ? 'buy' : 'sell', qty, brackets);
-  const liq = num(raw);
-  // `calcLiquidationPrice`는 못 구하면 **0을 돌려준다.** 0을 청산가로 읽으면
-  // LONG 청산거리가 100%가 된다 — 통과시키면 안 되는 모양이다.
-  if (liq == null || liq <= 0) {
-    return fail('LIQUIDATION_PRICE_UNCOMPUTABLE',
-      '청산가를 계산하지 못했습니다 — 0을 청산가로 읽지 않습니다'
-      + ' (0이면 청산거리가 100%가 되어 가장 위험한 주문이 가장 안전해 보입니다)',
-      { side, referencePrice: price, leverage: lev, marginMode, tier });
+  for (const t of brackets) {
+    // **상한은 Infinity일 수 있다.** 마지막 구간은 위가 없다는 뜻이고,
+    // 저장소의 추정 표도 실제 응답(아주 큰 수)도 그 자리를 그렇게 쓴다.
+    // 여기서 유한수만 받으면 마지막 구간이 통째로 막힌다.
+    const cap = Number(t?.[0]);
+    const m = num(t?.[1]); const amt = num(t?.[2]);
+    if (!(cap > 0) || Number.isNaN(cap)
+        || m == null || amt == null || !(m >= 0 && m < 1) || amt < 0) {
+      return fail('MAINTENANCE_TIER_MISSING',
+        `유지증거금 구간에 쓸 수 없는 값이 있습니다 (${JSON.stringify(t)})`
+        + ' — 0.4와 0.004를 헷갈리면 청산가가 통째로 달라집니다',
+        { side, referencePrice: price, leverage: lev, marginMode });
+    }
+    // ★ **계정별 브래킷 조정 배수(notionalCoef).**
+    //
+    //   바이낸스는 계정에 따라 브래킷을 조정해 줄 수 있고 그 배수를 응답에
+    //   담는다. 이 저장소는 그 칸을 **버리고 있었다** — 버리는 것은 "조정이
+    //   없다"는 가정과 같은데 확인한 적이 없다.
+    //
+    //   지금은 보존만 하고 **적용하지 않는다.** 상한/하한에 이미 반영되어
+    //   오는지, 따로 곱해야 하는지 확인하지 못했기 때문이다. 대신 1이 아닌
+    //   값이 오면 막는다 — 모르는 조정이 걸린 계정의 청산가를 아는 척하지
+    //   않는다. 추측해서 곱하는 것보다 막는 것이 낫다.
+    const coef = t?.[3];
+    if (coef != null && !(Number(coef) === 1)) {
+      return fail('BRACKET_COEF_UNSUPPORTED',
+        `이 계정의 유지증거금 브래킷에 조정 배수(notionalCoef=${String(coef)})가 걸려 있습니다`
+        + ' — 적용 방식을 확인하지 못해 추측하지 않고 막습니다',
+        { side, referencePrice: price, leverage: lev, marginMode });
+    }
   }
+
+  // ── ⑦ 청산가와 구간을 **함께** 푼다 ──
+  //
+  //   진입 명목가로 구간을 한 번 고르고 끝내면 틀린다. 청산가에서의
+  //   명목가가 다른 구간이면 그 구간의 값으로 다시 계산해야 한다
+  //   (`solveLiquidationPrice` 머리말에 실측 예가 있다). 100배에서는
+  //   청산까지 0.x%만 움직이므로 경계 근처에서 실제로 일어난다.
+  const sol = solveLiquidationPrice({
+    entryPrice: price, leverage: lev, side: side === 'LONG' ? 'buy' : 'sell',
+    quantity: qty, brackets,
+  });
+  const crossInfo = {
+    entryTierIndex: sol.entryTierIndex, entryNotional: sol.entryNotional,
+  };
+  if (sol.code === 'NO_SELF_CONSISTENT_TIER') {
+    return fail('TIER_NOT_SELF_CONSISTENT',
+      '어느 유지증거금 구간으로 계산해도 그 청산가의 명목가가 같은 구간에 들어가지'
+      + ' 않습니다 — 청산가를 확정할 수 없습니다',
+      { side, referencePrice: price, leverage: lev, marginMode, ...crossInfo });
+  }
+  if (sol.code === 'AMBIGUOUS_TIER') {
+    return fail('TIER_AMBIGUOUS',
+      '두 개 이상의 유지증거금 구간이 자기일관입니다 — 어느 쪽이 실제인지'
+      + ' 말할 수 없어 막습니다',
+      { side, referencePrice: price, leverage: lev, marginMode, ...crossInfo });
+  }
+  const liq = num(sol.liquidationPrice);
+  // 해를 못 찾으면 **0을 청산가로 적지 않는다.** 0이면 LONG 청산거리가
+  // 100%가 되어 가장 위험한 주문이 가장 안전해 보인다.
+  if (sol.code !== 'OK' || liq == null || liq <= 0) {
+    return fail('LIQUIDATION_PRICE_UNCOMPUTABLE',
+      `청산가를 계산하지 못했습니다 (${sol.code}) — 0을 청산가로 읽지 않습니다`,
+      { side, referencePrice: price, leverage: lev, marginMode, ...crossInfo });
+  }
+  const tier: MaintenanceTier = {
+    mmr: sol.mmr as number, maintAmount: sol.maintAmount as number,
+    source: 'EXCHANGE_BRACKET',
+    notional: sol.liquidationNotional as number,
+    index: sol.tierIndex as number,
+  };
 
   const known = {
     side, referencePrice: price, estimatedLiquidationPrice: liq,
-    leverage: lev, marginMode, tier,
+    leverage: lev, marginMode, tier, ...crossInfo,
   };
 
   // ── ⑧ 방향이 말이 되는가 ──
@@ -331,26 +411,4 @@ export function assessLiquidationDistance(
     ok: true, code: 'OK', reason: '', trustworthy: true,
     ...measured, headroomKind: 'RAW', adverseDistancePct: adverse,
   };
-}
-
-/**
- * 명목가로 유지증거금 구간을 고른다. **거래소 브래킷만 받는다.**
- *
- * `safety.getMaintMargin`은 브래킷이 없으면 하드코딩 추정 표로 떨어진다.
- * 그 동작은 기존 화면이 쓰고 있어 그대로 두고, Exact100X 경로는 떨어지지
- * 않는 쪽을 쓴다 — 추정 구간으로 100배 청산가를 정하지 않는다.
- */
-export function tierFromBrackets(
-  notional: number | null | undefined,
-  tiers: BracketTier[] | null | undefined,
-): MaintenanceTier | null {
-  const n = num(notional);
-  if (n == null || n <= 0) return null;
-  if (!Array.isArray(tiers) || tiers.length === 0) return null;
-  const sorted = [...tiers].sort((a, b) => a[0] - b[0]);
-  const hit = sorted.find(([cap]) => n <= cap) ?? sorted[sorted.length - 1];
-  const mmr = num(hit?.[1]);
-  const maintAmount = num(hit?.[2]);
-  if (mmr == null || maintAmount == null) return null;
-  return { mmr, maintAmount, source: 'EXCHANGE_BRACKET', notional: n };
 }

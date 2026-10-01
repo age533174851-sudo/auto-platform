@@ -9,13 +9,13 @@
 //
 // ★ 이것은 **진입 전 보호**다. 열린 포지션을 닫는 권한이 아니다.
 import { test, eq, assert, close } from '../../test/harness';
-import {
-  assessLiquidationDistance, tierFromBrackets,
-  type LiquidationDistanceInput,
-} from './liquidationDistance';
+import { assessLiquidationDistance, type LiquidationDistanceInput } from './liquidationDistance';
+import { solveLiquidationPrice, type BracketTier } from '../safety/liquidationPrice';
 
-/** 거래소 브래킷 첫 구간(소액): MMR 0.4% · 공제액 0 */
-const TIER = { mmr: 0.004, maintAmount: 0, source: 'EXCHANGE_BRACKET' as const, notional: 10_000 };
+/** 바이낸스 BTCUSDT 대표 구간 — `[상한, MMR, 공제액]` */
+const BRACKETS: BracketTier[] = [
+  [50_000, 0.004, 0], [500_000, 0.005, 50], [1_000_000, 0.010, 2_550],
+];
 
 /** 통과하는 입력 한 벌. 시험마다 한 칸씩만 바꾼다 */
 const ok = (over: Partial<LiquidationDistanceInput> = {}): LiquidationDistanceInput => ({
@@ -24,7 +24,7 @@ const ok = (over: Partial<LiquidationDistanceInput> = {}): LiquidationDistanceIn
   quantity: 0.2,            // 명목가 10,000 · 증거금 100 · 100배
   leverage: 100,
   marginMode: 'isolated',
-  tier: TIER,
+  brackets: BRACKETS,
   adverseDistancePct: 0.3,
   ...over,
 });
@@ -83,7 +83,8 @@ export function runLiquidationDistanceTests() {
     ['배율 Infinity', { leverage: Infinity }, 'LEVERAGE_UNUSABLE'],
     ['마진 모드 없음', { marginMode: null }, 'MARGIN_MODE_UNKNOWN'],
     ['마진 모드가 교차', { marginMode: 'cross' as const }, 'MARGIN_MODE_UNSUPPORTED'],
-    ['브래킷 없음', { tier: null }, 'MAINTENANCE_TIER_MISSING'],
+    ['브래킷 없음', { brackets: null }, 'MAINTENANCE_TIER_MISSING'],
+    ['브래킷이 빈 표', { brackets: [] }, 'MAINTENANCE_TIER_MISSING'],
   ] as const) {
     test(`${why} → 거부한다`, () => {
       const v = assessLiquidationDistance(ok(over as any));
@@ -93,31 +94,111 @@ export function runLiquidationDistanceTests() {
     });
   }
 
-  test('추정 출처의 구간은 받지 않는다 — 추정 표로 100배를 정하지 않는다', () => {
-    const v = assessLiquidationDistance(ok({
-      tier: { mmr: 0.004, maintAmount: 0, source: 'GUESS' as any, notional: 10_000 },
-    }));
-    eq(v.ok, false, '★ 추정 구간으로 100배 청산가를 계산했다');
-    eq(v.code, 'MAINTENANCE_TIER_MISSING');
-  });
-
   test('MMR이 1 이상이면 거부한다 — 비율이 아니라 퍼센트를 넣은 경우다', () => {
     // 0.4(=40%)와 0.004(=0.4%)를 헷갈리면 청산가가 통째로 달라진다.
-    const v = assessLiquidationDistance(ok({
-      tier: { ...TIER, mmr: 1 },
-    }));
+    const v = assessLiquidationDistance(ok({ brackets: [[Infinity, 1, 0]] }));
     eq(v.ok, false);
     eq(v.code, 'MAINTENANCE_TIER_MISSING');
   });
 
+  test('구간에 쓸 수 없는 값이 있으면 거부한다', () => {
+    eq(assessLiquidationDistance(ok({ brackets: [[NaN, 0.004, 0]] })).code,
+      'MAINTENANCE_TIER_MISSING');
+    eq(assessLiquidationDistance(ok({ brackets: [[Infinity, 0.004, -1]] })).code,
+      'MAINTENANCE_TIER_MISSING');
+  });
+
+  test('계정별 브래킷 조정 배수(notionalCoef)가 걸려 있으면 막는다', () => {
+    // 적용 방식을 확인하지 못했다. **추측해서 곱하지 않고 막는다.**
+    const v = assessLiquidationDistance(ok({ brackets: [[Infinity, 0.004, 0, 1.5]] }));
+    eq(v.ok, false, '★ 모르는 브래킷 조정이 걸린 계정에서 청산가를 아는 척했다');
+    eq(v.code, 'BRACKET_COEF_UNSUPPORTED');
+  });
+
+  test('조정 배수가 1이거나 없으면 그대로 간다 — 기존 응답을 막지 않는다', () => {
+    eq(assessLiquidationDistance(ok({ brackets: [[Infinity, 0.004, 0, 1]] })).ok, true);
+    eq(assessLiquidationDistance(ok({ brackets: [[Infinity, 0.004, 0]] })).ok, true);
+  });
+
   test('계산이 안 되면 0을 청산가로 적지 않는다', () => {
     // 공제액이 명목가를 통째로 먹으면 식이 0 이하를 낸다.
-    const v = assessLiquidationDistance(ok({
-      tier: { ...TIER, maintAmount: 1_000_000 },
-    }));
+    const v = assessLiquidationDistance(ok({ brackets: [[Infinity, 0.004, 1_000_000]] }));
     eq(v.ok, false, '★ 계산 못 한 청산가로 통과했다');
-    eq(v.code, 'LIQUIDATION_PRICE_UNCOMPUTABLE');
+    assert(v.code === 'LIQUIDATION_PRICE_UNCOMPUTABLE' || v.code === 'TIER_NOT_SELF_CONSISTENT',
+      `사유가 ${v.code}다`);
     eq(v.estimatedLiquidationPrice, null, '★ 0을 청산가로 적었다 — 거리가 100%가 된다');
+  });
+
+  // ── 구간 자기일관성 (②A) ──
+  //
+  // **한 번 고른 구간으로 끝내면 틀린다.** 100배에서는 청산까지 0.x%만
+  // 움직이면 되므로, 진입 명목가가 구간 경계 근처면 그 사이에 경계를
+  // 넘는다. 넘었는데 처음 구간으로 계산하면 청산거리가 실제보다 **멀게**
+  // 나온다 — 틀리는 방향이 낙관적이다.
+
+  test('LONG: 청산가가 아래 구간으로 넘어가면 그 구간으로 다시 계산한다', () => {
+    // 진입 명목가 50,100 → 2구간. 청산가(≈49,699)에서 명목가 49,798 → 1구간.
+    const v = assessLiquidationDistance(ok({ side: 'LONG', quantity: 1.002 }));
+    eq(v.ok, true, `★ 경계를 넘는 정상 케이스가 막혔다 — ${v.reason}`);
+    eq(v.entryTierIndex, 1, '진입 명목가는 2구간이어야 한다');
+    eq(v.tier!.index, 0, '★ 청산가에서의 구간으로 다시 계산하지 않았다');
+    eq(v.tier!.mmr, 0.004, '★ 최초 구간의 MMR을 그대로 썼다');
+    eq(v.tier!.maintAmount, 0, '★ 최초 구간의 공제액을 그대로 썼다');
+    // 자기일관: 청산가에서의 명목가가 **그 구간 안**이다.
+    assert(v.tier!.notional <= 50_000, '★ 고른 구간과 청산 명목가가 어긋난다');
+    close(v.estimatedLiquidationPrice as number, 49_698.795, 1e-2, '청산가');
+  });
+
+  test('SHORT: 청산가가 위 구간으로 넘어가면 그 구간으로 다시 계산한다', () => {
+    // 진입 명목가 499,500 → 2구간. 청산가(≈50,253)에서 명목가 502,025 → 3구간.
+    const v = assessLiquidationDistance(ok({ side: 'SHORT', quantity: 9.99 }));
+    eq(v.ok, true, `★ 경계를 넘는 정상 케이스가 막혔다 — ${v.reason}`);
+    eq(v.entryTierIndex, 1, '진입 명목가는 2구간이어야 한다');
+    eq(v.tier!.index, 2, '★ 청산가에서의 구간으로 다시 계산하지 않았다');
+    eq(v.tier!.mmr, 0.010);
+    eq(v.tier!.maintAmount, 2_550);
+    assert(v.tier!.notional > 500_000, '★ 고른 구간과 청산 명목가가 어긋난다');
+    close(v.estimatedLiquidationPrice as number, 50_252.728, 1e-2, '청산가');
+  });
+
+  test('경계를 넘으면 예전 계산보다 청산거리가 **짧게** 나온다', () => {
+    // 예전(진입 구간 고정)은 더 멀게 적었다 = 낙관적. 이 방향이 중요하다.
+    const q = 1.002;
+    const nowPct = assessLiquidationDistance(ok({ side: 'LONG', quantity: q }))
+      .liquidationDistancePct as number;
+    // 진입 구간(2구간)으로 고정했을 때의 옛 값
+    const oldLp = (50_000 * (1 - 1 / 100) - 50 / q) / (1 - 0.005);
+    const oldPct = (50_000 - oldLp) / 50_000 * 100;
+    assert(nowPct < oldPct,
+      `★ 고친 값(${nowPct})이 옛 값(${oldPct})보다 멀다 — 낙관적인 방향으로 틀렸다`);
+  });
+
+  test('구간 한가운데는 넘지 않는다 — 과도 수정이 아니다', () => {
+    const v = assessLiquidationDistance(ok({ quantity: 0.2 }));
+    eq(v.ok, true);
+    eq(v.entryTierIndex, 0);
+    eq(v.tier!.index, 0, '★ 넘지 않아야 하는데 구간이 바뀌었다');
+  });
+
+  test('자기일관 해가 없으면 거부한다', () => {
+    // 공제액이 구간 상한보다 훨씬 커서 어느 구간으로 풀어도 그 구간에
+    // 들어가지 않게 만든다.
+    const broken: BracketTier[] = [[1, 0.004, 0], [2, 0.5, 900_000]];
+    const v = assessLiquidationDistance(ok({ brackets: broken }));
+    eq(v.ok, false, '★ 자기일관 해가 없는데 통과했다');
+    assert(v.code === 'TIER_NOT_SELF_CONSISTENT' || v.code === 'LIQUIDATION_PRICE_UNCOMPUTABLE',
+      `사유가 ${v.code}다`);
+  });
+
+  test('solver는 경계 해석을 한 곳에서만 한다 — 판정과 같은 답을 낸다', () => {
+    // 판정이 solver를 쓰지 않고 자기 식을 가지면 두 답이 갈린다.
+    const v = assessLiquidationDistance(ok({ side: 'LONG', quantity: 1.002 }));
+    const s = solveLiquidationPrice({
+      entryPrice: 50_000, leverage: 100, side: 'buy', quantity: 1.002, brackets: BRACKETS,
+    });
+    eq(s.code, 'OK');
+    eq(v.estimatedLiquidationPrice, s.liquidationPrice, '★ 판정과 solver의 답이 다르다');
+    eq(v.tier!.index, s.tierIndex);
   });
 
   // ── 계산은 됐는데 여유가 모자람 ──
@@ -154,31 +235,5 @@ export function runLiquidationDistanceTests() {
     eq(assessLiquidationDistance(null).ok, false);
     eq(assessLiquidationDistance(undefined).ok, false);
     eq(assessLiquidationDistance({} as any).ok, false);
-  });
-
-  // ── 구간 고르기 ──
-
-  test('명목가로 브래킷 구간을 고른다', () => {
-    const tiers: Array<[number, number, number]> = [
-      [50_000, 0.004, 0], [500_000, 0.005, 50], [1_000_000, 0.01, 2_550],
-    ];
-    eq(tierFromBrackets(10_000, tiers)!.mmr, 0.004);
-    eq(tierFromBrackets(100_000, tiers)!.mmr, 0.005);
-    eq(tierFromBrackets(100_000, tiers)!.maintAmount, 50);
-    // 마지막 구간을 넘으면 마지막 구간을 쓴다 (거래소도 그렇다)
-    eq(tierFromBrackets(9_000_000, tiers)!.mmr, 0.01);
-  });
-
-  test('브래킷이 없으면 구간도 없다 — 추정 표로 떨어지지 않는다', () => {
-    eq(tierFromBrackets(10_000, null), null);
-    eq(tierFromBrackets(10_000, []), null);
-    eq(tierFromBrackets(0, [[50_000, 0.004, 0]]), null);
-    eq(tierFromBrackets(null, [[50_000, 0.004, 0]]), null);
-  });
-
-  test('고른 구간은 출처를 거래소로 적는다', () => {
-    const t = tierFromBrackets(10_000, [[50_000, 0.004, 0]])!;
-    eq(t.source, 'EXCHANGE_BRACKET');
-    eq(t.notional, 10_000);
   });
 }
