@@ -124,7 +124,7 @@ const P = {
   cov: 'src/lib/engine/exitCoverage.ts',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
-  bfut: 'src/lib/exchanges/binanceFutures.ts',
+  bfut: 'src/lib/exchanges/leverageBracket.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -1046,9 +1046,17 @@ const M = [
     s => s.replace('    if (notional <= table[i][0]) return i;',
                    '    if (notional < table[i][0]) return i;'), 'RED'],
 
-  ['MUT-L15 자기일관 실패를 통과로 (fail-open)', P.liq,
-    s => s.replace("  if (sol.code === 'NO_SELF_CONSISTENT_TIER') {",
-                   '  if (false) {'), 'RED'],
+  // ★ 앞선 변이는 판정 쪽 분기 하나만 껐는데, 그 아래 `sol.code !== 'OK'`
+  //   catch-all이 여전히 막아서 **fail-open이 아니었다.** 진짜 fail-open은
+  //   solver가 자기일관 해가 없는데도 진입 구간으로 답을 지어내는 것이다.
+  ['MUT-L15 자기일관 해가 없는데 진입 구간으로 답을 지어냄 (fail-open)', P.liqmath,
+    s => s.replace("  if (hits.length === 0) return noSolution('NO_SELF_CONSISTENT_TIER', seen);",
+      '  if (hits.length === 0) {\n'
+      + '    const i = entryTierIndex;\n'
+      + '    const lp = calcLiquidationPrice(p, L, side, q, [[Infinity, table[i][1], table[i][2]]]);\n'
+      + "    return { code: 'OK', liquidationPrice: lp, mmr: table[i][1],\n"
+      + '      maintAmount: table[i][2], tierIndex: i, liquidationNotional: q * lp, ...seen };\n'
+      + '  }'), 'RED'],
 
   ['MUT-L16 최종 구간 대신 최초 구간의 MMR을 적음', P.liqmath,
     s => s.replace('    mmr: table[h.i][1],', '    mmr: table[entryTierIndex][1],'), 'RED'],

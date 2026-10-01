@@ -917,10 +917,31 @@ if (entry) {
     //
     //   버린다는 것은 "그런 조정이 없다"고 가정하는 것과 같다. 확인한 적이
     //   없으므로 보존하고, 1이 아니면 위 판정이 막는다.
-    const bf = code('src/lib/exchanges/binanceFutures.ts');
-    if (!/notionalCoef/.test(bf)) {
-      err('src/lib/exchanges/binanceFutures.ts: leverageBracket 응답의 notionalCoef를 버립니다'
-        + ' — 계정별 브래킷 조정이 걸려 있어도 알 수 없습니다');
+    //   ★ 이름이 있는지로는 부족하다. `BracketTier` 튜플 라벨에도 같은
+    //     단어가 있어서, 파서가 값을 버려도 정규식은 통과했다 — 실제로
+    //     그 변이가 새 나갔다. 그래서 **파서를 돌려서** 확인한다.
+    const bfMod = await loadModule('src/lib/exchanges/leverageBracket.ts', '브래킷 파서');
+    if (bfMod && typeof bfMod.parseBrackets === 'function') {
+      const parsed = bfMod.parseBrackets({
+        symbol: 'BTCUSDT',
+        brackets: [
+          { notionalCap: 50_000, maintMarginRatio: 0.004, cum: 0, notionalCoef: 1.5 },
+          { notionalCap: 500_000, maintMarginRatio: 0.005, cum: 50 },
+        ],
+      });
+      if (!Array.isArray(parsed) || parsed.length !== 2) {
+        err('leverageBracket.parseBrackets: 구간을 파싱하지 못합니다');
+      } else {
+        if (parsed[0][3] !== 1.5) {
+          err('leverageBracket.parseBrackets: leverageBracket 응답의 notionalCoef를 버립니다'
+            + ` (받은 값 ${String(parsed[0][3])}) — 계정별 브래킷 조정이 걸려 있어도 알 수 없습니다`);
+        }
+        if (parsed[1][3] !== undefined) {
+          err('leverageBracket.parseBrackets: 응답에 없는 notionalCoef를 지어냅니다');
+        }
+      }
+    } else {
+      err('leverageBracket.parseBrackets를 불러오지 못했습니다 — 파서 동작을 확인할 수 없습니다');
     }
     const ps = code('src/lib/safety/liquidationPrice.ts');
     const caps = (ps.match(/notional\s*<=\s*table\[i\]\[0\]|notional\s*<=\s*cap/g) || []).length;

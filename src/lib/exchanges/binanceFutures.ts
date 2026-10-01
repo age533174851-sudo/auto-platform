@@ -149,30 +149,14 @@ export async function getFuturesIncome(
 
 // ── 레버리지 브래킷 (심볼별 실제 유지증거금률/공제액) ──────────────
 // Binance /fapi/v1/leverageBracket (서명 필요). 응답을 [상한, MMR, 공제액] 형태로 변환
-export type BracketTier =
-  [cap: number, mmr: number, maintAmount: number, notionalCoef?: number];
+export type { BracketTier } from './leverageBracket';
+export { parseBrackets } from './leverageBracket';
+import { parseBrackets, type BracketTier } from './leverageBracket';
+
+// 캐시는 여기 남는다 — 파서는 순수 함수이고, 캐시는 네트워크 호출의 것이다.
 interface BracketCacheEntry { tiers: BracketTier[]; ts: number; }
 const BRACKET_CACHE = new Map<string, BracketCacheEntry>();
 const BRACKET_TTL = 6 * 60 * 60 * 1000; // 6시간
-
-function parseBrackets(raw: any): BracketTier[] {
-  const arr = Array.isArray(raw?.brackets) ? raw.brackets : [];
-  return arr
-    .map((b: any): BracketTier => [
-      parseFloat(b.notionalCap),
-      parseFloat(b.maintMarginRatio),
-      parseFloat(b.cum ?? b.cumFastMaintenanceAmount ?? '0'),
-      // ★ **계정별 브래킷 조정 배수를 버리지 않는다.**
-      //
-      //   예전에는 이 칸을 읽지도 않았다. 버린다는 것은 "조정이 없다"고
-      //   가정하는 것과 같은데 우리는 그것을 확인한 적이 없다. 적용 방식을
-      //   모르므로 **적용하지는 않고 보존만 한다** — 1이 아닌 값이 오면
-      //   Exact100X 청산거리 판정이 막는다(liquidationDistance.ts).
-      //   없는 응답에서는 undefined가 되어 지금 동작 그대로다.
-      b?.notionalCoef == null ? undefined : Number(b.notionalCoef),
-    ])
-    .sort((a: BracketTier, b: BracketTier) => a[0] - b[0]);
-}
 
 /**
  * 이 심볼에서 거래소가 허용하는 **최대 배율**.
