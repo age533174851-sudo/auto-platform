@@ -987,9 +987,11 @@ const M = [
         + '  }\n');
     }, 'RED'],
 
+  // ★ ②A가 입력 모양을 `tier` 하나 → `brackets` 표 전체로 바꿨다.
+  //   예년 앵커는 사라졌고 그대로 두면 **판정불가**가 된다. 새 자리로 옮긴다.
   ['MUT-L3 브래킷이 없어도 통과 (fail-closed → fail-open)', P.liq,
-    s => s.replace("  if (tier == null || tier.source !== 'EXCHANGE_BRACKET'",
-                   '  if (false && (tier == null || tier.source !== \'EXCHANGE_BRACKET\''), 'RED'],
+    s => s.replace('  if (!brackets || brackets.length === 0) {',
+                   '  if (false) {'), 'RED'],
 
   ['MUT-L4 거리 계산의 LONG/SHORT를 뒤집음', P.liq,
     s => s.replace("  const distance = side === 'LONG' ? price - liq : liq - price;",
@@ -999,11 +1001,17 @@ const M = [
     s => s.replace("  const onCorrectSide = side === 'LONG' ? liq < price : liq > price;",
                    "  const onCorrectSide = side === 'LONG' ? liq > price : liq < price;"), 'RED'],
 
-  ['MUT-L6 브래킷이 없으면 추정 구간을 지어냄', P.liq,
-    s => s.replace('  if (!Array.isArray(tiers) || tiers.length === 0) return null;',
-      "  if (!Array.isArray(tiers) || tiers.length === 0) {\n"
-      + "    return { mmr: 0.004, maintAmount: 0, source: 'EXCHANGE_BRACKET', notional: n };\n"
-      + '  }'), 'RED'],
+  // ★ 구간 선택이 solver 안으로 들어갔다. 추정 표로 떨어지는 변이를
+  //   거기에 건다 — `MMR_BRACKETS`는 "BTCUSDT 대표값 · 추정치"다.
+  ['MUT-L6 브래킷이 없으면 추정 표로 떨어짐', P.liqmath,
+    s => s.replace(
+      "  if (!Array.isArray(args.brackets) || args.brackets.length === 0) {\n"
+      + "    return noSolution('NO_BRACKETS');\n"
+      + '  }\n'
+      + '  const table = sortedTiers(args.brackets);',
+      '  const table = sortedTiers(\n'
+      + '    Array.isArray(args.brackets) && args.brackets.length\n'
+      + '      ? args.brackets : MMR_BRACKETS);'), 'RED'],
 
   ['MUT-L7 Exact100X에서 청산거리 관문을 건너뜀', P.entry,
     s => s.replace('  if (!liquidation.ok) {',
@@ -1013,9 +1021,11 @@ const M = [
     s => s.replace('  if (!(distancePct > adverse)) {',
                    '  if (!(distancePct >= adverse)) {'), 'RED'],
 
-  ['MUT-L9 청산가 산출에 오염된 유지증거금률을 넘김', P.liq,
-    s => s.replace('  const brackets: BracketTier[] = [[Infinity, mmr, maintAmount]];',
-                   '  const brackets: BracketTier[] = [[Infinity, 0.5, maintAmount]];'), 'RED'],
+  // ★ 식 호출이 solver 안으로 옮겨졌다.
+  ['MUT-L9 청산가 산출에 오염된 유지증거금률을 넘김', P.liqmath,
+    s => s.replace('    const lp = calcLiquidationPrice(p, L, side, q, [[Infinity, mmr, maintAmount]]);',
+                   '    const lp = calcLiquidationPrice(p, L, side, q, [[Infinity, 0.5, maintAmount]]);'),
+    'RED'],
 
   // 과도 거부도 결함이다. 정상 100배 진입이 막히면 그 전략은 못 돈다.
   ['MUT-L10 정상 케이스를 과도하게 거부 (여유 요구를 10배로)', P.liq,
