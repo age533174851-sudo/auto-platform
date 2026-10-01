@@ -919,7 +919,7 @@ const M = [
                    'if (false) {'), 'RED'],
 
   ['MUT-N4 커버리지에서 계약 줄을 떼어냄', P.cov,
-    s => s.replace('return [...base, ...contractRows(new Set(base.map(b => b.strategyId)))];',
+    s => s.replace(/return \[\.\.\.base, \.\.\.contractRows\([\s\S]*?\)\];/,
                    'return base;'), 'RED'],
 
   // ★ 앵커를 **계약 줄 쪽**으로 좁힌다. 예전 앵커
