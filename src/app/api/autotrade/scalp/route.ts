@@ -548,6 +548,13 @@ export async function POST(req: NextRequest) {
         marginModes: epContract!.marginModes,
         // 청산은 방향이 있어야 거리를 잴 수 있다. 신호가 정한 방향 그대로.
         side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
+        // **계약의 주문 유형에서 온다.** MAX_LEV_100X는 'market'이므로
+        // 호가를 먹는 쪽(taker)이다 — maker를 임의로 고르면 비용이 작아진다.
+        fillKind: String(epContract!.orderType).toLowerCase().includes('market')
+          ? 'TAKER' : null,
+        // 펀딩 평가 구간. **"이 시간에 자동 청산된다"는 뜻이 아니다** —
+        // 그 배선은 아직 없다. 계약이 선언한 보유 상한일 뿐이다.
+        maxHoldSec: epContract!.maxHoldSec ?? null,
       },
       epMarginAllocationPct,
       {
@@ -578,6 +585,47 @@ export async function POST(req: NextRequest) {
         adverseDistancePct: async () => {
           const p = Number(scalp.signal.stopPct);
           return Number.isFinite(p) && p > 0 ? p : null;
+        },
+        // ── 비용 입력 셋 ──
+        //
+        // 전부 **거래소에서 읽는다.** 기본 수수료 표나 `0.05% 슬리피지`
+        // 같은 상수로 때우지 않는다 — 못 읽으면 진입이 막힌다.
+        commissionRates: async () => {
+          if (ex !== 'binance') return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.getCommissionRate(conn.apiKey, conn.apiSecret, symbol, !connIsLive)
+            .catch(() => ({ rate: null, error: 'x' } as any));
+          return r.rate == null ? null : {
+            takerRate: r.rate.takerRate, makerRate: r.rate.makerRate,
+            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+          };
+        },
+        orderBookDepth: async () => {
+          if (ex !== 'binance') return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.getOrderBookDepth(symbol, !connIsLive)
+            .catch(() => ({ depth: null, error: 'x' } as any));
+          return r.depth == null ? null : {
+            bids: r.depth.bids, asks: r.depth.asks,
+            source: 'EXCHANGE_DEPTH' as const, observedAtMs: r.depth.observedAtMs,
+          };
+        },
+        fundingContext: async () => {
+          if (ex !== 'binance') return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const [prem, iv] = await Promise.all([
+            bf.getPremiumIndex(symbol, !connIsLive).catch(() => null),
+            bf.getFundingInterval(symbol, !connIsLive).catch(() => ({ info: null } as any)),
+          ]);
+          if (!prem || iv?.info == null) return null;
+          return {
+            rate: prem.lastFundingRate,
+            nextFundingTimeMs: prem.nextFundingTime,
+            // **8시간을 박지 않는다** — fundingInfo에서 읽은 값이다.
+            intervalHours: iv.info.intervalHours,
+            intervalSource: iv.info.source,
+            observedAtMs: Date.now(),
+          };
         },
         quantize: async (qty: number) => {
           // 규격을 못 읽으면 `quantizeOrder`가 신규 진입을 막는다 —
@@ -626,6 +674,11 @@ export async function POST(req: NextRequest) {
           // 계산한 값이 들어 있다.
           liquidationPrice: entry.liquidation?.estimatedLiquidationPrice ?? null,
           liquidationDistancePct: entry.liquidation?.liquidationDistancePct ?? null,
+          // **RAW를 덮어쓰지 않는다.** 비용이 여유를 얼마나 먹었는지
+          // 운영자가 둘을 비교할 수 있어야 한다.
+          effectiveLiquidationDistancePct:
+            entry.effectiveLiquidation?.liquidationDistancePct ?? null,
+          totalCostNotionalPct: entry.cost?.totalCostNotionalPct ?? null,
           notes: entry.notes,
         }
       : {
@@ -637,6 +690,9 @@ export async function POST(req: NextRequest) {
           // 막힌 경우와 아예 계산을 못 한 경우를 운영자가 구별해야 한다.
           liquidationPrice: entry.liquidation?.estimatedLiquidationPrice ?? null,
           liquidationDistancePct: entry.liquidation?.liquidationDistancePct ?? null,
+          effectiveLiquidationDistancePct:
+            entry.effectiveLiquidation?.liquidationDistancePct ?? null,
+          totalCostNotionalPct: entry.cost?.totalCostNotionalPct ?? null,
           notes: entry.notes,
         };
   } else {

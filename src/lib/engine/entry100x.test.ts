@@ -21,6 +21,8 @@ import { validateMarginAllocation, planSize100x, verifyLeverageExact } from './s
 const C = {
   leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'],
   side: 'LONG' as const,
+  fillKind: 'TAKER' as const,
+  maxHoldSec: 14_400,
 };
 
 const baseDeps = () => ({
@@ -34,6 +36,20 @@ const baseDeps = () => ({
     [[50_000_000, 0.004, 0]],
   // **손절이 아니라** 변동성 기준 참고 위험 거리(%)다.
   adverseDistancePct: async (): Promise<number | null> => 0.3,
+  commissionRates: async () => ({
+    takerRate: 0.0004, makerRate: 0.0002,
+    source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+  }),
+  // 수량 0.2를 받아낼 깊이. 기준가 50,000에서 매도호가가 한 칸 위다.
+  orderBookDepth: async () => ({
+    bids: [[49_995, 50] as [number, number]],
+    asks: [[50_005, 50] as [number, number]],
+    source: 'EXCHANGE_DEPTH' as const, observedAtMs: Date.now(),
+  }),
+  fundingContext: async () => ({
+    rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+    intervalSource: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
+  }),
 });
 
 /** 의존을 감싸서 읽기/쓰기를 나눠 센다. 분류에 없는 의존은 즉시 실패다. */
@@ -176,6 +192,20 @@ export function runEntry100xTests() {
       quantize: async (q: number) => ({ qty: q, message: '' }),
       maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
       adverseDistancePct: async () => 0.3,
+      commissionRates: async () => ({
+        takerRate: 0.0004, makerRate: 0.0002,
+        source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+      }),
+          // 수량 0.2를 받아낼 깊이. 기준가 50,000에서 매도호가가 한 칸 위다.
+          orderBookDepth: async () => ({
+        bids: [[49_995, 50] as [number, number]],
+        asks: [[50_005, 50] as [number, number]],
+        source: 'EXCHANGE_DEPTH' as const, observedAtMs: Date.now(),
+      }),
+          fundingContext: async () => ({
+        rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+        intervalSource: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
+      }),
       applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
       ...over,
     };
@@ -186,6 +216,9 @@ export function runEntry100xTests() {
       quantize: ['quantize'],
       maintenanceTiers: ['bracket:read'],
       adverseDistancePct: ['adverse:read'],
+      commissionRates: ['commission:read'],
+      orderBookDepth: ['book:read'],
+      fundingContext: ['funding:read'],
       applyLeverage: ['leverage:write', 'leverage:readback'],
     };
     const d: any = {};
@@ -210,13 +243,15 @@ export function runEntry100xTests() {
     //   첫 거래소 쓰기보다 뒤에서 재면 "청산당할 자리를 알고도 들어간"
     //   요청이 이미 계좌 배율을 바꾼 뒤가 된다.
     eq(log.join(' > '),
-      'marginMode:read > balance:read > price:read > quantize > bracket:read > adverse:read',
+      'marginMode:read > balance:read > price:read > quantize > bracket:read > adverse:read'
+      + ' > commission:read > book:read > funding:read',
       '준비 단계의 호출 순서가 다르다 — 쓰기가 섞여 있으면 여기서 드러난다');
 
     const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
     assert(done.ok, `확정 단계가 막혔다 — ${done.message}`);
     eq(log.join(' > '),
       'marginMode:read > balance:read > price:read > quantize > bracket:read > adverse:read'
+      + ' > commission:read > book:read > funding:read'
       + ' > leverage:write > leverage:readback',
       '전체 호출 순서가 계약과 다르다 — 청산거리 판정이 배율 쓰기보다 뒤면 실패다');
   });

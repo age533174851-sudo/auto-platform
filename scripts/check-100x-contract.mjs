@@ -29,6 +29,7 @@ const PLAN        = 'src/lib/execution/profile.ts';
 const GATE        = 'src/lib/execution/dormantGate.ts';
 const COVERAGE    = 'src/lib/engine/exitCoverage.ts';
 const LIQ         = 'src/lib/engine/liquidationDistance.ts';
+const COST        = 'src/lib/engine/executionCost.ts';
 const EXEC        = 'src/lib/engine/orderExecutor.ts';
 const REATTACH    = 'src/lib/engine/stopReattach.ts';
 const SIZING      = 'src/lib/engine/sizing100x.ts';
@@ -569,11 +570,26 @@ if (entry) {
     maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
     // **손절이 아니다** — 신호가 ATR로 잰 변동성 위험 거리(%)다.
     adverseDistancePct: async () => 0.3,
+    commissionRates: async () => ({
+      takerRate: 0.0004, makerRate: 0.0002,
+      source: 'EXCHANGE_ACCOUNT', observedAtMs: Date.now(),
+    }),
+    orderBookDepth: async () => ({
+      bids: [[49_995, 50]], asks: [[50_005, 50]],
+      source: 'EXCHANGE_DEPTH', observedAtMs: Date.now(),
+    }),
+    fundingContext: async () => ({
+      rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+      intervalSource: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now(),
+    }),
     ...over,
   });
   const C = {
     leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
     side: 'LONG',
+    // 시장가 주문이므로 taker다.
+    fillKind: 'TAKER',
+    maxHoldSec: 14_400,
   };
   // 두 단계를 이어 부르는 검사용 합성. 제품 경로는 그 사이에 쓰기 없는
   // 관문(1회 상한)을 하나 더 넣는다.
@@ -639,6 +655,9 @@ if (entry) {
         quantize: ['quantize'],
         maintenanceTiers: ['bracket:read'],
         adverseDistancePct: ['adverse:read'],
+        commissionRates: ['commission:read'],
+        orderBookDepth: ['book:read'],
+        fundingContext: ['funding:read'],
         applyLeverage: ['leverage:write', 'leverage:readback'],
       };
       const d = {};
@@ -657,13 +676,15 @@ if (entry) {
       // ★ 청산거리 입력을 **준비 단계 안에서** 읽는다. 이 두 칸이
       //   `leverage:write` 앞에 있다는 것이 진입 전 보호의 전부다.
       if (afterPrep !== 'marginMode:read > balance:read > price:read > quantize'
-                      + ' > bracket:read > adverse:read') {
+                      + ' > bracket:read > adverse:read'
+                      + ' > commission:read > book:read > funding:read') {
         err(`100X 순서: 준비 단계 호출 순서가 다릅니다 — ${afterPrep}`);
       }
       await entry.commitEntry100x(prep, d, SEND);
       const full = log.join(' > ');
       if (full !== 'marginMode:read > balance:read > price:read > quantize'
                  + ' > bracket:read > adverse:read'
+                 + ' > commission:read > book:read > funding:read'
                  + ' > leverage:write > leverage:readback') {
         err(`100X 순서: 전체 호출 순서가 계약과 다릅니다 — ${full}`);
       }
@@ -994,9 +1015,21 @@ if (entry) {
       quantize: async (q) => ({ qty: q, message: '' }),
       maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
       adverseDistancePct: async () => 0.3,
+      commissionRates: async () => ({
+        takerRate: 0.0004, makerRate: 0.0002,
+        source: 'EXCHANGE_ACCOUNT', observedAtMs: Date.now(),
+      }),
+      orderBookDepth: async () => ({
+        bids: [[49_995, 50]], asks: [[50_005, 50]],
+        source: 'EXCHANGE_DEPTH', observedAtMs: Date.now(),
+      }),
+      fundingContext: async () => ({
+        rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+        intervalSource: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now(),
+      }),
     };
     const CC = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
-                 side: 'LONG' };
+                 side: 'LONG', fillKind: 'TAKER', maxHoldSec: 14_400 };
     for (const [why, over] of [
       ['브래킷을 못 읽으면', { maintenanceTiers: async () => null }],
       ['브래킷 조회가 터지면', { maintenanceTiers: async () => { throw new Error('boom'); } }],
@@ -2660,6 +2693,221 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       if (defId.deferred[0]?.executionIdentity?.profileId !== ID) {
         err('감시 후보: 유예 기록에 identity를 싣지 않습니다'
           + ' — 어느 계약의 노출이 관리되지 않는지 알 수 없습니다');
+      }
+    }
+  }
+}
+
+// ── 실행·보유 비용과 실질 여유 (③) ──
+//
+//   ②가 구한 RAW 여유는 비용을 빼기 **전** 값이다. 100배에서 왕복 taker
+//   수수료만 여유의 상당 부분이고 슬리피지가 거기 더해진다.
+{
+  const cost = await loadModule(COST, '실행 비용 판정');
+  const COM = { takerRate: 0.0004, makerRate: 0.0002,
+                source: 'EXCHANGE_ACCOUNT', observedAtMs: 1 };
+  const BOOK = { bids: [[49_995, 50]], asks: [[50_005, 50]],
+                 source: 'EXCHANGE_DEPTH', observedAtMs: 1 };
+  const NOW = 1_000_000_000_000;
+  const FUND = { rate: 0.0001, nextFundingTimeMs: NOW + 3_600_000, intervalHours: 8,
+                 intervalSource: 'EXCHANGE_FUNDING_INFO', observedAtMs: 1 };
+  const cIn = (over = {}) => ({
+    side: 'LONG', referencePrice: 50_000, quantity: 0.2, leverage: 100,
+    fillKind: 'TAKER', commission: COM, book: BOOK, funding: FUND,
+    nowMs: NOW, holdHorizonMs: 14_400_000, ...over,
+  });
+
+  if (cost) {
+    const good = cost.assessExecutionCost(cIn());
+    if (!good.ok) err(`${COST}: 정상 입력이 막힙니다 — ${good.reason}`);
+    else {
+      // **세 비용이 따로 보여야 한다.**
+      for (const k of ['entryFeeUsd', 'exitFeeReserveUsd', 'entrySlippageUsd',
+                       'exitSlippageReserveUsd', 'fundingReserveUsd']) {
+        if (!(Number(good[k]) >= 0)) err(`${COST}: ${k}가 ${good[k]}입니다`);
+      }
+      if (!(good.totalCostUsd > 0)) err(`${COST}: 총 비용이 ${good.totalCostUsd}입니다`);
+      if (good.commissionRate !== COM.takerRate) {
+        err(`${COST}: taker 주문에 ${good.commissionRate} 수수료율을 씁니다`
+          + ` (${COM.takerRate}여야 합니다 — maker를 쓰면 비용이 작아집니다)`);
+      }
+      // LONG 진입은 **매도호가**를 먹는다.
+      if (!(good.expectedFillPrice >= 50_005)) {
+        err(`${COST}: LONG 예상 체결가가 ${good.expectedFillPrice}입니다`
+          + ' — 매도호가(50,005)보다 낮으면 유리한 쪽으로 계산한 것입니다');
+      }
+      if (!(good.entrySlippageUsd > 0)) {
+        err(`${COST}: 기준가보다 불리하게 체결되는데 슬리피지가 ${good.entrySlippageUsd}입니다`);
+      }
+      if (good.bookObservedAtMs == null || good.fundingObservedAtMs == null
+          || good.commissionObservedAtMs == null) {
+        err(`${COST}: 관측 시각을 버립니다 — ④(신선도)가 검사할 근거가 없습니다`);
+      }
+    }
+
+    const sh = cost.assessExecutionCost(cIn({ side: 'SHORT' }));
+    if (!sh.ok) err(`${COST}: 정상 SHORT이 막힙니다 — ${sh.reason}`);
+    else if (!(sh.expectedFillPrice <= 49_995)) {
+      err(`${COST}: SHORT 예상 체결가가 ${sh.expectedFillPrice}입니다`
+        + ' — 매수호가(49,995)보다 높으면 유리한 쪽으로 계산한 것입니다');
+    }
+
+    for (const [why, over, codeWant] of [
+      ['방향 없음', { side: null }, 'SIDE_UNKNOWN'],
+      ['주문 유형 모름', { fillKind: null }, 'FILL_KIND_UNKNOWN'],
+      ['수수료 없음', { commission: null }, 'COMMISSION_MISSING'],
+      ['수수료 출처가 기본값 표', { commission: { ...COM, source: 'DEFAULT_TABLE' } },
+        'COMMISSION_MISSING'],
+      ['호가 없음', { book: null }, 'BOOK_MISSING'],
+      ['먹어야 하는 쪽 호가가 빔', { book: { ...BOOK, asks: [] } }, 'BOOK_SIDE_EMPTY'],
+      ['호가가 교차', { book: { bids: [[50_010, 50]], asks: [[50_005, 50]],
+        source: 'EXCHANGE_DEPTH', observedAtMs: 1 } }, 'BOOK_CROSSED'],
+      ['깊이 부족', { quantity: 1_000 }, 'DEPTH_INSUFFICIENT'],
+      ['펀딩 없음', { funding: null }, 'FUNDING_MISSING'],
+      ['펀딩 주기 없음', { funding: { ...FUND, intervalHours: null } },
+        'FUNDING_INTERVAL_UNUSABLE'],
+      ['보유 구간 없음', { holdHorizonMs: null }, 'HOLD_HORIZON_UNUSABLE'],
+    ]) {
+      const v = cost.assessExecutionCost(cIn(over));
+      if (v.ok) err(`${COST}: ${why}인데 통과합니다 — 비용을 모르면 실질 여유를 말할 수 없습니다`);
+      else if (v.code !== codeWant) {
+        err(`${COST}: ${why}의 사유가 ${v.code}입니다 (${codeWant}이어야 합니다)`);
+      }
+    }
+
+    // **수취 예상치를 안전 여유로 쓰지 않는다.**
+    const pay = cost.assessExecutionCost(cIn({ funding: { ...FUND, rate: 0.0001 } }));
+    const recv = cost.assessExecutionCost(cIn({ funding: { ...FUND, rate: -0.0001 } }));
+    if (pay.ok && recv.ok) {
+      if (recv.fundingReserveUsd !== pay.fundingReserveUsd) {
+        err(`${COST}: 펀딩 수취 쪽 예약이 ${recv.fundingReserveUsd}, 지불 쪽이`
+          + ` ${pay.fundingReserveUsd}입니다 — 수취 예상치로 위험한 진입을 통과시킵니다`);
+      }
+      if (recv.fundingSideNow !== 'RECEIVE' || pay.fundingSideNow !== 'PAY') {
+        err(`${COST}: 펀딩 방향을 관측에 남기지 않습니다`
+          + ` (지불 ${pay.fundingSideNow} · 수취 ${recv.fundingSideNow})`);
+      }
+    }
+    // 유리한 슬리피지를 **깎는다.**
+    const favor = cost.assessExecutionCost(cIn({
+      book: { bids: [[49_000, 50]], asks: [[49_500, 50]],
+              source: 'EXCHANGE_DEPTH', observedAtMs: 1 },
+    }));
+    if (favor.ok && favor.entrySlippageUsd !== 0) {
+      err(`${COST}: 기준가보다 싸게 체결될 예상을 ${favor.entrySlippageUsd}로 적습니다`
+        + ' — 유리한 쪽은 0으로 깎아야 합니다');
+    }
+
+    // 펀딩 주기를 **8시간으로 박지 않는가.**
+    const h1 = cost.assessExecutionCost(cIn({ funding: { ...FUND, intervalHours: 1 } }));
+    const h8 = cost.assessExecutionCost(cIn());
+    if (h1.ok && h8.ok && !(h1.fundingEvents > h8.fundingEvents)) {
+      err(`${COST}: 펀딩 주기 1시간과 8시간의 횟수가 ${h1.fundingEvents}·${h8.fundingEvents}입니다`
+        + ' — 주기를 읽지 않고 고정값을 씁니다');
+    }
+
+    // ── 비용 → 증거금 → 실효배율 ──
+    const eff = cost.effectiveMarginAfterCost(good, 100);
+    if (eff.code !== 'OK') err(`${COST}: 정상 비용에서 실효 증거금을 못 구합니다 — ${eff.reason}`);
+    else {
+      if (!(eff.marginAfterCostUsd < eff.marginAtEntryUsd)) {
+        err(`${COST}: 비용을 뺐는데 증거금이 줄지 않았습니다`);
+      }
+      if (!(eff.effectiveLeverage > 100)) {
+        err(`${COST}: 실효배율이 ${eff.effectiveLeverage}입니다 — 증거금이 줄면 배율은 올라야 합니다`);
+      }
+      if (eff.effectiveEntryPrice !== good.expectedFillPrice) {
+        err(`${COST}: 실질 계산의 진입가가 예상 체결가가 아닙니다`
+          + ' — 슬리피지를 비용 표 한 줄로만 적고 청산가는 옛 기준가로 두면 두 세계가 생깁니다');
+      }
+    }
+    if (cost.effectiveMarginAfterCost({ ...good, totalCostUsd: 1e9 }, 100).code === 'OK') {
+      err(`${COST}: 비용이 증거금을 넘는데 통과합니다`);
+    }
+    if (cost.effectiveMarginAfterCost({ ok: false, code: 'X' }, 100).code !== 'COST_NOT_ASSESSED') {
+      err(`${COST}: 비용을 확정하지 못했는데 실질 여유를 계산합니다`);
+    }
+  }
+
+  // 기존 상수를 **정본으로 승격하지 않았는가.**
+  {
+    const src = code(COST);
+    if (/roundTripCostPct|SCALP_DEFAULTS/.test(src)) {
+      err(`${COST}: 신호 쪽 왕복 비용 상수를 끌어옵니다 — 다른 질문입니다`);
+    }
+    if (/DEFAULT_FEES|getDefaultConfig/.test(src)) {
+      err(`${COST}: 수수료를 기본값 표에서 가져옵니다`);
+    }
+    if (/intervalHours\s*\?\?\s*8|=\s*8\s*;/.test(src)) {
+      err(`${COST}: 펀딩 주기를 8시간으로 박았습니다`);
+    }
+  }
+
+  // 진입 계획이 비용으로 **막는가** (이름이 아니라 동작).
+  if (entry) {
+    const base = {
+      observeMarginMode: async () => 'isolated',
+      applyLeverage: async (lev) => ({ ok: true, observed: lev, message: '' }),
+      availableUsd: async () => 1000,
+      referencePrice: async () => 50_000,
+      quantize: async (q) => ({ qty: q, message: '' }),
+      maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
+      adverseDistancePct: async () => 0.3,
+      commissionRates: async () => COM,
+      orderBookDepth: async () => BOOK,
+      fundingContext: async () => ({ ...FUND, nextFundingTimeMs: Date.now() + 3_600_000 }),
+    };
+    const CC = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
+                 side: 'LONG', fillKind: 'TAKER', maxHoldSec: 14_400 };
+    for (const [why, over, wantCode] of [
+      ['수수료를 못 읽으면', { commissionRates: async () => null }, 'COST_UNKNOWN'],
+      ['호가를 못 읽으면', { orderBookDepth: async () => null }, 'COST_UNKNOWN'],
+      ['펀딩을 못 읽으면', { fundingContext: async () => null }, 'COST_UNKNOWN'],
+      ['호가 깊이가 모자라면', {
+        orderBookDepth: async () => ({ ...BOOK, asks: [[50_005, 0.0001]] }),
+      }, 'COST_UNKNOWN'],
+      ['수수료가 증거금을 먹으면',
+        { commissionRates: async () => ({ ...COM, takerRate: 0.4 }) },
+        'LIQUIDATION_UNSAFE_AFTER_COST'],
+    ]) {
+      const prep = await entry.prepareEntry100x(CC, 10, { ...base, ...over });
+      if (prep.ok) err(`100X 진입: ${why} 막아야 하는데 통과했습니다`);
+      else if (prep.code !== wantCode) {
+        err(`100X 진입: ${why} 막긴 했는데 사유가 ${prep.code}입니다 (${wantCode}여야 합니다)`);
+      }
+    }
+    // 통과한 계획은 RAW와 EFFECTIVE를 **둘 다** 들고 간다.
+    const ok2 = await entry.prepareEntry100x(CC, 10, base);
+    if (!ok2.ok) err(`100X 진입: 비용 포함 정상 경로가 막혔습니다 — ${ok2.message}`);
+    else {
+      if (ok2.liquidation?.headroomKind !== 'RAW') {
+        err(`100X 진입: RAW 여유 표시가 ${ok2.liquidation?.headroomKind}입니다`);
+      }
+      if (ok2.effectiveLiquidation?.headroomKind !== 'EFFECTIVE') {
+        err(`100X 진입: 실질 여유 표시가 ${ok2.effectiveLiquidation?.headroomKind}입니다`);
+      }
+      if (ok2.cost?.ok !== true) err('100X 진입: 통과한 계획이 비용 판정을 들고 있지 않습니다');
+      const raw = ok2.liquidation?.liquidationDistancePct;
+      const effPct = ok2.effectiveLiquidation?.liquidationDistancePct;
+      if (!(effPct < raw)) {
+        err(`100X 진입: 비용을 반영했는데 여유가 줄지 않았습니다 (RAW ${raw} · 실질 ${effPct})`);
+      }
+      if (ok2.liquidation === ok2.effectiveLiquidation) {
+        err('100X 진입: RAW와 실질 여유가 같은 객체입니다 — 하나가 다른 하나를 덮었습니다');
+      }
+    }
+    // 의존 분류 — 새 읽기 셋이 통합 카운터 밖으로 새지 않는가.
+    const es = code(ENTRY);
+    const iRead = es.indexOf('export interface Entry100xReadDeps');
+    const iWrite = es.indexOf('export interface Entry100xWriteDeps');
+    const readBlock = iRead >= 0 && iWrite > iRead ? es.slice(iRead, iWrite) : '';
+    for (const nm of ['commissionRates', 'orderBookDepth', 'fundingContext']) {
+      if (!(entry.READONLY_DEPS || []).includes(nm)) {
+        err(`100X 진입: ${nm}이 READONLY_DEPS에 없습니다`);
+      }
+      if (!readBlock.includes(nm)) {
+        err(`${ENTRY}: ${nm}이 읽기 전용 의존 타입 안에 없습니다`
+          + ' — 쓰기 단계에서 읽으면 보호가 첫 거래소 쓰기 뒤로 갑니다');
       }
     }
   }

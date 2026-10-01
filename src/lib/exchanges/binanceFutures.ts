@@ -227,6 +227,121 @@ export async function getCachedBracket(
   return hit ? hit.tiers : null; // 만료된 캐시라도 있으면 그거라도
 }
 
+// ── 계정의 **실제** 수수료율 ────────────────────────────────
+//
+// 기본값 표(`lib/fees.ts`의 `DEFAULT_FEES`)는 등급·BNB 할인·프로모션을
+// 모르므로 100배 비용 계산의 출처로 쓸 수 없다. 심볼별 실제 수수료를
+// 계정에서 읽는다. **못 읽으면 null이다** — 기본값으로 대체하지 않는다.
+export interface CommissionRate {
+  symbol: string;
+  /** 비율. 0.0004 = 0.04% */
+  makerRate: number;
+  takerRate: number;
+}
+
+export async function getCommissionRate(
+  key: string, secret: string, symbol: string, testnet = true,
+): Promise<{ rate: CommissionRate | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const d = await fapiSigned('GET', '/fapi/v1/commissionRate', key, secret, testnet,
+      { symbol: sym });
+    const maker = parseFloat(d?.makerCommissionRate);
+    const taker = parseFloat(d?.takerCommissionRate);
+    if (!Number.isFinite(maker) || !Number.isFinite(taker)) {
+      return { rate: null, error: `${sym}의 수수료율을 읽지 못했습니다` };
+    }
+    return { rate: { symbol: sym, makerRate: maker, takerRate: taker }, error: null };
+  } catch (e: any) {
+    return { rate: null, error: e?.message || '수수료율 조회 실패' };
+  }
+}
+
+// ── 호가(depth) ─────────────────────────────────────────────
+//
+// 슬리피지를 상수로 지어내지 않으려면 **실제 호가**가 있어야 한다.
+// 공개 엔드포인트다(서명 불필요). 캐시하지 않는다 — 호가는 금방 낡고,
+// 낡은 호가로 체결가를 추정하면 그 추정이 가장 틀리는 순간에 쓰인다.
+// 관측 시각을 함께 돌려주어 ④(신선도)가 검사할 수 있게 한다.
+export interface DepthSnapshot {
+  symbol: string;
+  bids: Array<[number, number]>;
+  asks: Array<[number, number]>;
+  observedAtMs: number;
+}
+
+export async function getOrderBookDepth(
+  symbol: string, testnet = true, limit = 100,
+): Promise<{ depth: DepthSnapshot | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const r = await fetch(`${base(testnet)}/fapi/v1/depth?symbol=${sym}&limit=${limit}`,
+      { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+    if (!r.ok) return { depth: null, error: `호가 조회 실패 (HTTP ${r.status})` };
+    const d = parseLossless(await r.text());
+    const lv = (x: any): Array<[number, number]> => (Array.isArray(x) ? x : [])
+      .map((e: any) => [parseFloat(e?.[0]), parseFloat(e?.[1])] as [number, number])
+      .filter(e => Number.isFinite(e[0]) && Number.isFinite(e[1]));
+    const bids = lv(d?.bids);
+    const asks = lv(d?.asks);
+    if (!bids.length || !asks.length) {
+      return { depth: null, error: `${sym}의 호가가 비어 있습니다` };
+    }
+    return { depth: { symbol: sym, bids, asks, observedAtMs: Date.now() }, error: null };
+  } catch (e: any) {
+    return { depth: null, error: e?.message || '호가 조회 실패' };
+  }
+}
+
+// ── 펀딩 주기 ───────────────────────────────────────────────
+//
+// **8시간을 박지 않는다.** 바이낸스는 종목별로 주기를 조정하고, 그 목록을
+// `/fapi/v1/fundingInfo`로 준다. 다만 그 응답은 **조정된 종목만** 담는다 —
+// 목록에 없는 종목의 주기는 거기 적혀 있지 않다.
+//
+// 그래서 이렇게 한다:
+//   · 종목이 목록에 있으면 그 값이 정본이다 (`EXCHANGE_FUNDING_INFO`)
+//   · 없으면 목록에 있는 **가장 짧은 주기**를 쓴다 (`SHORTEST_LISTED`) —
+//     짧을수록 보유 구간에 펀딩이 더 많이 들어오므로 보수적이다
+//   · 목록을 못 읽거나 비어 있으면 **null이다.** 기본값을 지어내지 않는다
+export interface FundingIntervalInfo {
+  symbol: string;
+  intervalHours: number;
+  source: 'EXCHANGE_FUNDING_INFO' | 'SHORTEST_LISTED';
+}
+
+export async function getFundingInterval(
+  symbol: string, testnet = true,
+): Promise<{ info: FundingIntervalInfo | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const r = await fetch(`${base(testnet)}/fapi/v1/fundingInfo`,
+      { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+    if (!r.ok) return { info: null, error: `펀딩 주기 조회 실패 (HTTP ${r.status})` };
+    const d = parseLossless(await r.text());
+    const list = Array.isArray(d) ? d : [];
+    const rows = list
+      .map((x: any) => ({
+        symbol: String(x?.symbol || '').toUpperCase(),
+        hours: parseFloat(x?.fundingIntervalHours),
+      }))
+      .filter(x => x.symbol && Number.isFinite(x.hours) && x.hours > 0);
+    if (!rows.length) {
+      return { info: null, error: '펀딩 주기 목록이 비어 있습니다 — 기본값을 지어내지 않습니다' };
+    }
+    const own = rows.find(x => x.symbol === sym);
+    if (own) {
+      return { info: { symbol: sym, intervalHours: own.hours, source: 'EXCHANGE_FUNDING_INFO' },
+               error: null };
+    }
+    const shortest = Math.min(...rows.map(x => x.hours));
+    return { info: { symbol: sym, intervalHours: shortest, source: 'SHORTEST_LISTED' },
+             error: null };
+  } catch (e: any) {
+    return { info: null, error: e?.message || '펀딩 주기 조회 실패' };
+  }
+}
+
 // 펀딩 예측용 premiumIndex (공개 엔드포인트, 서명 불필요) — 45초 캐시
 export interface PremiumIndex { symbol: string; markPrice: number; indexPrice: number; lastFundingRate: number; nextFundingTime: number; }
 interface PremiumCacheEntry { data: PremiumIndex; ts: number; }

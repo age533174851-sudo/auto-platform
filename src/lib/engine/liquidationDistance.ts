@@ -123,6 +123,16 @@ export interface LiquidationDistanceInput {
    *   말이다. 이 값을 손절이라고 부르면 안 된다.
    */
   adverseDistancePct: number | null | undefined;
+  /**
+   * 이 판정이 **어떤 종류의 여유**인가. 안 주면 `RAW`다.
+   *
+   * `RAW`는 거래소 브래킷·배율·마진 구조만으로 구한 여유(②)이고,
+   * `EFFECTIVE`는 예상 체결가와 비용으로 증거금을 줄인 뒤의 실질 여유(③)다.
+   * **같은 필드에 덮어쓰지 않는다** — 둘을 나란히 두어야 운영자가 비용이
+   * 얼마나 먹었는지 볼 수 있다. 실패한 판정도 어느 쪽을 재려던 것인지
+   * 말해야 한다.
+   */
+  headroomKind?: 'RAW' | 'EFFECTIVE';
 }
 
 export interface LiquidationDistanceAssessment {
@@ -154,7 +164,7 @@ export interface LiquidationDistanceAssessment {
    */
   liquidationDistancePct: number | null;
   /** 위 값이 어떤 종류의 여유인지. ③이 다른 값을 더할 때 섞이지 않게 한다 */
-  headroomKind: 'RAW';
+  headroomKind: 'RAW' | 'EFFECTIVE';
 
   leverage: number | null;
   marginMode: 'isolated' | 'cross' | null;
@@ -197,6 +207,14 @@ const fail = (
  * 통과로 읽으면 그 한 번이 증거금 전액이다.
  */
 export function assessLiquidationDistance(
+  i: LiquidationDistanceInput | null | undefined,
+): LiquidationDistanceAssessment {
+  // 어느 여유를 재려던 것인지는 **성공·실패와 무관하게** 남는다.
+  const kind: 'RAW' | 'EFFECTIVE' = i?.headroomKind === 'EFFECTIVE' ? 'EFFECTIVE' : 'RAW';
+  return { ...assessCore(i), headroomKind: kind };
+}
+
+function assessCore(
   i: LiquidationDistanceInput | null | undefined,
 ): LiquidationDistanceAssessment {
   const inp = i ?? ({} as LiquidationDistanceInput);

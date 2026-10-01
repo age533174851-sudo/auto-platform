@@ -40,6 +40,11 @@ import {
 import {
   assessLiquidationDistance, type LiquidationDistanceAssessment,
 } from './liquidationDistance';
+import {
+  assessExecutionCost, effectiveMarginAfterCost,
+  type ExecutionCostAssessment, type CommissionRates, type DepthBook,
+  type FundingContext, type OrderFillKind,
+} from './executionCost';
 import type { BracketTier } from '../safety/liquidationPrice';
 
 export type Entry100xCode =
@@ -50,6 +55,18 @@ export type Entry100xCode =
    * **진입 전 보호다.** 이미 열린 포지션을 닫는 권한이 아니다.
    */
   | 'LIQUIDATION_UNSAFE'
+  /**
+   * 실행·보유 비용을 확정하지 못했다 (수수료·호가·펀딩).
+   *
+   * **진입 전 보호다.** 비용을 모르면 실질 여유를 말할 수 없다.
+   */
+  | 'COST_UNKNOWN'
+  /**
+   * 비용을 빼면 청산 여유가 계약을 만족하지 못한다.
+   *
+   * RAW는 통과했는데 여기서 막히는 경우가 이 코드다.
+   */
+  | 'LIQUIDATION_UNSAFE_AFTER_COST'
   /** 이 계약은 증거금 배정 사이징이 아니다 — 호출부가 잘못 불렀다 */
   | 'NOT_MARGIN_ALLOCATION'
   /** 마진 모드를 읽지 못했다 */
@@ -82,6 +99,7 @@ export const MUTATING_DEPS = ['applyLeverage'] as const;
 export const READONLY_DEPS = [
   'observeMarginMode', 'availableUsd', 'referencePrice', 'quantize',
   'maintenanceTiers', 'adverseDistancePct',
+  'commissionRates', 'orderBookDepth', 'fundingContext',
 ] as const;
 
 /**
@@ -118,6 +136,24 @@ export interface Entry100xReadDeps {
    *   참고 거리이고, 청산거리가 그보다 먼지 비교하는 데만 쓴다.
    */
   adverseDistancePct(): Promise<number | null>;
+  /**
+   * **계정의 실제 수수료율.** 못 읽으면 null → 막는다.
+   *
+   * 기본값 표(`lib/fees.ts`)는 등급·할인·프로모션을 모른다. 100배에서
+   * 왕복 수수료는 청산 여유의 상당 부분이라 추정으로 때울 수 없다.
+   */
+  commissionRates(): Promise<CommissionRates | null>;
+  /**
+   * **거래소 호가.** 못 읽으면 null → 막는다.
+   *
+   * 슬리피지는 API가 확정해 주는 값이 아니다. 체결되는 쪽 호가를 수량만큼
+   * 먹어 예상 체결가를 구한다 — 임의의 `0.05%` 상수를 만들지 않는다.
+   */
+  orderBookDepth(): Promise<DepthBook | null>;
+  /**
+   * **펀딩 정보.** 못 읽으면 null → 막는다. 주기를 8시간으로 박지 않는다.
+   */
+  fundingContext(): Promise<FundingContext | null>;
 }
 
 /** 확정 단계가 쓰는 의존 — 여기에만 쓰기가 있다. */
@@ -150,6 +186,15 @@ export interface Entry100xVerdict {
    * 화면과 기록이 "얼마로 계산했는데 모자랐다"를 말할 수 있어야 한다.
    */
   liquidation: LiquidationDistanceAssessment | null;
+  /** 실행·보유 비용 판정. 계산했으면 막혔든 통과했든 담긴다 */
+  cost: ExecutionCostAssessment | null;
+  /**
+   * **비용을 반영한** 청산거리 판정 (`headroomKind: 'EFFECTIVE'`).
+   *
+   * `liquidation`(RAW)을 덮어쓰지 않는다 — 둘을 나란히 두어야 비용이
+   * 여유를 얼마나 먹었는지 볼 수 있다.
+   */
+  effectiveLiquidation: LiquidationDistanceAssessment | null;
   message: string;
   /** 무엇을 물어보고 무엇을 얻었는지. 화면과 기록이 같은 말을 하게 한다 */
   notes: string[];
@@ -161,7 +206,7 @@ const fail = (
 ): Entry100xVerdict => ({
   ok: false, code, quantity: null, leverage: null, allocatedMargin: null,
   requiredMargin: null, referencePrice: null, marginMode: null,
-  liquidation: null,
+  liquidation: null, cost: null, effectiveLiquidation: null,
   message, notes, ...partial,
 });
 
@@ -200,9 +245,24 @@ export async function prepareEntry100x(
      * 그래서 선택값이 아니라 **필수**다. 빠뜨리면 컴파일이 멈춘다.
      */
     side: 'LONG' | 'SHORT' | null;
+    /**
+     * 이 주문이 호가를 **먹는** 쪽인가 놓는 쪽인가.
+     *
+     * 계약의 주문 유형에서 온다 — 시장가면 taker다. **여기서 고르지
+     * 않는다.** maker를 임의로 고르면 비용이 실제보다 작게 나온다.
+     */
+    fillKind: OrderFillKind | null;
+    /**
+     * 계약이 선언한 최대 보유 시간(초). 펀딩 평가 구간이다.
+     *
+     * ★ "이 시간에 자동 청산된다"는 뜻이 **아니다.** 그 배선은 아직 없다.
+     */
+    maxHoldSec: number | null;
   },
   marginAllocationPct: number | null,
   deps: Entry100xReadDeps,
+  /** 지금 시각. 시험이 고정할 수 있게 주입받는다 */
+  nowMs: () => number = () => Date.now(),
 ): Promise<Entry100xVerdict> {
   const notes: string[] = [];
 
@@ -333,6 +393,92 @@ export async function prepareEntry100x(
     });
   }
 
+  // ── ⑨ 실행·보유 비용 ──
+  //
+  // RAW 여유(⑧)는 비용을 빼기 **전** 값이다. 100배에서 왕복 taker 수수료만
+  // 여유의 상당 부분이고 슬리피지가 거기 더해진다. 빼지 않으면 "청산거리가
+  // 충분하다"가 사실이 아니게 된다.
+  //
+  // 세 입력 모두 **거래소에서 읽는다.** 못 읽으면 막는다 — 기본 수수료
+  // 표나 `0.05% 슬리피지` 같은 상수로 때우지 않는다.
+  let commission: CommissionRates | null = null;
+  try { commission = await deps.commissionRates(); } catch { commission = null; }
+  let book: DepthBook | null = null;
+  try { book = await deps.orderBookDepth(); } catch { book = null; }
+  let funding: FundingContext | null = null;
+  try { funding = await deps.fundingContext(); } catch { funding = null; }
+
+  const cost = assessExecutionCost({
+    side: contract.side,
+    referencePrice: price,
+    quantity: q.qty,
+    leverage: req,
+    // **시장가면 taker다.** 계약의 주문 유형에서 오고, 여기서 고르지 않는다.
+    fillKind: contract.fillKind,
+    commission, book, funding,
+    nowMs: nowMs(),
+    // 계약이 **선언한** 최대 보유 시간이 펀딩 평가 구간이다.
+    //
+    // ★ 이것은 "4시간에 자동으로 청산된다"는 뜻이 **아니다.** 그 배선은
+    //   아직 없다(post-entry exit authority 없음). 여기서는 "계약이 최대
+    //   4시간 보유한다고 선언했으므로 비용을 그 구간으로 본다"일 뿐이다.
+    holdHorizonMs: contract.maxHoldSec != null && contract.maxHoldSec > 0
+      ? contract.maxHoldSec * 1000 : null,
+  });
+  notes.push(
+    cost.totalCostNotionalPct == null
+      ? `비용 계산 실패 (${cost.code})`
+      : `비용 ${cost.totalCostNotionalPct.toFixed(4)}%`
+        + ` (수수료 입 ${cost.entryFeeUsd!.toFixed(6)} · 출예약 ${cost.exitFeeReserveUsd!.toFixed(6)}`
+        + ` · 슬리피지 입 ${cost.entrySlippageUsd!.toFixed(6)} · 출예약 ${cost.exitSlippageReserveUsd!.toFixed(6)}`
+        + ` · 펀딩예약 ${cost.fundingReserveUsd!.toFixed(6)} × ${cost.fundingEvents}회)`,
+  );
+  if (!cost.ok) {
+    return fail('COST_UNKNOWN', cost.reason, notes, {
+      marginMode: mode, leverage: req, referencePrice: price,
+      allocatedMargin: allocated, requiredMargin, quantity: q.qty,
+      liquidation, cost,
+    });
+  }
+
+  // ── ⑩ 비용을 반영한 청산거리 ──
+  //
+  // **퍼센트끼리 빼지 않는다.** 슬리피지는 진입가를 옮기고, 수수료·펀딩은
+  // 격리 증거금을 줄인다. 줄어든 증거금은 곧 오른 배율이므로, 같은 식에
+  // 예상 체결가와 실효배율을 넣어 **다시 푼다**(executionCost 머리말 참조).
+  const eff = effectiveMarginAfterCost(cost, req);
+  if (eff.code !== 'OK') {
+    return fail('LIQUIDATION_UNSAFE_AFTER_COST', eff.reason, notes, {
+      marginMode: mode, leverage: req, referencePrice: price,
+      allocatedMargin: allocated, requiredMargin, quantity: q.qty,
+      liquidation, cost,
+    });
+  }
+  const effectiveLiquidation = assessLiquidationDistance({
+    side: contract.side,
+    referencePrice: eff.effectiveEntryPrice,
+    quantity: q.qty,
+    leverage: eff.effectiveLeverage,
+    marginMode: mode,
+    brackets: tiers,
+    adverseDistancePct: adverse,
+    headroomKind: 'EFFECTIVE',
+  });
+  notes.push(
+    effectiveLiquidation.liquidationDistancePct == null
+      ? `실질 청산거리 계산 실패 (${effectiveLiquidation.code})`
+      : `실질 청산거리 ${effectiveLiquidation.liquidationDistancePct.toFixed(4)}%`
+        + ` (실효배율 ${eff.effectiveLeverage!.toFixed(4)}배`
+        + ` · 체결가 ${eff.effectiveEntryPrice})`,
+  );
+  if (!effectiveLiquidation.ok) {
+    return fail('LIQUIDATION_UNSAFE_AFTER_COST', effectiveLiquidation.reason, notes, {
+      marginMode: mode, leverage: req, referencePrice: price,
+      allocatedMargin: allocated, requiredMargin, quantity: q.qty,
+      liquidation, cost, effectiveLiquidation,
+    });
+  }
+
   return {
     ok: true, code: 'OK',
     quantity: q.qty,
@@ -341,9 +487,11 @@ export async function prepareEntry100x(
     requiredMargin,
     referencePrice: price,
     marginMode: mode,
-    liquidation,
+    liquidation, cost, effectiveLiquidation,
     message: `${req}배 · 수량 ${q.qty} · 증거금 $${requiredMargin.toFixed(4)} / 배정 $${allocated.toFixed(4)}`
-      + ` · 청산거리 ${liquidation.liquidationDistancePct!.toFixed(4)}%`,
+      + ` · 청산거리 ${liquidation.liquidationDistancePct!.toFixed(4)}%`
+      + ` → 비용 ${cost.totalCostNotionalPct!.toFixed(4)}% 반영 후`
+      + ` ${effectiveLiquidation.liquidationDistancePct!.toFixed(4)}%`,
     notes,
   };
 }

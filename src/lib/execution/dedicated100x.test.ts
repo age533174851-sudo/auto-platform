@@ -70,12 +70,29 @@ const okDeps = (over: Partial<Entry100xDeps> = {}): Entry100xDeps => ({
   maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
   // **손절 주문이 아니다** — 신호가 ATR로 잰 참고 위험 거리다.
   adverseDistancePct: async () => 0.3,
+  commissionRates: async () => ({
+    takerRate: 0.0004, makerRate: 0.0002,
+    source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+  }),
+  // 수량 0.2를 받아낼 깊이. 기준가 50,000에서 매도호가가 한 칸 위다.
+  orderBookDepth: async () => ({
+    bids: [[49_995, 50] as [number, number]],
+    asks: [[50_005, 50] as [number, number]],
+    source: 'EXCHANGE_DEPTH' as const, observedAtMs: Date.now(),
+  }),
+  fundingContext: async () => ({
+    rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+    intervalSource: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
+  }),
   ...over,
 });
 
 const contract100x = {
   leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
   side: 'LONG' as const,
+  // 시장가 주문이므로 taker다 (MAX_LEV_100X.orderType === 'market').
+  fillKind: 'TAKER' as const,
+  maxHoldSec: 14_400,
 };
 
 /** 열린 조합 한 벌 — 켜기 관련 시험이 쓴다 */

@@ -124,6 +124,7 @@ const P = {
   cov: 'src/lib/engine/exitCoverage.ts',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
+  cost: 'src/lib/engine/executionCost.ts',
   bfut: 'src/lib/exchanges/leverageBracket.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
@@ -1079,6 +1080,75 @@ const M = [
   ['MUT-L18b 조정 배수가 걸려 있어도 통과시킴', P.liq,
     s => s.replace('    if (coef != null && !(Number(coef) === 1)) {',
                    '    if (false) {'), 'RED'],
+
+  // ── ③ 실행·보유 비용 → 실질 청산 여유 ──
+  //
+  // RAW 여유만 보고 통과시키면 "청산거리가 충분하다"가 사실이 아니게 된다.
+
+  ['MUT-C1 수수료 조회를 안 봄 (기본값으로 넘김)', P.cost,
+    s => s.replace("  if (com == null || com.source !== 'EXCHANGE_ACCOUNT'",
+      "  if (false && (com == null || com.source !== 'EXCHANGE_ACCOUNT'"), 'RED'],
+
+  ['MUT-C2 taker 주문인데 maker 수수료를 씀', P.cost,
+    s => s.replace("  const rate = fillKind === 'TAKER' ? taker : maker;",
+                   '  const rate = maker;'), 'RED'],
+
+  ['MUT-C3 나갈 때 수수료 예약을 지움', P.cost,
+    s => s.replace('  const exitFeeReserveUsd = notional * rate;',
+                   '  const exitFeeReserveUsd = 0;'), 'RED'],
+
+  ['MUT-C4 슬리피지 방향을 뒤집음', P.cost,
+    s => s.replace("  const adverse = side === 'LONG' ? fill - ref : ref - fill;",
+                   "  const adverse = side === 'LONG' ? ref - fill : fill - ref;"), 'RED'],
+
+  ['MUT-C5 LONG이 매도호가 대신 매수호가를 먹음', P.cost,
+    s => s.replace("  const raw = side === 'LONG' ? book.asks : book.bids;",
+                   "  const raw = side === 'LONG' ? book.bids : book.asks;"), 'RED'],
+
+  ['MUT-C6 깊이가 모자라도 통과 (마지막 호가로 채움)', P.cost,
+    s => s.replace('  if (left > 0) return null;   // 깊이 부족',
+                   '  if (left > 0) { /* 깊이 부족을 무시한다 */ }'), 'RED'],
+
+  ['MUT-C7 펀딩 지불 부호를 뒤집음', P.cost,
+    s => s.replace("    fRate === 0 ? 'NEUTRAL' : (side === 'LONG' ? fRate > 0 : fRate < 0) ? 'PAY' : 'RECEIVE';",
+                   "    fRate === 0 ? 'NEUTRAL' : (side === 'LONG' ? fRate < 0 : fRate > 0) ? 'PAY' : 'RECEIVE';"),
+    'RED'],
+
+  ['MUT-C8 펀딩 수취 예상치를 안전 여유로 씀 (부호 그대로 더함)', P.cost,
+    s => s.replace('  const fundingReserveUsd = events * Math.abs(fRate) * notional;',
+      "  const _pays = side === 'LONG' ? fRate > 0 : fRate < 0;\n"
+      + '  const fundingReserveUsd = events * (_pays ? Math.abs(fRate) : -Math.abs(fRate)) * notional;'),
+    'RED'],
+
+  ['MUT-C9 펀딩 주기를 8시간으로 박음', P.cost,
+    s => s.replace('  const stepMs = intervalH * 3_600_000;',
+                   '  const stepMs = 8 * 3_600_000;'), 'RED'],
+
+  ['MUT-C10 비용을 못 구했는데 통과 (fail-open)', P.entry,
+    s => s.replace('  if (!cost.ok) {', '  if (false) {'), 'RED'],
+
+  ['MUT-C11 RAW만 검사하고 실질 여유 관문을 우회', P.entry,
+    s => s.replace('  if (!effectiveLiquidation.ok) {', '  if (false) {'), 'RED'],
+
+  ['MUT-C12 실질 여유 경계를 > 에서 >= 로', P.liq,
+    s => s.replace('  if (!(distancePct > adverse)) {',
+                   '  if (!(distancePct >= adverse)) {'), 'RED'],
+
+  ['MUT-C13 비용을 계산하고 청산 계산에는 반영하지 않음 (체결가·배율 원복)', P.entry,
+    s => s.replace("    referencePrice: eff.effectiveEntryPrice,\n    quantity: q.qty,\n    leverage: eff.effectiveLeverage,",
+                   '    referencePrice: price,\n    quantity: q.qty,\n    leverage: req,'), 'RED'],
+
+  ['MUT-C14 비용이 증거금을 넘어도 통과', P.cost,
+    s => s.replace('  if (!(marginAfterCostUsd > 0)) {', '  if (false) {'), 'RED'],
+
+  ['MUT-C15 실효배율을 계약 배율로 되돌림 (비용이 사라진다)', P.cost,
+    s => s.replace('    effectiveLeverage: notional / marginAfterCostUsd,',
+                   '    effectiveLeverage: lev,'), 'RED'],
+
+  // 과도 거부도 결함이다. 정상 저비용 케이스가 막히면 그 전략은 못 돈다.
+  ['MUT-C16 정상 저비용 케이스를 과도 거부 (비용을 100배로)', P.cost,
+    s => s.replace('  const totalCostUsd = parts.reduce((a, b) => a + b, 0);',
+                   '  const totalCostUsd = parts.reduce((a, b) => a + b, 0) * 100;'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
