@@ -481,6 +481,63 @@ export async function runDedicated100xTests() {
     eq(v.allowed, false, 'LIVE가 열렸다');
   });
 
+  // ── 표가 실자금 모드를 열어도 계약이 막는다 ──────────────
+  //
+  // 위 시험들은 **표에 적힌 것**을 본다. 그래서 `modes`에 한 줄 더하는
+  // 것만으로 실계좌가 열린다 — 검사기가 그것을 잡지만 검사기는 돌려야
+  // 의미가 있고, 그 사이에 배포가 나갈 수 있다. 체크리스트를 자동으로
+  // 눌러 주기보다 **그 칸이 아예 없게** 만든다.
+  //
+  // 그리고 글자로 막으면 안 된다: `'LIVE'`라는 모드는 **존재하지 않는다.**
+  // 실자금 모드는 `LIVE_SMALL`·`LIVE_LIMITED`다. `mode === 'LIVE'`로
+  // 막았다면 둘 다 그대로 통과했을 것이다.
+  {
+    const wideOpen = [
+      { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: V,
+        modes: ['TESTNET', 'SHADOW_LIVE', 'LIVE_SMALL', 'LIVE_LIMITED'],
+        requiresMarginAllocation: true },
+    ];
+
+    test('표가 LIVE_SMALL을 열어도 NO_FIXED_SL 계약은 막힌다', () => {
+      const v = executionGateVerdict({ ...openRow, mode: 'LIVE_SMALL' }, wideOpen);
+      eq(v.allowed, false, '★ 표에 한 줄 더한 것만으로 실자금이 열렸습니다');
+      assert(/고정 손절을 걸지 않는 계약/.test(v.reason),
+        `사유가 계약을 가리키지 않는다: ${v.reason}`);
+      assert(/사람이 직접 닫는/.test(v.reason),
+        `무엇이 없는지 적지 않는다: ${v.reason}`);
+    });
+
+    test('LIVE_LIMITED도 막힌다 — 글자가 아니라 능력으로 판정한다', () => {
+      const v = executionGateVerdict({ ...openRow, mode: 'LIVE_LIMITED' }, wideOpen);
+      eq(v.allowed, false, '★ LIVE_LIMITED가 열렸습니다');
+    });
+
+    test('TESTNET은 그대로 통과한다 — 기존 동작을 바꾸지 않는다', () => {
+      const v = executionGateVerdict({ ...openRow, mode: 'TESTNET' }, wideOpen);
+      eq(v.allowed, true, `★ TESTNET 검증이 막혔습니다: ${v.reason}`);
+    });
+
+    test('SHADOW_LIVE는 막지 않는다 — 주문이 나가지 않는 모드다', () => {
+      // 실계좌로 판단만 하고 보내지 않는다(`sendsOrders: false`).
+      // 나간 주문이 없으면 닫을 것도 없다. 여기까지 막으면 LIVE 승급에
+      // 필요한 관찰 자체를 못 하게 된다.
+      const v = executionGateVerdict({ ...openRow, mode: 'SHADOW_LIVE' }, wideOpen);
+      eq(v.allowed, true, `★ 주문을 보내지 않는 모드가 막혔습니다: ${v.reason}`);
+    });
+
+    test('계약을 해석할 수 없으면 실자금 모드에서 통과시키지 않는다', () => {
+      // 표에는 있는데 계약 해석이 깨진 조합. **모르는 것을 통과로 읽지
+      // 않는다** — 무엇이 도는지 모른 채 돈을 걸게 된다.
+      const brokenVersion = [
+        { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: 99,
+          modes: ['LIVE_SMALL'], requiresMarginAllocation: true },
+      ];
+      const v = executionGateVerdict(
+        { ...openRow, contractVersion: 99, mode: 'LIVE_SMALL' }, brokenVersion);
+      eq(v.allowed, false, '★ 해석되지 않는 계약이 실자금 모드에서 통과했습니다');
+    });
+  }
+
   test('배정 비율이 없으면 켤 수 없다', () => {
     for (const pct of [null, undefined, 0, -1, 101]) {
       const v = executionGateVerdict({ ...openRow, marginAllocationPct: pct });

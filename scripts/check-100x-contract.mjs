@@ -27,6 +27,7 @@ import { stripJsComments } from './lib/strip-comments.mjs';
 const PROFILES_TS = 'src/lib/strategies/profiles.ts';
 const PLAN        = 'src/lib/execution/profile.ts';
 const GATE        = 'src/lib/execution/dormantGate.ts';
+const COVERAGE    = 'src/lib/engine/exitCoverage.ts';
 const EXEC        = 'src/lib/engine/orderExecutor.ts';
 const REATTACH    = 'src/lib/engine/stopReattach.ts';
 const SIZING      = 'src/lib/engine/sizing100x.ts';
@@ -397,6 +398,136 @@ if (gate) {
   }
   if (gate.enableFilterSpec([]).kind !== 'isNull') {
     err('열린 조합이 없는데 켜기 조건이 넓어졌습니다');
+  }
+
+  // ── 표를 넓히는 것만으로 실자금이 열리지 않는가 ──
+  //
+  //   위 `mustBlock`은 **정본 표**를 쓴다. 그래서 표의 `modes`에 한 줄
+  //   더하는 변경을 전혀 보지 못한다 — 그 변경 하나로 실계좌가 열렸다.
+  //   검사기가 그것을 잡더라도 검사기는 돌려야 의미가 있다.
+  //
+  //   그래서 **실자금 모드를 전부 열어 둔 표를 직접 넘겨서** 그래도
+  //   막히는지 본다. 막는 근거가 표가 아니라 계약(고정 손절 없음)이어야
+  //   이 검사가 통과한다.
+  //
+  //   ★ 글자로 막으면 샌다: `'LIVE'`라는 모드는 **존재하지 않는다**
+  //     (사다리는 UI_DEMO·PAPER·TESTNET·SHADOW_LIVE·LIVE_SMALL·LIVE_LIMITED).
+  //     `mode === 'LIVE'`로 막았다면 LIVE_SMALL·LIVE_LIMITED가 그대로
+  //     통과했을 것이다.
+  {
+    const wide = [{
+      strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: 2,
+      modes: ['TESTNET', 'SHADOW_LIVE', 'LIVE_SMALL', 'LIVE_LIMITED'],
+      requiresMarginAllocation: true,
+    }];
+    for (const mode of ['LIVE_SMALL', 'LIVE_LIMITED']) {
+      const v = gate.executionGateVerdict({ ...okRow, mode }, wide);
+      if (v.allowed) {
+        err(`켜기 게이트: 표에 ${mode}를 적는 것만으로 실자금이 열립니다`
+          + ' — 막는 근거가 계약(고정 손절 없음)이 아니라 표입니다');
+      } else if (!/고정 손절/.test(String(v.reason))) {
+        err(`켜기 게이트: ${mode}가 막히기는 하는데 사유가 계약을 가리키지 않습니다`
+          + ` (${String(v.reason).slice(0, 80)}) — 표를 넓히면 사라질 방어입니다`);
+      }
+    }
+    // **TESTNET 검증을 막아서 통과시키는 것이 아니다.** 지금 돌고 있는
+    // 조합은 그대로 켜져야 한다.
+    if (!gate.executionGateVerdict({ ...okRow, mode: 'TESTNET' }, wide).allowed) {
+      err('켜기 게이트: TESTNET 검증이 막혔습니다 — 기존 동작을 바꿨습니다');
+    }
+    // 주문을 보내지 않는 모드까지 막으면 LIVE 승급에 필요한 관찰을 못 한다.
+    if (!gate.executionGateVerdict({ ...okRow, mode: 'SHADOW_LIVE' }, wide).allowed) {
+      err('켜기 게이트: SHADOW_LIVE가 막혔습니다'
+        + ' — 주문이 나가지 않는 모드입니다(닫을 것이 없습니다)');
+    }
+  }
+
+  // 모드를 **글자로** 비교하지 않는가. 사다리 정본에 물어야 모드를 하나
+  // 더 만들어도 조건이 자동으로 따라온다.
+  {
+    const src = code(GATE);
+    if (!/capability\s*\(/.test(src) || !/parseMode\s*\(/.test(src)) {
+      err(`${GATE}: 실자금 판정을 모드 사다리 정본(capability·parseMode)에 묻지 않습니다`);
+    }
+    if (/mode\s*===\s*['"]LIVE['"]/.test(src)) {
+      err(`${GATE}: 모드를 'LIVE' 글자와 비교합니다`
+        + " — 그런 모드는 없습니다. LIVE_SMALL·LIVE_LIMITED가 그대로 통과합니다");
+    }
+    if (!/stopPolicy\s*===\s*['"]NO_FIXED_SL['"]/.test(src)) {
+      err(`${GATE}: 실자금 차단이 계약의 stopPolicy를 보지 않습니다`);
+    }
+  }
+}
+
+// ── 청산 감시 커버리지가 계약 단위로 참말을 하는가 ──
+//
+//   `exitCoverage`는 전략 단위 표였다. 그래서 `scalp` 한 줄이
+//   `lifecyclePolicyOf('scalp')`를 근거로 트레일링·본전이동·시간청산을 전부
+//   true로 적었고, 같은 전략의 `NO_FIXED_SL` 계약 포지션에는 그 중 **하나도
+//   돌지 않는데도** 응답은 초록이었다(자리 전체가 유예된다). 이 파일
+//   머리말의 "여기에 희망을 적지 않는다"를 어기고 있었다.
+{
+  const cov = await loadModule(COVERAGE, '청산 감시 커버리지');
+  if (cov) {
+    const rows = cov.exitCoverage();
+    const contractRows = rows.filter(r => r.contract != null);
+    const noFixed = contractRows.filter(r => r.stopPolicy === 'NO_FIXED_SL');
+    if (noFixed.length === 0) {
+      err(`${COVERAGE}: 열려 있는 NO_FIXED_SL 계약 줄이 표에 없습니다`
+        + ' — 그 계약의 포지션이 무슨 감시를 받는지 아무도 적지 않습니다');
+    }
+    for (const r of noFixed) {
+      for (const [k, what] of [
+        ['trailing', '트레일링'], ['breakEven', '본전이동'],
+        ['timeExit', '시간청산'], ['positionGuard', '포지션 점검'],
+        ['protectiveOrdersAtEntry', '진입 보호주문'],
+      ]) {
+        if (r[k] !== false) {
+          err(`${COVERAGE}: ${r.strategyId}/${r.contract.presetId}의 ${what}을 ${r[k]}로 적습니다`
+            + ' — 자리 유예로 돌지 않는 것을 돈다고 적으면 화면이 거짓말을 합니다');
+        }
+      }
+      if (r.gap == null) {
+        err(`${COVERAGE}: ${r.strategyId}/${r.contract.presetId}에 빈 칸이 있는데 이유가 없습니다`);
+      } else if (!/사람이 직접 닫는/.test(String(r.gap))) {
+        err(`${COVERAGE}: 자동 종료가 없다는 사실을 사유에 적지 않습니다`
+          + ' — 운영자가 무엇이 없는지 알 수 없습니다');
+      }
+    }
+    // 기본 예약 줄의 커버리지는 **건드리지 않는다.**
+    const base = rows.filter(r => r.contract == null);
+    if (base.length < 3) err(`${COVERAGE}: 기본 예약 줄이 ${base.length}개입니다 — 줄이 사라졌습니다`);
+    for (const b of base) {
+      if (b.stopPolicy != null) {
+        err(`${COVERAGE}: 기본 예약 줄의 stopPolicy를 ${b.stopPolicy}로 적습니다`
+          + ' — 장부 칸이 비어 있는 옛 줄을 "정하기로 한 줄"로 바꿔 읽습니다');
+      }
+    }
+    // 요약 줄이 **계약 단위**로 세는가. 전략 수로 세면 같은 전략의 다른
+    // 계약이 숨는다.
+    const line = String(cov.exitCoverageLine());
+    if (!/실행 계약/.test(line)) {
+      err(`${COVERAGE}: 요약 줄이 아직 전략 수로 셉니다 (${line.slice(0, 60)})`);
+    }
+    if (/전부 청산 감시 대상/.test(line)) {
+      err(`${COVERAGE}: 돌지 않는 계약이 있는데 "전부 감시 대상"이라고 적습니다`);
+    }
+    // 유예 판정을 **표가 다시 적지 않는가.** 분류기에게 물어야 한다 —
+    // 두 벌이 되면 언젠가 한쪽만 고쳐진다.
+    const src = code(COVERAGE);
+    if (!/managedCandidates/.test(src)) {
+      err(`${COVERAGE}: 유예 판정을 분류기(managedCandidates)에게 묻지 않습니다`
+        + ' — 표에 규칙을 다시 적으면 managedPosition과 갈립니다');
+    }
+    if (!/OPEN_COMBOS/.test(src)) {
+      err(`${COVERAGE}: 계약 줄을 dormantGate의 조합 목록에서 만들지 않습니다`
+        + ' — 조합을 하나 더 열면 이 표가 그것을 조용히 빠뜨립니다');
+    }
+    // 탐침이 분류되지 않을 때 **통과로 적지 않는가.**
+    if (!/UNCLASSIFIED/.test(src)) {
+      err(`${COVERAGE}: 분류되지 않은 계약을 다루는 자리가 없습니다`
+        + ' — 모르는 것을 감시 중으로 적으면 UNKNOWN을 0으로 적는 것입니다');
+    }
   }
 }
 

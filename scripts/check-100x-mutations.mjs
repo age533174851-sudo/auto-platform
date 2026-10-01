@@ -121,6 +121,7 @@ const P = {
   rows: 'src/lib/engine/lifecycleRows.ts',
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
+  cov: 'src/lib/engine/exitCoverage.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -898,6 +899,54 @@ const M = [
     if (k < 0) return s;
     return rest.slice(0, k) + block + rest.slice(k);
   }, 'RED'],
+
+  // ── NO_FIXED_SL 계약 확정: 실자금 장벽 + 계약 단위 관측 ──
+  //
+  // **표를 넓히는 것만으로 실자금이 열리지 않아야 한다.** 그리고 커버리지
+  // 표는 전략이 아니라 **계약** 단위로 참말을 해야 한다 — 같은 `scalp`
+  // 안에서 기본 예약은 감시를 받고 `NO_FIXED_SL` 계약은 하나도 못 받는다.
+
+  ['MUT-N1 실자금 장벽 제거 (표만 보게 되돌림)', P.gate,
+    s => s.replace(/  const cap = capability\(parseMode\(mode\)\);\n  if \(cap\.sendsOrders && cap\.realMoney\) \{[\s\S]*?\n  \}\n\n/,
+      ''), 'RED'],
+
+  ['MUT-N2 장벽을 \'LIVE\' 글자 비교로 되돌림 (LIVE_SMALL이 샌다)', P.gate,
+    s => s.replace("  const cap = capability(parseMode(mode));\n  if (cap.sendsOrders && cap.realMoney) {",
+                   "  if (mode === 'LIVE') {"), 'RED'],
+
+  ['MUT-N3 장벽이 계약의 stopPolicy를 안 봄', P.gate,
+    s => s.replace("if (resolved.contract.stopPolicy === 'NO_FIXED_SL') {",
+                   'if (false) {'), 'RED'],
+
+  ['MUT-N4 커버리지에서 계약 줄을 떼어냄', P.cov,
+    s => s.replace('return [...base, ...contractRows(new Set(base.map(b => b.strategyId)))];',
+                   'return base;'), 'RED'],
+
+  ['MUT-N5 NO_FIXED_SL 계약이 시간청산을 받는다고 적음', P.cov,
+    s => s.replace('trailing: false, breakEven: false, timeExit: false,',
+                   'trailing: false, breakEven: false, timeExit: true,'), 'RED'],
+
+  ['MUT-N6 유예 판정을 표에 직접 적음 (분류기를 안 부름)', P.cov,
+    s => s.replace('  const r = managedCandidates([row]);',
+      "  const r = { positions: [], deferred: [{ code: 'NO_FIXED_SL_EXIT_UNWIRED',\n"
+      + "    reason: '고정 손절을 쓰지 않는 주문입니다' }], skipped: [] } as any;"), 'RED'],
+
+  ['MUT-N7 분류되지 않은 계약을 감시 중으로 적음 (UNKNOWN을 0으로)', P.cov,
+    s => s.replace("    admitted: false, code: 'UNCLASSIFIED',",
+                   "    admitted: true, code: 'MANAGED_ASSUMED',"), 'RED'],
+
+  ['MUT-N8 조합 목록을 손으로 적음 (dormantGate를 안 읽음)', P.cov,
+    s => s.replace('  for (const c of OPEN_COMBOS) {',
+      "  const HAND = [{ strategyId: 'scalp', profileId: 'MAX_LEV_100X',\n"
+      + "    presetId: 'EXACT_100X', contractVersion: 2 }];\n"
+      + '  for (const c of HAND) {'), 'RED'],
+
+  ['MUT-N9 요약 줄을 전략 수로 되돌림', P.cov,
+    s => s.replace('`실행 계약 ${all.length}개 중 ${gaps.length}개가',
+                   '`전략 ${all.length}개 중 ${gaps.length}개가'), 'RED'],
+
+  ['MUT-N10 빈 칸인데 이유를 지움', P.cov,
+    s => s.replace(/      gap: adm\.admitted\n[\s\S]*?\$\{adm\.reason\}\)`,\n/, '      gap: null,\n'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
