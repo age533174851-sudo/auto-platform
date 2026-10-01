@@ -2869,6 +2869,15 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       ['수수료가 증거금을 먹으면',
         { commissionRates: async () => ({ ...COM, takerRate: 0.4 }) },
         'LIQUIDATION_UNSAFE_AFTER_COST'],
+      // ★ **RAW는 통과하고 실질 여유만 모자라는 자리.** 이 케이스가 없으면
+      //   실질 여유 관문을 통째로 지우는 변경이 조용히 통과한다 — 실제로
+      //   그 변이가 새 나갔다. RAW 0.6024% · 실질 0.4920%이므로 0.55는
+      //   그 사이에 있다.
+      ['비용을 빼면 여유가 모자라면', { adverseDistancePct: async () => 0.55 },
+        'LIQUIDATION_UNSAFE_AFTER_COST'],
+      // 비교: RAW 자체가 모자라면 사유가 다르다.
+      ['RAW 여유부터 모자라면', { adverseDistancePct: async () => 0.62 },
+        'LIQUIDATION_UNSAFE'],
     ]) {
       const prep = await entry.prepareEntry100x(CC, 10, { ...base, ...over });
       if (prep.ok) err(`100X 진입: ${why} 막아야 하는데 통과했습니다`);
@@ -2876,6 +2885,25 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         err(`100X 진입: ${why} 막긴 했는데 사유가 ${prep.code}입니다 (${wantCode}여야 합니다)`);
       }
     }
+    // 실질 여유로 막힌 계획은 **RAW가 통과했다는 사실**도 들고 있어야 한다.
+    // 그래야 운영자가 "구조는 괜찮은데 비용이 먹었다"를 읽을 수 있다.
+    {
+      const afterCost = await entry.prepareEntry100x(
+        CC, 10, { ...base, adverseDistancePct: async () => 0.55 });
+      if (afterCost.code !== 'LIQUIDATION_UNSAFE_AFTER_COST') {
+        err(`100X 진입: 비용 때문에 막혀야 하는데 ${afterCost.code}입니다`);
+      } else {
+        if (afterCost.liquidation?.ok !== true) {
+          err('100X 진입: 비용으로 막힌 계획인데 RAW 판정이 통과로 남아 있지 않습니다');
+        }
+        if (afterCost.effectiveLiquidation?.ok !== false
+            || afterCost.effectiveLiquidation?.headroomKind !== 'EFFECTIVE') {
+          err('100X 진입: 실질 여유 판정이 결과에 남지 않습니다'
+            + ' — 무엇이 모자랐는지 말할 수 없습니다');
+        }
+      }
+    }
+
     // 통과한 계획은 RAW와 EFFECTIVE를 **둘 다** 들고 간다.
     const ok2 = await entry.prepareEntry100x(CC, 10, base);
     if (!ok2.ok) err(`100X 진입: 비용 포함 정상 경로가 막혔습니다 — ${ok2.message}`);

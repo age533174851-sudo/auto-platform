@@ -501,6 +501,29 @@ export async function runDedicated100xTests() {
     eq(v.allowed, true, `열린 조합이 막혔다: ${v.reason}`);
   });
 
+  // ── 비용을 빼면 모자라는 자리 (③) ──
+  //
+  // RAW 0.6024% · 실질 0.4920%이므로 변동성 위험 거리 0.55%는 **그 사이**다.
+  // RAW만 보면 통과하고 비용을 빼면 막힌다. 이 자리를 시험하지 않으면
+  // 실질 여유 관문을 통째로 지우는 변경이 조용히 통과한다.
+  test('RAW는 통과하는데 비용을 빼면 막힌다', async () => {
+    const v = await planEntry100x(contract100x as any, 10,
+      okDeps({ adverseDistancePct: async () => 0.55 }));
+    eq(v.ok, false, '★ 비용을 빼면 여유가 모자란데 진입했다');
+    eq(v.code, 'LIQUIDATION_UNSAFE_AFTER_COST');
+    // RAW가 통과했다는 사실이 남아야 "구조는 괜찮은데 비용이 먹었다"를 읽는다.
+    eq(v.liquidation?.ok, true, '★ RAW 판정을 버렸다');
+    eq(v.effectiveLiquidation?.ok, false, '★ 실질 판정을 버렸다');
+    eq(v.effectiveLiquidation?.headroomKind, 'EFFECTIVE');
+  });
+
+  test('RAW 자체가 모자라면 사유가 다르다 — 두 실패를 구별한다', async () => {
+    const v = await planEntry100x(contract100x as any, 10,
+      okDeps({ adverseDistancePct: async () => 0.62 }));
+    eq(v.ok, false);
+    eq(v.code, 'LIQUIDATION_UNSAFE', '★ 비용 때문인지 구조 때문인지 구별되지 않는다');
+  });
+
   test('LIVE는 막힌다', () => {
     const v = executionGateVerdict({ ...openRow, mode: 'LIVE' });
     eq(v.allowed, false, 'LIVE가 열렸다');
