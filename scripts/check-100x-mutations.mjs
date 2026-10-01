@@ -922,9 +922,15 @@ const M = [
     s => s.replace('return [...base, ...contractRows(new Set(base.map(b => b.strategyId)))];',
                    'return base;'), 'RED'],
 
+  // ★ 앵커를 **계약 줄 쪽**으로 좁힌다. 예전 앵커
+  //   ('trailing: false, breakEven: false, timeExit: false,')는 파일 앞의
+  //   `UNDECLARED` 상수를 먼저 때렸고, 그 상수는 지금 쓰이지 않아 아무
+  //   관측도 바뀌지 않았다 — 변이가 아니라 **빈 변이**였다.
   ['MUT-N5 NO_FIXED_SL 계약이 시간청산을 받는다고 적음', P.cov,
-    s => s.replace('trailing: false, breakEven: false, timeExit: false,',
-                   'trailing: false, breakEven: false, timeExit: true,'), 'RED'],
+    s => s.replace("      trailing: false, breakEven: false, timeExit: false,\n"
+                   + '      positionGuard: adm.admitted,',
+                   "      trailing: false, breakEven: false, timeExit: true,\n"
+                   + '      positionGuard: adm.admitted,'), 'RED'],
 
   ['MUT-N6 유예 판정을 표에 직접 적음 (분류기를 안 부름)', P.cov,
     s => s.replace('  const r = managedCandidates([row]);',
@@ -935,10 +941,12 @@ const M = [
     s => s.replace("    admitted: false, code: 'UNCLASSIFIED',",
                    "    admitted: true, code: 'MANAGED_ASSUMED',"), 'RED'],
 
-  ['MUT-N8 조합 목록을 손으로 적음 (dormantGate를 안 읽음)', P.cov,
-    s => s.replace('  for (const c of OPEN_COMBOS) {',
+  // 이름(`OPEN_COMBOS` import)은 **그대로 남겨 둔다.** 이름만 보는 검사의
+  // 빈틈을 겨냥한 변이다 — 주입한 표를 무시하고 손으로 적은 목록을 돈다.
+  ['MUT-N8 조합 목록을 손으로 적음 (주어진 표를 무시)', P.cov,
+    s => s.replace('  for (const c of open) {',
       "  const HAND = [{ strategyId: 'scalp', profileId: 'MAX_LEV_100X',\n"
-      + "    presetId: 'EXACT_100X', contractVersion: 2 }];\n"
+      + "    presetId: 'EXACT_100X', contractVersion: 2 }] as any;\n"
       + '  for (const c of HAND) {'), 'RED'],
 
   ['MUT-N9 요약 줄을 전략 수로 되돌림', P.cov,

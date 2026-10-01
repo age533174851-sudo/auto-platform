@@ -519,9 +519,33 @@ if (gate) {
       err(`${COVERAGE}: 유예 판정을 분류기(managedCandidates)에게 묻지 않습니다`
         + ' — 표에 규칙을 다시 적으면 managedPosition과 갈립니다');
     }
-    if (!/OPEN_COMBOS/.test(src)) {
-      err(`${COVERAGE}: 계약 줄을 dormantGate의 조합 목록에서 만들지 않습니다`
-        + ' — 조합을 하나 더 열면 이 표가 그것을 조용히 빠뜨립니다');
+    // **이름이 있는지로는 부족하다.** `import { OPEN_COMBOS }` 한 줄만
+    // 남겨 두고 손으로 적은 목록을 돌려도 이름 검사는 통과한다 — 실제로
+    // 그 변이가 새 나갔다. 그래서 **표를 주입해서 따라오는지** 본다.
+    if (!/of\s+open\b/.test(src)) {
+      err(`${COVERAGE}: 계약 줄을 주어진 조합 목록으로 만들지 않습니다`
+        + ' — 손으로 적은 목록이면 조합을 하나 더 열어도 표가 빠뜨립니다');
+    }
+    {
+      // 정본과 **다른 전략**의 조합을 넘긴다. 표가 주입을 무시하고 손으로
+      // 적은 목록(scalp)을 쓰면 strategyId가 달라서 바로 드러난다.
+      const injected = [{
+        strategyId: 'my-original-v1', profileId: ID, presetId: PRESET,
+        contractVersion: 2, modes: ['TESTNET'], requiresMarginAllocation: true,
+      }];
+      const got = cov.exitCoverage(injected).filter(r => r.contract != null);
+      if (got.length !== 1) {
+        err(`${COVERAGE}: 조합 하나를 주입했는데 계약 줄이 ${got.length}개입니다`
+          + ' — 표가 주어진 조합 목록을 읽지 않습니다');
+      } else if (got[0].strategyId !== 'my-original-v1') {
+        err(`${COVERAGE}: 주입한 조합의 전략은 my-original-v1인데 표는`
+          + ` ${got[0].strategyId}을(를) 적습니다 — 목록을 손으로 적어 두었습니다`);
+      }
+      // 빈 표를 주면 계약 줄도 없어야 한다. 그래도 줄이 나오면 어딘가에
+      // 조합이 박혀 있다는 뜻이다.
+      if (cov.exitCoverage([]).some(r => r.contract != null)) {
+        err(`${COVERAGE}: 열린 조합이 없는데도 계약 줄이 나옵니다`);
+      }
     }
     // 탐침이 분류되지 않을 때 **통과로 적지 않는가.**
     if (!/UNCLASSIFIED/.test(src)) {

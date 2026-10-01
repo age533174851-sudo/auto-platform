@@ -102,6 +102,31 @@ export function runExitCoverageTests() {
     eq(scalp.gap, null);
   });
 
+  // ── ③-b 표를 **정말 읽는가** ──
+  //
+  // 이름만 보는 검사는 "import는 남겨 두고 목록을 손으로 적는" 변경을
+  // 잡지 못한다. 실제로 그 변이가 한 번 새 나갔다. 그래서 조합을
+  // 주입해서 표가 따라오는지 본다.
+
+  test('조합을 주입하면 그 조합의 전략으로 계약 줄이 생긴다', () => {
+    const injected = [{
+      strategyId: 'my-original-v1', profileId: 'MAX_LEV_100X',
+      presetId: 'EXACT_100X', contractVersion: 2,
+      modes: ['TESTNET'], requiresMarginAllocation: true,
+    }];
+    const got = exitCoverage(injected as any).filter(c => c.contract != null);
+    eq(got.length, 1, '★ 주입한 조합이 표에 반영되지 않습니다');
+    eq(got[0].strategyId, 'my-original-v1',
+      '★ 주입을 무시하고 어딘가에 박아 둔 목록을 씁니다');
+  });
+
+  test('열린 조합이 없으면 계약 줄도 없다', () => {
+    const got = exitCoverage([]).filter(c => c.contract != null);
+    eq(got.length, 0, '★ 조합이 없는데 계약 줄이 나옵니다');
+    // 기본 예약 줄은 그대로 있어야 한다 — 조합과 무관하다.
+    assert(exitCoverage([]).length >= 3, '기본 예약 줄까지 사라졌습니다');
+  });
+
   // ── ④ 요약 줄 ──
 
   test('요약 줄이 계약 단위로 세고 빠진 계약을 지목한다', () => {

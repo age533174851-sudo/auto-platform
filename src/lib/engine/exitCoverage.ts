@@ -24,7 +24,7 @@
 import { STRATEGIES, type StrategyId } from '../strategies/registry';
 import { lifecyclePolicyOf } from '../strategies/lifecyclePolicy';
 import { managedCandidates, type OrderRowLike } from './managedPosition';
-import { OPEN_COMBOS } from '../execution/dormantGate';
+import { OPEN_COMBOS, type OpenCombo } from '../execution/dormantGate';
 import { resolveExecutionProfile } from '../execution/profile';
 import type { StopPolicy } from '../strategies/profiles';
 
@@ -216,9 +216,9 @@ export function genericLifecycleAdmission(stopPolicy: StopPolicy | null): Lifecy
  * 하나 더 열었을 때 이 표가 조용히 그 조합을 빠뜨린다 — 지금 고치는
  * 고장이 정확히 그 형태다.
  */
-function contractRows(baseStrategyIds: Set<string>): ExitCoverage[] {
+function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]): ExitCoverage[] {
   const out: ExitCoverage[] = [];
-  for (const c of OPEN_COMBOS) {
+  for (const c of open) {
     if (!baseStrategyIds.has(c.strategyId)) continue;
     const r = resolveExecutionProfile(c.profileId, c.presetId, c.contractVersion);
     if (!r.ok || !r.contract) continue;
@@ -260,8 +260,15 @@ function contractRows(baseStrategyIds: Set<string>): ExitCoverage[] {
   return out;
 }
 
-/** 실행 경로가 있는 전략의 청산 감시 커버리지 */
-export function exitCoverage(): ExitCoverage[] {
+/**
+ * 실행 경로가 있는 전략의 청산 감시 커버리지.
+ *
+ * @param open 열린 조합. **시험·검사기가 주입한다.** 안 주면 정본을 쓴다 —
+ *   `executionGateVerdict`가 쓰는 것과 같은 관용구다. 주입을 받아야
+ *   "표를 정말 읽는가"를 바깥에서 확인할 수 있다. 이름만 보는 검사는
+ *   손으로 적은 목록을 잡지 못한다(실제로 그 변이가 새 나갔다).
+ */
+export function exitCoverage(open: readonly OpenCombo[] = OPEN_COMBOS): ExitCoverage[] {
   const base = STRATEGIES
     .filter(s => s.executionReady)
     .map(s => ({
@@ -275,12 +282,12 @@ export function exitCoverage(): ExitCoverage[] {
       contractLabel: '기본 예약 (실행 계약 없음)',
       ...(BY_MONITOR[s.id] ?? UNDECLARED),
     }));
-  return [...base, ...contractRows(new Set(base.map(b => b.strategyId)))];
+  return [...base, ...contractRows(new Set(base.map(b => b.strategyId)), open)];
 }
 
 /** 빈 칸이 있는 전략만 */
-export function exitCoverageGaps(): ExitCoverage[] {
-  return exitCoverage().filter(c => c.gap != null);
+export function exitCoverageGaps(open?: readonly OpenCombo[]): ExitCoverage[] {
+  return exitCoverage(open).filter(c => c.gap != null);
 }
 
 /**
@@ -288,8 +295,8 @@ export function exitCoverageGaps(): ExitCoverage[] {
  *
  * **"정상"이라고 적지 않는다.** 안 보는 전략이 하나라도 있으면 그 수를 적는다.
  */
-export function exitCoverageLine(): string {
-  const all = exitCoverage();
+export function exitCoverageLine(open?: readonly OpenCombo[]): string {
+  const all = exitCoverage(open);
   const gaps = all.filter(c => c.gap != null);
   if (all.length === 0) return '실행 경로가 있는 전략이 없습니다';
   // **세는 단위가 전략이 아니라 계약이다.** 같은 전략이 계약에 따라 다른
