@@ -55,12 +55,34 @@ export interface DepthBook {
 }
 
 export interface FundingContext {
-  /** 최근 펀딩률(비율). **부호 그대로** 받는다 */
+  /**
+   * 최근 펀딩률(비율). **부호 그대로** 받는다.
+   *
+   * ★ 이 값은 **관측·방향 표시용이다.** 미래 정산 비용의 상한이 아니다 —
+   *   진입 시 0.01%여도 정산 직전에 커질 수 있다. 예약 금액은 아래
+   *   `capRate`/`floorRate`로 구한다.
+   */
   rate: number;
   nextFundingTimeMs: number;
   /** **8시간을 박지 않는다.** 종목·시점에 따라 다르다 */
   intervalHours: number;
-  intervalSource: 'EXCHANGE_FUNDING_INFO' | 'SHORTEST_LISTED';
+  /**
+   * 요율 상한(비율, 보통 양수). **LONG이 한 번에 지불할 수 있는 최대치**
+   */
+  capRate: number;
+  /**
+   * 요율 하한(비율, 보통 음수). **SHORT이 한 번에 지불할 수 있는 최대치**는
+   * 이 값의 절댓값이다.
+   */
+  floorRate: number;
+  /**
+   * **대상 종목에서 직접 읽은 값만** 받는다.
+   *
+   * 예전에는 목록에 없는 종목에 "목록에서 가장 짧은 주기"를 쓰고
+   * `SHORTEST_LISTED`라고 적었다. 그 값은 대상 종목에서 관측한 것이
+   * 아니다 — 다른 종목의 숫자를 빌려 authoritative인 척한 것이다.
+   */
+  source: 'EXCHANGE_FUNDING_INFO';
   observedAtMs: number;
 }
 
@@ -78,6 +100,7 @@ export type ExecutionCostCode =
   | 'DEPTH_INSUFFICIENT'
   | 'FUNDING_MISSING'
   | 'FUNDING_INTERVAL_UNUSABLE'
+  | 'FUNDING_BOUNDS_UNUSABLE'
   | 'HOLD_HORIZON_UNUSABLE'
   | 'COST_NOT_FINITE'
   | 'COST_NEGATIVE';
@@ -114,11 +137,34 @@ export interface ExecutionCostAssessment {
 
   entryFeeUsd: number | null;
   exitFeeReserveUsd: number | null;
+  /**
+   * 마크가와 예상 체결가의 차 × 수량.
+   *
+   * ★ **총비용에 넣지 않는다.** 이것은 따로 빠져나가는 현금이 아니라
+   *   "나쁜 가격에 열린다"는 사실이고, 그 사실은 청산가 계산에 진입가로
+   *   **이미 한 번** 들어간다(`liquidationDistance`의 `entryPrice`).
+   *   비용에 또 더하면 같은 손실을 두 번 세는 것이다. 관측용으로 남긴다.
+   */
   entrySlippageUsd: number | null;
+  /** 나갈 때의 가격 충격 예약. 이것은 **아직 반영되지 않은** 미래 비용이다 */
   exitSlippageReserveUsd: number | null;
+  /**
+   * 청산 쪽으로 갔을 때의 명목가. 청산·펀딩 비용의 보수적 기준이다.
+   *
+   * SHORT은 불리한 방향이 **가격 상승**이라 명목가가 커진다 — 진입
+   * 명목가를 쓰면 과소 예약이 된다.
+   */
+  worstCloseNotional: number | null;
   fundingReserveUsd: number | null;
   /** 보유 구간에 지나갈 펀딩 시점 수 */
   fundingEvents: number | null;
+  /**
+   * 예약에 쓴 **1회 최대 지불 요율**(비율, 양수).
+   *
+   * 지금 요율이 아니라 거래소가 적어 둔 상한이다 — LONG은 `capRate`,
+   * SHORT은 `|floorRate|`.
+   */
+  fundingWorstRate: number | null;
   /**
    * 지금 관측된 펀딩 방향. **예약 금액에는 쓰지 않는다** —
    * 부호는 구간 안에서 뒤집힐 수 있어 수취를 믿지 않는다.
@@ -133,10 +179,21 @@ export interface ExecutionCostAssessment {
   bookObservedAtMs: number | null;
   fundingObservedAtMs: number | null;
   commissionObservedAtMs: number | null;
-  fundingIntervalSource: FundingContext['intervalSource'] | null;
+  fundingSource: FundingContext['source'] | null;
 }
 
+/**
+ * 숫자로 읽는다. **없는 것은 null이지 0이 아니다.**
+ *
+ * 예전 구현은 `Number(v)`만 썼다. 그런데 `Number(null) === 0`이고
+ * `Number('') === 0`이라, **빠진 값이 조용히 0이 됐다.** 0은 여기서
+ * 위험한 값이다 — 빠진 유지증거금률이 0이면 청산가가 멀어지고, 빠진
+ * 펀딩 상한이 0이면 예약이 0이 된다. 둘 다 fail-open이다.
+ * (시험이 실제로 그 구멍을 잡았다.)
+ */
 const num = (v: unknown): number | null => {
+  if (v == null) return null;
+  if (typeof v === 'string' && v.trim() === '') return null;
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : null;
 };
@@ -149,11 +206,12 @@ const fail = (
   fillKind: null, commissionRate: null,
   expectedFillPrice: null, notionalAtFill: null,
   entryFeeUsd: null, exitFeeReserveUsd: null,
-  entrySlippageUsd: null, exitSlippageReserveUsd: null,
-  fundingReserveUsd: null, fundingEvents: null, fundingSideNow: null,
+  entrySlippageUsd: null, exitSlippageReserveUsd: null, worstCloseNotional: null,
+  fundingReserveUsd: null, fundingEvents: null, fundingWorstRate: null,
+  fundingSideNow: null,
   totalCostUsd: null, totalCostNotionalPct: null,
   bookObservedAtMs: null, fundingObservedAtMs: null, commissionObservedAtMs: null,
-  fundingIntervalSource: null,
+  fundingSource: null,
   ...partial,
 });
 
@@ -285,6 +343,7 @@ export function assessExecutionCost(
       base);
   }
   const notional = fill * qty;
+  const notionalAtRef = ref * qty;
 
   // ── 슬리피지 ──
   //
@@ -293,20 +352,30 @@ export function assessExecutionCost(
   const adverse = side === 'LONG' ? fill - ref : ref - fill;
   const entrySlippageUsd = Math.max(0, adverse) * qty;
   // 나갈 때의 호가는 **아직 모른다.** 진입에서 **관측한** 충격과 같은
-  // 크기를 예약한다 — 지어낸 상수가 아니라 측정값이다.
-  const exitSlippageReserveUsd = entrySlippageUsd;
+  // 비율을 청산 쪽 명목가에 적용해 예약한다 — 지어낸 상수가 아니다.
+  const slipPct = notionalAtRef > 0 ? (Math.max(0, adverse) * qty) / notionalAtRef : 0;
+
+  // ── 청산 쪽 명목가 ──
+  //
+  // **SHORT은 불리한 방향이 가격 상승**이라 청산으로 갈수록 명목가가
+  // 커진다. 진입 명목가를 청산·펀딩 비용의 기준으로 쓰면 과소 예약이다.
+  // 격리 증거금에서 버틸 수 있는 최대 역행은 대략 `1/배율`이므로 그
+  // 자리의 가격을 쓴다 — 지어낸 상수가 아니라 증거금 비율이다.
+  // LONG은 명목가가 작아지므로 진입 명목가가 이미 보수적이다(max로 유지).
+  const worstClosePrice = side === 'LONG' ? fill * (1 - 1 / lev) : fill * (1 + 1 / lev);
+  const worstCloseNotional = Math.max(notional, qty * worstClosePrice);
+  const exitSlippageReserveUsd = slipPct * worstCloseNotional;
 
   // ── 수수료 ──
   const entryFeeUsd = notional * rate;
-  // 나갈 때의 명목가는 모른다. 진입 명목가를 대리값으로 쓴다 — 청산 쪽으로
-  // 갈수록 명목가가 작아지므로 이 대리값은 **보수적**이다(LONG 기준).
-  const exitFeeReserveUsd = notional * rate;
+  const exitFeeReserveUsd = worstCloseNotional * rate;
 
   // ── 펀딩 ──
   const f = inp.funding ?? null;
   const now = num(inp.nowMs);
   const horizon = num(inp.holdHorizonMs);
   const withFee = { ...base, expectedFillPrice: fill, notionalAtFill: notional,
+                    worstCloseNotional,
                     entryFeeUsd, exitFeeReserveUsd, entrySlippageUsd, exitSlippageReserveUsd };
   if (f == null) {
     return fail('FUNDING_MISSING', '펀딩 정보를 읽지 못했습니다', withFee);
@@ -324,7 +393,33 @@ export function assessExecutionCost(
     // **8시간을 박지 않는다.** 못 읽었으면 막는다.
     return fail('FUNDING_INTERVAL_UNUSABLE',
       `펀딩 주기가 ${String(f.intervalHours)}시간입니다 — 8시간으로 가정하지 않습니다`,
-      { ...withFee, fundingObservedAtMs: fObs, fundingIntervalSource: f.intervalSource ?? null });
+      { ...withFee, fundingObservedAtMs: fObs, fundingSource: f.source ?? null });
+  }
+  // **대상 종목에서 직접 읽은 값만 쓴다.**
+  if (f.source !== 'EXCHANGE_FUNDING_INFO') {
+    return fail('FUNDING_BOUNDS_UNUSABLE',
+      `펀딩 정보의 출처가 ${String(f.source)}입니다`
+      + ' — 다른 종목의 값을 빌려 이 종목의 상한으로 쓰지 않습니다',
+      { ...withFee, fundingObservedAtMs: fObs });
+  }
+  // ── 1회 최대 지불 요율 ──
+  //
+  // **지금 요율을 미래 정산의 상한으로 쓰지 않는다.** 거래소가 적어 둔
+  // 상한/하한을 쓴다. LONG은 요율이 양수일 때 지불하므로 `capRate`,
+  // SHORT은 음수일 때 지불하므로 `|floorRate|`가 1회 최대다.
+  const cap = num(f.capRate);
+  const floor = num(f.floorRate);
+  if (cap == null || floor == null) {
+    return fail('FUNDING_BOUNDS_UNUSABLE',
+      `펀딩 요율 상한(${String(f.capRate)})·하한(${String(f.floorRate)})을 읽지 못했습니다`
+      + ' — 지금 요율을 미래 정산 비용의 상한으로 쓰지 않습니다',
+      { ...withFee, fundingObservedAtMs: fObs, fundingSource: f.source });
+  }
+  const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);
+  if (!Number.isFinite(worstRate) || worstRate < 0) {
+    return fail('FUNDING_BOUNDS_UNUSABLE',
+      `${side}의 1회 최대 지불 요율을 구하지 못했습니다 (상한 ${cap} · 하한 ${floor})`,
+      { ...withFee, fundingObservedAtMs: fObs, fundingSource: f.source });
   }
   if (now == null || horizon == null || !(horizon > 0)) {
     return fail('HOLD_HORIZON_UNUSABLE',
@@ -355,10 +450,18 @@ export function assessExecutionCost(
   const fundingSideNow: 'PAY' | 'RECEIVE' | 'NEUTRAL' =
     fRate === 0 ? 'NEUTRAL' : (side === 'LONG' ? fRate > 0 : fRate < 0) ? 'PAY' : 'RECEIVE';
   // **수취 예상치로 위험한 진입을 통과시키지 않는다.** 부호는 구간 안에서
-  // 뒤집힐 수 있으므로 크기만 예약한다 — 방향은 관측에만 남긴다.
-  const fundingReserveUsd = events * Math.abs(fRate) * notional;
+  // 뒤집힐 수 있으므로 지불 방향의 **상한**으로 예약한다 — 지금 요율이
+  // 아니다. 방향(`fundingSideNow`)은 관측에만 남긴다.
+  const fundingReserveUsd = events * worstRate * worstCloseNotional;
 
-  const parts = [entryFeeUsd, exitFeeReserveUsd, entrySlippageUsd,
+  // ★ **진입 슬리피지는 여기 없다.**
+  //
+  //   그것은 따로 빠져나가는 현금이 아니라 "나쁜 가격에 열린다"는
+  //   사실이고, 청산가 계산에 **진입가로 이미 반영**된다
+  //   (`liquidationDistance`가 식에는 체결가를, 거리는 마크가로 잰다).
+  //   비용에 또 더하면 같은 손실을 두 번 세고, 그러면 EFFECTIVE가 회계가
+  //   아니라 섞인 stress 지표가 된다.
+  const parts = [entryFeeUsd, exitFeeReserveUsd,
                  exitSlippageReserveUsd, fundingReserveUsd];
   if (!parts.every(v => Number.isFinite(v))) {
     return fail('COST_NOT_FINITE', '비용 구성 요소 중 숫자가 아닌 것이 있습니다',
@@ -373,9 +476,10 @@ export function assessExecutionCost(
   return {
     ok: true, code: 'OK', reason: '', trustworthy: true,
     ...withFee,
-    fundingReserveUsd, fundingEvents: events, fundingSideNow,
+    fundingReserveUsd, fundingEvents: events, fundingWorstRate: worstRate,
+    fundingSideNow,
     fundingObservedAtMs: fObs,
-    fundingIntervalSource: f.intervalSource ?? null,
+    fundingSource: f.source,
     totalCostUsd,
     totalCostNotionalPct: (totalCostUsd / notional) * 100,
   };
@@ -388,10 +492,14 @@ export function assessExecutionCost(
 // `raw청산거리% − 비용%`는 회계가 아니다. 비용이 실제로 하는 일은 두 가지다:
 //
 //   ① 슬리피지는 **진입가를 옮긴다.** 청산가 식의 `entryPrice`가 마크가가
-//      아니라 예상 체결가여야 한다.
-//   ② 수수료·펀딩은 **격리 증거금을 줄인다.** 격리 포지션의 청산 조건은
-//      `증거금 + 미실현손익 = 유지증거금`이고, 수수료와 펀딩은 그 증거금
-//      쪽에서 빠진다.
+//      아니라 예상 체결가여야 한다. 그리고 **거리는 마크가에서 잰다** —
+//      청산은 마크가로 발동하기 때문이다. 이 둘을 하나로 두면 슬리피지가
+//      거리에서 사라진다(식이 진입가에 비례해 % 거리가 그대로다). 실제로
+//      그랬고, 그걸 메우려고 진입 슬리피지를 비용에 **또** 넣고 있었다 —
+//      같은 손실을 두 번 센 것이다. 이제 한 번만 센다.
+//   ② 수수료·펀딩·**청산 쪽 슬리피지**는 격리 증거금을 줄인다. 격리
+//      포지션의 청산 조건은 `증거금 + 미실현손익 = 유지증거금`이고, 이
+//      비용들은 증거금 쪽에서 빠지거나 나갈 때 실현된다.
 //
 // ②를 식에 넣는 방법: 청산가 식의 `1/leverage`는 곧 `증거금/명목가`다.
 // 증거금이 비용만큼 줄었으면 그 비율이 커진 것이고, 그것은 **배율이 오른
@@ -417,7 +525,13 @@ export interface EffectiveMargin {
   marginAfterCostUsd: number | null;
   /** 그 증거금이 뜻하는 배율. 청산가 식에 그대로 넣는다 */
   effectiveLeverage: number | null;
-  /** 청산 계산에 쓸 진입가 — 마크가가 아니라 예상 체결가다 */
+  /**
+   * 청산가 **식에 넣을 진입가** — 마크가가 아니라 예상 체결가다.
+   *
+   * ★ 거리를 재는 기준은 여전히 **마크가**다. 청산은 마크가로 발동한다.
+   *   둘을 하나로 두면 슬리피지가 거리에서 사라진다(식이 진입가에
+   *   비례하므로 진입가 대비 %가 그대로다).
+   */
   effectiveEntryPrice: number | null;
 }
 

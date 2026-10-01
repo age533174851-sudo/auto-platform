@@ -99,8 +99,26 @@ export type LiquidationAssessmentCode =
 
 export interface LiquidationDistanceInput {
   side: 'LONG' | 'SHORT' | null | undefined;
-  /** 기준가. **거래소에서 읽은 값**이어야 한다 (신호가 들고 온 값이 아니라) */
+  /**
+   * **마크가.** 거리를 재는 기준이고, 청산이 실제로 발동하는 가격이다.
+   * 거래소에서 읽은 값이어야 한다(신호가 들고 온 값이 아니라).
+   */
   referencePrice: number | null | undefined;
+  /**
+   * **포지션이 열리는 가격.** 안 주면 `referencePrice`와 같다.
+   *
+   * 왜 나누는가: 청산가 식은 **진입가**가 정하고, 청산은 **마크가**가
+   * 발동시킨다. 둘을 하나로 두면 진입 슬리피지가 거리에서 사라진다 —
+   * 식이 진입가에 비례하므로 진입가를 올려도 **진입가 대비 %는 그대로**다.
+   *
+   *   마크 50,000 · 체결 50,005 · 100배 · MMR 0.4%
+   *     체결가 대비 거리 0.6024%   ← 슬리피지가 안 보인다
+   *     마크 대비 거리   0.5925%   ← 실제로 남은 거리
+   *
+   * 슬리피지는 여기서 **한 번만** 반영된다. 비용 표에 또 넣으면 이중
+   * 반영이고, 그래서 `executionCost`의 총비용에는 진입 슬리피지가 없다.
+   */
+  entryPrice?: number | null;
   quantity: number | null | undefined;
   leverage: number | null | undefined;
   marginMode: 'isolated' | 'cross' | null | undefined;
@@ -151,7 +169,10 @@ export interface LiquidationDistanceAssessment {
   trustworthy: boolean;
 
   side: 'LONG' | 'SHORT' | null;
+  /** 거리를 잰 기준(마크가) */
   referencePrice: number | null;
+  /** 청산가 식에 넣은 진입가. 마크가와 다르면 슬리피지가 반영된 것이다 */
+  entryPrice: number | null;
   estimatedLiquidationPrice: number | null;
   /** 가격 단위 거리. 항상 0 이상이거나 null이다 (방향은 side가 말한다) */
   liquidationDistance: number | null;
@@ -179,7 +200,18 @@ export interface LiquidationDistanceAssessment {
   adverseDistancePct: number | null;
 }
 
+/**
+ * 숫자로 읽는다. **없는 것은 null이지 0이 아니다.**
+ *
+ * 예전 구현은 `Number(v)`만 썼다. 그런데 `Number(null) === 0`이고
+ * `Number('') === 0`이라, **빠진 값이 조용히 0이 됐다.** 0은 여기서
+ * 위험한 값이다 — 빠진 유지증거금률이 0이면 청산가가 멀어지고, 빠진
+ * 펀딩 상한이 0이면 예약이 0이 된다. 둘 다 fail-open이다.
+ * (시험이 실제로 그 구멍을 잡았다.)
+ */
 const num = (v: unknown): number | null => {
+  if (v == null) return null;
+  if (typeof v === 'string' && v.trim() === '') return null;
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : null;
 };
@@ -190,7 +222,7 @@ const fail = (
   partial: Partial<LiquidationDistanceAssessment> = {},
 ): LiquidationDistanceAssessment => ({
   ok: false, code, reason, trustworthy: false,
-  side: null, referencePrice: null, estimatedLiquidationPrice: null,
+  side: null, referencePrice: null, entryPrice: null, estimatedLiquidationPrice: null,
   liquidationDistance: null, liquidationDistancePct: null, headroomKind: 'RAW',
   leverage: null, marginMode: null, tier: null,
   entryTierIndex: null, entryNotional: null, adverseDistancePct: null,
@@ -234,6 +266,14 @@ function assessCore(
     return fail('REFERENCE_PRICE_UNUSABLE',
       `기준가가 ${String(inp.referencePrice)}입니다 — 0 이하이거나 숫자가 아닌 값으로는`
       + ' 거리를 재지 않습니다', { side });
+  }
+
+  // 진입가. 안 주면 마크가와 같다(포지션을 마크가에 연다고 보는 경우).
+  const entry = inp.entryPrice == null ? price : num(inp.entryPrice);
+  if (entry == null || entry <= 0) {
+    return fail('REFERENCE_PRICE_UNUSABLE',
+      `진입가가 ${String(inp.entryPrice)}입니다 — 0 이하이거나 숫자가 아닌 값으로는`
+      + ' 청산가를 구하지 않습니다', { side, referencePrice: price });
   }
 
   // ── ③ 수량 ──
@@ -282,7 +322,7 @@ function assessCore(
     return fail('MAINTENANCE_TIER_MISSING',
       '거래소에서 유지증거금 구간(leverageBracket)을 읽지 못했습니다'
       + ' — 추정 표로 100배 청산가를 정하지 않습니다',
-      { side, referencePrice: price, leverage: lev, marginMode });
+      { side, referencePrice: price, entryPrice: entry, leverage: lev, marginMode });
   }
   for (const t of brackets) {
     // **상한은 Infinity일 수 있다.** 마지막 구간은 위가 없다는 뜻이고,
@@ -295,7 +335,7 @@ function assessCore(
       return fail('MAINTENANCE_TIER_MISSING',
         `유지증거금 구간에 쓸 수 없는 값이 있습니다 (${JSON.stringify(t)})`
         + ' — 0.4와 0.004를 헷갈리면 청산가가 통째로 달라집니다',
-        { side, referencePrice: price, leverage: lev, marginMode });
+        { side, referencePrice: price, entryPrice: entry, leverage: lev, marginMode });
     }
     // ★ **계정별 브래킷 조정 배수(notionalCoef).**
     //
@@ -312,7 +352,7 @@ function assessCore(
       return fail('BRACKET_COEF_UNSUPPORTED',
         `이 계정의 유지증거금 브래킷에 조정 배수(notionalCoef=${String(coef)})가 걸려 있습니다`
         + ' — 적용 방식을 확인하지 못해 추측하지 않고 막습니다',
-        { side, referencePrice: price, leverage: lev, marginMode });
+        { side, referencePrice: price, entryPrice: entry, leverage: lev, marginMode });
     }
   }
 
@@ -322,8 +362,9 @@ function assessCore(
   //   명목가가 다른 구간이면 그 구간의 값으로 다시 계산해야 한다
   //   (`solveLiquidationPrice` 머리말에 실측 예가 있다). 100배에서는
   //   청산까지 0.x%만 움직이므로 경계 근처에서 실제로 일어난다.
+  // **식에는 진입가를 넣는다.** 거리는 아래에서 마크가로 잰다.
   const sol = solveLiquidationPrice({
-    entryPrice: price, leverage: lev, side: side === 'LONG' ? 'buy' : 'sell',
+    entryPrice: entry, leverage: lev, side: side === 'LONG' ? 'buy' : 'sell',
     quantity: qty, brackets,
   });
   const crossInfo = {
@@ -333,13 +374,13 @@ function assessCore(
     return fail('TIER_NOT_SELF_CONSISTENT',
       '어느 유지증거금 구간으로 계산해도 그 청산가의 명목가가 같은 구간에 들어가지'
       + ' 않습니다 — 청산가를 확정할 수 없습니다',
-      { side, referencePrice: price, leverage: lev, marginMode, ...crossInfo });
+      { side, referencePrice: price, entryPrice: entry, leverage: lev, marginMode, ...crossInfo });
   }
   if (sol.code === 'AMBIGUOUS_TIER') {
     return fail('TIER_AMBIGUOUS',
       '두 개 이상의 유지증거금 구간이 자기일관입니다 — 어느 쪽이 실제인지'
       + ' 말할 수 없어 막습니다',
-      { side, referencePrice: price, leverage: lev, marginMode, ...crossInfo });
+      { side, referencePrice: price, entryPrice: entry, leverage: lev, marginMode, ...crossInfo });
   }
   const liq = num(sol.liquidationPrice);
   // 해를 못 찾으면 **0을 청산가로 적지 않는다.** 0이면 LONG 청산거리가
@@ -347,7 +388,7 @@ function assessCore(
   if (sol.code !== 'OK' || liq == null || liq <= 0) {
     return fail('LIQUIDATION_PRICE_UNCOMPUTABLE',
       `청산가를 계산하지 못했습니다 (${sol.code}) — 0을 청산가로 읽지 않습니다`,
-      { side, referencePrice: price, leverage: lev, marginMode, ...crossInfo });
+      { side, referencePrice: price, entryPrice: entry, leverage: lev, marginMode, ...crossInfo });
   }
   const tier: MaintenanceTier = {
     mmr: sol.mmr as number, maintAmount: sol.maintAmount as number,
@@ -357,7 +398,7 @@ function assessCore(
   };
 
   const known = {
-    side, referencePrice: price, estimatedLiquidationPrice: liq,
+    side, referencePrice: price, entryPrice: entry, estimatedLiquidationPrice: liq,
     leverage: lev, marginMode, tier, ...crossInfo,
   };
 

@@ -126,6 +126,7 @@ const P = {
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
   bfut: 'src/lib/exchanges/leverageBracket.ts',
+  bfapi: 'src/lib/exchanges/binanceFutures.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -1151,6 +1152,71 @@ const M = [
   ['MUT-C16 정상 저비용 케이스를 과도 거부 (비용을 100배로)', P.cost,
     s => s.replace('  const totalCostUsd = parts.reduce((a, b) => a + b, 0);',
                    '  const totalCostUsd = parts.reduce((a, b) => a + b, 0) * 100;'), 'RED'],
+
+  // ── 재감사 BLOCKER 1~6 + 정확성 후속 ──
+  //
+  // solver는 좋아졌는데 **solver에 넣는 거래소 사실**이 틀릴 수 있었다.
+
+  ['MUT-D1 notionalCoef를 bracket 줄에서 읽음 (실제 응답엔 없는 자리)', P.bfut,
+    s => s.replace('  const coefRaw = raw?.notionalCoef;',
+                   '  const coefRaw = raw?.brackets?.[0]?.notionalCoef;'), 'RED'],
+
+  ['MUT-D2 최상위 notionalCoef를 버림', P.bfut,
+    s => s.replace('  const coefRaw = raw?.notionalCoef;',
+                   '  const coefRaw = undefined;'), 'RED'],
+
+  ['MUT-D3 브래킷 캐시 키에서 계정을 뺌 (계정 간 공유)', P.bfapi,
+    s => s.replace('  return `${testnet ? \'T\' : \'L\'}:${who}:${symbol}`;',
+                   '  return `${testnet ? \'T\' : \'L\'}:${symbol}`;'), 'RED'],
+
+  ['MUT-D4 만료된 브래킷 캐시를 FRESH로 돌려줌', P.bfapi,
+    s => s.replace("    return { tiers: hit.tiers, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };",
+                   "    return { tiers: hit.tiers, freshness: 'FRESH', observedAtMs: hit.ts, error: null };"),
+    'RED'],
+
+  ['MUT-D5 라우트가 낡은 브래킷도 받아들임', P.scalp,
+    s => s.replace("          return r.freshness === 'FRESH' ? r.tiers : null;",
+                   '          return r.tiers;'), 'RED'],
+
+  ['MUT-D6 펀딩 예약에 상한 대신 지금 요율을 씀', P.cost,
+    s => s.replace("  const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);",
+                   '  const worstRate = Math.abs(fRate);'), 'RED'],
+
+  ['MUT-D7 SHORT도 cap을 지불 상한으로 씀 (지불 방향 반대)', P.cost,
+    s => s.replace("  const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);",
+                   '  const worstRate = Math.max(0, cap);'), 'RED'],
+
+  ['MUT-D8 목록에 없는 종목에 다른 종목 값을 빌려 씀', P.cost,
+    s => s.replace("  if (f.source !== 'EXCHANGE_FUNDING_INFO') {", '  if (false) {'), 'RED'],
+
+  ['MUT-D9 낡은 premium 캐시에 새 시각을 붙임', P.bfapi,
+    s => s.replace("      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };",
+                   "      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: nowMs(), error: why };"),
+    'RED'],
+
+  ['MUT-D10 라우트가 낡은 premium도 받아들임', P.scalp,
+    s => s.replace("          if (prem.freshness !== 'FRESH' || prem.data == null || fb?.bounds == null) return null;",
+                   '          if (prem.data == null || fb?.bounds == null) return null;'), 'RED'],
+
+  ['MUT-D11 청산 쪽 명목가 대신 진입 명목가 (SHORT 과소예약)', P.cost,
+    s => s.replace('  const worstCloseNotional = Math.max(notional, qty * worstClosePrice);',
+                   '  const worstCloseNotional = notional;'), 'RED'],
+
+  ['MUT-D12 진입 슬리피지를 총비용에 다시 더함 (이중 반영)', P.cost,
+    s => s.replace('  const parts = [entryFeeUsd, exitFeeReserveUsd,\n'
+                   + '                 exitSlippageReserveUsd, fundingReserveUsd];',
+      '  const parts = [entryFeeUsd, exitFeeReserveUsd, entrySlippageUsd,\n'
+      + '                 exitSlippageReserveUsd, fundingReserveUsd];'), 'RED'],
+
+  ['MUT-D13 실질 거리를 체결가 기준으로 되돌림 (슬리피지가 사라짐)', P.entry,
+    s => s.replace('    referencePrice: price,\n    // **식에는 예상 체결가를 넣는다** — 포지션이 열리는 가격이 그것이다.\n    entryPrice: eff.effectiveEntryPrice,',
+                   '    referencePrice: eff.effectiveEntryPrice,'), 'RED'],
+
+  ['MUT-D14 빠진 값을 0으로 읽음 (null → 0, fail-open 복원)', P.cost,
+    s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
+
+  ['MUT-D15 유지증거금에서도 빠진 값을 0으로 읽음', P.liq,
+    s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

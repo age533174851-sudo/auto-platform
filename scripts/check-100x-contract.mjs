@@ -580,7 +580,8 @@ if (entry) {
     }),
     fundingContext: async () => ({
       rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
-      intervalSource: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now(),
+      capRate: 0.0005, floorRate: -0.0005,
+      source: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now(),
     }),
     ...over,
   });
@@ -959,23 +960,51 @@ if (entry) {
     //     그 변이가 새 나갔다. 그래서 **파서를 돌려서** 확인한다.
     const bfMod = await loadModule('src/lib/exchanges/leverageBracket.ts', '브래킷 파서');
     if (bfMod && typeof bfMod.parseBrackets === 'function') {
+      // ★ **바이낸스 실제 응답 모양**이다. `notionalCoef`는 bracket 줄
+      //   안이 아니라 **symbol 객체 최상위**에 있다. 예전 fixture는 줄
+      //   안에 넣고 있었고, 구현도 거기서 읽고 있어서 **둘이 같은 오해를
+      //   공유한 채 초록**이었다. 실제 응답에는 줄 안에 그 칸이 없으므로
+      //   조정 배수를 계속 버리고 있었던 셈이다.
       const parsed = bfMod.parseBrackets({
         symbol: 'BTCUSDT',
+        notionalCoef: 1.5,
         brackets: [
-          { notionalCap: 50_000, maintMarginRatio: 0.004, cum: 0, notionalCoef: 1.5 },
-          { notionalCap: 500_000, maintMarginRatio: 0.005, cum: 50 },
+          { bracket: 1, initialLeverage: 125, notionalCap: 50_000,
+            notionalFloor: 0, maintMarginRatio: 0.004, cum: 0 },
+          { bracket: 2, initialLeverage: 100, notionalCap: 500_000,
+            notionalFloor: 50_000, maintMarginRatio: 0.005, cum: 50 },
         ],
       });
       if (!Array.isArray(parsed) || parsed.length !== 2) {
         err('leverageBracket.parseBrackets: 구간을 파싱하지 못합니다');
       } else {
-        if (parsed[0][3] !== 1.5) {
-          err('leverageBracket.parseBrackets: leverageBracket 응답의 notionalCoef를 버립니다'
-            + ` (받은 값 ${String(parsed[0][3])}) — 계정별 브래킷 조정이 걸려 있어도 알 수 없습니다`);
+        // 계정-level 값이므로 **모든 구간**이 그 값을 들고 있어야 한다.
+        if (parsed[0][3] !== 1.5 || parsed[1][3] !== 1.5) {
+          err('leverageBracket.parseBrackets: 최상위 notionalCoef를 버립니다'
+            + ` (구간별 값 ${String(parsed[0][3])}·${String(parsed[1][3])})`
+            + ' — 계정별 브래킷 조정이 걸려 있어도 알 수 없습니다');
         }
-        if (parsed[1][3] !== undefined) {
-          err('leverageBracket.parseBrackets: 응답에 없는 notionalCoef를 지어냅니다');
+        if (parsed[0][1] !== 0.004 || parsed[1][2] !== 50) {
+          err('leverageBracket.parseBrackets: 실제 응답 모양에서 MMR·공제액을 못 읽습니다');
         }
+      }
+      // 줄 안에만 들어 있는 값은 **읽지 않아야 한다** — 실제 API에는
+      // 그 자리에 그런 칸이 없고, 거기서 읽으면 늘 undefined다.
+      const bogus = bfMod.parseBrackets({
+        symbol: 'BTCUSDT',
+        brackets: [{ notionalCap: 50_000, maintMarginRatio: 0.004, cum: 0, notionalCoef: 1.5 }],
+      });
+      if (bogus?.[0]?.[3] !== undefined) {
+        err('leverageBracket.parseBrackets: bracket 줄 안의 notionalCoef를 읽습니다'
+          + ' — 실제 응답에는 그 자리에 그 칸이 없습니다');
+      }
+      // 조정이 없는 응답은 undefined여야 한다(지어내지 않는다).
+      const plain = bfMod.parseBrackets({
+        symbol: 'BTCUSDT',
+        brackets: [{ notionalCap: 50_000, maintMarginRatio: 0.004, cum: 0 }],
+      });
+      if (plain?.[0]?.[3] !== undefined) {
+        err('leverageBracket.parseBrackets: 응답에 없는 notionalCoef를 지어냅니다');
       }
     } else {
       err('leverageBracket.parseBrackets를 불러오지 못했습니다 — 파서 동작을 확인할 수 없습니다');
@@ -1025,7 +1054,8 @@ if (entry) {
       }),
       fundingContext: async () => ({
         rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
-        intervalSource: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now(),
+        capRate: 0.0005, floorRate: -0.0005,
+        source: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now(),
       }),
     };
     const CC = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
@@ -2710,7 +2740,8 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
                  source: 'EXCHANGE_DEPTH', observedAtMs: 1 };
   const NOW = 1_000_000_000_000;
   const FUND = { rate: 0.0001, nextFundingTimeMs: NOW + 3_600_000, intervalHours: 8,
-                 intervalSource: 'EXCHANGE_FUNDING_INFO', observedAtMs: 1 };
+                 capRate: 0.0005, floorRate: -0.0005,
+                 source: 'EXCHANGE_FUNDING_INFO', observedAtMs: 1 };
   const cIn = (over = {}) => ({
     side: 'LONG', referencePrice: 50_000, quantity: 0.2, leverage: 100,
     fillKind: 'TAKER', commission: COM, book: BOOK, funding: FUND,

@@ -23,19 +23,27 @@ export type BracketTier =
  */
 export function parseBrackets(raw: any): BracketTier[] {
   const arr = Array.isArray(raw?.brackets) ? raw.brackets : [];
+  // ★ **`notionalCoef`는 bracket 줄 안이 아니라 symbol 객체 최상위다.**
+  //
+  //   바이낸스 응답 모양:
+  //     { symbol: 'BTCUSDT', notionalCoef: 1.5, brackets: [ {...}, ... ] }
+  //
+  //   예전 코드는 `brackets[i].notionalCoef`를 읽었다. 실제 응답에는 거기
+  //   그런 칸이 없으므로 **언제나 undefined**였다 — 즉 "조정 배수를
+  //   보존한다"고 적어 놓고 실제로는 계속 버리고 있었다. 더 나쁜 것은
+  //   검사기 fixture도 같은 잘못된 모양을 넣고 있어서 둘이 같은 오해를
+  //   공유한 채 초록이었다는 점이다.
+  //
+  //   계정-level 값이므로 **모든 구간에 같은 값**을 싣는다. 구간마다 다른
+  //   값이 들어갈 자리가 아니다.
+  const coefRaw = raw?.notionalCoef;
+  const coef = coefRaw == null ? undefined : Number(coefRaw);
   return arr
     .map((b: any): BracketTier => [
       parseFloat(b.notionalCap),
       parseFloat(b.maintMarginRatio),
       parseFloat(b.cum ?? b.cumFastMaintenanceAmount ?? '0'),
-      // ★ **계정별 브래킷 조정 배수를 버리지 않는다.**
-      //
-      //   예전에는 이 칸을 읽지도 않았다. 버린다는 것은 "조정이 없다"고
-      //   가정하는 것과 같은데 우리는 그것을 확인한 적이 없다. 적용 방식을
-      //   모르므로 **적용하지는 않고 보존만 한다** — 1이 아닌 값이 오면
-      //   Exact100X 청산거리 판정이 막는다(liquidationDistance.ts).
-      //   없는 응답에서는 undefined가 되어 지금 동작 그대로다.
-      b?.notionalCoef == null ? undefined : Number(b.notionalCoef),
+      coef,
     ])
     .sort((a: BracketTier, b: BracketTier) => a[0] - b[0]);
 }

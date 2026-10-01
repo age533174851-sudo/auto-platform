@@ -4,7 +4,7 @@
 // 바이낸스가 testnet.binancefuture.com → demo-fapi.binance.com 으로 변경
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
-import { createHmac } from 'crypto';
+import { createHmac, createHash } from 'crypto';
 import { parseLossless, venueIdOf } from './losslessJson';
 import { qtyGridFor, type SymbolFilters } from './quantize';
 
@@ -210,21 +210,102 @@ export async function getLeverageBrackets(
   }
 }
 
-// 캐시 우선 단일 심볼 브래킷 조회 (TTL 6시간). 실패 시 null → 호출측이 fallback 사용
+/**
+ * 브래킷을 어디서 가져왔는가. **"있다"와 "지금 것이다"는 다르다.**
+ *
+ *   FRESH        TTL 안의 값이거나 방금 읽은 값
+ *   STALE_CACHE  TTL이 지났는데 다시 읽는 데 실패해 **옛 값**이 남아 있다
+ *   NONE         쓸 값이 없다
+ */
+export type BracketFreshness = 'FRESH' | 'STALE_CACHE' | 'NONE';
+
+export interface BracketRead {
+  tiers: BracketTier[] | null;
+  freshness: BracketFreshness;
+  /** 이 값을 **실제로 거래소에서 읽은** 시각. 캐시면 그때 그 시각이다 */
+  observedAtMs: number | null;
+  error: string | null;
+}
+
+/**
+ * 캐시 키. **계정이 들어간다.**
+ *
+ * `/fapi/v1/leverageBracket`은 USER_DATA이고 응답의 `notionalCoef`는
+ * **계정별 조정 배수**다. 그래서 `테스트넷여부 + 심볼`만으로 키를 만들면,
+ * 계정 A가 먼저 BTCUSDT를 읽은 뒤 계정 B가 같은 심볼을 물으면 **A의
+ * 브래킷을 받는다.** 100배 청산거리 입력에서 그건 허용할 수 없다.
+ *
+ * **비밀값을 키에 넣지 않는다** — 저장소 정본인 `fingerprintOf`(SHA-256)로
+ * 지문만 쓴다. 캐시 키라 충돌이 곧 계정 섞임이므로 6자리보다 길게 잡는다.
+ */
+function bracketCacheKey(apiKey: string, symbol: string, testnet: boolean): string {
+  const who = createHash('sha256').update(String(apiKey ?? '')).digest('hex').slice(0, 16);
+  return `${testnet ? 'T' : 'L'}:${who}:${symbol}`;
+}
+
+/**
+ * 단일 심볼 브래킷 — **출처와 신선도를 함께** 돌려준다.
+ *
+ * 옛 `getCachedBracket`은 TTL이 지난 뒤 다시 읽기에 실패하면 옛 값을
+ * 조용히 돌려줬다. 그러면 6시간이 아니라 **사실상 무기한** 낡은
+ * 유지증거금 구간으로 100배 청산가를 계산하게 된다. "거래소 risk tier를
+ * 신뢰할 수 없으면 막는다"는 ②의 계약과 정면으로 어긋난다.
+ *
+ * 그래서 값을 버리지는 않되 **`STALE_CACHE`라고 말한다.** 그 값을 쓸지는
+ * 부르는 쪽이 정한다 — Exact100X는 쓰지 않는다.
+ */
+export async function readBracket(
+  symbol: string, key: string, secret: string, testnet = true,
+  /**
+   * 거래소 조회. **시험이 주입한다** — 안 주면 정본을 쓴다.
+   *
+   * 전역 `fetch`를 바꿔치기하지 않는 이유: 공유 하네스에서 그렇게 하면
+   * 다른 시험까지 깨진다(실제로 깨뜨렸다). 저장소의 다른 판정들이 쓰는
+   * 의존 주입과 같은 모양으로 맞춘다.
+   */
+  fetchBrackets: (
+    k: string, sec: string, tn: boolean, sym: string,
+  ) => Promise<{ brackets: Record<string, BracketTier[]>; message?: string }>
+    = getLeverageBrackets as any,
+  /** 지금 시각. 시험이 고정한다 — 전역 `Date.now`를 바꾸지 않는다 */
+  nowMs: () => number = () => Date.now(),
+): Promise<BracketRead> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  const cacheKey = bracketCacheKey(key, sym, testnet);
+  const hit = BRACKET_CACHE.get(cacheKey);
+  if (hit && nowMs() - hit.ts < BRACKET_TTL) {
+    return { tiers: hit.tiers, freshness: 'FRESH', observedAtMs: hit.ts, error: null };
+  }
+  let res: { brackets: Record<string, BracketTier[]>; message?: string };
+  try { res = await fetchBrackets(key, secret, testnet, sym); }
+  catch (e: any) { res = { brackets: {}, message: e?.message || '브래킷 조회 실패' }; }
+  const tiers = res.brackets[sym];
+  if (tiers && tiers.length) {
+    const ts = nowMs();
+    BRACKET_CACHE.set(cacheKey, { tiers, ts });
+    return { tiers, freshness: 'FRESH', observedAtMs: ts, error: null };
+  }
+  const why = res.message || `${sym}의 브래킷을 읽지 못했습니다`;
+  if (hit) {
+    // 값은 있지만 **지금 것이 아니다.** 그 사실을 숨기지 않는다.
+    return { tiers: hit.tiers, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };
+  }
+  return { tiers: null, freshness: 'NONE', observedAtMs: null, error: why };
+}
+
+/**
+ * 옛 이름. **기존 화면의 동작을 바꾸지 않는다** — 낡은 캐시도 그대로
+ * 돌려준다(그쪽은 `bracketSource`로 추정/거래소를 구분해 표시한다).
+ *
+ * ★ Exact100X 청산거리 입력에는 **쓰지 마라.** 낡은 구간으로 100배
+ *   청산가를 정하게 된다. 그 경로는 `readBracket`을 쓰고 `FRESH`가
+ *   아니면 막는다.
+ */
 export async function getCachedBracket(
   symbol: string, key: string, secret: string, testnet = true,
 ): Promise<BracketTier[] | null> {
-  const sym = symbol.toUpperCase().replace('/', '');
-  const cacheKey = `${testnet ? 'T' : 'L'}:${sym}`;
-  const hit = BRACKET_CACHE.get(cacheKey);
-  if (hit && Date.now() - hit.ts < BRACKET_TTL) return hit.tiers;
-  const res = await getLeverageBrackets(key, secret, testnet, sym);
-  const tiers = res.brackets[sym];
-  if (tiers && tiers.length) {
-    BRACKET_CACHE.set(cacheKey, { tiers, ts: Date.now() });
-    return tiers;
-  }
-  return hit ? hit.tiers : null; // 만료된 캐시라도 있으면 그거라도
+  const r = await readBracket(symbol, key, secret, testnet);
+  return r.tiers;
 }
 
 // ── 계정의 **실제** 수수료율 ────────────────────────────────
@@ -293,52 +374,72 @@ export async function getOrderBookDepth(
   }
 }
 
-// ── 펀딩 주기 ───────────────────────────────────────────────
+// ── 펀딩: 주기와 **지불 상한** ─────────────────────────────
 //
-// **8시간을 박지 않는다.** 바이낸스는 종목별로 주기를 조정하고, 그 목록을
-// `/fapi/v1/fundingInfo`로 준다. 다만 그 응답은 **조정된 종목만** 담는다 —
-// 목록에 없는 종목의 주기는 거기 적혀 있지 않다.
+// **8시간을 박지 않는다.** 그리고 더 중요한 것: **지금 펀딩률을 미래
+// 정산 비용의 상한으로 쓰지 않는다.**
 //
-// 그래서 이렇게 한다:
-//   · 종목이 목록에 있으면 그 값이 정본이다 (`EXCHANGE_FUNDING_INFO`)
-//   · 없으면 목록에 있는 **가장 짧은 주기**를 쓴다 (`SHORTEST_LISTED`) —
-//     짧을수록 보유 구간에 펀딩이 더 많이 들어오므로 보수적이다
-//   · 목록을 못 읽거나 비어 있으면 **null이다.** 기본값을 지어내지 않는다
-export interface FundingIntervalInfo {
+// `premiumIndex.lastFundingRate`가 보장하는 것은 "가장 최근 요율"뿐이다.
+// 진입 시 0.01%여도 정산 직전에 0.3%가 될 수 있다. 그 값을 반복해서
+// 예약하면 reserve가 모자랄 수 있고, 모자란 reserve는 100배에서 증거금
+// 전액이다.
+//
+// 상한은 `/fapi/v1/fundingInfo`가 준다 — `adjustedFundingRateCap`과
+// `adjustedFundingRateFloor`. 그 엔드포인트는 **조정된 종목만** 담는다.
+//
+// ★ 목록에 없는 종목은 **막는다.**
+//   예전에는 "목록에 있는 가장 짧은 주기"를 그 종목의 주기로 썼다. 그
+//   값은 대상 종목에서 관측한 것이 아니다 — 다른 종목의 숫자를 빌려
+//   authoritative인 척한 것이고, 이 저장소가 금지하는 형태다("다른
+//   전략의 값을 빌려 쓰지 않는다"). 기본 주기·기본 상한이 무엇인지는
+//   이 환경에서 증명하지 못했으므로 **지어내지 않고 막는다.**
+export interface FundingBounds {
   symbol: string;
+  /** 정산 주기(시간) */
   intervalHours: number;
-  source: 'EXCHANGE_FUNDING_INFO' | 'SHORTEST_LISTED';
+  /** 요율 상한(비율). LONG이 지불할 수 있는 최대치 */
+  capRate: number;
+  /** 요율 하한(비율, 음수). SHORT이 지불할 수 있는 최대치의 부호 반대 */
+  floorRate: number;
+  /** **대상 종목에서 직접 읽은 값만** 이 출처를 쓴다 */
+  source: 'EXCHANGE_FUNDING_INFO';
+  observedAtMs: number;
 }
 
-export async function getFundingInterval(
+export async function getFundingBounds(
   symbol: string, testnet = true,
-): Promise<{ info: FundingIntervalInfo | null; error: string | null }> {
+): Promise<{ bounds: FundingBounds | null; error: string | null }> {
   const sym = symbol.toUpperCase().replace('/', '');
   try {
     const r = await fetch(`${base(testnet)}/fapi/v1/fundingInfo`,
       { signal: AbortSignal.timeout(5000), cache: 'no-store' });
-    if (!r.ok) return { info: null, error: `펀딩 주기 조회 실패 (HTTP ${r.status})` };
+    if (!r.ok) return { bounds: null, error: `펀딩 정보 조회 실패 (HTTP ${r.status})` };
     const d = parseLossless(await r.text());
     const list = Array.isArray(d) ? d : [];
-    const rows = list
-      .map((x: any) => ({
-        symbol: String(x?.symbol || '').toUpperCase(),
-        hours: parseFloat(x?.fundingIntervalHours),
-      }))
-      .filter(x => x.symbol && Number.isFinite(x.hours) && x.hours > 0);
-    if (!rows.length) {
-      return { info: null, error: '펀딩 주기 목록이 비어 있습니다 — 기본값을 지어내지 않습니다' };
+    const own = list.find((x: any) => String(x?.symbol || '').toUpperCase() === sym);
+    if (!own) {
+      // **다른 종목의 숫자를 빌려 쓰지 않는다.**
+      return { bounds: null,
+        error: `${sym}은 펀딩 정보 목록에 없습니다 — 이 종목의 주기·상한을 직접 읽지 못했습니다`
+          + ' (다른 종목의 값을 빌려 쓰지 않습니다)' };
     }
-    const own = rows.find(x => x.symbol === sym);
-    if (own) {
-      return { info: { symbol: sym, intervalHours: own.hours, source: 'EXCHANGE_FUNDING_INFO' },
-               error: null };
+    const hours = parseFloat(own.fundingIntervalHours);
+    const cap = parseFloat(own.adjustedFundingRateCap);
+    const floor = parseFloat(own.adjustedFundingRateFloor);
+    if (!Number.isFinite(hours) || !(hours > 0)
+        || !Number.isFinite(cap) || !Number.isFinite(floor)) {
+      return { bounds: null,
+        error: `${sym}의 펀딩 주기·상한을 읽지 못했습니다`
+          + ` (주기 ${own.fundingIntervalHours} · 상한 ${own.adjustedFundingRateCap}`
+          + ` · 하한 ${own.adjustedFundingRateFloor})` };
     }
-    const shortest = Math.min(...rows.map(x => x.hours));
-    return { info: { symbol: sym, intervalHours: shortest, source: 'SHORTEST_LISTED' },
-             error: null };
+    return {
+      bounds: { symbol: sym, intervalHours: hours, capRate: cap, floorRate: floor,
+                source: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now() },
+      error: null,
+    };
   } catch (e: any) {
-    return { info: null, error: e?.message || '펀딩 주기 조회 실패' };
+    return { bounds: null, error: e?.message || '펀딩 정보 조회 실패' };
   }
 }
 
@@ -348,27 +449,82 @@ interface PremiumCacheEntry { data: PremiumIndex; ts: number; }
 const PREMIUM_CACHE = new Map<string, PremiumCacheEntry>();
 const PREMIUM_TTL = 45 * 1000;
 
-export async function getPremiumIndex(symbol: string, testnet = true): Promise<PremiumIndex | null> {
+/**
+ * 읽은 값과 **언제 읽었는지**를 함께 준다.
+ *
+ * 왜 따로 만드는가
+ * ────────────────
+ * 옛 `getPremiumIndex`는 TTL이 지난 뒤 조회에 실패하면 캐시의 옛 값을
+ * 조용히 돌려줬다. 그런데 부르는 쪽(scalp 라우트)은 그 값에
+ * `observedAtMs: Date.now()`를 **새로 붙이고** 있었다. 그러면 며칠 된
+ * 캐시도 "방금 읽은 펀딩 데이터"로 보인다 — ④(신선도 보호)가 설 기반이
+ * 통째로 오염된다.
+ *
+ * 그래서 **실제 관측 시각을 값과 함께** 돌려준다. 낡은 캐시를 쓰더라도
+ * 그 사실(`STALE_CACHE`)과 원래 시각이 남는다. 세탁은 부르는 쪽에서도
+ * 할 수 없다 — 붙일 시각이 응답에 들어 있으므로.
+ */
+export type PremiumFreshness = 'FRESH' | 'STALE_CACHE' | 'NONE';
+
+/** 실제 조회. 주입이 없으면 이것을 쓴다 */
+async function defaultPremiumFetch(sym: string, testnet: boolean): Promise<PremiumIndex> {
+  const r = await fetch(`${base(testnet)}/fapi/v1/premiumIndex?symbol=${sym}`,
+    { signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = parseLossless(await r.text());
+  return {
+    symbol: d.symbol,
+    markPrice: parseFloat(d.markPrice || '0'),
+    indexPrice: parseFloat(d.indexPrice || '0'),
+    lastFundingRate: parseFloat(d.lastFundingRate || '0'),
+    nextFundingTime: Number(d.nextFundingTime || 0),
+  };
+}
+
+export interface PremiumRead {
+  data: PremiumIndex | null;
+  freshness: PremiumFreshness;
+  /** 이 값을 **실제로 거래소에서 읽은** 시각 */
+  observedAtMs: number | null;
+  error: string | null;
+}
+
+export async function readPremiumIndex(
+  symbol: string, testnet = true,
+  /** 거래소 조회. **시험이 주입한다** — 전역 `fetch`를 바꾸지 않는다 */
+  fetchOne: (sym: string, tn: boolean) => Promise<PremiumIndex> = defaultPremiumFetch,
+  /** 지금 시각. 시험이 고정한다 */
+  nowMs: () => number = () => Date.now(),
+): Promise<PremiumRead> {
   const sym = symbol.toUpperCase().replace('/', '');
   const cacheKey = `${testnet ? 'T' : 'L'}:${sym}`;
   const hit = PREMIUM_CACHE.get(cacheKey);
-  if (hit && Date.now() - hit.ts < PREMIUM_TTL) return hit.data;
-  try {
-    const r = await fetch(`${base(testnet)}/fapi/v1/premiumIndex?symbol=${sym}`, { signal: AbortSignal.timeout(5000) });
-    if (!r.ok) return hit ? hit.data : null;
-    const d = parseLossless(await r.text());
-    const data: PremiumIndex = {
-      symbol: d.symbol,
-      markPrice: parseFloat(d.markPrice || '0'),
-      indexPrice: parseFloat(d.indexPrice || '0'),
-      lastFundingRate: parseFloat(d.lastFundingRate || '0'),
-      nextFundingTime: Number(d.nextFundingTime || 0),
-    };
-    PREMIUM_CACHE.set(cacheKey, { data, ts: Date.now() });
-    return data;
-  } catch {
-    return hit ? hit.data : null;
+  if (hit && nowMs() - hit.ts < PREMIUM_TTL) {
+    return { data: hit.data, freshness: 'FRESH', observedAtMs: hit.ts, error: null };
   }
+  try {
+    const data = await fetchOne(sym, testnet);
+    const ts = nowMs();
+    PREMIUM_CACHE.set(cacheKey, { data, ts });
+    return { data, freshness: 'FRESH', observedAtMs: ts, error: null };
+  } catch (e: any) {
+    const why = e?.message || 'premiumIndex 조회 실패';
+    if (hit) {
+      // 값은 있지만 **지금 것이 아니다.** 원래 시각을 그대로 들고 간다.
+      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };
+    }
+    return { data: null, freshness: 'NONE', observedAtMs: null, error: why };
+  }
+}
+
+/**
+ * 옛 이름. 기존 화면의 동작을 바꾸지 않는다(낡은 캐시도 돌려준다).
+ *
+ * ★ Exact100X 비용 입력에는 **쓰지 마라** — 관측 시각이 사라진다.
+ *   그 경로는 `readPremiumIndex`를 쓰고 `FRESH`가 아니면 막는다.
+ */
+export async function getPremiumIndex(symbol: string, testnet = true): Promise<PremiumIndex | null> {
+  return (await readPremiumIndex(symbol, testnet)).data;
 }
 
 // ── 전체 오픈주문 취소 (C 옵션) — 심볼별 DELETE allOpenOrders ───────

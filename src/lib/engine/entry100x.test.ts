@@ -48,7 +48,9 @@ const baseDeps = () => ({
   }),
   fundingContext: async () => ({
     rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
-    intervalSource: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
+    // 1회 최대 지불 요율의 근거 — 지금 요율이 아니다.
+    capRate: 0.0005, floorRate: -0.0005,
+    source: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
   }),
 });
 
@@ -204,7 +206,8 @@ export function runEntry100xTests() {
       }),
           fundingContext: async () => ({
         rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
-        intervalSource: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
+        capRate: 0.0005, floorRate: -0.0005,
+        source: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
       }),
       applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
       ...over,

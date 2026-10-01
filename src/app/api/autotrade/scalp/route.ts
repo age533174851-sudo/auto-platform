@@ -576,8 +576,13 @@ export async function POST(req: NextRequest) {
         maintenanceTiers: async () => {
           if (ex !== 'binance') return null;   // Gate는 브래킷 경로가 없다
           const bf = await import('@/lib/exchanges/binanceFutures');
-          return bf.getCachedBracket(symbol, conn.apiKey, conn.apiSecret, !connIsLive)
-            .catch(() => null);
+          const r = await bf.readBracket(symbol, conn.apiKey, conn.apiSecret, !connIsLive)
+            .catch(() => ({ tiers: null, freshness: 'NONE' } as any));
+          // ★ **지금 것이 아니면 쓰지 않는다.** TTL이 지난 뒤 다시 읽기에
+          //   실패하면 값은 남아 있지만 그건 옛 유지증거금 구간이다.
+          //   그걸로 100배 청산가를 정하면 "거래소 risk tier를 신뢰할 수
+          //   없으면 막는다"는 계약이 깨진다.
+          return r.freshness === 'FRESH' ? r.tiers : null;
         },
         // **손절 주문이 아니다.** 신호가 ATR로 잰 참고 위험 거리이고,
         // `NO_FIXED_SL`에서는 거래소로 나가지 않는다(아래 주문 조립에서
@@ -613,18 +618,30 @@ export async function POST(req: NextRequest) {
         fundingContext: async () => {
           if (ex !== 'binance') return null;
           const bf = await import('@/lib/exchanges/binanceFutures');
-          const [prem, iv] = await Promise.all([
-            bf.getPremiumIndex(symbol, !connIsLive).catch(() => null),
-            bf.getFundingInterval(symbol, !connIsLive).catch(() => ({ info: null } as any)),
+          const [prem, fb] = await Promise.all([
+            bf.readPremiumIndex(symbol, !connIsLive)
+              .catch(() => ({ data: null, freshness: 'NONE', observedAtMs: null } as any)),
+            bf.getFundingBounds(symbol, !connIsLive)
+              .catch(() => ({ bounds: null } as any)),
           ]);
-          if (!prem || iv?.info == null) return null;
+          // ★ **지금 것이 아니면 쓰지 않는다.** 45초 TTL이 지난 뒤 조회에
+          //   실패하면 캐시의 옛 값이 남는데, 예전에는 거기에
+          //   `observedAtMs: Date.now()`를 새로 붙이고 있었다 — 며칠 된
+          //   캐시가 "방금 읽은 데이터"로 보였고, ④(신선도 보호)가 설
+          //   기반이 통째로 오염돼 있었다.
+          if (prem.freshness !== 'FRESH' || prem.data == null || fb?.bounds == null) return null;
           return {
-            rate: prem.lastFundingRate,
-            nextFundingTimeMs: prem.nextFundingTime,
-            // **8시간을 박지 않는다** — fundingInfo에서 읽은 값이다.
-            intervalHours: iv.info.intervalHours,
-            intervalSource: iv.info.source,
-            observedAtMs: Date.now(),
+            // 관측·방향 표시용이다. **미래 정산 비용의 상한이 아니다.**
+            rate: prem.data.lastFundingRate,
+            nextFundingTimeMs: prem.data.nextFundingTime,
+            // **8시간을 박지 않는다** — 대상 종목에서 직접 읽은 값이다.
+            intervalHours: fb.bounds.intervalHours,
+            // 1회 최대 지불 요율의 근거.
+            capRate: fb.bounds.capRate,
+            floorRate: fb.bounds.floorRate,
+            source: fb.bounds.source,
+            // **세탁하지 않는다** — 실제로 읽은 시각 그대로.
+            observedAtMs: prem.observedAtMs as number,
           };
         },
         quantize: async (qty: number) => {

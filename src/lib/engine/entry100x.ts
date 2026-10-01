@@ -456,7 +456,10 @@ export async function prepareEntry100x(
   }
   const effectiveLiquidation = assessLiquidationDistance({
     side: contract.side,
-    referencePrice: eff.effectiveEntryPrice,
+    // **거리는 마크가에서 잰다** — 청산은 마크가로 발동한다.
+    referencePrice: price,
+    // **식에는 예상 체결가를 넣는다** — 포지션이 열리는 가격이 그것이다.
+    entryPrice: eff.effectiveEntryPrice,
     quantity: q.qty,
     leverage: eff.effectiveLeverage,
     marginMode: mode,
