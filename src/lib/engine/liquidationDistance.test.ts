@@ -101,6 +101,17 @@ export function runLiquidationDistanceTests() {
     eq(v.code, 'MAINTENANCE_TIER_MISSING');
   });
 
+  test('빠진 유지증거금률을 0으로 읽지 않는다', () => {
+    // `Number(null) === 0`이라 예전에는 **빠진 MMR이 0**이 됐다. MMR 0이면
+    // 청산가가 멀어져 거리가 커진다 — fail-open이다.
+    eq(assessLiquidationDistance(ok({ brackets: [[Infinity, null as any, 0]] })).code,
+      'MAINTENANCE_TIER_MISSING', '★ 빠진 MMR이 0으로 읽혀 통과했다');
+    eq(assessLiquidationDistance(ok({ brackets: [[Infinity, 0.004, null as any]] })).code,
+      'MAINTENANCE_TIER_MISSING', '★ 빠진 공제액이 0으로 읽혀 통과했다');
+    eq(assessLiquidationDistance(ok({ brackets: [[Infinity, '' as any, 0]] })).code,
+      'MAINTENANCE_TIER_MISSING', '★ 빈 문자열이 0으로 읽혔다');
+  });
+
   test('구간에 쓸 수 없는 값이 있으면 거부한다', () => {
     eq(assessLiquidationDistance(ok({ brackets: [[NaN, 0.004, 0]] })).code,
       'MAINTENANCE_TIER_MISSING');
@@ -199,6 +210,29 @@ export function runLiquidationDistanceTests() {
     eq(v.ok, false, '★ 자기일관 해가 없는데 통과했다');
     eq(v.code, 'TIER_NOT_SELF_CONSISTENT',
       '★ 사유가 "해가 없다"가 아니다 — 계산 불가와 구별되지 않는다');
+  });
+
+  test('식에는 진입가, 거리는 마크가 — 슬리피지가 거리에 나타난다', () => {
+    // 식이 진입가에 비례하므로 **진입가 대비 %는 슬리피지와 무관하게
+    // 그대로**다. 거리를 체결가에서 재면 슬리피지가 통째로 사라진다.
+    const atMark = assessLiquidationDistance(ok({ referencePrice: 50_000 }));
+    const slipped = assessLiquidationDistance(ok({
+      referencePrice: 50_000, entryPrice: 50_005,
+    }));
+    const fromFill = assessLiquidationDistance(ok({
+      referencePrice: 50_005, entryPrice: 50_005,
+    }));
+    eq(atMark.ok, true); eq(slipped.ok, true); eq(fromFill.ok, true);
+    // 체결가에서 재면 슬리피지가 안 보인다 — 값이 같다.
+    close(fromFill.liquidationDistancePct as number,
+      atMark.liquidationDistancePct as number, 1e-9,
+      '진입가 대비 %는 진입가와 무관하다');
+    // 마크가에서 재야 줄어든다.
+    assert((slipped.liquidationDistancePct as number)
+      < (atMark.liquidationDistancePct as number),
+      '★ 불리하게 체결됐는데 거리가 안 줄었다 — 거리를 체결가에서 재고 있다');
+    eq(slipped.referencePrice, 50_000, '거리 기준은 마크가다');
+    eq(slipped.entryPrice, 50_005, '식에 넣은 진입가는 체결가다');
   });
 
   test('solver는 경계 해석을 한 곳에서만 한다 — 판정과 같은 답을 낸다', () => {

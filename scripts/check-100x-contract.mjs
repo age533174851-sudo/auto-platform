@@ -836,6 +836,9 @@ if (entry) {
       ['브래킷 없음', { brackets: null }, 'MAINTENANCE_TIER_MISSING'],
       ['빈 브래킷 표', { brackets: [] }, 'MAINTENANCE_TIER_MISSING'],
       ['MMR이 비율이 아님', { brackets: [[Infinity, 1, 0]] }, 'MAINTENANCE_TIER_MISSING'],
+      // `Number(null) === 0`이라 빠진 값이 0으로 읽히면 fail-open이다.
+      ['MMR이 빠짐', { brackets: [[Infinity, null, 0]] }, 'MAINTENANCE_TIER_MISSING'],
+      ['공제액이 빠짐', { brackets: [[Infinity, 0.004, null]] }, 'MAINTENANCE_TIER_MISSING'],
       ['계정별 브래킷 조정 배수', { brackets: [[Infinity, 0.004, 0, 1.5]] },
         'BRACKET_COEF_UNSUPPORTED'],
       ['변동성 거리 모름', { adverseDistancePct: null }, 'ADVERSE_DISTANCE_UNKNOWN'],
@@ -1118,6 +1121,37 @@ if (entry) {
       err(`${SCALP}: 청산가·청산거리를 0으로 적습니다`
         + ' — 0은 "0달러에 청산"이라 거리가 100%가 됩니다 (UNKNOWN을 0으로 적지 않는다)');
     }
+    // **낡은 거래소 값을 Exact100X 입력으로 넘기지 않는가.**
+    //
+    //   브래킷도 premium도 TTL이 지난 뒤 조회에 실패하면 옛 값이 남는다.
+    //   그 값을 그대로 넘기면 "거래소 사실을 신뢰할 수 없으면 막는다"는
+    //   계약이 깨진다. 라우트가 신선도를 보는지 **그 의존의 본문 안에서**
+    //   확인한다 — 파일 어딘가에 단어가 있는지로는 부족하다.
+    for (const [dep, what] of [
+      ['maintenanceTiers:', '유지증거금 브래킷'],
+      ['fundingContext:', '펀딩 정보'],
+    ]) {
+      const at = sc.indexOf(dep);
+      if (at < 0) { err(`${SCALP}: ${what} 의존을 넘기지 않습니다`); continue; }
+      const body = sc.slice(at, at + 1400);
+      if (!/freshness\s*!==\s*'FRESH'|freshness\s*===\s*'FRESH'/.test(body)) {
+        err(`${SCALP}: ${what}를 넘기면서 신선도를 보지 않습니다`
+          + ' — TTL이 지난 뒤 조회에 실패하면 낡은 값이 그대로 들어갑니다');
+      }
+    }
+    // premium의 관측 시각을 **세탁하지 않는가.**
+    {
+      const at = sc.indexOf('fundingContext:');
+      const body = at < 0 ? '' : sc.slice(at, at + 1400);
+      if (/observedAtMs:\s*Date\.now\(\)/.test(body)) {
+        err(`${SCALP}: 펀딩 데이터에 새 시각(Date.now())을 붙입니다`
+          + ' — 낡은 캐시가 "방금 읽은 데이터"로 보입니다 (④가 설 기반이 사라집니다)');
+      }
+      if (!/prem\.observedAtMs/.test(body)) {
+        err(`${SCALP}: 펀딩 데이터의 실제 관측 시각을 쓰지 않습니다`);
+      }
+    }
+
     // 변동성 거리로 **손절가**를 넘기지 않는가. `NO_FIXED_SL`을 되살리는 길이다.
     const iAdv = sc.indexOf('adverseDistancePct:');
     if (iAdv < 0) {
@@ -2953,6 +2987,16 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       }
       if (ok2.liquidation === ok2.effectiveLiquidation) {
         err('100X 진입: RAW와 실질 여유가 같은 객체입니다 — 하나가 다른 하나를 덮었습니다');
+      }
+      // **거리는 마크가에서 잰다.** 체결가에서 재면 슬리피지가 통째로
+      // 사라진다 — 식이 진입가에 비례하므로 진입가 대비 %가 그대로다.
+      if (ok2.effectiveLiquidation?.referencePrice !== 50_000) {
+        err('100X 진입: 실질 거리의 기준이 마크가가 아닙니다'
+          + ` (${ok2.effectiveLiquidation?.referencePrice}) — 체결가에서 재면 슬리피지가 사라집니다`);
+      }
+      if (!(ok2.effectiveLiquidation?.entryPrice > 50_000)) {
+        err('100X 진입: 실질 계산의 진입가가 예상 체결가가 아닙니다'
+          + ` (${ok2.effectiveLiquidation?.entryPrice})`);
       }
     }
     // 의존 분류 — 새 읽기 셋이 통합 카운터 밖으로 새지 않는가.
