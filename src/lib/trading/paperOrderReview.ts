@@ -204,6 +204,7 @@ export function reviewRows(i: ReviewInput): ReviewRow[] {
         : { kind: 'TEXT', text: `${Number(i.leverage)}배` },
     },
     { key: 'REQUIRED_MARGIN', label: '필요 증거금', value: planned(i.plan, i.plan.requiredMargin) },
+    { key: 'ENTRY_FEE', label: '예상 진입 수수료', value: planned(i.plan, i.plan.entryFee) },
     {
       key: 'LIQUIDATION_PRICE', label: '청산가',
       // ★ `plan.plan.liquidationPrice`를 쓰지 않는다 — 그쪽은 못 구했을 때
