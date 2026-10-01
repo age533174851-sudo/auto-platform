@@ -1001,17 +1001,14 @@ const M = [
     s => s.replace("  const onCorrectSide = side === 'LONG' ? liq < price : liq > price;",
                    "  const onCorrectSide = side === 'LONG' ? liq > price : liq < price;"), 'RED'],
 
-  // ★ 구간 선택이 solver 안으로 들어갔다. 추정 표로 떨어지는 변이를
-  //   거기에 건다 — `MMR_BRACKETS`는 "BTCUSDT 대표값 · 추정치"다.
-  ['MUT-L6 브래킷이 없으면 추정 표로 떨어짐', P.liqmath,
-    s => s.replace(
-      "  if (!Array.isArray(args.brackets) || args.brackets.length === 0) {\n"
-      + "    return noSolution('NO_BRACKETS');\n"
-      + '  }\n'
-      + '  const table = sortedTiers(args.brackets);',
-      '  const table = sortedTiers(\n'
-      + '    Array.isArray(args.brackets) && args.brackets.length\n'
-      + '      ? args.brackets : MMR_BRACKETS);'), 'RED'],
+  // ★ 앞선 변이는 solver의 fallback을 건드렸는데, 판정이 solver를
+  //   부르기 **전에** 이미 벼 표를 거부한다(L3과 동치였다).
+  //   추정 표로 때우는 진짜 위험은 **배선 축**에 있다 — 거래소가
+  //   브래킷을 안 주면 그럴듯한 표를 넣어 넘기는 것이다.
+  ['MUT-L6 브래킷을 못 읽으면 추정 표로 때운다 (배선 축)', P.entry,
+    s => s.replace('  try { tiers = await deps.maintenanceTiers(notional); } catch { tiers = null; }',
+      '  try { tiers = await deps.maintenanceTiers(notional); } catch { tiers = null; }\n'
+      + '  if (!tiers || !tiers.length) tiers = [[Infinity, 0.004, 0]];'), 'RED'],
 
   ['MUT-L7 Exact100X에서 청산거리 관문을 건너뜀', P.entry,
     s => s.replace('  if (!liquidation.ok) {',
