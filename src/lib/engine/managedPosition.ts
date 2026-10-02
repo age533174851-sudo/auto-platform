@@ -233,6 +233,133 @@ export interface OrderRowLike {
   strategy_id?: string | null;
 }
 
+/**
+ * 이 자리의 노출에 **지금 실제로 열려 있는 종료 수단.**
+ *
+ * 왜 boolean 하나가 아닌가
+ * ────────────────────────
+ * 지금까지는 `MANAGED` / `UNMANAGED_SEAT_DEFERRED` 둘뿐이었다. 그래서
+ * `NO_FIXED_SL` 자리의 유예를 푸는 변경은 **네 기능을 한꺼번에 연다** —
+ * 고정 손절 재부착 · 본전이동 · 트레일링 · 시간청산. 시간 청산 하나만
+ * 열고 싶어도 그럴 수단이 타입에 없었다.
+ *
+ * 그래서 기능을 칸으로 나눈다. 빈 기능을 `true`로 적지 않는다.
+ */
+export interface SeatExitCapabilities {
+  /** 진입 시점 고정 손절을 거는 계약인가 */
+  fixedStopAtEntry: boolean;
+  breakEven: boolean;
+  trailing: boolean;
+  /** 계약이 선언한 보유 상한으로 닫는다 */
+  timeExit: boolean;
+  /** adverse·청산여유 비상 종료. **아직 구현이 없다** */
+  emergency: boolean;
+}
+
+/**
+ * 이 노출의 분류. 일반 생명주기 관리 여부와 **따로** 둔다.
+ *
+ * `NO_FIXED_SL_EXACT100X`는 일반 생명주기에 들어가지 않지만
+ * (트레일링·본전이동이 1R을 요구하므로) **시간 청산은 열려 있다.**
+ * 두 사실을 한 boolean에 담을 수 없어서 분류를 따로 만든다.
+ */
+export type SeatExposureClass =
+  /** 일반 생명주기가 전부 관리한다 */
+  | 'GENERIC_LIFECYCLE'
+  /** 고정 손절 없는 전용 100배 계약 — 전용 종료 권한만 본다 */
+  | 'NO_FIXED_SL_EXACT100X'
+  /** 관리 계약이 깨져 있다. 아무 종료 수단도 열지 않는다 */
+  | 'BROKEN_CONTRACT';
+
+const NO_CAPABILITIES: SeatExitCapabilities = {
+  fixedStopAtEntry: false, breakEven: false, trailing: false,
+  timeExit: false, emergency: false,
+};
+
+/**
+ * 이 노출에 열려 있는 종료 수단.
+ *
+ * **표를 손으로 적지 않는다.** 분류가 정하고, 분류는 손절 정책과 실행
+ * 계약 기록에서 나온다. 계약 기록이 없으면 전용 종료 권한이 어느 계약의
+ * 한도를 쓸지 알 수 없으므로 시간 청산도 열지 않는다(fail-closed).
+ */
+export function seatExitCapabilities(i: {
+  stopPolicy: 'FIXED_SL' | 'NO_FIXED_SL' | 'UNKNOWN' | null;
+  hasStopValue: boolean;
+  executionIdentity: ExecutionIdentity | null;
+}): { exposureClass: SeatExposureClass; capabilities: SeatExitCapabilities } {
+  const pol = i?.stopPolicy ?? null;
+
+  if (pol === 'NO_FIXED_SL') {
+    // 계약과 장부가 어긋났다 — 어느 쪽이 참인지 모르므로 아무것도 안 연다.
+    if (i.hasStopValue) {
+      return { exposureClass: 'BROKEN_CONTRACT', capabilities: { ...NO_CAPABILITIES } };
+    }
+    // 계약 기록이 없으면 **어느 계약의 보유 한도인지 알 수 없다.**
+    // 전략 기본값으로 대신하지 않는다 — 사용자가 고르지 않은 숫자다.
+    if (i.executionIdentity == null) {
+      return { exposureClass: 'BROKEN_CONTRACT', capabilities: { ...NO_CAPABILITIES } };
+    }
+    return {
+      exposureClass: 'NO_FIXED_SL_EXACT100X',
+      capabilities: {
+        // 계약상 **안 거는 것**이다. 고쳐야 할 빈 칸이 아니다.
+        fixedStopAtEntry: false,
+        // 1R이 없으므로 정의할 수 없다.
+        breakEven: false, trailing: false,
+        // ★ 이번 단계에서 **처음으로** 열리는 하나.
+        timeExit: true,
+        // 아직 구현이 없다. 있다고 적지 않는다.
+        emergency: false,
+      },
+    };
+  }
+
+  if (pol === 'FIXED_SL' && i.hasStopValue) {
+    return {
+      exposureClass: 'GENERIC_LIFECYCLE',
+      capabilities: {
+        fixedStopAtEntry: true, breakEven: true, trailing: true,
+        timeExit: true, emergency: false,
+      },
+    };
+  }
+
+  if (pol == null && i.hasStopValue) {
+    // 정책을 안 적던 시절의 줄. 기존 동작 그대로 일반 생명주기가 본다.
+    return {
+      exposureClass: 'GENERIC_LIFECYCLE',
+      capabilities: {
+        fixedStopAtEntry: true, breakEven: true, trailing: true,
+        timeExit: true, emergency: false,
+      },
+    };
+  }
+
+  return { exposureClass: 'BROKEN_CONTRACT', capabilities: { ...NO_CAPABILITIES } };
+}
+
+/**
+ * 전용 종료 권한이 볼 후보. **일반 생명주기 후보와 다른 목록이다.**
+ *
+ * 둘을 같은 배열에 담으면 `positions`를 도는 기존 루프가 이 노출까지
+ * 트레일링·본전이동 대상으로 집어 간다. 목록을 나누면 그 일이
+ * **구조적으로** 불가능하다 — 기존 루프는 이 배열을 모른다.
+ */
+export interface ExitAuthorityCandidate {
+  connectionId: string;
+  exchange: 'binance' | 'gate';
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  strategyId: string | null;
+  executionIdentity: ExecutionIdentity;
+  openedAt: number;
+  entryPrice: number;
+  orderId: string | null;
+  exposureClass: SeatExposureClass;
+  capabilities: SeatExitCapabilities;
+}
+
 export interface ManagedPosition {
   connectionId: string;
   exchange: 'binance' | 'gate';
@@ -315,6 +442,15 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
   positions: ManagedPosition[];
   deferred: DeferredRow[];
   skipped: CandidateSkip[];
+  /**
+   * 전용 종료 권한이 볼 후보. **`positions`와 겹치지 않는다.**
+   *
+   * 유예(`deferred`)는 그대로 둔다 — 일반 생명주기는 여전히 이 노출을
+   * 건드리지 않는다. 다만 "인식만 하고 끝"이던 것을 **시간 청산 하나만**
+   * 열어 전용 권한에 넘긴다. 목록이 따로라서 기존 루프가 이것을 집어
+   * 트레일링·본전이동을 거는 일이 구조적으로 불가능하다.
+   */
+  authorityCandidates: ExitAuthorityCandidate[];
 } {
   const skip = new Map<string, CandidateSkip>();
   const note = (code: string, reason: string) => {
@@ -338,6 +474,7 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     unmanagedSeats.get(key)!.add(code);
   };
   const deferred: DeferredRow[] = [];
+  const authorityCandidates: ExitAuthorityCandidate[] = [];
   const keep: Array<{ row: OrderRowLike; pos: Omit<ManagedPosition, 'ownership' | 'management'> }> = [];
 
   for (const r of list) {
@@ -419,8 +556,35 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
           + ' — 계약과 장부가 어긋나 일반 생명주기에 넣지 않습니다');
       } else {
         defer('NO_FIXED_SL_EXIT_UNWIRED',
-          '고정 손절을 쓰지 않는 주문입니다 — 전용 종료 권한이 아직 연결되지 않아'
-          + ' 일반 생명주기로 관리하지 않습니다 (인식은 하고 있습니다)');
+          '고정 손절을 쓰지 않는 주문입니다 — 일반 생명주기(트레일링·본전이동)는'
+          + ' 1R이 없어 관리하지 않습니다. 전용 종료 권한이 시간 청산만 봅니다');
+      }
+
+      // ── 전용 종료 권한 후보 ──
+      //
+      // **유예는 그대로다.** 위 `blockSeat`·`defer`를 지우지 않았고,
+      // 아래 `continue`도 그대로라 이 줄은 `positions`에 들어가지 않는다.
+      // 일반 생명주기는 여전히 이 노출을 건드리지 않는다.
+      //
+      // 다만 "인식만 하고 끝"이던 것을 **시간 청산 하나만** 열어 전용
+      // 권한에 넘긴다. 어느 기능이 열렸는지는 `capabilities`가 말한다 —
+      // boolean 하나로 네 기능을 같이 열지 않는다.
+      {
+        const cap = seatExitCapabilities({
+          stopPolicy: policy, hasStopValue: hasStop, executionIdentity: identity,
+        });
+        // 계약 기록이 없거나 장부가 어긋나면 아무것도 열리지 않는다.
+        if (cap.exposureClass === 'NO_FIXED_SL_EXACT100X'
+            && identity != null && Number.isFinite(openedAt)) {
+          authorityCandidates.push({
+            connectionId, exchange, symbol, side, strategyId,
+            executionIdentity: identity,
+            openedAt, entryPrice,
+            orderId: r?.id ? String(r.id) : null,
+            exposureClass: cap.exposureClass,
+            capabilities: cap.capabilities,
+          });
+        }
       }
       continue;
     }
@@ -526,7 +690,7 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
     return { ...pos, ownership, management };
   });
 
-  return { positions, deferred, skipped: Array.from(skip.values()) };
+  return { positions, deferred, skipped: Array.from(skip.values()), authorityCandidates };
 }
 
 /**
