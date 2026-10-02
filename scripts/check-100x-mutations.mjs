@@ -128,6 +128,14 @@ const P = {
   bfut: 'src/lib/exchanges/leverageBracket.ts',
   bfapi: 'src/lib/exchanges/binanceFutures.ts',
   fresh: 'src/lib/engine/marketFreshness.ts',
+  xauth: 'src/lib/engine/exitAuthority.ts',
+  xrun: 'src/lib/engine/exitAuthorityRun.ts',
+  xpol: 'src/lib/engine/exitPolicy.ts',
+  xint: 'src/lib/engine/exitIntent.ts',
+  xact: 'src/lib/engine/lifecycleAction.ts',
+  xlease: 'src/lib/engine/exitMonitorLease.ts',
+  xvops: 'src/lib/engine/venuePositionOps.ts',
+  cov: 'src/lib/engine/exitCoverage.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -934,11 +942,14 @@ const M = [
   //   ('trailing: false, breakEven: false, timeExit: false,')는 파일 앞의
   //   `UNDECLARED` 상수를 먼저 때렸고, 그 상수는 지금 쓰이지 않아 아무
   //   관측도 바뀌지 않았다 — 변이가 아니라 **빈 변이**였다.
-  ['MUT-N5 NO_FIXED_SL 계약이 시간청산을 받는다고 적음', P.cov,
-    s => s.replace("      trailing: false, breakEven: false, timeExit: false,\n"
-                   + '      positionGuard: adm.admitted,',
-                   "      trailing: false, breakEven: false, timeExit: true,\n"
-                   + '      positionGuard: adm.admitted,'), 'RED'],
+  // ★ **앵커를 옮겼다(지우지 않았다).** 원래는 "시간청산을 false에서
+  //   true로"였다. ⑤에서 전용 종료 권한이 붙어 시간청산이 **실제로**
+  //   돌기 시작했으므로 그 거짓말은 더 이상 거짓말이 아니다. 같은 성질
+  //   ("표가 돌지 않는 것을 돈다고 적는다")을 아직 돌지 않는 축으로
+  //   옮긴다 — 트레일링은 이 계약에 1R이 없어 정의 자체가 없다.
+  //   배선 없이 시간청산을 켜는 쪽은 MUT-EX20이 따로 본다.
+  ['MUT-N5 NO_FIXED_SL 계약이 트레일링을 받는다고 적음', P.cov,
+    s => s.replace('      trailing: auth.capabilities.trailing,', '      trailing: true,'), 'RED'],
 
   ['MUT-N6 유예 판정을 표에 직접 적음 (분류기를 안 부름)', P.cov,
     s => s.replace('  const r = managedCandidates([row]);',
@@ -1406,6 +1417,143 @@ const M = [
                    '      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: null as any },'),
     'RED'],
 
+  // ── ⑤ 전용 종료 권한 (TIME_EXIT) ──
+  //
+  // 이 단계에서 처음으로 **이미 열린 포지션을 자동으로 닫는다.**
+  // 가장 위험한 고장은 중복 청산과 반대 포지션 생성이다.
+
+  ['MUT-EX1  시간 청산 판정을 없앰 (영원히 안 닫힘)', P.xauth,
+    s => s.replace('  if (!(heldMs >= policy.maxHoldMs)) {', '  if (true) {'), 'RED'],
+
+  ['MUT-EX2  계약 4시간 대신 전략 6시간으로 내려감', P.xpol,
+    s => s.replace("  if (!r.ok || !r.contract) {\n    return fail('CONTRACT_UNRESOLVED',",
+      "  if (!r.ok || !r.contract) {\n"
+      + "    const fb = lifecyclePolicyOf(String(i?.strategyId ?? '').trim());\n"
+      + "    if (fb?.maxHoldMs != null) {\n"
+      + "      return { ok: true, code: 'OK', maxHoldMs: fb.maxHoldMs,\n"
+      + "        source: 'STRATEGY_LIFECYCLE', policyVersion: 'fb', reason: 'fb' };\n"
+      + "    }\n"
+      + "    return fail('CONTRACT_UNRESOLVED',"), 'RED'],
+
+  ['MUT-EX3  보유 경계를 >= 에서 > 로 (정확히 4시간이 통과)', P.xauth,
+    s => s.replace('  if (!(heldMs >= policy.maxHoldMs)) {', '  if (!(heldMs > policy.maxHoldMs)) {'), 'RED'],
+
+  ['MUT-EX4  전용 권한 후보를 올리지 않음 (배선 제거)', P.cand,
+    s => s.replace('          authorityCandidates.push({', '          false && authorityCandidates.push({'), 'RED'],
+
+  ['MUT-EX5  실행 순서에서 임차 확인을 건너뜀', P.xrun,
+    s => s.replace('  if (lease.owned === true) {', '  if (true) {'), 'RED'],
+
+  ['MUT-EX5b 권한 정본이 임차를 안 봄', P.xauth,
+    s => s.replace("  if (i.lease?.owned !== true) {", '  if (false) {'), 'RED'],
+
+  ['MUT-EX6  소유권 재검사를 전송 **뒤**로 옮김', P.xact,
+    s => moveStillMineAfterClose(s), 'RED'],
+
+  ['MUT-EX7  울타리를 못 읽어도 내 것으로 침 (stale fence 허용)', P.xlease,
+    s => s.replace("    return { ok: false, reason: '울타리 번호를 다시 읽지 못했습니다 — 확인하지 못한 것을 통과로 보지 않습니다' };",
+                   "    return { ok: true, reason: '' };"), 'RED'],
+
+  ['MUT-EX8  실행 계약 identity 검사 제거', P.xauth,
+    s => s.replace('  if (eid == null) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX9  종목만 같으면 신원 통과 (계좌·방향 무시)', P.xauth,
+    s => s.replace('  if (!pid || !pid.exchange || !pid.connectionId || !pid.symbol || !pid.side) {',
+                   '  if (!pid || !pid.symbol) {'), 'RED'],
+
+  ['MUT-EX10 방향 검사 제거 (헤지 다른 다리를 닫음)', P.xauth,
+    s => s.replace('  if (obs.side != null && obs.side !== pid.side) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX10b 포지션 모드 검사 제거', P.xauth,
+    s => s.replace("  if (pid.positionMode !== 'ONE_WAY') {", '  if (false) {'), 'RED'],
+
+  ['MUT-EX11 현재 노출 대신 고정 진입 수량으로 닫음', P.xauth,
+    s => s.replace('  const qty = num(obs.qty);', '  const qty = 1;'), 'RED'],
+
+  ['MUT-EX12 청산 주문에서 reduceOnly 제거 (반대 포지션 생성)', P.bfapi,
+    s => s.replace("    // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.\n    reduceOnly: true,\n", ''), 'RED'],
+
+  ['MUT-EX13 청산 주문 방향을 포지션과 같게 함 (포지션이 커진다)', P.bfapi,
+    s => s.replace("      side: pos.side === 'LONG' ? 'SELL' : 'BUY',",
+                   "      side: pos.side === 'LONG' ? 'BUY' : 'SELL',"), 'RED'],
+
+  ['MUT-EX14 이미 flat인데 시장가 주문을 보냄', P.xauth,
+    s => s.replace('  if (obs.found !== true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX15 전송 결과를 모를 때 재조회를 건너뜀', P.xact,
+    s => s.replace('  let after: { ok: boolean; found: boolean };\n'
+                   + '  try { after = await deps.readAfter(); }\n'
+                   + '  catch { after = { ok: false, found: false }; }',
+      '  let after: { ok: boolean; found: boolean };\n'
+      + '  if (ambiguous) { after = { ok: true, found: false }; }\n'
+      + '  else { try { after = await deps.readAfter(); }\n'
+      + '  catch { after = { ok: false, found: false }; } }'), 'RED'],
+
+  ['MUT-EX16 flat 정리를 "아무것도 안 함"으로 적음', P.xrun,
+    s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,',
+                   '        ok: false, blocked: true, reconciledFlat: false, flatVerified: null,'), 'RED'],
+
+  ['MUT-EX17 거래소가 flat이라 해도 장부를 믿고 닫음', P.xrun,
+    s => s.replace("      ? { ok: true, found: false, qty: 0, side: null as 'LONG' | 'SHORT' | null }",
+                   "      ? { ok: true, found: true, qty: 1, side: candidate.positionIdentity.side }"), 'RED'],
+
+  ['MUT-EX18 진입 시각이 없으면 지금으로 대체', P.xauth,
+    s => s.replace('  const openedAt = num(i.openedAtMs);\n  if (openedAt == null || !(openedAt > 0)) {',
+                   '  const openedAt = num(i.openedAtMs) ?? i.nowMs;\n  if (false) {'), 'RED'],
+
+  ['MUT-EX19 미래 진입 시각을 경과 0으로 깎아 통과', P.xauth,
+    s => s.replace('  if (openedAt > now) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX20 배선 없이 커버리지 표에 시간청산 true', P.cov,
+    s => s.replace('      timeExit: auth.capabilities.timeExit,', '      timeExit: true,'), 'RED'],
+
+  ['MUT-EX21 전용 100배 노출에 트레일링·본전이동을 함께 엶', P.cand,
+    s => s.replace('        breakEven: false, trailing: false,', '        breakEven: true, trailing: true,'), 'RED'],
+
+  ['MUT-EX22 LIVE 차단 제거 (전용 100배를 실전에 엶)', P.gate,
+    s => s.replace("    modes: ['TESTNET'],", "    modes: ['TESTNET', 'LIVE_SMALL'],"), 'RED'],
+
+  ['MUT-EX23 쓰기 직전 울타리 재검증 제거', P.xrun,
+    s => s.replace('    stillMine: deps.revalidateFence,', '    stillMine: undefined,'), 'RED'],
+
+  ['MUT-EX24 기록 전 죽은 뒤 재실행에서 flat을 무시하고 또 보냄', P.xrun,
+    s => s.replace("    if (code === 'ALREADY_FLAT') {", '    if (false) {'), 'RED'],
+
+  ['MUT-EX25 노출 조회 실패 시 고정 수량으로 되돌림', P.xrun,
+    s => s.replace("          : { ok: false, found: false, qty: null, side: null as 'LONG' | 'SHORT' | null };",
+                   "          : { ok: true, found: true, qty: 1, side: candidate.positionIdentity.side };"), 'RED'],
+
+  ['MUT-EX26 ALREADY_FLAT인데 주문을 보냈다고 적음', P.xrun,
+    s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n      });',
+                   '        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        attemptedWrite: true,\n      });'), 'RED'],
+
+  ['MUT-EX27 종료 의도 멱등 키를 주문에 안 붙임 (거래소가 중복을 못 막음)', P.bfapi,
+    s => s.replace("    // **멱등 키.** 같은 의도의 둘째 주문을 거래소가 거부한다.\n"
+                   + "    ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),\n", ''), 'RED'],
+
+  ['MUT-EX27b 멱등 키에 시각을 섞음 (실행자마다 달라짐)', P.xint,
+    s => s.replace('    qtyToken(Number(k.quantity)),',
+                   '    qtyToken(Number(k.quantity)), String(Date.now()),'), 'RED'],
+
+  ['MUT-EX28 전송 직전에 거래소 조회를 다시 끼움 (창이 넓어짐)', P.xvops,
+    s => s.replace("    const bf = await import('../exchanges/binanceFutures');\n"
+                   + '    const r = await bf.sendPreparedClose(',
+      "    const bf = await import('../exchanges/binanceFutures');\n"
+      + '    await readOpenPosition(c, prepared.symbol);\n'
+      + '    const r = await bf.sendPreparedClose('), 'RED'],
+
+  ['MUT-EX29 접수됐는데 잔여가 남아도 닫혔다고 적음', P.xact,
+    s => s.replace('  if (after.found === true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX30 재조회에 실패해도 닫혔다고 적음', P.xact,
+    s => s.replace('  if (after.ok !== true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX31 중복 거부를 "거부됨"으로 적음 (같은 자리에 또 보냄)', P.xrun,
+    s => s.replace('      if (!r.ok && isDuplicateIntentError(r.error)) {', '      if (false) {'), 'RED'],
+
+  ['MUT-EX32 보낸 수량을 "닫힌 수량"으로 적음', P.xrun,
+    s => s.replace(/requestedQuantity/g, 'closedQuantity'), 'RED'],
+
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**
@@ -1442,6 +1590,28 @@ function moveReadAfterWrite(src, dep) {
       + src.slice(to + '  const price: number = mark!.price as number;\n'.length);
   }
   return src;
+}
+
+/**
+ * **소유권 재검사를 전송 뒤로 옮긴다.**
+ *
+ * 지우는 변이가 아니다 — 검사는 그대로 일어나고 자리만 바뀐다. 그때
+ * 임차를 잃은 실행자도 주문을 **이미 보낸 뒤**가 된다.
+ */
+function moveStillMineAfterClose(src) {
+  const GUARD = "  if (deps.stillMine) {\n"
+    + "    let mine = false;\n"
+    + "    try { mine = await deps.stillMine(); } catch { mine = false; }\n"
+    + "    if (!mine) {\n"
+    + "      return { code: 'LEASE_LOST', ok: false, attempted: false, accepted: false,\n"
+    + "        flatVerified: null, needsReconcile: false,\n"
+    + "        reason: '\uc2e4\ud589 \uad8c\ud55c(\uc784\ucc28)\uc774 \ub118\uc5b4\uac00 \uccad\uc0b0\uc744 \ubcf4\ub0b4\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4' };\n"
+    + "    }\n"
+    + "  }\n";
+  if (!src.includes(GUARD)) return src;
+  const AFTER = '  const ambiguous = r.ambiguous === true;\n';
+  if (!src.includes(AFTER)) return src;
+  return src.replace(GUARD, '').replace(AFTER, AFTER + GUARD);
 }
 
 /**
