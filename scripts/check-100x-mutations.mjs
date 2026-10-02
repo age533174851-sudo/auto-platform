@@ -1231,68 +1231,68 @@ const M = [
   // 서로 다른 시점의 mark/depth/premium을 하나의 현재 시장 상태처럼
   // 합쳐 쓰지 않는가.
 
-  ['MUT-E1  거래소 시각 요구를 없앰 (수신 시각만으로 통과)', P.fresh,
+  ['MUT-F1   거래소 시각 요구를 없앰 (수신 시각만으로 통과)', P.fresh,
     s => s.replace('    if (needEx && ex == null) {', '    if (false) {'), 'RED'],
 
-  ['MUT-E2  낡은 값을 통과시킴 (나이 검사 제거)', P.fresh,
+  ['MUT-F2   낡은 값을 통과시킴 (나이 검사 제거)', P.fresh,
     s => s.replace('    if (ageBudget == null || age > ageBudget) {', '    if (false) {'), 'RED'],
 
-  ['MUT-E3  만료된 캐시를 새 데이터로 취급 (캐시 검사 제거)', P.fresh,
+  ['MUT-F3   만료된 캐시를 새 데이터로 취급 (캐시 검사 제거)', P.fresh,
     s => s.replace("    if (o.cache !== 'FRESH') {", '    if (false) {'), 'RED'],
 
-  ['MUT-E4  수신 시각이 없어도 통과 (없는 시각을 통과로)', P.fresh,
+  ['MUT-F4   수신 시각이 없어도 통과 (없는 시각을 통과로)', P.fresh,
     s => s.replace('    if (at == null) {', '    if (false) {'), 'RED'],
 
-  ['MUT-E5  없는 시각을 0으로 읽음 (null → 0, fail-open 복원)', P.fresh,
+  ['MUT-F5   없는 시각을 0으로 읽음 (null → 0, fail-open 복원)', P.fresh,
     s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
 
-  ['MUT-E6  미래 시각을 통과시킴 (음수 나이를 그냥 씀)', P.fresh,
+  ['MUT-F6   미래 시각을 통과시킴 (음수 나이를 그냥 씀)', P.fresh,
     s => s.replace('    if (at > now + tol) {', '    if (false) {'), 'RED'],
 
-  ['MUT-E7  수신 지연(거래소↔로컬 시각 차)을 안 봄', P.fresh,
+  ['MUT-F7   수신 지연(거래소↔로컬 시각 차)을 안 봄', P.fresh,
     s => s.replace('    if (lag != null && lagBudget != null && lag > lagBudget) {',
                    '    if (false) {'), 'RED'],
 
-  ['MUT-E8  교차 출처 시각 차 검사를 없앰', P.fresh,
+  ['MUT-F8   교차 출처 시각 차 검사를 없앰', P.fresh,
     s => s.replace('      if (skew > budget) {', '      if (false) {'), 'RED'],
 
-  ['MUT-E9  교차 검사를 수신 시각으로 잼 (각자의 나이 예산에 갇혀 비어 버림)', P.fresh,
+  ['MUT-F9   교차 검사를 수신 시각으로 잼 (각자의 나이 예산에 갇혀 비어 버림)', P.fresh,
     s => s.replace('      const ta = num(a.o.exchangeTimeMs) as number;\n'
                    + '      const tb = num(b.o.exchangeTimeMs) as number;',
                    '      const ta = num(a.o.observedAtMs) as number;\n'
                    + '      const tb = num(b.o.observedAtMs) as number;'), 'RED'],
 
-  ['MUT-E10 마크가 값 검사를 없앰 (0·NaN을 가격으로 씀)', P.fresh,
+  ['MUT-F10 마크가 값 검사를 없앰 (0·NaN을 가격으로 씀)', P.fresh,
     s => s.replace('      if (v == null || !(v > 0)) {', '      if (false) {'), 'RED'],
 
-  ['MUT-E11 판정 시각을 모를 때 지금으로 대체', P.fresh,
+  ['MUT-F11 판정 시각을 모를 때 지금으로 대체', P.fresh,
     s => s.replace('  const now = num(input.nowMs);\n  if (now == null) {',
                    '  const now = num(input.nowMs) ?? Date.now();\n  if (false) {'), 'RED'],
 
-  ['MUT-E12 신선도 예산을 화면용 정본 수준(100초)으로 늘림', P.fresh,
+  ['MUT-F12 신선도 예산을 화면용 정본 수준(100초)으로 늘림', P.fresh,
     s => s.replace('  maxDecisionAgeMs: {\n    MARK: CLOCK_SKEW_BUDGET_MS,\n'
                    + '    BOOK: CLOCK_SKEW_BUDGET_MS,',
                    '  maxDecisionAgeMs: {\n    MARK: 100_000,\n    BOOK: 100_000,'), 'RED'],
 
-  ['MUT-E13 출처별 관측 시각을 한 칸으로 합침 (premium = 펀딩 상한)', P.fresh,
+  ['MUT-F13 출처별 관측 시각을 한 칸으로 합침 (premium = 펀딩 상한)', P.fresh,
     s => s.replace("    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = at; }",
                    "    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = p.premiumObservedAtMs; }"),
     'RED'],
 
-  ['MUT-E14 비용 판정도 두 시각을 합침', P.cost,
+  ['MUT-F14 비용 판정도 두 시각을 합침', P.cost,
     s => s.replace('    fundingBoundsObservedAtMs: fBoundsObs,',
                    '    fundingBoundsObservedAtMs: fPremObs,'), 'RED'],
 
-  ['MUT-E15 진입에서 신선도 판정 자체를 건너뜀', P.entry,
+  ['MUT-F15 진입에서 신선도 판정 자체를 건너뜀', P.entry,
     s => s.replace('  if (!freshness.ok) {\n'
                    + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {",
                    '  if (false) {\n'
                    + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {"), 'RED'],
 
-  ['MUT-E16 마크가 신선도 판정을 건너뜀 (사이징이 그냥 씀)', P.entry,
+  ['MUT-F16 마크가 신선도 판정을 건너뜀 (사이징이 그냥 씀)', P.entry,
     s => s.replace('  if (!markFreshness.ok) {', '  if (false && !markFreshness.ok) {'), 'RED'],
 
-  ['MUT-E17 기준 마크가를 다시 "시각 없는 숫자"로 축소', P.entry,
+  ['MUT-F17 기준 마크가를 다시 "시각 없는 숫자"로 축소', P.entry,
     s => s.replace("  const markObservation: MarketObservation = {\n"
                    + "    kind: 'MARK',\n"
                    + '    source: mark?.source ?? null,\n'
@@ -1307,18 +1307,18 @@ const M = [
                    + '    exchangeTimeMs: nowMs(), observedAtMs: nowMs(), cache: \'FRESH\',\n'
                    + '  };'), 'RED'],
 
-  ['MUT-E18 낡은 브래킷 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
+  ['MUT-F18 낡은 브래킷 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
     s => s.replace('      observedAtMs: bracket.observedAtMs ?? null, cache: bracket.freshness ?? null });',
                    "      observedAtMs: bracket.observedAtMs ?? null, cache: 'FRESH' });"), 'RED'],
 
-  ['MUT-E19 낡은 premium 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
+  ['MUT-F19 낡은 premium 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
     s => s.replace('      cache: funding.premiumCache ?? null });',
                    "      cache: 'FRESH' });"), 'RED'],
 
-  ['MUT-E20 신선도 판정을 첫 거래소 쓰기 **뒤로** 옮김', P.entry,
+  ['MUT-F20 신선도 판정을 첫 거래소 쓰기 **뒤로** 옮김', P.entry,
     s => moveFreshnessAfterWrite(s), 'RED'],
 
-  ['MUT-E21 라우트가 기준 마크가를 포지션 응답에서 떼어 옴', P.scalp,
+  ['MUT-F21 라우트가 기준 마크가를 포지션 응답에서 떼어 옴', P.scalp,
     s => s.replace('          const r = await bf.readMarkPrice(symbol, !connIsLive)\n'
                    + '            .catch(() => null);\n'
                    + '          // **시각을 여기서 붙이지 않는다** — 읽는 쪽이 응답에 넣어 준다.\n'
@@ -1331,27 +1331,27 @@ const M = [
                    + "            observedAtMs: Date.now(), source: 'POSITION_RISK', cache: 'FRESH' } : null;"),
     'RED'],
 
-  ['MUT-E22 라우트가 수수료에 새 시각을 붙임', P.scalp,
+  ['MUT-F22 라우트가 수수료에 새 시각을 붙임', P.scalp,
     s => s.replace("            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: r.rate.observedAtMs,",
                    "            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),"), 'RED'],
 
-  ['MUT-E23 라우트가 호가의 거래소 시각을 버림', P.scalp,
+  ['MUT-F23 라우트가 호가의 거래소 시각을 버림', P.scalp,
     s => s.replace('            exchangeTimeMs: r.depth.exchangeTimeMs,',
                    '            exchangeTimeMs: Date.now(),'), 'RED'],
 
-  ['MUT-E24 거래소 조회가 premium 응답의 시각을 버림', P.bfapi,
+  ['MUT-F24 거래소 조회가 premium 응답의 시각을 버림', P.bfapi,
     s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
                    '    timeMs: null,'), 'RED'],
 
-  ['MUT-E25 없는 거래소 시각을 0(1970년)으로 적음', P.bfapi,
+  ['MUT-F25 없는 거래소 시각을 0(1970년)으로 적음', P.bfapi,
     s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
                    '    timeMs: Number(d.time || 0),'), 'RED'],
 
-  ['MUT-E26 마크가 조회가 거래소 시각 대신 수신 시각을 적음', P.bfapi,
+  ['MUT-F26 마크가 조회가 거래소 시각 대신 수신 시각을 적음', P.bfapi,
     s => s.replace('      exchangeTimeMs: d?.timeMs ?? null,',
                    '      exchangeTimeMs: at,'), 'RED'],
 
-  ['MUT-E27 마크가 조회에 45초 캐시를 붙임', P.bfapi,
+  ['MUT-F27 마크가 조회에 45초 캐시를 붙임', P.bfapi,
     s => s.replace('  let d: PremiumIndex;\n'
                    + '  try { d = await fetchOne(sym, testnet); }\n'
                    + "  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }\n"
@@ -1364,11 +1364,11 @@ const M = [
                    + '  PREMIUM_CACHE.set(`${testnet ? \'T\' : \'L\'}:${sym}`, { data: d, ts: nowMs() }); }\n'
                    + '  const at = hit0 ? hit0.ts : nowMs();'), 'RED'],
 
-  ['MUT-E28 호가 조회가 거래소 시각을 버림', P.bfapi,
+  ['MUT-F28 호가 조회가 거래소 시각을 버림', P.bfapi,
     s => s.replace('    const te = Number(d?.T ?? d?.E);',
                    '    const te = NaN;'), 'RED'],
 
-  ['MUT-E29 수수료 조회가 관측 시각을 안 싣음 (부르는 쪽이 붙이게 됨)', P.bfapi,
+  ['MUT-F29 수수료 조회가 관측 시각을 안 싣음 (부르는 쪽이 붙이게 됨)', P.bfapi,
     s => s.replace('      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: Date.now() },',
                    '      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: null as any },'),
     'RED'],
@@ -1493,6 +1493,29 @@ if (LIST_ONLY) {
 if (SELF_TEST) {
   let bad = 0;
   const seen = new Set();
+
+  // ── 이름이 겹치면 결과를 읽을 수 없다 ──
+  //
+  // `--only MUT-E`는 **이름 앞부분**으로 고른다. 그래서 다른 묶음이 같은
+  // 접두사를 쓰면 한 번에 둘이 돌고, 보고서의 "MUT-E3"가 어느 것인지
+  // 알 수 없게 된다. 실제로 ④ 작업에서 그 일이 났다 — 신선도 묶음에
+  // `MUT-E*`를 붙였는데 `entryExitSafety` 묶음이 이미 그 이름이었다.
+  //
+  // 체크리스트를 자동으로 눌러 주는 대신 **체크리스트 자체를 없앤다.**
+  {
+    const byName = new Map();
+    for (const [name] of M) {
+      const key = String(name).trim().split(/\s+/)[0];
+      byName.set(key, (byName.get(key) || 0) + 1);
+    }
+    for (const [key, n] of byName) {
+      if (n > 1) {
+        console.error(`❌ 돌연변이 이름이 ${n}번 겹칩니다: ${key}`
+          + ' — --only가 둘을 함께 고르고, 보고서에서 어느 것인지 구별할 수 없습니다');
+        bad++;
+      }
+    }
+  }
   // 자기 점검은 파일을 **바꾸지 않는다.** 그것을 확인하려면 "지금 더러운가"가
   // 아니라 "이 점검 때문에 더러워졌는가"를 봐야 한다. 하네스 파일 자체가
   // 아직 커밋되지 않은 상태에서 돌리면 앞의 방식은 거짓 경보를 낸다.
