@@ -917,6 +917,11 @@ async function runLifecycleSweep(
   //     조회는 `prepareSymbolClose`가 재검증 **앞**에서 전부 끝낸다.
   if (authorityCandidates.length > 0) {
     const { runExitAuthority } = await import('@/lib/engine/exitAuthorityRun');
+    // **DB 울타리는 거래소를 막지 못한다.** 재검증 직후 임차가 넘어가면
+    // 낡은 실행자도 요청을 보낼 수 있다 — 다른 프로세스라 같은 event
+    // loop를 공유하지 않는다. 같은 종료 의도에 같은 멱등 키를 써서
+    // **거래소가** 둘째를 거부하게 한다(진입 경로가 이미 쓰는 규칙).
+    const { exitIntentId } = await import('@/lib/engine/exitIntent');
     out.authority.candidates = authorityCandidates.length;
 
     for (const c of authorityCandidates) {
@@ -987,7 +992,15 @@ async function runLifecycleSweep(
             },
             // ② 노출·모드·규격을 **전부 여기서** 읽는다
             prepareClose: async () => {
-              const p0 = await ops.prepareSymbolClose(venue, c.symbol, c.side);
+              const p0 = await ops.prepareSymbolClose(venue, c.symbol, c.side,
+                // 관측한 노출로 만든다 — 같은 순간 같은 노출을 본
+                // 실행자끼리 같은 값이 나와야 거래소가 중복을 막는다.
+                (observedQty) => exitIntentId({
+                  connectionId: c.connectionId, exchange: c.exchange,
+                  symbol: c.symbol, side: c.side,
+                  executionIdentity: c.executionIdentity,
+                  reason: 'TIME_EXIT', quantity: observedQty,
+                }));
               prepared = p0.prepared;
               return { code: p0.code, prepared: p0.prepared as any, message: p0.message };
             },
@@ -1010,7 +1023,7 @@ async function runLifecycleSweep(
           attemptedWrite: r.attemptedWrite, accepted: r.accepted,
           flatVerified: r.flatVerified, reconciledFlat: r.reconciledFlat,
           needsReconcile: r.needsReconcile,
-          closedQuantity: r.closedQuantity,
+          requestedQuantity: r.requestedQuantity,
           heldMs: r.decision?.heldMs ?? null,
           policySource: r.decision?.policySource ?? null,
           policyVersion: r.decision?.policyVersion ?? null,

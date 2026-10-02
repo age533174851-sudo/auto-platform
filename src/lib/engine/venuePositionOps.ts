@@ -183,6 +183,14 @@ export interface PreparedSymbolClose {
   orderSide: 'BUY' | 'SELL' | null;
   reduceOnly: true;
   observedQty: number | null;
+  /**
+   * 멱등 키. **같은 종료 의도면 같은 값이다.**
+   *
+   * DB 울타리는 거래소를 막지 못한다 — 재검증 **직후** 임차가 넘어가면
+   * 낡은 실행자도 요청을 보낼 수 있다. 같은 식별자를 쓰면 거래소가
+   * 둘째를 거부하므로 **주문은 하나만 생긴다.**
+   */
+  clientOrderId: string | null;
   /** 거래소에서 읽은 계좌 포지션 모드 */
   positionMode: 'ONE_WAY' | 'HEDGE' | null;
   /** 거래소별 전송에 필요한 내부 값 */
@@ -208,11 +216,19 @@ export type PrepareCloseCode =
  */
 export async function prepareSymbolClose(
   c: VenueCreds, symbol: string, positionSide: 'LONG' | 'SHORT',
+  /**
+   * 이 종료 의도의 멱등 키를 만든다. **관측한 수량을 받아서** 만든다 —
+   * 같은 순간 같은 노출을 본 실행자끼리 같은 값이 나와야 한다.
+   *
+   * 안 주면 붙이지 않는다(기존 호출부 동작 불변). 전용 종료 권한은
+   * 반드시 준다.
+   */
+  intentIdFor: ((observedQty: number) => string) | null = null,
 ): Promise<{ code: PrepareCloseCode; prepared: PreparedSymbolClose | null; message: string }> {
   const blank = (positionMode: 'ONE_WAY' | 'HEDGE' | null): PreparedSymbolClose => ({
     venue: c.exchange, symbol, positionSide,
     quantity: null, orderSide: null, reduceOnly: true,
-    observedQty: null, positionMode, inner: null,
+    observedQty: null, clientOrderId: null, positionMode, inner: null,
   });
   try {
     // ── 모드 관문을 **먼저** ──
@@ -240,13 +256,21 @@ export async function prepareSymbolClose(
         code: 'READY', message: 'Gate 전량 청산 준비',
         prepared: { ...blank('ONE_WAY'), quantity: live.qty,
           orderSide: positionSide === 'LONG' ? 'SELL' : 'BUY',
-          observedQty: live.qty, inner: { kind: 'gate' } },
+          observedQty: live.qty,
+          clientOrderId: intentIdFor && live.qty != null ? intentIdFor(live.qty) : null,
+          inner: { kind: 'gate' } },
       };
     }
 
     const bf = await import('../exchanges/binanceFutures');
-    const prep = await bf.prepareClosePosition(
+    // 멱등 키는 **관측한 노출**로 만든다. 먼저 한 번 읽어 수량을 알아야
+    // 하므로, 조회를 두 번 하지 않도록 조회 결과를 받아 다시 만든다.
+    const probe = await bf.prepareClosePosition(
       c.apiKey, c.apiSecret, symbol, positionSide, 100, c.testnet);
+    const prep = (intentIdFor && probe.ok && probe.prepared)
+      ? { ...probe, prepared: { ...probe.prepared,
+          clientOrderId: intentIdFor(probe.prepared.observedQty) } }
+      : probe;
     if (!prep.ok) {
       const mismatch = /방향 불일치/.test(prep.message);
       return { code: mismatch ? 'SIDE_MISMATCH' : 'READ_FAILED',
@@ -261,6 +285,7 @@ export async function prepareSymbolClose(
         venue: 'binance', symbol: prep.prepared.symbol, positionSide,
         quantity: prep.prepared.quantity, orderSide: prep.prepared.side,
         reduceOnly: true, observedQty: prep.prepared.observedQty,
+        clientOrderId: prep.prepared.clientOrderId ?? null,
         positionMode: 'ONE_WAY', inner: prep.prepared,
       },
     };

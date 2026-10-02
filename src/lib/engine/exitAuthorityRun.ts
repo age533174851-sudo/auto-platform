@@ -38,6 +38,7 @@ import {
   type ExitReason, type LeaseIdentity, type PositionIdentity,
 } from './exitAuthority';
 import { applyLifecycleClose } from './lifecycleAction';
+import { isDuplicateIntentError } from './exitIntent';
 import type { ExecutionIdentity } from './managedPosition';
 
 export type ExitRunCode =
@@ -96,8 +97,15 @@ export interface ExitRunResult {
   needsReconcile: boolean;
 
   decision: ExitAuthorityDecision | null;
-  /** 보낸 수량. 안 보냈으면 null */
-  closedQuantity: number | null;
+  /**
+   * **요청한 수량.** 안 보냈으면 null.
+   *
+   * ★ 이것은 "닫힌 양"이 **아니다.** 준비 시점의 노출로 만든 값이고,
+   *   그 사이 사용자가 일부를 수동 청산하면 축소 전용 주문은 남은 만큼만
+   *   체결된다. 실제로 닫혔는지는 `flatVerified` 하나만이 사실이다 —
+   *   보낸 수량을 체결량으로 적으면 장부가 거짓말을 한다.
+   */
+  requestedQuantity: number | null;
   reason: string;
 }
 
@@ -151,7 +159,7 @@ const denied = (
   code, ok: false, failed: false, blocked: true,
   attemptedWrite: false, accepted: null, flatVerified: null,
   reconciledFlat: false, needsReconcile: false,
-  decision, closedQuantity: null, reason, ...over,
+  decision, requestedQuantity: null, reason, ...over,
 });
 
 /**
@@ -237,7 +245,19 @@ export async function runExitAuthority(
   //   `sendClose`는 읽지 않는다.
   const act = await applyLifecycleClose({
     stillMine: deps.revalidateFence,
-    close: deps.sendClose,
+    close: async () => {
+      const r = await deps.sendClose();
+      // ★ **중복 식별자 거부는 실패가 아니다.**
+      //
+      //   같은 종료 의도를 다른 실행자가 이미 보냈다는 뜻이다(울타리가
+      //   넘어간 직후의 경합). "거부됐다"로 적으면 **안 나간 것**으로
+      //   읽혀 같은 자리에 또 보내게 된다. 실제로 닫혔는지는 거래소에만
+      //   있으므로 재조회가 확정하게 넘긴다.
+      if (!r.ok && isDuplicateIntentError(r.error)) {
+        return { ...r, ambiguous: true };
+      }
+      return r;
+    },
     readAfter: deps.readAfter,
   });
 
@@ -254,7 +274,7 @@ export async function runExitAuthority(
       ok: true, failed: false, blocked: false,
       attemptedWrite: true, accepted: act.accepted, flatVerified: true,
       reconciledFlat: reconciled, needsReconcile: false,
-      decision, closedQuantity: qty, reason: act.reason,
+      decision, requestedQuantity: qty, reason: act.reason,
     };
   }
   if (act.code === 'CLOSE_REJECTED') {
@@ -262,7 +282,7 @@ export async function runExitAuthority(
       code: 'CLOSE_REJECTED', ok: false, failed: true, blocked: false,
       attemptedWrite: act.attempted, accepted: false, flatVerified: null,
       reconciledFlat: false, needsReconcile: false,
-      decision, closedQuantity: null, reason: act.reason,
+      decision, requestedQuantity: null, reason: act.reason,
     };
   }
   if (act.code === 'CLOSE_INCOMPLETE') {
@@ -270,7 +290,7 @@ export async function runExitAuthority(
       code: 'CLOSE_INCOMPLETE', ok: false, failed: true, blocked: false,
       attemptedWrite: true, accepted: true, flatVerified: false,
       reconciledFlat: false, needsReconcile: true,
-      decision, closedQuantity: qty, reason: act.reason,
+      decision, requestedQuantity: qty, reason: act.reason,
     };
   }
   // CLOSE_AMBIGUOUS · CLOSE_UNVERIFIED — **보냈는지도 닫혔는지도 모른다.**
@@ -279,6 +299,6 @@ export async function runExitAuthority(
     code: 'CLOSE_UNKNOWN_RECONCILE_REQUIRED', ok: false, failed: true, blocked: false,
     attemptedWrite: true, accepted: act.accepted, flatVerified: act.flatVerified,
     reconciledFlat: false, needsReconcile: true,
-    decision, closedQuantity: null, reason: act.reason,
+    decision, requestedQuantity: null, reason: act.reason,
   };
 }

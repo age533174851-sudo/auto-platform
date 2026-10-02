@@ -798,6 +798,14 @@ export interface PreparedClose {
   /** 준비 시점에 거래소가 답한 노출 */
   observedQty: number;
   observedSide: 'LONG' | 'SHORT';
+  /**
+   * 멱등 키. **같은 종료 의도면 같은 값이다.**
+   *
+   * 거래소가 같은 식별자의 둘째 주문을 거부하므로, 울타리가 넘어간
+   * 직후에 두 실행자가 각자 보내더라도 **주문은 하나만 생긴다.**
+   * 저장소의 진입 경로가 이미 쓰는 규칙이다(`orderExecutor`).
+   */
+  clientOrderId: string | null;
   reason: string;
 }
 
@@ -810,6 +818,8 @@ export interface PreparedClose {
 export async function prepareClosePosition(
   key: string, secret: string, symbol: string,
   positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
+  /** 멱등 키. 안 주면 붙이지 않는다 — 기존 호출부의 동작을 바꾸지 않는다 */
+  clientOrderId: string | null = null,
 ): Promise<{
   ok: boolean; alreadyFlat: boolean; prepared: PreparedClose | null; message: string;
 }> {
@@ -846,6 +856,7 @@ export async function prepareClosePosition(
       side: pos.side === 'LONG' ? 'SELL' : 'BUY',
       quantity: calc.qty, fullClose: calc.fullClose,
       observedQty: Math.abs(pos.amount), observedSide: pos.side,
+      clientOrderId,
       reason: calc.reason,
     },
     message: calc.reason,
@@ -865,6 +876,8 @@ export async function sendPreparedClose(
     symbol: p.symbol, side: p.side, type: 'MARKET', quantity: p.quantity,
     // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.
     reduceOnly: true,
+    // **멱등 키.** 같은 의도의 둘째 주문을 거래소가 거부한다.
+    ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),
   }, testnet);
   if (!r.success) {
     return { success: false, closedQty: 0, fullClose: false, message: r.message };

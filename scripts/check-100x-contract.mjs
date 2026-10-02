@@ -3719,6 +3719,99 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     }
   }
 
+  // ── DB 울타리는 거래소를 막지 못한다 — 멱등 키가 있는가 ──
+  //
+  //   재검증 **직후** 임차가 넘어가면 낡은 실행자도 요청을 보낼 수 있다.
+  //   다른 프로세스라 같은 event loop를 공유하지 않고, 거래소는 우리
+  //   `fence` 값을 모른다. 그래서 같은 종료 의도에 **같은 주문 식별자**를
+  //   써서 거래소가 둘째를 거부하게 한다.
+  //
+  //   저장소의 진입 경로가 이미 쓰는 규칙이다 — `orderExecutor`는
+  //   "clientOrderId가 없으면 중복 주문을 막을 수 없어 중단합니다"라고
+  //   하드 실패시킨다. 종료 경로만 그 규칙 밖에 있었다.
+  {
+    const INTENT = 'src/lib/engine/exitIntent.ts';
+    const it = await loadModule(INTENT, '종료 의도 멱등 키');
+    if (!it || typeof it.exitIntentId !== 'function') {
+      err(`${INTENT}: exitIntentId를 불러오지 못했습니다`
+        + ' — 거래소 수준 중복 차단이 없으면 낡은 실행자가 두 번째 청산을 낼 수 있습니다');
+    } else {
+      const EID = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
+      const base = { connectionId: 'c1', exchange: 'binance', symbol: 'BTCUSDT',
+                     side: 'LONG', executionIdentity: EID, reason: 'TIME_EXIT' };
+      const a = it.exitIntentId({ ...base, quantity: 1 });
+      const b = it.exitIntentId({ ...base, quantity: 1 });
+      if (a !== b) {
+        err(`${INTENT}: 같은 종료 의도가 다른 식별자를 만듭니다 (${a} vs ${b})`
+          + ' — 두 실행자가 다른 id를 쓰면 거래소가 중복을 막지 못합니다');
+      }
+      // 시각·난수가 들어가면 결정적이지 않다. 소스로도 확인한다.
+      const isrc = code(INTENT);
+      for (const banned of ['Date.now()', 'Math.random()', 'randomUUID', 'process.pid']) {
+        if (isrc.includes(banned)) {
+          err(`${INTENT}: 식별자에 ${banned}를 씁니다`
+            + ' — 실행자마다 달라져 거래소가 중복을 구별할 수 없습니다');
+        }
+      }
+      // 서로 다른 의도는 **달라야** 한다 (정당한 재시도가 영구 차단되지 않게)
+      for (const [why, over] of [
+        ['수량', { quantity: 0.6 }], ['종목', { symbol: 'ETHUSDT', quantity: 1 }],
+        ['방향', { side: 'SHORT', quantity: 1 }], ['계좌', { connectionId: 'c2', quantity: 1 }],
+        ['계약', { executionIdentity: { ...EID, contractVersion: 3 }, quantity: 1 }],
+      ]) {
+        if (it.exitIntentId({ ...base, quantity: 1, ...over }) === a) {
+          err(`${INTENT}: ${why}가 달라도 같은 식별자입니다 — 다른 종료가 영구히 막힙니다`);
+        }
+      }
+      // 거래소 규격 — 저장소가 이미 쓰는 36자
+      if (!(a.length > 0 && a.length <= 36) || !/^[A-Za-z0-9_-]+$/.test(a)) {
+        err(`${INTENT}: 식별자가 거래소 규격을 벗어납니다 (${a})`);
+      }
+      // 중복 거부를 **실패로 적지 않는가**
+      if (typeof it.isDuplicateIntentError !== 'function') {
+        err(`${INTENT}: isDuplicateIntentError가 없습니다`
+          + ' — 중복 거부를 "안 나갔다"로 읽으면 같은 자리에 또 보냅니다');
+      } else if (!it.isDuplicateIntentError('Duplicate order sent. (code -4015)')) {
+        err(`${INTENT}: 중복 식별자 거부를 알아보지 못합니다`);
+      }
+    }
+
+    // 전송 경로가 **실제로** 그 키를 싣는가
+    const vops2 = code('src/lib/engine/venuePositionOps.ts');
+    if (!/clientOrderId/.test(vops2)) {
+      err('venuePositionOps: 청산 주문에 멱등 키를 싣지 않습니다');
+    }
+    const bfs = code('src/lib/exchanges/binanceFutures.ts');
+    const iSend2 = bfs.indexOf('export async function sendPreparedClose(');
+    const sendBody2 = iSend2 < 0 ? '' : bfs.slice(iSend2, iSend2 + 1200);
+    if (iSend2 < 0) {
+      err('binanceFutures: sendPreparedClose를 찾지 못했습니다 — 쓰기 경계를 확인할 수 없습니다');
+    } else {
+      if (!/clientOrderId/.test(sendBody2)) {
+        err('binanceFutures.sendPreparedClose가 멱등 키를 주문에 싣지 않습니다'
+          + ' — 울타리가 넘어간 직후의 둘째 주문을 거래소가 막을 수 없습니다');
+      }
+      if (!/reduceOnly:\s*true/.test(sendBody2)) {
+        err('binanceFutures.sendPreparedClose의 payload에 reduceOnly가 없습니다');
+      }
+    }
+    const mon6 = code(MON5);
+    if (!/exitIntentId\(/.test(mon6)) {
+      err(`${MON5}: 전용 종료 경로가 멱등 키를 만들지 않습니다`);
+    }
+    // 실행 순서 정본이 중복 거부를 "모름"으로 넘기는가
+    const runSrc = code(RUN);
+    if (!/isDuplicateIntentError/.test(runSrc)) {
+      err(`${RUN}: 중복 식별자 거부를 분류하지 않습니다`
+        + ' — "거부됐다"로 적으면 안 나간 것으로 읽혀 또 보냅니다');
+    }
+    // 보낸 수량을 **체결량으로 적지 않는가**
+    if (/closedQuantity/.test(runSrc)) {
+      err(`${RUN}: 보낸 수량을 "닫힌 수량"으로 적습니다`
+        + ' — 준비 뒤 일부가 수동 청산되면 그 숫자가 거짓이 됩니다 (flatVerified만 사실입니다)');
+    }
+  }
+
   // ── 아직 열지 않은 종료 사유를 열지 않았는가 ──
   {
     const authSrc = code(AUTH);
