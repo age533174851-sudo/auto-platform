@@ -773,49 +773,123 @@ export function closeQuantityFor(
   return { qty, fullClose, reason };
 }
 
+// ── 청산을 **준비**하는 것과 **보내는** 것을 나눈다 ──
+//
+// 왜 나누는가
+// ───────────
+// 전용 종료 권한(⑤)은 "쓰기 직전에 다시 내가 주인인가"를 묻는다. 그런데
+// 예전 `closePositionPercent`는 그 확인이 끝난 **뒤에** 포지션 조회와
+// 규격 조회를 또 했다 — 네트워크 왕복 두 번이다. 그 사이에 임차가
+// 넘어가면 울타리를 확인하고도 남의 포지션에 주문이 나간다.
+//
+// 그래서 **읽는 일을 전부 앞으로** 모은다. 울타리 확인 뒤에는
+// `sendPreparedClose`의 주문 전송 하나만 남는다.
+//
+// ★ **주문 payload를 만드는 곳은 여전히 한 곳이다.** 수량·반대방향·
+//   `reduceOnly`를 두 벌로 만들면 한쪽만 고쳐지고 그때 두 답이 갈린다.
+
+export interface PreparedClose {
+  symbol: string;
+  /** 보낼 주문의 방향. 포지션의 **반대**다 */
+  side: 'BUY' | 'SELL';
+  /** 지금 관측한 노출로 만든 수량. **진입 수량이 아니다** */
+  quantity: number;
+  fullClose: boolean;
+  /** 준비 시점에 거래소가 답한 노출 */
+  observedQty: number;
+  observedSide: 'LONG' | 'SHORT';
+  reason: string;
+}
+
+/**
+ * 청산 주문을 **준비한다.** 거래소를 바꾸지 않는다 — 읽기만 한다.
+ *
+ * `alreadyFlat`은 "보낼 것이 없다"이고 **실패가 아니다.** 그 둘을 한
+ * boolean으로 합치면 "이미 닫혀 있음"이 "주문을 보냈음"으로 적힌다.
+ */
+export async function prepareClosePosition(
+  key: string, secret: string, symbol: string,
+  positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
+): Promise<{
+  ok: boolean; alreadyFlat: boolean; prepared: PreparedClose | null; message: string;
+}> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  const posRes: any = await getFuturesPositions(key, secret, testnet);
+  if (!posRes?.success) {
+    // **못 읽은 것을 flat으로 읽지 않는다.**
+    return { ok: false, alreadyFlat: false, prepared: null,
+      message: `포지션 조회 실패: ${posRes?.message || '사유 미상'}` };
+  }
+  const pos = (posRes.positions as FuturesPosition[])
+    .find(p => p.symbol.toUpperCase() === sym);
+  if (!pos || Math.abs(pos.amount) === 0) {
+    return { ok: true, alreadyFlat: true, prepared: null, message: '이미 포지션이 없습니다' };
+  }
+  if (pos.side !== positionSide) {
+    return { ok: false, alreadyFlat: false, prepared: null,
+      message: `방향 불일치 — 요청 ${positionSide}, 실제 ${pos.side}. 상태를 먼저 대조하세요` };
+  }
+
+  const filters = await getSymbolFilters(sym, testnet);
+  // 청산은 시장가로 나간다 — 시장가 격자를 쓴다. 없으면 격자 없이 간다.
+  const grid = qtyGridFor(filters, 'MARKET');
+  const calc = closeQuantityFor(
+    pos.amount, percent, grid?.stepSize ?? 0, grid?.minQty ?? 0);
+  if (calc.qty <= 0) {
+    return { ok: false, alreadyFlat: false, prepared: null, message: calc.reason };
+  }
+  return {
+    ok: true, alreadyFlat: false,
+    prepared: {
+      symbol: sym,
+      // **반대 방향이다.** 같은 방향으로 보내면 포지션이 커진다.
+      side: pos.side === 'LONG' ? 'SELL' : 'BUY',
+      quantity: calc.qty, fullClose: calc.fullClose,
+      observedQty: Math.abs(pos.amount), observedSide: pos.side,
+      reason: calc.reason,
+    },
+    message: calc.reason,
+  };
+}
+
+/**
+ * 준비된 청산을 **보낸다.** 여기서는 읽지 않는다.
+ *
+ * 울타리 확인과 이 호출 사이에 네트워크 왕복이 없어야 한다 — 그 창이
+ * 넓을수록 느린 실행자가 뒤늦게 깨어나 남의 포지션을 닫을 여지가 커진다.
+ */
+export async function sendPreparedClose(
+  key: string, secret: string, p: PreparedClose, testnet = true,
+): Promise<{ success: boolean; closedQty: number; fullClose: boolean; message: string }> {
+  const r = await placeFuturesOrder(key, secret, {
+    symbol: p.symbol, side: p.side, type: 'MARKET', quantity: p.quantity,
+    // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.
+    reduceOnly: true,
+  }, testnet);
+  if (!r.success) {
+    return { success: false, closedQty: 0, fullClose: false, message: r.message };
+  }
+  return { success: true, closedQty: p.quantity, fullClose: p.fullClose,
+    message: `${p.quantity} 종료 (${p.reason})` };
+}
+
+/**
+ * 옛 이름. **동작을 바꾸지 않는다** — 준비와 전송을 이어서 할 뿐이다.
+ *
+ * ★ 전용 종료 권한은 이것을 쓰지 않는다. 준비와 전송 사이에 울타리를
+ *   다시 확인해야 하기 때문이다.
+ */
 export async function closePositionPercent(
   key: string, secret: string, symbol: string,
   positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
 ): Promise<{ success: boolean; closedQty: number; fullClose: boolean; message: string }> {
   try {
-    const sym = symbol.toUpperCase().replace('/', '');
-    const posRes: any = await getFuturesPositions(key, secret, testnet);
-    if (!posRes?.success) {
-      return { success: false, closedQty: 0, fullClose: false,
-        message: `포지션 조회 실패: ${posRes?.message || '사유 미상'}` };
+    const prep = await prepareClosePosition(key, secret, symbol, positionSide, percent, testnet);
+    if (!prep.ok) return { success: false, closedQty: 0, fullClose: false, message: prep.message };
+    if (prep.alreadyFlat || !prep.prepared) {
+      return { success: true, closedQty: 0, fullClose: false, message: prep.message };
     }
-    const pos = (posRes.positions as FuturesPosition[])
-      .find(p => p.symbol.toUpperCase() === sym);
-    if (!pos || Math.abs(pos.amount) === 0) {
-      return { success: true, closedQty: 0, fullClose: false, message: '이미 포지션이 없습니다' };
-    }
-    if (pos.side !== positionSide) {
-      return { success: false, closedQty: 0, fullClose: false,
-        message: `방향 불일치 — 요청 ${positionSide}, 실제 ${pos.side}. 상태를 먼저 대조하세요` };
-    }
-
-    const filters = await getSymbolFilters(sym, testnet);
-    // 청산은 시장가로 나간다 — 시장가 격자를 쓴다. 없으면 격자 없이 간다.
-    const grid = qtyGridFor(filters, 'MARKET');
-    const calc = closeQuantityFor(
-      pos.amount, percent, grid?.stepSize ?? 0, grid?.minQty ?? 0);
-    if (calc.qty <= 0) {
-      return { success: false, closedQty: 0, fullClose: false, message: calc.reason };
-    }
-    const { qty, fullClose } = calc;
-
-    const side: 'BUY' | 'SELL' = pos.side === 'LONG' ? 'SELL' : 'BUY';
-    const r = await placeFuturesOrder(key, secret, {
-      symbol: sym, side, type: 'MARKET', quantity: qty, reduceOnly: true,
-    }, testnet);
-
-    if (!r.success) {
-      return { success: false, closedQty: 0, fullClose: false, message: r.message };
-    }
-    return {
-      success: true, closedQty: qty, fullClose,
-      message: `${qty} 종료 (${calc.reason})`,
-    };
+    return await sendPreparedClose(key, secret, prep.prepared, testnet);
   } catch (e: any) {
     // 여기까지 오면 주문을 보냈는지 알 수 없다. 성공으로 만들지 않는다.
     return { success: false, closedQty: 0, fullClose: false,

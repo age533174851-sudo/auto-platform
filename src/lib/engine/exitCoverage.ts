@@ -23,6 +23,7 @@
 
 import { STRATEGIES, type StrategyId } from '../strategies/registry';
 import { lifecyclePolicyOf } from '../strategies/lifecyclePolicy';
+import type { SeatExitCapabilities } from './managedPosition';
 import { managedCandidates, type OrderRowLike } from './managedPosition';
 import { OPEN_COMBOS, type OpenCombo } from '../execution/dormantGate';
 import { resolveExecutionProfile } from '../execution/profile';
@@ -169,6 +170,39 @@ const PROBE_ROW = {
   strategy_id: '(probe-strategy)',
 } as const;
 
+/**
+ * 이 계약의 노출에 **전용 종료 권한이 무엇을 열어 두었는가.**
+ *
+ * **표에 손으로 적지 않는다.** `managedCandidates`에 탐침 줄을 넣고
+ * 분류기가 실제로 올려 주는 후보의 `capabilities`를 그대로 읽는다.
+ * 배선을 끊으면 이 값도 같이 false가 된다 — 표가 거짓말하지 않는다.
+ */
+export function authorityCapabilitiesOf(
+  stopPolicy: StopPolicy | null,
+  identity: { profileId: string; presetId: string; contractVersion: number } | null,
+): { admitted: boolean; capabilities: SeatExitCapabilities } {
+  const row: OrderRowLike = {
+    ...PROBE_ROW,
+    stop_policy: stopPolicy,
+    stop_loss: stopPolicy === 'NO_FIXED_SL' ? null : 99,
+    ...(identity ? {
+      execution_profile_id: identity.profileId,
+      execution_preset_id: identity.presetId,
+      execution_contract_version: identity.contractVersion,
+    } : {}),
+  };
+  const r = managedCandidates([row]);
+  const c = (r.authorityCandidates ?? [])[0];
+  if (!c) {
+    return {
+      admitted: false,
+      capabilities: { fixedStopAtEntry: false, breakEven: false, trailing: false,
+                      timeExit: false, emergency: false },
+    };
+  }
+  return { admitted: true, capabilities: c.capabilities };
+}
+
 export interface LifecycleAdmission {
   admitted: boolean;
   /** 분류기가 돌려준 코드. 통과면 'MANAGED' */
@@ -227,13 +261,21 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
     if (policy !== 'NO_FIXED_SL') continue;
 
     const adm = genericLifecycleAdmission(policy);
+    // ★ **전용 종료 권한이 실제로 무엇을 여는지 분류기에게 묻는다.**
+    //   표에 손으로 `true`를 적으면 배선을 끊어도 화면은 초록으로 남는다.
+    const auth = authorityCapabilitiesOf(policy, {
+      profileId: c.profileId, presetId: c.presetId, contractVersion: c.contractVersion,
+    });
     const strat = STRATEGIES.find(s => s.id === c.strategyId);
     const label = `${c.profileId} · ${c.presetId} v${c.contractVersion}`;
-    // 계약이 스스로 선언한 보유 한도. **읽는 곳이 있는지와는 별개다.**
-    const declaredHold = Number(r.contract.maxHoldSec) > 0
-      ? `계약은 최대 보유 ${Math.round(Number(r.contract.maxHoldSec) / 3600)}시간을 선언하지만`
-        + ' 청산 경로가 그 값을 읽지 않습니다'
-      : '계약에 최대 보유 한도가 없습니다';
+    // 계약이 선언한 보유 한도와, 그 값을 **실제로 읽는 경로가 있는가.**
+    const holdH = Number(r.contract.maxHoldSec) > 0
+      ? Math.round(Number(r.contract.maxHoldSec) / 3600) : null;
+    const declaredHold = holdH == null
+      ? '계약에 최대 보유 한도가 없습니다'
+      : auth.capabilities.timeExit
+        ? `계약이 선언한 최대 보유 ${holdH}시간을 전용 종료 권한이 읽어 시간 청산을 돌립니다`
+        : `계약은 최대 보유 ${holdH}시간을 선언하지만 청산 경로가 그 값을 읽지 않습니다`;
 
     out.push({
       strategyId: c.strategyId,
@@ -242,19 +284,31 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
       contract: { profileId: c.profileId, presetId: c.presetId, contractVersion: c.contractVersion },
       contractLabel: label,
       // **계약상 안 거는 것**이다. 고쳐야 할 빈 칸이 아니다.
-      protectiveOrdersAtEntry: false,
-      trailing: false, breakEven: false, timeExit: false,
-      positionGuard: adm.admitted,
+      protectiveOrdersAtEntry: auth.capabilities.fixedStopAtEntry,
+      // ★ 셋 다 **분류기에서 derive한다.** 손으로 적지 않는다.
+      trailing: auth.capabilities.trailing,
+      breakEven: auth.capabilities.breakEven,
+      timeExit: auth.capabilities.timeExit,
+      // 전용 권한이 매 회차 거래소 노출을 다시 읽는다.
+      positionGuard: adm.admitted || auth.capabilities.timeExit,
       // 고아 보호주문 정리는 적어 둔 번호로만 하므로 자리 유예와 무관하게 돈다.
       orphanSweep: true,
       gap: adm.admitted
         // 분류기가 통과시키는데 표가 false면 둘이 갈린 것이다. 숨기지 않는다.
         ? '분류기는 이 계약을 일반 생명주기에 넣는데 이 표는 아니라고 적고 있습니다'
           + ' — 둘 중 하나가 틀렸습니다'
-        : `고정 손절을 걸지 않는 계약입니다(의도). 그리고 ${adm.code}로 자리 전체가`
-          + ` 일반 생명주기에서 유예되어 트레일링·본전이동·시간청산이 하나도 돌지`
-          + ` 않습니다 — 지금 이 계약의 종료 수단은 사람이 직접 닫는 것뿐입니다.`
-          + ` ${declaredHold}. (${adm.reason})`,
+        : auth.capabilities.timeExit
+          // 전용 권한이 **시간 청산 하나만** 연 상태. 나머지가 없다는 것을
+          // 그대로 적는다 — 하나가 열렸다고 "종료가 된다"로 적지 않는다.
+          ? `고정 손절을 걸지 않는 계약입니다(의도). 일반 생명주기는 ${adm.code}로`
+            + ` 유예되고, 전용 종료 권한이 **시간 청산만** 돌립니다.`
+            + ` ${declaredHold}. 트레일링·본전이동·adverse/청산여유 비상 종료는`
+            + ` 아직 없습니다 — 보유 한도 전에 불리하게 움직이면 자동으로 닫히지`
+            + ` 않습니다.`
+          : `고정 손절을 걸지 않는 계약입니다(의도). 그리고 ${adm.code}로 자리 전체가`
+            + ` 일반 생명주기에서 유예되어 트레일링·본전이동·시간청산이 하나도 돌지`
+            + ` 않습니다 — 지금 이 계약의 종료 수단은 사람이 직접 닫는 것뿐입니다.`
+            + ` ${declaredHold}. (${adm.reason})`,
     });
   }
   return out;

@@ -774,6 +774,8 @@ async function runLifecycleSweep(
 ): Promise<{
   candidates: number; acted: number; skipped: any[];
   deferred: any[]; deferredCount: number;
+  /** 전용 종료 권한(Exact100X 시간 청산) 결과. **일반 생명주기와 섞지 않는다** */
+  authority: { candidates: number; acted: number; failed: number; results: any[] };
   /** 주문 장부를 어떤 모양으로 읽었는가. 못 읽었으면 null */
   projection: 'IDENTITY' | 'LEGACY' | null;
   results: any[]; summary: string; error: string | null;
@@ -784,6 +786,9 @@ async function runLifecycleSweep(
     // ★ **유예는 실패가 아니다.** 일부러 관리하지 않은 줄을 `skipped`나
     //   실패 목록에 섞으면 운영자가 고칠 것이 없는데 고치려 든다.
     deferred: [] as any[], deferredCount: 0,
+    // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
+    //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
+    authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
     results: [] as any[], summary: '', error: null as string | null,
   };
 
@@ -829,12 +834,16 @@ async function runLifecycleSweep(
   //   `deferred`가 이 반복문에 **도달할 수 없는 것**이 이 PR의 핵심이다.
   //   반복문 안에서 뒤늦게 거르면 그때는 이미 `credsOf`·`readOpenPosition`·
   //   `highWaterSince`·`liveStopPrice`가 불린 뒤다.
-  const { positions, deferred, skipped } = managedCandidates(rows);
+  const { positions, deferred, skipped, authorityCandidates } = managedCandidates(rows);
   out.candidates = positions.length;
   out.skipped = skipped;
   out.deferred = deferred;
   out.deferredCount = deferred.length;
-  if (positions.length === 0) {
+  // ★ **일반 후보가 0건이어도 전용 권한은 돈다.**
+  //   Exact100X 노출은 정의상 `positions`에 들어가지 않는다(자리 유예).
+  //   여기서 일찍 돌아가면 전용 종료 권한이 영원히 호출되지 않는다 —
+  //   이 저장소가 반복한 "만들어 놓고 배선을 안 함"이 그대로 재현된다.
+  if (positions.length === 0 && authorityCandidates.length === 0) {
     out.summary = deferred.length
       ? `감시할 후보가 없습니다 · 관리 유예 ${deferred.length}건`
       : '감시할 후보가 없습니다';
@@ -890,6 +899,136 @@ async function runLifecycleSweep(
     if (!stillMine) return true;
     try { return await stillMine(); } catch { return false; }
   };
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 전용 종료 권한 — Exact100X 시간 청산
+  // ══════════════════════════════════════════════════════════
+  //
+  //   **일반 루프에 합치지 않는다.** 합치면 `lifecyclePolicyOf(strategyId)`
+  //   경로를 타게 되어 계약의 4시간이 아니라 전략 scalp의 6시간으로
+  //   닫힌다 — 사용자가 고르지 않은 2시간이다. 그리고 트레일링·본전이동이
+  //   같이 열린다.
+  //
+  //   순서(임차 → 노출 READ → 신원 검증 → **울타리 재검증** → 전송 →
+  //   재조회)는 `exitAuthorityRun`이 갖는다. 라우트에 인라인으로 두면 그
+  //   순서가 시험되지 않는 자리에 남는다.
+  //
+  //   ★ 재검증과 전송 사이에 네트워크 왕복이 **0**이다. 모드·노출·규격
+  //     조회는 `prepareSymbolClose`가 재검증 **앞**에서 전부 끝낸다.
+  if (authorityCandidates.length > 0) {
+    const { runExitAuthority } = await import('@/lib/engine/exitAuthorityRun');
+    out.authority.candidates = authorityCandidates.length;
+
+    for (const c of authorityCandidates) {
+      const tag = {
+        symbol: c.symbol, strategyId: c.strategyId,
+        executionProfileId: c.executionIdentity.profileId,
+        contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
+          + `/v${c.executionIdentity.contractVersion}`,
+        side: c.side,
+      };
+      try {
+        const venue = await credsOf(c.connectionId);
+        if (!venue) {
+          out.authority.results.push({ ...tag, code: 'NO_VENUE', ok: false, failed: true,
+            attemptedWrite: false,
+            reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+          out.authority.failed += 1;
+          continue;
+        }
+        if (venue.exchange !== c.exchange) {
+          out.authority.results.push({ ...tag, code: 'VENUE_MISMATCH', ok: false, failed: true,
+            attemptedWrite: false,
+            reason: `주문은 ${c.exchange}로 적혀 있는데 연결은 ${venue.exchange}입니다` });
+          out.authority.failed += 1;
+          continue;
+        }
+
+        if (dryRun) {
+          // 점검 모드에서는 **거래소를 읽지도 쓰지도 않는다.**
+          out.authority.results.push({ ...tag, code: 'DRY_RUN', ok: true, failed: false,
+            attemptedWrite: false, reason: '점검 모드 — 전용 종료 권한을 돌리지 않았습니다' });
+          continue;
+        }
+
+        // ★ **같은 회차에 같은 자리를 두 번 건드리지 않는다.**
+        //   일반 루프와 같은 표식을 쓴다 — 같은 자리를 두 경로가 함께
+        //   건드리는 것도 막아야 한다.
+        const key = mutationKeyOf({
+          connectionId: c.connectionId, symbol: c.symbol, side: c.side,
+        } as any);
+        if (!guard.claim(key)) {
+          out.authority.results.push({ ...tag, code: 'DUPLICATE', ok: true, failed: false,
+            attemptedWrite: false,
+            reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
+          continue;
+        }
+
+        let prepared: any = null;
+        const r = await runExitAuthority(
+          {
+            positionIdentity: {
+              exchange: c.exchange, connectionId: c.connectionId, symbol: c.symbol,
+              side: c.side, executionIdentity: c.executionIdentity,
+              openingOrderId: c.orderId,
+            },
+            strategyId: c.strategyId,
+            executionIdentity: c.executionIdentity,
+            capabilities: c.capabilities,
+            reason: 'TIME_EXIT',
+            openedAtMs: c.openedAt,
+          },
+          {
+            // ① 임차 — 거래소를 읽기 전에
+            leaseOwned: async () => {
+              const owned = await mayMutate();
+              return { owned, identity: { holder: null, fence: fence ?? null },
+                reason: owned ? '' : LEASE_LOST_MSG };
+            },
+            // ② 노출·모드·규격을 **전부 여기서** 읽는다
+            prepareClose: async () => {
+              const p0 = await ops.prepareSymbolClose(venue, c.symbol, c.side);
+              prepared = p0.prepared;
+              return { code: p0.code, prepared: p0.prepared as any, message: p0.message };
+            },
+            // ③ 쓰기 직전 재검증 — 아래 전송과의 사이에 await가 없다
+            revalidateFence: mayMutate,
+            // ④ 전송 — 읽지 않는다
+            sendClose: () => ops.sendSymbolClose(venue, prepared),
+            // ⑤ 재조회
+            readAfter: () => ops.readOpenPosition(venue, c.symbol)
+              .then((x: any) => ({ ok: x.ok === true, found: x.found === true })),
+          },
+          Date.now(),
+        );
+
+        if (r.attemptedWrite) out.authority.acted += 1;
+        if (r.failed) out.authority.failed += 1;
+        out.authority.results.push({
+          ...tag, code: r.code, ok: r.ok, failed: r.failed, blocked: r.blocked,
+          // ★ **"성공"과 "주문 전송"을 같은 값으로 적지 않는다.**
+          attemptedWrite: r.attemptedWrite, accepted: r.accepted,
+          flatVerified: r.flatVerified, reconciledFlat: r.reconciledFlat,
+          needsReconcile: r.needsReconcile,
+          closedQuantity: r.closedQuantity,
+          heldMs: r.decision?.heldMs ?? null,
+          policySource: r.decision?.policySource ?? null,
+          policyVersion: r.decision?.policyVersion ?? null,
+          leaseFence: r.decision?.leaseIdentity?.fence ?? null,
+          reason: r.reason,
+        });
+
+        if (r.code === 'LEASE_LOST' || r.code === 'NOT_OWNER') {
+          // **회차를 끊는다.** 임차가 넘어갔으면 다음 후보도 내 것이 아니다.
+          break;
+        }
+      } catch (e: any) {
+        out.authority.results.push({ ...tag, code: 'FAILED', ok: false, failed: true,
+          attemptedWrite: false, reason: String(e?.message || e).slice(0, 160) });
+        out.authority.failed += 1;
+      }
+    }
+  }
 
   for (const p of positions) {
     // ══════════════════════════════════════════════════════════
@@ -1061,7 +1200,14 @@ async function runLifecycleSweep(
   }
 
   const unknown = out.results.filter(r => r.code === 'POSITION_UNKNOWN').length;
+  // ★ **전용 권한 결과가 요약에서 사라지지 않게 한다.** 예전에 생명주기
+  //   결과가 실패 집계에서 빠져 "조용한 정상"으로 보인 적이 있다.
   out.summary = `후보 ${out.candidates}건 · 실행 ${out.acted}건`
+    + (out.authority.candidates
+        ? ` · 전용 종료 후보 ${out.authority.candidates}건`
+          + ` (전송 ${out.authority.acted}건`
+          + `${out.authority.failed ? ` · 실패 ${out.authority.failed}건` : ''})`
+        : '')
     + (unknown > 0 ? ` · 확인 못 함 ${unknown}건` : '')
     // ★ 유예를 따로 적는다. "대상 아님"에 합치면 **일부러 관리하지 않은 줄**과
     //   칸이 모자라 판단 못 한 줄이 한 숫자가 되고, 그러면 화면만 보고는

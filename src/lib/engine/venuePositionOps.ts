@@ -157,6 +157,152 @@ export async function closeSymbolPosition(
   }
 }
 
+// ── 전용 종료 권한용: 준비 / 전송을 나눈다 ──
+//
+// `closeSymbolPosition`은 모드 조회와 포지션 조회를 **전송 직전에** 한다.
+// 그래서 "쓰기 직전에 울타리 재확인"을 그 앞에 두어도, 확인과 실제 주문
+// 사이에 네트워크 왕복이 두 번 남는다. 느린 실행자가 그 창에서 깨어나면
+// 울타리를 확인하고도 남의 포지션에 주문을 낸다.
+//
+// 그래서 **읽는 일을 전부 앞으로** 모은다:
+//
+//   prepareSymbolClose   모드·노출·규격을 전부 읽고 payload를 만든다
+//   ── 여기서 울타리를 다시 확인한다 (네트워크 왕복 0) ──
+//   sendSymbolClose      주문 하나만 보낸다
+//
+// payload를 만드는 곳은 여전히 `binanceFutures.prepareClosePosition`
+// 한 곳이다 — 수량·반대방향·reduceOnly 규칙이 두 벌이 되지 않는다.
+
+export interface PreparedSymbolClose {
+  venue: 'binance' | 'gate';
+  symbol: string;
+  positionSide: 'LONG' | 'SHORT';
+  /** 보낼 수량. **지금 관측한 노출에서 왔다** */
+  quantity: number | null;
+  /** 보낼 주문 방향 — 포지션의 반대 */
+  orderSide: 'BUY' | 'SELL' | null;
+  reduceOnly: true;
+  observedQty: number | null;
+  /** 거래소에서 읽은 계좌 포지션 모드 */
+  positionMode: 'ONE_WAY' | 'HEDGE' | null;
+  /** 거래소별 전송에 필요한 내부 값 */
+  inner: unknown;
+}
+
+export type PrepareCloseCode =
+  | 'READY'
+  /** 거래소에 포지션이 없다 — 보낼 주문이 없다. **실패가 아니다** */
+  | 'ALREADY_FLAT'
+  /** 포지션·모드를 읽지 못했다. **flat이 아니다** */
+  | 'READ_FAILED'
+  /** 모드를 확인하지 못했거나 양방향이다 */
+  | 'MODE_BLOCKED'
+  /** 장부와 거래소의 방향이 다르다 */
+  | 'SIDE_MISMATCH';
+
+/**
+ * 청산을 **준비한다.** 거래소를 바꾸지 않는다.
+ *
+ * 모드 관문(`closeModeGate`)을 여기서 지난다 — 전송 시점이 아니라.
+ * 판정 자체는 `futuresExec.closeModeVerdict` 한 곳 그대로다.
+ */
+export async function prepareSymbolClose(
+  c: VenueCreds, symbol: string, positionSide: 'LONG' | 'SHORT',
+): Promise<{ code: PrepareCloseCode; prepared: PreparedSymbolClose | null; message: string }> {
+  const blank = (positionMode: 'ONE_WAY' | 'HEDGE' | null): PreparedSymbolClose => ({
+    venue: c.exchange, symbol, positionSide,
+    quantity: null, orderSide: null, reduceOnly: true,
+    observedQty: null, positionMode, inner: null,
+  });
+  try {
+    // ── 모드 관문을 **먼저** ──
+    const cm = await closeModeGate(c, positionSide);
+    if (!cm.ok) {
+      return { code: 'MODE_BLOCKED', prepared: blank(null), message: cm.message };
+    }
+
+    if (c.exchange === 'gate') {
+      // Gate는 `auto_size`가 잔여 부호에서 수량을 정한다 — 미리 만들 payload가
+      // 없다. 노출만 확인해 두고 전송은 기존 경로를 쓴다.
+      const live = await readOpenPosition(c, symbol);
+      if (live.ok !== true) {
+        return { code: 'READ_FAILED', prepared: blank('ONE_WAY'),
+          message: live.error || 'Gate 포지션 조회 실패' };
+      }
+      if (!live.found) {
+        return { code: 'ALREADY_FLAT', prepared: blank('ONE_WAY'), message: '이미 포지션이 없습니다' };
+      }
+      if (live.side != null && live.side !== positionSide) {
+        return { code: 'SIDE_MISMATCH', prepared: blank('ONE_WAY'),
+          message: `방향 불일치 — 장부 ${positionSide}, 거래소 ${live.side}` };
+      }
+      return {
+        code: 'READY', message: 'Gate 전량 청산 준비',
+        prepared: { ...blank('ONE_WAY'), quantity: live.qty,
+          orderSide: positionSide === 'LONG' ? 'SELL' : 'BUY',
+          observedQty: live.qty, inner: { kind: 'gate' } },
+      };
+    }
+
+    const bf = await import('../exchanges/binanceFutures');
+    const prep = await bf.prepareClosePosition(
+      c.apiKey, c.apiSecret, symbol, positionSide, 100, c.testnet);
+    if (!prep.ok) {
+      const mismatch = /방향 불일치/.test(prep.message);
+      return { code: mismatch ? 'SIDE_MISMATCH' : 'READ_FAILED',
+        prepared: blank('ONE_WAY'), message: prep.message };
+    }
+    if (prep.alreadyFlat || !prep.prepared) {
+      return { code: 'ALREADY_FLAT', prepared: blank('ONE_WAY'), message: prep.message };
+    }
+    return {
+      code: 'READY', message: prep.message,
+      prepared: {
+        venue: 'binance', symbol: prep.prepared.symbol, positionSide,
+        quantity: prep.prepared.quantity, orderSide: prep.prepared.side,
+        reduceOnly: true, observedQty: prep.prepared.observedQty,
+        positionMode: 'ONE_WAY', inner: prep.prepared,
+      },
+    };
+  } catch (e: any) {
+    return { code: 'READ_FAILED', prepared: blank(null), message: String(e?.message || e) };
+  }
+}
+
+/**
+ * 준비된 청산을 **보낸다.** 여기서는 읽지 않는다 — 주문 하나뿐이다.
+ *
+ * 돌려주는 `ok`는 "거래소가 접수했다"이고 닫혔는지는 호출부가 재조회로
+ * 확인한다. `ambiguous`는 **접수 여부를 모른다**는 뜻이다.
+ */
+export async function sendSymbolClose(
+  c: VenueCreds, prepared: PreparedSymbolClose,
+): Promise<{ attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean }> {
+  try {
+    if (prepared.venue === 'gate') {
+      const gf = await import('../exchanges/gateFutures');
+      const gp = await import('../exchanges/gatePlan');
+      const contract = gp.toGateContract(prepared.symbol);
+      if (!contract) {
+        return { attempted: false, ok: false, error: `계약 이름을 만들 수 없습니다 (${prepared.symbol})` };
+      }
+      const r = await gf.closePositionGateFutures(c.apiKey, c.apiSecret, contract, c.testnet);
+      return { attempted: true, ok: r.success === true, error: r.success ? null : r.message,
+        ambiguous: r.success ? false : await isAmbiguousSend(r.message) };
+    }
+    const bf = await import('../exchanges/binanceFutures');
+    const r = await bf.sendPreparedClose(
+      c.apiKey, c.apiSecret, prepared.inner as any, c.testnet);
+    const ok = r?.success === true;
+    const msg = ok ? null : String(r?.message || '청산 주문 실패');
+    return { attempted: true, ok, error: msg,
+      ambiguous: ok ? false : await isAmbiguousSend(msg) };
+  } catch (e: any) {
+    // **예외를 '안 보냈다'로도 '거부됐다'로도 적지 않는다.**
+    return { attempted: true, ok: false, error: String(e?.message || e), ambiguous: true };
+  }
+}
+
 /**
  * 걸려 있는 조건부 주문.
  *

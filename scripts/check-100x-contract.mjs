@@ -479,21 +479,79 @@ if (gate) {
         + ' — 그 계약의 포지션이 무슨 감시를 받는지 아무도 적지 않습니다');
     }
     for (const r of noFixed) {
+      // ── 계약상 **안 하는 것**은 여전히 false여야 한다 ──
+      //
+      //   ⑤가 시간 청산 하나를 열었다고 해서 나머지가 같이 열리면 안 된다.
+      //   그 셋은 1R(고정 손절)을 요구하므로 이 계약에는 정의 자체가 없다.
       for (const [k, what] of [
         ['trailing', '트레일링'], ['breakEven', '본전이동'],
-        ['timeExit', '시간청산'], ['positionGuard', '포지션 점검'],
         ['protectiveOrdersAtEntry', '진입 보호주문'],
       ]) {
         if (r[k] !== false) {
           err(`${COVERAGE}: ${r.strategyId}/${r.contract.presetId}의 ${what}을 ${r[k]}로 적습니다`
-            + ' — 자리 유예로 돌지 않는 것을 돈다고 적으면 화면이 거짓말을 합니다');
+            + ' — 이 계약에는 1R이 없어 정의할 수 없습니다 (시간 청산과 함께 열리면 안 됩니다)');
         }
       }
+
+      // ── 시간 청산은 **분류기와 같아야 한다** ──
+      //
+      //   원래 규칙은 `timeExit === false`를 못박았다. 그 이유는 "자리
+      //   유예로 돌지 않는데 돈다고 적으면 거짓말"이었다. ⑤에서 전용 종료
+      //   권한이 붙어 실제로 돌기 시작했으므로 그 숫자는 더 이상 사실이
+      //   아니다. 지켜야 할 성질은 "false다"가 아니라 **"표와 코드가
+      //   같다"**였다. 그래서 상수 대신 분류기에게 묻는다.
+      const auth = typeof cov.authorityCapabilitiesOf === 'function'
+        ? cov.authorityCapabilitiesOf(r.stopPolicy, {
+            profileId: r.contract.profileId, presetId: r.contract.presetId,
+            contractVersion: r.contract.contractVersion })
+        : null;
+      if (!auth) {
+        err(`${COVERAGE}: authorityCapabilitiesOf가 없습니다`
+          + ' — 표가 무엇을 근거로 시간 청산을 적는지 확인할 수 없습니다');
+      } else {
+        if (r.timeExit !== auth.capabilities.timeExit) {
+          err(`${COVERAGE}: 표의 시간청산(${r.timeExit})이 분류기(${auth.capabilities.timeExit})와`
+            + ' 다릅니다 — 표에 손으로 적었습니다');
+        }
+        for (const k of ['trailing', 'breakEven', 'emergency']) {
+          if (auth.capabilities[k] !== false) {
+            err(`${COVERAGE}: 분류기가 ${k}를 열어 두었습니다`
+              + ' — 이번 단계에서 열린 것은 시간 청산 하나뿐입니다');
+          }
+        }
+      }
+
+      // ── 배선이 **실제로** 있는가 ──
+      //
+      //   표가 `timeExit: true`라고 적으려면 라우트가 전용 권한을 실제로
+      //   돌려야 한다. 표만 보고 믿지 않는다 — 배선을 끊는 변이에서 이
+      //   검사가 빨간불이 되어야 한다.
+      if (r.timeExit === true) {
+        // `MONITOR` 상수는 이 블록보다 뒤에 선언된다 — 경로를 여기서 쓴다.
+        const monPath = 'src/app/api/autotrade/exit-monitor/route.ts';
+        const mon2 = code(monPath);
+        if (!/runExitAuthority\(/.test(mon2)) {
+          err(`${COVERAGE}: 시간청산을 true로 적는데 ${monPath}가 전용 종료 권한을 부르지 않습니다`
+            + ' — 만들어 놓고 배선하지 않은 상태입니다');
+        }
+        if (!/authorityCandidates/.test(mon2)) {
+          err(`${COVERAGE}: 시간청산을 true로 적는데 ${monPath}가 전용 권한 후보를 받지 않습니다`);
+        }
+      }
+
       if (r.gap == null) {
         err(`${COVERAGE}: ${r.strategyId}/${r.contract.presetId}에 빈 칸이 있는데 이유가 없습니다`);
-      } else if (!/사람이 직접 닫는/.test(String(r.gap))) {
-        err(`${COVERAGE}: 자동 종료가 없다는 사실을 사유에 적지 않습니다`
-          + ' — 운영자가 무엇이 없는지 알 수 없습니다');
+      } else {
+        const gap = String(r.gap);
+        // **하나가 열렸다고 "종료가 된다"로 적지 않는다.** 없는 것은
+        // 그대로 없다고 적어야 운영자가 무엇을 못 믿는지 안다.
+        const okGap = r.timeExit
+          ? /시간 청산만/.test(gap) && /아직 없습니다/.test(gap)
+          : /사람이 직접 닫는/.test(gap);
+        if (!okGap) {
+          err(`${COVERAGE}: 아직 없는 종료 수단을 사유에 적지 않습니다`
+            + ' — 운영자가 무엇이 없는지 알 수 없습니다');
+        }
       }
     }
     // 기본 예약 줄의 커버리지는 **건드리지 않는다.**
@@ -2413,8 +2471,8 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
   //   반복문 안에서 뒤늦게 거르면 그때는 이미 거래소를 읽은 뒤다.
   //   구조로 막혔는지를 본다 — `deferred`가 반복문 안에 없어야 한다.
   {
-    if (!/const \{ positions, deferred, skipped \} = managedCandidates\(/.test(mon)) {
-      err(`${MONITOR}: managedCandidates의 유예 목록을 받지 않습니다`);
+    if (!/const \{ positions, deferred, skipped, authorityCandidates \} = managedCandidates\(/.test(mon)) {
+      err(`${MONITOR}: managedCandidates의 유예·전용권한 목록을 받지 않습니다`);
     }
     const iLoop = mon.indexOf('for (const p of positions) {');
     const iEnd = mon.indexOf('const unknown = out.results.filter');
@@ -2769,13 +2827,47 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     }
   }
 
-  // ── ⑭-d ★★ identity로 **판단하지 않는다** ──
+  // ── ⑭-d ★★ identity가 **일반 생명주기 분류를 바꾸지 않는다** ──
   //
-  //   이 PR은 적고 보여 줄 뿐이다. 무엇을 할지는 전용 종료 권한을
-  //   설계하는 다음 단계의 일이다. 지금 분기가 생기면 반쪽짜리 규칙이
-  //   먼저 자리를 잡는다.
+  //   원래 규칙은 "identity로 아예 분기하지 마라"였다. 그 이유는 적혀
+  //   있었다 — *"무엇을 할지는 전용 종료 권한을 설계하는 다음 단계의
+  //   일이다."* 그 단계가 ⑤다. 이제 전용 권한은 identity로 계약의 보유
+  //   한도를 찾아야 하므로 분기가 **필요하다.**
+  //
+  //   그래서 규칙을 지우지 않고 **좁힌다.** 지켜야 할 성질은 처음부터
+  //   "분기 금지"가 아니라 이것이었다:
+  //
+  //     identity가 있든 없든 **`positions`·`deferred`·`skipped`는 같다.**
+  //     identity는 전용 권한 목록(`authorityCandidates`)만 바꾼다.
+  //
+  //   정규식은 그 성질의 대리물이었고 지금은 거짓 경보를 낸다. 성질
+  //   자체를 아래에서 **돌려서** 검사한다. 정규식은 분류기 정본 함수
+  //   (`seatExitCapabilities`) 밖에서만 유지한다 — 그 함수가 바로
+  //   "이 계약에 무엇이 열려 있는가"를 정하는 자리다.
   {
-    for (const [f, src] of [[CAND, code(CAND)], [MONITOR, code(MONITOR)]]) {
+    /** 능력 분류기 본문은 예외다. 그 함수의 일이 바로 identity 판단이다 */
+    const withoutCapabilityFn = (src) => {
+      const at = src.indexOf('export function seatExitCapabilities(');
+      if (at < 0) {
+        // 정본 함수가 사라졌으면 **검사가 눈머는 것이 아니라 실패한다.**
+        err(`${CAND}: seatExitCapabilities가 없습니다 — 능력 분류 정본이 사라졌습니다`);
+        return src;
+      }
+      // 함수의 끝은 **열 0의 닫는 중괄호 한 줄**이다(`\n}\n`).
+      //
+      // `indexOf('\n}')`만 쓰면 인자 객체 타입의 닫는 줄(`}): {`)에 먼저
+      // 걸려 범위가 짧게 잘리고, 그러면 예외가 적용되지 않아 거짓 경보가
+      // 난다(실제로 그렇게 틀렸다). 그 줄은 뒤에 `)`가 붙으므로 개행이
+      // 바로 오는 것만 고르면 구별된다.
+      const end = src.indexOf('\n}\n', at);
+      if (end < 0) {
+        err(`${CAND}: seatExitCapabilities의 끝을 찾지 못했습니다 — 예외 범위를 정할 수 없습니다`);
+        return src;
+      }
+      return src.slice(0, at) + src.slice(end + 3);
+    };
+    for (const [f, src0] of [[CAND, code(CAND)], [MONITOR, code(MONITOR)]]) {
+      const src = f === CAND ? withoutCapabilityFn(src0) : src0;
       // identity 값을 조건으로 쓰는 모양
       for (const re of [
         /executionIdentity\??\.\w+\s*===/,
@@ -2823,8 +2915,47 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           r.skipped.map(x => x.code).join('|'),
         ].join(' · ');
         if (shape(a) !== shape(b)) {
-          err(`감시 후보: identity가 분류를 바꿉니다 (${JSON.stringify(c)})`
+          err(`감시 후보: identity가 **일반 생명주기 분류**를 바꿉니다 (${JSON.stringify(c)})`
             + `\n      없을 때: ${shape(a)}\n      있을 때: ${shape(b)}`);
+        }
+      }
+
+      // ★ 전용 권한 목록은 **identity가 정한다** — 그리고 일반 목록과 겹치지 않는다.
+      {
+        const NFS = { stop_policy: 'NO_FIXED_SL', stop_loss: null };
+        const noId = cm2.managedCandidates([base(NFS)]);
+        const yesId = cm2.managedCandidates([base({ ...NFS, ...IDENT })]);
+        if ((noId.authorityCandidates || []).length !== 0) {
+          err('감시 후보: 계약 기록이 없는 NO_FIXED_SL을 전용 종료 권한 후보로 올립니다'
+            + ' — 어느 계약의 보유 한도를 쓸지 알 수 없습니다 (fail-closed여야 합니다)');
+        }
+        if ((yesId.authorityCandidates || []).length !== 1) {
+          err('감시 후보: 계약 기록이 있는 NO_FIXED_SL이 전용 종료 권한 후보에 없습니다'
+            + ' — 만들어 놓고 배선하지 않은 상태입니다');
+        }
+        const ac = (yesId.authorityCandidates || [])[0];
+        if (ac) {
+          if (ac.capabilities?.timeExit !== true) {
+            err('감시 후보: 전용 권한 후보에 시간 청산이 열려 있지 않습니다');
+          }
+          for (const k of ['trailing', 'breakEven', 'fixedStopAtEntry', 'emergency']) {
+            if (ac.capabilities?.[k] !== false) {
+              err(`감시 후보: 전용 권한 후보에 ${k}가 함께 열렸습니다`
+                + ' — boolean 하나로 네 기능을 같이 열지 않습니다');
+            }
+          }
+          if (ac.executionIdentity?.presetId !== PRESET) {
+            err('감시 후보: 전용 권한 후보가 identity를 들고 있지 않습니다');
+          }
+        }
+        // **일반 목록에는 그대로 없어야 한다.** 겹치면 트레일링이 함께 돈다.
+        if (yesId.positions.length !== 0) {
+          err('감시 후보: 전용 권한 노출이 일반 생명주기 목록에도 들어 있습니다'
+            + ' — 한 노출을 두 경로가 건드립니다');
+        }
+        if ((yesId.deferred || []).length !== 1) {
+          err('감시 후보: 전용 권한 후보를 올리면서 유예 기록을 지웠습니다'
+            + ' — 일반 생명주기가 왜 안 보는지는 그대로 말해야 합니다');
         }
       }
       // 그러면서도 사실은 실려 있어야 한다 (적기만 한다 ≠ 안 적는다)
@@ -3354,6 +3485,249 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     if (!/positionUpdateTimeMs/.test(src)) {
       err(`${bf}: positionRisk의 updateTime을 버립니다`
         + ' — 보존하되 마크가 시각으로 쓰지 않는 것이 맞습니다');
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ⑤ 전용 종료 권한 — **순서를 돌려서** 증명한다
+// ═══════════════════════════════════════════════════════════
+//
+//   `exitAuthority.ts`가 단계를 타입으로 적어 두었다고 런타임 순서가
+//   보장되지는 않는다. 선언은 선언이고, 무엇을 몇 번 어느 순서로 부르는지는
+//   돌려 봐야 안다.
+//
+//   특히 **울타리 재검증과 전송 사이**에 조회가 하나라도 끼면, 느린
+//   실행자가 그 창에서 깨어나 남의 포지션에 주문을 낸다. 그 창의 폭을
+//   호출 기록으로 직접 센다.
+{
+  const RUN = 'src/lib/engine/exitAuthorityRun.ts';
+  const AUTH = 'src/lib/engine/exitAuthority.ts';
+  const POL = 'src/lib/engine/exitPolicy.ts';
+  const MON5 = 'src/app/api/autotrade/exit-monitor/route.ts';
+  const run = await loadModule(RUN, '전용 종료 실행 순서');
+  const pol = await loadModule(POL, '종료 정책 정본');
+
+  // ── 정책: 계약이 정본이고, 못 풀면 전략 값으로 내려가지 않는다 ──
+  if (!pol || typeof pol.resolveExitPolicy !== 'function') {
+    err(`${POL}: resolveExitPolicy를 불러오지 못했습니다`);
+  } else {
+    const ID = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
+    const good = pol.resolveExitPolicy({ executionIdentity: ID, strategyId: 'scalp' });
+    if (!good.ok || good.maxHoldMs !== 4 * 3600 * 1000) {
+      err(`${POL}: 전용 100배 계약의 보유 한도가 ${good.maxHoldMs}ms입니다`
+        + ' — 계약이 선언한 14400초(4시간)여야 합니다');
+    }
+    if (good.source !== 'EXECUTION_CONTRACT') {
+      err(`${POL}: 전용 100배의 정책 출처가 ${good.source}입니다 — 계약이어야 합니다`);
+    }
+    // **전략 6시간으로 내려가지 않는가.**
+    for (const [why, idv] of [
+      ['못 푸는 계약', { profileId: 'NOPE', presetId: 'NOPE', contractVersion: 1 }],
+      ['반쪽 identity', { profileId: 'MAX_LEV_100X', presetId: '', contractVersion: 2 }],
+    ]) {
+      const r = pol.resolveExitPolicy({ executionIdentity: idv, strategyId: 'scalp' });
+      if (r.ok) {
+        err(`${POL}: ${why}인데 정책을 돌려줍니다 (${r.maxHoldMs}ms · ${r.source})`
+          + ' — 사용자가 고르지 않은 보유 한도로 닫게 됩니다');
+      }
+      if (r.maxHoldMs === 6 * 3600 * 1000) {
+        err(`${POL}: ${why}에 전략 scalp의 6시간으로 내려갔습니다`);
+      }
+    }
+    // 계약 없이 연 예약은 **기존 의미 그대로**다.
+    const legacy = pol.resolveExitPolicy({ executionIdentity: null, strategyId: 'scalp' });
+    if (!legacy.ok || legacy.maxHoldMs !== 6 * 3600 * 1000
+        || legacy.source !== 'STRATEGY_LIFECYCLE') {
+      err(`${POL}: 계약 없는 scalp의 기존 생명주기 의미가 바뀌었습니다`
+        + ` (${legacy.maxHoldMs}ms · ${legacy.source})`);
+    }
+  }
+
+  // ── 런타임 순서를 **호출 기록으로** 본다 ──
+  if (!run || typeof run.runExitAuthority !== 'function') {
+    err(`${RUN}: runExitAuthority를 불러오지 못했습니다 — 순서를 확인할 수 없습니다`);
+  } else {
+    const NOW = 1_800_000_000_000;
+    const FOUR_H = 4 * 3600 * 1000;
+    const EID = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
+    const cand = (over = {}) => ({
+      positionIdentity: {
+        exchange: 'binance', connectionId: 'c1', symbol: 'BTCUSDT', side: 'LONG',
+        executionIdentity: EID, openingOrderId: 'o1',
+      },
+      strategyId: 'scalp', executionIdentity: EID,
+      capabilities: { fixedStopAtEntry: false, breakEven: false, trailing: false,
+                      timeExit: true, emergency: false },
+      reason: 'TIME_EXIT', openedAtMs: NOW - FOUR_H, ...over,
+    });
+    const rig = (o = {}) => {
+      const log = [];
+      return { log, deps: {
+        leaseOwned: async () => { log.push('lease'); return { owned: o.owned !== false, identity: { holder: 'a', fence: 10 } }; },
+        prepareClose: async () => {
+          log.push('prepare');
+          if (o.flat) return { code: 'ALREADY_FLAT', prepared: null, message: 'flat' };
+          if (o.readFail) return { code: 'READ_FAILED', prepared: null, message: '조회 실패' };
+          return { code: 'READY', message: 'ready',
+            prepared: { quantity: 0.2, orderSide: 'SELL', reduceOnly: true,
+                        observedQty: 0.2, positionMode: 'ONE_WAY' } };
+        },
+        revalidateFence: async () => { log.push('revalidate'); return o.fence !== false; },
+        sendClose: async () => { log.push('send'); return { attempted: true, ok: true, error: null }; },
+        readAfter: async () => { log.push('readAfter'); return { ok: true, found: false }; },
+      } };
+    };
+
+    // 정상 경로의 **정확한** 순서
+    {
+      const { deps, log } = rig();
+      const r = await run.runExitAuthority(cand(), deps, NOW);
+      if (r.code !== 'CLOSED_VERIFIED') {
+        err(`${RUN}: 정상 경로가 ${r.code}입니다 — ${r.reason}`);
+      }
+      const want = 'lease > prepare > revalidate > send > readAfter';
+      if (log.join(' > ') !== want) {
+        err(`${RUN}: 런타임 순서가 계약과 다릅니다 — ${log.join(' > ')} (${want}여야 합니다)`);
+      }
+      // ★ **재검증과 전송 사이가 비어 있는가.** 이 창이 넓으면 울타리가
+      //   있어도 느린 실행자가 주문을 보낼 여지가 남는다.
+      const iR = log.indexOf('revalidate');
+      if (iR < 0 || log[iR + 1] !== 'send') {
+        err(`${RUN}: 울타리 재검증과 전송 사이에 다른 호출이 끼어 있습니다 (${log.join(' > ')})`
+          + ' — 그 창만큼 낡은 실행자가 주문을 보낼 수 있습니다');
+      }
+      // 노출 조회는 재검증 **앞**이어야 한다.
+      if (!(log.indexOf('prepare') < iR)) {
+        err(`${RUN}: 노출 조회가 울타리 재검증보다 뒤입니다 — 창이 넓어집니다`);
+      }
+    }
+
+    // 쓰기 직전 재검증이 막으면 **주문 0건**
+    {
+      const { deps, log } = rig({ fence: false });
+      const r = await run.runExitAuthority(cand(), deps, NOW);
+      if (r.code !== 'LEASE_LOST' || r.attemptedWrite !== false || log.includes('send')) {
+        err(`${RUN}: 울타리가 넘어갔는데 주문이 나갔습니다 (${r.code} · ${log.join(' > ')})`);
+      }
+    }
+    // 임차가 없으면 거래소를 **읽지도** 않는다
+    {
+      const { deps, log } = rig({ owned: false });
+      const r = await run.runExitAuthority(cand(), deps, NOW);
+      if (r.code !== 'NOT_OWNER' || log.join(' > ') !== 'lease') {
+        err(`${RUN}: 남의 임차인데 거래소를 건드렸습니다 (${log.join(' > ')})`);
+      }
+    }
+    // 이미 flat이면 **주문 0건**이고 "보냈다"로 적지 않는다
+    {
+      const { deps, log } = rig({ flat: true });
+      const r = await run.runExitAuthority(cand(), deps, NOW);
+      if (r.code !== 'ALREADY_FLAT' || r.attemptedWrite !== false || log.includes('send')) {
+        err(`${RUN}: flat인데 주문을 보냈거나 전송했다고 적습니다 (${r.code} · attempted=${r.attemptedWrite})`);
+      }
+      if (r.failed !== false || r.ok !== true) {
+        err(`${RUN}: ALREADY_FLAT을 실패로 셉니다 — 안전 상태입니다`);
+      }
+    }
+    // 못 읽으면 flat이 아니다
+    {
+      const { deps, log } = rig({ readFail: true });
+      const r = await run.runExitAuthority(cand(), deps, NOW);
+      if (r.code !== 'POSITION_READ_FAILED' || log.includes('send')) {
+        err(`${RUN}: 포지션을 못 읽었는데 ${r.code}입니다`);
+      }
+    }
+    // 경계 — `>=`
+    for (const [held, want] of [[FOUR_H - 1, 'POLICY_NOT_DUE'], [FOUR_H, 'CLOSED_VERIFIED'],
+                                [FOUR_H + 1, 'CLOSED_VERIFIED']]) {
+      const { deps } = rig();
+      const r = await run.runExitAuthority(cand({ openedAtMs: NOW - held }), deps, NOW);
+      if (r.code !== want) {
+        err(`${RUN}: 보유 ${held}ms에서 ${r.code}입니다 (${want}여야 합니다)`
+          + ' — 경계는 >=입니다');
+      }
+    }
+    // openedAt이 없거나 미래면 막는다
+    for (const [why, v] of [['없음', null], ['NaN', NaN], ['미래', NOW + 60_000]]) {
+      const { deps, log } = rig();
+      const r = await run.runExitAuthority(cand({ openedAtMs: v }), deps, NOW);
+      if (r.code !== 'OPENED_AT_UNUSABLE' || log.includes('send')) {
+        err(`${RUN}: 진입 시각이 ${why}인데 ${r.code}입니다 — fail-closed여야 합니다`);
+      }
+    }
+  }
+
+  // ── 라우트가 **실제로** 그 경로를 부르는가 ──
+  {
+    const mon = code(MON5);
+    if (!/runExitAuthority\(/.test(mon)) {
+      err(`${MON5}: 전용 종료 권한을 부르지 않습니다 — 만들어 놓고 배선하지 않았습니다`);
+    }
+    // 쓰기 원시 함수를 못 찾으면 **검사기 자신이 실패한다.** 이름이 바뀌어
+    // 검사가 눈머는 길을 열어 두지 않는다.
+    const vops = code('src/lib/engine/venuePositionOps.ts');
+    for (const fn of ['prepareSymbolClose', 'sendSymbolClose']) {
+      if (!new RegExp(`export async function ${fn}\\(`).test(vops)) {
+        err(`venuePositionOps: ${fn}를 찾지 못했습니다 — 쓰기 경계를 확인할 수 없습니다`);
+      }
+      if (!new RegExp(`${fn}\\(`).test(mon)) {
+        err(`${MON5}: ${fn}를 쓰지 않습니다 — 준비/전송 분리가 배선되지 않았습니다`);
+      }
+    }
+    // 전송은 **읽지 않아야** 한다 — 그래야 재검증과의 창이 0이다.
+    const iSend = vops.indexOf('export async function sendSymbolClose(');
+    const sendBody = iSend < 0 ? '' : vops.slice(iSend, iSend + 1600);
+    for (const banned of ['readOpenPosition', 'closeModeGate', 'prepareClosePosition',
+                          'getFuturesPositions', 'futuresPositionMode']) {
+      if (sendBody.includes(banned)) {
+        err(`venuePositionOps.sendSymbolClose가 ${banned}를 부릅니다`
+          + ' — 전송 직전에 조회가 남으면 울타리 재검증과의 창이 넓어집니다');
+      }
+    }
+    // 전용 권한 결과가 **집계에서 사라지지 않는가.**
+    if (!/out\.authority/.test(mon)) {
+      err(`${MON5}: 전용 종료 결과를 따로 집계하지 않습니다`);
+    }
+    if (!/전용 종료 후보/.test(mon)) {
+      err(`${MON5}: 요약에 전용 종료 결과가 없습니다 — 화면에서 사라집니다`);
+    }
+    // **일반 루프에 합치지 않았는가.**
+    if (/positions\.push\(\s*\.\.\.authorityCandidates|positions\.concat\(authorityCandidates/.test(mon)) {
+      err(`${MON5}: 전용 권한 후보를 일반 생명주기 목록에 합쳤습니다`
+        + ' — 전략 6시간 정책을 타고 트레일링까지 열립니다');
+    }
+    // 전용 경로가 `lifecyclePolicyOf`를 쓰지 않는가.
+    // 범위를 **일반 루프 시작 전까지**로 자른다. 넉넉히 잡으면 일반
+    // 루프의 `lifecyclePolicyOf`가 섞여 들어와 거짓 경보가 난다.
+    const iAuth = mon.indexOf('if (authorityCandidates.length > 0) {');
+    const iGeneric = mon.indexOf('for (const p of positions) {', iAuth < 0 ? 0 : iAuth);
+    if (iAuth < 0) {
+      err(`${MON5}: 전용 종료 권한 블록을 찾지 못했습니다 — 배선을 확인할 수 없습니다`);
+    }
+    if (iAuth >= 0 && iGeneric < 0) {
+      err(`${MON5}: 일반 생명주기 반복문을 찾지 못했습니다 — 두 경로의 경계를 확인할 수 없습니다`);
+    }
+    const authBody = (iAuth < 0 || iGeneric < 0) ? '' : mon.slice(iAuth, iGeneric);
+    // 전용 블록이 일반 루프보다 **앞**이어야 한다 — 뒤에 있으면 일반
+    // 루프가 먼저 같은 자리를 건드릴 수 있다.
+    if (iAuth >= 0 && iGeneric >= 0 && !(iAuth < iGeneric)) {
+      err(`${MON5}: 전용 종료 권한 블록이 일반 생명주기 반복문보다 뒤에 있습니다`);
+    }
+    if (/lifecyclePolicyOf/.test(authBody)) {
+      err(`${MON5}: 전용 종료 경로가 전략 생명주기 정책을 씁니다 — 계약 4시간이 아니라 6시간이 됩니다`);
+    }
+  }
+
+  // ── 아직 열지 않은 종료 사유를 열지 않았는가 ──
+  {
+    const authSrc = code(AUTH);
+    const m = /export type ExitReason =([\s\S]{0,200}?);/.exec(authSrc);
+    if (!m) {
+      err(`${AUTH}: ExitReason을 찾지 못했습니다`);
+    } else if (/ADVERSE|EMERGENCY|TRAIL|LIQUIDATION_BUFFER|BREAK_EVEN/i.test(m[1])) {
+      err(`${AUTH}: 아직 구현이 없는 종료 사유가 ExitReason에 들어 있습니다 (${m[1].trim()})`
+        + ' — 빈 기능을 이름으로 먼저 열지 않습니다');
     }
   }
 }
