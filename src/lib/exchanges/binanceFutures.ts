@@ -820,11 +820,26 @@ export async function prepareClosePosition(
   positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
   /** 멱등 키. 안 주면 붙이지 않는다 — 기존 호출부의 동작을 바꾸지 않는다 */
   clientOrderId: string | null = null,
+  /**
+   * 거래소 조회. **시험이 주입한다** — 안 주면 정본을 쓴다.
+   *
+   * 이 함수가 정하는 것은 숫자가 아니라 **방향**이다. LONG을 닫으려면
+   * SELL을 보내야 하고, 뒤집히면 `reduceOnly`가 거부하지 않는 한
+   * 포지션이 **커진다.** 그 판단이 네트워크 뒤에 숨어 있으면 시험이
+   * 지나갈 수 없다 — 실제로 변이 하나가 그래서 새 나갔다.
+   * 저장소의 다른 판정들이 쓰는 주입과 같은 모양으로 맞춘다.
+   */
+  deps: {
+    fetchPositions?: (k: string, sec: string, tn: boolean) => Promise<any>;
+    fetchFilters?: (sym: string, tn: boolean) => Promise<SymbolFilters | null>;
+  } = {},
 ): Promise<{
   ok: boolean; alreadyFlat: boolean; prepared: PreparedClose | null; message: string;
 }> {
   const sym = symbol.toUpperCase().replace('/', '');
-  const posRes: any = await getFuturesPositions(key, secret, testnet);
+  const readPositions = deps.fetchPositions ?? getFuturesPositions;
+  const readFilters = deps.fetchFilters ?? getSymbolFilters;
+  const posRes: any = await readPositions(key, secret, testnet);
   if (!posRes?.success) {
     // **못 읽은 것을 flat으로 읽지 않는다.**
     return { ok: false, alreadyFlat: false, prepared: null,
@@ -840,7 +855,7 @@ export async function prepareClosePosition(
       message: `방향 불일치 — 요청 ${positionSide}, 실제 ${pos.side}. 상태를 먼저 대조하세요` };
   }
 
-  const filters = await getSymbolFilters(sym, testnet);
+  const filters = await readFilters(sym, testnet);
   // 청산은 시장가로 나간다 — 시장가 격자를 쓴다. 없으면 격자 없이 간다.
   const grid = qtyGridFor(filters, 'MARKET');
   const calc = closeQuantityFor(

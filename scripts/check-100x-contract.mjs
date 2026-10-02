@@ -513,6 +513,33 @@ if (gate) {
           err(`${COVERAGE}: 표의 시간청산(${r.timeExit})이 분류기(${auth.capabilities.timeExit})와`
             + ' 다릅니다 — 표에 손으로 적었습니다');
         }
+        // ★ **값이 같은 것으로는 부족하다.**
+        //
+        //   분류기도 `true`이므로 표에 `true`를 손으로 적어도 값은 같다.
+        //   그러면 "분류기에서 derive한다"는 계약이 깨졌는데 검사는
+        //   통과한다(실제로 그 변이가 새 나갔다). 값이 아니라 **어디서
+        //   왔는가**를 본다.
+        const csrc = code(COVERAGE);
+        const iRows = csrc.indexOf('function contractRows(');
+        const rowsBody = iRows < 0 ? '' : csrc.slice(iRows, csrc.indexOf('\n}', iRows));
+        if (iRows < 0) {
+          err(`${COVERAGE}: contractRows를 찾지 못했습니다 — 표가 무엇을 적는지 확인할 수 없습니다`);
+        }
+        for (const [field, want] of [
+          ['timeExit', 'auth.capabilities.timeExit'],
+          ['trailing', 'auth.capabilities.trailing'],
+          ['breakEven', 'auth.capabilities.breakEven'],
+          ['protectiveOrdersAtEntry', 'auth.capabilities.fixedStopAtEntry'],
+        ]) {
+          if (!rowsBody.includes(`${field}: ${want}`)) {
+            err(`${COVERAGE}: 계약 줄의 ${field}를 분류기에서 가져오지 않습니다`
+              + ` (${want}가 아닙니다) — 표에 손으로 적으면 배선을 끊어도 초록으로 남습니다`);
+          }
+        }
+        if (/\b(timeExit|trailing|breakEven|protectiveOrdersAtEntry):\s*(true|false)\b/.test(rowsBody)) {
+          err(`${COVERAGE}: 계약 줄에 감시 깃발을 상수로 적었습니다`
+            + ' — 분류기가 바뀌어도 표가 따라가지 않습니다');
+        }
         for (const k of ['trailing', 'breakEven', 'emergency']) {
           if (auth.capabilities[k] !== false) {
             err(`${COVERAGE}: 분류기가 ${k}를 열어 두었습니다`

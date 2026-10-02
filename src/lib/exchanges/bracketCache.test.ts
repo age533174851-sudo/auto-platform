@@ -13,7 +13,8 @@
 // 그리고 TTL이 지난 뒤 다시 읽기에 실패하면 옛 값을 조용히 돌려주고
 // 있었다 — 6시간이 아니라 **사실상 무기한** 낡은 구간이다.
 import { test, eq, assert } from '../../test/harness';
-import { readBracket, readPremiumIndex, readMarketSnapshot } from './binanceFutures';
+import { readBracket, readPremiumIndex, readMarketSnapshot,
+  prepareClosePosition } from './binanceFutures';
 
 /** 주입할 가짜 조회기. 전역 `fetch`를 건드리지 않는다 */
 const tiersFor = (coef: number | null) => {
@@ -218,5 +219,74 @@ export function runBracketCacheTests() {
     const b = await readPremiumIndex('BNBUSDT', true, fetchOne, () => T0 + 10_000);
     eq(b.freshness, 'FRESH');
     eq(b.observedAtMs, T0, '★ 캐시 적중인데 시각을 지금으로 바꿨다');
+  });
+
+  // ── 청산 주문의 **방향**: 뒤집히면 포지션이 커진다 ──
+  //
+  //   LONG을 닫으려면 SELL을 보내야 한다. 뒤집으면 `reduceOnly`가
+  //   거부하지 않는 한 **같은 방향으로 더 사는 것**이 된다. 이 판단이
+  //   네트워크 뒤에 숨어 있어 변이 하나가 그대로 새 나갔다 — 조회를
+  //   주입해 payload를 직접 본다.
+
+  const POSRES = (side: 'LONG' | 'SHORT', amount: number) => async () => ({
+    success: true,
+    positions: [{ symbol: 'BTCUSDT', side, amount,
+                  entryPrice: 100, markPrice: 100, unrealizedPnl: 0,
+                  leverage: 100, liquidationPrice: 0 }],
+  });
+  const NOFILTERS = async () => null;
+
+  test('LONG을 닫을 때는 SELL을 보낸다 — 뒤집히면 포지션이 커진다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'LONG', 100, true, null,
+      { fetchPositions: POSRES('LONG', 0.5), fetchFilters: NOFILTERS });
+    eq(r.ok, true, r.message);
+    eq(r.prepared!.side, 'SELL', '★ LONG에 BUY를 보내면 포지션이 커진다');
+    eq(r.prepared!.observedSide, 'LONG');
+  });
+
+  test('SHORT을 닫을 때는 BUY를 보낸다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'SHORT', 100, true, null,
+      { fetchPositions: POSRES('SHORT', -0.5), fetchFilters: NOFILTERS });
+    eq(r.ok, true, r.message);
+    eq(r.prepared!.side, 'BUY', '★ SHORT에 SELL을 보내면 포지션이 커진다');
+    eq(r.prepared!.observedSide, 'SHORT');
+  });
+
+  test('수량은 **지금 관측한 노출**이다 — 진입 수량이 아니다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'LONG', 100, true, null,
+      { fetchPositions: POSRES('LONG', 0.07), fetchFilters: NOFILTERS });
+    eq(r.prepared!.quantity, 0.07);
+    eq(r.prepared!.observedQty, 0.07);
+  });
+
+  test('장부와 거래소의 방향이 다르면 준비하지 않는다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'LONG', 100, true, null,
+      { fetchPositions: POSRES('SHORT', -0.5), fetchFilters: NOFILTERS });
+    eq(r.ok, false);
+    eq(r.prepared, null);
+    assert(/방향 불일치/.test(r.message), `★ 방향이 달라도 주문을 만들었다 — ${r.message}`);
+  });
+
+  test('노출이 0이면 **이미 flat**이고 실패가 아니다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'LONG', 100, true, null,
+      { fetchPositions: POSRES('LONG', 0), fetchFilters: NOFILTERS });
+    eq(r.ok, true);
+    eq(r.alreadyFlat, true);
+    eq(r.prepared, null, '★ flat인데 보낼 주문을 만들었다');
+  });
+
+  test('포지션 조회에 실패하면 flat으로 읽지 않는다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'LONG', 100, true, null,
+      { fetchPositions: async () => ({ success: false, message: 'network' }),
+        fetchFilters: NOFILTERS });
+    eq(r.ok, false);
+    eq(r.alreadyFlat, false, '★ 못 읽은 것을 "이미 닫힘"으로 읽었다');
+    eq(r.prepared, null);
+  });
+
+  test('멱등 키는 준비물에 그대로 실린다', async () => {
+    const r = await prepareClosePosition('k', 's', 'BTCUSDT', 'LONG', 100, true, 'x5tABC',
+      { fetchPositions: POSRES('LONG', 0.5), fetchFilters: NOFILTERS });
+    eq(r.prepared!.clientOrderId, 'x5tABC');
   });
 }
