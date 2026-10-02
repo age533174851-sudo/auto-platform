@@ -49,26 +49,23 @@
 //     100초). 100배 진입 판정에 100초 된 마크가를 쓸 수는 없다. 원칙
 //     ("나이는 데이터 자신의 시각으로 잰다", "'없음'과 '오래됨'은 다른
 //     상태다")은 그대로 따르되 **숫자는 쓰지 않는다.**
-//   · `engine/preTradeChecklist.ts: checkClockSkew` — 여기에 이
-//     저장소가 이미 확정한 숫자가 있다. 서명 요청의 `recvWindow`는
-//     5000ms이고 안전 비율은 0.6이라 **3000ms**다. 그 머리말이 이유를
-//     적고 있다: 경계에 붙은 값을 통과로 적으면 "가끔 실패하는" 상태가
-//     되고 그것이 가장 찾기 어려운 고장이다.
+//   · `engine/preTradeChecklist.ts: checkClockSkew` — **시계 오차의
+//     정본이다.** `recvWindow 5000 × safetyRatio 0.6 = 3000ms`이고,
+//     읽지 못하면 `unknown`으로 막는다. 거래소 시각과 우리 수신 시각을
+//     비교하는 판단은 **그 함수를 그대로 부른다** — 같은 판단을 두 벌
+//     만들지 않는다. 이 파일에는 그 숫자가 없다.
+//   · `AbortSignal.timeout(5000)` — 저장소의 모든 거래소 조회가 쓰는
+//     값이다. "하나의 조회가 5초를 넘으면 이미 포기한다"는 선언이
+//     코드에 이미 있다.
 //
-// 그래서 **규칙 하나**로 정한다:
+// 그래서 나이 예산을 **두 종류**로 나눈다. 성질이 다른 것에 같은 문턱을
+// 씌우면 둘 중 하나는 반드시 틀린다.
 //
-//   > 어떤 출처의 신선도 예산은 **시스템이 그 출처에 대해 이미 선언한
-//   > 갱신 주기**다. 선언한 주기가 없으면(=매번 새로 읽는다) 예산은
-//   > 저장소의 시계 오차 정본 3000ms다 — 그것이 이 저장소가 이미
-//   > 확정한 "두 시각이 이만큼 벌어지면 주문이 안전하지 않다"이기
-//   > 때문이다.
-//
-//   마크가   매번 새로 읽는다(캐시 없음)        → 3000ms
-//   호가     매번 새로 읽는다(캐시 없음)        → 3000ms
-//   premium  `PREMIUM_TTL` 45초를 선언한다      → 45000ms
-//   펀딩상한 매번 새로 읽는다(캐시 없음)        → 3000ms
-//   수수료   매번 새로 읽는다(캐시 없음)        → 3000ms
-//   브래킷   `BRACKET_TTL` 6시간을 선언한다     → 6시간
+//   빠른 시장 사실  마크가 · 호가 · premium/다음 정산 스냅숏
+//                   → 진입 직전 가격 상태다. 5000ms (위 근거)
+//   느린 설정 사실  유지증거금 구간 · 수수료율 · 펀딩 상한
+//                   → 가격 tick이 아니다. 저장소가 이 성질에 이미 선언한
+//                     주기(`BRACKET_TTL` 6시간)를 쓴다
 //
 // 이 숫자들은 **Exact100X가 소유하는 실행 안전 정책**이다. 바이낸스의
 // 공식 기준이라고 주장하지 않는다 — 그런 문서를 이 환경에서 확인하지
@@ -78,6 +75,8 @@
 // ──────────────────
 // **이미 열린 포지션을 닫지 않는다.** 여기는 진입 전 보호다. 데이터가
 // 낡았다는 이유로 포지션을 종료시키는 권한은 아직 없다(⑤).
+
+import { checkClockSkew } from './preTradeChecklist';
 
 /** 무엇을 관측했는가. 출처별로 예산이 다르므로 종류가 필요하다 */
 export type ObservationKind =
@@ -95,7 +94,7 @@ export type ObservationCache = 'FRESH' | 'STALE_CACHE' | 'NONE';
  * **하나의 관측.** 값만 들고 다니지 않는다.
  *
  * `observedAtMs`를 호출부가 `Date.now()`로 붙일 수 없게 하려면, 읽는
- * 쪽(`readMarkPrice` 등)이 자기가 실제로 받은 시각을 **응답에 넣어서**
+ * 쪽(`readMarketSnapshot` 등)이 자기가 실제로 받은 시각을 **응답에 넣어서**
  * 돌려줘야 한다. 그러면 낡은 캐시에 새 시각을 붙이는 길이 구조적으로
  * 사라진다 — 붙일 시각이 이미 응답 안에 있으므로.
  */
@@ -108,9 +107,25 @@ export interface MarketObservation {
    * **`undefined`는 "이 출처는 값 검사 대상이 아니다"**, `null`은 "못 읽었다".
    */
   value?: number | null;
-  /** 거래소가 응답에 적어 준 시각(ms). 없으면 null — **만들어 내지 않는다** */
+  /**
+   * **① 거래소가 응답에 적어 준 시각(ms).** 없으면 null — 만들어 내지 않는다.
+   *
+   * "거래소가 이 값을 언제 만들었는가"의 답이다.
+   */
   exchangeTimeMs: number | null;
-  /** 우리가 그 응답을 **실제로 받은** 시각(ms) */
+  /**
+   * **② 우리 서버가 그 응답을 실제로 받은 시각(ms).**
+   *
+   * ①과 비교하면 **수신 지연 또는 시계 오차**가 나온다.
+   */
+  receivedAtMs?: number | null;
+  /**
+   * **③ 이 값이 원래 관측된 시각(ms).**
+   *
+   * 캐시가 없으면 ②와 같다. 캐시에서 왔다면 **원본을 받은 그때**다.
+   * ②와 ③을 하나로 뭉개면 "거래소에서 이미 오래된 값"과 "우리 캐시에서
+   * 오래된 값"을 구별할 수 없다. 나이는 ③으로 잰다.
+   */
   observedAtMs: number | null;
   cache: ObservationCache | null;
 }
@@ -129,24 +144,20 @@ export type FreshnessCode =
   | 'CACHE_NOT_FRESH'
   /** 시각이 미래다 — 시계가 어긋났다 */
   | 'FROM_FUTURE'
-  /** 거래소 시각과 수신 시각이 너무 벌어졌다 (지연 또는 시계 오차) */
-  | 'QUOTE_LAG_EXCEEDED'
+  /**
+   * 거래소 시각과 수신 시각이 너무 벌어졌다 (지연 또는 시계 오차).
+   *
+   * 판단은 `preTradeChecklist.checkClockSkew` 한 곳이 한다 — 이 파일은
+   * 그 숫자를 다시 정하지 않는다.
+   */
+  | 'CLOCK_SKEW'
   /** 판정 시점 기준으로 너무 오래된 값이다 */
   | 'STALE'
   /** 서로 다른 시점을 하나의 시장 상태로 합치려 했다 */
   | 'CROSS_SOURCE_SKEW';
 
 export interface FreshnessPolicy {
-  /**
-   * 두 시각이 이만큼 벌어지면 주문이 안전하지 않다.
-   * `checkClockSkew`의 `recvWindow 5000 × safetyRatio 0.6`에서 온다.
-   */
-  clockSkewBudgetMs: number;
-  /** 미래 시각 허용치. 같은 근거다 */
-  futureToleranceMs: number;
-  /** 거래소 시각 → 수신 시각 지연 예산 (출처별) */
-  maxQuoteLagMs: Partial<Record<ObservationKind, number>>;
-  /** 수신 시각 → 판정 시각 나이 예산 (출처별) */
+  /** 원본 관측 시각 → 판정 시각 나이 예산 (출처별) */
   maxDecisionAgeMs: Record<ObservationKind, number>;
   /**
    * 거래소 시각을 **반드시** 들고 와야 하는 출처.
@@ -154,56 +165,84 @@ export interface FreshnessPolicy {
    * 시장 데이터 엔드포인트는 응답에 시각을 적어 준다(premiumIndex의
    * `time`, depth의 `T`/`E`). 계정 쪽 응답(수수료·브래킷·펀딩 정보)은
    * 적어 주지 않으므로 **없는 것을 요구하지 않는다** — 대신 그쪽은
-   * 캐시 상태와 수신 시각으로 본다.
+   * 캐시 상태와 관측 시각으로 본다.
    */
   requireExchangeTime: ObservationKind[];
   /**
    * **하나의 "현재 시장 상태"로 합쳐지는 출처들.**
    *
-   * 이들끼리는 거래소 시각이 서로 얼마나 벌어졌는지를 본다. 각자
-   * 신선해도 서로 다른 순간이면 합친 그림은 존재한 적이 없다.
+   * 이들끼리는 거래소 시각이 서로 얼마나 벌어졌는지를 본다.
    */
   crossSourceKinds: ObservationKind[];
+  /** 교차 출처 시각 차 허용값 */
+  crossSourceSkewMs: number;
 }
 
 /**
- * **이 저장소의 시계 오차 정본.** `checkClockSkew`와 같은 수다.
+ * **빠른 시장 사실의 나이 예산 — Exact100X가 소유한다.**
  *
- * 복제가 아니라 같은 근거를 명시적으로 적은 것이다 — `preTradeChecklist`는
- * 주문 서명의 timestamp를 보고, 여기는 시장 데이터의 시각을 본다. 두
- * 판정은 입력이 다르지만 "두 시각이 이만큼 벌어지면 위험하다"는 같은
- * 숫자를 쓴다. 한쪽만 바뀌면 안 되므로 그 사실을 여기 적어 둔다.
+ * 왜 저장소의 다른 정본을 쓰지 않는가
+ * ───────────────────────────────────
+ * `engine/dataQuality.ts`는 **화면용**이다(머리말이 그렇게 적고, POLLED
+ * 기본 10초 · STALE은 그 10배라 100초다). 100배 진입 판정에 100초 된
+ * 마크가를 쓸 수는 없다.
+ *
+ * 왜 이 숫자인가
+ * ──────────────
+ * 저장소의 모든 거래소 조회는 `AbortSignal.timeout(5000)`을 쓴다 —
+ * **"하나의 거래소 조회가 5초를 넘으면 이 저장소는 이미 포기한다"**는
+ * 선언이 이미 코드에 있다. 진입 판정이 쓰는 시세도 그보다 오래됐으면
+ * 같은 이유로 포기한다.
+ *
+ * ★ **바이낸스 공식 기준이 아니다.** 그런 문서를 이 환경에서 확인하지
+ *   못했고, 확인하지 못한 것을 근거로 적지 않는다. 이것은 Exact100X가
+ *   소유하는 실행 안전 정책이다.
+ *
+ * ★ 실제 TESTNET에서 PHASE A 읽기 파이프라인이 이 예산을 넘긴다면,
+ *   고칠 것은 **문턱이 아니라 읽기 구조**다(한 요청에 한 스냅숏 ·
+ *   병렬화). 문턱을 올리는 쪽으로 가면 ④가 무의미해진다.
  */
-export const CLOCK_SKEW_BUDGET_MS = 5000 * 0.6;
+export const FAST_MARKET_MAX_AGE_MS = 5000;
 
-/** premium 모듈이 스스로 선언한 갱신 주기 (`PREMIUM_TTL`) */
-export const PREMIUM_REFRESH_MS = 45 * 1000;
+/**
+ * **느린 계정·설정 사실의 나이 예산.**
+ *
+ * 유지증거금 구간·수수료율·펀딩 상한은 가격 tick이 아니다. 여기에 빠른
+ * 시장 문턱을 씌우면, 순차로 읽는 파이프라인이 조금만 느려져도 **정상
+ * 진입이 전부 막힌다.** 저장소가 이 성질의 데이터에 대해 이미 선언한
+ * 주기는 브래킷의 `BRACKET_TTL`(6시간)이므로 그것을 쓴다.
+ */
+export const SLOW_FACT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
 /** 브래킷 모듈이 스스로 선언한 갱신 주기 (`BRACKET_TTL`) */
-export const BRACKET_REFRESH_MS = 6 * 60 * 60 * 1000;
+export const BRACKET_REFRESH_MS = SLOW_FACT_MAX_AGE_MS;
 
 /**
  * **Exact100X가 소유하는 실행 안전 정책.**
  *
- * 화면용 정본(`dataQuality`)을 쓰지 않는 이유는 머리말에 적었다.
+ * 거래소 시각 ↔ 수신 시각의 차(시계 오차·수신 지연)는 **여기서 숫자를
+ * 정하지 않는다** — `preTradeChecklist.checkClockSkew`가 이 저장소의
+ * 정본이고, 같은 판단을 두 벌 만들지 않는다.
  */
 export const EXACT100X_FRESHNESS_POLICY: FreshnessPolicy = {
-  clockSkewBudgetMs: CLOCK_SKEW_BUDGET_MS,
-  futureToleranceMs: CLOCK_SKEW_BUDGET_MS,
-  maxQuoteLagMs: {
-    MARK: CLOCK_SKEW_BUDGET_MS,
-    BOOK: CLOCK_SKEW_BUDGET_MS,
-    PREMIUM: CLOCK_SKEW_BUDGET_MS,
-  },
   maxDecisionAgeMs: {
-    MARK: CLOCK_SKEW_BUDGET_MS,
-    BOOK: CLOCK_SKEW_BUDGET_MS,
-    PREMIUM: PREMIUM_REFRESH_MS,
-    FUNDING_BOUNDS: CLOCK_SKEW_BUDGET_MS,
-    COMMISSION: CLOCK_SKEW_BUDGET_MS,
-    BRACKET: BRACKET_REFRESH_MS,
+    // 빠른 시장 사실 — 진입 직전 가격 상태다
+    MARK: FAST_MARKET_MAX_AGE_MS,
+    BOOK: FAST_MARKET_MAX_AGE_MS,
+    PREMIUM: FAST_MARKET_MAX_AGE_MS,
+    // 느린 계정·설정 사실
+    COMMISSION: SLOW_FACT_MAX_AGE_MS,
+    FUNDING_BOUNDS: SLOW_FACT_MAX_AGE_MS,
+    BRACKET: SLOW_FACT_MAX_AGE_MS,
   },
   requireExchangeTime: ['MARK', 'BOOK', 'PREMIUM'],
   crossSourceKinds: ['MARK', 'BOOK', 'PREMIUM'],
+  /**
+   * **교차 출처 시각 차.** 각자 신선해도 서로 다른 순간이면 합친 그림은
+   * 어느 순간에도 존재한 적이 없다. 빠른 사실끼리의 문제이므로 빠른
+   * 예산을 쓴다.
+   */
+  crossSourceSkewMs: FAST_MARKET_MAX_AGE_MS,
 };
 
 export interface FreshnessFinding {
@@ -225,6 +264,7 @@ export interface FreshnessFinding {
  */
 export interface FreshnessProvenance {
   referenceMarkObservedAtMs: number | null;
+  referenceMarkReceivedAtMs: number | null;
   referenceMarkExchangeTimeMs: number | null;
   bookObservedAtMs: number | null;
   bookExchangeTimeMs: number | null;
@@ -275,7 +315,8 @@ const KIND_WORD: Record<ObservationKind, string> = {
 };
 
 const emptyProvenance = (): FreshnessProvenance => ({
-  referenceMarkObservedAtMs: null, referenceMarkExchangeTimeMs: null,
+  referenceMarkObservedAtMs: null, referenceMarkReceivedAtMs: null,
+  referenceMarkExchangeTimeMs: null,
   bookObservedAtMs: null, bookExchangeTimeMs: null,
   premiumObservedAtMs: null, premiumExchangeTimeMs: null,
   fundingBoundsObservedAtMs: null,
@@ -290,7 +331,11 @@ function collectProvenance(obs: Array<MarketObservation | null | undefined>): Fr
     if (!o) continue;
     const at = num(o.observedAtMs);
     const ex = num(o.exchangeTimeMs);
-    if (o.kind === 'MARK') { p.referenceMarkObservedAtMs = at; p.referenceMarkExchangeTimeMs = ex; }
+    if (o.kind === 'MARK') {
+      p.referenceMarkObservedAtMs = at;
+      p.referenceMarkReceivedAtMs = num(o.receivedAtMs);
+      p.referenceMarkExchangeTimeMs = ex;
+    }
     else if (o.kind === 'BOOK') { p.bookObservedAtMs = at; p.bookExchangeTimeMs = ex; }
     else if (o.kind === 'PREMIUM') { p.premiumObservedAtMs = at; p.premiumExchangeTimeMs = ex; }
     else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = at; }
@@ -388,16 +433,21 @@ export function assessMarketFreshness(input: MarketFreshnessInput): MarketFreshn
       continue;
     }
 
-    // ③ 수신 시각. **없으면 0이나 지금으로 대체하지 않는다**
+    // ③ **원래 관측 시각.** 나이는 이것으로 잰다.
+    //    없으면 0이나 지금으로 대체하지 않는다.
     const at = num(o.observedAtMs);
     if (at == null) {
       findings.push({ kind, code: 'TIMESTAMP_MISSING', ageMs: null, quoteLagMs: null,
-        detail: `${word} — **언제 받았는지** 모릅니다 (${String(o.observedAtMs)}).`
+        detail: `${word} — **언제 관측된 값인지** 모릅니다 (${String(o.observedAtMs)}).`
           + ' 시각이 없는 값은 지금 시장이라고 말할 수 없습니다' });
       continue;
     }
 
-    // ④ 거래소 시각. 시장 데이터 출처에는 **반드시** 있어야 한다
+    // ④ 수신 시각. 거래소 시각과 비교할 상대가 필요하다.
+    //    없으면 관측 시각으로 본다 — 캐시가 없는 출처는 둘이 같다.
+    const recv = num(o.receivedAtMs) ?? at;
+
+    // ⑤ 거래소 시각. 시장 데이터 출처에는 **반드시** 있어야 한다
     const needEx = policy.requireExchangeTime.includes(kind);
     const ex = num(o.exchangeTimeMs);
     if (needEx && ex == null) {
@@ -407,33 +457,41 @@ export function assessMarketFreshness(input: MarketFreshnessInput): MarketFreshn
       continue;
     }
 
-    // ⑤ 미래 시각 — 시계가 어긋나면 나이가 음수가 되어 **가장 낡은 값이
+    // ⑥ 거래소 시각 ↔ 수신 시각.
+    //
+    //    **판단을 여기서 다시 만들지 않는다.** `checkClockSkew`가 이
+    //    저장소의 정본이고, 숫자(recvWindow × safetyRatio)도 거기 있다.
+    //    늦게 도착한 값과 시계가 어긋난 값은 같은 저울로 재는 것이 맞다 —
+    //    둘 다 "거래소가 적은 시각과 우리 시각이 벌어졌다"이기 때문이다.
+    //    읽지 못하면 그 함수가 `unknown`으로 막는다(fail-closed).
+    const lag = ex == null ? null : recv - ex;
+    if (ex != null) {
+      const skew = checkClockSkew(recv, ex);
+      if (skew.blocks) {
+        findings.push({
+          kind,
+          code: lag != null && lag < 0 ? 'FROM_FUTURE' : 'CLOCK_SKEW',
+          ageMs: now - at, quoteLagMs: lag,
+          detail: `${word} — ${skew.detail}`,
+        });
+        continue;
+      }
+    }
+
+    // ⑦ 미래 시각 — 시계가 어긋나면 나이가 음수가 되어 **가장 낡은 값이
     //    가장 신선해 보인다.** 음수를 0으로 깎지 않고 막는다.
-    const tol = policy.futureToleranceMs;
-    if (at > now + tol) {
-      findings.push({ kind, code: 'FROM_FUTURE', ageMs: now - at, quoteLagMs: null,
-        detail: `${word} — 수신 시각이 지금보다 ${at - now}ms 미래입니다`
-          + ` (허용 ${tol}ms). 로컬 시계가 어긋났습니다` });
-      continue;
-    }
-    if (ex != null && ex > at + tol) {
-      findings.push({ kind, code: 'FROM_FUTURE', ageMs: now - at, quoteLagMs: at - ex,
-        detail: `${word} — 거래소 시각이 수신 시각보다 ${ex - at}ms 미래입니다`
-          + ` (허용 ${tol}ms). 거래소와 로컬 시계가 어긋났습니다` });
-      continue;
+    //    허용치도 시계 오차 정본에 맡긴다.
+    if (at > now) {
+      const fut = checkClockSkew(at, now);
+      if (fut.blocks) {
+        findings.push({ kind, code: 'FROM_FUTURE', ageMs: now - at, quoteLagMs: lag,
+          detail: `${word} — 관측 시각이 지금보다 ${at - now}ms 미래입니다. ${fut.detail}` });
+        continue;
+      }
     }
 
-    // ⑥ 수신 지연 — 늦게 도착한 값이거나 시계가 벌어진 것이다
-    const lagBudget = policy.maxQuoteLagMs[kind];
-    const lag = ex == null ? null : at - ex;
-    if (lag != null && lagBudget != null && lag > lagBudget) {
-      findings.push({ kind, code: 'QUOTE_LAG_EXCEEDED', ageMs: now - at, quoteLagMs: lag,
-        detail: `${word} — 거래소 시각으로부터 ${lag}ms 뒤에 도착했습니다`
-          + ` (허용 ${lagBudget}ms). 수신 지연이거나 시계 오차입니다` });
-      continue;
-    }
-
-    // ⑦ 결정 시점의 나이
+    // ⑧ 결정 시점의 나이. **원래 관측 시각으로 잰다** — 캐시에서 온
+    //    값에 수신 시각을 쓰면 캐시의 나이가 사라진다.
     const age = now - at;
     const ageBudget = policy.maxDecisionAgeMs[kind];
     if (ageBudget == null || age > ageBudget) {
@@ -468,10 +526,7 @@ export function assessMarketFreshness(input: MarketFreshnessInput): MarketFreshn
       const tb = num(b.o.exchangeTimeMs) as number;
       const skew = Math.abs(ta - tb);
       maxSkew = maxSkew == null ? skew : Math.max(maxSkew, skew);
-      const budget = Math.max(
-        policy.maxDecisionAgeMs[a.k] ?? policy.clockSkewBudgetMs,
-        policy.maxDecisionAgeMs[b.k] ?? policy.clockSkewBudgetMs,
-      );
+      const budget = policy.crossSourceSkewMs;
       if (skew > budget) {
         crossFail.push(`${KIND_WORD[a.k]} ↔ ${KIND_WORD[b.k]} — 거래소 시각이 ${skew}ms`
           + ` 벌어져 있습니다 (허용 ${budget}ms)`);

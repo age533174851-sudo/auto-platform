@@ -541,6 +541,28 @@ export async function POST(req: NextRequest) {
       return { ok: v.ok, observed: v.observed, message: v.message };
     };
 
+    // ── 이 진입이 쓰는 **시장 스냅숏 하나** ──
+    //
+    // 마크가와 premium은 `/fapi/v1/premiumIndex` **같은 응답**에 있다.
+    // 따로 읽으면 한 진입 안에서 청산거리는 T0의 마크가로, 펀딩은 T1의
+    // 요율로 계산된다 — ④가 막으려는 바로 그 모양("서로 다른 시점을
+    // 하나의 시장 상태처럼")을 ④ 자신이 만드는 꼴이다.
+    //
+    // 그래서 Promise를 **한 번만** 만들어 두 의존이 같은 것을 기다리게
+    // 한다. 호출 횟수가 아니라 **같은 순간**이라는 것이 요점이다.
+    let marketSnapshotOnce: Promise<any> | null = null;
+    const marketSnapshot = () => {
+      if (!marketSnapshotOnce) {
+        marketSnapshotOnce = (async () => {
+          if (ex !== 'binance') return null;   // Gate는 이 경로가 없다
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.readMarketSnapshot(symbol, !connIsLive).catch(() => null);
+          return r?.snapshot ?? null;
+        })();
+      }
+      return marketSnapshotOnce;
+    };
+
     let entry = await prepareEntry100x(
       {
         leverage: epContract!.leverage,
@@ -577,12 +599,16 @@ export async function POST(req: NextRequest) {
         //   마크가는 시장 데이터 엔드포인트에서 읽는다. 두 질문이므로
         //   두 조회다.
         referenceMark: async () => {
-          if (ex !== 'binance') return null;   // Gate는 마크가 관측 경로가 없다
-          const bf = await import('@/lib/exchanges/binanceFutures');
-          const r = await bf.readMarkPrice(symbol, !connIsLive)
-            .catch(() => null);
+          const snap = await marketSnapshot();
+          if (!snap) return null;
           // **시각을 여기서 붙이지 않는다** — 읽는 쪽이 응답에 넣어 준다.
-          return r?.mark ?? null;
+          return {
+            price: snap.markPrice,
+            exchangeTimeMs: snap.stamps.exchangeTimeMs,
+            receivedAtMs: snap.stamps.receivedAtMs,
+            observedAtMs: snap.stamps.observedAtMs,
+            source: snap.source, cache: snap.stamps.cache,
+          };
         },
         // 구간별 유지증거금은 **거래소에서 읽는다.** 추정 표로 100배
         // 청산가를 정하지 않는다 — 못 읽으면 `prepareEntry100x`가 막는다.
@@ -640,25 +666,22 @@ export async function POST(req: NextRequest) {
         fundingContext: async () => {
           if (ex !== 'binance') return null;
           const bf = await import('@/lib/exchanges/binanceFutures');
-          const [prem, fb] = await Promise.all([
-            bf.readPremiumIndex(symbol, !connIsLive)
-              .catch(() => ({ data: null, freshness: 'NONE', observedAtMs: null } as any)),
+          // ★ **마크가와 같은 스냅숏이다.** `readPremiumIndex`(45초 캐시)를
+          //   따로 부르지 않는다 — 그러면 청산거리는 T0, 펀딩은 T1이 되어
+          //   서로 다른 시점을 하나의 시장 상태로 합치게 된다.
+          const [snap, fb] = await Promise.all([
+            marketSnapshot(),
             bf.getFundingBounds(symbol, !connIsLive)
               .catch(() => ({ bounds: null } as any)),
           ]);
-          // ★ **지금 것이 아니면 쓰지 않는다.** 45초 TTL이 지난 뒤 조회에
-          //   실패하면 캐시의 옛 값이 남는데, 예전에는 거기에
-          //   `observedAtMs: Date.now()`를 새로 붙이고 있었다 — 며칠 된
-          //   캐시가 "방금 읽은 데이터"로 보였고, ④(신선도 보호)가 설
-          //   기반이 통째로 오염돼 있었다.
           // 값이 아예 없으면 비용을 계산할 수 없다. **신선도 판정은
           // 하지 않는다** — ④의 정본이 본다. 여기서 또 보면 판정이 두
           // 곳이 되고 사유가 "펀딩을 못 읽음"으로 뭉개진다.
-          if (prem.data == null || fb?.bounds == null) return null;
+          if (snap == null || fb?.bounds == null) return null;
           return {
             // 관측·방향 표시용이다. **미래 정산 비용의 상한이 아니다.**
-            rate: prem.data.lastFundingRate,
-            nextFundingTimeMs: prem.data.nextFundingTime,
+            rate: snap.lastFundingRate,
+            nextFundingTimeMs: snap.nextFundingTimeMs,
             // **8시간을 박지 않는다** — 대상 종목에서 직접 읽은 값이다.
             intervalHours: fb.bounds.intervalHours,
             // 1회 최대 지불 요율의 근거.
@@ -668,15 +691,14 @@ export async function POST(req: NextRequest) {
             // **세탁하지 않는다** — 실제로 읽은 시각 그대로.
             //
             // ★ **premium과 펀딩 상한을 한 칸에 합치지 않는다.** 둘은
-            //   다른 엔드포인트에서 다른 순간에 온다(premium은 45초
-            //   캐시, 펀딩 상한은 매번 새로 읽는다). 합치면 한쪽의
-            //   신선함이 다른 쪽을 덮어 "어느 쪽이 낡았는가"를 영영
-            //   물을 수 없게 된다.
-            premiumObservedAtMs: prem.observedAtMs as number,
-            premiumExchangeTimeMs: prem.data.timeMs,
+            //   다른 엔드포인트에서 온다(premium은 시장 스냅숏, 상한은
+            //   `fundingInfo`). 합치면 한쪽의 신선함이 다른 쪽을 덮어
+            //   "어느 쪽이 낡았는가"를 영영 물을 수 없게 된다.
+            premiumObservedAtMs: snap.stamps.observedAtMs,
+            premiumExchangeTimeMs: snap.stamps.exchangeTimeMs,
             // 캐시 상태를 **그대로** 넘긴다. 여기서 'FRESH'로 적으면
             // 만료된 캐시가 새 데이터가 된다.
-            premiumCache: prem.freshness,
+            premiumCache: snap.stamps.cache,
             fundingBoundsObservedAtMs: fb.bounds.observedAtMs,
           };
         },

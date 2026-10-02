@@ -137,16 +137,23 @@ export const READONLY_DEPS = [
 /**
  * **기준 마크가 관측.** 값과 "언제의 값인가"를 함께 들고 다닌다.
  *
- * `binanceFutures.readMarkPrice`가 돌려주는 모양이다. 여기서 따로
+ * `binanceFutures.readMarketSnapshot`이 돌려주는 모양이다. 여기서 따로
  * 선언하는 이유는 엔진이 거래소 모듈에 의존하지 않기 위해서다 —
  * 시험은 가짜 어댑터를 물려 준다.
+ *
+ * ★ **같은 스냅숏이 펀딩 입력에도 쓰여야 한다.** 마크가와 premium을
+ *   따로 읽으면 청산거리는 T0, 펀딩은 T1로 계산된다 — ④가 막으려는
+ *   바로 그 모양이다. 공유는 호출부(라우트)의 일이고, 검사기가 그것을
+ *   확인한다.
  */
 export interface ReferenceMarkObservation {
   /** 마크가. 못 읽었으면 null */
   price: number | null;
   /** 거래소가 적어 준 시각. 없으면 null — **지어내지 않는다** */
   exchangeTimeMs: number | null;
-  /** 우리가 **실제로 받은** 시각 */
+  /** 우리 서버가 응답을 **실제로 받은** 시각 */
+  receivedAtMs?: number | null;
+  /** 이 값이 **원래 관측된** 시각. 캐시가 없으면 수신 시각과 같다 */
   observedAtMs: number | null;
   source: string | null;
   cache: ObservationCache | null;
@@ -387,6 +394,7 @@ export async function prepareEntry100x(
     source: mark?.source ?? null,
     value: mark?.price ?? null,
     exchangeTimeMs: mark?.exchangeTimeMs ?? null,
+    receivedAtMs: mark?.receivedAtMs ?? null,
     observedAtMs: mark?.observedAtMs ?? null,
     cache: mark?.cache ?? null,
   };

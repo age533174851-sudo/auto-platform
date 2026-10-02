@@ -9,8 +9,8 @@
 // ★ 진입 전 보호다. 이미 열린 포지션을 닫는 권한이 아니다.
 import { test, eq, assert } from '../../test/harness';
 import {
-  assessMarketFreshness, EXACT100X_FRESHNESS_POLICY, CLOCK_SKEW_BUDGET_MS,
-  PREMIUM_REFRESH_MS, BRACKET_REFRESH_MS,
+  assessMarketFreshness, EXACT100X_FRESHNESS_POLICY,
+  FAST_MARKET_MAX_AGE_MS, SLOW_FACT_MAX_AGE_MS, BRACKET_REFRESH_MS,
   type MarketObservation, type ObservationKind,
 } from './marketFreshness';
 
@@ -21,11 +21,14 @@ const obs = (over: Partial<Record<ObservationKind, Partial<MarketObservation> | 
 : MarketObservation[] => {
   const base: Record<ObservationKind, MarketObservation> = {
     MARK: { kind: 'MARK', source: 'EXCHANGE_PREMIUM_INDEX', value: 50_000,
-            exchangeTimeMs: NOW - 300, observedAtMs: NOW - 200, cache: 'FRESH' },
+            exchangeTimeMs: NOW - 300, receivedAtMs: NOW - 200, observedAtMs: NOW - 200,
+            cache: 'FRESH' },
     BOOK: { kind: 'BOOK', source: 'EXCHANGE_DEPTH',
-            exchangeTimeMs: NOW - 400, observedAtMs: NOW - 250, cache: 'FRESH' },
+            exchangeTimeMs: NOW - 400, receivedAtMs: NOW - 250, observedAtMs: NOW - 250,
+            cache: 'FRESH' },
     PREMIUM: { kind: 'PREMIUM', source: 'EXCHANGE_PREMIUM_INDEX',
-               exchangeTimeMs: NOW - 500, observedAtMs: NOW - 350, cache: 'FRESH' },
+               exchangeTimeMs: NOW - 500, receivedAtMs: NOW - 350, observedAtMs: NOW - 350,
+               cache: 'FRESH' },
     FUNDING_BOUNDS: { kind: 'FUNDING_BOUNDS', source: 'EXCHANGE_FUNDING_INFO',
                       exchangeTimeMs: null, observedAtMs: NOW - 100, cache: 'FRESH' },
     COMMISSION: { kind: 'COMMISSION', source: 'EXCHANGE_ACCOUNT',
@@ -64,12 +67,20 @@ export function runMarketFreshnessTests() {
     assert(v.findings.every(f => f.code === 'OK'), '정상인데 지적이 남았다');
   });
 
-  test('브래킷은 6시간, premium은 45초까지 정상이다 — 자기 갱신 주기가 예산이다', () => {
-    assert(run({ BRACKET: { observedAtMs: NOW - (BRACKET_REFRESH_MS - 1000) } }).ok,
-      '브래킷 6시간 예산 안인데 막혔다');
-    assert(run({ PREMIUM: { exchangeTimeMs: NOW - PREMIUM_REFRESH_MS + 2000,
-                            observedAtMs: NOW - (PREMIUM_REFRESH_MS - 1000) } }).ok,
-      'premium 45초 예산 안인데 막혔다');
+  test('느린 설정 사실은 6시간까지 정상이다 — 가격 tick과 같은 문턱을 씌우지 않는다', () => {
+    for (const k of ['BRACKET', 'COMMISSION', 'FUNDING_BOUNDS'] as ObservationKind[]) {
+      const at = NOW - (SLOW_FACT_MAX_AGE_MS - 1000);
+      const r = run({ [k]: { observedAtMs: at, receivedAtMs: at } } as any);
+      assert(r.ok, `${k}: 느린 설정 사실에 빠른 시장 문턱을 씌웠다 — ${r.reason}`);
+    }
+  });
+
+  test('빠른 시장 사실은 5초 안이면 정상이다 (순차 읽기 파이프라인이 지나갈 자리)', () => {
+    for (const k of ['MARK', 'BOOK', 'PREMIUM'] as ObservationKind[]) {
+      const at = NOW - (FAST_MARKET_MAX_AGE_MS - 500);
+      const r = run({ [k]: { exchangeTimeMs: at - 100, receivedAtMs: at, observedAtMs: at } } as any);
+      assert(r.ok, `${k}: 예산 안인데 막혔다 — ${r.reason}`);
+    }
   });
 
   // ══════════════════════════════════════════════════════════
@@ -126,26 +137,17 @@ export function runMarketFreshnessTests() {
   // ══════════════════════════════════════════════════════════
   // ④⑤ 낡음
   // ══════════════════════════════════════════════════════════
-  test('마크가가 시계오차 예산보다 오래됐으면 막는다', () => {
-    const r = run({ MARK: { exchangeTimeMs: NOW - CLOCK_SKEW_BUDGET_MS - 1100,
-                            observedAtMs: NOW - CLOCK_SKEW_BUDGET_MS - 1 } });
-    assert(!r.ok, '예산을 넘겼는데 통과했다'); eq(r.code, 'STALE');
-  });
-
-  test('호가가 오래됐으면 막는다', () => {
-    const r = run({ BOOK: { exchangeTimeMs: NOW - CLOCK_SKEW_BUDGET_MS - 1100,
-                            observedAtMs: NOW - CLOCK_SKEW_BUDGET_MS - 1 } });
-    assert(!r.ok); eq(r.code, 'STALE');
-  });
-
-  test('premium이 자기 갱신 주기를 넘겼으면 막는다', () => {
-    const r = run({ PREMIUM: { exchangeTimeMs: NOW - PREMIUM_REFRESH_MS - 1100,
-                               observedAtMs: NOW - PREMIUM_REFRESH_MS - 1 } });
-    assert(!r.ok); eq(r.code, 'STALE');
-  });
+  for (const k of ['MARK', 'BOOK', 'PREMIUM'] as ObservationKind[]) {
+    test(`${k}가 빠른 시장 예산보다 오래됐으면 막는다`, () => {
+      const at = NOW - FAST_MARKET_MAX_AGE_MS - 1;
+      const r = run({ [k]: { exchangeTimeMs: at - 100, receivedAtMs: at, observedAtMs: at } } as any);
+      assert(!r.ok, `${k}: 예산을 넘겼는데 통과했다`); eq(r.code, 'STALE');
+    });
+  }
 
   test('브래킷이 6시간을 넘겼으면 막는다', () => {
-    const r = run({ BRACKET: { observedAtMs: NOW - BRACKET_REFRESH_MS - 1 } });
+    const r = run({ BRACKET: { observedAtMs: NOW - BRACKET_REFRESH_MS - 1,
+                               receivedAtMs: NOW - BRACKET_REFRESH_MS - 1 } });
     assert(!r.ok); eq(r.code, 'STALE');
   });
 
@@ -159,7 +161,7 @@ export function runMarketFreshnessTests() {
   test('낡은 캐시에 지금 시각을 붙여도 캐시 상태로 잡힌다 — 세탁이 안 된다', () => {
     // 시각만 보면 완벽하게 새것이다. 나이 검사만 있으면 통과한다.
     const r = run({ PREMIUM: { cache: 'STALE_CACHE',
-                               exchangeTimeMs: NOW - 100, observedAtMs: NOW } });
+                               exchangeTimeMs: NOW - 100, receivedAtMs: NOW, observedAtMs: NOW } });
     assert(!r.ok, '★ 열흘 된 캐시에 지금 시각을 붙여 통과시켰다');
     eq(r.code, 'CACHE_NOT_FRESH');
   });
@@ -169,25 +171,37 @@ export function runMarketFreshnessTests() {
   // ══════════════════════════════════════════════════════════
   test('거래소 시각과 수신 시각이 너무 벌어지면 막는다 (지연·시계오차)', () => {
     // 받은 지 100ms밖에 안 됐지만, 거래소가 만든 것은 그보다 한참 전이다.
-    const r = run({ MARK: { exchangeTimeMs: NOW - CLOCK_SKEW_BUDGET_MS - 200,
-                            observedAtMs: NOW - 100 } });
+    // 문턱은 이 파일이 정하지 않는다 — `checkClockSkew` 정본이 정한다.
+    const r = run({ MARK: { exchangeTimeMs: NOW - 100 - 3_300,
+                            receivedAtMs: NOW - 100, observedAtMs: NOW - 100 } });
     assert(!r.ok, '★ 수신 시각만 새것이면 통과시켰다');
-    eq(r.code, 'QUOTE_LAG_EXCEEDED');
+    eq(r.code, 'CLOCK_SKEW');
+  });
+
+  test('시계 오차 판단을 이 파일이 다시 만들지 않는다 — 정본과 같은 경계다', () => {
+    // `checkClockSkew(local, server, recvWindow 5000, safetyRatio 0.6)` → 3000ms
+    const inside = run({ MARK: { exchangeTimeMs: NOW - 100 - 2_900,
+                                 receivedAtMs: NOW - 100, observedAtMs: NOW - 100 } });
+    assert(inside.ok, `정본 경계 안인데 막혔다 — ${inside.reason}`);
+    const outside = run({ MARK: { exchangeTimeMs: NOW - 100 - 3_100,
+                                  receivedAtMs: NOW - 100, observedAtMs: NOW - 100 } });
+    assert(!outside.ok, '정본 경계 밖인데 통과했다');
+    eq(outside.code, 'CLOCK_SKEW');
   });
 
   // ══════════════════════════════════════════════════════════
   // ⑦ 미래 시각 — 음수 나이를 0으로 깎지 않는다
   // ══════════════════════════════════════════════════════════
-  test('수신 시각이 미래면 막는다 — 로컬 시계가 어긋났다', () => {
-    const r = run({ MARK: { exchangeTimeMs: NOW + CLOCK_SKEW_BUDGET_MS + 1000,
-                            observedAtMs: NOW + CLOCK_SKEW_BUDGET_MS + 1000 } });
+  test('관측 시각이 미래면 막는다 — 로컬 시계가 어긋났다', () => {
+    const t = NOW + 60_000;
+    const r = run({ MARK: { exchangeTimeMs: t - 100, receivedAtMs: t, observedAtMs: t } });
     assert(!r.ok, '★ 미래 시각이 "나이 0"으로 읽혀 가장 신선해 보였다');
     eq(r.code, 'FROM_FUTURE');
   });
 
   test('거래소 시각이 수신 시각보다 미래면 막는다', () => {
-    const r = run({ BOOK: { exchangeTimeMs: NOW - 100 + CLOCK_SKEW_BUDGET_MS + 1000,
-                            observedAtMs: NOW - 100 } });
+    const r = run({ BOOK: { exchangeTimeMs: NOW - 100 + 60_000,
+                            receivedAtMs: NOW - 100, observedAtMs: NOW - 100 } });
     assert(!r.ok); eq(r.code, 'FROM_FUTURE');
   });
 
@@ -199,19 +213,20 @@ export function runMarketFreshnessTests() {
     // 호가:   거래소 시각 NOW-5200, 수신 NOW-2600 → 나이 2600ms · 지연 2600ms ✓
     // 둘 다 자기 예산(3000ms) 안이지만 거래소 시각은 5000ms 벌어져 있다.
     const r = run({
-      MARK: { exchangeTimeMs: NOW - 200, observedAtMs: NOW - 100 },
-      BOOK: { exchangeTimeMs: NOW - 5_200, observedAtMs: NOW - 2_600 },
+      MARK: { exchangeTimeMs: NOW - 200, receivedAtMs: NOW - 100, observedAtMs: NOW - 100 },
+      BOOK: { exchangeTimeMs: NOW - 7_000, receivedAtMs: NOW - 4_500, observedAtMs: NOW - 4_500 },
     });
-    assert(!r.ok, '★ 5초 떨어진 마크가와 호가를 하나의 현재 시장으로 합쳤다');
+    assert(!r.ok, '★ 6.8초 떨어진 마크가와 호가를 하나의 현재 시장으로 합쳤다');
     eq(r.code, 'CROSS_SOURCE_SKEW');
-    assert((r.maxCrossSourceSkewMs as number) >= 5_000, '최대 시각차를 적어야 한다');
+    assert((r.maxCrossSourceSkewMs as number) > FAST_MARKET_MAX_AGE_MS,
+      '최대 시각차를 적어야 한다');
   });
 
   test('교차 검사가 각자의 개별 검사로 대체되지 않는다 — 개별은 전부 통과했다', () => {
     const only = assessMarketFreshness({
       observations: obs({
-        MARK: { exchangeTimeMs: NOW - 200, observedAtMs: NOW - 100 },
-        BOOK: { exchangeTimeMs: NOW - 5_200, observedAtMs: NOW - 2_600 },
+        MARK: { exchangeTimeMs: NOW - 200, receivedAtMs: NOW - 100, observedAtMs: NOW - 100 },
+        BOOK: { exchangeTimeMs: NOW - 7_000, receivedAtMs: NOW - 4_500, observedAtMs: NOW - 4_500 },
       }),
       required: ALL, nowMs: NOW,
     });
@@ -219,11 +234,13 @@ export function runMarketFreshnessTests() {
     eq(perSource.length, 0, '개별 검사가 이미 잡았다면 교차 검사가 무의미해진다');
   });
 
-  test('premium은 자기 주기가 길어 마크가와 45초까지는 합칠 수 있다', () => {
-    // 스스로 45초 주기를 선언한 출처를 3초 안에 맞추라고 요구하면
-    // 정상 동작이 영구 차단된다. 쌍의 예산은 느슨한 쪽이다.
-    const r = run({ PREMIUM: { exchangeTimeMs: NOW - 40_000, observedAtMs: NOW - 39_900 } });
-    assert(r.ok, `정상 동작을 막았다 — ${r.reason}`);
+  test('premium은 마크가와 **같은 스냅숏**이면 시각차가 0이다', () => {
+    // 한 진입은 `/fapi/v1/premiumIndex`를 한 번만 읽는다. 따로 읽으면
+    // 청산거리는 T0, 펀딩은 T1이 되어 ④가 막으려는 모양이 된다.
+    const same = { exchangeTimeMs: NOW - 300, receivedAtMs: NOW - 200, observedAtMs: NOW - 200 };
+    const r = run({ MARK: same, PREMIUM: same });
+    assert(r.ok, `같은 스냅숏인데 막혔다 — ${r.reason}`);
+    eq(r.maxCrossSourceSkewMs != null, true);
   });
 
   // ══════════════════════════════════════════════════════════
@@ -255,14 +272,28 @@ export function runMarketFreshnessTests() {
   // ══════════════════════════════════════════════════════════
   // 정책 자체
   // ══════════════════════════════════════════════════════════
-  test('시계오차 예산은 저장소 정본과 같은 수다 (recvWindow 5000 × 0.6)', () => {
-    eq(CLOCK_SKEW_BUDGET_MS, 3000);
-    eq(EXACT100X_FRESHNESS_POLICY.clockSkewBudgetMs, 3000);
-    eq(EXACT100X_FRESHNESS_POLICY.futureToleranceMs, 3000);
+  test('시계 오차 숫자를 이 파일이 들고 있지 않다 — 정본은 checkClockSkew다', () => {
+    // 같은 판단을 두 벌 만들면 한쪽만 바뀌고 그때 두 답이 갈린다.
+    assert(!('clockSkewBudgetMs' in (EXACT100X_FRESHNESS_POLICY as any)),
+      '시계 오차 예산을 여기서 또 정의했다');
+    assert(!('futureToleranceMs' in (EXACT100X_FRESHNESS_POLICY as any)),
+      '미래 허용치를 여기서 또 정의했다');
+  });
+
+  test('빠른 사실과 느린 사실에 같은 문턱을 쓰지 않는다', () => {
+    const m = EXACT100X_FRESHNESS_POLICY.maxDecisionAgeMs;
+    for (const fast of ['MARK', 'BOOK', 'PREMIUM'] as ObservationKind[]) {
+      for (const slow of ['BRACKET', 'COMMISSION', 'FUNDING_BOUNDS'] as ObservationKind[]) {
+        assert(m[fast] < m[slow],
+          `${fast}와 ${slow}에 같은 문턱을 쓰면 둘 중 하나는 반드시 틀린다`);
+      }
+    }
+    eq(m.MARK, FAST_MARKET_MAX_AGE_MS);
+    eq(m.BRACKET, SLOW_FACT_MAX_AGE_MS);
   });
 
   test('화면용 정본(dataQuality)의 100초 STALE 기준을 쓰지 않는다', () => {
-    for (const k of ['MARK', 'BOOK'] as ObservationKind[]) {
+    for (const k of ['MARK', 'BOOK', 'PREMIUM'] as ObservationKind[]) {
       assert(EXACT100X_FRESHNESS_POLICY.maxDecisionAgeMs[k] < 100_000,
         `${k}에 화면용 기준(100초)을 쓰면 100배 진입이 10만ms 전 가격으로 판정된다`);
     }

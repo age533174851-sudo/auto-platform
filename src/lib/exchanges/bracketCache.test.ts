@@ -13,7 +13,7 @@
 // 그리고 TTL이 지난 뒤 다시 읽기에 실패하면 옛 값을 조용히 돌려주고
 // 있었다 — 6시간이 아니라 **사실상 무기한** 낡은 구간이다.
 import { test, eq, assert } from '../../test/harness';
-import { readBracket, readPremiumIndex, readMarkPrice } from './binanceFutures';
+import { readBracket, readPremiumIndex, readMarketSnapshot } from './binanceFutures';
 
 /** 주입할 가짜 조회기. 전역 `fetch`를 건드리지 않는다 */
 const tiersFor = (coef: number | null) => {
@@ -144,58 +144,69 @@ export function runBracketCacheTests() {
     eq(r.observedAtMs, null);
   });
 
-  // ── 기준 마크가: **시장 데이터에서, 시각과 함께** ──
+  // ── 시장 스냅숏: **한 요청에 한 번, 시각과 함께** ──
   //
   //   `positionRisk.markPrice` 숫자 하나로는 "언제의 값인가"를 물을 수
   //   없었다. 그리고 그 응답의 `updateTime`은 포지션이 갱신된 시각이지
   //   마크가가 만들어진 시각이 아니다 — 서로의 timestamp가 될 수 없다.
+  //
+  //   마크가와 premium은 **같은 응답**에 있다. 따로 읽으면 한 진입
+  //   안에서 청산거리와 펀딩이 서로 다른 시점으로 계산된다.
 
-  test('마크가 관측은 거래소 시각과 수신 시각을 **따로** 들고 온다', async () => {
+  test('스냅숏은 마크가와 premium을 **같은 순간**으로 돌려준다', async () => {
     const T = 1_500_000_000_000;
-    const r = await readMarkPrice('BTCUSDT', true, async () => PREM, () => T);
+    const r = await readMarketSnapshot('BTCUSDT', true, async () => PREM, () => T);
     eq(r.error, null);
-    eq(r.mark.price, 50_000);
-    eq(r.mark.exchangeTimeMs, PREM.timeMs, '★ 거래소가 적어 준 시각을 버렸다');
-    eq(r.mark.observedAtMs, T, '★ 우리가 받은 시각이 아니다');
-    assert(r.mark.exchangeTimeMs !== r.mark.observedAtMs,
+    eq(r.snapshot!.markPrice, 50_000);
+    eq(r.snapshot!.lastFundingRate, PREM.lastFundingRate);
+    eq(r.snapshot!.nextFundingTimeMs, PREM.nextFundingTime);
+    // 청산거리가 쓰는 마크가와 펀딩이 쓰는 요율이 **한 시각**이다.
+    eq(r.snapshot!.stamps.observedAtMs, T);
+  });
+
+  test('세 시각을 따로 들고 온다 — 거래소 / 수신 / 원래 관측', async () => {
+    const T = 1_500_000_000_000;
+    const r = await readMarketSnapshot('BTCUSDT', true, async () => PREM, () => T);
+    const st = r.snapshot!.stamps;
+    eq(st.exchangeTimeMs, PREM.timeMs, '★ 거래소가 적어 준 시각을 버렸다');
+    eq(st.receivedAtMs, T);
+    eq(st.observedAtMs, T, '캐시가 없으면 수신 시각과 같다');
+    assert(st.exchangeTimeMs !== st.receivedAtMs,
       '두 시각을 한 값으로 합치면 수신 지연을 영영 못 잰다');
-    eq(r.mark.cache, 'FRESH');
+    eq(st.cache, 'FRESH');
   });
 
   test('거래소가 시각을 안 주면 null이다 — 1970년도, 지금도 아니다', async () => {
     const T = 1_500_000_000_000;
-    const r = await readMarkPrice('BTCUSDT', true,
+    const r = await readMarketSnapshot('BTCUSDT', true,
       async () => ({ ...PREM, timeMs: null }), () => T);
-    eq(r.mark.exchangeTimeMs, null,
+    eq(r.snapshot!.stamps.exchangeTimeMs, null,
       '★ 없는 시각을 0이나 지금으로 채웠다 — "없음"과 "낡음"은 다른 상태다');
-    eq(r.mark.observedAtMs, T);
+    eq(r.snapshot!.stamps.receivedAtMs, T);
   });
 
-  test('마크가 조회는 **캐시하지 않는다** — 매번 새로 읽은 시각이다', async () => {
+  test('스냅숏은 **캐시하지 않는다** — 매번 새로 읽은 시각이다', async () => {
     let n = 0;
     const fetchOne = async () => { n++; return PREM; };
     const T0 = 1_600_000_000_000;
-    await readMarkPrice('ETHUSDT', true, fetchOne, () => T0);
-    const b = await readMarkPrice('ETHUSDT', true, fetchOne, () => T0 + 10_000);
+    await readMarketSnapshot('ETHUSDT', true, fetchOne, () => T0);
+    const b = await readMarketSnapshot('ETHUSDT', true, fetchOne, () => T0 + 10_000);
     eq(n, 2, '★ 45초 캐시를 100배 기준가에 썼다');
-    eq(b.mark.observedAtMs, T0 + 10_000, '★ 캐시 시각을 돌려줬다');
+    eq(b.snapshot!.stamps.observedAtMs, T0 + 10_000, '★ 캐시 시각을 돌려줬다');
   });
 
   test('조회가 실패하면 값도 시각도 없다 — 지어내지 않는다', async () => {
-    const r = await readMarkPrice('BTCUSDT', true,
+    const r = await readMarketSnapshot('BTCUSDT', true,
       async () => { throw new Error('network'); }, () => 1);
-    eq(r.mark.price, null);
-    eq(r.mark.observedAtMs, null);
-    eq(r.mark.exchangeTimeMs, null);
-    eq(r.mark.cache, 'NONE');
+    eq(r.snapshot, null);
     assert(r.error != null, '왜 못 읽었는지 적어야 한다');
   });
 
-  test('마크가가 0이거나 음수면 값으로 치지 않는다', async () => {
+  test('마크가가 0이거나 음수면 스냅숏을 만들지 않는다', async () => {
     for (const px of [0, -1, NaN]) {
-      const r = await readMarkPrice('BTCUSDT', true,
+      const r = await readMarketSnapshot('BTCUSDT', true,
         async () => ({ ...PREM, markPrice: px }), () => 1);
-      eq(r.mark.price, null, `markPrice ${px}를 값으로 받았다`);
+      eq(r.snapshot, null, `markPrice ${px}를 값으로 받았다`);
       assert(r.error != null);
     }
   });

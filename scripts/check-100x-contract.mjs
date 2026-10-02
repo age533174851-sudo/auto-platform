@@ -1145,7 +1145,7 @@ if (entry) {
     //   그래서 라우트에 요구하는 것은 **캐시 상태를 그대로 넘기는 것**이다.
     for (const [dep, what, need] of [
       ['maintenanceTiers:', '유지증거금 브래킷', /freshness:\s*r\.freshness/],
-      ['fundingContext:', 'premium', /premiumCache:\s*prem\.freshness/],
+      ['fundingContext:', 'premium', /premiumCache:\s*snap\.stamps\.cache/],
     ]) {
       const at = sc.indexOf(dep);
       if (at < 0) { err(`${SCALP}: ${what} 의존을 넘기지 않습니다`); continue; }
@@ -1180,7 +1180,7 @@ if (entry) {
     {
       const at = sc.indexOf('fundingContext:');
       const body = at < 0 ? '' : sc.slice(at, at + 2200);
-      if (!/premiumObservedAtMs:\s*prem\.observedAtMs/.test(body)) {
+      if (!/premiumObservedAtMs:\s*snap\.stamps\.observedAtMs/.test(body)) {
         err(`${SCALP}: premium의 실제 관측 시각을 쓰지 않습니다`);
       }
       if (!/fundingBoundsObservedAtMs:\s*fb\.bounds\.observedAtMs/.test(body)) {
@@ -1200,8 +1200,34 @@ if (entry) {
         err(`${SCALP}: 기준 마크가를 계좌/포지션 응답에서 읽습니다`
           + ' — 그 응답의 updateTime은 포지션 갱신 시각이지 시세 시각이 아닙니다');
       }
-      if (!/readMarkPrice/.test(body)) {
-        err(`${SCALP}: 기준 마크가를 시장 데이터 조회(readMarkPrice)로 읽지 않습니다`);
+      if (!/marketSnapshot\(\)/.test(body)) {
+        err(`${SCALP}: 기준 마크가를 시장 스냅숏에서 읽지 않습니다`);
+      }
+    }
+    // **한 진입이 시장 스냅숏을 한 번만 읽는가.**
+    //
+    //   마크가와 premium이 서로 다른 조회에서 오면, 청산거리는 T0의
+    //   가격으로 펀딩은 T1의 요율로 계산된다 — ④가 막으려는 바로 그
+    //   모양을 ④ 자신이 만드는 꼴이다. 라우트가 Promise 하나를 만들어
+    //   두 의존이 같은 것을 기다리게 해야 한다.
+    {
+      if (!/marketSnapshotOnce/.test(sc)) {
+        err(`${SCALP}: 시장 스냅숏을 요청 범위로 공유하지 않습니다`
+          + ' — 마크가와 펀딩이 서로 다른 시점이 됩니다');
+      }
+      const calls = (sc.match(/readMarketSnapshot\(/g) || []).length;
+      if (calls !== 1) {
+        err(`${SCALP}: readMarketSnapshot을 ${calls}번 부릅니다`
+          + ' — 한 진입은 한 스냅숏이어야 합니다');
+      }
+      const iFund = sc.indexOf('fundingContext:');
+      const fundBody = iFund < 0 ? '' : sc.slice(iFund, iFund + 2200);
+      if (/readPremiumIndex/.test(fundBody)) {
+        err(`${SCALP}: 펀딩 입력이 45초 캐시 reader(readPremiumIndex)를 씁니다`
+          + ' — 마크가와 다른 시점이 됩니다');
+      }
+      if (!/marketSnapshot\(\)/.test(fundBody)) {
+        err(`${SCALP}: 펀딩 입력이 마크가와 **같은 스냅숏**을 쓰지 않습니다`);
       }
     }
 
@@ -3111,11 +3137,14 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     const NOW = 1_700_000_000_000;
     const BASE = {
       MARK: { kind: 'MARK', source: 'EXCHANGE_PREMIUM_INDEX', value: 50_000,
-              exchangeTimeMs: NOW - 300, observedAtMs: NOW - 200, cache: 'FRESH' },
+              exchangeTimeMs: NOW - 300, receivedAtMs: NOW - 200, observedAtMs: NOW - 200,
+              cache: 'FRESH' },
       BOOK: { kind: 'BOOK', source: 'EXCHANGE_DEPTH',
-              exchangeTimeMs: NOW - 400, observedAtMs: NOW - 250, cache: 'FRESH' },
+              exchangeTimeMs: NOW - 400, receivedAtMs: NOW - 250, observedAtMs: NOW - 250,
+              cache: 'FRESH' },
       PREMIUM: { kind: 'PREMIUM', source: 'EXCHANGE_PREMIUM_INDEX',
-                 exchangeTimeMs: NOW - 500, observedAtMs: NOW - 350, cache: 'FRESH' },
+                 exchangeTimeMs: NOW - 500, receivedAtMs: NOW - 350, observedAtMs: NOW - 350,
+                 cache: 'FRESH' },
       FUNDING_BOUNDS: { kind: 'FUNDING_BOUNDS', source: 'EXCHANGE_FUNDING_INFO',
                         exchangeTimeMs: null, observedAtMs: NOW - 100, cache: 'FRESH' },
       COMMISSION: { kind: 'COMMISSION', source: 'EXCHANGE_ACCOUNT',
@@ -3150,30 +3179,32 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       ['수신 시각이 Infinity', { MARK: { observedAtMs: Infinity } }, 'TIMESTAMP_MISSING'],
       ['호가에 거래소 시각이 없음', { BOOK: { exchangeTimeMs: null } }, 'TIMESTAMP_MISSING'],
       // ④ 낡음
-      ['마크가가 10초 전', { MARK: { exchangeTimeMs: NOW - 10_100, observedAtMs: NOW - 10_000 } },
-        'STALE'],
-      ['호가가 10초 전', { BOOK: { exchangeTimeMs: NOW - 10_100, observedAtMs: NOW - 10_000 } },
-        'STALE'],
-      ['premium이 60초 전', { PREMIUM: { exchangeTimeMs: NOW - 60_100, observedAtMs: NOW - 60_000 } },
-        'STALE'],
-      ['브래킷이 7시간 전', { BRACKET: { observedAtMs: NOW - 7 * 3_600_000 } }, 'STALE'],
+      ['마크가가 10초 전', { MARK: { exchangeTimeMs: NOW - 10_100,
+        receivedAtMs: NOW - 10_000, observedAtMs: NOW - 10_000 } }, 'STALE'],
+      ['호가가 10초 전', { BOOK: { exchangeTimeMs: NOW - 10_100,
+        receivedAtMs: NOW - 10_000, observedAtMs: NOW - 10_000 } }, 'STALE'],
+      ['premium이 60초 전', { PREMIUM: { exchangeTimeMs: NOW - 60_100,
+        receivedAtMs: NOW - 60_000, observedAtMs: NOW - 60_000 } }, 'STALE'],
+      ['브래킷이 7시간 전', { BRACKET: { observedAtMs: NOW - 7 * 3_600_000,
+        receivedAtMs: NOW - 7 * 3_600_000 } }, 'STALE'],
       // ⑤ 만료된 캐시 — 시각을 지금으로 바꿔도 잡힌다 (세탁 불가)
       ['만료된 브래킷 캐시', { BRACKET: { cache: 'STALE_CACHE' } }, 'CACHE_NOT_FRESH'],
       ['만료된 premium 캐시에 지금 시각',
-        { PREMIUM: { cache: 'STALE_CACHE', exchangeTimeMs: NOW - 100, observedAtMs: NOW } },
+        { PREMIUM: { cache: 'STALE_CACHE', exchangeTimeMs: NOW - 100,
+                     receivedAtMs: NOW, observedAtMs: NOW } },
         'CACHE_NOT_FRESH'],
-      // ⑥ 수신 지연 — 늦게 도착한 값
-      ['거래소 시각만 한참 전', { MARK: { exchangeTimeMs: NOW - 4_000, observedAtMs: NOW - 100 } },
-        'QUOTE_LAG_EXCEEDED'],
+      // ⑥ 수신 지연 — 늦게 도착한 값 (판단은 checkClockSkew 정본)
+      ['거래소 시각만 한참 전', { MARK: { exchangeTimeMs: NOW - 100 - 3_300,
+        receivedAtMs: NOW - 100, observedAtMs: NOW - 100 } }, 'CLOCK_SKEW'],
       // ⑦ 미래 시각
-      ['수신 시각이 미래', { MARK: { exchangeTimeMs: NOW + 60_000, observedAtMs: NOW + 60_000 } },
-        'FROM_FUTURE'],
-      ['거래소 시각이 수신보다 미래', { BOOK: { exchangeTimeMs: NOW + 60_000, observedAtMs: NOW - 100 } },
-        'FROM_FUTURE'],
+      ['관측 시각이 미래', { MARK: { exchangeTimeMs: NOW + 60_000 - 100,
+        receivedAtMs: NOW + 60_000, observedAtMs: NOW + 60_000 } }, 'FROM_FUTURE'],
+      ['거래소 시각이 수신보다 미래', { BOOK: { exchangeTimeMs: NOW + 60_000,
+        receivedAtMs: NOW - 100, observedAtMs: NOW - 100 } }, 'FROM_FUTURE'],
       // ⑧ 교차 출처 — 각자 신선해도 **합친 그림**은 없을 수 있다
-      ['마크가와 호가가 5초 떨어진 시점', {
-        MARK: { exchangeTimeMs: NOW - 200, observedAtMs: NOW - 100 },
-        BOOK: { exchangeTimeMs: NOW - 5_200, observedAtMs: NOW - 2_600 },
+      ['마크가와 호가가 7초 떨어진 시점', {
+        MARK: { exchangeTimeMs: NOW - 200, receivedAtMs: NOW - 100, observedAtMs: NOW - 100 },
+        BOOK: { exchangeTimeMs: NOW - 7_000, receivedAtMs: NOW - 4_500, observedAtMs: NOW - 4_500 },
       }, 'CROSS_SOURCE_SKEW'],
       // 기준 마크가가 아예 없으면 — 그 값에는 다른 주인이 없다
       ['마크가 관측 자체가 없음', { MARK: null }, 'OBSERVATION_MISSING'],
@@ -3196,8 +3227,8 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     // 교차 검사가 **개별 검사로 대체되지 않는가** — 비어 있는 검사는 검사가 아니다
     {
       const v = assess({
-        MARK: { exchangeTimeMs: NOW - 200, observedAtMs: NOW - 100 },
-        BOOK: { exchangeTimeMs: NOW - 5_200, observedAtMs: NOW - 2_600 },
+        MARK: { exchangeTimeMs: NOW - 200, receivedAtMs: NOW - 100, observedAtMs: NOW - 100 },
+        BOOK: { exchangeTimeMs: NOW - 7_000, receivedAtMs: NOW - 4_500, observedAtMs: NOW - 4_500 },
       });
       const perSource = (v.findings || [])
         .filter(f => f.code !== 'OK' && f.code !== 'CROSS_SOURCE_SKEW');
@@ -3210,7 +3241,8 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     // 출처별 관측 시각을 **합치지 않는가**
     {
       const p = good.provenance || {};
-      for (const k of ['referenceMarkObservedAtMs', 'referenceMarkExchangeTimeMs',
+      for (const k of ['referenceMarkObservedAtMs', 'referenceMarkReceivedAtMs',
+                       'referenceMarkExchangeTimeMs',
                        'bookObservedAtMs', 'bookExchangeTimeMs',
                        'premiumObservedAtMs', 'premiumExchangeTimeMs',
                        'fundingBoundsObservedAtMs', 'commissionObservedAtMs',
@@ -3226,11 +3258,31 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     // 문턱이 **화면용 정본**에서 오지 않았는가
     {
       const pol = mf.EXACT100X_FRESHNESS_POLICY || {};
-      if (mf.CLOCK_SKEW_BUDGET_MS !== 3000) {
-        err(`${FRESH}: 시계 오차 예산이 ${mf.CLOCK_SKEW_BUDGET_MS}ms입니다`
-          + ' — 저장소 정본(recvWindow 5000 × safetyRatio 0.6 = 3000ms)과 다릅니다');
+      // **시계 오차 숫자를 여기서 또 정의하지 않았는가.**
+      //   정본은 `preTradeChecklist.checkClockSkew`다. 같은 판단이 두
+      //   곳에 있으면 한쪽만 바뀌고 그때 두 답이 갈린다.
+      for (const dup of ['clockSkewBudgetMs', 'futureToleranceMs']) {
+        if (dup in pol) {
+          err(`${FRESH}: 정책에 ${dup}를 또 정의했습니다`
+            + ' — 시계 오차 정본은 preTradeChecklist.checkClockSkew 한 곳입니다');
+        }
       }
-      for (const k of ['MARK', 'BOOK']) {
+      if (!/checkClockSkew/.test(code(FRESH))) {
+        err(`${FRESH}: 시계 오차 정본(checkClockSkew)을 쓰지 않습니다`
+          + ' — 같은 판단을 두 벌 만들면 언젠가 두 답이 갈립니다');
+      }
+      // **빠른 시장 사실과 느린 설정 사실에 같은 문턱을 씌우지 않았는가.**
+      for (const fast of ['MARK', 'BOOK', 'PREMIUM']) {
+        for (const slow of ['BRACKET', 'COMMISSION', 'FUNDING_BOUNDS']) {
+          const a = (pol.maxDecisionAgeMs || {})[fast];
+          const b = (pol.maxDecisionAgeMs || {})[slow];
+          if (!(a < b)) {
+            err(`${FRESH}: ${fast}(${a}ms)와 ${slow}(${b}ms)에 같은 문턱을 씁니다`
+              + ' — 가격 tick과 계정 설정은 성질이 다릅니다. 둘 중 하나는 반드시 틀립니다');
+          }
+        }
+      }
+      for (const k of ['MARK', 'BOOK', 'PREMIUM']) {
         const v = (pol.maxDecisionAgeMs || {})[k];
         if (!(v > 0) || v >= 100_000) {
           err(`${FRESH}: ${k}의 나이 예산이 ${v}ms입니다`
@@ -3258,8 +3310,8 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
   {
     const bf = 'src/lib/exchanges/binanceFutures.ts';
     const src = code(bf);
-    if (!/export async function readMarkPrice/.test(src)) {
-      err(`${bf}: readMarkPrice가 없습니다 — 기준 마크가를 시장 데이터에서 읽지 않습니다`);
+    if (!/export async function readMarketSnapshot/.test(src)) {
+      err(`${bf}: readMarketSnapshot이 없습니다 — 기준 마크가를 시장 데이터에서 읽지 않습니다`);
     }
     // premiumIndex 응답의 `time`을 버리지 않는가
     if (!/timeMs:\s*Number\.isFinite\(t\)/.test(src)) {
@@ -3280,11 +3332,28 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         + ' — 그러면 부르는 쪽이 Date.now()를 붙이게 되고, 언제 읽었든 "방금"이 됩니다');
     }
     // 마크가 조회가 **캐시를 쓰지 않는가** — 45초 캐시는 100배 기준가에 못 쓴다
-    const iMk = src.indexOf('export async function readMarkPrice');
+    const iMk = src.indexOf('export async function readMarketSnapshot');
     const mkBody = iMk < 0 ? '' : src.slice(iMk, iMk + 2000);
     if (/PREMIUM_CACHE|CACHE\.get\(/.test(mkBody)) {
-      err(`${bf}: readMarkPrice가 캐시를 씁니다`
+      err(`${bf}: readMarketSnapshot이 캐시를 씁니다`
         + ' — premium의 45초 캐시를 100배 청산 여유의 기준가로 쓸 수 없습니다');
+    }
+    // **마크가와 premium이 한 응답에서 나오는가.**
+    //   따로 읽으면 한 진입 안에서 청산거리는 T0, 펀딩은 T1이 된다.
+    for (const need of ['markPrice', 'lastFundingRate', 'nextFundingTimeMs']) {
+      if (!mkBody.includes(need)) {
+        err(`${bf}: 시장 스냅숏이 ${need}를 함께 돌려주지 않습니다`
+          + ' — 마크가와 펀딩을 따로 읽으면 서로 다른 시점이 됩니다');
+      }
+    }
+    // **포지션 갱신 시각을 마크가 시각이라고 부르지 않는가.**
+    if (/markPriceObservedAtMs/.test(src)) {
+      err(`${bf}: 포지션 갱신 시각을 markPriceObservedAtMs라고 부릅니다`
+        + ' — 그 timestamp의 의미가 다릅니다');
+    }
+    if (!/positionUpdateTimeMs/.test(src)) {
+      err(`${bf}: positionRisk의 updateTime을 버립니다`
+        + ' — 보존하되 마크가 시각으로 쓰지 않는 것이 맞습니다');
     }
   }
 }

@@ -567,7 +567,7 @@ export async function getPremiumIndex(symbol: string, testnet = true): Promise<P
   return (await readPremiumIndex(symbol, testnet)).data;
 }
 
-// ── 기준 마크가: **계좌 상태가 아니라 시장 데이터에서 읽는다** ──
+// ── 시장 스냅숏: **한 요청에 한 번만 읽는다** ──
 //
 // 예전에는 `positionRisk.markPrice` 숫자 하나를 기준가로 썼다. 두 가지가
 // 동시에 잘못돼 있었다.
@@ -580,61 +580,89 @@ export async function getPremiumIndex(symbol: string, testnet = true): Promise<P
 //     될 수 없다
 //   · 숫자만 돌려주니 호출부가 나이를 잴 방법이 없었다
 //
-// 그래서 마크가는 시장 데이터 엔드포인트(`premiumIndex`)에서 읽고,
-// **거래소가 적어 준 시각과 우리가 받은 시각을 함께** 돌려준다.
+// **왜 마크가와 premium을 한 함수에서 주는가**
+// ────────────────────────────────────────────
+// 둘은 `/fapi/v1/premiumIndex` **같은 응답**에 들어 있다. 따로 읽으면
+// 한 진입 안에서 청산거리는 T0의 마크가로, 펀딩은 T1의 요율로 계산된다 —
+// ④가 막으려는 바로 그 모양("서로 다른 시점을 하나의 시장 상태처럼")을
+// ④ 자신이 만드는 꼴이다. 그래서 **한 번 읽어 둘 다 돌려준다.**
 //
-// **캐시하지 않는다.** `readPremiumIndex`는 펀딩 계산용이라 45초 캐시를
-// 선언하지만, 100배 청산 여유를 재는 기준가에 45초는 쓸 수 없다. 같은
-// 엔드포인트지만 신선도 계약이 다르므로 읽기도 따로 둔다 — 응답을 푸는
-// 코드(`defaultPremiumFetch`)는 **한 벌을 공유한다.**
-export interface MarkPriceObservation {
-  symbol: string;
-  /** 마크가. 못 읽으면 null */
-  price: number | null;
-  /** 지수가(참고). 거리 계산에는 쓰지 않는다 */
-  indexPrice: number | null;
-  /** 거래소가 적어 준 시각. 없으면 null — **지어내지 않는다** */
+// **캐시하지 않는다.** `readPremiumIndex`는 화면·예측용이라 45초 캐시를
+// 선언하지만, 100배 청산 여유를 재는 기준가에 45초는 쓸 수 없다. 응답을
+// 푸는 코드(`defaultPremiumFetch`)는 **한 벌을 공유한다.**
+//
+// 한 요청 안에서 여러 번 부르지 않는 것은 **호출부의 일이다** — 라우트가
+// 이 Promise를 한 번 만들어 모든 의존이 같은 것을 쓰게 한다.
+
+/** 하나의 관측이 들고 다니는 시각들. 셋은 서로 다른 질문의 답이다 */
+export interface ObservationStamps {
+  /** 거래소가 응답에 적어 준 시각(`time`). 없으면 null — **지어내지 않는다** */
   exchangeTimeMs: number | null;
-  /** 우리가 응답을 **실제로 받은** 시각 */
-  observedAtMs: number | null;
-  source: 'EXCHANGE_PREMIUM_INDEX';
-  /** 캐시하지 않으므로 성공이면 항상 `FRESH`, 실패면 `NONE`이다 */
-  cache: 'FRESH' | 'NONE';
+  /** 우리 서버가 이 응답을 **실제로 받은** 시각 */
+  receivedAtMs: number;
+  /**
+   * 이 값이 **원래 관측된** 시각.
+   *
+   * 캐시가 없으면 `receivedAtMs`와 같다. 캐시에서 왔다면 **원본을 받은
+   * 그때**다 — 지금이 아니다. 둘을 하나로 뭉개면 "거래소에서 이미 오래된
+   * 값"과 "우리 캐시에서 오래된 값"을 구별할 수 없다.
+   */
+  observedAtMs: number;
+  cache: 'FRESH' | 'STALE_CACHE' | 'NONE';
 }
 
-export async function readMarkPrice(
+export interface MarketSnapshot {
+  symbol: string;
+  /** 거리를 재는 기준가 */
+  markPrice: number;
+  /** 지수가(참고). 거리 계산에는 쓰지 않는다 */
+  indexPrice: number | null;
+  /** 최근 펀딩률. **미래 비용의 상한이 아니다** (상한은 fundingInfo) */
+  lastFundingRate: number;
+  nextFundingTimeMs: number;
+  source: 'EXCHANGE_PREMIUM_INDEX';
+  stamps: ObservationStamps;
+}
+
+/**
+ * 한 진입이 쓰는 **시장 스냅숏 하나.** 마크가와 premium이 같은 순간이다.
+ *
+ * 실패하면 `snapshot: null`이고 이유를 적는다 — 값도 시각도 지어내지 않는다.
+ */
+export async function readMarketSnapshot(
   symbol: string, testnet = true,
   /** 거래소 조회. **시험이 주입한다** — 전역 `fetch`를 바꾸지 않는다 */
   fetchOne: (sym: string, tn: boolean) => Promise<PremiumIndex> = defaultPremiumFetch,
   /** 지금 시각. 시험이 고정한다 */
   nowMs: () => number = () => Date.now(),
-): Promise<{ mark: MarkPriceObservation; error: string | null }> {
+): Promise<{ snapshot: MarketSnapshot | null; error: string | null }> {
   const sym = symbol.toUpperCase().replace('/', '');
-  const miss = (why: string): { mark: MarkPriceObservation; error: string } => ({
-    mark: { symbol: sym, price: null, indexPrice: null, exchangeTimeMs: null,
-            observedAtMs: null, source: 'EXCHANGE_PREMIUM_INDEX', cache: 'NONE' },
-    error: why,
-  });
   let d: PremiumIndex;
   try { d = await fetchOne(sym, testnet); }
-  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }
+  catch (e: any) { return { snapshot: null, error: e?.message || '시장 스냅숏 조회 실패' }; }
   const at = nowMs();
   const px = Number(d?.markPrice);
   if (!Number.isFinite(px) || !(px > 0)) {
-    return miss(`${sym}의 마크가를 읽지 못했습니다 (${String(d?.markPrice)})`);
+    return { snapshot: null, error: `${sym}의 마크가를 읽지 못했습니다 (${String(d?.markPrice)})` };
   }
   const ix = Number(d?.indexPrice);
   return {
-    mark: {
+    snapshot: {
       symbol: sym,
-      price: px,
+      markPrice: px,
       indexPrice: Number.isFinite(ix) && ix > 0 ? ix : null,
-      // **없는 시각을 받은 시각으로 대체하지 않는다.** 그러면 지연이 항상
-      // 0이 되어 "늦게 도착한 값"을 영영 못 잡는다.
-      exchangeTimeMs: d?.timeMs ?? null,
-      observedAtMs: at,
+      lastFundingRate: Number(d?.lastFundingRate),
+      nextFundingTimeMs: Number(d?.nextFundingTime),
       source: 'EXCHANGE_PREMIUM_INDEX',
-      cache: 'FRESH',
+      stamps: {
+        // **없는 시각을 받은 시각으로 대체하지 않는다.** 그러면 지연이
+        // 항상 0이 되어 "늦게 도착한 값"을 영영 못 잡는다.
+        exchangeTimeMs: d?.timeMs ?? null,
+        receivedAtMs: at,
+        // 캐시가 없으므로 원래 관측 시각 = 받은 시각이다.
+        observedAtMs: at,
+        cache: 'FRESH',
+      },
     },
     error: null,
   };
@@ -916,6 +944,16 @@ export interface SymbolPositionRisk {
   liquidationPrice: number | null;
   entryPrice: number | null;
   markPrice: number | null;
+  /**
+   * 거래소가 적어 준 **포지션 갱신 시각**. 없으면 null.
+   *
+   * ★ **이것을 마크가의 관측 시각으로 쓰지 마라.** 문서상 이 값은
+   *   포지션의 update time이고, 마크가 호가가 만들어진 시각이라는
+   *   보장이 없다 — 포지션을 사흘 안 건드렸으면 사흘 전 값이다.
+   *   기준 마크가는 `readMarketSnapshot`이 시장 데이터에서 읽는다.
+   *   그래서 이름도 `markPriceObservedAtMs`가 아니라 이것이다.
+   */
+  positionUpdateTimeMs: number | null;
 }
 
 /**
@@ -964,6 +1002,11 @@ export async function getSymbolPositionRiskEx(
       liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
       entryPrice: parseFloat(row.entryPrice ?? '0') || null,
       markPrice: parseFloat(row.markPrice ?? '0') || null,
+      // 버리지 않고 보존하되 **마크가 시각이 아니다**(위 주석).
+      positionUpdateTimeMs: (() => {
+        const u = Number(row.updateTime);
+        return Number.isFinite(u) && u > 0 ? u : null;
+      })(),
     } as SymbolPositionRisk;
   };
   // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을

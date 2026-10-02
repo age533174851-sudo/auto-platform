@@ -1202,7 +1202,7 @@ const M = [
     'RED'],
 
   ['MUT-D10 라우트가 premium 캐시 상태를 FRESH로 세탁함', P.scalp,
-    s => s.replace('            premiumCache: prem.freshness,',
+    s => s.replace('            premiumCache: snap.stamps.cache,',
                    "            premiumCache: 'FRESH',"), 'RED'],
 
   ['MUT-D11 청산 쪽 명목가 대신 진입 명목가 (SHORT 과소예약)', P.cost,
@@ -1247,11 +1247,15 @@ const M = [
     s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
 
   ['MUT-F6   미래 시각을 통과시킴 (음수 나이를 그냥 씀)', P.fresh,
-    s => s.replace('    if (at > now + tol) {', '    if (false) {'), 'RED'],
+    s => s.replace('    if (at > now) {', '    if (false) {'), 'RED'],
 
-  ['MUT-F7   수신 지연(거래소↔로컬 시각 차)을 안 봄', P.fresh,
-    s => s.replace('    if (lag != null && lagBudget != null && lag > lagBudget) {',
-                   '    if (false) {'), 'RED'],
+  ['MUT-F7   수신 지연(거래소↔로컬 시각 차)을 안 봄 — 정본 호출 제거', P.fresh,
+    s => s.replace('      if (skew.blocks) {', '      if (false) {'), 'RED'],
+
+  ['MUT-F7b  시계 오차 정본 대신 자체 숫자를 다시 만듦', P.fresh,
+    s => s.replace('      const skew = checkClockSkew(recv, ex);',
+                   "      const skew = { blocks: Math.abs(recv - ex) > 60_000, detail: '' };"),
+    'RED'],
 
   ['MUT-F8   교차 출처 시각 차 검사를 없앰', P.fresh,
     s => s.replace('      if (skew > budget) {', '      if (false) {'), 'RED'],
@@ -1270,9 +1274,12 @@ const M = [
                    '  const now = num(input.nowMs) ?? Date.now();\n  if (false) {'), 'RED'],
 
   ['MUT-F12 신선도 예산을 화면용 정본 수준(100초)으로 늘림', P.fresh,
-    s => s.replace('  maxDecisionAgeMs: {\n    MARK: CLOCK_SKEW_BUDGET_MS,\n'
-                   + '    BOOK: CLOCK_SKEW_BUDGET_MS,',
-                   '  maxDecisionAgeMs: {\n    MARK: 100_000,\n    BOOK: 100_000,'), 'RED'],
+    s => s.replace('export const FAST_MARKET_MAX_AGE_MS = 5000;',
+                   'export const FAST_MARKET_MAX_AGE_MS = 100_000;'), 'RED'],
+
+  ['MUT-F12b 느린 설정 사실에도 빠른 시장 문턱을 씌움 (정상 진입 전면 차단)', P.fresh,
+    s => s.replace('export const SLOW_FACT_MAX_AGE_MS = 6 * 60 * 60 * 1000;',
+                   'export const SLOW_FACT_MAX_AGE_MS = 5000;'), 'RED'],
 
   ['MUT-F13 출처별 관측 시각을 한 칸으로 합침 (premium = 펀딩 상한)', P.fresh,
     s => s.replace("    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = at; }",
@@ -1308,13 +1315,15 @@ const M = [
                    + '    source: mark?.source ?? null,\n'
                    + '    value: mark?.price ?? null,\n'
                    + '    exchangeTimeMs: mark?.exchangeTimeMs ?? null,\n'
+                   + '    receivedAtMs: mark?.receivedAtMs ?? null,\n'
                    + '    observedAtMs: mark?.observedAtMs ?? null,\n'
                    + '    cache: mark?.cache ?? null,\n'
                    + '  };',
                    "  const markObservation: MarketObservation = {\n"
                    + "    kind: 'MARK', source: 'LEGACY_NUMBER',\n"
                    + '    value: (mark as any)?.price ?? (mark as any),\n'
-                   + '    exchangeTimeMs: nowMs(), observedAtMs: nowMs(), cache: \'FRESH\',\n'
+                   + '    exchangeTimeMs: nowMs(), receivedAtMs: nowMs(),\n'
+                   + '    observedAtMs: nowMs(), cache: \'FRESH\',\n'
                    + '  };'), 'RED'],
 
   ['MUT-F18 낡은 브래킷 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
@@ -1329,17 +1338,27 @@ const M = [
     s => moveFreshnessAfterWrite(s), 'RED'],
 
   ['MUT-F21 라우트가 기준 마크가를 포지션 응답에서 떼어 옴', P.scalp,
-    s => s.replace('          const r = await bf.readMarkPrice(symbol, !connIsLive)\n'
-                   + '            .catch(() => null);\n'
-                   + '          // **시각을 여기서 붙이지 않는다** — 읽는 쪽이 응답에 넣어 준다.\n'
-                   + '          return r?.mark ?? null;',
-                   '          void bf;\n'
+    s => s.replace('        referenceMark: async () => {\n'
+                   + '          const snap = await marketSnapshot();\n'
+                   + '          if (!snap) return null;',
+                   '        referenceMark: async () => {\n'
                    + '          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);\n'
                    + '          const m = Number(rr.risk?.markPrice);\n'
-                   + '          return Number.isFinite(m) && m > 0 ? { price: m,\n'
-                   + '            exchangeTimeMs: Number(rr.risk?.updateTime) || Date.now(),\n'
-                   + "            observedAtMs: Date.now(), source: 'POSITION_RISK', cache: 'FRESH' } : null;"),
+                   + '          if (!Number.isFinite(m) || !(m > 0)) return null;\n'
+                   + '          const snap = { markPrice: m, source: \'POSITION_RISK\', stamps: {\n'
+                   + '            exchangeTimeMs: rr.risk?.positionUpdateTimeMs ?? Date.now(),\n'
+                   + '            receivedAtMs: Date.now(), observedAtMs: Date.now(), cache: \'FRESH\' } } as any;'),
     'RED'],
+
+  ['MUT-F21b 라우트가 펀딩을 별도 조회로 읽음 (마크가와 다른 시점)', P.scalp,
+    s => s.replace('            marketSnapshot(),\n', '            (async () => {\n'
+                   + '              const pr = await bf.readPremiumIndex(symbol, !connIsLive)\n'
+                   + '                .catch(() => ({ data: null, observedAtMs: null, freshness: \'NONE\' } as any));\n'
+                   + '              return pr.data == null ? null : { lastFundingRate: pr.data.lastFundingRate,\n'
+                   + '                nextFundingTimeMs: pr.data.nextFundingTime, markPrice: pr.data.markPrice,\n'
+                   + '                stamps: { exchangeTimeMs: pr.data.timeMs, receivedAtMs: pr.observedAtMs,\n'
+                   + '                  observedAtMs: pr.observedAtMs, cache: pr.freshness } };\n'
+                   + '            })(),\n'), 'RED'],
 
   ['MUT-F22 라우트가 수수료에 새 시각을 붙임', P.scalp,
     s => s.replace("            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: r.rate.observedAtMs,",
@@ -1357,20 +1376,24 @@ const M = [
     s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
                    '    timeMs: Number(d.time || 0),'), 'RED'],
 
-  ['MUT-F26 마크가 조회가 거래소 시각 대신 수신 시각을 적음', P.bfapi,
-    s => s.replace('      exchangeTimeMs: d?.timeMs ?? null,',
-                   '      exchangeTimeMs: at,'), 'RED'],
+  ['MUT-F26 스냅숏이 거래소 시각 대신 수신 시각을 적음', P.bfapi,
+    s => s.replace('        exchangeTimeMs: d?.timeMs ?? null,',
+                   '        exchangeTimeMs: at,'), 'RED'],
 
-  ['MUT-F27 마크가 조회에 45초 캐시를 붙임', P.bfapi,
+  ['MUT-F26b 포지션 갱신 시각을 마크가 시각으로 보존', P.bfapi,
+    s => s.replace('      positionUpdateTimeMs: (() => {',
+                   '      markPriceObservedAtMs: (() => {'), 'RED'],
+
+  ['MUT-F27 시장 스냅숏에 45초 캐시를 붙임', P.bfapi,
     s => s.replace('  let d: PremiumIndex;\n'
                    + '  try { d = await fetchOne(sym, testnet); }\n'
-                   + "  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }\n"
+                   + "  catch (e: any) { return { snapshot: null, error: e?.message || '시장 스냅숏 조회 실패' }; }\n"
                    + '  const at = nowMs();',
                    '  let d: PremiumIndex;\n'
                    + '  const hit0 = PREMIUM_CACHE.get(`${testnet ? \'T\' : \'L\'}:${sym}`);\n'
                    + '  if (hit0) { d = hit0.data; } else {\n'
                    + '  try { d = await fetchOne(sym, testnet); }\n'
-                   + "  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }\n"
+                   + "  catch (e: any) { return { snapshot: null, error: e?.message || '시장 스냅숏 조회 실패' }; }\n"
                    + '  PREMIUM_CACHE.set(`${testnet ? \'T\' : \'L\'}:${sym}`, { data: d, ts: nowMs() }); }\n'
                    + '  const at = hit0 ? hit0.ts : nowMs();'), 'RED'],
 
