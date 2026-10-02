@@ -63,11 +63,20 @@ const okDeps = (over: Partial<Entry100xDeps> = {}): Entry100xDeps => ({
   observeMarginMode: async () => 'isolated',
   applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: `${lev}배 확인` }),
   availableUsd: async () => 1_000,
-  referencePrice: async () => 50_000,
+  referenceMark: async () => ({
+    price: 50_000,
+    // 거래소가 적어 준 시각과 우리가 받은 시각은 **다른 값이다**.
+    exchangeTimeMs: Date.now() - 100,
+    observedAtMs: Date.now(),
+    source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' as const,
+  }),
   quantize: async (q: number) => ({ qty: q, message: '' }),
   // 거래소 브래킷 첫 구간(BTCUSDT 소액): MMR 0.4% · 공제액 0.
   // 이 값이면 50,000 · 100배에서 청산거리가 약 0.6%로 나온다.
-  maintenanceTiers: async () => [[50_000_000, 0.004, 0]],
+  maintenanceTiers: async () => ({
+    tiers: [[50_000_000, 0.004, 0]] as Array<[number, number, number]>,
+    observedAtMs: Date.now(), freshness: 'FRESH' as const,
+  }),
   // **손절 주문이 아니다** — 신호가 ATR로 잰 참고 위험 거리다.
   adverseDistancePct: async () => 0.3,
   commissionRates: async () => ({
@@ -78,13 +87,18 @@ const okDeps = (over: Partial<Entry100xDeps> = {}): Entry100xDeps => ({
   orderBookDepth: async () => ({
     bids: [[49_995, 50] as [number, number]],
     asks: [[50_005, 50] as [number, number]],
-    source: 'EXCHANGE_DEPTH' as const, observedAtMs: Date.now(),
+    source: 'EXCHANGE_DEPTH' as const,
+    observedAtMs: Date.now(), exchangeTimeMs: Date.now() - 100,
   }),
   fundingContext: async () => ({
     rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
     // 1회 최대 지불 요율의 근거 — 지금 요율이 아니다.
     capRate: 0.0005, floorRate: -0.0005,
-    source: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: Date.now(),
+    source: 'EXCHANGE_FUNDING_INFO' as const,
+    // **합치지 않는다** — 다른 엔드포인트의 다른 순간이다.
+    premiumObservedAtMs: Date.now(), premiumExchangeTimeMs: Date.now() - 100,
+    premiumCache: 'FRESH' as const,
+    fundingBoundsObservedAtMs: Date.now(),
   }),
   ...over,
 });
@@ -326,7 +340,10 @@ export async function runDedicated100xTests() {
 
   test('가짜 어댑터: 잔고·기준가를 못 읽으면 진입하지 않는다', async () => {
     eq((await planEntry100x(contract100x, 10, okDeps({ availableUsd: async () => null }))).code, 'SIZING_BLOCKED');
-    eq((await planEntry100x(contract100x, 10, okDeps({ referencePrice: async () => null }))).code, 'SIZING_BLOCKED');
+    // 기준 마크가는 **관측**이다. 못 읽으면 사이징 전에 신선도에서 막힌다 —
+    // "값이 없다"가 아니라 "언제의 값인지 모른다"가 사유다.
+    eq((await planEntry100x(contract100x, 10, okDeps({ referenceMark: async () => null }))).code,
+       'MARKET_DATA_STALE');
   });
 
   test('가짜 어댑터: 거래소 규격에 못 맞추면 진입하지 않는다', async () => {

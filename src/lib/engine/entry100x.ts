@@ -18,16 +18,27 @@
 //
 // 순서가 계약의 일부다
 // ────────────────────
+//   PHASE A — 읽고 계산만 한다
 //   ① 마진 모드를 되읽는다      cross거나 모르면 여기서 멈춘다
-//   ② 배율을 걸고 되읽는다      정확히 요청값이 아니면 멈춘다
+//   ② 배정 비율을 검증한다      거래소에 물어볼 것이 없다
 //   ③ 가용 잔고를 읽는다        못 읽으면 멈춘다 (0으로 눕히지 않는다)
-//   ④ 기준가를 읽는다           서버가 읽은 값이다. 신호의 진입가가 아니다
+//   ④ 기준 마크가를 **관측**한다 값·출처·거래소 시각·수신 시각·캐시
 //   ⑤ 크기를 만든다             planSize100x
 //   ⑥ 거래소 규격으로 다듬는다   수량 단위·최소 주문
 //   ⑦ 필요 증거금을 다시 잰다    다듬느라 배정을 넘었으면 멈춘다
+//   ⑧ 브래킷·변동성 거리를 읽는다
+//   ⑨ 수수료·호가·펀딩을 읽는다
+//   ⑩ **시장 데이터 신선도**     언제의 값인지 모르면 여기서 멈춘다
+//   ⑪ 청산거리 (RAW)
+//   ⑫ 실행·보유 비용
+//   ⑬ 비용을 반영한 청산거리 (EFFECTIVE)
+//   PHASE B — 여기서 처음으로 거래소에 쓴다 (배율 설정·되읽기)
 //
-// ①이 ②보다 앞인 이유: 교차 계좌에 배율부터 걸면, 막을 주문을 위해
-// 계좌 설정을 먼저 바꾸는 것이 된다. 확인이 먼저다.
+// ⑩이 ⑪·⑫보다 앞인 이유: 낡은 값으로 계산한 "여유 0.59%"는 틀린
+// 전제 위에 선 숫자다. 그 숫자가 통과하면 아무도 그것이 몇 초 전
+// 시장이었는지 묻지 않는다. **읽기를 전부 끝낸 뒤** 보는 이유는, 서로
+// 다른 시점을 하나의 현재 시장 상태로 합쳤는지는 전부 모여야 알 수
+// 있기 때문이다.
 //
 // ⑦이 필요한 이유: 거래소 수량 단위는 올림이 될 수 있다. 0.001 단위에서
 // 0.0007이 0.001이 되면 명목가가 배정보다 커지고, 그 차이는 100배에서
@@ -45,10 +56,23 @@ import {
   type ExecutionCostAssessment, type CommissionRates, type DepthBook,
   type FundingContext, type OrderFillKind,
 } from './executionCost';
+import {
+  assessMarketFreshness, type MarketFreshnessAssessment,
+  type MarketObservation, type ObservationCache, type ObservationKind,
+} from './marketFreshness';
 import type { BracketTier } from '../safety/liquidationPrice';
 
 export type Entry100xCode =
   | 'OK'
+  /**
+   * 시장 데이터가 **언제의 값인지 모르거나 지금 시장이 아니다.**
+   *
+   * 값이 없어서가 아니라 **시각이 없거나 낡아서** 막은 것이다. 둘은
+   * 다른 고장이라 코드를 나눈다.
+   *
+   * **진입 전 보호다.** 이미 열린 포지션을 닫는 권한이 아니다.
+   */
+  | 'MARKET_DATA_STALE'
   /**
    * 청산거리를 신뢰할 수 없거나 계약이 요구하는 여유가 없다.
    *
@@ -97,7 +121,7 @@ export const MUTATING_DEPS = ['applyLeverage'] as const;
 
 /** 거래소를 읽기만 하는 의존 */
 export const READONLY_DEPS = [
-  'observeMarginMode', 'availableUsd', 'referencePrice', 'quantize',
+  'observeMarginMode', 'availableUsd', 'referenceMark', 'quantize',
   'maintenanceTiers', 'adverseDistancePct',
   'commissionRates', 'orderBookDepth', 'fundingContext',
 ] as const;
@@ -110,13 +134,53 @@ export const READONLY_DEPS = [
  * 이 타입만 받으면, 그 안에서 배율을 거는 코드는 **타입이 없어서**
  * 쓸 수 없다. 순서가 규칙이 아니라 구조가 된다.
  */
+/**
+ * **기준 마크가 관측.** 값과 "언제의 값인가"를 함께 들고 다닌다.
+ *
+ * `binanceFutures.readMarkPrice`가 돌려주는 모양이다. 여기서 따로
+ * 선언하는 이유는 엔진이 거래소 모듈에 의존하지 않기 위해서다 —
+ * 시험은 가짜 어댑터를 물려 준다.
+ */
+export interface ReferenceMarkObservation {
+  /** 마크가. 못 읽었으면 null */
+  price: number | null;
+  /** 거래소가 적어 준 시각. 없으면 null — **지어내지 않는다** */
+  exchangeTimeMs: number | null;
+  /** 우리가 **실제로 받은** 시각 */
+  observedAtMs: number | null;
+  source: string | null;
+  cache: ObservationCache | null;
+}
+
+/** 유지증거금 구간 관측. 표와 **언제 읽었는지**를 함께 받는다 */
+export interface BracketObservation {
+  tiers: BracketTier[] | null;
+  observedAtMs: number | null;
+  freshness: ObservationCache | null;
+}
+
 export interface Entry100xReadDeps {
   /** 이 심볼의 거래소 마진 모드. **못 읽으면 null** */
   observeMarginMode(): Promise<'isolated' | 'cross' | null>;
   /** 주문에 쓸 수 있는 잔고(USD). **못 읽으면 null** */
   availableUsd(): Promise<number | null>;
-  /** 서버가 읽은 기준가(마크가 우선). **못 읽으면 null** */
-  referencePrice(): Promise<number | null>;
+  /**
+   * **기준 마크가 관측.** 숫자 하나가 아니다.
+   *
+   * 예전에는 `Promise<number | null>`이었고, 그 값은 `positionRisk`
+   * 응답에서 떼어 온 것이었다. 두 가지가 동시에 잘못돼 있었다.
+   *
+   *   · **계좌/포지션 상태와 시장 가격을 섞었다.** 그 응답의
+   *     `updateTime`은 포지션이 갱신된 시각이지 마크가가 만들어진
+   *     시각이 아니다 — 서로의 timestamp가 될 수 없다
+   *   · 숫자만 오니 **언제의 값인지 물을 자리가 없었다.** 시각이 없으면
+   *     "지금 시장"이라고 말할 근거도 없다
+   *
+   * 그래서 값·출처·거래소 시각·수신 시각·캐시 상태를 **함께** 받는다.
+   * 수신 시각은 읽는 쪽이 채운다 — 여기서 `Date.now()`를 붙일 수 있게
+   * 두면 낡은 캐시가 "방금 읽은 값"이 된다.
+   */
+  referenceMark(): Promise<ReferenceMarkObservation | null>;
   /** 거래소 수량 단위·최소 주문에 맞춘 수량. 못 맞추면 null */
   quantize(qty: number): Promise<{ qty: number | null; message: string }>;
   /**
@@ -127,7 +191,7 @@ export interface Entry100xReadDeps {
    * **못 읽으면 진입을 막는다** — 이 의존이 null을 돌려주는 것은 통과가
    * 아니다.
    */
-  maintenanceTiers(notional: number): Promise<BracketTier[] | null>;
+  maintenanceTiers(notional: number): Promise<BracketObservation | null>;
   /**
    * **예상 adverse/변동성 위험 거리 (%).** 못 구하면 null.
    *
@@ -186,6 +250,13 @@ export interface Entry100xVerdict {
    * 화면과 기록이 "얼마로 계산했는데 모자랐다"를 말할 수 있어야 한다.
    */
   liquidation: LiquidationDistanceAssessment | null;
+  /**
+   * **시장 데이터 신선도 판정.** 계산했으면 막혔든 통과했든 담긴다.
+   *
+   * 출처별 관측 시각이 여기 그대로 남는다 — 화면과 기록이 "무엇이
+   * 몇 ms 전 값이었나"를 말할 수 있어야 한다.
+   */
+  freshness: MarketFreshnessAssessment | null;
   /** 실행·보유 비용 판정. 계산했으면 막혔든 통과했든 담긴다 */
   cost: ExecutionCostAssessment | null;
   /**
@@ -206,7 +277,7 @@ const fail = (
 ): Entry100xVerdict => ({
   ok: false, code, quantity: null, leverage: null, allocatedMargin: null,
   requiredMargin: null, referencePrice: null, marginMode: null,
-  liquidation: null, cost: null, effectiveLiquidation: null,
+  liquidation: null, freshness: null, cost: null, effectiveLiquidation: null,
   message, notes, ...partial,
 });
 
@@ -301,11 +372,43 @@ export async function prepareEntry100x(
     return fail('SIZING_BLOCKED', allocBad.message, notes, { marginMode: mode });
   }
 
-  // ── ③④ 잔고 · 기준가 ──
+  // ── ③ 잔고 ──
   let avail: number | null = null;
   try { avail = await deps.availableUsd(); } catch { avail = null; }
-  let price: number | null = null;
-  try { price = await deps.referencePrice(); } catch { price = null; }
+
+  // ── ④ 기준 마크가 **관측** ──
+  //
+  // 숫자 하나를 받지 않는다. 값·출처·거래소 시각·수신 시각·캐시 상태를
+  // 함께 받아 "언제의 값인가"를 물을 수 있게 한다.
+  let mark: ReferenceMarkObservation | null = null;
+  try { mark = await deps.referenceMark(); } catch { mark = null; }
+  const markObservation: MarketObservation = {
+    kind: 'MARK',
+    source: mark?.source ?? null,
+    value: mark?.price ?? null,
+    exchangeTimeMs: mark?.exchangeTimeMs ?? null,
+    observedAtMs: mark?.observedAtMs ?? null,
+    cache: mark?.cache ?? null,
+  };
+  // ★ **먼저 알 수 있는 것은 먼저 막는다.**
+  //   아래 ⑩에서 전부 모아 한 번 더 보지만, 기준가는 바로 다음 줄의
+  //   사이징이 쓴다. 쓸 수 없는 값으로 계산부터 해 놓고 뒤에서 막으면,
+  //   그 사이에 끼어든 어떤 단계가 그 숫자를 다른 곳으로 흘릴 수 있다.
+  //   판정은 같은 정본 함수 한 곳이고, 여기서는 그 시점에 **가진 것**만
+  //   넘긴다 — 규칙이 두 벌이 되지 않는다.
+  const markFreshness = assessMarketFreshness({
+    observations: [markObservation], required: ['MARK'], nowMs: nowMs(),
+  });
+  notes.push(markFreshness.ok
+    ? `기준 마크가 신선도 확인 — ${markFreshness.findings[0]?.detail ?? ''}`
+    : `기준 마크가 신선도 미달 — ${markFreshness.reason}`);
+  if (!markFreshness.ok) {
+    // **값이 없어서가 아니라 언제의 값인지 모르거나 낡아서 막는다.**
+    return fail('MARKET_DATA_STALE', markFreshness.reason, notes, {
+      marginMode: mode, leverage: req, freshness: markFreshness,
+    });
+  }
+  const price: number = mark!.price as number;
 
   // ── ⑤ 후보 크기 ──
   //
@@ -349,21 +452,112 @@ export async function prepareEntry100x(
                allocatedMargin: allocated, requiredMargin });
   }
 
-  // ── ⑧ 청산거리 ──
+  // ── ⑧ 유지증거금 구간 · 변동성 위험거리 읽기 ──
   //
-  // **마지막에 둔다.** 구간별 유지증거금은 명목가로 정해지므로 다듬은
-  // 수량이 확정된 뒤여야 맞는 구간을 짚는다.
+  // 구간별 유지증거금은 명목가로 정해지므로 **다듬은 수량이 확정된
+  // 뒤**여야 맞는 구간을 짚는다.
+  const notional = q.qty * (price as number);
+  let bracket: BracketObservation | null = null;
+  try { bracket = await deps.maintenanceTiers(notional); } catch { bracket = null; }
+  const tiers: BracketTier[] | null = bracket?.tiers ?? null;
+  let adverse: number | null = null;
+  try { adverse = await deps.adverseDistancePct(); } catch { adverse = null; }
+
+  // ── ⑨ 비용 입력 읽기 ──
+  //
+  // **읽기를 먼저 전부 끝낸다.** 신선도 판정(⑩)은 여섯 출처의 관측
+  // 시각을 서로 비교해야 하므로, 하나라도 아직 안 읽혔으면 "서로 다른
+  // 시점을 합쳤는가"를 물을 수 없다.
+  //
+  // 세 입력 모두 **거래소에서 읽는다.** 못 읽으면 막는다 — 기본 수수료
+  // 표나 `0.05% 슬리피지` 같은 상수로 때우지 않는다.
+  let commission: CommissionRates | null = null;
+  try { commission = await deps.commissionRates(); } catch { commission = null; }
+  let book: DepthBook | null = null;
+  try { book = await deps.orderBookDepth(); } catch { book = null; }
+  let funding: FundingContext | null = null;
+  try { funding = await deps.fundingContext(); } catch { funding = null; }
+
+  // ── ⑩ 시장 데이터 신선도 ──
+  //
+  // **청산거리·비용 판정보다 먼저다.** 낡은 값으로 계산한 "여유
+  // 0.59%"는 틀린 전제 위에 선 숫자이고, 그 숫자가 통과하면 아무도
+  // 그것이 몇 초 전 시장이었는지 묻지 않는다.
+  //
+  // ★ 이 판정이 `prepareEntry100x` 안에 있다는 것이 요점이다. 라우트의
+  //   `if` 한 줄로 두면 그 줄을 아래로 옮기는 변경이 조용히 통과한다.
+  //   여기서는 `Entry100xReadDeps`에 쓰기 함수가 없으므로, 이 판정보다
+  //   먼저 거래소에 쓰는 코드는 **타입이 없어서 쓸 수 없다.**
+  //
+  // 캐시 상태에 대하여: 브래킷과 premium은 읽는 쪽이 캐시를 선언하므로
+  // 그쪽이 돌려준 값을 그대로 쓴다. 수수료·호가·펀딩 상한은 캐시를 두지
+  // 않는 조회라 **응답이 있으면 그 자체가 방금 읽은 것**이다(그래서
+  // `FRESH`, 없으면 `NONE`). 나이는 그 뒤 `observedAtMs`로 잰다 —
+  // 여기서 시각을 만들어 붙이는 자리는 없다.
+  //
+  // **못 읽은 출처는 목록에 넣지 않는다.** "못 읽었다"는 이미 주인이
+  // 있는 고장이다 — 브래킷은 ⑪(`LIQUIDATION_UNSAFE`), 수수료·호가·펀딩은
+  // ⑫(`COST_UNKNOWN`)가 막는다. 여기서 같은 상황을 `MARKET_DATA_STALE`로
+  // 덮어쓰면 ②·③이 세운 계약이 조용히 사라지고, 운영자는 "낡았다"와
+  // "못 읽었다"를 구분할 수 없게 된다.
+  //
+  // 기준 마크가만 다르다. 그 값에는 다른 주인이 없으므로 ④가 막는다.
+  const observations: MarketObservation[] = [markObservation];
+  if (bracket) {
+    observations.push({ kind: 'BRACKET', source: 'EXCHANGE_LEVERAGE_BRACKET',
+      exchangeTimeMs: null,
+      observedAtMs: bracket.observedAtMs ?? null, cache: bracket.freshness ?? null });
+  }
+  if (commission) {
+    observations.push({ kind: 'COMMISSION', source: commission.source ?? null,
+      exchangeTimeMs: null,
+      observedAtMs: commission.observedAtMs ?? null, cache: 'FRESH' });
+  }
+  if (book) {
+    observations.push({ kind: 'BOOK', source: book.source ?? null,
+      exchangeTimeMs: book.exchangeTimeMs ?? null,
+      observedAtMs: book.observedAtMs ?? null, cache: 'FRESH' });
+  }
+  if (funding) {
+    // **premium과 펀딩 상한을 하나의 timestamp로 합치지 않는다.**
+    // 다른 엔드포인트에서 다른 순간에 온 값이고, 한 칸에 적으면 한쪽의
+    // 신선함이 다른 쪽을 덮는다.
+    observations.push({ kind: 'PREMIUM', source: 'EXCHANGE_PREMIUM_INDEX',
+      exchangeTimeMs: funding.premiumExchangeTimeMs ?? null,
+      observedAtMs: funding.premiumObservedAtMs ?? null,
+      // **읽는 쪽이 선언한 캐시 상태를 그대로 쓴다.** premium은 45초
+      // 캐시를 두므로 "응답이 있으니 방금 읽은 것"이 성립하지 않는다.
+      cache: funding.premiumCache ?? null });
+    observations.push({ kind: 'FUNDING_BOUNDS', source: funding.source ?? null,
+      exchangeTimeMs: null,
+      observedAtMs: funding.fundingBoundsObservedAtMs ?? null, cache: 'FRESH' });
+  }
+  const freshness = assessMarketFreshness({
+    observations,
+    // 기준 마크가만 **반드시** 있어야 한다. 나머지의 "없음"은 ⑪·⑫가
+    // 자기 사유로 막는다.
+    required: ['MARK'],
+    nowMs: nowMs(),
+  });
+  notes.push(freshness.ok
+    ? `시장 데이터 신선도 확인 (${freshness.findings.length}개 출처`
+      + `${freshness.maxCrossSourceSkewMs == null ? ''
+          : ` · 출처 간 최대 시각차 ${freshness.maxCrossSourceSkewMs}ms`})`
+    : `시장 데이터 신선도 미달 — ${freshness.reason}`);
+  if (!freshness.ok) {
+    return fail('MARKET_DATA_STALE', freshness.reason, notes, {
+      marginMode: mode, leverage: req, referencePrice: price,
+      allocatedMargin: allocated, requiredMargin, quantity: q.qty,
+      freshness,
+    });
+  }
+
+  // ── ⑪ 청산거리 (RAW) ──
   //
   // ★ 이 단계가 PHASE A 안에 있다는 것이 요점이다. 라우트의 `if` 한 줄로
   //   두면 그 줄을 아래로 옮기는 변경이 조용히 통과할 수 있다. 여기서는
   //   `Entry100xReadDeps`에 쓰기 함수가 없으므로, 이 판정보다 먼저 거래소에
   //   쓰는 코드는 **타입이 없어서 쓸 수 없다.** 순서가 규칙이 아니라 구조다.
-  const notional = q.qty * (price as number);
-  let tiers: BracketTier[] | null = null;
-  try { tiers = await deps.maintenanceTiers(notional); } catch { tiers = null; }
-  let adverse: number | null = null;
-  try { adverse = await deps.adverseDistancePct(); } catch { adverse = null; }
-
   const liquidation = assessLiquidationDistance({
     side: contract.side,
     referencePrice: price,
@@ -389,25 +583,18 @@ export async function prepareEntry100x(
     return fail('LIQUIDATION_UNSAFE', liquidation.reason, notes, {
       marginMode: mode, leverage: req, referencePrice: price,
       allocatedMargin: allocated, requiredMargin, quantity: q.qty,
-      liquidation,
+      liquidation, freshness,
     });
   }
 
-  // ── ⑨ 실행·보유 비용 ──
+  // ── ⑫ 실행·보유 비용 ──
   //
-  // RAW 여유(⑧)는 비용을 빼기 **전** 값이다. 100배에서 왕복 taker 수수료만
+  // RAW 여유(⑪)는 비용을 빼기 **전** 값이다. 100배에서 왕복 taker 수수료만
   // 여유의 상당 부분이고 슬리피지가 거기 더해진다. 빼지 않으면 "청산거리가
   // 충분하다"가 사실이 아니게 된다.
   //
-  // 세 입력 모두 **거래소에서 읽는다.** 못 읽으면 막는다 — 기본 수수료
-  // 표나 `0.05% 슬리피지` 같은 상수로 때우지 않는다.
-  let commission: CommissionRates | null = null;
-  try { commission = await deps.commissionRates(); } catch { commission = null; }
-  let book: DepthBook | null = null;
-  try { book = await deps.orderBookDepth(); } catch { book = null; }
-  let funding: FundingContext | null = null;
-  try { funding = await deps.fundingContext(); } catch { funding = null; }
-
+  // 세 입력은 ⑨에서 이미 읽었다 — 신선도 판정이 전부를 함께 봐야
+  // 하기 때문이다.
   const cost = assessExecutionCost({
     side: contract.side,
     referencePrice: price,
@@ -437,11 +624,11 @@ export async function prepareEntry100x(
     return fail('COST_UNKNOWN', cost.reason, notes, {
       marginMode: mode, leverage: req, referencePrice: price,
       allocatedMargin: allocated, requiredMargin, quantity: q.qty,
-      liquidation, cost,
+      liquidation, freshness, cost,
     });
   }
 
-  // ── ⑩ 비용을 반영한 청산거리 ──
+  // ── ⑬ 비용을 반영한 청산거리 ──
   //
   // **퍼센트끼리 빼지 않는다.** 슬리피지는 진입가를 옮기고, 수수료·펀딩은
   // 격리 증거금을 줄인다. 줄어든 증거금은 곧 오른 배율이므로, 같은 식에
@@ -451,7 +638,7 @@ export async function prepareEntry100x(
     return fail('LIQUIDATION_UNSAFE_AFTER_COST', eff.reason, notes, {
       marginMode: mode, leverage: req, referencePrice: price,
       allocatedMargin: allocated, requiredMargin, quantity: q.qty,
-      liquidation, cost,
+      liquidation, freshness, cost,
     });
   }
   const effectiveLiquidation = assessLiquidationDistance({
@@ -478,7 +665,7 @@ export async function prepareEntry100x(
     return fail('LIQUIDATION_UNSAFE_AFTER_COST', effectiveLiquidation.reason, notes, {
       marginMode: mode, leverage: req, referencePrice: price,
       allocatedMargin: allocated, requiredMargin, quantity: q.qty,
-      liquidation, cost, effectiveLiquidation,
+      liquidation, freshness, cost, effectiveLiquidation,
     });
   }
 
@@ -490,7 +677,7 @@ export async function prepareEntry100x(
     requiredMargin,
     referencePrice: price,
     marginMode: mode,
-    liquidation, cost, effectiveLiquidation,
+    liquidation, freshness, cost, effectiveLiquidation,
     message: `${req}배 · 수량 ${q.qty} · 증거금 $${requiredMargin.toFixed(4)} / 배정 $${allocated.toFixed(4)}`
       + ` · 청산거리 ${liquidation.liquidationDistancePct!.toFixed(4)}%`
       + ` → 비용 ${cost.totalCostNotionalPct!.toFixed(4)}% 반영 후`

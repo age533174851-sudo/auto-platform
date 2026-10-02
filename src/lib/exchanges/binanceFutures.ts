@@ -318,6 +318,13 @@ export interface CommissionRate {
   /** 비율. 0.0004 = 0.04% */
   makerRate: number;
   takerRate: number;
+  /**
+   * 우리가 이 응답을 **실제로 받은** 시각.
+   *
+   * 부르는 쪽이 `Date.now()`를 붙이게 두지 않는다 — 그러면 언제 읽었든
+   * 항상 "방금"이 되어 신선도 검사가 자기 자신을 속인다.
+   */
+  observedAtMs: number;
 }
 
 export async function getCommissionRate(
@@ -332,7 +339,10 @@ export async function getCommissionRate(
     if (!Number.isFinite(maker) || !Number.isFinite(taker)) {
       return { rate: null, error: `${sym}의 수수료율을 읽지 못했습니다` };
     }
-    return { rate: { symbol: sym, makerRate: maker, takerRate: taker }, error: null };
+    return {
+      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: Date.now() },
+      error: null,
+    };
   } catch (e: any) {
     return { rate: null, error: e?.message || '수수료율 조회 실패' };
   }
@@ -348,7 +358,14 @@ export interface DepthSnapshot {
   symbol: string;
   bids: Array<[number, number]>;
   asks: Array<[number, number]>;
+  /** 우리가 응답을 **실제로 받은** 시각 */
   observedAtMs: number;
+  /**
+   * 거래소가 적어 준 시각. 선물 depth 응답은 `T`(거래 엔진 시각)와
+   * `E`(메시지 출력 시각)를 준다 — 호가가 **만들어진** 시각은 `T`다.
+   * 둘 다 없으면 null이다. **지어내지 않는다.**
+   */
+  exchangeTimeMs: number | null;
 }
 
 export async function getOrderBookDepth(
@@ -368,7 +385,12 @@ export async function getOrderBookDepth(
     if (!bids.length || !asks.length) {
       return { depth: null, error: `${sym}의 호가가 비어 있습니다` };
     }
-    return { depth: { symbol: sym, bids, asks, observedAtMs: Date.now() }, error: null };
+    const te = Number(d?.T ?? d?.E);
+    return {
+      depth: { symbol: sym, bids, asks, observedAtMs: Date.now(),
+               exchangeTimeMs: Number.isFinite(te) && te > 0 ? te : null },
+      error: null,
+    };
   } catch (e: any) {
     return { depth: null, error: e?.message || '호가 조회 실패' };
   }
@@ -444,7 +466,21 @@ export async function getFundingBounds(
 }
 
 // 펀딩 예측용 premiumIndex (공개 엔드포인트, 서명 불필요) — 45초 캐시
-export interface PremiumIndex { symbol: string; markPrice: number; indexPrice: number; lastFundingRate: number; nextFundingTime: number; }
+export interface PremiumIndex {
+  symbol: string;
+  markPrice: number;
+  indexPrice: number;
+  lastFundingRate: number;
+  nextFundingTime: number;
+  /**
+   * 거래소가 응답에 적어 준 시각(`time`). **없으면 null이다.**
+   *
+   * 예전에는 이 칸을 버렸다. 그래서 "이 마크가가 거래소에서 언제
+   * 만들어졌는가"를 물을 방법이 없었고, 남은 것은 우리가 받은 시각뿐이라
+   * **늦게 도착한 값과 방금 만들어진 값을 구분할 수 없었다.**
+   */
+  timeMs: number | null;
+}
 interface PremiumCacheEntry { data: PremiumIndex; ts: number; }
 const PREMIUM_CACHE = new Map<string, PremiumCacheEntry>();
 const PREMIUM_TTL = 45 * 1000;
@@ -472,12 +508,16 @@ async function defaultPremiumFetch(sym: string, testnet: boolean): Promise<Premi
     { signal: AbortSignal.timeout(5000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const d = parseLossless(await r.text());
+  // **`|| 0`으로 때우지 않는다** — 없는 시각을 1970년으로 적으면 그
+  // 값은 "아주 낡음"이 아니라 "시각을 모름"이다. 둘은 다른 고장이다.
+  const t = Number(d.time);
   return {
     symbol: d.symbol,
     markPrice: parseFloat(d.markPrice || '0'),
     indexPrice: parseFloat(d.indexPrice || '0'),
     lastFundingRate: parseFloat(d.lastFundingRate || '0'),
     nextFundingTime: Number(d.nextFundingTime || 0),
+    timeMs: Number.isFinite(t) && t > 0 ? t : null,
   };
 }
 
@@ -525,6 +565,79 @@ export async function readPremiumIndex(
  */
 export async function getPremiumIndex(symbol: string, testnet = true): Promise<PremiumIndex | null> {
   return (await readPremiumIndex(symbol, testnet)).data;
+}
+
+// ── 기준 마크가: **계좌 상태가 아니라 시장 데이터에서 읽는다** ──
+//
+// 예전에는 `positionRisk.markPrice` 숫자 하나를 기준가로 썼다. 두 가지가
+// 동시에 잘못돼 있었다.
+//
+//   · 그 응답은 **계좌/포지션 상태**다. 같은 응답에 들어 있다는 이유로
+//     마크가를 거기서 떼어 오면, 시장 가격의 관측 시각을 물을 자리가
+//     사라진다. 그 응답의 `updateTime`은 **포지션이 갱신된 시각**이지
+//     마크가가 만들어진 시각이 아니다 — 포지션을 사흘 안 건드렸으면
+//     `updateTime`은 사흘 전이고 마크가는 방금 값이다. 서로의 timestamp가
+//     될 수 없다
+//   · 숫자만 돌려주니 호출부가 나이를 잴 방법이 없었다
+//
+// 그래서 마크가는 시장 데이터 엔드포인트(`premiumIndex`)에서 읽고,
+// **거래소가 적어 준 시각과 우리가 받은 시각을 함께** 돌려준다.
+//
+// **캐시하지 않는다.** `readPremiumIndex`는 펀딩 계산용이라 45초 캐시를
+// 선언하지만, 100배 청산 여유를 재는 기준가에 45초는 쓸 수 없다. 같은
+// 엔드포인트지만 신선도 계약이 다르므로 읽기도 따로 둔다 — 응답을 푸는
+// 코드(`defaultPremiumFetch`)는 **한 벌을 공유한다.**
+export interface MarkPriceObservation {
+  symbol: string;
+  /** 마크가. 못 읽으면 null */
+  price: number | null;
+  /** 지수가(참고). 거리 계산에는 쓰지 않는다 */
+  indexPrice: number | null;
+  /** 거래소가 적어 준 시각. 없으면 null — **지어내지 않는다** */
+  exchangeTimeMs: number | null;
+  /** 우리가 응답을 **실제로 받은** 시각 */
+  observedAtMs: number | null;
+  source: 'EXCHANGE_PREMIUM_INDEX';
+  /** 캐시하지 않으므로 성공이면 항상 `FRESH`, 실패면 `NONE`이다 */
+  cache: 'FRESH' | 'NONE';
+}
+
+export async function readMarkPrice(
+  symbol: string, testnet = true,
+  /** 거래소 조회. **시험이 주입한다** — 전역 `fetch`를 바꾸지 않는다 */
+  fetchOne: (sym: string, tn: boolean) => Promise<PremiumIndex> = defaultPremiumFetch,
+  /** 지금 시각. 시험이 고정한다 */
+  nowMs: () => number = () => Date.now(),
+): Promise<{ mark: MarkPriceObservation; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  const miss = (why: string): { mark: MarkPriceObservation; error: string } => ({
+    mark: { symbol: sym, price: null, indexPrice: null, exchangeTimeMs: null,
+            observedAtMs: null, source: 'EXCHANGE_PREMIUM_INDEX', cache: 'NONE' },
+    error: why,
+  });
+  let d: PremiumIndex;
+  try { d = await fetchOne(sym, testnet); }
+  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }
+  const at = nowMs();
+  const px = Number(d?.markPrice);
+  if (!Number.isFinite(px) || !(px > 0)) {
+    return miss(`${sym}의 마크가를 읽지 못했습니다 (${String(d?.markPrice)})`);
+  }
+  const ix = Number(d?.indexPrice);
+  return {
+    mark: {
+      symbol: sym,
+      price: px,
+      indexPrice: Number.isFinite(ix) && ix > 0 ? ix : null,
+      // **없는 시각을 받은 시각으로 대체하지 않는다.** 그러면 지연이 항상
+      // 0이 되어 "늦게 도착한 값"을 영영 못 잡는다.
+      exchangeTimeMs: d?.timeMs ?? null,
+      observedAtMs: at,
+      source: 'EXCHANGE_PREMIUM_INDEX',
+      cache: 'FRESH',
+    },
+    error: null,
+  };
 }
 
 // ── 전체 오픈주문 취소 (C 옵션) — 심볼별 DELETE allOpenOrders ───────

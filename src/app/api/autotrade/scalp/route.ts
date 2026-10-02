@@ -566,10 +566,23 @@ export async function POST(req: NextRequest) {
         },
         availableUsd: () => futuresAvailableUsd(ex, conn.apiKey, conn.apiSecret, !connIsLive),
         // **서버가 읽은 값이다.** 신호가 들고 온 진입가를 쓰지 않는다.
-        referencePrice: async () => {
-          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
-          const m = Number(rr.risk?.markPrice);
-          return Number.isFinite(m) && m > 0 ? m : null;
+        //
+        // ★ **계좌/포지션 응답에서 떼어 오지 않는다.** 예전에는
+        //   `positionRisk.markPrice` 숫자 하나였다. 그 응답은 계좌 상태라
+        //   시장 가격의 관측 시각을 물을 자리가 없고, 거기 있는
+        //   `updateTime`은 **포지션이 갱신된 시각**이지 마크가가 만들어진
+        //   시각이 아니다 — 서로의 timestamp가 될 수 없다.
+        //
+        //   마진 모드(위)는 계좌 상태라 `positionRisk`에서 읽고, 기준
+        //   마크가는 시장 데이터 엔드포인트에서 읽는다. 두 질문이므로
+        //   두 조회다.
+        referenceMark: async () => {
+          if (ex !== 'binance') return null;   // Gate는 마크가 관측 경로가 없다
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.readMarkPrice(symbol, !connIsLive)
+            .catch(() => null);
+          // **시각을 여기서 붙이지 않는다** — 읽는 쪽이 응답에 넣어 준다.
+          return r?.mark ?? null;
         },
         // 구간별 유지증거금은 **거래소에서 읽는다.** 추정 표로 100배
         // 청산가를 정하지 않는다 — 못 읽으면 `prepareEntry100x`가 막는다.
@@ -577,12 +590,14 @@ export async function POST(req: NextRequest) {
           if (ex !== 'binance') return null;   // Gate는 브래킷 경로가 없다
           const bf = await import('@/lib/exchanges/binanceFutures');
           const r = await bf.readBracket(symbol, conn.apiKey, conn.apiSecret, !connIsLive)
-            .catch(() => ({ tiers: null, freshness: 'NONE' } as any));
-          // ★ **지금 것이 아니면 쓰지 않는다.** TTL이 지난 뒤 다시 읽기에
-          //   실패하면 값은 남아 있지만 그건 옛 유지증거금 구간이다.
-          //   그걸로 100배 청산가를 정하면 "거래소 risk tier를 신뢰할 수
-          //   없으면 막는다"는 계약이 깨진다.
-          return r.freshness === 'FRESH' ? r.tiers : null;
+            .catch(() => ({ tiers: null, freshness: 'NONE', observedAtMs: null } as any));
+          // ★ **신선도를 여기서 판정하지 않는다 — 있는 그대로 넘긴다.**
+          //   예전에는 이 줄에서 `FRESH`가 아니면 null로 바꿔 버렸다.
+          //   막는 결과는 같았지만 판정이 두 곳(라우트와 엔진)이 되고,
+          //   무엇보다 **왜 막혔는지가 사라졌다** — 엔진에는 "브래킷을
+          //   못 읽음"으로만 보였다. 신선도 판정은 ④의 정본 한 곳이다.
+          return { tiers: r.tiers, observedAtMs: r.observedAtMs ?? null,
+                   freshness: r.freshness };
         },
         // **손절 주문이 아니다.** 신호가 ATR로 잰 참고 위험 거리이고,
         // `NO_FIXED_SL`에서는 거래소로 나가지 않는다(아래 주문 조립에서
@@ -600,9 +615,12 @@ export async function POST(req: NextRequest) {
           const bf = await import('@/lib/exchanges/binanceFutures');
           const r = await bf.getCommissionRate(conn.apiKey, conn.apiSecret, symbol, !connIsLive)
             .catch(() => ({ rate: null, error: 'x' } as any));
+          // **시각을 여기서 붙이지 않는다** — 조회가 응답에 넣어 준다.
+          // 여기서 `Date.now()`를 붙이면 언제 읽었든 항상 "방금"이 되어
+          // 신선도 검사가 자기 자신을 속인다.
           return r.rate == null ? null : {
             takerRate: r.rate.takerRate, makerRate: r.rate.makerRate,
-            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: r.rate.observedAtMs,
           };
         },
         orderBookDepth: async () => {
@@ -612,7 +630,11 @@ export async function POST(req: NextRequest) {
             .catch(() => ({ depth: null, error: 'x' } as any));
           return r.depth == null ? null : {
             bids: r.depth.bids, asks: r.depth.asks,
-            source: 'EXCHANGE_DEPTH' as const, observedAtMs: r.depth.observedAtMs,
+            source: 'EXCHANGE_DEPTH' as const,
+            observedAtMs: r.depth.observedAtMs,
+            // 거래소가 적어 준 시각(`T`). 수신 시각만으로는 늦게 도착한
+            // 호가를 구분할 수 없다.
+            exchangeTimeMs: r.depth.exchangeTimeMs,
           };
         },
         fundingContext: async () => {
@@ -629,7 +651,10 @@ export async function POST(req: NextRequest) {
           //   `observedAtMs: Date.now()`를 새로 붙이고 있었다 — 며칠 된
           //   캐시가 "방금 읽은 데이터"로 보였고, ④(신선도 보호)가 설
           //   기반이 통째로 오염돼 있었다.
-          if (prem.freshness !== 'FRESH' || prem.data == null || fb?.bounds == null) return null;
+          // 값이 아예 없으면 비용을 계산할 수 없다. **신선도 판정은
+          // 하지 않는다** — ④의 정본이 본다. 여기서 또 보면 판정이 두
+          // 곳이 되고 사유가 "펀딩을 못 읽음"으로 뭉개진다.
+          if (prem.data == null || fb?.bounds == null) return null;
           return {
             // 관측·방향 표시용이다. **미래 정산 비용의 상한이 아니다.**
             rate: prem.data.lastFundingRate,
@@ -641,7 +666,18 @@ export async function POST(req: NextRequest) {
             floorRate: fb.bounds.floorRate,
             source: fb.bounds.source,
             // **세탁하지 않는다** — 실제로 읽은 시각 그대로.
-            observedAtMs: prem.observedAtMs as number,
+            //
+            // ★ **premium과 펀딩 상한을 한 칸에 합치지 않는다.** 둘은
+            //   다른 엔드포인트에서 다른 순간에 온다(premium은 45초
+            //   캐시, 펀딩 상한은 매번 새로 읽는다). 합치면 한쪽의
+            //   신선함이 다른 쪽을 덮어 "어느 쪽이 낡았는가"를 영영
+            //   물을 수 없게 된다.
+            premiumObservedAtMs: prem.observedAtMs as number,
+            premiumExchangeTimeMs: prem.data.timeMs,
+            // 캐시 상태를 **그대로** 넘긴다. 여기서 'FRESH'로 적으면
+            // 만료된 캐시가 새 데이터가 된다.
+            premiumCache: prem.freshness,
+            fundingBoundsObservedAtMs: fb.bounds.observedAtMs,
           };
         },
         quantize: async (qty: number) => {
@@ -696,6 +732,10 @@ export async function POST(req: NextRequest) {
           effectiveLiquidationDistancePct:
             entry.effectiveLiquidation?.liquidationDistancePct ?? null,
           totalCostNotionalPct: entry.cost?.totalCostNotionalPct ?? null,
+          // **출처별 관측 시각을 합치지 않고 그대로 싣는다.** 운영자가
+          // "무엇이 몇 ms 전 값이었나"를 계획만 보고 말할 수 있어야 한다.
+          marketDataProvenance: entry.freshness?.provenance ?? null,
+          marketDataSkewMs: entry.freshness?.maxCrossSourceSkewMs ?? null,
           notes: entry.notes,
         }
       : {
@@ -710,6 +750,10 @@ export async function POST(req: NextRequest) {
           effectiveLiquidationDistancePct:
             entry.effectiveLiquidation?.liquidationDistancePct ?? null,
           totalCostNotionalPct: entry.cost?.totalCostNotionalPct ?? null,
+          // **출처별 관측 시각을 합치지 않고 그대로 싣는다.** 운영자가
+          // "무엇이 몇 ms 전 값이었나"를 계획만 보고 말할 수 있어야 한다.
+          marketDataProvenance: entry.freshness?.provenance ?? null,
+          marketDataSkewMs: entry.freshness?.maxCrossSourceSkewMs ?? null,
           notes: entry.notes,
         };
   } else {

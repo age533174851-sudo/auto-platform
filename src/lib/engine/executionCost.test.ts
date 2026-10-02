@@ -27,7 +27,11 @@ const FUND = {
   rate: 0.0001, nextFundingTimeMs: NOW + 3_600_000, intervalHours: 8,
   // **지금 요율이 아니라 거래소가 적어 둔 상한**이 예약의 근거다.
   capRate: 0.0005, floorRate: -0.0005,
-  source: 'EXCHANGE_FUNDING_INFO' as const, observedAtMs: 1,
+  source: 'EXCHANGE_FUNDING_INFO' as const,
+  // **서로 다른 값**이어야 한다. 같은 값으로 두면 두 칸을 하나로
+  // 합치는 변경이 시험을 그대로 통과한다.
+  premiumObservedAtMs: 1, premiumExchangeTimeMs: 1, premiumCache: 'FRESH' as const,
+  fundingBoundsObservedAtMs: 2,
 };
 
 const ok = (over: Partial<ExecutionCostInput> = {}): ExecutionCostInput => ({
@@ -279,7 +283,9 @@ export function runExecutionCostTests() {
   test('관측 시각과 출처를 보존한다 — ④가 검사할 근거다', () => {
     const v = assessExecutionCost(ok());
     eq(v.bookObservedAtMs, 1);
-    eq(v.fundingObservedAtMs, 1);
+    eq(v.premiumObservedAtMs, 1);
+    eq(v.fundingBoundsObservedAtMs, 2,
+      '★ premium과 펀딩 상한의 시각이 한 칸으로 합쳐졌다');
     eq(v.commissionObservedAtMs, 1);
     eq(v.fundingSource, 'EXCHANGE_FUNDING_INFO');
   });

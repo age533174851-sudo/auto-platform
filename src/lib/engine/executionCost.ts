@@ -50,7 +50,15 @@ export interface DepthBook {
   /** `[가격, 수량]`. 순서는 여기서 정렬한다 */
   bids: Array<[number, number]>;
   asks: Array<[number, number]>;
+  /** 우리가 응답을 **실제로 받은** 시각 */
   observedAtMs: number;
+  /**
+   * 거래소가 적어 준 시각(depth의 `T`). 없으면 null.
+   *
+   * ④가 "이 호가가 거래소에서 언제 만들어졌는가"를 물을 수 있어야
+   * 한다 — 수신 시각만으로는 늦게 도착한 호가를 구분할 수 없다.
+   */
+  exchangeTimeMs?: number | null;
   source: 'EXCHANGE_DEPTH';
 }
 
@@ -83,7 +91,28 @@ export interface FundingContext {
    * 아니다 — 다른 종목의 숫자를 빌려 authoritative인 척한 것이다.
    */
   source: 'EXCHANGE_FUNDING_INFO';
-  observedAtMs: number;
+  /**
+   * **premium(요율·다음 정산 시각)을 실제로 읽은 시각.**
+   *
+   * ★ 펀딩 상한과 **합치지 않는다.** 둘은 다른 엔드포인트에서 다른
+   *   순간에 온다(`premiumIndex`는 45초 캐시, `fundingInfo`는 매번
+   *   새로 읽는다). 한 칸에 적으면 한쪽의 신선함이 다른 쪽을 덮어
+   *   "어느 쪽이 낡았는가"를 영영 물을 수 없게 된다.
+   */
+  premiumObservedAtMs: number;
+  /** 거래소가 premium 응답에 적어 준 시각. 없으면 null */
+  premiumExchangeTimeMs?: number | null;
+  /**
+   * premium이 **캐시에서 왔는가.**
+   *
+   * `readPremiumIndex`는 45초 TTL이 지난 뒤 조회에 실패하면 옛 값을
+   * `STALE_CACHE`로 돌려준다. 그 사실을 여기까지 들고 오지 않으면,
+   * 나이 검사만 남아 "캐시인지 아닌지"라는 다른 질문이 사라진다.
+   * 생략하면 **모름**으로 취급한다 — 통과가 아니다.
+   */
+  premiumCache?: 'FRESH' | 'STALE_CACHE' | 'NONE';
+  /** **펀딩 주기·상한을 실제로 읽은 시각.** premium과 다른 값이다 */
+  fundingBoundsObservedAtMs: number;
 }
 
 export type ExecutionCostCode =
@@ -175,9 +204,14 @@ export interface ExecutionCostAssessment {
   /** 체결 명목가 대비 % */
   totalCostNotionalPct: number | null;
 
-  /** ④가 신선도를 검사할 수 있도록 **보존만** 한다 */
+  /** ④가 신선도를 검사할 수 있도록 **보존만** 한다. 출처별로 따로 둔다 */
   bookObservedAtMs: number | null;
-  fundingObservedAtMs: number | null;
+  bookExchangeTimeMs: number | null;
+  /** premium을 읽은 시각. **펀딩 상한과 합치지 않는다** */
+  premiumObservedAtMs: number | null;
+  premiumExchangeTimeMs: number | null;
+  /** 펀딩 주기·상한을 읽은 시각. premium과 **다른 값이다** */
+  fundingBoundsObservedAtMs: number | null;
   commissionObservedAtMs: number | null;
   fundingSource: FundingContext['source'] | null;
 }
@@ -210,7 +244,9 @@ const fail = (
   fundingReserveUsd: null, fundingEvents: null, fundingWorstRate: null,
   fundingSideNow: null,
   totalCostUsd: null, totalCostNotionalPct: null,
-  bookObservedAtMs: null, fundingObservedAtMs: null, commissionObservedAtMs: null,
+  bookObservedAtMs: null, bookExchangeTimeMs: null,
+  premiumObservedAtMs: null, premiumExchangeTimeMs: null,
+  fundingBoundsObservedAtMs: null, commissionObservedAtMs: null,
   fundingSource: null,
   ...partial,
 });
@@ -316,8 +352,9 @@ export function assessExecutionCost(
       { fillKind, commissionRate: rate, commissionObservedAtMs: comObs });
   }
   const bookObs = num(book.observedAtMs);
+  const bookEx = num(book.exchangeTimeMs);
   const base = { fillKind, commissionRate: rate, commissionObservedAtMs: comObs,
-                 bookObservedAtMs: bookObs };
+                 bookObservedAtMs: bookObs, bookExchangeTimeMs: bookEx };
 
   const bestBid = Math.max(...(book.bids || []).map(l => num(l?.[0]) ?? -Infinity));
   const bestAsk = Math.min(...(book.asks || []).map(l => num(l?.[0]) ?? Infinity));
@@ -383,24 +420,30 @@ export function assessExecutionCost(
   const fRate = num(f.rate);
   const nextAt = num(f.nextFundingTimeMs);
   const intervalH = num(f.intervalHours);
-  const fObs = num(f.observedAtMs);
+  // **두 시각을 따로 읽는다.** 하나로 합치면 낡은 쪽이 숨는다.
+  const fPremObs = num(f.premiumObservedAtMs);
+  const fPremEx = num(f.premiumExchangeTimeMs);
+  const fBoundsObs = num(f.fundingBoundsObservedAtMs);
   if (fRate == null || nextAt == null || nextAt <= 0) {
     return fail('FUNDING_MISSING',
       `펀딩률(${String(f.rate)}) 또는 다음 펀딩 시각(${String(f.nextFundingTimeMs)})을 읽지 못했습니다`,
-      { ...withFee, fundingObservedAtMs: fObs });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs });
   }
   if (intervalH == null || !(intervalH > 0) || intervalH > 24) {
     // **8시간을 박지 않는다.** 못 읽었으면 막는다.
     return fail('FUNDING_INTERVAL_UNUSABLE',
       `펀딩 주기가 ${String(f.intervalHours)}시간입니다 — 8시간으로 가정하지 않습니다`,
-      { ...withFee, fundingObservedAtMs: fObs, fundingSource: f.source ?? null });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs, fundingSource: f.source ?? null });
   }
   // **대상 종목에서 직접 읽은 값만 쓴다.**
   if (f.source !== 'EXCHANGE_FUNDING_INFO') {
     return fail('FUNDING_BOUNDS_UNUSABLE',
       `펀딩 정보의 출처가 ${String(f.source)}입니다`
       + ' — 다른 종목의 값을 빌려 이 종목의 상한으로 쓰지 않습니다',
-      { ...withFee, fundingObservedAtMs: fObs });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs });
   }
   // ── 1회 최대 지불 요율 ──
   //
@@ -413,18 +456,21 @@ export function assessExecutionCost(
     return fail('FUNDING_BOUNDS_UNUSABLE',
       `펀딩 요율 상한(${String(f.capRate)})·하한(${String(f.floorRate)})을 읽지 못했습니다`
       + ' — 지금 요율을 미래 정산 비용의 상한으로 쓰지 않습니다',
-      { ...withFee, fundingObservedAtMs: fObs, fundingSource: f.source });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs, fundingSource: f.source });
   }
   const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);
   if (!Number.isFinite(worstRate) || worstRate < 0) {
     return fail('FUNDING_BOUNDS_UNUSABLE',
       `${side}의 1회 최대 지불 요율을 구하지 못했습니다 (상한 ${cap} · 하한 ${floor})`,
-      { ...withFee, fundingObservedAtMs: fObs, fundingSource: f.source });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs, fundingSource: f.source });
   }
   if (now == null || horizon == null || !(horizon > 0)) {
     return fail('HOLD_HORIZON_UNUSABLE',
       `보유 평가 구간을 정할 수 없습니다 (지금 ${String(inp.nowMs)} · 구간 ${String(inp.holdHorizonMs)})`,
-      { ...withFee, fundingObservedAtMs: fObs });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs });
   }
 
   // 구간 안에 **앞으로** 지나갈 펀딩 시점을 센다.
@@ -465,12 +511,14 @@ export function assessExecutionCost(
                  exitSlippageReserveUsd, fundingReserveUsd];
   if (!parts.every(v => Number.isFinite(v))) {
     return fail('COST_NOT_FINITE', '비용 구성 요소 중 숫자가 아닌 것이 있습니다',
-      { ...withFee, fundingObservedAtMs: fObs });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs });
   }
   const totalCostUsd = parts.reduce((a, b) => a + b, 0);
   if (!(totalCostUsd >= 0)) {
     return fail('COST_NEGATIVE', `총 비용이 ${totalCostUsd}입니다 — 비용이 음수일 수 없습니다`,
-      { ...withFee, fundingObservedAtMs: fObs });
+      { ...withFee, premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+        fundingBoundsObservedAtMs: fBoundsObs });
   }
 
   return {
@@ -478,7 +526,8 @@ export function assessExecutionCost(
     ...withFee,
     fundingReserveUsd, fundingEvents: events, fundingWorstRate: worstRate,
     fundingSideNow,
-    fundingObservedAtMs: fObs,
+    premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,
+    fundingBoundsObservedAtMs: fBoundsObs,
     fundingSource: f.source,
     totalCostUsd,
     totalCostNotionalPct: (totalCostUsd / notional) * 100,

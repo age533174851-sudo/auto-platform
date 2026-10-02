@@ -127,6 +127,7 @@ const P = {
   cost: 'src/lib/engine/executionCost.ts',
   bfut: 'src/lib/exchanges/leverageBracket.ts',
   bfapi: 'src/lib/exchanges/binanceFutures.ts',
+  fresh: 'src/lib/engine/marketFreshness.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -497,8 +498,8 @@ const M = [
   ['MUT-BALANCE-BEFORE-WRITE  잔고 조회를 쓰기 뒤로', P.entry,
     s => moveReadAfterWrite(s, 'availableUsd'), 'RED'],
 
-  ['MUT-PRICE-BEFORE-WRITE    기준가 조회를 쓰기 뒤로', P.entry,
-    s => moveReadAfterWrite(s, 'referencePrice'), 'RED'],
+  ['MUT-PRICE-BEFORE-WRITE    기준 마크가 조회를 쓰기 뒤로', P.entry,
+    s => moveReadAfterWrite(s, 'referenceMark'), 'RED'],
 
   // 다듬기·증거금 재검증·후보 사이징을 통째로 확정 단계로 미룬다.
   // 준비 단계가 통과해 버리므로, 그 뒤에서 막힐 요청이 배율을 먼저 건다.
@@ -1010,8 +1011,8 @@ const M = [
   //   추정 표로 때우는 진짜 위험은 **배선 축**에 있다 — 거래소가
   //   브래킷을 안 주면 그럴듯한 표를 넣어 넘기는 것이다.
   ['MUT-L6 브래킷을 못 읽으면 추정 표로 때운다 (배선 축)', P.entry,
-    s => s.replace('  try { tiers = await deps.maintenanceTiers(notional); } catch { tiers = null; }',
-      '  try { tiers = await deps.maintenanceTiers(notional); } catch { tiers = null; }\n'
+    s => s.replace('  const tiers: BracketTier[] | null = bracket?.tiers ?? null;',
+      '  let tiers: BracketTier[] | null = bracket?.tiers ?? null;\n'
       + '  if (!tiers || !tiers.length) tiers = [[Infinity, 0.004, 0]];'), 'RED'],
 
   ['MUT-L7 Exact100X에서 청산거리 관문을 건너뜀', P.entry,
@@ -1180,9 +1181,9 @@ const M = [
                    "    return { tiers: hit.tiers, freshness: 'FRESH', observedAtMs: hit.ts, error: null };"),
     'RED'],
 
-  ['MUT-D5 라우트가 낡은 브래킷도 받아들임', P.scalp,
-    s => s.replace("          return r.freshness === 'FRESH' ? r.tiers : null;",
-                   '          return r.tiers;'), 'RED'],
+  ['MUT-D5 라우트가 브래킷 캐시 상태를 FRESH로 세탁함', P.scalp,
+    s => s.replace("                   freshness: r.freshness };",
+                   "                   freshness: 'FRESH' };"), 'RED'],
 
   ['MUT-D6 펀딩 예약에 상한 대신 지금 요율을 씀', P.cost,
     s => s.replace("  const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);",
@@ -1200,9 +1201,9 @@ const M = [
                    "      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: nowMs(), error: why };"),
     'RED'],
 
-  ['MUT-D10 라우트가 낡은 premium도 받아들임', P.scalp,
-    s => s.replace("          if (prem.freshness !== 'FRESH' || prem.data == null || fb?.bounds == null) return null;",
-                   '          if (prem.data == null || fb?.bounds == null) return null;'), 'RED'],
+  ['MUT-D10 라우트가 premium 캐시 상태를 FRESH로 세탁함', P.scalp,
+    s => s.replace('            premiumCache: prem.freshness,',
+                   "            premiumCache: 'FRESH',"), 'RED'],
 
   ['MUT-D11 청산 쪽 명목가 대신 진입 명목가 (SHORT 과소예약)', P.cost,
     s => s.replace('  const worstCloseNotional = Math.max(notional, qty * worstClosePrice);',
@@ -1223,6 +1224,154 @@ const M = [
 
   ['MUT-D15 유지증거금에서도 빠진 값을 0으로 읽음', P.liq,
     s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
+
+  // ── ④ 시장 데이터 신선도 ──
+  //
+  // "값은 있는데 **언제의 값인지 모르는 상태**"로 진입하지 않는가.
+  // 서로 다른 시점의 mark/depth/premium을 하나의 현재 시장 상태처럼
+  // 합쳐 쓰지 않는가.
+
+  ['MUT-E1  거래소 시각 요구를 없앰 (수신 시각만으로 통과)', P.fresh,
+    s => s.replace('    if (needEx && ex == null) {', '    if (false) {'), 'RED'],
+
+  ['MUT-E2  낡은 값을 통과시킴 (나이 검사 제거)', P.fresh,
+    s => s.replace('    if (ageBudget == null || age > ageBudget) {', '    if (false) {'), 'RED'],
+
+  ['MUT-E3  만료된 캐시를 새 데이터로 취급 (캐시 검사 제거)', P.fresh,
+    s => s.replace("    if (o.cache !== 'FRESH') {", '    if (false) {'), 'RED'],
+
+  ['MUT-E4  수신 시각이 없어도 통과 (없는 시각을 통과로)', P.fresh,
+    s => s.replace('    if (at == null) {', '    if (false) {'), 'RED'],
+
+  ['MUT-E5  없는 시각을 0으로 읽음 (null → 0, fail-open 복원)', P.fresh,
+    s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
+
+  ['MUT-E6  미래 시각을 통과시킴 (음수 나이를 그냥 씀)', P.fresh,
+    s => s.replace('    if (at > now + tol) {', '    if (false) {'), 'RED'],
+
+  ['MUT-E7  수신 지연(거래소↔로컬 시각 차)을 안 봄', P.fresh,
+    s => s.replace('    if (lag != null && lagBudget != null && lag > lagBudget) {',
+                   '    if (false) {'), 'RED'],
+
+  ['MUT-E8  교차 출처 시각 차 검사를 없앰', P.fresh,
+    s => s.replace('      if (skew > budget) {', '      if (false) {'), 'RED'],
+
+  ['MUT-E9  교차 검사를 수신 시각으로 잼 (각자의 나이 예산에 갇혀 비어 버림)', P.fresh,
+    s => s.replace('      const ta = num(a.o.exchangeTimeMs) as number;\n'
+                   + '      const tb = num(b.o.exchangeTimeMs) as number;',
+                   '      const ta = num(a.o.observedAtMs) as number;\n'
+                   + '      const tb = num(b.o.observedAtMs) as number;'), 'RED'],
+
+  ['MUT-E10 마크가 값 검사를 없앰 (0·NaN을 가격으로 씀)', P.fresh,
+    s => s.replace('      if (v == null || !(v > 0)) {', '      if (false) {'), 'RED'],
+
+  ['MUT-E11 판정 시각을 모를 때 지금으로 대체', P.fresh,
+    s => s.replace('  const now = num(input.nowMs);\n  if (now == null) {',
+                   '  const now = num(input.nowMs) ?? Date.now();\n  if (false) {'), 'RED'],
+
+  ['MUT-E12 신선도 예산을 화면용 정본 수준(100초)으로 늘림', P.fresh,
+    s => s.replace('  maxDecisionAgeMs: {\n    MARK: CLOCK_SKEW_BUDGET_MS,\n'
+                   + '    BOOK: CLOCK_SKEW_BUDGET_MS,',
+                   '  maxDecisionAgeMs: {\n    MARK: 100_000,\n    BOOK: 100_000,'), 'RED'],
+
+  ['MUT-E13 출처별 관측 시각을 한 칸으로 합침 (premium = 펀딩 상한)', P.fresh,
+    s => s.replace("    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = at; }",
+                   "    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = p.premiumObservedAtMs; }"),
+    'RED'],
+
+  ['MUT-E14 비용 판정도 두 시각을 합침', P.cost,
+    s => s.replace('    fundingBoundsObservedAtMs: fBoundsObs,',
+                   '    fundingBoundsObservedAtMs: fPremObs,'), 'RED'],
+
+  ['MUT-E15 진입에서 신선도 판정 자체를 건너뜀', P.entry,
+    s => s.replace('  if (!freshness.ok) {\n'
+                   + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {",
+                   '  if (false) {\n'
+                   + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {"), 'RED'],
+
+  ['MUT-E16 마크가 신선도 판정을 건너뜀 (사이징이 그냥 씀)', P.entry,
+    s => s.replace('  if (!markFreshness.ok) {', '  if (false && !markFreshness.ok) {'), 'RED'],
+
+  ['MUT-E17 기준 마크가를 다시 "시각 없는 숫자"로 축소', P.entry,
+    s => s.replace("  const markObservation: MarketObservation = {\n"
+                   + "    kind: 'MARK',\n"
+                   + '    source: mark?.source ?? null,\n'
+                   + '    value: mark?.price ?? null,\n'
+                   + '    exchangeTimeMs: mark?.exchangeTimeMs ?? null,\n'
+                   + '    observedAtMs: mark?.observedAtMs ?? null,\n'
+                   + '    cache: mark?.cache ?? null,\n'
+                   + '  };',
+                   "  const markObservation: MarketObservation = {\n"
+                   + "    kind: 'MARK', source: 'LEGACY_NUMBER',\n"
+                   + '    value: (mark as any)?.price ?? (mark as any),\n'
+                   + '    exchangeTimeMs: nowMs(), observedAtMs: nowMs(), cache: \'FRESH\',\n'
+                   + '  };'), 'RED'],
+
+  ['MUT-E18 낡은 브래킷 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
+    s => s.replace('      observedAtMs: bracket.observedAtMs ?? null, cache: bracket.freshness ?? null });',
+                   "      observedAtMs: bracket.observedAtMs ?? null, cache: 'FRESH' });"), 'RED'],
+
+  ['MUT-E19 낡은 premium 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
+    s => s.replace('      cache: funding.premiumCache ?? null });',
+                   "      cache: 'FRESH' });"), 'RED'],
+
+  ['MUT-E20 신선도 판정을 첫 거래소 쓰기 **뒤로** 옮김', P.entry,
+    s => moveFreshnessAfterWrite(s), 'RED'],
+
+  ['MUT-E21 라우트가 기준 마크가를 포지션 응답에서 떼어 옴', P.scalp,
+    s => s.replace('          const r = await bf.readMarkPrice(symbol, !connIsLive)\n'
+                   + '            .catch(() => null);\n'
+                   + '          // **시각을 여기서 붙이지 않는다** — 읽는 쪽이 응답에 넣어 준다.\n'
+                   + '          return r?.mark ?? null;',
+                   '          void bf;\n'
+                   + '          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);\n'
+                   + '          const m = Number(rr.risk?.markPrice);\n'
+                   + '          return Number.isFinite(m) && m > 0 ? { price: m,\n'
+                   + '            exchangeTimeMs: Number(rr.risk?.updateTime) || Date.now(),\n'
+                   + "            observedAtMs: Date.now(), source: 'POSITION_RISK', cache: 'FRESH' } : null;"),
+    'RED'],
+
+  ['MUT-E22 라우트가 수수료에 새 시각을 붙임', P.scalp,
+    s => s.replace("            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: r.rate.observedAtMs,",
+                   "            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),"), 'RED'],
+
+  ['MUT-E23 라우트가 호가의 거래소 시각을 버림', P.scalp,
+    s => s.replace('            exchangeTimeMs: r.depth.exchangeTimeMs,',
+                   '            exchangeTimeMs: Date.now(),'), 'RED'],
+
+  ['MUT-E24 거래소 조회가 premium 응답의 시각을 버림', P.bfapi,
+    s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
+                   '    timeMs: null,'), 'RED'],
+
+  ['MUT-E25 없는 거래소 시각을 0(1970년)으로 적음', P.bfapi,
+    s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
+                   '    timeMs: Number(d.time || 0),'), 'RED'],
+
+  ['MUT-E26 마크가 조회가 거래소 시각 대신 수신 시각을 적음', P.bfapi,
+    s => s.replace('      exchangeTimeMs: d?.timeMs ?? null,',
+                   '      exchangeTimeMs: at,'), 'RED'],
+
+  ['MUT-E27 마크가 조회에 45초 캐시를 붙임', P.bfapi,
+    s => s.replace('  let d: PremiumIndex;\n'
+                   + '  try { d = await fetchOne(sym, testnet); }\n'
+                   + "  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }\n"
+                   + '  const at = nowMs();',
+                   '  let d: PremiumIndex;\n'
+                   + '  const hit0 = PREMIUM_CACHE.get(`${testnet ? \'T\' : \'L\'}:${sym}`);\n'
+                   + '  if (hit0) { d = hit0.data; } else {\n'
+                   + '  try { d = await fetchOne(sym, testnet); }\n'
+                   + "  catch (e: any) { return miss(e?.message || '마크가 조회 실패'); }\n"
+                   + '  PREMIUM_CACHE.set(`${testnet ? \'T\' : \'L\'}:${sym}`, { data: d, ts: nowMs() }); }\n'
+                   + '  const at = hit0 ? hit0.ts : nowMs();'), 'RED'],
+
+  ['MUT-E28 호가 조회가 거래소 시각을 버림', P.bfapi,
+    s => s.replace('    const te = Number(d?.T ?? d?.E);',
+                   '    const te = NaN;'), 'RED'],
+
+  ['MUT-E29 수수료 조회가 관측 시각을 안 싣음 (부르는 쪽이 붙이게 됨)', P.bfapi,
+    s => s.replace('      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: Date.now() },',
+                   '      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: null as any },'),
+    'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
@@ -1249,11 +1398,41 @@ function moveReadAfterWrite(src, dep) {
     return src.replace('  try { avail = await deps.availableUsd(); } catch { avail = null; }',
                        '  avail = 1000;');
   }
-  if (dep === 'referencePrice') {
-    return src.replace('  try { price = await deps.referencePrice(); } catch { price = null; }',
-                       '  price = 50000;');
+  if (dep === 'referenceMark') {
+    // 조회를 준비 단계에서 들어내고, 신선도 판정도 함께 눕힌다.
+    // (관측이 없으면 ④가 막으므로, 그것까지 지워야 "쓰기 뒤로 옮김"이 된다)
+    const from = src.indexOf('  // ── ④ 기준 마크가 **관측** ──');
+    const to = src.indexOf('  const price: number = mark!.price as number;');
+    if (from < 0 || to < 0) return src;
+    return src.slice(0, from)
+      + '  const price = 50000;\n'
+      + src.slice(to + '  const price: number = mark!.price as number;\n'.length);
   }
   return src;
+}
+
+/**
+ * **신선도 판정을 첫 거래소 쓰기 뒤로 옮긴다.**
+ *
+ * 지우는 변이가 아니다 — 판정은 그대로 일어나고 자리만 `applyLeverage`
+ * 뒤로 간다. "판정이 있는가"만 보는 검사는 이것을 놓치고, 그때 낡은
+ * 데이터로 막힐 요청이 **계좌 배율을 먼저 바꾼 뒤** 멈춘다.
+ */
+function moveFreshnessAfterWrite(src) {
+  const GUARD = '  if (!freshness.ok) {\n'
+    + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {\n"
+    + '      marginMode: mode, leverage: req, referencePrice: price,\n'
+    + '      allocatedMargin: allocated, requiredMargin, quantity: q.qty,\n'
+    + '      freshness,\n'
+    + '    });\n'
+    + '  }\n';
+  if (!src.includes(GUARD)) return src;
+  const AFTER = '  notes.push(`배율 ${req}배 확인(되읽음)`);\n';
+  if (!src.includes(AFTER)) return src;
+  const moved = '  if (!prepared.freshness?.ok) {\n'
+    + "    return fail('MARKET_DATA_STALE', prepared.freshness?.reason || '', notes);\n"
+    + '  }\n';
+  return src.replace(GUARD, '').replace(AFTER, AFTER + moved);
 }
 
 function moveAfterWrite(src, startMarker, alsoFrom, endMarker) {

@@ -13,7 +13,7 @@
 // 그리고 TTL이 지난 뒤 다시 읽기에 실패하면 옛 값을 조용히 돌려주고
 // 있었다 — 6시간이 아니라 **사실상 무기한** 낡은 구간이다.
 import { test, eq, assert } from '../../test/harness';
-import { readBracket, readPremiumIndex } from './binanceFutures';
+import { readBracket, readPremiumIndex, readMarkPrice } from './binanceFutures';
 
 /** 주입할 가짜 조회기. 전역 `fetch`를 건드리지 않는다 */
 const tiersFor = (coef: number | null) => {
@@ -111,6 +111,8 @@ export function runBracketCacheTests() {
   const PREM = {
     symbol: 'BTCUSDT', markPrice: 50_000, indexPrice: 50_000,
     lastFundingRate: 0.0001, nextFundingTime: 1_000_000_100_000,
+    // 거래소가 적어 준 시각. 우리가 받은 시각과 **다른 값이다**.
+    timeMs: 999_999_999_900,
   };
 
   test('낡은 premium 캐시는 **원래 읽은 시각**을 그대로 들고 간다', async () => {
@@ -140,6 +142,62 @@ export function runBracketCacheTests() {
     eq(r.freshness, 'NONE');
     eq(r.data, null);
     eq(r.observedAtMs, null);
+  });
+
+  // ── 기준 마크가: **시장 데이터에서, 시각과 함께** ──
+  //
+  //   `positionRisk.markPrice` 숫자 하나로는 "언제의 값인가"를 물을 수
+  //   없었다. 그리고 그 응답의 `updateTime`은 포지션이 갱신된 시각이지
+  //   마크가가 만들어진 시각이 아니다 — 서로의 timestamp가 될 수 없다.
+
+  test('마크가 관측은 거래소 시각과 수신 시각을 **따로** 들고 온다', async () => {
+    const T = 1_500_000_000_000;
+    const r = await readMarkPrice('BTCUSDT', true, async () => PREM, () => T);
+    eq(r.error, null);
+    eq(r.mark.price, 50_000);
+    eq(r.mark.exchangeTimeMs, PREM.timeMs, '★ 거래소가 적어 준 시각을 버렸다');
+    eq(r.mark.observedAtMs, T, '★ 우리가 받은 시각이 아니다');
+    assert(r.mark.exchangeTimeMs !== r.mark.observedAtMs,
+      '두 시각을 한 값으로 합치면 수신 지연을 영영 못 잰다');
+    eq(r.mark.cache, 'FRESH');
+  });
+
+  test('거래소가 시각을 안 주면 null이다 — 1970년도, 지금도 아니다', async () => {
+    const T = 1_500_000_000_000;
+    const r = await readMarkPrice('BTCUSDT', true,
+      async () => ({ ...PREM, timeMs: null }), () => T);
+    eq(r.mark.exchangeTimeMs, null,
+      '★ 없는 시각을 0이나 지금으로 채웠다 — "없음"과 "낡음"은 다른 상태다');
+    eq(r.mark.observedAtMs, T);
+  });
+
+  test('마크가 조회는 **캐시하지 않는다** — 매번 새로 읽은 시각이다', async () => {
+    let n = 0;
+    const fetchOne = async () => { n++; return PREM; };
+    const T0 = 1_600_000_000_000;
+    await readMarkPrice('ETHUSDT', true, fetchOne, () => T0);
+    const b = await readMarkPrice('ETHUSDT', true, fetchOne, () => T0 + 10_000);
+    eq(n, 2, '★ 45초 캐시를 100배 기준가에 썼다');
+    eq(b.mark.observedAtMs, T0 + 10_000, '★ 캐시 시각을 돌려줬다');
+  });
+
+  test('조회가 실패하면 값도 시각도 없다 — 지어내지 않는다', async () => {
+    const r = await readMarkPrice('BTCUSDT', true,
+      async () => { throw new Error('network'); }, () => 1);
+    eq(r.mark.price, null);
+    eq(r.mark.observedAtMs, null);
+    eq(r.mark.exchangeTimeMs, null);
+    eq(r.mark.cache, 'NONE');
+    assert(r.error != null, '왜 못 읽었는지 적어야 한다');
+  });
+
+  test('마크가가 0이거나 음수면 값으로 치지 않는다', async () => {
+    for (const px of [0, -1, NaN]) {
+      const r = await readMarkPrice('BTCUSDT', true,
+        async () => ({ ...PREM, markPrice: px }), () => 1);
+      eq(r.mark.price, null, `markPrice ${px}를 값으로 받았다`);
+      assert(r.error != null);
+    }
   });
 
   test('TTL 안이면 캐시지만 FRESH이고, 시각은 읽은 그때다', async () => {
