@@ -1076,9 +1076,11 @@ const M = [
     s => s.replace('    maintAmount: table[h.i][2],',
                    '    maintAmount: table[entryTierIndex][2],'), 'RED'],
 
-  ['MUT-L18 계정별 브래킷 조정 배수를 다시 버림', P.bfut,
-    s => s.replace('      b?.notionalCoef == null ? undefined : Number(b.notionalCoef),',
-                   '      undefined,'), 'RED'],
+  // ★ BLOCKER 1 수정으로 coef를 읽는 자리가 **최상위**로 옮겨졌다.
+  //   옛 앵커(bracket 줄 안)는 사라졌다. 여기서는 "읽어 놓고 구간에
+  //   싣지 않는" 쪽을 건다 — D2(최상위를 아예 안 읽음)와 다른 변이다.
+  ['MUT-L18 조정 배수를 읽고도 구간에 싣지 않음', P.bfut,
+    s => s.replace('      coef,\n', '      undefined,\n'), 'RED'],
 
   ['MUT-L18b 조정 배수가 걸려 있어도 통과시킴', P.liq,
     s => s.replace('    if (coef != null && !(Number(coef) === 1)) {',
@@ -1096,8 +1098,9 @@ const M = [
     s => s.replace("  const rate = fillKind === 'TAKER' ? taker : maker;",
                    '  const rate = maker;'), 'RED'],
 
+  // ★ 청산 수수료 기준이 진입 명목가 → **청산 쪽 명목가**로 바뀌었다.
   ['MUT-C3 나갈 때 수수료 예약을 지움', P.cost,
-    s => s.replace('  const exitFeeReserveUsd = notional * rate;',
+    s => s.replace('  const exitFeeReserveUsd = worstCloseNotional * rate;',
                    '  const exitFeeReserveUsd = 0;'), 'RED'],
 
   ['MUT-C4 슬리피지 방향을 뒤집음', P.cost,
@@ -1117,10 +1120,11 @@ const M = [
                    "    fRate === 0 ? 'NEUTRAL' : (side === 'LONG' ? fRate < 0 : fRate > 0) ? 'PAY' : 'RECEIVE';"),
     'RED'],
 
-  ['MUT-C8 펀딩 수취 예상치를 안전 여유로 씀 (부호 그대로 더함)', P.cost,
-    s => s.replace('  const fundingReserveUsd = events * Math.abs(fRate) * notional;',
+  // ★ 예약식이 상한 기반 + 청산 쪽 명목가로 바뀌었다.
+  ['MUT-C8 펀딩 수취 예상치를 안전 여유로 씀 (받는 쪽이면 예약을 깎음)', P.cost,
+    s => s.replace('  const fundingReserveUsd = events * worstRate * worstCloseNotional;',
       "  const _pays = side === 'LONG' ? fRate > 0 : fRate < 0;\n"
-      + '  const fundingReserveUsd = events * (_pays ? Math.abs(fRate) : -Math.abs(fRate)) * notional;'),
+      + '  const fundingReserveUsd = events * (_pays ? worstRate : -worstRate) * worstCloseNotional;'),
     'RED'],
 
   ['MUT-C9 펀딩 주기를 8시간으로 박음', P.cost,
@@ -1137,9 +1141,11 @@ const M = [
     s => s.replace('  if (!(distancePct > adverse)) {',
                    '  if (!(distancePct >= adverse)) {'), 'RED'],
 
+  // ★ 실질 판정이 `referencePrice`(마크) + `entryPrice`(체결가)로 나뉘었다.
+  //   비용이 아예 반영되지 않는 모양으로 되돌린다 — 진입가도 배율도 원복.
   ['MUT-C13 비용을 계산하고 청산 계산에는 반영하지 않음 (체결가·배율 원복)', P.entry,
-    s => s.replace("    referencePrice: eff.effectiveEntryPrice,\n    quantity: q.qty,\n    leverage: eff.effectiveLeverage,",
-                   '    referencePrice: price,\n    quantity: q.qty,\n    leverage: req,'), 'RED'],
+    s => s.replace('    entryPrice: eff.effectiveEntryPrice,\n    quantity: q.qty,\n    leverage: eff.effectiveLeverage,',
+                   '    entryPrice: price,\n    quantity: q.qty,\n    leverage: req,'), 'RED'],
 
   ['MUT-C14 비용이 증거금을 넘어도 통과', P.cost,
     s => s.replace('  if (!(marginAfterCostUsd > 0)) {', '  if (false) {'), 'RED'],
