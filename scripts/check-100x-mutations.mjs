@@ -1279,9 +1279,19 @@ const M = [
                    "    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = p.premiumObservedAtMs; }"),
     'RED'],
 
+  // ★ **앵커가 통과 경로여야 한다.** 처음에는
+  //   `'    fundingBoundsObservedAtMs: fBoundsObs,'`(4칸)을 겨눴는데, 그
+  //   문자열은 실패 경로의 8칸 줄 안에 **부분 문자열로 먼저 들어 있다.**
+  //   `String.replace`가 그쪽을 고쳐 버려서, 통과 경로를 보는 시험에는
+  //   아무 변화가 없었다 — 변이가 "새 나감"으로 찍혔지만 사실은 아무것도
+  //   겨누지 못한 것이다(공허한 변이). 앞뒤 줄을 함께 묶어 유일하게 만든다.
   ['MUT-F14 비용 판정도 두 시각을 합침', P.cost,
-    s => s.replace('    fundingBoundsObservedAtMs: fBoundsObs,',
-                   '    fundingBoundsObservedAtMs: fPremObs,'), 'RED'],
+    s => s.replace('    premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,\n'
+                   + '    fundingBoundsObservedAtMs: fBoundsObs,\n'
+                   + '    fundingSource: f.source,',
+                   '    premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,\n'
+                   + '    fundingBoundsObservedAtMs: fPremObs,\n'
+                   + '    fundingSource: f.source,'), 'RED'],
 
   ['MUT-F15 진입에서 신선도 판정 자체를 건너뜀', P.entry,
     s => s.replace('  if (!freshness.ok) {\n'
