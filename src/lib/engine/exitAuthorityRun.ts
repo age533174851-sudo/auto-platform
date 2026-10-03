@@ -33,6 +33,41 @@
 // ★ 이미 flat인 것은 **실패가 아니다.** 주문을 보내지 않았다는 사실과
 //   성공/실패를 한 boolean으로 합치지 않는다.
 
+// ══════════════════════════════════════════════════════════════
+// ★ ⑤A 안전 계약 — **정본은 여기 하나다**
+// ══════════════════════════════════════════════════════════════
+//
+// 이 계약이 흩어지면 한쪽만 고쳐지고, 그때 "보장한다고 적었지만
+// 보장하지 않는" 상태가 생긴다. 그래서 한 곳에 적는다.
+//
+// 보장하는 것
+// ───────────
+//   · 쓰기 **직전에** 울타리를 재검증한다
+//   · 재검증 → 전송 사이에 거래소 READ가 **0**이다
+//   · 낡은 실행자의 전송 가능성을 **숨기지 않는다** (Case F-A가 고정)
+//   · 같은 종료 의도에 **결정적으로 같은** clientOrderId를 싣는다
+//   · `reduceOnly: true` — 조건부가 아니라 상수다
+//   · 주문 방향은 **관측한 포지션의 반대**다
+//   · payload는 **지금 관측한 노출**로 만든다
+//   · 최종 노출의 정본은 `readAfter`다
+//   · flat이 아니면 `CLOSED_VERIFIED`로 적지 않는다
+//   · 중복·모호 응답은 실패로 단정하지 않고 재조회로 확정한다
+//
+// 보장하지 **않는** 것
+// ────────────────────
+//   · strict single-writer — 이 경로는 그것이 아니다
+//   · 낡은 실행자의 HTTP 전송 **자체**의 차단
+//   · 거래소가 모든 시점에 같은 clientOrderId를 무조건 거부한다는 것
+//   · 실제 Binance TESTNET의 duplicate 동작 (검증한 적 없음)
+//
+// 최종 문구 — 이 세 줄은 **줄이거나 강하게 고치지 않는다**
+// ────────────────────────────────────────────────────────
+//   exchange-level strict single-writer는 보장하지 않는다.
+//   안전성은 fence window 최소화 + reduceOnly + current exposure
+//   reconciliation에 의존한다.
+//   clientOrderId duplicate rejection은 추가 방어층이며 외부 검증
+//   전제다.
+
 import {
   decideExitAuthority, type ExitAuthorityDecision, type ExitCapabilities,
   type ExitReason, type LeaseIdentity, type PositionIdentity,

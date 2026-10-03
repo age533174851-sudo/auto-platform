@@ -3861,19 +3861,52 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     //   공식 문서는 `newClientOrderId`가 열린 주문 사이에서 고유하다고만
     //   적는다. "같은 의도면 주문이 하나만 생긴다"·"거래소가 둘째를
     //   거부한다"는 그보다 강한 주장이고, 이 환경에서 확인하지 못했다.
+    //   ★ **원본을 본다 — `code()`가 아니다.** 이 저장소의 과장 문장은
+    //     전부 주석에 있다. 주석을 지운 소스로 검사하면 규칙이 통과하는
+    //     이유가 "과장이 없어서"가 아니라 "볼 수 없어서"가 된다.
+    //     (실제로 그 모양으로 한 번 들어갔다가 이 줄로 고쳤다.)
+    //
+    //   부정문은 **적어야 한다.** "strict single-writer가 아니다"는 금지
+    //   대상이 아니라 우리가 원하는 문장이다. 그래서 금지어를 찾은 뒤
+    //   그 줄과 **다음 줄**에 부정 표지가 있는지 본다 — 한국어 주석은
+    //   서술어가 다음 줄로 넘어간다.
+    const NEGATION = /아니다|아니라|아닙니다|않는다|않습니다|않음|못한다|못합니다|못한|비보장|보장하지|주장하지|증명하지|적지\s*않/;
     for (const f of [INTENT, RUN, 'src/lib/engine/venuePositionOps.ts',
-                     'src/lib/exchanges/binanceFutures.ts', MON5]) {
-      const src2 = code(f);
+                     'src/lib/exchanges/binanceFutures.ts', MON5,
+                     'src/lib/engine/exitAuthorityRun.test.ts']) {
+      const lines = read(f).split('\n');
       for (const [re, what] of [
-        [/주문(이|은)\s*하나만\s*생긴다/, '"주문은 하나만 생긴다"'],
+        [/주문(이|은)?\s*하나만\s*생긴다|주문\s*하나(로|만)?\s*(끝난다|생긴다)|→\s*주문\s*하나/, '"주문은 하나만 생긴다"'],
         [/둘째를\s*거부한다/, '"거래소가 둘째를 거부한다"'],
         [/같은\s*ID\s*재사용을\s*거부한다/, '"같은 ID 재사용을 거부한다"'],
         [/strict\s*single-?writer/i, 'strict single-writer 주장'],
+        [/멱등\s*키가\s*(중복|둘째)[^\n]{0,20}막는다/, '"멱등 키가 둘째를 막는다"'],
       ]) {
-        if (re.test(src2)) {
-          err(`${f}: 외부 거래소가 보장하지 않은 것을 보장한다고 적습니다 (${what})`
+        for (let i = 0; i < lines.length; i += 1) {
+          if (!re.test(lines[i])) continue;
+          const window = lines[i] + ' ' + (lines[i + 1] ?? '');
+          if (NEGATION.test(window)) continue;
+          err(`${f}:${i + 1}: 외부 거래소가 보장하지 않은 것을 보장한다고 적습니다 (${what})`
             + ' — 공식 문서는 열린 주문 사이의 고유성만 적습니다.'
             + ' 추가 방어층이라고 적고 UNVERIFIED_EXTERNAL로 남기십시오');
+        }
+      }
+    }
+
+    // ── ⑤A 안전 계약의 **최종 세 문장**이 그대로 있는가 ──
+    //
+    //   이 세 줄이 사라지거나 강해지면, 다음 사람은 이 경로가 strict
+    //   single-writer라고 읽는다. 문장을 자산으로 취급한다.
+    {
+      const prose = read(RUN).replace(/^\s*(\/\/|\*)/gm, ' ').replace(/\s+/g, ' ');
+      for (const must of [
+        'exchange-level strict single-writer는 보장하지 않는다.',
+        '안전성은 fence window 최소화 + reduceOnly + current exposure reconciliation에 의존한다.',
+        'clientOrderId duplicate rejection은 추가 방어층이며 외부 검증 전제다.',
+      ]) {
+        if (!prose.includes(must)) {
+          err(`${RUN}: ⑤A 안전 계약의 최종 문장이 없습니다 — "${must}"`
+            + ' 이 문장이 사라지면 다음 사람이 이 경로를 strict single-writer로 읽습니다');
         }
       }
     }
