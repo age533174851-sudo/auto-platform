@@ -485,4 +485,67 @@ export function runExitAuthorityRunTests() {
     eq(r.code, 'CAPABILITY_NOT_ENABLED');
     assert(!log.includes('send'));
   });
+
+  // ══════════════════════════════════════════════════════════
+  // ⑤A-2 — 지원하지 않는 거래소는 **무엇을 부르기도 전에** 막는다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   Gate는 지금 전용 종료 권한의 대상이 아니다. 진입 경로가 Gate에서
+  //   우연히 fail-closed라는 것만으로는 부족하다 — 그건 미래의 코드
+  //   변화·과거 row·비정상 상태에서 되살아나는 잠복 경로다.
+  //
+  //   여기서 세는 것은 "주문을 안 보냈다"가 아니라 **"아무것도 안 불렀다"**
+  //   이다. 조회 한 번이라도 나가면 이 시험이 깨진다.
+
+  test('⑤A-2: Gate 후보는 거래소를 **읽지도 않고** 막힌다', async () => {
+    const { deps, log } = rig();
+    const r = await runExitAuthority(candidate({
+      positionIdentity: {
+        exchange: 'gate', connectionId: 'conn-1', symbol: 'BTC_USDT', side: 'LONG',
+        executionIdentity: EXACT100X, openingOrderId: 'ord-1',
+      },
+    }), deps, NOW);
+    eq(r.code, 'EXIT_VENUE_UNSUPPORTED',
+      '★ 지원하지 않는 거래소를 다른 오류로 숨기면 운영자가 거래소 탓을 한다');
+    eq(r.attemptedWrite, false);
+    eq(r.failed, false, '★ 고장이 아니라 설정·계약의 범위다');
+    eq(r.blocked, true);
+    eq(log.length, 0,
+      `★ 거래소를 ${log.length}번 건드렸다 (${log.join('→')}) — 0이어야 한다.`
+      + ' lease·prepare·revalidate·send·readAfter 전부 호출 0이다');
+  });
+
+  test('⑤A-2: Gate 차단은 **다른 코드로 숨지 않는다**', async () => {
+    const { deps } = rig({}, { readOk: false });
+    const r = await runExitAuthority(candidate({
+      positionIdentity: {
+        exchange: 'gate', connectionId: 'conn-1', symbol: 'BTC_USDT', side: 'LONG',
+        executionIdentity: EXACT100X, openingOrderId: 'ord-1',
+      },
+    }), deps, NOW);
+    // 조회가 실패하도록 꾸몄어도 READ_FAILED가 아니다 — 읽지 않았으니까.
+    assert(r.code !== 'POSITION_READ_FAILED' && r.code !== 'IDENTITY_MISMATCH',
+      `★ 미지원 거래소가 "${r.code}"로 보고됐다`);
+    eq(r.code, 'EXIT_VENUE_UNSUPPORTED');
+  });
+
+  test('⑤A-2: 거래소 지원 범위의 **정본은 하나다**', async () => {
+    const { exact100xExitVenueCapability } = await import('./exitAuthority');
+    eq(exact100xExitVenueCapability('binance').timeExit, true);
+    eq(exact100xExitVenueCapability('gate').timeExit, false);
+    // 모르는 거래소도 닫힌다 — 목록에 없으면 검증한 적이 없다는 뜻이다.
+    eq(exact100xExitVenueCapability('okx' as any).timeExit, false);
+    eq(exact100xExitVenueCapability(null).timeExit, false);
+    eq(exact100xExitVenueCapability(undefined).timeExit, false);
+    assert(exact100xExitVenueCapability('gate').reason.length > 0,
+      '★ 왜 닫혀 있는지 운영자가 볼 수 없다');
+  });
+
+  test('⑤A-2: Binance 경로의 순서는 **그대로다**', async () => {
+    const { deps, log } = rig();
+    const r = await runExitAuthority(candidate(), deps, NOW);
+    eq(r.code, 'CLOSED_VERIFIED');
+    eq(log.join('→'), 'lease→prepare→revalidate→send→readAfter',
+      '★ 거래소 관문을 넣으면서 Binance 순서가 바뀌었다');
+  });
 }

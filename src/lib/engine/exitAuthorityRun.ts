@@ -69,7 +69,8 @@
 //   전제다.
 
 import {
-  decideExitAuthority, type ExitAuthorityDecision, type ExitCapabilities,
+  decideExitAuthority, exact100xExitVenueCapability,
+  type ExitAuthorityDecision, type ExitCapabilities,
   type ExitReason, type LeaseIdentity, type PositionIdentity,
 } from './exitAuthority';
 import { applyLifecycleClose } from './lifecycleAction';
@@ -103,7 +104,9 @@ export type ExitRunCode =
   | 'OPENED_AT_UNUSABLE'
   | 'IDENTITY_INCOMPLETE'
   | 'CAPABILITY_NOT_ENABLED'
-  | 'QUANTITY_UNUSABLE';
+  | 'QUANTITY_UNUSABLE'
+  /** 이 거래소는 전용 종료 권한이 아직 지원하지 않는다. **주문 0건·조회 0건** */
+  | 'EXIT_VENUE_UNSUPPORTED';
 
 export interface ExitRunResult {
   code: ExitRunCode;
@@ -206,6 +209,23 @@ const denied = (
 export async function runExitAuthority(
   candidate: ExitRunCandidate, deps: ExitRunDeps, nowMs: number,
 ): Promise<ExitRunResult> {
+  // ── ⓪ 거래소가 지원 범위 안인가 — **무엇이든 부르기 전에** ──
+  //
+  // `decideExitAuthority`에도 같은 관문이 있지만 그것만으로는 부족하다.
+  // 이 함수는 판정보다 **먼저** `leaseOwned`와 `prepareClose`를 부른다
+  // (임차 없으면 읽지 않으려고 그 순서다). 그래서 판정에만 두면 지원하지
+  // 않는 거래소를 **조회한 뒤에** 막게 된다 — "주문 0건"은 지켜도
+  // "거래소 READ 0"이 깨진다.
+  //
+  // ★ 그렇다고 판단을 두 벌 적지는 않는다. 두 자리가 **같은 정본**
+  //   (`exact100xExitVenueCapability`)을 부른다. Gate를 열 때 바꿀 곳은
+  //   그 함수 하나다.
+  const venue = exact100xExitVenueCapability(candidate.positionIdentity?.exchange);
+  if (candidate.reason === 'TIME_EXIT' && venue.timeExit !== true) {
+    // deps는 **하나도 부르지 않았다.** 조회·준비·전송 전부 0회다.
+    return denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason);
+  }
+
   // ── ① 임차 (거래소를 읽기 **전에**) ──
   //
   // 남의 임차면 조회할 이유도 없다. 그리고 여기서 참이어도 끝이 아니다.

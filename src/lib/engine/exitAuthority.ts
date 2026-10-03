@@ -65,7 +65,59 @@ export type ExitAuthorityCode =
   /** 임차(실행 권한)가 내 것이 아니다 */
   | 'NOT_OWNER'
   /** 닫을 수량을 정하지 못했다 */
-  | 'QUANTITY_UNUSABLE';
+  | 'QUANTITY_UNUSABLE'
+  /**
+   * 이 거래소는 **전용 Exact100X 종료 권한이 아직 지원하지 않는다.**
+   *
+   * 설정·계약의 문제이지 조회 실패가 아니다. `POSITION_READ_FAILED`나
+   * `IDENTITY_MISMATCH`로 숨기면 운영자가 "거래소가 이상하다"고 읽는다.
+   */
+  | 'EXIT_VENUE_UNSUPPORTED';
+
+// ══════════════════════════════════════════════════════════════
+// ★ 전용 종료 권한이 **지금 지원하는 거래소** — 정본은 여기 하나다
+// ══════════════════════════════════════════════════════════════
+//
+// 왜 상수 하나가 아니라 함수인가: 허용 목록을 여러 곳에 흩어 적으면
+// (`exchange === 'binance'`가 라우트·판정·검사기에 각각) 나중에 Gate를
+// 열 때 한 곳만 고쳐지고 그때 두 답이 갈린다. 이 저장소가 반복한
+// "경로가 둘인데 한쪽만 고침"이다.
+//
+// 왜 Gate가 닫혀 있는가 — **지원을 줄이는 것이 아니라, 실제로 검증한
+// 범위와 런타임 허용 범위를 맞추는 것이다.**
+//
+//   · Gate 종료 경로(`closePositionGateFutures`)는 주문에 client id
+//     (`text`)를 **싣지 않는다.** 거래소가 같은 종료 의도의 둘째 요청을
+//     알아볼 수단이 없다.
+//   · Gate `text` 규격은 Binance clientOrderId와 다르다 — `t-` 접두사
+//     필수, 접두사 제외 28 bytes, 제한된 문자셋. 지금 `exitIntentId`가
+//     만드는 36자 `x5t…` 값을 그대로 넣으면 **규격부터 맞지 않는다.**
+//   · 같은 `text`의 둘째 주문이 반드시 거부된다는 보장도 확인하지
+//     못했다(`UNVERIFIED_EXTERNAL`).
+//
+// ★ 이것은 **전용 종료 권한에만** 적용된다. 일반 생명주기의 Gate 지원과
+//   Gate의 보통 청산·보호주문은 건드리지 않는다.
+//
+// Gate를 열 때 바꿀 곳은 이 함수 하나다.
+export interface ExitVenueCapability {
+  /** 이 거래소에서 전용 TIME_EXIT을 실행해도 되는가 */
+  timeExit: boolean;
+  /** 왜 닫혀 있는가. 열려 있으면 빈 문자열 */
+  reason: string;
+}
+
+export function exact100xExitVenueCapability(
+  exchange: string | null | undefined,
+): ExitVenueCapability {
+  if (exchange === 'binance') return { timeExit: true, reason: '' };
+  // **모르는 거래소도 닫는다.** 목록에 없으면 검증한 적이 없다는 뜻이다.
+  return {
+    timeExit: false,
+    reason: `전용 Exact100X 종료 권한은 아직 binance에서만 지원합니다`
+      + ` (이 포지션은 ${exchange || '알 수 없음'}) —`
+      + ' 멱등 키 규격과 중복 거부 동작을 외부 검증한 뒤에 엽니다',
+  };
+}
 
 /**
  * 종료 대상 포지션의 신원.
@@ -247,6 +299,17 @@ export function decideExitAuthority(i: ExitAuthorityInput): ExitAuthorityDecisio
     return deny(i, 'IDENTITY_INCOMPLETE',
       '포지션 신원(거래소·계좌·종목·방향)이 온전하지 않습니다 — 종목만 보고 닫지 않습니다');
   }
+
+  // ── ②-b 거래소(venue)가 지원 범위 안인가 ──
+  //
+  // 정책·임차·조회보다 **앞**이다. 뒤로 밀면 지원하지 않는 거래소를
+  // 조회한 뒤에 막게 되고, 그건 "주문 시도 0"은 지켜도 "거래소 READ 0"을
+  // 깨뜨린다. 판정은 `exact100xExitVenueCapability` 한 곳이다.
+  const venue = exact100xExitVenueCapability(pid.exchange);
+  if (i.reason === 'TIME_EXIT' && venue.timeExit !== true) {
+    return deny(i, 'EXIT_VENUE_UNSUPPORTED', venue.reason);
+  }
+
   if (eid == null) {
     // 계약 없이 연 포지션은 이 권한의 대상이 아니다. 기존 생명주기가 본다.
     return deny(i, 'IDENTITY_INCOMPLETE',

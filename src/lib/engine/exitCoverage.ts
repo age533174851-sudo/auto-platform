@@ -27,6 +27,7 @@ import type { SeatExitCapabilities } from './managedPosition';
 import { managedCandidates, type OrderRowLike } from './managedPosition';
 import { OPEN_COMBOS, type OpenCombo } from '../execution/dormantGate';
 import { resolveExecutionProfile } from '../execution/profile';
+import { exact100xExitVenueCapability } from './exitAuthority';
 import type { StopPolicy } from '../strategies/profiles';
 
 /** 청산 감시가 열린 포지션 목록을 읽는 표 */
@@ -266,6 +267,16 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
     const auth = authorityCapabilitiesOf(policy, {
       profileId: c.profileId, presetId: c.presetId, contractVersion: c.contractVersion,
     });
+    // ★ **거래소 범위를 문장으로 적되, 목록을 손으로 적지 않는다.**
+    //   표는 거래소 칸이 없어서 "어디서나 시간 청산이 된다"로 읽힌다.
+    //   그건 사실이 아니다 — 전용 권한은 지금 binance에서만 돈다.
+    //   목록은 정본(`exact100xExitVenueCapability`)에서 derive한다. 여기에
+    //   'binance'라고 적으면 Gate를 열 때 이 줄만 옛말로 남는다.
+    const venues = (['binance', 'gate'] as const)
+      .filter(x => exact100xExitVenueCapability(x).timeExit);
+    const venueNote = venues.length
+      ? `전용 종료 권한은 ${venues.join('·')} 실행 venue에서만 돕니다`
+      : '전용 종료 권한을 지원하는 실행 venue가 없습니다';
     const strat = STRATEGIES.find(s => s.id === c.strategyId);
     const label = `${c.profileId} · ${c.presetId} v${c.contractVersion}`;
     // 계약이 선언한 보유 한도와, 그 값을 **실제로 읽는 경로가 있는가.**
@@ -304,7 +315,7 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
             + ` 유예되고, 전용 종료 권한이 **시간 청산만** 돌립니다.`
             + ` ${declaredHold}. 트레일링·본전이동·adverse/청산여유 비상 종료는`
             + ` 아직 없습니다 — 보유 한도 전에 불리하게 움직이면 자동으로 닫히지`
-            + ` 않습니다.`
+            + ` 않습니다. ${venueNote}.`
           : `고정 손절을 걸지 않는 계약입니다(의도). 그리고 ${adm.code}로 자리 전체가`
             + ` 일반 생명주기에서 유예되어 트레일링·본전이동·시간청산이 하나도 돌지`
             + ` 않습니다 — 지금 이 계약의 종료 수단은 사람이 직접 닫는 것뿐입니다.`

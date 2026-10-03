@@ -3893,6 +3893,109 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       }
     }
 
+    // ── ⑤A-2 전용 종료 권한의 **거래소 지원 범위** ──
+    //
+    //   Gate는 전용 권한이 아직 지원하지 않는다. 진입 경로가 Gate에서
+    //   우연히 fail-closed라는 것만으로는 부족하다 — 그건 잠복 경로다.
+    //   여기서는 **돌려서** 확인한다. 이름이 아니라 동작이다.
+    {
+      const AUTH2 = 'src/lib/engine/exitAuthority.ts';
+      const am = await loadModule(AUTH2, '종료 권한 정본');
+      if (!am || typeof am.exact100xExitVenueCapability !== 'function') {
+        err(`${AUTH2}: exact100xExitVenueCapability가 없습니다`
+          + ' — 거래소 허용 범위가 흩어져 적히면 Gate를 열 때 한 곳만 고쳐집니다');
+      } else {
+        if (am.exact100xExitVenueCapability('binance').timeExit !== true) {
+          err(`${AUTH2}: binance에서 전용 TIME_EXIT이 닫혀 있습니다 — 기존 경로가 죽습니다`);
+        }
+        for (const x of ['gate', 'okx', '', null, undefined]) {
+          if (am.exact100xExitVenueCapability(x).timeExit === true) {
+            err(`${AUTH2}: 검증하지 않은 거래소(${String(x)})에서 전용 TIME_EXIT이 열려 있습니다`
+              + ' — 멱등 키 규격·중복 거부 동작을 외부 검증한 뒤에 엽니다');
+          }
+        }
+        if (!String(am.exact100xExitVenueCapability('gate').reason || '').trim()) {
+          err(`${AUTH2}: Gate가 왜 닫혀 있는지 사유가 비어 있습니다`);
+        }
+      }
+
+      // 실행 정본이 **무엇을 부르기도 전에** 막는가. deps 호출 0회여야 한다.
+      const rm = await loadModule(RUN, '종료 권한 실행 정본');
+      if (rm && typeof rm.runExitAuthority === 'function') {
+        const touched = [];
+        const spy = n => async () => { touched.push(n); throw new Error('불려서는 안 된다'); };
+        const EID = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
+        const r = await rm.runExitAuthority({
+          positionIdentity: { exchange: 'gate', connectionId: 'c1', symbol: 'BTC_USDT',
+            side: 'LONG', executionIdentity: EID, openingOrderId: 'o1' },
+          strategyId: 'scalp', executionIdentity: EID,
+          capabilities: { fixedStopAtEntry: false, breakEven: false, trailing: false,
+            timeExit: true, emergency: false },
+          reason: 'TIME_EXIT', openedAtMs: Date.now() - 9 * 3600 * 1000,
+        }, {
+          leaseOwned: spy('lease'), prepareClose: spy('prepare'),
+          revalidateFence: spy('revalidate'), sendClose: spy('send'),
+          readAfter: spy('readAfter'),
+        }, Date.now());
+        if (r?.code !== 'EXIT_VENUE_UNSUPPORTED') {
+          err(`${RUN}: Gate 후보가 EXIT_VENUE_UNSUPPORTED가 아니라 "${r?.code}"로 보고됩니다`
+            + ' — 미지원을 조회 실패·신원 불일치로 숨기면 운영자가 거래소를 의심합니다');
+        }
+        if (r?.attemptedWrite !== false) {
+          err(`${RUN}: 미지원 거래소인데 attemptedWrite가 ${String(r?.attemptedWrite)}입니다`);
+        }
+        if (touched.length !== 0) {
+          err(`${RUN}: 미지원 거래소에서 거래소 경로를 ${touched.length}번 건드립니다`
+            + ` (${touched.join('→')}) — 조회·준비·전송 전부 0회여야 합니다`);
+        }
+        // Binance 경로는 **그대로**여야 한다 (지원을 줄이는 변경이 아니다)
+        const log = [];
+        const ok = await rm.runExitAuthority({
+          positionIdentity: { exchange: 'binance', connectionId: 'c1', symbol: 'BTCUSDT',
+            side: 'LONG', executionIdentity: EID, openingOrderId: 'o1' },
+          strategyId: 'scalp', executionIdentity: EID,
+          capabilities: { fixedStopAtEntry: false, breakEven: false, trailing: false,
+            timeExit: true, emergency: false },
+          reason: 'TIME_EXIT', openedAtMs: Date.now() - 9 * 3600 * 1000,
+        }, {
+          leaseOwned: async () => { log.push('lease'); return { owned: true, identity: { holder: 'w', fence: 1 } }; },
+          prepareClose: async () => { log.push('prepare'); return { code: 'READY', message: '',
+            prepared: { quantity: 1, orderSide: 'SELL', reduceOnly: true, observedQty: 1,
+              positionMode: 'ONE_WAY' } }; },
+          revalidateFence: async () => { log.push('revalidate'); return true; },
+          sendClose: async () => { log.push('send'); return { attempted: true, ok: true, error: null }; },
+          readAfter: async () => { log.push('readAfter'); return { ok: true, found: false }; },
+        }, Date.now());
+        if (log.join('>') !== 'lease>prepare>revalidate>send>readAfter' || ok?.code !== 'CLOSED_VERIFIED') {
+          err(`${RUN}: 거래소 관문을 넣으면서 Binance 경로가 바뀌었습니다`
+            + ` (${log.join('>')} · ${ok?.code})`);
+        }
+      }
+
+      // **일반 생명주기의 Gate 지원을 막지 않았는가.** 지원을 줄이는
+      // 변경이 아니라 검증 범위와 런타임을 맞추는 변경이다.
+      const mp = await loadModule('src/lib/engine/managedPosition.ts', '열린 포지션 분류');
+      if (mp && typeof mp.managedCandidates === 'function') {
+        const g = mp.managedCandidates([{
+          id: 'g', connection_id: 'cg', exchange: 'gate', symbol: 'ETHUSDT', side: 'BUY',
+          avg_price: 100, stop_loss: 90, status: 'FILLED', reduce_only: false,
+          acked_at: '2026-08-27T09:00:00.000Z', created_at: '2026-08-27T08:00:00.000Z',
+          signal_id: '[s:scalp]s1', sl_order_id: 'sl-1', tp_order_id: null,
+        }]);
+        if ((g?.positions?.length ?? 0) !== 1) {
+          err('managedPosition: Gate 일반 생명주기 줄이 후보에서 빠졌습니다'
+            + ' — 전용 권한의 거래소 제한이 일반 Gate 기능까지 막았습니다');
+        }
+      }
+
+      // Gate `text` 미배선을 **방어층이 있다고 적지 않는가**
+      const vsrc = read('src/lib/engine/venuePositionOps.ts');
+      if (/Gate[^\n]{0,40}(멱등\s*키|client\s*id)[^\n]{0,40}(있다|싣는다|전달한다)/.test(vsrc)) {
+        err('venuePositionOps: Gate에 멱등 키 방어층이 있다고 적습니다'
+          + ' — closePositionGateFutures는 text를 싣지 않습니다');
+      }
+    }
+
     // ── ⑤A 안전 계약의 **최종 세 문장**이 그대로 있는가 ──
     //
     //   이 세 줄이 사라지거나 강해지면, 다음 사람은 이 경로가 strict

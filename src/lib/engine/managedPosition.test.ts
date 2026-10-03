@@ -44,6 +44,19 @@ export function runManagedPositionTests() {
     eq(positions[1].exchange, 'gate', '거래소도 줄에서 읽는다');
   });
 
+  // ⑤A-2 회귀 — 전용 종료 권한이 Gate를 닫았다고 **일반 생명주기까지
+  // 닫으면 안 된다.** 둘은 다른 목록이고, 다른 기능이다.
+  test('⑤A-2: Gate 일반 생명주기는 **그대로 후보다** (전용 권한만 제한된다)', () => {
+    const { positions, authorityCandidates, deferred } = managedCandidates([
+      row({ id: 'g', connection_id: 'conn-gt', exchange: 'gate', symbol: 'ETHUSDT' }),
+    ]);
+    eq(positions.length, 1, '★ 전용 권한 제한이 Gate의 보통 청산·보호까지 막았다');
+    eq(positions[0].exchange, 'gate');
+    eq(deferred.length, 0, '일반 Gate 줄을 유예로 보내면 안 된다');
+    // 전용 권한 후보는 애초에 NO_FIXED_SL 전용이라 여기 없다.
+    eq(authorityCandidates.length, 0);
+  });
+
   test('strategy_id 칼럼이 있으면 그걸 쓴다 — 문자열을 새로 파싱하지 않는다', () => {
     const { positions } = managedCandidates([row({ strategy_id: 'daily-ladder', signal_id: 'no-tag' })]);
     eq(positions[0].strategyId, 'daily-ladder', '칼럼 우선');

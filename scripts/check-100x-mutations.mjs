@@ -1588,6 +1588,34 @@ const M = [
     s => s.replace('//   exchange-level strict single-writer는 보장하지 않는다.',
       '//   (삭제됨)'), 'RED'],
 
+  // ── ⑤A-2 전용 종료 권한의 거래소 지원 범위 ──
+  //
+  //   Gate는 전용 권한이 아직 지원하지 않는다. 이 묶음이 지키는 것은
+  //   "지원을 줄였다"가 아니라 **"검증한 범위와 런타임 허용 범위가
+  //   같다"**이다. EX40은 반대 방향을 지킨다 — 일반 Gate 기능까지
+  //   막으면 그것도 고장이다.
+
+  ['MUT-EX37 Gate에도 전용 TIME_EXIT을 열어 줌 (정본 뒤집기)', P.xauth,
+    s => s.replace("  if (exchange === 'binance') return { timeExit: true, reason: '' };",
+      "  if (exchange !== 'nope') return { timeExit: true, reason: '' };"), 'RED'],
+
+  ['MUT-EX38 거래소 관문을 실행 정본에서 제거 (조회 뒤에 막음)', P.xrun,
+    s => s.replace("  if (candidate.reason === 'TIME_EXIT' && venue.timeExit !== true) {",
+      '  if (false) {'), 'RED'],
+
+  ['MUT-EX39 미지원 거래소를 attemptedWrite=true로 적음', P.xrun,
+    s => s.replace("    return denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason);",
+      "    return { ...denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason), attemptedWrite: true };"),
+    'RED'],
+
+  ['MUT-EX40 미지원을 조회 실패로 숨김 (운영자가 거래소를 의심함)', P.xrun,
+    s => s.replace("    return denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason);",
+      "    return denied('POSITION_READ_FAILED', null, venue.reason);"), 'RED'],
+
+  ['MUT-EX41 전용 권한 제한이 일반 Gate 생명주기까지 막음', P.cand,
+    s => s.replace('  for (const r of list) {',
+      "  for (const r of list) {\n    if (String((r as any)?.exchange) === 'gate') continue;"), 'RED'],
+
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**
