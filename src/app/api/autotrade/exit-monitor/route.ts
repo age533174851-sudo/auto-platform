@@ -919,8 +919,12 @@ async function runLifecycleSweep(
     const { runExitAuthority } = await import('@/lib/engine/exitAuthorityRun');
     // **DB 울타리는 거래소를 막지 못한다.** 재검증 직후 임차가 넘어가면
     // 낡은 실행자도 요청을 보낼 수 있다 — 다른 프로세스라 같은 event
-    // loop를 공유하지 않는다. 같은 종료 의도에 같은 멱등 키를 써서
-    // **거래소가** 둘째를 거부하게 한다(진입 경로가 이미 쓰는 규칙).
+    // loop를 공유하지 않는다. 같은 종료 의도에 같은 멱등 키를 실어
+    // 거래소가 중복을 **알아볼 기회**를 준다.
+    //
+    // ★ strict single-writer가 되는 것은 **아니다.** 그 거부가 반드시
+    //   일어난다고 주장하지 않는다 — 추가 방어층이고, 반대 포지션은
+    //   `reduceOnly`·방향 검증·재조회 대조가 막는다.
     const { exitIntentId } = await import('@/lib/engine/exitIntent');
     out.authority.candidates = authorityCandidates.length;
 
@@ -994,7 +998,7 @@ async function runLifecycleSweep(
             prepareClose: async () => {
               const p0 = await ops.prepareSymbolClose(venue, c.symbol, c.side,
                 // 관측한 노출로 만든다 — 같은 순간 같은 노출을 본
-                // 실행자끼리 같은 값이 나와야 거래소가 중복을 막는다.
+                // 실행자끼리 같은 값이어야 거래소가 중복을 알아볼 수 있다.
                 (observedQty) => exitIntentId({
                   connectionId: c.connectionId, exchange: c.exchange,
                   symbol: c.symbol, side: c.side,

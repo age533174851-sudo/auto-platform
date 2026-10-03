@@ -1527,8 +1527,8 @@ const M = [
     s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n      });',
                    '        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        attemptedWrite: true,\n      });'), 'RED'],
 
-  ['MUT-EX27 종료 의도 멱등 키를 주문에 안 붙임 (거래소가 중복을 못 막음)', P.bfapi,
-    s => s.replace("    // **멱등 키.** 같은 의도의 둘째 주문을 거래소가 거부한다.\n"
+  ['MUT-EX27 종료 의도 멱등 키를 주문에 안 붙임 (거래소가 중복을 알아볼 수 없음)', P.bfapi,
+    s => s.replace("    // **멱등 키.** 거래소가 중복을 알아볼 기회를 주는 추가 방어층이다.\n"
                    + "    ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),\n", ''), 'RED'],
 
   ['MUT-EX27b 멱등 키에 시각을 섞음 (실행자마다 달라짐)', P.xint,
@@ -1550,6 +1550,20 @@ const M = [
 
   ['MUT-EX31 중복 거부를 "거부됨"으로 적음 (같은 자리에 또 보냄)', P.xrun,
     s => s.replace('      if (!r.ok && isDuplicateIntentError(r.error)) {', '      if (false) {'), 'RED'],
+
+  // ── 중복 응답 분류. **두 코드를 정반대로 다뤄야 한다** ──
+  //
+  //   USDⓈ-M 공식 오류표에서
+  //     -4015 INVALID_CL_ORD_ID_LEN      식별자 길이·형식 오류
+  //     -4116 DUPLICATED_CLIENT_ORDER_ID 식별자 중복
+  //   처음에 -4015를 중복으로 적었다. 그건 틀렸고, 그 오분류는
+  //   **보내지도 않은 주문을 보낸 것으로** 치게 만든다.
+
+  ['MUT-EX33 -4116 중복 인식을 제거 (중복 응답을 거부로 읽음)', P.xint,
+    s => s.replace("  if (/-4116\\b/.test(s)) return true;", '  if (false) return true;'), 'RED'],
+
+  ['MUT-EX34 -4015(형식 오류)를 중복으로 잘못 인식', P.xint,
+    s => s.replace('  if (/-4015\\b/.test(s)) return false;', '  if (/-4015\\b/.test(s)) return true;'), 'RED'],
 
   ['MUT-EX32 보낸 수량을 "닫힌 수량"으로 적음', P.xrun,
     s => s.replace(/requestedQuantity/g, 'closedQuantity'), 'RED'],

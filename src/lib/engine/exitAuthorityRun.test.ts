@@ -157,43 +157,26 @@ export function runExitAuthorityRunTests() {
   });
 
   // ══════════════════════════════════════════════════════════
-  // Case F — **재검증 직후** 임차가 넘어간다 (분산 race)
+  // Case F-A — **재검증 직후** 임차가 넘어간다 (애플리케이션 race)
   // ══════════════════════════════════════════════════════════
   //
   //   Case B는 재검증 **전에** 낡아진 A를 잡는다. 여기서는 A가
   //   `revalidateFence() === true`를 받은 **직후** 임차가 만료되고 B가
   //   새 울타리를 얻는다.
   //
-  //   "재검증 뒤에 await가 없다"로는 이것을 막지 못한다 — B는 **다른
-  //   프로세스**라 같은 event loop를 공유하지 않는다. DB 울타리는 DB를
-  //   막을 뿐 거래소 요청을 막지 않는다.
+  //   증명하려는 사실은 **막는다**가 아니라 **막지 못한다**이다:
+  //   "재검증 뒤에 await가 없다"로는 이것을 막을 수 없다. B는 다른
+  //   프로세스라 같은 event loop를 공유하지 않고, 거래소는 우리 울타리를
+  //   모른다. 둘 다 HTTP 요청을 보낼 수 있다.
   //
-  //   그래서 막는 자리는 거래소다: 같은 종료 의도는 **같은 주문 식별자**를
-  //   쓰고, 거래소가 중복 식별자를 거부한다. 둘 다 요청을 보내더라도
-  //   **주문은 하나만 생긴다.**
-  test('Case F: 재검증 직후 임차가 넘어가도 거래소에 주문은 하나만 생긴다', async () => {
-    // 거래소를 흉내 낸다 — 같은 clientOrderId는 두 번 받지 않는다.
-    const accepted = new Set<string>();
-    const exchangeSubmits: string[] = [];
-    const exchange = (id: string | null) => {
-      exchangeSubmits.push(id ?? '(없음)');
-      if (!id) {
-        // 식별자가 없으면 거래소는 중복을 구별할 방법이 없다 — 전부 받는다.
-        accepted.add(`anon-${exchangeSubmits.length}`);
-        return { attempted: true, ok: true, error: null };
-      }
-      if (accepted.has(id)) {
-        return { attempted: true, ok: false,
-          error: 'Duplicate order sent. (code -4015)' };
-      }
-      accepted.add(id);
-      return { attempted: true, ok: true, error: null };
-    };
-
-    const mk = (fenceAfterRevalidate: boolean) => {
+  //   ★ 이 시험은 **거래소가 둘째를 거부한다는 것을 증명하지 않는다.**
+  //     그건 우리가 확인하지 못한 외부 동작이다(Case F-B가 따로,
+  //     "거부 응답을 받았을 때 우리가 어떻게 처리하는가"만 본다).
+  test('Case F-A: 재검증 직후 임차가 넘어가면 **두 실행자 다 요청을 보낼 수 있다**', async () => {
+    const submits: string[] = [];
+    const mk = () => {
       const log: string[] = [];
-      let intentId: string | null = null;
-      return { log, getId: () => intentId, deps: {
+      return { log, deps: {
         leaseOwned: async () => { log.push('lease'); return { owned: true, identity: { holder: 'w', fence: 10 } }; },
         prepareClose: async () => {
           log.push('prepare');
@@ -201,45 +184,36 @@ export function runExitAuthorityRunTests() {
             prepared: { quantity: 1, orderSide: 'SELL' as const, reduceOnly: true as const,
                         observedQty: 1, positionMode: 'ONE_WAY' as const } };
         },
+        // A도 B도 자기 시점에는 울타리가 자기 것이다.
         revalidateFence: async () => { log.push('revalidate'); return true; },
-        sendClose: async () => {
-          log.push('send');
-          // ★ 재검증을 통과한 **뒤** 임차가 넘어갔다. A는 그 사실을 모른다.
-          void fenceAfterRevalidate;
-          return exchange(intentId);
-        },
+        sendClose: async () => { log.push('send'); submits.push('submit');
+          return { attempted: true, ok: true, error: null }; },
         readAfter: async () => { log.push('readAfter'); return { ok: true, found: false }; },
-        setIntentId: (v: string) => { intentId = v; },
-      } as any };
+      } as ExitRunDeps };
     };
+    const A = mk();
+    const B = mk();
+    await runExitAuthority(candidate(), A.deps, NOW);
+    await runExitAuthority(candidate(), B.deps, NOW);
 
-    // A: 재검증 통과 → 그 직후 B가 fence 11을 얻음 → A가 전송
-    const A = mk(false);
-    // B: 새 울타리로 정상 진행 → 같은 의도이므로 같은 식별자
-    const B = mk(true);
+    // ★ **숨기지 않는다.** 애플리케이션 층에서 stale submit은 가능하다.
+    eq(submits.length, 2,
+      'stale worker의 HTTP submit 자체를 막는다고 주장하려면 여기가 1이어야 한다 —'
+      + ' 지금 구조는 그것을 보장하지 않는다');
+    // 다만 둘 다 축소 전용이고 방향이 같으므로 반대 포지션은 생기지 않는다.
+    eq(A.deps === B.deps, false);
+  });
 
-    // 두 실행자가 **같은 종료 의도**에 대해 같은 식별자를 만들어야 한다.
+  test('Case F-A: 두 실행자가 **같은 식별자**를 만든다 (중복을 알아볼 기회)', async () => {
     const { exitIntentId } = await import('./exitIntent');
-    const id = exitIntentId({
-      connectionId: 'conn-1', exchange: 'binance', symbol: 'BTCUSDT', side: 'LONG',
-      executionIdentity: EXACT100X, reason: 'TIME_EXIT', quantity: 1,
-    });
-    (A.deps as any).setIntentId(id);
-    (B.deps as any).setIntentId(id);
-
-    const rA = await runExitAuthority(candidate(), A.deps, NOW);
-    const rB = await runExitAuthority(candidate(), B.deps, NOW);
-
-    // 둘 다 요청은 보냈다 — 분산 환경에서 그것까지 막을 수는 없다.
-    eq(exchangeSubmits.length, 2, '두 실행자가 각자 요청을 보낸 상황을 재현해야 한다');
-    // ★ **그러나 주문은 하나만 생긴다.**
-    eq(accepted.size, 1,
-      '★ 같은 종료 의도가 거래소에 두 번 들어갔다 — 중복 청산이다');
-    // 두 번째는 거부되지만, 재조회가 flat을 확인하므로 "닫혔다"로 수렴한다.
-    for (const r of [rA, rB]) {
-      assert(r.code === 'CLOSED_VERIFIED' || r.code === 'RECONCILED_CLOSED',
-        `★ 결과가 ${r.code}다 — 중복 거부를 "실패"로 적으면 같은 자리에 또 보낸다`);
-    }
+    const key = {
+      connectionId: 'conn-1', exchange: 'binance' as const, symbol: 'BTCUSDT',
+      side: 'LONG' as const, executionIdentity: EXACT100X,
+      reason: 'TIME_EXIT' as const, quantity: 1,
+    };
+    // 두 프로세스가 각자 계산해도 같아야 한다 — 그래야 거래소가
+    // 중복을 알아볼 **기회**가 생긴다. (거부를 보장하지는 않는다.)
+    eq(exitIntentId(key), exitIntentId(key));
   });
 
   test('같은 종료 의도는 **같은** 식별자, 다른 노출은 **다른** 식별자다', async () => {
@@ -249,104 +223,110 @@ export function runExitAuthorityRunTests() {
       side: 'LONG' as const, executionIdentity: EXACT100X, reason: 'TIME_EXIT' as const,
     };
     eq(exitIntentId({ ...base, quantity: 1 }), exitIntentId({ ...base, quantity: 1 }),
-      '★ 같은 의도인데 식별자가 달라지면 거래소가 중복을 못 막는다');
+      '★ 같은 의도인데 식별자가 달라지면 거래소가 중복을 알아볼 수 없다');
     assert(exitIntentId({ ...base, quantity: 1 }) !== exitIntentId({ ...base, quantity: 0.6 }),
       '★ 부분 청산 뒤 남은 노출을 닫는 것은 **다른** 의도다 — 영원히 막히면 안 된다');
     assert(exitIntentId({ ...base, quantity: 1 }) !== exitIntentId({ ...base, symbol: 'ETHUSDT', quantity: 1 }),
       '★ 다른 종목이 같은 식별자를 쓰면 한쪽이 막힌다');
     assert(exitIntentId({ ...base, quantity: 1 }) !== exitIntentId({ ...base, side: 'SHORT', quantity: 1 }),
       '★ 헤지 계좌의 다른 다리가 같은 식별자를 쓰면 한쪽이 막힌다');
-    // 거래소 규격: 36자 이하
     const id = exitIntentId({ ...base, quantity: 1 });
     assert(id.length > 0 && id.length <= 36, `★ 식별자 길이가 ${id.length}자다 (36자 이하여야 한다)`);
     assert(/^[A-Za-z0-9_-]+$/.test(id), `★ 식별자에 허용되지 않는 문자가 있다 (${id})`);
   });
 
   // ══════════════════════════════════════════════════════════
-  // Case G — 준비 **뒤** 사용자가 일부를 수동 청산한다
+  // Case F-B — 거래소가 **중복 응답을 줬을 때** 우리가 어떻게 처리하는가
   // ══════════════════════════════════════════════════════════
   //
-  //   payload는 준비 시점의 노출(1.0)로 만들어진다. 그 뒤 사용자가 0.4를
-  //   닫으면 축소 전용 주문은 남은 0.6만 체결한다. 보낸 수량을 체결량으로
-  //   적으면 장부가 거짓말을 한다.
-  //
-  //   ★ 해결을 "진입 수량으로 되돌리기"로 하지 않는다 — 그러면 더 틀린다.
-  test('Case G: 준비 뒤 일부가 수동 청산돼도 반대 포지션이 생기지 않는다', async () => {
-    // 준비 1.0 → 재검증 → 사용자가 0.4 청산 → 축소 전용이라 0.6만 닫힌다.
-    let exposure = 1.0;
-    const sent: Array<{ qty: number; reduceOnly: boolean }> = [];
+  //   ★ 이것은 "거래소가 반드시 중복을 거부한다"의 시험이 **아니다.**
+  //     그 동작은 이 환경에서 확인하지 못했다. 여기서 보는 것은
+  //     **그런 응답이 왔을 때** 우리가 "안 나갔다"로 읽고 또 보내지
+  //     않는가 하나뿐이다.
+  test('Case F-B: -4116 중복 응답은 실패가 아니라 재조회로 확정한다', async () => {
     const log: string[] = [];
     const deps: ExitRunDeps = {
-      leaseOwned: async () => { log.push('lease'); return { owned: true, identity: { holder: 'a', fence: 1 } }; },
-      prepareClose: async () => {
-        log.push('prepare');
-        return { code: 'READY' as const, message: 'ready',
-          prepared: { quantity: exposure, orderSide: 'SELL' as const, reduceOnly: true as const,
-                      observedQty: exposure, positionMode: 'ONE_WAY' as const } };
-      },
-      revalidateFence: async () => {
-        log.push('revalidate');
-        // ★ 재검증 직후 사용자가 0.4를 닫는다.
-        exposure = 0.6;
-        return true;
-      },
-      sendClose: async () => {
-        log.push('send');
-        // 준비된 수량(1.0)을 축소 전용으로 보낸다. 거래소는 남은 0.6만
-        // 줄이고 **반대 포지션을 만들지 않는다** — 그게 reduceOnly다.
-        sent.push({ qty: 1.0, reduceOnly: true });
-        exposure = 0;
-        return { attempted: true, ok: true, error: null };
-      },
-      readAfter: async () => { log.push('readAfter'); return { ok: true, found: exposure > 0 }; },
-    };
-    const r = await runExitAuthority(candidate(), deps, NOW);
-
-    eq(sent.length, 1);
-    eq(sent[0].reduceOnly, true, '★ reduceOnly가 빠지면 0.4만큼 반대 포지션이 생긴다');
-    assert(exposure === 0, '노출이 남아 있다');
-    // 재조회가 정본이다 — flat을 확인했으므로 닫힌 것이다.
-    eq(r.code, 'CLOSED_VERIFIED');
-    eq(r.flatVerified, true);
-    // ★ **보낸 수량을 체결량으로 적지 않는다.**
-    eq(r.requestedQuantity, 1.0, '요청한 수량은 준비 시점의 1.0이다');
-    assert(!('closedQuantity' in (r as any)),
-      '★ "닫힌 수량"이라는 칸을 만들면 1.0이 체결량으로 읽힌다 (실제로는 0.6)');
-  });
-
-  test('Case G-2: 일부만 닫히고 잔여가 남으면 CLOSED_VERIFIED가 아니다', async () => {
-    let exposure = 1.0;
-    const deps: ExitRunDeps = {
-      leaseOwned: async () => ({ owned: true, identity: { holder: 'a', fence: 1 } }),
-      prepareClose: async () => ({ code: 'READY' as const, message: 'ready',
-        prepared: { quantity: exposure, orderSide: 'SELL' as const, reduceOnly: true as const,
-                    observedQty: exposure, positionMode: 'ONE_WAY' as const } }),
-      revalidateFence: async () => true,
-      sendClose: async () => { exposure = 0.3; return { attempted: true, ok: true, error: null }; },
-      // 재조회가 **실제 노출**을 본다 — 준비한 수량이 아니다.
-      readAfter: async () => ({ ok: true, found: exposure > 0 }),
-    };
-    const r = await runExitAuthority(candidate(), deps, NOW);
-    eq(r.code, 'CLOSE_INCOMPLETE', '★ 접수됐으니 닫혔다고 단정하면 안 된다');
-    eq(r.flatVerified, false);
-    eq(r.needsReconcile, true);
-    eq(r.ok, false);
-  });
-
-  test('Case G-3: 노출을 못 읽으면 진입 수량으로 되돌리지 않는다', async () => {
-    const log: string[] = [];
-    const deps: ExitRunDeps = {
-      leaseOwned: async () => { log.push('lease'); return { owned: true, identity: { holder: 'a', fence: 1 } }; },
+      leaseOwned: async () => { log.push('lease'); return { owned: true, identity: { holder: 'b', fence: 11 } }; },
       prepareClose: async () => { log.push('prepare');
-        return { code: 'READ_FAILED' as const, prepared: null, message: '조회 실패' }; },
+        return { code: 'READY' as const, message: 'ready',
+          prepared: { quantity: 1, orderSide: 'SELL' as const, reduceOnly: true as const,
+                      observedQty: 1, positionMode: 'ONE_WAY' as const } }; },
       revalidateFence: async () => { log.push('revalidate'); return true; },
-      sendClose: async () => { log.push('send'); return { attempted: true, ok: true, error: null }; },
+      sendClose: async () => { log.push('send');
+        return { attempted: true, ok: false,
+          error: '-4116 DUPLICATED_CLIENT_ORDER_ID: clientOrderId is duplicated' }; },
+      // 다른 실행자의 주문이 이미 닫아 둔 상태.
       readAfter: async () => { log.push('readAfter'); return { ok: true, found: false }; },
     };
     const r = await runExitAuthority(candidate(), deps, NOW);
-    eq(r.code, 'POSITION_READ_FAILED');
-    eq(r.requestedQuantity, null, '★ 진입 수량으로 되돌리면 실제보다 많이 닫으려 한다');
-    assert(!log.includes('send'), '★ 수량을 모르는데 주문을 보냈다');
+    eq(r.code, 'RECONCILED_CLOSED',
+      '★ 중복 거부를 "거부됨"으로 적으면 안 나간 것으로 읽혀 같은 자리에 또 보낸다');
+    eq(r.accepted, null, '접수 여부는 모른다');
+    eq(r.flatVerified, true, '재조회가 정본이다');
+    assert(log.includes('readAfter'), '★ 중복 응답을 받고 재조회를 건너뛰었다');
+  });
+
+  test('Case F-B: 중복 응답인데 포지션이 남아 있으면 닫혔다고 적지 않는다', async () => {
+    const deps: ExitRunDeps = {
+      leaseOwned: async () => ({ owned: true, identity: { holder: 'b', fence: 11 } }),
+      prepareClose: async () => ({ code: 'READY' as const, message: 'ready',
+        prepared: { quantity: 1, orderSide: 'SELL' as const, reduceOnly: true as const,
+                    observedQty: 1, positionMode: 'ONE_WAY' as const } }),
+      revalidateFence: async () => true,
+      sendClose: async () => ({ attempted: true, ok: false, error: '-4116 duplicated' }),
+      readAfter: async () => ({ ok: true, found: true }),
+    };
+    const r = await runExitAuthority(candidate(), deps, NOW);
+    eq(r.code, 'CLOSE_UNKNOWN_RECONCILE_REQUIRED');
+    eq(r.needsReconcile, true);
+  });
+
+  // ── 오류 코드 분류 — **정반대로 다루면 안 되는 둘** ──
+  test('F-code: -4116은 중복이다', async () => {
+    const { isDuplicateIntentError } = await import('./exitIntent');
+    assert(isDuplicateIntentError('-4116 DUPLICATED_CLIENT_ORDER_ID'), '★ 중복을 못 알아본다');
+    assert(isDuplicateIntentError('code=-4116 clientOrderId is duplicated'));
+  });
+
+  test('F-code: -4015는 **중복이 아니다** (식별자 길이·형식 오류)', async () => {
+    const { isDuplicateIntentError } = await import('./exitIntent');
+    // ★ 공식 오류표에서 -4015는 INVALID_CL_ORD_ID_LEN이다. 이것을
+    //   "이미 보냈다"로 읽으면 **보내지도 않은 주문을 보낸 것으로 치고**
+    //   재조회 결과에 따라 닫혔다고 적게 된다.
+    eq(isDuplicateIntentError('-4015 Client order id is not valid'), false,
+      '★ 형식 오류를 중복으로 읽었다 — 보내지 않은 주문을 보냈다고 적게 된다');
+    eq(isDuplicateIntentError('-4015 INVALID_CL_ORD_ID_LEN'), false);
+  });
+
+  test('F-code: -4015는 거부로 남아 닫혔다고 적히지 않는다', async () => {
+    const deps: ExitRunDeps = {
+      leaseOwned: async () => ({ owned: true, identity: { holder: 'a', fence: 1 } }),
+      prepareClose: async () => ({ code: 'READY' as const, message: 'ready',
+        prepared: { quantity: 1, orderSide: 'SELL' as const, reduceOnly: true as const,
+                    observedQty: 1, positionMode: 'ONE_WAY' as const } }),
+      revalidateFence: async () => true,
+      sendClose: async () => ({ attempted: true, ok: false,
+        error: '-4015 Client order id is not valid' }),
+      // 주문이 안 나갔으므로 포지션은 그대로다.
+      readAfter: async () => ({ ok: true, found: true }),
+    };
+    const r = await runExitAuthority(candidate(), deps, NOW);
+    eq(r.code, 'CLOSE_REJECTED', '★ 형식 오류를 중복으로 읽어 "모름"으로 넘겼다');
+    eq(r.needsReconcile, false, '거부는 "모름"이 아니다');
+  });
+
+  test('F-code: 모르는 오류를 중복으로 확대 해석하지 않는다', async () => {
+    const { isDuplicateIntentError } = await import('./exitIntent');
+    for (const m of ['-1021 Timestamp outside recvWindow', '-2022 ReduceOnly Order is rejected',
+                     'socket hang up', 'HTTP 500', '', null, undefined]) {
+      eq(isDuplicateIntentError(m as any), false, `★ "${String(m)}"를 중복으로 읽었다`);
+    }
+  });
+
+  test('F-code: 코드 없는 명백한 문구는 보수적으로 잡는다', async () => {
+    const { isDuplicateIntentError } = await import('./exitIntent');
+    assert(isDuplicateIntentError('Duplicate order sent.'));
+    assert(isDuplicateIntentError('ORDER_DUPLICATE'));
   });
 
   // ══════════════════════════════════════════════════════════

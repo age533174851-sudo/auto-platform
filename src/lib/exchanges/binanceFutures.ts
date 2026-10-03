@@ -801,9 +801,13 @@ export interface PreparedClose {
   /**
    * 멱등 키. **같은 종료 의도면 같은 값이다.**
    *
-   * 거래소가 같은 식별자의 둘째 주문을 거부하므로, 울타리가 넘어간
-   * 직후에 두 실행자가 각자 보내더라도 **주문은 하나만 생긴다.**
-   * 저장소의 진입 경로가 이미 쓰는 규칙이다(`orderExecutor`).
+   * 울타리가 넘어간 직후 두 실행자가 각자 보내더라도, 같은 식별자면
+   * 거래소가 중복을 **알아볼 기회**가 생긴다.
+   *
+   * ★ 다만 "둘째가 반드시 거부된다"고 주장하지 않는다. 공식 문서는
+   *   `newClientOrderId`가 **열린 주문들 사이에서** 고유하다고만 적고,
+   *   체결된 MARKET 주문까지 포함한 영구 중복 차단은 확인된 범위 밖이다.
+   *   이것은 **추가 방어층**이다.
    */
   clientOrderId: string | null;
   reason: string;
@@ -891,7 +895,7 @@ export async function sendPreparedClose(
     symbol: p.symbol, side: p.side, type: 'MARKET', quantity: p.quantity,
     // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.
     reduceOnly: true,
-    // **멱등 키.** 같은 의도의 둘째 주문을 거래소가 거부한다.
+    // **멱등 키.** 거래소가 중복을 알아볼 기회를 주는 추가 방어층이다.
     ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),
   }, testnet);
   if (!r.success) {
@@ -1235,7 +1239,9 @@ export async function placeFuturesOrder(
     const params: Record<string, string | number> = {
       symbol: opts.symbol.toUpperCase().replace('/', ''), side: opts.side, type: opts.type, quantity: opts.quantity,
     };
-    // clientOrderId: 재시도 시 중복 주문을 막는 멱등 키. 바이낸스는 같은 ID 재사용을 거부한다.
+    // clientOrderId: 재시도 시 중복 주문을 막기 위한 멱등 키.
+    // ★ 공식 문서가 보장하는 범위는 **열린 주문들 사이의 고유성**이다.
+    //   체결이 끝난 주문까지 포함해 영구히 재사용 불가라고 적혀 있지 않다.
     if (opts.clientOrderId) params.newClientOrderId = opts.clientOrderId;
     if (opts.reduceOnly) params.reduceOnly = 'true';
     if (opts.type === 'LIMIT') {

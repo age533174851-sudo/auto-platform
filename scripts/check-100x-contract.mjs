@@ -3751,11 +3751,13 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
   //   재검증 **직후** 임차가 넘어가면 낡은 실행자도 요청을 보낼 수 있다.
   //   다른 프로세스라 같은 event loop를 공유하지 않고, 거래소는 우리
   //   `fence` 값을 모른다. 그래서 같은 종료 의도에 **같은 주문 식별자**를
-  //   써서 거래소가 둘째를 거부하게 한다.
+  //   실어 거래소가 중복을 **알아볼 기회**를 준다.
   //
-  //   저장소의 진입 경로가 이미 쓰는 규칙이다 — `orderExecutor`는
-  //   "clientOrderId가 없으면 중복 주문을 막을 수 없어 중단합니다"라고
-  //   하드 실패시킨다. 종료 경로만 그 규칙 밖에 있었다.
+  //   ★ 여기서 강제하는 것은 "거래소가 둘째를 거부한다"가 **아니다.**
+  //     그 동작은 이 환경에서 확인하지 못했고, 공식 문서도 `newClientOrderId`
+  //     가 **열린 주문들 사이에서** 고유하다고만 적는다. 강제하는 것은
+  //     우리 쪽 계약뿐이다 — 결정적 식별자 · 규격 · 전달 · 중복 응답의
+  //     올바른 분류 · 그리고 **strict single-writer라고 주장하지 않을 것.**
   {
     const INTENT = 'src/lib/engine/exitIntent.ts';
     const it = await loadModule(INTENT, '종료 의도 멱등 키');
@@ -3770,14 +3772,14 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       const b = it.exitIntentId({ ...base, quantity: 1 });
       if (a !== b) {
         err(`${INTENT}: 같은 종료 의도가 다른 식별자를 만듭니다 (${a} vs ${b})`
-          + ' — 두 실행자가 다른 id를 쓰면 거래소가 중복을 막지 못합니다');
+          + ' — 두 실행자가 다른 id를 쓰면 거래소가 중복을 알아볼 기회조차 없습니다');
       }
       // 시각·난수가 들어가면 결정적이지 않다. 소스로도 확인한다.
       const isrc = code(INTENT);
       for (const banned of ['Date.now()', 'Math.random()', 'randomUUID', 'process.pid']) {
         if (isrc.includes(banned)) {
           err(`${INTENT}: 식별자에 ${banned}를 씁니다`
-            + ' — 실행자마다 달라져 거래소가 중복을 구별할 수 없습니다');
+            + ' — 실행자마다 달라져 거래소가 중복을 알아볼 수 없습니다');
         }
       }
       // 서로 다른 의도는 **달라야** 한다 (정당한 재시도가 영구 차단되지 않게)
@@ -3794,12 +3796,34 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       if (!(a.length > 0 && a.length <= 36) || !/^[A-Za-z0-9_-]+$/.test(a)) {
         err(`${INTENT}: 식별자가 거래소 규격을 벗어납니다 (${a})`);
       }
-      // 중복 거부를 **실패로 적지 않는가**
+      // ── 중복 응답 분류. **두 코드를 정반대로 다뤄야 한다** ──
+      //
+      //   USDⓈ-M 공식 오류표:
+      //     -4015 INVALID_CL_ORD_ID_LEN      식별자 길이·형식 오류
+      //     -4116 DUPLICATED_CLIENT_ORDER_ID 식별자 중복
+      //
+      //   -4015를 중복으로 읽으면 **보내지도 않은 주문을 보낸 것으로**
+      //   치고 재조회 결과에 따라 닫혔다고 적게 된다. 우리가 만드는 고장이다.
       if (typeof it.isDuplicateIntentError !== 'function') {
         err(`${INTENT}: isDuplicateIntentError가 없습니다`
-          + ' — 중복 거부를 "안 나갔다"로 읽으면 같은 자리에 또 보냅니다');
-      } else if (!it.isDuplicateIntentError('Duplicate order sent. (code -4015)')) {
-        err(`${INTENT}: 중복 식별자 거부를 알아보지 못합니다`);
+          + ' — 중복 응답을 "안 나갔다"로 읽으면 같은 자리에 또 보냅니다');
+      } else {
+        for (const m of ['-4116 DUPLICATED_CLIENT_ORDER_ID',
+                         'code=-4116 clientOrderId is duplicated',
+                         'Duplicate order sent.', 'ORDER_DUPLICATE']) {
+          if (!it.isDuplicateIntentError(m)) {
+            err(`${INTENT}: 중복 응답을 알아보지 못합니다 ("${m}")`);
+          }
+        }
+        for (const m of ['-4015 Client order id is not valid', '-4015 INVALID_CL_ORD_ID_LEN',
+                         '-2022 ReduceOnly Order is rejected', '-1021 Timestamp',
+                         'socket hang up']) {
+          if (it.isDuplicateIntentError(m)) {
+            err(`${INTENT}: "${m}"을 중복으로 읽습니다`
+              + ' — -4015는 식별자 형식 오류이고 중복이 아닙니다.'
+              + ' 모르는 오류를 중복으로 확대 해석하면 보내지 않은 주문을 보냈다고 적게 됩니다');
+          }
+        }
       }
     }
 
@@ -3832,6 +3856,28 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       err(`${RUN}: 중복 식별자 거부를 분류하지 않습니다`
         + ' — "거부됐다"로 적으면 안 나간 것으로 읽혀 또 보냅니다');
     }
+    // ── 외부가 보장하지 않은 것을 **보장한다고 적지 않는가** ──
+    //
+    //   공식 문서는 `newClientOrderId`가 열린 주문 사이에서 고유하다고만
+    //   적는다. "같은 의도면 주문이 하나만 생긴다"·"거래소가 둘째를
+    //   거부한다"는 그보다 강한 주장이고, 이 환경에서 확인하지 못했다.
+    for (const f of [INTENT, RUN, 'src/lib/engine/venuePositionOps.ts',
+                     'src/lib/exchanges/binanceFutures.ts', MON5]) {
+      const src2 = code(f);
+      for (const [re, what] of [
+        [/주문(이|은)\s*하나만\s*생긴다/, '"주문은 하나만 생긴다"'],
+        [/둘째를\s*거부한다/, '"거래소가 둘째를 거부한다"'],
+        [/같은\s*ID\s*재사용을\s*거부한다/, '"같은 ID 재사용을 거부한다"'],
+        [/strict\s*single-?writer/i, 'strict single-writer 주장'],
+      ]) {
+        if (re.test(src2)) {
+          err(`${f}: 외부 거래소가 보장하지 않은 것을 보장한다고 적습니다 (${what})`
+            + ' — 공식 문서는 열린 주문 사이의 고유성만 적습니다.'
+            + ' 추가 방어층이라고 적고 UNVERIFIED_EXTERNAL로 남기십시오');
+        }
+      }
+    }
+
     // 보낸 수량을 **체결량으로 적지 않는가**
     if (/closedQuantity/.test(runSrc)) {
       err(`${RUN}: 보낸 수량을 "닫힌 수량"으로 적습니다`

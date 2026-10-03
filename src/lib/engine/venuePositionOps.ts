@@ -140,6 +140,11 @@ export async function closeSymbolPosition(
       const gp = await import('../exchanges/gatePlan');
       const contract = gp.toGateContract(symbol);
       if (!contract) return { attempted: false, ok: false, error: `계약 이름을 만들 수 없습니다 (${symbol})` };
+      // ★ **Gate에는 멱등 키 방어층이 없다.** `closePositionGateFutures`는
+      //   주문에 client id(`text`)를 싣지 않는다. 즉 Gate 경로에서는
+      //   거래소가 같은 종료 의도의 둘째 요청을 알아볼 수단이 없다.
+      //   안전성은 `reduce_only` + `auto_size` + 재조회 대조에만 의존한다.
+      //   (전용 종료 권한이 Gate에 도달 가능한지는 별도 감사 대상이다.)
       const r = await gf.closePositionGateFutures(c.apiKey, c.apiSecret, contract, c.testnet);
       return { attempted: true, ok: r.success === true, error: r.success ? null : r.message,
         ambiguous: r.success ? false : await isAmbiguousSend(r.message) };
@@ -188,7 +193,10 @@ export interface PreparedSymbolClose {
    *
    * DB 울타리는 거래소를 막지 못한다 — 재검증 **직후** 임차가 넘어가면
    * 낡은 실행자도 요청을 보낼 수 있다. 같은 식별자를 쓰면 거래소가
-   * 둘째를 거부하므로 **주문은 하나만 생긴다.**
+   * 중복을 **알아볼 기회**가 생긴다. 다만 그 거부가 반드시 일어난다고
+   * 주장하지 않는다(공식 문서는 열린 주문 사이의 고유성만 적는다) —
+   * **추가 방어층**이고, 안전성은 `reduceOnly`·방향 검증·재조회 대조에
+   * 의존한다.
    */
   clientOrderId: string | null;
   /** 거래소에서 읽은 계좌 포지션 모드 */
@@ -311,6 +319,11 @@ export async function sendSymbolClose(
       if (!contract) {
         return { attempted: false, ok: false, error: `계약 이름을 만들 수 없습니다 (${prepared.symbol})` };
       }
+      // ★ **Gate에는 멱등 키 방어층이 없다.** `closePositionGateFutures`는
+      //   주문에 client id(`text`)를 싣지 않는다. 즉 Gate 경로에서는
+      //   거래소가 같은 종료 의도의 둘째 요청을 알아볼 수단이 없다.
+      //   안전성은 `reduce_only` + `auto_size` + 재조회 대조에만 의존한다.
+      //   (전용 종료 권한이 Gate에 도달 가능한지는 별도 감사 대상이다.)
       const r = await gf.closePositionGateFutures(c.apiKey, c.apiSecret, contract, c.testnet);
       return { attempted: true, ok: r.success === true, error: r.success ? null : r.message,
         ambiguous: r.success ? false : await isAmbiguousSend(r.message) };
