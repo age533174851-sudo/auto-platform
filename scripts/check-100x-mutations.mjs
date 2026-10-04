@@ -124,6 +124,8 @@ const P = {
   cov: 'src/lib/engine/exitCoverage.ts',
   per: 'src/lib/engine/postEntryRisk.ts',
   prr: 'src/lib/exchanges/positionRiskRead.ts',
+  obs: 'src/lib/engine/riskObservationStore.ts',
+  mig91: 'supabase/migrations/091_exact100x_risk_observations.sql',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
@@ -1756,6 +1758,60 @@ const M = [
       '    positionRiskReceivedAtMs: received,',
       '    positionRiskReceivedAtMs: received ?? num(i?.provenance?.positionUpdateTimeMs),'),
     'RED'],
+
+  // ── ⑤B-2 관측 적재 — 실측과 주입값, duration과 epoch ──
+
+  ['MUT-OB1 단조 elapsed를 Date.now 차로 바꿈', P.prr,
+    s => s.replace('  const helperT0 = monotonicMs();',
+      '  const helperT0 = nowMs();\n'
+      + '  const monotonicMs = nowMs;'), 'RED'],
+
+  ['MUT-OB2 elapsed와 epoch timestamp를 같은 칸으로 합침', P.per,
+    s => s.replace(
+      '    positionRiskElapsedMs: num(i?.provenance?.positionRiskElapsedMs),',
+      '    positionRiskElapsedMs: started != null && received != null'
+      + ' ? received - started : null,'), 'RED'],
+
+  ['MUT-OB3 v2 실패 시간을 v3 elapsed에 포함', P.prr,
+    s => s.replace('  const v3T0 = monotonicMs();', '  const v3T0 = helperT0;'), 'RED'],
+
+  ['MUT-OB4 관측을 live_orders에 씀 (진입 불변 스냅숏을 덮음)', P.obs,
+    s => s.replace("    const { error } = await sb.from('exact100x_risk_observations')",
+      "    const { error } = await sb.from('live_orders')"), 'RED'],
+
+  ['MUT-OB5 관측 단계가 종료 primitive를 부름', P.monitor,
+    s => s.replace(
+      "        if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;",
+      '        await ops.sendSymbolClose(venue, m as any);\n'
+      + "        if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;"), 'RED'],
+
+  ['MUT-OB6 시험 주입값을 실측으로 표시', P.obs,
+    s => s.replace(
+      "  if (!ORIGINS.includes(i?.sampleOrigin as any)) {",
+      "  if (false) {"), 'RED'],
+
+  ['MUT-OB7 출처를 안 골라도 실측 기본값으로 적음', P.obs,
+    s => s.replace(
+      "export function riskObservationRow(i: RiskObservationInput): Record<string, any> {",
+      "export function riskObservationRow(i: RiskObservationInput): Record<string, any> {\n"
+      + "  i = { ...i, sampleOrigin: i.sampleOrigin ?? 'VERIFIED_TESTNET_OBSERVATION' };"),
+    'RED'],
+
+  ['MUT-OB8 적재 실패를 성공으로 적음 (분포가 왜곡됨)', P.obs,
+    s => s.replace("      return { code: 'WRITE_FAILED', reason: String(error?.message || error).slice(0, 160) };",
+      "      return { code: 'RECORDED', reason: '' };"), 'RED'],
+
+  ['MUT-OB9 091에 sample_origin 기본값을 둠', P.mig91,
+    s => s.replace('  sample_origin TEXT NOT NULL,',
+      "  sample_origin TEXT NOT NULL DEFAULT 'VERIFIED_TESTNET_OBSERVATION',"), 'RED'],
+
+  ['MUT-OB10 관측 줄에 문턱 칸을 더함', P.obs,
+    s => s.replace('    status: m.status,',
+      '    headroom_ratio_threshold: 0.35,\n    status: m.status,'), 'RED'],
+
+  ['MUT-OB11 단조 시계가 없을 때 Date.now로 메움', P.prr,
+    s => s.replace('  return typeof p?.now === \'function\' ? p.now() : null;',
+      '  return typeof p?.now === \'function\' ? p.now() : Date.now();'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

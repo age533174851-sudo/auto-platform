@@ -48,6 +48,7 @@ const input = (over: Partial<PostEntryRiskInput> = {}): PostEntryRiskInput => ({
     positionRiskRequestStartedAtMs: NOW - 180,
     positionRiskReceivedAtMs: NOW - 100,
     accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+    positionRiskElapsedMs: 74, accountElapsedMs: null, helperElapsedMs: 74,
     positionUpdateTimeMs: NOW - 3_600_000,
     markExchangeTimeMs: NOW - 200, markReceivedAtMs: NOW - 150,
     markObservedAtMs: NOW - 150, bracketObservedAtMs: NOW - 60_000,
@@ -233,9 +234,14 @@ export function runPostEntryRiskTests() {
   // provenance — 실제 HTTP 경계와 같아야 한다
   // ══════════════════════════════════════════════════════════
 
-  test('★ latency는 **파생값**이고 판정이 아니다', () => {
+  test('★ wall-clock 차와 단조 elapsed를 **다른 칸**에 둔다', () => {
     const m = measurePostEntryRisk(input());
-    eq(m.provenance.positionRiskLatencyMs, 80, '받은 시각 − 보낸 시각');
+    eq(m.provenance.positionRiskWallClockDeltaMs, 80, '받은 시각 − 보낸 시각(epoch)');
+    // ★ 단조 측정은 그대로 들고 온다. wall-clock으로 다시 계산하지 않는다.
+    eq(m.provenance.positionRiskElapsedMs, 74,
+      '★ 단조 elapsed를 wall-clock 차로 덮었다 — 시계 보정이 표본을 오염시킨다');
+    assert(m.provenance.positionRiskElapsedMs !== m.provenance.positionRiskWallClockDeltaMs,
+      '★ 두 값이 같다 — 한 칸이 다른 칸을 덮었을 수 있다');
     eq(m.provenance.positionRiskSource, 'V2');
     // 좋다/나쁘다를 적는 칸이 없어야 한다.
     for (const k of Object.keys(m.provenance)) {
@@ -252,7 +258,7 @@ export function runPostEntryRiskTests() {
       const m = measurePostEntryRisk(input({
         provenance: { ...input().provenance, ...over } as any,
       }));
-      eq(m.provenance.positionRiskLatencyMs, null,
+      eq(m.provenance.positionRiskWallClockDeltaMs, null,
         '★ 모르는 지연을 0으로 적었다 — 가장 빠른 응답처럼 보인다');
     }
   });
@@ -270,7 +276,7 @@ export function runPostEntryRiskTests() {
     }));
     eq(m.provenance.positionRiskReceivedAtMs, NOW - 300,
       '★ 계정 응답 시각이 청산가 관측 시각을 덮었다');
-    eq(m.provenance.positionRiskLatencyMs, 100,
+    eq(m.provenance.positionRiskWallClockDeltaMs, 100,
       '★ helper 전체 수행시간이 positionRisk 왕복으로 기록됐다');
     eq(m.provenance.accountReceivedAtMs, NOW - 120, '계정 시각은 따로 남는다');
   });

@@ -103,13 +103,24 @@ export interface LiquidationProvenance {
    */
   positionRiskReceivedAtMs: number | null;
   /**
-   * 그 한 번의 왕복에 걸린 시간(ms). **파생값이고 판정이 아니다** —
-   * 좋다/나쁘다를 적지 않는다.
+   * wall-clock 두 시각의 차(ms). **provenance 참고값이다.**
    *
-   * v2가 실패하고 v3로 간 경우 이것은 **v3 왕복**이지 helper 전체
-   * 수행시간이 아니다. 둘을 섞으면 지연 분포가 망가진다.
+   * ★ ⑤B-3의 지연 표본으로 **이 값을 쓰지 않는다.** epoch 기반이라
+   *   NTP 보정이나 시계 점프에 오염된다 — 보정 한 번이 문턱을 바꾼다.
+   *   그 용도는 아래 `positionRiskElapsedMs`(단조)다.
    */
-  positionRiskLatencyMs: number | null;
+  positionRiskWallClockDeltaMs: number | null;
+  /**
+   * **단조 시계로 잰** 성공한 positionRisk 왕복 시간(ms).
+   *
+   * duration이지 timestamp가 아니다. epoch 칸과 섞지 않는다.
+   * v2 실패 후 v3면 이것은 v3 왕복이고, helper 전체는 아래 칸이다.
+   */
+  positionRiskElapsedMs: number | null;
+  /** 계정 조회 왕복(ms, 단조) */
+  accountElapsedMs: number | null;
+  /** helper 전체(실패한 v2 시도 포함, ms 단조). **위 둘과 다른 값이다** */
+  helperElapsedMs: number | null;
   /** 마진 모드·배율을 채우려고 부른 계정 조회. 안 불렀으면 null */
   accountRequestStartedAtMs: number | null;
   accountReceivedAtMs: number | null;
@@ -149,7 +160,7 @@ export interface PostEntryRiskInput {
    * 출처 좌표. **`positionRiskLatencyMs`는 받지 않는다** — 파생값이라
    * 여기서 계산한다. 부르는 쪽이 넘기면 두 벌이 된다.
    */
-  provenance: Omit<LiquidationProvenance, 'positionRiskLatencyMs'>;
+  provenance: Omit<LiquidationProvenance, 'positionRiskWallClockDeltaMs'>;
   /** 판정 시각. **이 파일은 `Date.now()`를 부르지 않는다** */
   nowMs: number | null | undefined;
 }
@@ -221,7 +232,8 @@ const blank = (
   provenance: {
     positionRiskSource: null,
     positionRiskRequestStartedAtMs: null, positionRiskReceivedAtMs: null,
-    positionRiskLatencyMs: null,
+    positionRiskWallClockDeltaMs: null,
+    positionRiskElapsedMs: null, accountElapsedMs: null, helperElapsedMs: null,
     accountRequestStartedAtMs: null, accountReceivedAtMs: null,
     positionUpdateTimeMs: null,
     markExchangeTimeMs: null, markReceivedAtMs: null, markObservedAtMs: null,
@@ -262,7 +274,13 @@ export function measurePostEntryRisk(
     positionRiskRequestStartedAtMs: started,
     positionRiskReceivedAtMs: received,
     // **파생값이다.** 둘 중 하나라도 없으면 null이고 0이 아니다.
-    positionRiskLatencyMs: started != null && received != null ? received - started : null,
+    positionRiskWallClockDeltaMs:
+      started != null && received != null ? received - started : null,
+    // ★ 단조 측정은 **받은 그대로 들고 다닌다.** 여기서 wall-clock으로
+    //   다시 계산하지 않는다 — 그러면 분리한 의미가 되돌아간다.
+    positionRiskElapsedMs: num(i?.provenance?.positionRiskElapsedMs),
+    accountElapsedMs: num(i?.provenance?.accountElapsedMs),
+    helperElapsedMs: num(i?.provenance?.helperElapsedMs),
     accountRequestStartedAtMs: num(i?.provenance?.accountRequestStartedAtMs),
     accountReceivedAtMs: num(i?.provenance?.accountReceivedAtMs),
     positionUpdateTimeMs: num(i?.provenance?.positionUpdateTimeMs),

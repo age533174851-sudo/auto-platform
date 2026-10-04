@@ -76,26 +76,71 @@ export interface PositionRiskProvenance {
   /** 마진 모드·배율을 채우려고 부른 계정 조회. 안 불렀으면 null */
   accountRequestStartedAtMs: number | null;
   accountReceivedAtMs: number | null;
+
+  // ── 지속시간 (duration) — **epoch 시각과 같은 칸에 담지 않는다** ──
+  //
+  //   위의 `…AtMs`는 전부 wall-clock epoch이다. provenance로는 맞지만
+  //   **지연 표본으로는 위험하다** — NTP 보정이나 시계 점프가 일어나면
+  //   그 순간의 차이가 음수가 되거나 몇 초씩 튄다. ⑤B-3이 그 표본으로
+  //   문턱을 유도하면 보정 한 번이 문턱을 바꾼다.
+  //
+  //   그래서 지속시간은 **단조(monotonic) 시계**로 따로 잰다. 이 값들은
+  //   duration이지 timestamp가 아니다 — 서로 빼거나 epoch과 비교하지
+  //   않는다.
+
+  /**
+   * **성공한** positionRisk 왕복에 걸린 시간(ms, 단조).
+   *
+   * v2가 실패하고 v3로 갔으면 이것은 **v3 왕복**이다. helper 전체
+   * 수행시간이 아니다 — 둘을 섞으면 지연 분포가 fallback 비용만큼
+   * 통째로 오른쪽으로 밀린다.
+   */
+  positionRiskElapsedMs: number | null;
+  /** 계정 조회 왕복(ms, 단조). 안 불렀으면 null */
+  accountElapsedMs: number | null;
+  /** helper 전체(실패한 v2 시도 포함, ms 단조). **위 둘과 다른 값이다** */
+  helperElapsedMs: number | null;
 }
 
 const NO_PROVENANCE: PositionRiskProvenance = {
   positionRiskSource: null,
   positionRiskRequestStartedAtMs: null, positionRiskReceivedAtMs: null,
   accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+  positionRiskElapsedMs: null, accountElapsedMs: null, helperElapsedMs: null,
+};
+
+/**
+ * 기본 단조 시계. **`Date.now()`가 아니다.**
+ *
+ * 런타임이 `performance.now()`를 안 주면 duration을 **재지 않는다** —
+ * `Date.now()`로 대신하면 그 표본이 시계 보정에 오염되는데, 오염된 줄과
+ * 깨끗한 줄을 나중에 구분할 수 없다. 없으면 null이 낫다.
+ */
+const defaultMonotonic = (): number | null => {
+  const p = (globalThis as any)?.performance;
+  return typeof p?.now === 'function' ? p.now() : null;
 };
 
 export async function readPositionRiskWithProvenance(
   symbol: string,
   /** 서명 조회. **주입받는다** — 이 파일은 네트워크를 모른다 */
   signed: (path: string, params?: Record<string, string | number>) => Promise<any>,
-  /** 지금 시각. **시험이 고정한다** — 전역 `Date.now`를 바꾸지 않는다 */
+  /** 지금 시각(epoch). **시험이 고정한다** — 전역 `Date.now`를 바꾸지 않는다 */
   nowMs: () => number = () => Date.now(),
+  /**
+   * 단조 시계. duration 전용이고 epoch이 아니다. 못 쓰면 null을 준다.
+   */
+  monotonicMs: () => number | null = defaultMonotonic,
 ): Promise<{
   risk: SymbolPositionRisk | null; error: string | null;
   provenance: PositionRiskProvenance;
 }> {
   const sym = symbol.toUpperCase().replace('/', '');
   const prov: PositionRiskProvenance = { ...NO_PROVENANCE };
+  /** 두 단조 눈금의 차. 하나라도 없으면 **null이고 0이 아니다** */
+  const span = (a: number | null, b: number | null): number | null =>
+    a != null && b != null ? b - a : null;
+  const helperT0 = monotonicMs();
 
   const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
     const liq = parseFloat(row.liquidationPrice ?? '0');
@@ -129,9 +174,11 @@ export async function readPositionRiskWithProvenance(
   //   실패하면 아래 v3가 **자기 시각을 새로 찍는다.** 여기서 찍은 값은
   //   실패한 요청의 것이므로 성공한 관측에 붙이지 않는다.
   const v2Started = nowMs();
+  const v2T0 = monotonicMs();
   try {
     const raw = await signed('/fapi/v2/positionRisk', { symbol: sym });
     const v2Received = nowMs();
+    const v2T1 = monotonicMs();
     const row = pick(raw);
     if (row && row.marginType != null) {
       return {
@@ -140,6 +187,8 @@ export async function readPositionRiskWithProvenance(
           ...prov, positionRiskSource: 'V2',
           positionRiskRequestStartedAtMs: v2Started,
           positionRiskReceivedAtMs: v2Received,
+          positionRiskElapsedMs: span(v2T0, v2T1),
+          helperElapsedMs: span(helperT0, v2T1),
         },
       };
     }
@@ -147,11 +196,15 @@ export async function readPositionRiskWithProvenance(
 
   // v3 + 계정 조회. v3에는 marginType·leverage가 없다.
   const v3Started = nowMs();
+  // ★ **단조 눈금도 새로 찍는다.** 실패한 v2 시도의 시간을 성공한 v3
+  //   왕복에 포함하면 지연 분포가 fallback 비용만큼 밀린다.
+  const v3T0 = monotonicMs();
   try {
     const raw3 = await signed('/fapi/v3/positionRisk', { symbol: sym });
     // ★ **청산가가 관측된 시각은 여기다.** 아래 account 응답으로
     //   덮어쓰지 않는다 — 청산가는 그 응답에 들어 있지 않다.
     const v3Received = nowMs();
+    const v3T1 = monotonicMs();
     const row = pick(raw3);
     if (!row) {
       return { risk: null, error: `포지션 정보가 비어 있습니다 (v2: ${v2Err || '없음'})`,
@@ -161,14 +214,18 @@ export async function readPositionRiskWithProvenance(
       ...prov, positionRiskSource: 'V3',
       positionRiskRequestStartedAtMs: v3Started,
       positionRiskReceivedAtMs: v3Received,
+      // 성공한 v3 왕복만. 실패한 v2 시도는 들어가지 않는다.
+      positionRiskElapsedMs: span(v3T0, v3T1),
     };
 
     let marginType: string | undefined;
     let leverage: number | null | undefined;
     p3.accountRequestStartedAtMs = nowMs();
+    const acctT0 = monotonicMs();
     try {
       const acct: any = await signed('/fapi/v3/account');
       p3.accountReceivedAtMs = nowMs();
+      p3.accountElapsedMs = span(acctT0, monotonicMs());
       const p = (acct?.positions || []).find((x: any) => String(x?.symbol) === sym);
       if (p) {
         // v3 계정은 isolated 여부를 boolean으로 준다
@@ -178,6 +235,7 @@ export async function readPositionRiskWithProvenance(
       }
     } catch { /* marginType은 빈 값 → 검사가 '확인 못 함'으로 잡는다 */ }
 
+    p3.helperElapsedMs = span(helperT0, monotonicMs());
     return {
       risk: shape(row, { marginType, leverage }),
       // 마진 모드를 못 채웠으면 그 사실을 남긴다. 값만 비워 두면 또

@@ -782,7 +782,13 @@ async function runLifecycleSweep(
    * ★ 이 칸의 어떤 값도 주문을 유발하지 않는다. `acted`가 없는 것이
    *   그 사실을 타입으로 말한다 — 셀 것이 없기 때문이다.
    */
-  postEntryRisk: { measured: number; unusable: number; samples: any[] };
+  postEntryRisk: {
+    measured: number; unusable: number; samples: any[];
+    /** ⑤B-2 — 표에 **덧붙인** 관측 수. 판단이 아니라 적은 줄 수다 */
+    recorded: number;
+    /** 적지 못한 수. **조용히 사라지면 분포가 왜곡된다** */
+    recordFailed: number;
+  };
   /** 주문 장부를 어떤 모양으로 읽었는가. 못 읽었으면 null */
   projection: 'RISK' | 'IDENTITY' | 'LEGACY' | null;
   results: any[]; summary: string; error: string | null;
@@ -797,7 +803,8 @@ async function runLifecycleSweep(
     //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
     authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
     // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
-    postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[] },
+    postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
+      recorded: 0, recordFailed: 0 },
     results: [] as any[], summary: '', error: null as string | null,
   };
 
@@ -1072,6 +1079,7 @@ async function runLifecycleSweep(
   if (authorityCandidates.length > 0 && !dryRun) {
     const { measurePostEntryRisk } = await import('@/lib/engine/postEntryRisk');
     const { exact100xExitVenueCapability } = await import('@/lib/engine/exitAuthority');
+    const { recordRiskObservation } = await import('@/lib/engine/riskObservationStore');
     const bf = await import('@/lib/exchanges/binanceFutures');
 
     for (const c of authorityCandidates) {
@@ -1137,6 +1145,10 @@ async function runLifecycleSweep(
             positionRiskReceivedAtMs: rr?.provenance?.positionRiskReceivedAtMs ?? null,
             accountRequestStartedAtMs: rr?.provenance?.accountRequestStartedAtMs ?? null,
             accountReceivedAtMs: rr?.provenance?.accountReceivedAtMs ?? null,
+            // ★ 단조 측정(duration). epoch 칸과 섞지 않는다.
+            positionRiskElapsedMs: rr?.provenance?.positionRiskElapsedMs ?? null,
+            accountElapsedMs: rr?.provenance?.accountElapsedMs ?? null,
+            helperElapsedMs: rr?.provenance?.helperElapsedMs ?? null,
             positionUpdateTimeMs: rr?.risk?.positionUpdateTimeMs ?? null,
             markExchangeTimeMs: snap?.snapshot?.stamps.exchangeTimeMs ?? null,
             markReceivedAtMs: snap?.snapshot?.stamps.receivedAtMs ?? null,
@@ -1148,6 +1160,34 @@ async function runLifecycleSweep(
 
         if (m.status === 'MEASURED') out.postEntryRisk.measured += 1;
         else out.postEntryRisk.unusable += 1;
+
+        // ── ⑤B-2 관측을 **덧붙인다** ──
+        //
+        //   한 회차 응답에만 있으면 분포를 만들 수 없고, 분포가 없으면
+        //   ⑤B-3의 문턱을 유도할 수 없다 — 지어내는 수밖에 없어진다.
+        //
+        //   ★ 출처를 **여기서 고른다.** 이 경로는 실제 자격증명으로 실제
+        //     거래소를 조회한 것이므로 실측이다. 시험·검사기가 부를 때는
+        //     그쪽이 SYNTHETIC_TEST_ONLY를 넘긴다.
+        //   ★ 돌려받은 값으로 **분기하지 않는다.** 세기만 한다.
+        const rec = await recordRiskObservation(sb, {
+          sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
+          env: venue.testnet ? 'TESTNET' : 'LIVE',
+          connectionId: c.connectionId,
+          symbol: c.symbol, side: c.side,
+          executionIdentity: c.executionIdentity,
+          measurement: m,
+          position: {
+            entryPrice: rr?.risk?.entryPrice ?? null,
+            quantity: rr?.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt),
+            leverage: rr?.risk?.leverage ?? null,
+            marginMode: rr?.risk?.marginType === 'isolated' ? 'isolated'
+              : rr?.risk?.marginType === 'cross' ? 'cross' : null,
+          },
+          bracketFreshness: br?.freshness ?? null,
+        });
+        if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;
+        else out.postEntryRisk.recordFailed += 1;
         out.postEntryRisk.samples.push({
           symbol: c.symbol, side: c.side,
           contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
@@ -1174,6 +1214,7 @@ async function runLifecycleSweep(
           bracketFreshness: br?.freshness ?? 'NONE',
           markFreshness: m.freshness?.code ?? null,
           provenance: m.provenance,
+          recorded: rec.code,
         });
       } catch (e: any) {
         // 측정 실패는 **감시 상태**다. 종료 사유가 아니다.
@@ -1378,6 +1419,8 @@ async function runLifecycleSweep(
     + (out.postEntryRisk.measured || out.postEntryRisk.unusable
       ? ` · 위험 측정 ${out.postEntryRisk.measured}건`
         + `${out.postEntryRisk.unusable ? ` · 측정 불가 ${out.postEntryRisk.unusable}건` : ''}`
+        + `${out.postEntryRisk.recorded ? ` · 관측 기록 ${out.postEntryRisk.recorded}건` : ''}`
+        + `${out.postEntryRisk.recordFailed ? ` · 기록 실패 ${out.postEntryRisk.recordFailed}건` : ''}`
         + ' (측정만, 종료 0건)'
       : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');

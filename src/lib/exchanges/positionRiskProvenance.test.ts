@@ -120,6 +120,67 @@ export function runPositionRiskProvenanceTests() {
     }
   });
 
+  // ══════════════════════════════════════════════════════════
+  // 단조(monotonic) elapsed — wall-clock과 **다른 칸**이다
+  // ══════════════════════════════════════════════════════════
+
+  /** 단조 눈금을 호출마다 7씩 전진 — wall-clock(100)과 구별된다 */
+  function mono() {
+    let t = 0;
+    return () => (t += 7);
+  }
+
+  test('★ elapsed는 단조 시계로 재고 epoch 차와 다르다', async () => {
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async () => [ROW], clock(), mono());
+    const p = r.provenance;
+    // wall-clock은 100씩, 단조는 7씩 — 섞였으면 값이 같아진다.
+    eq(p.positionRiskElapsedMs, 7, '★ elapsed를 Date.now 차로 쟀다');
+    const wall = (p.positionRiskReceivedAtMs ?? 0) - (p.positionRiskRequestStartedAtMs ?? 0);
+    eq(wall, 100, 'wall-clock 차는 그대로 남는다');
+    assert(p.positionRiskElapsedMs !== wall,
+      '★ duration과 epoch 차가 같은 값이다 — 한쪽이 다른 쪽을 덮었다');
+  });
+
+  test('★ v2 실패 시간이 v3 elapsed에 들어가지 않는다', async () => {
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => {
+        if (path === '/fapi/v2/positionRisk') throw new Error('v2 down');
+        if (path === '/fapi/v3/positionRisk') return [ROW3];
+        return ACCT;
+      }, clock(), mono());
+    const p = r.provenance;
+    // 단조 눈금: helper0=7, v2:14→(실패), v3:21→28, acct:35→42, helper끝=49
+    eq(p.positionRiskElapsedMs, 7, '★ v3 왕복만이어야 한다 (v2 시도 제외)');
+    eq(p.accountElapsedMs, 7, '계정 왕복은 따로 센다');
+    assert((p.helperElapsedMs ?? 0) > (p.positionRiskElapsedMs ?? 0),
+      `★ helper 전체가 v3 왕복과 같다 — fallback 비용이 사라졌다`
+      + ` (${p.helperElapsedMs} vs ${p.positionRiskElapsedMs})`);
+  });
+
+  test('★ 단조 시계가 없으면 duration을 **재지 않는다** — 0도 추정도 아니다', async () => {
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async () => [ROW], clock(), () => null);
+    eq(r.provenance.positionRiskElapsedMs, null,
+      '★ 단조 시계가 없는데 Date.now 차로 메웠다 — 오염된 줄을 구분할 수 없다');
+    eq(r.provenance.helperElapsedMs, null);
+    // epoch provenance는 그대로 남는다.
+    assert(r.provenance.positionRiskReceivedAtMs != null);
+  });
+
+  test('★ duration 칸과 timestamp 칸의 이름이 섞이지 않는다', async () => {
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async () => [ROW], clock(), mono());
+    for (const k of Object.keys(r.provenance)) {
+      if (/ElapsedMs$/.test(k)) {
+        assert(!/At(Ms)?$/.test(k), `★ duration 칸이 시각처럼 이름 지어졌다 (${k})`);
+      }
+      if (/AtMs$/.test(k)) {
+        assert(!/Elapsed/.test(k), `★ 시각 칸이 duration처럼 이름 지어졌다 (${k})`);
+      }
+    }
+  });
+
   test('★ 이 정본은 네트워크도 crypto도 모른다 — 검사기가 돌릴 수 있어야 한다', async () => {
     const src = await import('./positionRiskRead');
     eq(typeof src.readPositionRiskWithProvenance, 'function');

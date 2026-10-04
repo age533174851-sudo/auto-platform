@@ -4331,16 +4331,173 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
             err(`${PER2}: positionUpdateTimeMs를 버립니다 — 기록은 남아야 합니다`);
           }
 
-          // latency는 파생값이고 판정이 아니다
-          const lat = pm2.measurePostEntryRisk(base2).provenance?.positionRiskLatencyMs;
-          if (lat !== 80) {
-            err(`${PER2}: positionRisk 지연을 받은 시각 − 보낸 시각으로 재지 않습니다 (${lat})`);
+          // ── wall-clock 차와 단조 elapsed를 **다른 칸**에 두는가 ──
+          //
+          //   epoch 차는 NTP 보정에 오염되므로 지연 표본으로 쓸 수 없다.
+          //   그 용도는 단조 측정이고, 둘이 한 칸이 되면 분리가 사라진다.
+          const pv = pm2.measurePostEntryRisk({
+            ...base2,
+            provenance: { ...base2.provenance, positionRiskElapsedMs: 74 },
+          }).provenance;
+          if (pv?.positionRiskWallClockDeltaMs !== 80) {
+            err(`${PER2}: wall-clock 차를 받은 시각 − 보낸 시각으로 재지 않습니다`
+              + ` (${pv?.positionRiskWallClockDeltaMs})`);
+          }
+          if (pv?.positionRiskElapsedMs !== 74) {
+            err(`${PER2}: 단조 elapsed를 그대로 들고 오지 않습니다`
+              + ` (${pv?.positionRiskElapsedMs}) — wall-clock으로 다시 계산하면`
+              + ' 시계 보정이 지연 표본을 오염시킵니다');
+          }
+          if (pv?.positionRiskElapsedMs === pv?.positionRiskWallClockDeltaMs) {
+            err(`${PER2}: duration과 epoch 차가 같은 칸입니다`);
           }
         }
         // `trustworthy:` 단순 alias가 돌아오지 않았는가 (소스)
         const per2src = code(PER2);
         if (/\btrustworthy\s*:\s*internal\.trustworthy/.test(per2src)) {
           err(`${PER2}: 전체 trustworthy를 internal.trustworthy의 alias로 되돌렸습니다`);
+        }
+      }
+
+      // ── ⑤B-2 관측 적재 — 실측과 주입값을 섞지 않는가 ──
+      {
+        const OBS = 'src/lib/engine/riskObservationStore.ts';
+        const om = await loadModule(OBS, '위험 관측 적재기');
+        if (!om || typeof om.recordRiskObservation !== 'function'
+            || typeof om.riskObservationRow !== 'function') {
+          err(`${OBS}: 관측 적재기를 불러오지 못했습니다`);
+        } else {
+          for (const bad of ['sendClose', 'closePosition', 'sendSymbolClose',
+                             'runExitAuthority', 'placeFuturesOrder']) {
+            if (Object.keys(om).includes(bad)) {
+              err(`${OBS}: 적재기가 ${bad}를 내보냅니다 — 관측에 주문 권한이 붙었습니다`);
+            }
+          }
+          const N = 1_780_000_000_000;
+          const MEAS = {
+            status: 'MEASURED', reason: '', internalTrustworthy: true,
+            side: 'LONG', markPrice: 50_000,
+            exchangeLiquidationPrice: 49_700, estimatedLiquidationPrice: 49_690,
+            exchangeHeadroomPct: 0.6, estimatedHeadroomPct: 0.62,
+            absoluteDelta: 10, deltaPct: 0.02, liquidationSources: 'BOTH_AVAILABLE',
+            entryAdverseDistancePct: 0.4, entryLiquidationDistancePctRaw: 0.6,
+            provenance: {
+              positionRiskSource: 'V2',
+              positionRiskRequestStartedAtMs: N - 180, positionRiskReceivedAtMs: N - 100,
+              positionRiskWallClockDeltaMs: 80,
+              positionRiskElapsedMs: 74, accountElapsedMs: null, helperElapsedMs: 74,
+              accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+              positionUpdateTimeMs: N - 3_600_000,
+              markExchangeTimeMs: N - 200, markReceivedAtMs: N - 150,
+              markObservedAtMs: N - 150, bracketObservedAtMs: N - 60_000,
+            },
+            freshness: { code: 'OK' },
+            internal: { code: 'ADVERSE_DISTANCE_UNKNOWN', entryTierIndex: 1,
+              tier: { mmr: 0.005, maintAmount: 50 } },
+          };
+          const inp = (o = {}) => ({
+            sampleOrigin: 'SYNTHETIC_TEST_ONLY', env: 'TESTNET',
+            connectionId: 'c1', symbol: 'BTCUSDT', side: 'LONG',
+            executionIdentity: { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+              contractVersion: 2 },
+            measurement: MEAS,
+            position: { entryPrice: 50_000, quantity: 0.2, leverage: 100,
+              marginMode: 'isolated' },
+            bracketFreshness: 'FRESH', ...o,
+          });
+
+          const row = om.riskObservationRow(inp());
+          // ★ duration과 epoch이 **다른 칸**인가
+          if (row.position_risk_elapsed_ms === row.position_risk_wall_clock_delta_ms) {
+            err(`${OBS}: 단조 elapsed와 wall-clock 차가 같은 값입니다`
+              + ' — 한 칸이 다른 칸을 덮었습니다. 시계 보정이 표본을 오염시킵니다');
+          }
+          if (!(row.position_risk_elapsed_ms < 1_000_000)) {
+            err(`${OBS}: duration 칸에 epoch timestamp가 들어갔습니다`
+              + ` (${row.position_risk_elapsed_ms})`);
+          }
+          // ★ 시크릿·문턱 칸이 없는가
+          for (const k of Object.keys(row)) {
+            if (/key|secret|signature|token|passphrase/i.test(k)) {
+              err(`${OBS}: 관측 줄에 시크릿성 칸이 있습니다 (${k})`);
+            }
+            if (/threshold|tolerance|ratio|consistent|should|verdict/i.test(k)) {
+              err(`${OBS}: 관측 줄에 판단 칸이 있습니다 (${k})`
+                + ' — ⑤B-2는 측정만 합니다');
+            }
+            if (/liquidation_exchange_time|liquidation_observed_at/i.test(k)) {
+              err(`${OBS}: 청산가 전용 시각 칸을 만들었습니다 (${k})`);
+            }
+          }
+
+          // ★ 출처를 안 고르면 **적지 않는가**
+          const seen = [];
+          const fakeSb = { from: (t) => ({ insert: async (r2) => {
+            seen.push({ t, r2 }); return { error: null }; } }) };
+          for (const bad of [undefined, null, '', 'REAL']) {
+            seen.length = 0;
+            const r2 = await om.recordRiskObservation(fakeSb, inp({ sampleOrigin: bad }));
+            if (r2?.code !== 'ORIGIN_UNSPECIFIED' || seen.length !== 0) {
+              err(`${OBS}: 출처 "${String(bad)}"로 관측이 쌓입니다`
+                + ' — 시험 주입값이 실측으로 둔갑합니다');
+            }
+          }
+          // ★ 어느 표에 쓰는가 — live_orders를 덮지 않는가
+          seen.length = 0;
+          const okRec = await om.recordRiskObservation(fakeSb, inp());
+          if (okRec?.code !== 'RECORDED' || seen[0]?.t !== 'exact100x_risk_observations') {
+            err(`${OBS}: 관측을 "${seen[0]?.t}"에 씁니다`
+              + ' — live_orders에 쓰면 진입 불변 스냅숏이 덮입니다');
+          }
+          // ★ 기록 실패를 성공으로 적지 않는가
+          const failSb = { from: () => ({ insert: async () => ({ error: { message: 'denied' } }) }) };
+          if ((await om.recordRiskObservation(failSb, inp()))?.code !== 'WRITE_FAILED') {
+            err(`${OBS}: 적재 실패를 성공으로 적습니다`
+              + ' — 조용히 사라진 줄이 분포를 왜곡합니다');
+          }
+          // ★ 던지지 않는가 (감시 회차를 죽이지 않는다)
+          let threw = false;
+          try { await om.recordRiskObservation(null, inp()); } catch { threw = true; }
+          if (threw) err(`${OBS}: 적재 실패가 감시 회차를 죽입니다`);
+        }
+
+        // 감시 라우트가 **실측 출처**로 적는가, 그리고 여전히 주문 0건인가
+        const monObs = code(MON5);
+        const iObs = monObs.indexOf('recordRiskObservation');
+        if (iObs < 0) {
+          err(`${MON5}: 위험 관측을 적재하지 않습니다`
+            + ' — 한 회차 응답에만 있으면 ⑤B-3이 쓸 분포가 생기지 않습니다');
+        } else {
+          const end = monObs.indexOf('for (const p of positions) {', iObs);
+          const body = end > iObs ? monObs.slice(iObs, end) : monObs.slice(iObs, iObs + 4000);
+          if (!/sampleOrigin:\s*'VERIFIED_TESTNET_OBSERVATION'/.test(body)) {
+            err(`${MON5}: 실제 조회 경로가 표본 출처를 실측으로 적지 않습니다`);
+          }
+          for (const bad of ['sendSymbolClose', 'prepareSymbolClose', 'runExitAuthority']) {
+            if (body.includes(bad)) {
+              err(`${MON5}: 관측 적재 블록이 ${bad}를 부릅니다 — 주문 0건이어야 합니다`);
+            }
+          }
+        }
+
+        // 091이 ADDITIVE이고 기존 칸을 건드리지 않는가
+        const mig = read('supabase/migrations/091_exact100x_risk_observations.sql');
+        if (!mig) {
+          err('091 마이그레이션이 없습니다');
+        } else {
+          for (const bad of [/ALTER\s+COLUMN/i, /DROP\s+(COLUMN|TABLE)/i,
+                             /\bUPDATE\s+public\./i, /\bDELETE\s+FROM/i]) {
+            if (bad.test(mig)) {
+              err(`091: 파괴적 문장이 있습니다 (${bad}) — ADDITIVE여야 합니다`);
+            }
+          }
+          if (!/sample_origin/.test(mig) || !/CHECK \(sample_origin IN/.test(mig)) {
+            err('091: 표본 출처 칸과 제약이 없습니다 — 실측과 주입값이 섞입니다');
+          }
+          if (/sample_origin[^,]*DEFAULT/i.test(mig)) {
+            err('091: sample_origin에 기본값이 있습니다'
+              + ' — 모르고 실측으로 적히는 길을 열어 둡니다');
+          }
         }
       }
 
