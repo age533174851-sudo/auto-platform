@@ -4430,6 +4430,17 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
             }
           }
 
+          // ★ OB7 — 줄 **생성기**를 직접 불러도 실측으로 둔갑하지 않는가.
+          //   `recordRiskObservation`만 검사하면 생성기가 기본값을 넣는
+          //   변경이 그대로 통과한다(실제로 한 번 새 나갔다).
+          for (const bad of [undefined, null, '']) {
+            const r3 = om.riskObservationRow(inp({ sampleOrigin: bad }));
+            if (r3?.sample_origin === 'VERIFIED_TESTNET_OBSERVATION') {
+              err(`${OBS}: 출처를 안 골랐는데 줄 생성기가 실측으로 적습니다`
+                + ' — 시험 주입값이 조용히 실측 통계에 섞입니다');
+            }
+          }
+
           // ★ 출처를 안 고르면 **적지 않는가**
           const seen = [];
           const fakeSb = { from: (t) => ({ insert: async (r2) => {
@@ -4459,6 +4470,26 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           let threw = false;
           try { await om.recordRiskObservation(null, inp()); } catch { threw = true; }
           if (threw) err(`${OBS}: 적재 실패가 감시 회차를 죽입니다`);
+        }
+
+        // ★ OB11 — 단조 시계 **기본값**이 `Date.now()`로 되돌아가지
+        //   않는가. 시험은 `() => null`을 주입하므로 기본값 경로를 밟지
+        //   않는다 — 그래서 원본으로 본다(실제로 한 번 새 나갔다).
+        {
+          const PRR2 = 'src/lib/exchanges/positionRiskRead.ts';
+          const prrSrc = code(PRR2);
+          const m2 = /const defaultMonotonic[\s\S]{0,400}?\n\};/.exec(prrSrc);
+          if (!m2) {
+            err(`${PRR2}: 단조 시계 기본값을 찾지 못했습니다`);
+          } else if (/Date\.now/.test(m2[0])) {
+            err(`${PRR2}: 단조 시계가 없을 때 Date.now로 메웁니다`
+              + ' — 시계 보정에 오염된 줄과 깨끗한 줄을 나중에 구분할 수 없습니다.'
+              + ' 없으면 null이 맞습니다');
+          }
+          // duration 계산이 epoch 시계를 쓰지 않는가
+          if (/span\(\s*(v2Started|v3Started|nowMs\(\))/.test(prrSrc)) {
+            err(`${PRR2}: duration을 epoch 시각으로 잽니다`);
+          }
         }
 
         // 감시 라우트가 **실측 출처**로 적는가, 그리고 여전히 주문 0건인가
