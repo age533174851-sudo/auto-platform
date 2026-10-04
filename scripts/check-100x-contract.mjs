@@ -4618,9 +4618,16 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           const iSig = monSig.indexOf('await recordRiskObservation(');
           const sigBody = iSig < 0 ? '' : monSig.slice(iSig, iSig + 2500);
           if (iSig < 0) err(`${MON5}: 관측 적재 호출부를 찾지 못했습니다`);
-          if (iSig >= 0 && !/signedPositionAmt:\s*rr\?\.risk\?\.positionAmt/.test(sigBody)) {
-            err(`${MON5}: 실측 자격 판정에 부호 있는 수량을 넘기지 않습니다`
-              + ' — 절댓값이면 헤지 계좌의 반대 다리를 이 포지션으로 적습니다');
+          // ★ **줄 전체**를 본다. 앞부분만 맞추면 `Math.abs(...)`를
+          //   덧붙이는 변이가 그대로 통과한다(실제로 한 번 새 나갔다).
+          const sigLine = /signedPositionAmt:([^\n]*)/.exec(sigBody);
+          if (iSig >= 0 && !sigLine) {
+            err(`${MON5}: 실측 자격 판정에 부호 있는 수량을 넘기지 않습니다`);
+          } else if (sigLine && /Math\.abs|Math\.sign|\babs\(/.test(sigLine[1])) {
+            err(`${MON5}: 실측 자격 판정에 절댓값을 넘깁니다 (${sigLine[1].trim()})`
+              + ' — 부호가 사라지면 헤지 계좌의 반대 다리를 이 포지션으로 적습니다');
+          } else if (sigLine && !/rr\?\.risk\?\.positionAmt\s*\?\?\s*null\s*,/.test(sigLine[1])) {
+            err(`${MON5}: 부호 있는 수량을 그대로 넘기지 않습니다 (${sigLine[1].trim()})`);
           }
         }
 
