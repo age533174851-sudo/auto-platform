@@ -4128,8 +4128,30 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         }
       }
 
-      // 소스 규칙: **문턱 숫자를 들고 오지 않는가**
+      // ── 소스 규칙 ──
+      //
+      //   아래 넷은 **타입·주석에만 나타나는 변경**이거나 다른 파일에
+      //   있어서 모듈을 돌려서는 보이지 않는다. RK4·RK5·RK9·RK14가
+      //   그래서 한 번 새 나갔다. 돌려서 보는 규칙과 소스를 보는 규칙은
+      //   둘 다 필요하다.
+      const psrcRaw = read(PER);
       const psrc = code(PER);
+
+      // ★ RK5 — 청산가에 거래소 시각 칸을 **선언조차** 하지 않는가
+      if (/liquidationExchangeTimeMs|liqExchangeTimeMs/.test(psrcRaw)) {
+        err(`${PER}: 거래소 청산가에 exchangeTimeMs 칸을 선언했습니다`
+          + ' — 공식 응답에 그 값이 없습니다. receivedAtMs만 적을 수 있습니다');
+      }
+      // ★ RK9 — 측정 상태에 **행동 이름**이 섞이지 않는가
+      {
+        const m = /export type PostEntryRiskStatus =([\s\S]{0,400}?);/.exec(psrc);
+        if (!m) {
+          err(`${PER}: PostEntryRiskStatus를 찾지 못했습니다`);
+        } else if (/CLOSE|EXIT|SELL|LIQUIDATE|EMERGENCY|ADVERSE|TRAIL/i.test(m[1])) {
+          err(`${PER}: 측정 상태에 행동 이름이 들어 있습니다 (${m[1].trim()})`
+            + ' — ⑤B-0/1은 재기만 합니다. 종료 사유는 ⑤B-2/3의 일입니다');
+        }
+      }
       for (const banned of ['0.35', '1.5', 'liquidationProximityRatio', 'markShockPct']) {
         if (psrc.includes(banned)) {
           err(`${PER}: positionGuard의 문턱(${banned})을 100배 경로로 가져왔습니다`
@@ -4141,7 +4163,29 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         err(`${PER}: 포지션 응답의 markPrice를 씁니다`
           + ' — 그 값에는 시각이 없습니다. ④의 timestamped MARK를 쓰십시오');
       }
+      // ★ RK1 — 진입 스냅숏을 **허가 판정 결과에서** 꺼내는가
+      {
+        const sc2 = code('src/app/api/autotrade/scalp/route.ts');
+        const iSnap = sc2.indexOf('entryRiskSnapshot');
+        if (iSnap < 0) {
+          err('scalp/route: 진입 위험 스냅숏을 주문에 넘기지 않습니다'
+            + ' — 090 칸이 영원히 null이 되어 ⑤B가 쓸 기록이 생기지 않습니다');
+        } else {
+          const body = sc2.slice(iSnap, sc2.indexOf('}', sc2.indexOf('}', iSnap) + 1) + 1);
+          if (!/prepared100x\.liquidation\.adverseDistancePct/.test(body)
+              || !/prepared100x\.liquidation\.liquidationDistancePct/.test(body)) {
+            err('scalp/route: 진입 위험 스냅숏이 허가 판정 결과에서 오지 않습니다'
+              + ' — 저장된 값이 "허가를 내린 값"이 아니게 되어 칸의 뜻이 사라집니다');
+          }
+          if (/signal\.stopPct|signal\.stop\b|atr/i.test(body)) {
+            err('scalp/route: 진입 위험 스냅숏을 신호에서 다시 계산합니다'
+              + ' — 신호가 그 사이 바뀌었으면 장부가 거짓말을 합니다');
+          }
+        }
+      }
+
       // 감시 라우트가 **측정만** 하는가
+      const mon7raw = read(MON5);
       const mon7 = code(MON5);
       const iRisk = mon7.indexOf('measurePostEntryRisk');
       if (iRisk < 0) {
@@ -4157,9 +4201,26 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
               + ' — ⑤B-0/1은 주문 0건이어야 합니다');
           }
         }
-        if (!/exact100xExitVenueCapability/.test(body)) {
-          err(`${MON5}: 위험 측정이 거래소 관문을 지나지 않습니다`
+        // ★ RK14 — 관문을 **부르는 것**으로는 부족하다. 그 결과로
+        //   실제로 건너뛰는지까지 본다 (`if (false)`로 바꿔치기 방지).
+        if (!/exact100xExitVenueCapability\([^)]*\)\s*\.timeExit\s*!==\s*true\)\s*continue/
+            .test(body)) {
+          err(`${MON5}: 위험 측정이 거래소 관문으로 실제로 건너뛰지 않습니다`
             + ' — 감시가 권한보다 넓은 거래소를 보면 그쪽이 새 잠복 경로가 됩니다');
+        }
+        // ★ RK4 — MARK 정본이 **시장 스냅숏**인가.
+        //   포지션 응답의 markPrice에는 시각이 없다.
+        const rawBody = (() => {
+          const i = mon7raw.indexOf('measurePostEntryRisk');
+          const e = mon7raw.indexOf('for (const p of positions) {', i);
+          return i < 0 ? '' : mon7raw.slice(i, e > i ? e : i + 8000);
+        })();
+        if (/mark:\s*rr\?\.risk|mark:[\s\S]{0,120}risk\.markPrice/.test(rawBody)) {
+          err(`${MON5}: 위험 측정이 포지션 응답의 markPrice를 MARK로 씁니다`
+            + ' — 그 값에는 시각이 없어 "언제의 가격인가"를 물을 수 없습니다');
+        }
+        if (!/mark:\s*snap\?\.snapshot/.test(body)) {
+          err(`${MON5}: 위험 측정의 MARK가 시장 스냅숏에서 오지 않습니다`);
         }
       }
       // 090 후퇴가 **계약 칸을 함께 잃지 않는가**
