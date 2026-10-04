@@ -1091,10 +1091,14 @@ async function runLifecycleSweep(
           .catch(() => null);
         // ── 거래소 청산가: 포지션 응답 ──
         //
-        //   받은 시각만 적는다. `positionUpdateTimeMs`는 **기록만** 하고
-        //   신선도 판정에 쓰지 않는다 — 그것은 포지션 갱신 시각이지
-        //   청산가가 계산된 시각이 아니다. `exchangeTimeMs`는 없다.
-        const posReceivedAtMs = Date.now();
+        //   ★ **여기서 시각을 찍지 않는다.** 이 helper는 한 번의 왕복이
+        //     아니다(v2 → v3 → account). 호출 **전에** 찍은 값을 "받은
+        //     시각"이라고 적으면 왕복 두세 번만큼 앞선 숫자가 기록되고,
+        //     ⑤B-0이 모으려는 관측이 그 자리에서 오염된다.
+        //
+        //     실제 HTTP 경계는 helper가 잡아서 `provenance`로 준다.
+        //     `positionUpdateTimeMs`는 **기록만** 한다 — 포지션 갱신
+        //     시각이지 청산가가 계산된 시각이 아니다.
         const rr = await bf.getSymbolPositionRiskEx(
           venue.apiKey, venue.apiSecret, c.symbol, venue.testnet).catch(() => null);
 
@@ -1126,7 +1130,13 @@ async function runLifecycleSweep(
           entryAdverseDistancePct: c.entryAdverseDistancePct,
           entryLiquidationDistancePctRaw: c.entryLiquidationDistancePctRaw,
           provenance: {
-            positionReceivedAtMs: rr?.risk ? posReceivedAtMs : null,
+            // helper가 잡은 **실제 경계**를 그대로 쓴다. 추측하지 않는다.
+            positionRiskSource: rr?.provenance?.positionRiskSource ?? null,
+            positionRiskRequestStartedAtMs:
+              rr?.provenance?.positionRiskRequestStartedAtMs ?? null,
+            positionRiskReceivedAtMs: rr?.provenance?.positionRiskReceivedAtMs ?? null,
+            accountRequestStartedAtMs: rr?.provenance?.accountRequestStartedAtMs ?? null,
+            accountReceivedAtMs: rr?.provenance?.accountReceivedAtMs ?? null,
             positionUpdateTimeMs: rr?.risk?.positionUpdateTimeMs ?? null,
             markExchangeTimeMs: snap?.snapshot?.stamps.exchangeTimeMs ?? null,
             markReceivedAtMs: snap?.snapshot?.stamps.receivedAtMs ?? null,
@@ -1142,7 +1152,9 @@ async function runLifecycleSweep(
           symbol: c.symbol, side: c.side,
           contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
             + `/v${c.executionIdentity.contractVersion}`,
-          status: m.status, reason: m.reason, trustworthy: m.trustworthy,
+          status: m.status, reason: m.reason,
+          // 내부 검증자의 신뢰도다. 측정 전체의 신뢰도가 아니다.
+          internalTrustworthy: m.internalTrustworthy,
           markPrice: m.markPrice,
           exchangeLiquidationPrice: m.exchangeLiquidationPrice,
           estimatedLiquidationPrice: m.estimatedLiquidationPrice,

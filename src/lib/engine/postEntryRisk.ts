@@ -83,11 +83,42 @@ export type PostEntryRiskStatus =
 
 /** 어느 값이 어디서 왔는가. **두 출처를 한 칸에 담지 않는다** */
 export interface LiquidationProvenance {
-  /** 거래소 응답을 **받은** 시각. 못 받았으면 null */
-  positionReceivedAtMs: number | null;
+  /**
+   * `liquidationPrice`를 준 엔드포인트. 못 받았으면 null.
+   *
+   * 포지션 조회는 한 번의 왕복이 아니다(v2 → v3 → account). 어느 쪽이
+   * 답했는지를 적어야 아래 두 시각이 무엇의 경계인지 말할 수 있다.
+   */
+  positionRiskSource: 'V2' | 'V3' | null;
+  /** 그 요청을 **보내기 직전** 시각 */
+  positionRiskRequestStartedAtMs: number | null;
+  /**
+   * 그 응답을 **받은 직후** 시각.
+   *
+   * ★ 부르는 쪽이 helper 호출 **전에** 찍은 시각이 아니다. 그렇게 하면
+   *   왕복 두세 번만큼 앞선 값이 "받은 시각"으로 기록된다 — ⑤B-0이
+   *   모으려는 관측이 그 자리에서 오염된다.
+   * ★ 그 뒤 계정 조회를 더 해도 이 값을 덮어쓰지 않는다. 청산가는 그
+   *   응답에 들어 있지 않다.
+   */
+  positionRiskReceivedAtMs: number | null;
+  /**
+   * 그 한 번의 왕복에 걸린 시간(ms). **파생값이고 판정이 아니다** —
+   * 좋다/나쁘다를 적지 않는다.
+   *
+   * v2가 실패하고 v3로 간 경우 이것은 **v3 왕복**이지 helper 전체
+   * 수행시간이 아니다. 둘을 섞으면 지연 분포가 망가진다.
+   */
+  positionRiskLatencyMs: number | null;
+  /** 마진 모드·배율을 채우려고 부른 계정 조회. 안 불렀으면 null */
+  accountRequestStartedAtMs: number | null;
+  accountReceivedAtMs: number | null;
   /**
    * 거래소가 적어 준 포지션 갱신 시각. **청산가 계산 시각이 아니다.**
-   * 기록만 하고 신선도 판정에 쓰지 않는다.
+   *
+   * 공식 응답에 `liquidationPrice` 전용 시각이 없고, 문서는 이 값을
+   * 그냥 "update time"이라고만 적는다. 기록만 하고 신선도 판정에
+   * 쓰지 않는다. 이름을 `liquidation…`으로 바꾸지 않는다.
    */
   positionUpdateTimeMs: number | null;
   /** 마크가의 거래소 시각 (`/fapi/v1/premiumIndex`의 `time`) */
@@ -114,7 +145,11 @@ export interface PostEntryRiskInput {
   /** 090 불변 스냅숏. **없으면 null이고 0이 아니다** */
   entryAdverseDistancePct: number | null | undefined;
   entryLiquidationDistancePctRaw: number | null | undefined;
-  provenance: LiquidationProvenance;
+  /**
+   * 출처 좌표. **`positionRiskLatencyMs`는 받지 않는다** — 파생값이라
+   * 여기서 계산한다. 부르는 쪽이 넘기면 두 벌이 된다.
+   */
+  provenance: Omit<LiquidationProvenance, 'positionRiskLatencyMs'>;
   /** 판정 시각. **이 파일은 `Date.now()`를 부르지 않는다** */
   nowMs: number | null | undefined;
 }
@@ -123,8 +158,18 @@ export interface PostEntryRiskMeasurement {
   status: PostEntryRiskStatus;
   /** 왜 못 쟀는가. 쟀으면 빈 문자열 */
   reason: string;
-  /** 이 측정값을 믿을 수 있는가 (`assessLiquidationDistance.trustworthy`) */
-  trustworthy: boolean;
+  /**
+   * **내부 추정**(독립 검증자)을 믿을 수 있는가.
+   *
+   * ★ 이름이 중요하다. 예전에는 이 값이 측정 전체에 붙은
+   *   `trustworthy`였는데, 그러면 브래킷을 못 읽어 내부 계산만 실패한
+   *   `EXCHANGE_ONLY` 샘플이 "거래소 값도 못 믿음"으로 읽힌다.
+   *   설계상 거래소 청산가가 1차 venue 관측이므로 그건 거짓이다.
+   *
+   *   측정 전체를 쓸 수 있는가는 `status`·`liquidationSources`·
+   *   `freshness`가 이미 말한다. 새 위험 판단 boolean을 만들지 않는다.
+   */
+  internalTrustworthy: boolean;
   side: 'LONG' | 'SHORT' | null;
   markPrice: number | null;
 
@@ -167,14 +212,18 @@ const blank = (
   status: PostEntryRiskStatus, reason: string,
   p: Partial<PostEntryRiskMeasurement> = {},
 ): PostEntryRiskMeasurement => ({
-  status, reason, trustworthy: false,
+  status, reason, internalTrustworthy: false,
   side: null, markPrice: null,
   exchangeLiquidationPrice: null, estimatedLiquidationPrice: null,
   exchangeHeadroomPct: null, estimatedHeadroomPct: null,
   absoluteDelta: null, deltaPct: null, liquidationSources: 'BOTH_UNAVAILABLE',
   entryAdverseDistancePct: null, entryLiquidationDistancePctRaw: null,
   provenance: {
-    positionReceivedAtMs: null, positionUpdateTimeMs: null,
+    positionRiskSource: null,
+    positionRiskRequestStartedAtMs: null, positionRiskReceivedAtMs: null,
+    positionRiskLatencyMs: null,
+    accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+    positionUpdateTimeMs: null,
     markExchangeTimeMs: null, markReceivedAtMs: null, markObservedAtMs: null,
     bracketObservedAtMs: null,
   },
@@ -206,8 +255,16 @@ function headroomPct(
 export function measurePostEntryRisk(
   i: PostEntryRiskInput | null | undefined,
 ): PostEntryRiskMeasurement {
+  const started = num(i?.provenance?.positionRiskRequestStartedAtMs);
+  const received = num(i?.provenance?.positionRiskReceivedAtMs);
   const prov: LiquidationProvenance = {
-    positionReceivedAtMs: num(i?.provenance?.positionReceivedAtMs),
+    positionRiskSource: i?.provenance?.positionRiskSource ?? null,
+    positionRiskRequestStartedAtMs: started,
+    positionRiskReceivedAtMs: received,
+    // **파생값이다.** 둘 중 하나라도 없으면 null이고 0이 아니다.
+    positionRiskLatencyMs: started != null && received != null ? received - started : null,
+    accountRequestStartedAtMs: num(i?.provenance?.accountRequestStartedAtMs),
+    accountReceivedAtMs: num(i?.provenance?.accountReceivedAtMs),
     positionUpdateTimeMs: num(i?.provenance?.positionUpdateTimeMs),
     markExchangeTimeMs: num(i?.provenance?.markExchangeTimeMs),
     markReceivedAtMs: num(i?.provenance?.markReceivedAtMs),
@@ -275,7 +332,8 @@ export function measurePostEntryRisk(
     ? (absoluteDelta / exLiq) * 100 : null;
 
   const measured: PostEntryRiskMeasurement = {
-    status: 'MEASURED', reason: '', trustworthy: internal.trustworthy,
+    // ★ 내부 검증자의 신뢰도일 뿐이다. 측정 전체의 신뢰도가 아니다.
+    status: 'MEASURED', reason: '', internalTrustworthy: internal.trustworthy,
     side, markPrice,
     exchangeLiquidationPrice: exLiq, estimatedLiquidationPrice: inLiq,
     exchangeHeadroomPct: exHead, estimatedHeadroomPct: inHead,

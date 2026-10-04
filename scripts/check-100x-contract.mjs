@@ -3537,11 +3537,19 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       }
     }
     // **포지션 갱신 시각을 마크가 시각이라고 부르지 않는가.**
-    if (/markPriceObservedAtMs/.test(src)) {
+    //
+    // ★ 앵커가 옮겨갔다 — `SymbolPositionRisk`와 조회 순서가
+    //   `positionRiskRead.ts`(순수 정본)로 갔다. `binanceFutures.ts`는
+    //   node `crypto` 때문에 검사기가 컴파일하지 못해 그 경계를 돌려서
+    //   확인할 수 없었기 때문이다. **규칙을 지우지 않고** 새 자리를
+    //   함께 본다.
+    const PRR = 'src/lib/exchanges/positionRiskRead.ts';
+    const stampSrc = code(bf) + '\n' + code(PRR);
+    if (/markPriceObservedAtMs/.test(stampSrc)) {
       err(`${bf}: 포지션 갱신 시각을 markPriceObservedAtMs라고 부릅니다`
         + ' — 그 timestamp의 의미가 다릅니다');
     }
-    if (!/positionUpdateTimeMs/.test(src)) {
+    if (!/positionUpdateTimeMs/.test(stampSrc)) {
       err(`${bf}: positionRisk의 updateTime을 버립니다`
         + ' — 보존하되 마크가 시각으로 쓰지 않는 것이 맞습니다');
     }
@@ -4163,6 +4171,157 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         err(`${PER}: 포지션 응답의 markPrice를 씁니다`
           + ' — 그 값에는 시각이 없습니다. ④의 timestamped MARK를 쓰십시오');
       }
+      // ── ⑤B-0/1 정정 — provenance가 **실제 HTTP 경계**와 같은가 ──
+      //
+      //   포지션 조회는 한 번의 왕복이 아니다(v2 → v3 → account).
+      //   부르는 쪽이 호출 **전에** 찍은 시각을 "받은 시각"이라고 적으면
+      //   왕복 두세 번만큼 앞선 값이 기록된다. ⑤B-0이 모으려는 관측이
+      //   그 자리에서 오염되므로 이름 문제가 아니다.
+      {
+        // ★ 순수 정본을 돌린다. `binanceFutures.ts`는 node `crypto`를
+        //   써서 검사기가 컴파일하지 못한다 — 그래서 순서·시각 경계를
+        //   그쪽에 두면 **돌려서 확인할 수 없다.**
+        const BF = 'src/lib/exchanges/positionRiskRead.ts';
+        const bm = await loadModule(BF, '포지션 조회 순서 정본');
+        if (!bm || typeof bm.readPositionRiskWithProvenance !== 'function') {
+          err(`${BF}: readPositionRiskWithProvenance를 불러오지 못했습니다`);
+        } else {
+          const ROW = { symbol: 'BTCUSDT', positionAmt: '0.2', marginType: 'isolated',
+            leverage: '100', liquidationPrice: '49700', entryPrice: '50000',
+            markPrice: '50010', updateTime: '1779999000000' };
+          const ROW3 = { ...ROW, marginType: undefined, leverage: undefined };
+          const ACCT = { positions: [{ symbol: 'BTCUSDT', isolated: true, leverage: '100' }] };
+          const clock = () => { let t = 1000; return () => (t += 100); };
+
+          // ① v2 성공 — started < received (요청 전 시각이면 같아진다)
+          const a = await bm.readPositionRiskWithProvenance('BTCUSDT',
+            async () => [ROW], clock());
+          const pa = a?.provenance ?? {};
+          if (pa.positionRiskSource !== 'V2') {
+            err(`${BF}: v2 성공인데 출처가 ${pa.positionRiskSource}입니다`);
+          }
+          if (pa.positionRiskRequestStartedAtMs == null
+              || pa.positionRiskReceivedAtMs == null
+              || !(pa.positionRiskRequestStartedAtMs < pa.positionRiskReceivedAtMs)) {
+            err(`${BF}: positionRisk 관측 시각이 실제 응답 경계가 아닙니다`
+              + ` (${pa.positionRiskRequestStartedAtMs} → ${pa.positionRiskReceivedAtMs})`
+              + ' — 요청 **전**에 찍은 시각을 "받은 시각"으로 적으면 왕복만큼 앞섭니다');
+          }
+          if (pa.accountRequestStartedAtMs != null) {
+            err(`${BF}: v2 성공인데 계정 조회 시각이 적혀 있습니다`);
+          }
+
+          // ② v2 실패 → v3 — v2 시각을 재사용하지 않는가
+          const b = await bm.readPositionRiskWithProvenance('BTCUSDT',
+            async (path) => {
+              if (path === '/fapi/v2/positionRisk') throw new Error('v2 down');
+              if (path === '/fapi/v3/positionRisk') return [ROW3];
+              return ACCT;
+            }, clock());
+          const pb = b?.provenance ?? {};
+          if (pb.positionRiskSource !== 'V3') {
+            err(`${BF}: v3로 넘어갔는데 출처가 ${pb.positionRiskSource}입니다`);
+          }
+          if (!(pb.positionRiskRequestStartedAtMs > 1100)) {
+            err(`${BF}: 실패한 v2 요청의 시각을 v3 관측 시각으로 재사용합니다`
+              + ` (${pb.positionRiskRequestStartedAtMs})`);
+          }
+          // ③ 계정 응답 시각이 청산가 관측 시각을 덮지 않는가
+          if (!(pb.positionRiskReceivedAtMs < pb.accountRequestStartedAtMs)) {
+            err(`${BF}: 계정 조회 시각이 청산가 관측 시각을 덮어씁니다`
+              + ` (${pb.positionRiskReceivedAtMs} vs ${pb.accountRequestStartedAtMs})`
+              + ' — 청산가는 계정 응답에 들어 있지 않습니다');
+          }
+          // ④ 실패했는데 시각을 지어내지 않는가
+          const d = await bm.readPositionRiskWithProvenance('BTCUSDT',
+            async () => { throw new Error('down'); }, clock());
+          if (d?.provenance?.positionRiskSource != null
+              || d?.provenance?.positionRiskReceivedAtMs != null) {
+            err(`${BF}: 조회가 전부 실패했는데 관측 시각을 적습니다`);
+          }
+          // ⑤ 청산가 전용 거래소 시각 칸을 만들지 않는가
+          for (const bad of ['liquidationExchangeTimeMs', 'liquidationObservedAtMs',
+                             'liquidationCalculatedAtMs']) {
+            if (bad in (pa ?? {})) {
+              err(`${BF}: ${bad} 칸을 만들었습니다 — 공식 응답에 그 값이 없습니다`);
+            }
+          }
+        }
+
+        // 라우트가 helper 호출 **전에** 시각을 찍지 않는가 (원본으로 본다)
+        const monRaw = read(MON5);
+        if (/const\s+\w*[Rr]eceivedAt\w*\s*=\s*Date\.now\(\)\s*;?\s*\n\s*const\s+\w+\s*=\s*await\s+bf\.getSymbolPositionRiskEx/
+            .test(monRaw)) {
+          err(`${MON5}: 포지션 조회 **전에** 찍은 시각을 "받은 시각"으로 씁니다`
+            + ' — 이 helper는 v2→v3→account까지 왕복이 여러 번입니다.'
+            + ' helper가 돌려주는 provenance를 쓰십시오');
+        }
+        if (!/positionRiskReceivedAtMs:\s*rr\?\.provenance/.test(monRaw)) {
+          err(`${MON5}: 위험 측정이 helper의 실제 provenance를 쓰지 않습니다`);
+        }
+      }
+
+      // ── trustworthy 의미가 섞이지 않는가 ──
+      //
+      //   거래소 청산가는 1차 venue 관측이고 내부 solver는 독립
+      //   검증자다. 둘을 한 boolean으로 묶으면 브래킷을 못 읽어 내부
+      //   계산만 실패한 샘플이 "거래소 값도 못 믿음"으로 읽힌다.
+      {
+        const PER2 = 'src/lib/engine/postEntryRisk.ts';
+        const pm2 = await loadModule(PER2, '열린 포지션 위험 측정기');
+        if (pm2 && typeof pm2.measurePostEntryRisk === 'function') {
+          const N = 1_780_000_000_000;
+          const base2 = {
+            side: 'LONG',
+            mark: { kind: 'MARK', source: 'EXCHANGE_PREMIUM_INDEX', value: 50_000,
+              exchangeTimeMs: N - 200, receivedAtMs: N - 150, observedAtMs: N - 150,
+              cache: 'FRESH' },
+            bracket: null,
+            exchangeLiquidationPrice: 49_700, entryPrice: 50_000, quantity: 0.2,
+            leverage: 100, marginMode: 'isolated', brackets: null,
+            entryAdverseDistancePct: 0.4, entryLiquidationDistancePctRaw: 0.6,
+            provenance: { positionRiskSource: 'V2',
+              positionRiskRequestStartedAtMs: N - 180, positionRiskReceivedAtMs: N - 100,
+              accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+              positionUpdateTimeMs: N - 3_600_000,
+              markExchangeTimeMs: N - 200, markReceivedAtMs: N - 150,
+              markObservedAtMs: N - 150, bracketObservedAtMs: null },
+            nowMs: N,
+          };
+          const only = pm2.measurePostEntryRisk(base2);
+          if ('trustworthy' in only) {
+            err(`${PER2}: 측정 전체에 붙은 trustworthy가 있습니다`
+              + ' — 내부 계산 실패가 거래소 관측까지 못 믿는 것으로 읽힙니다.'
+              + ' internalTrustworthy로 분리하십시오');
+          }
+          if (only.liquidationSources !== 'EXCHANGE_ONLY'
+              || only.exchangeLiquidationPrice !== 49_700) {
+            err(`${PER2}: 내부 계산이 실패했다고 거래소 관측까지 버립니다`
+              + ` (${only.liquidationSources})`);
+          }
+          if (only.internalTrustworthy !== false) {
+            err(`${PER2}: 브래킷이 없는데 내부 추정을 믿을 수 있다고 적습니다`);
+          }
+          // 새 위험 판단 boolean을 만들지 않았는가
+          for (const k of Object.keys(only)) {
+            if (typeof only[k] === 'boolean' && k !== 'internalTrustworthy') {
+              err(`${PER2}: 측정에 새 boolean이 생겼습니다 (${k})`
+                + ' — 판단은 ⑤B-2/3의 일입니다');
+            }
+          }
+          // latency는 파생값이고 판정이 아니다
+          const lat = pm2.measurePostEntryRisk(base2).provenance?.positionRiskLatencyMs;
+          if (lat !== 80) {
+            err(`${PER2}: positionRisk 지연을 받은 시각 − 보낸 시각으로 재지 않습니다 (${lat})`);
+          }
+        }
+        // `trustworthy:` 단순 alias가 돌아오지 않았는가 (소스)
+        const per2src = code(PER2);
+        if (/\btrustworthy\s*:\s*internal\.trustworthy/.test(per2src)) {
+          err(`${PER2}: 전체 trustworthy를 internal.trustworthy의 alias로 되돌렸습니다`);
+        }
+      }
+
       // ★ RK1 — 진입 스냅숏을 **허가 판정 결과에서** 꺼내는가
       {
         const sc2 = code('src/app/api/autotrade/scalp/route.ts');

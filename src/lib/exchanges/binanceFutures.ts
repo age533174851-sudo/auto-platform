@@ -5,6 +5,11 @@
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
 import { createHmac, createHash } from 'crypto';
+import {
+  readPositionRiskWithProvenance,
+  type PositionRiskProvenance, type SymbolPositionRisk,
+} from './positionRiskRead';
+export type { PositionRiskProvenance, SymbolPositionRisk };
 import { parseLossless, venueIdOf } from './losslessJson';
 import { qtyGridFor, type SymbolFilters } from './quantize';
 
@@ -1039,28 +1044,6 @@ export async function getFuturesTicker(symbol: string, testnet = true): Promise<
   } catch { return null; }
 }
 
-export interface SymbolPositionRisk {
-  symbol: string;
-  /** 부호 있는 수량. 0이면 포지션 없음 */
-  positionAmt: number;
-  /** 'isolated' | 'cross' */
-  marginType: string;
-  leverage: number | null;
-  /** 0이면 거래소가 안 준 것이라 null */
-  liquidationPrice: number | null;
-  entryPrice: number | null;
-  markPrice: number | null;
-  /**
-   * 거래소가 적어 준 **포지션 갱신 시각**. 없으면 null.
-   *
-   * ★ **이것을 마크가의 관측 시각으로 쓰지 마라.** 문서상 이 값은
-   *   포지션의 update time이고, 마크가 호가가 만들어진 시각이라는
-   *   보장이 없다 — 포지션을 사흘 안 건드렸으면 사흘 전 값이다.
-   *   기준 마크가는 `readMarketSnapshot`이 시장 데이터에서 읽는다.
-   *   그래서 이름도 `markPriceObservedAtMs`가 아니라 이것이다.
-   */
-  positionUpdateTimeMs: number | null;
-}
 
 /**
  * 심볼 하나의 포지션 위험 정보. **포지션이 없어도 돌려준다.**
@@ -1091,73 +1074,26 @@ export interface SymbolPositionRisk {
  * "확인 못 함"까지만 뜨고 **왜 못 읽었는지는 아무도 몰랐다.** 오늘
  * 하루를 그것 때문에 썼다. 이제 이유를 함께 돌려준다.
  */
+/**
+ * 심볼 하나의 포지션 위험 + **조회 provenance.**
+ *
+ * 순서와 시각 경계는 `positionRiskRead` 한 곳에 있다 — 여기서 다시 쓰면
+ * 두 벌이 되고, 무엇보다 이 파일은 `crypto` 때문에 검사기가 컴파일하지
+ * 못해 그 경계를 돌려서 확인할 수 없다.
+ */
 export async function getSymbolPositionRiskEx(
   key: string, secret: string, symbol: string, testnet = true,
-): Promise<{ risk: SymbolPositionRisk | null; error: string | null }> {
-  const sym = symbol.toUpperCase().replace('/', '');
-
-  const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
-    const liq = parseFloat(row.liquidationPrice ?? '0');
-    const lev = extra?.leverage != null ? extra.leverage : parseInt(row.leverage ?? '0', 10);
-    return {
-      symbol: String(row.symbol ?? sym),
-      positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
-      marginType: String(extra?.marginType ?? row.marginType ?? '').toLowerCase(),
-      // 0은 값이 아니라 '못 받았음'이다
-      leverage: Number.isFinite(lev as any) && Number(lev) > 0 ? Number(lev) : null,
-      liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
-      entryPrice: parseFloat(row.entryPrice ?? '0') || null,
-      markPrice: parseFloat(row.markPrice ?? '0') || null,
-      // 버리지 않고 보존하되 **마크가 시각이 아니다**(위 주석).
-      positionUpdateTimeMs: (() => {
-        const u = Number(row.updateTime);
-        return Number.isFinite(u) && u > 0 ? u : null;
-      })(),
-    } as SymbolPositionRisk;
-  };
-  // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을
-  // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
-  const pick = (data: any) => {
-    const rows = Array.isArray(data) ? data : [data];
-    return rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
-  };
-
-  let v2Err = '';
-  try {
-    const row = pick(await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet, { symbol: sym }));
-    if (row && row.marginType != null) return { risk: shape(row), error: null };
-  } catch (e: any) { v2Err = String(e?.message || e); }
-
-  // v3 + 계정 조회. v3에는 marginType·leverage가 없다.
-  try {
-    const row = pick(await fapiSigned('GET', '/fapi/v3/positionRisk', key, secret, testnet, { symbol: sym }));
-    if (!row) return { risk: null, error: `포지션 정보가 비어 있습니다 (v2: ${v2Err || '없음'})` };
-
-    let marginType: string | undefined;
-    let leverage: number | null | undefined;
-    try {
-      const acct: any = await fapiSigned('GET', '/fapi/v3/account', key, secret, testnet);
-      const p = (acct?.positions || []).find((x: any) => String(x?.symbol) === sym);
-      if (p) {
-        // v3 계정은 isolated 여부를 boolean으로 준다
-        marginType = p.isolated === true ? 'isolated' : p.isolated === false ? 'cross' : undefined;
-        const l = parseInt(p.leverage ?? '0', 10);
-        leverage = Number.isFinite(l) && l > 0 ? l : null;
-      }
-    } catch { /* marginType은 빈 값 → 검사가 '확인 못 함'으로 잡는다 */ }
-
-    return {
-      risk: shape(row, { marginType, leverage }),
-      // 마진 모드를 못 채웠으면 그 사실을 남긴다. 값만 비워 두면 또
-      // "왜 확인 못 했지"가 된다.
-      error: marginType ? null : `마진 모드를 계정 조회에서 못 찾았습니다 (v2: ${v2Err || '없음'})`,
-    };
-  } catch (e: any) {
-    return {
-      risk: null,
-      error: `포지션 조회 실패 — v2: ${v2Err || '시도 안 함'} / v3: ${String(e?.message || e)}`,
-    };
-  }
+  /** 지금 시각. **시험이 고정한다** */
+  nowMs: () => number = () => Date.now(),
+): Promise<{
+  risk: SymbolPositionRisk | null; error: string | null;
+  provenance: PositionRiskProvenance;
+}> {
+  return readPositionRiskWithProvenance(
+    symbol,
+    (path, params = {}) => fapiSigned('GET', path, key, secret, testnet, params),
+    nowMs,
+  );
 }
 
 /** 이유가 필요 없을 때 쓰는 얇은 래퍼 */

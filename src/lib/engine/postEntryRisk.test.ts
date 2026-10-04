@@ -44,7 +44,11 @@ const input = (over: Partial<PostEntryRiskInput> = {}): PostEntryRiskInput => ({
   entryAdverseDistancePct: 0.4,
   entryLiquidationDistancePctRaw: 0.6,
   provenance: {
-    positionReceivedAtMs: NOW - 100, positionUpdateTimeMs: NOW - 3_600_000,
+    positionRiskSource: 'V2' as const,
+    positionRiskRequestStartedAtMs: NOW - 180,
+    positionRiskReceivedAtMs: NOW - 100,
+    accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+    positionUpdateTimeMs: NOW - 3_600_000,
     markExchangeTimeMs: NOW - 200, markReceivedAtMs: NOW - 150,
     markObservedAtMs: NOW - 150, bracketObservedAtMs: NOW - 60_000,
   },
@@ -168,7 +172,7 @@ export function runPostEntryRiskTests() {
   test('★ 거래소 청산가에 exchangeTimeMs를 지어내지 않는다', () => {
     const m = measurePostEntryRisk(input());
     // 포지션 응답에는 받은 시각만 있다.
-    assert(m.provenance.positionReceivedAtMs != null, '받은 시각은 적는다');
+    assert(m.provenance.positionRiskReceivedAtMs != null, '받은 시각은 적는다');
     // provenance에 "청산가의 거래소 시각" 칸 자체가 없어야 한다.
     assert(!('liquidationExchangeTimeMs' in (m.provenance as any)),
       '★ 청산가에 거래소 시각 칸을 만들었다 — 문서에 없는 값이다');
@@ -200,7 +204,7 @@ export function runPostEntryRiskTests() {
     eq(m.internal!.code, 'ADVERSE_DISTANCE_UNKNOWN');
     // 그런데 측정은 성립하고 trustworthy다 — 그 구분이 요점이다.
     eq(m.status, 'MEASURED');
-    eq(m.trustworthy, true,
+    eq(m.internalTrustworthy, true,
       '★ 비교 기준이 없다는 이유로 측정값까지 못 믿는다고 적었다');
   });
 
@@ -222,6 +226,98 @@ export function runPostEntryRiskTests() {
     for (const k of Object.keys(m)) {
       assert(!/tolerance|consistent|threshold|ratio/i.test(k),
         `★ 측정 결과에 문턱성 칸이 있다 (${k})`);
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // provenance — 실제 HTTP 경계와 같아야 한다
+  // ══════════════════════════════════════════════════════════
+
+  test('★ latency는 **파생값**이고 판정이 아니다', () => {
+    const m = measurePostEntryRisk(input());
+    eq(m.provenance.positionRiskLatencyMs, 80, '받은 시각 − 보낸 시각');
+    eq(m.provenance.positionRiskSource, 'V2');
+    // 좋다/나쁘다를 적는 칸이 없어야 한다.
+    for (const k of Object.keys(m.provenance)) {
+      assert(!/ok|good|slow|fast|healthy|degraded/i.test(k),
+        `★ provenance에 판정 칸이 있다 (${k})`);
+    }
+  });
+
+  test('★ 시각이 한쪽만 있으면 latency는 null이다 — 0이 아니다', () => {
+    for (const over of [
+      { positionRiskRequestStartedAtMs: null },
+      { positionRiskReceivedAtMs: null },
+    ]) {
+      const m = measurePostEntryRisk(input({
+        provenance: { ...input().provenance, ...over } as any,
+      }));
+      eq(m.provenance.positionRiskLatencyMs, null,
+        '★ 모르는 지연을 0으로 적었다 — 가장 빠른 응답처럼 보인다');
+    }
+  });
+
+  test('★ 계정 조회 시각을 positionRisk 시각에 섞지 않는다', () => {
+    const m = measurePostEntryRisk(input({
+      provenance: {
+        ...input().provenance,
+        positionRiskSource: 'V3' as const,
+        positionRiskRequestStartedAtMs: NOW - 400,
+        positionRiskReceivedAtMs: NOW - 300,
+        accountRequestStartedAtMs: NOW - 290,
+        accountReceivedAtMs: NOW - 120,
+      } as any,
+    }));
+    eq(m.provenance.positionRiskReceivedAtMs, NOW - 300,
+      '★ 계정 응답 시각이 청산가 관측 시각을 덮었다');
+    eq(m.provenance.positionRiskLatencyMs, 100,
+      '★ helper 전체 수행시간이 positionRisk 왕복으로 기록됐다');
+    eq(m.provenance.accountReceivedAtMs, NOW - 120, '계정 시각은 따로 남는다');
+  });
+
+  test('★ 청산가 전용 거래소 시각 칸을 만들지 않는다', () => {
+    const m = measurePostEntryRisk(input());
+    for (const bad of ['liquidationExchangeTimeMs', 'liquidationObservedAtMs',
+                       'liquidationCalculatedAtMs']) {
+      eq(bad in (m.provenance as any), false,
+        `★ ${bad} 칸을 만들었다 — 공식 응답에 그 값이 없다`);
+    }
+    // updateTime은 **그 이름 그대로** 남는다.
+    eq(m.provenance.positionUpdateTimeMs, NOW - 3_600_000);
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // trustworthy — venue 관측과 내부 검증자를 섞지 않는다
+  // ══════════════════════════════════════════════════════════
+
+  test('★ EXCHANGE_ONLY는 "거래소 값도 못 믿음"이 아니다', () => {
+    // 브래킷이 없어 내부 계산만 실패한 경우다.
+    const m = measurePostEntryRisk(input({ brackets: null, bracket: null }));
+    eq(m.status, 'MEASURED');
+    eq(m.liquidationSources, 'EXCHANGE_ONLY');
+    eq(m.exchangeLiquidationPrice, 49_700, '거래소 관측은 그대로 산다');
+    assert(m.exchangeHeadroomPct != null, '거래소 기준 여유도 그대로 산다');
+    // 내부 검증자만 못 믿는다 — 그 사실이 이름에 드러나야 한다.
+    eq(m.internalTrustworthy, false);
+    eq('trustworthy' in (m as any), false,
+      '★ 측정 전체에 붙은 trustworthy가 돌아왔다 —'
+      + ' 내부 계산 실패가 거래소 관측까지 못 믿는 것으로 읽힌다');
+  });
+
+  test('★ INTERNAL_ONLY가 venue truth를 가졌다고 적지 않는다', () => {
+    const m = measurePostEntryRisk(input({ exchangeLiquidationPrice: null }));
+    eq(m.liquidationSources, 'INTERNAL_ONLY');
+    eq(m.exchangeLiquidationPrice, null);
+    eq(m.internalTrustworthy, true, '내부 검증자는 믿을 수 있다');
+    eq(m.status, 'MEASURED');
+  });
+
+  test('★ 새 위험 판단 boolean을 만들지 않는다', () => {
+    const m = measurePostEntryRisk(input());
+    for (const k of Object.keys(m)) {
+      if (typeof (m as any)[k] !== 'boolean') continue;
+      eq(k, 'internalTrustworthy',
+        `★ 측정에 새 boolean이 생겼다 (${k}) — 판단은 ⑤B-2/3의 일이다`);
     }
   });
 

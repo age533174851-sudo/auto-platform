@@ -123,6 +123,7 @@ const P = {
   reatt: 'src/lib/engine/stopReattach.ts',
   cov: 'src/lib/engine/exitCoverage.ts',
   per: 'src/lib/engine/postEntryRisk.ts',
+  prr: 'src/lib/exchanges/positionRiskRead.ts',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
@@ -1395,7 +1396,10 @@ const M = [
     s => s.replace('        exchangeTimeMs: d?.timeMs ?? null,',
                    '        exchangeTimeMs: at,'), 'RED'],
 
-  ['MUT-F26b 포지션 갱신 시각을 마크가 시각으로 보존', P.bfapi,
+  // ★ 앵커가 옮겨갔다 — `shape()`와 `SymbolPositionRisk`가
+  //   `positionRiskRead.ts`(순수 정본)로 갔다. **지우지 않고** 같은
+  //   고장을 같은 뜻으로 찌르는 새 자리로 옮긴다.
+  ['MUT-F26b 포지션 갱신 시각을 마크가 시각으로 보존', P.prr,
     s => s.replace('      positionUpdateTimeMs: (() => {',
                    '      markPriceObservedAtMs: (() => {'), 'RED'],
 
@@ -1652,8 +1656,8 @@ const M = [
 
   ['MUT-RK5 updateTime을 청산가 시각이라고 주장', P.per,
     s => s.replace(
-      '  positionReceivedAtMs: number | null;',
-      '  liquidationExchangeTimeMs?: number | null;\n  positionReceivedAtMs: number | null;'),
+      '  positionRiskReceivedAtMs: number | null;',
+      '  liquidationExchangeTimeMs?: number | null;\n  positionRiskReceivedAtMs: number | null;'),
     'RED'],
 
   ['MUT-RK6 거래소 청산가가 없으면 내부 값을 그 칸으로 승격', P.per,
@@ -1718,6 +1722,40 @@ const M = [
     s => s.replace(
       '  return n != null && n > 0 ? n : null;\n};',
       '  return n;\n};'), 'RED'],
+
+  // ── ⑤B-0/1 정정 — provenance가 실제 HTTP 경계와 같은가 ──
+  //
+  //   RK17은 **순서**를 찌른다. 변수 이름이 있는지가 아니라, 시각을
+  //   요청 **전**에 찍는지를 본다. 그렇게 하면 v2→v3→account 왕복만큼
+  //   앞선 값이 "받은 시각"으로 기록돼 지연 데이터가 통째로 오염된다.
+
+  ['MUT-RK17 받은 시각을 요청 전에 찍음 (왕복만큼 앞섬)', P.prr,
+    s => s.replace(
+      "    const raw = await signed('/fapi/v2/positionRisk', { symbol: sym });\n"
+      + '    const v2Received = nowMs();',
+      "    const v2Received = v2Started;\n"
+      + "    const raw = await signed('/fapi/v2/positionRisk', { symbol: sym });"), 'RED'],
+
+  ['MUT-RK17b 계정 응답 시각이 청산가 관측 시각을 덮음', P.prr,
+    s => s.replace(
+      '      p3.accountReceivedAtMs = nowMs();',
+      '      p3.accountReceivedAtMs = nowMs();\n'
+      + '      p3.positionRiskReceivedAtMs = p3.accountReceivedAtMs;'), 'RED'],
+
+  ['MUT-RK17c 실패한 v2 시각을 v3 provenance로 재사용', P.prr,
+    s => s.replace('  const v3Started = nowMs();', '  const v3Started = v2Started;'), 'RED'],
+
+  ['MUT-RK18 전체 trustworthy를 internal.trustworthy의 alias로 되돌림', P.per,
+    s => s.replace(
+      "    status: 'MEASURED', reason: '', internalTrustworthy: internal.trustworthy,",
+      "    status: 'MEASURED', reason: '', internalTrustworthy: internal.trustworthy,\n"
+      + '    trustworthy: internal.trustworthy,'), 'RED'],
+
+  ['MUT-RK18b updateTime을 청산가 관측 시각으로 승격', P.per,
+    s => s.replace(
+      '    positionRiskReceivedAtMs: received,',
+      '    positionRiskReceivedAtMs: received ?? num(i?.provenance?.positionUpdateTimeMs),'),
+    'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
