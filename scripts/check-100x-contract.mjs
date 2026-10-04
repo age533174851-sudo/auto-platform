@@ -4309,6 +4309,28 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
                 + ' — 판단은 ⑤B-2/3의 일입니다');
             }
           }
+          // ★ 받은 시각이 **없을 때** updateTime으로 메우지 않는가.
+          //   `received ?? updateTime` 같은 대체는 "한 시간 전 갱신"을
+          //   "방금 받음"으로 둔갑시킨다. fixture가 항상 received를 주면
+          //   그 경로가 실행되지 않아 변이가 새 나간다 — 실제로 한 번
+          //   새 나갔다(RK18b).
+          const noRecv = pm2.measurePostEntryRisk({
+            ...base2,
+            provenance: { ...base2.provenance,
+              positionRiskRequestStartedAtMs: null, positionRiskReceivedAtMs: null },
+          });
+          if (noRecv.provenance?.positionRiskReceivedAtMs != null) {
+            err(`${PER2}: 받은 시각이 없는데 다른 값으로 메웁니다`
+              + ` (${noRecv.provenance.positionRiskReceivedAtMs})`
+              + ' — 모르는 것은 null입니다. updateTime은 청산가 시각이 아닙니다');
+          }
+          if (noRecv.provenance?.positionRiskLatencyMs != null) {
+            err(`${PER2}: 시각이 없는데 지연을 적습니다`);
+          }
+          if (noRecv.provenance?.positionUpdateTimeMs == null) {
+            err(`${PER2}: positionUpdateTimeMs를 버립니다 — 기록은 남아야 합니다`);
+          }
+
           // latency는 파생값이고 판정이 아니다
           const lat = pm2.measurePostEntryRisk(base2).provenance?.positionRiskLatencyMs;
           if (lat !== 80) {
