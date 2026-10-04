@@ -122,6 +122,7 @@ const P = {
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
   cov: 'src/lib/engine/exitCoverage.ts',
+  per: 'src/lib/engine/postEntryRisk.ts',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
@@ -872,9 +873,12 @@ const M = [
 
   // ★ 아무 실패에나 후퇴하면 권한·연결 오류가 "마이그레이션이 아직"으로
   //   덮이고, 진짜 고장이 정상 회차로 보인다.
+  // ★ 앵커가 옮겨갔다 — 090이 `missingColumnShape`를 뽑아내면서
+  //   `isMissingIdentityColumn` 첫 두 줄이 사라졌다. **지우지 않고**
+  //   같은 고장을 같은 뜻으로 찌르는 새 자리로 옮긴다: 모양 판정이
+  //   무조건 참이 되면 어떤 오류에나 후퇴한다.
   ['MUT-R2x 아무 오류에나 후퇴 (진짜 고장을 덮는다)', P.rows,
-    s => s.replace('export function isMissingIdentityColumn(err: any): boolean {\n  if (!err) return false;',
-                   'export function isMissingIdentityColumn(err: any): boolean {\n  if (!err) return false;\n  return true;'), 'RED'],
+    s => s.replace('  return { yes, text };', '  return { yes: true, text };'), 'RED'],
 
   // ★ 다른 칼럼이 없다는 오류까지 우리 것으로 읽는다.
   ['MUT-R3x 칼럼 이름을 확인하지 않고 후퇴', P.rows,
@@ -1615,6 +1619,105 @@ const M = [
   ['MUT-EX41 전용 권한 제한이 일반 Gate 생명주기까지 막음', P.cand,
     s => s.replace('  for (const r of list) {',
       "  for (const r of list) {\n    if (String((r as any)?.exchange) === 'gate') continue;"), 'RED'],
+
+  // ── ⑤B-0/1 위험 측정 — **재는 것과 판단하는 것을 섞지 않는다** ──
+  //
+  //   이 묶음이 지키는 것 대부분은 "하지 않는다"다. 그런 금지는 변이가
+  //   없으면 다음 사람이 "편의상" 되살린다.
+
+  ['MUT-RK1 진입 위험 스냅숏을 신호에서 다시 계산', P.scalp,
+    s => s.replace(
+      'adverseDistancePct: prepared100x.liquidation.adverseDistancePct ?? null,',
+      'adverseDistancePct: Number(scalp.signal.stopPct) || null,'), 'RED'],
+
+  ['MUT-RK2 없는 스냅숏을 0으로 대체', P.per,
+    s => s.replace(
+      '    entryAdverseDistancePct: num(i?.entryAdverseDistancePct),',
+      '    entryAdverseDistancePct: num(i?.entryAdverseDistancePct) ?? 0,'), 'RED'],
+
+  ['MUT-RK3 옛 행에 기본 adverse를 주입', P.cand,
+    s => s.replace(
+      'entryAdverseDistancePct: num((r as any)?.entry_adverse_distance_pct),',
+      'entryAdverseDistancePct: num((r as any)?.entry_adverse_distance_pct) ?? 0.4,'), 'RED'],
+
+  ['MUT-RK4 positionRisk.markPrice를 MARK 정본으로 사용', P.monitor,
+    s => s.replace(
+      '          mark: snap?.snapshot ? {',
+      "          mark: rr?.risk?.markPrice ? {\n"
+      + "            kind: 'MARK' as const, source: 'EXCHANGE_POSITION_RISK',\n"
+      + "            value: rr.risk.markPrice, exchangeTimeMs: null,\n"
+      + "            receivedAtMs: posReceivedAtMs, observedAtMs: posReceivedAtMs,\n"
+      + "            cache: 'FRESH' as const,\n"
+      + "          } : snap?.snapshot ? {"), 'RED'],
+
+  ['MUT-RK5 updateTime을 청산가 시각이라고 주장', P.per,
+    s => s.replace(
+      '  positionReceivedAtMs: number | null;',
+      '  liquidationExchangeTimeMs?: number | null;\n  positionReceivedAtMs: number | null;'),
+    'RED'],
+
+  ['MUT-RK6 거래소 청산가가 없으면 내부 값을 그 칸으로 승격', P.per,
+    s => s.replace(
+      '  const exHead = exLiq == null ? null : headroomPct(side, markPrice, exLiq);',
+      '  const exFinal = exLiq ?? inLiq;\n'
+      + '  const exHead = exFinal == null ? null : headroomPct(side, markPrice, exFinal);'),
+    'RED'],
+
+  ['MUT-RK7 두 청산가를 평균', P.per,
+    s => s.replace(
+      '    exchangeLiquidationPrice: exLiq, estimatedLiquidationPrice: inLiq,',
+      '    exchangeLiquidationPrice: exLiq != null && inLiq != null'
+      + ' ? (exLiq + inLiq) / 2 : exLiq, estimatedLiquidationPrice: inLiq,'), 'RED'],
+
+  ['MUT-RK8 임의 delta 문턱으로 일치/불일치를 나눔', P.per,
+    s => s.replace(
+      '  const measured: PostEntryRiskMeasurement = {',
+      '  const consistentRatio = 0.002;\n  const measured: any = { consistentRatio,'), 'RED'],
+
+  ['MUT-RK9 측정 상태에 종료 지시를 더함', P.per,
+    s => s.replace(
+      "export type PostEntryRiskStatus =",
+      "export type PostEntryRiskStatus =\n  | 'CLOSE_NOW'"), 'RED'],
+
+  ['MUT-RK10 측정 블록이 직접 청산을 부름', P.monitor,
+    s => s.replace(
+      "        if (m.status === 'MEASURED') out.postEntryRisk.measured += 1;",
+      "        if (m.status === 'MEASURED') {\n"
+      + "          await ops.sendSymbolClose(venue, m as any);\n"
+      + "          out.postEntryRisk.measured += 1;\n"
+      + "        }\n        if (false) {"), 'RED'],
+
+  ['MUT-RK11 positionGuard의 0.35를 100배 경로로 복사', P.per,
+    s => s.replace(
+      '/** 0과 음수는 **없음**이다.',
+      'export const liquidationProximityRatio = 0.35;\n\n/** 0과 음수는 **없음**이다.'),
+    'RED'],
+
+  ['MUT-RK12 positionGuard의 1.5(markShockPct)를 100배 경로로 복사', P.per,
+    s => s.replace(
+      '/** 0과 음수는 **없음**이다.',
+      'export const markShockPct = 1.5;\n\n/** 0과 음수는 **없음**이다.'), 'RED'],
+
+  ['MUT-RK13 Exact100X에 고정 익절을 함께 개방', P.prof,
+    s => s.replace("  takeProfitPct: null,\n  takeProfitPolicy: 'NO_FIXED_TP',",
+      "  takeProfitPct: 1.5,\n  takeProfitPolicy: 'NO_FIXED_TP',"), 'RED'],
+
+  ['MUT-RK14 Gate에서 ⑤B 감시를 열어 ⑤A-2를 우회', P.monitor,
+    s => s.replace(
+      '        if (exact100xExitVenueCapability(c.exchange).timeExit !== true) continue;',
+      '        if (false) continue;'), 'RED'],
+
+  ['MUT-RK15 090 후퇴가 계약 칸까지 함께 버림', P.rows,
+    s => s.replace(
+      '  if (!zero.error) {',
+      '  if (zero.error) { zero = { data: null, error: { code: "42703",'
+      + ' message: "column live_orders.execution_profile_id does not exist" } }; }\n'
+      + '  if (!zero.error) {'), 'RED'],
+
+  ['MUT-RK16 0을 청산가로 읽음 (여유가 100%가 됨)', P.per,
+    s => s.replace(
+      '  return n != null && n > 0 ? n : null;\n};',
+      '  return n;\n};'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

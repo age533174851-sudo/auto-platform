@@ -11,8 +11,9 @@
 // 보인다.
 import { test, assert, eq } from '../../test/harness';
 import {
-  loadLifecycleRows, isMissingIdentityColumn,
-  LIFECYCLE_SELECT_IDENTITY, LIFECYCLE_SELECT_LEGACY, IDENTITY_COLUMNS,
+  loadLifecycleRows, isMissingIdentityColumn, isMissingRiskSnapshotColumn,
+  LIFECYCLE_SELECT_RISK, LIFECYCLE_SELECT_IDENTITY, LIFECYCLE_SELECT_LEGACY,
+  IDENTITY_COLUMNS, RISK_SNAPSHOT_COLUMNS,
 } from './lifecycleRows';
 import { managedCandidates, mayActOn } from './managedPosition';
 
@@ -30,12 +31,32 @@ const rowWithIdentity = (o: any = {}) => ({
   ...o,
 });
 
+/** 089 + 090이 적용된 DB의 줄 */
+const rowWithRisk = (o: any = {}) => ({
+  ...rowWithIdentity(),
+  entry_adverse_distance_pct: 0.4,
+  entry_liquidation_distance_pct_raw: 0.6,
+  ...o,
+});
+
 /** 089가 아직인 DB의 줄 — 세 칸이 **아예 없다** */
 const rowLegacy = (o: any = {}) => {
   const r: any = rowWithIdentity(o);
   for (const c of IDENTITY_COLUMNS) delete r[c];
   return r;
 };
+
+/**
+ * 090만 아직인 DB. RISK 모양만 거절하고 IDENTITY는 받는다.
+ *
+ * 시험이 이 헬퍼를 쓰는 것이 요점이다 — "첫 조회가 곧 IDENTITY"라고
+ * 가정하면 단계가 하나 늘 때마다 시험이 조용히 다른 것을 보게 된다.
+ */
+const rejectRisk = (sel: string) =>
+  sel === LIFECYCLE_SELECT_RISK
+    ? { error: { code: '42703',
+        message: 'column live_orders.entry_adverse_distance_pct does not exist' } }
+    : null;
 
 /** PostgREST가 모르는 칼럼에 주는 오류 */
 const missingCol = (col: string) => ({
@@ -61,29 +82,75 @@ export function runLifecycleRowsTests() {
   console.log('\n🗄  주문 장부 읽기 — 089 미적용에서도 멈추지 않는다');
 
   // ① 칸이 있으면 한 번에 읽는다
-  test('★ 계약 칸이 있으면 identity까지 한 번에 읽는다', () => {
-    const q = fakeQuery(() => ({ data: [rowWithIdentity()] }));
+  test('★ 090까지 있으면 위험 스냅숏까지 한 번에 읽는다', () => {
+    const q = fakeQuery(() => ({ data: [rowWithRisk()] }));
+    return loadLifecycleRows(q.fn).then(r => {
+      eq(r.projection, 'RISK');
+      eq(r.error, null);
+      eq(r.rows.length, 1);
+      eq(q.calls.length, 1, '★ 멀쩡한데 두 번 읽었습니다');
+      eq(q.calls[0], LIFECYCLE_SELECT_RISK);
+      eq(r.rows[0].entry_adverse_distance_pct, 0.4);
+    });
+  });
+
+  test('★ 계약 칸이 있으면 identity까지 한 번에 읽는다 (090만 아직)', () => {
+    const q = fakeQuery(sel => rejectRisk(sel) ?? { data: [rowWithIdentity()] });
     return loadLifecycleRows(q.fn).then(r => {
       eq(r.projection, 'IDENTITY');
       eq(r.error, null);
       eq(r.rows.length, 1);
-      eq(q.calls.length, 1, '★ 멀쩡한데 두 번 읽었습니다');
-      eq(q.calls[0], LIFECYCLE_SELECT_IDENTITY);
+      eq(q.calls.length, 2, '정확히 한 단계만 후퇴한다');
+      eq(q.calls[1], LIFECYCLE_SELECT_IDENTITY);
       eq(r.rows[0].execution_preset_id, 'EXACT_100X');
+    });
+  });
+
+  // ★ 이 시험이 ⑤B의 핵심 보장이다.
+  //
+  //   090이 아직이라고 **계약 세 칸까지 함께 잃으면** 이미 검증된 ⑤A의
+  //   4시간 TIME_EXIT이 죽는다. 새 위험 기록이 없다는 이유로 되는 종료까지
+  //   멈추는 것은 후퇴가 아니라 고장이다.
+  test('★ 090이 아직이어도 실행 계약 칸을 잃지 않는다 — TIME_EXIT이 산다', () => {
+    const q = fakeQuery(sel => rejectRisk(sel)
+      ?? { data: [rowWithIdentity({ stop_policy: 'NO_FIXED_SL', stop_loss: null })] });
+    return loadLifecycleRows(q.fn).then(r => {
+      eq(r.projection, 'IDENTITY', '★ LEGACY로 내려가면 계약을 잃는다');
+      const c = managedCandidates(r.rows);
+      eq(c.authorityCandidates.length, 1,
+        '★ 090이 아직이라고 전용 종료 권한 후보가 사라졌습니다 — TIME_EXIT이 멈춥니다');
+      eq(c.authorityCandidates[0].capabilities.timeExit, true);
+      // 위험 스냅숏은 **없다.** 그건 UNKNOWN이고 0이 아니다.
+      eq(c.authorityCandidates[0].entryAdverseDistancePct, null,
+        '★ 없는 위험 기록을 숫자로 만들었습니다');
+      eq(c.authorityCandidates[0].entryLiquidationDistancePctRaw, null);
+    });
+  });
+
+  test('★ 090 스냅숏이 있으면 후보가 그 값을 그대로 들고 온다', () => {
+    const q = fakeQuery(() => ({ data: [rowWithRisk({
+      stop_policy: 'NO_FIXED_SL', stop_loss: null,
+      entry_adverse_distance_pct: 0.37, entry_liquidation_distance_pct_raw: 0.58,
+    })] }));
+    return loadLifecycleRows(q.fn).then(r => {
+      const c = managedCandidates(r.rows);
+      eq(c.authorityCandidates.length, 1);
+      eq(c.authorityCandidates[0].entryAdverseDistancePct, 0.37);
+      eq(c.authorityCandidates[0].entryLiquidationDistancePctRaw, 0.58);
     });
   });
 
   // ② 칸이 없으면 옛 모양으로 한 번 더
   test('★ 계약 칸이 없으면 옛 모양으로 다시 읽어 회차를 살린다', () => {
-    const q = fakeQuery(sel => sel === LIFECYCLE_SELECT_IDENTITY
+    const q = fakeQuery(sel => sel !== LIFECYCLE_SELECT_LEGACY
       ? { error: missingCol('execution_profile_id') }
       : { data: [rowLegacy()] });
     return loadLifecycleRows(q.fn).then(r => {
       eq(r.error, null, '★ 089가 아직이라고 회차를 죽였습니다 — 열린 포지션이 방치됩니다');
       eq(r.projection, 'LEGACY');
       eq(r.rows.length, 1);
-      eq(q.calls.length, 2, '정확히 한 번만 후퇴한다');
-      eq(q.calls[1], LIFECYCLE_SELECT_LEGACY);
+      eq(q.calls.length, 3, 'RISK → IDENTITY → LEGACY 순으로 한 단계씩만 내려간다');
+      eq(q.calls[2], LIFECYCLE_SELECT_LEGACY);
       // 후퇴 모양에서 세 칸이 빠졌는지 — 넣은 채로 재시도하면 또 실패한다
       for (const c of IDENTITY_COLUMNS) {
         eq(LIFECYCLE_SELECT_LEGACY.includes(c), false, `${c}가 옛 모양에 남아 있습니다`);
@@ -93,7 +160,7 @@ export function runLifecycleRowsTests() {
 
   // ③ 후퇴로 읽은 줄은 identity가 null이다 — 지어내지 않는다
   test('★ 후퇴로 읽은 줄의 identity는 null이지 추측값이 아니다', () => {
-    const q = fakeQuery(sel => sel === LIFECYCLE_SELECT_IDENTITY
+    const q = fakeQuery(sel => sel !== LIFECYCLE_SELECT_LEGACY
       ? { error: missingCol('execution_contract_version') }
       : { data: [rowLegacy()] });
     return loadLifecycleRows(q.fn).then(r => {
@@ -106,7 +173,7 @@ export function runLifecycleRowsTests() {
 
   // ④ 후퇴해도 기존 고정 손절 포지션은 평소대로 관리된다
   test('★ 후퇴 상태에서도 고정 손절 포지션은 계속 관리된다', () => {
-    const q = fakeQuery(sel => sel === LIFECYCLE_SELECT_IDENTITY
+    const q = fakeQuery(sel => sel !== LIFECYCLE_SELECT_LEGACY
       ? { error: missingCol('execution_preset_id') }
       : { data: [rowLegacy({ stop_policy: 'FIXED_SL', stop_loss: 90 })] });
     return loadLifecycleRows(q.fn).then(r => {
@@ -120,7 +187,7 @@ export function runLifecycleRowsTests() {
 
   // ⑤ 후퇴해도 NO_FIXED_SL 유예 규칙은 그대로다
   test('★ 후퇴 상태에서도 NO_FIXED_SL 유예가 유지된다', () => {
-    const q = fakeQuery(sel => sel === LIFECYCLE_SELECT_IDENTITY
+    const q = fakeQuery(sel => sel !== LIFECYCLE_SELECT_LEGACY
       ? { error: missingCol('execution_profile_id') }
       : { data: [rowLegacy({ stop_policy: 'NO_FIXED_SL', stop_loss: null })] });
     return loadLifecycleRows(q.fn).then(r => {
@@ -174,8 +241,39 @@ export function runLifecycleRowsTests() {
     }
   });
 
+  test('090 후퇴 판정은 두 칸을 가리키는 "칼럼 없음"에만 참이다', () => {
+    for (const c of RISK_SNAPSHOT_COLUMNS) {
+      eq(isMissingRiskSnapshotColumn(missingCol(c)), true, c);
+      eq(isMissingRiskSnapshotColumn({
+        code: 'PGRST204',
+        message: `Could not find the '${c}' column of 'live_orders' in the schema cache`,
+      }), true, `${c} (스키마 캐시)`);
+      // 089 판정과 **섞이지 않는다** — 섞이면 한 단계를 건너뛴다
+      eq(isMissingIdentityColumn(missingCol(c)), false, `${c}는 089 칸이 아니다`);
+    }
+    for (const c of IDENTITY_COLUMNS) {
+      eq(isMissingRiskSnapshotColumn(missingCol(c)), false, `${c}는 090 칸이 아니다`);
+    }
+    eq(isMissingRiskSnapshotColumn({ code: '42501', message: 'permission denied' }), false);
+    eq(isMissingRiskSnapshotColumn(null), false);
+  });
+
+  test('★ 090 모양에 089 세 칸이 전부 들어 있다', () => {
+    for (const c of IDENTITY_COLUMNS) {
+      eq(LIFECYCLE_SELECT_RISK.includes(c), true,
+        `★ ${c}가 090 모양에서 빠졌습니다 — 090을 적용한 DB가 계약을 잃습니다`);
+    }
+    for (const c of RISK_SNAPSHOT_COLUMNS) {
+      eq(LIFECYCLE_SELECT_RISK.includes(c), true, c);
+      eq(LIFECYCLE_SELECT_IDENTITY.includes(c), false,
+        `★ ${c}가 IDENTITY 모양에 남아 있습니다 — 후퇴해도 또 실패합니다`);
+      eq(LIFECYCLE_SELECT_LEGACY.includes(c), false, `${c}가 옛 모양에 남아 있습니다`);
+    }
+    eq(LIFECYCLE_SELECT_RISK.includes('stop_policy'), true);
+  });
+
   test('두 번째 조회까지 실패하면 실패로 적는다', () => {
-    const q = fakeQuery(sel => sel === LIFECYCLE_SELECT_IDENTITY
+    const q = fakeQuery(sel => sel !== LIFECYCLE_SELECT_LEGACY
       ? { error: missingCol('execution_profile_id') }
       : { error: { code: '42501', message: 'permission denied' } });
     return loadLifecycleRows(q.fn).then(r => {
@@ -187,7 +285,7 @@ export function runLifecycleRowsTests() {
 
   test('던져진 예외도 같은 규칙으로 다룬다', () => {
     const q = fakeQuery(sel => {
-      if (sel === LIFECYCLE_SELECT_IDENTITY) throw missingCol('execution_preset_id');
+      if (sel !== LIFECYCLE_SELECT_LEGACY) throw missingCol('execution_preset_id');
       return { data: [rowLegacy()] };
     });
     return loadLifecycleRows(q.fn).then(r => {

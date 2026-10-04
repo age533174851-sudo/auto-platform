@@ -47,6 +47,27 @@ export const IDENTITY_COLUMNS = [
   'execution_contract_version',
 ] as const;
 
+/**
+ * 090이 더한 칸. 이 이름들이 실패 사유에 있어야만 **한 단계만** 후퇴한다.
+ *
+ * ★ 089 칸과 **따로 둔다.** 합쳐 두면 090이 아직인 DB에서 첫 조회가
+ *   실패했을 때 곧장 LEGACY로 내려가 **계약 세 칸까지 함께 잃는다.**
+ *   그러면 이미 검증된 ⑤A의 4시간 TIME_EXIT이 죽는다 — 새 위험 기록이
+ *   없다는 이유로 되는 종료까지 멈추는 것은 후퇴가 아니라 고장이다.
+ */
+export const RISK_SNAPSHOT_COLUMNS = [
+  'entry_adverse_distance_pct',
+  'entry_liquidation_distance_pct_raw',
+] as const;
+
+/** 계약 + 진입 위험 스냅숏까지 읽는 모양 (089 + 090 적용 후) */
+export const LIFECYCLE_SELECT_RISK =
+  'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
+  + 'stop_policy, '
+  + 'execution_profile_id, execution_preset_id, execution_contract_version, '
+  + 'entry_adverse_distance_pct, entry_liquidation_distance_pct_raw, '
+  + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id';
+
 /** 진입 당시 계약까지 읽는 모양 (089 적용 후) */
 export const LIFECYCLE_SELECT_IDENTITY =
   'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
@@ -68,7 +89,9 @@ export const LIFECYCLE_SELECT_LEGACY =
 
 /** 어떤 모양으로 읽었는가. **관측할 수 있어야 한다** */
 export type LifecycleProjection =
-  /** 계약까지 읽었다 (089 적용됨) */
+  /** 계약 + 진입 위험 스냅숏까지 읽었다 (089 + 090 적용됨) */
+  | 'RISK'
+  /** 090이 아직이다 — 계약은 읽었고 위험 스냅숏만 전부 null이다 */
   | 'IDENTITY'
   /** 089가 아직이라 옛 모양으로 읽었다 — identity는 전부 null이다 */
   | 'LEGACY';
@@ -81,26 +104,41 @@ export interface LifecycleRowsResult {
   error: string | null;
 }
 
+/** "그런 칼럼 없음" 모양의 실패인가. 칼럼 이름은 보지 않는다 */
+function missingColumnShape(err: any): { yes: boolean; text: string } {
+  if (!err) return { yes: false, text: '' };
+  const code = String(err.code ?? '').trim().toUpperCase();
+  const text = `${err.message ?? ''} ${err.details ?? ''} ${err.hint ?? ''}`.toLowerCase();
+  // 42703  = PostgreSQL undefined_column
+  // PGRST204 = PostgREST 스키마 캐시에서 칼럼을 못 찾음
+  const yes = code === '42703' || code === 'PGRST204'
+    // 코드가 없는 클라이언트도 있다. 그때는 문구로 본다.
+    || (!code && /(column|칼럼).*(does not exist|not found)|schema cache/.test(text));
+  return { yes, text };
+}
+
 /**
  * 이 실패가 **089가 아직이라서**인가.
  *
  * 좁게 판정한다 — 넓히면 진짜 고장이 후퇴로 덮인다.
  */
 export function isMissingIdentityColumn(err: any): boolean {
-  if (!err) return false;
-  const code = String(err.code ?? '').trim().toUpperCase();
-  const text = `${err.message ?? ''} ${err.details ?? ''} ${err.hint ?? ''}`.toLowerCase();
-
-  // ① "그런 칼럼 없음"인가.
-  //    42703  = PostgreSQL undefined_column
-  //    PGRST204 = PostgREST 스키마 캐시에서 칼럼을 못 찾음
-  const missingColumn = code === '42703' || code === 'PGRST204'
-    // 코드가 없는 클라이언트도 있다. 그때는 문구로 본다.
-    || (!code && /(column|칼럼).*(does not exist|not found)|schema cache/.test(text));
-  if (!missingColumn) return false;
-
-  // ② 없다는 그 칼럼이 **089의 것**인가. 다른 칼럼이면 우리 문제가 아니다.
+  const { yes, text } = missingColumnShape(err);
+  if (!yes) return false;
+  // 없다는 그 칼럼이 **089의 것**인가. 다른 칼럼이면 우리 문제가 아니다.
   return IDENTITY_COLUMNS.some(c => text.includes(c));
+}
+
+/**
+ * 이 실패가 **090이 아직이라서**인가.
+ *
+ * 089 칸을 가리키는 실패는 여기서 참이 되지 않는다 — 그건 한 단계 더
+ * 내려가야 하는 다른 상황이다.
+ */
+export function isMissingRiskSnapshotColumn(err: any): boolean {
+  const { yes, text } = missingColumnShape(err);
+  if (!yes) return false;
+  return RISK_SNAPSHOT_COLUMNS.some(c => text.includes(c));
 }
 
 /**
@@ -115,6 +153,28 @@ export function isMissingIdentityColumn(err: any): boolean {
 export async function loadLifecycleRows(
   query: (select: string) => Promise<{ data: any; error: any }>,
 ): Promise<LifecycleRowsResult> {
+  // ── ⓞ 090까지 읽어 본다 ──
+  //
+  //   실패가 **090 칸 때문**일 때만 한 단계 내려간다. 거기서 곧장
+  //   LEGACY로 가지 않는 것이 요점이다 — 그러면 계약 세 칸을 함께 잃고
+  //   ⑤A TIME_EXIT이 멈춘다.
+  let zero: { data: any; error: any };
+  try {
+    zero = await query(LIFECYCLE_SELECT_RISK);
+  } catch (e: any) {
+    if (!isMissingRiskSnapshotColumn(e) && !isMissingIdentityColumn(e)) {
+      return { rows: [], projection: null, error: String(e?.message || e).slice(0, 200) };
+    }
+    zero = { data: null, error: e };
+  }
+  if (!zero.error) {
+    return { rows: Array.isArray(zero.data) ? zero.data : [], projection: 'RISK', error: null };
+  }
+  if (!isMissingRiskSnapshotColumn(zero.error) && !isMissingIdentityColumn(zero.error)) {
+    return { rows: [], projection: null,
+      error: String(zero.error?.message ?? zero.error).slice(0, 200) };
+  }
+
   let first: { data: any; error: any };
   try {
     first = await query(LIFECYCLE_SELECT_IDENTITY);

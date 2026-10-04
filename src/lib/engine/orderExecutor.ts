@@ -112,6 +112,22 @@ export interface ExecuteArgs {
     presetId: string;
     contractVersion: number;
   };
+  /**
+   * **진입 허가가 실제로 쓴 위험 좌표.** 적기만 한다 — 이 값으로
+   * 진입을 막거나 종료를 바꾸지 않는다.
+   *
+   * ★ 반드시 **허가 판정의 결과에서** 와야 한다. 여기서 신호를 다시
+   *   계산하거나 ATR을 새로 재면, 저장된 값이 "허가를 내린 값"이
+   *   아니게 되어 이 칸의 존재 이유가 사라진다.
+   *
+   * 안 넘기면 두 칸 모두 적지 않는다(= 기존 경로 그대로).
+   */
+  entryRiskSnapshot?: {
+    /** 허가 판정이 쓴 변동성 위험 거리(%). 못 구했으면 null */
+    adverseDistancePct: number | null;
+    /** 그 주문이 입장한 RAW 청산여유(%). **EFFECTIVE가 아니다** */
+    liquidationDistancePctRaw: number | null;
+  };
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -349,6 +365,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // 쓸 이유가 없고, 별칭 동적 import는 시험 하네스에서 풀리지 않는다.)
   const ident = args.executionIdentity;
   const identOk = executionIdentityComplete(ident);
+  // 진입 허가가 준 위험 좌표. **여기서 만들지 않는다 — 받기만 한다.**
+  const riskSnap = args.entryRiskSnapshot;
   const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
   // **익절은 따로 판단한다.** `policy === 'NONE'`으로 익절까지 끄면
   // 손절 정책 하나가 두 가지를 뜻하게 되고, 그때 바이낸스와 Gate가
@@ -476,6 +494,19 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       execution_preset_id: ident.presetId,
       execution_contract_version: ident.contractVersion,
     } : {}),
+    // ── 진입 허가가 쓴 위험 좌표 (090) ──
+    //
+    // **값이 있을 때만 붙인다.** `stop_policy`·계약 세 칸과 같은 이유다 —
+    // 항상 붙이면 090이 아직인 DB에서 모든 주문이 실패한다.
+    //
+    // 둘을 따로 붙인다. 한쪽만 구해졌을 때 저장을 통째로 실패시키면
+    // **구한 값까지 버린다**(090이 CHECK 제약을 걸지 않은 것과 같은 이유).
+    //
+    // ★ 여기서 계산하지 않는다. 받은 값을 그대로 적는다.
+    ...(riskSnap?.adverseDistancePct != null
+      ? { entry_adverse_distance_pct: riskSnap.adverseDistancePct } : {}),
+    ...(riskSnap?.liquidationDistancePctRaw != null
+      ? { entry_liquidation_distance_pct_raw: riskSnap.liquidationDistancePctRaw } : {}),
   };
 
   const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();

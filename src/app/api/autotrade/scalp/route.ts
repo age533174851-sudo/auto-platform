@@ -1294,6 +1294,24 @@ export async function POST(req: NextRequest) {
         contractVersion: epContract.contractVersion,
       },
     } : {}),
+    // ★ **진입 허가가 쓴 위험 좌표를 그 판정 결과에서 그대로 꺼낸다** (090)
+    //
+    //   `prepared100x.liquidation`은 `prepareEntry100x`가 통과시킨 바로 그
+    //   판정이다. 여기서 `scalp.signal.stopPct`를 다시 읽거나 ATR을 새로
+    //   재지 **않는다** — 그러면 저장된 값이 "허가를 내린 값"이 아니게
+    //   되고, 신호가 그 사이에 바뀌었으면 장부가 거짓말을 한다.
+    //
+    //   `headroomKind`가 'RAW'인 것만 적는다. `effectiveLiquidation`은
+    //   비용을 반영한 다른 값이고, 둘을 한 칸에 섞으면 나중에 무엇을
+    //   저장한 것인지 알 수 없다.
+    //
+    //   적기만 한다 — 이 값으로 진입을 막거나 종료를 바꾸지 않는다.
+    ...(prepared100x?.liquidation?.headroomKind === 'RAW' ? {
+      entryRiskSnapshot: {
+        adverseDistancePct: prepared100x.liquidation.adverseDistancePct ?? null,
+        liquidationDistancePctRaw: prepared100x.liquidation.liquidationDistancePct ?? null,
+      },
+    } : {}),
     // **손절은 반드시 함께 낸다.** 단타에서 손절 없는 진입은 배율이
     // 붙어 있어 청산까지 간다. 고정 손절을 쓰지 않는 계약만 예외다.
     //

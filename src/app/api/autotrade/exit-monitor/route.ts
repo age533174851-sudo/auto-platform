@@ -776,19 +776,28 @@ async function runLifecycleSweep(
   deferred: any[]; deferredCount: number;
   /** 전용 종료 권한(Exact100X 시간 청산) 결과. **일반 생명주기와 섞지 않는다** */
   authority: { candidates: number; acted: number; failed: number; results: any[] };
+  /**
+   * ⑤B-0/1 — 열려 있는 100배 포지션의 **위험 측정값.** 판단이 아니다.
+   *
+   * ★ 이 칸의 어떤 값도 주문을 유발하지 않는다. `acted`가 없는 것이
+   *   그 사실을 타입으로 말한다 — 셀 것이 없기 때문이다.
+   */
+  postEntryRisk: { measured: number; unusable: number; samples: any[] };
   /** 주문 장부를 어떤 모양으로 읽었는가. 못 읽었으면 null */
-  projection: 'IDENTITY' | 'LEGACY' | null;
+  projection: 'RISK' | 'IDENTITY' | 'LEGACY' | null;
   results: any[]; summary: string; error: string | null;
 }> {
   const out = {
     candidates: 0, acted: 0, skipped: [] as any[],
-    projection: null as 'IDENTITY' | 'LEGACY' | null,
+    projection: null as 'RISK' | 'IDENTITY' | 'LEGACY' | null,
     // ★ **유예는 실패가 아니다.** 일부러 관리하지 않은 줄을 `skipped`나
     //   실패 목록에 섞으면 운영자가 고칠 것이 없는데 고치려 든다.
     deferred: [] as any[], deferredCount: 0,
     // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
     //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
     authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
+    // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
+    postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[] },
     results: [] as any[], summary: '', error: null as string | null,
   };
 
@@ -1047,6 +1056,124 @@ async function runLifecycleSweep(
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // ⑤B-0/1 — 열려 있는 100배 포지션의 위험을 **재기만 한다**
+  // ══════════════════════════════════════════════════════════════
+  //
+  //   왜 여기 있는가: 측정기를 만들고 어디에도 안 이으면 이 저장소가
+  //   반복한 "만들어 놓고 배선을 안 함"이 된다. 관측이 실제로 나와야
+  //   ⑤B-2/3가 문턱을 **유도**할 수 있다.
+  //
+  //   ★ **주문을 내지 않는다.** 이 블록은 `ops.sendSymbolClose`도
+  //     `ops.prepareSymbolClose`도 부르지 않는다. `runExitAuthority`도
+  //     부르지 않는다. 읽기 세 번과 순수 계산 한 번이 전부다.
+  //
+  //   ★ 점검 모드에서는 **읽지도 않는다.**
+  if (authorityCandidates.length > 0 && !dryRun) {
+    const { measurePostEntryRisk } = await import('@/lib/engine/postEntryRisk');
+    const { exact100xExitVenueCapability } = await import('@/lib/engine/exitAuthority');
+    const bf = await import('@/lib/exchanges/binanceFutures');
+
+    for (const c of authorityCandidates) {
+      try {
+        // ⑤A-2의 거래소 관문을 **같은 정본으로** 다시 지난다. 감시가
+        // 권한보다 넓은 거래소를 보면 그쪽이 새 잠복 경로가 된다.
+        if (exact100xExitVenueCapability(c.exchange).timeExit !== true) continue;
+        const venue = await credsOf(c.connectionId);
+        if (!venue || venue.exchange !== c.exchange) continue;
+
+        // ── 마크가: ④의 timestamped MARK ──
+        //
+        //   `positionRisk.markPrice`를 쓰지 않는다 — 그 값에는 시각이
+        //   없어서 "언제의 가격인가"를 물을 수 없다.
+        const snap = await bf.readMarketSnapshot(c.symbol, venue.testnet).catch(() => null);
+        const br = await bf.readBracket(c.symbol, venue.apiKey, venue.apiSecret, venue.testnet)
+          .catch(() => null);
+        // ── 거래소 청산가: 포지션 응답 ──
+        //
+        //   받은 시각만 적는다. `positionUpdateTimeMs`는 **기록만** 하고
+        //   신선도 판정에 쓰지 않는다 — 그것은 포지션 갱신 시각이지
+        //   청산가가 계산된 시각이 아니다. `exchangeTimeMs`는 없다.
+        const posReceivedAtMs = Date.now();
+        const rr = await bf.getSymbolPositionRiskEx(
+          venue.apiKey, venue.apiSecret, c.symbol, venue.testnet).catch(() => null);
+
+        const m = measurePostEntryRisk({
+          side: c.side,
+          mark: snap?.snapshot ? {
+            kind: 'MARK', source: snap.snapshot.source, value: snap.snapshot.markPrice,
+            exchangeTimeMs: snap.snapshot.stamps.exchangeTimeMs,
+            receivedAtMs: snap.snapshot.stamps.receivedAtMs,
+            observedAtMs: snap.snapshot.stamps.observedAtMs,
+            cache: snap.snapshot.stamps.cache,
+          } : null,
+          // ★ `value`를 **넣지 않는다.** 브래킷은 숫자 하나가 아니라
+          //   구간 표다. `value: null`을 넣으면 ④가 VALUE_INVALID로
+          //   막는다 — `entry100x`가 같은 관측을 만드는 모양 그대로다.
+          bracket: br?.tiers ? {
+            kind: 'BRACKET', source: 'EXCHANGE_LEVERAGE_BRACKET',
+            exchangeTimeMs: null, receivedAtMs: br.observedAtMs,
+            observedAtMs: br.observedAtMs, cache: br.freshness,
+          } : null,
+          exchangeLiquidationPrice: rr?.risk?.liquidationPrice ?? null,
+          entryPrice: rr?.risk?.entryPrice ?? c.entryPrice,
+          quantity: rr?.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt),
+          leverage: rr?.risk?.leverage ?? null,
+          marginMode: rr?.risk?.marginType === 'isolated' ? 'isolated'
+            : rr?.risk?.marginType === 'cross' ? 'cross' : null,
+          brackets: br?.tiers ?? null,
+          // 090 스냅숏을 **그대로** 넘긴다. null은 UNKNOWN이다.
+          entryAdverseDistancePct: c.entryAdverseDistancePct,
+          entryLiquidationDistancePctRaw: c.entryLiquidationDistancePctRaw,
+          provenance: {
+            positionReceivedAtMs: rr?.risk ? posReceivedAtMs : null,
+            positionUpdateTimeMs: rr?.risk?.positionUpdateTimeMs ?? null,
+            markExchangeTimeMs: snap?.snapshot?.stamps.exchangeTimeMs ?? null,
+            markReceivedAtMs: snap?.snapshot?.stamps.receivedAtMs ?? null,
+            markObservedAtMs: snap?.snapshot?.stamps.observedAtMs ?? null,
+            bracketObservedAtMs: br?.observedAtMs ?? null,
+          },
+          nowMs: Date.now(),
+        });
+
+        if (m.status === 'MEASURED') out.postEntryRisk.measured += 1;
+        else out.postEntryRisk.unusable += 1;
+        out.postEntryRisk.samples.push({
+          symbol: c.symbol, side: c.side,
+          contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
+            + `/v${c.executionIdentity.contractVersion}`,
+          status: m.status, reason: m.reason, trustworthy: m.trustworthy,
+          markPrice: m.markPrice,
+          exchangeLiquidationPrice: m.exchangeLiquidationPrice,
+          estimatedLiquidationPrice: m.estimatedLiquidationPrice,
+          exchangeHeadroomPct: m.exchangeHeadroomPct,
+          estimatedHeadroomPct: m.estimatedHeadroomPct,
+          absoluteDelta: m.absoluteDelta, deltaPct: m.deltaPct,
+          liquidationSources: m.liquidationSources,
+          entryAdverseDistancePct: m.entryAdverseDistancePct,
+          entryLiquidationDistancePctRaw: m.entryLiquidationDistancePctRaw,
+          entryTierIndex: m.internal?.entryTierIndex ?? null,
+          tier: m.internal?.tier ?? null,
+          internalCode: m.internal?.code ?? null,
+          leverage: rr?.risk?.leverage ?? null,
+          quantity: rr?.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt),
+          entryPrice: rr?.risk?.entryPrice ?? null,
+          marginType: rr?.risk?.marginType ?? null,
+          bracketFreshness: br?.freshness ?? 'NONE',
+          markFreshness: m.freshness?.code ?? null,
+          provenance: m.provenance,
+        });
+      } catch (e: any) {
+        // 측정 실패는 **감시 상태**다. 종료 사유가 아니다.
+        out.postEntryRisk.unusable += 1;
+        out.postEntryRisk.samples.push({
+          symbol: c.symbol, status: 'RISK_DATA_UNUSABLE',
+          reason: String(e?.message || e).slice(0, 160),
+        });
+      }
+    }
+  }
+
   for (const p of positions) {
     // ══════════════════════════════════════════════════════════
     // ★ 관리 유예된 자리는 **여기서 끝난다** — 조회도 하지 않는다
@@ -1233,6 +1360,14 @@ async function runLifecycleSweep(
     // 후퇴로 읽은 회차는 그 사실을 적는다 — identity가 전부 비어 있는
     // 이유가 "기록이 없어서"가 아니라 "칸을 못 읽어서"임을 구별하게 한다.
     + (out.projection === 'LEGACY' ? ' · 실행 계약 칸 없음(089 미적용)' : '')
+    + (out.projection === 'IDENTITY' ? ' · 진입 위험 스냅숏 칸 없음(090 미적용)' : '')
+    // ⑤B-0/1 — **측정만 했다.** 닫은 것이 아니다. 둘을 같은 문장에
+    // 섞으면 "위험 측정 3건"이 "3건 닫았다"로 읽힌다.
+    + (out.postEntryRisk.measured || out.postEntryRisk.unusable
+      ? ` · 위험 측정 ${out.postEntryRisk.measured}건`
+        + `${out.postEntryRisk.unusable ? ` · 측정 불가 ${out.postEntryRisk.unusable}건` : ''}`
+        + ' (측정만, 종료 0건)'
+      : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
   return out;
 }

@@ -2773,20 +2773,49 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       err(`${ROWS}: loadLifecycleRows가 없습니다 — 089 미적용에서 회차가 죽습니다`);
     } else {
       const miss = c => ({ code: '42703', message: `column live_orders.${c} does not exist` });
-      // ① 칸이 있으면 한 번에 읽는다 (멀쩡한데 두 번 읽지 않는다)
+      // ① 칸이 다 있으면 한 번에 읽는다 (멀쩡한데 두 번 읽지 않는다)
       {
         const calls = [];
         const r = await lr.loadLifecycleRows(async sel => { calls.push(sel); return { data: [{ id: 'a' }], error: null }; });
-        if (r.projection !== 'IDENTITY' || calls.length !== 1) {
-          err('주문 장부 읽기: 칸이 있는데 identity로 한 번에 읽지 않습니다');
+        if (r.projection !== 'RISK' || calls.length !== 1) {
+          err('주문 장부 읽기: 칸이 다 있는데 한 번에 읽지 않습니다'
+            + ` (${r.projection} · ${calls.length}회)`);
         }
       }
-      // ② 칸이 없으면 옛 모양으로 살린다
+      // ①-b ★ 090만 아직일 때 **계약 칸을 함께 잃지 않는다**
+      //
+      //   여기서 LEGACY로 내려가면 실행 계약 세 칸이 사라지고 이미 검증된
+      //   ⑤A의 4시간 TIME_EXIT이 멈춘다. 새 위험 기록이 없다는 이유로
+      //   되는 종료까지 죽이는 것은 후퇴가 아니라 고장이다.
       {
         const calls = [];
         const r = await lr.loadLifecycleRows(async sel => {
           calls.push(sel);
           return calls.length === 1
+            ? { data: null, error: miss('entry_adverse_distance_pct') }
+            : { data: [{ id: 'a' }], error: null };
+        });
+        if (r.error || r.projection !== 'IDENTITY' || calls.length !== 2) {
+          err('주문 장부 읽기: 090이 아직일 때 한 단계가 아니라 통째로 후퇴합니다'
+            + ` (${r.projection} · ${calls.length}회) — 실행 계약을 잃어 TIME_EXIT이 멈춥니다`);
+        }
+        for (const c of (lr.IDENTITY_COLUMNS || [])) {
+          if (!String(calls[1] || '').includes(c)) {
+            err(`주문 장부 읽기: 090 후퇴 모양에서 ${c}가 사라졌습니다`);
+          }
+        }
+        for (const c of (lr.RISK_SNAPSHOT_COLUMNS || [])) {
+          if (String(calls[1] || '').includes(c)) {
+            err(`주문 장부 읽기: 090 후퇴 모양에 ${c}가 남아 있습니다 — 또 실패합니다`);
+          }
+        }
+      }
+      // ② 089 칸이 없으면 옛 모양으로 살린다
+      {
+        const calls = [];
+        const r = await lr.loadLifecycleRows(async sel => {
+          calls.push(sel);
+          return calls.length <= 2
             ? { data: null, error: miss('execution_profile_id') }
             : { data: [{ id: 'a' }], error: null };
         });
@@ -2794,14 +2823,17 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           err('주문 장부 읽기: 089가 아직이라고 회차를 죽입니다'
             + ' — 이미 열린 포지션의 청산·보호·복구가 멈춥니다');
         }
-        if (calls.length !== 2) err('주문 장부 읽기: 후퇴가 정확히 한 번이 아닙니다');
-        for (const c of (lr.IDENTITY_COLUMNS || [])) {
-          if (String(calls[1] || '').includes(c)) {
+        if (calls.length !== 3) {
+          err(`주문 장부 읽기: 후퇴가 한 단계씩이 아닙니다 (${calls.length}회)`);
+        }
+        const last = String(calls[calls.length - 1] || '');
+        for (const c of [...(lr.IDENTITY_COLUMNS || []), ...(lr.RISK_SNAPSHOT_COLUMNS || [])]) {
+          if (last.includes(c)) {
             err(`주문 장부 읽기: 후퇴 모양에 ${c}가 남아 있습니다 — 또 실패합니다`);
           }
         }
         // 후퇴가 조용한 기능 축소가 되지 않는가
-        if (!String(calls[1] || '').includes('stop_policy')) {
+        if (!last.includes('stop_policy')) {
           err('주문 장부 읽기: 후퇴가 stop_policy까지 버립니다'
             + ' — NO_FIXED_SL 주문이 일반 생명주기로 들어갑니다');
         }
@@ -3993,6 +4025,168 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       if (/Gate[^\n]{0,40}(멱등\s*키|client\s*id)[^\n]{0,40}(있다|싣는다|전달한다)/.test(vsrc)) {
         err('venuePositionOps: Gate에 멱등 키 방어층이 있다고 적습니다'
           + ' — closePositionGateFutures는 text를 싣지 않습니다');
+      }
+    }
+
+    // ── ⑤B-0/1 위험 측정기는 **재기만 하는가** ──
+    //
+    //   문턱을 먼저 정하고 측정기를 만들면 그 문턱을 정당화하는 측정기가
+    //   나온다. 그래서 이 단계의 규칙은 대부분 "하지 않는다"이고,
+    //   돌려서 확인한다 — 이름이 아니라 동작이다.
+    {
+      const PER = 'src/lib/engine/postEntryRisk.ts';
+      const pm = await loadModule(PER, '열린 포지션 위험 측정기');
+      if (!pm || typeof pm.measurePostEntryRisk !== 'function') {
+        err(`${PER}: measurePostEntryRisk를 불러오지 못했습니다`);
+      } else {
+        // 측정기가 **거래소를 바꿀 수단을 내보내지 않는가**
+        for (const bad of ['sendClose', 'closePosition', 'sendPreparedClose',
+                           'runExitAuthority', 'sendSymbolClose', 'decideExit']) {
+          if (Object.keys(pm).includes(bad)) {
+            err(`${PER}: 측정기가 ${bad}를 내보냅니다 — 재는 것과 닫는 것을 섞었습니다`);
+          }
+        }
+        const N = 1_780_000_000_000;
+        const BR = [[50_000, 0.004, 0], [250_000, 0.005, 50]];
+        const base = {
+          side: 'LONG',
+          mark: { kind: 'MARK', source: 'EXCHANGE_PREMIUM_INDEX', value: 50_000,
+            exchangeTimeMs: N - 200, receivedAtMs: N - 150, observedAtMs: N - 150,
+            cache: 'FRESH' },
+          bracket: { kind: 'BRACKET', source: 'EXCHANGE_LEVERAGE_BRACKET',
+            exchangeTimeMs: null, receivedAtMs: N - 60_000, observedAtMs: N - 60_000,
+            cache: 'FRESH' },
+          exchangeLiquidationPrice: 49_700, entryPrice: 50_000, quantity: 0.2,
+          leverage: 100, marginMode: 'isolated', brackets: BR,
+          entryAdverseDistancePct: 0.4, entryLiquidationDistancePctRaw: 0.6,
+          provenance: { positionReceivedAtMs: N - 100, positionUpdateTimeMs: N - 3_600_000,
+            markExchangeTimeMs: N - 200, markReceivedAtMs: N - 150,
+            markObservedAtMs: N - 150, bracketObservedAtMs: N - 60_000 },
+          nowMs: N,
+        };
+        const both = pm.measurePostEntryRisk(base);
+        if (both.status !== 'MEASURED' || both.liquidationSources !== 'BOTH_AVAILABLE') {
+          err(`${PER}: 두 청산가가 다 있는데 ${both.status}/${both.liquidationSources}입니다`);
+        }
+        // ★ **평균하지 않는가**
+        if (both.exchangeLiquidationPrice != null && both.estimatedLiquidationPrice != null) {
+          const avg = (both.exchangeLiquidationPrice + both.estimatedLiquidationPrice) / 2;
+          if (both.exchangeLiquidationPrice === avg || both.estimatedLiquidationPrice === avg) {
+            err(`${PER}: 두 청산가를 평균해 한 칸에 적습니다`
+              + ' — 근거 없는 숫자를 만드는 것입니다');
+          }
+        }
+        // ★ **한쪽이 없을 때 조용히 대체하지 않는가**
+        const noEx = pm.measurePostEntryRisk({ ...base, exchangeLiquidationPrice: null });
+        if (noEx.exchangeLiquidationPrice != null || noEx.exchangeHeadroomPct != null) {
+          err(`${PER}: 거래소 청산가가 없는데 내부 추정이 그 칸으로 승격됩니다`);
+        }
+        if (noEx.liquidationSources !== 'INTERNAL_ONLY' || noEx.absoluteDelta != null) {
+          err(`${PER}: 한쪽만 있는데 차이를 적거나 상태를 잘못 분류합니다`
+            + ` (${noEx.liquidationSources})`);
+        }
+        // ★ **0을 청산가로 읽지 않는가**
+        const zero = pm.measurePostEntryRisk({ ...base, exchangeLiquidationPrice: 0 });
+        if (zero.exchangeLiquidationPrice != null) {
+          err(`${PER}: 거래소가 준 0을 청산가로 읽습니다`
+            + ' — 여유가 100%가 되어 가장 위험한 자리가 가장 안전해 보입니다');
+        }
+        // ★ **090 스냅숏 null을 숫자로 바꾸지 않는가**
+        const noSnap = pm.measurePostEntryRisk({
+          ...base, entryAdverseDistancePct: null, entryLiquidationDistancePctRaw: null });
+        if (noSnap.entryAdverseDistancePct != null
+            || noSnap.entryLiquidationDistancePctRaw != null) {
+          err(`${PER}: 없는 진입 위험 스냅숏을 숫자로 채웁니다`
+            + ' — 0이면 어떤 청산여유든 통과합니다. NULL은 UNKNOWN입니다');
+        }
+        if (noSnap.status !== 'MEASURED') {
+          err(`${PER}: 스냅숏이 없다고 측정까지 포기합니다 (${noSnap.status})`);
+        }
+        // ★ **둘 다 없으면 RISK_DATA_UNUSABLE이고, 그것은 종료 사유가 아니다**
+        const none = pm.measurePostEntryRisk({
+          ...base, exchangeLiquidationPrice: null, brackets: null, bracket: null });
+        if (none.status !== 'RISK_DATA_UNUSABLE') {
+          err(`${PER}: 청산가를 어느 쪽에서도 못 구했는데 ${none.status}입니다`);
+        }
+        for (const k of Object.keys(none)) {
+          if (/^(action|close|shouldExit|exit|verdict)$/i.test(k)) {
+            err(`${PER}: 측정 결과에 행동 칸이 있습니다 (${k}) — 판단이 섞였습니다`);
+          }
+          if (/tolerance|threshold|ratio|consistent/i.test(k)) {
+            err(`${PER}: 측정 결과에 문턱성 칸이 있습니다 (${k})`
+              + ' — ⑤B-3 전에는 문턱을 만들지 않습니다');
+          }
+        }
+        // ★ `positionRisk.updateTime`을 신선도에 쓰지 않는가
+        //   (한 시간 전 갱신인데도 측정은 성립해야 한다)
+        if (both.provenance?.positionUpdateTimeMs !== N - 3_600_000) {
+          err(`${PER}: 포지션 갱신 시각을 기록하지 않습니다`);
+        }
+        if ('liquidationExchangeTimeMs' in (both.provenance ?? {})) {
+          err(`${PER}: 거래소 청산가에 exchangeTimeMs 칸을 만들었습니다`
+            + ' — 공식 응답에 없는 값입니다');
+        }
+      }
+
+      // 소스 규칙: **문턱 숫자를 들고 오지 않는가**
+      const psrc = code(PER);
+      for (const banned of ['0.35', '1.5', 'liquidationProximityRatio', 'markShockPct']) {
+        if (psrc.includes(banned)) {
+          err(`${PER}: positionGuard의 문턱(${banned})을 100배 경로로 가져왔습니다`
+            + ' — 저배율용으로 고른 값이고 Exact100X의 근거가 아닙니다');
+        }
+      }
+      // 마크가 정본: `positionRisk.markPrice`를 쓰지 않는가
+      if (/positionRisk\.markPrice|risk\.markPrice/.test(psrc)) {
+        err(`${PER}: 포지션 응답의 markPrice를 씁니다`
+          + ' — 그 값에는 시각이 없습니다. ④의 timestamped MARK를 쓰십시오');
+      }
+      // 감시 라우트가 **측정만** 하는가
+      const mon7 = code(MON5);
+      const iRisk = mon7.indexOf('measurePostEntryRisk');
+      if (iRisk < 0) {
+        err(`${MON5}: 위험 측정기를 부르지 않습니다`
+          + ' — 만들어 놓고 배선하지 않으면 ⑤B-3이 쓸 관측이 생기지 않습니다');
+      } else {
+        const end = mon7.indexOf('for (const p of positions) {', iRisk);
+        const body = end > iRisk ? mon7.slice(iRisk, end) : mon7.slice(iRisk, iRisk + 6000);
+        for (const bad of ['sendSymbolClose', 'prepareSymbolClose', 'runExitAuthority',
+                           'closePositionPercent', 'applyLifecycleClose']) {
+          if (body.includes(bad)) {
+            err(`${MON5}: 위험 측정 블록이 ${bad}를 부릅니다`
+              + ' — ⑤B-0/1은 주문 0건이어야 합니다');
+          }
+        }
+        if (!/exact100xExitVenueCapability/.test(body)) {
+          err(`${MON5}: 위험 측정이 거래소 관문을 지나지 않습니다`
+            + ' — 감시가 권한보다 넓은 거래소를 보면 그쪽이 새 잠복 경로가 됩니다');
+        }
+      }
+      // 090 후퇴가 **계약 칸을 함께 잃지 않는가**
+      const lr = code('src/lib/engine/lifecycleRows.ts');
+      for (const c of ['execution_profile_id', 'execution_preset_id',
+                       'execution_contract_version']) {
+        if (!new RegExp(`LIFECYCLE_SELECT_RISK[\\s\\S]{0,600}${c}`).test(lr)) {
+          err(`lifecycleRows: 090 모양에 ${c}가 없습니다`
+            + ' — 090을 적용한 DB가 실행 계약을 잃고 TIME_EXIT이 멈춥니다');
+        }
+      }
+      for (const c of ['entry_adverse_distance_pct', 'entry_liquidation_distance_pct_raw']) {
+        if (new RegExp(`LIFECYCLE_SELECT_IDENTITY[\\s\\S]{0,600}${c}`).test(lr)) {
+          err(`lifecycleRows: 090 칸(${c})이 IDENTITY 모양에 남아 있습니다`
+            + ' — 후퇴해도 같은 이유로 또 실패합니다');
+        }
+      }
+      // 익절·트레일링이 함께 열리지 않았는가 (큰 Winner 보존)
+      const prof = code('src/lib/strategies/profiles.ts');
+      // **계약 본문 하나만 본다.** 창이 넓으면 다른 프로필의 익절 숫자를
+      // 이 계약의 것으로 잘못 읽는다.
+      const iMax = prof.indexOf('const MAX_LEV_100X');
+      const pEnd = iMax < 0 ? -1 : prof.indexOf('\n};', iMax);
+      const pbody = iMax < 0 ? '' : prof.slice(iMax, pEnd < 0 ? iMax + 3000 : pEnd);
+      if (/takeProfitPct:\s*[0-9]/.test(pbody)) {
+        err('profiles: Exact100X에 고정 익절 숫자가 들어왔습니다'
+          + ' — 큰 Winner를 크게 가져가는 계약입니다');
       }
     }
 
