@@ -126,6 +126,8 @@ const P = {
   prr: 'src/lib/exchanges/positionRiskRead.ts',
   obs: 'src/lib/engine/riskObservationStore.ts',
   mig91: 'supabase/migrations/091_exact100x_risk_observations.sql',
+  mig92: 'supabase/migrations/092_exact100x_risk_observations_rls.sql',
+  elig: 'src/lib/engine/riskObservationEligibility.ts',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
@@ -1797,9 +1799,11 @@ const M = [
       + "  i = { ...i, sampleOrigin: i.sampleOrigin ?? 'VERIFIED_TESTNET_OBSERVATION' };"),
     'RED'],
 
+  // ★ 앵커가 옮겨갔다 — 결과에 `eligibility` 칸이 생겼다.
+  //   **지우지 않고** 같은 고장을 같은 뜻으로 찌르는 새 자리로 옮긴다.
   ['MUT-OB8 적재 실패를 성공으로 적음 (분포가 왜곡됨)', P.obs,
-    s => s.replace("      return { code: 'WRITE_FAILED', reason: String(error?.message || error).slice(0, 160) };",
-      "      return { code: 'RECORDED', reason: '' };"), 'RED'],
+    s => s.replace("      return { code: 'WRITE_FAILED', eligibility: null,\n        reason: String(error?.message || error).slice(0, 160) };",
+      "      return { code: 'RECORDED', eligibility: null, reason: '' };"), 'RED'],
 
   ['MUT-OB9 091에 sample_origin 기본값을 둠', P.mig91,
     s => s.replace('  sample_origin TEXT NOT NULL,',
@@ -1812,6 +1816,46 @@ const M = [
   ['MUT-OB11 단조 시계가 없을 때 Date.now로 메움', P.prr,
     s => s.replace('  return typeof p?.now === \'function\' ? p.now() : null;',
       '  return typeof p?.now === \'function\' ? p.now() : Date.now();'), 'RED'],
+
+  // ── ⑤B-2 봉인 — 실측의 뜻과 표의 보안 ──
+
+  ['MUT-OB12 VERIFIED_TESTNET을 LIVE에도 허용 (런타임)', P.obs,
+    s => s.replace("    if (i.env !== 'TESTNET') {", '    if (i.env === "MOCK_NEVER") {'),
+    'RED'],
+
+  ['MUT-OB12b VERIFIED_TESTNET을 LIVE에도 허용 (자격 정본)', P.elig,
+    s => s.replace('  if (i?.testnet !== true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-OB12c DB의 TESTNET 전용 제약을 제거', P.mig92,
+    s => s.replace("    OR env = 'TESTNET'", "    OR env <> 'NEVER'"), 'RED'],
+
+  ['MUT-OB13 positionAmt 0인데 실측으로 기록', P.elig,
+    s => s.replace('  if (amt === 0) {', '  if (false) {'), 'RED'],
+
+  ['MUT-OB14 반대 부호 포지션을 이 후보의 것으로 기록', P.elig,
+    s => s.replace('  if (observed !== i.side) {', '  if (false) {'), 'RED'],
+
+  ['MUT-OB14b 라우트가 절댓값을 자격 판정에 넘김', P.monitor,
+    s => s.replace('          signedPositionAmt: rr?.risk?.positionAmt ?? null,',
+      '          signedPositionAmt: rr?.risk?.positionAmt == null ? null'
+      + ' : Math.abs(rr.risk.positionAmt),'), 'RED'],
+
+  ['MUT-OB15 관측 표의 RLS를 끔', P.mig92,
+    s => s.replace('  ENABLE ROW LEVEL SECURITY;', '  DISABLE ROW LEVEL SECURITY;'), 'RED'],
+
+  ['MUT-OB15b service-only 정책을 제거', P.mig92,
+    s => s.replace('    TO service_role', '    TO public'), 'RED'],
+
+  ['MUT-OB15c 자격 미달을 쓰기 실패로 적음 (운영자가 DB를 뒤짐)', P.obs,
+    s => s.replace("      return { code: 'NOT_ELIGIBLE', eligibility: el.code, reason: el.reason };",
+      "      return { code: 'WRITE_FAILED', eligibility: el.code, reason: el.reason };"),
+    'RED'],
+
+  ['MUT-OB15d 어긋난 기존 줄을 UPDATE로 고침', P.mig92,
+    s => s.replace('  IF bad_rows > 0 THEN',
+      "  UPDATE public.exact100x_risk_observations SET env = 'TESTNET'\n"
+      + "    WHERE sample_origin = 'VERIFIED_TESTNET_OBSERVATION';\n"
+      + '  IF false THEN'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

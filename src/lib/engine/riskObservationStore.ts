@@ -24,6 +24,10 @@
 
 import type { PostEntryRiskMeasurement } from './postEntryRisk';
 import type { ExecutionIdentity } from './managedPosition';
+import {
+  verifiedTestnetObservationEligibility,
+  type RiskObservationEligibility,
+} from './riskObservationEligibility';
 
 /**
  * 이 관측이 **어디서 나왔는가.**
@@ -53,21 +57,47 @@ export interface RiskObservationInput {
     marginMode: 'isolated' | 'cross' | null;
   };
   bracketFreshness: string | null;
+  /**
+   * 거래소가 답한 **부호 있는** 수량. 실측 자격을 가리는 데 쓴다.
+   *
+   * `position.quantity`(절댓값)와 다른 값이다 — 부호가 사라지면 헤지
+   * 계좌의 반대 다리를 이 포지션으로 적게 된다.
+   */
+  signedPositionAmt: number | null;
+  /** 이 연결이 테스트넷인가. **못 읽었으면 null** */
+  testnet: boolean | null;
+  exchange: string | null;
 }
 
 export type RiskObservationCode =
   /** 적었다 */
   | 'RECORDED'
-  /** 적지 못했다. **감시 회차는 계속 돈다** */
+  /**
+   * 적지 못했다 — **DB 쓰기가 실패했다.**
+   *
+   * ★ 아래 `NOT_ELIGIBLE`과 **섞지 않는다.** 열린 포지션이 없는 것은
+   *   고장이 아니라 정상이고, 둘을 한 숫자로 세면 운영자가 고칠 것이
+   *   없는데 DB를 들여다보게 된다.
+   */
   | 'WRITE_FAILED'
   /** 출처를 고르지 않았다 — 실측으로 둔갑할 수 있어 막는다 */
   | 'ORIGIN_UNSPECIFIED'
-  /** MOCK을 실측이라고 적으려 했다 */
-  | 'ORIGIN_IMPOSSIBLE';
+  /** 환경이 그 출처와 맞지 않는다 (LIVE·MOCK을 실측이라고 적으려 함) */
+  | 'ORIGIN_IMPOSSIBLE'
+  /**
+   * 실측 표본 자격이 없다. **쓰기 실패가 아니다.**
+   *
+   * 열린 포지션이 없거나 방향이 다른 경우다. 값을 고치거나 출처를
+   * `SYNTHETIC_TEST_ONLY`로 바꿔 적지 않는다 — 실제 런타임 상황을
+   * 시험값이라고 부르면 그것도 출처 오염이다.
+   */
+  | 'NOT_ELIGIBLE';
 
 export interface RiskObservationResult {
   code: RiskObservationCode;
   reason: string;
+  /** 자격 판정 코드. 판정하지 않았으면 null */
+  eligibility: RiskObservationEligibility | null;
 }
 
 const ORIGINS: RiskSampleOrigin[] = [
@@ -153,23 +183,40 @@ export async function recordRiskObservation(
   // ★ 출처를 고르지 않았으면 **적지 않는다.** 기본값을 주면 시험
   //   주입값이 조용히 실측으로 쌓이고, 그 표로 낸 통계는 거짓이 된다.
   if (!ORIGINS.includes(i?.sampleOrigin as any)) {
-    return { code: 'ORIGIN_UNSPECIFIED',
+    return { code: 'ORIGIN_UNSPECIFIED', eligibility: null,
       reason: `표본 출처를 고르지 않았습니다 (${String(i?.sampleOrigin)})`
         + ' — 실측과 시험값을 섞으면 ⑤B-3의 통계가 거짓이 됩니다' };
   }
-  if (i.sampleOrigin === 'VERIFIED_TESTNET_OBSERVATION' && i.env === 'MOCK') {
-    return { code: 'ORIGIN_IMPOSSIBLE',
-      reason: 'MOCK 환경의 값을 실제 거래소 관측이라고 적을 수 없습니다' };
+  if (i.sampleOrigin === 'VERIFIED_TESTNET_OBSERVATION') {
+    // ★ **TESTNET에서만 성립한다.** 이름 그대로다 — LIVE를
+    //   VERIFIED_TESTNET으로 적는 경로는 0이어야 한다. LIVE 관측이
+    //   필요해지면 별도 출처를 별도로 설계한다.
+    if (i.env !== 'TESTNET') {
+      return { code: 'ORIGIN_IMPOSSIBLE', eligibility: null,
+        reason: `${i.env} 환경의 값을 VERIFIED_TESTNET으로 적을 수 없습니다`
+          + ' — 환경을 섞으면 표본이 오염됩니다' };
+    }
+    // ★ **실제로 열린 포지션인가.** 자격 판정은 정본 한 곳이다.
+    const el = verifiedTestnetObservationEligibility({
+      testnet: i.testnet, exchange: i.exchange, side: i.side,
+      executionIdentity: i.executionIdentity, positionAmt: i.signedPositionAmt,
+    });
+    if (!el.eligible) {
+      // **쓰기 실패가 아니다.** 값을 고치거나 출처를 바꿔 적지 않는다.
+      return { code: 'NOT_ELIGIBLE', eligibility: el.code, reason: el.reason };
+    }
   }
   try {
     const { error } = await sb.from('exact100x_risk_observations')
       .insert(riskObservationRow(i));
     if (error) {
-      return { code: 'WRITE_FAILED', reason: String(error?.message || error).slice(0, 160) };
+      return { code: 'WRITE_FAILED', eligibility: null,
+        reason: String(error?.message || error).slice(0, 160) };
     }
-    return { code: 'RECORDED', reason: '' };
+    return { code: 'RECORDED', eligibility: null, reason: '' };
   } catch (e: any) {
     // **호출부를 실패시키지 않는다.** 관측을 못 적었다고 감시를 끄지 않는다.
-    return { code: 'WRITE_FAILED', reason: String(e?.message || e).slice(0, 160) };
+    return { code: 'WRITE_FAILED', eligibility: null,
+      reason: String(e?.message || e).slice(0, 160) };
   }
 }

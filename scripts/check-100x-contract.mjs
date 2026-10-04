@@ -4363,6 +4363,29 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       {
         const OBS = 'src/lib/engine/riskObservationStore.ts';
         const om = await loadModule(OBS, '위험 관측 적재기');
+        // 아래 두 블록이 함께 쓰므로 **상위 스코프**에 둔다.
+        const N0 = 1_780_000_000_000;
+        const MEAS = {
+          status: 'MEASURED', reason: '', internalTrustworthy: true,
+          side: 'LONG', markPrice: 50_000,
+          exchangeLiquidationPrice: 49_700, estimatedLiquidationPrice: 49_690,
+          exchangeHeadroomPct: 0.6, estimatedHeadroomPct: 0.62,
+          absoluteDelta: 10, deltaPct: 0.02, liquidationSources: 'BOTH_AVAILABLE',
+          entryAdverseDistancePct: 0.4, entryLiquidationDistancePctRaw: 0.6,
+          provenance: {
+            positionRiskSource: 'V2',
+            positionRiskRequestStartedAtMs: N0 - 180, positionRiskReceivedAtMs: N0 - 100,
+            positionRiskWallClockDeltaMs: 80,
+            positionRiskElapsedMs: 74, accountElapsedMs: null, helperElapsedMs: 74,
+            accountRequestStartedAtMs: null, accountReceivedAtMs: null,
+            positionUpdateTimeMs: N0 - 3_600_000,
+            markExchangeTimeMs: N0 - 200, markReceivedAtMs: N0 - 150,
+            markObservedAtMs: N0 - 150, bracketObservedAtMs: N0 - 60_000,
+          },
+          freshness: { code: 'OK' },
+          internal: { code: 'ADVERSE_DISTANCE_UNKNOWN', entryTierIndex: 1,
+            tier: { mmr: 0.005, maintAmount: 50 } },
+        };
         if (!om || typeof om.recordRiskObservation !== 'function'
             || typeof om.riskObservationRow !== 'function') {
           err(`${OBS}: 관측 적재기를 불러오지 못했습니다`);
@@ -4373,28 +4396,7 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
               err(`${OBS}: 적재기가 ${bad}를 내보냅니다 — 관측에 주문 권한이 붙었습니다`);
             }
           }
-          const N = 1_780_000_000_000;
-          const MEAS = {
-            status: 'MEASURED', reason: '', internalTrustworthy: true,
-            side: 'LONG', markPrice: 50_000,
-            exchangeLiquidationPrice: 49_700, estimatedLiquidationPrice: 49_690,
-            exchangeHeadroomPct: 0.6, estimatedHeadroomPct: 0.62,
-            absoluteDelta: 10, deltaPct: 0.02, liquidationSources: 'BOTH_AVAILABLE',
-            entryAdverseDistancePct: 0.4, entryLiquidationDistancePctRaw: 0.6,
-            provenance: {
-              positionRiskSource: 'V2',
-              positionRiskRequestStartedAtMs: N - 180, positionRiskReceivedAtMs: N - 100,
-              positionRiskWallClockDeltaMs: 80,
-              positionRiskElapsedMs: 74, accountElapsedMs: null, helperElapsedMs: 74,
-              accountRequestStartedAtMs: null, accountReceivedAtMs: null,
-              positionUpdateTimeMs: N - 3_600_000,
-              markExchangeTimeMs: N - 200, markReceivedAtMs: N - 150,
-              markObservedAtMs: N - 150, bracketObservedAtMs: N - 60_000,
-            },
-            freshness: { code: 'OK' },
-            internal: { code: 'ADVERSE_DISTANCE_UNKNOWN', entryTierIndex: 1,
-              tier: { mmr: 0.005, maintAmount: 50 } },
-          };
+          const N = N0;
           const inp = (o = {}) => ({
             sampleOrigin: 'SYNTHETIC_TEST_ONLY', env: 'TESTNET',
             connectionId: 'c1', symbol: 'BTCUSDT', side: 'LONG',
@@ -4507,6 +4509,161 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           for (const bad of ['sendSymbolClose', 'prepareSymbolClose', 'runExitAuthority']) {
             if (body.includes(bad)) {
               err(`${MON5}: 관측 적재 블록이 ${bad}를 부릅니다 — 주문 0건이어야 합니다`);
+            }
+          }
+        }
+
+        // ── 실측 자격 정본 — **열린 포지션이어야 실측이다** ──
+        {
+          const ELG = 'src/lib/engine/riskObservationEligibility.ts';
+          const em = await loadModule(ELG, '실측 표본 자격 정본');
+          if (!em || typeof em.verifiedTestnetObservationEligibility !== 'function') {
+            err(`${ELG}: 자격 정본을 불러오지 못했습니다`);
+          } else {
+            const E = em.verifiedTestnetObservationEligibility;
+            const EID = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+              contractVersion: 2 };
+            const b = (o = {}) => ({ testnet: true, exchange: 'binance', side: 'LONG',
+              executionIdentity: EID, positionAmt: 0.2, ...o });
+            if (E(b()).code !== 'ELIGIBLE') {
+              err(`${ELG}: 정상 TESTNET 관측이 자격 미달입니다 (${E(b()).code})`);
+            }
+            if (E(b({ side: 'SHORT', positionAmt: -0.2 })).code !== 'ELIGIBLE') {
+              err(`${ELG}: SHORT 음수 수량이 자격 미달입니다`);
+            }
+            // ★ LIVE를 VERIFIED_TESTNET으로 적지 않는가
+            for (const t of [false, null, undefined]) {
+              if (E(b({ testnet: t })).eligible !== false) {
+                err(`${ELG}: testnet=${String(t)}인데 실측 자격을 줍니다`
+                  + ' — LIVE 관측이 TESTNET 통계로 들어갑니다');
+              }
+            }
+            // ★ 열린 포지션인가
+            if (E(b({ positionAmt: 0 })).code !== 'NO_POSITION') {
+              err(`${ELG}: 수량 0을 열린 포지션으로 봅니다`
+                + ' — 없는 포지션의 청산가가 실측 통계에 들어갑니다');
+            }
+            // ★ 방향이 맞는가
+            if (E(b({ side: 'LONG', positionAmt: -0.2 })).code !== 'SIDE_MISMATCH'
+                || E(b({ side: 'SHORT', positionAmt: 0.2 })).code !== 'SIDE_MISMATCH') {
+              err(`${ELG}: 부호가 반대인 포지션을 이 후보의 것으로 봅니다`);
+            }
+            // ★ 못 읽은 수량을 0으로 읽지 않는가
+            for (const q of [null, undefined, NaN, Infinity, 'x', true]) {
+              if (E(b({ positionAmt: q })).code !== 'POSITION_UNUSABLE') {
+                err(`${ELG}: 수량 ${String(q)}를 쓸 수 있다고 봅니다`);
+              }
+            }
+            if (E(b({ executionIdentity: null })).code !== 'IDENTITY_MISMATCH'
+                || E(b({ exchange: 'gate' })).code !== 'VENUE_UNSUPPORTED') {
+              err(`${ELG}: 계약·거래소 관문이 열려 있습니다`);
+            }
+            // 행동 칸이 없는가 (종료 판정이 아니다)
+            for (const k of Object.keys(E(b()))) {
+              if (/action|close|exit|order|send/i.test(k)) {
+                err(`${ELG}: 자격 판정에 행동 칸이 있습니다 (${k})`);
+              }
+            }
+          }
+
+          // 적재기가 **정본에게 묻는가**, 그리고 쓰기 실패와 섞지 않는가
+          if (om && typeof om.recordRiskObservation === 'function') {
+            const seen2 = [];
+            const sb2 = { from: () => ({ insert: async (r4) => {
+              seen2.push(r4); return { error: null }; } }) };
+            const verified = (o = {}) => ({
+              sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION', env: 'TESTNET',
+              connectionId: 'c1', symbol: 'BTCUSDT', side: 'LONG',
+              executionIdentity: { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+                contractVersion: 2 },
+              measurement: MEAS,
+              position: { entryPrice: 50_000, quantity: 0.2, leverage: 100,
+                marginMode: 'isolated' },
+              bracketFreshness: 'FRESH',
+              signedPositionAmt: 0.2, testnet: true, exchange: 'binance', ...o,
+            });
+            // LIVE/MOCK은 실측이 될 수 없다
+            for (const env2 of ['LIVE', 'MOCK']) {
+              seen2.length = 0;
+              const r5 = await om.recordRiskObservation(sb2, verified({ env: env2 }));
+              if (r5?.code !== 'ORIGIN_IMPOSSIBLE' || seen2.length !== 0) {
+                err(`${OBS}: ${env2} 관측이 VERIFIED_TESTNET으로 쌓입니다`);
+              }
+            }
+            // 열린 포지션이 아니면 **쓰기 실패가 아니라** 자격 미달이다
+            for (const amt of [0, -0.2, null]) {
+              seen2.length = 0;
+              const r6 = await om.recordRiskObservation(sb2,
+                verified({ signedPositionAmt: amt }));
+              if (r6?.code !== 'NOT_ELIGIBLE' || seen2.length !== 0) {
+                err(`${OBS}: 수량 ${String(amt)}인데 실측으로 적습니다 (${r6?.code})`);
+              }
+              if (r6?.code === 'WRITE_FAILED') {
+                err(`${OBS}: 자격 미달을 쓰기 실패로 적습니다 — 고칠 것이 없는데 DB를 봅니다`);
+              }
+            }
+            // 정상 경로는 그대로 적힌다
+            seen2.length = 0;
+            if ((await om.recordRiskObservation(sb2, verified()))?.code !== 'RECORDED'
+                || seen2[0]?.sample_origin !== 'VERIFIED_TESTNET_OBSERVATION') {
+              err(`${OBS}: 실제 열린 TESTNET 포지션을 실측으로 적지 않습니다`);
+            }
+          }
+
+          // 라우트가 **부호 있는 수량**을 넘기는가
+          const monSig = code(MON5);
+          // ★ **호출부**를 앵커로 잡는다. `recordRiskObservation`의 첫
+          //   등장은 import 줄이고, 거기서 창을 자르면 실제 인자를
+          //   보기도 전에 끝난다(실제로 그래서 한 번 오탐이 났다).
+          const iSig = monSig.indexOf('await recordRiskObservation(');
+          const sigBody = iSig < 0 ? '' : monSig.slice(iSig, iSig + 2500);
+          if (iSig < 0) err(`${MON5}: 관측 적재 호출부를 찾지 못했습니다`);
+          if (iSig >= 0 && !/signedPositionAmt:\s*rr\?\.risk\?\.positionAmt/.test(sigBody)) {
+            err(`${MON5}: 실측 자격 판정에 부호 있는 수량을 넘기지 않습니다`
+              + ' — 절댓값이면 헤지 계좌의 반대 다리를 이 포지션으로 적습니다');
+          }
+        }
+
+        // ── 관측 표의 **보안** — RLS 없이 열어 두지 않는가 ──
+        //
+        //   이 표에는 connection_id·방향·수량·진입가·청산가가 들어간다.
+        //   public 스키마에 무보호로 두면 anon 키 하나로 전부 읽힌다.
+        //   048·040·026은 전부 켜 두었다 — 091만 빠져 있었다.
+        {
+          const sec = read('supabase/migrations/091_exact100x_risk_observations.sql')
+            + '\n' + read('supabase/migrations/092_exact100x_risk_observations_rls.sql');
+          if (!sec.trim()) {
+            err('관측 표 마이그레이션을 찾지 못했습니다');
+          } else {
+            if (!/ALTER TABLE[\s\S]{0,120}exact100x_risk_observations[\s\S]{0,80}ENABLE ROW LEVEL SECURITY/i
+                .test(sec)) {
+              err('exact100x_risk_observations: RLS가 켜져 있지 않습니다'
+                + ' — connection_id·포지션·청산가가 무보호로 열립니다');
+            }
+            if (!/CREATE POLICY[\s\S]{0,200}TO service_role/i.test(sec)) {
+              err('exact100x_risk_observations: service_role 정책이 없습니다');
+            }
+            // anon·authenticated에 쓰기를 열지 않는가
+            for (const role of ['anon', 'authenticated']) {
+              const re = new RegExp(`CREATE POLICY[\\s\\S]{0,300}TO\\s+[^;]*\\b${role}\\b`, 'i');
+              if (re.test(sec)) {
+                err(`exact100x_risk_observations: ${role}에 정책을 열었습니다`
+                  + ' — 이 표는 service 경로 전용입니다');
+              }
+            }
+            // VERIFIED_TESTNET → TESTNET 제약이 DB에도 있는가
+            if (!/CHECK\s*\([\s\S]{0,200}VERIFIED_TESTNET_OBSERVATION[\s\S]{0,120}env\s*=\s*'TESTNET'/i
+                .test(sec)) {
+              err('exact100x_risk_observations: VERIFIED_TESTNET → TESTNET 제약이 없습니다'
+                + ' — 런타임만 막으면 다른 경로가 생겼을 때 DB가 받아 줍니다');
+            }
+            // 기존 데이터를 고쳐서 맞추지 않는가
+            for (const bad of [/\bUPDATE\s+public\.exact100x/i,
+                               /\bDELETE\s+FROM\s+public\.exact100x/i]) {
+              if (bad.test(sec)) {
+                err('exact100x_risk_observations: 기존 줄을 고쳐서 제약을 맞춥니다'
+                  + ' — 어긋난 줄이 있었다는 사실이 사라집니다');
+              }
             }
           }
         }

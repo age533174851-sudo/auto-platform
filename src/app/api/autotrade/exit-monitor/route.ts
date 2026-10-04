@@ -786,8 +786,17 @@ async function runLifecycleSweep(
     measured: number; unusable: number; samples: any[];
     /** ⑤B-2 — 표에 **덧붙인** 관측 수. 판단이 아니라 적은 줄 수다 */
     recorded: number;
-    /** 적지 못한 수. **조용히 사라지면 분포가 왜곡된다** */
+    /** DB 쓰기가 실패한 수. **조용히 사라지면 분포가 왜곡된다** */
     recordFailed: number;
+    /**
+     * 실측 표본 **자격이 없던** 수. 쓰기 실패와 **다른 숫자다**.
+     *
+     * 열린 포지션이 없거나 방향이 다른 경우다 — 고장이 아니라 정상이고,
+     * 쓰기 실패와 합치면 운영자가 고칠 것이 없는데 DB를 들여다본다.
+     */
+    notEligible: number;
+    /** 자격 없음의 사유별 개수 */
+    notEligibleBy: Record<string, number>;
   };
   /** 주문 장부를 어떤 모양으로 읽었는가. 못 읽었으면 null */
   projection: 'RISK' | 'IDENTITY' | 'LEGACY' | null;
@@ -804,7 +813,8 @@ async function runLifecycleSweep(
     authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
     // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
     postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
-      recorded: 0, recordFailed: 0 },
+      recorded: 0, recordFailed: 0, notEligible: 0,
+      notEligibleBy: {} as Record<string, number> },
     results: [] as any[], summary: '', error: null as string | null,
   };
 
@@ -1170,6 +1180,9 @@ async function runLifecycleSweep(
         //     거래소를 조회한 것이므로 실측이다. 시험·검사기가 부를 때는
         //     그쪽이 SYNTHETIC_TEST_ONLY를 넘긴다.
         //   ★ 돌려받은 값으로 **분기하지 않는다.** 세기만 한다.
+        //   ★ **열린 포지션이 아니면 실측이 아니다.** 자격 판정은
+        //     `recordRiskObservation`이 정본에게 묻는다 — 여기서 미리
+        //     거르면 판단이 두 곳이 된다.
         const rec = await recordRiskObservation(sb, {
           sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
           env: venue.testnet ? 'TESTNET' : 'LIVE',
@@ -1185,9 +1198,18 @@ async function runLifecycleSweep(
               : rr?.risk?.marginType === 'cross' ? 'cross' : null,
           },
           bracketFreshness: br?.freshness ?? null,
+          // **부호를 그대로** 넘긴다. 절댓값을 주면 방향을 대조할 수 없다.
+          signedPositionAmt: rr?.risk?.positionAmt ?? null,
+          testnet: venue.testnet ?? null,
+          exchange: venue.exchange ?? null,
         });
         if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;
-        else out.postEntryRisk.recordFailed += 1;
+        else if (rec.code === 'NOT_ELIGIBLE' || rec.code === 'ORIGIN_IMPOSSIBLE') {
+          // **쓰기 실패가 아니다.** 따로 센다.
+          out.postEntryRisk.notEligible += 1;
+          const k = rec.eligibility ?? rec.code;
+          out.postEntryRisk.notEligibleBy[k] = (out.postEntryRisk.notEligibleBy[k] ?? 0) + 1;
+        } else out.postEntryRisk.recordFailed += 1;
         out.postEntryRisk.samples.push({
           symbol: c.symbol, side: c.side,
           contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
@@ -1215,6 +1237,10 @@ async function runLifecycleSweep(
           markFreshness: m.freshness?.code ?? null,
           provenance: m.provenance,
           recorded: rec.code,
+          // 실제 런타임 상황을 그대로 남긴다 — 표본에는 안 넣지만
+          // 운영자는 "포지션이 없더라"를 볼 수 있어야 한다.
+          eligibility: rec.eligibility,
+          eligibilityReason: rec.code === 'RECORDED' ? null : rec.reason,
         });
       } catch (e: any) {
         // 측정 실패는 **감시 상태**다. 종료 사유가 아니다.
@@ -1421,6 +1447,7 @@ async function runLifecycleSweep(
         + `${out.postEntryRisk.unusable ? ` · 측정 불가 ${out.postEntryRisk.unusable}건` : ''}`
         + `${out.postEntryRisk.recorded ? ` · 관측 기록 ${out.postEntryRisk.recorded}건` : ''}`
         + `${out.postEntryRisk.recordFailed ? ` · 기록 실패 ${out.postEntryRisk.recordFailed}건` : ''}`
+        + `${out.postEntryRisk.notEligible ? ` · 실측 자격 불충족 ${out.postEntryRisk.notEligible}건` : ''}`
         + ' (측정만, 종료 0건)'
       : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');

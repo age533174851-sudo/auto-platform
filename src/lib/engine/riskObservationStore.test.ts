@@ -45,6 +45,9 @@ const input = (over: Partial<RiskObservationInput> = {}): RiskObservationInput =
   measurement: MEASUREMENT,
   position: { entryPrice: 50_000, quantity: 0.2, leverage: 100, marginMode: 'isolated' },
   bracketFreshness: 'FRESH',
+  signedPositionAmt: 0.2,
+  testnet: true,
+  exchange: 'binance',
   ...over,
 });
 
@@ -118,13 +121,60 @@ export function runRiskObservationStoreTests() {
     }
   });
 
-  test('★ MOCK을 실측이라고 적을 수 없다', async () => {
+  test('★ MOCK·LIVE를 실측이라고 적을 수 없다', async () => {
+    for (const env of ['MOCK', 'LIVE'] as const) {
+      const { sb, rows } = fakeDb();
+      const r = await recordRiskObservation(sb, input({
+        sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION', env,
+      }));
+      eq(r.code, 'ORIGIN_IMPOSSIBLE', `${env} 환경`);
+      eq(rows.length, 0, `★ ${env} 관측이 TESTNET 실측으로 쌓였다`);
+    }
+  });
+
+  test('★ 열린 포지션이 아니면 실측으로 적지 않는다 — 쓰기 실패가 아니다', async () => {
+    for (const [amt, code] of [[0, 'NO_POSITION'], [-0.2, 'SIDE_MISMATCH'],
+                               [null, 'POSITION_UNUSABLE']] as Array<[any, string]>) {
+      const { sb, rows } = fakeDb();
+      const r = await recordRiskObservation(sb, input({
+        sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION', signedPositionAmt: amt,
+      }));
+      eq(r.code, 'NOT_ELIGIBLE', `수량 ${String(amt)}`);
+      eq(r.eligibility, code, '자격 사유를 그대로 전한다');
+      eq(rows.length, 0, '★ 자격 없는 줄이 실측 통계에 쌓였다');
+    }
+  });
+
+  test('★ 자격 없음을 SYNTHETIC으로 바꿔 적지 않는다', async () => {
+    const { sb, rows } = fakeDb();
+    await recordRiskObservation(sb, input({
+      sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION', signedPositionAmt: 0,
+    }));
+    eq(rows.length, 0,
+      '★ 실제 런타임 상황을 시험값이라고 적었다 — 그것도 출처 오염이다');
+  });
+
+  test('실제 열린 TESTNET 포지션은 실측으로 적는다', async () => {
     const { sb, rows } = fakeDb();
     const r = await recordRiskObservation(sb, input({
-      sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION', env: 'MOCK',
+      sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
     }));
-    eq(r.code, 'ORIGIN_IMPOSSIBLE');
-    eq(rows.length, 0);
+    eq(r.code, 'RECORDED');
+    eq(rows[0].row.sample_origin, 'VERIFIED_TESTNET_OBSERVATION');
+    eq(rows[0].row.env, 'TESTNET');
+  });
+
+  test('★ 위험 데이터가 불완전해도 실측은 실측이다', async () => {
+    // 계정 조회가 실패해 배율·마진 모드를 못 읽은 경우.
+    // VERIFIED의 뜻은 "열린 TESTNET 포지션에서 얻었다"이지
+    // "모든 데이터가 완벽했다"가 아니다.
+    const { sb, rows } = fakeDb();
+    const r = await recordRiskObservation(sb, input({
+      sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
+      position: { entryPrice: 50_000, quantity: 0.2, leverage: null, marginMode: null },
+    }));
+    eq(r.code, 'RECORDED', '★ 불완전한 데이터를 자격 미달로 읽었다');
+    eq(rows[0].row.leverage, null, '못 읽은 것은 null로 남는다');
   });
 
   test('★ 적지 못하면 **세어서 돌려준다** — 조용히 삼키지 않는다', async () => {
