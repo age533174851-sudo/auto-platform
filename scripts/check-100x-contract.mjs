@@ -4900,6 +4900,38 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           }
         }
 
+        // ★ ESC3 — 거래소 계층이 평균가를 **실제로 끌어올리는가.**
+        //
+        //   `binanceFutures`는 node `crypto` 때문에 검사기가 컴파일하지
+        //   못한다. 그래서 주입한 가짜 `sendClose`만 보면 그 계층이
+        //   값을 버려도 통과한다(실제로 한 번 새 나갔다). 원본을 본다.
+        {
+          const bfRaw = code('src/lib/exchanges/binanceFutures.ts');
+          const i2 = bfRaw.indexOf('export async function sendPreparedClose');
+          const body4 = i2 < 0 ? '' : bfRaw.slice(i2, i2 + 1800);
+          if (i2 < 0) {
+            err('binanceFutures: sendPreparedClose를 찾지 못했습니다');
+          } else {
+            if (!/reportedAvgPrice/.test(body4)) {
+              err('binanceFutures.sendPreparedClose가 평균 체결가를 돌려주지 않습니다'
+                + ' — 그 값이 없으면 종료 슬리피지를 낼 수 없습니다');
+            }
+            const m4 = /const\s+reportedAvgPrice\s*=([^;]*);/.exec(body4);
+            if (!m4) {
+              err('binanceFutures.sendPreparedClose: 평균가를 응답에서 꺼내지 않습니다');
+            } else if (!/\br\b|raw/.test(m4[1]) || /^\s*null\s*$/.test(m4[1])) {
+              err(`binanceFutures.sendPreparedClose가 평균가를 버립니다 (${m4[1].trim()})`
+                + ' — 응답에서 꺼내야 합니다');
+            }
+          }
+          const vopRaw = code('src/lib/engine/venuePositionOps.ts');
+          const i3 = vopRaw.indexOf('export async function sendSymbolClose');
+          const body5 = i3 < 0 ? '' : vopRaw.slice(i3, i3 + 2200);
+          if (i3 >= 0 && !/reportedAvgPrice:\s*r\?\.reportedAvgPrice/.test(body5)) {
+            err('venuePositionOps.sendSymbolClose가 평균 체결가를 통과시키지 않습니다');
+          }
+        }
+
         // 093 보안
         const mig93 = read('supabase/migrations/093_exact100x_exit_escape_observations.sql');
         if (!mig93.trim()) err('093 마이그레이션이 없습니다');
@@ -4934,11 +4966,14 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
 
         // 감시 라우트의 계측 적재가 **주문을 내지 않는가**
         const monEsc = code(MON5);
-        const iEsc = monEsc.indexOf('recordEscapeObservation(sb');
-        if (iEsc < 0) {
+        // ★ **블록 전체를 본다.** `recordEscapeObservation` 호출부에서
+        //   창을 시작하면 그 **앞**에 끼워 넣은 주문 호출을 놓친다
+        //   (실제로 ESC10이 그렇게 새 나갔다).
+        const iEsc = monEsc.indexOf("if (r.attemptedWrite === true) {");
+        if (iEsc < 0 || monEsc.indexOf('recordEscapeObservation(sb') < 0) {
           err(`${MON5}: 탈출 계측을 적재하지 않습니다`);
         } else {
-          const body3 = monEsc.slice(iEsc, iEsc + 2500);
+          const body3 = monEsc.slice(iEsc, iEsc + 3500);
           for (const bad of ['sendSymbolClose', 'prepareSymbolClose', 'runExitAuthority']) {
             if (body3.includes(bad)) {
               err(`${MON5}: 계측 적재 블록이 ${bad}를 부릅니다 — 주문 0건이어야 합니다`);
