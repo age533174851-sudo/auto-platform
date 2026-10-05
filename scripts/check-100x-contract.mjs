@@ -18,7 +18,7 @@
 // 두고 조건만 `if (false)`로 바꾸면 통과했고, 호출을 stub으로 바꿔도
 // import에 이름이 남아 통과했다. 그래서 여기서는 **정본을 컴파일해서 실제로
 // 부르고**, 배선은 "이름이 있는가"가 아니라 "옛 판단이 사라졌는가"까지 본다.
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -91,9 +91,33 @@ const collect = (entry) => {
   return files;
 };
 
+// ── 임시 작업판을 치운다 ──
+//
+// `loadModule`은 호출마다 `mkdtemp`로 작업판을 만들어 의존 파일을 복사하고
+// tsc로 컴파일한다. 그런데 **그 디렉터리를 지우지 않았다.**
+//
+// 검사기 한 번에 `loadModule`을 열 번 넘게 부르고, 돌연변이 전수는 검사기를
+// 376번 돌린다. 한 번의 전수가 수천 개를 남기고, 그것이 세션 디스크 할당량을
+// 먹어 전수가 **ENOSPC로 죽는다.** 실제로 그 상태에서 소스 파일이 중간에서
+// 잘렸다(`positionSizing.ts`). /tmp에 190,615개가 쌓여 있었다.
+//
+// `import`가 끝난 뒤에도 모듈이 평가될 수 있으므로 **바로 지우지 않고**
+// 프로세스가 끝날 때 한꺼번에 치운다.
+const probeDirs = [];
+const cleanProbeDirs = () => {
+  while (probeDirs.length) {
+    try { rmSync(probeDirs.pop(), { recursive: true, force: true }); } catch { /* 지우기 실패는 판정에 영향 없다 */ }
+  }
+};
+process.on('exit', cleanProbeDirs);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { cleanProbeDirs(); process.exit(130); });
+}
+
 const loadModule = async (entry, what) => {
   const files = collect(entry);
   const dir = mkdtempSync(join(tmpdir(), 'traigo-100x-'));
+  probeDirs.push(dir);
   for (const [f, src] of files) {
     if (src == null) { err(`${what}: ${f}을(를) 읽지 못했습니다`); return null; }
     const dest = join(dir, f);
