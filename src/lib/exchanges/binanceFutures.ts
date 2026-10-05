@@ -895,7 +895,23 @@ export async function prepareClosePosition(
  */
 export async function sendPreparedClose(
   key: string, secret: string, p: PreparedClose, testnet = true,
-): Promise<{ success: boolean; closedQty: number; fullClose: boolean; message: string }> {
+): Promise<{
+  success: boolean; closedQty: number; fullClose: boolean; message: string;
+  /**
+   * 거래소가 응답에 적어 준 **평균 체결가**(`avgPrice`). 없으면 null.
+   *
+   * ★ 이름이 `fillPrice`가 아닌 이유: 응답 값을 **그대로 보존**한 것이고
+   *   우리가 "체결가"라는 해석을 얹은 값이 아니다. 0은 "안 줬다"이지
+   *   "0원에 체결"이 아니므로 null로 눕힌다 — 0으로 두면 슬리피지가
+   *   전부 100%가 된다.
+   *
+   * ★ 예전에는 이 값을 **버렸다.** 그래서 종료 슬리피지를 낼 자료가
+   *   저장소 어디에도 없었다(⑤B-3A 감사가 찾은 구멍).
+   */
+  reportedAvgPrice: number | null;
+  exchangeOrderId: string | null;
+  executedQty: number | null;
+}> {
   const r = await placeFuturesOrder(key, secret, {
     symbol: p.symbol, side: p.side, type: 'MARKET', quantity: p.quantity,
     // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.
@@ -903,11 +919,24 @@ export async function sendPreparedClose(
     // **멱등 키.** 거래소가 중복을 알아볼 기회를 주는 추가 방어층이다.
     ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),
   }, testnet);
+  // **응답의 숫자를 지어내지 않는다.** 0·NaN·없음은 전부 null이다.
+  const num = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const raw: any = (r as any)?.raw ?? {};
+  // **raw 응답 전체를 들고 다니지 않는다.** 필요한 세 칸만 꺼낸다 —
+  // 서명·키가 섞인 payload를 telemetry로 흘리지 않기 위해서다.
+  const reportedAvgPrice = num((r as any)?.price) ?? num(raw.avgPrice);
+  const exchangeOrderId = raw.orderId == null ? null : String(raw.orderId);
+  const executedQty = num(raw.executedQty);
   if (!r.success) {
-    return { success: false, closedQty: 0, fullClose: false, message: r.message };
+    return { success: false, closedQty: 0, fullClose: false, message: r.message,
+      reportedAvgPrice, exchangeOrderId, executedQty };
   }
   return { success: true, closedQty: p.quantity, fullClose: p.fullClose,
-    message: `${p.quantity} 종료 (${p.reason})` };
+    message: `${p.quantity} 종료 (${p.reason})`,
+    reportedAvgPrice, exchangeOrderId, executedQty };
 }
 
 /**

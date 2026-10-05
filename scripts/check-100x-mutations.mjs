@@ -128,6 +128,10 @@ const P = {
   mig91: 'supabase/migrations/091_exact100x_risk_observations.sql',
   mig92: 'supabase/migrations/092_exact100x_risk_observations_rls.sql',
   elig: 'src/lib/engine/riskObservationEligibility.ts',
+  esc: 'src/lib/engine/escapeObservationStore.ts',
+  slip: 'src/lib/engine/closeSlippage.ts',
+  mclock: 'src/lib/system/monotonicClock.ts',
+  mig93: 'supabase/migrations/093_exact100x_exit_escape_observations.sql',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
@@ -1525,8 +1529,11 @@ const M = [
   ['MUT-EX22 LIVE 차단 제거 (전용 100배를 실전에 엶)', P.gate,
     s => s.replace("    modes: ['TESTNET'],", "    modes: ['TESTNET', 'LIVE_SMALL'],"), 'RED'],
 
+  // ★ 앵커가 옮겨갔다 — ⑤B-3A-1 계측이 `stillMine`을 래퍼로 감쌌다.
+  //   **지우지 않고** 같은 고장(재검증 제거)을 찌르는 새 자리로 옮긴다.
   ['MUT-EX23 쓰기 직전 울타리 재검증 제거', P.xrun,
-    s => s.replace('    stillMine: deps.revalidateFence,', '    stillMine: undefined,'), 'RED'],
+    s => s.replace('      const mine = await deps.revalidateFence();', '      const mine = true;'),
+    'RED'],
 
   ['MUT-EX24 기록 전 죽은 뒤 재실행에서 flat을 무시하고 또 보냄', P.xrun,
     s => s.replace("    if (code === 'ALREADY_FLAT') {", '    if (false) {'), 'RED'],
@@ -1535,9 +1542,10 @@ const M = [
     s => s.replace("          : { ok: false, found: false, qty: null, side: null as 'LONG' | 'SHORT' | null };",
                    "          : { ok: true, found: true, qty: 1, side: candidate.positionIdentity.side };"), 'RED'],
 
+  // ★ 앵커가 옮겨갔다 — ALREADY_FLAT 반환에 timing이 붙었다. 뜻은 같다.
   ['MUT-EX26 ALREADY_FLAT인데 주문을 보냈다고 적음', P.xrun,
-    s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n      });',
-                   '        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        attemptedWrite: true,\n      });'), 'RED'],
+    s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        timing,',
+                   '        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        attemptedWrite: true, timing,'), 'RED'],
 
   ['MUT-EX27 종료 의도 멱등 키를 주문에 안 붙임 (거래소가 중복을 알아볼 수 없음)', P.bfapi,
     s => s.replace("    // **멱등 키.** 거래소가 중복을 알아볼 기회를 주는 추가 방어층이다.\n"
@@ -1813,7 +1821,9 @@ const M = [
     s => s.replace('    status: m.status,',
       '    headroom_ratio_threshold: 0.35,\n    status: m.status,'), 'RED'],
 
-  ['MUT-OB11 단조 시계가 없을 때 Date.now로 메움', P.prr,
+  // ★ 앵커가 옮겨갔다 — 단조 시계 정본이 `system/monotonicClock`으로
+  //   갔다(두 벌이 되지 않게 모았다). **지우지 않고** 새 자리로 옮긴다.
+  ['MUT-OB11 단조 시계가 없을 때 Date.now로 메움', P.mclock,
     s => s.replace('  return typeof p?.now === \'function\' ? p.now() : null;',
       '  return typeof p?.now === \'function\' ? p.now() : Date.now();'), 'RED'],
 
@@ -1879,6 +1889,77 @@ const M = [
   ['MUT-OB16c 계약 모양 검사를 건너뜀 (이름만으로 Exact100X)', P.plan,
     s => s.replace('  for (const [okShape, why] of shape) {', '  for (const [okShape, why] of []) {'),
     'RED'],
+
+  // ── ⑤B-3A-1 탈출 계측 (ESC) ──
+  //
+  //   "언제 닫을지"가 아니라 "닫는 데 얼마나 걸리는지"를 제대로 재는가.
+  //   잘못 잰 숫자로 문턱을 유도하면 틀린 문턱이 근거 있어 보인다.
+
+  ['MUT-ESC1 submit duration을 Date.now 차로 계산', P.mclock,
+    s => s.replace("  return typeof p?.now === 'function' ? p.now() : null;",
+      '  return Date.now();'), 'RED'],
+
+  ['MUT-ESC2 critical window 측정 사이에 await를 끼움', P.xrun,
+    s => s.replace('      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());',
+      '      await deps.readAfter();\n'
+      + '      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());'),
+    'RED'],
+
+  ['MUT-ESC2b critical window를 재지 않고 0으로 적음', P.xrun,
+    s => s.replace('      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());',
+      '      timing.criticalWindowElapsedMs = 0;'), 'RED'],
+
+  ['MUT-ESC3 reportedAvgPrice를 다시 버림', P.bfapi,
+    s => s.replace('  const reportedAvgPrice = num((r as any)?.price) ?? num(raw.avgPrice);',
+      '  const reportedAvgPrice = null;'), 'RED'],
+
+  ['MUT-ESC3b 평균가 0을 그대로 적음 (슬리피지가 100%가 됨)', P.xrun,
+    s => s.replace('      reportedAvgPrice = typeof avg === \'number\' && Number.isFinite(avg) && avg > 0\n'
+      + '        ? avg : null;',
+      '      reportedAvgPrice = typeof avg === \'number\' ? avg : null;'), 'RED'],
+
+  ['MUT-ESC4 보낸 수량을 체결 수량이라고 기록', P.esc,
+    s => s.replace('    executed_qty: i.executedQty,', '    executed_qty: i.requestedQuantity,'),
+    'RED'],
+
+  ['MUT-ESC5 첫 재조회 지연을 actualTimeToFlatMs라고 기록', P.xrun,
+    s => s.replace('  submitAcceptedToFirstReadAfterMs: number | null;',
+      '  actualTimeToFlatMs: number | null;\n  submitAcceptedToFirstReadAfterMs: number | null;'),
+    'RED'],
+
+  ['MUT-ESC6 모든 호출을 wakeSource=worker로 고정', P.monitor,
+    s => s.replace("              wakeSource: wake.source, wakeDelayMs: wake.delayMs,",
+      "              wakeSource: 'worker', wakeDelayMs: wake.delayMs,"), 'RED'],
+
+  ['MUT-ESC7 모르는 wake 지연을 5분 기준으로 추정', P.esc,
+    s => s.replace('    wake_delay_ms: i.wakeDelayMs,',
+      '    wake_delay_ms: i.wakeDelayMs ?? 300_000,'), 'RED'],
+
+  ['MUT-ESC8 synthetic 표본을 VERIFIED_TESTNET으로 저장', P.esc,
+    s => s.replace("  if (i.sampleOrigin === 'VERIFIED_TESTNET_OBSERVATION') {",
+      '  if (false) {'), 'RED'],
+
+  ['MUT-ESC9 다른 계약의 종료를 Exact100X 계측에 저장', P.esc,
+    s => s.replace('    if (!el.eligible) {', '    if (false) {'), 'RED'],
+
+  ['MUT-ESC10 계측 적재가 새 주문 경로를 만듦', P.monitor,
+    s => s.replace("            const live = await ops.readOpenPosition(venue, c.symbol).catch(() => null);",
+      '            const live = await ops.sendSymbolClose(venue, prepared).catch(() => null);'),
+    'RED'],
+
+  ['MUT-ESC11 슬리피지 부호를 방향과 무관하게 계산', P.slip,
+    s => s.replace("  const adverse = side === 'LONG' ? mark - fill : fill - mark;",
+      '  const adverse = mark - fill;'), 'RED'],
+
+  ['MUT-ESC12 모르는 슬리피지를 0으로 적음', P.slip,
+    s => s.replace('  return Number.isFinite(n) && n > 0 ? n : null;', '  return Number.isFinite(n) ? n : 0;'),
+    'RED'],
+
+  ['MUT-ESC13 093의 RLS를 끔', P.mig93,
+    s => s.replace('  ENABLE ROW LEVEL SECURITY;', '  DISABLE ROW LEVEL SECURITY;'), 'RED'],
+
+  ['MUT-ESC14 093의 service-only 정책을 품', P.mig93,
+    s => s.replace('    TO service_role', '    TO authenticated'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

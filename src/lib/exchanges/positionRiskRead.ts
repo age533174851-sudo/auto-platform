@@ -21,6 +21,8 @@
 //   · 뒤이은 `/fapi/v3/account` 응답 시각 (청산가가 거기 없다)
 //   · 거래소가 준 `updateTime` (문서는 그냥 "update time"이라고만 한다)
 
+import { monotonicNowMs, monotonicSpanMs } from '../system/monotonicClock';
+
 export interface SymbolPositionRisk {
   symbol: string;
   /** 부호 있는 수량. 0이면 포지션 없음 */
@@ -112,14 +114,10 @@ const NO_PROVENANCE: PositionRiskProvenance = {
 /**
  * 기본 단조 시계. **`Date.now()`가 아니다.**
  *
- * 런타임이 `performance.now()`를 안 주면 duration을 **재지 않는다** —
- * `Date.now()`로 대신하면 그 표본이 시계 보정에 오염되는데, 오염된 줄과
- * 깨끗한 줄을 나중에 구분할 수 없다. 없으면 null이 낫다.
+ * 정본은 `system/monotonicClock`이다 — 두 벌로 두면 한쪽만
+ * `Date.now()` 폴백으로 되돌아가고, 그 줄만 조용히 오염된다.
  */
-const defaultMonotonic = (): number | null => {
-  const p = (globalThis as any)?.performance;
-  return typeof p?.now === 'function' ? p.now() : null;
-};
+const defaultMonotonic = monotonicNowMs;
 
 export async function readPositionRiskWithProvenance(
   symbol: string,
@@ -138,8 +136,7 @@ export async function readPositionRiskWithProvenance(
   const sym = symbol.toUpperCase().replace('/', '');
   const prov: PositionRiskProvenance = { ...NO_PROVENANCE };
   /** 두 단조 눈금의 차. 하나라도 없으면 **null이고 0이 아니다** */
-  const span = (a: number | null, b: number | null): number | null =>
-    a != null && b != null ? b - a : null;
+  const span = monotonicSpanMs;
   const helperT0 = monotonicMs();
 
   const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {

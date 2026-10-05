@@ -4478,15 +4478,23 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         //   않는가. 시험은 `() => null`을 주입하므로 기본값 경로를 밟지
         //   않는다 — 그래서 원본으로 본다(실제로 한 번 새 나갔다).
         {
+          // ★ 앵커가 옮겨갔다 — 단조 시계 정본이
+          //   `system/monotonicClock`으로 갔다(⑤B-3A-1에서 두 벌이 되지
+          //   않게 모았다). **지우지 않고** 새 자리를 본다.
           const PRR2 = 'src/lib/exchanges/positionRiskRead.ts';
           const prrSrc = code(PRR2);
-          const m2 = /const defaultMonotonic[\s\S]{0,400}?\n\};/.exec(prrSrc);
+          const monSrc = code('src/lib/system/monotonicClock.ts');
+          const m2 = /export function monotonicNowMs[\s\S]{0,300}?\n\}/.exec(monSrc);
           if (!m2) {
-            err(`${PRR2}: 단조 시계 기본값을 찾지 못했습니다`);
+            err('system/monotonicClock: 단조 시계 정본을 찾지 못했습니다');
           } else if (/Date\.now/.test(m2[0])) {
-            err(`${PRR2}: 단조 시계가 없을 때 Date.now로 메웁니다`
+            err('system/monotonicClock: 단조 시계가 없을 때 Date.now로 메웁니다'
               + ' — 시계 보정에 오염된 줄과 깨끗한 줄을 나중에 구분할 수 없습니다.'
               + ' 없으면 null이 맞습니다');
+          }
+          if (/const defaultMonotonic[\s\S]{0,200}?performance/.test(prrSrc)) {
+            err(`${PRR2}: 단조 시계를 또 한 벌 만들었습니다`
+              + ' — 정본은 system/monotonicClock 하나입니다');
           }
           // duration 계산이 epoch 시계를 쓰지 않는가
           if (/span\(\s*(v2Started|v3Started|nowMs\(\))/.test(prrSrc)) {
@@ -4696,7 +4704,256 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           }
         }
 
-        // ── 관측 표의 **보안** — RLS 없이 열어 두지 않는가 ──
+        // ── ⑤B-3A-1 탈출 계측 — 재기만 하는가, 제대로 재는가 ──
+      {
+        const ESC = 'src/lib/engine/escapeObservationStore.ts';
+        const SLP = 'src/lib/engine/closeSlippage.ts';
+        const MON = 'src/lib/system/monotonicClock.ts';
+
+        // 단조 시계 정본이 Date.now로 되돌아가지 않는가
+        const msrc = code(MON);
+        if (!msrc.trim()) err(`${MON}: 단조 시계 정본이 없습니다`);
+        else if (/Date\.now/.test(msrc)) {
+          err(`${MON}: 단조 시계 정본이 Date.now를 씁니다`
+            + ' — 시계 보정에 오염된 줄을 나중에 구분할 수 없습니다');
+        }
+
+        // 슬리피지 정본: 부호 규칙과 문턱 없음
+        const sm = await loadModule(SLP, '종료 슬리피지 정본');
+        if (!sm || typeof sm.closeSlippage !== 'function') {
+          err(`${SLP}: closeSlippage 정본이 없습니다`);
+        } else {
+          const L = sm.closeSlippage({ side: 'LONG', markPrice: 50_000, fillPrice: 49_900 });
+          const S = sm.closeSlippage({ side: 'SHORT', markPrice: 50_000, fillPrice: 50_100 });
+          if (!(L.adverseCloseSlippagePct > 0) || !(S.adverseCloseSlippagePct > 0)) {
+            err(`${SLP}: 불리한 체결이 양수가 아닙니다`
+              + ` (LONG ${L.adverseCloseSlippagePct} · SHORT ${S.adverseCloseSlippagePct})`
+              + ' — 방향이 섞이면 두 분포가 서로 뒤집힌 채 한 통에 담깁니다');
+          }
+          for (const bad of [
+            { side: 'LONG', markPrice: null, fillPrice: 49_900 },
+            { side: 'LONG', markPrice: 50_000, fillPrice: null },
+            { side: 'LONG', markPrice: 0, fillPrice: 49_900 },
+          ]) {
+            if (sm.closeSlippage(bad).adverseCloseSlippagePct != null) {
+              err(`${SLP}: 모르는 슬리피지를 숫자로 적습니다 — 분포가 0으로 쏠립니다`);
+            }
+          }
+          const ssrc = code(SLP);
+          if (/\b\d+(\.\d+)?\s*(?:\/\/|$)/m.test('') || /threshold|tolerance/i.test(ssrc)) {
+            err(`${SLP}: 슬리피지 정본에 문턱이 있습니다`);
+          }
+        }
+
+        // 실행 경로 계측: 구간이 따로이고, 순서를 바꾸지 않았는가
+        const rm2 = await loadModule(RUN, '종료 권한 실행 정본');
+        if (rm2 && typeof rm2.runExitAuthority === 'function') {
+          const EID2 = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
+          const log2 = [];
+          let tick = 0;
+          const r7 = await rm2.runExitAuthority({
+            positionIdentity: { exchange: 'binance', connectionId: 'c1', symbol: 'BTCUSDT',
+              side: 'LONG', executionIdentity: EID2, openingOrderId: 'o1' },
+            strategyId: 'scalp', executionIdentity: EID2,
+            capabilities: { fixedStopAtEntry: false, breakEven: false, trailing: false,
+              timeExit: true, emergency: false },
+            reason: 'TIME_EXIT', openedAtMs: Date.now() - 9 * 3600 * 1000,
+          }, {
+            leaseOwned: async () => { log2.push('lease'); return { owned: true, identity: { holder: 'w', fence: 1 } }; },
+            prepareClose: async () => { log2.push('prepare'); return { code: 'READY', message: '',
+              prepared: { quantity: 1, orderSide: 'SELL', reduceOnly: true, observedQty: 1,
+                positionMode: 'ONE_WAY' } }; },
+            revalidateFence: async () => { log2.push('revalidate'); return true; },
+            sendClose: async () => { log2.push('send'); return { attempted: true, ok: true,
+              error: null, reportedAvgPrice: 49_900 }; },
+            readAfter: async () => { log2.push('readAfter'); return { ok: true, found: false }; },
+            monotonicNowMs: () => (tick += 1),
+          }, Date.now());
+
+          // 계측이 순서를 바꾸지 않았는가
+          if (log2.join('>') !== 'lease>prepare>revalidate>send>readAfter') {
+            err(`${RUN}: 계측 때문에 경로 순서가 바뀌었습니다 (${log2.join('>')})`);
+          }
+          const t7 = r7?.timing ?? {};
+          for (const k of ['leaseCheckElapsedMs', 'prepareCloseElapsedMs',
+                           'fenceRevalidationElapsedMs', 'criticalWindowElapsedMs',
+                           'submitElapsedMs', 'submitAcceptedToFirstReadAfterMs']) {
+            if (t7[k] == null) err(`${RUN}: ${k}를 재지 않습니다`);
+          }
+          // ★ critical window를 0으로 적지 않는가
+          if (!(t7.criticalWindowElapsedMs > 0)) {
+            err(`${RUN}: 재검증→전송 구간을 재지 않고 ${t7.criticalWindowElapsedMs}로 적습니다`
+              + ' — 왕복이 0이라고 시간이 0인 것은 아닙니다');
+          }
+          // ★ 평균가를 버리지 않는가
+          if (r7?.reportedAvgPrice !== 49_900) {
+            err(`${RUN}: 거래소가 준 평균 체결가를 버립니다 (${r7?.reportedAvgPrice})`
+              + ' — 그 값이 없으면 종료 슬리피지를 낼 수 없습니다');
+          }
+          // ★ 첫 재조회를 실제 flat 시간이라고 부르지 않는가
+          if ('actualTimeToFlatMs' in t7) {
+            err(`${RUN}: 첫 재조회 지연을 actualTimeToFlatMs라고 적습니다`
+              + ' — 재조회는 한 번뿐이라 실제 flat 시각은 모릅니다');
+          }
+          if (t7.flatObservedAtFirstRead !== true) {
+            err(`${RUN}: 첫 재조회 결과를 적지 않습니다`);
+          }
+          // ★ 단조 시계가 없으면 재지 않는가
+          const r8 = await rm2.runExitAuthority({
+            positionIdentity: { exchange: 'binance', connectionId: 'c1', symbol: 'BTCUSDT',
+              side: 'LONG', executionIdentity: EID2, openingOrderId: 'o1' },
+            strategyId: 'scalp', executionIdentity: EID2,
+            capabilities: { fixedStopAtEntry: false, breakEven: false, trailing: false,
+              timeExit: true, emergency: false },
+            reason: 'TIME_EXIT', openedAtMs: Date.now() - 9 * 3600 * 1000,
+          }, {
+            leaseOwned: async () => ({ owned: true, identity: { holder: 'w', fence: 1 } }),
+            prepareClose: async () => ({ code: 'READY', message: '',
+              prepared: { quantity: 1, orderSide: 'SELL', reduceOnly: true, observedQty: 1,
+                positionMode: 'ONE_WAY' } }),
+            revalidateFence: async () => true,
+            sendClose: async () => ({ attempted: true, ok: true, error: null }),
+            readAfter: async () => ({ ok: true, found: false }),
+            monotonicNowMs: () => null,
+          }, Date.now());
+          if (r8?.timing?.submitElapsedMs != null) {
+            err(`${RUN}: 단조 시계가 없는데 구간 시간을 지어냅니다`);
+          }
+        }
+
+        // 적재기: 다른 표에 쓰는가, 출처를 섞지 않는가, 주문 수단이 없는가
+        const em2 = await loadModule(ESC, '탈출 계측 적재기');
+        if (!em2 || typeof em2.recordEscapeObservation !== 'function') {
+          err(`${ESC}: 탈출 계측 적재기가 없습니다`);
+        } else {
+          for (const bad of ['sendClose', 'sendSymbolClose', 'placeFuturesOrder',
+                             'runExitAuthority', 'closePosition']) {
+            if (Object.keys(em2).includes(bad)) {
+              err(`${ESC}: 적재기가 ${bad}를 내보냅니다`);
+            }
+          }
+          const T = { leaseCheckElapsedMs: 5, prepareCloseElapsedMs: 180,
+            fenceRevalidationElapsedMs: 6, criticalWindowElapsedMs: 0.2,
+            submitElapsedMs: 210, submitAcceptedToFirstReadAfterMs: 90,
+            flatObservedAtFirstRead: true };
+          const EI = (o = {}) => ({
+            sampleOrigin: 'SYNTHETIC_TEST_ONLY', env: 'TESTNET', connectionId: 'c1',
+            symbol: 'BTCUSDT', side: 'LONG',
+            executionIdentity: { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+              contractVersion: 2 },
+            wakeSource: 'worker', wakeDelayMs: null, configuredIntervalMs: 300_000,
+            observation: { markReadElapsedMs: 12, bracketReadElapsedMs: 8,
+              positionRiskElapsedMs: 74, riskMeasurementElapsedMs: 0.4 },
+            timing: T, runCode: 'CLOSED_VERIFIED', attemptedWrite: true, accepted: true,
+            flatVerified: true, requestedQuantity: 1, reportedAvgPrice: 49_900,
+            exchangeOrderId: 'o-1', executedQty: 0.6, markAtSubmit: 50_000,
+            signedPositionAmt: 1, testnet: true, exchange: 'binance', ...o,
+          });
+          const row2 = em2.escapeObservationRow(EI());
+          if (row2.requested_quantity === row2.executed_qty) {
+            err(`${ESC}: 보낸 수량과 체결 수량을 같은 칸으로 적습니다`);
+          }
+          if (!(row2.adverse_close_slippage_pct > 0)) {
+            err(`${ESC}: 슬리피지를 계산하지 않거나 부호가 뒤집혔습니다`
+              + ` (${row2.adverse_close_slippage_pct})`);
+          }
+          if (em2.escapeObservationRow(EI({ markAtSubmit: null })).adverse_close_slippage_pct != null) {
+            err(`${ESC}: 마크가가 없는데 슬리피지를 지어냅니다`);
+          }
+          if (em2.escapeObservationRow(EI({ wakeDelayMs: null })).wake_delay_ms != null) {
+            err(`${ESC}: 모르는 wake 지연을 숫자로 추정합니다`);
+          }
+          for (const k of Object.keys(row2)) {
+            if (/key|secret|signature|token|passphrase|raw/i.test(k)) {
+              err(`${ESC}: 계측 줄에 시크릿성 칸이 있습니다 (${k})`);
+            }
+            if (/actual_time_to_flat/i.test(k)) {
+              err(`${ESC}: 실제 flat 시간 칸을 만들었습니다 (${k})`);
+            }
+            if (/threshold|tolerance|verdict/i.test(k)) {
+              err(`${ESC}: 계측 줄에 판정 칸이 있습니다 (${k})`);
+            }
+          }
+          const seen3 = [];
+          const sb3 = { from: (t) => ({ insert: async (r9) => {
+            seen3.push({ t, r9 }); return { error: null }; } }) };
+          if ((await em2.recordEscapeObservation(sb3, EI()))?.code !== 'RECORDED'
+              || seen3[0]?.t !== 'exact100x_exit_escape_observations') {
+            err(`${ESC}: 계측을 "${seen3[0]?.t}"에 씁니다`
+              + ' — 위험 스냅숏 표와 결이 다릅니다');
+          }
+          for (const env3 of ['LIVE', 'MOCK']) {
+            seen3.length = 0;
+            const rr3 = await em2.recordEscapeObservation(sb3,
+              EI({ sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION', env: env3 }));
+            if (rr3?.code !== 'ORIGIN_IMPOSSIBLE' || seen3.length !== 0) {
+              err(`${ESC}: ${env3} 계측이 VERIFIED_TESTNET으로 쌓입니다`);
+            }
+          }
+          seen3.length = 0;
+          const rr4 = await em2.recordEscapeObservation(sb3, EI({
+            sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
+            executionIdentity: { profileId: 'SCALP_HIGH_LEV', presetId: 'STABILIZE',
+              contractVersion: 2 } }));
+          if (rr4?.code !== 'NOT_ELIGIBLE' || seen3.length !== 0) {
+            err(`${ESC}: 다른 계약의 종료가 Exact100X 계측 표본에 섞입니다`);
+          }
+        }
+
+        // 093 보안
+        const mig93 = read('supabase/migrations/093_exact100x_exit_escape_observations.sql');
+        if (!mig93.trim()) err('093 마이그레이션이 없습니다');
+        else {
+          if (!/ENABLE ROW LEVEL SECURITY/i.test(mig93)) {
+            err('093: RLS가 켜져 있지 않습니다');
+          }
+          if (!/CREATE POLICY[\s\S]{0,200}TO service_role/i.test(mig93)) {
+            err('093: service_role 정책이 없습니다');
+          }
+          for (const role of ['anon', 'authenticated']) {
+            if (new RegExp(`CREATE POLICY[\\s\\S]{0,300}TO\\s+[^;]*\\b${role}\\b`, 'i').test(mig93)) {
+              err(`093: ${role}에 정책을 열었습니다`);
+            }
+          }
+          if (!/CHECK\s*\([\s\S]{0,200}VERIFIED_TESTNET_OBSERVATION[\s\S]{0,120}env\s*=\s*'TESTNET'/i
+              .test(mig93)) {
+            err('093: VERIFIED_TESTNET → TESTNET 제약이 없습니다');
+          }
+          // **칸 정의만** 본다. 주석에 "그 칸을 만들지 않았다"고 적은
+          // 문장을 금지어로 잡으면, 이유를 설명하는 글이 규칙을 깬다.
+          const ddl93 = mig93.split('\n')
+            .filter(l => !/^\s*(--|\*|\/\*)/.test(l)).join('\n');
+          if (/^\s*actual_time_to_flat\w*\s+\w/im.test(ddl93)) {
+            err('093: 실제 flat 시간 칸을 만들었습니다 — 재조회는 한 번뿐입니다');
+          }
+          for (const bad of [/ALTER\s+COLUMN/i, /DROP\s+(COLUMN|TABLE)/i,
+                             /\bUPDATE\s+public\./i, /\bDELETE\s+FROM/i]) {
+            if (bad.test(mig93)) err(`093: 파괴적 문장이 있습니다 (${bad})`);
+          }
+        }
+
+        // 감시 라우트의 계측 적재가 **주문을 내지 않는가**
+        const monEsc = code(MON5);
+        const iEsc = monEsc.indexOf('recordEscapeObservation(sb');
+        if (iEsc < 0) {
+          err(`${MON5}: 탈출 계측을 적재하지 않습니다`);
+        } else {
+          const body3 = monEsc.slice(iEsc, iEsc + 2500);
+          for (const bad of ['sendSymbolClose', 'prepareSymbolClose', 'runExitAuthority']) {
+            if (body3.includes(bad)) {
+              err(`${MON5}: 계측 적재 블록이 ${bad}를 부릅니다 — 주문 0건이어야 합니다`);
+            }
+          }
+          if (!/sampleOrigin:\s*'VERIFIED_TESTNET_OBSERVATION'/.test(body3)) {
+            err(`${MON5}: 계측 표본 출처를 적지 않습니다`);
+          }
+          if (!/wakeSource:\s*wake\.source/.test(body3)) {
+            err(`${MON5}: wake source를 헤더 정본에서 가져오지 않습니다`);
+          }
+        }
+      }
+
+      // ── 관측 표의 **보안** — RLS 없이 열어 두지 않는가 ──
         //
         //   이 표에는 connection_id·방향·수량·진입가·청산가가 들어간다.
         //   public 스키마에 무보호로 두면 anon 키 하나로 전부 읽힌다.

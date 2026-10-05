@@ -310,7 +310,19 @@ export async function prepareSymbolClose(
  */
 export async function sendSymbolClose(
   c: VenueCreds, prepared: PreparedSymbolClose,
-): Promise<{ attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean }> {
+): Promise<{
+  attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean;
+  /**
+   * 거래소가 적어 준 평균 체결가. 없으면 null.
+   *
+   * **버리지 않는다** — 이 값이 없으면 종료 슬리피지를 낼 수 없다.
+   * Gate 경로는 현재 이 값을 주지 않으므로 null이다(없는 것을 지어내지
+   * 않는다).
+   */
+  reportedAvgPrice?: number | null;
+  exchangeOrderId?: string | null;
+  executedQty?: number | null;
+}> {
   try {
     if (prepared.venue === 'gate') {
       const gf = await import('../exchanges/gateFutures');
@@ -325,8 +337,10 @@ export async function sendSymbolClose(
       //   안전성은 `reduce_only` + `auto_size` + 재조회 대조에만 의존한다.
       //   (전용 종료 권한이 Gate에 도달 가능한지는 별도 감사 대상이다.)
       const r = await gf.closePositionGateFutures(c.apiKey, c.apiSecret, contract, c.testnet);
+      // Gate는 체결가를 돌려주지 않는다. **없는 것을 지어내지 않는다.**
       return { attempted: true, ok: r.success === true, error: r.success ? null : r.message,
-        ambiguous: r.success ? false : await isAmbiguousSend(r.message) };
+        ambiguous: r.success ? false : await isAmbiguousSend(r.message),
+        reportedAvgPrice: null, exchangeOrderId: null, executedQty: null };
     }
     const bf = await import('../exchanges/binanceFutures');
     const r = await bf.sendPreparedClose(
@@ -334,7 +348,10 @@ export async function sendSymbolClose(
     const ok = r?.success === true;
     const msg = ok ? null : String(r?.message || '청산 주문 실패');
     return { attempted: true, ok, error: msg,
-      ambiguous: ok ? false : await isAmbiguousSend(msg) };
+      ambiguous: ok ? false : await isAmbiguousSend(msg),
+      reportedAvgPrice: r?.reportedAvgPrice ?? null,
+      exchangeOrderId: r?.exchangeOrderId ?? null,
+      executedQty: r?.executedQty ?? null };
   } catch (e: any) {
     // **예외를 '안 보냈다'로도 '거부됐다'로도 적지 않는다.**
     return { attempted: true, ok: false, error: String(e?.message || e), ambiguous: true };

@@ -74,6 +74,7 @@ import {
   type ExitReason, type LeaseIdentity, type PositionIdentity,
 } from './exitAuthority';
 import { applyLifecycleClose } from './lifecycleAction';
+import { monotonicNowMs, monotonicSpanMs } from '../system/monotonicClock';
 import { isDuplicateIntentError } from './exitIntent';
 import type { ExecutionIdentity } from './managedPosition';
 
@@ -108,6 +109,58 @@ export type ExitRunCode =
   /** 이 거래소는 전용 종료 권한이 아직 지원하지 않는다. **주문 0건·조회 0건** */
   | 'EXIT_VENUE_UNSUPPORTED';
 
+/**
+ * **탈출에 실제로 얼마나 걸렸는가 (⑤B-3A-1).**
+ *
+ * 전부 단조 시계 duration이다 — epoch 시각이 아니고, 서로 빼지 않는다.
+ * 못 잰 구간은 `null`이지 0이 아니다.
+ *
+ * ★ 이 값들로 **판단하지 않는다.** ⑤B-3이 문턱을 유도할 때 쓸 관측일
+ *   뿐이고, 여기에 좋다/나쁘다를 적는 칸은 없다.
+ *
+ * ★ 재려고 `await`를 추가하지 않았다. 눈금만 찍는다 — 특히
+ *   `criticalWindowElapsedMs` 구간에 비동기 호출이 끼면 ⑤A가 만든
+ *   "재검증과 전송 사이 왕복 0" 불변식 자체가 깨진다.
+ */
+export interface ExitEscapeTiming {
+  /** 임차 확인 (DB 1왕복) */
+  leaseCheckElapsedMs: number | null;
+  /** 모드·노출·규격을 전부 읽는 구간 (거래소 3왕복) */
+  prepareCloseElapsedMs: number | null;
+  /** 쓰기 직전 울타리 재검증 (DB 1왕복) */
+  fenceRevalidationElapsedMs: number | null;
+  /**
+   * 재검증이 참을 돌려준 **직후**부터 전송을 **시작하기 직전**까지.
+   *
+   * 네트워크 왕복이 0이라고 해서 0으로 적지 않는다 — 실제로 잰다.
+   */
+  criticalWindowElapsedMs: number | null;
+  /** 주문 전송 시작 → 거래소 응답(성공·실패·모호) 직후 */
+  submitElapsedMs: number | null;
+  /**
+   * 거래소 응답 직후 → **첫** 재조회 결과.
+   *
+   * ★ 이것은 실제 flat까지 걸린 시간이 **아니다.** 재조회는 한 번뿐이고,
+   *   그때 포지션이 남아 있으면 실제 flat 시점은 모른다.
+   */
+  submitAcceptedToFirstReadAfterMs: number | null;
+  /**
+   * 첫 재조회에서 잔여 0을 봤는가.
+   *
+   * `false`는 "아직 안 닫혔다"가 아니라 **"첫 조회 시점에는 남아 있었다"**다.
+   * 실제 flat 시각은 이 구조에서 알 수 없다(`actualTimeToFlatMs`를 만들지
+   * 않는 이유 — 반복 조회를 새로 넣는 것은 실행 의미를 바꾸는 다른 단계다).
+   */
+  flatObservedAtFirstRead: boolean | null;
+}
+
+const NO_TIMING: ExitEscapeTiming = {
+  leaseCheckElapsedMs: null, prepareCloseElapsedMs: null,
+  fenceRevalidationElapsedMs: null, criticalWindowElapsedMs: null,
+  submitElapsedMs: null, submitAcceptedToFirstReadAfterMs: null,
+  flatObservedAtFirstRead: null,
+};
+
 export interface ExitRunResult {
   code: ExitRunCode;
   /**
@@ -135,6 +188,15 @@ export interface ExitRunResult {
   needsReconcile: boolean;
 
   decision: ExitAuthorityDecision | null;
+  /** ⑤B-3A-1 — 각 구간에 실제로 걸린 시간. **판단이 아니다** */
+  timing: ExitEscapeTiming;
+  /**
+   * 거래소가 응답에 적어 준 평균 체결가. **없으면 null이다.**
+   *
+   * 이름이 `fillPrice`가 아닌 이유: Binance 응답의 `avgPrice`를 그대로
+   * 보존한 값이고, 우리가 "체결가"라고 해석을 얹은 값이 아니다.
+   */
+  reportedAvgPrice: number | null;
   /**
    * **요청한 수량.** 안 보냈으면 null.
    *
@@ -176,9 +238,18 @@ export interface ExitRunDeps {
    */
   revalidateFence(): Promise<boolean>;
   /** 준비된 청산을 보낸다. 읽지 않는다 */
-  sendClose(): Promise<{ attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean }>;
+  sendClose(): Promise<{
+    attempted: boolean; ok: boolean; error: string | null; ambiguous?: boolean;
+    /** 거래소가 적어 준 평균 체결가. **버리지 않는다.** 없으면 null */
+    reportedAvgPrice?: number | null;
+  }>;
   /** 보낸 뒤 잔여를 다시 읽는다. `ok:false`는 "못 읽었다"다 */
   readAfter(): Promise<{ ok: boolean; found: boolean }>;
+  /**
+   * 단조 시계. **시험이 고정한다** — 안 주면 정본을 쓴다.
+   * duration 전용이고 epoch이 아니다.
+   */
+  monotonicNowMs?: () => number | null;
 }
 
 export interface ExitRunCandidate {
@@ -197,7 +268,8 @@ const denied = (
   code, ok: false, failed: false, blocked: true,
   attemptedWrite: false, accepted: null, flatVerified: null,
   reconciledFlat: false, needsReconcile: false,
-  decision, requestedQuantity: null, reason, ...over,
+  decision, requestedQuantity: null, reason,
+  timing: { ...NO_TIMING }, reportedAvgPrice: null, ...over,
 });
 
 /**
@@ -226,22 +298,34 @@ export async function runExitAuthority(
     return denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason);
   }
 
+  // ── ⑤B-3A-1 계측 ──
+  //
+  //   눈금만 찍는다. **`await`를 추가하지 않는다** — 재려다가 경로의
+  //   불변식을 깨면 측정이 측정 대상을 바꾼 것이다.
+  const timing: ExitEscapeTiming = { ...NO_TIMING };
+  let reportedAvgPrice: number | null = null;
+  const mono = deps.monotonicNowMs ?? monotonicNowMs;
+
   // ── ① 임차 (거래소를 읽기 **전에**) ──
   //
   // 남의 임차면 조회할 이유도 없다. 그리고 여기서 참이어도 끝이 아니다.
   let lease: { owned: boolean; identity: LeaseIdentity | null; reason?: string };
+  const tLease = mono();
   try { lease = await deps.leaseOwned(); }
   catch (e: any) { lease = { owned: false, identity: null, reason: String(e?.message || e) }; }
+  timing.leaseCheckElapsedMs = monotonicSpanMs(tLease, mono());
 
   // ── ② 거래소의 지금 노출 + payload 준비 ──
   //
   // ★ 임차가 없으면 **읽지도 않는다.** 아래 판정이 어차피 막는다.
   let prep: Awaited<ReturnType<ExitRunDeps['prepareClose']>> | null = null;
   if (lease.owned === true) {
+    const tPrep = mono();
     try { prep = await deps.prepareClose(); }
     catch (e: any) {
       prep = { code: 'READ_FAILED', prepared: null, message: String(e?.message || e) };
     }
+    timing.prepareCloseElapsedMs = monotonicSpanMs(tPrep, mono());
   }
 
   // ── ③ 권한 판정 ──
@@ -282,12 +366,13 @@ export async function runExitAuthority(
       // ★ **보낸 주문 0건이다.** 성공과 전송을 같은 값으로 적지 않는다.
       return denied('ALREADY_FLAT', decision, decision.reason, {
         ok: true, blocked: false, reconciledFlat: true, flatVerified: true,
+        timing,
       });
     }
     const failed = code === 'POSITION_READ_FAILED' || code === 'IDENTITY_MISMATCH';
     return denied(code as ExitRunCode, decision,
       prep?.code === 'MODE_BLOCKED' ? prep.message : decision.reason,
-      { failed, blocked: !failed });
+      { failed, blocked: !failed, timing });
   }
 
   // ── ④ 쓰기 직전 재검증 → 전송 → 재조회 ──
@@ -298,10 +383,32 @@ export async function runExitAuthority(
   //
   // ★ 재검증과 전송 사이에 await가 없다: `prepareClose`가 이미 끝났고
   //   `sendClose`는 읽지 않는다.
+  //   ★ 계측이 **구간을 바꾸지 않는다.** `stillMine`이 참을 돌려준 직후
+  //     눈금을 찍고, `close`가 불리는 첫 줄에서 다시 찍는다 — 그 사이에
+  //     들어가는 것은 `applyLifecycleClose`의 기존 분기뿐이다.
+  let tAfterFence: number | null = null;
+  let tAccepted: number | null = null;
   const act = await applyLifecycleClose({
-    stillMine: deps.revalidateFence,
+    stillMine: async () => {
+      const t0 = mono();
+      const mine = await deps.revalidateFence();
+      const t1 = mono();
+      timing.fenceRevalidationElapsedMs = monotonicSpanMs(t0, t1);
+      tAfterFence = t1;
+      return mine;
+    },
     close: async () => {
+      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());
+      const tSend = mono();
       const r = await deps.sendClose();
+      const tDone = mono();
+      timing.submitElapsedMs = monotonicSpanMs(tSend, tDone);
+      tAccepted = tDone;
+      // 거래소가 적어 준 평균가를 **버리지 않는다.** 없으면 null이다 —
+      // 0으로 적으면 슬리피지가 전부 100%가 된다.
+      const avg = (r as any)?.reportedAvgPrice;
+      reportedAvgPrice = typeof avg === 'number' && Number.isFinite(avg) && avg > 0
+        ? avg : null;
       // ★ **중복 식별자 거부는 실패가 아니다.**
       //
       //   같은 종료 의도를 다른 실행자가 이미 보냈다는 뜻이다(울타리가
@@ -313,7 +420,13 @@ export async function runExitAuthority(
       }
       return r;
     },
-    readAfter: deps.readAfter,
+    readAfter: async () => {
+      const after = await deps.readAfter();
+      timing.submitAcceptedToFirstReadAfterMs = monotonicSpanMs(tAccepted, mono());
+      // **첫 조회에서 봤는가**일 뿐이다. 실제 flat 시각이 아니다.
+      timing.flatObservedAtFirstRead = after.ok === true ? after.found !== true : null;
+      return after;
+    },
   });
 
   const qty = decision.requestedQuantity;
@@ -330,6 +443,7 @@ export async function runExitAuthority(
       attemptedWrite: true, accepted: act.accepted, flatVerified: true,
       reconciledFlat: reconciled, needsReconcile: false,
       decision, requestedQuantity: qty, reason: act.reason,
+      timing, reportedAvgPrice,
     };
   }
   if (act.code === 'CLOSE_REJECTED') {
@@ -338,6 +452,7 @@ export async function runExitAuthority(
       attemptedWrite: act.attempted, accepted: false, flatVerified: null,
       reconciledFlat: false, needsReconcile: false,
       decision, requestedQuantity: null, reason: act.reason,
+      timing, reportedAvgPrice,
     };
   }
   if (act.code === 'CLOSE_INCOMPLETE') {
@@ -346,6 +461,7 @@ export async function runExitAuthority(
       attemptedWrite: true, accepted: true, flatVerified: false,
       reconciledFlat: false, needsReconcile: true,
       decision, requestedQuantity: qty, reason: act.reason,
+      timing, reportedAvgPrice,
     };
   }
   // CLOSE_AMBIGUOUS · CLOSE_UNVERIFIED — **보냈는지도 닫혔는지도 모른다.**
@@ -355,5 +471,6 @@ export async function runExitAuthority(
     attemptedWrite: true, accepted: act.accepted, flatVerified: act.flatVerified,
     reconciledFlat: false, needsReconcile: true,
     decision, requestedQuantity: null, reason: act.reason,
+      timing, reportedAvgPrice,
   };
 }

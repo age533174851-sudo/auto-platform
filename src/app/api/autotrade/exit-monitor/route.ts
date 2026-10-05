@@ -757,6 +757,14 @@ export async function GET(req: NextRequest) {
 async function runLifecycleSweep(
   sb: any, dryRun: boolean,
   /**
+   * ⑤B-3A-1 — 누가 깨웠는가. `x-traigo-source` 그대로다(058과 같은 정본).
+   *
+   * **추측하지 않는다.** 헤더가 없으면 'manual'로 들어오고, 예정 시각을
+   * 확실히 모르면 지연은 null이다 — 5분이라고 가정해 빼지 않는다.
+   */
+  wake: { source: string | null; delayMs: number | null; intervalMs: number | null }
+    = { source: null, delayMs: null, intervalMs: null },
+  /**
    * ★ **거래소를 바꾸기 직전에 물어보는 실행 권한.**
    *
    *   이 sweep은 안에서 `closeSymbolPosition`·`placeStop`·`cancelOtherStops`로
@@ -811,6 +819,7 @@ async function runLifecycleSweep(
     // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
     //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
     authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
+    escape: { recorded: 0, recordFailed: 0, notEligible: 0 },
     // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
     postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
       recorded: 0, recordFailed: 0, notEligible: 0,
@@ -1060,6 +1069,57 @@ async function runLifecycleSweep(
           leaseFence: r.decision?.leaseIdentity?.fence ?? null,
           reason: r.reason,
         });
+
+        // ── ⑤B-3A-1 종료 실행 계측을 적는다 ──
+        //
+        //   ★ **주문을 내지 않는다.** 이미 끝난 실행의 구간 시간과
+        //     거래소가 돌려준 체결 정보를 적을 뿐이다.
+        //   ★ 실행을 **시도한 회차만** 적는다 — 권한이 없어 아무것도
+        //     하지 않은 회차를 섞으면 지연 분포가 0 쪽으로 쏠린다.
+        if (r.attemptedWrite === true) {
+          try {
+            const { recordEscapeObservation } =
+              await import('@/lib/engine/escapeObservationStore');
+            const live = await ops.readOpenPosition(venue, c.symbol).catch(() => null);
+            const esc = await recordEscapeObservation(sb, {
+              sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
+              env: venue.testnet ? 'TESTNET' : 'LIVE',
+              connectionId: c.connectionId, symbol: c.symbol, side: c.side,
+              executionIdentity: c.executionIdentity,
+              wakeSource: wake.source, wakeDelayMs: wake.delayMs,
+              configuredIntervalMs: wake.intervalMs,
+              // 관측 구간은 ⑤B-2 블록이 따로 잰다 — 여기서는 실행 구간만.
+              observation: {
+                markReadElapsedMs: null, bracketReadElapsedMs: null,
+                positionRiskElapsedMs: null, riskMeasurementElapsedMs: null,
+              },
+              timing: r.timing,
+              runCode: r.code,
+              attemptedWrite: r.attemptedWrite,
+              accepted: r.accepted,
+              flatVerified: r.flatVerified,
+              requestedQuantity: r.requestedQuantity,
+              reportedAvgPrice: r.reportedAvgPrice,
+              exchangeOrderId: null, executedQty: null,
+              // 전송 시점 마크가는 이 경로가 읽지 않는다. **지어내지
+              // 않는다** — 없으면 슬리피지가 null이 된다.
+              markAtSubmit: null,
+              // 실행 **직전**의 노출이 아니라 직후 조회다. 자격 판정은
+              // "이 후보가 Exact100X TESTNET 포지션이었나"를 묻는다.
+              signedPositionAmt: prepared?.observedQty == null ? null
+                : (c.side === 'LONG' ? prepared.observedQty : -prepared.observedQty),
+              testnet: venue.testnet ?? null, exchange: venue.exchange ?? null,
+            });
+            void live;
+            if (esc.code === 'RECORDED') out.escape.recorded += 1;
+            else if (esc.code === 'NOT_ELIGIBLE' || esc.code === 'ORIGIN_IMPOSSIBLE') {
+              out.escape.notEligible += 1;
+            } else out.escape.recordFailed += 1;
+          } catch {
+            // 기록 실패가 종료 경로를 죽이지 않는다.
+            out.escape.recordFailed += 1;
+          }
+        }
 
         if (r.code === 'LEASE_LOST' || r.code === 'NOT_OWNER') {
           // **회차를 끊는다.** 임차가 넘어갔으면 다음 후보도 내 것이 아니다.
@@ -1450,6 +1510,12 @@ async function runLifecycleSweep(
         + `${out.postEntryRisk.notEligible ? ` · 실측 자격 불충족 ${out.postEntryRisk.notEligible}건` : ''}`
         + ' (측정만, 종료 0건)'
       : '')
+    // ⑤B-3A-1 — 실행 계측. **적은 줄 수지 닫은 수가 아니다.**
+    + (out.escape.recorded || out.escape.recordFailed || out.escape.notEligible
+      ? ` · 탈출 계측 ${out.escape.recorded}건`
+        + `${out.escape.recordFailed ? ` · 계측 기록 실패 ${out.escape.recordFailed}건` : ''}`
+        + `${out.escape.notEligible ? ` · 계측 자격 불충족 ${out.escape.notEligible}건` : ''}`
+      : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
   return out;
 }
@@ -1464,7 +1530,11 @@ async function runLifecycleSweep(
   // 위 `decideExits`는 계단식 표만 본다. 이 경로가 scalp·my-original-v1의
   // 트레일링·본전이동·시간청산을 담당한다. 점검 모드에서는 판단만 하고
   // 주문을 내지 않는다.
-  const lifecycle = await runLifecycleSweep(sb, dryRun, stillMine, myFence);
+  const lifecycle = await runLifecycleSweep(sb, dryRun,
+    // **헤더 정본을 그대로 넘긴다.** 예정 시각을 확실히 모르므로 지연은
+    // null이다 — worker 간격은 env로 바뀌고 GitHub/Vercel은 예정이 다르다.
+    { source: runner, delayMs: null, intervalMs: null },
+    stillMine, myFence);
 
   // ── 무엇을 안 보고 있는가 ──
   //
