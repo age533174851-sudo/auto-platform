@@ -4986,6 +4986,167 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
             err(`${MON5}: wake source를 헤더 정본에서 가져오지 않습니다`);
           }
         }
+
+        // ── ⑤B-3A-1.1 wake provenance — **틀린 값을 적지 않는가** ──
+        //
+        //   라우트는 `x-traigo-source`가 없으면 `'manual'`로 적고 있었다.
+        //   Vercel Cron은 Bearer로 인증하고 그 헤더를 보내지 않으므로,
+        //   **실제 자동 cron 호출이 전부 manual로 적혔다.** UNKNOWN이
+        //   아니라 거짓이었다.
+        //
+        //   판정은 `engine/exitMonitorWake.ts` 한 곳에 있고 node 내장을
+        //   쓰지 않으므로, 이 검사기는 이름이 아니라 **동작을 돌려서** 본다.
+        {
+          const WK = 'src/lib/engine/exitMonitorWake.ts';
+          const wm = await loadModule(WK, 'wake provenance 정본');
+          if (!wm || typeof wm.resolveWakeSource !== 'function'
+              || typeof wm.resolveWakeCadence !== 'function'
+              || typeof wm.wakeCadenceHeaders !== 'function') {
+            err(`${WK}: wake provenance 정본이 없습니다`
+              + ' — 누가 깨웠는지를 라우트가 추측하게 됩니다');
+          } else {
+            // ① 헤더가 없다고 manual로 적지 않는가
+            for (const kind of ['CRON_BEARER', 'ADMIN_HEADER']) {
+              for (const empty of [null, '', '  ']) {
+                const got = wm.resolveWakeSource(empty, kind);
+                if (got === 'manual') {
+                  err(`${WK}: source 헤더가 없는데 manual로 적습니다 (${kind})`
+                    + ' — 실제 자동 호출이 전부 사람이 부른 것으로 기록됩니다');
+                }
+                if (got == null) {
+                  err(`${WK}: 인증된 호출(${kind})의 출처가 비었습니다`);
+                }
+              }
+            }
+            // ② 두 인증 경로가 한 이름으로 합쳐지지 않는가
+            const cron = wm.resolveWakeSource(null, 'CRON_BEARER');
+            const admin = wm.resolveWakeSource(null, 'ADMIN_HEADER');
+            if (cron === admin) {
+              err(`${WK}: Bearer cron과 admin 호출을 같은 이름("${cron}")으로 적습니다`
+                + ' — 어느 쪽이 깨웠는지 영구히 복원할 수 없습니다');
+            }
+            // ③ 명시한 값은 보존되는가
+            if (wm.resolveWakeSource('worker', 'CRON_BEARER') !== 'worker'
+                || wm.resolveWakeSource('github-backup', 'ADMIN_HEADER') !== 'github-backup') {
+              err(`${WK}: 명시한 source를 인증 경로로 덮어씁니다`);
+            }
+            // ④ 인증 실패는 출처가 없다
+            if (wm.resolveWakeSource(null, 'NONE') != null) {
+              err(`${WK}: 인증되지 않은 호출에 출처를 붙입니다`);
+            }
+            // ⑤ 예정 시각을 모르면 지연은 null — 0도 5분도 아니다
+            for (const exp of [null, '', '0', 'abc']) {
+              const c = wm.resolveWakeCadence({
+                intervalHeader: '300000', expectedAtHeader: exp, observedAtMs: 1_780_000_000_000 });
+              if (c?.delayMs != null) {
+                err(`${WK}: 예정 시각 없이 wake 지연을 ${c.delayMs}로 적습니다`
+                  + ' — 0은 "정시"라는 다른 사실이고 300000은 추정입니다');
+              }
+            }
+            // ⑥ 간격을 모르면 null — 상수로 메우지 않는가
+            for (const iv of [null, '', '0', 'abc']) {
+              const c = wm.resolveWakeCadence({
+                intervalHeader: iv, expectedAtHeader: null, observedAtMs: 1_780_000_000_000 });
+              if (c?.intervalMs != null) {
+                err(`${WK}: 간격을 모르는데 ${c.intervalMs}로 적습니다`);
+              }
+            }
+            // ⑦ 알려 준 값은 실제로 쓰이는가 (상수로 못박히지 않았는가)
+            {
+              const c = wm.resolveWakeCadence({ intervalHeader: '90000',
+                expectedAtHeader: String(1_780_000_000_000 - 7_000),
+                observedAtMs: 1_780_000_000_000 });
+              if (c?.intervalMs !== 90_000 || c?.delayMs !== 7_000) {
+                err(`${WK}: 알려 준 cadence를 그대로 쓰지 않습니다`
+                  + ` (간격 ${c?.intervalMs} · 지연 ${c?.delayMs})`);
+              }
+            }
+            // ⑧ 첫 tick에는 예정 시각을 지어내지 않는가
+            {
+              const h = wm.wakeCadenceHeaders({ lastRunMs: null, intervalMs: 300_000 });
+              const k = Object.keys(h || {});
+              if (k.some(x => /expected/i.test(x))) {
+                err(`${WK}: 직전 실행이 없는데 예정 시각 헤더를 보냅니다`);
+              }
+              const h2 = wm.wakeCadenceHeaders({ lastRunMs: null, intervalMs: null });
+              if (Object.keys(h2 || {}).length !== 0) {
+                err(`${WK}: 모르는 cadence를 헤더로 보냅니다 — 키 자체가 없어야 합니다`);
+              }
+            }
+          }
+
+          // 라우트가 그 정본을 쓰는가 — `|| 'manual'`로 되돌아가지 않는가
+          const rsrc = code(MON5);
+          if (!/resolveWakeSource\(/.test(rsrc)) {
+            err(`${MON5}: wake source 정본을 쓰지 않습니다`);
+          }
+          const runnerLine = /const\s+runner\s*=([^;]*);/.exec(rsrc);
+          if (!runnerLine) {
+            err(`${MON5}: wake source를 정하는 자리를 찾지 못했습니다`);
+          } else if (/'manual'|"manual"/.test(runnerLine[1])) {
+            err(`${MON5}: 헤더가 없을 때 manual로 적습니다 (${runnerLine[1].trim()})`
+              + ' — Vercel cron은 그 헤더를 보내지 않습니다');
+          }
+          // 인증 결과를 boolean으로 버리지 않는가
+          const authBody = /function authorized\(req: NextRequest\)([\s\S]{0,900}?)\n}/.exec(rsrc);
+          if (!authBody) {
+            err(`${MON5}: authorized를 찾지 못했습니다`);
+          } else {
+            if (!/CRON_BEARER/.test(authBody[1]) || !/ADMIN_HEADER/.test(authBody[1])) {
+              err(`${MON5}: 인증 경로를 구분해서 돌려주지 않습니다`
+                + ' — 헤더가 없으면 provenance를 복원할 수 없습니다');
+            }
+            if (/:\s*boolean\s*\{/.test(authBody[0])) {
+              err(`${MON5}: 인증 결과를 boolean으로 버립니다`);
+            }
+          }
+          // ★ cadence telemetry를 **판단에 쓰지 않는가** (ESC18c)
+          //
+          //   간격·지연은 provenance 전용이다. 이 값으로 종료를 앞당기거나
+          //   건너뛰면 그 순간 telemetry가 실행 경로가 된다.
+          for (const [f, label] of [[MON5, 'exit-monitor'],
+                                    ['src/lib/engine/exitAuthorityRun.ts', 'exitAuthorityRun'],
+                                    ['src/lib/engine/exitAuthority.ts', 'exitAuthority'],
+                                    ['src/lib/engine/venuePositionOps.ts', 'venuePositionOps']]) {
+            const body = code(f);
+            for (const line of body.split('\n')) {
+              if (!/\b(wakeCadence|wake)\.(delayMs|intervalMs)\b/.test(line)) continue;
+              if (/\b(if|while|switch)\s*\(/.test(line)
+                  || /[<>]=?|===|!==|&&|\|\||\?\s*[^?:]*:/.test(line)) {
+                err(`${label}: cadence telemetry를 판단에 씁니다 (${line.trim().slice(0, 90)})`
+                  + ' — 간격·지연은 provenance 전용입니다');
+              }
+            }
+          }
+
+          // 부르는 쪽이 **자기가 실제로 쓰는** 값을 보내는가
+          const wsrc = code('worker/src/index.ts');
+          if (!/wakeCadenceHeaders\(/.test(wsrc)) {
+            err('worker: 실제 간격·예정 시각을 알려주지 않습니다'
+              + ' — 라우트는 예정이 언제였는지 알 방법이 없습니다');
+          } else {
+            const mh = /const\s+wakeHeaders\s*=\s*wakeCadenceHeaders\(\{([\s\S]{0,240}?)\}\);/.exec(wsrc);
+            if (!mh) {
+              err('worker: cadence 헤더를 만드는 자리를 찾지 못했습니다');
+            } else {
+              if (!/intervalMs:\s*EXIT_MONITOR_MS/.test(mh[1])) {
+                err(`worker: 실제 간격 대신 다른 값을 보냅니다 (${mh[1].replace(/\s+/g, ' ').trim()})`
+                  + ' — EXIT_MONITOR_MS가 정본입니다');
+              }
+              if (!/lastRunMs:\s*lastExitMonitorMs/.test(mh[1])) {
+                err('worker: 직전 실행 시각을 그대로 넘기지 않습니다');
+              }
+              // ★ 덮어쓰기 **전에** 읽는가. 뒤에서 만들면 예정 시각이
+              //   "지금 + 간격"이 되어 항상 간격만큼 이르다고 적힌다.
+              const iH = wsrc.indexOf('wakeCadenceHeaders({');
+              const iW = wsrc.indexOf('lastExitMonitorMs = Date.now();');
+              if (iH < 0 || iW < 0 || iH > iW) {
+                err('worker: 직전 실행 시각을 덮어쓴 뒤에 예정 시각을 계산합니다'
+                  + ' — 지연이 항상 음수가 됩니다');
+              }
+            }
+          }
+        }
       }
 
       // ── 관측 표의 **보안** — RLS 없이 열어 두지 않는가 ──

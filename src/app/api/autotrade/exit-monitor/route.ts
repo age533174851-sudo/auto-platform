@@ -25,6 +25,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
+import {
+  type WakeAuth, resolveWakeSource, resolveWakeCadence,
+  WAKE_SOURCE_HEADER, WAKE_INTERVAL_HEADER, WAKE_EXPECTED_AT_HEADER,
+} from '@/lib/engine/exitMonitorWake';
 
 /** 임차를 잃어 거래소를 바꾸지 않았을 때 남기는 말 (한 곳에서만 적는다) */
 const LEASE_LOST_MSG = '실행 권한(임차)이 넘어가 거래소 주문을 보내지 않았습니다';
@@ -41,14 +45,29 @@ function safeEqual(provided: string | null, expected: string): boolean {
   try { return timingSafeEqual(a, b); } catch { return false; }
 }
 
-function authorized(req: NextRequest): boolean {
+/**
+ * 인증 결과를 **boolean으로 버리지 않는다.**
+ *
+ * ⑤B-3A-1.1 — Vercel Cron은 Bearer로 들어오면서 `x-traigo-source`를 보내지
+ * 않는다. 예전에는 그 호출이 전부 `manual`로 적혔다 — UNKNOWN이 아니라
+ * **거짓 provenance**였다. 어느 경로로 들어왔는지를 남기면, 헤더가 없어도
+ * 복원할 수 있는 최소 사실이 생긴다.
+ *
+ * ★ 인증은 여전히 secret 비교뿐이다. Vercel 고유 user-agent나 헤더를
+ *   인증 근거로 쓰지 않는다 — 그건 누구나 흉내 낼 수 있다.
+ */
+function authorized(req: NextRequest): WakeAuth {
   const cronSecret = process.env.CRON_SECRET || '';
   const adminSecret = process.env.ADMIN_SECRET || '';
 
   const auth = req.headers.get('authorization') || '';
-  if (cronSecret && auth.startsWith('Bearer ') && safeEqual(auth.slice(7), cronSecret)) return true;
-  if (safeEqual(req.headers.get('x-admin-secret'), adminSecret)) return true;
-  return false;
+  if (cronSecret && auth.startsWith('Bearer ') && safeEqual(auth.slice(7), cronSecret)) {
+    return { ok: true, kind: 'CRON_BEARER' };
+  }
+  if (safeEqual(req.headers.get('x-admin-secret'), adminSecret)) {
+    return { ok: true, kind: 'ADMIN_HEADER' };
+  }
+  return { ok: false, kind: 'NONE' };
 }
 
 /**
@@ -419,7 +438,8 @@ async function recoverUnresolvedOrders(
 }
 
 export async function GET(req: NextRequest) {
-  if (!authorized(req)) {
+  const wakeAuth = authorized(req);
+  if (!wakeAuth.ok) {
     // ── 401은 두 가지가 전혀 다른 문제인데 문구가 같았다 ──
     //
     //  (가) 서버에 ADMIN_SECRET이 아예 없다 → Vercel에 넣고 **재배포**해야 한다
@@ -490,8 +510,29 @@ export async function GET(req: NextRequest) {
   // 판정·획득 순서·울타리 확인은 모두 exitMonitorLease.ts에 있고, 두 실행을
   // 동시에 돌려 "둘 다 주인이 되는" 경합을 재현하는 시험이 붙어 있다.
   const { acquireExitLease, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
-  const runner = String(req.headers.get('x-traigo-source') || '').trim() || 'manual';
-  const holder = `${runner}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
+  // ── 누가 깨웠는가 ──
+  //
+  // ⑤B-3A-1.1 — 예전에는 헤더가 없으면 `'manual'`로 적었다. 그런데 Vercel
+  // Cron은 Bearer로 인증하고 `x-traigo-source`를 보내지 않는다. 그래서
+  // **실제 자동 cron 호출이 전부 manual로 적혔다** — UNKNOWN이 아니라
+  // 거짓 provenance였다. 판정은 exitMonitorWake.ts 한 곳에 있다.
+  //
+  // 인증을 통과했으므로 `resolveWakeSource`는 null을 주지 않는다. 그래도
+  // 타입이 null을 말하므로 여기서 추측으로 메우지 않고 그대로 들고 간다.
+  const runner = resolveWakeSource(req.headers.get(WAKE_SOURCE_HEADER), wakeAuth.kind);
+  const holder = `${runner ?? 'unknown'}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
+
+  // ── 예정보다 얼마나 늦었는가 ──
+  //
+  // 부르는 쪽이 **자기가 실제로 쓰는** 간격과 예정 시각을 알려줄 때만
+  // 채워진다. 라우트가 자기 상수로 5분을 가정하지 않는다.
+  //
+  // ★ telemetry 전용이다. 이 두 값은 어떤 주문·청산 판단에도 쓰이지 않는다.
+  const wakeCadence = resolveWakeCadence({
+    intervalHeader: req.headers.get(WAKE_INTERVAL_HEADER),
+    expectedAtHeader: req.headers.get(WAKE_EXPECTED_AT_HEADER),
+    observedAtMs: cronStartedAt,
+  });
 
   const lease = await acquireExitLease({
     me: holder, nowMs: cronStartedAt, ttlMs: LEASE_TTL_MS,
@@ -562,7 +603,9 @@ export async function GET(req: NextRequest) {
   try {
     const { data } = await (sb as any).from('exit_monitor_runs').insert({
       started_at: new Date(cronStartedAt).toISOString(),
-      source: runner,
+      // 058 `source`는 NOT NULL이다. 인증을 통과했으면 runner는 비지
+      // 않지만, 비었다면 **모른다**고 적는다 — 'manual'로 메우지 않는다.
+      source: runner ?? 'unknown',
       worker_id: String(req.headers.get('x-traigo-worker') || '').trim() || null,
       worker_sha: String(req.headers.get('x-traigo-sha') || '').trim() || null,
       status: 'RUNNING',
@@ -1531,9 +1574,10 @@ async function runLifecycleSweep(
   // 트레일링·본전이동·시간청산을 담당한다. 점검 모드에서는 판단만 하고
   // 주문을 내지 않는다.
   const lifecycle = await runLifecycleSweep(sb, dryRun,
-    // **헤더 정본을 그대로 넘긴다.** 예정 시각을 확실히 모르므로 지연은
-    // null이다 — worker 간격은 env로 바뀌고 GitHub/Vercel은 예정이 다르다.
-    { source: runner, delayMs: null, intervalMs: null },
+    // **wake 정본을 그대로 넘긴다.** 부른 쪽이 예정 시각을 알려주지
+    // 않았으면 지연은 null이다 — worker 간격은 env로 바뀌고 GitHub/Vercel은
+    // 예정이 다르므로 라우트가 추정하지 않는다.
+    { source: runner, delayMs: wakeCadence.delayMs, intervalMs: wakeCadence.intervalMs },
     stillMine, myFence);
 
   // ── 무엇을 안 보고 있는가 ──

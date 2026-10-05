@@ -129,6 +129,7 @@ const P = {
   mig92: 'supabase/migrations/092_exact100x_risk_observations_rls.sql',
   elig: 'src/lib/engine/riskObservationEligibility.ts',
   esc: 'src/lib/engine/escapeObservationStore.ts',
+  wake: 'src/lib/engine/exitMonitorWake.ts',
   slip: 'src/lib/engine/closeSlippage.ts',
   mclock: 'src/lib/system/monotonicClock.ts',
   mig93: 'supabase/migrations/093_exact100x_exit_escape_observations.sql',
@@ -1960,6 +1961,59 @@ const M = [
 
   ['MUT-ESC14 093의 service-only 정책을 품', P.mig93,
     s => s.replace('    TO service_role', '    TO authenticated'), 'RED'],
+
+  // ── ⑤B-3A-1.1 wake provenance ──
+  //
+  //   `manual` 추측이 실제 Vercel cron 호출 전부를 거짓으로 적었다.
+  //   되돌리는 길을 전부 막는다.
+  ['MUT-ESC17 source header가 없으면 manual로 되돌림', P.wake,
+    s => s.replace("  if (s) return s;\n  if (authKind === 'CRON_BEARER') return WAKE_SOURCE_CRON_BEARER;",
+      "  if (s) return s;\n  return 'manual';\n  if (authKind === 'CRON_BEARER') return WAKE_SOURCE_CRON_BEARER;"),
+    'RED'],
+
+  ['MUT-ESC17b CRON_BEARER와 ADMIN_HEADER를 같은 source로 합침', P.wake,
+    s => s.replace("export const WAKE_SOURCE_UNATTRIBUTED_ADMIN = 'unattributed-admin';",
+      "export const WAKE_SOURCE_UNATTRIBUTED_ADMIN = 'cron-bearer';"), 'RED'],
+
+  ['MUT-ESC17c 라우트가 정본을 버리고 다시 manual로 적음', P.monitor,
+    s => s.replace('  const runner = resolveWakeSource(req.headers.get(WAKE_SOURCE_HEADER), wakeAuth.kind);',
+      "  const runner = String(req.headers.get(WAKE_SOURCE_HEADER) || '').trim() || 'manual';"),
+    'RED'],
+
+  ['MUT-ESC17d 인증 결과를 다시 boolean으로 버림', P.monitor,
+    s => s.replace('function authorized(req: NextRequest): WakeAuth {',
+      'function authorized(req: NextRequest): boolean {'), 'RED'],
+
+  ['MUT-ESC18 Worker actual interval 대신 5분 상수를 기록', P.worker,
+    s => s.replace('    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,',
+      '    lastRunMs: lastExitMonitorMs, intervalMs: 300_000,'), 'RED'],
+
+  ['MUT-ESC18b expectedAt이 없는데 wakeDelayMs=0을 기록', P.wake,
+    s => s.replace('  const delayMs = usable ? observed - (exp as number) : null;',
+      '  const delayMs = usable ? observed - (exp as number) : 0;'), 'RED'],
+
+  ['MUT-ESC18b2 모르는 간격을 5분으로 추정', P.wake,
+    s => s.replace('  const intervalMs = iv != null && iv > 0 ? iv : null;',
+      '  const intervalMs = iv != null && iv > 0 ? iv : 300_000;'), 'RED'],
+
+  ['MUT-ESC18c cadence telemetry를 청산 권한 판정에 사용', P.monitor,
+    s => s.replace('    for (const c of authorityCandidates) {',
+      '    for (const c of authorityCandidates) {\n'
+      + '      if ((wakeCadence.delayMs ?? 0) > 60_000) continue;'), 'RED'],
+
+  ['MUT-ESC18d 첫 tick에도 예정 시각을 지어냄', P.wake,
+    s => s.replace("  if (typeof last === 'number' && Number.isFinite(last) && last > 0\n"
+      + '      && Number.isFinite(iv) && iv > 0) {',
+      '  if (Number.isFinite(iv) && iv > 0) {'), 'RED'],
+
+  ['MUT-ESC18e Worker가 직전 실행 시각을 덮어쓴 뒤에 예정 시각을 계산', P.worker,
+    s => s.replace('  const wakeHeaders = wakeCadenceHeaders({\n'
+      + '    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,\n'
+      + '  });\n\n  lastExitMonitorMs = Date.now();',
+      '  lastExitMonitorMs = Date.now();\n\n'
+      + '  const wakeHeaders = wakeCadenceHeaders({\n'
+      + '    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,\n'
+      + '  });'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
