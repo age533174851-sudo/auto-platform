@@ -31,7 +31,7 @@
 // 설계한다** — 지금 `VERIFIED_LIVE…`를 만들지 않는다. MOCK/TESTNET/LIVE의
 // 장부와 자산을 섞지 않는 저장소 규칙이 표본에도 그대로 적용된다.
 
-import { executionIdentityComplete } from '../execution/profile';
+import { exact100xIdentity } from '../execution/profile';
 import type { ExecutionIdentity } from './managedPosition';
 
 export type RiskObservationEligibility =
@@ -94,10 +94,22 @@ export function verifiedTestnetObservationEligibility(
     return no('VENUE_UNSUPPORTED',
       `전용 Exact100X 관측은 binance에서만 합니다 (${i.exchange || '알 수 없음'})`);
   }
-  // ③ 실행 계약 — 반쪽이면 어느 계약의 노출인지 모른다
-  if (!executionIdentityComplete(i.executionIdentity ?? undefined)) {
+  // ③ 실행 계약 — **Exact100X인가.** "세 칸이 찼는가"로는 부족하다.
+  //
+  //    `executionIdentityComplete`는 완전성만 본다. 그래서 다른 프로필·
+  //    다른 프리셋·지난 버전도 통과한다 — 그러면 다른 계약의 포지션이
+  //    Exact100X 실측 통계에 섞인다. 라우트가 `authorityCandidates`로
+  //    좁혀 주는 것은 방어층일 뿐이고, 이 함수를 **직접 불러도** 스스로
+  //    증명해야 한다.
+  //
+  //    판정은 `exact100xIdentity` 한 곳이다 — resolver를 지나고 계약의
+  //    모양까지 본다.
+  const ident = i.executionIdentity ?? null;
+  const ex100 = exact100xIdentity(
+    ident?.profileId, ident?.presetId, ident?.contractVersion);
+  if (!ex100.ok) {
     return no('IDENTITY_MISMATCH',
-      '실행 계약 기록이 없거나 반쪽입니다 — 어느 계약의 노출인지 모릅니다');
+      `Exact100X 계약의 노출이 아닙니다 (${ex100.code}) — ${ex100.reason}`);
   }
   if (i.side !== 'LONG' && i.side !== 'SHORT') {
     return no('POSITION_UNUSABLE', `장부의 방향을 읽지 못했습니다 (${String(i.side)})`);

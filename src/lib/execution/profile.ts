@@ -305,6 +305,79 @@ export function resolveExecutionProfile(
 }
 
 /**
+ * **이 실행 계약 식별자가 Exact100X를 가리키는가.**
+ *
+ * 왜 `executionIdentityComplete`로는 부족한가
+ * ──────────────────────────────────────────
+ * 그 함수는 **세 칸이 찼는가**만 본다. 그래서 아무 완전한 계약이나
+ * (다른 프로필·다른 프리셋·지난 버전) 통과한다. "완전한 identity"와
+ * "Exact100X identity"는 다른 말인데, 그 둘을 같은 함수로 물으면
+ * 언젠가 다른 계약의 포지션이 Exact100X 취급을 받는다.
+ *
+ * 어떻게 가르는가
+ * ───────────────
+ * **문자열 세 개를 여기서 다시 비교하지 않는다.** 그러면 이 파일이
+ * 네 번째 정본이 되고, 버전이 올라갈 때 여기만 옛말로 남는다.
+ *
+ *   ① `resolveExecutionProfile`에 **푼다** — 모르는 프로필·프리셋,
+ *      짝이 아닌 조합, 지난 버전은 전부 여기서 걸린다.
+ *   ② 어느 짝이 Exact100X인가는 이미 선언된 `EXCLUSIVE_PAIRS`가 말한다.
+ *   ③ 풀린 계약의 **모양**이 실제로 그 계약인지 확인한다.
+ *
+ * ③이 왜 필요한가: 이름만 보면, 나중에 `MAX_LEV_100X`의 내용이 50배나
+ * 고정 손절로 바뀌어도 이 함수는 계속 "Exact100X다"라고 답한다. 모양을
+ * 함께 보면 그 순간 **자격이 사라진다** — 이름이 아니라 계약이 기준이다.
+ *
+ * ★ 이것은 포지션의 **런타임 속성**으로 identity를 추론하는 것이 아니다.
+ *   (PR-E·PR1이 금지한 그것 — "거래소 배율이 100이고 격리이고 손절이
+ *   없으니 Exact100X겠지".) 여기서 보는 것은 장부에 적힌 식별자가
+ *   **선언상** 어떤 계약을 가리키는가이고, 거래소를 보지 않는다.
+ */
+export type Exact100xIdentityCode =
+  | 'EXACT_100X'
+  /** 셋 중 하나라도 비었거나 resolver가 풀지 못했다 */
+  | 'UNRESOLVED'
+  /** 풀렸지만 Exact100X 짝이 아니다 */
+  | 'OTHER_CONTRACT'
+  /** 짝은 맞는데 계약 내용이 더 이상 Exact100X의 모양이 아니다 */
+  | 'CONTRACT_SHAPE_CHANGED';
+
+export function exact100xIdentity(
+  profileId: unknown, presetId: unknown, version: unknown,
+): { ok: boolean; code: Exact100xIdentityCode; reason: string } {
+  const r = resolveExecutionProfile(profileId, presetId, version);
+  if (!r.ok || r.kind !== 'contract' || !r.contract) {
+    return { ok: false, code: 'UNRESOLVED',
+      reason: r.ok
+        ? '실행 계약 기록이 없습니다'
+        : `실행 계약을 풀지 못했습니다 (${(r as any).code}) — ${(r as any).message}` };
+  }
+  const c = r.contract;
+  // ② 어느 짝인가. 목록은 이미 한 곳에 있다.
+  const paired = EXCLUSIVE_PAIRS.some(
+    x => x.profileId === c.profileId && x.presetId === c.presetId);
+  if (!paired) {
+    return { ok: false, code: 'OTHER_CONTRACT',
+      reason: `${c.profileId}/${c.presetId}는 Exact100X 계약이 아닙니다` };
+  }
+  // ③ 모양. 이름이 아니라 계약이 기준이다.
+  const shape: Array<[boolean, string]> = [
+    [c.leverage === 100 && c.maxLeverage === 100, `배율이 정확히 100이 아닙니다 (${c.leverage}/${c.maxLeverage})`],
+    [c.stopPolicy === 'NO_FIXED_SL', `고정 손절을 쓰는 계약입니다 (${c.stopPolicy})`],
+    [c.sizingPolicy === 'MARGIN_ALLOCATION', `증거금 배정 계약이 아닙니다 (${c.sizingPolicy})`],
+    [c.takeProfitPolicy === 'NO_FIXED_TP', `고정 익절을 쓰는 계약입니다 (${c.takeProfitPolicy})`],
+    [c.stopLossPct == null && c.takeProfitPct == null, '손절·익절 숫자가 남아 있습니다'],
+  ];
+  for (const [okShape, why] of shape) {
+    if (!okShape) {
+      return { ok: false, code: 'CONTRACT_SHAPE_CHANGED',
+        reason: `${c.profileId}/${c.presetId}의 계약 내용이 Exact100X가 아닙니다 — ${why}` };
+    }
+  }
+  return { ok: true, code: 'EXACT_100X', reason: '' };
+}
+
+/**
  * 실행 계약 전체의 지문.
  *
  * 모든 (프로필 × 프리셋) 조합의 **실행값만** 안정 직렬화한다. 검사기가

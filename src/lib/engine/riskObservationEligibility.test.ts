@@ -76,6 +76,75 @@ export function runRiskObservationEligibilityTests() {
       'IDENTITY_MISMATCH', '★ 반쪽 계약을 통과시켰다');
   });
 
+  // ══════════════════════════════════════════════════════════
+  // **완전한 identity ≠ Exact100X identity**
+  // ══════════════════════════════════════════════════════════
+  //
+  //   `executionIdentityComplete`는 "세 칸이 찼는가"만 본다. 그걸로
+  //   자격을 주면 다른 계약의 포지션이 Exact100X 실측 통계에 섞인다.
+
+  test('★ 다른 완전한 계약은 Exact100X가 아니다', async () => {
+    const { executionIdentityComplete } = await import('../execution/profile');
+    for (const id of [
+      { profileId: 'SCALP_HIGH_LEV', presetId: 'STABILIZE', contractVersion: 2 },
+      { profileId: 'SWING_LOW_LEV', presetId: 'RESEARCH', contractVersion: 2 },
+      { profileId: 'DAILY_HIGH_LEV', presetId: 'STABILIZE', contractVersion: 2 },
+    ]) {
+      // ★ 핵심 불변: 완전한데도 자격이 없어야 한다.
+      eq(executionIdentityComplete(id as any), true,
+        `전제: ${id.profileId}/${id.presetId}는 완전한 identity다`);
+      eq(elig(base({ executionIdentity: id })).code, 'IDENTITY_MISMATCH',
+        `★ ${id.profileId}/${id.presetId}가 Exact100X 실측으로 들어갔다`);
+    }
+  });
+
+  test('★ 짝이 아닌 조합은 통과하지 못한다', () => {
+    // SCALP_HIGH_LEV + EXACT_100X — 프리셋만 빌려 온 조합
+    eq(elig(base({ executionIdentity: {
+      profileId: 'SCALP_HIGH_LEV', presetId: 'EXACT_100X', contractVersion: 2,
+    } })).code, 'IDENTITY_MISMATCH');
+    // MAX_LEV_100X + 다른 프리셋
+    eq(elig(base({ executionIdentity: {
+      profileId: 'MAX_LEV_100X', presetId: 'STABILIZE', contractVersion: 2,
+    } })).code, 'IDENTITY_MISMATCH');
+  });
+
+  test('★ 지원하지 않는 계약 버전은 통과하지 못한다', async () => {
+    const { EXECUTION_CONTRACT_VERSION } = await import('../execution/profile');
+    for (const v of [EXECUTION_CONTRACT_VERSION - 1, EXECUTION_CONTRACT_VERSION + 1,
+                     0, -1, 1.5, '2.0', 'two', null]) {
+      eq(elig(base({ executionIdentity: {
+        profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: v as any,
+      } })).code, 'IDENTITY_MISMATCH', `버전 ${String(v)}`);
+    }
+  });
+
+  test('★ 세 칸이 임의 문자열이면 resolver가 막는다', () => {
+    eq(elig(base({ executionIdentity: {
+      profileId: 'NOPE', presetId: 'ALSO_NOPE', contractVersion: 2,
+    } })).code, 'IDENTITY_MISMATCH');
+  });
+
+  test('★ 정상 Exact100X는 통과한다 (정본이 실제로 푸는가)', async () => {
+    const { EXECUTION_CONTRACT_VERSION } = await import('../execution/profile');
+    eq(elig(base({ executionIdentity: {
+      profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+      contractVersion: EXECUTION_CONTRACT_VERSION,
+    } })).code, 'ELIGIBLE');
+  });
+
+  test('★ 자격 정본은 계약의 **모양**까지 본다 — 이름만으로 주지 않는다', async () => {
+    const { exact100xIdentity } = await import('../execution/profile');
+    const ok = exact100xIdentity('MAX_LEV_100X', 'EXACT_100X', 2);
+    eq(ok.ok, true);
+    eq(ok.code, 'EXACT_100X');
+    // 다른 계약은 OTHER_CONTRACT, 못 푸는 것은 UNRESOLVED — 사유가 갈린다.
+    eq(exact100xIdentity('SCALP_HIGH_LEV', 'STABILIZE', 2).code, 'OTHER_CONTRACT');
+    eq(exact100xIdentity('NOPE', 'NOPE', 2).code, 'UNRESOLVED');
+    eq(exact100xIdentity('MAX_LEV_100X', 'EXACT_100X', 99).code, 'UNRESOLVED');
+    eq(exact100xIdentity(null, null, null).code, 'UNRESOLVED');
+  });
+
   test('★ 수량을 못 읽었으면 0으로 읽지 않는다', () => {
     for (const q of [null, undefined, NaN, Infinity, -Infinity, 'x', true]) {
       const v = elig(base({ positionAmt: q }));

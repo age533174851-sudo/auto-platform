@@ -1857,6 +1857,29 @@ const M = [
       + "    WHERE sample_origin = 'VERIFIED_TESTNET_OBSERVATION';\n"
       + '  IF false THEN'), 'RED'],
 
+  // ── ⑤B-2 OB16 — 완전한 identity ≠ Exact100X identity ──
+  //
+  //   `executionIdentityComplete`는 "세 칸이 찼는가"만 본다. 그걸로
+  //   실측 자격을 주면 다른 계약의 포지션이 Exact100X 통계에 섞인다.
+
+  ['MUT-OB16 Exact100X 확인을 지우고 완전성만 봄', P.elig,
+    s => s.replace('  const ex100 = exact100xIdentity(\n'
+      + '    ident?.profileId, ident?.presetId, ident?.contractVersion);',
+      '  const ex100 = { ok: ident?.profileId != null && ident?.presetId != null'
+      + " && ident?.contractVersion != null, code: 'EXACT_100X', reason: '' };"), 'RED'],
+
+  ['MUT-OB16b 이름만 보고 버전·resolver 실패를 무시', P.plan,
+    s => s.replace('  const r = resolveExecutionProfile(profileId, presetId, version);',
+      "  const r: any = { ok: true, kind: 'contract', contract: {\n"
+      + '    profileId, presetId, contractVersion: version, leverage: 100, maxLeverage: 100,\n'
+      + "    stopPolicy: 'NO_FIXED_SL', sizingPolicy: 'MARGIN_ALLOCATION',\n"
+      + "    takeProfitPolicy: 'NO_FIXED_TP', stopLossPct: null, takeProfitPct: null } };"),
+    'RED'],
+
+  ['MUT-OB16c 계약 모양 검사를 건너뜀 (이름만으로 Exact100X)', P.plan,
+    s => s.replace('  for (const [okShape, why] of shape) {', '  for (const [okShape, why] of []) {'),
+    'RED'],
+
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**

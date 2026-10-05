@@ -4558,6 +4558,71 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
                 || E(b({ exchange: 'gate' })).code !== 'VENUE_UNSUPPORTED') {
               err(`${ELG}: 계약·거래소 관문이 열려 있습니다`);
             }
+            // ★ **완전한 identity ≠ Exact100X identity.**
+            //
+            //   `executionIdentityComplete`는 세 칸이 찼는가만 본다.
+            //   그걸로 자격을 주면 다른 계약의 포지션이 Exact100X 실측
+            //   통계에 섞인다. 여기서는 **돌려서** 확인한다 — 완전한데도
+            //   자격이 없어야 한다.
+            const pm3 = await loadModule('src/lib/execution/profile.ts', '실행 계약 정본');
+            if (pm3 && typeof pm3.executionIdentityComplete === 'function') {
+              for (const id of [
+                { profileId: 'SCALP_HIGH_LEV', presetId: 'STABILIZE', contractVersion: 2 },
+                { profileId: 'SWING_LOW_LEV', presetId: 'RESEARCH', contractVersion: 2 },
+                { profileId: 'MAX_LEV_100X', presetId: 'STABILIZE', contractVersion: 2 },
+                { profileId: 'SCALP_HIGH_LEV', presetId: 'EXACT_100X', contractVersion: 2 },
+              ]) {
+                const complete = pm3.executionIdentityComplete(id);
+                const v2 = E(b({ executionIdentity: id }));
+                if (complete && v2.eligible) {
+                  err(`${ELG}: ${id.profileId}/${id.presetId}가 Exact100X 실측 자격을 받습니다`
+                    + ' — 완전한 identity와 Exact100X identity는 다릅니다');
+                }
+                if (v2.code !== 'IDENTITY_MISMATCH') {
+                  err(`${ELG}: ${id.profileId}/${id.presetId}를 ${v2.code}로 적습니다`);
+                }
+              }
+              // 지난/엉뚱한 버전도 막히는가
+              for (const v of [1, 3, 0, -1, 1.5, '2.0', 'two', null]) {
+                const v3 = E(b({ executionIdentity: {
+                  profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: v } }));
+                if (v3.eligible) {
+                  err(`${ELG}: 계약 버전 ${String(v)}인데 실측 자격을 줍니다`);
+                }
+              }
+              // 정상 Exact100X는 통과해야 한다 (관문이 전부 닫히면 안 된다)
+              const good = E(b({ executionIdentity: {
+                profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+                contractVersion: pm3.EXECUTION_CONTRACT_VERSION } }));
+              if (good.code !== 'ELIGIBLE') {
+                err(`${ELG}: 정상 Exact100X가 자격 미달입니다 (${good.code}) — 관문이 전부 닫혔습니다`);
+              }
+            }
+            // Exact100X 판정 정본이 resolver를 지나는가
+            if (!pm3 || typeof pm3.exact100xIdentity !== 'function') {
+              err('execution/profile: exact100xIdentity 정본이 없습니다');
+            } else {
+              const X = pm3.exact100xIdentity;
+              if (X('MAX_LEV_100X', 'EXACT_100X', pm3.EXECUTION_CONTRACT_VERSION).code
+                  !== 'EXACT_100X') {
+                err('execution/profile: 정상 Exact100X를 알아보지 못합니다');
+              }
+              if (X('SCALP_HIGH_LEV', 'STABILIZE', 2).code !== 'OTHER_CONTRACT'
+                  || X('NOPE', 'NOPE', 2).code !== 'UNRESOLVED'
+                  || X('MAX_LEV_100X', 'EXACT_100X', 99).code !== 'UNRESOLVED') {
+                err('execution/profile: Exact100X 판정이 사유를 구별하지 못합니다');
+              }
+              // 자격 정본이 **그 정본을 쓰는가** (문자열 비교로 되돌아가지 않았는가)
+              const esrc = code(ELG);
+              if (!/exact100xIdentity\(/.test(esrc)) {
+                err(`${ELG}: Exact100X 판정 정본을 쓰지 않습니다`
+                  + ' — 완전성 검사만으로는 다른 계약이 섞입니다');
+              }
+              if (/MAX_LEV_100X|EXACT_100X/.test(esrc)) {
+                err(`${ELG}: 계약 이름을 직접 비교합니다`
+                  + ' — 버전이 올라갈 때 여기만 옛말로 남습니다. 정본에 물으십시오');
+              }
+            }
             // 행동 칸이 없는가 (종료 판정이 아니다)
             for (const k of Object.keys(E(b()))) {
               if (/action|close|exit|order|send/i.test(k)) {
