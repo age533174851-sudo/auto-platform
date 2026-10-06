@@ -2048,8 +2048,8 @@ const M = [
   ['MIG-L3b 같은 번호가 두 파일을 가리키는 것을 허용', P.lin,
     s => s.replace('    if (prev != null) {', '    if (false) {'), 'RED'],
 
-  ['MIG-L3c base가 쓰는 번호와 겹치는 것을 허용', P.lin,
-    s => s.replace('    if (baseIds.has(d.id)) {', '    if (false) {'), 'RED'],
+  ['MIG-L3c base 마지막 번호 뒤가 아닌 것을 허용', P.lin,
+    s => s.replace('    if (d.id <= baseMax) {', '    if (false) {'), 'RED'],
 
   ['MIG-L3d 094를 건너뛰고 095로 선언', P.lin,
     s => s.replace("  { id: 94, name: '094_exact100x_exit_escape_observations.sql' },",

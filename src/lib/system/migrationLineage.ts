@@ -138,15 +138,18 @@ export function checkMigrationLineage(i: {
   // ④ base가 이미 쓰는 번호와 겹치지 않는가
   const baseIds = new Set(baseFiles.map(b => b.id).filter((n): n is number => n != null));
   const baseMax = baseIds.size ? Math.max(...baseIds) : -1;
+  // ★ `baseIds.has(d.id)`를 따로 보지 않는다 — **도달할 수 없기
+  //   때문이다.** base가 그 번호를 쓰면 그 파일은 ②에서 트리에 있어야
+  //   하고, 그러면 우리 파일과 **번호가 겹쳐** ①이 먼저 잡는다. 죽은
+  //   가지를 남겨 두면 돌연변이가 그것을 건드려도 아무 일이 없다
+  //   (MIG-L3c가 그렇게 새 나갔다). 아래 한 줄이 전부 덮는다:
+  //   겹쳤다면 d.id <= max(baseIds) = baseMax가 반드시 참이다.
   for (const d of declared) {
-    if (baseIds.has(d.id)) {
+    if (d.id <= baseMax) {
       const other = baseFiles.find(b => b.id === d.id)?.name;
       return no('COLLIDES_WITH_BASE',
-        `번호 ${d.id}는 base가 이미 씁니다 (${other}) — ${d.name}과 겹칩니다`);
-    }
-    if (d.id <= baseMax) {
-      return no('COLLIDES_WITH_BASE',
-        `${d.name}의 번호 ${d.id}가 base의 마지막 번호 ${baseMax} 뒤가 아닙니다`);
+        `${d.name}의 번호 ${d.id}가 base의 마지막 번호 ${baseMax} 뒤가 아닙니다`
+        + (other ? ` — base의 ${other}과 같은 번호입니다` : ''));
     }
   }
 
