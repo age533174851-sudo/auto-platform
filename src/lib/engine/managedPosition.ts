@@ -213,7 +213,7 @@ export interface OrderRowLike {
    */
   stop_policy?: string | null;
   /**
-   * 진입 당시의 실행 계약 (migration 089). **셋은 함께 온다.**
+   * 진입 당시의 실행 계약 (migration 090). **셋은 함께 온다.**
    *
    * 이 값이 없던 시절에는 "배율 100 · 격리 · 손절 없음"으로 Exact100X를
    * 추론할 수밖에 없었고, 그 추론은 금지돼 있었다. 이제 장부가 직접
@@ -359,14 +359,14 @@ export interface ExitAuthorityCandidate {
   exposureClass: SeatExposureClass;
   capabilities: SeatExitCapabilities;
   /**
-   * 진입 허가가 쓴 변동성 위험 거리(%) — 090 불변 스냅숏.
+   * 진입 허가가 쓴 변동성 위험 거리(%) — 091 불변 스냅숏.
    *
-   * **NULL은 UNKNOWN이다.** 090 이전에 열린 행은 null이고, 그 행은
+   * **NULL은 UNKNOWN이다.** 091 이전에 열린 행은 null이고, 그 행은
    * ⑤B의 adverse 판단에 쓸 수 없다. 0으로 대체하거나 지금 ATR을 재서
    * 채우지 않는다. (⑤A의 TIME_EXIT은 이 값을 보지 않으므로 그대로 돈다.)
    */
   entryAdverseDistancePct: number | null;
-  /** 진입 당시 통과한 RAW 청산여유(%) — 090 불변 스냅숏. NULL은 UNKNOWN */
+  /** 진입 당시 통과한 RAW 청산여유(%) — 091 불변 스냅숏. NULL은 UNKNOWN */
   entryLiquidationDistancePctRaw: number | null;
 }
 
@@ -593,7 +593,7 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
             orderId: r?.id ? String(r.id) : null,
             exposureClass: cap.exposureClass,
             capabilities: cap.capabilities,
-            // 090 스냅숏을 **있는 그대로** 싣는다. 없으면 null이다 —
+            // 091 스냅숏을 **있는 그대로** 싣는다. 없으면 null이다 —
             // 여기서 기본값을 주면 UNKNOWN이 숫자가 되어 사라진다.
             entryAdverseDistancePct: num((r as any)?.entry_adverse_distance_pct),
             entryLiquidationDistancePctRaw:

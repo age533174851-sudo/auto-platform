@@ -141,7 +141,7 @@ export function runPostEntryRiskTests() {
     eq(stale.freshness!.ok, false);
   });
 
-  test('★ 090 스냅숏은 그대로 들고 다닌다 — null은 null이다', () => {
+  test('★ 091 스냅숏은 그대로 들고 다닌다 — null은 null이다', () => {
     const m = measurePostEntryRisk(input({
       entryAdverseDistancePct: null, entryLiquidationDistancePctRaw: null,
     }));

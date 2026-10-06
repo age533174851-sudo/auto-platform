@@ -20,7 +20,7 @@
 //
 // 다만 그 함수의 `ok`를 **이 측정의 정본으로 쓰지 않는다.** 그 `ok`에는
 // "변동성 위험거리와 비교해서 충분한가"가 섞여 있는데, post-entry에는
-// 그 비교 기준이 장부(090)에서 오고 없을 수도 있다. 측정 자체를 믿을 수
+// 그 비교 기준이 장부(091)에서 오고 없을 수도 있다. 측정 자체를 믿을 수
 // 있는가는 `trustworthy`가 답한다 — 그 구분은 이미 그 파일이 세워 둔
 // 것이고, 여기서 뒤집지 않는다.
 //
@@ -153,7 +153,7 @@ export interface PostEntryRiskInput {
   leverage: number | null | undefined;
   marginMode: 'isolated' | 'cross' | null | undefined;
   brackets: BracketTier[] | null | undefined;
-  /** 090 불변 스냅숏. **없으면 null이고 0이 아니다** */
+  /** 091 불변 스냅숏. **없으면 null이고 0이 아니다** */
   entryAdverseDistancePct: number | null | undefined;
   entryLiquidationDistancePctRaw: number | null | undefined;
   /**
@@ -196,7 +196,7 @@ export interface PostEntryRiskMeasurement {
   deltaPct: number | null;
   liquidationSources: LiquidationSourceStatus;
 
-  /** 090 스냅숏 그대로. **여기서 계산하거나 대체하지 않는다** */
+  /** 091 스냅숏 그대로. **여기서 계산하거나 대체하지 않는다** */
   entryAdverseDistancePct: number | null;
   entryLiquidationDistancePctRaw: number | null;
 
@@ -289,7 +289,7 @@ export function measurePostEntryRisk(
     markObservedAtMs: num(i?.provenance?.markObservedAtMs),
     bracketObservedAtMs: num(i?.provenance?.bracketObservedAtMs),
   };
-  // 090 스냅숏은 **그대로 들고 다닌다.** 없으면 null이다 — 0으로 바꾸거나
+  // 091 스냅숏은 **그대로 들고 다닌다.** 없으면 null이다 — 0으로 바꾸거나
   // 지금 ATR을 재서 채우지 않는다.
   const snap = {
     entryAdverseDistancePct: num(i?.entryAdverseDistancePct),
@@ -320,7 +320,7 @@ export function measurePostEntryRisk(
   // ── 내부 추정 (독립 검증자) ──
   //
   // `adverseDistancePct`를 **넘기지 않는다.** 진입 허가의 비교는 이미
-  // 끝났고, post-entry 비교 기준은 090 스냅숏이지 지금 재는 ATR이 아니다.
+  // 끝났고, post-entry 비교 기준은 091 스냅숏이지 지금 재는 ATR이 아니다.
   // 넘기지 않으면 `ADVERSE_DISTANCE_UNKNOWN`으로 `ok: false`가 되지만
   // `trustworthy`는 참이다 — 그 구분이 여기서 쓰는 것이다.
   const internal = assessLiquidationDistance({

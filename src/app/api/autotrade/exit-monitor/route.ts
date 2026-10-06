@@ -877,8 +877,8 @@ async function runLifecycleSweep(
 
   // ── 주문 장부를 읽는다 — DB가 코드보다 뒤처져도 멈추지 않는다 ──
   //
-  //   진입 당시의 실행 계약(089)까지 읽어 보고, **그 칸이 없어서** 실패한
-  //   경우에만 옛 모양으로 한 번 더 읽는다. 089가 아직인 DB에서 조회가
+  //   진입 당시의 실행 계약(090)까지 읽어 보고, **그 칸이 없어서** 실패한
+  //   경우에만 옛 모양으로 한 번 더 읽는다. 090가 아직인 DB에서 조회가
   //   통째로 죽으면 이미 열린 포지션의 청산·보호·복구가 함께 멈추는데,
   //   그건 `migrationStatus`의 불변식("막는 것은 새로 여는 것뿐이다")과
   //   정면으로 충돌한다.
@@ -1247,7 +1247,7 @@ async function runLifecycleSweep(
           marginMode: rr?.risk?.marginType === 'isolated' ? 'isolated'
             : rr?.risk?.marginType === 'cross' ? 'cross' : null,
           brackets: br?.tiers ?? null,
-          // 090 스냅숏을 **그대로** 넘긴다. null은 UNKNOWN이다.
+          // 091 스냅숏을 **그대로** 넘긴다. null은 UNKNOWN이다.
           entryAdverseDistancePct: c.entryAdverseDistancePct,
           entryLiquidationDistancePctRaw: c.entryLiquidationDistancePctRaw,
           provenance: {
@@ -1541,8 +1541,8 @@ async function runLifecycleSweep(
     + (out.deferredCount ? ` · 관리 유예 ${out.deferredCount}건` : '')
     // 후퇴로 읽은 회차는 그 사실을 적는다 — identity가 전부 비어 있는
     // 이유가 "기록이 없어서"가 아니라 "칸을 못 읽어서"임을 구별하게 한다.
-    + (out.projection === 'LEGACY' ? ' · 실행 계약 칸 없음(089 미적용)' : '')
-    + (out.projection === 'IDENTITY' ? ' · 진입 위험 스냅숏 칸 없음(090 미적용)' : '')
+    + (out.projection === 'LEGACY' ? ' · 실행 계약 칸 없음(090 미적용)' : '')
+    + (out.projection === 'IDENTITY' ? ' · 진입 위험 스냅숏 칸 없음(091 미적용)' : '')
     // ⑤B-0/1 — **측정만 했다.** 닫은 것이 아니다. 둘을 같은 문장에
     // 섞으면 "위험 측정 3건"이 "3건 닫았다"로 읽힌다.
     + (out.postEntryRisk.measured || out.postEntryRisk.unusable

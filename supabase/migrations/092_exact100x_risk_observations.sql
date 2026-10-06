@@ -1,4 +1,4 @@
--- 091_exact100x_risk_observations.sql
+-- 092_exact100x_risk_observations.sql
 --
 -- **⑤B-2 — 열린 100배 포지션의 위험을 시간에 따라 모은다. 판단하지 않는다.**
 --
@@ -11,9 +11,9 @@
 --
 -- 왜 `live_orders`가 아닌가
 -- ─────────────────────────
--- 090의 두 칸은 **진입 시점의 불변 스냅숏**이다. 여기 담는 것은 **열려
+-- 091의 두 칸은 **진입 시점의 불변 스냅숏**이다. 여기 담는 것은 **열려
 -- 있는 동안 계속 바뀌는 시계열**이다. 성격이 다르고, 무엇보다 같은 줄에
--- 쓰면 진입 당시의 값이 덮인다 — 090이 존재하는 이유가 사라진다.
+-- 쓰면 진입 당시의 값이 덮인다 — 091이 존재하는 이유가 사라진다.
 --
 -- 왜 `audit_events`가 아닌가
 -- ──────────────────────────
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS public.exact100x_risk_observations (
   symbol        TEXT NOT NULL,
   side          TEXT NOT NULL,
 
-  -- 어느 실행 계약의 포지션인가 (089와 같은 세 칸)
+  -- 어느 실행 계약의 포지션인가 (090와 같은 세 칸)
   execution_profile_id       TEXT,
   execution_preset_id        TEXT,
   execution_contract_version INTEGER,
@@ -106,9 +106,9 @@ CREATE TABLE IF NOT EXISTS public.exact100x_risk_observations (
   delta_pct               DOUBLE PRECISION,
   liquidation_sources     TEXT,
 
-  -- ── 진입 당시 불변 스냅숏 (090에서 읽어 온 값) ──
+  -- ── 진입 당시 불변 스냅숏 (091에서 읽어 온 값) ──
   --
-  -- 여기 적히는 것은 **사본**이다. 090의 원본을 갱신하지 않는다.
+  -- 여기 적히는 것은 **사본**이다. 091의 원본을 갱신하지 않는다.
   entry_adverse_distance_pct          DOUBLE PRECISION,
   entry_liquidation_distance_pct_raw  DOUBLE PRECISION,
 

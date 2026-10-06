@@ -3,7 +3,7 @@
 // **⑤B-2 — 실측과 주입값을 섞으면 통계가 거짓이 된다.**
 //
 // 이 파일이 지키는 것의 절반은 "적지 않는다"다. 출처를 모르면 적지
-// 않고, 주문 수단을 들지 않고, 090 원본을 갱신하지 않는다.
+// 않고, 주문 수단을 들지 않고, 091 원본을 갱신하지 않는다.
 import { test, assert, eq } from '../../test/harness';
 import {
   recordRiskObservation, riskObservationRow,
@@ -103,7 +103,7 @@ export function runRiskObservationStoreTests() {
       '★ updateTime이 관측 시각으로 승격됐다');
   });
 
-  test('★ 090 원본을 갱신하지 않는다 — 사본만 적는다', async () => {
+  test('★ 091 원본을 갱신하지 않는다 — 사본만 적는다', async () => {
     const { sb, rows } = fakeDb();
     await recordRiskObservation(sb, input());
     eq(rows.length, 1);

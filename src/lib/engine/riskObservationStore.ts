@@ -159,7 +159,7 @@ export function riskObservationRow(i: RiskObservationInput): Record<string, any>
     delta_pct: m.deltaPct,
     liquidation_sources: m.liquidationSources,
 
-    // 090의 **사본**이다. 원본을 갱신하지 않는다.
+    // 091의 **사본**이다. 원본을 갱신하지 않는다.
     entry_adverse_distance_pct: m.entryAdverseDistancePct,
     entry_liquidation_distance_pct_raw: m.entryLiquidationDistancePctRaw,
 

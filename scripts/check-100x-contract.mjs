@@ -2485,7 +2485,7 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
   // ── ⑬-b 감시 라우트가 정책 칸을 읽는가 ──
   const mon = code(MONITOR);
   {
-    // ★ 조회 모양은 이제 `lifecycleRows`에 있다(089 미적용 후퇴 때문에
+    // ★ 조회 모양은 이제 `lifecycleRows`에 있다(090 미적용 후퇴 때문에
     //   두 벌이 필요해졌다). 라우트가 아니라 그 정본을 본다.
     //
     //   **두 모양 다** 손절 정책을 읽어야 한다 — 후퇴가 `stop_policy`를
@@ -2641,7 +2641,7 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
 // ★ 그런데 **말할 뿐 판단하지 않는다.** identity가 생기면 "Exact100X면
 //   이렇게 하자"가 자연스러워 보이기 시작하고, 그 분기가 전용 종료 권한
 //   설계보다 먼저 생긴다. 아래 ⑭-d가 그것을 막는다.
-const MIG_IDENT = 'supabase/migrations/089_live_orders_execution_identity.sql';
+const MIG_IDENT = 'supabase/migrations/090_live_orders_execution_identity.sql';
 const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
 {
   // ── ⑭-a 마이그레이션이 세 칸과 완전성 제약을 둔다 ──
@@ -2714,10 +2714,10 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       'execution_contract_version']) {
       if (!ex.includes(col)) err(`${EXECUTOR}: ${col}을 장부에 적지 않습니다`);
     }
-    // **조건부여야 한다** — 항상 붙이면 089 이전 DB에서 모든 주문이 실패한다
+    // **조건부여야 한다** — 항상 붙이면 090 이전 DB에서 모든 주문이 실패한다
     if (!/\.\.\.\(ident\s*\?\s*\{/.test(ex)) {
       err(`${EXECUTOR}: 실행 계약 칸을 조건 없이 붙입니다`
-        + ' — 089가 아직인 DB에서 기존 경로의 주문까지 전부 실패합니다');
+        + ' — 090가 아직인 DB에서 기존 경로의 주문까지 전부 실패합니다');
     }
     // ★ 온전함을 **정본에 묻는가.** `!!ident`처럼 자기가 세면 적는 쪽과
     //   읽는 쪽의 기준이 갈리고, 반쪽이 저장된다.
@@ -2787,14 +2787,14 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
 
   // ── ⑭-c2 DB가 코드보다 뒤처져도 회차가 죽지 않는가 ──
   //
-  //   089가 아직인 DB에 코드가 먼저 닿으면, 새 칸을 넣은 조회를 PostgREST가
+  //   090가 아직인 DB에 코드가 먼저 닿으면, 새 칸을 넣은 조회를 PostgREST가
   //   통째로 거절한다. 그때 회차가 끝나면 **이미 열린 포지션의 청산·보호·
   //   복구가 함께 멈춘다** — `migrationStatus`의 불변식과 정면으로 충돌한다.
   {
     const ROWS = 'src/lib/engine/lifecycleRows.ts';
     const lr = await loadModule(ROWS, '주문 장부 읽기 정본');
     if (!lr || typeof lr.loadLifecycleRows !== 'function') {
-      err(`${ROWS}: loadLifecycleRows가 없습니다 — 089 미적용에서 회차가 죽습니다`);
+      err(`${ROWS}: loadLifecycleRows가 없습니다 — 090 미적용에서 회차가 죽습니다`);
     } else {
       const miss = c => ({ code: '42703', message: `column live_orders.${c} does not exist` });
       // ① 칸이 다 있으면 한 번에 읽는다 (멀쩡한데 두 번 읽지 않는다)
@@ -2806,7 +2806,7 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
             + ` (${r.projection} · ${calls.length}회)`);
         }
       }
-      // ①-b ★ 090만 아직일 때 **계약 칸을 함께 잃지 않는다**
+      // ①-b ★ 091만 아직일 때 **계약 칸을 함께 잃지 않는다**
       //
       //   여기서 LEGACY로 내려가면 실행 계약 세 칸이 사라지고 이미 검증된
       //   ⑤A의 4시간 TIME_EXIT이 멈춘다. 새 위험 기록이 없다는 이유로
@@ -2820,21 +2820,21 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
             : { data: [{ id: 'a' }], error: null };
         });
         if (r.error || r.projection !== 'IDENTITY' || calls.length !== 2) {
-          err('주문 장부 읽기: 090이 아직일 때 한 단계가 아니라 통째로 후퇴합니다'
+          err('주문 장부 읽기: 091이 아직일 때 한 단계가 아니라 통째로 후퇴합니다'
             + ` (${r.projection} · ${calls.length}회) — 실행 계약을 잃어 TIME_EXIT이 멈춥니다`);
         }
         for (const c of (lr.IDENTITY_COLUMNS || [])) {
           if (!String(calls[1] || '').includes(c)) {
-            err(`주문 장부 읽기: 090 후퇴 모양에서 ${c}가 사라졌습니다`);
+            err(`주문 장부 읽기: 091 후퇴 모양에서 ${c}가 사라졌습니다`);
           }
         }
         for (const c of (lr.RISK_SNAPSHOT_COLUMNS || [])) {
           if (String(calls[1] || '').includes(c)) {
-            err(`주문 장부 읽기: 090 후퇴 모양에 ${c}가 남아 있습니다 — 또 실패합니다`);
+            err(`주문 장부 읽기: 091 후퇴 모양에 ${c}가 남아 있습니다 — 또 실패합니다`);
           }
         }
       }
-      // ② 089 칸이 없으면 옛 모양으로 살린다
+      // ② 090 칸이 없으면 옛 모양으로 살린다
       {
         const calls = [];
         const r = await lr.loadLifecycleRows(async sel => {
@@ -2844,7 +2844,7 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
             : { data: [{ id: 'a' }], error: null };
         });
         if (r.error || r.projection !== 'LEGACY' || r.rows.length !== 1) {
-          err('주문 장부 읽기: 089가 아직이라고 회차를 죽입니다'
+          err('주문 장부 읽기: 090가 아직이라고 회차를 죽입니다'
             + ' — 이미 열린 포지션의 청산·보호·복구가 멈춥니다');
         }
         if (calls.length !== 3) {
@@ -2871,7 +2871,7 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         const calls = [];
         const r = await lr.loadLifecycleRows(async sel => { calls.push(sel); return { data: null, error: e }; });
         if (r.projection !== null || !r.error || calls.length !== 1) {
-          err(`주문 장부 읽기: ${why} 오류를 "089 미적용"으로 읽고 후퇴합니다`
+          err(`주문 장부 읽기: ${why} 오류를 "090 미적용"으로 읽고 후퇴합니다`
             + ' — 진짜 고장이 정상 회차로 덮입니다');
         }
       }
@@ -4123,7 +4123,7 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           err(`${PER}: 거래소가 준 0을 청산가로 읽습니다`
             + ' — 여유가 100%가 되어 가장 위험한 자리가 가장 안전해 보입니다');
         }
-        // ★ **090 스냅숏 null을 숫자로 바꾸지 않는가**
+        // ★ **091 스냅숏 null을 숫자로 바꾸지 않는가**
         const noSnap = pm.measurePostEntryRisk({
           ...base, entryAdverseDistancePct: null, entryLiquidationDistancePctRaw: null });
         if (noSnap.entryAdverseDistancePct != null
@@ -4728,6 +4728,127 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           }
         }
 
+
+      // ── ⑤B-3A-2 마이그레이션 계보 — **번호가 두 갈래로 갈라졌는가** ──
+      //
+      //   이 브랜치는 main에서 갈라진 뒤 자체 089를 만들었고, 그 사이
+      //   main에도 089_auth_profile_identity_sync가 생겨 **production에
+      //   이미 적용됐다.** 같은 번호가 두 SQL을 가리켰다.
+      //
+      //   로컬만 보면 보이지 않는다 — 번호를 바꾸고 manifest를 다시 구우면
+      //   **자기 일관적이라** 기존 검사기가 전부 초록이다. 충돌은
+      //   **base(main)에 대해서만** 보인다. 그래서 여기서 base를 읽는다.
+      //
+      //   판정은 `system/migrationLineage.ts` 한 곳에 있고, 이 검사기는
+      //   이름이 아니라 **그 판정을 돌려서** 본다.
+      {
+        const LIN = 'src/lib/system/migrationLineage.ts';
+        const lm = await loadModule(LIN, '마이그레이션 계보 정본');
+        if (!lm || typeof lm.checkMigrationLineage !== 'function'
+            || !Array.isArray(lm.EXACT100X_MIGRATIONS)) {
+          err(`${LIN}: 마이그레이션 계보 정본이 없습니다`
+            + ' — 번호 충돌이 base에 대해서만 보이므로 이 판정이 유일한 방어입니다');
+        } else {
+          const MIGD = 'supabase/migrations';
+          const idOf = n => (/^(\d{3})_/.exec(n) ? Number(/^(\d{3})_/.exec(n)[1]) : null);
+          // 작업 트리
+          const files = readdirSync(MIGD).filter(n => n.endsWith('.sql')).sort()
+            .map(n => ({ name: n, id: idOf(n), sql: read(`${MIGD}/${n}`) }));
+          // base(origin/main). **못 읽으면 통과시키지 않는다** —
+          // 비교하지 못한 것을 "겹치지 않음"으로 적는 순간 이 사고가 다시 난다.
+          let baseFiles = [];
+          let baseErr = null;
+          try {
+            const ls = execFileSync('git', ['ls-tree', '--name-only', 'origin/main', `${MIGD}/`],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+            const names = ls.split('\n').map(s => s.trim()).filter(s => s.endsWith('.sql'))
+              .map(s => s.replace(`${MIGD}/`, ''));
+            baseFiles = names.map(n => ({
+              name: n, id: idOf(n),
+              sql: execFileSync('git', ['show', `origin/main:${MIGD}/${n}`],
+                { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }),
+            }));
+          } catch (e) { baseErr = String(e?.message || e); }
+
+          if (baseErr || baseFiles.length === 0) {
+            err('마이그레이션 계보: base(origin/main)를 읽지 못했습니다'
+              + ` (${baseErr || '목록이 비었습니다'})`
+              + ' — 얕은 체크아웃이면 전체 이력을 받아(fetch-depth 0) 다시 실행하세요.'
+              + ' 비교하지 못한 것을 "겹치지 않음"으로 적지 않습니다');
+          } else {
+            const v = lm.checkMigrationLineage({ files, baseFiles });
+            if (!v?.ok) {
+              err(`마이그레이션 계보 ${v?.code}: ${v?.reason}`);
+            }
+            // base의 089는 **내용까지** 같아야 한다 (이미 적용된 파일이다)
+            const AUTH = '089_auth_profile_identity_sync.sql';
+            const b089 = baseFiles.find(b => b.name === AUTH);
+            const m089 = files.find(b => b.name === AUTH);
+            if (!b089) {
+              err(`마이그레이션 계보: base에 ${AUTH}이 없습니다 — base 선택이 잘못됐습니다`);
+            } else if (!m089) {
+              err(`마이그레이션 계보: ${AUTH}이 작업 트리에 없습니다`
+                + ' — production ledger에 이미 적용된 파일입니다');
+            } else if (m089.sql !== b089.sql) {
+              err(`마이그레이션 계보: ${AUTH}이 base와 다릅니다 — 내용 변경 없이 복원해야 합니다`);
+            }
+            // ⑤B 다섯 개가 manifest에 **같은 번호로** 실려 있는가.
+            // manifest는 자동생성이다 — 다시 굽지 않으면 옛 번호가 남는다.
+            const man = read('src/lib/system/migrationManifest.ts');
+            for (const d of lm.EXACT100X_MIGRATIONS) {
+              const re = new RegExp(`name:\\s*'${d.name.replace(/\./g, '\\.')}'[^}]*id:\\s*${d.id}\\b`);
+              if (!re.test(man)) {
+                err(`마이그레이션 계보: manifest에 ${d.name}이 id ${d.id}로 없습니다`
+                  + ' — `npm run gen:migrations`를 다시 실행해야 합니다');
+              }
+            }
+            // base의 번호 있는 파일은 **전부** manifest에 있어야 한다.
+            // 한 줄만 빠져도 화면은 조용히 옛 기준으로 초록을 켠다.
+            for (const b of baseFiles) {
+              if (b.id == null) continue;
+              if (!man.includes(`name: '${b.name}'`)) {
+                err(`마이그레이션 계보: manifest에 base의 ${b.name}이 없습니다`
+                  + ' — `npm run gen:migrations`를 다시 실행해야 합니다');
+              }
+            }
+            // 옛 번호가 manifest에 남아 있지 않은가
+            for (const stale of ['089_live_orders_execution_identity.sql',
+                                 '090_live_orders_entry_risk_snapshot.sql',
+                                 '091_exact100x_risk_observations.sql',
+                                 '092_exact100x_risk_observations_rls.sql',
+                                 '093_exact100x_exit_escape_observations.sql']) {
+              if (man.includes(`'${stale}'`)) {
+                err(`마이그레이션 계보: manifest에 옛 이름 ${stale}이 남아 있습니다`);
+              }
+            }
+            // 이름만 옮기고 **의미를 바꾸지 않았는가.** 각 파일이 약속한
+            // 것이 그대로 있는지 본다 — rename이라고 말하면서 SQL을 고치면
+            // 여기서 걸린다.
+            const PROMISES = [
+              ['090_live_orders_execution_identity.sql',
+                ['execution_profile_id', 'execution_preset_id', 'execution_contract_version']],
+              ['091_live_orders_entry_risk_snapshot.sql',
+                ['entry_adverse_distance_pct', 'entry_liquidation_distance_pct_raw']],
+              ['092_exact100x_risk_observations.sql',
+                ['exact100x_risk_observations', 'sample_origin']],
+              ['093_exact100x_risk_observations_rls.sql',
+                ['ENABLE ROW LEVEL SECURITY', 'service_role']],
+              ['094_exact100x_exit_escape_observations.sql',
+                ['exact100x_exit_escape_observations', 'ENABLE ROW LEVEL SECURITY', 'service_role']],
+            ];
+            for (const [name, needles] of PROMISES) {
+              const sql = read(`${MIGD}/${name}`);
+              if (!sql.trim()) { err(`마이그레이션 계보: ${name}이 비었습니다`); continue; }
+              for (const n of needles) {
+                if (!sql.includes(n)) {
+                  err(`마이그레이션 계보: ${name}이 ${n}을 더는 선언하지 않습니다`
+                    + ' — 번호만 옮긴 것이 아니라 의미가 바뀌었습니다');
+                }
+              }
+            }
+          }
+        }
+      }
         // ── ⑤B-3A-1 탈출 계측 — 재기만 하는가, 제대로 재는가 ──
       {
         const ESC = 'src/lib/engine/escapeObservationStore.ts';
@@ -4956,35 +5077,35 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           }
         }
 
-        // 093 보안
-        const mig93 = read('supabase/migrations/093_exact100x_exit_escape_observations.sql');
-        if (!mig93.trim()) err('093 마이그레이션이 없습니다');
+        // 094 보안
+        const mig94 = read('supabase/migrations/094_exact100x_exit_escape_observations.sql');
+        if (!mig94.trim()) err('094 마이그레이션이 없습니다');
         else {
-          if (!/ENABLE ROW LEVEL SECURITY/i.test(mig93)) {
-            err('093: RLS가 켜져 있지 않습니다');
+          if (!/ENABLE ROW LEVEL SECURITY/i.test(mig94)) {
+            err('094: RLS가 켜져 있지 않습니다');
           }
-          if (!/CREATE POLICY[\s\S]{0,200}TO service_role/i.test(mig93)) {
-            err('093: service_role 정책이 없습니다');
+          if (!/CREATE POLICY[\s\S]{0,200}TO service_role/i.test(mig94)) {
+            err('094: service_role 정책이 없습니다');
           }
           for (const role of ['anon', 'authenticated']) {
-            if (new RegExp(`CREATE POLICY[\\s\\S]{0,300}TO\\s+[^;]*\\b${role}\\b`, 'i').test(mig93)) {
-              err(`093: ${role}에 정책을 열었습니다`);
+            if (new RegExp(`CREATE POLICY[\\s\\S]{0,300}TO\\s+[^;]*\\b${role}\\b`, 'i').test(mig94)) {
+              err(`094: ${role}에 정책을 열었습니다`);
             }
           }
           if (!/CHECK\s*\([\s\S]{0,200}VERIFIED_TESTNET_OBSERVATION[\s\S]{0,120}env\s*=\s*'TESTNET'/i
-              .test(mig93)) {
-            err('093: VERIFIED_TESTNET → TESTNET 제약이 없습니다');
+              .test(mig94)) {
+            err('094: VERIFIED_TESTNET → TESTNET 제약이 없습니다');
           }
           // **칸 정의만** 본다. 주석에 "그 칸을 만들지 않았다"고 적은
           // 문장을 금지어로 잡으면, 이유를 설명하는 글이 규칙을 깬다.
-          const ddl93 = mig93.split('\n')
+          const ddl93 = mig94.split('\n')
             .filter(l => !/^\s*(--|\*|\/\*)/.test(l)).join('\n');
           if (/^\s*actual_time_to_flat\w*\s+\w/im.test(ddl93)) {
-            err('093: 실제 flat 시간 칸을 만들었습니다 — 재조회는 한 번뿐입니다');
+            err('094: 실제 flat 시간 칸을 만들었습니다 — 재조회는 한 번뿐입니다');
           }
           for (const bad of [/ALTER\s+COLUMN/i, /DROP\s+(COLUMN|TABLE)/i,
                              /\bUPDATE\s+public\./i, /\bDELETE\s+FROM/i]) {
-            if (bad.test(mig93)) err(`093: 파괴적 문장이 있습니다 (${bad})`);
+            if (bad.test(mig94)) err(`094: 파괴적 문장이 있습니다 (${bad})`);
           }
         }
 
@@ -5177,10 +5298,10 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         //
         //   이 표에는 connection_id·방향·수량·진입가·청산가가 들어간다.
         //   public 스키마에 무보호로 두면 anon 키 하나로 전부 읽힌다.
-        //   048·040·026은 전부 켜 두었다 — 091만 빠져 있었다.
+        //   048·040·026은 전부 켜 두었다 — 092만 빠져 있었다.
         {
-          const sec = read('supabase/migrations/091_exact100x_risk_observations.sql')
-            + '\n' + read('supabase/migrations/092_exact100x_risk_observations_rls.sql');
+          const sec = read('supabase/migrations/092_exact100x_risk_observations.sql')
+            + '\n' + read('supabase/migrations/093_exact100x_risk_observations_rls.sql');
           if (!sec.trim()) {
             err('관측 표 마이그레이션을 찾지 못했습니다');
           } else {
@@ -5217,22 +5338,22 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           }
         }
 
-        // 091이 ADDITIVE이고 기존 칸을 건드리지 않는가
-        const mig = read('supabase/migrations/091_exact100x_risk_observations.sql');
+        // 092이 ADDITIVE이고 기존 칸을 건드리지 않는가
+        const mig = read('supabase/migrations/092_exact100x_risk_observations.sql');
         if (!mig) {
-          err('091 마이그레이션이 없습니다');
+          err('092 마이그레이션이 없습니다');
         } else {
           for (const bad of [/ALTER\s+COLUMN/i, /DROP\s+(COLUMN|TABLE)/i,
                              /\bUPDATE\s+public\./i, /\bDELETE\s+FROM/i]) {
             if (bad.test(mig)) {
-              err(`091: 파괴적 문장이 있습니다 (${bad}) — ADDITIVE여야 합니다`);
+              err(`092: 파괴적 문장이 있습니다 (${bad}) — ADDITIVE여야 합니다`);
             }
           }
           if (!/sample_origin/.test(mig) || !/CHECK \(sample_origin IN/.test(mig)) {
-            err('091: 표본 출처 칸과 제약이 없습니다 — 실측과 주입값이 섞입니다');
+            err('092: 표본 출처 칸과 제약이 없습니다 — 실측과 주입값이 섞입니다');
           }
           if (/sample_origin[^,]*DEFAULT/i.test(mig)) {
-            err('091: sample_origin에 기본값이 있습니다'
+            err('092: sample_origin에 기본값이 있습니다'
               + ' — 모르고 실측으로 적히는 길을 열어 둡니다');
           }
         }
@@ -5244,7 +5365,7 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         const iSnap = sc2.indexOf('entryRiskSnapshot');
         if (iSnap < 0) {
           err('scalp/route: 진입 위험 스냅숏을 주문에 넘기지 않습니다'
-            + ' — 090 칸이 영원히 null이 되어 ⑤B가 쓸 기록이 생기지 않습니다');
+            + ' — 091 칸이 영원히 null이 되어 ⑤B가 쓸 기록이 생기지 않습니다');
         } else {
           const body = sc2.slice(iSnap, sc2.indexOf('}', sc2.indexOf('}', iSnap) + 1) + 1);
           if (!/prepared100x\.liquidation\.adverseDistancePct/.test(body)
@@ -5298,18 +5419,18 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           err(`${MON5}: 위험 측정의 MARK가 시장 스냅숏에서 오지 않습니다`);
         }
       }
-      // 090 후퇴가 **계약 칸을 함께 잃지 않는가**
+      // 091 후퇴가 **계약 칸을 함께 잃지 않는가**
       const lr = code('src/lib/engine/lifecycleRows.ts');
       for (const c of ['execution_profile_id', 'execution_preset_id',
                        'execution_contract_version']) {
         if (!new RegExp(`LIFECYCLE_SELECT_RISK[\\s\\S]{0,600}${c}`).test(lr)) {
-          err(`lifecycleRows: 090 모양에 ${c}가 없습니다`
-            + ' — 090을 적용한 DB가 실행 계약을 잃고 TIME_EXIT이 멈춥니다');
+          err(`lifecycleRows: 091 모양에 ${c}가 없습니다`
+            + ' — 091을 적용한 DB가 실행 계약을 잃고 TIME_EXIT이 멈춥니다');
         }
       }
       for (const c of ['entry_adverse_distance_pct', 'entry_liquidation_distance_pct_raw']) {
         if (new RegExp(`LIFECYCLE_SELECT_IDENTITY[\\s\\S]{0,600}${c}`).test(lr)) {
-          err(`lifecycleRows: 090 칸(${c})이 IDENTITY 모양에 남아 있습니다`
+          err(`lifecycleRows: 091 칸(${c})이 IDENTITY 모양에 남아 있습니다`
             + ' — 후퇴해도 같은 이유로 또 실패합니다');
         }
       }

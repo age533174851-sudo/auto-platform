@@ -1294,7 +1294,7 @@ export async function POST(req: NextRequest) {
         contractVersion: epContract.contractVersion,
       },
     } : {}),
-    // ★ **진입 허가가 쓴 위험 좌표를 그 판정 결과에서 그대로 꺼낸다** (090)
+    // ★ **진입 허가가 쓴 위험 좌표를 그 판정 결과에서 그대로 꺼낸다** (091)
     //
     //   `prepared100x.liquidation`은 `prepareEntry100x`가 통과시킨 바로 그
     //   판정이다. 여기서 `scalp.signal.stopPct`를 다시 읽거나 ATR을 새로

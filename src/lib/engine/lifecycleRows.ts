@@ -29,7 +29,7 @@
 //
 // 그래서 두 가지가 **함께** 맞을 때만 후퇴한다:
 //   · 오류 코드가 "그런 칼럼 없음"(42703) 또는 스키마 캐시 미스(PGRST204)
-//   · 그 메시지가 **089가 더한 세 칸 중 하나**를 가리킨다
+//   · 그 메시지가 **090가 더한 세 칸 중 하나**를 가리킨다
 //
 // 다른 칼럼이 없다는 오류는 후퇴 대상이 아니다 — 그건 이 파일이 모르는
 // 진짜 고장이다.
@@ -40,7 +40,7 @@
 // `executionIdentityOf()`가 자연스럽게 `null`을 준다. 여기서 "scalp니까
 // Exact100X겠지"로 채우면 PR2가 없애려던 추론이 되살아난다.
 
-/** 089가 더한 칸. 이 이름들이 실패 사유에 있어야만 후퇴한다 */
+/** 090가 더한 칸. 이 이름들이 실패 사유에 있어야만 후퇴한다 */
 export const IDENTITY_COLUMNS = [
   'execution_profile_id',
   'execution_preset_id',
@@ -48,9 +48,9 @@ export const IDENTITY_COLUMNS = [
 ] as const;
 
 /**
- * 090이 더한 칸. 이 이름들이 실패 사유에 있어야만 **한 단계만** 후퇴한다.
+ * 091이 더한 칸. 이 이름들이 실패 사유에 있어야만 **한 단계만** 후퇴한다.
  *
- * ★ 089 칸과 **따로 둔다.** 합쳐 두면 090이 아직인 DB에서 첫 조회가
+ * ★ 090 칸과 **따로 둔다.** 합쳐 두면 091이 아직인 DB에서 첫 조회가
  *   실패했을 때 곧장 LEGACY로 내려가 **계약 세 칸까지 함께 잃는다.**
  *   그러면 이미 검증된 ⑤A의 4시간 TIME_EXIT이 죽는다 — 새 위험 기록이
  *   없다는 이유로 되는 종료까지 멈추는 것은 후퇴가 아니라 고장이다.
@@ -60,7 +60,7 @@ export const RISK_SNAPSHOT_COLUMNS = [
   'entry_liquidation_distance_pct_raw',
 ] as const;
 
-/** 계약 + 진입 위험 스냅숏까지 읽는 모양 (089 + 090 적용 후) */
+/** 계약 + 진입 위험 스냅숏까지 읽는 모양 (090 + 091 적용 후) */
 export const LIFECYCLE_SELECT_RISK =
   'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
   + 'stop_policy, '
@@ -68,7 +68,7 @@ export const LIFECYCLE_SELECT_RISK =
   + 'entry_adverse_distance_pct, entry_liquidation_distance_pct_raw, '
   + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id';
 
-/** 진입 당시 계약까지 읽는 모양 (089 적용 후) */
+/** 진입 당시 계약까지 읽는 모양 (090 적용 후) */
 export const LIFECYCLE_SELECT_IDENTITY =
   'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
   + 'stop_policy, '
@@ -76,7 +76,7 @@ export const LIFECYCLE_SELECT_IDENTITY =
   + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id';
 
 /**
- * 089 이전 DB가 읽을 수 있는 모양.
+ * 090 이전 DB가 읽을 수 있는 모양.
  *
  * **새 칸 셋만 빠졌고 나머지는 같다.** 여기서 다른 칸까지 빼면 후퇴가
  * 조용한 기능 축소가 된다 — 예를 들어 `stop_policy`를 함께 빼면
@@ -89,11 +89,11 @@ export const LIFECYCLE_SELECT_LEGACY =
 
 /** 어떤 모양으로 읽었는가. **관측할 수 있어야 한다** */
 export type LifecycleProjection =
-  /** 계약 + 진입 위험 스냅숏까지 읽었다 (089 + 090 적용됨) */
+  /** 계약 + 진입 위험 스냅숏까지 읽었다 (090 + 091 적용됨) */
   | 'RISK'
-  /** 090이 아직이다 — 계약은 읽었고 위험 스냅숏만 전부 null이다 */
+  /** 091이 아직이다 — 계약은 읽었고 위험 스냅숏만 전부 null이다 */
   | 'IDENTITY'
-  /** 089가 아직이라 옛 모양으로 읽었다 — identity는 전부 null이다 */
+  /** 090가 아직이라 옛 모양으로 읽었다 — identity는 전부 null이다 */
   | 'LEGACY';
 
 export interface LifecycleRowsResult {
@@ -118,21 +118,21 @@ function missingColumnShape(err: any): { yes: boolean; text: string } {
 }
 
 /**
- * 이 실패가 **089가 아직이라서**인가.
+ * 이 실패가 **090가 아직이라서**인가.
  *
  * 좁게 판정한다 — 넓히면 진짜 고장이 후퇴로 덮인다.
  */
 export function isMissingIdentityColumn(err: any): boolean {
   const { yes, text } = missingColumnShape(err);
   if (!yes) return false;
-  // 없다는 그 칼럼이 **089의 것**인가. 다른 칼럼이면 우리 문제가 아니다.
+  // 없다는 그 칼럼이 **090의 것**인가. 다른 칼럼이면 우리 문제가 아니다.
   return IDENTITY_COLUMNS.some(c => text.includes(c));
 }
 
 /**
- * 이 실패가 **090이 아직이라서**인가.
+ * 이 실패가 **091이 아직이라서**인가.
  *
- * 089 칸을 가리키는 실패는 여기서 참이 되지 않는다 — 그건 한 단계 더
+ * 090 칸을 가리키는 실패는 여기서 참이 되지 않는다 — 그건 한 단계 더
  * 내려가야 하는 다른 상황이다.
  */
 export function isMissingRiskSnapshotColumn(err: any): boolean {
@@ -153,9 +153,9 @@ export function isMissingRiskSnapshotColumn(err: any): boolean {
 export async function loadLifecycleRows(
   query: (select: string) => Promise<{ data: any; error: any }>,
 ): Promise<LifecycleRowsResult> {
-  // ── ⓞ 090까지 읽어 본다 ──
+  // ── ⓞ 091까지 읽어 본다 ──
   //
-  //   실패가 **090 칸 때문**일 때만 한 단계 내려간다. 거기서 곧장
+  //   실패가 **091 칸 때문**일 때만 한 단계 내려간다. 거기서 곧장
   //   LEGACY로 가지 않는 것이 요점이다 — 그러면 계약 세 칸을 함께 잃고
   //   ⑤A TIME_EXIT이 멈춘다.
   let zero: { data: any; error: any };
@@ -194,7 +194,7 @@ export async function loadLifecycleRows(
     return { rows: [], projection: null, error: String(first.error?.message ?? first.error).slice(0, 200) };
   }
 
-  // 089가 아직이다 — 옛 모양으로 한 번 더. 이미 열린 포지션은 계속 관리한다.
+  // 090가 아직이다 — 옛 모양으로 한 번 더. 이미 열린 포지션은 계속 관리한다.
   try {
     const second = await query(LIFECYCLE_SELECT_LEGACY);
     if (second.error) {

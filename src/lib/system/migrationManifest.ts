@@ -103,11 +103,12 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '086_paper_challenge_finalizer.sql', id: 86, risk: 'ADDITIVE', checksum: '1b994d7cb7668771' },
   { name: '087_paper_challenge_cancel.sql', id: 87, risk: 'ADDITIVE', checksum: '7bf74b4acac16795' },
   { name: '088_paper_spot_holdings.sql', id: 88, risk: 'ADDITIVE', checksum: 'aba98631b1b1caf2' },
-  { name: '089_live_orders_execution_identity.sql', id: 89, risk: 'ADDITIVE', checksum: '559e52508a82a91b' },
-  { name: '090_live_orders_entry_risk_snapshot.sql', id: 90, risk: 'ADDITIVE', checksum: '8b9962c093db5e2a' },
-  { name: '091_exact100x_risk_observations.sql', id: 91, risk: 'ADDITIVE', checksum: '32ea667a8e054537' },
-  { name: '092_exact100x_risk_observations_rls.sql', id: 92, risk: 'ADDITIVE', checksum: '8470bb05c9adf65e' },
-  { name: '093_exact100x_exit_escape_observations.sql', id: 93, risk: 'ADDITIVE', checksum: '69844d7fb2dfe208' },
+  { name: '089_auth_profile_identity_sync.sql', id: 89, risk: 'ADDITIVE', checksum: '215bf3625a2a972a' },
+  { name: '090_live_orders_execution_identity.sql', id: 90, risk: 'ADDITIVE', checksum: 'b6c3bc5f9d44dc59' },
+  { name: '091_live_orders_entry_risk_snapshot.sql', id: 91, risk: 'ADDITIVE', checksum: '7bf45dcab9cbea6b' },
+  { name: '092_exact100x_risk_observations.sql', id: 92, risk: 'ADDITIVE', checksum: '4a4da3a61abc4550' },
+  { name: '093_exact100x_risk_observations_rls.sql', id: 93, risk: 'ADDITIVE', checksum: 'bf812d7fd8f9ec45' },
+  { name: '094_exact100x_exit_escape_observations.sql', id: 94, risk: 'ADDITIVE', checksum: 'b492969adeab1281' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */

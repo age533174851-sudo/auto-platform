@@ -355,7 +355,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   //   그래도 여기서 따로 막는 이유는 **DB 제약은 마지막 방어선이지
   //   응용 검증의 대체물이 아니기 때문**이다:
   //
-  //     · 제약이 없는 배포(089 미적용)에서는 반쪽이 그대로 저장된다
+  //     · 제약이 없는 배포(090 미적용)에서는 반쪽이 그대로 저장된다
   //     · 제약 위반은 PostgREST 오류 문자열로 와서 호출부의 실수를
   //       "DB 오류"처럼 보이게 한다 — 무엇을 고쳐야 하는지 가린다
   //
@@ -483,7 +483,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 여기서 칸을 떼고 저장하는 후퇴는 만들지 않는다.
     ...(noFixedSl ? { stop_policy: 'NO_FIXED_SL' } : {}),
     // **계약이 있을 때만 붙인다.** `stop_policy`와 같은 이유다 — 항상
-    // 붙이면 089가 아직인 DB에서 모든 주문이 실패한다. 계약 없이 나가던
+    // 붙이면 090가 아직인 DB에서 모든 주문이 실패한다. 계약 없이 나가던
     // 기존 경로의 바이트는 그대로 둔다.
     //
     // 반대로 계약이 있는데 못 붙이면 실패하는 것이 **맞다** — 그 칸이 없는
@@ -494,13 +494,13 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       execution_preset_id: ident.presetId,
       execution_contract_version: ident.contractVersion,
     } : {}),
-    // ── 진입 허가가 쓴 위험 좌표 (090) ──
+    // ── 진입 허가가 쓴 위험 좌표 (091) ──
     //
     // **값이 있을 때만 붙인다.** `stop_policy`·계약 세 칸과 같은 이유다 —
-    // 항상 붙이면 090이 아직인 DB에서 모든 주문이 실패한다.
+    // 항상 붙이면 091이 아직인 DB에서 모든 주문이 실패한다.
     //
     // 둘을 따로 붙인다. 한쪽만 구해졌을 때 저장을 통째로 실패시키면
-    // **구한 값까지 버린다**(090이 CHECK 제약을 걸지 않은 것과 같은 이유).
+    // **구한 값까지 버린다**(091이 CHECK 제약을 걸지 않은 것과 같은 이유).
     //
     // ★ 여기서 계산하지 않는다. 받은 값을 그대로 적는다.
     ...(riskSnap?.adverseDistancePct != null

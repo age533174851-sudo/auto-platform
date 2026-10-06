@@ -117,7 +117,7 @@ const P = {
   auth: 'src/lib/engine/entryAuthority.ts',
   safety: 'src/lib/engine/entryExitSafety.ts',
   cand: 'src/lib/engine/managedPosition.ts',
-  migIdent: 'supabase/migrations/089_live_orders_execution_identity.sql',
+  migIdent: 'supabase/migrations/090_live_orders_execution_identity.sql',
   rows: 'src/lib/engine/lifecycleRows.ts',
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
@@ -125,14 +125,18 @@ const P = {
   per: 'src/lib/engine/postEntryRisk.ts',
   prr: 'src/lib/exchanges/positionRiskRead.ts',
   obs: 'src/lib/engine/riskObservationStore.ts',
-  mig91: 'supabase/migrations/091_exact100x_risk_observations.sql',
-  mig92: 'supabase/migrations/092_exact100x_risk_observations_rls.sql',
+  mig92: 'supabase/migrations/092_exact100x_risk_observations.sql',
+  mig93: 'supabase/migrations/093_exact100x_risk_observations_rls.sql',
   elig: 'src/lib/engine/riskObservationEligibility.ts',
   esc: 'src/lib/engine/escapeObservationStore.ts',
   wake: 'src/lib/engine/exitMonitorWake.ts',
   slip: 'src/lib/engine/closeSlippage.ts',
   mclock: 'src/lib/system/monotonicClock.ts',
-  mig93: 'supabase/migrations/093_exact100x_exit_escape_observations.sql',
+  lin: 'src/lib/system/migrationLineage.ts',
+  manifest: 'src/lib/system/migrationManifest.ts',
+  mig90: 'supabase/migrations/090_live_orders_execution_identity.sql',
+  mig91: 'supabase/migrations/091_live_orders_entry_risk_snapshot.sql',
+  mig94: 'supabase/migrations/094_exact100x_exit_escape_observations.sql',
   liq: 'src/lib/engine/liquidationDistance.ts',
   liqmath: 'src/lib/safety/liquidationPrice.ts',
   cost: 'src/lib/engine/executionCost.ts',
@@ -657,7 +661,7 @@ const M = [
   // 생명주기 실행으로만 보인다.
 
   // ── 정책 칸을 아예 안 읽는다 ──
-  // 조회 모양이 `lifecycleRows`로 옮겨졌다(089 미적용 후퇴 때문에 두 벌이
+  // 조회 모양이 `lifecycleRows`로 옮겨졌다(090 미적용 후퇴 때문에 두 벌이
   // 됐다). **막는 규칙은 그대로** — identity 모양이 손절 정책을 버리는 회귀를
   // 본다. 옛 모양 쪽은 MUT-R4x가 따로 지킨다.
   ['MUT-P1  주문 조회가 stop_policy를 안 읽음', P.rows,
@@ -817,7 +821,7 @@ const M = [
                    '    ...(false ? {\n      executionIdentity: {'), 'RED'],
 
   // 반쪽은 **호출부의 계약 조립 오류**다. 경계에서 거절하지 않으면
-  // 제약이 없는 배포(089 미적용)에서 그대로 저장되고, 제약이 있는
+  // 제약이 없는 배포(090 미적용)에서 그대로 저장되고, 제약이 있는
   // 배포에서도 호출부 실수가 "DB 오류"로 보여 원인을 가린다.
   ['MUT-Q3  반쪽 식별자를 보내기 전에 막지 않음', P.exec,
     s => s.replace('  if (ident && !identOk) {', '  if (false) {'), 'RED'],
@@ -876,14 +880,14 @@ const M = [
   // PR2 후속 — DB가 코드보다 뒤처져도 회차가 죽지 않는다
   // ══════════════════════════════════════════════════════════
 
-  // ★ 후퇴를 없애면 089 미적용 DB에서 조회가 통째로 죽고, 이미 열린
+  // ★ 후퇴를 없애면 090 미적용 DB에서 조회가 통째로 죽고, 이미 열린
   //   포지션의 청산·보호·복구가 함께 멈춘다.
-  ['MUT-R1x 089 미적용 후퇴 제거 (회차가 죽는다)', P.rows,
+  ['MUT-R1x 090 미적용 후퇴 제거 (회차가 죽는다)', P.rows,
     s => s.replace('  if (!isMissingIdentityColumn(first.error)) {', '  if (true) {'), 'RED'],
 
   // ★ 아무 실패에나 후퇴하면 권한·연결 오류가 "마이그레이션이 아직"으로
   //   덮이고, 진짜 고장이 정상 회차로 보인다.
-  // ★ 앵커가 옮겨갔다 — 090이 `missingColumnShape`를 뽑아내면서
+  // ★ 앵커가 옮겨갔다 — 091이 `missingColumnShape`를 뽑아내면서
   //   `isMissingIdentityColumn` 첫 두 줄이 사라졌다. **지우지 않고**
   //   같은 고장을 같은 뜻으로 찌르는 새 자리로 옮긴다: 모양 판정이
   //   무조건 참이 되면 어떤 오류에나 후퇴한다.
@@ -1724,7 +1728,7 @@ const M = [
       '        if (exact100xExitVenueCapability(c.exchange).timeExit !== true) continue;',
       '        if (false) continue;'), 'RED'],
 
-  ['MUT-RK15 090 후퇴가 계약 칸까지 함께 버림', P.rows,
+  ['MUT-RK15 091 후퇴가 계약 칸까지 함께 버림', P.rows,
     s => s.replace(
       '  if (!zero.error) {',
       '  if (zero.error) { zero = { data: null, error: { code: "42703",'
@@ -1814,7 +1818,7 @@ const M = [
     s => s.replace("      return { code: 'WRITE_FAILED', eligibility: null,\n        reason: String(error?.message || error).slice(0, 160) };",
       "      return { code: 'RECORDED', eligibility: null, reason: '' };"), 'RED'],
 
-  ['MUT-OB9 091에 sample_origin 기본값을 둠', P.mig91,
+  ['MUT-OB9 092에 sample_origin 기본값을 둠', P.mig92,
     s => s.replace('  sample_origin TEXT NOT NULL,',
       "  sample_origin TEXT NOT NULL DEFAULT 'VERIFIED_TESTNET_OBSERVATION',"), 'RED'],
 
@@ -1837,7 +1841,7 @@ const M = [
   ['MUT-OB12b VERIFIED_TESTNET을 LIVE에도 허용 (자격 정본)', P.elig,
     s => s.replace('  if (i?.testnet !== true) {', '  if (false) {'), 'RED'],
 
-  ['MUT-OB12c DB의 TESTNET 전용 제약을 제거', P.mig92,
+  ['MUT-OB12c DB의 TESTNET 전용 제약을 제거', P.mig93,
     s => s.replace("    OR env = 'TESTNET'", "    OR env <> 'NEVER'"), 'RED'],
 
   ['MUT-OB13 positionAmt 0인데 실측으로 기록', P.elig,
@@ -1851,10 +1855,10 @@ const M = [
       '          signedPositionAmt: rr?.risk?.positionAmt == null ? null'
       + ' : Math.abs(rr.risk.positionAmt),'), 'RED'],
 
-  ['MUT-OB15 관측 표의 RLS를 끔', P.mig92,
+  ['MUT-OB15 관측 표의 RLS를 끔', P.mig93,
     s => s.replace('  ENABLE ROW LEVEL SECURITY;', '  DISABLE ROW LEVEL SECURITY;'), 'RED'],
 
-  ['MUT-OB15b service-only 정책을 제거', P.mig92,
+  ['MUT-OB15b service-only 정책을 제거', P.mig93,
     s => s.replace('    TO service_role', '    TO public'), 'RED'],
 
   ['MUT-OB15c 자격 미달을 쓰기 실패로 적음 (운영자가 DB를 뒤짐)', P.obs,
@@ -1862,7 +1866,7 @@ const M = [
       "      return { code: 'WRITE_FAILED', eligibility: el.code, reason: el.reason };"),
     'RED'],
 
-  ['MUT-OB15d 어긋난 기존 줄을 UPDATE로 고침', P.mig92,
+  ['MUT-OB15d 어긋난 기존 줄을 UPDATE로 고침', P.mig93,
     s => s.replace('  IF bad_rows > 0 THEN',
       "  UPDATE public.exact100x_risk_observations SET env = 'TESTNET'\n"
       + "    WHERE sample_origin = 'VERIFIED_TESTNET_OBSERVATION';\n"
@@ -1956,10 +1960,10 @@ const M = [
     s => s.replace('  return Number.isFinite(n) && n > 0 ? n : null;', '  return Number.isFinite(n) ? n : 0;'),
     'RED'],
 
-  ['MUT-ESC13 093의 RLS를 끔', P.mig93,
+  ['MUT-ESC13 094의 RLS를 끔', P.mig94,
     s => s.replace('  ENABLE ROW LEVEL SECURITY;', '  DISABLE ROW LEVEL SECURITY;'), 'RED'],
 
-  ['MUT-ESC14 093의 service-only 정책을 품', P.mig93,
+  ['MUT-ESC14 094의 service-only 정책을 품', P.mig94,
     s => s.replace('    TO service_role', '    TO authenticated'), 'RED'],
 
   // ── ⑤B-3A-1.1 wake provenance ──
@@ -2014,6 +2018,58 @@ const M = [
       + '  const wakeHeaders = wakeCadenceHeaders({\n'
       + '    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,\n'
       + '  });'), 'RED'],
+
+
+  // ── ⑤B-3A-2 마이그레이션 계보 ──
+  //
+  //   번호 충돌은 로컬에서 자기 일관적이라 base(main)에 대해서만 보인다.
+  //   되돌리는 길과 "비교하지 못한 것을 통과로 적는" 길을 전부 막는다.
+  ['MIG-L1 ⑤B 마이그레이션을 다시 089로 되돌림', P.lin,
+    s => s.replace("  { id: 90, name: '090_live_orders_execution_identity.sql' },",
+      "  { id: 89, name: '089_live_orders_execution_identity.sql' },"), 'RED'],
+
+  ['MIG-L1b 선언 번호만 089로 낮춤 (파일은 그대로)', P.lin,
+    s => s.replace("  { id: 90, name: '090_live_orders_execution_identity.sql' },",
+      "  { id: 89, name: '090_live_orders_execution_identity.sql' },"), 'RED'],
+
+  ['MIG-L2 base에 있던 파일이 사라진 것을 통과시킴', P.lin,
+    s => s.replace("    const mine = byName.get(b.name);\n    if (!mine) {",
+      '    const mine = byName.get(b.name);\n    if (false) {'), 'RED'],
+
+  ['MIG-L2b 이미 적용된 파일의 내용 변경을 통과시킴', P.lin,
+    s => s.replace('    if (mine.sql !== b.sql) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L2c base를 못 읽은 것을 "겹치지 않음"으로 적음', P.lin,
+    s => s.replace('  if (baseFiles.length === 0) {', '  if (false) {'), 'RED'],
+
+  ['MIG-L3 선언 번호 사이에 빈 칸을 허용', P.lin,
+    s => s.replace('    if (cur.id !== prev.id + 1) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L3b 같은 번호가 두 파일을 가리키는 것을 허용', P.lin,
+    s => s.replace('    if (prev != null) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L3c base가 쓰는 번호와 겹치는 것을 허용', P.lin,
+    s => s.replace('    if (baseIds.has(d.id)) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L3d 094를 건너뛰고 095로 선언', P.lin,
+    s => s.replace("  { id: 94, name: '094_exact100x_exit_escape_observations.sql' },",
+      "  { id: 95, name: '094_exact100x_exit_escape_observations.sql' },"), 'RED'],
+
+  ['MIG-L4 manifest를 다시 굽지 않고 옛 이름·번호를 유지', P.manifest,
+    s => s.replace("  { name: '090_live_orders_execution_identity.sql', id: 90,",
+      "  { name: '089_live_orders_execution_identity.sql', id: 89,"), 'RED'],
+
+  ['MIG-L4b manifest에서 main의 089를 빼 버림', P.manifest,
+    s => s.replace(/\n  \{ name: '089_auth_profile_identity_sync\.sql',[^\n]*\n/, '\n'), 'RED'],
+
+  ['MIG-L5 rename이라면서 090의 칸 이름을 바꿈', P.mig90,
+    s => s.replace(/execution_preset_id/g, 'exec_preset_id'), 'RED'],
+
+  ['MIG-L5b rename이라면서 091의 칸을 지움', P.mig91,
+    s => s.replace(/entry_liquidation_distance_pct_raw/g, 'entry_liq_dist_raw'), 'RED'],
+
+  ['MIG-L5c rename이라면서 092의 표 이름을 바꿈', P.mig92,
+    s => s.replace(/exact100x_risk_observations/g, 'exact100x_risk_obs'), 'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

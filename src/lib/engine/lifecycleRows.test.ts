@@ -19,7 +19,7 @@ import { managedCandidates, mayActOn } from './managedPosition';
 
 const T = '2026-08-27T09:00:00.000Z';
 
-/** 089가 적용된 DB의 줄 */
+/** 090가 적용된 DB의 줄 */
 const rowWithIdentity = (o: any = {}) => ({
   id: 'ord-1', connection_id: 'conn-bn', exchange: 'binance',
   symbol: 'BTCUSDT', side: 'BUY', avg_price: 100, stop_loss: 90,
@@ -31,7 +31,7 @@ const rowWithIdentity = (o: any = {}) => ({
   ...o,
 });
 
-/** 089 + 090이 적용된 DB의 줄 */
+/** 090 + 091이 적용된 DB의 줄 */
 const rowWithRisk = (o: any = {}) => ({
   ...rowWithIdentity(),
   entry_adverse_distance_pct: 0.4,
@@ -39,7 +39,7 @@ const rowWithRisk = (o: any = {}) => ({
   ...o,
 });
 
-/** 089가 아직인 DB의 줄 — 세 칸이 **아예 없다** */
+/** 090가 아직인 DB의 줄 — 세 칸이 **아예 없다** */
 const rowLegacy = (o: any = {}) => {
   const r: any = rowWithIdentity(o);
   for (const c of IDENTITY_COLUMNS) delete r[c];
@@ -47,7 +47,7 @@ const rowLegacy = (o: any = {}) => {
 };
 
 /**
- * 090만 아직인 DB. RISK 모양만 거절하고 IDENTITY는 받는다.
+ * 091만 아직인 DB. RISK 모양만 거절하고 IDENTITY는 받는다.
  *
  * 시험이 이 헬퍼를 쓰는 것이 요점이다 — "첫 조회가 곧 IDENTITY"라고
  * 가정하면 단계가 하나 늘 때마다 시험이 조용히 다른 것을 보게 된다.
@@ -79,10 +79,10 @@ function fakeQuery(handler: (select: string) => { data?: any; error?: any }) {
 }
 
 export function runLifecycleRowsTests() {
-  console.log('\n🗄  주문 장부 읽기 — 089 미적용에서도 멈추지 않는다');
+  console.log('\n🗄  주문 장부 읽기 — 090 미적용에서도 멈추지 않는다');
 
   // ① 칸이 있으면 한 번에 읽는다
-  test('★ 090까지 있으면 위험 스냅숏까지 한 번에 읽는다', () => {
+  test('★ 091까지 있으면 위험 스냅숏까지 한 번에 읽는다', () => {
     const q = fakeQuery(() => ({ data: [rowWithRisk()] }));
     return loadLifecycleRows(q.fn).then(r => {
       eq(r.projection, 'RISK');
@@ -94,7 +94,7 @@ export function runLifecycleRowsTests() {
     });
   });
 
-  test('★ 계약 칸이 있으면 identity까지 한 번에 읽는다 (090만 아직)', () => {
+  test('★ 계약 칸이 있으면 identity까지 한 번에 읽는다 (091만 아직)', () => {
     const q = fakeQuery(sel => rejectRisk(sel) ?? { data: [rowWithIdentity()] });
     return loadLifecycleRows(q.fn).then(r => {
       eq(r.projection, 'IDENTITY');
@@ -108,17 +108,17 @@ export function runLifecycleRowsTests() {
 
   // ★ 이 시험이 ⑤B의 핵심 보장이다.
   //
-  //   090이 아직이라고 **계약 세 칸까지 함께 잃으면** 이미 검증된 ⑤A의
+  //   091이 아직이라고 **계약 세 칸까지 함께 잃으면** 이미 검증된 ⑤A의
   //   4시간 TIME_EXIT이 죽는다. 새 위험 기록이 없다는 이유로 되는 종료까지
   //   멈추는 것은 후퇴가 아니라 고장이다.
-  test('★ 090이 아직이어도 실행 계약 칸을 잃지 않는다 — TIME_EXIT이 산다', () => {
+  test('★ 091이 아직이어도 실행 계약 칸을 잃지 않는다 — TIME_EXIT이 산다', () => {
     const q = fakeQuery(sel => rejectRisk(sel)
       ?? { data: [rowWithIdentity({ stop_policy: 'NO_FIXED_SL', stop_loss: null })] });
     return loadLifecycleRows(q.fn).then(r => {
       eq(r.projection, 'IDENTITY', '★ LEGACY로 내려가면 계약을 잃는다');
       const c = managedCandidates(r.rows);
       eq(c.authorityCandidates.length, 1,
-        '★ 090이 아직이라고 전용 종료 권한 후보가 사라졌습니다 — TIME_EXIT이 멈춥니다');
+        '★ 091이 아직이라고 전용 종료 권한 후보가 사라졌습니다 — TIME_EXIT이 멈춥니다');
       eq(c.authorityCandidates[0].capabilities.timeExit, true);
       // 위험 스냅숏은 **없다.** 그건 UNKNOWN이고 0이 아니다.
       eq(c.authorityCandidates[0].entryAdverseDistancePct, null,
@@ -127,7 +127,7 @@ export function runLifecycleRowsTests() {
     });
   });
 
-  test('★ 090 스냅숏이 있으면 후보가 그 값을 그대로 들고 온다', () => {
+  test('★ 091 스냅숏이 있으면 후보가 그 값을 그대로 들고 온다', () => {
     const q = fakeQuery(() => ({ data: [rowWithRisk({
       stop_policy: 'NO_FIXED_SL', stop_loss: null,
       entry_adverse_distance_pct: 0.37, entry_liquidation_distance_pct_raw: 0.58,
@@ -146,7 +146,7 @@ export function runLifecycleRowsTests() {
       ? { error: missingCol('execution_profile_id') }
       : { data: [rowLegacy()] });
     return loadLifecycleRows(q.fn).then(r => {
-      eq(r.error, null, '★ 089가 아직이라고 회차를 죽였습니다 — 열린 포지션이 방치됩니다');
+      eq(r.error, null, '★ 090가 아직이라고 회차를 죽였습니다 — 열린 포지션이 방치됩니다');
       eq(r.projection, 'LEGACY');
       eq(r.rows.length, 1);
       eq(q.calls.length, 3, 'RISK → IDENTITY → LEGACY 순으로 한 단계씩만 내려간다');
@@ -203,8 +203,8 @@ export function runLifecycleRowsTests() {
       '★ 후퇴가 손절 정책까지 버렸습니다 — NO_FIXED_SL 주문이 일반 생명주기로 들어갑니다');
   });
 
-  // ⑥ 089와 무관한 오류에는 후퇴하지 않는다
-  test('★ 089와 무관한 오류는 후퇴하지 않고 실패한다', () => {
+  // ⑥ 090와 무관한 오류에는 후퇴하지 않는다
+  test('★ 090와 무관한 오류는 후퇴하지 않고 실패한다', () => {
     const others = [
       { code: '42501', message: 'permission denied for table live_orders' },
       { code: 'PGRST301', message: 'JWT expired' },
@@ -215,7 +215,7 @@ export function runLifecycleRowsTests() {
     return Promise.all(others.map(err => {
       const q = fakeQuery(() => ({ error: err }));
       return loadLifecycleRows(q.fn).then(r => {
-        eq(r.projection, null, `★ ${err.message}를 "089 미적용"으로 읽었습니다`);
+        eq(r.projection, null, `★ ${err.message}를 "090 미적용"으로 읽었습니다`);
         assert(!!r.error, '실패는 실패로 적는다');
         eq(q.calls.length, 1, `★ ${err.message}에 후퇴를 시도했습니다 — 진짜 고장이 덮입니다`);
       });
@@ -241,27 +241,27 @@ export function runLifecycleRowsTests() {
     }
   });
 
-  test('090 후퇴 판정은 두 칸을 가리키는 "칼럼 없음"에만 참이다', () => {
+  test('091 후퇴 판정은 두 칸을 가리키는 "칼럼 없음"에만 참이다', () => {
     for (const c of RISK_SNAPSHOT_COLUMNS) {
       eq(isMissingRiskSnapshotColumn(missingCol(c)), true, c);
       eq(isMissingRiskSnapshotColumn({
         code: 'PGRST204',
         message: `Could not find the '${c}' column of 'live_orders' in the schema cache`,
       }), true, `${c} (스키마 캐시)`);
-      // 089 판정과 **섞이지 않는다** — 섞이면 한 단계를 건너뛴다
-      eq(isMissingIdentityColumn(missingCol(c)), false, `${c}는 089 칸이 아니다`);
+      // 090 판정과 **섞이지 않는다** — 섞이면 한 단계를 건너뛴다
+      eq(isMissingIdentityColumn(missingCol(c)), false, `${c}는 090 칸이 아니다`);
     }
     for (const c of IDENTITY_COLUMNS) {
-      eq(isMissingRiskSnapshotColumn(missingCol(c)), false, `${c}는 090 칸이 아니다`);
+      eq(isMissingRiskSnapshotColumn(missingCol(c)), false, `${c}는 091 칸이 아니다`);
     }
     eq(isMissingRiskSnapshotColumn({ code: '42501', message: 'permission denied' }), false);
     eq(isMissingRiskSnapshotColumn(null), false);
   });
 
-  test('★ 090 모양에 089 세 칸이 전부 들어 있다', () => {
+  test('★ 091 모양에 090 세 칸이 전부 들어 있다', () => {
     for (const c of IDENTITY_COLUMNS) {
       eq(LIFECYCLE_SELECT_RISK.includes(c), true,
-        `★ ${c}가 090 모양에서 빠졌습니다 — 090을 적용한 DB가 계약을 잃습니다`);
+        `★ ${c}가 091 모양에서 빠졌습니다 — 091을 적용한 DB가 계약을 잃습니다`);
     }
     for (const c of RISK_SNAPSHOT_COLUMNS) {
       eq(LIFECYCLE_SELECT_RISK.includes(c), true, c);

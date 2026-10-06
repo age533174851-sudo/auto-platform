@@ -174,7 +174,7 @@ export const EXCLUSIVE_PAIRS: ReadonlyArray<{ profileId: StrategyType; presetId:
 
 /**
  * 실행 계약을 가리키는 **세 칸**. 장부에 적히는 것도 이 모양이다
- * (`live_orders.execution_*`, migration 089).
+ * (`live_orders.execution_*`, migration 090).
  */
 export interface ExecutionIdentityLike {
   profileId?: unknown;
