@@ -4729,6 +4729,83 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
         }
 
 
+
+      // ── ⑤B-3A-2.3 관측 표 ACL — **RLS만으로 닫았다고 적지 않는다** ──
+      //
+      //   Supabase의 legacy default privileges가 새 public table에
+      //   anon/authenticated 권한을 자동으로 줄 수 있다. RLS를 켜 두어도
+      //   표 자체에는 닿을 수 있고, 정책 한 줄만 잘못 생기면 열린다.
+      //   095가 GRANT/REVOKE 층을 닫는다.
+      //
+      //   판정은 `system/observationAcl.ts` 한 곳에 있고 **문자열 위치가
+      //   아니라 문장을 끊어 동사·권한·표·role을 읽는다.** 검사기는 그
+      //   함수를 **돌려서** 실제 095 파일을 본다 — 시험은 fixture로,
+      //   여기서는 진짜 파일로. 판정 로직은 한 벌이다.
+      {
+        const ACLF = 'supabase/migrations/095_exact100x_observation_acl_hardening.sql';
+        const ACLM = 'src/lib/system/observationAcl.ts';
+        const am = await loadModule(ACLM, '관측 표 ACL 정본');
+        if (!am || typeof am.checkObservationAcl !== 'function'
+            || typeof am.parseAclStatements !== 'function') {
+          err(`${ACLM}: 관측 표 ACL 정본이 없습니다`);
+        } else {
+          const sql = read(ACLF);
+          if (!sql.trim()) {
+            err(`${ACLF}이 없습니다 — anon/authenticated의 table privilege가 열린 채로 남습니다`);
+          } else {
+            const v = am.checkObservationAcl(sql);
+            if (!v?.ok) err(`095 ACL ${v?.code}: ${v?.reason}`);
+
+            // 두 표 · 세 role이 실제로 문장에 등장하는가
+            const st = am.parseAclStatements(sql);
+            for (const t of am.PROTECTED_OBSERVATION_TABLES) {
+              if (!st.some(s => s.tables.includes(t))) {
+                err(`095: ${t}에 대한 ACL 문장이 없습니다`);
+              }
+            }
+            for (const r of [...am.PUBLIC_ROLES, am.SERVICE_ROLE]) {
+              if (!st.some(s => s.roles.includes(r))) err(`095: ${r}에 대한 문장이 없습니다`);
+            }
+            // replay-safe — ACL 문장만 있고 데이터를 바꾸지 않는가
+            for (const s of st) {
+              if (s.verb === 'OTHER') {
+                err(`095: ACL이 아닌 문장이 있습니다 (${s.raw.slice(0, 70)})`
+                  + ' — 이 파일은 다시 돌려도 안전해야 합니다');
+              }
+            }
+            // 거래·실행 판단에 손대지 않는가
+            for (const bad of [/threshold/i, /ExitReason/i, /adverse/i, /emergency/i,
+                               /leverage/i, /stop_?loss/i, /take_?profit/i]) {
+              if (bad.test(sql)) err(`095가 거래 판단(${bad})을 건드립니다`);
+            }
+          }
+          // manifest에 095가 있는가 (자동생성 — 다시 굽지 않으면 낡는다)
+          const man095 = read('src/lib/system/migrationManifest.ts');
+          if (!/name:\s*'095_exact100x_observation_acl_hardening\.sql'[^}]*id:\s*95\b/.test(man095)) {
+            err('095가 manifest에 id 95로 없습니다 — `npm run gen:migrations`를 다시 실행해야 합니다');
+          }
+          if (!/name:\s*'095_exact100x_observation_acl_hardening\.sql'[^}]*risk:\s*'ADDITIVE'/
+              .test(man095)) {
+            err('095의 manifest risk가 ADDITIVE가 아닙니다');
+          }
+          // ★ checksum이 낡지 않았는가.
+          //
+          //   체크섬 계산을 여기서 **다시 구현하지 않는다.** 같은 판단이
+          //   두 곳에 있으면 언젠가 갈린다 — 생성기의 함수를 그대로 쓴다
+          //   (`gen-migration-manifest.mjs`의 loadPlan()이 같은 방식이다).
+          try {
+            const gen = await import('./gen-migration-manifest.mjs');
+            const built = await gen.buildManifest();
+            const want = gen.renderManifest(built);
+            if (man095 !== want) {
+              err('migrationManifest.ts가 낡았습니다 (체크섬·목록 불일치)'
+                + ' — `npm run gen:migrations`를 실행하고 커밋해야 합니다');
+            }
+          } catch (e) {
+            err(`manifest 신선도를 확인하지 못했습니다: ${String(e?.message || e)}`);
+          }
+        }
+      }
       // ── ⑤B-3A-2 마이그레이션 계보 — **번호가 두 갈래로 갈라졌는가** ──
       //
       //   이 브랜치는 main에서 갈라진 뒤 자체 089를 만들었고, 그 사이

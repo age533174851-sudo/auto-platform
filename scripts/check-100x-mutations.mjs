@@ -133,6 +133,8 @@ const P = {
   slip: 'src/lib/engine/closeSlippage.ts',
   mclock: 'src/lib/system/monotonicClock.ts',
   lin: 'src/lib/system/migrationLineage.ts',
+  acl: 'src/lib/system/observationAcl.ts',
+  mig95: 'supabase/migrations/095_exact100x_observation_acl_hardening.sql',
   manifest: 'src/lib/system/migrationManifest.ts',
   mig90: 'supabase/migrations/090_live_orders_execution_identity.sql',
   mig91: 'supabase/migrations/091_live_orders_entry_risk_snapshot.sql',
@@ -2070,6 +2072,73 @@ const M = [
 
   ['MIG-L5c rename이라면서 092의 표 이름을 바꿈', P.mig92,
     s => s.replace(/exact100x_risk_observations/g, 'exact100x_risk_obs'), 'RED'],
+
+
+  // ── ⑤B-3A-2.3 관측 표 ACL ──
+  //
+  //   RLS와 GRANT는 다른 층이다. "RLS 켰으니 됐다"로 되돌리는 길과
+  //   "일부만 회수하고 닫았다고 적는" 길을 전부 막는다.
+  ['ACL1  risk_observations의 REVOKE 제거', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES ON TABLE public\.exact100x_risk_observations\n  FROM anon, authenticated;\n/, ''), 'RED'],
+
+  ['ACL2  escape_observations의 REVOKE 제거', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES ON TABLE public\.exact100x_exit_escape_observations\n  FROM anon, authenticated;\n/, ''), 'RED'],
+
+  ['ACL3  anon만 REVOKE하고 authenticated를 남김', P.mig95,
+    s => s.replace(/FROM anon, authenticated;/g, 'FROM anon;'), 'RED'],
+
+  ['ACL4  authenticated만 REVOKE하고 anon을 남김', P.mig95,
+    s => s.replace(/FROM anon, authenticated;/g, 'FROM authenticated;'), 'RED'],
+
+  ['ACL5  REVOKE ALL 대신 SELECT만 회수', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES/g, 'REVOKE SELECT'), 'RED'],
+
+  ['ACL6  TRUNCATE가 남는 열거형으로 약화', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES/g, 'REVOKE SELECT, INSERT, UPDATE, DELETE'), 'RED'],
+
+  ['ACL7  service_role GRANT 제거', P.mig95,
+    s => s.replace(/GRANT ALL PRIVILEGES ON TABLE public\.exact100x_\w+\n  TO service_role;\n/g, ''),
+    'RED'],
+
+  ['ACL8  service_role 대신 authenticated에 GRANT', P.mig95,
+    s => s.replace(/TO service_role;/g, 'TO authenticated;'), 'RED'],
+
+  ['ACL9  표 이름을 하나 틀리게 바꿈', P.mig95,
+    s => s.replace(/exact100x_exit_escape_observations/g, 'exact100x_exit_escape_observation'),
+    'RED'],
+
+  ['ACL10 095를 manifest에서 제거', P.manifest,
+    s => s.replace(/\n  \{ name: '095_exact100x_observation_acl_hardening\.sql',[^\n]*\n/, '\n'),
+    'RED'],
+
+  ['ACL11 095 checksum을 낡은 값으로 둠', P.manifest,
+    s => s.replace("'095_exact100x_observation_acl_hardening.sql', id: 95, risk: 'ADDITIVE', checksum: '32710ae3272dcc57'",
+      "'095_exact100x_observation_acl_hardening.sql', id: 95, risk: 'ADDITIVE', checksum: 'deadbeefdeadbeef'"),
+    'RED'],
+
+  ['ACL12 "RLS 있으니 필요 없다"며 REVOKE 둘 다 제거', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES ON TABLE public\.exact100x_\w+\n  FROM anon, authenticated;\n/g, ''),
+    'RED'],
+
+  // 정본 자체를 약화시키는 길도 막는다
+  ['ACL13 정본이 부분 REVOKE를 ALL로 인정', P.acl,
+    s => s.replace("s.verb === 'REVOKE' && s.roles.includes(role) && s.privileges.includes('ALL')",
+      "s.verb === 'REVOKE' && s.roles.includes(role)"), 'RED'],
+
+  ['ACL14 정본이 public role 재GRANT를 안 봄', P.acl,
+    s => s.replace('      for (const role of PUBLIC_ROLES) {\n        if (s.roles.includes(role)) {',
+      '      for (const role of []) {\n        if (s.roles.includes(role)) {'), 'RED'],
+
+  ['ACL15 정본이 파괴적 문장을 통과시킴', P.acl,
+    s => s.replace("    if (/^(DROP|TRUNCATE|DELETE|UPDATE|INSERT|ALTER\\s+TABLE\\s+\\S+\\s+DROP)\\b/i.test(s.raw)) {",
+      '    if (false) {'), 'RED'],
+
+  ['ACL16 정본이 service_role GRANT 없음을 통과시킴', P.acl,
+    s => s.replace('    if (!served) {', '    if (false) {'), 'RED'],
+
+  ['ACL17 095를 계보 선언에서 뺌', P.lin,
+    s => s.replace("  { id: 95, name: '095_exact100x_observation_acl_hardening.sql' },\n", ''),
+    'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],

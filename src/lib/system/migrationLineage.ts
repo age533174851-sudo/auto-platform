@@ -66,6 +66,7 @@ export const EXACT100X_MIGRATIONS: ReadonlyArray<{ id: number; name: string }> =
   { id: 92, name: '092_exact100x_risk_observations.sql' },
   { id: 93, name: '093_exact100x_risk_observations_rls.sql' },
   { id: 94, name: '094_exact100x_exit_escape_observations.sql' },
+  { id: 95, name: '095_exact100x_observation_acl_hardening.sql' },
 ];
 
 const ok = (): LineageVerdict => ({ ok: true, code: 'OK', reason: '' });

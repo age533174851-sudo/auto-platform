@@ -40,11 +40,11 @@ export function runMigrationLineageTests() {
     eq(v.ok, true);
   });
 
-  test('선언이 090~094 다섯 개이고 base 마지막(089) 바로 뒤다', () => {
-    eq(EXACT100X_MIGRATIONS.length, 5);
-    eq(EXACT100X_MIGRATIONS.map(d => d.id).join(','), '90,91,92,93,94');
+  test('선언이 090~095 여섯 개이고 base 마지막(089) 바로 뒤다', () => {
+    eq(EXACT100X_MIGRATIONS.length, 6);
+    eq(EXACT100X_MIGRATIONS.map(d => d.id).join(','), '90,91,92,93,94,95');
     eq(EXACT100X_MIGRATIONS[0].name, '090_live_orders_execution_identity.sql');
-    eq(EXACT100X_MIGRATIONS[4].name, '094_exact100x_exit_escape_observations.sql');
+    eq(EXACT100X_MIGRATIONS[5].name, '095_exact100x_observation_acl_hardening.sql');
   });
 
   // ── MIG-L1 ──
@@ -121,7 +121,7 @@ export function runMigrationLineageTests() {
   });
 
   test('★ 우리 번호가 base 마지막보다 앞이면 잡는다', () => {
-    const base2 = [...BASE, f('095_something_main_added.sql')];
+    const base2 = [...BASE, f('096_something_main_added.sql')];
     const v = checkMigrationLineage({ files: [...base2.map(b => ({ ...b })),
       ...EXACT100X_MIGRATIONS.map(d => f(d.name))], baseFiles: base2 });
     assert(!v.ok, '★ main이 더 큰 번호를 점유했는데 통과시켰다');
