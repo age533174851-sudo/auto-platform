@@ -4730,6 +4730,125 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
 
 
 
+
+      // ── ⑤B-3A-3 외부 준비 상태 — **거짓 준비를 만들지 않는가** ──
+      //
+      //   표본이 없는 이유를 "코드 문제"로 적지 않기 위해, 그리고 없는
+      //   표본을 만들어 내지 않기 위해 판정을 정본 한 곳에 둔다.
+      //
+      //   ★ 자격 진단은 **시크릿을 받지 않는다.** 입력이 전부 boolean이
+      //     아니면 값이 흘러 들어올 길이 생긴다.
+      {
+        const RDY = 'src/lib/engine/testnetReadiness.ts';
+        const rm = await loadModule(RDY, 'TESTNET 준비 상태 정본');
+        if (!rm || typeof rm.diagnoseCredential !== 'function'
+            || typeof rm.binanceTestnetReadiness !== 'function'
+            || typeof rm.sampleReadiness !== 'function') {
+          err(`${RDY}: TESTNET 준비 상태 정본이 없습니다`);
+        } else {
+          const okc = { rowFound: true, exchangeResolved: true, hasWithdrawal: false,
+            keyPresent: true, secretCiphertextPresent: true, secretDecrypted: true };
+          // ① 서로 다른 원인이 서로 다른 코드로 나오는가
+          const want = {
+            rowFound: 'NO_CONNECTION', exchangeResolved: 'UNSUPPORTED_EXCHANGE',
+            keyPresent: 'KEY_MISSING', secretCiphertextPresent: 'SECRET_MISSING',
+            secretDecrypted: 'DECRYPT_FAILED',
+          };
+          const seen = new Set();
+          for (const [k, code] of Object.entries(want)) {
+            const got = rm.diagnoseCredential({ ...okc, [k]: false });
+            if (got !== code) err(`${RDY}: ${k}=false를 ${got}로 읽습니다 (${code}이어야 합니다)`);
+            seen.add(got);
+          }
+          const wd = rm.diagnoseCredential({ ...okc, hasWithdrawal: true });
+          if (wd !== 'WITHDRAWAL_ENABLED') err(`${RDY}: 출금 권한 있는 키를 ${wd}로 읽습니다`);
+          seen.add(wd);
+          if (seen.size < 6) {
+            err(`${RDY}: 서로 다른 원인이 같은 코드로 뭉개집니다 (${seen.size}종)`
+              + ' — 1037회가 무엇이었는지 알 수 없게 됩니다');
+          }
+          // ② 출금 권한 미확인(null)을 통과로 적지 않는가
+          for (const v of [null, undefined]) {
+            if (rm.diagnoseCredential({ ...okc, hasWithdrawal: v }) !== 'WITHDRAWAL_ENABLED') {
+              err(`${RDY}: 출금 권한 미확인을 "없음"으로 읽습니다`);
+            }
+          }
+          // ③ 사유 문구에 값이 들어가지 않는가
+          if (typeof rm.credentialDiagnosisReason === 'function') {
+            for (const c of ['NO_CONNECTION', 'WITHDRAWAL_ENABLED', 'DECRYPT_FAILED']) {
+              const r = String(rm.credentialDiagnosisReason(c) ?? '');
+              if (/[A-Za-z0-9+/]{20,}={0,2}/.test(r)) {
+                err(`${RDY}: ${c} 사유에 값처럼 보이는 문자열이 있습니다`);
+              }
+            }
+          }
+          // ④ 현재 실제 상태(Gate TESTNET 1 + Binance LIVE 2)가 READY가 아닌가
+          const now = rm.binanceTestnetReadiness([
+            { connectionId: 'gate', exchange: 'gate', testnet: true, active: true,
+              permissionRead: true, permissionTrade: false, hasWithdrawal: false },
+            { connectionId: 'bn1', exchange: 'binance', testnet: false, active: true,
+              permissionRead: true, permissionTrade: true, hasWithdrawal: false },
+            { connectionId: 'bn2', exchange: 'binance', testnet: false, active: true,
+              permissionRead: true, permissionTrade: true, hasWithdrawal: false },
+          ]);
+          if (now?.code !== 'NO_BINANCE_TESTNET_CONNECTION') {
+            err(`${RDY}: Gate TESTNET·Binance LIVE만 있는데 ${now?.code}로 읽습니다`
+              + ' — 기존 연결을 TESTNET 후보로 세면 거짓 표본이 쌓입니다');
+          }
+          // ⑤ 빈 목록을 통과시키지 않는가
+          for (const x of [[], null, undefined]) {
+            if (rm.binanceTestnetReadiness(x)?.ready !== false) {
+              err(`${RDY}: 연결이 없는데 준비됐다고 적습니다`);
+            }
+          }
+          // ⑥ 출금 권한이 거래 권한보다 먼저 막는가
+          const wo = rm.binanceTestnetReadiness([{ connectionId: 'x', exchange: 'binance',
+            testnet: true, active: true, permissionRead: true, permissionTrade: false,
+            hasWithdrawal: true }]);
+          if (wo?.code !== 'WITHDRAWAL_PERMISSION_PRESENT') {
+            err(`${RDY}: 출금 가능한 키를 ${wo?.code}까지 들여다봅니다`);
+          }
+          // ⑦ Gate TESTNET이 Exact100X 표본 자격을 얻지 않는가
+          const g = rm.sampleReadiness({ testnet: true, exchange: 'gate', side: 'LONG',
+            executionIdentity: { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X',
+              contractVersion: 2 }, positionAmt: 0.01 });
+          if (g?.code !== 'VENUE_UNSUPPORTED') {
+            err(`${RDY}: Gate TESTNET을 ${g?.code}로 읽습니다 — VENUE_UNSUPPORTED여야 합니다`);
+          }
+          // ⑧ 모듈이 주문·DB·연결 생성 수단을 내보내지 않는가
+          for (const bad of ['sendClose', 'placeFuturesOrder', 'createConnection',
+                             'setTestnet', 'decryptSecret', 'applyMigration']) {
+            if (Object.keys(rm).includes(bad)) err(`${RDY}: ${bad}를 내보냅니다`);
+          }
+        }
+
+        // 라우트가 그 정본을 쓰고, 세 사실을 한 문장으로 되돌리지 않는가
+        const rsrc = code(MON5);
+        if (!/diagnoseCredential\(/.test(rsrc)) {
+          err(`${MON5}: 자격 진단 정본을 쓰지 않습니다`
+            + ' — 실패 원인이 다시 한 문장으로 뭉개집니다');
+        }
+        if (!/credentialCode:/.test(rsrc)) {
+          err(`${MON5}: 실패에 자격 코드를 남기지 않습니다`);
+        }
+        if (!/path:\s*'GENERIC_PROTECTION_SWEEP'/.test(rsrc)) {
+          err(`${MON5}: 보호주문 고아 정리 실패를 경로로 구분하지 않습니다`
+            + ' — Exact100X 관측 실패와 섞여 셉니다');
+        }
+        // ★ 진단에 시크릿 **값**을 넘기지 않는가
+        const dm = /diagnoseCredential\(\{([\s\S]{0,420}?)\}\);/.exec(rsrc);
+        if (!dm) {
+          err(`${MON5}: 자격 진단 호출부를 찾지 못했습니다`);
+        } else {
+          for (const bad of [/api_secret_enc\s*[,}]/, /apiSecret:/, /plain\s*[,}]/,
+                             /secret:\s*\w/, /\.length/]) {
+            if (bad.test(dm[1])) {
+              err(`${MON5}: 자격 진단에 시크릿 값·길이를 넘깁니다 (${bad})`
+                + ' — 있다/없다만 넘겨야 합니다');
+            }
+          }
+        }
+      }
       // ── ⑤B-3A-2.3 관측 표 ACL — **RLS만으로 닫았다고 적지 않는다** ──
       //
       //   Supabase의 legacy default privileges가 새 public table에

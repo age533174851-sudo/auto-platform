@@ -134,6 +134,7 @@ const P = {
   mclock: 'src/lib/system/monotonicClock.ts',
   lin: 'src/lib/system/migrationLineage.ts',
   acl: 'src/lib/system/observationAcl.ts',
+  rdy: 'src/lib/engine/testnetReadiness.ts',
   mig95: 'supabase/migrations/095_exact100x_observation_acl_hardening.sql',
   manifest: 'src/lib/system/migrationManifest.ts',
   mig90: 'supabase/migrations/090_live_orders_execution_identity.sql',
@@ -2138,6 +2139,89 @@ const M = [
 
   ['ACL17 095를 계보 선언에서 뺌', P.lin,
     s => s.replace("  { id: 95, name: '095_exact100x_observation_acl_hardening.sql' },\n", ''),
+    'RED'],
+
+
+  // ── ⑤B-3A-3 외부 준비 상태 ──
+  //
+  //   없는 표본을 만들어 내는 길과, 실패 원인을 다시 한 문장으로 뭉개는
+  //   길을 전부 막는다.
+  ['RDY1  LIVE 연결을 TESTNET 후보로 셈', P.rdy,
+    s => s.replace("    String(c?.exchange ?? '').trim().toLowerCase() === 'binance' && c?.testnet === true);",
+      "    String(c?.exchange ?? '').trim().toLowerCase() === 'binance');"), 'RED'],
+
+  ['RDY1b Gate도 Exact100X 후보로 셈', P.rdy,
+    s => s.replace("String(c?.exchange ?? '').trim().toLowerCase() === 'binance' &&", 'true &&'),
+    'RED'],
+
+  ['RDY2  testnet 미확인(null)을 true로 읽음', P.rdy,
+    s => s.replace('c?.testnet === true);', 'c?.testnet !== false);'), 'RED'],
+
+  ['RDY3  연결이 없는데 준비됐다고 적음', P.rdy,
+    s => s.replace('  if (cand.length === 0) {', '  if (false) {'), 'RED'],
+
+  ['RDY4  출금 권한 미확인을 "없음"으로 읽음 (진단)', P.rdy,
+    s => s.replace("  if (i.hasWithdrawal !== false) return 'WITHDRAWAL_ENABLED';",
+      "  if (i.hasWithdrawal === true) return 'WITHDRAWAL_ENABLED';"), 'RED'],
+
+  ['RDY4b 출금 권한 미확인을 "없음"으로 읽음 (연결)', P.rdy,
+    s => s.replace('    if (c.hasWithdrawal !== false) {', '    if (c.hasWithdrawal === true) {'),
+    'RED'],
+
+  ['RDY5  출금 권한을 거래 권한보다 늦게 봄', P.rdy,
+    s => s.replace("    if (c.hasWithdrawal !== false) {\n"
+      + "      last = nope('WITHDRAWAL_PERMISSION_PRESENT',\n"
+      + "        '출금 권한이 있는(또는 확인하지 못한) 키입니다 — 출금 비허용 키여야 합니다', id);\n"
+      + '      continue;\n    }\n', ''), 'RED'],
+
+  ['RDY6  세 사실을 한 코드로 뭉갬', P.rdy,
+    s => s.replace("  if (i.exchangeResolved !== true) return 'UNSUPPORTED_EXCHANGE';",
+      "  if (i.exchangeResolved !== true) return 'NO_CONNECTION';"), 'RED'],
+
+  ['RDY6b 복호화 실패를 SECRET_MISSING으로 뭉갬', P.rdy,
+    s => s.replace("  if (i.secretDecrypted !== true) return 'DECRYPT_FAILED';",
+      "  if (i.secretDecrypted !== true) return 'SECRET_MISSING';"), 'RED'],
+
+  ['RDY7  사유 문구에 값을 끼움', P.rdy,
+    s => s.replace("    case 'DECRYPT_FAILED': return 'API 시크릿을 복호화하지 못했습니다';",
+      "    case 'DECRYPT_FAILED': return 'API 시크릿을 복호화하지 못했습니다: AAAAAAAAAAAAAAAAAAAAAAAA=';"),
+    'RED'],
+
+  ['RDY8  Gate TESTNET을 Exact100X 표본 자격으로 바꿈', P.rdy,
+    s => s.replace("    VENUE_UNSUPPORTED: 'VENUE_UNSUPPORTED',", "    VENUE_UNSUPPORTED: 'READY',"),
+    'RED'],
+
+  ['RDY9  표본 자격 판정을 복제함 (정본 위임 제거)', P.rdy,
+    s => s.replace('  const v = verifiedTestnetObservationEligibility(i);',
+      "  const v = { code: 'ELIGIBLE', eligible: true, reason: '' } as any;"), 'RED'],
+
+  ['RDY10 라우트가 다시 한 문장으로 뭉갬', P.monitor,
+    s => s.replace("          reason: credentialDiagnosisReason(dc),",
+      "          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다',"),
+    'RED'],
+
+  ['RDY10b 라우트가 자격 코드를 안 남김', P.monitor,
+    s => s.replace('          credentialCode: dc,', ''), 'RED'],
+
+  ['RDY11 고아 정리 실패를 Exact100X 경로로 적음', P.monitor,
+    s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP',",
+      "          path: 'EXACT100X_AUTHORITY',"), 'RED'],
+
+  ['RDY12 진단에 시크릿 평문을 넘김', P.monitor,
+    s => s.replace('          secretDecrypted: decrypted,',
+      '          secretDecrypted: decrypted, apiSecret: plain,'), 'RED'],
+
+  ['RDY12b 진단에 시크릿 길이를 넘김', P.monitor,
+    s => s.replace('          secretCiphertextPresent: !!String(row?.api_secret_enc ?? \'\'),',
+      '          secretCiphertextPresent: String(row?.api_secret_enc ?? \'\').length > 0,\n'
+      + '          secretLen: String(row?.api_secret_enc ?? \'\').length,'), 'RED'],
+
+  ['RDY13 경로별 집계를 합계로 되돌림', P.monitor,
+    s => s.replace('    out.failures = classifyFailures(', '    out.failures = [] as any; void classifyFailures('),
+    'RED'],
+
+  ['RDY13b 서로 다른 경로를 한 줄로 합침', P.rdy,
+    s => s.replace('    const key = `${it?.path}:${it?.code}`;', '    const key = `${it?.code}`;'),
     'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──

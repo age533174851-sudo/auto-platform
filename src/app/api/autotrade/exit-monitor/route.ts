@@ -239,6 +239,8 @@ async function sweepOrphanProtection(
     targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0,
     skipped: [] as Array<{ code: string; count: number; reason: string }>,
     details: [] as any[], summary: '', error: null as string | null,
+    /** 경로별·원인별 실패 수. **합계에 묻지 않는다** */
+    failures: [] as Array<{ path: string; code: string; count: number }>,
   };
 
   let rows: any[] = [];
@@ -278,27 +280,52 @@ async function sweepOrphanProtection(
 
   /** 연결 하나당 한 번만 읽는다. **연결이 망과 거래소를 정한다** */
   const credCache = new Map<string, any>();
+  // ── 왜 못 쓰는지를 **한 문장으로 뭉개지 않는다** (⑤B-3A-3) ──
+  //
+  //   예전에는 row를 못 읽은 것·출금 권한이 켜진 것·모르는 거래소인 것이
+  //   전부 같은 문구로 나왔다. 최근 7일 1037회가 모두 그 문구였고 어느
+  //   것인지 알 방법이 없었다. 판정은 `engine/testnetReadiness.ts`에 있다.
+  //
+  //   ★ 진단에 **시크릿을 넘기지 않는다.** "있다/없다"와 "풀렸다/못
+  //     풀었다"만 넘긴다 — 값을 넘기지 않으면 흘릴 수도 없다.
+  const credDiag = new Map<string, string>();
   const credsOf = async (connectionId: string) => {
     if (!credCache.has(connectionId)) {
+      const { diagnoseCredential } = await import('@/lib/engine/testnetReadiness');
       let v: any = null;
+      let code: any = 'NO_CONNECTION';
       try {
         const { data: c } = await sb.from('exchange_connections')
           .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
           .eq('id', connectionId).maybeSingle();
-        if (c && !(c as any).has_withdrawal) {
-          const ex = resolveExecExchange((c as any).exchange_id).exchange;
-          // **모르는 거래소를 바이낸스로 읽지 않는다.**
-          if (ex) {
-            v = {
-              exchange: ex,
-              apiKey: (c as any).api_key,
-              apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),
-              testnet: (c as any).is_testnet !== false,
-            };
-          }
+        const row: any = c ?? null;
+        // **모르는 거래소를 바이낸스로 읽지 않는다.**
+        const ex = row ? resolveExecExchange(row.exchange_id).exchange : null;
+        let plain = '';
+        let decrypted = false;
+        if (row && String(row.api_secret_enc ?? '')) {
+          try { plain = decryptSecret(String(row.api_secret_enc)); decrypted = !!plain; }
+          catch { decrypted = false; }
         }
-      } catch { v = null; }
+        code = diagnoseCredential({
+          rowFound: !!row,
+          exchangeResolved: !!ex,
+          hasWithdrawal: row ? row.has_withdrawal === true : null,
+          keyPresent: !!String(row?.api_key ?? ''),
+          secretCiphertextPresent: !!String(row?.api_secret_enc ?? ''),
+          secretDecrypted: decrypted,
+        });
+        if (code === 'READY') {
+          v = {
+            exchange: ex,
+            apiKey: row.api_key,
+            apiSecret: plain,
+            testnet: row.is_testnet !== false,
+          };
+        }
+      } catch { v = null; code = 'NO_CONNECTION'; }
       credCache.set(connectionId, v);
+      credDiag.set(connectionId, code);
     }
     return credCache.get(connectionId);
   };
@@ -308,8 +335,17 @@ async function sweepOrphanProtection(
       const venue = await credsOf(t.connectionId);
       if (!venue) {
         out.unreadable += 1;
-        out.details.push({ symbol: t.symbol, code: 'NO_VENUE', ok: false,
-          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+        // **어느 사실 때문인지 적는다.** 값은 싣지 않는다 — 코드와 문구만.
+        const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
+        const dc: any = credDiag.get(t.connectionId) ?? 'NO_CONNECTION';
+        out.details.push({
+          symbol: t.symbol, code: 'NO_VENUE', ok: false,
+          credentialCode: dc,
+          // 이 경로는 **전략을 가리지 않는 보호주문 고아 정리**다.
+          // Exact100X 전용 종료 권한 후보와 섞어 세지 않는다.
+          path: 'GENERIC_PROTECTION_SWEEP',
+          reason: credentialDiagnosisReason(dc),
+        });
         continue;
       }
 
@@ -360,6 +396,19 @@ async function sweepOrphanProtection(
       out.details.push({ symbol: t.symbol, code: 'SWEEP_ERROR', ok: false,
         reason: String(e?.message || e).slice(0, 200) });
     }
+  }
+
+  // ── 실패를 경로별·원인별로 센다 (⑤B-3A-3) ──
+  //
+  //   합계만 적으면 "1037회 실패"가 무엇이었는지 영원히 알 수 없다.
+  //   이 경로는 전부 보호주문 고아 정리이고, Exact100X 전용 종료 권한
+  //   후보와 **같은 숫자에 넣지 않는다.**
+  {
+    const { classifyFailures } = await import('@/lib/engine/testnetReadiness');
+    out.failures = classifyFailures(
+      out.details.filter((d: any) => d?.ok === false && d?.credentialCode)
+        .map((d: any) => ({ path: d.path ?? 'GENERIC_PROTECTION_SWEEP', code: d.credentialCode })),
+    );
   }
 
   out.summary = sweepSummary({
