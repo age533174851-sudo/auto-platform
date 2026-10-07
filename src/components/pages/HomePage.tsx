@@ -147,6 +147,22 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
   }, [top5]);
   const logoMap = useLogoMap(logoSymbols);
 
+  // ── 홈 환율 ──
+  // 지갑 화면과 같은 정본(/api/fx/usd)을 쓴다. 예전 홈은 KRW를 선택해도
+  // moneyView에 fx를 넘기지 않아 환율 API가 정상이어도 항상 "환율 확인 불가"였다.
+  const [fx, setFx] = useState<any>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/fx/usd', { cache: 'no-store' });
+        const j = await r.json().catch(() => null);
+        if (alive) setFx(j?.fx ?? null);
+      } catch { if (alive) setFx(null); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   // ── 총자산 ──
   //
   // **예전에는 여기에 4,850만 원이 적혀 있었다.** 하드코딩이다.
@@ -208,6 +224,22 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
           <ChevronRight size={20} color="#fff" style={{flexShrink:0}}/>
         </button>
       )}
+      {/* ── 쉬운 화면 — 기능이 많아도 첫 화면에서 바로 찾을 수 있어야 한다 ── */}
+      <button onClick={()=>onNav('easy')} aria-label="쉬운 화면 열기" style={{
+        width:'100%',minHeight:72,textAlign:'left',display:'flex',alignItems:'center',gap:13,
+        background:`linear-gradient(135deg,${A(T.acc,'18')},${A(T.prp,'16')})`,
+        border:`1px solid ${A(T.acl,'45')}`,borderRadius:18,padding:'14px 16px',marginBottom:14,cursor:'pointer'
+      }}>
+        <div style={{width:44,height:44,borderRadius:13,background:T.acg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+          <Sparkles size={22} color={T.acl}/>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:T.txt,fontWeight:900,fontSize:15}}>쉬운 화면</div>
+          <div style={{color:T.muted,fontSize:11,marginTop:2}}>모의매매 · 자동매매 · 내 전략 · 자산 · 설정만 크게 보기</div>
+        </div>
+        <ChevronRight size={20} color={T.acl} style={{flexShrink:0}}/>
+      </button>
+
       {/* ── 총자산 히어로 ── */}
       <div style={{background:'linear-gradient(145deg,var(--t-card),var(--t-bg))',border:`1px solid ${T.border2}`,borderRadius:22,padding:'22px 20px',marginBottom:14,position:'relative',overflow:'hidden'}}>
         <div style={{position:'absolute',right:-40,top:-40,width:200,height:200,background:`radial-gradient(circle,${T.acg} 0%,transparent 70%)`,pointerEvents:'none'}}/>
@@ -219,13 +251,13 @@ function HomePage({onNav,prices,currency,lang,onOpenAsset,authUser,onLogin}:{onN
         <div style={{color:totalCell?.value==null?T.muted:T.txt,fontSize:totalCell?.value==null?15:32,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',letterSpacing:totalCell?.value==null?0:-1.5,overflowWrap:'anywhere'}}>
           {totalCell?.value==null
             ? (walletErr || totalCell?.text || '확인하지 못했습니다')
-            : moneyView(totalCell.value,currency as any).text}
+            : moneyView(totalCell.value,currency as any,fx).text}
         </div>
         {shownEnv?.unrealizedPnl?.value!=null && (
           <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
             <span style={{color:T.muted,fontSize:12}}>미실현 손익</span>
             <span style={{color:shownEnv.unrealizedPnl.value>=0?T.grn:T.red,fontWeight:800,fontSize:14}}>
-              {shownEnv.unrealizedPnl.value>=0?'+':''}{moneyView(Math.abs(shownEnv.unrealizedPnl.value),currency as any).text}
+              {shownEnv.unrealizedPnl.value>=0?'+':''}{moneyView(Math.abs(shownEnv.unrealizedPnl.value),currency as any,fx).text}
             </span>
           </div>
         )}

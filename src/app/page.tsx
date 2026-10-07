@@ -100,6 +100,7 @@ import { notifyError, notifyInfo } from '@/lib/notify/center';
 const CommandPalette = dynamic(() => import('@/components/CommandPalette'),{ ssr: false });
 const ShortcutHelp = dynamic(() => import('@/components/ShortcutHelp'),{ ssr: false });
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
+const EasyModePage = dynamic(() => import('@/components/pages/EasyModePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const AiUsagePage = dynamic(() => import('@/components/pages/AiUsagePage'),{ ssr: false });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
@@ -244,6 +245,7 @@ const BTABS: { id: string; label: string; Icon: IconComp }[] = [
   // 빈 화면으로 간다. **화면이 아닌 것을 화면 목록에 넣지 않는다.**
 ];
 const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
+  {id:'easy',         label:'쉬운 화면',   Icon: LayoutGrid, core: true},
   {id:'wallet',       label:'지갑',       Icon: Wallet2, core: true},
   {id:'watchlist',    label:'왓치리스트', Icon: Star, core: true},
   {id:'season',       label:'시즌전략',   Icon: Sprout},
@@ -261,7 +263,7 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
   {id:'alerts',       label:'알림',       Icon: Bell, core: true},
   {id:'social',       label:'소셜',       Icon: Users},
   {id:'hub_accounts', label:'통합운용',   Icon: Landmark},
-  {id:'ai_portfolio', label:'AI추천',     Icon: Brain},
+  {id:'ai_portfolio', label:'포트폴리오 설계', Icon: Brain},
   {id:'dca',          label:'자동적립',   Icon: CalendarClock},
   {id:'fear_dca',     label:'공포 DCA',    Icon: TrendingDown, core: true},
   {id:'dividends',    label:'배당캘린더', Icon: BadgeDollarSign},
@@ -316,7 +318,10 @@ export default function App() {
   useEffect(()=>{
     try{
       const t=new URLSearchParams(window.location.search).get('tab');
-      if(t) setTab(t);
+      if(t) { setTab(t); return; }
+      // 사용자가 명시적으로 고른 경우에만 쉬운 화면부터 시작한다.
+      // 딥링크가 있으면 그 화면이 우선이고, 기본값은 기존 홈 그대로다.
+      if(localStorage.getItem('tg_easy_start')==='true') setTab('easy');
     }catch{}
   },[]);
 
@@ -869,6 +874,7 @@ export default function App() {
   const allTabs=[...BTABS,...MTABS];
   const TAB_DESC:Record<string,string>={
     home:'전체 요약을 한눈에 봐요',
+    easy:'자주 쓰는 기능만 크게 모아봐요',
     autobot:'돌아가는 자동매매 봇을 관리해요',
     paper:'가상 자금으로 연습 매매해요',
     season:'계절·이벤트 기반 전략을 봐요',
@@ -914,6 +920,7 @@ export default function App() {
     try {
       switch(tab) {
         case 'home':         return <HomePageComp {...p} onOpenAsset={openDetail}/>;
+        case 'easy':         return <EasyModePage onNav={nav}/>;
         case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail} liveIds={priceLiveIds}/>;
         case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openDetail} onOpenPnL={openPnL}/>;
         case 'trading':      return <TradingPageComp key={activeAsset?.id||'trading'} prices={prices} currency={currency} activeAsset={activeAsset} onOpenPnL={openPnL} priceRealAt={priceRealAt} priceSimSteps={priceSimSteps}/>;
@@ -1206,6 +1213,10 @@ export default function App() {
               <div style={{display:'flex',alignItems:'center',gap:3,background:priceStatus==='live'?'rgba(16,185,129,.12)':priceStatus==='mock'?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)',border:`1px solid ${priceStatus==='live'?'rgba(16,185,129,.3)':priceStatus==='mock'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}`,borderRadius:20,padding:'2px 7px'}}>
                 <Dot c={priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red}/><span style={{color:priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red,fontSize:9,fontWeight:700}}>{priceStatus==='live'?'LIVE':priceStatus==='mock'?'MOCK':'ERR'}</span>
               </div>
+              <button onClick={()=>nav('easy')} aria-label="쉬운 화면" title="쉬운 화면"
+                style={{minHeight:34,background:T.acg,border:`1px solid ${A(T.acl,'45')}`,borderRadius:20,padding:'0 10px',cursor:'pointer',fontSize:10,color:T.acl,fontWeight:800,display:'flex',alignItems:'center',gap:4,whiteSpace:'nowrap',flexShrink:0}}>
+                <Sparkles size={12} strokeWidth={2.4}/> 쉬운 화면
+              </button>
               {/* 테마는 설정에도 있지만 여기에도 둔다. 밝기는 자주 바꾸는
                   것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.
                   누르면 밝음 → 어두움 → 시간에 맞춰 순으로 돈다. */}
@@ -1404,6 +1415,7 @@ export default function App() {
                 <div style={{display:'flex',flexDirection:'column',gap:4}}>
                   {(()=>{
                     const mGroups:{title:string;ids:string[]}[]=[
+                      {title:'시작',ids:['easy']},
                       {title:'거래',ids:['strategies','autobot','fear_dca','paper','season']},
                       {title:'분석',ids:['backtest','scanner','seasonality','review','briefing','news','calendar','analysis','pine_guide']},
                       {title:'자산',ids:['portfolio','ai_portfolio','growth','dividends','accounts','manual_accounts']},

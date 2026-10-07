@@ -157,14 +157,16 @@ export async function GET(req: NextRequest) {
   const eventMap: Record<string, typeof EVENTS_KO> = {
     ko: EVENTS_KO, en: EVENTS_EN, ja: EVENTS_JA, zh: EVENTS_ZH,
   };
-  let events = addDates(eventMap[lang] ?? EVENTS_KO);
+  // 실제 출처가 없으면 빈 배열이다. 정례 일정이 아닌 이벤트를
+  // "이번 달 18일" 같은 규칙으로 만들어 내지 않는다.
+  let events: any[] = [];
 
   // ── 1순위: 저장된 일정 ──
   // 크론이 모아 둔 실제 일정이 있으면 그걸 쓴다. 아래 목데이터는
   // 그럴듯한 가짜 숫자(FOMC 5.25% 같은)라서, 있는데 안 쓰면 사용자가
   // 지어낸 예상치를 실제 전망으로 읽는다.
-  let source = 'mock';
-  let status: 'live' | 'sample' = 'sample';
+  let source = 'unavailable';
+  let status: 'live' | 'unavailable' = 'unavailable';
   try {
     const { getSupabaseAdmin } = await import('@/lib/supabase/server');
     const sb = getSupabaseAdmin();
@@ -220,11 +222,12 @@ export async function GET(req: NextRequest) {
             id:       `fh-${i}`,
             title:    ev.event || ev.eventName || 'Economic Event',
             country:  ev.country || 'US',
-            date:     ev.date || nextDate(15),
-            time:     ev.time || '08:30',
-            // 시간대를 붙이지 않는다. 예전에는 +09:00을 박아서 미국 지표가
-            // 한국 시각으로 해석됐다 — FOMC가 9시간 밀린다.
-            dateTime: ev.time ? `${ev.date}T${ev.time}:00Z` : null,
+            date:     ev.date || '',
+            // 공급자가 시간을 주지 않았으면 자정으로 채우지 않는다.
+            time:     ev.time || null,
+            // Finnhub의 문자열 time만 보고 UTC라고 단정하지 않는다.
+            // 시간대가 확인된 저장 일정만 dateTime 정본으로 쓴다.
+            dateTime: null,
             impact:   ev.impact === '3' ? 'high' : ev.impact === '2' ? 'medium' : 'low',
             forecast: ev.estimate != null ? String(ev.estimate) : null,
             previous: ev.prev     != null ? String(ev.prev)     : null,
@@ -232,7 +235,7 @@ export async function GET(req: NextRequest) {
           }));
         }
       }
-    } catch { /* fallback to mock */ }
+    } catch { /* 실제 공급자를 못 읽으면 unavailable 그대로 둔다 */ }
   }
 
   // Filters
@@ -240,7 +243,7 @@ export async function GET(req: NextRequest) {
   if (impact  !== 'all') events = events.filter(e => e.impact  === impact);
 
   return NextResponse.json({
-    ok: true,
+    ok: status === 'live',
     // 예전에는 항상 'mock'이었다. 실제 데이터를 받아와도 그렇게 적으면
     // 화면이 진짜와 가짜를 구분할 수 없다.
     status, source, lang,
@@ -249,8 +252,8 @@ export async function GET(req: NextRequest) {
     // `cd.events`를 읽고 있었는데 여기서는 `data`만 줘서 **항상 빈 배열**을
     // 받고 있었다 — 회피가 켜져 있는데 한 번도 안 걸렸다.
     events,
-    sampleWarning: status === 'sample'
-      ? '표시된 일정과 예상치는 예시입니다. 실제 발표 일정이 아니므로 매매 판단에 쓰지 마세요.'
+    sampleWarning: status !== 'live'
+      ? '실제 경제 일정을 확인하지 못했습니다. 가짜 일정은 표시하지 않습니다. 공급자 연결 또는 동기화 상태를 확인하세요.'
       : null,
   },
     { headers:{ 'Cache-Control':'public, s-maxage=300, stale-while-revalidate=600' } });

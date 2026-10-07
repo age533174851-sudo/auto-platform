@@ -3,8 +3,9 @@
 // 입력: 목표 / 기간 / 월투자금 / 성향 / 선호자산 / 위험허용도
 // 출력: 종목별 비중 (합계 100%) + 근거 + 예상 수익 시뮬레이션
 //
-// 외부 API 호출 없는 룰 기반 시스템 — 빠르고 결정적이며 비용 0
-// 마스터프롬프트의 "AI 반도체 장투 포트폴리오" 예시를 기준 데이터로
+// 외부 API 호출 없는 룰 기반 계획 도구.
+ // 실시간 AI 모델·시장데이터·기업 펀더멘털 분석을 사용하지 않는다.
+ // 따라서 아래 수익률/변동성은 "예측"이 아니라 시나리오 계산용 정적 가정이다.
 // ─────────────────────────────────────────────────────────────
 
 export type RiskProfile = 'conservative' | 'balanced' | 'aggressive' | 'extreme';
@@ -42,13 +43,13 @@ export interface AIPortfolioResult {
   warnings: string[];
 }
 
-// ── 자산 마스터 데이터 (실제 시장 데이터 기반 보수적 추정) ─
+// ── 자산 마스터 데이터 (시나리오 계산용 정적 가정) ─
 interface AssetMeta {
   symbol: string;
   name: string;
   category: AllocItem['category'];
   themes: Theme[];
-  annualReturn: number; // 추정 연수익률 (보수적, 과거 10년 중앙값 - 1%p)
+  annualReturn: number; // 계획용 연수익률 가정. 실시간 기대수익률/예측이 아님
   volatility: number;
 }
 
@@ -219,11 +220,13 @@ export function generatePortfolio(input: AIPortfolioInput): AIPortfolioResult {
     allocations[0].weight = Number((allocations[0].weight + diff).toFixed(1));
   }
 
-  // ── 포트폴리오 기대수익률 / 변동성 ──────────────────
+  // ── 포트폴리오 계획 수익률 / 변동성 ──────────────────
+  // 둘 다 실시간 예측이 아니라 정적 가정이다.
   const expectedAnnualReturn = allocations.reduce((s, a) => s + (a.weight / 100) * a.expectedAnnualReturn, 0);
-  // 단순화: 가중 변동성 (실제로는 공분산 필요하나 모의 용도)
-  const expectedVolatility = Math.sqrt(allocations.reduce((s, a) => s + Math.pow((a.weight / 100) * a.volatility, 2), 0)) * 1.8;
-  const riskScore = Math.max(1, Math.min(10, Math.round(expectedVolatility / 4)));
+  // 공분산 데이터가 없는데 임의 배수로 "정교한 변동성"처럼 보이게 하지 않는다.
+  // 각 자산 변동성의 가중평균을 단순 위험 근사치로만 쓴다.
+  const expectedVolatility = allocations.reduce((s, a) => s + (a.weight / 100) * a.volatility, 0);
+  const riskScore = Math.max(1, Math.min(10, Math.round(expectedVolatility / 5)));
 
   // ── 시뮬레이션 (월별 적립 + 복리) ──────────────────
   const monthlyReturn = expectedAnnualReturn / 100 / 12;
@@ -242,7 +245,8 @@ export function generatePortfolio(input: AIPortfolioInput): AIPortfolioResult {
         months: m,
         principal,
         expected: Math.round(bal),
-        conservative: Math.round(Math.max(principal, bal - span)),
+        // 하방 시나리오를 원금 이상으로 강제하지 않는다. 손실 가능성을 숨기면 안 된다.
+        conservative: Math.round(Math.max(0, bal - span)),
         optimistic:   Math.round(bal + span),
       });
     }
@@ -262,6 +266,8 @@ export function generatePortfolio(input: AIPortfolioInput): AIPortfolioResult {
   const summary = `${RISK_LABEL[input.risk]} 성향 · ${HORIZON_LABEL[input.horizon]} 운용 · 기대 연수익률 ${expectedAnnualReturn.toFixed(1)}% (변동성 ${expectedVolatility.toFixed(0)}%) · 위험점수 ${riskScore}/10`;
 
   // ── 경고 ────────────────────────────────────────────
+  warnings.push('이 결과는 실시간 AI 예측이 아니라 정적 수익률·변동성 가정으로 만든 계획 시나리오입니다.');
+  warnings.push('자산 간 상관관계·공분산과 세금·실제 체결비용을 반영하지 않았으므로 실전 투자 판단 근거로 단독 사용하지 마세요.');
   if (input.risk === 'extreme' && cryptoW > 20) warnings.push('코인 비중이 높아 단기 변동성에 매우 취약합니다.');
   if (monthsToGoal !== null && monthsToGoal > months) warnings.push(`현재 월 투자금으로는 목표 ${input.horizon} 내 달성이 어렵습니다 (예상 ${Math.ceil(monthsToGoal/12)}년).`);
   if (input.monthly < 100000) warnings.push('월 투자금이 적어 분산 매수 시 거래비용 비중이 커질 수 있습니다.');

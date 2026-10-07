@@ -421,7 +421,7 @@ function AnalysisHubPage() {
   return (
     <div>
       {/* ── Top toolbar ── */}
-      <div style={{background:'linear-gradient(135deg,#04060F,#080D1A)',border:`1px solid ${A(T.acl,'30')}`,borderRadius:18,padding:'12px 14px',marginBottom:12}}>
+      <div style={{background:'linear-gradient(135deg,var(--t-card),var(--t-bg))',border:`1px solid ${A(T.acl,'30')}`,borderRadius:18,padding:'12px 14px',marginBottom:12}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
           <div style={{display:'flex',gap:5,alignItems:'center'}}>
             <span style={{fontSize:16}}>🔬</span>
@@ -843,7 +843,7 @@ function AnalysisHubPage() {
       {/* ── PAPER ── */}
       {tab==='paper'&&(
         <div>
-          <div style={{background:'linear-gradient(135deg,var(--t-bg),#0A0F1E)',border:`1px solid ${A(T.prp,'40')}`,borderRadius:18,padding:'16px',marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,var(--t-card),var(--t-bg))',border:`1px solid ${A(T.prp,'40')}`,borderRadius:18,padding:'16px',marginBottom:12}}>
             <div style={{color:T.muted,fontSize:11,marginBottom:2}}>모의매매 계좌</div>
             <div style={{color:T.txt,fontSize:26,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>{cvt(paperSize,'KRW')}</div>
             <div style={{display:'flex',gap:12,marginTop:6}}>

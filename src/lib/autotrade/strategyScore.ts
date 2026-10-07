@@ -47,8 +47,9 @@ export function computeMetrics(pnls: number[]) {
   const variance = n ? pnls.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0;
   const std = Math.sqrt(variance);
   const sharpe = std > 0 ? (mean / std) * Math.sqrt(Math.min(n, 50)) : 0;
-  // 최근 성과: 마지막 10회 승률
-  const recent = pnls.slice(-10);
+  // 최근 성과: 너무 짧은 10회 대신 최근 30회. 10회는 1~2번만 달라도
+  // 비율이 크게 흔들려 자동 ON/OFF 근거로 쓰기 어렵다.
+  const recent = pnls.slice(-30);
   const recentWR = recent.length ? (recent.filter(p => p > 0).length / recent.length) * 100 : 0;
   return { n, winRate, profitFactor, mddPct: clamp(mddPct, 0, 100), sharpe, recentWR };
 }
@@ -64,11 +65,13 @@ export function scoreStrategy(pnls: number[]): StrategyScore {
     { key: 'profitFactor', label: 'Profit Factor', value: m.profitFactor.toFixed(2), sub: mapRange(m.profitFactor, 0.8, 2.5), weight: 25 },
     { key: 'mdd', label: '최대 낙폭(MDD)', value: `-${m.mddPct.toFixed(1)}%`, sub: 100 - mapRange(m.mddPct, 5, 45), weight: 20 },
     { key: 'sharpe', label: 'Sharpe', value: m.sharpe.toFixed(2), sub: mapRange(m.sharpe, 0, 2.5), weight: 15 },
-    { key: 'recent', label: '최근 10회', value: `승률 ${m.recentWR.toFixed(0)}%`, sub: mapRange(m.recentWR, 30, 70), weight: 20 },
+    { key: 'recent', label: '최근 30회', value: `승률 ${m.recentWR.toFixed(0)}%`, sub: mapRange(m.recentWR, 30, 70), weight: 20 },
   ];
   let raw = breakdown.reduce((a, b) => a + b.sub * (b.weight / 100), 0);
-  // 표본 신뢰도: 20회에 수렴
-  const confidence = clamp((m.n / 20) * 100, 0, 100);
+  // 표본 신뢰도: 200회에 수렴.
+  // 20회만으로 100% 신뢰도를 주면 몇 번의 우연한 승패가 전략 등급을
+  // 확정해 버린다. 백테스트 판정의 권장 표본(200회)과 같은 선을 쓴다.
+  const confidence = clamp((m.n / 200) * 100, 0, 100);
   const score = Math.round(50 + (raw - 50) * (confidence / 100));
   const stars = clamp(Math.round((score / 20) * 2) / 2, 0.5, 5);
   const grade = score >= 85 ? 'S' : score >= 70 ? 'A' : score >= 55 ? 'B' : score >= 40 ? 'C' : 'D';
@@ -79,7 +82,9 @@ export function scoreStrategy(pnls: number[]): StrategyScore {
   return { score, stars, grade, gradeColor, confidence: Math.round(confidence), breakdown, summary };
 }
 
-// 요약치(winRate/totalPnl/trades)에서 결정적 거래열 합성 — 실거래가 쌓이면 그대로 대체.
+// @deprecated 요약치(winRate/totalPnl/trades)에서 거래열을 합성하는 함수.
+ // 실제 자동 ON/OFF·추천·자금배분에는 사용하지 않는다.
+ // MDD/Sharpe/최근성과는 거래 순서가 필요한 지표라 요약치에서 지어내면 안 된다.
 export function tradesFromSummary(s: { id: string; winRate: number; totalPnl: number; trades: number }): number[] {
   const n = Math.max(0, Math.floor(s.trades));
   if (n === 0) return [];
@@ -108,7 +113,9 @@ export function tradesFromSummary(s: { id: string; winRate: number; totalPnl: nu
 
 // AI 추천: 최고 점수 전략
 export function recommendStrategy(list: { id: string; name: string; score: StrategyScore }[]): { id: string; name: string; score: StrategyScore } | null {
-  const eligible = list.filter(x => x.score.confidence >= 25);
+  // 추천은 최소 60% 신뢰도(약 120개 실제 거래)가 있어야 한다.
+  // 표본이 적으면 '추천 없음'이 정답이다.
+  const eligible = list.filter(x => x.score.confidence >= 60);
   if (!eligible.length) return null;
   return [...eligible].sort((a, b) => b.score.score - a.score.score)[0];
 }

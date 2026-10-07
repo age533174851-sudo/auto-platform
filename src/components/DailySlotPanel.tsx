@@ -130,15 +130,18 @@ export default function DailySlotPanel() {
 
       {/* 스트레스 테스트 */}
       <div style={{ background: T.card, borderRadius: 12, padding: '13px', marginBottom: 12 }}>
+        <div style={{ color: T.ylw, fontSize: 9.5, lineHeight: 1.5, marginBottom: 8 }}>
+          ⚠️ 아래 결과는 실제 거래소 과거 데이터가 아니라 코드가 생성한 합성 캔들입니다. 청산·격리 구조 시험용이며 전략 수익성 검증값이 아닙니다.
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <TrendingDown size={13} color={liqColor} />
-          <span style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>스트레스 테스트 (캔들 내부 청산 반영)</span>
+          <span style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>합성 캔들 구조 스트레스 테스트</span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7, marginBottom: 10 }}>
           {[
             ['청산률', `${stress.liquidationRate.toFixed(0)}%`, liqColor],
-            ['승률', `${stress.winRate.toFixed(0)}%`, T.sub],
-            ['순손익', `$${stress.totalNetPnl.toFixed(0)}`, stress.totalNetPnl >= 0 ? T.grn : T.red],
+            ['합성 경로 승률', `${stress.winRate.toFixed(0)}%`, T.muted],
+            ['합성 경로 손익', `${stress.totalNetPnl.toFixed(0)}`, T.muted],
             ['최대 연속손실', `${stress.maxConsecutiveLosses}회`, T.sub],
           ].map(([l, v, c]) => (
             <div key={l as string} style={{ background: T.alt, borderRadius: 8, padding: '8px 10px' }}>

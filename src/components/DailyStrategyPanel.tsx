@@ -1,6 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
-// DailyStrategyPanel — 1D 5v5 통합 백테스트 결과.
+// DailyStrategyPanel — 1D 5v5 합성 경로 연구 결과.
 // 실전 규칙(하루 1회·계단식·비대칭 청산·사이클)을 그대로 반영한 결과를 보여준다.
 import React, { useState, useMemo } from 'react';
 import { T } from '@/lib/constants';
@@ -75,7 +75,7 @@ export default function DailyStrategyPanel() {
         </div>
       </div>
       <div style={{ color: T.muted, fontSize: 10, marginBottom: 14, lineHeight: 1.4 }}>
-        실전 규칙을 그대로 반영합니다. 캔들 내부 청산도 판정하므로 일반 백테스트보다 결과가 보수적입니다.
+        이 화면의 가격 경로는 실제 거래소 과거 데이터가 아니라 코드가 생성한 합성 데이터입니다. 규칙 엔진 동작을 시험하는 연구용이며 전략의 실제 우위·실전 적합 근거로 사용하지 않습니다.
       </div>
 
       {/* 핵심 결과 */}
@@ -141,7 +141,7 @@ export default function DailyStrategyPanel() {
             <div style={{ color: T.red, fontSize: 14, fontWeight: 800 }}>{result.cyclesFailed}회</div>
           </div>
           <div style={{ flex: 1, background: T.alt, borderRadius: 8, padding: '8px 10px' }}>
-            <div style={{ color: T.muted, fontSize: 9 }}>최종 자본</div>
+            <div style={{ color: T.muted, fontSize: 9 }}>합성 경로 끝 자본</div>
             <div style={{ color: T.txt, fontSize: 14, fontWeight: 800 }}>${result.finalCapital.toFixed(0)}</div>
           </div>
         </div>
@@ -177,7 +177,7 @@ export default function DailyStrategyPanel() {
 
       <div style={{ display: 'flex', gap: 7, alignItems: 'flex-start', background: evColor + '10', borderRadius: 10, padding: '11px 13px' }}>
         <Target size={14} color={evColor} style={{ flexShrink: 0, marginTop: 1 }} />
-        <span style={{ color: T.sub, fontSize: 10.5, lineHeight: 1.5 }}>{result.verdict}</span>
+        <span style={{ color: T.sub, fontSize: 10.5, lineHeight: 1.5 }}>합성 데이터 결과: {result.verdict} · 실제 시장 검증 전에는 실전 승격하지 않습니다.</span>
       </div>
     </div>
   );
