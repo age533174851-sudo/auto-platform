@@ -4822,28 +4822,71 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           }
         }
 
+        // 자격 판독이 **한 벌인가.** 두 벌이면 한쪽만 고치고 끝난다
+        // (실제로 이 파일에 같은 구현이 두 벌 있었고, 그래서 뭉개진 문장이
+        //  두 자리에 남아 있었다).
+        const CRD = 'src/lib/engine/connectionCreds.ts';
+        const csrc = code(CRD);
+        if (!csrc.trim()) err(`${CRD}: 자격 판독 정본이 없습니다`);
+        else if (!/diagnoseCredential\(/.test(csrc)) {
+          err(`${CRD}: 자격 진단 정본을 쓰지 않습니다`
+            + ' — 실패 원인이 다시 한 문장으로 뭉개집니다');
+        }
+
         // 라우트가 그 정본을 쓰고, 세 사실을 한 문장으로 되돌리지 않는가
         const rsrc = code(MON5);
-        if (!/diagnoseCredential\(/.test(rsrc)) {
-          err(`${MON5}: 자격 진단 정본을 쓰지 않습니다`
-            + ' — 실패 원인이 다시 한 문장으로 뭉개집니다');
+        if (!/makeCredsReader\(/.test(rsrc)) {
+          err(`${MON5}: 공용 자격 판독기를 쓰지 않습니다`);
+        }
+        // 라우트 안에 **연결 범위** 판독기를 다시 만들지 않는가.
+        //
+        //   `runPositionGuards`의 user 범위 판독(`.eq('user_id', ...)`)은
+        //   다른 관심사다 — `connFor` 주입으로 시험이 붙어 있고 출금 권한을
+        //   보지 않는다. 그것까지 금지하면 검사기가 거짓말을 한다.
+        //   여기서 막는 것은 **연결 id로 읽는 자격 판독의 복제**다.
+        if (/\.eq\('id',\s*connectionId\)/.test(rsrc)) {
+          err(`${MON5}: 연결 범위 자격 판독을 라우트 안에서 다시 구현합니다`
+            + ' — 두 벌이 되면 한쪽만 고치게 됩니다 (실제로 그랬다)');
+        }
+        if ((rsrc.match(/creds\.codeOf\(/g) || []).length < 3) {
+          err(`${MON5}: 자격 코드를 쓰지 않는 실패 경로가 남아 있습니다`
+            + ` (${(rsrc.match(/creds\.codeOf\(/g) || []).length}곳) — 세 경로 전부여야 합니다`);
         }
         if (!/credentialCode:/.test(rsrc)) {
           err(`${MON5}: 실패에 자격 코드를 남기지 않습니다`);
+        }
+        // ★ **결과를 실제로 쓰는가.** 함수를 불러 놓고 버리면 아무 의미가
+        //   없다 — 검사기가 "호출했는가"만 보면 그것을 놓친다
+        //   (RDY10·RDY13이 그렇게 새 나갔다).
+        if (!/reason:\s*credentialDiagnosisReason\(/.test(rsrc)) {
+          err(`${MON5}: 사유를 자격 진단 정본에서 만들지 않습니다`
+            + ' — 세 가지 다른 실패가 다시 한 문장이 됩니다');
+        }
+        if (!/out\.failures\s*=\s*classifyFailures\(/.test(rsrc)) {
+          err(`${MON5}: 경로별 집계 결과를 쓰지 않습니다`
+            + ' — 불러 놓고 버리면 합계만 남습니다');
+        }
+        // ★ 뭉개진 옛 문장을 되돌리지 않는가. **주석이 아니라 코드**에서만 본다.
+        {
+          const COLLAPSED = '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다';
+          if (rsrc.includes(COLLAPSED)) {
+            err(`${MON5}: 세 가지 다른 실패를 한 문장으로 뭉개는 문구가 남아 있습니다`
+              + ' — 어느 원인인지 알 수 없게 됩니다');
+          }
         }
         if (!/path:\s*'GENERIC_PROTECTION_SWEEP'/.test(rsrc)) {
           err(`${MON5}: 보호주문 고아 정리 실패를 경로로 구분하지 않습니다`
             + ' — Exact100X 관측 실패와 섞여 셉니다');
         }
         // ★ 진단에 시크릿 **값**을 넘기지 않는가
-        const dm = /diagnoseCredential\(\{([\s\S]{0,420}?)\}\);/.exec(rsrc);
+        const dm = /diagnoseCredential\(\{([\s\S]{0,420}?)\}\);/.exec(csrc);
         if (!dm) {
-          err(`${MON5}: 자격 진단 호출부를 찾지 못했습니다`);
+          err(`${CRD}: 자격 진단 호출부를 찾지 못했습니다`);
         } else {
           for (const bad of [/api_secret_enc\s*[,}]/, /apiSecret:/, /plain\s*[,}]/,
                              /secret:\s*\w/, /\.length/]) {
             if (bad.test(dm[1])) {
-              err(`${MON5}: 자격 진단에 시크릿 값·길이를 넘깁니다 (${bad})`
+              err(`${CRD}: 자격 진단에 시크릿 값·길이를 넘깁니다 (${bad})`
                 + ' — 있다/없다만 넘겨야 합니다');
             }
           }

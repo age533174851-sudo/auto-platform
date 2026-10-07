@@ -149,12 +149,12 @@ export function binanceTestnetReadiness(
   const cand = all.filter(c =>
     String(c?.exchange ?? '').trim().toLowerCase() === 'binance' && c?.testnet === true);
 
-  if (cand.length === 0) {
-    return nope('NO_BINANCE_TESTNET_CONNECTION',
-      'Binance TESTNET 연결이 없습니다'
-      + ' — 기존 연결의 testnet 플래그를 바꾸지 않고 별도 연결을 추가해야 합니다');
-  }
-
+  // ★ "후보가 없다"를 **한 곳에서만** 판정한다.
+  //
+  //   예전에는 여기서 조기 반환하고 아래 fallback에서도 같은 코드를
+  //   돌려줬다. 조기 가드를 지워도 루프가 비어 있어 결과가 같았으므로
+  //   돌연변이가 그것을 지워도 아무 일이 없었다(RDY3가 그렇게 새 나갔다).
+  //   같은 판단이 두 곳에 있으면 언젠가 갈린다 — 아래 하나로 모았다.
   let last: TestnetReadinessVerdict | null = null;
   for (const c of cand) {
     const id = String(c.connectionId ?? '').trim() || null;
@@ -180,7 +180,12 @@ export function binanceTestnetReadiness(
     }
     return { ready: true, code: 'READY', reason: '', connectionId: id };
   }
-  return last ?? nope('NO_BINANCE_TESTNET_CONNECTION', 'Binance TESTNET 연결이 없습니다');
+  // 후보가 아예 없었거나(cand 비었음), 있었지만 전부 결격이었다.
+  // 앞의 경우에는 **무엇을 해야 하는지**까지 적는다 — 기존 연결을 고쳐서
+  // 만들면 표본이 거짓이 되기 때문이다.
+  return last ?? nope('NO_BINANCE_TESTNET_CONNECTION',
+    'Binance TESTNET 연결이 없습니다'
+    + ' — 기존 연결의 testnet 플래그를 바꾸지 않고 별도 연결을 추가해야 합니다');
 }
 
 // ── ③ 표본 자격 (기존 정본에 위임한다) ──
@@ -227,6 +232,8 @@ export function sampleReadiness(
 export type FailurePath =
   /** 전략을 가리지 않는 보호주문 고아 정리 */
   | 'GENERIC_PROTECTION_SWEEP'
+  /** 전략을 가리지 않는 포지션 생명주기(트레일링·본전이동·시간청산) */
+  | 'GENERIC_MANAGED_POSITION'
   /** Exact100X 전용 종료 권한 후보 */
   | 'EXACT100X_AUTHORITY'
   /** 자리를 유예한 줄 */

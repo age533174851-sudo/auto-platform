@@ -25,6 +25,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
+import { makeCredsReader } from '@/lib/engine/connectionCreds';
 import {
   type WakeAuth, resolveWakeSource, resolveWakeCadence,
   WAKE_SOURCE_HEADER, WAKE_INTERVAL_HEADER, WAKE_EXPECTED_AT_HEADER,
@@ -279,56 +280,11 @@ async function sweepOrphanProtection(
     await import('@/lib/engine/protectionCleanup');
 
   /** 연결 하나당 한 번만 읽는다. **연결이 망과 거래소를 정한다** */
-  const credCache = new Map<string, any>();
-  // ── 왜 못 쓰는지를 **한 문장으로 뭉개지 않는다** (⑤B-3A-3) ──
-  //
-  //   예전에는 row를 못 읽은 것·출금 권한이 켜진 것·모르는 거래소인 것이
-  //   전부 같은 문구로 나왔다. 최근 7일 1037회가 모두 그 문구였고 어느
-  //   것인지 알 방법이 없었다. 판정은 `engine/testnetReadiness.ts`에 있다.
-  //
-  //   ★ 진단에 **시크릿을 넘기지 않는다.** "있다/없다"와 "풀렸다/못
-  //     풀었다"만 넘긴다 — 값을 넘기지 않으면 흘릴 수도 없다.
-  const credDiag = new Map<string, string>();
-  const credsOf = async (connectionId: string) => {
-    if (!credCache.has(connectionId)) {
-      const { diagnoseCredential } = await import('@/lib/engine/testnetReadiness');
-      let v: any = null;
-      let code: any = 'NO_CONNECTION';
-      try {
-        const { data: c } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
-          .eq('id', connectionId).maybeSingle();
-        const row: any = c ?? null;
-        // **모르는 거래소를 바이낸스로 읽지 않는다.**
-        const ex = row ? resolveExecExchange(row.exchange_id).exchange : null;
-        let plain = '';
-        let decrypted = false;
-        if (row && String(row.api_secret_enc ?? '')) {
-          try { plain = decryptSecret(String(row.api_secret_enc)); decrypted = !!plain; }
-          catch { decrypted = false; }
-        }
-        code = diagnoseCredential({
-          rowFound: !!row,
-          exchangeResolved: !!ex,
-          hasWithdrawal: row ? row.has_withdrawal === true : null,
-          keyPresent: !!String(row?.api_key ?? ''),
-          secretCiphertextPresent: !!String(row?.api_secret_enc ?? ''),
-          secretDecrypted: decrypted,
-        });
-        if (code === 'READY') {
-          v = {
-            exchange: ex,
-            apiKey: row.api_key,
-            apiSecret: plain,
-            testnet: row.is_testnet !== false,
-          };
-        }
-      } catch { v = null; code = 'NO_CONNECTION'; }
-      credCache.set(connectionId, v);
-      credDiag.set(connectionId, code);
-    }
-    return credCache.get(connectionId);
-  };
+  // 자격 판독은 **한 곳에서만** 한다 (engine/connectionCreds.ts).
+  // 예전에는 이 파일 안에 같은 구현이 두 벌 있어서 실패 사유를 한 쪽만
+  // 고쳤고, 나머지 한 쪽은 계속 세 사실을 한 문장으로 뭉갰다.
+  const creds = makeCredsReader({ sb, resolveExchange: resolveExecExchange, decrypt: decryptSecret });
+  const credsOf = (connectionId: string) => creds.get(connectionId);
 
   for (const t of sel.targets) {
     try {
@@ -337,7 +293,7 @@ async function sweepOrphanProtection(
         out.unreadable += 1;
         // **어느 사실 때문인지 적는다.** 값은 싣지 않는다 — 코드와 문구만.
         const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
-        const dc: any = credDiag.get(t.connectionId) ?? 'NO_CONNECTION';
+        const dc = creds.codeOf(t.connectionId);
         out.details.push({
           symbol: t.symbol, code: 'NO_VENUE', ok: false,
           credentialCode: dc,
@@ -984,27 +940,8 @@ async function runLifecycleSweep(
   const { moveStopSafely } = await import('@/lib/engine/stopMove');
 
   /** 연결 하나당 한 번만 읽는다. **연결이 망을 정한다** */
-  const credCache = new Map<string, any>();
-  const credsOf = async (connectionId: string) => {
-    if (!credCache.has(connectionId)) {
-      let v: any = null;
-      try {
-        const { data: c } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
-          .eq('id', connectionId).maybeSingle();
-        if (c && !(c as any).has_withdrawal) {
-          const ex = resolveExecExchange((c as any).exchange_id).exchange;
-          if (ex) {
-            v = { exchange: ex, apiKey: (c as any).api_key,
-              apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),
-              testnet: (c as any).is_testnet !== false };
-          }
-        }
-      } catch { v = null; }
-      credCache.set(connectionId, v);
-    }
-    return credCache.get(connectionId);
-  };
+  const creds = makeCredsReader({ sb, resolveExchange: resolveExecExchange, decrypt: decryptSecret });
+  const credsOf = (connectionId: string) => creds.get(connectionId);
 
   // ★ **두 가지 중복을 구분한다.**
   //
@@ -1066,9 +1003,14 @@ async function runLifecycleSweep(
       try {
         const venue = await credsOf(c.connectionId);
         if (!venue) {
+          // **어느 사실 때문인지 적는다.** 이 경로는 Exact100X 전용
+          // 종료 권한이므로, 고아 정리 실패와 같은 숫자에 넣지 않는다.
+          const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
+          const dc = creds.codeOf(c.connectionId);
           out.authority.results.push({ ...tag, code: 'NO_VENUE', ok: false, failed: true,
             attemptedWrite: false,
-            reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+            credentialCode: dc, path: 'EXACT100X_AUTHORITY',
+            reason: credentialDiagnosisReason(dc) });
           out.authority.failed += 1;
           continue;
         }
@@ -1446,8 +1388,11 @@ async function runLifecycleSweep(
     try {
       const venue = await credsOf(p.connectionId);
       if (!venue) {
+        const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
+        const dc = creds.codeOf(p.connectionId);
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'NO_VENUE', ok: false,
-          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+          credentialCode: dc, path: 'GENERIC_MANAGED_POSITION',
+          reason: credentialDiagnosisReason(dc) });
         continue;
       }
       // **줄에 적힌 거래소와 연결의 거래소가 다르면 손대지 않는다.**

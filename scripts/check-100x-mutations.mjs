@@ -135,6 +135,7 @@ const P = {
   lin: 'src/lib/system/migrationLineage.ts',
   acl: 'src/lib/system/observationAcl.ts',
   rdy: 'src/lib/engine/testnetReadiness.ts',
+  creds: 'src/lib/engine/connectionCreds.ts',
   mig95: 'supabase/migrations/095_exact100x_observation_acl_hardening.sql',
   manifest: 'src/lib/system/migrationManifest.ts',
   mig90: 'supabase/migrations/090_live_orders_execution_identity.sql',
@@ -2158,7 +2159,13 @@ const M = [
     s => s.replace('c?.testnet === true);', 'c?.testnet !== false);'), 'RED'],
 
   ['RDY3  연결이 없는데 준비됐다고 적음', P.rdy,
-    s => s.replace('  if (cand.length === 0) {', '  if (false) {'), 'RED'],
+    s => s.replace("  return last ?? nope('NO_BINANCE_TESTNET_CONNECTION',",
+      "  return last ?? { ready: true, code: 'READY', reason: '', connectionId: null };\n"
+      + "  return last ?? nope('NO_BINANCE_TESTNET_CONNECTION',"), 'RED'],
+
+  ['RDY3b 후보 필터를 통과한 것이 없어도 마지막 결격 사유만 적음', P.rdy,
+    s => s.replace('  const cand = all.filter(c =>', '  const cand = all.slice(0, 0) || all.filter(c =>'),
+    'RED'],
 
   ['RDY4  출금 권한 미확인을 "없음"으로 읽음 (진단)', P.rdy,
     s => s.replace("  if (i.hasWithdrawal !== false) return 'WITHDRAWAL_ENABLED';",
@@ -2207,14 +2214,26 @@ const M = [
     s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP',",
       "          path: 'EXACT100X_AUTHORITY',"), 'RED'],
 
-  ['RDY12 진단에 시크릿 평문을 넘김', P.monitor,
+  ['RDY12 진단에 시크릿 평문을 넘김', P.creds,
     s => s.replace('          secretDecrypted: decrypted,',
       '          secretDecrypted: decrypted, apiSecret: plain,'), 'RED'],
 
-  ['RDY12b 진단에 시크릿 길이를 넘김', P.monitor,
-    s => s.replace('          secretCiphertextPresent: !!String(row?.api_secret_enc ?? \'\'),',
-      '          secretCiphertextPresent: String(row?.api_secret_enc ?? \'\').length > 0,\n'
-      + '          secretLen: String(row?.api_secret_enc ?? \'\').length,'), 'RED'],
+  ['RDY12b 진단에 시크릿 길이를 넘김', P.creds,
+    s => s.replace("          secretCiphertextPresent: !!String(row?.api_secret_enc ?? ''),",
+      "          secretCiphertextPresent: String(row?.api_secret_enc ?? '').length > 0,\n"
+      + "          secretLen: String(row?.api_secret_enc ?? '').length,"), 'RED'],
+
+  ['RDY12c 자격 판독을 두 벌로 되돌림', P.monitor,
+    s => s.replace('  const credsOf = (connectionId: string) => creds.get(connectionId);',
+      '  const credsOf = async (connectionId: string) => {\n'
+      + '    const { data: c } = await sb.from(\'exchange_connections\')\n'
+      + "      .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')\n"
+      + '      .eq(\'id\', connectionId).maybeSingle();\n'
+      + '    if (!c || (c as any).has_withdrawal) return null;\n'
+      + '    const ex = resolveExecExchange((c as any).exchange_id).exchange;\n'
+      + '    return ex ? { exchange: ex, apiKey: (c as any).api_key,\n'
+      + "      apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),\n"
+      + '      testnet: (c as any).is_testnet !== false } : null;\n  };'), 'RED'],
 
   ['RDY13 경로별 집계를 합계로 되돌림', P.monitor,
     s => s.replace('    out.failures = classifyFailures(', '    out.failures = [] as any; void classifyFailures('),
