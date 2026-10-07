@@ -2306,6 +2306,10 @@ const M = [
   ['ENV10 set-testnet 반대편 충돌을 통과시킴', P.idn,
     s => s.replace('    if (s?.isTestnet !== i.toTestnet) continue;', '    continue;'), 'RED'],
 
+  ['ENV9c 이름 충돌 판정을 요청값 환경으로 함', P.exr,
+    s => s.replace('        isTestnet: usedTestnet,\n      });\n      if (!nv.ok) {',
+      '        isTestnet: isTestnet,\n      });\n      if (!nv.ok) {'), 'RED'],
+
   ['ENV10b 라우트가 반대편 충돌을 무시함', P.exr,
     s => s.replace("        if (ev.code === 'ENV_CONNECTION_EXISTS') {", '        if (false) {'),
     'RED'],

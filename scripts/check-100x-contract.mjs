@@ -4821,17 +4821,43 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           if (!/is_testnet:\s*usedTestnet/.test(esrc)) {
             err(`${EXR}: 검증으로 확정한 환경(usedTestnet)을 저장하지 않습니다`);
           }
-          if (!/resolveNickname\(/.test(esrc) || !/isTestnet:\s*usedTestnet/.test(esrc)) {
-            err(`${EXR}: 연결 이름을 환경별로 만들지 않습니다`);
+          // ★ **호출 블록 안을 본다.** 토큰이 다른 자리에도 있으면,
+          //   한 자리만 바꿔도 파일 전체 검색은 계속 맞는다
+          //   (ENV4b가 그렇게 새 나갔다).
+          {
+            const rn = /resolveNickname\(\{([\s\S]{0,260}?)\}\)/.exec(esrc);
+            if (!rn) {
+              err(`${EXR}: 연결 이름을 환경별로 만들지 않습니다`);
+            } else if (!/isTestnet:\s*usedTestnet\b/.test(rn[1])) {
+              err(`${EXR}: 연결 이름을 검증으로 확정한 환경이 아니라`
+                + ` 요청값으로 만듭니다 (${rn[1].replace(/\s+/g, ' ').trim().slice(0, 80)})`
+                + ' — 실전 키가 "테스트넷"이라는 이름을 받습니다');
+            }
+            const nvc = /nicknameVerdict\(\{([\s\S]{0,420}?)\}\);/.exec(esrc);
+            if (!nvc) {
+              err(`${EXR}: 이름 충돌을 검사하지 않습니다`);
+            } else if (!/isTestnet:\s*usedTestnet\b/.test(nvc[1])) {
+              err(`${EXR}: 이름 충돌을 요청값 환경으로 판정합니다`);
+            }
           }
-          if (!/nicknameVerdict\(/.test(esrc) || !/NICKNAME_CONFLICT|nv\.code/.test(esrc)) {
-            err(`${EXR}: 이름 충돌을 명시적으로 거부하지 않습니다`);
+          // ★ **판정 결과를 실제로 막는 데 쓰는가.** 호출만 남겨 두고
+          //   가지를 죽이면 아무 의미가 없다(ENV9b가 그렇게 새 나갔다).
+          if (!/if\s*\(!nv\.ok\)\s*\{/.test(esrc)) {
+            err(`${EXR}: 이름 충돌 판정을 막는 데 쓰지 않습니다`
+              + ' — 불러 놓고 버리면 기존 연결이 덮입니다');
+          }
+          if (!/NICKNAME_CONFLICT|nv\.code/.test(esrc)) {
+            err(`${EXR}: 이름 충돌을 명시적 코드로 거부하지 않습니다`);
           }
           if (!/envSwitchVerdict\(/.test(esrc)) {
             err(`${EXR}: 환경 전환에서 반대편 연결을 보지 않습니다`);
           }
           if (!/ENV_CONNECTION_EXISTS/.test(esrc)) {
             err(`${EXR}: 자리 겹침을 ENV_CONNECTION_EXISTS로 거부하지 않습니다`);
+          }
+          // 환경 전환 판정도 **막는 데** 쓰는가
+          if (!/if\s*\(ev\.code === 'ENV_CONNECTION_EXISTS'\)\s*\{/.test(esrc)) {
+            err(`${EXR}: 환경 전환 판정을 막는 데 쓰지 않습니다`);
           }
           // 자동으로 합치거나 지우지 않는가
           for (const bad of [/\.delete\(\)[\s\S]{0,120}is_testnet/,
