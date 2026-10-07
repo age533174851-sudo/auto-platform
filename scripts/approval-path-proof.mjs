@@ -25,14 +25,16 @@
 // 무엇을 쓰는가
 // ─────────────
 // 픽스처를 새로 만들지 않는다. 이 저장소의 **실제 마이그레이션 전부**를 그대로
-// 쓴다 — 빈 DB에서 막히는 것이 마침 다섯 개고, UNKNOWN 셋과 DESTRUCTIVE 둘이
-// 순서까지 섞여 있어서 필요한 경우가 전부 나온다:
+// 쓴다. 085까지의 승인 시나리오는 고정된 역사지만, **085 뒤의 수동
+// 마이그레이션 수는 고정하지 않는다.** manifest의 실제 위험도를 읽어서
+// non-ADDITIVE가 새로 생기면 그 파일도 자동 적용·승인으로 새지 않는지 본다:
 //
 //   022 UNKNOWN      ← 첫 번째로 막힌 것. 승인해도 통과하면 안 된다
 //   050 UNKNOWN
 //   081 UNKNOWN
 //   082 DESTRUCTIVE  ← 앞에 막힌 것이 있으므로 순서를 건너뛸 수 없다
 //   085 DESTRUCTIVE
+//   >085 non-ADDITIVE ← manifest에서 동적으로 발견 (현재 096 UNKNOWN)
 //
 // 운영에 닿지 않는다
 // ──────────────────
@@ -43,7 +45,7 @@
 //   PROOF_DB_URL=postgresql://... node scripts/approval-path-proof.mjs
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { checksumOf, readMigrationFiles } from './gen-migration-manifest.mjs';
+import { buildManifest, checksumOf, readMigrationFiles } from './gen-migration-manifest.mjs';
 
 const REPLAY_URL = process.env.PROOF_DB_URL || '';
 if (!REPLAY_URL) { console.error('PROOF_DB_URL이 필요합니다'); process.exit(1); }
@@ -249,6 +251,8 @@ ok('본 DB 지문 기록 (증명 전)', BEFORE);
 }
 
 const files = readMigrationFiles();
+const manifest = await buildManifest();
+const lateManual = manifest.rows.filter(r => r.id > 85 && r.risk !== 'ADDITIVE');
 const rowCount = () => psql(`SELECT count(*) FROM schema_migrations`);
 const statusOf = n => psql(`SELECT status FROM schema_migrations WHERE filename = '${n}'`);
 
@@ -334,7 +338,13 @@ function seedApplied(upTo) {
 seedApplied(81);
 {
   const r = runner(['--check']);
-  want('이제 막힌 것은 082·085 둘', '2', String((r.out.match(/⛔/g) || []).length));
+  const expectedBlocked = 2 + lateManual.length;
+  want('082·085와 뒤의 수동 마이그레이션만 막혀 있다',
+    String(expectedBlocked), String((r.out.match(/⛔/g) || []).length));
+  for (const m of lateManual) {
+    want(`  뒤의 수동 마이그레이션이 실제로 막힌다: ${m.name}`,
+      'true', String(r.out.includes(`⛔ ${m.name}`)));
+  }
 }
 {
   // 082를 승인한다. **085는 승인하지 않았으므로 그대로 막혀 있어야 한다.**
@@ -370,8 +380,10 @@ console.log('\n── 4단계: 085만 남은 상태 (운영의 지금 모양) �
   const r = runner(['--apply',
     '--approve-destructive=085_paper_challenge_accounting.sql',
     `--approve-sha=${FAKE_SHA}`, `--approve-checksum=${real}`]);
-  want('★ 정확한 승인이면 085가 적용된다', 'APPLIED', r.verdict);
-  want('  종료코드 0', '0', String(r.code));
+  want('★ 정확한 승인이면 085가 적용되고 뒤의 수동 항목은 그대로 막힌다',
+    lateManual.length ? 'NEEDS_APPROVAL' : 'APPLIED', r.verdict);
+  want('  종료코드도 뒤의 수동 항목 존재 여부를 반영한다',
+    lateManual.length ? '1' : '0', String(r.code));
   want('  085 기록 상태', 'APPLIED', statusOf('085_paper_challenge_accounting.sql'));
   want('  확인까지 끝났다 (verified)', 't',
     psql(`SELECT verified FROM schema_migrations WHERE filename='085_paper_challenge_accounting.sql'`));
@@ -384,32 +396,60 @@ console.log('\n── 4단계: 085만 남은 상태 (운영의 지금 모양) �
 }
 // **승인은 그 하나만 통과시킨다 — 그 뒤는 평소대로다.**
 //
-// 085를 승인해 적용하고 나면 뒤에 남은 ADDITIVE(지금은 086)는 승인 없이
-// 평소 경로로 들어간다. 예전에는 085가 마지막이라 바로 UP_TO_DATE가 나왔고,
-// 이 증명은 그것을 가정하고 있었다 — 086이 생기자 APPLIED가 나와서 빨개졌다.
-// **계약이 아니라 픽스처가 낡은 것이다.** 남은 것이 있으면 적용하고, 그다음
-// 실행에서 UP_TO_DATE가 된다.
-{
+// 085 뒤의 ADDITIVE는 자동 적용할 수 있지만 새 non-ADDITIVE가 생기면 다시
+// 멈춰야 한다. manifest의 실제 위험도를 읽어 수동 항목마다 자동 적용/승인
+// 우회 여부를 확인한다.
+for (const m of lateManual) {
   const r = runner(['--apply']);
-  if (r.verdict === 'APPLIED') {
-    ok('승인 뒤 남은 ADDITIVE는 승인 없이 적용된다', 'APPLIED');
-    want('  종료코드 0', '0', String(r.code));
+  want(`뒤의 수동 항목 앞 ADDITIVE는 처리하고 ${m.name}에서 멈춘다`,
+    'NEEDS_APPROVAL', r.verdict);
+  want('  수동 항목이 남아 있으므로 종료코드 1', '1', String(r.code));
+  wantNoRow(`  ★ 자동으로 적용되지 않았다: ${m.name}`, m.name);
+
+  if (m.risk === 'UNKNOWN') {
+    const reject = runner(['--apply',
+      `--approve-destructive=${m.name}`, `--approve-sha=${FAKE_SHA}`]);
+    want(`  ★ UNKNOWN은 DESTRUCTIVE 승인으로 우회할 수 없다: ${m.name}`,
+      'APPROVAL_RISK_MISMATCH', reject.verdict);
+    wantNoRow(`  거부 뒤에도 미적용: ${m.name}`, m.name);
+  }
+
+  // 승인 경로 기능이 아니다. 운영에서 별도 검토·적용된 수동 migration이
+  // 존재하는 상태를 격리 proof DB에만 재현한다.
+  const file = files.find(f => f.name === m.name);
+  want(`  proof fixture가 실제 SQL 파일을 찾는다: ${m.name}`,
+    'true', String(Boolean(file)));
+  if (file) {
+    want(`  proof fixture에서 수동 SQL 실행 성공: ${m.name}`,
+      'true', String(psqlFile(`supabase/migrations/${m.name}`)));
+    psql(`INSERT INTO schema_migrations
+            (filename, checksum, applied_by, status, verified, verify_detail)
+          VALUES ('${m.name}', '${checksumOf(file.sql)}', 'proof-seed-manual',
+                  'APPLIED', true, 'approval proof fixture: externally reviewed manual migration')
+          ON CONFLICT (filename) DO NOTHING`);
+    want(`  수동 적용 fixture 기록: ${m.name}`, 'APPLIED', statusOf(m.name));
+    want(`  승인 경로로 기록하지 않았다: ${m.name}`, '0',
+      psql(`SELECT count(*) FROM schema_migrations
+             WHERE filename='${m.name}' AND applied_by LIKE 'approved:%'`));
+  }
+}
+
+{
+  const settle = runner(['--apply']);
+  if (settle.verdict === 'APPLIED') {
+    ok('마지막 수동 항목 뒤의 ADDITIVE는 승인 없이 적용된다', 'APPLIED');
+    want('  종료코드 0', '0', String(settle.code));
   } else {
-    want('승인 뒤 남은 것이 없으면 바로 UP_TO_DATE', 'UP_TO_DATE', r.verdict);
+    want('뒤에 남은 것이 없으면 바로 UP_TO_DATE', 'UP_TO_DATE', settle.verdict);
+    want('  종료코드 0', '0', String(settle.code));
   }
   const again = runner(['--apply']);
-  want('★ 다 끝난 뒤 승인 없이 돌리면 UP_TO_DATE', 'UP_TO_DATE', again.verdict);
+  want('★ 모든 수동 상태를 반영한 뒤에는 UP_TO_DATE', 'UP_TO_DATE', again.verdict);
   want('  종료코드 0', '0', String(again.code));
-  // **승인은 뒤엣것에 번지지 않는다.**
-  //
-  // 085를 승인해 통과시킨 뒤 따라 들어간 ADDITIVE는 평소 경로로 들어간 것이지
-  // 승인된 것이 아니다. 그 구분이 흐려지면 "무엇을 사람이 허락했는가"가
-  // 기록에서 사라진다. (이 증명은 3단계에서 082도 승인하므로 승인 흔적 자체는
-  // 둘이다 — 그래서 개수가 아니라 **어느 파일에 붙었는지**를 본다.)
   want('  085에는 승인 흔적이 있다', '1',
     psql(`SELECT count(*) FROM schema_migrations
            WHERE filename LIKE '085%' AND applied_by LIKE 'approved:%'`));
-  want('★ 승인 뒤 따라 들어간 것에는 승인 흔적이 없다', '0',
+  want('★ 085 뒤의 어떤 migration에도 승인 흔적이 번지지 않는다', '0',
     psql(`SELECT count(*) FROM schema_migrations
            WHERE filename > '085_zzz' AND applied_by LIKE 'approved:%'`));
 }
