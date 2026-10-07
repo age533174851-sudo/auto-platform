@@ -2207,8 +2207,15 @@ const M = [
       "          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다',"),
     'RED'],
 
-  ['RDY10b 라우트가 자격 코드를 안 남김', P.monitor,
+  ['RDY10b 라우트가 자격 코드를 안 남김 (한 경로만)', P.monitor,
     s => s.replace('          credentialCode: dc,', ''), 'RED'],
+
+  ['RDY10c 모든 경로에서 자격 코드를 지움', P.monitor,
+    s => s.replace(/ *credentialCode: dc,\n/g, ''), 'RED'],
+
+  ['RDY11b 모든 경로에서 경로 이름을 지움', P.monitor,
+    s => s.replace(/ *path: '(GENERIC_PROTECTION_SWEEP|EXACT100X_AUTHORITY|GENERIC_MANAGED_POSITION)',\n/g, ''),
+    'RED'],
 
   ['RDY11 고아 정리 실패를 Exact100X 경로로 적음', P.monitor,
     s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP',",

@@ -4848,12 +4848,26 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           err(`${MON5}: 연결 범위 자격 판독을 라우트 안에서 다시 구현합니다`
             + ' — 두 벌이 되면 한쪽만 고치게 됩니다 (실제로 그랬다)');
         }
-        if ((rsrc.match(/creds\.codeOf\(/g) || []).length < 3) {
-          err(`${MON5}: 자격 코드를 쓰지 않는 실패 경로가 남아 있습니다`
-            + ` (${(rsrc.match(/creds\.codeOf\(/g) || []).length}곳) — 세 경로 전부여야 합니다`);
-        }
-        if (!/credentialCode:/.test(rsrc)) {
-          err(`${MON5}: 실패에 자격 코드를 남기지 않습니다`);
+
+        // ★ **진단한 경로마다 기록하는가.** "하나라도 있으면 통과"로 두면
+        //   세 경로 중 하나에서 지워도 초록이 된다(RDY10b가 그렇게 새 나갔다).
+        //   진단한 수와 기록한 수가 같아야 한다.
+        {
+          const diagCount = (rsrc.match(/creds\.codeOf\(/g) || []).length;
+          const recCount = (rsrc.match(/credentialCode:/g) || []).length;
+          const pathCount = (rsrc.match(/\bpath:\s*'(GENERIC_PROTECTION_SWEEP|EXACT100X_AUTHORITY|GENERIC_MANAGED_POSITION)'/g) || []).length;
+          if (diagCount < 3) {
+            err(`${MON5}: 자격 코드를 쓰지 않는 실패 경로가 남아 있습니다 (${diagCount}곳)`
+              + ' — 고아 정리·Exact100X 권한·생명주기 세 경로 전부여야 합니다');
+          }
+          if (recCount !== diagCount) {
+            err(`${MON5}: 진단은 ${diagCount}곳인데 자격 코드를 ${recCount}곳만 남깁니다`
+              + ' — 진단한 경로는 전부 기록해야 합니다');
+          }
+          if (pathCount !== diagCount) {
+            err(`${MON5}: 진단은 ${diagCount}곳인데 경로 이름을 ${pathCount}곳만 적습니다`
+              + ' — 경로를 안 적으면 Exact100X 실패와 섞여 셉니다');
+          }
         }
         // ★ **결과를 실제로 쓰는가.** 함수를 불러 놓고 버리면 아무 의미가
         //   없다 — 검사기가 "호출했는가"만 보면 그것을 놓친다
