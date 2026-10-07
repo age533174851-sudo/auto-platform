@@ -8,6 +8,9 @@
 // - RLS + service_role
 // - 출금 권한 있는 키는 등록 거부
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  connectionConflictTarget, resolveNickname, nicknameVerdict, envSwitchVerdict,
+} from '@/lib/exchanges/connectionIdentity';
 import { encryptSecret, decryptSecret, maskKey } from '@/lib/exchanges/crypto';
 import { testExchange, getExchangeBalances } from '@/lib/exchanges/router';
 import { EXCHANGE_META } from '@/lib/exchanges/types';
@@ -173,12 +176,52 @@ export async function POST(req: NextRequest) {
     }
 
     const meta = EXCHANGE_META[exchange as ExchangeId];
+    // **실제로 통한 쪽**(usedTestnet)이 환경이다. 사용자가 고른 값이 아니다.
+    const envNickname = resolveNickname({
+      custom: nickname, exchangeNameKr: meta.nameKr, isTestnet: usedTestnet,
+    });
+
+    // ── 기존 연결을 덮지 않는다 ──
+    //
+    //   같은 사용자·같은 거래소의 **다른 환경** 연결이 같은 이름을 쓰고
+    //   있으면 조용히 갱신하는 대신 명시적으로 실패한다. 덮어쓰면 실전
+    //   연결이 사라진 것을 아무도 모른다.
+    if (sb) {
+      // ★ `label`을 읽는다. `nickname`은 production에만 있는 옛 쌍둥이
+      //   칸이고 **어느 마이그레이션에도 선언이 없다** — 마이그레이션으로
+      //   만든 DB에서 그 칸을 조회하면 조용히 0건이 되고, 그러면 충돌을
+      //   못 보고 지나간다. 이 라우트는 둘에 **같은 값**을 쓰고, `safeConn`도
+      //   `label ?? nickname` 순으로 본다. 선언된 쪽이 정본이다.
+      //
+      //   이 사전 검사를 놓쳐도 데이터가 사라지지는 않는다 — DB의 unique가
+      //   실제 방어이고, 이 검사는 그 오류를 사람이 읽을 문장으로 바꾸는
+      //   것이다. conflict target에 환경이 들어갔으므로 실전 row가 갱신될
+      //   일은 없다.
+      const { data: sib } = await (sb.from('exchange_connections') as any)
+        .select('id, label, is_testnet')
+        .eq('user_id', uid).eq('exchange_id', exchange);
+      const nv = nicknameVerdict({
+        wanted: envNickname,
+        existing: (Array.isArray(sib) ? sib : []).map((r: any) => ({
+          nickname: r?.label, isTestnet: r?.is_testnet !== false,
+        })),
+        isTestnet: usedTestnet,
+      });
+      if (!nv.ok) {
+        return NextResponse.json({ error: nv.reason, code: nv.code }, { status: 409 });
+      }
+    }
+
     const record = {
       user_id:             uid,
       exchange_id:         exchange,
       exchange:            exchange,                       // 옛 컬럼 호환 (not-null 대비)
-      label:               nickname ?? meta.nameKr,
-      nickname:            nickname ?? meta.nameKr,        // 옛 컬럼 호환
+      // 환경별로 다른 이름을 쓴다. production에 `UNIQUE (user_id,
+      // exchange, nickname)`이 있어서, 실전과 테스트넷이 같은 이름이면
+      // 두 번째 등록이 첫 연결을 덮거나 실패한다. 사용자가 적은 이름은
+      // 그대로 보존한다.
+      label:               envNickname,
+      nickname:            envNickname,                    // 옛 컬럼 호환
       api_key:             apiKey,                         // 평문 보관 (key는 시크릿이 아니라 식별자)
       api_key_encrypted:   apiKey,                         // 옛 컬럼 호환
       api_key_masked:      maskKey(apiKey),
@@ -206,7 +249,10 @@ export async function POST(req: NextRequest) {
       for (let attempt = 0; attempt < 6; attempt++) {
         const { data, error } = await (sb
           .from('exchange_connections') as any)
-          .upsert(rec, { onConflict: 'user_id,exchange_id' })
+          // **환경까지 자리에 넣는다.** 예전에는 'user_id,exchange_id'였고,
+          // 그래서 테스트넷을 등록하면 기존 실전 row가 갱신됐다. 자리를
+          // 정하는 문자열은 손으로 적지 않고 identity 정본에서 만든다.
+          .upsert(rec, { onConflict: connectionConflictTarget() })
           .select()
           .single();
         if (!error) {
@@ -419,6 +465,30 @@ export async function POST(req: NextRequest) {
     if (!connectionId) return NextResponse.json({ error: 'missing_params' }, { status: 400 });
     const next = isTestnet === true;
     if (sb) {
+      // ── 이제 실전과 테스트넷이 동시에 존재할 수 있다 ──
+      //
+      //   전환하려는 쪽에 이미 연결이 있으면 자리가 겹친다. 그때
+      //   **자동으로 합치거나 지우거나 덮지 않는다** — 어느 쪽 키가
+      //   사라졌는지 아무도 모르게 된다.
+      const { data: cur } = await (sb.from('exchange_connections') as any)
+        .select('id, exchange_id, is_testnet')
+        .eq('id', connectionId).eq('user_id', uid).maybeSingle();
+      if (cur) {
+        const { data: sib } = await (sb.from('exchange_connections') as any)
+          .select('id, is_testnet')
+          .eq('user_id', uid).eq('exchange_id', (cur as any).exchange_id);
+        const ev = envSwitchVerdict({
+          target: { connectionId: String((cur as any).id),
+            isTestnet: (cur as any).is_testnet !== false },
+          siblings: (Array.isArray(sib) ? sib : []).map((r: any) => ({
+            connectionId: String(r?.id), isTestnet: r?.is_testnet !== false,
+          })),
+          toTestnet: next,
+        });
+        if (ev.code === 'ENV_CONNECTION_EXISTS') {
+          return NextResponse.json({ error: ev.reason, code: ev.code }, { status: 409 });
+        }
+      }
       // 컬럼 이름은 `auto_trading_enabled`다. 한동안 `auto_trading`으로
       // 잘못 적어서 이 요청이 통째로 실패했다 — 덕분에 환경도 안 바뀌었다.
       // 그게 오히려 맞는 결과였다: 자동매매를 못 끄는데 환경만 바뀌면,

@@ -4731,6 +4731,148 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
 
 
 
+
+      // ── ⑤B-3A-3.1 실전·테스트넷 동시 연결 — **기존 연결을 덮지 않는가** ──
+      //
+      //   연결 생성이 `onConflict: 'user_id,exchange_id'`였고 DB 제약도
+      //   같았다. 그래서 Binance 실전이 있는 사용자가 테스트넷을 등록하면
+      //   **기존 실전 row가 갱신됐다.** 우리가 "절대 하지 말 것"으로 적어
+      //   둔 사고를 코드가 열어 두고 있었다.
+      {
+        const IDN = 'src/lib/exchanges/connectionIdentity.ts';
+        const EXR = 'src/app/api/exchange/route.ts';
+        const MIG96 = 'supabase/migrations/096_exchange_connections_environment_identity.sql';
+        const im = await loadModule(IDN, '연결 자리 정본');
+        if (!im || typeof im.connectionConflictTarget !== 'function'
+            || typeof im.envSwitchVerdict !== 'function'
+            || typeof im.nicknameVerdict !== 'function') {
+          err(`${IDN}: 연결 자리 정본이 없습니다`);
+        } else {
+          // ① 자리에 환경이 들어가는가
+          const cols = im.CONNECTION_IDENTITY_COLUMNS || [];
+          if (!cols.includes('is_testnet')) {
+            err(`${IDN}: 자리에 is_testnet이 없습니다 (${cols.join(',')})`
+              + ' — 테스트넷 등록이 기존 실전 연결을 덮습니다');
+          }
+          const tgt = im.connectionConflictTarget();
+          if (tgt !== 'user_id,exchange_id,is_testnet') {
+            err(`${IDN}: conflict target이 "${tgt}"입니다`);
+          }
+          // ② 두 환경의 기본 이름이 다른가
+          for (const name of ['Binance', 'Gate']) {
+            if (im.envNicknameOf(name, true) === im.envNicknameOf(name, false)) {
+              err(`${IDN}: ${name}의 실전·테스트넷 기본 이름이 같습니다`
+                + ' — nickname unique가 부딪혀 한쪽이 덮입니다');
+            }
+          }
+          // ③ 실전과 테스트넷이 서로 다른 자리인가
+          if (im.sameIdentity({ userId: 'u', exchangeId: 'binance', isTestnet: false },
+            { userId: 'u', exchangeId: 'binance', isTestnet: true })) {
+            err(`${IDN}: 실전과 테스트넷을 같은 자리로 봅니다`);
+          }
+          if (im.duplicateIdentityGroups([
+            { userId: 'u', exchangeId: 'binance', isTestnet: false },
+            { userId: 'u', exchangeId: 'binance', isTestnet: true },
+          ]).length !== 0) {
+            err(`${IDN}: 실전+테스트넷 동시 보유를 duplicate로 읽습니다`);
+          }
+          // ④ 환경 전환이 자리를 덮지 않는가
+          const ev = im.envSwitchVerdict({
+            target: { connectionId: 'live-1', isTestnet: false },
+            siblings: [{ connectionId: 'live-1', isTestnet: false },
+              { connectionId: 'test-1', isTestnet: true }],
+            toTestnet: true,
+          });
+          if (ev?.code !== 'ENV_CONNECTION_EXISTS') {
+            err(`${IDN}: 자리가 겹치는 환경 전환을 ${ev?.code}로 읽습니다`
+              + ' — 자동으로 합치거나 덮으면 어느 키가 사라졌는지 알 수 없습니다');
+          }
+          // 자기 자신 때문에 막히지 않는가 (영구 전환 불가가 된다)
+          if (im.envSwitchVerdict({ target: { connectionId: 'only', isTestnet: false },
+            siblings: [{ connectionId: 'only', isTestnet: false }], toTestnet: true })?.code
+            !== 'OK') {
+            err(`${IDN}: 자기 자신을 반대편으로 세어 전환을 막습니다`);
+          }
+          // ⑤ 다른 환경이 쓰는 이름을 덮지 않는가
+          if (im.nicknameVerdict({ wanted: 'x',
+            existing: [{ nickname: 'x', isTestnet: false }], isTestnet: true })?.code
+            !== 'NICKNAME_CONFLICT') {
+            err(`${IDN}: 다른 환경이 쓰는 이름을 덮어씁니다`);
+          }
+          // ⑥ 키·시크릿을 다루지 않는가
+          for (const bad of ['encryptSecret', 'decryptSecret', 'upsert', 'setTestnet']) {
+            if (Object.keys(im).includes(bad)) err(`${IDN}: ${bad}를 내보냅니다`);
+          }
+        }
+
+        // 라우트가 정본을 쓰는가
+        const esrc = code(EXR);
+        if (!esrc.trim()) err(`${EXR}을 읽지 못했습니다`);
+        else {
+          if (/onConflict:\s*'user_id,exchange_id'/.test(esrc)) {
+            err(`${EXR}: conflict target이 환경을 보지 않습니다`
+              + ' — 테스트넷 등록이 기존 실전 연결을 덮습니다');
+          }
+          if (!/onConflict:\s*connectionConflictTarget\(\)/.test(esrc)) {
+            err(`${EXR}: conflict target을 자리 정본에서 만들지 않습니다`);
+          }
+          // ★ 실제로 통한 환경(usedTestnet)이 자리에 들어가는가.
+          //   사용자가 고른 isTestnet을 쓰면 실전 키가 테스트넷 자리에 앉는다.
+          if (!/is_testnet:\s*usedTestnet/.test(esrc)) {
+            err(`${EXR}: 검증으로 확정한 환경(usedTestnet)을 저장하지 않습니다`);
+          }
+          if (!/resolveNickname\(/.test(esrc) || !/isTestnet:\s*usedTestnet/.test(esrc)) {
+            err(`${EXR}: 연결 이름을 환경별로 만들지 않습니다`);
+          }
+          if (!/nicknameVerdict\(/.test(esrc) || !/NICKNAME_CONFLICT|nv\.code/.test(esrc)) {
+            err(`${EXR}: 이름 충돌을 명시적으로 거부하지 않습니다`);
+          }
+          if (!/envSwitchVerdict\(/.test(esrc)) {
+            err(`${EXR}: 환경 전환에서 반대편 연결을 보지 않습니다`);
+          }
+          if (!/ENV_CONNECTION_EXISTS/.test(esrc)) {
+            err(`${EXR}: 자리 겹침을 ENV_CONNECTION_EXISTS로 거부하지 않습니다`);
+          }
+          // 자동으로 합치거나 지우지 않는가
+          for (const bad of [/\.delete\(\)[\s\S]{0,120}is_testnet/,
+                             /is_testnet[\s\S]{0,80}\.delete\(\)/]) {
+            if (bad.test(esrc)) {
+              err(`${EXR}: 환경 전환에서 반대편 연결을 지웁니다 (${bad})`);
+            }
+          }
+          // 새 연결은 자동매매가 꺼진 상태여야 한다
+          if (!/auto_trading_enabled:\s*false/.test(esrc)) {
+            err(`${EXR}: 새 연결을 자동매매 꺼진 상태로 만들지 않습니다`);
+          }
+          if (/auto_trading_enabled:\s*true/.test(esrc)) {
+            err(`${EXR}: 자동매매를 코드가 켭니다 — 사람이 확인하기 전에 켜지 않습니다`);
+          }
+        }
+
+        // 096이 데이터를 고치지 않는가
+        const m96 = read(MIG96);
+        if (!m96.trim()) err('096 마이그레이션이 없습니다');
+        else {
+          if (!/RAISE EXCEPTION/i.test(m96)) {
+            err('096: duplicate를 RAISE로 멈추지 않습니다');
+          }
+          if (!/UNIQUE \(user_id, exchange_id, is_testnet\)/i.test(m96)) {
+            err('096: 환경을 포함한 새 제약이 없습니다');
+          }
+          const ddl96 = m96.split('\n').filter(l => !/^\s*--/.test(l)).join('\n');
+          for (const bad of [/\bUPDATE\s+public\./i, /\bDELETE\s+FROM/i, /\bTRUNCATE\b/i,
+                             /DROP\s+TABLE/i, /DROP\s+COLUMN/i]) {
+            if (bad.test(ddl96)) {
+              err(`096: 데이터·구조를 고치는 문장이 있습니다 (${bad})`
+                + ' — 어느 연결이 맞는지는 사람이 정합니다');
+            }
+          }
+          // 쓰고 있는 nickname 제약을 조용히 떨어뜨리지 않는가
+          if (/DROP CONSTRAINT[\s\S]{0,80}nickname/i.test(ddl96)) {
+            err('096: nickname unique 제약을 떨어뜨립니다 — 환경별 이름으로 피해야 합니다');
+          }
+        }
+      }
       // ── ⑤B-3A-3 외부 준비 상태 — **거짓 준비를 만들지 않는가** ──
       //
       //   표본이 없는 이유를 "코드 문제"로 적지 않기 위해, 그리고 없는

@@ -136,6 +136,9 @@ const P = {
   acl: 'src/lib/system/observationAcl.ts',
   rdy: 'src/lib/engine/testnetReadiness.ts',
   creds: 'src/lib/engine/connectionCreds.ts',
+  idn: 'src/lib/exchanges/connectionIdentity.ts',
+  exr: 'src/app/api/exchange/route.ts',
+  mig96: 'supabase/migrations/096_exchange_connections_environment_identity.sql',
   mig95: 'supabase/migrations/095_exact100x_observation_acl_hardening.sql',
   manifest: 'src/lib/system/migrationManifest.ts',
   mig90: 'supabase/migrations/090_live_orders_execution_identity.sql',
@@ -2248,6 +2251,89 @@ const M = [
 
   ['RDY13b 서로 다른 경로를 한 줄로 합침', P.rdy,
     s => s.replace('    const key = `${it?.path}:${it?.code}`;', '    const key = `${it?.code}`;'),
+    'RED'],
+
+
+  // ── ⑤B-3A-3.1 실전·테스트넷 동시 연결 ──
+  //
+  //   테스트넷 등록이 기존 실전 연결을 덮는 길을 전부 막는다.
+  ['ENV1  옛 UNIQUE(user_id,exchange_id)를 그대로 둠', P.mig96,
+    s => s.replace(/ALTER TABLE public\.exchange_connections\n  DROP CONSTRAINT IF EXISTS exchange_connections_user_id_exchange_id_key;/,
+      '-- (제약 유지)'), 'RED'],
+
+  ['ENV2  새 unique에서 is_testnet 제거 (DB)', P.mig96,
+    s => s.replace('UNIQUE (user_id, exchange_id, is_testnet);', 'UNIQUE (user_id, exchange_id);'),
+    'RED'],
+
+  ['ENV2b 자리 정본에서 is_testnet 제거', P.idn,
+    s => s.replace("  'user_id', 'exchange_id', 'is_testnet',", "  'user_id', 'exchange_id',"),
+    'RED'],
+
+  ['ENV3  connect conflict target을 옛 키로 되돌림', P.exr,
+    s => s.replace('.upsert(rec, { onConflict: connectionConflictTarget() })',
+      ".upsert(rec, { onConflict: 'user_id,exchange_id' })"), 'RED'],
+
+  ['ENV4  usedTestnet 대신 요청 isTestnet을 저장', P.exr,
+    s => s.replace('      is_testnet:          usedTestnet,', '      is_testnet:          isTestnet,'),
+    'RED'],
+
+  ['ENV4b 이름도 요청 isTestnet으로 만듦', P.exr,
+    s => s.replace('      custom: nickname, exchangeNameKr: meta.nameKr, isTestnet: usedTestnet,',
+      '      custom: nickname, exchangeNameKr: meta.nameKr, isTestnet: isTestnet,'), 'RED'],
+
+  ['ENV5  TESTNET 추가가 LIVE row를 덮음 (자리에서 환경 제거)', P.idn,
+    s => s.replace('export function connectionConflictTarget(): string {\n  return CONNECTION_IDENTITY_COLUMNS.join(\',\');',
+      "export function connectionConflictTarget(): string {\n  return 'user_id,exchange_id';"),
+    'RED'],
+
+  ['ENV6  실전과 테스트넷을 같은 자리로 봄', P.idn,
+    s => s.replace('    && a?.isTestnet === b?.isTestnet;', '    && true;'), 'RED'],
+
+  ['ENV7  실전+테스트넷 동시 보유를 duplicate로 셈', P.idn,
+    s => s.replace('    const key = `${r?.userId}\\u0000${r?.exchangeId}\\u0000${r?.isTestnet === true}`;',
+      '    const key = `${r?.userId}\\u0000${r?.exchangeId}`;'), 'RED'],
+
+  ['ENV8  두 환경의 기본 이름을 같게 만듦', P.idn,
+    s => s.replace('  return `${base} ${isTestnet ? TESTNET_SUFFIX : LIVE_SUFFIX}`;',
+      '  return base;'), 'RED'],
+
+  ['ENV9  이름 충돌에서 기존 연결을 덮음', P.idn,
+    s => s.replace('    if (e.isTestnet === i.isTestnet) continue;', '    continue;'), 'RED'],
+
+  ['ENV9b 라우트가 이름 충돌을 무시함', P.exr,
+    s => s.replace('      if (!nv.ok) {', '      if (false) {'), 'RED'],
+
+  ['ENV10 set-testnet 반대편 충돌을 통과시킴', P.idn,
+    s => s.replace('    if (s?.isTestnet !== i.toTestnet) continue;', '    continue;'), 'RED'],
+
+  ['ENV10b 라우트가 반대편 충돌을 무시함', P.exr,
+    s => s.replace("        if (ev.code === 'ENV_CONNECTION_EXISTS') {", '        if (false) {'),
+    'RED'],
+
+  ['ENV11 set-testnet이 반대편을 지움', P.exr,
+    s => s.replace("        .update({ is_testnet: next, auto_trading_enabled: false })",
+      "        .update({ is_testnet: next, auto_trading_enabled: false });\n"
+      + "      await (sb.from('exchange_connections') as any).delete()\n"
+      + "        .eq('user_id', uid).eq('is_testnet', next)"), 'RED'],
+
+  ['ENV12 새 연결을 자동매매 켠 상태로 만듦', P.exr,
+    s => s.replace('      auto_trading_enabled: false,', '      auto_trading_enabled: true,'), 'RED'],
+
+  ['ENV13 사유 문구에 키처럼 보이는 값을 끼움', P.idn,
+    s => s.replace("        + ' — 다른 이름을 쓰거나 그 연결을 먼저 정리하세요',",
+      "        + ' — key AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE',"), 'RED'],
+
+  ['ENV14 096이 duplicate를 RAISE 없이 넘김', P.mig96,
+    s => s.replace('    RAISE EXCEPTION', '    RAISE NOTICE'), 'RED'],
+
+  ['ENV14b 096이 duplicate를 UPDATE로 고침', P.mig96,
+    s => s.replace('    RAISE EXCEPTION',
+      "    UPDATE public.exchange_connections SET is_testnet = true WHERE false;\n    RAISE EXCEPTION"),
+    'RED'],
+
+  ['ENV14c 096이 nickname 제약을 떨어뜨림', P.mig96,
+    s => s.replace('ALTER TABLE public.exchange_connections\n  DROP CONSTRAINT IF EXISTS exchange_connections_user_id_exchange_id_key;',
+      'ALTER TABLE public.exchange_connections\n  DROP CONSTRAINT IF EXISTS exchange_connections_user_id_exchange_nickname_key;'),
     'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
