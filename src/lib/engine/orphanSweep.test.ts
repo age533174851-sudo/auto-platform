@@ -7,7 +7,7 @@
 //   · 안 지우면 다음 진입이 옛 주문에 맞아 예상치 못하게 닫힌다
 import { test, eq, assert } from '../../test/harness';
 import {
-  sweepTargets, sweepDecision, sweepSummary,
+  sweepTargets, sweepDecision, sweepSummary, sweepCredentialDisposition,
 } from './orphanSweep';
 import { exitCoverage, exitCoverageGaps, exitCoverageLine } from './exitCoverage';
 import { lifecyclePolicyOf } from '../strategies/lifecyclePolicy';
@@ -125,6 +125,33 @@ export function runOrphanSweepTests() {
     const blind = sweepSummary({ targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0, skipped: 3 });
     assert(none !== blind, '후보가 없는 것과 볼 수 없던 것이 같은 문장이면 안 된다');
     assert(blind.includes('3'), blind);
+  });
+
+  console.log('[고아 보호주문 — 삭제된 연결과 현재 연결 장애를 가른다]');
+
+  test('삭제된 연결은 실패가 아니라 과거 대상 skip이다', () => {
+    const d = sweepCredentialDisposition('NO_CONNECTION');
+    eq(d.code, 'CONNECTION_GONE');
+    eq(d.skip, true);
+    eq(d.failure, false);
+    assert(d.reason.includes('다른 연결로 추측하지'), d.reason);
+  });
+
+  test('현재 연결의 키·시크릿 장애는 계속 실패다', () => {
+    for (const code of ['UNSUPPORTED_EXCHANGE', 'WITHDRAWAL_ENABLED', 'KEY_MISSING',
+      'SECRET_MISSING', 'DECRYPT_FAILED'] as const) {
+      const d = sweepCredentialDisposition(code);
+      eq(d.skip, false, code);
+      eq(d.failure, true, code);
+      eq(d.code, 'CREDENTIAL_UNREADABLE', code);
+    }
+  });
+
+  test('정상 자격을 stale로 분류하지 않는다', () => {
+    const d = sweepCredentialDisposition('READY');
+    eq(d.skip, false);
+    eq(d.failure, false);
+    eq(d.code, 'READY');
   });
 
   console.log('[청산 감시 커버리지 — 안 보는 것을 정상이라 적지 않는다]');

@@ -235,7 +235,7 @@ async function sweepOrphanProtection(
   skipped: Array<{ code: string; count: number; reason: string }>;
   details: any[]; summary: string; error: string | null;
 }> {
-  const { sweepTargets, sweepDecision, sweepSummary } = await import('@/lib/engine/orphanSweep');
+  const { sweepTargets, sweepDecision, sweepSummary, sweepCredentialDisposition } = await import('@/lib/engine/orphanSweep');
   const out = {
     targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0,
     skipped: [] as Array<{ code: string; count: number; reason: string }>,
@@ -290,16 +290,36 @@ async function sweepOrphanProtection(
     try {
       const venue = await credsOf(t.connectionId);
       if (!venue) {
-        out.unreadable += 1;
         // **어느 사실 때문인지 적는다.** 값은 싣지 않는다 — 코드와 문구만.
         const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
         const dc = creds.codeOf(t.connectionId);
-        out.details.push({
-          symbol: t.symbol, code: 'NO_VENUE', ok: false,
+        const disp = sweepCredentialDisposition(dc);
+        const credentialDetail = {
+          symbol: t.symbol,
           credentialCode: dc,
           // 이 경로는 **전략을 가리지 않는 보호주문 고아 정리**다.
           // Exact100X 전용 종료 권한 후보와 섞어 세지 않는다.
-          path: 'GENERIC_PROTECTION_SWEEP',
+          path: 'GENERIC_PROTECTION_SWEEP' as const,
+        };
+
+        // 삭제된 과거 connection_id는 현재 연결 장애가 아니다.
+        // 이 연결로는 더 이상 거래소를 읽거나 주문을 취소할 수 없고,
+        // 다른 활성 연결을 추측해서 쓰면 실계좌/테스트넷을 뒤섞을 수 있다.
+        // 그래서 **건드리지 않되 실패로도 세지 않는다.**
+        if (disp.skip) {
+          const hit = out.skipped.find(x => x.code === disp.code);
+          if (hit) hit.count += t.rows;
+          else out.skipped.push({ code: disp.code, count: t.rows, reason: disp.reason });
+          out.details.push({
+            ...credentialDetail, code: disp.code, ok: true, skipped: true,
+            reason: disp.reason,
+          });
+          continue;
+        }
+
+        out.unreadable += 1;
+        out.details.push({
+          ...credentialDetail, code: 'NO_VENUE', ok: false,
           reason: credentialDiagnosisReason(dc),
         });
         continue;
@@ -369,7 +389,7 @@ async function sweepOrphanProtection(
 
   out.summary = sweepSummary({
     targets: out.targets, cleaned: out.cleaned, stillPresent: out.stillPresent,
-    unreadable: out.unreadable, skipped: sel.skipped.reduce((a, b) => a + b.count, 0),
+    unreadable: out.unreadable, skipped: out.skipped.reduce((a, b) => a + b.count, 0),
   });
   return out;
 }

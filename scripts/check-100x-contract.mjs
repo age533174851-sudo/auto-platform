@@ -5061,6 +5061,33 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           err(`${MON5}: 보호주문 고아 정리 실패를 경로로 구분하지 않습니다`
             + ' — Exact100X 관측 실패와 섞여 셉니다');
         }
+        // ★ 삭제된 과거 연결은 현재 자격 장애와 다르다.
+        // 다른 연결로 추측해서 접근하지 않고, 반복 FAILED도 만들지 않는다.
+        {
+          const a = rsrc.indexOf('async function sweepOrphanProtection(');
+          const b = rsrc.indexOf('async function recoverUnresolvedOrders(', a);
+          const sweep = a >= 0 && b > a ? rsrc.slice(a, b) : '';
+          if (!sweep) {
+            err(`${MON5}: 보호주문 고아 정리 본문을 찾지 못했습니다`);
+          } else {
+            const iDisp = sweep.indexOf('const disp = sweepCredentialDisposition(dc)');
+            const iSkip = sweep.indexOf('if (disp.skip)', iDisp);
+            const iUnread = sweep.indexOf('out.unreadable += 1', iDisp);
+            if (iDisp < 0 || iSkip < 0 || iUnread < 0 || !(iDisp < iSkip && iSkip < iUnread)) {
+              err(`${MON5}: 삭제된 연결 분류가 unreadable 증가보다 앞에 있지 않습니다`
+                + ' — 과거 connection_id가 회차 전체를 계속 FAILED로 만듭니다');
+            }
+            if (!/ok:\s*true,\s*skipped:\s*true/.test(sweep)) {
+              err(`${MON5}: 삭제된 연결을 비실패 skip으로 기록하지 않습니다`);
+            }
+            if (!/out\.skipped\.push\(\{ code: disp\.code/.test(sweep)) {
+              err(`${MON5}: 삭제된 연결 skip을 요약에 남기지 않습니다`);
+            }
+            if (!/skipped:\s*out\.skipped\.reduce/.test(sweep)) {
+              err(`${MON5}: 보호주문 요약이 동적으로 추가된 skip을 세지 않습니다`);
+            }
+          }
+        }
         // ★ 진단에 시크릿 **값**을 넘기지 않는가
         const dm = /diagnoseCredential\(\{([\s\S]{0,420}?)\}\);/.exec(csrc);
         if (!dm) {
