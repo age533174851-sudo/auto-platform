@@ -90,8 +90,19 @@ const ALLOW = new Map([
     + '금·원유 ETF처럼 24시간 거래되지만 기초자산 시장은 닫혀 있는 종목의 '
     + '주문 시각 검사에 붙일 것'],
 
+  // ── 한 번 갚았다가 **다시 생긴 빚** ──
+  //
   // robustness.ts / costAnalysis.ts는 edgeSweep.ts(격자 실행기)가
-  // 부르면서 여기서 빠졌다. 빚 하나를 갚을 때마다 이렇게 줄인다.
+  // 부르면서 한 번 여기서 빠졌다. 그런데 assumed-edge 연구 모듈 cleanup이
+  // edgeSweep.ts를 삭제하면서 둘 다 다시 고아가 됐다.
+  //
+  // robustness.ts는 격자 과최적화 등급 전용이라 함께 제거했다.
+  // costAnalysis.ts는 실행 비용 정본에 붙일 다음 단계 판정이라 남긴다.
+  ['src/lib/strategies/costAnalysis.ts',
+    '막는 것: 비용을 뺀 기대값과 빼기 전 기대값을 둘 다 내놓는 실행 경로가 아직 없다. '
+    + '유일한 소비자였던 edgeSweep.ts는 assumed-edge 연구 cleanup에서 삭제됐다. '
+    + '수수료·슬리피지·펀딩을 실행 계약에 반영하는 단계에서 실제 비용 전후 값을 '
+    + '만들어 이 판정을 배선할 것 — 그 전까지는 실행 경로에 없는 연구값으로 거래를 막지 않는다'],
 
   // ── src/lib/backtest·src/lib/ai를 검사 대상에 넣자마자 나온 것 ──
   ['src/lib/ai/runtime.ts',
