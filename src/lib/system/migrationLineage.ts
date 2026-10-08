@@ -113,6 +113,17 @@ export function checkMigrationLineage(i: {
   for (const b of baseFiles) {
     const mine = byName.get(b.name);
     if (!mine) {
+      // ★ **왜 없는지**를 구분한다. 그 번호를 우리 쪽 **다른 파일**이
+      //   쓰고 있으면 단순 누락이 아니라 번호가 두 갈래가 된 것이다 —
+      //   실제 사고가 그 모양이었다(base 089는 auth_profile_identity_sync,
+      //   우리 089는 live_orders_execution_identity).
+      const squatter = b.id == null ? undefined
+        : files.find(f => f.id === b.id && f.name !== b.name);
+      if (squatter) {
+        return no('COLLIDES_WITH_BASE',
+          `번호 ${b.id}가 두 파일을 가리킵니다: base의 ${b.name} · 우리의 ${squatter.name}`
+          + ' — 번호를 옮겨야 합니다. base 파일을 지우거나 덮지 않습니다');
+      }
       return no('BASE_FILE_MISSING',
         `base에 있는 ${b.name}이 작업 트리에 없습니다`
         + ' — 이미 적용된 마이그레이션을 지우면 ledger와 저장소가 갈라집니다');
@@ -136,23 +147,15 @@ export function checkMigrationLineage(i: {
     }
   }
 
-  // ④ base가 이미 쓰는 번호와 겹치지 않는가
-  const baseIds = new Set(baseFiles.map(b => b.id).filter((n): n is number => n != null));
-  const baseMax = baseIds.size ? Math.max(...baseIds) : -1;
-  // ★ `baseIds.has(d.id)`를 따로 보지 않는다 — **도달할 수 없기
-  //   때문이다.** base가 그 번호를 쓰면 그 파일은 ②에서 트리에 있어야
-  //   하고, 그러면 우리 파일과 **번호가 겹쳐** ①이 먼저 잡는다. 죽은
-  //   가지를 남겨 두면 돌연변이가 그것을 건드려도 아무 일이 없다
-  //   (MIG-L3c가 그렇게 새 나갔다). 아래 한 줄이 전부 덮는다:
-  //   겹쳤다면 d.id <= max(baseIds) = baseMax가 반드시 참이다.
-  for (const d of declared) {
-    if (d.id <= baseMax) {
-      const other = baseFiles.find(b => b.id === d.id)?.name;
-      return no('COLLIDES_WITH_BASE',
-        `${d.name}의 번호 ${d.id}가 base의 마지막 번호 ${baseMax} 뒤가 아닙니다`
-        + (other ? ` — base의 ${other}과 같은 번호입니다` : ''));
-    }
-  }
+  // ★ "그 번호에 base가 다른 파일을 두었는가"를 **여기서 따로 보지
+  //   않는다 — 도달할 수 없기 때문이다.** base가 그 번호를 쓰면 그
+  //   파일은 ②에서 트리에 있어야 하고, 우리 파일도 ③에서 있어야 한다.
+  //   그러면 같은 번호 두 파일이 되어 ①이 먼저 잡는다. 트리에 없으면
+  //   ②가 잡고, 그 안에서 "번호를 다른 파일이 쓰고 있다"까지 말한다.
+  //
+  //   죽은 가지를 남겨 두면 돌연변이가 그것을 건드려도 아무 일이
+  //   없다 — MIG-L3c가 그렇게 새 나갔고, "base 마지막 번호보다 커야
+  //   한다"는 규칙은 거기에 더해 **머지 후 항상 거짓**이었다.
 
   // ⑤ 선언한 번호가 오름차순이고 **빈 칸이 없는가**
   for (let k = 1; k < declared.length; k += 1) {
@@ -165,10 +168,9 @@ export function checkMigrationLineage(i: {
       return no('GAP', `${prev.name}(${prev.id})과 ${cur.name}(${cur.id}) 사이에 빈 번호가 있습니다`);
     }
   }
-  if (declared.length && declared[0].id !== baseMax + 1) {
-    return no('GAP',
-      `첫 번호 ${declared[0].id}가 base 마지막 ${baseMax} 바로 뒤가 아닙니다`);
-  }
+  // ★ "첫 번호가 base 마지막 바로 뒤여야 한다"는 **걸지 않는다.**
+  //   머지 후에는 base가 우리 마지막 번호까지 포함하므로 그 규칙이
+  //   항상 깨진다. 번호가 두 갈래가 되는 것은 ④가 본다.
 
   return ok();
 }

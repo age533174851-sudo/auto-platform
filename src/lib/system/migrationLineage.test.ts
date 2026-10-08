@@ -120,12 +120,73 @@ export function runMigrationLineageTests() {
     eq(v.code, 'BASE_FILE_MISSING');
   });
 
-  test('★ 우리 번호가 base 마지막보다 앞이면 잡는다', () => {
-    const base2 = [...BASE, f('096_something_main_added.sql')];
-    const v = checkMigrationLineage({ files: [...base2.map(b => ({ ...b })),
-      ...EXACT100X_MIGRATIONS.map(d => f(d.name))], baseFiles: base2 });
-    assert(!v.ok, '★ main이 더 큰 번호를 점유했는데 통과시켰다');
+  // ── 번호가 두 갈래가 되는 것만 충돌이다 ──
+
+  test('★ 같은 번호를 두 파일이 가리키면 잡는다 (실제 사고 모양)', () => {
+    // 머지 전 실제 사고: base의 089는 auth_profile_identity_sync였고
+    // 우리 089는 live_orders_execution_identity였다. 우리 트리에는
+    // base의 그 파일이 **없었다** — 그래서 번호 중복으로도 안 보였다.
+    const base2 = [...BASE, f('090_main_took_this_number.sql')];
+    const files = [...BASE.map(b => ({ ...b })),
+      ...EXACT100X_MIGRATIONS.map(d => f(d.name))];   // base의 090_main_... 없음
+    const v = checkMigrationLineage({ files, baseFiles: base2 });
+    assert(!v.ok, '★ 번호가 두 갈래인데 통과시켰다');
     eq(v.code, 'COLLIDES_WITH_BASE');
+    assert(v.reason.includes('090_main_took_this_number.sql'),
+      `base 쪽 파일 이름이 없다: ${v.reason}`);
+    assert(v.reason.includes('090_live_orders_execution_identity.sql'),
+      `우리 쪽 파일 이름이 없다: ${v.reason}`);
+  });
+
+  test('★ 번호가 겹치지 않은 단순 누락은 COLLIDES가 아니다', () => {
+    // 같은 사실을 두 코드가 가리키면 원인이 뒤섞인다.
+    const files = TREE().filter(x => x.name !== '089_auth_profile_identity_sync.sql');
+    eq(checkMigrationLineage({ files, baseFiles: BASE }).code, 'BASE_FILE_MISSING');
+  });
+
+  test('main이 **더 큰** 번호를 쓰는 것은 충돌이 아니다', () => {
+    // main이 097을 더해도 우리 090~095와 부딪히지 않는다. 예전 규칙은
+    // "우리 번호가 base 마지막보다 커야 한다"였고, 그래서 이 경우까지
+    // 실패시켰다 — 그리고 머지 후에는 **항상** 실패했다.
+    const base2 = [...BASE, f('097_something_main_added.sql')];
+    const v = checkMigrationLineage({
+      files: [...base2.map(b => ({ ...b })), ...EXACT100X_MIGRATIONS.map(d => f(d.name))],
+      baseFiles: base2,
+    });
+    eq(v.code, 'OK', `main의 더 큰 번호를 충돌로 읽었다: ${v.reason}`);
+  });
+
+  test('★ 선언한 번호 사이에 base의 다른 파일이 끼어도 잡는다', () => {
+    // base가 092를 다른 파일로 쓰고 우리도 092를 선언한 경우. 우리
+    // 트리에 base 파일이 있으면 번호 중복(①)으로, 없으면 ②의 충돌로
+    // 잡힌다 — 어느 쪽이든 통과하지 않는다.
+    const base2 = [...BASE, f('092_main_other.sql')];
+    const withBase = [...base2.map(b => ({ ...b })),
+      ...EXACT100X_MIGRATIONS.map(d => f(d.name))];
+    eq(checkMigrationLineage({ files: withBase, baseFiles: base2 }).code, 'DUPLICATE_NUMBER');
+    const withoutBase = [...BASE.map(b => ({ ...b })),
+      ...EXACT100X_MIGRATIONS.map(d => f(d.name))];
+    eq(checkMigrationLineage({ files: withoutBase, baseFiles: base2 }).code,
+      'COLLIDES_WITH_BASE');
+  });
+
+  test('★ 머지된 뒤에도 통과한다 — base가 우리 파일을 포함한다', () => {
+    // ⑤B가 main에 들어가면 base 자신이 090~095를 갖는다. 예전 규칙은
+    // 그 상태에서 전부 COLLIDES_WITH_BASE를 냈고 main CI가 빨개졌다.
+    const merged = [...BASE.map(b => ({ ...b })),
+      ...EXACT100X_MIGRATIONS.map(d => f(d.name))];
+    const v = checkMigrationLineage({ files: merged.map(x => ({ ...x })), baseFiles: merged });
+    eq(v.code, 'OK', `★ 머지 후 상태를 충돌로 읽는다: ${v.reason}`);
+    eq(v.ok, true);
+  });
+
+  test('★ 머지된 뒤에도 base 파일 변경은 잡는다', () => {
+    const merged = [...BASE.map(b => ({ ...b })),
+      ...EXACT100X_MIGRATIONS.map(d => f(d.name))];
+    const files = merged.map(x => x.name === '092_exact100x_risk_observations.sql'
+      ? { ...x, sql: `${x.sql}\n-- 손댐\n` } : { ...x });
+    eq(checkMigrationLineage({ files, baseFiles: merged }).code, 'BASE_FILE_CHANGED',
+      '★ 머지 후에는 적용된 파일 수정을 놓친다');
   });
 
   test('★ 계보 판정에 DB를 적용할 수단이 없다', async () => {
