@@ -120,6 +120,29 @@ export function runMigrationLineageTests() {
     eq(v.code, 'BASE_FILE_MISSING');
   });
 
+  test('★ 선언 파일이 이미 base에 동일하게 통합됐으면 충돌이 아니다', () => {
+    // ⑤B가 main에 합쳐진 뒤의 실제 모양. 그 뒤 main에 096이 추가돼도
+    // 090~095는 다시 추가할 파일이 아니라 이미 base의 일부다.
+    const integrated = TREE();
+    const baseAfterMerge = [...integrated.map(x => ({ ...x })), f('096_after_exact100x.sql')];
+    const files = baseAfterMerge.map(x => ({ ...x }));
+    const v = checkMigrationLineage({ files, baseFiles: baseAfterMerge });
+    eq(v.ok, true, v.reason);
+    eq(v.code, 'OK');
+  });
+
+  test('★ 일부만 base에 있고 남은 선언 번호가 이미 점유됐으면 여전히 충돌이다', () => {
+    const integratedFirst = EXACT100X_MIGRATIONS.slice(0, 2).map(d => f(d.name));
+    const basePartial = [...BASE.map(b => ({ ...b })), ...integratedFirst, f('092_other_main.sql')];
+    const files = [
+      ...basePartial.map(x => ({ ...x })),
+      ...EXACT100X_MIGRATIONS.slice(2).map(d => f(d.name)),
+    ];
+    const v = checkMigrationLineage({ files, baseFiles: basePartial });
+    eq(v.ok, false);
+    eq(v.code, 'COLLIDES_WITH_BASE');
+  });
+
   test('★ 우리 번호가 base 마지막보다 앞이면 잡는다', () => {
     const base2 = [...BASE, f('096_something_main_added.sql')];
     const v = checkMigrationLineage({ files: [...base2.map(b => ({ ...b })),
