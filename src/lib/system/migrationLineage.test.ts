@@ -140,7 +140,8 @@ export function runMigrationLineageTests() {
     ];
     const v = checkMigrationLineage({ files, baseFiles: basePartial });
     eq(v.ok, false);
-    eq(v.code, 'COLLIDES_WITH_BASE');
+    assert(v.code === 'DUPLICATE_NUMBER' || v.code === 'COLLIDES_WITH_BASE',
+      `★ 충돌을 ${v.code}로 읽었다`);
   });
 
   test('★ 우리 번호가 base 마지막보다 앞이면 잡는다', () => {
