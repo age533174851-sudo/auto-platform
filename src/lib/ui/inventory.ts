@@ -112,12 +112,14 @@ export interface ScreenIdentity {
 
 // ── 실제로 있는 화면 전부 ──
 //
-// `src/app/page.tsx`의 분기(57) + `src/app/**/page.tsx`의 라우트(9).
+// `src/app/page.tsx`의 분기(58) + `src/app/**/page.tsx`의 라우트(10).
 // **여기 없는 화면이 코드에서 발견되면 CI가 실패한다.**
 
 export const SCREEN_INDEX: ScreenIdentity[] = [
   { id: 'home', label: '홈', routeOrSurface: 'tab:home',
     sources: ['BTABS', 'SWITCH'], note: null },
+  { id: 'easy', label: '쉬운 화면', routeOrSurface: 'tab:easy',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
   { id: 'market', label: '시장 보기', routeOrSurface: 'tab:market',
     sources: ['MENU', 'BTABS', 'SWITCH'], note: null },
   { id: 'trading', label: '매매하기', routeOrSurface: 'tab:trading',
@@ -240,6 +242,8 @@ export const SCREEN_INDEX: ScreenIdentity[] = [
     sources: ['ROUTE'], note: null },
   { id: 'auth', label: '로그인', routeOrSurface: '/auth',
     sources: ['ROUTE'], note: '**키·시크릿을 화면에 남기지 않는다**' },
+  { id: 'auth_reset', label: '비밀번호 재설정', routeOrSurface: '/auth/reset',
+    sources: ['ROUTE'], note: null },
   { id: 'auth_callback', label: '로그인 콜백', routeOrSurface: '/auth/callback',
     sources: ['ROUTE'], note: '사용자가 머무는 화면이 아니라 거쳐 가는 자리다' },
   { id: 'privacy', label: '개인정보처리방침', routeOrSurface: '/privacy',
