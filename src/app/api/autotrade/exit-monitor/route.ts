@@ -294,6 +294,13 @@ async function sweepOrphanProtection(
         const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
         const dc = creds.codeOf(t.connectionId);
         const disp = sweepCredentialDisposition(dc);
+        const credentialDetail = {
+          symbol: t.symbol,
+          credentialCode: dc,
+          // 이 경로는 **전략을 가리지 않는 보호주문 고아 정리**다.
+          // Exact100X 전용 종료 권한 후보와 섞어 세지 않는다.
+          path: 'GENERIC_PROTECTION_SWEEP' as const,
+        };
 
         // 삭제된 과거 connection_id는 현재 연결 장애가 아니다.
         // 이 연결로는 더 이상 거래소를 읽거나 주문을 취소할 수 없고,
@@ -304,9 +311,7 @@ async function sweepOrphanProtection(
           if (hit) hit.count += t.rows;
           else out.skipped.push({ code: disp.code, count: t.rows, reason: disp.reason });
           out.details.push({
-            symbol: t.symbol, code: disp.code, ok: true, skipped: true,
-            credentialCode: dc,
-            path: 'GENERIC_PROTECTION_SWEEP',
+            ...credentialDetail, code: disp.code, ok: true, skipped: true,
             reason: disp.reason,
           });
           continue;
@@ -314,11 +319,7 @@ async function sweepOrphanProtection(
 
         out.unreadable += 1;
         out.details.push({
-          symbol: t.symbol, code: 'NO_VENUE', ok: false,
-          credentialCode: dc,
-          // 이 경로는 **전략을 가리지 않는 보호주문 고아 정리**다.
-          // Exact100X 전용 종료 권한 후보와 섞어 세지 않는다.
-          path: 'GENERIC_PROTECTION_SWEEP',
+          ...credentialDetail, code: 'NO_VENUE', ok: false,
           reason: credentialDiagnosisReason(dc),
         });
         continue;
