@@ -110,7 +110,9 @@ export function BeginnerBuyScreen({
       display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
       background: C.bg, color: C.text,
     }}>
-      <Head title={`${name || symbol} 구매`} sub={symbol} onBack={onBack}
+      <Head title={`${name || symbol} 구매`}
+        sub={`${symbol} · ${market === 'SPOT' ? '코인 현물' : '코인 USDT-M'}`}
+        onBack={onBack}
         right={onPro ? <LevelSwitch to="프로" onClick={onPro}/> : null}/>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, display: 'grid', gap: 12 }}>
