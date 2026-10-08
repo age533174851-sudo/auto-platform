@@ -137,15 +137,20 @@ export function checkMigrationLineage(i: {
   }
 
   // ④ base가 이미 쓰는 번호와 겹치지 않는가
+  //
+  // ★ 선언 파일이 **이미 base에 같은 이름·같은 본문으로 들어간 경우**는
+  //   충돌이 아니라 통합 완료다. ⑤B를 main에 merge한 뒤에도 이 판정은
+  //   계속 CI에서 돌기 때문에, 모든 090~095를 다시 "base 뒤에 새로
+  //   추가해야 한다"고 보면 main 자신을 영원히 실패시킨다.
+  //
+  //   ②에서 base 파일은 이름과 본문까지 동일함을 이미 확인했다. 따라서
+  //   여기서는 base에 **아직 없는 선언 파일만** 새 번호로 본다.
   const baseIds = new Set(baseFiles.map(b => b.id).filter((n): n is number => n != null));
+  const baseNames = new Set(baseFiles.map(b => b.name));
   const baseMax = baseIds.size ? Math.max(...baseIds) : -1;
-  // ★ `baseIds.has(d.id)`를 따로 보지 않는다 — **도달할 수 없기
-  //   때문이다.** base가 그 번호를 쓰면 그 파일은 ②에서 트리에 있어야
-  //   하고, 그러면 우리 파일과 **번호가 겹쳐** ①이 먼저 잡는다. 죽은
-  //   가지를 남겨 두면 돌연변이가 그것을 건드려도 아무 일이 없다
-  //   (MIG-L3c가 그렇게 새 나갔다). 아래 한 줄이 전부 덮는다:
-  //   겹쳤다면 d.id <= max(baseIds) = baseMax가 반드시 참이다.
-  for (const d of declared) {
+  const pending = declared.filter(d => !baseNames.has(d.name));
+
+  for (const d of pending) {
     if (d.id <= baseMax) {
       const other = baseFiles.find(b => b.id === d.id)?.name;
       return no('COLLIDES_WITH_BASE',
@@ -154,7 +159,8 @@ export function checkMigrationLineage(i: {
     }
   }
 
-  // ⑤ 선언한 번호가 오름차순이고 **빈 칸이 없는가**
+  // ⑤ 선언 자체는 언제나 오름차순이고 **빈 칸이 없어야 한다**.
+  // 이미 base에 통합된 뒤에도 이 계약은 그대로 지킨다.
   for (let k = 1; k < declared.length; k += 1) {
     const prev = declared[k - 1];
     const cur = declared[k];
@@ -165,9 +171,13 @@ export function checkMigrationLineage(i: {
       return no('GAP', `${prev.name}(${prev.id})과 ${cur.name}(${cur.id}) 사이에 빈 번호가 있습니다`);
     }
   }
-  if (declared.length && declared[0].id !== baseMax + 1) {
+
+  // base에 아직 안 들어간 선언 파일이 있다면 그 **첫 새 파일**은 현재
+  // base의 마지막 번호 바로 뒤여야 한다. 전부 통합된 뒤(pending=0)에는
+  // 다시 추가할 번호가 없으므로 이 검사를 하지 않는다.
+  if (pending.length && pending[0].id !== baseMax + 1) {
     return no('GAP',
-      `첫 번호 ${declared[0].id}가 base 마지막 ${baseMax} 바로 뒤가 아닙니다`);
+      `첫 새 번호 ${pending[0].id}가 base 마지막 ${baseMax} 바로 뒤가 아닙니다`);
   }
 
   return ok();
