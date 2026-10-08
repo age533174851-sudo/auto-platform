@@ -92,7 +92,7 @@ export async function sleeveCapitalGate(sb: any, i: {
 }): Promise<SleeveVerdict> {
   try {
     const { data, error } = await (sb as any).from('strategy_accounts')
-      .select('*').eq('user_id', i.userId).eq('strategy_id', i.strategyId).maybeSingle();
+      .select('*').eq('user_id', i.userId).eq('sleeve_id', i.strategyId).maybeSingle();
 
     if (error) {
       if (/does not exist|schema cache|relation/i.test(String(error.message))) {
