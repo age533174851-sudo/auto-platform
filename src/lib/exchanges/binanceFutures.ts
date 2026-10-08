@@ -1535,12 +1535,26 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     //
     // 필요한 값이 하나라도 없으면 그 격자는 null이다. 부르는 쪽이
     // "이 주문유형의 수량 규격을 모른다"로 읽는다.
-    const gridOf = (f: any) => {
+    const baseGridOf = (f: any) => {
+      if (!f) return null;
+      const st = parseFloat(f?.stepSize ?? '');
+      const mn = parseFloat(f?.minQty ?? '');
+      const mx = parseFloat(f?.maxQty ?? '');
+      // LOT_SIZE는 기본 격자다. 최소/단위를 못 읽으면 전체 규격을 모르는 것.
+      if (!Number.isFinite(st) || st <= 0) return null;
+      if (!Number.isFinite(mn) || mn <= 0) return null;
+      return {
+        stepSize: st,
+        minQty: mn,
+        maxQty: Number.isFinite(mx) && mx > 0 ? mx : null,
+      };
+    };
+    const marketGridOf = (f: any) => {
       if (!f) return null;
       const read = (v: any): number | null => {
         if (v == null || v === '') return null;
         const n = parseFloat(String(v));
-        // 0은 "필터를 못 읽음"이 아니라 해당 제한 비활성일 수 있다.
+        // MARKET_LOT_SIZE만 0을 명시적 비활성으로 보존한다.
         return Number.isFinite(n) && n >= 0 ? n : null;
       };
       const stepSize = read(f.stepSize);
@@ -1549,8 +1563,8 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
       if (stepSize == null && minQty == null && maxQty == null) return null;
       return { stepSize, minQty, maxQty };
     };
-    const limitQty = gridOf(lot);
-    const marketQty = gridOf(mktLot);
+    const limitQty = baseGridOf(lot);
+    const marketQty = marketGridOf(mktLot);
     const tick = parseFloat(priceF?.tickSize ?? '');
     // 지정가 격자와 호가 단위는 이 심볼이 거래 가능하다는 최소 근거다.
     // 둘 중 하나라도 없으면 규격을 읽은 것으로 치지 않는다.
