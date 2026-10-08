@@ -476,15 +476,20 @@ export async function getSpotSymbolFilters(
       const n = parseFloat(String(v));
       return Number.isFinite(n) && n >= 0 ? n : null;
     };
+    const marketStep = marketNum(mktLot?.stepSize);
+    const marketMin = marketNum(mktLot?.minQty);
+    // step/min 중 하나라도 누락이면 MARKET_LOT_SIZE를 완전히 안다고 할 수 없다.
+    // 둘 다 0이면 **누락이 아니라 명시적 비활성**이므로 그대로 보존한다.
+    const marketComplete = marketStep != null && marketMin != null;
     const result: SpotSymbolFilters = {
       stepSize: num(lot?.stepSize),
       minQty:   num(lot?.minQty),
       tickSize: num(priceF?.tickSize),
       minNotional: num(notionalF?.minNotional),
       // 다른 필터에서 값을 복사하지 않는다. **원문 0은 0으로 보존**한다.
-      marketStepSize: marketNum(mktLot?.stepSize),
-      marketMinQty:   marketNum(mktLot?.minQty),
-      marketMaxQty:   marketNum(mktLot?.maxQty),
+      marketStepSize: marketComplete ? marketStep : null,
+      marketMinQty:   marketComplete ? marketMin : null,
+      marketMaxQty:   marketComplete ? marketNum(mktLot?.maxQty) : null,
       at: Date.now(),
     };
     _spotLotCache[cacheKey] = result;
