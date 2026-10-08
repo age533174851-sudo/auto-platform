@@ -789,21 +789,27 @@ const M = [
                    '      });\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**'), 'RED'],
 
   ['MUT-P24 관리 유예 관문을 포지션 조회 뒤로 옮김', P.monitor, s => {
-    const i = s.indexOf("    if (p.management?.code !== 'MANAGED') {");
+    // #300 뒤 관문 정본은 management 단독 조건이 아니라 mayActOn(ownership+management)이다.
+    // 블록 전체를 거래소 노출 조회 **뒤**로 옮겨 "조회 0회" 계약을 깨 본다.
+    const startMark = '    if (!mayActOn(p)) {';
+    const nextMark = '    // ★ **선점은 여기서 하지 않는다.**';
+    const i = s.indexOf(startMark);
     if (i < 0) return s;
-    const end = s.indexOf('      continue;\n    }\n', i);
+    const end = s.indexOf(nextMark, i);
     if (end < 0) return s;
-    const block = s.slice(i, end + '      continue;\n    }\n'.length);
-    const rest = s.slice(0, i) + s.slice(i + block.length);
-    const k = rest.indexOf('      const live = await ops.readOpenPosition(venue, p.symbol);');
+    const block = s.slice(i, end);
+    const rest = s.slice(0, i) + s.slice(end);
+    const read = '      const live = await ops.readOpenPosition(venue, p.symbol);\n';
+    const k = rest.indexOf(read);
     if (k < 0) return s;
-    return rest.slice(0, k) + block + rest.slice(k);
+    const after = k + read.length;
+    return rest.slice(0, after) + block + rest.slice(after);
   }, 'RED'],
 
-  // 유예된 자리에서도 시간청산이 닫게 한다 — 관문을 관리 판정 대신
-  // 소유권만 보게 되돌리는 회귀다(옛 고장 그대로).
+  // 유예된 자리에서도 시간청산이 닫게 한다 — mayActOn의 management 절반을
+  // 빼고 소유권만 보게 되돌리는 회귀다(옛 고장 그대로).
   ['MUT-P25 유예 자리에서 시간청산 close 허용 (관문을 소유권만 보게)', P.monitor,
-    s => s.replace("    if (p.management?.code !== 'MANAGED') {",
+    s => s.replace('    if (!mayActOn(p)) {',
                    "    if (p.ownership?.code !== 'OWNED') {"), 'RED'],
 
   // ── 레거시 안전망 ──
@@ -879,9 +885,9 @@ const M = [
                    "    if (policy === 'NO_FIXED_SL' && !identity) {"), 'RED'],
 
   ['MUT-Q14 감시 라우트가 identity로 분기', P.monitor,
-    s => s.replace("    if (p.management?.code !== 'MANAGED') {",
+    s => s.replace('    if (!mayActOn(p)) {',
                    "    if (p.executionIdentity?.profileId === 'MAX_LEV_100X') { /* 전용 처리 */ }\n"
-                   + "    if (p.management?.code !== 'MANAGED') {"), 'RED'],
+                   + '    if (!mayActOn(p)) {'), 'RED'],
 
   // ══════════════════════════════════════════════════════════
   // PR2 후속 — DB가 코드보다 뒤처져도 회차가 죽지 않는다
@@ -2221,8 +2227,8 @@ const M = [
     'RED'],
 
   ['RDY11 고아 정리 실패를 Exact100X 경로로 적음', P.monitor,
-    s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP',",
-      "          path: 'EXACT100X_AUTHORITY',"), 'RED'],
+    s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP' as const,",
+      "          path: 'EXACT100X_AUTHORITY' as const,"), 'RED'],
 
   ['RDY12 진단에 시크릿 평문을 넘김', P.creds,
     s => s.replace('          secretDecrypted: decrypted,',

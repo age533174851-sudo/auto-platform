@@ -75,6 +75,8 @@ const CLASSIFIED = new Map([
   ['src/components/pages/ChartTab.tsx', 'POLL — 차트 갱신'],
   ['src/components/pages/BriefingPage.tsx', 'POLL — 브리핑 갱신'],
   ['src/components/pages/AlertsPage.tsx', 'POLL — 알림 조건 확인(브라우저 전용)'],
+  ['src/components/pages/FearDcaPage.tsx',
+    'POLL — Alternative.me 공포·탐욕 지수를 다시 읽어 화면 판단을 갱신한다. 주문·체결은 만들지 않는다'],
   ['src/components/pages/SharedUI.tsx', 'UI — 시계·애니메이션'],
   ['src/components/ui/DataBadge.tsx', 'UI — 데이터 신선도 표시'],
   ['src/app/chart/page.tsx', 'POLL — 차트 갱신'],
