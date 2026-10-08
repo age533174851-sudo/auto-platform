@@ -19,6 +19,7 @@ import { readbackProtective, type ProtectiveEvidence } from './protectiveReadbac
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
 import { futuresApplyLeverage } from '../exchanges/futuresExec';
+import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 
@@ -88,6 +89,45 @@ export interface ExecuteArgs {
    * `FIXED_TP`라 기존 호출부의 동작이 바뀌지 않는다.
    */
   takeProfitPolicy?: TakeProfitPolicy;
+  /**
+   * **어느 실행 계약으로 여는 주문인가.** 장부에 그대로 적는다.
+   *
+   * 왜 정책이 아니라 identity를 따로 받는가
+   * ──────────────────────────────────────
+   * `stopPolicy`·`takeProfitPolicy`는 **계약이 정한 행동**이고, 이 값은
+   * **계약 자체의 이름**이다. 행동만 적어 두면 나중에 그 포지션을 보는
+   * 코드가 "손절이 없고 배율이 100이니 Exact100X겠지"로 되돌아간다 —
+   * 이 저장소가 반복해서 금지해 온 추론이다.
+   *
+   * 셋은 조합 키라 **함께** 온다. 하나만으로는 계약이 정해지지 않고
+   * (`MAX_LEV_100X`는 `EXACT_100X`와만 짝이다), 반쪽만 적으면 나머지를
+   * 추측하게 된다 — DB의 `_complete` 제약도 같은 규칙이다.
+   *
+   * 안 넘기면 세 칸 모두 적지 않는다(= 계약 없이 나가던 기존 경로).
+   *
+   * ★ **이 값으로 판단하지 않는다.** 여기서도, 읽는 쪽에서도. 적기만 한다.
+   */
+  executionIdentity?: {
+    profileId: string;
+    presetId: string;
+    contractVersion: number;
+  };
+  /**
+   * **진입 허가가 실제로 쓴 위험 좌표.** 적기만 한다 — 이 값으로
+   * 진입을 막거나 종료를 바꾸지 않는다.
+   *
+   * ★ 반드시 **허가 판정의 결과에서** 와야 한다. 여기서 신호를 다시
+   *   계산하거나 ATR을 새로 재면, 저장된 값이 "허가를 내린 값"이
+   *   아니게 되어 이 칸의 존재 이유가 사라진다.
+   *
+   * 안 넘기면 두 칸 모두 적지 않는다(= 기존 경로 그대로).
+   */
+  entryRiskSnapshot?: {
+    /** 허가 판정이 쓴 변동성 위험 거리(%). 못 구했으면 null */
+    adverseDistancePct: number | null;
+    /** 그 주문이 입장한 RAW 청산여유(%). **EFFECTIVE가 아니다** */
+    liquidationDistancePctRaw: number | null;
+  };
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -304,6 +344,29 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // **고정 손절을 쓰지 않는 프로필은 여기서 NONE으로 덮는다.** 호출부가
   // 실수로 REQUIRED를 넘겨도 마찬가지다 — 계약이 호출부보다 세다.
   const noFixedSl = args.stopPolicy === 'NO_FIXED_SL';
+
+  // ── 실행 계약 identity — 적을 것인가, 적는다면 온전한가 ──
+  //
+  //   **반쪽은 받지 않는다.** 셋 중 일부만 오면 **호출부가 계약을 잘못
+  //   조립한 것**이다. 그건 이 함수가 고쳐 줄 일이 아니라 거절할 일이다.
+  //
+  //   DB의 `_complete` 제약이 어차피 막지 않느냐고 할 수 있다. 막는다 —
+  //   그리고 그 실패는 거래소 전송보다 먼저 난다(INTENT insert가 앞이다).
+  //   그래도 여기서 따로 막는 이유는 **DB 제약은 마지막 방어선이지
+  //   응용 검증의 대체물이 아니기 때문**이다:
+  //
+  //     · 제약이 없는 배포(090 미적용)에서는 반쪽이 그대로 저장된다
+  //     · 제약 위반은 PostgREST 오류 문자열로 와서 호출부의 실수를
+  //       "DB 오류"처럼 보이게 한다 — 무엇을 고쳐야 하는지 가린다
+  //
+  //   그래서 경계에서 명시적으로 fail-closed한다.
+  // 온전한지는 **계약 정본이 판단한다.** 여기서 다시 세면 적는 쪽과
+  // 읽는 쪽의 기준이 갈린다. (정적 import — 순수 함수 하나에 동적 로딩을
+  // 쓸 이유가 없고, 별칭 동적 import는 시험 하네스에서 풀리지 않는다.)
+  const ident = args.executionIdentity;
+  const identOk = executionIdentityComplete(ident);
+  // 진입 허가가 준 위험 좌표. **여기서 만들지 않는다 — 받기만 한다.**
+  const riskSnap = args.entryRiskSnapshot;
   const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
   // **익절은 따로 판단한다.** `policy === 'NONE'`으로 익절까지 끄면
   // 손절 정책 하나가 두 가지를 뜻하게 되고, 그때 바이낸스와 Gate가
@@ -339,6 +402,19 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     return { ok: false, status: 'REJECTED', clientOrderId,
       message: '고정 익절을 쓰지 않는 프로필인데 익절가가 함께 넘어왔습니다'
         + ` (${args.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
+  // 실행 계약 식별자도 같은 규칙이다. **반쪽은 받지 않는다.**
+  //
+  //   호출부가 계약을 잘못 조립한 것이므로 **경계에서 거절한다.** 거래소
+  //   쓰기(배율 설정·주문 전송)는 전부 이 뒤에 있으므로, 여기서 멈추면
+  //   계좌에 아무 일도 일어나지 않는다 — 시험이 호출 횟수 0으로 확인한다.
+  //
+  //   DB 제약에 기대지 않는 이유는 위 주석에 적었다.
+  if (ident && !identOk) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '실행 계약 식별자가 반쪽입니다 — 프로필·프리셋·버전은 함께 와야 합니다'
+        + ` (프로필 ${ident.profileId || '없음'} · 프리셋 ${ident.presetId || '없음'}`
+        + ` · 버전 ${ident.contractVersion ?? '없음'}). 나머지를 추측하지 않고 주문하지 않습니다.` };
   }
   if (!isFinite(plan.quantity) || plan.quantity <= 0) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: `주문 수량이 유효하지 않습니다 (${plan.quantity})` };
@@ -406,6 +482,31 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 읽게 되고, 그건 100배 포지션에 손절을 새로 거는 일이다.
     // 여기서 칸을 떼고 저장하는 후퇴는 만들지 않는다.
     ...(noFixedSl ? { stop_policy: 'NO_FIXED_SL' } : {}),
+    // **계약이 있을 때만 붙인다.** `stop_policy`와 같은 이유다 — 항상
+    // 붙이면 090가 아직인 DB에서 모든 주문이 실패한다. 계약 없이 나가던
+    // 기존 경로의 바이트는 그대로 둔다.
+    //
+    // 반대로 계약이 있는데 못 붙이면 실패하는 것이 **맞다** — 그 칸이 없는
+    // DB에서는 이 포지션이 나중에 "어느 계약의 것인지 모르는 주문"이 되고,
+    // 그러면 다시 배율·손절 조합으로 추론하는 자리로 되돌아간다.
+    ...(ident ? {
+      execution_profile_id: ident.profileId,
+      execution_preset_id: ident.presetId,
+      execution_contract_version: ident.contractVersion,
+    } : {}),
+    // ── 진입 허가가 쓴 위험 좌표 (091) ──
+    //
+    // **값이 있을 때만 붙인다.** `stop_policy`·계약 세 칸과 같은 이유다 —
+    // 항상 붙이면 091이 아직인 DB에서 모든 주문이 실패한다.
+    //
+    // 둘을 따로 붙인다. 한쪽만 구해졌을 때 저장을 통째로 실패시키면
+    // **구한 값까지 버린다**(091이 CHECK 제약을 걸지 않은 것과 같은 이유).
+    //
+    // ★ 여기서 계산하지 않는다. 받은 값을 그대로 적는다.
+    ...(riskSnap?.adverseDistancePct != null
+      ? { entry_adverse_distance_pct: riskSnap.adverseDistancePct } : {}),
+    ...(riskSnap?.liquidationDistancePctRaw != null
+      ? { entry_liquidation_distance_pct_raw: riskSnap.liquidationDistancePctRaw } : {}),
   };
 
   const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();

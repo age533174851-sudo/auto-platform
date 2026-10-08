@@ -30,6 +30,7 @@ import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futur
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
+import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
 // 이 워커가 실행할 수 있는 거래소. 모니터 조회도 이 목록을 쓴다 —
 // 목록이 두 곳에 있으면 하나만 늘어난다.
@@ -819,6 +820,21 @@ async function pollExitMonitor(isMain: boolean): Promise<void> {
     }
     return;
   }
+  // ── cadence provenance (⑤B-3A-1.1) ──
+  //
+  // 라우트는 "예정이 언제였는지"를 알 방법이 없다. Worker 간격은 env로
+  // 바뀌고(`EXIT_MONITOR_INTERVAL_MS`), GitHub·Vercel은 예정이 서로 다르다.
+  // 그래서 **실제 값을 아는 쪽이 알려준다.**
+  //
+  // ★ 직전 실행 시각을 덮어쓰기 **전에** 읽는다. 덮어쓴 뒤에 계산하면
+  //   expectedAt이 지금 시각 + 간격이 되어 "항상 간격만큼 이르다"가 된다.
+  // ★ 첫 tick(lastExitMonitorMs == null)이면 예정 시각이 없다 — 헤더를
+  //   보내지 않는다. 지어내지 않는다.
+  // ★ telemetry 전용이다. 거래 권한 판단에 쓰지 않는다.
+  const wakeHeaders = wakeCadenceHeaders({
+    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,
+  });
+
   lastExitMonitorMs = Date.now();
 
   let status: number | null = null;
@@ -838,6 +854,8 @@ async function pollExitMonitor(isMain: boolean): Promise<void> {
         'x-traigo-worker': WORKER_ID,
         // 어느 커밋이 돌렸는가. 비어 있으면 '같음'이 아니라 '모름'이다.
         'x-traigo-sha': String(process.env.GIT_SHA || '').slice(0, 40),
+        // 실제 간격과 예정 시각. 모르는 값은 키 자체가 없다.
+        ...wakeHeaders,
       },
       signal: AbortSignal.timeout(90_000),
     });

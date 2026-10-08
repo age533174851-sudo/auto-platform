@@ -25,6 +25,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
+import { makeCredsReader } from '@/lib/engine/connectionCreds';
+import {
+  type WakeAuth, resolveWakeSource, resolveWakeCadence,
+  WAKE_SOURCE_HEADER, WAKE_INTERVAL_HEADER, WAKE_EXPECTED_AT_HEADER,
+} from '@/lib/engine/exitMonitorWake';
 
 /** 임차를 잃어 거래소를 바꾸지 않았을 때 남기는 말 (한 곳에서만 적는다) */
 const LEASE_LOST_MSG = '실행 권한(임차)이 넘어가 거래소 주문을 보내지 않았습니다';
@@ -41,14 +46,29 @@ function safeEqual(provided: string | null, expected: string): boolean {
   try { return timingSafeEqual(a, b); } catch { return false; }
 }
 
-function authorized(req: NextRequest): boolean {
+/**
+ * 인증 결과를 **boolean으로 버리지 않는다.**
+ *
+ * ⑤B-3A-1.1 — Vercel Cron은 Bearer로 들어오면서 `x-traigo-source`를 보내지
+ * 않는다. 예전에는 그 호출이 전부 `manual`로 적혔다 — UNKNOWN이 아니라
+ * **거짓 provenance**였다. 어느 경로로 들어왔는지를 남기면, 헤더가 없어도
+ * 복원할 수 있는 최소 사실이 생긴다.
+ *
+ * ★ 인증은 여전히 secret 비교뿐이다. Vercel 고유 user-agent나 헤더를
+ *   인증 근거로 쓰지 않는다 — 그건 누구나 흉내 낼 수 있다.
+ */
+function authorized(req: NextRequest): WakeAuth {
   const cronSecret = process.env.CRON_SECRET || '';
   const adminSecret = process.env.ADMIN_SECRET || '';
 
   const auth = req.headers.get('authorization') || '';
-  if (cronSecret && auth.startsWith('Bearer ') && safeEqual(auth.slice(7), cronSecret)) return true;
-  if (safeEqual(req.headers.get('x-admin-secret'), adminSecret)) return true;
-  return false;
+  if (cronSecret && auth.startsWith('Bearer ') && safeEqual(auth.slice(7), cronSecret)) {
+    return { ok: true, kind: 'CRON_BEARER' };
+  }
+  if (safeEqual(req.headers.get('x-admin-secret'), adminSecret)) {
+    return { ok: true, kind: 'ADMIN_HEADER' };
+  }
+  return { ok: false, kind: 'NONE' };
 }
 
 /**
@@ -220,6 +240,8 @@ async function sweepOrphanProtection(
     targets: 0, cleaned: 0, stillPresent: 0, unreadable: 0,
     skipped: [] as Array<{ code: string; count: number; reason: string }>,
     details: [] as any[], summary: '', error: null as string | null,
+    /** 경로별·원인별 실패 수. **합계에 묻지 않는다** */
+    failures: [] as Array<{ path: string; code: string; count: number }>,
   };
 
   let rows: any[] = [];
@@ -258,39 +280,28 @@ async function sweepOrphanProtection(
     await import('@/lib/engine/protectionCleanup');
 
   /** 연결 하나당 한 번만 읽는다. **연결이 망과 거래소를 정한다** */
-  const credCache = new Map<string, any>();
-  const credsOf = async (connectionId: string) => {
-    if (!credCache.has(connectionId)) {
-      let v: any = null;
-      try {
-        const { data: c } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
-          .eq('id', connectionId).maybeSingle();
-        if (c && !(c as any).has_withdrawal) {
-          const ex = resolveExecExchange((c as any).exchange_id).exchange;
-          // **모르는 거래소를 바이낸스로 읽지 않는다.**
-          if (ex) {
-            v = {
-              exchange: ex,
-              apiKey: (c as any).api_key,
-              apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),
-              testnet: (c as any).is_testnet !== false,
-            };
-          }
-        }
-      } catch { v = null; }
-      credCache.set(connectionId, v);
-    }
-    return credCache.get(connectionId);
-  };
+  // 자격 판독은 **한 곳에서만** 한다 (engine/connectionCreds.ts).
+  // 예전에는 이 파일 안에 같은 구현이 두 벌 있어서 실패 사유를 한 쪽만
+  // 고쳤고, 나머지 한 쪽은 계속 세 사실을 한 문장으로 뭉갰다.
+  const creds = makeCredsReader({ sb, resolveExchange: resolveExecExchange, decrypt: decryptSecret });
+  const credsOf = (connectionId: string) => creds.get(connectionId);
 
   for (const t of sel.targets) {
     try {
       const venue = await credsOf(t.connectionId);
       if (!venue) {
         out.unreadable += 1;
-        out.details.push({ symbol: t.symbol, code: 'NO_VENUE', ok: false,
-          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+        // **어느 사실 때문인지 적는다.** 값은 싣지 않는다 — 코드와 문구만.
+        const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
+        const dc = creds.codeOf(t.connectionId);
+        out.details.push({
+          symbol: t.symbol, code: 'NO_VENUE', ok: false,
+          credentialCode: dc,
+          // 이 경로는 **전략을 가리지 않는 보호주문 고아 정리**다.
+          // Exact100X 전용 종료 권한 후보와 섞어 세지 않는다.
+          path: 'GENERIC_PROTECTION_SWEEP',
+          reason: credentialDiagnosisReason(dc),
+        });
         continue;
       }
 
@@ -341,6 +352,19 @@ async function sweepOrphanProtection(
       out.details.push({ symbol: t.symbol, code: 'SWEEP_ERROR', ok: false,
         reason: String(e?.message || e).slice(0, 200) });
     }
+  }
+
+  // ── 실패를 경로별·원인별로 센다 (⑤B-3A-3) ──
+  //
+  //   합계만 적으면 "1037회 실패"가 무엇이었는지 영원히 알 수 없다.
+  //   이 경로는 전부 보호주문 고아 정리이고, Exact100X 전용 종료 권한
+  //   후보와 **같은 숫자에 넣지 않는다.**
+  {
+    const { classifyFailures } = await import('@/lib/engine/testnetReadiness');
+    out.failures = classifyFailures(
+      out.details.filter((d: any) => d?.ok === false && d?.credentialCode)
+        .map((d: any) => ({ path: d.path ?? 'GENERIC_PROTECTION_SWEEP', code: d.credentialCode })),
+    );
   }
 
   out.summary = sweepSummary({
@@ -419,7 +443,8 @@ async function recoverUnresolvedOrders(
 }
 
 export async function GET(req: NextRequest) {
-  if (!authorized(req)) {
+  const wakeAuth = authorized(req);
+  if (!wakeAuth.ok) {
     // ── 401은 두 가지가 전혀 다른 문제인데 문구가 같았다 ──
     //
     //  (가) 서버에 ADMIN_SECRET이 아예 없다 → Vercel에 넣고 **재배포**해야 한다
@@ -490,8 +515,29 @@ export async function GET(req: NextRequest) {
   // 판정·획득 순서·울타리 확인은 모두 exitMonitorLease.ts에 있고, 두 실행을
   // 동시에 돌려 "둘 다 주인이 되는" 경합을 재현하는 시험이 붙어 있다.
   const { acquireExitLease, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
-  const runner = String(req.headers.get('x-traigo-source') || '').trim() || 'manual';
-  const holder = `${runner}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
+  // ── 누가 깨웠는가 ──
+  //
+  // ⑤B-3A-1.1 — 예전에는 헤더가 없으면 `'manual'`로 적었다. 그런데 Vercel
+  // Cron은 Bearer로 인증하고 `x-traigo-source`를 보내지 않는다. 그래서
+  // **실제 자동 cron 호출이 전부 manual로 적혔다** — UNKNOWN이 아니라
+  // 거짓 provenance였다. 판정은 exitMonitorWake.ts 한 곳에 있다.
+  //
+  // 인증을 통과했으므로 `resolveWakeSource`는 null을 주지 않는다. 그래도
+  // 타입이 null을 말하므로 여기서 추측으로 메우지 않고 그대로 들고 간다.
+  const runner = resolveWakeSource(req.headers.get(WAKE_SOURCE_HEADER), wakeAuth.kind);
+  const holder = `${runner ?? 'unknown'}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
+
+  // ── 예정보다 얼마나 늦었는가 ──
+  //
+  // 부르는 쪽이 **자기가 실제로 쓰는** 간격과 예정 시각을 알려줄 때만
+  // 채워진다. 라우트가 자기 상수로 5분을 가정하지 않는다.
+  //
+  // ★ telemetry 전용이다. 이 두 값은 어떤 주문·청산 판단에도 쓰이지 않는다.
+  const wakeCadence = resolveWakeCadence({
+    intervalHeader: req.headers.get(WAKE_INTERVAL_HEADER),
+    expectedAtHeader: req.headers.get(WAKE_EXPECTED_AT_HEADER),
+    observedAtMs: cronStartedAt,
+  });
 
   const lease = await acquireExitLease({
     me: holder, nowMs: cronStartedAt, ttlMs: LEASE_TTL_MS,
@@ -562,7 +608,9 @@ export async function GET(req: NextRequest) {
   try {
     const { data } = await (sb as any).from('exit_monitor_runs').insert({
       started_at: new Date(cronStartedAt).toISOString(),
-      source: runner,
+      // 058 `source`는 NOT NULL이다. 인증을 통과했으면 runner는 비지
+      // 않지만, 비었다면 **모른다**고 적는다 — 'manual'로 메우지 않는다.
+      source: runner ?? 'unknown',
       worker_id: String(req.headers.get('x-traigo-worker') || '').trim() || null,
       worker_sha: String(req.headers.get('x-traigo-sha') || '').trim() || null,
       status: 'RUNNING',
@@ -757,6 +805,14 @@ export async function GET(req: NextRequest) {
 async function runLifecycleSweep(
   sb: any, dryRun: boolean,
   /**
+   * ⑤B-3A-1 — 누가 깨웠는가. `x-traigo-source` 그대로다(058과 같은 정본).
+   *
+   * **추측하지 않는다.** 헤더가 없으면 'manual'로 들어오고, 예정 시각을
+   * 확실히 모르면 지연은 null이다 — 5분이라고 가정해 빼지 않는다.
+   */
+  wake: { source: string | null; delayMs: number | null; intervalMs: number | null }
+    = { source: null, delayMs: null, intervalMs: null },
+  /**
    * ★ **거래소를 바꾸기 직전에 물어보는 실행 권한.**
    *
    *   이 sweep은 안에서 `closeSymbolPosition`·`placeStop`·`cancelOtherStops`로
@@ -774,13 +830,48 @@ async function runLifecycleSweep(
 ): Promise<{
   candidates: number; acted: number; skipped: any[];
   deferred: any[]; deferredCount: number;
+  /** 전용 종료 권한(Exact100X 시간 청산) 결과. **일반 생명주기와 섞지 않는다** */
+  authority: { candidates: number; acted: number; failed: number; results: any[] };
+  /**
+   * ⑤B-0/1 — 열려 있는 100배 포지션의 **위험 측정값.** 판단이 아니다.
+   *
+   * ★ 이 칸의 어떤 값도 주문을 유발하지 않는다. `acted`가 없는 것이
+   *   그 사실을 타입으로 말한다 — 셀 것이 없기 때문이다.
+   */
+  postEntryRisk: {
+    measured: number; unusable: number; samples: any[];
+    /** ⑤B-2 — 표에 **덧붙인** 관측 수. 판단이 아니라 적은 줄 수다 */
+    recorded: number;
+    /** DB 쓰기가 실패한 수. **조용히 사라지면 분포가 왜곡된다** */
+    recordFailed: number;
+    /**
+     * 실측 표본 **자격이 없던** 수. 쓰기 실패와 **다른 숫자다**.
+     *
+     * 열린 포지션이 없거나 방향이 다른 경우다 — 고장이 아니라 정상이고,
+     * 쓰기 실패와 합치면 운영자가 고칠 것이 없는데 DB를 들여다본다.
+     */
+    notEligible: number;
+    /** 자격 없음의 사유별 개수 */
+    notEligibleBy: Record<string, number>;
+  };
+  /** 주문 장부를 어떤 모양으로 읽었는가. 못 읽었으면 null */
+  projection: 'RISK' | 'IDENTITY' | 'LEGACY' | null;
   results: any[]; summary: string; error: string | null;
 }> {
   const out = {
     candidates: 0, acted: 0, skipped: [] as any[],
+    projection: null as 'RISK' | 'IDENTITY' | 'LEGACY' | null,
     // ★ **유예는 실패가 아니다.** 일부러 관리하지 않은 줄을 `skipped`나
     //   실패 목록에 섞으면 운영자가 고칠 것이 없는데 고치려 든다.
     deferred: [] as any[], deferredCount: 0,
+    // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
+    //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
+    authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
+    escape: { recorded: 0, recordFailed: 0, notEligible: 0 },
+    // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
+    postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
+      recorded: 0, recordFailed: 0, notEligible: 0,
+      notEligibleBy: {} as Record<string, number> },
     results: [] as any[], summary: '', error: null as string | null,
   };
 
@@ -789,44 +880,53 @@ async function runLifecycleSweep(
   const { lifecycleDecide } = await import('@/lib/engine/exitLifecycle');
   const { lifecyclePolicyOf } = await import('@/lib/strategies/lifecyclePolicy');
 
-  let rows: any[] = [];
-  try {
-    const { data, error } = await (sb as any).from('live_orders')
-      // ★ `stop_policy`(migration 078)를 읽는다. 이 칸이 없으면 고정 손절을
-      //   쓰지 않는 주문과 "손절 값이 아직 안 적힌 주문"이 화면에서 같아
-      //   보이고, 값이 채워지는 순간 일반 생명주기가 그 포지션을 가져간다.
-      .select('id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '
-        + 'stop_policy, '
-        // live_orders에는 strategy_id 컬럼이 없다. 전략 소유권은 strategyOf()가
-        // signal_id의 [s:...] 표식에서 읽는다. 없는 칼럼을 projection하면
-        // PostgREST가 조회 전체를 실패시키므로 signal_id만 읽는다.
-        + 'sl_order_id, tp_order_id, status, reduce_only, acked_at, created_at, signal_id')
+  // ── 주문 장부를 읽는다 — DB가 코드보다 뒤처져도 멈추지 않는다 ──
+  //
+  //   진입 당시의 실행 계약(090)까지 읽어 보고, **그 칸이 없어서** 실패한
+  //   경우에만 옛 모양으로 한 번 더 읽는다. 090가 아직인 DB에서 조회가
+  //   통째로 죽으면 이미 열린 포지션의 청산·보호·복구가 함께 멈추는데,
+  //   그건 `migrationStatus`의 불변식("막는 것은 새로 여는 것뿐이다")과
+  //   정면으로 충돌한다.
+  //
+  //   후퇴 판정과 두 조회 모양은 `lifecycleRows`에 있다 — 여기에 두면
+  //   시험이 Supabase 체인을 흉내 내야 한다.
+  //
+  //   ★ 다른 실패(권한·연결·다른 칼럼)는 후퇴하지 않는다. 그걸 후퇴로
+  //     덮으면 진짜 고장이 정상 회차로 보인다.
+  const { loadLifecycleRows } = await import('@/lib/engine/lifecycleRows');
+  const loaded = await loadLifecycleRows(async (select) => {
+    const r = await (sb as any).from('live_orders')
+      .select(select)
       .order('acked_at', { ascending: false })
       .limit(200);
-    // **조회 실패를 '없음'으로 적지 않는다.**
-    if (error) {
-      out.error = String(error.message).slice(0, 200);
-      out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
-      return out;
-    }
-    rows = Array.isArray(data) ? data : [];
-  } catch (e: any) {
-    out.error = String(e?.message || e).slice(0, 200);
+    return { data: r?.data, error: r?.error };
+  });
+  // **조회 실패를 '없음'으로 적지 않는다.**
+  if (loaded.error || loaded.projection == null) {
+    out.error = loaded.error || '주문 장부를 읽지 못했습니다';
     out.summary = `주문 장부를 읽지 못했습니다 — ${out.error}`;
     return out;
   }
+  const rows: any[] = loaded.rows;
+  // 어떤 모양으로 읽었는지 남긴다. 이게 없으면 "계약 기록이 없는 주문"과
+  // "계약 칸을 못 읽은 회차"가 화면에서 같아 보인다.
+  out.projection = loaded.projection;
 
   // ★ 셋은 다른 뜻이다 — `positions`만 아래 반복문에 들어간다.
   //
   //   `deferred`가 이 반복문에 **도달할 수 없는 것**이 이 PR의 핵심이다.
   //   반복문 안에서 뒤늦게 거르면 그때는 이미 `credsOf`·`readOpenPosition`·
   //   `highWaterSince`·`liveStopPrice`가 불린 뒤다.
-  const { positions, deferred, skipped } = managedCandidates(rows);
+  const { positions, deferred, skipped, authorityCandidates } = managedCandidates(rows);
   out.candidates = positions.length;
   out.skipped = skipped;
   out.deferred = deferred;
   out.deferredCount = deferred.length;
-  if (positions.length === 0) {
+  // ★ **일반 후보가 0건이어도 전용 권한은 돈다.**
+  //   Exact100X 노출은 정의상 `positions`에 들어가지 않는다(자리 유예).
+  //   여기서 일찍 돌아가면 전용 종료 권한이 영원히 호출되지 않는다 —
+  //   이 저장소가 반복한 "만들어 놓고 배선을 안 함"이 그대로 재현된다.
+  if (positions.length === 0 && authorityCandidates.length === 0) {
     out.summary = deferred.length
       ? `감시할 후보가 없습니다 · 관리 유예 ${deferred.length}건`
       : '감시할 후보가 없습니다';
@@ -840,27 +940,8 @@ async function runLifecycleSweep(
   const { moveStopSafely } = await import('@/lib/engine/stopMove');
 
   /** 연결 하나당 한 번만 읽는다. **연결이 망을 정한다** */
-  const credCache = new Map<string, any>();
-  const credsOf = async (connectionId: string) => {
-    if (!credCache.has(connectionId)) {
-      let v: any = null;
-      try {
-        const { data: c } = await sb.from('exchange_connections')
-          .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
-          .eq('id', connectionId).maybeSingle();
-        if (c && !(c as any).has_withdrawal) {
-          const ex = resolveExecExchange((c as any).exchange_id).exchange;
-          if (ex) {
-            v = { exchange: ex, apiKey: (c as any).api_key,
-              apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),
-              testnet: (c as any).is_testnet !== false };
-          }
-        }
-      } catch { v = null; }
-      credCache.set(connectionId, v);
-    }
-    return credCache.get(connectionId);
-  };
+  const creds = makeCredsReader({ sb, resolveExchange: resolveExecExchange, decrypt: decryptSecret });
+  const credsOf = (connectionId: string) => creds.get(connectionId);
 
   // ★ **두 가지 중복을 구분한다.**
   //
@@ -882,6 +963,389 @@ async function runLifecycleSweep(
     if (!stillMine) return true;
     try { return await stillMine(); } catch { return false; }
   };
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 전용 종료 권한 — Exact100X 시간 청산
+  // ══════════════════════════════════════════════════════════
+  //
+  //   **일반 루프에 합치지 않는다.** 합치면 `lifecyclePolicyOf(strategyId)`
+  //   경로를 타게 되어 계약의 4시간이 아니라 전략 scalp의 6시간으로
+  //   닫힌다 — 사용자가 고르지 않은 2시간이다. 그리고 트레일링·본전이동이
+  //   같이 열린다.
+  //
+  //   순서(임차 → 노출 READ → 신원 검증 → **울타리 재검증** → 전송 →
+  //   재조회)는 `exitAuthorityRun`이 갖는다. 라우트에 인라인으로 두면 그
+  //   순서가 시험되지 않는 자리에 남는다.
+  //
+  //   ★ 재검증과 전송 사이에 네트워크 왕복이 **0**이다. 모드·노출·규격
+  //     조회는 `prepareSymbolClose`가 재검증 **앞**에서 전부 끝낸다.
+  if (authorityCandidates.length > 0) {
+    const { runExitAuthority } = await import('@/lib/engine/exitAuthorityRun');
+    // **DB 울타리는 거래소를 막지 못한다.** 재검증 직후 임차가 넘어가면
+    // 낡은 실행자도 요청을 보낼 수 있다 — 다른 프로세스라 같은 event
+    // loop를 공유하지 않는다. 같은 종료 의도에 같은 멱등 키를 실어
+    // 거래소가 중복을 **알아볼 기회**를 준다.
+    //
+    // ★ strict single-writer가 되는 것은 **아니다.** 그 거부가 반드시
+    //   일어난다고 주장하지 않는다 — 추가 방어층이고, 반대 포지션은
+    //   `reduceOnly`·방향 검증·재조회 대조가 막는다.
+    const { exitIntentId } = await import('@/lib/engine/exitIntent');
+    out.authority.candidates = authorityCandidates.length;
+
+    for (const c of authorityCandidates) {
+      const tag = {
+        symbol: c.symbol, strategyId: c.strategyId,
+        executionProfileId: c.executionIdentity.profileId,
+        contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
+          + `/v${c.executionIdentity.contractVersion}`,
+        side: c.side,
+      };
+      try {
+        const venue = await credsOf(c.connectionId);
+        if (!venue) {
+          // **어느 사실 때문인지 적는다.** 이 경로는 Exact100X 전용
+          // 종료 권한이므로, 고아 정리 실패와 같은 숫자에 넣지 않는다.
+          const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
+          const dc = creds.codeOf(c.connectionId);
+          out.authority.results.push({ ...tag, code: 'NO_VENUE', ok: false, failed: true,
+            attemptedWrite: false,
+            credentialCode: dc, path: 'EXACT100X_AUTHORITY',
+            reason: credentialDiagnosisReason(dc) });
+          out.authority.failed += 1;
+          continue;
+        }
+        if (venue.exchange !== c.exchange) {
+          out.authority.results.push({ ...tag, code: 'VENUE_MISMATCH', ok: false, failed: true,
+            attemptedWrite: false,
+            reason: `주문은 ${c.exchange}로 적혀 있는데 연결은 ${venue.exchange}입니다` });
+          out.authority.failed += 1;
+          continue;
+        }
+
+        if (dryRun) {
+          // 점검 모드에서는 **거래소를 읽지도 쓰지도 않는다.**
+          out.authority.results.push({ ...tag, code: 'DRY_RUN', ok: true, failed: false,
+            attemptedWrite: false, reason: '점검 모드 — 전용 종료 권한을 돌리지 않았습니다' });
+          continue;
+        }
+
+        // ★ **같은 회차에 같은 자리를 두 번 건드리지 않는다.**
+        //   일반 루프와 같은 표식을 쓴다 — 같은 자리를 두 경로가 함께
+        //   건드리는 것도 막아야 한다.
+        const key = mutationKeyOf({
+          connectionId: c.connectionId, symbol: c.symbol, side: c.side,
+        } as any);
+        if (!guard.claim(key)) {
+          out.authority.results.push({ ...tag, code: 'DUPLICATE', ok: true, failed: false,
+            attemptedWrite: false,
+            reason: '같은 계좌·종목·방향을 이번 회차에 이미 처리했습니다' });
+          continue;
+        }
+
+        let prepared: any = null;
+        const r = await runExitAuthority(
+          {
+            positionIdentity: {
+              exchange: c.exchange, connectionId: c.connectionId, symbol: c.symbol,
+              side: c.side, executionIdentity: c.executionIdentity,
+              openingOrderId: c.orderId,
+            },
+            strategyId: c.strategyId,
+            executionIdentity: c.executionIdentity,
+            capabilities: c.capabilities,
+            reason: 'TIME_EXIT',
+            openedAtMs: c.openedAt,
+          },
+          {
+            // ① 임차 — 거래소를 읽기 전에
+            leaseOwned: async () => {
+              const owned = await mayMutate();
+              return { owned, identity: { holder: null, fence: fence ?? null },
+                reason: owned ? '' : LEASE_LOST_MSG };
+            },
+            // ② 노출·모드·규격을 **전부 여기서** 읽는다
+            prepareClose: async () => {
+              const p0 = await ops.prepareSymbolClose(venue, c.symbol, c.side,
+                // 관측한 노출로 만든다 — 같은 순간 같은 노출을 본
+                // 실행자끼리 같은 값이어야 거래소가 중복을 알아볼 수 있다.
+                (observedQty) => exitIntentId({
+                  connectionId: c.connectionId, exchange: c.exchange,
+                  symbol: c.symbol, side: c.side,
+                  executionIdentity: c.executionIdentity,
+                  reason: 'TIME_EXIT', quantity: observedQty,
+                }));
+              prepared = p0.prepared;
+              return { code: p0.code, prepared: p0.prepared as any, message: p0.message };
+            },
+            // ③ 쓰기 직전 재검증 — 아래 전송과의 사이에 await가 없다
+            revalidateFence: mayMutate,
+            // ④ 전송 — 읽지 않는다
+            sendClose: () => ops.sendSymbolClose(venue, prepared),
+            // ⑤ 재조회
+            readAfter: () => ops.readOpenPosition(venue, c.symbol)
+              .then((x: any) => ({ ok: x.ok === true, found: x.found === true })),
+          },
+          Date.now(),
+        );
+
+        if (r.attemptedWrite) out.authority.acted += 1;
+        if (r.failed) out.authority.failed += 1;
+        out.authority.results.push({
+          ...tag, code: r.code, ok: r.ok, failed: r.failed, blocked: r.blocked,
+          // ★ **"성공"과 "주문 전송"을 같은 값으로 적지 않는다.**
+          attemptedWrite: r.attemptedWrite, accepted: r.accepted,
+          flatVerified: r.flatVerified, reconciledFlat: r.reconciledFlat,
+          needsReconcile: r.needsReconcile,
+          requestedQuantity: r.requestedQuantity,
+          heldMs: r.decision?.heldMs ?? null,
+          policySource: r.decision?.policySource ?? null,
+          policyVersion: r.decision?.policyVersion ?? null,
+          leaseFence: r.decision?.leaseIdentity?.fence ?? null,
+          reason: r.reason,
+        });
+
+        // ── ⑤B-3A-1 종료 실행 계측을 적는다 ──
+        //
+        //   ★ **주문을 내지 않는다.** 이미 끝난 실행의 구간 시간과
+        //     거래소가 돌려준 체결 정보를 적을 뿐이다.
+        //   ★ 실행을 **시도한 회차만** 적는다 — 권한이 없어 아무것도
+        //     하지 않은 회차를 섞으면 지연 분포가 0 쪽으로 쏠린다.
+        if (r.attemptedWrite === true) {
+          try {
+            const { recordEscapeObservation } =
+              await import('@/lib/engine/escapeObservationStore');
+            const live = await ops.readOpenPosition(venue, c.symbol).catch(() => null);
+            const esc = await recordEscapeObservation(sb, {
+              sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
+              env: venue.testnet ? 'TESTNET' : 'LIVE',
+              connectionId: c.connectionId, symbol: c.symbol, side: c.side,
+              executionIdentity: c.executionIdentity,
+              wakeSource: wake.source, wakeDelayMs: wake.delayMs,
+              configuredIntervalMs: wake.intervalMs,
+              // 관측 구간은 ⑤B-2 블록이 따로 잰다 — 여기서는 실행 구간만.
+              observation: {
+                markReadElapsedMs: null, bracketReadElapsedMs: null,
+                positionRiskElapsedMs: null, riskMeasurementElapsedMs: null,
+              },
+              timing: r.timing,
+              runCode: r.code,
+              attemptedWrite: r.attemptedWrite,
+              accepted: r.accepted,
+              flatVerified: r.flatVerified,
+              requestedQuantity: r.requestedQuantity,
+              reportedAvgPrice: r.reportedAvgPrice,
+              exchangeOrderId: null, executedQty: null,
+              // 전송 시점 마크가는 이 경로가 읽지 않는다. **지어내지
+              // 않는다** — 없으면 슬리피지가 null이 된다.
+              markAtSubmit: null,
+              // 실행 **직전**의 노출이 아니라 직후 조회다. 자격 판정은
+              // "이 후보가 Exact100X TESTNET 포지션이었나"를 묻는다.
+              signedPositionAmt: prepared?.observedQty == null ? null
+                : (c.side === 'LONG' ? prepared.observedQty : -prepared.observedQty),
+              testnet: venue.testnet ?? null, exchange: venue.exchange ?? null,
+            });
+            void live;
+            if (esc.code === 'RECORDED') out.escape.recorded += 1;
+            else if (esc.code === 'NOT_ELIGIBLE' || esc.code === 'ORIGIN_IMPOSSIBLE') {
+              out.escape.notEligible += 1;
+            } else out.escape.recordFailed += 1;
+          } catch {
+            // 기록 실패가 종료 경로를 죽이지 않는다.
+            out.escape.recordFailed += 1;
+          }
+        }
+
+        if (r.code === 'LEASE_LOST' || r.code === 'NOT_OWNER') {
+          // **회차를 끊는다.** 임차가 넘어갔으면 다음 후보도 내 것이 아니다.
+          break;
+        }
+      } catch (e: any) {
+        out.authority.results.push({ ...tag, code: 'FAILED', ok: false, failed: true,
+          attemptedWrite: false, reason: String(e?.message || e).slice(0, 160) });
+        out.authority.failed += 1;
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ⑤B-0/1 — 열려 있는 100배 포지션의 위험을 **재기만 한다**
+  // ══════════════════════════════════════════════════════════════
+  //
+  //   왜 여기 있는가: 측정기를 만들고 어디에도 안 이으면 이 저장소가
+  //   반복한 "만들어 놓고 배선을 안 함"이 된다. 관측이 실제로 나와야
+  //   ⑤B-2/3가 문턱을 **유도**할 수 있다.
+  //
+  //   ★ **주문을 내지 않는다.** 이 블록은 `ops.sendSymbolClose`도
+  //     `ops.prepareSymbolClose`도 부르지 않는다. `runExitAuthority`도
+  //     부르지 않는다. 읽기 세 번과 순수 계산 한 번이 전부다.
+  //
+  //   ★ 점검 모드에서는 **읽지도 않는다.**
+  if (authorityCandidates.length > 0 && !dryRun) {
+    const { measurePostEntryRisk } = await import('@/lib/engine/postEntryRisk');
+    const { exact100xExitVenueCapability } = await import('@/lib/engine/exitAuthority');
+    const { recordRiskObservation } = await import('@/lib/engine/riskObservationStore');
+    const bf = await import('@/lib/exchanges/binanceFutures');
+
+    for (const c of authorityCandidates) {
+      try {
+        // ⑤A-2의 거래소 관문을 **같은 정본으로** 다시 지난다. 감시가
+        // 권한보다 넓은 거래소를 보면 그쪽이 새 잠복 경로가 된다.
+        if (exact100xExitVenueCapability(c.exchange).timeExit !== true) continue;
+        const venue = await credsOf(c.connectionId);
+        if (!venue || venue.exchange !== c.exchange) continue;
+
+        // ── 마크가: ④의 timestamped MARK ──
+        //
+        //   `positionRisk.markPrice`를 쓰지 않는다 — 그 값에는 시각이
+        //   없어서 "언제의 가격인가"를 물을 수 없다.
+        const snap = await bf.readMarketSnapshot(c.symbol, venue.testnet).catch(() => null);
+        const br = await bf.readBracket(c.symbol, venue.apiKey, venue.apiSecret, venue.testnet)
+          .catch(() => null);
+        // ── 거래소 청산가: 포지션 응답 ──
+        //
+        //   ★ **여기서 시각을 찍지 않는다.** 이 helper는 한 번의 왕복이
+        //     아니다(v2 → v3 → account). 호출 **전에** 찍은 값을 "받은
+        //     시각"이라고 적으면 왕복 두세 번만큼 앞선 숫자가 기록되고,
+        //     ⑤B-0이 모으려는 관측이 그 자리에서 오염된다.
+        //
+        //     실제 HTTP 경계는 helper가 잡아서 `provenance`로 준다.
+        //     `positionUpdateTimeMs`는 **기록만** 한다 — 포지션 갱신
+        //     시각이지 청산가가 계산된 시각이 아니다.
+        const rr = await bf.getSymbolPositionRiskEx(
+          venue.apiKey, venue.apiSecret, c.symbol, venue.testnet).catch(() => null);
+
+        const m = measurePostEntryRisk({
+          side: c.side,
+          mark: snap?.snapshot ? {
+            kind: 'MARK', source: snap.snapshot.source, value: snap.snapshot.markPrice,
+            exchangeTimeMs: snap.snapshot.stamps.exchangeTimeMs,
+            receivedAtMs: snap.snapshot.stamps.receivedAtMs,
+            observedAtMs: snap.snapshot.stamps.observedAtMs,
+            cache: snap.snapshot.stamps.cache,
+          } : null,
+          // ★ `value`를 **넣지 않는다.** 브래킷은 숫자 하나가 아니라
+          //   구간 표다. `value: null`을 넣으면 ④가 VALUE_INVALID로
+          //   막는다 — `entry100x`가 같은 관측을 만드는 모양 그대로다.
+          bracket: br?.tiers ? {
+            kind: 'BRACKET', source: 'EXCHANGE_LEVERAGE_BRACKET',
+            exchangeTimeMs: null, receivedAtMs: br.observedAtMs,
+            observedAtMs: br.observedAtMs, cache: br.freshness,
+          } : null,
+          exchangeLiquidationPrice: rr?.risk?.liquidationPrice ?? null,
+          entryPrice: rr?.risk?.entryPrice ?? c.entryPrice,
+          quantity: rr?.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt),
+          leverage: rr?.risk?.leverage ?? null,
+          marginMode: rr?.risk?.marginType === 'isolated' ? 'isolated'
+            : rr?.risk?.marginType === 'cross' ? 'cross' : null,
+          brackets: br?.tiers ?? null,
+          // 091 스냅숏을 **그대로** 넘긴다. null은 UNKNOWN이다.
+          entryAdverseDistancePct: c.entryAdverseDistancePct,
+          entryLiquidationDistancePctRaw: c.entryLiquidationDistancePctRaw,
+          provenance: {
+            // helper가 잡은 **실제 경계**를 그대로 쓴다. 추측하지 않는다.
+            positionRiskSource: rr?.provenance?.positionRiskSource ?? null,
+            positionRiskRequestStartedAtMs:
+              rr?.provenance?.positionRiskRequestStartedAtMs ?? null,
+            positionRiskReceivedAtMs: rr?.provenance?.positionRiskReceivedAtMs ?? null,
+            accountRequestStartedAtMs: rr?.provenance?.accountRequestStartedAtMs ?? null,
+            accountReceivedAtMs: rr?.provenance?.accountReceivedAtMs ?? null,
+            // ★ 단조 측정(duration). epoch 칸과 섞지 않는다.
+            positionRiskElapsedMs: rr?.provenance?.positionRiskElapsedMs ?? null,
+            accountElapsedMs: rr?.provenance?.accountElapsedMs ?? null,
+            helperElapsedMs: rr?.provenance?.helperElapsedMs ?? null,
+            positionUpdateTimeMs: rr?.risk?.positionUpdateTimeMs ?? null,
+            markExchangeTimeMs: snap?.snapshot?.stamps.exchangeTimeMs ?? null,
+            markReceivedAtMs: snap?.snapshot?.stamps.receivedAtMs ?? null,
+            markObservedAtMs: snap?.snapshot?.stamps.observedAtMs ?? null,
+            bracketObservedAtMs: br?.observedAtMs ?? null,
+          },
+          nowMs: Date.now(),
+        });
+
+        if (m.status === 'MEASURED') out.postEntryRisk.measured += 1;
+        else out.postEntryRisk.unusable += 1;
+
+        // ── ⑤B-2 관측을 **덧붙인다** ──
+        //
+        //   한 회차 응답에만 있으면 분포를 만들 수 없고, 분포가 없으면
+        //   ⑤B-3의 문턱을 유도할 수 없다 — 지어내는 수밖에 없어진다.
+        //
+        //   ★ 출처를 **여기서 고른다.** 이 경로는 실제 자격증명으로 실제
+        //     거래소를 조회한 것이므로 실측이다. 시험·검사기가 부를 때는
+        //     그쪽이 SYNTHETIC_TEST_ONLY를 넘긴다.
+        //   ★ 돌려받은 값으로 **분기하지 않는다.** 세기만 한다.
+        //   ★ **열린 포지션이 아니면 실측이 아니다.** 자격 판정은
+        //     `recordRiskObservation`이 정본에게 묻는다 — 여기서 미리
+        //     거르면 판단이 두 곳이 된다.
+        const rec = await recordRiskObservation(sb, {
+          sampleOrigin: 'VERIFIED_TESTNET_OBSERVATION',
+          env: venue.testnet ? 'TESTNET' : 'LIVE',
+          connectionId: c.connectionId,
+          symbol: c.symbol, side: c.side,
+          executionIdentity: c.executionIdentity,
+          measurement: m,
+          position: {
+            entryPrice: rr?.risk?.entryPrice ?? null,
+            quantity: rr?.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt),
+            leverage: rr?.risk?.leverage ?? null,
+            marginMode: rr?.risk?.marginType === 'isolated' ? 'isolated'
+              : rr?.risk?.marginType === 'cross' ? 'cross' : null,
+          },
+          bracketFreshness: br?.freshness ?? null,
+          // **부호를 그대로** 넘긴다. 절댓값을 주면 방향을 대조할 수 없다.
+          signedPositionAmt: rr?.risk?.positionAmt ?? null,
+          testnet: venue.testnet ?? null,
+          exchange: venue.exchange ?? null,
+        });
+        if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;
+        else if (rec.code === 'NOT_ELIGIBLE' || rec.code === 'ORIGIN_IMPOSSIBLE') {
+          // **쓰기 실패가 아니다.** 따로 센다.
+          out.postEntryRisk.notEligible += 1;
+          const k = rec.eligibility ?? rec.code;
+          out.postEntryRisk.notEligibleBy[k] = (out.postEntryRisk.notEligibleBy[k] ?? 0) + 1;
+        } else out.postEntryRisk.recordFailed += 1;
+        out.postEntryRisk.samples.push({
+          symbol: c.symbol, side: c.side,
+          contract: `${c.executionIdentity.profileId}/${c.executionIdentity.presetId}`
+            + `/v${c.executionIdentity.contractVersion}`,
+          status: m.status, reason: m.reason,
+          // 내부 검증자의 신뢰도다. 측정 전체의 신뢰도가 아니다.
+          internalTrustworthy: m.internalTrustworthy,
+          markPrice: m.markPrice,
+          exchangeLiquidationPrice: m.exchangeLiquidationPrice,
+          estimatedLiquidationPrice: m.estimatedLiquidationPrice,
+          exchangeHeadroomPct: m.exchangeHeadroomPct,
+          estimatedHeadroomPct: m.estimatedHeadroomPct,
+          absoluteDelta: m.absoluteDelta, deltaPct: m.deltaPct,
+          liquidationSources: m.liquidationSources,
+          entryAdverseDistancePct: m.entryAdverseDistancePct,
+          entryLiquidationDistancePctRaw: m.entryLiquidationDistancePctRaw,
+          entryTierIndex: m.internal?.entryTierIndex ?? null,
+          tier: m.internal?.tier ?? null,
+          internalCode: m.internal?.code ?? null,
+          leverage: rr?.risk?.leverage ?? null,
+          quantity: rr?.risk?.positionAmt == null ? null : Math.abs(rr.risk.positionAmt),
+          entryPrice: rr?.risk?.entryPrice ?? null,
+          marginType: rr?.risk?.marginType ?? null,
+          bracketFreshness: br?.freshness ?? 'NONE',
+          markFreshness: m.freshness?.code ?? null,
+          provenance: m.provenance,
+          recorded: rec.code,
+          // 실제 런타임 상황을 그대로 남긴다 — 표본에는 안 넣지만
+          // 운영자는 "포지션이 없더라"를 볼 수 있어야 한다.
+          eligibility: rec.eligibility,
+          eligibilityReason: rec.code === 'RECORDED' ? null : rec.reason,
+        });
+      } catch (e: any) {
+        // 측정 실패는 **감시 상태**다. 종료 사유가 아니다.
+        out.postEntryRisk.unusable += 1;
+        out.postEntryRisk.samples.push({
+          symbol: c.symbol, status: 'RISK_DATA_UNUSABLE',
+          reason: String(e?.message || e).slice(0, 160),
+        });
+      }
+    }
+  }
 
   for (const p of positions) {
     // ══════════════════════════════════════════════════════════
@@ -924,8 +1388,11 @@ async function runLifecycleSweep(
     try {
       const venue = await credsOf(p.connectionId);
       if (!venue) {
+        const { credentialDiagnosisReason } = await import('@/lib/engine/testnetReadiness');
+        const dc = creds.codeOf(p.connectionId);
         out.results.push({ symbol: p.symbol, strategyId: p.strategyId, code: 'NO_VENUE', ok: false,
-          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다' });
+          credentialCode: dc, path: 'GENERIC_MANAGED_POSITION',
+          reason: credentialDiagnosisReason(dc) });
         continue;
       }
       // **줄에 적힌 거래소와 연결의 거래소가 다르면 손대지 않는다.**
@@ -1053,12 +1520,39 @@ async function runLifecycleSweep(
   }
 
   const unknown = out.results.filter(r => r.code === 'POSITION_UNKNOWN').length;
+  // ★ **전용 권한 결과가 요약에서 사라지지 않게 한다.** 예전에 생명주기
+  //   결과가 실패 집계에서 빠져 "조용한 정상"으로 보인 적이 있다.
   out.summary = `후보 ${out.candidates}건 · 실행 ${out.acted}건`
+    + (out.authority.candidates
+        ? ` · 전용 종료 후보 ${out.authority.candidates}건`
+          + ` (전송 ${out.authority.acted}건`
+          + `${out.authority.failed ? ` · 실패 ${out.authority.failed}건` : ''})`
+        : '')
     + (unknown > 0 ? ` · 확인 못 함 ${unknown}건` : '')
     // ★ 유예를 따로 적는다. "대상 아님"에 합치면 **일부러 관리하지 않은 줄**과
     //   칸이 모자라 판단 못 한 줄이 한 숫자가 되고, 그러면 화면만 보고는
     //   고정 손절 없는 노출이 몇 건 열려 있는지 알 수 없다.
     + (out.deferredCount ? ` · 관리 유예 ${out.deferredCount}건` : '')
+    // 후퇴로 읽은 회차는 그 사실을 적는다 — identity가 전부 비어 있는
+    // 이유가 "기록이 없어서"가 아니라 "칸을 못 읽어서"임을 구별하게 한다.
+    + (out.projection === 'LEGACY' ? ' · 실행 계약 칸 없음(090 미적용)' : '')
+    + (out.projection === 'IDENTITY' ? ' · 진입 위험 스냅숏 칸 없음(091 미적용)' : '')
+    // ⑤B-0/1 — **측정만 했다.** 닫은 것이 아니다. 둘을 같은 문장에
+    // 섞으면 "위험 측정 3건"이 "3건 닫았다"로 읽힌다.
+    + (out.postEntryRisk.measured || out.postEntryRisk.unusable
+      ? ` · 위험 측정 ${out.postEntryRisk.measured}건`
+        + `${out.postEntryRisk.unusable ? ` · 측정 불가 ${out.postEntryRisk.unusable}건` : ''}`
+        + `${out.postEntryRisk.recorded ? ` · 관측 기록 ${out.postEntryRisk.recorded}건` : ''}`
+        + `${out.postEntryRisk.recordFailed ? ` · 기록 실패 ${out.postEntryRisk.recordFailed}건` : ''}`
+        + `${out.postEntryRisk.notEligible ? ` · 실측 자격 불충족 ${out.postEntryRisk.notEligible}건` : ''}`
+        + ' (측정만, 종료 0건)'
+      : '')
+    // ⑤B-3A-1 — 실행 계측. **적은 줄 수지 닫은 수가 아니다.**
+    + (out.escape.recorded || out.escape.recordFailed || out.escape.notEligible
+      ? ` · 탈출 계측 ${out.escape.recorded}건`
+        + `${out.escape.recordFailed ? ` · 계측 기록 실패 ${out.escape.recordFailed}건` : ''}`
+        + `${out.escape.notEligible ? ` · 계측 자격 불충족 ${out.escape.notEligible}건` : ''}`
+      : '')
     + (out.skipped.length ? ` · 대상 아님 ${out.skipped.reduce((a, b) => a + b.count, 0)}줄` : '');
   return out;
 }
@@ -1073,7 +1567,12 @@ async function runLifecycleSweep(
   // 위 `decideExits`는 계단식 표만 본다. 이 경로가 scalp·my-original-v1의
   // 트레일링·본전이동·시간청산을 담당한다. 점검 모드에서는 판단만 하고
   // 주문을 내지 않는다.
-  const lifecycle = await runLifecycleSweep(sb, dryRun, stillMine, myFence);
+  const lifecycle = await runLifecycleSweep(sb, dryRun,
+    // **wake 정본을 그대로 넘긴다.** 부른 쪽이 예정 시각을 알려주지
+    // 않았으면 지연은 null이다 — worker 간격은 env로 바뀌고 GitHub/Vercel은
+    // 예정이 다르므로 라우트가 추정하지 않는다.
+    { source: runner, delayMs: wakeCadence.delayMs, intervalMs: wakeCadence.intervalMs },
+    stillMine, myFence);
 
   // ── 무엇을 안 보고 있는가 ──
   //

@@ -4,7 +4,12 @@
 // 바이낸스가 testnet.binancefuture.com → demo-fapi.binance.com 으로 변경
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
-import { createHmac } from 'crypto';
+import { createHmac, createHash } from 'crypto';
+import {
+  readPositionRiskWithProvenance,
+  type PositionRiskProvenance, type SymbolPositionRisk,
+} from './positionRiskRead';
+export type { PositionRiskProvenance, SymbolPositionRisk };
 import { parseLossless, venueIdOf } from './losslessJson';
 import { qtyGridFor, type SymbolFilters } from './quantize';
 
@@ -149,21 +154,14 @@ export async function getFuturesIncome(
 
 // ── 레버리지 브래킷 (심볼별 실제 유지증거금률/공제액) ──────────────
 // Binance /fapi/v1/leverageBracket (서명 필요). 응답을 [상한, MMR, 공제액] 형태로 변환
-export type BracketTier = [cap: number, mmr: number, maintAmount: number];
+export type { BracketTier } from './leverageBracket';
+export { parseBrackets } from './leverageBracket';
+import { parseBrackets, type BracketTier } from './leverageBracket';
+
+// 캐시는 여기 남는다 — 파서는 순수 함수이고, 캐시는 네트워크 호출의 것이다.
 interface BracketCacheEntry { tiers: BracketTier[]; ts: number; }
 const BRACKET_CACHE = new Map<string, BracketCacheEntry>();
 const BRACKET_TTL = 6 * 60 * 60 * 1000; // 6시간
-
-function parseBrackets(raw: any): BracketTier[] {
-  const arr = Array.isArray(raw?.brackets) ? raw.brackets : [];
-  return arr
-    .map((b: any): BracketTier => [
-      parseFloat(b.notionalCap),
-      parseFloat(b.maintMarginRatio),
-      parseFloat(b.cum ?? b.cumFastMaintenanceAmount ?? '0'),
-    ])
-    .sort((a: BracketTier, b: BracketTier) => a[0] - b[0]);
-}
 
 /**
  * 이 심볼에서 거래소가 허용하는 **최대 배율**.
@@ -217,50 +215,462 @@ export async function getLeverageBrackets(
   }
 }
 
-// 캐시 우선 단일 심볼 브래킷 조회 (TTL 6시간). 실패 시 null → 호출측이 fallback 사용
+/**
+ * 브래킷을 어디서 가져왔는가. **"있다"와 "지금 것이다"는 다르다.**
+ *
+ *   FRESH        TTL 안의 값이거나 방금 읽은 값
+ *   STALE_CACHE  TTL이 지났는데 다시 읽는 데 실패해 **옛 값**이 남아 있다
+ *   NONE         쓸 값이 없다
+ */
+export type BracketFreshness = 'FRESH' | 'STALE_CACHE' | 'NONE';
+
+export interface BracketRead {
+  tiers: BracketTier[] | null;
+  freshness: BracketFreshness;
+  /** 이 값을 **실제로 거래소에서 읽은** 시각. 캐시면 그때 그 시각이다 */
+  observedAtMs: number | null;
+  error: string | null;
+}
+
+/**
+ * 캐시 키. **계정이 들어간다.**
+ *
+ * `/fapi/v1/leverageBracket`은 USER_DATA이고 응답의 `notionalCoef`는
+ * **계정별 조정 배수**다. 그래서 `테스트넷여부 + 심볼`만으로 키를 만들면,
+ * 계정 A가 먼저 BTCUSDT를 읽은 뒤 계정 B가 같은 심볼을 물으면 **A의
+ * 브래킷을 받는다.** 100배 청산거리 입력에서 그건 허용할 수 없다.
+ *
+ * **비밀값을 키에 넣지 않는다** — 저장소 정본인 `fingerprintOf`(SHA-256)로
+ * 지문만 쓴다. 캐시 키라 충돌이 곧 계정 섞임이므로 6자리보다 길게 잡는다.
+ */
+function bracketCacheKey(apiKey: string, symbol: string, testnet: boolean): string {
+  const who = createHash('sha256').update(String(apiKey ?? '')).digest('hex').slice(0, 16);
+  return `${testnet ? 'T' : 'L'}:${who}:${symbol}`;
+}
+
+/**
+ * 단일 심볼 브래킷 — **출처와 신선도를 함께** 돌려준다.
+ *
+ * 옛 `getCachedBracket`은 TTL이 지난 뒤 다시 읽기에 실패하면 옛 값을
+ * 조용히 돌려줬다. 그러면 6시간이 아니라 **사실상 무기한** 낡은
+ * 유지증거금 구간으로 100배 청산가를 계산하게 된다. "거래소 risk tier를
+ * 신뢰할 수 없으면 막는다"는 ②의 계약과 정면으로 어긋난다.
+ *
+ * 그래서 값을 버리지는 않되 **`STALE_CACHE`라고 말한다.** 그 값을 쓸지는
+ * 부르는 쪽이 정한다 — Exact100X는 쓰지 않는다.
+ */
+export async function readBracket(
+  symbol: string, key: string, secret: string, testnet = true,
+  /**
+   * 거래소 조회. **시험이 주입한다** — 안 주면 정본을 쓴다.
+   *
+   * 전역 `fetch`를 바꿔치기하지 않는 이유: 공유 하네스에서 그렇게 하면
+   * 다른 시험까지 깨진다(실제로 깨뜨렸다). 저장소의 다른 판정들이 쓰는
+   * 의존 주입과 같은 모양으로 맞춘다.
+   */
+  fetchBrackets: (
+    k: string, sec: string, tn: boolean, sym: string,
+  ) => Promise<{ brackets: Record<string, BracketTier[]>; message?: string }>
+    = getLeverageBrackets as any,
+  /** 지금 시각. 시험이 고정한다 — 전역 `Date.now`를 바꾸지 않는다 */
+  nowMs: () => number = () => Date.now(),
+): Promise<BracketRead> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  const cacheKey = bracketCacheKey(key, sym, testnet);
+  const hit = BRACKET_CACHE.get(cacheKey);
+  if (hit && nowMs() - hit.ts < BRACKET_TTL) {
+    return { tiers: hit.tiers, freshness: 'FRESH', observedAtMs: hit.ts, error: null };
+  }
+  let res: { brackets: Record<string, BracketTier[]>; message?: string };
+  try { res = await fetchBrackets(key, secret, testnet, sym); }
+  catch (e: any) { res = { brackets: {}, message: e?.message || '브래킷 조회 실패' }; }
+  const tiers = res.brackets[sym];
+  if (tiers && tiers.length) {
+    const ts = nowMs();
+    BRACKET_CACHE.set(cacheKey, { tiers, ts });
+    return { tiers, freshness: 'FRESH', observedAtMs: ts, error: null };
+  }
+  const why = res.message || `${sym}의 브래킷을 읽지 못했습니다`;
+  if (hit) {
+    // 값은 있지만 **지금 것이 아니다.** 그 사실을 숨기지 않는다.
+    return { tiers: hit.tiers, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };
+  }
+  return { tiers: null, freshness: 'NONE', observedAtMs: null, error: why };
+}
+
+/**
+ * 옛 이름. **기존 화면의 동작을 바꾸지 않는다** — 낡은 캐시도 그대로
+ * 돌려준다(그쪽은 `bracketSource`로 추정/거래소를 구분해 표시한다).
+ *
+ * ★ Exact100X 청산거리 입력에는 **쓰지 마라.** 낡은 구간으로 100배
+ *   청산가를 정하게 된다. 그 경로는 `readBracket`을 쓰고 `FRESH`가
+ *   아니면 막는다.
+ */
 export async function getCachedBracket(
   symbol: string, key: string, secret: string, testnet = true,
 ): Promise<BracketTier[] | null> {
+  const r = await readBracket(symbol, key, secret, testnet);
+  return r.tiers;
+}
+
+// ── 계정의 **실제** 수수료율 ────────────────────────────────
+//
+// 기본값 표(`lib/fees.ts`의 `DEFAULT_FEES`)는 등급·BNB 할인·프로모션을
+// 모르므로 100배 비용 계산의 출처로 쓸 수 없다. 심볼별 실제 수수료를
+// 계정에서 읽는다. **못 읽으면 null이다** — 기본값으로 대체하지 않는다.
+export interface CommissionRate {
+  symbol: string;
+  /** 비율. 0.0004 = 0.04% */
+  makerRate: number;
+  takerRate: number;
+  /**
+   * 우리가 이 응답을 **실제로 받은** 시각.
+   *
+   * 부르는 쪽이 `Date.now()`를 붙이게 두지 않는다 — 그러면 언제 읽었든
+   * 항상 "방금"이 되어 신선도 검사가 자기 자신을 속인다.
+   */
+  observedAtMs: number;
+}
+
+export async function getCommissionRate(
+  key: string, secret: string, symbol: string, testnet = true,
+): Promise<{ rate: CommissionRate | null; error: string | null }> {
   const sym = symbol.toUpperCase().replace('/', '');
-  const cacheKey = `${testnet ? 'T' : 'L'}:${sym}`;
-  const hit = BRACKET_CACHE.get(cacheKey);
-  if (hit && Date.now() - hit.ts < BRACKET_TTL) return hit.tiers;
-  const res = await getLeverageBrackets(key, secret, testnet, sym);
-  const tiers = res.brackets[sym];
-  if (tiers && tiers.length) {
-    BRACKET_CACHE.set(cacheKey, { tiers, ts: Date.now() });
-    return tiers;
+  try {
+    const d = await fapiSigned('GET', '/fapi/v1/commissionRate', key, secret, testnet,
+      { symbol: sym });
+    const maker = parseFloat(d?.makerCommissionRate);
+    const taker = parseFloat(d?.takerCommissionRate);
+    if (!Number.isFinite(maker) || !Number.isFinite(taker)) {
+      return { rate: null, error: `${sym}의 수수료율을 읽지 못했습니다` };
+    }
+    return {
+      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: Date.now() },
+      error: null,
+    };
+  } catch (e: any) {
+    return { rate: null, error: e?.message || '수수료율 조회 실패' };
   }
-  return hit ? hit.tiers : null; // 만료된 캐시라도 있으면 그거라도
+}
+
+// ── 호가(depth) ─────────────────────────────────────────────
+//
+// 슬리피지를 상수로 지어내지 않으려면 **실제 호가**가 있어야 한다.
+// 공개 엔드포인트다(서명 불필요). 캐시하지 않는다 — 호가는 금방 낡고,
+// 낡은 호가로 체결가를 추정하면 그 추정이 가장 틀리는 순간에 쓰인다.
+// 관측 시각을 함께 돌려주어 ④(신선도)가 검사할 수 있게 한다.
+export interface DepthSnapshot {
+  symbol: string;
+  bids: Array<[number, number]>;
+  asks: Array<[number, number]>;
+  /** 우리가 응답을 **실제로 받은** 시각 */
+  observedAtMs: number;
+  /**
+   * 거래소가 적어 준 시각. 선물 depth 응답은 `T`(거래 엔진 시각)와
+   * `E`(메시지 출력 시각)를 준다 — 호가가 **만들어진** 시각은 `T`다.
+   * 둘 다 없으면 null이다. **지어내지 않는다.**
+   */
+  exchangeTimeMs: number | null;
+}
+
+export async function getOrderBookDepth(
+  symbol: string, testnet = true, limit = 100,
+): Promise<{ depth: DepthSnapshot | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const r = await fetch(`${base(testnet)}/fapi/v1/depth?symbol=${sym}&limit=${limit}`,
+      { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+    if (!r.ok) return { depth: null, error: `호가 조회 실패 (HTTP ${r.status})` };
+    const d = parseLossless(await r.text());
+    const lv = (x: any): Array<[number, number]> => (Array.isArray(x) ? x : [])
+      .map((e: any) => [parseFloat(e?.[0]), parseFloat(e?.[1])] as [number, number])
+      .filter(e => Number.isFinite(e[0]) && Number.isFinite(e[1]));
+    const bids = lv(d?.bids);
+    const asks = lv(d?.asks);
+    if (!bids.length || !asks.length) {
+      return { depth: null, error: `${sym}의 호가가 비어 있습니다` };
+    }
+    const te = Number(d?.T ?? d?.E);
+    return {
+      depth: { symbol: sym, bids, asks, observedAtMs: Date.now(),
+               exchangeTimeMs: Number.isFinite(te) && te > 0 ? te : null },
+      error: null,
+    };
+  } catch (e: any) {
+    return { depth: null, error: e?.message || '호가 조회 실패' };
+  }
+}
+
+// ── 펀딩: 주기와 **지불 상한** ─────────────────────────────
+//
+// **8시간을 박지 않는다.** 그리고 더 중요한 것: **지금 펀딩률을 미래
+// 정산 비용의 상한으로 쓰지 않는다.**
+//
+// `premiumIndex.lastFundingRate`가 보장하는 것은 "가장 최근 요율"뿐이다.
+// 진입 시 0.01%여도 정산 직전에 0.3%가 될 수 있다. 그 값을 반복해서
+// 예약하면 reserve가 모자랄 수 있고, 모자란 reserve는 100배에서 증거금
+// 전액이다.
+//
+// 상한은 `/fapi/v1/fundingInfo`가 준다 — `adjustedFundingRateCap`과
+// `adjustedFundingRateFloor`. 그 엔드포인트는 **조정된 종목만** 담는다.
+//
+// ★ 목록에 없는 종목은 **막는다.**
+//   예전에는 "목록에 있는 가장 짧은 주기"를 그 종목의 주기로 썼다. 그
+//   값은 대상 종목에서 관측한 것이 아니다 — 다른 종목의 숫자를 빌려
+//   authoritative인 척한 것이고, 이 저장소가 금지하는 형태다("다른
+//   전략의 값을 빌려 쓰지 않는다"). 기본 주기·기본 상한이 무엇인지는
+//   이 환경에서 증명하지 못했으므로 **지어내지 않고 막는다.**
+export interface FundingBounds {
+  symbol: string;
+  /** 정산 주기(시간) */
+  intervalHours: number;
+  /** 요율 상한(비율). LONG이 지불할 수 있는 최대치 */
+  capRate: number;
+  /** 요율 하한(비율, 음수). SHORT이 지불할 수 있는 최대치의 부호 반대 */
+  floorRate: number;
+  /** **대상 종목에서 직접 읽은 값만** 이 출처를 쓴다 */
+  source: 'EXCHANGE_FUNDING_INFO';
+  observedAtMs: number;
+}
+
+export async function getFundingBounds(
+  symbol: string, testnet = true,
+): Promise<{ bounds: FundingBounds | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const r = await fetch(`${base(testnet)}/fapi/v1/fundingInfo`,
+      { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+    if (!r.ok) return { bounds: null, error: `펀딩 정보 조회 실패 (HTTP ${r.status})` };
+    const d = parseLossless(await r.text());
+    const list = Array.isArray(d) ? d : [];
+    const own = list.find((x: any) => String(x?.symbol || '').toUpperCase() === sym);
+    if (!own) {
+      // **다른 종목의 숫자를 빌려 쓰지 않는다.**
+      return { bounds: null,
+        error: `${sym}은 펀딩 정보 목록에 없습니다 — 이 종목의 주기·상한을 직접 읽지 못했습니다`
+          + ' (다른 종목의 값을 빌려 쓰지 않습니다)' };
+    }
+    const hours = parseFloat(own.fundingIntervalHours);
+    const cap = parseFloat(own.adjustedFundingRateCap);
+    const floor = parseFloat(own.adjustedFundingRateFloor);
+    if (!Number.isFinite(hours) || !(hours > 0)
+        || !Number.isFinite(cap) || !Number.isFinite(floor)) {
+      return { bounds: null,
+        error: `${sym}의 펀딩 주기·상한을 읽지 못했습니다`
+          + ` (주기 ${own.fundingIntervalHours} · 상한 ${own.adjustedFundingRateCap}`
+          + ` · 하한 ${own.adjustedFundingRateFloor})` };
+    }
+    return {
+      bounds: { symbol: sym, intervalHours: hours, capRate: cap, floorRate: floor,
+                source: 'EXCHANGE_FUNDING_INFO', observedAtMs: Date.now() },
+      error: null,
+    };
+  } catch (e: any) {
+    return { bounds: null, error: e?.message || '펀딩 정보 조회 실패' };
+  }
 }
 
 // 펀딩 예측용 premiumIndex (공개 엔드포인트, 서명 불필요) — 45초 캐시
-export interface PremiumIndex { symbol: string; markPrice: number; indexPrice: number; lastFundingRate: number; nextFundingTime: number; }
+export interface PremiumIndex {
+  symbol: string;
+  markPrice: number;
+  indexPrice: number;
+  lastFundingRate: number;
+  nextFundingTime: number;
+  /**
+   * 거래소가 응답에 적어 준 시각(`time`). **없으면 null이다.**
+   *
+   * 예전에는 이 칸을 버렸다. 그래서 "이 마크가가 거래소에서 언제
+   * 만들어졌는가"를 물을 방법이 없었고, 남은 것은 우리가 받은 시각뿐이라
+   * **늦게 도착한 값과 방금 만들어진 값을 구분할 수 없었다.**
+   */
+  timeMs: number | null;
+}
 interface PremiumCacheEntry { data: PremiumIndex; ts: number; }
 const PREMIUM_CACHE = new Map<string, PremiumCacheEntry>();
 const PREMIUM_TTL = 45 * 1000;
 
-export async function getPremiumIndex(symbol: string, testnet = true): Promise<PremiumIndex | null> {
+/**
+ * 읽은 값과 **언제 읽었는지**를 함께 준다.
+ *
+ * 왜 따로 만드는가
+ * ────────────────
+ * 옛 `getPremiumIndex`는 TTL이 지난 뒤 조회에 실패하면 캐시의 옛 값을
+ * 조용히 돌려줬다. 그런데 부르는 쪽(scalp 라우트)은 그 값에
+ * `observedAtMs: Date.now()`를 **새로 붙이고** 있었다. 그러면 며칠 된
+ * 캐시도 "방금 읽은 펀딩 데이터"로 보인다 — ④(신선도 보호)가 설 기반이
+ * 통째로 오염된다.
+ *
+ * 그래서 **실제 관측 시각을 값과 함께** 돌려준다. 낡은 캐시를 쓰더라도
+ * 그 사실(`STALE_CACHE`)과 원래 시각이 남는다. 세탁은 부르는 쪽에서도
+ * 할 수 없다 — 붙일 시각이 응답에 들어 있으므로.
+ */
+export type PremiumFreshness = 'FRESH' | 'STALE_CACHE' | 'NONE';
+
+/** 실제 조회. 주입이 없으면 이것을 쓴다 */
+async function defaultPremiumFetch(sym: string, testnet: boolean): Promise<PremiumIndex> {
+  const r = await fetch(`${base(testnet)}/fapi/v1/premiumIndex?symbol=${sym}`,
+    { signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = parseLossless(await r.text());
+  // **`|| 0`으로 때우지 않는다** — 없는 시각을 1970년으로 적으면 그
+  // 값은 "아주 낡음"이 아니라 "시각을 모름"이다. 둘은 다른 고장이다.
+  const t = Number(d.time);
+  return {
+    symbol: d.symbol,
+    markPrice: parseFloat(d.markPrice || '0'),
+    indexPrice: parseFloat(d.indexPrice || '0'),
+    lastFundingRate: parseFloat(d.lastFundingRate || '0'),
+    nextFundingTime: Number(d.nextFundingTime || 0),
+    timeMs: Number.isFinite(t) && t > 0 ? t : null,
+  };
+}
+
+export interface PremiumRead {
+  data: PremiumIndex | null;
+  freshness: PremiumFreshness;
+  /** 이 값을 **실제로 거래소에서 읽은** 시각 */
+  observedAtMs: number | null;
+  error: string | null;
+}
+
+export async function readPremiumIndex(
+  symbol: string, testnet = true,
+  /** 거래소 조회. **시험이 주입한다** — 전역 `fetch`를 바꾸지 않는다 */
+  fetchOne: (sym: string, tn: boolean) => Promise<PremiumIndex> = defaultPremiumFetch,
+  /** 지금 시각. 시험이 고정한다 */
+  nowMs: () => number = () => Date.now(),
+): Promise<PremiumRead> {
   const sym = symbol.toUpperCase().replace('/', '');
   const cacheKey = `${testnet ? 'T' : 'L'}:${sym}`;
   const hit = PREMIUM_CACHE.get(cacheKey);
-  if (hit && Date.now() - hit.ts < PREMIUM_TTL) return hit.data;
-  try {
-    const r = await fetch(`${base(testnet)}/fapi/v1/premiumIndex?symbol=${sym}`, { signal: AbortSignal.timeout(5000) });
-    if (!r.ok) return hit ? hit.data : null;
-    const d = parseLossless(await r.text());
-    const data: PremiumIndex = {
-      symbol: d.symbol,
-      markPrice: parseFloat(d.markPrice || '0'),
-      indexPrice: parseFloat(d.indexPrice || '0'),
-      lastFundingRate: parseFloat(d.lastFundingRate || '0'),
-      nextFundingTime: Number(d.nextFundingTime || 0),
-    };
-    PREMIUM_CACHE.set(cacheKey, { data, ts: Date.now() });
-    return data;
-  } catch {
-    return hit ? hit.data : null;
+  if (hit && nowMs() - hit.ts < PREMIUM_TTL) {
+    return { data: hit.data, freshness: 'FRESH', observedAtMs: hit.ts, error: null };
   }
+  try {
+    const data = await fetchOne(sym, testnet);
+    const ts = nowMs();
+    PREMIUM_CACHE.set(cacheKey, { data, ts });
+    return { data, freshness: 'FRESH', observedAtMs: ts, error: null };
+  } catch (e: any) {
+    const why = e?.message || 'premiumIndex 조회 실패';
+    if (hit) {
+      // 값은 있지만 **지금 것이 아니다.** 원래 시각을 그대로 들고 간다.
+      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };
+    }
+    return { data: null, freshness: 'NONE', observedAtMs: null, error: why };
+  }
+}
+
+/**
+ * 옛 이름. 기존 화면의 동작을 바꾸지 않는다(낡은 캐시도 돌려준다).
+ *
+ * ★ Exact100X 비용 입력에는 **쓰지 마라** — 관측 시각이 사라진다.
+ *   그 경로는 `readPremiumIndex`를 쓰고 `FRESH`가 아니면 막는다.
+ */
+export async function getPremiumIndex(symbol: string, testnet = true): Promise<PremiumIndex | null> {
+  return (await readPremiumIndex(symbol, testnet)).data;
+}
+
+// ── 시장 스냅숏: **한 요청에 한 번만 읽는다** ──
+//
+// 예전에는 `positionRisk.markPrice` 숫자 하나를 기준가로 썼다. 두 가지가
+// 동시에 잘못돼 있었다.
+//
+//   · 그 응답은 **계좌/포지션 상태**다. 같은 응답에 들어 있다는 이유로
+//     마크가를 거기서 떼어 오면, 시장 가격의 관측 시각을 물을 자리가
+//     사라진다. 그 응답의 `updateTime`은 **포지션이 갱신된 시각**이지
+//     마크가가 만들어진 시각이 아니다 — 포지션을 사흘 안 건드렸으면
+//     `updateTime`은 사흘 전이고 마크가는 방금 값이다. 서로의 timestamp가
+//     될 수 없다
+//   · 숫자만 돌려주니 호출부가 나이를 잴 방법이 없었다
+//
+// **왜 마크가와 premium을 한 함수에서 주는가**
+// ────────────────────────────────────────────
+// 둘은 `/fapi/v1/premiumIndex` **같은 응답**에 들어 있다. 따로 읽으면
+// 한 진입 안에서 청산거리는 T0의 마크가로, 펀딩은 T1의 요율로 계산된다 —
+// ④가 막으려는 바로 그 모양("서로 다른 시점을 하나의 시장 상태처럼")을
+// ④ 자신이 만드는 꼴이다. 그래서 **한 번 읽어 둘 다 돌려준다.**
+//
+// **캐시하지 않는다.** `readPremiumIndex`는 화면·예측용이라 45초 캐시를
+// 선언하지만, 100배 청산 여유를 재는 기준가에 45초는 쓸 수 없다. 응답을
+// 푸는 코드(`defaultPremiumFetch`)는 **한 벌을 공유한다.**
+//
+// 한 요청 안에서 여러 번 부르지 않는 것은 **호출부의 일이다** — 라우트가
+// 이 Promise를 한 번 만들어 모든 의존이 같은 것을 쓰게 한다.
+
+/** 하나의 관측이 들고 다니는 시각들. 셋은 서로 다른 질문의 답이다 */
+export interface ObservationStamps {
+  /** 거래소가 응답에 적어 준 시각(`time`). 없으면 null — **지어내지 않는다** */
+  exchangeTimeMs: number | null;
+  /** 우리 서버가 이 응답을 **실제로 받은** 시각 */
+  receivedAtMs: number;
+  /**
+   * 이 값이 **원래 관측된** 시각.
+   *
+   * 캐시가 없으면 `receivedAtMs`와 같다. 캐시에서 왔다면 **원본을 받은
+   * 그때**다 — 지금이 아니다. 둘을 하나로 뭉개면 "거래소에서 이미 오래된
+   * 값"과 "우리 캐시에서 오래된 값"을 구별할 수 없다.
+   */
+  observedAtMs: number;
+  cache: 'FRESH' | 'STALE_CACHE' | 'NONE';
+}
+
+export interface MarketSnapshot {
+  symbol: string;
+  /** 거리를 재는 기준가 */
+  markPrice: number;
+  /** 지수가(참고). 거리 계산에는 쓰지 않는다 */
+  indexPrice: number | null;
+  /** 최근 펀딩률. **미래 비용의 상한이 아니다** (상한은 fundingInfo) */
+  lastFundingRate: number;
+  nextFundingTimeMs: number;
+  source: 'EXCHANGE_PREMIUM_INDEX';
+  stamps: ObservationStamps;
+}
+
+/**
+ * 한 진입이 쓰는 **시장 스냅숏 하나.** 마크가와 premium이 같은 순간이다.
+ *
+ * 실패하면 `snapshot: null`이고 이유를 적는다 — 값도 시각도 지어내지 않는다.
+ */
+export async function readMarketSnapshot(
+  symbol: string, testnet = true,
+  /** 거래소 조회. **시험이 주입한다** — 전역 `fetch`를 바꾸지 않는다 */
+  fetchOne: (sym: string, tn: boolean) => Promise<PremiumIndex> = defaultPremiumFetch,
+  /** 지금 시각. 시험이 고정한다 */
+  nowMs: () => number = () => Date.now(),
+): Promise<{ snapshot: MarketSnapshot | null; error: string | null }> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  let d: PremiumIndex;
+  try { d = await fetchOne(sym, testnet); }
+  catch (e: any) { return { snapshot: null, error: e?.message || '시장 스냅숏 조회 실패' }; }
+  const at = nowMs();
+  const px = Number(d?.markPrice);
+  if (!Number.isFinite(px) || !(px > 0)) {
+    return { snapshot: null, error: `${sym}의 마크가를 읽지 못했습니다 (${String(d?.markPrice)})` };
+  }
+  const ix = Number(d?.indexPrice);
+  return {
+    snapshot: {
+      symbol: sym,
+      markPrice: px,
+      indexPrice: Number.isFinite(ix) && ix > 0 ? ix : null,
+      lastFundingRate: Number(d?.lastFundingRate),
+      nextFundingTimeMs: Number(d?.nextFundingTime),
+      source: 'EXCHANGE_PREMIUM_INDEX',
+      stamps: {
+        // **없는 시각을 받은 시각으로 대체하지 않는다.** 그러면 지연이
+        // 항상 0이 되어 "늦게 도착한 값"을 영영 못 잡는다.
+        exchangeTimeMs: d?.timeMs ?? null,
+        receivedAtMs: at,
+        // 캐시가 없으므로 원래 관측 시각 = 받은 시각이다.
+        observedAtMs: at,
+        cache: 'FRESH',
+      },
+    },
+    error: null,
+  };
 }
 
 // ── 전체 오픈주문 취소 (C 옵션) — 심볼별 DELETE allOpenOrders ───────
@@ -368,49 +778,184 @@ export function closeQuantityFor(
   return { qty, fullClose, reason };
 }
 
+// ── 청산을 **준비**하는 것과 **보내는** 것을 나눈다 ──
+//
+// 왜 나누는가
+// ───────────
+// 전용 종료 권한(⑤)은 "쓰기 직전에 다시 내가 주인인가"를 묻는다. 그런데
+// 예전 `closePositionPercent`는 그 확인이 끝난 **뒤에** 포지션 조회와
+// 규격 조회를 또 했다 — 네트워크 왕복 두 번이다. 그 사이에 임차가
+// 넘어가면 울타리를 확인하고도 남의 포지션에 주문이 나간다.
+//
+// 그래서 **읽는 일을 전부 앞으로** 모은다. 울타리 확인 뒤에는
+// `sendPreparedClose`의 주문 전송 하나만 남는다.
+//
+// ★ **주문 payload를 만드는 곳은 여전히 한 곳이다.** 수량·반대방향·
+//   `reduceOnly`를 두 벌로 만들면 한쪽만 고쳐지고 그때 두 답이 갈린다.
+
+export interface PreparedClose {
+  symbol: string;
+  /** 보낼 주문의 방향. 포지션의 **반대**다 */
+  side: 'BUY' | 'SELL';
+  /** 지금 관측한 노출로 만든 수량. **진입 수량이 아니다** */
+  quantity: number;
+  fullClose: boolean;
+  /** 준비 시점에 거래소가 답한 노출 */
+  observedQty: number;
+  observedSide: 'LONG' | 'SHORT';
+  /**
+   * 멱등 키. **같은 종료 의도면 같은 값이다.**
+   *
+   * 울타리가 넘어간 직후 두 실행자가 각자 보내더라도, 같은 식별자면
+   * 거래소가 중복을 **알아볼 기회**가 생긴다.
+   *
+   * ★ 다만 "둘째가 반드시 거부된다"고 주장하지 않는다. 공식 문서는
+   *   `newClientOrderId`가 **열린 주문들 사이에서** 고유하다고만 적고,
+   *   체결된 MARKET 주문까지 포함한 영구 중복 차단은 확인된 범위 밖이다.
+   *   이것은 **추가 방어층**이다.
+   */
+  clientOrderId: string | null;
+  reason: string;
+}
+
+/**
+ * 청산 주문을 **준비한다.** 거래소를 바꾸지 않는다 — 읽기만 한다.
+ *
+ * `alreadyFlat`은 "보낼 것이 없다"이고 **실패가 아니다.** 그 둘을 한
+ * boolean으로 합치면 "이미 닫혀 있음"이 "주문을 보냈음"으로 적힌다.
+ */
+export async function prepareClosePosition(
+  key: string, secret: string, symbol: string,
+  positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
+  /** 멱등 키. 안 주면 붙이지 않는다 — 기존 호출부의 동작을 바꾸지 않는다 */
+  clientOrderId: string | null = null,
+  /**
+   * 거래소 조회. **시험이 주입한다** — 안 주면 정본을 쓴다.
+   *
+   * 이 함수가 정하는 것은 숫자가 아니라 **방향**이다. LONG을 닫으려면
+   * SELL을 보내야 하고, 뒤집히면 `reduceOnly`가 거부하지 않는 한
+   * 포지션이 **커진다.** 그 판단이 네트워크 뒤에 숨어 있으면 시험이
+   * 지나갈 수 없다 — 실제로 변이 하나가 그래서 새 나갔다.
+   * 저장소의 다른 판정들이 쓰는 주입과 같은 모양으로 맞춘다.
+   */
+  deps: {
+    fetchPositions?: (k: string, sec: string, tn: boolean) => Promise<any>;
+    fetchFilters?: (sym: string, tn: boolean) => Promise<SymbolFilters | null>;
+  } = {},
+): Promise<{
+  ok: boolean; alreadyFlat: boolean; prepared: PreparedClose | null; message: string;
+}> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  const readPositions = deps.fetchPositions ?? getFuturesPositions;
+  const readFilters = deps.fetchFilters ?? getSymbolFilters;
+  const posRes: any = await readPositions(key, secret, testnet);
+  if (!posRes?.success) {
+    // **못 읽은 것을 flat으로 읽지 않는다.**
+    return { ok: false, alreadyFlat: false, prepared: null,
+      message: `포지션 조회 실패: ${posRes?.message || '사유 미상'}` };
+  }
+  const pos = (posRes.positions as FuturesPosition[])
+    .find(p => p.symbol.toUpperCase() === sym);
+  if (!pos || Math.abs(pos.amount) === 0) {
+    return { ok: true, alreadyFlat: true, prepared: null, message: '이미 포지션이 없습니다' };
+  }
+  if (pos.side !== positionSide) {
+    return { ok: false, alreadyFlat: false, prepared: null,
+      message: `방향 불일치 — 요청 ${positionSide}, 실제 ${pos.side}. 상태를 먼저 대조하세요` };
+  }
+
+  const filters = await readFilters(sym, testnet);
+  // 청산은 시장가로 나간다 — 시장가 격자를 쓴다. 없으면 격자 없이 간다.
+  const grid = qtyGridFor(filters, 'MARKET');
+  const calc = closeQuantityFor(
+    pos.amount, percent, grid?.stepSize ?? 0, grid?.minQty ?? 0);
+  if (calc.qty <= 0) {
+    return { ok: false, alreadyFlat: false, prepared: null, message: calc.reason };
+  }
+  return {
+    ok: true, alreadyFlat: false,
+    prepared: {
+      symbol: sym,
+      // **반대 방향이다.** 같은 방향으로 보내면 포지션이 커진다.
+      side: pos.side === 'LONG' ? 'SELL' : 'BUY',
+      quantity: calc.qty, fullClose: calc.fullClose,
+      observedQty: Math.abs(pos.amount), observedSide: pos.side,
+      clientOrderId,
+      reason: calc.reason,
+    },
+    message: calc.reason,
+  };
+}
+
+/**
+ * 준비된 청산을 **보낸다.** 여기서는 읽지 않는다.
+ *
+ * 울타리 확인과 이 호출 사이에 네트워크 왕복이 없어야 한다 — 그 창이
+ * 넓을수록 느린 실행자가 뒤늦게 깨어나 남의 포지션을 닫을 여지가 커진다.
+ */
+export async function sendPreparedClose(
+  key: string, secret: string, p: PreparedClose, testnet = true,
+): Promise<{
+  success: boolean; closedQty: number; fullClose: boolean; message: string;
+  /**
+   * 거래소가 응답에 적어 준 **평균 체결가**(`avgPrice`). 없으면 null.
+   *
+   * ★ 이름이 `fillPrice`가 아닌 이유: 응답 값을 **그대로 보존**한 것이고
+   *   우리가 "체결가"라는 해석을 얹은 값이 아니다. 0은 "안 줬다"이지
+   *   "0원에 체결"이 아니므로 null로 눕힌다 — 0으로 두면 슬리피지가
+   *   전부 100%가 된다.
+   *
+   * ★ 예전에는 이 값을 **버렸다.** 그래서 종료 슬리피지를 낼 자료가
+   *   저장소 어디에도 없었다(⑤B-3A 감사가 찾은 구멍).
+   */
+  reportedAvgPrice: number | null;
+  exchangeOrderId: string | null;
+  executedQty: number | null;
+}> {
+  const r = await placeFuturesOrder(key, secret, {
+    symbol: p.symbol, side: p.side, type: 'MARKET', quantity: p.quantity,
+    // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.
+    reduceOnly: true,
+    // **멱등 키.** 거래소가 중복을 알아볼 기회를 주는 추가 방어층이다.
+    ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),
+  }, testnet);
+  // **응답의 숫자를 지어내지 않는다.** 0·NaN·없음은 전부 null이다.
+  const num = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const raw: any = (r as any)?.raw ?? {};
+  // **raw 응답 전체를 들고 다니지 않는다.** 필요한 세 칸만 꺼낸다 —
+  // 서명·키가 섞인 payload를 telemetry로 흘리지 않기 위해서다.
+  const reportedAvgPrice = num((r as any)?.price) ?? num(raw.avgPrice);
+  const exchangeOrderId = raw.orderId == null ? null : String(raw.orderId);
+  const executedQty = num(raw.executedQty);
+  if (!r.success) {
+    return { success: false, closedQty: 0, fullClose: false, message: r.message,
+      reportedAvgPrice, exchangeOrderId, executedQty };
+  }
+  return { success: true, closedQty: p.quantity, fullClose: p.fullClose,
+    message: `${p.quantity} 종료 (${p.reason})`,
+    reportedAvgPrice, exchangeOrderId, executedQty };
+}
+
+/**
+ * 옛 이름. **동작을 바꾸지 않는다** — 준비와 전송을 이어서 할 뿐이다.
+ *
+ * ★ 전용 종료 권한은 이것을 쓰지 않는다. 준비와 전송 사이에 울타리를
+ *   다시 확인해야 하기 때문이다.
+ */
 export async function closePositionPercent(
   key: string, secret: string, symbol: string,
   positionSide: 'LONG' | 'SHORT', percent: number, testnet = true,
 ): Promise<{ success: boolean; closedQty: number; fullClose: boolean; message: string }> {
   try {
-    const sym = symbol.toUpperCase().replace('/', '');
-    const posRes: any = await getFuturesPositions(key, secret, testnet);
-    if (!posRes?.success) {
-      return { success: false, closedQty: 0, fullClose: false,
-        message: `포지션 조회 실패: ${posRes?.message || '사유 미상'}` };
+    const prep = await prepareClosePosition(key, secret, symbol, positionSide, percent, testnet);
+    if (!prep.ok) return { success: false, closedQty: 0, fullClose: false, message: prep.message };
+    if (prep.alreadyFlat || !prep.prepared) {
+      return { success: true, closedQty: 0, fullClose: false, message: prep.message };
     }
-    const pos = (posRes.positions as FuturesPosition[])
-      .find(p => p.symbol.toUpperCase() === sym);
-    if (!pos || Math.abs(pos.amount) === 0) {
-      return { success: true, closedQty: 0, fullClose: false, message: '이미 포지션이 없습니다' };
-    }
-    if (pos.side !== positionSide) {
-      return { success: false, closedQty: 0, fullClose: false,
-        message: `방향 불일치 — 요청 ${positionSide}, 실제 ${pos.side}. 상태를 먼저 대조하세요` };
-    }
-
-    const filters = await getSymbolFilters(sym, testnet);
-    // 청산은 시장가로 나간다 — 시장가 격자를 쓴다. 없으면 격자 없이 간다.
-    const grid = qtyGridFor(filters, 'MARKET');
-    const calc = closeQuantityFor(
-      pos.amount, percent, grid?.stepSize ?? 0, grid?.minQty ?? 0);
-    if (calc.qty <= 0) {
-      return { success: false, closedQty: 0, fullClose: false, message: calc.reason };
-    }
-    const { qty, fullClose } = calc;
-
-    const side: 'BUY' | 'SELL' = pos.side === 'LONG' ? 'SELL' : 'BUY';
-    const r = await placeFuturesOrder(key, secret, {
-      symbol: sym, side, type: 'MARKET', quantity: qty, reduceOnly: true,
-    }, testnet);
-
-    if (!r.success) {
-      return { success: false, closedQty: 0, fullClose: false, message: r.message };
-    }
-    return {
-      success: true, closedQty: qty, fullClose,
-      message: `${qty} 종료 (${calc.reason})`,
-    };
+    return await sendPreparedClose(key, secret, prep.prepared, testnet);
   } catch (e: any) {
     // 여기까지 오면 주문을 보냈는지 알 수 없다. 성공으로 만들지 않는다.
     return { success: false, closedQty: 0, fullClose: false,
@@ -528,18 +1073,6 @@ export async function getFuturesTicker(symbol: string, testnet = true): Promise<
   } catch { return null; }
 }
 
-export interface SymbolPositionRisk {
-  symbol: string;
-  /** 부호 있는 수량. 0이면 포지션 없음 */
-  positionAmt: number;
-  /** 'isolated' | 'cross' */
-  marginType: string;
-  leverage: number | null;
-  /** 0이면 거래소가 안 준 것이라 null */
-  liquidationPrice: number | null;
-  entryPrice: number | null;
-  markPrice: number | null;
-}
 
 /**
  * 심볼 하나의 포지션 위험 정보. **포지션이 없어도 돌려준다.**
@@ -570,68 +1103,26 @@ export interface SymbolPositionRisk {
  * "확인 못 함"까지만 뜨고 **왜 못 읽었는지는 아무도 몰랐다.** 오늘
  * 하루를 그것 때문에 썼다. 이제 이유를 함께 돌려준다.
  */
+/**
+ * 심볼 하나의 포지션 위험 + **조회 provenance.**
+ *
+ * 순서와 시각 경계는 `positionRiskRead` 한 곳에 있다 — 여기서 다시 쓰면
+ * 두 벌이 되고, 무엇보다 이 파일은 `crypto` 때문에 검사기가 컴파일하지
+ * 못해 그 경계를 돌려서 확인할 수 없다.
+ */
 export async function getSymbolPositionRiskEx(
   key: string, secret: string, symbol: string, testnet = true,
-): Promise<{ risk: SymbolPositionRisk | null; error: string | null }> {
-  const sym = symbol.toUpperCase().replace('/', '');
-
-  const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
-    const liq = parseFloat(row.liquidationPrice ?? '0');
-    const lev = extra?.leverage != null ? extra.leverage : parseInt(row.leverage ?? '0', 10);
-    return {
-      symbol: String(row.symbol ?? sym),
-      positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
-      marginType: String(extra?.marginType ?? row.marginType ?? '').toLowerCase(),
-      // 0은 값이 아니라 '못 받았음'이다
-      leverage: Number.isFinite(lev as any) && Number(lev) > 0 ? Number(lev) : null,
-      liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
-      entryPrice: parseFloat(row.entryPrice ?? '0') || null,
-      markPrice: parseFloat(row.markPrice ?? '0') || null,
-    } as SymbolPositionRisk;
-  };
-  // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을
-  // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
-  const pick = (data: any) => {
-    const rows = Array.isArray(data) ? data : [data];
-    return rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
-  };
-
-  let v2Err = '';
-  try {
-    const row = pick(await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet, { symbol: sym }));
-    if (row && row.marginType != null) return { risk: shape(row), error: null };
-  } catch (e: any) { v2Err = String(e?.message || e); }
-
-  // v3 + 계정 조회. v3에는 marginType·leverage가 없다.
-  try {
-    const row = pick(await fapiSigned('GET', '/fapi/v3/positionRisk', key, secret, testnet, { symbol: sym }));
-    if (!row) return { risk: null, error: `포지션 정보가 비어 있습니다 (v2: ${v2Err || '없음'})` };
-
-    let marginType: string | undefined;
-    let leverage: number | null | undefined;
-    try {
-      const acct: any = await fapiSigned('GET', '/fapi/v3/account', key, secret, testnet);
-      const p = (acct?.positions || []).find((x: any) => String(x?.symbol) === sym);
-      if (p) {
-        // v3 계정은 isolated 여부를 boolean으로 준다
-        marginType = p.isolated === true ? 'isolated' : p.isolated === false ? 'cross' : undefined;
-        const l = parseInt(p.leverage ?? '0', 10);
-        leverage = Number.isFinite(l) && l > 0 ? l : null;
-      }
-    } catch { /* marginType은 빈 값 → 검사가 '확인 못 함'으로 잡는다 */ }
-
-    return {
-      risk: shape(row, { marginType, leverage }),
-      // 마진 모드를 못 채웠으면 그 사실을 남긴다. 값만 비워 두면 또
-      // "왜 확인 못 했지"가 된다.
-      error: marginType ? null : `마진 모드를 계정 조회에서 못 찾았습니다 (v2: ${v2Err || '없음'})`,
-    };
-  } catch (e: any) {
-    return {
-      risk: null,
-      error: `포지션 조회 실패 — v2: ${v2Err || '시도 안 함'} / v3: ${String(e?.message || e)}`,
-    };
-  }
+  /** 지금 시각. **시험이 고정한다** */
+  nowMs: () => number = () => Date.now(),
+): Promise<{
+  risk: SymbolPositionRisk | null; error: string | null;
+  provenance: PositionRiskProvenance;
+}> {
+  return readPositionRiskWithProvenance(
+    symbol,
+    (path, params = {}) => fapiSigned('GET', path, key, secret, testnet, params),
+    nowMs,
+  );
 }
 
 /** 이유가 필요 없을 때 쓰는 얇은 래퍼 */
@@ -713,7 +1204,9 @@ export async function placeFuturesOrder(
     const params: Record<string, string | number> = {
       symbol: opts.symbol.toUpperCase().replace('/', ''), side: opts.side, type: opts.type, quantity: opts.quantity,
     };
-    // clientOrderId: 재시도 시 중복 주문을 막는 멱등 키. 바이낸스는 같은 ID 재사용을 거부한다.
+    // clientOrderId: 재시도 시 중복 주문을 막기 위한 멱등 키.
+    // ★ 공식 문서가 보장하는 범위는 **열린 주문들 사이의 고유성**이다.
+    //   체결이 끝난 주문까지 포함해 영구히 재사용 불가라고 적혀 있지 않다.
     if (opts.clientOrderId) params.newClientOrderId = opts.clientOrderId;
     if (opts.reduceOnly) params.reduceOnly = 'true';
     if (opts.type === 'LIMIT') {

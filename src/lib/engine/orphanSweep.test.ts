@@ -139,8 +139,17 @@ export function runOrphanSweepTests() {
   // 이 테스트는 예전에 **반대**를 고정하고 있었다:
   //   scalp.trailing === false · my-original-v1.timeExit === false
   // 그 빈 칸을 이번에 닫았으므로 지금은 세 전략 모두 true여야 한다.
-  test('세 실행 전략 모두 트레일링·본전이동·시간청산을 받는다', () => {
-    const by = new Map(exitCoverage().map(c => [String(c.strategyId), c]));
+  test('세 실행 전략의 기본 예약은 모두 트레일링·본전이동·시간청산을 받는다', () => {
+    // **표의 키는 이제 전략 하나가 아니다.** 같은 전략이 실행 계약에 따라
+    // 다른 감시를 받으므로 `strategyId`만으로 Map을 만들면 뒤 줄이 앞 줄을
+    // 덮는다 — 실제로 그렇게 덮여서 이 시험이 한 번 빨갰다.
+    //
+    // 이 시험이 고정하려는 것은 **기본 예약**(실행 계약 없는 줄)의 커버리지다.
+    // 계약 줄은 그쪽 시험(`exitCoverage.test.ts`)이 본다. 단정을 약하게 하는
+    // 것이 아니라 보는 줄을 정확히 고른다.
+    const by = new Map(exitCoverage()
+      .filter(c => c.contract == null)
+      .map(c => [String(c.strategyId), c]));
     for (const id of ['daily-ladder', 'scalp', 'my-original-v1']) {
       const c = by.get(id);
       assert(c != null, `${id}가 표에 없다`);

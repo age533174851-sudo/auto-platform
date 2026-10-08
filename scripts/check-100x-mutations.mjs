@@ -117,8 +117,47 @@ const P = {
   auth: 'src/lib/engine/entryAuthority.ts',
   safety: 'src/lib/engine/entryExitSafety.ts',
   cand: 'src/lib/engine/managedPosition.ts',
+  migIdent: 'supabase/migrations/090_live_orders_execution_identity.sql',
+  rows: 'src/lib/engine/lifecycleRows.ts',
   monitor: 'src/app/api/autotrade/exit-monitor/route.ts',
   reatt: 'src/lib/engine/stopReattach.ts',
+  cov: 'src/lib/engine/exitCoverage.ts',
+  per: 'src/lib/engine/postEntryRisk.ts',
+  prr: 'src/lib/exchanges/positionRiskRead.ts',
+  obs: 'src/lib/engine/riskObservationStore.ts',
+  mig92: 'supabase/migrations/092_exact100x_risk_observations.sql',
+  mig93: 'supabase/migrations/093_exact100x_risk_observations_rls.sql',
+  elig: 'src/lib/engine/riskObservationEligibility.ts',
+  esc: 'src/lib/engine/escapeObservationStore.ts',
+  wake: 'src/lib/engine/exitMonitorWake.ts',
+  slip: 'src/lib/engine/closeSlippage.ts',
+  mclock: 'src/lib/system/monotonicClock.ts',
+  lin: 'src/lib/system/migrationLineage.ts',
+  acl: 'src/lib/system/observationAcl.ts',
+  rdy: 'src/lib/engine/testnetReadiness.ts',
+  creds: 'src/lib/engine/connectionCreds.ts',
+  idn: 'src/lib/exchanges/connectionIdentity.ts',
+  exr: 'src/app/api/exchange/route.ts',
+  mig96: 'supabase/migrations/096_exchange_connections_environment_identity.sql',
+  mig95: 'supabase/migrations/095_exact100x_observation_acl_hardening.sql',
+  manifest: 'src/lib/system/migrationManifest.ts',
+  mig90: 'supabase/migrations/090_live_orders_execution_identity.sql',
+  mig91: 'supabase/migrations/091_live_orders_entry_risk_snapshot.sql',
+  mig94: 'supabase/migrations/094_exact100x_exit_escape_observations.sql',
+  liq: 'src/lib/engine/liquidationDistance.ts',
+  liqmath: 'src/lib/safety/liquidationPrice.ts',
+  cost: 'src/lib/engine/executionCost.ts',
+  bfut: 'src/lib/exchanges/leverageBracket.ts',
+  bfapi: 'src/lib/exchanges/binanceFutures.ts',
+  fresh: 'src/lib/engine/marketFreshness.ts',
+  xauth: 'src/lib/engine/exitAuthority.ts',
+  xrun: 'src/lib/engine/exitAuthorityRun.ts',
+  xpol: 'src/lib/engine/exitPolicy.ts',
+  xint: 'src/lib/engine/exitIntent.ts',
+  xact: 'src/lib/engine/lifecycleAction.ts',
+  xlease: 'src/lib/engine/exitMonitorLease.ts',
+  xvops: 'src/lib/engine/venuePositionOps.ts',
+  cov: 'src/lib/engine/exitCoverage.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
 };
@@ -489,8 +528,8 @@ const M = [
   ['MUT-BALANCE-BEFORE-WRITE  잔고 조회를 쓰기 뒤로', P.entry,
     s => moveReadAfterWrite(s, 'availableUsd'), 'RED'],
 
-  ['MUT-PRICE-BEFORE-WRITE    기준가 조회를 쓰기 뒤로', P.entry,
-    s => moveReadAfterWrite(s, 'referencePrice'), 'RED'],
+  ['MUT-PRICE-BEFORE-WRITE    기준 마크가 조회를 쓰기 뒤로', P.entry,
+    s => moveReadAfterWrite(s, 'referenceMark'), 'RED'],
 
   // 다듬기·증거금 재검증·후보 사이징을 통째로 확정 단계로 미룬다.
   // 준비 단계가 통과해 버리므로, 그 뒤에서 막힐 요청이 배율을 먼저 건다.
@@ -524,9 +563,11 @@ const M = [
     s => s.replace('  if (obs !== req) {', '  if (obs > req) {'), 'RED'],
 
   // 읽기 단계에 쓰기 의존을 다시 끼워 넣는다 — 구조적 보장이 무너진다.
+  // ★ ③이 시그니처에 `nowMs` 인자를 더해서 옛 앵커(`deps` 바로 뒤가
+  //   반환 타입이라는 가정)가 낡았다. 타입 이름만 바꾸도록 좁힌다 —
+  //   그 뒤에 인자가 더 붙어도 따라간다.
   ['MUT-PHASE-TYPE-MERGE      준비 단계가 쓰기 의존을 받게 함', P.entry,
-    s => s.replace('  deps: Entry100xReadDeps,\n): Promise<Entry100xVerdict> {',
-                   '  deps: Entry100xDeps,\n): Promise<Entry100xVerdict> {'), 'RED'],
+    s => s.replace('  deps: Entry100xReadDeps,', '  deps: Entry100xDeps,'), 'RED'],
 
   // 막힌 계획으로 확정을 불러도 쓰지 않는다는 방어를 없앤다.
   ['MUT-COMMIT-ON-BLOCKED     막힌 계획으로도 배율을 걺', P.entry,
@@ -627,8 +668,12 @@ const M = [
   // 생명주기 실행으로만 보인다.
 
   // ── 정책 칸을 아예 안 읽는다 ──
-  ['MUT-P1  감시 라우트가 stop_policy를 안 읽음', P.monitor,
-    s => s.replace("        + 'stop_policy, '\n", ''), 'RED'],
+  // 조회 모양이 `lifecycleRows`로 옮겨졌다(090 미적용 후퇴 때문에 두 벌이
+  // 됐다). **막는 규칙은 그대로** — identity 모양이 손절 정책을 버리는 회귀를
+  // 본다. 옛 모양 쪽은 MUT-R4x가 따로 지킨다.
+  ['MUT-P1  주문 조회가 stop_policy를 안 읽음', P.rows,
+    s => s.replace("  + 'stop_policy, '\n  + 'execution_profile_id",
+                   "  + 'execution_profile_id"), 'RED'],
 
   // ── 분류 (동작) ──
   ['MUT-P2  NO_FIXED_SL + 손절 없음을 일반 후보로 넣음', P.cand,
@@ -650,6 +695,7 @@ const M = [
   // ── 관찰 가능성 ──
   ['MUT-P7  유예 기록을 남기지 않음 (조용히 사라진 줄)', P.cand,
     s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + '        executionIdentity: identity,\n'
                    + "        orderId: r?.id ? String(r.id) : null, reason });",
                    '      void code; void reason;'), 'RED'],
 
@@ -658,9 +704,10 @@ const M = [
 
   ['MUT-P9  유예에서 정체성을 빼고 코드만 남김', P.cand,
     s => s.replace('      deferred.push({ code, connectionId, symbol, side, strategyId,\n'
+                   + '        executionIdentity: identity,\n'
                    + "        orderId: r?.id ? String(r.id) : null, reason });",
                    '      deferred.push({ code, connectionId: \'\', symbol: \'\', side,\n'
-                   + '        strategyId: null, orderId: null, reason });'), 'RED'],
+                   + '        strategyId: null, executionIdentity: null, orderId: null, reason });'), 'RED'],
 
   // ── ★★ net position 자리 — 이 PR의 핵심 ──
 
@@ -768,6 +815,1531 @@ const M = [
                    "const _lateBlock = (p: any) => p?.stop_policy === 'NO_FIXED_SL';\n"
                    + 'export function lifecycleDecide('), 'RED'],
 
+  // ══════════════════════════════════════════════════════════
+  // PR2 — 실행 계약 identity: 적는다 · 보여 준다 · 판단하지 않는다
+  // ══════════════════════════════════════════════════════════
+
+  // ── 적는 쪽 ──
+  ['MUT-Q1  주문에 계약 식별자를 적지 않음', P.exec,
+    s => s.replace('    ...(ident ? {', '    ...(false ? {'), 'RED'],
+
+  ['MUT-Q2  호출부가 식별자를 안 넘김', P.scalp,
+    s => s.replace('    ...(epContract ? {\n      executionIdentity: {',
+                   '    ...(false ? {\n      executionIdentity: {'), 'RED'],
+
+  // 반쪽은 **호출부의 계약 조립 오류**다. 경계에서 거절하지 않으면
+  // 제약이 없는 배포(090 미적용)에서 그대로 저장되고, 제약이 있는
+  // 배포에서도 호출부 실수가 "DB 오류"로 보여 원인을 가린다.
+  ['MUT-Q3  반쪽 식별자를 보내기 전에 막지 않음', P.exec,
+    s => s.replace('  if (ident && !identOk) {', '  if (false) {'), 'RED'],
+
+  ['MUT-Q4  온전함 기준을 정본 대신 따로 셈', P.exec,
+    s => s.replace('  const identOk = executionIdentityComplete(ident);',
+                   '  const identOk = !!ident;'), 'RED'],
+
+  ['MUT-Q5  읽는 쪽이 반쪽을 추측으로 메움', P.cand,
+    s => s.replace("  if (!executionIdentityComplete({ profileId, presetId, contractVersion })) return null;",
+                   '  if (!profileId && !presetId) return null;'), 'RED'],
+
+  ['MUT-Q6  주문 조회가 계약 칸을 안 읽음', P.rows,
+    s => s.replace("  + 'execution_profile_id, execution_preset_id, execution_contract_version, '\n", ''), 'RED'],
+
+  ['MUT-Q7  유예 기록에서 identity를 뺌', P.cand,
+    s => s.replace('        executionIdentity: identity,\n        orderId:', '        orderId:'), 'RED'],
+
+  ['MUT-Q8  포지션에서 identity를 뺌', P.cand,
+    s => s.replace('      executionIdentity: identity,\n', ''), 'RED'],
+
+  // ── 마이그레이션 ──
+  // ★ 이름만 바꾸면 `DROP CONSTRAINT` 줄 하나만 바뀌고 제약은 그대로
+  //   남는다(String.replace는 첫 자리만 바꾼다). **제약문 자체를 지운다.**
+  ['MUT-Q9  세 칸 완전성 제약 제거', P.migIdent,
+    s => s.replace(/ALTER TABLE public\.live_orders\s*\n\s*ADD CONSTRAINT live_orders_execution_identity_complete[\s\S]*?\);\n/,
+                   ''), 'RED'],
+
+  ['MUT-Q10 옛 행에 계약을 백필', P.migIdent,
+    s => s + "\nUPDATE public.live_orders SET execution_profile_id = 'MAX_LEV_100X'"
+           + " WHERE execution_profile_id IS NULL;\n", 'RED'],
+
+  ['MUT-Q11 칸을 NOT NULL로 만듦', P.migIdent,
+    s => s.replace('  ADD COLUMN IF NOT EXISTS execution_profile_id text;',
+                   '  ADD COLUMN IF NOT EXISTS execution_profile_id text NOT NULL;'), 'RED'],
+
+  // ── ★★ 판단하지 않는다 ──
+  //
+  //   identity가 생기면 "Exact100X면 이렇게 하자"가 자연스러워 보인다.
+  //   그 분기가 전용 종료 권한 설계보다 먼저 생기는 것을 막는다.
+  ['MUT-Q12 identity로 관리 여부를 분기 (이름 비교)', P.cand,
+    s => s.replace("    const why = unmanagedSeats.get(seat);",
+                   "    const why = pos.executionIdentity?.presetId === 'EXACT_100X'\n"
+                   + "      ? undefined : unmanagedSeats.get(seat);"), 'RED'],
+
+  ['MUT-Q13 identity가 있으면 유예를 건너뜀', P.cand,
+    s => s.replace("    if (policy === 'NO_FIXED_SL') {",
+                   "    if (policy === 'NO_FIXED_SL' && !identity) {"), 'RED'],
+
+  ['MUT-Q14 감시 라우트가 identity로 분기', P.monitor,
+    s => s.replace("    if (p.management?.code !== 'MANAGED') {",
+                   "    if (p.executionIdentity?.profileId === 'MAX_LEV_100X') { /* 전용 처리 */ }\n"
+                   + "    if (p.management?.code !== 'MANAGED') {"), 'RED'],
+
+  // ══════════════════════════════════════════════════════════
+  // PR2 후속 — DB가 코드보다 뒤처져도 회차가 죽지 않는다
+  // ══════════════════════════════════════════════════════════
+
+  // ★ 후퇴를 없애면 090 미적용 DB에서 조회가 통째로 죽고, 이미 열린
+  //   포지션의 청산·보호·복구가 함께 멈춘다.
+  ['MUT-R1x 090 미적용 후퇴 제거 (회차가 죽는다)', P.rows,
+    s => s.replace('  if (!isMissingIdentityColumn(first.error)) {', '  if (true) {'), 'RED'],
+
+  // ★ 아무 실패에나 후퇴하면 권한·연결 오류가 "마이그레이션이 아직"으로
+  //   덮이고, 진짜 고장이 정상 회차로 보인다.
+  // ★ 앵커가 옮겨갔다 — 091이 `missingColumnShape`를 뽑아내면서
+  //   `isMissingIdentityColumn` 첫 두 줄이 사라졌다. **지우지 않고**
+  //   같은 고장을 같은 뜻으로 찌르는 새 자리로 옮긴다: 모양 판정이
+  //   무조건 참이 되면 어떤 오류에나 후퇴한다.
+  ['MUT-R2x 아무 오류에나 후퇴 (진짜 고장을 덮는다)', P.rows,
+    s => s.replace('  return { yes, text };', '  return { yes: true, text };'), 'RED'],
+
+  // ★ 다른 칼럼이 없다는 오류까지 우리 것으로 읽는다.
+  ['MUT-R3x 칼럼 이름을 확인하지 않고 후퇴', P.rows,
+    s => s.replace('  return IDENTITY_COLUMNS.some(c => text.includes(c));', '  return true;'), 'RED'],
+
+  // ★ 후퇴 모양이 stop_policy까지 버리면 NO_FIXED_SL 주문이 일반
+  //   생명주기로 들어간다 — PR1이 막은 고장이 후퇴 경로로 되살아난다.
+  ['MUT-R4x 후퇴 모양이 stop_policy를 버림', P.rows,
+    s => s.replace("export const LIFECYCLE_SELECT_LEGACY =\n  'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '\n  + 'stop_policy, '",
+                   "export const LIFECYCLE_SELECT_LEGACY =\n  'id, connection_id, exchange, symbol, side, avg_price, price, stop_loss, '"), 'RED'],
+
+  // ★ 후퇴 모양에 세 칸이 남아 있으면 재시도도 같은 이유로 실패한다.
+  ['MUT-R5x 후퇴 모양에 계약 칸이 남음 (재시도도 실패)', P.rows,
+    s => s.replace('export const LIFECYCLE_SELECT_LEGACY =\n', 'export const LIFECYCLE_SELECT_LEGACY = LIFECYCLE_SELECT_IDENTITY;\nconst _unusedLegacy =\n'), 'RED'],
+
+  // ★ 라우트가 정본을 버리고 직접 조회하면 후퇴 경로가 사라진다.
+  ['MUT-R6x 라우트가 정본 없이 직접 조회', P.monitor,
+    s => s.replace('  const { loadLifecycleRows } = await import(\'@/lib/engine/lifecycleRows\');',
+                   '  const loadLifecycleRows = async (q: any) => { const r = await q(\'id\'); return { rows: r.data || [], projection: \'IDENTITY\' as const, error: null }; };'), 'RED'],
+
+  // ★ 어떤 모양으로 읽었는지 안 남기면 "기록이 없는 주문"과 "칸을 못 읽은
+  //   회차"가 화면에서 같아 보인다.
+  ['MUT-R7x 읽은 모양을 telemetry에서 지움', P.monitor,
+    s => s.replace('  out.projection = loaded.projection;', ''), 'RED'],
+
+  // ── 반쪽 식별자가 거래소보다 앞에서 막히는가 ──
+  //
+  //   ★ guard를 거래소 쓰기 뒤로 옮긴다. insert보다는 여전히 앞이라
+  //     "insert보다 앞인가"만 보는 검사로는 절대 안 잡힌다.
+  ['MUT-R8x 반쪽 관문을 거래소 쓰기 뒤로 옮김', P.exec, s => {
+    const g = s.indexOf('  if (ident && !identOk) {');
+    if (g < 0) return s;
+    const end = s.indexOf('  }\n', s.indexOf('주문하지 않습니다.` };', g));
+    if (end < 0) return s;
+    const block = s.slice(g, end + 4);
+    const rest = s.slice(0, g) + s.slice(g + block.length);
+    const k = rest.indexOf('        res = await bf.placeFuturesOrder(apiKey, apiSecret, {');
+    if (k < 0) return s;
+    return rest.slice(0, k) + block + rest.slice(k);
+  }, 'RED'],
+
+  // ── NO_FIXED_SL 계약 확정: 실자금 장벽 + 계약 단위 관측 ──
+  //
+  // **표를 넓히는 것만으로 실자금이 열리지 않아야 한다.** 그리고 커버리지
+  // 표는 전략이 아니라 **계약** 단위로 참말을 해야 한다 — 같은 `scalp`
+  // 안에서 기본 예약은 감시를 받고 `NO_FIXED_SL` 계약은 하나도 못 받는다.
+
+  ['MUT-N1 실자금 장벽 제거 (표만 보게 되돌림)', P.gate,
+    s => s.replace(/  const cap = capability\(parseMode\(mode\)\);\n  if \(cap\.sendsOrders && cap\.realMoney\) \{[\s\S]*?\n  \}\n\n/,
+      ''), 'RED'],
+
+  ['MUT-N2 장벽을 \'LIVE\' 글자 비교로 되돌림 (LIVE_SMALL이 샌다)', P.gate,
+    s => s.replace("  const cap = capability(parseMode(mode));\n  if (cap.sendsOrders && cap.realMoney) {",
+                   "  if (mode === 'LIVE') {"), 'RED'],
+
+  ['MUT-N3 장벽이 계약의 stopPolicy를 안 봄', P.gate,
+    s => s.replace("if (resolved.contract.stopPolicy === 'NO_FIXED_SL') {",
+                   'if (false) {'), 'RED'],
+
+  ['MUT-N4 커버리지에서 계약 줄을 떼어냄', P.cov,
+    s => s.replace(/return \[\.\.\.base, \.\.\.contractRows\([\s\S]*?\)\];/,
+                   'return base;'), 'RED'],
+
+  // ★ 앵커를 **계약 줄 쪽**으로 좁힌다. 예전 앵커
+  //   ('trailing: false, breakEven: false, timeExit: false,')는 파일 앞의
+  //   `UNDECLARED` 상수를 먼저 때렸고, 그 상수는 지금 쓰이지 않아 아무
+  //   관측도 바뀌지 않았다 — 변이가 아니라 **빈 변이**였다.
+  // ★ **앵커를 옮겼다(지우지 않았다).** 원래는 "시간청산을 false에서
+  //   true로"였다. ⑤에서 전용 종료 권한이 붙어 시간청산이 **실제로**
+  //   돌기 시작했으므로 그 거짓말은 더 이상 거짓말이 아니다. 같은 성질
+  //   ("표가 돌지 않는 것을 돈다고 적는다")을 아직 돌지 않는 축으로
+  //   옮긴다 — 트레일링은 이 계약에 1R이 없어 정의 자체가 없다.
+  //   배선 없이 시간청산을 켜는 쪽은 MUT-EX20이 따로 본다.
+  ['MUT-N5 NO_FIXED_SL 계약이 트레일링을 받는다고 적음', P.cov,
+    s => s.replace('      trailing: auth.capabilities.trailing,', '      trailing: true,'), 'RED'],
+
+  ['MUT-N6 유예 판정을 표에 직접 적음 (분류기를 안 부름)', P.cov,
+    s => s.replace('  const r = managedCandidates([row]);',
+      "  const r = { positions: [], deferred: [{ code: 'NO_FIXED_SL_EXIT_UNWIRED',\n"
+      + "    reason: '고정 손절을 쓰지 않는 주문입니다' }], skipped: [] } as any;"), 'RED'],
+
+  ['MUT-N7 분류되지 않은 계약을 감시 중으로 적음 (UNKNOWN을 0으로)', P.cov,
+    s => s.replace("    admitted: false, code: 'UNCLASSIFIED',",
+                   "    admitted: true, code: 'MANAGED_ASSUMED',"), 'RED'],
+
+  // 이름(`OPEN_COMBOS` import)은 **그대로 남겨 둔다.** 이름만 보는 검사의
+  // 빈틈을 겨냥한 변이다 — 주입한 표를 무시하고 손으로 적은 목록을 돈다.
+  ['MUT-N8 조합 목록을 손으로 적음 (주어진 표를 무시)', P.cov,
+    s => s.replace('  for (const c of open) {',
+      "  const HAND = [{ strategyId: 'scalp', profileId: 'MAX_LEV_100X',\n"
+      + "    presetId: 'EXACT_100X', contractVersion: 2 }] as any;\n"
+      + '  for (const c of HAND) {'), 'RED'],
+
+  ['MUT-N9 요약 줄을 전략 수로 되돌림', P.cov,
+    s => s.replace('`실행 계약 ${all.length}개 중 ${gaps.length}개가',
+                   '`전략 ${all.length}개 중 ${gaps.length}개가'), 'RED'],
+
+  ['MUT-N10 빈 칸인데 이유를 지움', P.cov,
+    s => s.replace(/      gap: adm\.admitted\n[\s\S]*?\$\{adm\.reason\}\)`,\n/, '      gap: null,\n'), 'RED'],
+
+  // ── ② 진입 전 청산거리 보호 ──
+  //
+  // **"청산당할 자리를 알고도 들어가는 것"을 막는 보호다.** 열린 포지션을
+  // 닫는 권한이 아니다 — 그것은 아직 없다.
+
+  ['MUT-L1 청산거리 관문 제거 (판정은 하는데 막지 않음)', P.entry,
+    s => s.replace(/  if \(!liquidation\.ok\) \{[\s\S]*?\n  \}\n/, ''), 'RED'],
+
+  // 판정도 하고 막기도 하는데 **배율 쓰기 뒤**에서 막는다. 주문은 안
+  // 나가지만 계좌 배율은 이미 바뀌었고, 그 자리에 포지션이 있으면
+  // 청산가가 함께 움직인다.
+  ['MUT-L2 청산거리 차단을 첫 거래소 쓰기 뒤로 이동', P.entry,
+    s => {
+      // 판정은 그대로 두고 **차단만** 배율 쓰기(PHASE B) 뒤로 옮긴다.
+      // 주문은 안 나가지만 계좌 배율은 이미 바뀐 뒤다.
+      const block = s.match(/  if \(!liquidation\.ok\) \{[\s\S]*?\n  \}\n/);
+      const afterWrite = "  notes.push(`배율 ${req}배 확인(되읽음)`);\n";
+      if (!block || !s.includes(afterWrite)) return s;
+      return s.replace(block[0], '').replace(afterWrite,
+        afterWrite
+        + '  if (prepared.liquidation && !prepared.liquidation.ok) {\n'
+        + "    return fail('LIQUIDATION_UNSAFE', prepared.liquidation.reason, notes,\n"
+        + '      { marginMode: prepared.marginMode, leverage: req,\n'
+        + '        referencePrice: prepared.referencePrice,\n'
+        + '        liquidation: prepared.liquidation });\n'
+        + '  }\n');
+    }, 'RED'],
+
+  // ★ ②A가 입력 모양을 `tier` 하나 → `brackets` 표 전체로 바꿨다.
+  //   예년 앵커는 사라졌고 그대로 두면 **판정불가**가 된다. 새 자리로 옮긴다.
+  ['MUT-L3 브래킷이 없어도 통과 (fail-closed → fail-open)', P.liq,
+    s => s.replace('  if (!brackets || brackets.length === 0) {',
+                   '  if (false) {'), 'RED'],
+
+  ['MUT-L4 거리 계산의 LONG/SHORT를 뒤집음', P.liq,
+    s => s.replace("  const distance = side === 'LONG' ? price - liq : liq - price;",
+                   "  const distance = side === 'LONG' ? liq - price : price - liq;"), 'RED'],
+
+  ['MUT-L5 청산가 방향 검사를 뒤집음', P.liq,
+    s => s.replace("  const onCorrectSide = side === 'LONG' ? liq < price : liq > price;",
+                   "  const onCorrectSide = side === 'LONG' ? liq > price : liq < price;"), 'RED'],
+
+  // ★ 앞선 변이는 solver의 fallback을 건드렸는데, 판정이 solver를
+  //   부르기 **전에** 이미 벼 표를 거부한다(L3과 동치였다).
+  //   추정 표로 때우는 진짜 위험은 **배선 축**에 있다 — 거래소가
+  //   브래킷을 안 주면 그럴듯한 표를 넣어 넘기는 것이다.
+  ['MUT-L6 브래킷을 못 읽으면 추정 표로 때운다 (배선 축)', P.entry,
+    s => s.replace('  const tiers: BracketTier[] | null = bracket?.tiers ?? null;',
+      '  let tiers: BracketTier[] | null = bracket?.tiers ?? null;\n'
+      + '  if (!tiers || !tiers.length) tiers = [[Infinity, 0.004, 0]];'), 'RED'],
+
+  ['MUT-L7 Exact100X에서 청산거리 관문을 건너뜀', P.entry,
+    s => s.replace('  if (!liquidation.ok) {',
+                   "  if (!liquidation.ok && contract.sizingPolicy !== 'MARGIN_ALLOCATION') {"), 'RED'],
+
+  ['MUT-L8 경계를 > 에서 >= 로 (딱 닿는 것을 여유로 침)', P.liq,
+    s => s.replace('  if (!(distancePct > adverse)) {',
+                   '  if (!(distancePct >= adverse)) {'), 'RED'],
+
+  // ★ 식 호출이 solver 안으로 옮겨졌다.
+  ['MUT-L9 청산가 산출에 오염된 유지증거금률을 넘김', P.liqmath,
+    s => s.replace('    const lp = calcLiquidationPrice(p, L, side, q, [[Infinity, mmr, maintAmount]]);',
+                   '    const lp = calcLiquidationPrice(p, L, side, q, [[Infinity, 0.5, maintAmount]]);'),
+    'RED'],
+
+  // 과도 거부도 결함이다. 정상 100배 진입이 막히면 그 전략은 못 돈다.
+  ['MUT-L10 정상 케이스를 과도하게 거부 (여유 요구를 10배로)', P.liq,
+    s => s.replace('  if (!(distancePct > adverse)) {',
+                   '  if (!(distancePct > adverse * 10)) {'), 'RED'],
+
+  // ── ②A 유지증거금 구간 자기일관성 ──
+  //
+  // 진입 명목가로 구간을 한 번 고르고 끝내면, 청산가에서 경계를 넘은
+  // 경우를 놓친다. 놓치면 청산거리가 실제보다 **멀게** 나온다 — 틀리는
+  // 방향이 낙관적이다.
+
+  ['MUT-L11 진입 구간으로 끝냄 (청산 명목가 재검증 제거)', P.liqmath,
+    s => s.replace('    if (tierIndexFor(n, table) === i) hits.push({ i, lp, n });',
+                   '    if (i === entryTierIndex) hits.push({ i, lp, n });'), 'RED'],
+
+  ['MUT-L12 LONG이 아래 구간으로 넘어가도 진입 구간 유지', P.liqmath,
+    s => s.replace('    if (tierIndexFor(n, table) === i) hits.push({ i, lp, n });',
+      "    const _c = side === 'buy' ? entryTierIndex : tierIndexFor(n, table);\n"
+      + '    if (_c === i) hits.push({ i, lp, n });'), 'RED'],
+
+  ['MUT-L13 SHORT이 위 구간으로 넘어가도 진입 구간 유지', P.liqmath,
+    s => s.replace('    if (tierIndexFor(n, table) === i) hits.push({ i, lp, n });',
+      "    const _c = side === 'sell' ? entryTierIndex : tierIndexFor(n, table);\n"
+      + '    if (_c === i) hits.push({ i, lp, n });'), 'RED'],
+
+  ['MUT-L14 구간 경계 의미를 <= 에서 < 로', P.liqmath,
+    s => s.replace('    if (notional <= table[i][0]) return i;',
+                   '    if (notional < table[i][0]) return i;'), 'RED'],
+
+  // ★ 앞선 변이는 판정 쪽 분기 하나만 껐는데, 그 아래 `sol.code !== 'OK'`
+  //   catch-all이 여전히 막아서 **fail-open이 아니었다.** 진짜 fail-open은
+  //   solver가 자기일관 해가 없는데도 진입 구간으로 답을 지어내는 것이다.
+  ['MUT-L15 자기일관 해가 없는데 진입 구간으로 답을 지어냄 (fail-open)', P.liqmath,
+    s => s.replace("  if (hits.length === 0) return noSolution('NO_SELF_CONSISTENT_TIER', seen);",
+      '  if (hits.length === 0) {\n'
+      + '    const i = entryTierIndex;\n'
+      + '    const lp = calcLiquidationPrice(p, L, side, q, [[Infinity, table[i][1], table[i][2]]]);\n'
+      + "    return { code: 'OK', liquidationPrice: lp, mmr: table[i][1],\n"
+      + '      maintAmount: table[i][2], tierIndex: i, liquidationNotional: q * lp, ...seen };\n'
+      + '  }'), 'RED'],
+
+  ['MUT-L16 최종 구간 대신 최초 구간의 MMR을 적음', P.liqmath,
+    s => s.replace('    mmr: table[h.i][1],', '    mmr: table[entryTierIndex][1],'), 'RED'],
+
+  ['MUT-L17 최종 구간 대신 최초 구간의 공제액을 적음', P.liqmath,
+    s => s.replace('    maintAmount: table[h.i][2],',
+                   '    maintAmount: table[entryTierIndex][2],'), 'RED'],
+
+  // ★ BLOCKER 1 수정으로 coef를 읽는 자리가 **최상위**로 옮겨졌다.
+  //   옛 앵커(bracket 줄 안)는 사라졌다. 여기서는 "읽어 놓고 구간에
+  //   싣지 않는" 쪽을 건다 — D2(최상위를 아예 안 읽음)와 다른 변이다.
+  ['MUT-L18 조정 배수를 읽고도 구간에 싣지 않음', P.bfut,
+    s => s.replace('      coef,\n', '      undefined,\n'), 'RED'],
+
+  ['MUT-L18b 조정 배수가 걸려 있어도 통과시킴', P.liq,
+    s => s.replace('    if (coef != null && !(Number(coef) === 1)) {',
+                   '    if (false) {'), 'RED'],
+
+  // ── ③ 실행·보유 비용 → 실질 청산 여유 ──
+  //
+  // RAW 여유만 보고 통과시키면 "청산거리가 충분하다"가 사실이 아니게 된다.
+
+  ['MUT-C1 수수료 조회를 안 봄 (기본값으로 넘김)', P.cost,
+    s => s.replace("  if (com == null || com.source !== 'EXCHANGE_ACCOUNT'",
+      "  if (false && (com == null || com.source !== 'EXCHANGE_ACCOUNT'"), 'RED'],
+
+  ['MUT-C2 taker 주문인데 maker 수수료를 씀', P.cost,
+    s => s.replace("  const rate = fillKind === 'TAKER' ? taker : maker;",
+                   '  const rate = maker;'), 'RED'],
+
+  // ★ 청산 수수료 기준이 진입 명목가 → **청산 쪽 명목가**로 바뀌었다.
+  ['MUT-C3 나갈 때 수수료 예약을 지움', P.cost,
+    s => s.replace('  const exitFeeReserveUsd = worstCloseNotional * rate;',
+                   '  const exitFeeReserveUsd = 0;'), 'RED'],
+
+  ['MUT-C4 슬리피지 방향을 뒤집음', P.cost,
+    s => s.replace("  const adverse = side === 'LONG' ? fill - ref : ref - fill;",
+                   "  const adverse = side === 'LONG' ? ref - fill : fill - ref;"), 'RED'],
+
+  ['MUT-C5 LONG이 매도호가 대신 매수호가를 먹음', P.cost,
+    s => s.replace("  const raw = side === 'LONG' ? book.asks : book.bids;",
+                   "  const raw = side === 'LONG' ? book.bids : book.asks;"), 'RED'],
+
+  ['MUT-C6 깊이가 모자라도 통과 (마지막 호가로 채움)', P.cost,
+    s => s.replace('  if (left > 0) return null;   // 깊이 부족',
+                   '  if (left > 0) { /* 깊이 부족을 무시한다 */ }'), 'RED'],
+
+  ['MUT-C7 펀딩 지불 부호를 뒤집음', P.cost,
+    s => s.replace("    fRate === 0 ? 'NEUTRAL' : (side === 'LONG' ? fRate > 0 : fRate < 0) ? 'PAY' : 'RECEIVE';",
+                   "    fRate === 0 ? 'NEUTRAL' : (side === 'LONG' ? fRate < 0 : fRate > 0) ? 'PAY' : 'RECEIVE';"),
+    'RED'],
+
+  // ★ 예약식이 상한 기반 + 청산 쪽 명목가로 바뀌었다.
+  ['MUT-C8 펀딩 수취 예상치를 안전 여유로 씀 (받는 쪽이면 예약을 깎음)', P.cost,
+    s => s.replace('  const fundingReserveUsd = events * worstRate * worstCloseNotional;',
+      "  const _pays = side === 'LONG' ? fRate > 0 : fRate < 0;\n"
+      + '  const fundingReserveUsd = events * (_pays ? worstRate : -worstRate) * worstCloseNotional;'),
+    'RED'],
+
+  ['MUT-C9 펀딩 주기를 8시간으로 박음', P.cost,
+    s => s.replace('  const stepMs = intervalH * 3_600_000;',
+                   '  const stepMs = 8 * 3_600_000;'), 'RED'],
+
+  ['MUT-C10 비용을 못 구했는데 통과 (fail-open)', P.entry,
+    s => s.replace('  if (!cost.ok) {', '  if (false) {'), 'RED'],
+
+  ['MUT-C11 RAW만 검사하고 실질 여유 관문을 우회', P.entry,
+    s => s.replace('  if (!effectiveLiquidation.ok) {', '  if (false) {'), 'RED'],
+
+  ['MUT-C12 실질 여유 경계를 > 에서 >= 로', P.liq,
+    s => s.replace('  if (!(distancePct > adverse)) {',
+                   '  if (!(distancePct >= adverse)) {'), 'RED'],
+
+  // ★ 실질 판정이 `referencePrice`(마크) + `entryPrice`(체결가)로 나뉘었다.
+  //   비용이 아예 반영되지 않는 모양으로 되돌린다 — 진입가도 배율도 원복.
+  ['MUT-C13 비용을 계산하고 청산 계산에는 반영하지 않음 (체결가·배율 원복)', P.entry,
+    s => s.replace('    entryPrice: eff.effectiveEntryPrice,\n    quantity: q.qty,\n    leverage: eff.effectiveLeverage,',
+                   '    entryPrice: price,\n    quantity: q.qty,\n    leverage: req,'), 'RED'],
+
+  ['MUT-C14 비용이 증거금을 넘어도 통과', P.cost,
+    s => s.replace('  if (!(marginAfterCostUsd > 0)) {', '  if (false) {'), 'RED'],
+
+  ['MUT-C15 실효배율을 계약 배율로 되돌림 (비용이 사라진다)', P.cost,
+    s => s.replace('    effectiveLeverage: notional / marginAfterCostUsd,',
+                   '    effectiveLeverage: lev,'), 'RED'],
+
+  // 과도 거부도 결함이다. 정상 저비용 케이스가 막히면 그 전략은 못 돈다.
+  ['MUT-C16 정상 저비용 케이스를 과도 거부 (비용을 100배로)', P.cost,
+    s => s.replace('  const totalCostUsd = parts.reduce((a, b) => a + b, 0);',
+                   '  const totalCostUsd = parts.reduce((a, b) => a + b, 0) * 100;'), 'RED'],
+
+  // ── 재감사 BLOCKER 1~6 + 정확성 후속 ──
+  //
+  // solver는 좋아졌는데 **solver에 넣는 거래소 사실**이 틀릴 수 있었다.
+
+  ['MUT-D1 notionalCoef를 bracket 줄에서 읽음 (실제 응답엔 없는 자리)', P.bfut,
+    s => s.replace('  const coefRaw = raw?.notionalCoef;',
+                   '  const coefRaw = raw?.brackets?.[0]?.notionalCoef;'), 'RED'],
+
+  ['MUT-D2 최상위 notionalCoef를 버림', P.bfut,
+    s => s.replace('  const coefRaw = raw?.notionalCoef;',
+                   '  const coefRaw = undefined;'), 'RED'],
+
+  ['MUT-D3 브래킷 캐시 키에서 계정을 뺌 (계정 간 공유)', P.bfapi,
+    s => s.replace('  return `${testnet ? \'T\' : \'L\'}:${who}:${symbol}`;',
+                   '  return `${testnet ? \'T\' : \'L\'}:${symbol}`;'), 'RED'],
+
+  ['MUT-D4 만료된 브래킷 캐시를 FRESH로 돌려줌', P.bfapi,
+    s => s.replace("    return { tiers: hit.tiers, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };",
+                   "    return { tiers: hit.tiers, freshness: 'FRESH', observedAtMs: hit.ts, error: null };"),
+    'RED'],
+
+  ['MUT-D5 라우트가 브래킷 캐시 상태를 FRESH로 세탁함', P.scalp,
+    s => s.replace("                   freshness: r.freshness };",
+                   "                   freshness: 'FRESH' };"), 'RED'],
+
+  ['MUT-D6 펀딩 예약에 상한 대신 지금 요율을 씀', P.cost,
+    s => s.replace("  const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);",
+                   '  const worstRate = Math.abs(fRate);'), 'RED'],
+
+  ['MUT-D7 SHORT도 cap을 지불 상한으로 씀 (지불 방향 반대)', P.cost,
+    s => s.replace("  const worstRate = side === 'LONG' ? Math.max(0, cap) : Math.max(0, -floor);",
+                   '  const worstRate = Math.max(0, cap);'), 'RED'],
+
+  ['MUT-D8 목록에 없는 종목에 다른 종목 값을 빌려 씀', P.cost,
+    s => s.replace("  if (f.source !== 'EXCHANGE_FUNDING_INFO') {", '  if (false) {'), 'RED'],
+
+  ['MUT-D9 낡은 premium 캐시에 새 시각을 붙임', P.bfapi,
+    s => s.replace("      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: hit.ts, error: why };",
+                   "      return { data: hit.data, freshness: 'STALE_CACHE', observedAtMs: nowMs(), error: why };"),
+    'RED'],
+
+  ['MUT-D10 라우트가 premium 캐시 상태를 FRESH로 세탁함', P.scalp,
+    s => s.replace('            premiumCache: snap.stamps.cache,',
+                   "            premiumCache: 'FRESH',"), 'RED'],
+
+  ['MUT-D11 청산 쪽 명목가 대신 진입 명목가 (SHORT 과소예약)', P.cost,
+    s => s.replace('  const worstCloseNotional = Math.max(notional, qty * worstClosePrice);',
+                   '  const worstCloseNotional = notional;'), 'RED'],
+
+  ['MUT-D12 진입 슬리피지를 총비용에 다시 더함 (이중 반영)', P.cost,
+    s => s.replace('  const parts = [entryFeeUsd, exitFeeReserveUsd,\n'
+                   + '                 exitSlippageReserveUsd, fundingReserveUsd];',
+      '  const parts = [entryFeeUsd, exitFeeReserveUsd, entrySlippageUsd,\n'
+      + '                 exitSlippageReserveUsd, fundingReserveUsd];'), 'RED'],
+
+  ['MUT-D13 실질 거리를 체결가 기준으로 되돌림 (슬리피지가 사라짐)', P.entry,
+    s => s.replace('    referencePrice: price,\n    // **식에는 예상 체결가를 넣는다** — 포지션이 열리는 가격이 그것이다.\n    entryPrice: eff.effectiveEntryPrice,',
+                   '    referencePrice: eff.effectiveEntryPrice,'), 'RED'],
+
+  ['MUT-D14 빠진 값을 0으로 읽음 (null → 0, fail-open 복원)', P.cost,
+    s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
+
+  ['MUT-D15 유지증거금에서도 빠진 값을 0으로 읽음', P.liq,
+    s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
+
+  // ── ④ 시장 데이터 신선도 ──
+  //
+  // "값은 있는데 **언제의 값인지 모르는 상태**"로 진입하지 않는가.
+  // 서로 다른 시점의 mark/depth/premium을 하나의 현재 시장 상태처럼
+  // 합쳐 쓰지 않는가.
+
+  ['MUT-F1   거래소 시각 요구를 없앰 (수신 시각만으로 통과)', P.fresh,
+    s => s.replace('    if (needEx && ex == null) {', '    if (false) {'), 'RED'],
+
+  ['MUT-F2   낡은 값을 통과시킴 (나이 검사 제거)', P.fresh,
+    s => s.replace('    if (ageBudget == null || age > ageBudget) {', '    if (false) {'), 'RED'],
+
+  ['MUT-F3   만료된 캐시를 새 데이터로 취급 (캐시 검사 제거)', P.fresh,
+    s => s.replace("    if (o.cache !== 'FRESH') {", '    if (false) {'), 'RED'],
+
+  ['MUT-F4   수신 시각이 없어도 통과 (없는 시각을 통과로)', P.fresh,
+    s => s.replace('    if (at == null) {', '    if (false) {'), 'RED'],
+
+  ['MUT-F5   없는 시각을 0으로 읽음 (null → 0, fail-open 복원)', P.fresh,
+    s => s.replace('  if (v == null) return null;\n', ''), 'RED'],
+
+  ['MUT-F6   미래 시각을 통과시킴 (음수 나이를 그냥 씀)', P.fresh,
+    s => s.replace('    if (at > now) {', '    if (false) {'), 'RED'],
+
+  ['MUT-F7   수신 지연(거래소↔로컬 시각 차)을 안 봄 — 정본 호출 제거', P.fresh,
+    s => s.replace('      if (skew.blocks) {', '      if (false) {'), 'RED'],
+
+  ['MUT-F7b  시계 오차 정본 대신 자체 숫자를 다시 만듦', P.fresh,
+    s => s.replace('      const skew = checkClockSkew(recv, ex);',
+                   "      const skew = { blocks: Math.abs(recv - ex) > 60_000, detail: '' };"),
+    'RED'],
+
+  ['MUT-F8   교차 출처 시각 차 검사를 없앰', P.fresh,
+    s => s.replace('      if (skew > budget) {', '      if (false) {'), 'RED'],
+
+  ['MUT-F9   교차 검사를 수신 시각으로 잼 (각자의 나이 예산에 갇혀 비어 버림)', P.fresh,
+    s => s.replace('      const ta = num(a.o.exchangeTimeMs) as number;\n'
+                   + '      const tb = num(b.o.exchangeTimeMs) as number;',
+                   '      const ta = num(a.o.observedAtMs) as number;\n'
+                   + '      const tb = num(b.o.observedAtMs) as number;'), 'RED'],
+
+  ['MUT-F10 마크가 값 검사를 없앰 (0·NaN을 가격으로 씀)', P.fresh,
+    s => s.replace('      if (v == null || !(v > 0)) {', '      if (false) {'), 'RED'],
+
+  ['MUT-F11 판정 시각을 모를 때 지금으로 대체', P.fresh,
+    s => s.replace('  const now = num(input.nowMs);\n  if (now == null) {',
+                   '  const now = num(input.nowMs) ?? Date.now();\n  if (false) {'), 'RED'],
+
+  ['MUT-F12 신선도 예산을 화면용 정본 수준(100초)으로 늘림', P.fresh,
+    s => s.replace('export const FAST_MARKET_MAX_AGE_MS = 5000;',
+                   'export const FAST_MARKET_MAX_AGE_MS = 100_000;'), 'RED'],
+
+  ['MUT-F12b 느린 설정 사실에도 빠른 시장 문턱을 씌움 (정상 진입 전면 차단)', P.fresh,
+    s => s.replace('export const SLOW_FACT_MAX_AGE_MS = 6 * 60 * 60 * 1000;',
+                   'export const SLOW_FACT_MAX_AGE_MS = 5000;'), 'RED'],
+
+  ['MUT-F13 출처별 관측 시각을 한 칸으로 합침 (premium = 펀딩 상한)', P.fresh,
+    s => s.replace("    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = at; }",
+                   "    else if (o.kind === 'FUNDING_BOUNDS') { p.fundingBoundsObservedAtMs = p.premiumObservedAtMs; }"),
+    'RED'],
+
+  // ★ **앵커가 통과 경로여야 한다.** 처음에는
+  //   `'    fundingBoundsObservedAtMs: fBoundsObs,'`(4칸)을 겨눴는데, 그
+  //   문자열은 실패 경로의 8칸 줄 안에 **부분 문자열로 먼저 들어 있다.**
+  //   `String.replace`가 그쪽을 고쳐 버려서, 통과 경로를 보는 시험에는
+  //   아무 변화가 없었다 — 변이가 "새 나감"으로 찍혔지만 사실은 아무것도
+  //   겨누지 못한 것이다(공허한 변이). 앞뒤 줄을 함께 묶어 유일하게 만든다.
+  ['MUT-F14 비용 판정도 두 시각을 합침', P.cost,
+    s => s.replace('    premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,\n'
+                   + '    fundingBoundsObservedAtMs: fBoundsObs,\n'
+                   + '    fundingSource: f.source,',
+                   '    premiumObservedAtMs: fPremObs, premiumExchangeTimeMs: fPremEx,\n'
+                   + '    fundingBoundsObservedAtMs: fPremObs,\n'
+                   + '    fundingSource: f.source,'), 'RED'],
+
+  ['MUT-F15 진입에서 신선도 판정 자체를 건너뜀', P.entry,
+    s => s.replace('  if (!freshness.ok) {\n'
+                   + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {",
+                   '  if (false) {\n'
+                   + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {"), 'RED'],
+
+  ['MUT-F16 마크가 신선도 판정을 건너뜀 (사이징이 그냥 씀)', P.entry,
+    s => s.replace('  if (!markFreshness.ok) {', '  if (false && !markFreshness.ok) {'), 'RED'],
+
+  ['MUT-F17 기준 마크가를 다시 "시각 없는 숫자"로 축소', P.entry,
+    s => s.replace("  const markObservation: MarketObservation = {\n"
+                   + "    kind: 'MARK',\n"
+                   + '    source: mark?.source ?? null,\n'
+                   + '    value: mark?.price ?? null,\n'
+                   + '    exchangeTimeMs: mark?.exchangeTimeMs ?? null,\n'
+                   + '    receivedAtMs: mark?.receivedAtMs ?? null,\n'
+                   + '    observedAtMs: mark?.observedAtMs ?? null,\n'
+                   + '    cache: mark?.cache ?? null,\n'
+                   + '  };',
+                   "  const markObservation: MarketObservation = {\n"
+                   + "    kind: 'MARK', source: 'LEGACY_NUMBER',\n"
+                   + '    value: (mark as any)?.price ?? (mark as any),\n'
+                   + '    exchangeTimeMs: nowMs(), receivedAtMs: nowMs(),\n'
+                   + '    observedAtMs: nowMs(), cache: \'FRESH\',\n'
+                   + '  };'), 'RED'],
+
+  ['MUT-F18 낡은 브래킷 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
+    s => s.replace('      observedAtMs: bracket.observedAtMs ?? null, cache: bracket.freshness ?? null });',
+                   "      observedAtMs: bracket.observedAtMs ?? null, cache: 'FRESH' });"), 'RED'],
+
+  ['MUT-F19 낡은 premium 캐시 상태를 진입에서 FRESH로 덮어씀', P.entry,
+    s => s.replace('      cache: funding.premiumCache ?? null });',
+                   "      cache: 'FRESH' });"), 'RED'],
+
+  ['MUT-F20 신선도 판정을 첫 거래소 쓰기 **뒤로** 옮김', P.entry,
+    s => moveFreshnessAfterWrite(s), 'RED'],
+
+  ['MUT-F21 라우트가 기준 마크가를 포지션 응답에서 떼어 옴', P.scalp,
+    s => s.replace('        referenceMark: async () => {\n'
+                   + '          const snap = await marketSnapshot();\n'
+                   + '          if (!snap) return null;',
+                   '        referenceMark: async () => {\n'
+                   + '          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);\n'
+                   + '          const m = Number(rr.risk?.markPrice);\n'
+                   + '          if (!Number.isFinite(m) || !(m > 0)) return null;\n'
+                   + '          const snap = { markPrice: m, source: \'POSITION_RISK\', stamps: {\n'
+                   + '            exchangeTimeMs: rr.risk?.positionUpdateTimeMs ?? Date.now(),\n'
+                   + '            receivedAtMs: Date.now(), observedAtMs: Date.now(), cache: \'FRESH\' } } as any;'),
+    'RED'],
+
+  ['MUT-F21b 라우트가 펀딩을 별도 조회로 읽음 (마크가와 다른 시점)', P.scalp,
+    s => s.replace('            marketSnapshot(),\n', '            (async () => {\n'
+                   + '              const pr = await bf.readPremiumIndex(symbol, !connIsLive)\n'
+                   + '                .catch(() => ({ data: null, observedAtMs: null, freshness: \'NONE\' } as any));\n'
+                   + '              return pr.data == null ? null : { lastFundingRate: pr.data.lastFundingRate,\n'
+                   + '                nextFundingTimeMs: pr.data.nextFundingTime, markPrice: pr.data.markPrice,\n'
+                   + '                stamps: { exchangeTimeMs: pr.data.timeMs, receivedAtMs: pr.observedAtMs,\n'
+                   + '                  observedAtMs: pr.observedAtMs, cache: pr.freshness } };\n'
+                   + '            })(),\n'), 'RED'],
+
+  ['MUT-F22 라우트가 수수료에 새 시각을 붙임', P.scalp,
+    s => s.replace("            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: r.rate.observedAtMs,",
+                   "            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),"), 'RED'],
+
+  ['MUT-F23 라우트가 호가의 거래소 시각을 버림', P.scalp,
+    s => s.replace('            exchangeTimeMs: r.depth.exchangeTimeMs,',
+                   '            exchangeTimeMs: Date.now(),'), 'RED'],
+
+  ['MUT-F24 거래소 조회가 premium 응답의 시각을 버림', P.bfapi,
+    s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
+                   '    timeMs: null,'), 'RED'],
+
+  ['MUT-F25 없는 거래소 시각을 0(1970년)으로 적음', P.bfapi,
+    s => s.replace('    timeMs: Number.isFinite(t) && t > 0 ? t : null,',
+                   '    timeMs: Number(d.time || 0),'), 'RED'],
+
+  ['MUT-F26 스냅숏이 거래소 시각 대신 수신 시각을 적음', P.bfapi,
+    s => s.replace('        exchangeTimeMs: d?.timeMs ?? null,',
+                   '        exchangeTimeMs: at,'), 'RED'],
+
+  // ★ 앵커가 옮겨갔다 — `shape()`와 `SymbolPositionRisk`가
+  //   `positionRiskRead.ts`(순수 정본)로 갔다. **지우지 않고** 같은
+  //   고장을 같은 뜻으로 찌르는 새 자리로 옮긴다.
+  ['MUT-F26b 포지션 갱신 시각을 마크가 시각으로 보존', P.prr,
+    s => s.replace('      positionUpdateTimeMs: (() => {',
+                   '      markPriceObservedAtMs: (() => {'), 'RED'],
+
+  ['MUT-F27 시장 스냅숏에 45초 캐시를 붙임', P.bfapi,
+    s => s.replace('  let d: PremiumIndex;\n'
+                   + '  try { d = await fetchOne(sym, testnet); }\n'
+                   + "  catch (e: any) { return { snapshot: null, error: e?.message || '시장 스냅숏 조회 실패' }; }\n"
+                   + '  const at = nowMs();',
+                   '  let d: PremiumIndex;\n'
+                   + '  const hit0 = PREMIUM_CACHE.get(`${testnet ? \'T\' : \'L\'}:${sym}`);\n'
+                   + '  if (hit0) { d = hit0.data; } else {\n'
+                   + '  try { d = await fetchOne(sym, testnet); }\n'
+                   + "  catch (e: any) { return { snapshot: null, error: e?.message || '시장 스냅숏 조회 실패' }; }\n"
+                   + '  PREMIUM_CACHE.set(`${testnet ? \'T\' : \'L\'}:${sym}`, { data: d, ts: nowMs() }); }\n'
+                   + '  const at = hit0 ? hit0.ts : nowMs();'), 'RED'],
+
+  ['MUT-F28 호가 조회가 거래소 시각을 버림', P.bfapi,
+    s => s.replace('    const te = Number(d?.T ?? d?.E);',
+                   '    const te = NaN;'), 'RED'],
+
+  ['MUT-F29 수수료 조회가 관측 시각을 안 싣음 (부르는 쪽이 붙이게 됨)', P.bfapi,
+    s => s.replace('      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: Date.now() },',
+                   '      rate: { symbol: sym, makerRate: maker, takerRate: taker, observedAtMs: null as any },'),
+    'RED'],
+
+  // ── ⑤ 전용 종료 권한 (TIME_EXIT) ──
+  //
+  // 이 단계에서 처음으로 **이미 열린 포지션을 자동으로 닫는다.**
+  // 가장 위험한 고장은 중복 청산과 반대 포지션 생성이다.
+
+  ['MUT-EX1  시간 청산 판정을 없앰 (영원히 안 닫힘)', P.xauth,
+    s => s.replace('  if (!(heldMs >= policy.maxHoldMs)) {', '  if (true) {'), 'RED'],
+
+  ['MUT-EX2  계약 4시간 대신 전략 6시간으로 내려감', P.xpol,
+    s => s.replace("  if (!r.ok || !r.contract) {\n    return fail('CONTRACT_UNRESOLVED',",
+      "  if (!r.ok || !r.contract) {\n"
+      + "    const fb = lifecyclePolicyOf(String(i?.strategyId ?? '').trim());\n"
+      + "    if (fb?.maxHoldMs != null) {\n"
+      + "      return { ok: true, code: 'OK', maxHoldMs: fb.maxHoldMs,\n"
+      + "        source: 'STRATEGY_LIFECYCLE', policyVersion: 'fb', reason: 'fb' };\n"
+      + "    }\n"
+      + "    return fail('CONTRACT_UNRESOLVED',"), 'RED'],
+
+  ['MUT-EX3  보유 경계를 >= 에서 > 로 (정확히 4시간이 통과)', P.xauth,
+    s => s.replace('  if (!(heldMs >= policy.maxHoldMs)) {', '  if (!(heldMs > policy.maxHoldMs)) {'), 'RED'],
+
+  ['MUT-EX4  전용 권한 후보를 올리지 않음 (배선 제거)', P.cand,
+    s => s.replace('          authorityCandidates.push({', '          false && authorityCandidates.push({'), 'RED'],
+
+  ['MUT-EX5  실행 순서에서 임차 확인을 건너뜀', P.xrun,
+    s => s.replace('  if (lease.owned === true) {', '  if (true) {'), 'RED'],
+
+  ['MUT-EX5b 권한 정본이 임차를 안 봄', P.xauth,
+    s => s.replace("  if (i.lease?.owned !== true) {", '  if (false) {'), 'RED'],
+
+  ['MUT-EX6  소유권 재검사를 전송 **뒤**로 옮김', P.xact,
+    s => moveStillMineAfterClose(s), 'RED'],
+
+  ['MUT-EX7  울타리를 못 읽어도 내 것으로 침 (stale fence 허용)', P.xlease,
+    s => s.replace("    return { ok: false, reason: '울타리 번호를 다시 읽지 못했습니다 — 확인하지 못한 것을 통과로 보지 않습니다' };",
+                   "    return { ok: true, reason: '' };"), 'RED'],
+
+  ['MUT-EX8  실행 계약 identity 검사 제거', P.xauth,
+    s => s.replace('  if (eid == null) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX9  종목만 같으면 신원 통과 (계좌·방향 무시)', P.xauth,
+    s => s.replace('  if (!pid || !pid.exchange || !pid.connectionId || !pid.symbol || !pid.side) {',
+                   '  if (!pid || !pid.symbol) {'), 'RED'],
+
+  ['MUT-EX10 방향 검사 제거 (헤지 다른 다리를 닫음)', P.xauth,
+    s => s.replace('  if (obs.side != null && obs.side !== pid.side) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX10b 포지션 모드 검사 제거', P.xauth,
+    s => s.replace("  if (pid.positionMode !== 'ONE_WAY') {", '  if (false) {'), 'RED'],
+
+  ['MUT-EX11 현재 노출 대신 고정 진입 수량으로 닫음', P.xauth,
+    s => s.replace('  const qty = num(obs.qty);', '  const qty = 1;'), 'RED'],
+
+  ['MUT-EX12 청산 주문에서 reduceOnly 제거 (반대 포지션 생성)', P.bfapi,
+    s => s.replace("    // **축소 전용이다.** 빼면 신규 반대 포지션이 된다.\n    reduceOnly: true,\n", ''), 'RED'],
+
+  ['MUT-EX13 청산 주문 방향을 포지션과 같게 함 (포지션이 커진다)', P.bfapi,
+    s => s.replace("      side: pos.side === 'LONG' ? 'SELL' : 'BUY',",
+                   "      side: pos.side === 'LONG' ? 'BUY' : 'SELL',"), 'RED'],
+
+  ['MUT-EX14 이미 flat인데 시장가 주문을 보냄', P.xauth,
+    s => s.replace('  if (obs.found !== true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX15 전송 결과를 모를 때 재조회를 건너뜀', P.xact,
+    s => s.replace('  let after: { ok: boolean; found: boolean };\n'
+                   + '  try { after = await deps.readAfter(); }\n'
+                   + '  catch { after = { ok: false, found: false }; }',
+      '  let after: { ok: boolean; found: boolean };\n'
+      + '  if (ambiguous) { after = { ok: true, found: false }; }\n'
+      + '  else { try { after = await deps.readAfter(); }\n'
+      + '  catch { after = { ok: false, found: false }; } }'), 'RED'],
+
+  ['MUT-EX16 flat 정리를 "아무것도 안 함"으로 적음', P.xrun,
+    s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,',
+                   '        ok: false, blocked: true, reconciledFlat: false, flatVerified: null,'), 'RED'],
+
+  ['MUT-EX17 거래소가 flat이라 해도 장부를 믿고 닫음', P.xrun,
+    s => s.replace("      ? { ok: true, found: false, qty: 0, side: null as 'LONG' | 'SHORT' | null }",
+                   "      ? { ok: true, found: true, qty: 1, side: candidate.positionIdentity.side }"), 'RED'],
+
+  ['MUT-EX18 진입 시각이 없으면 지금으로 대체', P.xauth,
+    s => s.replace('  const openedAt = num(i.openedAtMs);\n  if (openedAt == null || !(openedAt > 0)) {',
+                   '  const openedAt = num(i.openedAtMs) ?? i.nowMs;\n  if (false) {'), 'RED'],
+
+  ['MUT-EX19 미래 진입 시각을 경과 0으로 깎아 통과', P.xauth,
+    s => s.replace('  if (openedAt > now) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX20 배선 없이 커버리지 표에 시간청산 true', P.cov,
+    s => s.replace('      timeExit: auth.capabilities.timeExit,', '      timeExit: true,'), 'RED'],
+
+  ['MUT-EX21 전용 100배 노출에 트레일링·본전이동을 함께 엶', P.cand,
+    s => s.replace('        breakEven: false, trailing: false,', '        breakEven: true, trailing: true,'), 'RED'],
+
+  ['MUT-EX22 LIVE 차단 제거 (전용 100배를 실전에 엶)', P.gate,
+    s => s.replace("    modes: ['TESTNET'],", "    modes: ['TESTNET', 'LIVE_SMALL'],"), 'RED'],
+
+  // ★ 앵커가 옮겨갔다 — ⑤B-3A-1 계측이 `stillMine`을 래퍼로 감쌌다.
+  //   **지우지 않고** 같은 고장(재검증 제거)을 찌르는 새 자리로 옮긴다.
+  ['MUT-EX23 쓰기 직전 울타리 재검증 제거', P.xrun,
+    s => s.replace('      const mine = await deps.revalidateFence();', '      const mine = true;'),
+    'RED'],
+
+  ['MUT-EX24 기록 전 죽은 뒤 재실행에서 flat을 무시하고 또 보냄', P.xrun,
+    s => s.replace("    if (code === 'ALREADY_FLAT') {", '    if (false) {'), 'RED'],
+
+  ['MUT-EX25 노출 조회 실패 시 고정 수량으로 되돌림', P.xrun,
+    s => s.replace("          : { ok: false, found: false, qty: null, side: null as 'LONG' | 'SHORT' | null };",
+                   "          : { ok: true, found: true, qty: 1, side: candidate.positionIdentity.side };"), 'RED'],
+
+  // ★ 앵커가 옮겨갔다 — ALREADY_FLAT 반환에 timing이 붙었다. 뜻은 같다.
+  ['MUT-EX26 ALREADY_FLAT인데 주문을 보냈다고 적음', P.xrun,
+    s => s.replace('        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        timing,',
+                   '        ok: true, blocked: false, reconciledFlat: true, flatVerified: true,\n        attemptedWrite: true, timing,'), 'RED'],
+
+  ['MUT-EX27 종료 의도 멱등 키를 주문에 안 붙임 (거래소가 중복을 알아볼 수 없음)', P.bfapi,
+    s => s.replace("    // **멱등 키.** 거래소가 중복을 알아볼 기회를 주는 추가 방어층이다.\n"
+                   + "    ...(p.clientOrderId ? { clientOrderId: p.clientOrderId } : {}),\n", ''), 'RED'],
+
+  ['MUT-EX27b 멱등 키에 시각을 섞음 (실행자마다 달라짐)', P.xint,
+    s => s.replace('    qtyToken(Number(k.quantity)),',
+                   '    qtyToken(Number(k.quantity)), String(Date.now()),'), 'RED'],
+
+  ['MUT-EX28 전송 직전에 거래소 조회를 다시 끼움 (창이 넓어짐)', P.xvops,
+    s => s.replace("    const bf = await import('../exchanges/binanceFutures');\n"
+                   + '    const r = await bf.sendPreparedClose(',
+      "    const bf = await import('../exchanges/binanceFutures');\n"
+      + '    await readOpenPosition(c, prepared.symbol);\n'
+      + '    const r = await bf.sendPreparedClose('), 'RED'],
+
+  ['MUT-EX29 접수됐는데 잔여가 남아도 닫혔다고 적음', P.xact,
+    s => s.replace('  if (after.found === true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX30 재조회에 실패해도 닫혔다고 적음', P.xact,
+    s => s.replace('  if (after.ok !== true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-EX31 중복 거부를 "거부됨"으로 적음 (같은 자리에 또 보냄)', P.xrun,
+    s => s.replace('      if (!r.ok && isDuplicateIntentError(r.error)) {', '      if (false) {'), 'RED'],
+
+  // ── 중복 응답 분류. **두 코드를 정반대로 다뤄야 한다** ──
+  //
+  //   USDⓈ-M 공식 오류표에서
+  //     -4015 INVALID_CL_ORD_ID_LEN      식별자 길이·형식 오류
+  //     -4116 DUPLICATED_CLIENT_ORDER_ID 식별자 중복
+  //   처음에 -4015를 중복으로 적었다. 그건 틀렸고, 그 오분류는
+  //   **보내지도 않은 주문을 보낸 것으로** 치게 만든다.
+
+  ['MUT-EX33 -4116 중복 인식을 제거 (중복 응답을 거부로 읽음)', P.xint,
+    s => s.replace("  if (/-4116\\b/.test(s)) return true;", '  if (false) return true;'), 'RED'],
+
+  ['MUT-EX34 -4015(형식 오류)를 중복으로 잘못 인식', P.xint,
+    s => s.replace('  if (/-4015\\b/.test(s)) return false;', '  if (/-4015\\b/.test(s)) return true;'), 'RED'],
+
+  ['MUT-EX32 보낸 수량을 "닫힌 수량"으로 적음', P.xrun,
+    s => s.replace(/requestedQuantity/g, 'closedQuantity'), 'RED'],
+
+  // ── 과장 금지 규칙이 **공허하지 않은가** ──
+  //
+  //   b419fad에서 과장 금지 규칙을 넣었는데, 검사기가 `code()`(주석을
+  //   지운 소스)로 읽고 있었다. 이 저장소의 과장 문장은 전부 주석에
+  //   있으므로 그 규칙은 **아무것도 볼 수 없었다** — 통과한 이유가
+  //   "과장이 없어서"가 아니라 "볼 수 없어서"였다.
+  //
+  //   그 규칙을 겨냥한 변이가 없어서 RED로 증명된 적도 없었다. 아래
+  //   둘이 그 자리를 메운다. EX35는 주석에 과장을 넣고, EX36은 안전
+  //   계약의 최종 문장을 지운다.
+
+  ['MUT-EX35 주석에 과장 문구를 되살림 (검사기가 주석을 보는가)', P.xint,
+    s => s.replace('// ──────────────────────────',
+      '// ──────────────────────────\n'
+      + '// 같은 의도면 거래소에 주문은 하나만 생긴다.'), 'RED'],
+
+  ['MUT-EX36 안전 계약의 최종 문장을 지움 (strict single-writer 비보장 선언)', P.xrun,
+    s => s.replace('//   exchange-level strict single-writer는 보장하지 않는다.',
+      '//   (삭제됨)'), 'RED'],
+
+  // ── ⑤A-2 전용 종료 권한의 거래소 지원 범위 ──
+  //
+  //   Gate는 전용 권한이 아직 지원하지 않는다. 이 묶음이 지키는 것은
+  //   "지원을 줄였다"가 아니라 **"검증한 범위와 런타임 허용 범위가
+  //   같다"**이다. EX40은 반대 방향을 지킨다 — 일반 Gate 기능까지
+  //   막으면 그것도 고장이다.
+
+  ['MUT-EX37 Gate에도 전용 TIME_EXIT을 열어 줌 (정본 뒤집기)', P.xauth,
+    s => s.replace("  if (exchange === 'binance') return { timeExit: true, reason: '' };",
+      "  if (exchange !== 'nope') return { timeExit: true, reason: '' };"), 'RED'],
+
+  ['MUT-EX38 거래소 관문을 실행 정본에서 제거 (조회 뒤에 막음)', P.xrun,
+    s => s.replace("  if (candidate.reason === 'TIME_EXIT' && venue.timeExit !== true) {",
+      '  if (false) {'), 'RED'],
+
+  ['MUT-EX39 미지원 거래소를 attemptedWrite=true로 적음', P.xrun,
+    s => s.replace("    return denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason);",
+      "    return { ...denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason), attemptedWrite: true };"),
+    'RED'],
+
+  ['MUT-EX40 미지원을 조회 실패로 숨김 (운영자가 거래소를 의심함)', P.xrun,
+    s => s.replace("    return denied('EXIT_VENUE_UNSUPPORTED', null, venue.reason);",
+      "    return denied('POSITION_READ_FAILED', null, venue.reason);"), 'RED'],
+
+  ['MUT-EX41 전용 권한 제한이 일반 Gate 생명주기까지 막음', P.cand,
+    s => s.replace('  for (const r of list) {',
+      "  for (const r of list) {\n    if (String((r as any)?.exchange) === 'gate') continue;"), 'RED'],
+
+  // ── ⑤B-0/1 위험 측정 — **재는 것과 판단하는 것을 섞지 않는다** ──
+  //
+  //   이 묶음이 지키는 것 대부분은 "하지 않는다"다. 그런 금지는 변이가
+  //   없으면 다음 사람이 "편의상" 되살린다.
+
+  ['MUT-RK1 진입 위험 스냅숏을 신호에서 다시 계산', P.scalp,
+    s => s.replace(
+      'adverseDistancePct: prepared100x.liquidation.adverseDistancePct ?? null,',
+      'adverseDistancePct: Number(scalp.signal.stopPct) || null,'), 'RED'],
+
+  ['MUT-RK2 없는 스냅숏을 0으로 대체', P.per,
+    s => s.replace(
+      '    entryAdverseDistancePct: num(i?.entryAdverseDistancePct),',
+      '    entryAdverseDistancePct: num(i?.entryAdverseDistancePct) ?? 0,'), 'RED'],
+
+  ['MUT-RK3 옛 행에 기본 adverse를 주입', P.cand,
+    s => s.replace(
+      'entryAdverseDistancePct: num((r as any)?.entry_adverse_distance_pct),',
+      'entryAdverseDistancePct: num((r as any)?.entry_adverse_distance_pct) ?? 0.4,'), 'RED'],
+
+  ['MUT-RK4 positionRisk.markPrice를 MARK 정본으로 사용', P.monitor,
+    s => s.replace(
+      '          mark: snap?.snapshot ? {',
+      "          mark: rr?.risk?.markPrice ? {\n"
+      + "            kind: 'MARK' as const, source: 'EXCHANGE_POSITION_RISK',\n"
+      + "            value: rr.risk.markPrice, exchangeTimeMs: null,\n"
+      + "            receivedAtMs: posReceivedAtMs, observedAtMs: posReceivedAtMs,\n"
+      + "            cache: 'FRESH' as const,\n"
+      + "          } : snap?.snapshot ? {"), 'RED'],
+
+  ['MUT-RK5 updateTime을 청산가 시각이라고 주장', P.per,
+    s => s.replace(
+      '  positionRiskReceivedAtMs: number | null;',
+      '  liquidationExchangeTimeMs?: number | null;\n  positionRiskReceivedAtMs: number | null;'),
+    'RED'],
+
+  ['MUT-RK6 거래소 청산가가 없으면 내부 값을 그 칸으로 승격', P.per,
+    s => s.replace(
+      '  const exHead = exLiq == null ? null : headroomPct(side, markPrice, exLiq);',
+      '  const exFinal = exLiq ?? inLiq;\n'
+      + '  const exHead = exFinal == null ? null : headroomPct(side, markPrice, exFinal);'),
+    'RED'],
+
+  ['MUT-RK7 두 청산가를 평균', P.per,
+    s => s.replace(
+      '    exchangeLiquidationPrice: exLiq, estimatedLiquidationPrice: inLiq,',
+      '    exchangeLiquidationPrice: exLiq != null && inLiq != null'
+      + ' ? (exLiq + inLiq) / 2 : exLiq, estimatedLiquidationPrice: inLiq,'), 'RED'],
+
+  ['MUT-RK8 임의 delta 문턱으로 일치/불일치를 나눔', P.per,
+    s => s.replace(
+      '  const measured: PostEntryRiskMeasurement = {',
+      '  const consistentRatio = 0.002;\n  const measured: any = { consistentRatio,'), 'RED'],
+
+  ['MUT-RK9 측정 상태에 종료 지시를 더함', P.per,
+    s => s.replace(
+      "export type PostEntryRiskStatus =",
+      "export type PostEntryRiskStatus =\n  | 'CLOSE_NOW'"), 'RED'],
+
+  ['MUT-RK10 측정 블록이 직접 청산을 부름', P.monitor,
+    s => s.replace(
+      "        if (m.status === 'MEASURED') out.postEntryRisk.measured += 1;",
+      "        if (m.status === 'MEASURED') {\n"
+      + "          await ops.sendSymbolClose(venue, m as any);\n"
+      + "          out.postEntryRisk.measured += 1;\n"
+      + "        }\n        if (false) {"), 'RED'],
+
+  ['MUT-RK11 positionGuard의 0.35를 100배 경로로 복사', P.per,
+    s => s.replace(
+      '/** 0과 음수는 **없음**이다.',
+      'export const liquidationProximityRatio = 0.35;\n\n/** 0과 음수는 **없음**이다.'),
+    'RED'],
+
+  ['MUT-RK12 positionGuard의 1.5(markShockPct)를 100배 경로로 복사', P.per,
+    s => s.replace(
+      '/** 0과 음수는 **없음**이다.',
+      'export const markShockPct = 1.5;\n\n/** 0과 음수는 **없음**이다.'), 'RED'],
+
+  ['MUT-RK13 Exact100X에 고정 익절을 함께 개방', P.prof,
+    s => s.replace("  takeProfitPct: null,\n  takeProfitPolicy: 'NO_FIXED_TP',",
+      "  takeProfitPct: 1.5,\n  takeProfitPolicy: 'NO_FIXED_TP',"), 'RED'],
+
+  ['MUT-RK14 Gate에서 ⑤B 감시를 열어 ⑤A-2를 우회', P.monitor,
+    s => s.replace(
+      '        if (exact100xExitVenueCapability(c.exchange).timeExit !== true) continue;',
+      '        if (false) continue;'), 'RED'],
+
+  ['MUT-RK15 091 후퇴가 계약 칸까지 함께 버림', P.rows,
+    s => s.replace(
+      '  if (!zero.error) {',
+      '  if (zero.error) { zero = { data: null, error: { code: "42703",'
+      + ' message: "column live_orders.execution_profile_id does not exist" } }; }\n'
+      + '  if (!zero.error) {'), 'RED'],
+
+  ['MUT-RK16 0을 청산가로 읽음 (여유가 100%가 됨)', P.per,
+    s => s.replace(
+      '  return n != null && n > 0 ? n : null;\n};',
+      '  return n;\n};'), 'RED'],
+
+  // ── ⑤B-0/1 정정 — provenance가 실제 HTTP 경계와 같은가 ──
+  //
+  //   RK17은 **순서**를 찌른다. 변수 이름이 있는지가 아니라, 시각을
+  //   요청 **전**에 찍는지를 본다. 그렇게 하면 v2→v3→account 왕복만큼
+  //   앞선 값이 "받은 시각"으로 기록돼 지연 데이터가 통째로 오염된다.
+
+  ['MUT-RK17 받은 시각을 요청 전에 찍음 (왕복만큼 앞섬)', P.prr,
+    s => s.replace(
+      "    const raw = await signed('/fapi/v2/positionRisk', { symbol: sym });\n"
+      + '    const v2Received = nowMs();',
+      "    const v2Received = v2Started;\n"
+      + "    const raw = await signed('/fapi/v2/positionRisk', { symbol: sym });"), 'RED'],
+
+  ['MUT-RK17b 계정 응답 시각이 청산가 관측 시각을 덮음', P.prr,
+    s => s.replace(
+      '      p3.accountReceivedAtMs = nowMs();',
+      '      p3.accountReceivedAtMs = nowMs();\n'
+      + '      p3.positionRiskReceivedAtMs = p3.accountReceivedAtMs;'), 'RED'],
+
+  ['MUT-RK17c 실패한 v2 시각을 v3 provenance로 재사용', P.prr,
+    s => s.replace('  const v3Started = nowMs();', '  const v3Started = v2Started;'), 'RED'],
+
+  ['MUT-RK18 전체 trustworthy를 internal.trustworthy의 alias로 되돌림', P.per,
+    s => s.replace(
+      "    status: 'MEASURED', reason: '', internalTrustworthy: internal.trustworthy,",
+      "    status: 'MEASURED', reason: '', internalTrustworthy: internal.trustworthy,\n"
+      + '    trustworthy: internal.trustworthy,'), 'RED'],
+
+  ['MUT-RK18b updateTime을 청산가 관측 시각으로 승격', P.per,
+    s => s.replace(
+      '    positionRiskReceivedAtMs: received,',
+      '    positionRiskReceivedAtMs: received ?? num(i?.provenance?.positionUpdateTimeMs),'),
+    'RED'],
+
+  // ── ⑤B-2 관측 적재 — 실측과 주입값, duration과 epoch ──
+
+  ['MUT-OB1 단조 elapsed를 Date.now 차로 바꿈', P.prr,
+    s => s.replace('  const helperT0 = monotonicMs();',
+      '  const helperT0 = nowMs();\n'
+      + '  const monotonicMs = nowMs;'), 'RED'],
+
+  ['MUT-OB2 elapsed와 epoch timestamp를 같은 칸으로 합침', P.per,
+    s => s.replace(
+      '    positionRiskElapsedMs: num(i?.provenance?.positionRiskElapsedMs),',
+      '    positionRiskElapsedMs: started != null && received != null'
+      + ' ? received - started : null,'), 'RED'],
+
+  ['MUT-OB3 v2 실패 시간을 v3 elapsed에 포함', P.prr,
+    s => s.replace('  const v3T0 = monotonicMs();', '  const v3T0 = helperT0;'), 'RED'],
+
+  ['MUT-OB4 관측을 live_orders에 씀 (진입 불변 스냅숏을 덮음)', P.obs,
+    s => s.replace("    const { error } = await sb.from('exact100x_risk_observations')",
+      "    const { error } = await sb.from('live_orders')"), 'RED'],
+
+  ['MUT-OB5 관측 단계가 종료 primitive를 부름', P.monitor,
+    s => s.replace(
+      "        if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;",
+      '        await ops.sendSymbolClose(venue, m as any);\n'
+      + "        if (rec.code === 'RECORDED') out.postEntryRisk.recorded += 1;"), 'RED'],
+
+  ['MUT-OB6 시험 주입값을 실측으로 표시', P.obs,
+    s => s.replace(
+      "  if (!ORIGINS.includes(i?.sampleOrigin as any)) {",
+      "  if (false) {"), 'RED'],
+
+  ['MUT-OB7 출처를 안 골라도 실측 기본값으로 적음', P.obs,
+    s => s.replace(
+      "export function riskObservationRow(i: RiskObservationInput): Record<string, any> {",
+      "export function riskObservationRow(i: RiskObservationInput): Record<string, any> {\n"
+      + "  i = { ...i, sampleOrigin: i.sampleOrigin ?? 'VERIFIED_TESTNET_OBSERVATION' };"),
+    'RED'],
+
+  // ★ 앵커가 옮겨갔다 — 결과에 `eligibility` 칸이 생겼다.
+  //   **지우지 않고** 같은 고장을 같은 뜻으로 찌르는 새 자리로 옮긴다.
+  ['MUT-OB8 적재 실패를 성공으로 적음 (분포가 왜곡됨)', P.obs,
+    s => s.replace("      return { code: 'WRITE_FAILED', eligibility: null,\n        reason: String(error?.message || error).slice(0, 160) };",
+      "      return { code: 'RECORDED', eligibility: null, reason: '' };"), 'RED'],
+
+  ['MUT-OB9 092에 sample_origin 기본값을 둠', P.mig92,
+    s => s.replace('  sample_origin TEXT NOT NULL,',
+      "  sample_origin TEXT NOT NULL DEFAULT 'VERIFIED_TESTNET_OBSERVATION',"), 'RED'],
+
+  ['MUT-OB10 관측 줄에 문턱 칸을 더함', P.obs,
+    s => s.replace('    status: m.status,',
+      '    headroom_ratio_threshold: 0.35,\n    status: m.status,'), 'RED'],
+
+  // ★ 앵커가 옮겨갔다 — 단조 시계 정본이 `system/monotonicClock`으로
+  //   갔다(두 벌이 되지 않게 모았다). **지우지 않고** 새 자리로 옮긴다.
+  ['MUT-OB11 단조 시계가 없을 때 Date.now로 메움', P.mclock,
+    s => s.replace('  return typeof p?.now === \'function\' ? p.now() : null;',
+      '  return typeof p?.now === \'function\' ? p.now() : Date.now();'), 'RED'],
+
+  // ── ⑤B-2 봉인 — 실측의 뜻과 표의 보안 ──
+
+  ['MUT-OB12 VERIFIED_TESTNET을 LIVE에도 허용 (런타임)', P.obs,
+    s => s.replace("    if (i.env !== 'TESTNET') {", '    if (i.env === "MOCK_NEVER") {'),
+    'RED'],
+
+  ['MUT-OB12b VERIFIED_TESTNET을 LIVE에도 허용 (자격 정본)', P.elig,
+    s => s.replace('  if (i?.testnet !== true) {', '  if (false) {'), 'RED'],
+
+  ['MUT-OB12c DB의 TESTNET 전용 제약을 제거', P.mig93,
+    s => s.replace("    OR env = 'TESTNET'", "    OR env <> 'NEVER'"), 'RED'],
+
+  ['MUT-OB13 positionAmt 0인데 실측으로 기록', P.elig,
+    s => s.replace('  if (amt === 0) {', '  if (false) {'), 'RED'],
+
+  ['MUT-OB14 반대 부호 포지션을 이 후보의 것으로 기록', P.elig,
+    s => s.replace('  if (observed !== i.side) {', '  if (false) {'), 'RED'],
+
+  ['MUT-OB14b 라우트가 절댓값을 자격 판정에 넘김', P.monitor,
+    s => s.replace('          signedPositionAmt: rr?.risk?.positionAmt ?? null,',
+      '          signedPositionAmt: rr?.risk?.positionAmt == null ? null'
+      + ' : Math.abs(rr.risk.positionAmt),'), 'RED'],
+
+  ['MUT-OB15 관측 표의 RLS를 끔', P.mig93,
+    s => s.replace('  ENABLE ROW LEVEL SECURITY;', '  DISABLE ROW LEVEL SECURITY;'), 'RED'],
+
+  ['MUT-OB15b service-only 정책을 제거', P.mig93,
+    s => s.replace('    TO service_role', '    TO public'), 'RED'],
+
+  ['MUT-OB15c 자격 미달을 쓰기 실패로 적음 (운영자가 DB를 뒤짐)', P.obs,
+    s => s.replace("      return { code: 'NOT_ELIGIBLE', eligibility: el.code, reason: el.reason };",
+      "      return { code: 'WRITE_FAILED', eligibility: el.code, reason: el.reason };"),
+    'RED'],
+
+  ['MUT-OB15d 어긋난 기존 줄을 UPDATE로 고침', P.mig93,
+    s => s.replace('  IF bad_rows > 0 THEN',
+      "  UPDATE public.exact100x_risk_observations SET env = 'TESTNET'\n"
+      + "    WHERE sample_origin = 'VERIFIED_TESTNET_OBSERVATION';\n"
+      + '  IF false THEN'), 'RED'],
+
+  // ── ⑤B-2 OB16 — 완전한 identity ≠ Exact100X identity ──
+  //
+  //   `executionIdentityComplete`는 "세 칸이 찼는가"만 본다. 그걸로
+  //   실측 자격을 주면 다른 계약의 포지션이 Exact100X 통계에 섞인다.
+
+  ['MUT-OB16 Exact100X 확인을 지우고 완전성만 봄', P.elig,
+    s => s.replace('  const ex100 = exact100xIdentity(\n'
+      + '    ident?.profileId, ident?.presetId, ident?.contractVersion);',
+      '  const ex100 = { ok: ident?.profileId != null && ident?.presetId != null'
+      + " && ident?.contractVersion != null, code: 'EXACT_100X', reason: '' };"), 'RED'],
+
+  ['MUT-OB16b 이름만 보고 버전·resolver 실패를 무시', P.plan,
+    s => s.replace('  const r = resolveExecutionProfile(profileId, presetId, version);',
+      "  const r: any = { ok: true, kind: 'contract', contract: {\n"
+      + '    profileId, presetId, contractVersion: version, leverage: 100, maxLeverage: 100,\n'
+      + "    stopPolicy: 'NO_FIXED_SL', sizingPolicy: 'MARGIN_ALLOCATION',\n"
+      + "    takeProfitPolicy: 'NO_FIXED_TP', stopLossPct: null, takeProfitPct: null } };"),
+    'RED'],
+
+  ['MUT-OB16c 계약 모양 검사를 건너뜀 (이름만으로 Exact100X)', P.plan,
+    s => s.replace('  for (const [okShape, why] of shape) {', '  for (const [okShape, why] of []) {'),
+    'RED'],
+
+  // ── ⑤B-3A-1 탈출 계측 (ESC) ──
+  //
+  //   "언제 닫을지"가 아니라 "닫는 데 얼마나 걸리는지"를 제대로 재는가.
+  //   잘못 잰 숫자로 문턱을 유도하면 틀린 문턱이 근거 있어 보인다.
+
+  ['MUT-ESC1 submit duration을 Date.now 차로 계산', P.mclock,
+    s => s.replace("  return typeof p?.now === 'function' ? p.now() : null;",
+      '  return Date.now();'), 'RED'],
+
+  ['MUT-ESC2 critical window 측정 사이에 await를 끼움', P.xrun,
+    s => s.replace('      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());',
+      '      await deps.readAfter();\n'
+      + '      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());'),
+    'RED'],
+
+  ['MUT-ESC2b critical window를 재지 않고 0으로 적음', P.xrun,
+    s => s.replace('      timing.criticalWindowElapsedMs = monotonicSpanMs(tAfterFence, mono());',
+      '      timing.criticalWindowElapsedMs = 0;'), 'RED'],
+
+  ['MUT-ESC3 reportedAvgPrice를 다시 버림', P.bfapi,
+    s => s.replace('  const reportedAvgPrice = num((r as any)?.price) ?? num(raw.avgPrice);',
+      '  const reportedAvgPrice = null;'), 'RED'],
+
+  ['MUT-ESC3b 평균가 0을 그대로 적음 (슬리피지가 100%가 됨)', P.xrun,
+    s => s.replace('      reportedAvgPrice = typeof avg === \'number\' && Number.isFinite(avg) && avg > 0\n'
+      + '        ? avg : null;',
+      '      reportedAvgPrice = typeof avg === \'number\' ? avg : null;'), 'RED'],
+
+  ['MUT-ESC4 보낸 수량을 체결 수량이라고 기록', P.esc,
+    s => s.replace('    executed_qty: i.executedQty,', '    executed_qty: i.requestedQuantity,'),
+    'RED'],
+
+  ['MUT-ESC5 첫 재조회 지연을 actualTimeToFlatMs라고 기록', P.xrun,
+    s => s.replace('  submitAcceptedToFirstReadAfterMs: number | null;',
+      '  actualTimeToFlatMs: number | null;\n  submitAcceptedToFirstReadAfterMs: number | null;'),
+    'RED'],
+
+  ['MUT-ESC6 모든 호출을 wakeSource=worker로 고정', P.monitor,
+    s => s.replace("              wakeSource: wake.source, wakeDelayMs: wake.delayMs,",
+      "              wakeSource: 'worker', wakeDelayMs: wake.delayMs,"), 'RED'],
+
+  ['MUT-ESC7 모르는 wake 지연을 5분 기준으로 추정', P.esc,
+    s => s.replace('    wake_delay_ms: i.wakeDelayMs,',
+      '    wake_delay_ms: i.wakeDelayMs ?? 300_000,'), 'RED'],
+
+  ['MUT-ESC8 synthetic 표본을 VERIFIED_TESTNET으로 저장', P.esc,
+    s => s.replace("  if (i.sampleOrigin === 'VERIFIED_TESTNET_OBSERVATION') {",
+      '  if (false) {'), 'RED'],
+
+  ['MUT-ESC9 다른 계약의 종료를 Exact100X 계측에 저장', P.esc,
+    s => s.replace('    if (!el.eligible) {', '    if (false) {'), 'RED'],
+
+  ['MUT-ESC10 계측 적재가 새 주문 경로를 만듦', P.monitor,
+    s => s.replace("            const live = await ops.readOpenPosition(venue, c.symbol).catch(() => null);",
+      '            const live = await ops.sendSymbolClose(venue, prepared).catch(() => null);'),
+    'RED'],
+
+  ['MUT-ESC11 슬리피지 부호를 방향과 무관하게 계산', P.slip,
+    s => s.replace("  const adverse = side === 'LONG' ? mark - fill : fill - mark;",
+      '  const adverse = mark - fill;'), 'RED'],
+
+  ['MUT-ESC12 모르는 슬리피지를 0으로 적음', P.slip,
+    s => s.replace('  return Number.isFinite(n) && n > 0 ? n : null;', '  return Number.isFinite(n) ? n : 0;'),
+    'RED'],
+
+  ['MUT-ESC13 094의 RLS를 끔', P.mig94,
+    s => s.replace('  ENABLE ROW LEVEL SECURITY;', '  DISABLE ROW LEVEL SECURITY;'), 'RED'],
+
+  ['MUT-ESC14 094의 service-only 정책을 품', P.mig94,
+    s => s.replace('    TO service_role', '    TO authenticated'), 'RED'],
+
+  // ── ⑤B-3A-1.1 wake provenance ──
+  //
+  //   `manual` 추측이 실제 Vercel cron 호출 전부를 거짓으로 적었다.
+  //   되돌리는 길을 전부 막는다.
+  ['MUT-ESC17 source header가 없으면 manual로 되돌림', P.wake,
+    s => s.replace("  if (s) return s;\n  if (authKind === 'CRON_BEARER') return WAKE_SOURCE_CRON_BEARER;",
+      "  if (s) return s;\n  return 'manual';\n  if (authKind === 'CRON_BEARER') return WAKE_SOURCE_CRON_BEARER;"),
+    'RED'],
+
+  ['MUT-ESC17b CRON_BEARER와 ADMIN_HEADER를 같은 source로 합침', P.wake,
+    s => s.replace("export const WAKE_SOURCE_UNATTRIBUTED_ADMIN = 'unattributed-admin';",
+      "export const WAKE_SOURCE_UNATTRIBUTED_ADMIN = 'cron-bearer';"), 'RED'],
+
+  ['MUT-ESC17c 라우트가 정본을 버리고 다시 manual로 적음', P.monitor,
+    s => s.replace('  const runner = resolveWakeSource(req.headers.get(WAKE_SOURCE_HEADER), wakeAuth.kind);',
+      "  const runner = String(req.headers.get(WAKE_SOURCE_HEADER) || '').trim() || 'manual';"),
+    'RED'],
+
+  ['MUT-ESC17d 인증 결과를 다시 boolean으로 버림', P.monitor,
+    s => s.replace('function authorized(req: NextRequest): WakeAuth {',
+      'function authorized(req: NextRequest): boolean {'), 'RED'],
+
+  ['MUT-ESC18 Worker actual interval 대신 5분 상수를 기록', P.worker,
+    s => s.replace('    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,',
+      '    lastRunMs: lastExitMonitorMs, intervalMs: 300_000,'), 'RED'],
+
+  ['MUT-ESC18b expectedAt이 없는데 wakeDelayMs=0을 기록', P.wake,
+    s => s.replace('  const delayMs = usable ? observed - (exp as number) : null;',
+      '  const delayMs = usable ? observed - (exp as number) : 0;'), 'RED'],
+
+  ['MUT-ESC18b2 모르는 간격을 5분으로 추정', P.wake,
+    s => s.replace('  const intervalMs = iv != null && iv > 0 ? iv : null;',
+      '  const intervalMs = iv != null && iv > 0 ? iv : 300_000;'), 'RED'],
+
+  ['MUT-ESC18c cadence telemetry를 청산 권한 판정에 사용', P.monitor,
+    s => s.replace('    for (const c of authorityCandidates) {',
+      '    for (const c of authorityCandidates) {\n'
+      + '      if ((wakeCadence.delayMs ?? 0) > 60_000) continue;'), 'RED'],
+
+  ['MUT-ESC18d 첫 tick에도 예정 시각을 지어냄', P.wake,
+    s => s.replace("  if (typeof last === 'number' && Number.isFinite(last) && last > 0\n"
+      + '      && Number.isFinite(iv) && iv > 0) {',
+      '  if (Number.isFinite(iv) && iv > 0) {'), 'RED'],
+
+  ['MUT-ESC18e Worker가 직전 실행 시각을 덮어쓴 뒤에 예정 시각을 계산', P.worker,
+    s => s.replace('  const wakeHeaders = wakeCadenceHeaders({\n'
+      + '    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,\n'
+      + '  });\n\n  lastExitMonitorMs = Date.now();',
+      '  lastExitMonitorMs = Date.now();\n\n'
+      + '  const wakeHeaders = wakeCadenceHeaders({\n'
+      + '    lastRunMs: lastExitMonitorMs, intervalMs: EXIT_MONITOR_MS,\n'
+      + '  });'), 'RED'],
+
+
+  // ── ⑤B-3A-2 마이그레이션 계보 ──
+  //
+  //   번호 충돌은 로컬에서 자기 일관적이라 base(main)에 대해서만 보인다.
+  //   되돌리는 길과 "비교하지 못한 것을 통과로 적는" 길을 전부 막는다.
+  ['MIG-L1 ⑤B 마이그레이션을 다시 089로 되돌림', P.lin,
+    s => s.replace("  { id: 90, name: '090_live_orders_execution_identity.sql' },",
+      "  { id: 89, name: '089_live_orders_execution_identity.sql' },"), 'RED'],
+
+  ['MIG-L1b 선언 번호만 089로 낮춤 (파일은 그대로)', P.lin,
+    s => s.replace("  { id: 90, name: '090_live_orders_execution_identity.sql' },",
+      "  { id: 89, name: '090_live_orders_execution_identity.sql' },"), 'RED'],
+
+  ['MIG-L2 base에 있던 파일이 사라진 것을 통과시킴', P.lin,
+    s => s.replace("    const mine = byName.get(b.name);\n    if (!mine) {",
+      '    const mine = byName.get(b.name);\n    if (false) {'), 'RED'],
+
+  ['MIG-L2b 이미 적용된 파일의 내용 변경을 통과시킴', P.lin,
+    s => s.replace('    if (mine.sql !== b.sql) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L2c base를 못 읽은 것을 "겹치지 않음"으로 적음', P.lin,
+    s => s.replace('  if (baseFiles.length === 0) {', '  if (false) {'), 'RED'],
+
+  ['MIG-L3 선언 번호 사이에 빈 칸을 허용', P.lin,
+    s => s.replace('    if (cur.id !== prev.id + 1) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L3b 같은 번호가 두 파일을 가리키는 것을 허용', P.lin,
+    s => s.replace('    if (prev != null) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L3c base 마지막 번호 뒤가 아닌 것을 허용', P.lin,
+    s => s.replace('    if (d.id <= baseMax) {', '    if (false) {'), 'RED'],
+
+  ['MIG-L3d 094를 건너뛰고 095로 선언', P.lin,
+    s => s.replace("  { id: 94, name: '094_exact100x_exit_escape_observations.sql' },",
+      "  { id: 95, name: '094_exact100x_exit_escape_observations.sql' },"), 'RED'],
+
+  ['MIG-L4 manifest를 다시 굽지 않고 옛 이름·번호를 유지', P.manifest,
+    s => s.replace("  { name: '090_live_orders_execution_identity.sql', id: 90,",
+      "  { name: '089_live_orders_execution_identity.sql', id: 89,"), 'RED'],
+
+  ['MIG-L4b manifest에서 main의 089를 빼 버림', P.manifest,
+    s => s.replace(/\n  \{ name: '089_auth_profile_identity_sync\.sql',[^\n]*\n/, '\n'), 'RED'],
+
+  ['MIG-L5 rename이라면서 090의 칸 이름을 바꿈', P.mig90,
+    s => s.replace(/execution_preset_id/g, 'exec_preset_id'), 'RED'],
+
+  ['MIG-L5b rename이라면서 091의 칸을 지움', P.mig91,
+    s => s.replace(/entry_liquidation_distance_pct_raw/g, 'entry_liq_dist_raw'), 'RED'],
+
+  ['MIG-L5c rename이라면서 092의 표 이름을 바꿈', P.mig92,
+    s => s.replace(/exact100x_risk_observations/g, 'exact100x_risk_obs'), 'RED'],
+
+
+  // ── ⑤B-3A-2.3 관측 표 ACL ──
+  //
+  //   RLS와 GRANT는 다른 층이다. "RLS 켰으니 됐다"로 되돌리는 길과
+  //   "일부만 회수하고 닫았다고 적는" 길을 전부 막는다.
+  ['ACL1  risk_observations의 REVOKE 제거', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES ON TABLE public\.exact100x_risk_observations\n  FROM anon, authenticated;\n/, ''), 'RED'],
+
+  ['ACL2  escape_observations의 REVOKE 제거', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES ON TABLE public\.exact100x_exit_escape_observations\n  FROM anon, authenticated;\n/, ''), 'RED'],
+
+  ['ACL3  anon만 REVOKE하고 authenticated를 남김', P.mig95,
+    s => s.replace(/FROM anon, authenticated;/g, 'FROM anon;'), 'RED'],
+
+  ['ACL4  authenticated만 REVOKE하고 anon을 남김', P.mig95,
+    s => s.replace(/FROM anon, authenticated;/g, 'FROM authenticated;'), 'RED'],
+
+  ['ACL5  REVOKE ALL 대신 SELECT만 회수', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES/g, 'REVOKE SELECT'), 'RED'],
+
+  ['ACL6  TRUNCATE가 남는 열거형으로 약화', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES/g, 'REVOKE SELECT, INSERT, UPDATE, DELETE'), 'RED'],
+
+  ['ACL7  service_role GRANT 제거', P.mig95,
+    s => s.replace(/GRANT ALL PRIVILEGES ON TABLE public\.exact100x_\w+\n  TO service_role;\n/g, ''),
+    'RED'],
+
+  ['ACL8  service_role 대신 authenticated에 GRANT', P.mig95,
+    s => s.replace(/TO service_role;/g, 'TO authenticated;'), 'RED'],
+
+  ['ACL9  표 이름을 하나 틀리게 바꿈', P.mig95,
+    s => s.replace(/exact100x_exit_escape_observations/g, 'exact100x_exit_escape_observation'),
+    'RED'],
+
+  ['ACL10 095를 manifest에서 제거', P.manifest,
+    s => s.replace(/\n  \{ name: '095_exact100x_observation_acl_hardening\.sql',[^\n]*\n/, '\n'),
+    'RED'],
+
+  ['ACL11 095 checksum을 낡은 값으로 둠', P.manifest,
+    s => s.replace("'095_exact100x_observation_acl_hardening.sql', id: 95, risk: 'ADDITIVE', checksum: '32710ae3272dcc57'",
+      "'095_exact100x_observation_acl_hardening.sql', id: 95, risk: 'ADDITIVE', checksum: 'deadbeefdeadbeef'"),
+    'RED'],
+
+  ['ACL12 "RLS 있으니 필요 없다"며 REVOKE 둘 다 제거', P.mig95,
+    s => s.replace(/REVOKE ALL PRIVILEGES ON TABLE public\.exact100x_\w+\n  FROM anon, authenticated;\n/g, ''),
+    'RED'],
+
+  // 정본 자체를 약화시키는 길도 막는다
+  ['ACL13 정본이 부분 REVOKE를 ALL로 인정', P.acl,
+    s => s.replace("s.verb === 'REVOKE' && s.roles.includes(role) && s.privileges.includes('ALL')",
+      "s.verb === 'REVOKE' && s.roles.includes(role)"), 'RED'],
+
+  ['ACL14 정본이 public role 재GRANT를 안 봄', P.acl,
+    s => s.replace('      for (const role of PUBLIC_ROLES) {\n        if (s.roles.includes(role)) {',
+      '      for (const role of []) {\n        if (s.roles.includes(role)) {'), 'RED'],
+
+  ['ACL15 정본이 파괴적 문장을 통과시킴', P.acl,
+    s => s.replace("    if (/^(DROP|TRUNCATE|DELETE|UPDATE|INSERT|ALTER\\s+TABLE\\s+\\S+\\s+DROP)\\b/i.test(s.raw)) {",
+      '    if (false) {'), 'RED'],
+
+  ['ACL16 정본이 service_role GRANT 없음을 통과시킴', P.acl,
+    s => s.replace('    if (!served) {', '    if (false) {'), 'RED'],
+
+  ['ACL17 095를 계보 선언에서 뺌', P.lin,
+    s => s.replace("  { id: 95, name: '095_exact100x_observation_acl_hardening.sql' },\n", ''),
+    'RED'],
+
+
+  // ── ⑤B-3A-3 외부 준비 상태 ──
+  //
+  //   없는 표본을 만들어 내는 길과, 실패 원인을 다시 한 문장으로 뭉개는
+  //   길을 전부 막는다.
+  ['RDY1  LIVE 연결을 TESTNET 후보로 셈', P.rdy,
+    s => s.replace("    String(c?.exchange ?? '').trim().toLowerCase() === 'binance' && c?.testnet === true);",
+      "    String(c?.exchange ?? '').trim().toLowerCase() === 'binance');"), 'RED'],
+
+  ['RDY1b Gate도 Exact100X 후보로 셈', P.rdy,
+    s => s.replace("String(c?.exchange ?? '').trim().toLowerCase() === 'binance' &&", 'true &&'),
+    'RED'],
+
+  ['RDY2  testnet 미확인(null)을 true로 읽음', P.rdy,
+    s => s.replace('c?.testnet === true);', 'c?.testnet !== false);'), 'RED'],
+
+  ['RDY3  연결이 없는데 준비됐다고 적음', P.rdy,
+    s => s.replace("  return last ?? nope('NO_BINANCE_TESTNET_CONNECTION',",
+      "  return last ?? { ready: true, code: 'READY', reason: '', connectionId: null };\n"
+      + "  return last ?? nope('NO_BINANCE_TESTNET_CONNECTION',"), 'RED'],
+
+  ['RDY3b 후보 필터를 통과한 것이 없어도 마지막 결격 사유만 적음', P.rdy,
+    s => s.replace('  const cand = all.filter(c =>', '  const cand = all.slice(0, 0) || all.filter(c =>'),
+    'RED'],
+
+  ['RDY4  출금 권한 미확인을 "없음"으로 읽음 (진단)', P.rdy,
+    s => s.replace("  if (i.hasWithdrawal !== false) return 'WITHDRAWAL_ENABLED';",
+      "  if (i.hasWithdrawal === true) return 'WITHDRAWAL_ENABLED';"), 'RED'],
+
+  ['RDY4b 출금 권한 미확인을 "없음"으로 읽음 (연결)', P.rdy,
+    s => s.replace('    if (c.hasWithdrawal !== false) {', '    if (c.hasWithdrawal === true) {'),
+    'RED'],
+
+  ['RDY5  출금 권한을 거래 권한보다 늦게 봄', P.rdy,
+    s => s.replace("    if (c.hasWithdrawal !== false) {\n"
+      + "      last = nope('WITHDRAWAL_PERMISSION_PRESENT',\n"
+      + "        '출금 권한이 있는(또는 확인하지 못한) 키입니다 — 출금 비허용 키여야 합니다', id);\n"
+      + '      continue;\n    }\n', ''), 'RED'],
+
+  ['RDY6  세 사실을 한 코드로 뭉갬', P.rdy,
+    s => s.replace("  if (i.exchangeResolved !== true) return 'UNSUPPORTED_EXCHANGE';",
+      "  if (i.exchangeResolved !== true) return 'NO_CONNECTION';"), 'RED'],
+
+  ['RDY6b 복호화 실패를 SECRET_MISSING으로 뭉갬', P.rdy,
+    s => s.replace("  if (i.secretDecrypted !== true) return 'DECRYPT_FAILED';",
+      "  if (i.secretDecrypted !== true) return 'SECRET_MISSING';"), 'RED'],
+
+  ['RDY7  사유 문구에 값을 끼움', P.rdy,
+    s => s.replace("    case 'DECRYPT_FAILED': return 'API 시크릿을 복호화하지 못했습니다';",
+      "    case 'DECRYPT_FAILED': return 'API 시크릿을 복호화하지 못했습니다: AAAAAAAAAAAAAAAAAAAAAAAA=';"),
+    'RED'],
+
+  ['RDY8  Gate TESTNET을 Exact100X 표본 자격으로 바꿈', P.rdy,
+    s => s.replace("    VENUE_UNSUPPORTED: 'VENUE_UNSUPPORTED',", "    VENUE_UNSUPPORTED: 'READY',"),
+    'RED'],
+
+  ['RDY9  표본 자격 판정을 복제함 (정본 위임 제거)', P.rdy,
+    s => s.replace('  const v = verifiedTestnetObservationEligibility(i);',
+      "  const v = { code: 'ELIGIBLE', eligible: true, reason: '' } as any;"), 'RED'],
+
+  ['RDY10 라우트가 다시 한 문장으로 뭉갬', P.monitor,
+    s => s.replace("          reason: credentialDiagnosisReason(dc),",
+      "          reason: '연결을 읽지 못했거나 출금 권한이 있는 키라 조회하지 않았습니다',"),
+    'RED'],
+
+  ['RDY10b 라우트가 자격 코드를 안 남김 (한 경로만)', P.monitor,
+    s => s.replace('          credentialCode: dc,', ''), 'RED'],
+
+  ['RDY10c 모든 경로에서 자격 코드를 지움', P.monitor,
+    s => s.replace(/ *credentialCode: dc,\n/g, ''), 'RED'],
+
+  ['RDY11b 모든 경로에서 경로 이름을 지움', P.monitor,
+    s => s.replace(/ *path: '(GENERIC_PROTECTION_SWEEP|EXACT100X_AUTHORITY|GENERIC_MANAGED_POSITION)',\n/g, ''),
+    'RED'],
+
+  ['RDY11 고아 정리 실패를 Exact100X 경로로 적음', P.monitor,
+    s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP',",
+      "          path: 'EXACT100X_AUTHORITY',"), 'RED'],
+
+  ['RDY12 진단에 시크릿 평문을 넘김', P.creds,
+    s => s.replace('          secretDecrypted: decrypted,',
+      '          secretDecrypted: decrypted, apiSecret: plain,'), 'RED'],
+
+  ['RDY12b 진단에 시크릿 길이를 넘김', P.creds,
+    s => s.replace("          secretCiphertextPresent: !!String(row?.api_secret_enc ?? ''),",
+      "          secretCiphertextPresent: String(row?.api_secret_enc ?? '').length > 0,\n"
+      + "          secretLen: String(row?.api_secret_enc ?? '').length,"), 'RED'],
+
+  ['RDY12c 자격 판독을 두 벌로 되돌림', P.monitor,
+    s => s.replace('  const credsOf = (connectionId: string) => creds.get(connectionId);',
+      '  const credsOf = async (connectionId: string) => {\n'
+      + '    const { data: c } = await sb.from(\'exchange_connections\')\n'
+      + "      .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')\n"
+      + '      .eq(\'id\', connectionId).maybeSingle();\n'
+      + '    if (!c || (c as any).has_withdrawal) return null;\n'
+      + '    const ex = resolveExecExchange((c as any).exchange_id).exchange;\n'
+      + '    return ex ? { exchange: ex, apiKey: (c as any).api_key,\n'
+      + "      apiSecret: decryptSecret((c as any).api_secret_enc ?? ''),\n"
+      + '      testnet: (c as any).is_testnet !== false } : null;\n  };'), 'RED'],
+
+  ['RDY13 경로별 집계를 합계로 되돌림', P.monitor,
+    s => s.replace('    out.failures = classifyFailures(', '    out.failures = [] as any; void classifyFailures('),
+    'RED'],
+
+  ['RDY13b 서로 다른 경로를 한 줄로 합침', P.rdy,
+    s => s.replace('    const key = `${it?.path}:${it?.code}`;', '    const key = `${it?.code}`;'),
+    'RED'],
+
+
+  // ── ⑤B-3A-3.1 실전·테스트넷 동시 연결 ──
+  //
+  //   테스트넷 등록이 기존 실전 연결을 덮는 길을 전부 막는다.
+  ['ENV1  옛 UNIQUE(user_id,exchange_id)를 그대로 둠', P.mig96,
+    s => s.replace(/ALTER TABLE public\.exchange_connections\n  DROP CONSTRAINT IF EXISTS exchange_connections_user_id_exchange_id_key;/,
+      '-- (제약 유지)'), 'RED'],
+
+  ['ENV2  새 unique에서 is_testnet 제거 (DB)', P.mig96,
+    s => s.replace('UNIQUE (user_id, exchange_id, is_testnet);', 'UNIQUE (user_id, exchange_id);'),
+    'RED'],
+
+  ['ENV2b 자리 정본에서 is_testnet 제거', P.idn,
+    s => s.replace("  'user_id', 'exchange_id', 'is_testnet',", "  'user_id', 'exchange_id',"),
+    'RED'],
+
+  ['ENV3  connect conflict target을 옛 키로 되돌림', P.exr,
+    s => s.replace('.upsert(rec, { onConflict: connectionConflictTarget() })',
+      ".upsert(rec, { onConflict: 'user_id,exchange_id' })"), 'RED'],
+
+  ['ENV4  usedTestnet 대신 요청 isTestnet을 저장', P.exr,
+    s => s.replace('      is_testnet:          usedTestnet,', '      is_testnet:          isTestnet,'),
+    'RED'],
+
+  ['ENV4b 이름도 요청 isTestnet으로 만듦', P.exr,
+    s => s.replace('      custom: nickname, exchangeNameKr: meta.nameKr, isTestnet: usedTestnet,',
+      '      custom: nickname, exchangeNameKr: meta.nameKr, isTestnet: isTestnet,'), 'RED'],
+
+  ['ENV5  TESTNET 추가가 LIVE row를 덮음 (자리에서 환경 제거)', P.idn,
+    s => s.replace('export function connectionConflictTarget(): string {\n  return CONNECTION_IDENTITY_COLUMNS.join(\',\');',
+      "export function connectionConflictTarget(): string {\n  return 'user_id,exchange_id';"),
+    'RED'],
+
+  ['ENV6  실전과 테스트넷을 같은 자리로 봄', P.idn,
+    s => s.replace('    && a?.isTestnet === b?.isTestnet;', '    && true;'), 'RED'],
+
+  ['ENV7  실전+테스트넷 동시 보유를 duplicate로 셈', P.idn,
+    s => s.replace('    const key = `${r?.userId}\\u0000${r?.exchangeId}\\u0000${r?.isTestnet === true}`;',
+      '    const key = `${r?.userId}\\u0000${r?.exchangeId}`;'), 'RED'],
+
+  ['ENV8  두 환경의 기본 이름을 같게 만듦', P.idn,
+    s => s.replace('  return `${base} ${isTestnet ? TESTNET_SUFFIX : LIVE_SUFFIX}`;',
+      '  return base;'), 'RED'],
+
+  ['ENV9  이름 충돌에서 기존 연결을 덮음', P.idn,
+    s => s.replace('    if (e.isTestnet === i.isTestnet) continue;', '    continue;'), 'RED'],
+
+  ['ENV9b 라우트가 이름 충돌을 무시함', P.exr,
+    s => s.replace('      if (!nv.ok) {', '      if (false) {'), 'RED'],
+
+  ['ENV10 set-testnet 반대편 충돌을 통과시킴', P.idn,
+    s => s.replace('    if (s?.isTestnet !== i.toTestnet) continue;', '    continue;'), 'RED'],
+
+  ['ENV9c 이름 충돌 판정을 요청값 환경으로 함', P.exr,
+    s => s.replace('        isTestnet: usedTestnet,\n      });\n      if (!nv.ok) {',
+      '        isTestnet: isTestnet,\n      });\n      if (!nv.ok) {'), 'RED'],
+
+  ['ENV10b 라우트가 반대편 충돌을 무시함', P.exr,
+    s => s.replace("        if (ev.code === 'ENV_CONNECTION_EXISTS') {", '        if (false) {'),
+    'RED'],
+
+  ['ENV11 set-testnet이 반대편을 지움', P.exr,
+    s => s.replace("        .update({ is_testnet: next, auto_trading_enabled: false })",
+      "        .update({ is_testnet: next, auto_trading_enabled: false });\n"
+      + "      await (sb.from('exchange_connections') as any).delete()\n"
+      + "        .eq('user_id', uid).eq('is_testnet', next)"), 'RED'],
+
+  ['ENV12 새 연결을 자동매매 켠 상태로 만듦', P.exr,
+    s => s.replace('      auto_trading_enabled: false,', '      auto_trading_enabled: true,'), 'RED'],
+
+  ['ENV13 사유 문구에 키처럼 보이는 값을 끼움', P.idn,
+    s => s.replace("        + ' — 다른 이름을 쓰거나 그 연결을 먼저 정리하세요',",
+      "        + ' — key AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE',"), 'RED'],
+
+  ['ENV14 096이 duplicate를 RAISE 없이 넘김', P.mig96,
+    s => s.replace('    RAISE EXCEPTION', '    RAISE NOTICE'), 'RED'],
+
+  ['ENV14b 096이 duplicate를 UPDATE로 고침', P.mig96,
+    s => s.replace('    RAISE EXCEPTION',
+      "    UPDATE public.exchange_connections SET is_testnet = true WHERE false;\n    RAISE EXCEPTION"),
+    'RED'],
+
+  ['ENV14c 096이 nickname 제약을 떨어뜨림', P.mig96,
+    s => s.replace('ALTER TABLE public.exchange_connections\n  DROP CONSTRAINT IF EXISTS exchange_connections_user_id_exchange_id_key;',
+      'ALTER TABLE public.exchange_connections\n  DROP CONSTRAINT IF EXISTS exchange_connections_user_id_exchange_nickname_key;'),
+    'RED'],
+
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**
@@ -793,11 +2365,63 @@ function moveReadAfterWrite(src, dep) {
     return src.replace('  try { avail = await deps.availableUsd(); } catch { avail = null; }',
                        '  avail = 1000;');
   }
-  if (dep === 'referencePrice') {
-    return src.replace('  try { price = await deps.referencePrice(); } catch { price = null; }',
-                       '  price = 50000;');
+  if (dep === 'referenceMark') {
+    // 조회를 준비 단계에서 들어내고, 신선도 판정도 함께 눕힌다.
+    // (관측이 없으면 ④가 막으므로, 그것까지 지워야 "쓰기 뒤로 옮김"이 된다)
+    const from = src.indexOf('  // ── ④ 기준 마크가 **관측** ──');
+    const to = src.indexOf('  const price: number = mark!.price as number;');
+    if (from < 0 || to < 0) return src;
+    return src.slice(0, from)
+      + '  const price = 50000;\n'
+      + src.slice(to + '  const price: number = mark!.price as number;\n'.length);
   }
   return src;
+}
+
+/**
+ * **소유권 재검사를 전송 뒤로 옮긴다.**
+ *
+ * 지우는 변이가 아니다 — 검사는 그대로 일어나고 자리만 바뀐다. 그때
+ * 임차를 잃은 실행자도 주문을 **이미 보낸 뒤**가 된다.
+ */
+function moveStillMineAfterClose(src) {
+  const GUARD = "  if (deps.stillMine) {\n"
+    + "    let mine = false;\n"
+    + "    try { mine = await deps.stillMine(); } catch { mine = false; }\n"
+    + "    if (!mine) {\n"
+    + "      return { code: 'LEASE_LOST', ok: false, attempted: false, accepted: false,\n"
+    + "        flatVerified: null, needsReconcile: false,\n"
+    + "        reason: '\uc2e4\ud589 \uad8c\ud55c(\uc784\ucc28)\uc774 \ub118\uc5b4\uac00 \uccad\uc0b0\uc744 \ubcf4\ub0b4\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4' };\n"
+    + "    }\n"
+    + "  }\n";
+  if (!src.includes(GUARD)) return src;
+  const AFTER = '  const ambiguous = r.ambiguous === true;\n';
+  if (!src.includes(AFTER)) return src;
+  return src.replace(GUARD, '').replace(AFTER, AFTER + GUARD);
+}
+
+/**
+ * **신선도 판정을 첫 거래소 쓰기 뒤로 옮긴다.**
+ *
+ * 지우는 변이가 아니다 — 판정은 그대로 일어나고 자리만 `applyLeverage`
+ * 뒤로 간다. "판정이 있는가"만 보는 검사는 이것을 놓치고, 그때 낡은
+ * 데이터로 막힐 요청이 **계좌 배율을 먼저 바꾼 뒤** 멈춘다.
+ */
+function moveFreshnessAfterWrite(src) {
+  const GUARD = '  if (!freshness.ok) {\n'
+    + "    return fail('MARKET_DATA_STALE', freshness.reason, notes, {\n"
+    + '      marginMode: mode, leverage: req, referencePrice: price,\n'
+    + '      allocatedMargin: allocated, requiredMargin, quantity: q.qty,\n'
+    + '      freshness,\n'
+    + '    });\n'
+    + '  }\n';
+  if (!src.includes(GUARD)) return src;
+  const AFTER = '  notes.push(`배율 ${req}배 확인(되읽음)`);\n';
+  if (!src.includes(AFTER)) return src;
+  const moved = '  if (!prepared.freshness?.ok) {\n'
+    + "    return fail('MARKET_DATA_STALE', prepared.freshness?.reason || '', notes);\n"
+    + '  }\n';
+  return src.replace(GUARD, '').replace(AFTER, AFTER + moved);
 }
 
 function moveAfterWrite(src, startMarker, alsoFrom, endMarker) {
@@ -858,6 +2482,29 @@ if (LIST_ONLY) {
 if (SELF_TEST) {
   let bad = 0;
   const seen = new Set();
+
+  // ── 이름이 겹치면 결과를 읽을 수 없다 ──
+  //
+  // `--only MUT-E`는 **이름 앞부분**으로 고른다. 그래서 다른 묶음이 같은
+  // 접두사를 쓰면 한 번에 둘이 돌고, 보고서의 "MUT-E3"가 어느 것인지
+  // 알 수 없게 된다. 실제로 ④ 작업에서 그 일이 났다 — 신선도 묶음에
+  // `MUT-E*`를 붙였는데 `entryExitSafety` 묶음이 이미 그 이름이었다.
+  //
+  // 체크리스트를 자동으로 눌러 주는 대신 **체크리스트 자체를 없앤다.**
+  {
+    const byName = new Map();
+    for (const [name] of M) {
+      const key = String(name).trim().split(/\s+/)[0];
+      byName.set(key, (byName.get(key) || 0) + 1);
+    }
+    for (const [key, n] of byName) {
+      if (n > 1) {
+        console.error(`❌ 돌연변이 이름이 ${n}번 겹칩니다: ${key}`
+          + ' — --only가 둘을 함께 고르고, 보고서에서 어느 것인지 구별할 수 없습니다');
+        bad++;
+      }
+    }
+  }
   // 자기 점검은 파일을 **바꾸지 않는다.** 그것을 확인하려면 "지금 더러운가"가
   // 아니라 "이 점검 때문에 더러워졌는가"를 봐야 한다. 하네스 파일 자체가
   // 아직 커밋되지 않은 상태에서 돌리면 앞의 방식은 거짓 경보를 낸다.
