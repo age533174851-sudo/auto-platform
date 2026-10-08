@@ -47,20 +47,26 @@
 // 둘을 나눠 들고, 없는 쪽을 다른 쪽으로 **복사하지 않는다.**
 
 export interface QtyGrid {
-  /** 수량 단위 */
+  /** 수량 단위. 0이면 거래소가 이 제한을 비활성화한 것으로 읽는다. */
   stepSize?: number | null;
-  /** 최소 수량 */
+  /** 최소 수량. 0이면 비활성 */
   minQty?: number | null;
+  /** 최대 수량. 0이면 비활성 */
+  maxQty?: number | null;
 }
 
 export interface SymbolFilters {
-  /** 지정가 주문의 수량 격자 (바이낸스 LOT_SIZE) */
+  /**
+   * 바이낸스 LOT_SIZE. 필드명은 기존 호출부 호환 때문에 limitQty로 남지만,
+   * **LIMIT 전용이 아니다.** 심볼의 기본 수량 규칙이라 MARKET에도 적용한다.
+   */
   limitQty: QtyGrid | null;
   /**
-   * 시장가 주문의 수량 격자 (바이낸스 MARKET_LOT_SIZE).
+   * MARKET_LOT_SIZE — MARKET에 **추가로** 적용되는 수량 규칙.
    *
-   * **없으면 null이다.** 지정가 격자를 복사해 채우지 않는다 — 거래소가
-   * 주지 않은 규칙을 우리가 만드는 것이기 때문이다.
+   * null이면 필터 자체를 확인하지 못한 것이다. 반대로
+   * { stepSize: 0, minQty: 0, maxQty: ... }처럼 객체가 있으면
+   * 필터는 확인했고 0인 제한만 비활성인 것이다.
    */
   marketQty: QtyGrid | null;
   /** 가격 단위 */
@@ -85,6 +91,8 @@ export type QuantizeCode =
   | 'INVALID_STEP'
   /** 최소 주문 수량 미달 */
   | 'BELOW_MIN_QTY'
+  /** 최대 주문 수량 초과 */
+  | 'ABOVE_MAX_QTY'
   /** 최소 명목가 미달 */
   | 'BELOW_MIN_NOTIONAL'
   /** 최소 명목가를 검사할 기준가를 못 읽었다 */
@@ -210,21 +218,21 @@ export function quantizeOrder(
     };
   }
 
-  // ── 수량 격자는 **주문유형이 정한다** ──
+  // ── 수량 규칙: LOT_SIZE는 기본, MARKET_LOT_SIZE는 추가 ──
   //
-  // 바이낸스는 시장가에 `MARKET_LOT_SIZE`를 따로 준다. 지정가 격자로
-  // 시장가를 깎으면 거래소가 요구하지 않은 크기로 주문하게 된다.
-  const lot = qtyGridFor(filters, orderType);
+  // Binance의 LOT_SIZE는 심볼의 수량 규칙이고 MARKET 주문도 벗어나면 안 된다.
+  // MARKET_LOT_SIZE는 시장가에 **추가로** 붙는 규칙이다. 특히 BTCUSDT처럼
+  // MARKET_LOT_SIZE의 stepSize/minQty가 0(비활성)인 경우가 있다.
+  // 그 0을 "규격 미상"으로 접으면 정상 시장가 주문을 전부 막게 된다.
+  const baseLot = filters.limitQty;
+  const marketLot = orderType === 'MARKET' ? filters.marketQty : null;
   const tick = isPos(filters.tickSize) ? Number(filters.tickSize) : null;
   const p = (p0 != null && tick) ? roundToTick(p0, tick) : p0;
 
-  // ── 규격 응답을 받은 것과 **이 주문유형의 규격을 아는 것**은 다르다 ──
-  //
-  // `exchangeInfo`가 200을 주고 `LOT_SIZE`도 있는데 `MARKET_LOT_SIZE`만
-  // 없을 수 있다. 그때 시장가 수량을 그대로 흘려보내면, 조회에 실패했을
-  // 때와 똑같이 **규격을 모른 채 신규 포지션을 여는 것**이 된다.
-  // 위의 `filters == null`과 같은 정책으로 간다.
-  if (!lot) {
+  // LOT_SIZE 자체를 못 읽은 것은 주문유형과 무관하게 미상이다.
+  // MARKET_LOT_SIZE도 MARKET 주문에서는 필터의 존재 여부를 알아야 한다.
+  const missingGrid = !baseLot || (orderType === 'MARKET' && !marketLot);
+  if (missingGrid) {
     if (!reduceOnly) {
       return {
         ok: false, quantity: null, price: p, changed: false, applied: false,
@@ -240,23 +248,40 @@ export function quantizeOrder(
     };
   }
 
-  const step = isPos(lot.stepSize) ? Number(lot.stepSize) : null;
-  const minQty = isPos(lot.minQty) ? Number(lot.minQty) : null;
+  let q = q0;
+  const applyGrid = (lot: QtyGrid, label: string): QuantizeResult | null => {
+    const step = isPos(lot.stepSize) ? Number(lot.stepSize) : null;
+    const minQty = isPos(lot.minQty) ? Number(lot.minQty) : null;
+    const maxQty = isPos(lot.maxQty) ? Number(lot.maxQty) : null;
+    if (step) q = floorToStep(q, step);
 
-  const q = step ? floorToStep(q0, step) : q0;
+    if (!isPos(q)) {
+      return { ok: false, quantity: null, price: p, changed: true, applied: true,
+        code: 'INVALID_STEP',
+        reason: `수량 ${q0}이 ${label} 최소 단위(${step})보다 작습니다 — 이대로는 주문할 수 없습니다` };
+    }
+    if (minQty != null && q < minQty) {
+      return { ok: false, quantity: null, price: p, changed: q !== q0, applied: true,
+        code: 'BELOW_MIN_QTY',
+        reason: `수량 ${q}이 ${label} 최소 주문 수량 ${minQty}보다 적습니다` };
+    }
+    if (maxQty != null && q > maxQty) {
+      return { ok: false, quantity: null, price: p, changed: q !== q0, applied: true,
+        code: 'ABOVE_MAX_QTY',
+        reason: `수량 ${q}이 ${label} 최대 주문 수량 ${maxQty}보다 큽니다` };
+    }
+    return null;
+  };
 
-  if (!isPos(q)) {
-    // 내림했더니 0이 됐다. 요청한 수량이 한 단위보다 작다는 뜻이다.
-    return { ok: false, quantity: null, price: p, changed: true, applied: true,
-      code: 'INVALID_STEP',
-      reason: `수량 ${q0}이 거래소 최소 단위(${step})보다 작습니다 — 이대로는 주문할 수 없습니다` };
-  }
+  // 기본 LOT_SIZE는 모든 주문에 적용한다.
+  const baseErr = applyGrid(baseLot!, 'LOT_SIZE');
+  if (baseErr) return baseErr;
 
-  if (minQty != null && q < minQty) {
-    // 청산이라고 최소 수량을 없는 셈 치지 않는다 — 거래소가 그대로 거절한다.
-    return { ok: false, quantity: null, price: p, changed: true, applied: true,
-      code: 'BELOW_MIN_QTY',
-      reason: `수량 ${q}이 최소 주문 수량 ${minQty}보다 적습니다` };
+  // 시장가라면 MARKET_LOT_SIZE를 추가로 적용한다.
+  // 0인 항목은 isPos가 false라 **명시적으로 비활성**인 채 통과한다.
+  if (marketLot) {
+    const marketErr = applyGrid(marketLot, 'MARKET_LOT_SIZE');
+    if (marketErr) return marketErr;
   }
 
   // ── 최소 명목가 ──

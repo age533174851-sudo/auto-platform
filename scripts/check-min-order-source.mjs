@@ -138,9 +138,23 @@ else {
   const body = fnBodyAt(qz, 'export function quantizeOrder');
   if (!body) fail(`${QZ}에서 quantizeOrder 본문을 찾지 못했습니다`);
   else {
-    // 격자는 유형이 고른다.
-    if (!/qtyGridFor\s*\(\s*filters\s*,\s*orderType\s*\)/.test(body)) {
-      fail(`${QZ}의 quantizeOrder가 주문유형으로 격자를 고르지 않습니다`);
+    // ── 기본 LOT_SIZE + MARKET_LOT_SIZE 추가 규칙을 **실제로 적용하는가** ──
+    //
+    // Binance에서 LOT_SIZE는 심볼의 기본 수량 규칙이고, MARKET_LOT_SIZE는
+    // 시장가에 추가되는 규칙이다. 예전 검사는 둘 중 하나만 고르는
+    // `qtyGridFor(filters, orderType)` 모양만 허용해서 이 결합을 표현하지
+    // 못했다. 이름이 아니라 **두 규칙을 각각 읽고 적용하는 구조**를 본다.
+    if (!/const\s+baseLot\s*=\s*filters\.limitQty\s*;/.test(body)) {
+      fail(`${QZ}의 quantizeOrder가 기본 LOT_SIZE(limitQty)를 읽지 않습니다`);
+    }
+    if (!/const\s+marketLot\s*=\s*orderType\s*===\s*['"]MARKET['"]\s*\?\s*filters\.marketQty\s*:\s*null\s*;/.test(body)) {
+      fail(`${QZ}의 quantizeOrder가 MARKET 주문에 MARKET_LOT_SIZE를 추가로 읽지 않습니다`);
+    }
+    if (!/applyGrid\s*\(\s*baseLot!\s*,\s*['"]LOT_SIZE['"]\s*\)/.test(body)) {
+      fail(`${QZ}의 quantizeOrder가 기본 LOT_SIZE를 실제 수량에 적용하지 않습니다`);
+    }
+    if (!/if\s*\(\s*marketLot\s*\)[\s\S]{0,300}applyGrid\s*\(\s*marketLot\s*,\s*['"]MARKET_LOT_SIZE['"]\s*\)/.test(body)) {
+      fail(`${QZ}의 quantizeOrder가 MARKET_LOT_SIZE 추가 규칙을 실제 수량에 적용하지 않습니다`);
     }
     // ── 규격 미확인은 **두 가지**다 ──
     //
@@ -156,31 +170,40 @@ else {
       fail(`${QZ}이 '이 주문유형의 수량 격자 미확인'을 구분하지 않습니다`
         + ' — MARKET_LOT_SIZE가 없을 때 시장가 신규 진입이 그대로 나갑니다');
     }
-    for (const [pattern, label] of [
-      [/if\s*\(\s*!\s*filters\s*\)/, '규격 조회 실패'],
-      [/if\s*\(\s*!\s*lot\s*\)/, '주문유형 격자 미확인'],
-    ]) {
-      const at = body.search(pattern);
-      if (at < 0) { fail(`${QZ}에 ${label} 분기가 없습니다`); continue; }
-      const blk = braceBodyAt(body, at);
-      if (!/reduceOnly/.test(blk)) {
-        fail(`${QZ}이 ${label}에서 신규와 청산을 갈라내지 않습니다`
-          + ' — 못 여는 것은 불편이고 못 닫는 것은 사고입니다');
-      }
-      if (!/_UNKNOWN/.test(blk)) {
-        fail(`${QZ}의 ${label} 분기가 신규 진입을 막지 않습니다`);
-      }
-      // 격자를 적용하지 않았는데 적용했다고 적으면 안 된다.
-      if (/applied:\s*true/.test(blk)) {
-        fail(`${QZ}의 ${label} 분기가 applied:true를 적습니다`
-          + ' — 규격을 적용하지 않았습니다');
+    // 조회 전체 실패와 주문유형 격자 미확인은 둘 다 fail-closed다.
+    // 단, 청산은 못 닫는 사고를 피하기 위해 계속 fail-open이다.
+    {
+      const at = body.search(/if\s*\(\s*!\s*filters\s*\)/);
+      if (at < 0) fail(`${QZ}에 규격 조회 실패 분기가 없습니다`);
+      else {
+        const blk = braceBodyAt(body, at);
+        if (!/reduceOnly/.test(blk)) {
+          fail(`${QZ}이 규격 조회 실패에서 신규와 청산을 갈라내지 않습니다`);
+        }
+        if (!/FILTERS_UNKNOWN/.test(blk) || /applied:\s*true/.test(blk)) {
+          fail(`${QZ}의 규격 조회 실패 분기가 신규 진입 차단·미적용 사실을 보존하지 않습니다`);
+        }
       }
     }
-    // 격자가 없는데 아래 계산으로 흘러가면 안 된다. `!lot` 분기가
-    // step/minQty를 읽는 곳보다 **앞**에 있어야 한다.
-    const lotAt = body.search(/if\s*\(\s*!\s*lot\s*\)/);
-    const stepAt = body.search(/const\s+step\s*=/);
-    if (lotAt >= 0 && stepAt >= 0 && lotAt > stepAt) {
+    // 기본 LOT_SIZE가 없거나, MARKET인데 MARKET_LOT_SIZE를 못 읽으면 미상.
+    if (!/const\s+missingGrid\s*=\s*!baseLot\s*\|\|\s*\(\s*orderType\s*===\s*['"]MARKET['"]\s*&&\s*!marketLot\s*\)\s*;/.test(body)) {
+      fail(`${QZ}의 주문유형 격자 미확인 조건이 기본 LOT_SIZE와 MARKET_LOT_SIZE를 함께 보지 않습니다`);
+    }
+    const missingAt = body.search(/if\s*\(\s*missingGrid\s*\)/);
+    if (missingAt < 0) {
+      fail(`${QZ}에 주문유형 격자 미확인 분기가 없습니다`);
+    } else {
+      const blk = braceBodyAt(body, missingAt);
+      if (!/reduceOnly/.test(blk)) {
+        fail(`${QZ}이 주문유형 격자 미확인에서 신규와 청산을 갈라내지 않습니다`);
+      }
+      if (!/QTY_FILTER_UNKNOWN/.test(blk) || /applied:\s*true/.test(blk)) {
+        fail(`${QZ}의 주문유형 격자 미확인 분기가 신규 진입 차단·미적용 사실을 보존하지 않습니다`);
+      }
+    }
+    // 미확인을 판정한 뒤에만 실제 격자 적용으로 내려가야 한다.
+    const applyAt = body.search(/applyGrid\s*\(\s*baseLot!/);
+    if (missingAt >= 0 && applyAt >= 0 && missingAt > applyAt) {
       fail(`${QZ}이 격자 미확인을 확인하기 전에 수량을 자릅니다`);
     }
     // 최소 명목가: 청산 제외 + 자른 뒤 수량 + 시장가는 서버 기준가
@@ -242,22 +265,39 @@ else {
     for (const m of body.matchAll(/minNotional[^;\n]{0,40}(?:\?\?|\|\|)\s*(\d+)/g)) {
       fail(`${BF}이 최소 명목가 기본값 ${m[1]}을 지어냅니다`);
     }
-    // ── minQty를 stepSize로 추론하지 않는다 ──
+    // ── LOT_SIZE와 MARKET_LOT_SIZE 파서는 뜻이 다르다 ──
     //
-    // 바이낸스에서 둘은 서로 다른 규칙이다. 최소가 0.01인데 단위가
-    // 0.001인 종목에서 그 추론은 최소를 열 배 낮춰 잡는다 — 거래소가
-    // 거절할 주문을 우리가 통과시킨다.
-    const gridAt = body.search(/const\s+gridOf\s*=/);
-    if (gridAt < 0) fail(`${BF}에 격자 파서(gridOf)가 없습니다`);
-    else {
-      const g = braceBodyAt(body, gridAt);
+    // 기본 LOT_SIZE는 양수 step/min이 있어야 한다. MARKET_LOT_SIZE는
+    // **필드 누락(null)** 과 **명시적 0(추가 제한 비활성)** 을 구별한다.
+    // 어느 쪽도 minQty를 stepSize로 추론해서는 안 된다.
+    const baseAt = body.search(/const\s+baseGridOf\s*=/);
+    const marketAt = body.search(/const\s+marketGridOf\s*=/);
+    if (baseAt < 0) fail(`${BF}에 기본 LOT_SIZE 파서(baseGridOf)가 없습니다`);
+    if (marketAt < 0) fail(`${BF}에 MARKET_LOT_SIZE 파서(marketGridOf)가 없습니다`);
+    if (baseAt >= 0) {
+      const g = braceBodyAt(body, baseAt);
       if (/minQty\s*:\s*[^,}\n]*\b(?:st|step|stepSize)\b/.test(g)) {
-        fail(`${BF}이 minQty를 stepSize로 대신 채웁니다 — 둘은 다른 규칙입니다`);
+        fail(`${BF}이 기본 minQty를 stepSize로 대신 채웁니다`);
       }
-      // 두 값 다 있어야 격자가 만들어진다.
-      if (!/minQty[\s\S]{0,80}return null/.test(g) && !/return null[\s\S]{0,120}minQty/.test(g)) {
-        fail(`${BF}의 격자 파서가 minQty가 없을 때 null을 돌려주지 않습니다`);
+      if (!/st\s*<=\s*0/.test(g) || !/mn\s*<=\s*0/.test(g)) {
+        fail(`${BF}의 기본 LOT_SIZE 파서가 양수 step/min을 요구하지 않습니다`);
       }
+    }
+    if (marketAt >= 0) {
+      const g = braceBodyAt(body, marketAt);
+      if (/minQty\s*:\s*[^,}\n]*\b(?:step|stepSize)\b/.test(g)) {
+        fail(`${BF}이 시장가 minQty를 stepSize로 대신 채웁니다`);
+      }
+      if (!/n\s*>=\s*0/.test(g)) {
+        fail(`${BF}의 MARKET_LOT_SIZE 파서가 거래소의 명시적 0을 보존하지 않습니다`);
+      }
+      if (!/stepSize\s*==\s*null\s*\|\|\s*minQty\s*==\s*null/.test(g)) {
+        fail(`${BF}의 MARKET_LOT_SIZE 파서가 필드 누락을 규격 미상으로 막지 않습니다`);
+      }
+    }
+    if (!/const\s+limitQty\s*=\s*baseGridOf\s*\(\s*lot\s*\)/.test(body)
+      || !/const\s+marketQty\s*=\s*marketGridOf\s*\(\s*mktLot\s*\)/.test(body)) {
+      fail(`${BF}이 LOT_SIZE와 MARKET_LOT_SIZE를 각자의 파서로 읽지 않습니다`);
     }
   }
   notes.push(`${BF}이 주문유형별 격자와 최소 금액을 거래소에서 읽습니다`);
@@ -346,13 +386,15 @@ if (!existsSync(TEST)) fail(`${TEST}이 없습니다`);
 else {
   const t = readFileSync(TEST, 'utf8');
   const need = [
-    ['시장가는 MARKET_LOT_SIZE로, 지정가는 LOT_SIZE로 자른다', '주문유형별 격자'],
+    ['시장가는 LOT_SIZE를 먼저 지키고 MARKET_LOT_SIZE 추가 제한도 지킨다', '기본+시장가 추가 격자'],
     ['자른 뒤의 수량으로 최소 금액을 본다', 'quantization 후 최소 금액'],
     ['규격을 못 읽어도 청산은 보낸다', '청산 fail-open'],
     ['규격을 못 읽으면 신규 진입은 막는다', '신규 진입 차단'],
     ['청산에는 최소 금액을 적용하지 않는다', '청산 최소 금액 면제'],
     ['Gate는 1계약 미만이면 막고', 'Gate 계약 규칙'],
     ['시장가 격자를 모르면 신규 진입을 막는다', '주문유형 격자 미확인'],
+    ['MARKET_LOT_SIZE가 0으로 비활성이어도 BTCUSDT 시장가 매수는 막지 않는다', '명시적 0 비활성 규칙'],
+    ['MARKET_LOT_SIZE의 0과 필터 미상(null)은 다르다', '0과 미상 구분'],
   ];
   for (const [needle, label] of need) {
     if (!t.includes(needle)) fail(`${TEST}에 ${label} 시험이 없습니다`);

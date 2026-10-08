@@ -11,7 +11,7 @@ import {
 } from './positionRiskRead';
 export type { PositionRiskProvenance, SymbolPositionRisk };
 import { parseLossless, venueIdOf } from './losslessJson';
-import { qtyGridFor, type SymbolFilters } from './quantize';
+import { quantizeOrder, qtyGridFor, type SymbolFilters } from './quantize';
 
 const FUTURES_BASE         = 'https://fapi.binance.com';
 const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
@@ -1535,15 +1535,38 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
     //
     // 필요한 값이 하나라도 없으면 그 격자는 null이다. 부르는 쪽이
     // "이 주문유형의 수량 규격을 모른다"로 읽는다.
-    const gridOf = (f: any) => {
+    const baseGridOf = (f: any) => {
+      if (!f) return null;
       const st = parseFloat(f?.stepSize ?? '');
       const mn = parseFloat(f?.minQty ?? '');
+      const mx = parseFloat(f?.maxQty ?? '');
+      // LOT_SIZE는 기본 격자다. 최소/단위를 못 읽으면 전체 규격을 모르는 것.
       if (!Number.isFinite(st) || st <= 0) return null;
       if (!Number.isFinite(mn) || mn <= 0) return null;
-      return { stepSize: st, minQty: mn };
+      return {
+        stepSize: st,
+        minQty: mn,
+        maxQty: Number.isFinite(mx) && mx > 0 ? mx : null,
+      };
     };
-    const limitQty = gridOf(lot);
-    const marketQty = gridOf(mktLot);
+    const marketGridOf = (f: any) => {
+      if (!f) return null;
+      const read = (v: any): number | null => {
+        if (v == null || v === '') return null;
+        const n = parseFloat(String(v));
+        // MARKET_LOT_SIZE만 0을 명시적 비활성으로 보존한다.
+        return Number.isFinite(n) && n >= 0 ? n : null;
+      };
+      const stepSize = read(f.stepSize);
+      const minQty = read(f.minQty);
+      const maxQty = read(f.maxQty);
+      // 필터가 존재해도 핵심 두 필드 중 하나가 **누락**되면 모른다.
+      // 단, 0은 누락이 아니다 — 시장가 추가 제한을 거래소가 끈 값이다.
+      if (stepSize == null || minQty == null) return null;
+      return { stepSize, minQty, maxQty };
+    };
+    const limitQty = baseGridOf(lot);
+    const marketQty = marketGridOf(mktLot);
     const tick = parseFloat(priceF?.tickSize ?? '');
     // 지정가 격자와 호가 단위는 이 심볼이 거래 가능하다는 최소 근거다.
     // 둘 중 하나라도 없으면 규격을 읽은 것으로 치지 않는다.
@@ -1583,18 +1606,18 @@ export async function placeFuturesOrderSafe(
   testnet = true,
 ): Promise<FuturesOrderResult> {
   const filters = await getSymbolFilters(opts.symbol, testnet);
-  let qty = opts.quantity;
-  let price = opts.price;
-  // 시장가와 지정가는 격자가 다르다 — 유형에 맞는 것을 쓴다.
-  const grid = qtyGridFor(filters, opts.type);
-  if (grid?.stepSize) {
-    qty = roundToStep(opts.quantity, grid.stepSize);
-    if (grid.minQty != null && qty < grid.minQty) {
-      return { success: false, message: `주문 수량(${qty})이 최소 수량(${grid.minQty}) 미만입니다. 주문 금액을 늘리세요.` };
-    }
+  const q = quantizeOrder(opts.quantity, opts.price ?? null, filters, {
+    orderType: opts.type,
+    reduceOnly: opts.reduceOnly === true,
+    // 이 어댑터는 기준가를 읽지 않는 얇은 경로다. MIN_NOTIONAL이 있는
+    // 시장가 신규 진입은 더 상위의 서버 주문 경로가 기준가와 함께 처리한다.
+    marketReferencePrice: null,
+  });
+  if (!q.ok || q.quantity == null) {
+    return { success: false, message: q.reason };
   }
-  if (price != null && filters?.tickSize) price = roundToTick(price, filters.tickSize);
-  return placeFuturesOrder(key, secret, { ...opts, quantity: qty, price }, testnet);
+  return placeFuturesOrder(
+    key, secret, { ...opts, quantity: q.quantity, price: q.price ?? undefined }, testnet);
 }
 
 /**

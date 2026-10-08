@@ -415,9 +415,13 @@ export interface SpotSymbolFilters {
   tickSize: number | null;
   /** 최소 명목가 (NOTIONAL의 minNotional) */
   minNotional: number | null;
-  /** 시장가 전용 격자. 없으면 null — 지정가 격자를 복사하지 않는다 */
+  /**
+   * MARKET_LOT_SIZE의 원문 의미를 보존한다.
+   * null = 필터/필드를 못 읽음, 0 = 거래소가 그 제한을 명시적으로 비활성.
+   */
   marketStepSize: number | null;
   marketMinQty: number | null;
+  marketMaxQty: number | null;
   at: number;
 }
 
@@ -464,15 +468,28 @@ export async function getSpotSymbolFilters(
       const n = parseFloat(String(v));
       return Number.isFinite(n) && n > 0 ? n : null;
     };
+    // MARKET_LOT_SIZE는 0을 "없음"으로 접으면 안 된다. Binance는
+    // stepSize/minQty를 0으로 보내 해당 제한을 끌 수 있고, 그 경우에도
+    // 필터 자체는 읽은 것이다. null만 "못 읽음"이다.
+    const marketNum = (v: any): number | null => {
+      if (v == null || v === '') return null;
+      const n = parseFloat(String(v));
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const marketStep = marketNum(mktLot?.stepSize);
+    const marketMin = marketNum(mktLot?.minQty);
+    // step/min 중 하나라도 누락이면 MARKET_LOT_SIZE를 완전히 안다고 할 수 없다.
+    // 둘 다 0이면 **누락이 아니라 명시적 비활성**이므로 그대로 보존한다.
+    const marketComplete = marketStep != null && marketMin != null;
     const result: SpotSymbolFilters = {
       stepSize: num(lot?.stepSize),
       minQty:   num(lot?.minQty),
       tickSize: num(priceF?.tickSize),
       minNotional: num(notionalF?.minNotional),
-      // **MARKET_LOT_SIZE가 없으면 null이다.** LOT_SIZE를 복사하면
-      // 거래소가 두지 않은 규칙을 만드는 것이다.
-      marketStepSize: num(mktLot?.stepSize),
-      marketMinQty:   num(mktLot?.minQty),
+      // 다른 필터에서 값을 복사하지 않는다. **원문 0은 0으로 보존**한다.
+      marketStepSize: marketComplete ? marketStep : null,
+      marketMinQty:   marketComplete ? marketMin : null,
+      marketMaxQty:   marketComplete ? marketNum(mktLot?.maxQty) : null,
       at: Date.now(),
     };
     _spotLotCache[cacheKey] = result;
