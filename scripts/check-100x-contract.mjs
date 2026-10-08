@@ -2539,29 +2539,30 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
       }
       // 거래소를 건드리는 단계가 전부 이 반복문 **안**에 있는가.
       // 밖으로 새면 유예와 무관하게 불린다.
-      // ★★ 관리 유예 관문이 **반복문 맨 앞**에 있는가.
+      // ★★ 실행 권한 관문이 **반복문 맨 앞**에 있는가.
       //
-      //   예전에는 `mayActOn(p)`이 `highWaterSince` 한 줄에만 붙어 있어서,
-      //   유예된 자리도 `readOpenPosition` → `lifecycleDecide` →
-      //   `applyLifecycleClose`를 전부 지나갔다. `lifecycleDecide`는
-      //   소유권만 보는데 같은 전략끼리 섞인 자리는 소유권이 OWNED라,
-      //   시간청산이 그 포지션을 닫을 수 있었다.
+      //   mayActOn은 ownership + management의 SSOT다. 둘 중 하나라도
+      //   막혔으면 거래소를 읽을 이유도, 권한도 없다.
+      //
+      //   특히 OWNER_UNKNOWN 수동 주문이 삭제된 옛 connection_id를
+      //   가리키는 경우, 이 관문이 credsOf보다 뒤면 실제 주문 권한은
+      //   0인데 NO_CONNECTION만 발생해 회차 전체가 거짓 FAILED가 된다.
       {
-        const iGate = body.search(/if\s*\(\s*p\.management\?\.code\s*!==\s*'MANAGED'\s*\)/);
+        const iGate = body.search(/if\s*\(\s*!mayActOn\(p\)\s*\)/);
         if (iGate < 0) {
-          err(`${MONITOR}: 관리 유예 관문이 실행 반복문 앞에 없습니다`
-            + ' — 유예된 자리가 조회·판단·쓰기를 모두 지나갑니다');
+          err(`${MONITOR}: 실행 권한 관문(mayActOn)이 반복문 앞에 없습니다`
+            + ' — 소유권 불명·관리 유예 노출이 venue 조회까지 내려갑니다');
         } else {
-          if (!/continue;/.test(body.slice(iGate, iGate + 600))) {
-            err(`${MONITOR}: 관리 유예 관문이 회차를 끊지 않습니다`);
+          if (!/continue;/.test(body.slice(iGate, iGate + 1400))) {
+            err(`${MONITOR}: 실행 권한 관문이 회차를 끊지 않습니다`);
           }
           for (const needle of ['credsOf(', 'readOpenPosition(', 'highWaterSince(',
             'liveStopPrice(', 'lifecycleDecide(', 'guard.claim(', 'applyLifecycleClose(',
             'moveStopSafely(']) {
             const at = body.indexOf(needle);
             if (at >= 0 && !(iGate < at)) {
-              err(`${MONITOR}: 관리 유예 관문이 ${needle}보다 뒤입니다`
-                + ' — 유예된 자리를 조회하거나 건드립니다');
+              err(`${MONITOR}: 실행 권한 관문이 ${needle}보다 뒤입니다`
+                + ' — 소유권 불명·유예 노출을 조회하거나 건드립니다');
             }
           }
         }

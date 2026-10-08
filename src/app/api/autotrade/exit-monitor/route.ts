@@ -1365,14 +1365,27 @@ async function runLifecycleSweep(
     //
     //   그래서 관문을 반복문 맨 앞, `credsOf`보다도 앞에 둔다. 유예된
     //   자리는 일반 생명주기에서 조회 0회 · 쓰기 0회다.
-    if (p.management?.code !== 'MANAGED') {
+    if (!mayActOn(p)) {
+      const managementBlocked = p.management?.code !== 'MANAGED';
       out.results.push({
         symbol: p.symbol, strategyId: p.strategyId,
-        code: p.management?.code ?? 'MANAGEMENT_UNKNOWN',
-        // **실패가 아니다.** 일부러 건드리지 않은 것이다.
-        ok: true, deferred: true,
-        reason: p.management?.reason
-          ?? '일반 생명주기 관리 판정을 확인하지 못해 건드리지 않습니다',
+        code: managementBlocked
+          ? (p.management?.code ?? 'MANAGEMENT_UNKNOWN')
+          : (p.ownership?.code ?? 'OWNERSHIP_UNKNOWN'),
+        // **실패가 아니다.** 애초에 실행 권한이 없는 노출이다.
+        //
+        // ★ 소유권도 여기서 막는다. 예전에는 management만 먼저 보고
+        // OWNER_UNKNOWN/OWNERSHIP_AMBIGUOUS는 아래 credsOf까지 내려갔다.
+        // 삭제된 옛 connection_id를 가진 수동 주문은 결국 주문 권한이
+        // 없는데도 자격 조회가 NO_CONNECTION으로 실패해 회차 전체를
+        // FAILED로 만들었다. mayActOn은 ownership + management의 SSOT다.
+        ok: true, blocked: true,
+        deferred: managementBlocked,
+        reason: managementBlocked
+          ? (p.management?.reason
+              ?? '일반 생명주기 관리 판정을 확인하지 못해 건드리지 않습니다')
+          : (p.ownership?.reason
+              ?? '포지션 소유권을 증명할 수 없어 건드리지 않습니다'),
       });
       continue;
     }
