@@ -118,6 +118,9 @@ export interface ScreenIdentity {
 export const SCREEN_INDEX: ScreenIdentity[] = [
   { id: 'home', label: '홈', routeOrSurface: 'tab:home',
     sources: ['BTABS', 'SWITCH'], note: null },
+  // 조사하지 않았다 — **의미를 지어내지 않는다.** id·라벨·어디서 가는지만
+  // 적는다(라벨은 MTABS/menuItems에 적힌 그대로). 들여다본 뒤에
+  // SCREEN_SURVEY에 넣는다.
   { id: 'easy', label: '쉬운 화면', routeOrSurface: 'tab:easy',
     sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
   { id: 'market', label: '시장 보기', routeOrSurface: 'tab:market',
@@ -242,10 +245,10 @@ export const SCREEN_INDEX: ScreenIdentity[] = [
     sources: ['ROUTE'], note: null },
   { id: 'auth', label: '로그인', routeOrSurface: '/auth',
     sources: ['ROUTE'], note: '**키·시크릿을 화면에 남기지 않는다**' },
-  { id: 'auth_reset', label: '비밀번호 재설정', routeOrSurface: '/auth/reset',
-    sources: ['ROUTE'], note: null },
   { id: 'auth_callback', label: '로그인 콜백', routeOrSurface: '/auth/callback',
     sources: ['ROUTE'], note: '사용자가 머무는 화면이 아니라 거쳐 가는 자리다' },
+  { id: 'auth_reset', label: '비밀번호 재설정', routeOrSurface: '/auth/reset',
+    sources: ['ROUTE'], note: null },
   { id: 'privacy', label: '개인정보처리방침', routeOrSurface: '/privacy',
     sources: ['ROUTE'], note: null },
   { id: 'terms', label: '이용약관', routeOrSurface: '/terms',
