@@ -11,9 +11,9 @@
 
 | | 수 |
 |---|--:|
-| **실제 화면 (SCREEN_INDEX)** | 66 |
+| **실제 화면 (SCREEN_INDEX)** | 68 |
 | 들여다본 화면 (SURVEYED) | 6 |
-| 존재만 확인 (LISTED_ONLY) | 60 |
+| 존재만 확인 (LISTED_ONLY) | 62 |
 | 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
@@ -37,6 +37,7 @@
 | 화면 | 위치 | 어디서 가는가 | 조사 | 목적 |
 |---|---|---|---|---|
 | **홈** `home` | `tab:home` | BTABS · SWITCH | 본 것 | 오늘 무슨 일이 있었는지 한 화면에서 본다 |
+| **쉬운 화면** `easy` | `tab:easy` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **시장 보기** `market` | `tab:market` | MENU · BTABS · SWITCH | 본 것 | 실시간 코인·주식 시세 |
 | **매매하기** `trading` | `tab:trading` | MENU · BTABS · SWITCH | 본 것 | 차트·호가·주문 통합 화면 |
 | **자동매매** `auto` | `tab:auto` | MENU · BTABS · SWITCH | 본 것 | AI가 대신 자동 거래 |
@@ -98,6 +99,7 @@
 | **차트 (전용 라우트)** `route_chart` | `/chart` | ROUTE | 목록만 | `UNSURVEYED` |
 | **개발자** `developer` | `/developer` | ROUTE | 목록만 | `UNSURVEYED` |
 | **로그인** `auth` | `/auth` | ROUTE | 목록만 | `UNSURVEYED` |
+| **비밀번호 재설정** `auth_reset` | `/auth/reset` | ROUTE | 목록만 | `UNSURVEYED` |
 | **로그인 콜백** `auth_callback` | `/auth/callback` | ROUTE | 목록만 | `UNSURVEYED` |
 | **개인정보처리방침** `privacy` | `/privacy` | ROUTE | 목록만 | `UNSURVEYED` |
 | **이용약관** `terms` | `/terms` | ROUTE | 목록만 | `UNSURVEYED` |
