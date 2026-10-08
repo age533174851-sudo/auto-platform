@@ -2607,6 +2607,37 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
     }
   }
 
+  // ── ⑬-d2 정상 0-action 회차도 RUNNING으로 남기지 않는가 ──
+  //
+  //   실패일 때만 closeRun을 부르면 실패를 고친 순간 정상 회차가 열린
+  //   상태로 영구히 남는다. 실제 worker 실측에서 그대로 드러났다.
+  {
+    const iEarly = mon.indexOf('const earlyOutcome = exitRunOutcome');
+    const iBranch = mon.indexOf('if (dryRun || actionable.length === 0)', iEarly);
+    const iReturn = mon.indexOf('return NextResponse.json({', iBranch);
+    const early = iBranch >= 0 && iReturn > iBranch ? mon.slice(iBranch, iReturn) : '';
+    if (!early) {
+      err(`${MONITOR}: 0-action 조기 반환 구간을 찾지 못했습니다`);
+    } else {
+      if (!/if\s*\(\s*!dryRun\s*\)\s*\{[\s\S]*?await\s+closeRun\s*\(\s*\{/m.test(early)) {
+        err(`${MONITOR}: 실제 0-action 회차를 closeRun으로 닫지 않습니다`
+          + ' — 정상 회차가 RUNNING으로 영구히 남습니다');
+      }
+      if (!/status:\s*earlyOutcome\.status/.test(early)) {
+        err(`${MONITOR}: 조기 종료 상태를 exitRunOutcome 정본에서 가져오지 않습니다`
+          + ' — 응답과 exit_monitor_runs가 다른 진실을 말할 수 있습니다');
+      }
+      if (/!earlyOutcome\.ok/.test(early)) {
+        err(`${MONITOR}: 실패일 때만 회차를 닫습니다`
+          + ' — 정상 0-action 회차가 RUNNING으로 남습니다');
+      }
+      const iClose = early.indexOf('await closeRun(');
+      if (iClose < 0) {
+        err(`${MONITOR}: 조기 반환 전에 closeRun 호출이 없습니다`);
+      }
+    }
+  }
+
   // ── ⑬-e 뒤늦게 막는 구조로 바뀌지 않았는가 ──
   //
   //   `exitLifecycle`에서 걸러도 그때는 venue read가 끝난 뒤다. 기존

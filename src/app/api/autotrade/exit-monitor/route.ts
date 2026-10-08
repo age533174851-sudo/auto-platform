@@ -1637,9 +1637,16 @@ async function runLifecycleSweep(
   //   실패는 생명주기 쪽뿐이다.
   const earlyOutcome = exitRunOutcome({ results: [], lifecycleFailed });
   if (dryRun || actionable.length === 0) {
-    if (!dryRun && !earlyOutcome.ok) {
+    // 실제 회차는 성공/실패와 무관하게 반드시 닫는다.
+    //
+    // 이전 코드는 lifecycle 실패일 때만 closeRun(FAILED)을 불렀다. 그래서
+    // #298에서 과거 삭제 연결의 거짓 실패를 없애자, 정상 0-action 회차가
+    // RUNNING으로 영구히 남았다. 성공해서 열린 채로 남는 것은 성공이 아니다.
+    //
+    // dryRun은 운영 회차가 아니므로 기존처럼 run ledger를 확정하지 않는다.
+    if (!dryRun) {
       await closeRun({
-        status: 'FAILED',
+        status: earlyOutcome.status,
         positions_scanned: decisions.length,
         actions: 0,
         orphan_cleanups: (Array.isArray(orphanCleanups) ? orphanCleanups.length : 0) + sweep.cleaned,
