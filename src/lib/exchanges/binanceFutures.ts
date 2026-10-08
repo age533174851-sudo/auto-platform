@@ -11,7 +11,7 @@ import {
 } from './positionRiskRead';
 export type { PositionRiskProvenance, SymbolPositionRisk };
 import { parseLossless, venueIdOf } from './losslessJson';
-import { quantizeOrder, type SymbolFilters } from './quantize';
+import { quantizeOrder, qtyGridFor, type SymbolFilters } from './quantize';
 
 const FUTURES_BASE         = 'https://fapi.binance.com';
 const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
@@ -1560,7 +1560,9 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
       const stepSize = read(f.stepSize);
       const minQty = read(f.minQty);
       const maxQty = read(f.maxQty);
-      if (stepSize == null && minQty == null && maxQty == null) return null;
+      // 필터가 존재해도 핵심 두 필드 중 하나가 **누락**되면 모른다.
+      // 단, 0은 누락이 아니다 — 시장가 추가 제한을 거래소가 끈 값이다.
+      if (stepSize == null || minQty == null) return null;
       return { stepSize, minQty, maxQty };
     };
     const limitQty = baseGridOf(lot);
