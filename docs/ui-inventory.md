@@ -99,8 +99,8 @@
 | **차트 (전용 라우트)** `route_chart` | `/chart` | ROUTE | 목록만 | `UNSURVEYED` |
 | **개발자** `developer` | `/developer` | ROUTE | 목록만 | `UNSURVEYED` |
 | **로그인** `auth` | `/auth` | ROUTE | 목록만 | `UNSURVEYED` |
-| **비밀번호 재설정** `auth_reset` | `/auth/reset` | ROUTE | 목록만 | `UNSURVEYED` |
 | **로그인 콜백** `auth_callback` | `/auth/callback` | ROUTE | 목록만 | `UNSURVEYED` |
+| **비밀번호 재설정** `auth_reset` | `/auth/reset` | ROUTE | 목록만 | `UNSURVEYED` |
 | **개인정보처리방침** `privacy` | `/privacy` | ROUTE | 목록만 | `UNSURVEYED` |
 | **이용약관** `terms` | `/terms` | ROUTE | 목록만 | `UNSURVEYED` |
 | **권한 없음** `unauthorized` | `/unauthorized` | ROUTE | 목록만 | `UNSURVEYED` |
