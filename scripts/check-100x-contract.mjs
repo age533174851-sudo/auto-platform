@@ -2553,8 +2553,27 @@ const REATT   = 'src/lib/engine/stopReattach.ts';
           err(`${MONITOR}: 실행 권한 관문(mayActOn)이 반복문 앞에 없습니다`
             + ' — 소유권 불명·관리 유예 노출이 venue 조회까지 내려갑니다');
         } else {
-          if (!/continue;/.test(body.slice(iGate, iGate + 1400))) {
-            err(`${MONITOR}: 실행 권한 관문이 회차를 끊지 않습니다`);
+          // ★ **고정 크기 창으로 보지 않는다.**
+          //
+          //   예전에는 `body.slice(iGate, iGate + 1400)`에 `continue;`가
+          //   있는지만 봤다. 그런데 이 검사기는 주석을 지운 소스를 보므로
+          //   관문 블록이 675자로 줄고, 1400자 창이 **다음 블록까지** 닿아
+          //   거기 있는 `continue;`로 통과했다. 관문의 `continue;`를 지워도
+          //   초록이었다 — MUT-P23이 그렇게 새 나갔다.
+          //
+          //   관문 블록의 중괄호를 세서 **그 블록 안**만 본다.
+          const gOpen = body.indexOf('{', iGate);
+          let depth = 0;
+          let gEnd = -1;
+          for (let k = gOpen; k >= 0 && k < body.length; k += 1) {
+            if (body[k] === '{') depth += 1;
+            else if (body[k] === '}') { depth -= 1; if (depth === 0) { gEnd = k; break; } }
+          }
+          if (gOpen < 0 || gEnd < 0) {
+            err(`${MONITOR}: 실행 권한 관문 블록의 범위를 찾지 못했습니다`);
+          } else if (!/continue;/.test(body.slice(iGate, gEnd + 1))) {
+            err(`${MONITOR}: 실행 권한 관문이 회차를 끊지 않습니다`
+              + ' — 기록만 남기고 진행하면 유예된 자리가 거래소를 읽고 건드립니다');
           }
           for (const needle of ['credsOf(', 'readOpenPosition(', 'highWaterSince(',
             'liveStopPrice(', 'lifecycleDecide(', 'guard.claim(', 'applyLifecycleClose(',
