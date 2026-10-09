@@ -65,7 +65,9 @@ export function makeCredsReader(i: {
         code = diagnoseCredential({
           rowFound: !!row,
           exchangeResolved: !!ex,
-          hasWithdrawal: row ? row.has_withdrawal === true : null,
+          // 판독 실패·NULL은 '출금 권한 없음'의 증거가 아니다.
+          // 원래 === true는 NULL을 false로 바꿔 안전 차단을 우회했다.
+          hasWithdrawal: row ? (row.has_withdrawal === false ? false : null) : null,
           keyPresent: !!String(row?.api_key ?? ''),
           secretCiphertextPresent: !!String(row?.api_secret_enc ?? ''),
           secretDecrypted: decrypted,
