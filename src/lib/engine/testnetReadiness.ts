@@ -173,9 +173,13 @@ export function binanceTestnetReadiness(
         '거래 권한이 없습니다 — 실제 진입이 불가능합니다', id);
       continue;
     }
-    if (c.credential != null && c.credential !== 'READY') {
+    // 자격을 읽지 않았다는 사실(null/undefined)은 '복호화 성공'이 아니다.
+    // READY는 값·출금 비허용·복호화까지 확인됐을 때만 반환한다.
+    if (c.credential !== 'READY') {
       last = nope('CREDENTIALS_UNUSABLE',
-        `자격을 쓸 수 없습니다 (${c.credential})`, id);
+        c.credential == null
+          ? '자격 검증 결과가 없습니다 — 복호화 및 출금 권한을 확인해야 합니다'
+          : `자격을 쓸 수 없습니다 (${c.credential})`, id);
       continue;
     }
     return { ready: true, code: 'READY', reason: '', connectionId: id };

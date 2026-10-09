@@ -11,6 +11,7 @@ import {
   binanceTestnetReadiness, sampleReadiness, classifyFailures,
   type ConnectionFacts,
 } from './testnetReadiness';
+import { makeCredsReader } from './connectionCreds';
 
 const EXACT100X = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
 
@@ -140,6 +141,45 @@ export function runTestnetReadinessTests() {
       eq(binanceTestnetReadiness([conn({ hasWithdrawal: w as any })]).code,
         'WITHDRAWAL_PERMISSION_PRESENT');
     }
+  });
+
+  test('★ 복호화 상태를 아직 진단하지 않으면 READY라고 쓰지 않는다', () => {
+    for (const credential of [null, undefined] as const) {
+      const v = binanceTestnetReadiness([conn({ credential })]);
+      eq(v.ready, false);
+      eq(v.code, 'CREDENTIALS_UNUSABLE');
+    }
+  });
+
+  test('★ 판독기는 NULL·미확인 출금 권한을 false로 바꾸지 않는다', async () => {
+    const probe = async (hasWithdrawal: boolean | null | undefined) => {
+      const reader = makeCredsReader({
+        sb: { from: () => ({
+          select() { return this; },
+          eq() { return this; },
+          async maybeSingle() {
+            return { data: {
+              api_key: 'dummy-key', api_secret_enc: 'dummy-cipher',
+              has_withdrawal: hasWithdrawal, is_testnet: true,
+              exchange_id: 'binance',
+            }, error: null };
+          },
+        }) },
+        resolveExchange: () => ({ exchange: 'binance' as const }),
+        decrypt: () => 'dummy-secret',
+      });
+      const creds = await reader.get('test-connection');
+      return { creds, code: reader.codeOf('test-connection') };
+    };
+
+    for (const v of [true, null, undefined] as const) {
+      const r = await probe(v);
+      eq(r.code, 'WITHDRAWAL_ENABLED');
+      eq(r.creds, null, '출금 권한 미확인 상태에서 자격을 건넸다');
+    }
+    const safe = await probe(false);
+    eq(safe.code, 'READY');
+    assert(safe.creds !== null, '출금 권한 없음이 확인돼도 자격이 차단됐다');
   });
 
   test('쓸 수 있는 연결이 하나라도 있으면 그것을 고른다', () => {
