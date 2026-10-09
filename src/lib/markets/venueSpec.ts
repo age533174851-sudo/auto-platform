@@ -82,20 +82,24 @@ export interface VenueSpec {
   source: SpecSource;
   /** 가격 단위. 모르면 null — 지어내지 않는다 */
   tickSize: number | null;
-  /** 지정가 수량 단위 */
+  /**
+   * 심볼의 기본 수량 규칙(예: Binance LOT_SIZE).
+   * 이름은 기존 구조를 유지하지만 LIMIT 전용이 아니며 MARKET에도 적용된다.
+   */
   stepSize: number | null;
   minQty: number | null;
   /** venue가 고시하면 담는다. 대부분 없다 */
   maxQty: number | null;
   minNotional: number | null;
   /**
-   * 시장가 전용 수량 격자.
+   * 시장가 추가 규칙(예: MARKET_LOT_SIZE).
    *
-   * **없으면 null이다.** 지정가 격자를 복사하지 않는다 — 거래소가 두지
-   * 않은 규칙을 만드는 것이기 때문이다(`quantize.ts`가 같은 규율).
+   * null = 못 읽음/필터 없음, 0 = 거래소가 그 제한을 명시적으로 비활성.
+   * 기본 LOT_SIZE 값을 복사해 채우지는 않는다.
    */
   marketStepSize: number | null;
   marketMinQty: number | null;
+  marketMaxQty?: number | null;
   /** 1계약이 기초자산 몇 단위인가. 해당 없으면 null */
   multiplier: number | null;
   /** 읽은 시각(ms). 캐시 판단에 쓴다 */
@@ -112,7 +116,8 @@ export function unknownSpec(venue: VenueId, symbol: string): VenueSpec {
   return {
     venue, symbol, source: 'UNKNOWN',
     tickSize: null, stepSize: null, minQty: null, maxQty: null, minNotional: null,
-    marketStepSize: null, marketMinQty: null, multiplier: null, fetchedAt: null,
+    marketStepSize: null, marketMinQty: null, marketMaxQty: null,
+    multiplier: null, fetchedAt: null,
   };
 }
 
@@ -125,11 +130,15 @@ export function unknownSpec(venue: VenueId, symbol: string): VenueSpec {
 export function filtersOf(spec: VenueSpec | null | undefined): SymbolFilters | null {
   if (!specUsable(spec)) return null;
   const s = spec as VenueSpec;
-  const grid = (step: number | null, min: number | null) =>
-    (step == null && min == null) ? null : { stepSize: step, minQty: min };
+  const grid = (step: number | null, min: number | null, max: number | null) =>
+    (step == null && min == null && max == null)
+      ? null : { stepSize: step, minQty: min, maxQty: max };
   return {
-    limitQty: grid(s.stepSize, s.minQty),
-    marketQty: grid(s.marketStepSize, s.marketMinQty),
+    // 기존 필드명 limitQty지만 뜻은 기본 LOT_SIZE다 — MARKET에도 적용된다.
+    limitQty: grid(s.stepSize, s.minQty, s.maxQty),
+    // 명시적 0은 객체로 남는다. "필터를 읽었고 제한이 꺼져 있음"과
+    // "필터 자체를 못 읽음(null)"을 구분해야 정상 시장가를 막지 않는다.
+    marketQty: grid(s.marketStepSize, s.marketMinQty, s.marketMaxQty ?? null),
     tickSize: s.tickSize,
     minNotional: s.minNotional,
   };

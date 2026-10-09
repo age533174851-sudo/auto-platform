@@ -788,27 +788,29 @@ const M = [
     s => s.replace('      });\n      continue;\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**',
                    '      });\n    }\n\n    // ★ **선점은 여기서 하지 않는다.**'), 'RED'],
 
-  // 앵커 이동: 관문이 `p.management?.code !== 'MANAGED'` 한 줄에서
-  // `mayActOn(p)`(ownership + management SSOT)로 옮겨졌다. 지우지 않고
-  // 새 자리로 옮긴다.
   ['MUT-P24 관리 유예 관문을 포지션 조회 뒤로 옮김', P.monitor, s => {
-    const open = '    if (!mayActOn(p)) {';
-    const i = s.indexOf(open);
+    // #300 뒤 관문 정본은 management 단독 조건이 아니라 mayActOn(ownership+management)이다.
+    // 블록 전체를 거래소 노출 조회 **뒤**로 옮겨 "조회 0회" 계약을 깨 본다.
+    const startMark = '    if (!mayActOn(p)) {';
+    const nextMark = '    // ★ **선점은 여기서 하지 않는다.**';
+    const i = s.indexOf(startMark);
     if (i < 0) return s;
-    const close = '      continue;\n    }\n';
-    const end = s.indexOf(close, i);
+    const end = s.indexOf(nextMark, i);
     if (end < 0) return s;
-    const block = s.slice(i, end + close.length);
-    const rest = s.slice(0, i) + s.slice(end + close.length);
-    // 자격 조회·포지션 조회 뒤로 내린다 — 유예된 자리가 거래소를 읽는다
-    const after = rest.indexOf('      const live = await ops.readOpenPosition(venue, p.symbol);');
-    if (after < 0) return s;
-    const lineEnd = rest.indexOf('\n', after) + 1;
-    return rest.slice(0, lineEnd) + block + rest.slice(lineEnd);
+    const block = s.slice(i, end);
+    const rest = s.slice(0, i) + s.slice(end);
+    const read = '      const live = await ops.readOpenPosition(venue, p.symbol);\n';
+    const k = rest.indexOf(read);
+    if (k < 0) return s;
+    const after = k + read.length;
+    return rest.slice(0, after) + block + rest.slice(after);
   }, 'RED'],
 
-  ['MUT-P25 유예 자리에서 시간청산 close 허용 (관문을 소유권만 보게)', P.cand,
-    s => s.replace("  return p?.management?.code === 'MANAGED';", '  return true;'), 'RED'],
+  // 유예된 자리에서도 시간청산이 닫게 한다 — mayActOn의 management 절반을
+  // 빼고 소유권만 보게 되돌리는 회귀다(옛 고장 그대로).
+  ['MUT-P25 유예 자리에서 시간청산 close 허용 (관문을 소유권만 보게)', P.monitor,
+    s => s.replace('    if (!mayActOn(p)) {',
+                   "    if (p.ownership?.code !== 'OWNED') {"), 'RED'],
 
   // ── 레거시 안전망 ──
   ['MUT-P14 손절 재부착의 NO_FIXED_SL 방어 제거', P.reatt,
@@ -2059,8 +2061,8 @@ const M = [
   ['MIG-L3b 같은 번호가 두 파일을 가리키는 것을 허용', P.lin,
     s => s.replace('    if (prev != null) {', '    if (false) {'), 'RED'],
 
-  ['MIG-L3c 번호가 두 갈래인 것을 단순 누락으로 적음', P.lin,
-    s => s.replace('      if (squatter) {', '      if (false) {'), 'RED'],
+  ['MIG-L3c base 마지막 번호 뒤가 아닌 것을 허용', P.lin,
+    s => s.replace('    if (d.id <= baseMax) {', '    if (false) {'), 'RED'],
 
   ['MIG-L3d 094를 건너뛰고 095로 선언', P.lin,
     s => s.replace("  { id: 94, name: '094_exact100x_exit_escape_observations.sql' },",
@@ -2225,8 +2227,8 @@ const M = [
     'RED'],
 
   ['RDY11 고아 정리 실패를 Exact100X 경로로 적음', P.monitor,
-    s => s.replace("path: 'GENERIC_PROTECTION_SWEEP' as const,",
-      "path: 'EXACT100X_AUTHORITY' as const,"), 'RED'],
+    s => s.replace("          path: 'GENERIC_PROTECTION_SWEEP' as const,",
+      "          path: 'EXACT100X_AUTHORITY' as const,"), 'RED'],
 
   ['RDY12 진단에 시크릿 평문을 넘김', P.creds,
     s => s.replace('          secretDecrypted: decrypted,',

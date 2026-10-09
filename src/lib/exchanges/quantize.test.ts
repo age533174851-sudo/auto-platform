@@ -170,7 +170,7 @@ export function runQuantizeTests() {
     minNotional: 5,
   };
 
-  test('**시장가는 MARKET_LOT_SIZE로, 지정가는 LOT_SIZE로 자른다**', () => {
+  test('**시장가는 LOT_SIZE를 먼저 지키고 MARKET_LOT_SIZE 추가 제한도 지킨다**', () => {
     eq(qtyGridFor(TWO_GRID, 'LIMIT')!.stepSize, 0.001);
     eq(qtyGridFor(TWO_GRID, 'MARKET')!.stepSize, 0.01);
 
@@ -213,6 +213,42 @@ export function runQuantizeTests() {
     eq(limit.ok, true);
     eq(limit.quantity, 0.015);
     eq(limit.applied, true);
+  });
+
+  test('★ MARKET_LOT_SIZE가 0으로 비활성이어도 BTCUSDT 시장가 매수는 막지 않는다', () => {
+    // 실제 제보 화면: 5,000 / 82,937.01 ≈ 0.06028672 BTC.
+    // MARKET_LOT_SIZE의 0은 "규격 미상"이 아니라 그 추가 제한이 꺼진 것이다.
+    // 기본 LOT_SIZE(0.00001)는 여전히 적용되어 0.06028로 내려가야 한다.
+    const btc: SymbolFilters = {
+      limitQty: { stepSize: 0.00001, minQty: 0.00001, maxQty: 9000 },
+      marketQty: { stepSize: 0, minQty: 0, maxQty: 1000 },
+      tickSize: 0.01,
+      minNotional: 5,
+    };
+    const r = quantizeOrder(0.06028672, null, btc, {
+      orderType: 'MARKET', marketReferencePrice: 82937.01,
+    });
+    eq(r.ok, true);
+    eq(r.code, null);
+    eq(r.quantity, 0.06028);
+    eq(r.applied, true);
+    assert((r.quantity as number) <= 0.06028672, '시장가 수량이 사용자가 승인한 값보다 커졌습니다');
+  });
+
+  test('★ MARKET_LOT_SIZE의 0과 필터 미상(null)은 다르다', () => {
+    const base = {
+      limitQty: { stepSize: 0.001, minQty: 0.001 },
+      tickSize: 0.1, minNotional: null,
+    };
+    const disabled: SymbolFilters = {
+      ...base, marketQty: { stepSize: 0, minQty: 0, maxQty: 0 },
+    };
+    const unknown: SymbolFilters = { ...base, marketQty: null };
+
+    eq(quantizeOrder(0.0159, null, disabled, { orderType: 'MARKET' }).ok, true);
+    const miss = quantizeOrder(0.0159, null, unknown, { orderType: 'MARKET' });
+    eq(miss.ok, false);
+    eq(miss.code, 'QTY_FILTER_UNKNOWN');
   });
 
   test('**자른 뒤의 수량으로 최소 금액을 본다** — 원본으로 통과시키지 않는다', () => {
