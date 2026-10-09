@@ -17,6 +17,7 @@ import {
   classifyMigration, migrationIdOf, migrationPlanOf, migrationEntryGate,
   migrationTargets, migrationDrift,
 } from './migrationPlan';
+import { MIGRATION_MANIFEST } from './migrationManifest';
 
 const ADDITIVE_SQL = `
 CREATE TABLE IF NOT EXISTS ledger_events (
@@ -585,6 +586,84 @@ export function runMigrationPlanTests() {
     eq(plan.code, 'NEEDS_APPROVAL');
     eq(plan.autoApply.length, 0);
     eq(plan.blocked[0].risk, 'UNKNOWN');
+  });
+
+  // ── DECLARE 구역 ──
+  //
+  // `splitStatements()`가 `;`로 자르면 변수 선언이 문장처럼 떨어져 나온다.
+  // 두 번째 선언부터는 아무 규칙에도 걸리지 않아 UNKNOWN이 됐다 — 위험해서
+  // 막힌 것이 아니라 **읽지 못해서** 막힌 것이고, 096이 그렇게 막혔다.
+
+  test('★ 선언이 둘 이상인 DO 블록을 읽는다', () => {
+    const sql = 'DO $$\nDECLARE\n  bad_groups integer;\n  sample text;\nBEGIN\n'
+      + "  RAISE NOTICE 'x';\nEND $$;";
+    eq(classifyMigration(sql).risk, 'ADDITIVE');
+  });
+
+  test('★ 선언 자리에 둔 DROP TABLE은 그대로 막는다', () => {
+    const sql = 'DO $$\nDECLARE\n  a integer;\n  DROP TABLE important;\nBEGIN\n  NULL;\nEND $$;';
+    eq(classifyMigration(sql).risk, 'DESTRUCTIVE');
+  });
+
+  test('★ 선언 자리에 둔 조건 없는 DELETE도 막는다', () => {
+    const sql = 'DO $$\nDECLARE\n  a integer;\n  DELETE FROM t;\nBEGIN\n  NULL;\nEND $$;';
+    eq(classifyMigration(sql).risk, 'DESTRUCTIVE');
+  });
+
+  test('★ 선언의 기본값이 EXECUTE면 통과시키지 않는다', () => {
+    const sql = "DO $$\nDECLARE\n  a text := EXECUTE 'x';\nBEGIN\n  NULL;\nEND $$;";
+    eq(classifyMigration(sql).risk, 'UNKNOWN');
+  });
+
+  test('★ DECLARE가 없으면 선언 모양도 UNKNOWN이다', () => {
+    // 구역 밖에서 선언 모양을 인정하면, 알아보지 못한 문장이 전부 통과한다.
+    eq(classifyMigration('DO $$\nBEGIN\n  NULL;\n  sample text;\nEND $$;').risk, 'UNKNOWN');
+  });
+
+  test('★ BEGIN 뒤로는 구역이 닫힌다', () => {
+    const sql = 'DO $$\nDECLARE\n  a integer;\nBEGIN\n  NULL;\n  sample text;\nEND $$;';
+    eq(classifyMigration(sql).risk, 'UNKNOWN');
+  });
+
+  test('★ 선언 모양을 흉내 낸 SQL 명령은 구역 안에서도 문장으로 읽는다', () => {
+    // `LOCK TABLE t IN ACCESS EXCLUSIVE MODE`는 글자만 보면 `이름 타입`과
+    // 구별되지 않는다. 명령 머리말을 먼저 걸러야 선언으로 읽히지 않는다.
+    const sql = 'DO $$\nDECLARE\n  a integer;\n  LOCK TABLE important IN ACCESS EXCLUSIVE MODE;\n'
+      + 'BEGIN\n  NULL;\nEND $$;';
+    eq(classifyMigration(sql).risk, 'UNKNOWN');
+  });
+
+  test('★ 선언 모양이 아닌 것은 구역 안에서도 UNKNOWN이다', () => {
+    // 구역 안이면 무엇이든 통과시키면, 읽지 못한 것을 통과로 적는 것이다.
+    const sql = 'DO $$\nDECLARE\n  a integer;\n  junk ** junk;\nBEGIN\n  NULL;\nEND $$;';
+    eq(classifyMigration(sql).risk, 'UNKNOWN');
+  });
+
+  test('★ 096은 환경 identity 교체이고 자동 적용 대상이다', () => {
+    // 이 파일은 preflight에서 RAISE로 멈추고 **데이터를 고치지 않는다.**
+    // DROP CONSTRAINT는 이 저장소에서 이미 ADDITIVE로 선언돼 있다.
+    //
+    // 매니페스트는 `npm run gen:migrations`가 파일에서 만들고 CI가 파일과
+    // 대조한다(check:migrations). 그래서 여기서 매니페스트를 보는 것은
+    // 곧 그 파일을 보는 것이다 — 체크섬이 내용에 묶여 있다.
+    const e = MIGRATION_MANIFEST.find(m => m.id === 96);
+    if (!e) throw new Error('096이 매니페스트에 없습니다');
+    eq(e.name, '096_exchange_connections_environment_identity.sql');
+    eq(e.risk, 'ADDITIVE');
+    eq(e.checksum, '55008df74e066859');
+  });
+
+  test('★ 096을 UNKNOWN으로 되돌리면 자동 적용되지 않는다', () => {
+    // 되돌아갔을 때 **무엇을 잃는지**를 적어 둔다: UNKNOWN은 승인 경로도
+    // 받지 않는다(그 문은 DESTRUCTIVE만 통과시킨다). 즉 사람이 Supabase
+    // 편집기를 여는 수밖에 없어진다 — 이 저장소가 없애려던 상태다.
+    const plan = migrationPlanOf({
+      files: [file('096_x.sql', 'DO $$ DECLARE a int; b text; BEGIN NULL; END $$;')],
+      applied: [],
+    });
+    eq(plan.code, 'READY');
+    eq(plan.autoApply.length, 1);
+    eq(plan.blocked.length, 0);
   });
 
   test('이미 적용된 것은 재분류돼도 다시 실행 대상이 되지 않는다', () => {

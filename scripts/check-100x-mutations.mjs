@@ -133,6 +133,7 @@ const P = {
   slip: 'src/lib/engine/closeSlippage.ts',
   mclock: 'src/lib/system/monotonicClock.ts',
   lin: 'src/lib/system/migrationLineage.ts',
+  mplan: 'src/lib/system/migrationPlan.ts',
   acl: 'src/lib/system/observationAcl.ts',
   rdy: 'src/lib/engine/testnetReadiness.ts',
   creds: 'src/lib/engine/connectionCreds.ts',
@@ -2074,6 +2075,31 @@ const M = [
 
   ['MIG-L4b manifest에서 main의 089를 빼 버림', P.manifest,
     s => s.replace(/\n  \{ name: '089_auth_profile_identity_sync\.sql',[^\n]*\n/, '\n'), 'RED'],
+
+  // ── 분류기의 DECLARE 구역 (096이 자동 적용되는 근거) ──
+  //
+  // 이 규칙이 없으면 096은 UNKNOWN으로 되돌아간다. 그리고 UNKNOWN은
+  // 승인 경로도 받지 않으므로(그 문은 DESTRUCTIVE만 통과시킨다) 남는 길은
+  // 사람이 Supabase 편집기를 여는 것뿐이다.
+  ['MIG-D1 DECLARE 구역 인정을 지움 (096이 다시 UNKNOWN)', P.mplan,
+    s => s.replace('    if (inDeclare && isDeclaration(st)) continue;\n', ''), 'RED'],
+
+  ['MIG-D2 구역을 보지 않고 어디서나 선언으로 읽음', P.mplan,
+    s => s.replace('    if (inDeclare && isDeclaration(st)) continue;',
+      '    if (isDeclaration(st)) continue;'), 'RED'],
+
+  ['MIG-D3 BEGIN에서 구역을 닫지 않음', P.mplan,
+    s => s.replace("    else if (/^BEGIN\\b/i.test(st)) inDeclare = false;\n", ''), 'RED'],
+
+  ['MIG-D4 명령 머리말 검사를 지움 (LOCK을 선언으로 읽음)', P.mplan,
+    s => s.replace('  if (SQL_COMMAND_HEAD.test(st)) return false;\n', ''), 'RED'],
+
+  ['MIG-D5 선언 모양 검사를 전부 통과로 만듦', P.mplan,
+    s => s.replace('  return DECLARATION.test(st);', '  return true;'), 'RED'],
+
+  ['MIG-D6 096을 매니페스트에서 UNKNOWN으로 되돌림', P.manifest,
+    s => s.replace("'096_exchange_connections_environment_identity.sql', id: 96, risk: 'ADDITIVE'",
+      "'096_exchange_connections_environment_identity.sql', id: 96, risk: 'UNKNOWN'"), 'RED'],
 
   ['MIG-L5 rename이라면서 090의 칸 이름을 바꿈', P.mig90,
     s => s.replace(/execution_preset_id/g, 'exec_preset_id'), 'RED'],
