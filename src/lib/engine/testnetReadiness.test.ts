@@ -8,7 +8,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   diagnoseCredential, credentialDiagnosisReason,
-  binanceTestnetReadiness, sampleReadiness, classifyFailures,
+  binanceTestnetReadiness, binanceTestnetDiagnoseGate, sampleReadiness, classifyFailures,
   type ConnectionFacts,
 } from './testnetReadiness';
 import { makeCredsReader } from './connectionCreds';
@@ -27,6 +27,35 @@ const conn = (over: Partial<ConnectionFacts> = {}): ConnectionFacts => ({
 });
 
 export function runTestnetReadinessTests() {
+  // 진단은 TESTNET에만 나갈 수 있다. 순수 사실 판정이라 실키가 없다.
+  test('★ Binance TESTNET만 네트워크 진단 자격이 있다', () => {
+    const safe = {
+      exchange: 'binance', testnet: true, active: true,
+      hasWithdrawal: false, keyPresent: true, secretCipherPresent: true,
+    };
+    eq(binanceTestnetDiagnoseGate(safe).code, 'READY');
+    const blocked: Array<[Partial<typeof safe>, string]> = [
+      [{ testnet: false }, 'NOT_TESTNET'],
+      [{ testnet: null as any }, 'NOT_TESTNET'],
+      [{ testnet: undefined as any }, 'NOT_TESTNET'],
+      [{ exchange: 'gate' }, 'NOT_BINANCE'],
+      [{ exchange: '' }, 'NOT_BINANCE'],
+      [{ active: false }, 'CONNECTION_INACTIVE'],
+      [{ active: null as any }, 'CONNECTION_INACTIVE'],
+      [{ hasWithdrawal: true }, 'WITHDRAWAL_UNCONFIRMED'],
+      [{ hasWithdrawal: null as any }, 'WITHDRAWAL_UNCONFIRMED'],
+      [{ hasWithdrawal: undefined as any }, 'WITHDRAWAL_UNCONFIRMED'],
+      [{ keyPresent: false }, 'KEY_MISSING'],
+      [{ secretCipherPresent: false }, 'SECRET_MISSING'],
+    ];
+    for (const [change, expected] of blocked) {
+      const r = binanceTestnetDiagnoseGate({ ...safe, ...change });
+      eq(r.ok, false);
+      eq(r.code, expected);
+    }
+  });
+
+
   // ── 자격 진단 ──
 
   test('전부 갖춰지면 READY다', () => {
