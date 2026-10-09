@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
+import { binanceTestnetDiagnoseGate } from '@/lib/engine/testnetReadiness';
 import { testFuturesConnection, getFuturesBalance, getFuturesPositions, getFuturesTicker, getSymbolFilters } from '@/lib/exchanges/binanceFutures';
 
 export const dynamic = 'force-dynamic';
@@ -30,15 +31,31 @@ export async function POST(req: NextRequest) {
     .select('*').eq('id', connectionId).eq('user_id', uid).single();
   if (error || !conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
 
+  // 호출 전에 검사한다. 이 진단은 Binance TESTNET 전용이고,
+  // LIVE 연결의 키로 단 한 번도 거래소에 요청하지 않는다.
+  const ciphertext = conn.api_secret_enc || conn.encrypted_secret || '';
+  const gate = binanceTestnetDiagnoseGate({
+    exchange: conn.exchange_id,
+    testnet: conn.is_testnet,
+    active: conn.is_active,
+    hasWithdrawal: conn.has_withdrawal,
+    keyPresent: !!String(conn.api_key ?? '').trim(),
+    secretCipherPresent: !!String(ciphertext).trim(),
+  });
+  if (!gate.ok) {
+    return NextResponse.json({ error: gate.code, message: gate.reason }, { status: 409 });
+  }
+
   let secret = '';
-  try { secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''); } catch {}
-  const apiKey = conn.api_key || '';
-  // **프로젝트 공통 규칙: is_testnet === false일 때만 실전이다.**
-  //
-  // 여기는 `=== true`였다. 그러면 이 칸이 비어 있을 때 실전으로 읽는다 —
-  // 진단이 실계좌 호스트를 찌르고, 그 결과로 "테스트넷이 안 된다"고
-  // 보고한다. 모르는 값은 안전한 쪽(테스트넷)으로 떨어져야 한다.
-  const testnet = conn.is_testnet !== false;
+  try { secret = decryptSecret(String(ciphertext)); } catch {}
+  if (!secret) {
+    return NextResponse.json({
+      error: 'CREDENTIALS_UNUSABLE',
+      message: 'API 시크릿 복호화에 실패했습니다 — 거래소에 요청하지 않았습니다',
+    }, { status: 409 });
+  }
+  const apiKey = String(conn.api_key);
+  const testnet = true; // TESTNET 외에는 위 게이트에서 거부했다.
 
   const checks: Check[] = [];
   const run = async (name: string, fn: () => Promise<{ ok: boolean; detail: string }>) => {
@@ -47,10 +64,21 @@ export async function POST(req: NextRequest) {
     catch (e: any) { checks.push({ name, ok: false, detail: e?.message || '오류', ms: Date.now() - t0 }); }
   };
 
-  // 1. API 연결
+  // 1. API 연결과 선물 거래 가능 여부를 분리한다.
+  // 계좌 조회 성공이 canTrade=true의 증거는 아니다.
+  let exchangeCanTrade = false;
   await run('API 연결', async () => {
     const r = await testFuturesConnection(apiKey, secret, testnet);
-    return { ok: r.success, detail: r.success ? `잔고 ${r.totalBalance?.toFixed(2)} USDT` : r.message };
+    exchangeCanTrade = r.success === true && r.canTrade === true;
+    return { ok: r.success, detail: r.success ? 'TESTNET 계정 인증 성공' : r.message };
+  });
+  checks.push({
+    name: '선물 거래 권한',
+    ok: exchangeCanTrade && conn.perm_trading === true,
+    detail: exchangeCanTrade && conn.perm_trading === true
+      ? '거래소와 저장된 거래 권한이 일치합니다 (실제 주문은 내지 않았습니다)'
+      : '선물 거래 권한을 확인하지 못했습니다 — 진단 성공을 거래 가능으로 읽지 않습니다',
+    ms: 0,
   });
   // 2. 잔고 조회
   await run('잔고 조회', async () => {
