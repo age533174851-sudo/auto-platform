@@ -187,9 +187,8 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     testnet, checks, passed, total, successRate,
     verdict: successRate === 100 ? 'ready' : successRate >= 60 ? 'partial' : 'failed',
-    // 어디에 무슨 키로 물어봤는지. **키 값은 싣지 않는다** — 앞 8자만.
+    // TESTNET 호스트만 공개한다. API 키 일부라도 응답에 싣지 않는다.
     host: deep.host,
-    keyPrefix: deep.keyPrefix,
     stopSupport,
     cause,
     at: Date.now(),
