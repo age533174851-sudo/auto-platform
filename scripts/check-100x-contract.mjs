@@ -5984,6 +5984,40 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
   }
 }
 
+
+// ── Exact100X maxOpenPositions=1: 선언이 아니라 실주문 경계 배선 ──
+// 순수 단위 테스트만 있으면 호출부를 지워도 초록색이 된다.
+{
+  const scalp = code(SCALP);
+  const cap = code('src/lib/engine/maxOpenPositionsGate.ts');
+  if (!/epContract\?\.profileId\s*===\s*'MAX_LEV_100X'/.test(scalp)) {
+    err('scalp: Exact100X 계좌 전체 포지션 상한을 적용하지 않습니다');
+  }
+  if (!/maxOpenPositions:\s*epContract\.maxOpenPositions/.test(scalp)
+      || !/const capacity = await maxOpenPositionsGate\(/.test(scalp)) {
+    err('scalp: maxOpenPositions 선언값을 실제 용량 관문으로 넘기지 않습니다');
+  }
+  const gateAt = scalp.indexOf('const capacity = await maxOpenPositionsGate(');
+  const leverageAt = scalp.indexOf('const committed = await commitEntry100x(');
+  if (gateAt < 0 || leverageAt < 0 || gateAt >= leverageAt) {
+    err('scalp: 계좌 전체 상한이 거래소 배율 설정보다 앞에 있지 않습니다');
+  }
+  if (!/x100-capacity:\$\{userId\}:\$\{body\.connectionId\}/.test(scalp)) {
+    err('scalp: BTC·ETH가 동일한 계좌 수준의 원자적 claim key를 쓰지 않습니다');
+  }
+  if (!/getFuturesPositions\(/.test(scalp)
+      || !/getFuturesOpenOrders\(/.test(scalp)
+      || !/countPendingEntries:\s*async/.test(scalp)) {
+    err('scalp: 계좌 전체 포지션/미체결 주문/미확정 진입을 모두 조사하지 않습니다');
+  }
+  if (!/claim\.installed !== true/.test(cap)
+      || !/claim\.error/.test(cap)
+      || !/claim\.duplicate/.test(cap)
+      || !/i\.mode !== 'TESTNET'/.test(cap)) {
+    err('maxOpenPositionsGate: fail-closed 또는 TESTNET 전용 관문이 사라졌습니다');
+  }
+}
+
 if (bad) {
   console.error(`\n전용 100배 계약 검사 실패: ${bad}건`);
   process.exit(1);
