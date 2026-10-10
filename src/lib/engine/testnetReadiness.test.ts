@@ -115,7 +115,10 @@ export function runTestnetReadinessTests() {
     ];
     for (const [name, before, after] of mutations) {
       assert(source.includes(before), `변이 ${name} 대상이 사라졌습니다`);
-      const mutated = source.replace(before, after);
+      // 라우트 앞부분에도 동일한 연결 소유자 조건이 있다. 변이는 반드시
+      // Exact100X readiness 블록 안에서만 주입해야 검사가 진짜 결함을 본다.
+      const offset = source.indexOf('const { binanceTestnetReadiness }');
+      const mutated = source.slice(0, offset) + source.slice(offset).replace(before, after);
       assert(readinessRouteProblems(mutated).length > 0,
         `결함 ${name}를 넣어도 실거래 배선 검사가 통과했습니다`);
     }
