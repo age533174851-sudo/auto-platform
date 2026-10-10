@@ -5,6 +5,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
 import { EXCHANGE_META } from '@/lib/exchanges/types';
 import type { ExchangeId, ConnectedExchange } from '@/lib/exchanges/types';
+import { showBinanceTestnetDiagnosis } from '@/lib/ui/binanceDiagnosisGate';
 
 // ── Theme ─────────────────────────────────────────────────────
 // 팔레트는 공용 하나만 쓴다. 복사본을 두면 테마를 바꿨을 때
@@ -419,7 +420,7 @@ export default function ExchangeConnectPage() {
                     </div>
                   </div>
                   <div style={{ display:'flex', flexDirection:'column', gap:5, alignItems:'flex-end' }}>
-                    <button onClick={() => { setSelConn(conn); setView('detail'); loadBalances(conn); setTestMsg(''); }}
+                    <button onClick={() => { setSelConn(conn); setView('detail'); loadBalances(conn); setTestMsg(''); setDiag(null); }}
                       style={{ padding:'5px 10px', background:T.alt, border:`1px solid ${T.border}`, borderRadius:8, color:T.sub, fontSize:10, fontWeight:700, cursor:'pointer' }}>
                       상세
                     </button>
@@ -742,7 +743,9 @@ export default function ExchangeConnectPage() {
             )}
           </div>
 
-          {/* 테스트넷 진단 (선물 시스템 검증) */}
+          {/* 인증된 사용자 소유 Binance TESTNET만 이 조회 진단을 제공한다. */}
+          {showBinanceTestnetDiagnosis(selConn.exchange, selConn.isTestnet) && (
+          <>
           <button onClick={async () => {
             setDiagRunning(true); setDiag(null);
             try {
@@ -757,14 +760,14 @@ export default function ExchangeConnectPage() {
                 body: JSON.stringify({ connectionId: selConn.id }),
               });
               const d = await r.json();
-              setDiag(d);
-            } catch (e:any) { setDiag({ error: e?.message || '진단 실패' }); }
+              setDiag({ ...d, forConnectionId: selConn.id });
+            } catch (e:any) { setDiag({ error: e?.message || '진단 실패', forConnectionId: selConn.id }); }
             finally { setDiagRunning(false); }
           }} disabled={diagRunning}
             style={{ width:'100%', marginTop:8, padding:'10px', background:A(T.prp,'15'), border:`1px solid ${A(T.prp,'40')}`, borderRadius:10, color:T.prp, fontWeight:700, fontSize:12, cursor: diagRunning?'not-allowed':'pointer' }}>
             {diagRunning ? '진단 중…' : '테스트넷 진단 (시스템 검증)'}
           </button>
-          {diag && !diag.error && (
+          {diag && diag.forConnectionId === selConn.id && !diag.error && (
             <div style={{ marginTop:8, background:T.alt, borderRadius:10, padding:'10px 12px' }}>
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
                 <span style={{ color:T.txt, fontWeight:700, fontSize:11 }}>
@@ -774,12 +777,10 @@ export default function ExchangeConnectPage() {
                   {diag.passed}/{diag.total} · {diag.successRate}%
                 </span>
               </div>
-              {/* 어디에 무슨 키로 물어봤는가. 이게 없으면 "테스트넷이 안 된다"와
-                  "실전 호스트에 테스트넷 키를 보냈다"를 구분할 수 없다.
-                  키는 앞 8자만 — 전체 값은 화면에도 응답에도 싣지 않는다. */}
-              {(diag.host || diag.keyPrefix) && (
+              {/* 서버가 실제 요청한 TESTNET 호스트만 공개한다. API 키 일부도 표시하지 않는다. */}
+              {diag.host && (
                 <div style={{ color:T.muted, fontSize:9, marginBottom:6, wordBreak:'break-all' }}>
-                  {diag.host}{diag.keyPrefix ? ` · 키 ${diag.keyPrefix}…` : ''}
+                  {diag.host}
                 </div>
               )}
               {(diag.checks||[]).map((c:any,i:number)=>(
@@ -802,14 +803,21 @@ export default function ExchangeConnectPage() {
               <div style={{ marginTop:8, padding:'7px 10px', borderRadius:7, fontSize:10, lineHeight:1.4,
                 background: diag.verdict==='ready'?A(T.grn,'12'):diag.verdict==='partial'?A(T.ylw,'12'):A(T.red,'12'),
                 color: diag.verdict==='ready'?T.grn:diag.verdict==='partial'?T.ylw:T.red }}>
-                {diag.verdict==='ready' ? '✅ 모든 항목 통과 — 시스템 정상. 소액 실전 테스트 가능' :
+                {diag.verdict==='ready' ? '✅ TESTNET 조회 진단 항목 통과 — 실제 주문·청산 검증은 별도입니다' :
                  diag.verdict==='partial' ? '⚠️ 일부 실패 — 실패 항목 확인 후 재시도' :
                  '❌ 다수 실패 — API 키/권한/연결 점검 필요'}
               </div>
             </div>
           )}
-          {diag?.error && (
+          {diag?.error && diag.forConnectionId === selConn.id && (
             <div style={{ marginTop:8, padding:'8px 12px', background:A(T.red,'10'), borderRadius:8, color:T.red, fontSize:11 }}>진단 실패: {diag.error}</div>
+          )}
+          </>
+          )}
+          {selConn.exchange === 'binance' && !showBinanceTestnetDiagnosis(selConn.exchange, selConn.isTestnet) && (
+            <div style={{ marginTop:8, color:T.muted, fontSize:11 }}>
+              LIVE 연결에는 TESTNET 진단을 제공하지 않습니다. 환경을 바꾸기보다 별도의 TESTNET 연결을 선택하세요.
+            </div>
           )}
         </Card>
 
