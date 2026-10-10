@@ -7,9 +7,21 @@
 //  3. 실전 연결인데 테스트넷으로 나가는 것 — 주문이 허공으로 가고
 //     사용자는 거래한 줄 안다. 1번보다 조용해서 더 오래 안 들킨다.
 import { test, assert, eq } from '../../test/harness';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { binanceBase, annotateAuthError } from './binance';
 
 export function runBinanceHostTests() {
+  test('Binance 서명 로그·진단 응답에 API 키 앞부분을 기록하지 않는다', () => {
+    const futures = readFileSync(resolve(__dirname, 'binanceFutures.ts'), 'utf8');
+    const route = readFileSync(resolve(__dirname, '../../app/api/binance/futures/diagnose/route.ts'), 'utf8');
+    assert(!futures.includes("key?.slice(0, 8)"), '서명 요청 로그에 API 키 일부가 노출된다');
+    assert(!futures.includes("keyPrefix:"), '선물 진단이 키 일부를 응답으로 만든다');
+    assert(!route.includes("keyPrefix:"), 'API 응답에 키 일부가 노출된다');
+    assert(!route.includes("deep.keyPrefix"), 'API 응답에서 키 일부를 읽는다');
+    assert(route.includes("host: deep.host"), '진단 호스트는 계속 표기돼야 한다');
+  });
+
   console.log('[바이낸스 호스트 — 현물/선물 × 실전/테스트넷]');
 
   test('현물 실전은 api.binance.com', () => {
