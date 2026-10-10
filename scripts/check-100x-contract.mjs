@@ -6005,10 +6005,49 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
   if (!/x100-capacity:\$\{userId\}:\$\{body\.connectionId\}/.test(scalp)) {
     err('scalp: BTC·ETH가 동일한 계좌 수준의 원자적 claim key를 쓰지 않습니다');
   }
+
+  // ── 상태 목록을 **손으로 적지 않는가** ──
+  //
+  //   처음 배선은 `['INTENT','SENT','UNKNOWN']`을 라우트에 직접 적었다.
+  //   그 목록은 `live_orders_status_idx` 부분 인덱스와 같은 모양이라
+  //   그럴듯했지만 `OrderStatus`에는 `ACKED`가 더 있었고, **빠진 방향이
+  //   통과였다.** 정본 상수를 쓰게 해서 어휘가 늘면 한 곳만 고치면 되게 한다.
+  if (!/\[\.\.\.UNRESOLVED_ENTRY_STATUSES\]/.test(scalp)
+      || !/\[\.\.\.ACCEPTED_ENTRY_STATUSES\]/.test(scalp)) {
+    err('scalp: 진입 차단 상태 목록을 정본 상수가 아니라 손으로 적었습니다'
+      + ' — 어휘가 늘면 이 질의만 옛 목록을 씁니다');
+  }
+  // ── 접수된 진입은 **나이로 제한**하는가 ──
+  //
+  //   reconcile의 PENDING_STATUSES에 ACKED가 없어 그 줄은 해소되지 않는다.
+  //   나이 제한 없이 세면 한 번 진입한 계정이 영구히 막힌다.
+  {
+    const iAcc = scalp.indexOf('countRecentAcceptedEntries: async');
+    const open = iAcc < 0 ? -1 : scalp.indexOf('{', iAcc);
+    let depth = 0; let end = -1;
+    for (let k = open; k >= 0 && k < scalp.length; k += 1) {
+      if (scalp[k] === '{') depth += 1;
+      else if (scalp[k] === '}') { depth -= 1; if (depth === 0) { end = k; break; } }
+    }
+    if (iAcc < 0 || open < 0 || end < 0) {
+      err('scalp: 접수된 진입 조회 블록의 범위를 찾지 못했습니다');
+    } else {
+      const body = scalp.slice(iAcc, end + 1);
+      if (!/CAPACITY_WINDOW_SEC/.test(body) || !/\.gte\('created_at'/.test(body)) {
+        err('scalp: 접수된(ACKED) 진입을 잠금 창으로 제한하지 않습니다'
+          + ' — reconcile이 해소하지 않는 상태라 한 번 진입하면 영구히 막힙니다');
+      }
+      if (!/\.eq\('reduce_only', false\)/.test(body)) {
+        err('scalp: 접수된 진입 조회가 청산 주문을 함께 셉니다'
+          + ' — 청산이 진입을 막는 모양이 됩니다');
+      }
+    }
+  }
   if (!/getFuturesPositions\(/.test(scalp)
       || !/getFuturesOpenOrders\(/.test(scalp)
-      || !/countPendingEntries:\s*async/.test(scalp)) {
-    err('scalp: 계좌 전체 포지션/미체결 주문/미확정 진입을 모두 조사하지 않습니다');
+      || !/countPendingEntries:\s*async/.test(scalp)
+      || !/countRecentAcceptedEntries:\s*async/.test(scalp)) {
+    err('scalp: 계좌 전체 포지션/미체결 주문/미확정 진입/접수된 진입을 모두 조사하지 않습니다');
   }
   if (!/claim\.installed !== true/.test(cap)
       || !/claim\.error/.test(cap)

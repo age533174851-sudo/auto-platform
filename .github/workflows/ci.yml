@@ -959,13 +959,37 @@ jobs:
           # 파싱이 **중단되는** 코드만 고른다. TS1117(중복 프로퍼티) 같은
           # 문법 오류는 파싱을 멈추지 않으므로 개수 검사에 맡긴다 —
           # 여기 넣으면 기준선에 이미 있는 것 때문에 매번 빨개진다.
-          PARSE_CODES='TS1002|TS1003|TS1005|TS1011|TS1109|TS1128|TS1131|TS1160|TS1161'
+          # TS1127(Invalid character)이 빠져 있어서 같은 사고가 다시 났다:
+          # PR #313의 시험 파일에서 정규식 리터럴이 조기 종료되자 tsc가
+          # 73건 → 2건으로 멈췄고, 이 검사는 "줄었으니 기준선을 내려 주세요"
+          # 알림만 띄우고 **통과했다.**
+          PARSE_CODES='TS1002|TS1003|TS1005|TS1011|TS1109|TS1127|TS1128|TS1131|TS1160|TS1161'
           SYNTAX=$(grep -cE "error (${PARSE_CODES}):" ts.log || true)
           if [ "$SYNTAX" -gt 0 ]; then
             echo "::error::파싱이 중단된 파일이 있습니다 (${SYNTAX}건) — 개수 검사보다 우선합니다"
             grep -E "error (${PARSE_CODES}):" ts.log | head -20
             exit 1
           fi
+          # ── 목록을 늘리는 것만으로는 또 샌다 ──
+          #
+          # 중단 코드를 하나씩 추가하는 방식은 처음 보는 코드가 오면 똑같이
+          # 뚫린다(TS1127이 그랬다). 그래서 **원리로** 한 겹 더 둔다:
+          # TS1xxx는 전부 문법 계열이다. 기준선에 상주하는 비중단 코드만
+          # 허용 목록에 두고, **그 밖의 TS1xxx는 개수와 무관하게 실패**시킨다.
+          #
+          # 개수가 '줄었는가'에 기대지 않는 이유: TS1117이 기준선에 상주하므로
+          # 누가 다른 타입 오류를 정당하게 고쳐 개수가 줄기만 해도 터진다.
+          # 그것은 오탐이고, 오탐이 한 번 나면 다음부터 아무도 안 본다.
+          SYNTAX_ALLOW='TS1117'
+          SYNTAX_NEW=$(grep -oE "error TS1[0-9]{3}:" ts.log | sort -u \
+            | grep -vE "error (${SYNTAX_ALLOW}):" | tr -d ' ' | tr '\n' ' ')
+          if [ -n "${SYNTAX_NEW}" ]; then
+            echo "::error::허용 목록에 없는 문법 계열 오류가 있습니다: ${SYNTAX_NEW}"
+            echo "            — tsc가 파일을 끝까지 읽지 못했을 수 있습니다. 개수 검사보다 우선합니다."
+            grep -E "error TS1[0-9]{3}:" ts.log | grep -vE "error (${SYNTAX_ALLOW}):" | head -20
+            exit 1
+          fi
+
           if [ "$COUNT" -gt "$TS_ERROR_BASELINE" ]; then
             echo "::error::타입 에러가 ${TS_ERROR_BASELINE}건에서 ${COUNT}건으로 늘었습니다"
             # 늘어난 줄만 보여준다. 전체 로그는 80줄이라 새 에러가 묻힌다.

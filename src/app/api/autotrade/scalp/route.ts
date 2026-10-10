@@ -1219,7 +1219,10 @@ export async function POST(req: NextRequest) {
   // 공통 원자적 claim을 취득한 뒤에만 배율 설정 및 주문 전송으로 간다.
   // 관측 오류, DB 잠금 오류, 지원하지 않는 환경은 fail-closed.
   if (epContract?.profileId === 'MAX_LEV_100X') {
-    const { maxOpenPositionsGate } = await import('@/lib/engine/maxOpenPositionsGate');
+    const {
+      maxOpenPositionsGate, UNRESOLVED_ENTRY_STATUSES, ACCEPTED_ENTRY_STATUSES,
+      CAPACITY_WINDOW_SEC,
+    } = await import('@/lib/engine/maxOpenPositionsGate');
     const { claimSignal } = await import('@/lib/risk/idempotency');
     const capacity = await maxOpenPositionsGate(
       { maxOpenPositions: epContract.maxOpenPositions, mode: opMode },
@@ -1242,13 +1245,27 @@ export async function POST(req: NextRequest) {
             .eq('connection_id', body.connectionId)
             .eq('mode', 'TESTNET')
             .eq('reduce_only', false)
-            .in('status', ['INTENT', 'SENT', 'UNKNOWN']);
+            .in('status', [...UNRESOLVED_ENTRY_STATUSES]);
+          return error || count == null ? null : count;
+        },
+        // 거래소가 접수한(ACKED) 진입. reconcile이 해소하지 않는 상태라
+        // 잠금 창 안의 것만 센다 — 그러지 않으면 한 번 진입하고 영구 차단된다.
+        countRecentAcceptedEntries: async () => {
+          const since = new Date(Date.now() - CAPACITY_WINDOW_SEC * 1000).toISOString();
+          const { count, error } = await sb.from('live_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId!)
+            .eq('connection_id', body.connectionId)
+            .eq('mode', 'TESTNET')
+            .eq('reduce_only', false)
+            .in('status', [...ACCEPTED_ENTRY_STATUSES])
+            .gte('created_at', since);
           return error || count == null ? null : count;
         },
         claimSlot: async () => claimSignal(sb, {
           key: `x100-capacity:${userId}:${body.connectionId}`,
           neighbors: [], clientScoped: true,
-        }, 15 * 60),
+        }, CAPACITY_WINDOW_SEC),
       },
     );
     if (!capacity.allowed) {

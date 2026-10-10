@@ -75,7 +75,7 @@ export function runTestnetReadinessTests() {
     const begin = source.indexOf('const { binanceTestnetReadiness }');
     const end = source.indexOf('// ── 신규 진입 권한', begin);
     if (begin < 0 || end <= begin) return ['정본 준비 상태 호출 경계가 없습니다'];
-    const body = source.slice(begin, end).replace(/^\\s*\\/\\/.*$/gm, '');
+    const body = source.slice(begin, end).replace(/^\s*\/\/.*$/gm, '');
     const missing = [
       "binanceTestnetReadiness(rawReadiness ? [{",
       ".select('id, exchange_id, is_testnet, is_active, perm_read, perm_trading, has_withdrawal')",

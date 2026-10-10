@@ -23,7 +23,22 @@ import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 
-export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
+// ── 주문 상태 어휘를 **값으로** 둔다 ──
+//
+// 타입만 있으면 `.in('status', [...])`로 질의하는 쪽이 목록을 손으로 적고,
+// 어휘가 늘어도 그 질의는 조용히 옛 목록을 쓴다. PR #313의 계좌 용량
+// 관문이 `ACKED`를 빼먹은 것이 그 모양이었다 — 빠진 방향이 **통과**였다.
+// 값으로 두면 시험이 드리프트를 잡을 수 있다.
+export const ORDER_STATUSES = [
+  'INTENT', 'SENT', 'ACKED', 'FILLED', 'REJECTED', 'FAILED', 'UNKNOWN', 'RECONCILED',
+] as const;
+
+/** 더 움직이지 않는 상태. 이 상태의 주문은 진입을 막지 않는다 */
+export const TERMINAL_ORDER_STATUSES = [
+  'FILLED', 'REJECTED', 'FAILED', 'RECONCILED',
+] as const;
+
+export type OrderStatus = typeof ORDER_STATUSES[number];
 
 export interface ExecuteArgs {
   userId?: string | null;
