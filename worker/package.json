@@ -1,7 +1,7 @@
 {
   "name": "traigo-worker",
   "version": "1.0.0",
-  "description": "TRAIGO 24h risk worker — Ghost Sync, Kill Switch retry, Reconciliation, Telegram",
+  "description": "TRAIGO 24h worker — 유일한 자동 주문 실행 주체. 청산 감시(트레일링·본전이동·시간청산) · 전략 예약 평가 · 거래소 원장 수집 · 자산 스냅샷 · Ghost Sync · Kill Switch retry · Reconciliation · Telegram",
   "private": true,
   "type": "commonjs",
   "scripts": {
