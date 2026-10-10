@@ -12,6 +12,7 @@ import {
   type ConnectionFacts,
 } from './testnetReadiness';
 import { makeCredsReader } from './connectionCreds';
+import { envHealthProbeVerdict } from '../exchanges/testnetHealthGate';
 
 const EXACT100X = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
 
@@ -27,6 +28,27 @@ const conn = (over: Partial<ConnectionFacts> = {}): ConnectionFacts => ({
 });
 
 export function runTestnetReadinessTests() {
+  test('★ 환경변수 거래소 진단은 LIVE 선택을 어떤 값으로도 허용하지 않는다', () => {
+    for (const exchange of [null, 'binance', 'gate'] as const) {
+      const ok = envHealthProbeVerdict({ hasLiveQuery: false, exchange });
+      eq(ok.code, 'READY');
+      eq(ok.ok, true);
+      const blocked = envHealthProbeVerdict({ hasLiveQuery: true, exchange });
+      eq(blocked.code, 'LIVE_PROBE_FORBIDDEN');
+      eq(blocked.ok, false);
+    }
+  });
+
+  test('★ 지원하지 않는 환경변수 거래소는 조회 후보로 두지 않는다', () => {
+    for (const exchange of ['okx', 'bybit', 'BINANCE', 'binance;gate']) {
+      const v = envHealthProbeVerdict({ hasLiveQuery: false, exchange });
+      eq(v.code, 'UNSUPPORTED_EXCHANGE');
+      eq(v.ok, false);
+    }
+    eq(envHealthProbeVerdict({ hasLiveQuery: false, exchange: '' }).code, 'READY');
+  });
+
+
   // 진단은 TESTNET에만 나갈 수 있다. 순수 사실 판정이라 실키가 없다.
   test('★ Binance TESTNET만 네트워크 진단 자격이 있다', () => {
     const safe = {
