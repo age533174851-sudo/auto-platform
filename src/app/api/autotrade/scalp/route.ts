@@ -1161,6 +1161,55 @@ export async function POST(req: NextRequest) {
   // 하나 남는다.
   const barBucket = Math.floor(Date.now() / (intervalMin * 60_000));
 
+  // ── Exact100X 계좌 전체 포지션 최대 1개 ──
+  //
+  // BTC/ETH 별개 멱등 키로는 동시 진입을 막지 못한다. 거래소 연결 하나에
+  // 공통 원자적 claim을 취득한 뒤에만 배율 설정 및 주문 전송으로 간다.
+  // 관측 오류, DB 잠금 오류, 지원하지 않는 환경은 fail-closed.
+  if (epContract?.profileId === 'MAX_LEV_100X') {
+    const { maxOpenPositionsGate } = await import('@/lib/engine/maxOpenPositionsGate');
+    const { claimSignal } = await import('@/lib/risk/idempotency');
+    const capacity = await maxOpenPositionsGate(
+      { maxOpenPositions: epContract.maxOpenPositions, mode: opMode },
+      {
+        observeExposure: async () => {
+          if (conn.exchange !== 'binance' || connIsLive) return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const [p, o] = await Promise.all([
+            bf.getFuturesPositions(conn.apiKey, conn.apiSecret, true),
+            bf.getFuturesOpenOrders(conn.apiKey, conn.apiSecret, true),
+          ]);
+          if (!p?.success || !o?.success
+              || !Array.isArray(p.positions) || !Array.isArray(o.orders)) return null;
+          return { positions: p.positions.length, openOrders: o.orders.length };
+        },
+        countPendingEntries: async () => {
+          const { count, error } = await sb.from('live_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId!)
+            .eq('connection_id', body.connectionId)
+            .eq('mode', 'TESTNET')
+            .eq('reduce_only', false)
+            .in('status', ['INTENT', 'SENT', 'UNKNOWN']);
+          return error || count == null ? null : count;
+        },
+        claimSlot: async () => claimSignal(sb, {
+          key: `x100-capacity:${userId}:${body.connectionId}`,
+          neighbors: [], clientScoped: true,
+        }, 15 * 60),
+      },
+    );
+    if (!capacity.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: capacity.code, error: capacity.reason,
+      }, {
+        status: capacity.code === 'CAPACITY_UNKNOWN'
+          || capacity.code === 'CAPACITY_CLAIM_FAILED' ? 503 : 409,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+  }
+
   // ── 같은 봉에서 두 번 들어가지 않는다 (멱등 키) ──
   //
   // **이 경로에는 중복 차단이 없었다.** 웹훅에는 webhook_dedup을 쓰는
