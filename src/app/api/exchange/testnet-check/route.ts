@@ -2,6 +2,8 @@
 // 2단계 검증용: 거래소 테스트넷 연결 확인 (시세 수신 + 계좌 조회).
 // 서버 전용. 키는 환경변수에서만 읽고 응답에 절대 포함하지 않는다.
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdmin } from '@/lib/auth/isAdmin';
+import { envHealthProbeVerdict } from '@/lib/exchanges/testnetHealthGate';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -62,9 +64,27 @@ async function checkGateFutures(testnet: boolean): Promise<CheckResult> {
 }
 
 export async function GET(req: NextRequest) {
+  // 환경변수 키의 계좌 상태는 서비스 전체의 비공개 정보다.
+  // Authorization Bearer를 Supabase가 검증하고 profiles.role을 확인한다.
+  // 쿠키나 x-user-id, 요청 쿼리의 역할 주장을 인증으로 사용하지 않는다.
+  const guard = await requireAdmin(req.headers.get('authorization'));
+  if (guard instanceof Response) return guard;
+
   const url = new URL(req.url);
-  const testnet = url.searchParams.get('live') !== '1';   // 기본 테스트넷
-  const only = url.searchParams.get('exchange');          // 'binance' | 'gate'
+  const policy = envHealthProbeVerdict({
+    hasLiveQuery: url.searchParams.has('live'),
+    exchange: url.searchParams.get('exchange'),
+  });
+  if (!policy.ok) {
+    return NextResponse.json({ error: policy.code }, {
+      status: policy.code === 'LIVE_PROBE_FORBIDDEN' ? 403 : 400,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
+  const only = policy.exchange;
+  // 이 경로에서는 LIVE를 선택할 방법이 없다. 실계좌 진단은 별도의
+  // 명시적 승인/계정별 접근 제어가 있는 전용 경로에서만 해야 한다.
+  const testnet = true;
 
   const tasks: Promise<CheckResult>[] = [];
   if (!only || only === 'binance') tasks.push(checkBinanceFutures(testnet));
