@@ -100,8 +100,11 @@ jobs:
               count = int(total.group(1))
               if vals[1] or vals[3] or vals[5]:
                   errors.append(f'{i}: missed/noop/false-positive {vals}')
-              if vals[0]+vals[2]+vals[4]!=count:
-                  errors.append(f'{i}: coverage mismatch count={count}, counters={vals}')
+              # NOOP-EXPECTED 대조군은 의도적으로 파일이 안 바뀌며
+              # 하네스의 검출/동치/대조군 PASS 카운터에는 들어가지 않는다.
+              expected_noops = s.count('— 적용 안 됨(의도대로)')
+              if vals[0]+vals[2]+vals[4]+expected_noops!=count:
+                  errors.append(f'{i}: coverage mismatch count={count}, counters={vals}, expected_noop={expected_noops}')
               results.append((i,count,vals))
           total_count = sum(x[1] for x in results)
           # 커밋의 전수 목록은 457건. 451이라는 과거 수치에 맞춰 표본을 버리지 않는다.
