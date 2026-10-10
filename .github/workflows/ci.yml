@@ -981,8 +981,15 @@ jobs:
           # 누가 다른 타입 오류를 정당하게 고쳐 개수가 줄기만 해도 터진다.
           # 그것은 오탐이고, 오탐이 한 번 나면 다음부터 아무도 안 본다.
           SYNTAX_ALLOW='TS1117'
-          SYNTAX_NEW=$(grep -oE "error TS1[0-9]{3}:" ts.log | sort -u \
-            | grep -vE "error (${SYNTAX_ALLOW}):" | tr -d ' ' | tr '\n' ' ')
+          # 빈 검색 결과는 정상이다. pipefail 아래에서 grep -v가 1을
+          # 반환해 CI 전체가 중단되는 사고를 막는다. awk는 매칭 0건도 exit 0.
+          SYNTAX_NEW=$(awk -v allow="${SYNTAX_ALLOW}" '
+            match($0, /error TS1[0-9][0-9][0-9]:/) {
+              code = substr($0, RSTART + 6, RLENGTH - 7)
+              if (code != allow) unknown[code] = 1
+            }
+            END { for (code in unknown) printf "%s ", code }
+          ' ts.log)
           if [ -n "${SYNTAX_NEW}" ]; then
             echo "::error::허용 목록에 없는 문법 계열 오류가 있습니다: ${SYNTAX_NEW}"
             echo "            — tsc가 파일을 끝까지 읽지 못했을 수 있습니다. 개수 검사보다 우선합니다."
