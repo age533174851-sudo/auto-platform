@@ -13,6 +13,8 @@ import {
 } from './testnetReadiness';
 import { makeCredsReader } from './connectionCreds';
 import { envHealthProbeVerdict } from '../exchanges/testnetHealthGate';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const EXACT100X = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 2 };
 
@@ -28,6 +30,70 @@ const conn = (over: Partial<ConnectionFacts> = {}): ConnectionFacts => ({
 });
 
 export function runTestnetReadinessTests() {
+  // #308의 보안 정책은 순수 함수뿐 아니라 운영 라우트가 실제로 사용해야 한다.
+  // 주석을 근거로 삼지 않고 GET 본문에서 인증 → 정책 → TESTNET 고정을 확인한다.
+  const healthRoutePath = resolve(__dirname, '../../app/api/exchange/testnet-check/route.ts');
+  const routeGuardViolations = (source: string): string[] => {
+    const getAt = source.indexOf('export async function GET(req: NextRequest)');
+    if (getAt < 0) return ['GET 라우트를 찾지 못했습니다'];
+    const body = source.slice(getAt)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+
+    const at = (fragment: string) => body.indexOf(fragment);
+    const problems: string[] = [];
+    const auth = at("await requireAdmin(req.headers.get('authorization'))");
+    const authExit = at('if (guard instanceof Response) return guard;');
+    const live = at("url.searchParams.has('live')");
+    const policy = at('envHealthProbeVerdict({');
+    const policyExit = at('if (!policy.ok)');
+    const reject = at('return NextResponse.json({ error: policy.code }');
+    const testnet = at('const testnet = true;');
+    const binance = at('checkBinanceFutures(testnet)');
+    const gate = at('checkGateFutures(testnet)');
+
+    if (auth < 0 || authExit < auth) problems.push('관리자 Bearer 인증 관문이 빠졌습니다');
+    if (policy < 0 || live < policy || policyExit < live) problems.push('live 쿼리 존재 여부가 정책에 전달되지 않습니다');
+    if (policyExit < policy || reject < policyExit
+        || !body.includes("policy.code === 'LIVE_PROBE_FORBIDDEN' ? 403 : 400")) {
+      problems.push('정책 거부 결과가 HTTP 거부 응답으로 연결되지 않았습니다');
+    }
+    if (testnet < 0 || testnet < reject
+        || binance < testnet || gate < testnet) {
+      problems.push('거래소 호출이 TESTNET 상수에 고정되지 않았습니다');
+    }
+    if (auth < 0 || live < authExit || policyExit < authExit || testnet < authExit) {
+      problems.push('인증 전에 거래소 환경을 평가하거나 요청합니다');
+    }
+    return problems;
+  };
+
+  test('★ 환경변수 진단 GET에 관리자 인증·LIVE 차단·TESTNET 고정이 모두 배선돼 있다', () => {
+    const source = readFileSync(healthRoutePath, 'utf8');
+    const bad = routeGuardViolations(source);
+    eq(bad.length, 0, `보안 배선 위반: ${bad.join(' / ')}`);
+  });
+
+  test('★ #308 배선 M1~M4 방어 삭제 변이가 각각 RED다', () => {
+    const source = readFileSync(healthRoutePath, 'utf8');
+    const variants: Array<[string, string, string]> = [
+      ['M1 인증 관문 삭제', "const guard = await requireAdmin(req.headers.get('authorization'));",
+        'const guard = null;'],
+      ['M2 LIVE 호스트 선택 복귀', 'const testnet = true;',
+        "const testnet = url.searchParams.get('live') !== '1';"],
+      ['M3 정책 거부 무시', 'if (!policy.ok) {',
+        'if (false) {'],
+      ['M4 ?live=0 통과', "url.searchParams.has('live')",
+        "url.searchParams.get('live') === '1'"],
+    ];
+    for (const [name, before, after] of variants) {
+      assert(source.includes(before), `변이 ${name}의 대상 코드가 없어졌습니다`);
+      const mutated = source.replace(before, after);
+      assert(routeGuardViolations(mutated).length > 0,
+        `${name}을 제거해도 라우트 계약 검사가 통과했습니다`);
+    }
+  });
+
   test('★ 환경변수 거래소 진단은 LIVE 선택을 어떤 값으로도 허용하지 않는다', () => {
     for (const exchange of [null, 'binance', 'gate'] as const) {
       const ok = envHealthProbeVerdict({ hasLiveQuery: false, exchange });
