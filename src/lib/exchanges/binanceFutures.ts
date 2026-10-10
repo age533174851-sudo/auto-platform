@@ -44,7 +44,7 @@ async function fapiSigned(
   const sig = sign(qs, secret);
   const url = `${base(testnet)}${path}?${qs}&signature=${sig}`;
   // 디버그 로그 (Vercel 함수 로그에서 확인)
-  console.log('[Binance] MODE:', testnet ? 'TESTNET' : 'LIVE', '| BASE:', base(testnet), '| KEY:', key?.slice(0, 8) + '...', '| path:', path);
+  console.log('[Binance] MODE:', testnet ? 'TESTNET' : 'LIVE', '| BASE:', base(testnet), '| path:', path);
   const r = await fetch(url, {
     method, headers: { 'X-MBX-APIKEY': key }, signal: AbortSignal.timeout(8000),
   });
@@ -1694,7 +1694,7 @@ export async function findOrderByClientId(
  */
 export async function diagnoseFutures(
   key: string, secret: string, testnet = true, symbol = 'BTCUSDT',
-): Promise<{ host: string; keyPrefix: string; checks: Array<{ name: string; path: string; ok: boolean; detail: string }> }> {
+): Promise<{ host: string; checks: Array<{ name: string; path: string; ok: boolean; detail: string }> }> {
   const sym = symbol.toUpperCase().replace('/', '');
   const probes: Array<{ name: string; path: string; params?: Record<string, string | number> }> = [
     { name: '서버 시각 (서명 없음)', path: '/fapi/v1/time' },
@@ -1725,7 +1725,7 @@ export async function diagnoseFutures(
     }
   }
 
-  return { host: base(testnet), keyPrefix: String(key || '').slice(0, 8), checks };
+  return { host: base(testnet), checks };
 }
 
 /**
