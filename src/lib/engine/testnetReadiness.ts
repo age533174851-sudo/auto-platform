@@ -194,6 +194,42 @@ export function binanceTestnetReadiness(
 
 // ── ③ 표본 자격 (기존 정본에 위임한다) ──
 
+// TESTNET 전용 진단의 부작용 없는 사전 관문. 비밀 값은 입력으로 받지 않는다.
+export type BinanceTestnetDiagnoseCode =
+  | 'READY' | 'NOT_BINANCE' | 'NOT_TESTNET' | 'CONNECTION_INACTIVE'
+  | 'WITHDRAWAL_UNCONFIRMED' | 'KEY_MISSING' | 'SECRET_MISSING';
+
+export interface BinanceTestnetDiagnoseFacts {
+  exchange: string | null | undefined;
+  testnet: boolean | null | undefined;
+  active: boolean | null | undefined;
+  hasWithdrawal: boolean | null | undefined;
+  keyPresent: boolean;
+  secretCipherPresent: boolean;
+}
+
+export function binanceTestnetDiagnoseGate(
+  facts: BinanceTestnetDiagnoseFacts,
+): { ok: boolean; code: BinanceTestnetDiagnoseCode; reason: string } {
+  const no = (code: BinanceTestnetDiagnoseCode, reason: string) =>
+    ({ ok: false, code, reason });
+  if (String(facts?.exchange ?? '').trim().toLowerCase() !== 'binance') {
+    return no('NOT_BINANCE', 'Binance 연결만 진단할 수 있습니다');
+  }
+  // NULL/모름을 LIVE나 TESTNET으로 추정하지 않는다. LIVE 호스트 호출 금지.
+  if (facts.testnet !== true) {
+    return no('NOT_TESTNET', 'TESTNET 연결만 진단할 수 있습니다 — LIVE 연결 조회는 차단합니다');
+  }
+  if (facts.active !== true) return no('CONNECTION_INACTIVE', '비활성 연결은 진단하지 않습니다');
+  // NULL/미확인을 출금 비허용으로 취급하지 않는다.
+  if (facts.hasWithdrawal !== false) {
+    return no('WITHDRAWAL_UNCONFIRMED', '출금 권한 비허용을 확인하지 못했습니다');
+  }
+  if (facts.keyPresent !== true) return no('KEY_MISSING', 'API 키가 없습니다');
+  if (facts.secretCipherPresent !== true) return no('SECRET_MISSING', 'API 시크릿 암호문이 없습니다');
+  return { ok: true, code: 'READY', reason: '' };
+}
+
 export type SampleReadiness =
   | 'READY'
   | 'VENUE_UNSUPPORTED'
