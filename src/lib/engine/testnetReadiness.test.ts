@@ -53,7 +53,7 @@ export function runTestnetReadinessTests() {
     const gate = at('checkGateFutures(testnet)');
 
     if (auth < 0 || authExit < auth) problems.push('관리자 Bearer 인증 관문이 빠졌습니다');
-    if (live < 0 || policy < live) problems.push('live 쿼리 존재 여부가 정책에 전달되지 않습니다');
+    if (policy < 0 || live < policy || policyExit < live) problems.push('live 쿼리 존재 여부가 정책에 전달되지 않습니다');
     if (policyExit < policy || reject < policyExit
         || !body.includes("policy.code === 'LIVE_PROBE_FORBIDDEN' ? 403 : 400")) {
       problems.push('정책 거부 결과가 HTTP 거부 응답으로 연결되지 않았습니다');
