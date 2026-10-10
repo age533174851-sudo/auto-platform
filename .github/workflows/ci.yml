@@ -711,6 +711,15 @@ jobs:
           EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/check-execution-profile.mjs
 
+      # ── 청산 경로 권한 배선 ──
+      #
+      #   이 검사기는 **만들어졌는데 CI에 배선되지 않았다.** 그래서 ⑤B-3A-1이
+      #   sweep 시그니처에 wake 인자를 끼워 넣어 `stillMine`이 4번째로 밀렸을
+      #   때 2건 실패 상태로 들어갔고, main에서 계속 실패한 채로 아무도
+      #   보지 않았다. 거래소 쓰기는 되돌릴 수 없는 경로다 — 돌려야 한다.
+      - name: 종료 권한 배선 (임차 CAS · 권한 주입 · 판단 뒤 선점)
+        run: node scripts/check-exit-authority.mjs
+
       - name: 전용 100배 계약 (정확 100 · 고정 손절 없음 · 누출 0)
         run: node scripts/check-100x-contract.mjs
 
