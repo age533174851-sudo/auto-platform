@@ -17,6 +17,21 @@ jobs:
     name: 100X 전수 변이 shard ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    # ── 기준 커밋은 **job 수준**에서 넘긴다 ──
+    #
+    #   변이 하네스는 매 변이마다 게이트를 다시 돌리고, 그 안에
+    #   check-execution-profile.mjs가 있다. 그 검사기는 PR·push 이벤트에서
+    #   EXECUTION_CONTRACT_BASE가 비면 **실패한다** — 비었을 때 origin/main으로
+    #   조용히 후퇴하면 "자기 자신과 비교"가 되어 버전 검사가 꺼지기 때문이다.
+    #
+    #   ci.yml은 이 값을 넘기는데 이 워크플로는 넘기지 않아서, 8개 샤드가
+    #   전부 **기준선 단계에서 멈췄다**(runs/38065897023). 457건이 실패한 게
+    #   아니라 시작조차 못 한 것이다.
+    #
+    #   step마다 적지 않고 job 수준에 두는 이유: 자기 점검 step과 전수 step이
+    #   같은 값을 봐야 하고, 둘 중 한쪽만 고치는 것이 이 저장소의 상습 고장이다.
+    env:
+      EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha }}
     strategy:
       fail-fast: false
       matrix:

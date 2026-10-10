@@ -18,6 +18,7 @@
     "check:test-registry": "node scripts/check-test-registry.mjs",
     "check:status-claims": "node scripts/check-status-claims.mjs",
     "check:workflows": "actionlint",
+    "check:contract-base": "node scripts/check-contract-base-wiring.mjs",
     "check:entry-gates": "node scripts/check-entry-gates.mjs",
     "check:research": "node scripts/check-research-isolation.mjs",
     "check:browser-orders": "node scripts/check-browser-orders.mjs",

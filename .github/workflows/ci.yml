@@ -700,6 +700,12 @@ jobs:
       # base는 **이벤트가 알려 준다.** 검사기가 origin/main을 먼저 고르면
       # push main 실행에서 origin/main == HEAD가 되어 자기 자신과 비교한다
       # — 정작 우리가 신뢰하는 exact-main에서 버전 검사가 꺼진다.
+      # 계약 검사기 **앞**에 둔다. 배선이 끊긴 것이면 아래 검사가
+      # "기준선에서 멈췄다"는 모양으로 실패하는데, 그 로그만 보면
+      # 원인이 계약인지 배선인지 사람이 다시 파야 한다.
+      - name: 계약 기준 커밋 배선 (워크플로가 base를 넘기는가)
+        run: node scripts/check-contract-base-wiring.mjs
+
       - name: 실행 프로필 계약 (세 축 · fallback 없음 · dormant)
         env:
           EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
