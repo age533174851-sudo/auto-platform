@@ -6006,6 +6006,37 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     err('scalp: BTC·ETH가 동일한 계좌 수준의 원자적 claim key를 쓰지 않습니다');
   }
 
+  // ── 접수를 체결로 적지 않는가 ──
+  //
+  //   예전에는 접수(ACK) 단계가 `filled_qty: res.qty`를 적었다.
+  //   `placeFuturesOrder`의 `qty`는 `origQty || executedQty`라 **요청
+  //   수량이 먼저** 오므로, 한 주도 안 채워진 주문이 "요청만큼 체결됨"으로
+  //   남았다. 그 값을 ledger 세 곳이 보유 수량으로 읽고, reconcile은
+  //   ACKED를 보지 않아 스스로 고쳐지지도 않았다.
+  //
+  //   순수 모듈은 시험이 못박는다. 여기서는 **실행기가 그것을 쓰는지**를 본다.
+  {
+    const exe = code(EXEC);
+    if (!/fillFactsOf\(res\.raw\)/.test(exe)) {
+      err(`${EXEC}: 접수 기록이 체결 사실 정본(fillFactsOf)을 쓰지 않습니다`
+        + ' — 요청 수량이 체결로 적힐 수 있습니다');
+    }
+    if (!/filled_qty: fill\.filledQty/.test(exe) || !/avg_price: fill\.avgPrice/.test(exe)) {
+      err(`${EXEC}: filled_qty·avg_price에 체결 사실이 아닌 값을 적습니다`);
+    }
+    if (/filled_qty:\s*res\.qty/.test(exe) || /avg_price:\s*res\.price/.test(exe)) {
+      err(`${EXEC}: 주문 응답의 요청 수량·지정가를 체결로 적고 있습니다`
+        + ' — origQty는 체결의 증거가 아닙니다');
+    }
+    // 상태도 정본에서 와야 한다. 'ACKED'를 글자로 박으면 거래소가
+    // FILLED를 알려줘도 영구히 ACKED에 머문다.
+    const iAck = exe.indexOf('fillFactsOf(res.raw)');
+    const seg = iAck < 0 ? '' : exe.slice(iAck, iAck + 420);
+    if (iAck >= 0 && !/status: fill\.status/.test(seg)) {
+      err(`${EXEC}: 접수 기록의 상태를 체결 사실에서 가져오지 않습니다`);
+    }
+  }
+
   // ── 상태 목록을 **손으로 적지 않는가** ──
   //
   //   처음 배선은 `['INTENT','SENT','UNKNOWN']`을 라우트에 직접 적었다.

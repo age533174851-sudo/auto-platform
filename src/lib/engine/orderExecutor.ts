@@ -22,6 +22,8 @@ import { futuresApplyLeverage } from '../exchanges/futuresExec';
 import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
+import { fillFactsOf } from './orderFillFacts';
+
 
 // ── 주문 상태 어휘를 **값으로** 둔다 ──
 //
@@ -710,9 +712,20 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
 
       // ── 6) 접수 확인 ──
+      //
+      // **접수는 체결이 아니다.** 예전에는 `filled_qty: res.qty`를 적었는데
+      // `placeFuturesOrder`의 `qty`는 `origQty || executedQty`라 **요청
+      // 수량이 먼저** 온다. 한 주도 안 채워진 주문이 "요청만큼 체결됨"으로
+      // 장부에 남고, 그 값을 ledger 세 곳이 보유 수량으로 읽었다.
+      // reconcile은 ACKED를 보지 않으므로 스스로 고쳐지지도 않는다.
+      //
+      // 거래소가 증명한 것만 적는다. 증명하지 못한 것은 null이고 0이 아니다.
+      const fill = fillFactsOf(res.raw);
       await update({
-        status: 'ACKED', exchange_order_id: String(res.orderId),
-        filled_qty: res.qty, avg_price: res.price, acked_at: new Date().toISOString(),
+        status: fill.status, exchange_order_id: String(res.orderId),
+        filled_qty: fill.filledQty, avg_price: fill.avgPrice,
+        acked_at: new Date().toISOString(),
+        ...(fill.exchangeStatus ? { error_message: null } : {}),
       });
 
       // ── 7) 손절·익절 부착 ──
