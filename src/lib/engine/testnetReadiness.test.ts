@@ -37,8 +37,8 @@ export function runTestnetReadinessTests() {
     const getAt = source.indexOf('export async function GET(req: NextRequest)');
     if (getAt < 0) return ['GET 라우트를 찾지 못했습니다'];
     const body = source.slice(getAt)
-      .replace(/\\/\\*[\\s\\S]*?\\*\\//g, '')
-      .replace(/^\\s*\\/\\/.*$/gm, '');
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
 
     const at = (fragment: string) => body.indexOf(fragment);
     const problems: string[] = [];
