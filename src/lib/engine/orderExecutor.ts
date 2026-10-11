@@ -24,6 +24,7 @@ import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
+import { ledgerStatusOf } from './reconcileLedgerStatus';
 
 
 // ── 주문 상태 어휘를 **값으로** 둔다 ──
@@ -1538,6 +1539,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 // 넘긴다 — 규칙이 코드 안에 흩어져 있으면 테스트로 확인할 수가 없다.
 export interface ReconcileResult {
   checked: number; resolved: number; stillUnknown: number;
+  /**
+   * 거래소에 **아직 열려 있다고 확인된** 건수.
+   *
+   * 미확정(`stillUnknown`)과 다르다. 이쪽은 상태를 알았고, 그 상태가
+   * "아직 안 끝났다"인 것이다. 둘을 한 칸에 담으면 "모름"으로 보여서
+   * 사람이 손을 대게 된다.
+   */
+  stillOpen: number;
   /** 자동 판단이 불가능해 사람이 봐야 하는 건수 */
   needsAttention: number;
   details: string[];
@@ -1659,7 +1668,7 @@ export async function reconcilePendingOrders(
     connectionId?: string | null;
   }
 ): Promise<ReconcileResult> {
-  const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] };
+  const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, stillOpen: 0, needsAttention: 0, details: [] };
 
   // **ACKED가 빠져 있었다.**
   //
@@ -1755,11 +1764,18 @@ export async function reconcilePendingOrders(
           : resolveUnknown(args);
 
         const reFacts = query.order ? fillFactsOf(query.order) : null;
-        if (verdict.resolved) {
-          const st = verdict.state === 'FILLED' ? 'FILLED'
-            : verdict.state === 'FAILED' ? 'FAILED'
-            : verdict.state === 'REJECTED' ? 'REJECTED'
-            : 'RECONCILED';
+
+        // ── `resolved`는 "끝났다"가 아니다 ──
+        //
+        //   여기 있던 식은 FILLED/FAILED/REJECTED가 아닌 **모든** 확정을
+        //   `RECONCILED`로 적었다. 거래소가 `NEW`를 돌려주면 판정은
+        //   `ACKED`(아직 열려 있음)인데도 종료로 적힌 것이다. 그리고
+        //   `RECONCILED`는 대조 대상이 아니라 아무도 다시 조회하지 않는다
+        //   — 살아 있는 주문이 장부에서 사라졌다. 부분 체결도 같았다.
+        //   판정→장부 변환은 reconcileLedgerStatus 하나에만 둔다.
+        const decision = verdict.resolved ? ledgerStatusOf(verdict.state) : null;
+        if (decision && decision.terminal) {
+          const st = decision.status;
           await updateOrderRow(sb, o.id, {
             status: st,
             exchange_order_id: query.order?.orderId != null ? String(query.order.orderId) : o.exchange_order_id,
@@ -1787,6 +1803,31 @@ export async function reconcilePendingOrders(
           // 주문은 손절 부착 단계에 도달한 적이 없다 — 포지션은 열렸는데
           // 보호가 없는 상태로 남는다. 여기서 한 번 더 건다.
           if (st === 'FILLED' || st === 'RECONCILED') {
+            const rep = await attachStopIfMissing(sb, creds, o);
+            if (rep) out.details.push(`${o.symbol} ${rep}`);
+          }
+        } else if (decision) {
+          // ── 상태는 알았지만 아직 안 끝났다 ──
+          //
+          //   거래소가 `NEW`(열려 있음) 또는 `PARTIALLY_FILLED`(잔량이
+          //   열려 있음)를 돌려준 경우다. 수량·가격 사실은 지금 갱신하되
+          //   `reconciled_at`은 찍지 않는다 — 다음 대조가 이 줄을 다시
+          //   조회해서 끝낸다. UNKNOWN으로도 적지 않는다(모르는 게 아니다).
+          await updateOrderRow(sb, o.id, {
+            status: decision.status,
+            exchange_order_id: query.order?.orderId != null ? String(query.order.orderId) : o.exchange_order_id,
+            filled_qty: reFacts ? reFacts.filledQty : o.filled_qty,
+            avg_price: reFacts ? reFacts.avgPrice : o.avg_price,
+            resolve_attempts: attempts + 1,
+            last_resolve_at: new Date().toISOString(),
+            needs_attention: false,
+          });
+          out.stillOpen++;
+          out.details.push(
+            `${o.symbol} ${o.client_order_id} → ${verdict.state} · 거래소에 아직 열려 있음 (${verdict.reason})`);
+          // **부분 체결은 포지션이 생긴 것이다.** 주문이 안 끝났다는
+          // 이유로 보호를 미루면 보호 없는 포지션이 남는다.
+          if (reFacts && reFacts.filledQty != null && reFacts.filledQty > 0) {
             const rep = await attachStopIfMissing(sb, creds, o);
             if (rep) out.details.push(`${o.symbol} ${rep}`);
           }
@@ -1835,9 +1876,14 @@ export async function reconcilePendingOrders(
           position,
         });
 
-        if (verdict.resolved) {
+        // 바이낸스 쪽과 **같은 정본**으로 변환한다. 여기 있던 식은
+        // `FAILED가 아니면 RECONCILED`였고, Gate에서 주문이 발견되면
+        // 위에서 `status:'NEW'`로 넘기므로 판정은 `ACKED`(열려 있음)인데
+        // 장부에는 종료가 적혔다 — 같은 결함이 두 경로에 있었다.
+        const gDecision = verdict.resolved ? ledgerStatusOf(verdict.state) : null;
+        if (gDecision && gDecision.terminal) {
           await updateOrderRow(sb, o.id, {
-            status: verdict.state === 'FAILED' ? 'FAILED' : 'RECONCILED',
+            status: gDecision.status,
             exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
             error_message: verdict.state === 'FAILED' ? verdict.reason : null,
             reconciled_at: new Date().toISOString(),
@@ -1853,6 +1899,21 @@ export async function reconcilePendingOrders(
             const rep = await attachStopIfMissing(sb, creds, o);
             if (rep) out.details.push(`${o.symbol} ${rep}`);
           }
+        } else if (gDecision) {
+          // 거래소에 아직 열려 있다. 끝났다고 적지 않고 다음 대조에 넘긴다.
+          await updateOrderRow(sb, o.id, {
+            status: gDecision.status,
+            exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
+            resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
+            needs_attention: false,
+          });
+          out.stillOpen++;
+          out.details.push(
+            `${o.symbol} ${o.client_order_id} → ${verdict.state} · 거래소에 아직 열려 있음 (Gate)`);
+          // Gate 조회는 체결 수량을 여기까지 들고 오지 않는다. 포지션
+          // 존재 확인은 attachStopIfMissing이 직접 한다.
+          const rep = await attachStopIfMissing(sb, creds, o);
+          if (rep) out.details.push(`${o.symbol} ${rep}`);
         } else {
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
           await updateOrderRow(sb, o.id, {

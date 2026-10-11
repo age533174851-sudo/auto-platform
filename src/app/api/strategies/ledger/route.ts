@@ -12,6 +12,7 @@
 // 그 차이를 전략들에 나눠 붙이지 않고 '미귀속'으로 따로 보고한다.
 import { NextRequest, NextResponse } from 'next/server';
 import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
+import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import { marketTypeOf } from '@/lib/markets/marketType';
 import {
@@ -39,7 +40,7 @@ export async function GET(req: NextRequest) {
   const { data: rows, error } = await sb.from('live_orders')
     .select('*')
     .eq('user_id', uid)
-    .in('status', ['FILLED', 'RECONCILED'])
+    .in('status', [...HOLDING_EVIDENCE_STATUSES])
     .order('created_at', { ascending: true })
     .limit(1000);
 

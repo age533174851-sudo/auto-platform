@@ -19,6 +19,7 @@
 // 그러지 않으면 로그인한 누구나 남의 계정으로 주문을 돌릴 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
 import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
+import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
 
@@ -1275,7 +1276,7 @@ async function findForeignHolders(
   const { data, error } = await sb.from('live_orders')
     .select('side, filled_qty, quantity, signal_id')
     .eq('user_id', userId).eq('symbol', symbol)
-    .in('status', ['FILLED', 'RECONCILED'])
+    .in('status', [...HOLDING_EVIDENCE_STATUSES])
     .order('created_at', { ascending: true })
     .limit(500);
   if (error) throw new Error(`전략 장부를 확인하지 못했습니다: ${error.message}`);

@@ -39,6 +39,11 @@ export async function GET(req: NextRequest) {
 
   try {
     // 이 모드에서 끝까지 간 주문만 표본으로 센다.
+    //
+    // **여기는 `HOLDING_EVIDENCE_STATUSES`를 쓰지 않는다.** 그 목록은
+    // "보유 가능성"이고 `ACKED`(거래소에 아직 열려 있음)를 포함한다.
+    // 승급 근거는 **완주한 거래**이므로 열려 있는 주문을 세면 모드가
+    // 끝나지도 않은 거래로 올라간다. 두 질문이 다르므로 목록도 다르다.
     const { data: done } = await sb.from('live_orders')
       .select('created_at')
       .eq('user_id', userId).eq('mode', current)

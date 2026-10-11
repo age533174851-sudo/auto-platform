@@ -402,12 +402,18 @@ async function sweepOrphanProtection(
  */
 async function recoverUnresolvedOrders(
   sb: any, testnet: boolean,
-): Promise<{ checked: number; resolved: number; stillUnknown: number; needsAttention: number; details: string[] }> {
-  const out = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] as string[] };
+): Promise<{ checked: number; resolved: number; stillUnknown: number; stillOpen: number; needsAttention: number; details: string[] }> {
+  const out = { checked: 0, resolved: 0, stillUnknown: 0, stillOpen: 0, needsAttention: 0, details: [] as string[] };
   try {
     // 미확정 주문이 있는 연결만 고른다. 없으면 거래소를 부를 이유가 없다.
+    //
+    // **여기 목록이 `['SENT','UNKNOWN']`이었다.** 대조하는 쪽은 ACKED를
+    // 보도록 고쳤는데(RECONCILE_TARGET_STATUSES) 연결을 고르는 이 앞단은
+    // 안 고쳐서, ACKED만 남은 연결은 **복구 대상에 들어오지도 않았다** —
+    // 경로가 둘인데 한쪽만 고친 것이다. 목록은 정본 하나에서 받는다.
+    const { RECONCILE_TARGET_STATUSES } = await import('@/lib/engine/pendingReconcile');
     const { data: pend } = await sb.from('live_orders')
-      .select('connection_id').in('status', ['SENT', 'UNKNOWN']).limit(50);
+      .select('connection_id').in('status', [...RECONCILE_TARGET_STATUSES]).limit(50);
     const connIds = Array.from(new Set(
       (Array.isArray(pend) ? pend : []).map((r: any) => r.connection_id).filter(Boolean)));
     if (connIds.length === 0) return out;
@@ -452,7 +458,8 @@ async function recoverUnresolvedOrders(
         connectionId: cid,
       });
       out.checked += r.checked; out.resolved += r.resolved;
-      out.stillUnknown += r.stillUnknown; out.needsAttention += r.needsAttention;
+      out.stillUnknown += r.stillUnknown; out.stillOpen += r.stillOpen;
+      out.needsAttention += r.needsAttention;
       out.details.push(...r.details);
     }
   } catch (e: any) {

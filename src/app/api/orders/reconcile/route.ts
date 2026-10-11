@@ -84,9 +84,15 @@ export async function GET(req: NextRequest) {
 
     // 미확정 주문 목록. **관리자가 아니면 자기 것만 본다** —
     // 예전에는 전 사용자의 심볼·방향·상태·오류메시지가 한 번에 나왔다.
+    //
+    // **목록이 `['SENT','UNKNOWN','INTENT']`였다.** ACKED가 빠져 있어서
+    // 거래소가 접수만 해 둔 주문은 이 화면에 **0건으로 보였다.** 버튼은
+    // 실제로 ACKED를 대조하는데(reconcilePendingOrders), 사람은 할 일이
+    // 없다고 읽고 누르지 않았다. 목록은 대조 대상 정본과 같아야 한다.
+    const { RECONCILE_TARGET_STATUSES } = await import('@/lib/engine/pendingReconcile');
     let listQ = sb.from('live_orders')
       .select('id, client_order_id, symbol, side, status, mode, exchange, created_at, error_message')
-      .in('status', ['SENT', 'UNKNOWN', 'INTENT']);
+      .in('status', [...RECONCILE_TARGET_STATUSES]);
     if (scopeUserId) listQ = listQ.eq('user_id', scopeUserId);
     const { data: pending } = await listQ
       .order('created_at', { ascending: true })

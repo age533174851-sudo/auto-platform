@@ -305,8 +305,12 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
       // **몇 건을 어떻게 했는지 그대로 보여준다.** '확정했다'만 뜨면
       // 아직 남은 것을 놓치고, 다시 눌러야 하는지도 알 수 없다.
       const still = Number(j?.stillUnknown) || 0;
+      // 거래소에 **열려 있다고 확인된** 건수는 '모름'이 아니다. 섞어서
+      // 적으면 끝나지 않은 주문을 고장으로 읽는다.
+      const open = Number(j?.stillOpen) || 0;
       setMsg({ ok: !!j?.ok, text: j?.ok
         ? `대조 완료 — ${j?.resolved ?? 0}건 확정`
+          + (open ? ` · ${open}건은 거래소에 아직 열려 있음` : '')
           + (still ? ` · ${still}건은 거래소에도 없어 아직 모름` : '')
           + (still ? ' (거래소에 없다고 성공으로 확정하지 않았습니다)' : '')
         : errorTextOf(j, `대조 실패 (${r.status})`) });
@@ -363,9 +367,12 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
       for (const id of ['OPEN_ORDERS', 'ORDER_HISTORY'] as const) {
         push(id, okOrders ? 'OK' : 'FAILED', null, okOrders ? note : errorTextOf(j, `실패 (${r.status})`));
       }
+      const stillOpenN = Number(j?.stillOpen) || 0;
       push('MATCH_UNKNOWN', okOrders ? 'OK' : 'FAILED', resolved,
         okOrders
-          ? (still ? `${resolved}건 확정 · ${still}건은 거래소에도 없어 아직 모름` : `${resolved}건 확정`)
+          ? `${resolved}건 확정`
+            + (stillOpenN ? ` · ${stillOpenN}건은 거래소에 아직 열려 있음` : '')
+            + (still ? ` · ${still}건은 거래소에도 없어 아직 모름` : '')
           : errorTextOf(j, `실패 (${r.status})`));
       // **거래소에도 없는 것을 성공으로 확정하지 않는다.**
       push('SETTLE_LOCAL_ONLY', okOrders ? (still > 0 ? 'FAILED' : 'OK') : 'FAILED',

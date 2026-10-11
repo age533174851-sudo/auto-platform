@@ -2279,8 +2279,13 @@ export const OrderFormPanel = memo(function OrderFormPanel({
                     const j = await r.json();
                     // 결과를 그대로 보여준다. 몇 건을 어떻게 확정했는지
                     // 모르면 다시 눌러야 하는지 알 수 없다.
+                    // '아직 모름'과 '거래소에 아직 열려 있음'은 다른
+                    // 뜻이다. 열려 있는 것을 모름으로 적으면 사람이 손을
+                    // 대고, 모름을 열려 있음으로 적으면 손을 안 댄다.
                     setMsg({ ok: !!j?.ok, text: j?.ok
-                      ? `대조 완료 — ${j?.resolved ?? 0}건 확정${j?.stillUnknown ? ` · ${j.stillUnknown}건은 아직 모름` : ''}`
+                      ? `대조 완료 — ${j?.resolved ?? 0}건 확정`
+                        + (j?.stillOpen ? ` · ${j.stillOpen}건은 거래소에 아직 열려 있음` : '')
+                        + (j?.stillUnknown ? ` · ${j.stillUnknown}건은 아직 모름` : '')
                       : errorTextOf(j, `대조 실패 (${r.status})`) });
                     if (j?.ok) { setBlockers([]); setRiskError(null); }
                   } catch (e: any) {

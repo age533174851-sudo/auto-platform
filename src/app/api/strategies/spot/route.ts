@@ -13,6 +13,7 @@
 // 기존 현물 주문 라우트로 한다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import {
   decideSpot, SPOT_STRATEGY_IDS, SPOT_STRATEGY_LABEL,
   type SpotStrategyId, type SpotContext,
@@ -129,7 +130,7 @@ export async function GET(req: NextRequest) {
       // 읽으므로 여기서는 요청하지 않는다 (요청하면 조회 자체가 실패한다).
       .select('signal_id, created_at, side, symbol')
       .eq('user_id', uid).eq('symbol', symbol).eq('side', 'BUY')
-      .in('status', ['FILLED', 'RECONCILED'])
+      .in('status', [...HOLDING_EVIDENCE_STATUSES])
       .order('created_at', { ascending: false }).limit(200);
     for (const r of (Array.isArray(data) ? data : [])) {
       const s = strategyOf(r);

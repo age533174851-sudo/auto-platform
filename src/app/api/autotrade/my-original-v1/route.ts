@@ -36,6 +36,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
+import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { STRATEGY_MY_ORIGINAL_V1 } from '@/lib/strategies/registry';
 import { cycleStatusOf, CYCLE_TARGET_USD } from '@/lib/strategies/ladderCycle';
@@ -377,7 +378,7 @@ export async function POST(req: NextRequest) {
     const { data, error } = await (sb as any).from('live_orders')
       .select('side, filled_qty, quantity, signal_id')
       .eq('user_id', userId).eq('symbol', symbol)
-      .in('status', ['FILLED', 'RECONCILED'])
+      .in('status', [...HOLDING_EVIDENCE_STATUSES])
       .order('created_at', { ascending: true }).limit(500);
     // **조회 실패를 '아무도 안 들고 있다'로 읽지 않는다.**
     if (error) throw new Error(error.message);
