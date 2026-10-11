@@ -18,15 +18,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { splitAccountNo } from '@/lib/exchanges/kisCore';
+// `crypto.ts`의 `maskKey`를 **복제**하고 있었다. 같은 판단이 두 곳에
+// 있으면 언젠가 갈리고, 실제로 갈렸다 — 거래소 쪽을 지문으로 고치는
+// 동안 이쪽은 앞뒤 4자를 계속 흘렸다. 정본 하나를 가져다 쓴다.
+import { maskKey } from '@/lib/exchanges/crypto';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-function maskKey(k: string): string {
-  const s = String(k || '');
-  if (s.length <= 8) return '****';
-  return `${s.slice(0, 4)}****${s.slice(-4)}`;
-}
 
 /** 계좌번호는 통째로 보여주지 않는다. 화면 확인용으로 뒤 네 자리만. */
 function maskAccount(a: string): string {
