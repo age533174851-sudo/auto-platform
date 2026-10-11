@@ -589,16 +589,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       try {
         const existing = await bf.findOrderByClientId(apiKey, apiSecret, plan.symbol, clientOrderId, testnet);
         if (existing.found) {
+          // ── 이 자리도 `|| '0'`이었다 ──
+          //
+          //   같은 멱등 키의 주문이 거래소에 이미 있을 때다. 미체결이면
+          //   `avgPrice`가 '0'이고 그것이 **가격으로** 적혔다. 접수 자리와
+          //   대조 자리는 고쳤는데 이 자리는 남아 있었다 — 같은 파일 안에서
+          //   세 번째였다. 정본 하나로 모은다.
+          const exFacts = fillFactsOf(existing.order);
           await update({
             status: 'RECONCILED', exchange_order_id: String(existing.order?.orderId),
-            filled_qty: parseFloat(existing.order?.executedQty || '0'),
-            avg_price: parseFloat(existing.order?.avgPrice || '0'),
+            filled_qty: exFacts.filledQty,
+            avg_price: exFacts.avgPrice,
             reconciled_at: new Date().toISOString(),
           });
           return {
             ok: true, status: 'RECONCILED', clientOrderId,
             exchangeOrderId: String(existing.order?.orderId),
-            filledQty: parseFloat(existing.order?.executedQty || '0'),
+            filledQty: exFacts.filledQty ?? undefined,
             duplicate: true, message: '거래소에 이미 존재하는 주문 — 재전송하지 않음',
           };
         }

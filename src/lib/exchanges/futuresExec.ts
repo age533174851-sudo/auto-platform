@@ -703,7 +703,15 @@ export async function futuresPlaceOrder(
     const px = Number(r.price);
     return {
       ok: true,
-      status: input.type === 'LIMIT' && (filled == null || filled === 0) ? 'ACKED' : 'FILLED',
+      // ── MARKET이라고 체결을 가정하지 않는다 ──
+      //
+      //   예전 조건은 `input.type === 'LIMIT' && …`이었다. MARKET이면
+      //   앞 절이 거짓이라 **`filled`가 null이어도 FILLED**가 됐다.
+      //   `filledQty: null`과 `status: 'FILLED'`는 서로 모순이다.
+      //   지금은 아무 소비자도 이 status를 체결 증거로 쓰지 않지만
+      //   (청산은 포지션 재조회로, 워커는 `ok`로 판단한다) 다음 사람이
+      //   믿을 함정이다. 증거는 `executedQty`뿐이다.
+      status: filled != null && filled > 0 ? 'FILLED' : 'ACKED',
       orderId: r.orderId != null ? String(r.orderId) : null,
       clientOrderId: cid, filledQty: filled,
       avgPrice: Number.isFinite(px) && px > 0 ? px : null,
