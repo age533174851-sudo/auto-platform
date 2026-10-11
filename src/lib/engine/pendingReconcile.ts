@@ -38,6 +38,36 @@ export type PendingStatus = 'SENT' | 'UNKNOWN' | 'INTENT';
 
 export const PENDING_STATUSES: PendingStatus[] = ['SENT', 'UNKNOWN', 'INTENT'];
 
+// ── 목록이 세 곳에 서로 다르게 있었다 ──
+//
+//   pendingReconcile   ['SENT','UNKNOWN','INTENT']    ← cron이 **방문할 연결**을 고를 때
+//   orderExecutor      ['SENT','UNKNOWN','ACKED']     ← 실제로 **해소하는** 상태
+//   orders/reconcile   ['SENT','UNKNOWN','INTENT']    ← 목록 조회
+//
+//   그래서 **ACKED만 남은 연결은 영원히 방문되지 않았다.** 해소할 능력
+//   (`resolveAcked`)은 이미 있었는데 그것을 부르는 방아쇠가 당겨지지 않았다.
+//   ACKED는 다른 상태의 줄이 같은 연결에 **우연히** 있을 때만 쓸려
+//   들어갔다 — 그건 보장이 아니다.
+//
+//   그래서 두 축을 **이름으로 갈라** 한 곳에 둔다. 섞으면 또 갈린다.
+
+/**
+ * 거래소에 물어보면 **확정할 수 있는** 상태.
+ * `reconcilePendingOrders`가 실제로 처리하는 집합이다.
+ */
+export const RECONCILE_QUERY_STATUSES = ['SENT', 'UNKNOWN', 'ACKED'] as const;
+
+/**
+ * 그 연결을 **방문할 이유가 되는** 상태.
+ *
+ * 해소 가능한 집합보다 넓다 — `INTENT`는 여기서 해소하지 않지만, 그 줄이
+ * 있다는 것 자체가 그 연결에 미확정이 남아 있다는 신호다.
+ * **`RECONCILE_QUERY_STATUSES`를 반드시 포함해야 한다**(시험이 대조한다).
+ */
+export const RECONCILE_TARGET_STATUSES = [
+  'INTENT', 'SENT', 'ACKED', 'UNKNOWN',
+] as const;
+
 /**
  * 방금 만들어진 주문은 건드리지 않는다.
  *
@@ -90,7 +120,9 @@ export function pendingTargets(
     // **연결을 모르면 대조하지 않는다.** 어느 키로 물어볼지 모르는 주문을
     // 아무 연결로나 물어보면, 그 거래소에 없다고 확정해 버린다.
     if (!cid) continue;
-    if (!PENDING_STATUSES.includes(String(r.status ?? '').toUpperCase() as PendingStatus)) continue;
+    // 방문 대상 목록으로 본다. PENDING_STATUSES만 보면 ACKED가 빠진다.
+    if (!(RECONCILE_TARGET_STATUSES as readonly string[])
+      .includes(String(r.status ?? '').toUpperCase())) continue;
 
     const t = Date.parse(String(r.created_at ?? ''));
     // 시각을 못 읽으면 **유예를 지난 것으로 본다.** 여기서 건너뛰면

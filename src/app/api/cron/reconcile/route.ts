@@ -49,7 +49,7 @@ import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
   pendingTargets, skipReason, summarizeOutcomes,
-  PENDING_STATUSES, DEFAULT_GRACE_MS, DEFAULT_MAX_CONNECTIONS,
+  RECONCILE_TARGET_STATUSES, DEFAULT_GRACE_MS, DEFAULT_MAX_CONNECTIONS,
   type ReconcileOutcome,
 } from '@/lib/engine/pendingReconcile';
 
@@ -99,7 +99,8 @@ export async function GET(req: NextRequest) {
   try {
     const { data: rows, error } = await sb.from('live_orders')
       .select('id, user_id, connection_id, status, created_at, symbol')
-      .in('status', PENDING_STATUSES)
+      // ACKED가 빠져 있어서 ACKED만 남은 연결은 방문되지 않았다.
+      .in('status', [...RECONCILE_TARGET_STATUSES])
       .order('created_at', { ascending: true })
       .limit(500);
 

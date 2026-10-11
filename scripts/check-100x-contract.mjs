@@ -6028,12 +6028,42 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
       err(`${EXEC}: 주문 응답의 요청 수량·지정가를 체결로 적고 있습니다`
         + ' — origQty는 체결의 증거가 아닙니다');
     }
+    // ── 같은 파일 안에 `|| '0'`이 세 자리 있었다 ──
+    //
+    //   접수 · 대조 · 멱등 재진입. 하나씩 고쳤고 그때마다 "다른 자리는
+    //   없나"를 사람이 다시 찾았다. 이제 **파일 전체에서** 금지한다.
+    //   미체결 주문의 `avgPrice`는 '0'이고, 그것을 가격으로 적으면
+    //   0이 값이 된다. 0은 가격이 아니라 없음이다.
+    if (/parseFloat\([^)]*\b(executedQty|avgPrice|origQty)\b[^)]*\|\|\s*'0'\)/.test(exe)) {
+      err(`${EXEC}: 체결 수량·가격을 \`|| '0'\`으로 메우는 자리가 남아 있습니다`
+        + " — 못 읽은 것은 null이고 0이 아닙니다 (fillFactsOf를 쓰세요)");
+    }
+    // 멱등 재진입(이미 거래소에 있는 주문)도 같은 정본을 써야 한다.
+    if (/existing\.found/.test(exe) && !/fillFactsOf\(existing\.order\)/.test(exe)) {
+      err(`${EXEC}: 멱등 재진입에서 찾은 기존 주문을 체결 사실 정본으로 읽지 않습니다`);
+    }
     // 상태도 정본에서 와야 한다. 'ACKED'를 글자로 박으면 거래소가
     // FILLED를 알려줘도 영구히 ACKED에 머문다.
     const iAck = exe.indexOf('fillFactsOf(res.raw)');
     const seg = iAck < 0 ? '' : exe.slice(iAck, iAck + 420);
     if (iAck >= 0 && !/status: fill\.status/.test(seg)) {
       err(`${EXEC}: 접수 기록의 상태를 체결 사실에서 가져오지 않습니다`);
+    }
+  }
+
+  // ── 주문 유형이 체결 증거를 대신하지 않는가 ──
+  //
+  //   `futuresExec`의 옛 조건은 MARKET일 때 `filled`가 null이어도
+  //   FILLED를 돌려줬다. `filledQty: null`과 `status: 'FILLED'`는 모순이다.
+  //   지금은 청산이 포지션 재조회로, 워커가 `ok`로 판단해서 그 status를
+  //   체결 증거로 쓰지 않지만, 다음 사람이 믿을 함정이다.
+  {
+    const fx = code('src/lib/exchanges/futuresExec.ts');
+    if (/input\.type === 'LIMIT' && \(filled == null \|\| filled === 0\)/.test(fx)) {
+      err("futuresExec: 주문 유형으로 체결을 가정합니다 — MARKET이면 증거 없이 FILLED가 됩니다");
+    }
+    if (!/status: filled != null && filled > 0 \? 'FILLED' : 'ACKED'/.test(fx)) {
+      err('futuresExec: 체결 상태를 executedQty 증거로 판정하지 않습니다');
     }
   }
 

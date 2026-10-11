@@ -23,6 +23,7 @@ import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
+import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
 
 
 // ── 주문 상태 어휘를 **값으로** 둔다 ──
@@ -588,16 +589,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       try {
         const existing = await bf.findOrderByClientId(apiKey, apiSecret, plan.symbol, clientOrderId, testnet);
         if (existing.found) {
+          // ── 이 자리도 `|| '0'`이었다 ──
+          //
+          //   같은 멱등 키의 주문이 거래소에 이미 있을 때다. 미체결이면
+          //   `avgPrice`가 '0'이고 그것이 **가격으로** 적혔다. 접수 자리와
+          //   대조 자리는 고쳤는데 이 자리는 남아 있었다 — 같은 파일 안에서
+          //   세 번째였다. 정본 하나로 모은다.
+          const exFacts = fillFactsOf(existing.order);
           await update({
             status: 'RECONCILED', exchange_order_id: String(existing.order?.orderId),
-            filled_qty: parseFloat(existing.order?.executedQty || '0'),
-            avg_price: parseFloat(existing.order?.avgPrice || '0'),
+            filled_qty: exFacts.filledQty,
+            avg_price: exFacts.avgPrice,
             reconciled_at: new Date().toISOString(),
           });
           return {
             ok: true, status: 'RECONCILED', clientOrderId,
             exchangeOrderId: String(existing.order?.orderId),
-            filledQty: parseFloat(existing.order?.executedQty || '0'),
+            filledQty: exFacts.filledQty ?? undefined,
             duplicate: true, message: '거래소에 이미 존재하는 주문 — 재전송하지 않음',
           };
         }
@@ -1665,7 +1673,7 @@ export async function reconcilePendingOrders(
   // 그 버튼이 여기를 부르는데 ACKED를 조회하지 않았으니까.
   let q = sb.from('live_orders')
     .select('*')
-    .in('status', ['SENT', 'UNKNOWN', 'ACKED'])
+    .in('status', [...RECONCILE_QUERY_STATUSES])
     .eq('exchange', creds.exchange);
   // **모르면 좁히지 않는다.** 좁히지 않으면 과하게 대조할 뿐이지만,
   // 잘못 좁히면 진짜 미확정 주문을 놓친다.
@@ -1746,6 +1754,7 @@ export async function reconcilePendingOrders(
           ? resolveAcked(args)
           : resolveUnknown(args);
 
+        const reFacts = query.order ? fillFactsOf(query.order) : null;
         if (verdict.resolved) {
           const st = verdict.state === 'FILLED' ? 'FILLED'
             : verdict.state === 'FAILED' ? 'FAILED'
@@ -1754,8 +1763,18 @@ export async function reconcilePendingOrders(
           await updateOrderRow(sb, o.id, {
             status: st,
             exchange_order_id: query.order?.orderId != null ? String(query.order.orderId) : o.exchange_order_id,
-            filled_qty: query.order ? parseFloat(query.order.executedQty || '0') : o.filled_qty,
-            avg_price: query.order ? parseFloat(query.order.avgPrice || '0') : o.avg_price,
+            // ── 여기도 `|| '0'`이었다 ──
+            //
+            //   미체결·취소된 주문의 `avgPrice`는 `'0'`이고, 그것을 가격으로
+            //   적으면 0이 값이 된다. 접수 단계는 이미 고쳤는데 이 자리는
+            //   남아 있었다 — 경로가 둘인데 한쪽만 고친 것이다.
+            //
+            //   상태는 `verdict`가 정본이고, 수량·가격은 거래소 응답이
+            //   정본이다. 둘을 섞지 않는다. 부분 체결 뒤 취소된 주문의
+            //   채워진 수량은 **사실이므로 보존된다**(fillFactsOf가 상태와
+            //   무관하게 executedQty를 읽는다).
+            filled_qty: reFacts ? reFacts.filledQty : o.filled_qty,
+            avg_price: reFacts ? reFacts.avgPrice : o.avg_price,
             error_message: verdict.resolved && st === 'FAILED' ? verdict.reason : o.error_message,
             reconciled_at: new Date().toISOString(),
             resolve_attempts: attempts + 1,
