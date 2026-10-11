@@ -12,6 +12,7 @@ import {
   LADDER, parseMode, capability, canChangeMode, stepOf,
   type OperatingMode, type ModeEvidence,
 } from '@/lib/engine/operatingMode';
+import { PROVEN_FILL_STATUSES, isProvenFill } from '@/lib/engine/holdingEvidence';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -38,18 +39,23 @@ export async function GET(req: NextRequest) {
   };
 
   try {
-    // 이 모드에서 끝까지 간 주문만 표본으로 센다.
+    // 이 모드에서 **체결이 증명된** 주문만 표본으로 센다.
     //
     // **여기는 `HOLDING_EVIDENCE_STATUSES`를 쓰지 않는다.** 그 목록은
     // "보유 가능성"이고 `ACKED`(거래소에 아직 열려 있음)를 포함한다.
     // 승급 근거는 **완주한 거래**이므로 열려 있는 주문을 세면 모드가
     // 끝나지도 않은 거래로 올라간다. 두 질문이 다르므로 목록도 다르다.
+    //
+    // 그리고 예전에는 `['FILLED','RECONCILED']`를 셌다. `RECONCILED`는
+    // **최종 체결 결과를 모르는 상태**다 — 그걸 완주로 세면 체결된 적
+    // 없는 주문이 실전 승급의 근거가 된다. 상태와 수량을 둘 다 보는
+    // `isProvenFill` 하나로 판단한다.
     const { data: done } = await sb.from('live_orders')
-      .select('created_at')
+      .select('created_at, status, filled_qty')
       .eq('user_id', userId).eq('mode', current)
-      .in('status', ['FILLED', 'RECONCILED'])
+      .in('status', [...PROVEN_FILL_STATUSES])
       .order('created_at', { ascending: true }).limit(500);
-    const rows = Array.isArray(done) ? done : [];
+    const rows = (Array.isArray(done) ? done : []).filter(isProvenFill);
     ev.completedTrades = rows.length;
     if (rows.length > 0) {
       // 서로 다른 날짜 수. 하루에 여러 건 넣어 기간을 채울 수 없게 한다.

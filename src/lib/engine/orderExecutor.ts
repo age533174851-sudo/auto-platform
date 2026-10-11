@@ -24,7 +24,9 @@ import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
-import { ledgerStatusOf } from './reconcileLedgerStatus';
+import {
+  ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
+} from './reconcileLedgerStatus';
 
 
 // ── 주문 상태 어휘를 **값으로** 둔다 ──
@@ -597,17 +599,41 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           //   대조 자리는 고쳤는데 이 자리는 남아 있었다 — 같은 파일 안에서
           //   세 번째였다. 정본 하나로 모은다.
           const exFacts = fillFactsOf(existing.order);
+
+          // ── 찾았다고 끝난 것은 아니다 ──
+          //
+          //   여기는 `status: 'RECONCILED'`를 **무조건** 적었다. 거래소가
+          //   `NEW`(아직 열려 있음)나 `PARTIALLY_FILLED`(잔량이 열려
+          //   있음)를 돌려줘도 종료로 적혔고, `RECONCILED`는 대조 대상이
+          //   아니라 **아무도 그 주문을 다시 조회하지 않았다.** 거래소에
+          //   멀쩡히 살아 있는 주문이 장부에서 끝나고, 나중에 체결돼도 그
+          //   체결은 장부에 영원히 들어오지 않는다. 대조 쓰기와 같은
+          //   결함이 이 자리에도 있었다 — 경로가 셋인데 하나만 고쳤던 것.
+          const dup = ledgerStatusOfBinance(exFacts.exchangeStatus, exFacts.filledQty);
           await update({
-            status: 'RECONCILED', exchange_order_id: String(existing.order?.orderId),
+            status: dup.status, exchange_order_id: String(existing.order?.orderId),
             filled_qty: exFacts.filledQty,
             avg_price: exFacts.avgPrice,
-            reconciled_at: new Date().toISOString(),
+            // 끝난 것에만 종료 시각을 적는다.
+            ...(dup.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+            ...(dup.needsAttention
+              ? { needs_attention: true, error_message: dup.attentionReason }
+              : {}),
           });
           return {
-            ok: true, status: 'RECONCILED', clientOrderId,
+            // `ok`는 "이 주문이 살아 있거나 체결됐다"는 뜻이다 — 위 23505
+            // 분기와 같은 규칙을 쓴다. 취소·거절로 끝난 주문을 ok:true로
+            // 돌려주면 호출자가 없는 진입을 기록한다.
+            ok: dup.status === 'ACKED' || dup.status === 'FILLED',
+            status: dup.status, clientOrderId,
             exchangeOrderId: String(existing.order?.orderId),
             filledQty: exFacts.filledQty ?? undefined,
-            duplicate: true, message: '거래소에 이미 존재하는 주문 — 재전송하지 않음',
+            avgPrice: exFacts.avgPrice ?? undefined,
+            duplicate: true,
+            message: '거래소에 이미 존재하는 주문 — 재전송하지 않음'
+              + ` (거래소 상태 ${exFacts.exchangeStatus ?? '불명'}`
+              + `${dup.terminal ? '' : ' · 아직 열려 있음'})`
+              + (dup.needsAttention ? ` · ${dup.attentionReason}` : ''),
           };
         }
       } catch (e: any) {
@@ -1104,9 +1130,37 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     }
     if (lookup.order) {
       const existing = lookup.order;
-      await update({ status: 'RECONCILED', exchange_order_id: String(existing.id), reconciled_at: new Date().toISOString() });
-      return { ok: true, status: 'RECONCILED', clientOrderId, exchangeOrderId: String(existing.id),
-        duplicate: true, message: '거래소에 이미 존재하는 주문' };
+
+      // 바이낸스 멱등 경로와 **같은 규칙**이다. 여기도 찾으면 무조건
+      // `RECONCILED`를 적었다. Gate는 어휘가 달라서(`open`/`finished` +
+      // `finish_as`) 바이낸스 표로는 해석되지 않으므로 Gate 전용 변환을
+      // 쓴다 — 예전 대조 경로가 `status:'NEW'`를 지어낸 자리가 그것이다.
+      const gFill = gp.gateFillOf(existing);
+      const dup = ledgerStatusOfGate({
+        status: existing.status, finishAs: (existing as any).finish_as,
+        filledQty: gFill.filledQty,
+      });
+      await update({
+        status: dup.status, exchange_order_id: String(existing.id),
+        filled_qty: gFill.filledQty,
+        avg_price: gFill.avgPrice,
+        ...(dup.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+        ...(dup.needsAttention
+          ? { needs_attention: true, error_message: dup.attentionReason }
+          : {}),
+      });
+      return {
+        ok: dup.status === 'ACKED' || dup.status === 'FILLED',
+        status: dup.status, clientOrderId, exchangeOrderId: String(existing.id),
+        filledQty: gFill.filledQty ?? undefined,
+        avgPrice: gFill.avgPrice ?? undefined,
+        duplicate: true,
+        message: '거래소에 이미 존재하는 주문'
+          + ` (Gate ${existing.status ?? '불명'}`
+          + `${(existing as any).finish_as ? `/${(existing as any).finish_as}` : ''}`
+          + `${dup.terminal ? '' : ' · 아직 열려 있음'})`
+          + (dup.needsAttention ? ` · ${dup.attentionReason}` : ''),
+      };
     }
 
     // ── 레버리지 + 격리 확인 ──
@@ -1773,7 +1827,13 @@ export async function reconcilePendingOrders(
         //   `RECONCILED`는 대조 대상이 아니라 아무도 다시 조회하지 않는다
         //   — 살아 있는 주문이 장부에서 사라졌다. 부분 체결도 같았다.
         //   판정→장부 변환은 reconcileLedgerStatus 하나에만 둔다.
-        const decision = verdict.resolved ? ledgerStatusOf(verdict.state) : null;
+        //   그리고 상태와 수량을 따로 적던 자리이기도 하다. 거래소가
+        //   `FILLED`를 돌려주면서 수량을 주지 않으면 `status:'FILLED'` +
+        //   `filled_qty: null`이라는 모순이 적혔다 — 체결 증거 없이
+        //   체결을 적는 것이다. 같은 증거 규칙(withFillEvidence)을 쓴다.
+        const decision = verdict.resolved
+          ? withFillEvidence(ledgerStatusOf(verdict.state), reFacts ? reFacts.filledQty : null)
+          : null;
         if (decision && decision.terminal) {
           const st = decision.status;
           await updateOrderRow(sb, o.id, {
@@ -1823,8 +1883,16 @@ export async function reconcilePendingOrders(
             needs_attention: false,
           });
           out.stillOpen++;
+          if (decision.needsAttention) {
+            // 상태와 수량이 모순이다. 열린 주문으로 두되 사람이 보게 한다.
+            await updateOrderRow(sb, o.id, {
+              needs_attention: true, error_message: decision.attentionReason,
+            });
+            out.needsAttention++;
+          }
           out.details.push(
-            `${o.symbol} ${o.client_order_id} → ${verdict.state} · 거래소에 아직 열려 있음 (${verdict.reason})`);
+            `${o.symbol} ${o.client_order_id} → ${verdict.state} · 거래소에 아직 열려 있음`
+            + ` (${decision.needsAttention ? decision.attentionReason : verdict.reason})`);
           // **부분 체결은 포지션이 생긴 것이다.** 주문이 안 끝났다는
           // 이유로 보호를 미루면 보호 없는 포지션이 남는다.
           if (reFacts && reFacts.filledQty != null && reFacts.filledQty > 0) {
@@ -1866,36 +1934,61 @@ export async function reconcilePendingOrders(
           qtyNow: posBySymbol ? (posBySymbol.get(String(o.symbol).toUpperCase()) ?? 0) : null,
         };
 
+        // ── 주문을 찾았으면 Gate 어휘로 판정한다 ──
+        //
+        //   여기는 찾은 주문을 `{ status: 'NEW' }`로 **지어내서**
+        //   `resolveUnknown`에 넘겼다. 바이낸스 상태표에 Gate의
+        //   `open`/`finished`를 넣으면 전부 해석 불가가 되기 때문에 생긴
+        //   우회였는데, 그 우회가 **끝난 주문·체결된 주문·취소된 주문을
+        //   전부 "열려 있음"으로 읽게** 만들었다. 그리고 그 뒤에 장부엔
+        //   종료가 적혔으니 두 거짓이 서로를 가렸다.
+        //
+        //   찾지 못한 경우(유예·미발견·조회 실패)의 판단은 그대로
+        //   `resolveUnknown`이 한다 — 그쪽은 Gate 어휘와 무관하다.
+        const gFill = hit.ok && hit.order ? gp.gateFillOf(hit.order) : null;
+        let gDecision: ReturnType<typeof ledgerStatusOfGate> | null = null;
+        let gReason = '';
+        if (hit.ok && hit.order) {
+          const finishAs = (hit.order as any).finish_as as string | undefined;
+          gDecision = ledgerStatusOfGate({
+            status: hit.order.status, finishAs, filledQty: gFill ? gFill.filledQty : null,
+          });
+          gReason = `Gate 조회로 확정: ${hit.order.status ?? '불명'}`
+            + `${finishAs ? `/${finishAs}` : ''}`
+            + (gDecision.needsAttention ? ` · ${gDecision.attentionReason}` : '');
+        }
         const verdict = resolveUnknown({
           clientOrderId: o.client_order_id || null, elapsedMs,
           // 조회 실패를 '주문 없음'으로 넘기지 않는다 — resolveUnknown이
           // ok:false를 '확인 못 함'으로 다룬다.
           query: hit.ok
-            ? { ok: true, order: hit.order ? { status: 'NEW', orderId: hit.order.id } : null }
+            ? { ok: true, order: null }
             : { ok: false, order: null, error: hit.error },
           position,
         });
-
-        // 바이낸스 쪽과 **같은 정본**으로 변환한다. 여기 있던 식은
-        // `FAILED가 아니면 RECONCILED`였고, Gate에서 주문이 발견되면
-        // 위에서 `status:'NEW'`로 넘기므로 판정은 `ACKED`(열려 있음)인데
-        // 장부에는 종료가 적혔다 — 같은 결함이 두 경로에 있었다.
-        const gDecision = verdict.resolved ? ledgerStatusOf(verdict.state) : null;
+        if (gDecision == null && verdict.resolved) {
+          gDecision = { ...ledgerStatusOf(verdict.state), needsAttention: false, attentionReason: null };
+          gReason = verdict.reason;
+        }
         if (gDecision && gDecision.terminal) {
           await updateOrderRow(sb, o.id, {
             status: gDecision.status,
             exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
-            error_message: verdict.state === 'FAILED' ? verdict.reason : null,
+            // **체결 수량을 여기서 처음 적는다.** 예전에는 Gate 대조가
+            // 수량을 아예 쓰지 않아, 부분 체결된 주문의 채워진 수량이
+            // 장부에 들어오지 않았다.
+            ...(gFill ? { filled_qty: gFill.filledQty, avg_price: gFill.avgPrice } : {}),
+            error_message: gDecision.status === 'FAILED' ? gReason : null,
             reconciled_at: new Date().toISOString(),
             resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
             needs_attention: false,
           });
           out.resolved++;
-          out.details.push(`${o.symbol} ${o.client_order_id} → ${verdict.state} (Gate)`);
+          out.details.push(`${o.symbol} ${o.client_order_id} → ${gDecision.status} (Gate: ${gReason})`);
           // 실패로 확정된 것은 포지션이 없다. 그 외에는 열려 있을 수 있으므로
           // 손절이 비어 있으면 지금 건다 — attachStopIfMissing이 포지션
           // 존재를 다시 확인한다.
-          if (verdict.state !== 'FAILED') {
+          if (gDecision.status !== 'FAILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
             if (rep) out.details.push(`${o.symbol} ${rep}`);
           }
@@ -1904,14 +1997,18 @@ export async function reconcilePendingOrders(
           await updateOrderRow(sb, o.id, {
             status: gDecision.status,
             exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
+            ...(gFill ? { filled_qty: gFill.filledQty, avg_price: gFill.avgPrice } : {}),
             resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
-            needs_attention: false,
+            ...(gDecision.needsAttention
+              ? { needs_attention: true, error_message: gDecision.attentionReason }
+              : { needs_attention: false }),
           });
           out.stillOpen++;
+          if (gDecision.needsAttention) out.needsAttention++;
           out.details.push(
-            `${o.symbol} ${o.client_order_id} → ${verdict.state} · 거래소에 아직 열려 있음 (Gate)`);
-          // Gate 조회는 체결 수량을 여기까지 들고 오지 않는다. 포지션
-          // 존재 확인은 attachStopIfMissing이 직접 한다.
+            `${o.symbol} ${o.client_order_id} → ${gDecision.status} · 거래소에 아직 열려 있음 (Gate: ${gReason})`);
+          // 부분 체결이면 포지션이 생긴 것이다. 포지션 존재 확인은
+          // attachStopIfMissing이 직접 한다.
           const rep = await attachStopIfMissing(sb, creds, o);
           if (rep) out.details.push(`${o.symbol} ${rep}`);
         } else {

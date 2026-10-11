@@ -254,10 +254,7 @@ export function runFuturesExecTests() {
     }
   });
 
-  test('★ 전송 계층 오류 문구가 빠져 있으면 재시도가 열린다', () => {
-    // 이 판정은 **걸리면** 재시도 금지, 안 걸리면 재시도 허용이다.
-    // 즉 빠진 문구는 "거절"로 읽혀 중복 주문의 문이 된다.
-    // 아래는 전송 계층에서만 나오고 거래소 거절 응답에는 없는 문구들이다.
+  test('★ 전송 계층 오류는 재시도를 열지 않는다', () => {
     for (const s of [
       'connect ECONNREFUSED 13.33.1.1:443',
       'getaddrinfo ENOTFOUND fapi.binance.com',
@@ -265,37 +262,125 @@ export function runFuturesExecTests() {
       'Client network socket disconnected before secure TLS connection was established',
       'Premature close', 'terminated',
       'UND_ERR_SOCKET',
+      'The operation was aborted due to timeout', 'TimeoutError', 'AbortError',
+      'fetch failed',
     ]) {
-      assert(unknownResultVerdict(s).unknown, `UNKNOWN으로 안 읽힘: ${s}`);
+      const v = unknownResultVerdict(s);
+      assert(v.unknown, `UNKNOWN으로 안 읽힘: ${s}`);
+      eq(v.evidence, 'TRANSPORT', s);
     }
   });
 
-  test('★ 전송 계층 문구를 넓혀도 거절 판정이 흔들리지 않는다', () => {
-    // 추가는 "재시도 허용 → 금지" 한 방향으로만 움직여야 한다.
-    // 거래소 거절은 `[code] msg` 또는 `HTTP nnn` 모양이고 위 문구와 겹치지 않는다.
+  // ── 기본 방향이 뒤집혔다 ──
+  //
+  //   예전에는 전송 계층 문구에 **걸리면** UNKNOWN이고 안 걸리면
+  //   거절이었다. 즉 **처음 보는 문구가 거절로 읽혀 재시도가 열렸다** —
+  //   거래소에 이미 나갔는데 다시 보내면 중복 체결이다. 목록을 늘려도
+  //   그 방향은 남는다(목록에 없는 문구는 언제나 생긴다).
+  //
+  //   지금은 **거절로 읽으려면 거절한 모양이 보여야 한다.**
+  test('★ 처음 보는 문구는 재시도를 열지 않는다', () => {
+    for (const s of [
+      'something went terribly wrong',
+      'Gate INVALID_PARAM: contract not found',   // 우리 코드가 만들지 않는 모양
+      'order service unavailable',
+      'unexpected end of JSON input',             // 200 뒤 파싱 실패 — 이미 접수됐다
+      '???',
+    ]) {
+      const v = unknownResultVerdict(s);
+      assert(v.unknown, `처음 보는 문구가 거절로 읽혔다: ${s}`);
+      eq(v.evidence, 'UNRECOGNIZED', s);
+    }
+  });
+
+  test('★ 거래소가 거절한 모양만 재시도를 연다', () => {
+    // 이 저장소가 실제로 만드는 거절 문구다.
+    //   바이낸스 binanceFutures.ts:56 → `[-2019] msg` 또는 `HTTP 400`
+    //   Gate      gateFutures.ts:58   → `Gate 400: msg`
     for (const s of [
       '[-2019] Margin is insufficient', '[-1121] Invalid symbol',
+      '[-1111] Precision is over the maximum',
       '[-4164] Order\'s notional must be no smaller than 5',
-      'HTTP 400', 'HTTP 418',
-      'Gate 400: invalid argument', 'Gate INVALID_PARAM: contract not found',
-      '최소 수량 미달', '최소 주문금액 미달',
+      '[-1003] Too many requests',
+      'HTTP 400', 'HTTP 401', 'HTTP 403', 'HTTP 418',
+      'Gate 400: invalid argument', 'Gate 400: BALANCE_NOT_ENOUGH',
+      'Gate 401: INVALID_SIGNATURE',
     ]) {
-      eq(unknownResultVerdict(s).unknown, false, `거절인데 UNKNOWN으로 읽힘: ${s}`);
+      const v = unknownResultVerdict(s);
+      eq(v.unknown, false, `거절인데 UNKNOWN으로 읽힘: ${s}`);
+      eq(v.evidence, 'REJECTION_SHAPE', s);
     }
   });
 
-  test('거래소가 명시적으로 거절한 것은 UNKNOWN이 아니다', () => {
+  test('★ 거래소가 스스로 "결과 모름"이라고 답한 코드는 거절이 아니다', () => {
+    // 모양은 거절과 같다(`[code] msg`). 공식 문구가 "status unknown"이다.
     for (const s of [
-      '[-2019] Margin is insufficient', '[-1111] Precision is over the maximum',
-      'Gate 400: invalid argument', '최소 수량 미달',
+      '[-1007] Timeout waiting for response from backend server. Send status unknown; execution status unknown.',
+      '[-1006] An unexpected response was received from the message bus. Execution status unknown.',
+      '[-1001] Internal error; unable to process your request.',
+      '[-1008] Server is currently overloaded with other requests.',
+      '[-1016] This service is no longer available.',
     ]) {
-      eq(unknownResultVerdict(s).unknown, false, `거절인데 UNKNOWN으로 읽힘: ${s}`);
+      const v = unknownResultVerdict(s);
+      assert(v.unknown, `결과 모름인데 거절로 읽힘: ${s}`);
+      assert(v.evidence === 'AMBIGUOUS_CODE' || v.evidence === 'TRANSPORT', `${s} → ${v.evidence}`);
     }
   });
 
-  test('빈 문구는 UNKNOWN이 아니다', () => {
-    eq(unknownResultVerdict('').unknown, false);
-    eq(unknownResultVerdict(null).unknown, false);
+  test('★ 처리된 뒤 응답만 잃었을 수 있는 상태는 거절이 아니다', () => {
+    // 5xx는 게이트웨이가 **접수 뒤에** 죽을 수 있다. 408·429도 같다.
+    for (const s of [
+      'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504',
+      'HTTP 408', 'HTTP 429',
+      'Gate 500: INTERNAL', 'Gate 502: bad gateway', 'Gate 429: TOO_MANY_REQUESTS',
+    ]) {
+      const v = unknownResultVerdict(s);
+      assert(v.unknown, `5xx·레이트리밋이 거절로 읽혔다: ${s}`);
+      eq(v.evidence, 'AMBIGUOUS_STATUS', s);
+    }
+  });
+
+  test('★ 보내기 전에 우리가 막은 것은 재시도를 연다', () => {
+    // 거래소에 닿은 적이 없다. 이걸 UNKNOWN으로 묶으면 나간 적도 없는
+    // 주문이 장부에 미확정으로 쌓이고, 그 미확정이 다음 진입을 막는다.
+    for (const s of [
+      'LIMIT은 가격 필요',
+      '최소 수량 미달', '최소 주문금액 미달',
+      'Gate 계약 이름을 만들 수 없습니다 (XRPUSDT)',
+      'Gate 계약 수를 계산하지 못했습니다',
+      '수량을 거래소 규격에 맞추지 못했습니다',
+      'clientOrderId가 없어 대조할 수 없습니다',
+    ]) {
+      const v = unknownResultVerdict(s);
+      eq(v.unknown, false, `전송 전 거부가 UNKNOWN으로 읽힘: ${s}`);
+      eq(v.evidence, 'NOT_SENT', s);
+    }
+  });
+
+  test('★ 빈 문구는 모름이다 — 아무것도 모르면서 재시도를 열지 않는다', () => {
+    for (const s of ['', null, undefined, '   ']) {
+      const v = unknownResultVerdict(s as any);
+      assert(v.unknown, `빈 문구가 거절로 읽혔다: ${JSON.stringify(s)}`);
+      eq(v.evidence, 'EMPTY');
+    }
+  });
+
+  test('★ 재시도를 여는 근거는 둘뿐이다', () => {
+    // 근거 이름이 늘어나도 "열리는" 쪽은 명시된 둘이어야 한다.
+    const samples = [
+      '[-2019] Margin is insufficient', 'HTTP 400', 'Gate 400: x',
+      'LIMIT은 가격 필요', 'ECONNRESET', 'HTTP 503', '[-1007] execution status unknown',
+      'who knows', '',
+    ];
+    for (const s of samples) {
+      const v = unknownResultVerdict(s);
+      if (!v.unknown) {
+        assert(v.evidence === 'REJECTION_SHAPE' || v.evidence === 'NOT_SENT',
+          `재시도를 여는데 근거가 ${v.evidence}다: ${s}`);
+      } else {
+        assert(v.reason.length > 0, `UNKNOWN인데 사유가 비었다: ${s}`);
+      }
+    }
   });
 
   console.log('[실행기 — UNKNOWN 뒤 대조]');

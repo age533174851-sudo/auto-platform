@@ -33,3 +33,38 @@
 export const HOLDING_EVIDENCE_STATUSES = ['FILLED', 'RECONCILED', 'ACKED'] as const;
 
 export type HoldingEvidenceStatus = typeof HOLDING_EVIDENCE_STATUSES[number];
+
+// ──────────────────────────────────────────────────────────────────
+// 완주한 거래로 셀 수 있는 것
+// ──────────────────────────────────────────────────────────────────
+//
+// 모드 승급은 "이 모드에서 끝까지 간 주문" 개수를 근거로 쓴다. 그 질의가
+// `['FILLED','RECONCILED']`였다. 그런데 `RECONCILED`는 **최종 체결 결과를
+// 모르는 상태**다 — "끝났고, 체결인지 취소인지는 거래 내역에서 확인해야
+// 한다". 그걸 완주한 거래로 세면, 체결된 적 없는 주문이 실전 승급의
+// 근거가 된다. 승급은 실제 돈이 걸리는 결정이라 **증명된 것만** 센다.
+//
+// 그리고 상태만으로는 부족하다. `status`와 `filled_qty`는 서로 다른 자리에
+// 적히고, 증거 규칙이 없던 동안 `FILLED` + `filled_qty: null`이 함께 적힐
+// 수 있었다. 그래서 상태와 수량을 **둘 다** 본다.
+
+/** 체결이 증명된 장부 상태. `RECONCILED`는 들어오지 않는다 */
+export const PROVEN_FILL_STATUSES = ['FILLED'] as const;
+
+export interface ProvenFillRow {
+  status?: unknown;
+  filled_qty?: unknown;
+}
+
+/**
+ * 이 줄이 **실제 체결을 증명하는가.**
+ *
+ * 성과·승률·완주 거래 수·모드 승급 근거는 이 함수를 통과한 줄만 쓴다.
+ */
+export function isProvenFill(row: ProvenFillRow | null | undefined): boolean {
+  const r = row ?? {};
+  const status = String(r.status ?? '').trim().toUpperCase();
+  if (!(PROVEN_FILL_STATUSES as readonly string[]).includes(status)) return false;
+  const qty = Number(r.filled_qty);
+  return Number.isFinite(qty) && qty > 0;
+}

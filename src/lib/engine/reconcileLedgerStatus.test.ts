@@ -1,10 +1,14 @@
 // src/lib/engine/reconcileLedgerStatus.test.ts
 import { test, eq, assert } from '../../test/harness';
-import { ledgerStatusOf } from './reconcileLedgerStatus';
+import {
+  ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
+} from './reconcileLedgerStatus';
 import { fromExchangeStatus } from './orderLifecycle';
 import { RECONCILE_TARGET_STATUSES } from './pendingReconcile';
 import { UNRESOLVED_ENTRY_STATUSES, ACCEPTED_ENTRY_STATUSES } from './maxOpenPositionsGate';
-import { HOLDING_EVIDENCE_STATUSES } from './holdingEvidence';
+import {
+  HOLDING_EVIDENCE_STATUSES, PROVEN_FILL_STATUSES, isProvenFill,
+} from './holdingEvidence';
 
 export function runReconcileLedgerStatusTests() {
   // ── 이 파일이 막는 결함 ──
@@ -127,6 +131,179 @@ export function runHoldingEvidenceTests() {
       if (d.terminal) continue;
       assert(set.has(d.status),
         `${st} → ${d.status}가 보유 목록에 없다 — 열린 포지션이 보이지 않는다`);
+    }
+  });
+}
+
+export function runFoundOrderLedgerTests() {
+  // ── 이 파일이 막는 결함 ──
+  //
+  //   멱등 중복 감지는 거래소에서 같은 키의 주문을 **찾은** 자리다.
+  //   찾으면 무조건 `RECONCILED`(끝남)를 적었다. 열려 있는 주문도,
+  //   부분 체결 중인 주문도 종료로 적혔다. 그리고 상태가 FILLED이면
+  //   수량 증거가 없어도 FILLED를 적었다.
+
+  test('★ 찾은 주문이 NEW면 열려 있다고 적는다', () => {
+    const d = ledgerStatusOfBinance('NEW', 0);
+    eq(d.status, 'ACKED');
+    eq(d.terminal, false);
+    eq(d.needsAttention, false);
+  });
+
+  test('★ 부분 체결은 수량을 보존하며 열린 상태로 남는다', () => {
+    const d = ledgerStatusOfBinance('PARTIALLY_FILLED', 0.004);
+    eq(d.status, 'ACKED');
+    eq(d.terminal, false);
+    assert(d.status !== 'RECONCILED' && d.status !== 'FILLED');
+  });
+
+  test('★ 체결 증거가 없는 FILLED를 FILLED로 적지 않는다', () => {
+    for (const q of [null, undefined, 0]) {
+      const d = ledgerStatusOfBinance('FILLED', q as any);
+      eq(d.status, 'ACKED', `수량 ${String(q)}에서 ${d.status}가 적혔다`);
+      eq(d.terminal, false);
+      eq(d.needsAttention, true);   // 모순이므로 사람이 봐야 한다
+      assert(d.attentionReason != null);
+    }
+    // 증거가 있으면 FILLED다.
+    const ok = ledgerStatusOfBinance('FILLED', 0.068);
+    eq(ok.status, 'FILLED');
+    eq(ok.terminal, true);
+    eq(ok.needsAttention, false);
+  });
+
+  test('★ 취소·만료·거절은 구분해서 적고 수량 판단을 상태로 덮지 않는다', () => {
+    eq(ledgerStatusOfBinance('CANCELED', 0.004).status, 'RECONCILED');
+    eq(ledgerStatusOfBinance('CANCELED', 0.004).terminal, true);
+    eq(ledgerStatusOfBinance('EXPIRED', 0).status, 'RECONCILED');
+    eq(ledgerStatusOfBinance('REJECTED', 0).status, 'REJECTED');
+    eq(ledgerStatusOfBinance('REJECTED', 0).terminal, true);
+  });
+
+  test('★ 찾았는데 상태를 해석하지 못하면 UNKNOWN이 아니라 ACKED다', () => {
+    // 찾았다는 사실 자체가 "거래소가 갖고 있다"는 증거다. UNKNOWN은
+    // "닿았는지도 모른다"는 뜻이라 거짓이 된다.
+    for (const bad of ['', null, undefined, 'WHAT_IS_THIS']) {
+      const d = ledgerStatusOfBinance(bad as any, 0);
+      eq(d.status, 'ACKED');
+      eq(d.terminal, false);
+      eq(d.needsAttention, true);
+      assert(d.attentionReason != null && d.attentionReason.length > 0);
+    }
+  });
+
+  test('★ Gate 어휘를 바이낸스 어휘로 넣지 않는다', () => {
+    // Gate의 status는 open/finished뿐이다. 바이낸스 표에 넣으면 전부
+    // 해석 불가가 되고, 그래서 예전 경로는 'NEW'를 지어냈다.
+    eq(fromExchangeStatus('open'), null);
+    eq(fromExchangeStatus('finished'), null);
+
+    eq(ledgerStatusOfGate({ status: 'open' }).status, 'ACKED');
+    eq(ledgerStatusOfGate({ status: 'open' }).terminal, false);
+
+    const filled = ledgerStatusOfGate({ status: 'finished', finishAs: 'filled', filledQty: 3 });
+    eq(filled.status, 'FILLED');
+    eq(filled.terminal, true);
+
+    // 체결로 끝났다는데 수량 증거가 없다 — 적지 않는다.
+    const noEvidence = ledgerStatusOfGate({ status: 'finished', finishAs: 'filled', filledQty: 0 });
+    eq(noEvidence.status, 'ACKED');
+    eq(noEvidence.needsAttention, true);
+
+    // ioc로 한 계약도 못 붙고 끝났다: 끝난 것은 사실, 체결 0도 사실.
+    // FAILED로 적으면 재시도가 열려 중복 체결의 문이 된다.
+    const ioc = ledgerStatusOfGate({ status: 'finished', finishAs: 'ioc', filledQty: 0 });
+    eq(ioc.status, 'RECONCILED');
+    eq(ioc.terminal, true);
+    assert(ioc.status !== 'FAILED', 'FAILED는 재시도가 열리는 상태다');
+
+    eq(ledgerStatusOfGate({ status: 'finished', finishAs: 'cancelled', filledQty: 2 }).status, 'RECONCILED');
+    // finish_as를 못 읽어도 끝난 것은 끝난 것이다 — RECONCILED의 뜻 그대로.
+    eq(ledgerStatusOfGate({ status: 'finished' }).status, 'RECONCILED');
+
+    const weird = ledgerStatusOfGate({ status: 'whatever' });
+    eq(weird.status, 'ACKED');
+    eq(weird.needsAttention, true);
+  });
+
+  test('★ 대조 경로도 같은 증거 규칙을 쓴다', () => {
+    // 대조 쓰기는 상태를 verdict에서, 수량을 거래소 응답에서 받아 둘을
+    // 따로 적었다. 그래서 `status: 'FILLED'` + `filled_qty: null`이라는
+    // 모순이 가능했다 — 체결 증거 없이 FILLED를 적는 것이다.
+    const g = withFillEvidence(ledgerStatusOf('FILLED'), null);
+    eq(g.status, 'ACKED');
+    eq(g.terminal, false);
+    eq(g.needsAttention, true);
+
+    // 체결이 아닌 판정은 수량과 무관하게 그대로 둔다.
+    for (const st of ['RECONCILED', 'FAILED', 'REJECTED']) {
+      const d = withFillEvidence(ledgerStatusOf(st), null);
+      eq(d.terminal, true, `${st}가 비종료로 바뀌었다`);
+      eq(d.needsAttention, false);
+    }
+    // 주문 미발견 + 유예 경과는 수량이 없어도 RECONCILED다.
+    eq(withFillEvidence(ledgerStatusOf('RECONCILED'), null).status, 'RECONCILED');
+  });
+
+  test('★ 비종료로 적힌 것은 전부 다시 조회되고 용량 관문이 센다', () => {
+    const targets = new Set<string>(RECONCILE_TARGET_STATUSES as readonly string[]);
+    const counted = new Set<string>([
+      ...(UNRESOLVED_ENTRY_STATUSES as readonly string[]),
+      ...(ACCEPTED_ENTRY_STATUSES as readonly string[]),
+    ]);
+    const all = [
+      ledgerStatusOfBinance('NEW', 0),
+      ledgerStatusOfBinance('PARTIALLY_FILLED', 1),
+      ledgerStatusOfBinance('FILLED', null),
+      ledgerStatusOfBinance('???', 0),
+      ledgerStatusOfGate({ status: 'open' }),
+      ledgerStatusOfGate({ status: 'finished', finishAs: 'filled', filledQty: null }),
+      ledgerStatusOfGate({ status: 'nope' }),
+    ];
+    for (const d of all) {
+      if (d.terminal) continue;
+      assert(targets.has(d.status), `${d.status}는 종료가 아닌데 대조 대상이 아니다 — 방치된다`);
+      assert(counted.has(d.status), `${d.status}는 용량 관문이 세지 않는다 — 중복 진입이 열린다`);
+    }
+  });
+}
+
+export function runProvenFillTests() {
+  // ── 이 파일이 막는 결함 ──
+  //
+  //   모드 승급의 "완주한 거래 수"가 `['FILLED','RECONCILED']`를 셌다.
+  //   `RECONCILED`는 최종 체결 결과를 **모르는** 상태다. 체결된 적 없는
+  //   주문이 실전 승급의 근거가 됐다.
+
+  test('★ 체결이 증명된 줄만 완주로 센다', () => {
+    assert(isProvenFill({ status: 'FILLED', filled_qty: 0.068 }));
+    assert(isProvenFill({ status: 'filled', filled_qty: '0.004' }), '대소문자·문자열도 같게 읽는다');
+  });
+
+  test('★ RECONCILED는 완주가 아니다', () => {
+    // 최종 체결 결과를 모르는 상태다. 수량이 적혀 있어도 센다고 할 수 없다.
+    assert(!isProvenFill({ status: 'RECONCILED', filled_qty: 0.068 }));
+    assert(!(PROVEN_FILL_STATUSES as readonly string[]).includes('RECONCILED'));
+  });
+
+  test('★ 열려 있거나 닿았는지도 모르는 줄은 완주가 아니다', () => {
+    for (const st of ['ACKED', 'SENT', 'INTENT', 'UNKNOWN', 'REJECTED', 'FAILED']) {
+      assert(!isProvenFill({ status: st, filled_qty: 1 }), `${st}를 완주로 셌다`);
+    }
+  });
+
+  test('★ 상태가 FILLED여도 수량 증거가 없으면 완주가 아니다', () => {
+    // 증거 규칙이 없던 동안 status FILLED + filled_qty null이 함께 적힐
+    // 수 있었다. 상태만 보면 그 줄이 성과가 된다.
+    for (const q of [null, undefined, 0, '0', '', 'abc', -1]) {
+      assert(!isProvenFill({ status: 'FILLED', filled_qty: q as any }),
+        `수량 ${String(q)}를 체결 증거로 받았다`);
+    }
+  });
+
+  test('★ 빈 줄을 완주로 세지 않는다', () => {
+    for (const r of [null, undefined, {}, { status: '' }]) {
+      assert(!isProvenFill(r as any));
     }
   });
 }
