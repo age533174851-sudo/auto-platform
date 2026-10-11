@@ -931,3 +931,194 @@ export async function runCoinMRouteIntegrationTests() {
     });
   }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Gate 선물 **전송** 경로 — 실제 `executeOrder(exchange:'gate')`
+// ══════════════════════════════════════════════════════════════════
+//
+// 변이 I-2(Gate 전송 실패를 무조건 REJECTED로)가 **탈출했다.** Gate
+// 커버리지가 대조 경로에만 있었고 전송 경로에는 없었기 때문이다.
+// 거절과 타임아웃은 서로 반대 방향으로 틀릴 수 있으므로 둘 다 본다.
+
+function gateBaseVenue(): FakeVenue {
+  return new FakeVenue()
+    .on('/api/v4/futures/usdt/contracts/BTC_USDT', { json: {
+      name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1,
+      order_size_max: 1000000, order_price_round: '0.1', mark_price: '95000',
+    } })
+    .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: {
+      contract: 'BTC_USDT', size: 0, leverage: '100', liq_price: '0', entry_price: '0',
+    } })
+    .on('/api/v4/futures/usdt/positions', { json: [] })
+    .on('/api/v4/futures/usdt/accounts', { json: { total: '1000', available: '1000' } })
+    .on('/api/v4/futures/usdt/orders', { json: [] }, 'GET');
+}
+
+/**
+ * Gate 시나리오는 **고정 손절을 주고** 돌린다.
+ *
+ * Gate 진입 경로의 손절 관문(`orderExecutor.ts:1154`)은 `stopPolicy`를
+ * 보지 않는다 — 바이낸스 쪽은 `noFixedSl`을 보고 `protectionPolicy`를
+ * `NONE`으로 덮는데 Gate 쪽에는 그 분기가 없다(**D22**). 그래서
+ * `NO_FIXED_SL`로는 Gate 진입이 통째로 막힌다.
+ *
+ * 막히는 방향이라 돈이 새지는 않지만 경로가 갈린 것은 사실이다. **이
+ * PR에서 고치지 않는다**: 고치면 Gate에서 고정 손절 없는 포지션이 열리게
+ * 되고, Gate의 전용 종료 권한 도달 가능성은 아직 별도 감사 대상이다
+ * (`venuePositionOps.ts`의 주석). 종료가 보장되지 않은 거래소에서 보호
+ * 없는 포지션을 열 수 있게 만드는 것이 더 위험하다.
+ *
+ * 여기서 검증하는 것은 **전송 결과 분류**이므로 손절을 주고 돌린다.
+ */
+const GATE_ARGS = { exchange: 'gate' as const, stopPolicy: 'FIXED_SL' as const,
+  takeProfitPolicy: 'NO_FIXED_TP' as const, protectionPolicy: 'NONE' as const,
+  // 청산가(90000)보다 위여야 한다 — 손절이 청산 너머면 영원히 안 걸린다.
+  stopLoss: 92000 };
+
+export async function runGateExecIntegrationTests() {
+  console.log('[통합 — Gate 선물 전송 경로 (실제 executeOrder)]');
+
+  // ══════════ ① Gate 정상 거절 — REJECTED로 적는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      // 거래소가 **명시적으로 거절**했다. 모양이 `Gate 400: <label>`이다.
+      .on('/api/v4/futures/usdt/orders',
+        { status: 400, json: { label: 'BALANCE_NOT_ENOUGH', message: 'not enough balance' } }, 'POST');
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-1' }));
+
+    test('★ Gate 정상 거절은 REJECTED로 적는다 (미확정으로 쌓지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다 — 실행기가 안 돌았다');
+      eq(row.status, 'REJECTED',
+        `명시적 거절인데 ${row.status}다 — UNKNOWN으로 묶으면 미확정이 쌓여 진입이 막힌다`);
+      eq((r as any).status, row.status, '반환과 장부가 다르다');
+    });
+  }
+
+  // ══════════ ② Gate 전송 타임아웃 — UNKNOWN으로 적는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      .on('/api/v4/futures/usdt/orders', { timeout: true }, 'POST');
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-2' }));
+
+    test('★ Gate 전송 타임아웃을 거절로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      eq(row.status, 'UNKNOWN',
+        `타임아웃인데 ${row.status}다 — REJECTED는 대조 대상이 아니고 진입 잠금을 푼다`);
+      assert(row.status !== 'REJECTED');
+      eq((r as any).status, 'UNKNOWN');
+      // 주문은 한 번만 나갔다.
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 1);
+    });
+  }
+
+  // ══════════ ③ Gate 5xx — 접수 뒤 응답만 잃었을 수 있다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      .on('/api/v4/futures/usdt/orders',
+        { status: 502, json: { label: 'INTERNAL', message: 'bad gateway' } }, 'POST');
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-3' }));
+
+    test('★ Gate 5xx를 거절로 단정하지 않는다 (게이트웨이는 접수 뒤에도 죽는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'UNKNOWN', `5xx인데 ${row.status}로 확정됐다`);
+    });
+  }
+}
+
+export async function runGateDupIntegrationTests() {
+  console.log('[통합 — Gate 멱등 중복 · Gate 현물 중복]');
+
+  // ══════════ ④ Gate 선물 멱등 중복 — 전이가 적용되는가 ══════════
+  //
+  //   변이 I-4(SENT 선행 전이 제거)가 **탈출했다.** Gate 멱등 경로에
+  //   시나리오가 없었다. `INTENT → ACKED`는 상태 기계가 거부하므로,
+  //   SENT을 먼저 적지 않으면 그 쓰기가 조용히 버려진다.
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } });
+    // 중복 확인(GET)에서 **발견**된다: 아직 열려 있는 주문
+    (venue as any).rules.unshift({
+      label: 'gate-dup-found',
+      match: (c: any) => c.method === 'GET' && c.path.includes('/api/v4/futures/usdt/orders'),
+      reply: { json: [{ id: 9100, contract: 'BTC_USDT', size: 1, price: '0',
+        status: 'open', text: 't-GCOID-9', left: 1 }] },
+    });
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-9' }));
+
+    test('★ Gate 멱등 중복에서 전이가 실제로 적용된다 (장부 = 반환)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      eq((r as any).duplicate, true, '중복으로 판정하지 않았다');
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 0,
+        '이미 있는 주문을 다시 보냈다');
+      eq((r as any).status, row.status,
+        `반환(${(r as any).status})과 장부(${row.status})가 다르다`);
+      assert(row.status !== 'INTENT',
+        '상태 쓰기가 상태 기계에 버려졌다 — SENT 선행 전이가 없다');
+      eq(row.status, 'ACKED');
+      const statuses = db.writes.filter((w) => w.patch.status).map((w) => w.patch.status);
+      assert(statuses.includes('SENT'), `전이 경로가 SENT을 거치지 않았다: ${statuses.join(' → ')}`);
+    });
+  }
+
+  // ══════════ ⑤ Gate 현물 중복 발견 — 장부와 반환이 같은 답 ══════════
+  //
+  //   변이 I-5(D21 복원)가 **탈출했다.** 픽스처를 404로 바꾸면서 중복
+  //   분기 자체가 커버되지 않았다 — D21이 살던 자리다.
+  {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'c1', user_id: 'u1', exchange_id: 'gate',
+      api_key: 'K'.repeat(64), api_secret_enc: encryptSecret('S'.repeat(64)),
+      has_withdrawal: false, is_testnet: true,
+    }]);
+    unenv();
+    const venue = new FakeVenue()
+      .on('/api/v4/spot/currency_pairs/BTC_USDT', { json: {
+        id: 'BTC_USDT', trade_status: 'tradable',
+        amount_precision: 5, precision: 2, min_base_amount: '0.0001', min_quote_amount: '1',
+      } })
+      .on('/api/v4/spot/accounts', { json: [
+        { currency: 'USDT', available: '10000', locked: '0' },
+        { currency: 'BTC', available: '1', locked: '0' },
+      ] })
+      // 단건 조회에서 **발견**된다: 아직 열려 있는 주문
+      .on('/api/v4/spot/orders/', { json: {
+        id: '7100', currency_pair: 'BTC_USDT', status: 'open',
+        amount: '0.003', left: '0.003', filled_total: '0', avg_deal_price: '0',
+      } }, 'GET')
+      .on('/api/v4/spot/orders', { json: {} }, 'POST');
+
+    const r = await scenario(venue, () => placeSpotOrder(db as any, {
+      userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'LIMIT', quantity: 0.003, price: 90000,
+    }));
+
+    test('★ Gate 현물 중복 발견에서 장부와 반환이 같은 답을 적는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const rows = db.table('live_orders');
+      assert(rows.length > 0, '장부 줄이 없다');
+      const row = rows[rows.length - 1];
+      eq((r as any).code, 'duplicate', '중복으로 판정하지 않았다');
+      eq((r as any).status, row.status,
+        `장부(${row.status})와 반환(${(r as any).status})이 다르다`);
+      // 열려 있는 주문을 종료로도 거부로도 적지 않는다.
+      eq(row.status, 'ACKED');
+      assert(row.status !== 'RECONCILED' && row.status !== 'REJECTED');
+      eq(venue.countOf('/api/v4/spot/orders', 'POST'), 0, '중복인데 주문을 보냈다');
+    });
+  }
+}

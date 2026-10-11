@@ -154,6 +154,7 @@ import { runCredentialExposureTests } from './src/lib/security/credentialExposur
 import {
   runOrderPathIntegrationTests, runReconcileIntegrationTests, runSpotIntegrationTests,
   runCloseIntegrationTests, runTransitionIntegrationTests, runCoinMRouteIntegrationTests,
+  runGateExecIntegrationTests, runGateDupIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
@@ -401,6 +402,8 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runCloseIntegrationTests();
   await runTransitionIntegrationTests();
   await runCoinMRouteIntegrationTests();
+  await runGateExecIntegrationTests();
+  await runGateDupIntegrationTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
