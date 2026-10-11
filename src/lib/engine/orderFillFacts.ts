@@ -45,8 +45,20 @@ export interface FillFacts {
   partial: boolean;
 }
 
-const numOrNull = (v: unknown, opts: { positive?: boolean } = {}): number | null => {
+/**
+ * 응답의 숫자 칸을 **사실로만** 읽는다. 모르면 null이다.
+ *
+ * **내보내는 이유**: 같은 판단을 거래소 어댑터마다 다시 쓰다가 또
+ * 틀렸다. `Number(null)`은 `0`이고 `Number('')`도 `0`이다 — 그래서
+ * "수량을 못 읽었다"가 "체결 0"이라는 **사실**로 장부에 적혔다.
+ * 이 함수 하나만 쓰면 그 함정이 한 번만 존재한다.
+ */
+export const numOrNull = (v: unknown, opts: { positive?: boolean } = {}): number | null => {
   if (v == null || v === '') return null;
+  // **`Number`로 바꾸지 말 것.** `Number('')`과 `Number('  ')`은 `0`이고,
+  // `parseFloat`는 둘 다 NaN이다. 하중을 받는 것은 이 선택이다 — 위
+  // `v === ''` 가드는 그 뒤에 겹쳐 둔 것일 뿐이라 지워도 동작이 같다
+  // (변이 검증에서 동치로 확인됐다). 바꾸면 "못 읽었다"가 "체결 0"이 된다.
   const n = typeof v === 'number' ? v : parseFloat(String(v));
   if (!Number.isFinite(n)) return null;
   if (opts.positive) return n > 0 ? n : null;

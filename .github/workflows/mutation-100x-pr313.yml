@@ -1,10 +1,31 @@
-# PR #313에 한정된 Exact100X 변이 전체 병렬 실측.
-# 머지 전 DRAFT 검증용이며 시크릿/거래소/운영 DB 접근 없음.
-# 기존 수동 전수 워크플로와 서로 독립적이다.
+# Exact100X 변이 전체 병렬 실측 (PR 검증용).
+# 시크릿·거래소·운영 DB 접근 없음. 기존 수동 전수 워크플로와 독립적이다.
+#
+# ── PR 번호를 박으면 썩는다 ──
+#
+#   처음에는 `if: github.event.pull_request.number == 313`이었다. 그래서
+#   #313이 머지된 뒤 올린 **#315에서는 전부 skipped**였고, 그 PR은 전수
+#   457건 없이 초록으로 보였다. 안전망이 "실패"한 게 아니라 **돌지 않았다** —
+#   그리고 skipped는 초록처럼 보인다.
+#
+#   그래서 번호가 아니라 **무엇이 바뀌었는가**로 건다. 하네스가 변이시키는
+#   파일이 바뀌면 돈다. 넓게 잡는 쪽이 안전한 방향이다.
+#
+#   파일 이름(`-pr313`)은 그대로 둔다. `name:`을 바꾸면 체크 이름이 바뀌어
+#   필수 상태 검사 설정과 어긋날 수 있고, 그 설정을 여기서 확인할 수 없다.
+#   이름이 사실과 다른 것은 기술 부채로 남긴다.
 name: mutation-100x-pr313
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths:
+      - 'src/**'
+      - 'worker/src/**'
+      - 'scripts/check-100x-*.mjs'
+      - 'scripts/*mutations.mjs'
+      - 'scripts/run-tests.mjs'
+      - 'supabase/migrations/**'
+      - '.github/workflows/mutation-100x-pr313.yml'
 permissions:
   contents: read
   actions: read
@@ -13,7 +34,6 @@ concurrency:
   cancel-in-progress: true
 jobs:
   shard:
-    if: github.event.pull_request.number == 313
     name: 100X 전수 변이 shard ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
     timeout-minutes: 330
@@ -79,7 +99,7 @@ jobs:
   aggregate:
     name: 100X 전수 합산 · 누락 0 증명
     needs: [shard]
-    if: always() && github.event.pull_request.number == 313
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

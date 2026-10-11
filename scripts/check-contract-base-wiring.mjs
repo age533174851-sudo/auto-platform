@@ -77,6 +77,46 @@ for (const name of readdirSync(DIR).filter(f => f.endsWith('.yml') || f.endsWith
   wired += 1;
 }
 
+// ── 전수 변이 워크플로가 **특정 PR에만** 걸려 있지 않은가 ──
+//
+//   처음에는 `if: github.event.pull_request.number == 313`이었다. 그래서
+//   #313이 머지된 뒤 올린 #315에서는 8샤드가 전부 **skipped**였고, 그 PR은
+//   전수 457건 없이 초록으로 보였다. 안전망이 실패한 게 아니라 **돌지
+//   않았다** — skipped는 초록처럼 보인다.
+//
+//   번호를 박으면 다음 PR마다 같은 일이 난다. 그래서 그 모양 자체를 막는다.
+/** 주석은 규율이 아니다 — 옛 코드를 설명한 주석을 규율로 읽으면 오탐이 난다 */
+const yamlCode = (src) => src.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+
+for (const name of readdirSync(DIR).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))) {
+  const raw = readFileSync(join(DIR, name), 'utf8');
+  const src = yamlCode(raw);
+  if (!src.includes('check-100x-mutations.mjs')) continue;
+  if (!/^\s{2}pull_request:/m.test(src)) continue;
+
+  // ── `--self-test`만 돌리는 것은 전수가 아니다 ──
+  //
+  //   ci.yml은 하네스를 `--self-test`로만 부른다(겨냥 가능 여부 확인).
+  //   그것을 전수 워크플로로 보면 경로 필터를 요구해 오탐이 난다.
+  //   전수는 하네스를 `--self-test` 없이 부르는 줄이 있는 쪽이다.
+  const sweepLines = src.split('\n')
+    .filter(l => l.includes('check-100x-mutations.mjs') && !l.includes('--self-test'));
+  if (sweepLines.length === 0) continue;
+
+  if (/pull_request\.number\s*==\s*\d+/.test(src)) {
+    err(`${name}: 전수 변이를 특정 PR 번호에만 걸었습니다`
+      + ' — 그 PR이 머지되면 다음 PR에서는 전부 skipped가 되고, skipped는 초록처럼 보입니다');
+  }
+  // 경로 필터가 없으면 모든 PR에서 2시간 넘게 돌거나(비용),
+  // 있는데 핵심 경로가 빠지면 조용히 안 돈다. 최소한 src는 있어야 한다.
+  if (!/^\s+paths:/m.test(src)) {
+    err(`${name}: 전수 변이에 경로 필터가 없습니다 — 무엇이 바뀌면 도는지가 적혀 있지 않습니다`);
+  } else if (!/'src\/\*\*'/.test(src)) {
+    err(`${name}: 전수 변이 경로 필터에 src/**가 없습니다`
+      + ' — 하네스가 변이시키는 파일이 바뀌어도 돌지 않습니다');
+  }
+}
+
 if (scanned === 0) {
   // **0개를 통과로 적지 않는다.** 경로가 바뀌어 아무것도 못 찾았다면
   // 이 검사는 돌지 않은 것이다.

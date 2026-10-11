@@ -28,6 +28,30 @@ const FORM  = 'src/lib/trading/useTradeForm.ts';
 const REG   = 'src/lib/products/registry.ts';
 const STATE = 'src/lib/exchanges/spotPrecisionState.ts';
 
+/**
+ * `ok: true`를 담은 `return { … }` 블록을 **중괄호로 세어** 꺼낸다.
+ *
+ * 고정 길이 창(`{0,400}`)이나 한 줄 정규식으로 응답을 잡으면, 표현이
+ * 길어지거나 여러 줄로 나뉘는 순간 규칙이 동작과 무관하게 터진다.
+ * 이 저장소에서 실제로 그렇게 늙은 규칙이 둘 있었다.
+ */
+function successReturns(src) {
+  const out = [];
+  for (let i = src.indexOf('return {'); i >= 0; i = src.indexOf('return {', i + 1)) {
+    const open = src.indexOf('{', i);
+    let depth = 0, end = -1;
+    for (let j = open; j < src.length; j += 1) {
+      const c = src[j];
+      if (c === '{') depth += 1;
+      else if (c === '}') { depth -= 1; if (depth === 0) { end = j; break; } }
+    }
+    if (end < 0) continue;
+    const blk = src.slice(open, end + 1);
+    if (/\bok:\s*true\b/.test(blk)) out.push(blk);
+  }
+  return out;
+}
+
 let bad = 0;
 const fail = (m) => { console.error(`  ✗ ${m}`); bad += 1; };
 const read = (p) => {
@@ -284,16 +308,30 @@ function blockAfter(src, marker, after) {
   }
   // 체결 응답에 붙어 있는가. 오류 응답에만 있으면 체결된 주문이 격자를
   // 맞췄는지 알 수 없다 — 4B-1에서 같은 모양이 한 번 새 나갔다(MUT-V16).
-  const okResp = exec.match(/ok:\s*true,\s*status:\s*'FILLED'[\s\S]{0,400}?\}/);
-  if (!okResp) fail(`${EXEC}: 체결 응답을 찾지 못했습니다`);
-  else if (!/venuePrecision/.test(okResp[0])) {
-    fail(`${EXEC}: 체결 응답이 격자 적용 여부를 담지 않습니다`);
+  //
+  // ── 이 규칙의 모양이 한 번 늙었다 ──
+  //
+  //   예전 규칙은 `ok: true, status: 'FILLED'`라는 **글자**를 찾았다.
+  //   그런데 접수를 체결로 적던 것을 고치면서 그 자리가
+  //   `status: verdict.status`가 되자, 동작은 그대로인데 규칙이 "체결
+  //   응답을 찾지 못했습니다"로 터졌다. 같은 이유로 `message:`와 같은
+  //   줄에 있어야 한다는 규칙도 문장이 여러 줄로 바뀌자 터졌다.
+  //
+  //   **고정 모양이 아니라 중괄호로 센 블록**을 본다. 그래야 응답의
+  //   표현이 바뀌어도 "성공 응답이 격자 여부와 사유를 담는가"라는
+  //   물음은 그대로 유지된다.
+  const okBlocks = successReturns(exec);
+  if (okBlocks.length === 0) fail(`${EXEC}: 성공 응답(ok: true)을 찾지 못했습니다`);
+  for (const blk of okBlocks) {
+    if (!/venuePrecision/.test(blk)) {
+      fail(`${EXEC}: 성공 응답이 격자 적용 여부를 담지 않습니다`);
+    }
   }
   // 바뀌었거나 못 맞췄으면 사용자에게 한 줄이 간다
   if (!/precisionNote/.test(exec)) {
     fail(`${EXEC}: 수량이 바뀐 사실을 사용자에게 말하지 않습니다`);
   }
-  else if (!/message:[^\n]*precisionNote/.test(exec)) {
+  else if (!okBlocks.some((b) => /message:[\s\S]*?precisionNote/.test(b))) {
     fail(`${EXEC}: 사유를 만들어 놓고 문장에 붙이지 않습니다`);
   }
   // 문장도 정본에서 가져온다. 실행부가 다시 쓰면 사유가 늘 때 한쪽만 고쳐진다.

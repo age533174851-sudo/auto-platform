@@ -3,6 +3,7 @@
 // Docs: https://binance-docs.github.io/apidocs/spot/en/
 // ─────────────────────────────────────────────────────────────
 import { createHmac } from 'crypto';
+import { numOrNull } from '../engine/orderFillFacts';
 import { parseLossless } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
@@ -296,9 +297,57 @@ export interface OrderResult {
   orderId?: string | number;
   symbol?:  string;
   side?:    string;
-  qty?:     number;
-  price?:   number;
+  /**
+   * **체결된** 수량. 모르면 null이다.
+   *
+   * 예전에는 `parseFloat(d.executedQty || d.origQty || '0')`이었다.
+   * 응답에 `executedQty`가 없으면 **요청 수량이 체결 수량으로** 적혔다.
+   */
+  qty?:     number | null;
+  /**
+   * **체결** 평균가. 모르면 null이다.
+   *
+   * 예전에는 `parseFloat(d.fills?.[0]?.price || d.price || '0')`이었다.
+   * 지정가 대기 주문은 `fills`가 비어 있으므로 **지정가가 체결가로**
+   * 적혔다. 0보다 나쁘다 — 그럴듯해 보인다.
+   */
+  price?:   number | null;
+  /** 거래소가 돌려준 주문 상태 원문 (NEW·PARTIALLY_FILLED·FILLED…) */
+  exchangeStatus?: string | null;
   raw?:     any;
+}
+
+/**
+ * 현물 주문 응답에서 **체결 사실만** 읽는다.
+ *
+ * 가중평균을 쓴다 — `fills[0].price`는 여러 번 쪼개 체결된 주문에서
+ * 첫 조각의 가격일 뿐이다. 그걸 평균가로 적으면 시장가 체결의 실제
+ * 단가와 달라진다.
+ */
+export function spotFillOf(d: any): {
+  qty: number | null; price: number | null; exchangeStatus: string | null;
+} {
+  const st = d?.status == null || String(d.status).trim() === ''
+    ? null : String(d.status).trim().toUpperCase();
+  // `Number(null)`은 0이다 — "못 읽었다"가 "체결 0"이 되지 않게 한다.
+  const qty = numOrNull(d?.executedQty);
+
+  let price: number | null = null;
+  const fills = Array.isArray(d?.fills) ? d.fills : [];
+  let num = 0, den = 0;
+  for (const f of fills) {
+    const q = numOrNull(f?.qty, { positive: true });
+    const px = numOrNull(f?.price, { positive: true });
+    if (q != null && px != null) { num += q * px; den += q; }
+  }
+  if (den > 0) price = num / den;
+  else {
+    // fills가 없으면 누적 체결금액으로 되돌린다. 그것도 없으면 모른다 —
+    // 지정가로 메우지 않는다.
+    const quote = numOrNull(d?.cummulativeQuoteQty, { positive: true });
+    if (quote != null && qty != null && qty > 0) price = quote / qty;
+  }
+  return { qty, price, exchangeStatus: st };
 }
 
 // 실제 주문 (Binance Spot)
@@ -346,14 +395,21 @@ export async function placeOrderBinance(
     if (opts.clientOrderId) params.newClientOrderId = opts.clientOrderId;
 
     const d = await bnPost('/api/v3/order', key, secret, params, opts.testnet);
+    const f = spotFillOf(d);
+    // **'주문 체결'이라고 쓰지 않는다.** 지정가 대기 주문도 이 문장을
+    // 받았다. 증거(체결 수량)가 있을 때만 체결이라고 쓴다.
+    const filled = f.qty != null && f.qty > 0;
     return {
       success: true,
-      message: opts.testnet ? '주문 체결 (테스트넷)' : '주문 체결',
+      message: (filled ? '주문 체결' : '주문 접수 (체결 미확정)')
+        + (opts.testnet ? ' (테스트넷)' : '')
+        + (f.exchangeStatus ? ` · 거래소 상태 ${f.exchangeStatus}` : ''),
       orderId: d.orderId,
       symbol:  d.symbol,
       side:    d.side,
-      qty:     parseFloat(d.executedQty || d.origQty || '0'),
-      price:   parseFloat(d.fills?.[0]?.price || d.price || '0'),
+      qty:     f.qty,
+      price:   f.price,
+      exchangeStatus: f.exchangeStatus,
       raw:     d,
     };
   } catch (e: any) {

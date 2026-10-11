@@ -16,6 +16,7 @@
 //   - 감시 루프: 서버가 부른다 (사용자 확인은 루프가 한다)
 // 두 입구가 같은 함수를 쓴다.
 import { checkIntent, tagSignalId } from '@/lib/markets/marketType';
+import type { LedgerOrderStatus } from '@/lib/engine/reconcileLedgerStatus';
 import type { SpecSource } from '@/lib/markets/venueSpec';
 import {
   precisionSkipOf, PRECISION_SKIP_TEXT, type PrecisionSkip,
@@ -68,7 +69,14 @@ export interface SpotVenuePrecision {
 
 export interface SpotOrderResult {
   ok: boolean;
-  status: 'FILLED' | 'REJECTED' | 'UNKNOWN' | 'BLOCKED';
+  /**
+   * 장부에 적은 것과 **같은** 상태.
+   *
+   * `'ACKED'`가 늘었다. 예전에는 접수만 된 주문도 `'FILLED'`로 돌려줬다
+   * — 지정가 대기 주문이 체결로 보고됐다. `'RECONCILED'`는 취소·만료로
+   * 끝났다는 뜻이다(체결 여부는 수량이 말한다).
+   */
+  status: LedgerOrderStatus | 'BLOCKED';
   clientOrderId?: string;
   orderId?: number | string;
   filledQty?: number;
@@ -379,19 +387,36 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
       venuePrecision: precision, message: r?.message || '거래소가 거부했습니다' };
   }
 
+  // ── 접수는 체결이 아니다 ──
+  //
+  //   여기는 `r.success`면 **무조건** `status: 'FILLED'`를 적고 응답에도
+  //   "체결"이라고 썼다. 지정가 대기 주문(`status: NEW`, `executedQty: 0`)도
+  //   체결로 장부에 남았다. 선물 경로와 같은 정본을 쓴다 — 증거(체결
+  //   수량)가 있을 때만 FILLED다.
+  const { ledgerStatusOfBinance } = await import('@/lib/engine/reconcileLedgerStatus');
+  const verdict = ledgerStatusOfBinance(r.exchangeStatus, r.qty ?? null);
   await patch({
-    status: 'FILLED',
+    status: verdict.status,
     exchange_order_id: String(r.orderId ?? ''),
     filled_qty: r.qty ?? null,
     avg_price: r.price ?? null,
     acked_at: new Date().toISOString(),
+    ...(verdict.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+    ...(verdict.needsAttention
+      ? { needs_attention: true, error_message: verdict.attentionReason }
+      : {}),
   });
 
   return {
-    ok: true, status: 'FILLED', clientOrderId,
-    orderId: r.orderId, filledQty: r.qty, avgPrice: r.price,
+    ok: true, status: verdict.status, clientOrderId,
+    orderId: r.orderId, filledQty: r.qty ?? undefined, avgPrice: r.price ?? undefined,
     venuePrecision: precision,
-    message: `현물 ${side === 'BUY' ? '매수' : '매도'} 체결` + precisionNote,
+    message: `현물 ${side === 'BUY' ? '매수' : '매도'} `
+      + (verdict.status === 'FILLED'
+        ? `체결 ${r.qty}`
+        : `접수됨 (거래소 상태 ${r.exchangeStatus ?? '불명'} · 체결 미확정)`)
+      + (verdict.needsAttention ? ` · ${verdict.attentionReason}` : '')
+      + precisionNote,
   };
 }
 
@@ -540,20 +565,34 @@ async function placeGateSpot(
     return { ok: false, status: 'REJECTED', clientOrderId, code: 'order_rejected', message: r.message };
   }
 
+  // ── 장부와 응답이 **같은 판정**을 쓴다 ──
+  //
+  //   여기는 장부에 `status: 'FILLED'`를 무조건 적으면서 응답에는
+  //   IOC 미체결일 때 `REJECTED`를 돌려줬다. 같은 함수 안에서 장부와
+  //   응답이 서로 다른 답을 한 것이다. Gate 현물 어휘(open·closed·
+  //   cancelled)로 한 번 판정해 둘 다에 쓴다.
+  const { ledgerStatusOfGateSpot } = await import('@/lib/engine/reconcileLedgerStatus');
+  const gv = ledgerStatusOfGateSpot({
+    status: r.status, filledQty: r.filledQty ?? null, unfilled: r.unfilled,
+  });
   await patch({
-    status: 'FILLED',
+    status: gv.status,
     exchange_order_id: String(r.orderId ?? ''),
     // 체결량을 모르면 null로 둔다. 0으로 적으면 '한 개도 안 붙었다'가 되고,
     // 나중에 이 장부로 성과를 세면 그 거래가 통째로 사라진다.
     filled_qty: r.filledQty ?? null,
     avg_price: r.avgPrice ?? null,
     acked_at: new Date().toISOString(),
+    ...(gv.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+    ...(gv.needsAttention
+      ? { needs_attention: true, error_message: gv.attentionReason }
+      : {}),
   });
 
   return {
-    ok: true,
-    // IOC가 하나도 안 붙고 취소됐으면 그건 체결이 아니다.
-    status: r.unfilled ? 'REJECTED' : 'FILLED',
+    // IOC가 하나도 안 붙었으면 성공이라고 말하지 않는다.
+    ok: r.unfilled !== true,
+    status: gv.status,
     venuePrecision: r.precision,
     clientOrderId,
     orderId: r.orderId,
@@ -562,6 +601,9 @@ async function placeGateSpot(
     message: r.unfilled
       ? r.message
       : `Gate 현물 ${ctx.side === 'BUY' ? '매수' : '매도'} — ${r.message}`
-        + (r.filledQty == null ? ' (체결 수량은 거래 내역에서 확인하세요)' : ''),
+        + (gv.status === 'FILLED'
+          ? ` · 체결 ${r.filledQty}`
+          : ` · 체결 미확정 (거래소 상태 ${r.status ?? '불명'})`)
+        + (gv.needsAttention ? ` · ${gv.attentionReason}` : ''),
   };
 }

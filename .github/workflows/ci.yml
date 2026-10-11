@@ -720,6 +720,9 @@ jobs:
       - name: 종료 권한 배선 (임차 CAS · 권한 주입 · 판단 뒤 선점)
         run: node scripts/check-exit-authority.mjs
 
+      - name: 대조 진실성 (열린 주문을 종료로 적지 않는다)
+        run: node scripts/check-reconcile-truth.mjs
+
       - name: 전용 100배 계약 (정확 100 · 고정 손절 없음 · 누출 0)
         run: node scripts/check-100x-contract.mjs
 

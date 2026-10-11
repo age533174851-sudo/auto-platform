@@ -703,7 +703,15 @@ export async function futuresPlaceOrder(
     const px = Number(r.price);
     return {
       ok: true,
-      status: input.type === 'LIMIT' && (filled == null || filled === 0) ? 'ACKED' : 'FILLED',
+      // ── MARKET이라고 체결을 가정하지 않는다 ──
+      //
+      //   예전 조건은 `input.type === 'LIMIT' && …`이었다. MARKET이면
+      //   앞 절이 거짓이라 **`filled`가 null이어도 FILLED**가 됐다.
+      //   `filledQty: null`과 `status: 'FILLED'`는 서로 모순이다.
+      //   지금은 아무 소비자도 이 status를 체결 증거로 쓰지 않지만
+      //   (청산은 포지션 재조회로, 워커는 `ok`로 판단한다) 다음 사람이
+      //   믿을 함정이다. 증거는 `executedQty`뿐이다.
+      status: filled != null && filled > 0 ? 'FILLED' : 'ACKED',
       orderId: r.orderId != null ? String(r.orderId) : null,
       clientOrderId: cid, filledQty: filled,
       avgPrice: Number.isFinite(px) && px > 0 ? px : null,
@@ -722,29 +730,135 @@ export interface UnknownVerdict {
   /** 거래소가 받았는지 **모르는** 상태인가 */
   unknown: boolean;
   reason: string;
+  /**
+   * 무엇을 근거로 그렇게 판정했는가.
+   *
+   * `'REJECTION_SHAPE'`·`'NOT_SENT'`만 재시도를 연다. 나머지는 전부
+   * 닫는다 — 기본값이 "모름"이기 때문이다.
+   */
+  evidence:
+    | 'REJECTION_SHAPE'    // 거래소가 거절한 모양이 확인됐다
+    | 'NOT_SENT'           // 보내기 전에 우리가 막았다
+    | 'TRANSPORT'          // 전송 계층 오류 — 나갔는지 모른다
+    | 'AMBIGUOUS_CODE'     // 거래소가 "결과 모름"이라고 답했다
+    | 'AMBIGUOUS_STATUS'   // 5xx·타임아웃·레이트리밋 — 처리됐을 수 있다
+    | 'UNRECOGNIZED'       // 처음 보는 문구 — 기본값으로 닫는다
+    | 'EMPTY';             // 문구가 없다
 }
+
+// ── 거래소가 **거절했다는 증거** ───────────────────────
+//
+// 이 판정이 곧 재시도 여부다. 거절은 돈이 안 나갔으니 다시 보내도 되고,
+// 모름은 **이미 나갔을 수 있으니 다시 보내면 중복 체결이다.**
+//
+// 예전 기본값은 거꾸로였다
+// ───────────────────────
+// 전송 계층 문구 목록에 **걸리면** UNKNOWN이고 안 걸리면 거절이었다.
+// 즉 **처음 보는 오류 문구는 "거절"로 읽혀 재시도가 열렸다.** 거래소에
+// 이미 나갔는데 다시 보내면 중복 체결이다. 목록을 아무리 늘려도 그
+// 방향은 남는다 — 목록에 없는 문구는 언제나 생기기 때문이다.
+//
+// 그래서 **양쪽 모두 증거를 요구**하도록 뒤집었다. 거절로 읽으려면
+// 거래소가 거절한 모양이 보여야 한다.
+//
+// 두 거래소의 실제 거절 모양 (이 저장소가 만드는 문구)
+// ─────────────────────────────────────────────────
+//   바이낸스  `binanceFutures.ts:56`
+//     본문에 code/msg가 있으면  `[-2019] Margin is insufficient.`
+//     없으면                    `HTTP 400`
+//   Gate      `gateFutures.ts:58`
+//     언제나                    `Gate 400: BALANCE_NOT_ENOUGH`
+//
+// 거래소가 **스스로 "모른다"고 답하는 코드**는 모양이 거절과 같으므로
+// 따로 가른다. 바이낸스 공식 문서의 문구가 그대로 들어 있다:
+//   -1007 TIMEOUT          "Send status unknown; execution status unknown."
+//   -1006 UNEXPECTED_RESP  "Execution status unknown."
+//   -1001 DISCONNECTED  ·  -1008 SERVER_BUSY  ·  -1016 SERVICE_SHUTTING_DOWN
+const AMBIGUOUS_BINANCE_CODES = new Set([-1001, -1006, -1007, -1008, -1016]);
+
+// 처리된 뒤에 응답만 잃었을 수 있는 HTTP 상태. 4xx여도 거절로 보지 않는다.
+//   408 Request Timeout · 425 Too Early · 429 Too Many Requests
+// 5xx는 전부 여기에 든다 (게이트웨이가 접수 뒤에 죽을 수 있다).
+const AMBIGUOUS_HTTP = new Set([408, 425, 429]);
+const isAmbiguousHttp = (status: number): boolean =>
+  AMBIGUOUS_HTTP.has(status) || status >= 500;
+
+/**
+ * **보내기 전에 우리가 막은** 문구.
+ *
+ * 거래소에 닿은 적이 없으므로 재시도해도 중복이 되지 않는다. 이 목록이
+ * 없으면 기본값(모름)에 걸려 나간 적도 없는 주문이 장부에 미확정으로
+ * 쌓이고, 그 미확정이 다음 진입을 막는다.
+ *
+ * 전송 **전**에만 만들어지는 문구여야 한다. 하나라도 전송 후 경로에서
+ * 나올 수 있으면 그것은 중복 체결의 문이 된다.
+ */
+const NOT_SENT = /LIMIT은 가격 필요|수량을 모르면|clientOrderId가 없어|계약 이름을 만들 수 없습니다|계약 수를 계산하지 못했습니다|수량을 거래소 규격에 맞추지 못했습니다|최소 수량 미달|최소 주문금액 미달|최소 명목가/;
+
+/** 전송 계층 오류 — 요청이 나갔는지 자체를 모른다 */
+const TRANSPORT = /응답\s*없음|응답을\s*받지\s*못|타임아웃|timed?\s*out|ETIMEDOUT|ECONNRESET|ECONNABORTED|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|EPIPE|EAI_AGAIN|socket hang up|socket disconnected|premature close|terminated|UND_ERR|network\s*error|fetch failed|aborted|AbortError|TimeoutError/i;
+
+/** 거래소가 스스로 "결과를 모른다"고 적은 문구 */
+const SAYS_UNKNOWN = /execution status unknown|send status unknown|status unknown/i;
+
+const UNKNOWN_REASON =
+  '거래소가 받았는지 알 수 없습니다. 주문이 나갔을 수 있어 재시도하지 않습니다 — '
+  + 'clientOrderId로 대조해야 합니다.';
 
 /**
  * 실패 문구가 "거절"인지 "모름"인지 가른다.
  *
- * 이 구분이 곧 재시도 여부다. 거절은 돈이 안 나갔으니 다시 보내도 되고,
- * 모름은 **이미 나갔을 수 있으니 다시 보내면 중복 체결이다.**
- *
- * 예전에는 워커 안에 정규식이 인라인으로 박혀 있었다. 웹 경로에는 없었다 —
- * 같은 판정이 한쪽에만 있으면 다른 쪽은 언젠가 중복 주문을 낸다.
+ * **기본값은 "모름"이다.** 거절로 읽으려면 거래소가 거절한 모양이
+ * 보여야 한다. 모르는 채 재시도를 여는 것보다, 모른다고 적고 대조를
+ * 요구하는 쪽이 늘 싸다.
  */
 export function unknownResultVerdict(errorText: string | null | undefined): UnknownVerdict {
-  const s = String(errorText || '');
-  if (!s) return { unknown: false, reason: '' };
-  const hit = /응답\s*없음|응답을\s*받지\s*못|타임아웃|timed?\s*out|ETIMEDOUT|ECONNRESET|ECONNABORTED|EAI_AGAIN|socket hang up|network\s*error|fetch failed|aborted/i
-    .test(s);
-  return {
-    unknown: hit,
-    reason: hit
-      ? '거래소 응답을 받지 못했습니다. 주문이 나갔는지 알 수 없어 재시도하지 않습니다 — '
-        + 'clientOrderId로 대조해야 합니다.'
-      : '',
-  };
+  const s = String(errorText || '').trim();
+  if (!s) {
+    // 문구가 없다. 무엇이 일어났는지 모르므로 재시도를 열지 않는다.
+    return { unknown: true, reason: UNKNOWN_REASON, evidence: 'EMPTY' };
+  }
+
+  // ① 전송 계층·거래소 자백은 모양 판정보다 먼저 본다. `[-1007] … timeout`은
+  //    거절 모양이지만 거래소가 "모른다"고 적은 것이다.
+  if (TRANSPORT.test(s)) {
+    return { unknown: true, reason: UNKNOWN_REASON, evidence: 'TRANSPORT' };
+  }
+  if (SAYS_UNKNOWN.test(s)) {
+    return { unknown: true, reason: UNKNOWN_REASON, evidence: 'AMBIGUOUS_CODE' };
+  }
+
+  // ② 보내기 전에 우리가 막은 것. 닿은 적이 없다.
+  if (NOT_SENT.test(s)) {
+    return { unknown: false, reason: '', evidence: 'NOT_SENT' };
+  }
+
+  // ③ 바이낸스 `[code] msg`
+  const bCode = s.match(/\[(-?\d+)\]/);
+  if (bCode) {
+    const code = Number(bCode[1]);
+    if (AMBIGUOUS_BINANCE_CODES.has(code)) {
+      return { unknown: true, reason: UNKNOWN_REASON, evidence: 'AMBIGUOUS_CODE' };
+    }
+    return { unknown: false, reason: '', evidence: 'REJECTION_SHAPE' };
+  }
+
+  // ④ `HTTP nnn` (바이낸스 본문 없음) · `Gate nnn: msg`
+  const status = s.match(/(?:^|\s)HTTP\s+(\d{3})\b/i) || s.match(/(?:^|\s)Gate\s+(\d{3})\s*:/i);
+  if (status) {
+    const code = Number(status[1]);
+    if (isAmbiguousHttp(code)) {
+      return { unknown: true, reason: UNKNOWN_REASON, evidence: 'AMBIGUOUS_STATUS' };
+    }
+    if (code >= 400 && code < 500) {
+      return { unknown: false, reason: '', evidence: 'REJECTION_SHAPE' };
+    }
+    // 4xx도 5xx도 아닌 상태를 거절로 읽지 않는다.
+    return { unknown: true, reason: UNKNOWN_REASON, evidence: 'AMBIGUOUS_STATUS' };
+  }
+
+  // ⑤ 처음 보는 문구. **여기가 예전에 거절로 빠지던 자리다.**
+  return { unknown: true, reason: UNKNOWN_REASON, evidence: 'UNRECOGNIZED' };
 }
 
 export interface ReconcileDecision {

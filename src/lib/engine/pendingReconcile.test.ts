@@ -8,7 +8,9 @@
 //  4. 시각이 깨진 행 하나가 영영 미확정으로 남아 자동매매를 계속 막는 것
 //  5. 대조 실패를 '확정 0건'과 같게 적는 것
 import { test, assert, eq } from '../../test/harness';
+import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES } from './orderExecutor';
 import {
+  RECONCILE_QUERY_STATUSES, RECONCILE_TARGET_STATUSES,
   pendingTargets, skipReason, summarizeOutcomes,
   PENDING_STATUSES, DEFAULT_GRACE_MS,
 } from './pendingReconcile';
@@ -18,6 +20,56 @@ const ago = (ms: number) => new Date(NOW - ms).toISOString();
 
 export function runPendingReconcileTests() {
   console.log('[미확정 대조 — 방금 나간 주문은 건드리지 않는다]');
+
+  // ── ACKED만 남은 연결이 영원히 방문되지 않았다 ──
+  //
+  //   해소 능력(`resolveAcked`)은 이미 있었다. 그런데 cron이 **방문할
+  //   연결**을 고르는 목록에 ACKED가 없어서 그 방아쇠가 당겨지지 않았다.
+  //   ACKED는 같은 연결에 다른 상태의 줄이 **우연히** 있을 때만 쓸려
+  //   들어갔다 — 그건 보장이 아니다.
+
+  test('★ ACKED만 있는 연결도 대조 대상이다', () => {
+    const t = pendingTargets([
+      { connection_id: 'c1', user_id: 'u1', status: 'ACKED', created_at: new Date(0).toISOString() },
+    ], { now: 600_000 });
+    eq(t.length, 1);
+    eq(t[0].connectionId, 'c1');
+    eq(t[0].count, 1);
+  });
+
+  test('★ 해소 가능한 상태는 전부 방문 대상에 들어 있다', () => {
+    // 해소할 수 있는데 방문하지 않는 상태가 있으면 그 줄은 영구 미확정이다.
+    for (const st of RECONCILE_QUERY_STATUSES) {
+      assert((RECONCILE_TARGET_STATUSES as readonly string[]).includes(st));
+      const t = pendingTargets([
+        { connection_id: 'c1', user_id: 'u1', status: st, created_at: new Date(0).toISOString() },
+      ], { now: 600_000 });
+      eq(t.length, 1);
+    }
+  });
+
+  test('★ 종결되지 않은 모든 주문 상태가 방문 대상이다 (어휘 드리프트)', () => {
+    const terminal = new Set<string>(TERMINAL_ORDER_STATUSES);
+    const target = new Set<string>(RECONCILE_TARGET_STATUSES);
+    const orphan = ORDER_STATUSES.filter(x => !terminal.has(x) && !target.has(x));
+    if (orphan.length > 0) {
+      throw new Error(`종결도 아니고 대조 대상도 아닌 상태: ${orphan.join(', ')}`
+        + ' — 그 줄은 영구 미확정으로 남습니다');
+    }
+    // 종결 상태는 방문 대상이 아니어야 한다 — 끝난 주문을 계속 물어보지 않는다.
+    for (const st of TERMINAL_ORDER_STATUSES) {
+      assert(!target.has(st));
+    }
+  });
+
+  test('★ 종결된 주문은 대조 대상이 아니다', () => {
+    for (const st of TERMINAL_ORDER_STATUSES) {
+      const t = pendingTargets([
+        { connection_id: 'c1', user_id: 'u1', status: st, created_at: new Date(0).toISOString() },
+      ], { now: 600_000 });
+      eq(t.length, 0);
+    }
+  });
 
   test('유예 시간 안의 주문은 대상이 아니다', () => {
     // 다른 요청이 아직 거래소 응답을 기다리는 중일 수 있다. 그때 대조하면

@@ -100,6 +100,41 @@ export function runOrderFillFactsTests() {
     eq(fillFactsOf({ status: ' Filled ', executedQty: '1' }).exchangeStatus, 'FILLED');
   });
 
+  // ── MARKET이라고 체결을 가정하지 않는다 ──
+  //
+  //   `futuresExec`의 옛 조건은 `input.type === 'LIMIT' && (filled == null
+  //   || filled === 0) ? 'ACKED' : 'FILLED'`였다. MARKET이면 앞 절이
+  //   거짓이라 **filled가 null이어도 FILLED**가 됐다. `filledQty: null`과
+  //   `status: 'FILLED'`는 서로 모순이다.
+  test('★ 주문 유형이 체결 증거를 대신하지 않는다', () => {
+    // 시장가 주문의 ACK 응답 — 수량 증거가 없다.
+    const marketAck = fillFactsOf({ orderId: 9, status: 'NEW', origQty: '0.5', executedQty: '' });
+    eq(marketAck.status, 'ACKED');
+    eq(marketAck.filledQty, null);
+
+    // 응답에 type이 뭐라고 적혀 있어도 판정은 executedQty로만 한다.
+    for (const type of ['MARKET', 'LIMIT', undefined, 'STOP_MARKET']) {
+      const f = fillFactsOf({ status: 'NEW', type, origQty: '1' });
+      eq(f.status, 'ACKED');
+      eq(f.filledQty, null);
+      const g = fillFactsOf({ status: 'FILLED', type, origQty: '1', executedQty: '1' });
+      eq(g.status, 'FILLED');
+      eq(g.filledQty, 1);
+    }
+  });
+
+  test('★ 멱등 재진입에서 찾은 기존 주문도 같은 정본으로 읽는다', () => {
+    // `findOrderByClientId`가 돌려준 미체결 주문. avgPrice '0'은 가격이 아니다.
+    const f = fillFactsOf({ orderId: 7, status: 'NEW', origQty: '0.068', executedQty: '0', avgPrice: '0' });
+    eq(f.filledQty, 0);
+    eq(f.avgPrice, null);
+    eq(f.status, 'ACKED');
+    // 부분 체결 상태로 이미 존재하는 주문이면 그 수량이 보존된다.
+    const g = fillFactsOf({ orderId: 7, status: 'PARTIALLY_FILLED', executedQty: '0.03', avgPrice: '100000' });
+    eq(g.filledQty, 0.03);
+    eq(g.avgPrice, 100000);
+  });
+
   test('★ 이 함수가 돌려주는 상태는 장부 어휘 안에 있다', () => {
     for (const raw of [ackOnly, { status: 'FILLED', executedQty: '1' }, {}]) {
       assert((ORDER_STATUSES as readonly string[]).includes(fillFactsOf(raw).status));
