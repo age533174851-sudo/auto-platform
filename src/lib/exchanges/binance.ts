@@ -3,6 +3,7 @@
 // Docs: https://binance-docs.github.io/apidocs/spot/en/
 // ─────────────────────────────────────────────────────────────
 import { createHmac } from 'crypto';
+import { numOrNull } from '../engine/orderFillFacts';
 import { parseLossless } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
@@ -328,23 +329,23 @@ export function spotFillOf(d: any): {
 } {
   const st = d?.status == null || String(d.status).trim() === ''
     ? null : String(d.status).trim().toUpperCase();
-  const executed = Number(d?.executedQty);
-  const qty = Number.isFinite(executed) && executed >= 0 ? executed : null;
+  // `Number(null)`은 0이다 — "못 읽었다"가 "체결 0"이 되지 않게 한다.
+  const qty = numOrNull(d?.executedQty);
 
   let price: number | null = null;
   const fills = Array.isArray(d?.fills) ? d.fills : [];
   let num = 0, den = 0;
   for (const f of fills) {
-    const q = Number(f?.qty);
-    const px = Number(f?.price);
-    if (Number.isFinite(q) && q > 0 && Number.isFinite(px) && px > 0) { num += q * px; den += q; }
+    const q = numOrNull(f?.qty, { positive: true });
+    const px = numOrNull(f?.price, { positive: true });
+    if (q != null && px != null) { num += q * px; den += q; }
   }
   if (den > 0) price = num / den;
   else {
     // fills가 없으면 누적 체결금액으로 되돌린다. 그것도 없으면 모른다 —
     // 지정가로 메우지 않는다.
-    const quote = Number(d?.cummulativeQuoteQty);
-    if (Number.isFinite(quote) && quote > 0 && qty != null && qty > 0) price = quote / qty;
+    const quote = numOrNull(d?.cummulativeQuoteQty, { positive: true });
+    if (quote != null && qty != null && qty > 0) price = quote / qty;
   }
   return { qty, price, exchangeStatus: st };
 }

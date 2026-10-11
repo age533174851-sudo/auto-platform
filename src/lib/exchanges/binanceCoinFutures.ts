@@ -12,6 +12,7 @@
 // 주문이 된다. 반대로 BTCUSD_PERP에 0.003을 보내면 소수 계약이라 거부된다.
 // 전자는 사고고 후자는 그나마 거부다.
 import { createHmac } from 'crypto';
+import { numOrNull } from '../engine/orderFillFacts';
 import { parseLossless } from './losslessJson';
 
 const DAPI = 'https://dapi.binance.com';
@@ -327,18 +328,24 @@ export interface CoinMOrderResult {
   message?: string;
 }
 
-/** 거래소 응답에서 체결 사실만 읽는다. 없는 값을 지어내지 않는다 */
-function coinMFillOf(d: any): {
+/**
+ * 거래소 응답에서 체결 사실만 읽는다. 없는 값을 지어내지 않는다.
+ *
+ * **내보내는 이유**: 내보내지 않았더니 시험을 붙일 수 없었고, 변이
+ * 하나(`avgPrice || price || '0'` 복원)가 시험·검사기 **양쪽을 다
+ * 빠져나갔다.** 순수 함수의 결함을 grep 규칙 하나로만 막으면, 그
+ * 규칙이 문법 한 글자(`d?.avgPrice`)에 비껴간다.
+ */
+export function coinMFillOf(d: any): {
   filledContracts: number | null; avgPrice: number | null; exchangeStatus: string | null;
 } {
-  const q = Number(d?.executedQty);
-  const px = Number(d?.avgPrice);
   const st = d?.status == null || String(d.status).trim() === ''
     ? null : String(d.status).trim().toUpperCase();
   return {
-    filledContracts: Number.isFinite(q) && q >= 0 ? q : null,
+    // `Number(null)`은 0이다. 그 함정을 어댑터마다 다시 쓰지 않는다.
+    filledContracts: numOrNull(d?.executedQty),
     // 미체결 주문의 avgPrice는 '0'이다. 그것을 가격으로 적지 않는다.
-    avgPrice: Number.isFinite(px) && px > 0 ? px : null,
+    avgPrice: numOrNull(d?.avgPrice, { positive: true }),
     exchangeStatus: st,
   };
 }

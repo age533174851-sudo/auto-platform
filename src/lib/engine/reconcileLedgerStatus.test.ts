@@ -5,6 +5,8 @@ import {
   withFillEvidence,
 } from './reconcileLedgerStatus';
 import { spotFillOf } from '../exchanges/binance';
+import { coinMFillOf } from '../exchanges/binanceCoinFutures';
+import { numOrNull } from './orderFillFacts';
 import { fromExchangeStatus } from './orderLifecycle';
 import { RECONCILE_TARGET_STATUSES } from './pendingReconcile';
 import { UNRESOLVED_ENTRY_STATUSES, ACCEPTED_ENTRY_STATUSES } from './maxOpenPositionsGate';
@@ -390,5 +392,100 @@ export function runOtherVenueLedgerTests() {
     const f = spotFillOf({ status: 'NEW', executedQty: 'abc', fills: [{ qty: 'x', price: 'y' }] });
     eq(f.qty, null);
     eq(f.price, null);
+  });
+
+  // ── `Number(null)`은 0이다 ──
+  //
+  //   변이 둘이 이 자리로 빠져나갔다(V-12·V-13). `Number(null)`과
+  //   `Number('')`이 모두 `0`이므로, 수량 칸을 `Number(...)`로 읽으면
+  //   **"못 읽었다"가 "체결 0"이라는 사실로** 장부에 적힌다. 시험이
+  //   `'abc'`와 부재만 보고 있어서 그 변이를 놓쳤다.
+  test('★ null·빈 문자열을 체결 0으로 읽지 않는다 (현물·COIN-M·선물 전부)', () => {
+    for (const blank of [null, undefined, '', '   ' as any]) {
+      eq(spotFillOf({ status: 'NEW', executedQty: blank }).qty, null,
+        `현물: ${JSON.stringify(blank)}이 0으로 읽혔다`);
+      eq(coinMFillOf({ status: 'NEW', executedQty: blank }).filledContracts, null,
+        `COIN-M: ${JSON.stringify(blank)}이 0으로 읽혔다`);
+    }
+    // 정본 자체를 직접 못박는다 — 세 리더가 이 함수 하나를 쓴다.
+    for (const blank of [null, undefined, '', '  ']) {
+      eq(numOrNull(blank), null, `numOrNull(${JSON.stringify(blank)})이 null이 아니다`);
+      eq(numOrNull(blank, { positive: true }), null);
+    }
+    // 진짜 0은 사실이다 — null로 올리지 않는다.
+    eq(numOrNull(0), 0);
+    eq(numOrNull('0'), 0);
+    eq(numOrNull('0.000'), 0);
+    // 0은 가격이 아니다.
+    eq(numOrNull('0', { positive: true }), null);
+    eq(spotFillOf({ status: 'NEW', executedQty: '0' }).qty, 0);
+    eq(coinMFillOf({ status: 'NEW', executedQty: '0' }).filledContracts, 0);
+  });
+
+  test('★ 체결가 조각의 빈 값도 가중평균에 들어가지 않는다', () => {
+    const f = spotFillOf({
+      status: 'FILLED', executedQty: '3',
+      fills: [{ qty: null, price: '100' }, { qty: '2', price: '' }, { qty: '3', price: '130' }],
+    });
+    // 읽을 수 있는 조각(3 × 130)만 센다. 빈 조각을 0으로 세면 평균이 내려간다.
+    eq(f.price, 130);
+  });
+}
+
+export function runCoinMFillTests() {
+  // ── 왜 이 시험이 생겼나 ──
+  //
+  //   변이 하나(`avgPrice || price || '0'` 복원)가 시험·검사기 **양쪽을
+  //   다 빠져나갔다.** 시험은 이 함수가 내보내지지 않아서 붙일 수 없었고,
+  //   검사기 규칙은 `d?.avgPrice`라는 문법 한 글자에 비껴갔다. 순수
+  //   함수의 결함은 순수 함수의 시험으로 막는다.
+
+  test('★ COIN-M 미체결 주문의 지정가를 체결가로 적지 않는다', () => {
+    // 미체결 주문의 avgPrice는 '0'이다. 예전에는 d.price(지정가)로
+    // 떨어졌고, 그 값으로 필요 증거금까지 계산됐다.
+    const f = coinMFillOf({ status: 'NEW', executedQty: '0', avgPrice: '0', price: '95000' });
+    eq(f.filledContracts, 0);
+    eq(f.avgPrice, null, '지정가가 체결가로 적혔다');
+    eq(f.exchangeStatus, 'NEW');
+    eq(ledgerStatusOfBinance(f.exchangeStatus, f.filledContracts).status, 'ACKED');
+  });
+
+  test('★ 체결된 주문은 평균가를 그대로 읽는다', () => {
+    const f = coinMFillOf({ status: 'FILLED', executedQty: '3', avgPrice: '94500', price: '95000' });
+    eq(f.filledContracts, 3);
+    eq(f.avgPrice, 94500);
+    eq(ledgerStatusOfBinance(f.exchangeStatus, f.filledContracts).status, 'FILLED');
+  });
+
+  test('★ 수량을 못 읽으면 0으로 적지 않는다', () => {
+    for (const bad of [undefined, null, '', 'abc', -1]) {
+      const f = coinMFillOf({ status: 'NEW', executedQty: bad as any });
+      eq(f.filledContracts, null, `수량 ${String(bad)}이 0으로 적혔다`);
+    }
+    // 0은 사실이다 — null로 올리지 않는다.
+    eq(coinMFillOf({ executedQty: '0' }).filledContracts, 0);
+  });
+
+  test('★ 가격을 못 읽으면 0으로도 지정가로도 적지 않는다', () => {
+    for (const bad of [undefined, null, '', '0', 'abc', -5]) {
+      const f = coinMFillOf({ status: 'NEW', avgPrice: bad as any, price: '95000' });
+      eq(f.avgPrice, null, `가격 ${String(bad)}이 값으로 적혔다`);
+    }
+  });
+
+  test('★ 부분 체결은 수량을 보존하며 열린 상태로 남는다', () => {
+    const f = coinMFillOf({ status: 'PARTIALLY_FILLED', executedQty: '1', avgPrice: '94000' });
+    eq(f.filledContracts, 1);
+    eq(f.avgPrice, 94000);
+    const d = ledgerStatusOfBinance(f.exchangeStatus, f.filledContracts);
+    eq(d.status, 'ACKED');
+    eq(d.terminal, false);
+  });
+
+  test('★ 상태를 못 읽으면 null이다 — 지어내지 않는다', () => {
+    for (const bad of [undefined, null, '', '   ']) {
+      eq(coinMFillOf({ status: bad as any }).exchangeStatus, null);
+    }
+    eq(coinMFillOf({ status: 'new' }).exchangeStatus, 'NEW');
   });
 }

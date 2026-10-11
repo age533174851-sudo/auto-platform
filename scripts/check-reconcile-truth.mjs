@@ -375,7 +375,9 @@ for (const [p, who] of VENUE_WRITERS) {
   const p = 'src/lib/exchanges/binanceCoinFutures.ts';
   const src = read(p);
   if (src) {
-    if (/parseFloat\((?:d|existing)\.avgPrice \|\| (?:d|existing)\.price/.test(src)) {
+    // `d?.avgPrice`(옵셔널 체이닝)도 같은 결함이다. 변이 하나가 이
+    // 문법 한 글자로 규칙을 비껴갔다.
+    if (/avgPrice \|\|\s*(?:d|existing)\??\.price/.test(src)) {
       err(`${p}: 미체결 주문의 지정가를 체결가로 적습니다`
         + " (`avgPrice || price || '0'`) — 0보다 나쁩니다, 그럴듯해 보입니다");
     }
