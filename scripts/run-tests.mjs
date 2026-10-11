@@ -2,7 +2,7 @@
 // TRAIGO 코어 유닛 테스트 러너 (외부 프레임워크 없이 tsc 컴파일 후 실행)
 // 사용: node scripts/run-tests.mjs  (또는 npm test)
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, cpSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, cpSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,6 +25,11 @@ const __mod = require('module');
 const __path = require('path');
 const __origResolve = __mod._resolveFilename;
 __mod._resolveFilename = function (request, ...rest) {
+  // 라우트 핸들러가 쓰는 Next 응답 래퍼. 임시 디렉터리에 node_modules가
+  // 없어서 이 한 겹만 스텁으로 바꾼다.
+  if (request === 'next/server') {
+    return __path.join(__dirname, '__next_server_stub.js');
+  }
   if (typeof request === 'string' && request.startsWith('@/')) {
     // tsconfig의 별칭은 \`@/* → ./src/*\`다. 러너는 \`src\`를 임시
     // 폴더로 복사하므로 \`<tmp>/src/...\`가 실제 자리다.
@@ -146,7 +151,10 @@ import {
   runProvenFillTests, runOtherVenueLedgerTests, runCoinMFillTests,
 } from './src/lib/engine/reconcileLedgerStatus.test';
 import { runCredentialExposureTests } from './src/lib/security/credentialExposure.test';
-import { runOrderPathIntegrationTests } from './src/test/integration/orderPathIntegration.test';
+import {
+  runOrderPathIntegrationTests, runReconcileIntegrationTests, runSpotIntegrationTests,
+  runCloseIntegrationTests, runTransitionIntegrationTests, runCoinMRouteIntegrationTests,
+} from './src/test/integration/orderPathIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
 import { runWalletTests } from './src/lib/markets/wallets.test';
@@ -388,6 +396,11 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   //   가짜 거래소**에 묻게 된다. 실제로 그 일이 났고 "거래소 호출이
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
   await runOrderPathIntegrationTests();
+  await runReconcileIntegrationTests();
+  await runSpotIntegrationTests();
+  await runCloseIntegrationTests();
+  await runTransitionIntegrationTests();
+  await runCoinMRouteIntegrationTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
@@ -413,6 +426,29 @@ for (const mark of ['<<<<<<< ', '>>>>>>> ', '\n=======\n']) {
   }
 }
 
+// ── `next/server` 스텁 ──
+//
+//   임시 디렉터리에는 node_modules가 없다. 라우트 핸들러를 통합 시험에
+//   올리려면 `NextResponse.json`이 필요한데, 그 한 겹만 가짜로 둔다.
+//   라우트 본문·거래소 어댑터·장부 쓰기는 전부 실제로 돈다.
+//
+//   **모의 경계가 하나 늘었다는 사실을 보고에 적는다** — fetch · Supabase ·
+//   Next 응답 래퍼 셋이다.
+writeFileSync(join(dir, '__next_server_stub.js'), `
+class NextResponse {
+  constructor(body, init) {
+    this.__body = body;
+    this.status = (init && init.status) || 200;
+    this.headers = new Map(Object.entries((init && init.headers) || {}));
+  }
+  static json(body, init) { return new NextResponse(body, init); }
+  async json() { return this.__body; }
+  async text() { return JSON.stringify(this.__body); }
+}
+function NextRequest() {}
+module.exports = { NextResponse, NextRequest };
+`);
+
 writeFileSync(join(dir, 'run.ts'), RUN_SRC);
 
 
@@ -425,12 +461,36 @@ if (!existsSync(tscPath)) {
   process.exit(1);
 }
 
+// ── `src` 전체를 컴파일한다 ──
+//
+//   예전에는 `tsc run.ts` 하나만 넘겼다. tsc는 import를 따라가며 필요한
+//   파일만 내보내므로, **동적 `import('@/…')`로만 불리는 모듈은 컴파일
+//   대상에 들어가지 않았다.** 그러면 통합 시험이 실행기를 부를 때
+//   "Cannot find module"이 난다 — 실행기가 그 모듈을 그 방식으로
+//   불러오기 때문이다.
+//
+//   모듈을 하나씩 정적 import로 끌어오는 방법은 끝이 없다(실행기가
+//   부르는 것, 그것이 또 부르는 것…). 전부 컴파일한다.
+const allTs = [];
+(function collect(d) {
+  for (const name of readdirSync(d)) {
+    const p = join(d, name);
+    if (statSync(p).isDirectory()) { collect(p); continue; }
+    // .tsx는 제외한다 — jsx 설정이 필요하고 주문 경로에는 없다.
+    if (name.endsWith('.ts') && !name.endsWith('.d.ts')) {
+      allTs.push(p.slice(dir.length + 1));
+    }
+  }
+})(join(dir, 'src'));
+
+const TSC_ARGS = [
+  tscPath, 'run.ts', ...allTs,
+  '--module', 'commonjs', '--target', 'es2019',
+  '--skipLibCheck', '--esModuleInterop',
+];
+
 try {
-  execFileSync(process.execPath, [
-    tscPath, 'run.ts',
-    '--module', 'commonjs', '--target', 'es2019',
-    '--skipLibCheck', '--esModuleInterop',
-  ], { cwd: dir, stdio: 'pipe' });
+  execFileSync(process.execPath, TSC_ARGS, { cwd: dir, stdio: 'pipe' });
 } catch (e) {
   // tsc가 타입 에러로 non-zero를 반환해도 js는 생성된다 (ignoreBuildErrors 정책과 동일).
   // 다만 js가 아예 안 나온 경우는 진짜 실패이므로 아래에서 걸러낸다.
@@ -440,11 +500,7 @@ const entry = join(dir, 'run.js');
 if (!existsSync(entry)) {
   console.error('컴파일 실패 — run.js가 생성되지 않았습니다. tsc 출력:');
   try {
-    execFileSync(process.execPath, [
-      tscPath, 'run.ts',
-      '--module', 'commonjs', '--target', 'es2019',
-      '--skipLibCheck', '--esModuleInterop',
-    ], { cwd: dir, stdio: 'inherit' });
+    execFileSync(process.execPath, TSC_ARGS, { cwd: dir, stdio: 'inherit' });
   } catch { /* 출력은 위에서 이미 표시됨 */ }
   process.exit(1);
 }
