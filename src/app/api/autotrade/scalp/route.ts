@@ -304,6 +304,58 @@ export async function POST(req: NextRequest) {
   }
   const connIsLive = conn.isTestnet === false;
 
+  // ── Exact100X TESTNET 준비 상태: 실제 진입 경계에서 정본을 호출한다 ──
+  //
+  // loadConnection은 범용 구형 경로와의 호환을 위해 is_testnet=NULL을
+  // TESTNET으로, is_active=NULL을 활성으로 해석할 수 있다. 정확 100배는
+  // 그 폴백을 승인 사실로 취급하면 안 된다. 따라서 여기서는 연결 원본의
+  // 환경·권한을 범위 제한해서 다시 읽는다. 키/시크릿 값은 조회하지 않는다.
+  // 복호화 성공 사실만 conn의 존재에서 가져온다.
+  if (epContract?.profileId === 'MAX_LEV_100X') {
+    const { binanceTestnetReadiness } = await import('@/lib/engine/testnetReadiness');
+    let rawReadiness: any = null;
+    try {
+      const { data, error } = await sb.from('exchange_connections')
+        .select('id, exchange_id, is_testnet, is_active, perm_read, perm_trading, has_withdrawal')
+        .eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
+      if (error) {
+        return NextResponse.json({
+          ...preBase, ok: false, executed: false,
+          blocked: 'TESTNET_READINESS_UNKNOWN',
+          error: 'TESTNET 연결 원본의 환경·권한을 읽지 못했습니다 — 주문하지 않습니다',
+        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
+      rawReadiness = data;
+    } catch {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false,
+        blocked: 'TESTNET_READINESS_UNKNOWN',
+        error: 'TESTNET 연결 준비 상태를 확인하지 못했습니다 — 주문하지 않습니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // 여기에는 비밀 값도 암호문도 넘기지 않는다. conn은 loadConnection이
+    // 키 존재·시크릿 복호화를 통과한 결과지만 거래소 실인증 증거는 아니다.
+    const readiness = binanceTestnetReadiness(rawReadiness ? [{
+      connectionId: String(rawReadiness.id),
+      exchange: rawReadiness.exchange_id,
+      testnet: rawReadiness.is_testnet,
+      active: rawReadiness.is_active,
+      permissionRead: rawReadiness.perm_read,
+      permissionTrade: rawReadiness.perm_trading,
+      hasWithdrawal: rawReadiness.has_withdrawal,
+      credential: conn.apiKey && conn.apiSecret ? 'READY' : 'DECRYPT_FAILED',
+    }] : []);
+    if (!readiness.ready) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false,
+        blocked: 'TESTNET_NOT_READY',
+        readinessCode: readiness.code, error: readiness.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
+
   // ── 신규 진입 권한 ──
   //
   // **거래소를 건드리기 전에 전부 판정한다.**
@@ -1160,6 +1212,72 @@ export async function POST(req: NextRequest) {
   // 중복으로 거부한다 — 재진입 간격 검사가 실수로 빠져도 마지막 방어선이
   // 하나 남는다.
   const barBucket = Math.floor(Date.now() / (intervalMin * 60_000));
+
+  // ── Exact100X 계좌 전체 포지션 최대 1개 ──
+  //
+  // BTC/ETH 별개 멱등 키로는 동시 진입을 막지 못한다. 거래소 연결 하나에
+  // 공통 원자적 claim을 취득한 뒤에만 배율 설정 및 주문 전송으로 간다.
+  // 관측 오류, DB 잠금 오류, 지원하지 않는 환경은 fail-closed.
+  if (epContract?.profileId === 'MAX_LEV_100X') {
+    const {
+      maxOpenPositionsGate, UNRESOLVED_ENTRY_STATUSES, ACCEPTED_ENTRY_STATUSES,
+      CAPACITY_WINDOW_SEC,
+    } = await import('@/lib/engine/maxOpenPositionsGate');
+    const { claimSignal } = await import('@/lib/risk/idempotency');
+    const capacity = await maxOpenPositionsGate(
+      { maxOpenPositions: epContract.maxOpenPositions, mode: opMode },
+      {
+        observeExposure: async () => {
+          if (conn.exchange !== 'binance' || connIsLive) return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const [p, o] = await Promise.all([
+            bf.getFuturesPositions(conn.apiKey, conn.apiSecret, true),
+            bf.getFuturesOpenOrders(conn.apiKey, conn.apiSecret, true),
+          ]);
+          if (!p?.success || !o?.success
+              || !Array.isArray(p.positions) || !Array.isArray(o.orders)) return null;
+          return { positions: p.positions.length, openOrders: o.orders.length };
+        },
+        countPendingEntries: async () => {
+          const { count, error } = await sb.from('live_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId!)
+            .eq('connection_id', body.connectionId)
+            .eq('mode', 'TESTNET')
+            .eq('reduce_only', false)
+            .in('status', [...UNRESOLVED_ENTRY_STATUSES]);
+          return error || count == null ? null : count;
+        },
+        // 거래소가 접수한(ACKED) 진입. reconcile이 해소하지 않는 상태라
+        // 잠금 창 안의 것만 센다 — 그러지 않으면 한 번 진입하고 영구 차단된다.
+        countRecentAcceptedEntries: async () => {
+          const since = new Date(Date.now() - CAPACITY_WINDOW_SEC * 1000).toISOString();
+          const { count, error } = await sb.from('live_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId!)
+            .eq('connection_id', body.connectionId)
+            .eq('mode', 'TESTNET')
+            .eq('reduce_only', false)
+            .in('status', [...ACCEPTED_ENTRY_STATUSES])
+            .gte('created_at', since);
+          return error || count == null ? null : count;
+        },
+        claimSlot: async () => claimSignal(sb, {
+          key: `x100-capacity:${userId}:${body.connectionId}`,
+          neighbors: [], clientScoped: true,
+        }, CAPACITY_WINDOW_SEC),
+      },
+    );
+    if (!capacity.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: capacity.code, error: capacity.reason,
+      }, {
+        status: capacity.code === 'CAPACITY_UNKNOWN'
+          || capacity.code === 'CAPACITY_CLAIM_FAILED' ? 503 : 409,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+  }
 
   // ── 같은 봉에서 두 번 들어가지 않는다 (멱등 키) ──
   //

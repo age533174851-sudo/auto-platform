@@ -76,8 +76,29 @@ const cand  = code(read(CAND));
 
 // ══════════ ② sweep이 권한을 받고 쓴다 ══════════
 {
-  // 인자가 더 붙어도(fence 등) 권한이 넘어가는지만 본다.
-  if (!/runLifecycleSweep\(sb, dryRun, stillMine[,)]/.test(route)) {
+  // ── 위치가 아니라 **넘어가는가**를 본다 ──
+  //
+  //   예전에는 `runLifecycleSweep(sb, dryRun, stillMine` 모양을 글자로
+  //   요구했다. ⑤B-3A-1이 wake 정본을 3번째 인자로 끼워 넣자 `stillMine`이
+  //   4번째로 밀렸고, 이 규칙은 **권한이 그대로 넘어가는데도** 실패했다.
+  //   그리고 이 검사기가 CI에 배선돼 있지 않아 아무도 보지 않았다.
+  //
+  //   그래서 호출 **블록**을 괄호로 세서 그 안에 권한이 있는지 본다.
+  //   인자 순서가 또 바뀌어도 성립하고, 권한을 빼면 그때 실패한다.
+  const sweepCall = (() => {
+    const i = route.indexOf('await runLifecycleSweep(');
+    if (i < 0) return null;
+    const open = route.indexOf('(', i);
+    let depth = 0;
+    for (let k = open; k >= 0 && k < route.length; k += 1) {
+      if (route[k] === '(') depth += 1;
+      else if (route[k] === ')') { depth -= 1; if (depth === 0) return route.slice(i, k + 1); }
+    }
+    return null;
+  })();
+  if (sweepCall == null) {
+    err(`${ROUTE}에서 생명주기 sweep 호출 블록의 범위를 찾지 못했습니다`);
+  } else if (!/\bstillMine\b/.test(sweepCall)) {
     err(`${ROUTE}가 생명주기 sweep에 실행 권한을 넘기지 않습니다`
       + ' — 그 경로의 거래소 쓰기가 잠금 밖에 남습니다');
   }
@@ -322,8 +343,94 @@ const cand  = code(read(CAND));
   //
   //    판단 전에 선점하면 읽기만 한 줄이 자리를 먹어서, 같은 자리를
   //    가리키는 실제 조치 대상이 DUPLICATE로 밀린다.
-  const iClaim = route.indexOf('guard.claim(key)');
-  const iDecide = route.indexOf('const v = lifecycleDecide(');
+  //    ★ **첫 출현으로 재지 않는다.** 이 라우트에는 선점이 두 곳 있다 —
+  //      Exact100X 전용 종료 권한 경로와 일반 생명주기 경로. 파일 전체에서
+  //      `indexOf`로 첫 선점을 집으면 전용 경로의 선점(앞쪽)과 일반 경로의
+  //      판단(뒤쪽)을 비교해, 순서가 맞는데도 실패한다.
+  //      그래서 **생명주기 sweep 함수 본문 안에서만** 비교한다.
+  const sweepBody = (() => {
+    const i = route.indexOf('async function runLifecycleSweep(');
+    if (i < 0) return null;
+    // 파라미터 목록은 여러 줄이고 타입 안에 괄호가 있을 수 있다.
+    // `indexOf(')')`로 집으면 그 중 하나를 목록의 끝으로 착각한다 —
+    // 실제로 그래서 본문이 317자로 잘렸고 앵커를 "찾지 못했다"고 적혔다.
+    const pOpen = route.indexOf('(', i);
+    let pDepth = 0; let pEnd = -1;
+    for (let k = pOpen; k >= 0 && k < route.length; k += 1) {
+      if (route[k] === '(') pDepth += 1;
+      else if (route[k] === ')') { pDepth -= 1; if (pDepth === 0) { pEnd = k; break; } }
+    }
+    if (pEnd < 0) return null;
+    // 파라미터 목록 뒤에 **반환 타입**이 올 수 있다: `): Promise<{ … }> {`.
+    // 첫 `{`를 본문으로 잡으면 반환 타입만 떠내게 된다(실제로 766자가 됐다).
+    // 본문은 그 중 **가장 멀리 닫히는** 블록이다.
+    const match = (from) => {
+      let d = 0;
+      for (let k = from; k >= 0 && k < route.length; k += 1) {
+        if (route[k] === '{') d += 1;
+        else if (route[k] === '}') { d -= 1; if (d === 0) return k; }
+      }
+      return -1;
+    };
+    let best = -1; let bestEnd = -1; let at = pEnd;
+    for (let n = 0; n < 4; n += 1) {
+      const open = route.indexOf('{', at);
+      if (open < 0) break;
+      const end = match(open);
+      if (end > bestEnd) { best = open; bestEnd = end; }
+      at = open + 1;
+    }
+    if (best < 0 || bestEnd < 0) return null;
+    return route.slice(i, bestEnd + 1);
+  })();
+  if (sweepBody == null) {
+    err(`${ROUTE}에서 생명주기 sweep 함수 본문의 범위를 찾지 못했습니다`);
+  }
+  //    이 sweep 안에는 루프가 **둘**이고 각자 선점이 있다:
+  //      `for (const c of authorityCandidates)`  Exact100X 전용 종료 권한
+  //      `for (const p of positions)`            일반 생명주기
+  //    함수 전체에서 첫 선점을 집으면 전용 경로의 선점과 일반 경로의
+  //    판단을 비교해, 순서가 맞는데도 실패한다. **루프별로** 본다.
+  const blockFrom = (src, marker) => {
+    const i = src.indexOf(marker);
+    if (i < 0) return null;
+    const open = src.indexOf('{', i);
+    let d = 0;
+    for (let k = open; k >= 0 && k < src.length; k += 1) {
+      if (src[k] === '{') d += 1;
+      else if (src[k] === '}') { d -= 1; if (d === 0) return src.slice(i, k + 1); }
+    }
+    return null;
+  };
+  const sweep = sweepBody ?? '';
+  const scope = blockFrom(sweep, 'for (const p of positions)');
+  if (scope == null) {
+    err(`${ROUTE}에서 일반 생명주기 루프를 찾지 못했습니다`);
+  }
+  // 전용 권한 루프도 같은 규율을 지켜야 한다 — 거래소를 바꾸는 것이
+  // 확정된 뒤에 선점한다. 그 경로의 확정은 소유권·venue 확인과 점검 모드
+  // 조기 반환을 지난 자리다.
+  const authScope = blockFrom(sweep, 'for (const c of authorityCandidates)');
+  if (authScope == null) {
+    err(`${ROUTE}에서 전용 종료 권한 루프를 찾지 못했습니다`);
+  } else {
+    const aClaim = authScope.indexOf('guard.claim(');
+    const aDry = authScope.indexOf("code: 'DRY_RUN'");
+    // ★ `aDry >= 0 && …`로 쓰면 표식이 사라지는 순간 **검사가 꺼진다.**
+    //   조건부 규칙은 fail-open이다. 점검 모드 조기 반환이 **있어야 한다**로
+    //   바꿔서, 그것을 지우는 것 자체가 실패가 되게 한다.
+    if (aClaim < 0) err(`${ROUTE} 전용 권한 경로에 선점이 없습니다`);
+    else if (aDry < 0) {
+      err(`${ROUTE} 전용 권한 경로에 점검 모드 조기 반환이 없습니다`
+        + ' — 점검만 하는 회차가 거래소 쓰기 자리를 먹습니다');
+    } else if (aClaim < aDry) {
+      err(`${ROUTE} 전용 권한 경로가 점검 모드 반환보다 먼저 선점합니다`
+        + ' — 쓰지도 않을 회차가 자리를 먹습니다');
+    }
+  }
+  const lifeScope = scope ?? '';
+  const iClaim = lifeScope.indexOf('guard.claim(');
+  const iDecide = lifeScope.indexOf('const v = lifecycleDecide(');
   if (iClaim < 0 || iDecide < 0) err(`${ROUTE}에서 선점 또는 판단을 찾지 못했습니다`);
   else if (iClaim < iDecide) {
     err(`${ROUTE}가 판단 전에 자리를 선점합니다`

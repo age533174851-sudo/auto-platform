@@ -1,0 +1,137 @@
+# PR #313에 한정된 Exact100X 변이 전체 병렬 실측.
+# 머지 전 DRAFT 검증용이며 시크릿/거래소/운영 DB 접근 없음.
+# 기존 수동 전수 워크플로와 서로 독립적이다.
+name: mutation-100x-pr313
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: mutation-100x-pr313-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  shard:
+    if: github.event.pull_request.number == 313
+    name: 100X 전수 변이 shard ${{ matrix.shard }}/8
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    # ── 기준 커밋은 **job 수준**에서 넘긴다 ──
+    #
+    #   변이 하네스는 매 변이마다 게이트를 다시 돌리고, 그 안에
+    #   check-execution-profile.mjs가 있다. 그 검사기는 PR·push 이벤트에서
+    #   EXECUTION_CONTRACT_BASE가 비면 **실패한다** — 비었을 때 origin/main으로
+    #   조용히 후퇴하면 "자기 자신과 비교"가 되어 버전 검사가 꺼지기 때문이다.
+    #
+    #   ci.yml은 이 값을 넘기는데 이 워크플로는 넘기지 않아서, 8개 샤드가
+    #   전부 **기준선 단계에서 멈췄다**(runs/38065897023). 457건이 실패한 게
+    #   아니라 시작조차 못 한 것이다.
+    #
+    #   step마다 적지 않고 job 수준에 두는 이유: 자기 점검 step과 전수 step이
+    #   같은 값을 봐야 하고, 둘 중 한쪽만 고치는 것이 이 저장소의 상습 고장이다.
+    env:
+      EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: 원본·하네스·트리 확인
+        env:
+          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test -z "$(git status --porcelain)"
+          node scripts/check-100x-mutations.mjs --self-test
+      - name: 전수 샤드 실행
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/shard-$SHARD.log"
+          printf 'TARGET_SHA=%s\nSHARD=%s/8\n' "$(git rev-parse HEAD)" "$SHARD" > "$LOG"
+          node scripts/check-100x-mutations.mjs --shard-index "$SHARD" --shard-count 8 2>&1 | tee -a "$LOG"
+      - name: 완료 후 작업 트리 복원 확인
+        if: always()
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+      - name: 실행 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-100x-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.log
+          retention-days: 30
+          if-no-files-found: error
+
+  aggregate:
+    name: 100X 전수 합산 · 누락 0 증명
+    needs: [shard]
+    if: always() && github.event.pull_request.number == 313
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-100x-shard-*
+          path: mutation-evidence
+      - name: 샤드 8개·전체 수·누락·대조군 집계
+        env:
+          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+          base = pathlib.Path('mutation-evidence')
+          results = []
+          errors = []
+          for i in range(8):
+              f = base / f'mutation-100x-shard-{i}' / f'shard-{i}.log'
+              if not f.is_file():
+                  errors.append(f'{i}: evidence missing')
+                  continue
+              s = f.read_text(errors='replace')
+              if f'TARGET_SHA={os.environ["TARGET_SHA"]}' not in s:
+                  errors.append(f'{i}: target SHA mismatch')
+              if f'SHARD={i}/8' not in s or f'SHARD {i}/8;' not in s:
+                  errors.append(f'{i}: shard scope missing')
+              match = re.search(r'검출 (\d+) / 누락 (\d+) / 동치 (\d+) / 판정불가 (\d+)\s*/ 대조군 PASS (\d+) · 과도검출 (\d+)', s)
+              total = re.search(r'총 (\d+)건 · [\d.]+분 · 트리 clean 확인됨', s)
+              if not match or not total:
+                  errors.append(f'{i}: final summary missing')
+                  continue
+              vals = [int(v) for v in match.groups()]
+              count = int(total.group(1))
+              if vals[1] or vals[3] or vals[5]:
+                  errors.append(f'{i}: missed/noop/false-positive {vals}')
+              # NOOP-EXPECTED 대조군은 의도적으로 파일이 안 바뀌며
+              # 하네스의 검출/동치/대조군 PASS 카운터에는 들어가지 않는다.
+              expected_noops = s.count('— 적용 안 됨(의도대로)')
+              if vals[0]+vals[2]+vals[4]+expected_noops!=count:
+                  errors.append(f'{i}: coverage mismatch count={count}, counters={vals}, expected_noop={expected_noops}')
+              results.append((i,count,vals))
+          total_count = sum(x[1] for x in results)
+          # 커밋의 전수 목록은 457건. 451이라는 과거 수치에 맞춰 표본을 버리지 않는다.
+          if total_count != 457:
+              errors.append(f'expected 457 unique mutations, observed {total_count}')
+          if os.environ['SHARD_RESULT'] != 'success':
+              errors.append(f'shard jobs outcome: {os.environ["SHARD_RESULT"]}')
+          for i,n,v in results:
+              print(f'SHARD {i}: total {n}, detected {v[0]}, equiv {v[2]}, control {v[4]}, miss {v[1]}, noop {v[3]}, overdetect {v[5]}')
+          print(f'ALL SHARDS: {len(results)}/8, TOTAL {total_count}/457, TARGET_SHA={os.environ["TARGET_SHA"]}')
+          if errors:
+              for e in errors: print('FAIL:', e, file=sys.stderr)
+              sys.exit(1)
+          print('PASS: 457 complete, miss 0, undecidable 0, overdetect 0, complete clean evidence')
+          PY

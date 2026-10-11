@@ -68,6 +68,62 @@ export function runTestnetReadinessTests() {
     return problems;
   };
 
+  // 준비 상태 판정이 실제 주문 전 경계에 배선되는지 고정한다.
+  // 연결 로더의 NULL 폴백은 100배에는 허가가 아니다. DB 원본만 신뢰한다.
+  const scalpRoutePath = resolve(__dirname, '../../app/api/autotrade/scalp/route.ts');
+  const readinessRouteProblems = (source: string): string[] => {
+    const begin = source.indexOf('const { binanceTestnetReadiness }');
+    const end = source.indexOf('// ── 신규 진입 권한', begin);
+    if (begin < 0 || end <= begin) return ['정본 준비 상태 호출 경계가 없습니다'];
+    const body = source.slice(begin, end).replace(/^\s*\/\/.*$/gm, '');
+    const missing = [
+      "binanceTestnetReadiness(rawReadiness ? [{",
+      ".select('id, exchange_id, is_testnet, is_active, perm_read, perm_trading, has_withdrawal')",
+      ".eq('id', body.connectionId).eq('user_id', userId).maybeSingle()",
+      'testnet: rawReadiness.is_testnet',
+      'active: rawReadiness.is_active',
+      'permissionRead: rawReadiness.perm_read',
+      'permissionTrade: rawReadiness.perm_trading',
+      'hasWithdrawal: rawReadiness.has_withdrawal',
+      "credential: conn.apiKey && conn.apiSecret ? 'READY' : 'DECRYPT_FAILED'",
+      'if (!readiness.ready)',
+      "blocked: 'TESTNET_NOT_READY'",
+      "blocked: 'TESTNET_READINESS_UNKNOWN'",
+    ].filter(s => !body.includes(s));
+    const selectionAt = source.indexOf("epContract?.profileId === 'MAX_LEV_100X'", begin - 250);
+    const commitAt = source.indexOf('const committed = await commitEntry100x(');
+    if (selectionAt < 0 || commitAt < 0 || begin >= commitAt) {
+      missing.push('Exact100X만 선별하고 배율 설정 전에 차단해야 합니다');
+    }
+    return missing;
+  };
+
+  test('★ Exact100X TESTNET 준비 상태 정본이 실제 scalp 쓰기 이전에 배선됐다', () => {
+    const bad = readinessRouteProblems(readFileSync(scalpRoutePath, 'utf8'));
+    eq(bad.length, 0, `실거래 준비 상태 배선 누락: ${bad.join(' / ')}`);
+  });
+  test('★ TESTNET 준비 배선 보안 변이: 소유자/원본 플래그/차단을 지우면 RED', () => {
+    const source = readFileSync(scalpRoutePath, 'utf8');
+    const mutations: Array<[string, string, string]> = [
+      ['소유자 범위 누락', ".eq('id', body.connectionId).eq('user_id', userId).maybeSingle()",
+        ".eq('id', body.connectionId).maybeSingle()"],
+      ['TESTNET NULL 폴백', 'testnet: rawReadiness.is_testnet',
+        'testnet: conn.isTestnet'],
+      ['거래 권한 거짓 통과', 'permissionTrade: rawReadiness.perm_trading',
+        'permissionTrade: true'],
+      ['결격 준비 상태 통과', 'if (!readiness.ready)', 'if (false)'],
+    ];
+    for (const [name, before, after] of mutations) {
+      assert(source.includes(before), `변이 ${name} 대상이 사라졌습니다`);
+      // 라우트 앞부분에도 동일한 연결 소유자 조건이 있다. 변이는 반드시
+      // Exact100X readiness 블록 안에서만 주입해야 검사가 진짜 결함을 본다.
+      const offset = source.indexOf('const { binanceTestnetReadiness }');
+      const mutated = source.slice(0, offset) + source.slice(offset).replace(before, after);
+      assert(readinessRouteProblems(mutated).length > 0,
+        `결함 ${name}를 넣어도 실거래 배선 검사가 통과했습니다`);
+    }
+  });
+
   test('★ 환경변수 진단 GET에 관리자 인증·LIVE 차단·TESTNET 고정이 모두 배선돼 있다', () => {
     const source = readFileSync(healthRoutePath, 'utf8');
     const bad = routeGuardViolations(source);

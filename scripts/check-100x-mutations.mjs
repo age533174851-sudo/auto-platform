@@ -61,6 +61,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
 진단
   --only OK1,OK2   이름이 그것으로 시작하는 변이만 돌린다
   --verbose        어느 게이트가 빨간불을 켰는지 함께 적는다
+  --shard-index N --shard-count K   독립 CI 러너 K개 중 인덱스 N의 변이만 실행
 
   대조군이 빨개졌을 때 쓴다. 게이트 셋 중 무엇이 잡았는지 보이지 않으면
   원인을 찾을 수 없다.
@@ -85,6 +86,28 @@ if (argv.includes('--help') || argv.includes('-h')) {
 const SELF_TEST = argv.includes('--self-test');
 const LIST_ONLY = argv.includes('--list');
 const VERBOSE = argv.includes('--verbose');
+
+// 각 변이는 독립 러너에서 원본 바이트로 복구된다. 8개 샤드가 서로 다른
+// 작업 폴더에서 목록의 인덱스 modulo로 분할하므로 중복/누락 없이 병렬 검증.
+// 하나라도 샤드가 실패하면 집계 잡이 전체 결과를 FAIL로 만든다.
+const shardOption = name => {
+  const at = argv.indexOf(name);
+  if (at < 0) return null;
+  const value = argv[at + 1];
+  if (!value || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    console.error(`❌ ${name}는 0 이상의 정수여야 합니다`);
+    process.exit(2);
+  }
+  return Number(value);
+};
+const SHARD_INDEX = shardOption('--shard-index');
+const SHARD_COUNT = shardOption('--shard-count');
+if ((SHARD_INDEX === null) !== (SHARD_COUNT === null)
+    || (SHARD_COUNT !== null && (SHARD_COUNT < 1 || SHARD_COUNT > 32
+      || SHARD_INDEX >= SHARD_COUNT || !Number.isSafeInteger(SHARD_COUNT)))) {
+  console.error('❌ --shard-index와 --shard-count를 함께 유효한 범위로 넣어야 합니다');
+  process.exit(2);
+}
 // `--only OK1` 또는 `--only OK1,OK2` — 이름 앞부분만 맞으면 된다.
 // 대조군 하나가 빨개졌을 때 그것만 떼어 돌려 보기 위한 것이다.
 const ONLY = (() => {
@@ -2487,9 +2510,11 @@ const restoreExact = (file, original) => writeFileSync(file, original);
 // `--only`가 있으면 그것만 남긴다. 진단용이므로 **결과 요약에 그대로
 // 반영된다** — 일부만 돌린 결과를 전체 결과로 착각하지 않도록 총계도
 // 줄어든 수로 적힌다.
-const SELECTED = ONLY
+const FILTERED = ONLY
   ? M.filter(([name]) => ONLY.some(p => name.startsWith(p)))
   : M;
+const SELECTED = SHARD_COUNT == null ? FILTERED
+  : FILTERED.filter((_, index) => index % SHARD_COUNT === SHARD_INDEX);
 if (ONLY && SELECTED.length === 0) {
   console.error(`❌ --only ${ONLY.join(',')} 에 맞는 돌연변이가 없습니다`);
   process.exit(1);
@@ -2697,5 +2722,6 @@ const mins = ((Date.now() - started) / 60_000).toFixed(1);
 console.log(`\n검출 ${detected} / 누락 ${missed} / 동치 ${equiv} / 판정불가 ${noop}`
   + ` / 대조군 PASS ${greenOk} · 과도검출 ${greenBad}`);
 console.log(`총 ${SELECTED.length}건 · ${mins}분 · 트리 clean 확인됨`
-  + (ONLY ? `  (--only ${ONLY.join(',')} — 일부만 돌렸습니다)` : ''));
+  + (ONLY ? `  (--only ${ONLY.join(',')} — 일부만 돌렸습니다)` : '')
+  + (SHARD_COUNT != null ? `  (SHARD ${SHARD_INDEX}/${SHARD_COUNT}; 전체 ${FILTERED.length}건 중 부분 실행)` : ''));
 process.exit(missed || greenBad || noop ? 1 : 0);

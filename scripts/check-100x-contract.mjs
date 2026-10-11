@@ -5984,6 +5984,110 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
   }
 }
 
+
+// ── Exact100X maxOpenPositions=1: 선언이 아니라 실주문 경계 배선 ──
+// 순수 단위 테스트만 있으면 호출부를 지워도 초록색이 된다.
+{
+  const scalp = code(SCALP);
+  const cap = code('src/lib/engine/maxOpenPositionsGate.ts');
+  if (!/epContract\?\.profileId\s*===\s*'MAX_LEV_100X'/.test(scalp)) {
+    err('scalp: Exact100X 계좌 전체 포지션 상한을 적용하지 않습니다');
+  }
+  if (!/maxOpenPositions:\s*epContract\.maxOpenPositions/.test(scalp)
+      || !/const capacity = await maxOpenPositionsGate\(/.test(scalp)) {
+    err('scalp: maxOpenPositions 선언값을 실제 용량 관문으로 넘기지 않습니다');
+  }
+  const gateAt = scalp.indexOf('const capacity = await maxOpenPositionsGate(');
+  const leverageAt = scalp.indexOf('const committed = await commitEntry100x(');
+  if (gateAt < 0 || leverageAt < 0 || gateAt >= leverageAt) {
+    err('scalp: 계좌 전체 상한이 거래소 배율 설정보다 앞에 있지 않습니다');
+  }
+  if (!/x100-capacity:\$\{userId\}:\$\{body\.connectionId\}/.test(scalp)) {
+    err('scalp: BTC·ETH가 동일한 계좌 수준의 원자적 claim key를 쓰지 않습니다');
+  }
+
+  // ── 접수를 체결로 적지 않는가 ──
+  //
+  //   예전에는 접수(ACK) 단계가 `filled_qty: res.qty`를 적었다.
+  //   `placeFuturesOrder`의 `qty`는 `origQty || executedQty`라 **요청
+  //   수량이 먼저** 오므로, 한 주도 안 채워진 주문이 "요청만큼 체결됨"으로
+  //   남았다. 그 값을 ledger 세 곳이 보유 수량으로 읽고, reconcile은
+  //   ACKED를 보지 않아 스스로 고쳐지지도 않았다.
+  //
+  //   순수 모듈은 시험이 못박는다. 여기서는 **실행기가 그것을 쓰는지**를 본다.
+  {
+    const exe = code(EXEC);
+    if (!/fillFactsOf\(res\.raw\)/.test(exe)) {
+      err(`${EXEC}: 접수 기록이 체결 사실 정본(fillFactsOf)을 쓰지 않습니다`
+        + ' — 요청 수량이 체결로 적힐 수 있습니다');
+    }
+    if (!/filled_qty: fill\.filledQty/.test(exe) || !/avg_price: fill\.avgPrice/.test(exe)) {
+      err(`${EXEC}: filled_qty·avg_price에 체결 사실이 아닌 값을 적습니다`);
+    }
+    if (/filled_qty:\s*res\.qty/.test(exe) || /avg_price:\s*res\.price/.test(exe)) {
+      err(`${EXEC}: 주문 응답의 요청 수량·지정가를 체결로 적고 있습니다`
+        + ' — origQty는 체결의 증거가 아닙니다');
+    }
+    // 상태도 정본에서 와야 한다. 'ACKED'를 글자로 박으면 거래소가
+    // FILLED를 알려줘도 영구히 ACKED에 머문다.
+    const iAck = exe.indexOf('fillFactsOf(res.raw)');
+    const seg = iAck < 0 ? '' : exe.slice(iAck, iAck + 420);
+    if (iAck >= 0 && !/status: fill\.status/.test(seg)) {
+      err(`${EXEC}: 접수 기록의 상태를 체결 사실에서 가져오지 않습니다`);
+    }
+  }
+
+  // ── 상태 목록을 **손으로 적지 않는가** ──
+  //
+  //   처음 배선은 `['INTENT','SENT','UNKNOWN']`을 라우트에 직접 적었다.
+  //   그 목록은 `live_orders_status_idx` 부분 인덱스와 같은 모양이라
+  //   그럴듯했지만 `OrderStatus`에는 `ACKED`가 더 있었고, **빠진 방향이
+  //   통과였다.** 정본 상수를 쓰게 해서 어휘가 늘면 한 곳만 고치면 되게 한다.
+  if (!/\[\.\.\.UNRESOLVED_ENTRY_STATUSES\]/.test(scalp)
+      || !/\[\.\.\.ACCEPTED_ENTRY_STATUSES\]/.test(scalp)) {
+    err('scalp: 진입 차단 상태 목록을 정본 상수가 아니라 손으로 적었습니다'
+      + ' — 어휘가 늘면 이 질의만 옛 목록을 씁니다');
+  }
+  // ── 접수된 진입은 **나이로 제한**하는가 ──
+  //
+  //   reconcile의 PENDING_STATUSES에 ACKED가 없어 그 줄은 해소되지 않는다.
+  //   나이 제한 없이 세면 한 번 진입한 계정이 영구히 막힌다.
+  {
+    const iAcc = scalp.indexOf('countRecentAcceptedEntries: async');
+    const open = iAcc < 0 ? -1 : scalp.indexOf('{', iAcc);
+    let depth = 0; let end = -1;
+    for (let k = open; k >= 0 && k < scalp.length; k += 1) {
+      if (scalp[k] === '{') depth += 1;
+      else if (scalp[k] === '}') { depth -= 1; if (depth === 0) { end = k; break; } }
+    }
+    if (iAcc < 0 || open < 0 || end < 0) {
+      err('scalp: 접수된 진입 조회 블록의 범위를 찾지 못했습니다');
+    } else {
+      const body = scalp.slice(iAcc, end + 1);
+      if (!/CAPACITY_WINDOW_SEC/.test(body) || !/\.gte\('created_at'/.test(body)) {
+        err('scalp: 접수된(ACKED) 진입을 잠금 창으로 제한하지 않습니다'
+          + ' — reconcile이 해소하지 않는 상태라 한 번 진입하면 영구히 막힙니다');
+      }
+      if (!/\.eq\('reduce_only', false\)/.test(body)) {
+        err('scalp: 접수된 진입 조회가 청산 주문을 함께 셉니다'
+          + ' — 청산이 진입을 막는 모양이 됩니다');
+      }
+    }
+  }
+  if (!/getFuturesPositions\(/.test(scalp)
+      || !/getFuturesOpenOrders\(/.test(scalp)
+      || !/countPendingEntries:\s*async/.test(scalp)
+      || !/countRecentAcceptedEntries:\s*async/.test(scalp)) {
+    err('scalp: 계좌 전체 포지션/미체결 주문/미확정 진입/접수된 진입을 모두 조사하지 않습니다');
+  }
+  if (!/claim\.installed !== true/.test(cap)
+      || !/claim\.error/.test(cap)
+      || !/claim\.duplicate/.test(cap)
+      || !/i\.mode !== 'TESTNET'/.test(cap)) {
+    err('maxOpenPositionsGate: fail-closed 또는 TESTNET 전용 관문이 사라졌습니다');
+  }
+}
+
 if (bad) {
   console.error(`\n전용 100배 계약 검사 실패: ${bad}건`);
   process.exit(1);
