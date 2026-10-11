@@ -11,6 +11,28 @@ const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
 const RUN_SRC = `
+// ── \`@/\` 런타임 해석 ──
+//
+//   이 러너는 CommonJS로 컴파일해 Node로 바로 돌린다. tsc의 경로 별칭은
+//   **컴파일 시점만**이라 \`require('@/lib/...')\`는 런타임에 해석되지
+//   않는다. 그래서 \`await import('@/...')\`를 쓰는 실행기·라우트는
+//   유닛 시험에 **올릴 수 없었고**, 그 경로의 DB 쓰기는 정적 검사기
+//   한 겹에만 의존했다. 그 공백이 이 shim이 메우려는 것이다.
+//
+//   별칭을 해석기 수준에서 바꿔 두면, 실행기가 실제로 거래소 어댑터를
+//   불러오고 실제로 장부에 쓴다 — 통합 시험이 가능해진다.
+const __mod = require('module');
+const __path = require('path');
+const __origResolve = __mod._resolveFilename;
+__mod._resolveFilename = function (request, ...rest) {
+  if (typeof request === 'string' && request.startsWith('@/')) {
+    // tsconfig의 별칭은 \`@/* → ./src/*\`다. 러너는 \`src\`를 임시
+    // 폴더로 복사하므로 \`<tmp>/src/...\`가 실제 자리다.
+    request = __path.join(__dirname, 'src', request.slice(2));
+  }
+  return __origResolve.call(this, request, ...rest);
+};
+
 import { runPnlTests } from './src/lib/pnl/pnl.test';
 import { runBacktestTests } from './src/lib/backtest/engine.test';
 import { runRiskManagerTests } from './src/lib/engine/riskManager.test';
@@ -124,6 +146,7 @@ import {
   runProvenFillTests, runOtherVenueLedgerTests, runCoinMFillTests,
 } from './src/lib/engine/reconcileLedgerStatus.test';
 import { runCredentialExposureTests } from './src/lib/security/credentialExposure.test';
+import { runOrderPathIntegrationTests } from './src/test/integration/orderPathIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
 import { runWalletTests } from './src/lib/markets/wallets.test';
@@ -357,6 +380,14 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
+  await flushAsync();
+  // ── 통합 시험은 **단독으로** 돌린다 ──
+  //
+  //   이 시험은 \`globalThis.fetch\`를 바꿔 끼운다. 다른 async 시험이
+  //   아직 대기 중이면 그쪽 스텁이 이 스텁을 덮어써서, 실행기가 **남의
+  //   가짜 거래소**에 묻게 된다. 실제로 그 일이 났고 "거래소 호출이
+  //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
+  await runOrderPathIntegrationTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
