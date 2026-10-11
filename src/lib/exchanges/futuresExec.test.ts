@@ -254,6 +254,36 @@ export function runFuturesExecTests() {
     }
   });
 
+  test('★ 전송 계층 오류 문구가 빠져 있으면 재시도가 열린다', () => {
+    // 이 판정은 **걸리면** 재시도 금지, 안 걸리면 재시도 허용이다.
+    // 즉 빠진 문구는 "거절"로 읽혀 중복 주문의 문이 된다.
+    // 아래는 전송 계층에서만 나오고 거래소 거절 응답에는 없는 문구들이다.
+    for (const s of [
+      'connect ECONNREFUSED 13.33.1.1:443',
+      'getaddrinfo ENOTFOUND fapi.binance.com',
+      'connect EHOSTUNREACH', 'connect ENETUNREACH', 'write EPIPE',
+      'Client network socket disconnected before secure TLS connection was established',
+      'Premature close', 'terminated',
+      'UND_ERR_SOCKET',
+    ]) {
+      assert(unknownResultVerdict(s).unknown, `UNKNOWN으로 안 읽힘: ${s}`);
+    }
+  });
+
+  test('★ 전송 계층 문구를 넓혀도 거절 판정이 흔들리지 않는다', () => {
+    // 추가는 "재시도 허용 → 금지" 한 방향으로만 움직여야 한다.
+    // 거래소 거절은 `[code] msg` 또는 `HTTP nnn` 모양이고 위 문구와 겹치지 않는다.
+    for (const s of [
+      '[-2019] Margin is insufficient', '[-1121] Invalid symbol',
+      '[-4164] Order\'s notional must be no smaller than 5',
+      'HTTP 400', 'HTTP 418',
+      'Gate 400: invalid argument', 'Gate INVALID_PARAM: contract not found',
+      '최소 수량 미달', '최소 주문금액 미달',
+    ]) {
+      eq(unknownResultVerdict(s).unknown, false, `거절인데 UNKNOWN으로 읽힘: ${s}`);
+    }
+  });
+
   test('거래소가 명시적으로 거절한 것은 UNKNOWN이 아니다', () => {
     for (const s of [
       '[-2019] Margin is insufficient', '[-1111] Precision is over the maximum',

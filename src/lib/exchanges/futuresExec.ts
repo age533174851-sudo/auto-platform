@@ -744,7 +744,22 @@ export interface UnknownVerdict {
 export function unknownResultVerdict(errorText: string | null | undefined): UnknownVerdict {
   const s = String(errorText || '');
   if (!s) return { unknown: false, reason: '' };
-  const hit = /응답\s*없음|응답을\s*받지\s*못|타임아웃|timed?\s*out|ETIMEDOUT|ECONNRESET|ECONNABORTED|EAI_AGAIN|socket hang up|network\s*error|fetch failed|aborted/i
+  // ── 빠져 있던 전송 계층 오류 ──
+  //
+  //   이 판정은 **걸리면** UNKNOWN(재시도 금지)이고 안 걸리면 거절(재시도
+  //   허용)이다. 즉 **처음 보는 오류 문구는 "거절"로 읽혀 재시도가 열린다.**
+  //   거래소에 이미 나갔는데 다시 보내면 중복 체결이다.
+  //
+  //   아래는 전송 계층에서만 나오는 문구들이고, 거래소의 거절 응답에는
+  //   나타나지 않는다(거절은 `[code] msg` 또는 `HTTP nnn` 모양이다).
+  //   그래서 추가하는 것은 "재시도 허용 → 금지" 한 방향으로만 움직이고,
+  //   정상 거절 처리를 바꾸지 않는다.
+  //
+  //   ★ 기본 방향 자체(안 걸리면 재시도 허용)는 그대로 남아 있다.
+  //     그것을 뒤집으려면 Gate의 거절 문구까지 알아야 하고, 모르는 채
+  //     뒤집으면 정상 거절이 UNKNOWN으로 묶여 장부에 미확정이 쌓인다.
+  //     별도 판단이 필요한 변경이라 여기서 하지 않았다.
+  const hit = /응답\s*없음|응답을\s*받지\s*못|타임아웃|timed?\s*out|ETIMEDOUT|ECONNRESET|ECONNABORTED|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|EPIPE|EAI_AGAIN|socket hang up|socket disconnected|premature close|terminated|UND_ERR|network\s*error|fetch failed|aborted/i
     .test(s);
   return {
     unknown: hit,
