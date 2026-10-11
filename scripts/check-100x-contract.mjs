@@ -6051,6 +6051,37 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
     }
   }
 
+  // ── 읽는 쪽이 null을 요청 수량으로 메우지 않는가 ──
+  //
+  //   쓰는 쪽을 정직하게 고치자(`orderFillFacts`) 체결 미확인 줄의
+  //   `filled_qty`가 null이 됐다. 그런데 읽는 쪽 **세 곳**이
+  //   `Number(r.filled_qty ?? r.quantity) || 0`로 그 null을 요청 수량으로
+  //   메웠다 — 없애려던 결함이 읽는 쪽으로 옮겨 앉았다.
+  //
+  //   메우는 것 자체를 막지는 않는다(과소 보고가 더 위험하다). 대신
+  //   **정본 하나를 쓰게** 하고, 메웠다는 사실을 세서 드러내게 한다.
+  {
+    const readers = [
+      'src/app/api/strategies/ledger/route.ts',
+      'src/app/api/autotrade/my-original-v1/route.ts',
+      'src/app/api/autotrade/daily-ladder/route.ts',
+    ];
+    for (const f of readers) {
+      const r = code(f);
+      if (/filled_qty\s*\?\?\s*r?\.?quantity/.test(r)) {
+        err(`${f}: 체결 수량 null을 요청 수량으로 직접 메웁니다`
+          + ' — ledgerFillQty 정본을 쓰세요 (모르는 것이 요청만큼 체결된 것으로 읽힙니다)');
+      }
+      if (!/ledgerFillQty\(/.test(r)) {
+        err(`${f}: 장부 체결 수량 정본(ledgerFillQty)을 쓰지 않습니다`);
+      }
+      // 세어만 두고 드러내지 않으면 아무도 못 본다.
+      if (!/assumedFills/.test(r)) {
+        err(`${f}: 요청 수량으로 대신한 줄의 수를 드러내지 않습니다`);
+      }
+    }
+  }
+
   // ── 주문 유형이 체결 증거를 대신하지 않는가 ──
   //
   //   `futuresExec`의 옛 조건은 MARKET일 때 `filled`가 null이어도

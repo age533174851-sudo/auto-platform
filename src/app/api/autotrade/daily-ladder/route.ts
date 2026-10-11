@@ -18,6 +18,7 @@
 // JWT로 호출하면 body의 userId는 무시하고 토큰의 사용자로 강제한다 —
 // 그러지 않으면 로그인한 누구나 남의 계정으로 주문을 돌릴 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
+import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
 
@@ -578,13 +579,17 @@ export async function POST(req: NextRequest) {
     // **남의 포지션까지 닫는다.** 그쪽 전략은 자기가 아직 들고 있다고
     // 믿고 손절도 익절도 걸지 않는다.
     const foreign = await findForeignHolders(sb, userId, symbol, 'daily-ladder');
-    if (foreign.length > 0) {
+    if (foreign.holders.length > 0) {
       await releaseReservation(sb, result.ladder?.reservationId);
       return NextResponse.json({
         ...base, mode: opMode, executed: false,
         blocked: 'FOREIGN_STRATEGY_HOLDS',
-        error: `${symbol}을(를) 다른 전략(${foreign.join(', ')})이 보유 중입니다. ` +
-               '이 전략의 손절은 전량 청산이라 그쪽 포지션까지 닫습니다.',
+        assumedFills: foreign.assumedFills,
+        error: `${symbol}을(를) 다른 전략(${foreign.holders.join(', ')})이 보유 중입니다. `
+          + '이 전략의 손절은 전량 청산이라 그쪽 포지션까지 닫습니다.'
+          + (foreign.assumedFills > 0
+            ? ` (체결 수량을 확인하지 못해 요청 수량으로 대신한 주문 ${foreign.assumedFills}건이 섞여 있습니다)`
+            : ''),
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
     }
 
@@ -1261,7 +1266,7 @@ export async function GET(req: NextRequest) {
  */
 async function findForeignHolders(
   sb: any, userId: string, symbol: string, selfStrategy: string,
-): Promise<string[]> {
+): Promise<{ holders: string[]; assumedFills: number }> {
   const { strategyOf } = await import('@/lib/strategies/ledger');
   // **strategy_id는 live_orders에 없는 칸이다.** 그걸 고르는 동안 이 질의는
   // 언제나 실패했고, 위 주석대로 실패는 던지므로 **진입이 매번 여기서
@@ -1276,17 +1281,25 @@ async function findForeignHolders(
   if (error) throw new Error(`전략 장부를 확인하지 못했습니다: ${error.message}`);
 
   const net = new Map<string, number>();
+  let assumedFills = 0;
   for (const r of (Array.isArray(data) ? data : [])) {
     const owner = strategyOf(r);
     // 주인을 모르는 주문은 여기서 판단 근거로 쓰지 않는다. 임의로 남의
     // 것이라고 보면 정상 진입이 영영 막힌다.
     if (!owner || owner === selfStrategy) continue;
-    const q = Number(r.filled_qty ?? r.quantity) || 0;
+    const fq = ledgerFillQty(r);
+    const q = fq.qty;
+    if (fq.assumed && q > 0) assumedFills += 1;
     if (q <= 0) continue;
     const signed = String(r.side).toUpperCase() === 'BUY' ? q : -q;
     net.set(owner, (net.get(owner) ?? 0) + signed);
   }
-  return Array.from(net.entries())
-    .filter(([, q]) => Math.abs(q) > 1e-12)
-    .map(([k]) => k);
+  // 요청 수량으로 대신한 줄이 섞여 있으면 이 순포지션은 거래소가 증명한
+  // 값이 아니다. 막든 안 막든 그 사실을 함께 돌려준다.
+  return {
+    holders: Array.from(net.entries())
+      .filter(([, q]) => Math.abs(q) > 1e-12)
+      .map(([k]) => k),
+    assumedFills,
+  };
 }

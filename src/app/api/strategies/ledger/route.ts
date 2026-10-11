@@ -11,6 +11,7 @@
 // 그래서 마지막에 반드시 거래소 실제 수량과 대조하고, 차이가 있으면
 // 그 차이를 전략들에 나눠 붙이지 않고 '미귀속'으로 따로 보고한다.
 import { NextRequest, NextResponse } from 'next/server';
+import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import { marketTypeOf } from '@/lib/markets/marketType';
 import {
@@ -51,6 +52,8 @@ export async function GET(req: NextRequest) {
   const book = new Map<string, StrategyHolding>();
   let unownedCount = 0;
 
+  // 요청 수량으로 대신한 줄의 수. **확인하지 못한 것을 통과로 적지 않는다.**
+  let assumedFills = 0;
   for (const r of (Array.isArray(rows) ? rows : [])) {
     const market = marketTypeOf(r);
     // 시장 유형을 모르는 주문은 장부에 넣지 않는다. 현물인지 선물인지
@@ -60,7 +63,10 @@ export async function GET(req: NextRequest) {
     const strategy = strategyOf(r) ?? UNOWNED;
     if (strategy === UNOWNED) unownedCount++;
 
-    const qty = Number(r.filled_qty ?? r.quantity) || 0;
+    // 요청 수량으로 대신한 줄은 세서 응답에 드러낸다 (ledgerFillQty 주석).
+    const fq = ledgerFillQty(r);
+    const qty = fq.qty;
+    if (fq.assumed && qty > 0) assumedFills += 1;
     if (qty <= 0) continue;
     const price = Number(r.avg_price ?? r.price) || null;
 
@@ -146,8 +152,16 @@ export async function GET(req: NextRequest) {
     conflicts,
     exchangeReadable,
     unownedCount,
+    // **확인하지 못한 것을 통과로 적지 않는다.** 체결 수량을 거래소가
+    // 증명하지 않아 요청 수량으로 대신한 줄의 수다. 0이 아니면 이 장부의
+    // 수량 일부는 증거가 아니라 추정이다.
+    assumedFills,
     note: exchangeReadable
       ? '장부는 앱이 붙인 귀속입니다. 거래소가 사실이고, 차이는 미귀속으로 표시됩니다.'
       : '거래소 수량을 읽지 못해 대조하지 못했습니다 — 일치한다는 뜻이 아닙니다.',
+    assumedNote: assumedFills > 0
+      ? `체결 수량을 확인하지 못해 요청 수량으로 대신한 주문 ${assumedFills}건이 섞여 있습니다`
+        + ' — 이 장부의 수량 일부는 거래소가 증명한 값이 아닙니다'
+      : null,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
