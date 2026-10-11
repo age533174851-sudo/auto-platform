@@ -186,3 +186,45 @@ export function ledgerStatusOfGate(f: GateOrderLedgerFacts): ExchangeLedgerDecis
   // 끝났다. 체결이었는지 아닌지는 수량이 말한다 — 상태로 단정하지 않는다.
   return { status: 'RECONCILED', terminal: true, needsAttention: false, attentionReason: null };
 }
+
+/**
+ * Gate **현물**에서 받은 주문 → 장부 상태.
+ *
+ * **Gate 현물의 어휘는 Gate 선물과도 다르다.** 주문 상태가
+ * `open`·`closed`·`cancelled`이고 `finish_as`가 없다. 어휘가 셋이면
+ * 변환도 셋이어야 한다 — 하나를 돌려쓰면 그 순간부터 조용히 틀린다.
+ *
+ * 그리고 이 자리에 있던 고장은 더 단순했다: Gate 현물 경로는 장부에
+ * `status: 'FILLED'`를 **무조건** 적으면서 응답에는 `REJECTED`를
+ * 돌려줬다. 같은 함수 안에서 장부와 응답이 서로 다른 답을 했다.
+ */
+export function ledgerStatusOfGateSpot(f: {
+  status?: string | null;
+  filledQty?: number | null;
+  /** 시장가 IOC가 한 계약도 못 붙고 끝났다 */
+  unfilled?: boolean;
+}): ExchangeLedgerDecision {
+  const st = String(f?.status ?? '').trim().toLowerCase();
+  // 한 개도 안 붙고 끝났다. 끝난 것도 체결 0도 사실이다 — REJECTED(거래소가
+  // 거부)도 FILLED도 아니다.
+  if (f?.unfilled === true) {
+    return { status: 'RECONCILED', terminal: true, needsAttention: false, attentionReason: null };
+  }
+  if (st === 'open') {
+    return { status: 'ACKED', terminal: false, needsAttention: false, attentionReason: null };
+  }
+  if (st === 'cancelled' || st === 'canceled') {
+    return { status: 'RECONCILED', terminal: true, needsAttention: false, attentionReason: null };
+  }
+  if (st === 'closed') {
+    // 끝났다. 체결이었는지는 수량이 말한다.
+    if (f.filledQty != null && f.filledQty > 0) {
+      return { status: 'FILLED', terminal: true, needsAttention: false, attentionReason: null };
+    }
+    return { status: 'RECONCILED', terminal: true, needsAttention: false, attentionReason: null };
+  }
+  return {
+    status: 'ACKED', terminal: false, needsAttention: true,
+    attentionReason: `Gate 현물이 해석할 수 없는 주문 상태를 돌려줬습니다: ${st === '' ? '(없음)' : st}`,
+  };
+}

@@ -337,6 +337,75 @@ if (fx) {
   }
 }
 
+// ── ⑤-3 다른 거래소 경로도 증거 없이 FILLED를 적지 않는가 ──
+//
+// COIN-M·현물(바이낸스/Gate)은 `success`면 **무조건** `status:'FILLED'`를
+// 적었다. 지정가 대기 주문도 체결로 장부에 남았고, 미체결 주문의
+// `avgPrice`가 '0'이라 **지정가가 체결가로** 적혔다. Exact100X 경로가
+// 아니라고 장부가 거짓이어도 되는 것은 아니다.
+const VENUE_WRITERS = [
+  ['src/app/api/binance/coinm/order/route.ts', 'COIN-M'],
+  ['src/lib/exchanges/spotOrderExecutor.ts', '현물'],
+];
+for (const [p, who] of VENUE_WRITERS) {
+  const src = read(p);
+  if (!src) continue;
+  if (/status: 'FILLED',\s*\n/.test(src)) {
+    err(`${p}: ${who} 경로가 장부에 FILLED를 무조건 적습니다`
+      + ' — 체결 증거가 있을 때만 적어야 합니다');
+  }
+  if (!/ledgerStatusOf(Binance|GateSpot)/.test(src)) {
+    err(`${p}: ${who} 경로가 장부 상태 정본을 쓰지 않습니다`);
+  }
+}
+{
+  const p = 'src/app/api/binance/coinm/order/route.ts';
+  const src = read(p);
+  if (src) {
+    // 같은 판정이 두 곳에 있으면 언젠가 갈린다. 실제로 갈렸다.
+    if (/\/timeout\|ETIMEDOUT/.test(src)) {
+      err(`${p}: UNKNOWN 판정 정규식을 복제했습니다 — unknownResultVerdict를 쓰십시오`);
+    }
+    if (!/unknownResultVerdict/.test(src)) {
+      err(`${p}: unknownResultVerdict를 쓰지 않습니다 — 판정이 갈립니다`);
+    }
+  }
+}
+{
+  const p = 'src/lib/exchanges/binanceCoinFutures.ts';
+  const src = read(p);
+  if (src) {
+    if (/parseFloat\((?:d|existing)\.avgPrice \|\| (?:d|existing)\.price/.test(src)) {
+      err(`${p}: 미체결 주문의 지정가를 체결가로 적습니다`
+        + " (`avgPrice || price || '0'`) — 0보다 나쁩니다, 그럴듯해 보입니다");
+    }
+    if (!/function coinMFillOf/.test(src)) {
+      err(`${p}: 체결 사실만 읽는 정본(coinMFillOf)이 없습니다`);
+    }
+  }
+}
+{
+  const p = 'src/lib/exchanges/binance.ts';
+  const src = read(p);
+  if (src) {
+    if (/executedQty \|\| (?:d\.)?origQty/.test(src)) {
+      err(`${p}: 요청 수량을 체결 수량으로 적습니다 (\`executedQty || origQty\`)`);
+    }
+    if (/fills\?\.\[0\]\?\.price \|\| d\.price/.test(src)) {
+      err(`${p}: 지정가를 체결가로 적습니다 (\`fills[0].price || d.price\`)`);
+    }
+    if (!/export function spotFillOf/.test(src)) {
+      err(`${p}: 현물 체결 사실 정본(spotFillOf)이 없습니다`);
+    } else if (!/num \+= q \* px/.test(src)) {
+      err(`${p}: 현물 체결가를 가중평균으로 계산하지 않습니다`
+        + ' — 첫 조각 가격은 쪼개 체결된 주문의 단가가 아닙니다');
+    }
+    if (/message: opts\.testnet \? '주문 체결/.test(src)) {
+      err(`${p}: 접수를 '주문 체결'이라고 적습니다 — 지정가 대기 주문도 그 문장을 받습니다`);
+    }
+  }
+}
+
 // ── ⑥ stillOpen이 합산·화면까지 가는가 ──
 const mon = read(MON);
 if (mon) {

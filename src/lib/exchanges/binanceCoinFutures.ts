@@ -305,10 +305,42 @@ export async function setCoinMMarginType(
 export interface CoinMOrderResult {
   success: boolean;
   orderId?: number;
-  /** 체결된 계약 수 */
-  filledContracts?: number;
-  avgPrice?: number;
+  /**
+   * 체결된 계약 수. **모르면 null이다.**
+   *
+   * 예전에는 `Number(d.executedQty) || 0`이었다. 응답에 수량이 없으면
+   * 0이 되고, 호출자는 그 0을 "체결 0"이라는 **사실**로 읽는다. 모른
+   * 것과 0인 것은 다르다.
+   */
+  filledContracts?: number | null;
+  /**
+   * 평균 체결가. **모르면 null이다.**
+   *
+   * 예전에는 `parseFloat(d.avgPrice || d.price || '0')`이었다. 미체결
+   * 주문의 `avgPrice`는 `'0'`이므로 **지정가(`d.price`)가 체결가로**
+   * 적혔다. 0보다 나쁘다 — 그럴듯해 보여서 아무도 의심하지 않는다.
+   * 그 값으로 증거금까지 계산됐다.
+   */
+  avgPrice?: number | null;
+  /** 거래소가 돌려준 주문 상태 원문 (NEW·PARTIALLY_FILLED·FILLED…) */
+  exchangeStatus?: string | null;
   message?: string;
+}
+
+/** 거래소 응답에서 체결 사실만 읽는다. 없는 값을 지어내지 않는다 */
+function coinMFillOf(d: any): {
+  filledContracts: number | null; avgPrice: number | null; exchangeStatus: string | null;
+} {
+  const q = Number(d?.executedQty);
+  const px = Number(d?.avgPrice);
+  const st = d?.status == null || String(d.status).trim() === ''
+    ? null : String(d.status).trim().toUpperCase();
+  return {
+    filledContracts: Number.isFinite(q) && q >= 0 ? q : null,
+    // 미체결 주문의 avgPrice는 '0'이다. 그것을 가격으로 적지 않는다.
+    avgPrice: Number.isFinite(px) && px > 0 ? px : null,
+    exchangeStatus: st,
+  };
 }
 
 /**
@@ -343,11 +375,16 @@ export async function placeCoinMOrder(
       const existing = await findCoinMOrderByClientId(
         key, secret, opts.symbol, opts.clientOrderId, testnet);
       if (existing) {
+        // 상태를 그대로 올린다. 여기는 상태를 **보지 않고** success를
+        // 돌려줬다 — 취소·거절로 끝난 기존 주문도 성공으로 읽혔다.
+        const f = coinMFillOf(existing);
         return {
           success: true, orderId: existing.orderId,
-          filledContracts: Number(existing.executedQty) || 0,
-          avgPrice: parseFloat(existing.avgPrice || existing.price || '0'),
-          message: '거래소에 이미 존재하는 주문 — 재전송하지 않음',
+          filledContracts: f.filledContracts,
+          avgPrice: f.avgPrice,
+          exchangeStatus: f.exchangeStatus,
+          message: '거래소에 이미 존재하는 주문 — 재전송하지 않음'
+            + ` (거래소 상태 ${f.exchangeStatus ?? '불명'})`,
         };
       }
     }
@@ -367,11 +404,13 @@ export async function placeCoinMOrder(
     if (opts.clientOrderId) params.newClientOrderId = opts.clientOrderId;
 
     const d = await dapiSigned('POST', '/dapi/v1/order', key, secret, testnet, params);
+    const f = coinMFillOf(d);
     return {
       success: true,
       orderId: d.orderId,
-      filledContracts: Number(d.executedQty) || 0,
-      avgPrice: parseFloat(d.avgPrice || d.price || '0'),
+      filledContracts: f.filledContracts,
+      avgPrice: f.avgPrice,
+      exchangeStatus: f.exchangeStatus,
     };
   } catch (e: any) {
     return { success: false, message: e?.message || 'COIN-M 주문 실패' };

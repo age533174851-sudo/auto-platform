@@ -378,8 +378,13 @@ export async function POST(req: NextRequest) {
   if (!r.success) {
     // placeCoinMOrder는 네트워크 오류도 success:false로 돌려준다.
     // 응답을 못 받은 경우와 거부된 경우를 구분해야 재시도 여부를 정할 수 있다.
-    const unknown = /timeout|ETIMEDOUT|ECONNRESET|socket hang up|fetch failed/i
-      .test(String(r.message || ''));
+    //
+    // **이 판정이 여기 복제돼 있었다.** 목록이 `timeout|ETIMEDOUT|
+    // ECONNRESET|socket hang up|fetch failed` 다섯뿐이어서, USDⓈ-M 쪽
+    // 판정이 넓어지고 기본 방향까지 뒤집히는 동안 이 경로만 옛 규칙으로
+    // 남아 있었다 — 같은 판단이 두 곳에 있으면 언젠가 갈린다.
+    const { unknownResultVerdict } = await import('@/lib/exchanges/futuresExec');
+    const unknown = unknownResultVerdict(r.message).unknown;
     await patch({
       status: unknown ? 'UNKNOWN' : 'REJECTED',
       error_message: r.message,
@@ -394,12 +399,24 @@ export async function POST(req: NextRequest) {
     }, { status: unknown ? 502 : 400 });
   }
 
+  // ── 접수는 체결이 아니다 ──
+  //
+  //   여기는 `r.success`면 **무조건** `status: 'FILLED'`를 적었다.
+  //   미체결 LIMIT 주문도, 부분 체결도 전량 체결로 장부에 남았고
+  //   `filled_qty`에는 0이 적혔다 — `FILLED` + 수량 0은 모순이다.
+  //   USDⓈ-M 경로와 같은 정본(증거가 있을 때만 FILLED)을 쓴다.
+  const { ledgerStatusOfBinance } = await import('@/lib/engine/reconcileLedgerStatus');
+  const verdict = ledgerStatusOfBinance(r.exchangeStatus, r.filledContracts ?? null);
   await patch({
-    status: 'FILLED',
+    status: verdict.status,
     exchange_order_id: String(r.orderId ?? ''),
     filled_qty: r.filledContracts ?? null,
     avg_price: r.avgPrice ?? null,
     acked_at: new Date().toISOString(),
+    ...(verdict.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+    ...(verdict.needsAttention
+      ? { needs_attention: true, error_message: verdict.attentionReason }
+      : {}),
   });
 
   // ── 손절 부착 ──
@@ -476,8 +493,13 @@ export async function POST(req: NextRequest) {
     clientOrderId, orderId: r.orderId,
     contracts, contractUsd: spec.contractUsd,
     contractSizeSource: spec.source,
-    filledContracts: r.filledContracts,
-    avgPrice: r.avgPrice,
+    // 장부에 적은 것과 **같은 판정**을 돌려준다. 화면이 "진입 완료"로
+    // 그리는지 "접수됨"으로 그리는지가 이 값에 달려 있다.
+    status: verdict.status,
+    settled: verdict.terminal,
+    exchangeStatus: r.exchangeStatus ?? null,
+    filledContracts: r.filledContracts ?? null,
+    avgPrice: r.avgPrice ?? null,
     marginCoin: margin?.ok ? margin.marginCoin : null,
     baseAsset: symbol.replace(/USD_(PERP|\d{6})$/, ''),
     conversionNote,
@@ -486,9 +508,14 @@ export async function POST(req: NextRequest) {
     stopPrice: isExit ? null : stopPrice,
     slOrderId: slOrderId ?? null,
     stopNote,
-    message: isExit
+    // 체결됐다고 쓰지 않는다 — 증거가 있을 때만 그렇게 쓴다.
+    message: (isExit
       ? `COIN-M 청산 — ${contracts}계약`
       : `COIN-M ${side === 'BUY' ? 'LONG 진입' : 'SHORT 진입'} — ${contracts}계약`
-        + (slOrderId ? ` · 손절 ${stopPrice} 부착` : ''),
+        + (slOrderId ? ` · 손절 ${stopPrice} 부착` : ''))
+      + (verdict.status === 'FILLED'
+        ? ` · 체결 ${r.filledContracts}계약`
+        : ` · 접수됨 (거래소 상태 ${r.exchangeStatus ?? '불명'} · 체결 미확정)`)
+      + (verdict.needsAttention ? ` · ${verdict.attentionReason}` : ''),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

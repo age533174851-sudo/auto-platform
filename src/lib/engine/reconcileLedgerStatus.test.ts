@@ -1,8 +1,10 @@
 // src/lib/engine/reconcileLedgerStatus.test.ts
 import { test, eq, assert } from '../../test/harness';
 import {
-  ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
+  ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, ledgerStatusOfGateSpot,
+  withFillEvidence,
 } from './reconcileLedgerStatus';
+import { spotFillOf } from '../exchanges/binance';
 import { fromExchangeStatus } from './orderLifecycle';
 import { RECONCILE_TARGET_STATUSES } from './pendingReconcile';
 import { UNRESOLVED_ENTRY_STATUSES, ACCEPTED_ENTRY_STATUSES } from './maxOpenPositionsGate';
@@ -305,5 +307,88 @@ export function runProvenFillTests() {
     for (const r of [null, undefined, {}, { status: '' }]) {
       assert(!isProvenFill(r as any));
     }
+  });
+}
+
+export function runOtherVenueLedgerTests() {
+  // ── 이 파일이 막는 결함 ──
+  //
+  //   COIN-M·현물 경로는 `success`면 **무조건** `status: 'FILLED'`를
+  //   적었다. 지정가 대기 주문도 체결로 장부에 남았고, 미체결 주문의
+  //   `avgPrice`가 `'0'`이라 **지정가가 체결가로** 적혔다. Gate 현물은
+  //   장부에 FILLED를 적으면서 응답에는 REJECTED를 돌려줬다.
+
+  test('★ Gate 현물 어휘는 Gate 선물과 다르다', () => {
+    // open/closed/cancelled. finish_as가 없다.
+    eq(ledgerStatusOfGateSpot({ status: 'open' }).status, 'ACKED');
+    eq(ledgerStatusOfGateSpot({ status: 'open' }).terminal, false);
+    eq(ledgerStatusOfGateSpot({ status: 'closed', filledQty: 0.5 }).status, 'FILLED');
+    eq(ledgerStatusOfGateSpot({ status: 'closed', filledQty: 0.5 }).terminal, true);
+    // 끝났는데 체결이 없다 — 체결로도 거부로도 적지 않는다.
+    eq(ledgerStatusOfGateSpot({ status: 'closed', filledQty: 0 }).status, 'RECONCILED');
+    eq(ledgerStatusOfGateSpot({ status: 'cancelled', filledQty: 0.2 }).status, 'RECONCILED');
+  });
+
+  test('★ IOC가 한 개도 안 붙었으면 거부가 아니라 "끝났고 체결 0"이다', () => {
+    const d = ledgerStatusOfGateSpot({ status: 'closed', filledQty: 0, unfilled: true });
+    eq(d.status, 'RECONCILED');
+    eq(d.terminal, true);
+    // REJECTED는 거래소가 거부했다는 뜻이다. 거부한 적이 없다.
+    assert(d.status !== 'REJECTED' && d.status !== 'FILLED');
+  });
+
+  test('★ Gate 현물 상태를 해석하지 못하면 열린 것으로 두고 사람에게 올린다', () => {
+    for (const st of ['', null, undefined, 'whatever']) {
+      const d = ledgerStatusOfGateSpot({ status: st as any });
+      eq(d.status, 'ACKED');
+      eq(d.terminal, false);
+      eq(d.needsAttention, true);
+    }
+  });
+
+  test('★ 현물 응답에서 체결가를 지정가로 메우지 않는다', () => {
+    // 지정가 대기 주문: fills가 비어 있고 d.price는 **지정가**다.
+    const resting = spotFillOf({
+      status: 'NEW', executedQty: '0', origQty: '0.01', price: '95000', fills: [],
+    });
+    eq(resting.qty, 0);
+    eq(resting.price, null, '지정가가 체결가로 적혔다');
+    eq(resting.exchangeStatus, 'NEW');
+    // 그 응답으로 장부 상태를 정하면 접수(ACKED)다.
+    eq(ledgerStatusOfBinance(resting.exchangeStatus, resting.qty).status, 'ACKED');
+  });
+
+  test('★ 현물 체결가는 가중평균이다 — 첫 조각 가격이 아니다', () => {
+    const f = spotFillOf({
+      status: 'FILLED', executedQty: '3',
+      fills: [{ qty: '1', price: '100' }, { qty: '2', price: '130' }],
+    });
+    eq(f.qty, 3);
+    eq(f.price, 120);   // (1·100 + 2·130) / 3 — 첫 조각이면 100이 된다
+    eq(ledgerStatusOfBinance(f.exchangeStatus, f.qty).status, 'FILLED');
+  });
+
+  test('★ fills가 없으면 누적 체결금액으로 되돌리고, 그것도 없으면 모른다', () => {
+    const byQuote = spotFillOf({ status: 'FILLED', executedQty: '2', cummulativeQuoteQty: '250' });
+    eq(byQuote.price, 125);
+    const nothing = spotFillOf({ status: 'FILLED', executedQty: '2' });
+    eq(nothing.price, null);
+    // 상태는 FILLED인데 가격을 모른다 — 수량 증거는 있으므로 FILLED다.
+    eq(ledgerStatusOfBinance(nothing.exchangeStatus, nothing.qty).status, 'FILLED');
+  });
+
+  test('★ 요청 수량을 체결 수량으로 올리지 않는다', () => {
+    // executedQty가 **없는** 응답. 예전에는 origQty가 그 자리에 들어갔다.
+    const f = spotFillOf({ status: 'NEW', origQty: '0.01', price: '95000' });
+    eq(f.qty, null, '요청 수량이 체결 수량으로 적혔다');
+    const d = ledgerStatusOfBinance(f.exchangeStatus, f.qty);
+    eq(d.status, 'ACKED');
+    assert(!isProvenFill({ status: d.status, filled_qty: f.qty }));
+  });
+
+  test('★ 읽을 수 없는 값을 0으로 적지 않는다', () => {
+    const f = spotFillOf({ status: 'NEW', executedQty: 'abc', fills: [{ qty: 'x', price: 'y' }] });
+    eq(f.qty, null);
+    eq(f.price, null);
   });
 }
