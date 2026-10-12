@@ -91,8 +91,23 @@ export type KillClosePlanCode =
 
 export interface KillPositionRow {
   symbol: string | null;
-  /** 부호 있는 수량. 0이면 포지션 없음 */
+  /**
+   * 수량. **부호가 있을 수도, 없을 수도 있다.**
+   *
+   * ★ `futuresListPositions`가 주는 `ExecPosition.amount`는 **절댓값**
+   *   이고 방향은 `side` 칸에 따로 있다. 부호만 보고 방향을 정하면
+   *   SHORT 포지션이 전부 LONG으로 읽힌다 — 그러면 종료 주문의 방향
+   *   검증이 매번 불일치로 떨어져 **SHORT는 영원히 닫히지 않는다.**
+   *   이 저장소가 `qty`/`amount` 칸 이름으로 한 번 당한 그 모양이다.
+   */
   amount: number | null;
+  /**
+   * 거래소가 적어 준 방향. **있으면 이것이 정본이다.**
+   *
+   * 없으면 수량의 부호에서 정하고, 둘 다 없으면 **방향을 모르는 것**이다 —
+   * 짐작하지 않는다(짐작하면 반대 방향 신규 진입이 된다).
+   */
+  side?: 'LONG' | 'SHORT' | null;
 }
 
 export interface KillOpenOrderRow {
@@ -259,7 +274,19 @@ export function planKillClose(i: KillClosePlanInput | null | undefined): KillClo
     if (wanted != null && !wanted.has(s)) continue;   // 범위 밖 — 건드리지 않는다
     if (amt == null) { unusable += 1; continue; }      // 플랫이라고 말할 수 없다
     if (Math.abs(amt) === 0) continue;                 // 플랫
-    closes.push({ symbol: s, side: amt > 0 ? 'LONG' : 'SHORT', qty: Math.abs(amt) });
+
+    // ── 방향 ──
+    //
+    //   `side`가 있으면 그것이 정본이다. 없으면 부호에서 정한다.
+    //   **둘이 어긋나면 막는다** — 어느 쪽이 맞는지 알 수 없고, 틀린
+    //   방향으로 보내면 청산이 아니라 반대 진입이 된다.
+    const declared = r?.side === 'LONG' || r?.side === 'SHORT' ? r.side : null;
+    const signed = amt > 0 ? 'LONG' : 'SHORT';
+    const side: 'LONG' | 'SHORT' | null = declared == null
+      ? (Math.abs(amt) === amt || amt < 0 ? signed : null)
+      : (Math.abs(amt) !== amt && declared !== signed ? null : declared);
+    if (side == null) { unusable += 1; continue; }
+    closes.push({ symbol: s, side, qty: Math.abs(amt) });
   }
 
   if (closes.length === 0 && unusable > 0) {

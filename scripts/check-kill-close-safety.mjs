@@ -128,6 +128,24 @@ if (mod && typeof mod.planKillClose === 'function') {
     err('★ 닫을 대상이 아닌 심볼(SOLUSDT)의 주문이 취소 목록에 있습니다'
       + ' — 다른 전략의 보호주문을 지웁니다');
   }
+  // ★ `amount`는 절댓값이다 — `side`를 읽어야 SHORT가 닫힌다
+  const shortPos = mod.planKillClose({
+    modeVerdict: { ok: true, code: 'ONE_WAY', mode: 'ONE_WAY', message: '' },
+    positions: { ok: true, rows: [{ symbol: 'BTCUSDT', amount: 0.01, side: 'SHORT' }] },
+    openOrders: { ok: true, rows: [] } });
+  if (shortPos?.closes?.[0]?.side !== 'SHORT') {
+    err('★ 절댓값 수량 + side:SHORT를 LONG으로 읽습니다'
+      + ' — `ExecPosition.amount`는 절댓값이고 방향은 `side` 칸입니다.'
+      + ' 부호만 보면 SHORT 포지션이 영원히 닫히지 않습니다');
+  }
+  const conflict = mod.planKillClose({
+    modeVerdict: { ok: true, code: 'ONE_WAY', mode: 'ONE_WAY', message: '' },
+    positions: { ok: true, rows: [{ symbol: 'BTCUSDT', amount: -0.01, side: 'LONG' }] },
+    openOrders: { ok: true, rows: [] } });
+  if (conflict?.mayClose !== false) {
+    err('방향 표기와 수량 부호가 어긋나는데 종료가 허용됩니다 — 짐작하면 반대 진입입니다');
+  }
+
   // 주문을 못 읽으면 전체 취소로 대신하지 않는다
   const noOrd = mod.planKillClose({
     modeVerdict: { ok: true, code: 'ONE_WAY', mode: 'ONE_WAY', message: '' },
@@ -181,6 +199,11 @@ if (mod && typeof mod.planKillCancelOnly === 'function') {
     }
     if (!sw.includes('accountCloseModeGate')) {
       err(`${SW}이(가) 모드 관문을 부르지 않습니다`);
+    }
+    // 방향 칸을 함께 넘기는가 — `amount`만 넘기면 SHORT가 닫히지 않는다
+    if (!/side:\s*\(?p\?\.side/.test(sw)) {
+      err(`${SW}이(가) 포지션의 side 칸을 넘기지 않습니다`
+        + ' — `amount`는 절댓값이므로 부호만으로는 SHORT를 알 수 없습니다');
     }
   }
 }

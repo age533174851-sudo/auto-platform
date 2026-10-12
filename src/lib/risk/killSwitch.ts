@@ -390,8 +390,12 @@ export async function executeKillActions(
         exchange: ex as any, key: opts.key, secret: opts.secret, testnet: opts.testnet,
       } as any);
       if (r?.ok !== true || !Array.isArray(r.positions)) return { ok: false, rows: null };
+      // ★ `amount`는 **절댓값**이고 방향은 `side` 칸이다. 둘을 함께
+      //   넘긴다 — 부호만 보면 SHORT가 전부 LONG으로 읽힌다.
       return { ok: true, rows: r.positions.map((p: any) => ({
-        symbol: p?.symbol ?? null, amount: p?.amount ?? null })) };
+        symbol: p?.symbol ?? null, amount: p?.amount ?? null,
+        side: (p?.side === 'SHORT' ? 'SHORT'
+          : p?.side === 'LONG' ? 'LONG' : null) as 'LONG' | 'SHORT' | null })) };
     } catch { return { ok: false, rows: null }; }
   };
   const readOpenOrders = async () => {

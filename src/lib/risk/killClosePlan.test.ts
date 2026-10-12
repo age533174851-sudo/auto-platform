@@ -224,6 +224,60 @@ export function runKillClosePlanTests() {
     eq(p.unusableTargets, 2);
   });
 
+  // ══════════════════════════════════════════════════════════
+  // ★ 방향 — `amount`는 절댓값이고 `side`가 정본이다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   `futuresListPositions`가 주는 `ExecPosition.amount`는 **절댓값**이다.
+  //   부호만 보고 방향을 정하면 SHORT가 전부 LONG으로 읽히고, 종료 주문의
+  //   방향 검증이 매번 불일치로 떨어져 **SHORT는 영원히 닫히지 않는다.**
+  test('★ side가 SHORT면 수량이 양수여도 SHORT로 닫는다', () => {
+    const p = planKillClose(IN({ positions: { ok: true, rows: [
+      { symbol: 'BTCUSDT', amount: 0.01, side: 'SHORT' },
+    ] } }));
+    eq(p.code, 'PROCEED');
+    eq(p.closes[0].side, 'SHORT', '★ 절댓값 수량에 속지 않는다');
+    eq(p.closes[0].qty, 0.01);
+  });
+
+  test('side가 없으면 수량의 부호에서 정한다 (옛 모양 호환)', () => {
+    const p = planKillClose(IN({ positions: { ok: true, rows: [
+      { symbol: 'BTCUSDT', amount: -0.01 },
+    ] } }));
+    eq(p.closes[0].side, 'SHORT');
+  });
+
+  test('★ side와 부호가 어긋나면 짐작하지 않고 막는다', () => {
+    const p = planKillClose(IN({ positions: { ok: true, rows: [
+      { symbol: 'BTCUSDT', amount: -0.01, side: 'LONG' },
+    ] } }));
+    eq(p.code, 'BLOCKED_TARGET_UNUSABLE');
+    eq(p.mayClose, false);
+    eq(p.mayCancel, false, '★ 방향을 모르면 보호주문도 건드리지 않는다');
+    eq(p.unusableTargets, 1);
+  });
+
+  test('side가 쓰레기면 부호로 떨어진다', () => {
+    const p = planKillClose(IN({ positions: { ok: true, rows: [
+      { symbol: 'BTCUSDT', amount: 0.01, side: 'UP' as any },
+    ] } }));
+    eq(p.code, 'PROCEED');
+    eq(p.closes[0].side, 'LONG');
+  });
+
+  test('★ 절댓값 수량 + side 조합이 LONG·SHORT 둘 다 통과한다', () => {
+    const p = planKillClose(IN({
+      positions: { ok: true, rows: [
+        { symbol: 'BTCUSDT', amount: 0.01, side: 'LONG' },
+        { symbol: 'ETHUSDT', amount: 0.5, side: 'SHORT' },
+      ] },
+      openOrders: { ok: true, rows: [] },
+    }));
+    eq(p.code, 'PROCEED');
+    eq(p.closes.map(c => `${c.symbol}:${c.side}:${c.qty}`).join(' '),
+      'BTCUSDT:LONG:0.01 ETHUSDT:SHORT:0.5');
+  });
+
   test('심볼 대소문자와 공백을 같은 것으로 본다', () => {
     const p = planKillClose(IN({
       positions: { ok: true, rows: [{ symbol: ' btcusdt ', amount: 1 }] },
