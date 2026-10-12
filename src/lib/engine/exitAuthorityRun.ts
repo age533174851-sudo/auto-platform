@@ -73,6 +73,7 @@ import {
   type ExitAuthorityDecision, type ExitCapabilities,
   type ExitReason, type LeaseIdentity, type PositionIdentity,
 } from './exitAuthority';
+import { resolveHoldExtensionPolicy, type HoldEvidence } from './holdExtension';
 import { applyLifecycleClose } from './lifecycleAction';
 import { monotonicNowMs, monotonicSpanMs } from '../system/monotonicClock';
 import { isDuplicateIntentError } from './exitIntent';
@@ -101,6 +102,8 @@ export type ExitRunCode =
   | 'IDENTITY_MISMATCH'
   | 'POSITION_READ_FAILED'
   | 'POLICY_NOT_DUE'
+  /** 한도에 닿았지만 **증거로 보유를 연장했다.** 주문 0건 */
+  | 'HOLD_EXTENDED'
   | 'POLICY_UNRESOLVED'
   | 'OPENED_AT_UNUSABLE'
   | 'IDENTITY_INCOMPLETE'
@@ -246,6 +249,20 @@ export interface ExitRunDeps {
   /** 보낸 뒤 잔여를 다시 읽는다. `ok:false`는 "못 읽었다"다 */
   readAfter(): Promise<{ ok: boolean; found: boolean }>;
   /**
+   * **보유 연장 증거를 읽는다.** 안 주면 연장을 묻지 않는다.
+   *
+   * ★ 이 호출이 일어나는 자리가 계약이다: 권한이 **이미 청산을 승인한
+   *   뒤**, 그리고 울타리 재검증 **앞**이다.
+   *
+   *   · 승인 뒤인 이유 — 아직 때가 아닌 포지션마다 거래소를 더 읽지
+   *     않는다. 연장은 4시간에 닿은 회차에만 묻는다.
+   *   · 재검증 앞인 이유 — ⑤A가 만든 "재검증과 전송 사이 왕복 0"
+   *     불변식을 이 조회가 깨뜨리면 안 된다.
+   *
+   * 못 읽으면 `null`을 돌려준다. **그러면 연장하지 않고 닫는다.**
+   */
+  readHoldEvidence?(): Promise<HoldEvidence | null>;
+  /**
    * 단조 시계. **시험이 고정한다** — 안 주면 정본을 쓴다.
    * duration 전용이고 epoch이 아니다.
    */
@@ -345,7 +362,11 @@ export async function runExitAuthority(
               side: (candidate.positionIdentity.side === 'LONG' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT' }
           : { ok: false, found: false, qty: null, side: null as 'LONG' | 'SHORT' | null };
 
-  const decision = decideExitAuthority({
+  // 판정 입력은 **한 벌이다.** 연장을 물어보는 두 번째 판정도 같은
+  // 입력에 증거만 더한다 — 두 벌을 따로 조립하면 한쪽만 고쳐진다.
+  const decideWith = (
+    holdExtension: Parameters<typeof decideExitAuthority>[0]['holdExtension'],
+  ) => decideExitAuthority({
     positionIdentity: {
       ...candidate.positionIdentity,
       // 모드는 **거래소에서 읽은 것**이다. 못 읽었으면 null이고 판정이 막는다.
@@ -358,7 +379,43 @@ export async function runExitAuthority(
     observed,
     lease,
     nowMs,
+    holdExtension,
   });
+
+  // ── ③-a 연장을 **묻지 않은** 판정 ──
+  //
+  // 먼저 이것을 한다. 승인되지 않았다면 연장을 물을 이유가 없고, 증거를
+  // 읽으러 거래소에 갈 이유도 없다.
+  let decision = decideWith(null);
+
+  // ── ③-b 승인됐다면, 그래도 늦출 증거가 있는가 ──
+  //
+  // ★ 연장은 **거부권일 뿐이다.** 여기서 바뀔 수 있는 것은
+  //   `AUTHORIZED → HOLD_EXTENDED` 한 방향이고, 막힌 판정이 연장으로
+  //   풀리는 경로는 없다(③-a가 막았으면 이 블록에 들어오지 않는다).
+  if (decision.authorized && candidate.reason === 'TIME_EXIT'
+      && typeof deps.readHoldEvidence === 'function') {
+    const policy = resolveHoldExtensionPolicy(candidate.executionIdentity);
+    if (policy != null) {
+      let evidence: HoldEvidence | null = null;
+      // ★ **절대 상한을 이미 넘긴 자리는 읽지 않는다.**
+      //
+      //   증거를 읽어도 결과가 바뀌지 않는다 — 상한은 증거보다 앞에서
+      //   막는다(`decideHoldExtension` ②). 그러니 왕복만 늘린다.
+      //
+      //   ★ 상한 **판단**을 여기로 옮기는 것이 아니다. 아래 판정이 그대로
+      //     다시 보고 `CLOSE_CAP`을 적는다 — 이 줄은 조회를 건너뛰는
+      //     것뿐이고, 틀리는 방향조차 닫는 쪽이다(증거 null → 닫는다).
+      const pastCap = (nowMs - candidate.openedAtMs) >= policy.absoluteMaxHoldMs;
+      if (!pastCap) {
+        // 증거 조회 실패는 **연장 실패**다. 종료 경로를 죽이지 않는다 —
+        // 못 읽으면 오늘과 같이 닫는다.
+        try { evidence = await deps.readHoldEvidence(); }
+        catch { evidence = null; }
+      }
+      decision = decideWith({ policy, evidence });
+    }
+  }
 
   if (!decision.authorized) {
     const code = decision.code === 'AUTHORIZED' ? 'IDENTITY_MISMATCH' : decision.code;
@@ -370,6 +427,9 @@ export async function runExitAuthority(
       });
     }
     const failed = code === 'POSITION_READ_FAILED' || code === 'IDENTITY_MISMATCH';
+    // ★ `HOLD_EXTENDED`는 여기서 **blocked**로 떨어진다 — 일부러 아무것도
+    //   안 한 회차이고 주문 0건이다. `failed`에 넣으면 운영 화면이 연장마다
+    //   붉어지고, 그러면 사람이 연장을 끄는 쪽으로 움직인다.
     return denied(code as ExitRunCode, decision,
       prep?.code === 'MODE_BLOCKED' ? prep.message : decision.reason,
       { failed, blocked: !failed, timing });

@@ -28,6 +28,7 @@ import { managedCandidates, type OrderRowLike } from './managedPosition';
 import { OPEN_COMBOS, type OpenCombo } from '../execution/dormantGate';
 import { resolveExecutionProfile } from '../execution/profile';
 import { exact100xExitVenueCapability } from './exitAuthority';
+import { resolveHoldExtensionPolicy } from './holdExtension';
 import type { StopPolicy } from '../strategies/profiles';
 
 /** 청산 감시가 열린 포지션 목록을 읽는 표 */
@@ -282,10 +283,20 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
     // 계약이 선언한 보유 한도와, 그 값을 **실제로 읽는 경로가 있는가.**
     const holdH = Number(r.contract.maxHoldSec) > 0
       ? Math.round(Number(r.contract.maxHoldSec) / 3600) : null;
+    // ★ **연장 여부를 손으로 적지 않는다.** 정책 정본에서 derive한다 —
+    //   여기에 "4시간에 닫힙니다"라고 적어 두면, 연장이 열린 뒤에도 화면은
+    //   계속 그 문장을 보여 준다. 그건 확인한 것과 다른 말을 하는 것이다.
+    const hx = resolveHoldExtensionPolicy({ profileId: c.profileId, presetId: c.presetId });
+    const extendNote = hx == null
+      ? '증거에 따른 보유 연장은 이 계약에 없습니다 — 한도에서 바로 닫습니다'
+      : `순수익(수수료·펀딩 반영)·추세·청산 여유가 모두 증거로 확인되면`
+        + ` 최대 ${Math.round(hx.absoluteMaxHoldMs / 3_600_000)}시간까지 보유를 연장합니다`
+        + ' (증거가 없거나 낡으면 연장하지 않고 한도에서 닫습니다)';
     const declaredHold = holdH == null
       ? '계약에 최대 보유 한도가 없습니다'
       : auth.capabilities.timeExit
-        ? `계약이 선언한 최대 보유 ${holdH}시간을 전용 종료 권한이 읽어 시간 청산을 돌립니다`
+        ? `계약이 선언한 최대 보유 ${holdH}시간을 전용 종료 권한이 읽어 시간 청산을 돌립니다.`
+          + ` ${extendNote}`
         : `계약은 최대 보유 ${holdH}시간을 선언하지만 청산 경로가 그 값을 읽지 않습니다`;
 
     out.push({
