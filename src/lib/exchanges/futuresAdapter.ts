@@ -824,7 +824,16 @@ export async function futuresOpenOrdersAll(
     }
     const bf = await import('./binanceFutures');
     const r: any = await bf.getFuturesOpenOrders(key, secret, testnet);
-    const rows = Array.isArray(r) ? r : (Array.isArray(r?.orders) ? r.orders : null);
+    // ★ **`success`를 반드시 본다.** 이 함수는 실패할 때 `orders: []`를
+    //   돌려준다 — 배열 길이만 보면 **조회 실패가 "미체결 없음"으로**
+    //   읽히고, 그러면 취소 범위가 비어 "지울 것이 없다"가 된다.
+    //   그 상태로 종료만 진행하면 보호주문이 남아 고아가 되고, 더 나쁜
+    //   경우(닫지 않는 단계)에는 아무 일도 안 하고 성공으로 적힌다.
+    if (r?.success !== true) {
+      return { ok: false, orders: null,
+        error: r?.message || '미체결 조회가 실패했습니다' };
+    }
+    const rows = Array.isArray(r.orders) ? r.orders : null;
     if (rows == null) return { ok: false, orders: null, error: '미체결 응답을 읽지 못했습니다' };
     return { ok: true, error: null, orders: rows.map((o: any) => ({
       id: o?.orderId != null ? String(o.orderId) : null,
