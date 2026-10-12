@@ -1028,6 +1028,12 @@ async function runLifecycleSweep(
     //   일어난다고 주장하지 않는다 — 추가 방어층이고, 반대 포지션은
     //   `reduceOnly`·방향 검증·재조회 대조가 막는다.
     const { exitIntentId } = await import('@/lib/engine/exitIntent');
+    // 승인 환경을 회차 시작에 한 번 읽는다. 후보마다 다시 읽으면 한 회차
+    // 안에서 승인 상태가 갈릴 수 있다.
+    const { holdExtensionEnvFromProcess: hxEnvReader } =
+      await import('@/lib/engine/holdExtensionEnv');
+    const hxEnvForRun = hxEnvReader();
+    const holdExtensionEnvOf = () => hxEnvForRun;
     out.authority.candidates = authorityCandidates.length;
 
     for (const c of authorityCandidates) {
@@ -1124,6 +1130,8 @@ async function runLifecycleSweep(
             //     불변식을 이 조회가 깨뜨리면 안 된다.
             //   ★ 못 읽으면 **오늘과 같이 닫는다** — 비는 칸이 null로
             //     올라가고 판정이 닫는 쪽으로 떨어진다.
+            // ★ 승인 환경은 **라우트가** 넣는다 (엔진은 process.env를 안 본다)
+            holdExtensionEnv: holdExtensionEnvOf(),
             readHoldEvidence: async () => {
               const { readHoldEvidence } = await import('@/lib/engine/holdEvidenceReader');
               return readHoldEvidence({
@@ -1671,7 +1679,14 @@ async function runLifecycleSweep(
   // 오르지 않은 것과 볼 것이 없던 것이 구분되지 않는다. **안 보는 것은
   // '이상 없음'이 아니다.**
   const { exitCoverage, exitCoverageLine } = await import('@/lib/engine/exitCoverage');
-  const coverage = { line: exitCoverageLine(), strategies: exitCoverage() };
+  // ★ 승인 환경을 **여기서** 넣는다. 판정·커버리지 모듈은 `process.env`를
+  //   집지 않는다 — 집으면 검사기가 그 사슬을 컴파일할 수 없다.
+  const { holdExtensionEnvFromProcess } = await import('@/lib/engine/holdExtensionEnv');
+  const hxEnv = holdExtensionEnvFromProcess();
+  const coverage = {
+    line: exitCoverageLine(undefined, hxEnv),
+    strategies: exitCoverage(undefined, hxEnv),
+  };
   for (const g of guardFindings) {
     if (g.verdict.action !== 'CLOSE') continue;
     const d = decisions.find(x => x.tradeId === g.tradeId);

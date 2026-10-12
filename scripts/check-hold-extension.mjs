@@ -182,11 +182,17 @@ if (mod && typeof mod.decideHoldExtension === 'function') {
       err(`${HX}에 import가 ${imports.length}개 있습니다 — 순수 판정 모듈이어야 합니다`
         + ' (거래소·DB가 들어오면 시험이 네트워크 없이 경계를 재현할 수 없습니다)');
     }
-    // `process.env`는 얇은 래퍼 하나에서만 읽는다.
+    // ★ `process.env`를 **한 번도** 읽지 않는다.
+    //
+    //   읽는 순간 이 파일(과 이 파일을 쓰는 사슬)이 Node 타입 없이
+    //   컴파일되지 않고, `check-100x-contract.mjs`의 탐침이 일곱 개 모듈에서
+    //   "컴파일되지 않습니다"로 멈춘다 — 실제로 그렇게 깨졌다.
+    //   환경을 읽는 일은 `holdExtensionEnv.ts` 하나가 맡는다.
     const envHits = (c.match(/process\.env/g) || []).length;
-    if (envHits > 1) {
+    if (envHits > 0) {
       err(`${HX}에서 process.env를 ${envHits}번 읽습니다`
-        + ' — 승인 값은 holdExtensionActivation 한 곳에서만 읽어야 합니다');
+        + ' — 순수 판정 모듈은 주변 상태를 집지 않습니다'
+        + ' (환경은 holdExtensionEnv.ts가 읽어 인자로 넘깁니다)');
     }
   }
   for (const f of [HX, HXR]) {
@@ -247,9 +253,37 @@ if (mod && typeof mod.decideHoldExtension === 'function') {
     }
   }
   const cov = read(COV);
-  if (cov && !code(cov).includes('holdExtensionActivation')) {
+  if (cov && !code(cov).includes('judgeHoldExtensionActivation')) {
     err(`${COV}이(가) 켜짐 여부를 보지 않습니다`
       + ' — 선언된 기능을 "돈다"고 적으면 승인하지 않은 기능이 화면에서 켜져 보입니다');
+  }
+  if (cov && /process\.env/.test(code(cov))) {
+    err(`${COV}이(가) process.env를 읽습니다 — 검사기 탐침이 이 파일을 컴파일할 수`
+      + ' 없게 됩니다. 승인 환경은 호출부가 인자로 넣어야 합니다');
+  }
+
+  // ── 환경을 읽는 자리는 **하나뿐**이어야 한다 ──
+  {
+    const envFile = 'src/lib/engine/holdExtensionEnv.ts';
+    const e = read(envFile);
+    if (!e) err(`${envFile}이 없습니다 — 승인 값을 읽는 정본이 사라졌습니다`);
+    else if (!code(e).includes('EXACT100X_HOLD_EXTENSION_APPROVED_AT')) {
+      err(`${envFile}이 승인 환경변수를 읽지 않습니다`);
+    }
+    // 엔진 쪽 사슬은 환경을 집지 않는다
+    for (const f of [RUN, AUTH, HXR]) {
+      const src = read(f);
+      if (src && /process\.env\.EXACT100X_HOLD_EXTENSION/.test(code(src))) {
+        err(`${f}이(가) 승인 값을 직접 읽습니다 — 호출부가 인자로 넣어야 합니다`);
+      }
+    }
+    // 라우트는 **반드시** 넣어야 한다. 안 넣으면 영구 꺼짐이고,
+    // 그러면 승인해도 아무 일이 일어나지 않는다(조용한 영구 OFF).
+    const m2 = read(MON);
+    if (m2 && !code(m2).includes('holdExtensionEnvFromProcess')) {
+      err(`${MON}이(가) 승인 환경을 넣지 않습니다`
+        + ' — 승인해도 연장이 영구히 꺼진 채로 남습니다');
+    }
   }
 }
 

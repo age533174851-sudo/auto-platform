@@ -305,6 +305,28 @@ export async function runHoldExtensionIntegrationTests() {
     });
   }
 
+  {
+    // 호출부가 승인 환경을 **아예 넣지 않으면** 꺼짐이다. 엔진은
+    // `process.env`를 집지 않는다 — 집으면 검사기가 이 사슬을 컴파일할 수 없다.
+    const now = Date.now();
+    const venue = venueFor(now);
+    const restore = venue.install();
+    const unenv = withCryptoEnv();
+    let r: any;
+    try {
+      const deps = depsFor(now, { approved: true });
+      delete (deps as any).holdExtensionEnv;
+      r = await runExitAuthority(candidate(now), deps, now);
+    } finally { restore(); unenv(); }
+
+    test('★ ⓿-E 승인 환경을 넣지 않은 호출부에서는 꺼짐이다 (fail-closed)', () => {
+      eq(r.holdExtensionGate?.code, 'NOT_APPROVED');
+      eq(r.code, 'CLOSED_VERIFIED');
+      eq(venue.orderSends().length, 1);
+      eq(r.decision?.holdExtension, null);
+    });
+  }
+
   test('★ ⓿ 승인 판정 자체 — 빈 값·공백·쓰레기는 전부 꺼짐이다', () => {
     for (const v of [undefined, '', '   ', 'yes', 'true', 'soon', '0', '-5']) {
       const a = judgeHoldExtensionActivation({

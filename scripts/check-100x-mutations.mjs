@@ -190,6 +190,12 @@ const P = {
 
 const CHECK = ['scripts/check-100x-contract.mjs'];
 const CHECK1A = ['scripts/check-execution-profile.mjs'];
+// ★ 보유 연장 검사기도 **게이트에 넣는다.**
+//
+//   넣지 않으면 "라우트가 승인 환경을 넣지 않는다" 같은 **배선** 변이가
+//   새 나간다 — 시험은 환경을 직접 주입하므로 그 변이에 초록으로 남는다.
+//   하네스가 CI보다 좁게 보면 그 차이만큼 거짓 신호가 나온다.
+const CHECK_HX = ['scripts/check-hold-extension.mjs'];
 
 /** 게이트 하나를 돌린다. 통과면 null, 실패면 {name, code, output}. */
 const runGate = (name, cmd, args) => {
@@ -211,6 +217,7 @@ const runGate = (name, cmd, args) => {
 const GATES = [
   ['check-100x-contract', process.execPath, CHECK],
   ['check-execution-profile', process.execPath, CHECK1A],
+  ['check-hold-extension', process.execPath, CHECK_HX],
   ['npm test', 'npm', ['test']],
 ];
 
@@ -991,8 +998,9 @@ const M = [
     s => s.replace("if (resolved.contract.stopPolicy === 'NO_FIXED_SL') {",
                    'if (false) {'), 'RED'],
 
+  // 정본이 줄바꿈과 인자 하나(승인 환경)를 얻었다. **앵커를 옮긴다.**
   ['MUT-N4 커버리지에서 계약 줄을 떼어냄', P.cov,
-    s => s.replace(/return \[\.\.\.base, \.\.\.contractRows\([\s\S]*?\)\];/,
+    s => s.replace(/return \[\.\.\.base,[\s\S]*?contractRows\([\s\S]*?\)\];/,
                    'return base;'), 'RED'],
 
   // ★ 앵커를 **계약 줄 쪽**으로 좁힌다. 예전 앵커
@@ -2468,6 +2476,13 @@ const M = [
   ['HX25 승인 값 범위 검사 제거 (오타 한 자가 승인이 됨)', P.hx,
     s => s.replace("  if (!Number.isFinite(asNum) || !(asNum >= MIN_MS) || !(asNum < MAX_MS)) {",
       '  if (!Number.isFinite(asNum) || !(asNum > 0)) {')],
+  // 배선 변이 — 시험은 환경을 직접 주입하므로 검사기만 잡는다
+  ['HX26 라우트가 승인 환경을 넣지 않음 (조용한 영구 꺼짐)', P.monitor,
+    s => s.replace('            holdExtensionEnv: holdExtensionEnvOf(),', '')],
+  ['HX27 판정 모듈이 환경을 직접 집음 (검사기 탐침이 깨진다)', P.hx,
+    s => s.replace('  const activation = judgeHoldExtensionActivation(i?.env);',
+      '  const activation = judgeHoldExtensionActivation(i?.env'
+      + ' ?? { EXACT100X_HOLD_EXTENSION_APPROVED_AT: process.env.EXACT100X_HOLD_EXTENSION_APPROVED_AT });')],
 
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**

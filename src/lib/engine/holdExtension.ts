@@ -279,8 +279,18 @@ export interface HoldExtensionActivation {
 }
 
 /**
- * 연장이 켜져 있는가. **환경을 인자로 받는다** — 시험이 모든 조합을
- * `process.env`를 건드리지 않고 확인할 수 있어야 한다.
+ * 연장이 켜져 있는가. **환경을 인자로 받는다.**
+ *
+ * 두 가지 이유로 `process.env`를 여기서 읽지 않는다:
+ *
+ *   ① 시험이 모든 조합을 `process.env`를 건드리지 않고 확인해야 한다.
+ *   ② 이 파일은 **순수 판정 모듈이다.** import도 0개이고 주변 상태도
+ *      읽지 않는다. 그래서 검사기가 이 파일(과 이 파일을 쓰는 사슬)을
+ *      Node 타입 없이 단독으로 컴파일해 **실제로 불러 볼 수 있다.**
+ *      여기서 `process.env` 한 줄을 읽는 순간 그 사슬 전체가 검사기에서
+ *      컴파일되지 않았다 — 실제로 그렇게 깨졌다.
+ *
+ * `process.env`를 읽는 얇은 래퍼는 `holdExtensionEnv.ts`에 있다.
  */
 export function judgeHoldExtensionActivation(
   e: HoldExtensionActivationEnv | null | undefined,
@@ -320,14 +330,6 @@ export function judgeHoldExtensionActivation(
   };
 }
 
-/** 실제 호출부가 쓰는 얇은 래퍼 */
-export function holdExtensionActivation(): HoldExtensionActivation {
-  return judgeHoldExtensionActivation({
-    EXACT100X_HOLD_EXTENSION_APPROVED_AT:
-      process.env.EXACT100X_HOLD_EXTENSION_APPROVED_AT,
-  });
-}
-
 export type HoldExtensionGateCode =
   | 'OPEN'
   /** 이 계약에 연장 정책이 선언돼 있지 않다 */
@@ -360,11 +362,13 @@ export interface HoldExtensionGateVerdict {
 export function holdExtensionGate(i: {
   executionIdentity: HoldExtensionTarget | null | undefined;
   openedAtMs: number | null | undefined;
-  env?: HoldExtensionActivationEnv | null;
+  /**
+   * 승인 환경. **호출부가 넣는다.** 안 넣으면 승인 없음(= 꺼짐)이다 —
+   * 이 함수는 `process.env`를 집지 않는다.
+   */
+  env: HoldExtensionActivationEnv | null | undefined;
 }): HoldExtensionGateVerdict {
-  const activation = i?.env === undefined
-    ? holdExtensionActivation()
-    : judgeHoldExtensionActivation(i.env);
+  const activation = judgeHoldExtensionActivation(i?.env);
 
   const declared = resolveHoldExtensionPolicy(i?.executionIdentity);
   if (declared == null) {

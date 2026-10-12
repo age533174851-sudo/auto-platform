@@ -262,10 +262,11 @@ export interface ExitRunDeps {
   /** 보낸 뒤 잔여를 다시 읽는다. `ok:false`는 "못 읽었다"다 */
   readAfter(): Promise<{ ok: boolean; found: boolean }>;
   /**
-   * 보유 연장 **승인 환경**. **시험이 고정한다** — 안 주면 `process.env`다.
+   * 보유 연장 **승인 환경**. **호출부가 넣는다 — 안 주면 꺼짐이다.**
    *
-   * 기본값(승인 값 없음)은 **꺼짐**이고, 그러면 아래 `readHoldEvidence`는
-   * 불리지 않는다.
+   * 이 파일이 `process.env`를 직접 읽지 않는 이유는
+   * `holdExtensionEnv.ts`의 머리글에 적혀 있다. 라우트가
+   * `holdExtensionEnvFromProcess()`를 넣고, 시험은 조합을 직접 넣는다.
    */
   holdExtensionEnv?: HoldExtensionActivationEnv | null;
   /**
@@ -426,8 +427,10 @@ export async function runExitAuthority(
     ? holdExtensionGate({
         executionIdentity: candidate.executionIdentity,
         openedAtMs: candidate.openedAtMs,
-        // `undefined`면 `process.env`를 본다. 시험은 명시적으로 넘긴다.
-        env: deps.holdExtensionEnv,
+        // ★ **안 주면 꺼짐이다.** 이 파일은 `process.env`를 집지 않는다 —
+        //   집으면 검사기가 이 사슬을 Node 타입 없이 컴파일할 수 없다.
+        //   승인 환경은 라우트가 `holdExtensionEnvFromProcess()`로 넣는다.
+        env: deps.holdExtensionEnv ?? null,
       })
     : null;
 
