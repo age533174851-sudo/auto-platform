@@ -723,6 +723,9 @@ jobs:
       - name: 대조 진실성 (열린 주문을 종료로 적지 않는다)
         run: node scripts/check-reconcile-truth.mjs
 
+      - name: 자격증명 노출 (키·시크릿·토큰 값을 어디에도 남기지 않는다)
+        run: node scripts/check-credential-exposure.mjs
+
       - name: 전용 100배 계약 (정확 100 · 고정 손절 없음 · 누출 0)
         run: node scripts/check-100x-contract.mjs
 

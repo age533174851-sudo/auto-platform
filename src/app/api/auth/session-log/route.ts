@@ -46,11 +46,18 @@ export async function GET(req: NextRequest) {
 
   if (queryErr) return NextResponse.json({ sessions: [], error: queryErr.message }, { status: 500 });
 
-  // 클라이언트로 보내기 전에 session_token 마스킹
-  const sessions = (data || []).map((s: any) => ({
-    ...s,
-    session_token: s.session_token ? s.session_token.slice(0, 8) + '…' : null,
-  }));
+  // ── 토큰의 **일부도** 내보내지 않는다 ──
+  //
+  //   예전에는 `session_token.slice(0, 8) + '…'`이었다. 이 토큰은
+  //   세션 행을 찾는 열쇠(`.eq('session_token', token)`)이므로 일부라도
+  //   흘리면 대조·식별에 쓸 수 있다. 화면이 세션을 지목하는 데는 `id`가
+  //   있고, "이 기기인가"는 `is_current`가 답한다 — 토큰 자체를 보낼
+  //   이유가 없다. 구별이 필요하면 지문으로 한다.
+  const { fingerprintOf } = await import('@/lib/system/fingerprint');
+  const sessions = (data || []).map((s: any) => {
+    const { session_token, ...rest } = s;
+    return { ...rest, session_fingerprint: fingerprintOf(session_token) };
+  });
 
   return NextResponse.json({ sessions }, { headers: { 'Cache-Control': 'no-store' } });
 }

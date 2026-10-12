@@ -18,7 +18,7 @@ import { fillBasis, exitFromFill } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
-import { futuresApplyLeverage } from '../exchanges/futuresExec';
+import { futuresApplyLeverage, unknownResultVerdict } from '../exchanges/futuresExec';
 import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
@@ -610,6 +610,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           //   체결은 장부에 영원히 들어오지 않는다. 대조 쓰기와 같은
           //   결함이 이 자리에도 있었다 — 경로가 셋인데 하나만 고쳤던 것.
           const dup = ledgerStatusOfBinance(exFacts.exchangeStatus, exFacts.filledQty);
+
+          // ── 상태 기계가 이 쓰기를 **조용히 버리고 있었다** ──
+          //
+          //   장부 줄은 아직 `INTENT`(= 상태 기계의 `APPROVED`)다. 그
+          //   상태에서 나갈 수 있는 길은 `SENT`·`CANCELED`·`FAILED`뿐이라
+          //   `ACKED`로 가는 전이가 거부되고, `update`가 **status만 빼고**
+          //   나머지를 적었다. 그래서 이 분기는 수량·주문번호는 적으면서
+          //   상태는 영원히 `INTENT`로 남겼다 — 예전 코드가 `RECONCILED`를
+          //   적던 시절에도 똑같이 버려지고 있었다(둘 다 `ACKED`로 매핑된다).
+          //
+          //   거래소에서 그 주문을 **찾았다**는 것은 이전 시도가 실제로
+          //   전송됐다는 뜻이다. 그러니 먼저 `SENT`을 적고(사실이다) 그
+          //   다음에 발견한 상태로 간다. 전이표를 넓히지 않고도 네 결과
+          //   (ACKED·FILLED·REJECTED·RECONCILED) 모두 통과한다.
+          await update({ status: 'SENT', sent_at: new Date().toISOString() });
           await update({
             status: dup.status, exchange_order_id: String(existing.order?.orderId),
             filled_qty: exFacts.filledQty,
@@ -742,6 +757,30 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
 
       if (!res?.success) {
+        // ── 실패를 **거부로 단정하지 않는다** ──
+        //
+        //   `placeFuturesOrder`는 타임아웃·연결 끊김도 **내부에서 잡아**
+        //   `{ success: false, message }`로 돌려준다. 그래서 위 catch는
+        //   돌지 않고 여기로 온다. 여기서 무조건 `REJECTED`를 적고 있었다.
+        //
+        //   `REJECTED`는 "거래소가 거부했다"는 뜻이고, 대조 대상도 아니며
+        //   (`RECONCILE_TARGET_STATUSES`에 없다) 계좌 용량 관문의 어느
+        //   목록에도 없다. 즉 **거래소에 살아 있을 수 있는 주문이
+        //   "거부됨"으로 종료되고, 아무도 다시 조회하지 않고, 진입 잠금도
+        //   풀린다.** 자동매매의 주 진입 경로에 그 구멍이 있었다.
+        //
+        //   판정은 `unknownResultVerdict` 하나를 쓴다 — 거래소가 거절한
+        //   모양이 보일 때만 거부로 적는다.
+        const verdict = unknownResultVerdict(res?.message);
+        if (verdict.unknown) {
+          await update({
+            status: 'UNKNOWN',
+            error_message: `결과 미확정(${verdict.evidence}): ${res?.message || '사유 미상'}`,
+          });
+          return { ok: false, status: 'UNKNOWN', clientOrderId,
+            message: '주문 결과를 확정하지 못했습니다. 재시도하지 않고 대조가 필요합니다 — '
+                   + `${res?.message || '사유 미상'}` };
+        }
         await update({ status: 'REJECTED', error_message: res?.message });
         return { ok: false, status: 'REJECTED', clientOrderId, message: `거래소 거부: ${res?.message}` };
       }
@@ -1140,6 +1179,10 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         status: existing.status, finishAs: (existing as any).finish_as,
         filledQty: gFill.filledQty,
       });
+      // 바이낸스 쪽과 같은 이유로 먼저 `SENT`을 적는다 — 찾았다는 것은
+      // 이전 시도가 실제로 전송됐다는 뜻이고, `INTENT → ACKED` 전이는
+      // 상태 기계가 거부해 이 쓰기가 조용히 버려졌다.
+      await update({ status: 'SENT', sent_at: new Date().toISOString() });
       await update({
         status: dup.status, exchange_order_id: String(existing.id),
         filled_qty: gFill.filledQty,
@@ -1212,8 +1255,19 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         clientOrderId,
       }, testnet);
     } catch (e: any) {
-      await update({ status: 'UNKNOWN', error_message: `응답 없음: ${e?.message || e}` });
-      return { ok: false, status: 'UNKNOWN', clientOrderId, message: '응답 없음 — 대조 필요' };
+      // Gate는 HTTP 오류에서 **던진다**(`gateReq`). 그래서 정상 거절
+      // (`Gate 400: BALANCE_NOT_ENOUGH`)도 여기로 온다. 전부 UNKNOWN으로
+      // 묶으면 나간 적 없는 주문이 미확정으로 쌓여 다음 진입을 막는다.
+      // 바이낸스 쪽과 **같은 정본**으로 가른다.
+      const msg = String(e?.message || e);
+      const verdict = unknownResultVerdict(msg);
+      if (!verdict.unknown) {
+        await update({ status: 'REJECTED', error_message: msg });
+        return { ok: false, status: 'REJECTED', clientOrderId, message: `거래소 거부: ${msg}` };
+      }
+      await update({ status: 'UNKNOWN', error_message: `결과 미확정(${verdict.evidence}): ${msg}` });
+      return { ok: false, status: 'UNKNOWN', clientOrderId,
+        message: `주문 결과를 확정하지 못했습니다 — 대조 필요: ${msg}` };
     }
 
     // ── 체결됐는가 ──

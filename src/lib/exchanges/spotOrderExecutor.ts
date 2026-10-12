@@ -17,6 +17,7 @@
 // 두 입구가 같은 함수를 쓴다.
 import { checkIntent, tagSignalId } from '@/lib/markets/marketType';
 import type { LedgerOrderStatus } from '@/lib/engine/reconcileLedgerStatus';
+import { ledgerStatusOfGateSpot as gateSpotLedgerStatus } from '../engine/reconcileLedgerStatus';
 import type { SpecSource } from '@/lib/markets/venueSpec';
 import {
   precisionSkipOf, PRECISION_SKIP_TEXT, type PrecisionSkip,
@@ -529,10 +530,34 @@ async function placeGateSpot(
     };
   }
   if (dup.order) {
-    await patch({ status: 'RECONCILED', exchange_order_id: String(dup.order?.id ?? '') });
+    // ── 장부와 반환이 **서로 다른 답**을 하고 있었다 ──
+    //
+    //   장부에는 `RECONCILED`(끝남)를, 반환에는 `REJECTED`(거래소가
+    //   거부함)를 적었다. 둘 다 사실이 아니다: 찾은 주문은 아직 열려
+    //   있을 수 있고, 거래소는 아무것도 거부하지 않았다. 그리고 두
+    //   값이 다르면 화면과 장부가 영원히 갈린다.
+    //
+    //   Gate 현물 어휘로 한 번 판정해서 **같은 값을** 양쪽에 쓴다.
+    const { gateSpotFillOf } = await import('./gateSpotPlan');
+    const dupFill = gateSpotFillOf(dup.order);
+    const dupVerdict = gateSpotLedgerStatus({
+      status: dupFill.status, filledQty: dupFill.filledQty, unfilled: dupFill.unfilled,
+    });
+    await patch({
+      status: dupVerdict.status,
+      exchange_order_id: String(dup.order?.id ?? ''),
+      filled_qty: dupFill.filledQty ?? null,
+      avg_price: dupFill.avgPrice ?? null,
+      ...(dupVerdict.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+      ...(dupVerdict.needsAttention
+        ? { needs_attention: true, error_message: dupVerdict.attentionReason }
+        : {}),
+    });
     return {
-      ok: false, status: 'REJECTED', clientOrderId, code: 'duplicate',
-      message: '같은 표식의 주문이 이미 거래소에 있습니다',
+      ok: false, status: dupVerdict.status, clientOrderId, code: 'duplicate',
+      message: '같은 표식의 주문이 이미 거래소에 있습니다'
+        + ` (거래소 상태 ${dupFill.status ?? '불명'}`
+        + `${dupVerdict.terminal ? '' : ' · 아직 열려 있음'})`,
     };
   }
 

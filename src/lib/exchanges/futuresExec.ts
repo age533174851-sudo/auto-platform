@@ -34,6 +34,7 @@
 // 중복 체결이고, 그건 실패보다 나쁘다.
 
 import { quantizeOrder, type QuantizeCode } from './quantize';
+import { fingerprintOf } from '../system/fingerprint';
 import {
   futuresExchangeOf, futuresExchangeName, futuresPositionRisk,
   futuresSetLeverage, futuresSymbolFilters, futuresMarkPrice, futuresClosePosition,
@@ -438,8 +439,13 @@ const MODE_TTL_MS = 60_000;
 export async function futuresCheckPositionMode(
   t: ExecTarget, nowMs = Date.now(),
 ): Promise<PositionModeVerdict> {
-  // 키 전체를 캐시 열쇠에 넣지 않는다. 앞 8자로 계좌를 구분하기에 충분하다.
-  const cacheKey = `${t.exchange}:${t.testnet ? 'demo' : 'live'}:${t.key.slice(0, 8)}`;
+  // 키 전체를 캐시 열쇠에 넣지 않는다 — **앞 8자도 넣지 않는다.**
+  //
+  //   메모리 안에만 있으니 괜찮다고 두면, 그 변수가 언젠가 디버그 로그나
+  //   오류 메시지에 실린다. 그때는 "왜 키 일부가 로그에 있나"를 다시
+  //   찾아야 한다. 지문은 계좌를 구분하는 데 똑같이 충분하고, 어디에
+  //   실려도 값이 새지 않는다.
+  const cacheKey = `${t.exchange}:${t.testnet ? 'demo' : 'live'}:${fingerprintOf(t.key) ?? 'none'}`;
   const hit = _modeCache[cacheKey];
   if (hit && nowMs - hit.at < MODE_TTL_MS) return positionModeVerdict(hit.mode, null);
   try {
