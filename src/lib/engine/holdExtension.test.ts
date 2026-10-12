@@ -311,6 +311,19 @@ export function runHoldExtensionTests() {
     eq(d.requiredGivebackRoePct, null, '아직 안 걸렸으면 null이다');
   });
 
+  test('★ 지금 가격이 봉의 고점보다 높으면 지금이 고점이다', () => {
+    // 봉은 **완성된 것만** 쓰므로 진행 중인 봉의 고점이 빠진다. 그 창에서
+    // 봉의 고점만 믿으면 고점을 실제보다 낮게 보고, 그러면 보호(⑥)가
+    // 아직 안 걸린 것으로 읽혀 **급반전이 그대로 통과한다.**
+    const d = decideHoldExtension(IN({
+      evidence: EV({ markPrice: 100_400, bestPrice: 100_200 }) }));
+    eq(d.code, 'EXTEND');
+    eq(Math.round(d.netRoePct!), 28);
+    eq(d.peakNetRoePct, d.netRoePct, '★ 지금이 고점이어야 한다');
+    assert(d.requiredGivebackRoePct != null,
+      '★ 고점이 작동 문턱을 넘었으니 보호가 걸려 있어야 한다');
+  });
+
   test('★ 고점을 모르면 현재를 고점으로 본다 — 가짜 반납을 만들지 않는다', () => {
     const d = decideHoldExtension(IN({ evidence: EV({ bestPrice: null }) }));
     eq(d.code, 'EXTEND');
