@@ -800,6 +800,68 @@ export async function futuresContractSpec(
  * **못 읽으면 null이다.** 추측한 모드로 주문을 만들면, 틀렸을 때
  * 거부가 아니라 반대 포지션이 열릴 수 있다.
  */
+/**
+ * **계좌의 미체결 주문 전부** (거래소 중립).
+ *
+ * 왜 필요한가: 긴급 종료가 "계좌 전체 취소"를 버리고 **대상 주문만**
+ * 취소하려면, 먼저 어떤 주문이 있는지 번호와 함께 읽어야 한다.
+ *
+ * `ok:false`는 **못 읽었다**는 뜻이고 "없다"가 아니다 — 그 구분이 없으면
+ * 조회 실패가 "취소할 것이 없음"으로 읽힌다.
+ */
+export async function futuresOpenOrdersAll(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+): Promise<{ ok: boolean; orders: Array<{ id: string | null; symbol: string | null }> | null; error: string | null }> {
+  try {
+    if (ex === 'gate') {
+      const gf = await import('./gateFutures');
+      const rows: any = await gf.getOpenOrdersGateFutures(key, secret, testnet);
+      if (!Array.isArray(rows)) return { ok: false, orders: null, error: 'Gate 미체결 응답이 배열이 아닙니다' };
+      return { ok: true, error: null, orders: rows.map((o: any) => ({
+        id: o?.id != null ? String(o.id) : null,
+        symbol: o?.contract ?? o?.symbol ?? null,
+      })) };
+    }
+    const bf = await import('./binanceFutures');
+    const r: any = await bf.getFuturesOpenOrders(key, secret, testnet);
+    const rows = Array.isArray(r) ? r : (Array.isArray(r?.orders) ? r.orders : null);
+    if (rows == null) return { ok: false, orders: null, error: '미체결 응답을 읽지 못했습니다' };
+    return { ok: true, error: null, orders: rows.map((o: any) => ({
+      id: o?.orderId != null ? String(o.orderId) : null,
+      symbol: o?.symbol ?? null,
+    })) };
+  } catch (e: any) {
+    return { ok: false, orders: null, error: String(e?.message || e) };
+  }
+}
+
+/**
+ * 이 식별자의 주문이 거래소에 **이미 있는가.**
+ *
+ * `ok:false`는 **못 물어봤다**는 뜻이다. 재시도 전에 이것을 묻고, 못
+ * 물어보면 새 주문을 보내지 않는다 — 조회 실패를 신규 주문 허가로
+ * 쓰지 않는다.
+ *
+ * ★ Gate는 이 조회 수단을 아직 확인하지 못했다. `ok:false`를 돌려주므로
+ *   Gate에서는 **재전송하지 않는다**(안전한 방향).
+ */
+export async function futuresFindByClientId(
+  ex: FuturesExchange, key: string, secret: string, testnet: boolean,
+  symbol: string, clientOrderId: string,
+): Promise<{ ok: boolean; found: boolean; error: string | null }> {
+  if (ex === 'gate') {
+    return { ok: false, found: false,
+      error: 'Gate의 식별자 조회를 확인하지 못했습니다 — 재전송하지 않습니다' };
+  }
+  try {
+    const bf = await import('./binanceFutures');
+    const r = await bf.findOrderByClientId(key, secret, symbol, clientOrderId, testnet);
+    return { ok: true, found: r.found === true, error: null };
+  } catch (e: any) {
+    return { ok: false, found: false, error: String(e?.message || e) };
+  }
+}
+
 export async function futuresPositionMode(
   ex: FuturesExchange, key: string, secret: string, testnet: boolean,
 ): Promise<{ mode: 'ONE_WAY' | 'HEDGE' | null; error: string | null }> {

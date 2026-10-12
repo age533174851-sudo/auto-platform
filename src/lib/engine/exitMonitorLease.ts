@@ -28,6 +28,18 @@ export type LeaseCode =
   | 'HELD_BY_OTHER'
   /** 만료된 것을 가져왔다 */
   | 'TAKEN_OVER'
+  /**
+   * **살아 있는 임차를 긴급으로 선점했다.**
+   *
+   * 긴급 종료는 기다릴 수 없다 — 4분을 기다리는 동안 손실이 커진다.
+   * 그래서 남이 쥐고 있어도 가져간다. 번호를 올리므로, 돌고 있던 쪽은
+   * 쓰기 직전 재검증(`fenceStillMine`)에서 자기 번호가 낡은 것을 보고
+   * **주문을 내지 않는다.**
+   *
+   * ★ 선점만으로 **이미 전송 중인** 주문을 취소할 수는 없다. 그 겹침은
+   *   축소 전용·식별자 중복 인식·마지막 재조회가 다룬다.
+   */
+  | 'PREEMPTED'
   /** 상태를 읽지 못했다. **비어 있는 것이 아니다** */
   | 'UNKNOWN';
 
@@ -60,6 +72,17 @@ export function leaseDecision(i: {
   me: string;
   nowMs: number;
   ttlMs?: number;
+  /**
+   * **긴급 선점.** 기본은 거짓 — 기존 의미(남이 쥐고 있으면 건너뜀)
+   * 그대로다.
+   *
+   * 참이면 살아 있는 임차도 가져간다. 긴급 종료만 넘긴다.
+   *
+   * ★ 상태를 **못 읽은** 경우는 선점해도 통과시키지 않는다. 번호를
+   *   모르면 재검증할 수가 없고, 재검증 없는 쓰기는 이 구조가 막으려던
+   *   바로 그것이다.
+   */
+  preempt?: boolean;
 }): LeaseDecision {
   if (i?.current === undefined) {
     return { code: 'UNKNOWN', granted: false, nextFence: null,
@@ -77,6 +100,11 @@ export function leaseDecision(i: {
   }
   const expired = !Number.isFinite(cur.expiresAtMs) || cur.expiresAtMs <= i.nowMs;
   if (!expired) {
+    if (i.preempt === true) {
+      return { code: 'PREEMPTED', granted: true, nextFence: (Number(cur.fence) || 0) + 1,
+        reason: `${cur.holder}가 돌고 있지만 긴급 종료가 선점했습니다`
+          + ' — 그쪽은 쓰기 직전 재검증에서 막힙니다' };
+    }
     return { code: 'HELD_BY_OTHER', granted: false, nextFence: null,
       reason: `${cur.holder}가 돌고 있습니다 — 기다리지 않고 이번은 건너뜁니다` };
   }
@@ -246,6 +274,8 @@ export async function acquireExitLease(i: {
   me: string;
   nowMs: number;
   ttlMs?: number;
+  /** 긴급 선점. **기본 거짓** — 긴급 종료만 참으로 넘긴다 */
+  preempt?: boolean;
 }): Promise<LeaseAcquireResult> {
   const ttl = Number.isFinite(i?.ttlMs as number) && (i.ttlMs as number) > 0
     ? (i.ttlMs as number) : LEASE_TTL_MS;
@@ -264,7 +294,7 @@ export async function acquireExitLease(i: {
 
   // **못 읽은 것을 빈 표로 읽지 않는다.** `leaseDecision`이 UNKNOWN으로
   // 막는다 — 그 의미를 여기서 다시 쓰지 않는다.
-  const d = leaseDecision({ current, me: i.me, nowMs: i.nowMs, ttlMs: ttl });
+  const d = leaseDecision({ current, me: i.me, nowMs: i.nowMs, ttlMs: ttl, preempt: i.preempt === true });
   if (!d.granted) {
     return { code: 'SKIP', granted: false, myFence: null, tracked: true, reason: d.reason };
   }

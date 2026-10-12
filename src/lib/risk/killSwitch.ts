@@ -303,48 +303,247 @@ export async function releaseLock(sb: any, name: string, holder: string): Promis
   try { await sb.from('worker_lock').update({ holder: null, expires_at: new Date(0).toISOString() }).eq('name', name).eq('holder', holder); } catch {}
 }
 
-// ── 발동 시 C/D 자동 실행 (순서 엄수: Cancel All → Close All) ────────
+// ══════════════════════════════════════════════════════════════
+// ★ 발동 시 C/D 자동 실행 — **순서가 뒤집혔다**
+// ══════════════════════════════════════════════════════════════
+//
+// 예전 순서: Cancel All (계좌 전체) → Close All (계좌 전체)
+//
+// 두 가지가 틀려 있었다.
+//
+//   ① **포지션 모드를 묻지 않았다.** 종료 주문은 단방향 전용 조합으로
+//      나가고, 양방향 계좌에 그걸 보내면 **반대 방향 신규 진입**이 될 수
+//      있다. 판정 정본(`closeModeVerdict`)은 이미 있었는데 이 경로만
+//      그 관문 밖이었다.
+//
+//   ② **보호주문을 먼저 지웠다.** 그래서 ①을 고치면 더 나쁜 상태가
+//      만들어진다 — 보호주문은 지워졌는데 포지션은 열린 채 남는다.
+//
+// 그래서 순서를 바꾼다:
+//
+//     모드 확인 → 대상·주문 식별 → (닫을 수 있을 때만) 대상 주문 취소
+//     → 축소 전용 종료 → 잔여 확인 → **보호 상태 판정**
+//
+// 판정은 `killClosePlan`, 순서는 `killCloseRun`에 있다. 이 파일은 거래소
+// 호출을 그 둘에 **주입**한다 — 판정을 여기 다시 적지 않는다.
+//
+// ★ 계좌 전체 Cancel All은 **이 경로에서 제거했다.** 같은 계좌의 다른
+//   전략이 걸어 둔 손절까지 지우기 때문이다. 취소 범위는 "닫을 대상
+//   심볼의, 번호를 읽은 주문"이고, 닫지 않는 단계(`C`만)에서는 "열린
+//   포지션이 없는 심볼의 대기 주문"뿐이다.
 export interface KillExecResult {
   cancel: { ran: boolean; success: boolean; count?: number; results?: any[] } | null;
   close:  { ran: boolean; success: boolean; remaining?: number; retries?: number } | null;
+  /** 모드 관문·취소 범위·보호 상태. **없으면 예전 경로다** */
+  safety?: {
+    planCode: string;
+    modeCode: string;
+    mode: 'ONE_WAY' | 'HEDGE' | null;
+    mayClose: boolean;
+    mayCancel: boolean;
+    cancelScope: number;
+    retainedProtective: number;
+    unidentifiedOrders: number;
+    unusableTargets: number;
+    ordersSent: number;
+    protectionCode: string;
+    unprotected: boolean;
+    manualInterventionRequired: boolean;
+    reason: string;
+  } | null;
 }
 export async function executeKillActions(
   sb: any, userId: string, connectionId: string,
   opts: { key: string; secret: string; testnet: boolean; actionMode: string;
           /** 어느 거래소인가. 안 주면 바이낸스 — 예전 호출부와 동작이 같다 */
-          exchange?: 'binance' | 'gate' },
+          exchange?: 'binance' | 'gate';
+          /**
+           * 쓰기 직전 울타리 재검증. **안 주면 확인하지 않는다**(예전 동작).
+           *
+           * 긴급 종료와 청산 감시가 같은 포지션을 동시에 닫지 못하게 하는
+           * 장치다. 못 읽으면 호출부가 거짓으로 떨어뜨려 넘긴다.
+           */
+          stillMine?: () => Promise<boolean> },
 ): Promise<KillExecResult> {
   // **거래소를 가리지 않는다.** 킬스위치는 "문을 잠그고 안에 있는 것을 꺼내는"
   // 동작이다. Gate에서 꺼내는 쪽이 안 돌면 잠그기만 하고 끝나는데, 급할 때
   // 누른 사람은 정리됐다고 믿고 손을 뗀다 — 이 앱에서 가장 위험한 실패다.
-  const { futuresCancelAll, futuresCloseAll } = await import('@/lib/exchanges/futuresAdapter');
+  // **거래소를 가리지 않는다.** 킬스위치는 "문을 잠그고 안에 있는 것을 꺼내는"
+  // 동작이다. Gate에서 꺼내는 쪽이 안 돌면 잠그기만 하고 끝나는데, 급할 때
+  // 누른 사람은 정리됐다고 믿고 손을 뗀다 — 이 앱에서 가장 위험한 실패다.
+  const fa = await import('@/lib/exchanges/futuresAdapter');
+  const ops = await import('@/lib/engine/venuePositionOps');
+  const { planKillCancelOnly } = await import('./killClosePlan');
+  const { runKillClose } = await import('./killCloseRun');
   const ex = opts.exchange ?? 'binance';
-  const cancelAllOpenOrders = (k: string, sec: string, t: boolean) => futuresCancelAll(ex, k, sec, t);
-  const closeAllPositions = (k: string, sec: string, t: boolean, n: number) => futuresCloseAll(ex, k, sec, t, n);
+  const creds = { exchange: ex, apiKey: opts.key, apiSecret: opts.secret, testnet: opts.testnet };
   const mode = (opts.actionMode || '').toUpperCase();
   const doClose = mode.includes('D');
-  const doCancel = mode.includes('C') || doClose;   // 종료하려면 반드시 취소가 선행
+  const doCancel = mode.includes('C') || doClose;
   const modeLbl = opts.testnet ? 'TESTNET' : 'LIVE';
-  const out: KillExecResult = { cancel: null, close: null };
+  const out: KillExecResult = { cancel: null, close: null, safety: null };
 
-  // 3) Cancel All Open Orders (최대 5회 재시도)
-  if (doCancel) {
-    let cancel: any = null;
-    for (let i = 1; i <= 5; i++) {
-      cancel = await cancelAllOpenOrders(opts.key, opts.secret, opts.testnet);
-      if (cancel.success) break;
-      if (i < 5) await new Promise(r => setTimeout(r, 3000));
+  const readPositions = async () => {
+    try {
+      const fx = await import('@/lib/exchanges/futuresExec');
+      const r = await fx.futuresListPositions({
+        exchange: ex as any, key: opts.key, secret: opts.secret, testnet: opts.testnet,
+      } as any);
+      if (r?.ok !== true || !Array.isArray(r.positions)) return { ok: false, rows: null };
+      return { ok: true, rows: r.positions.map((p: any) => ({
+        symbol: p?.symbol ?? null, amount: p?.amount ?? null })) };
+    } catch { return { ok: false, rows: null }; }
+  };
+  const readOpenOrders = async () => {
+    const r = await fa.futuresOpenOrdersAll(ex as any, opts.key, opts.secret, opts.testnet);
+    return r.ok === true && r.orders != null
+      ? { ok: true, rows: r.orders }
+      : { ok: false, rows: null };
+  };
+
+  /**
+   * 취소 id를 **심볼별로** 묶는다. `cancelExact`가 심볼을 요구한다.
+   *
+   * 스냅숏에 없는 번호는 **버린다** — 어느 심볼의 것인지 모르는 번호를
+   * 아무 심볼로 보내면 다른 자리를 건드린다.
+   */
+  const targetSymbolsOf = (
+    ids: string[], snapshot: Array<{ id: string | null; symbol: string | null }>,
+  ): Array<{ symbol: string; ids: string[] }> => {
+    const bySymbol = new Map<string, string[]>();
+    for (const id of ids) {
+      const hit = snapshot.find(o => String(o?.id ?? '') === id);
+      const sym = String(hit?.symbol ?? '').trim().toUpperCase();
+      if (!sym) continue;
+      bySymbol.set(sym, [...(bySymbol.get(sym) ?? []), id]);
     }
-    out.cancel = { ran: true, success: !!cancel?.success, count: cancel?.count, results: cancel?.results };
-    await logKillEvent(sb, userId, connectionId, { reason: cancel?.success ? '오픈주문 전체 취소 성공' : '오픈주문 취소 일부 실패 — 거래소 직접 확인 필요', equity: 0, drawdownPct: 0, action: 'CANCEL_ALL', mode: modeLbl });
+    return [...bySymbol].map(([symbol, list]) => ({ symbol, ids: list }));
+  };
+  let ordersSnapshot: Array<{ id: string | null; symbol: string | null }> = [];
+
+  // ── ③ 닫는 단계(`D`) — 모드 관문을 지나는 하나의 순서 ──
+  if (doClose) {
+    const run = await runKillClose(
+      { connectionId, exchange: ex as any, actionMode: mode },
+      {
+        readMode: () => ops.accountCloseModeGate(creds as any),
+        readPositions,
+        readOpenOrders: async () => {
+          const r = await readOpenOrders();
+          ordersSnapshot = r.ok === true ? (r.rows ?? []) : [];
+          return r;
+        },
+        cancelOrders: async (ids) => {
+          // **이 번호들만.** 계좌 전체 취소를 쓰지 않는다.
+          let okAll = true;
+          let done = 0;
+          for (const t of targetSymbolsOf(ids, ordersSnapshot)) {
+            const r = await ops.cancelExact(creds as any, t.symbol, t.ids)
+              .catch(() => null);
+            if (r == null || r.leftover == null) { okAll = false; continue; }
+            done += t.ids.length;
+          }
+          return { ok: okAll, cancelled: done };
+        },
+        closeOne: async (t, clientOrderId) => {
+          // ★ **정본 경로를 쓴다.** `prepareSymbolClose`가 모드 관문·방향
+          //   검증·현재 노출 기준 수량·멱등 키를 전부 들고 있다.
+          const prep = await ops.prepareSymbolClose(
+            creds as any, t.symbol, t.side, () => clientOrderId);
+          if (prep.code === 'ALREADY_FLAT') {
+            return { ok: true, ambiguous: false, error: null };
+          }
+          if (prep.code !== 'READY' || prep.prepared == null) {
+            return { ok: false, ambiguous: false, error: prep.message };
+          }
+          const r = await ops.sendSymbolClose(creds as any, prep.prepared);
+          return { ok: r.ok === true, ambiguous: r.ambiguous === true,
+            error: r.error ?? null };
+        },
+        findByClientId: async (symbol, clientOrderId) => {
+          const r = await fa.futuresFindByClientId(
+            ex as any, opts.key, opts.secret, opts.testnet, symbol, clientOrderId);
+          return { ok: r.ok === true, found: r.found === true };
+        },
+        readLeftover: async () => {
+          const p = await readPositions();
+          if (p.ok !== true) return { ok: false, positions: null };
+          const n = (p.rows ?? []).filter((r: any) => {
+            const a = Number(r?.amount);
+            return Number.isFinite(a) && Math.abs(a) > 0;
+          }).length;
+          return { ok: true, positions: n };
+        },
+        stillMine: opts.stillMine,
+      },
+    );
+
+    out.cancel = run.cancelAttempted
+      ? { ran: true, success: run.cancelOk === true,
+          count: run.cancelledCount ?? undefined, results: [] }
+      : { ran: false, success: false, count: 0, results: [] };
+    out.close = { ran: run.ordersSent > 0, success: run.code === 'CLOSED_VERIFIED',
+      remaining: run.leftoverPositions ?? undefined, retries: undefined };
+    out.safety = {
+      planCode: run.plan.code,
+      modeCode: run.plan.code.startsWith('BLOCKED_') ? run.plan.code : 'ONE_WAY',
+      mode: null,
+      mayClose: run.plan.mayClose,
+      mayCancel: run.plan.mayCancel,
+      cancelScope: run.plan.cancelIds.length,
+      retainedProtective: 0,
+      unidentifiedOrders: run.plan.unidentifiedOrders,
+      unusableTargets: run.plan.unusableTargets,
+      ordersSent: run.ordersSent,
+      protectionCode: run.protection.code,
+      unprotected: run.protection.unprotected,
+      manualInterventionRequired: run.protection.manualInterventionRequired
+        || run.plan.manualInterventionRequired,
+      reason: run.reason,
+    };
+    await logKillEvent(sb, userId, connectionId, {
+      reason: run.code === 'CLOSED_VERIFIED'
+        ? '전체 포지션 종료 성공 (모드 확인 · 대상 주문만 취소)'
+        : `${run.code} — ${run.reason}`,
+      equity: 0, drawdownPct: 0, action: 'CLOSE_ALL', mode: modeLbl });
+    return out;
   }
 
-  // 4) Close All Positions (D 옵션, 취소 이후에만)
-  if (doClose) {
-    const close = await closeAllPositions(opts.key, opts.secret, opts.testnet, 5);
-    out.close = { ran: true, success: close.success, remaining: close.remaining, retries: close.retries };
-    await logKillEvent(sb, userId, connectionId, { reason: close.success ? '전체 포지션 종료 성공' : `포지션 ${close.remaining}개 잔존 — 거래소 직접 확인 필요`, equity: 0, drawdownPct: 0, action: 'CLOSE_ALL', mode: modeLbl });
+  // ── ④ 닫지 않는 단계(`C`만) — **보호주문을 벗기지 않는다** ──
+  //
+  //   포지션을 닫지 않으면서 그 포지션의 손절을 지우면, 닫지도 않고
+  //   보호만 벗긴 상태가 된다(P1이 금지). 그래서 취소 범위는 **열린
+  //   포지션이 없는 심볼의 대기 주문**뿐이다 — 새 노출을 막는 일만 한다.
+  if (doCancel) {
+    const [pos, ord] = await Promise.all([readPositions(), readOpenOrders()]);
+    const plan = planKillCancelOnly({ positions: pos, openOrders: ord });
+    ordersSnapshot = ord.ok === true ? (ord.rows ?? []) : [];
+    let ok = plan.cancelIds.length === 0;
+    if (plan.cancelIds.length > 0) {
+      ok = true;
+      for (const t of targetSymbolsOf(plan.cancelIds, ordersSnapshot)) {
+        const r = await ops.cancelExact(creds as any, t.symbol, t.ids).catch(() => null);
+        if (r == null || r.leftover == null) ok = false;
+      }
+    }
+    out.cancel = { ran: plan.cancelIds.length > 0, success: ok,
+      count: plan.cancelIds.length, results: [] };
+    out.safety = {
+      planCode: plan.code, modeCode: 'NOT_REQUIRED', mode: null,
+      mayClose: false, mayCancel: plan.cancelIds.length > 0,
+      cancelScope: plan.cancelIds.length,
+      retainedProtective: plan.retainedProtective,
+      unidentifiedOrders: plan.unidentifiedOrders,
+      unusableTargets: 0, ordersSent: 0,
+      protectionCode: 'PROTECTION_INTACT', unprotected: false,
+      manualInterventionRequired: plan.code.startsWith('BLOCKED_'),
+      reason: plan.reason,
+    };
+    await logKillEvent(sb, userId, connectionId, {
+      reason: `${plan.code} — ${plan.reason}`,
+      equity: 0, drawdownPct: 0, action: 'CANCEL_ALL', mode: modeLbl });
   }
+
   return out;
 }
 
