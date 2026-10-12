@@ -1189,6 +1189,35 @@ export async function runNoFixedTpIntegrationTests() {
     });
   }
 
+  // ══════════ ②-2 분할 익절 사다리도 모순으로 거절한다 ══════════
+  //
+  //   변이 T-1(보호주문 단계의 `else if (noFixedTp)` 제거)이 **탈출했다.**
+  //   단일 익절만 넘기는 시험에서는 그 분기를 지워도 아무 일이 안 일어난다
+  //   (`exitPlan`도 `takeProfit`도 없으니 어느 분기도 안 탄다). 그런데
+  //   `exitPlan`에 `PARTIAL_TP`가 담겨 오면 그 한 줄이 **유일한** 방어였다.
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder() }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      exitPlan: { orders: [
+        { kind: 'PARTIAL_TP', price: 96000, quantity: 0.005 },
+        { kind: 'PARTIAL_TP', price: 97000, quantity: 0.005 },
+      ] },
+    }));
+
+    test('★ NO_FIXED_TP에 분할 익절 사다리가 오면 주문하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).status, 'REJECTED');
+      eq(venue.calls.length, 0,
+        `모순인데 거래소 호출이 ${venue.calls.length}건 있었다 — 경계에서 막지 못했다`);
+      const tp = venue.calls.filter((c) => /TAKE_PROFIT/.test(String(c.params.type ?? '')));
+      eq(tp.length, 0, `분할 익절이 ${tp.length}건 나갔다`);
+      assert(/분할 익절/.test(String((r as any).message)), String((r as any).message));
+    });
+  }
+
   // ══════════ ③ 수익이 커져도 자동 종료 수단은 시간청산뿐이다 ══════════
   {
     test('★ Exact100X 자리에 열린 자동 종료는 시간청산 하나뿐이다', async () => {
