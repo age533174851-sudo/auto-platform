@@ -188,8 +188,24 @@ const sym = (v: unknown): string => String(v ?? '').trim().toUpperCase();
  *
  * 닫을 수 없으면 취소 목록을 비우고 `mayCancel`을 내린다. 분기마다
  * 적지 않는 이유는 이 파일 머리글에 있다.
+ *
+ * ★ 왜 **내보내는가** (`clampKillClosePlan`)
+ * ──────────────────────────────────────────
+ * 지금 이 함수는 **아무 분기도 의존하지 않는다.** 위의 `blocked()`와
+ * 각 반환 자리가 이미 `mayCancel: false`를 직접 적고 있어서, 이 조임을
+ * 떼어내도 오늘의 동작은 바뀌지 않는다 — 변이 검사에서 그것이 그대로
+ * 드러났다(KC-1이 새 나갔다).
+ *
+ * 그렇다고 지우지 않는다. 이 함수가 막으려는 것은 **오늘의 분기가
+ * 아니라 내일 생길 분기**다. 닫을 수 있는지 모르는 채 `mayCancel`을
+ * 참으로 적는 새 경로가 들어오면, 다른 어떤 시험도 그것을 막지 못하고
+ * 보호주문이 벗겨진다.
+ *
+ * 그래서 **직접 시험한다.** 불변식을 어긴 입력을 넣어 조여지는지 보는
+ * 시험이 붙어 있고(`killClosePlan.test.ts`), 그 시험이 이 조임을
+ * 지켜 준다. 지켜지지 않는 방어는 방어가 아니다.
  */
-function clamp(p: KillClosePlan): KillClosePlan {
+export function clampKillClosePlan(p: KillClosePlan): KillClosePlan {
   if (p.mayClose === true) return p;
   return {
     ...p,
@@ -199,6 +215,8 @@ function clamp(p: KillClosePlan): KillClosePlan {
     protectionRetained: true,
   };
 }
+
+const clamp = clampKillClosePlan;
 
 const blocked = (
   code: KillClosePlanCode, reason: string,

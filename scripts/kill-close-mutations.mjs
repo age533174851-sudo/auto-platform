@@ -41,6 +41,7 @@ const P = {
 /** [이름, 파일, 변이 함수] */
 const M = [
   // ★★ 이번 수정의 핵심
+  // 정본이 내보내는 함수로 옮겨갔다(직접 시험하기 위해). **앵커를 따라간다.**
   ['KC-1  불변식 clamp 제거 (닫지 못하는데 취소 허용)', P.plan,
     s => s.replace('  if (p.mayClose === true) return p;', '  return p;')],
   ['KC-2  모드 관문 무력화 (HEDGE·UNKNOWN을 통과)', P.plan,
@@ -82,8 +83,13 @@ const M = [
     s => s.replace('    catch { mine = false; }', '    catch { mine = true; }')],
   ['KC-17 재시도 전 조회 없이 재전송', P.run,
     s => s.replace('        if (probe.ok !== true) {', '        if (false) {')],
-  ['KC-18 조회 수단이 없어도 재전송', P.run,
-    s => s.replace("        if (typeof deps.findByClientId !== 'function') {", '        if (false) {')],
+  // ★ **동치 변이다.** 관문을 지워도 바로 아래 `deps.findByClientId(...)`가
+  //   undefined 호출로 던지고, 그것을 감싼 try/catch가 `probe.ok = false`로
+  //   떨어뜨려 **같은 결과**(재전송하지 않음)가 된다. 안전한 방향으로
+  //   같아지는 것이므로 새 나간 것이 아니다.
+  ['KC-18 조회 수단이 없어도 재전송 (동치 — catch가 같은 결과를 만든다)', P.run,
+    s => s.replace("        if (typeof deps.findByClientId !== 'function') {", '        if (false) {'),
+    'EQUIV'],
   ['KC-19 이미 있는 주문에도 재전송', P.run,
     s => s.replace('        if (probe.found === true) {', '        if (false) {')],
   ['KC-20 중복 식별자 거부를 실패로 적는다', P.run,
@@ -157,7 +163,7 @@ const base = runGates();
 if (base) { console.error(`❌ 기준선이 이미 빨갛습니다 (${base}) — 변이 결과를 믿을 수 없습니다`); process.exit(1); }
 console.log('초록');
 
-let red = 0, escaped = 0, noop = 0, green = 0;
+let red = 0, escaped = 0, noop = 0, green = 0, equiv = 0;
 for (const [name, file, fn, kind = 'RED'] of FILTERED) {
   const orig = readFileSync(file, 'utf8');
   const next = fn(orig);
@@ -176,10 +182,16 @@ for (const [name, file, fn, kind = 'RED'] of FILTERED) {
     else { console.log(`  ✓  ${name} — PASS (과도 검출 없음)`); green += 1; }
     continue;
   }
+  if (kind === 'EQUIV') {
+    // 동치 변이 — **초록이 맞다.** 뒤 코드가 같은 결과를 만든다.
+    if (failedGate) { console.log(`  ●  ${name} — RED (${failedGate}) · 동치인데 잡혔다`); red += 1; }
+    else { console.log(`  ○  ${name} — GREEN (동치 변이 · 뒤 코드가 같은 결과를 만든다)`); equiv += 1; }
+    continue;
+  }
   if (failedGate) { console.log(`  ●  ${name} — RED (${failedGate})`); red += 1; }
   else { console.log(`  ✗  ${name} — GREEN (새 나감)`); escaped += 1; }
 }
 
-console.log(`\n검출 ${red} / 누락 ${escaped} / NOOP ${noop} / 대조군 PASS ${green}`);
+console.log(`\n검출 ${red} / 누락 ${escaped} / 동치 ${equiv} / NOOP ${noop} / 대조군 PASS ${green}`);
 console.log(`총 ${FILTERED.length}건 · 트리 clean 확인됨`);
 process.exit(escaped > 0 || noop > 0 ? 1 : 0);

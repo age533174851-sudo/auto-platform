@@ -8,8 +8,9 @@
 // 함께 못박는다. 성능이나 수익과는 무관하다.
 import { test, eq, assert } from '../../test/harness';
 import {
-  planKillClose, planKillCancelOnly, killProtectionVerdict, KILL_CLOSE_SEQUENCE,
-  type KillClosePlanInput, type KillModeVerdictLike,
+  planKillClose, planKillCancelOnly, killProtectionVerdict, clampKillClosePlan,
+  KILL_CLOSE_SEQUENCE,
+  type KillClosePlan, type KillClosePlanInput, type KillModeVerdictLike,
 } from './killClosePlan';
 
 const OK_MODE: KillModeVerdictLike = {
@@ -134,6 +135,61 @@ export function runKillClosePlanTests() {
       eq(p.mayClose, false);
       eq(p.mayCancel, false);
       eq(p.protectionRetained, true);
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ★★ 불변식을 조이는 자리를 **직접** 시험한다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   `clampKillClosePlan`은 오늘의 어떤 분기도 의존하지 않는다 — 각
+  //   반환 자리가 이미 `mayCancel: false`를 적는다. 그래서 이 조임을
+  //   떼어내도 오늘 동작은 안 바뀌고, 변이 검사에서 그대로 새 나갔다.
+  //
+  //   이 함수가 막으려는 것은 **내일 생길 분기**다. 닫을 수 있는지
+  //   모르는 채 `mayCancel: true`를 적는 경로가 들어오면 다른 어떤
+  //   시험도 그것을 막지 못한다. 그래서 불변식을 **어긴 입력**을 직접
+  //   넣어 조여지는지 본다.
+  const VIOLATING: KillClosePlan = {
+    code: 'BLOCKED_HEDGE',
+    // ★ 불변식 위반: 닫을 수 없는데 취소가 열려 있다
+    mayClose: false, mayCancel: true,
+    cancelIds: ['111', '222'],
+    unidentifiedOrders: 0, unusableTargets: 0, closes: [],
+    protectionRetained: false,
+    manualInterventionRequired: true,
+    reason: '시험용 — 불변식을 어긴 입력',
+  };
+
+  test('★★ 닫을 수 없는데 취소가 열려 있으면 조여서 내린다', () => {
+    const c = clampKillClosePlan(VIOLATING);
+    eq(c.mayCancel, false, '★ 이것이 이번 수정의 전부다');
+    eq(c.cancelIds.length, 0, '★ 취소 목록을 비운다');
+    eq(c.protectionRetained, true, '★ 보호주문이 남았다고 적는다');
+    eq(c.code, 'BLOCKED_HEDGE', '다른 칸은 건드리지 않는다');
+    eq(c.manualInterventionRequired, true);
+  });
+
+  test('닫을 수 있으면 그대로 통과시킨다', () => {
+    const ok: KillClosePlan = { ...VIOLATING, mayClose: true, code: 'PROCEED' };
+    const c = clampKillClosePlan(ok);
+    eq(c.mayCancel, true);
+    eq(c.cancelIds.length, 2);
+    eq(c.protectionRetained, false);
+  });
+
+  test('★ 모든 planKillClose 결과가 이미 조여진 상태다 (멱등)', () => {
+    const inputs: Array<Partial<KillClosePlanInput>> = [
+      {}, { modeVerdict: HEDGE }, { modeVerdict: null },
+      { positions: { ok: false } }, { openOrders: { ok: false } },
+      { positions: { ok: true, rows: [] } },
+    ];
+    for (const i of inputs) {
+      const p = planKillClose(IN(i));
+      const again = clampKillClosePlan(p);
+      eq(again.mayCancel, p.mayCancel, JSON.stringify(i));
+      eq(again.cancelIds.length, p.cancelIds.length, JSON.stringify(i));
+      eq(again.protectionRetained, p.protectionRetained, JSON.stringify(i));
     }
   });
 
