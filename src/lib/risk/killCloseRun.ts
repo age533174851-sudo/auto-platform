@@ -120,15 +120,26 @@ export interface KillCloseArgs {
 
 const blockedResult = (
   code: KillCloseRunCode, plan: KillClosePlan, reason: string,
-): KillCloseRunResult => ({
-  code, plan,
-  cancelAttempted: false, cancelOk: null, cancelledCount: null,
-  attempts: [], ordersSent: 0, leftoverPositions: null,
-  protection: killProtectionVerdict({
-    plan, cancelAttempted: false, leftoverPositions: null,
-  }),
-  reason,
-});
+): KillCloseRunResult => {
+  // ★ **아는 것과 모르는 것을 구분한다.**
+  //
+  //   `NOTHING_TO_DO`는 포지션을 **읽었고 비어 있었다**는 뜻이다 —
+  //   잔여 0을 아는 상태다. 그걸 `null`로 넘기면 보호 판정이
+  //   `UNKNOWN`(수동 개입 필요)이 되고, 할 일이 없는 회차마다 운영자를
+  //   부른다. 그러면 정말 불러야 할 때의 경고가 묻힌다.
+  //
+  //   그 외(모드 미확인·포지션 미조회 등)는 **모르는 것이 맞다** → null.
+  const leftover = plan.code === 'NOTHING_TO_DO' ? 0 : null;
+  return {
+    code, plan,
+    cancelAttempted: false, cancelOk: null, cancelledCount: null,
+    attempts: [], ordersSent: 0, leftoverPositions: leftover,
+    protection: killProtectionVerdict({
+      plan, cancelAttempted: false, leftoverPositions: leftover,
+    }),
+    reason,
+  };
+};
 
 /**
  * 긴급 종료 한 회차.

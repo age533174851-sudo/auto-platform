@@ -113,6 +113,16 @@ const M = [
   ['KC-27 계좌 범위 관문이 방향까지 면제한다', P.fx,
     s => s.replace("  if (i.scope !== 'ACCOUNT'\n      && i.exchange === 'binance'", '  if (false\n      && i.exchange === \'binance\'')],
 
+  ['KC-28 무방비 노출을 운영자 알림에서 정상 실행처럼 적는다',
+    'src/lib/risk/killAlert.ts',
+    s => s.replace('  const unprotected = safety?.unprotected === true;', '  const unprotected = false;')],
+  ['KC-29 할 일 없는 회차의 잔여를 모른다고 적는다 (경고 홍수)', P.run,
+    s => s.replace("  const leftover = plan.code === 'NOTHING_TO_DO' ? 0 : null;",
+      '  const leftover = null;')],
+  ['KC-30 막힌 회차의 잔여를 0으로 적는다', P.run,
+    s => s.replace("  const leftover = plan.code === 'NOTHING_TO_DO' ? 0 : null;",
+      '  const leftover = 0;')],
+
   // 대조군
   ['OK1 주석 한 줄 추가 (중립이어야 한다)', P.plan, s => `// 대조군\n${s}`, 'GREEN'],
 ];

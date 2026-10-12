@@ -242,6 +242,64 @@ export async function runKillCloseIntegrationTests() {
     });
   }
 
+  // ══════════ ⑦-c 선점했지만 상대가 이미 닫았다 ══════════
+  //
+  //   선점만으로 **이미 전송 중인 주문**은 취소되지 않는다. 그래서 상대가
+  //   먼저 닫아 버린 상태로 우리가 도착할 수 있다. 그때 우리는 **새 주문을
+  //   보내지 않고**, 닫힌 것을 실패로 적지도 않아야 한다.
+  {
+    const v = venueFor({ positions: [{ symbol: 'BTCUSDT', positionAmt: '0',
+      entryPrice: '0', markPrice: '100000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '0', unRealizedProfit: '0' }] });
+    const { r } = await exec(v, 'ABCD');
+
+    test('★ ⑦-c 상대가 이미 닫았으면 주문 0건이고 실패가 아니다', () => {
+      eq(v.orderSends().length, 0, '★ 이미 닫힌 자리에 보내면 반대 포지션이 된다');
+      eq(cancels(v), 0, '닫을 것이 없으면 취소도 하지 않는다');
+      eq(r.safety?.planCode, 'NOTHING_TO_DO');
+      eq(r.safety?.manualInterventionRequired, false);
+    });
+  }
+
+  // ══════════ ⑦-d 상대의 주문이 전송 중이다 (같은 멱등 키) ══════════
+  //
+  //   선점 직후, 상대가 **같은 종료 의도**로 이미 보낸 주문이 거래소에
+  //   있을 수 있다. 그때 우리 주문은 중복 식별자로 거부된다 — 그것은
+  //   실패가 아니라 "누가 이미 보냈다"는 뜻이고, 결과는 재조회가 정한다.
+  {
+    const v = venueFor({
+      orderReply: { status: 400,
+        json: { code: -4116, msg: 'Duplicate client order id.' } },
+      // 상대의 주문이 체결돼 잔여 0
+      leftAfter: false,
+    });
+    const { r } = await exec(v, 'ABCD');
+
+    test('★ ⑦-d 같은 멱등 키의 중복 거부는 실패로 적지 않는다', () => {
+      eq(v.orderSends().length, 1, '★ 중복 응답 뒤에 또 보내지 않는다');
+      eq(r.close?.success, true, '재조회로 잔여 0을 확인했다');
+      eq(r.safety?.protectionCode, 'CLOSED');
+      eq(r.safety?.unprotected, false);
+    });
+  }
+  {
+    // 같은 상황에서 잔여가 남아 있으면 **모른다**로 적는다
+    const v = venueFor({
+      orderReply: { status: 400,
+        json: { code: -4116, msg: 'Duplicate client order id.' } },
+      leftAfter: true,
+    });
+    const { r } = await exec(v, 'ABCD');
+
+    test('★ ⑦-d2 중복 거부 + 잔여 있으면 닫혔다고 적지 않는다', () => {
+      eq(r.close?.success, false);
+      eq(r.safety?.protectionCode, 'UNPROTECTED_EXPOSURE',
+        '★ 취소는 했고 포지션은 남았다');
+      eq(r.safety?.unprotected, true);
+      eq(r.safety?.manualInterventionRequired, true);
+    });
+  }
+
   // ══════════ ⑧ 주문 타임아웃 — 재전송하지 않는다 ══════════
   {
     const v = venueFor({ orderReply: { timeout: true }, leftAfter: true });

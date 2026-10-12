@@ -171,4 +171,64 @@ export function runKillAlertTests() {
     eq(killTriggerAlert({ actionMode: 'BC', exchange: 'binance', testnet: false,
       reason: 'x', equity: 1, exec: { ran: true } }).mode, 'LIVE', '실전');
   });
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 가장 나쁜 상태를 가장 크게 적는다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   보호주문을 취소한 뒤 포지션이 남은 상태는 되돌릴 수 없고 사람이
+  //   즉시 거래소로 가야 한다. 예전 문구에서는 이것이 **정상 실행과
+  //   똑같이** 보였다("실행함 (결과 확인 중)").
+  test('★ 무방비 노출이면 문구와 칸이 즉시 개입을 말한다', () => {
+    const a = killTriggerAlert({
+      actionMode: 'ABCD', exchange: 'binance', testnet: false,
+      reason: '한도 초과', equity: 100,
+      exec: { ran: true, safety: {
+        protectionCode: 'UNPROTECTED_EXPOSURE', unprotected: true,
+        manualInterventionRequired: true, planCode: 'PROCEED',
+        reason: '보호주문 1건을 취소한 뒤 포지션 1개가 남았습니다' } },
+    });
+    assert(a.message.includes('보호주문을 취소한 뒤 포지션이 남았습니다'),
+      `무방비 상태를 문구에 적어야 한다 — ${a.message}`);
+    eq((a.fields as any).Protection, 'UNPROTECTED_EXPOSURE — 즉시 개입');
+    eq((a.fields as any).Manual, '수동 개입 필요');
+    eq(a.level, 'critical');
+  });
+
+  test('★ 관문이 막아 주문을 안 보냈으면 "보호주문은 그대로"라고 적는다', () => {
+    const a = killTriggerAlert({
+      actionMode: 'ABCD', exchange: 'binance', testnet: true,
+      reason: '한도 초과', equity: null,
+      exec: { ran: true, safety: {
+        protectionCode: 'PROTECTION_INTACT', unprotected: false,
+        manualInterventionRequired: true, planCode: 'BLOCKED_HEDGE',
+        reason: '양방향 규격 미확정' } },
+    });
+    assert(a.message.includes('기존 보호주문은 그대로'), a.message);
+    assert(a.message.includes('주문을 내지 않았습니다'), a.message);
+    eq((a.fields as any).Gate, 'BLOCKED_HEDGE');
+    eq((a.fields as any).Protection, 'PROTECTION_INTACT');
+  });
+
+  test('안전 칸이 없으면 예전 문구 그대로다 (기존 호출부 호환)', () => {
+    const a = killTriggerAlert({
+      actionMode: 'ABCD', exchange: 'binance', testnet: true,
+      reason: 'r', equity: 1, exec: { ran: true },
+    });
+    assert(a.message.includes('거래소 작업 결과를 확인 중입니다'), a.message);
+    eq((a.fields as any).Protection, undefined);
+  });
+
+  test('정상 종료(보호 필요 없음)는 즉시 개입을 말하지 않는다', () => {
+    const a = killTriggerAlert({
+      actionMode: 'ABCD', exchange: 'binance', testnet: true,
+      reason: 'r', equity: 1,
+      exec: { ran: true, safety: {
+        protectionCode: 'CLOSED', unprotected: false,
+        manualInterventionRequired: false, planCode: 'PROCEED' } },
+    });
+    assert(!a.message.includes('즉시'), a.message);
+    eq((a.fields as any).Protection, 'CLOSED');
+    eq((a.fields as any).Manual, undefined);
+  });
 }

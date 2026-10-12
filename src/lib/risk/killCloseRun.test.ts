@@ -196,6 +196,21 @@ export function runKillCloseRunTests() {
     eq(r.ordersSent, 0);
     eq(r0.calls.includes('cancelOrders'), false);
     eq(r.plan.manualInterventionRequired, false);
+    // ★ 포지션을 **읽었고 비어 있었다** — 잔여 0을 아는 상태다.
+    //   `UNKNOWN`으로 적으면 할 일 없는 회차마다 운영자를 부르고,
+    //   그러면 정말 불러야 할 때의 경고가 묻힌다.
+    eq(r.leftoverPositions, 0);
+    eq(r.protection.code, 'CLOSED');
+    eq(r.protection.manualInterventionRequired, false);
+  });
+
+  test('★ 막힌 회차는 잔여를 모른다고 적는다 (0으로 적지 않는다)', async () => {
+    const r0 = rig({ mode: HEDGE });
+    const r = await runKillClose(ARGS, r0.deps);
+    eq(r.leftoverPositions, null);
+    eq(r.protection.code, 'UNKNOWN');
+    eq(r.protection.unprotected, false, '취소를 안 했으므로 보호는 그대로다');
+    eq(r.protection.manualInterventionRequired, true, '사람이 거래소에서 닫아야 한다');
   });
 
   // ══════════════════════════════════════════════════════════
