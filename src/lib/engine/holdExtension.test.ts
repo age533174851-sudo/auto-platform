@@ -14,6 +14,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   decideHoldExtension, resolveHoldExtensionPolicy, holdExtensionContractKeys,
+  judgeHoldExtensionActivation, holdExtensionGate,
   netRoeOf, summarizeBars, TREND_MIN_BARS,
   type HoldEvidence, type HoldExtensionInput, type HoldExtensionPolicy,
 } from './holdExtension';
@@ -120,6 +121,93 @@ export function runHoldExtensionTests() {
       eq(d.extend, d.code === 'EXTEND',
         `extend=${d.extend}인데 코드가 ${d.code}다`);
     }
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 켜짐은 승인이다 — **기본값은 꺼짐**
+  // ══════════════════════════════════════════════════════════
+  test('★ 승인 값이 없으면 꺼짐이다 (운영 기본값)', () => {
+    const a = judgeHoldExtensionActivation({});
+    eq(a.enabled, false);
+    eq(a.code, 'NOT_APPROVED');
+    eq(a.approvedAtMs, null);
+    eq(judgeHoldExtensionActivation(null).enabled, false);
+    eq(judgeHoldExtensionActivation(undefined).enabled, false);
+  });
+
+  test('★ 읽을 수 없는 승인 값은 승인이 아니다 — 오타가 켜짐이 되지 않는다', () => {
+    for (const v of ['yes', 'true', 'ON', 'soon', '-5', '2', '0', 'tomorrow',
+      '2026/10/20', 'Oct 20 2026', '   ',
+      // ★ 초 단위를 ms 칸에 넣은 실수 — ms로 읽으면 1970년이고, 그러면
+      //   그 뒤에 연 모든 포지션이 "승인 뒤"가 된다
+      '1760000000',
+      // 범위 밖
+      '2019-12-31T23:59:59Z', '2100-01-01T00:00:00Z']) {
+      const a = judgeHoldExtensionActivation({
+        EXACT100X_HOLD_EXTENSION_APPROVED_AT: v });
+      eq(a.enabled, false, `${JSON.stringify(v)}가 켜짐으로 읽혔다`);
+    }
+  });
+
+  test('승인 값은 epoch ms와 ISO 날짜 둘 다 받는다', () => {
+    const iso = judgeHoldExtensionActivation({
+      EXACT100X_HOLD_EXTENSION_APPROVED_AT: '2026-10-20T00:00:00Z' });
+    eq(iso.enabled, true);
+    eq(iso.approvedAtMs, Date.parse('2026-10-20T00:00:00Z'));
+    const ms = judgeHoldExtensionActivation({
+      EXACT100X_HOLD_EXTENSION_APPROVED_AT: String(NOW) });
+    eq(ms.enabled, true);
+    eq(ms.approvedAtMs, NOW);
+  });
+
+  const EID = { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' };
+  const APPROVED = { EXACT100X_HOLD_EXTENSION_APPROVED_AT: String(NOW - 10 * FOUR_H) };
+
+  test('★ 관문: 승인되지 않으면 정책을 주지 않는다', () => {
+    const g = holdExtensionGate({
+      executionIdentity: EID, openedAtMs: NOW - FOUR_H, env: {} });
+    eq(g.policy, null);
+    eq(g.code, 'NOT_APPROVED');
+  });
+
+  test('★ 관문: 승인 **전에** 연 포지션에는 소급 적용하지 않는다', () => {
+    const g = holdExtensionGate({
+      executionIdentity: EID,
+      // 승인 1ms 전에 열렸다
+      openedAtMs: NOW - 10 * FOUR_H - 1,
+      env: APPROVED,
+    });
+    eq(g.policy, null);
+    eq(g.code, 'OPENED_BEFORE_APPROVAL');
+    // 경계 — 승인과 **같은** 순간에 열린 포지션은 대상이다
+    const at = holdExtensionGate({
+      executionIdentity: EID, openedAtMs: NOW - 10 * FOUR_H, env: APPROVED });
+    eq(at.code, 'OPEN');
+    assert(at.policy != null, '승인 시각에 연 포지션은 대상이어야 한다');
+  });
+
+  test('★ 관문: 진입 시각을 모르면 열지 않는다 (소급인지 알 수 없다)', () => {
+    for (const v of [null, undefined, 0, NaN, '']) {
+      const g = holdExtensionGate({
+        executionIdentity: EID, openedAtMs: v as any, env: APPROVED });
+      eq(g.policy, null, `openedAtMs=${String(v)}`);
+      eq(g.code, 'OPENED_AT_UNUSABLE');
+    }
+  });
+
+  test('★ 관문: 선언되지 않은 계약은 승인해도 열리지 않는다', () => {
+    const g = holdExtensionGate({
+      executionIdentity: { profileId: 'SCALP_HIGH_LEV', presetId: 'BALANCED' },
+      openedAtMs: NOW - FOUR_H, env: APPROVED });
+    eq(g.policy, null);
+    eq(g.code, 'NOT_DECLARED');
+  });
+
+  test('관문: 선언 + 승인 + 승인 뒤 진입이면 열린다', () => {
+    const g = holdExtensionGate({
+      executionIdentity: EID, openedAtMs: NOW - FOUR_H, env: APPROVED });
+    eq(g.code, 'OPEN');
+    eq(g.policy?.policyId, 'hold-extension-100x-v1');
   });
 
   // ══════════════════════════════════════════════════════════
@@ -359,6 +447,112 @@ export function runHoldExtensionTests() {
       const d = decideHoldExtension(IN({ evidence: EV({ trendAlive: v as any }) }));
       eq(d.code, 'CLOSE_TREND_DEAD', `trendAlive=${JSON.stringify(v)}인데 ${d.code}`);
     }
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 민감도 — **상수 다섯 개가 조용히 움직이지 못하게 못박는다**
+  // ══════════════════════════════════════════════════════════
+  //
+  //   성과가 좋아진다는 주장이 아니다(시장 데이터가 없어 UNKNOWN이다).
+  //   여기서 고정하는 것은 **각 상수가 실제로 어느 경계를 만드는가**다.
+  //   상수를 바꾸면 아래 시험 중 하나가 반드시 빨개진다.
+
+  /** 100배·왕복 0.1%·미끄러짐 0.02% → 간접비 ROE 12%p */
+  const OVERHEAD_ROE = 12;
+  /**
+   * 주어진 순수익 ROE를 만드는 LONG 마크가.
+   *
+   *   net = 가격% × 배율 − 간접비  →  가격% = (net + 12) / 100
+   */
+  const priceForNet = (netRoe: number) =>
+    100_000 * (1 + (netRoe + OVERHEAD_ROE) / 100 / 100);
+
+  test('민감도: 간접비는 ROE 12%p다 (수수료 10 + 미끄러짐 2)', () => {
+    eq(Math.round(decideHoldExtension(IN({
+      evidence: EV({ markPrice: 100_120, bestPrice: 100_120 }) })).netRoePct!), 0,
+      '★ 가격 +0.12%가 순수익 0이다 — 이 값이 바뀌면 문턱의 뜻도 바뀐다');
+  });
+
+  test('민감도: 순수익 문턱 15%는 가격 +0.27%다', () => {
+    const under = decideHoldExtension(IN({
+      evidence: EV({ markPrice: 100_270, bestPrice: 100_270 }) }));
+    eq(Math.round(under.netRoePct!), POLICY.minNetRoePct, '문턱과 같은 값');
+    eq(under.code, 'CLOSE_LOSING', '같으면 연장하지 않는다');
+    const over = decideHoldExtension(IN({
+      evidence: EV({ markPrice: 100_271, bestPrice: 100_271 }) }));
+    eq(over.code, 'EXTEND', '한 틱 위면 연장한다');
+    // 문턱을 0으로 두면 본전 근처(가격 +0.12%)가 연장된다 — 그 차이를 적는다
+    assert(POLICY.minNetRoePct > OVERHEAD_ROE - OVERHEAD_ROE,
+      '문턱은 간접비 위에 있어야 한다');
+    eq(POLICY.minNetRoePct, 15, '★ 상수가 바뀌면 위 두 경계도 바뀐다');
+  });
+
+  test('민감도: 청산 여유 0.3%는 100배 청산 거리 0.6%의 절반이다', () => {
+    eq(POLICY.minLiquidationHeadroomPct, 0.3);
+    // 0.6% = 100/100 − MMR 0.4%. 절반을 남긴다.
+    eq(POLICY.minLiquidationHeadroomPct * 2, 0.6);
+    // 경계 양쪽
+    eq(decideHoldExtension(IN({ evidence: EV({ liquidationHeadroomPct: 0.3 }) })).code,
+      'EXTEND');
+    eq(decideHoldExtension(IN({ evidence: EV({ liquidationHeadroomPct: 0.2999 }) })).code,
+      'CLOSE_LIQUIDATION_RISK');
+    // ★ 이 숫자는 **5분 주기 안의 급변을 막지 못한다.** 남은 여유보다 큰
+    //   역행이 한 주기에 일어나면 청산이 먼저다 — 시험이 할 수 있는 것은
+    //   "여유가 이 값 아래면 더 들고 있지 않는다"까지다.
+  });
+
+  test('민감도: 고점 반납 0.4 — 고점이 클수록 허용 반납폭도 커진다', () => {
+    // ATR 바닥을 0에 가깝게 눌러 비율만 본다
+    const atr = 0.0001;
+    for (const [peakRoe, closeAtRoe] of [[50, 30], [100, 60]] as const) {
+      const bestPrice = priceForNet(peakRoe);
+      // 경계를 **정확히** 겨냥하지 않는다 — 부동소수점에서 요구폭과 반납폭이
+      // 같은 지점은 비트 단위로 갈린다. 양쪽 한 걸음을 본다.
+      const below = decideHoldExtension(IN({
+        evidence: EV({ markPrice: priceForNet(closeAtRoe - 0.5), bestPrice, atrPct: atr }) }));
+      eq(below.code, 'CLOSE_GIVEBACK',
+        `고점 ${peakRoe}% → ${closeAtRoe}% 아래에서는 닫혀야 한다`);
+      eq(Math.round(below.requiredGivebackRoePct!), Math.round(peakRoe * 0.4));
+      const above = decideHoldExtension(IN({
+        evidence: EV({ markPrice: priceForNet(closeAtRoe + 0.5), bestPrice, atrPct: atr }) }));
+      eq(above.code, 'EXTEND',
+        `고점 ${peakRoe}% → ${closeAtRoe}% 위에서는 연장해야 한다`);
+    }
+    eq(POLICY.givebackFraction, 0.4);
+    eq(POLICY.givebackArmRoePct, 25, '이 아래에서는 보호가 걸리지 않는다');
+  });
+
+  test('민감도: ATR 계수 0.5 — 바닥은 ATR(가격%) × 배율 × 0.5다', () => {
+    eq(POLICY.atrGivebackFloorMultiple, 0.5);
+    for (const [atrPct, floor] of [[0.2, 10], [0.5, 25], [1.0, 50]] as const) {
+      // 고점 50% · 비율 요구 20%p — 바닥이 그보다 크면 바닥이 이긴다
+      const bestPrice = priceForNet(50);
+      const d = decideHoldExtension(IN({
+        evidence: EV({ bestPrice, atrPct, markPrice: 100_400 }) }));
+      eq(Math.round(d.requiredGivebackRoePct!), Math.max(20, floor),
+        `ATR ${atrPct}% → 바닥 ${floor}%p`);
+    }
+  });
+
+  test('민감도: 12시간 상한은 계약 4시간의 3배다', () => {
+    eq(POLICY.absoluteMaxHoldMs, 12 * 3_600_000);
+    eq(POLICY.absoluteMaxHoldMs / FOUR_H, 3,
+      '★ 무보호 노출 시간이 몇 배로 늘어나는가 — 이 숫자가 그 배수다');
+  });
+
+  test('민감도: 증거 허용 시각 창은 60초다', () => {
+    eq(POLICY.maxEvidenceAgeMs, 60_000);
+    eq(decideHoldExtension(IN({
+      evidence: EV({ observedAtMs: NOW - 60_000 }) })).code, 'EXTEND');
+    eq(decideHoldExtension(IN({
+      evidence: EV({ observedAtMs: NOW - 60_001 }) })).code, 'CLOSE_EVIDENCE_STALE');
+  });
+
+  test('★ 민감도: 어떤 상수도 성과를 주장하지 않는다 — 셈만 고정한다', () => {
+    // 이 시험의 목적은 숫자 자체가 옳다는 주장이 아니다. 숫자가 **움직이면
+    // 알게 된다**는 것이다. 실측 표본 0건이므로 성과는 UNKNOWN으로 남는다.
+    eq(typeof POLICY.policyId, 'string');
+    eq(POLICY.policyId, 'hold-extension-100x-v1');
   });
 
   // ══════════════════════════════════════════════════════════

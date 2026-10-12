@@ -73,7 +73,10 @@ import {
   type ExitAuthorityDecision, type ExitCapabilities,
   type ExitReason, type LeaseIdentity, type PositionIdentity,
 } from './exitAuthority';
-import { resolveHoldExtensionPolicy, type HoldEvidence } from './holdExtension';
+import {
+  holdExtensionGate,
+  type HoldEvidence, type HoldExtensionActivationEnv, type HoldExtensionGateCode,
+} from './holdExtension';
 import { applyLifecycleClose } from './lifecycleAction';
 import { monotonicNowMs, monotonicSpanMs } from '../system/monotonicClock';
 import { isDuplicateIntentError } from './exitIntent';
@@ -191,6 +194,16 @@ export interface ExitRunResult {
   needsReconcile: boolean;
 
   decision: ExitAuthorityDecision | null;
+  /**
+   * 보유 연장 **관문** 판정. 물어본 회차에만 있다.
+   *
+   * ★ `decision.holdExtension`과 다른 것이다. 저쪽은 "증거를 보고
+   *   늦출지 정한 결과"이고, 이쪽은 **"물어봐도 되는 자리였는가"**다.
+   *   꺼져 있을 때 저쪽은 `null`로 남고(동작이 예전과 같다는 증거),
+   *   이쪽이 그 이유를 들고 있다 — 둘을 한 칸에 합치면 "승인 안 됨"과
+   *   "증거가 없음"이 같은 문장으로 적힌다.
+   */
+  holdExtensionGate: { code: HoldExtensionGateCode; reason: string } | null;
   /** ⑤B-3A-1 — 각 구간에 실제로 걸린 시간. **판단이 아니다** */
   timing: ExitEscapeTiming;
   /**
@@ -249,6 +262,13 @@ export interface ExitRunDeps {
   /** 보낸 뒤 잔여를 다시 읽는다. `ok:false`는 "못 읽었다"다 */
   readAfter(): Promise<{ ok: boolean; found: boolean }>;
   /**
+   * 보유 연장 **승인 환경**. **시험이 고정한다** — 안 주면 `process.env`다.
+   *
+   * 기본값(승인 값 없음)은 **꺼짐**이고, 그러면 아래 `readHoldEvidence`는
+   * 불리지 않는다.
+   */
+  holdExtensionEnv?: HoldExtensionActivationEnv | null;
+  /**
    * **보유 연장 증거를 읽는다.** 안 주면 연장을 묻지 않는다.
    *
    * ★ 이 호출이 일어나는 자리가 계약이다: 권한이 **이미 청산을 승인한
@@ -286,6 +306,9 @@ const denied = (
   attemptedWrite: false, accepted: null, flatVerified: null,
   reconciledFlat: false, needsReconcile: false,
   decision, requestedQuantity: null, reason,
+  // 관문을 물어보기 **전에** 막힌 회차는 null이다. 물어본 회차는
+  // 호출부가 `over`로 덮는다.
+  holdExtensionGate: null,
   timing: { ...NO_TIMING }, reportedAvgPrice: null, ...over,
 });
 
@@ -393,28 +416,44 @@ export async function runExitAuthority(
   // ★ 연장은 **거부권일 뿐이다.** 여기서 바뀔 수 있는 것은
   //   `AUTHORIZED → HOLD_EXTENDED` 한 방향이고, 막힌 판정이 연장으로
   //   풀리는 경로는 없다(③-a가 막았으면 이 블록에 들어오지 않는다).
-  if (decision.authorized && candidate.reason === 'TIME_EXIT'
-      && typeof deps.readHoldEvidence === 'function') {
-    const policy = resolveHoldExtensionPolicy(candidate.executionIdentity);
-    if (policy != null) {
-      let evidence: HoldEvidence | null = null;
-      // ★ **절대 상한을 이미 넘긴 자리는 읽지 않는다.**
-      //
-      //   증거를 읽어도 결과가 바뀌지 않는다 — 상한은 증거보다 앞에서
-      //   막는다(`decideHoldExtension` ②). 그러니 왕복만 늘린다.
-      //
-      //   ★ 상한 **판단**을 여기로 옮기는 것이 아니다. 아래 판정이 그대로
-      //     다시 보고 `CLOSE_CAP`을 적는다 — 이 줄은 조회를 건너뛰는
-      //     것뿐이고, 틀리는 방향조차 닫는 쪽이다(증거 null → 닫는다).
-      const pastCap = (nowMs - candidate.openedAtMs) >= policy.absoluteMaxHoldMs;
-      if (!pastCap) {
-        // 증거 조회 실패는 **연장 실패**다. 종료 경로를 죽이지 않는다 —
-        // 못 읽으면 오늘과 같이 닫는다.
-        try { evidence = await deps.readHoldEvidence(); }
-        catch { evidence = null; }
-      }
-      decision = decideWith({ policy, evidence });
+  //
+  // ★ **관문이 닫혀 있으면 판정을 두 번 하지 않는다.** 기본값(승인 없음)
+  //   에서는 아래 블록 전체가 건너뛰어지고, `decision`은 ③-a가 만든 것
+  //   그대로다 — 코드도 사유 문장도 연장 기능이 없던 때와 **같은 바이트**다.
+  //   `decision.holdExtension`이 `null`로 남는 것이 그 증거다.
+  const hxGate = (candidate.reason === 'TIME_EXIT'
+    && typeof deps.readHoldEvidence === 'function')
+    ? holdExtensionGate({
+        executionIdentity: candidate.executionIdentity,
+        openedAtMs: candidate.openedAtMs,
+        // `undefined`면 `process.env`를 본다. 시험은 명시적으로 넘긴다.
+        env: deps.holdExtensionEnv,
+      })
+    : null;
+
+  /** 관문 기록 — 결과에 그대로 실린다. 물어보지 않았으면 null이다 */
+  const hxRecord = hxGate == null
+    ? null : { code: hxGate.code, reason: hxGate.reason };
+
+  if (decision.authorized && hxGate != null && hxGate.policy != null) {
+    const policy = hxGate.policy;
+    let evidence: HoldEvidence | null = null;
+    // ★ **절대 상한을 이미 넘긴 자리는 읽지 않는다.**
+    //
+    //   증거를 읽어도 결과가 바뀌지 않는다 — 상한은 증거보다 앞에서
+    //   막는다(`decideHoldExtension` ②). 그러니 왕복만 늘린다.
+    //
+    //   ★ 상한 **판단**을 여기로 옮기는 것이 아니다. 아래 판정이 그대로
+    //     다시 보고 `CLOSE_CAP`을 적는다 — 이 줄은 조회를 건너뛰는
+    //     것뿐이고, 틀리는 방향조차 닫는 쪽이다(증거 null → 닫는다).
+    const pastCap = (nowMs - candidate.openedAtMs) >= policy.absoluteMaxHoldMs;
+    if (!pastCap) {
+      // 증거 조회 실패는 **연장 실패**다. 종료 경로를 죽이지 않는다 —
+      // 못 읽으면 오늘과 같이 닫는다.
+      try { evidence = await deps.readHoldEvidence!(); }
+      catch { evidence = null; }
     }
+    decision = decideWith({ policy, evidence });
   }
 
   if (!decision.authorized) {
@@ -423,7 +462,7 @@ export async function runExitAuthority(
       // ★ **보낸 주문 0건이다.** 성공과 전송을 같은 값으로 적지 않는다.
       return denied('ALREADY_FLAT', decision, decision.reason, {
         ok: true, blocked: false, reconciledFlat: true, flatVerified: true,
-        timing,
+        timing, holdExtensionGate: hxRecord,
       });
     }
     const failed = code === 'POSITION_READ_FAILED' || code === 'IDENTITY_MISMATCH';
@@ -432,7 +471,7 @@ export async function runExitAuthority(
     //   붉어지고, 그러면 사람이 연장을 끄는 쪽으로 움직인다.
     return denied(code as ExitRunCode, decision,
       prep?.code === 'MODE_BLOCKED' ? prep.message : decision.reason,
-      { failed, blocked: !failed, timing });
+      { failed, blocked: !failed, timing, holdExtensionGate: hxRecord });
   }
 
   // ── ④ 쓰기 직전 재검증 → 전송 → 재조회 ──
@@ -492,7 +531,8 @@ export async function runExitAuthority(
   const qty = decision.requestedQuantity;
   if (act.code === 'LEASE_LOST') {
     // **주문 0건.** 재검증이 막았다.
-    return denied('LEASE_LOST', decision, act.reason, { blocked: true });
+    return denied('LEASE_LOST', decision, act.reason,
+      { blocked: true, holdExtensionGate: hxRecord });
   }
   if (act.code === 'CLOSED_VERIFIED') {
     // 전송 결과를 몰랐어도 잔여 0을 확인했으면 대조로 닫힌 것이다.
@@ -503,7 +543,7 @@ export async function runExitAuthority(
       attemptedWrite: true, accepted: act.accepted, flatVerified: true,
       reconciledFlat: reconciled, needsReconcile: false,
       decision, requestedQuantity: qty, reason: act.reason,
-      timing, reportedAvgPrice,
+      holdExtensionGate: hxRecord, timing, reportedAvgPrice,
     };
   }
   if (act.code === 'CLOSE_REJECTED') {
@@ -512,7 +552,7 @@ export async function runExitAuthority(
       attemptedWrite: act.attempted, accepted: false, flatVerified: null,
       reconciledFlat: false, needsReconcile: false,
       decision, requestedQuantity: null, reason: act.reason,
-      timing, reportedAvgPrice,
+      holdExtensionGate: hxRecord, timing, reportedAvgPrice,
     };
   }
   if (act.code === 'CLOSE_INCOMPLETE') {
@@ -521,7 +561,7 @@ export async function runExitAuthority(
       attemptedWrite: true, accepted: true, flatVerified: false,
       reconciledFlat: false, needsReconcile: true,
       decision, requestedQuantity: qty, reason: act.reason,
-      timing, reportedAvgPrice,
+      holdExtensionGate: hxRecord, timing, reportedAvgPrice,
     };
   }
   // CLOSE_AMBIGUOUS · CLOSE_UNVERIFIED — **보냈는지도 닫혔는지도 모른다.**
@@ -531,6 +571,6 @@ export async function runExitAuthority(
     attemptedWrite: true, accepted: act.accepted, flatVerified: act.flatVerified,
     reconciledFlat: false, needsReconcile: true,
     decision, requestedQuantity: null, reason: act.reason,
-      timing, reportedAvgPrice,
+    holdExtensionGate: hxRecord, timing, reportedAvgPrice,
   };
 }

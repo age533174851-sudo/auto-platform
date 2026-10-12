@@ -25,7 +25,9 @@ import {
   runExitAuthority, type ExitRunDeps, type ExitRunCandidate,
 } from '../../lib/engine/exitAuthorityRun';
 import { readHoldEvidence } from '../../lib/engine/holdEvidenceReader';
-import { resolveHoldExtensionPolicy } from '../../lib/engine/holdExtension';
+import {
+  resolveHoldExtensionPolicy, judgeHoldExtensionActivation,
+} from '../../lib/engine/holdExtension';
 import * as ops from '../../lib/engine/venuePositionOps';
 import { exitIntentId } from '../../lib/engine/exitIntent';
 
@@ -145,6 +147,30 @@ interface RigOpts {
   fenceLost?: boolean;
   /** 증거 조회를 아예 주지 않는다 — 연장 기능이 없던 때와 같다 */
   noEvidenceDep?: boolean;
+  /**
+   * 보유 연장 승인 상태. **기본은 승인 없음(= 꺼짐)이다.**
+   *
+   *   생략·false  → 승인 값 없음 (운영 기본값)
+   *   true        → 포지션을 연 **뒤** 시각으로 승인 (대상이 된다)
+   *   'before'    → 포지션을 연 **뒤** 시각으로 승인 (소급 금지로 제외된다)
+   *   'garbage'   → 읽을 수 없는 승인 값
+   */
+  approved?: boolean | 'before' | 'garbage';
+}
+
+/** 이 회차에 넘길 승인 환경. **기본은 빈 환경 = 꺼짐** */
+function envFor(nowMs: number, r: RigOpts): { EXACT100X_HOLD_EXTENSION_APPROVED_AT?: string } {
+  if (r.approved === 'garbage') return { EXACT100X_HOLD_EXTENSION_APPROVED_AT: 'yes' };
+  if (r.approved === 'before') {
+    // 승인 시각이 **지금**이면, 4시간 전에 연 포지션은 승인 전의 것이다.
+    return { EXACT100X_HOLD_EXTENSION_APPROVED_AT: String(nowMs) };
+  }
+  if (r.approved === true) {
+    // 어느 시나리오의 포지션보다도 **앞서** 승인됐다 → 전부 대상이다.
+    // (절대 상한을 넘긴 포지션도 포함해야 `CLOSE_CAP`을 시험할 수 있다)
+    return { EXACT100X_HOLD_EXTENSION_APPROVED_AT: String(nowMs - 30 * 24 * 3_600_000) };
+  }
+  return {};
 }
 
 function depsFor(nowMs: number, r: RigOpts = {}): ExitRunDeps {
@@ -165,6 +191,9 @@ function depsFor(nowMs: number, r: RigOpts = {}): ExitRunDeps {
     sendClose: () => ops.sendSymbolClose(VENUE_CREDS, prepared),
     readAfter: () => ops.readOpenPosition(VENUE_CREDS, 'BTCUSDT')
       .then((x: any) => ({ ok: x.ok === true, found: x.found === true })),
+    // **환경을 명시적으로 넘긴다.** `process.env`를 보게 두면 시험 결과가
+    // 돌리는 기계의 환경변수에 따라 달라진다.
+    holdExtensionEnv: envFor(nowMs, r),
   };
   if (r.noEvidenceDep !== true) {
     deps.readHoldEvidence = () => readHoldEvidence({
@@ -176,14 +205,22 @@ function depsFor(nowMs: number, r: RigOpts = {}): ExitRunDeps {
   return deps;
 }
 
+/**
+ * 시나리오 하나를 돌린다.
+ *
+ * ★ 여기서는 `approved: true`가 기본이다 — 연장 **동작**을 시험하려면
+ *   승인이 있어야 한다. **운영 기본값은 반대(꺼짐)이고**, 그 사실은 아래
+ *   ⓿ 묶음이 `approved: false`로 따로 못박는다.
+ */
 async function run(
   venue: FakeVenue, nowMs: number,
   cand: ExitRunCandidate = candidate(nowMs), rig: RigOpts = {},
 ) {
   const restore = venue.install();
   const unenv = withCryptoEnv();
-  try { return await runExitAuthority(cand, depsFor(nowMs, rig), nowMs); }
-  finally { restore(); unenv(); }
+  try {
+    return await runExitAuthority(cand, depsFor(nowMs, { approved: true, ...rig }), nowMs);
+  } finally { restore(); unenv(); }
 }
 
 export async function runHoldExtensionIntegrationTests() {
@@ -194,6 +231,91 @@ export async function runHoldExtensionIntegrationTests() {
   test('★ Exact100X 계약에 연장 정책이 실제로 배선돼 있다', () => {
     assert(resolveHoldExtensionPolicy(EXACT100X) != null,
       '정책이 없으면 아래 시나리오는 전부 공허하다');
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ⓿ **기본값은 꺼짐이다** — 승인 없이는 아무것도 달라지지 않는다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   검증되지 않은 파라미터(문턱 다섯 · 상한 12시간)를 운영 기본값으로
+  //   켜지 않는다. 그리고 켠 뒤에도 **이미 열려 있는 포지션의 종료 규칙을
+  //   소급해서 바꾸지 않는다.**
+  {
+    const now = Date.now();
+    const venue = venueFor(now);
+    const r = await run(venue, now, candidate(now), { approved: false });
+
+    test('★ ⓿-A 승인 값이 없으면(운영 기본값) 4시간에 그대로 닫는다', () => {
+      eq(r.code, 'CLOSED_VERIFIED');
+      eq(venue.orderSends().length, 1);
+      eq(r.holdExtensionGate?.code, 'NOT_APPROVED');
+    });
+
+    test('★ ⓿-A 꺼져 있으면 연장 판정 자체를 하지 않는다 (동작이 예전과 같다)', () => {
+      eq(r.decision?.holdExtension, null,
+        '★ 판정이 남으면 꺼진 상태에서도 두 번 판정한 것이다');
+      assert(!/연장/.test(r.decision?.reason ?? ''),
+        `사유 문장이 예전과 같아야 한다 — ${r.decision?.reason}`);
+    });
+
+    test('★ ⓿-A 꺼져 있으면 증거 조회를 한 번도 하지 않는다', () => {
+      eq(venue.countOf('/fapi/v1/premiumIndex'), 0);
+      eq(venue.countOf('/fapi/v1/klines'), 0);
+      eq(venue.countOf('/fapi/v1/income'), 0);
+      eq(venue.countOf('/fapi/v1/commissionRate'), 0);
+    });
+  }
+  {
+    // 승인 시각이 **지금**이면 4시간 전에 연 포지션은 승인 전의 것이다.
+    const now = Date.now();
+    const venue = venueFor(now);
+    const r = await run(venue, now, candidate(now), { approved: 'before' });
+
+    test('★ ⓿-B 승인 전에 연 포지션에는 소급 적용하지 않는다', () => {
+      eq(r.holdExtensionGate?.code, 'OPENED_BEFORE_APPROVAL');
+      eq(r.code, 'CLOSED_VERIFIED');
+      eq(venue.orderSends().length, 1);
+      eq(r.decision?.holdExtension, null);
+      eq(venue.countOf('/fapi/v1/premiumIndex'), 0, '증거를 읽지도 않는다');
+    });
+  }
+  {
+    const now = Date.now();
+    const venue = venueFor(now);
+    const r = await run(venue, now, candidate(now), { approved: 'garbage' });
+
+    test('★ ⓿-C 읽을 수 없는 승인 값은 승인이 아니다', () => {
+      eq(r.holdExtensionGate?.code, 'UNPARSEABLE');
+      eq(r.code, 'CLOSED_VERIFIED');
+      eq(venue.orderSends().length, 1);
+    });
+  }
+  {
+    const now = Date.now();
+    // 진입 시각을 못 읽으면 소급인지 아닌지 모른다 → 열지 않는다.
+    // (권한 판정도 같은 이유로 막으므로 주문도 나가지 않는다)
+    const venue = venueFor(now);
+    const r = await run(venue, now,
+      candidate(now, { openedAtMs: null as any }), { approved: true });
+
+    test('★ ⓿-D 진입 시각을 모르면 연장도 청산도 하지 않는다', () => {
+      eq(r.holdExtensionGate?.code, 'OPENED_AT_UNUSABLE');
+      eq(r.code, 'OPENED_AT_UNUSABLE');
+      eq(venue.orderSends().length, 0);
+    });
+  }
+
+  test('★ ⓿ 승인 판정 자체 — 빈 값·공백·쓰레기는 전부 꺼짐이다', () => {
+    for (const v of [undefined, '', '   ', 'yes', 'true', 'soon', '0', '-5']) {
+      const a = judgeHoldExtensionActivation({
+        EXACT100X_HOLD_EXTENSION_APPROVED_AT: v as any });
+      eq(a.enabled, false, `${JSON.stringify(v)}가 켜짐으로 읽혔다`);
+      eq(a.approvedAtMs, null);
+    }
+    const ok = judgeHoldExtensionActivation({
+      EXACT100X_HOLD_EXTENSION_APPROVED_AT: '2026-10-20T00:00:00Z' });
+    eq(ok.enabled, true);
+    eq(ok.approvedAtMs, Date.parse('2026-10-20T00:00:00Z'));
   });
 
   // ══════════ ① 4시간 경계 전 — 묻지도 않는다 ══════════
@@ -531,6 +653,62 @@ export async function runHoldExtensionIntegrationTests() {
       eq(r5.needsReconcile, true);
       eq(r5.requestedQuantity, null, '★ 닫힌 양을 모르면 적지 않는다');
       eq(v5.orderSends().length, 1, '★ 모호해도 재전송하지 않는다');
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // ⑧-f **`CLOSE_*`는 종료 의도다 — 거래소 청산 완료가 아니다**
+  // ══════════════════════════════════════════════════════════
+  //
+  //   `decideHoldExtension`의 `CLOSE_*`는 "이번 회차에 늦추지 않는다"는
+  //   뜻이고, 실제로 닫혔는지는 `ExitRunCode`와 `flatVerified`만이 말한다.
+  //   둘을 같은 값으로 읽으면 **거부된 청산이 "닫았다"로 적힌다.**
+  {
+    const now = Date.now();
+    const venue = venueFor(now, {
+      markPrice: '100120', leftAfter: true,
+      // 거래소가 **명시적으로** 거부한다 (모호한 코드가 아니다)
+      orderReply: { status: 400, json: { code: -2022, msg: 'ReduceOnly Order is rejected.' } },
+    });
+    const r = await run(venue, now);
+
+    test('★ ⑧-f 연장 판정은 CLOSE_*인데 거래소가 거부하면 "닫았다"가 아니다', () => {
+      eq(r.decision?.holdExtension?.code, 'CLOSE_LOSING', '연장하지 않기로 했다');
+      eq(r.code, 'CLOSE_REJECTED', '★ 그러나 청산은 되지 않았다');
+      eq(r.flatVerified, null, '★ 닫혔다고 적지 않는다');
+      eq(r.failed, true, '고쳐야 할 상태다');
+      eq(r.reconciledFlat, false);
+      eq(venue.orderSends().length, 1, '재전송하지 않는다');
+    });
+
+    // 거부된 뒤 **다음 회차**가 다시 시도한다 — 방치되지 않는다
+    const v2 = venueFor(now, { markPrice: '100120' });
+    const r2 = await run(v2, now);
+
+    test('★ ⑧-f 거부된 포지션은 다음 회차에 다시 시도된다 (방치 없음)', () => {
+      eq(r2.code, 'CLOSED_VERIFIED');
+      eq(v2.orderSends().length, 1);
+      eq(r2.flatVerified, true);
+    });
+  }
+  {
+    // 부분 체결로 잔여가 남은 뒤 재시작 → 다음 회차가 남은 노출을 다시 닫는다
+    const now = Date.now();
+    const first = venueFor(now, {
+      markPrice: '100120', leftAfter: true,
+      orderReply: { json: { orderId: 9100, symbol: 'BTCUSDT',
+        status: 'PARTIALLY_FILLED', executedQty: '0.004', avgPrice: '100120' } },
+    });
+    const a = await run(first, now);
+    const second = venueFor(now, { markPrice: '100120', positionAmt: '0.006' });
+    const b = await run(second, now);
+
+    test('★ ⑧-g 부분 체결 뒤 재시작하면 남은 노출을 다시 닫는다', () => {
+      eq(a.code, 'CLOSE_INCOMPLETE');
+      eq(a.needsReconcile, true);
+      eq(b.code, 'CLOSED_VERIFIED');
+      eq(b.requestedQuantity, 0.006, '★ 진입 수량이 아니라 지금 관측한 노출로 닫는다');
+      eq(second.orderSends().length, 1);
     });
   }
 

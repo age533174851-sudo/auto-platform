@@ -28,7 +28,7 @@ import { managedCandidates, type OrderRowLike } from './managedPosition';
 import { OPEN_COMBOS, type OpenCombo } from '../execution/dormantGate';
 import { resolveExecutionProfile } from '../execution/profile';
 import { exact100xExitVenueCapability } from './exitAuthority';
-import { resolveHoldExtensionPolicy } from './holdExtension';
+import { resolveHoldExtensionPolicy, holdExtensionActivation } from './holdExtension';
 import type { StopPolicy } from '../strategies/profiles';
 
 /** 청산 감시가 열린 포지션 목록을 읽는 표 */
@@ -287,11 +287,19 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
     //   여기에 "4시간에 닫힙니다"라고 적어 두면, 연장이 열린 뒤에도 화면은
     //   계속 그 문장을 보여 준다. 그건 확인한 것과 다른 말을 하는 것이다.
     const hx = resolveHoldExtensionPolicy({ profileId: c.profileId, presetId: c.presetId });
+    // ★ **선언과 켜짐을 구분해서 적는다.** "선언돼 있다"를 "돈다"로 적으면,
+    //   승인하지 않은 기능이 화면에서는 켜져 있는 것으로 보인다.
+    const act = holdExtensionActivation();
     const extendNote = hx == null
       ? '증거에 따른 보유 연장은 이 계약에 없습니다 — 한도에서 바로 닫습니다'
-      : `순수익(수수료·펀딩 반영)·추세·청산 여유가 모두 증거로 확인되면`
-        + ` 최대 ${Math.round(hx.absoluteMaxHoldMs / 3_600_000)}시간까지 보유를 연장합니다`
-        + ' (증거가 없거나 낡으면 연장하지 않고 한도에서 닫습니다)';
+      : !act.enabled
+        ? `보유 연장이 선언돼 있지만 **켜져 있지 않습니다** (${act.code}) —`
+          + ' 지금은 계약이 선언한 보유 한도에서 그대로 닫습니다'
+        : `보유 연장이 켜져 있습니다: 순수익(수수료·펀딩 반영)·추세·청산 여유가`
+          + ` 모두 증거로 확인되면 최대 ${Math.round(hx.absoluteMaxHoldMs / 3_600_000)}시간까지`
+          + ' 연장합니다. 증거가 없거나 낡으면 연장하지 않고 한도에서 닫습니다.'
+          + ` 승인 시각(${new Date(act.approvedAtMs as number).toISOString()}) **전에** 연`
+          + ' 포지션에는 적용되지 않습니다';
     const declaredHold = holdH == null
       ? '계약에 최대 보유 한도가 없습니다'
       : auth.capabilities.timeExit

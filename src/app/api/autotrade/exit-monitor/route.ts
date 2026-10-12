@@ -1155,6 +1155,15 @@ async function runLifecycleSweep(
           needsReconcile: r.needsReconcile,
           requestedQuantity: r.requestedQuantity,
           heldMs: r.decision?.heldMs ?? null,
+          // ★ **관문**과 **판정**을 따로 적는다.
+          //
+          //   관문  = 물어봐도 되는 자리였는가 (승인 · 소급 금지)
+          //   판정  = 증거를 보고 늦출지 정한 결과
+          //
+          //   꺼져 있으면 판정은 null이고(동작이 예전과 같다는 증거) 관문이
+          //   이유를 들고 있다. 한 칸에 합치면 "승인 안 됨"과 "증거 없음"이
+          //   같은 문장으로 적힌다.
+          holdExtensionGate: r.holdExtensionGate,
           // ★ 연장을 물어본 회차에만 있다. `null`은 "묻지 않았다"다 —
           //   "연장하지 않았다"(code: 'CLOSE_*')와 다른 사실이다.
           holdExtension: r.decision?.holdExtension == null ? null : {

@@ -54,6 +54,19 @@
 //   없어서 후보 비교·백테스트는 **UNKNOWN**이다. 검증한 것은 안전
 //   속성(늦추기만 함 · 상한 · fail-closed)과 산술이다.
 
+// ★ **`CLOSE_*`는 종료 "의도"다 — 거래소 청산 완료가 아니다.**
+//
+//   이 모듈이 돌려주는 `CLOSE_*`는 모두 한 가지 뜻뿐이다:
+//   **"이번 회차에 늦추지 않는다."** 그 뒤에 실제로 닫혔는지는 이 모듈이
+//   알 수 없다 — 주문을 낼 수단이 없으므로 알 방법도 없다.
+//
+//   실제 청산 결과를 말하는 것은 `ExitRunCode`와 `flatVerified` 둘뿐이다
+//   (`CLOSED_VERIFIED` · `RECONCILED_CLOSED` · `CLOSE_REJECTED` ·
+//   `CLOSE_INCOMPLETE` · `CLOSE_UNKNOWN_RECONCILE_REQUIRED`).
+//
+//   둘을 같은 값으로 읽으면 **거부된 청산이 "닫았다"로 적힌다.** 그래서
+//   이름이 `CLOSED_*`가 아니라 `CLOSE_*`(동사)다.
+
 export type HoldExtensionCode =
   /** 늦춘다 */
   | 'EXTEND'
@@ -187,13 +200,24 @@ const POLICIES: Record<string, HoldExtensionPolicy> = {
   },
 };
 
+const num = (v: unknown): number | null => {
+  if (v == null || typeof v === 'boolean') return null;
+  if (typeof v === 'string' && v.trim() === '') return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
 export interface HoldExtensionTarget {
   profileId?: unknown;
   presetId?: unknown;
 }
 
 /**
- * 이 실행 계약에 연장이 열려 있는가. **없으면 null이고 그게 기본값이다.**
+ * 이 실행 계약에 연장 정책이 **선언돼** 있는가.
+ *
+ * ★ "선언됨"은 "켜짐"이 **아니다.** 켜짐은 `judgeHoldExtensionActivation`이
+ *   정하고, 기본값은 **꺼짐**이다. 둘을 한 함수로 합치면 "선언했으니
+ *   돈다"가 되고, 그건 검증되지 않은 파라미터를 운영 기본값으로 켜는 것이다.
  */
 export function resolveHoldExtensionPolicy(
   t: HoldExtensionTarget | null | undefined,
@@ -204,17 +228,176 @@ export function resolveHoldExtensionPolicy(
   return POLICIES[`${pid}/${sid}`] ?? null;
 }
 
+// ══════════════════════════════════════════════════════════════
+// ★ 켜짐은 **승인이다.** 기본값은 꺼짐이다
+// ══════════════════════════════════════════════════════════════
+//
+// 왜 기본이 꺼짐인가
+// ──────────────────
+// 이 연장의 문턱 다섯 개(순수익 15% · 작동 25% · 반납 0.4 · ATR 0.5 ·
+// 청산 여유 0.3%)와 상한 12시간은 **산술에서 유도했고 데이터에서 유도하지
+// 않았다.** Exact100X 실측 표본은 0건이다. 검증되지 않은 파라미터를
+// 운영 기본값으로 켜면, 그것을 고른 근거가 "그때 그렇게 적혀 있었다"가 된다.
+//
+// 그래서 선언(정책 표)과 켜짐(승인)을 나눈다. 선언은 커밋이고, 켜짐은
+// **사람의 명시적 승인**이다 — LIVE 자금 승인과 같은 분류다.
+//
+// 왜 스위치 하나가 아니라 **시각**인가
+// ────────────────────────────────────
+// boolean 하나로 켜면, 켜는 순간 **이미 열려 있는 포지션들의 종료 규칙이
+// 바뀐다.** 사용자가 4시간 계약으로 연 자리가 승인 한 번에 12시간 자리로
+// 변한다 — 그 포지션에 대해서는 아무도 그것을 고르지 않았다.
+//
+// 그래서 승인 값 자체를 **"언제부터"**로 둔다. 한 칸이 승인과 적용 시점을
+// 같이 들고 있으므로, 맞춰야 할 값이 둘로 늘지 않는다.
+//
+//     EXACT100X_HOLD_EXTENSION_APPROVED_AT=2026-10-20T00:00:00Z
+//
+// 그 시각 **이후에 연** 포지션만 연장 대상이다. 그 전에 연 포지션은
+// 계약이 선언한 4시간에 그대로 닫힌다.
+//
+// 비어 있거나 읽을 수 없으면 **꺼짐**이다. 모르는 값을 "켜짐"으로 읽지 않는다.
+
+export interface HoldExtensionActivationEnv {
+  EXACT100X_HOLD_EXTENSION_APPROVED_AT?: string;
+}
+
+export type HoldExtensionActivationCode =
+  /** 승인됨. `approvedAtMs` 이후에 연 포지션만 대상이다 */
+  | 'APPROVED'
+  /** 승인 값이 없다 — **기본값** */
+  | 'NOT_APPROVED'
+  /** 값이 있는데 시각으로 읽히지 않는다. 켜지 않는다 */
+  | 'UNPARSEABLE';
+
+export interface HoldExtensionActivation {
+  enabled: boolean;
+  code: HoldExtensionActivationCode;
+  /** 이 시각 이후에 연 포지션만 대상. 꺼졌으면 null */
+  approvedAtMs: number | null;
+  reason: string;
+}
+
+/**
+ * 연장이 켜져 있는가. **환경을 인자로 받는다** — 시험이 모든 조합을
+ * `process.env`를 건드리지 않고 확인할 수 있어야 한다.
+ */
+export function judgeHoldExtensionActivation(
+  e: HoldExtensionActivationEnv | null | undefined,
+): HoldExtensionActivation {
+  const raw = String(e?.EXACT100X_HOLD_EXTENSION_APPROVED_AT ?? '').trim();
+  if (!raw) {
+    return { enabled: false, code: 'NOT_APPROVED', approvedAtMs: null,
+      reason: '승자 보유 연장은 승인되지 않았습니다 (기본값: 꺼짐)'
+        + ' — 계약이 선언한 보유 한도에서 닫습니다' };
+  }
+  // epoch ms 숫자도, ISO 날짜도 받는다. **둘 중 어느 모양도 아니면 켜지지
+  // 않는다.** `Date.parse`에 아무 문자열이나 넘기면 안 된다 — 엔진에 따라
+  // `'-5'`나 `'2'` 같은 값도 어떤 시각으로 읽히고, 그러면 오타가 승인이 된다.
+  const ISO_DAY = /^\d{4}-\d{2}-\d{2}([T ].*)?$/;
+  const asNum = /^\d+$/.test(raw) ? Number(raw)
+    : ISO_DAY.test(raw) ? Date.parse(raw) : NaN;
+  // ★ **그럴듯한 ms epoch 범위 안이어야 한다.**
+  //
+  //   `'2'`는 숫자로 읽히고 1970-01-01T00:00:00.002Z가 된다. 그러면 그 뒤에
+  //   연 **모든** 포지션이 "승인 뒤"가 되어, 오타 한 자가 소급 적용 금지를
+  //   통째로 무력화한다.
+  //
+  //   초 단위를 ms 칸에 넣는 실수도 같은 모양이다 — 1760000000(초)은 ms로
+  //   읽으면 1970년이다. 둘 다 여기서 걸린다.
+  const MIN_MS = Date.parse('2020-01-01T00:00:00Z');
+  const MAX_MS = Date.parse('2100-01-01T00:00:00Z');
+  if (!Number.isFinite(asNum) || !(asNum >= MIN_MS) || !(asNum < MAX_MS)) {
+    return { enabled: false, code: 'UNPARSEABLE', approvedAtMs: null,
+      reason: '보유 연장 승인 값을 시각으로 읽지 못했습니다'
+        + ' (ms epoch 또는 ISO 날짜, 2020~2100 범위)'
+        + ' — 읽지 못한 승인은 승인이 아니므로 켜지 않습니다' };
+  }
+  return {
+    enabled: true, code: 'APPROVED', approvedAtMs: asNum,
+    reason: `보유 연장이 승인됐습니다 (${new Date(asNum).toISOString()} 이후에`
+      + ' 연 포지션만 대상 — 그 전에 연 포지션은 계약 한도에서 닫습니다)',
+  };
+}
+
+/** 실제 호출부가 쓰는 얇은 래퍼 */
+export function holdExtensionActivation(): HoldExtensionActivation {
+  return judgeHoldExtensionActivation({
+    EXACT100X_HOLD_EXTENSION_APPROVED_AT:
+      process.env.EXACT100X_HOLD_EXTENSION_APPROVED_AT,
+  });
+}
+
+export type HoldExtensionGateCode =
+  | 'OPEN'
+  /** 이 계약에 연장 정책이 선언돼 있지 않다 */
+  | 'NOT_DECLARED'
+  | 'NOT_APPROVED'
+  | 'UNPARSEABLE'
+  /** 승인 **전에** 연 포지션이다 — 규칙을 소급 적용하지 않는다 */
+  | 'OPENED_BEFORE_APPROVAL'
+  /** 진입 시각을 읽지 못했다 — 소급인지 아닌지 알 수 없다 */
+  | 'OPENED_AT_UNUSABLE';
+
+export interface HoldExtensionGateVerdict {
+  /** 열렸을 때만 정책이 있다. `null`이면 **오늘과 같이 닫는다** */
+  policy: HoldExtensionPolicy | null;
+  code: HoldExtensionGateCode;
+  reason: string;
+  activation: HoldExtensionActivation;
+}
+
+/**
+ * **이 포지션에 연장을 물어봐도 되는가.**
+ *
+ *   ① 이 계약에 정책이 선언돼 있는가
+ *   ② 사람이 승인했는가              (기본값: 아니다)
+ *   ③ 이 포지션이 승인 **뒤에** 열렸는가
+ *
+ * 셋이 모두 참일 때만 정책을 돌려준다. 하나라도 아니면 `policy: null`이고,
+ * 그러면 종료 경로는 연장 기능이 없던 때와 **글자 그대로 같이** 동작한다.
+ */
+export function holdExtensionGate(i: {
+  executionIdentity: HoldExtensionTarget | null | undefined;
+  openedAtMs: number | null | undefined;
+  env?: HoldExtensionActivationEnv | null;
+}): HoldExtensionGateVerdict {
+  const activation = i?.env === undefined
+    ? holdExtensionActivation()
+    : judgeHoldExtensionActivation(i.env);
+
+  const declared = resolveHoldExtensionPolicy(i?.executionIdentity);
+  if (declared == null) {
+    return { policy: null, code: 'NOT_DECLARED', activation,
+      reason: '이 실행 계약에는 보유 연장이 선언돼 있지 않습니다' };
+  }
+  if (!activation.enabled) {
+    return {
+      policy: null,
+      code: activation.code === 'UNPARSEABLE' ? 'UNPARSEABLE' : 'NOT_APPROVED',
+      activation, reason: activation.reason,
+    };
+  }
+
+  const opened = num(i?.openedAtMs);
+  if (opened == null || !(opened > 0)) {
+    // 소급인지 아닌지 **모른다.** 모르면 열지 않는다.
+    return { policy: null, code: 'OPENED_AT_UNUSABLE', activation,
+      reason: `진입 시각을 읽지 못해(${String(i?.openedAtMs)}) 이 포지션이 승인 뒤에`
+        + ' 열린 것인지 확인할 수 없습니다 — 연장하지 않습니다' };
+  }
+  if (opened < (activation.approvedAtMs as number)) {
+    return { policy: null, code: 'OPENED_BEFORE_APPROVAL', activation,
+      reason: '승인 전에 열린 포지션입니다 — 이미 운영 중인 자리의 종료 규칙을'
+        + ' 소급해서 바꾸지 않습니다 (계약이 선언한 보유 한도에서 닫습니다)' };
+  }
+  return { policy: declared, code: 'OPEN', activation, reason: activation.reason };
+}
+
 /** 선언된 계약 목록 — 검사기·시험이 센다 */
 export function holdExtensionContractKeys(): string[] {
   return Object.keys(POLICIES).sort();
 }
-
-const num = (v: unknown): number | null => {
-  if (v == null || typeof v === 'boolean') return null;
-  if (typeof v === 'string' && v.trim() === '') return null;
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isFinite(n) ? n : null;
-};
 
 const pct = (n: number): string => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 
