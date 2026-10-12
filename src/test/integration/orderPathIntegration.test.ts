@@ -1122,3 +1122,91 @@ export async function runGateDupIntegrationTests() {
     });
   }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// `NO_FIXED_TP`가 **실행 경로까지** 유지되는가
+// ══════════════════════════════════════════════════════════════════
+//
+// 선언과 실행은 다른 것이다. 프로필에 `NO_FIXED_TP`라고 적혀 있다는
+// 사실은 "거래소에 익절 주문이 안 나간다"를 증명하지 않는다 — 실제로
+// 예전에 Gate 갈래에 정책 검사가 없어서 익절이 그대로 나갔다(코드 주석
+// 835~841행이 그 사고를 적고 있다).
+//
+// 그래서 **거래소에 나간 주문을 세어** 확인한다.
+
+export async function runNoFixedTpIntegrationTests() {
+  console.log('[통합 — NO_FIXED_TP가 실행 경로까지 유지되는가]');
+
+  /** 조건부 주문(손절·익절) 전송 횟수 */
+  const condSends = (v: FakeVenue) => v.calls.filter(
+    (c) => c.method === 'POST' && /\/fapi\/v1\/order\b/.test(c.path)
+      && /STOP|TAKE_PROFIT/.test(String(c.params.type ?? ''))).length;
+
+  // ══════════ ① 익절 주문이 한 건도 나가지 않는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));   // 기본값이 NO_FIXED_SL/NO_FIXED_TP다
+
+    test('★ NO_FIXED_TP 주문은 거래소에 익절을 한 건도 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const tp = venue.calls.filter((c) => c.method === 'POST'
+        && /TAKE_PROFIT/.test(String(c.params.type ?? '')));
+      eq(tp.length, 0, `익절 주문이 ${tp.length}건 나갔다 — 선언과 실행이 갈렸다`);
+      eq(condSends(venue), 0, '고정 손절·익절이 함께 나갔다');
+      // 장부에도 익절 주문 번호가 남지 않아야 한다.
+      const row = db.table('live_orders')[0];
+      assert(row.tp_order_id == null || row.tp_order_id === '',
+        `장부에 익절 주문 번호가 적혔다: ${row.tp_order_id}`);
+    });
+
+    test('★ 진입은 정상 체결된다 — 익절이 없다고 진입을 막지 않는다', () => {
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.01);
+    });
+  }
+
+  // ══════════ ② 익절가를 함께 넘기면 **주문 자체를 거절한다** ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder() }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, { takeProfit: 96000 }));
+
+    test('★ NO_FIXED_TP에 익절가가 함께 오면 주문하지 않는다 (모순 거절)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).ok, false);
+      eq((r as any).status, 'REJECTED');
+      // **거래소에 아무것도 나가지 않았다.**
+      eq(venue.calls.length, 0, `모순인데 거래소 호출이 ${venue.calls.length}건 있었다`);
+      assert(/고정 익절/.test(String((r as any).message)), String((r as any).message));
+    });
+  }
+
+  // ══════════ ③ 수익이 커져도 자동 종료 수단은 시간청산뿐이다 ══════════
+  {
+    test('★ Exact100X 자리에 열린 자동 종료는 시간청산 하나뿐이다', async () => {
+      const { seatExitCapabilities } = await import('@/lib/engine/managedPosition');
+      const r = seatExitCapabilities({
+        stopPolicy: 'NO_FIXED_SL', hasStopValue: false,
+        executionIdentity: {
+          profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 1,
+        } as any,
+      });
+      eq(r.exposureClass, 'NO_FIXED_SL_EXACT100X');
+      // 이익을 제한할 수 있는 수단이 전부 닫혀 있어야 한다.
+      eq(r.capabilities.fixedStopAtEntry, false);
+      eq(r.capabilities.breakEven, false, '본전 이동이 열리면 수익이 0에서 잘린다');
+      eq(r.capabilities.trailing, false, '트레일링이 열리면 수익이 되돌림에서 잘린다');
+      eq(r.capabilities.emergency, false);
+      // 열려 있는 것은 보유 시간 하나다 — 이익과 무관한 기준이다.
+      eq(r.capabilities.timeExit, true);
+    });
+  }
+}
