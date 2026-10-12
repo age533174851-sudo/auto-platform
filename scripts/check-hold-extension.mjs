@@ -40,6 +40,30 @@ const code = (s) => s
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
 
+/**
+ * `fn(` 호출의 **인자 전체**를 괄호를 세어 떼어 온다. 없으면 null.
+ *
+ * 왜 고정 모양 regex를 쓰지 않는가: `holdExtensionEnv`라는 이름은 import·
+ * 변수 선언·다른 블록에도 있다. 파일 전체를 문자열로 검색하면 **deps에
+ * 넘기는 줄만 지워도 검사기가 통과한다** — 실제로 그렇게 됐다(HX26 누락).
+ * 그래서 "이 호출의 인자 안에 있는가"로 범위를 좁힌다.
+ */
+const callArgsOf = (src, fn) => {
+  const at = src.indexOf(`${fn}(`);
+  if (at < 0) return null;
+  let i = at + fn.length;           // '(' 위치
+  let depth = 0;
+  for (let k = i; k < src.length; k += 1) {
+    const ch = src[k];
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return src.slice(i + 1, k);
+    }
+  }
+  return null;                      // 닫히지 않았다
+};
+
 // ── 단독 컴파일 ──
 //
 // `holdExtension.ts`는 의존이 **없다**(순수 판정). 그래서 한 파일만
@@ -277,12 +301,56 @@ if (mod && typeof mod.decideHoldExtension === 'function') {
         err(`${f}이(가) 승인 값을 직접 읽습니다 — 호출부가 인자로 넣어야 합니다`);
       }
     }
-    // 라우트는 **반드시** 넣어야 한다. 안 넣으면 영구 꺼짐이고,
-    // 그러면 승인해도 아무 일이 일어나지 않는다(조용한 영구 OFF).
-    const m2 = read(MON);
-    if (m2 && !code(m2).includes('holdExtensionEnvFromProcess')) {
-      err(`${MON}이(가) 승인 환경을 넣지 않습니다`
-        + ' — 승인해도 연장이 영구히 꺼진 채로 남습니다');
+    // ── 라우트가 **deps에 실제로 넘기는가** ──
+    //
+    //   안 넘기면 엔진은 `?? null`로 떨어져 **승인해도 영구히 꺼진 채**
+    //   남는다. 그런데 통합 시험은 `deps`에 환경을 직접 주입하므로 그
+    //   변이에 초록이다 — 이 검사기만이 그것을 잡을 수 있다.
+    //
+    //   ★ 파일 전체 문자열 검색으로는 **잡지 못한다.** `holdExtensionEnv`
+    //     라는 이름은 import와 다른 블록에도 있어서, deps에 넘기는 줄만
+    //     지워도 통과한다. 실제로 그렇게 새 나갔다(HX26). 그래서
+    //     `runExitAuthority(` 호출의 **인자 안에서만** 확인한다.
+    const m2 = code(read(MON) ?? '');
+    const args = callArgsOf(m2, 'runExitAuthority');
+    if (!args) {
+      err(`${MON}에서 runExitAuthority 호출을 찾지 못했습니다`
+        + ' — 전용 종료 권한이 라우트에 배선되지 않았습니다');
+    } else {
+      const hit = args.match(/holdExtensionEnv\s*:\s*([^,\n]+)/);
+      if (!hit) {
+        err(`${MON}의 runExitAuthority deps에 holdExtensionEnv가 없습니다`
+          + ' — 승인해도 연장이 영구히 꺼진 채로 남습니다 (조용한 영구 OFF)');
+      } else {
+        const value = hit[1].trim().replace(/[,;]$/, '');
+        if (/^(null|undefined|\{\s*\}|''|""|``)$/.test(value)) {
+          err(`${MON}이 holdExtensionEnv에 ${value}을(를) 넘깁니다`
+            + ' — 넘기지 않는 것과 같습니다');
+        } else {
+          // 넘기는 값이 **프로세스 환경에서 온 것**인지 본다. 지어낸
+          // 객체 리터럴을 넘기면 승인 값을 영영 읽지 못한다.
+          const id = value.replace(/\(\s*\)$/, '').trim();
+          const fromProcess = new RegExp(
+            `${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=[^\n]*`);
+          const decl = m2.match(fromProcess);
+          const chain = decl ? decl[0] : '';
+          const reachesProcess = /holdExtensionEnvFromProcess/.test(chain)
+            // `const f = () => x` 꼴이면 x를 한 번 더 따라간다
+            || (() => {
+              const inner = chain.match(/=>\s*([A-Za-z_$][\w$]*)/);
+              if (!inner) return false;
+              const d2 = m2.match(new RegExp(`${inner[1]}\\s*=[^\n]*`));
+              return !!d2 && /holdExtensionEnvFromProcess|hxEnvReader/.test(d2[0]);
+            })();
+          if (!reachesProcess) {
+            err(`${MON}의 holdExtensionEnv(${value})가 holdExtensionEnvFromProcess에서`
+              + ' 오지 않습니다 — 승인 값을 읽지 않는 환경을 넘기면 영구 꺼짐입니다');
+          }
+        }
+      }
+    }
+    if (m2 && !m2.includes('holdExtensionEnvFromProcess')) {
+      err(`${MON}이(가) holdExtensionEnvFromProcess를 부르지 않습니다`);
     }
   }
 }
