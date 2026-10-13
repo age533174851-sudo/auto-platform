@@ -246,6 +246,27 @@ if (mod) {
       'diagnoseFutures(', 'getFuturesBalance(',
     ].map(n => { const at = c.indexOf(n); return at < 0 ? Number.MAX_SAFE_INTEGER : at; }));
     if (gateAt < 0) err(`${ROUTE}: TESTNET 전용 관문(binanceTestnetDiagnoseGate)이 없습니다`);
+    else {
+      // ★ **부르는 것과 막는 것은 다르다.** `if (!gate.ok)`를 `if (false)`로
+      //   바꾸면 호출은 그대로 남고 관문만 열린다 (TD-18이 그렇게 새
+      //   나갔다). 그래서 결과를 보고 **돌려보내는 분기**를 확인한다.
+      const branch = /if\s*\(\s*!\s*gate\.ok\s*\)/.test(c)
+        || /if\s*\(\s*gate\.ok\s*(!==|===)\s*(true|false)\s*\)/.test(c);
+      if (!branch) {
+        err(`${ROUTE}: 관문 결과(gate.ok)로 분기하지 않습니다`
+          + ' — 부르기만 하고 막지 않으면 LIVE 연결도 통과합니다');
+      }
+      // 그 분기 안에서 응답을 돌려주고 끝나야 한다.
+      const after = c.slice(gateAt, gateAt + 600);
+      if (!/return\s+NextResponse\.json/.test(after)) {
+        err(`${ROUTE}: 관문 미통과 시 곧바로 돌려보내지 않습니다`);
+      }
+      // 관문 분기가 **거래소 호출보다 앞**이어야 한다.
+      const branchAt = c.search(/if\s*\(\s*!\s*gate\.ok\s*\)/);
+      if (branchAt >= 0 && firstCall !== Number.MAX_SAFE_INTEGER && branchAt > firstCall) {
+        err(`${ROUTE}: 관문 분기보다 거래소 호출이 먼저 있습니다`);
+      }
+    }
     if (authAt < 0) err(`${ROUTE}: 사용자 인증(resolveUserId)이 없습니다`);
     if (gateAt >= 0 && firstCall !== Number.MAX_SAFE_INTEGER && gateAt > firstCall) {
       err(`${ROUTE}: 관문보다 거래소 호출이 먼저 있습니다 — LIVE 키로 요청이 나갈 수 있습니다`);
@@ -270,9 +291,31 @@ if (mod) {
     if (c.includes('getFuturesSymbolSettings(') === false) {
       err(`${ROUTE}: getFuturesSymbolSettings를 부르지 않습니다 — 격리·배율을 확인할 수 없습니다`);
     }
-    // 전체 판정이 응답에 실리는가.
-    if (!/readiness/.test(c)) {
-      err(`${ROUTE}: 전체 판정(readiness)을 응답에 싣지 않습니다`);
+    // ── 전체 판정이 **응답 객체에** 실리는가 ──
+    //
+    //   `/readiness/`를 파일 전체에서 찾으면 `const readiness = …` 선언이
+    //   남아 있어 **응답에서 빼도 통과한다** (TD-16이 그렇게 새 나갔다).
+    //   그래서 `NextResponse.json(` 인자 안을 본다.
+    const resArgs = callArgsOf(c, 'NextResponse.json');
+    if (resArgs == null) err(`${ROUTE}: NextResponse.json 호출을 찾지 못했습니다`);
+    else {
+      // 마지막 응답(진단 결과)을 보기 위해 가장 긴 인자를 고른다 —
+      // 앞쪽에는 400·401 같은 짧은 오류 응답들이 있다.
+      let best = resArgs;
+      let from = 0;
+      for (;;) {
+        const at = c.indexOf('NextResponse.json(', from);
+        if (at < 0) break;
+        const a = callArgsOf(c.slice(at), 'NextResponse.json');
+        if (a && a.length > best.length) best = a;
+        from = at + 1;
+      }
+      if (!/(^|[\s,{])readiness\s*[,:}]/.test(best)) {
+        err(`${ROUTE}: 전체 판정(readiness)을 응답 객체에 싣지 않습니다`);
+      }
+      if (!/itemCodes/.test(best)) {
+        err(`${ROUTE}: 항목별 판정 코드(itemCodes)를 응답에 싣지 않습니다`);
+      }
     }
 
     // ── ⑤ 요구 배율을 라우트가 스스로 적지 않는다 ──
@@ -308,6 +351,22 @@ if (mod) {
       }
       if (!/'GET'/.test(body)) {
         err(`${FUT}: getFuturesSymbolSettings가 GET으로 조회하지 않습니다`);
+      }
+      // ★ 응답에 그 심볼이 없으면 **모른다고 답해야 한다.** 기본값으로
+      //   메우면 격리도 배율도 확인한 적 없이 "격리 100배"가 된다
+      //   (TD-21이 그렇게 새 나갔다).
+      const notFound = /if\s*\(\s*!row\s*\)\s*\{([\s\S]*?)\n {4}\}/.exec(body);
+      if (!notFound) {
+        err(`${FUT}: getFuturesSymbolSettings에 "심볼 없음" 분기가 없습니다`);
+      } else {
+        const blk = notFound[1];
+        if (!/ok:\s*false/.test(blk)) {
+          err(`${FUT}: 심볼을 못 찾았는데 ok:false로 답하지 않습니다`);
+        }
+        if (/'isolated'|"isolated"/.test(blk) || /leverage:\s*\d/.test(blk)) {
+          err(`${FUT}: 심볼을 못 찾았을 때 격리·배율을 지어냅니다`
+            + ' — 확인한 적 없는 값이 진단을 통과시킵니다');
+        }
       }
       for (const bad of ["'POST'", 'leverage\x27, key', '/fapi/v1/marginType']) {
         if (body.includes(bad)) err(`${FUT}: getFuturesSymbolSettings에 쓰기 수단이 있습니다 (${bad})`);

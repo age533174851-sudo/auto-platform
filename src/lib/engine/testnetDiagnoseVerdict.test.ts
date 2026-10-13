@@ -86,6 +86,21 @@ export function runTestnetDiagnoseVerdictTests() {
     }
   });
 
+  test('★ 격리 ⑤-b 빈 칸과 모르는 값의 **이유가 다르다**', () => {
+    // 상태(UNKNOWN)만 보면 둘이 같다. 그래서 빈 칸 가드를 지워도
+    // 아래 `!isolated` 분기가 같은 UNKNOWN을 만들어 변이가 새 나갔다
+    // (TD-4). 운영자에게는 "거래소가 안 보냈다"와 "우리가 못 읽었다"가
+    // 다른 사실이므로, 그 구분을 시험으로 고정한다.
+    const empty = iso({ marginType: '' });
+    const weird = iso({ marginType: 'something_new' });
+    eq(empty.status, 'UNKNOWN'); eq(weird.status, 'UNKNOWN');
+    assert(/보고하지 않았습니다/.test(empty.reason),
+      `빈 칸의 이유가 "보고하지 않았습니다"가 아니다: ${empty.reason}`);
+    assert(/해석하지 못했습니다/.test(weird.reason),
+      `모르는 값의 이유가 "해석하지 못했습니다"가 아니다: ${weird.reason}`);
+    assert(empty.reason !== weird.reason, '두 이유가 같아졌다 — 구분이 사라졌다');
+  });
+
   test('격리 ⑥ 배율이 다르면 실패다', () => {
     const v = iso({ leverage: 20 });
     eq(v.status, 'FAIL'); eq(v.code, 'LEVERAGE_MISMATCH');
