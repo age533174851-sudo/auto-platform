@@ -800,6 +800,13 @@ jobs:
       - name: TESTNET 진단 변이 자기 점검 (전수 실행은 수동)
         run: node scripts/testnet-diagnose-mutations.mjs --self-test
 
+      # ── 운영 감사가 읽기만 하는가 ──
+      #
+      # 감사 SQL은 운영 DB에 붙는다. 한 줄이 쓰기로 바뀌어도 로컬 시험은
+      # 아무것도 말해 주지 않는다 — 그 SQL은 시험에서 돌지 않는다.
+      - name: 운영 감사 읽기 전용 계약 (쓰기 0 · 비밀 칸 미선택)
+        run: node scripts/check-audit-readonly.mjs
+
       # ── 관리자 인증 계약 (같은 비밀에 이름을 둘 붙이지 않는다) ──
       #
       # x-admin-secret 호출자가 `EXIT_MONITOR_SECRET`이라는 다른 GitHub secret
