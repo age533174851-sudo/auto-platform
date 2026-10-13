@@ -424,6 +424,23 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       message: '고정 익절을 쓰지 않는 프로필인데 익절가가 함께 넘어왔습니다'
         + ` (${args.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
   }
+  // ── 분할 익절 사다리도 익절이다 ──
+  //
+  //   이 관문은 `args.takeProfit`(단일 익절)만 봤다. 그래서 `exitPlan`에
+  //   `PARTIAL_TP`가 담겨 오면 여기를 통과하고, 전송 뒤 보호주문 단계의
+  //   `else if (noFixedTp)` 한 줄에만 막혔다. 그 한 줄을 지우면 **고정
+  //   익절 사다리가 거래소로 나간다** — 변이 검증에서 그 변이가 탈출했고,
+  //   탈출한 이유가 "단일 익절만 넘기는 시험"이었다.
+  //
+  //   경계에서 막는 쪽이 낫다. 여기서 멈추면 계좌에 아무 일도 일어나지
+  //   않는다(거래소 호출 0건). 뒤에서 막으면 진입은 이미 나가 있다.
+  const planTpCount = (args.exitPlan?.orders ?? [])
+    .filter((o: any) => o?.kind === 'PARTIAL_TP').length;
+  if (noFixedTp && planTpCount > 0) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '고정 익절을 쓰지 않는 프로필인데 분할 익절 사다리가 함께 넘어왔습니다'
+        + ` (${planTpCount}단) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
   // 실행 계약 식별자도 같은 규칙이다. **반쪽은 받지 않는다.**
   //
   //   호출부가 계약을 잘못 조립한 것이므로 **경계에서 거절한다.** 거래소

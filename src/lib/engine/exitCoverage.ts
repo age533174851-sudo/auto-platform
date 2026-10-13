@@ -28,6 +28,8 @@ import { managedCandidates, type OrderRowLike } from './managedPosition';
 import { OPEN_COMBOS, type OpenCombo } from '../execution/dormantGate';
 import { resolveExecutionProfile } from '../execution/profile';
 import { exact100xExitVenueCapability } from './exitAuthority';
+import { resolveHoldExtensionPolicy, judgeHoldExtensionActivation } from './holdExtension';
+import type { HoldExtensionActivationEnv } from './holdExtension';
 import type { StopPolicy } from '../strategies/profiles';
 
 /** 청산 감시가 열린 포지션 목록을 읽는 표 */
@@ -251,7 +253,17 @@ export function genericLifecycleAdmission(stopPolicy: StopPolicy | null): Lifecy
  * 하나 더 열었을 때 이 표가 조용히 그 조합을 빠뜨린다 — 지금 고치는
  * 고장이 정확히 그 형태다.
  */
-function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]): ExitCoverage[] {
+function contractRows(
+  baseStrategyIds: Set<string>, open: readonly OpenCombo[],
+  /**
+   * 보유 연장 승인 환경. **호출부가 넣는다 — 안 넣으면 "켜지지 않음"이다.**
+   *
+   * 이 파일이 `process.env`를 직접 읽지 않는 이유는
+   * `holdExtensionEnv.ts`의 머리글에 있다. 라우트가
+   * `holdExtensionEnvFromProcess()`를 넣는다.
+   */
+  activationEnv: HoldExtensionActivationEnv | null | undefined,
+): ExitCoverage[] {
   const out: ExitCoverage[] = [];
   for (const c of open) {
     if (!baseStrategyIds.has(c.strategyId)) continue;
@@ -282,10 +294,28 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
     // 계약이 선언한 보유 한도와, 그 값을 **실제로 읽는 경로가 있는가.**
     const holdH = Number(r.contract.maxHoldSec) > 0
       ? Math.round(Number(r.contract.maxHoldSec) / 3600) : null;
+    // ★ **연장 여부를 손으로 적지 않는다.** 정책 정본에서 derive한다 —
+    //   여기에 "4시간에 닫힙니다"라고 적어 두면, 연장이 열린 뒤에도 화면은
+    //   계속 그 문장을 보여 준다. 그건 확인한 것과 다른 말을 하는 것이다.
+    const hx = resolveHoldExtensionPolicy({ profileId: c.profileId, presetId: c.presetId });
+    // ★ **선언과 켜짐을 구분해서 적는다.** "선언돼 있다"를 "돈다"로 적으면,
+    //   승인하지 않은 기능이 화면에서는 켜져 있는 것으로 보인다.
+    const act = judgeHoldExtensionActivation(activationEnv);
+    const extendNote = hx == null
+      ? '증거에 따른 보유 연장은 이 계약에 없습니다 — 한도에서 바로 닫습니다'
+      : !act.enabled
+        ? `보유 연장이 선언돼 있지만 **켜져 있지 않습니다** (${act.code}) —`
+          + ' 지금은 계약이 선언한 보유 한도에서 그대로 닫습니다'
+        : `보유 연장이 켜져 있습니다: 순수익(수수료·펀딩 반영)·추세·청산 여유가`
+          + ` 모두 증거로 확인되면 최대 ${Math.round(hx.absoluteMaxHoldMs / 3_600_000)}시간까지`
+          + ' 연장합니다. 증거가 없거나 낡으면 연장하지 않고 한도에서 닫습니다.'
+          + ` 승인 시각(${new Date(act.approvedAtMs as number).toISOString()}) **전에** 연`
+          + ' 포지션에는 적용되지 않습니다';
     const declaredHold = holdH == null
       ? '계약에 최대 보유 한도가 없습니다'
       : auth.capabilities.timeExit
-        ? `계약이 선언한 최대 보유 ${holdH}시간을 전용 종료 권한이 읽어 시간 청산을 돌립니다`
+        ? `계약이 선언한 최대 보유 ${holdH}시간을 전용 종료 권한이 읽어 시간 청산을 돌립니다.`
+          + ` ${extendNote}`
         : `계약은 최대 보유 ${holdH}시간을 선언하지만 청산 경로가 그 값을 읽지 않습니다`;
 
     out.push({
@@ -333,7 +363,10 @@ function contractRows(baseStrategyIds: Set<string>, open: readonly OpenCombo[]):
  *   "표를 정말 읽는가"를 바깥에서 확인할 수 있다. 이름만 보는 검사는
  *   손으로 적은 목록을 잡지 못한다(실제로 그 변이가 새 나갔다).
  */
-export function exitCoverage(open: readonly OpenCombo[] = OPEN_COMBOS): ExitCoverage[] {
+export function exitCoverage(
+  open: readonly OpenCombo[] = OPEN_COMBOS,
+  activationEnv: HoldExtensionActivationEnv | null = null,
+): ExitCoverage[] {
   const base = STRATEGIES
     .filter(s => s.executionReady)
     .map(s => ({
@@ -347,12 +380,16 @@ export function exitCoverage(open: readonly OpenCombo[] = OPEN_COMBOS): ExitCove
       contractLabel: '기본 예약 (실행 계약 없음)',
       ...(BY_MONITOR[s.id] ?? UNDECLARED),
     }));
-  return [...base, ...contractRows(new Set(base.map(b => b.strategyId)), open)];
+  return [...base,
+    ...contractRows(new Set(base.map(b => b.strategyId)), open, activationEnv)];
 }
 
 /** 빈 칸이 있는 전략만 */
-export function exitCoverageGaps(open?: readonly OpenCombo[]): ExitCoverage[] {
-  return exitCoverage(open).filter(c => c.gap != null);
+export function exitCoverageGaps(
+  open?: readonly OpenCombo[],
+  activationEnv: HoldExtensionActivationEnv | null = null,
+): ExitCoverage[] {
+  return exitCoverage(open, activationEnv).filter(c => c.gap != null);
 }
 
 /**
@@ -360,8 +397,11 @@ export function exitCoverageGaps(open?: readonly OpenCombo[]): ExitCoverage[] {
  *
  * **"정상"이라고 적지 않는다.** 안 보는 전략이 하나라도 있으면 그 수를 적는다.
  */
-export function exitCoverageLine(open?: readonly OpenCombo[]): string {
-  const all = exitCoverage(open);
+export function exitCoverageLine(
+  open?: readonly OpenCombo[],
+  activationEnv: HoldExtensionActivationEnv | null = null,
+): string {
+  const all = exitCoverage(open, activationEnv);
   const gaps = all.filter(c => c.gap != null);
   if (all.length === 0) return '실행 경로가 있는 전략이 없습니다';
   // **세는 단위가 전략이 아니라 계약이다.** 같은 전략이 계약에 따라 다른

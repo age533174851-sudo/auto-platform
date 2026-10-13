@@ -184,10 +184,18 @@ const P = {
   cov: 'src/lib/engine/exitCoverage.ts',
   life: 'src/lib/engine/exitLifecycle.ts',
   vpo: 'src/lib/engine/venuePositionOps.ts',
+  hx: 'src/lib/engine/holdExtension.ts',
+  hxr: 'src/lib/engine/holdEvidenceReader.ts',
 };
 
 const CHECK = ['scripts/check-100x-contract.mjs'];
 const CHECK1A = ['scripts/check-execution-profile.mjs'];
+// ★ 보유 연장 검사기도 **게이트에 넣는다.**
+//
+//   넣지 않으면 "라우트가 승인 환경을 넣지 않는다" 같은 **배선** 변이가
+//   새 나간다 — 시험은 환경을 직접 주입하므로 그 변이에 초록으로 남는다.
+//   하네스가 CI보다 좁게 보면 그 차이만큼 거짓 신호가 나온다.
+const CHECK_HX = ['scripts/check-hold-extension.mjs'];
 
 /** 게이트 하나를 돌린다. 통과면 null, 실패면 {name, code, output}. */
 const runGate = (name, cmd, args) => {
@@ -209,6 +217,7 @@ const runGate = (name, cmd, args) => {
 const GATES = [
   ['check-100x-contract', process.execPath, CHECK],
   ['check-execution-profile', process.execPath, CHECK1A],
+  ['check-hold-extension', process.execPath, CHECK_HX],
   ['npm test', 'npm', ['test']],
 ];
 
@@ -989,8 +998,9 @@ const M = [
     s => s.replace("if (resolved.contract.stopPolicy === 'NO_FIXED_SL') {",
                    'if (false) {'), 'RED'],
 
+  // 정본이 줄바꿈과 인자 하나(승인 환경)를 얻었다. **앵커를 옮긴다.**
   ['MUT-N4 커버리지에서 계약 줄을 떼어냄', P.cov,
-    s => s.replace(/return \[\.\.\.base, \.\.\.contractRows\([\s\S]*?\)\];/,
+    s => s.replace(/return \[\.\.\.base,[\s\S]*?contractRows\([\s\S]*?\)\];/,
                    'return base;'), 'RED'],
 
   // ★ 앵커를 **계약 줄 쪽**으로 좁힌다. 예전 앵커
@@ -2396,6 +2406,84 @@ const M = [
     'RED'],
 
   // ── 과도 검출 대조군 (GREEN이어야 함) ──
+  // ══════════════════════════════════════════════════════════
+  // ⑥ 보유 연장 — **늦추기만 한다**는 계약을 깨 본다
+  // ══════════════════════════════════════════════════════════
+  //
+  // 이 묶음이 지키는 것은 수익성이 아니다. 연장이 ① 늦추기만 하고
+  // ② 상한을 증거로 뚫지 못하고 ③ 모호함을 전부 닫는 쪽으로 떨어뜨리는지
+  // 하나씩 깨뜨려 본다. 하나라도 새 나가면 그 보호는 지켜지는 것이 아니라
+  // 아무도 안 보는 것이다.
+  ['HX1  절대 상한 검사 제거 (무한 연장)', P.hx,
+    s => s.replace('  if (held >= p.absoluteMaxHoldMs) {', '  if (false) {')],
+  ['HX2  손실 포지션 문턱 제거 (지는 자리도 연장)', P.hx,
+    s => s.replace('  if (!(net > p.minNetRoePct)) {', '  if (false) {')],
+  ['HX3  추세 UNKNOWN을 통과로 읽음', P.hx,
+    s => s.replace('  if (e.trendAlive !== true) {', '  if (e.trendAlive === false) {')],
+  ['HX4  청산 여유 검사 제거', P.hx,
+    s => s.replace('  if (!(headroom! >= p.minLiquidationHeadroomPct)) {', '  if (false) {')],
+  ['HX5  빈 관측을 통과로 읽음', P.hx,
+    s => s.replace('  if (missing.length > 0) {', '  if (false) {')],
+  ['HX6  수수료를 순수익에서 깎지 않음 (gross로 판단)', P.hx,
+    s => s.replace('  const feeRoePct = i.roundTripFeeRate * 100 * i.leverage;', '  const feeRoePct = 0;')],
+  ['HX7  펀딩 부호 뒤집기 (낸 비용을 수익으로)', P.hxr,
+    s => s.replace('    if (usable) fundingPaidQuote = -sum;', '    if (usable) fundingPaidQuote = sum;')],
+  ['HX8  수수료를 왕복이 아니라 편도로 셈', P.hxr,
+    s => s.replace('  const roundTripFeeRate = taker == null ? null : taker * 2;',
+      '  const roundTripFeeRate = taker == null ? null : taker;')],
+  ['HX9  고점을 gross로 셈 (가짜 반납)', P.hx,
+    s => s.replace('  const peakRaw = best == null ? null : netRoeOf({ ...common, price: best });',
+      '  const peakRaw = best == null ? null : netRoeOf({ ...common, price: best, roundTripFeeRate: 0, slippageAllowancePct: 0 });')],
+  ['HX10 선언 안 된 계약에도 연장을 엶', P.hx,
+    s => s.replace('  return POLICIES[`${pid}/${sid}`] ?? null;',
+      "  return POLICIES[`${pid}/${sid}`] ?? POLICIES['MAX_LEV_100X/EXACT_100X'];")],
+  ['HX11 이익 보호(고점 반납) 제거', P.hx,
+    s => s.replace('    if (drop >= required) {', '    if (false) {')],
+  ['HX12 멈춘 봉으로 추세를 말함', P.hxr,
+    s => s.replace('  const barsFresh = step != null && lastOpen != null',
+      '  const barsFresh = true || (step != null && lastOpen != null)')],
+  ['HX13 추세를 종가 한 조건만으로 판단', P.hx,
+    s => s.replace('  const trendAlive = (last - maNow) * dir > 0 && (maNow - maPrev) * dir > 0;',
+      '  const trendAlive = (last - maNow) * dir > 0;')],
+  // 정본이 옮겨갔다(관문이 생겼다). **변이를 지우지 않고 새 자리로 옮긴다.**
+  ['HX14 승인 전에도 증거를 읽음 (매 주기 거래소 조회)', P.xrun,
+    s => s.replace('  if (decision.authorized && hxGate != null && hxGate.policy != null) {',
+      '  if (hxGate != null && hxGate.policy != null) {')],
+  ['HX15 ATR 노이즈 바닥 제거', P.hx,
+    s => s.replace('    required = Math.max(peak * p.givebackFraction, atrFloor);',
+      '    required = peak * p.givebackFraction;')],
+  ['HX16 펀딩 종류 필터 제거 (수수료까지 펀딩으로)', P.hxr,
+    s => s.replace("      if (String(row?.incomeType) !== 'FUNDING') continue;", '      if (false) continue;')],
+  ['HX17 펀딩 줄 하나를 못 읽어도 부분합을 씀', P.hxr,
+    s => s.replace('      if (v == null) { usable = false; break; }', '      if (v == null) { continue; }')],
+  ['HX18 상한 넘긴 자리도 증거를 읽음', P.xrun,
+    s => s.replace('    const pastCap = (nowMs - candidate.openedAtMs) >= policy.absoluteMaxHoldMs;',
+      '    const pastCap = false;')],
+  ['HX19 연장 거부권을 끊음 (판정은 하고 반영 안 함)', P.xauth,
+    s => s.replace('    if (hx.extend === true) {', '    if (false) {')],
+  ['HX20 봉 고점만 믿고 지금 가격을 무시', P.hx,
+    s => s.replace('  const peak = peakRaw == null ? net : Math.max(peakRaw, net);',
+      '  const peak = peakRaw == null ? net : peakRaw;')],
+  ['HX21 펀딩 종목 필터 제거 (다른 종목의 펀딩을 더함)', P.hxr,
+    s => s.replace("      if (String(row?.symbol ?? '').toUpperCase() !== symbol.toUpperCase()) continue;",
+      '      if (false) continue;')],
+  ['HX22 증거 신선도 검사 제거', P.hx,
+    s => s.replace('  if (age > p.maxEvidenceAgeMs) {', '  if (false) {')],
+  ['HX23 승인 없이도 켜짐 (운영 기본값이 ON이 됨)', P.hx,
+    s => s.replace('  if (!activation.enabled) {', '  if (false) {')],
+  ['HX24 승인 전에 연 포지션에도 소급 적용', P.hx,
+    s => s.replace('  if (opened < (activation.approvedAtMs as number)) {', '  if (false) {')],
+  ['HX25 승인 값 범위 검사 제거 (오타 한 자가 승인이 됨)', P.hx,
+    s => s.replace("  if (!Number.isFinite(asNum) || !(asNum >= MIN_MS) || !(asNum < MAX_MS)) {",
+      '  if (!Number.isFinite(asNum) || !(asNum > 0)) {')],
+  // 배선 변이 — 시험은 환경을 직접 주입하므로 검사기만 잡는다
+  ['HX26 라우트가 승인 환경을 넣지 않음 (조용한 영구 꺼짐)', P.monitor,
+    s => s.replace('            holdExtensionEnv: holdExtensionEnvOf(),', '')],
+  ['HX27 판정 모듈이 환경을 직접 집음 (검사기 탐침이 깨진다)', P.hx,
+    s => s.replace('  const activation = judgeHoldExtensionActivation(i?.env);',
+      '  const activation = judgeHoldExtensionActivation(i?.env'
+      + ' ?? { EXACT100X_HOLD_EXTENSION_APPROVED_AT: process.env.EXACT100X_HOLD_EXTENSION_APPROVED_AT });')],
+
   ['OK1 주석 한 줄 추가', P.sizing, s => `// 대조군\n${s}`, 'GREEN'],
   // **대조군은 정말로 중립이어야 한다.**
   //

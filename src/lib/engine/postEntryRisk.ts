@@ -249,8 +249,13 @@ const blank = (
  * LONG은 청산가가 **아래**, SHORT는 **위**다. 방향이 반대로 나오면
  * 이미 지난 것이므로 음수가 되고, **그 음수를 그대로 돌려준다** —
  * 0으로 깎으면 "닿았다"가 "여유 없음"이 되어 사실이 흐려진다.
+ *
+ * ★ 내보내는 이유: 보유 연장 증거(`holdEvidenceReader`)도 같은 거리를
+ *   쓴다. 거기서 다시 적으면 "LONG은 아래"라는 부호 판단이 두 벌이 되고,
+ *   한쪽만 고쳐지는 순간 한 경로가 **이미 청산을 지난 포지션을 여유
+ *   있다고 읽는다.**
  */
-function headroomPct(
+export function headroomPct(
   side: 'LONG' | 'SHORT', mark: number, liq: number,
 ): number | null {
   if (!(mark > 0)) return null;

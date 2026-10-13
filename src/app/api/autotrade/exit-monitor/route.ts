@@ -814,7 +814,18 @@ async function runLifecycleSweep(
   candidates: number; acted: number; skipped: any[];
   deferred: any[]; deferredCount: number;
   /** 전용 종료 권한(Exact100X 시간 청산) 결과. **일반 생명주기와 섞지 않는다** */
-  authority: { candidates: number; acted: number; failed: number; results: any[] };
+  authority: {
+    candidates: number; acted: number; failed: number;
+    /**
+     * **증거로 보유를 연장한 회차 수.** 주문 0건이다.
+     *
+     * `acted`와 섞지 않는다 — 저쪽은 거래소에 주문을 보낸 횟수다.
+     * 연장이 보이지 않으면 "왜 안 닫혔나"를 사람이 로그로 뒤져야 하고,
+     * 그게 바로 이 저장소가 없애려는 수동 절차다.
+     */
+    extended: number;
+    results: any[];
+  };
   /**
    * ⑤B-0/1 — 열려 있는 100배 포지션의 **위험 측정값.** 판단이 아니다.
    *
@@ -849,7 +860,7 @@ async function runLifecycleSweep(
     deferred: [] as any[], deferredCount: 0,
     // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
     //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
-    authority: { candidates: 0, acted: 0, failed: 0, results: [] as any[] },
+    authority: { candidates: 0, acted: 0, failed: 0, extended: 0, results: [] as any[] },
     escape: { recorded: 0, recordFailed: 0, notEligible: 0 },
     // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
     postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
@@ -973,6 +984,12 @@ async function runLifecycleSweep(
     //   일어난다고 주장하지 않는다 — 추가 방어층이고, 반대 포지션은
     //   `reduceOnly`·방향 검증·재조회 대조가 막는다.
     const { exitIntentId } = await import('@/lib/engine/exitIntent');
+    // 승인 환경을 회차 시작에 한 번 읽는다. 후보마다 다시 읽으면 한 회차
+    // 안에서 승인 상태가 갈릴 수 있다.
+    const { holdExtensionEnvFromProcess: hxEnvReader } =
+      await import('@/lib/engine/holdExtensionEnv');
+    const hxEnvForRun = hxEnvReader();
+    const holdExtensionEnvOf = () => hxEnvForRun;
     out.authority.candidates = authorityCandidates.length;
 
     for (const c of authorityCandidates) {
@@ -1060,6 +1077,26 @@ async function runLifecycleSweep(
               prepared = p0.prepared;
               return { code: p0.code, prepared: p0.prepared as any, message: p0.message };
             },
+            // ③-a 보유 연장 증거 — **권한이 청산을 승인한 뒤, 재검증 앞**
+            //
+            //   ★ 승인 뒤인 이유: 아직 4시간이 안 된 회차에는 아예 불리지
+            //     않는다(`runExitAuthority`가 승인 후에만 부른다). 그래서
+            //     이 조회가 매 주기 거래소를 두드리지 않는다.
+            //   ★ 재검증 앞인 이유: ⑤A의 "재검증과 전송 사이 왕복 0"
+            //     불변식을 이 조회가 깨뜨리면 안 된다.
+            //   ★ 못 읽으면 **오늘과 같이 닫는다** — 비는 칸이 null로
+            //     올라가고 판정이 닫는 쪽으로 떨어진다.
+            // ★ 승인 환경은 **라우트가** 넣는다 (엔진은 process.env를 안 본다)
+            holdExtensionEnv: holdExtensionEnvOf(),
+            readHoldEvidence: async () => {
+              const { readHoldEvidence } = await import('@/lib/engine/holdEvidenceReader');
+              return readHoldEvidence({
+                venue: { apiKey: venue.apiKey, apiSecret: venue.apiSecret,
+                  testnet: venue.testnet === true },
+                symbol: c.symbol, side: c.side,
+                openedAtMs: c.openedAt, nowMs: Date.now(),
+              });
+            },
             // ③ 쓰기 직전 재검증 — 아래 전송과의 사이에 await가 없다
             revalidateFence: mayMutate,
             // ④ 전송 — 읽지 않는다
@@ -1073,6 +1110,7 @@ async function runLifecycleSweep(
 
         if (r.attemptedWrite) out.authority.acted += 1;
         if (r.failed) out.authority.failed += 1;
+        if (r.code === 'HOLD_EXTENDED') out.authority.extended += 1;
         out.authority.results.push({
           ...tag, code: r.code, ok: r.ok, failed: r.failed, blocked: r.blocked,
           // ★ **"성공"과 "주문 전송"을 같은 값으로 적지 않는다.**
@@ -1081,6 +1119,27 @@ async function runLifecycleSweep(
           needsReconcile: r.needsReconcile,
           requestedQuantity: r.requestedQuantity,
           heldMs: r.decision?.heldMs ?? null,
+          // ★ **관문**과 **판정**을 따로 적는다.
+          //
+          //   관문  = 물어봐도 되는 자리였는가 (승인 · 소급 금지)
+          //   판정  = 증거를 보고 늦출지 정한 결과
+          //
+          //   꺼져 있으면 판정은 null이고(동작이 예전과 같다는 증거) 관문이
+          //   이유를 들고 있다. 한 칸에 합치면 "승인 안 됨"과 "증거 없음"이
+          //   같은 문장으로 적힌다.
+          holdExtensionGate: r.holdExtensionGate,
+          // ★ 연장을 물어본 회차에만 있다. `null`은 "묻지 않았다"다 —
+          //   "연장하지 않았다"(code: 'CLOSE_*')와 다른 사실이다.
+          holdExtension: r.decision?.holdExtension == null ? null : {
+            code: r.decision.holdExtension.code,
+            policyId: r.decision.holdExtension.policyId,
+            netRoePct: r.decision.holdExtension.netRoePct,
+            peakNetRoePct: r.decision.holdExtension.peakNetRoePct,
+            requiredGivebackRoePct: r.decision.holdExtension.requiredGivebackRoePct,
+            liquidationHeadroomPct: r.decision.holdExtension.liquidationHeadroomPct,
+            absoluteDeadlineMs: r.decision.holdExtension.absoluteDeadlineMs,
+            reason: r.decision.holdExtension.reason,
+          },
           policySource: r.decision?.policySource ?? null,
           policyVersion: r.decision?.policyVersion ?? null,
           leaseFence: r.decision?.leaseIdentity?.fence ?? null,
@@ -1576,7 +1635,14 @@ async function runLifecycleSweep(
   // 오르지 않은 것과 볼 것이 없던 것이 구분되지 않는다. **안 보는 것은
   // '이상 없음'이 아니다.**
   const { exitCoverage, exitCoverageLine } = await import('@/lib/engine/exitCoverage');
-  const coverage = { line: exitCoverageLine(), strategies: exitCoverage() };
+  // ★ 승인 환경을 **여기서** 넣는다. 판정·커버리지 모듈은 `process.env`를
+  //   집지 않는다 — 집으면 검사기가 그 사슬을 컴파일할 수 없다.
+  const { holdExtensionEnvFromProcess } = await import('@/lib/engine/holdExtensionEnv');
+  const hxEnv = holdExtensionEnvFromProcess();
+  const coverage = {
+    line: exitCoverageLine(undefined, hxEnv),
+    strategies: exitCoverage(undefined, hxEnv),
+  };
   for (const g of guardFindings) {
     if (g.verdict.action !== 'CLOSE') continue;
     const d = decisions.find(x => x.tradeId === g.tradeId);

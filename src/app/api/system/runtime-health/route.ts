@@ -65,6 +65,9 @@ export async function GET(req: NextRequest) {
   // 워커가 살아 있는 것과 청산 감시가 도는 것은 **다른 사실이다.**
   // 2026-08-03부터 다섯 달 동안 워커는 멀쩡했고 청산 감시만 죽어 있었다.
   const { exitCoverage, exitCoverageLine } = await import('@/lib/engine/exitCoverage');
+  // 승인 환경은 **라우트가** 읽는다 (커버리지 모듈은 process.env를 안 본다)
+  const { holdExtensionEnvFromProcess } = await import('@/lib/engine/holdExtensionEnv');
+  const hxEnvForHealth = holdExtensionEnvFromProcess();
   const { exitMonitorGate } = await import('@/lib/engine/exitMonitorGate');
   const em = await exitMonitorGate(sb);
   let lastRun: any = null;
@@ -227,7 +230,10 @@ export async function GET(req: NextRequest) {
       //
       // 그 사실이 어디에도 안 적히면 화면은 "청산 감시 정상"만 보여준다.
       // **안 보는 것은 이상 없음이 아니다.**
-      coverage: { line: exitCoverageLine(), strategies: exitCoverage() },
+      coverage: {
+        line: exitCoverageLine(undefined, hxEnvForHealth),
+        strategies: exitCoverage(undefined, hxEnvForHealth),
+      },
       // 밀렸다고 바로 막지는 않는다. 막는 순간은 이 값이 true가 될 때다.
       blocksEntry: em.blockEntry,
       sinceSec: em.sinceSec,

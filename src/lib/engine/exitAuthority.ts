@@ -32,6 +32,10 @@
 // 적지 않는다.**
 
 import { resolveExitPolicy, type ResolvedExitPolicy } from './exitPolicy';
+import {
+  decideHoldExtension,
+  type HoldEvidence, type HoldExtensionDecision, type HoldExtensionPolicy,
+} from './holdExtension';
 import type { ExecutionIdentity } from './managedPosition';
 
 /**
@@ -56,6 +60,14 @@ export type ExitAuthorityCode =
   | 'OPENED_AT_UNUSABLE'
   /** 아직 때가 아니다 */
   | 'POLICY_NOT_DUE'
+  /**
+   * 한도에 도달했고 다른 관문도 모두 통과했지만, **증거가 있어 늦췄다.**
+   *
+   * `POLICY_NOT_DUE`와 섞지 않는다 — 저쪽은 "아직 때가 아니다"이고
+   * 이쪽은 "때가 됐는데 연장 조건을 증거로 확인했다"다. 같은 코드로
+   * 적으면 운영자가 연장이 일어났다는 사실 자체를 볼 수 없다.
+   */
+  | 'HOLD_EXTENDED'
   /** 거래소 포지션을 읽지 못했다. **flat이 아니다** */
   | 'POSITION_READ_FAILED'
   /** 거래소에 포지션이 없다 — 보낼 주문이 없다 */
@@ -189,6 +201,14 @@ export interface ExitAuthorityDecision {
   policy: ResolvedExitPolicy | null;
   /** 보유 경과(ms). 못 재면 null */
   heldMs: number | null;
+  /**
+   * 보유 연장 판정. **연장을 물어본 회차에만 있다.**
+   *
+   * `null`은 "연장을 묻지 않았다"다 — 때가 되지 않았거나, 앞 관문에서
+   * 막혔거나, 호출부가 증거를 넣지 않았다는 뜻이다. "연장하지 않았다"와
+   * 다르다(그쪽은 `code: 'CLOSE_*'`로 적힌다).
+   */
+  holdExtension: HoldExtensionDecision | null;
 }
 
 /**
@@ -224,6 +244,16 @@ export interface ExitAuthorityInput {
    * 여러 `Date.now()`로 갈라지면 경계에서 답이 흔들린다.
    */
   nowMs: number;
+  /**
+   * 보유 연장을 물어볼 것인가. **없으면 묻지 않는다 — 그것이 기본값이다.**
+   *
+   * 이 칸이 비어 있으면 이 함수의 동작은 연장 기능이 없던 때와 글자
+   * 그대로 같다. 호출부가 증거를 모아 넣을 때만 ⑩이 돈다.
+   */
+  holdExtension?: {
+    policy: HoldExtensionPolicy | null;
+    evidence: HoldEvidence | null;
+  } | null;
 }
 
 const base = (i: ExitAuthorityInput, policy: ResolvedExitPolicy | null, heldMs: number | null)
@@ -243,6 +273,8 @@ const base = (i: ExitAuthorityInput, policy: ResolvedExitPolicy | null, heldMs: 
   policyVersion: policy?.policyVersion ?? null,
   policy,
   heldMs,
+  // 연장을 물어본 회차에만 채운다. 기본은 "묻지 않았다"다.
+  holdExtension: null,
 });
 
 const deny = (
@@ -276,6 +308,11 @@ const num = (v: unknown): number | null => {
  *   ⑦ 거래소가 지금 뭐라고 답하는가
  *   ⑧ 그것이 내가 아는 그 포지션인가
  *   ⑨ 닫을 수량이 얼마인가
+ *   ⑩ **그래도 늦출 증거가 있는가**  (물어본 회차에만)
+ *
+ * ⑩이 **맨 끝인 이유**: 연장은 "닫아도 되는가"에 대한 거부권일 뿐이고,
+ * 다른 관문을 대신하지 않는다. 앞에 두면 임차도 없고 수량도 못 읽는
+ * 자리가 "연장됐다"로 적혀, 못 읽었다는 사실이 수익 판정에 가려진다.
  *
  * ⑥이 ⑦보다 앞인 이유: 임차가 남의 것이면 거래소를 **읽을 이유도** 없다.
  * ⑦이 ⑨보다 앞인 이유: 닫을 수량은 **지금 관측한 노출**이지 진입 수량이
@@ -410,6 +447,40 @@ export function decideExitAuthority(i: ExitAuthorityInput): ExitAuthorityDecisio
     return deny(i, 'QUANTITY_UNUSABLE',
       `거래소가 답한 수량이 ${String(obs.qty)}입니다 — 닫을 양을 정할 수 없습니다`,
       policy, heldMs);
+  }
+
+  // ── ⑩ 그래도 늦출 증거가 있는가 ──
+  //
+  // **이 자리에서만 연장이 가능하다.** 위 ①~⑨를 전부 통과한 뒤,
+  // 즉 "지금 닫아도 된다"가 확정된 다음이다. 그래서 연장은 종료 권한을
+  // 넓히지 않는다 — 좁히기만 한다(늦춤 = 이번 회차에 보내지 않음).
+  //
+  // ★ 묻지 않으면 아무 일도 없다. `holdExtension`이 비어 있으면 아래
+  //   블록 전체가 건너뛰어지고, 동작은 연장 기능이 없던 때와 같다.
+  if (i.reason === 'TIME_EXIT' && i.holdExtension != null) {
+    const hx = decideHoldExtension({
+      policy: i.holdExtension.policy,
+      evidence: i.holdExtension.evidence,
+      side: pid.side,
+      heldMs,
+      nowMs: now,
+    });
+    if (hx.extend === true) {
+      return {
+        ...deny(i, 'HOLD_EXTENDED', hx.reason, policy, heldMs),
+        holdExtension: hx,
+      };
+    }
+    // 연장하지 않는다 — 아래 청산으로 내려간다. **판정은 남긴다**:
+    // 왜 늦추지 않았는지가 기록에 없으면 운영자가 이유를 물을 수 없다.
+    return {
+      ...base(i, policy, heldMs),
+      authorized: true, code: 'AUTHORIZED', reasonCode: i.reason,
+      requestedAction: 'CLOSE', requestedQuantity: qty,
+      holdExtension: hx,
+      reason: `${policy.reason} 초과 (보유 ${Math.round(heldMs / 1000)}초) — 축소 전용 청산`
+        + ` · 연장 안 함(${hx.code}): ${hx.reason}`,
+    };
   }
 
   return {
