@@ -566,47 +566,12 @@ export async function GET(req: NextRequest) {
     observedAtMs: cronStartedAt,
   });
 
+  // 표를 읽고 쓰는 코드는 `exitLeaseStore`에 하나만 둔다 — 긴급 종료도
+  // **같은 줄**을 잡아야 둘이 동시에 같은 포지션을 닫지 않는다.
+  const { exitLeaseStore, exitFenceChecker } = await import('@/lib/engine/exitLeaseStore');
   const lease = await acquireExitLease({
     me: holder, nowMs: cronStartedAt, ttlMs: LEASE_TTL_MS,
-    store: {
-      read: async () => {
-        try {
-          const { data, error } = await (sb as any)
-            .from('exit_monitor_lease').select('holder, fence, expires_at').eq('id', 1).maybeSingle();
-          if (error) {
-            if (/does not exist|schema cache|relation/i.test(String(error.message))) {
-              return { missingTable: true };
-            }
-            return {}; // row: undefined → **못 읽었다.** 비어 있는 것이 아니다
-          }
-          return { row: data == null ? null : {
-            holder: String((data as any).holder), fence: Number((data as any).fence) || 0,
-            expiresAtMs: Date.parse(String((data as any).expires_at)),
-          } };
-        } catch { return {}; }
-      },
-      insert: async (row) => {
-        const { error } = await (sb as any).from('exit_monitor_lease').insert({
-          id: 1, holder: row.holder, fence: row.fence,
-          acquired_at: new Date(row.acquiredAtMs).toISOString(),
-          expires_at: new Date(row.expiresAtMs).toISOString(),
-        });
-        return { ok: !error, error: error ? String(error.message) : null };
-      },
-      // ★ **본 값을 조건으로 걸어** 쓴다(compare-and-set).
-      //   예전에는 조건 없는 upsert라 두 실행이 같은 fence로 둘 다 주인이 됐다.
-      compareAndSet: async (row, prevFence) => {
-        const { data, error } = await (sb as any).from('exit_monitor_lease')
-          .update({
-            holder: row.holder, fence: row.fence,
-            acquired_at: new Date(row.acquiredAtMs).toISOString(),
-            expires_at: new Date(row.expiresAtMs).toISOString(),
-          })
-          .eq('id', 1).eq('fence', prevFence).select('fence');
-        return { updated: Array.isArray(data) ? data.length : 0,
-          error: error ? String(error.message) : null };
-      },
-    },
+    store: exitLeaseStore(sb),
   });
   if (!lease.granted) {
     // **기다리지 않는다.** 그쪽이 하면 되는 일이다. 거래소 쓰기는 0이다.
@@ -617,16 +582,7 @@ export async function GET(req: NextRequest) {
   const leaseTracked = lease.tracked;
 
   /** 주문을 내기 직전에 다시 묻는다 — 내 울타리가 아직 최신인가 */
-  const stillMine = async (): Promise<boolean> => {
-    if (!leaseTracked) return true;
-    let cur: number | null | undefined = undefined;
-    try {
-      const { data, error } = await (sb as any)
-        .from('exit_monitor_lease').select('fence').eq('id', 1).maybeSingle();
-      if (!error) cur = data == null ? null : Number(data.fence);
-    } catch { /* undefined */ }
-    return fenceStillMine({ myFence, currentFence: cur }).ok;
-  };
+  const stillMine = exitFenceChecker(sb, myFence, leaseTracked);
 
   // 회차를 연다. **돌기 시작했다는 사실부터 남긴다** — 중간에 죽으면
   // finished_at이 비어 있는 줄이 남고, 그게 "돌다 죽었다"의 증거다.

@@ -391,6 +391,19 @@ export function closeModeVerdict(i: {
   mode: 'ONE_WAY' | 'HEDGE' | null | undefined;
   positionSide?: 'LONG' | 'SHORT' | null;
   error?: string | null;
+  /**
+   * 어느 범위의 판정인가. **기본은 포지션 범위** — 기존 호출부 동작 그대로다.
+   *
+   * `'ACCOUNT'`는 "이 계좌에 자동 청산을 보낼 수 있는 모드인가"만 묻는다.
+   * 그 시점에는 **닫을 포지션을 아직 읽지 않았으므로** 방향을 알 수 없고,
+   * 방향이 없다는 사실로 막으면 계좌 범위 판정이 영원히 실패한다.
+   *
+   * ★ 방향 규칙을 면제하는 것이 **아니다.** 계좌 범위로 통과한 호출부는
+   *   포지션을 읽은 뒤 방향을 반드시 확정해야 한다 — 긴급 종료 경로는
+   *   `killClosePlan`이 수량 부호에서 방향을 정하고, 읽지 못한 수량은
+   *   `BLOCKED_TARGET_UNUSABLE`로 막는다. 규칙은 여전히 한 곳에만 있다.
+   */
+  scope?: 'ACCOUNT' | 'POSITION';
 }): CloseModeVerdict {
   // ── ① 모드를 모르면 보내지 않는다 ──
   if (i?.mode !== 'ONE_WAY' && i?.mode !== 'HEDGE') {
@@ -416,7 +429,8 @@ export function closeModeVerdict(i: {
   // ── ③ 단방향: Binance는 방향을 알아야 한다 ──
   //
   //   Gate는 `auto_size`를 잔여 부호에서 정하므로 방향 인자가 없어도 된다.
-  if (i.exchange === 'binance' && i.positionSide !== 'LONG' && i.positionSide !== 'SHORT') {
+  if (i.scope !== 'ACCOUNT'
+      && i.exchange === 'binance' && i.positionSide !== 'LONG' && i.positionSide !== 'SHORT') {
     return { ok: false, mode: 'ONE_WAY', code: 'NO_DIRECTION', strandsOpenPosition: true,
       message: '닫을 포지션의 방향을 읽지 못해 청산 주문을 보내지 않았습니다 '
         + '— 짐작하면 반대 방향으로 신규 진입이 됩니다.' };

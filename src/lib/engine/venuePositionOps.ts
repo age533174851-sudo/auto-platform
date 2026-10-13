@@ -52,6 +52,32 @@ export async function closeModeGate(
 }
 
 /**
+ * **이 계좌에 자동 청산을 보낼 수 있는 모드인가** (계좌 범위).
+ *
+ * `closeModeGate`와 같은 정본(`closeModeVerdict`)을 쓰지만 **방향을 묻지
+ * 않는다** — 긴급 종료는 포지션을 읽기 **전에** 모드를 확인해야 하기
+ * 때문이다. 순서가 그 반대이면 보호주문을 지운 뒤에 "닫을 수 없다"를
+ * 알게 된다.
+ *
+ * ★ 방향 확인을 건너뛰는 것이 아니다. 통과한 호출부가 포지션을 읽고
+ *   방향을 확정한다(`killClosePlan`이 수량 부호에서 정하고, 못 읽은
+ *   수량은 막는다).
+ */
+export async function accountCloseModeGate(
+  c: VenueCreds,
+): Promise<{ ok: boolean; code: string; mode: 'ONE_WAY' | 'HEDGE' | null; message: string }> {
+  const fa = await import('../exchanges/futuresAdapter');
+  const fx = await import('../exchanges/futuresExec');
+  const pm = await fa.futuresPositionMode(
+    c.exchange as any, c.apiKey, c.apiSecret, c.testnet);
+  const v = fx.closeModeVerdict({
+    exchange: c.exchange, mode: pm.mode as any,
+    positionSide: null, error: pm.error, scope: 'ACCOUNT',
+  });
+  return { ok: v.ok, code: v.code, mode: (v.mode ?? null) as any, message: v.message };
+}
+
+/**
  * 이 오류가 **접수 여부를 모른다**는 뜻인가.
  *
  * 타임아웃·연결 끊김을 "거부됐다"로 적으면 안 나간 것으로 읽혀 같은
