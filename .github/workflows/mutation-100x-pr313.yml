@@ -140,18 +140,42 @@ jobs:
               expected_noops = s.count('— 적용 안 됨(의도대로)')
               if vals[0]+vals[2]+vals[4]+expected_noops!=count:
                   errors.append(f'{i}: coverage mismatch count={count}, counters={vals}, expected_noop={expected_noops}')
-              results.append((i,count,vals))
+              # ── 전수 건수를 여기에 적지 않는다 ──
+              #
+              #   예전에는 `if total_count != 457`이었다. 그래서 하네스에
+              #   변이를 **더 넣은** PR이 빨개졌다(#317이 HX1~HX27을 넣어
+              #   484가 되자 샤드 8개는 전부 통과했는데 합산만 실패했다).
+              #   숫자가 두 곳에 있으면 언젠가 갈린다 — 이 저장소의 상습 고장이다.
+              #
+              #   그래서 목록 길이는 **하네스가 적은 것을 읽는다.** 샤드 로그의
+              #   `전체 N건 중 부분 실행`이 그 값이다. 숫자를 맞추는 일이
+              #   사람 손에서 사라진다.
+              cat = re.search(r'전체 (\d+)건 중 부분 실행', s)
+              if not cat:
+                  errors.append(f'{i}: catalog size missing')
+                  continue
+              # 목록 길이를 하네스에서 읽으므로, `--only`로 목록을 **줄여 놓고**
+              # 그 줄어든 수와 맞추는 것도 통과해 버린다. 하네스는 일부만 돌면
+              # 요약에 `--only`를 적는다 — 그것이 보이면 전수가 아니다.
+              if '--only' in s:
+                  errors.append(f'{i}: partial run (--only) is not a full sweep')
+              results.append((i,count,vals,int(cat.group(1))))
           total_count = sum(x[1] for x in results)
-          # 커밋의 전수 목록은 457건. 451이라는 과거 수치에 맞춰 표본을 버리지 않는다.
-          if total_count != 457:
-              errors.append(f'expected 457 unique mutations, observed {total_count}')
+          # 샤드 8개가 **같은 목록**을 보고 나눠 돌았는가. 하나라도 다르면
+          # 합계가 맞아떨어져도 같은 전수를 돈 것이 아니다.
+          catalogs = sorted({x[3] for x in results})
+          catalog = catalogs[0] if len(catalogs) == 1 else None
+          if catalog is None:
+              errors.append(f'shards disagree on catalog size: {catalogs}')
+          elif total_count != catalog:
+              errors.append(f'expected {catalog} unique mutations (harness catalog), observed {total_count}')
           if os.environ['SHARD_RESULT'] != 'success':
               errors.append(f'shard jobs outcome: {os.environ["SHARD_RESULT"]}')
-          for i,n,v in results:
-              print(f'SHARD {i}: total {n}, detected {v[0]}, equiv {v[2]}, control {v[4]}, miss {v[1]}, noop {v[3]}, overdetect {v[5]}')
-          print(f'ALL SHARDS: {len(results)}/8, TOTAL {total_count}/457, TARGET_SHA={os.environ["TARGET_SHA"]}')
+          for i,n,v,c in results:
+              print(f'SHARD {i}: total {n}, detected {v[0]}, equiv {v[2]}, control {v[4]}, miss {v[1]}, noop {v[3]}, overdetect {v[5]}, catalog {c}')
+          print(f'ALL SHARDS: {len(results)}/8, TOTAL {total_count}/{catalog if catalog is not None else catalogs}, TARGET_SHA={os.environ["TARGET_SHA"]}')
           if errors:
               for e in errors: print('FAIL:', e, file=sys.stderr)
               sys.exit(1)
-          print('PASS: 457 complete, miss 0, undecidable 0, overdetect 0, complete clean evidence')
+          print(f'PASS: {catalog} complete, miss 0, undecidable 0, overdetect 0, complete clean evidence')
           PY
