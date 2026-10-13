@@ -785,7 +785,16 @@ export default function ExchangeConnectPage() {
               )}
               {(diag.checks||[]).map((c:any,i:number)=>(
                 <div key={i} style={{ padding:'5px 0', borderBottom:i<diag.checks.length-1?`1px solid ${T.border}`:'none' }}>
-                  <div style={{ color: c.ok?T.txt:T.red, fontSize:11 }}>{c.ok?'✅':'❌'} {c.name}</div>
+                  {/* **확인하지 못한 것을 ❌로 적지 않는다.** 서버가
+                      status로 셋을 가려서 준다 — 틀린 것과 모르는 것은
+                      다음 할 일이 전혀 다르다. status가 없는 옛 응답은
+                      ok로 떨어뜨린다(모르는 것을 통과로 만들지 않는다). */}
+                  <div style={{ fontSize:11, color:
+                    c.status==='PASS'||(c.status==null&&c.ok) ? T.txt
+                      : c.status==='UNKNOWN' ? T.ylw : T.red }}>
+                    {c.status==='PASS'||(c.status==null&&c.ok) ? '✅'
+                      : c.status==='UNKNOWN' ? '⚠️' : '❌'} {c.name}
+                  </div>
                   {/* **오류 원문을 자르지 않는다.** 예전에는 한 줄로 잘라서
                       정작 필요한 거래소 메시지가 '…'로 사라졌다 — 진단을
                       돌려도 원인을 알 수 없었다. */}

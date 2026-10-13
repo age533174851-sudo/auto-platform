@@ -7,12 +7,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { binanceTestnetDiagnoseGate } from '@/lib/engine/testnetReadiness';
+import {
+  positionModeVerdict, isolationVerdict, withdrawalEvidence,
+  overallDiagnoseVerdict, statusToOk, type DiagnoseStatus,
+} from '@/lib/engine/testnetDiagnoseVerdict';
+import { overrideOf } from '@/lib/strategies/profilePreset';
 import { testFuturesConnection, getFuturesBalance, getFuturesPositions, getFuturesTicker, getSymbolFilters } from '@/lib/exchanges/binanceFutures';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-interface Check { name: string; ok: boolean; detail: string; ms: number; }
+// ★ `ok` 한 칸으로는 "확인했고 틀리다"와 "확인하지 못했다"를 가를 수
+//   없다. 둘은 다음 할 일이 완전히 다르다. 그래서 `status`를 더한다.
+//   `ok`는 옛 화면을 위해 남기고 **`status === 'PASS'`에서만 참**이다.
+interface Check {
+  name: string; ok: boolean; detail: string; ms: number;
+  status?: DiagnoseStatus; code?: string;
+}
 
 export async function POST(req: NextRequest) {
   let body: any;
@@ -60,8 +71,16 @@ export async function POST(req: NextRequest) {
   const checks: Check[] = [];
   const run = async (name: string, fn: () => Promise<{ ok: boolean; detail: string }>) => {
     const t0 = Date.now();
-    try { const r = await fn(); checks.push({ name, ...r, ms: Date.now() - t0 }); }
-    catch (e: any) { checks.push({ name, ok: false, detail: e?.message || '오류', ms: Date.now() - t0 }); }
+    try {
+      const r = await fn();
+      checks.push({ name, ...r, ms: Date.now() - t0, status: r.ok ? 'PASS' : 'FAIL' });
+    }
+    catch (e: any) {
+      // **던진 것은 답을 못 받은 것이다.** 거래소가 거절한 것(FAIL)과
+      // 구별한다 — 전자는 다시 물어봐야 하고 후자는 설정을 고쳐야 한다.
+      checks.push({ name, ok: false, detail: e?.message || '오류',
+        ms: Date.now() - t0, status: 'UNKNOWN', code: 'PROBE_THREW' });
+    }
   };
 
   // 1. API 연결과 선물 거래 가능 여부를 분리한다.
@@ -79,6 +98,8 @@ export async function POST(req: NextRequest) {
       ? '거래소와 저장된 거래 권한이 일치합니다 (실제 주문은 내지 않았습니다)'
       : '선물 거래 권한을 확인하지 못했습니다 — 진단 성공을 거래 가능으로 읽지 않습니다',
     ms: 0,
+    status: exchangeCanTrade && conn.perm_trading === true ? 'PASS' : 'FAIL',
+    code: 'TRADE_PERMISSION',
   });
   // 2. 잔고 조회
   await run('잔고 조회', async () => {
@@ -138,6 +159,9 @@ export async function POST(req: NextRequest) {
     checks.push({
       name: '조건부 주문 지원 (STOP_MARKET)',
       ok: hasStop,
+      // 목록을 못 받은 것은 "지원 안 함"이 아니다.
+      status: here.ok ? (hasStop ? 'PASS' : 'FAIL') : 'UNKNOWN',
+      code: here.ok ? (hasStop ? 'STOP_SUPPORTED' : 'STOP_UNSUPPORTED') : 'STOP_UNKNOWN',
       detail: here.ok
         ? (hasStop
             ? `받습니다 · ${here.orderTypes.length}종`
@@ -150,8 +174,83 @@ export async function POST(req: NextRequest) {
   for (const c of deep.checks) {
     // 위에서 이미 본 항목은 건너뛴다
     if (c.path === '/fapi/v1/time' || c.path === '/fapi/v2/balance') continue;
-    checks.push({ name: c.name, ok: c.ok, detail: c.detail, ms: 0 });
+    checks.push({ name: c.name, ok: c.ok, detail: c.detail, ms: 0,
+      status: c.ok ? 'PASS' : 'FAIL', code: `PROBE:${c.path}` });
   }
+
+  // ══════════ 9~11. Exact100X 실측 전제 — 읽기만 한다 ══════════
+  //
+  // 왜 1~8번으로 부족한가: 1~8번이 전부 통과해도 **계좌가 양방향이거나
+  // 교차 마진이거나 배율이 100이 아니면** Exact100X는 의도대로 돌지
+  // 않는다. 그리고 그 셋은 주문을 내 보기 전에 알 수 있다.
+  //
+  // ★ **설정을 바꾸지 않는다.** 모드·배율·마진 타입의 변경 API를 부르지
+  //   않는다. 진단이 설정을 고쳐 놓으면 "진단했더니 통과"가 진단이 만든
+  //   결과가 되고, 사람은 원래 상태를 영영 못 본다.
+
+  // ── 9. 포지션 모드 ──
+  {
+    const { getFuturesPositionMode } = await import('@/lib/exchanges/binanceFutures');
+    const t0 = Date.now();
+    const m = await getFuturesPositionMode(apiKey, secret, testnet)
+      .catch((e: any) => ({ mode: null as null, error: e?.message || String(e) }));
+    const v = positionModeVerdict(m);
+    checks.push({
+      name: '포지션 모드 (단방향)', ok: statusToOk(v.status), detail: v.reason,
+      ms: Date.now() - t0, status: v.status, code: `POSITION_MODE:${v.code}`,
+    });
+  }
+
+  // ── 10. 격리 · 배율 ──
+  //
+  //   요구 배율을 여기에 적지 않는다. 실행 프로필(`EXACT_100X`의
+  //   `MAX_LEV_100X`)이 정본이고 그 값을 읽어 넘긴다 — 숫자를 두 곳에
+  //   두면 표에 적힌 값과 검사하는 값이 갈린다.
+  {
+    const expectedLeverage = overrideOf('MAX_LEV_100X', 'EXACT_100X').leverage;
+    const t0 = Date.now();
+    const { getFuturesSymbolSettings } = await import('@/lib/exchanges/binanceFutures');
+    const st = await getFuturesSymbolSettings(apiKey, secret, testnet, 'BTCUSDT')
+      .catch(() => ({ ok: false, marginType: null, leverage: null,
+        positionAmt: null, error: '설정 조회가 실패했습니다' }));
+    const v = isolationVerdict({
+      read: st.ok === true,
+      marginType: st.marginType,
+      leverage: st.leverage,
+      // 정본에서 못 읽으면 `undefined`가 넘어가고, 판정은 그것을
+      // UNKNOWN으로 떨어뜨린다 — 0으로 메워 "일치"를 만들지 않는다.
+      expectedLeverage: expectedLeverage as number,
+    });
+    checks.push({
+      name: '격리 마진 · 요구 배율 (BTCUSDT)',
+      ok: statusToOk(v.status),
+      detail: v.reason + (st.error ? ` (${st.error})` : ''),
+      ms: Date.now() - t0, status: v.status, code: `ISOLATION:${v.code}`,
+    });
+  }
+
+  // ── 11. 출금 권한의 증거 수준 ──
+  //
+  //   값이 아니라 **증거 수준**을 적는다. TESTNET 등록 경로는 출금
+  //   권한을 거래소에 묻지 않고 상수 false로 적는다. 그 false를 초록으로
+  //   보여 주면 확인한 적 없는 것을 확인했다고 적는 셈이다.
+  //   저장 로직과 스키마는 이번 변경에서 건드리지 않는다.
+  {
+    const v = withdrawalEvidence({
+      testnet, declaredHasWithdrawal: conn.has_withdrawal,
+    });
+    checks.push({
+      name: '출금 비허용 (확인 수준)', ok: statusToOk(v.status), detail: v.reason,
+      ms: 0, status: v.status, code: `WITHDRAWAL:${v.code}`,
+    });
+  }
+
+  // ── 전체 판정 — **모르는 것이 있으면 READY가 아니다** ──
+  //
+  //   예전 응답의 `verdict`는 `successRate === 100 ? 'ready' : …`였다.
+  //   그 식에서는 "확인하지 못함"이 분모만 늘려서 FAIL과 구별되지
+  //   않았다. 다음 할 일이 전혀 다른 둘을 같은 칸에 적던 것이다.
+  const readiness = overallDiagnoseVerdict(checks);
 
   const passed = checks.filter(c => c.ok).length;
   const total = checks.length;
@@ -186,7 +285,13 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     testnet, checks, passed, total, successRate,
+    // 옛 칸은 **그대로 둔다** — 화면이 이것을 읽고 있고, 이 변경의
+    // 목적은 판정을 더 정확히 적는 것이지 화면을 깨는 것이 아니다.
     verdict: successRate === 100 ? 'ready' : successRate >= 60 ? 'partial' : 'failed',
+    // ★ 새 정본. READY는 **FAIL 0 · UNKNOWN 0**일 때만 나온다.
+    readiness,
+    // 기계가 읽는 항목별 코드. 문구가 바뀌어도 이것은 안 바뀐다.
+    itemCodes: checks.map(c => ({ name: c.name, status: c.status ?? 'UNKNOWN', code: c.code ?? null })),
     // TESTNET 호스트만 공개한다. API 키 일부라도 응답에 싣지 않는다.
     host: deep.host,
     stopSupport,

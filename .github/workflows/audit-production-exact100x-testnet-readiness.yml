@@ -26,9 +26,25 @@
 #
 # 왜 이렇게 좁게 트리거하나
 # ─────────────────────────
-#   · `pull_request` 없음      — PR 검토 중 운영 DB 접속 0.
-#   · `workflow_dispatch` 없음 — 사람이 아무 때나 운영 DB를 두드리는 문을 만들지 않는다.
-#   · `push` + 이 파일 경로    — 이 파일이 main에 들어오는 그 순간 한 번만 돈다.
+#   · `pull_request` 없음   — PR 검토 중 운영 DB 접속 0.
+#   · `push` + 이 파일 경로 — 이 파일이 main에 들어오는 그 순간 한 번만 돈다.
+#
+# 수동 실행을 **왜 결국 열었나**
+# ──────────────────────────────
+# 처음에는 `workflow_dispatch`를 일부러 두지 않았다 — "사람이 아무 때나
+# 운영 DB를 두드리는 문을 만들지 않는다". 그 판단의 대가가 드러났다:
+# 최신 상태를 보려면 **이 파일을 건드리는 커밋을 밀어야** 했다. 즉
+# "읽기만 하는 조회"를 하려고 main에 커밋이 쌓인다. 그래서 상태가 3일
+# 묵은 채로 판단에 쓰였다.
+#
+# 문을 열면서 **권한은 넓히지 않는다.** 세 겹으로 좁힌다:
+#   ① `workflow_dispatch`는 이미 저장소 쓰기 권한자만 부를 수 있다
+#   ② 거기에 **저장소 소유자**만으로 한 번 더 좁힌다
+#   ③ 오타·오클릭으로 돌지 않게 확인 문구를 **그대로** 입력받는다
+#
+# 비밀정보는 새로 늘지 않는다 — `SUPABASE_DB_URL` 하나를 그대로 쓰고,
+# 값은 어디에도 출력하지 않는다. 더 강한 문(Environment 필수 승인자)은
+# 저장소 설정이 필요해 여기서 확인할 수 없으므로 코드로 걸지 않는다.
 name: audit-production-exact100x-testnet-readiness
 
 on:
@@ -36,6 +52,12 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/audit-production-exact100x-testnet-readiness.yml'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '읽기 전용 운영 감사를 실행하려면 READ-ONLY-AUDIT 를 그대로 입력하세요'
+        required: true
+        default: ''
 
 concurrency:
   group: audit-production-exact100x-testnet-readiness
@@ -54,6 +76,28 @@ jobs:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
 
     steps:
+      # ── 수동 실행이면 누가·무엇을 확인하고 넘긴다 ──
+      #
+      #   `push`로 돈 경우에는 이 단계가 아무것도 하지 않는다.
+      #   **실패하면 DB 접속 단계로 가지 않는다.**
+      - name: 수동 실행 관문 (소유자 · 확인 문구)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${ACTOR}" != "${OWNER}" ]; then
+            echo "::error::저장소 소유자만 이 감사를 수동 실행할 수 있습니다"
+            exit 1
+          fi
+          if [ "${CONFIRM}" != "READ-ONLY-AUDIT" ]; then
+            echo "::error::확인 문구가 일치하지 않습니다 — READ-ONLY-AUDIT 를 그대로 입력하세요"
+            exit 1
+          fi
+          echo "수동 실행 승인 (소유자 확인 · 확인 문구 일치)"
+
       - name: DB 접속 정보 확인
         run: |
           if [ -z "${SUPABASE_DB_URL}" ]; then
@@ -104,6 +148,31 @@ jobs:
            ORDER BY 1, 2;
 
           \echo ''
+          \echo '=== 2b. 칸이 실제로 있는가 (없는 칸의 NULL을 0으로 읽지 않기 위해) ==='
+          -- 아래 분해는 `to_jsonb(...)->>'...'`로 칸이 없어도 죽지 않게
+          -- 적었다. 그런데 **칸이 없어서 NULL인 것**과 **있는데 비어
+          -- 있는 것**은 완전히 다른 사실이다. 그래서 먼저 존재를 적는다.
+          SELECT c.col,
+                 (EXISTS (SELECT 1 FROM information_schema.columns ic
+                           WHERE ic.table_schema='public' AND ic.table_name=c.tbl
+                             AND ic.column_name=c.col)) AS present,
+                 c.tbl AS table_name
+            FROM (VALUES
+                   ('live_orders','status'),
+                   ('live_orders','strategy_id'),
+                   ('live_orders','strategy_account_id'),
+                   ('live_orders','execution_profile_id'),
+                   ('live_orders','filled_qty'),
+                   ('autotrade_schedules','execution_profile_id'),
+                   ('autotrade_schedules','execution_preset_id'),
+                   ('autotrade_schedules','execution_contract_version'),
+                   ('autotrade_schedules','margin_allocation_pct'),
+                   ('autotrade_schedules','last_run_at'),
+                   ('autotrade_schedules','last_result')
+                 ) AS c(tbl,col)
+           ORDER BY c.tbl, c.col;
+
+          \echo ''
           \echo '=== 3. Exact100X 주문 장부 — mode별 ==='
           SELECT mode,
                  count(*)                                                    AS orders,
@@ -112,6 +181,94 @@ jobs:
             FROM public.live_orders
            GROUP BY mode
            ORDER BY mode;
+
+          \echo ''
+          \echo '=== 3b. 주문을 status로 분해 (136건이 무엇이었나) ==='
+          -- 합계만 보면 "주문이 136건 있었다"까지만 알 수 있다. 그중
+          -- 몇 건이 거래소까지 갔는지는 **status가 말한다** — INTENT만
+          -- 쌓인 것과 체결된 것은 완전히 다른 사실이다.
+          SELECT mode, status,
+                 count(*) AS orders,
+                 count(*) FILTER (WHERE execution_profile_id = 'MAX_LEV_100X') AS exact100x,
+                 max(created_at) AS newest
+            FROM public.live_orders
+           GROUP BY mode, status
+           ORDER BY mode, orders DESC;
+
+          \echo ''
+          \echo '=== 3c. 주문을 전략으로 분해 (칸이 없으면 NULL로 나온다 — 2b를 함께 보라) ==='
+          -- `strategy_id`는 이 표에 없을 수 있다(041은 `strategy_account_id`를
+          -- 더했다). 직접 적으면 칸이 없을 때 **감사 전체가 실패한다.**
+          -- `to_jsonb`로 읽으면 없는 칸은 NULL이 되고 조회는 산다.
+          -- `strategy_id`는 'scalp' 같은 **전략 이름**이라 식별정보가 아니다.
+          -- `strategy_account_id`는 내부 계정 식별자이므로 **값을 찍지 않고**
+          -- 비었는지만 적는다.
+          SELECT to_jsonb(lo) ->> 'strategy_id'                        AS strategy_id,
+                 ((to_jsonb(lo) ->> 'strategy_account_id') IS NOT NULL) AS has_strategy_account,
+                 lo.mode,
+                 count(*) AS orders,
+                 count(*) FILTER (WHERE lo.execution_profile_id = 'MAX_LEV_100X') AS exact100x
+            FROM public.live_orders lo
+           GROUP BY 1, 2, 3
+           ORDER BY orders DESC
+           LIMIT 30;
+
+          \echo ''
+          \echo '=== 3d. Exact100X 주문·체결만 따로 ==='
+          -- 주문이 나간 것과 **체결된 것**은 다르다. 체결 수량이 0보다
+          -- 큰 줄만 따로 센다.
+          SELECT mode,
+                 count(*)                                                      AS exact100x_orders,
+                 count(*) FILTER (WHERE coalesce(filled_qty, 0) > 0)           AS with_fill,
+                 count(*) FILTER (WHERE status = 'FILLED')                     AS status_filled,
+                 min(created_at)                                               AS first_at,
+                 max(created_at)                                               AS newest
+            FROM public.live_orders
+           WHERE execution_profile_id = 'MAX_LEV_100X'
+           GROUP BY mode
+           ORDER BY mode;
+
+          \echo ''
+          \echo '=== 3e. 예약 — Exact100X 조합이 켜져 있는가 ==='
+          -- **이 질문이 빠져 있었다.** 연결도 되고 권한도 맞는데 진입이
+          -- 0건이면, 다음에 볼 곳은 예약이다. 예약이 없거나 꺼져 있으면
+          -- 거래소·키를 아무리 들여다봐도 원인이 거기 없다.
+          --
+          -- 계약 적합성은 `dormantGate`의 열린 조합과 같은 기준으로 센다:
+          --   scalp + MAX_LEV_100X + EXACT_100X + 계약 v2 + TESTNET + 증거금 배정
+          SELECT to_jsonb(sc) ->> 'execution_profile_id'        AS profile_id,
+                 to_jsonb(sc) ->> 'execution_preset_id'         AS preset_id,
+                 to_jsonb(sc) ->> 'execution_contract_version'  AS contract_version,
+                 to_jsonb(sc) ->> 'strategy_id'                 AS strategy_id,
+                 sc.mode,
+                 count(*)                                       AS rows,
+                 count(*) FILTER (WHERE sc.enabled)             AS enabled_rows,
+                 count(*) FILTER (
+                   WHERE (to_jsonb(sc) ->> 'margin_allocation_pct') IS NOT NULL
+                 )                                              AS margin_alloc_set
+            FROM public.autotrade_schedules sc
+           WHERE (to_jsonb(sc) ->> 'execution_profile_id') IS NOT NULL
+           GROUP BY 1, 2, 3, 4, 5
+           ORDER BY rows DESC
+           LIMIT 30;
+
+          \echo ''
+          \echo '=== 3f. 예약 전체 — 실행 모드·활성·최근 실행 (내용은 적지 않는다) ==='
+          -- `last_result`는 자유 문자열이라 **원문을 찍지 않는다.**
+          -- 비었는가 / 뭔가 적혔는가로만 센다.
+          SELECT sc.mode,
+                 count(*)                                            AS rows,
+                 count(*) FILTER (WHERE sc.enabled)                  AS enabled_rows,
+                 count(*) FILTER (
+                   WHERE (to_jsonb(sc) ->> 'last_run_at') IS NOT NULL
+                 )                                                   AS ever_ran,
+                 count(*) FILTER (
+                   WHERE (to_jsonb(sc) ->> 'last_result') IS NOT NULL
+                 )                                                   AS has_last_result,
+                 max((to_jsonb(sc) ->> 'last_run_at')::timestamptz)  AS newest_run
+            FROM public.autotrade_schedules sc
+           GROUP BY sc.mode
+           ORDER BY sc.mode;
 
           \echo ''
           \echo '=== 4. 판정 — 어느 단계에서 막혀 있는가 ==='
@@ -132,7 +289,30 @@ jobs:
               WHERE env = 'TESTNET')                                     AS testnet_escape_samples,
             (SELECT count(*) FROM public.live_orders
               WHERE mode = 'TESTNET' AND execution_profile_id = 'MAX_LEV_100X')
-                                                                         AS testnet_exact100x_orders;
+                                                                         AS testnet_exact100x_orders,
+            -- ── 진입 0건의 **다음 질문**을 여기서 답한다 ──
+            --   예약이 아예 없는가 · 있는데 꺼져 있는가 · 켜져 있는데
+            --   한 번도 안 돌았는가. 셋은 다음 할 일이 전부 다르다.
+            (SELECT count(*) FROM public.autotrade_schedules sc
+              WHERE (to_jsonb(sc) ->> 'execution_profile_id') = 'MAX_LEV_100X')
+                                                                         AS exact100x_schedules,
+            (SELECT count(*) FROM public.autotrade_schedules sc
+              WHERE (to_jsonb(sc) ->> 'execution_profile_id') = 'MAX_LEV_100X'
+                AND sc.enabled)                                          AS exact100x_enabled,
+            (SELECT count(*) FROM public.autotrade_schedules sc
+              WHERE (to_jsonb(sc) ->> 'execution_profile_id') = 'MAX_LEV_100X'
+                AND sc.enabled AND sc.mode = 'TESTNET'
+                AND (to_jsonb(sc) ->> 'execution_preset_id') = 'EXACT_100X'
+                AND (to_jsonb(sc) ->> 'execution_contract_version') = '2'
+                AND (to_jsonb(sc) ->> 'strategy_id') = 'scalp'
+                AND (to_jsonb(sc) ->> 'margin_allocation_pct') IS NOT NULL)
+                                                                         AS exact100x_combo_ok,
+            (SELECT count(*) FROM public.autotrade_schedules sc
+              WHERE (to_jsonb(sc) ->> 'execution_profile_id') = 'MAX_LEV_100X'
+                AND (to_jsonb(sc) ->> 'last_run_at') IS NOT NULL)        AS exact100x_ever_ran,
+            (SELECT count(*) FROM public.live_orders
+              WHERE execution_profile_id = 'MAX_LEV_100X'
+                AND coalesce(filled_qty, 0) > 0)                         AS exact100x_filled;
 
           COMMIT;
           SQL
@@ -181,8 +361,17 @@ jobs:
           |---|---|
           | `binance_testnet_rows = 0` | Binance TESTNET 연결을 **추가**합니다 (기존 LIVE 연결은 건드리지 않습니다) |
           | `declared_ok_rows = 0` | 키 권한이 read+trade·출금 비허용인지 확인합니다 |
+          | `exact100x_schedules = 0` | 예약이 **없습니다**. 거래소·키를 보지 마세요 — 만들 차례입니다 |
+          | `exact100x_enabled = 0` | 예약은 있는데 **꺼져 있습니다** |
+          | `exact100x_combo_ok = 0` 인데 `enabled > 0` | 켜져 있지만 열린 조합이 아닙니다 (scalp · v2 · TESTNET · 증거금 배정) |
+          | `exact100x_ever_ran = 0` 인데 `combo_ok > 0` | 조합은 맞는데 **한 번도 돌지 않았습니다** — 실행기/스케줄러를 봅니다 |
           | `testnet_exact100x_orders = 0` | 연결은 있으나 Exact100X 진입이 **한 번도 없었습니다** |
-          | `testnet_*_samples = 0` 인데 주문은 있음 | 관측 기록 경로가 돌지 않았습니다 |
+          | `exact100x_filled = 0` 인데 주문은 있음 | 주문은 나갔지만 **체결된 적이 없습니다** (3b·3d의 status를 보세요) |
+          | `testnet_*_samples = 0` 인데 **체결이 있음** | 관측 기록 경로가 돌지 않았습니다 |
+
+          `=== 2b. 칸이 실제로 있는가 ===`를 먼저 보세요. `present = f`인 칸의
+          NULL은 "값이 없다"가 아니라 **"칸이 없다"**입니다. 둘을 같은 0으로
+          읽으면 안 됩니다.
 
           **이 감사가 답하지 않는 것**: 저장된 시크릿으로 Binance TESTNET
           **인증이 실제로 되는지**. 그것은 복호화가 필요하고 이 워크플로는
