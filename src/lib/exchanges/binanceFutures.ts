@@ -105,6 +105,60 @@ export async function getFuturesPositions(key: string, secret: string, testnet =
   } catch (e: any) { return { success: false, message: e.message || '포지션 조회 실패' }; }
 }
 
+/**
+ * 심볼 하나의 **격리·배율 설정**을 읽는다. 읽기 전용이다.
+ *
+ * 왜 `getFuturesPositions`로 안 되는가
+ * ───────────────────────────────────
+ * 그 함수는 `positionAmt !== 0`으로 **거른다.** 포지션이 없으면 빈
+ * 배열이 오고, 그러면 marginType·leverage를 볼 수 없다. 그런데 실측
+ * 준비를 확인하는 시점은 정확히 **포지션이 없는 때**다. 진입 전에
+ * 격리·100배가 맞는지 알아야 하기 때문이다.
+ *
+ * 바이낸스는 포지션이 비어 있어도 그 심볼의 설정 줄을 준다
+ * (`positionAmt: "0"`). 그래서 거르지 않고 그 줄을 찾는다.
+ *
+ * ★ **설정을 바꾸지 않는다.** `/fapi/v1/leverage`·`/fapi/v1/marginType`
+ *   (POST)을 부르지 않는다. 진단이 설정을 고치면, 사람은 "진단했더니
+ *   통과"를 보는데 실제로는 진단이 그렇게 만든 것이 된다.
+ */
+export async function getFuturesSymbolSettings(
+  key: string, secret: string, testnet = true, symbol = 'BTCUSDT',
+): Promise<{
+  ok: boolean; marginType: string | null; leverage: number | null;
+  positionAmt: number | null; error: string | null;
+}> {
+  const sym = symbol.toUpperCase().replace('/', '');
+  try {
+    const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet, { symbol: sym });
+    const rows = Array.isArray(data) ? data : [];
+    const row = rows.find((p: any) => String(p?.symbol ?? '').toUpperCase() === sym);
+    if (!row) {
+      // 응답은 왔는데 그 심볼이 없다. **기본값으로 메우지 않는다.**
+      return { ok: false, marginType: null, leverage: null, positionAmt: null,
+        error: `${sym} 설정 줄이 응답에 없습니다` };
+    }
+    const levRaw = row.leverage;
+    const lev = levRaw == null || String(levRaw).trim() === ''
+      ? null : Number.parseInt(String(levRaw), 10);
+    const amtRaw = row.positionAmt;
+    const amt = amtRaw == null || String(amtRaw).trim() === ''
+      ? null : Number.parseFloat(String(amtRaw));
+    const mt = String(row.marginType ?? '').trim();
+    return {
+      ok: true,
+      // 빈 문자열은 null로 넘긴다 — 판정이 "보고하지 않았다"로 읽어야 한다.
+      marginType: mt === '' ? null : mt.toLowerCase(),
+      leverage: lev != null && Number.isFinite(lev) ? lev : null,
+      positionAmt: amt != null && Number.isFinite(amt) ? amt : null,
+      error: null,
+    };
+  } catch (e: any) {
+    return { ok: false, marginType: null, leverage: null, positionAmt: null,
+      error: e?.message || String(e) };
+  }
+}
+
 // 실제 정산된 펀딩비 조회 (incomeType=FUNDING_FEE). income<0=지불, income>0=수령
 export interface FuturesFundingItem { symbol: string; income: number; time: number; }
 export async function getFuturesFunding(

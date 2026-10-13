@@ -789,6 +789,17 @@ jobs:
       - name: 긴급 종료 변이 자기 점검 (전수 실행은 수동)
         run: node scripts/kill-close-mutations.mjs --self-test
 
+      # ── TESTNET 진단 (읽기 전용 · UNKNOWN을 READY로 적지 않는다) ──
+      #
+      # 진단이 설정을 바꾸면 사람은 "진단했더니 통과"를 보는데 실제로는
+      # 진단이 그렇게 만든 것이 된다. 그 경로가 생기지 않는지 본다.
+      - name: TESTNET 진단 계약 (설정 변경 없음 · 관문·배선)
+        run: node scripts/check-testnet-diagnose.mjs
+
+      # 전수 실행: node scripts/testnet-diagnose-mutations.mjs (판정이 바뀐 라운드에 사람이 부른다)
+      - name: TESTNET 진단 변이 자기 점검 (전수 실행은 수동)
+        run: node scripts/testnet-diagnose-mutations.mjs --self-test
+
       # ── 관리자 인증 계약 (같은 비밀에 이름을 둘 붙이지 않는다) ──
       #
       # x-admin-secret 호출자가 `EXIT_MONITOR_SECRET`이라는 다른 GitHub secret
