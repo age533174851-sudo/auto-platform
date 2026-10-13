@@ -172,6 +172,51 @@ export function exitIntentId(k: ExitIntentKey): string {
   return `x5t${fnv128(parts)}`.slice(0, EXIT_INTENT_ID_MAX);
 }
 
+// ══════════════════════════════════════════════════════════════
+// ★ 긴급 종료(킬스위치)의 식별자 — **같은 해시, 다른 접두사**
+// ══════════════════════════════════════════════════════════════
+//
+// 왜 `exitIntentId`를 그대로 못 쓰는가: 그쪽은 **실행 계약**(profileId·
+// presetId·contractVersion)을 키에 넣는다. 긴급 종료는 계약과 무관하게
+// 계좌의 노출을 닫으므로 그 세 칸이 없다. 없는 것을 빈 문자열로 채워
+// 넣으면 "계약 없는 종료"끼리 식별자가 겹친다.
+//
+// 그렇다고 해시를 새로 만들지 않는다 — 같은 `fnv128`을 쓴다. 접두사만
+// 다르게 해서 **어느 경로가 낸 주문인지** 거래소 쪽에서도 읽을 수 있게
+// 한다(`x5t` = 종료 권한, `k5t` = 긴급 종료).
+//
+// ★ 여기에도 **시각·난수를 넣지 않는다.** 재시도가 같은 식별자를 만들어야
+//   거래소가 중복을 알아볼 기회가 생긴다. 수량이 들어가므로 부분 체결
+//   뒤의 정당한 재시도는 다른 식별자가 된다.
+
+export interface KillIntentKey {
+  connectionId: string;
+  exchange: 'binance' | 'gate';
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  /** 어느 단계의 긴급 종료인가 (`CLOSE_ALL`·`REDUCE_RISK` 등) */
+  actionMode: string;
+  /** 닫으려는 수량. **지금 관측한 노출이다** */
+  quantity: number;
+}
+
+/**
+ * **같은 긴급 종료 의도 → 같은 식별자.**
+ *
+ * 재시도·재시작·두 실행자가 각자 계산해도 같은 값이 나와야 한다.
+ */
+export function killIntentId(k: KillIntentKey): string {
+  const parts = [
+    String(k.connectionId ?? ''),
+    String(k.exchange ?? ''),
+    String(k.symbol ?? '').toUpperCase(),
+    String(k.side ?? ''),
+    String(k.actionMode ?? '').toUpperCase(),
+    qtyToken(Number(k.quantity)),
+  ].join('|');
+  return `k5t${fnv128(parts)}`.slice(0, EXIT_INTENT_ID_MAX);
+}
+
 /**
  * 이 오류가 **"같은 식별자가 이미 있다"**인가.
  *

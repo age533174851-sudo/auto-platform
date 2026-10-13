@@ -41,6 +41,9 @@ const act   = code(read(ACT));
 const exec  = code(read(EXEC));
 const ops   = code(read(OPS));
 const cand  = code(read(CAND));
+/** 임차 표를 읽고 쓰는 정본 — 라우트에서 뗐다 (킬스위치도 같은 줄을 잡는다) */
+const STORE = 'src/lib/engine/exitLeaseStore.ts';
+const store = code(read(STORE));
 
 // ══════════ ① 임차 획득이 원자적이다 ══════════
 {
@@ -61,9 +64,20 @@ const cand  = code(read(CAND));
   if (!/acquireExitLease\(/.test(route)) {
     err(`${ROUTE}가 임차 획득 정본을 쓰지 않습니다`);
   }
-  if (!/\.eq\('fence', prevFence\)/.test(route)) {
-    err(`${ROUTE}의 조건부 갱신에 본 fence 조건이 없습니다`
+  // ★ **정본이 옮겨갔다.** 표를 읽고 쓰는 코드는 이제 `exitLeaseStore`
+  //   하나다 — 긴급 종료(킬스위치)도 같은 줄을 잡아야 해서 뗐다. 그래서
+  //   조건부 갱신은 그 파일에서 확인하고, 라우트는 **그것을 쓰는지**만
+  //   본다. 검사를 지우지 않고 **자리를 옮긴다.**
+  if (!/\.eq\('fence', prevFence\)/.test(store)) {
+    err(`${STORE}의 조건부 갱신에 본 fence 조건이 없습니다`
       + ' — 판정은 원자적인데 실제 쿼리가 조건 없이 덮어씁니다');
+  }
+  if (!/exitLeaseStore/.test(route)) {
+    err(`${ROUTE}가 ${STORE}를 쓰지 않습니다 — 표 접근 코드가 두 벌이면`
+      + ' 한쪽만 고쳐지고 그때 두 실행이 둘 다 주인이 됩니다');
+  }
+  if (/from\(['"]exit_monitor_lease['"]\)/.test(route)) {
+    err(`${ROUTE}가 임차 표를 직접 다룹니다 — 정본(${STORE})을 거쳐야 합니다`);
   }
   // 조건 없는 덮어쓰기로 되돌아가지 않았는가
   if (/from\('exit_monitor_lease'\)[\s\S]{0,120}?\.upsert\(/.test(route)) {

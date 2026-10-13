@@ -151,17 +151,64 @@ export async function POST(req: NextRequest) {
         const { automatedSymbols, closeTargets } = await import('@/lib/risk/emergencyLevel');
         const spec = levelSpec;
 
+        let autoNote = '';
+        /** 임차 상태 — 상호 배제가 보장됐는지 응답에 그대로 적는다 */
+        let leaseNote = '';
+        /** 포지션 모드 관문 판정 */
+        let modeNote = '';
+        // ── ⓪ 긴급 선점 임차 — **거래소를 바꾸기 전에** ──
+        //
+        //   청산 감시(exit-monitor)가 같은 포지션을 닫는 중일 수 있다.
+        //   긴급 종료는 기다릴 수 없으므로 **선점**한다(번호를 올린다) —
+        //   돌고 있던 쪽은 쓰기 직전 재검증에서 막힌다.
+        //
+        //   ★ 선점만으로 **이미 전송 중인** 주문은 취소되지 않는다. 그
+        //     겹침은 축소 전용·멱등 식별자·마지막 재조회가 다룬다.
+        const { acquireExitLease, LEASE_TTL_MS } =
+          await import('@/lib/engine/exitMonitorLease');
+        const { exitLeaseStore, exitFenceChecker } =
+          await import('@/lib/engine/exitLeaseStore');
+        const killHolder = `kill:${String(uid).slice(0, 8)}:${connectionId}`;
+        const killLease = await acquireExitLease({
+          me: killHolder, nowMs: Date.now(), ttlMs: LEASE_TTL_MS,
+          store: exitLeaseStore(sb),
+          // ★ 긴급만 참이다. 기본값은 거짓(= 건너뜀)이다.
+          preempt: true,
+        });
+        const killStillMine = exitFenceChecker(
+          sb, killLease.myFence, killLease.tracked);
+        leaseNote = killLease.tracked
+          ? `임차 ${killLease.code}(울타리 ${killLease.myFence})`
+          // 표가 없는 배포 — 상호 배제가 **보장되지 않는다.** 그대로 적는다.
+          : '임차 표가 없는 배포 — 청산 감시와의 상호 배제가 보장되지 않습니다';
+        if (!killLease.granted) {
+          // 선점했는데도 못 잡았다 = 상태를 못 읽었다. **쓰지 않는다.**
+          autoNote = `${killLease.reason} — 긴급 종료를 보내지 않았습니다`;
+        }
+
+        // ── ⓪-b 포지션 모드 관문 — **취소·종료보다 앞** ──
+        //
+        //   뒤로 밀면 보호주문을 지운 뒤에 "닫을 수 없다"를 알게 된다.
+        const ops0 = await import('@/lib/engine/venuePositionOps');
+        const killMode = await ops0.accountCloseModeGate({
+          exchange: creds.exchange as any, apiKey: creds.key!,
+          apiSecret: creds.secret!, testnet: creds.testnet!,
+        }).catch((e: any) => ({ ok: false, code: 'UNKNOWN', mode: null,
+          message: String(e?.message || e) } as any));
+        modeNote = `${killMode.code}: ${killMode.message}`;
+        const killBlocked = killLease.granted !== true || killMode.ok !== true;
+
         // ── 심볼별로 닫는 단계 ──
         //
         // executeKillActions의 'D'는 **계좌의 모든 포지션**을 닫는다.
         // "자동매매가 연 것만" 또는 "절반만"은 그걸로 못 한다 —
         // 손매매까지 나가면 이 단계를 만든 이유의 정반대다.
-        let autoNote = '';
         let closed: Array<{
           symbol: string; ok: boolean; message: string;
           before?: number | null; after?: number | null; closePct?: number;
         }> = [];
-        if (spec && spec.closePct > 0 && (spec.automatedOnly || spec.closePct < 100)) {
+        if (!killBlocked && spec && spec.closePct > 0
+            && (spec.automatedOnly || spec.closePct < 100)) {
           const { futuresClosePosition, futuresPositionRisk } =
             await import('@/lib/exchanges/futuresAdapter');
           const { runTargetedCloses } = await import('@/lib/risk/killTargets');
@@ -190,12 +237,26 @@ export async function POST(req: NextRequest) {
           });
         }
 
-        const r = await executeKillActions(sb, uid, connectionId, {
-          key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
-          exchange: creds.exchange,
-          // 단계가 있으면 그 조합, 없으면 저장된 값.
-          actionMode: spec ? actionModeOf(spec) : s.actionMode,
-        });
+        // ★ 관문이 막으면 `executeKillActions`를 **부르지 않는다.**
+        //   그 안에서 다시 막히기도 하지만, 여기서 멈추면 취소·종료
+        //   어느 쪽도 시도되지 않는다는 것이 호출 횟수로 드러난다.
+        const r = killBlocked
+          ? { cancel: null, close: null, safety: {
+              planCode: killLease.granted !== true ? 'BLOCKED_LEASE' : 'BLOCKED_MODE',
+              modeCode: killMode.code, mode: killMode.mode ?? null,
+              mayClose: false, mayCancel: false, cancelScope: 0,
+              retainedProtective: 0, unidentifiedOrders: 0, unusableTargets: 0,
+              ordersSent: 0, protectionCode: 'PROTECTION_INTACT',
+              unprotected: false, manualInterventionRequired: true,
+              reason: killLease.granted !== true ? killLease.reason : killMode.message,
+            } }
+          : await executeKillActions(sb, uid, connectionId, {
+              key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+              exchange: creds.exchange,
+              // 단계가 있으면 그 조합, 없으면 저장된 값.
+              actionMode: spec ? actionModeOf(spec) : s.actionMode,
+              stillMine: killStillMine,
+            });
         exec = {
           ran: true, ...r,
           level: spec?.level ?? null,
@@ -210,6 +271,17 @@ export async function POST(req: NextRequest) {
           // **완료 판정이 보는 것.** `D`가 없는 단계(CLOSE_AUTOMATED ·
           // REDUCE_RISK)도 여기로 검사된다 — 주문 응답이 아니라 재조회 결과로.
           targeted: closed.length ? closed : null,
+          // ★ **안전 관문의 결과를 숨기지 않는다.**
+          //
+          //   `blocked`가 참이면 주문 0건·취소 0건이고 기존 보호주문이
+          //   그대로 남아 있다. 사람이 거래소에서 직접 닫아야 한다 —
+          //   그 사실이 응답에 없으면 "눌렀으니 됐다"로 읽힌다.
+          safety: {
+            lease: leaseNote || null,
+            mode: modeNote || null,
+            blocked: killBlocked,
+            ...(r as any)?.safety ? { exec: (r as any).safety } : {},
+          },
         };
       }
     } catch (e: any) {

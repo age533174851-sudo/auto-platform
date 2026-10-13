@@ -782,6 +782,13 @@ jobs:
       - name: 킬스위치 배선 계약
         run: node scripts/check-kill-switch-contract.mjs
 
+      - name: 긴급 종료 안전성 (모드 관문 우선 · 닫을 수 없으면 취소 없음)
+        run: node scripts/check-kill-close-safety.mjs
+
+      # 전수 실행: node scripts/kill-close-mutations.mjs (안전 조건이 바뀐 라운드에 사람이 부른다)
+      - name: 긴급 종료 변이 자기 점검 (전수 실행은 수동)
+        run: node scripts/kill-close-mutations.mjs --self-test
+
       # ── 관리자 인증 계약 (같은 비밀에 이름을 둘 붙이지 않는다) ──
       #
       # x-admin-secret 호출자가 `EXIT_MONITOR_SECRET`이라는 다른 GitHub secret
