@@ -35,5 +35,9 @@ export function classifyExitRestart(e: ExitReconcileEvidence): ExitReconcileVerd
   if (e.order.state === 'OPEN' || e.order.state === 'PARTIAL')
     return result('ORDER_UNRESOLVED');
   if (e.position.found) return result('POSITION_OPEN');
+  // A flat position alone cannot attribute the close to this order: another
+  // actor could have closed it. Only a venue-confirmed FILLED order is enough
+  // to close *this intent*. Cancelled/rejected orders require separate audit.
+  if (e.order.state !== 'FILLED') return result('ORDER_UNRESOLVED');
   return result('FLAT_VERIFIED', true);
 }
