@@ -33,6 +33,21 @@ export function runExitRestartReconcileTests() {
       order: { ok: true, state: 'CANCELLED' } });
     eq(r.code, 'POSITION_OPEN'); eq(r.mayResend, false);
   });
+  test('거부된 주문 + 포지션 0은 이 청산의 성공 증거가 아니다', () => {
+    const r = decide({ intent: 'REJECTED', position: { ok: true, found: false },
+      order: { ok: true, state: 'REJECTED' } });
+    eq(r.code, 'ORDER_UNRESOLVED'); eq(r.mayMarkClosed, false);
+  });
+  test('취소된 주문 + 포지션 0도 이 청산의 성공 증거가 아니다', () => {
+    const r = decide({ intent: 'ACCEPTED', position: { ok: true, found: false },
+      order: { ok: true, state: 'CANCELLED' } });
+    eq(r.code, 'ORDER_UNRESOLVED'); eq(r.mayMarkClosed, false);
+  });
+  test('영속 의도가 NONE이면 타인의 체결로 종료 처리하지 않는다', () => {
+    const r = decide({ intent: 'NONE', position: { ok: true, found: false },
+      order: { ok: true, state: 'FILLED' } });
+    eq(r.code, 'NO_INTENT'); eq(r.mayMarkClosed, false);
+  });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
       order: { ok: true, state: 'FILLED' } });
