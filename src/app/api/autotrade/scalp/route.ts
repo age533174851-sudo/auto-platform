@@ -234,11 +234,13 @@ export async function POST(req: NextRequest) {
   const scalp = scalpSignal(bars, cfg);
   const timeframeInfo = { intervalMin, interval, ...verdict };
   if (!scalp.signal) {
+    const { diagnoseScalpSignal } = await import('@/lib/strategies/scalpSignalDiagnosis');
+    const diagnosis = diagnoseScalpSignal(scalp);
     // **신호 없음은 실패가 아니다.** ok:true로 돌려준다 — 대부분의 봉에서
     // 신호는 나지 않고, 그걸 실패로 적으면 실행 기록이 빨간색으로 가득 찬다.
     return NextResponse.json({
       ok: true, executed: false, symbol, mode: opMode,
-      signal: null, reason: scalp.reason, timeframe: timeframeInfo,
+      signal: null, reason: scalp.reason, reasonCode: diagnosis.code, timeframe: timeframeInfo,
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
