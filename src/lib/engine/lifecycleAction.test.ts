@@ -14,6 +14,7 @@
 // 그래서 호출을 세고 순서를 기록한다.
 import { test, eq, assert } from '../../test/harness';
 import { applyLifecycleClose } from './lifecycleAction';
+import { decideRestartClose } from './restartClosePreflight';
 
 /** 호출 순서를 기록하는 가짜 거래소 */
 function fake(o: {
@@ -191,6 +192,60 @@ export function runLifecycleActionTests() {
     eq(r.code, 'CLOSED_VERIFIED');
     eq(f.counts().mines, 0);
     eq(f.calls.join('→'), 'close→readAfter');
+  });
+
+  test('★ #325: 타임아웃 → 재시작 → 기존 미확정 주문이면 신규 청산 0회', async () => {
+    let sends = 0;
+    // First worker: the venue accepts the close but its response is lost.
+    const first = await applyLifecycleClose({
+      stillMine: async () => true,
+      close: async () => { sends++; throw new Error('timeout after submit'); },
+      readAfter: async () => ({ ok: true, found: true }),
+    });
+    eq(first.code, 'CLOSE_AMBIGUOUS');
+    eq(first.needsReconcile, true);
+    // New worker: position is still visible, previous reduce-only order is pending.
+    const preflight = decideRestartClose({
+      state: { kind: 'PENDING_OR_UNKNOWN' },
+      durablePriorAttemptCleared: false,
+    });
+    eq(preflight.code, 'RECONCILE_FIRST');
+    eq(preflight.send, false);
+    eq(sends, 1, '재시작 직후 기존 주문이 미확정인데 두 번째 전송');
+  });
+
+  test('★ #325: 부분 체결 후 잔량이 있어도 이전 주문 미확정이면 전송 금지', () => {
+    const r = decideRestartClose({
+      state: { kind: 'NONE_CONFIRMED', positionReadOk: true, positionFound: true,
+        openOrdersReadOk: true, pendingReduceOnly: false },
+      durablePriorAttemptCleared: false,
+    });
+    eq(r.code, 'RECONCILE_FIRST'); eq(r.send, false);
+  });
+
+  test('★ #325: 거래소 조회 실패와 누락 장부는 진입 허가가 아니다', () => {
+    for (const state of [{ kind: 'READ_FAILED' }, { kind: 'PENDING_OR_UNKNOWN' }] as const) {
+      const r = decideRestartClose({ state, durablePriorAttemptCleared: true });
+      eq(r.code, 'RECONCILE_FIRST'); eq(r.send, false);
+    }
+  });
+
+  test('★ #325: 재시작 후 이미 flat이면 추가 주문하지 않는다', () => {
+    const r = decideRestartClose({
+      state: { kind: 'NONE_CONFIRMED', positionReadOk: true, positionFound: false,
+        openOrdersReadOk: true, pendingReduceOnly: false },
+      durablePriorAttemptCleared: true,
+    });
+    eq(r.code, 'ALREADY_FLAT'); eq(r.send, false);
+  });
+
+  test('★ #325: 거래소와 영속 장부 모두 대조 완료한 경우만 신규 청산 후보', () => {
+    const r = decideRestartClose({
+      state: { kind: 'NONE_CONFIRMED', positionReadOk: true, positionFound: true,
+        openOrdersReadOk: true, pendingReduceOnly: false },
+      durablePriorAttemptCleared: true,
+    });
+    eq(r.code, 'NEW_CLOSE_ELIGIBLE'); eq(r.send, true);
   });
 
   test('★ 어떤 경로에서도 청산을 두 번 보내지 않는다', async () => {
