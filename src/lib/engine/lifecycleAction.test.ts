@@ -16,6 +16,7 @@ import { test, eq, assert } from '../../test/harness';
 import { applyLifecycleClose } from './lifecycleAction';
 import { decideRestartClose } from './restartClosePreflight';
 import { reconcileBeforeRestartClose } from './restartReconcileGate';
+import { advanceCloseAttempt, type CloseAttemptSnapshot } from './closeAttemptState';
 
 /** 호출 순서를 기록하는 가짜 거래소 */
 function fake(o: {
@@ -292,6 +293,46 @@ export function runLifecycleActionTests() {
       claimNextAttempt: async () => { throw new Error('commit unknown'); },
     });
     eq(failedClaim.code, 'CLAIM_FAILED'); eq(failedClaim.maySend, false);
+  });
+
+  test('★ #325: 전송 타임아웃은 확정 거부가 아니라 SUBMIT_UNKNOWN', () => {
+    const r = advanceCloseAttempt(
+      { status: 'PREPARED', orderTerminalConfirmed: false },
+      { kind: 'SUBMIT_TIMEOUT' },
+    );
+    eq(r.next.status, 'SUBMIT_UNKNOWN'); eq(r.mayClearDurableAttempt, false);
+  });
+
+  test('★ #325: 포지션 flat이어도 기존 주문 미해결이면 장부 삭제 금지', () => {
+    const r = advanceCloseAttempt(
+      { status: 'ACCEPTED', orderTerminalConfirmed: false },
+      { kind: 'POSITION_FLAT', pendingOrderResolved: false },
+    );
+    eq(r.next.status, 'NEEDS_RECONCILE'); eq(r.mayClearDurableAttempt, false);
+  });
+
+  test('★ #325: 지연 체결 이후 주문 종결 + flat 모두 확인하면 정리 가능', () => {
+    const start: CloseAttemptSnapshot = { status: 'SUBMIT_UNKNOWN', orderTerminalConfirmed: false };
+    const partial = advanceCloseAttempt(start, { kind: 'POSITION_PARTIAL', pendingOrderResolved: false });
+    eq(partial.next.status, 'NEEDS_RECONCILE'); eq(partial.mayClearDurableAttempt, false);
+    const final = advanceCloseAttempt(partial.next, { kind: 'POSITION_FLAT', pendingOrderResolved: true });
+    eq(final.next.status, 'FLAT_VERIFIED'); eq(final.mayClearDurableAttempt, true);
+  });
+
+  test('★ #325: 부분 체결 + 주문 종결 확인해도 잔여 포지션은 남는다', () => {
+    const r = advanceCloseAttempt(
+      { status: 'ACCEPTED', orderTerminalConfirmed: false },
+      { kind: 'POSITION_PARTIAL', pendingOrderResolved: true },
+    );
+    eq(r.next.status, 'PARTIAL'); eq(r.mayClearDurableAttempt, false);
+  });
+
+  test('★ #325: 조회 실패는 청산 완료 증거가 아니다', () => {
+    const r = advanceCloseAttempt(
+      { status: 'ACCEPTED', orderTerminalConfirmed: false },
+      { kind: 'POSITION_READ_FAILED' },
+    );
+    eq(r.next.status, 'NEEDS_RECONCILE'); eq(r.mayClearDurableAttempt, false);
   });
 
   test('★ 어떤 경로에서도 청산을 두 번 보내지 않는다', async () => {
