@@ -2,6 +2,7 @@ import { test, eq } from '../../test/harness';
 import { diagnoseScalpSignal } from './scalpSignalDiagnosis';
 import type { ScalpResult } from './scalpSignal';
 
+export function runScalpSignalDiagnosisTests(): void {
 const cases = [
   ['돌파 없음 (1.00 ~ 2.00 안)', 'NO_BREAKOUT'],
   ['돌파했지만 거래량이 부족합니다 (평균의 1.00배 · 1.3배 필요)', 'VOLUME_BELOW_THRESHOLD'],
@@ -35,3 +36,5 @@ test('diagnose scalp: actual signal is present', () => {
   eq(d.code, 'SIGNAL_PRESENT');
   eq(d.signalPresent, true);
 });
+
+}
