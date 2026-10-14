@@ -15,6 +15,7 @@
 import { test, eq, assert } from '../../test/harness';
 import { applyLifecycleClose } from './lifecycleAction';
 import { decideRestartClose } from './restartClosePreflight';
+import { reconcileBeforeRestartClose } from './restartReconcileGate';
 
 /** 호출 순서를 기록하는 가짜 거래소 */
 function fake(o: {
@@ -246,6 +247,51 @@ export function runLifecycleActionTests() {
       durablePriorAttemptCleared: true,
     });
     eq(r.code, 'NEW_CLOSE_ELIGIBLE'); eq(r.send, true);
+  });
+
+  test('★ #325: 두 워커가 같은 영속 장부를 읽어도 원자적 claim은 한 번', async () => {
+    let claimed = false, claims = 0;
+    const deps = () => ({
+      readAttempt: async () => ({ code: 'CLEAR' as const, lastClientOrderId: null }),
+      readVenue: async () => ({ kind: 'NONE_CONFIRMED' as const,
+        positionReadOk: true as const, positionFound: true,
+        openOrdersReadOk: true as const, pendingReduceOnly: false as const }),
+      claimNextAttempt: async () => { claims++; if (claimed) return false; claimed = true; return true; },
+    });
+    const [a, b] = await Promise.all([
+      reconcileBeforeRestartClose(deps()), reconcileBeforeRestartClose(deps()),
+    ]);
+    eq([a.maySend, b.maySend].filter(Boolean).length, 1);
+    eq(claims, 2);
+  });
+
+  test('★ #325: 재시작 후 장부 UNKNOWN/PENDING은 거래소 조회도 청구하지 않는다', async () => {
+    for (const code of ['UNKNOWN', 'PENDING'] as const) {
+      let reads = 0, claims = 0;
+      const r = await reconcileBeforeRestartClose({
+        readAttempt: async () => ({ code, lastClientOrderId: 'close-123' }),
+        readVenue: async () => { reads++; return { kind: 'PENDING_OR_UNKNOWN' }; },
+        claimNextAttempt: async () => { claims++; return true; },
+      });
+      eq(r.code, 'RECONCILE_FIRST'); eq(reads, 0); eq(claims, 0);
+    }
+  });
+
+  test('★ #325: 영속 장부 읽기 오류 또는 원자적 claim 오류는 신규 전송 0', async () => {
+    let claims = 0;
+    const blocked = await reconcileBeforeRestartClose({
+      readAttempt: async () => { throw new Error('DB down'); },
+      readVenue: async () => ({ kind: 'PENDING_OR_UNKNOWN' }),
+      claimNextAttempt: async () => { claims++; return true; },
+    });
+    eq(blocked.maySend, false); eq(claims, 0);
+    const failedClaim = await reconcileBeforeRestartClose({
+      readAttempt: async () => ({ code: 'CLEAR', lastClientOrderId: null }),
+      readVenue: async () => ({ kind: 'NONE_CONFIRMED', positionReadOk: true,
+        positionFound: true, openOrdersReadOk: true, pendingReduceOnly: false }),
+      claimNextAttempt: async () => { throw new Error('commit unknown'); },
+    });
+    eq(failedClaim.code, 'CLAIM_FAILED'); eq(failedClaim.maySend, false);
   });
 
   test('★ 어떤 경로에서도 청산을 두 번 보내지 않는다', async () => {
