@@ -1,6 +1,7 @@
 import { test, eq } from '../../test/harness';
 import { outcomeOf } from './runStrategy';
 
+export function runRunStrategyDiagnosisTests(): void {
 test('NO_SIGNAL: known reason code is persisted without changing outcome', () => {
   const v = outcomeOf({ httpOk: true, body: { ok: true, executed: false, reasonCode: 'NO_BREAKOUT' } });
   eq(v.outcome, 'NO_SIGNAL');
@@ -22,3 +23,5 @@ test('NO_SIGNAL: diagnostic never overrides blocked or entered outcomes', () => 
   eq(outcomeOf({ httpOk: true, body: { executed: true, reasonCode: 'NO_BREAKOUT' } }).outcome, 'ENTERED');
   eq(outcomeOf({ httpOk: true, body: { checklist: { allowed: false }, reasonCode: 'NO_BREAKOUT' } }).outcome, 'BLOCKED');
 });
+
+}
