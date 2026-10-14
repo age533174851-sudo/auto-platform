@@ -67,6 +67,11 @@ const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
  * 약속이고, 약속이 쌓이면 이 검사는 없는 것과 같아진다.
  */
 const ALLOW = new Map([
+  ['src/lib/engine/exitRestartReconcile.ts',
+    'Issue #325 단계 1: 읽기 전용 재시작 대조 판정과 가짜 증거 테스트만 작성됨. '
+    + '실제 청산 라우트에 배선하면 영속 exit intent/clientOrderId 기록, 거래소 주문 조회, '
+    + '동일 노출 재시도 금지 및 재시작 통합 테스트가 먼저 필요함. '
+    + '이 ALLOW는 보호 기능이 운영 중이라는 뜻이 아님; 배선 완료 즉시 제거할 것'],
   // ── 이 검사를 처음 켰을 때 이미 끊겨 있던 것들 ──
   //
   // **이 목록은 갚아야 할 빚이다.** 여기 있는 동안 그 판정은
