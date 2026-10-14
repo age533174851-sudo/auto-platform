@@ -19,6 +19,7 @@
 //
 // 1·4의 방향 계산과 검증 규칙을 여기 모아 테스트를 붙인다. 네트워크는 타지 않는다.
 
+import { decimalsOf } from './quantize';
 import type { SymbolFilters } from './quantize';
 
 /** getGateContractSpec가 돌려주는 모양 중 계산에 필요한 부분만 */
@@ -234,7 +235,7 @@ export function gateStopSpec(
     const k = side === 'LONG' ? Math.floor(n + eps) : Math.ceil(n - eps);
     // 소수 자릿수를 tick에서 뽑아 잘라 낸다. k*tick이 62653.90000000001이
     // 되면 거래소가 또 거부한다.
-    const dec = Math.max(0, Math.min(12, Math.round(-Math.log10(tick))));
+    const dec = decimalsOf(tick);
     sp = Number((k * tick).toFixed(dec));
     if (!(sp > 0)) {
       return { ...base, ok: false,
@@ -418,7 +419,7 @@ export function gateTakeProfitSpec(
     // LONG 익절은 위에 있으므로 올림, SHORT는 아래이므로 내림 —
     // 손절과 반대 방향이다.
     const k = side === 'LONG' ? Math.ceil(n - eps) : Math.floor(n + eps);
-    const dec = Math.max(0, Math.min(12, Math.round(-Math.log10(tick))));
+    const dec = decimalsOf(tick);
     p = Number((k * tick).toFixed(dec));
     if (!(p > 0)) {
       return { ...base, ok: false,

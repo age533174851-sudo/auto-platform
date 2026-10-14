@@ -2,6 +2,7 @@
 // Binance API Adapter (server-side only)
 // Docs: https://binance-docs.github.io/apidocs/spot/en/
 // ─────────────────────────────────────────────────────────────
+import { decimalsOf } from './quantize';
 import { createHmac } from 'crypto';
 import { numOrNull } from '../engine/orderFillFacts';
 import { parseLossless } from './losslessJson';
@@ -567,6 +568,5 @@ export async function getSpotSymbolFilters(
 export function roundSpotQty(qty: number, stepSize: number | null | undefined): number {
   const step = Number(stepSize);
   if (!Number.isFinite(step) || step <= 0) return qty;
-  const decimals = Math.max(0, Math.round(-Math.log10(step)));
-  return parseFloat((Math.floor(qty / step) * step).toFixed(decimals));
+  return parseFloat((Math.floor(qty / step + 1e-9) * step).toFixed(decimalsOf(step)));
 }

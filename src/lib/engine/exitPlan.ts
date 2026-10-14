@@ -18,6 +18,7 @@
 // 이 모듈은 앞의 두 개를 주문 목록으로 만들고, 뒤의 셋은 파라미터로 넘겨
 // 워커가 이어받을 수 있게 한다. 지금 워커가 없더라도 손절과 분할 익절은
 // 거래소에 걸리므로, 서버가 죽어도 손실은 고정된다.
+import { floorToStep as canonFloorToStep } from '../exchanges/quantize';
 import { rToPrice, type AsymmetricConfig } from './asymmetricExit';
 
 export interface ExitOrder {
@@ -44,11 +45,17 @@ export interface ExitPlan {
   notes: string[];
 }
 
-/** 거래소 수량 단위에 맞춰 내림. stepSize가 없으면 그대로 둔다. */
+/**
+ * 거래소 수량 단위에 맞춰 내림. stepSize가 없으면 그대로 둔다.
+ *
+ * ★ **여기서 다시 계산하지 않는다.** 자리수 계산의 정본은
+ *   `decimalsOf`이고, 이 파일에 한 벌 더 두면 언젠가 갈린다 — 실제로
+ *   갈려 있었다. 0.005 단위에서 분할 익절 수량이 한 칸 깎이고,
+ *   0.5 단위에서는 **요청보다 많은 수량**이 나왔다.
+ */
 function floorToStep(qty: number, step?: number): number {
   if (!step || step <= 0) return qty;
-  const precision = Math.max(0, Math.round(-Math.log10(step)));
-  return Number((Math.floor(qty / step) * step).toFixed(precision));
+  return canonFloorToStep(qty, step);
 }
 
 export const DEFAULT_PARTIAL_LADDER = [
