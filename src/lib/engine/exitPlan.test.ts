@@ -59,12 +59,12 @@ export function runExitPlanTests() {
   });
 
   test('0.005 단위에서 분할 수량을 올림하지 않고 정확히 내린다', () => {
-    // 0.37 * 30% = 0.111 → 0.005 단위로 0.110 (기존 로직은 0.11 자릿수 반올림 오류)
-    const p = buildExitPlan({ ...base, quantity: 0.37, qtyStep: 0.005 });
+    // 0.355 * 30% = 0.1065 → 0.005 단위로 0.105 (기존 로직은 0.10으로 잘못 반올림)
+    const p = buildExitPlan({ ...base, quantity: 0.355, qtyStep: 0.005 });
     const partials = p.orders.filter(o => o.kind === 'PARTIAL_TP');
     eq(partials.length, 2);
     for (const o of partials) {
-      close(o.quantity ?? 0, 0.11, 1e-9, '0.005 단위 수량 계산 오류');
+      close(o.quantity ?? 0, 0.105, 1e-9, '0.005 단위 수량 계산 오류');
       const units = (o.quantity ?? 0) / 0.005;
       close(units, Math.round(units), 1e-9, '거래소 단위의 정수배가 아니다');
     }
