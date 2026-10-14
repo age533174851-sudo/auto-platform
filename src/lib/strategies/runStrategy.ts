@@ -108,7 +108,17 @@ export function outcomeOf(input: {
   }
 
   // **여기가 정상이다.** 평가했고 조건이 아니었다.
-  return { outcome: 'NO_SIGNAL', summary: '정상 평가 완료 · 진입 조건 없음' };
+  // Persist only a bounded diagnostic code, never raw exchange payloads.
+  // No code (older routes) and unknown codes remain generic NO_SIGNAL.
+  const knownNoSignalCodes = [
+    'NO_BREAKOUT', 'VOLUME_BELOW_THRESHOLD', 'VOLUME_UNAVAILABLE',
+    'BARS_UNAVAILABLE', 'BARS_INSUFFICIENT', 'BAR_DATA_INVALID',
+    'PRICE_UNAVAILABLE', 'ATR_UNAVAILABLE', 'STOP_INVALID',
+    'COST_EXCEEDS_TARGET', 'UNKNOWN_REASON',
+  ];
+  const reasonCode = typeof b?.reasonCode === 'string' ? b.reasonCode : '';
+  const diagnostic = knownNoSignalCodes.includes(reasonCode) ? ` · 사유코드 ${reasonCode}` : '';
+  return { outcome: 'NO_SIGNAL', summary: `정상 평가 완료 · 진입 조건 없음${diagnostic}` };
 }
 
 export interface RunStrategyDeps {
