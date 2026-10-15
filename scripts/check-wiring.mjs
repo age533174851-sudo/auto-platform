@@ -67,6 +67,9 @@ const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
  * 약속이고, 약속이 쌓이면 이 검사는 없는 것과 같아진다.
  */
 const ALLOW = new Map([
+  ['src/lib/engine/exitRestartEvidence.ts',
+    'Issue #325 읽기 전용 영속 의도·거래소 조회 어댑터. 현재 가짜 저장소 테스트 전용이며 '
+    + '실제 DB intent와 거래소 clientOrderId 조회 연결 및 재시작 통합 검증 전까지 운영 미배선'],
   ['src/lib/engine/exitRestartReconcile.ts',
     'Issue #325 단계 1: 읽기 전용 재시작 대조 판정과 가짜 증거 테스트만 작성됨. '
     + '실제 청산 라우트에 배선하면 영속 exit intent/clientOrderId 기록, 거래소 주문 조회, '
