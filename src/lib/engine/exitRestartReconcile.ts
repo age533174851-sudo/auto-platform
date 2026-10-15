@@ -28,6 +28,9 @@ export function classifyExitRestart(e: ExitReconcileEvidence): ExitReconcileVerd
     ({ code, mayResend: false, mayMarkClosed, needsReconcile: code !== 'NO_INTENT' && !mayMarkClosed });
   if (e.intent === undefined || !e.position?.ok) return result('READ_FAILED');
   if (e.intent === 'NONE') return result('NO_INTENT');
+  // Contradictory durable/venue evidence must not attribute a fill to a rejected intent.
+  if (e.intent === 'REJECTED' && e.order?.state === 'FILLED')
+    return result('ORDER_UNRESOLVED');
   // A missing order lookup or NOT_FOUND is not proof of non-submission:
   // eventual consistency and clientOrderId lookup gaps are possible.
   if (!e.order?.ok || e.order.state === 'UNKNOWN' || e.order.state === 'NOT_FOUND')
