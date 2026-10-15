@@ -271,6 +271,56 @@ jobs:
            ORDER BY sc.mode;
 
           \echo ''
+          \echo '=== 3g. 왜 진입이 0건인가 — 평가 결과를 경계 있는 값으로만 센다 ==='
+          -- **자유 문자열을 찍지 않는다.** `last_decision`·`last_result`에는
+          -- 무엇이 들어 있을지 모른다. 그래서 알려진 값만 그대로 두고
+          -- 나머지는 'OTHER'로 접는다. 집계 수만 나온다.
+          WITH ex AS (
+            SELECT sc.*,
+                   (to_jsonb(sc) -> 'last_decision' ->> 'outcome') AS outcome_raw,
+                   coalesce(
+                     to_jsonb(sc) -> 'last_decision' ->> 'reasonCode',
+                     to_jsonb(sc) -> 'last_decision' ->> 'reason_code'
+                   ) AS code_raw
+              FROM public.autotrade_schedules sc
+             WHERE (to_jsonb(sc) ->> 'execution_profile_id') = 'MAX_LEV_100X'
+          )
+          SELECT
+            CASE WHEN outcome_raw IN ('ENTERED','NO_SIGNAL','BLOCKED','FAILED')
+                 THEN outcome_raw
+                 WHEN outcome_raw IS NULL THEN 'NOT_RECORDED'
+                 ELSE 'OTHER' END                                    AS outcome,
+            CASE WHEN code_raw IN ('NO_BREAKOUT','VOLUME_BELOW_THRESHOLD',
+                                   'VOLUME_UNAVAILABLE','BARS_UNAVAILABLE',
+                                   'BARS_INSUFFICIENT','BAR_DATA_INVALID',
+                                   'PRICE_UNAVAILABLE','ATR_UNAVAILABLE',
+                                   'STOP_INVALID','COST_EXCEEDS_TARGET',
+                                   'UNKNOWN_REASON')
+                 THEN code_raw
+                 WHEN code_raw IS NULL THEN 'NOT_RECORDED'
+                 ELSE 'OTHER' END                                    AS reason_code,
+            count(*)                                                 AS schedules,
+            count(*) FILTER (WHERE enabled)                           AS enabled_rows,
+            max(last_run_at)                                          AS newest_run
+            FROM ex
+           GROUP BY 1, 2
+           ORDER BY schedules DESC;
+
+          \echo ''
+          \echo '=== 3h. 미결 청산·주문이 쌓여 있는가 (내구성 공백의 흔적) ==='
+          -- `UNKNOWN`·`ACKED`는 **끝나지 않은 상태**다. 쌓여 있으면
+          -- 재조회가 돌지 않았다는 뜻이다.
+          SELECT mode, status,
+                 count(*)                                             AS orders,
+                 count(*) FILTER (WHERE reduce_only)                   AS reduce_only_rows,
+                 min(created_at)                                       AS oldest,
+                 max(created_at)                                       AS newest
+            FROM public.live_orders
+           WHERE status IN ('INTENT','SENT','ACKED','UNKNOWN')
+           GROUP BY mode, status
+           ORDER BY orders DESC;
+
+          \echo ''
           \echo '=== 4. 판정 — 어느 단계에서 막혀 있는가 ==='
           WITH tn AS (
             SELECT * FROM public.exchange_connections
