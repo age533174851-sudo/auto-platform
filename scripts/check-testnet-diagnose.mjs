@@ -329,10 +329,10 @@ if (mod) {
       if (!/itemCodes/.test(best)) {
         err(`${ROUTE}: 항목별 판정 코드(itemCodes)를 응답에 싣지 않습니다`);
       }
-      if (!/(^|[\\s,{])openOrderEvidence\\s*[,:}]/.test(best)) {
+      if (!/(^|[\s,{])openOrderEvidence\s*[,:}]/.test(best)) {
         err(`${ROUTE}: Binance 미체결 주문 증거(openOrderEvidence)가 응답에 없습니다`);
       }
-      if (!/(^|[\\s,{])positionEvidence\\s*[,:}]/.test(best)) {
+      if (!/(^|[\s,{])positionEvidence\s*[,:}]/.test(best)) {
         err(`${ROUTE}: Binance 실제 포지션 증거(positionEvidence)가 응답에 없습니다`);
       }
     }
