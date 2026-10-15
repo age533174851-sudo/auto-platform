@@ -5,6 +5,7 @@ import { gateRestartExitDispatch } from './exitRestartDispatch';
 import { binanceExitOrderStatus } from './exitRestartOrderStatus';
 import { claimExitBeforeSend, type ExitIntentRecord } from './exitRestartIntentStore';
 import { supabaseTestnetExitIntentStore, EXIT_ORDER_INTENT_TABLE } from './exitRestartSupabaseStore';
+import { readBinanceTestnetExitOrderEvidence } from './exitRestartBinanceRead';
 
 export function runExitRestartReconcileTests() {
   console.log('\n🔒 #325 재시작 청산 대조 (가짜 거래소)');
@@ -304,6 +305,44 @@ export function runExitRestartReconcileTests() {
     const loaded = await supabaseTestnetExitIntentStore(sb, true).load(id, conn);
     eq(loaded?.clientOrderId, id); eq(loaded?.state, 'SENT');
     eq(eqCalls.join(','), 'client_order_id=' + id + ',connection_id=' + conn);
+  });
+  test('Binance TESTNET 읽기: 검증 안 되면 거래소를 조회하지 않는다', async () => {
+    let calls = 0;
+    const q = { apiKey: 'test-key', apiSecret: 'test-secret',
+      symbol: 'BTCUSDT', clientOrderId: 'x5tabc123', verifiedTestnet: false };
+    const r = await readBinanceTestnetExitOrderEvidence(q, async () => {
+      calls++; return { found: true, order: { status: 'FILLED',
+        clientOrderId: 'x5tabc123' } };
+    });
+    eq(calls, 0); eq(r.ok, false); eq(r.state, 'UNKNOWN');
+  });
+  test('Binance TESTNET 읽기: 원본 ID로만 조회하고 강제로 testnet=true', async () => {
+    const id = 'x5tabc123';
+    const q = { apiKey: 'test-key', apiSecret: 'test-secret',
+      symbol: 'BTCUSDT', clientOrderId: id, verifiedTestnet: true };
+    const r = await readBinanceTestnetExitOrderEvidence(q,
+      async (_key, _secret, symbol, gotId, testnet) => {
+        eq(symbol, 'BTCUSDT'); eq(gotId, id); eq(testnet, true);
+        return { found: true, order: { clientOrderId: id, status: 'FILLED' } };
+      });
+    eq(r.ok, true); eq(r.state, 'FILLED');
+  });
+  test('Binance TESTNET 읽기: 미발견·오류·ID 불일치는 재전송 근거가 아니다', async () => {
+    const q = { apiKey: 'test-key', apiSecret: 'test-secret',
+      symbol: 'BTCUSDT', clientOrderId: 'x5tabc123', verifiedTestnet: true };
+    const missing = await readBinanceTestnetExitOrderEvidence(q,
+      async () => ({ found: false }));
+    eq(missing.ok, true); eq(missing.state, 'NOT_FOUND');
+    const verdict = decide({ intent: 'SENT', position: { ok: true, found: true },
+      order: missing });
+    eq(verdict.mayResend, false); eq(verdict.code, 'ORDER_UNRESOLVED');
+    const failure = await readBinanceTestnetExitOrderEvidence(q,
+      async () => { throw new Error('timeout'); });
+    eq(failure.ok, false); eq(failure.state, 'UNKNOWN');
+    const wrong = await readBinanceTestnetExitOrderEvidence(q,
+      async () => ({ found: true, order: { status: 'FILLED',
+        clientOrderId: 'x5tother' } }));
+    eq(wrong.ok, false); eq(wrong.state, 'UNKNOWN');
   });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
