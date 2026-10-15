@@ -2,6 +2,7 @@ import { test, eq } from '../../test/harness';
 import { classifyExitRestart as decide } from './exitRestartReconcile';
 import { reconcileExitRestartReadOnly } from './exitRestartEvidence';
 import { gateRestartExitDispatch } from './exitRestartDispatch';
+import { binanceExitOrderStatus } from './exitRestartOrderStatus';
 
 export function runExitRestartReconcileTests() {
   console.log('\n🔒 #325 재시작 청산 대조 (가짜 거래소)');
@@ -135,6 +136,28 @@ export function runExitRestartReconcileTests() {
     });
     eq(r.code, 'ALREADY_FLAT'); eq(r.maySend, false);
     eq(r.verdict.mayMarkClosed, true);
+  });
+  test('Binance 상태 변환: 체결·부분 체결·취소·거부를 구분', () => {
+    const id = 'exit-stable-325';
+    for (const [raw, expected] of [
+      ['NEW', 'OPEN'], ['PARTIALLY_FILLED', 'PARTIAL'],
+      ['FILLED', 'FILLED'], ['CANCELED', 'CANCELLED'],
+      ['EXPIRED', 'CANCELLED'], ['REJECTED', 'REJECTED'],
+    ] as const) {
+      const r = binanceExitOrderStatus({ clientOrderId: id, status: raw }, id);
+      eq(r.ok, true); eq(r.state, expected);
+    }
+  });
+  test('Binance 상태 변환: 다른 주문 ID·빈 응답·알 수 없는 상태는 증거 아님', () => {
+    const id = 'exit-stable-325';
+    for (const raw of [
+      null, { clientOrderId: 'another-order', status: 'FILLED' },
+      { clientOrderId: id, status: 'SOMETHING_NEW' },
+      { clientOrderId: id, status: null },
+    ]) {
+      const r = binanceExitOrderStatus(raw, id);
+      eq(r.ok, false); eq(r.state, 'UNKNOWN');
+    }
   });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
