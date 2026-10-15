@@ -1047,6 +1047,9 @@ async function runLifecycleSweep(
         }
 
         let prepared: any = null;
+        // ②에서 정해지고 ④가 읽는다. 전송 허가와 기록 내구성을 함께 든다.
+        let sendGate: { maySend: boolean; code: string; reason: string;
+          durable: boolean; alert: boolean } | null = null;
         const r = await runExitAuthority(
           {
             positionIdentity: {
@@ -1079,6 +1082,58 @@ async function runLifecycleSweep(
                   reason: 'TIME_EXIT', quantity: observedQty,
                 }));
               prepared = p0.prepared;
+
+              // ── 전송 허가와 선점을 **여기서** 끝낸다 ──
+              //
+              //   ★ `revalidateFence()`와 `sendClose()` 사이에는 await를
+              //     끼우지 않는다(`exitAuthorityRun` 253줄의 불변식,
+              //     `criticalWindowElapsedMs`가 그 창을 잰다).
+              //
+              //     처음에 이 작업을 `sendClose` 안에 뒀다가 그 창에
+              //     **DB 조회 + 거래소 HTTP 왕복 + DB INSERT 셋**을
+              //     집어넣었다. 울타리가 막으려던 경합을 그만큼 넓힌
+              //     것이다. 독립 감사가 그것을 잡았고, 그래서 전부
+              //     울타리 앞으로 옮겼다.
+              //
+              //   준비가 READY가 아니면 보낼 것이 없으므로 묻지 않는다.
+              sendGate = null;
+              if (p0.code === 'READY' && p0.prepared) {
+                const { recordExitIntent, findExitIntent, judgeExitSendPermission } =
+                  await import('@/lib/engine/exitIntentStore');
+                const cid = String((p0.prepared as any)?.clientOrderId ?? '').trim();
+                const prior = await findExitIntent(sb as any, cid);
+                // 첫 전송이 확실하면 거래소를 괴롭히지 않는다.
+                const venueLookup = prior.recordFound === false ? null
+                  : await ops.findCloseByClientId(venue, c.symbol, cid)
+                      .catch(() => ({ ok: false, found: false }));
+                const perm = judgeExitSendPermission({
+                  prior: { ...prior, venueLookup, sendCount: undefined } });
+                if (!perm.maySend) {
+                  sendGate = { maySend: false, code: perm.code, reason: perm.reason,
+                    durable: prior.recordFound === true, alert: perm.code === 'BLOCKED_PRIOR_UNKNOWN' };
+                } else {
+                  // **선점한다.** UNIQUE 위반이 나면 다른 실행자가 같은
+                  // 의도를 먼저 잡은 것이고, 그때는 보내지 않는다.
+                  const wrote = await recordExitIntent(sb as any, {
+                    clientOrderId: cid,
+                    connectionId: c.connectionId,
+                    exchange: String(c.exchange),
+                    mode: c.mode,
+                    symbol: c.symbol,
+                    orderSide: (p0.prepared as any)?.orderSide === 'BUY' ? 'BUY' : 'SELL',
+                    quantity: Number((p0.prepared as any)?.quantity ?? 0),
+                    userId: c.userId,
+                  }, 'AUTOMATIC');
+                  sendGate = { maySend: wrote.maySend, code: wrote.code,
+                    reason: wrote.reason, durable: wrote.durable,
+                    alert: wrote.code === 'ALREADY_EXISTS' };
+                }
+                if (!sendGate.maySend) {
+                  out.exitDurability.push({ symbol: c.symbol, code: 'SEND_DEFERRED',
+                    alertOperator: sendGate.alert, intent: sendGate.code,
+                    reason: sendGate.reason });
+                }
+              }
               return { code: p0.code, prepared: p0.prepared as any, message: p0.message };
             },
             // ③-a 보유 연장 증거 — **권한이 청산을 승인한 뒤, 재검증 앞**
@@ -1116,67 +1171,19 @@ async function runLifecycleSweep(
             //   기록 실패는 **청산을 막지 않는다.** 못 썼다고 포지션에서
             //   빠져나갈 길을 막으면 못 여는 불편이 아니라 못 닫는
             //   사고가 된다. 그래서 기록하지 못한 사실만 따로 적는다.
+            // ④ 전송 — 읽지 않는다. **이 앞에 await가 없다.**
+            //
+            //   허가·선점은 ②에서 이미 끝났다. 여기서 DB나 거래소를
+            //   건드리면 울타리 재검증과 전송 사이가 벌어진다.
             sendClose: async () => {
-              const { recordExitIntent, markExitIntentResult, judgeExitDurability,
-                findExitIntent, judgeExitSendPermission } =
-                await import('@/lib/engine/exitIntentStore');
-              const cid = String(prepared?.clientOrderId ?? '').trim();
-
-              // ── 다시 보내는 것인가 ──
-              //
-              //   "기록 실패에도 청산 허용"과 "기록 불확실 시 재전송
-              //   금지"는 충돌이 아니다. **다른 질문에 대한 답이다.**
-              //   처음 보내는 것은 기록 실패에도 허가하고, 다시 보내는
-              //   것은 앞 시도가 끝났음을 확인했을 때만 허가한다.
-              //   장부를 못 읽었으면 거래소에 멱등 키로 물어본다 —
-              //   거래소가 최종 권위다.
-              const prior = await findExitIntent(sb as any, cid);
-              let venueLookup: { ok: boolean; found: boolean } | null = null;
-              if (prior.recordFound !== false) {
-                // 첫 전송이 확실한 경우에는 거래소를 괴롭히지 않는다.
-                venueLookup = await ops.findCloseByClientId(venue, c.symbol, cid)
-                  .catch(() => ({ ok: false, found: false }));
-              }
-              const perm = judgeExitSendPermission({
-                prior: { ...prior, venueLookup, sendCount: undefined },
-              });
-              if (!perm.maySend) {
-                out.exitDurability.push({ symbol: c.symbol, code: 'SEND_BLOCKED',
-                  alertOperator: perm.code === 'BLOCKED_PRIOR_UNKNOWN',
-                  intent: perm.code, reason: perm.reason });
-                // **보내지 않았다**를 그대로 돌려준다. 실패로 적지 않는다 —
-                // 실패로 적으면 다음 회차가 재시도 대상으로 읽는다.
-                return { attempted: false, ok: false, error: perm.reason,
+              if (sendGate && !sendGate.maySend) {
+                // **보내지 않았다**를 그대로 돌려준다. 실패로 적으면
+                // 다음 회차가 재시도 대상으로 읽는다.
+                return { attempted: false, ok: false, error: sendGate.reason,
                   ambiguous: false, reportedAvgPrice: null,
                   exchangeOrderId: null, executedQty: null };
               }
-
-              const wrote = await recordExitIntent(sb as any, {
-                clientOrderId: cid,
-                connectionId: c.connectionId,
-                exchange: String(c.exchange),
-                // **모드를 지어내지 않는다.** 못 읽었으면 적지 않는다 —
-                // 'TESTNET'으로 메우면 LIVE 청산이 TESTNET 장부에 남는다.
-                mode: c.mode,
-                symbol: c.symbol,
-                orderSide: prepared?.orderSide === 'BUY' ? 'BUY' : 'SELL',
-                quantity: Number(prepared?.quantity ?? 0),
-                userId: c.userId,
-              });
-              const sent = await ops.sendSymbolClose(venue, prepared);
-              // 결과를 적는다. **UNKNOWN을 거부로 적지 않는다.**
-              if (cid && wrote.durable) {
-                await markExitIntentResult(sb as any, cid,
-                  sent.ok === true ? 'ACKED' : sent.ambiguous === true ? 'UNKNOWN' : 'REJECTED',
-                  { exchangeOrderId: sent.exchangeOrderId ?? null,
-                    executedQty: sent.executedQty ?? null });
-              }
-              const dur = judgeExitDurability({
-                attempted: sent.attempted === true, durable: wrote.durable });
-              out.exitDurability.push({ symbol: c.symbol, code: dur.code,
-                alertOperator: dur.alertOperator,
-                intent: wrote.code, reason: dur.reason || wrote.reason || null });
-              return sent;
+              return ops.sendSymbolClose(venue, prepared);
             },
             // ⑤ 재조회
             readAfter: () => ops.readOpenPosition(venue, c.symbol)

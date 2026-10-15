@@ -84,75 +84,133 @@ export function runExitIntentStoreTests() {
 
   // ── ② 기록 실패가 청산을 막지 않는다 ──
 
-  test('★ 실패 ① DB 오류에서도 전송을 허가한다', async () => {
+  // ── 자동과 긴급의 장애 정책은 다르다 ──
+  //
+  //   처음에는 "기록 실패에도 무조건 전송 허가"로 적었다. 독립 감사가
+  //   그것이 자동 회차에서 중복 재전송을 허용한다고 지적했고, 맞다.
+  //   자동은 5분 뒤 다시 오므로 **미루면 된다.** 긴급은 사람이 눌렀고
+  //   다음 회차를 기다릴 수 없으므로 **보내야 한다.**
+
+  test('★ 실패 ① 자동 회차: DB 오류면 이번 회차를 미룬다', async () => {
+    const f = fakeStore({ insertError: { code: '42501' } });
+    const r = await recordExitIntent(f.store, intent(), 'AUTOMATIC');
+    eq(r.code, 'WRITE_FAILED'); eq(r.durable, false);
+    eq(r.maySend, false, '중복 아님을 증명할 수 없으면 보내지 않는다');
+    assert(/다음 회차/.test(r.reason), '영구 차단이 아님을 이유에 적는다');
+  });
+
+  test('★ 실패 ①-b 긴급 청산: DB 오류에도 보낸다', async () => {
+    const f = fakeStore({ insertError: { code: '42501' } });
+    const r = await recordExitIntent(f.store, intent(), 'EMERGENCY');
+    eq(r.code, 'WRITE_FAILED'); eq(r.durable, false);
+    eq(r.maySend, true, '사람이 누른 비상 정지가 DB 때문에 안 나가면 안 된다');
+    eq(r.duplicateRisk, true, '중복 위험을 숨기지 않는다');
+  });
+
+  test('★ 실패 ①-c 기본 정책은 자동이다 (긴급이 기본이면 전부 긴급이 된다)', async () => {
     const f = fakeStore({ insertError: { code: '42501' } });
     const r = await recordExitIntent(f.store, intent());
-    eq(r.code, 'WRITE_FAILED');
-    eq(r.durable, false);
-    eq(r.maySend, true,
-      '★ 못 썼다고 청산을 막으면 못 여는 불편이 아니라 못 닫는 사고가 된다');
+    eq(r.maySend, false, '정책을 안 적으면 자동으로 다룬다');
   });
 
-  test('★ 실패 ② 예외에서도 전송을 허가한다', async () => {
-    const f = fakeStore({ throwOn: 'insert' });
-    const r = await recordExitIntent(f.store, intent());
-    eq(r.code, 'WRITE_FAILED'); eq(r.maySend, true); eq(r.durable, false);
+  test('★ 실패 ② 예외도 정책을 따른다', async () => {
+    eq((await recordExitIntent(fakeStore({ throwOn: 'insert' }).store, intent(),
+      'AUTOMATIC')).maySend, false);
+    eq((await recordExitIntent(fakeStore({ throwOn: 'insert' }).store, intent(),
+      'EMERGENCY')).maySend, true);
   });
 
-  test('★ 실패 ③ 장부 핸들이 없어도 전송을 허가한다', async () => {
+  test('★ 실패 ③ 장부 핸들이 없어도 정책을 따른다', async () => {
     for (const sb of [null, undefined] as any[]) {
-      const r = await recordExitIntent(sb, intent());
-      eq(r.code, 'NO_STORE'); eq(r.maySend, true); eq(r.durable, false);
+      eq((await recordExitIntent(sb, intent(), 'AUTOMATIC')).maySend, false);
+      eq((await recordExitIntent(sb, intent(), 'EMERGENCY')).maySend, true);
     }
   });
 
   test('★ 실패 ③-b 모드를 모르면 기본값으로 메우지 않는다', async () => {
     const f = fakeStore();
     for (const m of [null, undefined, '', '  '] as any[]) {
-      const r = await recordExitIntent(f.store, intent({ mode: m }));
-      eq(r.code, 'WRITE_FAILED', String(m));
-      eq(r.durable, false);
-      eq(r.maySend, true, '모드를 몰라도 청산을 막지 않는다');
-      assert(/메우지 않습니다/.test(r.reason), '왜 안 적는지 적는다');
+      // 자동 회차: 기록할 수 없으니 미룬다.
+      const a = await recordExitIntent(f.store, intent({ mode: m }), 'AUTOMATIC');
+      eq(a.code, 'WRITE_FAILED', String(m));
+      eq(a.durable, false);
+      eq(a.maySend, false, '중복 아님을 증명할 수 없으면 미룬다');
+      // 긴급: 기록은 못 해도 보낸다.
+      const e = await recordExitIntent(f.store, intent({ mode: m }), 'EMERGENCY');
+      eq(e.maySend, true, '사람이 누른 비상 정지는 모드 불명에도 나간다');
+      eq(e.duplicateRisk, true);
     }
     eq(f.rows.length, 0, "★ 'TESTNET'으로 메운 행이 생기면 LIVE 청산이 섞인다");
   });
 
-  test('★ 실패 ④ 멱등 키가 없으면 적지 못하지만 전송은 막지 않는다', async () => {
+  test('★ 실패 ④ 멱등 키가 없으면 삽입을 시도하지 않는다', async () => {
     const f = fakeStore();
     for (const cid of ['', '   '] as any[]) {
-      const r = await recordExitIntent(f.store, intent({ clientOrderId: cid }));
-      eq(r.code, 'WRITE_FAILED'); eq(r.maySend, true);
+      const r = await recordExitIntent(f.store, intent({ clientOrderId: cid }), 'AUTOMATIC');
+      eq(r.code, 'WRITE_FAILED'); eq(r.maySend, false);
     }
-    eq(f.calls.insert, 0, '키가 없으면 삽입을 시도하지 않는다');
+    eq(f.calls.insert, 0);
   });
 
-  test('★ 실패 ⑤ 어떤 입력에서도 maySend가 거짓이 되지 않는다', async () => {
-    const cases = [
+  test('★ 실패 ⑤ 긴급은 어떤 장애에서도 길이 남는다 (영구 차단 없음)', async () => {
+    for (const f of [
       fakeStore({ insertError: { code: '23503' } }),
       fakeStore({ insertError: { code: 'PGRST301' } }),
       fakeStore({ throwOn: 'insert' }),
-      fakeStore(),
-    ];
-    for (const f of cases) {
-      const r = await recordExitIntent(f.store, intent());
-      eq(r.maySend, true, `maySend가 거짓이 됐다 (${r.code})`);
+    ]) {
+      eq((await recordExitIntent(f.store, intent(), 'EMERGENCY')).maySend, true);
     }
-    eq((await recordExitIntent(null as any, intent())).maySend, true);
+    eq((await recordExitIntent(null as any, intent(), 'EMERGENCY')).maySend, true);
   });
 
   // ── ③ 중복 워커 · 재시작 ──
 
-  test('★ 중복 ① 같은 멱등 키의 둘째 기록은 실패가 아니다', async () => {
+  test('★★ 중복 ① 선점에서 지면 보내지 않는다 (23505 ≠ 전송 허가)', async () => {
+    // 독립 감사가 잡은 결함이다. `ALREADY_EXISTS`에서 maySend:true를
+    // 돌려주면, 다른 워커가 방금 선점한 의도를 내가 또 보낸다.
     const f = fakeStore();
     const a = await recordExitIntent(f.store, intent());
     const b = await recordExitIntent(f.store, intent());
-    eq(a.code, 'RECORDED');
-    eq(b.code, 'ALREADY_EXISTS',
-      '재시작·중복 워커의 정상 경로다 — 실패로 적으면 둘째 워커가 재시도한다');
-    eq(b.durable, true, '기록은 남아 있다');
-    eq(b.maySend, true);
+    eq(a.code, 'RECORDED'); eq(a.maySend, true, '먼저 잡은 쪽은 보낸다');
+    eq(b.code, 'ALREADY_EXISTS');
+    eq(b.maySend, false,
+      '★ 기존 intent의 존재가 새 전송의 허가가 되어서는 안 된다');
     eq(f.rows.length, 1, '행이 두 개가 되지 않는다');
+  });
+
+  test('★★ 중복 ①-b 긴급도 선점을 뚫지 않는다', async () => {
+    // 같은 순간 다른 실행자가 이미 보내고 있는데 긴급이라고 하나 더
+    // 보내면 두 건이 나간다. 긴급의 목적은 "막힌 청산을 뚫는 것"이고
+    // "중복을 만드는 것"이 아니다.
+    const f = fakeStore();
+    await recordExitIntent(f.store, intent());
+    const b = await recordExitIntent(f.store, intent(), 'EMERGENCY');
+    eq(b.code, 'ALREADY_EXISTS'); eq(b.maySend, false);
+  });
+
+  test('★★ 중복 ①-c 동시 워커 3개 — 정확히 하나만 보낸다', async () => {
+    const f = fakeStore();
+    const rs = await Promise.all([
+      recordExitIntent(f.store, intent()),
+      recordExitIntent(f.store, intent()),
+      recordExitIntent(f.store, intent()),
+    ]);
+    const allowed = rs.filter(r => r.maySend);
+    eq(allowed.length, 1, `전송 허가가 ${allowed.length}건이다 — 정확히 1건이어야 한다`);
+    eq(allowed[0].code, 'RECORDED');
+    eq(f.rows.length, 1);
+    for (const r of rs.filter(r => !r.maySend)) eq(r.code, 'ALREADY_EXISTS');
+  });
+
+  test('★★ 중복 ①-d 동시 워커 3개 + 긴급 섞임 — 여전히 하나만', async () => {
+    const f = fakeStore();
+    const rs = await Promise.all([
+      recordExitIntent(f.store, intent(), 'AUTOMATIC'),
+      recordExitIntent(f.store, intent(), 'EMERGENCY'),
+      recordExitIntent(f.store, intent(), 'EMERGENCY'),
+    ]);
+    eq(rs.filter(r => r.maySend).length, 1,
+      '긴급이 섞여도 선점은 하나다 — 긴급이 중복을 만들지 않는다');
   });
 
   test('★ 중복 ② 수량이 다르면 다른 키이므로 다른 행이다 (부분 체결 뒤)', async () => {

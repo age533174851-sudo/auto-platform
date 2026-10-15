@@ -67,21 +67,54 @@ export interface ExitIntentRecord {
 }
 
 export type ExitIntentWriteCode =
-  /** 새로 적었다 */
+  /** 새로 적었다 — 이 의도를 **내가 선점했다** */
   | 'RECORDED'
-  /** 같은 키의 행이 이미 있다 — 재시작·중복 워커의 정상 경로다 */
+  /**
+   * 같은 키의 행이 이미 있다 (UNIQUE 위반).
+   *
+   * ★ **이것은 전송 허가가 아니다.** 앞서 `findExitIntent`가 "없다"고
+   *   읽었는데 INSERT가 충돌했다는 것은, 그 사이에 **다른 워커가 같은
+   *   의도를 선점했다**는 뜻이다. 경쟁에서 졌으면 상대가 보내고 있다 —
+   *   내가 또 보내면 중복 청산이다.
+   *
+   *   (같은 워커가 재시작 후 재시도하는 경우는 여기 오지 않는다.
+   *   그때는 `findExitIntent`가 행을 찾고 `judgeExitSendPermission`이
+   *   그 상태를 보고 판단한다.)
+   */
   | 'ALREADY_EXISTS'
-  /** 적지 못했다. **전송을 막지 않는다** */
+  /** 적지 못했다 */
   | 'WRITE_FAILED'
   /** 적을 수단이 없다 (DB 핸들 없음) */
   | 'NO_STORE';
+
+/**
+ * 자동 회차와 긴급 수동 청산의 **장애 정책은 다르다.**
+ *
+ *   AUTOMATIC  5분마다 다시 온다. 기록하지 못해 중복 아님을 증명할 수
+ *              없으면 **이번 회차를 미룬다** — 영구 차단이 아니다.
+ *   EMERGENCY  사람이 버튼을 눌렀고 다음 회차를 기다릴 수 없다.
+ *              기록하지 못해도 **보낸다** — 중복 위험을 안고 간다.
+ *
+ * 둘을 한 정책으로 묶으면 한쪽이 반드시 틀린다. 자동에 긴급 정책을
+ * 쓰면 DB 장애 때 무한 재전송이 되고, 긴급에 자동 정책을 쓰면 사람이
+ * 누른 비상 정지가 DB 때문에 안 나간다.
+ */
+export type ExitSendPolicy = 'AUTOMATIC' | 'EMERGENCY';
 
 export interface ExitIntentWriteResult {
   code: ExitIntentWriteCode;
   /** 기록이 남았는가. false면 재시작 뒤 이 주문을 찾을 수 없다 */
   durable: boolean;
-  /** 전송해도 되는가. **기록 실패에서도 참이다** */
+  /**
+   * 전송해도 되는가.
+   *
+   * ★ **`ALREADY_EXISTS`에서는 거짓이다.** 기존 intent의 존재가 새
+   *   전송의 허가가 되어서는 안 된다.
+   * ★ 기록 실패(`WRITE_FAILED`·`NO_STORE`)에서는 **정책에 따라 다르다.**
+   */
   maySend: boolean;
+  /** 이 전송이 중복일 수 있는가 */
+  duplicateRisk: boolean;
   reason: string;
 }
 
@@ -106,22 +139,25 @@ export const PENDING_EXIT_STATUSES = ['INTENT', 'SENT', 'ACKED', 'UNKNOWN'] as c
 export async function recordExitIntent(
   sb: MinimalStore | null | undefined,
   r: ExitIntentRecord,
+  policy: ExitSendPolicy = 'AUTOMATIC',
 ): Promise<ExitIntentWriteResult> {
-  if (sb == null) {
-    return { code: 'NO_STORE', durable: false, maySend: true,
-      reason: '장부를 쓸 수 없습니다 — 기록 없이 전송합니다 (청산을 막지 않습니다)' };
-  }
+  // 기록하지 못했을 때의 답. **자동과 긴급이 다르다.**
+  const unrecorded = (code: ExitIntentWriteCode, why: string): ExitIntentWriteResult =>
+    policy === 'EMERGENCY'
+      ? { code, durable: false, maySend: true, duplicateRisk: true,
+          reason: `${why} — 긴급 청산이라 중복 위험을 안고 보냅니다` }
+      : { code, durable: false, maySend: false, duplicateRisk: false,
+          reason: `${why} — 중복 아님을 증명할 수 없어 이번 회차를 미룹니다`
+            + ' (다음 회차에 다시 봅니다)' };
+
+  if (sb == null) return unrecorded('NO_STORE', '장부를 쓸 수 없습니다');
   const cid = String(r?.clientOrderId ?? '').trim();
-  if (!cid) {
-    return { code: 'WRITE_FAILED', durable: false, maySend: true,
-      reason: '멱등 키가 없어 기록할 수 없습니다 — 전송은 막지 않습니다' };
-  }
+  if (!cid) return unrecorded('WRITE_FAILED', '멱등 키가 없어 기록할 수 없습니다');
   const mode = String(r?.mode ?? '').trim();
   if (!mode) {
     // **모드를 메우지 않는다.** 어느 장부인지 모르는 행을 만들면
     // MOCK·TESTNET·LIVE가 섞이고, 그 섞임은 되돌릴 수 없다.
-    return { code: 'WRITE_FAILED', durable: false, maySend: true,
-      reason: '운영 모드를 읽지 못해 기록할 수 없습니다 — 기본값으로 메우지 않습니다. 전송은 막지 않습니다' };
+    return unrecorded('WRITE_FAILED', '운영 모드를 읽지 못해 기록할 수 없습니다');
   }
   try {
     const { error } = await sb.from('live_orders').insert({
@@ -140,19 +176,30 @@ export async function recordExitIntent(
       ...(r.userId ? { user_id: r.userId } : {}),
     }).select('id, status').single();
     if (error) {
-      // 23505 = unique 위반. **중복은 실패가 아니다** — 재시작했거나
-      // 다른 워커가 같은 의도를 이미 적은 것이고, 둘 다 정상이다.
+      // ── 23505 = UNIQUE 위반 ──
+      //
+      //   **이 INSERT는 선점(claim)이다.** 앞서 조회가 "없다"고 읽었는데
+      //   충돌했다는 것은 그 사이에 다른 워커가 같은 의도를 선점했다는
+      //   뜻이다. 경쟁에서 졌으면 상대가 보내고 있다 — 내가 또 보내면
+      //   중복 청산이다.
+      //
+      //   **기록이 있다는 사실이 전송 허가가 아니다.** 긴급도 예외가
+      //   아니다: 같은 순간 다른 실행자가 이미 보내고 있는데 긴급이라고
+      //   하나 더 보내면 두 건이 나간다.
       if (String((error as any)?.code) === '23505') {
-        return { code: 'ALREADY_EXISTS', durable: true, maySend: true,
-          reason: '같은 멱등 키의 청산 의도가 이미 기록돼 있습니다' };
+        return { code: 'ALREADY_EXISTS', durable: true, maySend: false,
+          duplicateRisk: false,
+          reason: '같은 멱등 키의 청산 의도를 다른 실행자가 이미 선점했습니다'
+            + ' — 이번 회차에는 보내지 않습니다' };
       }
-      return { code: 'WRITE_FAILED', durable: false, maySend: true,
-        reason: `청산 의도를 기록하지 못했습니다 — 전송은 막지 않습니다 (${String((error as any)?.code ?? 'unknown')})` };
+      return unrecorded('WRITE_FAILED',
+        `청산 의도를 기록하지 못했습니다 (${String((error as any)?.code ?? 'unknown')})`);
     }
-    return { code: 'RECORDED', durable: true, maySend: true, reason: '' };
+    return { code: 'RECORDED', durable: true, maySend: true,
+      duplicateRisk: false, reason: '' };
   } catch (e: any) {
-    return { code: 'WRITE_FAILED', durable: false, maySend: true,
-      reason: `청산 의도 기록이 예외로 끝났습니다 — 전송은 막지 않습니다 (${String(e?.message ?? e).slice(0, 80)})` };
+    return unrecorded('WRITE_FAILED',
+      `청산 의도 기록이 예외로 끝났습니다 (${String(e?.message ?? e).slice(0, 80)})`);
   }
 }
 

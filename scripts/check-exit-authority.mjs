@@ -542,6 +542,45 @@ const store = code(read(STORE));
   }
 }
 
+// ══════════════════════════════════════════════════════════
+// 울타리 재검증과 전송 사이에 await가 없다
+// ══════════════════════════════════════════════════════════
+//
+//   `exitAuthorityRun`은 `revalidateFence()` 직후에 `sendClose()`를
+//   부른다(253줄 불변식, `criticalWindowElapsedMs`가 그 창을 잰다).
+//   그 사이가 벌어지면 울타리가 막으려던 경합이 그만큼 열린다.
+//   한 번 그 창에 **DB 조회 + 거래소 HTTP 왕복 + DB INSERT**가 들어간
+//   적이 있다 — 독립 감사가 잡았다. 그래서 소스에서 막는다.
+{
+  const MON = 'src/app/api/autotrade/exit-monitor/route.ts';
+  const src = read(MON);
+  if (src == null) err(`${MON}을(를) 읽지 못했습니다`);
+  else {
+    const c = code(src);
+    const m = /sendClose:\s*async\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s{12}\},/.exec(c);
+    if (m) {
+      const body = m[1];
+      const n = (body.match(/\bawait\b/g) || []).length;
+      if (n > 0) {
+        err(`${MON}: sendClose 본문에 await가 ${n}개 있습니다`
+          + ' — 울타리 재검증과 전송 사이가 벌어집니다.'
+          + ' 허가·기록·조회는 prepareClose(울타리 앞)에서 끝내세요');
+      }
+      if (/import\(/.test(body)) {
+        err(`${MON}: sendClose 본문에서 동적 import를 합니다 — 임계 창이 벌어집니다`);
+      }
+      for (const bad2 of ['recordExitIntent', 'findExitIntent',
+        'findCloseByClientId', 'judgeExitSendPermission']) {
+        if (body.includes(bad2)) {
+          err(`${MON}: sendClose 본문에서 ${bad2}를 부릅니다 — 울타리 앞으로 옮기세요`);
+        }
+      }
+    } else if (!/sendClose:\s*\(\)\s*=>/.test(c)) {
+      err(`${MON}: sendClose 주입을 찾지 못했습니다`);
+    }
+  }
+}
+
 if (bad > 0) {
   console.error(`\n종료 권한 배선 검사 실패 (${bad}건)`);
   console.error('\n   거래소 쓰기는 되돌릴 수 없습니다. 권한 확인이 먼저입니다.');
