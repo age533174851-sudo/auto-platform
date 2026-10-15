@@ -1,5 +1,6 @@
 import { test, eq } from '../../test/harness';
 import { classifyExitRestart as decide } from './exitRestartReconcile';
+import { reconcileExitRestartReadOnly } from './exitRestartEvidence';
 
 export function runExitRestartReconcileTests() {
   console.log('\n🔒 #325 재시작 청산 대조 (가짜 거래소)');
@@ -47,6 +48,38 @@ export function runExitRestartReconcileTests() {
     const r = decide({ intent: 'NONE', position: { ok: true, found: false },
       order: { ok: true, state: 'FILLED' } });
     eq(r.code, 'NO_INTENT'); eq(r.mayMarkClosed, false);
+  });
+  test('재시작 2회: 같은 영속 주문 ID로만 조회하고 신규 전송은 없다', async () => {
+    const calls: string[] = [];
+    const durable = { clientOrderId: 'exit-abc', state: 'UNKNOWN' as const };
+    const reads = {
+      loadIntent: async () => { calls.push('load'); return durable; },
+      readPosition: async () => { calls.push('position'); return { ok: true, found: true }; },
+      readOrder: async (id: string) => { calls.push('order:' + id);
+        return { ok: true, state: 'NOT_FOUND' as const }; },
+    };
+    const a = await reconcileExitRestartReadOnly(reads);
+    const b = await reconcileExitRestartReadOnly(reads);
+    eq(a.mayResend, false); eq(b.mayResend, false);
+    eq(a.needsReconcile, true); eq(b.needsReconcile, true);
+    eq(calls.join(','), 'load,position,order:exit-abc,load,position,order:exit-abc');
+  });
+  test('영속 주문 ID가 없으면 거래소를 조회하지 않고 차단', async () => {
+    let queried = 0;
+    const r = await reconcileExitRestartReadOnly({
+      loadIntent: async () => ({ clientOrderId: null, state: 'SENT' }),
+      readPosition: async () => { queried++; return { ok: true, found: false }; },
+      readOrder: async () => { queried++; return { ok: true, state: 'FILLED' }; },
+    });
+    eq(queried, 0); eq(r.code, 'READ_FAILED'); eq(r.mayMarkClosed, false);
+  });
+  test('재시작 대조에서 주문 조회 예외는 종료가 아니다', async () => {
+    const r = await reconcileExitRestartReadOnly({
+      loadIntent: async () => ({ clientOrderId: 'exit-abc', state: 'UNKNOWN' }),
+      readPosition: async () => ({ ok: true, found: false }),
+      readOrder: async () => { throw new Error('timeout'); },
+    });
+    eq(r.code, 'ORDER_UNRESOLVED'); eq(r.mayMarkClosed, false);
   });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
