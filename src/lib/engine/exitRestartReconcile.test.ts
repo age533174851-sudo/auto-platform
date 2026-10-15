@@ -64,6 +64,21 @@ export function runExitRestartReconcileTests() {
     eq(a.needsReconcile, true); eq(b.needsReconcile, true);
     eq(calls.join(','), 'load,position,order:exit-abc,load,position,order:exit-abc');
   });
+  test('동시 재시작 워커 3개: 같은 영속 주문 ID 조회만 하고 재전송 권한 0', async () => {
+    const ids: string[] = [];
+    const reads = {
+      loadIntent: async () => ({ clientOrderId: 'exit-stable-325', state: 'UNKNOWN' as const }),
+      readPosition: async () => ({ ok: true, found: true }),
+      readOrder: async (id: string) => { ids.push(id);
+        return { ok: true, state: 'NOT_FOUND' as const }; },
+    };
+    const verdicts = await Promise.all(Array.from({ length: 3 }, () =>
+      reconcileExitRestartReadOnly(reads)));
+    eq(ids.length, 3);
+    eq(ids.every(id => id === 'exit-stable-325'), true);
+    eq(verdicts.every(v => v.code === 'ORDER_UNRESOLVED'
+      && v.mayResend === false && v.mayMarkClosed === false), true);
+  });
   test('영속 주문 ID가 없으면 거래소를 조회하지 않고 차단', async () => {
     let queried = 0;
     const r = await reconcileExitRestartReadOnly({
