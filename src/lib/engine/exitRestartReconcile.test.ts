@@ -81,6 +81,20 @@ export function runExitRestartReconcileTests() {
     });
     eq(r.code, 'ORDER_UNRESOLVED'); eq(r.mayMarkClosed, false);
   });
+  test('거부된 영속 의도와 체결된 거래소 주문이 충돌하면 종료 기록 금지', () => {
+    const r = decide({ intent: 'REJECTED', position: { ok: true, found: false },
+      order: { ok: true, state: 'FILLED' } });
+    eq(r.code, 'ORDER_UNRESOLVED'); eq(r.mayMarkClosed, false); eq(r.mayResend, false);
+  });
+  test('영속 기록 조회 예외 시 포지션·주문 조회 자체를 하지 않는다', async () => {
+    let queried = 0;
+    const r = await reconcileExitRestartReadOnly({
+      loadIntent: async () => { throw new Error('db unavailable'); },
+      readPosition: async () => { queried++; return { ok: true, found: false }; },
+      readOrder: async () => { queried++; return { ok: true, state: 'FILLED' }; },
+    });
+    eq(queried, 0); eq(r.code, 'READ_FAILED'); eq(r.mayResend, false);
+  });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
       order: { ok: true, state: 'FILLED' } });
