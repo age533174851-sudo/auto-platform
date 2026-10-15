@@ -21,7 +21,11 @@
 import { preflightVerdict, holdUntilMs, SMOKE_STRATEGY_ID } from './smokePlan';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
 
-export type AttemptSource = 'USER' | 'FLY_WORKER' | 'GITHUB_FALLBACK';
+// 누가 이 회차를 깨웠는가.
+//
+// **`GITHUB_DISPATCH`는 사람이 화면을 열지 않고 돌린 스모크다** —
+// 09:00 KST 전략 평가가 낸 주문과 장부에서 섞이지 않게 따로 적는다.
+export type AttemptSource = 'USER' | 'FLY_WORKER' | 'GITHUB_FALLBACK' | 'GITHUB_DISPATCH';
 
 export interface StartAttemptInput {
   userId: string;

@@ -11,7 +11,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   sideForAttempt, runRequestVerdict, advanceVerdict, runProgress,
-  runMetrics, runSummary,
+  runMetrics, runSummary, headlessStartVerdict, HEADLESS_START_CONFIRM,
   ATTEMPT_CHOICES, MAX_ATTEMPTS, DEFAULT_ATTEMPTS,
   type AttemptSummary, type DirectionMode,
 } from './smokeRun';
@@ -269,5 +269,75 @@ export function runSmokeRunTests() {
     ]);
     eq(m.entryLatencyMsAvg, 400);
     eq(m.exitLatencyMsAvg, 800);
+  });
+
+  console.log('[무인 시작 — 대상을 적지 않으면 주문을 내지 않는다]');
+
+  /** 통과하는 최소 본문 */
+  const HL = (over: any = {}) => ({
+    userId: 'u-1', connectionId: 'conn-abcdef0123',
+    confirm: HEADLESS_START_CONFIRM, ...over,
+  });
+
+  test('세 가지가 모두 있으면 무인 시작을 받는다', () => {
+    const v = headlessStartVerdict(HL());
+    assert(v.ok, v.message);
+    eq(v.code, 'OK');
+    eq(v.userId, 'u-1');
+  });
+
+  test('userId가 비면 거절한다 — 빈 값을 "전체"로 읽지 않는다', () => {
+    // `/advance`는 대상을 비우면 "도는 것 전부"가 맞다. 시작에서
+    // 그렇게 읽으면 **없던 주문이 사용자 수만큼 생긴다.**
+    for (const bad of [undefined, null, '', '   ']) {
+      const v = headlessStartVerdict(HL({ userId: bad }));
+      assert(!v.ok, `userId=${JSON.stringify(bad)}인데 통과했습니다`);
+      eq(v.code, 'USER_REQUIRED');
+      eq(v.userId, null);
+    }
+  });
+
+  test('connectionId가 비면 거절한다', () => {
+    for (const bad of [undefined, null, '', '  ']) {
+      const v = headlessStartVerdict(HL({ connectionId: bad }));
+      assert(!v.ok, `connectionId=${JSON.stringify(bad)}인데 통과했습니다`);
+      eq(v.code, 'CONNECTION_REQUIRED');
+    }
+  });
+
+  test('확인 문구가 없거나 다르면 거절한다', () => {
+    // 스케줄러나 재시도 루프가 이 경로를 긁어도 주문이 나가지 않는
+    // 마지막 관문이다.
+    for (const bad of [undefined, null, '', 'yes', 'TESTNET', 'testnet-smoke-order',
+      HEADLESS_START_CONFIRM + ' ', ' ' + HEADLESS_START_CONFIRM]) {
+      const v = headlessStartVerdict(HL({ confirm: bad }));
+      assert(!v.ok, `confirm=${JSON.stringify(bad)}인데 통과했습니다`);
+      eq(v.code, 'CONFIRM_REQUIRED');
+    }
+  });
+
+  test('빈 본문·이상한 본문에 던지지 않는다', () => {
+    for (const body of [undefined, null, {}, 0, '', [], 'nope']) {
+      const v = headlessStartVerdict(body);
+      assert(!v.ok, `${JSON.stringify(body)}가 통과했습니다`);
+      eq(v.userId, null);
+    }
+  });
+
+  test('판정 문구에 연결 id를 통째로 적지 않는다', () => {
+    // 이 줄은 로그에 남는다.
+    const full = 'conn-0123456789abcdef';
+    const v = headlessStartVerdict(HL({ connectionId: full }));
+    assert(v.ok, v.message);
+    assert(!v.message.includes(full), `연결 id 전체가 문구에 남았습니다: ${v.message}`);
+  });
+
+  test('TESTNET 여부를 이 판정이 대신 말하지 않는다', () => {
+    // 거래소 연결을 실제로 읽는 `startAttempt`가 정한다
+    // (`is_testnet !== true` → 403). 같은 판단을 두 곳에 두면
+    // 언젠가 느슨한 쪽이 주문을 내보낸다.
+    const v = headlessStartVerdict(HL({ testnet: false, mode: 'LIVE' }));
+    assert(v.ok, '본문의 mode·testnet 칸은 이 판정의 입력이 아니다');
+    eq(v.code, 'OK');
   });
 }
