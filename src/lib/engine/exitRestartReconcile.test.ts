@@ -1,6 +1,7 @@
 import { test, eq } from '../../test/harness';
 import { classifyExitRestart as decide } from './exitRestartReconcile';
 import { reconcileExitRestartReadOnly } from './exitRestartEvidence';
+import { gateRestartExitDispatch } from './exitRestartDispatch';
 
 export function runExitRestartReconcileTests() {
   console.log('\n🔒 #325 재시작 청산 대조 (가짜 거래소)');
@@ -109,6 +110,31 @@ export function runExitRestartReconcileTests() {
       readOrder: async () => { queried++; return { ok: true, state: 'FILLED' }; },
     });
     eq(queried, 0); eq(r.code, 'READ_FAILED'); eq(r.mayResend, false);
+  });
+  test('재시작 발송 관문: 주문 미확인 시 새 주문 허가하지 않음', async () => {
+    const r = await gateRestartExitDispatch({
+      loadIntent: async () => ({ clientOrderId: 'exit-325', state: 'UNKNOWN' }),
+      readPosition: async () => ({ ok: true, found: true }),
+      readOrder: async () => ({ ok: true, state: 'NOT_FOUND' }),
+    });
+    eq(r.code, 'RECONCILE_REQUIRED'); eq(r.maySend, false);
+  });
+  test('재시작 발송 관문: DB 장애 시 신규 주문 허가하지 않음', async () => {
+    const r = await gateRestartExitDispatch({
+      loadIntent: async () => { throw new Error('storage down'); },
+      readPosition: async () => { throw new Error('must not read'); },
+      readOrder: async () => { throw new Error('must not read'); },
+    });
+    eq(r.code, 'NO_DURABLE_INTENT'); eq(r.maySend, false);
+  });
+  test('재시작 발송 관문: 체결·포지션 0 확인 시에도 재전송하지 않음', async () => {
+    const r = await gateRestartExitDispatch({
+      loadIntent: async () => ({ clientOrderId: 'exit-325', state: 'FILLED' }),
+      readPosition: async () => ({ ok: true, found: false }),
+      readOrder: async () => ({ ok: true, state: 'FILLED' }),
+    });
+    eq(r.code, 'ALREADY_FLAT'); eq(r.maySend, false);
+    eq(r.verdict.mayMarkClosed, true);
   });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
