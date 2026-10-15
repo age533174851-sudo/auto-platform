@@ -90,9 +90,7 @@ export interface MinimalStore {
   from(table: string): {
     insert(row: any): { select(cols: string): { single(): Promise<{ data: any; error: any }> } };
     update(patch: any): { eq(col: string, val: any): Promise<{ error: any }> };
-    select(cols: string): {
-      eq(col: string, val: any): any;
-    };
+    select(cols: string): { eq(col: string, val: any): any };
   };
 }
 
@@ -155,6 +153,30 @@ export async function recordExitIntent(
   } catch (e: any) {
     return { code: 'WRITE_FAILED', durable: false, maySend: true,
       reason: `청산 의도 기록이 예외로 끝났습니다 — 전송은 막지 않습니다 (${String(e?.message ?? e).slice(0, 80)})` };
+  }
+}
+
+/**
+ * 이 멱등 키의 앞 시도를 장부에서 찾는다.
+ *
+ * ★ **못 읽은 것과 없는 것을 가른다.** `recordFound: undefined`가
+ *   "못 읽었다"이고 `false`가 "없다"다. 둘을 섞으면 중복 주문이 난다.
+ */
+export async function findExitIntent(
+  sb: MinimalStore | null | undefined, clientOrderId: string,
+): Promise<{ recordFound: boolean | undefined; recordStatus: string | undefined }> {
+  const cid = String(clientOrderId ?? '').trim();
+  if (sb == null || !cid) return { recordFound: undefined, recordStatus: undefined };
+  try {
+    const q: any = sb.from('live_orders').select('status').eq('client_order_id', cid);
+    const r = typeof q?.maybeSingle === 'function' ? await q.maybeSingle() : await q;
+    if (r?.error) return { recordFound: undefined, recordStatus: undefined };
+    const row = Array.isArray(r?.data) ? r.data[0] : r?.data;
+    if (row == null) return { recordFound: false, recordStatus: undefined };
+    const st = typeof row?.status === 'string' ? row.status : undefined;
+    return { recordFound: true, recordStatus: st };
+  } catch {
+    return { recordFound: undefined, recordStatus: undefined };
   }
 }
 
@@ -244,4 +266,163 @@ export function judgeExitDurability(i: {
     reason: '청산 주문을 보냈지만 기록이 남지 않았습니다'
       + ' — 재시작하면 이 주문을 멱등 키로 찾을 수 없습니다. 거래소에서 직접 확인해야 합니다',
   };
+}
+
+// ══════════════════════════════════════════════════════════
+// 전송 허가 — 처음 보내는 것과 다시 보내는 것은 다른 질문이다
+// ══════════════════════════════════════════════════════════
+//
+// 두 정책이 충돌하는 것처럼 보였다
+// ────────────────────────────────
+//   · 이 파일(#331): **기록 실패에도 청산을 허용한다.** 못 썼다고
+//     빠져나갈 길을 막으면 못 닫는 사고가 된다.
+//   · #330의 분류기: **기록이 불확실하면 재전송을 금지한다.** 살아
+//     있는 주문이 있는데 또 보내면 중복 청산이 된다.
+//
+// 둘은 충돌하지 않는다. **다른 질문에 대한 답이다.**
+//
+//     처음 보내는 것   → 기록 실패에도 허가한다 (청산 가능성 보존)
+//     다시 보내는 것   → 기록이 확실할 때만 허가한다 (중복 차단)
+//
+// 그리고 확실할 때도 **무제한은 아니다.** 자동 재시작이 같은 키로
+// 반복 전송하면, 각 회차가 "증거가 있다"고 판단하면서도 전체로는
+// 무한 루프가 된다. 그래서 횟수 상한을 둔다.
+//
+// ★ 긴급 청산 가능성은 보존된다. `emergency: true`는 **명시적 결정**이고
+//   기록에 남는다 — 기본값이 아니다. 기본값이면 모든 회차가 긴급이 된다.
+
+/** 같은 멱등 키로 보낼 수 있는 최대 횟수. 이 저장소의 감시 주기는 5분이다 */
+export const MAX_SENDS_PER_KEY = 3;
+
+export type ExitSendPermissionCode =
+  /** 이 노출에 대한 첫 전송이다 — 기록 실패에도 보낸다 */
+  | 'FIRST_SEND'
+  /** 앞 시도가 끝났음이 확인됐다 — 다시 보내도 된다 */
+  | 'RESEND_PRIOR_RESOLVED'
+  /** 앞 시도가 아직 살아 있다 — 보내지 않는다 */
+  | 'BLOCKED_PRIOR_LIVE'
+  /** 앞 시도의 상태를 모른다 — **보내지 않는다** */
+  | 'BLOCKED_PRIOR_UNKNOWN'
+  /** 같은 키로 이미 상한만큼 보냈다 */
+  | 'BLOCKED_ATTEMPT_CAP'
+  /** 긴급 종료로 명시적으로 허가됐다 */
+  | 'EMERGENCY_OVERRIDE';
+
+export interface ExitSendPermission {
+  maySend: boolean;
+  code: ExitSendPermissionCode;
+  /** 이 전송이 중복일 수 있는가. 허가해도 참일 수 있다 */
+  duplicateRisk: boolean;
+  reason: string;
+}
+
+/**
+ * 앞 시도에 대해 **확실히 아는 것**만 넘긴다.
+ *
+ * 세 값 모두 "모름"을 표현할 수 있어야 한다. `false`로 메우면
+ * "없다"와 "모른다"가 같은 값이 되고, 그 섞임이 중복 주문을 만든다.
+ */
+export interface PriorAttemptEvidence {
+  /**
+   * 장부에서 이 멱등 키의 행을 읽었는가.
+   * `undefined` = 장부를 못 읽었다 (false와 다르다)
+   */
+  recordFound: boolean | undefined;
+  /** 그 행의 상태. 못 읽었으면 undefined */
+  recordStatus: string | undefined;
+  /**
+   * 거래소에 이 멱등 키로 물어본 결과.
+   * `ok: false`면 **물어보지 못한 것**이고 "없다"가 아니다.
+   */
+  venueLookup: { ok: boolean; found: boolean } | null;
+  /** 이 키로 지금까지 보낸 횟수. 모르면 undefined */
+  sendCount: number | undefined;
+}
+
+const TERMINAL_EXIT_STATUSES = ['FILLED', 'REJECTED', 'FAILED', 'RECONCILED'] as const;
+
+/**
+ * 이 전송을 보내도 되는가.
+ *
+ * ★ 판정 순서가 의미다. 긴급을 먼저 보고, 그다음 "처음인가"를 보고,
+ *   재전송은 가장 엄격하게 본다.
+ */
+export function judgeExitSendPermission(i: {
+  prior?: PriorAttemptEvidence | null;
+  /** 긴급 종료로 명시적으로 허가됐는가. **기본값은 거짓이다** */
+  emergency?: boolean | null;
+  maxSends?: number | null;
+} | null | undefined): ExitSendPermission {
+  const cap = Number.isFinite(i?.maxSends as number) && (i?.maxSends as number) > 0
+    ? (i!.maxSends as number) : MAX_SENDS_PER_KEY;
+  const p = i?.prior ?? null;
+  const sent = Number.isFinite(p?.sendCount as number) ? (p!.sendCount as number) : undefined;
+
+  // ── 상한은 긴급보다도 앞이다 ──
+  //
+  //   긴급이 상한을 무시하면, 긴급 경로가 무한 재전송 경로가 된다.
+  //   상한에 걸렸다는 것은 세 번 보냈는데도 안 끝났다는 뜻이고, 그때
+  //   필요한 것은 네 번째 주문이 아니라 사람이다.
+  if (sent != null && sent >= cap) {
+    return { maySend: false, code: 'BLOCKED_ATTEMPT_CAP', duplicateRisk: false,
+      reason: `같은 멱등 키로 이미 ${sent}번 보냈습니다 (상한 ${cap})`
+        + ' — 네 번째 주문이 아니라 사람이 필요한 상태입니다' };
+  }
+
+  if (i?.emergency === true) {
+    return { maySend: true, code: 'EMERGENCY_OVERRIDE', duplicateRisk: true,
+      reason: '긴급 종료로 명시적으로 허가됐습니다 — 중복 가능성을 안고 보냅니다' };
+  }
+
+  // ── 처음 보내는가 ──
+  //
+  //   장부를 **읽었고** 그 키의 행이 없으면 첫 전송이다.
+  //   장부를 못 읽었으면(undefined) 첫 전송인지 알 수 없다 — 아래로 간다.
+  if (p?.recordFound === false) {
+    return { maySend: true, code: 'FIRST_SEND', duplicateRisk: false,
+      reason: '' };
+  }
+
+  // 장부도 못 읽었고 거래소에도 못 물어봤다. **첫 전송인지조차 모른다.**
+  //
+  //   이 자리에서 보내면 중복 위험이고, 막으면 첫 전송까지 막힌다.
+  //   거래소에 물어볼 수 있으면 그것이 답이다 — 아래가 그 경로다.
+  if (p == null || p.recordFound === undefined) {
+    const lk = p?.venueLookup ?? null;
+    if (lk?.ok === true && lk.found === false) {
+      // 장부는 못 읽었지만 **거래소가 "그런 주문 없다"고 했다.**
+      // 거래소가 최종 권위다 — 보내도 된다.
+      return { maySend: true, code: 'FIRST_SEND', duplicateRisk: false,
+        reason: '장부를 읽지 못했지만 거래소에 그 멱등 키의 주문이 없습니다' };
+    }
+    if (lk?.ok === true && lk.found === true) {
+      return { maySend: false, code: 'BLOCKED_PRIOR_LIVE', duplicateRisk: false,
+        reason: '거래소에 같은 멱등 키의 주문이 있습니다 — 다시 보내지 않습니다' };
+    }
+    return { maySend: false, code: 'BLOCKED_PRIOR_UNKNOWN', duplicateRisk: false,
+      reason: '장부도 거래소도 읽지 못해 앞 시도가 살아 있는지 모릅니다'
+        + ' — 모르는 상태에서 같은 주문을 또 보내지 않습니다'
+        + ' (긴급 종료는 명시적으로 허가해야 합니다)' };
+  }
+
+  // ── 여기부터 recordFound === true. 재전송 질문이다 ──
+  const st = String(p.recordStatus ?? '').trim().toUpperCase();
+  if (!st) {
+    return { maySend: false, code: 'BLOCKED_PRIOR_UNKNOWN', duplicateRisk: false,
+      reason: '앞 시도의 상태를 읽지 못했습니다 — 살아 있는지 모르는 주문 위에 또 보내지 않습니다' };
+  }
+  if ((TERMINAL_EXIT_STATUSES as readonly string[]).includes(st)) {
+    return { maySend: true, code: 'RESEND_PRIOR_RESOLVED', duplicateRisk: false,
+      reason: `앞 시도가 ${st}로 끝났습니다` };
+  }
+  // INTENT · SENT · ACKED · UNKNOWN — 아직 끝나지 않았다.
+  //
+  //   거래소가 "없다"고 하면 그것이 장부보다 최신이다. 그때만 뚫는다.
+  const lk = p.venueLookup;
+  if (lk?.ok === true && lk.found === false) {
+    return { maySend: true, code: 'RESEND_PRIOR_RESOLVED', duplicateRisk: false,
+      reason: `장부는 ${st}이지만 거래소에 그 주문이 없습니다 — 거래소가 최종 권위입니다` };
+  }
+  return { maySend: false, code: 'BLOCKED_PRIOR_LIVE', duplicateRisk: false,
+    reason: `앞 시도가 ${st} 상태로 남아 있습니다 — 끝났음을 확인하기 전에 또 보내지 않습니다` };
 }

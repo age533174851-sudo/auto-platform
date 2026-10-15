@@ -1117,9 +1117,40 @@ async function runLifecycleSweep(
             //   빠져나갈 길을 막으면 못 여는 불편이 아니라 못 닫는
             //   사고가 된다. 그래서 기록하지 못한 사실만 따로 적는다.
             sendClose: async () => {
-              const { recordExitIntent, markExitIntentResult, judgeExitDurability } =
+              const { recordExitIntent, markExitIntentResult, judgeExitDurability,
+                findExitIntent, judgeExitSendPermission } =
                 await import('@/lib/engine/exitIntentStore');
               const cid = String(prepared?.clientOrderId ?? '').trim();
+
+              // ── 다시 보내는 것인가 ──
+              //
+              //   "기록 실패에도 청산 허용"과 "기록 불확실 시 재전송
+              //   금지"는 충돌이 아니다. **다른 질문에 대한 답이다.**
+              //   처음 보내는 것은 기록 실패에도 허가하고, 다시 보내는
+              //   것은 앞 시도가 끝났음을 확인했을 때만 허가한다.
+              //   장부를 못 읽었으면 거래소에 멱등 키로 물어본다 —
+              //   거래소가 최종 권위다.
+              const prior = await findExitIntent(sb as any, cid);
+              let venueLookup: { ok: boolean; found: boolean } | null = null;
+              if (prior.recordFound !== false) {
+                // 첫 전송이 확실한 경우에는 거래소를 괴롭히지 않는다.
+                venueLookup = await ops.findCloseByClientId(venue, c.symbol, cid)
+                  .catch(() => ({ ok: false, found: false }));
+              }
+              const perm = judgeExitSendPermission({
+                prior: { ...prior, venueLookup, sendCount: undefined },
+              });
+              if (!perm.maySend) {
+                out.exitDurability.push({ symbol: c.symbol, code: 'SEND_BLOCKED',
+                  alertOperator: perm.code === 'BLOCKED_PRIOR_UNKNOWN',
+                  intent: perm.code, reason: perm.reason });
+                // **보내지 않았다**를 그대로 돌려준다. 실패로 적지 않는다 —
+                // 실패로 적으면 다음 회차가 재시도 대상으로 읽는다.
+                return { attempted: false, ok: false, error: perm.reason,
+                  ambiguous: false, reportedAvgPrice: null,
+                  exchangeOrderId: null, executedQty: null };
+              }
+
               const wrote = await recordExitIntent(sb as any, {
                 clientOrderId: cid,
                 connectionId: c.connectionId,

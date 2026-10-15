@@ -4,6 +4,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   recordExitIntent, markExitIntentResult, judgeExitDurability,
+  judgeExitSendPermission, findExitIntent, MAX_SENDS_PER_KEY,
   PENDING_EXIT_STATUSES, type ExitIntentRecord,
 } from './exitIntentStore';
 import { readFileSync } from 'node:fs';
@@ -244,7 +245,176 @@ export function runExitIntentStoreTests() {
     assert(/기록/.test(v.reason), '무엇이 없는지 적는다');
   });
 
-  // ── ⑥ 정본이 순수한가 ──
+  // ══════════════════════════════════════════════════════════
+  // ⑥ 전송 허가 — 두 정책의 통합 (D 목록)
+  // ══════════════════════════════════════════════════════════
+
+  const perm = (over: any = {}) => judgeExitSendPermission({
+    prior: { recordFound: false, recordStatus: undefined,
+      venueLookup: null, sendCount: 0, ...(over.prior ?? {}) },
+    ...(over.emergency != null ? { emergency: over.emergency } : {}),
+    ...(over.maxSends != null ? { maxSends: over.maxSends } : {}),
+  });
+
+  test('★ 허가 ① 첫 전송은 기록 실패와 무관하게 허가한다', () => {
+    const v = perm();
+    eq(v.code, 'FIRST_SEND'); eq(v.maySend, true);
+  });
+
+  test('★ 허가 ② D: 전송 성공 + 응답 유실 → 다시 보내지 않는다', () => {
+    // 응답을 못 받았으니 장부는 UNKNOWN으로 남는다. 그 위에 또 보내면
+    // 중복 청산이다.
+    const v = perm({ prior: { recordFound: true, recordStatus: 'UNKNOWN' } });
+    eq(v.code, 'BLOCKED_PRIOR_LIVE'); eq(v.maySend, false);
+  });
+
+  test('★ 허가 ③ 거래소가 "없다"고 하면 거래소가 최종 권위다', () => {
+    const v = perm({ prior: { recordFound: true, recordStatus: 'UNKNOWN',
+      venueLookup: { ok: true, found: false } } });
+    eq(v.code, 'RESEND_PRIOR_RESOLVED'); eq(v.maySend, true);
+  });
+
+  test('★ 허가 ④ 거래소가 "있다"고 하면 막는다', () => {
+    const v = perm({ prior: { recordFound: true, recordStatus: 'ACKED',
+      venueLookup: { ok: true, found: true } } });
+    eq(v.code, 'BLOCKED_PRIOR_LIVE'); eq(v.maySend, false);
+  });
+
+  test('★ 허가 ⑤ 조회 실패를 "없다"로 읽지 않는다', () => {
+    // `ok: false`는 못 물어본 것이다. 이것을 없음으로 읽으면 중복이 난다.
+    for (const st of ['INTENT', 'SENT', 'ACKED', 'UNKNOWN']) {
+      const v = perm({ prior: { recordFound: true, recordStatus: st,
+        venueLookup: { ok: false, found: false } } });
+      eq(v.maySend, false, `${st}에서 재전송이 열렸다`);
+    }
+  });
+
+  test('★ 허가 ⑥ D: 서버 재시작 — 장부도 거래소도 못 읽으면 보내지 않는다', () => {
+    const v = judgeExitSendPermission({
+      prior: { recordFound: undefined, recordStatus: undefined,
+        venueLookup: { ok: false, found: false }, sendCount: undefined } });
+    eq(v.code, 'BLOCKED_PRIOR_UNKNOWN'); eq(v.maySend, false);
+    assert(/긴급 종료는 명시적으로/.test(v.reason), '빠져나갈 길을 이유에 적는다');
+  });
+
+  test('★ 허가 ⑦ 장부를 못 읽어도 거래소가 "없다"면 첫 전송이다', () => {
+    const v = judgeExitSendPermission({
+      prior: { recordFound: undefined, recordStatus: undefined,
+        venueLookup: { ok: true, found: false }, sendCount: undefined } });
+    eq(v.code, 'FIRST_SEND'); eq(v.maySend, true);
+  });
+
+  test('허가 ⑧ 앞 시도가 끝났으면 다시 보낸다', () => {
+    for (const st of ['FILLED', 'REJECTED', 'FAILED', 'RECONCILED']) {
+      const v = perm({ prior: { recordFound: true, recordStatus: st } });
+      eq(v.code, 'RESEND_PRIOR_RESOLVED', st); eq(v.maySend, true);
+    }
+  });
+
+  test('★ 허가 ⑨ D: 동시 워커 — 상한을 넘으면 사람이 필요하다', () => {
+    const v = perm({ prior: { recordFound: true, recordStatus: 'FAILED', sendCount: 3 } });
+    eq(v.code, 'BLOCKED_ATTEMPT_CAP'); eq(v.maySend, false);
+    assert(/사람이 필요한/.test(v.reason));
+  });
+
+  test('★ 허가 ⑩ 상한은 긴급보다도 앞이다 (긴급이 무한 루프가 되지 않게)', () => {
+    const v = judgeExitSendPermission({
+      prior: { recordFound: true, recordStatus: 'UNKNOWN',
+        venueLookup: null, sendCount: 5 },
+      emergency: true });
+    eq(v.code, 'BLOCKED_ATTEMPT_CAP', '긴급이 상한을 무시하면 무한 재전송 경로가 된다');
+    eq(v.maySend, false);
+  });
+
+  test('★ 허가 ⑪ 긴급 청산 가능성은 보존된다 (명시적일 때만)', () => {
+    const v = judgeExitSendPermission({
+      prior: { recordFound: true, recordStatus: 'UNKNOWN',
+        venueLookup: null, sendCount: 1 },
+      emergency: true });
+    eq(v.code, 'EMERGENCY_OVERRIDE'); eq(v.maySend, true);
+    eq(v.duplicateRisk, true, '중복 가능성을 숨기지 않는다');
+  });
+
+  test('★ 허가 ⑫ 긴급은 기본값이 아니다', () => {
+    for (const e of [false, null, undefined] as any[]) {
+      const v = judgeExitSendPermission({
+        prior: { recordFound: true, recordStatus: 'UNKNOWN',
+          venueLookup: null, sendCount: 1 },
+        ...(e != null ? { emergency: e } : {}) });
+      assert(v.code !== 'EMERGENCY_OVERRIDE', `${String(e)}에서 긴급이 됐다`);
+      eq(v.maySend, false);
+    }
+  });
+
+  test('★ 허가 ⑬ 상태를 못 읽은 행 위에 또 보내지 않는다', () => {
+    for (const st of [undefined, '', '   '] as any[]) {
+      const v = perm({ prior: { recordFound: true, recordStatus: st } });
+      eq(v.code, 'BLOCKED_PRIOR_UNKNOWN', String(st)); eq(v.maySend, false);
+    }
+  });
+
+  test('★ 허가 ⑭ 입력이 아예 없으면 보내지 않는다', () => {
+    for (const i of [null, undefined, {}] as any[]) {
+      const v = judgeExitSendPermission(i);
+      eq(v.maySend, false, String(JSON.stringify(i)));
+      eq(v.code, 'BLOCKED_PRIOR_UNKNOWN');
+    }
+  });
+
+  test('★ 허가 ⑮ 무제한 재전송 경로가 존재하지 않는다 (전수)', () => {
+    // 허가가 나는 모든 조합에서, 상한에 닿으면 반드시 막혀야 한다.
+    const vals = [true, false, undefined] as any[];
+    const statuses = [undefined, 'INTENT', 'SENT', 'ACKED', 'UNKNOWN',
+      'FILLED', 'REJECTED', 'FAILED', 'RECONCILED'] as any[];
+    const lookups = [null, { ok: true, found: true }, { ok: true, found: false },
+      { ok: false, found: false }] as any[];
+    let allowed = 0;
+    for (const rf of vals) for (const st of statuses) for (const lk of lookups)
+      for (const em of [true, false] as any[]) {
+        const atCap = judgeExitSendPermission({
+          prior: { recordFound: rf, recordStatus: st, venueLookup: lk,
+            sendCount: MAX_SENDS_PER_KEY },
+          emergency: em });
+        eq(atCap.maySend, false,
+          `상한에서 허가가 났다: rf=${String(rf)} st=${String(st)} em=${em}`);
+        const under = judgeExitSendPermission({
+          prior: { recordFound: rf, recordStatus: st, venueLookup: lk, sendCount: 0 },
+          emergency: em });
+        if (under.maySend) allowed += 1;
+      }
+    assert(allowed > 0, '허가되는 경우가 없으면 청산이 영구히 막힌다');
+  });
+
+  // ── ⑦ 장부 조회 ──
+
+  test('★ 조회 ① 못 읽은 것과 없는 것을 가른다', async () => {
+    const found = {
+      from: () => ({ select: () => ({ eq: () => ({
+        maybeSingle: async () => ({ data: { status: 'ACKED' }, error: null }) }) }) }),
+    };
+    eq((await findExitIntent(found as any, 'k')).recordFound, true);
+    eq((await findExitIntent(found as any, 'k')).recordStatus, 'ACKED');
+
+    const empty = {
+      from: () => ({ select: () => ({ eq: () => ({
+        maybeSingle: async () => ({ data: null, error: null }) }) }) }),
+    };
+    eq((await findExitIntent(empty as any, 'k')).recordFound, false, '없다');
+
+    const broken = {
+      from: () => ({ select: () => ({ eq: () => ({
+        maybeSingle: async () => ({ data: null, error: { code: '42501' } }) }) }) }),
+    };
+    eq((await findExitIntent(broken as any, 'k')).recordFound, undefined,
+      '★ 못 읽은 것을 "없다"로 적으면 중복 주문이 난다');
+
+    const throws = { from: () => { throw new Error('x'); } };
+    eq((await findExitIntent(throws as any, 'k')).recordFound, undefined);
+    eq((await findExitIntent(null as any, 'k')).recordFound, undefined);
+    eq((await findExitIntent(found as any, '')).recordFound, undefined);
+  });
+
+  // ── ⑧ 정본이 순수한가 ──
 
   test('★ 이 모듈은 주문을 보내지 않는다', () => {
     const src = readFileSync(
