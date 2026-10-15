@@ -43,6 +43,8 @@ export interface EvaluationResult {
   summary: string;
   /** 실행기가 돌려준 것 그대로 */
   raw: any;
+  /** 경계 있는 사유 코드. 화이트리스트를 통과한 값만 들어온다 */
+  reasonCode?: string;
 }
 
 export interface RunContext {
@@ -76,7 +78,7 @@ export function outcomeOf(input: {
   httpOk: boolean;
   status?: number | null;
   body: any;
-}): { outcome: EvaluationOutcome; summary: string } {
+}): { outcome: EvaluationOutcome; summary: string; reasonCode?: string } {
   const b = input.body ?? {};
 
   if (!input.httpOk) {
@@ -117,8 +119,19 @@ export function outcomeOf(input: {
     'COST_EXCEEDS_TARGET', 'UNKNOWN_REASON',
   ];
   const reasonCode = typeof b?.reasonCode === 'string' ? b.reasonCode : '';
-  const diagnostic = knownNoSignalCodes.includes(reasonCode) ? ` · 사유코드 ${reasonCode}` : '';
-  return { outcome: 'NO_SIGNAL', summary: `정상 평가 완료 · 진입 조건 없음${diagnostic}` };
+  const known = knownNoSignalCodes.includes(reasonCode);
+  const diagnostic = known ? ` · 사유코드 ${reasonCode}` : '';
+  // ★ **코드를 문자열 안에만 묻어 두지 않는다.**
+  //
+  //   예전에는 요약 문장에만 들어갔다. 그래서 운영 감사가 예약 줄을
+  //   읽어도 `reasonCode` 칸이 비어 있었고(`NOT_RECORDED`),
+  //   "NO_SIGNAL인데 왜인지 모른다"가 됐다 — 2026-10-15 감사에서
+  //   활성 예약 2개가 정확히 그 상태였다.
+  //
+  //   화이트리스트에 없는 값은 싣지 않는다. 거래소·전략이 보낸 임의
+  //   문자열이 장부에 들어가면 경계가 사라진다.
+  return { outcome: 'NO_SIGNAL', summary: `정상 평가 완료 · 진입 조건 없음${diagnostic}`,
+    ...(known ? { reasonCode } : {}) };
 }
 
 export interface RunStrategyDeps {
@@ -174,6 +187,8 @@ export async function runStrategy(
   return {
     outcome: o.outcome, strategyId: spec.id, strategyVersion: spec.version,
     summary: o.summary, raw: res.body,
+    // 없으면 칸을 만들지 않는다 — 'UNKNOWN'으로 메우지 않는다.
+    ...(o.reasonCode ? { reasonCode: o.reasonCode } : {}),
   };
 }
 
