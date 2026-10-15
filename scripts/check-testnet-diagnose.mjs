@@ -243,7 +243,7 @@ if (mod) {
     const authAt = c.indexOf('resolveUserId(');
     const firstCall = Math.min(...[
       'testFuturesConnection(', 'getFuturesPositionMode(', 'getFuturesSymbolSettings(',
-      'diagnoseFutures(', 'getFuturesBalance(',
+      'diagnoseFutures(', 'getFuturesBalance(', 'getFuturesOpenOrders(',
     ].map(n => { const at = c.indexOf(n); return at < 0 ? Number.MAX_SAFE_INTEGER : at; }));
     if (gateAt < 0) err(`${ROUTE}: TESTNET 전용 관문(binanceTestnetDiagnoseGate)이 없습니다`);
     else {
@@ -273,6 +273,19 @@ if (mod) {
     }
     if (authAt >= 0 && gateAt >= 0 && authAt > gateAt) {
       err(`${ROUTE}: 인증이 관문보다 뒤에 있습니다`);
+    }
+
+    // ── 현재 Binance TESTNET 상태 증거도 진단 결과에 연결돼야 한다 ──
+    // 오래된 live_orders의 ACKED/UNKNOWN 건수로 거래소 미체결 건수를
+    // 대신하면 안 된다. 실패한 openOrders 조회는 UNKNOWN이며 0이 아니다.
+    if (!c.includes('getFuturesOpenOrders(apiKey, secret, true)')) {
+      err(`${ROUTE}: TESTNET openOrders 직접 읽기가 없습니다 — DB 미결 43건은 거래소 주문이 아닙니다`);
+    }
+    if (!c.includes('summarizeTestnetOpenOrders(snapshot)')) {
+      err(`${ROUTE}: 거래소 응답을 UNKNOWN/VERIFIED로 구분하지 않습니다`);
+    }
+    if (!c.includes('summarizeTestnetOpenPositions(r)')) {
+      err(`${ROUTE}: 기존 포지션 조회 결과를 응답 증거로 만들지 않습니다`);
     }
 
     // ── ④ 판정 정본을 **부른다** (import만 하고 안 부르는 상태를 잡는다) ──
@@ -315,6 +328,12 @@ if (mod) {
       }
       if (!/itemCodes/.test(best)) {
         err(`${ROUTE}: 항목별 판정 코드(itemCodes)를 응답에 싣지 않습니다`);
+      }
+      if (!/(^|[\\s,{])openOrderEvidence\\s*[,:}]/.test(best)) {
+        err(`${ROUTE}: Binance 미체결 주문 증거(openOrderEvidence)가 응답에 없습니다`);
+      }
+      if (!/(^|[\\s,{])positionEvidence\\s*[,:}]/.test(best)) {
+        err(`${ROUTE}: Binance 실제 포지션 증거(positionEvidence)가 응답에 없습니다`);
       }
     }
 
