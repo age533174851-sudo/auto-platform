@@ -4,6 +4,7 @@ import { reconcileExitRestartReadOnly } from './exitRestartEvidence';
 import { gateRestartExitDispatch } from './exitRestartDispatch';
 import { binanceExitOrderStatus } from './exitRestartOrderStatus';
 import { claimExitBeforeSend, type ExitIntentRecord } from './exitRestartIntentStore';
+import { supabaseTestnetExitIntentStore, EXIT_ORDER_INTENT_TABLE } from './exitRestartSupabaseStore';
 
 export function runExitRestartReconcileTests() {
   console.log('\n🔒 #325 재시작 청산 대조 (가짜 거래소)');
@@ -191,6 +192,118 @@ export function runExitRestartReconcileTests() {
       claim: async i => ({ code: 'CLAIMED', record: { ...i, ownerToken: 'other' } }),
     }, intent);
     eq(wrong.maySend, false);
+  });
+  test('Supabase 원자 선점 경계: INSERT/PK 충돌만 사용, 3명 중 1명 허가', async () => {
+    const intent: ExitIntentRecord = {
+      clientOrderId: 'x5t-restart-325',
+      connectionId: '44c25b6f-18cf-465f-9a21-c1b53569b999',
+      symbol: 'BTCUSDT', state: 'SENT', ownerToken: 'worker-a',
+    };
+    let row: any = null;
+    let insertCalls = 0;
+    let lookupCalls = 0;
+    const sb = {
+      from: (table: string) => {
+        eq(table, EXIT_ORDER_INTENT_TABLE);
+        return {
+          insert: (payload: any) => {
+            insertCalls++;
+            eq(payload.mode, 'TESTNET');
+            return { select: (_: string) => ({
+              single: async () => {
+                if (row) return { data: null, error: { code: '23505' } };
+                row = payload;
+                return { data: row, error: null };
+              },
+            }) };
+          },
+          select: (_: string) => {
+            lookupCalls++;
+            return {
+              eq: (column: string, value: string) => {
+                eq(column, 'client_order_id'); eq(value, intent.clientOrderId);
+                return { maybeSingle: async () => ({ data: row, error: null }) };
+              },
+            };
+          },
+        };
+      },
+    };
+    const store = supabaseTestnetExitIntentStore(sb, true);
+    const all = await Promise.all(Array.from({ length: 3 },
+      () => claimExitBeforeSend(store, intent)));
+    eq(all.filter(r => r.maySend).length, 1);
+    eq(all.filter(r => r.code === 'EXISTS').length, 2);
+    eq(insertCalls, 3); eq(lookupCalls, 2);
+  });
+  test('Supabase 선점: TESTNET 미검증 시 DB 접근 0·주문 권한 0', async () => {
+    let calls = 0;
+    const sb = { from: () => { calls++; throw new Error('MUST_NOT_TOUCH_DB'); } };
+    const intent: ExitIntentRecord = {
+      clientOrderId: 'x5t-restart-325',
+      connectionId: '44c25b6f-18cf-465f-9a21-c1b53569b999',
+      symbol: 'BTCUSDT', state: 'SENT', ownerToken: 'worker-a',
+    };
+    const result = await claimExitBeforeSend(
+      supabaseTestnetExitIntentStore(sb, false), intent);
+    eq(result.code, 'UNAVAILABLE'); eq(result.maySend, false); eq(calls, 0);
+  });
+  test('Supabase 선점: INSERT 결과가 LIVE 또는 다른 신원이라면 권한 0', async () => {
+    const intent: ExitIntentRecord = {
+      clientOrderId: 'x5t-restart-325',
+      connectionId: '44c25b6f-18cf-465f-9a21-c1b53569b999',
+      symbol: 'BTCUSDT', state: 'SENT', ownerToken: 'worker-a',
+    };
+    const make = (mode: string, owner: string) => ({
+      from: () => ({ insert: (_: any) => ({ select: (_: string) => ({
+        single: async () => ({ error: null, data: {
+          client_order_id: intent.clientOrderId,
+          connection_id: intent.connectionId, symbol: intent.symbol,
+          owner_token: owner, mode, state: 'SENT',
+        } }),
+      }) }) }),
+    });
+    for (const [mode, owner] of [['LIVE', 'worker-a'], ['TESTNET', 'other']]) {
+      const r = await claimExitBeforeSend(
+        supabaseTestnetExitIntentStore(make(mode, owner), true), intent);
+      eq(r.maySend, false);
+    }
+  });
+  test('Supabase 선점: DB 읽기·쓰기 오류는 무조건 차단', async () => {
+    const intent: ExitIntentRecord = {
+      clientOrderId: 'x5t-restart-325',
+      connectionId: '44c25b6f-18cf-465f-9a21-c1b53569b999',
+      symbol: 'BTCUSDT', state: 'SENT', ownerToken: 'worker-a',
+    };
+    const sb = { from: () => ({ insert: (_: any) => ({
+      select: (_: string) => ({ single: async () => { throw new Error('timeout'); } }),
+    }) }) };
+    const store = supabaseTestnetExitIntentStore(sb, true);
+    const result = await claimExitBeforeSend(store, intent);
+    eq(result.code, 'UNAVAILABLE'); eq(result.maySend, false);
+  });
+  test('Supabase 재시작 읽기: 원본 주문 ID와 연결이 모두 일치해야 한다', async () => {
+    const id = 'x5t-restart-325';
+    const conn = '44c25b6f-18cf-465f-9a21-c1b53569b999';
+    let eqCalls: string[] = [];
+    const sb = { from: () => ({
+      select: (_: string) => ({
+        eq: (field: string, val: string): any => {
+          eqCalls.push(field + '=' + val);
+          return { eq: (field2: string, val2: string) => {
+            eqCalls.push(field2 + '=' + val2);
+            return { maybeSingle: async () => ({ error: null, data: {
+              client_order_id: id, connection_id: conn,
+              symbol: 'BTCUSDT', owner_token: 'worker-a',
+              state: 'SENT', mode: 'TESTNET',
+            } }) };
+          } };
+        },
+      }),
+    }) };
+    const loaded = await supabaseTestnetExitIntentStore(sb, true).load(id, conn);
+    eq(loaded?.clientOrderId, id); eq(loaded?.state, 'SENT');
+    eq(eqCalls.join(','), 'client_order_id=' + id + ',connection_id=' + conn);
   });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
