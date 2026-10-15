@@ -3,6 +3,7 @@ import { classifyExitRestart as decide } from './exitRestartReconcile';
 import { reconcileExitRestartReadOnly } from './exitRestartEvidence';
 import { gateRestartExitDispatch } from './exitRestartDispatch';
 import { binanceExitOrderStatus } from './exitRestartOrderStatus';
+import { claimExitBeforeSend, type ExitIntentRecord } from './exitRestartIntentStore';
 
 export function runExitRestartReconcileTests() {
   console.log('\n🔒 #325 재시작 청산 대조 (가짜 거래소)');
@@ -158,6 +159,38 @@ export function runExitRestartReconcileTests() {
       const r = binanceExitOrderStatus(raw, id);
       eq(r.ok, false); eq(r.state, 'UNKNOWN');
     }
+  });
+  test('영속 청산 claim: 동시 3개 중 단 1개만 전송 권한', async () => {
+    const intent: ExitIntentRecord = {
+      clientOrderId: 'exit-325', connectionId: 'conn-1',
+      symbol: 'BTCUSDT', state: 'SENT', ownerToken: 'owner-1',
+    };
+    let claimed = false;
+    const store = {
+      claim: async (i: ExitIntentRecord) => {
+        if (claimed) return { code: 'EXISTS' as const, record: i };
+        claimed = true;
+        return { code: 'CLAIMED' as const, record: i };
+      },
+    };
+    const results = await Promise.all(Array.from({ length: 3 },
+      () => claimExitBeforeSend(store, intent)));
+    eq(results.filter(r => r.maySend).length, 1);
+    eq(results.filter(r => r.code === 'EXISTS').length, 2);
+  });
+  test('영속 청산 claim: 저장소 장애·위조 응답은 전송 차단', async () => {
+    const intent: ExitIntentRecord = {
+      clientOrderId: 'exit-325', connectionId: 'conn-1',
+      symbol: 'BTCUSDT', state: 'SENT', ownerToken: 'owner-1',
+    };
+    const down = await claimExitBeforeSend({
+      claim: async () => { throw new Error('db unavailable'); },
+    }, intent);
+    eq(down.maySend, false); eq(down.code, 'UNAVAILABLE');
+    const wrong = await claimExitBeforeSend({
+      claim: async i => ({ code: 'CLAIMED', record: { ...i, ownerToken: 'other' } }),
+    }, intent);
+    eq(wrong.maySend, false);
   });
   test('영속 의도 기록을 못 읽으면 차단한다', () => {
     const r = decide({ intent: undefined, position: { ok: true, found: false },
