@@ -188,6 +188,8 @@ jobs:
       # 직접 기다렸다가 부르는 이유는 **워커가 죽어 있어도 한 바퀴가
       # 끝나야** 하기 때문이다 — 워커 생존이 이 검증의 전제가 되면,
       # 검증하려던 것을 전제로 깔게 된다.
+      # 진입이 확정된 회차만 유지 시간을 기다린다. `entered=no`면
+      # 마감 시각이 이미 '지금'이라 곧바로 정산으로 간다.
       - name: 유지 — 마감까지 대기
         if: steps.start.outputs.entered == 'yes'
         run: |
@@ -199,8 +201,14 @@ jobs:
           sleep $(( total * 60 ))
 
       # ── 3. 닫는다 ──
+      # **`entered=no`일 때도 돈다.**
+      #
+      # 진입이 확정되지 않은 회차가 바로 노출을 남길 수 있는 경우다 —
+      # 체결은 됐는데 보호주문을 확인하지 못하면 `startAttempt`가 줄을
+      # 닫지 않고 `HOLDING` + 마감 시각 '지금'으로 정산에 넘긴다.
+      # 그때 이 단계를 건너뛰면 워커가 깨어날 때까지 노출이 남는다.
       - name: 청산 — 마감된 회차 정리
-        if: always() && steps.start.outputs.entered == 'yes'
+        if: always()
         run: |
           set -euo pipefail
           B="${BASE%/}"
@@ -261,15 +269,28 @@ jobs:
               print(f"    포지션잔량0={steps.get('POSITION_ZERO')} 미결잔량0={steps.get('ORDERS_ZERO')}")
               print(f"    정리증거: residual={ev.get('residual')} cancel={ev.get('cancel')}")
               print(f"    사유: {t.get('reason')}")
-              # 끝난 회차인데 잔여가 증명되지 않았으면 빨갛게 끝낸다.
-              if t.get('state') in ('PASS', 'FAIL', 'UNKNOWN'):
-                  if steps.get('POSITION_ZERO') != 'PASS' or steps.get('ORDERS_ZERO') != 'PASS':
-                      print(f"::error::{t.get('attemptNo')}회차의 잔여가 0으로 증명되지 않았습니다")
-                      bad += 1
-                  if t.get('verdict') not in ('PASS', 'BLOCKED'):
-                      print(f"::error::{t.get('attemptNo')}회차 판정이 {t.get('verdict')}입니다")
-                      bad += 1
-              elif t.get('state') in ('HOLDING', 'CLOSING', 'ENTERING'):
-                  print(f"::warning::{t.get('attemptNo')}회차가 아직 {t.get('state')}입니다 — 워커가 이어서 닫습니다")
+              # ── 노출이 남았을 수 있으면 **무조건** 빨갛게 끝낸다 ──
+              #
+              # 이 작업은 유지 시간을 다 기다리고 정산을 3회 불렀다.
+              # 그런데도 포지션 0이 증명되지 않았다면, 상태가 무엇이든
+              # **거래소에 노출이 남아 있을 수 있다.** "아직 도는
+              # 중"이라는 이유로 초록을 켜면 사람은 화면을 닫는다.
+              pz = steps.get('POSITION_ZERO')
+              oz = steps.get('ORDERS_ZERO')
+              if pz != 'PASS':
+                  print(f"::error::{t.get('attemptNo')}회차: 포지션 0이 증명되지 않았습니다"
+                        f" (POSITION_ZERO={pz}) — 거래소에 노출이 남아 있을 수 있습니다")
+                  bad += 1
+              if oz != 'PASS':
+                  print(f"::error::{t.get('attemptNo')}회차: 잔여 보호주문 0이 증명되지 않았습니다"
+                        f" (ORDERS_ZERO={oz})")
+                  bad += 1
+              if t.get('state') in ('HOLDING', 'CLOSING', 'ENTERING'):
+                  print(f"::error::{t.get('attemptNo')}회차가 정산 뒤에도 {t.get('state')}입니다"
+                        " — 닫히지 않았습니다")
+                  bad += 1
+              elif t.get('verdict') not in ('PASS', 'BLOCKED'):
+                  print(f"::error::{t.get('attemptNo')}회차 판정이 {t.get('verdict')}입니다")
+                  bad += 1
           sys.exit(1 if bad else 0)
           PY

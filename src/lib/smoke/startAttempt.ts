@@ -18,7 +18,9 @@
 // 사전 확인 · 진입 관문 · 실제 체결가 기준 SL/TP · 되읽기 · 진입 완료
 // 판정은 전부 이미 있다. 이 파일은 **순서대로 부르고 결과를 적을 뿐**이다.
 
-import { preflightVerdict, holdUntilMs, SMOKE_STRATEGY_ID } from './smokePlan';
+import {
+  preflightVerdict, holdUntilMs, unprotectedExposureVerdict, SMOKE_STRATEGY_ID,
+} from './smokePlan';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
 
 // 누가 이 회차를 깨웠는가.
@@ -280,12 +282,53 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       // **모르는 상태에서 다시 주문하지 않는다.** 반복에서는 이 판정이
       // 다음 회차를 멈추는 근거가 된다.
       steps.HOLD = step('SKIPPED', '진입이 확정되지 않아 유지 단계로 가지 않았습니다');
+
+      // ── 줄을 닫기 전에 거래소에 **한 번 더** 묻는다 ──
+      //
+      // `posAfter`는 실행기가 되돌리기(`undoEntry`)를 끝낸 직후의 값인데,
+      // **그 되돌리기 자체가 실패할 수 있다.** 그러면 보호주문 없는
+      // 포지션이 거래소에 남는다.
+      //
+      // 예전에는 여기서 `closed_at`을 적고 끝냈다. 그런데 `/settle`은
+      // `state = 'HOLDING'`인 줄만 고르므로 **닫힌 줄은 아무도 다시 보지
+      // 않는다.** 노출이 조용히 방치되는 길이 그것이었다.
+      const reT0 = Date.now();
+      const posRecheck = await ops.readOpenPosition(venue, i.symbol);
+      apiMax = Math.max(apiMax, Date.now() - reT0);
+
+      const ex = unprotectedExposureVerdict({ code: ev.code, position: posRecheck });
+      // **못 읽은 것을 0으로 적지 않는다.** 판정이 준 값을 그대로 쓴다.
+      steps.POSITION_ZERO = step(ex.positionZero, ex.reason);
+
       const verdict = ev.code === 'ENTERED_UNPROTECTED' ? 'FAIL' : 'UNKNOWN';
+      const why = `${ev.reason} · ${ex.reason}`;
+
+      if (ex.handoff === 'SETTLE') {
+        // **줄을 닫지 않는다.** 마감 시각을 지금으로 적어 다음 정산
+        // 회차가 집어 가게 한다.
+        //
+        // 여기서 청산을 직접 보내지 않는 이유: 보내는 일은
+        // `settleAttempt` 하나가 한다 — 선점(compare-and-set) ·
+        // reduceOnly 전량청산 · 재조회로 0 확인 · **내 보호주문만**
+        // 취소까지 이미 거기 있다. 여기서 한 번 더 보내면 같은 주문을
+        // 내는 곳이 둘이 되고, 그게 중복 청산의 모양이다.
+        //
+        // 그리고 정산은 회차당 한 번씩만 보낸다 — 무제한 재주문이 아니다.
+        await save(sb, row.id, {
+          ...common, state: 'HOLDING', steps,
+          hold_until: new Date(startedMs).toISOString(),
+          verdict: null,
+          reason: why,
+        });
+        return { ok: false, code: verdict === 'FAIL' ? 'FAILED' : 'UNKNOWN', row,
+          message: why, status: 200 };
+      }
+
       await save(sb, row.id, {
-        ...common, state: verdict, verdict, steps, reason: ev.reason,
+        ...common, state: verdict, verdict, steps, reason: why,
         closed_at: new Date().toISOString(),
       });
-      return { ok: false, code: verdict === 'FAIL' ? 'FAILED' : 'UNKNOWN', row, message: ev.reason, status: 200 };
+      return { ok: false, code: verdict === 'FAIL' ? 'FAILED' : 'UNKNOWN', row, message: why, status: 200 };
     }
 
     // ── 마감 시각을 DB에 적는다 ──
