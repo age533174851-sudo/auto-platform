@@ -5,6 +5,7 @@ import {
   buildBinanceConditionalAlgoPayload, parseBinanceAlgoAcceptance,
   verifyBinanceAlgoOpenReadback,
   inspectBinanceAlgoRecovery,
+  inspectBinanceAlgoCancellationEvidence,
   binanceAlgoCancellationIdentifier, type BinanceConditionalAlgoIntent,
 } from './binanceAlgoContract';
 
@@ -420,6 +421,83 @@ export function runBinanceAlgoContractTests() {
       orderLookup: { success: true, order: { ...o, quantity: '.006' } },
       openLookup: { success: true, orders: [o] },
     }).code, 'VENUE_IDENTITY_MISMATCH');
+  });
+
+  test('DELETE ACK is not cancellation proof; only CANCELED query + empty open list', () => {
+    const { payload, order } = recoveryEvidence();
+    const accepted = parseBinanceAlgoAcceptance(order, payload);
+    const cancelled = inspectBinanceAlgoCancellationEvidence({
+      expectedPayload: payload, accepted,
+      deleteReceipt: { algoId: '9007199254740993',
+        clientAlgoId: payload.clientAlgoId, code: '200', msg: 'success' },
+      orderLookup: { success: true, order: { ...order, algoStatus: 'CANCELED' } },
+      openLookup: { success: true, orders: [] },
+    });
+    eq(cancelled.code, 'CANCEL_OBSERVED_POSITION_UNKNOWN');
+    eq(cancelled.canMarkPositionFlat, false);
+    eq(cancelled.canStartNewPosition, false);
+    eq(cancelled.canRepeatCancel, false);
+    eq(cancelled.executionAuthorized, false);
+  });
+
+  test('Stale/mismatched DELETE receipt never proves cancellation', () => {
+    const { payload, order } = recoveryEvidence();
+    const accepted = parseBinanceAlgoAcceptance(order, payload);
+    for (const receipt of [
+      null, { code: 500, algoId: '9007199254740993',
+        clientAlgoId: payload.clientAlgoId },
+      { code: 200, algoId: '9007199254740994',
+        clientAlgoId: payload.clientAlgoId },
+      { code: 200, algoId: '9007199254740993', clientAlgoId: 'other-user' },
+      { code: 200, algoId: 9007199254740992,
+        clientAlgoId: payload.clientAlgoId },
+    ]) {
+      const r = inspectBinanceAlgoCancellationEvidence({
+        expectedPayload: payload, accepted, deleteReceipt: receipt,
+        orderLookup: { success: true, order: { ...order, algoStatus: 'CANCELED' } },
+        openLookup: { success: true, orders: [] },
+      });
+      eq(r.code, 'RECEIPT_UNKNOWN');
+      eq(r.canRepeatCancel, false);
+    }
+  });
+
+  test('Cancelled individual lookup but Algo still open is conflict, not flat', () => {
+    const { payload, order } = recoveryEvidence();
+    const accepted = parseBinanceAlgoAcceptance(order, payload);
+    const r = inspectBinanceAlgoCancellationEvidence({
+      expectedPayload: payload, accepted,
+      deleteReceipt: { code: 200, algoId: order.algoId,
+        clientAlgoId: order.clientAlgoId },
+      orderLookup: { success: true, order: { ...order, algoStatus: 'CANCELED' } },
+      openLookup: { success: true, orders: [order] },
+    });
+    eq(r.code, 'STILL_OPEN');
+    eq(r.canMarkPositionFlat, false);
+  });
+
+  test('Missing GET or terminal UNKNOWN after DELETE ACK cannot start another trade', () => {
+    const { payload, order } = recoveryEvidence();
+    const accepted = parseBinanceAlgoAcceptance(order, payload);
+    for (const [query, open] of [
+      [{ success: false, order: null }, { success: true, orders: [] }],
+      [{ success: true, order: { ...order, algoStatus: 'CANCELED' } },
+        { success: false, orders: [] }],
+      [{ success: true, order: { ...order, algoStatus: 'EXPIRED' } },
+        { success: true, orders: [] }],
+      [{ success: true, order: { ...order, algoStatus: 'FINISHED' } },
+        { success: true, orders: [] }],
+    ] as any[]) {
+      const r = inspectBinanceAlgoCancellationEvidence({
+        expectedPayload: payload, accepted,
+        deleteReceipt: { code: 200, algoId: order.algoId,
+          clientAlgoId: order.clientAlgoId },
+        orderLookup: query, openLookup: open,
+      });
+      eq(r.code, 'LOOKUP_UNKNOWN');
+      eq(r.canStartNewPosition, false);
+      eq(r.canRepeatCancel, false);
+    }
   });
 
   test('Cancel ID namespace ALGO != REGULAR orderId, even with same digits', () => {
