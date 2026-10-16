@@ -266,9 +266,10 @@ export interface AtomicExitSeatStore {
 }
 
 export interface AtomicExitSeatVerdict {
-  maySend: boolean;
+  seatClaimed: boolean;
   code: AtomicSeatClaimCode;
   duplicateRisk: false;
+  // `seatClaimed` is only research evidence, NEVER authorization to send.
   // A successful claim ONLY proves we won the proposed research gate;
   // caller still needs connection-scoped TESTNET readiness, lease fencing,
   // fresh venue exposure and the existing order-intent write-ahead record.
@@ -280,7 +281,7 @@ export async function claimAtomicExitSeatForResearch(
   i: AtomicExitSeatIdentity,
 ): Promise<AtomicExitSeatVerdict> {
   const deny = (code: AtomicSeatClaimCode): AtomicExitSeatVerdict => ({
-    maySend: false, code, duplicateRisk: false, executionAuthorized: false,
+    seatClaimed: false, code, duplicateRisk: false, executionAuthorized: false,
   });
   const fields = [i?.userId, i?.connectionId, i?.exchange,
     i?.symbol, i?.clientOrderId, i?.ownerToken];
@@ -305,7 +306,7 @@ export async function claimAtomicExitSeatForResearch(
         r.ownerToken !== i.ownerToken) {
       return deny('UNAVAILABLE');
     }
-    return { maySend: true, code: 'CLAIMED', duplicateRisk: false,
+    return { seatClaimed: true, code: 'CLAIMED', duplicateRisk: false,
       executionAuthorized: false };
   } catch {
     return deny('UNAVAILABLE');
