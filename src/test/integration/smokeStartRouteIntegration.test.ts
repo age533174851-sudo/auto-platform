@@ -202,31 +202,30 @@ export async function runSmokeStartRouteTests() {
     // 전역을 바꾸면 남의 시험이 끊긴다 — 실제로 3건이 끊겼다.)
   });
 
-  test('③ 실전 거절은 is_testnet === false 에만 걸린다 — 빈 값은 테스트넷으로 읽는다', async () => {
-    // **저장소 규칙을 여기에 못 박는다.** `loadFuturesCreds`는
-    // `is_testnet === false`만 실전으로 읽고, 빈 값·null은 테스트넷으로
-    // 읽는다. 처음에 나는 "모르는 것은 막아야 한다"고 생각해 이 시험을
-    // 반대로 썼고, 시험이 틀렸다.
+  test('③ 확인되지 않은 환경(is_testnet이 비어 있음)은 주문을 내지 않는다', async () => {
+    // **정책이 바뀐 자리다.**
     //
-    // 왜 지금 규칙이 안전한 쪽인가: 빈 값을 테스트넷으로 읽으면 요청이
-    // **테스트넷 호스트로** 나간다. 실패하면 인증 오류일 뿐이고 실전
-    // 자금은 걸리지 않는다. 거꾸로 빈 값을 실전으로 읽으면 모르는
+    // 저장소 전체 규칙은 `is_testnet !== false`를 테스트넷으로 읽고,
+    // 읽기·조회에는 그걸로 맞다 — 빈 값을 실전으로 읽으면 모르는
     // 연결에 진짜 주문이 나간다.
     //
-    // 그래서 확인하는 것은 "열리지 않는가"가 아니라
-    // **"실전으로 읽히지 않는가"** 다.
-    const live = await hit(good, { 'x-admin-secret': ADMIN },
-      { seedConn: conn({ is_testnet: false }) });
-    assert(/실전/.test(String(live.json.message)),
-      `is_testnet=false가 실전으로 읽히지 않았습니다: ${live.json.message}`);
-
-    const blank = await hit(good, { 'x-admin-secret': ADMIN },
-      { seedConn: conn({ is_testnet: null }) });
-    assert(!/실전/.test(String(blank.json.message)),
-      `is_testnet=null이 실전으로 읽혔습니다: ${blank.json.message}`);
-    // 그리고 어느 쪽이든 **열리지는 않는다** — 가짜 자격증명으로는
-    // 거래소가 응답하지 않으므로 진입이 확정되지 않는다.
-    assert(blank.json.ok === false, `ok:${blank.json.ok}가 돌아왔습니다`);
+    // 그런데 스모크는 **없던 주문을 새로 만든다.** 테스트넷 호스트로
+    // 나간다는 것과 그 계좌가 테스트넷임이 확인됐다는 것은 다른
+    // 사실이고, 확인되지 않은 연결에까지 주문을 낼 이유가 없다.
+    // 그래서 **스모크 주문 경로에서만** `=== true`를 요구한다.
+    //
+    // 거부하되 **실전이라고 부르지는 않는다** — 그렇게 적으면 없는
+    // 실전 연결을 찾으러 가게 된다.
+    for (const raw of [null, undefined]) {
+      const { json, db } = await hit(good, { 'x-admin-secret': ADMIN },
+        { seedConn: conn({ is_testnet: raw }) });
+      assert(json.ok === false, `is_testnet=${String(raw)}인데 ok:${json.ok}가 돌아왔습니다`);
+      assert(/확인되지 않았습니다/.test(String(json.message)),
+        `환경 미확인 사유가 아닙니다: ${json.message}`);
+      assert(!/실전 연결로는/.test(String(json.message)),
+        `확인 안 된 것을 실전이라고 적었습니다: ${json.message}`);
+      eq(db.table('smoke_tests').length, 0);
+    }
   });
 
   // ── ④ 남의 연결로는 열리지 않는가 ──

@@ -19,7 +19,8 @@
 // 판정은 전부 이미 있다. 이 파일은 **순서대로 부르고 결과를 적을 뿐**이다.
 
 import {
-  preflightVerdict, holdUntilMs, unprotectedExposureVerdict, SMOKE_STRATEGY_ID,
+  preflightVerdict, holdUntilMs, unprotectedExposureVerdict,
+  smokeTestnetVerdict, unresolvedExposureBlock, SMOKE_STRATEGY_ID,
 } from './smokePlan';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
 
@@ -81,10 +82,43 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
 
   const exchange = (creds as any).exchange as 'binance' | 'gate';
   const testnet = (creds as any).testnet as boolean;
-  // **저장소 규칙: is_testnet === false 만 실전이다.**
-  if (testnet !== true) {
-    return fail('ERROR',
-      '실전 연결로는 스모크 테스트를 돌리지 않습니다 — 진짜 돈으로 배관을 확인하지 않습니다', 403);
+
+  // ── 스모크는 **확인된 테스트넷 연결**에만 주문을 낸다 ──
+  //
+  // 저장소 규칙(`is_testnet !== false`가 테스트넷)보다 좁다. 그 규칙은
+  // 읽기·조회에 맞지만, 스모크는 **없던 주문을 새로 만든다.** 테스트넷
+  // 호스트로 나간다는 것과 그 계좌가 테스트넷임이 확인됐다는 것은
+  // 다른 사실이다.
+  //
+  // 해석 체계는 건드리지 않는다 — `loadFuturesCreds`가 날것을 함께
+  // 돌려주고, 더 좁게 볼 이 경로만 그것을 본다.
+  const tv = smokeTestnetVerdict((creds as any).isTestnetRaw);
+  if (!tv.ok) return fail('ERROR', tv.reason, 403);
+
+  // ── 정리되지 않은 노출 위에 새 회차를 열지 않는다 ──
+  //
+  // `preflightVerdict`는 **요청한 종목만** 본다. 보호 없는 노출은
+  // 다른 종목에 남아 있을 수 있으므로 **연결 단위**로 한 번 더 본다.
+  //
+  // 이 차단은 `POSITION_ZERO`가 `PASS`가 되어야 풀리고, 그 값은
+  // `settleAttempt`가 **거래소 재조회로만** 적는다. 장부를 고쳐서
+  // 푸는 길은 없다.
+  try {
+    const { data, error } = await sb.from('smoke_tests')
+      .select('id, connection_id, steps, state')
+      .eq('user_id', i.userId).eq('connection_id', i.connectionId)
+      .order('created_at', { ascending: false }).limit(50);
+    if (error) throw new Error(error.message);
+    const blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
+    if (blk.blocked) return fail('BLOCKED', blk.reason, 409);
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    // 표가 아직 없으면 노출도 없다 — 첫 실행이다.
+    if (!isMissing(msg)) {
+      // **못 읽은 것을 "없음"으로 보지 않는다.**
+      const blk = unresolvedExposureBlock({ rows: null, connectionId: i.connectionId });
+      return fail('BLOCKED', `${blk.reason} (${msg})`, 503);
+    }
   }
 
   // ── 킬스위치 ──

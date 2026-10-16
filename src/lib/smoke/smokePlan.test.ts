@@ -11,6 +11,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   smokeRequestVerdict, stepsOf, smokeVerdict, holdUntilMs, closeDue,
   smokeBlocksStrategy, preflightVerdict, unprotectedExposureVerdict,
+  smokeTestnetVerdict, unresolvedExposureBlock,
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
@@ -330,5 +331,131 @@ export function runSmokePlanTests() {
           `${c}/${JSON.stringify(pos)} → ${v.positionZero}는 단계 어휘가 아니다`);
       }
     }
+  });
+
+  console.log('[스모크 주문 — 확인된 테스트넷 연결에만]');
+
+  test('★ is_testnet === true 만 주문을 낸다', () => {
+    const v = smokeTestnetVerdict(true);
+    eq(v.ok, true);
+    eq(v.code, 'OK');
+  });
+
+  test('★ 실전 연결은 거부하고 그렇게 적는다', () => {
+    const v = smokeTestnetVerdict(false);
+    eq(v.ok, false);
+    eq(v.code, 'LIVE_CONNECTION');
+    assert(/실전/.test(v.reason), v.reason);
+  });
+
+  test('★ 확인되지 않은 환경은 거부하되 실전이라고 부르지 않는다', () => {
+    // 둘은 다른 사실이다. 같은 코드로 적으면 "실전 연결이 있다"는
+    // 경보가 울리고, 사람은 없는 실전 연결을 찾으러 간다.
+    for (const raw of [null, undefined, '', 0, 'true', 'TRUE', 1, {}, []]) {
+      const v = smokeTestnetVerdict(raw);
+      assert(!v.ok, `${JSON.stringify(raw)}가 통과했습니다`);
+      eq(v.code, 'ENV_UNVERIFIED');
+      assert(!/실전 연결로는/.test(v.reason),
+        `${JSON.stringify(raw)}를 실전이라고 적었습니다: ${v.reason}`);
+    }
+  });
+
+  test('★ 문자열 "true"를 참으로 읽지 않는다', () => {
+    // DB가 텍스트로 돌려주는 경우를 통과시키면 확인이 아니라 추측이 된다.
+    eq(smokeTestnetVerdict('true').ok, false);
+  });
+
+  console.log('[정리되지 않은 노출 위에 새 회차를 열지 않는다]');
+
+  const PZ = (id: string, state: string | null, over: any = {}) => ({
+    id, connection_id: 'c-1',
+    steps: state == null ? {} : { POSITION_ZERO: { state } },
+    ...over,
+  });
+
+  test('★ 장부를 못 읽으면 막는다 — 못 읽은 것은 "없음"이 아니다', () => {
+    for (const rows of [null, undefined, 'nope' as any, 0 as any]) {
+      const v = unresolvedExposureBlock({ rows, connectionId: 'c-1' });
+      eq(v.blocked, true);
+      eq(v.code, 'LEDGER_UNREADABLE');
+    }
+  });
+
+  test('★ POSITION_ZERO가 FAIL인 회차가 있으면 막는다', () => {
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-1', 'PASS'), PZ('t-2', 'FAIL')], connectionId: 'c-1',
+    });
+    eq(v.blocked, true);
+    eq(v.code, 'UNPROTECTED_UNRESOLVED');
+    eq(v.offenders.join(','), 't-2');
+  });
+
+  test('★ UNKNOWN도 막는다 — 모르는 것 위에 새 회차를 열지 않는다', () => {
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-3', 'UNKNOWN')], connectionId: 'c-1',
+    });
+    eq(v.blocked, true);
+    eq(v.code, 'EXPOSURE_UNKNOWN');
+    eq(v.offenders.join(','), 't-3');
+  });
+
+  test('★ FAIL과 UNKNOWN이 섞이면 FAIL을 먼저 적는다', () => {
+    // 둘 다 막지만, 사람이 먼저 봐야 하는 것은 확실히 남은 쪽이다.
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-4', 'UNKNOWN'), PZ('t-5', 'FAIL')], connectionId: 'c-1',
+    });
+    eq(v.code, 'UNPROTECTED_UNRESOLVED');
+    eq(v.offenders.join(','), 't-5');
+  });
+
+  test('★ 거래소가 0을 확인한 회차(PASS)는 막지 않는다', () => {
+    // 이 값은 settleAttempt가 **재조회로만** 적는다 — 장부를 고쳐서
+    // 푸는 길이 없다는 뜻이다.
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-6', 'PASS'), PZ('t-7', 'PASS')], connectionId: 'c-1',
+    });
+    eq(v.blocked, false);
+    eq(v.code, 'CLEAR');
+  });
+
+  test('★ 단계를 적은 적 없는 회차는 노출이 아니다', () => {
+    // 진입조차 못 한 회차가 대부분이다. 이것까지 막으면 사전 확인에
+    // 한 번 걸린 뒤로 영영 시작할 수 없다.
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-8', null), { id: 't-9' }], connectionId: 'c-1',
+    });
+    eq(v.blocked, false);
+    eq(v.code, 'CLEAR');
+  });
+
+  test('★ 다른 연결의 노출은 이 연결을 막지 않는다', () => {
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-10', 'FAIL', { connection_id: 'c-2' })], connectionId: 'c-1',
+    });
+    eq(v.blocked, false);
+  });
+
+  test('★ 연결을 안 적으면 전부 본다 — 좁히지 못한 것을 통과로 바꾸지 않는다', () => {
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-11', 'FAIL', { connection_id: 'c-2' })], connectionId: null,
+    });
+    eq(v.blocked, true);
+  });
+
+  test('★ 단계 상태가 문자열로만 적힌 옛 줄도 읽는다', () => {
+    const v = unresolvedExposureBlock({
+      rows: [{ id: 't-12', connection_id: 'c-1', steps: { POSITION_ZERO: 'FAIL' } }],
+      connectionId: 'c-1',
+    });
+    eq(v.blocked, true);
+    eq(v.code, 'UNPROTECTED_UNRESOLVED');
+  });
+
+  test('★ 막은 근거가 된 회차 id를 사유에 적는다', () => {
+    // 사람이 바로 찾아볼 수 있어야 한다.
+    const v = unresolvedExposureBlock({
+      rows: [PZ('t-13', 'FAIL')], connectionId: 'c-1',
+    });
+    assert(v.reason.includes('t-13'), v.reason);
   });
 }
