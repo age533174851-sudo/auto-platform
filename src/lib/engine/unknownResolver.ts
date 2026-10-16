@@ -144,13 +144,11 @@ export function resolveUnknown(input: ResolveInput): ResolveResult {
     }
   }
 
-  // 3-d. 멱등 키로 물었고, 반영 시간이 지났고, 포지션도 그대로다.
-  // 여기까지 와야 "거래소에 안 들어갔다"고 볼 수 있다.
+  // 조회 미발견 + 포지션 불변은 '미전송'의 증거가 아니다.
+  // 미체결로 열린 주문은 포지션을 움직이지 않는다. 재전송 금지.
   return {
-    state: 'FAILED', resolved: true, action: 'NONE',
-    reason: position
-      ? '멱등 키로 조회했으나 주문이 없고 포지션도 변하지 않았습니다 — 전송되지 않은 것으로 확정합니다'
-      : '멱등 키로 조회했으나 주문이 없습니다 — 전송되지 않은 것으로 확정합니다 (포지션 교차 확인 없음)',
+    state: 'UNKNOWN', resolved: false, action: 'ESCALATE',
+    reason: '주문 조회에 없지만 거래 내역/미체결 주문 증거 없이 미전송으로 확정할 수 없습니다 — 수동 확인 필요',
   };
 }
 
@@ -256,17 +254,10 @@ export function resolveAcked(input: ResolveInput): AckedResolveResult {
     };
   }
 
-  // **여기가 UNKNOWN과 갈리는 지점이다.**
-  // 거래소가 받았다고 했던 주문이 이제 안 보인다 = 더 이상 살아 있지
-  // 않다. 체결인지 취소인지는 이 조회로 알 수 없으므로 **그렇게 말한다.**
-  // RECONCILED는 "이 주문은 끝났고, 최종 결과는 거래 내역에서 확인해야
-  // 한다"는 뜻이다 — FILLED로도 FAILED로도 단정하지 않는다.
+  // 접수 확인 후 조회 미발견만으로 종결하면 장부의 진입 잠금이 풀린다.
+  // 체결/취소 증거를 확보할 때까지 ACKED 유지. 재전송하지 않는다.
   return {
-    state: 'RECONCILED', resolved: true, action: 'NONE',
-    reason: position && position.qtyNow !== null && !qtyChanged(position)
-      ? '거래소가 받았던 주문이 더 이상 조회되지 않고 포지션도 그대로입니다 — '
-        + '이미 종료된 주문으로 정리합니다 (체결·취소 여부는 거래 내역에서 확인하세요)'
-      : '거래소가 받았던 주문이 더 이상 조회되지 않습니다 — '
-        + '이미 종료된 주문으로 정리합니다 (체결·취소 여부는 거래 내역에서 확인하세요)',
+    state: 'ACKED', resolved: false, action: 'ESCALATE',
+    reason: '접수된 주문이 조회되지 않습니다 — 체결/취소 내역 검증 전 종결 불가',
   };
 }
