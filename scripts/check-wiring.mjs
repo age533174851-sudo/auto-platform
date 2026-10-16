@@ -85,6 +85,16 @@ const ALLOW = new Map([
   // 챌린지 도메인 모듈의 면제는 **지웠다.** PR3의 스윕(paperChallengeSweep.ts)이
   // transitionAllowed·terminalStatusFor를 실제로 부르면서 배선됐다 —
   // 면제 목록이 낡으면 다음에 진짜로 끊긴 것을 덮는다.
+  ['src/lib/engine/exitDependency.ts',
+    '막는 것: 두 가지가 모두 승인 사항이다. ① 시간청산 완화 허가는 '
+    + '신호 기반 청산이 배선된 뒤에만 의미가 있고, 그 공식(반대 신호·'
+    + '모멘텀 둔화·실현 기준 트레일링 중 무엇인가)은 STRATEGY_SPEC.md '
+    + '§1.1에서 아직 사용자 확정이 아니다. ② judgeUnresolvedClose의 '
+    + 'OPERATOR_REQUIRED를 알림에 붙이는 것은 운영 동작 변경이다 '
+    + '(Issue #325가 "테스트/정적 감사만 허용"으로 범위를 정했다). '
+    + '지금은 docs/EXIT_TIME_VS_SIGNAL.md의 분석을 코드로 고정하는 '
+    + '용도이고, 승인이 나면 exit-monitor 라우트의 결과 기록과 '
+    + 'killAlert 경로에 붙인다'],
   ['src/lib/markets/proxyAsset.ts',
     '막는 것: 해외주식 주문 경로(stock/order)가 이 판정을 받을 자리가 없다. '
     + '금·원유 ETF처럼 24시간 거래되지만 기초자산 시장은 닫혀 있는 종목의 '
