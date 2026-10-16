@@ -2,7 +2,8 @@
 import { test, eq, assert, close } from '../../test/harness';
 import { compareMarginAllocationScenarios, type CompletedMarginTrade } from './marginAllocationComparison';
 
-const criteria = { minClosedTrades: 30, maxDrawdownPct: 10, maxStepIncreasePct: 25 };
+// Research thresholds, NOT statistical significance or automatic approval.
+const criteria = { minClosedTrades: 100, maxDrawdownPct: 10, maxStepIncreasePct: 10 };
 const verified = (count: number, roi: number): CompletedMarginTrade[] =>
   Array.from({ length: count }, () => ({
     netReturnOnMargin: roi, evidence: 'VERIFIED' as const, costsIncluded: true,
@@ -63,34 +64,34 @@ export function runMarginAllocationComparisonTests() {
     }
   });
 
-  test('positive verified 30-trade sample + approved review allows one 25% hypothetical step', () => {
-    const v = scenario(verified(32, 0.1), [{
-      afterClosedTrades: 30, newBaseMarginUsd: 125, explicitlyApproved: true,
+  test('positive 100-trade sample + approved review allows one 10% hypothetical step', () => {
+    const v = scenario(verified(102, 0.1), [{
+      afterClosedTrades: 100, newBaseMarginUsd: 110, explicitlyApproved: true,
     }]);
     eq(v.fixedThenReviewedStep.appliedSteps.length, 1);
-    eq(v.fixedThenReviewedStep.appliedSteps[0], 30);
-    close(v.fixedThenReviewedStep.marginsUsd[29], 100);
-    close(v.fixedThenReviewedStep.marginsUsd[30], 125);
-    close(v.fixedThenReviewedStep.endingEquityUsd, 1325);
+    eq(v.fixedThenReviewedStep.appliedSteps[0], 100);
+    close(v.fixedThenReviewedStep.marginsUsd[99], 100);
+    close(v.fixedThenReviewedStep.marginsUsd[100], 110);
+    close(v.fixedThenReviewedStep.endingEquityUsd, 2022);
     eq(v.executionAuthorized, false);
   });
 
-  test('synthetic outcomes cannot authorize size increase even after 30 profitable closes', () => {
-    const trades = verified(32, 0.1);
+  test('synthetic outcomes cannot authorize size increase even after 100 profitable closes', () => {
+    const trades = verified(102, 0.1);
     trades[4] = { ...trades[4], evidence: 'SYNTHETIC' };
     const v = scenario(trades, [{
-      afterClosedTrades: 30, newBaseMarginUsd: 125, explicitlyApproved: true,
+      afterClosedTrades: 100, newBaseMarginUsd: 110, explicitlyApproved: true,
     }]);
     eq(v.fixedThenReviewedStep.appliedSteps.length, 0);
-    eq(v.fixedThenReviewedStep.skippedSteps[0], 30);
-    eq(v.fixedThenReviewedStep.marginsUsd[30], 100);
+    eq(v.fixedThenReviewedStep.skippedSteps[0], 100);
+    eq(v.fixedThenReviewedStep.marginsUsd[100], 100);
     assert(!v.finalReview.eligibleForHumanReview);
   });
 
   test('high historical drawdown blocks step-up despite eventual net profit', () => {
-    const trades = [...verified(2, -1), ...verified(30, 0.2)];
+    const trades = [...verified(2, -1), ...verified(100, 0.2)];
     const v = scenario(trades, [{
-      afterClosedTrades: 30, newBaseMarginUsd: 125, explicitlyApproved: true,
+      afterClosedTrades: 100, newBaseMarginUsd: 110, explicitlyApproved: true,
     }]);
     assert(v.fixedThenReviewedStep.maxDrawdownPct > 10);
     eq(v.fixedThenReviewedStep.appliedSteps.length, 0);
@@ -100,11 +101,11 @@ export function runMarginAllocationComparisonTests() {
   test('approval is never inferred from stats; unapproved step and oversized jump stay blocked', () => {
     const trades = verified(32, 0.1);
     const noApproval = scenario(trades, [{
-      afterClosedTrades: 30, newBaseMarginUsd: 125, explicitlyApproved: false,
+      afterClosedTrades: 100, newBaseMarginUsd: 110, explicitlyApproved: false,
     }]);
     eq(noApproval.fixedThenReviewedStep.appliedSteps.length, 0);
     const hugeJump = scenario(trades, [{
-      afterClosedTrades: 30, newBaseMarginUsd: 1000, explicitlyApproved: true,
+      afterClosedTrades: 100, newBaseMarginUsd: 1000, explicitlyApproved: true,
     }]);
     eq(hugeJump.fixedThenReviewedStep.appliedSteps.length, 0);
   });
