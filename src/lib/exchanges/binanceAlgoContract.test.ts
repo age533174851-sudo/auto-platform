@@ -12,7 +12,11 @@ const intent = (extra: Partial<BinanceConditionalAlgoIntent> = {}):
     environment: 'TESTNET', symbol: 'BTCUSDT', positionMode: 'ONE_WAY',
     closes: 'LONG', side: 'SELL', type: 'STOP_MARKET',
     triggerPrice: 65000.2, tickSize: 0.1,
-    workingType: 'MARK_PRICE', closeAll: true,
+    workingType: 'MARK_PRICE',
+    referencePrice: 65000.3,
+    referenceObservedAtMs: 100000, evaluatedAtMs: 100500,
+    maxReferenceAgeMs: 3000,
+    closeAll: true,
     clientAlgoId: 'TRAIGO_TEST_CLOSE_001',
     ...extra,
   });
@@ -30,6 +34,13 @@ export function runBinanceAlgoContractTests() {
                 type, closeAll,
                 triggerPrice: symbol === 'BTCUSDT' ? 65000.2 : 3500.15,
                 tickSize: symbol === 'BTCUSDT' ? .1 : .01,
+                // The trigger must be above or below the same-type venue
+                // reference depending on LONG/SHORT and STOP/TP.
+                referencePrice: (symbol === 'BTCUSDT' ? 65000.2 : 3500.15) +
+                  ((type === 'STOP_MARKET'
+                    ? closes === 'LONG' : closes === 'SHORT')
+                    ? (symbol === 'BTCUSDT' ? .1 : .01)
+                    : -(symbol === 'BTCUSDT' ? .1 : .01)),
                 clientAlgoId: 'SMOKE_' + n.toString().padStart(3, '0'),
                 ...(closeAll ? {} : { quantity: symbol === 'BTCUSDT' ? 0.005 : 0.02,
                   quantityStep: .001, reduceOnly: true }),
@@ -112,6 +123,49 @@ export function runBinanceAlgoContractTests() {
       { tickSize: 0 }, { tickSize: NaN }, { triggerPrice: Infinity },
     ] as any[]) {
       assert(!buildBinanceConditionalAlgoPayload(intent(extra)).ok);
+    }
+  });
+
+  test('Trigger side must match LONG/SHORT and STOP/TP; equality is not safe', () => {
+    for (const closes of ['LONG', 'SHORT'] as const) {
+      for (const type of ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] as const) {
+        const above = (type === 'STOP_MARKET') === (closes === 'SHORT');
+        const reference = 65000.0;
+        const safeTrigger = above ? 65000.1 : 64999.9;
+        const safe = buildBinanceConditionalAlgoPayload(intent({
+          closes, side: closes === 'LONG' ? 'SELL' : 'BUY',
+          type, referencePrice: reference, triggerPrice: safeTrigger,
+        }));
+        eq(safe.code, 'OK', 'Proper trigger direction was rejected');
+        for (const badTrigger of [reference, above ? 64999.9 : 65000.1]) {
+          const bad = buildBinanceConditionalAlgoPayload(intent({
+            closes, side: closes === 'LONG' ? 'SELL' : 'BUY',
+            type, referencePrice: reference, triggerPrice: badTrigger,
+          }));
+          eq(bad.code, 'TRIGGER_WRONG_SIDE_OR_IMMEDIATE');
+          eq(bad.executionAuthorized, false);
+        }
+      }
+    }
+  });
+
+  test('Missing, stale or future-dated market reference cannot be used to create Algo trigger', () => {
+    for (const extra of [
+      { referencePrice: null },
+      { referencePrice: 0 },
+      { referencePrice: NaN },
+      { referencePrice: Infinity },
+      { referenceObservedAtMs: undefined },
+      { referenceObservedAtMs: 96000 },
+      { referenceObservedAtMs: 100501 },
+      { evaluatedAtMs: 0 },
+      { maxReferenceAgeMs: 0 },
+      { maxReferenceAgeMs: 10000 },
+      { maxReferenceAgeMs: 1.5 },
+    ] as any[]) {
+      const v = buildBinanceConditionalAlgoPayload(intent(extra));
+      eq(v.code, 'REFERENCE_UNKNOWN_OR_STALE', JSON.stringify(extra));
+      eq(v.payload, null);
     }
   });
 
