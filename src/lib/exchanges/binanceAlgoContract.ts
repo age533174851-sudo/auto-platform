@@ -158,6 +158,76 @@ export function buildBinanceConditionalAlgoPayload(
   return { ok: true, code: 'OK', payload, executionAuthorized: false };
 }
 
+// ── Signed GET-by-clientAlgoId: a READ ONLY path toward venue evidence ──
+//
+// This injects a GET-only transport for testability. Its caller must be
+// server-side and must use the verified connection owner's TESTNET key.
+// A 404/not-found, network timeout or malformed 200 is UNKNOWN, NOT
+// proof the conditional order was never accepted.
+//
+// NOTE: Unlike the offline payload builder above, the transport below may
+// be wired to a signed exchange GET. It can NEVER create, cancel or
+// authorize a position. Request and response fields are deliberately narrow.
+export interface AlgoIndividualLookup {
+  code: 'FOUND_UNVERIFIED' | 'INVALID_SCOPE' |
+    'VENUE_READ_UNKNOWN' | 'VENUE_IDENTITY_MISMATCH';
+  order: any | null;
+  canResend: false;
+  canCancel: false;
+  executionAuthorized: false;
+}
+
+export type AlgoSignedGet = (
+  path: '/fapi/v1/algoOrder',
+  params: { clientAlgoId: string },
+) => Promise<any>;
+
+export async function queryBinanceAlgoByClientId(
+  i: {
+    environment: 'TESTNET' | 'LIVE' | 'UNKNOWN';
+    symbol: string;
+    clientAlgoId: string;
+  },
+  readSignedGet: AlgoSignedGet | null | undefined,
+): Promise<AlgoIndividualLookup> {
+  const failed = (code: AlgoIndividualLookup['code']): AlgoIndividualLookup =>
+    ({ code, order: null, canResend: false, canCancel: false,
+      executionAuthorized: false });
+  if (i?.environment !== 'TESTNET' ||
+      !/^[A-Z0-9]{5,24}$/.test(i?.symbol ?? '') ||
+      !/^[.A-Z:/a-z0-9_-]{1,36}$/.test(i?.clientAlgoId ?? '') ||
+      typeof readSignedGet !== 'function') {
+    return failed('INVALID_SCOPE');
+  }
+  try {
+    const r: any = await readSignedGet('/fapi/v1/algoOrder', {
+      clientAlgoId: i.clientAlgoId,
+    });
+    if (!r || typeof r !== 'object' || Array.isArray(r)) {
+      return failed('VENUE_READ_UNKNOWN');
+    }
+    const id = r.algoId;
+    const validId = typeof id === 'string'
+      ? /^[1-9][0-9]*$/.test(id)
+      : typeof id === 'number' && Number.isSafeInteger(id) && id > 0;
+    if (!validId || r.algoType !== 'CONDITIONAL' ||
+        r.clientAlgoId !== i.clientAlgoId || r.symbol !== i.symbol ||
+        !['STOP_MARKET', 'TAKE_PROFIT_MARKET', 'TRAILING_STOP_MARKET',
+          'STOP', 'TAKE_PROFIT'].includes(r.orderType) ||
+        !['BUY', 'SELL'].includes(r.side) ||
+        !['BOTH', 'LONG', 'SHORT'].includes(r.positionSide) ||
+        typeof r.algoStatus !== 'string') {
+      return failed('VENUE_IDENTITY_MISMATCH');
+    }
+    return {
+      code: 'FOUND_UNVERIFIED', order: r, canResend: false,
+      canCancel: false, executionAuthorized: false,
+    };
+  } catch {
+    return failed('VENUE_READ_UNKNOWN');
+  }
+}
+
 export interface AcceptedAlgoOrder {
   code: 'ACKED_UNVERIFIED' | 'UNKNOWN';
   acceptedAlgoId: string | null;
