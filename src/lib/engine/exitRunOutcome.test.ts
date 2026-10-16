@@ -10,7 +10,7 @@
 // 안 보는 표에만 남는다 — `strategy_id` projection 장애가 25일간 숨어
 // 있던 것이 정확히 이 모양이다.
 import { test, eq, assert } from '../../test/harness';
-import { collectLifecycleFailures, exitRunOutcome } from './exitRunOutcome';
+import { collectLifecycleFailures, exitRunOutcome, exitMonitorScanScope } from './exitRunOutcome';
 
 export function runExitRunOutcomeTests() {
   console.log('\n📋 청산 감시 회차 결과 (기록과 응답이 같은 진실)');
@@ -121,5 +121,70 @@ export function runExitRunOutcomeTests() {
     const f = collectLifecycleFailures({ results: [{ symbol: 'A', ok: false }] });
     eq(f.length, 1);
     eq(f[0].error, 'lifecycle_failed');
+  });
+
+  // ── Exit-monitor scan-scope telemetry: do NOT infer unique venue positions ──
+  test('★ ladder 0 but dedicated exit 2: legacy positions_scanned 0 is not total coverage', () => {
+    const scope = exitMonitorScanScope({
+      ladderDecisionRows: 0,
+      lifecycle: {
+        projection: 'RISK', error: null, candidates: 0,
+        deferredCount: 1, authority: { candidates: 2 },
+      },
+    });
+    eq(scope.legacyLadderDecisionRows, 0);
+    eq(scope.lifecycleReadState, 'READ');
+    eq(scope.genericLifecycleCandidates, 0);
+    eq(scope.dedicatedExitCandidates, 2);
+    eq(scope.deferredLifecycleRows, 1);
+    eq(scope.uniqueOpenExchangePositions, null);
+    eq(scope.venuePositionsVerified, false);
+  });
+
+  test('★ overlapping ladders, generic and dedicated candidates are NOT added', () => {
+    const scope = exitMonitorScanScope({
+      ladderDecisionRows: 3,
+      lifecycle: { projection: 'IDENTITY', candidates: 2, deferredCount: 0,
+        authority: { candidates: 1 } },
+    });
+    eq(scope.legacyLadderDecisionRows, 3);
+    eq(scope.genericLifecycleCandidates, 2);
+    eq(scope.dedicatedExitCandidates, 1);
+    eq(scope.uniqueOpenExchangePositions, null,
+      'Distinct exchange positions require actual venue observations and ownership');
+  });
+
+  test('★ lifecycle DB read failure keeps counters UNKNOWN despite ladder 0', () => {
+    const scope = exitMonitorScanScope({
+      ladderDecisionRows: 0,
+      lifecycle: { projection: 'RISK', error: 'db timeout',
+        candidates: 0, deferredCount: 0, authority: { candidates: 0 } },
+    });
+    eq(scope.lifecycleReadState, 'FAILED');
+    eq(scope.genericLifecycleCandidates, null);
+    eq(scope.dedicatedExitCandidates, null);
+    eq(scope.deferredLifecycleRows, null);
+  });
+
+  test('★ missing projection and missing authority fields are UNKNOWN, never 0', () => {
+    const absent = exitMonitorScanScope({ ladderDecisionRows: 0, lifecycle: null });
+    eq(absent.lifecycleReadState, 'UNKNOWN');
+    eq(absent.dedicatedExitCandidates, null);
+    const incomplete = exitMonitorScanScope({
+      ladderDecisionRows: 0,
+      lifecycle: { projection: 'LEGACY', candidates: 0, deferredCount: 0 },
+    });
+    eq(incomplete.lifecycleReadState, 'UNKNOWN');
+    eq(incomplete.genericLifecycleCandidates, null);
+    eq(incomplete.dedicatedExitCandidates, null);
+  });
+
+  test('★ invalid source count is not silently converted into a truthful scan', () => {
+    for (const n of [-1, NaN, Infinity, 1.1] ) {
+      let rejected = false;
+      try { exitMonitorScanScope({ ladderDecisionRows: n, lifecycle: null }); }
+      catch { rejected = true; }
+      assert(rejected, String(n) + ' must not be reported as a real scan');
+    }
   });
 }
