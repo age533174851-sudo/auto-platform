@@ -1034,10 +1034,17 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
       if (args.stopLoss && !slId) {
         let closed = false, closeErr = '';
+        // reduceOnly 수량은 origQty(res.qty)가 아니라 체결 사실을 우선한다.
+        // 필터를 알고 있으면 LOT_SIZE+MARKET_LOT_SIZE 격자에 내리고,
+        // 필터 미상/잔량 dust는 청산 시도 자체를 막지 않는다.
+        const closeQuantity = (raw: number): number => {
+          const q = quantizeOrder(raw, null, filters, { orderType: 'MARKET', reduceOnly: true });
+          return q.ok && q.quantity != null && q.quantity > 0 ? q.quantity : raw;
+        };
         try {
           const close = await bf.placeFuturesOrder(apiKey, apiSecret, {
             symbol: plan.symbol, side: closeSide, type: 'MARKET',
-            quantity: res.qty || plan.quantity, reduceOnly: true,
+            quantity: closeQuantity(fill.filledQty && fill.filledQty > 0 ? fill.filledQty : sendQty), reduceOnly: true,
             clientOrderId: `${clientOrderId}X`.slice(0, 36),
           }, testnet);
           closed = !!(close as any)?.success;
@@ -1100,7 +1107,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
             try {
               const retry = await bf.placeFuturesOrder(apiKey, apiSecret, {
                 symbol: plan.symbol, side: closeSide, type: 'MARKET',
-                quantity: posAmt, reduceOnly: true,
+                quantity: closeQuantity(posAmt), reduceOnly: true,
                 clientOrderId: `${clientOrderId}Y`.slice(0, 36),
               }, testnet);
               if ((retry as any)?.success) { closed = true; closeErr = ''; }
@@ -1846,9 +1853,19 @@ async function attachStopIfMissing(
       return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
     }
 
+    // 복구 시에도 최초 손절 부착과 동일한 격자/방향 정본을 사용한다.
+    // 필터 미상 시 기존 closePosition 우선 시도는 유지한다.
+    const filters = await bf.getSymbolFilters(symbol, creds.testnet);
+    const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+    const trigger = roundTrigger(stop, posSide, 'STOP', tick);
+    if (trigger.price == null) return `손절 복구 실패 — 트리거 가격을 확인할 수 없습니다: ${trigger.note}`;
+    const quantized = quantizeOrder(Math.abs(amt), null, filters,
+      { orderType: 'MARKET', reduceOnly: true });
+    const fallbackQuantity = quantized.ok && quantized.quantity != null && quantized.quantity > 0
+      ? quantized.quantity : Math.abs(amt);
     const sl: any = await bf.placeFuturesTPSL(creds.apiKey, creds.apiSecret, {
-      symbol, side: closeSide, stopPrice: stop, type: 'STOP_MARKET',
-      fallbackQuantity: Math.abs(amt),
+      symbol, side: closeSide, stopPrice: trigger.price, type: 'STOP_MARKET',
+      fallbackQuantity,
     }, creds.testnet);
     if (!sl?.success) return `손절 복구 실패 — ${sl?.message || '원인 불명'}`;
     await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
