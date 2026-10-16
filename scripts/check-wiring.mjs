@@ -67,6 +67,13 @@ const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
  * 약속이고, 약속이 쌓이면 이 검사는 없는 것과 같아진다.
  */
 const ALLOW = new Map([
+  ['src/lib/exchanges/binanceAlgoContract.ts',
+    'Binance 조건부 STOP/TP의 새 Algo Order API 계약 연구 전용. '
+    + '현재 placeFuturesTPSL은 구 /fapi/v1/order를 호출하므로 이 모듈을 실행기에 연결하면 '
+    + '호환 안 된 algoId와 orderId 및 취소 API 차이로 포지션이 무방비가 될 수 있다. '
+    + '연결 전에 #345의 실측 조회/접수/취소, 소유권 귀속,'
+    + ' 부분 체결 및 불확실 ACK 후 복구, 전체 TESTNET 스모크를 요구한다. '
+    + '현재 fake-only 테스트만 허용하며 실제 주문/취소 경로에서 호출 금지'],
   // ── 이 검사를 처음 켰을 때 이미 끊겨 있던 것들 ──
   //
   // **이 목록은 갚아야 할 빚이다.** 여기 있는 동안 그 판정은
