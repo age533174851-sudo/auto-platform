@@ -390,9 +390,9 @@ export interface ExposureBlockVerdict {
   reason: string;
 }
 
-/** 이 줄의 `POSITION_ZERO` 단계 상태 */
-function positionZeroOf(row: any): string | null {
-  const v = row?.steps?.POSITION_ZERO;
+/** 단계의 상태. 옛 행의 문자열 형태도 허용한다. */
+function zeroStepOf(row: any, id: 'POSITION_ZERO' | 'ORDERS_ZERO'): string | null {
+  const v = row?.steps?.[id];
   if (v == null) return null;
   const st = typeof v === 'string' ? v : v?.state;
   return st == null ? null : String(st).toUpperCase();
@@ -412,12 +412,9 @@ function positionZeroOf(row: any): string | null {
  *
  * 언제 풀리는가
  * ─────────────
- * `POSITION_ZERO`가 `PASS`로 바뀌어야 풀린다. 그 값은 `settleAttempt`가
- * **거래소 재조회**로만 적는다(`closeVerdict`). 즉 **거래소가 0을
- * 확인해 주기 전에는 풀리지 않는다.** 장부를 고쳐서 푸는 길은 없다.
- *
- * `ORDERS_ZERO`도 본다 — 포지션이 0이어도 내 청산·보호 주문이 남아
- * 있으면 다음 진입을 친다.
+ * `POSITION_ZERO`와 `ORDERS_ZERO`가 **둘 다 PASS**여야 풀린다.
+ * 정산 경로에서 거래소 재조회로 두 값을 확인한다. 포지션이 0이어도
+ * 미체결 주문이 남거나 확인 불가하면 다음 진입을 막는다.
  *
  * **`rows`가 null이면 막는다.** 못 읽은 것은 "없음"이 아니다.
  */
@@ -440,15 +437,17 @@ export function unresolvedExposureBlock(i: {
   for (const r of i.rows) {
     if (conn != null && r?.connection_id != null && String(r.connection_id) !== conn) continue;
 
-    const pz = positionZeroOf(r);
-    // 단계를 적은 적이 없는 줄은 이 판정의 대상이 아니다 — 진입조차
-    // 못 한 회차가 대부분이고, 그건 노출이 아니다.
-    if (pz == null) continue;
-    if (pz === 'PASS') continue;
+    const pz = zeroStepOf(r, 'POSITION_ZERO');
+    const oz = zeroStepOf(r, 'ORDERS_ZERO');
+    const state = String(r?.state ?? '').toUpperCase();
+    // 진입 전에 끝난 줄은 노출이 없지만, 진입 중/유지/청산 중인 줄은
+    // 단계 기록이 없어도 미확인 노출이다. PZ PASS만으로는 충분하지 않다.
+    if (pz == null && oz == null && !['ENTERING', 'HOLDING', 'CLOSING'].includes(state)) continue;
+    if (pz === 'PASS' && oz === 'PASS') continue;
 
     const id = String(r?.id ?? '?');
-    if (pz === 'FAIL') unresolved.push(id);
-    else unknown.push(id);                      // UNKNOWN · PENDING · 그 밖
+    if (pz === 'FAIL' || oz === 'FAIL') unresolved.push(id);
+    else unknown.push(id);                      // UNKNOWN · PENDING · 누락 · 그 밖
   }
 
   if (unresolved.length) {
