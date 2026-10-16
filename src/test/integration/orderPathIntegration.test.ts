@@ -402,6 +402,67 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
+  // ══════════ ⑤-b 실제 대조 → 손절 재부착 → -4120 대체 전송 ══════════
+  {
+    // 처음 부착되지 않은 ACKED 진입이 뒤늦게 FILLED로 확인된다.
+    // 대조 자체가 실행기의 attachStopIfMissing을 호출해야 한다.
+    const SYM = 'PRECLREATTUSDT';
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      symbol: SYM, stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.0033333333333333335',
+        entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.0033333333333333335', origQty: '0.010', avgPrice: '60000' }) }, 'GET')
+      .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001', maxQty: '100' },
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0', maxQty: '0' },
+        { filterType: 'PRICE_FILTER', tickSize: '0.1' },
+      ] }] } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, orderId: 9501 }) });
+    const result = await scenario(venue, () => reconcile(db));
+
+    test('★ 대조에서 복구한 LONG 손절은 아래 틱 58920.9, 대체 수량은 0.003', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문을 대조하지 못했다');
+      const stopCalls = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET');
+      eq(stopCalls.length, 2, 'closePosition 실패 후 대체 주문 경로가 돌지 않았다');
+      eq(stopCalls[0].params.stopPrice, '58920.9');
+      eq(stopCalls[0].params.closePosition, 'true');
+      eq(stopCalls[1].params.stopPrice, '58920.9');
+      eq(stopCalls[1].params.quantity, '0.003');
+      eq(stopCalls[1].params.reduceOnly, 'true');
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, '9501');
+    });
+  }
+
+  // ══════════ ⑤-c NO_FIXED_SL 계약은 대조에서도 손절을 걸지 않는다 ══════════
+  {
+    const SYM = 'PRECMREATTUSDT';
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      symbol: SYM, stop_policy: 'NO_FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.003',
+        entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'GET');
+    const result = await scenario(venue, () => reconcile(db));
+    test('★ NO_FIXED_SL 회차는 손절가가 기록돼도 복구 주문 0건', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1);
+      eq(venue.orderSends().length, 0, 'NO_FIXED_SL인데 복구가 STOP_MARKET을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('고정 손절을 쓰지 않는')),
+        '정책에 따른 의도적 미부착 이유가 누락됐다');
+    });
+  }
+
   // ══════════ ⑥ Gate 선물 상태 어휘 ══════════
   {
     const db = new FakeDb().seed('live_orders', [
