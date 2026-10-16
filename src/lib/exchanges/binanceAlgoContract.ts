@@ -167,6 +167,63 @@ export function parseBinanceAlgoAcceptance(
     venueProtectionActiveVerified: false, executionAuthorized: false };
 }
 
+/**
+ * Follow-up READ-ONLY proof from GET /fapi/v1/openAlgoOrders.
+ *
+ * This is a *snapshot* of currently listed Algo orders, not a guarantee
+ * that the stop can fill before liquidation or that it cannot disappear
+ * between reads. Missing from the list is UNKNOWN (filled/cancelled/missed
+ * from view), NEVER permission to resend a second stop.
+ */
+export function verifyBinanceAlgoOpenReadback(i: {
+  accepted: AcceptedAlgoOrder;
+  payload: Record<string, string> | null;
+  venueRead: { success?: unknown; orders?: unknown } | null | undefined;
+}): {
+  code: 'LISTED_OPEN_AT_READ' | 'NOT_LISTED_UNKNOWN' | 'READ_UNKNOWN' | 'IDENTITY_MISMATCH';
+  listedOpenAtRead: boolean;
+  executionAuthorized: false;
+} {
+  const fail = (code: 'NOT_LISTED_UNKNOWN' | 'READ_UNKNOWN' | 'IDENTITY_MISMATCH') =>
+    ({ code, listedOpenAtRead: false, executionAuthorized: false as const });
+  const p = i?.payload;
+  const a = i?.accepted;
+  if (!p || a?.code !== 'ACKED_UNVERIFIED' || !a.acceptedAlgoId ||
+      !a.clientAlgoId || a.clientAlgoId !== p.clientAlgoId) {
+    return fail('IDENTITY_MISMATCH');
+  }
+  if (i.venueRead?.success !== true ||
+      !Array.isArray(i.venueRead?.orders)) {
+    return fail('READ_UNKNOWN');
+  }
+  // The venue ID may be int64. Treat a numeric ID as usable ONLY while
+  // Number.isSafeInteger; never round an int64 then claim it matches.
+  const lossless = (x: any): string | null =>
+    typeof x === 'string' && /^[1-9][0-9]*$/.test(x) ? x
+    : typeof x === 'number' && Number.isSafeInteger(x) && x > 0 ? String(x)
+    : null;
+  const matchesClientId = i.venueRead.orders.filter((o: any) =>
+    o?.clientAlgoId === a.clientAlgoId);
+  if (matchesClientId.length === 0) return fail('NOT_LISTED_UNKNOWN');
+  if (matchesClientId.length !== 1) return fail('IDENTITY_MISMATCH');
+  const o = matchesClientId[0];
+  const same = lossless(o.algoId) === a.acceptedAlgoId &&
+    o.symbol === p.symbol && o.side === p.side &&
+    o.algoType === 'CONDITIONAL' &&
+    o.orderType === p.type && o.positionSide === 'BOTH' &&
+    o.algoStatus === 'NEW' && o.workingType === p.workingType &&
+    Number.isFinite(Number(o.triggerPrice)) &&
+    Number(o.triggerPrice) === Number(p.triggerPrice) &&
+    (p.closePosition === 'true'
+      ? o.closePosition === true && !o.reduceOnly
+      : o.reduceOnly === true && !o.closePosition &&
+        Number.isFinite(Number(o.quantity)) &&
+        Number(o.quantity) === Number(p.quantity));
+  if (!same) return fail('IDENTITY_MISMATCH');
+  return { code: 'LISTED_OPEN_AT_READ',
+    listedOpenAtRead: true, executionAuthorized: false };
+}
+
 /** Deletion must use Algo ID namespace; a regular-order ID is NOT interchangeable. */
 export function binanceAlgoCancellationIdentifier(
   id: { kind: 'ALGO'; algoId: string } | { kind: 'REGULAR'; orderId: string },
