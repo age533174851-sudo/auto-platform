@@ -49,7 +49,7 @@ export function runMarginAllocationComparisonTests() {
     close(v.fixedThenReviewedStep.marginsUsd[0], 100);
     close(v.fixedThenReviewedStep.marginsUsd[1], 100);
     close(v.fixedThenReviewedStep.marginsUsd[2], 100 * (1050 / 1100));
-    close(v.tenPercentOfEquity.marginsUsd[2], 105);
+    close(v.tenPercentOfEquity.marginsUsd[2], 104.5); // A: 1100 - (110 * 0.5) = 1045
   });
 
   test('fixed model also reduces margin on drawdown; never breaches 10% of equity', () => {
