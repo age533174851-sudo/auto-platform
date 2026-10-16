@@ -1444,3 +1444,126 @@ export async function runPrecisionIntegrationTests() {
     });
   }
 }
+
+/**
+ * **실제 심볼 × 방향 × 배율 전수.**
+ *
+ * 합성 심볼로만 보면 "BTCUSDT에서도 되는가"를 못 말한다. 실제 바이낸스
+ * USDⓈ-M 규격으로 BTCUSDT·ETHUSDT를 LONG/SHORT · 10배/100배로 돌려
+ * **거래소에 간 수량과 보호주문 가격이 전부 격자 위에 있는지** 본다.
+ */
+export async function runPrecisionMatrixTests() {
+  console.log('[통합 — 정밀도 전수 (BTC·ETH × LONG·SHORT × 10·100배)]');
+
+  /** 실제 바이낸스 USDⓈ-M 규격 (MARKET_LOT_SIZE의 0은 '꺼짐') */
+  const SPECS: Record<string, { step: string; minQty: string; tick: string; px: number }> = {
+    // **기준가를 딱 떨어지는 값으로 두지 않는다.**
+    //   60000 × 0.98 = 58800 — 이미 0.10 격자 위라 반올림을 떼도 시험이
+    //   통과한다. 실제로 그렇게 써서 음성 시험이 0건을 잡았다.
+    //   실측의 `59400.000000000007`처럼 **어긋나는 값**이어야 한다.
+    MTXBTCUSDT: { step: '0.001', minQty: '0.001', tick: '0.10', px: 60123.45 },
+    MTXETHUSDT: { step: '0.001', minQty: '0.001', tick: '0.01', px: 3012.37 },
+  };
+
+  const onGrid = (v: number, step: number) => {
+    const k = Math.round(v / step);
+    return Math.abs(k * step - v) < step * 1e-6;
+  };
+
+  for (const [SYM, spec] of Object.entries(SPECS)) {
+    for (const side of ['LONG', 'SHORT'] as const) {
+      for (const leverage of [10, 100]) {
+        const db = new FakeDb();
+        const marginUsd = 20;
+        // 스모크가 쓰는 바로 그 식 — 생 부동소수가 나온다
+        const rawQty = (marginUsd * leverage) / spec.px;
+
+        // **손절은 청산가 안쪽이어야 한다.** 배율이 높을수록 청산까지의
+        // 거리가 짧다(100배면 약 1%). 처음엔 손절을 1%로 고정하고
+        // 청산가를 아무 값이나 넣었다가, 청산가 관문이 옳게 막았다 —
+        // 코드가 아니라 픽스처가 틀렸던 것이다.
+        const liqPct = 0.9 * (100 / leverage);          // 10배 9% · 100배 0.9%
+        const stopPct = leverage >= 100 ? 0.3 : 2;
+        const sgn = side === 'LONG' ? -1 : 1;
+        const liqPrice = spec.px * (1 + sgn * liqPct / 100);
+        const rawStop = spec.px * (1 + sgn * stopPct / 100);
+        const rawTp = spec.px * (1 - sgn * stopPct / 100);
+
+        const venue = new FakeVenue()
+          .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
+            { filterType: 'LOT_SIZE', stepSize: spec.step, minQty: spec.minQty },
+            { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+            { filterType: 'PRICE_FILTER', tickSize: spec.tick },
+            { filterType: 'MIN_NOTIONAL', notional: '5' },
+          ] }] } })
+          .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+          .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
+          .on(BN_DUAL, { json: { dualSidePosition: false } })
+          .on(BN_LEV, { json: { leverage, symbol: SYM } })
+          .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0', entryPrice: '0',
+            leverage: String(leverage), marginType: 'isolated', liquidationPrice: '0' }] })
+          .on('/fapi/v1/premiumIndex', { json: { symbol: SYM, markPrice: String(spec.px) } })
+          .on('/fapi/v1/openOrders', { json: [] })
+          .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+          .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+            executedQty: String(rawQty), avgPrice: String(spec.px) }) }, 'POST');
+
+        const r = await scenario(venue, () => exec(db, {
+          plan: plan({ symbol: SYM, side, quantity: rawQty, leverage,
+            stopDistancePct: stopPct, effectiveStopPct: stopPct,
+            liquidationPrice: liqPrice, liquidationDistancePct: liqPct }),
+          stopLoss: rawStop, takeProfit: rawTp,
+          stopPolicy: 'FIXED_STOP', takeProfitPolicy: 'FIXED_TP',
+          protectionPolicy: 'OPTIONAL',
+        }));
+
+        const label = `${SYM} ${side} ${leverage}배`;
+
+        test(`★ ${label} — 진입 수량이 stepSize 격자 위에 있다`, () => {
+          assert(!(r instanceof Error), String((r as any)?.message));
+          const sends = venue.orderSends();
+          assert(sends.length >= 1, `주문이 안 나갔다 (${String((r as any)?.message)})`);
+          const q = Number((sends[0].params as any).quantity);
+          const step = Number(spec.step);
+          assert(onGrid(q, step), `${label}: 수량 ${q}이 격자 ${step} 위에 없다`);
+          assert(q > 0, `${label}: 수량이 0이다`);
+          // 생 부동소수가 그대로 나가지 않았다
+          assert(q !== rawQty || onGrid(rawQty, step),
+            `${label}: 생 부동소수 ${rawQty}가 그대로 나갔다`);
+        });
+
+        test(`★ ${label} — 보호주문 가격이 tickSize 격자 위에 있다`, () => {
+          const tick = Number(spec.tick);
+          // **이 시험이 공허하지 않다는 확인.** 원본이 이미 격자 위면
+          // 반올림을 떼도 통과하므로 아무것도 막지 못한다.
+          assert(!onGrid(rawStop, tick) || !onGrid(rawTp, tick),
+            `${label}: 원본 가격이 이미 격자 위다 — 이 시험은 아무것도 막지 못한다`);
+          const conds = venue.calls.filter((c) => c.method === 'POST'
+            && /\/order\b/.test(c.path) && (c.params as any)?.stopPrice != null);
+          assert(conds.length >= 1, `${label}: 조건부 주문이 안 나갔다`);
+          for (const c of conds) {
+            const sp = Number((c.params as any).stopPrice);
+            assert(onGrid(sp, tick), `${label}: stopPrice ${sp}이 호가 단위 ${tick} 위에 없다`);
+          }
+        });
+
+        test(`★ ${label} — 손절은 불리한 쪽, 익절은 유리한 쪽으로 맞춘다`, () => {
+          // 반올림하면 손절이 한 틱 가까워지거나 익절이 한 틱 멀어진다.
+          const conds = venue.calls.filter((c) => c.method === 'POST'
+            && /\/order\b/.test(c.path) && (c.params as any)?.stopPrice != null);
+          for (const c of conds) {
+            const sp = Number((c.params as any).stopPrice);
+            const type = String((c.params as any).type);
+            if (type === 'STOP_MARKET') {
+              if (side === 'LONG') assert(sp <= rawStop, `${label}: LONG 손절이 올라갔다 ${rawStop}→${sp}`);
+              else assert(sp >= rawStop, `${label}: SHORT 손절이 내려갔다 ${rawStop}→${sp}`);
+            } else if (type === 'TAKE_PROFIT_MARKET') {
+              if (side === 'LONG') assert(sp >= rawTp, `${label}: LONG 익절이 내려갔다 ${rawTp}→${sp}`);
+              else assert(sp <= rawTp, `${label}: SHORT 익절이 올라갔다 ${rawTp}→${sp}`);
+            }
+          }
+        });
+      }
+    }
+  }
+}

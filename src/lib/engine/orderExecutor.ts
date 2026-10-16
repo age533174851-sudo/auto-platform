@@ -14,7 +14,7 @@
 import type { PositionPlan } from './riskManager';
 import type { ExitPlan } from './exitPlan';
 import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
-import { fillBasis, exitFromFill } from './fillBasedExit';
+import { fillBasis, exitFromFill, roundTrigger } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
@@ -24,7 +24,7 @@ import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
-import { quantizeOrder } from '../exchanges/quantize';
+import { quantizeOrder, floorToStep, qtyGridFor } from '../exchanges/quantize';
 import {
   ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
 } from './reconcileLedgerStatus';
@@ -874,14 +874,41 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       let slId: string | undefined, tpId: string | undefined;
       const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
       let slError = '';
+
+      // ── 보호주문도 거래소 격자 위에 올린다 ──
+      //
+      // 진입 수량만 맞추면 **다음 벽이 여기다.** 손절·익절의
+      // `stopPrice`는 `기준가 × (1 ± 손절%)`가 만든 생 부동소수고
+      // (예: 59400.000000000007), 호가 단위를 벗어나면 똑같이 -1111로
+      // 거절된다. 그러면 **보호 없는 포지션이 열린 채로 남는다** —
+      // 진입이 거절되는 것보다 나쁜 결과다.
+      //
+      // 자릿수를 새로 쓰지 않는다. 방향까지 맞추는 정본이 이미 있다:
+      // `roundTrigger`는 LONG 손절을 **내리고** LONG 익절을 **올린다**
+      // (SHORT는 반대). 반올림으로 처리하면 손절이 한 틱 가까워지거나
+      // 익절이 한 틱 멀어져 **닿지 않는 보호주문**이 된다.
+      const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+      const mktGrid = qtyGridFor(filters, 'MARKET');
+      const protStep = mktGrid?.stepSize && mktGrid.stepSize > 0 ? mktGrid.stepSize : null;
+      /** 조건부 주문 수량도 격자 위로. 규격을 모르면 **그대로 보낸다** —
+       *  못 닫는 것이 거절당하는 것보다 나쁘다(정본의 청산 규칙과 같다). */
+      const protQty = (q: any): number | undefined => {
+        const n = Number(q);
+        if (!Number.isFinite(n) || n <= 0) return undefined;
+        return protStep ? floorToStep(n, protStep) : n;
+      };
+
       // 청산 주문에는 보호주문을 붙이지 않는다. 붙이면 포지션이 없어진 뒤에도
       // 남아서 다음 진입을 예상치 못하게 닫는다.
       if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
-        const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-          symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
+        const slTrig = roundTrigger(args.stopLoss, plan.side, 'STOP', tick);
+        const sl = slTrig.price == null
+          ? { success: false, message: `손절가를 호가 단위에 맞추지 못했습니다: ${slTrig.note}` } as any
+          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          symbol: plan.symbol, side: closeSide, stopPrice: slTrig.price, type: 'STOP_MARKET',
           // 1차는 closePosition(그때 있는 전량)이 맞다. 그게 이 환경에서
           // 거절되면(-4120) 체결 수량으로 한 번 더 시도한다.
-          fallbackQuantity: res.qty || plan.quantity,
+          fallbackQuantity: protQty(res.qty || sendQty) ?? null,
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
         else {
@@ -909,9 +936,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       } else if (args.exitPlan) {
         for (const o of args.exitPlan.orders) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
+          const pTrig = roundTrigger(o.price, plan.side, 'TAKE_PROFIT', tick);
+          if (pTrig.price == null) continue;   // 격자에 못 올리면 안 보낸다
           const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-            symbol: plan.symbol, side: closeSide, stopPrice: o.price,
-            type: 'TAKE_PROFIT_MARKET', quantity: o.quantity,
+            symbol: plan.symbol, side: closeSide, stopPrice: pTrig.price,
+            type: 'TAKE_PROFIT_MARKET', quantity: protQty(o.quantity),
           }, testnet);
           if ((r as any)?.success) tpIds.push(String((r as any).orderId));
           // 분할 익절 실패는 진입을 되돌릴 사유가 아니다 — 손절은 이미 걸려
@@ -919,8 +948,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
         tpId = tpIds[0];
       } else if (args.takeProfit) {
-        const tp = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-          symbol: plan.symbol, side: closeSide, stopPrice: args.takeProfit, type: 'TAKE_PROFIT_MARKET',
+        const tpTrig = roundTrigger(args.takeProfit, plan.side, 'TAKE_PROFIT', tick);
+        const tp = tpTrig.price == null
+          ? { success: false, message: `익절가를 호가 단위에 맞추지 못했습니다: ${tpTrig.note}` } as any
+          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          symbol: plan.symbol, side: closeSide, stopPrice: tpTrig.price, type: 'TAKE_PROFIT_MARKET',
         }, testnet);
         if ((tp as any)?.success) tpId = String((tp as any).orderId);
       }

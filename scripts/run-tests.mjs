@@ -158,6 +158,7 @@ import {
   runCloseIntegrationTests, runTransitionIntegrationTests, runCoinMRouteIntegrationTests,
   runGateExecIntegrationTests, runGateDupIntegrationTests, runNoFixedTpIntegrationTests,
   runPrecisionIntegrationTests,
+  runPrecisionMatrixTests,
 } from './src/test/integration/orderPathIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
@@ -416,6 +417,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runGateDupIntegrationTests();
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
+  await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
