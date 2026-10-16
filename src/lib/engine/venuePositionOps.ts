@@ -385,6 +385,29 @@ export async function sendSymbolClose(
 }
 
 /**
+ * 이 멱등 키의 주문이 거래소에 있는가.
+ *
+ * ★ **`ok: false`는 "없다"가 아니라 "못 물어봤다"다.** 둘을 섞으면
+ *   살아 있는 주문 위에 또 보내게 된다. Gate는 식별자 조회를 확인하지
+ *   못했으므로 `ok: false`를 주고, 그래서 Gate 경로는 재전송이 막힌다 —
+ *   막히는 쪽이 안전한 방향이다.
+ */
+export async function findCloseByClientId(
+  c: VenueCreds, symbol: string, clientOrderId: string,
+): Promise<{ ok: boolean; found: boolean }> {
+  const cid = String(clientOrderId ?? '').trim();
+  if (!cid) return { ok: false, found: false };
+  try {
+    const fa = await import('../exchanges/futuresAdapter');
+    const r = await fa.futuresFindByClientId(
+      c.exchange as any, c.apiKey, c.apiSecret, c.testnet === true, symbol, cid);
+    return { ok: r.ok === true, found: r.found === true };
+  } catch {
+    return { ok: false, found: false };
+  }
+}
+
+/**
  * 걸려 있는 조건부 주문.
  *
  * **null은 '못 읽음'이고 `[]`는 '없음'이다.** 이 둘을 섞으면 조회 실패가
