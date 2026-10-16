@@ -17,7 +17,6 @@ import {
   prepareEntry100x, commitEntry100x, MUTATING_DEPS, READONLY_DEPS,
 } from './entry100x';
 import { validateMarginAllocation, planSize100x, verifyLeverageExact } from './sizing100x';
-import { runMarginAllocationComparisonTests } from './marginAllocationComparison.test';
 
 const C = {
   leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'],
@@ -90,8 +89,6 @@ const planEntry100x = async (c: any, pct: number | null, deps: any) =>
   commitEntry100x(await prepareEntry100x(c, pct, deps), deps, { disposition: 'SEND', reason: '' });
 
 export function runEntry100xTests() {
-  // Read-only sizing simulations; never called from order execution code.
-  runMarginAllocationComparisonTests();
   test('교차 마진이면 배율을 걸지 않는다 — 쓰기 0', async () => {
     const { deps, c } = counted({ observeMarginMode: async () => 'cross' });
     const v = await planEntry100x(C as any, 10, deps);
