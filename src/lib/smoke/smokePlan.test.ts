@@ -369,7 +369,11 @@ export function runSmokePlanTests() {
 
   const PZ = (id: string, state: string | null, over: any = {}) => ({
     id, connection_id: 'c-1',
-    steps: state == null ? {} : { POSITION_ZERO: { state } },
+    steps: state == null ? {} : {
+      POSITION_ZERO: { state },
+      // 기존 PASS 픽스처는 두 가지 거래소 잔량 검사가 끝난 회차다.
+      ...(state === 'PASS' ? { ORDERS_ZERO: { state: 'PASS' } } : {}),
+    },
     ...over,
   });
 
@@ -416,6 +420,33 @@ export function runSmokePlanTests() {
     });
     eq(v.blocked, false);
     eq(v.code, 'CLEAR');
+  });
+
+  test('★ 포지션 0이어도 미결 주문이 FAIL이면 재진입을 막는다', () => {
+    const v = unresolvedExposureBlock({ rows: [PZ('o-fail', 'PASS', {
+      steps: { POSITION_ZERO: { state: 'PASS' }, ORDERS_ZERO: { state: 'FAIL' } },
+    })], connectionId: 'c-1' });
+    eq(v.blocked, true); eq(v.code, 'UNPROTECTED_UNRESOLVED');
+    eq(v.offenders.join(','), 'o-fail');
+  });
+
+  test('★ 미결 주문 PENDING·UNKNOWN·누락은 재진입을 막는다', () => {
+    for (const oz of ['PENDING', 'UNKNOWN', null]) {
+      const steps: any = { POSITION_ZERO: { state: 'PASS' } };
+      if (oz != null) steps.ORDERS_ZERO = { state: oz };
+      const v = unresolvedExposureBlock({ rows: [PZ('o-unknown', 'PASS', { steps })], connectionId: 'c-1' });
+      eq(v.blocked, true, String(oz)); eq(v.code, 'EXPOSURE_UNKNOWN', String(oz));
+    }
+  });
+
+  test('★ 진입 중인데 잔량 단계가 없으면 확인 불가로 막는다', () => {
+    const v = unresolvedExposureBlock({ rows: [PZ('entering', null, { state: 'ENTERING' })], connectionId: 'c-1' });
+    eq(v.blocked, true); eq(v.code, 'EXPOSURE_UNKNOWN');
+  });
+
+  test('★ 두 잔량 모두 PASS인 회차만 통과한다', () => {
+    const v = unresolvedExposureBlock({ rows: [PZ('clean', 'PASS')], connectionId: 'c-1' });
+    eq(v.blocked, false); eq(v.code, 'CLEAR');
   });
 
   test('★ 단계를 적은 적 없는 회차는 노출이 아니다', () => {
