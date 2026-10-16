@@ -888,14 +888,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       // (SHORT는 반대). 반올림으로 처리하면 손절이 한 틱 가까워지거나
       // 익절이 한 틱 멀어져 **닿지 않는 보호주문**이 된다.
       const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
-      const mktGrid = qtyGridFor(filters, 'MARKET');
-      const protStep = mktGrid?.stepSize && mktGrid.stepSize > 0 ? mktGrid.stepSize : null;
-      /** 조건부 주문 수량도 격자 위로. 규격을 모르면 **그대로 보낸다** —
-       *  못 닫는 것이 거절당하는 것보다 나쁘다(정본의 청산 규칙과 같다). */
-      const protQty = (q: any): number | undefined => {
+      /** 조건부 주문의 reduceOnly 수량에도 LOT_SIZE와 MARKET_LOT_SIZE를
+       * **모두** 적용한다. MARKET_LOT_SIZE.stepSize=0은 비활성이라는 뜻이고
+       * 이때도 LOT_SIZE를 반드시 지켜야 한다. 필터 조회 실패 시 청산
+       * 자체를 막지 않는 기존 quantizeOrder의 reduceOnly 계약을 따른다. */
+      const protQty = (q: unknown): number | undefined => {
         const n = Number(q);
         if (!Number.isFinite(n) || n <= 0) return undefined;
-        return protStep ? floorToStep(n, protStep) : n;
+        const v = quantizeOrder(n, null, filters, { orderType: 'MARKET', reduceOnly: true });
+        return v.ok && v.quantity != null && Number.isFinite(v.quantity) && v.quantity > 0
+          ? v.quantity : undefined;
       };
 
       // 청산 주문에는 보호주문을 붙이지 않는다. 붙이면 포지션이 없어진 뒤에도
@@ -938,9 +940,13 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
           const pTrig = roundTrigger(o.price, plan.side, 'TAKE_PROFIT', tick);
           if (pTrig.price == null) continue;   // 격자에 못 올리면 안 보낸다
+          const partialQty = protQty(o.quantity);
+          // PARTIAL_TP에 quantity를 생략하면 closePosition=true가 되어
+          // 부분 익절이 전량 청산으로 바뀐다. 절대로 그대로 보내지 않는다.
+          if (partialQty == null) continue;
           const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
             symbol: plan.symbol, side: closeSide, stopPrice: pTrig.price,
-            type: 'TAKE_PROFIT_MARKET', quantity: protQty(o.quantity),
+            type: 'TAKE_PROFIT_MARKET', quantity: partialQty,
           }, testnet);
           if ((r as any)?.success) tpIds.push(String((r as any).orderId));
           // 분할 익절 실패는 진입을 되돌릴 사유가 아니다 — 손절은 이미 걸려
