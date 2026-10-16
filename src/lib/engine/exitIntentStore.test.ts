@@ -5,8 +5,8 @@ import { test, assert, eq } from '../../test/harness';
 import {
   recordExitIntent, markExitIntentResult, judgeExitDurability,
   judgeExitSendPermission, findExitIntent, findOtherPendingExitForSeat,
-  claimAtomicExitSeatForResearch, type AtomicExitSeatIdentity,
-  type AtomicExitSeatStore, MAX_SENDS_PER_KEY,
+  claimAtomicExitSeatForResearch, supabaseAtomicExitSeatStore,
+  type AtomicExitSeatIdentity, type AtomicExitSeatStore, MAX_SENDS_PER_KEY,
   PENDING_EXIT_STATUSES, type ExitIntentRecord,
 } from './exitIntentStore';
 import { readFileSync } from 'node:fs';
@@ -743,6 +743,78 @@ export function runExitIntentStoreTests() {
     const x = await claimAtomicExitSeatForResearch(throws, atomicSeat());
     eq(x.code, 'UNAVAILABLE'); eq(x.seatClaimed, false);
     eq(x.executionAuthorized, false);
+  });
+
+
+  test('★ DB atomic adapter performs one INSERT, never SELECT-then-INSERT', async () => {
+    const log: string[] = [];
+    const db = {
+      from(t: string) {
+        log.push('from:' + t);
+        return { insert(row: any) {
+          log.push('insert');
+          return { select(cols: string) {
+            log.push('select-returned-insert');
+            return { single: async () => ({ data: { ...row }, error: null }) };
+          } };
+        } };
+      },
+    };
+    const result = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(db as any, true), atomicSeat());
+    eq(result.code, 'CLAIMED'); eq(result.seatClaimed, true);
+    eq(result.executionAuthorized, false);
+    eq(JSON.stringify(log), JSON.stringify([
+      'from:exit_seat_claims', 'insert', 'select-returned-insert',
+    ]));
+  });
+
+  test('★ duplicate SQL unique violation is ALREADY_HELD not permission to send', async () => {
+    let inserts = 0;
+    const db = { from() {
+      return { insert() {
+        inserts++;
+        return { select: () => ({ single: async () => ({
+          data: null, error: { code: '23505' },
+        }) }) };
+      } };
+    } };
+    const response = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(db as any, true), atomicSeat());
+    eq(response.code, 'ALREADY_HELD');
+    eq(response.seatClaimed, false);
+    eq(inserts, 1);
+  });
+
+  test('★ missing migration, failed insert or wrong returned owner fail closed', async () => {
+    for (const outcome of [
+      { data: null, error: { code: '42P01' } },
+      { data: null, error: { code: '42501' } },
+      { data: { ...{
+        user_id: 'not-owner', connection_id: 'conn-1', exchange: 'binance',
+        mode: 'TESTNET', symbol: 'BTCUSDT', client_order_id: 'close-qty-010',
+        owner_token: 'fence-1',
+      } }, error: null },
+      { data: null, error: null },
+    ]) {
+      const db = { from() { return { insert() {
+        return { select: () => ({ single: async () => outcome }) };
+      } }; } };
+      const r = await claimAtomicExitSeatForResearch(
+        supabaseAtomicExitSeatStore(db as any, true), atomicSeat());
+      eq(r.code, 'UNAVAILABLE'); eq(r.seatClaimed, false);
+    }
+  });
+
+  test('★ TESTNET readiness false / no DB cannot create atomic claims', async () => {
+    let calls = 0;
+    const db = { from() { calls++; throw new Error('should not be called'); } };
+    const a = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(db as any, false), atomicSeat());
+    eq(a.code, 'UNAVAILABLE'); eq(calls, 0);
+    const b = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(null, true), atomicSeat());
+    eq(b.code, 'UNAVAILABLE');
   });
 
   test('★ atomic research contract stays disconnected from active route', () => {
