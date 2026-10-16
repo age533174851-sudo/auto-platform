@@ -908,9 +908,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           ? { success: false, message: `손절가를 호가 단위에 맞추지 못했습니다: ${slTrig.note}` } as any
           : await bf.placeFuturesTPSL(apiKey, apiSecret, {
           symbol: plan.symbol, side: closeSide, stopPrice: slTrig.price, type: 'STOP_MARKET',
-          // 1차는 closePosition(그때 있는 전량)이 맞다. 그게 이 환경에서
-          // 거절되면(-4120) 체결 수량으로 한 번 더 시도한다.
-          fallbackQuantity: protQty(res.qty || sendQty) ?? null,
+          // 1차는 closePosition(그때 있는 전량)이 맞다. -4120 대체 방식은
+          // 거래소가 **증명한 체결 수량**만 사용한다. res.qty는 origQty를
+          // 우선 돌려줄 수 있어 실제 체결 수량이 아니다. 체결 증거가 없으면
+          // 추정 수량으로 reduceOnly 주문을 보내지 않는다.
+          fallbackQuantity: protQty(fill.filledQty) ?? null,
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
         else {
