@@ -15,6 +15,8 @@ import {
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
+import { confirmedBinanceOpenOrders } from '../engine/venuePositionOps';
+import { requireBinanceVenueRows } from '../exchanges/binanceFutures';
 
 const OK_BODY = {
   symbol: 'ETHUSDT', side: 'LONG', connectionId: 'conn-1', mode: 'TESTNET',
@@ -29,6 +31,96 @@ const allSteps = (state: StepState, over: Partial<Record<StepId, StepState>> = {
 };
 
 export function runSmokePlanTests() {
+  // ── Regression: failed Binance GET must not become an empty account ──
+  test('★ openOrders HTTP failure with orders:[] is UNKNOWN, not zero', () => {
+    const orders = confirmedBinanceOpenOrders({ success: false, orders: [] });
+    eq(orders, null, 'A failed read must not impersonate zero open orders');
+    const verdict = preflightVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders,
+    });
+    eq(verdict.ok, false);
+    eq(verdict.code, 'UNKNOWN');
+  });
+
+  test('★ successful openOrders with [] alone permits empty-order preflight', () => {
+    const orders = confirmedBinanceOpenOrders({ success: true, orders: [] });
+    assert(Array.isArray(orders));
+    eq(orders!.length, 0);
+    const verdict = preflightVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders,
+    });
+    eq(verdict.code, 'CLEAR');
+  });
+
+  test('★ successful openOrders reporting live order must remain blocked', () => {
+    const orders = confirmedBinanceOpenOrders({
+      success: true, orders: [{ orderId: 'order-1', type: 'LIMIT' }],
+    });
+    const verdict = preflightVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders,
+    });
+    eq(verdict.ok, false);
+    eq(verdict.code, 'ORDERS_OPEN');
+  });
+
+  test('★ malformed or missing Binance result cannot impersonate a successful empty list', () => {
+    for (const x of [
+      null, undefined, { orders: [] }, { success: false, orders: [] },
+      { success: true, orders: null },
+      { success: true, orders: {} },
+      { success: 'true', orders: [] },
+    ] as any[]) {
+      eq(confirmedBinanceOpenOrders(x), null);
+    }
+  });
+
+  test('★ 200 responses with non-array positionRisk payload fail closed', () => {
+    for (const malformed of [null, undefined, {}, { positions: [] }, false, 0, '[]']) {
+      let rejected = false;
+      try { requireBinanceVenueRows(malformed, 'INVALID_POSITION_RISK_SHAPE'); }
+      catch (e: any) { rejected = String(e?.message).includes('INVALID_POSITION_RISK_SHAPE'); }
+      assert(rejected, 'Malformed positionRisk was interpreted as an empty position list');
+    }
+    eq(requireBinanceVenueRows([], 'INVALID_POSITION_RISK_SHAPE').length, 0);
+  });
+
+  test('★ 200 responses with non-array openOrders payload fail closed', () => {
+    for (const malformed of [null, undefined, {}, { orders: [] }, 0, false]) {
+      let rejected = false;
+      try { requireBinanceVenueRows(malformed, 'INVALID_OPEN_ORDERS_SHAPE'); }
+      catch (e: any) { rejected = String(e?.message).includes('INVALID_OPEN_ORDERS_SHAPE'); }
+      assert(rejected, 'Malformed openOrders was interpreted as no open orders');
+    }
+    eq(requireBinanceVenueRows([{ orderId: '1' }], 'INVALID_OPEN_ORDERS_SHAPE').length, 1);
+  });
+
+  test('★ historical -1111 UNKNOWN row PZ PASS without ORDERS_ZERO remains blocked', () => {
+    const prior = {
+      id: 'synthetic-legacy-1111', connection_id: 'conn-1', state: 'UNKNOWN',
+      steps: {
+        PREFLIGHT: { state: 'PASS' },
+        ENTRY: { state: 'FAIL', note: '[-1111] Precision error' },
+        POSITION_ZERO: { state: 'PASS' },
+      },
+    };
+    const v = unresolvedExposureBlock({ rows: [prior], connectionId: 'conn-1' });
+    eq(v.blocked, true);
+    eq(v.code, 'EXPOSURE_UNKNOWN');
+    eq(v.offenders.length, 1);
+  });
+
+  test('★ legacy unknown only clears after BOTH venue-zero facts are recorded', () => {
+    const v = unresolvedExposureBlock({
+      rows: [{
+        id: 'synthetic-legacy-1111', connection_id: 'conn-1', state: 'UNKNOWN',
+        steps: { POSITION_ZERO: { state: 'PASS' }, ORDERS_ZERO: { state: 'PASS' } },
+      }],
+      connectionId: 'conn-1',
+    });
+    eq(v.blocked, false);
+    eq(v.code, 'CLEAR');
+  });
+
   console.log('[스모크 테스트 — 시작 요청 검사]');
 
   test('제대로 된 요청은 값으로 확정된다', () => {
