@@ -390,6 +390,23 @@ export async function sendSymbolClose(
  * **null은 '못 읽음'이고 `[]`는 '없음'이다.** 이 둘을 섞으면 조회 실패가
  * "보호주문 0건"으로 그려진다.
  */
+/**
+ * Failing GET /fapi/v1/openOrders is NOT evidence of an empty order book.
+ *
+ * Binance's adapter returns `{success:false,orders:[]}` after a rejected
+ * request or network error. Checking only Array.isArray(r.orders) used to turn
+ * that failure into [] -> PREFLIGHT PASS -> potentially overlapping orders.
+ *
+ * Only an explicitly successful Binance read with an array can prove zero.
+ * The caller's existing preflightVerdict maps null to UNKNOWN/block.
+ */
+export function confirmedBinanceOpenOrders(
+  result: { success?: unknown; orders?: unknown } | null | undefined,
+): any[] | null {
+  return result?.success === true && Array.isArray(result.orders)
+    ? result.orders : null;
+}
+
 export async function readProtectiveOrders(c: VenueCreds, symbol: string): Promise<any[] | null> {
   try {
     if (c.exchange === 'gate') {
@@ -401,9 +418,7 @@ export async function readProtectiveOrders(c: VenueCreds, symbol: string): Promi
     }
     const bf = await import('../exchanges/binanceFutures');
     const r: any = await bf.getFuturesOpenOrders(c.apiKey, c.apiSecret, c.testnet, symbol);
-    if (Array.isArray(r)) return r;
-    if (Array.isArray(r?.orders)) return r.orders;
-    return null;
+    return confirmedBinanceOpenOrders(r);
   } catch { return null; }
 }
 
