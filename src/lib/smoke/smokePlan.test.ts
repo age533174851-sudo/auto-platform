@@ -11,7 +11,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   smokeRequestVerdict, stepsOf, smokeVerdict, holdUntilMs, closeDue,
   smokeBlocksStrategy, preflightVerdict, unprotectedExposureVerdict,
-  smokeTestnetVerdict, unresolvedExposureBlock,
+  smokeTestnetVerdict, unresolvedExposureBlock, legacySmokeExposureVerdict,
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
@@ -152,6 +152,94 @@ export function runSmokePlanTests() {
     const code = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/startAttempt.ts'), 'utf8');
     assert(code.includes('ops.readAllOpenOrdersForSmoke(venue, i.symbol)'));
     assert(!code.includes('const ordersBefore = await ops.readProtectiveOrders(venue, i.symbol)'));
+  });
+
+  test('★ legacy read-only diagnostic with 3 successful empty reads is NOT authorization', () => {
+    const r = legacySmokeExposureVerdict({
+      symbol: 'BTCUSDT',
+      positionRead: { success: true, positions: [] },
+      regularOrderRead: { success: true, orders: [] },
+      algoOrderRead: { success: true, orders: [] },
+    });
+    eq(r.code, 'OBSERVED_FLAT_NOW');
+    eq(r.positionCount, 0);
+    eq(r.regularOrderCount, 0);
+    eq(r.algoOrderCount, 0);
+    eq(r.canClearHistoricalUnknown, false);
+    eq(r.mayStartSmoke, false);
+  });
+
+  test('★ old -1111 history cannot clear if regular or Algo order still exists', () => {
+    for (const [regular,algo] of [[1,0],[0,1],[2,3]]) {
+      const r = legacySmokeExposureVerdict({
+        symbol: 'BTCUSDT',
+        positionRead: { success: true, positions: [] },
+        regularOrderRead: { success: true, orders: Array(regular).fill({}) },
+        algoOrderRead: { success: true, orders: Array(algo).fill({}) },
+      });
+      eq(r.code, 'EXPOSURE_OPEN');
+      eq(r.mayStartSmoke, false);
+    }
+  });
+
+  test('★ legacy venue cannot report flat while BTCUSDT position remains open', () => {
+    const r = legacySmokeExposureVerdict({
+      symbol: 'BTCUSDT',
+      positionRead: { success: true,
+        positions: [{ symbol: 'BTCUSDT', amount: 0.002, side: 'LONG' }] },
+      regularOrderRead: { success: true, orders: [] },
+      algoOrderRead: { success: true, orders: [] },
+    });
+    eq(r.code, 'EXPOSURE_OPEN');
+    eq(r.positionCount, 1);
+    eq(r.canClearHistoricalUnknown, false);
+  });
+
+  test('★ a failure in any of 3 signed reads remains UNKNOWN, even if 2 are empty', () => {
+    const base: any = {
+      symbol: 'BTCUSDT',
+      positionRead: { success: true, positions: [] },
+      regularOrderRead: { success: true, orders: [] },
+      algoOrderRead: { success: true, orders: [] },
+    };
+    for (const key of ['positionRead', 'regularOrderRead', 'algoOrderRead']) {
+      const r = legacySmokeExposureVerdict({
+        ...base, [key]: { success: false, orders: [], positions: [] },
+      });
+      eq(r.code, 'UNKNOWN');
+      eq(r.mayStartSmoke, false);
+    }
+  });
+
+  test('★ malformed authenticated position and Algo 200 payload fail UNKNOWN', () => {
+    for (const invalid of [
+      { success: true, positions: {} },
+      { success: true, positions: [{ symbol: 'BTCUSDT', amount: NaN }] },
+      { success: true, positions: [{ symbol: 'BTCUSDT', amount: null }] },
+    ]) {
+      const r = legacySmokeExposureVerdict({
+        symbol: 'BTCUSDT', positionRead: invalid,
+        regularOrderRead: { success: true, orders: [] },
+        algoOrderRead: { success: true, orders: [] },
+      });
+      eq(r.code, 'UNKNOWN');
+    }
+  });
+
+  test('★ legacy diagnostic has no data writes and only authentication-owned rows', () => {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const route = fs.readFileSync(path.resolve(process.cwd(),
+      'src/app/api/autotrade/smoke-test/legacy-evidence/route.ts'), 'utf8');
+    assert(route.includes("resolveUserId(req.headers.get('authorization'), null, null)"));
+    assert(route.includes(".eq('id', testId).eq('user_id', userId).maybeSingle()"));
+    assert(route.includes("creds.isTestnetRaw !== true"));
+    assert(route.includes('getFuturesOpenAlgoOrders('));
+    assert(route.includes('getFuturesOpenOrders('));
+    assert(route.includes('getFuturesPositions('));
+    assert(!/\.insert\s*\(|\.update\s*\(|\.delete\s*\(|\.upsert\s*\(/.test(route));
+    assert(!route.includes("export async function GET("),
+      'GET route with cross-site links might allow unreviewed account scans');
   });
 
   test('★ historical -1111 UNKNOWN row PZ PASS without ORDERS_ZERO remains blocked', () => {
