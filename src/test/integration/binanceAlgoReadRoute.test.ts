@@ -34,6 +34,10 @@ export function runBinanceAlgoReadRouteTests() {
   // avoiding test-vs-test self-interference in our lightweight harness.
   test('JWT, ownership, withdrawal and LIVE gates block before any venue GET', async () => {
     const restoreCrypto = withCryptoEnv();
+    // This suite runs AFTER prior async integration tests are flushed, so
+    // setting the real server crypto var cannot affect unrelated venues.
+    const oldExchangeKey = process.env.EXCHANGE_ENCRYPTION_KEY;
+    process.env.EXCHANGE_ENCRYPTION_KEY = 'synthetic-readonly-algo-suite-key-only-0123456789';
     const serverPath = require.resolve('../../lib/supabase/server');
     const adminPath = require.resolve('../../lib/supabase/admin');
     const routePath = require.resolve('../../app/api/binance/futures/algo-read/route');
@@ -109,7 +113,7 @@ export function runBinanceAlgoReadRouteTests() {
       const restoreVenue = venue.install();
       try {
         const valid = await hit(GOOD, 'owner-1', [conn()]);
-        eq(valid.status, 200);
+        eq(valid.status, 200, 'Owned TESTNET signed GET failed: ' + valid.code);
         eq(valid.code, 'FOUND_UNVERIFIED');
         eq(valid.json.activeProtectionVerified, false);
         eq(valid.json.mayStartSmoke, false);
@@ -141,6 +145,10 @@ export function runBinanceAlgoReadRouteTests() {
         eq(missing.calls[0].method, 'GET');
         eq(r.writes, 0);
       } finally { restoreMissing(); }
-    } finally { restoreCrypto(); }
+    } finally {
+      restoreCrypto();
+      if (oldExchangeKey === undefined) delete process.env.EXCHANGE_ENCRYPTION_KEY;
+      else process.env.EXCHANGE_ENCRYPTION_KEY = oldExchangeKey;
+    }
   });
 }
