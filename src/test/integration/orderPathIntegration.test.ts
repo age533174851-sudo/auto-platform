@@ -1423,6 +1423,36 @@ export async function runPrecisionIntegrationTests() {
     });
   }
 
+  // ══════════ ②-c3 손절 부착 실패 후 REQUIRED 청산도 체결량/격자 사용 ══════════
+  {
+    const SYM = 'PRECKUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.003', avgPrice: '60000' }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', origQty: '0.010', avgPrice: '60000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'REQUIRED',
+    }));
+    test('★ REQUIRED 손절 실패 청산은 origQty 0.010 아닌 체결 0.003을 전송', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const close = venue.orderSends().filter(c => c.params.type === 'MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(close.length, 1, '손절 실패 후 reduceOnly 청산이 전송되지 않았다');
+      eq(close[0].params.quantity, '0.003');
+    });
+  }
+
   // ══════════ ②-d 잘못된 PARTIAL_TP는 closePosition으로 승격되지 않는다 ══════════
   {
     const SYM = 'PRECIUSDT';
