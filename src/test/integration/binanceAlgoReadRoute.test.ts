@@ -2,7 +2,7 @@
 // No network, order, cancel, database mutation or production credentials.
 
 import { test, eq, assert } from '../harness';
-import { FakeDb, withCryptoEnv } from './venueHarness';
+import { FakeDb, FakeVenue, withCryptoEnv } from './venueHarness';
 import { encryptSecret } from '../../lib/exchanges/crypto';
 
 const GOOD = {
@@ -39,7 +39,7 @@ export function runBinanceAlgoReadRouteTests() {
     const routePath = require.resolve('../../app/api/binance/futures/algo-read/route');
     try {
       async function hit(body: any, owner: string | null,
-        rows: any[] = []): Promise<{ status: number; code: string; writes: number }> {
+        rows: any[] = []): Promise<{ status: number; code: string; writes: number; json: any }> {
         const db = new FakeDb();
         db.seed('exchange_connections', rows);
         const prevServer = require.cache[serverPath];
@@ -61,7 +61,7 @@ export function runBinanceAlgoReadRouteTests() {
           const response = await POST(req(body, owner != null));
           const json = await response.json();
           return { status: response.status, code: json.code,
-            writes: db.writes.length };
+            writes: db.writes.length, json };
         } finally {
           delete require.cache[routePath];
           delete require.cache[adminPath];
@@ -95,6 +95,52 @@ export function runBinanceAlgoReadRouteTests() {
         eq(res.writes, 0, 'READ ONLY route wrote an operational row');
       }
       assert(cases.length >= 10);
+
+      // Exercise the REAL signer and HTTP handler against a fake venue.
+      // Never uses Binance: FakeVenue traps and records all fetch() calls.
+      const venue = new FakeVenue().on('/fapi/v1/algoOrder', {
+        json: {
+          algoId: '9007199254740993', clientAlgoId: GOOD.clientAlgoId,
+          algoType: 'CONDITIONAL', symbol: GOOD.symbol,
+          side: 'SELL', positionSide: 'BOTH',
+          orderType: 'STOP_MARKET', algoStatus: 'NEW',
+        },
+      }, 'GET');
+      const restoreVenue = venue.install();
+      try {
+        const valid = await hit(GOOD, 'owner-1', [conn()]);
+        eq(valid.status, 200);
+        eq(valid.code, 'FOUND_UNVERIFIED');
+        eq(valid.json.activeProtectionVerified, false);
+        eq(valid.json.mayStartSmoke, false);
+        eq(valid.json.canResend, false);
+        eq(valid.json.canCancel, false);
+        eq(valid.writes, 0);
+        eq(venue.calls.length, 1);
+        eq(venue.calls[0].method, 'GET');
+        eq(venue.calls[0].path, '/fapi/v1/algoOrder');
+        eq(venue.calls[0].host, 'demo-fapi.binance.com');
+        eq(venue.calls[0].params.clientAlgoId, GOOD.clientAlgoId);
+        eq(venue.calls[0].authed, true);
+        eq(venue.calls.filter(c => c.method === 'POST' || c.method === 'DELETE').length, 0,
+          'Evidence endpoint attempted an order or cancellation');
+      } finally { restoreVenue(); }
+
+      // 404/not found is NOT proof that an old order was rejected.
+      const missing = new FakeVenue().on('/fapi/v1/algoOrder', {
+        status: 404, json: { code: -2013, msg: 'Order does not exist' },
+      }, 'GET');
+      const restoreMissing = missing.install();
+      try {
+        const r = await hit(GOOD, 'owner-1', [conn()]);
+        eq(r.status, 502);
+        eq(r.code, 'VENUE_READ_UNKNOWN');
+        eq(r.json.mayStartSmoke, false);
+        eq(r.json.canResend, false);
+        eq(missing.calls.length, 1);
+        eq(missing.calls[0].method, 'GET');
+        eq(r.writes, 0);
+      } finally { restoreMissing(); }
     } finally { restoreCrypto(); }
   });
 }
