@@ -227,6 +227,91 @@ export async function findExitIntent(
   }
 }
 
+// ── RESEARCH CONTRACT: atomic same-seat exit ownership ─────────────────
+// The previous select->insert two-step path cannot atomically serialize
+// workers whose quantity-derived clientOrderIds differ. In particular, a
+// PARTIAL fill can change the key. A *future* database implementation MUST
+// claim one UNIQUE seat (user + connection + exchange + mode + symbol)
+// using ONE transaction/unique constraint. A select followed by insert,
+// a process-local mutex, or the clientOrderId uniqueness is insufficient.
+//
+// IMPORTANT: No running route calls this adapter; it cannot send an order.
+// Deploying it would also require a new durable DB schema and a verified
+// release/recovery procedure. Claims MUST NOT expire automatically: an
+// already-sent market close may still be pending after a network timeout.
+export interface AtomicExitSeatIdentity {
+  userId: string;
+  connectionId: string;
+  exchange: string;
+  mode: 'TESTNET';
+  symbol: string;
+  clientOrderId: string;
+  ownerToken: string;
+}
+
+export type AtomicSeatClaimCode =
+  | 'CLAIMED'
+  | 'ALREADY_HELD'
+  | 'UNAVAILABLE';
+
+export type AtomicSeatClaimResult =
+  | { code: 'CLAIMED'; record: AtomicExitSeatIdentity }
+  | { code: 'ALREADY_HELD'; record: AtomicExitSeatIdentity | null }
+  | { code: 'UNAVAILABLE'; record: null };
+
+export interface AtomicExitSeatStore {
+  // Must be implemented as one DB-atomic claim against UNIQUE seat identity;
+  // NEVER implement this with a preflight SELECT followed by an INSERT.
+  claimUniqueSeat: (intent: AtomicExitSeatIdentity) => Promise<AtomicSeatClaimResult>;
+}
+
+export interface AtomicExitSeatVerdict {
+  maySend: boolean;
+  code: AtomicSeatClaimCode;
+  duplicateRisk: false;
+  // A successful claim ONLY proves we won the proposed research gate;
+  // caller still needs connection-scoped TESTNET readiness, lease fencing,
+  // fresh venue exposure and the existing order-intent write-ahead record.
+  executionAuthorized: false;
+}
+
+export async function claimAtomicExitSeatForResearch(
+  store: AtomicExitSeatStore | null | undefined,
+  i: AtomicExitSeatIdentity,
+): Promise<AtomicExitSeatVerdict> {
+  const deny = (code: AtomicSeatClaimCode): AtomicExitSeatVerdict => ({
+    maySend: false, code, duplicateRisk: false, executionAuthorized: false,
+  });
+  const fields = [i?.userId, i?.connectionId, i?.exchange,
+    i?.symbol, i?.clientOrderId, i?.ownerToken];
+  if (!store || !i || i.mode !== 'TESTNET' ||
+      fields.some(x => typeof x !== 'string' || !x.trim()) ||
+      i.clientOrderId.length > 36 || i.symbol.length > 40 ||
+      i.symbol !== i.symbol.toUpperCase() ||
+      i.ownerToken.length > 128) {
+    return deny('UNAVAILABLE');
+  }
+  try {
+    const result = await store.claimUniqueSeat(i);
+    if (result?.code !== 'CLAIMED') {
+      return deny(result?.code === 'ALREADY_HELD' ? 'ALREADY_HELD' : 'UNAVAILABLE');
+    }
+    const r = result.record;
+    // A successful-looking response is NOT enough. All claimed seat and
+    // fencing identity must match exactly, including the unique client ID.
+    if (!r || r.userId !== i.userId || r.connectionId !== i.connectionId ||
+        r.exchange !== i.exchange || r.mode !== i.mode ||
+        r.symbol !== i.symbol || r.clientOrderId !== i.clientOrderId ||
+        r.ownerToken !== i.ownerToken) {
+      return deny('UNAVAILABLE');
+    }
+    return { maySend: true, code: 'CLAIMED', duplicateRisk: false,
+      executionAuthorized: false };
+  } catch {
+    return deny('UNAVAILABLE');
+  }
+}
+
 // ── Same-seat pending exit preflight ──────────────────────────────────────
 // A close ID is derived from quantity. A partially filled old close can have
 // clientOrderId A while the remaining position produces clientOrderId B.
