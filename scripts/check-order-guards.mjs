@@ -183,6 +183,101 @@ if (zeroErrors.length > 0) {
   process.exit(1);
 }
 
+// ── 스모크 주문이 **확인된 테스트넷 연결**에만 나가는가 ──
+//
+// 저장소 전체 규칙은 `is_testnet !== false`를 테스트넷으로 읽는다.
+// 읽기·조회에는 맞다 — 빈 값을 실전으로 읽으면 모르는 연결에 진짜
+// 주문이 나간다.
+//
+// 그런데 스모크는 **없던 주문을 새로 만든다.** 테스트넷 호스트로
+// 나간다는 것과 그 계좌가 테스트넷임이 확인됐다는 것은 다른 사실이다.
+// 그래서 이 경로만 `=== true`를 요구하고, **그 좁힘이 사라지지 않게**
+// 여기서 센다.
+//
+// 그리고 정리되지 않은 노출 위에 새 회차를 열지 않는지도 함께 본다 —
+// `preflightVerdict`는 요청한 종목만 보므로 그것만으로는 부족하다.
+{
+  const F = 'src/lib/smoke/startAttempt.ts';
+  const CANON = 'src/lib/smoke/smokePlan.ts';
+  const strip = (t) => t.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  const bad = [];
+
+  const rawA = existsSync(F) ? readFileSync(F, 'utf8') : null;
+  if (!rawA) bad.push(`${F}이 없습니다`);
+  else {
+    const a = strip(rawA);
+
+    // ① 테스트넷 판정을 부르고 **그 결과로 되돌아가는가**
+    if (!a.includes('smokeTestnetVerdict(')) {
+      bad.push(`${F}: \`smokeTestnetVerdict\`를 부르지 않습니다 — `
+        + '스모크 주문은 확인된 테스트넷 연결에만 나가야 합니다');
+    } else {
+      const m = a.match(/(?:const|let|var)\s+(\w+)\s*=\s*smokeTestnetVerdict\(/);
+      if (!m) {
+        bad.push(`${F}: 테스트넷 판정 결과를 변수에 받지 않습니다`);
+      } else if (!new RegExp(`if\\s*\\(\\s*!\\s*${m[1]}\\.ok\\s*\\)\\s*return`).test(a)) {
+        bad.push(`${F}: 테스트넷 판정 결과로 되돌아가지 않습니다 — `
+          + '부르기만 하고 버리면 아무것도 막지 않습니다');
+      }
+      // 날것을 봐야 한다. 정규화된 `creds.testnet`을 넘기면 다시
+      // `is_testnet !== false`가 되어 좁힌 의미가 사라진다.
+      // `[^)]*`로는 못 본다 — 실제 인자가 `(creds as any).isTestnetRaw`라
+      // 중간에 닫는 괄호가 있다. 호출 뒤 한 줄 안에서 찾는다.
+      const callAt = a.indexOf('smokeTestnetVerdict(');
+      const callArgs = a.slice(callAt, a.indexOf('\n', callAt) + 1 || callAt + 200);
+      if (!callArgs.includes('isTestnetRaw')) {
+        bad.push(`${F}: 테스트넷 판정에 \`isTestnetRaw\`(날것)를 넘기지 않습니다 — `
+          + '정규화된 값을 넘기면 빈 값이 다시 통과합니다');
+      }
+    }
+
+    // ② 정리되지 않은 노출을 보고 **막는가**
+    if (!a.includes('unresolvedExposureBlock(')) {
+      bad.push(`${F}: \`unresolvedExposureBlock\`을 부르지 않습니다 — `
+        + '보호 없는 노출 위에 새 회차가 열립니다');
+    } else {
+      if (!/if\s*\(\s*\w+\.blocked\s*\)\s*return/.test(a)) {
+        bad.push(`${F}: 노출 차단 결과로 되돌아가지 않습니다`);
+      }
+      // 조회가 실패했을 때 **막는 쪽**으로 가는가.
+      if (!/unresolvedExposureBlock\(\s*\{\s*rows:\s*null/.test(a)) {
+        bad.push(`${F}: 장부 조회 실패를 막는 쪽으로 처리하지 않습니다 — `
+          + '못 읽은 것은 "없음"이 아닙니다');
+      }
+      // 주문을 만드는 것보다 **먼저** 와야 한다.
+      const bIdx = a.indexOf('unresolvedExposureBlock(');
+      for (const sink of ['executeOrder(', "from('smoke_tests').insert("]) {
+        const sIdx = a.indexOf(sink);
+        if (sIdx >= 0 && sIdx < bIdx) {
+          bad.push(`${F}: \`${sink}\`이 노출 차단보다 먼저 옵니다`);
+        }
+      }
+    }
+  }
+
+  const rawC = existsSync(CANON) ? readFileSync(CANON, 'utf8') : null;
+  if (!rawC) bad.push(`${CANON}이 없습니다`);
+  else {
+    const c = strip(rawC);
+    // `=== true`를 실제로 비교하는가. `!== false`로 되돌리면 좁힘이 없어진다.
+    if (!/isTestnetRaw\s*===\s*true/.test(c)) {
+      bad.push(`${CANON}: \`isTestnetRaw === true\`를 비교하지 않습니다 — `
+        + '`!== false`로 되돌리면 확인되지 않은 연결에도 주문이 나갑니다');
+    }
+    // 차단 해제는 PASS에만. 다른 상태를 통과로 읽으면 거래소 확인 없이 풀린다.
+    if (!/pz\s*===\s*'PASS'/.test(c)) {
+      bad.push(`${CANON}: 노출 차단 해제를 \`POSITION_ZERO === 'PASS'\`에 걸지 않습니다 — `
+        + '그 값은 settleAttempt가 거래소 재조회로만 적습니다');
+    }
+  }
+
+  if (bad.length) {
+    console.error('❌ 스모크 주문 관문에 구멍이 있습니다:');
+    for (const b of bad) console.error(`   · ${b}`);
+    process.exit(1);
+  }
+}
+
 // ── 진입이 확정되지 않은 회차가 노출을 방치하지 않는가 ──
 //
 // 무엇이 있었나
@@ -284,4 +379,5 @@ if (zeroErrors.length > 0) {
 
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
   + ' · 조회 실패를 0으로 만드는 길 0개'
-  + ' · 진입 미확정 노출 방치 경로 0개');
+  + ' · 진입 미확정 노출 방치 경로 0개'
+  + ' · 스모크 주문 관문 구멍 0개');

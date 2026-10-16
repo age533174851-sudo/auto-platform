@@ -322,6 +322,155 @@ export function smokeBlocksStrategy(i: {
   };
 }
 
+// ── 스모크는 **확인된 테스트넷 연결**에만 주문을 낸다 ───────────
+
+export type SmokeTestnetCode = 'OK' | 'LIVE_CONNECTION' | 'ENV_UNVERIFIED';
+
+export interface SmokeTestnetVerdict {
+  ok: boolean;
+  code: SmokeTestnetCode;
+  reason: string;
+}
+
+/**
+ * 스모크 주문을 낼 수 있는 연결인가.
+ *
+ * **왜 저장소 규칙보다 좁은가**
+ * ─────────────────────────────
+ * `loadFuturesCreds`는 `is_testnet !== false`를 테스트넷으로 읽는다.
+ * 그 해석은 전체 경로에서 맞다 — 모르는 값이 실전이 되면 안 되고,
+ * 빈 값을 테스트넷으로 읽으면 요청이 테스트넷 호스트로 나가 인증
+ * 오류로 끝난다. **읽기·조회에는 그걸로 충분하다.**
+ *
+ * 그런데 스모크는 **없던 주문을 새로 만든다.** 테스트넷 호스트로
+ * 나간다는 것과 그 계좌가 테스트넷 계좌임이 확인됐다는 것은 다른
+ * 사실이고, 확인되지 않은 연결에까지 주문을 낼 이유가 없다.
+ *
+ * 그래서 여기서만 `is_testnet === true`를 요구한다. `null` ·
+ * `undefined` · 누락은 **거부**다 — 실전이라고 부르지는 않지만
+ * 주문도 내지 않는다. 그 둘을 다른 코드로 구분해 적는다.
+ *
+ * **전체 해석 체계는 그대로 둔다.** 이 함수는 스모크 주문 경로만
+ * 부른다.
+ */
+export function smokeTestnetVerdict(isTestnetRaw: unknown): SmokeTestnetVerdict {
+  if (isTestnetRaw === true) {
+    return { ok: true, code: 'OK', reason: '테스트넷 연결이 확인됐습니다' };
+  }
+  if (isTestnetRaw === false) {
+    return {
+      ok: false, code: 'LIVE_CONNECTION',
+      reason: '실전 연결로는 스모크 테스트를 돌리지 않습니다 — 진짜 돈으로 배관을 확인하지 않습니다',
+    };
+  }
+  return {
+    ok: false, code: 'ENV_UNVERIFIED',
+    reason: '이 연결이 테스트넷인지 확인되지 않았습니다 — 확인되지 않은 환경에는 '
+      + '주문을 내지 않습니다(실전이라는 뜻은 아닙니다). 연결을 다시 등록하세요',
+  };
+}
+
+// ── 정리되지 않은 노출 위에 새 회차를 열지 않는다 ───────────────
+
+export type ExposureBlockCode =
+  /** 막을 것이 없다 */
+  | 'CLEAR'
+  /** 보호 없는 노출이 남아 있다 */
+  | 'UNPROTECTED_UNRESOLVED'
+  /** 노출이 남았는지 **모른다** */
+  | 'EXPOSURE_UNKNOWN'
+  /** 장부를 못 읽었다 — 못 읽은 것은 "없음"이 아니다 */
+  | 'LEDGER_UNREADABLE';
+
+export interface ExposureBlockVerdict {
+  blocked: boolean;
+  code: ExposureBlockCode;
+  /** 막은 근거가 된 회차 id들. 사람이 바로 찾아볼 수 있어야 한다 */
+  offenders: string[];
+  reason: string;
+}
+
+/** 이 줄의 `POSITION_ZERO` 단계 상태 */
+function positionZeroOf(row: any): string | null {
+  const v = row?.steps?.POSITION_ZERO;
+  if (v == null) return null;
+  const st = typeof v === 'string' ? v : v?.state;
+  return st == null ? null : String(st).toUpperCase();
+}
+
+/**
+ * 이 **연결**에 정리되지 않은 노출이 남아 있는가.
+ *
+ * 무엇을 막는가
+ * ─────────────
+ * `ENTERED_UNPROTECTED` 뒤 청산이 실패했거나 포지션을 읽지 못하면,
+ * 거래소에 보호 없는 포지션이 남아 있을 수 있다. 그 위로 새 회차를
+ * 열면 ONE_WAY 계좌에서 서로를 상계하거나 노출이 겹친다.
+ *
+ * `preflightVerdict`는 **요청한 종목만** 본다. 노출은 다른 종목에
+ * 남아 있을 수 있으므로, 이 판정은 **연결 단위**로 본다.
+ *
+ * 언제 풀리는가
+ * ─────────────
+ * `POSITION_ZERO`가 `PASS`로 바뀌어야 풀린다. 그 값은 `settleAttempt`가
+ * **거래소 재조회**로만 적는다(`closeVerdict`). 즉 **거래소가 0을
+ * 확인해 주기 전에는 풀리지 않는다.** 장부를 고쳐서 푸는 길은 없다.
+ *
+ * `ORDERS_ZERO`도 본다 — 포지션이 0이어도 내 청산·보호 주문이 남아
+ * 있으면 다음 진입을 친다.
+ *
+ * **`rows`가 null이면 막는다.** 못 읽은 것은 "없음"이 아니다.
+ */
+export function unresolvedExposureBlock(i: {
+  rows: any[] | null | undefined;
+  connectionId?: string | null;
+}): ExposureBlockVerdict {
+  if (!Array.isArray(i?.rows)) {
+    return {
+      blocked: true, code: 'LEDGER_UNREADABLE', offenders: [],
+      reason: '정리되지 않은 노출이 있는지 장부에서 확인하지 못했습니다 — '
+        + '못 읽은 것을 "없음"으로 보지 않습니다',
+    };
+  }
+
+  const conn = i.connectionId == null ? null : String(i.connectionId);
+  const unresolved: string[] = [];
+  const unknown: string[] = [];
+
+  for (const r of i.rows) {
+    if (conn != null && r?.connection_id != null && String(r.connection_id) !== conn) continue;
+
+    const pz = positionZeroOf(r);
+    // 단계를 적은 적이 없는 줄은 이 판정의 대상이 아니다 — 진입조차
+    // 못 한 회차가 대부분이고, 그건 노출이 아니다.
+    if (pz == null) continue;
+    if (pz === 'PASS') continue;
+
+    const id = String(r?.id ?? '?');
+    if (pz === 'FAIL') unresolved.push(id);
+    else unknown.push(id);                      // UNKNOWN · PENDING · 그 밖
+  }
+
+  if (unresolved.length) {
+    return {
+      blocked: true, code: 'UNPROTECTED_UNRESOLVED', offenders: unresolved,
+      reason: `정리되지 않은 노출이 ${unresolved.length}건 있습니다(${unresolved.join(' · ')}) — `
+        + '거래소에서 포지션 0과 잔여 주문 0을 확인한 뒤에 다시 시작하세요',
+    };
+  }
+  if (unknown.length) {
+    return {
+      blocked: true, code: 'EXPOSURE_UNKNOWN', offenders: unknown,
+      reason: `노출이 정리됐는지 확인하지 못한 회차가 ${unknown.length}건 있습니다`
+        + `(${unknown.join(' · ')}) — 모르는 것 위에 새 회차를 열지 않습니다`,
+    };
+  }
+  return {
+    blocked: false, code: 'CLEAR', offenders: [],
+    reason: '이 연결에 정리되지 않은 노출이 없습니다',
+  };
+}
+
 // ── 진입이 확정되지 않았을 때 포지션을 방치하지 않는다 ─────────
 
 /** 이 회차 줄을 어떻게 끝낼 것인가 */
