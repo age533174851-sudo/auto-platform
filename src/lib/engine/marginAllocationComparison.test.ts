@@ -41,6 +41,17 @@ export function runMarginAllocationComparisonTests() {
     close(v.fixedThenReviewedStep.endingEquityUsd, 1200);
   });
 
+  test('fixed model scales down from PEAK after a loss even if still above original capital', () => {
+    const trades: CompletedMarginTrade[] = [
+      ...verified(1, 1), ...verified(1, -0.5), ...verified(1, 0),
+    ];
+    const v = scenario(trades);
+    close(v.fixedThenReviewedStep.marginsUsd[0], 100);
+    close(v.fixedThenReviewedStep.marginsUsd[1], 100);
+    close(v.fixedThenReviewedStep.marginsUsd[2], 100 * (1050 / 1100));
+    close(v.tenPercentOfEquity.marginsUsd[2], 105);
+  });
+
   test('fixed model also reduces margin on drawdown; never breaches 10% of equity', () => {
     const v = scenario(verified(10, -1));
     close(v.tenPercentOfEquity.endingEquityUsd, 1000 * Math.pow(0.9, 10));
