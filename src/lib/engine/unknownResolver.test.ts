@@ -88,15 +88,15 @@ export function runUnknownResolverTests() {
     }
   });
 
-  test('멱등 키 + 반영시간 경과 + 포지션 불변이면 미전송으로 확정한다', () => {
+  test('멱등 키 + 반영시간 경과 + 포지션 불변만으로 미전송 확정 금지', () => {
     const r = resolveUnknown({
       clientOrderId: 'x1', elapsedMs: AFTER,
       query: { ok: true, order: null },
       position: { qtyNow: 0, qtyBefore: 0 },
     });
-    eq(r.state, 'FAILED', '세 조건이 모두 맞으면 미전송으로 볼 수 있다');
-    eq(r.resolved, true);
-    eq(r.action, 'NONE');
+    eq(r.state, 'UNKNOWN');
+    eq(r.resolved, false);
+    eq(r.action, 'ESCALATE');
   });
 
   test('조회 시점에 포지션이 원래 있던 그대로면 변한 것이 아니다', () => {
@@ -105,7 +105,7 @@ export function runUnknownResolverTests() {
       query: { ok: true, order: null },
       position: { qtyNow: 1.2, qtyBefore: 1.2 },
     });
-    eq(r.state, 'FAILED', '기존 포지션이 있는 상태를 변화로 오인했다');
+    eq(r.state, 'UNKNOWN', '기존 포지션 불변은 미체결 열린 주문을 배제하지 못한다');
   });
 
   console.log('[UNKNOWN 확정 — 재조회 정책]');
@@ -127,16 +127,17 @@ export function runUnknownResolverTests() {
   // 거래소가 이미 받았다고 확인해 준 주문이기 때문이다.
   const okQuery = { ok: true, order: null as any };
 
-  test('ACKED인데 조회에 없으면 FAILED가 아니라 RECONCILED다', () => {
+  test('ACKED인데 조회에 없으면 체결 증거 전까지 ACKED 유지', () => {
     const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 60_000, query: okQuery });
-    eq(r.resolved, true);
-    eq(r.state, 'RECONCILED', 'ACKED 주문을 전송 실패로 찍었다 — 장부가 거짓말을 하고 재시도가 열린다');
+    eq(r.resolved, false);
+    eq(r.state, 'ACKED', '체결 증거 없이 종결하면 재진입 잠금이 풀린다');
     assert(!/전송되지 않/.test(r.reason), r.reason);
   });
 
-  test('같은 상황에서 UNKNOWN은 여전히 FAILED다 — 규칙을 섞지 않는다', () => {
+  test('같은 상황에서 UNKNOWN도 미확정이다 — 재전송하지 않는다', () => {
     const r = resolveUnknown({ clientOrderId: 'c1', elapsedMs: 60_000, query: okQuery });
-    eq(r.state, 'FAILED');
+    eq(r.state, 'UNKNOWN');
+    eq(r.resolved, false);
   });
 
   test('거래소에 못 닿으면 ACKED를 그대로 둔다', () => {
@@ -169,7 +170,7 @@ export function runUnknownResolverTests() {
   // 체결인지 취소인지는 이 조회로 알 수 없다. 아는 척하면 손익이 틀어진다.
   test('체결·취소 어느 쪽이라고도 단정하지 않는다', () => {
     const r = resolveAcked({ clientOrderId: 'c1', elapsedMs: 60_000, query: okQuery });
-    assert(r.reason.includes('거래 내역'), '확인할 곳을 안 알려줬다: ' + r.reason);
+    assert(r.reason.includes('체결/취소'), '확인할 곳을 안 알려줬다: ' + r.reason);
     assert(r.state !== 'FILLED' && r.state !== 'CANCELED', '단정했다: ' + r.state);
   });
 }

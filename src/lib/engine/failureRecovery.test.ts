@@ -122,14 +122,14 @@ export function runFailureRecoveryTests() {
     eq(r.action, 'RETRY_QUERY');
   });
 
-  test('★ 유예가 지나고 포지션도 그대로여야 "안 나갔다"로 확정한다', () => {
+  test('★ 유예가 지나고 포지션이 그대로여도 미전송을 단정하지 않는다', () => {
     const sent = resolveUnknown({
       clientOrderId: 'K1', elapsedMs: 60_000,
       query: { ok: true, order: null },
       position: { qtyBefore: 0, qtyNow: 0 },
     });
-    eq(sent.state, 'FAILED');
-    eq(sent.resolved, true);
+    eq(sent.state, 'UNKNOWN');
+    eq(sent.resolved, false);
 
     // 포지션을 못 읽었으면 증거가 반쪽이다 — 확정하지 않는다.
     const half = resolveUnknown({
@@ -228,14 +228,14 @@ export function runFailureRecoveryTests() {
     assert((RECONCILE_TARGET_STATUSES as readonly string[]).includes(d.status));
   });
 
-  test('★ 재시작 뒤 주문이 안 보이고 유예도 지났으면 RECONCILED다', () => {
+  test('★ 재시작 뒤 주문이 안 보여도 체결 증거 없으면 ACKED 유지', () => {
     const r = resolveAcked({
       clientOrderId: 'K1', elapsedMs: 10 * 60_000,
       query: { ok: true, order: null },
       position: { qtyBefore: 0, qtyNow: 0 },
     });
-    eq(r.state, 'RECONCILED');
-    eq(r.resolved, true);
+    eq(r.state, 'ACKED');
+    eq(r.resolved, false);
     // **체결로도 미체결로도 단정하지 않는다.** 성과로 세지 않는다.
     assert(!isProvenFill({ status: 'RECONCILED', filled_qty: 0.068 }));
   });
