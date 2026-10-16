@@ -350,7 +350,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       //
       // 판정은 `residualVerdict` 하나가 한다 — `settleAttempt`가 쓰는
       // 그것이다. 여기서 따로 세면 같은 판단이 두 곳에 생긴다.
-      const ordersAfter = await ops.readProtectiveOrders(venue, i.symbol);
+      const ordersAfter = await ops.readAllOpenOrdersForSmoke(venue, i.symbol);
       const rv = residualVerdict({
         position: { ok: posRecheck.ok === true, found: posRecheck.found === true,
           qty: posRecheck.qty ?? null },
