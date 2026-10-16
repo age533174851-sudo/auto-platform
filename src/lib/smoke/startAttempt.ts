@@ -102,25 +102,27 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   // `preflightVerdict`는 **요청한 종목만** 본다. 보호 없는 노출은
   // 다른 종목에 남아 있을 수 있으므로 **연결 단위**로 한 번 더 본다.
   //
-  // 이 차단은 `POSITION_ZERO`가 `PASS`가 되어야 풀리고, 그 값은
-  // `settleAttempt`가 **거래소 재조회로만** 적는다. 장부를 고쳐서
-  // 푸는 길은 없다.
+  // POSITION_ZERO와 ORDERS_ZERO가 모두 PASS여야 차단이 풀린다.
+  // 50개만 읽으면 그 이전의 미해결 노출이 사라진 것처럼 보인다.
+  // 안전한 상한(1000)에 닿으면 전체를 확인한 것이 아니므로 차단한다.
   try {
     const { data, error } = await sb.from('smoke_tests')
       .select('id, connection_id, steps, state')
       .eq('user_id', i.userId).eq('connection_id', i.connectionId)
-      .order('created_at', { ascending: false }).limit(50);
+      .order('created_at', { ascending: false }).limit(1000);
     if (error) throw new Error(error.message);
+    if (!Array.isArray(data)) throw new Error('스모크 장부 조회 결과가 배열이 아닙니다');
+    if (data.length >= 1000) {
+      return fail('BLOCKED', '스모크 장부가 조회 상한(1000건)에 도달했습니다 — '
+        + '과거 미해결 노출을 모두 확인할 수 없어 새 주문을 차단합니다', 503);
+    }
     const blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
     if (blk.blocked) return fail('BLOCKED', blk.reason, 409);
   } catch (e: any) {
+    // 테이블 누락도 실패다. "첫 실행" 여부를 테이블 누락으로 추정하지 않는다.
     const msg = String(e?.message || e);
-    // 표가 아직 없으면 노출도 없다 — 첫 실행이다.
-    if (!isMissing(msg)) {
-      // **못 읽은 것을 "없음"으로 보지 않는다.**
-      const blk = unresolvedExposureBlock({ rows: null, connectionId: i.connectionId });
-      return fail('BLOCKED', `${blk.reason} (${msg})`, 503);
-    }
+    const blk = unresolvedExposureBlock({ rows: null, connectionId: i.connectionId });
+    return fail('BLOCKED', `${blk.reason} (${msg})`, 503);
   }
 
   // ── 킬스위치 ──
