@@ -1396,6 +1396,33 @@ export async function runPrecisionIntegrationTests() {
     });
   }
 
+  // ══════════ ②-c2 미체결 주문의 origQty는 fallback 수량 증거가 아니다 ══════════
+  {
+    const SYM = 'PRECJUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'NEW',
+        executedQty: '0', origQty: '0.010' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'OPTIONAL',
+    }));
+    test('★ 미체결 origQty=0.010을 손절 대체 수량으로 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const fallback = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(fallback.length, 0, '미체결 주문의 요청 수량으로 손절 대체 주문을 보냈다');
+    });
+  }
+
   // ══════════ ②-d 잘못된 PARTIAL_TP는 closePosition으로 승격되지 않는다 ══════════
   {
     const SYM = 'PRECIUSDT';
