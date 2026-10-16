@@ -158,13 +158,14 @@ function simulate(i: ComparisonInput, mode: 'TEN_PERCENT' | 'FIXED'): SizingSimu
       }
     }
 
-    // Lower the fixed stake in a drawdown; never raise it automatically.
+    // Lower the fixed stake on ANY drawdown from the running equity peak;
+    // never raise it automatically, even when gains exceed starting equity.
     // Equity-only model: excludes mark-to-market, slippage/market impact and
     // simultaneous positions; these need separate execution-path validation.
     const riskCeiling = equity * 0.1;
     const requested = mode === 'TEN_PERCENT'
       ? riskCeiling
-      : baseMargin * Math.min(1, equity / i.initialEquityUsd);
+      : baseMargin * Math.min(1, equity / peak);
     const margin = Math.max(0, Math.min(riskCeiling, requested));
     marginsUsd.push(margin);
     equity = Math.max(0, equity + margin * i.trades[n].netReturnOnMargin);
