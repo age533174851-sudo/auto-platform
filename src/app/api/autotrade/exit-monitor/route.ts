@@ -1098,9 +1098,25 @@ async function runLifecycleSweep(
               //   준비가 READY가 아니면 보낼 것이 없으므로 묻지 않는다.
               sendGate = null;
               if (p0.code === 'READY' && p0.prepared) {
-                const { recordExitIntent, findExitIntent, judgeExitSendPermission } =
+                const { recordExitIntent, findExitIntent, findOtherPendingExitForSeat,
+                  judgeExitSendPermission } =
                   await import('@/lib/engine/exitIntentStore');
                 const cid = String((p0.prepared as any)?.clientOrderId ?? '').trim();
+                // Quantity changes after PARTIAL fill, so clientOrderId
+                // changes. A new key cannot prove that an earlier close in
+                // the SAME owned connection/symbol has finished. Before
+                // claiming a new key, search other unresolved reduceOnly
+                // intents in the ledger. Missing DB evidence blocks only
+                // this AUTOMATIC send; no cancellation or venue write here.
+                const seat = await findOtherPendingExitForSeat(sb as any, {
+                  userId: c.userId, connectionId: c.connectionId,
+                  exchange: String(c.exchange), mode: c.mode,
+                  symbol: c.symbol, clientOrderId: cid,
+                });
+                if (!seat.mayProceedToExistingOrderGate) {
+                  sendGate = { maySend: false, code: seat.code,
+                    reason: seat.reason, durable: false, alert: true };
+                } else {
                 const prior = await findExitIntent(sb as any, cid);
                 // 첫 전송이 확실하면 거래소를 괴롭히지 않는다.
                 const venueLookup = prior.recordFound === false ? null
@@ -1128,6 +1144,7 @@ async function runLifecycleSweep(
                     reason: wrote.reason, durable: wrote.durable,
                     alert: wrote.code === 'ALREADY_EXISTS' };
                 }
+                } // same-seat read guard
                 if (!sendGate.maySend) {
                   out.exitDurability.push({ symbol: c.symbol, code: 'SEND_DEFERRED',
                     alertOperator: sendGate.alert, intent: sendGate.code,

@@ -4,7 +4,9 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   recordExitIntent, markExitIntentResult, judgeExitDurability,
-  judgeExitSendPermission, findExitIntent, MAX_SENDS_PER_KEY,
+  judgeExitSendPermission, findExitIntent, findOtherPendingExitForSeat,
+  claimAtomicExitSeatForResearch, supabaseAtomicExitSeatStore,
+  type AtomicExitSeatIdentity, type AtomicExitSeatStore, MAX_SENDS_PER_KEY,
   PENDING_EXIT_STATUSES, type ExitIntentRecord,
 } from './exitIntentStore';
 import { readFileSync } from 'node:fs';
@@ -470,6 +472,356 @@ export function runExitIntentStoreTests() {
     eq((await findExitIntent(throws as any, 'k')).recordFound, undefined);
     eq((await findExitIntent(null as any, 'k')).recordFound, undefined);
     eq((await findExitIntent(found as any, '')).recordFound, undefined);
+  });
+
+  // ── ⑦-b 부분 체결 시 바뀐 clientOrderId의 이전 청산을 찾는다 ──
+  // All fake DB rows are intentionally synthetic. This is not real Binance
+  // openOrders evidence and cannot authorize a send to either environment.
+  const seatOf = (clientOrderId = 'new_qty_key') => ({
+    userId: 'u1', connectionId: 'conn-1', exchange: 'binance',
+    mode: 'TESTNET', symbol: 'BTCUSDT', clientOrderId,
+  });
+  const fakeSeatDb = (rows: Record<string, any>[], error: any = null) => {
+    const observed = { tables: [] as string[], filters: [] as string[] };
+    const db = {
+      from(table: string) {
+        observed.tables.push(table);
+        let subset = [...rows];
+        let limit = 999;
+        const chain = {
+          eq(col: string, val: any) {
+            observed.filters.push(col);
+            subset = subset.filter(r => r[col] === val); return this;
+          },
+          neq(col: string, val: any) {
+            observed.filters.push('neq:' + col);
+            subset = subset.filter(r => r[col] !== val); return this;
+          },
+          in(col: string, vals: string[]) {
+            observed.filters.push('in:' + col);
+            subset = subset.filter(r => vals.includes(r[col])); return this;
+          },
+          limit(n: number) { limit = n; return this; },
+          then(yes: any, no: any) {
+            return Promise.resolve({ data: subset.slice(0, limit), error }).then(yes, no);
+          },
+        };
+        return { select: () => chain };
+      },
+    };
+    return { db: db as any, observed };
+  };
+  const fakeExitRow = (over: Record<string, any> = {}) => ({
+    user_id: 'u1', connection_id: 'conn-1', exchange: 'binance',
+    mode: 'TESTNET', symbol: 'BTCUSDT',
+    client_order_id: 'old_qty_key', reduce_only: true, status: 'UNKNOWN',
+    ...over,
+  });
+
+  test('★ partial-fill restart: older quantity-derived key blocks next close', async () => {
+    const f = fakeSeatDb([fakeExitRow()]);
+    const r = await findOtherPendingExitForSeat(f.db, seatOf());
+    eq(r.code, 'BLOCKED_OTHER_PENDING_EXIT');
+    eq(r.mayProceedToExistingOrderGate, false);
+    eq(f.observed.tables[0], 'live_orders');
+    for (const col of ['user_id', 'connection_id', 'exchange', 'mode',
+      'symbol', 'reduce_only', 'in:status', 'neq:client_order_id']) {
+      assert(f.observed.filters.includes(col), 'Scope/filter missing: ' + col);
+    }
+  });
+
+  test('★ restart 3 times: same pending old key never opens a second automatic send', async () => {
+    const f = fakeSeatDb([fakeExitRow()]);
+    for (let restart = 0; restart < 3; restart++) {
+      const r = await findOtherPendingExitForSeat(f.db, seatOf());
+      eq(r.mayProceedToExistingOrderGate, false, 'restart=' + restart);
+    }
+  });
+
+  test('★ same owner and symbol but different connection / mode / exchange is separate seat', async () => {
+    const f = fakeSeatDb([
+      fakeExitRow({ connection_id: 'other-conn' }),
+      fakeExitRow({ user_id: 'other-user' }),
+      fakeExitRow({ mode: 'LIVE' }),
+      fakeExitRow({ exchange: 'other-venue' }),
+      fakeExitRow({ symbol: 'ETHUSDT' }),
+    ]);
+    const r = await findOtherPendingExitForSeat(f.db, seatOf());
+    eq(r.code, 'CLEAR_IN_LEDGER');
+    eq(r.mayProceedToExistingOrderGate, true);
+  });
+
+  test('★ entry orders, completed exits and same key do not masquerade as OTHER pending', async () => {
+    const f = fakeSeatDb([
+      fakeExitRow({ reduce_only: false }),
+      fakeExitRow({ status: 'FILLED' }),
+      fakeExitRow({ status: 'RECONCILED' }),
+      fakeExitRow({ client_order_id: 'new_qty_key' }),
+    ]);
+    const r = await findOtherPendingExitForSeat(f.db, seatOf());
+    eq(r.mayProceedToExistingOrderGate, true);
+    // Same-key pending is still blocked by existing findExitIntent/judge
+    // in the route; this gate only covers a DIFFERENT quantity-derived key.
+  });
+
+  test('★ read errors, thrown DB calls and malformed payload block instead of empty', async () => {
+    const broken = fakeSeatDb([], { code: '42501' });
+    eq((await findOtherPendingExitForSeat(broken.db, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    const throws = { from: () => { throw new Error('read unavailable'); } };
+    eq((await findOtherPendingExitForSeat(throws as any, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    const malformed = { from: () => ({ select: () => {
+      const q: any = { eq() { return q; }, in() { return q; },
+        neq() { return q; }, limit() { return Promise.resolve({ data: null, error: null }); } };
+      return q;
+    } }) };
+    eq((await findOtherPendingExitForSeat(malformed as any, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+  });
+
+  test('★ missing scope or missing DB does not fall back to all-users lookup', async () => {
+    const f = fakeSeatDb([]);
+    eq((await findOtherPendingExitForSeat(f.db, { ...seatOf(), userId: '' })).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    eq((await findOtherPendingExitForSeat(f.db, { ...seatOf(), connectionId: null })).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    eq((await findOtherPendingExitForSeat(null, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    eq(f.observed.tables.length, 0, 'Invalid scope must not issue broad DB search');
+  });
+
+  test('★ unknown send count on EXISTING intent may not bypass 3-send cap', () => {
+    const prior = { recordFound: true, recordStatus: 'RECONCILED',
+      venueLookup: { ok: true, found: false }, sendCount: undefined };
+    const r = judgeExitSendPermission({ prior });
+    eq(r.code, 'BLOCKED_PRIOR_UNKNOWN');
+    eq(r.maySend, false);
+    const provenFirst = judgeExitSendPermission({
+      prior: { ...prior, sendCount: 0 },
+    });
+    eq(provenFirst.code, 'RESEND_PRIOR_RESOLVED');
+    eq(provenFirst.maySend, true);
+  });
+
+  test('★ route wires seat lookup BEFORE checking current key / writing intent', () => {
+    const route = readFileSync(resolve(process.cwd(),
+      'src/app/api/autotrade/exit-monitor/route.ts'), 'utf8');
+    const marker = 'await findOtherPendingExitForSeat(sb as any';
+    const idx = route.indexOf(marker);
+    assert(idx >= 0, 'No per-seat pending exit check in production route');
+    const after = route.slice(idx);
+    assert(after.indexOf('await findExitIntent') > 0, 'Missing existing-key reconciliation');
+    assert(after.indexOf('await recordExitIntent') > 0, 'No write-ahead intent');
+    assert(after.indexOf('await findExitIntent') < after.indexOf('await recordExitIntent'),
+      'Existing-key query must occur before claiming the order');
+  });
+
+  // ── ⑦-c 원자적 seat claim 계약 (아직 실행 경로 미배선) ──
+  const atomicSeat = (over: Partial<AtomicExitSeatIdentity> = {}): AtomicExitSeatIdentity => ({
+    userId: 'owner-1', connectionId: 'conn-1', exchange: 'binance',
+    mode: 'TESTNET', symbol: 'BTCUSDT',
+    clientOrderId: 'close-qty-010', ownerToken: 'fence-1',
+    ...over,
+  });
+  const atomicFake = () => {
+    const claims = new Map<string, AtomicExitSeatIdentity>();
+    const keyOf = (x: AtomicExitSeatIdentity) =>
+      JSON.stringify([x.userId, x.connectionId, x.exchange, x.mode, x.symbol]);
+    const store: AtomicExitSeatStore = {
+      // IMPORTANT: fake atomic unique insert, NOT a production DB adapter.
+      // This map.set is synchronous before any await (single JS scheduler).
+      async claimUniqueSeat(x) {
+        const key = keyOf(x);
+        const older = claims.get(key);
+        if (older) return { code: 'ALREADY_HELD' as const, record: older };
+        claims.set(key, x);
+        return { code: 'CLAIMED' as const, record: x };
+      },
+    };
+    return { claims, store };
+  };
+
+  test('★ 3 simultaneous workers with different quantities/IDs -> ONE seat winner', async () => {
+    const { claims, store } = atomicFake();
+    const candidates = [
+      atomicSeat({ clientOrderId: 'close-qty-010', ownerToken: 'worker-a' }),
+      atomicSeat({ clientOrderId: 'close-qty-006', ownerToken: 'worker-b' }),
+      atomicSeat({ clientOrderId: 'close-qty-003', ownerToken: 'worker-c' }),
+    ];
+    const out = await Promise.all(candidates.map(i => claimAtomicExitSeatForResearch(store, i)));
+    eq(out.filter(x => x.seatClaimed).length, 1,
+      'Different clientOrderIds for the same net position must not BOTH win');
+    eq(out.filter(x => x.code === 'ALREADY_HELD').length, 2);
+    eq(claims.size, 1);
+    out.forEach(x => eq(x.executionAuthorized, false,
+      'Research seat wins must NEVER authorize a trade'));
+  });
+
+  test('★ 3 consecutive restarts: same CID is not a new atomic seat', async () => {
+    const { claims, store } = atomicFake();
+    eq((await claimAtomicExitSeatForResearch(store, atomicSeat())).seatClaimed, true);
+    for (let restart = 1; restart <= 3; restart++) {
+      const response = await claimAtomicExitSeatForResearch(store,
+        atomicSeat({ ownerToken: 'restarted-' + restart }));
+      eq(response.code, 'ALREADY_HELD');
+      eq(response.seatClaimed, false);
+    }
+    eq(claims.size, 1);
+  });
+
+  test('★ different owner, connection, exchange, mode or symbol are distinct seats', async () => {
+    const { claims, store } = atomicFake();
+    const identities = [
+      atomicSeat(),
+      atomicSeat({ userId: 'owner-2', clientOrderId: 'c2' }),
+      atomicSeat({ connectionId: 'conn-2', clientOrderId: 'c3' }),
+      atomicSeat({ exchange: 'gate', clientOrderId: 'c4' }),
+      atomicSeat({ symbol: 'ETHUSDT', clientOrderId: 'c5' }),
+    ];
+    const outcomes = await Promise.all(identities.map(i=>claimAtomicExitSeatForResearch(store, i)));
+    eq(outcomes.filter(x=>x.seatClaimed).length, identities.length);
+    eq(claims.size, identities.length);
+  });
+
+  test('★ stale claim never auto-expires because a delayed order can still arrive', async () => {
+    const { claims, store } = atomicFake();
+    const before = await claimAtomicExitSeatForResearch(store, atomicSeat());
+    eq(before.code, 'CLAIMED');
+    // No TTL or wall-clock is part of the atomic claim contract. Reconciliation
+    // plus owner-confirmed flat/fully resolved evidence is required later.
+    const after = await claimAtomicExitSeatForResearch(store,
+      atomicSeat({ clientOrderId: 'new-after-timeout' }));
+    eq(after.code, 'ALREADY_HELD');
+    eq(claims.size, 1);
+  });
+
+  test('★ missing owner/connection/mode or non-TESTNET is rejected BEFORE store', async () => {
+    const { store } = atomicFake();
+    let calls = 0;
+    const counted: AtomicExitSeatStore = {
+      claimUniqueSeat: async i => { calls++; return store.claimUniqueSeat(i); },
+    };
+    const cases = [
+      atomicSeat({ userId: '' }), atomicSeat({ connectionId: '' }),
+      atomicSeat({ clientOrderId: '' }), atomicSeat({ ownerToken: '' }),
+      atomicSeat({ symbol: 'btcusdt' }), atomicSeat({ mode: 'LIVE' as any }),
+      atomicSeat({ clientOrderId: 'c'.repeat(37) }),
+    ];
+    for (const i of cases) {
+      const result = await claimAtomicExitSeatForResearch(counted, i);
+      eq(result.code, 'UNAVAILABLE'); eq(result.seatClaimed, false);
+    }
+    eq(calls, 0);
+    eq((await claimAtomicExitSeatForResearch(null, atomicSeat())).code, 'UNAVAILABLE');
+  });
+
+  test('★ claimed-looking database response with wrong seat/fence never succeeds', async () => {
+    for (const altered of [
+      { userId: 'other-user' }, { connectionId: 'other-connection' },
+      { exchange: 'other-exchange' }, { symbol: 'ETHUSDT' },
+      { clientOrderId: 'wrong-cid' }, { ownerToken: 'stale-fence' },
+    ]) {
+      const store: AtomicExitSeatStore = {
+        claimUniqueSeat: async i => ({
+          code: 'CLAIMED', record: { ...i, ...altered },
+        }),
+      };
+      const r = await claimAtomicExitSeatForResearch(store, atomicSeat());
+      eq(r.code, 'UNAVAILABLE'); eq(r.seatClaimed, false);
+    }
+  });
+
+  test('★ unavailable/throwing atomic DB cannot be interpreted as free seat', async () => {
+    const failed: AtomicExitSeatStore = {
+      claimUniqueSeat: async () => ({ code: 'UNAVAILABLE', record: null }),
+    };
+    eq((await claimAtomicExitSeatForResearch(failed, atomicSeat())).seatClaimed, false);
+    const throws: AtomicExitSeatStore = {
+      claimUniqueSeat: async () => { throw new Error('database unavailable'); },
+    };
+    const x = await claimAtomicExitSeatForResearch(throws, atomicSeat());
+    eq(x.code, 'UNAVAILABLE'); eq(x.seatClaimed, false);
+    eq(x.executionAuthorized, false);
+  });
+
+
+  test('★ DB atomic adapter performs one INSERT, never SELECT-then-INSERT', async () => {
+    const log: string[] = [];
+    const db = {
+      from(t: string) {
+        log.push('from:' + t);
+        return { insert(row: any) {
+          log.push('insert');
+          return { select(cols: string) {
+            log.push('select-returned-insert');
+            return { single: async () => ({ data: { ...row }, error: null }) };
+          } };
+        } };
+      },
+    };
+    const result = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(db as any, true), atomicSeat());
+    eq(result.code, 'CLAIMED'); eq(result.seatClaimed, true);
+    eq(result.executionAuthorized, false);
+    eq(JSON.stringify(log), JSON.stringify([
+      'from:exit_seat_claims', 'insert', 'select-returned-insert',
+    ]));
+  });
+
+  test('★ duplicate SQL unique violation is ALREADY_HELD not permission to send', async () => {
+    let inserts = 0;
+    const db = { from() {
+      return { insert() {
+        inserts++;
+        return { select: () => ({ single: async () => ({
+          data: null, error: { code: '23505' },
+        }) }) };
+      } };
+    } };
+    const response = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(db as any, true), atomicSeat());
+    eq(response.code, 'ALREADY_HELD');
+    eq(response.seatClaimed, false);
+    eq(inserts, 1);
+  });
+
+  test('★ missing migration, failed insert or wrong returned owner fail closed', async () => {
+    for (const outcome of [
+      { data: null, error: { code: '42P01' } },
+      { data: null, error: { code: '42501' } },
+      { data: { ...{
+        user_id: 'not-owner', connection_id: 'conn-1', exchange: 'binance',
+        mode: 'TESTNET', symbol: 'BTCUSDT', client_order_id: 'close-qty-010',
+        owner_token: 'fence-1',
+      } }, error: null },
+      { data: null, error: null },
+    ]) {
+      const db = { from() { return { insert() {
+        return { select: () => ({ single: async () => outcome }) };
+      } }; } };
+      const r = await claimAtomicExitSeatForResearch(
+        supabaseAtomicExitSeatStore(db as any, true), atomicSeat());
+      eq(r.code, 'UNAVAILABLE'); eq(r.seatClaimed, false);
+    }
+  });
+
+  test('★ TESTNET readiness false / no DB cannot create atomic claims', async () => {
+    let calls = 0;
+    const db = { from() { calls++; throw new Error('should not be called'); } };
+    const a = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(db as any, false), atomicSeat());
+    eq(a.code, 'UNAVAILABLE'); eq(calls, 0);
+    const b = await claimAtomicExitSeatForResearch(
+      supabaseAtomicExitSeatStore(null, true), atomicSeat());
+    eq(b.code, 'UNAVAILABLE');
+  });
+
+  test('★ atomic research contract stays disconnected from active route', () => {
+    const route = readFileSync(resolve(process.cwd(),
+      'src/app/api/autotrade/exit-monitor/route.ts'), 'utf8');
+    eq(route.includes('claimAtomicExitSeatForResearch('), false,
+      'It must not be connected without deployed schema and safe claim release logic');
   });
 
   // ── ⑧ 정본이 순수한가 ──

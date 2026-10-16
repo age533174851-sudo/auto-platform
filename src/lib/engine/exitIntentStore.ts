@@ -227,6 +227,230 @@ export async function findExitIntent(
   }
 }
 
+// ── RESEARCH CONTRACT: atomic same-seat exit ownership ─────────────────
+// The previous select->insert two-step path cannot atomically serialize
+// workers whose quantity-derived clientOrderIds differ. In particular, a
+// PARTIAL fill can change the key. A *future* database implementation MUST
+// claim one UNIQUE seat (user + connection + exchange + mode + symbol)
+// using ONE transaction/unique constraint. A select followed by insert,
+// a process-local mutex, or the clientOrderId uniqueness is insufficient.
+//
+// IMPORTANT: No running route calls this adapter; it cannot send an order.
+// Deploying it would also require a new durable DB schema and a verified
+// release/recovery procedure. Claims MUST NOT expire automatically: an
+// already-sent market close may still be pending after a network timeout.
+export interface AtomicExitSeatIdentity {
+  userId: string;
+  connectionId: string;
+  exchange: string;
+  mode: 'TESTNET';
+  symbol: string;
+  clientOrderId: string;
+  ownerToken: string;
+}
+
+export type AtomicSeatClaimCode =
+  | 'CLAIMED'
+  | 'ALREADY_HELD'
+  | 'UNAVAILABLE';
+
+export type AtomicSeatClaimResult =
+  | { code: 'CLAIMED'; record: AtomicExitSeatIdentity }
+  | { code: 'ALREADY_HELD'; record: AtomicExitSeatIdentity | null }
+  | { code: 'UNAVAILABLE'; record: null };
+
+export interface AtomicExitSeatStore {
+  // Must be implemented as one DB-atomic claim against UNIQUE seat identity;
+  // NEVER implement this with a preflight SELECT followed by an INSERT.
+  claimUniqueSeat: (intent: AtomicExitSeatIdentity) => Promise<AtomicSeatClaimResult>;
+}
+
+export interface AtomicExitSeatVerdict {
+  seatClaimed: boolean;
+  code: AtomicSeatClaimCode;
+  duplicateRisk: false;
+  // `seatClaimed` is only research evidence, NEVER authorization to send.
+  // A successful claim ONLY proves we won the proposed research gate;
+  // caller still needs connection-scoped TESTNET readiness, lease fencing,
+  // fresh venue exposure and the existing order-intent write-ahead record.
+  executionAuthorized: false;
+}
+
+export async function claimAtomicExitSeatForResearch(
+  store: AtomicExitSeatStore | null | undefined,
+  i: AtomicExitSeatIdentity,
+): Promise<AtomicExitSeatVerdict> {
+  const deny = (code: AtomicSeatClaimCode): AtomicExitSeatVerdict => ({
+    seatClaimed: false, code, duplicateRisk: false, executionAuthorized: false,
+  });
+  const fields = [i?.userId, i?.connectionId, i?.exchange,
+    i?.symbol, i?.clientOrderId, i?.ownerToken];
+  if (!store || !i || i.mode !== 'TESTNET' ||
+      fields.some(x => typeof x !== 'string' || !x.trim()) ||
+      i.clientOrderId.length > 36 || i.symbol.length > 40 ||
+      i.symbol !== i.symbol.toUpperCase() ||
+      i.ownerToken.length > 128) {
+    return deny('UNAVAILABLE');
+  }
+  try {
+    const result = await store.claimUniqueSeat(i);
+    if (result?.code !== 'CLAIMED') {
+      return deny(result?.code === 'ALREADY_HELD' ? 'ALREADY_HELD' : 'UNAVAILABLE');
+    }
+    const r = result.record;
+    // A successful-looking response is NOT enough. All claimed seat and
+    // fencing identity must match exactly, including the unique client ID.
+    if (!r || r.userId !== i.userId || r.connectionId !== i.connectionId ||
+        r.exchange !== i.exchange || r.mode !== i.mode ||
+        r.symbol !== i.symbol || r.clientOrderId !== i.clientOrderId ||
+        r.ownerToken !== i.ownerToken) {
+      return deny('UNAVAILABLE');
+    }
+    return { seatClaimed: true, code: 'CLAIMED', duplicateRisk: false,
+      executionAuthorized: false };
+  } catch {
+    return deny('UNAVAILABLE');
+  }
+}
+
+/** Prototype adapter for an UNDEPLOYED TESTNET-only table. NO route imports it.
+ *
+ * A database migration must first create `public.exit_seat_claims` with a
+ * UNIQUE(user_id, connection_id, exchange, mode, symbol) constraint, NOT
+ * merely UNIQUE(client_order_id). No SELECT-before-INSERT: the INSERT and
+ * unique constraint together choose the sole seat winner atomically.
+ *
+ * 23505 conflict is NEVER permission to send. Missing table/RLS error,
+ * timeout, partial payload, malformed owner identity => UNAVAILABLE.
+ */
+export function supabaseAtomicExitSeatStore(
+  sb: MinimalStore | null | undefined,
+  verifiedTestnet: boolean,
+): AtomicExitSeatStore {
+  return {
+    async claimUniqueSeat(i): Promise<AtomicSeatClaimResult> {
+      const unavailable: AtomicSeatClaimResult = {
+        code: 'UNAVAILABLE', record: null,
+      };
+      if (!sb || verifiedTestnet !== true || i?.mode !== 'TESTNET') {
+        return unavailable;
+      }
+      try {
+        const { data, error } = await sb.from('exit_seat_claims')
+          .insert({
+            user_id: i.userId,
+            connection_id: i.connectionId,
+            exchange: i.exchange,
+            mode: i.mode,
+            symbol: i.symbol,
+            client_order_id: i.clientOrderId,
+            owner_token: i.ownerToken,
+          })
+          .select('user_id,connection_id,exchange,mode,symbol,client_order_id,owner_token')
+          .single();
+        if (error) {
+          if (String(error.code) === '23505') {
+            return { code: 'ALREADY_HELD', record: null };
+          }
+          return unavailable;
+        }
+        if (!data || data.user_id !== i.userId ||
+            data.connection_id !== i.connectionId ||
+            data.exchange !== i.exchange || data.mode !== i.mode ||
+            data.symbol !== i.symbol ||
+            data.client_order_id !== i.clientOrderId ||
+            data.owner_token !== i.ownerToken) {
+          return unavailable;
+        }
+        return { code: 'CLAIMED', record: i };
+      } catch {
+        return unavailable;
+      }
+    },
+  };
+}
+
+// ── Same-seat pending exit preflight ──────────────────────────────────────
+// A close ID is derived from quantity. A partially filled old close can have
+// clientOrderId A while the remaining position produces clientOrderId B.
+// Checking ONLY B cannot prove A isn't still an open reduceOnly order.
+//
+// This query intentionally does not authorize transmission: it is a
+// conservative read-only prerequisite, scoped to the *same owner, connection,
+// exchange, mode and symbol*. A successful empty ledger query is NOT proof of
+// exchange absence: other writers/manual orders and races need venue evidence.
+// The normal automatic path must defer if any other unresolved exit exists.
+export type ExitSeatPendingCode =
+  | 'CLEAR_IN_LEDGER'
+  | 'BLOCKED_OTHER_PENDING_EXIT'
+  | 'BLOCKED_SEAT_LOOKUP_UNKNOWN';
+
+export interface ExitSeatPendingVerdict {
+  code: ExitSeatPendingCode;
+  mayProceedToExistingOrderGate: boolean;
+  reason: string;
+}
+
+export async function findOtherPendingExitForSeat(
+  sb: MinimalStore | null | undefined,
+  i: {
+    userId: string | null | undefined;
+    connectionId: string | null | undefined;
+    exchange: string | null | undefined;
+    mode: string | null | undefined;
+    symbol: string | null | undefined;
+    clientOrderId: string | null | undefined;
+  },
+): Promise<ExitSeatPendingVerdict> {
+  const blocked = (code: ExitSeatPendingCode, reason: string): ExitSeatPendingVerdict =>
+    ({ code, mayProceedToExistingOrderGate: false, reason });
+  const scoped = [
+    i?.userId, i?.connectionId, i?.exchange, i?.mode,
+    i?.symbol, i?.clientOrderId,
+  ];
+  if (!sb || scoped.some(x => typeof x !== 'string' || !x.trim())) {
+    return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+      '청산 주문 소유권·거래소·망·종목·식별자 또는 장부를 확인할 수 없습니다');
+  }
+  try {
+    const q: any = sb.from('live_orders')
+      .select('client_order_id,status')
+      .eq('user_id', i.userId)
+      .eq('connection_id', i.connectionId)
+      .eq('exchange', i.exchange)
+      .eq('mode', i.mode)
+      .eq('symbol', i.symbol)
+      .eq('reduce_only', true)
+      .in('status', [...PENDING_EXIT_STATUSES])
+      .neq('client_order_id', i.clientOrderId)
+      .limit(1);
+    const res = await q;
+    if (!res || res.error || (res.data != null && !Array.isArray(res.data))) {
+      return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+        '동일 소유권·연결·종목의 이전 미결 청산 기록 조회에 실패했습니다');
+    }
+    const rows = res.data;
+    if (rows == null) {
+      // Successful PostgREST array selects return []; a null payload is
+      // not equivalent evidence of an empty successful result.
+      return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+        '미결 청산 조회 결과의 형태를 확인할 수 없습니다');
+    }
+    if (rows.length > 0) {
+      return blocked('BLOCKED_OTHER_PENDING_EXIT',
+        '같은 소유권·연결·종목에 다른 clientOrderId의 미결 reduceOnly 주문 기록이 있습니다'
+        + ' — 부분 체결/재시작의 앞 주문을 대사하기 전 새 청산을 발송하지 않습니다');
+    }
+    return {
+      code: 'CLEAR_IN_LEDGER', mayProceedToExistingOrderGate: true,
+      reason: '',
+    };
+  } catch {
+    return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+      '미결 청산 기록 조회가 예외로 종료됐습니다 — 없음으로 간주하지 않습니다');
+  }
+}
+
 export type ExitSendOutcome =
   /** 거래소가 접수했다 */
   | 'ACKED'
@@ -419,6 +643,14 @@ export function judgeExitSendPermission(i: {
   if (i?.emergency === true) {
     return { maySend: true, code: 'EMERGENCY_OVERRIDE', duplicateRisk: true,
       reason: '긴급 종료로 명시적으로 허가됐습니다 — 중복 가능성을 안고 보냅니다' };
+  }
+
+  // Existing row with an unknown send count: the caller cannot claim
+  // the 3-send ceiling is enforced. Fail closed for automatic retries.
+  // Explicit EMERGENCY remains a separate, audited human decision above.
+  if (p?.recordFound === true && (sent == null || !Number.isSafeInteger(sent) || sent < 0)) {
+    return { maySend: false, code: 'BLOCKED_PRIOR_UNKNOWN', duplicateRisk: false,
+      reason: '이전 청산의 실제 전송 횟수가 확인되지 않아 자동 재전송을 차단합니다' };
   }
 
   // ── 처음 보내는가 ──
