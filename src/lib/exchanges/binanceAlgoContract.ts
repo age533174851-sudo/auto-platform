@@ -343,6 +343,79 @@ export function inspectBinanceAlgoRecovery(i: {
     : result('OPEN_LIST_CONFLICT_UNKNOWN', id);
 }
 
+/**
+ * Cancel is never "done" just because DELETE /fapi/v1/algoOrder returned 200.
+ * Its response is not a fill/position proof, and a lost response does NOT
+ * authorize retry. A later signed GET must show the exact Algo order as
+ * canceled, and the open order book must no longer list this clientAlgoId.
+ *
+ * Even this classified observation leaves account exposure UNKNOWN:
+ * stop cancellation can strand an open position, and a sibling TP may
+ * still be active. A separate connection-scoped position + order
+ * reconciliation is mandatory. This function never performs a DELETE.
+ */
+export function inspectBinanceAlgoCancellationEvidence(i: {
+  expectedPayload: Record<string, string> | null;
+  accepted: AcceptedAlgoOrder;
+  deleteReceipt: any;
+  orderLookup: { success?: unknown; order?: unknown } | null | undefined;
+  openLookup: { success?: unknown; orders?: unknown } | null | undefined;
+}): {
+  code: 'CANCEL_OBSERVED_POSITION_UNKNOWN' | 'RECEIPT_UNKNOWN' |
+    'LOOKUP_UNKNOWN' | 'STILL_OPEN' | 'VENUE_IDENTITY_MISMATCH';
+  canStartNewPosition: false;
+  canRepeatCancel: false;
+  canMarkPositionFlat: false;
+  executionAuthorized: false;
+} {
+  const result = (code: 'CANCEL_OBSERVED_POSITION_UNKNOWN' | 'RECEIPT_UNKNOWN' |
+    'LOOKUP_UNKNOWN' | 'STILL_OPEN' | 'VENUE_IDENTITY_MISMATCH') => ({
+    code, canStartNewPosition: false as const,
+    canRepeatCancel: false as const, canMarkPositionFlat: false as const,
+    executionAuthorized: false as const,
+  });
+  const p = i?.expectedPayload;
+  const accepted = i?.accepted;
+  if (!p || !accepted || accepted.code !== 'ACKED_UNVERIFIED' ||
+      accepted.clientAlgoId !== p.clientAlgoId || !accepted.acceptedAlgoId) {
+    return result('VENUE_IDENTITY_MISMATCH');
+  }
+  const lossless = (n: any) => typeof n === 'string' && /^[1-9][0-9]*$/.test(n)
+    ? n : typeof n === 'number' && Number.isSafeInteger(n) && n > 0
+      ? String(n) : null;
+  if (!i.deleteReceipt ||
+      lossless(i.deleteReceipt.algoId) !== accepted.acceptedAlgoId ||
+      i.deleteReceipt.clientAlgoId !== p.clientAlgoId ||
+      ![200, '200'].includes(i.deleteReceipt.code)) {
+    return result('RECEIPT_UNKNOWN');
+  }
+  const query = i?.orderLookup;
+  const open = i?.openLookup;
+  if (query?.success !== true || !query.order ||
+      open?.success !== true || !Array.isArray(open.orders)) {
+    return result('LOOKUP_UNKNOWN');
+  }
+  const q: any = query.order;
+  const mirrored = parseBinanceAlgoAcceptance(q, p);
+  if (mirrored.code !== 'ACKED_UNVERIFIED' ||
+      mirrored.acceptedAlgoId !== accepted.acceptedAlgoId ||
+      q.positionSide !== 'BOTH' || q.workingType !== p.workingType ||
+      Number(q.triggerPrice) !== Number(p.triggerPrice)) {
+    return result('VENUE_IDENTITY_MISMATCH');
+  }
+  // Fail closed if any matching open algo remains, even if individual
+  // lookup claims CANCELED. A race/inconsistent venue snapshot needs review.
+  if (open.orders.some((o: any) =>
+      o?.clientAlgoId === p.clientAlgoId ||
+      lossless(o?.algoId) === accepted.acceptedAlgoId)) {
+    return result('STILL_OPEN');
+  }
+  if (q.algoStatus !== 'CANCELED') {
+    return result('LOOKUP_UNKNOWN');
+  }
+  return result('CANCEL_OBSERVED_POSITION_UNKNOWN');
+}
+
 /** Deletion must use Algo ID namespace; a regular-order ID is NOT interchangeable. */
 export function binanceAlgoCancellationIdentifier(
   id: { kind: 'ALGO'; algoId: string } | { kind: 'REGULAR'; orderId: string },
