@@ -256,6 +256,93 @@ export function verifyBinanceAlgoOpenReadback(i: {
     listedOpenAtRead: true, executionAuthorized: false };
 }
 
+/**
+ * Recovery after POST response loss / process restart.
+ *
+ * Queries must be performed with the SAME VERIFIED owner's TESTNET key,
+ * the same symbol, and persisted immutable clientAlgoId. GET algoOrder
+ * includes terminal history; GET openAlgoOrders includes only live
+ * conditional orders. One empty open list NEVER means "never accepted".
+ *
+ * This is a pure readback classifier with NO retry, cancel or order
+ * capability. Recovery of canceled/triggered/expired orders still requires
+ * flat-position proof, actualOrderId fill reconciliation and other
+ * outstanding close-intent owner checks before considering any new trade.
+ */
+export type AlgoRecoveryCode =
+  | 'OPEN_CONFIRMED_AT_READ'
+  | 'TRIGGERED_OR_TERMINAL_NEEDS_RECONCILIATION'
+  | 'OPEN_LIST_CONFLICT_UNKNOWN'
+  | 'ORDER_LOOKUP_UNKNOWN'
+  | 'OPEN_LOOKUP_UNKNOWN'
+  | 'VENUE_IDENTITY_MISMATCH';
+
+export interface AlgoRecoveryVerdict {
+  code: AlgoRecoveryCode;
+  algoId: string | null;
+  mustInspectPositionAndFills: true;
+  canResendAlgoOrder: false;
+  canCancelAlgoOrder: false;
+  executionAuthorized: false;
+}
+
+export function inspectBinanceAlgoRecovery(i: {
+  expectedPayload: Record<string, string> | null;
+  orderLookup: { success?: unknown; order?: unknown } | null | undefined;
+  openLookup: { success?: unknown; orders?: unknown } | null | undefined;
+}): AlgoRecoveryVerdict {
+  const result = (code: AlgoRecoveryCode, algoId: string | null = null):
+    AlgoRecoveryVerdict => ({
+      code, algoId, mustInspectPositionAndFills: true,
+      canResendAlgoOrder: false, canCancelAlgoOrder: false,
+      executionAuthorized: false,
+    });
+  const p = i?.expectedPayload;
+  if (!p || !p.clientAlgoId || !p.symbol || !p.type ||
+      p.algoType !== 'CONDITIONAL') {
+    return result('VENUE_IDENTITY_MISMATCH');
+  }
+  if (i?.orderLookup?.success !== true ||
+      !i.orderLookup.order || typeof i.orderLookup.order !== 'object') {
+    return result('ORDER_LOOKUP_UNKNOWN');
+  }
+  const q: any = i.orderLookup.order;
+  // The parser validates exact original request identity and retains int64
+  // algoId as a string. A forged, stale or foreign venue order blocks.
+  const accepted = parseBinanceAlgoAcceptance(q, p);
+  if (accepted.code !== 'ACKED_UNVERIFIED') {
+    return result('VENUE_IDENTITY_MISMATCH');
+  }
+  const id = accepted.acceptedAlgoId;
+  if (q.positionSide !== 'BOTH' ||
+      q.workingType !== p.workingType ||
+      !Number.isFinite(Number(q.triggerPrice)) ||
+      Number(q.triggerPrice) !== Number(p.triggerPrice) ||
+      (p.closePosition === 'true'
+        ? q.closePosition !== true || q.reduceOnly === true
+        : q.closePosition === true || q.reduceOnly !== true ||
+          !Number.isFinite(Number(q.quantity)) ||
+          Number(q.quantity) !== Number(p.quantity))) {
+    return result('VENUE_IDENTITY_MISMATCH', id);
+  }
+  // A triggered conditional creates an ACTUAL order (possibly partly
+  // filled). Terminal status is NOT proof that the position is flat.
+  if (q.algoStatus !== 'NEW' ||
+      (q.actualOrderId != null && String(q.actualOrderId) !== '')) {
+    return result('TRIGGERED_OR_TERMINAL_NEEDS_RECONCILIATION', id);
+  }
+  if (i?.openLookup?.success !== true ||
+      !Array.isArray(i.openLookup.orders)) {
+    return result('OPEN_LOOKUP_UNKNOWN', id);
+  }
+  const evidence = verifyBinanceAlgoOpenReadback({
+    accepted, payload: p, venueRead: i.openLookup,
+  });
+  return evidence.code === 'LISTED_OPEN_AT_READ'
+    ? result('OPEN_CONFIRMED_AT_READ', id)
+    : result('OPEN_LIST_CONFLICT_UNKNOWN', id);
+}
+
 /** Deletion must use Algo ID namespace; a regular-order ID is NOT interchangeable. */
 export function binanceAlgoCancellationIdentifier(
   id: { kind: 'ALGO'; algoId: string } | { kind: 'REGULAR'; orderId: string },
