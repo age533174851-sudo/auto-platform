@@ -5,6 +5,7 @@ import {
   buildBinanceConditionalAlgoPayload, parseBinanceAlgoAcceptance,
   verifyBinanceAlgoOpenReadback,
   inspectBinanceAlgoRecovery,
+  queryBinanceAlgoByClientId,
   inspectBinanceAlgoCancellationEvidence,
   binanceAlgoCancellationIdentifier, type BinanceConditionalAlgoIntent,
 } from './binanceAlgoContract';
@@ -498,6 +499,104 @@ export function runBinanceAlgoContractTests() {
       eq(r.canStartNewPosition, false);
       eq(r.canRepeatCancel, false);
     }
+  });
+
+  test('READ ONLY signed GET uses exact algoOrder path and stable client key', async () => {
+    const calls: Array<{ path: string; params: any }> = [];
+    const r = await queryBinanceAlgoByClientId({
+      environment: 'TESTNET', symbol: 'BTCUSDT',
+      clientAlgoId: 'SMOKE_OLD_001',
+    }, async (path, params) => {
+      calls.push({ path, params });
+      return {
+        algoId: '9007199254740993', clientAlgoId: params.clientAlgoId,
+        symbol: 'BTCUSDT', algoType: 'CONDITIONAL',
+        algoStatus: 'NEW', orderType: 'STOP_MARKET',
+        side: 'SELL', positionSide: 'BOTH',
+      };
+    });
+    eq(r.code, 'FOUND_UNVERIFIED');
+    eq(calls.length, 1);
+    eq(calls[0].path, '/fapi/v1/algoOrder');
+    eq(JSON.stringify(calls[0].params), '{"clientAlgoId":"SMOKE_OLD_001"}');
+    eq(r.order.algoId, '9007199254740993');
+    eq(r.canResend, false);
+    eq(r.canCancel, false);
+    eq(r.executionAuthorized, false);
+  });
+
+  test('LIVE, missing scope and malformed ID never invoke signed GET', async () => {
+    let invoked = 0;
+    const signed = async (): Promise<any> => { invoked++; throw new Error('called'); };
+    for (const i of [
+      { environment: 'LIVE', symbol: 'BTCUSDT', clientAlgoId: 'abc' },
+      { environment: 'UNKNOWN', symbol: 'BTCUSDT', clientAlgoId: 'abc' },
+      { environment: 'TESTNET', symbol: '', clientAlgoId: 'abc' },
+      { environment: 'TESTNET', symbol: 'BTCUSDT', clientAlgoId: '' },
+      { environment: 'TESTNET', symbol: 'BTCUSDT', clientAlgoId: 'bad id' },
+      { environment: 'TESTNET', symbol: 'BTCUSDT', clientAlgoId: 'A'.repeat(37) },
+    ] as any[]) {
+      const r = await queryBinanceAlgoByClientId(i, signed);
+      eq(r.code, 'INVALID_SCOPE');
+      eq(r.order, null);
+    }
+    eq(invoked, 0);
+  });
+
+  test('Signed lookup 404, timeout and malformed 200 are UNKNOWN — never permission to retry', async () => {
+    const input = { environment: 'TESTNET' as const, symbol: 'BTCUSDT',
+      clientAlgoId: 'SMOKE_OLD_001' };
+    for (const impl of [
+      async () => { throw new Error('Binance 404 unknown order'); },
+      async () => { throw new Error('network timeout'); },
+      async () => null,
+      async () => [],
+      async () => 'OK',
+    ]) {
+      const r = await queryBinanceAlgoByClientId(input, impl as any);
+      eq(r.canResend, false); eq(r.canCancel, false);
+      eq(r.executionAuthorized, false);
+      assert(r.code !== 'FOUND_UNVERIFIED');
+    }
+  });
+
+  test('Foreign symbol/clientId or unsafe Algo number never match a known TESTNET seat', async () => {
+    const input = { environment: 'TESTNET' as const, symbol: 'BTCUSDT',
+      clientAlgoId: 'SMOKE_OLD_001' };
+    const base = {
+      algoId: '9007199254740993', clientAlgoId: input.clientAlgoId,
+      symbol: input.symbol, algoType: 'CONDITIONAL',
+      algoStatus: 'NEW', orderType: 'STOP_MARKET',
+      side: 'SELL', positionSide: 'BOTH',
+    };
+    for (const override of [
+      { algoId: 9007199254740992 },
+      { algoId: null }, { clientAlgoId: 'OTHER' },
+      { symbol: 'ETHUSDT' }, { algoType: 'WRONG' },
+      { algoStatus: null }, { orderType: 'MARKET' },
+      { side: 'wrong' }, { positionSide: '' },
+    ]) {
+      const r = await queryBinanceAlgoByClientId(input,
+        async () => ({ ...base, ...override }));
+      eq(r.code, 'VENUE_IDENTITY_MISMATCH', JSON.stringify(override));
+      eq(r.order, null);
+    }
+  });
+
+  test('Production read-only handler imports GET evidence but no POST/DELETE execution', () => {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const route = fs.readFileSync(path.resolve(process.cwd(),
+      'src/app/api/binance/futures/algo-read/route.ts'), 'utf8');
+    const binance = fs.readFileSync(path.resolve(process.cwd(),
+      'src/lib/exchanges/binanceFutures.ts'), 'utf8');
+    assert(route.includes("resolveUserId(req.headers.get('authorization'), null, null)"));
+    assert(route.includes('loadBinanceCreds('));
+    assert(route.includes("creds.isTestnetRaw !== true"));
+    assert(route.includes('getFuturesAlgoByClientIdReadOnly('));
+    assert(!/\.insert\s*\(|\.update\s*\(|\.delete\s*\(|\.upsert\s*\(/.test(route));
+    assert(binance.includes("fapiSigned('GET', path, key, secret, true, params)"));
+    assert(!route.includes('placeFuturesTPSL('));
   });
 
   test('Cancel ID namespace ALGO != REGULAR orderId, even with same digits', () => {
