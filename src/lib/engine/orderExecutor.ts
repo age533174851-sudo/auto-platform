@@ -24,6 +24,7 @@ import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
+import { quantizeOrder } from '../exchanges/quantize';
 import {
   ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
 } from './reconcileLedgerStatus';
@@ -752,18 +753,68 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
       } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
 
+      // ── 4.7) 거래소 규격에 맞춘다 ──
+      //
+      // **2026-10-16 TESTNET 실측에서 여기가 비어 있었다.**
+      // 거래소가 `-1111 Precision is over the maximum defined for this
+      // asset`로 거절했다. 보낸 수량은 `(증거금 × 배율) / 기준가`가
+      // 만든 생 부동소수(예: 0.0033333333333333335)였다.
+      //
+      // 규격을 맞추는 정본은 이미 있었다 — `quantizeOrder`가
+      // LOT_SIZE · MARKET_LOT_SIZE · stepSize · minQty · maxQty ·
+      // minNotional · tickSize를 전부 다룬다. `placeFuturesOrderSafe`와
+      // `futuresExec`는 그것을 쓰는데 **이 경로만 안 쓰고 있었다.**
+      // 만들어 놓고 배선을 안 한 것이고, 그래서 실주문이 거절됐다.
+      //
+      // `placeFuturesOrderSafe`로 바꾸지 않는 이유: 그쪽은
+      // `clientOrderId`를 받지 않는다. 멱등 키를 잃으면 재시도가 중복
+      // 주문이 된다 — 정밀도를 고치려다 더 나쁜 것을 만든다.
+      const filters = await bf.getSymbolFilters(plan.symbol, testnet);
+
+      // 최소 명목가 검사에 쓸 기준가는 **거래소에서 읽는다.** 호출부가
+      // 넘긴 값을 쓰면 검사가 검사 대상에게 값을 물어보는 꼴이 된다.
+      // 못 읽으면 null을 넘긴다 — 정본이 "기준가 없음"으로 판정한다.
+      let markPrice: number | null = null;
+      if (orderType === 'MARKET' && args.reduceOnly !== true) {
+        try {
+          const snap = await bf.readMarketSnapshot(plan.symbol, testnet);
+          markPrice = snap.snapshot?.markPrice ?? null;
+        } catch { /* 못 읽으면 null — 지어내지 않는다 */ }
+      }
+
+      const qz = quantizeOrder(
+        plan.quantity,
+        orderType === 'LIMIT' ? (args.limitPrice ?? null) : null,
+        filters,
+        { orderType, reduceOnly: args.reduceOnly === true, marketReferencePrice: markPrice },
+      );
+      if (!qz.ok || !(Number.isFinite(Number(qz.quantity)) && Number(qz.quantity) > 0)) {
+        // **보내기 전에 멈춘다.** `status: 'SENT'`를 적기 전이라
+        // 장부에 "보냈다"가 남지 않는다 — 안 보낸 것을 보냈다고 적으면
+        // 대조가 영영 어긋난다.
+        const reason = `거래소 수량 규격을 맞추지 못해 주문을 보내지 않았습니다`
+          + ` (${qz.code ?? 'QUANTIZE_FAILED'}): ${qz.reason}`;
+        await update({ status: 'FAILED', error_message: reason });
+        return { ok: false, status: 'FAILED', clientOrderId, message: reason };
+      }
+      const sendQty = qz.quantity as number;
+      const sendPrice = orderType === 'LIMIT' ? (qz.price ?? args.limitPrice) : undefined;
+
       // ── 5) 주문 전송 ──
       await update({
         status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
         pos_qty_before: posQtyBefore,
+        // 규격에 맞추며 깎인 수량을 장부에 남긴다. 요청 수량만 남기면
+        // 체결 수량과 비교할 기준이 틀어진다.
+        ...(qz.changed ? { quantity: sendQty } : {}),
       });
 
       let res: any;
       try {
         res = await bf.placeFuturesOrder(apiKey, apiSecret, {
           symbol: plan.symbol, side, type: orderType,
-          quantity: plan.quantity, clientOrderId,
-          ...(orderType === 'LIMIT' ? { price: args.limitPrice } : {}),
+          quantity: sendQty, clientOrderId,
+          ...(orderType === 'LIMIT' ? { price: sendPrice } : {}),
           ...(args.reduceOnly ? { reduceOnly: true } : {}),
         }, testnet);
       } catch (e: any) {

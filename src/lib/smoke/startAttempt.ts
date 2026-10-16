@@ -22,6 +22,8 @@ import {
   preflightVerdict, holdUntilMs, unprotectedExposureVerdict,
   smokeTestnetVerdict, unresolvedExposureBlock, SMOKE_STRATEGY_ID,
 } from './smokePlan';
+import { residualVerdict } from '../engine/orderOwnership';
+import { ownedOrderIds } from '../engine/protectionLedger';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
 
 // 누가 이 회차를 깨웠는가.
@@ -333,6 +335,30 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       const ex = unprotectedExposureVerdict({ code: ev.code, position: posRecheck });
       // **못 읽은 것을 0으로 적지 않는다.** 판정이 준 값을 그대로 쓴다.
       steps.POSITION_ZERO = step(ex.positionZero, ex.reason);
+
+      // ── 미결 주문도 다시 읽는다 ──
+      //
+      // **2026-10-16 TESTNET 실측에서 여기가 비어 있었다.**
+      // 진입이 -1111로 거절됐는데 `ORDERS_ZERO`가 `PENDING`으로 남았다.
+      // 보호주문을 걸기도 전에 거절됐으니 남은 것이 없을 가능성이
+      // 높지만, **높다는 것과 확인했다는 것은 다르다.** 진입 직전
+      // 단계에서 조건부 주문이 먼저 들어갔을 수도 있다.
+      //
+      // 판정은 `residualVerdict` 하나가 한다 — `settleAttempt`가 쓰는
+      // 그것이다. 여기서 따로 세면 같은 판단이 두 곳에 생긴다.
+      const ordersAfter = await ops.readProtectiveOrders(venue, i.symbol);
+      const rv = residualVerdict({
+        position: { ok: posRecheck.ok === true, found: posRecheck.found === true,
+          qty: posRecheck.qty ?? null },
+        orders: ordersAfter,
+        myStrategyId: SMOKE_STRATEGY_ID,
+        // 이번 회차가 건 보호주문 번호. 진입 전 거절이면 비어 있다.
+        ownedIds: ownedOrderIds({ placed: [common.sl_order_id, common.tp_order_id] }),
+      });
+      steps.ORDERS_ZERO = rv.ok
+        ? step('PASS', rv.reason)
+        : step(rv.code === 'ORDERS_UNKNOWN' || rv.code === 'POSITION_NOT_ZERO'
+          ? 'UNKNOWN' : 'FAIL', rv.reason);
 
       const verdict = ev.code === 'ENTERED_UNPROTECTED' ? 'FAIL' : 'UNKNOWN';
       const why = `${ev.reason} · ${ex.reason}`;
