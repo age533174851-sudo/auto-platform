@@ -861,6 +861,10 @@ async function runLifecycleSweep(
     // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
     //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
     authority: { candidates: 0, acted: 0, failed: 0, extended: 0, results: [] as any[] },
+    // ★ **청산 의도가 기록으로 남았는가.** 주문을 보냈는데 기록이
+    //   없으면 재시작이 그 주문을 멱등 키로 찾을 수 없다. 조용히
+    //   넘기면 다음 회차가 그 사실을 모른다.
+    exitDurability: [] as any[],
     escape: { recorded: 0, recordFailed: 0, notEligible: 0 },
     // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
     postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
@@ -1100,7 +1104,49 @@ async function runLifecycleSweep(
             // ③ 쓰기 직전 재검증 — 아래 전송과의 사이에 await가 없다
             revalidateFence: mayMutate,
             // ④ 전송 — 읽지 않는다
-            sendClose: () => ops.sendSymbolClose(venue, prepared),
+            //
+            // ★ **보내기 전에 보낸다는 사실을 남긴다.**
+            //
+            //   진입 경로는 `live_orders`에 `INTENT` 행을 먼저 쓰지만
+            //   청산 경로에는 그것이 없었다 — `clientOrderId`가 요청
+            //   메모리에만 있었다. 멱등 키는 지금 관측한 노출에서
+            //   나오므로 **부분 체결 뒤에는 키가 바뀌고**, 앞서 보낸
+            //   주문을 그 키로 더 이상 찾을 수 없다.
+            //
+            //   기록 실패는 **청산을 막지 않는다.** 못 썼다고 포지션에서
+            //   빠져나갈 길을 막으면 못 여는 불편이 아니라 못 닫는
+            //   사고가 된다. 그래서 기록하지 못한 사실만 따로 적는다.
+            sendClose: async () => {
+              const { recordExitIntent, markExitIntentResult, judgeExitDurability } =
+                await import('@/lib/engine/exitIntentStore');
+              const cid = String(prepared?.clientOrderId ?? '').trim();
+              const wrote = await recordExitIntent(sb as any, {
+                clientOrderId: cid,
+                connectionId: c.connectionId,
+                exchange: String(c.exchange),
+                // **모드를 지어내지 않는다.** 못 읽었으면 적지 않는다 —
+                // 'TESTNET'으로 메우면 LIVE 청산이 TESTNET 장부에 남는다.
+                mode: c.mode,
+                symbol: c.symbol,
+                orderSide: prepared?.orderSide === 'BUY' ? 'BUY' : 'SELL',
+                quantity: Number(prepared?.quantity ?? 0),
+                userId: c.userId,
+              });
+              const sent = await ops.sendSymbolClose(venue, prepared);
+              // 결과를 적는다. **UNKNOWN을 거부로 적지 않는다.**
+              if (cid && wrote.durable) {
+                await markExitIntentResult(sb as any, cid,
+                  sent.ok === true ? 'ACKED' : sent.ambiguous === true ? 'UNKNOWN' : 'REJECTED',
+                  { exchangeOrderId: sent.exchangeOrderId ?? null,
+                    executedQty: sent.executedQty ?? null });
+              }
+              const dur = judgeExitDurability({
+                attempted: sent.attempted === true, durable: wrote.durable });
+              out.exitDurability.push({ symbol: c.symbol, code: dur.code,
+                alertOperator: dur.alertOperator,
+                intent: wrote.code, reason: dur.reason || wrote.reason || null });
+              return sent;
+            },
             // ⑤ 재조회
             readAfter: () => ops.readOpenPosition(venue, c.symbol)
               .then((x: any) => ({ ok: x.ok === true, found: x.found === true })),
