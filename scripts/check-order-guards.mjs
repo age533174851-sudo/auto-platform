@@ -183,5 +183,105 @@ if (zeroErrors.length > 0) {
   process.exit(1);
 }
 
+// ── 진입이 확정되지 않은 회차가 노출을 방치하지 않는가 ──
+//
+// 무엇이 있었나
+// ─────────────
+// `enteredVerdict`가 `ENTERED_UNPROTECTED`를 주는 경우가 있다 —
+// **체결은 됐는데 보호주문을 확인하지 못한 것이다.** 실행기는
+// `undoEntry()`로 되돌리려 하지만 그 되돌리기도 실패할 수 있다.
+//
+// 그때 `startAttempt`가 줄에 `closed_at`을 적고 끝내면, `/settle`은
+// `state = 'HOLDING'`인 줄만 고르므로 **아무도 그 노출을 다시 보지
+// 않는다.** 거래소에는 보호 없는 포지션이 남는다.
+//
+// 그래서 세 가지를 못 박는다:
+//   ① 줄을 끝내기 전에 포지션을 **다시 읽는가**
+//   ② 그 결과로 `POSITION_ZERO`를 적는가 (못 읽으면 PASS가 아니다)
+//   ③ 넘겨야 할 때 **줄을 닫지 않는가**
+{
+  const F = 'src/lib/smoke/startAttempt.ts';
+  const raw = existsSync(F) ? readFileSync(F, 'utf8') : null;
+  const bad = [];
+  if (!raw) bad.push(`${F}이 없습니다`);
+  else {
+    // 주석을 걷어낸다 — 이 파일은 설명이 길고, 설명이 계약을 대신
+    // 증명하면 검사가 아무것도 막지 않는다.
+    const src = raw.split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+
+    if (!src.includes('unprotectedExposureVerdict(')) {
+      bad.push(`${F}: \`unprotectedExposureVerdict\`를 부르지 않습니다 — `
+        + '진입 미확정 회차가 노출을 방치하지 않는지 판정하는 정본입니다');
+    }
+    // 판정 **뒤에** 포지션을 다시 읽는 호출이 있어야 한다. 실행기 직후의
+    // `posAfter`만 믿으면 되돌리기 실패를 못 본다.
+    const vIdx = src.indexOf('unprotectedExposureVerdict(');
+    const notEnteredIdx = src.indexOf('if (!ev.entered)');
+    if (notEnteredIdx >= 0 && vIdx >= 0) {
+      const branch = src.slice(notEnteredIdx, vIdx);
+      if (!/readOpenPosition\(/.test(branch)) {
+        bad.push(`${F}: 진입 미확정 분기에서 포지션을 다시 읽지 않습니다 — `
+          + '되돌리기가 실패했는지는 재조회만 말해 줍니다');
+      }
+    }
+    // `POSITION_ZERO`를 판정 결과로 적는가. 상수를 그대로 적으면
+    // 못 읽은 것도 PASS가 된다.
+    if (!/steps\.POSITION_ZERO\s*=\s*step\(\s*ex\.positionZero/.test(src)) {
+      bad.push(`${F}: POSITION_ZERO를 판정 결과(\`ex.positionZero\`)로 적지 않습니다 — `
+        + '상수로 적으면 못 읽은 것도 통과가 됩니다');
+    }
+    // 넘겨야 할 때 줄을 닫지 않는가.
+    if (!/ex\.handoff\s*===\s*'SETTLE'/.test(src)) {
+      bad.push(`${F}: 정산으로 넘기는 분기가 없습니다 — `
+        + '줄을 닫으면 /settle이 HOLDING만 보므로 노출을 다시 보지 않습니다');
+    } else {
+      // **분기 몸통만 본다.** 고정 길이로 자르면 바로 아래
+      // CLOSE_RECORD 분기까지 들어오고, 그쪽 `closed_at`은 정상이다 —
+      // 처음 돌렸을 때 그 이유로 잘못 실패했다.
+      const hIdx = src.indexOf("ex.handoff === 'SETTLE'");
+      const settleBranch = (() => {
+        const open = src.indexOf('{', hIdx);
+        if (open < 0) return '';
+        let depth = 0;
+        for (let k = open; k < src.length; k++) {
+          if (src[k] === '{') depth += 1;
+          else if (src[k] === '}') {
+            depth -= 1;
+            if (depth === 0) return src.slice(open, k + 1);
+          }
+        }
+        return src.slice(open);
+      })();
+      if (!settleBranch) {
+        bad.push(`${F}: 정산 분기의 몸통을 읽지 못했습니다 — 검사기가 고장 난 것입니다`);
+      }
+      if (/closed_at/.test(settleBranch)) {
+        bad.push(`${F}: 정산으로 넘기는 분기가 \`closed_at\`을 적습니다 — `
+          + '닫힌 줄은 /settle이 고르지 않습니다');
+      }
+      if (!/state:\s*'HOLDING'/.test(settleBranch)) {
+        bad.push(`${F}: 정산으로 넘기는 분기가 state를 HOLDING으로 두지 않습니다 — `
+          + '/settle은 HOLDING인 줄만 고릅니다');
+      }
+      // **여기서 청산을 직접 보내지 않는다.** 보내는 곳이 둘이면
+      // 중복 청산이 된다.
+      if (/closeSymbolPosition\(/.test(settleBranch)) {
+        bad.push(`${F}: 정산으로 넘기는 분기가 청산을 직접 보냅니다 — `
+          + '보내는 곳은 settleAttempt 하나여야 합니다(둘이면 중복 청산)');
+      }
+    }
+  }
+  if (bad.length) {
+    console.error('❌ 보호 없는 노출이 방치될 길이 있습니다:');
+    for (const b of bad) console.error(`   · ${b}`);
+    console.error('');
+    console.error('   체결은 됐는데 보호주문이 없고, 그 줄이 닫혀 있으면');
+    console.error('   아무도 그 포지션을 다시 보지 않습니다.');
+    process.exit(1);
+  }
+}
+
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
-  + ' · 조회 실패를 0으로 만드는 길 0개');
+  + ' · 조회 실패를 0으로 만드는 길 0개'
+  + ' · 진입 미확정 노출 방치 경로 0개');

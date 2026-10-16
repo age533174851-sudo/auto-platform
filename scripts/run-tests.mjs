@@ -158,6 +158,7 @@ import {
   runCloseIntegrationTests, runTransitionIntegrationTests, runCoinMRouteIntegrationTests,
   runGateExecIntegrationTests, runGateDupIntegrationTests, runNoFixedTpIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
@@ -413,6 +414,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runGateExecIntegrationTests();
   await runGateDupIntegrationTests();
   await runNoFixedTpIntegrationTests();
+  await runSmokeStartRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
   await flushAsync();

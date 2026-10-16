@@ -10,7 +10,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   smokeRequestVerdict, stepsOf, smokeVerdict, holdUntilMs, closeDue,
-  smokeBlocksStrategy, preflightVerdict,
+  smokeBlocksStrategy, preflightVerdict, unprotectedExposureVerdict,
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
@@ -240,5 +240,95 @@ export function runSmokePlanTests() {
 
   test('모든 단계에 한국어 이름이 있다', () => {
     for (const s of stepsOf({})) assert(s.label.length > 0, `${s.id}에 이름이 없다`);
+  });
+
+  console.log('[보호 없는 노출 — 진입이 확정되지 않았을 때 줄을 닫는 방법]');
+
+  test('★ 보호 없는 포지션이 남으면 줄을 닫지 않고 정산으로 넘긴다', () => {
+    const v = unprotectedExposureVerdict({
+      code: 'ENTERED_UNPROTECTED',
+      position: { ok: true, found: true, qty: 0.002 },
+    });
+    eq(v.handoff, 'SETTLE');
+    eq(v.positionZero, 'FAIL');
+    eq(v.alert, true);
+    assert(/남았습니다/.test(v.reason), v.reason);
+  });
+
+  test('★ 재조회를 못 했으면 UNKNOWN이고, 그래도 정산으로 넘긴다', () => {
+    // **모르는 것을 0으로 적지 않는다.** 그리고 모르는 채로 줄을 닫으면
+    // `/settle`이 다시 보지 않는다(HOLDING인 줄만 고른다).
+    for (const pos of [null, undefined, { ok: false }, { ok: false, found: false, qty: null }]) {
+      const v = unprotectedExposureVerdict({ code: 'UNKNOWN', position: pos as any });
+      eq(v.handoff, 'SETTLE');
+      eq(v.positionZero, 'UNKNOWN');
+      eq(v.alert, true);
+    }
+  });
+
+  test('★ 포지션 0을 재조회로 확인했을 때만 줄을 닫는다', () => {
+    const v = unprotectedExposureVerdict({
+      code: 'UNKNOWN',
+      position: { ok: true, found: false, qty: 0 },
+    });
+    eq(v.handoff, 'CLOSE_RECORD');
+    eq(v.positionZero, 'PASS');
+    eq(v.alert, false);
+  });
+
+  test('★ found가 false라도 수량이 남아 있으면 0으로 보지 않는다', () => {
+    // 어댑터가 `found`를 못 채우고 수량만 주는 경우가 있다. 수량이
+    // 0이 아니면 노출이다 — 두 신호 중 **하나라도** 남았다고 하면 남았다.
+    const v = unprotectedExposureVerdict({
+      code: 'ENTERED_UNPROTECTED',
+      position: { ok: true, found: false, qty: -0.5 },
+    });
+    eq(v.handoff, 'SETTLE');
+    eq(v.positionZero, 'FAIL');
+  });
+
+  test('★ 음수 수량(SHORT)도 노출로 센다', () => {
+    const v = unprotectedExposureVerdict({
+      code: 'ENTERED_UNPROTECTED',
+      position: { ok: true, found: true, qty: -0.002 },
+    });
+    eq(v.positionZero, 'FAIL');
+  });
+
+  test('★ 읽을 수 없는 수량을 0으로 눕히지 않는다', () => {
+    // `qty`가 NaN이면 "0"이 아니라 "모름"이다. `found`가 false이고
+    // 수량이 NaN이면 수량 신호는 없는 것이므로 found를 따른다 —
+    // 그래도 **ok가 true일 때만** PASS가 된다.
+    const nan = unprotectedExposureVerdict({
+      code: 'UNKNOWN', position: { ok: true, found: false, qty: Number.NaN },
+    });
+    eq(nan.positionZero, 'PASS');
+    const unread = unprotectedExposureVerdict({
+      code: 'UNKNOWN', position: { ok: undefined, found: false, qty: Number.NaN } as any,
+    });
+    eq(unread.positionZero, 'UNKNOWN');
+  });
+
+  test('★ 코드가 무엇이든 재조회 결과가 판정을 정한다', () => {
+    // 보호 실패가 아니더라도(단순 UNKNOWN) 포지션이 남았으면 방치하지
+    // 않는다. 문구만 다르다.
+    const v = unprotectedExposureVerdict({
+      code: 'NOT_ENTERED', position: { ok: true, found: true, qty: 0.001 },
+    });
+    eq(v.handoff, 'SETTLE');
+    eq(v.positionZero, 'FAIL');
+    assert(!/보호주문 없는/.test(v.reason), `보호 실패가 아닌데 그 문구를 적었습니다: ${v.reason}`);
+  });
+
+  test('★ PASS는 POSITION_ZERO 단계가 받는 값이어야 한다', () => {
+    // 단계 상태 어휘를 벗어난 값을 적으면 화면과 진행 판정이 갈린다.
+    const ok: StepState[] = ['PASS', 'FAIL', 'UNKNOWN'];
+    for (const c of ['ENTERED_UNPROTECTED', 'UNKNOWN', 'NOT_ENTERED']) {
+      for (const pos of [{ ok: true, found: true, qty: 1 }, { ok: true, found: false, qty: 0 }, { ok: false }]) {
+        const v = unprotectedExposureVerdict({ code: c, position: pos as any });
+        assert(ok.includes(v.positionZero as StepState),
+          `${c}/${JSON.stringify(pos)} → ${v.positionZero}는 단계 어휘가 아니다`);
+      }
+    }
   });
 }

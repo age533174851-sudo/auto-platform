@@ -1,0 +1,296 @@
+# Binance TESTNET 스모크 테스트 — 한 번의 명령으로 한 바퀴 전체
+#
+# 무엇을 하는가
+# ─────────────
+# 진입 → 접수 → 체결 → 보호주문 되읽기 → 유지 → 청산 → 잔여 확인까지
+# **한 바퀴를 끝까지** 돌리고 그 결과를 로그에 남긴다.
+#
+# 왜 여기인가
+# ───────────
+# 스모크 테스트 자체는 이미 있다(`/api/autotrade/smoke-test`). 그런데
+# **시작만** 사람의 브라우저 로그인을 요구했다. `/advance` · `/settle` ·
+# `/cancel`은 이미 `x-admin-secret`을 받는데 시작은 받지 않았다.
+#
+# 그래서 "실제 주문 경로가 도는가"를 확인하려면 매번 사람이 화면을 열어
+# 버튼을 눌러야 했고, 전략이 NO_SIGNAL인 날에는 그 경로가 하루 종일 한
+# 번도 돌지 않았다. **쓰지 않는 배관은 막힌 것도 모른다.**
+#
+# 무엇을 하지 않는가
+# ──────────────────
+# · **cron이 없다.** 묻지 않고 주기적으로 실주문을 내지 않는다.
+#   매번 사람이 명령으로 시작한다.
+# · **LIVE로는 돌지 않는다.** 연결이 테스트넷이 아니면 `startAttempt`가
+#   거래소를 보기 전에 403으로 막는다 — 이 워크플로가 판정하는 것이
+#   아니라 서버가 판정한다.
+# · **전략 평가를 건드리지 않는다.** 09:00 KST 판단과 이 스모크는
+#   `dispatch_source`로 장부에서 갈라진다.
+name: smoke-test-testnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '확인 문구 (TESTNET-SMOKE-ORDER)'
+        required: true
+        default: ''
+      userId:
+        description: '대상 사용자 id (Supabase auth user id)'
+        required: true
+      connectionId:
+        description: '거래소 연결 id (테스트넷 연결이어야 한다)'
+        required: true
+      symbol:
+        description: '종목'
+        required: true
+        default: 'BTCUSDT'
+        type: choice
+        options: ['BTCUSDT', 'ETHUSDT']
+      side:
+        description: '첫 회차 방향'
+        required: true
+        default: 'LONG'
+        type: choice
+        options: ['LONG', 'SHORT']
+      directionMode:
+        description: '반복 방향 (ALTERNATE면 회차마다 LONG↔SHORT 교대)'
+        required: true
+        default: 'ALTERNATE'
+        type: choice
+        options: ['ALTERNATE', 'LONG', 'SHORT']
+      attempts:
+        description: '회차 수'
+        required: true
+        default: '1'
+        type: choice
+        options: ['1', '3', '5', '10']
+      holdMin:
+        description: '회차당 유지 시간(분)'
+        required: true
+        default: '1'
+        type: choice
+        options: ['1', '5', '10', '30']
+      marginUsd:
+        description: '회차당 증거금 (USDT, 테스트넷 가상자금)'
+        required: true
+        default: '20'
+      leverage:
+        description: '배율'
+        required: true
+        default: '10'
+
+concurrency:
+  # 같은 종목에 둘을 동시에 열면 ONE_WAY 계좌에서 서로를 상계한다.
+  # DB의 부분 유니크 인덱스가 진짜 방어선이고, 이건 한 겹 더 두는 것이다.
+  group: smoke-test-testnet
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    # 유지 시간 최대 30분 × 회차를 감당해야 한다.
+    timeout-minutes: 60
+
+    # **입력을 셸·파이썬 안에 `${{ }}`로 펼치지 않는다.**
+    # 자유 입력 칸(증거금·배율·id)이 그대로 코드가 되는 자리라,
+    # 전부 환경변수로 넘기고 스크립트는 환경에서 읽는다.
+    env:
+      BASE: ${{ secrets.EXIT_MONITOR_URL }}
+      SECRET: ${{ secrets.ADMIN_SECRET }}
+      CONFIRM_IN: ${{ inputs.confirm }}
+      USER_ID: ${{ inputs.userId }}
+      CONNECTION_ID: ${{ inputs.connectionId }}
+      SYMBOL: ${{ inputs.symbol }}
+      SIDE: ${{ inputs.side }}
+      DIRECTION_MODE: ${{ inputs.directionMode }}
+      ATTEMPTS: ${{ inputs.attempts }}
+      HOLD_MIN: ${{ inputs.holdMin }}
+      MARGIN_USD: ${{ inputs.marginUsd }}
+      LEVERAGE: ${{ inputs.leverage }}
+      ACTOR: ${{ github.actor }}
+      OWNER: ${{ github.repository_owner }}
+
+    steps:
+      # ── 관문 ──
+      #
+      # 감사 워크플로와 **같은 2중 관문**이다. 실주문을 내는 명령이라
+      # 저장소 소유자만, 그리고 확인 문구를 적었을 때만 지나간다.
+      - name: 관문 — 소유자와 확인 문구
+        run: |
+          set -euo pipefail
+          if [ "${ACTOR}" != "${OWNER}" ]; then
+            echo "::error::저장소 소유자만 실행할 수 있습니다 (요청자: ${ACTOR})"
+            exit 1
+          fi
+          if [ "${CONFIRM_IN}" != "TESTNET-SMOKE-ORDER" ]; then
+            echo "::error::확인 문구가 다릅니다 — confirm에 TESTNET-SMOKE-ORDER를 적으세요"
+            exit 1
+          fi
+          if [ -z "${BASE:-}" ] || [ -z "${SECRET:-}" ]; then
+            echo "::error::EXIT_MONITOR_URL 또는 ADMIN_SECRET 시크릿이 없습니다 — sync-secrets가 미는 그 이름입니다"
+            exit 1
+          fi
+          echo "관문 통과 — 실제 TESTNET 주문을 내는 명령입니다"
+
+      # ── 1. 묶음을 시작한다 (실제 주문이 나간다) ──
+      - name: 진입 — 1회차 시작
+        id: start
+        run: |
+          set -euo pipefail
+          B="${BASE%/}"
+          body=$(mktemp)
+          payload=$(mktemp)
+          # 숫자 칸은 숫자로, 문자 칸은 문자열로 넣는다. 못 읽는 숫자가
+          # 오면 여기서 멈춘다 — 서버가 받아 보고 400을 주기 전에.
+          python3 -c '
+          import json, os, sys
+          def n(k):
+              try: return json.loads(os.environ[k])
+              except Exception: sys.exit(f"{k}를 숫자로 읽지 못했습니다: {os.environ.get(k)!r}")
+          json.dump({
+              "confirm": "TESTNET-SMOKE-ORDER",
+              "userId": os.environ["USER_ID"],
+              "connectionId": os.environ["CONNECTION_ID"],
+              "symbol": os.environ["SYMBOL"],
+              "side": os.environ["SIDE"],
+              "directionMode": os.environ["DIRECTION_MODE"],
+              "attempts": n("ATTEMPTS"),
+              "holdMin": n("HOLD_MIN"),
+              "marginUsd": n("MARGIN_USD"),
+              "leverage": n("LEVERAGE"),
+          }, open(sys.argv[1], "w"))
+          ' "$payload"
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 300 \
+            -X POST "${B}/api/autotrade/smoke-test" \
+            -H 'content-type: application/json' \
+            -H "x-admin-secret: ${SECRET}" \
+            --data-binary "@${payload}")
+          echo "HTTP ${code}"
+          # **응답 전문을 남긴다.** clientOrderId · 접수 여부 · 체결 수량 ·
+          # 보호주문 되읽기가 여기 들어 있고, 그게 증거다.
+          cat "$body"; echo
+          echo "code=${code}" >> "$GITHUB_OUTPUT"
+          if [ "$code" != "200" ]; then
+            echo "::error::시작 요청이 HTTP ${code}로 실패했습니다 — 위 응답의 error·message가 단계를 적고 있습니다"
+            exit 1
+          fi
+          # 200이어도 `ok:false`일 수 있다 — 거래소가 막았거나 사전 확인이
+          # 걸린 경우다. **그것을 성공으로 적지 않는다.**
+          if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('$body')).get('ok') else 1)"; then
+            echo "::warning::진입이 열리지 않았습니다 — 위 응답의 message가 이유입니다. 정리 단계로 갑니다"
+            echo "entered=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "entered=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 2. 마감 시각까지 기다린다 ──
+      #
+      # 평소에는 Fly 워커가 1분마다 `/settle`·`/advance`를 부른다. 여기서
+      # 직접 기다렸다가 부르는 이유는 **워커가 죽어 있어도 한 바퀴가
+      # 끝나야** 하기 때문이다 — 워커 생존이 이 검증의 전제가 되면,
+      # 검증하려던 것을 전제로 깔게 된다.
+      # 진입이 확정된 회차만 유지 시간을 기다린다. `entered=no`면
+      # 마감 시각이 이미 '지금'이라 곧바로 정산으로 간다.
+      - name: 유지 — 마감까지 대기
+        if: steps.start.outputs.entered == 'yes'
+        run: |
+          set -euo pipefail
+          # 회차 수 × (유지 시간 + 여유 1분). 워커가 살아 있으면 그쪽이
+          # 먼저 닫고, 그때 아래 정리는 "닫을 것 없음"으로 끝난다.
+          total=$(( ATTEMPTS * (HOLD_MIN + 1) ))
+          echo "${total}분 대기합니다"
+          sleep $(( total * 60 ))
+
+      # ── 3. 닫는다 ──
+      # **`entered=no`일 때도 돈다.**
+      #
+      # 진입이 확정되지 않은 회차가 바로 노출을 남길 수 있는 경우다 —
+      # 체결은 됐는데 보호주문을 확인하지 못하면 `startAttempt`가 줄을
+      # 닫지 않고 `HOLDING` + 마감 시각 '지금'으로 정산에 넘긴다.
+      # 그때 이 단계를 건너뛰면 워커가 깨어날 때까지 노출이 남는다.
+      - name: 청산 — 마감된 회차 정리
+        if: always()
+        run: |
+          set -euo pipefail
+          B="${BASE%/}"
+          for round in 1 2 3; do
+            body=$(mktemp)
+            code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 300 \
+              -X POST "${B}/api/autotrade/smoke-test/settle" \
+              -H 'content-type: application/json' \
+              -H "x-admin-secret: ${SECRET}" \
+              -d "{\"userId\":\"${USER_ID}\"}")
+            echo "[정리 ${round}] HTTP ${code}"
+            cat "$body"; echo
+            sleep 20
+          done
+
+      # ── 4. 증거를 읽는다 ──
+      #
+      # **체결 수량은 시작 응답에 있지만 "청산 후 잔여 0"은 닫은 뒤에야
+      # 적힌다.** 그래서 마지막에 한 번 더 읽는다.
+      - name: 증거 — 회차별 단계와 잔여
+        if: always()
+        run: |
+          set -euo pipefail
+          B="${BASE%/}"
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 120 \
+            "${B}/api/autotrade/smoke-test?userId=${USER_ID}" \
+            -H "x-admin-secret: ${SECRET}")
+          echo "HTTP ${code}"
+          cat "$body"; echo
+          if [ "$code" != "200" ]; then
+            echo "::error::증거 조회가 HTTP ${code}로 실패했습니다 — 결과를 모르는 것은 통과가 아닙니다"
+            exit 1
+          fi
+          # ── 증거를 한 줄씩 적는다 ──
+          #
+          # **UNKNOWN을 초록으로 바꾸지 않는다.** 판정은 서버가 적은
+          # 것을 그대로 옮기고, 모르는 것이 하나라도 있으면 이 작업은
+          # 빨갛게 끝난다 — 모르는 것은 통과가 아니다.
+          python3 - "$body" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          runs = d.get('runs') or []
+          if not runs:
+              print('::error::이 사용자의 스모크 묶음이 하나도 없습니다 — 시작이 기록되지 않았습니다')
+              sys.exit(1)
+          r = runs[0]
+          print(f"묶음 {r.get('id')} · {r.get('symbol')} · 상태 {r.get('state')} · 회차 {r.get('attempts')}")
+          bad = 0
+          for t in (r.get('tests') or []):
+              steps = {s.get('id'): s.get('state') for s in (t.get('steps') or [])}
+              e = t.get('entry') or {}
+              ev = t.get('evidence') or {}
+              print(f"  [{t.get('attemptNo')}회차] {t.get('side')} 판정={t.get('verdict')} 상태={t.get('state')}")
+              print(f"    clientOrderId={t.get('clientOrderId')} 거래소주문={e.get('orderId')}")
+              print(f"    체결수량={e.get('qty')} 평균가={e.get('avgPrice')} 청산주문={e.get('exitOrderId')}")
+              print(f"    단계: " + ' · '.join(f'{k}={v}' for k, v in steps.items()))
+              print(f"    포지션잔량0={steps.get('POSITION_ZERO')} 미결잔량0={steps.get('ORDERS_ZERO')}")
+              print(f"    정리증거: residual={ev.get('residual')} cancel={ev.get('cancel')}")
+              print(f"    사유: {t.get('reason')}")
+              # ── 노출이 남았을 수 있으면 **무조건** 빨갛게 끝낸다 ──
+              #
+              # 이 작업은 유지 시간을 다 기다리고 정산을 3회 불렀다.
+              # 그런데도 포지션 0이 증명되지 않았다면, 상태가 무엇이든
+              # **거래소에 노출이 남아 있을 수 있다.** "아직 도는
+              # 중"이라는 이유로 초록을 켜면 사람은 화면을 닫는다.
+              pz = steps.get('POSITION_ZERO')
+              oz = steps.get('ORDERS_ZERO')
+              if pz != 'PASS':
+                  print(f"::error::{t.get('attemptNo')}회차: 포지션 0이 증명되지 않았습니다"
+                        f" (POSITION_ZERO={pz}) — 거래소에 노출이 남아 있을 수 있습니다")
+                  bad += 1
+              if oz != 'PASS':
+                  print(f"::error::{t.get('attemptNo')}회차: 잔여 보호주문 0이 증명되지 않았습니다"
+                        f" (ORDERS_ZERO={oz})")
+                  bad += 1
+              if t.get('state') in ('HOLDING', 'CLOSING', 'ENTERING'):
+                  print(f"::error::{t.get('attemptNo')}회차가 정산 뒤에도 {t.get('state')}입니다"
+                        " — 닫히지 않았습니다")
+                  bad += 1
+              elif t.get('verdict') not in ('PASS', 'BLOCKED'):
+                  print(f"::error::{t.get('attemptNo')}회차 판정이 {t.get('verdict')}입니다")
+                  bad += 1
+          sys.exit(1 if bad else 0)
+          PY

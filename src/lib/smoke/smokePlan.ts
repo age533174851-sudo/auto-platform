@@ -322,6 +322,90 @@ export function smokeBlocksStrategy(i: {
   };
 }
 
+// ── 진입이 확정되지 않았을 때 포지션을 방치하지 않는다 ─────────
+
+/** 이 회차 줄을 어떻게 끝낼 것인가 */
+export type ExposureHandoff =
+  /** 포지션 없음이 **재조회로 확인됐다.** 줄을 닫아도 된다 */
+  | 'CLOSE_RECORD'
+  /** 거래소에 노출이 남았거나 **모른다.** 정산 경로로 넘긴다 */
+  | 'SETTLE';
+
+export interface ExposureVerdict {
+  handoff: ExposureHandoff;
+  /** `POSITION_ZERO` 단계에 적을 값. **모르면 UNKNOWN이지 PASS가 아니다** */
+  positionZero: 'PASS' | 'FAIL' | 'UNKNOWN';
+  /** 사람이 깨어나야 하는가 (보호 없는 노출이 열려 있다) */
+  alert: boolean;
+  reason: string;
+}
+
+/**
+ * 진입이 확정되지 않은 회차를 **어떻게 끝낼지** 정한다.
+ *
+ * 무엇이 문제였나
+ * ───────────────
+ * `enteredVerdict`가 `ENTERED_UNPROTECTED`를 주는 경우가 있다 —
+ * **체결은 됐는데 보호주문을 확인하지 못한 것이다.** 실행기는
+ * `protectionPolicy: 'REQUIRED'`에서 `undoEntry()`로 되돌리려 하지만,
+ * 그 되돌리기 자체가 실패할 수 있다.
+ *
+ * 그때 예전 코드는 줄에 `closed_at`을 적고 끝냈다. 그런데 `/settle`은
+ * `state = 'HOLDING'`인 줄만 고르므로, **닫힌 줄은 아무도 다시 보지
+ * 않는다.** 거래소에는 보호 없는 포지션이 열린 채로 남는다.
+ *
+ * 그래서 여기서는 **재조회 결과로** 끝내는 방법을 고른다:
+ *
+ *   읽었고 · 없다        → 줄을 닫는다 (POSITION_ZERO PASS)
+ *   읽었고 · 남았다      → 정산으로 넘긴다 (FAIL · 경고)
+ *   **못 읽었다**        → 정산으로 넘긴다 (UNKNOWN · 경고)
+ *
+ * **못 읽은 것을 0으로 적지 않는다.** 그리고 못 읽었을 때 줄을 닫으면
+ * 모르는 노출을 아무도 다시 보지 않게 된다.
+ *
+ * 여기서 청산을 보내지 않는 이유
+ * ──────────────────────────────
+ * 보내는 일은 `settleAttempt` 하나가 한다 — 선점(compare-and-set) ·
+ * reduceOnly 전량청산 · 재조회로 0 확인 · 내 보호주문만 취소까지
+ * 이미 거기 있고 시험이 붙어 있다. 여기서 한 번 더 보내면 **같은
+ * 주문을 내는 곳이 둘**이 되고, 그게 중복 청산의 모양이다.
+ *
+ * 그리고 정산은 **회차당 한 번씩만** 보낸다 — 무제한 재주문이 아니다.
+ */
+export function unprotectedExposureVerdict(i: {
+  /** `enteredVerdict`의 코드 */
+  code: string;
+  /** 진입 뒤 **재조회한** 포지션 */
+  position: { ok?: boolean; found?: boolean; qty?: number | null } | null | undefined;
+}): ExposureVerdict {
+  const p = i?.position;
+  const unprotected = String(i?.code ?? '') === 'ENTERED_UNPROTECTED';
+
+  if (!p || p.ok !== true) {
+    return {
+      handoff: 'SETTLE', positionZero: 'UNKNOWN', alert: true,
+      reason: '진입 뒤 포지션을 재조회하지 못했습니다 — 모르는 것을 0으로 적지 않고 '
+        + '정산 경로로 넘깁니다',
+    };
+  }
+
+  const qty = Number(p.qty);
+  const hasQty = Number.isFinite(qty) && Math.abs(qty) > 0;
+  if (p.found === true || hasQty) {
+    return {
+      handoff: 'SETTLE', positionZero: 'FAIL', alert: true,
+      reason: unprotected
+        ? `⚠ 보호주문 없는 포지션이 거래소에 남았습니다(수량 ${p.qty}) — 정산 경로가 닫습니다`
+        : `진입이 확정되지 않았는데 포지션이 남았습니다(수량 ${p.qty}) — 정산 경로가 닫습니다`,
+    };
+  }
+
+  return {
+    handoff: 'CLOSE_RECORD', positionZero: 'PASS', alert: false,
+    reason: '진입은 확정되지 않았고 거래소 포지션도 재조회로 0을 확인했습니다',
+  };
+}
+
 /**
  * 사전 확인 판정.
  *
