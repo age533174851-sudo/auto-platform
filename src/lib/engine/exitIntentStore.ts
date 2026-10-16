@@ -227,6 +227,87 @@ export async function findExitIntent(
   }
 }
 
+// ── Same-seat pending exit preflight ──────────────────────────────────────
+// A close ID is derived from quantity. A partially filled old close can have
+// clientOrderId A while the remaining position produces clientOrderId B.
+// Checking ONLY B cannot prove A isn't still an open reduceOnly order.
+//
+// This query intentionally does not authorize transmission: it is a
+// conservative read-only prerequisite, scoped to the *same owner, connection,
+// exchange, mode and symbol*. A successful empty ledger query is NOT proof of
+// exchange absence: other writers/manual orders and races need venue evidence.
+// The normal automatic path must defer if any other unresolved exit exists.
+export type ExitSeatPendingCode =
+  | 'CLEAR_IN_LEDGER'
+  | 'BLOCKED_OTHER_PENDING_EXIT'
+  | 'BLOCKED_SEAT_LOOKUP_UNKNOWN';
+
+export interface ExitSeatPendingVerdict {
+  code: ExitSeatPendingCode;
+  mayProceedToExistingOrderGate: boolean;
+  reason: string;
+}
+
+export async function findOtherPendingExitForSeat(
+  sb: MinimalStore | null | undefined,
+  i: {
+    userId: string | null | undefined;
+    connectionId: string | null | undefined;
+    exchange: string | null | undefined;
+    mode: string | null | undefined;
+    symbol: string | null | undefined;
+    clientOrderId: string | null | undefined;
+  },
+): Promise<ExitSeatPendingVerdict> {
+  const blocked = (code: ExitSeatPendingCode, reason: string): ExitSeatPendingVerdict =>
+    ({ code, mayProceedToExistingOrderGate: false, reason });
+  const scoped = [
+    i?.userId, i?.connectionId, i?.exchange, i?.mode,
+    i?.symbol, i?.clientOrderId,
+  ];
+  if (!sb || scoped.some(x => typeof x !== 'string' || !x.trim())) {
+    return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+      '청산 주문 소유권·거래소·망·종목·식별자 또는 장부를 확인할 수 없습니다');
+  }
+  try {
+    const q: any = sb.from('live_orders')
+      .select('client_order_id,status')
+      .eq('user_id', i.userId)
+      .eq('connection_id', i.connectionId)
+      .eq('exchange', i.exchange)
+      .eq('mode', i.mode)
+      .eq('symbol', i.symbol)
+      .eq('reduce_only', true)
+      .in('status', [...PENDING_EXIT_STATUSES])
+      .neq('client_order_id', i.clientOrderId)
+      .limit(1);
+    const res = await q;
+    if (!res || res.error || (res.data != null && !Array.isArray(res.data))) {
+      return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+        '동일 소유권·연결·종목의 이전 미결 청산 기록 조회에 실패했습니다');
+    }
+    const rows = res.data;
+    if (rows == null) {
+      // Successful PostgREST array selects return []; a null payload is
+      // not equivalent evidence of an empty successful result.
+      return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+        '미결 청산 조회 결과의 형태를 확인할 수 없습니다');
+    }
+    if (rows.length > 0) {
+      return blocked('BLOCKED_OTHER_PENDING_EXIT',
+        '같은 소유권·연결·종목에 다른 clientOrderId의 미결 reduceOnly 주문 기록이 있습니다'
+        + ' — 부분 체결/재시작의 앞 주문을 대사하기 전 새 청산을 발송하지 않습니다');
+    }
+    return {
+      code: 'CLEAR_IN_LEDGER', mayProceedToExistingOrderGate: true,
+      reason: '',
+    };
+  } catch {
+    return blocked('BLOCKED_SEAT_LOOKUP_UNKNOWN',
+      '미결 청산 기록 조회가 예외로 종료됐습니다 — 없음으로 간주하지 않습니다');
+  }
+}
+
 export type ExitSendOutcome =
   /** 거래소가 접수했다 */
   | 'ACKED'
@@ -419,6 +500,14 @@ export function judgeExitSendPermission(i: {
   if (i?.emergency === true) {
     return { maySend: true, code: 'EMERGENCY_OVERRIDE', duplicateRisk: true,
       reason: '긴급 종료로 명시적으로 허가됐습니다 — 중복 가능성을 안고 보냅니다' };
+  }
+
+  // Existing row with an unknown send count: the caller cannot claim
+  // the 3-send ceiling is enforced. Fail closed for automatic retries.
+  // Explicit EMERGENCY remains a separate, audited human decision above.
+  if (p?.recordFound === true && (sent == null || !Number.isSafeInteger(sent) || sent < 0)) {
+    return { maySend: false, code: 'BLOCKED_PRIOR_UNKNOWN', duplicateRisk: false,
+      reason: '이전 청산의 실제 전송 횟수가 확인되지 않아 자동 재전송을 차단합니다' };
   }
 
   // ── 처음 보내는가 ──
