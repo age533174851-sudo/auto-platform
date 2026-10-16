@@ -96,13 +96,15 @@ export async function runSmokeStartRouteTests() {
   /** 한 번 두드리고 응답·장부를 돌려준다 */
   async function hit(body: any, headers: Record<string, string>, opts: {
     jwtUser?: string | null; seedConn?: any;
+    seedSmoke?: any[]; failSmokeSelect?: boolean;
   } = {}) {
     const prevAdminSecret = process.env.ADMIN_SECRET;
     const prevNodeEnv = process.env.NODE_ENV;
     process.env.ADMIN_SECRET = ADMIN;
     const restoreCrypto = withCryptoEnv();
-    const db = new FakeDb();
+    const db = new FakeDb(opts.failSmokeSelect ? { failSelectsOn: 'smoke_tests' } : {});
     if (opts.seedConn) db.seed('exchange_connections', [opts.seedConn]);
+    if (opts.seedSmoke) db.seed('smoke_tests', opts.seedSmoke);
     const r = loadRoute(db, opts.jwtUser ?? null);
 
     try {
@@ -226,6 +228,41 @@ export async function runSmokeStartRouteTests() {
         `확인 안 된 것을 실전이라고 적었습니다: ${json.message}`);
       eq(db.table('smoke_tests').length, 0);
     }
+  });
+
+  // ── ③-b 과거 미해결 노출 / 장부 실패도 주문 전에 차단 ──
+
+  test('③ 오래된 51번째 미결 주문도 차단한다 (기존 50개 조회 회귀)', async () => {
+    const clean = Array.from({ length: 50 }, (_, n) => ({
+      id: `clean-${n}`, user_id: 'u-1', connection_id: 'c-testnet',
+      state: 'PASS', steps: { POSITION_ZERO: 'PASS', ORDERS_ZERO: 'PASS' },
+    }));
+    const old = { id: 'old-51', user_id: 'u-1', connection_id: 'c-testnet',
+      state: 'FAIL', steps: { POSITION_ZERO: 'PASS', ORDERS_ZERO: 'UNKNOWN' } };
+    const { json, db } = await hit(good, { 'x-admin-secret': ADMIN },
+      { seedConn: conn(), seedSmoke: [...clean, old] });
+    assert(json.ok === false, '오래된 미결 주문 위에 재진입했습니다');
+    assert(/old-51|노출/.test(String(json.message)), String(json.message));
+    eq(db.table('smoke_tests').length, 51);
+  });
+
+  test('③ 장부 조회 실패는 첫 실행으로 오인하지 않고 막는다', async () => {
+    const { json, db } = await hit(good, { 'x-admin-secret': ADMIN },
+      { seedConn: conn(), failSmokeSelect: true });
+    assert(json.ok === false, '장부를 못 읽었는데 시작했습니다');
+    eq(db.table('smoke_tests').length, 0);
+  });
+
+  test('③ 장부 1000건 조회 상한에 닿으면 미확인 과거 노출을 막는다', async () => {
+    const rows = Array.from({ length: 1000 }, (_, n) => ({
+      id: `historical-${n}`, user_id: 'u-1', connection_id: 'c-testnet',
+      state: 'PASS', steps: { POSITION_ZERO: 'PASS', ORDERS_ZERO: 'PASS' },
+    }));
+    const { json, db } = await hit(good, { 'x-admin-secret': ADMIN },
+      { seedConn: conn(), seedSmoke: rows });
+    assert(json.ok === false, '장부 상한을 넘었는데 시작했습니다');
+    assert(/1000/.test(String(json.message)), String(json.message));
+    eq(db.table('smoke_tests').length, 1000);
   });
 
   // ── ④ 남의 연결로는 열리지 않는가 ──
