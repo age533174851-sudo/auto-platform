@@ -15,7 +15,7 @@ import {
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
-import { confirmedBinanceOpenOrders } from '../engine/venuePositionOps';
+import { confirmedBinanceOpenOrders, combinedSmokeOpenOrderEvidence } from '../engine/venuePositionOps';
 import { requireBinanceVenueRows } from '../exchanges/binanceFutures';
 
 const OK_BODY = {
@@ -92,6 +92,66 @@ export function runSmokePlanTests() {
       assert(rejected, 'Malformed openOrders was interpreted as no open orders');
     }
     eq(requireBinanceVenueRows([{ orderId: '1' }], 'INVALID_OPEN_ORDERS_SHAPE').length, 1);
+  });
+
+  test('★ Binance regular [] but Algo TP/SL order is NOT empty preflight', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] },
+      { success: true, orders: [{ algoId: 'algo-12', symbol: 'BTCUSDT', orderType: 'STOP_MARKET' }] },
+    );
+    assert(Array.isArray(orders));
+    eq(orders!.length, 1);
+    eq(orders![0].kind, 'ALGO');
+    const verdict = preflightVerdict({ position: { ok: true, found: false, qty: 0 }, orders });
+    eq(verdict.code, 'ORDERS_OPEN');
+  });
+
+  test('★ Binance Algo API failure + regular zero = UNKNOWN, never CLEAR', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] },
+      { success: false, orders: [] },
+    );
+    eq(orders, null);
+    eq(preflightVerdict({ position: { ok: true, found: false, qty: 0 }, orders }).code,
+      'UNKNOWN');
+  });
+
+  test('★ Binance ordinary API failure + Algo zero = UNKNOWN, never CLEAR', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: false, orders: [] }, { success: true, orders: [] },
+    );
+    eq(orders, null);
+  });
+
+  test('★ Binance two successful empty books = preflight CLEAR (not order authorization)', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] }, { success: true, orders: [] },
+    );
+    eq(orders?.length, 0);
+    eq(preflightVerdict({ position: { ok: true, found: false, qty: 0 }, orders }).code,
+      'CLEAR');
+  });
+
+  test('★ malformed Algo readback and missing success cannot invent zero protection', () => {
+    for (const x of [null, { success: true, orders: null },
+      { success: true, orders: {} }, { orders: [] }] as any[]) {
+      const orders = combinedSmokeOpenOrderEvidence({ success: true, orders: [] }, x);
+      eq(orders, null);
+    }
+    let rejected = false;
+    try { requireBinanceVenueRows({ orders: [] }, 'INVALID_OPEN_ALGO_ORDERS_SHAPE'); }
+    catch (e: any) { rejected = String(e?.message).includes('INVALID_OPEN_ALGO_ORDERS_SHAPE'); }
+    assert(rejected, 'Malformed 200 Algo payload must block');
+  });
+
+  test('★ Binance new smoke cannot use sole ordinary order list as preflight evidence', () => {
+    // Explicit source-level wiring check so a future refactor cannot regress
+    // to the old single book read while these isolated helper tests stay green.
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const code = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/startAttempt.ts'), 'utf8');
+    assert(code.includes('ops.readAllOpenOrdersForSmoke(venue, i.symbol)'));
+    assert(!code.includes('const ordersBefore = await ops.readProtectiveOrders(venue, i.symbol)'));
   });
 
   test('★ historical -1111 UNKNOWN row PZ PASS without ORDERS_ZERO remains blocked', () => {
