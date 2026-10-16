@@ -4,7 +4,8 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   recordExitIntent, markExitIntentResult, judgeExitDurability,
-  judgeExitSendPermission, findExitIntent, MAX_SENDS_PER_KEY,
+  judgeExitSendPermission, findExitIntent, findOtherPendingExitForSeat,
+  MAX_SENDS_PER_KEY,
   PENDING_EXIT_STATUSES, type ExitIntentRecord,
 } from './exitIntentStore';
 import { readFileSync } from 'node:fs';
@@ -470,6 +471,149 @@ export function runExitIntentStoreTests() {
     eq((await findExitIntent(throws as any, 'k')).recordFound, undefined);
     eq((await findExitIntent(null as any, 'k')).recordFound, undefined);
     eq((await findExitIntent(found as any, '')).recordFound, undefined);
+  });
+
+  // ── ⑦-b 부분 체결 시 바뀐 clientOrderId의 이전 청산을 찾는다 ──
+  // All fake DB rows are intentionally synthetic. This is not real Binance
+  // openOrders evidence and cannot authorize a send to either environment.
+  const seatOf = (clientOrderId = 'new_qty_key') => ({
+    userId: 'u1', connectionId: 'conn-1', exchange: 'binance',
+    mode: 'TESTNET', symbol: 'BTCUSDT', clientOrderId,
+  });
+  const fakeSeatDb = (rows: Record<string, any>[], error: any = null) => {
+    const observed = { tables: [] as string[], filters: [] as string[] };
+    const db = {
+      from(table: string) {
+        observed.tables.push(table);
+        let subset = [...rows];
+        let limit = 999;
+        const chain = {
+          eq(col: string, val: any) {
+            observed.filters.push(col);
+            subset = subset.filter(r => r[col] === val); return this;
+          },
+          neq(col: string, val: any) {
+            observed.filters.push('neq:' + col);
+            subset = subset.filter(r => r[col] !== val); return this;
+          },
+          in(col: string, vals: string[]) {
+            observed.filters.push('in:' + col);
+            subset = subset.filter(r => vals.includes(r[col])); return this;
+          },
+          limit(n: number) { limit = n; return this; },
+          then(yes: any, no: any) {
+            return Promise.resolve({ data: subset.slice(0, limit), error }).then(yes, no);
+          },
+        };
+        return { select: () => chain };
+      },
+    };
+    return { db: db as any, observed };
+  };
+  const fakeExitRow = (over: Record<string, any> = {}) => ({
+    user_id: 'u1', connection_id: 'conn-1', exchange: 'binance',
+    mode: 'TESTNET', symbol: 'BTCUSDT',
+    client_order_id: 'old_qty_key', reduce_only: true, status: 'UNKNOWN',
+    ...over,
+  });
+
+  test('★ partial-fill restart: older quantity-derived key blocks next close', async () => {
+    const f = fakeSeatDb([fakeExitRow()]);
+    const r = await findOtherPendingExitForSeat(f.db, seatOf());
+    eq(r.code, 'BLOCKED_OTHER_PENDING_EXIT');
+    eq(r.mayProceedToExistingOrderGate, false);
+    eq(f.observed.tables[0], 'live_orders');
+    for (const col of ['user_id', 'connection_id', 'exchange', 'mode',
+      'symbol', 'reduce_only', 'in:status', 'neq:client_order_id']) {
+      assert(f.observed.filters.includes(col), 'Scope/filter missing: ' + col);
+    }
+  });
+
+  test('★ restart 3 times: same pending old key never opens a second automatic send', async () => {
+    const f = fakeSeatDb([fakeExitRow()]);
+    for (let restart = 0; restart < 3; restart++) {
+      const r = await findOtherPendingExitForSeat(f.db, seatOf());
+      eq(r.mayProceedToExistingOrderGate, false, 'restart=' + restart);
+    }
+  });
+
+  test('★ same owner and symbol but different connection / mode / exchange is separate seat', async () => {
+    const f = fakeSeatDb([
+      fakeExitRow({ connection_id: 'other-conn' }),
+      fakeExitRow({ user_id: 'other-user' }),
+      fakeExitRow({ mode: 'LIVE' }),
+      fakeExitRow({ exchange: 'other-venue' }),
+      fakeExitRow({ symbol: 'ETHUSDT' }),
+    ]);
+    const r = await findOtherPendingExitForSeat(f.db, seatOf());
+    eq(r.code, 'CLEAR_IN_LEDGER');
+    eq(r.mayProceedToExistingOrderGate, true);
+  });
+
+  test('★ entry orders, completed exits and same key do not masquerade as OTHER pending', async () => {
+    const f = fakeSeatDb([
+      fakeExitRow({ reduce_only: false }),
+      fakeExitRow({ status: 'FILLED' }),
+      fakeExitRow({ status: 'RECONCILED' }),
+      fakeExitRow({ client_order_id: 'new_qty_key' }),
+    ]);
+    const r = await findOtherPendingExitForSeat(f.db, seatOf());
+    eq(r.mayProceedToExistingOrderGate, true);
+    // Same-key pending is still blocked by existing findExitIntent/judge
+    // in the route; this gate only covers a DIFFERENT quantity-derived key.
+  });
+
+  test('★ read errors, thrown DB calls and malformed payload block instead of empty', async () => {
+    const broken = fakeSeatDb([], { code: '42501' });
+    eq((await findOtherPendingExitForSeat(broken.db, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    const throws = { from: () => { throw new Error('read unavailable'); } };
+    eq((await findOtherPendingExitForSeat(throws as any, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    const malformed = { from: () => ({ select: () => {
+      const q: any = { eq() { return q; }, in() { return q; },
+        neq() { return q; }, limit() { return Promise.resolve({ data: null, error: null }); } };
+      return q;
+    } }) };
+    eq((await findOtherPendingExitForSeat(malformed as any, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+  });
+
+  test('★ missing scope or missing DB does not fall back to all-users lookup', async () => {
+    const f = fakeSeatDb([]);
+    eq((await findOtherPendingExitForSeat(f.db, { ...seatOf(), userId: '' })).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    eq((await findOtherPendingExitForSeat(f.db, { ...seatOf(), connectionId: null })).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    eq((await findOtherPendingExitForSeat(null, seatOf())).code,
+      'BLOCKED_SEAT_LOOKUP_UNKNOWN');
+    eq(f.observed.tables.length, 0, 'Invalid scope must not issue broad DB search');
+  });
+
+  test('★ unknown send count on EXISTING intent may not bypass 3-send cap', () => {
+    const prior = { recordFound: true, recordStatus: 'RECONCILED',
+      venueLookup: { ok: true, found: false }, sendCount: undefined };
+    const r = judgeExitSendPermission({ prior });
+    eq(r.code, 'BLOCKED_PRIOR_UNKNOWN');
+    eq(r.maySend, false);
+    const provenFirst = judgeExitSendPermission({
+      prior: { ...prior, sendCount: 0 },
+    });
+    eq(provenFirst.code, 'RESEND_PRIOR_RESOLVED');
+    eq(provenFirst.maySend, true);
+  });
+
+  test('★ route wires seat lookup BEFORE checking current key / writing intent', () => {
+    const route = readFileSync(resolve(process.cwd(),
+      'src/app/api/autotrade/exit-monitor/route.ts'), 'utf8');
+    const marker = 'await findOtherPendingExitForSeat(sb as any';
+    const idx = route.indexOf(marker);
+    assert(idx >= 0, 'No per-seat pending exit check in production route');
+    const after = route.slice(idx);
+    assert(after.indexOf('await findExitIntent') > 0, 'Missing existing-key reconciliation');
+    assert(after.indexOf('await recordExitIntent') > 0, 'No write-ahead intent');
+    assert(after.indexOf('await findExitIntent') < after.indexOf('await recordExitIntent'),
+      'Existing-key query must occur before claiming the order');
   });
 
   // ── ⑧ 정본이 순수한가 ──
