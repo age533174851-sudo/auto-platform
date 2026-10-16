@@ -24,7 +24,7 @@ import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
-import { quantizeOrder, floorToStep, qtyGridFor } from '../exchanges/quantize';
+import { quantizeOrder } from '../exchanges/quantize';
 import {
   ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
 } from './reconcileLedgerStatus';
