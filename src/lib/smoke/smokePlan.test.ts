@@ -154,6 +154,17 @@ export function runSmokePlanTests() {
     assert(!code.includes('const ordersBefore = await ops.readProtectiveOrders(venue, i.symbol)'));
   });
 
+  test('★ failed entry and settlement residuals require BOTH Binance order books', () => {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const start = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/startAttempt.ts'), 'utf8');
+    const settle = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/settleAttempt.ts'), 'utf8');
+    assert(start.includes('const ordersAfter = await ops.readAllOpenOrdersForSmoke(venue, i.symbol)'));
+    assert(!start.includes('const ordersAfter = await ops.readProtectiveOrders(venue, i.symbol)'));
+    assert(settle.includes('const leftover = await ops.readAllOpenOrdersForSmoke(venue, row.symbol)'));
+    assert(!settle.includes('const leftover = plan.ok ? (cx.leftover ?? await ops.readProtectiveOrders'));
+  });
+
   test('★ legacy read-only diagnostic with 3 successful empty reads is NOT authorization', () => {
     const r = legacySmokeExposureVerdict({
       symbol: 'BTCUSDT',
