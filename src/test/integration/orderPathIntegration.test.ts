@@ -1363,6 +1363,68 @@ export async function runPrecisionIntegrationTests() {
     });
   }
 
+  // ══════════ ②-c 실제 보호주문 fallback HTTP 전송 — -4120 이후 수량 ══════════
+  {
+    const SYM = 'PRECHUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, orderId: 9001 }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'POST')
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 9001, symbol: SYM,
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: '59000', reduceOnly: true }] });
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'OPTIONAL',
+    }));
+    test('★ -4120 후 실제 fallback 주문의 수량은 LOT_SIZE 격자 위', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const fallback = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(fallback.length, 1, '손절 대체 주문이 실제로 나가지 않았다');
+      eq(fallback[0].params.quantity, '0.003');
+      assert(!fallback[0].params.quantity.includes('33333'), '생 부동소수가 나갔다');
+    });
+  }
+
+  // ══════════ ②-d 잘못된 PARTIAL_TP는 closePosition으로 승격되지 않는다 ══════════
+  {
+    const SYM = 'PRECIUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET' },
+        { json: bnOrder({ symbol: SYM, orderId: 9002 }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'POST')
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 9002, symbol: SYM,
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: '59000', closePosition: true }] });
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      takeProfitPolicy: 'FIXED_TP', protectionPolicy: 'OPTIONAL',
+      exitPlan: { orders: [{ kind: 'PARTIAL_TP', price: 61000, quantity: 0.0005 }] },
+    }));
+    test('★ 격자 미만 PARTIAL_TP는 주문 0건 (전량 청산 전환 금지)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const tp = venue.orderSends().filter(c => c.params.type === 'TAKE_PROFIT_MARKET');
+      eq(tp.length, 0, '수량 없는 분할 익절이 closePosition으로 전송됐다');
+    });
+  }
+
   // ══════════ ③ 격자 아래 수량은 **보내지 않는다** ══════════
   {
     const SYM = 'PRECCUSDT';
