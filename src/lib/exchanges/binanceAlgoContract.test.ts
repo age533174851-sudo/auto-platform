@@ -3,6 +3,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   buildBinanceConditionalAlgoPayload, parseBinanceAlgoAcceptance,
+  verifyBinanceAlgoOpenReadback,
   binanceAlgoCancellationIdentifier, type BinanceConditionalAlgoIntent,
 } from './binanceAlgoContract';
 
@@ -144,6 +145,98 @@ export function runBinanceAlgoContractTests() {
       const out = parseBinanceAlgoAcceptance({ ...good, ...extra }, v.payload);
       eq(out.code, 'UNKNOWN', JSON.stringify(extra));
       eq(out.venueProtectionActiveVerified, false);
+    }
+  });
+
+  test('GET openAlgoOrders MUST independently prove exact algoId, clientAlgoId and trigger', () => {
+    const build = buildBinanceConditionalAlgoPayload(intent());
+    const p = build.payload!;
+    const ack = parseBinanceAlgoAcceptance({
+      algoId: '9007199254740993', clientAlgoId: p.clientAlgoId,
+      algoType: 'CONDITIONAL', orderType: p.type,
+      symbol: p.symbol, side: p.side,
+    }, p);
+    const open = { algoId: '9007199254740993',
+      clientAlgoId: p.clientAlgoId, algoType: 'CONDITIONAL',
+      orderType: p.type, symbol: p.symbol, side: p.side,
+      positionSide: 'BOTH', algoStatus: 'NEW',
+      workingType: p.workingType, triggerPrice: p.triggerPrice,
+      closePosition: true, reduceOnly: false,
+    };
+    const result = verifyBinanceAlgoOpenReadback({
+      accepted: ack, payload: p,
+      venueRead: { success: true, orders: [open] },
+    });
+    eq(result.code, 'LISTED_OPEN_AT_READ');
+    eq(result.listedOpenAtRead, true);
+    eq(result.executionAuthorized, false);
+    for (const mutation of [
+      { algoId: '9007199254740994' },
+      { side: 'BUY' }, { triggerPrice: '64000' },
+      { positionSide: 'LONG' }, { algoStatus: 'EXPIRED' },
+      { workingType: 'CONTRACT_PRICE' },
+      { closePosition: false }, { clientAlgoId: 'another-id' },
+    ]) {
+      const r = verifyBinanceAlgoOpenReadback({
+        accepted: ack, payload: p,
+        venueRead: { success: true, orders: [{ ...open, ...mutation }] },
+      });
+      eq(r.listedOpenAtRead, false, JSON.stringify(mutation));
+      eq(r.executionAuthorized, false);
+    }
+  });
+
+  test('Missing from openAlgoOrders means UNKNOWN, NOT a safe resend', () => {
+    const p = buildBinanceConditionalAlgoPayload(intent()).payload!;
+    const ack = parseBinanceAlgoAcceptance({
+      algoId: '321', clientAlgoId: p.clientAlgoId,
+      algoType: 'CONDITIONAL', orderType: p.type,
+      symbol: p.symbol, side: p.side,
+    }, p);
+    const noMatch = verifyBinanceAlgoOpenReadback({
+      accepted: ack, payload: p, venueRead: { success: true, orders: [] },
+    });
+    eq(noMatch.code, 'NOT_LISTED_UNKNOWN');
+    eq(noMatch.listedOpenAtRead, false);
+    eq(noMatch.executionAuthorized, false);
+    const readFailed = verifyBinanceAlgoOpenReadback({
+      accepted: ack, payload: p,
+      venueRead: { success: false, orders: [] },
+    });
+    eq(readFailed.code, 'READ_UNKNOWN');
+    eq(readFailed.listedOpenAtRead, false);
+  });
+
+  test('Quantity-mode readback must match exact quantity and reduceOnly', () => {
+    const p = buildBinanceConditionalAlgoPayload(intent({
+      closeAll: false, quantity: 0.005, quantityStep: .001,
+      reduceOnly: true,
+    })).payload!;
+    const a = parseBinanceAlgoAcceptance({
+      algoId: '123', clientAlgoId: p.clientAlgoId,
+      algoType: 'CONDITIONAL', orderType: p.type,
+      symbol: p.symbol, side: p.side,
+    }, p);
+    const base = {
+      algoId: '123', clientAlgoId: p.clientAlgoId,
+      algoType: 'CONDITIONAL', orderType: p.type,
+      symbol: p.symbol, side: p.side, positionSide: 'BOTH',
+      algoStatus: 'NEW', workingType: p.workingType,
+      triggerPrice: p.triggerPrice, reduceOnly: true,
+      closePosition: false, quantity: '0.005',
+    };
+    eq(verifyBinanceAlgoOpenReadback({
+      accepted: a, payload: p, venueRead: { success: true, orders: [base] },
+    }).code, 'LISTED_OPEN_AT_READ');
+    for (const mutation of [
+      { quantity: '0.004' }, { reduceOnly: false },
+      { closePosition: true }, { quantity: undefined },
+    ]) {
+      eq(verifyBinanceAlgoOpenReadback({
+        accepted: a, payload: p, venueRead: {
+          success: true, orders: [{ ...base, ...mutation }],
+        },
+      }).listedOpenAtRead, false);
     }
   });
 
