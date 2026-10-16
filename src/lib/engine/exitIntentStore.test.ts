@@ -5,7 +5,8 @@ import { test, assert, eq } from '../../test/harness';
 import {
   recordExitIntent, markExitIntentResult, judgeExitDurability,
   judgeExitSendPermission, findExitIntent, findOtherPendingExitForSeat,
-  MAX_SENDS_PER_KEY,
+  claimAtomicExitSeatForResearch, type AtomicExitSeatIdentity,
+  type AtomicExitSeatStore, MAX_SENDS_PER_KEY,
   PENDING_EXIT_STATUSES, type ExitIntentRecord,
 } from './exitIntentStore';
 import { readFileSync } from 'node:fs';
@@ -614,6 +615,141 @@ export function runExitIntentStoreTests() {
     assert(after.indexOf('await recordExitIntent') > 0, 'No write-ahead intent');
     assert(after.indexOf('await findExitIntent') < after.indexOf('await recordExitIntent'),
       'Existing-key query must occur before claiming the order');
+  });
+
+  // ── ⑦-c 원자적 seat claim 계약 (아직 실행 경로 미배선) ──
+  const atomicSeat = (over: Partial<AtomicExitSeatIdentity> = {}): AtomicExitSeatIdentity => ({
+    userId: 'owner-1', connectionId: 'conn-1', exchange: 'binance',
+    mode: 'TESTNET', symbol: 'BTCUSDT',
+    clientOrderId: 'close-qty-010', ownerToken: 'fence-1',
+    ...over,
+  });
+  const atomicFake = () => {
+    const claims = new Map<string, AtomicExitSeatIdentity>();
+    const keyOf = (x: AtomicExitSeatIdentity) =>
+      JSON.stringify([x.userId, x.connectionId, x.exchange, x.mode, x.symbol]);
+    const store: AtomicExitSeatStore = {
+      // IMPORTANT: fake atomic unique insert, NOT a production DB adapter.
+      // This map.set is synchronous before any await (single JS scheduler).
+      async claimUniqueSeat(x) {
+        const key = keyOf(x);
+        const older = claims.get(key);
+        if (older) return { code: 'ALREADY_HELD' as const, record: older };
+        claims.set(key, x);
+        return { code: 'CLAIMED' as const, record: x };
+      },
+    };
+    return { claims, store };
+  };
+
+  test('★ 3 simultaneous workers with different quantities/IDs -> ONE seat winner', async () => {
+    const { claims, store } = atomicFake();
+    const candidates = [
+      atomicSeat({ clientOrderId: 'close-qty-010', ownerToken: 'worker-a' }),
+      atomicSeat({ clientOrderId: 'close-qty-006', ownerToken: 'worker-b' }),
+      atomicSeat({ clientOrderId: 'close-qty-003', ownerToken: 'worker-c' }),
+    ];
+    const out = await Promise.all(candidates.map(i => claimAtomicExitSeatForResearch(store, i)));
+    eq(out.filter(x => x.seatClaimed).length, 1,
+      'Different clientOrderIds for the same net position must not BOTH win');
+    eq(out.filter(x => x.code === 'ALREADY_HELD').length, 2);
+    eq(claims.size, 1);
+    out.forEach(x => eq(x.executionAuthorized, false,
+      'Research seat wins must NEVER authorize a trade'));
+  });
+
+  test('★ 3 consecutive restarts: same CID is not a new atomic seat', async () => {
+    const { claims, store } = atomicFake();
+    eq((await claimAtomicExitSeatForResearch(store, atomicSeat())).seatClaimed, true);
+    for (let restart = 1; restart <= 3; restart++) {
+      const response = await claimAtomicExitSeatForResearch(store,
+        atomicSeat({ ownerToken: 'restarted-' + restart }));
+      eq(response.code, 'ALREADY_HELD');
+      eq(response.seatClaimed, false);
+    }
+    eq(claims.size, 1);
+  });
+
+  test('★ different owner, connection, exchange, mode or symbol are distinct seats', async () => {
+    const { claims, store } = atomicFake();
+    const identities = [
+      atomicSeat(),
+      atomicSeat({ userId: 'owner-2', clientOrderId: 'c2' }),
+      atomicSeat({ connectionId: 'conn-2', clientOrderId: 'c3' }),
+      atomicSeat({ exchange: 'gate', clientOrderId: 'c4' }),
+      atomicSeat({ symbol: 'ETHUSDT', clientOrderId: 'c5' }),
+    ];
+    const outcomes = await Promise.all(identities.map(i=>claimAtomicExitSeatForResearch(store, i)));
+    eq(outcomes.filter(x=>x.seatClaimed).length, identities.length);
+    eq(claims.size, identities.length);
+  });
+
+  test('★ stale claim never auto-expires because a delayed order can still arrive', async () => {
+    const { claims, store } = atomicFake();
+    const before = await claimAtomicExitSeatForResearch(store, atomicSeat());
+    eq(before.code, 'CLAIMED');
+    // No TTL or wall-clock is part of the atomic claim contract. Reconciliation
+    // plus owner-confirmed flat/fully resolved evidence is required later.
+    const after = await claimAtomicExitSeatForResearch(store,
+      atomicSeat({ clientOrderId: 'new-after-timeout' }));
+    eq(after.code, 'ALREADY_HELD');
+    eq(claims.size, 1);
+  });
+
+  test('★ missing owner/connection/mode or non-TESTNET is rejected BEFORE store', async () => {
+    const { store } = atomicFake();
+    let calls = 0;
+    const counted: AtomicExitSeatStore = {
+      claimUniqueSeat: async i => { calls++; return store.claimUniqueSeat(i); },
+    };
+    const cases = [
+      atomicSeat({ userId: '' }), atomicSeat({ connectionId: '' }),
+      atomicSeat({ clientOrderId: '' }), atomicSeat({ ownerToken: '' }),
+      atomicSeat({ symbol: 'btcusdt' }), atomicSeat({ mode: 'LIVE' as any }),
+      atomicSeat({ clientOrderId: 'c'.repeat(37) }),
+    ];
+    for (const i of cases) {
+      const result = await claimAtomicExitSeatForResearch(counted, i);
+      eq(result.code, 'UNAVAILABLE'); eq(result.seatClaimed, false);
+    }
+    eq(calls, 0);
+    eq((await claimAtomicExitSeatForResearch(null, atomicSeat())).code, 'UNAVAILABLE');
+  });
+
+  test('★ claimed-looking database response with wrong seat/fence never succeeds', async () => {
+    for (const altered of [
+      { userId: 'other-user' }, { connectionId: 'other-connection' },
+      { exchange: 'other-exchange' }, { symbol: 'ETHUSDT' },
+      { clientOrderId: 'wrong-cid' }, { ownerToken: 'stale-fence' },
+    ]) {
+      const store: AtomicExitSeatStore = {
+        claimUniqueSeat: async i => ({
+          code: 'CLAIMED', record: { ...i, ...altered },
+        }),
+      };
+      const r = await claimAtomicExitSeatForResearch(store, atomicSeat());
+      eq(r.code, 'UNAVAILABLE'); eq(r.seatClaimed, false);
+    }
+  });
+
+  test('★ unavailable/throwing atomic DB cannot be interpreted as free seat', async () => {
+    const failed: AtomicExitSeatStore = {
+      claimUniqueSeat: async () => ({ code: 'UNAVAILABLE', record: null }),
+    };
+    eq((await claimAtomicExitSeatForResearch(failed, atomicSeat())).seatClaimed, false);
+    const throws: AtomicExitSeatStore = {
+      claimUniqueSeat: async () => { throw new Error('database unavailable'); },
+    };
+    const x = await claimAtomicExitSeatForResearch(throws, atomicSeat());
+    eq(x.code, 'UNAVAILABLE'); eq(x.seatClaimed, false);
+    eq(x.executionAuthorized, false);
+  });
+
+  test('★ atomic research contract stays disconnected from active route', () => {
+    const route = readFileSync(resolve(process.cwd(),
+      'src/app/api/autotrade/exit-monitor/route.ts'), 'utf8');
+    eq(route.includes('claimAtomicExitSeatForResearch('), false,
+      'It must not be connected without deployed schema and safe claim release logic');
   });
 
   // ── ⑧ 정본이 순수한가 ──
