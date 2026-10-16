@@ -67,6 +67,10 @@ export interface ComparisonResult {
   executionAuthorized: false;
 }
 
+// Conservative RESEARCH review floors only; they are not evidence of edge.
+export const RESEARCH_MIN_CLOSED_TRADES = 100;
+export const RESEARCH_MAX_STEP_INCREASE_PCT = 10;
+
 const validPositive = (n: number): boolean => Number.isFinite(n) && n > 0;
 
 function requireValid(i: ComparisonInput): void {
@@ -76,11 +80,12 @@ function requireValid(i: ComparisonInput): void {
   if (i.initialMarginUsd > i.initialEquityUsd * 0.1 + 1e-9) {
     throw new Error('Initial margin exceeds the 10% research risk ceiling');
   }
-  if (!Number.isInteger(i.review.minClosedTrades) || i.review.minClosedTrades < 1 ||
+  if (!Number.isInteger(i.review.minClosedTrades) || i.review.minClosedTrades < RESEARCH_MIN_CLOSED_TRADES ||
       !Number.isFinite(i.review.maxDrawdownPct) || i.review.maxDrawdownPct < 0 ||
       i.review.maxDrawdownPct > 100 ||
       !Number.isFinite(i.review.maxStepIncreasePct) ||
-      i.review.maxStepIncreasePct <= 0 || i.review.maxStepIncreasePct > 100) {
+      i.review.maxStepIncreasePct <= 0 ||
+      i.review.maxStepIncreasePct > RESEARCH_MAX_STEP_INCREASE_PCT) {
     throw new Error('Explicit performance-review criteria are required');
   }
   for (const trade of i.trades) {
@@ -450,7 +455,8 @@ export function bootstrapMarginScenarios(i: BootstrapInput): BootstrapResult {
   const B: SizingSimulation[] = [];
   const C: SizingSimulation[] = [];
   const criteria: ReviewCriteria = {
-    minClosedTrades: i.horizonTrades + 1, maxDrawdownPct: 0,
+    minClosedTrades: Math.max(RESEARCH_MIN_CLOSED_TRADES, i.horizonTrades + 1),
+    maxDrawdownPct: 0,
     maxStepIncreasePct: 1,
   };
   for (let n = 0; n < i.paths; n++) {
