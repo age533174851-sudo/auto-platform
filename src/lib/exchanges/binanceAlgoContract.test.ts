@@ -4,6 +4,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   buildBinanceConditionalAlgoPayload, parseBinanceAlgoAcceptance,
   verifyBinanceAlgoOpenReadback,
+  inspectBinanceAlgoRecovery,
   binanceAlgoCancellationIdentifier, type BinanceConditionalAlgoIntent,
 } from './binanceAlgoContract';
 
@@ -292,6 +293,133 @@ export function runBinanceAlgoContractTests() {
         },
       }).listedOpenAtRead, false);
     }
+  });
+
+  const recoveryEvidence = (params: Partial<BinanceConditionalAlgoIntent> = {}) => {
+    const payload = buildBinanceConditionalAlgoPayload(intent(params)).payload!;
+    const order = {
+      algoId: '9007199254740993', clientAlgoId: payload.clientAlgoId,
+      algoType: 'CONDITIONAL', symbol: payload.symbol,
+      side: payload.side, orderType: payload.type,
+      positionSide: 'BOTH', workingType: payload.workingType,
+      triggerPrice: payload.triggerPrice, closePosition: true,
+      reduceOnly: false, algoStatus: 'NEW',
+      actualOrderId: '',
+    };
+    return { payload, order };
+  };
+
+  test('POST ACK lost: matching signed single-order + open-order reads forbid automatic resend', () => {
+    const { payload, order } = recoveryEvidence();
+    const v = inspectBinanceAlgoRecovery({
+      expectedPayload: payload,
+      orderLookup: { success: true, order },
+      openLookup: { success: true, orders: [order] },
+    });
+    eq(v.code, 'OPEN_CONFIRMED_AT_READ');
+    eq(v.algoId, '9007199254740993');
+    eq(v.canResendAlgoOrder, false);
+    eq(v.canCancelAlgoOrder, false);
+    eq(v.mustInspectPositionAndFills, true);
+    eq(v.executionAuthorized, false);
+  });
+
+  test('POST timeout + failed individual GET remains UNKNOWN even if openAlgoOrders is empty', () => {
+    const { payload } = recoveryEvidence();
+    for (const response of [
+      null, { success: false, order: null }, { success: true, order: null },
+    ]) {
+      const v = inspectBinanceAlgoRecovery({
+        expectedPayload: payload, orderLookup: response,
+        openLookup: { success: true, orders: [] },
+      });
+      eq(v.code, 'ORDER_LOOKUP_UNKNOWN');
+      eq(v.canResendAlgoOrder, false);
+    }
+  });
+
+  test('Algo NEW but absent from open list / failed open GET is still blocked', () => {
+    const { payload, order } = recoveryEvidence();
+    for (const [openLookup, code] of [
+      [{ success: true, orders: [] }, 'OPEN_LIST_CONFLICT_UNKNOWN'],
+      [{ success: false, orders: [] }, 'OPEN_LOOKUP_UNKNOWN'],
+      [{ success: true, orders: {} }, 'OPEN_LOOKUP_UNKNOWN'],
+    ] as any[]) {
+      const v = inspectBinanceAlgoRecovery({
+        expectedPayload: payload,
+        orderLookup: { success: true, order }, openLookup,
+      });
+      eq(v.code, code);
+      eq(v.canResendAlgoOrder, false);
+      eq(v.executionAuthorized, false);
+    }
+  });
+
+  test('Triggered/FINISHED/CANCELED/EXPIRED orders require fills + position readback', () => {
+    const { payload, order } = recoveryEvidence();
+    for (const mutation of [
+      { algoStatus: 'FINISHED', actualOrderId: '67890' },
+      { algoStatus: 'CANCELED', actualOrderId: '' },
+      { algoStatus: 'EXPIRED', actualOrderId: '' },
+      { algoStatus: 'NEW', actualOrderId: '67890' },
+    ]) {
+      const v = inspectBinanceAlgoRecovery({
+        expectedPayload: payload,
+        orderLookup: { success: true, order: { ...order, ...mutation } },
+        openLookup: { success: true, orders: [] },
+      });
+      eq(v.code, 'TRIGGERED_OR_TERMINAL_NEEDS_RECONCILIATION');
+      eq(v.canResendAlgoOrder, false);
+      eq(v.canCancelAlgoOrder, false);
+      eq(v.mustInspectPositionAndFills, true);
+    }
+  });
+
+  test('Wrong venue identity, trigger, positionSide and ownership IDs never reconcile', () => {
+    const { payload, order } = recoveryEvidence();
+    for (const mutation of [
+      { clientAlgoId: 'foreign-client' },
+      { symbol: 'ETHUSDT' },
+      { algoId: 9007199254740992 },
+      { side: 'BUY' }, { orderType: 'TAKE_PROFIT_MARKET' },
+      { triggerPrice: '64000.2' }, { workingType: 'CONTRACT_PRICE' },
+      { positionSide: 'LONG' }, { closePosition: false },
+      { reduceOnly: true },
+    ]) {
+      const v = inspectBinanceAlgoRecovery({
+        expectedPayload: payload,
+        orderLookup: { success: true, order: { ...order, ...mutation } },
+        openLookup: { success: true, orders: [order] },
+      });
+      eq(v.code, 'VENUE_IDENTITY_MISMATCH', JSON.stringify(mutation));
+      eq(v.canResendAlgoOrder, false);
+      eq(v.executionAuthorized, false);
+    }
+  });
+
+  test('Quantity-only protective recovery enforces both quantity and reduceOnly', () => {
+    const payload = buildBinanceConditionalAlgoPayload(intent({
+      closeAll: false, quantity: .005, quantityStep: .001,
+      reduceOnly: true,
+    })).payload!;
+    const o = {
+      algoId: '999', clientAlgoId: payload.clientAlgoId,
+      algoType: 'CONDITIONAL', orderType: payload.type,
+      symbol: payload.symbol, side: payload.side, positionSide: 'BOTH',
+      workingType: payload.workingType, triggerPrice: payload.triggerPrice,
+      quantity: '.005', closePosition: false, reduceOnly: true,
+      algoStatus: 'NEW', actualOrderId: '',
+    };
+    eq(inspectBinanceAlgoRecovery({
+      expectedPayload: payload,
+      orderLookup: { success: true, order: o },
+      openLookup: { success: true, orders: [o] },
+    }).code, 'OPEN_CONFIRMED_AT_READ');
+    eq(inspectBinanceAlgoRecovery({
+      expectedPayload: payload,
+      orderLookup: { success: true, order: { ...o, quantity: '.006' } },
+      openLookup: { success: true, orders: [o] },
+    }).code, 'VENUE_IDENTITY_MISMATCH');
   });
 
   test('Cancel ID namespace ALGO != REGULAR orderId, even with same digits', () => {
