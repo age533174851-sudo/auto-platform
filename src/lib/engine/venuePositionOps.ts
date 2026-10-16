@@ -423,6 +423,50 @@ export async function readProtectiveOrders(c: VenueCreds, symbol: string): Promi
 }
 
 /**
+ * Smoke ENTRY preflight only. Do not use this flattened view to CANCEL
+ * orders: the Algo Service uses algoId + a different DELETE endpoint,
+ * while ordinary orders use orderId. A combined list is for COUNTING
+ * existing exposure, never determining cancellation ownership.
+ *
+ * Both Binance books must return success:true and arrays. A failed read
+ * of either book means UNKNOWN, not "no existing orders".
+ */
+export function combinedSmokeOpenOrderEvidence(
+  regular: { success?: unknown; orders?: unknown } | null | undefined,
+  conditional: { success?: unknown; orders?: unknown } | null | undefined,
+): any[] | null {
+  const r = confirmedBinanceOpenOrders(regular);
+  const a = confirmedBinanceOpenOrders(conditional);
+  if (r == null || a == null) return null;
+  return [
+    ...r.map((order: any) => ({ kind: 'REGULAR', symbol: order?.symbol ?? null })),
+    ...a.map((order: any) => ({ kind: 'ALGO', symbol: order?.symbol ?? null })),
+  ];
+}
+
+/**
+ * For Binance smoke preflight, inspect regular AND conditional order books.
+ * Reuses the existing Gate protection listing without fabricating a
+ * Binance-specific Algo API there.
+ */
+export async function readAllOpenOrdersForSmoke(
+  c: VenueCreds, symbol: string,
+): Promise<any[] | null> {
+  if (c.exchange !== 'binance') return readProtectiveOrders(c, symbol);
+  if (c.testnet !== true) return null;
+  try {
+    const bf = await import('../exchanges/binanceFutures');
+    const [regular, conditional] = await Promise.all([
+      bf.getFuturesOpenOrders(c.apiKey, c.apiSecret, true, symbol),
+      bf.getFuturesOpenAlgoOrders(c.apiKey, c.apiSecret, true, symbol),
+    ]);
+    return combinedSmokeOpenOrderEvidence(regular, conditional);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * **이 id들만** 취소한다. 목록을 통째로 지우지 않는다.
  *
  * `cancelAll`은 같은 계좌의 다른 전략이 걸어 둔 손절까지 지운다.
