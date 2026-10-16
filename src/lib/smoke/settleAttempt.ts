@@ -166,7 +166,10 @@ export async function settleAttempt(sb: any, row: any, opts: SettleOptions = {})
       cancelled: plan.ok ? ledger.entries.filter(e => e.state === 'CANCEL_CONFIRMED').map(e => e.id) : null,
     });
 
-    const leftover = plan.ok ? (cx.leftover ?? await ops.readProtectiveOrders(venue, row.symbol)) : orders;
+    // Cancellation uses its existing owned-ID regular-order path; final absence evidence
+    // must independently cover BOTH Binance order books (regular + Algo).
+    // An unknown Algo read must never become ORDERS_ZERO PASS.
+    const leftover = await ops.readAllOpenOrdersForSmoke(venue, row.symbol);
     const rv = residualVerdict({
       position: { ok: after.ok, found: after.found, qty: after.qty },
       orders: leftover, myStrategyId: SMOKE_STRATEGY_ID, ownedIds,
