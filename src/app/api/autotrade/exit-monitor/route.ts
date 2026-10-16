@@ -1659,8 +1659,16 @@ async function runLifecycleSweep(
   // generic lifecycle 실패를 ladder 결과와 별개로 보존한다.
   // projection 오류처럼 lifecycle 자체가 실패했는데 actionable이 0이면
   // 예전에는 ok:true로 조기 반환되어 운영에서 조용히 숨었다.
-  const { collectLifecycleFailures, exitRunOutcome } = await import('@/lib/engine/exitRunOutcome');
+  const { collectLifecycleFailures, exitRunOutcome, exitMonitorScanScope } = await import('@/lib/engine/exitRunOutcome');
   const lifecycleFailed = collectLifecycleFailures(lifecycle);
+  // ★ This count is NOT "all positions scanned". The legacy
+  // exit_monitor_runs.positions_scanned counts ladder decisions only.
+  // Dedicated Exact100X exit candidates are in lifecycle.authority; there
+  // is no justified unique-venue-position total without separate readbacks.
+  // Diagnostic only: this must NEVER change any trading decision.
+  const scanScope = exitMonitorScanScope({
+    ladderDecisionRows: decisions.length, lifecycle,
+  });
 
   // ★ 조기 반환도 **같은 판정**을 쓴다. 여기서는 아직 처리 결과가 없으므로
   //   실패는 생명주기 쪽뿐이다.
@@ -1687,7 +1695,7 @@ async function runLifecycleSweep(
     }
     return NextResponse.json({
       ok: earlyOutcome.ok, dryRun, checked: decisions.length, actionable: actionable.length,
-      alerts, recovery, orphanCleanups, sweep, coverage, lifecycle,
+      alerts, recovery, orphanCleanups, sweep, coverage, scanScope, lifecycle,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
         highWaterR: Number(d.highWaterR.toFixed(3)),
@@ -1717,7 +1725,7 @@ async function runLifecycleSweep(
     });
     return NextResponse.json({
       ok: true, skipped: true, code: 'LEASE_LOST', checked: decisions.length, actionable: 0,
-      orphanCleanups, sweep, coverage, lifecycle,
+      orphanCleanups, sweep, coverage, scanScope, lifecycle,
       message: '실행 도중 임차가 다른 워커에게 넘어가 주문을 내지 않았습니다 — 그쪽이 같은 판단을 합니다',
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
@@ -1911,7 +1919,7 @@ async function runLifecycleSweep(
 
   return NextResponse.json({
     ok: outcome.ok, checked: decisions.length, actionable: actionable.length, alerts, recovery,
-    orphanCleanups, sweep, coverage, lifecycle, results,
+    orphanCleanups, sweep, coverage, scanScope, lifecycle, results,
     runId, cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
