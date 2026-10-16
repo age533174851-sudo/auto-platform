@@ -67,6 +67,19 @@ export class FakeVenue {
     return this;
   }
 
+  /** 같은 /order 엔드포인트의 MARKET 진입과 조건부 보호주문을 구분한다.
+   * HTTP 응답은 계속 가짜지만 실행기의 실제 fallback 분기를 시험한다. */
+  onParams(pathFragment: string, method: string,
+    params: Record<string, string>, reply: VenueReply): this {
+    this.rules.push({
+      label: `${pathFragment}:${method}:${JSON.stringify(params)}`,
+      match: (c) => c.path.includes(pathFragment) && c.method === method
+        && Object.entries(params).every(([k, v]) => c.params[k] === v),
+      reply,
+    });
+    return this;
+  }
+
   /** 이 경로를 몇 번 불렀는가 */
   countOf(pathFragment: string, method?: string): number {
     return this.calls.filter(

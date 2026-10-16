@@ -14,7 +14,7 @@
 import type { PositionPlan } from './riskManager';
 import type { ExitPlan } from './exitPlan';
 import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
-import { fillBasis, exitFromFill } from './fillBasedExit';
+import { fillBasis, exitFromFill, roundTrigger } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
@@ -24,6 +24,7 @@ import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
+import { quantizeOrder } from '../exchanges/quantize';
 import {
   ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
 } from './reconcileLedgerStatus';
@@ -752,18 +753,68 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
       } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
 
+      // ── 4.7) 거래소 규격에 맞춘다 ──
+      //
+      // **2026-10-16 TESTNET 실측에서 여기가 비어 있었다.**
+      // 거래소가 `-1111 Precision is over the maximum defined for this
+      // asset`로 거절했다. 보낸 수량은 `(증거금 × 배율) / 기준가`가
+      // 만든 생 부동소수(예: 0.0033333333333333335)였다.
+      //
+      // 규격을 맞추는 정본은 이미 있었다 — `quantizeOrder`가
+      // LOT_SIZE · MARKET_LOT_SIZE · stepSize · minQty · maxQty ·
+      // minNotional · tickSize를 전부 다룬다. `placeFuturesOrderSafe`와
+      // `futuresExec`는 그것을 쓰는데 **이 경로만 안 쓰고 있었다.**
+      // 만들어 놓고 배선을 안 한 것이고, 그래서 실주문이 거절됐다.
+      //
+      // `placeFuturesOrderSafe`로 바꾸지 않는 이유: 그쪽은
+      // `clientOrderId`를 받지 않는다. 멱등 키를 잃으면 재시도가 중복
+      // 주문이 된다 — 정밀도를 고치려다 더 나쁜 것을 만든다.
+      const filters = await bf.getSymbolFilters(plan.symbol, testnet);
+
+      // 최소 명목가 검사에 쓸 기준가는 **거래소에서 읽는다.** 호출부가
+      // 넘긴 값을 쓰면 검사가 검사 대상에게 값을 물어보는 꼴이 된다.
+      // 못 읽으면 null을 넘긴다 — 정본이 "기준가 없음"으로 판정한다.
+      let markPrice: number | null = null;
+      if (orderType === 'MARKET' && args.reduceOnly !== true) {
+        try {
+          const snap = await bf.readMarketSnapshot(plan.symbol, testnet);
+          markPrice = snap.snapshot?.markPrice ?? null;
+        } catch { /* 못 읽으면 null — 지어내지 않는다 */ }
+      }
+
+      const qz = quantizeOrder(
+        plan.quantity,
+        orderType === 'LIMIT' ? (args.limitPrice ?? null) : null,
+        filters,
+        { orderType, reduceOnly: args.reduceOnly === true, marketReferencePrice: markPrice },
+      );
+      if (!qz.ok || !(Number.isFinite(Number(qz.quantity)) && Number(qz.quantity) > 0)) {
+        // **보내기 전에 멈춘다.** `status: 'SENT'`를 적기 전이라
+        // 장부에 "보냈다"가 남지 않는다 — 안 보낸 것을 보냈다고 적으면
+        // 대조가 영영 어긋난다.
+        const reason = `거래소 수량 규격을 맞추지 못해 주문을 보내지 않았습니다`
+          + ` (${qz.code ?? 'QUANTIZE_FAILED'}): ${qz.reason}`;
+        await update({ status: 'FAILED', error_message: reason });
+        return { ok: false, status: 'FAILED', clientOrderId, message: reason };
+      }
+      const sendQty = qz.quantity as number;
+      const sendPrice = orderType === 'LIMIT' ? (qz.price ?? args.limitPrice) : undefined;
+
       // ── 5) 주문 전송 ──
       await update({
         status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
         pos_qty_before: posQtyBefore,
+        // 규격에 맞추며 깎인 수량을 장부에 남긴다. 요청 수량만 남기면
+        // 체결 수량과 비교할 기준이 틀어진다.
+        ...(qz.changed ? { quantity: sendQty } : {}),
       });
 
       let res: any;
       try {
         res = await bf.placeFuturesOrder(apiKey, apiSecret, {
           symbol: plan.symbol, side, type: orderType,
-          quantity: plan.quantity, clientOrderId,
-          ...(orderType === 'LIMIT' ? { price: args.limitPrice } : {}),
+          quantity: sendQty, clientOrderId,
+          ...(orderType === 'LIMIT' ? { price: sendPrice } : {}),
           ...(args.reduceOnly ? { reduceOnly: true } : {}),
         }, testnet);
       } catch (e: any) {
@@ -823,14 +874,45 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       let slId: string | undefined, tpId: string | undefined;
       const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
       let slError = '';
+
+      // ── 보호주문도 거래소 격자 위에 올린다 ──
+      //
+      // 진입 수량만 맞추면 **다음 벽이 여기다.** 손절·익절의
+      // `stopPrice`는 `기준가 × (1 ± 손절%)`가 만든 생 부동소수고
+      // (예: 59400.000000000007), 호가 단위를 벗어나면 똑같이 -1111로
+      // 거절된다. 그러면 **보호 없는 포지션이 열린 채로 남는다** —
+      // 진입이 거절되는 것보다 나쁜 결과다.
+      //
+      // 자릿수를 새로 쓰지 않는다. 방향까지 맞추는 정본이 이미 있다:
+      // `roundTrigger`는 LONG 손절을 **내리고** LONG 익절을 **올린다**
+      // (SHORT는 반대). 반올림으로 처리하면 손절이 한 틱 가까워지거나
+      // 익절이 한 틱 멀어져 **닿지 않는 보호주문**이 된다.
+      const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+      /** 조건부 주문의 reduceOnly 수량에도 LOT_SIZE와 MARKET_LOT_SIZE를
+       * **모두** 적용한다. MARKET_LOT_SIZE.stepSize=0은 비활성이라는 뜻이고
+       * 이때도 LOT_SIZE를 반드시 지켜야 한다. 필터 조회 실패 시 청산
+       * 자체를 막지 않는 기존 quantizeOrder의 reduceOnly 계약을 따른다. */
+      const protQty = (q: unknown): number | undefined => {
+        const n = Number(q);
+        if (!Number.isFinite(n) || n <= 0) return undefined;
+        const v = quantizeOrder(n, null, filters, { orderType: 'MARKET', reduceOnly: true });
+        return v.ok && v.quantity != null && Number.isFinite(v.quantity) && v.quantity > 0
+          ? v.quantity : undefined;
+      };
+
       // 청산 주문에는 보호주문을 붙이지 않는다. 붙이면 포지션이 없어진 뒤에도
       // 남아서 다음 진입을 예상치 못하게 닫는다.
       if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
-        const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-          symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
-          // 1차는 closePosition(그때 있는 전량)이 맞다. 그게 이 환경에서
-          // 거절되면(-4120) 체결 수량으로 한 번 더 시도한다.
-          fallbackQuantity: res.qty || plan.quantity,
+        const slTrig = roundTrigger(args.stopLoss, plan.side, 'STOP', tick);
+        const sl = slTrig.price == null
+          ? { success: false, message: `손절가를 호가 단위에 맞추지 못했습니다: ${slTrig.note}` } as any
+          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          symbol: plan.symbol, side: closeSide, stopPrice: slTrig.price, type: 'STOP_MARKET',
+          // 1차는 closePosition(그때 있는 전량)이 맞다. -4120 대체 방식은
+          // 거래소가 **증명한 체결 수량**만 사용한다. res.qty는 origQty를
+          // 우선 돌려줄 수 있어 실제 체결 수량이 아니다. 체결 증거가 없으면
+          // 추정 수량으로 reduceOnly 주문을 보내지 않는다.
+          fallbackQuantity: protQty(fill.filledQty) ?? null,
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
         else {
@@ -858,9 +940,15 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       } else if (args.exitPlan) {
         for (const o of args.exitPlan.orders) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
+          const pTrig = roundTrigger(o.price, plan.side, 'TAKE_PROFIT', tick);
+          if (pTrig.price == null) continue;   // 격자에 못 올리면 안 보낸다
+          const partialQty = protQty(o.quantity);
+          // PARTIAL_TP에 quantity를 생략하면 closePosition=true가 되어
+          // 부분 익절이 전량 청산으로 바뀐다. 절대로 그대로 보내지 않는다.
+          if (partialQty == null) continue;
           const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-            symbol: plan.symbol, side: closeSide, stopPrice: o.price,
-            type: 'TAKE_PROFIT_MARKET', quantity: o.quantity,
+            symbol: plan.symbol, side: closeSide, stopPrice: pTrig.price,
+            type: 'TAKE_PROFIT_MARKET', quantity: partialQty,
           }, testnet);
           if ((r as any)?.success) tpIds.push(String((r as any).orderId));
           // 분할 익절 실패는 진입을 되돌릴 사유가 아니다 — 손절은 이미 걸려
@@ -868,8 +956,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
         tpId = tpIds[0];
       } else if (args.takeProfit) {
-        const tp = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-          symbol: plan.symbol, side: closeSide, stopPrice: args.takeProfit, type: 'TAKE_PROFIT_MARKET',
+        const tpTrig = roundTrigger(args.takeProfit, plan.side, 'TAKE_PROFIT', tick);
+        const tp = tpTrig.price == null
+          ? { success: false, message: `익절가를 호가 단위에 맞추지 못했습니다: ${tpTrig.note}` } as any
+          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          symbol: plan.symbol, side: closeSide, stopPrice: tpTrig.price, type: 'TAKE_PROFIT_MARKET',
         }, testnet);
         if ((tp as any)?.success) tpId = String((tp as any).orderId);
       }
@@ -943,10 +1034,17 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
       if (args.stopLoss && !slId) {
         let closed = false, closeErr = '';
+        // reduceOnly 수량은 origQty(res.qty)가 아니라 체결 사실을 우선한다.
+        // 필터를 알고 있으면 LOT_SIZE+MARKET_LOT_SIZE 격자에 내리고,
+        // 필터 미상/잔량 dust는 청산 시도 자체를 막지 않는다.
+        const closeQuantity = (raw: number): number => {
+          const q = quantizeOrder(raw, null, filters, { orderType: 'MARKET', reduceOnly: true });
+          return q.ok && q.quantity != null && q.quantity > 0 ? q.quantity : raw;
+        };
         try {
           const close = await bf.placeFuturesOrder(apiKey, apiSecret, {
             symbol: plan.symbol, side: closeSide, type: 'MARKET',
-            quantity: res.qty || plan.quantity, reduceOnly: true,
+            quantity: closeQuantity(fill.filledQty && fill.filledQty > 0 ? fill.filledQty : sendQty), reduceOnly: true,
             clientOrderId: `${clientOrderId}X`.slice(0, 36),
           }, testnet);
           closed = !!(close as any)?.success;
@@ -1009,7 +1107,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
             try {
               const retry = await bf.placeFuturesOrder(apiKey, apiSecret, {
                 symbol: plan.symbol, side: closeSide, type: 'MARKET',
-                quantity: posAmt, reduceOnly: true,
+                quantity: closeQuantity(posAmt), reduceOnly: true,
                 clientOrderId: `${clientOrderId}Y`.slice(0, 36),
               }, testnet);
               if ((retry as any)?.success) { closed = true; closeErr = ''; }
@@ -1755,9 +1853,19 @@ async function attachStopIfMissing(
       return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
     }
 
+    // 복구 시에도 최초 손절 부착과 동일한 격자/방향 정본을 사용한다.
+    // 필터 미상 시 기존 closePosition 우선 시도는 유지한다.
+    const filters = await bf.getSymbolFilters(symbol, creds.testnet);
+    const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+    const trigger = roundTrigger(stop, posSide, 'STOP', tick);
+    if (trigger.price == null) return `손절 복구 실패 — 트리거 가격을 확인할 수 없습니다: ${trigger.note}`;
+    const quantized = quantizeOrder(Math.abs(amt), null, filters,
+      { orderType: 'MARKET', reduceOnly: true });
+    const fallbackQuantity = quantized.ok && quantized.quantity != null && quantized.quantity > 0
+      ? quantized.quantity : Math.abs(amt);
     const sl: any = await bf.placeFuturesTPSL(creds.apiKey, creds.apiSecret, {
-      symbol, side: closeSide, stopPrice: stop, type: 'STOP_MARKET',
-      fallbackQuantity: Math.abs(amt),
+      symbol, side: closeSide, stopPrice: trigger.price, type: 'STOP_MARKET',
+      fallbackQuantity,
     }, creds.testnet);
     if (!sl?.success) return `손절 복구 실패 — ${sl?.message || '원인 불명'}`;
     await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });

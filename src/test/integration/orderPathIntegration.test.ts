@@ -402,6 +402,67 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
+  // ══════════ ⑤-b 실제 대조 → 손절 재부착 → -4120 대체 전송 ══════════
+  {
+    // 처음 부착되지 않은 ACKED 진입이 뒤늦게 FILLED로 확인된다.
+    // 대조 자체가 실행기의 attachStopIfMissing을 호출해야 한다.
+    const SYM = 'PRECLREATTUSDT';
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      symbol: SYM, stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.0033333333333333335',
+        entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.0033333333333333335', origQty: '0.010', avgPrice: '60000' }) }, 'GET')
+      .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001', maxQty: '100' },
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0', maxQty: '0' },
+        { filterType: 'PRICE_FILTER', tickSize: '0.1' },
+      ] }] } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, orderId: 9501 }) });
+    const result = await scenario(venue, () => reconcile(db));
+
+    test('★ 대조에서 복구한 LONG 손절은 아래 틱 58920.9, 대체 수량은 0.003', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문을 대조하지 못했다');
+      const stopCalls = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET');
+      eq(stopCalls.length, 2, 'closePosition 실패 후 대체 주문 경로가 돌지 않았다');
+      eq(stopCalls[0].params.stopPrice, '58920.9');
+      eq(stopCalls[0].params.closePosition, 'true');
+      eq(stopCalls[1].params.stopPrice, '58920.9');
+      eq(stopCalls[1].params.quantity, '0.003');
+      eq(stopCalls[1].params.reduceOnly, 'true');
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, '9501');
+    });
+  }
+
+  // ══════════ ⑤-c NO_FIXED_SL 계약은 대조에서도 손절을 걸지 않는다 ══════════
+  {
+    const SYM = 'PRECMREATTUSDT';
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      symbol: SYM, stop_policy: 'NO_FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.003',
+        entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'GET');
+    const result = await scenario(venue, () => reconcile(db));
+    test('★ NO_FIXED_SL 회차는 손절가가 기록돼도 복구 주문 0건', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1);
+      eq(venue.orderSends().length, 0, 'NO_FIXED_SL인데 복구가 STOP_MARKET을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('고정 손절을 쓰지 않는')),
+        '정책에 따른 의도적 미부착 이유가 누락됐다');
+    });
+  }
+
   // ══════════ ⑥ Gate 선물 상태 어휘 ══════════
   {
     const db = new FakeDb().seed('live_orders', [
@@ -1237,5 +1298,477 @@ export async function runNoFixedTpIntegrationTests() {
       // 열려 있는 것은 보유 시간 하나다 — 이익과 무관한 기준이다.
       eq(r.capabilities.timeExit, true);
     });
+  }
+}
+
+/**
+ * **2026-10-16 TESTNET 실측 회귀.**
+ *
+ * 실제 Binance TESTNET이 `-1111 Precision is over the maximum defined
+ * for this asset`로 주문을 거절했다. 보낸 수량은
+ * `(증거금 × 배율) / 기준가`가 만든 생 부동소수였고, 실행기는 거래소
+ * 규격을 맞추는 단계를 **아예 거치지 않았다.**
+ *
+ * 규격 정본(`quantizeOrder`)은 이미 있었고 `placeFuturesOrderSafe`와
+ * `futuresExec`는 그것을 썼다. 이 경로만 안 쓰고 있었다.
+ *
+ * 그래서 이 시험들은 "정본이 맞게 계산하는가"가 아니라
+ * **"실행기가 실제로 보낸 값이 격자 위에 있는가"**를 본다.
+ */
+export async function runPrecisionIntegrationTests() {
+  console.log('[통합 — 수량 정밀도 (-1111 회귀)]');
+
+  // **시나리오마다 다른 심볼을 쓴다.**
+  //
+  // `getSymbolFilters`는 `demo:심볼`로 5분 캐시한다. 처음에 전부
+  // BTCUSDT로 썼더니 두 번째 시나리오부터 **첫 시나리오의 규격**을
+  // 봤고, 그래서 MARKET_LOT_SIZE 시험과 "규격 미상" 시험이 둘 다
+  // 엉뚱하게 실패했다. 캐시는 옳게 동작한 것이고 시험이 틀렸다.
+  const venueFor = (symbol: string, filters: any[], exInfoFails = false): FakeVenue => {
+    const v = new FakeVenue();
+    v.on(BN_EXINFO, exInfoFails
+      ? { status: 500, json: { msg: 'down' } }
+      : { json: { symbols: [{ symbol, filters }] } });
+    return v
+      .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+      .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
+      .on(BN_DUAL, { json: { dualSidePosition: false } })
+      .on(BN_LEV, { json: { leverage: 100, symbol } })
+      .on(BN_POS, { json: [{ symbol, positionAmt: '0', entryPrice: '0',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] })
+      .on('/fapi/v1/premiumIndex', { json: { symbol, markPrice: '60000' } })
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET');
+  };
+
+  /** 거래소에 실제로 간 수량 문자열 */
+  const sentQty = (venue: FakeVenue): string | null => {
+    const c = venue.orderSends()[0];
+    return c ? String((c.params as any)?.quantity ?? '') : null;
+  };
+  const decimalsOfStr = (v: string) => {
+    const dot = v.indexOf('.');
+    return dot < 0 ? 0 : v.slice(dot + 1).replace(/0+$/, '').length;
+  };
+
+  // ══════════ ① 생 부동소수가 격자로 내려간다 ══════════
+  {
+    const SYM = 'PRECAUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.003', avgPrice: '60000' }) }, 'POST');
+    // 실측과 같은 모양: (20 × 10) / 60000
+    const raw = (20 * 10) / 60000;
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: raw }) }));
+
+    test('★ 실측 회귀 — 생 부동소수를 그대로 보내지 않는다 (-1111)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1);
+      const q = sentQty(venue)!;
+      assert(!q.includes('0.0033333'), `생 부동소수가 그대로 나갔다: ${q}`);
+      assert(decimalsOfStr(q) <= 3, `자리수가 규격을 넘었다: ${q}`);
+      eq(Number(q), 0.003);
+    });
+
+    test('★ 규격에 맞춘 수량을 장부에도 적는다', () => {
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      eq(Number(row.quantity), 0.003);
+    });
+  }
+
+  // ══════════ ② MARKET_LOT_SIZE가 더 좁으면 그쪽을 따른다 ══════════
+  {
+    const SYM = 'PRECBUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0.01', minQty: '0.01' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.03', avgPrice: '60000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0333 }) }));
+
+    test('★ 시장가는 MARKET_LOT_SIZE까지 적용한다 (0.0333 → 0.03)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1);
+      eq(Number(sentQty(venue)), 0.03);
+    });
+  }
+
+  // ══════════ ②-b 보호주문 대체 수량도 LOT_SIZE 적용 ══════════
+  {
+    const { quantizeOrder } = await import('../../lib/exchanges/quantize');
+    const filters: any = {
+      limitQty: { stepSize: 0.001, minQty: 0.001 },
+      // MARKET_LOT_SIZE가 비활성(0)이어도 LOT_SIZE는 살아 있다.
+      marketQty: { stepSize: 0, minQty: 0 }, tickSize: 0.1,
+    };
+    test('★ 손절 fallback 0.0033333333은 reduceOnly에서도 0.003', () => {
+      const q = quantizeOrder(0.0033333333333333335, null, filters,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, true); eq(q.quantity, 0.003);
+    });
+    test('★ 분할 익절 수량이 격자 아래면 실패 (전량 closePosition 승격 금지)', () => {
+      const q = quantizeOrder(0.0005, null, filters,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, false); eq(q.quantity, null);
+    });
+    test('★ 청산 중 거래소 필터를 못 읽어도 원수량을 유지한다', () => {
+      const q = quantizeOrder(0.0033333333333333335, null, null,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, true); eq(q.quantity, 0.0033333333333333335);
+    });
+  }
+
+  // ══════════ ②-c 실제 보호주문 fallback HTTP 전송 — -4120 이후 수량 ══════════
+  {
+    const SYM = 'PRECHUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, orderId: 9001 }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'POST')
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 9001, symbol: SYM,
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: '59000', reduceOnly: true }] });
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'OPTIONAL',
+    }));
+    test('★ -4120 후 실제 fallback 주문의 수량은 LOT_SIZE 격자 위', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const fallback = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(fallback.length, 1, '손절 대체 주문이 실제로 나가지 않았다');
+      eq(fallback[0].params.quantity, '0.003');
+      assert(!fallback[0].params.quantity.includes('33333'), '생 부동소수가 나갔다');
+    });
+  }
+
+  // ══════════ ②-c2 미체결 주문의 origQty는 fallback 수량 증거가 아니다 ══════════
+  {
+    const SYM = 'PRECJUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'NEW',
+        executedQty: '0', origQty: '0.010' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'OPTIONAL',
+    }));
+    test('★ 미체결 origQty=0.010을 손절 대체 수량으로 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const fallback = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(fallback.length, 0, '미체결 주문의 요청 수량으로 손절 대체 주문을 보냈다');
+    });
+  }
+
+  // ══════════ ②-c3 손절 부착 실패 후 REQUIRED 청산도 체결량/격자 사용 ══════════
+  {
+    const SYM = 'PRECKUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.003', avgPrice: '60000' }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', origQty: '0.010', avgPrice: '60000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'REQUIRED',
+    }));
+    test('★ REQUIRED 손절 실패 청산은 origQty 0.010 아닌 체결 0.003을 전송', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const close = venue.orderSends().filter(c => c.params.type === 'MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(close.length, 1, '손절 실패 후 reduceOnly 청산이 전송되지 않았다');
+      eq(close[0].params.quantity, '0.003');
+    });
+  }
+
+  // ══════════ ②-d 잘못된 PARTIAL_TP는 closePosition으로 승격되지 않는다 ══════════
+  {
+    const SYM = 'PRECIUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET' },
+        { json: bnOrder({ symbol: SYM, orderId: 9002 }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'POST')
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 9002, symbol: SYM,
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: '59000', closePosition: true }] });
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      takeProfitPolicy: 'FIXED_TP', protectionPolicy: 'OPTIONAL',
+      exitPlan: { orders: [{ kind: 'PARTIAL_TP', price: 61000, quantity: 0.0005 }] },
+    }));
+    test('★ 격자 미만 PARTIAL_TP는 주문 0건 (전량 청산 전환 금지)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const tp = venue.orderSends().filter(c => c.params.type === 'TAKE_PROFIT_MARKET');
+      eq(tp.length, 0, '수량 없는 분할 익절이 closePosition으로 전송됐다');
+    });
+  }
+
+  // ══════════ ③ 격자 아래 수량은 **보내지 않는다** ══════════
+  {
+    const SYM = 'PRECCUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.00005 }) }));
+
+    test('★ 격자보다 작은 수량은 주문을 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+    });
+
+    test('★ 안 보낸 주문을 SENT로 적지 않는다', () => {
+      // 장부에 "보냈다"가 남으면 대조가 영영 어긋난다.
+      const sent = db.writes.filter((w) => w.patch?.status === 'SENT');
+      eq(sent.length, 0);
+      eq(db.table('live_orders')[0].status, 'FAILED');
+    });
+  }
+
+  // ══════════ ④ 최소 명목가 미달도 보내지 않는다 ══════════
+  {
+    const SYM = 'PRECDUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      // 0.003 × 60000 = $180 < $500
+      { filterType: 'MIN_NOTIONAL', notional: '500' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0033333 }) }));
+
+    test('★ 최소 명목가에 못 미치면 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+    });
+  }
+
+  // ══════════ ⑤ 규격을 못 읽으면 신규 진입을 보내지 않는다 ══════════
+  {
+    const SYM = 'PRECEUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [], true)
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0033333 }) }));
+
+    test('★ 규격 미상이면 신규 진입을 막는다 — 모르는 규격으로 열지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+      assert(/규격/.test(String((r as any).message)), String((r as any).message));
+    });
+  }
+
+  // ══════════ ⑥ 지정가는 tickSize에 맞춘다 ══════════
+  {
+    const SYM = 'PRECFUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'NEW' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333 }),
+      orderType: 'LIMIT', limitPrice: 60000.07,
+    }));
+
+    test('★ 지정가는 tickSize 격자로 간다 (60000.07 → 60000.1)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const c = venue.orderSends()[0];
+      assert(c != null, '주문이 안 나갔다');
+      eq(Number((c.params as any).price), 60000.1);
+      eq(Number((c.params as any).quantity), 0.003);
+    });
+  }
+
+  // ══════════ ⑦ MARKET_LOT_SIZE가 아예 없으면 시장가를 막는다 ══════════
+  {
+    // 실제 바이낸스 USDⓈ-M 무기한은 이 필터를 **항상** 준다(꺼져 있으면
+    // 0으로). 아예 없다는 것은 규격을 다 읽지 못했다는 뜻이고, 그때
+    // `LOT_SIZE`를 복사해 쓰면 거래소가 두지 않은 규칙을 지어내는 것이다.
+    // 그래서 신규 진입은 막는다 — 거부당하는 것보다 안 보내는 것이 낫다.
+    const SYM = 'PRECGUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0033333 }) }));
+
+    test('★ 시장가 격자가 없으면 신규 진입을 막는다 (LOT_SIZE를 복사하지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+    });
+  }
+}
+
+/**
+ * **실제 심볼 × 방향 × 배율 전수.**
+ *
+ * 합성 심볼로만 보면 "BTCUSDT에서도 되는가"를 못 말한다. 실제 바이낸스
+ * USDⓈ-M 규격으로 BTCUSDT·ETHUSDT를 LONG/SHORT · 10배/100배로 돌려
+ * **거래소에 간 수량과 보호주문 가격이 전부 격자 위에 있는지** 본다.
+ */
+export async function runPrecisionMatrixTests() {
+  console.log('[통합 — 정밀도 전수 (BTC·ETH × LONG·SHORT × 10·100배)]');
+
+  /** 실제 바이낸스 USDⓈ-M 규격 (MARKET_LOT_SIZE의 0은 '꺼짐') */
+  const SPECS: Record<string, { step: string; minQty: string; tick: string; px: number }> = {
+    // **기준가를 딱 떨어지는 값으로 두지 않는다.**
+    //   60000 × 0.98 = 58800 — 이미 0.10 격자 위라 반올림을 떼도 시험이
+    //   통과한다. 실제로 그렇게 써서 음성 시험이 0건을 잡았다.
+    //   실측의 `59400.000000000007`처럼 **어긋나는 값**이어야 한다.
+    MTXBTCUSDT: { step: '0.001', minQty: '0.001', tick: '0.10', px: 60123.45 },
+    MTXETHUSDT: { step: '0.001', minQty: '0.001', tick: '0.01', px: 3012.37 },
+  };
+
+  const onGrid = (v: number, step: number) => {
+    const k = Math.round(v / step);
+    return Math.abs(k * step - v) < step * 1e-6;
+  };
+
+  for (const [SYM, spec] of Object.entries(SPECS)) {
+    for (const side of ['LONG', 'SHORT'] as const) {
+      for (const leverage of [10, 100]) {
+        const db = new FakeDb();
+        const marginUsd = 20;
+        // 스모크가 쓰는 바로 그 식 — 생 부동소수가 나온다
+        const rawQty = (marginUsd * leverage) / spec.px;
+
+        // **손절은 청산가 안쪽이어야 한다.** 배율이 높을수록 청산까지의
+        // 거리가 짧다(100배면 약 1%). 처음엔 손절을 1%로 고정하고
+        // 청산가를 아무 값이나 넣었다가, 청산가 관문이 옳게 막았다 —
+        // 코드가 아니라 픽스처가 틀렸던 것이다.
+        const liqPct = 0.9 * (100 / leverage);          // 10배 9% · 100배 0.9%
+        const stopPct = leverage >= 100 ? 0.3 : 2;
+        const sgn = side === 'LONG' ? -1 : 1;
+        const liqPrice = spec.px * (1 + sgn * liqPct / 100);
+        const rawStop = spec.px * (1 + sgn * stopPct / 100);
+        const rawTp = spec.px * (1 - sgn * stopPct / 100);
+
+        const venue = new FakeVenue()
+          .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
+            { filterType: 'LOT_SIZE', stepSize: spec.step, minQty: spec.minQty },
+            { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+            { filterType: 'PRICE_FILTER', tickSize: spec.tick },
+            { filterType: 'MIN_NOTIONAL', notional: '5' },
+          ] }] } })
+          .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+          .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
+          .on(BN_DUAL, { json: { dualSidePosition: false } })
+          .on(BN_LEV, { json: { leverage, symbol: SYM } })
+          .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0', entryPrice: '0',
+            leverage: String(leverage), marginType: 'isolated', liquidationPrice: '0' }] })
+          .on('/fapi/v1/premiumIndex', { json: { symbol: SYM, markPrice: String(spec.px) } })
+          .on('/fapi/v1/openOrders', { json: [] })
+          .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+          .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+            executedQty: String(rawQty), avgPrice: String(spec.px) }) }, 'POST');
+
+        const r = await scenario(venue, () => exec(db, {
+          plan: plan({ symbol: SYM, side, quantity: rawQty, leverage,
+            stopDistancePct: stopPct, effectiveStopPct: stopPct,
+            liquidationPrice: liqPrice, liquidationDistancePct: liqPct }),
+          stopLoss: rawStop, takeProfit: rawTp,
+          stopPolicy: 'FIXED_STOP', takeProfitPolicy: 'FIXED_TP',
+          protectionPolicy: 'OPTIONAL',
+        }));
+
+        const label = `${SYM} ${side} ${leverage}배`;
+
+        test(`★ ${label} — 진입 수량이 stepSize 격자 위에 있다`, () => {
+          assert(!(r instanceof Error), String((r as any)?.message));
+          const sends = venue.orderSends();
+          assert(sends.length >= 1, `주문이 안 나갔다 (${String((r as any)?.message)})`);
+          const q = Number((sends[0].params as any).quantity);
+          const step = Number(spec.step);
+          assert(onGrid(q, step), `${label}: 수량 ${q}이 격자 ${step} 위에 없다`);
+          assert(q > 0, `${label}: 수량이 0이다`);
+          // 생 부동소수가 그대로 나가지 않았다
+          assert(q !== rawQty || onGrid(rawQty, step),
+            `${label}: 생 부동소수 ${rawQty}가 그대로 나갔다`);
+        });
+
+        test(`★ ${label} — 보호주문 가격이 tickSize 격자 위에 있다`, () => {
+          const tick = Number(spec.tick);
+          // **이 시험이 공허하지 않다는 확인.** 원본이 이미 격자 위면
+          // 반올림을 떼도 통과하므로 아무것도 막지 못한다.
+          assert(!onGrid(rawStop, tick) || !onGrid(rawTp, tick),
+            `${label}: 원본 가격이 이미 격자 위다 — 이 시험은 아무것도 막지 못한다`);
+          const conds = venue.calls.filter((c) => c.method === 'POST'
+            && /\/order\b/.test(c.path) && (c.params as any)?.stopPrice != null);
+          assert(conds.length >= 1, `${label}: 조건부 주문이 안 나갔다`);
+          for (const c of conds) {
+            const sp = Number((c.params as any).stopPrice);
+            assert(onGrid(sp, tick), `${label}: stopPrice ${sp}이 호가 단위 ${tick} 위에 없다`);
+          }
+        });
+
+        test(`★ ${label} — 손절은 불리한 쪽, 익절은 유리한 쪽으로 맞춘다`, () => {
+          // 반올림하면 손절이 한 틱 가까워지거나 익절이 한 틱 멀어진다.
+          const conds = venue.calls.filter((c) => c.method === 'POST'
+            && /\/order\b/.test(c.path) && (c.params as any)?.stopPrice != null);
+          for (const c of conds) {
+            const sp = Number((c.params as any).stopPrice);
+            const type = String((c.params as any).type);
+            if (type === 'STOP_MARKET') {
+              if (side === 'LONG') assert(sp <= rawStop, `${label}: LONG 손절이 올라갔다 ${rawStop}→${sp}`);
+              else assert(sp >= rawStop, `${label}: SHORT 손절이 내려갔다 ${rawStop}→${sp}`);
+            } else if (type === 'TAKE_PROFIT_MARKET') {
+              if (side === 'LONG') assert(sp >= rawTp, `${label}: LONG 익절이 내려갔다 ${rawTp}→${sp}`);
+              else assert(sp <= rawTp, `${label}: SHORT 익절이 올라갔다 ${rawTp}→${sp}`);
+            }
+          }
+        });
+      }
+    }
   }
 }

@@ -262,6 +262,19 @@ jobs:
               steps = {s.get('id'): s.get('state') for s in (t.get('steps') or [])}
               e = t.get('entry') or {}
               ev = t.get('evidence') or {}
+              # **한 줄은 `::notice::`로 적는다.**
+              #
+              # 평범한 출력은 로그 본문에만 남고, 로그 본문은 blob
+              # 호스트에서 받아야 한다. 주석(annotation)으로 적으면
+              # 체크런 API로 바로 읽히므로, 이 작업을 돌린 사람이
+              # 로그를 복사해 붙이지 않아도 증거가 전달된다.
+              print(f"::notice::[{t.get('attemptNo')}회차] {t.get('side')}"
+                    f" 판정={t.get('verdict')} 상태={t.get('state')}"
+                    f" clientOrderId={t.get('clientOrderId')}"
+                    f" 거래소주문={e.get('orderId')} 체결수량={e.get('qty')}"
+                    f" 청산주문={e.get('exitOrderId')}"
+                    f" 포지션잔량0={steps.get('POSITION_ZERO')}"
+                    f" 미결잔량0={steps.get('ORDERS_ZERO')}")
               print(f"  [{t.get('attemptNo')}회차] {t.get('side')} 판정={t.get('verdict')} 상태={t.get('state')}")
               print(f"    clientOrderId={t.get('clientOrderId')} 거래소주문={e.get('orderId')}")
               print(f"    체결수량={e.get('qty')} 평균가={e.get('avgPrice')} 청산주문={e.get('exitOrderId')}")

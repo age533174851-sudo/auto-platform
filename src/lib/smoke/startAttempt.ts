@@ -19,8 +19,11 @@
 // 판정은 전부 이미 있다. 이 파일은 **순서대로 부르고 결과를 적을 뿐**이다.
 
 import {
-  preflightVerdict, holdUntilMs, unprotectedExposureVerdict, SMOKE_STRATEGY_ID,
+  preflightVerdict, holdUntilMs, unprotectedExposureVerdict,
+  smokeTestnetVerdict, unresolvedExposureBlock, SMOKE_STRATEGY_ID,
 } from './smokePlan';
+import { residualVerdict } from '../engine/orderOwnership';
+import { ownedOrderIds } from '../engine/protectionLedger';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
 
 // 누가 이 회차를 깨웠는가.
@@ -81,10 +84,45 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
 
   const exchange = (creds as any).exchange as 'binance' | 'gate';
   const testnet = (creds as any).testnet as boolean;
-  // **저장소 규칙: is_testnet === false 만 실전이다.**
-  if (testnet !== true) {
-    return fail('ERROR',
-      '실전 연결로는 스모크 테스트를 돌리지 않습니다 — 진짜 돈으로 배관을 확인하지 않습니다', 403);
+
+  // ── 스모크는 **확인된 테스트넷 연결**에만 주문을 낸다 ──
+  //
+  // 저장소 규칙(`is_testnet !== false`가 테스트넷)보다 좁다. 그 규칙은
+  // 읽기·조회에 맞지만, 스모크는 **없던 주문을 새로 만든다.** 테스트넷
+  // 호스트로 나간다는 것과 그 계좌가 테스트넷임이 확인됐다는 것은
+  // 다른 사실이다.
+  //
+  // 해석 체계는 건드리지 않는다 — `loadFuturesCreds`가 날것을 함께
+  // 돌려주고, 더 좁게 볼 이 경로만 그것을 본다.
+  const tv = smokeTestnetVerdict((creds as any).isTestnetRaw);
+  if (!tv.ok) return fail('ERROR', tv.reason, 403);
+
+  // ── 정리되지 않은 노출 위에 새 회차를 열지 않는다 ──
+  //
+  // `preflightVerdict`는 **요청한 종목만** 본다. 보호 없는 노출은
+  // 다른 종목에 남아 있을 수 있으므로 **연결 단위**로 한 번 더 본다.
+  //
+  // POSITION_ZERO와 ORDERS_ZERO가 모두 PASS여야 차단이 풀린다.
+  // 50개만 읽으면 그 이전의 미해결 노출이 사라진 것처럼 보인다.
+  // 안전한 상한(1000)에 닿으면 전체를 확인한 것이 아니므로 차단한다.
+  try {
+    const { data, error } = await sb.from('smoke_tests')
+      .select('id, connection_id, steps, state')
+      .eq('user_id', i.userId).eq('connection_id', i.connectionId)
+      .order('created_at', { ascending: false }).limit(1000);
+    if (error) throw new Error(error.message);
+    if (!Array.isArray(data)) throw new Error('스모크 장부 조회 결과가 배열이 아닙니다');
+    if (data.length >= 1000) {
+      return fail('BLOCKED', '스모크 장부가 조회 상한(1000건)에 도달했습니다 — '
+        + '과거 미해결 노출을 모두 확인할 수 없어 새 주문을 차단합니다', 503);
+    }
+    const blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
+    if (blk.blocked) return fail('BLOCKED', blk.reason, 409);
+  } catch (e: any) {
+    // 테이블 누락도 실패다. "첫 실행" 여부를 테이블 누락으로 추정하지 않는다.
+    const msg = String(e?.message || e);
+    const blk = unresolvedExposureBlock({ rows: null, connectionId: i.connectionId });
+    return fail('BLOCKED', `${blk.reason} (${msg})`, 503);
   }
 
   // ── 킬스위치 ──
@@ -299,6 +337,30 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       const ex = unprotectedExposureVerdict({ code: ev.code, position: posRecheck });
       // **못 읽은 것을 0으로 적지 않는다.** 판정이 준 값을 그대로 쓴다.
       steps.POSITION_ZERO = step(ex.positionZero, ex.reason);
+
+      // ── 미결 주문도 다시 읽는다 ──
+      //
+      // **2026-10-16 TESTNET 실측에서 여기가 비어 있었다.**
+      // 진입이 -1111로 거절됐는데 `ORDERS_ZERO`가 `PENDING`으로 남았다.
+      // 보호주문을 걸기도 전에 거절됐으니 남은 것이 없을 가능성이
+      // 높지만, **높다는 것과 확인했다는 것은 다르다.** 진입 직전
+      // 단계에서 조건부 주문이 먼저 들어갔을 수도 있다.
+      //
+      // 판정은 `residualVerdict` 하나가 한다 — `settleAttempt`가 쓰는
+      // 그것이다. 여기서 따로 세면 같은 판단이 두 곳에 생긴다.
+      const ordersAfter = await ops.readProtectiveOrders(venue, i.symbol);
+      const rv = residualVerdict({
+        position: { ok: posRecheck.ok === true, found: posRecheck.found === true,
+          qty: posRecheck.qty ?? null },
+        orders: ordersAfter,
+        myStrategyId: SMOKE_STRATEGY_ID,
+        // 이번 회차가 건 보호주문 번호. 진입 전 거절이면 비어 있다.
+        ownedIds: ownedOrderIds({ placed: [common.sl_order_id, common.tp_order_id] }),
+      });
+      steps.ORDERS_ZERO = rv.ok
+        ? step('PASS', rv.reason)
+        : step(rv.code === 'ORDERS_UNKNOWN' || rv.code === 'POSITION_NOT_ZERO'
+          ? 'UNKNOWN' : 'FAIL', rv.reason);
 
       const verdict = ev.code === 'ENTERED_UNPROTECTED' ? 'FAIL' : 'UNKNOWN';
       const why = `${ev.reason} · ${ex.reason}`;
