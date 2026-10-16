@@ -265,12 +265,22 @@ export class FakeDb {
   }
 }
 
-/** 암호화된 시크릿을 넣기 위한 키. 실행기가 실제 복호화를 거치게 한다 */
+/** 암호화된 시크릿을 넣기 위한 키. 실제 서버의 키 변수와 같아야 한다.
+ *
+ * crypto.ts는 EXCHANGE_ENCRYPTION_KEY를 사용한다. 과거 테스트 헬퍼는
+ * ENCRYPTION_KEY만 설정해 encryptSecret() 호출 시 실패했다.
+ * 두 환경 변수를 각각 원래 값으로 되돌리며 테스트 외로 노출하지 않는다.
+ */
 export function withCryptoEnv(): () => void {
   const prev = process.env.ENCRYPTION_KEY;
-  process.env.ENCRYPTION_KEY = 'traigo-integration-test-key-0123456789';
+  const prevExchange = process.env.EXCHANGE_ENCRYPTION_KEY;
+  const fixture = 'traigo-integration-test-key-0123456789';
+  process.env.ENCRYPTION_KEY = fixture;
+  process.env.EXCHANGE_ENCRYPTION_KEY = fixture;
   return () => {
     if (prev === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = prev;
+    if (prevExchange === undefined) delete process.env.EXCHANGE_ENCRYPTION_KEY;
+    else process.env.EXCHANGE_ENCRYPTION_KEY = prevExchange;
   };
 }
