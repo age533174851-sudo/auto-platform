@@ -28,6 +28,13 @@ export interface BinanceConditionalAlgoIntent {
   /** Verified Binance PRICE_FILTER.tickSize, not a default. */
   tickSize: number;
   workingType: 'MARK_PRICE' | 'CONTRACT_PRICE';
+  /** Price of EXACTLY workingType (MARK or CONTRACT) from the same symbol. */
+  referencePrice: number;
+  /** Caller must provide observed and evaluation instants in Unix ms. */
+  referenceObservedAtMs: number;
+  evaluatedAtMs: number;
+  /** Research freshness budget; must be 1..5000ms. */
+  maxReferenceAgeMs: number;
   /** Exactly one form: true -> closePosition, false -> quantity + reduceOnly. */
   closeAll: boolean;
   quantity?: number | null;
@@ -49,7 +56,9 @@ export type AlgoContractCode =
   | 'TICK_UNKNOWN_OR_OFF_GRID'
   | 'CONFLICTING_CLOSE_FORM'
   | 'QUANTITY_UNKNOWN_OR_OFF_GRID'
-  | 'INVALID_WORKING_TYPE';
+  | 'INVALID_WORKING_TYPE'
+  | 'REFERENCE_UNKNOWN_OR_STALE'
+  | 'TRIGGER_WRONG_SIDE_OR_IMMEDIATE';
 
 export interface AlgoPayloadVerdict {
   ok: boolean;
@@ -96,6 +105,29 @@ export function buildBinanceConditionalAlgoPayload(
   }
   if (i.workingType !== 'MARK_PRICE' && i.workingType !== 'CONTRACT_PRICE') {
     return denied('INVALID_WORKING_TYPE');
+  }
+  // A tick-aligned trigger can still be catastrophically placed on the
+  // WRONG side of the current mark/contract price, immediately activating
+  // on entry or leaving the position with unusable protection. No fallback
+  // price or unbounded-age readback is accepted. The caller must prove that
+  // referencePrice corresponds to the declared workingType.
+  const timestamp = (x: unknown) =>
+    typeof x === 'number' && Number.isSafeInteger(x) && x > 0;
+  if (!valid(i.referencePrice) ||
+      !timestamp(i.referenceObservedAtMs) ||
+      !timestamp(i.evaluatedAtMs) ||
+      !timestamp(i.maxReferenceAgeMs) || i.maxReferenceAgeMs > 5000 ||
+      i.referenceObservedAtMs > i.evaluatedAtMs ||
+      i.evaluatedAtMs - i.referenceObservedAtMs > i.maxReferenceAgeMs) {
+    return denied('REFERENCE_UNKNOWN_OR_STALE');
+  }
+  const shouldBeAboveReference = i.type === 'STOP_MARKET'
+    ? i.closes === 'SHORT'
+    : i.closes === 'LONG';
+  if (shouldBeAboveReference
+    ? !(i.triggerPrice > i.referencePrice)
+    : !(i.triggerPrice < i.referencePrice)) {
+    return denied('TRIGGER_WRONG_SIDE_OR_IMMEDIATE');
   }
 
   const payload: Record<string, string> = {
