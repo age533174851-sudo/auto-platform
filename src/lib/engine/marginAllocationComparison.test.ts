@@ -104,7 +104,7 @@ export function runMarginAllocationComparisonTests() {
   });
 
   test('approval is never inferred from stats; unapproved step and oversized jump stay blocked', () => {
-    const trades = verified(32, 0.1);
+    const trades = verified(102, 0.1);
     const noApproval = scenario(trades, [{
       afterClosedTrades: 100, newBaseMarginUsd: 110, explicitlyApproved: false,
     }]);
