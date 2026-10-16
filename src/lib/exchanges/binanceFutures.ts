@@ -79,6 +79,16 @@ export async function getFuturesBalance(key: string, secret: string, testnet = t
   } catch (e: any) { return { success: false, message: e.message || '잔고 조회 실패' }; }
 }
 
+/**
+ * A syntactically successful HTTP response still needs the expected array
+ * shape before it can prove no open positions or open orders. An object,
+ * null, or other malformed response is UNKNOWN, NEVER an empty account.
+ */
+export function requireBinanceVenueRows(data: unknown, errorCode: string): any[] {
+  if (!Array.isArray(data)) throw new Error(errorCode);
+  return data;
+}
+
 export interface FuturesPosition {
   symbol: string; side: 'LONG' | 'SHORT' | 'FLAT'; amount: number;
   entryPrice: number; markPrice: number; unrealizedPnl: number; leverage: number; liquidationPrice: number;
@@ -91,8 +101,7 @@ export async function getFuturesPositions(key: string, secret: string, testnet =
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
     // A 200 response with malformed JSON/object is not an empty account.
     // Fail closed so openPositionOf cannot return found:false from a bad read.
-    if (!Array.isArray(data)) throw new Error('INVALID_POSITION_RISK_SHAPE');
-    const positions: FuturesPosition[] = data
+    const positions: FuturesPosition[] = requireBinanceVenueRows(data, 'INVALID_POSITION_RISK_SHAPE')
       .filter((p: any) => parseFloat(p.positionAmt) !== 0)
       .map((p: any) => {
         const amt = parseFloat(p.positionAmt);
@@ -1454,8 +1463,7 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
     // Unknown response shape is a failed venue read, NEVER zero open orders.
-    if (!Array.isArray(data)) throw new Error('INVALID_OPEN_ORDERS_SHAPE');
-    const orders: FuturesOpenOrder[] = data.map((o: any) => ({
+    const orders: FuturesOpenOrder[] = requireBinanceVenueRows(data, 'INVALID_OPEN_ORDERS_SHAPE').map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
