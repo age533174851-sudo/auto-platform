@@ -1338,6 +1338,31 @@ export async function runPrecisionIntegrationTests() {
     });
   }
 
+  // ══════════ ②-b 보호주문 대체 수량도 LOT_SIZE 적용 ══════════
+  {
+    const { quantizeOrder } = await import('../../lib/exchanges/quantize');
+    const filters: any = {
+      limitQty: { stepSize: 0.001, minQty: 0.001 },
+      // MARKET_LOT_SIZE가 비활성(0)이어도 LOT_SIZE는 살아 있다.
+      marketQty: { stepSize: 0, minQty: 0 }, tickSize: 0.1,
+    };
+    test('★ 손절 fallback 0.0033333333은 reduceOnly에서도 0.003', () => {
+      const q = quantizeOrder(0.0033333333333333335, null, filters,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, true); eq(q.quantity, 0.003);
+    });
+    test('★ 분할 익절 수량이 격자 아래면 실패 (전량 closePosition 승격 금지)', () => {
+      const q = quantizeOrder(0.0005, null, filters,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, false); eq(q.quantity, null);
+    });
+    test('★ 청산 중 거래소 필터를 못 읽어도 원수량을 유지한다', () => {
+      const q = quantizeOrder(0.0033333333333333335, null, null,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, true); eq(q.quantity, 0.0033333333333333335);
+    });
+  }
+
   // ══════════ ③ 격자 아래 수량은 **보내지 않는다** ══════════
   {
     const SYM = 'PRECCUSDT';
