@@ -313,6 +313,63 @@ export async function claimAtomicExitSeatForResearch(
   }
 }
 
+/** Prototype adapter for an UNDEPLOYED TESTNET-only table. NO route imports it.
+ *
+ * A database migration must first create `public.exit_seat_claims` with a
+ * UNIQUE(user_id, connection_id, exchange, mode, symbol) constraint, NOT
+ * merely UNIQUE(client_order_id). No SELECT-before-INSERT: the INSERT and
+ * unique constraint together choose the sole seat winner atomically.
+ *
+ * 23505 conflict is NEVER permission to send. Missing table/RLS error,
+ * timeout, partial payload, malformed owner identity => UNAVAILABLE.
+ */
+export function supabaseAtomicExitSeatStore(
+  sb: MinimalStore | null | undefined,
+  verifiedTestnet: boolean,
+): AtomicExitSeatStore {
+  return {
+    async claimUniqueSeat(i): Promise<AtomicSeatClaimResult> {
+      const unavailable: AtomicSeatClaimResult = {
+        code: 'UNAVAILABLE', record: null,
+      };
+      if (!sb || verifiedTestnet !== true || i?.mode !== 'TESTNET') {
+        return unavailable;
+      }
+      try {
+        const { data, error } = await sb.from('exit_seat_claims')
+          .insert({
+            user_id: i.userId,
+            connection_id: i.connectionId,
+            exchange: i.exchange,
+            mode: i.mode,
+            symbol: i.symbol,
+            client_order_id: i.clientOrderId,
+            owner_token: i.ownerToken,
+          })
+          .select('user_id,connection_id,exchange,mode,symbol,client_order_id,owner_token')
+          .single();
+        if (error) {
+          if (String(error.code) === '23505') {
+            return { code: 'ALREADY_HELD', record: null };
+          }
+          return unavailable;
+        }
+        if (!data || data.user_id !== i.userId ||
+            data.connection_id !== i.connectionId ||
+            data.exchange !== i.exchange || data.mode !== i.mode ||
+            data.symbol !== i.symbol ||
+            data.client_order_id !== i.clientOrderId ||
+            data.owner_token !== i.ownerToken) {
+          return unavailable;
+        }
+        return { code: 'CLAIMED', record: i };
+      } catch {
+        return unavailable;
+      }
+    },
+  };
+}
+
 // ── Same-seat pending exit preflight ──────────────────────────────────────
 // A close ID is derived from quantity. A partially filled old close can have
 // clientOrderId A while the remaining position produces clientOrderId B.
