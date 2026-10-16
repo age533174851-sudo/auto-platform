@@ -1,0 +1,178 @@
+// Binance USD-M Algo Service conditional STOP/TP contract — OFFLINE ONLY.
+//
+// Official API as reviewed 2026-10-16:
+// POST /fapi/v1/algoOrder, algoType=CONDITIONAL, triggerPrice,
+// clientAlgoId and response.algoId (distinct from regular orderId).
+//
+// CRITICAL: this module makes NO network requests, imports no exchange
+// credentials and is NOT connected to startAttempt/placeFuturesTPSL.
+// It is only a future adapter contract until tested with a real TESTNET
+// signed GET/POST, safe cancellation/reconciliation, and release policies.
+//
+// Binance docs:
+// https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order
+
+export type ConditionalAlgoKind = 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
+export type AlgoClosingPosition = 'LONG' | 'SHORT';
+export type AlgoPositionMode = 'ONE_WAY' | 'HEDGE' | 'UNKNOWN';
+
+export interface BinanceConditionalAlgoIntent {
+  environment: 'TESTNET' | 'LIVE' | 'UNKNOWN';
+  symbol: string;
+  positionMode: AlgoPositionMode;
+  closes: AlgoClosingPosition;
+  side: 'BUY' | 'SELL';
+  type: ConditionalAlgoKind;
+  /** Already normalized in the protective direction by roundTrigger. */
+  triggerPrice: number;
+  /** Verified Binance PRICE_FILTER.tickSize, not a default. */
+  tickSize: number;
+  workingType: 'MARK_PRICE' | 'CONTRACT_PRICE';
+  /** Exactly one form: true -> closePosition, false -> quantity + reduceOnly. */
+  closeAll: boolean;
+  quantity?: number | null;
+  /** Verified LOT_SIZE step for the same symbol, if quantity is supplied. */
+  quantityStep?: number | null;
+  reduceOnly?: boolean | null;
+  /** Stable idempotency key, NEVER regenerated on a network retry. */
+  clientAlgoId: string;
+}
+
+export type AlgoContractCode =
+  | 'OK'
+  | 'NOT_TESTNET'
+  | 'MODE_UNKNOWN_OR_UNSUPPORTED'
+  | 'BAD_SYMBOL'
+  | 'BAD_IDENTITY'
+  | 'SIDE_MISMATCH'
+  | 'BAD_TRIGGER'
+  | 'TICK_UNKNOWN_OR_OFF_GRID'
+  | 'CONFLICTING_CLOSE_FORM'
+  | 'QUANTITY_UNKNOWN_OR_OFF_GRID'
+  | 'INVALID_WORKING_TYPE';
+
+export interface AlgoPayloadVerdict {
+  ok: boolean;
+  code: AlgoContractCode;
+  /** Only constructed in a verified scenario; never an execution grant. */
+  payload: Record<string, string> | null;
+  executionAuthorized: false;
+}
+
+const valid = (x: unknown): x is number =>
+  typeof x === 'number' && Number.isFinite(x) && x > 0;
+const gridAligned = (value: number, step: number): boolean => {
+  if (!valid(value) || !valid(step)) return false;
+  const ratio = value / step;
+  return Number.isFinite(ratio) && ratio >= 1 &&
+    Math.abs(ratio - Math.round(ratio)) < 1e-7;
+};
+
+const denied = (code: AlgoContractCode): AlgoPayloadVerdict =>
+  ({ ok: false, code, payload: null, executionAuthorized: false });
+
+export function buildBinanceConditionalAlgoPayload(
+  i: BinanceConditionalAlgoIntent,
+): AlgoPayloadVerdict {
+  if (!i || i.environment !== 'TESTNET') return denied('NOT_TESTNET');
+  // This research implementation supports ONE_WAY only. Hedge mode has
+  // positionSide-specific order rules; do not fake them with BOTH.
+  if (i.positionMode !== 'ONE_WAY') return denied('MODE_UNKNOWN_OR_UNSUPPORTED');
+  if (!/^[A-Z0-9]{5,24}$/.test(i.symbol || '')) return denied('BAD_SYMBOL');
+  if (!/^[.A-Z:/a-z0-9_-]{1,36}$/.test(i.clientAlgoId || '')) {
+    return denied('BAD_IDENTITY');
+  }
+  if ((i.closes !== 'LONG' && i.closes !== 'SHORT') ||
+      !['STOP_MARKET', 'TAKE_PROFIT_MARKET'].includes(i.type)) {
+    return denied('SIDE_MISMATCH');
+  }
+  if ((i.closes === 'LONG' && i.side !== 'SELL') ||
+      (i.closes === 'SHORT' && i.side !== 'BUY')) {
+    return denied('SIDE_MISMATCH');
+  }
+  if (!valid(i.triggerPrice)) return denied('BAD_TRIGGER');
+  if (!gridAligned(i.triggerPrice, i.tickSize)) {
+    return denied('TICK_UNKNOWN_OR_OFF_GRID');
+  }
+  if (i.workingType !== 'MARK_PRICE' && i.workingType !== 'CONTRACT_PRICE') {
+    return denied('INVALID_WORKING_TYPE');
+  }
+
+  const payload: Record<string, string> = {
+    algoType: 'CONDITIONAL',
+    symbol: i.symbol, side: i.side, positionSide: 'BOTH',
+    type: i.type, triggerPrice: String(i.triggerPrice),
+    workingType: i.workingType, clientAlgoId: i.clientAlgoId,
+  };
+  if (i.closeAll === true) {
+    // Binance forbids reduceOnly OR quantity alongside closePosition=true.
+    if (i.quantity != null || i.reduceOnly != null) {
+      return denied('CONFLICTING_CLOSE_FORM');
+    }
+    payload.closePosition = 'true';
+  } else if (i.closeAll === false) {
+    // For ONE_WAY quantity close, reduceOnly must be explicit and true.
+    // Quantity cannot be rounded *up*, nor silently replaced.
+    if (i.reduceOnly !== true || !valid(i.quantity) ||
+        !gridAligned(i.quantity, Number(i.quantityStep))) {
+      return denied('QUANTITY_UNKNOWN_OR_OFF_GRID');
+    }
+    payload.quantity = String(i.quantity);
+    payload.reduceOnly = 'true';
+  } else {
+    return denied('CONFLICTING_CLOSE_FORM');
+  }
+
+  return { ok: true, code: 'OK', payload, executionAuthorized: false };
+}
+
+export interface AcceptedAlgoOrder {
+  code: 'ACKED_UNVERIFIED' | 'UNKNOWN';
+  acceptedAlgoId: string | null;
+  clientAlgoId: string | null;
+  /** ACK is not evidence the protection is active on the exchange. */
+  venueProtectionActiveVerified: false;
+  executionAuthorized: false;
+}
+
+/**
+ * Accept only a matching idempotency echo and lossless int64 `algoId`.
+ * Never borrow regular orderId; never Number() an unsafe integer.
+ * Even a matching ACK is not a successful protective readback.
+ */
+export function parseBinanceAlgoAcceptance(
+  response: any,
+  payload: Record<string, string> | null,
+): AcceptedAlgoOrder {
+  const unknown: AcceptedAlgoOrder = {
+    code: 'UNKNOWN', acceptedAlgoId: null, clientAlgoId: null,
+    venueProtectionActiveVerified: false, executionAuthorized: false,
+  };
+  if (!payload || !response || response.algoType !== 'CONDITIONAL' ||
+      response.clientAlgoId !== payload.clientAlgoId ||
+      response.symbol !== payload.symbol ||
+      response.side !== payload.side ||
+      response.orderType !== payload.type) {
+    return unknown;
+  }
+  const raw = response.algoId;
+  let id: string | null = null;
+  if (typeof raw === 'string' && /^[1-9][0-9]*$/.test(raw)) id = raw;
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) {
+    id = String(raw);
+  }
+  if (!id) return unknown;
+  return { code: 'ACKED_UNVERIFIED', acceptedAlgoId: id,
+    clientAlgoId: payload.clientAlgoId,
+    venueProtectionActiveVerified: false, executionAuthorized: false };
+}
+
+/** Deletion must use Algo ID namespace; a regular-order ID is NOT interchangeable. */
+export function binanceAlgoCancellationIdentifier(
+  id: { kind: 'ALGO'; algoId: string } | { kind: 'REGULAR'; orderId: string },
+): { ok: boolean; algoId: string | null; executionAuthorized: false } {
+  if (id?.kind !== 'ALGO' || !/^[1-9][0-9]*$/.test(id.algoId ?? '')) {
+    return { ok: false, algoId: null, executionAuthorized: false };
+  }
+  return { ok: true, algoId: id.algoId, executionAuthorized: false };
+}
