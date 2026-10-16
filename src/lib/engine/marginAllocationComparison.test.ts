@@ -115,6 +115,22 @@ export function runMarginAllocationComparisonTests() {
     eq(hugeJump.fixedThenReviewedStep.appliedSteps.length, 0);
   });
 
+  test('research review itself rejects 30 trades or a 25% step cap', () => {
+    for (const review of [
+      { ...criteria, minClosedTrades: 30 },
+      { ...criteria, maxStepIncreasePct: 25 },
+    ]) {
+      let rejected = false;
+      try {
+        compareMarginAllocationScenarios({
+          initialEquityUsd: 1000, initialMarginUsd: 10,
+          trades: verified(102, 0.1), review,
+        });
+      } catch { rejected = true; }
+      assert(rejected, 'Legacy aggressive scale-up review parameters should be rejected');
+    }
+  });
+
   test('gross returns without verified costs or excessive margin are refused', () => {
     let refusedCosts = false;
     try { scenario([{ ...verified(1, 0.2)[0], costsIncluded: false }]); }
