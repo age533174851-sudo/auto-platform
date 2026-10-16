@@ -89,7 +89,10 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
+    // A 200 response with malformed JSON/object is not an empty account.
+    // Fail closed so openPositionOf cannot return found:false from a bad read.
+    if (!Array.isArray(data)) throw new Error('INVALID_POSITION_RISK_SHAPE');
+    const positions: FuturesPosition[] = data
       .filter((p: any) => parseFloat(p.positionAmt) !== 0)
       .map((p: any) => {
         const amt = parseFloat(p.positionAmt);
@@ -1450,7 +1453,9 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     const params: Record<string, string | number> = {};
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
-    const orders: FuturesOpenOrder[] = (Array.isArray(data) ? data : []).map((o: any) => ({
+    // Unknown response shape is a failed venue read, NEVER zero open orders.
+    if (!Array.isArray(data)) throw new Error('INVALID_OPEN_ORDERS_SHAPE');
+    const orders: FuturesOpenOrder[] = data.map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
