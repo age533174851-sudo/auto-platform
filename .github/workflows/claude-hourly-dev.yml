@@ -1,77 +1,193 @@
-# Claude Code automated development. Review all output before merge.
+# 무인 개발 — **일반 갈래** (거래 엔진이 아닌 모든 것)
+#
+# 왜 둘로 나눴는가
+# ────────────────
+# 계정 화면을 고치는 일과 청산 엔진을 고치는 일은 **틀리면 잃는 것이
+# 다르다.** 전자는 화면이 어색해지고, 후자는 포지션이 방치된다.
+# 같은 권한과 같은 검증으로 둘 다 하면, 검증을 거래 엔진에 맞추면
+# 화면 작업이 느려지고 화면에 맞추면 엔진이 위험해진다.
+#
+# 그래서 갈래를 나눈다:
+#   claude-hourly-dev      ← 여기. 거래 엔진 **밖**
+#   claude-hourly-trading  ← 주문·Exact100X·청산·TESTNET. 검증이 더 세다
+#
+# 이 갈래가 거래 엔진 경로를 건드리면 `check-autodev-safety`가 막는다 —
+# 프롬프트가 아니라 커밋된 결과를 보고 막는다.
 name: Claude Hourly Dev
 
 on:
   schedule:
+    # 정시를 피한다 — 전 세계의 `0 * * * *`가 몰려 예약이 밀린다.
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      focus:
+        description: '이번 회차 주제 (비우면 스스로 고른다)'
+        required: false
+        default: ''
 
-# Scheduled runs remain disabled until CLAUDE_HOURLY_ENABLED=true.
-# Manual workflow_dispatch remains available for the first dry run.
 concurrency:
+  # 겹쳐 돌면 같은 문제에 Draft PR이 둘 열린다.
+  # 돌던 회차를 죽이면 만들던 브랜치가 반쯤 남으므로 끊지 않고 기다린다.
   group: claude-hourly-dev
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  actions: read
+  contents: write          # 브랜치·커밋
+  pull-requests: write     # Draft PR
+  issues: read             # 우선순위 판단에 읽기만
+  actions: read            # **read만** — 다른 워크플로를 못 깨운다
   id-token: write
 
 jobs:
-  claude-dev:
+  dev:
+    # 예약은 저장소 변수로 명시적으로 켠다. 처음에는 수동 실행으로
+    # 비용·동작을 보고, 확인한 뒤에 켠다.
     if: ${{ github.event_name == 'workflow_dispatch' || vars.CLAUDE_HOURLY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+
     steps:
+      - name: 인증 확인
+        env:
+          OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          APIKEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OAUTH:-}" ] && [ -z "${APIKEY:-}" ]; then
+            echo "::error::인증이 없습니다 — CLAUDE_CODE_OAUTH_TOKEN 또는 ANTHROPIC_API_KEY 시크릿을 넣으세요"
+            exit 1
+          fi
+          if [ -n "${OAUTH:-}" ]; then echo "인증: CLAUDE_CODE_OAUTH_TOKEN"; else echo "인증: ANTHROPIC_API_KEY"; fi
+
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
+        with: { node-version: '22', cache: npm }
 
-      - name: Claude Code — scoped autonomous development
+      - name: 의존성 설치
+        run: npm ci
+
+      # 고치기 전 tsc 오류 수를 모르면 "내가 늘렸는지"를 말할 수 없다.
+      - name: 기준선 측정
+        id: baseline
+        run: |
+          set -uo pipefail
+          n=$(npx tsc --noEmit 2>&1 | grep -c "error TS" || true)
+          echo "tsc_before=${n}" >> "$GITHUB_OUTPUT"
+          echo "tsc 기준선: ${n}건"
+
+      - name: Claude Code — 일반 개발
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           base_branch: main
-          branch_prefix: 'claude/'
-          additional_permissions: |
-            actions: read
+          branch_prefix: 'claude/dev-'
           claude_args: |
-            --max-turns 30
-            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run worker:build),Bash(npm run build),Bash(npx tsc --noEmit)"
+            --max-turns 40
+            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*)"
           prompt: |
-            You are the scheduled TRAIGO maintenance agent. Read CLAUDE.md first.
-            Work only on low-risk account/profile/auth UI (excluding auth security policy changes),
-            interface usability, and local application state management. Pick ONE small
-            well-defined task per run. Avoid duplicating open PR work.
+            TRAIGO 무인 개발 — **일반 갈래** 1회차.
+            저장소: ${{ github.repository }}
+            집중 주제: "${{ inputs.focus }}" (비면 스스로 고르세요)
+            tsc 기준선: ${{ steps.baseline.outputs.tsc_before }}건
 
-            Hard prohibitions (including indirect changes):
-            - No LIVE or TESTNET orders; no deployment or migration execution.
-            - No DB writes/schema changes; no secret or credentials access/output.
-            - No merge, rebase, force-push, or modification of main.
-            - No changes to trading strategy, sizing, leverage, TP/SL, Exact100X,
-              order placement, exit authority, risk gates, or exchange adapters.
-            - Never edit src/lib/engine/, src/lib/strategies/, src/lib/backtest/,
-              worker/, supabase/migrations/, or .github/workflows/.
-            - Never alter NO_FIXED_SL / NO_FIXED_TP contracts.
-            - Leave PR #343, #346 and #347 work to ChatGPT; do not overlap.
+            ## 0. 먼저 읽습니다
 
-            Before changing anything, check open PRs and the working tree.
-            If no safe non-overlapping task exists, report and exit with no changes.
-            Run npm ci, npm ci --prefix worker, npm test, npm run worker:build,
-            npm run build, and npx tsc --noEmit before proposing changes.
-            Typecheck has a pre-existing baseline: do not claim PASS if the
-            count of diagnostics increases above the base branch baseline.
-            If any previously passing check fails or the baseline worsens,
-            do not commit or propose changes; report the failure only.
+            1. 루트 `CLAUDE.md` — **이 지시보다 우선합니다.**
+            2. 최신 main의 최근 커밋.
+            3. **열린 PR 전체와 각 PR이 바꾸는 파일**
+               (`gh pr list --state open --json number,title,headRefName,files`).
+            4. 열린 이슈 중 버그·미완성.
 
-            If checks pass, create only a claude/ branch and a DRAFT PR against main.
-            Include exact changes, test evidence, and risks. Never merge a PR.
-            If draft PR creation cannot be verified, do not claim success.
-            Never claim GitHub Actions or exchange evidence that was not observed.
+            ## 1. 중복을 피합니다 — 말이 아니라 파일로
+
+            열린 PR이 이미 바꾸는 파일은 건드리지 않습니다. 고치려는
+            문제가 이미 열린 PR에 있으면 버리고 다음 후보로 갑니다.
+
+            ## 2. 이 갈래의 범위
+
+            거래 엔진 **밖**의 모든 것입니다. 우선순위:
+
+            1. 모의투자(페이퍼) 기능의 버그·미완성
+            2. 사용자 계정·인증·설정 기능
+            3. 금융 데이터 수집·분석
+            4. 자동매매 **상태 표시**와 운영 화면 (판단 로직이 아니라 표시)
+            5. UI/UX
+            6. 기타
+
+            **다음 경로는 이 갈래가 건드리지 않습니다** —
+            `src/lib/engine/` · `src/lib/strategies/` · `src/lib/exchanges/` ·
+            `src/lib/smoke/` · `src/lib/execution/` · `src/lib/risk/` ·
+            `src/lib/backtest/` · `worker/` · `supabase/migrations/` ·
+            `.github/workflows/`.
+            그 수정이 필요하면 **고치지 말고**, 무엇이 왜 필요한지만
+            적고 끝냅니다. 거래 엔진은 `claude-hourly-trading` 갈래가
+            더 센 검증을 받고 합니다.
+
+            ## 3. 순서
+
+            원인을 먼저 특정합니다. 재현 테스트를 먼저 쓰고 RED를 확인한
+            뒤 **최소한으로** 고치고 GREEN을 확인합니다. 원인을 모르면
+            고치지 않습니다. 한 회차에 **문제 하나**입니다.
+
+            ## 4. 검증 — 통과해야 PR을 엽니다
+
+            `npm test` (0 실패) · `npx tsc --noEmit`(기준선 초과 금지) ·
+            `npm run build` · 건드린 영역의 `scripts/check-*.mjs`.
+
+            하나라도 실패하면 **PR을 열지 말고** 무엇이 왜 실패했는지
+            적고 끝냅니다. 실패를 숨기지 않습니다.
+
+            ## 5. 금지
+
+            - main 직접 수정 금지. 새 브랜치 + **Draft** PR만.
+            - PR 자동 병합 금지.
+            - LIVE 주문·실거래 API 호출 금지.
+            - 운영 DB 변경·마이그레이션 금지.
+            - 다른 워크플로를 실행시키지 않습니다.
+            - **기존 안전장치를 제거하지 않습니다.** 검사기가 막으면
+              검사기가 옳다고 보고 원인을 다시 봅니다.
+            - `NO_FIXED_SL`·`NO_FIXED_TP`·Exact100X 계약, 진입·청산 정책
+              변경 금지.
+            - 키·시크릿·토큰을 로그·코드·PR 본문에 적지 않습니다.
+            - 변이 하네스가 도는 중에는 커밋하지 않습니다(`git status` 확인).
+
+            ## 6. 고칠 것이 없으면 고치지 않습니다
+
+            억지로 코드를 바꾸지 않습니다. 무엇을 봤고 왜 고칠 것이
+            없었는지 적고 끝내는 것이 정상적인 회차입니다.
+
+            ## 7. 보고
+
+            고른 문제와 근거 · 원인 · 변경 파일 · 실제 실행한 검증 결과 ·
+            브랜치/커밋 SHA · PR 번호 · 남은 위험. 테스트를 **작성한 것**과
+            **실행한 것**을 구분합니다.
+
+      # ── 결과를 한 번 더 본다 ──
+      #
+      # 프롬프트는 지시고 이것은 관문이다. 커밋된 변경에서 안전 닻이
+      # 줄었거나, 울타리·마이그레이션·거래 엔진을 건드렸으면 실패한다.
+      - name: 변경 안전 관문
+        if: always()
+        run: |
+          set -uo pipefail
+          git fetch origin main --quiet || true
+          node scripts/check-autodev-safety.mjs --base origin/main --mode dev
+
+      - name: 실패 원인 기록
+        if: failure()
+        run: |
+          {
+            echo "## Claude Hourly Dev 회차 실패"
+            echo ""
+            echo "- 실행: ${{ github.run_id }} (시도 ${{ github.run_attempt }})"
+            echo "- 트리거: ${{ github.event_name }}"
+            echo "- tsc 기준선: ${{ steps.baseline.outputs.tsc_before }}건"
+            echo ""
+            echo "인증 단계에서 멈췄다면 시크릿이 없는 것입니다."
+            echo "변경 안전 관문에서 멈췄다면 그 회차가 울타리를 넘은 것이므로"
+            echo "브랜치를 병합하지 말고 내용을 먼저 보세요."
+          } >> "$GITHUB_STEP_SUMMARY"

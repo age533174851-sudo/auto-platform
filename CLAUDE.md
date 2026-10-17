@@ -71,17 +71,60 @@
 해야 하면 **로직을 복제하지 말고 같은 파일을 컴파일해서 쓴다**
 (`scripts/gen-migration-manifest.mjs`의 `loadPlan()`이 그 예다).
 
-## 예약 Claude 개발 에이전트 (Claude Hourly Dev)
+## 무인 회차 — 갈래가 둘이다
 
-이 섹션은 위의 모든 최상위 규칙에 **추가**된다. 충돌 시 더 엄격한 제한을 따른다.
+매시간 Claude Code가 스스로 깨어나 문제 하나를 고치고 Draft PR을 연다.
+이 절은 위의 모든 규칙에 **추가**되고, 충돌하면 더 엄격한 쪽을 따른다.
 
-- 담당: 계정·프로필·인증 관련 **화면/UI 개선**(인증 정책·권한 로직 변경 제외), 화면 사용성, 클라이언트 상태 관리의 작은 비중복 작업만 수행한다.
-- ChatGPT 담당 PR #343, #346, #347 및 다른 열린 PR과 중복 작업 금지.
-- 매 실행마다 열린 PR·main 기준을 먼저 확인하고, 안전하고 독립적인 작업이 없으면 변경 없이 종료한다.
-- **절대 수정 금지 경로:** `src/lib/engine/`, `src/lib/strategies/`, `src/lib/backtest/`, `worker/`, `supabase/migrations/`, `.github/workflows/`.
-- **절대 실행 금지:** LIVE/TESTNET 주문, DB 쓰기/마이그레이션, 배포, PR 머지, force-push, 자격증명 조회·출력.
-- **계약 변경 금지:** Exact100X, 레버리지, 주문 크기, 진입/청산, 손절·익절, `NO_FIXED_SL` / `NO_FIXED_TP`, 위험 관문.
-- 검증: `npm ci`, `npm ci --prefix worker`, `npm test`, `npm run worker:build`, `npm run build`, `npx tsc --noEmit`. 기존 main 타입 오류 기준선보다 악화되면 실패로 판단한다. 기존 통과 검증이 실패해도 변경 제출 금지.
-- 모든 검증을 확인한 경우에만 `claude/` 브랜치와 **Draft PR** 생성. PR에는 테스트 근거, 변경 경로, 미검증 사항, 위험을 명시한다. 머지는 사용자 승인 후 별도 절차로만 한다.
-- 예약 실행은 `CLAUDE_HOURLY_ENABLED=true` 저장소 변수로 명시적으로 켠다. 최초에는 수동 `workflow_dispatch` 검증을 먼저 한다.
-- 프롬프트의 금지 문구만으로 기술적 권한 분리가 보장되지는 않는다. 보호 브랜치·CODEOWNERS·필수 리뷰를 별도로 유지한다.
+| | `claude-hourly-dev` | `claude-hourly-trading` |
+|---|---|---|
+| 범위 | 거래 엔진 **밖** — 모의투자·계정·데이터·화면 | 주문·Exact100X·청산·TESTNET |
+| 예약 | 매시 :17 | 매시 :47 |
+| 켜는 변수 | `CLAUDE_HOURLY_ENABLED` | `CLAUDE_TRADING_AUTODEV_ENABLED` |
+| 검증 | test · tsc · build · 관련 검사기 | 그 전부 + **검사기 전수** + 변이 자기점검 + 워커 빌드 |
+
+**갈래를 나눈 이유:** 화면이 어색해지는 것과 포지션이 방치되는 것은
+잃는 것이 다르다. 같은 검증을 둘 다에 걸면, 엔진에 맞추면 화면이
+느려지고 화면에 맞추면 엔진이 위험해진다.
+
+켜는 변수가 **둘로 나뉜 이유도 같다** — 화면 작업을 켜는 결정과 엔진
+작업을 켜는 결정은 같은 결정이 아니다.
+
+### 막히면 관문이 옳다
+
+검사기나 관문이 막으면 **그것을 지우지 않는다.** 시험을 통과시키려고
+fail-closed 분기를 없애는 것이 이 저장소에서 가장 비싼 실수다 — 그렇게
+없앤 관문은 아무도 다시 세우지 않는다. 막혔으면 원인을 다시 본다.
+
+`scripts/check-autodev-safety.mjs`가 **커밋된 결과를** 보고 이것을
+확인한다. 안전 닻(`maySend: false` · `fail('BLOCKED'` · `killSwitchGate` ·
+`quantizeOrder(` · `NO_FIXED_SL` 등)의 개수가 줄면 그 회차는 실패한다.
+
+### 고칠 것이 없으면 고치지 않는다
+
+확인된 문제가 없는 회차는 **아무것도 바꾸지 않고 끝내는 것이 정답**이다.
+매시간 도는 작업이 매시간 무언가를 바꾸면 그 절반은 이유가 없다.
+
+### 이미 열린 PR이 잡은 파일은 건드리지 않는다
+
+말로 나누지 말고 **파일 목록으로** 확인한다
+(`gh pr list --state open --json files`). 같은 문제에 PR이 둘이면 나중에
+들어온 쪽이 앞의 수정을 덮는다.
+
+### 무인 회차가 가질 수 없는 것 — 권한으로 막는다
+
+- `actions: read` — **다른 워크플로를 깨울 수 없다.** `smoke-test-testnet`
+  (실주문) · `ops-runner`(배포) · `migrate`(DB) 전부.
+- 거래소·DB 시크릿을 **넘기지 않는다** (`ADMIN_SECRET` ·
+  `EXIT_MONITOR_URL` · `SUPABASE_DB_URL` · `FLY_API_TOKEN` …).
+- `curl` · `wget` · `psql` · `supabase` · `flyctl` · `gh workflow run` ·
+  `gh pr merge` · `git push --force`를 **도구 수준에서 막는다.**
+- `.github/workflows/`를 건드릴 수 없다 — 제 울타리를 스스로 넓히는
+  변경을 제안할 수 없다.
+
+**금지를 프롬프트에만 적으면 언젠가 지켜지지 않는다.** 프롬프트는 지시고
+권한과 관문이 울타리다. `scripts/check-claude-hourly.mjs`가 그 울타리가
+두 갈래 모두에 남아 있는지 CI에서 센다.
+
+⚠ `contents: write`는 기술적으로 main push를 허용한다. **main 브랜치
+보호 규칙**(Require a pull request before merging)이 진짜 관문이다.
