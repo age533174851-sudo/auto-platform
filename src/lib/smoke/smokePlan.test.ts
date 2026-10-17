@@ -17,6 +17,7 @@ import {
 } from './smokePlan';
 import { confirmedBinanceOpenOrders, combinedSmokeOpenOrderEvidence } from '../engine/venuePositionOps';
 import { requireBinanceVenueRows } from '../exchanges/binanceFutures';
+import { residualVerdict } from '../engine/orderOwnership';
 
 const OK_BODY = {
   symbol: 'ETHUSDT', side: 'LONG', connectionId: 'conn-1', mode: 'TESTNET',
@@ -31,6 +32,63 @@ const allSteps = (state: StepState, over: Partial<Record<StepId, StepState>> = {
 };
 
 export function runSmokePlanTests() {
+
+  test('★ ORDERS_ZERO: regular empty but Algo present cannot pass', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] },
+      { success: true, orders: [{ algoId: '9000000000000000001', symbol: 'ETHUSDT' }] },
+    );
+    assert(orders !== null);
+    const v = residualVerdict({ position: { ok: true, found: false },
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+    eq(v.ok, false); eq(v.code, 'UNKNOWN_PRESENT');
+  });
+
+  test('★ ORDERS_ZERO: ordinary orders cannot disappear from dual-book evidence', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [{ orderId: '123', symbol: 'ETHUSDT' }] },
+      { success: true, orders: [] },
+    );
+    assert(orders !== null);
+    const v = residualVerdict({ position: { ok: true, found: false },
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+    eq(v.ok, false); eq(v.code, 'UNKNOWN_PRESENT');
+  });
+
+  test('★ ORDERS_ZERO: flat position read failure cannot pass empty books', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] }, { success: true, orders: [] },
+    );
+    const v = residualVerdict({ position: { ok: false, found: false },
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+    eq(v.ok, false); eq(v.code, 'POSITION_NOT_ZERO');
+  });
+
+  test('★ ORDERS_ZERO: Algo GET failure or malformed 200 is UNKNOWN', () => {
+    for (const algo of [
+      { success: false, orders: [] },
+      { success: true, orders: {} },
+    ]) {
+      const orders = combinedSmokeOpenOrderEvidence(
+        { success: true, orders: [] }, algo,
+      );
+      eq(orders, null);
+      const v = residualVerdict({ position: { ok: true, found: false },
+        orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+      eq(v.ok, false); eq(v.code, 'ORDERS_UNKNOWN');
+    }
+  });
+
+  test('★ ORDERS_ZERO: both successful empty books permit clear evidence', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] }, { success: true, orders: [] },
+    );
+    assert(Array.isArray(orders));
+    const v = residualVerdict({ position: { ok: true, found: false },
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+    eq(v.ok, true); eq(v.code, 'CLEAR');
+  });
+
   // ── Regression: failed Binance GET must not become an empty account ──
   test('★ openOrders HTTP failure with orders:[] is UNKNOWN, not zero', () => {
     const orders = confirmedBinanceOpenOrders({ success: false, orders: [] });
@@ -152,6 +210,17 @@ export function runSmokePlanTests() {
     const code = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/startAttempt.ts'), 'utf8');
     assert(code.includes('ops.readAllOpenOrdersForSmoke(venue, i.symbol)'));
     assert(!code.includes('const ordersBefore = await ops.readProtectiveOrders(venue, i.symbol)'));
+  });
+
+  test('★ failed entry and settlement residuals require BOTH Binance order books', () => {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const start = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/startAttempt.ts'), 'utf8');
+    const settle = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/settleAttempt.ts'), 'utf8');
+    assert(start.includes('const ordersAfter = await ops.readAllOpenOrdersForSmoke(venue, i.symbol)'));
+    assert(!start.includes('const ordersAfter = await ops.readProtectiveOrders(venue, i.symbol)'));
+    assert(settle.includes('const leftover = await ops.readAllOpenOrdersForSmoke(venue, row.symbol)'));
+    assert(!settle.includes('const leftover = plan.ok ? (cx.leftover ?? await ops.readProtectiveOrders'));
   });
 
   test('★ legacy read-only diagnostic with 3 successful empty reads is NOT authorization', () => {
