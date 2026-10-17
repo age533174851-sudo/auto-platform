@@ -260,13 +260,30 @@ if (lane.mode === 'trading') {
 // 진짜 관문인데, **관문이 있는지 모르는 채로** 무인 회차를 돌리면
 // 약속만 남는다.
 {
-  if (!/branches\/main\/protection/.test(src)) {
-    err(`${WF}: main 보호 규칙을 확인하지 않습니다 — `
+  // **추가 권한 없이** 읽을 수 있는 두 곳을 본다.
+  //   /rules/branches/main  적용되는 룰셋 (PR 필수 여부가 여기 있다)
+  //   /branches/main        protected 참/거짓
+  //
+  // 처음에는 `/branches/main/protection` 하나만 봤는데 그쪽은
+  // Administration 읽기 권한을 요구한다. 403을 "토큰이 못 읽는다"로
+  // 읽었지만 실제로는 **보호가 아예 없었다** — 낮은 권한의 두 경로가
+  // 그것을 확정적으로 말해 준다.
+  if (!/rules\/branches\/main/.test(src)) {
+    err(`${WF}: 룰셋(/rules/branches/main)을 보지 않습니다 — `
+      + 'PR 필수 여부를 추가 권한 없이 알 수 있는 경로입니다');
+  }
+  if (!/\/branches\/main"/.test(src) && !/branches\/main\b/.test(src)) {
+    err(`${WF}: main 보호 여부(/branches/main)를 확인하지 않습니다 — `
       + '`contents: write`가 main push를 허용하는데 관문이 있는지 모릅니다');
   }
-  if (!/required_pull_request_reviews/.test(src)) {
-    err(`${WF}: 보호 규칙에서 PR 필수 여부를 보지 않습니다 — `
+  if (!/'pull_request'/.test(src)) {
+    err(`${WF}: 룰셋에서 PR 필수 규칙을 보지 않습니다 — `
       + '보호가 켜져 있어도 PR 없이 밀 수 있으면 관문이 아닙니다');
+  }
+  // 추가 권한을 몰래 올리지 않았는가.
+  if (/administration:\s*(read|write)/.test(src)) {
+    err(`${WF}: \`administration\` 권한을 요구합니다 — `
+      + '보호 여부는 낮은 권한의 두 경로로 확인할 수 있습니다');
   }
   // 읽지 못한 경우를 통과로 보면 관문이 없는 것과 같다.
   if (!/UNKNOWN/.test(src)) {
@@ -275,6 +292,28 @@ if (lane.mode === 'trading') {
   }
   if (!/workflow_dispatch["']?\s*\]?\s*;?\s*then[\s\S]{0,200}exit 1|GITHUB_EVENT_NAME..\s*!=\s*"workflow_dispatch"/.test(src)) {
     err(`${WF}: 보호가 확인되지 않았을 때 **예약 실행**을 멈추지 않습니다`);
+  }
+}
+
+// ── ⑮ 실패 원인을 **읽을 수 있게** 남기는가 ──
+//
+// 첫 수동 실행이 `Claude execution failed: result is_error:true`로만
+// 끝났다. 진짜 사유(`Credit balance is too low`)는 액션이 주는
+// `execution_file` 안에 있었고, 그것을 주석으로 끌어올리고 나서야
+// 보였다. `display_report`는 Step Summary에만 쓰고 Summary는 API로
+// 나오지 않는다 — 화면을 열 수 없는 쪽에서는 원인을 영영 못 읽는다.
+{
+  if (!/display_report:\s*true/.test(src)) {
+    err(`${WF}: \`display_report: true\`가 없습니다 — 실패 사유가 요약에 남지 않습니다`);
+  }
+  if (!/execution_file/.test(src)) {
+    err(`${WF}: \`execution_file\`에서 실패 사유를 꺼내지 않습니다 — `
+      + 'Step Summary는 API로 읽히지 않아 원인이 사람 눈에만 남습니다');
+  }
+  // 토큰이 없으면 브랜치·PR을 만들 자격이 없다(첫 실행이 그래서 의심됐다).
+  if (!/github_token:\s*\$\{\{\s*secrets\.GITHUB_TOKEN\s*\}\}/.test(src)) {
+    err(`${WF}: \`github_token\`을 넘기지 않습니다 — GitHub App이 없으면 `
+      + '브랜치·Draft PR을 만들 자격이 없습니다');
   }
 }
 
