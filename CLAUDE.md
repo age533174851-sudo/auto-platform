@@ -70,3 +70,18 @@
 새 판단 로직은 한 곳에 두고 테스트를 붙인다. 스크립트가 앱과 같은 판단을
 해야 하면 **로직을 복제하지 말고 같은 파일을 컴파일해서 쓴다**
 (`scripts/gen-migration-manifest.mjs`의 `loadPlan()`이 그 예다).
+
+## 예약 Claude 개발 에이전트 (Claude Hourly Dev)
+
+이 섹션은 위의 모든 최상위 규칙에 **추가**된다. 충돌 시 더 엄격한 제한을 따른다.
+
+- 담당: 계정·프로필·인증 관련 **화면/UI 개선**(인증 정책·권한 로직 변경 제외), 화면 사용성, 클라이언트 상태 관리의 작은 비중복 작업만 수행한다.
+- ChatGPT 담당 PR #343, #346, #347 및 다른 열린 PR과 중복 작업 금지.
+- 매 실행마다 열린 PR·main 기준을 먼저 확인하고, 안전하고 독립적인 작업이 없으면 변경 없이 종료한다.
+- **절대 수정 금지 경로:** `src/lib/engine/`, `src/lib/strategies/`, `src/lib/backtest/`, `worker/`, `supabase/migrations/`, `.github/workflows/`.
+- **절대 실행 금지:** LIVE/TESTNET 주문, DB 쓰기/마이그레이션, 배포, PR 머지, force-push, 자격증명 조회·출력.
+- **계약 변경 금지:** Exact100X, 레버리지, 주문 크기, 진입/청산, 손절·익절, `NO_FIXED_SL` / `NO_FIXED_TP`, 위험 관문.
+- 검증: `npm ci`, `npm ci --prefix worker`, `npm test`, `npm run worker:build`, `npm run build`, `npx tsc --noEmit`. 기존 main 타입 오류 기준선보다 악화되면 실패로 판단한다. 기존 통과 검증이 실패해도 변경 제출 금지.
+- 모든 검증을 확인한 경우에만 `claude/` 브랜치와 **Draft PR** 생성. PR에는 테스트 근거, 변경 경로, 미검증 사항, 위험을 명시한다. 머지는 사용자 승인 후 별도 절차로만 한다.
+- 예약 실행은 `CLAUDE_HOURLY_ENABLED=true` 저장소 변수로 명시적으로 켠다. 최초에는 수동 `workflow_dispatch` 검증을 먼저 한다.
+- 프롬프트의 금지 문구만으로 기술적 권한 분리가 보장되지는 않는다. 보호 브랜치·CODEOWNERS·필수 리뷰를 별도로 유지한다.
