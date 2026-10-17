@@ -561,6 +561,69 @@ export function unprotectedExposureVerdict(i: {
  * 남의 포지션을 청산하거나 남의 손절을 지우면, 배관을 확인하려다
  * 사고를 내는 것이다.
  */
+/**
+ * Historical smoke recovery diagnostic, READ-ONLY.
+ *
+ * Even if an authenticated venue query proves the position and BOTH order
+ * books empty NOW, the previously failed attempt is not retroactively a
+ * successful trade. There can be races between the three GET requests, and
+ * the nine older ACKED ledger entries require separate order-ID reconciliation.
+ *
+ * Crucially this classifier can NEVER clear an UNKNOWN DB row or authorize
+ * the next smoke test. A separate reviewed/atomic historical-attestation
+ * mechanism is required to update any old ORDERS_ZERO evidence.
+ */
+export function legacySmokeExposureVerdict(i: {
+  positionRead: { success?: unknown; positions?: unknown } | null | undefined;
+  regularOrderRead: { success?: unknown; orders?: unknown } | null | undefined;
+  algoOrderRead: { success?: unknown; orders?: unknown } | null | undefined;
+  symbol: string;
+}): {
+  code: 'UNKNOWN' | 'EXPOSURE_OPEN' | 'OBSERVED_FLAT_NOW';
+  positionCount: number | null;
+  regularOrderCount: number | null;
+  algoOrderCount: number | null;
+  canClearHistoricalUnknown: false;
+  mayStartSmoke: false;
+} {
+  const blocked = (code: 'UNKNOWN' | 'EXPOSURE_OPEN',
+    positionCount: number | null, regularOrderCount: number | null,
+    algoOrderCount: number | null) => ({
+    code, positionCount, regularOrderCount, algoOrderCount,
+    canClearHistoricalUnknown: false as const, mayStartSmoke: false as const,
+  });
+  const symbol = String(i?.symbol ?? '').trim();
+  const positions = i?.positionRead?.success === true &&
+    Array.isArray(i.positionRead.positions) ? i.positionRead.positions : null;
+  const regular = i?.regularOrderRead?.success === true &&
+    Array.isArray(i.regularOrderRead.orders) ? i.regularOrderRead.orders : null;
+  const conditional = i?.algoOrderRead?.success === true &&
+    Array.isArray(i.algoOrderRead.orders) ? i.algoOrderRead.orders : null;
+  if (!/^[A-Z0-9]{5,24}$/.test(symbol) ||
+      positions == null || regular == null || conditional == null) {
+    return blocked('UNKNOWN', positions?.length ?? null, regular?.length ?? null,
+      conditional?.length ?? null);
+  }
+  // Binance getFuturesPositions reports only nonzero positions; if an
+  // opaque/malformed entry cannot be trusted, do not assert flat.
+  if (positions.some((p: any) => typeof p?.symbol !== 'string' ||
+      !Number.isFinite(Number(p?.amount)) || Number(p.amount) <= 0)) {
+    return blocked('UNKNOWN', positions.length, regular.length, conditional.length);
+  }
+  // Any open order, even one owned by another strategy, blocks
+  // "account is empty" for this symbol-scoped diagnostic.
+  if (positions.some((p: any) => p.symbol === symbol) ||
+      regular.length > 0 || conditional.length > 0) {
+    return blocked('EXPOSURE_OPEN', positions.filter((p: any) => p.symbol === symbol).length,
+      regular.length, conditional.length);
+  }
+  return {
+    code: 'OBSERVED_FLAT_NOW',
+    positionCount: 0, regularOrderCount: 0, algoOrderCount: 0,
+    canClearHistoricalUnknown: false, mayStartSmoke: false,
+  };
+}
+
 export function preflightVerdict(i: {
   position: { ok: boolean; found: boolean; qty?: number | null } | null;
   orders: any[] | null;
