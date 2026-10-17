@@ -5,6 +5,7 @@
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
 import { createHmac, createHash } from 'crypto';
+import { parseFuturesPositionRows } from './futuresPositionRows';
 import {
   readPositionRiskWithProvenance,
   type PositionRiskProvenance, type SymbolPositionRisk,
@@ -89,18 +90,7 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
-      .filter((p: any) => parseFloat(p.positionAmt) !== 0)
-      .map((p: any) => {
-        const amt = parseFloat(p.positionAmt);
-        return {
-          symbol: p.symbol, side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
-          amount: Math.abs(amt), entryPrice: parseFloat(p.entryPrice), markPrice: parseFloat(p.markPrice),
-          unrealizedPnl: parseFloat(p.unRealizedProfit), leverage: parseInt(p.leverage || '1', 10),
-          liquidationPrice: parseFloat(p.liquidationPrice || '0'),
-          marginType: String(p.marginType || '').toLowerCase(),
-        } as FuturesPosition;
-      });
+    const positions = parseFuturesPositionRows(data);
     return { success: true, message: `${positions.length}개 포지션`, positions };
   } catch (e: any) { return { success: false, message: e.message || '포지션 조회 실패' }; }
 }
