@@ -44,6 +44,26 @@ export function runSmokePlanTests() {
     eq(v.ok, false); eq(v.code, 'UNKNOWN_PRESENT');
   });
 
+  test('★ ORDERS_ZERO: ordinary orders cannot disappear from dual-book evidence', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [{ orderId: '123', symbol: 'ETHUSDT' }] },
+      { success: true, orders: [] },
+    );
+    assert(orders !== null);
+    const v = residualVerdict({ position: { ok: true, found: false },
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+    eq(v.ok, false); eq(v.code, 'UNKNOWN_PRESENT');
+  });
+
+  test('★ ORDERS_ZERO: flat position read failure cannot pass empty books', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] }, { success: true, orders: [] },
+    );
+    const v = residualVerdict({ position: { ok: false, found: false },
+      orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds: [] });
+    eq(v.ok, false); eq(v.code, 'POSITION_NOT_ZERO');
+  });
+
   test('★ ORDERS_ZERO: Algo GET failure or malformed 200 is UNKNOWN', () => {
     for (const algo of [
       { success: false, orders: [] },
