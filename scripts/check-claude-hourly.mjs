@@ -225,6 +225,80 @@ if (lane.mode === 'trading') {
   }
 }
 
+// ── ⑫ 도구를 **허용 목록**으로 준다 ──
+//
+// 공식 문서: "Claude does not have access to execute arbitrary Bash
+// commands by default." 즉 `--allowedTools`가 없으면 에이전트는 테스트도
+// 못 돌린다 — 검증했다고 적어도 돌린 적이 없는 것이다. 반대로 넓게 주면
+// 울타리가 무의미해진다. **필요한 것만** 있는지 센다.
+{
+  const am = src.match(/--allowedTools\s+"([^"]*)"/);
+  if (!am) {
+    err(`${WF}: \`--allowedTools\`가 없습니다 — Bash는 기본으로 꺼져 있어 `
+      + '에이전트가 테스트·타입검사·빌드를 돌릴 수 없습니다');
+  } else {
+    const allow = am[1];
+    for (const need of ['Bash(npm test)', 'Bash(npx tsc --noEmit)', 'Bash(npm run build)']) {
+      if (!allow.includes(need)) {
+        err(`${WF}: 허용 목록에 \`${need}\`가 없습니다 — 그 검증을 돌릴 수 없습니다`);
+      }
+    }
+    // 넓게 여는 모양은 막는다. `Bash(:*)`·`Bash(npm:*)`은 무엇이든 된다.
+    for (const tooWide of ['Bash(:*)', 'Bash(*)', 'Bash(npm:*)', 'Bash(node:*)',
+      'Bash(gh:*)', 'Bash(git:*)', 'Bash(bash:*)', 'Bash(sh:*)']) {
+      if (allow.includes(tooWide)) {
+        err(`${WF}: 허용 목록이 너무 넓습니다 (\`${tooWide}\`) — `
+          + '그 하나로 금지한 명령까지 전부 열립니다');
+      }
+    }
+  }
+}
+
+// ── ⑬ main 보호 규칙을 확인하고, 모르면 멈추는가 ──
+//
+// `contents: write`는 기술적으로 main push를 허용한다. 보호 규칙이
+// 진짜 관문인데, **관문이 있는지 모르는 채로** 무인 회차를 돌리면
+// 약속만 남는다.
+{
+  if (!/branches\/main\/protection/.test(src)) {
+    err(`${WF}: main 보호 규칙을 확인하지 않습니다 — `
+      + '`contents: write`가 main push를 허용하는데 관문이 있는지 모릅니다');
+  }
+  if (!/required_pull_request_reviews/.test(src)) {
+    err(`${WF}: 보호 규칙에서 PR 필수 여부를 보지 않습니다 — `
+      + '보호가 켜져 있어도 PR 없이 밀 수 있으면 관문이 아닙니다');
+  }
+  // 읽지 못한 경우를 통과로 보면 관문이 없는 것과 같다.
+  if (!/UNKNOWN/.test(src)) {
+    err(`${WF}: 보호 규칙을 **읽지 못한 경우**를 따로 다루지 않습니다 — `
+      + '모르는 것은 통과가 아닙니다');
+  }
+  if (!/workflow_dispatch["']?\s*\]?\s*;?\s*then[\s\S]{0,200}exit 1|GITHUB_EVENT_NAME..\s*!=\s*"workflow_dispatch"/.test(src)) {
+    err(`${WF}: 보호가 확인되지 않았을 때 **예약 실행**을 멈추지 않습니다`);
+  }
+}
+
+// ── ⑭ 검증을 워크플로가 직접 하는가 ──
+//
+// 에이전트가 "돌렸고 통과했다"고 적는 것과 실제 통과는 다른 사실이다.
+{
+  const need = [
+    { re: /^\s+npm test \|\|/m, what: 'npm test' },
+    // **기준선을 재는 것과 그것을 대조하는 것은 다른 단계다.**
+    // `npx tsc ... | grep -c` 만 보면 기준선 단계가 대신 증명해 준다 —
+    // 음성 시험 X9가 그렇게 빠져나갔다. 대조 단계에만 있는 비교문을 본다.
+    { re: /-gt\s+"\$\{\{\s*steps\.baseline\.outputs\.tsc_before\s*\}\}"/,
+      what: 'tsc 기준선 **대조**(늘었는지 비교)' },
+    { re: /^\s+npm run build \|\|/m, what: 'npm run build' },
+  ];
+  for (const n of need) {
+    if (!n.re.test(src)) {
+      err(`${WF}: 워크플로가 ${n.what}를 직접 돌리지 않습니다 — `
+        + '에이전트의 보고만으로는 통과를 확인할 수 없습니다');
+    }
+  }
+}
+
 }   // ← 갈래 반복 끝
 
 // ── ⑪ 두 갈래가 동시에 돌지 않는가 ──
@@ -239,6 +313,21 @@ if (lane.mode === 'trading') {
   });
   if (crons[0] && crons[1] && crons[0] === crons[1]) {
     err(`두 갈래의 예약 시각이 같습니다 (${crons[0]}) — 동시에 깨면 브랜치가 갈립니다`);
+  }
+
+  // **그리고 같은 concurrency 그룹이어야 한다.** 예약 시각을 벌린
+  // 것만으로는 부족하다 — 앞 회차가 길어지면 그대로 겹치고, 그때
+  // 두 브랜치가 같은 파일을 만진다.
+  const groups = LANES.map((l) => {
+    if (!existsSync(l.wf)) return null;
+    const m = readFileSync(l.wf, 'utf8').match(/^concurrency:[\s\S]*?group:\s*(\S+)/m);
+    return m ? m[1] : null;
+  });
+  if (!groups[0] || !groups[1]) {
+    err('갈래의 concurrency 그룹을 읽지 못했습니다');
+  } else if (groups[0] !== groups[1]) {
+    err(`두 갈래의 concurrency 그룹이 다릅니다 (${groups[0]} · ${groups[1]}) — `
+      + '앞 회차가 길어지면 일반 갈래와 거래 갈래가 동시에 돕니다');
   }
 }
 

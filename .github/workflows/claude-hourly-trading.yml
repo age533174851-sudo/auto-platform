@@ -38,6 +38,12 @@ on:
         description: '이번 회차 주제 (비우면 스스로 고른다)'
         required: false
         default: ''
+      ack_unprotected:
+        description: 'main 보호 규칙이 확인되지 않아도 진행한다 (수동 실행 전용)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 concurrency:
   # 두 갈래를 **한 그룹**에 묶는다. 엔진과 화면이 동시에 돌면 브랜치가
@@ -72,6 +78,57 @@ jobs:
           fi
           if [ -n "${OAUTH:-}" ]; then echo "인증: CLAUDE_CODE_OAUTH_TOKEN"; else echo "인증: ANTHROPIC_API_KEY"; fi
 
+      # ── main 보호 규칙이 **확인되지 않으면 돌지 않는다** ──
+      #
+      # `contents: write`는 기술적으로 main push를 허용한다. 프롬프트의
+      # "main 직접 수정 금지"는 약속이고, **보호 규칙이 관문**이다.
+      # 관문이 있는지 모르는 채로 무인 회차를 돌리지 않는다.
+      #
+      # 읽지 못한 경우(토큰에 권한이 없을 때)도 **UNKNOWN이지 통과가
+      # 아니다.** 예약 실행은 멈추고, 수동 실행은 입력으로 명시적으로
+      # 인정해야만 지나간다.
+      - name: main 보호 규칙 확인
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACK: ${{ inputs.ack_unprotected }}
+        run: |
+          set -uo pipefail
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/branches/main/protection" || echo 000)
+
+          state=UNKNOWN
+          if [ "$code" = "200" ]; then
+            if python3 -c "import json,sys; d=json.load(open('$body')); sys.exit(0 if d.get('required_pull_request_reviews') else 1)"; then
+              state=PROTECTED
+            else
+              state=NO_PR_REQUIRED
+            fi
+          elif [ "$code" = "404" ]; then
+            state=UNPROTECTED
+          fi
+          echo "main 보호: ${state} (HTTP ${code})"
+
+          if [ "$state" = "PROTECTED" ]; then
+            echo "보호 규칙 확인 — 진행합니다"
+            exit 0
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "::error::main 보호 규칙을 확인하지 못했습니다 (${state}) — 예약 실행을 멈춥니다."
+            echo "::error::Settings → Branches → main 에 'Require a pull request before merging'을 켜세요."
+            echo "::error::토큰에 권한이 없어 읽지 못한 것이라면, 수동 실행에서 ack_unprotected=true로 한 번 확인하세요."
+            exit 1
+          fi
+
+          if [ "${ACK:-false}" != "true" ]; then
+            echo "::error::보호 규칙이 ${state} 입니다 — 수동 실행은 ack_unprotected=true 로만 지나갑니다"
+            exit 1
+          fi
+          echo "::warning::보호 규칙이 ${state} 인데 사람이 인정하고 진행합니다"
+
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
@@ -100,6 +157,7 @@ jobs:
           branch_prefix: 'claude/trading-'
           claude_args: |
             --max-turns 60
+            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh api repos/:*)"
             --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*),Bash(nc:*),Bash(ssh:*)"
           prompt: |
             TRAIGO 무인 개발 — **거래 엔진 갈래** 1회차.
@@ -202,6 +260,27 @@ jobs:
             CI 통과를 실거래 검증으로 적지 않습니다.
 
       # ── 강화된 검증: 결과물을 기계가 다시 본다 ──
+      # ── 검증은 **워크플로가** 한다 ──
+      #
+      # 에이전트가 "돌렸고 통과했다"고 적는 것과 실제로 통과하는 것은
+      # 다른 사실이다. 여기서 직접 돌리면 에이전트가 무엇을 적었든
+      # 통과하지 못한 변경은 작업이 빨갛게 끝난다.
+      - name: 검증 — 테스트 · 타입 · 빌드
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          npm test || { echo "::error::npm test 실패"; fail=1; }
+          after=$(npx tsc --noEmit 2>&1 | grep -c "error TS" || true)
+          echo "tsc ${{ steps.baseline.outputs.tsc_before }} → ${after}"
+          if [ "${after}" -gt "${{ steps.baseline.outputs.tsc_before }}" ]; then
+            echo "::error::tsc 오류가 기준선(${{ steps.baseline.outputs.tsc_before }})보다 늘었습니다: ${after}"
+            fail=1
+          fi
+          npm run build || { echo "::error::build 실패"; fail=1; }
+          npm run worker:build || { echo "::error::worker:build 실패"; fail=1; }
+          exit $fail
+
       - name: 변경 안전 관문 (trading)
         if: always()
         run: |
