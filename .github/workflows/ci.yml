@@ -820,6 +820,14 @@ jobs:
       - name: 관리자 인증 계약 (호출자 · 서버 · 동기화가 같은 이름을 보는가)
         run: node scripts/check-admin-auth-contract.mjs
 
+      # ── 무인 회차의 울타리 ──
+      #
+      # `claude-hourly-*`는 사람이 보지 않는 시간에 코드를 바꾼다.
+      # 그 울타리(권한·도구 차단·검증 단계·금지 지시)가 조용히 사라지면
+      # **사라진 것을 아무도 보지 못한다.** 그래서 CI에서 센다.
+      - name: 무인 회차 울타리 (두 갈래의 권한 · 도구 차단 · 검증 단계)
+        run: node scripts/check-claude-hourly.mjs
+
       # ── 연습 장부 환경 격리 ──
       #
       # 브라우저 원화 연습 장부에 TESTNET·LIVE 체결이 함께 쌓이고 있었다.
