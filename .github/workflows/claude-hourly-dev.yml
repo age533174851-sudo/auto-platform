@@ -144,6 +144,14 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # **토큰을 명시적으로 넘긴다.** 액션 설명은 "GitHub App을 쓰면
+          # 선택"이라고 적지만, 앱이 없으면 브랜치·PR을 만들 자격이 없다.
+          # 첫 수동 실행이 `is_error:true`로 끝난 유력한 원인이다.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # **실패 원인을 Actions 화면에서 읽을 수 있게 한다.**
+          # 이것이 없으면 요약에 "Claude execution failed"만 남고,
+          # 무엇 때문인지는 blob 호스트의 로그 본문에만 있다.
+          display_report: true
           base_branch: main
           branch_prefix: 'claude/dev-'
           claude_args: |
@@ -238,7 +246,11 @@ jobs:
       # 다른 사실이다. 여기서 직접 돌리면 에이전트가 무엇을 적었든
       # 통과하지 못한 변경은 작업이 빨갛게 끝난다.
       - name: 검증 — 테스트 · 타입 · 빌드
-        if: always()
+        # **기준선을 잰 회차에서만 돈다.** `always()`로 두었더니 보호
+        # 관문에서 멈춘 회차에서 체크아웃도 없이 돌아 `npm test 실패` ·
+        # `build 실패`를 적었다 — 진짜 원인(보호 규칙 UNKNOWN)을
+        # 가리는 거짓 실패였다.
+        if: always() && steps.baseline.outcome == 'success'
         # **`${{ }}`를 셸 비교에 직접 넣지 않는다.** 식이 그대로 치환돼
         # `[ "3" -gt "" ]` 같은 모양이 될 수 있고, shellcheck가 SC2170으로
         # 막는다(실제로 CI가 여기서 실패했다). 환경변수로 넘기면 비어 있어도
@@ -260,7 +272,7 @@ jobs:
           exit $fail
 
       - name: 변경 안전 관문
-        if: always()
+        if: always() && steps.baseline.outcome == 'success'
         run: |
           set -uo pipefail
           git fetch origin main --quiet || true
