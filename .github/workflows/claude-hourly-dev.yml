@@ -140,6 +140,8 @@ jobs:
           echo "tsc 기준선: ${n}건"
 
       - name: Claude Code — 일반 개발
+        id: claude
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -242,6 +244,55 @@ jobs:
       # 에이전트가 "돌렸고 통과했다"고 적는 것과 실제로 통과하는 것은
       # 다른 사실이다. 여기서 직접 돌리면 에이전트가 무엇을 적었든
       # 통과하지 못한 변경은 작업이 빨갛게 끝난다.
+      # ── 실패했으면 **무엇 때문인지**를 주석으로 끌어올린다 ──
+      #
+      # `display_report`는 Step Summary에만 쓴다. Summary는 UI에서만
+      # 보이고 API로는 안 나온다 — 사람이 화면을 열어 옮겨 적어야 한다는
+      # 뜻이다. 액션이 주는 `execution_file`에 실제 사유가 있으므로,
+      # 거기서 꺼내 `::error::`로 적는다. 그래야 로그를 못 여는 쪽에서도
+      # 원인을 읽는다.
+      - name: Claude 실행 결과 진단
+        if: always() && steps.baseline.outcome == 'success'
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+          BRANCH: ${{ steps.claude.outputs.branch_name }}
+        run: |
+          set -uo pipefail
+          echo "conclusion=${CONCLUSION:-?} branch=${BRANCH:-없음}"
+          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "${EXEC_FILE}" ]; then
+            echo "::warning::실행 기록 파일이 없습니다 (execution_file=${EXEC_FILE:-없음})"
+          else
+            echo "--- 실행 기록 요약 ---"
+            python3 - "${EXEC_FILE}" <<'PY'
+          import json, sys
+          try:
+              raw = open(sys.argv[1], encoding='utf-8').read()
+          except Exception as e:
+              print(f"::warning::실행 기록을 읽지 못했습니다: {e}")
+              raise SystemExit(0)
+          try:
+              data = json.loads(raw)
+          except Exception:
+              print(raw[-3000:])
+              raise SystemExit(0)
+          items = data if isinstance(data, list) else [data]
+          for it in items:
+              if not isinstance(it, dict):
+                  continue
+              if it.get('type') == 'result' or it.get('is_error'):
+                  print(f"::error::type={it.get('type')} subtype={it.get('subtype')} "
+                        f"is_error={it.get('is_error')} turns={it.get('num_turns')}")
+                  res = str(it.get('result') or it.get('error') or '')[:800]
+                  if res:
+                      print(f"::error::{res}")
+          PY
+          fi
+          if [ "${CONCLUSION:-}" != "success" ]; then
+            echo "::error::Claude 단계가 ${CONCLUSION:-실패}로 끝났습니다"
+            exit 1
+          fi
+
       - name: 검증 — 테스트 · 타입 · 빌드
         # **기준선을 잰 회차에서만 돈다.** `always()`로 두었더니 보호
         # 관문에서 멈춘 회차에서 체크아웃도 없이 돌아 `npm test 실패` ·
