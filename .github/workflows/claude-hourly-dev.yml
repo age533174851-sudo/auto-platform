@@ -1,0 +1,77 @@
+# Claude Code automated development. Review all output before merge.
+name: Claude Hourly Dev
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+# Scheduled runs remain disabled until CLAUDE_HOURLY_ENABLED=true.
+# Manual workflow_dispatch remains available for the first dry run.
+concurrency:
+  group: claude-hourly-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+jobs:
+  claude-dev:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CLAUDE_HOURLY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Claude Code — scoped autonomous development
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          base_branch: main
+          branch_prefix: 'claude/'
+          additional_permissions: |
+            actions: read
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run worker:build),Bash(npm run build),Bash(npx tsc --noEmit)"
+          prompt: |
+            You are the scheduled TRAIGO maintenance agent. Read CLAUDE.md first.
+            Work only on low-risk account/profile/auth UI (excluding auth security policy changes),
+            interface usability, and local application state management. Pick ONE small
+            well-defined task per run. Avoid duplicating open PR work.
+
+            Hard prohibitions (including indirect changes):
+            - No LIVE or TESTNET orders; no deployment or migration execution.
+            - No DB writes/schema changes; no secret or credentials access/output.
+            - No merge, rebase, force-push, or modification of main.
+            - No changes to trading strategy, sizing, leverage, TP/SL, Exact100X,
+              order placement, exit authority, risk gates, or exchange adapters.
+            - Never edit src/lib/engine/, src/lib/strategies/, src/lib/backtest/,
+              worker/, supabase/migrations/, or .github/workflows/.
+            - Never alter NO_FIXED_SL / NO_FIXED_TP contracts.
+            - Leave PR #343, #346 and #347 work to ChatGPT; do not overlap.
+
+            Before changing anything, check open PRs and the working tree.
+            If no safe non-overlapping task exists, report and exit with no changes.
+            Run npm ci, npm ci --prefix worker, npm test, npm run worker:build,
+            npm run build, and npx tsc --noEmit before proposing changes.
+            Typecheck has a pre-existing baseline: do not claim PASS if the
+            count of diagnostics increases above the base branch baseline.
+            If any previously passing check fails or the baseline worsens,
+            do not commit or propose changes; report the failure only.
+
+            If checks pass, create only a claude/ branch and a DRAFT PR against main.
+            Include exact changes, test evidence, and risks. Never merge a PR.
+            If draft PR creation cannot be verified, do not claim success.
+            Never claim GitHub Actions or exchange evidence that was not observed.
