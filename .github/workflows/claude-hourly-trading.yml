@@ -267,14 +267,21 @@ jobs:
       # 통과하지 못한 변경은 작업이 빨갛게 끝난다.
       - name: 검증 — 테스트 · 타입 · 빌드
         if: always()
+        # **`${{ }}`를 셸 비교에 직접 넣지 않는다.** 식이 그대로 치환돼
+        # `[ "3" -gt "" ]` 같은 모양이 될 수 있고, shellcheck가 SC2170으로
+        # 막는다(실제로 CI가 여기서 실패했다). 환경변수로 넘기면 비어 있어도
+        # 셸이 다루고, 식이 명령으로 번지는 길도 없다.
+        env:
+          TSC_BEFORE: ${{ steps.baseline.outputs.tsc_before }}
         run: |
           set -uo pipefail
           fail=0
           npm test || { echo "::error::npm test 실패"; fail=1; }
           after=$(npx tsc --noEmit 2>&1 | grep -c "error TS" || true)
-          echo "tsc ${{ steps.baseline.outputs.tsc_before }} → ${after}"
-          if [ "${after}" -gt "${{ steps.baseline.outputs.tsc_before }}" ]; then
-            echo "::error::tsc 오류가 기준선(${{ steps.baseline.outputs.tsc_before }})보다 늘었습니다: ${after}"
+          base="${TSC_BEFORE:-0}"
+          echo "tsc ${base} → ${after}"
+          if [ "${after}" -gt "${base}" ]; then
+            echo "::error::tsc 오류가 기준선(${base})보다 늘었습니다: ${after}"
             fail=1
           fi
           npm run build || { echo "::error::build 실패"; fail=1; }

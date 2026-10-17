@@ -287,8 +287,12 @@ if (lane.mode === 'trading') {
     // **기준선을 재는 것과 그것을 대조하는 것은 다른 단계다.**
     // `npx tsc ... | grep -c` 만 보면 기준선 단계가 대신 증명해 준다 —
     // 음성 시험 X9가 그렇게 빠져나갔다. 대조 단계에만 있는 비교문을 본다.
-    { re: /-gt\s+"\$\{\{\s*steps\.baseline\.outputs\.tsc_before\s*\}\}"/,
-      what: 'tsc 기준선 **대조**(늘었는지 비교)' },
+    // 기준선은 **환경변수로** 넘긴다(SC2170). 그래서 비교문은
+    // `-gt "${base}"` 모양이고, 그 `base`가 `TSC_BEFORE`에서 온다는
+    // 것까지 함께 본다 — 둘 중 하나만 보면 연결이 끊겨도 통과한다.
+    { re: /-gt\s+"\$\{base\}"/, what: 'tsc 기준선 **대조**(늘었는지 비교)' },
+    { re: /TSC_BEFORE:\s*\$\{\{\s*steps\.baseline\.outputs\.tsc_before\s*\}\}/,
+      what: '기준선을 환경변수로 넘기기' },
     { re: /^\s+npm run build \|\|/m, what: 'npm run build' },
   ];
   for (const n of need) {
