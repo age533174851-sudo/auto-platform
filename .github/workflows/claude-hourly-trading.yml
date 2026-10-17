@@ -302,10 +302,16 @@ jobs:
 
       - name: 변경 안전 관문 (trading)
         if: always() && steps.baseline.outcome == 'success'
+        env:
+          RUN_BASE: ${{ github.sha }}
         run: |
           set -uo pipefail
-          git fetch origin main --quiet || true
-          node scripts/check-autodev-safety.mjs --base origin/main --mode trading
+          # **기준은 이 회차가 체크아웃한 커밋이다.** `origin/main`으로
+          # 잡으면 "이 브랜치가 main과 무엇이 다른가"를 묻게 되고,
+          # 워크플로를 고치는 브랜치에서 시험 실행하면 제 변경을
+          # 위반으로 읽는다(실제로 그렇게 실패했다). 물어야 하는 것은
+          # **이 회차가 무엇을 바꿨는가**다.
+          node scripts/check-autodev-safety.mjs --base "${RUN_BASE}" --mode trading
 
       # 에이전트가 "검사기를 돌렸다"고 적은 것과 실제로 통과하는 것은
       # 다른 사실이다. 여기서 직접 돌린다.

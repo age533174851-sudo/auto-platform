@@ -154,10 +154,7 @@ jobs:
           display_report: true
           base_branch: main
           branch_prefix: 'claude/dev-'
-          claude_args: |
-            --max-turns 40
-            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh api repos/:*)"
-            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*)"
+          # [격리 시험] claude_args 제거
           prompt: |
             TRAIGO 무인 개발 — **일반 갈래** 1회차.
             저장소: ${{ github.repository }}
@@ -273,10 +270,16 @@ jobs:
 
       - name: 변경 안전 관문
         if: always() && steps.baseline.outcome == 'success'
+        env:
+          RUN_BASE: ${{ github.sha }}
         run: |
           set -uo pipefail
-          git fetch origin main --quiet || true
-          node scripts/check-autodev-safety.mjs --base origin/main --mode dev
+          # **기준은 이 회차가 체크아웃한 커밋이다.** `origin/main`으로
+          # 잡으면 "이 브랜치가 main과 무엇이 다른가"를 묻게 되고,
+          # 워크플로를 고치는 브랜치에서 시험 실행하면 제 변경을
+          # 위반으로 읽는다(실제로 그렇게 실패했다). 물어야 하는 것은
+          # **이 회차가 무엇을 바꿨는가**다.
+          node scripts/check-autodev-safety.mjs --base "${RUN_BASE}" --mode dev
 
       - name: 실패 원인 기록
         if: failure()
