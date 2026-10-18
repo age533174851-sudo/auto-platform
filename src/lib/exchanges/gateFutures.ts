@@ -538,8 +538,37 @@ export async function findOrderByClientIdGateFutures(
       const rows = await gateReq<GateOrderResult[]>('GET', '/api/v4/futures/usdt/orders', {
         key, secret, qs: `contract=${contract}&status=${status}&limit=100`, testnet,
       });
-      const hit = Array.isArray(rows) ? rows.find(o => o.text === text) : null;
-      if (hit) return { ok: true, order: hit };
+      // ── 배열이 아니면 **목록을 못 본 것**이다 ──
+      //
+      // `gateReq`는 **비2xx만** 던진다. 200으로 객체가 오면(모양이 바뀌었거나
+      // 중간에서 무언가 끼어들면) 그대로 돌아오고, 예전에는 `Array.isArray`
+      // 삼항이 그것을 `hit = null`로 접었다. 두 상태를 다 돌고 나면
+      // `{ ok: true, order: null }` — 호출부에게는 **"보내도 된다"**는 허가다.
+      //
+      // 그 허가의 끝이 중복 주문이다. 이 함수의 주석이 이미 그것을 막겠다고
+      // 적고 있다: "레이트리밋이나 일시적 오류 한 번이 그대로 중복 체결이
+      // 될 수 있었다." 200이면서 읽히지 않는 응답에는 그 보호가 없었다.
+      if (!Array.isArray(rows)) {
+        return { ok: false, order: null,
+          error: `Gate ${status} 주문 목록이 배열이 아닙니다 — 중복 여부를 확인하지 못했습니다` };
+      }
+      const hit = rows.find(o => o?.text === text);
+      if (!hit) continue;
+      // ── 찾았어도 **번호를 못 읽으면 확인된 주문이 아니다** ──
+      //
+      // 호출부는 찾은 줄을 `exchange_order_id: String(existing.id)`로 적는다.
+      // `id`가 없으면 장부에 문자열 "undefined"가 남고, 나중 취소가 그 번호로
+      // 나가 `No order found with the given ID`가 된다 — 이 저장소가 Gate
+      // 주문 번호로 이미 겪은 사고다(포지션은 0인데 조건부 주문 2건이 남음).
+      //
+      // 못 읽었으니 '있다'고도 '없다'고도 말하지 않는다. `ok: false`면
+      // 호출부가 주문을 보내지 않으므로 중복도 나지 않는다.
+      const id = (hit as any)?.id;
+      if (id == null || String(id).trim() === '') {
+        return { ok: false, order: null,
+          error: 'Gate 주문을 찾았지만 주문 번호를 읽지 못했습니다 — 확인 불가' };
+      }
+      return { ok: true, order: hit };
     }
     return { ok: true, order: null };
   } catch (e: any) {
