@@ -145,18 +145,39 @@ export function qtyGridFor(
   return orderType === 'LIMIT' ? (filters.limitQty ?? null) : (filters.marketQty ?? null);
 }
 
-/** 소수점 자리수를 단위에서 뽑는다. 0.001 → 3 */
+/**
+ * 소수점 자리수를 단위에서 뽑는다. 0.001 → 3
+ *
+ * ★ **`Math.round(-log10(step))`을 쓰지 않는다.** 10의 거듭제곱이
+ *   아닌 단위에서 틀린다:
+ *
+ *     0.005 → 2자리로 읽힘 → `(0.105).toFixed(2)` = '0.10'  (한 칸 손실)
+ *     0.25  → 1자리로 읽힘 → `(2.25).toFixed(1)`  = '2.3'   (단위 정수배 아님)
+ *     0.5   → 0자리로 읽힘 → `(1.5).toFixed(0)`   = '2'     (요청보다 많다)
+ *
+ *   단위의 정수배가 아닌 수량·가격은 거래소가 거부한다. 거부된 보호주문은
+ *   **걸리지 않은 보호주문**이고 포지션은 무방비로 남는다.
+ */
 export function decimalsOf(step: number): number {
   if (!isPos(step)) return 0;
   // 부동소수 오차로 0.001이 0.0009999…가 되는 경우가 있어 문자열로도 본다.
   const s = String(step);
-  if (s.includes('e') || s.includes('E')) {
-    return Math.max(0, Math.round(-Math.log10(step)));
+  if (!s.includes('e') && !s.includes('E')) {
+    const dot = s.indexOf('.');
+    if (dot < 0) return 0;
+    // 뒤쪽 0을 세지 않는다 — '0.00100'은 3자리다
+    return s.slice(dot + 1).replace(/0+$/, '').length;
   }
-  const dot = s.indexOf('.');
-  if (dot < 0) return 0;
-  // 뒤쪽 0을 세지 않는다 — '0.00100'은 3자리다
-  return s.slice(dot + 1).replace(/0+$/, '').length;
+  // ── 지수 표기 ──
+  //
+  //   JS는 1e-7보다 작아지면 `String()`이 '5e-7' 형태를 준다. 여기서도
+  //   `-log10`은 틀린다: 5e-7은 **7자리**가 필요한데 round(6.30)=6을 준다.
+  //   6자리로 `toFixed`하면 1.0000005가 1로 **잘려 나간다.**
+  //   가수의 소수 자리수에서 지수를 빼면 정확하다.
+  const [mantissa, exponent] = s.toLowerCase().split('e');
+  const frac = (mantissa.split('.')[1] ?? '').replace(/0+$/, '').length;
+  // `toFixed`가 받는 범위는 0~100이다. 넘기면 던진다.
+  return Math.max(0, Math.min(100, frac - Number(exponent)));
 }
 
 /** 단위에 맞춰 **내림**한다. 올리면 가진 것보다 많이 사려다 거부당한다. */

@@ -26,6 +26,8 @@
 // 체결가를 못 읽으면 계산하지 않는다 — 참고가로 대신하지 않는다.
 // 그게 지금 고치는 고장 자체다.
 
+import { decimalsOf } from '../exchanges/quantize';
+
 export interface FillBasis {
   /** 이 값들로 보호주문 가격을 계산해도 되는가 */
   ok: boolean;
@@ -105,8 +107,9 @@ export function roundTrigger(
   const eps = 1e-9;
   const n = p0 / tick;
   const k = up ? Math.ceil(n - eps) : Math.floor(n + eps);
-  const dec = Math.max(0, Math.min(12, Math.round(-Math.log10(tick))));
-  const p = Number((k * tick).toFixed(dec));
+  // 자리수는 **정본에서 받는다.** 여기서 다시 세면 0.25·0.5 호가에서
+  // 어긋난 가격이 만들어지고, 거부된 보호주문은 걸리지 않은 보호주문이다.
+  const p = Number((k * tick).toFixed(decimalsOf(tick)));
   if (!(p > 0)) return { price: null, note: `${p0}을 호가 단위 ${tick}에 맞추면 0이 됩니다` };
   return { price: p, note: p === p0 ? '' : `${p0} → ${p} (호가 단위 ${tick})` };
 }

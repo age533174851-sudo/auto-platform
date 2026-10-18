@@ -4,6 +4,7 @@
 // 바이낸스가 testnet.binancefuture.com → demo-fapi.binance.com 으로 변경
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
+import { decimalsOf } from './quantize';
 import { createHmac, createHash } from 'crypto';
 import {
   readPositionRiskWithProvenance,
@@ -1640,17 +1641,17 @@ export async function getSymbolFilters(symbol: string, testnet = true): Promise<
 // 수량을 stepSize에 맞게 내림 + 최소수량 보정
 export function roundToStep(qty: number, stepSize: number): number {
   if (stepSize <= 0) return qty;
-  const decimals = Math.max(0, Math.round(-Math.log10(stepSize)));
-  const rounded = Math.floor(qty / stepSize) * stepSize;
-  return parseFloat(rounded.toFixed(decimals));
+  // 자리수는 정본(`quantize.decimalsOf`)이 센다. 여기서 세면
+  // 0.5·0.25 단위에서 **요청보다 많은 수량**이 만들어진다.
+  const rounded = Math.floor(qty / stepSize + 1e-9) * stepSize;
+  return parseFloat(rounded.toFixed(decimalsOf(stepSize)));
 }
 
 // 가격을 tickSize에 맞게 반올림
 export function roundToTick(price: number, tickSize: number): number {
   if (tickSize <= 0) return price;
-  const decimals = Math.max(0, Math.round(-Math.log10(tickSize)));
   const rounded = Math.round(price / tickSize) * tickSize;
-  return parseFloat(rounded.toFixed(decimals));
+  return parseFloat(rounded.toFixed(decimalsOf(tickSize)));
 }
 
 // 주문유형별 수량 격자를 적용한 안전 주문 (권장)

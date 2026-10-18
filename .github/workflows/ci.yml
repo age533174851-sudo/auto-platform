@@ -807,6 +807,15 @@ jobs:
       - name: 운영 감사 읽기 전용 계약 (쓰기 0 · 비밀 칸 미선택)
         run: node scripts/check-audit-readonly.mjs
 
+      # ── 수량·가격 격자 계산은 한 곳에서만 ──
+      #
+      # `-log10(step)`으로 자리수를 구하는 코드가 아홉 곳에 복제돼
+      # 있었고, 그 식은 0.005·0.25·0.5·5e-7에서 틀린다. 단위의 정수배가
+      # 아닌 값은 거래소가 거부하고, 거부된 보호주문은 걸리지 않은
+      # 보호주문이다.
+      - name: 격자 계산 정본 (복제 0 · 정수배 보장)
+        run: node scripts/check-step-precision.mjs
+
       # ── 관리자 인증 계약 (같은 비밀에 이름을 둘 붙이지 않는다) ──
       #
       # x-admin-secret 호출자가 `EXIT_MONITOR_SECRET`이라는 다른 GitHub secret
