@@ -743,24 +743,66 @@ export async function cancelAllOpenOrders(key: string, secret: string, testnet =
   return { success: results.every(r => r.ok), results, count: syms.length };
 }
 
+/**
+ * **종료 주문의 방향 — 수량의 부호로 정하지 않는다.**
+ *
+ * `FuturesPosition.amount`는 **절댓값이다.** 파서가 `Math.abs`를 걸고,
+ * 방향은 `side` 칸에 따로 둔다. 그런데 절댓값에는 음수가 없으므로
+ * 부호로 방향을 정하면 **SHORT가 전부 LONG으로 읽혀 SELL이 나간다.**
+ * `reduceOnly`라 거래소가 거절하니 반대 포지션이 열리지는 않지만,
+ * **긴급 전체 종료를 눌러도 SHORT는 끝내 닫히지 않는다** — 재시도가
+ * 전부 거절되고 `success: false`로 끝난다. 사람은 큰 빨간 버튼을
+ * 눌렀다고 믿는데 숏은 그대로다.
+ *
+ * `killClosePlan`은 이미 이 교훈을 반영해 `side`를 정본으로 쓴다
+ * (그 주석에 "부호만 보고 방향을 정하면 SHORT 포지션이 전부 LONG으로
+ * 읽힌다"고 적혀 있다). 같은 판단이 두 곳에 있었고 **한쪽만 고쳐져
+ * 있었다** — 이 저장소가 반복해서 겪는 고장이다.
+ *
+ * 방향을 모르면 `null`이다. 짐작하지 않는다 — 틀린 방향으로 보내면
+ * 청산이 아니라 **반대 방향 신규 진입**이 된다.
+ */
+function closeSideOf(p: { side?: unknown }): 'BUY' | 'SELL' | null {
+  if (p?.side === 'LONG') return 'SELL';
+  if (p?.side === 'SHORT') return 'BUY';
+  return null;
+}
+
 // ── 전체 포지션 종료 (D 옵션) — reduce-only MARKET, 3초 간격 최대 5회 재시도 ──
-export async function closeAllPositions(key: string, secret: string, testnet = true, maxRetry = 5) {
+export async function closeAllPositions(
+  key: string, secret: string, testnet = true, maxRetry = 5,
+  /** 시험용 주입. 비우면 실제 조회를 쓴다 (`prepareSymbolClose`와 같은 모양) */
+  deps: { fetchPositions?: (k: string, s: string, t: boolean) => Promise<any> } = {},
+) {
+  const readPositions = deps.fetchPositions ?? getFuturesPositions;
   const attempts: Array<{ symbol: string; ok: boolean; message?: string }> = [];
   for (let i = 1; i <= maxRetry; i++) {
-    const read = await getFuturesPositions(key, secret, testnet);
+    const read = await readPositions(key, secret, testnet);
     if (!read.success) return { success: false, remaining: null, retries: i - 1, attempts,
       message: read.message || '포지션 조회 실패 — 청산 완료 확인 불가' };
     const positions = read.positions;
     const open = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0);
     if (open.length === 0) return { success: true, remaining: 0, retries: i - 1, attempts };
+    let sent = 0;
     for (const p of open) {
-      const side: 'BUY' | 'SELL' = (p.amount || 0) > 0 ? 'SELL' : 'BUY';
+      const side = closeSideOf(p);
+      if (side == null) {
+        // **방향을 모르는 것은 "닫혔다"가 아니다.** 보내지 않은 사실을
+        // 남기고 넘어간다 — 아래 재조회가 잔여로 잡아 success를 막는다.
+        attempts.push({ symbol: p.symbol, ok: false,
+          message: '포지션 방향을 확인하지 못해 청산을 보내지 않았습니다' });
+        continue;
+      }
       const r = await placeFuturesOrderSafe(key, secret, { symbol: p.symbol, side, type: 'MARKET', quantity: Math.abs(p.amount), reduceOnly: true }, testnet);
       attempts.push({ symbol: p.symbol, ok: r.success, message: r.message });
+      sent += 1;
     }
+    // 한 건도 못 보냈으면 재조회해 봐야 같은 줄이 또 온다. 기다릴 이유가
+    // 없고, 기다리면 긴급 종료가 3초씩 느려진다.
+    if (sent === 0) break;
     if (i < maxRetry) await new Promise(res => setTimeout(res, 3000));  // 3초 간격 재시도
   }
-  const finalRead = await getFuturesPositions(key, secret, testnet);
+  const finalRead = await readPositions(key, secret, testnet);
   if (!finalRead.success) return { success: false, remaining: null, retries: maxRetry, attempts,
     message: finalRead.message || '최종 포지션 조회 실패 — 청산 완료 확인 불가' };
   const positions = finalRead.positions;
