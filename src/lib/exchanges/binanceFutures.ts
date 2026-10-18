@@ -69,7 +69,14 @@ export interface FuturesBalance { asset: string; balance: number; availableBalan
 export async function getFuturesBalance(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/balance', key, secret, testnet);
-    const balances: FuturesBalance[] = (Array.isArray(data) ? data : [])
+    // 배열이 아니면 읽은 것이 아니다. `[]`로 접으면 `success: true`와 함께
+    // 나가고, `usdtFromFuturesBalances`가 "USDT 줄이 없다"로 읽어
+    // **잔고 0원**을 사실처럼 돌려준다 (그 함수의 `balances` 없음 관문은
+    // 이 경우를 보지 못한다 — 목록은 있고 비어 있을 뿐이다).
+    if (!Array.isArray(data)) {
+      return { success: false, message: '잔고 응답이 배열이 아닙니다 — 읽지 못했습니다' };
+    }
+    const balances: FuturesBalance[] = data
       .filter((b: any) => parseFloat(b.balance) !== 0 || parseFloat(b.availableBalance) !== 0)
       .map((b: any) => ({
         asset: b.asset, balance: parseFloat(b.balance),
@@ -1450,7 +1457,19 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     const params: Record<string, string | number> = {};
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
-    const orders: FuturesOpenOrder[] = (Array.isArray(data) ? data : []).map((o: any) => ({
+    // **배열이 아니면 읽은 것이 아니다.**
+    //
+    // 예전에는 `Array.isArray(data) ? data : []`였다. 응답 모양이 바뀌거나
+    // HTTP 200으로 객체가 오면 그것이 **빈 목록**이 되고, `success: true`가
+    // 함께 나간다. 호출부에는 "조회에 성공했고 미체결이 0건"으로 보인다.
+    //
+    // 빈 목록은 안전한 값이 아니다. 이 저장소에서 "미체결 0건"은
+    // 보호주문이 없다는 뜻이고, 그 위에서 정리·판정이 돈다.
+    if (!Array.isArray(data)) {
+      return { success: false, message: '미체결 응답이 배열이 아닙니다 — 읽지 못했습니다',
+        orders: [] as FuturesOpenOrder[] };
+    }
+    const orders: FuturesOpenOrder[] = data.map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
@@ -1708,9 +1727,15 @@ export async function findOrderByClientId(
     if (!/-2015|-2014|-1022|API-key|Invalid API|permissions/i.test(msg)) throw e;
 
     try {
+      // ★ 여기서 `found: false`는 **"그 주문은 안 나갔다"**는 뜻이고,
+      //   호출부는 그 말을 믿고 **같은 자리에 다시 보낸다.** 그래서 이
+      //   두 목록은 "배열로 읽혔을 때만" 근거가 된다. 배열이 아니면
+      //   목록을 못 본 것이고, 못 본 것은 '없음'이 아니다 — 던져서
+      //   바깥의 판단 불가 경로로 보낸다. (예전에는 `? x : []`라서
+      //   모양이 바뀐 응답 하나가 조용히 '안 나갔다'가 됐다.)
       const open = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, { symbol: sym });
-      const hitOpen = (Array.isArray(open) ? open : [])
-        .find((o: any) => String(o?.clientOrderId) === clientOrderId);
+      if (!Array.isArray(open)) throw new Error('미체결 목록이 배열이 아닙니다 — 중복 확인 불가');
+      const hitOpen = open.find((o: any) => String(o?.clientOrderId) === clientOrderId);
       if (hitOpen) return { found: true, order: hitOpen };
 
       // 미체결에 없다고 '없음'이 아니다 — 이미 체결됐을 수 있다.
@@ -1718,8 +1743,8 @@ export async function findOrderByClientId(
       const recent = await fapiSigned('GET', '/fapi/v1/allOrders', key, secret, testnet, {
         symbol: sym, limit: 100,
       });
-      const hit = (Array.isArray(recent) ? recent : [])
-        .find((o: any) => String(o?.clientOrderId) === clientOrderId);
+      if (!Array.isArray(recent)) throw new Error('최근 주문 목록이 배열이 아닙니다 — 중복 확인 불가');
+      const hit = recent.find((o: any) => String(o?.clientOrderId) === clientOrderId);
       return hit ? { found: true, order: hit } : { found: false };
     } catch (e2: any) {
       // 두 문 다 막혔다 — 이제는 정말 판단 불가다. 원래 오류를 그대로
