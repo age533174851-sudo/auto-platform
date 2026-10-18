@@ -535,8 +535,36 @@ export async function findOrderByClientIdGateFutures(
   try {
     // 미체결 + 최근 완료 주문 조회
     for (const status of ['open', 'finished']) {
+    // ── 첫 쪽만 보고 '없음'이라 하지 않는다 ──
+    //
+    // Gate 문서(`GET /futures/{settle}/orders`)가 말하는 것:
+    //   · `limit` 기본값 100 — "Maximum number of records returned in a single list"
+    //   · `offset` — "List offset, starting from 0"
+    //   · 기록은 기본 **최근 6개월**
+    // 말하지 **않는** 것: **정렬 순서.** 어디에도 최신순이라고 적혀 있지
+    // 않고, `limit`의 상한도 적혀 있지 않다.
+    //
+    // 그러면 첫 100건에 없다는 것은 아무것도 증명하지 못한다 — 내 주문이
+    // 101번째일 수 있다. 그런데 예전 코드는 그 상태로
+    // `{ ok: true, order: null }`을 돌려줬고, 그것은 호출부에게
+    // **"보내도 된다"**는 허가다. 그대로 중복 주문이 된다.
+    //
+    // 그래서 **쪽을 넘긴다.** 끝을 어떻게 아는가:
+    //   · 한 쪽이 `limit`보다 **짧게** 오면 그것이 목록의 끝이다
+    //     → 그때의 '없음'은 단정해도 되는 사실이다 (정상 경로 유지)
+    //   · 상한까지 모든 쪽이 가득 차 있으면 **아직 남은 것이다**
+    //     → 다 보지 못했으므로 '없다'고 말하지 않는다 (`ok: false`)
+    //
+    // 흔한 계정은 첫 쪽이 이미 짧으므로 요청 수가 예전과 같다. 느려지는
+    // 것은 주문이 수백 건 쌓인 계정뿐이고, 그 계정이 바로 첫 쪽만 보면
+    // 안 되는 계정이다.
+      const LIMIT = 100;
+      const MAX_PAGES = 10;   // 상태별 최대 1,000건
+      for (let page = 0; page < MAX_PAGES; page += 1) {
       const rows = await gateReq<GateOrderResult[]>('GET', '/api/v4/futures/usdt/orders', {
-        key, secret, qs: `contract=${contract}&status=${status}&limit=100`, testnet,
+        key, secret,
+        qs: `contract=${contract}&status=${status}&limit=${LIMIT}&offset=${page * LIMIT}`,
+        testnet,
       });
       // ── 배열이 아니면 **목록을 못 본 것**이다 ──
       //
@@ -553,7 +581,19 @@ export async function findOrderByClientIdGateFutures(
           error: `Gate ${status} 주문 목록이 배열이 아닙니다 — 중복 여부를 확인하지 못했습니다` };
       }
       const hit = rows.find(o => o?.text === text);
-      if (!hit) continue;
+      if (!hit) {
+        // 쪽이 `limit`보다 짧다 = 목록의 끝이다. 이 상태에는 없는 것이
+        // **증명됐다** — 다음 상태로 넘어간다.
+        if (rows.length < LIMIT) break;
+        // 가득 찬 마지막 쪽까지 왔는데 못 찾았다. 창을 다 보지 못했으므로
+        // '없다'고 단정하지 않는다.
+        if (page === MAX_PAGES - 1) {
+          return { ok: false, order: null,
+            error: `Gate ${status} 주문이 ${MAX_PAGES * LIMIT}건을 넘어 목록을 끝까지 보지`
+              + ' 못했습니다 — 중복 여부를 확인하지 못했습니다' };
+        }
+        continue;   // 다음 쪽
+      }
       // ── 찾았어도 **번호를 못 읽으면 확인된 주문이 아니다** ──
       //
       // 호출부는 찾은 줄을 `exchange_order_id: String(existing.id)`로 적는다.
@@ -568,8 +608,10 @@ export async function findOrderByClientIdGateFutures(
         return { ok: false, order: null,
           error: 'Gate 주문을 찾았지만 주문 번호를 읽지 못했습니다 — 확인 불가' };
       }
-      return { ok: true, order: hit };
-    }
+        return { ok: true, order: hit };
+      }   // 쪽 반복
+    }     // 상태 반복
+    // 두 상태 모두 **끝까지 읽었고** 그 안에 없었다 — 단정해도 되는 '없음'이다.
     return { ok: true, order: null };
   } catch (e: any) {
     return { ok: false, order: null, error: e?.message || String(e) };
