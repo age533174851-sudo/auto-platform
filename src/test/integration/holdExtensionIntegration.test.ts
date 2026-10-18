@@ -115,11 +115,21 @@ function venueFor(nowMs: number, o: VenueOpts = {}): FakeVenue {
   //   조회 하나가 늘거나 줄 때마다 모든 시나리오가 조용히 뒤집힌다.
   v.on('/fapi/v2/positionRisk', { json: () => {
     const open = v.orderSends().length === 0 || o.leftAfter === true;
+    const entryPrice = open ? '100000' : '0';
+    const markPrice = o.markPrice ?? '100300';
+    // ★ 미실현손익은 **실제 응답에 언제나 있는 칸**이다. 여기서 빼면
+    //   거래소가 주지 않는 모양을 시험하는 것이 되고, 그 통과는
+    //   "읽을 수 없는 줄을 비어 있는 것으로 읽어도 된다"는 뜻이 된다.
+    //   값도 지어내지 않는다 — 마크가·진입가·수량에서 셈한다.
+    const unRealizedProfit = open
+      ? String((Number(markPrice) - Number(entryPrice)) * Number(amt))
+      : '0';
     return [{
       symbol: 'BTCUSDT',
       positionAmt: open ? amt : '0',
-      entryPrice: open ? '100000' : '0',
-      markPrice: o.markPrice ?? '100300',
+      entryPrice,
+      markPrice,
+      unRealizedProfit,
       leverage: '100', marginType: 'isolated',
       liquidationPrice: open ? (o.liquidationPrice ?? '99400') : '0',
       updateTime: nowMs,

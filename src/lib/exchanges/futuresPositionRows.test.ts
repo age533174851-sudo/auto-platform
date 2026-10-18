@@ -37,6 +37,16 @@ export function runFuturesPositionRowsTests() {
   test('one malformed row invalidates otherwise flat list', () => {
     rejects([{ symbol: 'BTCUSDT', positionAmt: '0' }, { symbol: 'ETHUSDT', positionAmt: '0oops' }]);
   });
+  // 깨진 값만이 아니라 **빠진 칸**도 막아야 한다. 실제로 틀렸던 모양은
+  // 'broken'이 아니라 칸 자체가 없는 줄이었다.
+  test('a missing risk field is not evidence of anything', () => {
+    for (const field of ['entryPrice', 'markPrice', 'unRealizedProfit', 'leverage',
+      'liquidationPrice', 'marginType'] as const) {
+      const row: Record<string, unknown> = { ...ROW };
+      delete row[field];
+      rejects([row]);
+    }
+  });
   test('nonzero risk fields must be numeric and valid', () => {
     for (const field of ['entryPrice', 'markPrice', 'unRealizedProfit', 'leverage',
       'liquidationPrice', 'marginType'] as const) {
