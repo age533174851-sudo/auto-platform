@@ -177,4 +177,64 @@ export async function runProtectiveReadFailClosedTests() {
       assert(threw, '목록을 못 봤는데 found:false를 돌려주면 같은 주문이 또 나간다');
     });
   }
+  // ══════════ ⑩ 200인데 orderId가 없으면 "안 나갔다"가 아니다 ══════════
+  //
+  // `/fapi/v1/order`는 주문이 없으면 **오류 -2013**을 준다. 그러니 200을
+  // 받았는데 `orderId`가 안 보이는 것은 "없다"가 아니라 **못 읽었다**이다.
+  //
+  // 이 구분이 무너지면 어떻게 되는지는 호출부가 적어 두었다:
+  // `orderExecutor`의 중복 확인은 `found: false`를 "아직 안 나갔다"로 읽고
+  // **같은 자리에 주문을 보낸다.** 그 한 번이 중복 주문이다.
+  {
+    const v = new FakeVenue().on(ORDER, { json: {} }, 'GET');
+    let threw = false;
+    try {
+      await on(v, () => findOrderByClientId(KEY, SECRET, 'BTCUSDT', 'cid-a', true));
+    } catch { threw = true; }
+
+    test('★ ⑩ 빈 객체 응답을 "주문 없음"으로 적지 않는다', () => {
+      assert(threw, 'orderId를 못 읽었는데 found:false를 돌려주면 같은 주문이 또 나간다');
+    });
+  }
+
+  // ══════════ ⑪ 모양이 다른 200도 같다 ══════════
+  {
+    const v = new FakeVenue().on(ORDER, { json: { code: 200, msg: 'ok' } }, 'GET');
+    let threw = false;
+    try {
+      await on(v, () => findOrderByClientId(KEY, SECRET, 'BTCUSDT', 'cid-b', true));
+    } catch { threw = true; }
+
+    test('★ ⑪ orderId가 없는 200 응답은 판단 불가로 올린다', () => {
+      assert(threw, '응답 모양이 바뀌면 조용히 "안 나갔다"가 된다');
+    });
+  }
+
+  // ══════════ ⑫ 진짜 없을 때(-2013)는 그대로 "없음"이다 ══════════
+  //
+  // ⑩⑪이 이 경로까지 막아 버리면 재시도가 영영 안 된다. 거래소가
+  // **없다고 말한 것**과 **우리가 못 읽은 것**은 다르다.
+  {
+    const v = new FakeVenue().on(ORDER,
+      { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET');
+    const r: any = await on(v, () => findOrderByClientId(KEY, SECRET, 'BTCUSDT', 'cid-c', true));
+
+    test('★ ⑫ -2013은 여전히 found:false다 (재시도가 막히지 않는다)', () => {
+      eq(r.found, false);
+    });
+  }
+
+  // ══════════ ⑬ 찾으면 찾았다고 한다 (⑩⑪이 공허하지 않다) ══════════
+  {
+    const v = new FakeVenue().on(ORDER, { json: {
+      orderId: 4242, symbol: 'BTCUSDT', clientOrderId: 'cid-d',
+      status: 'NEW', executedQty: '0', avgPrice: '0',
+    } }, 'GET');
+    const r: any = await on(v, () => findOrderByClientId(KEY, SECRET, 'BTCUSDT', 'cid-d', true));
+
+    test('★ ⑬ orderId가 읽히면 found:true이고 응답을 그대로 싣는다', () => {
+      eq(r.found, true);
+      eq(String(r.order?.orderId), '4242');
+    });
+  }
 }

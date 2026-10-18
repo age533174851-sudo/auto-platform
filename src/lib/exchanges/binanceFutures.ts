@@ -1706,7 +1706,26 @@ export async function findOrderByClientId(
       symbol: sym,
       origClientOrderId: clientOrderId,
     });
-    return { found: !!d?.orderId, order: d };
+    // ── 200인데 `orderId`가 없으면 **"없다"가 아니라 "못 읽었다"다** ──
+    //
+    // 이 엔드포인트는 주문이 없으면 **오류 -2013**을 준다(아래 catch가
+    // 받는다). 그러니 200을 받고도 번호가 안 보이는 것은 응답 모양이
+    // 바뀌었거나 중간에서 뭔가 끼어든 것이지, 주문이 없다는 뜻이 아니다.
+    //
+    // 예전에는 `!!d?.orderId`라서 그 경우가 조용히 `found: false`가 됐다.
+    // 그 값의 뜻은 호출부가 정한다 — `orderExecutor`의 중복 확인은
+    // "아직 안 나갔다"로 읽고 **같은 자리에 주문을 보낸다.** 한 번이면
+    // 중복 주문이다.
+    //
+    // 그래서 던진다. 이 함수의 계약은 호출부 주석이 이미 적어 두었다:
+    // "findOrderByClientId는 '없음'(-2013)만 found:false로 돌려주고 그 외
+    //  오류는 던진다. 던진 것은 조회 실패이지 주문 없음이 아니다."
+    // 호출부 다섯 곳이 전부 그 던짐을 `ok: false`나 주문 중단으로 받는다.
+    const id = d?.orderId;
+    if (id == null || String(id).trim() === '') {
+      throw new Error('주문 조회 응답에서 orderId를 읽지 못했습니다 — 존재 여부 확인 불가');
+    }
+    return { found: true, order: d };
   } catch (e: any) {
     const msg = String(e?.message || e);
     // -2013 = Order does not exist → 아직 안 나감
