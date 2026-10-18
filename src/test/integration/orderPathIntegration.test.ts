@@ -413,8 +413,7 @@ export async function runReconcileIntegrationTests() {
     })]);
     const venue = new FakeVenue()
       .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.0033333333333333335',
-        entryPrice: '60000', markPrice: '60000', unRealizedProfit: '0',
-        leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+        entryPrice: '60000', markPrice: '60000', unRealizedProfit: '0', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
       .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
         executedQty: '0.0033333333333333335', origQty: '0.010', avgPrice: '60000' }) }, 'GET')
       .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
@@ -451,8 +450,7 @@ export async function runReconcileIntegrationTests() {
     })]);
     const venue = new FakeVenue()
       .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.003',
-        entryPrice: '60000', markPrice: '60000', unRealizedProfit: '0',
-        leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+        entryPrice: '60000', markPrice: '60000', unRealizedProfit: '0', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
       .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
         executedQty: '0.003', avgPrice: '60000' }) }, 'GET');
     const result = await scenario(venue, () => reconcile(db));
@@ -722,8 +720,7 @@ export async function runCloseIntegrationTests() {
     return new FakeVenue()
       .on(BN_DUAL, { json: { dualSidePosition: false } })
       .on(BN_POS, { json: [{ symbol: 'BTCUSDT', positionAmt: '0.010', entryPrice: '95000',
-        leverage: '100', marginType: 'isolated', liquidationPrice: '94000', markPrice: '95000',
-        unRealizedProfit: '0' }] })
+        leverage: '100', marginType: 'isolated', liquidationPrice: '94000', markPrice: '95000', unRealizedProfit: '0' }] })
       .on(BN_EXINFO, { json: { symbols: [{ symbol: 'BTCUSDT', filters: [
         { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
         { filterType: 'MIN_NOTIONAL', notional: '5' },
