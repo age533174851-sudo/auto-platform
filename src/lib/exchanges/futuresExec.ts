@@ -1145,6 +1145,116 @@ export interface TpslOutcome {
  * 방향 판정은 `gateStopSpec` · `gateTakeProfitSpec` 한 곳에만 있다 —
  * 부등호를 여기서 다시 쓰면 언젠가 익절이 손절 자리에 걸린다.
  */
+
+/**
+ * **바꾸는 쪽만 지운다. 그리고 지워졌는지 확인한다.**
+ *
+ * 왜 범위를 좁히는가
+ * ──────────────────
+ * `SET_TPSL`은 같은 포지션에 여러 번 온다(손절 이동·본전 이동). 예전
+ * 구현은 그때마다 **전부** 지웠다 — 바이낸스는 `only`를 안 넘겨서,
+ * Gate는 `DELETE /price_orders?contract=X`가 계약 단위라서. 그래서
+ * **익절만 옮기는 회차에 손절이 함께 사라졌다.**
+ *
+ * 왜 다시 읽는가
+ * ──────────────
+ * **DELETE가 2xx라고 실제로 취소된 것이 아니다.** 지운 뒤 다시 읽어
+ * 대상이 사라졌는지 확인한다. 확인하지 못했거나 남아 있으면 새로
+ * 걸지 않는다 — 옛 보호가 남아 있는 편이, 지우다 말고 새로 걸지도
+ * 못한 상태보다 낫다.
+ *
+ * 여기서 **주문을 새로 내지 않는다.** 취소와 확인만 한다.
+ */
+async function replaceProtectiveScope(
+  t: ExecTarget, symbol: string, only: 'TP' | 'SL' | undefined,
+): Promise<{ ok: boolean; message: string }> {
+  if (t.exchange === 'gate') {
+    const gf = await import('./gateFutures');
+    const gp = await import('./gatePlan');
+    const contract = gp.toGateContract(symbol);
+    if (!contract) return { ok: false, message: `Gate 계약 이름을 만들 수 없습니다 (${symbol})` };
+
+    const want = (row: any): boolean => {
+      const k = gp.gateProtectiveKind(row);
+      // **분류하지 못한 주문은 건드리지 않는다.** 남의 보호일 수 있다.
+      if (k.kind === 'STOP') return only !== 'TP';
+      if (k.kind === 'TAKE_PROFIT') return only !== 'SL';
+      return false;
+    };
+    const idOf = (row: any): string | null => {
+      const raw = row?.id ?? row?.initial?.id;
+      const v = raw == null ? '' : String(raw).trim();
+      return v === '' ? null : v;
+    };
+
+    const before = await gf.getPriceOrdersGateFutures(t.key, t.secret, contract, t.testnet);
+    if (before == null) {
+      return { ok: false,
+        message: '기존 조건부 주문을 읽지 못했습니다 — 무엇이 걸려 있는지 모른 채 교체하지 않습니다' };
+    }
+    const targets = before.filter(want);
+    if (targets.length === 0) return { ok: true, message: '' };
+    for (const row of targets) {
+      const id = idOf(row);
+      if (!id) {
+        return { ok: false,
+          message: '기존 조건부 주문의 번호를 읽지 못했습니다 — 지울 수 없는 주문이 있습니다' };
+      }
+      await gf.cancelOrderGateFutures(t.key, t.secret, id, { bucket: 'price', testnet: t.testnet })
+        .catch(() => null);
+    }
+    const after = await gf.getPriceOrdersGateFutures(t.key, t.secret, contract, t.testnet);
+    if (after == null) {
+      return { ok: false,
+        message: '취소 뒤 조건부 주문을 다시 읽지 못했습니다 — 지워졌는지 확인하지 못했습니다' };
+    }
+    const gone = new Set(after.filter(want).map(idOf).filter(Boolean) as string[]);
+    const left = (targets.map(idOf).filter(Boolean) as string[]).filter(id => gone.has(id));
+    if (left.length > 0) {
+      return { ok: false,
+        message: `기존 조건부 주문 ${left.length}건이 아직 남아 있습니다 — 새로 걸면 중복이 됩니다` };
+    }
+    return { ok: true, message: '' };
+  }
+
+  const bf = await import('./binanceFutures');
+  const want = (o: any): boolean => {
+    if (o?.closePosition !== true) return false;   // 분할 익절·남의 주문은 건드리지 않는다
+    const ty = String(o?.type || '').toUpperCase();
+    const isTp = ty.includes('TAKE_PROFIT');
+    const isSl = ty.includes('STOP') && !isTp;
+    if (only === 'TP') return isTp;
+    if (only === 'SL') return isSl;
+    return isTp || isSl;
+  };
+  const snapshot = async (): Promise<{ ok: boolean; ids: string[] }> => {
+    const read: any = await bf.getFuturesOpenOrders(t.key, t.secret, t.testnet, symbol);
+    // **`success`를 본다.** 실패해도 `orders: []`가 오므로 길이만 보면
+    // 조회 실패가 "보호주문 없음"이 된다.
+    if (read?.success !== true || !Array.isArray(read.orders)) return { ok: false, ids: [] };
+    return { ok: true, ids: read.orders.filter(want).map((o: any) => String(o.orderId)) };
+  };
+
+  const before = await snapshot();
+  if (!before.ok) {
+    return { ok: false,
+      message: '기존 보호주문을 읽지 못했습니다 — 무엇이 걸려 있는지 모른 채 교체하지 않습니다' };
+  }
+  if (before.ids.length === 0) return { ok: true, message: '' };
+  await bf.cancelOpenTPSL(t.key, t.secret, symbol, t.testnet, only).catch(() => null);
+  const after = await snapshot();
+  if (!after.ok) {
+    return { ok: false,
+      message: '취소 뒤 보호주문을 다시 읽지 못했습니다 — 지워졌는지 확인하지 못했습니다' };
+  }
+  const left = after.ids.filter(id => before.ids.includes(id));
+  if (left.length > 0) {
+    return { ok: false,
+      message: `기존 보호주문 ${left.length}건이 아직 남아 있습니다 — 새로 걸면 중복이 됩니다` };
+  }
+  return { ok: true, message: '' };
+}
+
 export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<TpslOutcome> {
   const hasTp = input.tpPrice != null && Number(input.tpPrice) > 0;
   const hasSl = input.slPrice != null && Number(input.slPrice) > 0;
@@ -1163,12 +1273,12 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
     const spec = await gf.getGateContractSpec(contract, t.testnet).catch(() => null);
 
     if (input.replaceExisting) {
-      // Gate의 조건부 주문은 전부 전량 청산형이다. 계약 단위로 지운다.
-      try {
-        await gf.gateReq<any[]>('DELETE', '/api/v4/futures/usdt/price_orders', {
-          key: t.key, secret: t.secret, qs: `contract=${contract}`, testnet: t.testnet,
-        });
-      } catch { /* 못 지웠으면 아래에서 새로 걸린다 — 중복이 남는 편이 보호가 없는 것보다 낫다 */ }
+      // **바꾸는 쪽만 지우고, 지워졌는지 확인한다.** 예전에는 계약 단위
+      // `DELETE /price_orders?contract=X`라서 익절만 옮기는 회차에
+      // 손절까지 함께 사라졌다. 확인하지 못하면 새로 걸지 않는다.
+      const g = await replaceProtectiveScope(
+        t, input.symbol, hasTp && hasSl ? undefined : hasTp ? 'TP' : 'SL');
+      if (!g.ok) return { ok: false, tp: null, sl: null, message: g.message };
     }
 
     let tp: TpslOutcome['tp'] = null;
@@ -1208,8 +1318,13 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
   if (input.replaceExisting) {
     // **전량 청산용(closePosition:true)만** 지운다. 분할 익절 사다리와
     // 사용자가 직접 건 주문은 이 함수의 책임이 아니다.
-    try { await bf.cancelOpenTPSL(t.key, t.secret, input.symbol, t.testnet); }
-    catch { /* 조회 실패 시 건너뛴다 — 남의 주문을 지우는 것보다 중복이 낫다 */ }
+    //
+    // 그리고 **바꾸는 쪽만** 지운다. 예전에는 `only`를 넘기지 않아
+    // 익절만 옮기는 회차에 손절까지 지워졌다. 지운 뒤 다시 읽어
+    // 확인하고, 확인하지 못하면 새로 걸지 않는다.
+    const g = await replaceProtectiveScope(
+      t, input.symbol, hasTp && hasSl ? undefined : hasTp ? 'TP' : 'SL');
+    if (!g.ok) return { ok: false, tp: null, sl: null, message: g.message };
   }
 
   let tp: TpslOutcome['tp'] = null;
