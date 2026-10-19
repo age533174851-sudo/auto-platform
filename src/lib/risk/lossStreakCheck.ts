@@ -84,7 +84,9 @@ export async function collectStreakLimits(args: {
     }
   } catch { rows = null; }
 
-  const weekNetUsd = rows != null ? sumTodayIncome(rows, weekStart).net : null;
+  // 주간 합도 같은 규칙이다 — 못 읽은 줄이 있으면 확정하지 않는다.
+  const weekSum = rows != null ? sumTodayIncome(rows, weekStart) : null;
+  const weekNetUsd = weekSum != null && weekSum.unreadable === 0 ? weekSum.net : null;
   const weekStartEquityUsd =
     args.currentEquityUsd != null && weekNetUsd != null
       ? args.currentEquityUsd - weekNetUsd
