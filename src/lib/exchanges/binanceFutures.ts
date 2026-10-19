@@ -1325,8 +1325,24 @@ export async function placeFuturesTPSL(
   // 원래 쓰던 모양. 수량을 알면 reduceOnly, 모르면 closePosition.
   const first: 'closePosition' | 'quantity' = opts.quantity != null ? 'quantity' : 'closePosition';
 
+    // ── 번호를 못 읽은 보호주문은 **설정된 보호가 아니다** ──
+    //
+    //   200을 받았는데 `orderId`가 없으면, 그 주문은 나중에 취소할 수도
+    //   확인할 수도 없다. 장부에는 보호가 있고 거래소에는 다룰 수 없는
+    //   주문이 있는 상태가 된다 — Gate 쪽에서 같은 자리를 이미 막았다.
+    //
+    //   **다시 보내지 않는다.** 주문이 실제로 들어갔을 수 있고, 재전송은
+    //   중복 보호주문을 만든다. 사실만 적고 사람이 보게 한다.
+    const ambiguous = (label: string, d: any) => ({
+      success: false,
+      message: `${label} 실패: 주문 번호를 읽지 못했습니다 — 주문이 생성됐을 수 있으니`
+        + ' 거래소에서 직접 확인하세요 (중복을 피하려고 다시 보내지 않습니다)',
+      raw: d,
+    });
+
   try {
     const d = await attempt(first);
+    if (d?.orderId == null || String(d.orderId).trim() === '') return ambiguous(label, d);
     return { success: true, message: `${label} 설정`, orderId: d.orderId, symbol: d.symbol, raw: d };
   } catch (e: any) {
     const msg = String(e?.message || e);
@@ -1346,6 +1362,7 @@ export async function placeFuturesTPSL(
     if (retriable && !(other === 'quantity' && !canRetryWithQty)) {
       try {
         const d2 = await attempt(other);
+        if (d2?.orderId == null || String(d2.orderId).trim() === '') return ambiguous(label, d2);
         return { success: true, message: `${label} 설정 (대체 방식)`, orderId: d2.orderId, symbol: d2.symbol, raw: d2 };
       } catch (e2: any) {
         // 두 모양 다 -4120이면 파라미터 문제가 아니라 **환경 문제**다.
