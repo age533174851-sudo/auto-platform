@@ -209,6 +209,7 @@ import { runTradingLayoutTests } from './src/lib/ui/tradingLayout.test';
 import { runAutoCockpitTests } from './src/lib/ui/autoCockpit.test';
 import { runExecutionProfileTests } from './src/lib/execution/profile.test';
 import { runDedicated100xTests } from './src/lib/execution/dedicated100x.test';
+import { runExact100xObservationTests } from './src/test/integration/exact100xObservationIntegration.test';
 import { runScalpSignalTests } from './src/lib/strategies/scalpSignal.test';
 import { runRiskContextTests } from './src/lib/engine/riskContext.test';
 import { runConnectionTests } from './src/lib/exchanges/connection.test';
@@ -401,6 +402,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
   await flushAsync();
+  await runExact100xObservationTests();
   // ── 통합 시험은 **단독으로** 돌린다 ──
   //
   //   이 시험은 \`globalThis.fetch\`를 바꿔 끼운다. 다른 async 시험이
