@@ -142,12 +142,60 @@ export async function getPositionModeGateFutures(
   }
 }
 
+/**
+ * Gate 응답의 수치 한 칸. **읽히지 않으면 null이고, 그건 0이 아니다.**
+ *
+ * `Number()`를 그대로 쓰면 `null`·`''`·공백이 전부 0이 된다. 포지션
+ * 수량에서 그 0은 "평탄"으로 읽혀 **열린 포지션을 목록에서 지운다.**
+ *
+ * ⚠ PR #361이 같은 모양의 `gateDecimal`을 원장 쪽에 추가한다. 두 PR이
+ *   각자 main에서 갈라져 나왔기 때문이다 — 병합할 때 하나로 합치면 된다.
+ */
+function gateNum(value: unknown): number | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const raw = String(value).trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ── 포지션 조회 ──────────────────────────────────────
 export interface GatePosition { contract: string; size: number; entry_price: string; leverage: string; unrealised_pnl: string; liq_price?: string }
 
+/**
+ * 열린 포지션 목록. **못 읽으면 던진다 — 빈 목록이 아니다.**
+ *
+ * 왜 빈 배열로 접으면 안 되는가
+ * ─────────────────────────────
+ * 상위 함수들은 이미 "못 읽음"을 막으려고 만들어져 있다:
+ *
+ *     try { positions = await getPositionsGateFutures(...) }
+ *     catch { return { success: false, remaining: null, ... } }
+ *
+ * 그런데 조회가 **던지지 않고 빈 배열을 돌려주면** 그 보호가 그대로
+ * 지나간다. `positions.length === 0` → `success: true · remaining: 0 ·
+ * '포지션 전체 종료 완료'`. 주문은 한 건도 안 나갔는데 전체 종료가
+ * 완료로 적힌다. 사람은 정리됐다고 믿고 손을 뗀다.
+ *
+ * HTTP 오류는 `gateReq`가 이미 던진다. 여기서 막는 것은 **200인데
+ * 읽히지 않는 응답**과 **수량을 읽을 수 없는 줄**이다.
+ */
 export async function getPositionsGateFutures(key: string, secret: string, testnet = true): Promise<GatePosition[]> {
   const rows = await gateReq<GatePosition[]>('GET', '/api/v4/futures/usdt/positions', { key, secret, testnet });
-  return Array.isArray(rows) ? rows.filter(p => Number(p.size) !== 0) : [];
+  if (!Array.isArray(rows)) {
+    throw new Error('Gate 포지션 응답이 배열이 아닙니다 — 포지션 없음으로 읽지 않습니다');
+  }
+  const out: GatePosition[] = [];
+  for (const p of rows) {
+    // `Number(null)`도 `Number('')`도 **0**이다. 그 0은 아래 `!== 0`
+    // 필터에서 걸러져 **열린 포지션이 목록에서 사라진다.**
+    const size = gateNum((p as any)?.size);
+    if (size == null) {
+      throw new Error('Gate 포지션 수량을 읽지 못했습니다 — 평탄으로 읽지 않습니다');
+    }
+    if (size !== 0) out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -428,11 +476,23 @@ export async function closePositionGateFutures(
 ): Promise<{ success: boolean; message: string }> {
   try {
     const pos = await getPositionGateFutures(key, secret, contract, testnet);
-    const size = Number(pos?.size ?? 0);
-    if (!size) return { success: true, message: '이미 포지션이 없습니다' };
+    // ── "못 읽었다"를 "이미 없다"로 적지 않는다 ──
+    //
+    // `getPositionGateFutures`는 못 읽으면 **null**이다(그 함수 문서에
+    // 적혀 있다). 그런데 `Number(pos?.size ?? 0)`이 그 null을 0으로
+    // 바꿔 `success: true · '이미 포지션이 없습니다'`가 됐다. 조회가 한
+    // 번 깨지면 **열려 있는 포지션이 닫힌 것으로 기록된다.**
+    if (pos == null) {
+      return { success: false, message: '종료 실패: 포지션을 읽지 못했습니다 — 이미 없는 것과 다릅니다' };
+    }
+    const size = gateNum((pos as any)?.size);
+    if (size == null) {
+      return { success: false, message: '종료 실패: 포지션 수량을 읽지 못했습니다' };
+    }
+    if (size === 0) return { success: true, message: '이미 포지션이 없습니다' };
     // size 0 + auto_size로 전량 청산. 부호를 직접 계산하지 않는다 —
     // 거기서 틀리면 닫는 대신 두 배가 된다.
-    await gateReq('POST', '/api/v4/futures/usdt/orders', {
+    const sent = await gateReq<GateOrderResult>('POST', '/api/v4/futures/usdt/orders', {
       key, secret, testnet,
       body: {
         contract, size: 0, price: '0', tif: 'ioc',
@@ -440,6 +500,21 @@ export async function closePositionGateFutures(
         auto_size: size > 0 ? 'close_long' : 'close_short',
       },
     });
+    // ── IOC가 **하나도 못 붙었을 수 있다** ──
+    //
+    // `GateOrderResult.left`의 주석이 그대로 적고 있다: "미체결 수량.
+    // ioc 주문이 하나도 못 붙으면 size와 같다." 그 칸을 안 읽고 HTTP
+    // 2xx만으로 '전량 종료'라고 적으면, 포지션은 그대로인데 닫혔다고
+    // 기록된다.
+    //
+    // **다시 보내지 않는다.** 재전송은 이 함수의 일이 아니고(상위의
+    // 재시도·대조가 한다), 여기서 또 보내면 중복 청산이 된다. 사실만
+    // 정확히 적는다.
+    const left = gateNum((sent as any)?.left);
+    if (left != null && left !== 0) {
+      return { success: false,
+        message: `종료 미완료: IOC 잔량 ${left} — 체결되지 않은 수량이 남았습니다` };
+    }
     return { success: true, message: '포지션 전량 종료' };
   } catch (e: any) {
     return { success: false, message: `종료 실패: ${e?.message || e}` };
