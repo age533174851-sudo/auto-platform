@@ -35,7 +35,14 @@ const isMissingTable = (m: any) => /does not exist|schema cache|relation/i.test(
 export interface CancelOpResult {
   ok: boolean;
   code: 'STOPPED' | 'CANCELLED' | 'CANCEL_FAILED' | 'IN_PROGRESS'
-      | 'NOT_FOUND' | 'MIGRATION_MISSING' | 'TABLE_MISSING' | 'UPDATE_FAILED' | 'ALREADY_DONE';
+      | 'NOT_FOUND' | 'MIGRATION_MISSING' | 'TABLE_MISSING' | 'UPDATE_FAILED' | 'ALREADY_DONE'
+      /**
+       * **묶음을 읽지 못했다.** `NOT_FOUND`와 섞지 않는다.
+       *
+       * 없는 것과 못 읽은 것은 사람이 할 일이 정반대다. 없으면 할 일이
+       * 없고, 못 읽었으면 **포지션이 열린 채로 남아 있을 수 있다.**
+       */
+      | 'LOAD_FAILED';
   /** 지금 DB에 적힌 묶음 상태. **낙관적으로 앞질러 적지 않는다** */
   state: string | null;
   message: string;
@@ -43,11 +50,43 @@ export interface CancelOpResult {
   runId: string | null;
 }
 
-async function loadRun(sb: any, runId: string, userId?: string | null): Promise<any | null> {
-  let q = (sb as any).from('smoke_runs').select('*').eq('id', runId);
-  if (userId) q = q.eq('user_id', userId);
-  const { data } = await q.maybeSingle();
-  return data ?? null;
+/**
+ * 묶음 한 줄.
+ *
+ * **"없다"와 "못 읽었다"를 가른다.**
+ *
+ * 예전에는 `const { data } = await …`로 error를 버리고 `data ?? null`을
+ * 돌려줬다. 그래서 DB 조회가 실패하면 null이 되고, 호출부 둘 다
+ * `if (!run) → 404 '그 반복 테스트를 찾지 못했습니다'`로 끝났다.
+ *
+ * 그 404가 나가는 자리가 **즉시 중지 버튼**이다. 사람이 100배 포지션을
+ * 닫으려고 누른 순간에 "그런 테스트가 없습니다"라고 답하면, 사람은
+ * 닫을 것이 없다고 믿고 화면을 닫는다 — 포지션은 그대로 열려 있다.
+ *
+ * `maybeSingle()`은 줄이 0개일 때 `{ data: null, error: null }`을 준다.
+ * 그래서 둘은 깨끗하게 갈린다.
+ */
+async function loadRun(
+  sb: any, runId: string, userId?: string | null,
+): Promise<{ ok: boolean; row: any | null; reason: string }> {
+  try {
+    let q = (sb as any).from('smoke_runs').select('*').eq('id', runId);
+    if (userId) q = q.eq('user_id', userId);
+    const { data, error } = await q.maybeSingle();
+    if (error) return { ok: false, row: null, reason: String(error.message || error) };
+    return { ok: true, row: data ?? null, reason: '' };
+  } catch (e: any) {
+    return { ok: false, row: null, reason: String(e?.message || e) };
+  }
+}
+
+/** 못 읽었을 때의 답. **404가 아니다** */
+function loadFailed(runId: string, reason: string): CancelOpResult {
+  return {
+    ok: false, code: 'LOAD_FAILED', state: null, runId, status: 503,
+    message: `반복 테스트 기록을 읽지 못했습니다 (${reason}) — `
+      + '없다는 뜻이 아닙니다. 포지션이 열린 채로 남아 있을 수 있으니 다시 시도하세요',
+  };
 }
 
 // ── 반복만 중지 ──────────────────────────────────────
@@ -92,7 +131,9 @@ export async function stopAfterCurrent(
     return { ...base, ok: false, code: 'UPDATE_FAILED', status: 500, message: String(error.message) };
   }
   if (!Array.isArray(data) || data.length === 0) {
-    const cur = await loadRun(sb, runId, i.userId);
+    const got = await loadRun(sb, runId, i.userId);
+    if (!got.ok) return loadFailed(runId, got.reason);
+    const cur = got.row;
     if (!cur) {
       return { ...base, ok: false, code: 'NOT_FOUND', status: 404,
         message: '그 반복 테스트를 찾지 못했습니다' };
@@ -142,7 +183,9 @@ export async function cancelNow(
   sb: any, i: { runId: string; userId?: string | null },
 ): Promise<CancelOpResult> {
   const runId = String(i.runId);
-  const run = await loadRun(sb, runId, i.userId);
+  const got = await loadRun(sb, runId, i.userId);
+  if (!got.ok) return loadFailed(runId, got.reason);
+  const run = got.row;
   if (!run) {
     return { ok: false, code: 'NOT_FOUND', state: null, runId, status: 404,
       message: '그 반복 테스트를 찾지 못했습니다' };
