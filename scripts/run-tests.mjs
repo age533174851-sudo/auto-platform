@@ -160,6 +160,7 @@ import {
   runPrecisionIntegrationTests,
   runPrecisionMatrixTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runReconcileUnresolvedTests } from './src/test/integration/reconcileUnresolvedIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -418,6 +419,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
+  await runReconcileUnresolvedTests();
   await runSmokeStartRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
