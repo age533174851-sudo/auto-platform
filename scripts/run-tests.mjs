@@ -226,6 +226,7 @@ import { runFirstEvalRaceTests } from './src/lib/autotrade/firstEvalRace.test';
 import { runScheduleToggleTests } from './src/lib/autotrade/scheduleToggle.test';
 import { runPickConnectionTests } from './src/lib/exchanges/pickConnection.test';
 import { runOrderCycleTests } from './src/lib/engine/orderCycle.test';
+import { runModeEvidenceRouteTests } from './src/test/integration/modeEvidenceRouteIntegration.test';
 import { runLeverageSyncTests } from './src/lib/engine/leverageSync.test';
 import { runMismatchRecoveryTests } from './src/lib/engine/mismatchRecovery.test';
 import { runTabGroupsTests } from './src/lib/terminal/tabGroups.test';
@@ -408,6 +409,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   //   가짜 거래소**에 묻게 된다. 실제로 그 일이 났고 "거래소 호출이
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
   await runOrderPathIntegrationTests();
+  await runModeEvidenceRouteTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
