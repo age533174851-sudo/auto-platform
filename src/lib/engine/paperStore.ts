@@ -17,10 +17,25 @@ const DEFAULT_BALANCE = 10000;
  * 부분 유니크 인덱스가 막는 것은 **기본 계좌가 두 개가 되는 것뿐이다.**
  * 0개는 막지 못한다 — 다만 이 함수는 그때 임의 계좌를 고르지 않고
  * **기본 계좌를 새로 만든다.** 전용 계좌(챌린지 등)를 집어 오지 않는다.
+ *
+ * ★ **못 읽은 것은 "없음"이 아니다 — 던진다.**
+ *
+ *   예전에는 `error`를 버리고 `data`만 봤다. Supabase의 select는 실패해도
+ *   던지지 않으므로, 조회 장애가 "계좌 없음"이 되어 **10,000 USDT짜리
+ *   계좌를 만들고** 그 잔고를 돌려줬다. 잔고 300인 사용자의 예산이 조용히
+ *   10,000이 되고 그 상태로 진입이 통과한다 — 막는 쪽이 아니라 **여는
+ *   쪽으로 틀린** 기본값이다.
+ *
+ *   부르는 쪽은 전부 이 호출을 `try`로 감싸 "모름"으로 떨어뜨린다
+ *   (가용 잔고가 null이면 계획 단계가 막는다).
  */
 export async function getPaperAccount(sb: any, userId: string) {
-  const { data } = await sb.from('paper_accounts')
+  const { data, error } = await sb.from('paper_accounts')
     .select('*').eq('user_id', userId).eq('is_default', true).maybeSingle();
+  if (error) {
+    throw new Error(`모의 계좌를 읽지 못했습니다 (${String((error as any)?.message || error).slice(0, 120)})`
+      + ' — 계좌가 없다는 뜻이 아닙니다');
+  }
   if (data) return data;
   // 새로 만드는 계좌는 **기본 계좌**다. 이 함수는 기본 계좌를 다루는
   // 자리이고, 챌린지 같은 전용 계좌는 여기서 만들지 않는다.
