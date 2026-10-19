@@ -224,6 +224,53 @@ export function headlessStartVerdict(body: any): HeadlessStartVerdict {
   };
 }
 
+// ── 무인 **사전 점검**을 받아도 되는가 ──────────────────
+
+/**
+ * 사전 점검에는 **확인 문구를 요구하지 않는다.**
+ *
+ * 확인 문구는 "실주문을 내도 좋다"는 사람의 표시다. 사전 점검은
+ * 주문을 내지 않고 읽기만 하므로, 같은 문구를 요구하면 그 문구가
+ * 무엇을 뜻하는지 흐려진다 — 읽기에도 적는 문구가 되면 쓰기에서도
+ * 습관으로 적게 된다.
+ *
+ * 대신 **누구의 어느 연결인지는 똑같이 요구한다.** 비우면 "전체"가
+ * 되는 자리를 열지 않는 것이 이 판정의 전부다.
+ */
+export type HeadlessPreflightCode = 'OK' | 'USER_REQUIRED' | 'CONNECTION_REQUIRED';
+
+export interface HeadlessPreflightVerdict {
+  ok: boolean;
+  code: HeadlessPreflightCode;
+  /** 통과했을 때만 값이 있다. **빈 값을 "전체"로 읽지 않는다.** */
+  userId: string | null;
+  connectionId: string | null;
+  message: string;
+}
+
+export function headlessPreflightVerdict(body: any): HeadlessPreflightVerdict {
+  const bad = (code: HeadlessPreflightCode, message: string): HeadlessPreflightVerdict =>
+    ({ ok: false, code, userId: null, connectionId: null, message });
+
+  const userId = String(body?.userId ?? '').trim();
+  if (!userId) {
+    return bad('USER_REQUIRED',
+      '무인 사전 점검은 누구의 계좌인지 적어야 합니다 — userId가 비면 보지 않습니다');
+  }
+
+  const connectionId = String(body?.connectionId ?? '').trim();
+  if (!connectionId) {
+    return bad('CONNECTION_REQUIRED',
+      '무인 사전 점검은 어느 거래소 연결인지 적어야 합니다 — connectionId가 필요합니다');
+  }
+
+  return {
+    ok: true, code: 'OK', userId, connectionId,
+    // **id를 통째로 적지 않는다.** 로그에 남는 줄이다.
+    message: `무인 사전 점검 승인 — 연결 ${connectionId.slice(0, 8)}…`,
+  };
+}
+
 // ── 다음 회차로 가도 되는가 ──────────────────────────
 
 export type AdvanceCode =

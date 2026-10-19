@@ -1,0 +1,162 @@
+# TESTNET 스모크 **사전 점검** — 주문을 내지 않고 관문만 전부 거친다
+#
+# 무엇을 하는가
+# ─────────────
+# `smoke-test-testnet`(실주문)이 거치는 관문 여덟 개를 **주문만 빼고**
+# 그대로 거치고, 통과하지 못한 줄을 사람이 읽을 말로 적는다.
+#
+#   연결 소유권 · 테스트넷 확인 · 장부 조회 · 미해결 노출 0 ·
+#   킬스위치 · 청산 정책/청산가 · 종목 사전 확인 · 묶음 표(053)
+#
+# 왜 필요한가
+# ───────────
+# PR #335가 스모크 **시작**을 무인으로 열었다. 그런데 "시작해도 되는
+# 상태인가"를 확인할 길은 아직 브라우저뿐이었다 —
+# `/api/binance/futures/diagnose`도 `/api/exchange/testnet-check`도
+# 사람의 JWT를 요구한다. 그래서 TESTNET 검증 절차에
+# **"실행 전에 화면을 열어 확인해 주세요"**가 남아 있었고, 그 확인을
+# 건너뛰면 설정 문제를 **실주문으로** 발견하게 됐다.
+#
+# 무엇을 하지 않는가
+# ──────────────────
+# · **주문을 내지 않는다.** 거래소에는 조회만 간다.
+# · **DB를 바꾸지 않는다.** select만 한다.
+# · **막힌 것을 치워 주지 않는다.** 치우는 길은 `/orphans`·`/settle`에
+#   따로 있다 — 점검이 상태를 바꾸면 "점검했더니 통과"가 점검이 만든
+#   결과가 된다.
+# · **cron이 없다.** 사람이 명령할 때만 돈다.
+name: smoke-preflight-testnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      userId:
+        description: '대상 사용자 id (Supabase auth user id)'
+        required: true
+      connectionId:
+        description: '거래소 연결 id (테스트넷 연결이어야 한다)'
+        required: true
+      symbol:
+        description: '종목'
+        required: true
+        default: 'BTCUSDT'
+        type: choice
+        options: ['BTCUSDT', 'ETHUSDT']
+      leverage:
+        description: '배율 (청산가 관문을 이 값으로 미리 본다)'
+        required: true
+        default: '10'
+
+concurrency:
+  # 실주문 묶음과 같은 그룹에 두지 않는다 — 점검은 읽기라 겹쳐도
+  # 안전하고, 실주문이 도는 중에도 상태를 들여다볼 수 있어야 한다.
+  group: smoke-preflight-testnet
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # **입력을 셸·파이썬 안에 `${{ }}`로 펼치지 않는다.**
+    # 자유 입력 칸이 그대로 코드가 되는 자리라, 전부 환경변수로 넘긴다.
+    env:
+      BASE: ${{ secrets.EXIT_MONITOR_URL }}
+      SECRET: ${{ secrets.ADMIN_SECRET }}
+      USER_ID: ${{ inputs.userId }}
+      CONNECTION_ID: ${{ inputs.connectionId }}
+      SYMBOL: ${{ inputs.symbol }}
+      LEVERAGE: ${{ inputs.leverage }}
+      ACTOR: ${{ github.actor }}
+      OWNER: ${{ github.repository_owner }}
+
+    steps:
+      # ── 관문 ──
+      #
+      # 주문을 내지 않으므로 확인 문구는 요구하지 않는다. 다만 남의
+      # 계좌 상태를 읽는 명령이므로 **소유자만** 돌린다.
+      - name: 관문 — 소유자
+        run: |
+          set -euo pipefail
+          if [ "${ACTOR}" != "${OWNER}" ]; then
+            echo "::error::저장소 소유자만 실행할 수 있습니다 (요청자: ${ACTOR})"
+            exit 1
+          fi
+          if [ -z "${BASE:-}" ] || [ -z "${SECRET:-}" ]; then
+            echo "::error::EXIT_MONITOR_URL 또는 ADMIN_SECRET 시크릿이 없습니다 — sync-secrets가 미는 그 이름입니다"
+            exit 1
+          fi
+          echo "관문 통과 — 주문은 내지 않습니다"
+
+      - name: 사전 점검
+        run: |
+          set -euo pipefail
+          B="${BASE%/}"
+          body=$(mktemp)
+          payload=$(mktemp)
+          python3 -c '
+          import json, os, sys
+          raw = os.environ["LEVERAGE"]
+          try:
+              lev = json.loads(raw)
+          except Exception:
+              sys.exit("LEVERAGE를 숫자로 읽지 못했습니다: " + repr(raw))
+          json.dump({
+              "userId": os.environ["USER_ID"],
+              "connectionId": os.environ["CONNECTION_ID"],
+              "symbol": os.environ["SYMBOL"],
+              "leverage": lev,
+          }, open(sys.argv[1], "w"))
+          ' "$payload"
+
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 120 \
+            -X POST "${B}/api/autotrade/smoke-test/preflight" \
+            -H 'content-type: application/json' \
+            -H "x-admin-secret: ${SECRET}" \
+            --data-binary "@${payload}")
+          echo "HTTP ${code}"
+          cat "$body"; echo
+
+          if [ "$code" = "404" ]; then
+            echo "::error::사전 점검 경로가 배포에 없습니다 — 이 브랜치가 아직 배포되지 않았습니다"
+            exit 1
+          fi
+          if [ "$code" != "200" ]; then
+            echo "::error::사전 점검이 HTTP ${code}로 실패했습니다 — 결과를 모르는 것은 통과가 아닙니다"
+            exit 1
+          fi
+
+          # ── 결과를 한 줄씩 적는다 ──
+          #
+          # **PASS가 아닌 것은 전부 빨갛게 끝낸다.** SKIPPED·UNKNOWN을
+          # "아직 모름"이라고 초록으로 두면 사람은 그대로 실주문을 누른다.
+          #
+          # `::notice::`·`::error::`로 적는 이유: 평범한 출력은 로그
+          # 본문에만 남고 그 본문은 blob 호스트에서 받아야 한다.
+          # 주석으로 적으면 체크런 API로 바로 읽힌다.
+          python3 - "$body" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          checks = d.get('checks') or []
+          if not checks:
+              print('::error::점검 항목이 하나도 없습니다 — 응답을 믿을 수 없습니다')
+              sys.exit(1)
+          bad = 0
+          for c in checks:
+              state = c.get('state')
+              line = f"[{state}] {c.get('title')} — {c.get('detail')}"
+              if state == 'PASS':
+                  print(f"::notice::{line}")
+              else:
+                  print(f"::error::{line}")
+                  bad += 1
+          print()
+          print(d.get('message'))
+          if not d.get('ready') or bad:
+              print('::error::실주문 스모크를 시작할 수 있는 상태가 아닙니다 — 위 항목을 먼저 해결하세요')
+              sys.exit(1)
+          print('::notice::사전 점검 전부 통과 — smoke-test-testnet을 시작해도 됩니다')
+          PY
