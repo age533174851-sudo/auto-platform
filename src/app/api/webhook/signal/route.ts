@@ -275,14 +275,26 @@ export async function POST(req: NextRequest) {
       // **어느 계좌인지 먼저 정한다.** 이 경로는 기본 계좌로 들어오는
       // 신호이므로 기본 계좌만 본다 — 안 좁히면 전용 계좌(챌린지 등)의
       // 포지션까지 닫는다. 계좌를 못 정하면 **아무것도 닫지 않는다.**
+      //
+      // ★ **이 단계의 실패를 삼키지 않는다.** 예전에는 `catch {}`가
+      //   비어 있었다. 그래서 반대 포지션 조회가 실패해도 그대로 다음
+      //   줄로 내려가 **새 포지션을 열었고**, 모의 장부에 같은 종목의
+      //   LONG과 SHORT가 함께 남았다. 확인하지 못한 것은 "없다"가 아니다.
+      //
+      //   던진 것은 아래 바깥 `catch`가 받아 `executed: false`와 사유로
+      //   답한다 — 포지션은 열리지 않는다.
+      //
+      //   계좌가 아직 없는 경우(`NO_ACCOUNT`)는 그대로 통과다. 닫을
+      //   포지션이 있을 수 없고, 여기서 막으면 첫 진입이 영원히 안 열린다.
       let reversed = 0;
-      try {
-        const scope = await resolvePaperScope(sb, userId);
-        if (scope.ok) {
-          reversed = await closeOpposingPositions(
-            sb, userId, scope.accountId, v.signal!.symbol, plan.side, v.signal!.entryPrice);
-        }
-      } catch {}
+      const scope = await resolvePaperScope(sb, userId);
+      if (scope.ok) {
+        reversed = await closeOpposingPositions(
+          sb, userId, scope.accountId, v.signal!.symbol, plan.side, v.signal!.entryPrice);
+      } else if ((scope as any).code === 'UNREADABLE') {
+        // 계좌를 **못 읽었다.** 반대 포지션이 있는지도 모른다.
+        throw new Error(`모의 계좌를 읽지 못해 진입하지 않았습니다 — ${(scope as any).reason || ''}`);
+      }
 
       const r = await openPaperPosition(sb, {
         userId,
