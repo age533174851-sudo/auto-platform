@@ -462,11 +462,27 @@ export default function SmokeTestPanel({
                         </div>
                       );
                     })}
-                    {orphans?.smoke?.error && (
-                      <div style={{ fontSize: 9.5, color: T.ylw }}>
-                        DB 기록을 읽지 못했습니다 ({orphans.smoke.error}) — 0건과 다릅니다
-                      </div>
-                    )}
+                  </div>
+                )}
+
+                {/* ── **장부를 못 읽은 것은 "0건"이 아니다** ──
+
+                    이 경고는 원래 위 `rows.length > 0` 블록 **안**에
+                    있었다. 그런데 장부를 못 읽으면 rows가 비므로, 경고가
+                    정확히 필요한 순간에만 사라졌다 — 만들어 놓고 배선을
+                    안 한 자리다. 밖으로 꺼낸다.
+
+                    서버도 같은 때 `smokeReadable: false`를 준다. 소유
+                    증거의 1순위(주문 번호 일치)를 못 쓴 판정이므로,
+                    아래 `판정 UNKNOWN`은 "남의 것"이라는 뜻이 아니다. */}
+                {orphans?.smokeReadable === false && (
+                  <div style={{
+                    borderTop: `1px dashed ${T.border}`, paddingTop: 6,
+                    fontSize: 10, color: T.ylw, lineHeight: 1.6,
+                  }}>
+                    DB 기록을 읽지 못했습니다{orphans?.smoke?.error ? ` (${orphans.smoke.error})` : ''} — 0건과 다릅니다.
+                    주문 번호로 소유를 확인할 수 없어 아래 판정은 식별자만 본 것입니다.
+                    이 상태에서는 취소도 거절됩니다.
                   </div>
                 )}
 
