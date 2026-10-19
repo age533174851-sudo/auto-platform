@@ -889,7 +889,12 @@ export async function POST(req: NextRequest) {
         blockNewOrders: !gate.allowed,
         summary: gate.verdict?.summary || gate.reason || '일치',
       },
-      unresolvedOrderCount: gate.gather.unresolvedOrders.length,
+      // **`.length`를 적지 않는다.** 다른 세 경로는 `reachable`로 가리고
+      // 있었는데 여기만 빠져 있었다 — 거래소에 못 닿은 회차의 점검이
+      // "미확정 주문: 없음"으로 적혔다. 못 물어본 것이 통과로 적히는 것이
+      // 이 체크리스트가 막으려는 바로 그 실패다. 이제 가림은 수집기가
+      // 한 곳에서 한다.
+      unresolvedOrderCount: gate.gather.unresolvedOrderCount,
       marginType: risk?.marginType ?? null,
       leverage: risk?.leverage != null
         ? { actual: risk.leverage, intended: result.plan!.leverage }
