@@ -193,4 +193,63 @@ export async function runGateCloseTests() {
       eq(v.orderSends().length, 1);
     });
   }
+  // ══════════ ⑬ 101번째 포지션을 놓치지 않는다 ══════════
+  //
+  // Gate 문서(`GET /futures/{settle}/positions`)는 이 목록도 쪽으로
+  // 나눈다고 적는다:
+  //   · `limit` 기본 **100** — "Maximum number of records returned in a single list"
+  //   · `offset` — "List offset, starting from 0"
+  //   · `holding` — "Return only real positions - true, return all - false"
+  //
+  // 지금 코드는 셋 중 아무것도 보내지 않는다. 그러면 서버 기본값
+  // **100건**만 온다. 그리고 `holding`을 안 보내므로 목록에는 **수량 0인
+  // 계약까지** 섞여 들어온다 — 예전에 거래한 계약이 쌓이면 그 100칸이
+  // 0짜리로 차고, **진짜 열린 포지션이 둘째 쪽으로 밀린다.**
+  //
+  // 밀린 포지션은 `closeAllPositionsGateFutures`에게 보이지 않는다.
+  // 닫지 않은 채 '전체 종료 완료'가 적히는 또 하나의 문이다.
+  {
+    const v = new FakeVenue();
+    v.on(POSITIONS, { json: () => {
+      const c = v.calls[v.calls.length - 1];
+      const offset = Number(c?.params?.offset ?? 0);
+      // 첫 쪽은 수량 0짜리 100건(= 가득 참), 둘째 쪽에 진짜 포지션이 있다.
+      if (offset === 0) {
+        return Array.from({ length: 100 }, (_, i) => pos('0', { contract: `OLD${i}_USDT` }));
+      }
+      if (offset === 100) return [pos('5')];
+      return [];
+    } });
+    const r: any = await on(v, () => getPositionsGateFutures(KEY, SECRET, true));
+
+    test('★ ⑬ 첫 쪽이 가득 차면 다음 쪽을 읽는다 (101번째 포지션)', () => {
+      assert(Array.isArray(r), String(r));
+      eq(r.length, 1, '첫 쪽만 읽으면 열린 포지션이 0건으로 보인다');
+      eq(r[0].contract, C);
+    });
+  }
+
+  // ══════════ ⑭ 짧은 쪽에서 끝난다 (요청이 늘지 않는다) ══════════
+  {
+    const v = new FakeVenue().on(POSITIONS, { json: [pos('5')] });
+    const r: any = await on(v, () => getPositionsGateFutures(KEY, SECRET, true));
+
+    test('★ ⑭ 흔한 계정은 요청 한 번으로 끝난다', () => {
+      eq(r.length, 1);
+      eq(v.countOf(POSITIONS), 1, '짧은 쪽이면 더 묻지 않는다');
+    });
+  }
+
+  // ══════════ ⑮ 끝까지 가득 차면 "이게 전부"라고 하지 않는다 ══════════
+  {
+    const v = new FakeVenue().on(POSITIONS, { json: () =>
+      Array.from({ length: 100 }, (_, i) => pos('0', { contract: `OLD${i}_USDT` })) });
+    const threw = await threwOn(v, () => getPositionsGateFutures(KEY, SECRET, true));
+
+    test('★ ⑮ 쪽 상한까지 가득 차면 불완전한 목록을 돌려주지 않는다', () => {
+      assert(threw, '다 읽지 못한 목록을 "열린 포지션 0건"으로 넘기면 전체 종료가 거짓이 된다');
+      const n = v.countOf(POSITIONS);
+      assert(n > 1 && n <= 40, `요청이 ${n}번 — 상한이 없거나 쪽을 안 넘긴다`);
+    });
+  }
 }
