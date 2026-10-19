@@ -144,6 +144,22 @@ export interface ModeEvidence {
   daysInMode: number;
   /** 아직 결과가 확정되지 않은 주문 수 */
   unresolvedOrders: number;
+  /**
+   * 위 세 숫자를 **실제로 셌는가.**
+   *
+   * ★ 조회가 실패했을 때 `0`을 적으면, 막아야 할 상태가 관문을
+   *   통과한 것으로 보인다. 특히 `unresolvedOrders`는 **승급을 막는
+   *   증거**라서, 못 센 것을 0건으로 읽으면 미확정 주문을 안고 더
+   *   위험한 단계로 올라간다.
+   *
+   * ★ 생략하면 "셌다"로 본다 — 기존 호출부의 뜻을 바꾸지 않는다.
+   *   못 셌다는 것은 **부르는 쪽이 명시적으로 `false`를 적는다.**
+   */
+  unresolvedKnown?: boolean;
+  /** 완주 표본·기간을 실제로 읽었는가. 생략은 "읽었다" */
+  samplesKnown?: boolean;
+  /** 실계좌 키 등록 여부를 실제로 읽었는가. 생략은 "읽었다" */
+  liveKeyKnown?: boolean;
   /** 미해결 심각 상태 불일치 수 */
   criticalMismatches: number;
   /** 실계좌 키가 등록돼 있는가 */
@@ -189,16 +205,27 @@ export function canChangeMode(
 
   const min = PROMOTION_MIN[to];
   if (min) {
-    if (ev.completedTrades < min.trades) {
-      reasons.push(`표본 부족: ${ev.completedTrades}/${min.trades}건`);
-    }
-    if (ev.daysInMode < min.days) {
-      reasons.push(`기간 부족: ${ev.daysInMode}/${min.days}일`);
+    // ★ **못 읽은 것을 "부족"으로 적지 않는다.** 숫자를 말하면 사용자는
+    //   거래를 더 쌓으면 된다고 읽는다 — 실제로는 조회가 실패한 것이다.
+    if (ev.samplesKnown === false) {
+      reasons.push('완주 표본과 기간을 확인하지 못했습니다 — 부족하다는 뜻이 아닙니다');
+    } else {
+      if (ev.completedTrades < min.trades) {
+        reasons.push(`표본 부족: ${ev.completedTrades}/${min.trades}건`);
+      }
+      if (ev.daysInMode < min.days) {
+        reasons.push(`기간 부족: ${ev.daysInMode}/${min.days}일`);
+      }
     }
   }
 
   // 미확정·불일치를 남긴 채로 올라가면, 그 문제가 더 위험한 단계에서 터진다.
-  if (ev.unresolvedOrders > 0) {
+  //
+  // ★ **못 센 것은 0건이 아니다.** 이 조회가 실패하면 승급을 막는 증거가
+  //   조용히 사라진다 — 숫자가 0이어서가 아니라 세지 못해서다.
+  if (ev.unresolvedKnown === false) {
+    reasons.push('결과 미확정 주문 수를 확인하지 못했습니다 — 0건이라는 뜻이 아닙니다');
+  } else if (ev.unresolvedOrders > 0) {
     reasons.push(`결과 미확정 주문 ${ev.unresolvedOrders}건을 먼저 확정하세요`);
   }
   if (ev.criticalMismatches > 0) {
@@ -206,8 +233,14 @@ export function canChangeMode(
   }
 
   const cap = CAP[to];
-  if (cap.needsLiveKey && !ev.hasLiveKey) {
-    reasons.push('실계좌 API 키가 등록돼 있지 않습니다');
+  if (cap.needsLiveKey) {
+    // 막는 방향은 같다. 바뀌는 것은 **문장**이다 — 없다고 단정하면
+    // 이미 등록해 둔 사람이 같은 일을 반복한다.
+    if (ev.liveKeyKnown === false) {
+      reasons.push('실계좌 API 키 등록 여부를 확인하지 못했습니다 — 없다는 뜻이 아닙니다');
+    } else if (!ev.hasLiveKey) {
+      reasons.push('실계좌 API 키가 등록돼 있지 않습니다');
+    }
   }
   if (cap.realMoney && !ev.liveUnlocked) {
     reasons.push('실거래가 잠겨 있습니다 (ALLOW_LIVE_TRADING)');
