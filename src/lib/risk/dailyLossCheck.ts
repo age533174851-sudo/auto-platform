@@ -74,8 +74,17 @@ export async function collectDailyLoss(args: {
     }
     if (rows != null) {
       const sum = sumTodayIncome(rows, dayStart);
-      todayNetUsd = sum.net;
       incomeCount = sum.count;
+      // **못 읽은 줄이 하나라도 있으면 오늘 손익을 확정하지 않는다.**
+      //
+      // 응답은 왔는데 그 안의 한 줄을 못 읽은 경우, 남은 줄의 합은
+      // '오늘의 손익'이 아니라 '읽힌 것들의 합'이다. 건너뛴 줄이 큰
+      // 손실이면 **덜 잃은 것으로 보이고 한도를 통과한다.**
+      //
+      // null이면 판정이 unknown이 되고 신규 진입이 막힌다 — 이 파일
+      // 머리말이 말하는 "확인하지 못한 것은 통과가 아니다"와 같은 규칙을
+      // 조회 실패뿐 아니라 **부분 해독 실패**에도 적용하는 것이다.
+      todayNetUsd = sum.unreadable > 0 ? null : sum.net;
     }
   } catch { /* null로 남는다 → unknown → 막힌다 */ }
 

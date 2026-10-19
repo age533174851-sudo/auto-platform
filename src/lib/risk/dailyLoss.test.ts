@@ -51,6 +51,40 @@ export function runDailyLossTests() {
     ], DAY);
     eq(r.net, -20);
     eq(r.count, 1);
+    // **건너뛴 사실이 남아야 한다.** 조용히 빠지면 그 줄이 큰 손실이었을
+    // 때 한도가 헐거워지고, 아무도 그것을 모른다.
+    eq(r.unreadable, 2);
+  });
+
+  test('★ null·빈 문자열 금액은 "손익 0"이 아니라 못 읽은 것이다', () => {
+    // `Number(null)`도 `Number('')`도 **0이고 유한하다.** 예전 코드는
+    // 그 0을 그대로 합계에 넣었다 — 건너뛰지도 않았다.
+    const r = sumTodayIncome([
+      { incomeType: 'REALIZED_PNL', income: null as any, time: t(1) },
+      { incomeType: 'REALIZED_PNL', income: '' as any, time: t(2) },
+      { incomeType: 'REALIZED_PNL', income: '-30', time: t(3) },
+    ], DAY);
+    eq(r.net, -30, '못 읽은 줄이 0으로 합계에 들어갔다');
+    eq(r.count, 1);
+    eq(r.unreadable, 2);
+  });
+
+  test('★ 어제 줄을 거르는 것은 "못 읽음"이 아니다', () => {
+    // 정상적인 제외와 읽기 실패를 섞으면, 어제 거래가 많은 날마다
+    // 오늘 한도가 통째로 unknown이 되어 진입이 막힌다.
+    const r = sumTodayIncome([
+      { incomeType: 'REALIZED_PNL', income: '-500', time: DAY - 1 },
+      { incomeType: 'REALIZED_PNL', income: '10', time: t(1) },
+    ], DAY);
+    eq(r.net, 10);
+    eq(r.unreadable, 0, '어제 줄을 못 읽은 것으로 세면 안 된다');
+  });
+
+  test('★ 정상적인 0 손익은 그대로 센다', () => {
+    const r = sumTodayIncome([{ incomeType: 'COMMISSION', income: '0', time: t(1) }], DAY);
+    eq(r.count, 1);
+    eq(r.unreadable, 0);
+    eq(r.net, 0);
   });
 
   test('모르는 종류는 other로 모으되 합계에는 넣는다', () => {

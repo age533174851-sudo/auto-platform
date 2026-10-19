@@ -42,10 +42,21 @@ export interface TodayIncome {
   net: number;
   /** 센 항목 수 */
   count: number;
+  /**
+   * **읽지 못해 세지 못한 줄 수.**
+   *
+   * 0이 아니면 `net`은 '오늘의 손익'이 아니라 **읽힌 것들의 합**이다.
+   * 건너뛴 줄이 큰 손실이었으면 그만큼 덜 잃은 것으로 보이고, 한도가
+   * 헐거워진다. 그래서 호출부는 이 값이 0일 때만 `net`을 확정한다.
+   *
+   * 어제 줄을 거르는 것은 여기 들어가지 않는다 — 그건 정상적인 제외다.
+   */
+  unreadable: number;
 }
 
 const EMPTY: TodayIncome = {
   realizedPnl: 0, commission: 0, funding: 0, other: 0, net: 0, count: 0,
+  unreadable: 0,
 };
 
 /**
@@ -56,6 +67,20 @@ const EMPTY: TodayIncome = {
  * '오늘 얼마 잃었나'를 물었는데 수수료를 빼놓고 답하면 그건 다른 질문의
  * 답이다.
  */
+/**
+ * 원장 한 칸의 수치. **읽히지 않으면 null이고, 그건 0이 아니다.**
+ *
+ * `Number()`를 그대로 쓰면 `null`·`''`·공백이 전부 0이 된다. 손익
+ * 원장에서 그 0은 "손익 0"으로 섞여 실제 손실을 지운다.
+ */
+function readNum(value: unknown): number | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const raw = String(value).trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function sumTodayIncome(
   items: IncomeItem[] | null | undefined,
   dayStartMs: number,
@@ -64,13 +89,21 @@ export function sumTodayIncome(
 
   const out: TodayIncome = { ...EMPTY };
   for (const it of items) {
-    const t = Number(it?.time);
     // 시각을 모르는 줄은 세지 않는다. 어제 것을 오늘로 넣으면 한도가
     // 엉뚱하게 걸리고, 그 반대면 한도가 헐거워진다.
-    if (!Number.isFinite(t) || t < dayStartMs) continue;
+    //
+    // **두 가지를 갈라 센다.** 어제 줄을 거르는 것은 정상적인 제외이고,
+    // 시각을 못 읽은 줄은 **읽기 실패**다. 둘을 섞으면 어제 거래가 있는
+    // 날마다 한도가 unknown이 되거나, 반대로 못 읽은 줄이 조용히 사라진다.
+    const t = readNum(it?.time);
+    if (t == null) { out.unreadable += 1; continue; }
+    if (t < dayStartMs) continue;
 
-    const v = Number(it?.income);
-    if (!Number.isFinite(v)) continue;
+    // `Number(null)`도 `Number('')`도 **0이고 유한하다.** 예전에는 그 0이
+    // 그대로 합계에 들어갔다 — 건너뛰지도 않았다. 못 읽은 금액은 0이
+    // 아니라 '모르는 것'이다.
+    const v = readNum(it?.income);
+    if (v == null) { out.unreadable += 1; continue; }
 
     const type = String(it?.incomeType || '').toUpperCase();
     if (type === 'REALIZED_PNL') out.realizedPnl += v;
