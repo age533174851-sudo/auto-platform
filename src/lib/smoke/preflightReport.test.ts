@@ -51,6 +51,39 @@ export function runPreflightReportTests() {
     eq(r.checks.length, 8, '항목 수는 그대로여야 한다 — 사라지면 안 본 줄을 모른다');
   });
 
+  // ── **FAIL이 하나도 없어도 SKIPPED가 있으면 ready가 아니다** ──
+  //
+  // 이 줄이 없어서 변이 하나가 살아남았다:
+  // `notPass`에서 SKIPPED를 빼도 **전 시험이 통과했다.** 지금 수집기는
+  // SKIPPED를 만들 때 항상 그 앞에 FAIL을 같이 남기기 때문에, FAIL이
+  // 대신 잡아 준 것이다 — 시험이 본 것이 아니라 우연이었다.
+  //
+  // 수집기가 바뀌어 FAIL 없는 SKIPPED가 생기는 날(관문 추가 · 예외
+  // 경로 · 선택 항목), 그때 이 보고서는 **아무것도 확인하지 못한
+  // 상태를 가장 깨끗하게** 보여 주게 된다. 그 길을 지금 막는다.
+  test('②-B FAIL이 없어도 SKIPPED가 하나 있으면 ready가 아니다', () => {
+    const f = allGood();
+    f.symbol = null;                          // 보지 못했다 — 실패한 것이 아니다
+    const r = buildPreflightReport(f);
+    eq(stateOf(r, 'SYMBOL_CLEAR'), 'SKIPPED');
+    eq(r.checks.filter((c) => c.state === 'FAIL').length, 0, 'FAIL은 하나도 없다');
+    eq(r.ready, false, '보지 못한 항목이 있으면 준비된 것이 아니다');
+    eq(r.blockers.length, 1, '막는 줄에도 올라와야 한다 — 안 보이면 없는 것과 같다');
+  });
+
+  // 극단: 전부 SKIPPED. 아무것도 확인하지 못한 상태가 가장 깨끗해 보이면 안 된다.
+  test('②-C 전부 SKIPPED면 ready가 아니다', () => {
+    const none: PreflightFacts = {
+      creds: null, testnet: null, ledger: null, exposure: null,
+      killSwitch: null, exitPolicy: null, symbol: null, runTable: null,
+    };
+    const r = buildPreflightReport(none);
+    eq(r.ready, false, '아무것도 확인하지 못한 것이 통과일 수는 없다');
+    eq(r.checks.length, 8);
+    eq(r.checks.every((c) => c.state === 'SKIPPED'), true);
+    eq(r.blockers.length, 8);
+  });
+
   // 테스트넷 '확인되지 않음'(null)은 실전이라는 뜻은 아니지만 통과도 아니다.
   test('③ 테스트넷이 확인되지 않으면 ready가 아니다', () => {
     const f = allGood();
