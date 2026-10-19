@@ -21,6 +21,7 @@ import { test, eq, assert } from '../harness';
 import { FakeVenue } from './venueHarness';
 // 정적 import — 러너가 이 사슬을 컴파일 대상에 넣어야 한다.
 import { collectDailyLoss } from '../../lib/risk/dailyLossCheck';
+import { getFuturesIncome } from '../../lib/exchanges/binanceFutures';
 
 const INCOME = '/fapi/v1/income';
 const KEY = 'K'.repeat(64);
@@ -31,6 +32,9 @@ const todayMs = () => {
   const now = Date.now();
   return now - (now % 86_400_000) + 3_600_000;
 };
+
+/** 창 밀기 시험에서 쓰는 기준 시각 */
+const BASE = todayMs();
 
 const row = (income: unknown, over: Record<string, unknown> = {}) =>
   ({ symbol: 'BTCUSDT', incomeType: 'REALIZED_PNL', income, asset: 'USDT',
@@ -114,5 +118,101 @@ export async function runDailyLossReadTests() {
       eq(r.todayNetUsd, null);
       eq(r.verdict.status, 'unknown');
     });
+  }
+  // ══════════ ⑥ 1001번째 줄의 손실을 놓치지 않는다 ══════════
+  //
+  // 바이낸스 `/fapi/v1/income`의 `limit`은 **최대 1000**이다. 그리고
+  // 문서가 적는 잘림 방식이 고약하다 — "startTime과 endTime 사이 데이터가
+  // limit을 넘으면 **startTime+limit에서 잘린다**". 즉 **오래된 쪽
+  // 1000건만 오고 최근 것이 잘린다.**
+  //
+  // 오늘 체결이 많은 날(100배 스캘핑은 줄이 금방 쌓인다) 그 잘린 쪽에
+  // 큰 손실이 있으면, 일일 한도는 그것을 못 보고 통과한다.
+  {
+    const v = new FakeVenue();
+    v.on(INCOME, { json: () => {
+      const c = v.calls[v.calls.length - 1];
+      const from = Number(c?.params?.startTime ?? 0);
+      // 첫 창: 가득 찬 1000줄(각 -0.01). 다음 창: 큰 손실 한 줄.
+      if (from <= BASE) {
+        return Array.from({ length: 1000 }, (_, i) =>
+          ({ ...row('-0.01'), tranId: i + 1, time: BASE + i }));
+      }
+      return [{ ...row('-5000'), tranId: 99999, time: BASE + 2000 }];
+    } });
+    const r: any = await on(v, () => getFuturesIncome(KEY, SECRET, true,
+      { startTime: BASE, limit: 1000 }));
+
+    test('★ ⑥ 창이 가득 차면 다음 창을 읽는다 (1001번째 손실)', () => {
+      assert(Array.isArray(r), String(r));
+      eq(r.length, 1001, '첫 창만 읽으면 큰 손실이 집계에서 빠진다');
+      const total = r.reduce((s: number, x: any) => s + Number(x.income), 0);
+      assert(Math.abs(total - (-5010)) < 1e-6, `합이 ${total}이다`);
+    });
+  }
+
+  // ══════════ ⑦ 짧은 창이면 한 번으로 끝난다 ══════════
+  {
+    const v = new FakeVenue().on(INCOME, { json: [row('-1')] });
+    const r: any = await on(v, () => getFuturesIncome(KEY, SECRET, true, { startTime: BASE }));
+
+    test('★ ⑦ 흔한 계정은 요청 한 번이다', () => {
+      assert(Array.isArray(r) && r.length === 1, String(r));
+      eq(v.countOf(INCOME), 1);
+    });
+  }
+
+  // ══════════ ⑧ 같은 줄을 두 번 세지 않는다 ══════════
+  //
+  // 다음 창의 시작을 **마지막 시각(포함)** 으로 잡으므로 경계의 줄이
+  // 다시 온다. `tranId`로 걸러야 손익이 두 배로 적히지 않는다.
+  {
+    const v = new FakeVenue();
+    v.on(INCOME, { json: () => {
+      const c = v.calls[v.calls.length - 1];
+      const from = Number(c?.params?.startTime ?? 0);
+      if (from <= BASE) {
+        return Array.from({ length: 1000 }, (_, i) =>
+          ({ ...row('-0.01'), tranId: i + 1, time: BASE + i }));
+      }
+      // 경계 줄(tranId 1000)이 다시 온다 + 새 줄 하나
+      return [
+        { ...row('-0.01'), tranId: 1000, time: BASE + 999 },
+        { ...row('-2'), tranId: 1001, time: BASE + 1500 },
+      ];
+    } });
+    const r: any = await on(v, () => getFuturesIncome(KEY, SECRET, true,
+      { startTime: BASE, limit: 1000 }));
+
+    test('★ ⑧ 창 경계에서 겹쳐 온 줄을 두 번 세지 않는다', () => {
+      assert(Array.isArray(r), String(r));
+      eq(r.length, 1001, '중복이 섞였다');
+    });
+  }
+
+  // ══════════ ⑨ 끝까지 가득 차면 불완전한 원장을 돌려주지 않는다 ══════════
+  {
+    let n = 0;
+    const v = new FakeVenue().on(INCOME, { json: () => {
+      const base = BASE + (n++) * 10_000;
+      return Array.from({ length: 1000 }, (_, i) =>
+        ({ ...row('-0.01'), tranId: `${base}-${i}`, time: base + i }));
+    } });
+    const r: any = await on(v, () => getFuturesIncome(KEY, SECRET, true,
+      { startTime: BASE, limit: 1000 }));
+
+    test('★ ⑨ 창 상한에 닿으면 null이다 (덜 읽은 원장을 주지 않는다)', () => {
+      eq(r, null, '다 읽지 못한 원장은 "덜 잃었다"가 된다');
+      const c = v.countOf(INCOME);
+      assert(c > 1 && c <= 20, `요청 ${c}번 — 상한이 없거나 창을 안 민다`);
+    });
+  }
+
+  // ══════════ ⑩ 비배열 응답은 그대로 null이다 ══════════
+  {
+    const v = new FakeVenue().on(INCOME, { json: { code: 200, msg: 'ok' } });
+    const r: any = await on(v, () => getFuturesIncome(KEY, SECRET, true, { startTime: BASE }));
+
+    test('★ ⑩ 배열이 아닌 응답은 원장이 아니다', () => { eq(r, null); });
   }
 }

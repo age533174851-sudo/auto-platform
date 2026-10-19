@@ -198,11 +198,63 @@ export async function getFuturesIncome(
   key: string, secret: string, testnet = true,
   opts: { startTime?: number; limit?: number } = {},
 ): Promise<any[] | null> {
+  // ── 한 창만 읽고 "오늘은 이게 전부"라고 하지 않는다 ──
+  //
+  // 바이낸스 문서: `/fapi/v1/income`의 `limit`은 **기본 100 · 최대 1000**.
+  // 그리고 잘리는 방식이 고약하다 — "startTime과 endTime 사이 데이터가
+  // limit을 넘으면 **startTime+limit에서 잘린다**". 즉 **오래된 쪽
+  // 1000건만 오고 최근 것이 잘린다.**
+  //
+  // 체결이 많은 날(100배 스캘핑은 손익·수수료 줄이 금방 쌓인다) 그 잘린
+  // 쪽에 큰 손실이 있으면, 일일 한도는 그것을 못 보고 통과한다. 모자란
+  // 배열은 null보다 나쁘다 — null은 막지만 모자란 배열은 "덜 잃었다"로
+  // 지나간다.
+  //
+  // `page` 파라미터가 표에는 있지만 **설명이 비어 있다.** 의미를 모르는
+  // 것에 기대지 않고, **시간 창을 밀어** 읽는다. 다음 창의 시작은 지금까지
+  // 본 가장 늦은 시각이고(포함), 경계에서 겹쳐 오는 줄은 `tranId`로
+  // 걸러낸다.
+  const LIMIT = Math.min(Math.max(1, Number(opts.limit) || 1000), 1000);
+  const MAX_WINDOWS = 10;   // 최대 10,000줄
+  /** 같은 줄을 두 번 세지 않기 위한 열쇠 */
+  const keyOf = (r: any): string => {
+    const id = r?.tranId ?? r?.tradeId;
+    if (id != null && String(id).trim() !== '') return `id:${String(id)}`;
+    return `c:${r?.time}|${r?.incomeType}|${r?.income}|${r?.symbol ?? ''}|${r?.asset ?? ''}`;
+  };
   try {
-    const params: Record<string, string | number> = { limit: opts.limit ?? 1000 };
-    if (opts.startTime) params.startTime = opts.startTime;
-    const data = await fapiSigned('GET', '/fapi/v1/income', key, secret, testnet, params);
-    return Array.isArray(data) ? data : null;
+    const out: any[] = [];
+    const seen = new Set<string>();
+    let from = opts.startTime;
+    for (let win = 0; win < MAX_WINDOWS; win += 1) {
+      const params: Record<string, string | number> = { limit: LIMIT };
+      if (from) params.startTime = from;
+      const data = await fapiSigned('GET', '/fapi/v1/income', key, secret, testnet, params);
+      if (!Array.isArray(data)) return null;
+
+      let added = 0;
+      let maxTime = -Infinity;
+      for (const r of data) {
+        const t = Number(r?.time);
+        if (Number.isFinite(t) && t > maxTime) maxTime = t;
+        const k = keyOf(r);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(r);
+        added += 1;
+      }
+
+      // 창이 `limit`보다 짧다 = 더 없다. 여기까지가 전부다.
+      if (data.length < LIMIT) return out;
+      // 더 읽어야 하는데 다음 창의 시작을 정할 수 없다.
+      if (!Number.isFinite(maxTime)) return null;
+      // 창을 밀었는데 새 줄이 하나도 없다 = 같은 자리를 맴돈다.
+      // 무한히 돌지 않고, 다 읽었다고도 말하지 않는다.
+      if (from != null && maxTime <= from && added === 0) return null;
+      from = maxTime;
+    }
+    // 상한까지 모든 창이 가득 찼다 = 아직 남았다.
+    return null;
   } catch { return null; }
 }
 
