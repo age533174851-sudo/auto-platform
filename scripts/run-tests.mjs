@@ -274,6 +274,17 @@ import { runKillTargetsTests } from './src/lib/risk/killTargets.test';
 import { runKillClosePlanTests } from './src/lib/risk/killClosePlan.test';
 import { runKillCloseRunTests } from './src/lib/risk/killCloseRun.test';
 import { runKillCloseIntegrationTests } from './src/test/integration/killCloseIntegration.test';
+// **앵커를 일부러 떨어뜨려 둔다.**
+//
+// 통합 시험을 더하는 PR이 전부 위쪽 같은 두 줄(스모크 시작 import
+// 바로 앞 / 정밀도 행렬 호출 바로 뒤)에 끼워 넣고 있어서, 서로
+// 병합할 때마다 충돌이 난다. 충돌 자체는 사소하지만 기계적으로
+// 합치다가 시험이 두 번 등록되거나 통째로 사라진 사고가 이미 있었다
+// (scripts/check-test-registry.mjs 주석). 그래서 여기에 둔다.
+//
+// ※ 주석에 등록 함수 이름을 그대로 쓰지 않는다 — 그 검사기가
+//   파일 전체에서 이름을 세기 때문에 주석이 '두 번 등록'이 된다.
+import { runOrphansReadTests } from './src/test/integration/orphansReadIntegration.test';
 import { runKillAlertTests } from './src/lib/risk/killAlert.test';
 import { runPaperAccountTests } from './src/lib/portfolio/paperAccount.test';
 import { runPaperWiringTests } from './src/lib/portfolio/paperWiring.test';
@@ -421,6 +432,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runSmokeStartRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
+  await runOrphansReadTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
