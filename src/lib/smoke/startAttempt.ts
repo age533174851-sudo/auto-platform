@@ -219,7 +219,31 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
         client_order_id: clientOrderId, api_latency_ms_max: apiMax });
       return { ok: false, code: 'FAILED', row, message: '현재가를 읽지 못했습니다', status: 200 };
     }
-    const quantity = (i.marginUsd * i.leverage) / ref;
+    // Binance 신규 시장가 주문은 거래소가 공표한 LOT_SIZE + MARKET_LOT_SIZE
+    // 격자를 통과해야 한다. 원수량을 그대로 executeOrder에 넘기면
+    // [-1111] Precision is over the maximum defined for this asset 로 거절된다.
+    // 규격을 못 읽으면 기본값을 지어내지 않고, 주문 의도/거래소 쓰기 전에 막는다.
+    const requestedQuantity = (i.marginUsd * i.leverage) / ref;
+    let quantity = requestedQuantity;
+    let sizingNote = '';
+    if (exchange === 'binance') {
+      const bf = await import('../exchanges/binanceFutures');
+      const { quantizeOrder } = await import('../exchanges/quantize');
+      const filters = await bf.getSymbolFilters(i.symbol, testnet);
+      const q = quantizeOrder(requestedQuantity, null, filters, {
+        orderType: 'MARKET', reduceOnly: false, marketReferencePrice: ref,
+      });
+      if (!q.ok || q.quantity == null) {
+        const reason = `Binance 시장가 수량 검증 실패(${q.code ?? 'UNKNOWN'}): ${q.reason}`;
+        steps.ENTRY = step('FAIL', reason);
+        await save(sb, row.id, { state: 'FAIL', verdict: 'FAIL', steps,
+          reason, closed_at: new Date().toISOString(), client_order_id: clientOrderId,
+          api_latency_ms_max: apiMax });
+        return { ok: false, code: 'FAILED', row, message: reason, status: 200 };
+      }
+      quantity = q.quantity;
+      if (q.changed) sizingNote = q.reason;
+    }
 
     const orderT0 = Date.now();
     const exec = await executeOrder(sb, {
@@ -242,7 +266,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
         approved: true, symbol: i.symbol, side: i.side,
         riskAmount: i.marginUsd, riskAmountWithCosts: i.marginUsd,
         stopDistancePct: ep.spec.stopPct, effectiveStopPct: ep.spec.stopPct,
-        positionSize: i.marginUsd * i.leverage, quantity,
+        positionSize: quantity * ref, quantity,
         requiredMargin: i.marginUsd, leverage: i.leverage,
         entryPrice: ref,
         liquidationPrice: i.side === 'LONG'
@@ -253,6 +277,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
           `스모크 테스트 ${row.id}`,
           i.runId ? `반복 ${i.attemptNo}회차` : '단독 실행',
           `청산 정책 ${ep.spec.id} v${ep.spec.version}`,
+          ...(sizingNote ? [sizingNote] : []),
         ],
       } as any,
     } as any);
