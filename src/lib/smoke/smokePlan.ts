@@ -399,6 +399,23 @@ function zeroStepOf(row: any, id: 'POSITION_ZERO' | 'ORDERS_ZERO'): string | nul
 }
 
 /**
+ * 단계 기록이 하나도 없어도 **노출이 남았을 수 있는** 회차 상태.
+ *
+ * `ENTERING`·`HOLDING`·`CLOSING`은 진행 중이라 당연하다. `UNKNOWN`과
+ * `FAIL`을 함께 넣는 이유는 그 둘이 **"노출이 없다"가 아니라 "확인하지
+ * 못했다"**이기 때문이다.
+ *
+ * 실제로 그 모양이 난다 — `settleAttempt`가 중간에 예외로 끝나면
+ * `POSITION_ZERO`·`ORDERS_ZERO`를 적지 못한 채 state만 남는다. 그 줄을
+ * "단계 기록이 없으니 노출도 없다"로 읽으면, **정리하지 못한 회차
+ * 위에 새 회차가 열린다** — 이 저장소가 막으려는 바로 그 모양이다.
+ *
+ * `BLOCKED`은 여기 없다. 사전 확인에서 멈춘 줄은 주문을 낸 적이 없고,
+ * 그것까지 막으면 한 번 막힌 뒤로 영영 시작할 수 없다.
+ */
+const EXPOSURE_POSSIBLE_STATES = ['ENTERING', 'HOLDING', 'CLOSING', 'UNKNOWN', 'FAIL'];
+
+/**
  * 이 **연결**에 정리되지 않은 노출이 남아 있는가.
  *
  * 무엇을 막는가
@@ -442,7 +459,7 @@ export function unresolvedExposureBlock(i: {
     const state = String(r?.state ?? '').toUpperCase();
     // 진입 전에 끝난 줄은 노출이 없지만, 진입 중/유지/청산 중인 줄은
     // 단계 기록이 없어도 미확인 노출이다. PZ PASS만으로는 충분하지 않다.
-    if (pz == null && oz == null && !['ENTERING', 'HOLDING', 'CLOSING'].includes(state)) continue;
+    if (pz == null && oz == null && !EXPOSURE_POSSIBLE_STATES.includes(state)) continue;
     if (pz === 'PASS' && oz === 'PASS') continue;
 
     const id = String(r?.id ?? '?');
@@ -467,6 +484,141 @@ export function unresolvedExposureBlock(i: {
   return {
     blocked: false, code: 'CLEAR', offenders: [],
     reason: '이 연결에 정리되지 않은 노출이 없습니다',
+  };
+}
+
+/** 거래소 증거로 과거 미확인 노출을 풀 수 있는가 */
+export type ExposureClearanceCode =
+  /** 세 장부를 모두 읽었고 전부 0이었다 */
+  | 'CLEARED_BY_VENUE'
+  /** 사람이 봐야 한다 — 거래소가 비어 있어도 기계가 풀지 않는다 */
+  | 'NOT_CLEARABLE'
+  /** 하나라도 못 읽었다. **못 읽은 것은 0이 아니다** */
+  | 'READ_FAILED'
+  /** 포지션이나 주문이 실제로 남아 있다 */
+  | 'EXPOSURE_OPEN';
+
+export interface ExposureClearance {
+  cleared: boolean;
+  code: ExposureClearanceCode;
+  /** 읽지 못한 장부는 0이 아니라 null이다 */
+  positionCount: number | null;
+  regularOrderCount: number | null;
+  algoOrderCount: number | null;
+  reason: string;
+}
+
+/**
+ * 과거 회차의 **미확인** 노출을 지금 거래소 상태로 풀 수 있는가.
+ *
+ * 무엇을 고치는가
+ * ───────────────
+ * `unresolvedExposureBlock`이 `EXPOSURE_UNKNOWN`으로 막으면, 그때까지
+ * 남은 길은 사람이 거래소를 열어 보고 **장부를 손으로 고치는 것**뿐이었다.
+ * 그런데 장부를 손으로 고쳐서 푸는 길을 열면 관문 자체가 의미를 잃는다.
+ * 그래서 아무도 풀지 못했고, 그 연결에서는 스모크가 영영 시작되지 않는다.
+ *
+ * 사람에게 "거래소에서 0을 확인한 뒤 다시 누르세요"라고 시키는 대신
+ * **같은 확인을 기계가 한다** — 그리고 사람 눈보다 엄격하게 한다.
+ *
+ * 무엇을 풀지 않는가
+ * ──────────────────
+ *   · `UNPROTECTED_UNRESOLVED` — 단계가 **FAIL로 기록된** 회차다.
+ *     "지금 비어 있다"가 "그때 제대로 닫혔다"를 뜻하지 않는다. 사람이 본다.
+ *   · `LEDGER_UNREADABLE` — 장부를 못 읽었다. 무엇을 푸는지도 모른다.
+ *   · 셋 중 하나라도 **읽지 못한** 경우. 못 읽은 것을 0으로 적지 않는다.
+ *   · 포지션·일반 주문·조건부(Algo) 주문이 **하나라도 남은** 경우.
+ *     남의 전략이 건 주문이어도 막는다 — 이 판정은 "이 연결이 통째로
+ *     비어 있다"만 말할 수 있다.
+ *
+ * **옛 회차의 판정은 건드리지 않는다.** 이 함수는 아무것도 쓰지 않고,
+ * `UNKNOWN`을 `PASS`로 바꾸지도 않는다. 옛 회차는 영원히 UNKNOWN이고,
+ * 풀리는 것은 "지금 새 회차를 열어도 되는가" 하나뿐이다. 그래서 증거는
+ * **시작하는 순간 다시 읽은 것**이어야 하고, 저장해 두고 재사용하지 않는다.
+ */
+export function legacyExposureClearance(i: {
+  /** `unresolvedExposureBlock`의 결과 */
+  block: ExposureBlockVerdict;
+  /** 연결 전체(종목 무관) 포지션 조회 결과 */
+  positionRead: { success?: unknown; positions?: unknown } | null | undefined;
+  /** 연결 전체 일반 주문 조회 결과 */
+  regularOrderRead: { success?: unknown; orders?: unknown } | null | undefined;
+  /** 연결 전체 조건부(Algo) 주문 조회 결과 */
+  algoOrderRead: { success?: unknown; orders?: unknown } | null | undefined;
+}): ExposureClearance {
+  const rows = (r: any, key: 'positions' | 'orders'): any[] | null =>
+    r?.success === true && Array.isArray(r[key]) ? r[key] : null;
+
+  const positions = rows(i?.positionRead, 'positions');
+  const regular = rows(i?.regularOrderRead, 'orders');
+  const algo = rows(i?.algoOrderRead, 'orders');
+  const counts = {
+    positionCount: positions?.length ?? null,
+    regularOrderCount: regular?.length ?? null,
+    algoOrderCount: algo?.length ?? null,
+  };
+  const no = (code: ExposureClearanceCode, reason: string): ExposureClearance =>
+    ({ cleared: false, code, ...counts, reason });
+
+  if (i?.block?.blocked !== true || i.block.code !== 'EXPOSURE_UNKNOWN') {
+    return no('NOT_CLEARABLE',
+      '거래소가 비어 있어도 기계가 풀지 않는 차단입니다 — 사람이 확인해야 합니다');
+  }
+
+  if (positions == null || regular == null || algo == null) {
+    const missing = [
+      positions == null ? '포지션' : null,
+      regular == null ? '일반 주문' : null,
+      algo == null ? '조건부 주문' : null,
+    ].filter(Boolean).join(' · ');
+    return no('READ_FAILED',
+      `거래소에서 ${missing}을(를) 읽지 못했습니다 — 못 읽은 것을 0건으로 적지 않습니다`);
+  }
+
+  // Binance positionRisk는 수량 0인 줄을 걸러서 준다. 걸러진 뒤에도
+  // 읽을 수 없는 줄이 있으면 "비어 있다"고 말할 수 없다.
+  if (positions.some((p: any) => typeof p?.symbol !== 'string'
+      || !Number.isFinite(Number(p?.amount)) || Number(p.amount) <= 0)) {
+    return no('READ_FAILED',
+      '포지션 응답에 해석할 수 없는 줄이 있습니다 — 비어 있다고 적지 않습니다');
+  }
+
+  if (positions.length > 0 || regular.length > 0 || algo.length > 0) {
+    return no('EXPOSURE_OPEN',
+      `이 연결에 포지션 ${positions.length}건 · 일반 주문 ${regular.length}건 · `
+      + `조건부 주문 ${algo.length}건이 남아 있습니다 — 먼저 정리해야 합니다`);
+  }
+
+  return {
+    cleared: true, code: 'CLEARED_BY_VENUE', ...counts,
+    reason: '지금 거래소에서 이 연결의 포지션 0 · 일반 주문 0 · 조건부 주문 0을 '
+      + '직접 확인했습니다 (과거 회차의 판정은 그대로 UNKNOWN입니다)',
+  };
+}
+
+/**
+ * 장부 차단 + 거래소 증거를 **하나의 차단 판정**으로 합친다.
+ *
+ * 호출부가 두 결과를 각자 해석하면 "풀렸다고 생각했는데 안 풀렸다"가
+ * 생긴다. 관문은 하나여야 하고, 그 하나가 `blocked`를 말한다.
+ */
+export function exposureGateAfterVenueCheck(i: {
+  block: ExposureBlockVerdict;
+  positionRead: { success?: unknown; positions?: unknown } | null | undefined;
+  regularOrderRead: { success?: unknown; orders?: unknown } | null | undefined;
+  algoOrderRead: { success?: unknown; orders?: unknown } | null | undefined;
+}): ExposureBlockVerdict & { clearance: ExposureClearance } {
+  const clearance = legacyExposureClearance(i);
+  if (clearance.cleared) {
+    return {
+      blocked: false, code: 'CLEAR', offenders: i.block.offenders,
+      reason: clearance.reason, clearance,
+    };
+  }
+  return {
+    blocked: i.block.blocked, code: i.block.code, offenders: i.block.offenders,
+    reason: i.block.blocked ? `${i.block.reason} · ${clearance.reason}` : i.block.reason,
+    clearance,
   };
 }
 
