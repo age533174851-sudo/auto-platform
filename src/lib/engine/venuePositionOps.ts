@@ -467,6 +467,47 @@ export async function readAllOpenOrdersForSmoke(
 }
 
 /**
+ * 이 **연결 전체**(종목 무관)의 노출을 읽는다. 읽기 전용이다.
+ *
+ * `readAllOpenOrdersForSmoke`는 종목 하나만 본다. 과거 회차의 미확인
+ * 노출은 **다른 종목에 남아 있을 수 있으므로**, 그것을 풀 증거는
+ * 연결 단위여야 한다.
+ *
+ * 셋을 **날것 그대로** 돌려준다 — 여기서 "0건"으로 요약하지 않는다.
+ * 실패를 0으로 바꾸는 자리가 바로 이 저장소에서 가장 자주 난 고장이라,
+ * 성공 여부 판단은 판정 함수(`legacyExposureClearance`) 한 곳에만 둔다.
+ */
+export async function readConnectionExposureForSmoke(c: VenueCreds): Promise<{
+  positionRead: any; regularOrderRead: any; algoOrderRead: any;
+}> {
+  const unread = (what: string) => ({ success: false, message: `${what} 조회 불가` });
+  // 조건부 주문 장부를 읽을 수 없는 경로에서는 **풀지 않는다.**
+  // 일반 주문만 보고 "비어 있다"고 적는 것이 어제 사고의 모양이다.
+  if (c.exchange !== 'binance' || c.testnet !== true) {
+    return {
+      positionRead: unread('포지션'), regularOrderRead: unread('일반 주문'),
+      algoOrderRead: unread('조건부 주문'),
+    };
+  }
+  try {
+    const bf = await import('../exchanges/binanceFutures');
+    const [positionRead, regularOrderRead, algoOrderRead] = await Promise.all([
+      bf.getFuturesPositions(c.apiKey, c.apiSecret, true),
+      bf.getFuturesOpenOrders(c.apiKey, c.apiSecret, true),
+      bf.getFuturesOpenAlgoOrders(c.apiKey, c.apiSecret, true),
+    ]);
+    return { positionRead, regularOrderRead, algoOrderRead };
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    return {
+      positionRead: { success: false, message: msg },
+      regularOrderRead: { success: false, message: msg },
+      algoOrderRead: { success: false, message: msg },
+    };
+  }
+}
+
+/**
  * **이 id들만** 취소한다. 목록을 통째로 지우지 않는다.
  *
  * `cancelAll`은 같은 계좌의 다른 전략이 걸어 둔 손절까지 지운다.

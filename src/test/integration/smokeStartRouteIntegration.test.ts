@@ -20,8 +20,8 @@
 //
 // 거래소는 가짜다. 이 시험은 **실제 Binance 주문이 아니다.**
 
-import { test, eq, assert } from '../harness';
-import { FakeDb, withCryptoEnv } from './venueHarness';
+import { test, eq, assert, flushAsync } from '../harness';
+import { FakeDb, FakeVenue, withCryptoEnv } from './venueHarness';
 import { encryptSecret } from '../../lib/exchanges/crypto';
 
 const ADMIN = 'test-admin-secret-0123456789';
@@ -391,5 +391,147 @@ export async function runSmokeStartRouteTests() {
       eq(res.status, 401);
       eq(json.error, 'auth_required');
     } finally { r.restore(); }
+  });
+
+  // ── ⑦ 과거 UNKNOWN 회차 복구 — 가짜 거래소로 끝까지 돌린다 ──
+  //
+  // 여기서부터는 **전역 fetch를 바꾼다.** 이 하네스의 async 시험은
+  // 서로 겹쳐 도므로(`pending`), 먼저 앞의 것들을 모두 끝낸 뒤
+  // 한 번에 하나씩 순서대로 돌린다. 겹치면 남의 시험이 끊긴다.
+  await flushAsync();
+
+  const LEGACY_UNKNOWN = {
+    id: 'legacy-unknown-1', user_id: 'u-1', connection_id: 'c-testnet',
+    symbol: 'BTCUSDT', mode: 'TESTNET', state: 'UNKNOWN', verdict: 'UNKNOWN',
+    steps: {},
+  };
+
+  /** 세 장부 응답을 정해 놓고 실제 라우트를 한 번 두드린다 */
+  async function hitWithVenue(venueRules: (v: FakeVenue) => void) {
+    const prevAdminSecret = process.env.ADMIN_SECRET;
+    process.env.ADMIN_SECRET = ADMIN;
+    const restoreCrypto = withCryptoEnv();
+    const db = new FakeDb();
+    db.seed('exchange_connections', [conn()]);
+    db.seed('smoke_tests', [{ ...LEGACY_UNKNOWN }]);
+    const venue = new FakeVenue();
+    venueRules(venue);
+    const restoreVenue = venue.install();
+    const r = loadRoute(db, null);
+    try {
+      const res = await r.POST(req(good, { 'x-admin-secret': ADMIN }));
+      const json = await res.json();
+      return { json, db, venue, rows: db.table('smoke_tests') };
+    } finally {
+      r.restore();
+      restoreVenue();
+      restoreCrypto();
+      if (prevAdminSecret === undefined) delete process.env.ADMIN_SECRET;
+      else process.env.ADMIN_SECRET = prevAdminSecret;
+    }
+  }
+
+  /** 진입 뒤 경로는 이 시험의 관심사가 아니다 — 규칙 없는 호출만 막는다 */
+  const anyOtherCall = (v: FakeVenue) => {
+    v.on('/fapi/v1/ticker', { json: { symbol: 'BTCUSDT', price: '60000' } });
+    v.on('/fapi/', { json: { code: -1000, msg: 'not part of this test' } });
+  };
+
+  const flatVenue = (v: FakeVenue) => {
+    v.on('/fapi/v2/positionRisk', { json: [] });
+    v.on('/fapi/v1/openAlgoOrders', { json: [] });
+    v.on('/fapi/v1/openOrders', { json: [] });
+    anyOtherCall(v);
+  };
+
+  // ⑦-1 세 장부가 모두 0으로 읽히면 과거 UNKNOWN 위에서도 시작한다
+  const cleared = await hitWithVenue(flatVenue);
+
+  // ⑦-2 조건부(Algo) 주문이 남아 있으면 시작하지 않는다
+  const algoLeft = await hitWithVenue((v) => {
+    v.on('/fapi/v2/positionRisk', { json: [] });
+    v.on('/fapi/v1/openAlgoOrders', { json: [{ algoId: '9001', symbol: 'ETHUSDT' }] });
+    v.on('/fapi/v1/openOrders', { json: [] });
+    anyOtherCall(v);
+  });
+
+  // ⑦-3 일반 주문이 남아 있으면 시작하지 않는다
+  const regularLeft = await hitWithVenue((v) => {
+    v.on('/fapi/v2/positionRisk', { json: [] });
+    v.on('/fapi/v1/openAlgoOrders', { json: [] });
+    v.on('/fapi/v1/openOrders', { json: [{ orderId: 1, symbol: 'ETHUSDT', type: 'LIMIT', side: 'BUY' }] });
+    anyOtherCall(v);
+  });
+
+  // ⑦-4 다른 종목에 포지션이 남아 있으면 시작하지 않는다
+  const positionLeft = await hitWithVenue((v) => {
+    v.on('/fapi/v2/positionRisk', { json: [{
+      symbol: 'ETHUSDT', positionAmt: '0.5', entryPrice: '3000', markPrice: '3000',
+      unRealizedProfit: '0', leverage: '10', liquidationPrice: '0', marginType: 'isolated',
+    }] });
+    v.on('/fapi/v1/openAlgoOrders', { json: [] });
+    v.on('/fapi/v1/openOrders', { json: [] });
+    anyOtherCall(v);
+  });
+
+  // ⑦-5 Algo 장부 조회가 실패하면 "0건"이 아니라 미확인으로 막는다
+  const algoUnread = await hitWithVenue((v) => {
+    v.on('/fapi/v2/positionRisk', { json: [] });
+    v.on('/fapi/v1/openAlgoOrders', { status: 500, json: { code: -1001, msg: 'internal' } });
+    v.on('/fapi/v1/openOrders', { json: [] });
+    anyOtherCall(v);
+  });
+
+  // ⑦-6 200인데 배열이 아닌 포지션 응답을 "비어 있음"으로 읽지 않는다
+  const positionMalformed = await hitWithVenue((v) => {
+    v.on('/fapi/v2/positionRisk', { json: { positions: [] } });
+    v.on('/fapi/v1/openAlgoOrders', { json: [] });
+    v.on('/fapi/v1/openOrders', { json: [] });
+    anyOtherCall(v);
+  });
+
+  test('⑦ 세 장부가 모두 0으로 읽히면 과거 UNKNOWN 위에서도 새 회차가 열린다', () => {
+    // 차단은 **거래소 증거**로만 풀린다. 줄이 하나 더 생겼다는 것이
+    // 노출 관문을 지났다는 증거다 (그 뒤 진입 결과는 여기 관심사가 아니다).
+    eq(cleared.rows.length, 2, String(cleared.json?.message));
+    // 세 장부를 **실제로** 읽었는가
+    assert(cleared.venue.countOf('/fapi/v2/positionRisk') > 0, '포지션을 읽지 않았습니다');
+    assert(cleared.venue.countOf('/fapi/v1/openOrders') > 0, '일반 주문을 읽지 않았습니다');
+    assert(cleared.venue.countOf('/fapi/v1/openAlgoOrders') > 0, '조건부 주문을 읽지 않았습니다');
+  });
+
+  test('⑦ 거래소 증거로 풀어도 옛 회차의 UNKNOWN 판정은 그대로다', () => {
+    const old = cleared.rows.find((r: any) => r.id === 'legacy-unknown-1');
+    eq(old?.state, 'UNKNOWN');
+    eq(old?.verdict, 'UNKNOWN');
+    eq(JSON.stringify(old?.steps ?? {}), '{}', '옛 회차의 단계를 고쳐서 풀었습니다');
+  });
+
+  test('⑦ 조건부(Algo) 주문이 남아 있으면 새 회차를 열지 않는다', () => {
+    eq(algoLeft.rows.length, 1, String(algoLeft.json?.message));
+    eq(algoLeft.json?.ok, false);
+    assert(/남아 있습니다/.test(String(algoLeft.json?.message)), String(algoLeft.json?.message));
+  });
+
+  test('⑦ 일반 주문이 남아 있으면 새 회차를 열지 않는다', () => {
+    eq(regularLeft.rows.length, 1, String(regularLeft.json?.message));
+    eq(regularLeft.json?.ok, false);
+  });
+
+  test('⑦ 다른 종목의 포지션도 새 회차를 막는다 — 종목이 아니라 연결 단위다', () => {
+    eq(positionLeft.rows.length, 1, String(positionLeft.json?.message));
+    eq(positionLeft.json?.ok, false);
+  });
+
+  test('⑦ 조건부 주문 조회 실패를 0건으로 적지 않는다', () => {
+    eq(algoUnread.rows.length, 1, String(algoUnread.json?.message));
+    assert(/읽지 못했습니다/.test(String(algoUnread.json?.message)),
+      String(algoUnread.json?.message));
+  });
+
+  test('⑦ 200이어도 배열이 아닌 포지션 응답은 "비어 있음"이 아니다', () => {
+    eq(positionMalformed.rows.length, 1, String(positionMalformed.json?.message));
+    assert(/읽지 못했습니다/.test(String(positionMalformed.json?.message)),
+      String(positionMalformed.json?.message));
   });
 }

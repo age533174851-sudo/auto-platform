@@ -20,7 +20,8 @@
 
 import {
   preflightVerdict, holdUntilMs, unprotectedExposureVerdict,
-  smokeTestnetVerdict, unresolvedExposureBlock, SMOKE_STRATEGY_ID,
+  smokeTestnetVerdict, unresolvedExposureBlock, exposureGateAfterVenueCheck,
+  SMOKE_STRATEGY_ID, type ExposureBlockVerdict,
 } from './smokePlan';
 import { residualVerdict } from '../engine/orderOwnership';
 import { ownedOrderIds } from '../engine/protectionLedger';
@@ -105,6 +106,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   // POSITION_ZERO와 ORDERS_ZERO가 모두 PASS여야 차단이 풀린다.
   // 50개만 읽으면 그 이전의 미해결 노출이 사라진 것처럼 보인다.
   // 안전한 상한(1000)에 닿으면 전체를 확인한 것이 아니므로 차단한다.
+  let blk: ExposureBlockVerdict;
   try {
     const { data, error } = await sb.from('smoke_tests')
       .select('id, connection_id, steps, state')
@@ -116,14 +118,32 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       return fail('BLOCKED', '스모크 장부가 조회 상한(1000건)에 도달했습니다 — '
         + '과거 미해결 노출을 모두 확인할 수 없어 새 주문을 차단합니다', 503);
     }
-    const blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
-    if (blk.blocked) return fail('BLOCKED', blk.reason, 409);
+    blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
   } catch (e: any) {
     // 테이블 누락도 실패다. "첫 실행" 여부를 테이블 누락으로 추정하지 않는다.
     const msg = String(e?.message || e);
-    const blk = unresolvedExposureBlock({ rows: null, connectionId: i.connectionId });
-    return fail('BLOCKED', `${blk.reason} (${msg})`, 503);
+    const unread = unresolvedExposureBlock({ rows: null, connectionId: i.connectionId });
+    return fail('BLOCKED', `${unread.reason} (${msg})`, 503);
   }
+
+  // ── 막혔으면 **사람에게 넘기기 전에 거래소에 직접 물어본다** ──
+  //
+  // 옛 회차가 `UNKNOWN`으로 끝나면 장부만으로는 영영 풀리지 않는다.
+  // 그렇다고 장부를 손으로 고쳐서 푸는 길을 열면 관문이 의미를 잃는다.
+  // 그래서 **푸는 근거를 장부가 아니라 거래소에 둔다** — 지금 이 연결에
+  // 포지션 0 · 일반 주문 0 · 조건부 주문 0이 **읽혀야만** 열린다.
+  //
+  // 옛 회차의 판정은 그대로 UNKNOWN으로 남는다. 아무것도 쓰지 않고,
+  // 증거를 저장해 두고 재사용하지도 않는다 — 다음 회차는 다시 읽는다.
+  let gate: ExposureBlockVerdict = blk;
+  if (blk.blocked) {
+    const vops = await import('../engine/venuePositionOps');
+    const reads = await vops.readConnectionExposureForSmoke({
+      exchange, apiKey: (creds as any).key, apiSecret: (creds as any).secret, testnet,
+    });
+    gate = exposureGateAfterVenueCheck({ block: blk, ...reads });
+  }
+  if (gate.blocked) return fail('BLOCKED', gate.reason, 409);
 
   // ── 킬스위치 ──
   //
