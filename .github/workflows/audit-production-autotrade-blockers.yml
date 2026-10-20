@@ -1,0 +1,244 @@
+# 자동매매가 **왜 진입하지 않는가** — 읽기 전용 운영 조회
+#
+# 무엇을 답하는가
+# ───────────────
+# 2026-10-20 실측에서 이렇게 나왔다:
+#
+#   · Exact100X 예약(MAX_LEV_100X / EXACT_100X / v2 / scalp / TESTNET)
+#     **2건이 켜져 있고 실제로 돌았다**
+#   · 그런데 `live_orders`의 Exact100X 주문은 **0건**이다
+#   · 그래서 관측 표(위험·탈출)도 0건이다 — 관측할 포지션이 없었던 것이다
+#
+# 즉 막힌 자리는 "감시"도 "관측 저장"도 아니고 **진입**이다. 그 사유는
+# 예약 줄의 `last_result`·`last_decision`에 이미 적혀 있는데, 기존 감사는
+# 그 내용을 일부러 출력하지 않는다(개수만 센다). 그래서 사람이 화면을
+# 열어 읽어야 했다 — 이 저장소가 없애려는 바로 그 수동 절차다.
+#
+# 함께 보는 두 가지
+# ─────────────────
+#   · **미확정 주문이 복구 경로에 닿는가** — `connection_id`가 없는 줄은
+#     `recoverUnresolvedOrders`가 연결을 고를 때 떨어져 나가 영영 확정되지
+#     않는다. 그리고 미확정이 하나라도 남으면 체크리스트의
+#     `UNRESOLVED_ORDERS`가 다음 진입을 막는다(`pendingReconcile` 머리말에
+#     적힌 그 고장이다). 운영에는 UNKNOWN 32건이 8월부터 남아 있다.
+#   · **5분 주기 청산 감시가 실제로 도는가** — HTTP 200을 받았다는 사실과
+#     회차가 돌았다는 사실은 다르다. `exit_monitor_runs`가 정본이다.
+#
+# 권한·안전은 `audit-production-exact100x-testnet-readiness`와 **같다**:
+# 소유자만 · 확인 문구 · `BEGIN TRANSACTION READ ONLY` · 접속 문자열 가림 ·
+# 키/시크릿 칸은 고르지도 않는다. 새 비밀정보를 늘리지 않는다.
+#
+# 값이 아니라 **사유**를 출력한다. `last_result`는 시스템이 쓴 짧은 판정
+# 문구이고 160자로 자른다.
+name: audit-production-autotrade-blockers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-autotrade-blockers.yml'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '읽기 전용 운영 감사를 실행하려면 READ-ONLY-AUDIT 를 그대로 입력하세요'
+        required: true
+        default: ''
+
+concurrency:
+  group: audit-production-autotrade-blockers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 자동매매 진입 차단 사유 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      # ── 수동 실행이면 누가·무엇을 확인하고 넘긴다 ──
+      #
+      #   `push`로 돈 경우에는 이 단계가 아무것도 하지 않는다.
+      #   **실패하면 DB 접속 단계로 가지 않는다.**
+      - name: 수동 실행 관문 (소유자 · 확인 문구)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${ACTOR}" != "${OWNER}" ]; then
+            echo "::error::저장소 소유자만 이 감사를 수동 실행할 수 있습니다"
+            exit 1
+          fi
+          if [ "${CONFIRM}" != "READ-ONLY-AUDIT" ]; then
+            echo "::error::확인 문구가 일치하지 않습니다 — READ-ONLY-AUDIT 를 그대로 입력하세요"
+            exit 1
+          fi
+          echo "수동 실행 승인 (소유자 확인 · 확인 문구 일치)"
+
+      - name: DB 접속 정보 확인
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 상태를 확인할 수 없습니다"
+            echo "값은 GitHub Secrets에만 있습니다. 이 로그에는 출력하지 않습니다."
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      - name: 상태 조회 (BEGIN TRANSACTION READ ONLY)
+        run: |
+          set -o pipefail
+
+          cat > /tmp/audit.sql <<'SQL'
+          \set ON_ERROR_STOP on
+
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '20s';
+          SET LOCAL lock_timeout = '3s';
+
+          \echo '=== 0. READ ONLY 증명 ==='
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+
+          \echo ''
+          \echo '=== 0b. 칸이 실제로 있는가 (없는 칸의 NULL을 "값 없음"으로 읽지 않기 위해) ==='
+          SELECT c.tbl AS table_name, c.col,
+                 (EXISTS (SELECT 1 FROM information_schema.columns ic
+                           WHERE ic.table_schema='public' AND ic.table_name=c.tbl
+                             AND ic.column_name=c.col)) AS present
+            FROM (VALUES
+                   ('autotrade_schedules','last_result'),
+                   ('autotrade_schedules','last_decision'),
+                   ('autotrade_schedules','last_run_at'),
+                   ('live_orders','connection_id'),
+                   ('exit_monitor_runs','started_at'),
+                   ('exit_monitor_runs','finished_at'),
+                   ('exit_monitor_runs','source'),
+                   ('exit_monitor_runs','status')
+                 ) AS c(tbl,col)
+           ORDER BY c.tbl, c.col;
+
+          \echo ''
+          \echo '=== 1. 예약이 마지막 회차에 무엇이라고 적었나 (사유만 · 160자) ==='
+          -- 키·시크릿 칸은 고르지 않는다. 판정 문구만 본다.
+          SELECT mode,
+                 enabled,
+                 execution_profile_id AS profile,
+                 execution_preset_id  AS preset,
+                 last_run_at,
+                 left(coalesce(last_result::text,   '(없음)'), 160) AS last_result,
+                 left(coalesce(last_decision::text, '(없음)'), 160) AS last_decision
+            FROM public.autotrade_schedules
+           ORDER BY last_run_at DESC NULLS LAST
+           LIMIT 10;
+
+          \echo ''
+          \echo '=== 2. 미확정 주문 — 복구 경로가 닿는가 (connection_id 유무) ==='
+          -- `recoverUnresolvedOrders`는 `connection_id`로 연결을 고른다.
+          -- 그 칸이 비어 있으면 그 줄은 **영영 확정되지 않고**, 미확정이
+          -- 하나라도 남으면 체크리스트가 다음 진입을 막는다.
+          SELECT status,
+                 (connection_id IS NOT NULL) AS has_connection,
+                 count(*)        AS rows,
+                 min(created_at) AS oldest,
+                 max(created_at) AS newest
+            FROM public.live_orders
+           WHERE status IN ('UNKNOWN','ACKED','SENT','INTENT')
+           GROUP BY status, (connection_id IS NOT NULL)
+           ORDER BY status;
+
+          \echo ''
+          \echo '=== 2b. 그 줄들이 어느 연결인가 (id는 앞 8자만) ==='
+          SELECT left(coalesce(connection_id::text, '(없음)'), 8) AS conn,
+                 count(*)        AS rows,
+                 max(created_at) AS newest
+            FROM public.live_orders
+           WHERE status IN ('UNKNOWN','ACKED','SENT','INTENT')
+           GROUP BY 1
+           ORDER BY rows DESC
+           LIMIT 10;
+
+          \echo ''
+          \echo '=== 3. 청산 감시 회차 — 5분 주기가 실제로 도는가 ==='
+          -- HTTP 200을 받았다는 사실과 회차가 돌았다는 사실은 다르다.
+          SELECT started_at, finished_at, source, status
+            FROM public.exit_monitor_runs
+           ORDER BY started_at DESC
+           LIMIT 12;
+
+          \echo ''
+          \echo '=== 4. 판정 ==='
+          SELECT (SELECT count(*) FROM public.live_orders WHERE status='UNKNOWN')                         AS unknown_orders,
+                 (SELECT count(*) FROM public.live_orders WHERE status='UNKNOWN' AND connection_id IS NULL) AS unknown_without_conn,
+                 (SELECT count(*) FROM public.live_orders WHERE status IN ('ACKED','SENT','INTENT'))      AS other_pending,
+                 (SELECT count(*) FROM public.autotrade_schedules WHERE enabled)                           AS enabled_schedules,
+                 (SELECT max(last_run_at) FROM public.autotrade_schedules)                                 AS newest_schedule_run,
+                 (SELECT count(*) FROM public.exit_monitor_runs
+                   WHERE started_at > now() - interval '1 hour')                                           AS exit_runs_1h,
+                 (SELECT max(started_at) FROM public.exit_monitor_runs)                                    AS newest_exit_run;
+
+          COMMIT;
+          SQL
+
+          # ── 가려야 할 조각을 접속 문자열에서 뽑는다. 어디에도 출력하지 않는다 ──
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f /tmp/audit.sql 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::조회에 실패했습니다 — '확인하지 못함'을 '없음'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 — BEGIN TRANSACTION READ ONLY가 빠졌거나 무효화됐습니다"
+            exit 1
+          fi
+          echo "읽기 전용 트랜잭션 확인 (READ_ONLY=on)"
+
+      - name: 다음 단계 안내
+        if: success()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'MD'
+          ## 자동매매 진입 차단 사유 조회 완료
+
+          `=== 1. 예약이 마지막 회차에 무엇이라고 적었나 ===`가 **진입이
+          없는 이유**를 직접 말합니다. 아래는 그다음에 볼 자리입니다.
+
+          | 로그에서 본 것 | 뜻 | 다음 |
+          |---|---|---|
+          | `last_result`가 신호 없음 계열 | 전략이 진입 신호를 내지 않았다 | 고칠 것이 없습니다 — 신호가 날 때까지 기다립니다 |
+          | `last_result`가 점검 차단 계열 | 진입 관문이 막았다 | 어느 항목인지 문구에서 읽습니다 |
+          | `unknown_orders > 0` | 미확정 주문이 남아 있다 | 체크리스트의 `UNRESOLVED_ORDERS`가 **다음 진입을 막습니다** |
+          | `unknown_without_conn > 0` | 그 줄에 연결 id가 없다 | 복구 경로가 그 줄에 **닿지 못합니다** — 사람이 확정해야 합니다 |
+          | `exit_runs_1h = 0` | 최근 1시간 감시 회차가 없다 | 워커가 깨우지 않고 있습니다 |
+          | `newest_exit_run`이 오래됨 | 감시가 멈춰 있다 | 열린 포지션의 시간 청산이 돌지 않습니다 |
+
+          **이 워크플로가 답하지 않는 것**: 거래소 인증이 실제로 되는지,
+          그리고 지금 거래소에 포지션이 열려 있는지. 둘 다 복호화한 키가
+          필요하고 이 워크플로는 그 키를 받지 않습니다.
+
+          이 워크플로는 읽기만 합니다. 스키마와 데이터를 바꾸지 않았습니다.
+          MD
