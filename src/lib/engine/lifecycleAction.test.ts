@@ -14,6 +14,9 @@
 // 그래서 호출을 세고 순서를 기록한다.
 import { test, eq, assert } from '../../test/harness';
 import { applyLifecycleClose } from './lifecycleAction';
+import { decideRestartClose } from './restartClosePreflight';
+import { reconcileBeforeRestartClose } from './restartReconcileGate';
+import { advanceCloseAttempt, type CloseAttemptSnapshot } from './closeAttemptState';
 
 /** 호출 순서를 기록하는 가짜 거래소 */
 function fake(o: {
@@ -191,6 +194,145 @@ export function runLifecycleActionTests() {
     eq(r.code, 'CLOSED_VERIFIED');
     eq(f.counts().mines, 0);
     eq(f.calls.join('→'), 'close→readAfter');
+  });
+
+  test('★ #325: 타임아웃 → 재시작 → 기존 미확정 주문이면 신규 청산 0회', async () => {
+    let sends = 0;
+    // First worker: the venue accepts the close but its response is lost.
+    const first = await applyLifecycleClose({
+      stillMine: async () => true,
+      close: async () => { sends++; throw new Error('timeout after submit'); },
+      readAfter: async () => ({ ok: true, found: true }),
+    });
+    eq(first.code, 'CLOSE_AMBIGUOUS');
+    eq(first.needsReconcile, true);
+    // New worker: position is still visible, previous reduce-only order is pending.
+    const preflight = decideRestartClose({
+      state: { kind: 'PENDING_OR_UNKNOWN' },
+      durablePriorAttemptCleared: false,
+    });
+    eq(preflight.code, 'RECONCILE_FIRST');
+    eq(preflight.send, false);
+    eq(sends, 1, '재시작 직후 기존 주문이 미확정인데 두 번째 전송');
+  });
+
+  test('★ #325: 부분 체결 후 잔량이 있어도 이전 주문 미확정이면 전송 금지', () => {
+    const r = decideRestartClose({
+      state: { kind: 'NONE_CONFIRMED', positionReadOk: true, positionFound: true,
+        openOrdersReadOk: true, pendingReduceOnly: false },
+      durablePriorAttemptCleared: false,
+    });
+    eq(r.code, 'RECONCILE_FIRST'); eq(r.send, false);
+  });
+
+  test('★ #325: 거래소 조회 실패와 누락 장부는 진입 허가가 아니다', () => {
+    for (const state of [{ kind: 'READ_FAILED' }, { kind: 'PENDING_OR_UNKNOWN' }] as const) {
+      const r = decideRestartClose({ state, durablePriorAttemptCleared: true });
+      eq(r.code, 'RECONCILE_FIRST'); eq(r.send, false);
+    }
+  });
+
+  test('★ #325: 재시작 후 이미 flat이면 추가 주문하지 않는다', () => {
+    const r = decideRestartClose({
+      state: { kind: 'NONE_CONFIRMED', positionReadOk: true, positionFound: false,
+        openOrdersReadOk: true, pendingReduceOnly: false },
+      durablePriorAttemptCleared: true,
+    });
+    eq(r.code, 'ALREADY_FLAT'); eq(r.send, false);
+  });
+
+  test('★ #325: 거래소와 영속 장부 모두 대조 완료한 경우만 신규 청산 후보', () => {
+    const r = decideRestartClose({
+      state: { kind: 'NONE_CONFIRMED', positionReadOk: true, positionFound: true,
+        openOrdersReadOk: true, pendingReduceOnly: false },
+      durablePriorAttemptCleared: true,
+    });
+    eq(r.code, 'NEW_CLOSE_ELIGIBLE'); eq(r.send, true);
+  });
+
+  test('★ #325: 두 워커가 같은 영속 장부를 읽어도 원자적 claim은 한 번', async () => {
+    let claimed = false, claims = 0;
+    const deps = () => ({
+      readAttempt: async () => ({ code: 'CLEAR' as const, lastClientOrderId: null }),
+      readVenue: async () => ({ kind: 'NONE_CONFIRMED' as const,
+        positionReadOk: true as const, positionFound: true,
+        openOrdersReadOk: true as const, pendingReduceOnly: false as const }),
+      claimNextAttempt: async () => { claims++; if (claimed) return false; claimed = true; return true; },
+    });
+    const [a, b] = await Promise.all([
+      reconcileBeforeRestartClose(deps()), reconcileBeforeRestartClose(deps()),
+    ]);
+    eq([a.maySend, b.maySend].filter(Boolean).length, 1);
+    eq(claims, 2);
+  });
+
+  test('★ #325: 재시작 후 장부 UNKNOWN/PENDING은 거래소 조회도 청구하지 않는다', async () => {
+    for (const code of ['UNKNOWN', 'PENDING'] as const) {
+      let reads = 0, claims = 0;
+      const r = await reconcileBeforeRestartClose({
+        readAttempt: async () => ({ code, lastClientOrderId: 'close-123' }),
+        readVenue: async () => { reads++; return { kind: 'PENDING_OR_UNKNOWN' }; },
+        claimNextAttempt: async () => { claims++; return true; },
+      });
+      eq(r.code, 'RECONCILE_FIRST'); eq(reads, 0); eq(claims, 0);
+    }
+  });
+
+  test('★ #325: 영속 장부 읽기 오류 또는 원자적 claim 오류는 신규 전송 0', async () => {
+    let claims = 0;
+    const blocked = await reconcileBeforeRestartClose({
+      readAttempt: async () => { throw new Error('DB down'); },
+      readVenue: async () => ({ kind: 'PENDING_OR_UNKNOWN' }),
+      claimNextAttempt: async () => { claims++; return true; },
+    });
+    eq(blocked.maySend, false); eq(claims, 0);
+    const failedClaim = await reconcileBeforeRestartClose({
+      readAttempt: async () => ({ code: 'CLEAR', lastClientOrderId: null }),
+      readVenue: async () => ({ kind: 'NONE_CONFIRMED', positionReadOk: true,
+        positionFound: true, openOrdersReadOk: true, pendingReduceOnly: false }),
+      claimNextAttempt: async () => { throw new Error('commit unknown'); },
+    });
+    eq(failedClaim.code, 'CLAIM_FAILED'); eq(failedClaim.maySend, false);
+  });
+
+  test('★ #325: 전송 타임아웃은 확정 거부가 아니라 SUBMIT_UNKNOWN', () => {
+    const r = advanceCloseAttempt(
+      { status: 'PREPARED', orderTerminalConfirmed: false },
+      { kind: 'SUBMIT_TIMEOUT' },
+    );
+    eq(r.next.status, 'SUBMIT_UNKNOWN'); eq(r.mayClearDurableAttempt, false);
+  });
+
+  test('★ #325: 포지션 flat이어도 기존 주문 미해결이면 장부 삭제 금지', () => {
+    const r = advanceCloseAttempt(
+      { status: 'ACCEPTED', orderTerminalConfirmed: false },
+      { kind: 'POSITION_FLAT', pendingOrderResolved: false },
+    );
+    eq(r.next.status, 'NEEDS_RECONCILE'); eq(r.mayClearDurableAttempt, false);
+  });
+
+  test('★ #325: 지연 체결 이후 주문 종결 + flat 모두 확인하면 정리 가능', () => {
+    const start: CloseAttemptSnapshot = { status: 'SUBMIT_UNKNOWN', orderTerminalConfirmed: false };
+    const partial = advanceCloseAttempt(start, { kind: 'POSITION_PARTIAL', pendingOrderResolved: false });
+    eq(partial.next.status, 'NEEDS_RECONCILE'); eq(partial.mayClearDurableAttempt, false);
+    const final = advanceCloseAttempt(partial.next, { kind: 'POSITION_FLAT', pendingOrderResolved: true });
+    eq(final.next.status, 'FLAT_VERIFIED'); eq(final.mayClearDurableAttempt, true);
+  });
+
+  test('★ #325: 부분 체결 + 주문 종결 확인해도 잔여 포지션은 남는다', () => {
+    const r = advanceCloseAttempt(
+      { status: 'ACCEPTED', orderTerminalConfirmed: false },
+      { kind: 'POSITION_PARTIAL', pendingOrderResolved: true },
+    );
+    eq(r.next.status, 'PARTIAL'); eq(r.mayClearDurableAttempt, false);
+  });
+
+  test('★ #325: 조회 실패는 청산 완료 증거가 아니다', () => {
+    const r = advanceCloseAttempt(
+      { status: 'ACCEPTED', orderTerminalConfirmed: false },
+      { kind: 'POSITION_READ_FAILED' },
+    );
+    eq(r.next.status, 'NEEDS_RECONCILE'); eq(r.mayClearDurableAttempt, false);
   });
 
   test('★ 어떤 경로에서도 청산을 두 번 보내지 않는다', async () => {
