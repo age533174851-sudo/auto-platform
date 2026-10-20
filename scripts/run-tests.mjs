@@ -228,6 +228,7 @@ import { runPickConnectionTests } from './src/lib/exchanges/pickConnection.test'
 import { runOrderCycleTests } from './src/lib/engine/orderCycle.test';
 import { runLeverageSyncTests } from './src/lib/engine/leverageSync.test';
 import { runMismatchRecoveryTests } from './src/lib/engine/mismatchRecovery.test';
+import { runUnresolvedGateScopeTests } from './src/test/integration/unresolvedGateScopeIntegration.test';
 import { runTabGroupsTests } from './src/lib/terminal/tabGroups.test';
 import { runOrderSizingTests } from './src/lib/engine/orderSizing.test';
 import { runOwnerBootstrapTests } from './src/lib/auth/ownerBootstrap.test';
@@ -411,6 +412,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
+  await runUnresolvedGateScopeTests();
   await runTransitionIntegrationTests();
   await runCoinMRouteIntegrationTests();
   await runGateExecIntegrationTests();
