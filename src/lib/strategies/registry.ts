@@ -91,10 +91,14 @@ export const STRATEGIES: StrategySpec[] = [
     supportedIntervals: [60, 240, 720, 1440],
     executionReady: true,
     testnetReady: true,
-    liveReady: true,
+    // 실제 돈에서는 닫는다. 주문 경로가 존재한다는 것과 전략 우위가
+    // 검증됐다는 것은 전혀 다른 문제다. 단일 백테스트가 아니라
+    // OOS/Walk-forward + 비용 스트레스 + PAPER/TESTNET 실체결 증거가
+    // 연결되기 전에는 LIVE 권한을 주지 않는다.
+    liveReady: false,
     route: '/api/autotrade/daily-ladder',
     checkFlag: 'checkOnly',
-    note: '진입은 하루 한 번으로 제한됩니다 — 평가 주기를 짧게 잡아도 그 규칙은 그대로입니다',
+    note: '진입은 하루 한 번으로 제한됩니다. 실행 경로는 있지만 전략 우위의 실전 검증 증거가 아직 연결되지 않아 LIVE는 닫혀 있습니다',
   },
   {
     id: 'scalp',
