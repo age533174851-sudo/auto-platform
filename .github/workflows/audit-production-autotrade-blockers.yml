@@ -116,72 +116,130 @@ jobs:
                    ('autotrade_schedules','last_result'),
                    ('autotrade_schedules','last_decision'),
                    ('autotrade_schedules','last_run_at'),
+                   ('autotrade_schedules','connection_id'),
                    ('live_orders','connection_id'),
                    ('exit_monitor_runs','started_at'),
                    ('exit_monitor_runs','finished_at'),
-                   ('exit_monitor_runs','source'),
-                   ('exit_monitor_runs','status')
+                   ('exit_monitor_runs','status'),
+                   ('exit_monitor_runs','errors')
                  ) AS c(tbl,col)
            ORDER BY c.tbl, c.col;
 
           \echo ''
-          \echo '=== 1. 예약이 마지막 회차에 무엇이라고 적었나 (사유만 · 160자) ==='
-          -- 키·시크릿 칸은 고르지 않는다. 판정 문구만 본다.
-          SELECT mode,
-                 enabled,
-                 execution_profile_id AS profile,
-                 execution_preset_id  AS preset,
+          \echo '=== 1. 켜진 예약의 마지막 판정 — **분류만** 출력한다 ==='
+          -- ★ 자유 문구를 찍지 않는다. `last_result`에 무엇이 들어 있든
+          --   로그로 새지 않게, **코드에 선언된 이름이 들어 있는가**만
+          --   boolean으로 센다. 사용자 id·연결 id·종목·수량은 고르지 않는다.
+          --
+          --   항목 이름은 `preTradeChecklist`의 `resultFor(...)` 첫 인자와
+          --   같은 문자열이다 — 거기 없는 이름을 여기서 만들지 않는다.
+          SELECT enabled,
+                 mode,
+                 (execution_profile_id IS NOT NULL) AS has_contract,
                  last_run_at,
-                 left(coalesce(last_result::text,   '(없음)'), 160) AS last_result,
-                 left(coalesce(last_decision::text, '(없음)'), 160) AS last_decision
+                 (last_result IS NULL OR length(last_result::text) = 0) AS result_empty,
+                 (last_result::text ~* '(신호|signal)')             AS mentions_signal,
+                 (last_result::text ~* 'UNRESOLVED_ORDERS|미확정')   AS mentions_unresolved,
+                 (last_result::text ~* 'STATE_RECONCILE|불일치')     AS mentions_reconcile,
+                 (last_result::text ~* 'MARGIN_SUFFICIENT|증거금')   AS mentions_margin,
+                 (last_result::text ~* 'SUBACCOUNT_LIMIT')          AS mentions_subaccount,
+                 (last_result::text ~* 'REGIME_FILTER|국면')         AS mentions_regime,
+                 (last_result::text ~* 'KILL_SWITCH|킬스위치')        AS mentions_kill,
+                 (last_result::text ~* 'DAILY_LOSS|손실')            AS mentions_daily_loss,
+                 (last_result::text ~* 'MODE|모드')                  AS mentions_mode,
+                 (last_result::text ~* 'STOP_ATTACHED|손절')         AS mentions_stop,
+                 (last_result::text ~* 'BLOCKED|차단|막')            AS looks_blocked,
+                 (last_result::text ~* 'FAILED|실패|오류')            AS looks_failed,
+                 (last_result::text ~* 'ENTERED|진입')               AS looks_entered
             FROM public.autotrade_schedules
-           ORDER BY last_run_at DESC NULLS LAST
-           LIMIT 10;
+           WHERE enabled
+           ORDER BY last_run_at DESC NULLS LAST;
 
           \echo ''
-          \echo '=== 2. 미확정 주문 — 복구 경로가 닿는가 (connection_id 유무) ==='
-          -- `recoverUnresolvedOrders`는 `connection_id`로 연결을 고른다.
-          -- 그 칸이 비어 있으면 그 줄은 **영영 확정되지 않고**, 미확정이
-          -- 하나라도 남으면 체크리스트가 다음 진입을 막는다.
+          \echo '=== 2. 진입 관문과 **같은 범위**로 센 미확정 주문 ==='
+          -- ★ 전체 UNKNOWN 수를 세면 안 된다. 체크리스트가 보는 범위는
+          --   `reconcileCheck.gatherAndReconcile`이 정한다:
+          --
+          --     .eq('user_id', userId).eq('status','UNKNOWN')
+          --     + connectionId가 있으면 .eq('connection_id', connectionId)
+          --     + .order(created_at desc).limit(20)
+          --
+          --   `scalp` 라우트는 연결 id를 넘긴다. 그러므로 **그 연결의**
+          --   UNKNOWN만 진입을 막는다. 다른 연결·다른 사용자의 UNKNOWN은
+          --   이 관문과 무관하다 — 전체 수로 판단하면 과대평가다.
+          SELECT count(*)                       AS unknown_in_gate_scope,
+                 least(count(*), 20)            AS checklist_would_see,
+                 (count(*) > 0)                 AS would_block_entry,
+                 min(o.created_at)              AS oldest,
+                 max(o.created_at)              AS newest
+            FROM public.live_orders o
+           WHERE o.status = 'UNKNOWN'
+             AND EXISTS (
+                   SELECT 1 FROM public.autotrade_schedules s
+                    WHERE s.enabled
+                      AND s.user_id = o.user_id
+                      AND s.connection_id = o.connection_id);
+
+          \echo ''
+          \echo '=== 2b. 범위 밖 UNKNOWN은 따로 센다 (섞지 않는다) ==='
+          SELECT count(*) AS unknown_outside_gate_scope,
+                 count(*) FILTER (WHERE o.connection_id IS NULL) AS without_connection,
+                 min(o.created_at) AS oldest, max(o.created_at) AS newest
+            FROM public.live_orders o
+           WHERE o.status = 'UNKNOWN'
+             AND NOT EXISTS (
+                   SELECT 1 FROM public.autotrade_schedules s
+                    WHERE s.enabled
+                      AND s.user_id = o.user_id
+                      AND s.connection_id = o.connection_id);
+
+          \echo ''
+          \echo '=== 2c. 복구 경로가 닿는가 — 연결 id 유무만 (id는 찍지 않는다) ==='
           SELECT status,
                  (connection_id IS NOT NULL) AS has_connection,
-                 count(*)        AS rows,
-                 min(created_at) AS oldest,
-                 max(created_at) AS newest
+                 count(*) AS rows,
+                 min(created_at) AS oldest, max(created_at) AS newest
             FROM public.live_orders
            WHERE status IN ('UNKNOWN','ACKED','SENT','INTENT')
            GROUP BY status, (connection_id IS NOT NULL)
            ORDER BY status;
 
           \echo ''
-          \echo '=== 2b. 그 줄들이 어느 연결인가 (id는 앞 8자만) ==='
-          SELECT left(coalesce(connection_id::text, '(없음)'), 8) AS conn,
-                 count(*)        AS rows,
-                 max(created_at) AS newest
-            FROM public.live_orders
-           WHERE status IN ('UNKNOWN','ACKED','SENT','INTENT')
-           GROUP BY 1
-           ORDER BY rows DESC
-           LIMIT 10;
+          \echo '=== 3. 청산 감시 — 돌았는가와 성공했는가를 **가른다** ==='
+          -- ★ HTTP 200과 회차 성공은 다르고, 회차가 열린 것과 끝난 것도
+          --   다르다. `finished_at`이 비어 있으면 돌다 죽은 것이다.
+          SELECT count(*)                                              AS runs_24h,
+                 count(*) FILTER (WHERE finished_at IS NOT NULL)        AS finished,
+                 count(*) FILTER (WHERE finished_at IS NULL)            AS open_or_died,
+                 count(*) FILTER (WHERE upper(coalesce(status::text,'')) = 'OK')     AS ok_runs,
+                 count(*) FILTER (WHERE upper(coalesce(status::text,'')) = 'FAILED') AS failed_runs,
+                 count(*) FILTER (WHERE upper(coalesce(status::text,'')) NOT IN ('OK','FAILED')) AS other_status,
+                 count(*) FILTER (WHERE coalesce(errors::text,'') <> '') AS with_errors
+            FROM public.exit_monitor_runs
+           WHERE started_at > now() - interval '24 hours';
 
           \echo ''
-          \echo '=== 3. 청산 감시 회차 — 5분 주기가 실제로 도는가 ==='
-          -- HTTP 200을 받았다는 사실과 회차가 돌았다는 사실은 다르다.
-          SELECT started_at, finished_at, source, status
-            FROM public.exit_monitor_runs
-           ORDER BY started_at DESC
-           LIMIT 12;
+          \echo '=== 3b. 최근 간격 — 5분 주기가 실제로 유지되는가 ==='
+          SELECT count(*) FILTER (WHERE started_at > now() - interval '1 hour')  AS runs_1h,
+                 count(*) FILTER (WHERE started_at > now() - interval '3 hours') AS runs_3h,
+                 max(started_at)                                                  AS newest_run,
+                 round(extract(epoch FROM (now() - max(started_at))) / 60)        AS minutes_since_newest
+            FROM public.exit_monitor_runs;
 
           \echo ''
           \echo '=== 4. 판정 ==='
-          SELECT (SELECT count(*) FROM public.live_orders WHERE status='UNKNOWN')                         AS unknown_orders,
-                 (SELECT count(*) FROM public.live_orders WHERE status='UNKNOWN' AND connection_id IS NULL) AS unknown_without_conn,
-                 (SELECT count(*) FROM public.live_orders WHERE status IN ('ACKED','SENT','INTENT'))      AS other_pending,
-                 (SELECT count(*) FROM public.autotrade_schedules WHERE enabled)                           AS enabled_schedules,
-                 (SELECT max(last_run_at) FROM public.autotrade_schedules)                                 AS newest_schedule_run,
+          SELECT (SELECT count(*) FROM public.autotrade_schedules WHERE enabled)                 AS enabled_schedules,
+                 (SELECT max(last_run_at) FROM public.autotrade_schedules WHERE enabled)         AS newest_schedule_run,
+                 (SELECT count(*) FROM public.live_orders o
+                   WHERE o.status='UNKNOWN' AND EXISTS (
+                     SELECT 1 FROM public.autotrade_schedules s
+                      WHERE s.enabled AND s.user_id=o.user_id AND s.connection_id=o.connection_id)) AS unknown_in_gate_scope,
+                 (SELECT count(*) FROM public.live_orders WHERE status='UNKNOWN')                AS unknown_total,
                  (SELECT count(*) FROM public.exit_monitor_runs
-                   WHERE started_at > now() - interval '1 hour')                                           AS exit_runs_1h,
-                 (SELECT max(started_at) FROM public.exit_monitor_runs)                                    AS newest_exit_run;
+                   WHERE started_at > now() - interval '1 hour')                                 AS exit_runs_1h,
+                 (SELECT count(*) FROM public.exit_monitor_runs
+                   WHERE started_at > now() - interval '24 hours'
+                     AND upper(coalesce(status::text,'')) = 'OK')                                AS exit_ok_24h;
 
           COMMIT;
           SQL
@@ -224,21 +282,38 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'MD'
           ## 자동매매 진입 차단 사유 조회 완료
 
-          `=== 1. 예약이 마지막 회차에 무엇이라고 적었나 ===`가 **진입이
-          없는 이유**를 직접 말합니다. 아래는 그다음에 볼 자리입니다.
+          ### 읽는 순서
 
-          | 로그에서 본 것 | 뜻 | 다음 |
-          |---|---|---|
-          | `last_result`가 신호 없음 계열 | 전략이 진입 신호를 내지 않았다 | 고칠 것이 없습니다 — 신호가 날 때까지 기다립니다 |
-          | `last_result`가 점검 차단 계열 | 진입 관문이 막았다 | 어느 항목인지 문구에서 읽습니다 |
-          | `unknown_orders > 0` | 미확정 주문이 남아 있다 | 체크리스트의 `UNRESOLVED_ORDERS`가 **다음 진입을 막습니다** |
-          | `unknown_without_conn > 0` | 그 줄에 연결 id가 없다 | 복구 경로가 그 줄에 **닿지 못합니다** — 사람이 확정해야 합니다 |
-          | `exit_runs_1h = 0` | 최근 1시간 감시 회차가 없다 | 워커가 깨우지 않고 있습니다 |
-          | `newest_exit_run`이 오래됨 | 감시가 멈춰 있다 | 열린 포지션의 시간 청산이 돌지 않습니다 |
+          1. `=== 1 ===`의 `mentions_*` — 켜진 예약의 마지막 판정에 **어느
+             관문 이름이 들어 있는가**. `mentions_signal`만 참이면 신호가
+             나지 않은 것이고, `mentions_unresolved`가 참이면 미확정 주문이
+             막은 것이다.
+          2. `=== 2 ===`의 `would_block_entry` — **진입 관문과 같은 범위**로
+             센 결과다. `unknown_total`(2c·4)과 다르면 그 차이는 다른
+             연결·다른 사용자의 줄이고 **이 관문과 무관하다.**
+          3. `=== 3 ===` — `runs_24h`와 `ok_runs`는 다른 숫자다. `open_or_died`가
+             크면 회차가 돌다 죽고 있다.
 
-          **이 워크플로가 답하지 않는 것**: 거래소 인증이 실제로 되는지,
-          그리고 지금 거래소에 포지션이 열려 있는지. 둘 다 복호화한 키가
-          필요하고 이 워크플로는 그 키를 받지 않습니다.
+          | 로그에서 본 것 | 뜻 |
+          |---|---|
+          | `mentions_signal` 참 · 나머지 거짓 | 진입 조건 미충족 — 고칠 것이 없다 |
+          | `mentions_unresolved` 참 + `would_block_entry` 참 | 미확정 주문이 막았다 |
+          | `mentions_unresolved` 참 + `would_block_entry` **거짓** | 관문 범위와 기록이 어긋난다 — 코드 결함이다 |
+          | `unknown_in_gate_scope = 0` 인데 `unknown_total > 0` | 그 32건은 **이 진입을 막지 않는다** |
+          | `without_connection > 0` | 복구 경로가 그 줄에 닿지 못한다 |
+          | `runs_1h = 0` | 5분 주기 감시가 멈춰 있다 |
+          | `ok_runs = 0` 인데 `runs_24h > 0` | 회차는 도는데 **성공한 회차가 없다** |
+
+          ### 이 조회가 출력하지 않는 것
+
+          자유 문구(`last_result` 원문) · 사용자 id · 연결 id · 종목 ·
+          수량 · 잔고 · 키/시크릿. 1번 절은 **코드에 선언된 관문 이름이
+          들어 있는가**만 boolean으로 센다 — 무엇이 적혀 있든 로그로
+          새지 않는다.
+
+          거래소 인증이 실제로 되는지, 지금 포지션이 열려 있는지는 답하지
+          않는다. 둘 다 복호화한 키가 필요하고 이 워크플로는 그 키를
+          받지 않는다.
 
           이 워크플로는 읽기만 합니다. 스키마와 데이터를 바꾸지 않았습니다.
           MD
