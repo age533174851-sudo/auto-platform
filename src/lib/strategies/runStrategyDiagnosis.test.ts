@@ -40,6 +40,34 @@ test('★ 진입·차단·실패에는 사유 코드를 붙이지 않는다', ()
   eq(blocked.outcome, 'BLOCKED'); eq(blocked.reasonCode, undefined);
 });
 
+test('Exact100X: 주문 실패 응답에 order 객체가 있어도 ENTERED가 아니다', () => {
+  // scalp 라우트는 executeOrder 실패 때도 order: {status,...}를 돌려준다.
+  // executed:false가 명시됐는데 order 객체 존재만으로 ENTERED로 쓰면
+  // 실제 주문 0건을 진입 성공으로 기록한다.
+  for (const status of ['REJECTED', 'UNKNOWN', 'ACKED']) {
+    const v = outcomeOf({ httpOk: true, body: {
+      ok: true, executed: false, order: { status, clientOrderId: 'attempt-1' },
+    } });
+    eq(v.outcome, 'FAILED', `status=${status}: 주문 실패를 진입 성공으로 오인했다`);
+  }
+});
+
+test('Exact100X: 명시적 executed:false는 orderId와 entered보다 우선한다', () => {
+  const v = outcomeOf({ httpOk: true, body: {
+    ok: true, executed: false, orderId: 'attempt-1', entered: true,
+  } });
+  eq(v.outcome, 'FAILED');
+});
+
+test('Exact100X: 실제 성공과 구형 orderId 성공 응답은 유지한다', () => {
+  eq(outcomeOf({ httpOk: true, body: {
+    ok: true, executed: true, order: { status: 'FILLED' },
+  } }).outcome, 'ENTERED');
+  eq(outcomeOf({ httpOk: true, body: {
+    ok: true, orderId: 'legacy-order',
+  } }).outcome, 'ENTERED');
+});
+
 test('★ recordEvaluation이 그 칸을 장부에 적는다', async () => {
   const saved: any[] = [];
   const sb = { from: () => ({ update: (p: any) => ({ eq: async () => { saved.push(p); return { error: null }; } }) }) };
