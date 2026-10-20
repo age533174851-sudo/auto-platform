@@ -226,4 +226,28 @@ export function runSubAccountTests() {
     eq(judgeSubAccount({ accounts: [acc], market: 'USDM', symbol: 'BTCUSDT', addMarginUsd: 1200, open: [] }).status, 'over');
     eq(judgeSubAccount({ accounts: [acc], market: 'USDM', symbol: 'BTCUSDT', addMarginUsd: 900, open: [] }).status, 'ok');
   });
+
+  // 입력 검증 — 잘못된 목록을 []로 바꾸면 "모든 시장/종목"이 된다.
+  test('시장 목록이 문자열이면 전체 시장 허용으로 바꾸지 않는다', () => {
+    eq(!!normalizeSubAccountInput({ name: 'a', markets: 'USDM' }).error, true);
+  });
+
+  test('종목 목록이 문자열이면 전체 종목 허용으로 바꾸지 않는다', () => {
+    eq(!!normalizeSubAccountInput({ name: 'a', symbolPrefixes: 'BTC' }).error, true);
+  });
+
+  test('시장 목록에 빈 원소가 있으면 전체 시장으로 확대하지 않는다', () => {
+    eq(!!normalizeSubAccountInput({ name: 'a', markets: [''] }).error, true);
+    eq(!!normalizeSubAccountInput({ name: 'a', markets: [null] }).error, true);
+  });
+
+  test('종목 목록에 빈 원소가 있으면 전체 종목으로 확대하지 않는다', () => {
+    eq(!!normalizeSubAccountInput({ name: 'a', symbolPrefixes: [''] }).error, true);
+    eq(!!normalizeSubAccountInput({ name: 'a', symbolPrefixes: [null] }).error, true);
+  });
+
+  test('목록 생략과 정상 빈 배열은 기존처럼 모든 시장/종목을 뜻한다', () => {
+    eq(normalizeSubAccountInput({ name: 'a' }).value?.markets.length, 0);
+    eq(normalizeSubAccountInput({ name: 'a', markets: [], symbolPrefixes: [] }).value?.symbolPrefixes.length, 0);
+  });
 }
