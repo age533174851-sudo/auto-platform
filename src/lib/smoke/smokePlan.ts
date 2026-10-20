@@ -379,6 +379,8 @@ export type ExposureBlockCode =
   | 'UNPROTECTED_UNRESOLVED'
   /** 노출이 남았는지 **모른다** */
   | 'EXPOSURE_UNKNOWN'
+  /** 아직 진행 중인 회차 — 거래소가 잠깐 비어 있어도 자동 해제 불가 */
+  | 'ACTIVE_ATTEMPT'
   /** 장부를 못 읽었다 — 못 읽은 것은 "없음"이 아니다 */
   | 'LEDGER_UNREADABLE';
 
@@ -450,6 +452,7 @@ export function unresolvedExposureBlock(i: {
   const conn = i.connectionId == null ? null : String(i.connectionId);
   const unresolved: string[] = [];
   const unknown: string[] = [];
+  const active: string[] = [];
 
   for (const r of i.rows) {
     if (conn != null && r?.connection_id != null && String(r.connection_id) !== conn) continue;
@@ -457,6 +460,13 @@ export function unresolvedExposureBlock(i: {
     const pz = zeroStepOf(r, 'POSITION_ZERO');
     const oz = zeroStepOf(r, 'ORDERS_ZERO');
     const state = String(r?.state ?? '').toUpperCase();
+    // 진행 중인 회차는 아직 주문을 전송할 수 있다. 현재 거래소 조회가
+    // 0건이어도 그 다음 순간 주문이 나갈 수 있으므로 절대 자동 해제하지 않는다.
+    // 이전 단계의 PASS 기록이 남았어도 state가 활성이라면 이 규칙이 우선이다.
+    if (['ENTERING', 'HOLDING', 'CLOSING'].includes(state)) {
+      active.push(String(r?.id ?? '?'));
+      continue;
+    }
     // 진입 전에 끝난 줄은 노출이 없지만, 진입 중/유지/청산 중인 줄은
     // 단계 기록이 없어도 미확인 노출이다. PZ PASS만으로는 충분하지 않다.
     if (pz == null && oz == null && !EXPOSURE_POSSIBLE_STATES.includes(state)) continue;
@@ -467,6 +477,13 @@ export function unresolvedExposureBlock(i: {
     else unknown.push(id);                      // UNKNOWN · PENDING · 누락 · 그 밖
   }
 
+  if (active.length) {
+    return {
+      blocked: true, code: 'ACTIVE_ATTEMPT', offenders: active,
+      reason: `이 연결에서 진행 중인 스모크 회차가 ${active.length}건 있습니다`
+        + `(${active.join(' · ')}) — 거래소가 비어 있어도 진행 중 회차는 자동 해제하지 않습니다`,
+    };
+  }
   if (unresolved.length) {
     return {
       blocked: true, code: 'UNPROTECTED_UNRESOLVED', offenders: unresolved,
