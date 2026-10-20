@@ -67,6 +67,11 @@ const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
  * 약속이고, 약속이 쌓이면 이 검사는 없는 것과 같아진다.
  */
 const ALLOW = new Map([
+  ['src/lib/engine/marginAllocationComparison.ts',
+    '의도적으로 주문 경로에 배선하지 않는 독립 100X 증거금 연구 모델. '
+    + 'entry100x.test.ts가 오프라인 시나리오 테스트만 부른다. '
+    + '실행기 연결은 금지: 검증된 거래 장부와 리스크 승인/TESTNET 종료 커버리지 없이는 '
+    + '자동 증액을 실행할 수 없다. 연구 결과는 주문 허가가 아니다'],
   // ── 이 검사를 처음 켰을 때 이미 끊겨 있던 것들 ──
   //
   // **이 목록은 갚아야 할 빚이다.** 여기 있는 동안 그 판정은
