@@ -2082,7 +2082,8 @@ export async function reconcilePendingOrders(
           // 확정 못 함. 시도 횟수가 넘었거나 모순이면 사람에게 넘긴다.
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
           await updateOrderRow(sb, o.id, {
-            status: 'UNKNOWN',
+            status: String(o.status) === 'ACKED' && query.ok && !query.order && verdict.state === 'ACKED'
+              ? 'ACKED' : 'UNKNOWN',
             error_message: verdict.reason,
             resolve_attempts: attempts + 1,
             last_resolve_at: new Date().toISOString(),

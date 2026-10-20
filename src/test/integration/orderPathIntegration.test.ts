@@ -385,7 +385,7 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
-  // ══════════ ⑤ 주문 미발견 + 유예 경과 → RECONCILED ══════════
+  // ══════════ ⑤ 주문 미발견 + 유예 경과 → ACKED 유지 ══════════
   {
     const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'ACKED' })]);
     const venue = baseVenue()
@@ -394,11 +394,11 @@ export async function runReconcileIntegrationTests() {
         leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] });
     const r = await scenario(venue, () => reconcile(db));
 
-    test('★ 미발견 + 유예 경과는 RECONCILED이고 체결로 단정하지 않는다', async () => {
+    test('★ 미발견 + 유예 경과는 ACKED 유지하고 체결로 단정하지 않는다', async () => {
       assert(!(r instanceof Error), String((r as any)?.message));
       const row = db.row('live_orders', { id: 'ord-1' })!;
-      eq(row.status, 'RECONCILED');
-      eq(isProvenFill(row), false, 'RECONCILED가 체결 증거로 쓰였다');
+      eq(row.status, 'ACKED');
+      eq(isProvenFill(row), false, '미발견만으로 체결을 증명할 수 없다');
     });
   }
 
