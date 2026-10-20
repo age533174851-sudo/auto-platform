@@ -917,9 +917,63 @@ export function runSmokePlanTests() {
     }
   });
 
-  test('★ 진입 중인데 잔량 단계가 없으면 확인 불가로 막는다', () => {
+  test('★ 진입 중인데 잔량 단계가 없으면 활성 회차로 막는다', () => {
     const v = unresolvedExposureBlock({ rows: [PZ('entering', null, { state: 'ENTERING' })], connectionId: 'c-1' });
-    eq(v.blocked, true); eq(v.code, 'EXPOSURE_UNKNOWN');
+    eq(v.blocked, true); eq(v.code, 'ACTIVE_ATTEMPT');
+  });
+
+  test('★ 활성 회차 3종은 거래소가 비어 있어도 자동 해제되지 않는다', () => {
+    for (const state of ['ENTERING', 'HOLDING', 'CLOSING']) {
+      const block = unresolvedExposureBlock({
+        rows: [PZ(`active-${state}`, null, { state })], connectionId: 'c-1',
+      });
+      eq(block.blocked, true, state);
+      eq(block.code, 'ACTIVE_ATTEMPT', state);
+      const gate = exposureGateAfterVenueCheck({ block, ...FLAT });
+      eq(gate.blocked, true, state);
+      eq(gate.code, 'ACTIVE_ATTEMPT', state);
+      eq(gate.clearance.code, 'NOT_CLEARABLE', state);
+    }
+  });
+
+  test('★ 이전 잔량 검사 둘 다 PASS여도 현재 활성 회차면 차단한다', () => {
+    const block = unresolvedExposureBlock({
+      rows: [PZ('active-with-old-pass', 'PASS', { state: 'HOLDING' })],
+      connectionId: 'c-1',
+    });
+    eq(block.code, 'ACTIVE_ATTEMPT');
+    eq(exposureGateAfterVenueCheck({ block, ...FLAT }).blocked, true);
+  });
+
+  test('★ 과거 UNKNOWN과 활성 회차가 섞이면 활성 차단이 우선이다', () => {
+    const block = unresolvedExposureBlock({
+      rows: [PZ('old', null, { state: 'UNKNOWN' }),
+        PZ('active', null, { state: 'ENTERING' })],
+      connectionId: 'c-1',
+    });
+    eq(block.code, 'ACTIVE_ATTEMPT');
+    eq(block.offenders.join(','), 'active');
+    eq(exposureGateAfterVenueCheck({ block, ...FLAT }).blocked, true);
+  });
+
+  test('★ 다른 연결의 활성 회차는 이 연결을 막지 않는다', () => {
+    const block = unresolvedExposureBlock({
+      rows: [PZ('other-active', null,
+        { state: 'CLOSING', connection_id: 'c-2' })],
+      connectionId: 'c-1',
+    });
+    eq(block.blocked, false);
+    eq(block.code, 'CLEAR');
+  });
+
+  test('★ 과거 UNKNOWN만 있으면 거래소 세 장부 0 증거로 복구한다', () => {
+    const block = unresolvedExposureBlock({
+      rows: [PZ('old', null, { state: 'UNKNOWN' })], connectionId: 'c-1',
+    });
+    eq(block.code, 'EXPOSURE_UNKNOWN');
+    const gate = exposureGateAfterVenueCheck({ block, ...FLAT });
+    eq(gate.blocked, false);
+    eq(gate.clearance.code, 'CLEARED_BY_VENUE');
   });
 
   test('★ 두 잔량 모두 PASS인 회차만 통과한다', () => {
