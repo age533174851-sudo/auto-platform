@@ -169,7 +169,10 @@ export function forcedWindowStartMs(nowMs: number): number | null {
   const minute = kstMinuteOfDay(nowMs);
   if (minute == null || !Number.isFinite(nowMs)) return null;
   const startMin = FORCED_ENTRY_START_KST.hh * 60 + FORCED_ENTRY_START_KST.mm;
-  return nowMs - (minute - startMin) * 60_000;
+  // 분 이하 잔여 초·밀리초를 버려야 09:00:10 주문도 09:03:50 재조회에 잡힌다.
+  // 남겨 두면 조회 시작이 09:00:50으로 밀려 같은 날 중복 주문이 가능하다.
+  const currentMinuteStartMs = Math.floor(nowMs / 60_000) * 60_000;
+  return currentMinuteStartMs - (minute - startMin) * 60_000;
 }
 
 /**
