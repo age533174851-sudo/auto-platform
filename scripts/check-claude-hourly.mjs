@@ -20,6 +20,29 @@
 // ⑤는 그 위에 한 겹 더 두는 것이다. 그래서 ①②가 깨지면 더 큰 소리로
 // 실패한다.
 import { readFileSync, existsSync } from 'node:fs';
+import { basename, join } from 'node:path';
+
+/** 예약 상태 한 줄. 통과해도 **예약이 꺼진 것은 꺼졌다고 적는다** */
+let scheduleSummary = '무인 회차 예약: 확인하지 않음';
+
+/**
+ * `autodevSchedule.ts`를 프로젝트 tsc로 컴파일해서 불러온다.
+ *
+ * 판정을 여기에 다시 쓰지 않는다 — 같은 판단이 두 곳에 있으면
+ * 언젠가 갈린다(`gen-migration-manifest.mjs`의 `loadPlan()`과 같은 길).
+ */
+async function loadSchedule() {
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtempSync, cpSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'traigo-autodev-'));
+  cpSync('src/lib/ops/autodevSchedule.ts', join(dir, 'autodevSchedule.ts'));
+  const tsc = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+  if (!existsSync(tsc)) throw new Error(`TypeScript를 찾을 수 없습니다: ${tsc} — 먼저 npm install`);
+  execFileSync(process.execPath, [tsc, 'autodevSchedule.ts', '--module', 'commonjs',
+    '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe' });
+  return await import(`file://${join(dir, 'autodevSchedule.js')}`);
+}
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
 // 느슨한 쪽으로 작업이 흘러간다.
@@ -310,14 +333,21 @@ if (lane.mode === 'trading') {
 // 엔진과 화면이 같은 시각에 깨면 두 브랜치가 갈리고, 변경 안전 관문이
 // 서로의 변경을 보게 된다.
 {
-  const crons = LANES.map((l) => {
-    if (!existsSync(l.wf)) return null;
-    const m = readFileSync(l.wf, 'utf8').match(/cron:\s*'([^']+)'/);
-    return m ? m[1] : null;
-  });
-  if (crons[0] && crons[1] && crons[0] === crons[1]) {
-    err(`두 갈래의 예약 시각이 같습니다 (${crons[0]}) — 동시에 깨면 브랜치가 갈립니다`);
-  }
+  // **예약이 "없는" 것을 "문제 없는" 것으로 적지 않는다.**
+  //
+  // 예전에는 두 예약 시각이 **같을 때만** 실패했다. 그래서 `schedule:`을
+  // 통째로 지워도, 한 갈래만 지워도 그대로 초록이었다. 울타리는 멀쩡한데
+  // 그 안에서 도는 것이 없는 상태가 통과로 보였다.
+  //
+  // 판정은 `src/lib/ops/autodevSchedule.ts` 한 곳에 있고 여기서는
+  // **같은 파일을 컴파일해서** 쓴다 — 로직을 복제하면 둘이 갈린다.
+  const { autodevScheduleVerdict } = await loadSchedule();
+  const sv = autodevScheduleVerdict(LANES.map((l) => ({
+    name: basename(l.wf, '.yml'),
+    source: existsSync(l.wf) ? readFileSync(l.wf, 'utf8') : null,
+  })));
+  for (const e of sv.errors) err(e);
+  scheduleSummary = sv.summary;
 
   // **그리고 같은 concurrency 그룹이어야 한다.** 예약 시각을 벌린
   // 것만으로는 부족하다 — 앞 회차가 길어지면 그대로 겹치고, 그때
@@ -339,6 +369,9 @@ if (bad === 0) {
   console.log(`✅ 무인 회차 울타리 ${LANES.length}갈래 — 다른 워크플로 실행 불가 · `
     + '거래소/DB 시크릿 없음 · 도구 차단 · 겹침 방지 · 시간 상한 · '
     + '변경 안전 관문 · 금지 지시 보존');
+  // **울타리가 멀쩡한 것과 회차가 도는 것은 다른 사실이다.**
+  // 초록 한 줄이 "무인 개발이 돌고 있다"로 읽히지 않게 상태를 적는다.
+  console.log(`   ${scheduleSummary}`);
 } else {
   console.error('');
   console.error('   이 회차는 사람이 보고 있지 않은 시간에 돕니다.');
