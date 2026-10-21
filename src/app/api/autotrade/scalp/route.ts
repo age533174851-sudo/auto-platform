@@ -1113,13 +1113,22 @@ export async function POST(req: NextRequest) {
   // 규칙을 두 벌 두면 한쪽만 고쳐진다.
   try {
     const { applyVetoToSignal } = await import('@/lib/engine/tradingPipeline');
+    // Veto는 분봉이 아닌, 같은 TESTNET 선물 시장의 완성된 일봉으로 ATR 기준을 만든다.
+    // 조회 실패/표본 부족은 빈 배열로 전달해 기존 fail-closed 관문을 유지한다.
+    const { fetchVenueBars } = await import('@/lib/markets/venueBars');
+    const daily = await fetchVenueBars({
+      exchange: barExchange, symbol, interval: '1d', limit: 60,
+      testnet: barTestnet,
+    });
+    const dailyBars = daily.bars;
     const veto = await applyVetoToSignal(sb, {
+      dailyHighs: dailyBars?.highs,
+      dailyLows: dailyBars?.lows,
+      dailyCloses: dailyBars?.closes,
       side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
       symbol,
       leverage: plan.leverage ?? 1,
-      // 변동성 기준선은 일봉이 필요하다. 단타는 분봉만 갖고 있으므로
-      // **넘기지 않는다** — 분봉으로 계산한 값을 일봉 기준선 자리에
-      // 넣으면 비교 대상이 달라져 언제나 '평소보다 크다'가 된다.
+      // ATR 비교는 일봉으로만 한다. 분봉을 기준선으로 대체하지 않는다.
       currentVolume: bars?.volumes?.[bars.volumes.length - 1],
       avgVolume: bars?.volumes?.length
         ? bars.volumes.reduce((a: number, b: number) => a + b, 0) / bars.volumes.length
