@@ -1111,6 +1111,9 @@ export async function POST(req: NextRequest) {
   //
   // 새 경로를 만들지 않는다 — 웹훅이 쓰는 applyVetoToSignal을 그대로 쓴다.
   // 규칙을 두 벌 두면 한쪽만 고쳐진다.
+  // **왜 변동성 기준선이 없었는지**가 응답에 남아야 한다. 없으면
+  // "캘린더 때문인지 일봉 때문인지"를 매번 처음부터 추적하게 된다.
+  let dailyEvidence: any = null;
   try {
     const { applyVetoToSignal } = await import('@/lib/engine/tradingPipeline');
     // Veto는 분봉이 아닌, 같은 TESTNET 선물 시장의 완성된 일봉으로 ATR 기준을 만든다.
@@ -1120,7 +1123,27 @@ export async function POST(req: NextRequest) {
       exchange: barExchange, symbol, interval: '1d', limit: 60,
       testnet: barTestnet,
     });
-    const dailyBars = daily.bars;
+    // **일봉이 맞는지 시각으로 확인한 뒤에만 기준선으로 쓴다.**
+    //
+    // `computeAtrBaseline`은 숫자 배열 세 개만 받는다 — 시각이 없어서
+    // 그 배열이 일봉인지·연속인지·오늘 것인지 알 수 없다. 확인하지 않고
+    // 넘기면 다른 주기의 봉이나 멈춘 피드로도 관문이 **통과**한다
+    // (가짜 거래소로 재현됨: 20일 지난 1시간봉이 통과했다).
+    //
+    // 아니면 배열을 넘기지 않는다. 그러면 기준선이 안 만들어지고
+    // 기존 fail-closed 관문(`VOLATILITY_DATA_MISSING`)이 100배를 막는다.
+    const { dailyBarEvidence } = await import('@/lib/markets/dailyBarEvidence');
+    const dailyEv = dailyBarEvidence({ bars: daily.bars, nowMs: Date.now() });
+    const dailyBars = dailyEv.bars;
+    dailyEvidence = {
+      ok: dailyEv.ok, code: dailyEv.code, sampleCount: dailyEv.sampleCount,
+      ageDays: dailyEv.ageDays == null ? null : Number(dailyEv.ageDays.toFixed(2)),
+      reason: dailyEv.reason,
+    };
+    // **응답 뼈대에 실어 둔다.** 이 아래의 모든 응답이 `...base`를 펼치므로,
+    // 어디서 끝나든 "일봉 증거가 무엇이었나"가 같이 나간다. 한 군데에만
+    // 붙이면 다른 경로로 끝난 회차에서는 그 값이 사라진다.
+    (base as any).dailyEvidence = dailyEvidence;
     const veto = await applyVetoToSignal(sb, {
       dailyHighs: dailyBars?.highs,
       dailyLows: dailyBars?.lows,
