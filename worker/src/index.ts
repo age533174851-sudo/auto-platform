@@ -29,6 +29,11 @@ import {
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
+// **한도에 걸린 DB에 재시도를 퍼붓지 않는다.** 판정은 웹과 같은 파일이다.
+import {
+  noteResult as noteQuotaResult, quotaGate, breakerLine,
+  OPEN_BREAKER, type BreakerState,
+} from '../../src/lib/supabase/quotaBreaker';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -84,6 +89,49 @@ const WORKER_ID =
   || process.env.HOSTNAME                // 컨테이너 일반
   || `worker-local-${Math.random().toString(36).slice(2, 8)}`;
 const POLL_SEC = Math.max(1, Math.min(15, parseInt(process.env.WORKER_POLL_SEC || '3', 10)));
+
+// ── DB 사용량 차단기 ────────────────────────────────────────────
+//
+// Supabase Free Plan의 Egress가 한도를 넘으면 402가 돌아온다. 그 상태에서
+// 3초마다 같은 조회를 다시 보내면 **그 재시도 자체가 다시 전송량**이 된다.
+// 한가한 조회만 쉬게 하고, **포지션을 지키는 조회는 그대로 보낸다.**
+let dbBreaker: BreakerState = { ...OPEN_BREAKER };
+let breakerNotedAt = 0;
+
+/** 조회 결과를 차단기에 반영한다. 한도 오류일 때만 닫힌다 */
+function noteDb(outcome: { error?: any } | null | undefined): void {
+  const before = dbBreaker.blockedUntilMs;
+  dbBreaker = noteQuotaResult(dbBreaker, outcome, Date.now());
+  // 상태가 **바뀔 때만** 적는다. 매 틱 찍으면 로그가 그 줄로 덮인다.
+  if (dbBreaker.blockedUntilMs !== before) {
+    console.warn(`[db] ${breakerLine(dbBreaker, Date.now())}`);
+    breakerNotedAt = Date.now();
+  }
+}
+
+/** 지금 한가한 조회를 보내도 되는가 */
+function routineDbAllowed(): boolean {
+  const g = quotaGate(dbBreaker, 'ROUTINE', Date.now());
+  if (!g.allowed && Date.now() - breakerNotedAt > 300_000) {
+    breakerNotedAt = Date.now();
+    console.warn(`[db] ${g.reason}`);
+  }
+  return g.allowed;
+}
+
+/**
+ * heartbeat 주기.
+ *
+ * 3초마다 적을 이유가 없다 — 죽었다고 보는 문턱은 180초다(`WORKER_STALE_MS`).
+ * 15초면 12배 여유가 남고, 쓰기 횟수는 5분의 1이 된다. 오류·종료 때는
+ * 이 간격과 무관하게 **즉시** 적는다.
+ */
+const HEARTBEAT_MIN_GAP_MS = Number(process.env.WORKER_HEARTBEAT_MS || 15_000);
+let lastHeartbeatMs = 0;
+
+/** 낡은 잡 회수 검사 주기. 유예가 120초라 60초에 한 번이면 충분하다 */
+const STALE_SCAN_MS = 60_000;
+let lastStaleScanMs = 0;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let errorCount = 0;
@@ -107,7 +155,12 @@ async function releaseActionLock(name: string): Promise<void> {
 }
 
 async function getConnection(connId: string): Promise<any | null> {
-  const { data } = await sb().from('exchange_connections').select('*').eq('id', connId).maybeSingle();
+  // **쓰는 칸만 읽는다.** `select('*')`는 암호문과 쓰지 않는 칸까지 끌어온다.
+  // 워커가 연결에서 읽는 칸은 아래 여덟 개가 전부다(`conn.` 전수 확인).
+  const { data, error } = await sb().from('exchange_connections')
+    .select('id, user_id, exchange_id, api_key, api_secret_enc, encrypted_secret, is_testnet, has_withdrawal')
+    .eq('id', connId).maybeSingle();
+  noteDb({ error });
   return data || null;
 }
 function connCreds(conn: any): { key: string; secret: string; testnet: boolean } {
@@ -275,6 +328,11 @@ async function processPendingJobs() {
   //   2) 해당 잡을 쥔 워커의 heartbeat가 끊겼을 것
   // 살아 있는 워커의 잡은 아무리 느려도 회수하지 않는다.
   const STALE_GRACE_MS = 120_000;
+  // **3초마다 훑지 않는다.** 회수 조건은 "만료 + 유예 120초 경과"라
+  // 60초에 한 번 봐도 늦지 않는다. 3초 주기로 두면 같은 스캔이 하루
+  // 28,800번 나가고, 그 대부분은 돌려줄 줄이 없는 빈 조회다.
+  if (Date.now() - lastStaleScanMs >= STALE_SCAN_MS) {
+  lastStaleScanMs = Date.now();
   try {
     const cutoff = new Date(Date.now() - STALE_GRACE_MS).toISOString();
     const { data: stale } = await sb().from('jobs')
@@ -304,9 +362,19 @@ async function processPendingJobs() {
       }
     }
   } catch { /* 회수 실패는 다음 주기에 다시 시도한다 */ }
+  }
 
-  const { data: jobs, error: qErr } = await sb().from('jobs').select('*').eq('status', 'PENDING')
+  // **`select('*')`를 쓰지 않는다.** `result` 칸에는 거래소 응답이 통째로
+  // 들어 있어 PENDING 줄을 읽을 때도 같이 끌려온다. 3초마다 도는 조회라
+  // 그 한 칸이 한 달치 전송량에서 가장 큰 덩어리가 된다.
+  const { data: jobs, error: qErr } = await sb().from('jobs')
+    // 한 줄 문자열이어야 한다 — 이어 붙이면 타입 추론이 끊겨 행 타입이 무너진다.
+    .select('id, action, status, attempts, max_attempts, priority, user_id, connection_id, exchange, mode, symbol, side, quantity, percent, payload, created_at')
+    .eq('status', 'PENDING')
     .order('priority', { ascending: true }).order('created_at', { ascending: true }).limit(10);
+  // **잡 조회는 건너뛰지 않는다** — 청산·보호 작업이 이 줄로 들어온다.
+  // 다만 한도 오류라는 사실은 차단기에 적어, 한가한 조회 쪽이 쉬게 한다.
+  noteDb({ error: qErr });
   if (qErr) { console.error('[jobs] ❌ PENDING 조회 실패:', qErr.message, '— jobs 테이블/RLS/service_role 키 확인'); return; }
   console.log(`[jobs] pending count=${jobs?.length ?? 0}`);
   if (!jobs || jobs.length === 0) return;
@@ -424,9 +492,29 @@ async function finalize(job: any, ok: boolean, result: any, error: string | null
 // 예전에는 그랬다. 그래서 Gate 연결은 Ghost Sync도 안 돌고, 킬스위치가
 // active여도 워커가 job을 만들어 주지 않았다 — 웹이 job 만드는 데 실패하면
 // 아무도 안 만든다. **자가복구가 있다고 믿는 쪽이 없는 것보다 나쁘다.**
+/**
+ * Ghost Sync 주기.
+ *
+ * **3초마다 돌 이유가 없었다.** 이 감시는 연결 목록을 통째로 읽고
+ * (암호화된 시크릿 칸까지), 연결마다 킬스위치 상태와 잡을 또 읽는다.
+ * 연결이 N개면 한 바퀴에 1+2N번이고, 3초 주기면 하루 28,800바퀴다 —
+ * 한 달치 전송량에서 가장 큰 덩어리가 여기였다.
+ *
+ * 60초로 줄여도 하는 일은 같다. 킬스위치 잡은 Vercel이 즉시 만들고
+ * 이 자리는 **그게 실패했을 때의 자가복구**다. 그래서 끄지는 않는다.
+ */
+const MONITOR_CONNECTIONS_MS = Number(process.env.WORKER_MONITOR_MS || 60_000);
+let lastMonitorMs = 0;
+
 async function monitorConnections() {
-  const { data: conns } = await sb().from('exchange_connections')
-    .select('*').in('exchange_id', SUPPORTED_EXCHANGE_IDS);
+  if (Date.now() - lastMonitorMs < MONITOR_CONNECTIONS_MS) return;
+  lastMonitorMs = Date.now();
+  // **`select('*')`를 쓰지 않는다.** 쓰지 않는 칸까지 끌어오고, 그 안에는
+  // 암호화된 시크릿도 있다. 쓰는 칸만 읽는다.
+  const { data: conns, error: connErr } = await sb().from('exchange_connections')
+    .select('id, user_id, exchange_id, api_key, api_secret_enc, is_testnet, has_withdrawal')
+    .in('exchange_id', SUPPORTED_EXCHANGE_IDS);
+  noteDb({ error: connErr });
   if (!conns) return;
   for (const conn of (conns as any[])) {
     if (conn.has_withdrawal === true) continue;
@@ -505,6 +593,9 @@ let lastPollMs: number | null = null;
 let pollCount = 0;
 let evalCount = 0;
 async function pollSchedules(): Promise<void> {
+  // **한도에 막혔으면 새 진입을 찾지 않는다.** 적지 못할 주문을 내는 것은
+  // 아끼는 것보다 위험하다. 이미 열린 포지션을 닫는 쪽은 아래에서 계속 돈다.
+  if (!routineDbAllowed()) return;
   if (!APP_URL || !APP_ADMIN_SECRET) {
     // **한 번만 크게 말한다.** 매 tick 찍으면 로그가 덮여서 안 읽힌다.
     if (!pollWarned) {
@@ -956,6 +1047,7 @@ let lastChallengeSweepMs: number | null = null;
 let challengeSweepWarned = false;
 
 async function pollChallengeSweep(isMain: boolean): Promise<void> {
+  if (!routineDbAllowed()) return;           // 챌린지 생명주기는 포지션 보호가 아니다
   const plan = exitMonitorPlan({
     lastRunMs: lastChallengeSweepMs, nowMs: Date.now(),
     intervalMs: CHALLENGE_SWEEP_MS, isMain,
@@ -1076,6 +1168,7 @@ const LEDGER_SYNC_MS = Number(process.env.LEDGER_SYNC_INTERVAL_MS || 15 * 60_000
 let lastLedgerSyncMs: number | null = null;
 
 async function pollLedgerSync(isMain: boolean): Promise<void> {
+  if (!routineDbAllowed()) return;           // 수수료 집계는 급하지 않다
   if (!isMain) return;                       // 같은 구간을 두 번 읽지 않는다
   if (!APP_URL || !APP_ADMIN_SECRET) return; // 위에서 이미 한 번 경고했다
   const now = Date.now();
@@ -1138,6 +1231,7 @@ const EQUITY_SNAPSHOT_MS = Number(process.env.EQUITY_SNAPSHOT_INTERVAL_MS || 15 
 let lastEquitySnapshotMs: number | null = null;
 
 async function pollEquitySnapshot(isMain: boolean): Promise<void> {
+  if (!routineDbAllowed()) return;           // 자산 곡선 한 점은 급하지 않다
   if (!isMain) return;                       // 같은 칸을 두 번 부를 이유가 없다
   if (!APP_URL || !APP_ADMIN_SECRET) return; // 위에서 이미 한 번 경고했다
   const now = Date.now();
@@ -1189,7 +1283,12 @@ async function tick() {
   // **예약은 main 락을 쥔 워커만 본다.** 그 사실을 heartbeat에 같이
   // 적어야, 밖에서 예비 워커의 줄을 보고 "안 돈다"고 잘못 읽지 않는다.
   noteScheduler({ isMain });
-  await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
+  // **매 틱 적지 않는다.** 죽었다고 보는 문턱은 180초다 — 15초면 충분하고
+  // 쓰기는 5분의 1이 된다. 오류·종료 경로는 이 간격을 보지 않는다.
+  if (Date.now() - lastHeartbeatMs >= HEARTBEAT_MIN_GAP_MS) {
+    lastHeartbeatMs = Date.now();
+    await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
+  }
   if (isMain) await monitorConnections();
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
   // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
