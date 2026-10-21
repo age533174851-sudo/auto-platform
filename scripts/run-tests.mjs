@@ -38,6 +38,7 @@ __mod._resolveFilename = function (request, ...rest) {
   return __origResolve.call(this, request, ...rest);
 };
 
+import { runCalendarVetoEvidenceTests } from './src/lib/calendar/econCalendar.vetoEvidence.test';
 import { runPnlTests } from './src/lib/pnl/pnl.test';
 import { runBacktestTests } from './src/lib/backtest/engine.test';
 import { runRiskManagerTests } from './src/lib/engine/riskManager.test';
@@ -380,6 +381,7 @@ import { runVenueBarsTests } from './src/lib/markets/venueBars.test';
 import { runLoginDiagnosticTests } from './src/lib/auth/loginDiagnostic.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
+runCalendarVetoEvidenceTests();
 runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runPaperDispatchTests(); runPaperOpenAtomicTests(); runPaperEventTimeTests(); runPaperChallengeSweepTests(); runPaperCapacityTests(); runPaperExitSweepTests(); runPaperExitSweepMoreTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests();
 runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runInventoryTests(); runPracticeEnvTests();
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests(); runAutoMergeGateTests(); runAutoRebaseTests();
