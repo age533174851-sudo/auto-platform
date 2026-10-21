@@ -231,8 +231,58 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 진입 자리인가 ──
-  const scalp = scalpSignal(bars, cfg);
+  let scalp = scalpSignal(bars, cfg);
   const timeframeInfo = { intervalMin, interval, ...verdict };
+
+  // ── 09:00 KST 강제 진입 (Exact100X TESTNET 전용) ──
+  //
+  // 신호가 나지 않는 날에도 **하루 한 번은 시도한다.** 지금까지는
+  // 돌파·거래량·비용 세 필터를 통과해야만 주문이 만들어졌고, 그래서
+  // 진입이 한 번도 나지 않았다.
+  //
+  // 여기서 건너뛰는 것은 **그 재량 필터 셋뿐**이다. 아래의 위험 관문
+  // (dormantGate · riskManager · 청산가 · 기존 포지션/미결 주문 ·
+  // 보호주문 · killSwitch · 수량 양자화)은 **전부 그대로 지난다.**
+  // 크기도 같은 ATR 수치로 계산한다 — 강제 진입만 다른 크기로 나가면
+  // 그 숫자의 뜻이 둘로 갈린다.
+  let forced: any = null;
+  if (!scalp.signal) {
+    const { forcedEntryVerdict, forcedEntrySignal, forcedWindowStartMs } =
+      await import('@/lib/strategies/dailyForcedEntry');
+    const forcedNowMs = Date.now();
+
+    // 오늘 창에서 이미 냈는가. **못 읽으면 null이다** — 0건으로 접으면
+    // 같은 창에서 두 번 진입한다. 판정기가 null을 받으면 막는다.
+    let ordersTodayInWindow: number | null = null;
+    const sinceMs = forcedWindowStartMs(forcedNowMs);
+    if (sinceMs != null && body.connectionId && userId) {
+      const { count, error } = await (sb as any).from('live_orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('connection_id', body.connectionId)
+        .eq('symbol', symbol)
+        .eq('mode', 'TESTNET')
+        .eq('reduce_only', false)
+        .gte('created_at', new Date(sinceMs).toISOString());
+      ordersTodayInWindow = error || count == null ? null : count;
+    }
+
+    forced = forcedEntryVerdict({
+      nowMs: forcedNowMs,
+      mode: opMode,
+      profileId: epContract?.profileId,
+      presetId: epContract?.presetId,
+      ordersTodayInWindow,
+    });
+    if (forced.due) {
+      scalp = forcedEntrySignal(bars, cfg);
+      if (!scalp.signal) {
+        // ATR을 못 읽었다. **강제라고 해서 모르는 크기로 내지 않는다.**
+        forced = { ...forced, due: false, code: 'SIZING_UNKNOWN', reason: scalp.reason };
+      }
+    }
+  }
+
   if (!scalp.signal) {
     const { diagnoseScalpSignal } = await import('@/lib/strategies/scalpSignalDiagnosis');
     const diagnosis = diagnoseScalpSignal(scalp);
@@ -241,6 +291,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true, executed: false, symbol, mode: opMode,
       signal: null, reason: scalp.reason, reasonCode: diagnosis.code, timeframe: timeframeInfo,
+      // **왜 강제 진입도 안 했는지**가 여기 남아야 한다. 없으면
+      // "신호가 없었다"와 "창 밖이었다"와 "이미 냈다"가 구분되지 않는다.
+      forcedEntry: forced == null ? null
+        : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
@@ -285,6 +339,10 @@ export async function POST(req: NextRequest) {
       stopPct: scalp.signal.stopPct, targetPct: scalp.signal.targetPct,
       notes: scalp.signal.notes,
     },
+    // **이 진입이 신호에서 왔는지 09:00 강제에서 왔는지**를 값으로 남긴다.
+    // 사람이 notes 문장을 읽어 되짚게 하면 문장이 바뀔 때 조용히 틀린다.
+    forcedEntry: forced == null ? null
+      : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     // 계좌를 어디서 읽었는지와 못 읽은 것들. **이게 없으면 폴백 $10,000으로
     // 계산된 결과를 실계좌 결과로 읽게 된다.**
     account: { source: ctx.source, equity: ctx.config.accountEquity, warnings: ctx.warnings },

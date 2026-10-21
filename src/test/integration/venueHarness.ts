@@ -196,11 +196,31 @@ export class FakeDb {
   from(table: string): any {
     const db = this;
     const filters: { col: string; vals: any[] }[] = [];
+    // 범위 조건(`gte`·`lte`). 창 단위로 센 줄을 읽는 질의가 쓴다 —
+    // 이것이 없으면 그런 질의가 **시험에서만** 터진다.
+    const ranges: { col: string; op: 'gte' | 'lte'; val: any }[] = [];
+    // `select('id', { count: 'exact', head: true })` 형태인가.
+    let headCount = false;
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+
+    /** 시각 문자열과 숫자를 같은 축에서 비교한다 */
+    const cmpVal = (v: any): number => {
+      if (typeof v === 'number') return v;
+      const t = Date.parse(String(v));
+      return Number.isFinite(t) ? t : Number(v);
+    };
 
     const apply = () => {
       let out = db.rows[table] ?? [];
       for (const f of filters) out = out.filter((r) => f.vals.includes(r[f.col]));
+      for (const g of ranges) {
+        const bound = cmpVal(g.val);
+        out = out.filter((r) => {
+          const v = cmpVal(r[g.col]);
+          if (!Number.isFinite(v) || !Number.isFinite(bound)) return false;
+          return g.op === 'gte' ? v >= bound : v <= bound;
+        });
+      }
       return out;
     };
 
@@ -245,7 +265,8 @@ export class FakeDb {
     };
 
     const builder: any = {
-      select(_cols?: string) {
+      select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+        if (opts?.count != null || opts?.head === true) headCount = true;
         if (pending?.kind === 'insert') return builder;
         if (db.opts.failSelectsOn === table) {
           builder.__selectFails = true;
@@ -254,6 +275,8 @@ export class FakeDb {
       },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
+      gte(col: string, val: any) { ranges.push({ col, op: 'gte', val }); return builder; },
+      lte(col: string, val: any) { ranges.push({ col, op: 'lte', val }); return builder; },
       order() { return builder; },
       limit() { return builder; },
       insert(row: any) { pending = { kind: 'insert', patch: row }; return builder; },
@@ -279,13 +302,21 @@ export class FakeDb {
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
           // **await만 하는 insert도 적힌다.** 아래 select 분기로 떨어지면
-          // 오류 없이 아무것도 안 적혀, 시험이 "적혔다"를 못 본다.
+          // 오류 없이 아무것도 안 적혀, 시험이 "적혔다"를 못 본다. (#376)
           if (pending?.kind === 'insert') {
             const r = flushInsert();
             return { data: r.error ? null : r.data, error: r.error };
           }
-          if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
-          return { data: apply().map((r) => ({ ...r })), error: null };
+          if (builder.__selectFails) {
+            // **개수 질의도 실패는 실패다.** 0건으로 돌려주면 호출부의
+            // fail-closed 분기가 시험에서 영영 안 돈다. (#386)
+            return headCount
+              ? { count: null, data: null, error: { message: '조회 실패' } }
+              : { data: null, error: { message: '조회 실패' } };
+          }
+          const rows = apply();
+          if (headCount) return { count: rows.length, data: null, error: null };
+          return { data: rows.map((r) => ({ ...r })), error: null };
         };
         return run().then(resolve, reject);
       },
