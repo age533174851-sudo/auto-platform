@@ -100,6 +100,15 @@ export function runDailyForcedEntryTests() {
     eq(forcedWindowStartMs(at), AT(0, 0));
   });
 
+  test('★ 초·밀리초가 달라도 조회 시작은 09:00:00.000 KST다', () => {
+    // 09:03:50에 조회할 때 09:00:10 주문을 놓치면 하루 중복 진입이 열린다.
+    const start = AT(0, 0);
+    for (const at of [start + 10_000, AT(0, 3) + 50_000, AT(0, 29) + 59_999]) {
+      eq(forcedWindowStartMs(at), start,
+        `조회 시작이 초/밀리초를 남겼습니다: ${new Date(at).toISOString()}`);
+    }
+  });
+
   console.log('[강제 진입 주문 모양 — 크기는 평소와 같은 ATR로 센다]');
 
   test('★ 강제 신호는 주문 모양으로 변환된다 (손절 방향 포함)', () => {
