@@ -938,6 +938,14 @@ jobs:
       - name: 상태판 문장 검사
         run: node scripts/check-status-claims.mjs
 
+      # ── autotrade-tick 응답 계약 ──
+      #
+      # daily-ladder는 예약 표를 못 읽어도 **HTTP 200 + ok:false**를
+      # 돌려준다. 코드만 보면 그 회차가 초록이고, 15분마다 도는 작업이라
+      # 아무도 못 본다. 가짜 응답으로 판정 동작을 직접 확인한다.
+      - name: autotrade-tick 응답 계약 · 판정기 배선
+        run: node scripts/check-autotrade-tick-contract.mjs
+
       # ── 워크플로 문법 검사 ──
       #
       # **유효한 YAML과 유효한 워크플로는 다르다.**
