@@ -40,6 +40,8 @@ export const TICK_CODES = [
   'BODY_NOT_OBJECT',     // JSON이지만 객체가 아니다 (배열·문자열·null)
   'OK_FIELD_MISSING',    // 계약에 있어야 할 `ok`가 없다
   'APP_FAILED',          // 200인데 `ok:false` — DB 오류 등
+  'RESULTS_UNREADABLE',  // 예약은 있는데 결과 목록을 읽을 수 없다
+  'SCHEDULE_FAILED',     // 예약별 결과에 `ok:false`가 있다
 ];
 
 /**
@@ -89,15 +91,53 @@ export function tickVerdict(httpCode, rawBody) {
       `서버가 실패라고 답했습니다 (HTTP 200 · ok:${JSON.stringify(parsed.ok)}) — ${why.slice(0, 200)}`);
   }
 
-  // **여기부터는 전부 정상이다.** 진입 0건도 정상이다.
+  // ── 최상위 `ok:true`는 **예약 목록을 읽었다**는 뜻일 뿐이다 ──
+  //
+  // 개별 예약의 성패는 `results[].ok`에 따로 적힌다. 라우트에서
+  // 그 값이 false가 되는 경우는 둘뿐이고, **둘 다 관망이 아니다**:
+  //
+  //   · `due.code === 'NO_CONNECTION'`  예약은 켜져 있는데 거래소 연결이 없다
+  //   · `record.outcome === 'FAILED'`   평가가 실제로 실패했다
+  //
+  // 전자는 저절로 낫지 않는 설정 고장이고, 후자는 그냥 실패다. 최상위가
+  // 초록이라는 이유로 넘기면 이 PR이 닫으려는 구멍이 한 겹 남는다.
+  //
+  // **관망은 그대로 성공이다** — `WAITING`·`TOO_SOON`·꺼짐·평가했지만
+  // 진입하지 않음은 라우트가 `ok:true`로 적는다.
   const scheduled = Number(parsed.scheduled);
-  const results = Array.isArray(parsed.results) ? parsed.results : [];
+  const hasSchedules = Number.isFinite(scheduled) && scheduled > 0;
+
+  if (!Array.isArray(parsed.results)) {
+    // 예약이 없으면 목록이 없어도 된다. 있는데 못 읽는 것은 다른 얘기다.
+    if (hasSchedules) {
+      return no('RESULTS_UNREADABLE',
+        `예약 ${scheduled}건인데 results를 읽을 수 없습니다 `
+        + `(${parsed.results === undefined ? '없음' : typeof parsed.results}) — `
+        + '무엇을 했는지 모르는 응답을 성공으로 적지 않습니다');
+    }
+    return {
+      ok: true, code: 'OK', body: parsed,
+      reason: `정상 — 예약 0건${parsed.note ? ` · ${String(parsed.note).slice(0, 160)}` : ''}`,
+    };
+  }
+
+  const results = parsed.results;
   const executed = results.filter((r) => r && r.executed === true).length;
-  const failed = results.filter((r) => r && r.ok === false).length;
+  const failures = results.filter((r) => r && r.ok === false);
+  if (failures.length > 0) {
+    const why = failures.slice(0, 5).map((r) => {
+      const tag = r.symbol ? `${r.symbol} ` : '';
+      return `${tag}${r.code ?? r.outcome ?? '사유 없음'}`;
+    }).join(' · ');
+    return no('SCHEDULE_FAILED',
+      `예약 ${results.length}건 중 ${failures.length}건이 실패했습니다 — ${why}`
+      + (failures.length > 5 ? ` 외 ${failures.length - 5}건` : ''));
+  }
+
   return {
     ok: true, code: 'OK', body: parsed,
-    reason: `정상 — 예약 ${Number.isFinite(scheduled) ? scheduled : '?'}건 · `
-      + `진입 ${executed}건 · 예약별 실패 ${failed}건`
+    reason: `정상 — 예약 ${Number.isFinite(scheduled) ? scheduled : results.length}건 · `
+      + `진입 ${executed}건 · 예약별 실패 0건`
       + (parsed.note ? ` · ${String(parsed.note).slice(0, 160)}` : ''),
   };
 }

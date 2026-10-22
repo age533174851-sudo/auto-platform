@@ -30,6 +30,8 @@ for (const [label, body] of [
   ['켜진 예약 없음', '{"ok":true,"scheduled":0,"results":[],"note":"켜져 있는 자동매매 설정이 없습니다"}'],
   ['간격 안 됨', '{"ok":true,"scheduled":1,"results":[{"ok":true,"executed":false,"code":"WAITING"}]}'],
   ['진입함', '{"ok":true,"scheduled":1,"results":[{"ok":true,"executed":true}]}'],
+  ['평가했지만 진입 안 함', '{"ok":true,"scheduled":1,"results":[{"ok":true,"executed":false,"outcome":"NO_SIGNAL"}]}'],
+  ['꺼진 예약 건너뜀', '{"ok":true,"scheduled":1,"results":[{"ok":true,"skipped":true,"code":"OFF"}]}'],
 ]) {
   const v = tickVerdict(200, body);
   if (!v.ok) err(`정상 관망을 실패로 적었습니다 (${label}): [${v.code}] ${v.reason}`);
@@ -54,6 +56,41 @@ for (const [label, body] of [
   eq(v.ok, false, `DB 오류(${label})`);
   eq(v.code, 'APP_FAILED', `DB 오류(${label}) 코드`);
 }
+
+// ── 최상위 ok:true여도 **개별 예약 실패**는 초록이 아니다 ──
+//
+// 라우트에서 `results[].ok`가 false가 되는 경우는 둘뿐이고 둘 다 관망이
+// 아니다: `due.code === 'NO_CONNECTION'`(연결 없는 예약) ·
+// `record.outcome === 'FAILED'`(평가 실패). 저절로 낫지 않는 고장이다.
+for (const [label, body, want] of [
+  ['연결 없는 예약',
+    '{"ok":true,"scheduled":1,"results":[{"ok":false,"code":"NO_CONNECTION","symbol":"BTCUSDT"}]}',
+    'SCHEDULE_FAILED'],
+  ['평가 FAILED',
+    '{"ok":true,"scheduled":1,"results":[{"ok":false,"outcome":"FAILED","symbol":"ETHUSDT"}]}',
+    'SCHEDULE_FAILED'],
+  ['성공과 실패가 섞임',
+    '{"ok":true,"scheduled":2,"results":[{"ok":true,"executed":true},{"ok":false,"code":"NO_CONNECTION"}]}',
+    'SCHEDULE_FAILED'],
+]) {
+  const v = tickVerdict(200, body);
+  eq(v.ok, false, `개별 예약 실패(${label})`);
+  eq(v.code, want, `개별 예약 실패(${label}) 코드`);
+}
+{
+  // 사유가 응답에서 와야 한다 — 어느 예약이 왜 막혔는지 로그에 남아야
+  // 사람이 고칠 수 있다.
+  const v = tickVerdict(200,
+    '{"ok":true,"scheduled":1,"results":[{"ok":false,"code":"NO_CONNECTION","symbol":"BTCUSDT"}]}');
+  if (!/BTCUSDT/.test(v.reason) || !/NO_CONNECTION/.test(v.reason)) {
+    err(`개별 예약 실패 사유가 응답에서 오지 않습니다: ${v.reason}`);
+  }
+}
+
+// 예약이 있는데 결과 목록을 못 읽으면 실패다. 예약 0건이면 없어도 된다.
+eq(tickVerdict(200, '{"ok":true,"scheduled":1}').code, 'RESULTS_UNREADABLE', '예약 1건 · results 없음');
+eq(tickVerdict(200, '{"ok":true,"scheduled":2,"results":"x"}').code, 'RESULTS_UNREADABLE', '예약 2건 · results 문자열');
+eq(tickVerdict(200, '{"ok":true,"scheduled":0}').ok, true, '예약 0건 · results 없음은 정상');
 
 // 읽을 수 없는 본문을 "정상 관망"으로 적지 않는다.
 for (const [label, body, want] of [
@@ -101,7 +138,7 @@ if (!existsSync(WF)) {
 
 if (bad === 0) {
   console.log('✅ autotrade-tick 응답 계약 — 정상 관망 성공 · 200+ok:false 실패 · '
-    + '비정상 JSON/DB 오류/HTTP 실패 차단 · 워크플로 배선됨');
+    + '개별 예약 실패 차단 · 비정상 JSON/DB 오류/HTTP 실패 차단 · 워크플로 배선됨');
 } else {
   console.error('');
   console.error('   이 호출은 15분마다 돕니다. 초록으로 보이는 실패는 아무도 못 봅니다.');
