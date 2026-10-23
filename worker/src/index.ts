@@ -38,6 +38,7 @@ import {
   EXCHANGE_CONNECTION_COLUMNS, connectionReadVerdict, credentialColumnsPresent,
   connectionReadRetryPlan,
 } from '../../src/lib/supabase/exchangeConnectionRead';
+import { claimableFilter } from '../../src/lib/supabase/jobClaimWindow';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -137,14 +138,6 @@ let lastHeartbeatMs = 0;
 const STALE_SCAN_MS = 60_000;
 let lastStaleScanMs = 0;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-/**
- * 연결을 못 읽어 보류한 잡의 **다음에 볼 시각.**
- *
- * 워커 재시작이면 비는데, 그래도 된다 — 재시작 자체가 간격이고, 잡은
- * PENDING이라 사라지지 않는다. 여기 없는 잡은 평소대로 처리된다.
- */
-const connReadRetryAt = new Map<string, number>();
 
 let errorCount = 0;
 const prevPos: Record<string, Set<string>> = {};
@@ -402,6 +395,15 @@ async function processPendingJobs() {
     // 한 줄 문자열이어야 한다 — 이어 붙이면 타입 추론이 끊겨 행 타입이 무너진다.
     .select('id, action, status, attempts, max_attempts, priority, user_id, connection_id, exchange, mode, symbol, side, quantity, percent, payload, created_at')
     .eq('status', 'PENDING')
+    // **거르고 나서 자른다.** 이 조건이 `limit` 앞에 없으면, backoff 중인
+    // 우선순위 0짜리 잡 10개가 같은 우선순위의 새 `KILL_SWITCH_EXECUTE`를
+    // 11번째로 밀어내고 — DB가 앞의 10개만 돌려주므로 그 킬스위치는
+    // **조회조차 되지 않는다.** 폴러는 멀쩡히 도는데 보호 작업만 굶는다.
+    //
+    // `locked_until`은 이미 있는 칸이고 이미 같은 뜻으로 쓰이고 있었다
+    // (`runAction` 실패 재시도가 PENDING과 함께 now+5초를 적는다).
+    // 다만 조회가 안 봐서 **그 5초도 여태 지켜지지 않았다.** 같이 고쳐진다.
+    .or(claimableFilter(new Date().toISOString()))
     .order('priority', { ascending: true }).order('created_at', { ascending: true }).limit(10);
   // **잡 조회는 건너뛰지 않는다** — 청산·보호 작업이 이 줄로 들어온다.
   // 다만 한도 오류라는 사실은 차단기에 적어, 한가한 조회 쪽이 쉬게 한다.
@@ -412,14 +414,6 @@ async function processPendingJobs() {
   console.log(`[jobs] picked ${jobs[0].id.slice(0,8)} ${jobs[0].action} ${jobs[0].symbol || ''} status=${jobs[0].status}`);
 
   for (const job of jobs as any[]) {
-    // **간격을 벌린 잡은 락도 claim도 하지 않는다.** 여기서 거르지 않으면
-    // 되돌린 잡이 다음 틱에 바로 다시 claim돼 쓰기가 두 번씩 나간다 —
-    // 줄이려던 전송량이 늘어난다.
-    const retryAt = connReadRetryAt.get(String(job.id));
-    if (retryAt != null) {
-      if (Date.now() < retryAt) continue;
-      connReadRetryAt.delete(String(job.id));
-    }
     const actionLockKey = `lock:action:${job.exchange}:${job.connection_id}:${job.action}:${job.symbol || 'ALL'}`;
     const jobLockKey = `lock:job:${job.id}`;
     // 동일 포지션 동시 실행 방지 (CLOSE/CLOSE_ALL/REVERSE/KILL_SWITCH)
@@ -488,9 +482,13 @@ async function processPendingJobs() {
             `conn_read_giveup:${job.id}`);
           continue;
         }
-        connReadRetryAt.set(String(job.id), Date.now() + plan.waitMs);
+        // **다음에 볼 시각을 행에 적는다.** 프로세스 메모리에 적으면
+        // 재시작하면 비고 다른 인스턴스에는 안 보인다 — 되돌린 잡을
+        // 새 인스턴스가 즉시 다시 집어서, 쉬게 하려던 것이 오히려
+        // 재시도를 늘린다. 조회가 이 칸을 보고 거른다.
         await sb().from('jobs').update({
-          status: 'PENDING', locked_by: null, locked_until: null,
+          status: 'PENDING', locked_by: null,
+          locked_until: new Date(Date.now() + plan.waitMs).toISOString(),
           error: plan.reason, updated_at: new Date().toISOString(),
         }).eq('id', job.id);
         await alert('system', 'warning', '연결을 읽지 못해 잡을 보류했습니다',

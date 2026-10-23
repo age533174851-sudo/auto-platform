@@ -169,9 +169,37 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
     err('연결 조회 실패 분기에 재시도 상한·간격이 없습니다 — 3초마다 '
       + 'claim과 되돌림이 반복됩니다. connectionReadRetryPlan을 쓰세요');
   }
-  if (caller.includes('READ_FAILED') && !caller.includes('connReadRetryAt')) {
-    err('보류한 잡을 다음 틱에 바로 다시 claim합니다 — 간격을 벌린 잡은 '
-      + '락과 claim 앞에서 걸러야 쓰기가 두 번 나가지 않습니다');
+
+  // ── 거르는 일이 `limit` **앞**에 있는가 ──
+  //
+  // 조건이 뒤에 있으면, backoff 중인 우선순위 0짜리 잡 10개가 같은
+  // 우선순위의 새 `KILL_SWITCH_EXECUTE`를 11번째로 밀어낸다. DB는 앞의
+  // 10개만 돌려주므로 그 킬스위치는 **조회조차 되지 않는다.** 폴러는
+  // 멀쩡히 도는데 보호 작업만 굶는다.
+  // stale 회수 조회가 아니라 **PENDING 조회**를 겨냥한다.
+  const q = caller.match(/\.eq\('status', 'PENDING'\)[\s\S]{0,1200}?\.limit\(/);
+  if (!q) {
+    err('PENDING 잡 조회를 찾지 못했습니다');
+  } else if (!q[0].includes('claimableFilter')) {
+    err('PENDING 잡 조회가 재시도 가능 시각을 `limit` 앞에서 거르지 않습니다 — '
+      + 'backoff 중인 잡 10개가 11번째 긴급 잡을 가립니다. claimableFilter를 쓰세요');
+  }
+
+  // ── 다음에 볼 시각을 **행에** 적는가 ──
+  //
+  // 프로세스 메모리에 적으면 재시작하면 비고 다른 인스턴스에는 안 보인다.
+  // 되돌린 잡을 새 인스턴스가 즉시 다시 집어서, 한도(402) 때문에 쉬게
+  // 하려던 것이 오히려 재시도를 늘린다.
+  if (/connReadRetryAt|new Map<string, number>\(\)/.test(src)) {
+    err('재시도 간격을 프로세스 메모리에 둡니다 — 재시작과 다른 워커에서 '
+      + '유지되지 않습니다. locked_until(행)에 적으세요');
+  }
+  if (caller.includes('READ_FAILED') && /locked_until: null/.test(caller)) {
+    err('연결 조회 실패로 되돌리면서 locked_until을 비웁니다 — 다음 틱에 '
+      + '바로 다시 집힙니다');
+  }
+  if (!src.includes("from '../../src/lib/supabase/jobClaimWindow'")) {
+    err('잡 선택 조건을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
   }
 }
 
