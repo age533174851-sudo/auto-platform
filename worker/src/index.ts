@@ -40,6 +40,7 @@ import {
 } from '../../src/lib/supabase/exchangeConnectionRead';
 import { killSwitchRecoveryVerdict } from '../../src/lib/engine/killSwitchRecovery';
 import { claimableFilter, claimOutcome } from '../../src/lib/supabase/jobClaimWindow';
+import { persistOwnedJob } from '../../src/lib/supabase/jobOwnedWrite';
 import { staleRecoveryPlan } from '../../src/lib/engine/staleJobRecovery';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
@@ -545,11 +546,11 @@ async function processPendingJobs() {
         // 재시작하면 비고 다른 인스턴스에는 안 보인다 — 되돌린 잡을
         // 새 인스턴스가 즉시 다시 집어서, 쉬게 하려던 것이 오히려
         // 재시도를 늘린다. 조회가 이 칸을 보고 거른다.
-        await sb().from('jobs').update({
+        await writeClaimedJob(job, {
           status: 'PENDING', locked_by: null,
           locked_until: new Date(Date.now() + plan.waitMs).toISOString(),
           error: plan.reason, updated_at: new Date().toISOString(),
-        }).eq('id', job.id);
+        }, 'connection-read-retry');
         await alert('system', 'warning', '연결을 읽지 못해 잡을 보류했습니다',
           { Action: job.action, Symbol: job.symbol || '-', 사유: plan.reason },
           `conn_read:${job.connection_id}`);
@@ -597,7 +598,7 @@ async function processPendingJobs() {
 
         const willRetry = attempts < (job.max_attempts || 5);
         if (willRetry) {
-          await sb().from('jobs').update({ status: 'PENDING', error: res.error || '실패', result: res.result || null, locked_by: null, locked_until: new Date(Date.now() + 5000).toISOString(), updated_at: new Date().toISOString() }).eq('id', job.id);
+          await writeClaimedJob(job, { status: 'PENDING', error: res.error || '실패', result: res.result || null, locked_by: null, locked_until: new Date(Date.now() + 5000).toISOString(), updated_at: new Date().toISOString() }, 'action-retry');
         } else {
           await finalize(job, false, res.result, res.error || '최대 재시도 초과');
           if (job.mode === 'LIVE') await alert('system', 'warning', `Job 최종 실패: ${job.action}`, { Symbol: job.symbol || '-', Error: res.error || '?' }, `job_fail:${job.id}`);
@@ -610,11 +611,43 @@ async function processPendingJobs() {
   }
 }
 
+// Every post-claim write is a single conditional UPDATE. A stale worker cannot
+// finalize or requeue another worker's attempt; DB failure is never an ACK.
+async function writeClaimedJob(job: any, changes: Record<string, unknown>, phase: string) {
+  const outcome = await persistOwnedJob({
+    writeIfOwned: async ({ id, owner, attempts, changes: fields }) => {
+      const response = await sb().from('jobs').update(fields)
+        .eq('id', id).eq('status', 'PROCESSING')
+        .eq('locked_by', owner).eq('attempts', attempts)
+        .select('id');
+      noteDb({ error: (response as any).error });
+      return response;
+    },
+  }, {
+    id: String(job.id), owner: WORKER_ID,
+    // The SELECT snapshot precedes claim; the successful claim increments once.
+    attempts: (job.attempts || 0) + 1, changes,
+  });
+  if (outcome.code !== 'SAVED') {
+    // A successful exchange call may already have happened. Do NOT send it again.
+    // Even if Telegram fails (e.g. quota), retain an explicit worker error.
+    console.error(`[jobs] ${phase} ${outcome.code} id=${String(job.id).slice(0, 8)}: ${outcome.reason} — 거래소 결과 대조 필요, 자동 재주문 금지`);
+    try {
+      await alert('system', 'critical', '잡 상태 저장 확인 실패 — 거래소 대조 필요',
+        { Job: String(job.id).slice(0, 8), Action: job.action, Phase: phase,
+          Code: outcome.code, Reason: outcome.reason }, `job_write:${job.id}:${phase}`);
+    } catch (e: any) {
+      console.error('[jobs] 상태 저장 실패 알림도 실패:', e?.message || e);
+    }
+  }
+  return outcome;
+}
+
 async function finalize(job: any, ok: boolean, result: any, error: string | null) {
-  await sb().from('jobs').update({
+  return writeClaimedJob(job, {
     status: ok ? 'COMPLETED' : 'FAILED', result: result || null, error,
     completed_at: new Date().toISOString(), updated_at: new Date().toISOString(), locked_by: null,
-  }).eq('id', job.id);
+  }, 'finalize');
 }
 
 // ── 모니터: Ghost Sync(읽기) + 킬스위치 active면 job 보장 ──────────

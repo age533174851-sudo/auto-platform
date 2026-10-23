@@ -295,6 +295,24 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
   }
 }
 
+// Post-claim DB writes must be fenced, and UPDATE errors must not look successful.
+{
+  const owned = bodyOf(src, 'writeClaimedJob') || '';
+  for (const needle of [
+    "persistOwnedJob(", ".eq('status', 'PROCESSING')",
+    ".eq('locked_by', owner)", ".eq('attempts', attempts)", ".select('id')",
+  ]) {
+    if (!owned.includes(needle)) err(`잡 후속 상태 쓰기에 소유권 CAS/ACK 누락: ${needle}`);
+  }
+  const pending = bodyOf(src, 'processPendingJobs') || '';
+  if (!pending.includes("'connection-read-retry'") || !pending.includes("'action-retry'")) {
+    err('연결 조회 실패 또는 주문 실패 재시도 분기가 소유권 CAS를 거치지 않습니다');
+  }
+  if (!src.includes("from '../../src/lib/supabase/jobOwnedWrite'")) {
+    err('잡 쓰기 결과 판정 정본을 쓰지 않습니다');
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 워커 전송량 — 매 틱 전체 칸 조회 0 · 주기 제한 3곳 · 한도 차단기 배선됨 · '
     + '포지션 보호 경로는 차단기 뒤에 없음');
