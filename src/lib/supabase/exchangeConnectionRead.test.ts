@@ -6,8 +6,9 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   EXCHANGE_CONNECTION_COLUMNS, CREDENTIAL_COLUMNS,
-  connectionReadVerdict, credentialColumnsPresent,
+  connectionReadVerdict, credentialColumnsPresent, connectionReadRetryPlan,
 } from './exchangeConnectionRead';
+import { BACKOFF_STEPS_MS } from './quotaBreaker';
 
 /** 워커의 `connCreds`와 **같은 식**이다. 여기서 재현하는 대상이다. */
 function secretOf(conn: any): string {
@@ -127,5 +128,52 @@ export function runExchangeConnectionReadTests() {
   test('행이 아닌 것에 자격증명 칸 확인을 걸면 통과시키지 않는다', () => {
     eq(credentialColumnsPresent(null).ok, false);
     eq(credentialColumnsPresent('row' as any).ok, false);
+  });
+
+  // ── ④ 못 읽었을 때 재시도가 폭주하지 않는다 ─────────────────────
+  //
+  // 잡을 끝내지 않는 것까지는 맞지만, 그냥 PENDING으로 되돌리기만 하면
+  // 3초마다 claim → 되돌림이 반복된다. `max_attempts` 비교는 runAction
+  // 실패 경로에만 있어서 **이 분기에는 상한이 걸리지 않았다.**
+  test('★ 상한에 닿으면 포기한다 — 무한 반복하지 않는다', () => {
+    const p = connectionReadRetryPlan({ attempts: 5, maxAttempts: 5, reason: '402' });
+    eq(p.action, 'GIVE_UP', '상한을 넘겨도 계속 재시도합니다');
+    eq(p.waitMs, 0);
+  });
+
+  test('★ 포기해도 사유는 "연결 없음"이 아니다', () => {
+    const p = connectionReadRetryPlan({ attempts: 9, maxAttempts: 5, reason: 'column does not exist' });
+    eq(p.action, 'GIVE_UP');
+    assert(!p.reason.includes('연결 없음'), '포기 사유를 연결 없음으로 적었습니다');
+    assert(p.reason.includes('읽지 못했습니다'), '못 읽었다는 사실이 사유에 없습니다');
+    assert(p.reason.includes('column does not exist'), '원인이 사유에 없습니다');
+  });
+
+  test('★ 상한 전에는 간격을 벌려 다시 본다 — 3초마다가 아니다', () => {
+    const p = connectionReadRetryPlan({ attempts: 1, maxAttempts: 5, reason: '402' });
+    eq(p.action, 'RETRY_LATER');
+    assert(p.waitMs >= 60_000, `재시도 간격이 ${p.waitMs}ms입니다 — 틱 주기(3초)와 다를 바 없습니다`);
+  });
+
+  test('재시도 간격이 커진다 (한도 차단기와 같은 사다리)', () => {
+    const w: number[] = [];
+    for (let a = 1; a <= 5; a++) w.push(connectionReadRetryPlan({ attempts: a, maxAttempts: 99, reason: 'x' }).waitMs);
+    for (let i = 1; i < w.length; i++) assert(w[i] >= w[i - 1], `간격이 줄었습니다: ${w.join(',')}`);
+    eq(w[0], BACKOFF_STEPS_MS[0], '사다리를 공유하지 않습니다 — 간격을 두 군데 적으면 갈라집니다');
+  });
+
+  test('간격에 상한이 있다 (사다리 끝을 넘지 않는다)', () => {
+    const p = connectionReadRetryPlan({ attempts: 50, maxAttempts: 999, reason: 'x' });
+    eq(p.waitMs, BACKOFF_STEPS_MS[BACKOFF_STEPS_MS.length - 1]);
+  });
+
+  test('max_attempts가 없으면 기본 5다 — 무제한이 아니다', () => {
+    eq(connectionReadRetryPlan({ attempts: 5, maxAttempts: null, reason: 'x' }).action, 'GIVE_UP');
+    eq(connectionReadRetryPlan({ attempts: 4, maxAttempts: undefined, reason: 'x' }).action, 'RETRY_LATER');
+  });
+
+  test('max_attempts가 0이나 음수여도 무제한이 되지 않는다', () => {
+    eq(connectionReadRetryPlan({ attempts: 5, maxAttempts: 0, reason: 'x' }).action, 'GIVE_UP');
+    eq(connectionReadRetryPlan({ attempts: 5, maxAttempts: -1, reason: 'x' }).action, 'GIVE_UP');
   });
 }

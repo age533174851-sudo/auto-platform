@@ -158,6 +158,21 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
     err('잡 처리에서 연결 조회 결과를 "연결 없음" 한 가지로만 적습니다 — '
       + '못 읽은 것(READ_FAILED)은 없는 것이 아닙니다');
   }
+
+  // ── ⑨ 못 읽은 잡을 **상한 없이** 되돌리지 않는가 ──
+  //
+  // 조회 실패로 잡을 끝내지 않는 것까지는 맞다. 그런데 그냥 PENDING으로
+  // 되돌리기만 하면 3초마다 claim → 되돌림이 반복된다. `max_attempts`
+  // 비교는 `runAction` 실패 경로에만 있어서 이 분기에는 걸리지 않는다.
+  // 한도(402) 때문에 난 실패라면 아끼려던 전송량을 오히려 늘린다.
+  if (caller.includes('READ_FAILED') && !caller.includes('connectionReadRetryPlan')) {
+    err('연결 조회 실패 분기에 재시도 상한·간격이 없습니다 — 3초마다 '
+      + 'claim과 되돌림이 반복됩니다. connectionReadRetryPlan을 쓰세요');
+  }
+  if (caller.includes('READ_FAILED') && !caller.includes('connReadRetryAt')) {
+    err('보류한 잡을 다음 틱에 바로 다시 claim합니다 — 간격을 벌린 잡은 '
+      + '락과 claim 앞에서 걸러야 쓰기가 두 번 나가지 않습니다');
+  }
 }
 
 if (bad === 0) {

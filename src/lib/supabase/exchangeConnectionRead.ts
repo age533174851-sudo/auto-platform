@@ -109,3 +109,53 @@ export function credentialColumnsPresent(conn: any): { ok: boolean; missing: str
   const missing = CREDENTIAL_COLUMNS.filter((c) => !(c in conn));
   return { ok: missing.length === 0, missing };
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 못 읽었을 때 **얼마나 자주, 몇 번까지** 다시 볼 것인가
+// ─────────────────────────────────────────────────────────────────────
+//
+// 조회 실패로 잡을 끝내지 않는 것까지는 맞다. 그런데 그냥 PENDING으로
+// 되돌리기만 하면 **3초마다 claim → 되돌림이 반복된다.**
+//
+//   · `max_attempts` 비교는 `runAction` 실패 경로에만 있다. 조회 실패는
+//     그 앞에서 빠져나가므로 **상한이 걸리지 않는다**
+//   · claim 한 번 · 되돌림 한 번 = 틱마다 쓰기 2회. 한도(402) 때문에 난
+//     실패라면 **아끼려던 전송량을 오히려 늘린다**
+//   · 063이 안 간 환경처럼 **지속되는 원인**이면 영원히 돈다
+//
+// 그래서 되돌리되 간격을 벌리고, 상한을 건다. 사다리는 한도 차단기와
+// **같은 것을 쓴다** — 재시도 간격을 두 군데에 적지 않는다.
+
+import { BACKOFF_STEPS_MS } from './quotaBreaker';
+
+export type ConnectionReadRetry =
+  | { action: 'GIVE_UP'; waitMs: 0; reason: string }
+  | { action: 'RETRY_LATER'; waitMs: number; reason: string };
+
+/**
+ * 연결을 못 읽은 잡을 어떻게 할 것인가.
+ *
+ * **GIVE_UP도 "연결 없음"이 아니다.** 사유에 못 읽었다는 사실을 남긴다 —
+ * 포기한 이유가 "연결이 없어서"로 적히면 다음 사람이 엉뚱한 데를 본다.
+ */
+export function connectionReadRetryPlan(i: {
+  attempts: number;
+  maxAttempts?: number | null;
+  reason: string;
+}): ConnectionReadRetry {
+  const max = Number.isFinite(Number(i.maxAttempts)) && Number(i.maxAttempts) > 0
+    ? Number(i.maxAttempts) : 5;
+  const attempts = Number.isFinite(Number(i.attempts)) ? Number(i.attempts) : 0;
+  if (attempts >= max) {
+    return {
+      action: 'GIVE_UP', waitMs: 0,
+      reason: `연결을 ${attempts}회 읽지 못했습니다 (상한 ${max}) — ${i.reason}`,
+    };
+  }
+  // 1회차 실패 뒤 1분, 그다음 2·4·8·16분, 30분 상한.
+  const step = BACKOFF_STEPS_MS[Math.min(Math.max(attempts - 1, 0), BACKOFF_STEPS_MS.length - 1)];
+  return {
+    action: 'RETRY_LATER', waitMs: step,
+    reason: `연결을 읽지 못해 ${Math.round(step / 1000)}초 뒤 다시 봅니다 (${attempts}/${max}) — ${i.reason}`,
+  };
+}

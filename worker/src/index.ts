@@ -36,6 +36,7 @@ import {
 } from '../../src/lib/supabase/quotaBreaker';
 import {
   EXCHANGE_CONNECTION_COLUMNS, connectionReadVerdict, credentialColumnsPresent,
+  connectionReadRetryPlan,
 } from '../../src/lib/supabase/exchangeConnectionRead';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
@@ -136,6 +137,14 @@ let lastHeartbeatMs = 0;
 const STALE_SCAN_MS = 60_000;
 let lastStaleScanMs = 0;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * 연결을 못 읽어 보류한 잡의 **다음에 볼 시각.**
+ *
+ * 워커 재시작이면 비는데, 그래도 된다 — 재시작 자체가 간격이고, 잡은
+ * PENDING이라 사라지지 않는다. 여기 없는 잡은 평소대로 처리된다.
+ */
+const connReadRetryAt = new Map<string, number>();
 
 let errorCount = 0;
 const prevPos: Record<string, Set<string>> = {};
@@ -403,6 +412,14 @@ async function processPendingJobs() {
   console.log(`[jobs] picked ${jobs[0].id.slice(0,8)} ${jobs[0].action} ${jobs[0].symbol || ''} status=${jobs[0].status}`);
 
   for (const job of jobs as any[]) {
+    // **간격을 벌린 잡은 락도 claim도 하지 않는다.** 여기서 거르지 않으면
+    // 되돌린 잡이 다음 틱에 바로 다시 claim돼 쓰기가 두 번씩 나간다 —
+    // 줄이려던 전송량이 늘어난다.
+    const retryAt = connReadRetryAt.get(String(job.id));
+    if (retryAt != null) {
+      if (Date.now() < retryAt) continue;
+      connReadRetryAt.delete(String(job.id));
+    }
     const actionLockKey = `lock:action:${job.exchange}:${job.connection_id}:${job.action}:${job.symbol || 'ALL'}`;
     const jobLockKey = `lock:job:${job.id}`;
     // 동일 포지션 동시 실행 방지 (CLOSE/CLOSE_ALL/REVERSE/KILL_SWITCH)
@@ -448,17 +465,36 @@ async function processPendingJobs() {
 
       const read = await getConnection(job.connection_id);
       if (read.code === 'READ_FAILED') {
-        // **잡을 끝내지 않는다.** 연결이 없는 것이 아니라 못 읽은 것이다.
-        // `finalize(..., false, ...)`는 FAILED로 영구 종료라, 여기서 적으면
-        // 청산·킬스위치 잡이 틀린 사유로 죽고 포지션이 보호 없이 남는다.
-        // PENDING으로 돌려 다음 틱에 다시 본다 — attempts는 이미 올랐으므로
-        // max_attempts가 상한이 된다(무한 반복이 아니다).
+        // **잡을 "연결 없음"으로 끝내지 않는다.** 연결이 없는 것이 아니라
+        // 못 읽은 것이다. `finalize(..., false, ...)`는 FAILED로 영구 종료라,
+        // 여기서 적으면 청산·킬스위치 잡이 틀린 사유로 죽는다.
+        //
+        // **그렇다고 그냥 PENDING으로 되돌리지도 않는다.** `max_attempts`
+        // 비교는 아래 runAction 실패 경로에만 있어서 이 분기에는 상한이
+        // 걸리지 않는다. 되돌리기만 하면 3초마다 claim → 되돌림이 반복되고,
+        // 한도(402) 때문에 난 실패라면 아끼려던 전송량을 오히려 늘린다.
+        //
+        // 그래서 상한과 간격을 **정본에서** 받는다. 사다리는 한도 차단기와
+        // 같은 것이다 — 재시도 간격을 두 군데 적지 않는다.
+        // claim에서 이미 올린 값과 같은 수를 쓴다.
+        const tried = (job.attempts || 0) + 1;
+        const plan = connectionReadRetryPlan({
+          attempts: tried, maxAttempts: job.max_attempts, reason: read.reason,
+        });
+        if (plan.action === 'GIVE_UP') {
+          await finalize(job, false, null, plan.reason);
+          await alert('system', 'critical', '연결을 끝내 읽지 못해 잡을 종료했습니다',
+            { Action: job.action, Symbol: job.symbol || '-', 사유: plan.reason },
+            `conn_read_giveup:${job.id}`);
+          continue;
+        }
+        connReadRetryAt.set(String(job.id), Date.now() + plan.waitMs);
         await sb().from('jobs').update({
           status: 'PENDING', locked_by: null, locked_until: null,
-          error: read.reason, updated_at: new Date().toISOString(),
+          error: plan.reason, updated_at: new Date().toISOString(),
         }).eq('id', job.id);
         await alert('system', 'warning', '연결을 읽지 못해 잡을 보류했습니다',
-          { Action: job.action, Symbol: job.symbol || '-', 사유: read.reason },
+          { Action: job.action, Symbol: job.symbol || '-', 사유: plan.reason },
           `conn_read:${job.connection_id}`);
         continue;
       }
