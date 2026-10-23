@@ -39,7 +39,7 @@ import {
   connectionReadRetryPlan,
 } from '../../src/lib/supabase/exchangeConnectionRead';
 import { killSwitchRecoveryVerdict } from '../../src/lib/engine/killSwitchRecovery';
-import { claimableFilter } from '../../src/lib/supabase/jobClaimWindow';
+import { claimableFilter, claimOutcome } from '../../src/lib/supabase/jobClaimWindow';
 import { staleRecoveryPlan } from '../../src/lib/engine/staleJobRecovery';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
@@ -450,11 +450,43 @@ async function processPendingJobs() {
     if (!gotJob) { await releaseActionLock(actionLockKey); continue; }
 
     try {
-      // claim (race-safe): PENDING → PROCESSING 한 워커만 성공
-      const { data: claimed } = await sb().from('jobs')
+      // ── claim: 조회에서 본 것이 **집는 순간에도 그대로인가** ──
+      //
+      // 예전에는 `.eq('status', 'PENDING')`만 봤다. 조회에 `claimableFilter`를
+      // 걸어도 그것만으로는 원자적이지 않다:
+      //
+      //   ① A가 due한 잡을 읽는다 (attempts=0, locked_until=NULL)
+      //   ② A가 락 대기 등으로 지연된다
+      //   ③ B가 집어 실행하고 실패 → status=PENDING, attempts=1,
+      //      locked_until=now+60초로 **재시도 대기**를 적고 락을 놓는다
+      //   ④ A가 ①의 스냅샷으로 UPDATE — status가 다시 PENDING이라 통과
+      //
+      // backoff가 끝나기 전에 집히고, `attempts`가 0+1=1로 덮여 B의 증가가
+      // 사라진다. 상태만 보는 조건은 PENDING→PROCESSING→PENDING(ABA)을
+      // 구분하지 못한다.
+      //
+      // 그래서 조회에서 본 값을 조건에 같이 건다. `attempts`는 집을 때마다
+      // **오르기만 하므로** ABA를 구분하는 표식이 된다. 그 사이 무엇이든
+      // 바뀌었으면 0행이 갱신되고, 그게 맞다.
+      let claimQ = sb().from('jobs')
         .update({ status: 'PROCESSING', locked_by: WORKER_ID, locked_until: new Date(Date.now() + 60000).toISOString(), attempts: (job.attempts || 0) + 1, updated_at: new Date().toISOString() })
-        .eq('id', job.id).eq('status', 'PENDING').select();
-      if (!claimed || claimed.length === 0) continue;  // 다른 워커가 가져감
+        .eq('id', job.id).eq('status', 'PENDING')
+        .or(claimableFilter(new Date().toISOString()));
+      claimQ = job.attempts == null
+        ? claimQ.is('attempts', null)
+        : claimQ.eq('attempts', Number(job.attempts));
+      const claimRes = await claimQ.select();
+      noteDb({ error: (claimRes as any).error });
+      const claim = claimOutcome(claimRes as any);
+      if (claim.code === 'CLAIM_FAILED') {
+        // **0행과 오류는 다르다.** 예전에는 DB 오류가 "다른 워커가 가져감"
+        // 으로 조용히 넘어갔다. 경쟁에서 진 것과 DB가 흔들린 것은 사람이
+        // 봐야 하는 정도가 다르다.
+        await alert('system', 'warning', '잡 claim에 실패했습니다',
+          { Action: job.action, Symbol: job.symbol || '-', 사유: claim.reason }, `claim_fail:${job.id}`);
+        continue;
+      }
+      if (claim.code === 'LOST') continue;  // 다른 워커가 가져갔거나 다시 대기로 바뀌었다
       console.log(`[worker] Processing job ${job.id.slice(0,8)} ${job.action} ${job.symbol || ''} (attempt ${(job.attempts||0)+1}/${job.max_attempts||5})`);
 
       // ── 만료된 주문은 실행하지 않는다 ──

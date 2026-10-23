@@ -72,3 +72,76 @@ export function selectClaimable(rows: any[], nowMs: number, limit: number): any[
   });
   return ok.slice(0, Math.max(0, limit));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 조회에서 본 것이 **집는 순간에도 그대로인가**
+// ─────────────────────────────────────────────────────────────────────
+//
+// 조회에 `claimableFilter`를 걸어도 그것만으로는 원자적이지 않다.
+// claim UPDATE가 `status = 'PENDING'`만 보면 이런 일이 생긴다:
+//
+//   ① A가 due한 잡을 읽는다 (attempts=0, locked_until=NULL)
+//   ② A가 락 대기 등으로 지연된다
+//   ③ B가 그 잡을 집어 실행하고 실패 → status=PENDING, attempts=1,
+//      locked_until=now+60초로 **재시도 대기**를 적고 락을 놓는다
+//   ④ A가 ①의 스냅샷으로 UPDATE한다. status가 다시 PENDING이라 **통과**
+//
+// 결과: backoff가 끝나기 전에 집히고, `attempts`가 0+1=1로 덮여 B의
+// 증가가 사라진다. 상태만 보는 조건은 PENDING→PROCESSING→PENDING을
+// 구분하지 못한다(ABA).
+//
+// 그래서 **조회에서 본 값을 UPDATE 조건에 같이 건다**(CAS). 그 사이
+// 무엇이든 바뀌었으면 0행이 갱신되고, 그게 맞다.
+//
+// `attempts`를 쓰는 이유: 이 값은 claim할 때마다 **오르기만 한다.**
+// 되돌아가지 않으므로 ABA를 구분하는 표식이 된다.
+
+export type ClaimOutcomeCode =
+  /** 내가 집었다 */
+  | 'CLAIMED'
+  /** 0행 — 그 사이 누가 집었거나 다시 쉬게 됐다. 정상이다 */
+  | 'LOST'
+  /** **갱신 자체가 실패했다.** 집었는지 못 집었는지 모른다 */
+  | 'CLAIM_FAILED';
+
+/**
+ * claim UPDATE의 결과를 판정한다.
+ *
+ * **0행과 오류는 다르다.** 예전에는 `const { data: claimed } = …` 뒤에
+ * `if (!claimed || claimed.length === 0) continue;`라, DB 오류가 "다른
+ * 워커가 가져감"으로 조용히 넘어갔다. 경쟁에서 진 것과 DB가 흔들린 것은
+ * 사람이 봐야 하는 정도가 다르다.
+ */
+export function claimOutcome(res: { data?: any; error?: any } | null | undefined): {
+  code: ClaimOutcomeCode; reason: string;
+} {
+  if (!res) return { code: 'CLAIM_FAILED', reason: 'claim 갱신이 아무 응답도 돌려주지 않았습니다' };
+  if (res.error) {
+    return { code: 'CLAIM_FAILED', reason: `claim 갱신 실패 — ${String(res.error?.message ?? res.error)}` };
+  }
+  if (!Array.isArray(res.data)) {
+    // 비배열은 "0행"이 아니라 모르는 것이다.
+    return { code: 'CLAIM_FAILED', reason: 'claim 응답이 배열이 아닙니다 — 0행으로 읽지 않습니다' };
+  }
+  return res.data.length > 0
+    ? { code: 'CLAIMED', reason: '이 워커가 집었습니다' }
+    : { code: 'LOST', reason: '그 사이 다른 워커가 집었거나 다시 대기로 바뀌었습니다' };
+}
+
+/**
+ * claim UPDATE가 걸어야 하는 조건이 **지금의 행에 대해** 맞는가.
+ *
+ * 워커는 이 함수를 부르지 않는다 — PostgREST가 같은 조건을 DB에서 건다.
+ * 시험이 그 조건의 뜻을 고정하기 위해 쓴다. 조건이 하나라도 빠지면
+ * 위 ①~④가 다시 열린다.
+ */
+export function claimMatches(rowNow: any, snapshot: any, nowMs: number): boolean {
+  if (rowNow == null || snapshot == null) return false;
+  if (String(rowNow.id) !== String(snapshot.id)) return false;
+  if (rowNow.status !== 'PENDING') return false;
+  // 조회 당시 본 attempts와 같아야 한다 (ABA 차단)
+  const a = rowNow.attempts ?? null, b = snapshot.attempts ?? null;
+  if (a !== b) return false;
+  // 그리고 **지금도** 집을 수 있는 시각이어야 한다
+  return isJobClaimable(rowNow, nowMs);
+}

@@ -221,6 +221,36 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
   if (!src.includes("from '../../src/lib/engine/staleJobRecovery'")) {
     err('stale 회수 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
   }
+  // ── claim이 **조회에서 본 값**을 조건에 거는가 (CAS) ──
+  //
+  // 조회에 `claimableFilter`를 걸어도 그것만으로는 원자적이지 않다.
+  // `status = 'PENDING'`만 보면 PENDING→PROCESSING→PENDING(ABA)을
+  // 구분하지 못해, 그 사이 재시도 대기로 바뀐 잡을 backoff 만료 전에
+  // 집고 `attempts` 증가를 덮어쓴다.
+  {
+    const cl = callerCode.match(/update\(\{ status: 'PROCESSING'[\s\S]{0,900}?\.select\(\)/);
+    if (!cl) {
+      err('claim UPDATE를 찾지 못했습니다');
+    } else {
+      if (!cl[0].includes('claimableFilter')) {
+        err('claim UPDATE가 재시도 가능 시각을 다시 확인하지 않습니다 — 조회 이후 '
+          + '대기로 바뀐 잡을 backoff 만료 전에 집습니다');
+      }
+      if (!/'attempts'/.test(cl[0])) {
+        err('claim UPDATE가 조회 당시 attempts를 조건에 걸지 않습니다 — '
+          + 'PENDING→PROCESSING→PENDING(ABA)을 구분하지 못합니다');
+      }
+    }
+    if (!callerCode.includes('claimOutcome')) {
+      err('claim 결과에서 0행과 오류를 구분하지 않습니다 — DB 오류가 '
+        + '"다른 워커가 가져감"으로 조용히 넘어갑니다');
+    }
+    if (/const \{ data: claimed \}/.test(callerCode)) {
+      err('claim 조회에서 error를 버립니다 — 집었는지 못 집었는지 모르는 것을 '
+        + '경쟁 패배로 적습니다');
+    }
+  }
+
   // 조회 이후 바뀐 잡을 덮어쓰지 않는다 (CAS)
   if (callerCode.includes('staleRecoveryPlan') && !/eq\('locked_until'/.test(callerCode)) {
     err('stale 회수 UPDATE가 읽을 때 본 locked_until을 조건에 걸지 않습니다 — '
