@@ -194,6 +194,9 @@ export function runExitMonitorLeaseTests() {
       acquireExitLease({ store: st.api as any, me: 'w2', nowMs: NOW }),
     ]);
     eq([a, b].filter(x => x.granted).length, 1, '★ 둘 다 임차를 만들었습니다');
+    const loser = [a, b].find(x => !x.granted)!;
+    eq(loser.code, 'RACE_LOST');
+    eq(exitLeaseWakeVerdict(loser).status, 200);
   });
 
   test('★ ② 남이 쥐고 있고 만료 전이면 쓰기까지 가지 않는다 (WRITE 0)', async () => {
