@@ -204,6 +204,33 @@ export class FakeDb {
       return out;
     };
 
+    /**
+     * insert 한 줄을 장부에 넣는다.
+     *
+     * ★ `.single()`과 **그냥 await**가 같은 자리를 지나야 한다.
+     *   예전에는 `single()`에만 있었다 — 그래서
+     *   `await sb.from(t).insert(row)`(관측 저장 경로가 쓰는 모양)는
+     *   오류도 없이 **아무것도 적지 않았다.** 통합 시험이 "적혔다"를
+     *   확인할 수 없는 상태였고, 그 공백이 "저장이 안 이어졌다"와
+     *   "하네스가 안 적는다"를 구별할 수 없게 만든다.
+     */
+    const flushInsert = (): { data: any; error: any } => {
+      if (!pending || pending.kind !== 'insert') return { data: null, error: null };
+      const f = db.opts.failInsertCode;
+      if (f && f.table === table) {
+        return { data: null, error: { code: f.code, message: `insert 실패 (${f.code})` } };
+      }
+      const list = Array.isArray(pending.patch) ? pending.patch : [pending.patch];
+      const made: any[] = [];
+      for (const one of list) {
+        const row = { id: `row-${++db.seq}`, ...one };
+        db.rows[table] = (db.rows[table] ?? []).concat([row]);
+        db.writes.push({ table, kind: 'insert', patch: { ...one } });
+        made.push(row);
+      }
+      return { data: made, error: null };
+    };
+
     const flushUpdate = () => {
       if (!pending || pending.kind !== 'update') return { error: null };
       if (db.opts.failUpdatesOn === table) {
@@ -234,13 +261,9 @@ export class FakeDb {
 
       async single() {
         if (pending?.kind === 'insert') {
-          const f = db.opts.failInsertCode;
-          if (f && f.table === table) {
-            return { data: null, error: { code: f.code, message: `insert 실패 (${f.code})` } };
-          }
-          const row = { id: `row-${++db.seq}`, ...pending.patch };
-          db.rows[table] = (db.rows[table] ?? []).concat([row]);
-          db.writes.push({ table, kind: 'insert', patch: { ...pending.patch } });
+          const r = flushInsert();
+          if (r.error) return { data: null, error: r.error };
+          const row = r.data[0];
           return { data: { id: row.id, status: row.status }, error: null };
         }
         const rows = apply();
@@ -255,6 +278,12 @@ export class FakeDb {
         // await로 바로 끝나는 체인 (update().eq() · select().in() 등)
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
+          // **await만 하는 insert도 적힌다.** 아래 select 분기로 떨어지면
+          // 오류 없이 아무것도 안 적혀, 시험이 "적혔다"를 못 본다.
+          if (pending?.kind === 'insert') {
+            const r = flushInsert();
+            return { data: r.error ? null : r.data, error: r.error };
+          }
           if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
           return { data: apply().map((r) => ({ ...r })), error: null };
         };

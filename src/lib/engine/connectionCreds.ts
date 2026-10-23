@@ -25,7 +25,7 @@ export interface VenueCreds {
 export interface CredsReader {
   /** 쓸 수 있으면 자격, 아니면 null. 이유는 `codeOf`가 말한다 */
   get(connectionId: string): Promise<VenueCreds | null>;
-  /** 왜 못 쓰는가. 아직 읽지 않았으면 `NO_CONNECTION` */
+  /** 왜 못 쓰는가. 아직 읽지 않았으면 `NO_CONNECTION` (조회 실패는 `READ_FAILED`) */
   codeOf(connectionId: string): CredentialDiagnosis;
 }
 
@@ -49,9 +49,15 @@ export function makeCredsReader(i: {
       let v: VenueCreds | null = null;
       let code: CredentialDiagnosis = 'NO_CONNECTION';
       try {
-        const { data } = await i.sb.from('exchange_connections')
+        // ★ **`error`를 받는다.** Supabase의 select는 실패해도 던지지
+        //   않는다 — `{ data: null, error }`를 준다. 예전에는 `data`만
+        //   받아서, 조회 장애가 `row = null`이 되어 `NO_CONNECTION`
+        //   ("삭제된 연결")으로 적혔다. 고아 정리는 그 코드를 비실패
+        //   skip으로 넘기므로, 지금 고쳐야 할 장애가 조용히 사라졌다.
+        const { data, error } = await i.sb.from('exchange_connections')
           .select('api_key, api_secret_enc, has_withdrawal, is_testnet, exchange_id')
           .eq('id', connectionId).maybeSingle();
+        const readFailed = !!error;
         const row: any = data ?? null;
         // **모르는 거래소를 바이낸스로 읽지 않는다.**
         const ex = row ? i.resolveExchange(row.exchange_id).exchange : null;
@@ -62,11 +68,17 @@ export function makeCredsReader(i: {
           catch { decrypted = false; }
         }
         // ★ 진단에는 **boolean만** 넘긴다. 평문·암호문·길이를 넘기지 않는다.
+        //
+        //   `hasWithdrawal`: 판독 실패·NULL은 '출금 권한 없음'의 증거가
+        //   아니다. 원래 `=== true`는 NULL을 false로 바꿔 안전 차단을
+        //   우회했다.
+        //
+        //   `readFailed`: 조회 실패를 **코드로** 넘긴다. 이 사실을 넘기지
+        //   않으면 정본이 "row가 없다"로만 보고 NO_CONNECTION을 준다.
         code = diagnoseCredential({
+          readFailed,
           rowFound: !!row,
           exchangeResolved: !!ex,
-          // 판독 실패·NULL은 '출금 권한 없음'의 증거가 아니다.
-          // 원래 === true는 NULL을 false로 바꿔 안전 차단을 우회했다.
           hasWithdrawal: row ? (row.has_withdrawal === false ? false : null) : null,
           keyPresent: !!String(row?.api_key ?? ''),
           secretCiphertextPresent: !!String(row?.api_secret_enc ?? ''),
@@ -81,8 +93,10 @@ export function makeCredsReader(i: {
           };
         }
       } catch {
+        // **못 읽은 것을 "연결 없음"으로 적지 않는다.** 막는 방향은
+        // 그대로(자격은 null)이고, 바뀌는 것은 사유다.
         v = null;
-        code = 'NO_CONNECTION';
+        code = 'READ_FAILED';
       }
       cache.set(connectionId, v);
       diag.set(connectionId, code);
