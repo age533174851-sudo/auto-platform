@@ -319,8 +319,11 @@ export async function acquireExitLease(i: {
       // 줄이 없었다 → 만들면서 잡는다. 동시에 둘이 만들면 하나만 성공한다.
       const r = await i.store.insert(row);
       ok = r?.ok === true;
-      writeFailed = !!r?.error;
-      err = r?.error ? String(r.error) : (ok ? null : '다른 실행이 먼저 임차를 만들었습니다');
+      // 같은 PK를 두 실행이 동시에 만들면 한쪽은 정상적인 경쟁 패배다.
+      // 그 외 오류/무응답은 DB 쓰기 실패로 보고 경고를 남긴다.
+      const duplicate = /duplicate key|23505/i.test(String(r?.error || ''));
+      writeFailed = !ok && !duplicate;
+      err = r?.error ? String(r.error) : (ok ? null : '임차 생성 결과를 확인하지 못했습니다');
     } else {
       const r = await i.store.compareAndSet(row, prevFence);
       ok = !r?.error && Number(r?.updated) === 1;
