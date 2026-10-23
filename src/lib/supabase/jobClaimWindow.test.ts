@@ -3,7 +3,7 @@
 // **backoff 중인 잡 10개가 11번째 긴급 잡을 가리지 않는가.**
 
 import { test, eq, assert } from '../../test/harness';
-import { claimableFilter, isJobClaimable, selectClaimable } from './jobClaimWindow';
+import { claimableFilter, isJobClaimable, selectClaimable, claimMatches, claimOutcome } from './jobClaimWindow';
 
 const NOW = Date.parse('2026-10-23T12:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -128,5 +128,88 @@ export function runJobClaimWindowTests() {
 
   test('조건에 쉼표가 더 끼지 않는다 (PostgREST가 항목을 쉼표로 가른다)', () => {
     eq(claimableFilter('2026-10-23T12:00:00.000Z').split(',').length, 2);
+  });
+
+  // ── 집는 순간에도 그대로인가 (CAS) ───────────────────────────
+  //
+  // 조회에 조건을 걸어도 그것만으로는 원자적이지 않다. claim UPDATE가
+  // `status='PENDING'`만 보면 PENDING→PROCESSING→PENDING(ABA)을 구분하지
+  // 못한다.
+  const DUE = { id: 'j1', status: 'PENDING', attempts: 0, locked_until: null };
+
+  test('★ 그대로면 집는다', () => {
+    eq(claimMatches(DUE, DUE, NOW), true);
+  });
+
+  test('★ 그 사이 B가 집고 실패해 재시도 대기로 바뀌면 집지 못한다 (ABA)', () => {
+    // A의 스냅샷: attempts=0, locked_until=null
+    // 지금의 행: B가 집었다 실패 → PENDING이지만 attempts=1, 60초 대기
+    const rowNow = { id: 'j1', status: 'PENDING', attempts: 1, locked_until: iso(NOW + 60_000) };
+    eq(claimMatches(rowNow, DUE, NOW), false,
+      'status가 다시 PENDING이라는 이유로 대기 중인 잡을 집었습니다');
+  });
+
+  test('★ attempts만 올라도 집지 못한다 — 오래된 스냅샷이다', () => {
+    const rowNow = { id: 'j1', status: 'PENDING', attempts: 1, locked_until: null };
+    eq(claimMatches(rowNow, DUE, NOW), false, 'attempts 증가를 덮어쓸 뻔했습니다');
+  });
+
+  test('★ 대기 시각만 미래로 바뀌어도 집지 못한다', () => {
+    const rowNow = { id: 'j1', status: 'PENDING', attempts: 0, locked_until: iso(NOW + 60_000) };
+    eq(claimMatches(rowNow, DUE, NOW), false, 'backoff 만료 전에 집었습니다');
+  });
+
+  test('그 사이 다른 워커가 집어 PROCESSING이면 집지 못한다', () => {
+    eq(claimMatches({ id: 'j1', status: 'PROCESSING', attempts: 1, locked_until: null }, DUE, NOW), false);
+  });
+
+  test('대기가 끝났으면 다시 집는다 — 영원히 막히지 않는다', () => {
+    const waited = { id: 'j1', status: 'PENDING', attempts: 1, locked_until: iso(NOW - 1) };
+    eq(claimMatches(waited, waited, NOW), true);
+  });
+
+  test('attempts가 null이어도 같으면 집는다 (스키마 기본값은 0이지만 NULL이 올 수 있다)', () => {
+    const r = { id: 'j1', status: 'PENDING', attempts: null, locked_until: null };
+    eq(claimMatches(r, r, NOW), true);
+    eq(claimMatches({ ...r, attempts: 0 }, r, NOW), false, 'null과 0을 같은 값으로 읽었습니다');
+  });
+
+  test('다른 잡의 스냅샷으로는 집지 못한다', () => {
+    eq(claimMatches(DUE, { ...DUE, id: 'other' }, NOW), false);
+  });
+
+  test('빈 입력은 집지 않는다', () => {
+    eq(claimMatches(null, DUE, NOW), false);
+    eq(claimMatches(DUE, null, NOW), false);
+  });
+
+  // ── 0행과 오류는 다르다 ──────────────────────────────────────
+  test('★ claim 갱신 오류를 "다른 워커가 가져감"으로 읽지 않는다', () => {
+    const o = claimOutcome({ data: null, error: { message: '402 Payment Required' } });
+    eq(o.code, 'CLAIM_FAILED', 'DB 오류를 경쟁 패배로 읽었습니다');
+    assert(o.reason.includes('402'), '사유에 원인이 없습니다');
+  });
+
+  test('0행은 경쟁 패배다 — 오류가 아니다', () => {
+    eq(claimOutcome({ data: [], error: null }).code, 'LOST');
+  });
+
+  test('1행 이상이면 집은 것이다', () => {
+    eq(claimOutcome({ data: [{ id: 'j1' }], error: null }).code, 'CLAIMED');
+  });
+
+  test('비배열 응답을 0행으로 읽지 않는다', () => {
+    eq(claimOutcome({ data: null, error: null }).code, 'CLAIM_FAILED');
+    eq(claimOutcome({ data: {}, error: null }).code, 'CLAIM_FAILED');
+    eq(claimOutcome(null).code, 'CLAIM_FAILED');
+  });
+
+  test('★ 동시 두 워커 중 하나만 집는다 (조건이 같은 행에 한 번만 맞는다)', () => {
+    // 둘 다 같은 스냅샷을 들고 있다. 먼저 성공한 쪽이 attempts를 올리므로
+    // 나중 쪽의 조건은 더 이상 맞지 않는다.
+    const snap = { ...DUE };
+    const afterFirst = { id: 'j1', status: 'PROCESSING', attempts: 1, locked_until: iso(NOW + 60_000) };
+    eq(claimMatches(snap, snap, NOW), true);
+    eq(claimMatches(afterFirst, snap, NOW), false, '두 워커가 같은 잡을 집었습니다');
   });
 }
