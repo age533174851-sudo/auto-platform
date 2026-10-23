@@ -38,6 +38,7 @@ import {
   EXCHANGE_CONNECTION_COLUMNS, connectionReadVerdict, credentialColumnsPresent,
   connectionReadRetryPlan,
 } from '../../src/lib/supabase/exchangeConnectionRead';
+import { killSwitchRecoveryVerdict } from '../../src/lib/engine/killSwitchRecovery';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -643,24 +644,118 @@ async function monitorConnections() {
     }
     prevPos[conn.id] = symset;
 
-    // 킬스위치 active면 KILL_SWITCH_EXECUTE job 보장 (Vercel이 못 만들었어도 자가복구)
-    const { data: ks } = await sb().from('kill_switch_state').select('active, action_mode').eq('connection_id', conn.id).maybeSingle();
-    if (ks && ks.active) {
-      const { data: existing } = await sb().from('jobs').select('id')
-        .eq('connection_id', conn.id).eq('action', 'KILL_SWITCH_EXECUTE').in('status', ['PENDING', 'PROCESSING']).limit(1);
-      if (!existing || existing.length === 0) {
-        await sb().from('jobs').insert({
-          user_id: conn.user_id, connection_id: conn.id,
-          // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
-          // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
-          // 즉 킬스위치가 영원히 실행되지 않는다.
-          exchange: String(conn.exchange_id),
-          mode, action: 'KILL_SWITCH_EXECUTE',
-          payload: { actionMode: ks.action_mode || 'BC' },
-          status: 'PENDING', priority: 0, max_attempts: 10,
-          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-        });
+    // 킬스위치 자가복구는 **여기 없다.** `pollKillSwitchRecovery()`로
+    // 옮겼다 — 아래 함수 주석에 이유를 적었다.
+  }
+}
+
+/**
+ * 킬스위치 자가복구 — **Ghost Sync와 분리되어 있다.**
+ *
+ * 왜 떼어냈나
+ * ───────────
+ * 예전에는 `monitorConnections()` 안, 거래소 포지션 조회 **뒤**에 있었다.
+ * 그래서 `futuresListPositions`가 실패하면 `continue`에 걸려 **킬스위치가
+ * 켜져 있어도 복구 잡이 만들어지지 않았다.** 거래소가 흔들릴 때는 정확히
+ * 킬스위치가 필요한 때다.
+ *
+ * Ghost Sync 주기(60초)도 같이 쓰고 있었다. 그건 관측이고 이건 보호다 —
+ * 관측을 아끼려고 늘린 주기에 보호가 끌려가면 안 된다.
+ *
+ * 왜 이 모양이 **더 싼가**
+ * ────────────────────────
+ * 예전에는 연결마다 `kill_switch_state` 1회 + `jobs` 1회였다(1+2N).
+ * 지금은 `kill_switch_state`를 **켜진 것만** 한 번 읽는다. 평소에는 0줄이고
+ * 거기서 끝난다. 켜진 것이 있을 때만 그 연결들만 더 읽는다.
+ *
+ * 즉 매 틱 도는데도 예전 60초 주기보다 전송량이 적다. 보호를 빠르게 하는
+ * 것과 아끼는 것이 여기서는 같은 방향이다.
+ */
+const KILL_SWITCH_SCAN_MS = Number(process.env.WORKER_KILLSWITCH_SCAN_MS || 10_000);
+let lastKsScanMs = 0;
+
+async function pollKillSwitchRecovery() {
+  if (Date.now() - lastKsScanMs < KILL_SWITCH_SCAN_MS) return;
+  lastKsScanMs = Date.now();
+
+  // **켜진 것만** 읽는다. 평소에는 0줄이다.
+  const ksRes = await sb().from('kill_switch_state')
+    .select('connection_id, active, action_mode').eq('active', true).limit(50);
+  noteDb({ error: (ksRes as any).error });
+  if ((ksRes as any).error) {
+    // 못 읽은 것을 "꺼져 있다"로 넘기지 않는다.
+    await alert('system', 'warning', '킬스위치 상태를 읽지 못해 자가복구를 건너뜁니다',
+      { 사유: String((ksRes as any).error?.message ?? (ksRes as any).error) }, 'ks_state_read');
+    return;
+  }
+  const actives = Array.isArray((ksRes as any).data) ? (ksRes as any).data as any[] : [];
+  if (actives.length === 0) return;
+
+  const ids = actives.map((r) => String(r.connection_id)).filter(Boolean);
+  if (ids.length === 0) return;
+
+  // 살아 있는 KILL_SWITCH_EXECUTE 잡 (한 번에)
+  const jobsRes = await sb().from('jobs').select('id, connection_id')
+    .in('connection_id', ids).eq('action', 'KILL_SWITCH_EXECUTE')
+    .in('status', ['PENDING', 'PROCESSING']).limit(200);
+  noteDb({ error: (jobsRes as any).error });
+
+  // 잡을 만들려면 연결의 user_id·exchange_id·is_testnet이 필요하다.
+  const connRes = await sb().from('exchange_connections')
+    .select(EXCHANGE_CONNECTION_COLUMNS).in('id', ids);
+  noteDb({ error: (connRes as any).error });
+  const connById = new Map<string, any>();
+  if (Array.isArray((connRes as any).data)) {
+    for (const c of (connRes as any).data as any[]) connById.set(String(c.id), c);
+  }
+
+  for (const row of actives) {
+    const cid = String(row.connection_id);
+    const mine = Array.isArray((jobsRes as any).data)
+      ? ((jobsRes as any).data as any[]).filter((j) => String(j.connection_id) === cid)
+      : null;
+    const verdict = killSwitchRecoveryVerdict({
+      state: { data: row, error: null },
+      // 목록 조회가 실패했으면 **그 오류를 그대로 넘긴다** — 여기서
+      // 빈 배열로 바꾸면 중복 잡이 생긴다.
+      existing: (jobsRes as any).error
+        ? { data: null, error: (jobsRes as any).error }
+        : { data: mine, error: null },
+    });
+
+    if (!verdict.create) {
+      if (verdict.code === 'JOBS_UNREADABLE' || verdict.code === 'STATE_UNREADABLE') {
+        await alert('system', 'warning', '킬스위치 자가복구를 건너뛰었습니다',
+          { Connection: cid.slice(0, 8), 사유: verdict.reason }, `ks_skip:${cid}`);
       }
+      continue;
+    }
+
+    const conn = connById.get(cid);
+    if (!conn) {
+      // 연결을 못 읽었으면 거래소·모드를 모른다. 추측해서 적지 않는다.
+      await alert('system', 'warning', '킬스위치가 켜졌는데 연결을 읽지 못했습니다',
+        { Connection: cid.slice(0, 8), 사유: String((connRes as any).error?.message ?? '연결 행 없음') },
+        `ks_conn:${cid}`);
+      continue;
+    }
+
+    const { error: insErr } = await sb().from('jobs').insert({
+      user_id: conn.user_id, connection_id: cid,
+      // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
+      // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
+      // 즉 킬스위치가 영원히 실행되지 않는다.
+      exchange: String(conn.exchange_id),
+      mode: conn.is_testnet === true ? 'TESTNET' : 'LIVE',
+      action: 'KILL_SWITCH_EXECUTE',
+      payload: { actionMode: verdict.actionMode || 'BC' },
+      status: 'PENDING', priority: 0, max_attempts: 10,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    });
+    noteDb({ error: insErr });
+    if (insErr) {
+      await alert('system', 'critical', '킬스위치 자가복구 잡을 만들지 못했습니다',
+        { Connection: cid.slice(0, 8), 사유: String(insErr.message ?? insErr) }, `ks_insert:${cid}`);
     }
   }
 }
@@ -1384,6 +1479,16 @@ async function tick() {
     lastHeartbeatMs = Date.now();
     await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
   }
+  // **자가복구를 Ghost Sync보다 먼저, 따로 돌린다.**
+  //
+  // 예전에는 `monitorConnections()` 안에 있어서 거래소 포지션 조회가
+  // 실패하면 같이 멈췄고, Ghost Sync의 60초 주기에 끌려갔다. 관측이
+  // 흔들린다고 보호가 멈추면 안 된다.
+  //
+  // `isMain` 게이트는 **그대로 둔다.** 전량청산 잡을 두 워커가 동시에
+  // 만드는 쪽이 늦는 쪽보다 나쁘다 — 중복 방지는 여기서도 판정기가 보지만,
+  // 두 워커가 같은 순간에 "없다"를 읽는 경쟁까지 막지는 못한다.
+  if (isMain) await pollKillSwitchRecovery();
   if (isMain) await monitorConnections();
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
   // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
