@@ -94,3 +94,76 @@ export function exitRunOutcome(i: {
           .join(' · ').slice(0, 1000),
   };
 }
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// Exit-monitor scan scope: read-only diagnostics, never trading authorization.
+//
+// The historical exit_monitor_runs.positions_scanned counter counts ONLY
+// ladder decisions. It does not include separate generic lifecycle or
+// Exact100X dedicated-exit candidates. A zero therefore cannot prove that
+// no positions exist at the venue or that nothing was checked elsewhere.
+// These counts are separate and may overlap, so NEVER sum them into a fake
+// "unique positions" total.
+// ───────────────────────────────────────────────────────────────────────────
+
+export type ScanReadState = 'READ' | 'FAILED' | 'UNKNOWN';
+
+export interface ExitMonitorScanScope {
+  /**
+   * Legacy positions_scanned value, exactly the ladder decision row count.
+   * This is not an exchange readback or number of distinct open positions.
+   */
+  legacyLadderDecisionRows: number;
+  lifecycleReadState: ScanReadState;
+  genericLifecycleCandidates: number | null;
+  dedicatedExitCandidates: number | null;
+  deferredLifecycleRows: number | null;
+  /** Cannot be inferred by adding counts from different strategy paths. */
+  uniqueOpenExchangePositions: null;
+  /** Requires authenticated, connection-scoped venue position snapshots. */
+  venuePositionsVerified: false;
+}
+
+/**
+ * All inputs are observations from the current exit-monitor run, not
+ * permission to send orders. A missing/failed lifecycle scan is UNKNOWN,
+ * never "0 positions". Tested with ladder=0 + dedicated>0 and read failure.
+ */
+export function exitMonitorScanScope(i: {
+  ladderDecisionRows: number;
+  lifecycle: {
+    projection?: 'RISK' | 'IDENTITY' | 'LEGACY' | null;
+    error?: string | null;
+    candidates?: number | null;
+    deferredCount?: number | null;
+    authority?: { candidates?: number | null } | null;
+  } | null | undefined;
+}): ExitMonitorScanScope {
+  const count = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
+  const ladder = count(i?.ladderDecisionRows);
+  if (ladder == null) {
+    throw new Error('Ladder decision count is unknown; cannot publish scan coverage');
+  }
+  const l = i.lifecycle;
+  const state: ScanReadState = l?.error
+    ? 'FAILED'
+    : l?.projection === 'RISK' || l?.projection === 'IDENTITY' || l?.projection === 'LEGACY'
+      ? 'READ' : 'UNKNOWN';
+  // Inconsistent projection/count combinations MUST NOT claim a complete scan.
+  const generic = state === 'READ' ? count(l?.candidates) : null;
+  const dedicated = state === 'READ' ? count(l?.authority?.candidates) : null;
+  const deferred = state === 'READ' ? count(l?.deferredCount) : null;
+  const complete = state === 'READ' && generic != null &&
+    dedicated != null && deferred != null;
+  return {
+    legacyLadderDecisionRows: ladder,
+    lifecycleReadState: complete ? 'READ' : state === 'FAILED' ? 'FAILED' : 'UNKNOWN',
+    genericLifecycleCandidates: complete ? generic : null,
+    dedicatedExitCandidates: complete ? dedicated : null,
+    deferredLifecycleRows: complete ? deferred : null,
+    uniqueOpenExchangePositions: null,
+    venuePositionsVerified: false,
+  };
+}
