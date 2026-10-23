@@ -203,6 +203,43 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
   }
 }
 
+// ── ⑩ 킬스위치 자가복구가 Ghost Sync에 **묶여 있지 않은가** ──
+//
+// 예전에는 `monitorConnections()` 안, 거래소 포지션 조회 뒤에 있었다.
+// `futuresListPositions`가 실패하면 `continue`에 걸려 **킬스위치가 켜져
+// 있어도 복구 잡이 만들어지지 않았다.** 거래소가 흔들릴 때는 정확히
+// 킬스위치가 필요한 때다. Ghost Sync의 60초 주기에 끌려가서도 안 된다 —
+// 그건 관측이고 이건 보호다.
+{
+  const mon = bodyOf(src, 'monitorConnections');
+  if (mon == null) {
+    err('monitorConnections를 찾지 못했습니다');
+  } else if (/KILL_SWITCH_EXECUTE/.test(mon)) {
+    err('킬스위치 자가복구가 Ghost Sync(monitorConnections) 안에 있습니다 — '
+      + '거래소 포지션 조회가 실패하면 같이 멈추고, 관측 주기(60초)에 '
+      + '보호가 끌려갑니다. 따로 돌리세요');
+  }
+  const ks = bodyOf(src, 'pollKillSwitchRecovery');
+  if (ks == null) {
+    err('pollKillSwitchRecovery를 찾지 못했습니다 — 자가복구가 배선되지 않았습니다');
+  } else {
+    if (!ks.includes('killSwitchRecoveryVerdict')) {
+      err('자가복구가 판정 정본을 쓰지 않습니다 — 못 읽은 것을 "꺼짐"이나 '
+        + '"0건"으로 읽으면 복구가 멈추거나 중복 잡이 생깁니다');
+    }
+    if (/MONITOR_CONNECTIONS_MS/.test(ks)) {
+      err('자가복구가 Ghost Sync 주기(MONITOR_CONNECTIONS_MS)를 씁니다 — '
+        + '관측 주기에 보호가 끌려갑니다');
+    }
+    if (!src.includes("from '../../src/lib/engine/killSwitchRecovery'")) {
+      err('자가복구 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
+    }
+  }
+  if (!src.includes('pollKillSwitchRecovery()')) {
+    err('pollKillSwitchRecovery를 틱에서 부르지 않습니다 — 만들어 놓고 배선을 안 한 모양입니다');
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 워커 전송량 — 매 틱 전체 칸 조회 0 · 주기 제한 3곳 · 한도 차단기 배선됨 · '
     + '포지션 보호 경로는 차단기 뒤에 없음');
