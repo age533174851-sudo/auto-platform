@@ -956,6 +956,13 @@ jobs:
       - name: 상태판 문장 검사
         run: node scripts/check-status-claims.mjs
 
+      # ── 워커 전송량 (Supabase Egress 한도 초과 재발 방지) ──
+      #
+      # 3초마다 도는 조회라 한 줄이 하루 28,800번이다. 되돌림을 모양으로
+      # 막고, **한도 차단기가 포지션 보호 경로 앞에 붙지 않았는지**도 센다.
+      - name: 워커 전송량 · 한도 차단기 배선
+        run: node scripts/check-worker-egress.mjs
+
       # ── 워크플로 문법 검사 ──
       #
       # **유효한 YAML과 유효한 워크플로는 다르다.**

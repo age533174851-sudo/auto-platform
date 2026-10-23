@@ -22,6 +22,7 @@ export interface CalendarEvent {
   affectedAssets?: string[];
   source: 'api' | 'manual';  // 'demo'는 허용하지 않는다
   updatedAt?: number;        // DB 갱신 시각 (freshness 판정용)
+  timeKnown?: boolean;      // false: FRED 날짜만 확인됨. 자정 발표로 취급 금지.
 }
 
 export interface CalendarStatus {
@@ -72,6 +73,7 @@ export async function loadCalendar(sb: any): Promise<{ events: CalendarEvent[]; 
       affectedAssets: r.affected_assets || undefined,
       source: r.source === 'manual' ? 'manual' : 'api',
       updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : undefined,
+      timeKnown: r.time_known === false ? false : true,
     }));
 
     // ⚠️ freshness는 "우리가 DB를 읽은 시각"이 아니라 "캘린더가 마지막으로 갱신된 시각" 기준이어야 한다.
@@ -127,8 +129,19 @@ export function upcomingFromCalendar(
 ): { event: string; impact: EventImpact; hoursUntil: number }[] {
   const win = windowHours * 3600000;
   return events
-    .filter(e => Math.abs(e.timestampUtc - now) <= win)
-    .map(e => ({ event: e.event, impact: e.impact, hoursUntil: (e.timestampUtc - now) / 3600000 }))
+    .flatMap(e => {
+      if (!Number.isFinite(e.timestampUtc)) return [];
+      if (e.timeKnown === false) {
+        // FRED는 날짜만 제공한다. UTC 00:00은 실제 발표 시각이 아니다.
+        // 판정 시각이 그 발표일에 속하면 hoursUntil=0으로 전일 차단한다.
+        // 인접한 날짜를 실제 일정처럼 취급하지 않는다.
+        const dayStart = Math.floor(e.timestampUtc / 86_400_000) * 86_400_000;
+        if (now < dayStart || now >= dayStart + 86_400_000) return [];
+        return [{ event: e.event + ' (발표 시각 미상 · 당일 회피)', impact: e.impact, hoursUntil: 0 }];
+      }
+      if (Math.abs(e.timestampUtc - now) > win) return [];
+      return [{ event: e.event, impact: e.impact, hoursUntil: (e.timestampUtc - now) / 3600000 }];
+    })
     .sort((a, b) => Math.abs(a.hoursUntil) - Math.abs(b.hoursUntil));
 }
 
