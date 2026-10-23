@@ -541,7 +541,7 @@ export async function GET(req: NextRequest) {
   // 판정은 exitMonitorLease.ts에 있고 테스트가 붙어 있다.
   // 판정·획득 순서·울타리 확인은 모두 exitMonitorLease.ts에 있고, 두 실행을
   // 동시에 돌려 "둘 다 주인이 되는" 경합을 재현하는 시험이 붙어 있다.
-  const { acquireExitLease, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
+  const { acquireExitLease, exitLeaseWakeVerdict, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
   // ── 누가 깨웠는가 ──
   //
   // ⑤B-3A-1.1 — 예전에는 헤더가 없으면 `'manual'`로 적었다. 그런데 Vercel
@@ -575,8 +575,10 @@ export async function GET(req: NextRequest) {
   });
   if (!lease.granted) {
     // **기다리지 않는다.** 그쪽이 하면 되는 일이다. 거래소 쓰기는 0이다.
-    return NextResponse.json({ ok: true, skipped: true, code: lease.code, message: lease.reason },
-      { headers: { 'Cache-Control': 'no-store' } });
+    const verdict = exitLeaseWakeVerdict(lease);
+    return NextResponse.json({ ok: verdict.ok, skipped: verdict.skipped,
+      code: lease.code, message: lease.reason },
+      { status: verdict.status, headers: { 'Cache-Control': 'no-store' } });
   }
   const myFence = lease.myFence;
   const leaseTracked = lease.tracked;

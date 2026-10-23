@@ -9,7 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   leaseDecision, fenceStillMine, exitMonitorOverdue, LEASE_TTL_MS, OVERDUE_BLOCK_MS,
-  acquireExitLease,
+  acquireExitLease, exitLeaseWakeVerdict,
 } from './exitMonitorLease';
 
 /**
@@ -200,6 +200,8 @@ export function runExitMonitorLeaseTests() {
     const st = store({ row: { holder: 'w-other', fence: 3, expiresAtMs: NOW + 60_000 } });
     const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
     eq(r.code, 'SKIP'); eq(r.granted, false);
+    eq(exitLeaseWakeVerdict(r).status, 200);
+    eq(exitLeaseWakeVerdict(r).ok, true);
     assert(!st.log.some(l => l.startsWith('cas') || l === 'insert'),
       `★ 남의 임차 위에 썼습니다: ${st.log.join(',')}`);
   });
@@ -218,9 +220,29 @@ export function runExitMonitorLeaseTests() {
     const st = store({ readThrows: true });
     const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
     eq(r.granted, false);
-    eq(r.code, 'SKIP');
+    eq(r.code, 'UNREADABLE');
+    eq(exitLeaseWakeVerdict(r).status, 503);
+    eq(exitLeaseWakeVerdict(r).ok, false);
     assert(!st.log.some(l => l.startsWith('cas') || l === 'insert'),
       '★ 못 읽고 썼습니다 — 빈 표로 취급하면 안 됩니다');
+  });
+
+  test('DB 임차 갱신 오류는 RACE_LOST가 아닌 WRITE_FAILED로 보고한다', async () => {
+    const st = store({ row: { holder: 'old', fence: 7, expiresAtMs: NOW - 1 } });
+    st.api.compareAndSet = async () => ({ updated: 0, error: 'exceed_egress_quota' });
+    const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
+    eq(r.code, 'WRITE_FAILED');
+    eq(r.granted, false);
+    eq(exitLeaseWakeVerdict(r).status, 503);
+    eq(exitLeaseWakeVerdict(r).ok, false);
+  });
+
+  test('DB 임차 생성 오류도 WRITE_FAILED다', async () => {
+    const st = store({ row: null });
+    st.api.insert = async () => ({ ok: false, error: 'exceed_egress_quota' });
+    const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
+    eq(r.code, 'WRITE_FAILED');
+    eq(exitLeaseWakeVerdict(r).status, 503);
   });
 
   test('임차 표가 없는 배포에서는 임차 없이 돈다 — 기존 안전 의미 유지', async () => {
