@@ -34,6 +34,9 @@ import {
   noteResult as noteQuotaResult, quotaGate, breakerLine,
   OPEN_BREAKER, type BreakerState,
 } from '../../src/lib/supabase/quotaBreaker';
+import {
+  EXCHANGE_CONNECTION_COLUMNS, connectionReadVerdict, credentialColumnsPresent,
+} from '../../src/lib/supabase/exchangeConnectionRead';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -154,14 +157,33 @@ async function releaseActionLock(name: string): Promise<void> {
   await releaseLock(name, WORKER_ID);
 }
 
-async function getConnection(connId: string): Promise<any | null> {
-  // **쓰는 칸만 읽는다.** `select('*')`는 암호문과 쓰지 않는 칸까지 끌어온다.
-  // 워커가 연결에서 읽는 칸은 아래 여덟 개가 전부다(`conn.` 전수 확인).
-  const { data, error } = await sb().from('exchange_connections')
-    .select('id, user_id, exchange_id, api_key, api_secret_enc, encrypted_secret, is_testnet, has_withdrawal')
+/**
+ * 연결 한 건을 읽는다.
+ *
+ * **쓰는 칸만 읽는다** — `select('*')`는 암호문과 쓰지 않는 칸까지 끌어오고,
+ * 이 조회는 3초마다 돈다. 칸 목록은 정본 하나(`EXCHANGE_CONNECTION_COLUMNS`)에
+ * 있다. 손으로 적으면 읽는 자리끼리 갈라진다 — 실제로 갈라졌었다.
+ *
+ * **못 읽은 것을 "없다"로 돌려주지 않는다.** 예전에는 `data || null`이라
+ * 조회 실패와 연결 없음이 같은 값이었고, 부르는 쪽은 그걸 "연결 없음"으로
+ * 적어 잡을 영구 종료했다.
+ */
+async function getConnection(connId: string) {
+  const res = await sb().from('exchange_connections')
+    .select(EXCHANGE_CONNECTION_COLUMNS)
     .eq('id', connId).maybeSingle();
-  noteDb({ error });
-  return data || null;
+  noteDb({ error: (res as any).error });
+  const v = connectionReadVerdict(res as any);
+  if (v.code === 'FOUND') {
+    // 칸이 빠진 채로 왔으면 자격증명이 없는 것처럼 보인다. 값이 빈 것과
+    // 칸이 안 실려 온 것은 다르다 — 후자는 우리 잘못이고, 모르는 것이다.
+    const cols = credentialColumnsPresent(v.conn);
+    if (!cols.ok) {
+      return { code: 'READ_FAILED' as const, conn: null,
+        reason: `연결 자격증명 칸이 실려 오지 않았습니다 (${cols.missing.join(', ')})` };
+    }
+  }
+  return v;
 }
 function connCreds(conn: any): { key: string; secret: string; testnet: boolean } {
   return { key: conn.api_key || '', secret: decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''), testnet: conn.is_testnet === true };
@@ -424,8 +446,24 @@ async function processPendingJobs() {
         }
       }
 
-      const conn = await getConnection(job.connection_id);
-      if (!conn) { await finalize(job, false, null, '연결 없음'); continue; }
+      const read = await getConnection(job.connection_id);
+      if (read.code === 'READ_FAILED') {
+        // **잡을 끝내지 않는다.** 연결이 없는 것이 아니라 못 읽은 것이다.
+        // `finalize(..., false, ...)`는 FAILED로 영구 종료라, 여기서 적으면
+        // 청산·킬스위치 잡이 틀린 사유로 죽고 포지션이 보호 없이 남는다.
+        // PENDING으로 돌려 다음 틱에 다시 본다 — attempts는 이미 올랐으므로
+        // max_attempts가 상한이 된다(무한 반복이 아니다).
+        await sb().from('jobs').update({
+          status: 'PENDING', locked_by: null, locked_until: null,
+          error: read.reason, updated_at: new Date().toISOString(),
+        }).eq('id', job.id);
+        await alert('system', 'warning', '연결을 읽지 못해 잡을 보류했습니다',
+          { Action: job.action, Symbol: job.symbol || '-', 사유: read.reason },
+          `conn_read:${job.connection_id}`);
+        continue;
+      }
+      const conn = read.conn;
+      if (read.code === 'NOT_FOUND' || !conn) { await finalize(job, false, null, '연결 없음'); continue; }
       if (conn.has_withdrawal === true) { await finalize(job, false, null, '출금권한 키 거부'); continue; }
 
       const attempts = (job.attempts || 0) + 1;
@@ -509,15 +547,36 @@ let lastMonitorMs = 0;
 async function monitorConnections() {
   if (Date.now() - lastMonitorMs < MONITOR_CONNECTIONS_MS) return;
   lastMonitorMs = Date.now();
-  // **`select('*')`를 쓰지 않는다.** 쓰지 않는 칸까지 끌어오고, 그 안에는
-  // 암호화된 시크릿도 있다. 쓰는 칸만 읽는다.
+  // **`select('*')`를 쓰지 않는다.** 쓰지 않는 칸까지 끌어온다.
+  //
+  // 칸 목록은 `getConnection()`과 **같은 정본**을 쓴다. 한때 여기만
+  // `encrypted_secret`이 빠져 있었고, 그래서 그 칸에만 비밀이 든 구 버전
+  // 연결은 `connCreds`가 빈 비밀을 돌려줘 바로 아래 `continue`에 걸렸다 —
+  // Ghost Sync도 **킬스위치 자가복구**도 그 연결에서만 조용히 멈췄다.
   const { data: conns, error: connErr } = await sb().from('exchange_connections')
-    .select('id, user_id, exchange_id, api_key, api_secret_enc, is_testnet, has_withdrawal')
+    .select(EXCHANGE_CONNECTION_COLUMNS)
     .in('exchange_id', SUPPORTED_EXCHANGE_IDS);
   noteDb({ error: connErr });
+  if (connErr) {
+    // **못 읽은 것을 "연결이 없다"로 넘기지 않는다.** 여기서 조용히
+    // 돌아가면 Ghost Sync와 킬스위치 자가복구가 멈춘 사실이 아무 데도
+    // 남지 않는다. 60초 뒤 다시 보되, 멈췄다는 것은 적는다.
+    await alert('system', 'warning', '연결 목록을 읽지 못해 감시를 건너뜁니다',
+      { 사유: String((connErr as any)?.message ?? connErr) }, 'conn_list_read');
+    return;
+  }
   if (!conns) return;
   for (const conn of (conns as any[])) {
     if (conn.has_withdrawal === true) continue;
+    // 칸이 빠진 채로 왔으면 자격증명 없는 연결로 보인다. 그건 연결의
+    // 문제가 아니라 우리가 안 읽은 것이다 — 조용히 건너뛰지 않는다.
+    const cols = credentialColumnsPresent(conn);
+    if (!cols.ok) {
+      await alert('system', 'warning', '연결 자격증명 칸이 실려 오지 않았습니다',
+        { Connection: String(conn.id).slice(0, 8), 빠진칸: cols.missing.join(', ') },
+        `conn_cols:${conn.id}`);
+      continue;
+    }
 
     const resolved = resolveExecExchange(conn.exchange_id);
     if (!resolved.exchange) continue;   // 여기 오면 안 되지만, 오면 건드리지 않는다

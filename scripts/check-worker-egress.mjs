@@ -111,6 +111,55 @@ if (!src.includes("from '../../src/lib/supabase/quotaBreaker'")) {
   err('차단기 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
 }
 
+// ── ⑦ 연결 칸 목록을 손으로 적지 않는가 ──
+//
+// **좁히는 자리가 둘이었다.** `getConnection()`은 여덟 칸을 읽고
+// `monitorConnections()`는 일곱 칸을 읽었다 — 빠진 칸이 `encrypted_secret`
+// 이었다. 자격증명을 푸는 식은 이렇다:
+//
+//   secret = decryptSecret(conn.api_secret_enc || conn.encrypted_secret || '')
+//
+// `encrypted_secret`에만 비밀이 든 **구 버전 연결**(`api_secret_enc`는
+// 004의 기본값 `''`)은 그 자리에서 `secret === ''`가 되고, 바로 다음 줄
+// `if (!key || !secret) continue;`에 걸려 **조용히 빠진다.** 그 연결만
+// Ghost Sync와 **킬스위치 자가복구**를 잃는다.
+//
+// 그래서 칸 목록은 값 하나여야 한다. 손으로 적는 자리를 금지한다.
+for (const m of src.matchAll(/from\('exchange_connections'\)[\s\S]{0,200}?\.select\(([^)]*)\)/g)) {
+  const arg = m[1].trim();
+  if (!arg.includes('EXCHANGE_CONNECTION_COLUMNS')) {
+    err('exchange_connections의 칸 목록을 손으로 적었습니다 '
+      + `(${arg.slice(0, 60)}) — 읽는 자리가 둘이라 갈라집니다. `
+      + 'EXCHANGE_CONNECTION_COLUMNS 하나만 쓰세요');
+  }
+}
+if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
+  err('연결 칸 목록 정본(EXCHANGE_CONNECTION_COLUMNS)을 쓰지 않습니다');
+}
+
+// ── ⑧ 연결을 **못 읽은 것**을 "연결 없음"으로 적지 않는가 ──
+//
+// `finalize(job, false, ...)`는 잡을 **FAILED로 영구 종료**한다. 조회가
+// 한 번 실패했을 뿐인데 청산·킬스위치 잡이 "연결 없음"이라는 틀린 사유로
+// 죽으면, 열린 포지션이 보호 없이 남는다. 연결은 멀쩡히 있는데.
+{
+  const body = bodyOf(src, 'getConnection');
+  if (body == null) {
+    err('getConnection을 찾지 못했습니다');
+  } else if (!body.includes('connectionReadVerdict')) {
+    err('getConnection이 조회 실패와 연결 없음을 구분하지 않습니다 — '
+      + 'connectionReadVerdict로 READ_FAILED / NOT_FOUND를 갈라 주세요');
+  }
+  if (!src.includes("from '../../src/lib/supabase/exchangeConnectionRead'")) {
+    err('연결 조회 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
+  }
+  const caller = bodyOf(src, 'processPendingJobs') || '';
+  if (/연결 없음/.test(caller) && !caller.includes('READ_FAILED')) {
+    err('잡 처리에서 연결 조회 결과를 "연결 없음" 한 가지로만 적습니다 — '
+      + '못 읽은 것(READ_FAILED)은 없는 것이 아닙니다');
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 워커 전송량 — 매 틱 전체 칸 조회 0 · 주기 제한 3곳 · 한도 차단기 배선됨 · '
     + '포지션 보호 경로는 차단기 뒤에 없음');
